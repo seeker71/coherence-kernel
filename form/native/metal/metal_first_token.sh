@@ -545,6 +545,14 @@ func attn(_ s: Step, _ l: Int, _ pos: Int) {
 // so the overhead is visible rather than folded into a conclusion.
 var profAcc: [String: Double] = [:], profN: [String: Int] = [:]
 let profile = ProcessInfo.processInfo.environment["FORM_PROFILE"] == "1"
+// ---- the X-RAY (FORM_XRAY=1) ---------------------------------------------------------------------
+// tok/s says how fast the body spoke. It cannot say how SURE it was. The same token can be drawn from
+// a spike and from a near-flat spread, and only the spread tells you the body was guessing. bLogits
+// already holds that spread every single forward — the argmax reads it, the agreement gate reads it
+// (fvals at gate 8/9), and then it is dropped. The X-ray stops dropping it.
+let xray = ProcessInfo.processInfo.environment["FORM_XRAY"] == "1"
+var xrayOn = false                  // armed ONLY for the untimed observation run
+var xrayCap: [[Float]] = []
 func forward(_ id: Int, _ pos: Int) -> Int {
     var s = Step()
     var t0 = Date()
@@ -586,6 +594,10 @@ func forward(_ id: Int, _ pos: Int) -> Int {
     }
     s.done()
     if profile { profAcc["argmax", default: 0] += Date().timeIntervalSince(t0); profN["argmax", default: 0] += 1 }
+    // X-RAY: the full distribution the argmax collapsed. bLogits is storageModeShared, so this is a
+    // read of memory the host already holds — no copy, no readback, no new dispatch. It is OFF the
+    // timed path by construction: xrayOn is only ever true on a run whose rate is never quoted.
+    if xrayOn { xrayCap.append(fvals(bLogits, vocabN)) }
     return Int(bOutI.contents().bindMemory(to: UInt32.self, capacity: 1)[0])
 }
 
@@ -788,6 +800,135 @@ func report(_ label: String, _ r: Run) {
 }
 report("short", rShort)
 report("long ", rLong)
+
+// ---- gate 6b: the X-RAY — every part of the choice, not just the part that won --------------------
+// A SEPARATE run. The timed runs above are untouched, so no rate on this page pays for the looking.
+// Per token: the softmax over the whole vocabulary, its Shannon entropy in bits (0 = one spike, the
+// body certain; log2(vocab) = flat, the body guessing), the margin between first and second, and the
+// top-5 pieces with their probabilities. Entropy is the number a control loop can ACT on; the top-5
+// is what a reader can recognise.
+if xray {
+    print("=== gate 6b: the x-ray — the distribution behind each token ===")
+    xrayCap.removeAll(); xrayOn = true
+    let rX = generate(promptIds, nsteps)
+    xrayOn = false
+    let hMax = log2(Double(vocabN))
+    print("    vocab \(vocabN)  →  flat-spread entropy would be \(String(format: "%.2f", hMax)) bits")
+    print("    pos  token          H(bits)  margin   top-5 (piece:p)")
+    var hSum = 0.0
+    // xrayCap holds one row per forward: the prompt's prefill forwards first, then the decode ones.
+    // The token a row PREDICTS is the one emitted after it, so row i speaks for rX.out[i - (prefill-1)].
+    let skip = max(0, promptIds.count - 1)
+    for (i, logits) in xrayCap.enumerated() where i >= skip {
+        let k = i - skip
+        guard k < rX.out.count else { break }
+        let mx = logits.max() ?? 0
+        var exps = [Double](repeating: 0, count: logits.count); var z = 0.0
+        for (j, l) in logits.enumerated() { let e = exp(Double(l - mx)); exps[j] = e; z += e }
+        var h = 0.0
+        for e in exps { let p = e / z; if p > 0 { h -= p * log2(p) } }
+        hSum += h
+        let order = exps.enumerated().sorted { $0.element > $1.element }.prefix(5)
+        let top = order.map { "\(decodeIds([$0.offset])):\(String(format: "%.3f", $0.element / z))" }.joined(separator: "  ")
+        let p1 = order.first.map { $0.element / z } ?? 0
+        let p2 = order.dropFirst().first.map { $0.element / z } ?? 0
+        print(String(format: "    %3d  %-14@ %7.3f  %6.3f   ", k, "[\(decodeIds([rX.out[k]]))]" as NSString, h, p1 - p2) + top)
+    }
+    let n = max(1, xrayCap.count - skip)
+    print(String(format: "    mean entropy %.3f bits over %d tokens (%.1f%% of the flat spread)",
+                 hSum / Double(n), n, 100.0 * (hSum / Double(n)) / hMax))
+    print("    NOTE this run's wall clock is NOT a rate and is not quoted: it carries the x-ray read.")
+    // ---- the seam: hand these to the body's OWN observation organ ---------------------------------
+    // observe/thought-framebuffer.fk has carried (fb-frame step token margin), `hesitation` and
+    // `conviction` since before this path existed — but only ever over SYNTHETIC traces (tfb-trace-a).
+    // These are real frames off a real forward pass. Margin is milli-units because the body's margins
+    // are integers (jl-flips? compares with gt/sub).
+    print("    --- as the body's own frames: observe/thought-framebuffer.fk (fb-frame step token margin/1000) ---")
+    var frames: [String] = []
+    for (i, logits) in xrayCap.enumerated() where i >= skip {
+        let k = i - skip
+        guard k < rX.out.count else { break }
+        let mx = logits.max() ?? 0
+        var exps = [Double](repeating: 0, count: logits.count); var z = 0.0
+        for (j, l) in logits.enumerated() { let e = exp(Double(l - mx)); exps[j] = e; z += e }
+        let ord = exps.enumerated().sorted { $0.element > $1.element }.prefix(2)
+        let p1 = ord.first.map { $0.element / z } ?? 0
+        let p2 = ord.dropFirst().first.map { $0.element / z } ?? 0
+        frames.append("(fb-frame \(k) \(rX.out[k]) \(Int((p1 - p2) * 1000)))")
+    }
+    print("    (list " + frames.joined(separator: " ") + ")")
+    xrayCap.removeAll()
+
+    // ---- the BASELINE: what IS expected hesitation? ----------------------------------------------
+    // surprise-receipt.fk scores an event as (predicted, actual) and earns a receipt when the
+    // prediction-error clears a threshold. tier-router.fk refuses to route on a rate with too few
+    // held-out samples. Both refusals apply here: "hesitation higher than expected" is unsayable
+    // until `expected` has a denominator, and one 12-token prompt is n=1. So sweep prompts through
+    // the SAME loaded model and report the spread. This is a baseline for THIS model on THIS
+    // machine — it is not a constant and it is not quoted anywhere as one.
+    let sweep = (ProcessInfo.processInfo.environment["FORM_XRAY_SWEEP"] ?? "")
+        .split(separator: ";").map(String.init).filter { !$0.isEmpty }
+    if !sweep.isEmpty {
+        print("    --- baseline sweep: \(sweep.count) prompts through the same loaded model ---")
+        // The instrument must measure what the router CONSUMES. lhr-tier routes on MARGIN (min top1-top2
+        // across the trace = the hesitation step) with entropy as a second reading — so capture BOTH per
+        // token, and emit each prompt as an lhr-reading the body can route without re-deriving anything.
+        var allH: [Double] = []; var allM: [Double] = []
+        var readings: [String] = []
+        for p in sweep {
+            let ids = encode(p)
+            guard ids.count + nsteps < maxpos else { print("    (skip, too long) \(p)"); continue }
+            xrayCap.removeAll(); xrayOn = true
+            let rr = generate(ids, nsteps)
+            xrayOn = false
+            let sk = max(0, ids.count - 1)
+            var hs: [Double] = []; var ms: [Double] = []; var hesitStep = 0; var minM = 2.0; var hAtHesit = 0.0
+            for (i, lg) in xrayCap.enumerated() where i >= sk {
+                let k = i - sk
+                guard k < rr.out.count else { break }
+                let m = lg.max() ?? 0
+                var z = 0.0; var es = [Double](repeating: 0, count: lg.count)
+                for (j, l) in lg.enumerated() { let e = exp(Double(l - m)); es[j] = e; z += e }
+                var h = 0.0
+                for e in es { let q = e / z; if q > 0 { h -= q * log2(q) } }
+                hs.append(h)
+                let ord = es.sorted(by: >)
+                let margin = (ord.first ?? 0) / z - ((ord.count > 1 ? ord[1] : 0) / z)
+                ms.append(margin)
+                if margin < minM { minM = margin; hesitStep = k; hAtHesit = h }  // entropy AT the coin toss
+            }
+            allH.append(contentsOf: hs); allM.append(contentsOf: ms)
+            let mean = hs.reduce(0, +) / Double(max(1, hs.count))
+            print(String(format: "      H mean %5.3f  Hmax %6.3f   margin MIN %5.3f @step %d (H %5.3f)   n %2d   \"%@\" -> \"%@\"",
+                         mean, hs.max() ?? 0, minM, hesitStep, hAtHesit, hs.count,
+                         p as NSString, decodeIds(rr.out) as NSString))
+            // lhr-reading: hesit-step, min-margin, MEAN entropy, entropy-AT-hesitation, n — all milli-bits
+            // (living-vector lv-scale=1000). Entropy-at-hesitation is the epistemic/aleatoric discriminator.
+            readings.append("(lhr-reading \(hesitStep) \(Int(minM * 1000)) \(Int(mean * 1000)) \(Int(hAtHesit * 1000)) \(hs.count))")
+        }
+        let n = Double(max(1, allH.count))
+        let mu = allH.reduce(0, +) / n
+        let sd = (allH.map { ($0 - mu) * ($0 - mu) }.reduce(0, +) / n).squareRoot()
+        let sorted = allH.sorted()
+        print(String(format: "    BASELINE over %d tokens, %d prompts: mean %.3f bits, sd %.3f, median %.3f, p90 %.3f",
+                     allH.count, sweep.count, mu, sd,
+                     sorted[sorted.count / 2], sorted[min(sorted.count - 1, (sorted.count * 9) / 10)]))
+        print(String(format: "    a token is SURPRISING at mean+2sd = %.3f bits (%d of %d tokens, %.0f%%)",
+                     mu + 2 * sd, allH.filter { $0 > mu + 2 * sd }.count, allH.count,
+                     100.0 * Double(allH.filter { $0 > mu + 2 * sd }.count) / n))
+        // The MARGIN baseline — the quantity the router actually routes on. Its p10 is the floor below
+        // which the body is choosing between two answers; lhr-base-margin-floor should be set from THIS.
+        let sortedM = allM.sorted()
+        let muM = allM.reduce(0, +) / n
+        print(String(format: "    MARGIN baseline: mean %.3f, median %.3f, p10 %.3f (the coin-toss floor)",
+                     muM, sortedM[sortedM.count / 2], sortedM[max(0, sortedM.count / 10)]))
+        print("    NOTE this is llama3.2:3b on THIS machine at these prompts. Not a constant. Re-derive before quoting.")
+        // Hand the sweep to the router as ready lhr-readings — no re-derivation, no fitting on test.
+        print("    --- routing-ready (feed to observe/live-hesitation-route.fk lhr-tier) ---")
+        print("    (list " + readings.joined(separator: " ") + ")")
+        xrayCap.removeAll()
+    }
+}
 
 // ---- gate 7: two sizes and a slope ---------------------------------------------------------------
 let nA = Double(rShort.forwards), nB = Double(rLong.forwards)

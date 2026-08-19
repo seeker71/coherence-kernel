@@ -1,0 +1,143 @@
+; live-hesitation-route.fk — route on THIS utterance, not on last month's average.
+;
+; preludes: form-stdlib/core.fk form-stdlib/tier-router.fk observe/thought-framebuffer.fk
+;
+; tier-router.fk already chooses between tier 0 (form-native), tier 1 (local
+; oracle) and tier 2 (remote oracle) — but it chooses from HELD-OUT RATES per
+; capability: how often this lane succeeded historically. nmcp (the control
+; plane) does the same with registry scores. confidence-earned.fk names the
+; ambition out loud in its own header: "a mind can RELY ON ITSELF exactly where
+; this precision is high and escalate to the oracle where it is not."
+;
+; None of them can see the sentence being spoken right now. A capability at 94%
+; held-out is still 94% on the one utterance where the body is flipping a coin.
+; This cell is that missing edge: the native forward pass's OWN per-token
+; evidence, read while it speaks, deciding whether this answer is worth a second
+; opinion.
+;
+; WHICH NUMBER — and this is the whole teaching, learned the expensive way:
+;
+;   ENTROPY says how MANY candidates are live. MARGIN says how close the top TWO
+;   are. They do not point at the same token. On llama3.2:3b, prompt "The capital
+;   of France is" (2026-07-22, this machine, receipts/2026-07-22-...):
+;
+;     step 3 " capital"  H 6.015 bits (the run's MAX)   margin 0.160
+;     step 5 " Italy"    H 4.839 bits (only p90)        margin 0.020  <- the flip
+;
+;   Step 5 is where the body picked Italy over France by 0.021 and then said
+;   " is Rome" at margin 0.912 — confident, and confidently downstream of a coin
+;   toss. An entropy trigger set at the measured mean+2sd (6.250 bits) fires on
+;   step 3 and MISSES step 5 entirely. thought-framebuffer.fk's `hesitation`
+;   (min margin) — carried in this body since before the native path existed —
+;   picks step 5. The organ was right; the newer idea was wrong.
+;
+;   So: escalate on MARGIN. Entropy rides along as a second reading, never alone.
+;
+; THE DENOMINATOR IS NOT A CONSTANT. lhr-baseline below is one measurement —
+; 96 tokens, 8 prompts, llama3.2:3b, one machine, 2026-07-22. tier-router will
+; not route on a rate with too few held-out samples, and the same care belongs
+; here. Re-derive per model and per machine, or the escalation is superstition
+; wearing a number.
+;
+; The DECISION is this cell (pure list logic, four-way-able). The EFFECT —
+; actually calling the tier-1 or tier-2 oracle — stays a carrier, the same seam
+; oracle-ensure.fk keeps between its plan and `ollama pull`.
+
+; ── THE CORRECTION (2026-07-23, held-out) ──────────────────────────────────
+; Yesterday this cell said: hesitant AND broad (high entropy) -> tier 2, the
+; MOST escalation. A held-out sweep inverted it. Two uncertainties wear the same
+; low margin:
+;   EPISTEMIC — a factual near-tie ("Italy" vs "France", margin 0.020, a NEEDLE
+;               of hesitation in an otherwise confident, low-mean-entropy trace).
+;               A right answer exists; a larger model may know it. ESCALATE.
+;   ALEATORIC — generative openness ("he picked up the phone and said ___", the
+;               whole trace elevated, mean entropy ~2.5x higher). Many
+;               continuations are equally valid; no answer is more correct, so a
+;               remote oracle spends money to resolve a non-error. DO NOT escalate.
+; So entropy is not a second escalation trigger — it is the VETO that tells
+; reducible hesitation from irreducible. The signal is MEAN entropy (the trace's
+; overall openness), NOT entropy at the hesitation step: the held-out phone run's
+; min-margin step sat at H 3.97 while its aleatoric moment (the open first word)
+; sat at H 10.25 — a DIFFERENT token. The openness and the local near-tie do not
+; coincide, so only the trace-wide mean sees the aleatoric character.
+; The body already carried `epistemic` (speakable.fk's conviction lanes); it had
+; no `aleatoric`. This cell is where the twin arrives. See homecoming row 853.
+
+(do
+    ; ── the live reading off one native forward pass ──
+    ; all in milli-units (living-vector.fk's lv-scale is 1000; the body's margins
+    ; are integers — jl-flips? compares with gt/sub).
+    (defn lhr-reading (hesit-step hesit-margin mean-entropy hesit-entropy tokens)
+        (list "live-reading" hesit-step hesit-margin mean-entropy hesit-entropy tokens))
+    (defn lhr-step         (r) (nth r 1))
+    (defn lhr-margin       (r) (nth r 2))   ; MIN margin in the trace — the coin toss
+    (defn lhr-mean-entropy (r) (nth r 3))   ; trace-wide mean bits — the aleatoric signal
+    (defn lhr-hesit-entropy(r) (nth r 4))   ; bits AT the hesitation step (kept: NOT the veto)
+    (defn lhr-tokens       (r) (nth r 5))
+
+    ; ── the measured floor, witnessed not assumed ──
+    ; 2026-07-22, llama3.2:3b, 96 tokens/8 prompts: mean 2.357 bits, sd 1.946.
+    ; margin-floor: p10 of that sweep's margins (~60 milli), below which the body
+    ; is choosing between answers. aleatoric-veto: PROVISIONAL 3000 milli — it
+    ; falls between the held-out epistemic mean (France 2202) and aleatoric mean
+    ; (phone 3900), fit to <10 prompts. Marked, and GATED (see lhr-validated?).
+    (defn lhr-baseline () (list "llama3.2:3b" 2357 1946 60 3000 8))
+    (defn lhr-base-mean         (b) (nth b 1))
+    (defn lhr-base-sd           (b) (nth b 2))
+    (defn lhr-base-margin-floor (b) (nth b 3))
+    (defn lhr-base-aleatoric    (b) (nth b 4))
+    (defn lhr-base-samples      (b) (nth b 5))
+
+    ; ── is this utterance hesitant (a low-margin near-tie somewhere)? ──
+    (defn lhr-hesitant? (r b)
+        (if (lt (lhr-margin r) (lhr-base-margin-floor b)) 1 0))
+
+    ; ── is the hesitation ALEATORIC (irreducible, generative openness)? ──
+    ; high trace-wide entropy -> many valid continuations -> nothing to fetch.
+    (defn lhr-aleatoric? (r b)
+        (if (gt (lhr-mean-entropy r) (lhr-base-aleatoric b)) 1 0))
+
+    ; ── EPISTEMIC hesitation is the only kind worth an oracle ──
+    ; hesitant AND NOT aleatoric: a real fork with a real answer.
+    (defn lhr-epistemic? (r b)
+        (if (eq (add (lhr-hesitant? r b) (lhr-aleatoric? r b)) 1)   ; hesitant xor aleatoric...
+            (lhr-hesitant? r b)                                     ; ...and it's the hesitant side
+            0))
+
+    ; ── the tier a SINGLE native pass can honestly ask for ──
+    ;   0  the body speaks for itself (confident, OR aleatoric — open, no fact)
+    ;   1  ask a LOCAL oracle (epistemic hesitation — a fork a bigger model may settle)
+    ; tier 2 (remote) is NOT decidable from one pass: it needs the local oracle's
+    ; OWN reading (does it hesitate too?). Yesterday's tier-2-from-one-pass claimed
+    ; more than one forward can know. The honest ceiling here is 1.
+    (defn lhr-tier (r b)
+        (if (eq (lhr-epistemic? r b) 1) 1 0))
+
+    ; ── the honesty gate (mirrors tier-router's tr-validated-rate) ──
+    ; the aleatoric-veto is fit to <10 prompts. Until the baseline has enough
+    ; held-out samples, the SAFE router stays home rather than escalate — an
+    ; unvalidated threshold does not spend an oracle call. 30 is the floor.
+    (defn lhr-validated? (b) (if (ge (lhr-base-samples b) 30) 1 0))
+    (defn lhr-tier-safe (r b)
+        (if (eq (lhr-validated? b) 1) (lhr-tier r b) 0))
+
+    ; ── witnesses, all from REAL held-out x-ray runs (2026-07-22/23) ──
+    ; France/Italy: needle epistemic — margin 20, mean H 2202, H@hesit 4839.
+    (defn lhr-france    () (lhr-reading 5 20 2202 4839 12))
+    ; phone continuation: aleatoric — margin 16, mean H 3900, H@hesit 3970.
+    (defn lhr-phone     () (lhr-reading 9 16 3900 3970 12))
+    ; telephone inventor: epistemic — margin 42, mean H 1408, H@hesit 2467.
+    (defn lhr-telephone () (lhr-reading 3 42 1408 2467 12))
+    ; gold symbol: confident — margin 76 (above floor), never hesitant.
+    (defn lhr-gold      () (lhr-reading 1 76 918 1918 12))
+
+    (defn lhrk (cond bit) (if cond bit 0))
+    (defn live-hesitation-route-check ()
+        (add (add (add (add (add
+            (lhrk (eq (lhr-epistemic? (lhr-france) (lhr-baseline)) 1) 1)         ; needle near-tie -> escalate
+            (lhrk (eq (lhr-tier (lhr-telephone) (lhr-baseline)) 1) 10))          ; second epistemic -> escalate
+            (lhrk (eq (lhr-aleatoric? (lhr-phone) (lhr-baseline)) 1) 100))       ; open generation IS aleatoric
+            (lhrk (eq (lhr-tier (lhr-phone) (lhr-baseline)) 0) 1000))            ; ...so it STAYS sovereign (the fix)
+            (lhrk (eq (lhr-hesitant? (lhr-gold) (lhr-baseline)) 0) 10000))       ; the certain answer never fires
+            (lhrk (eq (lhr-tier-safe (lhr-france) (lhr-baseline)) 0) 100000)))   ; unvalidated -> stays sovereign
+    (live-hesitation-route-check))
