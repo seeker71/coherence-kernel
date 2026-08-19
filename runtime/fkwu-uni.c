@@ -1967,7 +1967,7 @@ static long long fk_native_call(const unsigned char *code, long long n, long lon
 extern void *mmap(void *, unsigned long, int, int, int, long);
 extern int mprotect(void *, unsigned long, int);
 static long long fk_native_call(const unsigned char *code, long long n, long long arg) {
-#if defined(__x86_64__) || defined(__amd64__)
+#if defined(__x86_64__) || defined(__amd64__) || defined(__aarch64__) || defined(__arm64__)
     void *mem = mmap(0, (unsigned long)n, 0x3, 0x1002, -1, 0);
     /* RW, MAP_PRIVATE|MAP_ANON(bsd) */
     if (mem == (void *)-1) {
@@ -1993,10 +1993,13 @@ static long long fk_native_call(const unsigned char *code, long long n, long lon
 }
 #endif
 static long long fk_native_call_test(long long arg) {
-/* lowered bytes of long long f(long long a){ return a + 1; } — arg1 in RCX (Win64) / RDI (SysV) */
+/* lowered bytes of long long f(long long a){ return a + 1; } */
 #if defined(_WIN32)
     static const unsigned char code[] = {0x48, 0x89, 0xC8, 0x48, 0x83, 0xC0, 0x01, 0xC3};
 /* mov rax,rcx; add rax,1; ret */
+#elif defined(__aarch64__) || defined(__arm64__)
+    static const unsigned char code[] = {0x00, 0x04, 0x00, 0x91, 0xC0, 0x03, 0x5F, 0xD6};
+/* add x0,x0,#1; ret */
 #else
     static const unsigned char code[] = {0x48, 0x89, 0xF8, 0x48, 0x83, 0xC0, 0x01, 0xC3};
 /* mov rax,rdi; add rax,1; ret */

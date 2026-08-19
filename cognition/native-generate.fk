@@ -3,9 +3,10 @@
 ; adds the two things a sequence needs, both native and oracle-checkable:
 ;   · RoPE at arbitrary position — sin/cos as Form Taylor (range-reduced), the fexp discipline;
 ;   · causal multi-key attention — real softmax (math_exp) over a growing key/value cache.
-; Each step's LM head still dispatches on the RTX (cuda_matvec_f32), so every generated token
-; carries a bit-exact GPU receipt. The whole sequence is checked token-for-token against the
-; tk-emit-llama projection runner (the independent oracle) — a divergence shows as a wrong word.
+; Each step's LM head prefers the RTX (cuda_matvec_f32), so an available GPU still carries a
+; bit-exact receipt. When CUDA is absent, the same tied embedding projection stays in Form through
+; nds-mv instead of refusing generation. The whole sequence can be checked token-for-token against
+; the tk-emit-llama projection runner (the independent oracle) — a divergence shows as a wrong word.
 ;
 ; preludes (cat before this cell): cognition/native-decode-step.fk (reuses nds-f32/nds-i32/
 ;   nds-mv/nds-rms/nds-swiglu/nds-addz/nds-floats-loop/nds-bases/nds-token-text/nds-best-loop/
@@ -136,7 +137,24 @@
             (cons (nds-floats-loop s (add t-emb (mul (head toks) (mul dim 4))) dim (empty))
                   (ng-embed-seq s (tail toks) dim t-emb))))
 
-    ; ── one step: forward the whole sequence, LM head on the RTX, argmax ──────
+    ; ── prompt pieces: resolve exact tokenizer strings entirely in Form ─────
+    ; The caller supplies already-segmented pieces (for example " Once", " upon").
+    ; This is deliberately narrower than a general BPE encoder, but it makes direction
+    ; real now: no host tokenizer and no rented model chooses the seed token ids.
+    (defn ng-token-id-loop (tok id vocab piece)
+        (if (ge id vocab) (sub 0 1)
+            (if (str_eq (nds-token-text tok id) piece) id
+                (ng-token-id-loop tok (add id 1) vocab piece))))
+    (defn ng-piece-ids (tok pieces vocab acc)
+        (if (eq (len pieces) 0) (nds-rev acc (empty))
+            (do (let id (ng-token-id-loop tok 0 vocab (head pieces)))
+                (if (lt id 0) (empty)
+                    (ng-piece-ids tok (tail pieces) vocab (cons id acc))))))
+    (defn ng-pieces-text (pieces)
+        (if (eq (len pieces) 0) ""
+            (str_concat (head pieces) (ng-pieces-text (tail pieces)))))
+
+    ; ── one step: forward the whole sequence, GPU-or-Form LM head, argmax ────
     (defn ng-i2s-p (n) (if (eq n 0) "" (str_concat (ng-i2s-p (div n 10)) (byte_to_str (add 48 (mod n 10))))))
     (defn ng-i2s (n) (if (eq n 0) "0" (ng-i2s-p n)))
     (defn ng-next (s toks dim kvd hid hd heads kvmul layers vocab t-emb ra0 rfin embflat)
@@ -144,7 +162,13 @@
                         dim kvd hid hd heads kvmul ra0))
             (let xf (nds-rms s rfin (ng-last xs) dim))
             (let r (cuda_matvec_f32 embflat xf))
-            (if (eq (len r) 0) (sub 0 1) (nds-best-loop (tail (tail r)) 1 0 (head (tail r))))))
+            ; cuda_matvec_f32 returns (agree logits...) or empty on an unsupported host.
+            ; The fallback reads the tied embedding matrix directly from checkpoint bytes and
+            ; performs the identical logical projection in the native Form walker.
+            (let logits (if (eq (len r) 0)
+                (nds-mv s t-emb vocab dim xf)
+                (tail (tail r))))
+            (nds-best-loop (tail logits) 1 0 (head logits))))
 
     ; ── the greedy loop: append each native token, accumulate the decoded text ─
     (defn ng-loop (s toks steps dim kvd hid hd heads kvmul layers vocab t-emb ra0 rfin embflat tok txt)
@@ -177,4 +201,29 @@
                 (str_concat (ng-loop s (cons 1 (empty)) steps dim kvd hid hd heads kvmul layers
                                 vocab t-emb ra0 rfin embflat tok "")
                     "]"))))
+
+    (defn native-generate-seeded (ckpt tokpath pieces steps)
+        (do (let s (read_file ckpt))
+            (let tok (read_file tokpath))
+            (let dim (nds-i32 s 0))
+            (let hid (nds-i32 s 4))
+            (let layers (nds-i32 s 8))
+            (let heads (nds-i32 s 12))
+            (let kvh (nds-i32 s 16))
+            (let vocab (nds-i32 s 20))
+            (let hd (div dim heads))
+            (let kvd (mul kvh hd))
+            (let kvmul (div heads kvh))
+            (let t-emb 28)
+            (let ra0 (add t-emb (mul (mul vocab dim) 4)))
+            (let rfin (add t-emb (mul 4 (add (mul vocab dim)
+                (mul layers (add (mul dim 2) (add (mul (mul dim dim) 2)
+                    (add (mul (mul kvd dim) 2) (mul (mul hid dim) 3)))))))))
+            (let embflat (nds-floats-loop s t-emb (mul vocab dim) (empty)))
+            (let resolved (ng-piece-ids tok pieces vocab (empty)))
+            (if (eq (len resolved) 0) "native-generated:[prompt-unresolved]"
+                (str_concat "native-generated:["
+                    (str_concat (ng-loop s (cons 1 resolved) steps dim kvd hid hd heads kvmul layers
+                                    vocab t-emb ra0 rfin embflat tok (ng-pieces-text pieces))
+                        "]")))))
     0)
