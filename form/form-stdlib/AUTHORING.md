@@ -37,6 +37,11 @@ resolves, while the inline count is the remaining cleanup ratchet.
 
 ## The two files
 
+New features that can live on the BML brace surface belong there:
+`section [form.bml] { def name(x) = ...; }`. Crystallize with
+`form-source-compile-file` (see `form-cli-bml-ice-compile.fk`) and call
+the emitted Form. Do not grow a hand-written s-expression twin.
+
 A **recipe** `form/form-stdlib/<name>.fk` — a series of `defn`s ending in literal `0`:
 
 ```lisp
