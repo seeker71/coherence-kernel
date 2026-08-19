@@ -49,6 +49,7 @@ GO_BIN="$ROOT/form-kernel-go/bin-go"
 BLOB="${FORM_DS4_BLOB:-$HOME/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf}"
 CACHE="$ROOT/native/metal/.metallib-cache"
 TOKEN="${FORM_DS4_PROMPT_TOKEN:-671}"
+TOKEN_B="${FORM_DS4_PROMPT_TOKEN_B:-1234}"
 POS_A=0
 POS_B=7
 
@@ -111,6 +112,12 @@ echo "  the file declares $NLAYER blocks; this run stacks $WANT_LAYERS"
 : > "$work/want.txt"
 : > "$work/flags.txt"
 echo "EMB token_embd.weight" >> "$work/want.txt"
+# the VOCAB HEAD (ds4.c output_logits_one): the collapse of the four streams, the final norm, the projection.
+echo "OHF output_hc_fn.weight"     >> "$work/want.txt"
+echo "OHS output_hc_scale.weight"  >> "$work/want.txt"
+echo "OHB output_hc_base.weight"   >> "$work/want.txt"
+echo "ONM output_norm.weight"      >> "$work/want.txt"
+echo "OUTW output.weight"          >> "$work/want.txt"
 for ((il=0; il<WANT_LAYERS; il++)); do
     P="blk.$il"
     for pair in "NORM attn_norm" "QA attn_q_a" "QAN attn_q_a_norm" "QB attn_q_b" "KV attn_kv" \
@@ -174,6 +181,7 @@ STEP $STEP
 VIEWLIMIT $VIEWLIMIT
 NVIEWS $NVIEWS
 TOKEN $TOKEN
+TOKEN_B $TOKEN_B
 NLAYERS $WANT_LAYERS
 N_EMBD $N_EMBD
 N_HEAD $N_HEAD
@@ -253,6 +261,29 @@ if cmp -s "$ORA0/oracle-L$((WANT_LAYERS-1))-out_hc.f64" "$ORA7/oracle-L$((WANT_L
 fi
 echo "  hushfold: the ORACLE's stack output already differs between pos $POS_A and pos $POS_B — the GPU must too"
 
+# ── 2c. THE SECOND PROMPT. The falsifier triple needs a DIFFERENT token to land on a DIFFERENT id, and
+# that claim is only worth anything if the oracle says the same. So the oracle is rented once more, for
+# token $TOKEN_B, all the way through the stack and the head.
+ORB0="${FORM_DS4_ORACLE_B_DIR0:-}"; ORB7="${FORM_DS4_ORACLE_B_DIR7:-}"
+if [[ -z "$ORB0" || -z "$ORB7" ]]; then
+    ORB0="$work/orb$POS_A"; ORB7="$work/orb$POS_B"; mkdir -p "$ORB0" "$ORB7"
+    echo "  renting the oracle for the SECOND prompt, token $TOKEN_B..."
+    DSV4_ORACLE_MODE=stack DSV4_ORACLE_HEAD=1 DSV4_ORACLE_OUT="$ORB0" python3 "$ORACLE" "$BLOB" "$TOKEN_B" "$POS_A" "$WANT_LAYERS" > "$work/orb0.txt" 2>&1 &
+    r0=$!
+    DSV4_ORACLE_MODE=stack DSV4_ORACLE_HEAD=1 DSV4_ORACLE_OUT="$ORB7" python3 "$ORACLE" "$BLOB" "$TOKEN_B" "$POS_B" "$WANT_LAYERS" > "$work/orb7.txt" 2>&1 &
+    r7=$!
+    wait $r0; wait $r7
+else
+    echo "  reusing the second prompt's oracle stacks: $ORB0 and $ORB7"
+fi
+for d in "$ORA0" "$ORA7"; do
+    [[ -f "$d/oracle-argmax.txt" ]] || { echo "FAIL the first prompt's oracle carries no head/argmax in $d"; exit 1; }
+done
+for d in "$ORB0" "$ORB7"; do
+    [[ -f "$d/oracle-argmax.txt" ]] || { echo "FAIL the second prompt's oracle carries no head/argmax in $d"; exit 1; }
+done
+echo "  the oracle's own tokens: prompt $TOKEN -> $(awk '{print $1}' "$ORA0/oracle-argmax.txt") / $(awk '{print $1}' "$ORA7/oracle-argmax.txt");  prompt $TOKEN_B -> $(awk '{print $1}' "$ORB0/oracle-argmax.txt") / $(awk '{print $1}' "$ORB7/oracle-argmax.txt")"
+
 # ── 3. compile the translation units, cached by sha ────────────────────────────────────────────────
 compile_unit() { # $1 emit-form  $2 grep-token  $3 cache-prefix -> echoes LIB path
     local form="$1" tok="$2" pre="$3" lib sha
@@ -298,6 +329,7 @@ let libEmb = argv[3], libMla = argv[4], lib8 = argv[5], libCore = argv[6], libHc
 let libMx4 = argv[8], libIq2 = argv[9], libFfn = argv[10]
 let oraDirA = argv[11], oraDirB = argv[12]
 let perDirA = argv[13], perDirB = argv[14]
+let orbDirA = argv[15], orbDirB = argv[16]
 
 struct Tn { let abs: Int, bytes: Int, idx: Int, inner: Int, holds: Int, d0: Int, d1: Int, d2: Int, type: Int
             var rows: Int { d1 }
@@ -308,7 +340,9 @@ func T(_ k: String) -> Tn {
               holds: I(k+"_HOLDS"), d0: I(k+"_D0"), d1: I(k+"_D1"), d2: I(k+"_D2"), type: I(k+"_TYPE"))
 }
 let emb = T("EMB")
+let ohf = T("OHF"), ohs = T("OHS"), ohb = T("OHB"), onm = T("ONM"), outw = T("OUTW")
 let step = I("STEP"), viewLimit = I("VIEWLIMIT"), nviews = I("NVIEWS"), token = I("TOKEN")
+let tokenB = I("TOKEN_B")
 let nLayers = I("NLAYERS")
 let nEmbd = I("N_EMBD"), nHead = I("N_HEAD"), headDim = I("HEAD_DIM"), nRot = I("N_ROT"), oRank = I("O_RANK")
 let nHc = I("N_HC"), hcIters = I("HC_ITERS"), nUsed = I("N_USED"), nFf = I("N_FF")
@@ -382,6 +416,7 @@ var spanning: [String] = []
 var groups: [String: [Int]] = [:]
 func resident(_ n: String, _ t: Tn) { if t.holds != 1 || t.idx >= nviews { spanning.append(n) } }
 resident("token_embd", emb)
+for (n, t) in [("output_hc_fn", ohf), ("output_hc_scale", ohs), ("output_hc_base", ohb), ("output_norm", onm), ("output", outw)] { resident(n, t) }
 for il in 0..<nLayers {
     let w = LW[il]
     let named: [(String, Tn)] = [("attn_norm", w.nrm), ("attn_q_a", w.qa), ("attn_q_a_norm", w.qan),
@@ -433,6 +468,13 @@ check(pruneOK,
   "the bias sentinel does not match the stack depth: \(pruneWhy)")
 
 // ---- the oracle's vectors ----
+func readOracle2(_ dir: String, _ key: String) -> [Double] {
+    let p = dir + "/oracle-" + key + ".f64"
+    guard let s = try? String(contentsOfFile: p, encoding: .utf8) else { print("FAIL oracle vector missing: \(p)"); exit(1) }
+    var out: [Double] = []
+    s.split(separator: "\n").forEach { if let v = Double($0) { out.append(v) } }
+    return out
+}
 func readOracle(_ dir: String, _ il: Int, _ key: String) -> [Double] {
     let p = dir + "/oracle-L\(il)-" + key + ".f64"
     guard let s = try? String(contentsOfFile: p, encoding: .utf8) else { print("FAIL oracle vector missing: \(p)"); exit(1) }
@@ -731,7 +773,7 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     return gpuMx8(w.ob, lo, w.ob.rows, w.ob.cols)
 }
 
-func runLayer(_ il: Int, _ pos: Int, _ residHc: MTLBuffer) -> LayerOut {
+func runLayer(_ il: Int, _ pos: Int, _ residHc: MTLBuffer, _ tok: Int) -> LayerOut {
     let w = LW[il]
     let (attnCur, attnSplit) = hcPre(residHc, w.haf, w.has, w.hab)
     let attnOut = mlaBlock(attnCur, pos, il)
@@ -747,7 +789,7 @@ func runLayer(_ il: Int, _ pos: Int, _ residHc: MTLBuffer) -> LayerOut {
         // forepick (row 867): the six experts come from an I32 TABLE READ on the token id, and the
         // router only WEIGHTS them. A top-k here would be the layer-3-and-up recipe applied to a hash layer.
         let ht = w.ht!
-        var t32 = UInt32(token), nu = UInt32(nUsed)
+        var t32 = UInt32(tok), nu = UInt32(nUsed)
         enc(pHashSel, nUsed, 8) { c in c.setBuffer(views[ht.idx], offset: ht.inner, index: 0)
                                        c.setBuffer(idsBuf, offset: 0, index: 1)
                                        c.setBytes(&t32, length: 4, index: 2); c.setBytes(&nu, length: 4, index: 3) }
@@ -826,15 +868,50 @@ func sentinelledCopy(_ a: [Float]) -> MTLBuffer {
 }
 
 // ---- the token's embedding, broadcast to the four streams: THE stack's input (ds4.c:9764) ----
-let rowOff = token * nEmbd * 2
-let x0 = sentinelled(nEmbd)
-do { var b64 = UInt64(emb.inner + rowOff), c32 = UInt32(nEmbd)
-     enc(pEmb, nEmbd, 256) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x0, offset: 0, index: 1)
-                                  c.setBytes(&b64, length: 8, index: 2); c.setBytes(&c32, length: 4, index: 3) } }
-let residHc0 = sentinelled(hcDim)
-do { var a = UInt32(nHc), b = UInt32(nEmbd)
-     enc(pHcBcast, hcDim, 256) { c in c.setBuffer(x0, offset: 0, index: 0); c.setBuffer(residHc0, offset: 0, index: 1)
-                                      c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) } }
+func residFor(_ tok: Int) -> MTLBuffer {
+    let x0 = sentinelled(nEmbd)
+    var b64 = UInt64(emb.inner + tok * nEmbd * 2), c32 = UInt32(nEmbd)
+    enc(pEmb, nEmbd, 256) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x0, offset: 0, index: 1)
+                                 c.setBytes(&b64, length: 8, index: 2); c.setBytes(&c32, length: 4, index: 3) }
+    let r = sentinelled(hcDim)
+    var a = UInt32(nHc), b = UInt32(nEmbd)
+    enc(pHcBcast, hcDim, 256) { c in c.setBuffer(x0, offset: 0, index: 0); c.setBuffer(r, offset: 0, index: 1)
+                                     c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) }
+    return r
+}
+let residHc0 = residFor(token)
+
+// ══ THE VOCAB HEAD (ds4.c output_logits_one) ═══════════════════════════════════════════════════════
+// rms(no weight) over the whole n_hc*n_embd state -> the F16 output_hc_fn mix -> a PLAIN sigmoid gate
+// (no sinkhorn, no post, no comb -- output_hc_fn is [16384, 4], so the file itself refuses hc_pre's
+// reading) -> the weighted collapse -> output_norm -> the MXFP8 vocab projection -> argmax.
+let pHeadGate = pipe(lFfn, "form_dsv4_head_gate")
+func headOf(_ outHc: MTLBuffer) -> (MTLBuffer, Int, Float, Float) {
+    let flat = sentinelled(hcDim)
+    do { var n = UInt32(hcDim), e0 = eps
+         enc(pHcRmsNw, 1, 1) { c in c.setBuffer(outHc, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
+                                    c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
+    let pre = gpuF16mv(ohf, flat)
+    let wbuf = sentinelled(nHc)
+    do { var a = UInt32(nHc), he = hcEps
+         enc(pHeadGate, nHc, 8) { c in c.setBuffer(pre, offset: 0, index: 0)
+                                       c.setBuffer(views[ohs.idx], offset: ohs.inner, index: 1)
+                                       c.setBuffer(views[ohb.idx], offset: ohb.inner, index: 2)
+                                       c.setBuffer(wbuf, offset: 0, index: 3)
+                                       c.setBytes(&a, length: 4, index: 4); c.setBytes(&he, length: 4, index: 5) } }
+    let embd = sentinelled(nEmbd)
+    do { var a = UInt32(nHc), b = UInt32(nEmbd)
+         enc(pHcWsum, nEmbd, 256) { c in c.setBuffer(outHc, offset: 0, index: 0); c.setBuffer(wbuf, offset: 0, index: 1)
+                                         c.setBuffer(embd, offset: 0, index: 2)
+                                         c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4) } }
+    let normed = gpuRmsnorm(embd, nEmbd, onm)
+    let nVocab = outw.rows
+    let logits = gpuMx8(outw, normed, nVocab, outw.cols)
+    let lp = fp(logits, nVocab)
+    var best = 0, second = 0
+    for i in 1..<nVocab { if lp[i] > lp[best] { second = best; best = i } else if i != best && lp[i] > lp[second] { second = i } }
+    return (logits, best, lp[best], lp[second])
+}
 
 // the WITNESS layers: the first layer of every distinct group, plus layer 1. Those get the full gate set
 // (the routing decision, the six weights, the first expert's whole path, the two accumulations); every
@@ -860,14 +937,14 @@ var ulpRouteSplit: [Int] = []
 var injNd: [Int: [Double]] = [:]
 var msPerLayer: [Int: [Double]] = [:]
 
-func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
-    var resid = residHc0
+func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ tok: Int, _ full: Bool) -> MTLBuffer {
+    var resid = tok == token ? residHc0 : residFor(tok)
     for il in 0..<nLayers {
         let w = LW[il]
         let t0 = Date()
-        let R = runLayer(il, pos, resid)
+        let R = runLayer(il, pos, resid, tok)
         let ms = Date().timeIntervalSince(t0) * 1000.0
-        msPerLayer[il, default: []].append(ms)
+        if full { msPerLayer[il, default: []].append(ms) }
         let tag = "blk.\(il) [gate/up \(w.gx.type) down \(w.dx.type) n_exp \(w.nExpStack) \(w.hashed ? "hash" : "top-k") rope \(w.ratio == 0 ? "plain" : "compressed(\(w.ratio))")]"
 
         // selfgauge: no number below was chosen to make this harness green. The envelope is measured
@@ -894,13 +971,15 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
         // regime, a wrong expert count, a biased weight or a stale bias would change outright -- and a
         // changed expert is a different 8.4 M-parameter matrix, not a rounding difference.
         let oraSel = readOracle(oraDir, il, "selected").map { Int($0) }
-        let perSel = readOracle(perDir, il, "selected").map { Int($0) }
-        if perSel != oraSel { ulpRouteSplit.append(il) }
+        if full {
+            let perSel = readOracle(perDir, il, "selected").map { Int($0) }
+            if perSel != oraSel { ulpRouteSplit.append(il) }
+        }
         check(R.ids == oraSel && !R.ids.isEmpty && R.ids.allSatisfy { $0 >= 0 && $0 < w.nExpStack },
           "\(tag) the routing DECISION [RENTED ORACLE, pos \(pos)]: \(w.hashed ? "the I32 table row for token \(token), read through the view" : "biased top-k over \(w.nExpRouter) logits with UNBIASED weighting") chose \(R.ids) -- bit-identical to the oracle's, and every id inside this layer's own \(w.nExpStack)-deep stack",
           "\(tag) routing: GPU \(R.ids) vs oracle \(oraSel)")
         if R.ids != oraSel { layerFail += 1 }
-        if witness.contains(il) {
+        if witness.contains(il) && full {
             G(R.afterAttn, hcDim, "after_attn_hc", 3e-5,
               "the attention half -- hc_pre(attn) -> 13 MLA dispatches with THIS layer's rope freqs -> hc_post(attn)")
             G(R.ffnNorm, nEmbd, "ffn_normed", 3e-5, "hc_pre(ffn) -> ffn_norm, the FFN's own frame")
@@ -949,6 +1028,7 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
                 GI(shI, nEmbd, "shared", "the MXFP8 shared expert, gate/up/SwiGLU/down")
             }
         }
+        if !full { resid = R.outHc; continue }
         // ── THE PER-LAYER INJECTED GATE. The whole-stack gate above measures the GPU's trajectory
         // against the oracle's, so at blk.36 it is really a gate on 37 composed layers and cannot say
         // whether blk.36 ITSELF is right. This runs the SAME layer again from the ORACLE's own input for
@@ -957,7 +1037,7 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
         do {
             let (inR, inN) = il == 0 ? (residHc0, hcDim) : oracleBuf(oraDir, il-1, "out_hc")
             if inN == hcDim {
-                let J = runLayer(il, pos, inR)
+                let J = runLayer(il, pos, inR, tok)
                 let ref = readOracle(oraDir, il, "out_hc")
                 let (ok, nd, _, _, mr, nn, ds, mn, mx, l2) = cmpOra(fp(J.outHc, hcDim), ref, [], 3e-5)
                 injNd[il, default: []].append(nd)
@@ -970,16 +1050,70 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
         G(R.outHc, hcDim, "out_hc", 3e-5,
           "THE LAYER'S OUTPUT — the \(hcDim) hyper-connection entries blk.\(il+1) receives, carried forward")
         resid = R.outHc
-        if il == nLayers - 1 {
+        if il == nLayers - 1 && full {
             var v = [Float](repeating: 0, count: hcDim)
             let op = fp(R.outHc, hcDim); for i in 0..<hcDim { v[i] = op[i] }
             finalByPos[pos] = v
         }
     }
+    return resid
 }
 
-let tA = Date(); runStack(posA, oraDirA, perDirA); let wallA = Date().timeIntervalSince(tA)
-let tB = Date(); runStack(posB, oraDirB, perDirB); let wallB = Date().timeIntervalSince(tB)
+let tA = Date(); let finA = runStack(posA, oraDirA, perDirA, token, true); let wallA = Date().timeIntervalSince(tA)
+let tB = Date(); let finB = runStack(posB, oraDirB, perDirB, token, true); let wallB = Date().timeIntervalSince(tB)
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+// THE TOKEN. Everything above ends holding the four hyper-connection streams; a token needs the head.
+// halfrent (row 870) is at its sharpest here: ds4.c CANNOT run this file, so there is no engine on this
+// machine that can say what token this model emits. The only validator is the rented transcription plus
+// the falsifier triple — determinism, prompt-dependence, and legality. Nothing here is fabricated: every
+// id printed below was computed twice, once by the GPU and once by an independent fp64 reading of the
+// same bytes, and the gate is that they are the SAME INTEGER.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+func oracleArgmax(_ dir: String) -> (Int, Double) {
+    guard let s = try? String(contentsOfFile: dir + "/oracle-argmax.txt", encoding: .utf8) else {
+        print("FAIL the oracle wrote no argmax in \(dir)"); exit(1)
+    }
+    let f = s.split(separator: "\n")[0].split(separator: " ")
+    return (Int(f[0]) ?? -1, Double(f[1]) ?? 0)
+}
+let (hLogA, idA, topA, secA) = headOf(finA)
+let (_,     idB7, topB7, _)  = headOf(finB)
+let (oIdA, oTopA) = oracleArgmax(oraDirA)
+let (oIdB, _)     = oracleArgmax(oraDirB)
+
+// the head's own logit vector, against the oracle's, at the deepest point in the whole pipeline.
+do {
+    let ref = readOracle2(oraDirA, "logits")
+    let (ok, nd, _, _, mr, nn, ds, mn, mx, l2) = cmpOra(fp(hLogA, outw.rows), ref, [], 1e-2)
+    check(ok && gpuErrors == 0,
+      "the VOCAB HEAD [RENTED ORACLE, pos \(posA)]: rms(no weight) over all \(hcDim) stream entries -> the F16 output_hc_fn mix -> a plain sigmoid gate (NOT hc_pre's sinkhorn; output_hc_fn is [16384,\(ohf.rows)] and the file refuses the other reading) -> the collapse -> output_norm -> the MXFP8 \(outw.rows)x\(outw.cols) vocab projection. \(outw.rows) logits (normalised disagreement \(nd); relative L2 \(l2); relative \(mr) above 1e-3 of peak; \(ds) distinct, range [\(mn),\(mx)]; \(nn) NaN)",
+      "the vocab head: normalised disagreement \(nd); relative L2 \(l2); nan \(nn); distinct \(ds)")
+    if !(ok && gpuErrors == 0) { layerFail += 1 }
+}
+check(idA == oIdA && idB7 == oIdB,
+  "THE TOKEN: after \(nLayers) layers and the head the GPU emits id \(idA) at pos \(posA) and id \(idB7) at pos \(posB), and the rented fp64 oracle independently emits \(oIdA) and \(oIdB) from the same bytes — the SAME INTEGER, not a tolerance. Winning logit \(topA), runner-up \(secA), margin \(topA - secA) (the oracle's top logit is \(oTopA))",
+  "THE TOKEN: GPU \(idA)/\(idB7) vs oracle \(oIdA)/\(oIdB)")
+
+// ── the falsifier triple (the only validator this file has; halfrent, row 870) ──────────────────────
+// 1. the SAME prompt twice must give the SAME id. The whole 43-layer stack and the head are run again.
+let (_, idA2, topA2, _) = headOf(runStack(posA, oraDirA, perDirA, token, false))
+check(idA2 == idA && topA2 == topA,
+  "falsifier 1/3 — DETERMINISM: prompt \(token) run through all \(nLayers) layers and the head a second time gives the identical id \(idA2) and the identical winning logit \(topA2)",
+  "falsifier 1/3: the same prompt gave \(idA2) (logit \(topA2)) then \(idA) (logit \(topA))")
+// 2. a DIFFERENT prompt must give a DIFFERENT id — and the oracle must agree it does.
+let finC = runStack(posA, orbDirA, perDirA, tokenB, false)
+let (_, idC, topC, secC) = headOf(finC)
+let (oIdC, _) = oracleArgmax(orbDirA)
+check(idC == oIdC && idC != idA,
+  "falsifier 2/3 — PROMPT DEPENDENCE: prompt \(tokenB) gives id \(idC) (logit \(topC), margin \(topC - secC)) where prompt \(token) gave \(idA); the oracle independently gives \(oIdC) for the same prompt. A stack that ignored its input would give one id for both",
+  "falsifier 2/3: prompt \(tokenB) -> GPU \(idC), oracle \(oIdC), first prompt \(idA)")
+// 3. the ids must be LEGAL and the win must be real.
+let nVocab = outw.rows
+check(idA >= 0 && idA < nVocab && idC >= 0 && idC < nVocab && idA > 2 && idC > 2
+      && topA != 0 && topC != 0 && topA > secA && topC > secC,
+  "falsifier 3/3 — LEGALITY: both ids are inside [0,\(nVocab)), neither is one of the three control ids 0/1/2 (BOS / EOS / pad), both winning logits are non-zero, and both beat their runner-up by a real margin (\(topA - secA) and \(topC - secC)) rather than by a rounding difference",
+  "falsifier 3/3: ids \(idA)/\(idC) logits \(topA)/\(topC) margins \(topA-secA)/\(topC-secC)")
 
 // ── hushfold at STACK scale ────────────────────────────────────────────────────────────────────────
 var posDiff = 0; var maxDelta: Float = 0
@@ -1019,7 +1153,7 @@ print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — t
 
 let ok = failures == 0 && gpuErrors == 0
 if ok {
-    print("VERDICT PASS  \(gateNo) gates — \(nLayers) HETEROGENEOUS DeepSeek-V4-Flash LAYERS STACKED at real dims over the 85 GiB file, the four hyper-connection streams carried from each layer into the next, every per-layer decision (expert count, gate/up and down type, routing regime, rope regime) read from the file's own tensor table, at TWO positions, every choosing surface against a rented fp64 ds4.c transcription and every dispatch sentinelled")
+    print("VERDICT PASS  \(gateNo) gates — \(nLayers) HETEROGENEOUS DeepSeek-V4-Flash LAYERS STACKED at real dims over the 85 GiB file AND THE TOKEN: the four hyper-connection streams carried from each layer into the next, every per-layer decision (expert count, gate/up and down type, routing regime, rope regime) read from the file's own tensor table, at TWO positions, every choosing surface against a rented fp64 ds4.c transcription, every dispatch sentinelled, and the head's argmax the SAME INTEGER as the oracle's for two different prompts")
 } else {
     print("VERDICT FAIL  \(failures) gate(s), \(gpuErrors) cb errors")
 }
@@ -1029,6 +1163,6 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "
 
 "$work/runner" "$work/params.txt" "$BLOB" \
     "$LIB_EMB" "$LIB_MLA" "$LIB8" "$LIB_CORE" "$LIB_HC" \
-    "$LIB_MX4" "$LIB_IQ2" "$LIB_FFN" "$ORA0" "$ORA7" "$PER0" "$PER7"
+    "$LIB_MX4" "$LIB_IQ2" "$LIB_FFN" "$ORA0" "$ORA7" "$PER0" "$PER7" "$ORB0" "$ORB7"
 rc=$?
 exit $rc
