@@ -1,0 +1,96 @@
+; channel-affordance.fk — ask a channel what it can answer, instead of assuming.
+;
+; Urs, 2026-07-23 00:13: use every camera and mic and radio we have, cross-reference them,
+; and "we don't even need to know the encoding — we can use an auto-research encoder that
+; auto-detects which encoders match the current inquiry plane of the current input
+; interface channel."
+;
+; That idea is right and this is its smallest honest form. Before any encoder is chosen, a
+; channel has to be asked what it AFFORDS — which of the inquiry planes it can carry at all
+; — because affordance is a property of the wire, not of the cleverness downstream. The
+; probe is the auto-detector. Choosing an encoder for a plane the channel cannot carry is
+; the whole failure mode this prevents.
+;
+; It was written because the probe caught its own author. The plan was to cross-correlate
+; the mac's microphone array for direction; system_profiler says
+;   MacBook Pro Microphone .... Input Channels: 1
+; macOS beamforms three physical mics into ONE channel, and there is no pair to correlate.
+; The phone, asked the same question, answers
+;   Channel count: 2   Channel mask: 0x3 (front-left, front-right)
+; So the spatial door is the pocket, not the desk — the opposite of the assumption, and one
+; probe apart from it.
+;
+; The affordance rules, and the one that keeps catching people:
+;   WHEN / WHAT  — one channel is enough. Onset and content need no geometry.
+;   WHERE, as a BEARING — needs 2+ channels, a shared clock, and a real baseline between
+;                them. Two channels on two devices is NOT a pair: separate clocks put the
+;                arrival difference under the clock's own uncertainty and the bearing
+;                dissolves. (Measured 2026-07-22: mac<->phone offset is knowable to
+;                +/-25 ms; sound crosses a 160 mm baseline in 0.47 ms. The error is fifty
+;                times the whole signal.)
+;   WHERE, as a POSITION — needs 3+ channels on a shared clock, not collinear.
+; A channel that cannot carry a plane says so, and ca-why names WHICH lack, so the caller
+; learns whether to add a channel or to fix a clock. They are different repairs.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn ca-mm-per-ms () 343)
+
+    ; a channel = (label channels shared-clock? baseline-mm rate-hz)
+    (defn ca-channel (label chans clock baseline rate)
+        (list label chans clock baseline rate))
+    (defn ca-label    (c) (nth c 0))
+    (defn ca-chans    (c) (nth c 1))
+    (defn ca-clock?   (c) (nth c 2))
+    (defn ca-baseline (c) (nth c 3))
+    (defn ca-rate     (c) (nth c 4))
+
+    ; --- the planes a channel can carry ---
+    (defn ca-affords-when? (c) (if (ge (ca-chans c) 1) 1 0))
+    (defn ca-affords-what? (c) (if (ge (ca-chans c) 1) 1 0))
+    (defn ca-affords-bearing? (c)
+        (if (ge (ca-chans c) 2)
+            (if (eq (ca-clock? c) 1) (if (gt (ca-baseline c) 0) 1 0) 0)
+            0))
+    (defn ca-affords-position? (c)
+        (if (ge (ca-chans c) 3) (if (eq (ca-clock? c) 1) 1 0) 0))
+
+    ; --- WHY a bearing is unavailable: 0 affords, 1 too few channels, 2 clocks unshared,
+    ; 3 no baseline (co-located). The repair differs for each. ---
+    (defn ca-why (c)
+        (if (lt (ca-chans c) 2) 1
+            (if (eq (ca-clock? c) 0) 2
+                (if (le (ca-baseline c) 0) 3 0))))
+
+    ; --- how much lag there is to work with: samples across the baseline ---
+    ; baseline_mm * rate / 343000. This is the entire budget a correlator has; below a few
+    ; samples the bearing is a coin toss however good the algorithm.
+    (defn ca-lag-samples (c)
+        (div (mul (ca-baseline c) (ca-rate c)) (mul (ca-mm-per-ms) 1000)))
+
+    ; --- the measured channels, 2026-07-22/23 ---
+    (defn ca-mac-mic ()   (ca-channel "mac builtin mic"  1 1   0 16000))
+    (defn ca-phone-mic () (ca-channel "phone stereo mic" 2 1 160 48000))
+    (defn ca-phone-16 ()  (ca-channel "phone stereo mic" 2 1 160 16000))
+    ; the tempting pair, and the reason it does not work
+    (defn ca-cross ()     (ca-channel "mac mic + phone mic" 2 0 2000 16000))
+
+    ; --- self-check ---
+    (defn cak (cond bit) (if cond bit 0))
+    (defn ca-mac-when ()   (cak (eq (ca-affords-when? (ca-mac-mic)) 1) 1))
+    (defn ca-mac-no-bear () (cak (eq (ca-affords-bearing? (ca-mac-mic)) 0) 2))
+    (defn ca-mac-why ()    (cak (eq (ca-why (ca-mac-mic)) 1) 4))
+    (defn ca-phone-bear () (cak (eq (ca-affords-bearing? (ca-phone-mic)) 1) 8))
+    (defn ca-phone-lag48 () (cak (eq (ca-lag-samples (ca-phone-mic)) 22) 16))
+    (defn ca-phone-lag16 () (cak (eq (ca-lag-samples (ca-phone-16)) 7) 32))
+    ; two channels, a two-metre baseline, and it still affords nothing — the clock decides
+    (defn ca-cross-no ()   (cak (eq (ca-affords-bearing? (ca-cross)) 0) 64))
+    (defn ca-cross-why ()  (cak (eq (ca-why (ca-cross)) 2) 128))
+    ; and nothing here reaches a position: that wants a third channel on the same clock
+    (defn ca-none-place () (cak (eq (ca-affords-position? (ca-phone-mic)) 0) 256))
+    (defn channel-affordance-check ()
+        (add (add (add (ca-mac-when) (ca-mac-no-bear)) (add (ca-mac-why) (ca-phone-bear)))
+        (add (add (add (ca-phone-lag48) (ca-phone-lag16)) (add (ca-cross-no) (ca-cross-why)))
+             (ca-none-place))))
+)

@@ -1,0 +1,105 @@
+; spatial-timing-budget.fk — what it would take to place a sound in this room, and how
+; far the organs presently are from it.
+;
+; Asked for on 2026-07-22 22:30: live real-time capture, the subtle energy between mic and
+; speaker and camera, time-dilation awareness, device and protocol duration, spatial
+; awareness accurate enough to trust. Every one of those rests on ONE quantity, and this
+; cell computes it rather than describing it.
+;
+; Placing a source from several sensors is MULTILATERATION: you locate it from the
+; DIFFERENCES in arrival time between sensors (TDOA — time difference of arrival). The
+; method has exactly one currency. Sound covers 343 mm every millisecond in air, so a
+; millisecond of timing uncertainty IS a third of a metre of position uncertainty, and
+; there is no processing anywhere downstream that buys it back. Space is bought with time,
+; at a fixed exchange rate, and this cell is the exchange desk.
+;
+; The three numbers below were MEASURED on this host at 22:30–22:33 WITA, not assumed:
+;   adb round trip, best of 15 probes ....... 50 ms   -> clock offset knowable to +/-25 ms
+;   mac ear capture window (HATI_WINDOW) .... 3000 ms -> the ear's own time quantum
+;   phone clock ahead of mac (midpoint) ..... ~37 ms  -> and only to +/-25 ms, per above
+;
+; Two different things are conflated in the plain phrase "time sync", and this cell keeps
+; them apart because they fail differently:
+;   OFFSET  — the constant difference between two clocks. Measurable, correctable.
+;   WINDOW  — the granularity at which a sensor timestamps at all. NOT correctable; it is
+;             the sensor's own quantum, and no amount of clock discipline shrinks it.
+; The mac ear's window is 3000 ms. That is not a sync problem and no sync fixes it.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    ; --- the exchange rate, dry air near 20 C ---
+    (defn stb-mm-per-ms () 343)
+
+    ; --- time uncertainty (ms) -> position uncertainty (mm) ---
+    (defn stb-position-mm (ms) (mul ms (stb-mm-per-ms)))
+    ; --- and the inverse: the timing you would need for a target accuracy ---
+    (defn stb-ms-for-mm (mm) (div mm (stb-mm-per-ms)))
+
+    ; --- the measured organs, as (label uncertainty-ms) ---
+    (defn stb-organ (label ms) (list label ms))
+    (defn stb-label (o) (nth o 0))
+    (defn stb-ms    (o) (nth o 1))
+
+    (defn stb-organs ()
+        (list
+            (stb-organ "adb clock offset"  25)     ; +/- half the 50 ms best round trip
+            (stb-organ "mac ear window"  3000)     ; HATI_WINDOW=3 seconds
+            (stb-organ "phone media poll"  34)))   ; the 20:59 sampling interval
+
+    ; --- the chain is only as placed as its worst-timed member ---
+    (defn stb-worst-ms (os)
+        (if (eq (len os) 0) 0
+            (max2 (stb-ms (head os)) (stb-worst-ms (tail os)))))
+    (defn stb-worst-label (os)
+        (if (eq (len os) 1) (stb-label (head os))
+            (if (ge (stb-ms (head os)) (stb-worst-ms (tail os)))
+                (stb-label (head os))
+                (stb-worst-label (tail os)))))
+    (defn stb-reachable-mm (os) (stb-position-mm (stb-worst-ms os)))
+
+    ; --- can this set of organs place a source to within a target? ---
+    ; -1 when it cannot, and the caller can ask stb-worst-label WHICH organ to fix first.
+    (defn stb-places-to? (os target-mm)
+        (if (le (stb-reachable-mm os) target-mm) 1 0))
+    (defn stb-shortfall (os target-mm)
+        (if (eq (stb-places-to? os target-mm) 1) 0
+            (div (stb-reachable-mm os) (max2 target-mm 1))))
+
+    ; --- the resolution ALREADY in the recording ---
+    ; The ear records at 16000 Hz before it summarises. One sample is 1/16000 s, which is
+    ; 21 mm of travel — cross-correlating two channels resolves arrival differences at that
+    ; scale. So the room's timing is not missing; it is present at 21 mm and discarded when
+    ; three seconds are folded into one transcript line. The ceiling is a summarising step,
+    ; not a sensor limit, which is the difference between building an organ and buying one.
+    (defn stb-sample-mm (rate-hz) (div (mul (stb-mm-per-ms) 1000) rate-hz))
+
+    ; --- self-check ---
+    (defn stk (cond bit) (if cond bit 0))
+    ; one millisecond is a third of a metre, and this is the whole argument
+    (defn stb-one-ms ()   (stk (eq (stb-position-mm 1) 343) 1))
+    ; to place a sound within one metre you need under 3 ms across every organ
+    (defn stb-metre ()    (stk (eq (stb-ms-for-mm 1000) 2) 2))
+    ; the measured clock offset alone costs 8.575 m
+    (defn stb-clock ()    (stk (eq (stb-position-mm 25) 8575) 4))
+    ; the ear's 3 s window costs 1029 m — a kilometre of ambiguity
+    (defn stb-ear ()      (stk (eq (stb-position-mm 3000) 1029000) 8))
+    ; and the ear is what dominates, by three orders of magnitude
+    (defn stb-bottleneck () (stk (str_eq (stb-worst-label (stb-organs)) "mac ear window") 16))
+    (defn stb-reach ()    (stk (eq (stb-reachable-mm (stb-organs)) 1029000) 32))
+    ; so a one-metre placement is not reachable today
+    (defn stb-no-metre () (stk (eq (stb-places-to? (stb-organs) 1000) 0) 64))
+    ; and it is short by a factor of 1029, which names the size of the work
+    (defn stb-short ()    (stk (eq (stb-shortfall (stb-organs) 1000) 1029) 128))
+    ; with the ear fixed to a 10 ms window the clock offset becomes the bottleneck
+    (defn stb-next ()
+        (stk (str_eq (stb-worst-label (list (stb-organ "adb clock offset" 25)
+                                            (stb-organ "mac ear window" 10)))
+                     "adb clock offset") 256))
+    ; and the hopeful floor: one sample at 16 kHz is already 21 mm of resolution
+    (defn stb-sample ()   (stk (eq (stb-sample-mm 16000) 21) 512))
+    (defn spatial-timing-budget-check ()
+        (add (add (add (stb-one-ms) (stb-metre)) (add (stb-clock) (stb-ear)))
+        (add (add (add (stb-bottleneck) (stb-reach)) (add (stb-no-metre) (stb-short)))
+             (add (stb-next) (stb-sample)))))
+)
