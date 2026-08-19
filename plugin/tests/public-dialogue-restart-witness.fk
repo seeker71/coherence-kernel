@@ -1,0 +1,75 @@
+; public-dialogue-restart-witness.fk — three fresh-process persistence witness.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/json.fk form-stdlib/relationship-store.fk plugin/public-dialogue.fk
+;
+; Run this same cell three times with fkwu.  It answers 111, then 1111, then
+; 11111.  The second process reads both directed turns before releasing them;
+; the third reads their content-free tombstones and then clears the fixture.
+
+(do
+    (defn pdrw-has? (text needle) (ge (str_find text needle 0) 0))
+    (defn pdrw-score (condition bit) (if condition bit 0))
+    (defn pdrw-purge (dir id)
+        (do
+            (pd-forget dir id "state")
+            (pd-forget dir id "question")
+            (pd-forget dir id "point")
+            (pd-forget dir id "locale")
+            (pd-forget dir id "parent")
+            (pd-forget dir id "root")
+            (pd-forget dir id "disclosure")
+            (pd-forget dir id "token-digest")
+            (pd-forget dir id "created")
+            (pd-forget dir id "turns")))
+    (defn pdrw-first (dir root-id reply-id root-token reply-token)
+        (do
+            (let root (pd-create-with dir root-id root-token ""
+                "Can the mangrove hear the tide?" "river" "en" (pd-disclosure)))
+            (let reply (pd-create-with dir reply-id reply-token root-id
+                "The tide can answer through the roots." "sea" "en" (pd-disclosure)))
+            (sum (list
+                (pdrw-score (eq (pd-code root) 202) 1)
+                (pdrw-score (eq (pd-code reply) 202) 10)
+                (pdrw-score (pd-record? dir reply-id) 100)))))
+    (defn pdrw-second (dir root-id reply-id root-token reply-token)
+        (do
+            (let from-root (pd-thread dir root-id))
+            (let from-reply (pd-thread dir reply-id))
+            (let foreign (pd-release-with dir root-id reply-token))
+            (let released-root (pd-release-with dir root-id root-token))
+            (let released-reply (pd-release-with dir reply-id reply-token))
+            (sum (list
+                (pdrw-score (and (eq (pd-code from-root) 200)
+                                  (eq (pd-code from-reply) 200)) 1)
+                (pdrw-score (and (pdrw-has? (pd-body from-root) root-id)
+                                  (pdrw-has? (pd-body from-reply) reply-id)) 10)
+                (pdrw-score (and (pdrw-has? (pd-body from-reply) "directed_edges")
+                                  (if (pdrw-has? (pd-body from-reply) "removal_token") false true)) 100)
+                (pdrw-score (and (eq (pd-code foreign) 403)
+                                  (and (eq (pd-code released-root) 200)
+                                       (eq (pd-code released-reply) 200))) 1000)))))
+    (defn pdrw-third (dir root-id reply-id)
+        (do
+            (let thread (pd-thread dir reply-id))
+            (let verdict
+                (sum (list
+                    (pdrw-score (eq (pd-code thread) 200) 1)
+                    (pdrw-score (pdrw-has? (pd-body thread) "\"state\":\"tombstoned\"") 10)
+                    (pdrw-score (if (pdrw-has? (pd-body thread) "mangrove") false true) 100)
+                    (pdrw-score (pdrw-has? (pd-body thread) "\"relation\":\"reply\"") 1000)
+                    (pdrw-score (if (pdrw-has? (pd-body thread) "removal_token") false true) 10000))))
+            (pdrw-purge dir root-id)
+            (pdrw-purge dir reply-id)
+            (fs_rmdir dir)
+            verdict))
+
+    (let dir (str_concat (temp_dir) "/public-dialogue-restart-witness.d"))
+    (let root-id "dlg-restart-root")
+    (let reply-id "dlg-restart-reply")
+    (let root-token "remove-restart-root-111111111111")
+    (let reply-token "remove-restart-reply-22222222222")
+    (if (pd-record? dir root-id)
+        (if (pd-active? dir root-id)
+            (pdrw-second dir root-id reply-id root-token reply-token)
+            (pdrw-third dir root-id reply-id))
+        (pdrw-first dir root-id reply-id root-token reply-token)))

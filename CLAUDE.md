@@ -16,9 +16,10 @@ must flow out, a correlated control decision must flow back into execution, and
 the resulting state must be re-observed. Start at
 [`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md).
 
-Voice attunement: [`teachings/voice-attunement.md`](teachings/voice-attunement.md) — words this body sets
-down (law, must, gate, REFUSED, ...) and the register that lives here instead. Before your text lands in the
-tree, hold `observe/voice-frequency.fk`'s mirror to it — it counts the set-down words and shows them; the
+Voice attunement: [`teachings/voice-attunement.md`](teachings/voice-attunement.md) — there are no set-down
+words. Common contracted descriptions (law, must, gate, refuse, ...) can be purified to a trusted
+frequency; the word stays. Before your text lands in the tree, hold `observe/voice-frequency.fk`'s
+mirror to it — it counts words that often arrive clouded; a count is attention, never a ban. The
 writer decides:
 
 ```sh

@@ -711,6 +711,27 @@ func resolveKernelHostPath(path string) string {
 	if path == "" || filepath.IsAbs(path) {
 		return path
 	}
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	if directory, err := os.Getwd(); err == nil {
+		for {
+			for _, candidate := range []string{
+				filepath.Join(directory, path),
+				filepath.Join(directory, "form", path),
+				filepath.Join(directory, "form", "form", path),
+			} {
+				if _, statErr := os.Stat(candidate); statErr == nil {
+					return candidate
+				}
+			}
+			parent := filepath.Dir(directory)
+			if parent == directory {
+				break
+			}
+			directory = parent
+		}
+	}
 	slashPath := filepath.ToSlash(path)
 	if slashPath == "form-stdlib" || strings.HasPrefix(slashPath, "form-stdlib/") {
 		// The working directory is the first authority: a caller standing
@@ -4388,7 +4409,7 @@ func (k *Kernel) registerNatives() {
 
 func (k *Kernel) nativeBypassesFormBinding(name NameID) bool {
 	switch k.nameStr(name) {
-	case "str_len", "str_byte_at", "byte_to_str", "substring", "char_at", "str_find", "scan_run":
+	case "str_len", "str_byte_at", "byte_to_str", "substring", "char_at", "str_find", "scan_run", "form_table_text":
 		return true
 	default:
 		return false
@@ -4658,9 +4679,10 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 				}
 			}
 			// Most user bindings still shadow same-named natives. The exception
-			// is the byte-string/cursor waist: source compilers and BMF cursors
-			// depend on those names staying byte-indexed when portable fallback
-			// definitions from core.fk are loaded.
+			// is the byte-string/cursor and table-image waist: source compilers and
+			// BMF cursors depend on those names staying byte-indexed, and universal
+			// table emission depends on its linear native serializer, when portable
+			// fallback definitions are loaded.
 			if ne, ok := k.natives[name]; ok {
 				if _, hasUserBinding := env.Lookup(name); !hasUserBinding || k.nativeBypassesFormBinding(name) {
 					args := make([]Value, len(kids)-1)
@@ -5601,6 +5623,101 @@ func writeKernelCrashTraceWithContext(args []string, src string, recovered any, 
 	return path
 }
 
+type formSourcePart struct {
+	path   string
+	source string
+}
+
+func formImportPath(line string) (string, bool) {
+	source := strings.TrimSpace(line)
+	if strings.HasSuffix(source, ";") {
+		source = strings.TrimSpace(strings.TrimSuffix(source, ";"))
+	}
+	if !strings.HasPrefix(source, "import \"") || !strings.HasSuffix(source, "\"") {
+		return "", false
+	}
+	path := strings.TrimSuffix(strings.TrimPrefix(source, "import \""), "\"")
+	return path, path != ""
+}
+
+func resolveFormImport(ownerPath, imported string) (string, error) {
+	var candidates []string
+	if filepath.IsAbs(imported) {
+		candidates = append(candidates, imported)
+	} else {
+		candidates = append(candidates,
+			filepath.Join(filepath.Dir(ownerPath), imported),
+			imported,
+		)
+		if strings.HasPrefix(imported, "form/") {
+			candidates = append(candidates, strings.TrimPrefix(imported, "form/"))
+		}
+		for directory := filepath.Dir(ownerPath); ; {
+			candidates = append(candidates,
+				filepath.Join(directory, imported),
+				filepath.Join(directory, "form", imported),
+			)
+			parent := filepath.Dir(directory)
+			if parent == directory {
+				break
+			}
+			directory = parent
+		}
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("import %q from %s: file not found", imported, ownerPath)
+}
+
+func loadFormSourceFile(path string, seen map[string]bool, parts *[]formSourcePart) error {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", path, err)
+	}
+	absolute = filepath.Clean(absolute)
+	if seen[absolute] {
+		return nil
+	}
+	body, err := os.ReadFile(absolute)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	seen[absolute] = true
+
+	lines := strings.Split(string(body), "\n")
+	source := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if imported, ok := formImportPath(line); ok {
+			dependency, err := resolveFormImport(absolute, imported)
+			if err != nil {
+				return err
+			}
+			if err := loadFormSourceFile(dependency, seen, parts); err != nil {
+				return err
+			}
+			continue
+		}
+		source = append(source, line)
+	}
+	*parts = append(*parts, formSourcePart{path: path, source: strings.Join(source, "\n")})
+	return nil
+}
+
+func loadFormSourceClosure(paths []string) ([]formSourcePart, error) {
+	parts := make([]formSourcePart, 0, len(paths))
+	seen := make(map[string]bool)
+	for _, path := range paths {
+		if err := loadFormSourceFile(path, seen, &parts); err != nil {
+			return nil, err
+		}
+	}
+	return parts, nil
+}
+
 func main() {
 	args := os.Args[1:]
 	if len(args) == 0 {
@@ -5703,24 +5820,18 @@ func main() {
 		}
 		src = args[1]
 	} else {
-		// Multiple files load sequentially into a shared top-level scope.
-		// Concatenation works because the kernel wraps multi-form input in
-		// an implicit do-block — definitions from earlier files become
-		// visible to later ones. The line map remembers each file's first
-		// global line so read-time attribution names the ORIGINAL file:line.
-		var parts []string
+		loaded, err := loadFormSourceClosure(args)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		parts := make([]string, 0, len(loaded))
 		nextLine := uint32(1)
-		for _, path := range args {
-			b, err := os.ReadFile(path)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "read %s: %v\n", path, err)
-				os.Exit(1)
-			}
-			s := string(b)
-			lineMapParts = append(lineMapParts, lineMapPart{path: path, startLine: nextLine})
+		for _, part := range loaded {
+			lineMapParts = append(lineMapParts, lineMapPart{path: part.path, startLine: nextLine})
 			// +1 for the join newline between parts.
-			nextLine += uint32(strings.Count(s, "\n")) + 1
-			parts = append(parts, s)
+			nextLine += uint32(strings.Count(part.source, "\n")) + 1
+			parts = append(parts, part.source)
 		}
 		src = strings.Join(parts, "\n")
 	}

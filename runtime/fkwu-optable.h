@@ -112,7 +112,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "sense_cam_grab", 1, 212 },
   { "sense_frame_read", 0, 213 },
   { "sense_stream", 1, 214 },
-  { "native_call_test", 1, 215 },
+  { "jit_arm64_u32_leaf", 3, 215 },
   { "sense_wifi_ssid", 0, 216 },
   { "sense_wifi_signal", 0, 217 },
   { "sense_bt_present", 0, 218 },

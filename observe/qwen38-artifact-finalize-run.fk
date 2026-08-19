@@ -1,0 +1,32 @@
+; Whole-file acceptance after an external byte carrier finishes.  This is an
+; effectful run cell: do not preflight it, because it writes the atomic seal.
+; preludes: form/form-stdlib/qwen35-artifact-fetch.fk
+
+(do
+    (let spec (qaf-default-spec))
+    (let manifest (qaf-observe-manifest spec))
+    (let path (qaf-spec-target spec))
+    (let actual (file_size path))
+    (let expected-size (qaf-manifest-size manifest))
+    (let expected-sha (qaf-manifest-sha manifest))
+    (if (not (qaf-manifest-ready? manifest))
+        (list "refused" "manifest" (qaf-manifest-detail manifest) actual)
+        (if (not (eq actual expected-size))
+            (list "refused" "size" actual expected-size)
+            (do
+                ; The raw state is retained with the exact completed offset, so
+                ; the durable ledger and the seal are two views of one JIT pass.
+                (let full-blocks (sub actual (mod actual 64)))
+                (let state (saj-file-prefix-state path full-blocks))
+                (let tail-size (mod actual 64))
+                (let tail (read_file_slice path full-blocks tail-size))
+                (let digest (saj-final-digest-from-state state tail actual))
+                (let digest-hex (qaf-string-hex digest))
+                (if (not (str_eq digest-hex expected-sha))
+                    (list "refused" "sha256" digest-hex expected-sha (metal_status))
+                    (if (not (eq (qaf-commit-offset spec actual state) actual))
+                        (list "refused" "atomic-ledger-write" path actual digest-hex)
+                        (if (eq (qaf-commit-seal path actual expected-sha) 1)
+                            (list "sealed" path actual digest-hex (metal_status))
+                            (list "refused" "atomic-seal-write" path actual digest-hex)))))))
+)

@@ -1,0 +1,75 @@
+; native-resource-attestation.fk -- one no-knob, content-blind native-resource observation.
+;
+; This cell has no backend argument and no policy switch.  It asks the already-linked
+; accelerator carrier once, keeps that response inside Form, and releases only fixed
+; general states.  A device name, model bytes, carrier diagnostics, and counters never
+; cross this cell's output membrane.
+;
+; The source executor is observed by this cell actually running under fkwu.  The
+; accelerator state is separate: an unlinked carrier, an unavailable device, and an
+; opened device are different observations and must not be collapsed into a claimed
+; hardware limit.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/native-resource-attestation-band.fk
+
+(do
+    (defn nra-has? (s needle) (if (ge (str_find s needle 0) 0) 1 0))
+
+    ; These are the only public accelerator states.  They are general resource
+    ; observations, not caller-selectable backend names.
+    (defn nra-state-carrier-unlinked () "carrier-unlinked")
+    (defn nra-state-device-unavailable () "device-unavailable")
+    (defn nra-state-device-open () "device-open")
+    (defn nra-state-observation-error () "observation-error")
+    (defn nra-state-observation-unexpected () "observation-unexpected")
+
+    ; A weak, unlinked carrier supplies the fixed false linkage field without an
+    ; error field.  A linked carrier that could not open a device supplies the
+    ; no-device error.  The open state requires both the linkage and handle-door
+    ; evidence, so a stray true-looking field cannot become an observation.
+    (defn nra-status-envelope? (status)
+        (nra-has? status "metal_door=handle"))
+    (defn nra-carrier-unlinked? (status)
+        (if (and (eq (nra-status-envelope? status) 1)
+                 (and (eq (nra-has? status "metal_linked=false") 1)
+                      (eq (nra-has? status "last_error=") 0))) 1 0))
+    (defn nra-device-unavailable? (status)
+        (if (and (eq (nra-status-envelope? status) 1)
+                 (and (eq (nra-has? status "metal_linked=false") 1)
+                      (eq (nra-has? status "last_error=no Metal device") 1))) 1 0))
+    (defn nra-device-open? (status)
+        (if (and (eq (nra-status-envelope? status) 1)
+                 (eq (nra-has? status "metal_linked=true") 1)) 1 0))
+    (defn nra-observation-error? (status)
+        (if (and (eq (nra-status-envelope? status) 1)
+                 (eq (nra-has? status "last_error=") 1)) 1 0))
+
+    ; Order is evidence order: exact unavailable precedes general error; exact
+    ; opened precedes malformed text that happens to contain a carrier field.
+    (defn nra-accelerator-state (status)
+        (if (eq (nra-carrier-unlinked? status) 1) (nra-state-carrier-unlinked)
+            (if (eq (nra-device-unavailable? status) 1) (nra-state-device-unavailable)
+                (if (eq (nra-device-open? status) 1) (nra-state-device-open)
+                    (if (eq (nra-observation-error? status) 1) (nra-state-observation-error)
+                        (nra-state-observation-unexpected))))))
+
+    (defn nra-source-executor-state () "observed")
+    (defn nra-nl () (byte_to_str 10))
+    (defn nra-render (accelerator-state)
+        (str_concat "source_form_executor="
+            (str_concat (nra-source-executor-state)
+                (str_concat (nra-nl)
+                    (str_concat "accelerator_state=" accelerator-state)))))
+
+    ; The only carrier call in this cell.  Its raw result stays transient in the
+    ; local binding; nra-render receives the fixed classification only.
+    (defn nra-observe ()
+        (do
+            (let status (metal_status))
+            (let accelerator-state (nra-accelerator-state status))
+            (print_str (nra-render accelerator-state))
+            1))
+
+    (nra-observe))

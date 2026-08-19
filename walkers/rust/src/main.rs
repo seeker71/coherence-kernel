@@ -29,13 +29,14 @@
 // str_concat — never a walker native again. See
 // receipts/2026-07-01-narrow-waist-string-cleanup.md.
 //
-// CLI parity with the full kernel's default source path: `form-walker-rust
-// a.fk b.fk ...` concatenates the files with '\n', evaluates, and prints the
-// final value's display. `--expr "<src>"` evaluates a single expression.
+// CLI parity with the source path: `form-walker-rust a.fk b.fk ...` resolves
+// recursive bare imports, joins the resulting files with '\n', evaluates, and
+// prints the final value's display. `--expr "<src>"` evaluates one expression.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
@@ -648,9 +649,7 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
         Node::Str(s) => Value::Str(Rc::from(s.as_str())),
         Node::Bool(b) => Value::Bool(*b),
         Node::Null => Value::Null,
-        Node::Ident(name) => {
-            env_lookup(env, name).unwrap_or_else(|| panic!("unbound: {}", name))
-        }
+        Node::Ident(name) => env_lookup(env, name).unwrap_or_else(|| panic!("unbound: {}", name)),
         Node::Math(op, a, b) => {
             let lv = walk(a, env);
             let rv = walk(b, env);
@@ -694,7 +693,9 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
                 return match *op {
                     CMP_EQ => bool_int(both),
                     CMP_NE => bool_int(!both),
-                    _ => panic!("compare on nothing: ordering it against a number is not a number question"),
+                    _ => panic!(
+                        "compare on nothing: ordering it against a number is not a number question"
+                    ),
                 };
             }
             if matches!(lv, Value::Float(_)) || matches!(rv, Value::Float(_)) {
@@ -783,14 +784,19 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
                     return v;
                 }
             }
-            let callee = env_lookup(env, name)
-                .unwrap_or_else(|| panic!("unbound function: {}", name));
+            let callee =
+                env_lookup(env, name).unwrap_or_else(|| panic!("unbound function: {}", name));
             let cl = match callee {
                 Value::Closure(c) => c,
                 _ => panic!("not callable: {}", name),
             };
             if args.len() != cl.params.len() {
-                panic!("{} wants {} args, got {}", name, cl.params.len(), args.len());
+                panic!(
+                    "{} wants {} args, got {}",
+                    name,
+                    cl.params.len(),
+                    args.len()
+                );
             }
             // Evaluate args in CALLER's env, bind in a fresh call frame chained
             // to the closure's definition env.
@@ -964,6 +970,92 @@ fn run_source(src: &str) -> Value {
     walk(&root, &env)
 }
 
+fn import_path(line: &str) -> Option<&str> {
+    let mut source = line.trim();
+    if let Some(without_semicolon) = source.strip_suffix(';') {
+        source = without_semicolon.trim();
+    }
+    source
+        .strip_prefix("import \"")
+        .and_then(|rest| rest.strip_suffix('"'))
+        .filter(|path| !path.is_empty())
+}
+
+fn resolve_import(owner: &Path, imported: &str) -> Result<PathBuf, String> {
+    let import_path = Path::new(imported);
+    let mut candidates = Vec::new();
+    if import_path.is_absolute() {
+        candidates.push(import_path.to_path_buf());
+    } else {
+        candidates.push(
+            owner
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(import_path),
+        );
+        candidates.push(import_path.to_path_buf());
+        if let Some(stripped) = imported.strip_prefix("form/") {
+            candidates.push(PathBuf::from(stripped));
+        }
+        let mut directory = owner.parent().unwrap_or_else(|| Path::new("."));
+        loop {
+            candidates.push(directory.join(import_path));
+            candidates.push(directory.join("form").join(import_path));
+            let Some(parent) = directory.parent() else {
+                break;
+            };
+            if parent == directory {
+                break;
+            }
+            directory = parent;
+        }
+    }
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "import {:?} from {}: file not found",
+        imported,
+        owner.display()
+    ))
+}
+
+fn load_source_file(
+    path: &Path,
+    seen: &mut HashSet<PathBuf>,
+    parts: &mut Vec<String>,
+) -> Result<(), String> {
+    let canonical =
+        fs::canonicalize(path).map_err(|error| format!("read {}: {}", path.display(), error))?;
+    if !seen.insert(canonical.clone()) {
+        return Ok(());
+    }
+    let source = fs::read_to_string(&canonical)
+        .map_err(|error| format!("read {}: {}", path.display(), error))?;
+    let mut body = Vec::new();
+    for line in source.split('\n') {
+        if let Some(imported) = import_path(line) {
+            let dependency = resolve_import(&canonical, imported)?;
+            load_source_file(&dependency, seen, parts)?;
+        } else {
+            body.push(line);
+        }
+    }
+    parts.push(body.join("\n"));
+    Ok(())
+}
+
+fn load_source_closure(paths: &[String]) -> Result<String, String> {
+    let mut seen = HashSet::new();
+    let mut parts = Vec::with_capacity(paths.len());
+    for path in paths {
+        load_source_file(Path::new(path), &mut seen, &mut parts)?;
+    }
+    Ok(parts.join("\n"))
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() {
@@ -978,17 +1070,13 @@ fn main() {
         }
         args[1].clone()
     } else {
-        let mut parts = Vec::with_capacity(args.len());
-        for path in &args {
-            match fs::read_to_string(path) {
-                Ok(s) => parts.push(s),
-                Err(e) => {
-                    eprintln!("read {}: {}", path, e);
-                    std::process::exit(1);
-                }
+        match load_source_closure(&args) {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!("{}", error);
+                std::process::exit(1);
             }
         }
-        parts.join("\n")
     };
     let result = run_source(&src);
     println!("{}", result.display());

@@ -45,18 +45,55 @@
 ; lives in fkc-table-serialize.fk — cat it before this file in FOURTH_CHAIN.
 
 
+; A table is a live program image, not a prefix whose early functions happen to
+; answer a canary.  The old emitted fourth walker accepted only one 1 MiB read.
+; A form-cli candidate that crossed that boundary could therefore lose its late
+; string rows while still looking structurally plausible; `ping` then answered a
+; stray number.  Keep the same named 16 MiB bounded floor as the checkout
+; source runner, consume until EOF, and reject a table that does not fit or does
+; not parse completely.  This is emitted Form source, never a runtime C-seed
+; exception.
+(defn fkc-table-image-buffer-capacity () 16777216)
+(defn fkc-table-image-buffer-limit () (sub (fkc-table-image-buffer-capacity) 1))
+
+(defn fkc-table-loader-prefix-text ()
+    (str_concat "static char fk_buf[" (int_to_str (fkc-table-image-buffer-capacity))))
+
+(defn fkc-table-loader-bound-text ()
+    (str_concat "]; static long long fk_buf_len; static long long fk_parse_bad; static long long fk_pos; extern int open(const char *, int, ...); extern long long read(int, void *, unsigned long); static int fk_table_load(int fd) { long long got = 0; for (;;) { long long room = "
+                (int_to_str (fkc-table-image-buffer-limit))))
+
+(defn fkc-table-loader-tail-text ()
+    " - got; if (room <= 0) { char extra; long long more = read(fd, &extra, 1); if (more > 0) { printf(\"fkwu: form table exceeds emitted buffer capacity\\n\"); return 0; } if (more < 0) { printf(\"fkwu: form table read failed\\n\"); return 0; } fk_buf_len = got; fk_buf[got] = 0; return 1; } long long n = read(fd, fk_buf + got, room); if (n < 0) { printf(\"fkwu: form table read failed\\n\"); return 0; } if (n == 0) { fk_buf_len = got; fk_buf[got] = 0; return 1; } got = got + n; } } static long long fk_next() { long long sg = 1; long long saw = 0; while (fk_pos < fk_buf_len) { if (fk_buf[fk_pos] == 45 && fk_pos + 1 < fk_buf_len && fk_buf[fk_pos + 1] >= 48 && fk_buf[fk_pos + 1] <= 57) { sg = 0 - 1; fk_pos = fk_pos + 1; break; } if (fk_buf[fk_pos] >= 48 && fk_buf[fk_pos] <= 57) { break; } fk_pos = fk_pos + 1; } if (fk_pos >= fk_buf_len) { fk_parse_bad = 1; return 0; } long long v = 0; while (fk_pos < fk_buf_len && fk_buf[fk_pos] >= 48 && fk_buf[fk_pos] <= 57) { v = v * 10 + (fk_buf[fk_pos] - 48); fk_pos = fk_pos + 1; saw = 1; } if (saw == 0) { fk_parse_bad = 1; return 0; } return sg * v; } ")
+
+(defn fkc-table-loader-text ()
+    (str_concat (fkc-table-loader-prefix-text)
+                (str_concat (fkc-table-loader-bound-text)
+                            (fkc-table-loader-tail-text))))
+
 (defn fkc-decl-universal-text ()
     (str_concat (fkc-arena-decl-text)
                 (str_concat "static long long fk_fn_count; static long long fk_node_count; static long long fk_fn["
                 (str_concat (int_to_str (fkc-universal-fn-slots))
                 (str_concat "]; static long long fk_node["
                 (str_concat (int_to_str (fkc-universal-node-slots))
-                "][4]; static char fk_buf[16777216]; static long long fk_pos; extern int open(const char *, int, ...); extern long long read(int, void *, unsigned long); static long long fk_next() { long long sg = 1; while (fk_buf[fk_pos] != 0) { if (fk_buf[fk_pos] == 45 && fk_buf[fk_pos + 1] >= 48 && fk_buf[fk_pos + 1] <= 57) { sg = 0 - 1; fk_pos = fk_pos + 1; break; } if (fk_buf[fk_pos] >= 48) { if (fk_buf[fk_pos] <= 57) { break; } } fk_pos = fk_pos + 1; } long long v = 0; while (fk_buf[fk_pos] >= 48 && fk_buf[fk_pos] <= 57) { v = v * 10 + (fk_buf[fk_pos] - 48); fk_pos = fk_pos + 1; } return sg * v; } "))))))
+                (str_concat "][4]; " (fkc-table-loader-text))))))))
+
+; A disposable emitted fixture can reserve a private dispatch-counter slot
+; without changing the ordinary universal carrier's public tag capacity.
+(defn fkc-decl-universal-text-with-arm-slots (arm-slots)
+    (str_concat (fkc-arena-decl-text-with-arm-slots arm-slots)
+                (str_concat "static long long fk_fn_count; static long long fk_node_count; static long long fk_fn["
+                (str_concat (int_to_str (fkc-universal-fn-slots))
+                (str_concat "]; static long long fk_node["
+                (str_concat (int_to_str (fkc-universal-node-slots))
+                (str_concat "][4]; " (fkc-table-loader-text))))))))
 
 ; the table file's STRING SECTION rides after the rows: count, then per
-; string length + bytes (plain ints, the loader's digit cursor unchanged);
-; an older table simply ends and fk_next answers 0 — an empty pool. The
-; loader appends VERBATIM: the flattener is the interner and pool indices
+; string length + bytes (plain ints).  EOF during one of those rows is a
+; malformed image, never an empty pool: the loader marks that exact condition
+; before any walker function can mistake a partly loaded table for a program.
+; The loader appends VERBATIM: the flattener is the interner and pool indices
 ; in SLIT rows must stay stable.
 ; the shared loader: read argv[1]=table into the node heap + string pool, bind
 ; argv[2]=scalar into fk_vs[0], stage argv[3]=fk_src. Both entries below share it
@@ -65,9 +102,13 @@
 ; node rows, then the string pool. Shared by the file loader and the baked entry,
 ; which differ only in HOW fk_buf gets filled (a file vs a baked-in literal).
 (defn fkc-main-parse-text ()
-    "long long nf = fk_next(); fk_fn_count = nf; long long k = 0; while (k < nf) { fk_fn[k] = fk_next(); k = k + 1; } long long nr = fk_next(); fk_node_count = nr; long long r = 0; while (r < nr) { fk_node[r][0] = fk_next(); fk_node[r][1] = fk_next(); fk_node[r][2] = fk_next(); fk_node[r][3] = fk_next(); r = r + 1; } long long ns = fk_next(); fk_sinit(); long long si = 0; while (si < ns) { long long sl = fk_next(); if (fk_sp >= fk_scap_s) { fk_scap_s = fk_scap_s * 2; fk_so = realloc(fk_so, fk_scap_s * 8); fk_sl = realloc(fk_sl, fk_scap_s * 8); fk_snext = realloc(fk_snext, fk_scap_s * 8); } while (fk_sbp + sl > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } fk_so[fk_sp] = fk_sbp; fk_sl[fk_sp] = sl; long long bj = 0; while (bj < sl) { fk_sb[fk_sbp] = (char)fk_next(); fk_sbp = fk_sbp + 1; bj = bj + 1; } fk_sindex(fk_sp); fk_sp = fk_sp + 1; si = si + 1; } ")
+    (str_concat "fk_pos = 0; fk_parse_bad = 0; long long nf = fk_next(); if (fk_parse_bad || nf < 1 || nf > "
+    (str_concat (int_to_str (fkc-universal-fn-slots))
+    (str_concat ") { printf(\"fkwu: malformed form table function count\\n\"); return 4; } fk_fn_count = nf; long long k = 0; while (k < nf) { fk_fn[k] = fk_next(); k = k + 1; } long long nr = fk_next(); if (fk_parse_bad || nr < 1 || nr > "
+    (str_concat (int_to_str (fkc-universal-node-slots))
+    ") { printf(\"fkwu: malformed form table node count\\n\"); return 4; } fk_node_count = nr; long long r = 0; while (r < nr) { fk_node[r][0] = fk_next(); fk_node[r][1] = fk_next(); fk_node[r][2] = fk_next(); fk_node[r][3] = fk_next(); r = r + 1; } long long ns = fk_next(); if (fk_parse_bad || ns < 0) { printf(\"fkwu: malformed form table string count\\n\"); return 4; } fk_sinit(); long long si = 0; while (si < ns) { long long sl = fk_next(); if (fk_parse_bad || sl < 0) { printf(\"fkwu: malformed form table string length\\n\"); return 4; } if (fk_sp >= fk_scap_s) { fk_scap_s = fk_scap_s * 2; fk_so = realloc(fk_so, fk_scap_s * 8); fk_sl = realloc(fk_sl, fk_scap_s * 8); } while (fk_sbp + sl > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } fk_so[fk_sp] = fk_sbp; fk_sl[fk_sp] = sl; long long bj = 0; while (bj < sl) { fk_sb[fk_sbp] = (char)fk_next(); fk_sbp = fk_sbp + 1; bj = bj + 1; } fk_sp = fk_sp + 1; si = si + 1; } while (fk_pos < fk_buf_len && (fk_buf[fk_pos] == 32 || fk_buf[fk_pos] == 9 || fk_buf[fk_pos] == 10 || fk_buf[fk_pos] == 13)) { fk_pos = fk_pos + 1; } if (fk_parse_bad || fk_pos != fk_buf_len) { printf(\"fkwu: malformed or truncated form table\\n\"); return 4; } ")))))
 (defn fkc-main-load-text ()
-    (str_concat "extern int atoi(const char *); static int fk_run(int argc, char **argv) { if (argc < 2) { return 1; } int fd = open(argv[1], 0); if (fd < 0) { return 2; } long long got = read(fd, fk_buf, 16777215); if (got < 0) { return 3; } fk_buf[got] = 0; "
+    (str_concat "extern int atoi(const char *); static int fk_run(int argc, char **argv) { if (argc < 2) { return 1; } int fd = open(argv[1], 0); if (fd < 0) { return 2; } if (fk_table_load(fd) == 0) { return 3; } "
     (str_concat (fkc-main-parse-text)
                 "long long a = 0; if (argc > 2) { a = atoi(argv[2]) << 1; } if (argc > 3) { int sfd = open(argv[3], 0); if (sfd >= 0) { long long sg = read(sfd, fk_src, 262143); if (sg >= 0) { fk_src[sg] = 0; } } } fk_vs[0] = a; fk_vsp = 1; ")))
 ; ── the big-stack launcher (the walker's stack-depth wall, matched to siblings) ─
@@ -108,23 +149,20 @@
 ; copies the baked table into fk_buf, parses it with the shared loader, then walks
 ; fk_fn[0] for effect (the form-cli REPL drives its own stdout over fd 0). `table`
 ; is the flattened program string, baked at emit time.
-(defn fkc-trim-table-eol (table)
-    (do (let n (str_len table))
-        (if (eq n 0) table
-            (do (let b (str_byte_at table (sub n 1)))
-                (if (or (eq b 10) (eq b 13))
-                    (fkc-trim-table-eol (substring table 0 (sub n 1)))
-                    table)))))
+; The tail is named on its own because the chunked emitter
+; (form-cli-bootstrap-emit-cli.fk) prints the 2.5 MiB table as adjacent C string
+; literals and then needs exactly this closing text. Splitting head from tail
+; changes no emitted byte: fkc-main-baked-repl-text below re-joins them.
 (defn fkc-main-baked-repl-tail-text ()
-    (str_concat "\"; extern const unsigned char fk_genesis[] __attribute__((weak)); extern const long long fk_genesis_len __attribute__((weak)); static int fk_run(int argc, char **argv) { if (&fk_genesis_len) { fk_gen = fk_genesis; fk_gen_len = fk_genesis_len; } long long ci = 0; while (fk_prog[ci] != 0) { fk_buf[ci] = fk_prog[ci]; ci = ci + 1; } fk_buf[ci] = 0; "
+    (str_concat "\"; extern const unsigned char fk_genesis[] __attribute__((weak)); extern const long long fk_genesis_len __attribute__((weak)); int main(int argc, char **argv) { (void)argc; (void)argv; if (&fk_genesis_len) { fk_gen = fk_genesis; fk_gen_len = fk_genesis_len; } long long ci = 0; while (fk_prog[ci] != 0) { if (ci >= "
+    (str_concat (int_to_str (fkc-table-image-buffer-limit))
+    (str_concat ") { printf(\"fkwu: baked form table exceeds emitted buffer capacity\\n\"); return 3; } fk_buf[ci] = fk_prog[ci]; ci = ci + 1; } fk_buf_len = ci; fk_buf[ci] = 0; "
     (str_concat (fkc-main-parse-text)
-      (str_concat "fk_vs[0] = 0; fk_vsp = 1; fk_walk(fk_fn[0], 0); return 0; }"
-                  (fkc-stack-launcher-text)))))
+                "fk_vs[0] = 0; fk_vsp = 1; fk_walk(fk_fn[0], 0); return 0; }")))))
 (defn fkc-main-baked-repl-text (table)
-    (do (let baked (fkc-trim-table-eol table))
-        (str_concat "static const char fk_prog[] = \""
-        (str_concat baked
-                    (fkc-main-baked-repl-tail-text)))))
+    (str_concat "static const char fk_prog[] = \""
+    (str_concat table
+                (fkc-main-baked-repl-tail-text))))
 
 (defn fkc-emit-universal ()
     (str_concat (fkc-pr-text)
@@ -142,6 +180,17 @@
     (str_concat (fkc-walk-many-text)
                 (fkc-main-repl-text))))))
 
+; Experimental emitted-walker profile.  Both the ABI declarations and the arm
+; text are caller-supplied Form values; production `fkc-emit-repl` remains the
+; only normal form-cli route and retains its ordinary 0..255 counter range.
+(defn fkc-emit-repl-with-extension (arm-slots extension-decls extra-arms)
+    (str_concat (fkc-pr-text)
+    (str_concat (fkc-decl-universal-text-with-arm-slots arm-slots)
+    (str_concat extension-decls
+    (str_concat (fkc-typed-stdout-text)
+    (str_concat (fkc-walk-many-text-with-extra extra-arms)
+                (fkc-main-repl-text)))))))
+
 ; the combined walker+program: one self-contained native binary with `table`
 ; (a flattened Form program) baked in. The build flattens form-cli once and bakes
 ; it here; the resulting exe runs directly with no table file and no toolchain.
@@ -152,19 +201,34 @@
     (str_concat (fkc-walk-many-text)
                 (fkc-main-baked-repl-text table))))))
 
+; The closed-port fixture bakes one Form table into its disposable executable.
+; It has no argv table selector, so an arbitrary alternate table cannot widen
+; its reachable carrier surface at runtime.
+(defn fkc-emit-combined-repl-with-extension (table arm-slots extension-decls extra-arms)
+    (str_concat (fkc-pr-text)
+    (str_concat (fkc-decl-universal-text-with-arm-slots arm-slots)
+    (str_concat extension-decls
+    (str_concat (fkc-typed-stdout-text)
+    (str_concat (fkc-walk-many-text-with-extra extra-arms)
+                (fkc-main-baked-repl-text table)))))))
+
 (defn fkc-decl-server-universal-text ()
     (str_concat (fkc-arena-decl-text)
                 (str_concat "static long long fk_fn_count; static long long fk_node_count; static long long fk_fn["
                 (str_concat (int_to_str (fkc-universal-fn-slots))
                 (str_concat "]; static long long fk_node["
                 (str_concat (int_to_str (fkc-universal-node-slots))
-                "][4]; static char fk_buf[1048576]; static long long fk_pos; extern int open(const char *, int, ...); extern long long read(int, void *, unsigned long); extern int socket(int,int,int); extern int bind(int,const void*,unsigned int); extern int listen(int,int); extern long accept(int,void*,void*); extern int close(int); extern int dup2(int,int); extern int fflush(void*); extern int fork(void); extern void _exit(int); extern int setsockopt(int,int,int,const void*,unsigned int); extern int shutdown(int,int); static long long fk_next() { long long sg = 1; while (fk_buf[fk_pos] != 0) { if (fk_buf[fk_pos] == 45 && fk_buf[fk_pos + 1] >= 48 && fk_buf[fk_pos + 1] <= 57) { sg = 0 - 1; fk_pos = fk_pos + 1; break; } if (fk_buf[fk_pos] >= 48) { if (fk_buf[fk_pos] <= 57) { break; } } fk_pos = fk_pos + 1; } long long v = 0; while (fk_buf[fk_pos] >= 48 && fk_buf[fk_pos] <= 57) { v = v * 10 + (fk_buf[fk_pos] - 48); fk_pos = fk_pos + 1; } return sg * v; } "))))))
+                (str_concat "][4]; "
+                (str_concat (fkc-table-loader-text)
+                "extern int socket(int,int,int); extern int bind(int,const void*,unsigned int); extern int listen(int,int); extern long accept(int,void*,void*); extern int close(int); extern int dup2(int,int); extern int fflush(void*); extern int fork(void); extern void _exit(int); extern int setsockopt(int,int,int,const void*,unsigned int); extern int shutdown(int,int); "))))))))
 
 ; universal dynamic server: load a table file once, then serve fn 0 over the
 ; net organ forever. Each accepted request is staged into fk_src before the
 ; walk, so the loaded program can branch on live request bytes through fk-buf.
 (defn fkc-main-server-universal-text ()
-    "extern int atoi(const char *); struct fk_sa { unsigned char len; unsigned char fam; unsigned char p[2]; unsigned int addr; unsigned char z[8]; }; int main(int argc, char **argv) { if (argc < 2) { return 1; } int fd = open(argv[1], 0); if (fd < 0) { return 2; } long long got = read(fd, fk_buf, 1048575); if (got < 0) { return 3; } fk_buf[got] = 0; long long nf = fk_next(); fk_fn_count = nf; long long k = 0; while (k < nf) { fk_fn[k] = fk_next(); k = k + 1; } long long nr = fk_next(); fk_node_count = nr; long long r = 0; while (r < nr) { fk_node[r][0] = fk_next(); fk_node[r][1] = fk_next(); fk_node[r][2] = fk_next(); fk_node[r][3] = fk_next(); r = r + 1; } long long ns = fk_next(); fk_sinit(); long long si = 0; while (si < ns) { long long sl = fk_next(); if (fk_sp >= fk_scap_s) { fk_scap_s = fk_scap_s * 2; fk_so = realloc(fk_so, fk_scap_s * 8); fk_sl = realloc(fk_sl, fk_scap_s * 8); } while (fk_sbp + sl > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } fk_so[fk_sp] = fk_sbp; fk_sl[fk_sp] = sl; long long bj = 0; while (bj < sl) { fk_sb[fk_sbp] = (char)fk_next(); fk_sbp = fk_sbp + 1; bj = bj + 1; } fk_sp = fk_sp + 1; si = si + 1; } long long port = 8080; if (argc > 2) { port = atoi(argv[2]); } int sfd = socket(2, 1, 0); int yes = 1; setsockopt(sfd, FK_SOL_SOCKET, FK_SO_REUSEADDR, &yes, 4); struct fk_sa a; a.len = FK_SA_B0; a.fam = FK_SA_B1; a.p[0] = (port >> 8) & 255; a.p[1] = port & 255; a.addr = 0; for (int z = 0; z < 8; z = z + 1) { a.z[z] = 0; } if (bind(sfd, &a, 16) < 0) { return 4; } listen(sfd, 16); while (1) { long cfd = accept(sfd, 0, 0); if (cfd < 0) { continue; } if (fork() == 0) { long rg = read((int)cfd, fk_src, 262143); if (rg < 0) { rg = 0; } fk_src[rg] = 0; dup2((int)cfd, 1); fk_vs[0] = 0; fk_vsp = 1; fk_walk(fk_fn[0], 0); fflush(0); shutdown((int)cfd, 2); _exit(0); } close((int)cfd); } return 0; }")
+    (str_concat "extern int atoi(const char *); struct fk_sa { unsigned char len; unsigned char fam; unsigned char p[2]; unsigned int addr; unsigned char z[8]; }; int main(int argc, char **argv) { if (argc < 2) { return 1; } int fd = open(argv[1], 0); if (fd < 0) { return 2; } if (fk_table_load(fd) == 0) { return 3; } "
+    (str_concat (fkc-main-parse-text)
+    "long long port = 8080; if (argc > 2) { port = atoi(argv[2]); } int sfd = socket(2, 1, 0); int yes = 1; setsockopt(sfd, FK_SOL_SOCKET, FK_SO_REUSEADDR, &yes, 4); struct fk_sa a; a.len = FK_SA_B0; a.fam = FK_SA_B1; a.p[0] = (port >> 8) & 255; a.p[1] = port & 255; a.addr = 0; for (int z = 0; z < 8; z = z + 1) { a.z[z] = 0; } if (bind(sfd, &a, 16) < 0) { return 4; } listen(sfd, 16); while (1) { long cfd = accept(sfd, 0, 0); if (cfd < 0) { continue; } if (fork() == 0) { long rg = read((int)cfd, fk_src, 262143); if (rg < 0) { rg = 0; } fk_src[rg] = 0; dup2((int)cfd, 1); fk_vs[0] = 0; fk_vsp = 1; fk_walk(fk_fn[0], 0); fflush(0); shutdown((int)cfd, 2); _exit(0); } close((int)cfd); } return 0; }")))
 
 (defn fkc-emit-server-universal ()
     (str_concat (fkc-net-platform-defs-text)
@@ -504,7 +568,9 @@
 ; probe: value, njit, nmelt, nfreeze, nwire, then (heat, ice, can) per loaded
 ; function — the foreign thermodynamic state born observable like every sibling
 (defn fkc-main-uwire-text ()
-    "extern int atoi(const char *); int main(int argc, char **argv) { if (argc < 2) { return 1; } int fd = open(argv[1], 0); if (fd < 0) { return 2; } long long got = read(fd, fk_buf, 1048575); if (got < 0) { return 3; } fk_buf[got] = 0; fk_nf = fk_next(); fk_fn_count = fk_nf; long long k = 0; while (k < fk_nf) { fk_fn[k] = fk_next(); k = k + 1; } long long nr = fk_next(); fk_node_count = nr; long long r = 0; while (r < nr) { fk_node[r][0] = fk_next(); fk_node[r][1] = fk_next(); fk_node[r][2] = fk_next(); fk_node[r][3] = fk_next(); r = r + 1; } long long ns = fk_next(); fk_sinit(); long long si = 0; while (si < ns) { long long sl = fk_next(); if (fk_sp >= fk_scap_s) { fk_scap_s = fk_scap_s * 2; fk_so = realloc(fk_so, fk_scap_s * 8); fk_sl = realloc(fk_sl, fk_scap_s * 8); } while (fk_sbp + sl > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } fk_so[fk_sp] = fk_sbp; fk_sl[fk_sp] = sl; long long bj = 0; while (bj < sl) { fk_sb[fk_sbp] = (char)fk_next(); fk_sbp = fk_sbp + 1; bj = bj + 1; } fk_sp = fk_sp + 1; si = si + 1; } long long a = 0; if (argc > 2) { a = atoi(argv[2]) << 1; } fk_hot = 1000000000000; if (argc > 3) { fk_hot = atoi(argv[3]); } fk_canc(); fk_vs[0] = a; fk_vsp = 1; fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0)); fk_pr(fk_njit); fk_pr(fk_nmelt); fk_pr(fk_nfreeze); fk_pr(fk_nwire); long long f = 0; while (f < fk_nf) { fk_pr(fk_heat[f]); fk_pr(fk_ice[f]); fk_pr(fk_can[f]); f = f + 1; } return 0; }")
+    (str_concat "extern int atoi(const char *); int main(int argc, char **argv) { if (argc < 2) { return 1; } int fd = open(argv[1], 0); if (fd < 0) { return 2; } if (fk_table_load(fd) == 0) { return 3; } "
+    (str_concat (fkc-main-parse-text)
+    "fk_nf = fk_fn_count; long long a = 0; if (argc > 2) { a = atoi(argv[2]) << 1; } fk_hot = 1000000000000; if (argc > 3) { fk_hot = atoi(argv[3]); } fk_canc(); fk_vs[0] = a; fk_vsp = 1; fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0)); fk_pr(fk_njit); fk_pr(fk_nmelt); fk_pr(fk_nfreeze); fk_pr(fk_nwire); long long f = 0; while (f < fk_nf) { fk_pr(fk_heat[f]); fk_pr(fk_ice[f]); fk_pr(fk_can[f]); f = f + 1; } return 0; }")))
 
 (defn fkc-emit-uwire ()
     (str_concat (fkc-pr-text)

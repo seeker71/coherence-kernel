@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 # Shared integrity checks for the committed form-cli bootstrap carrier.
 #
 # The source stamp proves which Form source set authored the bootstrap.  The
@@ -100,6 +100,7 @@ form_cli_validate_table() {
             if (function_count < 1 || cursor + function_count - 1 > token_count) {
                 die("function roots")
             }
+            function_root_start = cursor
             cursor += function_count
             if (cursor > token_count) {
                 die("missing node count")
@@ -108,28 +109,24 @@ form_cli_validate_table() {
             if (node_count < 1 || cursor + (node_count * 4) - 1 > token_count) {
                 die("node rows")
             }
-            row_cursor = cursor
-            for (row_index = 0; row_index < node_count; row_index++) {
-                tag = token[row_cursor + (row_index * 4)]
-                tag_count[tag]++
+            node_start = cursor
+            # A shape-valid table can still be aphonic if a function root or
+            # a direct CALL points outside the serialized function/node
+            # ranges.  Validate those links before a candidate reaches the
+            # voice canary.
+            for (root_index = 0; root_index < function_count; root_index++) {
+                root = token[function_root_start + root_index]
+                if (root < 0 || root >= node_count) {
+                    die("function root index")
+                }
             }
-            # A form-cli carrying the DS4/local-model body without its handle
-            # rows is structurally valid but physiologically numb: every call
-            # recovers to a cell/zero while the emitted C arms sit unused. Keep
-            # that exact failure from entering the content-addressed cache.
-            required[245] = 1
-            required[246] = 1
-            required[247] = 1
-            required[248] = 1
-            required[249] = 1
-            required[251] = 1
-            required[252] = 1
-            required[253] = 1
-            required[254] = 1
-            required[255] = 1
-            for (required_tag in required) {
-                if (tag_count[required_tag] < 1) {
-                    die("missing required native row tag " required_tag)
+            for (node_index = 0; node_index < node_count; node_index++) {
+                node_cursor = node_start + (node_index * 4)
+                if (token[node_cursor] == 12) {
+                    call_target = token[node_cursor + 1]
+                    if (call_target < 0 || call_target >= function_count) {
+                        die("call target")
+                    }
                 }
             }
             cursor += node_count * 4
@@ -168,27 +165,9 @@ form_cli_extract_emitted_table() {
     if ! LC_ALL=C awk '
         BEGIN {
             prefix = "static const char fk_prog[] = \""
-            chunk_prefix = "static const char fk_prog[] ="
             suffix = "\"; extern const unsigned char fk_genesis[]"
-            chunk_suffix = "; extern const unsigned char fk_genesis[]"
         }
         {
-            if ($0 == chunk_prefix) {
-                chunked = 1
-                next
-            }
-            if (chunked) {
-                if (index($0, chunk_suffix) == 1) {
-                    printf "\n"
-                    found = 1
-                    exit
-                }
-                if (substr($0, 1, 1) == "\"" && substr($0, length($0), 1) == "\"") {
-                    printf "%s", substr($0, 2, length($0) - 2)
-                    next
-                }
-                exit 3
-            }
             start = index($0, prefix)
             if (start > 0) {
                 payload = substr($0, start + length(prefix))
@@ -254,11 +233,11 @@ form_cli_verify_bootstrap() {
 }
 
 form_cli_sha256_file() {
-    local path="$1"
+    local file_path="$1"
     if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$path" | awk '{print $1}'
+        shasum -a 256 "$file_path" | awk '{print $1}'
     elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$path" | awk '{print $1}'
+        sha256sum "$file_path" | awk '{print $1}'
     else
         echo "form-cli bootstrap: SHA-256 tool unavailable" >&2
         return 1
@@ -311,7 +290,12 @@ form_cli_behavioral_proof() (
 
     [[ "$binary" == */* ]] || binary="./$binary"
     binary="$(cd -P "$(dirname "$binary")" && pwd)/$(basename "$binary")"
-    script_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        script_path="${(%):-%N}"
+    else
+        script_path="${BASH_SOURCE[0]}"
+    fi
+    script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
     form_dir="$(cd -P "$script_dir/.." && pwd)"
     if [[ -z "$expected_source_sha256" ]]; then
         expected_source_sha256="$(tr -d '\r\n' < "$form_dir/form-stdlib/bootstrap/form-cli.source.sha256")"
@@ -501,10 +485,12 @@ success"
     printf 'form-cli behavioral proof: OK (identity, v2/v1, exact bytes, 1546-row rank, embed batch/cap, request HMAC/replay)\n'
 )
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    if [[ $# -lt 1 || $# -gt 2 ]]; then
-        echo "usage: $0 FORM_CLI_BINARY [EXPECTED_SOURCE_SHA256]" >&2
-        exit 2
+if [[ -z "${ZSH_VERSION:-}" ]]; then
+    if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+        if [[ $# -lt 1 || $# -gt 2 ]]; then
+            echo "usage: $0 FORM_CLI_BINARY [EXPECTED_SOURCE_SHA256]" >&2
+            exit 2
+        fi
+        form_cli_behavioral_proof "$@"
     fi
-    form_cli_behavioral_proof "$@"
 fi

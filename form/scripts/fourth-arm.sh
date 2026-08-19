@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 # fourth-arm.sh — the emitted fourth kernel as a validate.sh leg.
 #
 # Sourced by validate.sh (cwd = form/). The fourth sibling is the universal
@@ -16,13 +16,12 @@
 # workload is mandatory: preparation, execution, and agreement failures fail
 # validation instead of silently reducing the proof to three siblings.
 
-# Bash-only: the array loops below index from 0. Sourced into zsh (arrays
-# 1-based) they SILENTLY malform every flatten expr — ${srcs[0]} reads empty
-# so a (read_file "") row rides the module list, and ${srcs[last]} grabs the
-# wrong band file. Die loudly instead of authoring a malformed carrier.
+# The flatten lists are zero-based. Zsh normally indexes arrays from 1, which
+# would silently turn ${srcs[0]} into an empty read_file row and shift the
+# band source. KSH_ARRAYS gives this source-compatible carrier the same
+# zero-based indexing without making Bash a condition of Form publication.
 if [[ -n "${ZSH_VERSION:-}" ]]; then
-    echo "fourth-arm.sh: bash-only (zsh arrays are 1-indexed; flatten exprs would be silently malformed) — source this under bash" >&2
-    return 1 2>/dev/null || exit 1
+    setopt KSH_ARRAYS
 fi
 
 FOURTH_DIR="form-stdlib/.cache/fourth"
@@ -35,6 +34,7 @@ FOURTH_CHAIN=(
     form-stdlib/minimal-surface.fk
     form-stdlib/hati-os-kernel.fk
     form-stdlib/host-io-fs-fkwu-emit.fk
+    form-stdlib/form-table-text.fk
     form-stdlib/fkc-table-serialize.fk
     form-stdlib/hati-os-kernel-emit.fk
     form-stdlib/core.fk
@@ -52,6 +52,7 @@ FOURTH_CHAIN=(
 FOURTH_FLATTEN_CHAIN=(
     form-stdlib/minimal-surface.fk
     form-stdlib/hati-os-kernel.fk
+    form-stdlib/form-table-text.fk
     form-stdlib/fkc-table-serialize.fk
     form-stdlib/core.fk
     form-stdlib/form-parse.fk
@@ -70,6 +71,7 @@ FOURTH_EMIT_CHAIN=(
     form-stdlib/minimal-surface.fk
     form-stdlib/hati-os-kernel.fk
     form-stdlib/host-io-fs-fkwu-emit.fk
+    form-stdlib/form-table-text.fk
     form-stdlib/fkc-table-serialize.fk
     form-stdlib/hati-os-kernel-emit.fk
 )
@@ -86,8 +88,11 @@ FOURTH_BOOTSTRAP_UNI_STAMP="form-stdlib/bootstrap/fkwu-uni.stamp"
 # self-host). The trailing fn-0 value + arm profile fkwu prints after
 # ==T-END== falls outside every per-band marker range, so the split ignores it.
 FOURTH_FLATTEN_TABLE="form-stdlib/fourth-flatten-table.txt"
-# T_flat is a compiler workload: large dependency closures recurse deeply.
-# The emitted walker carries its measured 2 GiB virtual stack directly.
+# T_flat is a compiler workload: large dependency closures recurse much more
+# deeply than an already-flattened runtime table. The emitted walker owns an
+# explicit stack-size door, so give this phase the measured stack that carries
+# the largest manifest band instead of relying on the 256 MiB runtime default.
+FOURTH_FLATTEN_STACK_MB="${FOURTH_FLATTEN_STACK_MB:-2048}"
 
 # BML reaches the fourth-arm flattener through executable Form text.  The
 # primary source compiler emits a durable .fkb image + loader; the final module
@@ -335,6 +340,19 @@ fourth_prepare_source_text() {
     [[ -s "$cached" ]] && printf '%s\n' "$cached"
 }
 
+fourth_prepare_import_source() {
+    local src="$1" key cached tmp
+    mkdir -p "$FOURTH_SOURCE_TEXT_DIR"
+    key="$(fourth_hash16 "$src")-imports-v1"
+    cached="$FOURTH_SOURCE_TEXT_DIR/$key.fk"
+    if [[ ! -s "$cached" ]]; then
+        tmp="$(mktemp "$FOURTH_SOURCE_TEXT_DIR/.${key}.XXXXXX")"
+        awk '!/^[ \t]*import([ \t:]|")/ { print }' "$src" > "$tmp"
+        mv -f "$tmp" "$cached"
+    fi
+    printf '%s\n' "$cached"
+}
+
 # fourth_fkwu_cache_stamp — cache key for the standing fkwu binary (emitter chain + committed uni.c).
 fourth_fkwu_cache_stamp() {
     fourth_hash16 "${FOURTH_CHAIN[@]}" "$FOURTH_BOOTSTRAP_UNI_C"
@@ -536,8 +554,89 @@ fourth_band_prelude_mods() {
     fourth_band_prelude_mods_raw "$1" | grep -vE '(^|/)core\.fk$' | grep . || true
 }
 
+fourth_file_import_mods() {
+    awk '
+        function emit(tok) {
+            gsub(/^[ \t,;"]+|[ \t,;"]+$/, "", tok)
+            if (tok ~ /\.(fk|bml|form|grammar)$/) print tok
+        }
+        /^[ \t]*import([ \t:]|")/ {
+            s = $0
+            sub(/^[ \t]*import[ \t:]*/, "", s)
+            if (match(s, /"[^"]+\.(fk|bml|form|grammar)"/))
+                emit(substr(s, RSTART + 1, RLENGTH - 2))
+            else {
+                n = split(s, a, /[ \t,;]+/)
+                if (n >= 1) emit(a[1])
+            }
+        }
+        /^;[ \t]*import([ \t:]|")/ {
+            s = $0
+            sub(/^;[ \t]*import[ \t:]*/, "", s)
+            if (match(s, /"[^"]+\.(fk|bml|form|grammar)"/))
+                emit(substr(s, RSTART + 1, RLENGTH - 2))
+            else {
+                n = split(s, a, /[ \t,;]+/)
+                if (n >= 1) emit(a[1])
+            }
+        }
+    ' "$1" 2>/dev/null || true
+}
+
+fourth_file_declared_mods() {
+    fourth_band_prelude_mods_raw "$1"
+    fourth_file_import_mods "$1"
+}
+
+fourth_resolve_dep_path() {
+    local owner="$1" token="$2" dir cand
+    case "$token" in
+        /*|[A-Za-z]:*) printf '%s\n' "$token"; return ;;
+    esac
+    dir="$(dirname "$owner")"
+    cand="$dir/$token"
+    if [[ -f "$cand" ]]; then
+        printf '%s\n' "$cand"
+    elif [[ -f "$token" ]]; then
+        printf '%s\n' "$token"
+    elif [[ "$token" == form/* && -f "${token#form/}" ]]; then
+        printf '%s\n' "${token#form/}"
+    elif [[ -f "../$token" ]]; then
+        printf '%s\n' "../$token"
+    else
+        printf '%s\n' "$cand"
+    fi
+}
+
+fourth_src_seen=()
+fourth_src_order=()
+
+fourth_src_seen_contains() {
+    local needle="$1" item
+    [[ ${#fourth_src_seen[@]} -eq 0 ]] && return 1
+    for item in "${fourth_src_seen[@]}"; do
+        [[ "$item" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+fourth_collect_source_dep() {
+    local file="$1" token dep
+    fourth_src_seen_contains "$file" && return 0
+    fourth_src_seen+=("$file")
+    [[ -f "$file" ]] || return 1
+    while IFS= read -r token; do
+        [[ -n "$token" ]] || continue
+        dep="$(fourth_resolve_dep_path "$file" "$token")"
+        fourth_collect_source_dep "$dep" || return 1
+    done < <(fourth_file_declared_mods "$file")
+    if [[ "$file" != */core.fk && "$file" != core.fk ]]; then
+        fourth_src_order+=("$file")
+    fi
+}
+
 fourth_band_srcs() {
-    local stem="$1" mods band
+    local stem="$1" mods band token dep
     band="form-stdlib/tests/${stem}-band.fk"
     # A manifest stem maps to tests/<stem>-band.fk OR the plain tests/<stem>.fk —
     # fourth_band_stem strips -band when reading, so both are the same band.
@@ -547,9 +646,31 @@ fourth_band_srcs() {
     # Drop ONLY the exact core.fk prelude (the shim mirrors it). Anchor the match
     # to a path boundary so sibling-named modules — substrate-core.fk, bmf-core.fk
     # — keep their place in the source list instead of vanishing as substrings.
-    mods="$(fourth_band_prelude_mods "$band")"
-    [[ -z "$mods" && -f "form-stdlib/${stem}.fk" ]] && mods="form-stdlib/${stem}.fk"
-    printf '%s\n' $mods "$band"
+    fourth_src_seen=()
+    fourth_src_order=()
+    mods="$(fourth_file_declared_mods "$band")"
+    if [[ -z "$mods" && -f "form-stdlib/${stem}.fk" ]]; then
+        fourth_collect_source_dep "form-stdlib/${stem}.fk" || return 1
+    else
+        while IFS= read -r token; do
+            [[ -n "$token" ]] || continue
+            dep="$(fourth_resolve_dep_path "$band" "$token")"
+            fourth_collect_source_dep "$dep" || return 1
+        done <<< "$mods"
+    fi
+    # A band whose ONLY declared prelude is core.fk collects nothing — the loop
+    # above drops core.fk on purpose, because the shim mirrors it. That is a
+    # legitimate state (the header two comments up already anticipates it), but
+    # bash 3.2 under `set -u` treats "${empty[@]}" as unbound and kills the whole
+    # run. validate.sh then aborts with exit 1 before a single band is read, so
+    # the honest degradation never happens and the suite cannot be reached at
+    # all. Witnessed 2026-08-17 on indirect-call-runtime-probe, whose band
+    # declares core.fk and nothing else.
+    if [[ ${#fourth_src_order[@]} -gt 0 ]]; then
+        printf '%s\n' "${fourth_src_order[@]}" "$band"
+    else
+        printf '%s\n' "$band"
+    fi
 }
 
 # fourth_prep_srcs — prepared source paths for a stem, one per line.  A
@@ -571,6 +692,10 @@ fourth_prep_srcs() {
         [[ -f "$f" ]] || return 1
         if grep -Eq '^[[:space:]]*section \[' "$f"; then
             prepared="$(fourth_prepare_source_text "$f")"
+            [[ -n "$prepared" && -s "$prepared" ]] || return 1
+            prepared_srcs+=("$prepared")
+        elif grep -Eq '^[[:space:]]*import([[:space:]:]|")' "$f"; then
+            prepared="$(fourth_prepare_import_source "$f")"
             [[ -n "$prepared" && -s "$prepared" ]] || return 1
             prepared_srcs+=("$prepared")
         else
@@ -623,11 +748,17 @@ fourth_table() {
         if fourth_selfhost; then
             # one-band request → fkwu walks T_flat → marker-framed table; the
             # trailing fn-0 value + arm profile sit past ==T-END==, outside the range.
+            # This file is sourced by BOTH shells (regen under zsh, validate.sh
+            # under bash), and the pipe-status array is spelled and indexed
+            # differently in each — so no pipe-status array at all: fkwu ends
+            # its pipeline into a raw file and answers for itself in $?.
+            local fkwu_status=0
             { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
-                | "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
-                | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
-            local statuses=("${PIPESTATUS[@]}")
-            if [[ "${statuses[1]}" -ne 0 || ! -s "$out.tmp" ]]; then
+                | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
+                > "$out.raw" || fkwu_status=$?
+            sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" "$out.raw" | sed -e '1d' -e '$d' > "$out.tmp"
+            rm -f "$out.raw"
+            if [[ "$fkwu_status" -ne 0 || ! -s "$out.tmp" ]]; then
                 echo "fourth arm: fkwu failed to produce a table for $stem" >&2
                 rm -f "$out.tmp"
                 return 1
@@ -648,11 +779,15 @@ fourth_flatten_sources() {
     local srcs=("$@")
     [[ "${#srcs[@]}" -ge 1 ]] || return 1
     if fourth_selfhost; then
+        # Same two-shell law as above: no pipe-status array; fkwu ends its
+        # pipeline into a raw file and answers for itself in $?.
+        local fkwu_status=0
         { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
-            | "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
-            | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
-        local statuses=("${PIPESTATUS[@]}")
-        if [[ "${statuses[1]}" -ne 0 || ! -s "$out.tmp" ]]; then
+            | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
+            > "$out.raw" || fkwu_status=$?
+        sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" "$out.raw" | sed -e '1d' -e '$d' > "$out.tmp"
+        rm -f "$out.raw"
+        if [[ "$fkwu_status" -ne 0 || ! -s "$out.tmp" ]]; then
             echo "fourth arm: fkwu failed to produce ad-hoc table $stem" >&2
             rm -f "$out.tmp"
             return 1
@@ -686,7 +821,8 @@ fourth_table_for_band() {
 fourth_run_chunk() {
     local driver="$1" plan="$2" out_all="$1.out"
     if fourth_selfhost; then
-        if ! "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 < "$driver" > "$out_all"; then
+        if ! FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" \
+            "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 < "$driver" > "$out_all"; then
             echo "fourth arm: fkwu failed while flattening:" >&2
             cut -f1 "$plan" | sed 's/^/  - /' >&2
             rm -f "$out_all"

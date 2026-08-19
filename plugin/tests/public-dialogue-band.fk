@@ -1,0 +1,193 @@
+; public-dialogue-band.fk — Form-native persistent turn, edge, HTTP, and MCP proof.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/json.fk form-stdlib/relationship-store.fk plugin/public-dialogue.fk
+;
+; Verdict 16383 when the complete public dialogue contract is observed.
+
+(do
+    (defn pdb-score (condition bit) (if condition bit 0))
+    (defn pdb-contains? (text needle) (ge (str_find text needle 0) 0))
+    (defn pdb-json (text) (parse-json "public-dialogue-band" text))
+    (defn pdb-jstr (obj key) (json-string-value (json-object-get obj key)))
+    (defn pdb-mcp-call (id name arguments-json)
+        (str_concat
+            "POST /mcp HTTP/1.1\r\nHost: witness\r\nContent-Type: application/json\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":"
+            (str_concat (int_to_str id)
+                (str_concat ",\"method\":\"tools/call\",\"params\":{\"name\":"
+                    (str_concat (pd-jstr name)
+                        (str_concat ",\"arguments\":"
+                            (str_concat arguments-json "}}}")))))))
+    (defn pdb-mcp-structured (result)
+        (json-object-get (json-object-get (pdb-json (pd-body result)) "result") "structuredContent"))
+    (defn pdb-purge-turn (dir id)
+        (do
+            (pd-forget dir id "state")
+            (pd-forget dir id "question")
+            (pd-forget dir id "point")
+            (pd-forget dir id "locale")
+            (pd-forget dir id "parent")
+            (pd-forget dir id "root")
+            (pd-forget dir id "disclosure")
+            (pd-forget dir id "token-digest")
+            (pd-forget dir id "created")
+            (pd-forget dir id "turns")))
+
+    (let stamp (int_to_str (now_unix_ms)))
+    (let dir (str_concat (temp_dir) (str_concat "/public-dialogue-band-" stamp)))
+
+    ; Three natural-language surfaces share one neutral directed thread.
+    (let root-id "dlg-root")
+    (let root-token "remove-root-capability-111111111111")
+    (let reply-id "dlg-reply")
+    (let reply-token "remove-reply-capability-22222222222")
+    (let third-id "dlg-third")
+    (let third-token "remove-third-capability-33333333333")
+    (let disclosure (pd-disclosure))
+
+    (let root
+        (pd-create-with dir root-id root-token ""
+            "红树林如何彼此支持" "河流" "zh-Hans" disclosure))
+    (let reply
+        (pd-create-with dir reply-id reply-token root-id
+            "根と潮は互いをどう支えますか" "潮" "ja" disclosure))
+    (let third
+        (pd-create-with dir third-id third-token reply-id
+            "كيف تحمل الجذور الحياة" "البحر" "ar" disclosure))
+    (let c1 (pdb-score (and (eq (pd-code root) 202)
+                             (and (eq (pd-code reply) 202) (eq (pd-code third) 202))) 1))
+
+    (let from-root (pd-thread dir root-id))
+    (let from-third (pd-thread dir third-id))
+    (let c2 (pdb-score
+        (and (eq (pd-code from-root) 200)
+            (and (pdb-contains? (pd-body from-root) "zh-Hans")
+                (and (pdb-contains? (pd-body from-root) "ja")
+                    (pdb-contains? (pd-body from-root) "ar")))) 2))
+    (let c3 (pdb-score
+        (and (pdb-contains? (pd-body from-root) "\"from\":\"dlg-root\",\"to\":\"dlg-reply\"")
+            (and (pdb-contains? (pd-body from-third) "\"root_dialogue_id\":\"dlg-root\"")
+                (pdb-contains? (pd-body from-third) "\"from\":\"dlg-reply\",\"to\":\"dlg-third\""))) 4))
+    (let c4 (pdb-score
+        (and (if (pdb-contains? (pd-body from-root) root-token) false true)
+             (if (pdb-contains? (pd-body from-root) "token-digest") false true)) 8))
+
+    ; A capability releases only its own turn.
+    (let foreign (pd-release-with dir root-id reply-token))
+    (let c5 (pdb-score (and (eq (pd-code foreign) 403)
+                             (eq (pd-active? dir root-id) 1)) 16))
+    (let release-root (pd-release-with dir root-id root-token))
+    (let release-reply (pd-release-with dir reply-id reply-token))
+    (let release-third (pd-release-with dir third-id third-token))
+    (let c6 (pdb-score
+        (and (eq (pd-code release-root) 200)
+            (and (eq (pd-code release-reply) 200) (eq (pd-code release-third) 200))) 32))
+    (let tombstones (pd-thread dir reply-id))
+    (let c7 (pdb-score
+        (and (eq (pd-code tombstones) 200)
+            (and (pdb-contains? (pd-body tombstones) "\"state\":\"tombstoned\"")
+                (and (if (pdb-contains? (pd-body tombstones) "红树林") false true)
+                    (pdb-contains? (pd-body tombstones) "\"relation\":\"reply\"")))) 64))
+
+    ; The same contract crosses the HTTP membrane.
+    (let http-dir (str_concat (temp_dir) (str_concat "/public-dialogue-http-band-" stamp)))
+    (let start-body
+        "question=How+do+roots+share+water%3F&point_of_view=river&locale=en&public_disclosure_ack=public-unlisted-thread-v2")
+    (let start-raw
+        (str_concat "POST /dialogues HTTP/1.1\r\nHost: witness\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n" start-body))
+    (let http-start (pd-handle-in http-dir start-raw "/dialogues"))
+    (let http-start-json (pdb-json (pd-body http-start)))
+    (let http-root-id (pdb-jstr http-start-json "id"))
+    (let http-root-token (pdb-jstr http-start-json "removal_token"))
+    (let reply-body
+        "question=I+can+offer+the+tide.&point_of_view=tide&locale=en&public_disclosure_ack=public-unlisted-thread-v2")
+    (let reply-path (str_concat "/dialogues/" (str_concat http-root-id "/replies")))
+    (let reply-raw
+        (str_concat "POST "
+            (str_concat reply-path
+                (str_concat " HTTP/1.1\r\nHost: witness\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n" reply-body))))
+    (let http-reply (pd-handle-in http-dir reply-raw reply-path))
+    (let http-reply-json (pdb-json (pd-body http-reply)))
+    (let http-reply-id (pdb-jstr http-reply-json "id"))
+    (let http-reply-token (pdb-jstr http-reply-json "removal_token"))
+    (let http-thread-path (str_concat "/dialogues/" (str_concat http-reply-id "/thread")))
+    (let http-thread
+        (pd-handle-in http-dir
+            (str_concat "GET " (str_concat http-thread-path " HTTP/1.1\r\nHost: witness\r\n\r\n"))
+            http-thread-path))
+    (let c8 (pdb-score
+        (and (eq (pd-code http-start) 202)
+            (and (eq (pd-code http-reply) 202)
+                (and (eq (pd-code http-thread) 200)
+                    (pdb-contains? (pd-body http-thread) http-root-id)))) 128))
+    (let c9 (pdb-score
+        (and (if (str_eq http-root-token http-reply-token) false true)
+            (if (pdb-contains? (pd-body http-thread) "removal_token") false true)) 256))
+
+    ; The MCP door lists and executes the same Form-owned cells.
+    (let mcp-dir (str_concat (temp_dir) (str_concat "/public-dialogue-mcp-band-" stamp)))
+    (let tools-raw
+        "POST /mcp HTTP/1.1\r\nHost: witness\r\nContent-Type: application/json\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")
+    (let tools (pd-handle-in mcp-dir tools-raw "/mcp"))
+    (let c10 (pdb-score
+        (and (pdb-contains? (pd-body tools) "start_dialogue")
+             (pdb-contains? (pd-body tools) "get_dialogue_thread")) 512))
+
+    (let mcp-start
+        (pd-handle-in mcp-dir
+            (pdb-mcp-call 2 "start_dialogue"
+                "{\"question\":\"What does the river see?\",\"point_of_view\":\"river\",\"locale\":\"en\",\"public_disclosure_ack\":\"public-unlisted-thread-v2\"}")
+            "/mcp"))
+    (let mcp-start-cell (pdb-mcp-structured mcp-start))
+    (let mcp-root-id (pdb-jstr mcp-start-cell "id"))
+    (let mcp-root-token (pdb-jstr mcp-start-cell "removal_token"))
+    (let reply-args
+        (str_concat "{\"parent_dialogue_id\":"
+            (str_concat (pd-jstr mcp-root-id)
+                ",\"question\":\"I see the river.\",\"point_of_view\":\"sea\",\"locale\":\"en\",\"public_disclosure_ack\":\"public-unlisted-thread-v2\"}")))
+    (let mcp-reply
+        (pd-handle-in mcp-dir (pdb-mcp-call 3 "reply_dialogue" reply-args) "/mcp"))
+    (let mcp-reply-cell (pdb-mcp-structured mcp-reply))
+    (let mcp-reply-id (pdb-jstr mcp-reply-cell "id"))
+    (let mcp-reply-token (pdb-jstr mcp-reply-cell "removal_token"))
+    (let thread-args
+        (str_concat "{\"dialogue_id\":" (str_concat (pd-jstr mcp-reply-id) "}")))
+    (let mcp-thread
+        (pd-handle-in mcp-dir (pdb-mcp-call 4 "get_dialogue_thread" thread-args) "/mcp"))
+    (let c11 (pdb-score
+        (and (pdb-contains? (pd-body mcp-thread) mcp-root-id)
+            (and (pdb-contains? (pd-body mcp-thread) mcp-reply-id)
+                 (pdb-contains? (pd-body mcp-thread) "directed_edges"))) 1024))
+    (let c12 (pdb-score
+        (and (if (str_eq mcp-root-token mcp-reply-token) false true)
+             (if (pdb-contains? (pd-body mcp-thread) "removal_token") false true)) 2048))
+
+    ; Malformed RPC and suffix-shaped resource paths do not become authority.
+    (let malformed-mcp
+        (pd-handle-in mcp-dir
+            "POST /mcp HTTP/1.1\r\nHost: witness\r\nContent-Type: application/json\r\n\r\n{"
+            "/mcp"))
+    (let c13 (pdb-score
+        (and (pdb-contains? (pd-body malformed-mcp) "\"code\":-32600")
+             (pdb-contains? (pd-body malformed-mcp) "\"id\":null")) 4096))
+    (let wrong-delete-path (str_concat "/dialogues/" (str_concat http-root-id "/thread")))
+    (let wrong-delete
+        (pd-handle-in http-dir
+            (str_concat "DELETE "
+                (str_concat wrong-delete-path
+                    (str_concat " HTTP/1.1\r\nHost: witness\r\n\r\nremoval_token=" http-root-token)))
+            wrong-delete-path))
+    (let c14 (pdb-score
+        (and (eq (pd-code wrong-delete) 404)
+             (eq (pd-active? http-dir http-root-id) 1)) 8192))
+
+    (pdb-purge-turn dir root-id)
+    (pdb-purge-turn dir reply-id)
+    (pdb-purge-turn dir third-id)
+    (pdb-purge-turn http-dir http-root-id)
+    (pdb-purge-turn http-dir http-reply-id)
+    (pdb-purge-turn mcp-dir mcp-root-id)
+    (pdb-purge-turn mcp-dir mcp-reply-id)
+    (fs_rmdir dir)
+    (fs_rmdir http-dir)
+    (fs_rmdir mcp-dir)
+    (sum (list c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14)))

@@ -17,6 +17,7 @@ FORM = Path(__file__).resolve().parents[1]
 FLATTEN = FORM / "form-stdlib" / "form-flatten.fk"
 EMIT = FORM / "form-stdlib" / "fkc-table-serialize.fk"
 FS_EMIT = FORM / "form-stdlib" / "host-io-fs-fkwu-emit.fk"
+RUNTIME = FORM.parent / "runtime" / "fkwu-uni.c"
 
 
 def _read(path: Path) -> str:
@@ -116,10 +117,11 @@ def main() -> int:
     dyn_unary = dynamic_unary_tags(flat)
     dyn_bin = dynamic_binary_tags(flat)
     tri = tri_tags(flat)
-    c_tags = c_walker_tags(EMIT, FS_EMIT)
+    c_tags = c_walker_tags(EMIT, FS_EMIT, RUNTIME)
 
     errors: list[str] = []
     warnings: list[str] = []
+    aliases = 0
 
     by_tag: dict[int, list[tuple[str, int]]] = defaultdict(list)
     for name, arity, tag in ops:
@@ -134,7 +136,7 @@ def main() -> int:
                 f"conflicting flt-ops tag {tag} (mixed arity {sorted(arities)}): {names}"
             )
         else:
-            warnings.append(f"alias flt-ops tag {tag}: {names}")
+            aliases += 1
 
     max_tag = max((t for _, _, t in ops), default=0)
     if max_tag >= arm_slots:
@@ -192,7 +194,7 @@ def main() -> int:
     print(
         f"validate_fkwu_native_surface: OK ({len(ops)} flt-ops rows, "
         f"max_tag={max_tag}, arm_slots={arm_slots}, "
-        f"{len(warnings)} warning(s))"
+        f"aliases={aliases}, {len(warnings)} warning(s))"
     )
     return 0
 

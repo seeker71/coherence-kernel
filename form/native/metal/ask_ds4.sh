@@ -33,6 +33,7 @@
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form
+FKWU="$ROOT/../fkwu"
 
 STEPS=40
 while [[ $# -gt 0 ]]; do
@@ -44,18 +45,74 @@ while [[ $# -gt 0 ]]; do
 done
 PROMPT="${*:-}"
 [[ -n "$PROMPT" ]] || { echo "usage: ask_ds4.sh [-n steps] \"your prompt\""; exit 2; }
+[[ "$STEPS" =~ ^[0-9]+$ ]] && (( STEPS >= 2 )) || {
+    echo "ask_ds4: steps must be an integer at least 2"; exit 2
+}
+
+# THE BODY, NOT THIS CARRIER, DECIDES THE WALK. ask-ds4.fk emits keyed lines so adding a field cannot
+# silently move every field after it. The shell validates the named paths and integer membrane before
+# handing them to the one model subprocess. FORM_DS4_CONTRACT_ONLY=1 witnesses this crossing without
+# loading 85 GiB of weights.
+[[ -x "$FKWU" ]] || { echo "ask_ds4: native fkwu is missing: $FKWU"; exit 1; }
+ASK_TMP="$(mktemp -d -t askds4)"
+trap 'rm -rf "$ASK_TMP"' EXIT
+contract_probe="$ASK_TMP/contract.fk"
+printf '; preludes: native/metal/ask-ds4.fk\n(ad-emit %s)\n' "$STEPS" > "$contract_probe"
+contract="$(cd "$ROOT" && "$FKWU" --src "$contract_probe" 2>&1)"; contract_rc=$?
+if [[ $contract_rc -ne 0 ]]; then
+    printf '%s\n' "$contract" | tail -8
+    echo "ask_ds4: Form ask contract did not compile (rc=$contract_rc)"; exit $contract_rc
+fi
+contract_value() {
+    printf '%s\n' "$contract" | awk -v key="$1" '$1 == key { sub(/^[^ ]+[ ]*/, ""); print; exit }'
+}
+CONTRACT_STEPS="$(contract_value STEPS)"
+CAP="$(contract_value CAP)"
+SEQUENCE="$(contract_value SEQUENCE)"
+MATCHORDER="$(contract_value MATCHORDER)"
+LANE="$(contract_value LANE)"
+TOKENIZER="$(contract_value TOKENIZER)"
+TOKENSWAP="$(contract_value TOKENSWAP)"
+TOKENBUDGETMS="$(contract_value TOKENBUDGETMS)"
+METALBANDWIDTHBMS="$(contract_value METALBANDWIDTHBMS)"
+DEFAULTTOKENBYTES="$(contract_value DEFAULTTOKENBYTES)"
+ENVPROMPT="$(contract_value ENVPROMPT)"
+for contract_number in "$CONTRACT_STEPS" "$CAP" "$SEQUENCE" "$MATCHORDER" \
+                       "$TOKENBUDGETMS" "$METALBANDWIDTHBMS" "$DEFAULTTOKENBYTES"; do
+    [[ "$contract_number" =~ ^[0-9]+$ ]] || {
+        echo "ask_ds4: Form ask contract emitted a non-integer limit"; exit 1
+    }
+done
+[[ "$CONTRACT_STEPS" == "$STEPS" ]] || {
+    echo "ask_ds4: Form ask contract changed requested steps ($STEPS -> $CONTRACT_STEPS)"; exit 1
+}
+[[ -x "$ROOT/$LANE" ]] || { echo "ask_ds4: Form ask lane is not executable: $LANE"; exit 1; }
+[[ -f "$ROOT/$TOKENIZER" ]] || { echo "ask_ds4: Form tokenizer is missing: $TOKENIZER"; exit 1; }
+[[ -f "$ROOT/$TOKENSWAP" ]] || { echo "ask_ds4: Form token-swap cell is missing: $TOKENSWAP"; exit 1; }
+[[ "$ENVPROMPT" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
+    echo "ask_ds4: Form prompt binding is not an environment name: $ENVPROMPT"; exit 1
+}
+if [[ "${FORM_DS4_CONTRACT_ONLY:-0}" == "1" ]]; then
+    printf '%s\n' "$contract"
+    exit 0
+fi
 
 # the cache must outrun the walk: the sequence lane refuses when steps reach the cap, because a
 # silently sliding window is the same class of bug as a rewritten history (dsv4-kv-cache.fk's aporon).
-export FORM_DS4_KV_STEPS="$STEPS"
-export FORM_DS4_KV_CAP=$(( STEPS + 8 ))
-export FORM_DS4_KV_SEQUENCE=1
-export FORM_DS4_MATCH_ORDER=1
+export FORM_DS4_KV_STEPS="$CONTRACT_STEPS"
+export FORM_DS4_KV_CAP="$CAP"
+export FORM_DS4_KV_SEQUENCE="$SEQUENCE"
+export FORM_DS4_MATCH_ORDER="$MATCHORDER"
 export FORM_DS4_GATES="${FORM_DS4_GATES:-0}"
-export FORM_DS4_PROMPT="$PROMPT"
+export "$ENVPROMPT=$PROMPT"
+export FORM_DS4_TOKENIZER="$TOKENIZER"
+export FORM_DS4_TOKEN_SWAP_CELL="$TOKENSWAP"
+export FORM_DS4_TOKEN_BUDGET_MS="$TOKENBUDGETMS"
+export FORM_DS4_METAL_BANDWIDTH_BYTES_PER_MS="$METALBANDWIDTHBMS"
+export FORM_DS4_DEFAULT_TOKEN_BYTES="$DEFAULTTOKENBYTES"
 
 t0=$(date +%s)
-out="$("$ROOT/native/metal/metal_dsv4_stack.sh" 2>&1)"; rc=$?
+out="$("$ROOT/$LANE" 2>&1)"; rc=$?
 t1=$(date +%s)
 
 if [[ $rc -ne 0 ]]; then
@@ -79,7 +136,7 @@ verdict=""
 if [[ -n "$ids" ]]; then
     _fk="$ROOT/../fkwu"
     if [[ -x "$_fk" ]]; then
-        pdir="$(mktemp -d -t ds4sanity)"; probe="$pdir/probe.fk"; trap 'rm -rf "$pdir"' EXIT
+        probe="$ASK_TMP/sanity.fk"
         printf '; preludes: form-stdlib/ds4-stream-sanity.fk\n(dss-trip-count (list %s))\n' \
                "$(printf '%s' "$ids" | tr -d '[],')" > "$probe"
         trips="$(cd "$ROOT" && "$_fk" --src "$probe" 2>/dev/null | tail -1)"
@@ -94,5 +151,7 @@ printf '\n%s%s\n' "$PROMPT" "$answer"
 printf '\n  [form-native · 43 layers · %s · %ss wall · greedy, base-model continuation]\n' \
        "${speed:-speed unmeasured}" "$((t1 - t0))"
 printf '  [weights: %s]\n' "${blob:-unnamed}"
+printf '  [token swap: %s · %sms / %s B/ms · Form loop hook witnessed in dsv4-decode-token-hook.fk; this Swift carrier is the next attention row]\n' \
+       "$TOKENSWAP" "$TOKENBUDGETMS" "$METALBANDWIDTHBMS"
 [[ -n "$verdict" ]] && printf '  [%s]\n' "$verdict"
 printf '  [token ids: %s]\n' "${ids:-none}"
