@@ -38,9 +38,13 @@ resolves, while the inline count is the remaining cleanup ratchet.
 ## The two files
 
 New features that can live on the BML brace surface belong there:
-`section [form.bml] { def name(x) = ...; }`. Crystallize with
-`form-source-compile-file` (see `form-cli-bml-ice-compile.fk`) and call
-the emitted Form. Do not grow a hand-written s-expression twin.
+`section [form.bml] { def name(x) = ...; }`. For infix, unless/when,
+and ice/liquid/compost literals, use `section [form.lift]` — a local
+grammar upgrade crystallized the same way (`form-cli-lift-ice-compile.fk`).
+Crystallize with `form-source-compile-file` and call the emitted Form.
+Do not grow a hand-written s-expression twin. The grammar file is
+`form/form-stdlib/grammars/form-lift.fk`; edit it, then write in the
+new rules. No remote oracle.
 
 A **recipe** `form/form-stdlib/<name>.fk` — a series of `defn`s ending in literal `0`:
 
