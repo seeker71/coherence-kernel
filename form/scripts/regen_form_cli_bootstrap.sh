@@ -73,7 +73,14 @@ sed "s/FORM_CLI_SOURCE_SHA256_PLACEHOLDER/$want_source_sha256/g" \
 
 source_cache="form-stdlib/.cache/source-compiled"
 mkdir -p "$source_cache"
+# The go lane's explicit closure (walkers do not read `; preludes:` lines).
+# engine-constants / compiler-objects / form-ontology-bp joined 2026-08-19 —
+# their Form births crashed this hand-held mirror at fol-core-row, the same
+# drift the other three copies of this list had already suffered.
 SOURCE_COMPILE_CHAIN=(
+    form-stdlib/engine-constants.fk
+    form-stdlib/compiler-objects.fk
+    form-stdlib/form-ontology-bp.fk
     form-stdlib/form-ontology-loader.fk
     form-stdlib/line-grammar.fk
     form-stdlib/bmf-core.fk
@@ -95,6 +102,21 @@ compile_bml() {
 
     key="$(fourth_hash16 "$src" "${SOURCE_COMPILE_CHAIN[@]}" "$GO_KERNEL")"
     cached="$source_cache/$key.fk"
+    # fkwu first: the thin driver's closure is the body's `; preludes:` graph,
+    # so no list here can drift for this lane. go stays as the fallback below.
+    if [[ ! -s "$cached" && -n "${FKWU:-}" && -x "${FKWU:-}" ]]; then
+        out="$(mktemp "$source_cache/.tmp.XXXXXX")"
+        driver="$work_dir/compile-fkwu.fk"
+        {
+            printf '; generated lens driver -- the closure is the preludes graph.\n'
+            printf '; preludes: form-stdlib/source-compiler-text-lens.fk\n'
+            printf '(do (form-source-compile-file "%s" "%s") 0)\n' "$src" "$out"
+        } > "$driver"
+        if "$FKWU" "$driver" >/dev/null 2>&1 && [[ -s "$out" ]]; then
+            mv -f "$out" "$cached"
+        fi
+        rm -f "$out" "$driver" "${driver%.fk}.fkb" "${driver%.fk}.sym" 2>/dev/null
+    fi
     if [[ ! -s "$cached" ]]; then
         out="$(mktemp "$source_cache/.tmp.XXXXXX")"
         driver="$work_dir/compile.fk"
@@ -184,12 +206,41 @@ stdlib=form-stdlib
 # a different place hash differently and the build stops with "source stamp
 # stale" naming two hashes and no file. That message is a mirroring gap, not a
 # stale tree. Six lists, one program: keep them mirrored.
+# WITNESSED 2026-08-17 — the failure this note already described, arriving.
+# One identical tree, one identical source stamp 8c2fcc728bab0c97, TWO programs:
+#   fkwu self-host arm  -> functions=1933  nodes=59609  strings=1975
+#   Rust sibling arm    -> functions=1924  nodes=58946  strings=1938
+# Same declared identity, nine fewer callable functions, and ds4-query-channel.fk
+# defines exactly nine. It was named only by a ${form_modules/pat/rep} line whose
+# pattern carried bash-style \/ and \" escapes; in zsh that pattern matches
+# NOTHING, so the substitution was a silent no-op and the cell never entered the
+# program. It stayed in the stamp, in the genesis text and in `form-cli source`,
+# quotable and uncallable — the shape this note has warned about since
+# 2026-08-03. The stamp could not see it: the stamp hashes the source LIST, and
+# the list had the cell.
+#
+# Two things kept it hidden. A substitution that fails is indistinguishable from
+# one that succeeds unless you compare the before and after. And the arm is
+# chosen by whichever flattener happens to be built on the host — Rust first —
+# so a checkout without form-kernel-rust silently produced the CORRECT carrier
+# and never disagreed with anything. This session built the Rust kernel mid-run
+# for a four-way band; the next regen changed arms, and only then did the number
+# move.
+#
+# The repair is not better escaping. The cell is named in $modules directly, in
+# the position the substitution meant, and the substitution line is gone. A list
+# that says what is in it cannot silently not-say it.
+#
+# fourth-shim.fk is in $modules and NOT in FORM_CLI_SELFHOST_ORDER, and that is
+# correct rather than a seventh gap: it is the flattener's standing prelude and
+# fourth_band_request prepends it on the fkwu path. Both arms carry it; only one
+# has to say so. Checked before touching it — its 85 defns would otherwise have
+# looked like the biggest gap here and it is not a gap at all.
 core_src="$(compile_bml "$stdlib/core.fk")"
 http_client_src="$(compile_bml "$stdlib/http-client.fk")"
 form_cli_ask_src="$(compile_bml "$stdlib/form-cli-ask.fk")"
-form_modules="(list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/grammars/sanskrit-roots.fk\") (read_file \"$stdlib/resource-port.fk\") (read_file \"$stdlib/bml-native-interface-package-import.fk\") (read_file \"$stdlib/hati-os-targets.fk\") (read_file \"$stdlib/form-native-resource-interfaces.fk\") (read_file \"$stdlib/form-fs.fk\") (read_file \"$stdlib/storage-port.fk\") (read_file \"$stdlib/host-kernel-carrier.fk\") (read_file \"$stdlib/fnri-standin.fk\") (read_file \"$stdlib/fnri-receipt.fk\") (read_file \"$http_client_src\") (read_file \"$stdlib/line-grammar.fk\") (read_file \"$stdlib/str-byte-at.fk\") (read_file \"$stdlib/sha256.fk\") (read_file \"$stdlib/hmac-sha256.fk\") (read_file \"$stdlib/hex.fk\") (read_file \"$stdlib/format-arith.fk\") (read_file \"$stdlib/f16-decode.fk\") (read_file \"$stdlib/q6k-dequant.fk\") (read_file \"$stdlib/equireach.fk\") (read_file \"$stdlib/equireach-gguf.fk\") (read_file \"$stdlib/gguf-meta.fk\") (read_file \"$stdlib/model-discovery.fk\") (read_file \"$stdlib/q4k-dequant.fk\") (read_file \"$stdlib/weight-load.fk\") (read_file \"$stdlib/voice-traits.fk\") (read_file \"$stdlib/nearest-shape.fk\") (read_file \"$stdlib/co-learning.fk\") (read_file \"$stdlib/co-learning-stream.fk\") (read_file \"$stdlib/mesh-dispatch.fk\") (read_file \"$stdlib/surprise-salience.fk\") (read_file \"$stdlib/host-sense-organ.fk\") (read_file \"$stdlib/speech-organ.fk\") (read_file \"$stdlib/native-host-instance.fk\") (read_file \"$stdlib/text-tokenize.fk\") (read_file \"$stdlib/rag-embed.fk\") (read_file \"$stdlib/rag-index-codec.fk\") (read_file \"$stdlib/rag-retrieve.fk\") (read_file \"$stdlib/rag-ask.fk\") (read_file \"$stdlib/ask-cost-receipt.fk\") (read_file \"$stdlib/ask-native-lane.fk\") (read_file \"$form_cli_ask_src\") (read_file \"$stdlib/form-cli-router.fk\") (read_file \"$stdlib/form-cli-judge.fk\") (read_file \"$stdlib/confidence-weighted-vote.fk\") (read_file \"$stdlib/lineage-discounted-vote.fk\") (read_file \"$stdlib/form-cli-oracle-loop.fk\") (read_file \"$stdlib/form-cli-sufficiency.fk\") (read_file \"$stdlib/form-freq-check.fk\") (read_file \"$stdlib/trust-row.fk\") (read_file \"$stdlib/form-cli-ask-gate.fk\") (read_file \"$stdlib/form-cli-staged-trace.fk\") (read_file \"$stdlib/form-cli-request.fk\") (read_file \"$carrier_src\") (read_file \"$stdlib/form-cli-ask-plus.fk\") (read_file \"$stdlib/form-cli-surface-inquiry.fk\") (read_file \"$stdlib/current-branch-landing.fk\") (read_file \"$stdlib/form-cli-inquiry.fk\") (read_file \"$stdlib/form-cli.fk\") (read_file \"$stdlib/form-cli-gguf-cell.fk\"))"
+form_modules="(list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/grammars/sanskrit-roots.fk\") (read_file \"$stdlib/resource-port.fk\") (read_file \"$stdlib/bml-native-interface-package-import.fk\") (read_file \"$stdlib/hati-os-targets.fk\") (read_file \"$stdlib/form-native-resource-interfaces.fk\") (read_file \"$stdlib/form-fs.fk\") (read_file \"$stdlib/storage-port.fk\") (read_file \"$stdlib/host-kernel-carrier.fk\") (read_file \"$stdlib/fnri-standin.fk\") (read_file \"$stdlib/fnri-receipt.fk\") (read_file \"$http_client_src\") (read_file \"$stdlib/line-grammar.fk\") (read_file \"$stdlib/str-byte-at.fk\") (read_file \"$stdlib/sha256.fk\") (read_file \"$stdlib/hmac-sha256.fk\") (read_file \"$stdlib/hex.fk\") (read_file \"$stdlib/format-arith.fk\") (read_file \"$stdlib/f16-decode.fk\") (read_file \"$stdlib/q6k-dequant.fk\") (read_file \"$stdlib/equireach.fk\") (read_file \"$stdlib/equireach-gguf.fk\") (read_file \"$stdlib/gguf-meta.fk\") (read_file \"$stdlib/model-discovery.fk\") (read_file \"$stdlib/q4k-dequant.fk\") (read_file \"$stdlib/weight-load.fk\") (read_file \"$stdlib/voice-traits.fk\") (read_file \"$stdlib/nearest-shape.fk\") (read_file \"$stdlib/co-learning.fk\") (read_file \"$stdlib/co-learning-stream.fk\") (read_file \"$stdlib/mesh-dispatch.fk\") (read_file \"$stdlib/surprise-salience.fk\") (read_file \"$stdlib/host-sense-organ.fk\") (read_file \"$stdlib/speech-organ.fk\") (read_file \"$stdlib/native-host-instance.fk\") (read_file \"$stdlib/text-tokenize.fk\") (read_file \"$stdlib/rag-embed.fk\") (read_file \"$stdlib/rag-index-codec.fk\") (read_file \"$stdlib/rag-retrieve.fk\") (read_file \"$stdlib/rag-ask.fk\") (read_file \"$stdlib/ask-cost-receipt.fk\") (read_file \"$stdlib/ask-native-lane.fk\") (read_file \"$form_cli_ask_src\") (read_file \"$stdlib/form-cli-router.fk\") (read_file \"$stdlib/form-cli-judge.fk\") (read_file \"$stdlib/confidence-weighted-vote.fk\") (read_file \"$stdlib/lineage-discounted-vote.fk\") (read_file \"$stdlib/form-cli-oracle-loop.fk\") (read_file \"$stdlib/form-cli-sufficiency.fk\") (read_file \"$stdlib/form-freq-check.fk\") (read_file \"$stdlib/trust-row.fk\") (read_file \"$stdlib/form-cli-ask-gate.fk\") (read_file \"$stdlib/form-cli-staged-trace.fk\") (read_file \"$stdlib/form-cli-request.fk\") (read_file \"$carrier_src\") (read_file \"$stdlib/form-cli-ask-plus.fk\") (read_file \"$stdlib/form-cli-surface-inquiry.fk\") (read_file \"$stdlib/current-branch-landing.fk\") (read_file \"$stdlib/form-cli-inquiry.fk\") (read_file \"$stdlib/ds4-query-channel.fk\") (read_file \"$stdlib/form-cli.fk\") (read_file \"$stdlib/form-cli-gguf-cell.fk\"))"
 form_modules="${form_modules%)} (read_file \"$stdlib/relational-inquiry-metabolism.fk\") (read_file \"$stdlib/native-model-native-hierarchy.fk\") (read_file \"$stdlib/native-model-control-plane.fk\") (read_file \"$stdlib/ask-lane-router.fk\"))"
-form_modules="${form_modules/ (read_file \"$stdlib\/form-cli.fk\")/ (read_file \"$stdlib\/ds4-query-channel.fk\") (read_file \"$stdlib\/form-cli.fk\")}"
 band="(read_file \"$stdlib/form-cli-repl.fk\")"
 FLATTEN_CHAIN=(
     form-stdlib/minimal-surface.fk

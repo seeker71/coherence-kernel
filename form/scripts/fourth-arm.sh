@@ -99,6 +99,9 @@ FOURTH_FLATTEN_STACK_MB="${FOURTH_FLATTEN_STACK_MB:-2048}"
 # in this dedicated chain is a late text lens for consumers that flatten source.
 FOURTH_SOURCE_TEXT_DIR="form-stdlib/.cache/fourth-source-text"
 FOURTH_SOURCE_COMPILER_CHAIN=(
+    form-stdlib/engine-constants.fk
+    form-stdlib/compiler-objects.fk
+    form-stdlib/form-ontology-bp.fk
     form-stdlib/form-ontology-loader.fk
     form-stdlib/line-grammar.fk
     form-stdlib/bmf-core.fk
@@ -320,8 +323,36 @@ fourth_recover_fresh_index() {
 # cache, so a compiler or kernel change cannot reuse an older lowering.
 fourth_prepare_source_text() {
     local src="$1" key cached out driver
-    [[ -n "${GO_BIN:-}" && -x "${GO_BIN:-}" ]] || return 0
     mkdir -p "$FOURTH_SOURCE_TEXT_DIR"
+    # fkwu FIRST, and the lens closure comes from the body's own `; preludes:`
+    # graph -- the generated driver names ONE cell and fkwu's resolver walks the
+    # rest, so no chain list here can drift from the Form dependencies again
+    # (2026-08-18: the go lane below crashed for a day because engine-constants
+    # was born in Form and this file's hand-held chain was never told). The
+    # sibling lane keeps the explicit chain because the walkers do not read
+    # preludes lines; it is the fallback, no longer the door.
+    if [[ -n "${FKWU:-}" && -x "${FKWU:-}" ]]; then
+        key="$(fourth_hash16 "$src" "${FOURTH_SOURCE_COMPILER_CHAIN[@]}")-$(fourth_raw_hash16 "$FKWU")"
+        cached="$FOURTH_SOURCE_TEXT_DIR/$key.fk"
+        if [[ ! -s "$cached" ]]; then
+            out="$(mktemp "$FOURTH_SOURCE_TEXT_DIR/.${key}.out.XXXXXX")"
+            driver="$(mktemp "$FOURTH_SOURCE_TEXT_DIR/.${key}.driver.XXXXXX.fk")"
+            {
+                printf '; generated lens driver -- the closure is the preludes graph.\n'
+                printf '; preludes: form-stdlib/source-compiler-text-lens.fk\n'
+                printf '(do (form-source-compile-file "%s" "%s") 0)\n' "$src" "$out"
+            } > "$driver"
+            if "$FKWU" "$driver" >/dev/null 2>&1 && [[ -s "$out" ]]; then
+                mv -f "$out" "$cached"
+            fi
+            rm -f "$out" "$driver" "${driver%.fk}.fkb" "${driver%.fk}.sym" "$driver.fkb" "$driver.sym" 2>/dev/null
+        fi
+        if [[ -s "$cached" ]]; then
+            printf '%s\n' "$cached"
+            return 0
+        fi
+    fi
+    [[ -n "${GO_BIN:-}" && -x "${GO_BIN:-}" ]] || return 0
     key="$(fourth_hash16 "$src" "${FOURTH_SOURCE_COMPILER_CHAIN[@]}")-$(fourth_raw_hash16 "$GO_BIN")"
     cached="$FOURTH_SOURCE_TEXT_DIR/$key.fk"
     if [[ ! -s "$cached" ]]; then
@@ -502,12 +533,22 @@ build_fourth() {
 # against the sample's own three-kernel output — a false divergence. Anchoring
 # to the tests/ path keeps the stem the contract for the real band only.
 fourth_band_stem() {
-    local band="$1" stem
+    local band="$1" stem hit
     [[ "$band" == form-stdlib/tests/* || "$band" == */form-stdlib/tests/* ]] || return 0
     stem="$(basename "$band")"
     stem="${stem%.fk}"
-    stem="${stem%-band}"
     [[ -f "$FOURTH_MANIFEST" ]] || return 0
+    # Exact name FIRST, stripped second. Stripping -band unconditionally sent a
+    # file literally named <x>-band.fk to look up row <x>, so the four rows whose
+    # registered name KEEPS the -band suffix (form-cli-band, form-cli-repl-
+    # control-band) were unreachable from the file side: fourth_prepare_all built
+    # their tables from the manifest side and validate.sh then ran the file
+    # three-arm with no fourth leg and no registered-verdict gate — declared
+    # four-way, run three-way, and nothing said so. fourth_band_srcs already
+    # accepts both spellings; this reader now does too.
+    hit="$(awk -v b="$stem" '$1==b{print $1; exit}' "$FOURTH_MANIFEST")"
+    if [[ -n "$hit" ]]; then printf '%s\n' "$hit"; return 0; fi
+    stem="${stem%-band}"
     awk -v b="$stem" '$1==b{print $1; exit}' "$FOURTH_MANIFEST"
 }
 
@@ -727,6 +768,47 @@ fourth_flatten_expr() {
     fi
 }
 
+# fourth_flatten_pipe — the one flatten pipeline, run so its status is readable.
+#
+# Two callers below had a byte-identical copy of this differing only in an error
+# string, and both inferred fkwu's exit from ${PIPESTATUS[@]}. This file is a
+# SHARED library: ten scripts source it, seven bash and three zsh. The two shells
+# spell that reading differently AND number it differently —
+#   bash  PIPESTATUS  0-indexed  -> the fkwu stage is [1]
+#   zsh   pipestatus  1-indexed  -> the fkwu stage is [2]
+# and each name is simply unset in the other shell, so under `set -u` whichever
+# shell was not the author's died on the check itself:
+#   zsh   "fourth_flatten_sources:9: PIPESTATUS[@]: parameter not set"
+#   bash  "scripts/fourth-arm.sh: line 735: pipestatus[@]: unbound variable"
+# Both were reached today from opposite directions — build-form-cli.sh (zsh) and
+# validate.sh (bash) — and each ended with no word about the real work.
+#
+# So fkwu is no longer a stage inside a pipe. It runs as its own command and $? is
+# its own answer, which means the same thing in every shell. The stage-numbering
+# question is not answered here, it is gone.
+fourth_flatten_pipe() {
+    local stem="$1" kind="$2" out="$3" label="$4"
+    shift 4
+    local req="$out.req" raw="$out.raw" rc=0
+    { printf '1\n'; fourth_band_request "$stem" "$kind" "$@"; } > "$req"
+    FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
+        < "$req" > "$raw" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        echo "fourth arm: fkwu failed to produce $label (exit $rc)" >&2
+        rm -f "$req" "$raw"
+        return 1
+    fi
+    # the marker window: the trailing fn-0 value + arm profile sit past ==T-END==.
+    sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" "$raw" | sed -e '1d' -e '$d' > "$out.tmp"
+    rm -f "$req" "$raw"
+    if [[ ! -s "$out.tmp" ]]; then
+        echo "fourth arm: fkwu produced no rows for $label" >&2
+        rm -f "$out.tmp"
+        return 1
+    fi
+    mv -f "$out.tmp" "$out"
+}
+
 # fourth_table — cached flattened node-table for one band (path on stdout).
 # Flattens only through fkwu walking the committed T_flat. The old Go fallback
 # concatenated the whole fourth chain plus the workload into a giant driver; that
@@ -748,22 +830,7 @@ fourth_table() {
         if fourth_selfhost; then
             # one-band request → fkwu walks T_flat → marker-framed table; the
             # trailing fn-0 value + arm profile sit past ==T-END==, outside the range.
-            # This file is sourced by BOTH shells (regen under zsh, validate.sh
-            # under bash), and the pipe-status array is spelled and indexed
-            # differently in each — so no pipe-status array at all: fkwu ends
-            # its pipeline into a raw file and answers for itself in $?.
-            local fkwu_status=0
-            { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
-                | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
-                > "$out.raw" || fkwu_status=$?
-            sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" "$out.raw" | sed -e '1d' -e '$d' > "$out.tmp"
-            rm -f "$out.raw"
-            if [[ "$fkwu_status" -ne 0 || ! -s "$out.tmp" ]]; then
-                echo "fourth arm: fkwu failed to produce a table for $stem" >&2
-                rm -f "$out.tmp"
-                return 1
-            fi
-            mv -f "$out.tmp" "$out"
+            fourth_flatten_pipe "$stem" "$kind" "$out" "a table for $stem" "${srcs[@]}" || return 1
         fi
     fi
     [[ -s "$out" ]] && printf '%s\n' "$out"
@@ -779,20 +846,7 @@ fourth_flatten_sources() {
     local srcs=("$@")
     [[ "${#srcs[@]}" -ge 1 ]] || return 1
     if fourth_selfhost; then
-        # Same two-shell law as above: no pipe-status array; fkwu ends its
-        # pipeline into a raw file and answers for itself in $?.
-        local fkwu_status=0
-        { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
-            | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
-            > "$out.raw" || fkwu_status=$?
-        sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" "$out.raw" | sed -e '1d' -e '$d' > "$out.tmp"
-        rm -f "$out.raw"
-        if [[ "$fkwu_status" -ne 0 || ! -s "$out.tmp" ]]; then
-            echo "fourth arm: fkwu failed to produce ad-hoc table $stem" >&2
-            rm -f "$out.tmp"
-            return 1
-        fi
-        mv -f "$out.tmp" "$out"
+        fourth_flatten_pipe "$stem" "$kind" "$out" "ad-hoc table $stem" "${srcs[@]}" || return 1
     fi
     [[ -s "$out" ]]
 }

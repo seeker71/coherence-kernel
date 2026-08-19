@@ -435,8 +435,12 @@ fk_expand_declared_deps() {
 SOURCE_CACHE_DIR="form-stdlib/.cache/source-compiled"
 mkdir -p "$SOURCE_CACHE_DIR"
 compiler_stamp=""
-compiler_chain=("form-stdlib/form-ontology-loader.fk" "form-stdlib/line-grammar.fk" "form-stdlib/bmf-core.fk" "form-stdlib/bmf-grammar.fk" "form-stdlib/bml.fk" "form-stdlib/bml-source.fk" "form-stdlib/source-compiler.fk" "form-stdlib/grammars/form-bml.fk" "form-stdlib/form-bml-lower.fk")
-compiler_stamp="$(form_hash16 "${compiler_chain[@]}" "$GO_BIN")"
+# The go lane's explicit closure. The walkers do not read `; preludes:` lines,
+# so this list exists for them alone; the fkwu lane below needs no list at all.
+# engine-constants / compiler-objects / form-ontology-bp joined 2026-08-18 when
+# their births in Form broke this hand-held mirror silently for a day.
+compiler_chain=("form-stdlib/engine-constants.fk" "form-stdlib/compiler-objects.fk" "form-stdlib/form-ontology-bp.fk" "form-stdlib/form-ontology-loader.fk" "form-stdlib/line-grammar.fk" "form-stdlib/bmf-core.fk" "form-stdlib/bmf-grammar.fk" "form-stdlib/bml.fk" "form-stdlib/bml-source.fk" "form-stdlib/source-compiler.fk" "form-stdlib/grammars/form-bml.fk" "form-stdlib/form-bml-lower.fk")
+compiler_stamp="$(form_hash16 "${compiler_chain[@]}" "${FKWU_SRC:-}" "$GO_BIN")"
 
 prepared_args=()
 prepare_sources() {
@@ -448,21 +452,41 @@ prepare_sources() {
             cached="$SOURCE_CACHE_DIR/$key.fk"
             if [[ ! -s "$cached" ]]; then
                 safe="${src//\//__}"
-                out="$(mktemp "$SOURCE_CACHE_DIR/.${key}.XXXXXX")"
-                driver="$(mktemp "$source_compile_dir/compile-${safe}.XXXXXX")"
-                printf '(do (form-source-compile-file "%s" "%s"))\n' "$src" "$out" > "$driver"
-                if "$GO_BIN" "${compiler_chain[@]}" "$driver" >/dev/null && [[ -s "$out" ]]; then
-                    mv -f "$out" "$cached"
-                else
-                    rm -f "$out" "$driver"
-                    if [[ ! -s "$cached" ]]; then
-                        prepared_args+=("$src")
-                        continue
+                # fkwu first: the driver names one cell and fkwu's resolver
+                # walks the body's own preludes graph -- no chain list to drift.
+                if [[ -n "${FKWU_SRC:-}" && -x "${FKWU_SRC:-}" ]]; then
+                    out="$(mktemp "$SOURCE_CACHE_DIR/.${key}.XXXXXX")"
+                    driver="$(mktemp "$source_compile_dir/compile-${safe}.XXXXXX.fk")"
+                    {
+                        printf '; generated lens driver -- the closure is the preludes graph.\n'
+                        printf '; preludes: form-stdlib/source-compiler-text-lens.fk\n'
+                        printf '(do (form-source-compile-file "%s" "%s") 0)\n' "$src" "$out"
+                    } > "$driver"
+                    if "$FKWU_SRC" "$driver" >/dev/null 2>&1 && [[ -s "$out" ]]; then
+                        mv -f "$out" "$cached"
                     fi
+                    rm -f "$out" "$driver" "${driver%.fk}.fkb" "${driver%.fk}.sym" 2>/dev/null
                 fi
-                rm -f "$out" "$driver"
+                if [[ ! -s "$cached" ]]; then
+                    out="$(mktemp "$SOURCE_CACHE_DIR/.${key}.XXXXXX")"
+                    driver="$(mktemp "$source_compile_dir/compile-${safe}.XXXXXX")"
+                    printf '(do (form-source-compile-file "%s" "%s"))\n' "$src" "$out" > "$driver"
+                    if "$GO_BIN" "${compiler_chain[@]}" "$driver" >/dev/null && [[ -s "$out" ]]; then
+                        mv -f "$out" "$cached"
+                    fi
+                    rm -f "$out" "$driver"
+                fi
             fi
-            prepared_args+=("$cached")
+            if [[ -s "$cached" ]]; then
+                prepared_args+=("$cached")
+            else
+                # No silent raw fallback: a raw section-bearing source cannot
+                # agree on any arm, so handing it forward only moves the failure
+                # somewhere quieter. Refusing HERE names the real seam.
+                echo "validate.sh: source lens failed for $src on both fkwu and go lanes" >&2
+                echo "  a section-bearing source cannot run raw; fix the lens, not the band" >&2
+                exit 1
+            fi
         else
             prepared_args+=("$src")
         fi
@@ -562,6 +586,35 @@ run_siblings() {
     rm -rf "$legs" 2>/dev/null || true
     if [[ "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]] \
         && { [[ -z "$fourth_tbl" ]] || [[ "$fk_out" == "$go_out" ]]; }; then
+        # REGISTERED-VERDICT GATE (2026-08-17). fourth-arm-bands.txt column 3 is
+        # the band's registered verdict, and until today NOTHING read it — every
+        # consumer parsed `stem kind _`, so the column was write-only and 114
+        # bands drifted from it silently, both directions, over months. This
+        # suite already proves the four arms AGREE; agreement was the only thing
+        # it proved, so a band that grew six checks kept passing while the
+        # registry still described the old six. Now an agreed verdict that
+        # differs from the registered one is a failure with its own word, so a
+        # band cannot change what it certifies without the change being seen.
+        # The verdict compared is the LAST line of the agreed output — fks bands
+        # answer one scalar, fkc bands may print above it — and only when the
+        # registered column is numeric (the one teach-sema-code row is not a
+        # band row and never reaches here).
+        local reg_stem reg_want reg_have
+        reg_stem="$(fourth_band_stem "${*: -1}" || true)"
+        reg_want=""
+        if [[ -n "$reg_stem" ]]; then
+            reg_want="$(awk -v b="$reg_stem" '!/^#/ && $1==b{print $3; exit}' "$FOURTH_MANIFEST")"
+        fi
+        if [[ "$reg_want" =~ ^[0-9]+$ ]]; then
+            reg_have="${go_out##*$'\n'}"
+            if [[ "$reg_have" != "$reg_want" ]]; then
+                printf "  ✗  %-30s  → %s agreed on every arm, but the manifest registers %s — REGISTERED-VERDICT DRIFT\n" \
+                    "$label" "$reg_have" "$reg_want"
+                fail=$((fail + 1))
+                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+                return
+            fi
+        fi
         printf "  ✓  %-30s  → %s\n" "$label" "$go_out"
         ok=$((ok + 1))
         if [[ -n "$fourth_tbl" ]]; then fourth_ok=$((fourth_ok + 1)); fi

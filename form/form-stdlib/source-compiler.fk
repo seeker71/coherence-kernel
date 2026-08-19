@@ -1,6 +1,6 @@
 ; source-compiler.fk - Form-native source section compiler
 ;
-; preludes: form-stdlib/core.fk form-stdlib/engine.fk form-stdlib/compiler.fk form-stdlib/bmf-grammar.fk form-stdlib/bml-source.fk form-stdlib/bml.fk
+; preludes: form-stdlib/core.fk form-stdlib/form-ontology-loader.fk form-stdlib/engine.fk form-stdlib/compiler-objects.fk form-stdlib/bmf-grammar.fk form-stdlib/bml-source.fk form-stdlib/bml.fk
 ;
 ; This module is runtime tissue above the kernel. It reads source text,
 ; lowers first-class BMF sections into ordinary Form object definitions,
@@ -91,8 +91,16 @@
         (if (eq (str_len line) 0) false
             (str_eq (char_at line (fsc-last-char-index line)) "{")))
 
+    ;; An unclosed section used to recurse forever: at end-of-string
+    ;; fsc-line-next answers the SAME index, so the walk stood still at 100%
+    ;; CPU on every arm alike (witnessed 600s+ on fkwu, 2026-08-18, via an
+    ;; inline fixture whose `}` never stood alone on a line). End of input
+    ;; with depth open is a refusal, not a treadmill.
     (defn fsc-section-end-depth (s i depth)
         (do
+            (if (ge i (str_len s))
+                (fsc-compiler-error "section not closed before end of source")
+                0)
             (let e (fsc-line-end s i))
             (let line (fsc-trim (fsc-sub s i e)))
             (if (str_eq line "}")
@@ -625,6 +633,7 @@
             (intern_trivial_string name)
             (intern_node fsc-rec-SEQ-CAT (fsc-rec-param-trivials param-names))
             body-recipe)))
+
 
     ;; Append xs (in order) onto acc (reversed accumulator) → reversed.
     (defn fsc-rec-append-rev (xs acc)
@@ -2811,9 +2820,35 @@
     (defn fsc-strip-bml-comments (s)
         (fsc-strip-bml-comments-loop s 0))
 
-    (defn form-source-compile-loop (src out-path i)
+    ;; A section opens only where a LINE opens it: `section [` preceded on its
+    ;; line by nothing but whitespace. codec.fk:8 carries that text inside a
+    ;; comment (a witness ABOUT sections), and the unanchored find read the
+    ;; comment as a door -- extracted a nonsense body across real code, refused,
+    ;; and on fkwu the refusal itself was numb (form_error answers nothing
+    ;; there), so the whole lensed text nothinged to a 0-byte file that
+    ;; printed success. Text about a form is not the form; the scanner now
+    ;; asks the line, not the bytes.
+    (defn fsc-line-start-of (s i)
+        (if (le i 0) 0
+            (if (str_eq (char_at s (sub i 1)) "\n") i
+                (fsc-line-start-of s (sub i 1)))))
+    (defn fsc-only-ws-between? (s a b)
+        (if (ge a b) true
+            (if (or (str_eq (char_at s a) " ") (str_eq (char_at s a) "\t"))
+                (fsc-only-ws-between? s (add a 1) b)
+                false)))
+    (defn fsc-section-line-open? (s pos)
+        (fsc-only-ws-between? s (fsc-line-start-of s pos) pos))
+    (defn fsc-find-section-open (src i)
         (do
             (let pos (fsc-find-string-from src "section [" i))
+            (if (lt pos 0) pos
+                (if (fsc-section-line-open? src pos) pos
+                    (fsc-find-section-open src (add pos 9))))))
+
+    (defn form-source-compile-loop (src out-path i)
+        (do
+            (let pos (fsc-find-section-open src i))
             (if (lt pos 0) (fsc-strip-bml-comments (fsc-sub src i (str_len src)))
                 (do
                     (let dialect-start (add pos 9))
