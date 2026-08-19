@@ -2275,6 +2275,105 @@ func runStack(_ pos: Int) {
 let tA = Date(); if gatesOn { runStack(posA) }; let wallA = Date().timeIntervalSince(tA)
 let tB = Date(); if gatesOn { runStack(posB) }; let wallB = Date().timeIntervalSince(tB)
 
+// ── the decode-hook door: a resident Form process answers between argmax and the next embedding ──
+// FORM_DS4_TOKEN_HOOK_DOOR names a serve cell (e.g. form-stdlib/dsv4-hook-door-quiet.fk); unset, the
+// loop is byte-identical to before this door existed. The door is spawned ONCE and asked once per
+// generation step over pipes; the LAW lives in the door (dtrs-select over the swap cell's window),
+// and this carrier stays a stopwatch: it adopts the door's chosen token only when the reply is
+// well-formed, in-vocabulary, and back before the absolute deadline it stamped on the request.
+// Anything else — silence, lateness, a malformed line, a dead door — keeps the default token and is
+// COUNTED, never swallowed: the TOKEN HOOK line below the walk carries every count.
+let hookDoor = ProcessInfo.processInfo.environment["FORM_DS4_TOKEN_HOOK_DOOR"] ?? ""
+// a newline inside the situation would split the one-line request and desync the door; the protocol
+// is line-framed, so the frame is defended here and the flattening is visible in the reply's witness.
+let hookSituation = (ProcessInfo.processInfo.environment["FORM_DS4_SITUATION"] ?? "")
+    .replacingOccurrences(of: "\n", with: " ")
+let hookBudgetMs = Int(ProcessInfo.processInfo.environment["FORM_DS4_TOKEN_BUDGET_MS"] ?? "34") ?? 34
+var hookProc: Process? = nil
+var hookIn: FileHandle? = nil
+var hookBuf = Data()
+let hookLock = NSCondition()
+var hookOffered = 0, hookSwapped = 0, hookQuiet = 0, hookLate = 0, hookInvalid = 0
+var hookHeadReason = ""
+if kvSequence && !hookDoor.isEmpty {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "../fkwu")            // cwd is form/, like every lane path
+    p.arguments = [hookDoor]
+    let pin = Pipe(); let pout = Pipe()
+    p.standardInput = pin; p.standardOutput = pout; p.standardError = FileHandle.nullDevice
+    pout.fileHandleForReading.readabilityHandler = { h in
+        let d = h.availableData
+        if d.isEmpty { return }
+        hookLock.lock(); hookBuf.append(d); hookLock.signal(); hookLock.unlock()
+    }
+    do {
+        try p.run()
+        hookProc = p; hookIn = pin.fileHandleForWriting
+        // prepare may fit a classifier before the first request (the control door measures ~25 s);
+        // the wait is bounded and a silent door is a DISABLED hook said out loud, never a stall.
+        let readyBy = Date().addingTimeInterval(180)
+        var readyText = ""
+        while Date() < readyBy {
+            hookLock.lock()
+            let s = String(data: hookBuf, encoding: .utf8) ?? ""
+            if !s.contains("prepare_ms=") { _ = hookLock.wait(until: Date().addingTimeInterval(0.05)) }
+            let s2 = String(data: hookBuf, encoding: .utf8) ?? ""
+            hookLock.unlock()
+            if s2.contains("prepare_ms=") { readyText = s2; break }
+        }
+        if readyText.isEmpty {
+            print("      TOKEN HOOK: door \(hookDoor) never finished prepare in 180s — hook disabled, defaults stand")
+            p.terminate(); hookProc = nil; hookIn = nil
+        } else {
+            let prep = readyText.split(separator: "\n").first { $0.hasPrefix("prepare_ms=") }.map(String.init) ?? "prepare_ms=?"
+            print("      TOKEN HOOK: door \(hookDoor) resident, \(prep)")
+        }
+    } catch {
+        print("      TOKEN HOOK: door spawn failed (\(error)) — hook disabled, defaults stand")
+        hookProc = nil; hookIn = nil
+    }
+}
+func hookConsult(_ genStep: Int, _ defaultToken: Int, _ contextIds: [Int]) -> (token: Int, reason: String)? {
+    guard let hin = hookIn, hookProc != nil else { return nil }
+    let deadlineMs = Int(Date().timeIntervalSince1970 * 1000) + hookBudgetMs
+    hookLock.lock(); hookBuf.removeAll(); hookLock.unlock()
+    let ctx = contextIds.suffix(16).map(String.init).joined(separator: ",")
+    let line = "offer step=\(genStep) default=\(defaultToken) deadline_ms=\(deadlineMs) context=\(ctx) situation=\(hookSituation)\n"
+    guard let data = line.data(using: .utf8) else { hookInvalid += 1; return nil }
+    do { try hin.write(contentsOf: data) }                        // a dead door is a kept default,
+    catch { hookInvalid += 1; hookProc = nil; hookIn = nil; return nil }  // never a crashed walk
+
+    let deadline = Date(timeIntervalSince1970: Double(deadlineMs) / 1000.0)
+    while Date() < deadline {
+        hookLock.lock()
+        let s = String(data: hookBuf, encoding: .utf8) ?? ""
+        if !s.contains("end=1") { _ = hookLock.wait(until: min(deadline, Date().addingTimeInterval(0.002))) }
+        let s2 = String(data: hookBuf, encoding: .utf8) ?? ""
+        hookLock.unlock()
+        if s2.contains("end=1") {
+            // a LATE reply from an earlier step can share the buffer with this step's reply; a reply
+            // is adopted only when its own step= names THIS step. The stale one's lateness was
+            // already counted at its own step, so here it is simply not this step's answer.
+            var rest = s2
+            while let r = rest.range(of: "end=1") {
+                let block = String(rest[..<r.lowerBound])
+                rest = String(rest[r.upperBound...])
+                var chosen = -1; var reason = "unparsed"; var step = -1
+                for l in block.split(separator: "\n") {
+                    if l.hasPrefix("step=") { step = Int(l.dropFirst(5)) ?? -1 }
+                    if l.hasPrefix("chosen=") { chosen = Int(l.dropFirst(7)) ?? -1 }
+                    if l.hasPrefix("reason=") { reason = String(l.dropFirst(7)) }
+                }
+                if step != genStep { continue }
+                if chosen < 0 || chosen >= emb.rows { hookInvalid += 1; return nil }
+                return (chosen, reason)
+            }
+        }
+    }
+    hookLate += 1
+    return nil
+}
+
 // ── two consecutive real-stack positions over persistent per-layer KV arenas ─────────────────────
 if kvSequence {
     guard kvSteps >= 2 && kvSteps < kvCap else {
@@ -2354,8 +2453,25 @@ if kvSequence {
             hzBarrierFrom = hzBarriers
             dispN.removeAll()
         }
-        if pos >= promptIds.count - 1 { emitted.append(exit.token) }
-        currentToken = exit.token
+        // THE HOOK IS IN THE PIPELINE, NOT AFTER IT: between the exit head's argmax and the next
+        // step's embedding, the resident Form door is offered the default token. The CHOSEN token —
+        // the door's, only when its reply is whole, in-vocabulary, and inside the deadline — is what
+        // gets emitted AND embedded, so a swap steers the rest of the walk. Everything else keeps
+        // exit.token, and the loop with no door configured takes the exact path it always took.
+        var chosenToken = exit.token
+        if hookProc != nil && pos >= promptIds.count - 1 {
+            hookOffered += 1
+            let genStep = pos - max(0, promptIds.count - 1)       // 0 at the first EMITTED token, prompt or not
+            if let r = hookConsult(genStep, exit.token, emitted) {
+                if r.token != exit.token {
+                    hookSwapped += 1
+                    if genStep == 0 { hookHeadReason = r.reason }
+                } else { hookQuiet += 1 }
+                chosenToken = r.token
+            }
+        }
+        if pos >= promptIds.count - 1 { emitted.append(chosenToken) }
+        currentToken = chosenToken
         // ONLY THE TWO STEPS THE GATE COMPARES ARE COPIED OUT. This built a 16 384-element Swift array
         // out of the residual on EVERY step to keep the last one; the state-moved gate reads the first
         // and the last and nothing in between. It is host time sitting on the token's critical path
@@ -2372,6 +2488,11 @@ if kvSequence {
         }
     }
     poolOn = false
+    if hookProc != nil {
+        print("      TOKEN HOOK: offered=\(hookOffered) swapped=\(hookSwapped) quiet=\(hookQuiet) late=\(hookLate) invalid=\(hookInvalid) door=\(hookDoor)\(hookHeadReason.isEmpty ? "" : " head_reason=\(hookHeadReason)")")
+        hookIn?.closeFile()                                       // EOF ends the door's serve loop
+        hookProc = nil; hookIn = nil
+    }
     let nPrefill = max(1, promptIds.count), nGen = max(1, kvSteps - promptIds.count)
     let prefillS = tPrefillEnd.timeIntervalSince(tGenStart)
     let genS = Date().timeIntervalSince(tPrefillEnd)
