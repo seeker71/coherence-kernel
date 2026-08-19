@@ -1,0 +1,166 @@
+; A real DS4 token-embedding dispatch in the persistent in-process Metal
+; session. Token 43 is the first token emitted by retained Form CLI run
+; 2963655b47a9c66aee045f7ed60ca8fec81c83789c419e06e015fdc94e985115.
+;
+; The embedding tensor starts at absolute byte 71707886176. Each F16 row is
+; 4096 * 2 bytes, so token 43 begins at 71707886176 + 43 * 8192 =
+; 71708238432. The whole row lies in view 0.
+;
+; preludes: native/metal/dsv4-embed.fk native/metal/dsv4-f16-matvec.fk native/metal/dsv4-rmsnorm.fk native/metal/dsv4-mx8-matvec.fk native/metal/dsv4-rope.fk native/metal/dsv4-attention.fk native/metal/dsv4-hash-route.fk native/metal/dsv4-moe-exec.fk native/metal/dsv4-kv-round.fk native/metal/dsv4-output.fk native/metal/dsv4-layer-walk.fk form-stdlib/dsv4-hc-msl.fk form-stdlib/dsv4-kv-cache.fk
+
+(do
+    (print_str
+        (metal_model_open
+            "/Users/ursmuff/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf"
+            "85445672960 86586540032 2"))
+    (print_str
+        (metal_model_library "dsv4-embed" (dsv4-embed-source)))
+    (print_str
+        (metal_model_library "dsv4-hc" (hc-msl-unit)))
+    (print_str
+        (metal_model_library "dsv4-f16" (dsv4-f16-matvec-source)))
+    (print_str
+        (metal_model_library "dsv4-rms" (dsv4-rmsnorm-source)))
+    (print_str
+        (metal_model_library "dsv4-mx8" (dsv4-mx8-matvec-source)))
+    (print_str
+        (metal_model_library "dsv4-rope" (dsv4-rope-source)))
+    (print_str
+        (metal_model_library "dsv4-attention" (dsv4-attention-source)))
+    (print_str
+        (metal_model_library "dsv4-route" (dsv4-hash-route-source)))
+    (print_str
+        (metal_model_library "dsv4-mx4" (dsv4-mx4-expert-source)))
+    (print_str
+        (metal_model_library "dsv4-iq2" (dsv4-iq2-expert-source)))
+    (print_str
+        (metal_model_library "dsv4-moe" (dsv4-moe-fold-source)))
+    (print_str
+        (metal_model_library "dsv4-topk" (dsv4-topk-route-source)))
+    (print_str
+        (metal_model_library "dsv4-output" (dsv4-argmax-source)))
+    (print_str
+        (metal_model_library "dsv4-kv-round" (dsv4-kv-round-source)))
+    (print_str
+        (metal_model_library "dsv4-kv-cache" (dkv-msl-source)))
+    (print_str
+        (metal_model_embed
+            "dsv4-embed"
+            "form_dsv4_embed_f16"
+            "0 71708238432 4096"))
+    (print_str
+        (metal_model_hc_begin "dsv4-hc" "4096 4 0.000001"))
+    (print_str
+        (metal_model_f16_matvec
+            "dsv4-f16"
+            "form_dsv4_f16_matvec"
+            "0 72905333696 24 16384"))
+    (print_str
+        (metal_model_hc_split
+            "dsv4-hc"
+            "0 72906120128 72905333600 4 20 0.000001"))
+    (print_str (metal_model_state_save "layer0-attention-hc-split"))
+    (print_str
+        (metal_model_hc_reduce "dsv4-hc" "4096 4"))
+    (print_str
+        (metal_model_rmsnorm
+            "dsv4-rms"
+            "0 72877251424 4096 0.000001"))
+    (print_str (metal_model_state_save "layer0-attention-normalized"))
+    (print_str
+        (metal_model_mx8_matvec
+            "dsv4-mx8"
+            "0 72838323040 4325376 1024 4096"))
+    (print_str
+        (metal_model_rmsnorm
+            "dsv4-rms"
+            "0 72766950240 1024 0.000001"))
+    (print_str
+        (metal_model_mx8_matvec
+            "dsv4-mx8"
+            "0 72842648416 34603008 32768 1024"))
+    (print_str (metal_model_state_save "layer0-q-projected"))
+    (print_str (metal_model_state_load "layer0-attention-normalized"))
+    (print_str
+        (metal_model_mx8_matvec
+            "dsv4-mx8"
+            "0 72766954336 2162688 512 4096"))
+    (print_str (metal_model_state_save "layer0-kv-projected"))
+    (print_str (metal_model_rmsnorm
+        "dsv4-rms"
+        "0 72766948192 512 0.000001"))
+    (print_str (metal_model_state_save "layer0-kv-normalized"))
+    (print_str (metal_model_state_load "layer0-q-projected"))
+    (print_str (metal_model_rmsnorm
+        "dsv4-rms"
+        "0 0 32768 0.000001 512"))
+    (print_str (metal_model_state_save "layer0-q-head-normalized"))
+    (print_str (metal_model_rope "dsv4-rope" "64 512 64 0 10000 1"))
+    (print_str (metal_model_state_save "layer0-q-rope"))
+    (print_str (metal_model_state_load "layer0-kv-normalized"))
+    (print_str (metal_model_rope "dsv4-rope" "1 512 64 0 10000 1"))
+    (print_str (metal_model_kv_round "dsv4-kv-round" "512 64"))
+    (print_str (metal_model_state_save "layer0-k-rope"))
+    (print_str
+        (metal_model_cached_attention
+            "dsv4-kv-cache"
+            "layer0-q-rope 0 0 256 0 72766947936 64 512 0.0441941738"))
+    (print_str (metal_model_state_save "layer0-attention-heads"))
+    (print_str (metal_model_rope "dsv4-rope" "64 512 64 0 10000 -1"))
+    (print_str (metal_model_state_save "layer0-attention-heads-unroped"))
+    (print_str
+        (metal_model_mx8_matvec
+            "dsv4-mx8"
+            "0 72769117024 34603008 8192 4096 1024"))
+    (print_str (metal_model_state_save "layer0-attention-output-low"))
+    (print_str
+        (metal_model_mx8_matvec
+            "dsv4-mx8"
+            "0 72803720032 34603008 4096 8192"))
+    (print_str (metal_model_state_save "layer0-attention-output"))
+    (print_str
+        (metal_model_hc_post
+            "dsv4-hc"
+            "layer0-attention-hc-split 4096 4"))
+    (print_str (metal_model_state_save "layer0-after-attention-streams"))
+    (print_str
+        (metal_model_f16_matvec
+            "dsv4-f16"
+            "form_dsv4_f16_matvec"
+            "0 72906120256 24 16384"))
+    (print_str
+        (metal_model_hc_split
+            "dsv4-hc"
+            "0 72906906688 72906120160 4 20 0.000001"))
+    (print_str (metal_model_state_save "layer0-ffn-hc-split"))
+    (print_str
+        (metal_model_hc_reduce "dsv4-hc" "4096 4"))
+    (print_str
+        (metal_model_rmsnorm
+            "dsv4-rms"
+            "0 72905317216 4096 0.000001"))
+    (print_str (metal_model_state_save "layer0-ffn-normalized"))
+    (print_str
+        (metal_model_f16_matvec
+            "dsv4-f16"
+            "form_dsv4_f16_matvec"
+            "0 72877267808 256 4096"))
+    (print_str
+        (metal_model_hash_route
+            "dsv4-route"
+            "0 5339744 43 6 1.5 0.00006103515625"))
+    (print_str (metal_model_state_load "layer0-ffn-normalized"))
+    (print_str
+        (metal_model_moe
+            "dsv4-mx4 dsv4-iq2 dsv4-moe dsv4-mx8"
+            "0 14647904 4456448 1709146720 4456448 1155498592 2162688 72879364960 8650752 72896666464 8650752 72888015712 8650752 4096 2048 10 40 16 256"))
+    (print_str (metal_model_state_save "layer0-ffn-output"))
+    (print_str
+        (metal_model_hc_post
+            "dsv4-hc"
+            "layer0-ffn-hc-split 4096 4"))
+    (print_str (metal_model_state_save "layer0-output-streams"))
+    (dlw-live-first-token-range 1 43 43)
+    (dlw-live-output-head)
+    (print_str (metal_model_close))
+    0)

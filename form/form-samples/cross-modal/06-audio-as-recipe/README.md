@@ -9,8 +9,7 @@ runs and across all three sibling kernels.
 
 ```bash
 cd <repo-root>
-go build -o /tmp/form-kernel-go ./form/form-kernel-go
-/tmp/form-kernel-go form/form-samples/cross-modal/06-audio-as-recipe/gen-sine.fk
+./fkwu form/form-samples/cross-modal/06-audio-as-recipe/gen-sine.fk
 ```
 
 This emits `gen-sine.wav` next to the recipe and prints `8044` (the byte
@@ -20,7 +19,7 @@ All three kernels produce the same bytes:
 
 ```bash
 # Go
-/tmp/form-kernel-go form/form-samples/cross-modal/06-audio-as-recipe/gen-sine.fk
+./fkwu form/form-samples/cross-modal/06-audio-as-recipe/gen-sine.fk
 sha256sum form/form-samples/cross-modal/06-audio-as-recipe/gen-sine.wav
 
 # Rust

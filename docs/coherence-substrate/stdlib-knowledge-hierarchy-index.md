@@ -167,7 +167,7 @@ No mechanical freshness-header sweep yet, and no side-mission uplift pass that
 does not serve an active release gate.
 
 The north-star rule is lift-on-touch: any file or section touched while releasing
-`--src`, `.tbl`, `.fkb`, `.sym`, `.dylib`, loader selection, or source compiler
+`direct-source`, `.tbl`, `.fkb`, `.sym`, `.dylib`, loader selection, or source compiler
 health must move to the highest available grammar. If no adequate grammar
 exists, build the smallest missing grammar needed for that touched path and use
 it immediately.

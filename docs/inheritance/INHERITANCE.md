@@ -27,26 +27,26 @@ source that stays where it is, mapped here so the kernel knows its full inherita
     (observe 5 · learn 3 · presence 1 · substrate 3 · model 2); resolved 2 band-only worklist
     entries (`sk-msl`, `trust-climb`). All HOME, re-prove PENDING the self-prove keystone.
   - [`wave-2-presence-learn-observe.md`](wave-2-presence-learn-observe.md) — 17 bodies + 17 bands
-    (presence 7 · learn 5 · observe 3 · cognition 1 · gate 1). Each RE-PROVES on `fkwu --src`
+    (presence 7 · learn 5 · observe 3 · cognition 1 · gate 1). Each RE-PROVES on `fkwu`
     native (no Go, no flatten): **15 reach their full origin witness on current-main `fkwu`**;
     `learning-readout` + `beings-channel` are HOME and reach full witness only on the stone-S2c
     general-arity runtime (multi-arg packed-call gap, named, closing as that stone lands).
   - [`wave-3-observe-gate-cognition.md`](wave-3-observe-gate-cognition.md) — 11 bodies + 11 bands
     (observe 4 · gate 3 · learn 2 · cognition 2). **8 RE-PROVE to full origin witness on
-    `fkwu --src`** standalone; 3 (`nearest-shape`, `tool-channel`, `choice-receipt`) come home as
+    `fkwu`** standalone; 3 (`nearest-shape`, `tool-channel`, `choice-receipt`) come home as
     deps that re-prove **transitively** inside a let-free consumer band, their own standalone
-    band `--src`-pending on the `do/let`-block floor (named gap, closing in the cursor-seed pivot).
+    band `direct-source`-pending on the `do/let`-block floor (named gap, closing in the cursor-seed pivot).
 
 ## Core lifts — raising the abstraction share once bodies are home
 
 Not homecoming waves (the bodies were already here); these collapse repeated *structure* into one
-high-grammar base, re-proven on `fkwu --src`.
+high-grammar base, re-proven on `fkwu`.
 
 - [`uplift-1-sensor-organ-template.md`](uplift-1-sensor-organ-template.md) — the observe/ sensing
   family's repeated `port + plane + reading + fusion` spine becomes ONE 19-line base template
   ([`observe/sensor-organ-template.fk`](../../observe/sensor-organ-template.fk)) over
   `world-sensor-floor`. Three sensors re-expressed as thin subclasses (scene-features, motion-sense,
-  same-room) — each **6–8 code lines vs 51–67**, each `--src` witness equal to its original
+  same-room) — each **6–8 code lines vs 51–67**, each `direct-source` witness equal to its original
   (`111`/`1111`/`11111`). Names the stored-fn-value/closure gap that blocks the cleaner data-row form,
   and the rest-of-family plan.
 
@@ -77,7 +77,7 @@ The homecoming is complete when ALL hold, checkable from this repo with no old-r
    multiple named functions (a function table, CALL=tag 12) + multi-arg `defn`/call (packed args) + multi-file
    prelude loading — which `four-way-verdict.fk` (7 fns, 4 args) and `form-flatten.fk` (231 fns, 199 multi-arg)
    require. Per `flatten/SEED-DROP.md`, the full grammar lands as the flattened **cursor seed**, retiring the
-   `--src` C grammar rather than growing it to stone 5.)
+   `direct-source` C grammar rather than growing it to stone 5.)
 3. The worklist bodies are home in their faculties and re-prove here. ⏳ (in waves)
 4. This file + the ledger reference every old-repo content category. ✅ (this map)
 5. New work can be authored, proven, and run entirely in this repo. ⏳ (follows 2+3)

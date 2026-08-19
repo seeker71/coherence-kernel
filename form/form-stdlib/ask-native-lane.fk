@@ -44,7 +44,7 @@
 ; form-cli-ask.fk (fca-* — the verb that chooses between the lanes),
 ; sha256.fk / hex.fk (the question binding), native/metal/metal_ask.sh (the carrier that writes it).
 ;
-; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/string-byte-fold-src-shim.fk form-stdlib/sha256.fk form-stdlib/hex-encode-only.fk
 ;
 ; Proven by: form-stdlib/tests/ask-native-lane-band.fk (four-way; verdict 127)
 
@@ -52,6 +52,7 @@
     (defn anl-artifact-path () ".coherence-network/ask-native/answer.txt")
     (defn anl-version () "v1")
     (defn anl-lane-name () "metal-gguf-native")
+    (defn anl-prompt-recipe () "vital-ground-chat-v2-s4")
     (defn anl-fallback-lane-name () "fkwu-rag-grounded")
     (defn anl-nl () (byte_to_str 10))
 
@@ -123,7 +124,7 @@
     (defn anl-model () (anl-model-at (anl-artifact-path)))
 
     ; ================= 2. the binding — the whole safety of the cache =================
-    (defn anl-question-key (q) (hex-encode (sha256-stream-string q)))
+    (defn anl-question-key (q) (hex-encode-only (sha256-stream-string q)))
     (defn anl-versioned? (raw) (if (str_eq (anl-line-value raw "ASK-NATIVE") (anl-version)) 1 0))
     (defn anl-bound? (raw q)
         (if (str_eq (anl-line-value raw "QUESTION-SHA256") (anl-question-key q)) 1 0))
@@ -141,9 +142,16 @@
     (defn anl-refusal-of-text (raw q)
         (if (eq (anl-versioned? raw) 0) "native-lane:version-mismatch"
             (if (eq (anl-bound? raw q) 0) "native-lane:question-not-bound"
-                (if (eq (str_len (anl-answer-text raw)) 0) "native-lane:empty-answer" ""))))
+                (if (eq (str_eq (anl-line-value raw "PROMPT-RECIPE")
+                                (anl-prompt-recipe)) 0)
+                    "native-lane:prompt-recipe-stale"
+                    (if (eq (str_len (anl-answer-text raw)) 0) "native-lane:empty-answer"
+                        (if (str_eq (anl-stop-reason raw) "cap")
+                            "native-lane:incomplete-cap" ""))))))
     (defn anl-refusal-of (raw q)
-        (if (nil? raw) "native-lane:absent" (anl-refusal-of-text raw q)))
+        (if (eq (str_len raw) 0)
+            "native-lane:absent"
+            (anl-refusal-of-text raw q)))
 
     (defn anl-ready-of-text (raw q) (if (str_eq (anl-refusal-of-text raw q) "") 1 0))
     (defn anl-ready-of (raw q) (if (str_eq (anl-refusal-of raw q) "") 1 0))
@@ -155,6 +163,70 @@
     (defn anl-ready-at (path q) (if (str_eq (anl-refusal-at path q) "") 1 0))
     (defn anl-ready? (q) (anl-ready-at (anl-artifact-path) q))
     (defn anl-refusal (q) (anl-refusal-at (anl-artifact-path) q))
+
+    (defn anl-generation-prompt (q)
+        (do
+            (let n (anl-nl))
+            (let a (str_concat "<|start_header_id|>system<|end_header_id|>"
+                               (str_concat n n)))
+            (let b (str_concat a
+                "You are a concise helpful assistant. Answer the exact relation the inquiry asks about before offering a familiar definition. Distinguish a representation or transport change from evidence that capability or behavior was learned. Separate observed ground from inference. Use revisable language and no invented citations."))
+            (let c (str_concat b
+                (str_concat n
+                    (str_concat "<|eot_id|>"
+                        (str_concat n "<|start_header_id|>user<|end_header_id|>")))))
+            (let d (str_concat c (str_concat n (str_concat n q))))
+            (let e (str_concat d
+                (str_concat n
+                    (str_concat "<|eot_id|>"
+                        (str_concat n "<|start_header_id|>assistant<|end_header_id|>")))))
+            (str_concat e (str_concat n n))))
+
+    ; Code generation is a different interface contract from dialogue.  The
+    ; model is shown the smallest useful Form surface, then must transfer that
+    ; syntax to the caller's unseen task.  BEGIN_FORM/END_FORM are transport
+    ; delimiters, not learned answers; the compiler remains the authority.
+    (defn anl-build-prompt (q)
+        (do
+            (let n (anl-nl))
+            (let a (str_concat "<|start_header_id|>system<|end_header_id|>"
+                               (str_concat n n)))
+            (let b (str_concat a
+                "Emit executable Form only. Use defn, lt (not <), gt (not >), and (sub 0 n) for a negative value (not -n). A checked program is one (do ...) expression. Copy the delimiters. Example task: define double and check double 4 is 8. Answer:\nBEGIN_FORM\n(do (defn double (x) (mul x 2)) (if (eq (double 4) 8) 1 0))\nEND_FORM\nEmit the new task in that shape, without Markdown or prose."))
+            (let c (str_concat b
+                (str_concat n
+                    (str_concat "<|eot_id|>"
+                        (str_concat n "<|start_header_id|>user<|end_header_id|>")))))
+            (let d (str_concat c (str_concat n (str_concat n q))))
+            (let e (str_concat d
+                (str_concat n
+                    (str_concat "<|eot_id|>"
+                        (str_concat n "<|start_header_id|>assistant<|end_header_id|>")))))
+            (str_concat e (str_concat n n))))
+
+    ; Generate for the question in hand, then re-open the question-bound
+    ; artifact. The carrier only transports bytes and dispatches the
+    ; Form-emitted Metal lane; readiness and answer authority remain here.
+    (defn anl-refresh (q)
+        (do
+            (let carrier (host-exec
+                "FORM_ASK_MODEL=form-llama-vital-ground-prompted:base-native FORM_ASK_PROMPT_RECIPE=vital-ground-chat-v2-s4 FORM_STOP_SENTENCES=4 form/native/metal/metal_ask.sh 128 -"
+                (str_concat q (str_concat (anl-nl) (anl-generation-prompt q)))))
+            (anl-ready? q)))
+
+    (defn anl-refresh-build (q)
+        (do
+            ; A failed carrier call must not make a prior answer to the same
+            ; question look like this attempt's result.
+            (write_file (anl-artifact-path) "")
+            (let carrier (host-exec
+                "FORM_ASK_MODEL=form-llama-vital-ground-prompted:base-native FORM_ASK_PROMPT_RECIPE=vital-ground-chat-v2-s4 FORM_STOP_SENTENCES=2 form/native/metal/metal_ask.sh 68 -"
+                (str_concat q (str_concat (anl-nl) (anl-build-prompt q)))))
+            (if (gt (str_len carrier) 0) (print_str carrier) 0)
+            (anl-ready? q)))
+
+    (defn anl-generate-answer (q)
+        (if (eq (anl-refresh q) 1) (anl-answer q) ""))
 
     ; ================= 3. the answer, with its lane and its costs attached =================
     ; The prose alone would be indistinguishable from the RAG lane's prose. What travels with it: the

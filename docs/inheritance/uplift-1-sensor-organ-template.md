@@ -27,7 +27,7 @@ A sensor-organ is the same idea one altitude down. So the *attribute-declaration
 
 What does **not** yet exist is a clean **function-value attribute stored in the organ's data row**. The
 ideal template would bake FEATURE-FN and FUSION-FN into the organ list `(so-organ NAME PLANE CARRIER
-FEATURE-FN FUSION-FN)` and dispatch them via `nth`. On the `fkwu --src` source-runner that fails: a
+FEATURE-FN FUSION-FN)` and dispatch them via `nth`. On the `fkwu` source-runner that fails: a
 function value stored in a composed list and pulled back out by `nth` does **not** resolve to a callable
 head — it acks `nothing`. (Verified directly: a fn passed as a *direct argument* and called `(fn x)`
 resolves; the same fn `nth`-ed out of a list and called `((nth o 4) x)` returns `nothing`.) This is the
@@ -38,7 +38,7 @@ resolves; the same fn `nth`-ed out of a list and called `((nth o 4) x)` returns 
 **The step that gets the job done AND points at the north star:** the organ list carries the three
 invariant CONTRACT attributes as DATA (`NAME PLANE CARRIER`); the two varying recipes (FEATURE-FN,
 FUSION-FN) ride in as **direct function-value arguments** to the template's recipes — the path stone-2c
-proves and `--src` runs. Genuinely high-grammar (declared attributes + dispatched function-values),
+proves and `direct-source` runs. Genuinely high-grammar (declared attributes + dispatched function-values),
 honest on the current runtime. **When the stored-fn-value lane lands, FEATURE-FN/FUSION-FN move INTO the
 organ row with no change to the call shape** — the template is written so that promotion is a one-line edit.
 
@@ -58,14 +58,14 @@ organ row with no change to the call shape** — the template is written so that
 Each thin organ DECLARES its three attributes, delegates its ONE feature recipe to the **proven**
 original (byte-identity), supplies its fusion, and INHERITS the route spine.
 
-| sensor | organ file | declared attributes | feature delegated to | fusion | `--src` witness | verdict |
+| sensor | organ file | declared attributes | feature delegated to | fusion | `direct-source` witness | verdict |
 |---|---|---|---|---|---|---|
 | scene-features | [`scene-features-organ.fk`](../../observe/scene-features-organ.fk) | `"scene" "what" "camera"` | `sf-objects` (object-block count) | floor `wsf-fuse` | `scene-features-organ-witness.fk` | **111** = original |
 | motion-sense | [`motion-sense-organ.fk`](../../observe/motion-sense-organ.fk) | `"motion" "motion" "accelerometer"` | `ms-direction` (heading octant) | floor `wsf-fuse` | `motion-sense-organ-witness.fk` | **1111** = original |
 | same-room | [`same-room-organ.fk`](../../observe/same-room-organ.fk) | `"same-room" "where" "wifi"` | `sr-same?` (co-location verdict) | `sr-grouping` (the FUSION-VARIES case) | `same-room-organ-witness.fk` | **11111** = original |
 
 Each witness verdict equals the original sensor's own feature/route result, computed both ways in one
-band and asserted equal bit-by-bit — **NO behavior change** on the `fkwu --src` native lane (the repo's
+band and asserted equal bit-by-bit — **NO behavior change** on the `fkwu` native lane (the repo's
 sovereignty proof bar; `core.fk` intrinsic, not concatenated, per the wave-3 convention).
 
 `same-room` proves the template's FUSION-VARIES design: most organs fuse by the floor's per-plane

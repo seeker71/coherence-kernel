@@ -16,7 +16,7 @@ companion `api/app/services/substrate/<name>.py` source. The pipeline:
                                                          .fk text
 ```
 
-The same `bin-go` kernel that the rest of the body uses; the same `emit-engine.fk`
+The same `retired sibling binary` kernel that the rest of the body uses; the same `emit-engine.fk`
 walker that ships every emit target; no per-language pipeline code outside data.
 
 ## Current coverage

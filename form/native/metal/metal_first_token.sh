@@ -45,7 +45,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form
-GO_BIN="$ROOT/form-kernel-go/bin-go"
+FKWU="$ROOT/../fkwu"
 NSTEPS="${1:-12}"
 PROMPT="${2:-The capital of France is}"
 BLOB="${FORM_GGUF_BLOB:-$HOME/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff}"
@@ -63,9 +63,9 @@ if [[ ! -f "$BLOB" ]]; then
     echo "      (ollama pull llama3.2:3b, or set FORM_GGUF_BLOB)"
     exit 2
 fi
-if [[ ! -x "$GO_BIN" ]]; then
-    echo "  building go kernel..." >&2
-    (cd "$ROOT/form-kernel-go" && go build -o bin-go .)
+if [[ ! -x "$FKWU" ]]; then
+    echo "FAIL  fresh fkwu carrier is absent: $FKWU"
+    exit 1
 fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/fkfirsttok.XXXXXX")"
@@ -123,8 +123,8 @@ emit() {   # emit <outfile> <label> <form-expr>
         return 0
     fi
     local t0 t1; t0=$(date +%s)
-    printf '%s\n' "$expr" > "$work/e.fk"
-    "$GO_BIN" "${FILES[@]}" "$work/e.fk" > "$out.tmp" 2>"$work/e.err" || {
+    printf '; preludes: %s\n%s\n' "$ROOT/native/metal/first-token.fk" "$expr" > "$work/e.fk"
+    "$FKWU" --src "$work/e.fk" > "$out.tmp" 2>"$work/e.err" || {
         echo "FAIL  $label emission failed"; tail -5 "$work/e.err"; exit 1; }
     grep -qx 'END' "$out.tmp" || { echo "FAIL  $label stream truncated"; exit 1; }
     mv "$out.tmp" "$out"; t1=$(date +%s)
@@ -139,8 +139,8 @@ emit "$REF" "refs"    "(ft-emit-ref \"$BLOB\" $REFID $REFROW)"
 if [[ -s "$MSL" ]]; then
     echo "  body cache HIT  msl"
 else
-    printf '(ft-emit-msl)\n' > "$work/e.fk"
-    "$GO_BIN" "${FILES[@]}" "$work/e.fk" > "$work/msl.out" 2>"$work/e.err" || {
+    printf '; preludes: %s\n(ft-emit-msl)\n' "$ROOT/native/metal/first-token.fk" > "$work/e.fk"
+    "$FKWU" --src "$work/e.fk" > "$work/msl.out" 2>"$work/e.err" || {
         echo "FAIL  MSL emission failed"; cat "$work/e.err"; exit 1; }
     awk '/^MSL$/{d=1;next} /^END$/{d=0;next} d{print}' "$work/msl.out" > "$MSL"
     echo "  body cache MISS msl — $(wc -c < "$MSL" | tr -d ' ') bytes"
@@ -981,7 +981,19 @@ print("=== gates 8-9: the split twin answers to the attestant ===")
 splitGates()
 zeroPool()
 
-struct Run { var out: [Int] = []; var prefill = 0.0; var decode = 0.0; var forwards = 0; var disp = 0 }
+let stopSentences = Int(ProcessInfo.processInfo.environment["FORM_STOP_SENTENCES"] ?? "0") ?? 0
+struct Run {
+    var out: [Int] = []
+    var prefill = 0.0
+    var decode = 0.0
+    var forwards = 0
+    var disp = 0
+    var policyStop = false
+}
+func completedSentences(_ ids: [Int]) -> Int {
+    if stopSentences <= 0 { return 0 }
+    return decodeIds(ids).reduce(0) { n, ch in n + (ch == "." ? 1 : 0) }
+}
 func generate(_ ids: [Int], _ steps: Int) -> Run {
     zeroPool()
     var r = Run(); var pos = 0; var cur = 0
@@ -992,6 +1004,10 @@ func generate(_ ids: [Int], _ steps: Int) -> Run {
     for _ in 0..<steps {
         r.out.append(cur)
         if cur == eosId || cur == 128001 { break }
+        if stopSentences > 0 && completedSentences(r.out) >= stopSentences {
+            r.policyStop = true
+            break
+        }
         cur = forward(cur, pos); pos += 1; r.forwards += 1
     }
     let t2 = Date()
@@ -1020,7 +1036,13 @@ if genOnly {
     let hitEos = (last == eosId || last == 128001 || last == 128009)
     if hitEos { g.out.removeLast() }
     report("slot-long ", g)
-    print("  STOP reason=\(hitEos ? "eos" : "cap") stop_id=\(hitEos ? last : -1) eos_id=\(eosId) generated=\(g.out.count) cap=\(nsteps)")
+    // Prose is not line-shaped. Keep the human answer in an explicit block so
+    // a newline cannot make the carrier lose already-generated native tokens.
+    print("ANSWER-TEXT-BEGIN")
+    print(decodeIds(g.out))
+    print("ANSWER-TEXT-END")
+    let stopReason = hitEos ? "eos" : (g.policyStop ? "policy" : "cap")
+    print("  STOP reason=\(stopReason) stop_id=\(hitEos ? last : -1) eos_id=\(eosId) generated=\(g.out.count) cap=\(nsteps)")
     print(String(format: "  LATENCY encode %.6f s + prefill %.3f s (%d prompt tokens) + decode %.3f s (%d forwards) = %.3f s in-process",
                  encodeS, g.prefill, promptIds.count, g.decode, g.forwards, encodeS + g.prefill + g.decode))
     if gpuErrors > 0 {

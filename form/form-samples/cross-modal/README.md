@@ -20,7 +20,7 @@ discoveries.
 
 ## What every experiment shares
 
-- **A `.fk` recipe that actually runs** through the Go kernel (`go build -o /tmp/form-kernel-go ./form/form-kernel-go`).
+- **A `.fk` recipe that actually runs** through the Go kernel (`go build -o ./fkwu ./form/form-kernel-go`).
 - **A `README.md`** naming the discovery, what's reachable today, what
   surprised, and what's not reachable.
 - **Honest separations** — failures are documented in the body of the README,
@@ -29,12 +29,11 @@ discoveries.
 ## Running everything
 
 ```bash
-go build -o /tmp/form-kernel-go ./form/form-kernel-go
 for d in form/form-samples/cross-modal/*/; do
     f="$d"*.fk
     for r in $f; do
         echo "=== $r ==="
-        /tmp/form-kernel-go "$r"
+        ./fkwu "$r"
     done
 done
 ```

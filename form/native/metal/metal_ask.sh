@@ -52,7 +52,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form
 REPO="$(cd "$ROOT/.." && pwd)"
-GO_BIN="$ROOT/form-kernel-go/bin-go"
+FKWU="$REPO/fkwu"
 # NSTEPS IS A CAP, NOT A LENGTH. The model ends its own answer with its end-of-turn id and the
 # harness breaks on it; this number only bounds how long the harness will wait for that to happen.
 # The old default of 12 was a length pretending to be a cap — every answer stopped mid-sentence
@@ -60,10 +60,26 @@ GO_BIN="$ROOT/form-kernel-go/bin-go"
 # real paragraph and still fits the 256-position KV pool with a long question in front of it.
 NSTEPS="${1:-96}"
 QUESTION="${2:-The capital of France is}"
+# `-` makes stdin the question. This is the Form-owned invocation path:
+# line one is the exact inquiry identity; remaining lines may carry a
+# Form-authored generation prompt. This keeps identity separate from prompting.
+BINDING_QUESTION="$QUESTION"
+if [[ "$QUESTION" == "-" ]]; then
+    IFS= read -r BINDING_QUESTION || BINDING_QUESTION=""
+    QUESTION="$(awk '{ if (seen) printf "\n"; printf "%s", $0; seen=1 }')"
+    [[ -z "$QUESTION" ]] && QUESTION="$BINDING_QUESTION"
+fi
 GATE_MODE="genonly"
 if [[ "${FORM_ASK_FULL_GATES:-0}" == "1" ]]; then GATE_MODE="full"; fi
-BLOB="${FORM_GGUF_BLOB:-$HOME/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff}"
-MODEL_NAME="${FORM_ASK_MODEL:-llama3.2:3b}"
+BASE_BLOB="$HOME/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff"
+if [[ -n "${FORM_GGUF_BLOB:-}" ]]; then
+    BLOB="$FORM_GGUF_BLOB"
+    MODEL_NAME="${FORM_ASK_MODEL:-explicit-local-gguf}"
+else
+    BLOB="$BASE_BLOB"
+    MODEL_NAME="${FORM_ASK_MODEL:-llama3.2:3b}"
+fi
+PROMPT_RECIPE="${FORM_ASK_PROMPT_RECIPE:-raw-v0}"
 CACHE="$ROOT/native/metal/.ask-cache"
 STAGE="${FORM_ASK_STAGE:-$REPO/.coherence-network/ask-native}"
 ARTIFACT="$STAGE/answer.txt"
@@ -100,9 +116,9 @@ if [[ ! -f "$BLOB" ]]; then
     echo "SKIP  the llama3.2:3b GGUF blob is not on this host: $BLOB"
     exit 2
 fi
-if [[ ! -x "$GO_BIN" ]]; then
-    echo "  building go kernel..." >&2
-    (cd "$ROOT/form-kernel-go" && go build -o bin-go .)
+if [[ ! -x "$FKWU" ]]; then
+    echo "FAIL  fresh fkwu carrier is absent: $FKWU"
+    exit 1
 fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/fkask.XXXXXX")"
@@ -154,8 +170,9 @@ if [[ -s "$SHAPE" ]] && grep -qx 'END' "$SHAPE"; then
     echo "  body cache HIT  declared shape"
 else
     echo "  body cache MISS declared shape — walking all 255 tensors at their own ggml types..."
-    printf '(adc-emit-shape "%s")\n' "$BLOB" > "$work/shape.fk"
-    "$GO_BIN" "${FILES[@]}" "$work/shape.fk" > "$SHAPE.tmp" 2>"$work/shape.err" || {
+    printf '; preludes: %s\n(adc-emit-shape "%s")\n' \
+        "$ROOT/native/metal/ask-declared-cost.fk" "$BLOB" > "$work/shape.fk"
+    "$FKWU" --src "$work/shape.fk" > "$SHAPE.tmp" 2>"$work/shape.err" || {
         echo "FAIL  declared-shape emission failed"; tail -5 "$work/shape.err"; exit 1; }
     grep -qx 'END' "$SHAPE.tmp" || { echo "FAIL  declared-shape stream truncated"; exit 1; }
     mv "$SHAPE.tmp" "$SHAPE"
@@ -178,14 +195,13 @@ echo "  gate D1 the derived tensor bytes + data base ARE the file's $FILE_ACTUAL
 
 # ── 2. generate, through the PROVEN lane. The harness is the witness; we read its output. ─────────
 echo "  generating through form/native/metal/metal_first_token.sh (the gated lane, gate-mode $GATE_MODE)..."
-gen_t0=$(python3 -c 'import time;print(int(time.time()*1000000))')
 if [[ "$GATE_MODE" == "genonly" ]]; then
-    FORM_GEN_ONLY=1 "$ROOT/native/metal/metal_first_token.sh" "$NSTEPS" "$QUESTION" > "$work/gen.txt" 2>&1
+    FORM_GEN_ONLY=1 FORM_STOP_SENTENCES="${FORM_STOP_SENTENCES:-0}" \
+        "$ROOT/native/metal/metal_first_token.sh" "$NSTEPS" "$QUESTION" > "$work/gen.txt" 2>&1
 else
     "$ROOT/native/metal/metal_first_token.sh" "$NSTEPS" "$QUESTION" > "$work/gen.txt" 2>&1
 fi
 gen_rc=$?
-gen_t1=$(python3 -c 'import time;print(int(time.time()*1000000))')
 if [[ $gen_rc -eq 2 ]]; then
     echo "SKIP  the generation lane skipped:"; sed -n '1,3p' "$work/gen.txt"; exit 2
 fi
@@ -303,9 +319,10 @@ NFWD_DECLARED=$(( NPROMPT + NSTEPS ))
 
 # ── 3. the DECLARED per-run bounds, from the body, for both the declared and the measured lengths ──
 mkrun() {   # mkrun <nfwd> -> DECL lines
-    printf '(adc-emit-run %s %s %s %s %s %s %s %s %s %s)\n' \
+    printf '; preludes: %s\n(adc-emit-run %s %s %s %s %s %s %s %s %s %s)\n' \
+        "$ROOT/native/metal/ask-declared-cost.fk" \
         "$NLAYER" "$DMODEL" "$DFF" "$NHEAD" "$NKV" "$HEADDIM" "$VOCAB" "$WBYTES" "$EMBROW" "$1" > "$work/run.fk"
-    "$GO_BIN" "${FILES[@]}" "$work/run.fk" 2>/dev/null
+    "$FKWU" --src "$work/run.fk" 2>/dev/null
 }
 mkrun "$NFWD_DECLARED" > "$work/decl.txt"
 mkrun "$NFWD_MEASURED" > "$work/meas.txt"
@@ -342,11 +359,12 @@ PCT_OF_VENDOR=$(awk -v a="$ACHIEVED_MBS" -v w="$BW_VENDOR_MBS" 'BEGIN{printf "%.
 PCT_OF_DEMO=$(awk   -v a="$ACHIEVED_MBS" -v w="$BW_DEMO_MBS"   'BEGIN{printf "%.2f", 100.0*a/w}')
 
 # ── 5. the receipt, rendered BY THE BODY ──────────────────────────────────────────────────────────
-printf '(adc-emit-receipt %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s)\n' \
+printf '; preludes: %s\n(adc-emit-receipt %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s)\n' \
+    "$ROOT/native/metal/ask-declared-cost.fk" \
     "$NFWD_DECLARED" "$NFWD_MEASURED" "$BYTES_D" "$BYTES_M" "$MACS_D" "$MACS_M" \
     "$DISP_D" "$DISP_M" "$PREFILL_FLOOR_US" "$PREFILL_US" "$DECODE_FLOOR_US" "$DECODE_US" \
     "$TOKPS_CEIL_MILLI" "$DECODE_TOKPS_MILLI" "$WORLD_DECODE_TOKPS_MILLI" > "$work/rcpt.fk"
-"$GO_BIN" "${FILES[@]}" "$work/rcpt.fk" 2>"$work/rcpt.err" | grep -E '^(COST|RATE) ' > "$work/receipt.txt" || true
+"$FKWU" --src "$work/rcpt.fk" 2>"$work/rcpt.err" | grep -E '^(COST|RATE) ' > "$work/receipt.txt" || true
 [[ -s "$work/receipt.txt" ]] || { echo "FAIL  the body did not render a receipt"; cat "$work/rcpt.err"; exit 1; }
 
 # a few carrier-measured context lines, clearly marked as context and not as declared/measured pairs
@@ -372,7 +390,7 @@ printf '(adc-emit-receipt %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s)\n' \
 } >> "$work/receipt.txt"
 
 # ── 6. stage the artifact, bound to THIS question by its own sha256 ───────────────────────────────
-QSHA=$(printf '%s' "$QUESTION" | shasum -a 256 | cut -d' ' -f1)
+QSHA=$(printf '%s' "$BINDING_QUESTION" | shasum -a 256 | cut -d' ' -f1)
 BSHA=$(basename "$BLOB" | sed 's/^sha256-//')
 mkdir -p "$STAGE"
 {
@@ -380,6 +398,7 @@ mkdir -p "$STAGE"
   echo "LANE metal-gguf-native"
   echo "QUESTION-SHA256 $QSHA"
   echo "MODEL $MODEL_NAME"
+  echo "PROMPT-RECIPE $PROMPT_RECIPE"
   echo "BLOB-SHA256 $BSHA"
   echo "GATES $GATES"
   echo "GATE-MODE $GATE_MODE"
@@ -395,7 +414,7 @@ mkdir -p "$STAGE"
 
 echo
 echo "=== staged: $ARTIFACT ==="
-echo "question: \"$QUESTION\""
+echo "question: \"$BINDING_QUESTION\""
 echo "answer  : \"$ANSWER\""
 echo
 cat "$work/receipt.txt"

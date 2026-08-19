@@ -22,10 +22,10 @@ gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwl
 Verify the direct source bootstrap first:
 
 ```sh
-./fkwu --src bootstrap/ground.fk                 # -> 42
-./fkwu --src bootstrap/ground-recursive.fk 10    # -> 55
-./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk   # -> 15 (anything else: REBUILD fkwu first)
-./fkwu --src bootstrap/ground-numeric-list.fk    # -> [1, 2.5, [3, 4]]
+./fkwu bootstrap/ground.fk                 # -> 42
+./fkwu bootstrap/ground-recursive.fk 10    # -> 55
+./fkwu form/form-stdlib/tests/binary-freshness-band.fk   # -> 15 (anything else: REBUILD fkwu first)
+./fkwu bootstrap/ground-numeric-list.fk    # -> [1, 2.5, [3, 4]]
 ```
 
 The third line matters more than it looks: `fkwu` is gitignored (a local build artifact), and a
@@ -34,18 +34,20 @@ evaluator capabilities — a real day was once lost "discovering" evaluator cons
 only ever the stale binary (receipts/2026-07-01-stale-binary-root-cause.md). If the freshness band
 does not return 15, rebuild before believing anything else you observe.
 
-Then verify it runs the body — a **real cell**, native, with no Go, no flatten, no T_flat:
+Then verify it runs the body as a real native cell:
 
 ```sh
 ( cat observe/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > /tmp/nvr.fk
-./fkwu --src /tmp/nvr.fk        # -> 11111   (bit-identical to the four-way proof walkers)
+./fkwu /tmp/nvr.fk        # -> 11111   (bit-identical to the four-way proof walkers)
 ```
 
-`fkwu --src <file.fk>` runs Form source straight through the kernel's own source-runner (multi-function,
-cross-calls, lists, recursion). The direction of travel is the native walker proven on `fkwu`, with the C seed
-made smaller until it disappears. The Go/Rust/TS kernels under `walkers/` are **four-way proof siblings only** —
-never the runtime; you never run the body on them. (`fkwu` also runs Form off the BMF cursor via `form-eval`, and
-loads flattened numeric tables; flatten is optional speed, never a gate — see [`HOMECOMING.md`](HOMECOMING.md).)
+`fkwu <file.fk>` is the source and execution door. It recursively reads declared
+Form preludes, selects or creates fresh native artifacts, and executes the
+result. Do not construct module lists in shell, invoke proof siblings as
+runtime carriers, create flattened tables, or add an alternate source flag.
+When a dependency is absent, repair the owning cell's `; preludes:` declaration.
+When execution is slow, improve the Form-owned JIT path and observe it through
+the framebuffer. The C checkout seed continues shrinking until it disappears.
 
 The trailing `10` on `ground-recursive.fk` is a checkout convention; the current direct-source Form surface accepts
 the CLI value but does not expose it as a Form primitive. Do not grow the C seed just to make that argument visible.

@@ -10,8 +10,7 @@ making the demo "win".
 
 ```bash
 cd <repo-root>
-go build -o /tmp/form-kernel-go ./form/form-kernel-go
-/tmp/form-kernel-go form/form-samples/cross-modal/03-recipe-as-compression/freeze.fk
+./fkwu form/form-samples/cross-modal/03-recipe-as-compression/freeze.fk
 ```
 
 Output:

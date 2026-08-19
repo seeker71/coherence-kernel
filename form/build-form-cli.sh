@@ -23,6 +23,15 @@ CLI_BOOTSTRAP_SOURCE_SHA256="$S/bootstrap/form-cli.source.sha256"
 FORM_CLI_FORCE_LINK="${FORM_CLI_FORCE_LINK:-0}"
 FORM_CLI_EXTRA_SRC="${FORM_CLI_EXTRA_SRC:-}"
 FORM_CLI_EXTRA_LDFLAGS="${FORM_CLI_EXTRA_LDFLAGS:-}"
+NATIVE_CARRIER_SRCS=()
+NATIVE_CARRIER_LDFLAGS=()
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # This is a build dependency, not runtime policy or environment state.
+  # Form owns the MSL, kernel identity, and model bytes. This linked port owns
+  # only the irreducible in-process Metal API calls.
+  NATIVE_CARRIER_SRCS+=("native/metal/fkwu_metal_port.m")
+  NATIVE_CARRIER_LDFLAGS+=("-framework" "Foundation" "-framework" "Metal")
+fi
 
 is_windows_host() {
     [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]
@@ -44,7 +53,9 @@ if [[ "${FORM_STANDARD_LANE:-0}" != 1 ]]; then
     command -v "$CC_BIN" >/dev/null || { echo "${CC_BIN} is required at BUILD time (not at run time)"; exit 1; }
 fi
 
-W="$(mktemp -d)"
+BUILD_ROOT=".coherence-network/build"
+mkdir -p "$BUILD_ROOT"
+W="$(mktemp -d "$BUILD_ROOT/form-cli.XXXXXX")"
 trap 'rm -rf "$W"' EXIT
 
 # the emit chain (plain Form) + the flatten chain.
@@ -213,6 +224,8 @@ clang_args=(
   -Wno-incompatible-library-redeclaration
   -o "$OUT" "$W/form-cli.c"
 )
+clang_args+=("${NATIVE_CARRIER_SRCS[@]}")
+clang_args+=("${NATIVE_CARRIER_LDFLAGS[@]}")
 if [[ -n "$FORM_CLI_EXTRA_SRC" ]]; then
   # shellcheck disable=SC2206
   extra_srcs=($FORM_CLI_EXTRA_SRC)

@@ -35,8 +35,8 @@ walker and the per-target Form emitters.
 ## Verify Direct Source Bootstrap
 
 ```sh
-./fkwu --src bootstrap/ground.fk
-./fkwu --src bootstrap/ground-recursive.fk 10
+./fkwu bootstrap/ground.fk
+./fkwu bootstrap/ground-recursive.fk 10
 ```
 
 Expected output:
@@ -54,7 +54,7 @@ convention; direct-source Form does not yet read argv without a table entry.
 
 ```sh
 ( cat observe/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > /tmp/nvr.fk
-./fkwu --src /tmp/nvr.fk
+./fkwu /tmp/nvr.fk
 ```
 
 Expected output:
@@ -66,14 +66,14 @@ Expected output:
 That is the minimum real-body grounding check after bootstrap: the local
 C-bootstrapped runner is present, and it executes a real Form body cell through
 the direct source path. This is not file-only grounding and it does not use Go,
-flatten, or `T_flat`.
+flatten, or `retired table cache`.
 
 ## Verify the bidirectional diagnostic protocol
 
 After freshness and real grounding, a fast Form-native protocol check is:
 
 ```sh
-./fkwu --src observe/tests/bidirectional-framebuffer-channel-band.fk
+./fkwu observe/tests/bidirectional-framebuffer-channel-band.fk
 ```
 
 Its final field must be `1`. This checks correlated observation/control frames,
@@ -88,7 +88,7 @@ required for every checkout bootstrap.
 cat form/form-stdlib/hati-os-targets.fk \
     form/form-stdlib/host-os-membrane.fk \
     form/form-stdlib/tests/host-os-membrane-band.fk > /tmp/host-os-membrane.fk
-./fkwu --src /tmp/host-os-membrane.fk
+./fkwu /tmp/host-os-membrane.fk
 ```
 
 Expected output:
@@ -110,9 +110,6 @@ emitters, not a larger C seed.
 
 ## What This Does Not Claim
 
-The direct source bootstrap is the standing entry; no flattened
-`form-eval-cli-loop.tbl` seed is required to ground or run the body.
-
-The optional flattened `form-eval-cli-loop` path is a cache/parity door for the
-Form meta-evaluator, not a gate for running the body. If a richer cell does not
-fit the current `--src` surface, name the actual coverage gap.
+The direct source bootstrap is the standing entry. There is no secondary table
+door. If a richer cell does not run, inspect its framebuffer evidence and
+repair its Form dependency declaration, lowering, or JIT recipe.
