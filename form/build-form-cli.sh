@@ -130,6 +130,9 @@ fi
 # byte is unchanged; keep stale flattened tables ineligible.
 want_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}" "$S/fourth-flatten-table.stamp")"
 want_source_sha256="$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")"
+carrier_src="$W/form-cli-carrier.fk"
+sed "s/FORM_CLI_SOURCE_SHA256_PLACEHOLDER/$want_source_sha256/g" \
+    "$S/form-cli-carrier.fk" > "$carrier_src"
 bootstrap_carrier_fresh=0
 if form_cli_verify_bootstrap \
         "$S/bootstrap/form-cli-table.txt" "$CLI_BOOTSTRAP_C" \
@@ -205,6 +208,11 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/ask-lane-router.fk"
     "$S/form-cli-repl.fk"
 )
+for source_index in "${!FORM_CLI_SELFHOST_SRCS[@]}"; do
+    if [[ "${FORM_CLI_SELFHOST_SRCS[$source_index]}" == "$S/form-cli-carrier.fk" ]]; then
+        FORM_CLI_SELFHOST_SRCS[$source_index]="$carrier_src"
+    fi
+done
 if [[ "$bootstrap_carrier_fresh" == 1 ]]; then
     cp "$S/bootstrap/form-cli-table.txt" "$W/table.txt"
     echo "  flatten: bootstrap table (no Go)" >&2
@@ -221,8 +229,14 @@ if [[ "$bootstrap_carrier_fresh" == 1 ]]; then
     cp "$CLI_BOOTSTRAP_C" "$W/form-cli.c"
     echo "  emit: bootstrap (no Go)" >&2
 else
-    echo "  emit: unavailable — need bootstrap/form-cli-emitted.c (maintainer: scripts/regen_form_cli_bootstrap.sh)" >&2
-    exit 1
+    # The self-host flatten above already produced the current table. Feed that
+    # table as data to the Form-owned emitter instead of refusing merely because
+    # the committed carrier is stale. This stays on fkwu and publishes nothing;
+    # the maintainer regeneration path remains responsible for committed caches.
+    printf '%s\n' "$W/table.txt" \
+        | ../fkwu "$S/form-cli-bootstrap-emit-cli.fk" \
+        > "$W/form-cli.c"
+    echo "  emit: fkwu Form emitter (no Go)" >&2
 fi
 grep -q fk_prog "$W/form-cli.c" || { echo "emit missing baked program"; exit 1; }
 
