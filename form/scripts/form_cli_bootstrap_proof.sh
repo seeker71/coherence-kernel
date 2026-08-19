@@ -46,8 +46,25 @@ form_cli_verify_binary_identity() {
         echo "form-cli bootstrap: binary is missing or not executable: $binary" >&2
         return 1
     }
-    actual_id="$(printf 'carrier-id\n' | "$binary")"
-    actual_challenge="$(printf 'carrier-challenge %s\n' "$nonce" | "$binary")"
+    # Take the carrier-id / carrier-challenge LINE, not the whole answer. This
+    # began as a repair for fc-with-share prepending a share stamp to every
+    # response; that prefix is gone now (share became an explicit verb), and the
+    # line grep is kept anyway because it stays exact — a carrier that cannot
+    # produce the line still fails.
+    #
+    # The two filters are NOT the same word. carrier-id answers
+    #   carrier-id|form-cli-carrier-v2|<sha>|...
+    # while the challenge answers a VERSIONED head:
+    #   carrier-challenge-v1|<sha>|<nonce>|<digest>
+    # The challenge filter here read '^carrier-challenge|' and so matched
+    # nothing. grep exited 1 under `set -e` and the whole build ended with two
+    # printed lines and no third — a correct, freshly linked, pong-answering
+    # binary reported as a build failure with no reason given. The expected
+    # string one line above always carried the -v1; only the filter had dropped
+    # it. Copying a sibling line and editing the middle is how a check ends up
+    # looking right and matching nothing.
+    actual_id="$(printf 'carrier-id\n' | "$binary" | grep -m1 '^carrier-id|')"
+    actual_challenge="$(printf 'carrier-challenge %s\n' "$nonce" | "$binary" | grep -m1 '^carrier-challenge-v1|')"
     if [[ "$actual_id" != "$expected_id" ]]; then
         printf 'form-cli bootstrap: carrier-id mismatch\n  have=%s\n  want=%s\n' \
             "$actual_id" "$expected_id" >&2

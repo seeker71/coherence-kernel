@@ -82,15 +82,14 @@ SNAPSHOT_PLATFORM_BIN="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-platform"
 SNAPSHOT_PLATFORM_STAMP="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-platform.stamp"
 SNAPSHOT_PLATFORM_ATTESTATION="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-platform.generation.attestation"
 
-# the emit chain (plain Form) + the flatten chain.
-EMIT_CHAIN="$S/minimal-surface.fk $S/hati-os-kernel.fk $S/host-io-fs-fkwu-emit.fk $S/form-table-text.fk $S/fkc-table-serialize.fk $S/hati-os-kernel-emit.fk"
-FLAT_CHAIN="$EMIT_CHAIN $S/core.fk $S/form-parse.fk $S/bmf-core.fk $S/bmf-grammar.fk $S/host-effect-grammar.fk $S/form-flatten.fk"
-# Keep the ask support modules before the dispatcher; default ask receipts stay
-# local through fkwu RAG while http-client remains available to legacy carriers.
-MODS="(list (read_file \"$S/fourth-shim.fk\") (read_file \"$S/core.fk\") (read_file \"$S/grammars/sanskrit-roots.fk\") (read_file \"$S/resource-port.fk\") (read_file \"$S/bml-native-interface-package-import.fk\") (read_file \"$S/hati-os-targets.fk\") (read_file \"$S/form-native-resource-interfaces.fk\") (read_file \"$S/form-fs.fk\") (read_file \"$S/storage-port.fk\") (read_file \"$S/host-kernel-carrier.fk\") (read_file \"$S/fnri-standin.fk\") (read_file \"$S/fnri-receipt.fk\") (read_file \"$S/http-client.fk\") (read_file \"$S/line-grammar.fk\") (read_file \"$S/str-byte-at.fk\") (read_file \"$S/sha256.fk\") (read_file \"$S/hmac-sha256.fk\") (read_file \"$S/hex.fk\") (read_file \"$S/format-arith.fk\") (read_file \"$S/f16-decode.fk\") (read_file \"$S/q6k-dequant.fk\") (read_file \"$S/equireach.fk\") (read_file \"$S/equireach-gguf.fk\") (read_file \"$S/gguf-meta.fk\") (read_file \"$S/model-discovery.fk\") (read_file \"$S/q4k-dequant.fk\") (read_file \"$S/weight-load.fk\") (read_file \"$S/voice-traits.fk\") (read_file \"$S/nearest-shape.fk\") (read_file \"$S/co-learning.fk\") (read_file \"$S/co-learning-stream.fk\") (read_file \"$S/mesh-dispatch.fk\") (read_file \"$S/surprise-salience.fk\") (read_file \"$S/host-sense-organ.fk\") (read_file \"$S/speech-organ.fk\") (read_file \"$S/native-host-instance.fk\") (read_file \"$S/text-tokenize.fk\") (read_file \"$S/rag-embed.fk\") (read_file \"$S/rag-index-codec.fk\") (read_file \"$S/rag-retrieve.fk\") (read_file \"$S/rag-ask.fk\") (read_file \"$S/ask-cost-receipt.fk\") (read_file \"$S/ask-native-lane.fk\") (read_file \"$S/form-cli-ask.fk\") (read_file \"$S/form-cli-router.fk\") (read_file \"$S/form-cli-judge.fk\") (read_file \"$S/confidence-weighted-vote.fk\") (read_file \"$S/lineage-discounted-vote.fk\") (read_file \"$S/form-cli-oracle-loop.fk\") (read_file \"$S/form-cli-sufficiency.fk\") (read_file \"$S/form-freq-check.fk\") (read_file \"$S/trust-row.fk\") (read_file \"$S/form-cli-ask-gate.fk\") (read_file \"$S/form-cli-staged-trace.fk\") (read_file \"$S/form-cli-request.fk\") (read_file \"$S/form-cli-carrier.fk\") (read_file \"$S/form-cli-ask-plus.fk\") (read_file \"$S/form-cli-surface-inquiry.fk\") (read_file \"$S/current-branch-landing.fk\") (read_file \"$S/form-cli-inquiry.fk\") (read_file \"$S/form-cli.fk\") (read_file \"$S/form-cli-gguf-cell.fk\"))"
-MODS="${MODS%)} (read_file \"$S/relational-inquiry-metabolism.fk\") (read_file \"$S/native-model-native-hierarchy.fk\"))"
-MODS="${MODS/ (read_file \"$S\/form-cli.fk\")/ (read_file \"$S\/ds4-query-channel.fk\") (read_file \"$S\/form-cli.fk\")}"
-BAND="(read_file \"$S/form-cli-repl.fk\")"
+# EMIT_CHAIN, FLAT_CHAIN, MODS and BAND stood here and were assigned, never read.
+# Four of the "SIX lists, one program" below, kept in step by hand for nothing: a
+# cell added to them reached no build and a cell missing from them broke none.
+# form_cli_source_list.sh is the one identity now, so they are gone rather than
+# reconciled — two lines had each edited MODS in the same hour, which is the cost
+# of mirroring a list that no reader ever consults. Found by reading every
+# capitalised assignment in this file for a matching read: 3 of 31 had none, and
+# EMIT_CHAIN's only reader was FLAT_CHAIN, itself dead.
 
 # Prefer fkwu self-host flatten (no Go) when T_flat + cached fkwu are warm.
 # This list authors the stamp the build compares against the one
@@ -230,7 +229,7 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/form-cli-oracle-loop.fk" "$S/form-cli-sufficiency.fk" "$S/form-freq-check.fk"
     "$S/trust-row.fk" "$S/form-cli-ask-gate.fk" "$S/form-cli-staged-trace.fk"
     "$S/form-cli-request.fk" "$S/form-cli-carrier.fk" "$S/form-cli-ask-plus.fk" "$S/form-cli-surface-inquiry.fk"
-    "$S/current-branch-landing.fk" "$S/form-cli-inquiry.fk" "$S/ds4-query-channel.fk" "$S/form-cli.fk" "$S/form-cli-gguf-cell.fk"
+    "$S/current-branch-landing.fk" "$S/form-cli-inquiry-edge-ledger.fk" "$S/form-cli-inquiry.fk" "$S/ds4-query-channel.fk" "$S/form-cli.fk" "$S/form-cli-gguf-cell.fk"
     "$S/relational-inquiry-metabolism.fk"
     "$S/native-model-native-hierarchy.fk"
     "$S/native-model-control-plane.fk"

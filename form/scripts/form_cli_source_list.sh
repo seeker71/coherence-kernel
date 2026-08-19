@@ -95,6 +95,7 @@ form-stdlib/rag-ask.fk
 form-stdlib/ask-cost-receipt.fk
 form-stdlib/ask-native-lane.fk
 form-stdlib/form-cli-ask.fk
+form-stdlib/form-cli-local-law.fk
 form-stdlib/form-cli-router.fk
 form-stdlib/form-cli-judge.fk
 form-stdlib/confidence-weighted-vote.fk
@@ -110,6 +111,7 @@ form-stdlib/form-cli-carrier.fk
 form-stdlib/form-cli-ask-plus.fk
 form-stdlib/form-cli-surface-inquiry.fk
 form-stdlib/current-branch-landing.fk
+form-stdlib/form-cli-inquiry-edge-ledger.fk
 form-stdlib/form-cli-inquiry.fk
 form-stdlib/relational-inquiry-metabolism.fk
 form-stdlib/native-model-native-hierarchy.fk
