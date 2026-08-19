@@ -1,0 +1,60 @@
+; form-local-agent-witness.fk -- an intentionally narrow diagnostic crossing.
+;
+; This is NOT a trusted form-voice-turn bridge: it accepts a caller-supplied
+; command and path, reaches that command through the current shell-backed
+; host-exec carrier, and cannot observe stderr or the child exit status.  It
+; remains useful only for a consented, one-shot diagnostic while the pinned,
+; file-based mailbox adapter is still missing.
+;
+; stdin: local agent command, prompt without a single quote, absolute
+; non-repository receipt path.
+; The caller explicitly elects to retain raw prompt and response bytes in that
+; receipt. Form writes the receipt, reads it back, and records only the two
+; crossing categories in its framebuffer. The agent CLI may use a remote model;
+; packet traffic behind that local process is not visible through host-exec and
+; is therefore named rather than inferred.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (let agent (read_line))
+    (let prompt (read_line))
+    (let receipt-path (read_line))
+    (if (or (str_eq agent "") (or (str_eq prompt "") (str_eq receipt-path "")))
+        (print_str "form-local-agent-witness:usage=<agent-command>\\n<prompt>\\n<absolute-receipt-path>\\n")
+        (do
+            ; fkwu's current host-exec captures a command's stdout but drops its
+            ; second input argument.  Keep that seam visible: this witness uses
+            ; a one-shot, single-quoted argv prompt instead.  An apostrophe is
+            ; refused rather than shell-escaped by an unproven ad-hoc codec.
+            (if (ge (str_find prompt "'" 0) 0)
+                (print_str "form-local-agent-witness:refused=prompt-contains-single-quote\n")
+                (do
+            (let command (str_concat "env -u ANTHROPIC_API_KEY "
+                (str_concat agent (str_concat " '" (str_concat prompt "'")))))
+            ; Current fkwu host-exec returns stdout alone.  Do not infer stderr,
+            ; child completion, exit status, or downstream packet traffic from an
+            ; empty string; all four are unobserved at this carrier seam.
+            (let response (host-exec command ""))
+            (framebuffer-clear)
+            (let outbound (fb_record (intern_trivial_string "host-exec-request")
+                "observe/form-local-agent-witness.fk" 131073))
+            (let inbound (fb_record (intern_trivial_string "host-exec-response")
+                "observe/form-local-agent-witness.fk" 196609))
+            (let report (str_concat "schema=form-local-agent-witness-v1\n"
+                (str_concat "form_source=observe/form-local-agent-witness.fk\n"
+                (str_concat "transport=form-host-exec-to-local-cli\n"
+                (str_concat "network_observation=not-visible-through-host-exec\n"
+                (str_concat "executed_command=" (str_concat command
+                (str_concat "\nprompt_begin\n" (str_concat prompt
+                (str_concat "\nprompt_end\nresponse_begin\n" (str_concat response
+                    "\nresponse_end\n")))))))))))
+            (let wrote (write_file receipt-path report))
+            (let reobserved (read_file receipt-path))
+            (if (str_eq report reobserved)
+                (print_str (str_concat "form-local-agent-witness|persisted=1|reobserved=1|framebuffer-events="
+                    (str_concat (int_to_str (len (framebuffer-events)))
+                        (str_concat "|receipt=" (str_concat receipt-path "\n")))))
+                (print_str "form-local-agent-witness|persisted=0|reobserved=0|reason=readback-mismatch\n"))
+            0))))
+    0)

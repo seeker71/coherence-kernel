@@ -15,6 +15,50 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# --- THE SEAL: a verdict belongs to the tree it was read from ---------------
+# Laid 2026-08-17, from a run that was still going while the files under it
+# changed three times. It would have printed a number, and the number would have
+# been about a tree that no longer existed — green or red equally meaningless.
+# Nothing caught that; it was noticed by hand, from a timestamp, and only
+# because someone happened to wonder. Once is luck.
+#
+# This body already knew the shape: scripts/fourth-arm.sh seals its table to a
+# generation and voids it when the sources move underneath ("table index
+# generation changed"). That guard sat one level down from the run that needed
+# it. This is the same guard at the top.
+#
+# A sweep here takes over an hour, so the window is wide and an edit inside it
+# is ordinary, not careless. What must never be ordinary is READING the result
+# afterward as though it said something. Exit 3 is a void reading — not a pass
+# and not a failure, an answer about nothing. Re-run on the settled tree.
+#
+# RADIUS, stated rather than implied: this compares the tree at the start against
+# the tree at the end. An edit that is made and undone entirely inside the window
+# leaves both stamps equal and passes unseen. It catches the drift that persists,
+# which is the drift that misleads a reader afterward. A per-file mtime watch
+# would close the rest and is the next stone if this one is ever the reason
+# something got through.
+_validate_tree_generation() {
+    printf '%s:%s\n' \
+        "$(git rev-parse HEAD 2>/dev/null || echo no-git)" \
+        "$(git status --porcelain=v1 2>/dev/null | shasum -a 256 | cut -d' ' -f1)"
+}
+VALIDATE_TREE_AT_START="$(_validate_tree_generation)"
+_validate_seal() {
+    local rc=$? now
+    now="$(_validate_tree_generation)"
+    if [[ "$now" != "$VALIDATE_TREE_AT_START" ]]; then
+        echo "validate.sh: VOID READING — the tree moved while this run was in flight." >&2
+        echo "              start $VALIDATE_TREE_AT_START" >&2
+        echo "              end   $now" >&2
+        echo "              This run's verdict describes a tree that is no longer here." >&2
+        echo "              It is neither a pass nor a failure. Re-run on the settled tree." >&2
+        exit 3
+    fi
+    exit $rc
+}
+trap _validate_seal EXIT
+
 # Keep package-manager advisory text out of sibling-kernel output comparison.
 # The TypeScript arm may invoke npm/npx when tsx is not locally installed; an
 # update notice on stdout makes identical kernel results look divergent.
@@ -101,8 +145,11 @@ build_ts() {
         done
     fi
     if [[ "$stale" == "1" ]]; then
-        echo "  bundling ts kernel..." >&2
-        npx --yes esbuild "$TS_DIR/src/main.ts" --bundle --platform=node             --format=esm --outfile="$bundle" --log-level=warning >&2 || rm -f "$bundle"
+        if [[ -x "$TS_DIR/node_modules/.bin/esbuild" ]]; then
+            echo "  bundling ts kernel..." >&2
+            "$TS_DIR/node_modules/.bin/esbuild" "$TS_DIR/src/main.ts" --bundle --platform=node \
+                --format=esm --outfile="$bundle" --log-level=warning >&2
+        fi
     fi
 }
 
@@ -118,11 +165,21 @@ wait
 FKWU_SRC=""
 build_fkwu_src() {
     local src="../runtime/fkwu-uni.c" bin="../fkwu"
+    local carrier="native/metal/fk-metal-carrier.m"
     [[ -f "$src" ]] || return 0
-    if [[ ! -x "$bin" || "$src" -nt "$bin" ]]; then
+    if [[ ! -x "$bin" || "$src" -nt "$bin" || ( -f "$carrier" && "$carrier" -nt "$bin" ) ]]; then
         command -v cc >/dev/null 2>&1 || return 0
         echo "  building runtime fkwu (repo root, door)..." >&2
-        cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+        # One binary carries its own doors: on Darwin the Metal carrier links in
+        # by default (fk-metal-carrier.m header's own claim), and a link failure
+        # falls back to the plain build — weak stubs answer SKIP, never crash.
+        if [[ "$(uname -s)" == "Darwin" && -f "$carrier" ]]; then
+            cc -O2 -o "$bin" "$src" "$carrier" \
+                -framework Metal -framework Foundation -fobjc-arc 2>/dev/null \
+                || cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+        else
+            cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+        fi
     fi
     [[ -x "$bin" ]] && FKWU_SRC="$bin"
 }
@@ -219,12 +276,23 @@ fi
 run_ts() {
     local bundle="$TS_DIR/dist/main.mjs"
     local loader="$PWD/$TS_DIR/node_modules/tsx/dist/loader.mjs"
-    if [[ -f "$bundle" ]]; then
+    local current=1 f
+    if [[ ! -f "$bundle" ]]; then
+        current=0
+    else
+        for f in "$TS_DIR"/src/*.ts; do
+            [[ "$f" -nt "$bundle" ]] && { current=0; break; }
+        done
+    fi
+    if [[ "$current" == "1" ]]; then
         node "$bundle" "$@"
+    elif node --experimental-strip-types --version >/dev/null 2>&1; then
+        node --experimental-strip-types "$TS_DIR/src/main.ts" "$@"
     elif [[ -x "$TS_DIR/node_modules/.bin/tsx" ]]; then
         node --import "$loader" "$TS_DIR/src/main.ts" "$@"
     else
-        npx --yes tsx "$TS_DIR/src/main.ts" "$@"
+        echo "validate.sh: TypeScript arm needs Node strip-types or a local tsx install" >&2
+        return 1
     fi
 }
 
@@ -249,6 +317,16 @@ fk_declared_deps() {
         /^;[ \t]*import([ \t:]|")/ {
             s = $0
             sub(/^;[ \t]*import[ \t:]*/, "", s)
+            if (match(s, /"[^"]+\.fk"/)) {
+                emit(substr(s, RSTART + 1, RLENGTH - 2))
+            } else {
+                n = split(s, a, /[ \t,;]+/)
+                if (n >= 1) emit(a[1])
+            }
+        }
+        /^[ \t]*import([ \t:]|")/ {
+            s = $0
+            sub(/^[ \t]*import[ \t:]*/, "", s)
             if (match(s, /"[^"]+\.fk"/)) {
                 emit(substr(s, RSTART + 1, RLENGTH - 2))
             } else {

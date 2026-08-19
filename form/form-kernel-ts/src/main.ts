@@ -7,9 +7,9 @@
 //   tsx src/main.ts --bench
 //   tsx src/main.ts path/to/file.fk
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { isMainThread, Worker, workerData } from "node:worker_threads";
 import {
   deserializeRecipeArtifact,
@@ -41,6 +41,77 @@ const crashTraceContext: CrashTraceContext = {
 // soon as the CLI kernel exists; the frames live at the crash answer
 // "which Form source line produced this".
 let crashKernel: Kernel | null = null;
+
+type FormSourcePart = {
+  path: string;
+  source: string;
+};
+
+function formImportPath(line: string): string | null {
+  let source = line.trim();
+  if (source.endsWith(";")) source = source.slice(0, -1).trim();
+  if (!source.startsWith('import "') || !source.endsWith('"')) return null;
+  const path = source.slice(8, -1);
+  return path.length > 0 ? path : null;
+}
+
+function resolveFormImport(owner: string, imported: string): string {
+  const candidates = isAbsolute(imported)
+    ? [imported]
+    : [
+        join(dirname(owner), imported),
+        imported,
+        ...(imported.startsWith("form/") ? [imported.slice(5)] : []),
+      ];
+  if (!isAbsolute(imported)) {
+    let directory = dirname(owner);
+    while (true) {
+      candidates.push(join(directory, imported));
+      candidates.push(join(directory, "form", imported));
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(
+    "import \"" + imported + "\" from " + owner + ": file not found",
+  );
+}
+
+async function loadFormSourceFile(
+  path: string,
+  displayPath: string,
+  seen: Set<string>,
+  parts: FormSourcePart[],
+): Promise<void> {
+  const canonical = await realpath(path);
+  if (seen.has(canonical)) return;
+  seen.add(canonical);
+  const source = await readFile(canonical, "utf8");
+  const body: string[] = [];
+  for (const line of source.split("\n")) {
+    const imported = formImportPath(line);
+    if (imported === null) {
+      body.push(line);
+    } else {
+      const dependency = resolveFormImport(canonical, imported);
+      await loadFormSourceFile(dependency, dependency, seen, parts);
+    }
+  }
+  parts.push({ path: displayPath, source: body.join("\n") });
+}
+
+async function loadFormSourceClosure(paths: string[]): Promise<FormSourcePart[]> {
+  const seen = new Set<string>();
+  const parts: FormSourcePart[] = [];
+  for (const path of paths) {
+    await loadFormSourceFile(path, path, seen, parts);
+  }
+  return parts;
+}
 
 function setCrashTraceContext(mode: string, args: string[], source?: string): void {
   crashTraceContext.mode = mode;
@@ -202,12 +273,13 @@ async function main(): Promise<void> {
     }
     process.exit(2);
   }
-  const parts = await Promise.all(paths.map((path) => readFile(path, "utf8")));
+  const loaded = await loadFormSourceClosure(paths);
+  const parts = loaded.map((part) => part.source);
   // Line map: each file's first global line in the joined source, so
   // read-time attribution names the ORIGINAL file:line (+1 per join newline).
   let nextLine = 1;
-  for (let i = 0; i < paths.length; i++) {
-    k.readingFiles.push({ file: paths[i]!, startLine: nextLine });
+  for (let i = 0; i < loaded.length; i++) {
+    k.readingFiles.push({ file: loaded[i]!.path, startLine: nextLine });
     nextLine += (parts[i]!.match(/\n/g)?.length ?? 0) + 1;
   }
   const src = parts.join("\n");

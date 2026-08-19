@@ -36,6 +36,34 @@ mod formats;
 mod inductive;
 mod quotient;
 
+fn resolve_kernel_host_path(path: &str) -> PathBuf {
+    let offered = PathBuf::from(path);
+    if path.is_empty() || offered.is_absolute() || offered.is_file() {
+        return offered;
+    }
+    if let Ok(mut directory) = env::current_dir() {
+        loop {
+            for candidate in [
+                directory.join(path),
+                directory.join("form").join(path),
+                directory.join("form").join("form").join(path),
+            ] {
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+            let Some(parent) = directory.parent() else {
+                break;
+            };
+            if parent == directory {
+                break;
+            }
+            directory = parent.to_path_buf();
+        }
+    }
+    offered
+}
+
 #[derive(Clone, Default)]
 struct CrashTraceContext {
     mode: String,
@@ -4628,7 +4656,7 @@ impl Kernel {
             Value::Str("<typing>".to_string().into())
         });
         let read_file_text_native: NativeFn =
-            |_, _, args| match fs::read_to_string(args[0].as_str()) {
+            |_, _, args| match fs::read_to_string(resolve_kernel_host_path(args[0].as_str())) {
                 Ok(s) => Value::Str(s.into()),
                 Err(_) => Value::Null,
             };
@@ -4636,7 +4664,7 @@ impl Kernel {
         self.register_native("read_file", cat_call(), read_file_text_native);
         // Byte-level host file read — returns a list of ints (0-255), one per byte.
         self.register_native("read_file_bytes", cat_call(), |_, _, args| {
-            match fs::read(args[0].as_str()) {
+            match fs::read(resolve_kernel_host_path(args[0].as_str())) {
                 Ok(bytes) => Value::List(Arc::new(
                     bytes.into_iter().map(|b| Value::Int(b as i64)).collect(),
                 )),
@@ -7201,6 +7229,7 @@ fn native_bypasses_form_binding(k: &Kernel, name: NameID) -> bool {
             | "char_at"
             | "str_find"
             | "scan_run"
+            | "form_table_text"
     )
 }
 
@@ -7404,9 +7433,10 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                     }
                 }
                 // Most user bindings still shadow same-named natives. The
-                // exception is the byte-string/cursor waist: source compilers
-                // and BMF cursors depend on those names staying byte-indexed
-                // when portable fallback definitions from core.fk are loaded.
+                // exception is the byte-string/cursor and table-image waist:
+                // source compilers and BMF cursors depend on those names staying
+                // byte-indexed, and universal table emission depends on its
+                // linear native serializer, when portable fallbacks are loaded.
                 // Copy the entry out so the natives-map borrow releases before
                 // we call &mut k.
                 let ne_opt = k.natives.get(&name).copied();
@@ -14950,6 +14980,94 @@ mod crash_diagnostics_tests {
     }
 }
 
+fn form_import_path(line: &str) -> Option<&str> {
+    let mut source = line.trim();
+    if let Some(without_semicolon) = source.strip_suffix(';') {
+        source = without_semicolon.trim();
+    }
+    source
+        .strip_prefix("import \"")
+        .and_then(|rest| rest.strip_suffix('"'))
+        .filter(|path| !path.is_empty())
+}
+
+fn resolve_form_import(owner: &Path, imported: &str) -> Result<PathBuf, String> {
+    let import_path = Path::new(imported);
+    let mut candidates = Vec::new();
+    if import_path.is_absolute() {
+        candidates.push(import_path.to_path_buf());
+    } else {
+        candidates.push(
+            owner
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(import_path),
+        );
+        candidates.push(import_path.to_path_buf());
+        if let Some(stripped) = imported.strip_prefix("form/") {
+            candidates.push(PathBuf::from(stripped));
+        }
+        let mut directory = owner.parent().unwrap_or_else(|| Path::new("."));
+        loop {
+            candidates.push(directory.join(import_path));
+            candidates.push(directory.join("form").join(import_path));
+            let Some(parent) = directory.parent() else {
+                break;
+            };
+            if parent == directory {
+                break;
+            }
+            directory = parent;
+        }
+    }
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "import {:?} from {}: file not found",
+        imported,
+        owner.display()
+    ))
+}
+
+fn load_form_source_file(
+    path: &Path,
+    display_path: &str,
+    seen: &mut HashSet<PathBuf>,
+    parts: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    let canonical =
+        fs::canonicalize(path).map_err(|error| format!("read {}: {}", path.display(), error))?;
+    if !seen.insert(canonical.clone()) {
+        return Ok(());
+    }
+    let source = fs::read_to_string(&canonical)
+        .map_err(|error| format!("read {}: {}", path.display(), error))?;
+    let mut body = Vec::new();
+    for line in source.split('\n') {
+        if let Some(imported) = form_import_path(line) {
+            let dependency = resolve_form_import(&canonical, imported)?;
+            let dependency_display = dependency.display().to_string();
+            load_form_source_file(&dependency, &dependency_display, seen, parts)?;
+        } else {
+            body.push(line);
+        }
+    }
+    parts.push((display_path.to_string(), body.join("\n")));
+    Ok(())
+}
+
+fn load_form_source_closure(paths: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut seen = HashSet::new();
+    let mut parts = Vec::with_capacity(paths.len());
+    for path in paths {
+        load_form_source_file(Path::new(path), path, &mut seen, &mut parts)?;
+    }
+    Ok(parts)
+}
+
 fn main_with_args(args: Vec<String>) -> i32 {
     set_crash_trace_context("startup", &args, None);
     if args.is_empty() {
@@ -14990,21 +15108,20 @@ fn main_with_args(args: Vec<String>) -> i32 {
                 }
                 args[1].clone()
             } else {
-                let mut parts = Vec::with_capacity(args.len());
-                let mut next_line = 1u32;
-                for path in &args {
-                    match fs::read_to_string(path) {
-                        Ok(s) => {
-                            line_map.push((path.clone(), next_line));
-                            // +1 for the join newline between parts.
-                            next_line += s.matches('\n').count() as u32 + 1;
-                            parts.push(s);
-                        }
-                        Err(e) => {
-                            eprintln!("read {}: {}", path, e);
-                            std::process::exit(1);
-                        }
+                let loaded = match load_form_source_closure(&args) {
+                    Ok(parts) => parts,
+                    Err(error) => {
+                        eprintln!("{}", error);
+                        std::process::exit(1);
                     }
+                };
+                let mut parts = Vec::with_capacity(loaded.len());
+                let mut next_line = 1u32;
+                for (path, source) in loaded {
+                    line_map.push((path, next_line));
+                    // +1 for the join newline between parts.
+                    next_line += source.matches('\n').count() as u32 + 1;
+                    parts.push(source);
                 }
                 parts.join("\n")
             };

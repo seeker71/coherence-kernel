@@ -14,8 +14,8 @@
 // projection consumes that machine-readable authority. Cross-kernel NodeID
 // agreement is the conformance contract.
 
-import { BP_TABLE } from "./bp_table";
-import CATEGORY_CONTRACT from "../../category-contract.json";
+import { BP_TABLE } from "./bp_table.ts";
+import CATEGORY_CONTRACT from "../../category-contract.json" with { type: "json" };
 import {
   EMPTY_KERNEL_HOST,
   type KernelHost,

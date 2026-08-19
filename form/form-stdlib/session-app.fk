@@ -1,0 +1,148 @@
+; session-app.fk — the Form-native meaning of the Sessions room.
+;
+; The browser is an offered microphone and page surface. Form owns session
+; identity, movement, attention, transcript edits, speaker honesty, and the
+; words returned when something needs tending.
+;
+; preludes: form-stdlib/core.fk form-stdlib/session-evidence.fk
+; witnessed: 2026-08-17 -> see form-stdlib/tests/session-app-band.fk
+
+(do
+    (defn sa-state-new () "new")
+    (defn sa-state-receiving () "receiving")
+    (defn sa-state-listening () "listening")
+    (defn sa-state-ready () "ready")
+    (defn sa-state-attention () "attention")
+
+    (defn sa-move? (from to)
+        (if (str_eq from (sa-state-new))
+            (if (str_eq to (sa-state-receiving)) 1 0)
+            (if (str_eq from (sa-state-receiving))
+                (if (or (str_eq to (sa-state-listening))
+                        (str_eq to (sa-state-attention))) 1 0)
+                (if (str_eq from (sa-state-listening))
+                    (if (or (str_eq to (sa-state-ready))
+                            (str_eq to (sa-state-attention))) 1 0)
+                    (if (str_eq from (sa-state-attention))
+                        (if (or (str_eq to (sa-state-listening))
+                                (str_eq to (sa-state-receiving))) 1 0)
+                        (if (str_eq from (sa-state-ready))
+                            (if (or (str_eq to (sa-state-ready))
+                                    (str_eq to (sa-state-listening))) 1 0)
+                            0))))))
+
+    ; Attention is (code message next-movement recording-kept).
+    (defn sa-attention (code)
+        (if (str_eq code "consent")
+            (list code "Everyone's agreement belongs in the room before recording begins."
+                       "Receive each person's yes, then begin together." 0)
+        (if (str_eq code "speech-not-ready")
+            (list code "The listening voice is still arriving on this computer."
+                       "Return to Sessions and leave the room open; it will continue here." 1)
+        (if (str_eq code "recording-empty")
+            (list code "No sound arrived in this session."
+                       "Return to the room and record or choose a sound file." 0)
+        (if (str_eq code "session-create")
+            (list code "This gathering did not find a place to rest."
+                       "The room is still open. Return once, then begin again." 0)
+        (if (str_eq code "recording-interrupted")
+            (list code "The recording paused before its last piece arrived."
+                       "The pieces that arrived are still here. Open the session and continue." 1)
+        (if (str_eq code "audio-unread")
+            (list code "The sound is here, but its present shape could not be heard."
+                       "Keep the original and bring another copy when it feels right." 1)
+        (if (str_eq code "speech-returned-nothing")
+            (list code "The sound crossed the speech path and no words returned."
+                       "Keep the recording; listen once, then invite the transcript to be tried again." 1)
+        (if (str_eq code "transcript-save")
+            (list code "The new words did not settle into the session."
+                       "Your recording and earlier transcript remain. Return and save once more." 1)
+        (if (str_eq code "session-unknown")
+            (list code "That session is not present in this library."
+                       "Return to Sessions or Archive and choose what is here." 0)
+        (if (str_eq code "request-unread")
+            (list code "This movement did not arrive whole."
+                       "Let the page return, then make the movement once more." 1)
+            (list code "This session is asking for attention."
+                       "The recording remains here. Return to the session and listen for the next movement." 1)
+        )))))))))))
+
+    (defn sa-att-code (a) (nth a 0))
+    (defn sa-att-message (a) (nth a 1))
+    (defn sa-att-next (a) (nth a 2))
+    (defn sa-att-kept? (a) (nth a 3))
+
+    (defn sa-session-id-byte? (b)
+        (or (and (ge b 48) (le b 57)) (eq b 45)))
+    (defn sa-session-id-loop (s i n)
+        (if (ge i n) 1
+            (if (sa-session-id-byte? (str_byte_at s i))
+                (sa-session-id-loop s (add i 1) n) 0)))
+    (defn sa-session-id? (s)
+        (if (or (eq (str_len s) 0) (gt (str_len s) 32)) 0
+            (sa-session-id-loop s 0 (str_len s))))
+
+    (defn sa-person-name? (s)
+        (if (or (eq (str_len s) 0) (gt (str_len s) 80)) 0 1))
+    (defn sa-speaker (name human-seen)
+        (if (and (eq human-seen 1) (eq (sa-person-name? name) 1))
+            name "Unknown speaker"))
+
+    (defn sa-html-byte (b)
+        (if (eq b 38) "&amp;"
+        (if (eq b 60) "&lt;"
+        (if (eq b 62) "&gt;"
+        (if (eq b 34) "&quot;"
+        (if (eq b 39) "&#39;" (byte_to_str b)))))))
+    (defn sa-html-loop (s i n acc)
+        (if (ge i n) acc
+            (sa-html-loop s (add i 1) n
+                (str_concat acc (sa-html-byte (str_byte_at s i))))))
+    (defn sa-html (s) (sa-html-loop s 0 (str_len s) ""))
+
+    (defn sa-hex (b)
+        (if (and (ge b 48) (le b 57)) (sub b 48)
+            (if (and (ge b 65) (le b 70)) (sub b 55)
+                (if (and (ge b 97) (le b 102)) (sub b 87) -1))))
+    (defn sa-url-decode-loop (s i n acc)
+        (if (ge i n) acc
+            (do
+                (let b (str_byte_at s i))
+                (if (eq b 43)
+                    (sa-url-decode-loop s (add i 1) n (str_concat acc " "))
+                    (if (and (eq b 37) (lt (add i 2) n))
+                        (do
+                            (let hi (sa-hex (str_byte_at s (add i 1))))
+                            (let lo (sa-hex (str_byte_at s (add i 2))))
+                            (if (and (ge hi 0) (ge lo 0))
+                                (sa-url-decode-loop s (add i 3) n
+                                    (str_concat acc (byte_to_str (add (mul hi 16) lo))))
+                                (sa-url-decode-loop s (add i 1) n
+                                    (str_concat acc (byte_to_str b)))))
+                        (sa-url-decode-loop s (add i 1) n
+                            (str_concat acc (byte_to_str b))))))))
+    (defn sa-url-decode (s) (sa-url-decode-loop s 0 (str_len s) ""))
+
+    (defn sa-source-link (session-id start-ms)
+        (str_concat "session:" (str_concat session-id
+            (str_concat "#t=" (int_to_str start-ms)))))
+
+    ; A readable transcript row keeps the machine-heard words, present edit,
+    ; source time, and human-seen speaker together.
+    (defn sa-row (start-ms end-ms heard text speaker human-seen)
+        (list start-ms end-ms heard text (sa-speaker speaker human-seen) human-seen
+              (if (str_eq heard text) 0 1)))
+    (defn sa-row-start (r) (nth r 0))
+    (defn sa-row-end (r) (nth r 1))
+    (defn sa-row-heard (r) (nth r 2))
+    (defn sa-row-text (r) (nth r 3))
+    (defn sa-row-speaker (r) (nth r 4))
+    (defn sa-row-human-seen? (r) (nth r 5))
+    (defn sa-row-edited? (r) (nth r 6))
+    (defn sa-row-sane? (r)
+        (if (and (ge (sa-row-start r) 0)
+                 (and (gt (sa-row-end r) (sa-row-start r))
+                      (and (gt (str_len (sa-row-heard r)) 0)
+                           (gt (str_len (sa-row-text r)) 0)))) 1 0))
+
+    0)

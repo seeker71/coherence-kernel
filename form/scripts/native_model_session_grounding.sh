@@ -169,9 +169,10 @@ labeled_pairs_observed=$(wc -l < "$pairs_all" | tr -d ' ')
 query_limit=${NATIVE_MODEL_SESSION_GROUNDING_QUERIES:-1}
 sort -k1,1 -u "$pairs_all" | tail -n "$query_limit" > "$pairs_raw"
 episode_count=$(wc -l < "$pairs_raw" | tr -d ' ')
-if [ "$episode_count" -lt 1 ]; then
-    printf 'no completed real queries cited a live indexed path\n' >&2
-    exit 1
+if [ "$episode_count" -eq 0 ]; then
+    quality_metric_observed=0
+else
+    quality_metric_observed=1
 fi
 
 salt_file="$NM_STATE_DIR/session-grounding-salt"
@@ -216,8 +217,14 @@ if [ "$distinct_label_count" -lt "$admitted_limit" ]; then
 else
     distractor_limit=0
 fi
-awk -F '\t' 'NR==FNR {wanted[$1]=1; next} !($1 in wanted)' \
-    "$label_ids" "$candidates" | sed -n "1,${distractor_limit}p" > "$distractor_candidates"
+if [ "$distinct_label_count" -eq 0 ]; then
+    # awk treats a following file as its first input when label_ids is empty.
+    # With no observed label, the deterministic live prefix is the whole pool.
+    sed -n "1,${distractor_limit}p" "$candidates" > "$distractor_candidates"
+else
+    awk -F '\t' 'NR==FNR {wanted[$1]=1; next} !($1 in wanted)' \
+        "$label_ids" "$candidates" | sed -n "1,${distractor_limit}p" > "$distractor_candidates"
+fi
 sort -u "$label_candidates" "$distractor_candidates" > "$admitted_candidates"
 cut -f1 "$admitted_candidates" | sort -u > "$admitted_ids"
 comm -23 "$label_ids" "$admitted_ids" > "$missing_labels"
@@ -245,7 +252,6 @@ build_source() {
         append_source "$destination" form/form-stdlib/str-byte-at.fk
         append_source "$destination" form/form-stdlib/base64.fk
     fi
-    append_source "$destination" form/form-stdlib/record-src-shim.fk
     for part in \
         form/form-stdlib/rag-embed.fk \
         form/form-stdlib/rag-retrieve.fk \
@@ -466,7 +472,7 @@ durable="$NM_STATE_DIR/session-grounding-${day}-${epoch}.txt"
     printf 'framing_preflight_min_labels=%s\n' "$framing_preflight_min_labels"
     printf 'production_cli_budget_seconds=%s\n' "$cli_budget"
     printf 'replay_elapsed_seconds=%s\n' "$replay_elapsed_seconds"
-    printf 'operational_timeout=0\nquality_metric_observed=1\n'
+    printf 'operational_timeout=0\nquality_metric_observed=%s\n' "$quality_metric_observed"
 } > "$durable"
 chmod 600 "$durable"
 digest=$(nm_sha256_file "$durable")

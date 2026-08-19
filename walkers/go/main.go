@@ -39,6 +39,7 @@ import (
 	"hash/fnv"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -1165,16 +1166,30 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 }
 
 // Category constructors (copied verbatim).
-func catMath(inst uint32) NodeID    { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMath, Inst: inst} }
-func catCompare(inst uint32) NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCompare, Inst: inst} }
-func catLogic(inst uint32) NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicLogic, Inst: inst} }
-func catCond(inst uint32) NodeID    { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCond, Inst: inst} }
-func catBlock(inst uint32) NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicBlock, Inst: inst} }
-func catMatch(inst uint32) NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMatch, Inst: inst} }
-func catChoice(inst uint32) NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicChoice, Inst: inst} }
-func catIdent() NodeID              { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicIdent, Inst: 1} }
-func catFnDef() NodeID              { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicFnDef, Inst: 1} }
-func catFnCall() NodeID             { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicFnCall, Inst: 1} }
+func catMath(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMath, Inst: inst}
+}
+func catCompare(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCompare, Inst: inst}
+}
+func catLogic(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicLogic, Inst: inst}
+}
+func catCond(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCond, Inst: inst}
+}
+func catBlock(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicBlock, Inst: inst}
+}
+func catMatch(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMatch, Inst: inst}
+}
+func catChoice(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicChoice, Inst: inst}
+}
+func catIdent() NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicIdent, Inst: 1} }
+func catFnDef() NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicFnDef, Inst: 1} }
+func catFnCall() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicFnCall, Inst: 1} }
 
 // readRootFromSource — wrap multiple top-level forms in an implicit do-block.
 // Copied verbatim from main.go.
@@ -1210,7 +1225,6 @@ func readRootFromSource(k *Kernel, src string) NodeID {
 // verbatim from main.go's registerNatives (Blueprint-attribution categories
 // dropped — they only fed the trace, which this walker omits).
 // ---------------------------------------------------------------------------
-
 
 func (k *Kernel) registerNative(name string, fn NativeFn) {
 	id := k.internName(name)
@@ -1313,8 +1327,98 @@ func (k *Kernel) registerNatives() {
 }
 
 // ---------------------------------------------------------------------------
-// Entry — read concatenated .fk source, evaluate, print the root value.
+// Entry — read a recursively imported .fk source, evaluate, print the root value.
 // ---------------------------------------------------------------------------
+
+func importPath(line string) (string, bool) {
+	s := strings.TrimSpace(line)
+	if strings.HasSuffix(s, ";") {
+		s = strings.TrimSpace(strings.TrimSuffix(s, ";"))
+	}
+	if !strings.HasPrefix(s, "import \"") || !strings.HasSuffix(s, "\"") {
+		return "", false
+	}
+	path := strings.TrimSuffix(strings.TrimPrefix(s, "import \""), "\"")
+	return path, path != ""
+}
+
+func resolveImport(ownerPath, imported string) (string, error) {
+	candidates := []string{}
+	if filepath.IsAbs(imported) {
+		candidates = append(candidates, imported)
+	} else {
+		candidates = append(candidates,
+			filepath.Join(filepath.Dir(ownerPath), imported),
+			imported,
+		)
+		if strings.HasPrefix(imported, "form/") {
+			candidates = append(candidates, strings.TrimPrefix(imported, "form/"))
+		}
+		for directory := filepath.Dir(ownerPath); ; {
+			candidates = append(candidates,
+				filepath.Join(directory, imported),
+				filepath.Join(directory, "form", imported),
+			)
+			parent := filepath.Dir(directory)
+			if parent == directory {
+				break
+			}
+			directory = parent
+		}
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("import %q from %s: file not found", imported, ownerPath)
+}
+
+func loadSourceFile(path string, seen map[string]bool, parts *[]string) error {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", path, err)
+	}
+	absolute = filepath.Clean(absolute)
+	if seen[absolute] {
+		return nil
+	}
+	b, err := os.ReadFile(absolute)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	seen[absolute] = true
+
+	lines := strings.Split(string(b), "\n")
+	body := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if dependency, ok := importPath(line); ok {
+			resolved, err := resolveImport(absolute, dependency)
+			if err != nil {
+				return err
+			}
+			if err := loadSourceFile(resolved, seen, parts); err != nil {
+				return err
+			}
+			continue
+		}
+		body = append(body, line)
+	}
+	*parts = append(*parts, strings.Join(body, "\n"))
+	return nil
+}
+
+func loadSourceClosure(paths []string) (string, error) {
+	parts := make([]string, 0, len(paths))
+	seen := make(map[string]bool)
+	for _, path := range paths {
+		if err := loadSourceFile(path, seen, &parts); err != nil {
+			return "", err
+		}
+	}
+	return strings.Join(parts, "\n"), nil
+}
 
 func main() {
 	args := os.Args[1:]
@@ -1322,16 +1426,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: walker <file.fk> [more.fk ...]")
 		os.Exit(2)
 	}
-	var parts []string
-	for _, path := range args {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "read %s: %v\n", path, err)
-			os.Exit(1)
-		}
-		parts = append(parts, string(b))
+	src, err := loadSourceClosure(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-	src := strings.Join(parts, "\n")
 
 	defer func() {
 		if r := recover(); r != nil {

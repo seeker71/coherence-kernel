@@ -1,0 +1,156 @@
+; dsv4-decode-token-hook.fk — the decode loop offers a Form recipe between
+; argmax and the next embedding. A gap here is attention, not a wall.
+;
+; THE FIVE ARE THE ONLY BOUNDS. axiom-1: silence / timeout is nothing, not
+; an error. axiom-2: the choice is a cell. axiom-3: a new choice mints a
+; new receipt; the default token stays referenced. axiom-4: the recipe
+; crosses only through the offered window. axiom-5: the offer is one act,
+; acked by nothing, 0, 1, or node.
+;
+; THE HOOK. After the default token is sampled, a recipe is offered the
+; same window dsv4-token-recipe-swap already holds. Nothing / decline /
+; lateness / less-vital keeps the default. A more-vital in-window node
+; replaces the token. The CHOSEN token is emitted AND embedded for the
+; next step. That is the hook being in the pipeline, not after it.
+;
+; A kernel-kind recipe may carry JIT MSL as its witness. The token is
+; still an id; the receipt names the kernel. Live GPU commit of that
+; text is a separate observation (metal-door-band; the live hook door).
+;
+; preludes: form-stdlib/core.fk form-stdlib/dsv4-token-recipe-swap.fk
+;
+; Proven by: form-stdlib/tests/dsv4-decode-token-hook-band.fk
+; witnessed: 2026-08-14 -> band 1023
+
+(do
+    ; ── toy logits: the next step depends on WHICH token was chosen ────
+    ; start        -> (3 1 0.5) argmax 0
+    ; after token 0 -> (1 4 0.5) argmax 1
+    ; after token 1 -> (0.2 0.3 0.1) argmax 1
+    ; after token 2 -> (0.1 0.2 5)   argmax 2
+    ; attestant stream from start: 0, 1, 1, ...
+    ; a recipe that replaces the first 0 with 2 yields: 2, 2, 2, ...
+    (defn ddth-table ()
+        (list (list 3.0 1.0 0.5)
+              (list 1.0 4.0 0.5)
+              (list 0.2 0.3 0.1)
+              (list 0.1 0.2 5.0)))
+    (defn ddth-start-logits () (nth (ddth-table) 0))
+    (defn ddth-logits-after (tok)
+        (if (lt tok 0) (ddth-start-logits)
+            (if (ge tok 3) (nth (ddth-table) 3)
+                (nth (ddth-table) (add tok 1)))))
+
+    (defn ddth-argmax-loop (xs i best bestv)
+        (if (eq (len xs) 0) best
+            (if (gt (head xs) bestv)
+                (ddth-argmax-loop (tail xs) (add i 1) i (head xs))
+                (ddth-argmax-loop (tail xs) (add i 1) best bestv))))
+    (defn ddth-argmax (xs)
+        (if (eq (len xs) 0) 0 (ddth-argmax-loop (tail xs) 1 0 (head xs))))
+
+    (defn ddth-window () (dtrs-dsv4-window 1000))
+    (defn ddth-default-cand (tok)
+        (dtrs-default-candidate (ddth-window) (dtrs-initial-baseline 70) tok 70 "ddth-argmax"))
+
+    ; A recipe candidate is already a dtrs-candidate. choose = dtrs-select.
+    (defn ddth-choose (tok alt)
+        (dtrs-select (ddth-window) (ddth-default-cand tok) alt))
+
+    (defn ddth-alt (recipe-id tok vitality started finished offered trusted observed)
+        (dtrs-candidate recipe-id
+            (dtrs-offer "node" tok 1000000000 vitality "ddth-recipe")
+            started finished offered trusted observed 1))
+
+    (defn ddth-kernel-alt (tok)
+        (dtrs-candidate "form-metal-matvec"
+            (dtrs-offer "node" tok 1000000000
+                (dtrs-vitality 91 90 89 88 87 86)
+                "kernel void form_matvec_f32")
+            1000 1020 1 1 1 1))
+
+    (defn ddth-silent-alt ()
+        (dtrs-candidate "form-silent"
+            (dtrs-offer "nothing" 0 0 0 "ddth-silence")
+            1000 1000 1 1 1 1))
+
+    (defn ddth-late-alt (tok)
+        (dtrs-candidate "form-late"
+            (dtrs-offer "1" tok 1000000000 (dtrs-vitality 91 90 89 88 87 86) "ddth-late")
+            1000 1035 1 1 1 1))
+
+    ; ── the loop: argmax -> offer -> emit chosen -> embed chosen ───────
+    ; alts is a list of alternatives, one per step (empty = no offer).
+    (defn ddth-step (logits alt)
+        (do
+            (let tok0 (ddth-argmax logits))
+            (let ch (if (eq (len alt) 0)
+                        (dtrs-choice (ddth-default-cand tok0) "no-offer" "default-more-vital-or-tie")
+                        (ddth-choose tok0 alt)))
+            (list (dtrs-choice-token ch)
+                  (dtrs-choice-reason ch)
+                  (dtrs-choice-alternative-state ch)
+                  tok0)))
+    (defn ddth-s-token  (s) (nth s 0))
+    (defn ddth-s-reason (s) (nth s 1))
+    (defn ddth-s-state  (s) (nth s 2))
+    (defn ddth-s-argmax (s) (nth s 3))
+
+    (defn ddth-loop (logits alts n acc)
+        (if (eq n 0) acc
+            (do
+                (let alt (if (eq (len alts) 0) (empty) (head alts)))
+                (let rest (if (eq (len alts) 0) (empty) (tail alts)))
+                (let s (ddth-step logits alt))
+                (ddth-loop (ddth-logits-after (ddth-s-token s)) rest (sub n 1)
+                    (cons (ddth-s-token s) acc)))))
+    (defn ddth-run (alts n)
+        (ddth-rev (ddth-loop (ddth-start-logits) alts n (empty)) (empty)))
+    (defn ddth-rev (xs acc)
+        (if (eq (len xs) 0) acc (ddth-rev (tail xs) (cons (head xs) acc))))
+
+    (defn ddth-eq-list (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) 1
+                (if (eq (head a) (head b)) (ddth-eq-list (tail a) (tail b)) 0))
+            0))
+
+    ; attestant: no offers, two steps -> (0 1)
+    (defn ddth-attestant () (ddth-run (empty) 2))
+
+    ; a gap is attention: named, and this cell is the attempt.
+    (defn ddth-attention (named attempted observed)
+        (list named attempted observed))
+    (defn ddth-attention-enter (a)
+        (if (eq (nth a 2) 1) 2
+            (if (eq (nth a 1) 1) 1 0)))
+
+    (defn ddthk (cond bit) (if cond bit 0))
+    (defn ddth-check ()
+        (do
+            (let att (ddth-attestant))
+            (let silent (ddth-run (list (ddth-silent-alt) (empty)) 2))
+            (let swap0 (ddth-kernel-alt 2))
+            (let swapped (ddth-run (list swap0 (empty)) 2))
+            (let late (ddth-run (list (ddth-late-alt 2) (empty)) 2))
+            (let first (ddth-step (ddth-start-logits) swap0))
+            (let after-swap (ddth-argmax (ddth-logits-after 2)))
+            (let after-default (ddth-argmax (ddth-logits-after 0)))
+            (let hook-gap (ddth-attention 1 1 1))
+            (add (add (add (add (add (add (add (add (add
+                (ddthk (ddth-eq-list att (list 0 1)) 1)
+                (ddthk (ddth-eq-list silent att) 2))
+                (ddthk (ddth-eq-list swapped (list 2 2)) 4))
+                (ddthk (and (eq (ddth-s-token first) 2)
+                            (str_eq (ddth-s-reason first) "recipe-more-vital")) 8))
+                (ddthk (and (eq after-swap 2) (eq after-default 1)) 16))
+                (ddthk (ddth-eq-list late att) 32))
+                (ddthk (str_eq (dtrs-choice-alternative-state
+                    (ddth-choose 0 (ddth-late-alt 2))) "timeout-nothing") 64))
+                (ddthk (ge (str_find
+                    (dtrs-offer-witness (dtrs-candidate-offer swap0))
+                    "kernel void" 0) 0) 128))
+                (ddthk (eq (ddth-s-argmax first) 0) 256))
+                (ddthk (eq (ddth-attention-enter hook-gap) 2) 512))))
+
+    0)

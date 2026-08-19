@@ -119,7 +119,11 @@ def main() -> int:
     ts_root = FORM_DIR / "form-kernel-ts" / "src"
     ts_sources = _source_texts(ts_root, ".ts")
     kernel_text = (ts_root / "kernel.ts").read_text(encoding="utf-8")
-    if 'import CATEGORY_CONTRACT from "../../category-contract.json";' not in kernel_text:
+    if not re.search(
+        r'import CATEGORY_CONTRACT from "\.\./\.\./category-contract\.json"'
+        r'(?: with \{ type: "json" \})?;',
+        kernel_text,
+    ):
         errors.append("TypeScript: kernel.ts does not import the canonical category contract")
     if "Object.freeze(CATEGORY_CONTRACT.r_basic)" not in kernel_text:
         errors.append("TypeScript: RBasic is not projected from category-contract.json")

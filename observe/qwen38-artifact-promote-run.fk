@@ -1,0 +1,75 @@
+; Promote only a whole-file Form-sealed artifact into normal model discovery.
+; The prior sparse attempt is preserved under a non-.gguf suffix so `models`
+; cannot accidentally select it.  This cell is effectful: do not preflight it.
+; preludes: form/form-stdlib/qwen35-artifact-fetch.fk
+
+(do
+    (defn qpr-root () "/Users/ursmuff/models/qwen38-27b/")
+    (defn qpr-name () "Qwen3.8-27B-Q8_0")
+    (defn qpr-path (suffix)
+        (str_concat (qpr-root) (str_concat (qpr-name) suffix)))
+    (defn qpr-clean-range-files ()
+        (sum (list
+            (fs-remove-file (qpr-path ".range-08-12"))
+            (fs-remove-file (qpr-path ".range-12-16"))
+            (fs-remove-file (qpr-path ".range-16-20"))
+            (fs-remove-file (qpr-path ".range-20-24"))
+            (fs-remove-file (qpr-path ".range-24-28"))
+            (fs-remove-file (qpr-path ".range-tail")))))
+    (defn qpr-rollback (canonical prior part canonical-seal part-seal old-sidecar prior-sidecar)
+        (do
+            (if (eq (fs-exists? canonical-seal) 1)
+                (fs-rename canonical-seal part-seal) 0)
+            (if (eq (fs-exists? canonical) 1) (fs-rename canonical part) 0)
+            (if (eq (fs-exists? prior) 1) (fs-rename prior canonical) 0)
+            (if (eq (fs-exists? prior-sidecar) 1)
+                (fs-rename prior-sidecar old-sidecar) 0)
+            0))
+    (defn qpr-promote ()
+        (do
+            (let canonical (qpr-path ".gguf"))
+            (let prior (qpr-path ".sparse-incomplete"))
+            (let part (qpr-path ".form-part.gguf"))
+            (let state (qpr-path ".form-part.state"))
+            (let kept-state (qpr-path ".form-download-state"))
+            (let old-sidecar (qpr-path ".gguf.aria2"))
+            (let prior-sidecar (qpr-path ".sparse-incomplete.aria2"))
+            (let part-seal (qaf-seal-path-for part))
+            (let canonical-seal (qaf-seal-path-for canonical))
+            (if (not (eq (qaf-verify-sealed-file part) 1))
+                (list "refused" "part-is-not-currently-sealed")
+            (if (eq (fs-exists? prior) 1)
+                (list "refused" "preservation-target-already-exists" prior)
+            (if (eq (fs-exists? kept-state) 1)
+                (list "refused" "state-preservation-target-already-exists" kept-state)
+            (if (eq (fs-exists? prior-sidecar) 1)
+                (list "refused" "sidecar-preservation-target-already-exists" prior-sidecar)
+            (if (not (eq (fs-rename canonical prior) 0))
+                (list "refused" "could-not-preserve-prior" canonical prior)
+            (if (and (eq (fs-exists? old-sidecar) 1)
+                     (not (eq (fs-rename old-sidecar prior-sidecar) 0)))
+                (do (fs-rename prior canonical)
+                    (list "refused" "could-not-preserve-prior-sidecar"
+                          old-sidecar prior-sidecar))
+            (if (not (eq (fs-rename part canonical) 0))
+                (do
+                    (if (eq (fs-exists? prior-sidecar) 1)
+                        (fs-rename prior-sidecar old-sidecar) 0)
+                    (fs-rename prior canonical)
+                    (list "refused" "could-not-promote-artifact" part canonical))
+            (if (not (eq (fs-rename part-seal canonical-seal) 0))
+                (do (qpr-rollback canonical prior part canonical-seal part-seal
+                                  old-sidecar prior-sidecar)
+                    (list "refused" "could-not-promote-seal" part-seal canonical-seal))
+            (if (not (eq (qaf-verify-sealed-file canonical) 1))
+                (do (qpr-rollback canonical prior part canonical-seal part-seal
+                                  old-sidecar prior-sidecar)
+                    (list "refused" "post-promotion-whole-file-verification"))
+                (do
+                    (let state-move
+                        (if (eq (fs-exists? state) 1)
+                            (fs-rename state kept-state) 0))
+                    (let cleaned (qpr-clean-range-files))
+                    (list "promoted" canonical prior prior-sidecar canonical-seal
+                          "state_move" state-move "temporary_cleanup_sum" cleaned)))))))))))))
+    (qpr-promote))

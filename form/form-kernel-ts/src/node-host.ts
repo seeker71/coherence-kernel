@@ -7,6 +7,7 @@
 import {
   appendFileSync,
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -20,7 +21,7 @@ import {
 } from "node:fs";
 import { randomBytes as nodeRandomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
 import type {
   KernelHost,
@@ -34,6 +35,24 @@ const UTF8_DECODER = new TextDecoder();
 const SOCKET_BYTES = 65_536;
 const HTTP_MAX_BODY_BYTES = 25 << 20;
 const HTTP_RESULT_BYTES = 64 << 20;
+
+function resolveHostReadPath(path: string): string {
+  if (path.length === 0 || isAbsolute(path) || existsSync(path)) return path;
+  let directory = process.cwd();
+  while (true) {
+    for (const candidate of [
+      join(directory, path),
+      join(directory, "form", path),
+      join(directory, "form", "form", path),
+    ]) {
+      if (existsSync(candidate)) return candidate;
+    }
+    const parent = dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  return path;
+}
 
 const SOCKET_WORKER_SOURCE = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
@@ -340,10 +359,12 @@ export function createNodeKernelHost(options: NodeKernelHostOptions = {}): Kerne
     // (fs::read_to_string) already yields Null on invalid UTF-8; this matches it, and the
     // caller's existing catch turns the throw into that same Null. Valid UTF-8 is untouched.
     readTextFile: (path) =>
-      new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path)),
-    readBinaryFile: (path) => readFileSync(path),
+      new TextDecoder("utf-8", { fatal: true }).decode(
+        readFileSync(resolveHostReadPath(path)),
+      ),
+    readBinaryFile: (path) => readFileSync(resolveHostReadPath(path)),
     readBinarySlice: (path, offset, length) => {
-      const descriptor = openSync(path, "r");
+      const descriptor = openSync(resolveHostReadPath(path), "r");
       try {
         const bytes = new Uint8Array(length);
         const count = readSync(descriptor, bytes, 0, length, offset);

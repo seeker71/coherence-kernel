@@ -503,6 +503,241 @@ kernel void isa_q4k_v3_f32 (device const uchar* qb [[buffer(0)]], device const f
 }
 Q4V3
 
+# ── STONE 18's variants: the 1.6x that remained after the map, separated one mechanism at a time. ──
+# slot4 (shipped) stops at 1.57-1.67x of ggml, and qk-matvec-slot.fk names the residue without
+# claiming its cause: "the byte loads and divisions DO cost". That sentence holds three distinct
+# hypotheses, so three variants, each moving ONE thing off slot4's map:
+#   v5h  d/dmin read as hardware half instead of the q4k_f16 transcription (2 decodes/superblock);
+#   v5u  ggml's uint16 in-place nibble arithmetic (nibbles used unshifted, 1/256 and 1/16 folded
+#        into the scale multiply) instead of byte loads + q4k_mod — the scales stay the body's;
+#   v5r  two rows per simdgroup with the 32 activations and their sums cached in registers across
+#        the row pair — ggml's register blocking, everything else the body's.
+cat >> "$work/tail.metal" <<'Q4V5'
+kernel void isa_q4k_v5h_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    uint r = gid / 32u; if (r >= rows) return;
+    uint nb = cols / 256u; uint rowbase = r * nb * 144u;
+    int ix = int(lane) / 8;
+    int it = q4k_mod(int(lane), 8);
+    int iq = it / 4;
+    int ir = q4k_mod(it, 4);
+    int qoff = 32 * iq + 8 * ir;
+    int yoff = 64 * iq + 8 * ir;
+    int j0 = 2 * iq;
+    float sumf = 0.0f;
+    for (uint i = uint(ix); i < nb; i += 4u) {
+        uint b = rowbase + i * 144u;
+        device const uchar* qs = qb + b + 16u + uint(qoff);
+        device const float* yv = x + i * 256u + uint(yoff);
+        device const half* dh = (device const half*)(qb + b);
+        float d = float(dh[0]);
+        float dmin = float(dh[1]);
+        int sc0 = q4k_sc(qb, b, j0);     int mn0 = q4k_mn(qb, b, j0);
+        int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1);
+        int sc2 = q4k_sc(qb, b, j0 + 4); int mn2 = q4k_mn(qb, b, j0 + 4);
+        int sc3 = q4k_sc(qb, b, j0 + 5); int mn3 = q4k_mn(qb, b, j0 + 5);
+        float4 sums = float4(0.0f); float4 xsum = float4(0.0f);
+        for (int m = 0; m < 8; ++m) {
+            int a1 = int(qs[m]); int a2 = int(qs[m + 64]);
+            float x0 = yv[m]; float x1 = yv[m + 32]; float x2 = yv[m + 128]; float x3 = yv[m + 160];
+            sums[0] += x0 * float(q4k_mod(a1, 16));
+            sums[1] += x1 * float(a1 / 16);
+            sums[2] += x2 * float(q4k_mod(a2, 16));
+            sums[3] += x3 * float(a2 / 16);
+            xsum[0] += x0; xsum[1] += x1; xsum[2] += x2; xsum[3] += x3;
+        }
+        sumf += (d * float(sc0)) * sums[0] - (dmin * float(mn0)) * xsum[0]
+              + (d * float(sc1)) * sums[1] - (dmin * float(mn1)) * xsum[1]
+              + (d * float(sc2)) * sums[2] - (dmin * float(mn2)) * xsum[2]
+              + (d * float(sc3)) * sums[3] - (dmin * float(mn3)) * xsum[3];
+    }
+    float s = metal::simd_sum(sumf);
+    if (lane == 0) y[r] = s;
+}
+kernel void isa_q4k_v5u_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    uint r = gid / 32u; if (r >= rows) return;
+    uint nb = cols / 256u; uint rowbase = r * nb * 144u;
+    int ix = int(lane) / 8;
+    int it = q4k_mod(int(lane), 8);
+    int iq = it / 4;
+    int ir = q4k_mod(it, 4);
+    int qoff = 32 * iq + 8 * ir;
+    int yoff = 64 * iq + 8 * ir;
+    int j0 = 2 * iq;
+    float sumf = 0.0f;
+    for (uint i = uint(ix); i < nb; i += 4u) {
+        uint b = rowbase + i * 144u;
+        device const uint16_t* q1 = (device const uint16_t*)(qb + b + 16u + uint(qoff));
+        device const uint16_t* q2 = (device const uint16_t*)(qb + b + 16u + uint(qoff) + 64u);
+        device const float* yv = x + i * 256u + uint(yoff);
+        float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u]));
+        float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u]));
+        int sc0 = q4k_sc(qb, b, j0);     int mn0 = q4k_mn(qb, b, j0);
+        int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1);
+        int sc2 = q4k_sc(qb, b, j0 + 4); int mn2 = q4k_mn(qb, b, j0 + 4);
+        int sc3 = q4k_sc(qb, b, j0 + 5); int mn3 = q4k_mn(qb, b, j0 + 5);
+        float4 acc1 = float4(0.0f); float4 acc2 = float4(0.0f);
+        float4 xsum = float4(0.0f);
+        for (short m = 0; m < 4; ++m) {
+            float xa0 = yv[2*m];       float xa1 = yv[2*m + 1];
+            float xb0 = yv[2*m + 32];  float xb1 = yv[2*m + 33];
+            float xc0 = yv[2*m + 128]; float xc1 = yv[2*m + 129];
+            float xd0 = yv[2*m + 160]; float xd1 = yv[2*m + 161];
+            acc1[0] += xa0 * (q1[m] & 0x000F) + xa1 * (1.0f/256.0f) * (q1[m] & 0x0F00);
+            acc1[1] += xb0 * (q1[m] & 0x00F0) + xb1 * (1.0f/256.0f) * (q1[m] & 0xF000);
+            acc2[0] += xc0 * (q2[m] & 0x000F) + xc1 * (1.0f/256.0f) * (q2[m] & 0x0F00);
+            acc2[1] += xd0 * (q2[m] & 0x00F0) + xd1 * (1.0f/256.0f) * (q2[m] & 0xF000);
+            xsum[0] += xa0 + xa1; xsum[1] += xb0 + xb1; xsum[2] += xc0 + xc1; xsum[3] += xd0 + xd1;
+        }
+        sumf += (d * float(sc0)) * acc1[0] - (dmin * float(mn0)) * xsum[0]
+              + (d * float(sc1)) * (1.0f/16.0f) * acc1[1] - (dmin * float(mn1)) * xsum[1]
+              + (d * float(sc2)) * acc2[0] - (dmin * float(mn2)) * xsum[2]
+              + (d * float(sc3)) * (1.0f/16.0f) * acc2[1] - (dmin * float(mn3)) * xsum[3];
+    }
+    float s = metal::simd_sum(sumf);
+    if (lane == 0) y[r] = s;
+}
+kernel void isa_q4k_v5r_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    uint r0 = (gid / 32u) * 2u; if (r0 >= rows) return;
+    uint nb = cols / 256u;
+    int ix = int(lane) / 8;
+    int it = q4k_mod(int(lane), 8);
+    int iq = it / 4;
+    int ir = q4k_mod(it, 4);
+    int qoff = 32 * iq + 8 * ir;
+    int yoff = 64 * iq + 8 * ir;
+    int j0 = 2 * iq;
+    float sumf0 = 0.0f; float sumf1 = 0.0f;
+    for (uint i = uint(ix); i < nb; i += 4u) {
+        device const float* yv = x + i * 256u + uint(yoff);
+        float ya[8]; float yb[8]; float yc[8]; float yd[8];
+        float4 xsum = float4(0.0f);
+        for (int m = 0; m < 8; ++m) {
+            ya[m] = yv[m]; yb[m] = yv[m + 32]; yc[m] = yv[m + 128]; yd[m] = yv[m + 160];
+            xsum[0] += ya[m]; xsum[1] += yb[m]; xsum[2] += yc[m]; xsum[3] += yd[m];
+        }
+        for (uint row = 0u; row < 2u; ++row) {
+            uint rr = r0 + row; if (rr >= rows) break;
+            uint b = rr * nb * 144u + i * 144u;
+            device const uchar* qs = qb + b + 16u + uint(qoff);
+            float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u]));
+            float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u]));
+            int sc0 = q4k_sc(qb, b, j0);     int mn0 = q4k_mn(qb, b, j0);
+            int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1);
+            int sc2 = q4k_sc(qb, b, j0 + 4); int mn2 = q4k_mn(qb, b, j0 + 4);
+            int sc3 = q4k_sc(qb, b, j0 + 5); int mn3 = q4k_mn(qb, b, j0 + 5);
+            float4 sums = float4(0.0f);
+            for (int m = 0; m < 8; ++m) {
+                int a1 = int(qs[m]); int a2 = int(qs[m + 64]);
+                sums[0] += ya[m] * float(q4k_mod(a1, 16));
+                sums[1] += yb[m] * float(a1 / 16);
+                sums[2] += yc[m] * float(q4k_mod(a2, 16));
+                sums[3] += yd[m] * float(a2 / 16);
+            }
+            float acc = (d * float(sc0)) * sums[0] - (dmin * float(mn0)) * xsum[0]
+                      + (d * float(sc1)) * sums[1] - (dmin * float(mn1)) * xsum[1]
+                      + (d * float(sc2)) * sums[2] - (dmin * float(mn2)) * xsum[2]
+                      + (d * float(sc3)) * sums[3] - (dmin * float(mn3)) * xsum[3];
+            if (row == 0u) { sumf0 += acc; } else { sumf1 += acc; }
+        }
+    }
+    float s0 = metal::simd_sum(sumf0);
+    float s1 = metal::simd_sum(sumf1);
+    if (lane == 0) { y[r0] = s0; if (r0 + 1u < rows) y[r0 + 1u] = s1; }
+}
+Q4V5
+
+# ── the composition, measured rather than multiplied: v5c = v5h + v5u; v5cu adds the unroll hint. ──
+cat >> "$work/tail.metal" <<'Q4V5C'
+kernel void isa_q4k_v5c_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    uint r = gid / 32u; if (r >= rows) return;
+    uint nb = cols / 256u; uint rowbase = r * nb * 144u;
+    int ix = int(lane) / 8;
+    int it = q4k_mod(int(lane), 8);
+    int iq = it / 4;
+    int ir = q4k_mod(it, 4);
+    int qoff = 32 * iq + 8 * ir;
+    int yoff = 64 * iq + 8 * ir;
+    int j0 = 2 * iq;
+    float sumf = 0.0f;
+    for (uint i = uint(ix); i < nb; i += 4u) {
+        uint b = rowbase + i * 144u;
+        device const uint16_t* q1 = (device const uint16_t*)(qb + b + 16u + uint(qoff));
+        device const uint16_t* q2 = (device const uint16_t*)(qb + b + 16u + uint(qoff) + 64u);
+        device const float* yv = x + i * 256u + uint(yoff);
+        device const half* dh = (device const half*)(qb + b);
+        float d = float(dh[0]);
+        float dmin = float(dh[1]);
+        int sc0 = q4k_sc(qb, b, j0);     int mn0 = q4k_mn(qb, b, j0);
+        int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1);
+        int sc2 = q4k_sc(qb, b, j0 + 4); int mn2 = q4k_mn(qb, b, j0 + 4);
+        int sc3 = q4k_sc(qb, b, j0 + 5); int mn3 = q4k_mn(qb, b, j0 + 5);
+        float4 acc1 = float4(0.0f); float4 acc2 = float4(0.0f);
+        float4 xsum = float4(0.0f);
+        for (short m = 0; m < 4; ++m) {
+            float xa0 = yv[2*m];       float xa1 = yv[2*m + 1];
+            float xb0 = yv[2*m + 32];  float xb1 = yv[2*m + 33];
+            float xc0 = yv[2*m + 128]; float xc1 = yv[2*m + 129];
+            float xd0 = yv[2*m + 160]; float xd1 = yv[2*m + 161];
+            acc1[0] += xa0 * (q1[m] & 0x000F) + xa1 * (1.0f/256.0f) * (q1[m] & 0x0F00);
+            acc1[1] += xb0 * (q1[m] & 0x00F0) + xb1 * (1.0f/256.0f) * (q1[m] & 0xF000);
+            acc2[0] += xc0 * (q2[m] & 0x000F) + xc1 * (1.0f/256.0f) * (q2[m] & 0x0F00);
+            acc2[1] += xd0 * (q2[m] & 0x00F0) + xd1 * (1.0f/256.0f) * (q2[m] & 0xF000);
+            xsum[0] += xa0 + xa1; xsum[1] += xb0 + xb1; xsum[2] += xc0 + xc1; xsum[3] += xd0 + xd1;
+        }
+        sumf += (d * float(sc0)) * acc1[0] - (dmin * float(mn0)) * xsum[0]
+              + (d * float(sc1)) * (1.0f/16.0f) * acc1[1] - (dmin * float(mn1)) * xsum[1]
+              + (d * float(sc2)) * acc2[0] - (dmin * float(mn2)) * xsum[2]
+              + (d * float(sc3)) * (1.0f/16.0f) * acc2[1] - (dmin * float(mn3)) * xsum[3];
+    }
+    float s = metal::simd_sum(sumf);
+    if (lane == 0) y[r] = s;
+}
+kernel void isa_q4k_v5cu_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    uint r = gid / 32u; if (r >= rows) return;
+    uint nb = cols / 256u; uint rowbase = r * nb * 144u;
+    int ix = int(lane) / 8;
+    int it = q4k_mod(int(lane), 8);
+    int iq = it / 4;
+    int ir = q4k_mod(it, 4);
+    int qoff = 32 * iq + 8 * ir;
+    int yoff = 64 * iq + 8 * ir;
+    int j0 = 2 * iq;
+    float sumf = 0.0f;
+    for (uint i = uint(ix); i < nb; i += 4u) {
+        uint b = rowbase + i * 144u;
+        device const uint16_t* q1 = (device const uint16_t*)(qb + b + 16u + uint(qoff));
+        device const uint16_t* q2 = (device const uint16_t*)(qb + b + 16u + uint(qoff) + 64u);
+        device const float* yv = x + i * 256u + uint(yoff);
+        device const half* dh = (device const half*)(qb + b);
+        float d = float(dh[0]);
+        float dmin = float(dh[1]);
+        int sc0 = q4k_sc(qb, b, j0);     int mn0 = q4k_mn(qb, b, j0);
+        int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1);
+        int sc2 = q4k_sc(qb, b, j0 + 4); int mn2 = q4k_mn(qb, b, j0 + 4);
+        int sc3 = q4k_sc(qb, b, j0 + 5); int mn3 = q4k_mn(qb, b, j0 + 5);
+        float4 acc1 = float4(0.0f); float4 acc2 = float4(0.0f);
+        float4 xsum = float4(0.0f);
+        _Pragma("clang loop unroll(full)") for (short m = 0; m < 4; ++m) {
+            float xa0 = yv[2*m];       float xa1 = yv[2*m + 1];
+            float xb0 = yv[2*m + 32];  float xb1 = yv[2*m + 33];
+            float xc0 = yv[2*m + 128]; float xc1 = yv[2*m + 129];
+            float xd0 = yv[2*m + 160]; float xd1 = yv[2*m + 161];
+            acc1[0] += xa0 * (q1[m] & 0x000F) + xa1 * (1.0f/256.0f) * (q1[m] & 0x0F00);
+            acc1[1] += xb0 * (q1[m] & 0x00F0) + xb1 * (1.0f/256.0f) * (q1[m] & 0xF000);
+            acc2[0] += xc0 * (q2[m] & 0x000F) + xc1 * (1.0f/256.0f) * (q2[m] & 0x0F00);
+            acc2[1] += xd0 * (q2[m] & 0x00F0) + xd1 * (1.0f/256.0f) * (q2[m] & 0xF000);
+            xsum[0] += xa0 + xa1; xsum[1] += xb0 + xb1; xsum[2] += xc0 + xc1; xsum[3] += xd0 + xd1;
+        }
+        sumf += (d * float(sc0)) * acc1[0] - (dmin * float(mn0)) * xsum[0]
+              + (d * float(sc1)) * (1.0f/16.0f) * acc1[1] - (dmin * float(mn1)) * xsum[1]
+              + (d * float(sc2)) * acc2[0] - (dmin * float(mn2)) * xsum[2]
+              + (d * float(sc3)) * (1.0f/16.0f) * acc2[1] - (dmin * float(mn3)) * xsum[3];
+    }
+    float s = metal::simd_sum(sumf);
+    if (lane == 0) y[r] = s;
+}
+Q4V5C
+
 cat "$work/ours.metal" "$work/tail.metal" > "$work/variants.metal"
 
 # ── the AIR both sides are counted in. There is no native slice to count: see the header. ──
@@ -625,10 +860,12 @@ var yLane: [Float]? = nil
 let sweep = qtype == 6
     ? ["form_q6k_matvec_lane_f32", "isa_q6k_v1_f32", "isa_q6k_v2_f32", "isa_q6k_v3_f32",
        "isa_q6k_v4_f32", "form_q6k_matvec_slot_f32"]
-    : ["form_q4k_matvec_lane_f32", "isa_q4k_v3_f32", "form_q4k_matvec_slot_f32", "form_q4k_matvec_slot4_f32"]
+    : ["form_q4k_matvec_lane_f32", "isa_q4k_v3_f32", "isa_q4k_v5h_f32", "isa_q4k_v5u_f32",
+       "isa_q4k_v5r_f32", "isa_q4k_v5c_f32", "isa_q4k_v5cu_f32",
+       "form_q4k_matvec_slot_f32", "form_q4k_matvec_slot4_f32"]
 for nm in sweep {
     pOurs = try dev.makeComputePipelineState(function: libOurs.makeFunction(name: nm)!)
-    oursNR0 = (nm == "isa_q6k_v4_f32") ? 2 : 1
+    oursNR0 = (nm == "isa_q6k_v4_f32" || nm == "isa_q4k_v5r_f32") ? 2 : 1
     _ = runOurs(1)
     var t = [Double]()
     for _ in 0..<3 { t.append(runOurs(iters)) }        // three runs, the minimum reported
