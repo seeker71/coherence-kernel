@@ -969,6 +969,8 @@ def run_stack(g, token, pos, n_layers, outdir):
             with open(os.path.join(outdir, "oracle-done.txt"), "a") as fh:
                 fh.write("%d\n" % il)
         resid = F["out_hc"]
+        if il == n_layers - 1 and os.environ.get("DSV4_ORACLE_HEAD") == "1":
+            run_head(g, resid, outdir, "after %d layers" % n_layers)
         # THE f32-STATE PROBE. DSV4_ORACLE_F32_STATE=1 rounds ONLY the state handed from one layer to the
         # next to f32, and leaves every arithmetic step in fp64. That is the one thing an f32 carrier
         # cannot avoid doing, so the distance between this trajectory and the pure-fp64 one is the floor
@@ -985,12 +987,67 @@ def run_stack(g, token, pos, n_layers, outdir):
     print("STACKEND %d" % n_layers)
 
 
+# ------------------------------------------------------------------ THE HEAD (ds4.c output_logits_one)
+# The stack's output is n_hc streams; a TOKEN needs them collapsed, normed and projected onto the vocab.
+# The collapse here is NOT hc_pre's. ds4.c's output_logits_one uses only the FIRST n_hc mix outputs and a
+# plain sigmoid gate -- no sinkhorn, no post, no comb -- and output_hc_fn is [16384, 4] wide, not 24, so
+# the file itself refuses the other reading. That is a CHOICE the artifact happens to record.
+#   rms_norm_no_weight(inp_hc)  ->  matvec_f16(output_hc_fn)
+#   w[i] = sigmoid(pre[i]*scale[0] + base[i]) + hc_eps
+#   hc_weighted_sum -> rms_norm_weight(output_norm) -> matvec(output.weight, MXFP8) -> logits[n_vocab]
+def head_logits(g, out_hc, K, GEO):
+    n_embd = GEO["n_embd"]; n_hc = GEO["n_hc"]; eps = GEO["eps"]; hc_eps = GEO["hc_eps"]
+    flat = rms_norm_no_weight(out_hc, eps)
+    rows = g.dims("output_hc_fn.weight")[1]
+    cols = g.dims("output_hc_fn.weight")[0]
+    pre = matvec_f16(g, "output_hc_fn.weight", flat, rows, cols)
+    scale = read_f32(g, "output_hc_scale.weight", 1)
+    base = read_f32(g, "output_hc_base.weight", n_hc)
+    w = [sigmoid(pre[i] * scale[0] + base[i]) + hc_eps for i in range(n_hc)]
+    embd = [sum(out_hc[h * n_embd + d] * w[h] for h in range(n_hc)) for d in range(n_embd)]
+    normed = rms_norm_weight(embd, read_f32(g, "output_norm.weight", n_embd), eps)
+    n_vocab = g.dims("output.weight")[1]
+    logits = mx8_matvec(g, "output.weight", normed, n_vocab, n_embd)
+    best, bestv = 0, logits[0]
+    for i, v in enumerate(logits):
+        if v > bestv:
+            bestv = v
+            best = i
+    return {"head_flat": flat, "head_pre": pre, "head_w": w, "head_embd": embd,
+            "head_normed": normed, "logits": logits, "argmax": best, "top": bestv}
+
+
+def run_head(g, out_hc, outdir, label):
+    K = g.kv
+    GEO = geometry(K)
+    H = head_logits(g, out_hc, K, GEO)
+    print("HEAD %s argmax %d top_logit %.17g n_vocab %d" % (label, H["argmax"], H["top"], len(H["logits"])))
+    if outdir:
+        for key in ("head_w", "head_embd", "head_normed", "logits"):
+            with open(os.path.join(outdir, "oracle-%s.f64" % key), "w") as fh:
+                for v in H[key]:
+                    fh.write("%.17g\n" % v)
+        with open(os.path.join(outdir, "oracle-argmax.txt"), "w") as fh:
+            fh.write("%d %.17g\n" % (H["argmax"], H["top"]))
+    return H
+
+
 # ------------------------------------------------------------------ the core
 def main():
     if len(sys.argv) < 4:
         raise SystemExit("usage: dsv4-mla-core-oracle.py <gguf> <token> <pos> [layer]")
     path, token, pos = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-    il = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+    # mode `head` computes the vocab head over an out_hc a previous stack run already wrote, so the head
+    # can be judged without paying for 43 layers again. argv[4] is that vector's path.
+    if os.environ.get("DSV4_ORACLE_MODE") == "head":
+        g = Gguf(path)
+        src = sys.argv[4]
+        vec = [float(x) for x in open(src)]
+        print("ORACLE dsv4-head over %s (%d entries)" % (src, len(vec)))
+        run_head(g, vec, os.environ.get("DSV4_ORACLE_OUT"), src)
+        print("END")
+        return
+    il = 0 if os.environ.get("DSV4_ORACLE_MODE") == "head" else int(sys.argv[4]) if len(sys.argv) > 4 else 0
     g = Gguf(path)
     K = g.kv
     # STONE 39: mode `stack` runs N heterogeneous layers, carrying the four hyper-connection streams,

@@ -5403,7 +5403,21 @@ func readRootFromSource(k *Kernel, src string) NodeID {
 		}
 	}
 	toks = tokenizeSexp(wrapped)
-	root, _ := k.readSexpr(toks, 0)
+	root, next := k.readSexpr(toks, 0)
+	// EVERY token must be consumed. Discarding the next position (`root, _ :=`)
+	// meant anything after the first complete form was silently dropped, so
+	// `(add 1 2))` answered 3 and exited 0 — the stray `)` never mentioned. That
+	// is the same silent acceptance this stone is about, sitting in the arm used
+	// as the oracle for the others: a reader that quietly ignores text it was
+	// given cannot be the thing that certifies the text was read. Leftover tokens
+	// are a refusal, and the message points at the first one.
+	if next < len(toks) {
+		t := toks[next]
+		panic(fmt.Sprintf("parse error: unexpected `%s` at line %d col %d after the program's "+
+			"last complete form — %d token(s) were never read. Trailing text is not silently "+
+			"ignored: the input does not parse as one program",
+			t.value, t.line, t.col, len(toks)-next))
+	}
 	return root
 }
 
@@ -5604,6 +5618,20 @@ func main() {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "form-kernel-go: %v\n", r)
+			// A PARSE error is a REFUSAL, not a crash. The two must not look alike:
+			// a crash trace reads as an environment failure ("the tool broke"), and
+			// anyone running a suite would chase the harness instead of the one
+			// missing character in their source. Refusing to read malformed or
+			// truncated text is this kernel working correctly, so it says so plainly
+			// and exits 1 with no host dump. Only a genuine walk-time fault — where
+			// the host stack and source excerpt are what a reader actually needs —
+			// still writes the trace.
+			if msg, ok := r.(string); ok && strings.HasPrefix(msg, "parse error:") {
+				os.Exit(1)
+			}
+			if err, ok := r.(error); ok && strings.HasPrefix(err.Error(), "parse error:") {
+				os.Exit(1)
+			}
 			var stack []string
 			if crashK != nil {
 				stack = crashK.formStack

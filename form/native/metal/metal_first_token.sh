@@ -1020,6 +1020,13 @@ if genOnly {
     let hitEos = (last == eosId || last == 128001 || last == 128009)
     if hitEos { g.out.removeLast() }
     report("slot-long ", g)
+    // PROSE DOES NOT FIT ON A LINE. `report` prints the text inside quotes on one line, which is
+    // right for a twelve-token fragment and wrong for an answer — the first newline the model emits
+    // makes the line unparseable, and the carrier that reads it reports "the harness's format
+    // moved" rather than an answer. A delimited block carries whatever the model wrote.
+    print("ANSWER-TEXT-BEGIN")
+    print(decodeIds(g.out))
+    print("ANSWER-TEXT-END")
     print("  STOP reason=\(hitEos ? "eos" : "cap") stop_id=\(hitEos ? last : -1) eos_id=\(eosId) generated=\(g.out.count) cap=\(nsteps)")
     print(String(format: "  LATENCY encode %.6f s + prefill %.3f s (%d prompt tokens) + decode %.3f s (%d forwards) = %.3f s in-process",
                  encodeS, g.prefill, promptIds.count, g.decode, g.forwards, encodeS + g.prefill + g.decode))
