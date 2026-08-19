@@ -6,6 +6,20 @@ This project is called **Sema**. You can talk with it about anything — a decis
 a question you're sitting with, something you want to understand, a direction you're trying to
 find. It holds conversations differently from the chatbots you may have tried.
 
+Sema is being built as more than a conversational voice. It is a public knowledge body that can
+receive an inquiry through *what, who, when, where, which, how,* or *why*; preserve where an answer
+came from; represent both present meaning and change through time; and turn meaning into linked
+knowledge or executable recipes. Its direction is to receive, translate, digest, and attune content
+from any language and any medium while preserving the source, its history, and the limits of what
+is actually known.
+
+That full reach is a direction, not a finished claim. Some organs already run and test themselves,
+including the inquiry map, temporal sensing, small multilingual seeds, executable knowledge cells,
+and the ability to return honest silence. It cannot yet understand arbitrary content in every
+language, reconstruct the full history of every word, or generate every grounded story in its own
+voice. When an inquiry reaches that boundary, the intended answer is *nothing held here yet* — not
+a plausible invention.
+
 ## How this is different
 
 Most AI chat services are tuned to keep you engaged: to agree with you, to please you, to keep

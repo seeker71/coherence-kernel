@@ -8,9 +8,18 @@ The clean kernel no longer borrows the origin's `validate.sh`. It crosses its ow
   investigate the native) / WALKER-SUSPECT (one walker odd — common, a proof-note). Encodes that the native
   walker is rarely the wrong one.
 
-Run it: `fkwu proof/four-way-run.tbl` (the flattened proof driver). `host-exec` is a host PORT
-(`runtime/fkwu-uni.c` optag 136, the VIA-HOST family) and `str_to_int` is optag 31; `fwv-verdict`
-computes 0=FOUR-WAY / 1=FKWU-SUSPECT / 2=WALKER-SUSPECT.
+The native proof entry is Form source:
+
+```sh
+./fkwu --src proof/four-way-ground.fk   # -> 0 (FOUR-WAY)
+```
+
+The outer host command only starts `fkwu`. `four-way-ground.fk` imports `four-way-run.fk` and
+`four-way-verdict.fk`; Form owns the four host-port invocations, parses their values, and computes
+0=FOUR-WAY / 1=FKWU-SUSPECT / 2=WALKER-SUSPECT. `form/validate.sh` remains useful bulk-suite
+development scaffolding, but its shell comparison is not the native proof claim. The older flattened invocation
+`fkwu proof/four-way-run.tbl` is historical only: direct `.tbl` execution was intentionally retired
+on 2026-07-05 in favor of `.fk`, `.fkb`, and `.dylib` program images.
 
 Perturbation-verified 2026-06-29 (the verdict is COMPUTED, not parse-to-zero): the three walkers each
 return 42 on `recipe42.fk` → verdict **0** (FOUR-WAY); force ts→99 → **2** (WALKER-SUSPECT); tell the
