@@ -1,0 +1,72 @@
+; sha256-arm64-jit-band.fk — Form's SHA2 opcode rows execute on this M4.
+;
+; The semantic witness is FIPS SHA-256("abc"), compared byte-for-byte with the
+; existing scalar Form SHA recipe.  No compiler or host digest utility enters.
+;
+; preludes: form-stdlib/form-asm.fk form-stdlib/sha256.fk form-stdlib/metal-door.fk form-stdlib/form-fs.fk native/metal/sha256-arm64-jit.fk
+
+(do
+    (let oracle-row
+        (fa-image (list
+            (fa-ldr-q 4 3 1)
+            (fa-str-q 5 4 2)
+            (fa-vrev32-b 4 5)
+            (fa-vadd-s 8 8 10)
+            (fa-vorr 9 0 0)
+            (fa-sha256h 0 1 8)
+            (fa-sha256h2 1 9 8)
+            (fa-sha256su0 4 5)
+            (fa-sha256su1 4 6 7))))
+    (let pinned-row
+        (list 100 4 192 61 133 8 128 61 164 8 32 110
+              8 133 170 78 9 28 160 78 32 64 8 94
+              33 81 8 94 164 40 40 94 196 96 7 94))
+    (let input-bytes
+        (str_concat "abc"
+            (str_concat (byte_to_str 128)
+                (str_concat (saj-zero-string 59) (byte_to_str 24)))))
+    (let input (metal_buf_alloc 64))
+    (let state (metal_buf_alloc 32))
+    (let rounds (metal_buf_alloc 256))
+    (let iw (metal_buf_write input 0 input-bytes))
+    (let sw (metal_buf_write state 0 (saj-initial-state-bytes)))
+    (let kw (metal_buf_write rounds 0 (saj-round-constant-bytes)))
+    (let pipeline (metal_pipeline (saj-code) "form_cpu_jit"))
+    (let ran (metal_enqueue pipeline (md-bind (list input state rounds) (list 1)) 1))
+    (let raw (metal_buf_read state 0 32))
+    (let digest (saj-state-digest raw))
+    (let expected (saj-byte-string (sha256 (list 97 98 99))))
+    (let status (metal_status))
+    (let file-path "/tmp/form-sha256-arm64-jit-abc")
+    (let fw (write_file file-path "abc"))
+    (let file-digest (saj-file-digest file-path 3))
+    ; The exact same two-block state must emerge when a process boundary falls
+    ; between blocks — the property the resumable artifact ledger depends on.
+    (let second-block (saj-zero-string 64))
+    (let both-h (metal_buf_alloc 128))
+    (let first-h (metal_buf_alloc 64))
+    (let second-h (metal_buf_alloc 64))
+    (metal_buf_write both-h 0 (str_concat input-bytes second-block))
+    (metal_buf_write first-h 0 input-bytes)
+    (metal_buf_write second-h 0 second-block)
+    (let joined-state (saj-compress-handle-state both-h (saj-initial-state-bytes) 2))
+    (let split-first (saj-compress-handle-state first-h (saj-initial-state-bytes) 1))
+    (let split-state (saj-compress-handle-state second-h split-first 1))
+    (let sf0 (metal_buf_free both-h))
+    (let sf1 (metal_buf_free first-h))
+    (let sf2 (metal_buf_free second-h))
+    (let f0 (metal_buf_free input))
+    (let f1 (metal_buf_free state))
+    (let f2 (metal_buf_free rounds))
+    (sum (list
+        (if (eq (fa-conviction oracle-row pinned-row) 1) 1 0)
+        (if (eq (str_len (saj-code)) (mul (len (saj-instruction-list)) 4)) 2 0)
+        (if (and (eq iw 64) (and (eq sw 32) (eq kw 256))) 4 0)
+        (if (gt pipeline 0) 8 0)
+        (if (eq ran 1) 16 0)
+        (if (and (eq (str_len digest) 32) (str_eq digest expected)) 32 0)
+        (if (and (eq f0 1) (and (eq f1 1) (eq f2 1))) 64 0)
+        (if (and (ge (str_find status "cpu_jit_dispatch=" 0) 0)
+                 (and (eq fw 3) (str_eq file-digest expected))) 128 0)
+        (if (and (str_eq joined-state split-state)
+                 (and (eq sf0 1) (and (eq sf1 1) (eq sf2 1)))) 256 0))))
