@@ -335,18 +335,70 @@
 (defn flt-do-let-n (s pos fns env val)
     (flt-do-let-v (flt-word s pos) s (fp-sym-end s pos) fns env val))
 (defn flt-do-let-v (name s pos fns env val)
-    (flt-do-let-done name (flt-peek s (fp-skip s pos)) s (flt-expr s pos fns env) fns env val))
+    (flt-do-let-done name (flt-peek s (fp-skip s pos)) (fp-skip s pos) s
+                     (flt-expr s pos fns env) fns env val))
 (defn flt-do-let-effect-op (op)
     (host-effect-op? op))
-(defn flt-do-let-done (name op s ve fns env val)
-    (if (eq (flt-do-let-store-op op fns env) 1)
+(defn flt-do-let-done (name op start s ve fns env val)
+    (if (eq (flt-do-let-store-op op start s (nth ve 1) fns env) 1)
         (flt-do-let-frame name s ve fns env val (add (flt-current-letdepth env) 1))
         (flt-do2 s (fp-skip s (fp-close s (nth ve 1))) fns
                  (cons (list name (nth ve 0)) env) val)))
-(defn flt-do-let-store-op (op fns env)
-    (if (eq (flt-do-let-effect-op op) 1) 1
-        (if (eq (flt-current-recursive env) 1) 0
-            (if (eq (len (flt-assoc op fns)) 0) 0 1))))
+; A LET IS A BINDING, and the test for that was reading one word deep.
+; flt-do-let-store-op asked only whether the value's HEAD op is an effect, so
+; `(let h (metal_buf_alloc 32))` stored while `(let r (if c (metal_enqueue …) 0))`
+; and `(let n (sub (metal_buf_alloc 16) 0))` were SUBSTITUTED — their expressions
+; copied to every mention and re-run there. Witnessed 2026-08-20 in the emitted
+; walker against the source runner, which binds once:
+;     (let arith (sub (metal_buf_alloc 16) 0))
+;     source runner  arith1=3 arith2=3     emitted walker  arith1=4 arith2=5
+; The cost in the standard path was not subtle: fcmg-run-context binds
+; `(let out (if … (q38-generate …)))` and reads `out` four times, so the built
+; form-cli RE-RAN a whole generation at each mention and answered a different
+; sentence than the same cells give under the source runner.
+; The law is unchanged — an effecting let stores — but it is now asked of the
+; WHOLE value, not of its first word. flt-span-effect? walks the value's own
+; source span and answers 1 if any symbol in it names an effect. The two cheap
+; tests run first so the common paths cost nothing new; the scan is the last
+; resort, and a false positive (an effect name inside a string literal) only ever
+; stores a let that could have been inlined, which is the safe direction.
+; Does the source span [pos,end) mention any effect op? Parens and delimiters are
+; stepped over; every symbol is asked of the vocabulary. Text, not tree, because
+; the value's cell is already built by the time the question matters and its span
+; is exactly what flt-expr just consumed.
+(defn flt-span-effect? (s pos end)
+    (if (ge pos end) 0
+        (do (let p (fp-skip s pos))
+            (if (ge p end) 0
+                (if (eq (fp-isdelim (fp-at s p)) 1)
+                    (flt-span-effect? s (add p 1) end)
+                    (do (let e (fp-sym-end s p))
+                        (if (eq (host-effect-op? (substring s p e)) 1) 1
+                            (flt-span-effect? s (if (gt e p) e (add p 1)) end))))))))
+; AND THE SPAN SCAN WAS STILL TOO SHALLOW. It sees the effects a value MENTIONS,
+; not the effects a value REACHES: `(let out (if … (q38-generate …)))` names no
+; effect op — every effect it performs is inside the recipe it calls — so the
+; built form-cli went on re-running a whole generation at each mention of `out`
+; even after the vocabulary was right. The scan is kept (it is what proves a
+; compound value effecting when the head alone does not), but the decision above
+; it is now the plain reading of what a `let` IS:
+;
+;   a COMPOUND value binds once. Only an atom — a literal or a bare name, where
+;   re-reading is re-reading and nothing more — may still be substituted.
+;
+; That is not a new law, it is the old one stopped from being clever. The cost is
+; frame slots for lets that used to be copied; the gain is that a name means the
+; same thing at its second mention as at its first, which is the whole of what a
+; binding promises. Measured after: no band moved, and the flattened table got
+; SMALLER — the copies it was making were never free.
+(defn flt-do-let-store-op (op start s end fns env)
+    (if (eq (fp-at s start) 40) 1
+        (if (eq (flt-do-let-effect-op op) 1) 1
+            (if (eq (flt-current-recursive env) 1)
+                (flt-span-effect? s start end)
+                (if (eq (len (flt-assoc op fns)) 0)
+                    (flt-span-effect? s start end)
+                    1)))))
 ; A stored let lowers to LETF: walk the value once, write it to the reserved
 ; frame slot fp+offset, walk the rest of the do with a frame-relative FARG
 ; binding. No fk_vsp push — the slot is pre-reserved, so it survives sub-calls
