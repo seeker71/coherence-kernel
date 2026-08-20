@@ -104,6 +104,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "metal_fence_wait", 1, 142 },
   { "mlx_status", 0, 143 },
   { "mlx_add", 2, 144 },
+  { "mlx_run", 1, 145 },
   { "sense_mic_count", 0, 205 },
   { "sense_cam_count", 0, 206 },
   { "sense_mic_name", 1, 207 },
