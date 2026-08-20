@@ -174,9 +174,20 @@ build_fkwu_src() {
         # by default (fk-metal-carrier.m header's own claim), and a link failure
         # falls back to the plain build — weak stubs answer SKIP, never crash.
         if [[ "$(uname -s)" == "Darwin" && -f "$carrier" ]]; then
-            cc -O2 -o "$bin" "$src" "$carrier" \
-                -framework Metal -framework Foundation -fobjc-arc 2>/dev/null \
-                || cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+            local mlx_c="native/mlx/fk-mlx-carrier.c"
+            if [[ -f /opt/homebrew/lib/libmlxc.dylib && -f "$mlx_c" ]]; then
+                cc -O2 -o "$bin" "$src" "$carrier" "$mlx_c" \
+                    -framework Metal -framework Foundation -fobjc-arc \
+                    -I/opt/homebrew/include -L/opt/homebrew/lib -lmlxc -Wl,-rpath,/opt/homebrew/lib \
+                    2>/dev/null \
+                    || cc -O2 -o "$bin" "$src" "$carrier" \
+                        -framework Metal -framework Foundation -fobjc-arc 2>/dev/null \
+                    || cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+            else
+                cc -O2 -o "$bin" "$src" "$carrier" \
+                    -framework Metal -framework Foundation -fobjc-arc 2>/dev/null \
+                    || cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+            fi
         else
             cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
         fi
