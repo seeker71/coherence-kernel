@@ -1022,6 +1022,11 @@ FK_METAL_WEAK long long fk_mlx_add_external(long long a, long long b) {
     (void)b;
     return FK_MLX_UNLINKED;
 }
+FK_METAL_WEAK long long fk_mlx_run_external(const char *src, long long n) {
+    (void)src;
+    (void)n;
+    return FK_MLX_UNLINKED;
+}
 static long long fk_srange(long long sv, const char **ptr, long long *len) {
     long long sa = fk_stri(sv);
     if (sa < 0 || sa >= fk_sp) {
@@ -1241,6 +1246,18 @@ static long long fk_mlx_status_native(void) {
 }
 static long long fk_mlx_add_native(long long a, long long b) {
     long long r = fk_mlx_add_external(a, b);
+    if (r == FK_MLX_UNLINKED) {
+        return 0;
+    }
+    return r;
+}
+static long long fk_mlx_run_native(long long srcv) {
+    const char *p;
+    long long n;
+    if (!fk_srange(srcv, &p, &n)) {
+        return 0;
+    }
+    long long r = fk_mlx_run_external(p, n);
     if (r == FK_MLX_UNLINKED) {
         return 0;
     }
@@ -7960,6 +7977,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long a144 = fk_walk(fk_node[i][1], fp) >> 1;
         long long b144 = fk_walk(fk_node[i][2], fp) >> 1;
         return fk_mlx_add_native(a144, b144) << 1;
+    }
+    if (t == 145) {
+        return fk_mlx_run_native(fk_walk(fk_node[i][1], fp)) << 1;
     }
     if (t == 205) {
         return fk_mic_count() << 1;
