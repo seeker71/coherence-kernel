@@ -79,6 +79,8 @@ static int fk_mlx_binop(const char *op, mlx_array *st, int *sp, mlx_stream s) {
         rc = mlx_multiply(&c, a, b, s);
     } else if (strcmp(op, "sub") == 0) {
         rc = mlx_subtract(&c, a, b, s);
+    } else if (strcmp(op, "max") == 0) {
+        rc = mlx_maximum(&c, a, b, s);
     } else {
         mlx_array_free(a);
         mlx_array_free(b);
@@ -102,6 +104,64 @@ static int fk_mlx_binop(const char *op, mlx_array *st, int *sp, mlx_stream s) {
     return 0;
 }
 
+static int fk_mlx_vecn(const char *tok, int *n) {
+    if (tok[0] != 'v' || tok[1] == 0) {
+        return 0;
+    }
+    if (!fk_mlx_num(tok + 1)) {
+        return 0;
+    }
+    *n = atoi(tok + 1);
+    return *n >= 1 && *n <= 16;
+}
+
+static int fk_mlx_unop(const char *op, mlx_array *st, int *sp, mlx_stream s) {
+    if (strcmp(op, "sum") != 0) {
+        return 1;
+    }
+    if (*sp < 1) {
+        fk_mlx_seterr("stack underflow");
+        return -1;
+    }
+    mlx_array a = st[--(*sp)];
+    mlx_array c = mlx_array_new();
+    int rc = mlx_sum(&c, a, false, s);
+    mlx_array_free(a);
+    if (rc != 0) {
+        mlx_array_free(c);
+        fk_mlx_seterr("mlx unop failed");
+        return -1;
+    }
+    if (*sp >= 32) {
+        mlx_array_free(c);
+        fk_mlx_seterr("stack overflow");
+        return -1;
+    }
+    st[(*sp)++] = c;
+    return 0;
+}
+
+static int fk_mlx_push_vec(const char **p, const char *end, int n, mlx_array *st, int *sp) {
+    int32_t data[16];
+    char tok[64];
+    int i = 0;
+    while (i < n) {
+        if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+            fk_mlx_seterr("vec needs integer lanes");
+            return -1;
+        }
+        data[i++] = (int32_t)atoi(tok);
+    }
+    if (*sp >= 32) {
+        fk_mlx_seterr("stack overflow");
+        return -1;
+    }
+    int shape[1];
+    shape[0] = n;
+    st[(*sp)++] = mlx_array_new_data(data, shape, 1, MLX_INT32);
+    return 0;
+}
+
 long long fk_mlx_run_external(const char *src, long long n) {
     if (src == 0 || n <= 0) {
         fk_mlx_seterr("empty program");
@@ -118,6 +178,8 @@ long long fk_mlx_run_external(const char *src, long long n) {
     char tok[64];
     int fail = 0;
     while (!fail && fk_mlx_tok(&p, end, tok, 64)) {
+        int vn = 0;
+        int u = 0;
         if (fk_mlx_num(tok)) {
             if (sp >= 32) {
                 fk_mlx_seterr("stack overflow");
@@ -125,6 +187,14 @@ long long fk_mlx_run_external(const char *src, long long n) {
                 break;
             }
             st[sp++] = mlx_array_new_int(atoi(tok));
+        } else if (fk_mlx_vecn(tok, &vn)) {
+            if (fk_mlx_push_vec(&p, end, vn, st, &sp) != 0) {
+                fail = 1;
+            }
+        } else if ((u = fk_mlx_unop(tok, st, &sp, s)) != 1) {
+            if (u != 0) {
+                fail = 1;
+            }
         } else if (fk_mlx_binop(tok, st, &sp, s) != 0) {
             fail = 1;
         }
