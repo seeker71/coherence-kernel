@@ -1,0 +1,104 @@
+; metal-pipeline-compile-cost-probe.fk — what the SECOND kernel of the same MSL source costs.
+;
+; RESULT (Apple M4 Max, 3 runs, 2026-08-19): THE HYPOTHESIS BELOW IS REFUTED. Over the real
+; 12,518-byte llama decode source, the FIRST kernel name cost 75 ms on the session's cold first
+; touch and 29-32 ms warm; the THIRTEEN further names cost 1-2 ms TOTAL, and asking for the first
+; name a second time cost 0 ms. Metal's front end already shares its compilation work across
+; newLibraryWithSource calls on identical text, so the fourteen-fold key is not a fourteen-fold
+; compile. There is no per-process compile tax to remove and no MTLLibrary cache worth adding:
+; one process start pays ~30 ms once, against a decode measured in seconds. The plausible
+; optimization this probe was written to justify does not exist. Kept, run and named so the next
+; reader does not re-derive it: ingest/frontier-ingest-omlx.fk composts it as U7.
+;
+; NOT A BAND, on purpose, and named so validate.sh does not read it as one: it answers durations,
+; and a duration is not a verdict. Two runs disagree by milliseconds and both are right.
+;
+; THE QUESTION. fk-metal-carrier.m's metal_pipeline caches by `fn + "\n" + src`, so the cache is
+; keyed on the FUNCTION NAME as well as the text. A decode lane that needs fifteen kernels out of
+; ONE emitted source therefore calls newLibraryWithSource fifteen times on the same bytes —
+; llama-token-handle.fk's lth-pipes is exactly that shape, and so is every DS4 handle. If the
+; Metal front end is doing real work each time, the fourteen repeats are pure tax paid once per
+; PROCESS, on every process, forever.
+;
+; WHAT IS MEASURED. The real llama decode source — qml-msl-header + q6m-msl-unit + q4m-msl-unit +
+; ldm-msl-unit, the same text lth-msl assembles — compiled for its first kernel, then for each
+; further kernel, each timed alone. Then the FIRST name is asked for a second time, which must be
+; the pure cache-hit cost. Nothing here dispatches; no buffer is allocated.
+;
+; HOW TO READ IT. If per-name cost after the first is near the cache-hit cost, the front end is
+; already sharing its work and there is nothing to win. If it is near the first cost, the library
+; is being rebuilt per name, and one MTLLibrary cache keyed on the SOURCE ALONE removes n-1 of n
+; compiles from every process start.
+;
+; RUN (the repo-root Metal-linked fkwu):
+;   rm -f form/form-stdlib/tests/metal-pipeline-compile-cost-probe.fkb
+;   ./fkwu-metal form/form-stdlib/tests/metal-pipeline-compile-cost-probe.fk
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/trig.fk form-stdlib/transformer-numerics.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk form-stdlib/qk-matvec-lane.fk
+
+(do
+    ; the same text lth-msl assembles, minus the copy kernel llama-token-handle authors locally
+    (defn mpc-msl ()
+        (str_concat (qml-msl-header)
+        (str_concat (q6m-msl-unit "form_q6k_dequant_f32" "form_q6k_matvec_f32")
+        (str_concat (q4m-msl-unit "form_q4k_dequant_f32" "form_q4k_matvec_f32")
+                    (ldm-msl-unit)))))
+
+    (defn mpc-say (label ms h)
+        (print_str (str_concat label (str_concat " ms " (str_concat (int_to_str ms)
+                   (str_concat " pipe " (int_to_str h)))))))
+
+    (let msl (mpc-msl))
+    (print_str (str_concat "msl-bytes " (int_to_str (str_len msl))))
+
+    (let t0 (now_unix_ms))
+    (let p0 (metal_pipeline msl "form_q6k_dequant_f32"))
+    (let t1 (now_unix_ms))
+    (let p1 (metal_pipeline msl "form_q6k_matvec_f32"))
+    (let t2 (now_unix_ms))
+    (let p2 (metal_pipeline msl "form_q4k_dequant_f32"))
+    (let t3 (now_unix_ms))
+    (let p3 (metal_pipeline msl "form_q4k_matvec_f32"))
+    (let t4 (now_unix_ms))
+    (let p4 (metal_pipeline msl "form_rmsnorm_f32"))
+    (let t5 (now_unix_ms))
+    (let p5 (metal_pipeline msl "form_rope_f32"))
+    (let t6 (now_unix_ms))
+    (let p6 (metal_pipeline msl "form_gqa_decode_f32"))
+    (let t7 (now_unix_ms))
+    (let p7 (metal_pipeline msl "form_swiglu_f32"))
+    (let t8 (now_unix_ms))
+    (let p8 (metal_pipeline msl "form_add_f32"))
+    (let t9 (now_unix_ms))
+    (let p9 (metal_pipeline msl "form_argmax_f32"))
+    (let t10 (now_unix_ms))
+    (let p10 (metal_pipeline msl "form_rmsnorm_tg_f32"))
+    (let t11 (now_unix_ms))
+    (let p11 (metal_pipeline msl "form_rope_pair_f32"))
+    (let t12 (now_unix_ms))
+    (let p12 (metal_pipeline msl "form_argmax_part_f32"))
+    (let t13 (now_unix_ms))
+    (let p13 (metal_pipeline msl "form_argmax_comb_f32"))
+    (let t14 (now_unix_ms))
+    ; the same NAME again — pure cache hit, no compile
+    (let again (metal_pipeline msl "form_q6k_dequant_f32"))
+    (let t15 (now_unix_ms))
+
+    (mpc-say "1  q6k_dequant   FIRST" (sub t1 t0) p0)
+    (mpc-say "2  q6k_matvec         " (sub t2 t1) p1)
+    (mpc-say "3  q4k_dequant        " (sub t3 t2) p2)
+    (mpc-say "4  q4k_matvec         " (sub t4 t3) p3)
+    (mpc-say "5  rmsnorm            " (sub t5 t4) p4)
+    (mpc-say "6  rope               " (sub t6 t5) p5)
+    (mpc-say "7  gqa_decode         " (sub t7 t6) p6)
+    (mpc-say "8  swiglu             " (sub t8 t7) p7)
+    (mpc-say "9  add                " (sub t9 t8) p8)
+    (mpc-say "10 argmax             " (sub t10 t9) p9)
+    (mpc-say "11 rmsnorm_tg         " (sub t11 t10) p10)
+    (mpc-say "12 rope_pair          " (sub t12 t11) p11)
+    (mpc-say "13 argmax_part        " (sub t13 t12) p12)
+    (mpc-say "14 argmax_comb        " (sub t14 t13) p13)
+    (mpc-say "15 q6k_dequant AGAIN  " (sub t15 t14) again)
+    (print_str (str_concat "all-14-names-total-ms " (int_to_str (sub t14 t0))))
+    (print_str (str_concat "after-first-13-names-ms " (int_to_str (sub t14 t1))))
+    (sub t14 t0))

@@ -223,7 +223,11 @@
                 1)
             0))
 
-    (defn q38-forward (ps bs geo lays sts embTv onormTv projTv id pos)
+    ; The state half of a forward: embed the token and run every block, which is
+    ; what advances this position's stream state and KV rows.  It stops before the
+    ; head, because the head answers a QUESTION (which token is next) and a
+    ; position nobody asks about does not need it asked.
+    (defn q38-forward-state (ps bs geo lays sts embTv id pos)
         (do
             (metal_batch_concurrent)
             (metal_enqueue (nth ps 30)
@@ -231,8 +235,24 @@
                          (list (mul id (nth geo 0)) (nth geo 0)) 0 0)
                 (nth geo 0))
             (q38-blocks ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22))
+            1))
+
+    (defn q38-forward (ps bs geo lays sts embTv onormTv projTv id pos)
+        (do
+            (q38-forward-state ps bs geo lays sts embTv id pos)
             (q38-head ps bs geo onormTv projTv)
             (kth-u32at (metal_buf_read (nth bs 31) 0 4) 0)))
+
+    ; Advance one position without asking the head.  metal_sync stands exactly
+    ; where the argmax read-back stood in a full forward: the batch is submitted
+    ; and waited on before the next position is encoded, so this position's state
+    ; and KV writes are complete before the next one reads them.  Same ordering,
+    ; one fewer question.
+    (defn q38-advance (ps bs geo lays sts embTv id pos)
+        (do
+            (q38-forward-state ps bs geo lays sts embTv id pos)
+            (metal_sync)
+            1))
 
     (defn q38-stop? (id stops)
         (if (eq (len stops) 0) 0
@@ -244,10 +264,17 @@
                     (q38-generate ps bs geo lays sts embTv onormTv projTv
                                   nid (add pos 1) (sub n 1) stops (append acc (list nid)))))))
 
+    ; Prefill asks the head ONCE, at the last prompt position — the only position
+    ; whose answer is read.  Every earlier position runs the state half only.  The
+    ; head is output_norm plus the vocab-wide output projection plus the argmax
+    ; fold, and the projection is the single largest tensor in the file; running it
+    ; for a prompt token and discarding its answer was pure weight traffic.  What
+    ; each position leaves behind — its stream state, its KV rows — is unchanged,
+    ; so the first generated token is the same token, bit for bit.
     (defn q38-prefill (ps bs geo lays sts embTv onormTv projTv ids pos)
         (if (eq (len ids) 1)
             (list (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos) (add pos 1))
-            (do (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos)
+            (do (q38-advance ps bs geo lays sts embTv (head ids) pos)
                 (q38-prefill ps bs geo lays sts embTv onormTv projTv (tail ids) (add pos 1)))))
 
     (defn q38-key (arch suffix) (str_concat arch (str_concat "." suffix)))

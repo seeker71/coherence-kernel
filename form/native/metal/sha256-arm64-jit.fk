@@ -128,6 +128,26 @@
     ; Continue an unpadded SHA state across a handle whose byte count is an
     ; exact number of 64-byte blocks.  This is the resumable downloader seam:
     ; the returned 32 bytes are the actual eight hardware-updated state words.
+    ; A CONDITIONAL EFFECT MUST BE A NAMED RECIPE, not an `if` in a let's value.
+    ; form-flatten.fk's flt-do-let-store-op decides whether a let gets a real
+    ; frame slot by looking at the HEAD op of its value and nothing deeper: an op
+    ; named in host-effect-grammar.fk stores, a call to a known recipe stores, and
+    ; everything else is SUBSTITUTED into the environment and re-evaluated at every
+    ; mention.  `(let ran (if c (metal_enqueue …) 0))` has `if` at its head, so it
+    ; was re-dispatched on each read of `ran`, and `(let raw (if (eq ran 1)
+    ; (metal_buf_read …) ""))` re-read on each mention of `raw` — the guards then
+    ; disagreed with each other and this recipe answered "" (2026-08-20, witnessed
+    ; through the emitted walker while the source runner, which binds lets once,
+    ; answered correctly).  Each conditional effect below is a recipe, so the let
+    ; binds a CALL and stores.  The head-op-only decision is the deeper thread and
+    ; is named in receipts/2026-08-20-the-let-that-allocated-four-times.md.
+    (defn saj-dispatch (message state rounds block-count sw kw)
+        (if (and (eq sw 32) (eq kw 256))
+            (metal_enqueue (metal_pipeline (saj-code) "form_cpu_jit")
+                (md-bind (list message state rounds) (list block-count)) 1)
+            0))
+    (defn saj-read-state (ran state)
+        (if (eq ran 1) (metal_buf_read state 0 32) ""))
     (defn saj-compress-handle-state (message state-raw block-count)
         (if (not (eq (str_len state-raw) 32)) ""
             (if (eq block-count 0) state-raw
@@ -138,13 +158,8 @@
                         (do
                             (let sw (metal_buf_write state 0 state-raw))
                             (let kw (metal_buf_write rounds 0 (saj-round-constant-bytes)))
-                            (let pipeline (metal_pipeline (saj-code) "form_cpu_jit"))
-                            (let ran
-                                (if (and (eq sw 32) (eq kw 256))
-                                    (metal_enqueue pipeline
-                                        (md-bind (list message state rounds) (list block-count)) 1)
-                                    0))
-                            (let raw (if (eq ran 1) (metal_buf_read state 0 32) ""))
+                            (let ran (saj-dispatch message state rounds block-count sw kw))
+                            (let raw (saj-read-state ran state))
                             (let f0 (metal_buf_free state))
                             (let f1 (metal_buf_free rounds))
                             (if (and (eq (str_len raw) 32) (and (eq f0 1) (eq f1 1)))
@@ -162,6 +177,14 @@
                             (let freed (metal_buf_free message))
                             (if (eq freed 1) raw "")))))))
 
+    ; Same law as saj-dispatch above: the conditional is a recipe, so the let that
+    ; holds its answer stores instead of re-running it.  Here the cost of getting
+    ; it wrong was exact — `freed` is read before `raw` in the closing guard, so an
+    ; inlined `raw` re-entered the compressor with a handle that had just been
+    ; released, and the whole digest came back empty.
+    (defn saj-compress-written (pad state-raw pw)
+        (if (eq pw 64) (saj-compress-handle-state pad state-raw 1) ""))
+
     (defn saj-final-digest-from-state (state-raw tail-bytes total-bytes)
         (if (or (not (eq (str_len state-raw) 32))
              (or (not (eq (str_len tail-bytes) (mod total-bytes 64)))
@@ -172,9 +195,7 @@
                 (if (le pad 0) ""
                     (do
                         (let pw (metal_buf_write pad 0 padding))
-                        (let raw
-                            (if (eq pw 64)
-                                (saj-compress-handle-state pad state-raw 1) ""))
+                        (let raw (saj-compress-written pad state-raw pw))
                         (let freed (metal_buf_free pad))
                         (if (and (eq freed 1) (eq (str_len raw) 32))
                             (saj-state-digest raw) ""))))))

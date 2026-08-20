@@ -48,6 +48,45 @@
                 (int_to_str end-to-end-tokps-x1000))
             (str_concat "text:\n" text)))))))))))))))))
 
+    ; ── residence ─────────────────────────────────────────────────────────────
+    ; A model admitted once should not be admitted again to answer a second
+    ; sentence.  Measured on this M4 Max against Qwen3.8-27B-Q8_0 (2026-08-19,
+    ; observe/qwen38-generate-phase-run.fk, and receipts/2026-08-19-omlx-in-the-standard-path.md):
+    ; re-verifying the whole-file SHA-256 seal is 13.4 s, opening the tensor views
+    ; and compiling the kernels is 15.6 s, and the GPU work of a 54-token prompt
+    ; with ten generated tokens is 7.1 s.  Setup was four times the inference, and
+    ; it was paid again on every single call.
+    ;
+    ; A residence is that admission, held: the sealed path, the position ceiling it
+    ; was opened for, the opened context, and the header window and architecture
+    ; read from it.  Nothing here is a mode or a switch — a caller that has no
+    ; residence hands `fcmr-none` and gets the old open-run-close exactly, and a
+    ; caller that keeps what it is handed back reuses it whenever the same file can
+    ; still hold the next prompt.  The stream state is NOT part of it: state is what
+    ; one conversation writes, so it is made and released per generation.
+    (defn fcmr-mark () "fcmg-resident1")
+    (defn fcmr (path maxpos ctx src arch) (list (fcmr-mark) path maxpos ctx src arch))
+    (defn fcmr-none () (empty))
+    (defn fcmr-live? (r)
+        (if (eq (len r) 6) (if (str_eq (nth r 0) (fcmr-mark)) 1 0) 0))
+    (defn fcmr-path (r) (nth r 1))
+    (defn fcmr-maxpos (r) (nth r 2))
+    (defn fcmr-ctx (r) (nth r 3))
+    (defn fcmr-src (r) (nth r 4))
+    (defn fcmr-arch (r) (nth r 5))
+    ; The same file, and a ceiling this residence can still reach.  A longer prompt
+    ; than the one it was opened for is not refused — it reopens, because the KV
+    ; extent was derived from that first need and there is no knob to raise.
+    (defn fcmr-fits? (r path need)
+        (if (eq (fcmr-live? r) 1)
+            (if (str_eq (fcmr-path r) path)
+                (if (le need (fcmr-maxpos r)) 1 0) 0) 0))
+    (defn fcmr-release-ok? (r)
+        (if (eq (fcmr-live? r) 1)
+            (if (eq (q38-close (fcmr-ctx r) (empty))
+                    (q38-close-expected (fcmr-ctx r) (empty))) 1 0)
+            1))
+
     ; Closing is part of the result.  A run that generated text but did not
     ; release every model/state handle is reported as refused, never hidden.
     (defn fcmg-close-result (ctx sts report)
@@ -64,12 +103,24 @@
             (str_concat "generation refused: "
                 (str_concat detail (str_concat "; " (metal_status))))))
 
+    ; The state half of the same honesty: a generation that ran but did not release
+    ; every state handle is reported as refused.  The model handles are not touched
+    ; here — they belong to the residence, which outlives this sentence.
+    (defn fcmg-state-close-result (sts report)
+        (do
+            (let expected (q38-state-handle-count sts))
+            (let closed (q38-free-state sts))
+            (if (eq closed expected) report
+                (str_concat "generation refused: state handle close mismatch; closed="
+                    (str_concat (int_to_str closed)
+                        (str_concat ";expected=" (int_to_str expected)))))))
+
     (defn fcmg-run-context (src arch ids ctx n)
         (do
             (let geo (nth ctx 2))
             (let sts (q38-new-state geo))
             (if (not (eq (q38-state-ok? sts) 1))
-                (fcmg-close-result ctx sts
+                (fcmg-state-close-result sts
                     (str_concat "generation refused: state allocation failed; " (metal_status)))
                 (do
                     (let before-status (metal_status))
@@ -101,13 +152,29 @@
                     (let forwards (add (len ids)
                         (if (gt (len out) 0) (sub (len out) 1) 0)))
                     (let weight-bytes (q38-forward-weight-bytes ctx))
-                    (fcmg-close-result ctx sts
+                    (fcmg-state-close-result sts
                         (fcmg-report arch ids out (tkz-decode-text src out)
                             forwards busy-us prefill-us decode-us weight-bytes))))))
 
-    (defn fcmg-q35-run (path prompt n)
-        (if (not (eq (qaf-verify-sealed-file path) 1))
-            "generation refused: selected artifact has no current Form-native SHA-256 seal"
+    ; A first admission: the seal is verified before a single byte of the file is
+    ; read for meaning, exactly as before.  What changed is only what is answered —
+    ; the text AND the residence the admission earned, so a caller that keeps it
+    ; does not pay this again.
+    ; A refusal must name what actually refused.  Verdict 2 is the digest engine
+    ; declining to run, which is a fact about this binary, not about the file —
+    ; and it carries metal_status so the reason is in the sentence rather than in
+    ; a later investigation.
+    (defn fcmg-seal-refusal (verdict)
+        (if (eq verdict 2)
+            (str_concat "generation refused: the Form-native SHA-256 digest engine did not answer — this says nothing about the artifact; "
+                (metal_status))
+            "generation refused: selected artifact has no current Form-native SHA-256 seal"))
+
+    (defn fcmg-fresh (path prompt n)
+        (do
+            (let verdict (qaf-seal-verdict path))
+        (if (not (eq verdict 1))
+            (list (fcmg-seal-refusal verdict) (fcmr-none))
             (do
                 (let src (fcmg-src path))
                 (let ids (q35-chat-ids src prompt))
@@ -118,33 +185,85 @@
                 (let required (q38-required-size src (egg-data-base src 32)))
                 (let actual (file_size path))
                 (if (not (str_eq arch "qwen35"))
-                    (str_concat "generation refused: unsupported GGUF architecture=" arch)
+                    (list (str_concat "generation refused: unsupported GGUF architecture=" arch)
+                          (fcmr-none))
                 (if (eq (len ids) 0)
-                    "generation refused: tokenizer produced no prompt tokens"
+                    (list "generation refused: tokenizer produced no prompt tokens" (fcmr-none))
                 (if (or (le n 0) (gt need model-max))
-                    (str_concat "generation refused: requested context exceeds model limit="
-                        (int_to_str model-max))
+                    (list (str_concat "generation refused: requested context exceeds model limit="
+                              (int_to_str model-max))
+                          (fcmr-none))
                 (if (or (le required 0) (lt actual required))
-                    (str_concat "generation refused: incomplete tensor extent; required="
-                        (str_concat (int_to_str required)
-                            (str_concat ";actual=" (int_to_str actual))))
+                    (list (str_concat "generation refused: incomplete tensor extent; required="
+                              (str_concat (int_to_str required)
+                                  (str_concat ";actual=" (int_to_str actual))))
+                          (fcmr-none))
                     (do
                         (let ctx (q38-open path maxpos))
                         (if (lt (len ctx) 10)
-                            (str_concat "generation refused: model context did not open; "
-                                (metal_status))
+                            (list (str_concat "generation refused: model context did not open; "
+                                      (metal_status))
+                                  (fcmr-none))
                             (if (not (eq (q38-context-ok? ctx) 1))
-                                (fcmg-open-refusal ctx "model context contains an invalid handle")
-                                (fcmg-run-context src arch ids ctx n)))))))))))
+                                (list (fcmg-open-refusal ctx "model context contains an invalid handle")
+                                      (fcmr-none))
+                                (list (fcmg-run-context src arch ids ctx n)
+                                      (fcmr path maxpos ctx src arch)))))))))))))
+
+    (defn fcmg-stale-close ()
+        (list "generation refused: previous model handle close mismatch" (fcmr-none)))
+
+    ; Generation against whatever the caller is already holding.  An empty
+    ; residence, a residence for a different file, or a prompt that outgrows the
+    ; ceiling this one was opened for all end in the same place — release, then
+    ; admit — so there is one path and no mode to be in.
+    (defn fcmg-generate-with (r path prompt n)
+        (if (eq (fcmr-live? r) 0) (fcmg-fresh path prompt n)
+            (if (not (str_eq (fcmr-path r) path))
+                (if (eq (fcmr-release-ok? r) 1) (fcmg-fresh path prompt n) (fcmg-stale-close))
+                (do
+                    (let src (fcmr-src r))
+                    (let arch (fcmr-arch r))
+                    (let ids (q35-chat-ids src prompt))
+                    (let model-max (gmt-u32 src (q38-key arch "context_length")))
+                    (let need (add (len ids) n))
+                    (if (eq (len ids) 0)
+                        (list "generation refused: tokenizer produced no prompt tokens" r)
+                    (if (or (le n 0) (gt need model-max))
+                        (list (str_concat "generation refused: requested context exceeds model limit="
+                                  (int_to_str model-max))
+                              r)
+                    (if (le need (fcmr-maxpos r))
+                        (list (fcmg-run-context src arch ids (fcmr-ctx r) n) r)
+                        (if (eq (fcmr-release-ok? r) 1)
+                            (fcmg-fresh path prompt n)
+                            (fcmg-stale-close)))))))))
+
+    ; The one-shot door, byte-identical in what it answers: admit, generate,
+    ; release.  A caller with nothing to hold on to loses nothing and keeps the
+    ; close check that was always here.
+    (defn fcmg-q35-run (path prompt n)
+        (do
+            (let out (fcmg-generate-with (fcmr-none) path prompt n))
+            (if (eq (fcmr-release-ok? (nth out 1)) 1) (nth out 0)
+                "generation refused: model handle close mismatch")))
 
     ; The generate door carries the Form teach overlay. Raw fcmg-q35-run
     ; stays for probes that need an exact prompt.
     (defn fcmg-teach (prompt) (fqt-prompt prompt))
-    (defn fcmg-generate (path prompt n)
+    ; The door a session speaks through: it is handed what the session holds and
+    ; answers the text together with what it should keep holding.
+    (defn fcmg-generate-resident (r path prompt n)
         (if (str_eq path "")
-            "no model is picked — run `models <dir>`, then `use <n>`, then `generate <prompt>`"
-            (if (str_eq prompt "") "usage: generate <prompt>"
-                (fcmg-q35-run path (fcmg-teach prompt) n))))
+            (list "no model is picked — run `models <dir>`, then `use <n>`, then `generate <prompt>`" r)
+            (if (str_eq prompt "") (list "usage: generate <prompt>" r)
+                (fcmg-generate-with r path (fcmg-teach prompt) n))))
+    ; The same door for a caller that holds nothing: admit, generate, release.
+    (defn fcmg-generate (path prompt n)
+        (do
+            (let out (fcmg-generate-resident (fcmr-none) path prompt n))
+            (if (eq (fcmr-release-ok? (nth out 1)) 1) (nth out 0)
+                "generation refused: model handle close mismatch")))
 
     (defn fcmg-bandwidth (path)
         (if (str_eq path "")
