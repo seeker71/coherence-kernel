@@ -1007,6 +1007,21 @@ FK_METAL_WEAK long long fk_metal_fence_wait_external(long long fence) {
     (void)fence;
     return FK_METAL_HANDLE_UNLINKED;
 }
+/* MLX organ. Same weak-stub shape as Metal: a build without the mlx carrier
+ * still compiles and still speaks mlx_linked=false. Tags 143/144 are free in
+ * the evaluator (holes after metal_fence_wait's 142). Checkout-witness; the
+ * Form walker is the shrink target. */
+#define FK_MLX_UNLINKED FK_METAL_HANDLE_UNLINKED
+FK_METAL_WEAK long long fk_mlx_status_external(char *out, long long cap) {
+    (void)out;
+    (void)cap;
+    return FK_MLX_UNLINKED;
+}
+FK_METAL_WEAK long long fk_mlx_add_external(long long a, long long b) {
+    (void)a;
+    (void)b;
+    return FK_MLX_UNLINKED;
+}
 static long long fk_srange(long long sv, const char **ptr, long long *len) {
     long long sa = fk_stri(sv);
     if (sa < 0 || sa >= fk_sp) {
@@ -1206,6 +1221,30 @@ static long long fk_metal_status_native(void) {
         n = FK_METAL_STATUS_BUF_CAP;
     }
     return fk_sbuf(out, n);
+}
+#define FK_MLX_STATUS_BUF_CAP 4096
+static long long fk_mlx_status_native(void) {
+    static char out[FK_MLX_STATUS_BUF_CAP];
+    long long n = fk_mlx_status_external(out, FK_MLX_STATUS_BUF_CAP);
+    if (n == FK_MLX_UNLINKED) {
+        const char *m = "mlx_owner=fkwu-form-cli\nmlx_linked=false\nmlx_metal_available=false\nmlx_gpu_available=false\nlast_error=unlinked\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m = "mlx_owner=fkwu-form-cli\nmlx_linked=false\nlast_error=carrier returned error\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_MLX_STATUS_BUF_CAP) {
+        n = FK_MLX_STATUS_BUF_CAP;
+    }
+    return fk_sbuf(out, n);
+}
+static long long fk_mlx_add_native(long long a, long long b) {
+    long long r = fk_mlx_add_external(a, b);
+    if (r == FK_MLX_UNLINKED) {
+        return 0;
+    }
+    return r;
 }
 /* ── host sense-channel carriers: camera (world-video) + mic (world-audio) ── The two conditions of
  * host-kernel.form, made concrete: ALLOW-PRESENCE (detect the device through the host's own OS API)
@@ -7913,6 +7952,14 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
      * call. The op table lists ops; FK_OPCODE_ARM_CAP bounds them. */
     if (t == 142) {
         return fk_metal_fence_wait_native(fk_walk(fk_node[i][1], fp) >> 1) << 1;
+    }
+    if (t == 143) {
+        return fk_mlx_status_native();
+    }
+    if (t == 144) {
+        long long a144 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long b144 = fk_walk(fk_node[i][2], fp) >> 1;
+        return fk_mlx_add_native(a144, b144) << 1;
     }
     if (t == 205) {
         return fk_mic_count() << 1;
