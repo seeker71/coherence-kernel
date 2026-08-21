@@ -3087,6 +3087,92 @@ static int fk_arm64_u32_emit_tree(const fk_arm64_u32_node nodes[FK_ARM64_U32_NOD
            (node->tag == 4U ? 0x4B000000U : 0x1B007C00U);
     return fk_arm64_u32_put(words, n, base | (temp << 5));
 }
+/* CRYSTALLIZE-ON-HEAT, the carrier's half. The door below emitted an image,
+ * mmap'd a fresh page, ran it, and munmap'd it again — ON EVERY CALL. Measured
+ * on an M4 Max over 20,000 calls of one four-node recipe: 62 ms through the
+ * door against 1 ms for the same recipe walked, i.e. ~3.1 us per call, nearly
+ * all of it the mmap/munmap pair. A JIT that recompiles at every call is a
+ * slower interpreter with extra steps.
+ *
+ * So the carrier keeps what it built. The key is the PARSED PROGRAM — every
+ * node's (tag,a,b), its count, and the root — not the Form value that carried
+ * it: a value is an index into an arena, and keying on an index would tie the
+ * cache's correctness to the arena never reusing one. Parsing is the cheap half
+ * (a walk of a short cons list); the page is the dear half, and the page is
+ * what is kept. Structural keying also means two callers that build the same
+ * recipe separately share one crystallization, which is what content-addressing
+ * has meant everywhere else in this body.
+ *
+ * Eviction is round-robin and unmaps what it replaces, so the page count is
+ * bounded by FK_ARM64_U32_CACHE and nothing leaks. No heat counter yet: this
+ * door crystallizes on FIRST call, which is the right default while the emitter
+ * covers only leaves that are cheap to emit. Heat belongs here when the emitter
+ * grows expensive enough that compiling a cold recipe can lose. */
+/* The structural cache below is exact but not free: it re-parses the program's
+ * cons list to build the key, and for a nine-node recipe that parse costs about
+ * what walking the recipe costs — measured 18 ms against the walker's 15 ms over
+ * 400,000 calls, so the door was correct, 76x better than uncompiled, and still
+ * losing. The hint closes that: the SAME program value asking again inside the
+ * same heap generation is three integer compares and a call. It is a shortcut,
+ * never an authority — a miss simply falls through to the parse. */
+/* Bumped once per compaction (fk_melt). A cons value is an index into an arena
+ * the collector MOVES, so the value-hint below is valid only inside the
+ * generation that set it. One counter is the whole guard. */
+static long long fk_melt_gen = 0;
+static long long fk_arm64_hint_prog = 0;
+static long long fk_arm64_hint_root = 0;
+static long long fk_arm64_hint_gen = -1;
+static void *fk_arm64_hint_mem = 0;
+
+#define FK_ARM64_U32_CACHE 32
+typedef struct {
+    int live;
+    long long nodes_n;
+    unsigned int root;
+    fk_arm64_u32_node nodes[FK_ARM64_U32_NODE_CAP];
+    void *mem;
+    long long span;
+} fk_arm64_u32_entry;
+static fk_arm64_u32_entry fk_arm64_u32_cache[FK_ARM64_U32_CACHE];
+static long long fk_arm64_u32_cursor = 0;
+
+static int fk_arm64_u32_same(const fk_arm64_u32_entry *e, const fk_arm64_u32_node *nodes,
+                             long long nodes_n, unsigned int root) {
+    long long i;
+    if (!e->live || e->nodes_n != nodes_n || e->root != root) {
+        return 0;
+    }
+    for (i = 0; i < nodes_n; i = i + 1) {
+        if (e->nodes[i].tag != nodes[i].tag || e->nodes[i].a != nodes[i].a ||
+            e->nodes[i].b != nodes[i].b) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void *fk_arm64_u32_keep(const fk_arm64_u32_node *nodes, long long nodes_n,
+                               unsigned int root, void *mem, long long span) {
+    fk_arm64_u32_entry *e = &fk_arm64_u32_cache[fk_arm64_u32_cursor];
+    long long i;
+    if (e->live && e->mem != 0) {
+        if (fk_arm64_hint_mem == e->mem) {
+            fk_arm64_hint_mem = 0;
+        }
+        munmap(e->mem, (size_t)e->span);
+    }
+    e->live = 1;
+    e->nodes_n = nodes_n;
+    e->root = root;
+    for (i = 0; i < nodes_n; i = i + 1) {
+        e->nodes[i] = nodes[i];
+    }
+    e->mem = mem;
+    e->span = span;
+    fk_arm64_u32_cursor = (fk_arm64_u32_cursor + 1) % FK_ARM64_U32_CACHE;
+    return mem;
+}
+
 static long long fk_native_call_arm64_u32_leaf(long long program, long long root_value,
                                                 long long arg_value) {
     fk_arm64_u32_node nodes[FK_ARM64_U32_NODE_CAP];
@@ -3097,10 +3183,32 @@ static long long fk_native_call_arm64_u32_leaf(long long program, long long root
     unsigned int root;
     unsigned int arg;
     long long i;
+    if (fk_arm64_hint_mem != 0 && program == fk_arm64_hint_prog &&
+        root_value == fk_arm64_hint_root && fk_melt_gen == fk_arm64_hint_gen) {
+        unsigned int hot_arg;
+        if (fk_arm64_u32_value(arg_value, &hot_arg)) {
+            unsigned int (*hot)(unsigned int) =
+                (unsigned int (*)(unsigned int))fk_arm64_hint_mem;
+            return ((long long)hot(hot_arg)) << 1;
+        }
+    }
     if (!fk_arm64_u32_program(program, nodes, &nodes_n) ||
         !fk_arm64_u32_value(root_value, &root) || root >= (unsigned int)nodes_n ||
-        !fk_arm64_u32_value(arg_value, &arg) ||
-        !fk_arm64_u32_put(image, &words, 0x2A0003E1U) ||
+        !fk_arm64_u32_value(arg_value, &arg)) {
+        return fk_nothing;
+    }
+    for (i = 0; i < FK_ARM64_U32_CACHE; i = i + 1) {
+        if (fk_arm64_u32_same(&fk_arm64_u32_cache[i], nodes, nodes_n, root)) {
+            unsigned int (*hot)(unsigned int) =
+                (unsigned int (*)(unsigned int))fk_arm64_u32_cache[i].mem;
+            fk_arm64_hint_prog = program;
+            fk_arm64_hint_root = root_value;
+            fk_arm64_hint_gen = fk_melt_gen;
+            fk_arm64_hint_mem = fk_arm64_u32_cache[i].mem;
+            return ((long long)hot(arg)) << 1;
+        }
+    }
+    if (!fk_arm64_u32_put(image, &words, 0x2A0003E1U) ||
         !fk_arm64_u32_emit_node(nodes, root, 0U, image, &words) ||
         !fk_arm64_u32_put(image, &words, 0xD65F03C0U)) {
         return fk_nothing;
@@ -3133,10 +3241,13 @@ static long long fk_native_call_arm64_u32_leaf(long long program, long long root
         pthread_jit_write_protect_np(1);
         __builtin___clear_cache((char *)mem, (char *)mem + words * 4);
         {
-            unsigned int (*fn)(unsigned int) = (unsigned int (*)(unsigned int))mem;
-            unsigned int result = fn(arg);
-            munmap(mem, 4096);
-            return ((long long)result) << 1;
+            unsigned int (*fn)(unsigned int) =
+                (unsigned int (*)(unsigned int))fk_arm64_u32_keep(nodes, nodes_n, root, mem, 4096);
+            fk_arm64_hint_prog = program;
+            fk_arm64_hint_root = root_value;
+            fk_arm64_hint_gen = fk_melt_gen;
+            fk_arm64_hint_mem = mem;
+            return ((long long)fn(arg)) << 1;
         }
     }
 }
@@ -6028,6 +6139,7 @@ static long long fk_nmelt;
  * Always reset to 0 after the call. */
 static long long fk_melt_want = 0;
 static void fk_melt(void) {
+    fk_melt_gen = fk_melt_gen + 1;
     long long hp0 = fk_hp;
     fk_fw = calloc(fk_hp + 1, 8);
     if (fk_fw == 0) {
