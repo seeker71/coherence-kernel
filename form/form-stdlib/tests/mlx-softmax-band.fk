@@ -1,0 +1,47 @@
+; mlx-softmax-band.fk — the GPU lane learns the op attention is made of.
+;
+; Matmul was the first generation token. Softmax is the next: attention is
+; (matmul, softmax, matmul), composed from tokens, not a fused C opcode.
+; fkwu-uni.c did not change.
+;
+; THE INTEGER DOOR IS REAL. softmax of [1,2,3] is probabilities, so a raw
+; read truncates to 0. Scaling belongs in the program. Bit 2 asserts the
+; distribution sums to 1; bit 4 scales it. Bits 8 and 16 are attention
+; composed on the GPU: a sharp score attends to one key (100), a flat
+; score averages two values (20). Exact in f32 — 0.5 is exact, and a
+; score of 40 underflows the other exp past ulp(1) so the one-hot is 1.0.
+;
+; fkwu-only organ. Every claim is guarded by bit 1 so an unlinked host
+; reads 1 rather than a false green.
+;
+; Verdict 63.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn msb-score (ok bit) (if ok bit 0))
+    (defn msb-has (hay needle) (if (lt (str_find hay needle 0) 0) 0 1))
+    (defn msb-live? () (msb-has (mlx_status) "mlx_linked=true"))
+    (defn mlx-softmax-band ()
+        (do
+    (let c0 (msb-score (eq (msb-live?) 1) 1))
+    ; softmax is a distribution: it sums to 1
+    (let c1 (msb-score (if (eq (msb-live?) 1)
+                           (eq (mlx_run "m1x3 1 2 3 softmax sum") 1) 0) 2))
+    ; scale lives in the program, the same lesson as Q8_0
+    (let c2 (msb-score (if (eq (msb-live?) 1)
+                           (eq (mlx_run "m1x3 1 2 3 softmax 1000 mul sum") 1000) 0) 4))
+    ; sharp attention: Q attends to the first key, value 100 comes back
+    (let c3 (msb-score (if (eq (msb-live?) 1)
+                           (eq (mlx_run "m1x2 40 0 m2x2 1 0 0 1 matmul softmax m2x1 100 0 matmul") 100) 0) 8))
+    ; uniform attention: equal scores average 10 and 30
+    (let c4 (msb-score (if (eq (msb-live?) 1)
+                           (eq (mlx_run "m1x2 0 0 m2x2 1 0 0 1 matmul softmax m2x1 10 30 matmul") 20) 0) 16))
+    ; add and matmul stay, and an empty softmax is declined
+    (let c5 (msb-score (if (eq (msb-live?) 1)
+                           (if (eq (mlx_run "2 3 add") 5)
+                               (if (eq (mlx_run "softmax") 0)
+                                   (if (eq (mlx_run "m1x3 1 2 3 m3x1 4 5 6 matmul") 32) 1 0) 0) 0) 0) 32))
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))
+    )
+    (mlx-softmax-band))
