@@ -446,7 +446,12 @@ static int fk_mlx_push_q8(const char **p, const char *end, mlx_array *st, int *s
 }
 
 static int fk_mlx_unop(const char *op, mlx_array *st, int *sp, mlx_stream s) {
-    if (strcmp(op, "sum") != 0) {
+    /* sum was the first reduction. softmax is the first generation op after
+     * matmul: attention is made of (matmul, softmax, matmul). New token, not
+     * a new fkwu-uni.c opcode. precise=true so a sharp score does not NaN. */
+    int is_sum = strcmp(op, "sum") == 0;
+    int is_sm = strcmp(op, "softmax") == 0;
+    if (!is_sum && !is_sm) {
         return 1;
     }
     if (*sp < 1) {
@@ -455,7 +460,8 @@ static int fk_mlx_unop(const char *op, mlx_array *st, int *sp, mlx_stream s) {
     }
     mlx_array a = st[--(*sp)];
     mlx_array c = mlx_array_new();
-    int rc = mlx_sum(&c, a, false, s);
+    int rc = is_sum ? mlx_sum(&c, a, false, s)
+                    : mlx_softmax(&c, a, true, s);
     mlx_array_free(a);
     if (rc != 0) {
         mlx_array_free(c);
