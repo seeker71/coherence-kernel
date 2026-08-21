@@ -306,6 +306,145 @@ static int fk_mlx_push_tensor(const char **p, const char *end, mlx_array *st, in
     return 0;
 }
 
+/* q8 <path> <off> <r> <c> — WHERE THE WEIGHT ACTUALLY LIVES.
+ *
+ * The f32 door reads the norms. Every large matrix in a Q8_0 model — the whole
+ * of what a forward pass multiplies — is stored quantized, so a lane that can
+ * only read f32 can read everything about the model except the model.
+ *
+ * block_q8_0 = { half d; int8_t qs[32] } — 34 bytes per 32 weights, w_i = d*q_i.
+ * One f16 super-scale and thirty-two signed bytes; no sub-scales, no nibbles, no
+ * high-bit plane, no mins. It is the simplest quant ggml has, which is why it is
+ * the right first one to carry.
+ *
+ * The product is EXACT in f32 and does not even round once: d has an 11-bit
+ * significand and q at most 8, so d*q needs at most 19 — well inside f32's 24.
+ * That is not a comfort, it is the reason this door can be checked against an
+ * independent reader digit for digit rather than within an epsilon. */
+static float fk_mlx_f16(unsigned short h) {
+    int sign = (h >> 15) & 1;
+    int exp = (h >> 10) & 0x1f;
+    int mant = h & 0x3ff;
+    float v;
+    if (exp == 0) {
+        v = (float)mant * 5.9604644775390625e-8f;   /* 2^-24, the subnormal step */
+    } else if (exp == 31) {
+        v = 0.0f;                                   /* no finite value to carry */
+    } else {
+        float m = 1.0f + (float)mant / 1024.0f;
+        int e = exp - 15;
+        float scale = 1.0f;
+        int k = 0;
+        if (e > 0) {
+            while (k < e) { scale = scale * 2.0f; k = k + 1; }
+        } else {
+            while (k > e) { scale = scale * 0.5f; k = k - 1; }
+        }
+        v = m * scale;
+    }
+    return sign ? -v : v;
+}
+
+static int fk_mlx_push_q8(const char **p, const char *end, mlx_array *st, int *sp) {
+    char path[512];
+    char tok[64];
+    long long off = 0;
+    long long r = 0;
+    long long c = 0;
+    long long n = 0;
+    long long blocks = 0;
+    unsigned char *raw = 0;
+    float *data = 0;
+    FILE *f = 0;
+    size_t got = 0;
+    long long bi = 0;
+    if (!fk_mlx_tok(p, end, path, 512)) {
+        fk_mlx_seterr("q8 needs a path");
+        return -1;
+    }
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q8 needs a byte offset");
+        return -1;
+    }
+    off = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q8 needs rows");
+        return -1;
+    }
+    r = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q8 needs cols");
+        return -1;
+    }
+    c = atoll(tok);
+    n = r * c;
+    if (r < 1 || c < 1 || n > FK_MLX_TENSOR_CAP || off < 0) {
+        fk_mlx_seterr("q8 shape out of range");
+        return -1;
+    }
+    if ((n % 32) != 0) {
+        /* A Q8_0 block is 32 weights. A shape that is not a whole number of
+         * blocks has no honest reading, so it is refused rather than rounded. */
+        fk_mlx_seterr("q8 shape is not a whole number of 32-weight blocks");
+        return -1;
+    }
+    if (*sp >= 32) {
+        fk_mlx_seterr("stack overflow");
+        return -1;
+    }
+    blocks = n / 32;
+    f = fopen(path, "rb");
+    if (f == 0) {
+        fk_mlx_seterr("q8 cannot open path");
+        return -1;
+    }
+    raw = (unsigned char *)malloc((size_t)blocks * 34);
+    data = (float *)malloc((size_t)n * sizeof(float));
+    if (raw == 0 || data == 0) {
+        free(raw);
+        free(data);
+        fclose(f);
+        fk_mlx_seterr("q8 out of memory");
+        return -1;
+    }
+    if (fseek(f, (long)off, SEEK_SET) != 0) {
+        free(raw);
+        free(data);
+        fclose(f);
+        fk_mlx_seterr("q8 cannot seek to offset");
+        return -1;
+    }
+    got = fread(raw, 1, (size_t)blocks * 34, f);
+    fclose(f);
+    if (got != (size_t)blocks * 34) {
+        free(raw);
+        free(data);
+        fk_mlx_seterr("q8 file is shorter than the shape asked for");
+        return -1;
+    }
+    while (bi < blocks) {
+        const unsigned char *b = raw + bi * 34;
+        unsigned short hb = (unsigned short)(b[0] | (b[1] << 8));
+        float d = fk_mlx_f16(hb);
+        int j = 0;
+        while (j < 32) {
+            signed char q = (signed char)b[2 + j];
+            data[bi * 32 + j] = d * (float)q;
+            j = j + 1;
+        }
+        bi = bi + 1;
+    }
+    free(raw);
+    {
+        int shape[2];
+        shape[0] = (int)r;
+        shape[1] = (int)c;
+        st[(*sp)++] = mlx_array_new_data(data, shape, 2, MLX_FLOAT32);
+    }
+    free(data);
+    return 0;
+}
+
 static int fk_mlx_unop(const char *op, mlx_array *st, int *sp, mlx_stream s) {
     if (strcmp(op, "sum") != 0) {
         return 1;
@@ -392,6 +531,10 @@ long long fk_mlx_run_external(const char *src, long long n) {
             }
         } else if (strcmp(tok, "f32") == 0) {
             if (fk_mlx_push_tensor(&p, end, st, &sp) != 0) {
+                fail = 1;
+            }
+        } else if (strcmp(tok, "q8") == 0) {
+            if (fk_mlx_push_q8(&p, end, st, &sp) != 0) {
                 fail = 1;
             }
         } else if ((u = fk_mlx_unop(tok, st, &sp, s)) != 1) {
