@@ -211,6 +211,101 @@ static int fk_mlx_push_mat(const char **p, const char *end, int r, int c,
     return 0;
 }
 
+/* f32 <path> <off> <r> <c> — A TENSOR ARRIVES BY REFERENCE.
+ *
+ * Until now the only way data reached this GPU was as literal lanes in the
+ * program text, capped at 256 of them. That is fine for proving a matmul and
+ * useless for a forward pass: a program is a string, and a string is not how
+ * gigabytes of weights should ever travel. This token names a file, a byte
+ * offset and a shape, and the carrier reads r*c float32 from there.
+ *
+ * It is the door the walk-home receipt named as the next stone, and it is what
+ * makes the MLX lane a GENERATION lane rather than a calculator: a GGUF's f32
+ * tensors (every norm in the file) can now be multiplied on the GPU from where
+ * they already lie, without being spelled out.
+ *
+ * Bounded, and the bound is honest: FK_MLX_TENSOR_CAP elements, and the file
+ * must actually contain the extent asked for — a short read is a REFUSAL, never
+ * a partial tensor padded with whatever was in the buffer. Quantized tiers
+ * (Q8_0 and the K-quants, which is where the model's weight actually lives) are
+ * the next stone after this one, and are named rather than faked. */
+#define FK_MLX_TENSOR_CAP 4000000
+
+static int fk_mlx_push_tensor(const char **p, const char *end, mlx_array *st, int *sp) {
+    char path[512];
+    char tok[64];
+    long long off = 0;
+    long long r = 0;
+    long long c = 0;
+    long long n = 0;
+    float *data = 0;
+    FILE *f = 0;
+    size_t got = 0;
+    if (!fk_mlx_tok(p, end, path, 512)) {
+        fk_mlx_seterr("f32 needs a path");
+        return -1;
+    }
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("f32 needs a byte offset");
+        return -1;
+    }
+    off = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("f32 needs rows");
+        return -1;
+    }
+    r = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("f32 needs cols");
+        return -1;
+    }
+    c = atoll(tok);
+    n = r * c;
+    if (r < 1 || c < 1 || n > FK_MLX_TENSOR_CAP || off < 0) {
+        fk_mlx_seterr("f32 shape out of range");
+        return -1;
+    }
+    if (*sp >= 32) {
+        fk_mlx_seterr("stack overflow");
+        return -1;
+    }
+    f = fopen(path, "rb");
+    if (f == 0) {
+        fk_mlx_seterr("f32 cannot open path");
+        return -1;
+    }
+    data = (float *)malloc((size_t)n * sizeof(float));
+    if (data == 0) {
+        fclose(f);
+        fk_mlx_seterr("f32 out of memory");
+        return -1;
+    }
+    if (fseek(f, (long)off, SEEK_SET) != 0) {
+        free(data);
+        fclose(f);
+        fk_mlx_seterr("f32 cannot seek to offset");
+        return -1;
+    }
+    got = fread(data, sizeof(float), (size_t)n, f);
+    fclose(f);
+    if (got != (size_t)n) {
+        /* A SHORT READ IS A REFUSAL. Padding here would hand the GPU a tensor
+         * whose tail is whatever malloc last held, and every number downstream
+         * would be confidently wrong with no instrument saying so. */
+        free(data);
+        fk_mlx_seterr("f32 file is shorter than the shape asked for");
+        return -1;
+    }
+    {
+        int shape[2];
+        shape[0] = (int)r;
+        shape[1] = (int)c;
+        st[(*sp)++] = mlx_array_new_data(data, shape, 2, MLX_FLOAT32);
+    }
+    free(data);
+    return 0;
+}
+
 static int fk_mlx_unop(const char *op, mlx_array *st, int *sp, mlx_stream s) {
     if (strcmp(op, "sum") != 0) {
         return 1;
@@ -293,6 +388,10 @@ long long fk_mlx_run_external(const char *src, long long n) {
             }
         } else if (fk_mlx_matn(tok, &mr, &mc)) {
             if (fk_mlx_push_mat(&p, end, mr, mc, st, &sp) != 0) {
+                fail = 1;
+            }
+        } else if (strcmp(tok, "f32") == 0) {
+            if (fk_mlx_push_tensor(&p, end, st, &sp) != 0) {
                 fail = 1;
             }
         } else if ((u = fk_mlx_unop(tok, st, &sp, s)) != 1) {
