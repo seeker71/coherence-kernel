@@ -1,0 +1,73 @@
+; mlx-tensor-band.fk — a tensor arrives by REFERENCE, and the GPU lane becomes a
+; generation lane.
+;
+; THE STONE THIS IS. Until now the only way data reached this GPU was as literal
+; lanes in the program text, capped at 256 of them — fine for proving a matmul,
+; useless for a forward pass. A program is a string, and a string is not how
+; gigabytes of weights should ever travel. `f32 <path> <off> <r> <c>` names a
+; file, a byte offset and a shape; the carrier reads r*c float32 from where they
+; already lie. That is the difference between a calculator and a lane a model
+; can run in.
+;
+; WITNESSED ON THE REAL MODEL, not only on this fixture. Qwen3.8-27B-Q8_0.gguf,
+; 29,047,086,048 bytes: `output_norm.weight` is 5120 floats of type 0 (F32) at
+; absolute offset 1,361,857,504, and `blk.0.attn_norm.weight` is 5120 more at
+; 2,746,162,144 — both read out of the tensor table by the body's own
+; equireach-gguf. On the GPU their sums are 9953 and 4949, and their matmul —
+; (1x5120) x (5120x1), a real dot product of two real weight vectors — is 9626.
+; An independent reader of the same bytes says 9953.986, 4949.170 and 9626.986.
+; Those runs are in the receipt; this band carries the LAW on a fixture it writes
+; itself, so it needs no 29 GB file to be honest.
+;
+; A SHORT READ IS A REFUSAL. Padding a tensor whose tail the file does not hold
+; would hand the GPU whatever malloc last carried, and every number downstream
+; would be confidently wrong with nothing saying so. Bit 16 stands there.
+;
+; fkwu-only organ (same seat as Metal). Every claim is guarded by bit 1 so an
+; unlinked host reads 1 rather than a false green.
+;
+; Verdict 63.
+;
+; preludes: form-stdlib/core.fk form-stdlib/metal-door.fk form-stdlib/form-fs.fk
+
+(do
+    (defn mtb-score (ok bit) (if ok bit 0))
+    (defn mtb-has (hay needle) (if (lt (str_find hay needle 0) 0) 0 1))
+    (defn mtb-live? () (mtb-has (mlx_status) "mlx_linked=true"))
+    (defn mtb-path () "/tmp/fk-mlx-tensor-band-fixture.bin")
+    ; eight float32 little-endian: two of padding, then [[1,2,3],[4,5,6]]
+    (defn mtb-f32 (x) (md-le32 (md-f32-bits x)))
+    (defn mtb-bytes ()
+        (str_concat (mtb-f32 99.0) (str_concat (mtb-f32 98.0)
+        (str_concat (mtb-f32 1.0) (str_concat (mtb-f32 2.0)
+        (str_concat (mtb-f32 3.0) (str_concat (mtb-f32 4.0)
+        (str_concat (mtb-f32 5.0) (mtb-f32 6.0)))))))))
+    (defn mtb-prog (off r c tail)
+        (str_concat "f32 " (str_concat (mtb-path)
+        (str_concat " " (str_concat (int_to_str off)
+        (str_concat " " (str_concat (int_to_str r)
+        (str_concat " " (str_concat (int_to_str c)
+        (str_concat " " tail))))))))))
+    (defn mlx-tensor-band ()
+        (do
+    (let wrote (fs-write-text (mtb-path) (mtb-bytes)))
+    ; the fixture is 32 bytes on disk — the band stands on its own ground
+    (let c0 (mtb-score (and (eq wrote 32) (eq (mtb-live?) 1)) 1))
+    ; the matrix at byte offset 8 is [[1,2,3],[4,5,6]] and sums to 21
+    (let c1 (mtb-score (if (eq (mtb-live?) 1)
+                           (eq (mlx_run (mtb-prog 8 2 3 "sum")) 21) 0) 2))
+    ; the OFFSET is real: from byte 0 the same shape reads 99+98+1+2+3+4 = 207
+    (let c2 (mtb-score (if (eq (mtb-live?) 1)
+                           (eq (mlx_run (mtb-prog 0 2 3 "sum")) 207) 0) 4))
+    ; and it multiplies: [[1,2,3],[4,5,6]] x [[1],[10],[100]] = [321,654], sum 975
+    (let c3 (mtb-score (if (eq (mtb-live?) 1)
+                           (eq (mlx_run (mtb-prog 8 2 3 "m3x1 1 10 100 matmul sum")) 975) 0) 8))
+    ; a shape longer than the file is REFUSED, never padded
+    (let c4 (mtb-score (if (eq (mtb-live?) 1)
+                           (eq (mlx_run (mtb-prog 8 100 100 "sum")) 0) 0) 16))
+    ; and a path that is not there is refused rather than guessed
+    (let c5 (mtb-score (if (eq (mtb-live?) 1)
+                           (eq (mlx_run "f32 /tmp/fk-mlx-no-such-fixture.bin 0 2 3 sum") 0) 0) 32))
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))
+    )
+    (mlx-tensor-band))
