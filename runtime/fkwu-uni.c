@@ -3173,6 +3173,106 @@ static void *fk_arm64_u32_keep(const fk_arm64_u32_node *nodes, long long nodes_n
     return mem;
 }
 
+/* THE FORM LANE'S EXECUTOR. form-lower.fk emits an arm64 leaf image for the
+ * AAPCS64 shape `int64 f(int64)` — the emitter is Form, four-way proven, and
+ * carries no 32-bit ceiling. The Go sibling has been able to RUN those bytes
+ * since jit_inram_darwin_arm64.go; fkwu could not, so the body could compile
+ * its own native code and had nowhere to put it. This is that door, with the
+ * same contract Go states: (image, arg) -> int64, image a list of bytes.
+ *
+ * It keeps its page, for the reason the u32 door learned: the Go one mmaps and
+ * unmaps per call, and a compiler that forgets is a slower interpreter. The key
+ * is the image BYTES — content, not the cons value the collector moves — so two
+ * callers that lower the same recipe share one crystallization. */
+#define FK_INRAM_CODE_CAP 4096
+#define FK_INRAM_CACHE 32
+typedef struct {
+    int live;
+    long long n;
+    unsigned char code[FK_INRAM_CODE_CAP];
+    void *mem;
+} fk_inram_entry;
+static fk_inram_entry fk_inram_cache[FK_INRAM_CACHE];
+static long long fk_inram_cursor = 0;
+
+static long long fk_inram_bytes(long long image, unsigned char *out, long long cap) {
+    long long cursor = image;
+    long long n = 0;
+    while (cursor != 1) {
+        long long head;
+        long long rest;
+        if (n >= cap || !fk_arm64_u32_cons(cursor, &head, &rest) || (head & 1) != 0) {
+            return -1;
+        }
+        {
+            long long b = head >> 1;
+            if (b < 0 || b > 255) {
+                return -1;
+            }
+            out[n] = (unsigned char)b;
+        }
+        n = n + 1;
+        cursor = rest;
+    }
+    return n;
+}
+
+static long long fk_jit_leaf_inram(long long image, long long arg_value) {
+    unsigned char code[FK_INRAM_CODE_CAP];
+    long long n;
+    long long i;
+    long long arg;
+    void *mem = 0;
+    if ((arg_value & 1) != 0) {
+        return fk_nothing;
+    }
+    arg = arg_value >> 1;
+    n = fk_inram_bytes(image, code, FK_INRAM_CODE_CAP);
+    if (n <= 0 || (n % 4) != 0) {
+        return fk_nothing;
+    }
+    for (i = 0; i < FK_INRAM_CACHE; i = i + 1) {
+        if (fk_inram_cache[i].live && fk_inram_cache[i].n == n) {
+            long long j = 0;
+            while (j < n && fk_inram_cache[i].code[j] == code[j]) {
+                j = j + 1;
+            }
+            if (j == n) {
+                long long (*hot)(long long) =
+                    (long long (*)(long long))fk_inram_cache[i].mem;
+                return (hot(arg)) << 1;
+            }
+        }
+    }
+    mem = mmap(0, FK_INRAM_CODE_CAP, 0x7, 0x1802, -1, 0);
+    if (mem == (void *)-1) {
+        return fk_nothing;
+    }
+    pthread_jit_write_protect_np(0);
+    for (i = 0; i < n; i = i + 1) {
+        ((unsigned char *)mem)[i] = code[i];
+    }
+    pthread_jit_write_protect_np(1);
+    __builtin___clear_cache((char *)mem, (char *)mem + n);
+    {
+        fk_inram_entry *e = &fk_inram_cache[fk_inram_cursor];
+        if (e->live && e->mem != 0) {
+            munmap(e->mem, FK_INRAM_CODE_CAP);
+        }
+        e->live = 1;
+        e->n = n;
+        for (i = 0; i < n; i = i + 1) {
+            e->code[i] = code[i];
+        }
+        e->mem = mem;
+        fk_inram_cursor = (fk_inram_cursor + 1) % FK_INRAM_CACHE;
+    }
+    {
+        long long (*fn)(long long) = (long long (*)(long long))mem;
+        return (fn(arg)) << 1;
+    }
+}
+
 static long long fk_native_call_arm64_u32_leaf(long long program, long long root_value,
                                                 long long arg_value) {
     fk_arm64_u32_node nodes[FK_ARM64_U32_NODE_CAP];
@@ -8131,6 +8231,15 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long arg215 = fk_walk(fk_node[i][3], fp);
         fk_vsp = fk_vsp - 2;
         return fk_native_call_arm64_u32_leaf(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], arg215);
+    }
+    if (t == 146) {
+        long long image146 = fk_walk(fk_node[i][1], fp);
+        fk_vp(image146);
+        {
+            long long arg146 = fk_walk(fk_node[i][2], fp);
+            fk_vsp = fk_vsp - 1;
+            return fk_jit_leaf_inram(fk_vs[fk_vsp], arg146);
+        }
     }
     if (t == 216) {
         return fk_wifi_ssid();
