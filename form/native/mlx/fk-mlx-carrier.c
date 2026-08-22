@@ -445,13 +445,226 @@ static int fk_mlx_push_q8(const char **p, const char *end, mlx_array *st, int *s
     return 0;
 }
 
+static int fk_mlx_q4k_scale(const unsigned char *sc, int j) {
+    if (j < 4) {
+        return sc[j] & 63;
+    }
+    return (sc[j + 4] & 15) | ((sc[j - 4] >> 6) << 4);
+}
+
+static int fk_mlx_q4k_minv(const unsigned char *sc, int j) {
+    if (j < 4) {
+        return sc[j + 4] & 63;
+    }
+    return (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
+}
+
+/* q4k <path> <off> <r> <c> — K-quant door. Superblock 144 bytes / 256 weights. */
+static int fk_mlx_push_q4k(const char **p, const char *end, mlx_array *st, int *sp) {
+    char path[512];
+    char tok[64];
+    long long off = 0, r = 0, c = 0, n = 0, blocks = 0, bi = 0;
+    unsigned char *raw = 0;
+    float *data = 0;
+    FILE *f = 0;
+    size_t got = 0;
+    if (!fk_mlx_tok(p, end, path, 512)) {
+        fk_mlx_seterr("q4k needs a path");
+        return -1;
+    }
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q4k needs a byte offset");
+        return -1;
+    }
+    off = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q4k needs rows");
+        return -1;
+    }
+    r = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q4k needs cols");
+        return -1;
+    }
+    c = atoll(tok);
+    n = r * c;
+    if (r < 1 || c < 1 || n > FK_MLX_TENSOR_CAP || off < 0) {
+        fk_mlx_seterr("q4k shape out of range");
+        return -1;
+    }
+    if ((n % 256) != 0) {
+        fk_mlx_seterr("q4k shape is not a whole number of 256-weight superblocks");
+        return -1;
+    }
+    if (*sp >= 32) {
+        fk_mlx_seterr("stack overflow");
+        return -1;
+    }
+    blocks = n / 256;
+    f = fopen(path, "rb");
+    if (f == 0) {
+        fk_mlx_seterr("q4k cannot open path");
+        return -1;
+    }
+    raw = (unsigned char *)malloc((size_t)blocks * 144);
+    data = (float *)malloc((size_t)n * sizeof(float));
+    if (raw == 0 || data == 0) {
+        free(raw); free(data); fclose(f);
+        fk_mlx_seterr("q4k out of memory");
+        return -1;
+    }
+    if (fseek(f, (long)off, SEEK_SET) != 0) {
+        free(raw); free(data); fclose(f);
+        fk_mlx_seterr("q4k cannot seek to offset");
+        return -1;
+    }
+    got = fread(raw, 1, (size_t)blocks * 144, f);
+    fclose(f);
+    if (got != (size_t)blocks * 144) {
+        free(raw); free(data);
+        fk_mlx_seterr("q4k file is shorter than the shape asked for");
+        return -1;
+    }
+    while (bi < blocks) {
+        const unsigned char *b = raw + bi * 144;
+        float d = fk_mlx_f16((unsigned short)(b[0] | (b[1] << 8)));
+        float dmin = fk_mlx_f16((unsigned short)(b[2] | (b[3] << 8)));
+        const unsigned char *sc = b + 4;
+        const unsigned char *qs = b + 16;
+        int i = 0;
+        while (i < 256) {
+            int chunk = i / 64;
+            int within = i - chunk * 64;
+            int hf = within / 32;
+            int l = within - hf * 32;
+            int sidx = 2 * chunk + hf;
+            int qbyte = qs[chunk * 32 + l];
+            int nib = (hf == 0) ? (qbyte & 15) : (qbyte >> 4);
+            int scv = fk_mlx_q4k_scale(sc, sidx);
+            int mnv = fk_mlx_q4k_minv(sc, sidx);
+            data[bi * 256 + i] = (d * (float)scv) * (float)nib - (dmin * (float)mnv);
+            i = i + 1;
+        }
+        bi = bi + 1;
+    }
+    free(raw);
+    {
+        int shape[2];
+        shape[0] = (int)r;
+        shape[1] = (int)c;
+        st[(*sp)++] = mlx_array_new_data(data, shape, 2, MLX_FLOAT32);
+    }
+    free(data);
+    return 0;
+}
+
+/* q6k <path> <off> <r> <c> — the other K-quant. Superblock 210 bytes / 256 weights. */
+static int fk_mlx_push_q6k(const char **p, const char *end, mlx_array *st, int *sp) {
+    char path[512];
+    char tok[64];
+    long long off = 0, r = 0, c = 0, n = 0, blocks = 0, bi = 0;
+    unsigned char *raw = 0;
+    float *data = 0;
+    FILE *f = 0;
+    size_t got = 0;
+    if (!fk_mlx_tok(p, end, path, 512)) {
+        fk_mlx_seterr("q6k needs a path");
+        return -1;
+    }
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q6k needs a byte offset");
+        return -1;
+    }
+    off = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q6k needs rows");
+        return -1;
+    }
+    r = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q6k needs cols");
+        return -1;
+    }
+    c = atoll(tok);
+    n = r * c;
+    if (r < 1 || c < 1 || n > FK_MLX_TENSOR_CAP || off < 0) {
+        fk_mlx_seterr("q6k shape out of range");
+        return -1;
+    }
+    if ((n % 256) != 0) {
+        fk_mlx_seterr("q6k shape is not a whole number of 256-weight superblocks");
+        return -1;
+    }
+    if (*sp >= 32) {
+        fk_mlx_seterr("stack overflow");
+        return -1;
+    }
+    blocks = n / 256;
+    f = fopen(path, "rb");
+    if (f == 0) {
+        fk_mlx_seterr("q6k cannot open path");
+        return -1;
+    }
+    raw = (unsigned char *)malloc((size_t)blocks * 210);
+    data = (float *)malloc((size_t)n * sizeof(float));
+    if (raw == 0 || data == 0) {
+        free(raw); free(data); fclose(f);
+        fk_mlx_seterr("q6k out of memory");
+        return -1;
+    }
+    if (fseek(f, (long)off, SEEK_SET) != 0) {
+        free(raw); free(data); fclose(f);
+        fk_mlx_seterr("q6k cannot seek to offset");
+        return -1;
+    }
+    got = fread(raw, 1, (size_t)blocks * 210, f);
+    fclose(f);
+    if (got != (size_t)blocks * 210) {
+        free(raw); free(data);
+        fk_mlx_seterr("q6k file is shorter than the shape asked for");
+        return -1;
+    }
+    while (bi < blocks) {
+        const unsigned char *ql = raw + bi * 210;
+        const unsigned char *qh = ql + 128;
+        const signed char *scales = (const signed char *)(ql + 192);
+        float d = fk_mlx_f16((unsigned short)(ql[208] | (ql[209] << 8)));
+        int i = 0;
+        while (i < 256) {
+            int h = i / 128;
+            int wi = i - h * 128;
+            int l = wi % 32;
+            int g = wi / 32;
+            int is_ = l / 16;
+            int qlidx = h * 64 + l + (g % 2) * 32;
+            int nib = (g / 2 == 0) ? (ql[qlidx] & 15) : (ql[qlidx] >> 4);
+            int hi = (qh[h * 32 + l] >> (2 * g)) & 3;
+            int q = (nib | (hi << 4)) - 32;
+            int scv = (int)scales[h * 8 + is_ + 2 * g];
+            data[bi * 256 + i] = d * (float)scv * (float)q;
+            i = i + 1;
+        }
+        bi = bi + 1;
+    }
+    free(raw);
+    {
+        int shape[2];
+        shape[0] = (int)r;
+        shape[1] = (int)c;
+        st[(*sp)++] = mlx_array_new_data(data, shape, 2, MLX_FLOAT32);
+    }
+    free(data);
+    return 0;
+}
+
 static int fk_mlx_unop(const char *op, mlx_array *st, int *sp, mlx_stream s) {
     /* sum was the first reduction. softmax is the first generation op after
      * matmul: attention is made of (matmul, softmax, matmul). New token, not
      * a new fkwu-uni.c opcode. precise=true so a sharp score does not NaN. */
     int is_sum = strcmp(op, "sum") == 0;
     int is_sm = strcmp(op, "softmax") == 0;
-    if (!is_sum && !is_sm) {
+    int is_rope = strcmp(op, "rope") == 0;
+    if (!is_sum && !is_sm && !is_rope) {
         return 1;
     }
     if (*sp < 1) {
@@ -460,12 +673,108 @@ static int fk_mlx_unop(const char *op, mlx_array *st, int *sp, mlx_stream s) {
     }
     mlx_array a = st[--(*sp)];
     mlx_array c = mlx_array_new();
-    int rc = is_sum ? mlx_sum(&c, a, false, s)
-                    : mlx_softmax(&c, a, true, s);
+    int rc = -1;
+    if (is_sum) {
+        rc = mlx_sum(&c, a, false, s);
+    } else if (is_sm) {
+        rc = mlx_softmax(&c, a, true, s);
+    } else {
+        size_t nd = mlx_array_ndim(a);
+        const int *sh = mlx_array_shape(a);
+        mlx_array x = a;
+        mlx_array shaped = mlx_array_new();
+        int own_shaped = 0;
+        int dims = 0;
+        if (nd == 2) {
+            int rs[4];
+            rs[0] = 1; rs[1] = 1; rs[2] = sh[0]; rs[3] = sh[1];
+            dims = sh[1];
+            if (mlx_reshape(&shaped, a, rs, 4, s) == 0) {
+                x = shaped;
+                own_shaped = 1;
+            }
+        } else if (nd > 0) {
+            dims = sh[nd - 1];
+        }
+        mlx_optional_float base;
+        base.value = 10000.0f;
+        base.has_value = 1;
+        rc = mlx_fast_rope(&c, x, dims, 0, base, 1.0f, 0, mlx_array_empty, s);
+        if (own_shaped) {
+            mlx_array_free(shaped);
+        } else {
+            mlx_array_free(shaped);
+        }
+    }
     mlx_array_free(a);
     if (rc != 0) {
         mlx_array_free(c);
-        fk_mlx_seterr("mlx unop failed");
+        if (!fk_mlx_failed) {
+            fk_mlx_seterr("mlx unop failed");
+        }
+        return -1;
+    }
+    if (*sp >= 32) {
+        mlx_array_free(c);
+        fk_mlx_seterr("stack overflow");
+        return -1;
+    }
+    st[(*sp)++] = c;
+    return 0;
+}
+
+static int fk_mlx_as4(mlx_array a, mlx_array *out, mlx_stream s) {
+    size_t nd = mlx_array_ndim(a);
+    const int *sh = mlx_array_shape(a);
+    int rs[4];
+    *out = mlx_array_new();
+    if (nd == 4) {
+        rs[0] = sh[0]; rs[1] = sh[1]; rs[2] = sh[2]; rs[3] = sh[3];
+        return mlx_reshape(out, a, rs, 4, s);
+    }
+    if (nd == 2) {
+        rs[0] = 1; rs[1] = 1; rs[2] = sh[0]; rs[3] = sh[1];
+        return mlx_reshape(out, a, rs, 4, s);
+    }
+    if (nd == 3) {
+        rs[0] = sh[0]; rs[1] = 1; rs[2] = sh[1]; rs[3] = sh[2];
+        return mlx_reshape(out, a, rs, 4, s);
+    }
+    return -1;
+}
+
+/* attn — fused scaled-dot-product attention. Postfix: q k v attn.
+ * Scale is 1.0 so a fixture whose QK^T is 1 stays 1 after softmax. */
+static int fk_mlx_attn(mlx_array *st, int *sp, mlx_stream s) {
+    if (*sp < 3) {
+        fk_mlx_seterr("stack underflow");
+        return -1;
+    }
+    mlx_array v = st[--(*sp)];
+    mlx_array k = st[--(*sp)];
+    mlx_array q = st[--(*sp)];
+    mlx_array q4, k4, v4, c;
+    int rc = -1;
+    int rq, rk, rv;
+    c = mlx_array_new();
+    rq = fk_mlx_as4(q, &q4, s);
+    rk = fk_mlx_as4(k, &k4, s);
+    rv = fk_mlx_as4(v, &v4, s);
+    if (rq == 0 && rk == 0 && rv == 0) {
+        rc = mlx_fast_scaled_dot_product_attention(
+            &c, q4, k4, v4, 1.0f, "", mlx_array_empty, mlx_array_empty, s);
+    }
+    mlx_array_free(q);
+    mlx_array_free(k);
+    mlx_array_free(v);
+    mlx_array_free(q4);
+    mlx_array_free(k4);
+    mlx_array_free(v4);
+    if (rc != 0) {
+        mlx_array_free(c);
+        if (!fk_mlx_failed) {
+            fk_mlx_seterr("mlx attn failed");
+        }
         return -1;
     }
     if (*sp >= 32) {
@@ -541,6 +850,18 @@ long long fk_mlx_run_external(const char *src, long long n) {
             }
         } else if (strcmp(tok, "q8") == 0) {
             if (fk_mlx_push_q8(&p, end, st, &sp) != 0) {
+                fail = 1;
+            }
+        } else if (strcmp(tok, "q4k") == 0) {
+            if (fk_mlx_push_q4k(&p, end, st, &sp) != 0) {
+                fail = 1;
+            }
+        } else if (strcmp(tok, "q6k") == 0) {
+            if (fk_mlx_push_q6k(&p, end, st, &sp) != 0) {
+                fail = 1;
+            }
+        } else if (strcmp(tok, "attn") == 0) {
+            if (fk_mlx_attn(st, &sp, s) != 0) {
                 fail = 1;
             }
         } else if ((u = fk_mlx_unop(tok, st, &sp, s)) != 1) {
