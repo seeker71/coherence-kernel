@@ -20,6 +20,14 @@ The recipe is connected to the existing Form review hand. A native PASS or
 REVISE now bypasses the rented panel; an open observation reaches it. The
 integration band invokes no outside model.
 
+During the final rebase, main's new direct CLI lane exposed an ignored-kernel
+seam: the old local `fkwu` still returned freshness **31**, answered `pong`,
+then emitted blank lines forever because its `read_line` returned an empty
+string rather than current source's `nothing` at EOF. Rebuilding the one
+kernel healed the direct lane. The freshness band's existing bit 16 now also
+requires `read_line -> nothing` with stdin closed, so this exact stale binary
+can no longer pass the grounding door.
+
 ## Observation
 
 | witness | verdict | exit |
@@ -28,6 +36,9 @@ integration band invokes no outside model.
 | `observe/tests/review-operationalization-route-band.fk` | 127 | 0 |
 | existing `observe/tests/review-ask-band.fk` | 511 | 0 |
 | preflight, both new bands | 0 errors / 0 warnings / 0 unresolved | 0 |
+| direct source CLI after kernel rebuild | `pong`, then EOF | 0 |
+| widened binary freshness band, stdin closed | 31 | 0 |
+| pre-`read_line -> nothing` kernel against widened band | 15 | 0 |
 
 ## Most surprising teaching
 
