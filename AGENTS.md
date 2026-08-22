@@ -37,7 +37,7 @@ Verify the direct source bootstrap first:
 ```sh
 ./fkwu bootstrap/ground.fk                 # -> 42
 ./fkwu bootstrap/ground-recursive.fk 10    # -> 55
-./fkwu form/form-stdlib/tests/binary-freshness-band.fk   # -> 31 (anything else: REBUILD fkwu first)
+./fkwu form/form-stdlib/tests/binary-freshness-band.fk </dev/null  # -> 31 (anything else: REBUILD fkwu first)
 ./fkwu bootstrap/ground-numeric-list.fk    # -> [1, 2.5, [3, 4]]
 ```
 
