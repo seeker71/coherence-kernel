@@ -5,7 +5,7 @@
 ; and required byte extent are read from that GGUF.  Form emits the MSL at runtime;
 ; the linked Metal carrier JIT-compiles it for the device that answered metal_status.
 ;
-; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-form-layer.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-dense-token-handle.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
+; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-form-layer.fk form-stdlib/local-model-choice.fk form-stdlib/local-generate-organ.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-dense-token-handle.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
 
 (do
     (defn fcmg-src (path) (eqr-of-file path 0 40000000))
@@ -17,22 +17,31 @@
         (str_concat name (str_concat "=" value)))
     (defn fcmg-line (name value)
         (str_concat (fcmg-field name value) "\n"))
-    (defn fcmg-report (arch ids out text forwards busy-us prefill-us decode-us weight-bytes)
+    (defn fcmg-name (src)
+        (do (let n (gmt-str src "general.name"))
+            (if (str_eq n "") "(header names no model)" n)))
+    (defn fcmg-report (model arch ids out text thought-eval thought-offers thought-n forwards busy-us prefill-us decode-us weight-bytes)
         (do
             (let effective-gbps-x10
                 (if (gt busy-us 0)
                     (div (mul (mul weight-bytes forwards) 10) (mul busy-us 1000)) 0))
-            (let decode-forwards (if (gt (len out) 0) (sub (len out) 1) 0))
+            (let decode-forwards (if (gt (len out) thought-n) (sub (sub (len out) thought-n) 1) 0))
             (let prefill-tokps-x1000
-                (if (gt prefill-us 0) (div (mul (len ids) 1000000000) prefill-us) 0))
+                (if (gt prefill-us 0) (div (mul (add (len ids) thought-n) 1000000000) prefill-us) 0))
             (let decode-tokps-x1000
                 (if (and (gt decode-us 0) (gt decode-forwards 0))
                     (div (mul decode-forwards 1000000000) decode-us) 0))
             (let end-to-end-tokps-x1000
                 (if (gt busy-us 0) (div (mul (len out) 1000000000) busy-us) 0))
             (str_concat (fcmg-line "backend" "form-native-metal-jit")
-            (str_concat (fcmg-line "form-layer" (if (eq (qfl-armed?) 1) "on" "off"))
+            (str_concat (fcmg-line "form-layer" (if (eq (ftl-armed?) 1) "on" "off"))
+            (str_concat (fcmg-line "model" model)
             (str_concat (fcmg-line "architecture" arch)
+            (str_concat (fcmg-line "mode" (lmc-mode arch))
+            (str_concat (fcmg-line "thought-kernel" "source-resonance-stream")
+            (str_concat (fcmg-line "thought-eval" thought-eval)
+            (str_concat (fcmg-line "thought-offers" (int_to_str thought-offers))
+            (str_concat (fcmg-line "thought-tokens" (int_to_str thought-n))
             (str_concat (fcmg-line "prompt_tokens" (int_to_str (len ids)))
             (str_concat (fcmg-line "generated_tokens" (int_to_str (len out)))
             (str_concat (fcmg-line "forward_passes" (int_to_str forwards))
@@ -47,7 +56,7 @@
                 (int_to_str effective-gbps-x10))
             (str_concat (fcmg-line "end_to_end_tokps_x1000"
                 (int_to_str end-to-end-tokps-x1000))
-                            (str_concat "text:\n" text))))))))))))))))))
+                            (str_concat "text:\n" text))))))))))))))))))))))))
 
     ; ── residence ─────────────────────────────────────────────────────────────
     ; A model admitted once should not be admitted again to answer a second
@@ -116,7 +125,59 @@
                     (str_concat (int_to_str closed)
                         (str_concat ";expected=" (int_to_str expected)))))))
 
-    (defn fcmg-run-context (src arch ids ctx n)
+    ; Encode every evaluated thought into tokenizer ids (left-to-right).
+    (defn fcmg-encode-thoughts (src thoughts acc)
+        (if (eq (len thoughts) 0) (lg-rev acc (empty))
+            (fcmg-encode-thoughts src (tail thoughts)
+                (cons (q35-encode src (lg-thought-text (head thoughts))) acc))))
+
+    (defn fcmg-id-count (lists n)
+        (if (eq (len lists) 0) n
+            (fcmg-id-count (tail lists) (add n (len (head lists))))))
+
+    (defn fcmg-flat-ids (lists acc)
+        (if (eq (len lists) 0) acc
+            (fcmg-flat-ids (tail lists) (tkz-cat acc (head lists)))))
+
+    ; Offer → commit → optional gap decode → next offer.
+    ; Returns (first pos stream-ids thought-n offers).
+    ; stream-ids is chronological: thought, gap, thought, ...
+    (defn fcmg-offer-stream (ps bs geo lays sts embTv onormTv projTv
+                             thought-lists pos gap-n stops stream thought-n offers)
+        (if (eq (len thought-lists) 0)
+            (list (sub 0 1) pos stream thought-n offers)
+            (do
+                (let ids (head thought-lists))
+                (let pf
+                    (if (eq (len ids) 0)
+                        (list (sub 0 1) pos)
+                        (q38-prefill ps bs geo lays sts embTv onormTv projTv ids pos)))
+                (let first (nth pf 0))
+                (let next-pos (nth pf 1))
+                (let rest (tail thought-lists))
+                (let more (gt (len rest) 0))
+                (let after-thought (tkz-cat stream ids))
+                (let thought-n2 (add thought-n (len ids)))
+                (if (and more (gt gap-n 0))
+                    (do
+                        (let gap-out
+                            (if (or (lt first 0) (q38-stop? first stops)) (empty)
+                                (cons first
+                                    (q38-generate ps bs geo lays sts embTv onormTv projTv
+                                        first next-pos (sub gap-n 1) stops (empty)))))
+                        (let gap-pos (add next-pos (len gap-out)))
+                        (fcmg-offer-stream ps bs geo lays sts embTv onormTv projTv
+                            rest gap-pos gap-n stops
+                            (tkz-cat after-thought gap-out)
+                            thought-n2
+                            (add offers 1)))
+                    (if (eq (len rest) 0)
+                        (list first next-pos after-thought thought-n2 (add offers 1))
+                        (fcmg-offer-stream ps bs geo lays sts embTv onormTv projTv
+                            rest next-pos gap-n stops after-thought thought-n2
+                            (add offers 1)))))))
+
+    (defn fcmg-run-context (src arch model ids thought-lists thought-eval ctx n gap-n)
         (do
             (let geo (nth ctx 2))
             (let sts (q38-new-state geo))
@@ -128,17 +189,32 @@
                     (let pf (q38-prefill
                         (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
                         (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0))
-                    (let prefill-status (metal_status))
-                    (let first (nth pf 0))
-                    (let pos (nth pf 1))
                     (let stops (fcmg-q35-stops src))
-                    (let out
-                        (if (or (lt first 0) (q38-stop? first stops)) (empty)
-                            (cons first
-                                (q38-generate
-                                    (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
-                                    (nth ctx 4) (nth ctx 5) (nth ctx 6)
-                                    first pos (sub n 1) stops (empty)))))
+                    (let offered
+                        (if (eq (len thought-lists) 0)
+                            (list (nth pf 0) (nth pf 1) (empty) 0 0)
+                            (fcmg-offer-stream
+                                (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
+                                (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                                thought-lists (nth pf 1) gap-n stops
+                                (empty) 0 0)))
+                    (let prefill-status (metal_status))
+                    (let first (nth offered 0))
+                    (let pos (nth offered 1))
+                    (let stream-ids (nth offered 2))
+                    (let thought-n (nth offered 3))
+                    (let offers (nth offered 4))
+                    (let model-extra (sub (len stream-ids) thought-n))
+                    (let remain (sub n model-extra))
+                    (let model-tail
+                        (if (le remain 0) (empty)
+                            (if (or (lt first 0) (q38-stop? first stops)) (empty)
+                                (cons first
+                                    (q38-generate
+                                        (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
+                                        (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                                        first pos (sub remain 1) stops (empty))))))
+                    (let out (tkz-cat stream-ids model-tail))
                     (metal_sync)
                     (let after-status (metal_status))
                     (let busy-us (sub
@@ -150,20 +226,22 @@
                     (let decode-us (sub
                         (mbw-status-int after-status "gpu_busy_us_total")
                         (mbw-status-int prefill-status "gpu_busy_us_total")))
-                    (let forwards (add (len ids)
-                        (if (gt (len out) 0) (sub (len out) 1) 0)))
+                    (let forwards (add (add (len ids) thought-n)
+                        (if (gt (add model-extra (len model-tail)) 0)
+                            (sub (add model-extra (len model-tail)) 1) 0)))
                     (let weight-bytes (q38-forward-weight-bytes ctx))
                     (fcmg-state-close-result sts
-                        (fcmg-report arch ids out (tkz-decode-text src out)
+                        (fcmg-report model arch ids out (tkz-decode-text src out)
+                            thought-eval offers thought-n
                             forwards busy-us prefill-us decode-us weight-bytes))))))
 
     (defn fcmg-chat-ids (src prompt)
-        (if (eq (qfl-armed?) 1)
+        (if (eq (ftl-armed?) 1)
             (do (let ims (q35-special-id src "<|im_start|>"))
                 (let ime (q35-special-id src "<|im_end|>"))
                 (tkz-cat (q35-one ims)
                 (tkz-cat (q35-encode src "system\n")
-                (tkz-cat (q35-encode src (qfl-system-text))
+                (tkz-cat (q35-encode src (ftl-system-text))
                 (tkz-cat (q35-one ime)
                 (tkz-cat (q35-encode src "\n")
                          (q35-chat-ids src prompt)))))))
@@ -183,44 +261,72 @@
                 (metal_status))
             "generation refused: selected artifact has no current Form-native SHA-256 seal"))
 
+    (defn fcmg-noted (prompt arch model msg)
+        (str_concat (lmc-say prompt arch model) (str_concat "\n" msg)))
+
+    (defn fcmg-arch-door (arch model)
+        (if (str_eq arch "deepseek4")
+            (str_concat "generate on "
+            (str_concat (if (str_eq model "") "this deepseek4 file" model)
+                " uses the DS4 control stack (route / ds4-query). This door is Form-native generate for qwen35."))
+            (str_concat "generate for architecture="
+            (str_concat arch
+            (str_concat " model="
+            (str_concat (if (str_eq model "") "unnamed" model)
+                " is unfinished on this door; choose and route still name the file."))))))
+
     (defn fcmg-fresh (path prompt n)
         (do
             (let verdict (qaf-seal-verdict path))
         (if (not (eq verdict 1))
-            (list (fcmg-seal-refusal verdict) (fcmr-none))
+            (list (fcmg-noted prompt "" "" (fcmg-seal-refusal verdict)) (fcmr-none))
             (do
                 (let src (fcmg-src path))
+                (let thoughts (lg-think-all prompt))
+                (let thought-lists (fcmg-encode-thoughts src thoughts (empty)))
+                (let thought-eval (lg-values-line thoughts))
+                (let thought-n (fcmg-id-count thought-lists 0))
+                (let gap-n (if (gt (len thoughts) 1) (lg-gap-default) 0))
                 (let ids (fcmg-chat-ids src prompt))
                 (let arch (fcmg-arch src))
+                (let model (fcmg-name src))
                 (let model-max (gmt-u32 src (q38-key arch "context_length")))
-                (let need (add (len ids) n))
+                (let need (add (add (len ids) thought-n)
+                    (add (mul gap-n (if (gt (len thoughts) 1) (sub (len thoughts) 1) 0)) n)))
                 (let maxpos (if (lt need model-max) need model-max))
                 (let required (q38-required-size src (egg-data-base src 32)))
                 (let actual (file_size path))
                 (if (not (str_eq arch "qwen35"))
-                    (list (str_concat "generation refused: unsupported GGUF architecture=" arch)
+                    (list (fcmg-noted prompt arch model (fcmg-arch-door arch model))
                           (fcmr-none))
                 (if (eq (len ids) 0)
-                    (list "generation refused: tokenizer produced no prompt tokens" (fcmr-none))
+                    (list (fcmg-noted prompt arch model "generation refused: tokenizer produced no prompt tokens")
+                          (fcmr-none))
                 (if (or (le n 0) (gt need model-max))
-                    (list (str_concat "generation refused: requested context exceeds model limit="
-                              (int_to_str model-max))
+                    (list (fcmg-noted prompt arch model
+                              (str_concat "generation refused: requested context exceeds model limit="
+                                  (int_to_str model-max)))
                           (fcmr-none))
                 (if (or (le required 0) (lt actual required))
-                    (list (str_concat "generation refused: incomplete tensor extent; required="
-                              (str_concat (int_to_str required)
-                                  (str_concat ";actual=" (int_to_str actual))))
+                    (list (fcmg-noted prompt arch model
+                              (str_concat "generation refused: incomplete tensor extent; required="
+                                  (str_concat (int_to_str required)
+                                      (str_concat ";actual=" (int_to_str actual)))))
                           (fcmr-none))
                     (do
                         (let ctx (q38-open path maxpos))
                         (if (lt (len ctx) 10)
-                            (list (str_concat "generation refused: model context did not open; "
-                                      (metal_status))
+                            (list (fcmg-noted prompt arch model
+                                      (str_concat "generation refused: model context did not open; "
+                                          (metal_status)))
                                   (fcmr-none))
                             (if (not (eq (q38-context-ok? ctx) 1))
-                                (list (fcmg-open-refusal ctx "model context contains an invalid handle")
+                                (list (fcmg-noted prompt arch model
+                                          (fcmg-open-refusal ctx "model context contains an invalid handle"))
                                       (fcmr-none))
-                                (list (fcmg-run-context src arch ids ctx n)
+                                (list (fcmg-noted prompt arch model
+                                          (fcmg-run-context src arch model ids thought-lists thought-eval
+                                              ctx n gap-n))
                                       (fcmr path maxpos ctx src arch)))))))))))))
 
     (defn fcmg-stale-close ()
@@ -237,17 +343,28 @@
                 (do
                     (let src (fcmr-src r))
                     (let arch (fcmr-arch r))
+                    (let model (fcmg-name src))
+                    (let thoughts (lg-think-all prompt))
+                    (let thought-lists (fcmg-encode-thoughts src thoughts (empty)))
+                    (let thought-eval (lg-values-line thoughts))
+                    (let thought-n (fcmg-id-count thought-lists 0))
+                    (let gap-n (if (gt (len thoughts) 1) (lg-gap-default) 0))
                     (let ids (fcmg-chat-ids src prompt))
                     (let model-max (gmt-u32 src (q38-key arch "context_length")))
-                    (let need (add (len ids) n))
+                    (let need (add (add (len ids) thought-n)
+                        (add (mul gap-n (if (gt (len thoughts) 1) (sub (len thoughts) 1) 0)) n)))
                     (if (eq (len ids) 0)
-                        (list "generation refused: tokenizer produced no prompt tokens" r)
+                        (list (fcmg-noted prompt arch model "generation refused: tokenizer produced no prompt tokens") r)
                     (if (or (le n 0) (gt need model-max))
-                        (list (str_concat "generation refused: requested context exceeds model limit="
-                                  (int_to_str model-max))
+                        (list (fcmg-noted prompt arch model
+                                  (str_concat "generation refused: requested context exceeds model limit="
+                                      (int_to_str model-max)))
                               r)
                     (if (le need (fcmr-maxpos r))
-                        (list (fcmg-run-context src arch ids (fcmr-ctx r) n) r)
+                        (list (fcmg-noted prompt arch model
+                                  (fcmg-run-context src arch model ids thought-lists thought-eval
+                                      (fcmr-ctx r) n gap-n))
+                              r)
                         (if (eq (fcmr-release-ok? r) 1)
                             (fcmg-fresh path prompt n)
                             (fcmg-stale-close)))))))))
