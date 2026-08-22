@@ -8574,7 +8574,19 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             long long rg = read(0, &rc, 1);
             if (rg <= 0) {
                 if (rn == 0) {
-                    return 0 - 2;
+                    /* END OF INPUT IS `nothing`, NOT A NEGATIVE NUMBER.
+                     * The old sentinel made every caller ask `(lt line 0)`, and
+                     * that question reads the ENCODING: this walker packs a
+                     * string as a large negative word (fk_strv) while the
+                     * emitted walker packs it as a positive index, so the same
+                     * check answered opposite in the two kernels. The form-cli
+                     * REPL therefore quit on its first real line under the
+                     * source runner and ran fine baked — which is why the CLI
+                     * looked like it needed the flatten table at all. Absence
+                     * is first-class in this body; say it with the word for
+                     * absence and the question becomes `(nothing? line)`,
+                     * which no encoding can answer differently. */
+                    return fk_nothing;
                 }
                 break;
             }
