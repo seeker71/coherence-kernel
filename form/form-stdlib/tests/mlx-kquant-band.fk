@@ -1,0 +1,99 @@
+; mlx-kquant-band.fk — the GPU lane reads the other half of a real GGUF.
+;
+; Q8_0 carries one f16 scale over 32 weights. The K-quants carry a SUPER-scale
+; over 256 and a second tier of per-sub-block scales inside it, which is how a
+; real model gets under two bits of error per weight. Both layouts came from this
+; body's own proven recipes — q6k-dequant.fk and q4k-dequant.fk — not from memory
+; of llama.cpp, so the decomposition the carrier walks and the one the four-way
+; bands prove are the SAME decomposition.
+;
+;   block_q6_K = { uint8 ql[128]; uint8 qh[64]; int8 scales[16]; half d }  210 B
+;     q = ((ql nibble) | (((qh >> 2g) & 3) << 4)) - 32     w = d * scale * q
+;
+;   block_q4_K = { half d; half dmin; uint8 scales[12]; uint8 qs[128] }    144 B
+;     w = (d * scale_j) * nib - (dmin * min_j)
+;
+; WITNESSED ON A REAL MODEL, in the receipt rather than here.
+; form-llama-vital-ground-q4_k_m.gguf, 2,019,373,248 bytes, tensors found by the
+; body's own equireach-gguf: blk.0.attn_q.weight is type 12 (Q4_K) at 338,141,376
+; and blk.0.ffn_down.weight is type 14 (Q6_K) at 346,030,272. On the GPU, x1e5:
+;   Q4_K attn_q row summed        76743
+;   Q6_K ffn_down row summed    -130742
+;   Q6_K token_embd row summed    -9053
+;   Q4_K row . Q6_K column        -8092
+; An independent dequantizer of the same bytes says the same four, to the digit.
+;
+; This band stands on superblocks it BUILDS, so it needs no 2 GB file. The
+; fixtures are chosen so the arithmetic is checkable by hand:
+;   Q6_K: every ql and qh byte 0, every scale 1, d = 1.0 -> every q is 0-32 = -32,
+;         so a superblock sums to 256 * -32 = -8192.
+;   Q4_K: every qs byte 0 and every scale byte 0 -> every nib 0 and every min 0,
+;         so a superblock sums to 0 whatever d is; then the same block with
+;         dmin = 1.0 and the min field set is what proves dmin is really
+;         subtracted.
+;
+; fkwu-only organ. Every claim is guarded by bit 1 so an unlinked host reads 1
+; rather than a false green.
+;
+; Verdict 63.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-fs.fk
+
+(do
+    (defn mkb-score (ok bit) (if ok bit 0))
+    (defn mkb-has (hay needle) (if (lt (str_find hay needle 0) 0) 0 1))
+    (defn mkb-live? () (mkb-has (mlx_status) "mlx_linked=true"))
+    (defn mkb-rep (b n acc) (if (le n 0) acc (mkb-rep b (sub n 1) (str_concat acc (byte_to_str b)))))
+    (defn mkb-q6path () "/tmp/fk-mlx-q6k-band-fixture.bin")
+    (defn mkb-q4path () "/tmp/fk-mlx-q4k-band-fixture.bin")
+    ; Q6_K: ql[128]=0, qh[64]=0, scales[16]=1, d=f16 1.0 (0x3C00 little-endian)
+    (defn mkb-q6 ()
+        (str_concat (mkb-rep 0 192 "")
+        (str_concat (mkb-rep 1 16 "")
+        (str_concat (byte_to_str 0) (byte_to_str 60)))))
+    ; Q4_K: d=1.0, dmin=1.0, scales[12]=0, qs[128]=0 -> all nib 0, all min 0 -> sum 0
+    (defn mkb-q4-zero ()
+        (str_concat (byte_to_str 0) (str_concat (byte_to_str 60)
+        (str_concat (byte_to_str 0) (str_concat (byte_to_str 60)
+        (str_concat (mkb-rep 0 12 "") (mkb-rep 0 128 ""))))))
+    )
+    ; the same block with every packed min field = 1 (scales[4..7] low 6 bits),
+    ; so w = 0 - dmin*1 for all 256 weights and the superblock sums to -256
+    (defn mkb-q4-min1 ()
+        (str_concat (byte_to_str 0) (str_concat (byte_to_str 60)
+        (str_concat (byte_to_str 0) (str_concat (byte_to_str 60)
+        (str_concat (mkb-rep 0 4 "")
+        (str_concat (mkb-rep 1 4 "")
+        (str_concat (mkb-rep 17 4 "")
+                    (mkb-rep 0 128 ""))))))))
+    )
+    (defn mkb-prog (tag path off r c tail)
+        (str_concat tag (str_concat " " (str_concat path
+        (str_concat " " (str_concat (int_to_str off)
+        (str_concat " " (str_concat (int_to_str r)
+        (str_concat " " (str_concat (int_to_str c) (str_concat " " tail)))))))))))
+    (defn mlx-kquant-band ()
+        (do
+    (let w6 (fs-write-text (mkb-q6path) (mkb-q6)))
+    (let w4 (fs-write-text (mkb-q4path) (str_concat (mkb-q4-zero) (mkb-q4-min1))))
+    ; the fixtures are one 210-byte Q6_K superblock and two 144-byte Q4_K ones
+    (let c0 (mkb-score (and (eq w6 210) (and (eq w4 288) (eq (mkb-live?) 1))) 1))
+    ; Q6_K: every quant code is 0 - 32, every scale 1, d 1.0 -> 256 * -32
+    (let c1 (mkb-score (if (eq (mkb-live?) 1)
+                           (eq (mlx_run (mkb-prog "q6k" (mkb-q6path) 0 1 256 "sum")) (sub 0 8192)) 0) 2))
+    ; Q4_K with every nibble and every min zero sums to zero whatever d is
+    (let c2 (mkb-score (if (eq (mkb-live?) 1)
+                           (eq (mlx_run (mkb-prog "q4k" (mkb-q4path) 0 1 256 "sum")) 0) 0) 4))
+    ; and the SECOND block, whose packed mins are 1, sums to -256: dmin is really
+    ; subtracted, which no all-zero fixture could ever have shown
+    (let c3 (mkb-score (if (eq (mkb-live?) 1)
+                           (eq (mlx_run (mkb-prog "q4k" (mkb-q4path) 144 1 256 "sum")) (sub 0 256)) 0) 8))
+    ; a shape that is not a whole number of 256-weight superblocks is REFUSED
+    (let c4 (mkb-score (if (eq (mkb-live?) 1)
+                           (eq (mlx_run (mkb-prog "q6k" (mkb-q6path) 0 1 128 "sum")) 0) 0) 16))
+    ; and a shape longer than the file is refused, never padded
+    (let c5 (mkb-score (if (eq (mkb-live?) 1)
+                           (eq (mlx_run (mkb-prog "q6k" (mkb-q6path) 0 1 2560 "sum")) 0) 0) 32))
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))
+    )
+    (mlx-kquant-band))
