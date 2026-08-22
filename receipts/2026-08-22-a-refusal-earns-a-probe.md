@@ -28,6 +28,12 @@ kernel healed the direct lane. The freshness band's existing bit 16 now also
 requires `read_line -> nothing` with stdin closed, so this exact stale binary
 can no longer pass the grounding door.
 
+Main then moved once more and taught the local Form generation lanes. The
+standalone carrier was re-authored from that reunited source rather than
+preserving the previous bytes: stamp `c5932df57265af1d`, **3023 functions**,
+**94941 nodes**, **517290 tokens**. The rebuilt carrier answered `pong`; the
+direct source lane answered `pong` and then observed EOF.
+
 ## Observation
 
 | witness | verdict | exit |
@@ -39,6 +45,7 @@ can no longer pass the grounding door.
 | direct source CLI after kernel rebuild | `pong`, then EOF | 0 |
 | widened binary freshness band, stdin closed | 31 | 0 |
 | pre-`read_line -> nothing` kernel against widened band | 15 | 0 |
+| reunited local-generation carrier canary | `pong` | 0 |
 
 ## Most surprising teaching
 
