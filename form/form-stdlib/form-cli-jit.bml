@@ -2,30 +2,30 @@
 //
 // form-cli-jit.bml
 //
-// The JIT is Form. One thought, emitted on demand onto whatever organ
-// can run it. C does not own the algorithm. C installs and calls.
+// High-grammar authority: form-stdlib/bml/form-cli-jit.bml
 //
-//   f(n) = n * Mul + Add     sample 5 -> 22
-//
-// CPU   — form-lower emits AArch64; jit_leaf_inram and form_cpu_jit run it
-// Metal — this class emits MSL; metal_pipeline compiles it on the GPU
-// MLX   — this class emits postfix; mlx_run is the dumb stack
+// One thought f(n)=n*Mul+Add. Backends are data (Mlx/Metal/Cpu).
+// Apply(backend, n) emits and runs. Host leaves are not fields.
 //
 // Proven by: form-stdlib/tests/form-cli-jit-band.fk
 //
 //////////////////////////////////////////////////////////////////////
 
 section [form.bml] {
+    template BackendCell<TImage> {
+        member image: TImage;
+    }
+
     class FormJit<T> {
         field Mul = 3;
         field Add = 7;
         field Sample = 5;
         field Expect = 22;
-        field CpuDoor = "jit_leaf_inram";
-        field MetalDoor = "metal_pipeline";
-        field MlxDoor = "mlx_run";
+        field Mlx = 0;
+        field Metal = 1;
+        field Cpu = 2;
 
-        thought fjit-pattern = list("cpu", "metal", "mlx");
+        thought fjit-pattern = list("mlx", "metal", "cpu");
 
         def fjit-spc() = " ";
         def fjit-nl() = byte_to_str(10);
@@ -37,14 +37,31 @@ section [form.bml] {
             str_concat("#include <metal_stdlib>", str_concat(n, str_concat("using namespace metal;", str_concat(n, str_concat("kernel void form_jit_f(device uint *a [[buffer(0)]], uint gid [[thread_position_in_grid]]) { if (gid == 0) a[0] = a[0] * ", str_concat(int_to_str(Mul()), str_concat(" + ", str_concat(int_to_str(Add()), "; }"))))))));
         }
 
+        def fjit-ssa() = list(list(1, Add()), list(2), list(1, Mul()), list(5, 1, 2), list(3, 3, 0));
+
+        def fjit-apply-mlx(n) = mlx_run(fjit-mlx(n));
+        def fjit-apply-cpu(n) = jit_leaf_inram(lo-compile-fn(fjit-ssa(), 4), n);
+
+        def fjit-apply-metal(n) {
+            let buf = metal_buf_alloc(4);
+            let wrote = metal_buf_write(buf, 0, md-le32(n));
+            let pipe = metal_pipeline(fjit-msl(), "form_jit_f");
+            let enq = metal_enqueue(pipe, md-bind(list(buf), empty()), 1);
+            let sync = metal_sync();
+            let res = metal_buf_read(buf, 0, 4);
+            let v = str_byte_at(res, 0);
+            let shut = metal_buf_free(buf);
+            v;
+        }
+
+        def fjit-apply(backend, n) = if eq(backend, Mlx()) then fjit-apply-mlx(n) else if eq(backend, Metal()) then fjit-apply-metal(n) else fjit-apply-cpu(n);
+
         def fjit-check() {
             let b0 = if eq(Mul(), 3) then if eq(Add(), 7) then 1 else 0 else 0;
             let b1 = if eq(Sample(), 5) then if eq(Expect(), 22) then 2 else 0 else 0;
             let b2 = if str_eq(fjit-mlx(Sample()), "5 3 mul 7 add") then 4 else 0;
-            let b3 = if str_eq(CpuDoor(), "jit_leaf_inram") then 8 else 0;
-            let b4 = if str_eq(MetalDoor(), "metal_pipeline") then 16 else 0;
-            let b5 = if str_eq(MlxDoor(), "mlx_run") then 32 else 0;
-            add(b0, add(b1, add(b2, add(b3, add(b4, b5)))));
+            let b3 = if eq(Mlx(), 0) then if eq(Metal(), 1) then if eq(Cpu(), 2) then 8 else 0 else 0 else 0;
+            add(b0, add(b1, add(b2, b3)));
         }
     }
     0;
