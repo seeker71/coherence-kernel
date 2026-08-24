@@ -1,0 +1,79 @@
+; qwen38-matmul-scaling-run.fk — does the batched matmul amortize, or not?
+;
+; Layer-major put the FFN's three matmuls on form_q8_0_matmul_batch_f32 at
+; ntok 385. The kernel reads each weight once per tile of 8 tokens, so 385
+; tokens should read every FFN weight 49 times instead of 385 — 7.9x less
+; traffic on 81% of the model. Prefill GPU time should have fallen about 47%.
+;
+; It fell 3.1%.
+;
+; This times ONE real FFN gate tensor through both kernels at several widths,
+; on the GPU counter alone, so the amortization curve is read rather than
+; assumed. If the batched kernel does not get cheaper per token as ntok grows,
+; the whole layer-major win is somewhere else and the next slice changes.
+;
+; Effectful: opens a sealed 29GB GGUF and drives the GPU. Do not preflight.
+; preludes: form/form-stdlib/form-cli-model-generate.fk
+
+(do
+    (defn ms-line (k v) (print_str (str_concat "scale " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn ms-int (k v) (ms-line k (int_to_str v)))
+
+    ; hoisted: a defn frame cannot see the enclosing lets
+    (defn ms-batch (ps gate xh yh ntok)
+        (do (let g0 (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (metal_batch_concurrent)
+            (q38-mv-batch ps gate xh yh ntok 1)
+            (metal_sync)
+            (sub (mbw-status-int (metal_status) "gpu_busy_us_total") g0)))
+
+    (let path "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf")
+    (let ctx (q38-open-span path 1024 512))
+    (if (lt (len ctx) 10)
+        (ms-line "refused" (metal_status))
+        (do
+            (let ps (nth ctx 0))
+            (let bs (nth ctx 1))
+            (let geo (nth ctx 2))
+            (let lay (nth (nth ctx 3) 0))
+            (let gate (nth lay 2))
+            (ms-int "gate-rows" (kth-tv-r gate))
+            (ms-int "gate-cols" (kth-tv-c gate))
+            (ms-int "gate-bytes" (kth-tybytes (kth-tv-ty gate)
+                                    (mul (kth-tv-r gate) (kth-tv-c gate))))
+
+            ; warm the pages so the first timing is not a disk fault
+            (q38-mv ps gate (nth bs 1) (nth bs 14) 1)
+            (metal_sync)
+
+            ; the wide matvec, one token — today's prefill and decode path
+            (let a0 (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (metal_batch_concurrent)
+            (q38-mv ps gate (nth bs 1) (nth bs 14) 1)
+            (metal_sync)
+            (let a1 (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (ms-int "wide-matvec-1tok-us" (sub a1 a0))
+
+            ; the wide matvec run 8 times, as prefill does for 8 tokens
+            (let b0 (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (metal_batch_concurrent)
+            (q38-mv ps gate (nth bs 1) (nth bs 14) 1)
+            (q38-mv ps gate (nth bs 1) (nth bs 14) 1)
+            (q38-mv ps gate (nth bs 1) (nth bs 14) 1)
+            (q38-mv ps gate (nth bs 1) (nth bs 14) 1)
+            (q38-mv ps gate (nth bs 1) (nth bs 14) 1)
+            (q38-mv ps gate (nth bs 1) (nth bs 14) 1)
+            (q38-mv ps gate (nth bs 1) (nth bs 14) 1)
+            (q38-mv ps gate (nth bs 1) (nth bs 14) 1)
+            (metal_sync)
+            (let b1 (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (ms-int "wide-matvec-8x-us" (sub b1 b0))
+
+            ; the batched kernel at 1, 8, 64, 385
+            (ms-int "batch-1tok-us"   (ms-batch ps gate (nth bs 1) (nth bs 14) 1))
+            (ms-int "batch-8tok-us"   (ms-batch ps gate (nth bs 1) (nth bs 14) 8))
+            (ms-int "batch-64tok-us"  (ms-batch ps gate (nth bs 1) (nth bs 14) 64))
+            (ms-int "batch-385tok-us" (ms-batch ps gate (nth bs 1) (nth bs 14) 385))
+
+            (q38-close ctx (empty))
+            0)))

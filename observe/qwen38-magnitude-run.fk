@@ -1,0 +1,56 @@
+; qwen38-magnitude-run.fk — the whole turn against its own floor, so the next
+; slice is chosen by size rather than by habit.
+;
+; Every repair so far has moved a few percent of a term that is not the big one.
+; This asks the only question that ranks them: how many bytes of weight must
+; cross memory for one forward pass, what does the device actually deliver, and
+; how far is the turn from what that floor allows.
+;
+; Effectful: opens a sealed 29GB GGUF. Do not preflight.
+; preludes: form/form-stdlib/form-cli-model-generate.fk
+
+(do
+    (defn mag-line (k v) (print_str (str_concat "mag " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn mag-int (k v) (mag-line k (int_to_str v)))
+
+    (let path "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf")
+    (let t0 (now_unix_ms))
+    (let src (fcmg-src path))
+    (let arch (fcmg-arch src))
+    (let model-max (gmt-u32 src (q38-key arch "context_length")))
+    (let t1 (now_unix_ms))
+    (mag-int "ms-header" (sub t1 t0))
+    (mag-int "file-bytes" (file_size path))
+    (mag-int "context-length" model-max)
+
+    (let ctx (q38-open-span path 1024 1))
+    (let t2 (now_unix_ms))
+    (mag-int "ms-open" (sub t2 t1))
+    (if (lt (len ctx) 10)
+        (mag-line "refused" (metal_status))
+        (do
+            (let wb (q38-forward-weight-bytes ctx))
+            (mag-int "weight-bytes-per-forward" wb)
+            (mag-int "layers" (nth (nth ctx 2) 21))
+            (mag-int "d-model" (nth (nth ctx 2) 0))
+            (mag-int "ff" (nth (nth ctx 2) 10))
+            (mag-int "n-head" (nth (nth ctx 2) 12))
+            (mag-int "head-dim" (nth (nth ctx 2) 14))
+            ; one real forward, timed on the GPU counter alone
+            (let sts (q38-new-state (nth ctx 2)))
+            (let g0 (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (let w0 (now_unix_ms))
+            (let tok (q38-forward (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                                  (nth ctx 4) (nth ctx 5) (nth ctx 6) 100 0))
+            (metal_sync)
+            (let w1 (now_unix_ms))
+            (let g1 (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (mag-int "one-forward-gpu-us" (sub g1 g0))
+            (mag-int "one-forward-wall-ms" (sub w1 w0))
+            (mag-int "one-forward-token" tok)
+            ; achieved bandwidth, in MB/s, from the body's own two numbers
+            (mag-int "achieved-mb-per-s"
+                (if (gt (sub g1 g0) 0) (div wb (sub g1 g0)) 0))
+            (q38-free-state sts)
+            (q38-close ctx (empty))
+            0)))

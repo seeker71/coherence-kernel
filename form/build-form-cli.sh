@@ -50,7 +50,8 @@ if [[ "$(uname -s 2>/dev/null)" == "Darwin" && -f "native/metal/fk-metal-carrier
     FORM_CLI_EXTRA_LDFLAGS="-framework Metal -framework Foundation -fobjc-arc${FORM_CLI_EXTRA_LDFLAGS:+ $FORM_CLI_EXTRA_LDFLAGS}"
 fi
 
-# The same law, one organ later. `fkwu` has linked the MLX carrier whenever
+# The same observed host-capability relation, one organ later. `fkwu` has linked
+# the MLX carrier whenever
 # libmlxc is on the host since 2026-08-20 (AGENTS.md carries that recipe), but
 # form-cli did not, so the binary a session actually speaks through answered
 # mlx_linked=false on a machine whose MLX was live — the body not knowing what
@@ -272,6 +273,7 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/kat-coder-embed.fk"
     "native/metal/kat-token-handle.fk"
     "native/metal/qwen35-dense-token-handle.fk"
+    "native/metal/qwen35-crystal.fk"
     "native/metal/model-bandwidth.fk"
     "$S/form-cli-qwen-teach-layer.fk"
     "$S/form-cli-model-generate.fk"

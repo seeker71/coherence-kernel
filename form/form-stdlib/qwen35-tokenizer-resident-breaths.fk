@@ -1,0 +1,167 @@
+; qwen35-tokenizer-resident-breaths.fk -- carry one bounded source and state
+; through several tokenizer artifact breaths in the same Form process.
+;
+; This layer does not widen a breath: every call to the committed vocabulary
+; or merge loop remains capped at q35tba-max-breath-rows (64).  It opens the
+; tiny progress row once, carries the returned progress value directly from
+; breath to breath, and reuses the caller's single equireach source window.
+; Every artifact row is still appended, checkpointed, and released before the
+; next row.  No vocabulary list, merge list, joined tokenizer monolith, model
+; tensor, or model forward is introduced here.
+;
+; preludes: form-stdlib/qwen35-tokenizer-bounded-bridge.fk
+
+(do
+    (defn q35trm-max-breaths-per-residence () 16)
+
+    (defn q35trm-feature (name status)
+        (list "qwen35-tokenizer-resident-feature" name status))
+    (defn q35trm-feature-name (f) (nth f 1))
+    (defn q35trm-feature-status (f) (nth f 2))
+    (defn q35trm-manifest ()
+        (list
+            (q35trm-feature "single-source-window-many-breaths" 1)
+            (q35trm-feature "progress-loaded-once" 1)
+            (q35trm-feature "state-carried-directly" 1)
+            (q35trm-feature "per-breath-cap-64" 1)
+            (q35trm-feature "per-row-checkpoint-release" 1)
+            (q35trm-feature "no-whole-vocab-list" 1)
+            (q35trm-feature "no-whole-merge-list" 1)
+            (q35trm-feature "no-tokenizer-monolith" 1)
+            (q35trm-feature "no-model-tensor-forward" 1)))
+    (defn q35trm-manifest-has? (name fs)
+        (if (nil? fs) 0
+            (if (and (str_eq (q35trm-feature-name (head fs)) name)
+                     (eq (q35trm-feature-status (head fs)) 1))
+                1
+                (q35trm-manifest-has? name (tail fs)))))
+
+    ; acc = tag breaths processed appended max-row choices cuts undos timeouts
+    ;       failures refinements releases state-handoffs monotonic
+    (defn q35trm-acc (breaths processed appended max-row choices cuts undos
+                       timeouts failures refinements releases state-handoffs monotonic)
+        (list "qwen35-tokenizer-resident-acc" breaths processed appended max-row
+              choices cuts undos timeouts failures refinements releases
+              state-handoffs monotonic))
+    (defn q35trm-acc-empty ()
+        (q35trm-acc 0 0 0 0 0 0 0 0 0 0 0 0 1))
+    (defn q35trm-acc-breaths (a) (nth a 1))
+    (defn q35trm-acc-processed (a) (nth a 2))
+    (defn q35trm-acc-appended (a) (nth a 3))
+    (defn q35trm-acc-max-row (a) (nth a 4))
+    (defn q35trm-acc-choices (a) (nth a 5))
+    (defn q35trm-acc-cuts (a) (nth a 6))
+    (defn q35trm-acc-undos (a) (nth a 7))
+    (defn q35trm-acc-timeouts (a) (nth a 8))
+    (defn q35trm-acc-failures (a) (nth a 9))
+    (defn q35trm-acc-refinements (a) (nth a 10))
+    (defn q35trm-acc-releases (a) (nth a 11))
+    (defn q35trm-acc-state-handoffs (a) (nth a 12))
+    (defn q35trm-acc-monotonic? (a) (nth a 13))
+
+    (defn q35trm-breath-forward? (before breath)
+        (do
+            (let after (q35tbb-breath-progress breath))
+            (let processed (q35tbb-breath-processed breath))
+            (if (not (eq (q35tbb-progress-source-size before)
+                         (q35tbb-progress-source-size after))) 0
+            (if (not (eq (q35tbb-progress-source-mtime before)
+                         (q35tbb-progress-source-mtime after))) 0
+            (if (not (eq (q35tbb-progress-next-index after)
+                         (add (q35tbb-progress-next-index before) processed))) 0
+            (if (not (eq (q35tbb-progress-appended-bytes after)
+                         (add (q35tbb-progress-appended-bytes before)
+                              (q35tbb-breath-appended breath)))) 0
+            (if (not (eq (q35tbb-breath-releases breath) processed)) 0
+            (if (gt (q35tbb-breath-max-row breath) (q35tba-max-row-bytes)) 0
+                1))))))))
+
+    (defn q35trm-acc-add (a before breath has-next)
+        (q35trm-acc
+            (add (q35trm-acc-breaths a) 1)
+            (add (q35trm-acc-processed a) (q35tbb-breath-processed breath))
+            (add (q35trm-acc-appended a) (q35tbb-breath-appended breath))
+            (q35tba-max (q35trm-acc-max-row a) (q35tbb-breath-max-row breath))
+            (add (q35trm-acc-choices a) (q35tbb-breath-choices breath))
+            (add (q35trm-acc-cuts a) (q35tbb-breath-cuts breath))
+            (add (q35trm-acc-undos a) (q35tbb-breath-undos breath))
+            (add (q35trm-acc-timeouts a) (q35tbb-breath-timeouts breath))
+            (add (q35trm-acc-failures a) (q35tbb-breath-failures breath))
+            (add (q35trm-acc-refinements a) (q35tbb-breath-refinements breath))
+            (add (q35trm-acc-releases a) (q35tbb-breath-releases breath))
+            (add (q35trm-acc-state-handoffs a) (if has-next 1 0))
+            (if (and (eq (q35trm-acc-monotonic? a) 1)
+                     (eq (q35trm-breath-forward? before breath) 1)) 1 0)))
+
+    ; result = tag status initial-progress final-progress requested-breaths
+    ;          rows-per-breath acc progress-loads source-windows reason
+    (defn q35trm-result (status initial final requested rows acc progress-loads
+                         source-windows reason)
+        (list "qwen35-tokenizer-resident-result" status initial final requested
+              rows acc progress-loads source-windows reason))
+    (defn q35trm-status (r) (nth r 1))
+    (defn q35trm-initial-progress (r) (nth r 2))
+    (defn q35trm-final-progress (r) (nth r 3))
+    (defn q35trm-requested-breaths (r) (nth r 4))
+    (defn q35trm-rows-per-breath (r) (nth r 5))
+    (defn q35trm-accumulation (r) (nth r 6))
+    (defn q35trm-progress-loads (r) (nth r 7))
+    (defn q35trm-source-windows (r) (nth r 8))
+    (defn q35trm-reason (r) (nth r 9))
+
+    (defn q35trm-one-breath (root src p requested)
+        (do
+            (let batch (if (lt requested 1) 1
+                (if (gt requested (q35tba-max-breath-rows))
+                    (q35tba-max-breath-rows) requested)))
+            (if (eq (q35tbb-progress-phase p) (q35tbb-phase-vocab))
+                (q35tbb-vocab-loop root src p batch batch 0 0 0)
+            (if (eq (q35tbb-progress-phase p) (q35tbb-phase-merge))
+                (q35tbb-merge-loop root src p batch batch 0 0 0)
+                (do
+                    (let sealed (q35tbb-write-final-seal root src p))
+                    (q35tbb-breath-result (if (eq sealed 1) "sealed" "failure") p
+                        batch 0 0 (q35tbb-progress-peak-row p) 1 1 0 0
+                        (if (eq sealed 1) 0 1) (if (eq sealed 1) 0 1) 1
+                        (if (eq sealed 1) "full-source-bound" "seal-write-failed")))))))
+
+    (defn q35trm-loop (root src initial p requested-breaths rows remaining acc)
+        (if (eq remaining 0)
+            (q35trm-result "resident-complete" initial p requested-breaths rows
+                           acc 1 1 "requested-breaths-complete")
+            (do
+                (let breath (q35trm-one-breath root src p rows))
+                (let status (q35tbb-breath-status breath))
+                (let can-continue (or (str_eq status "progress")
+                                      (str_eq status "phase-complete")))
+                (let next-remaining (sub remaining 1))
+                (let next-acc (q35trm-acc-add acc p breath
+                    (and can-continue (gt next-remaining 0))))
+                (if can-continue
+                    (q35trm-loop root src initial (q35tbb-breath-progress breath)
+                        requested-breaths rows next-remaining next-acc)
+                    (q35trm-result status initial (q35tbb-breath-progress breath)
+                        requested-breaths rows next-acc 1 1
+                        (q35tbb-breath-reason breath))))))
+
+    (defn q35trm-run (root src source-size source-mtime requested-breaths rows)
+        (do
+            (let breaths (if (lt requested-breaths 1) 1
+                (if (gt requested-breaths (q35trm-max-breaths-per-residence))
+                    (q35trm-max-breaths-per-residence) requested-breaths)))
+            (let batch (if (lt rows 1) 1
+                (if (gt rows (q35tba-max-breath-rows))
+                    (q35tba-max-breath-rows) rows)))
+            (let made (fs-mkdir root))
+            (let opened (q35tbb-load-progress root src source-size source-mtime batch))
+            (let open-status (q35tbb-progress-result-status opened))
+            (if (or (str_eq open-status "new") (str_eq open-status "ok"))
+                (do
+                    (let initial (q35tbb-progress-result-value opened))
+                    (q35trm-loop root src initial initial breaths batch breaths
+                                 (q35trm-acc-empty)))
+                (q35trm-result open-status (q35tbb-progress-result-value opened)
+                    (q35tbb-progress-result-value opened) breaths batch
+                    (q35trm-acc-empty) 1 1 "progress-open-refused"))))
+
+    0)

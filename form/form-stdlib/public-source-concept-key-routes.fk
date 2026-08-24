@@ -1,0 +1,672 @@
+; public-source-concept-key-routes.fk -- exact concept-key routing over the
+; persisted public-source concept shards without scanning every source record.
+;
+; This is a derived routing organ, not a flattened concept table and not an
+; operations table.  A concept key chooses one SHA-256 bucket.  Inside it,
+; every source coordinate owns one independently replaceable bounded reference
+; file.  Ambiguous keys therefore retain every candidate while lookup returns
+; exact nothing; no candidate wins by directory order.
+;
+; References retain the registry's durable source-content and entry-content
+; keys.  A hit is offered only after the referenced .psci artifact parses,
+; reconstructs the original PSCI source/entry NodeIDs, matches both retained
+; content keys, and re-observes the current source bytes.  Missing, malformed,
+; changed, colliding, over-wide, or timed-out evidence is refusal, never a hit.
+;
+; Incremental upsert writes the new references before dissolving old-only
+; references, then advances the per-source manifest.  A failed write undoes
+; the just-offered new references.  Repeating the same offer is idempotent.
+; Dissolve releases only references owned by that source coordinate.
+;
+; No top-level effect lives here.  The pure transition and lookup surfaces are
+; proven without opening a file.  The effectful functions remain explicit
+; doors for the proposed bounded driver.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/bmf-core.fk form-stdlib/form-fs.fk
+; preludes: form-stdlib/file-byte-window.fk form-stdlib/sha256.fk
+; preludes: form-stdlib/hex.fk form-stdlib/form-knowledge-source-search.fk
+; preludes: form-stdlib/public-source-concept-index.fk
+; preludes: form-stdlib/public-source-concept-shards.fk
+; Proven by: form-stdlib/tests/public-source-concept-key-routes-band.fk
+
+(do
+    (defn psckr-schema () "public-source-concept-key-routes-v1")
+    (defn psckr-reference-schema () "psckr-reference-v1")
+    (defn psckr-manifest-schema () "psckr-source-manifest-v1")
+    (defn psckr-result-schema () "psckr-lookup-result-v1")
+    (defn psckr-max-reference-bytes () 2048)
+    (defn psckr-max-manifest-bytes () 2048)
+    (defn psckr-max-candidates () 64)
+    (defn psckr-read-window () 512)
+
+    ; ---- content-addressed route coordinates ----------------------------
+    (defn psckr-key-hash (key)
+        (hex-encode (sha256-stream-string key)))
+    (defn psckr-coordinate-hash (family path)
+        (hex-encode (sha256-stream-string
+            (pscish-join (list family (pscish-string-hex path)) "|"))))
+    (defn psckr-store-root (artifact)
+        (fs-path-join artifact "concept-key-routes-v1"))
+    (defn psckr-routes-root (artifact)
+        (fs-path-join (psckr-store-root artifact) "routes"))
+    (defn psckr-manifests-root (artifact)
+        (fs-path-join (psckr-store-root artifact) "manifests"))
+    (defn psckr-key-prefix (key)
+        (substring (psckr-key-hash key) 0 2))
+    (defn psckr-key-bucket-at (artifact key)
+        (do
+            (let hash (psckr-key-hash key))
+            (fs-path-join
+                (fs-path-join (psckr-routes-root artifact)
+                    (substring hash 0 2))
+                hash)))
+    (defn psckr-reference-path-at (artifact key family path)
+        (fs-path-join (psckr-key-bucket-at artifact key)
+            (str_concat (psckr-coordinate-hash family path) ".route")))
+    (defn psckr-manifest-family-root (artifact family)
+        (fs-path-join (psckr-manifests-root artifact) family))
+    (defn psckr-manifest-bucket-root (artifact family path)
+        (do
+            ; Match the committed source shard's path-hash bucket so a live
+            ; report can compare one bounded source bucket with one manifest
+            ; bucket without inventing a second traversal coordinate.
+            (let hash (pscish-path-hash path))
+            (fs-path-join (psckr-manifest-family-root artifact family)
+                (substring hash 0 2))))
+    (defn psckr-manifest-path-at (artifact family path)
+        (fs-path-join (psckr-manifest-bucket-root artifact family path)
+            (str_concat (pscish-path-hash path) ".manifest")))
+
+    ; ---- bounded reference codec ----------------------------------------
+    ; reference = schema key key-hash family path source-content-key
+    ;             entry-content-key
+    (defn psckr-content-key-valid? (key)
+        (if (not (eq (str_len key) 64)) 0 (hex-valid? key)))
+    (defn psckr-reference (key family path source-key entry-key)
+        (list (psckr-reference-schema) key (psckr-key-hash key) family path
+            source-key entry-key))
+    (defn psckr-reference-key (r) (nth r 1))
+    (defn psckr-reference-key-hash (r) (nth r 2))
+    (defn psckr-reference-family (r) (nth r 3))
+    (defn psckr-reference-path (r) (nth r 4))
+    (defn psckr-reference-source-key (r) (nth r 5))
+    (defn psckr-reference-entry-key (r) (nth r 6))
+    (defn psckr-reference-valid? (r)
+        (if (not (eq (len r) 7)) 0
+        (if (not (str_eq (nth r 0) (psckr-reference-schema))) 0
+        (if (eq (psci-concept-key-valid? (psckr-reference-key r)) 0) 0
+        (if (not (str_eq (psckr-reference-key-hash r)
+                         (psckr-key-hash (psckr-reference-key r)))) 0
+        (if (eq (psci-path-valid-for-family?
+                    (psckr-reference-path r)
+                    (psckr-reference-family r)) 0) 0
+        (if (eq (psckr-content-key-valid?
+                    (psckr-reference-source-key r)) 0) 0
+            (psckr-content-key-valid? (psckr-reference-entry-key r)))))))))
+    (defn psckr-reference-from-record (record key)
+        (if (or (not (eq (len record) 13))
+            (or (eq (pscish-key-member? key
+                        (pscish-record-keys record)) 0)
+                (eq (psci-concept-key-valid? key) 0))) (empty)
+            (psckr-reference key (pscish-record-family record)
+                (pscish-record-path record)
+                (pscish-record-source-content-key record)
+                (pscish-record-entry-content-key record))))
+    (defn psckr-render-reference (r)
+        (if (eq (psckr-reference-valid? r) 0) ""
+            (pscish-join
+                (list (psckr-reference-schema)
+                    (pscish-string-hex (psckr-reference-key r))
+                    (psckr-reference-key-hash r)
+                    (psckr-reference-family r)
+                    (pscish-string-hex (psckr-reference-path r))
+                    (psckr-reference-source-key r)
+                    (psckr-reference-entry-key r)) "|")))
+    (defn psckr-parse-reference (text)
+        (if (gt (str_len text) (psckr-max-reference-bytes)) (empty)
+            (do
+                (let f (pscish-split text "|"))
+                (if (not (eq (len f) 7)) (empty)
+                    (do
+                        (let r (list (nth f 0)
+                            (pscish-hex-string (nth f 1)) (nth f 2)
+                            (nth f 3) (pscish-hex-string (nth f 4))
+                            (nth f 5) (nth f 6)))
+                        (if (eq (psckr-reference-valid? r) 1) r
+                            (empty)))))))
+
+    ; A real bmf-core raw-byte cursor consumes each bounded artifact.  The
+    ; filesystem door below also bounds the bytes before creating the cursor.
+    ; scan = status reason text position trace
+    (defn psckr-cursor-fold (cursor fuel out)
+        (if (eq (cur-eof? cursor) 1)
+            (list "ready" "complete" out (cur-pos cursor)
+                (list "choice" "cut" "release"))
+            (if (le fuel 0)
+                (list "timeout" "cursor-step-budget" out (cur-pos cursor)
+                    (list "choice" "timeout" "cut" "undo" "refine"
+                        "release"))
+                (psckr-cursor-fold (cur-advance cursor 1) (sub fuel 1)
+                    (str_concat out (byte_to_str (cur-peek cursor)))))))
+    (defn psckr-consume-reference (text fuel)
+        (do
+            (let folded (psckr-cursor-fold (cursor-str text) fuel ""))
+            (if (not (str_eq (nth folded 0) "ready")) folded
+                (if (eq (len (psckr-parse-reference (nth folded 2))) 7)
+                    folded
+                    (list "failure" "invalid-route-reference"
+                        (nth folded 2) (nth folded 3)
+                        (list "choice" "failure" "cut" "undo" "refine"
+                            "release"))))))
+
+    ; ---- per-source manifest codec --------------------------------------
+    ; manifest = schema family path source-content-key entry-content-key keys
+    (defn psckr-manifest (family path source-key entry-key keys)
+        (list (psckr-manifest-schema) family path source-key entry-key keys))
+    (defn psckr-manifest-family (m) (nth m 1))
+    (defn psckr-manifest-path (m) (nth m 2))
+    (defn psckr-manifest-source-key (m) (nth m 3))
+    (defn psckr-manifest-entry-key (m) (nth m 4))
+    (defn psckr-manifest-keys (m) (nth m 5))
+    (defn psckr-manifest-valid? (m)
+        (if (not (eq (len m) 6)) 0
+        (if (not (str_eq (nth m 0) (psckr-manifest-schema))) 0
+        (if (eq (psci-path-valid-for-family? (psckr-manifest-path m)
+                    (psckr-manifest-family m)) 0) 0
+        (if (eq (psckr-content-key-valid?
+                    (psckr-manifest-source-key m)) 0) 0
+        (if (eq (psckr-content-key-valid?
+                    (psckr-manifest-entry-key m)) 0) 0
+            (psci-concept-keys-valid? (psckr-manifest-keys m))))))))
+    (defn psckr-manifest-from-record (record)
+        (if (not (eq (len record) 13)) (empty)
+            (psckr-manifest (pscish-record-family record)
+                (pscish-record-path record)
+                (pscish-record-source-content-key record)
+                (pscish-record-entry-content-key record)
+                (pscish-record-keys record))))
+    (defn psckr-render-manifest (m)
+        (if (eq (psckr-manifest-valid? m) 0) ""
+            (pscish-join
+                (list (psckr-manifest-schema) (psckr-manifest-family m)
+                    (pscish-string-hex (psckr-manifest-path m))
+                    (psckr-manifest-source-key m)
+                    (psckr-manifest-entry-key m)
+                    (pscish-join (psckr-manifest-keys m) ",")) "|")))
+    (defn psckr-parse-manifest (text)
+        (if (gt (str_len text) (psckr-max-manifest-bytes)) (empty)
+            (do
+                (let f (pscish-split text "|"))
+                (if (not (eq (len f) 6)) (empty)
+                    (do
+                        (let m (list (nth f 0) (nth f 1)
+                            (pscish-hex-string (nth f 2)) (nth f 3)
+                            (nth f 4) (pscish-split (nth f 5) ",")))
+                        (if (eq (psckr-manifest-valid? m) 1) m
+                            (empty)))))))
+
+    ; ---- pure incremental reference movement ---------------------------
+    (defn psckr-same-coordinate? (a b)
+        (if (and (str_eq (psckr-reference-family a)
+                         (psckr-reference-family b))
+                 (str_eq (psckr-reference-path a)
+                         (psckr-reference-path b))) 1 0))
+    (defn psckr-without-coordinate (refs ref)
+        (if (nil? refs) (empty)
+            (if (eq (psckr-same-coordinate? (head refs) ref) 1)
+                (psckr-without-coordinate (tail refs) ref)
+                (cons (head refs)
+                    (psckr-without-coordinate (tail refs) ref)))))
+    (defn psckr-upsert-reference (refs ref)
+        (if (eq (psckr-reference-valid? ref) 0) refs
+            (cons ref (psckr-without-coordinate refs ref))))
+    (defn psckr-dissolve-reference (refs ref)
+        (if (eq (psckr-reference-valid? ref) 0) refs
+            (psckr-without-coordinate refs ref)))
+    (defn psckr-references-for-keys (record keys)
+        (if (nil? keys) (empty)
+            (cons (psckr-reference-from-record record (head keys))
+                (psckr-references-for-keys record (tail keys)))))
+    (defn psckr-keys-not-in (keys held)
+        (if (nil? keys) (empty)
+            (if (eq (pscish-key-member? (head keys) held) 1)
+                (psckr-keys-not-in (tail keys) held)
+                (cons (head keys) (psckr-keys-not-in (tail keys) held)))))
+    ; transition = schema status reason old-manifest new-manifest add-refs
+    ;              dissolve-keys trace
+    (defn psckr-transition (old-manifest record)
+        (do
+            (let next (psckr-manifest-from-record record))
+            (if (eq (psckr-manifest-valid? next) 0)
+                (list (psckr-schema) "failure" "invalid-source-record"
+                    old-manifest (empty) (empty) (empty)
+                    (list "choice" "failure" "cut" "undo" "refine"
+                        "release"))
+                (do
+                    (let old-keys (if (eq (psckr-manifest-valid?
+                                            old-manifest) 1)
+                        (psckr-manifest-keys old-manifest) (empty)))
+                    (let new-keys (psckr-manifest-keys next))
+                    (let dissolve (psckr-keys-not-in old-keys new-keys))
+                    (list (psckr-schema) "ready" "incremental-source-upsert"
+                        old-manifest next
+                        (psckr-references-for-keys record new-keys)
+                        dissolve
+                        (list "choice" "cut" "refine" "release"))))))
+    (defn psckr-transition-status (t) (nth t 1))
+    (defn psckr-transition-reason (t) (nth t 2))
+    (defn psckr-transition-old (t) (nth t 3))
+    (defn psckr-transition-next (t) (nth t 4))
+    (defn psckr-transition-adds (t) (nth t 5))
+    (defn psckr-transition-dissolves (t) (nth t 6))
+    (defn psckr-transition-trace (t) (nth t 7))
+    (defn psckr-transition-undo (t)
+        (if (not (str_eq (psckr-transition-status t) "ready")) t
+            (list (psckr-schema) "undo" "offered-transition-released"
+                (psckr-transition-next t) (psckr-transition-old t)
+                (empty)
+                (if (eq (psckr-manifest-valid? (psckr-transition-next t)) 1)
+                    (psckr-manifest-keys (psckr-transition-next t)) (empty))
+                (list "choice" "cut" "undo" "refine" "release"))))
+
+    ; ---- pure candidate resolution --------------------------------------
+    (defn psckr-record-same-coordinate? (record ref)
+        (if (and (str_eq (pscish-record-family record)
+                         (psckr-reference-family ref))
+                 (str_eq (pscish-record-path record)
+                         (psckr-reference-path ref))) 1 0))
+    (defn psckr-find-record (records ref)
+        (if (nil? records) (empty)
+            (if (and (eq (len (head records)) 13)
+                    (eq (psckr-record-same-coordinate?
+                        (head records) ref) 1))
+                (head records) (psckr-find-record (tail records) ref))))
+    (defn psckr-reference-current-for-record? (ref record)
+        (if (not (eq (len record) 13)) 0
+            (if (and
+                    (str_eq (psckr-reference-source-key ref)
+                        (pscish-record-source-content-key record))
+                    (str_eq (psckr-reference-entry-key ref)
+                        (pscish-record-entry-content-key record))) 1 0)))
+    ; accumulator = current-count first-record stale missing invalid
+    (defn psckr-resolve-reference (key ref records acc)
+        (if (or (eq (psckr-reference-valid? ref) 0)
+                (not (str_eq (psckr-reference-key ref) key)))
+            (list (nth acc 0) (nth acc 1) (nth acc 2) (nth acc 3)
+                (add (nth acc 4) 1))
+            (do
+                (let record (psckr-find-record records ref))
+                (if (eq (len record) 0)
+                    (list (nth acc 0) (nth acc 1) (nth acc 2)
+                        (add (nth acc 3) 1) (nth acc 4))
+                    (if (eq (psckr-reference-current-for-record?
+                                ref record) 0)
+                        (list (nth acc 0) (nth acc 1)
+                            (add (nth acc 2) 1) (nth acc 3) (nth acc 4))
+                        (list (add (nth acc 0) 1)
+                            (if (eq (nth acc 0) 0) record (nth acc 1))
+                            (nth acc 2) (nth acc 3) (nth acc 4)))))))
+    (defn psckr-resolve-references (key refs records acc)
+        (if (nil? refs) acc
+            (psckr-resolve-references key (tail refs) records
+                (psckr-resolve-reference key (head refs) records acc))))
+
+    ; result = schema status reason key family path source-id fresh rebuild
+    ;          match-count source-node entry-node source-key entry-key trace
+    ;          lookup-count model-executed stale missing invalid
+    (defn psckr-result (status reason key record fresh rebuild matches trace
+                        stale missing invalid)
+        (do
+            (let valid (if (eq (len record) 13) 1 0))
+            (list (psckr-result-schema) status reason key
+                (if (eq valid 1) (pscish-record-family record) "")
+                (if (eq valid 1) (pscish-record-path record) "")
+                (if (eq valid 1) (pscish-record-source-id record) "")
+                fresh rebuild matches
+                (if (eq valid 1) (pscish-record-source record)
+                    (psci-absent-node))
+                (if (eq valid 1) (pscish-record-entry record)
+                    (psci-absent-node))
+                (if (eq valid 1) (pscish-record-source-content-key record) "")
+                (if (eq valid 1) (pscish-record-entry-content-key record) "")
+                trace 1 0 stale missing invalid)))
+    (defn psckr-result-status (r) (nth r 1))
+    (defn psckr-result-reason (r) (nth r 2))
+    (defn psckr-result-key (r) (nth r 3))
+    (defn psckr-result-family (r) (nth r 4))
+    (defn psckr-result-path (r) (nth r 5))
+    (defn psckr-result-source-id (r) (nth r 6))
+    (defn psckr-result-fresh? (r) (nth r 7))
+    (defn psckr-result-rebuild? (r) (nth r 8))
+    (defn psckr-result-match-count (r) (nth r 9))
+    (defn psckr-result-source (r) (nth r 10))
+    (defn psckr-result-entry (r) (nth r 11))
+    (defn psckr-result-source-key (r) (nth r 12))
+    (defn psckr-result-entry-key (r) (nth r 13))
+    (defn psckr-result-trace (r) (nth r 14))
+    (defn psckr-result-lookup-count (r) (nth r 15))
+    (defn psckr-result-model-executed? (r) (nth r 16))
+    (defn psckr-result-stale (r) (nth r 17))
+    (defn psckr-result-missing (r) (nth r 18))
+    (defn psckr-result-invalid (r) (nth r 19))
+    (defn psckr-trace-has? (trace action)
+        (if (nil? trace) 0
+            (if (str_eq (head trace) action) 1
+                (psckr-trace-has? (tail trace) action))))
+    (defn psckr-result-from-acc (key acc)
+        (do
+            (let current (nth acc 0))
+            (let record (nth acc 1))
+            (let stale (nth acc 2))
+            (let missing (nth acc 3))
+            (let invalid (nth acc 4))
+            (if (gt (add stale (add missing invalid)) 0)
+                (psckr-result "nothing" "route-reference-refused" key
+                    (empty) 0 1 current
+                    (list "choice" "cut" "undo" "refine" "release")
+                    stale missing invalid)
+            (if (eq current 0)
+                (psckr-result "nothing" "concept-not-routed" key
+                    (empty) 0 0 0 (list "choice" "cut" "release")
+                    0 0 0)
+            (if (gt current 1)
+                (psckr-result "nothing" "ambiguous-concept-key" key
+                    (empty) 0 0 current
+                    (list "choice" "cut" "undo" "refine" "release")
+                    0 0 0)
+                (psckr-result "hit" "current-content-addressed-route" key
+                    record 1 0 1 (list "choice" "cut" "release")
+                    0 0 0))))))
+    (defn psckr-resolve-pure (key refs records)
+        (if (eq (psci-concept-key-valid? key) 0)
+            (psckr-result "nothing" "invalid-concept-key" "" (empty)
+                0 0 0 (list "choice" "failure" "cut" "undo" "refine"
+                    "release") 0 0 1)
+            (psckr-result-from-acc key
+                (psckr-resolve-references key refs records
+                    (list 0 (empty) 0 0 0)))))
+
+    ; ---- explicit bounded filesystem doors ------------------------------
+    (defn psckr-read-bounded-reference-at (path)
+        (do
+            (let size (fs-stat-size path))
+            (if (lt size 0)
+                (list "missing" "route-reference-missing" (empty))
+            (if (gt size (psckr-max-reference-bytes))
+                (list "timeout" "route-reference-over-window" (empty))
+                (do
+                    (let text (fs-read-slice path 0 size))
+                    (let scan (psckr-consume-reference text
+                        (psckr-max-reference-bytes)))
+                    (if (not (str_eq (nth scan 0) "ready"))
+                        (list (nth scan 0) (nth scan 1) (empty))
+                        (do
+                            (let r (psckr-parse-reference (nth scan 2)))
+                            (if (eq (len r) 7)
+                                (list "ready" "current-reference" r)
+                                (list "failure" "invalid-route-reference"
+                                    (empty))))))))))
+    (defn psckr-read-bounded-manifest-at (path)
+        (do
+            (let size (fs-stat-size path))
+            (if (lt size 0) (empty)
+            (if (gt size (psckr-max-manifest-bytes)) (empty)
+                (psckr-parse-manifest (fs-read-slice path 0 size))))))
+    (defn psckr-read-source-record-at (source-artifact family path)
+        (do
+            (let target (pscish-entry-artifact-path source-artifact family path))
+            (let size (fs-stat-size target))
+            (if (or (lt size 0) (gt size (psckr-max-reference-bytes)))
+                (empty)
+                (pscish-parse-entry (fs-read-slice target 0 size)))))
+    (defn psckr-ensure-reference-dirs (artifact key)
+        (do
+            (let _store (fs-mkdir (psckr-store-root artifact)))
+            (let _routes (fs-mkdir (psckr-routes-root artifact)))
+            (let _prefix (fs-mkdir (fs-path-join (psckr-routes-root artifact)
+                (psckr-key-prefix key))))
+            (let _bucket (fs-mkdir (psckr-key-bucket-at artifact key)))
+            1))
+    (defn psckr-ensure-manifest-dirs (artifact family path)
+        (do
+            (let _store (fs-mkdir (psckr-store-root artifact)))
+            (let _manifests (fs-mkdir (psckr-manifests-root artifact)))
+            (let _family (fs-mkdir
+                (psckr-manifest-family-root artifact family)))
+            (let _bucket (fs-mkdir
+                (psckr-manifest-bucket-root artifact family path)))
+            1))
+    ; write result = ok collision/failure
+    (defn psckr-write-reference-at (artifact ref)
+        (if (eq (psckr-reference-valid? ref) 0) (list 0 0)
+            (do
+                (let key (psckr-reference-key ref))
+                (let family (psckr-reference-family ref))
+                (let path (psckr-reference-path ref))
+                (let _dirs (psckr-ensure-reference-dirs artifact key))
+                (let target (psckr-reference-path-at artifact key family path))
+                (let held (psckr-read-bounded-reference-at target))
+                (if (and (str_eq (nth held 0) "ready")
+                         (or
+                            (not (str_eq
+                                (psckr-reference-family (nth held 2)) family))
+                            (not (str_eq
+                                (psckr-reference-path (nth held 2)) path))))
+                    (list 0 1)
+                    (if (gt (fs-write-text target
+                                (psckr-render-reference ref)) 0)
+                        (list 1 0) (list 0 0))))))
+    (defn psckr-release-reference-at (artifact ref)
+        (if (eq (psckr-reference-valid? ref) 0) 0
+            (do
+                (let target (psckr-reference-path-at artifact
+                    (psckr-reference-key ref)
+                    (psckr-reference-family ref)
+                    (psckr-reference-path ref)))
+                (let held (psckr-read-bounded-reference-at target))
+                (if (not (str_eq (nth held 0) "ready")) 0
+                    (if (and
+                            (str_eq (psckr-reference-family (nth held 2))
+                                (psckr-reference-family ref))
+                            (str_eq (psckr-reference-path (nth held 2))
+                                (psckr-reference-path ref)))
+                        (fs-remove-file target) 0)))))
+    (defn psckr-write-references-loop (artifact refs written failures collisions)
+        (if (nil? refs) (list written failures collisions)
+            (do
+                (let outcome (psckr-write-reference-at artifact (head refs)))
+                (if (eq (nth outcome 0) 0)
+                    (list written (add failures
+                        (if (eq (nth outcome 1) 0) 1 0))
+                        (add collisions (nth outcome 1)))
+                    (psckr-write-references-loop artifact (tail refs)
+                        (cons (head refs) written) failures collisions)))))
+    (defn psckr-release-references-loop (artifact refs released)
+        (if (nil? refs) released
+            (psckr-release-references-loop artifact (tail refs)
+                (add released
+                    (if (gt (psckr-release-reference-at artifact
+                                (head refs)) 0) 1 0)))))
+    (defn psckr-release-old-keys-loop (artifact old-manifest keys released)
+        (if (nil? keys) released
+            (do
+                (let ref (psckr-reference (head keys)
+                    (psckr-manifest-family old-manifest)
+                    (psckr-manifest-path old-manifest)
+                    (psckr-manifest-source-key old-manifest)
+                    (psckr-manifest-entry-key old-manifest)))
+                (psckr-release-old-keys-loop artifact old-manifest (tail keys)
+                    (add released
+                        (if (gt (psckr-release-reference-at artifact ref) 0)
+                            1 0))))))
+    ; outcome = schema status reason writes dissolves undos refinements
+    ;           releases collisions trace
+    (defn psckr-upsert-record-at (route-artifact record)
+        (do
+            (let next (psckr-manifest-from-record record))
+            (if (eq (psckr-manifest-valid? next) 0)
+                (list (psckr-schema) "failure" "invalid-source-record"
+                    0 0 0 1 0 0
+                    (list "choice" "failure" "cut" "undo" "refine"
+                        "release"))
+                (do
+                    (let manifest-path (psckr-manifest-path-at route-artifact
+                        (psckr-manifest-family next)
+                        (psckr-manifest-path next)))
+                    (let old (psckr-read-bounded-manifest-at manifest-path))
+                    (let transition (psckr-transition old record))
+                    (let offered (psckr-write-references-loop route-artifact
+                        (psckr-transition-adds transition) (empty) 0 0))
+                    (let failures (nth offered 1))
+                    (let collisions (nth offered 2))
+                    (if (gt (add failures collisions) 0)
+                        (do
+                            (let undone (psckr-release-references-loop
+                                route-artifact (nth offered 0) 0))
+                            (list (psckr-schema) "nothing"
+                                "route-upsert-undone" (len (nth offered 0))
+                                0 undone 1 undone collisions
+                                (list "choice" "failure" "cut" "undo"
+                                    "refine" "release")))
+                        (do
+                            (let dissolved (if (eq
+                                    (psckr-manifest-valid? old) 1)
+                                (psckr-release-old-keys-loop route-artifact old
+                                    (psckr-transition-dissolves transition) 0)
+                                0))
+                            (let _dirs (psckr-ensure-manifest-dirs
+                                route-artifact (psckr-manifest-family next)
+                                (psckr-manifest-path next)))
+                            (let wrote-manifest (fs-write-text manifest-path
+                                (psckr-render-manifest next)))
+                            (if (le wrote-manifest 0)
+                                (list (psckr-schema) "nothing"
+                                    "manifest-advance-failed"
+                                    (len (nth offered 0)) dissolved 0 1
+                                    dissolved 0
+                                    (list "choice" "cut" "undo" "refine"
+                                        "release"))
+                                (list (psckr-schema) "hit"
+                                    "incremental-source-upserted"
+                                    (len (nth offered 0)) dissolved 0 0
+                                    dissolved 0
+                                    (list "choice" "cut" "refine"
+                                        "release")))))))))
+    (defn psckr-dissolve-source-at (route-artifact family path)
+        (do
+            (let manifest-path (psckr-manifest-path-at route-artifact
+                family path))
+            (let manifest (psckr-read-bounded-manifest-at manifest-path))
+            (if (eq (psckr-manifest-valid? manifest) 0)
+                (list (psckr-schema) "nothing" "source-route-not-held"
+                    0 0 0 0 0 0 (list "choice" "cut" "release"))
+                (do
+                    (let released (psckr-release-old-keys-loop route-artifact
+                        manifest (psckr-manifest-keys manifest) 0))
+                    (let manifest-released (fs-remove-file manifest-path))
+                    (list (psckr-schema) "hit" "source-route-dissolved"
+                        0 released 0 0
+                        (add released (if (gt manifest-released 0) 1 0)) 0
+                        (list "choice" "cut" "dissolve" "release"))))))
+
+    ; ---- exact one-concept filesystem lookup ----------------------------
+    (defn psckr-route-file-names (names acc)
+        (if (nil? names) acc
+            (psckr-route-file-names (tail names)
+                (if (eq (psci-ends-with? (head names) ".route") 1)
+                    (cons (head names) acc) acc))))
+    ; inspection = status reason record
+    (defn psckr-inspect-reference-at (root source-artifact path key)
+        (do
+            (let bounded (psckr-read-bounded-reference-at path))
+            (if (not (str_eq (nth bounded 0) "ready"))
+                (list (nth bounded 0) (nth bounded 1) (empty))
+                (do
+                    (let ref (nth bounded 2))
+                    (if (not (str_eq (psckr-reference-key ref) key))
+                        (list "failure" "bucket-key-mismatch" (empty))
+                        (do
+                            (let record (psckr-read-source-record-at
+                                source-artifact
+                                (psckr-reference-family ref)
+                                (psckr-reference-path ref)))
+                            (if (eq (len record) 0)
+                                (list "missing" "source-artifact-missing"
+                                    (empty))
+                            (if (eq (psckr-reference-current-for-record?
+                                        ref record) 0)
+                                (list "stale" "source-artifact-key-changed"
+                                    (empty))
+                                (do
+                                    (let v (pscish-validate-source-at root
+                                        source-artifact
+                                        (pscish-record-family record)
+                                        (pscish-record-path record)))
+                                    (if (eq (nth v 0) 1)
+                                        (list "current" "current" record)
+                                    (if (eq (nth v 2) 1)
+                                        (list "missing" "source-unavailable"
+                                            (empty))
+                                        (list "stale" "source-rebuild-needed"
+                                            (empty)))))))))))))
+    ; accumulator = current-count first-record stale missing invalid timeout
+    (defn psckr-inspect-path-acc (inspection acc)
+        (do
+            (let status (nth inspection 0))
+            (if (str_eq status "current")
+                (list (add (nth acc 0) 1)
+                    (if (eq (nth acc 0) 0) (nth inspection 2) (nth acc 1))
+                    (nth acc 2) (nth acc 3) (nth acc 4) (nth acc 5))
+            (if (str_eq status "stale")
+                (list (nth acc 0) (nth acc 1) (add (nth acc 2) 1)
+                    (nth acc 3) (nth acc 4) (nth acc 5))
+            (if (str_eq status "missing")
+                (list (nth acc 0) (nth acc 1) (nth acc 2)
+                    (add (nth acc 3) 1) (nth acc 4) (nth acc 5))
+            (if (str_eq status "timeout")
+                (list (nth acc 0) (nth acc 1) (nth acc 2) (nth acc 3)
+                    (nth acc 4) (add (nth acc 5) 1))
+                (list (nth acc 0) (nth acc 1) (nth acc 2) (nth acc 3)
+                    (add (nth acc 4) 1) (nth acc 5))))))))
+    (defn psckr-inspect-files-loop (root source-artifact bucket names key acc)
+        (if (nil? names) acc
+            (psckr-inspect-files-loop root source-artifact bucket (tail names)
+                key (psckr-inspect-path-acc
+                    (psckr-inspect-reference-at root source-artifact
+                        (fs-path-join bucket (head names)) key) acc))))
+    (defn psckr-lookup-at (root source-artifact route-artifact key)
+        (if (eq (psci-concept-key-valid? key) 0)
+            (psckr-result "nothing" "invalid-concept-key" "" (empty)
+                0 0 0 (list "choice" "failure" "cut" "undo" "refine"
+                    "release") 0 0 1)
+            (do
+                (let bucket (psckr-key-bucket-at route-artifact key))
+                (if (not (eq (fs-is-dir? bucket) 1))
+                    (psckr-result "nothing" "concept-not-routed" key
+                        (empty) 0 0 0 (list "choice" "cut" "release")
+                        0 0 0)
+                    (do
+                        (let names (psckr-route-file-names
+                            (fs-list bucket) (empty)))
+                        (if (gt (len names) (psckr-max-candidates))
+                            (psckr-result "nothing" "candidate-window-timeout"
+                                key (empty) 0 1 (len names)
+                                (list "choice" "timeout" "cut" "undo"
+                                    "refine" "release") 0 0 0)
+                            (do
+                                (let acc (psckr-inspect-files-loop root
+                                    source-artifact bucket names key
+                                    (list 0 (empty) 0 0 0 0)))
+                                (if (gt (nth acc 5) 0)
+                                    (psckr-result "nothing"
+                                        "route-reference-timeout" key (empty)
+                                        0 1 (nth acc 0)
+                                        (list "choice" "timeout" "cut" "undo"
+                                            "refine" "release")
+                                        (nth acc 2) (nth acc 3) (nth acc 4))
+                                    (psckr-result-from-acc key
+                                        (list (nth acc 0) (nth acc 1)
+                                            (nth acc 2) (nth acc 3)
+                                            (nth acc 4)))))))))))
+    0)

@@ -1,0 +1,545 @@
+; public-source-concept-index.fk -- a small Form-native index over public body
+; sources, addressed by their current bytes rather than by a flattened table.
+;
+; A registry entry binds one repository-relative source coordinate to its
+; streamed SHA-256 identity, a content-addressed source NodeID, its census
+; family, and at most six bounded concept keys.  Lookup accepts only a concept
+; key: it does not need or guess a path.  A registered key returns `hit` only
+; while the source bytes still reconstruct the held NodeID.  An absent,
+; changed, malformed, unknown, or ambiguous source returns exact `nothing`
+; with a reason and a rebuild signal where one is owed.
+;
+; This is an index organ, not model-weight evidence.  Coverage therefore keeps
+; three numerators separate: registered sources, current index-integrated
+; sources, and independently observed model-integrated sources (zero here).
+; The 30-source seed below is a two-per-family witness, not a 95% claim.
+;
+; No source payload is rendered, no operation registry is present, and no
+; flattening is needed.  File identity is folded through bounded byte windows
+; by form-knowledge-source-search.fk.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/form-fs.fk form-stdlib/file-byte-window.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/form-knowledge-source-search.fk
+; Proven by: form-stdlib/tests/public-source-concept-index-band.fk
+
+(do
+    (defn psci-schema () "public-source-concept-index-v1")
+    (defn psci-source-schema () "public-source-artifact-node-v1")
+    (defn psci-entry-schema () "public-source-concept-entry-v1")
+    (defn psci-max-concept-keys () 6)
+    (defn psci-max-concept-key-bytes () 64)
+    (defn psci-max-source-path-bytes () 320)
+
+    ; Reserved Form-neutral categories.  Identity comes from the children;
+    ; these slots only keep this protocol's node families separate.
+    (defn psci-source-category () (make_nodeid 31 2 0 86))
+    (defn psci-entry-category () (make_nodeid 31 2 0 87))
+    (defn psci-index-category () (make_nodeid 31 2 0 88))
+    (defn psci-observation-category () (make_nodeid 31 2 0 89))
+    (defn psci-absent-category () (make_nodeid 31 2 0 90))
+
+    (defn psci-absent-node ()
+        (intern_node (psci-absent-category)
+            (list (intern_trivial_string "nothing"))))
+    (defn psci-node-key (node)
+        (str_concat (int_to_str (node_pkg node))
+        (str_concat "." (str_concat (int_to_str (node_level node))
+        (str_concat "." (str_concat (int_to_str (node_type node))
+        (str_concat "." (int_to_str (node_inst node)))))))))
+
+    ; ---- the same fifteen public source families as the live census -------
+    (defn psci-family (id root) (list id root))
+    (defn psci-family-id (f) (nth f 0))
+    (defn psci-family-root (f) (nth f 1))
+    (defn psci-families ()
+        (list
+            (psci-family "axioms" "axioms")
+            (psci-family "bootstrap" "bootstrap")
+            (psci-family "form-stdlib" "form/form-stdlib")
+            (psci-family "grammars" "grammars")
+            (psci-family "cognition" "cognition")
+            (psci-family "learn" "learn")
+            (psci-family "observe" "observe")
+            (psci-family "teachings" "teachings")
+            (psci-family "receipts" "receipts")
+            (psci-family "model" "model")
+            (psci-family "proof" "proof")
+            (psci-family "control" "control")
+            (psci-family "ingest" "ingest")
+            (psci-family "presence" "presence")
+            (psci-family "docs" "docs")))
+
+    (defn psci-find-family (id families)
+        (if (nil? families) (empty)
+            (if (str_eq id (psci-family-id (head families))) (head families)
+                (psci-find-family id (tail families)))))
+    (defn psci-family-valid? (id)
+        (if (eq (len (psci-find-family id (psci-families))) 2) 1 0))
+
+    (defn psci-ends-with? (s suffix)
+        (if (lt (str_len s) (str_len suffix)) 0
+            (if (str_eq
+                    (substring s (sub (str_len s) (str_len suffix)) (str_len s))
+                    suffix) 1 0)))
+    (defn psci-source-extension? (path)
+        (if (or (eq (psci-ends-with? path ".fk") 1)
+            (or (eq (psci-ends-with? path ".bml") 1)
+            (or (eq (psci-ends-with? path ".bmf") 1)
+            (or (eq (psci-ends-with? path ".form") 1)
+                (eq (psci-ends-with? path ".md") 1))))) 1 0))
+    (defn psci-generated-source? (path)
+        (if (eq (psci-ends-with? path "-xtal.fk") 1) 1 0))
+    (defn psci-path-under-root? (path root)
+        (if (le (str_len path) (str_len root)) 0
+            (if (not (str_eq (substring path 0 (str_len root)) root)) 0
+                (if (str_eq (substring path (str_len root)
+                        (add (str_len root) 1)) "/") 1 0))))
+    (defn psci-path-valid-for-family? (path family)
+        (do
+            (let f (psci-find-family family (psci-families)))
+            (if (not (eq (len f) 2)) 0
+            (if (or (eq (str_len path) 0)
+                    (gt (str_len path) (psci-max-source-path-bytes))) 0
+            (if (ge (str_find path ".." 0) 0) 0
+            (if (eq (psci-path-under-root? path (psci-family-root f)) 0) 0
+            (if (eq (psci-source-extension? path) 0) 0
+                (if (eq (psci-generated-source? path) 0) 1 0))))))))
+
+    ; Concept keys are scannerless bounded ASCII coordinates.  They are not
+    ; tokenizer vocabulary and may be streamed or generated one byte at a time.
+    (defn psci-concept-byte-valid? (b)
+        (if (or (and (ge b 97) (le b 122))
+            (or (and (ge b 48) (le b 57))
+                (eq b 45))) 1 0))
+    (defn psci-concept-key-loop (key at)
+        (if (ge at (str_len key)) 1
+            (if (eq (psci-concept-byte-valid? (str_byte_at key at)) 1)
+                (psci-concept-key-loop key (add at 1)) 0)))
+    (defn psci-concept-key-valid? (key)
+        (if (or (eq (str_len key) 0)
+                (gt (str_len key) (psci-max-concept-key-bytes))) 0
+            (psci-concept-key-loop key 0)))
+    (defn psci-concept-keys-valid-loop (keys count)
+        (if (nil? keys)
+            (if (and (gt count 0) (le count (psci-max-concept-keys))) 1 0)
+            (if (eq (psci-concept-key-valid? (head keys)) 0) 0
+                (psci-concept-keys-valid-loop (tail keys) (add count 1)))))
+    (defn psci-concept-keys-valid? (keys)
+        (psci-concept-keys-valid-loop keys 0))
+    (defn psci-key-nodes (keys)
+        (if (nil? keys) (empty)
+            (cons (intern_trivial_string (head keys))
+                  (psci-key-nodes (tail keys)))))
+
+    ; ---- content-addressed source and incremental index entries -----------
+    (defn psci-source-id-valid? (source-id)
+        (if (not (eq (str_len source-id) 71)) 0
+            (if (not (str_eq (substring source-id 0 7) "sha256:")) 0
+                (hex-valid? (substring source-id 7 71)))))
+    (defn psci-source-node (family path source-id size)
+        (intern_node (psci-source-category)
+            (list (intern_trivial_string (psci-source-schema))
+                  (intern_trivial_string family)
+                  (intern_trivial_string path)
+                  (intern_trivial_string source-id)
+                  (intern_trivial_int size))))
+    (defn psci-source-node-valid? (source)
+        (if (nothing? source) 0
+        (if (not (node_eq (node_category source) (psci-source-category))) 0
+        (if (not (eq (len (node_children source)) 5)) 0
+        (if (not (str_eq (node_value (nth (node_children source) 0))
+                         (psci-source-schema))) 0
+        (if (eq (psci-family-valid?
+                    (node_value (nth (node_children source) 1))) 0) 0
+        (if (eq (psci-path-valid-for-family?
+                    (node_value (nth (node_children source) 2))
+                    (node_value (nth (node_children source) 1))) 0) 0
+        (if (eq (psci-source-id-valid?
+                    (node_value (nth (node_children source) 3))) 0) 0
+            (if (ge (node_value (nth (node_children source) 4)) 0) 1 0)))))))))
+    (defn psci-source-family (source)
+        (node_value (nth (node_children source) 1)))
+    (defn psci-source-path (source)
+        (node_value (nth (node_children source) 2)))
+    (defn psci-source-id (source)
+        (node_value (nth (node_children source) 3)))
+    (defn psci-source-size (source)
+        (node_value (nth (node_children source) 4)))
+
+    (defn psci-entry (source keys)
+        (intern_node (psci-entry-category)
+            (cons source (psci-key-nodes keys))))
+    (defn psci-entry-key-nodes-valid? (nodes count)
+        (if (nil? nodes)
+            (if (and (gt count 0) (le count (psci-max-concept-keys))) 1 0)
+            (if (eq (psci-concept-key-valid? (node_value (head nodes))) 0) 0
+                (psci-entry-key-nodes-valid? (tail nodes) (add count 1)))))
+    (defn psci-entry-valid? (entry)
+        (if (nothing? entry) 0
+        (if (not (node_eq (node_category entry) (psci-entry-category))) 0
+        (if (or (lt (len (node_children entry)) 2)
+                (gt (len (node_children entry))
+                    (add (psci-max-concept-keys) 1))) 0
+        (if (eq (psci-source-node-valid? (head (node_children entry))) 0) 0
+            (psci-entry-key-nodes-valid? (tail (node_children entry)) 0))))))
+    (defn psci-entry-source (entry) (head (node_children entry)))
+    (defn psci-entry-key-nodes (entry) (tail (node_children entry)))
+    (defn psci-entry-keys-loop (nodes)
+        (if (nil? nodes) (empty)
+            (cons (node_value (head nodes))
+                  (psci-entry-keys-loop (tail nodes)))))
+    (defn psci-entry-keys (entry)
+        (psci-entry-keys-loop (psci-entry-key-nodes entry)))
+
+    (defn psci-index-empty ()
+        (intern_node (psci-index-category) (empty)))
+    (defn psci-index-entries-valid? (entries)
+        (if (nil? entries) 1
+            (if (eq (psci-entry-valid? (head entries)) 0) 0
+                (psci-index-entries-valid? (tail entries)))))
+    (defn psci-index-valid? (index)
+        (if (nothing? index) 0
+            (if (not (node_eq (node_category index) (psci-index-category))) 0
+                (psci-index-entries-valid? (node_children index)))))
+    (defn psci-index-entries (index) (node_children index))
+
+    (defn psci-entry-member? (entry entries)
+        (if (nil? entries) 0
+            (if (node_eq entry (head entries)) 1
+                (psci-entry-member? entry (tail entries)))))
+    (defn psci-same-coordinate? (a b)
+        (if (and
+                (str_eq (psci-source-family (psci-entry-source a))
+                        (psci-source-family (psci-entry-source b)))
+                (str_eq (psci-source-path (psci-entry-source a))
+                        (psci-source-path (psci-entry-source b)))) 1 0))
+    (defn psci-without-coordinate (entries entry)
+        (if (nil? entries) (empty)
+            (if (eq (psci-same-coordinate? (head entries) entry) 1)
+                (psci-without-coordinate (tail entries) entry)
+                (cons (head entries)
+                    (psci-without-coordinate (tail entries) entry)))))
+    (defn psci-add-entry (index entry)
+        (if (or (eq (psci-index-valid? index) 0)
+                (eq (psci-entry-valid? entry) 0)) (nothing)
+            (if (eq (psci-entry-member? entry (psci-index-entries index)) 1) index
+                (intern_node (psci-index-category)
+                    (cons entry
+                        (psci-without-coordinate
+                            (psci-index-entries index) entry))))))
+
+    ; Registering observes current bytes.  The source is never materialized as
+    ; one string: fkss-source-id folds it through the shared bounded cursor.
+    (defn psci-register-at (root family path keys)
+        (if (or (eq (str_len root) 0)
+            (or (eq (psci-path-valid-for-family? path family) 0)
+                (eq (psci-concept-keys-valid? keys) 0))) (nothing)
+            (do
+                (let full (fs-path-join root path))
+                (let size (fs-stat-size full))
+                (if (lt size 0) (nothing)
+                    (psci-entry
+                        (psci-source-node family path (fkss-source-id full) size)
+                        keys)))))
+    (defn psci-entry-from-observed (family path source-id size keys)
+        (if (or (eq (psci-path-valid-for-family? path family) 0)
+            (or (eq (psci-source-id-valid? source-id) 0)
+            (or (lt size 0)
+                (eq (psci-concept-keys-valid? keys) 0)))) (nothing)
+            (psci-entry (psci-source-node family path source-id size) keys)))
+    (defn psci-rebuild-entry-at (root entry)
+        (if (eq (psci-entry-valid? entry) 0) (nothing)
+            (psci-register-at root
+                (psci-source-family (psci-entry-source entry))
+                (psci-source-path (psci-entry-source entry))
+                (psci-entry-keys entry))))
+    (defn psci-rebuild-index-entry-at (root index entry)
+        (do
+            (let rebuilt (psci-rebuild-entry-at root entry))
+            (if (nothing? rebuilt) (nothing)
+                (psci-add-entry index rebuilt))))
+
+    ; ---- exact concept lookup and typed freshness observation -------------
+    (defn psci-entry-has-key? (entry key)
+        (psci-entry-has-key-nodes? (psci-entry-key-nodes entry) key))
+    (defn psci-entry-has-key-nodes? (nodes key)
+        (if (nil? nodes) 0
+            (if (str_eq (node_value (head nodes)) key) 1
+                (psci-entry-has-key-nodes? (tail nodes) key))))
+    (defn psci-matching-entries (entries key acc)
+        (if (nil? entries) acc
+            (psci-matching-entries (tail entries) key
+                (if (eq (psci-entry-has-key? (head entries) key) 1)
+                    (cons (head entries) acc) acc))))
+    (defn psci-current-source-at (root entry)
+        (do
+            (let held (psci-entry-source entry))
+            (let full (fs-path-join root (psci-source-path held)))
+            (let size (fs-stat-size full))
+            (if (lt size 0) (nothing)
+                (psci-source-node (psci-source-family held)
+                    (psci-source-path held) (fkss-source-id full) size))))
+    (defn psci-entry-current-at? (root entry)
+        (do
+            (let current (psci-current-source-at root entry))
+            (if (nothing? current) 0
+                (if (node_eq current (psci-entry-source entry)) 1 0))))
+
+    (defn psci-observation (status reason index key held current fresh rebuild)
+        (intern_node (psci-observation-category)
+            (list (intern_trivial_string status)
+                  (intern_trivial_string reason)
+                  index
+                  (intern_trivial_string key)
+                  held
+                  current
+                  (intern_trivial_int fresh)
+                  (intern_trivial_int rebuild)
+                  (intern_trivial_int 0))))
+    ; result = (schema status reason observation concept family path held-id
+    ;           current-id held-source current-source fresh rebuild lookup-count
+    ;           hit-count model-executed match-count index-id)
+    (defn psci-result (status reason index key entry current fresh rebuild
+                       lookup-count hit-count match-count)
+        (do
+            (let has-entry (psci-entry-valid? entry))
+            (let held (if (eq has-entry 1)
+                (psci-entry-source entry) (psci-absent-node)))
+            (let now (if (nothing? current) (psci-absent-node) current))
+            (let family (if (eq has-entry 1) (psci-source-family held) ""))
+            (let path (if (eq has-entry 1) (psci-source-path held) ""))
+            (let held-id (if (eq has-entry 1) (psci-source-id held) ""))
+            (let current-id (if (nothing? current) "" (psci-source-id current)))
+            (let index-node (if (eq (psci-index-valid? index) 1)
+                index (psci-absent-node)))
+            (let observation (psci-observation status reason index-node key held now
+                fresh rebuild))
+            (list (psci-schema) status reason observation key family path held-id
+                current-id held now fresh rebuild lookup-count hit-count 0
+                match-count (psci-node-key index-node))))
+    (defn psci-result-status (r) (nth r 1))
+    (defn psci-result-reason (r) (nth r 2))
+    (defn psci-result-observation (r) (nth r 3))
+    (defn psci-result-concept (r) (nth r 4))
+    (defn psci-result-family (r) (nth r 5))
+    (defn psci-result-path (r) (nth r 6))
+    (defn psci-result-held-id (r) (nth r 7))
+    (defn psci-result-current-id (r) (nth r 8))
+    (defn psci-result-held-source (r) (nth r 9))
+    (defn psci-result-current-source (r) (nth r 10))
+    (defn psci-result-fresh? (r) (nth r 11))
+    (defn psci-result-rebuild-needed? (r) (nth r 12))
+    (defn psci-result-lookup-count (r) (nth r 13))
+    (defn psci-result-hit-count (r) (nth r 14))
+    (defn psci-result-model-executed? (r) (nth r 15))
+    (defn psci-result-match-count (r) (nth r 16))
+    (defn psci-result-index-id (r) (nth r 17))
+
+    (defn psci-lookup-at (root index key)
+        (if (eq (psci-index-valid? index) 0)
+            (psci-result "nothing" "invalid-index" index key (nothing)
+                (nothing) 0 0 0 0 0)
+        (if (eq (psci-concept-key-valid? key) 0)
+            (psci-result "nothing" "invalid-concept-key" index "" (nothing)
+                (nothing) 0 0 0 0 0)
+            (do
+                (let matches (psci-matching-entries
+                    (psci-index-entries index) key (empty)))
+                (if (eq (len matches) 0)
+                    (psci-result "nothing" "concept-not-registered" index key
+                        (nothing) (nothing) 0 0 1 0 0)
+                (if (gt (len matches) 1)
+                    (psci-result "nothing" "ambiguous-concept-key" index key
+                        (head matches) (nothing) 0 0 1 0 (len matches))
+                    (do
+                        (let entry (head matches))
+                        (let current (psci-current-source-at root entry))
+                        (if (nothing? current)
+                            (psci-result "nothing" "source-unavailable" index key
+                                entry (nothing) 0 1 1 0 1)
+                        (if (not (node_eq current (psci-entry-source entry)))
+                            (psci-result "nothing" "source-rebuild-needed" index key
+                                entry current 0 1 1 0 1)
+                            (psci-result "hit" "current-content-addressed-source" index
+                                key entry current 1 0 1 1 1))))))))))
+
+    ; ---- coverage: repository denominator never disappears ----------------
+    (defn psci-count-entry-keys (entries)
+        (if (nil? entries) 0
+            (add (len (psci-entry-key-nodes (head entries)))
+                 (psci-count-entry-keys (tail entries)))))
+    (defn psci-count-registered-family (entries family)
+        (if (nil? entries) 0
+            (add (if (str_eq
+                        (psci-source-family (psci-entry-source (head entries)))
+                        family) 1 0)
+                 (psci-count-registered-family (tail entries) family))))
+    (defn psci-count-current-family-at (root entries family)
+        (if (nil? entries) 0
+            (add (if (and
+                        (str_eq
+                            (psci-source-family (psci-entry-source (head entries)))
+                            family)
+                        (eq (psci-entry-current-at? root (head entries)) 1)) 1 0)
+                 (psci-count-current-family-at root (tail entries) family))))
+    ; Count one family at a time.  Holding source_inventory for the whole body
+    ; beside the content-addressed index exhausted the bounded checkout heap;
+    ; this census-shaped walk observes the same extension boundary without
+    ; materializing thousands of paths as one retained list.
+    (defn psci-hidden-name? (name)
+        (if (eq (str_len name) 0) 1
+            (if (str_eq (substring name 0 1) ".") 1 0)))
+    (defn psci-count-source-names-at (dir names)
+        (if (nil? names) 0
+            (do
+                (let name (head names))
+                (let path (fs-path-join dir name))
+                (let source (if (and (eq (psci-source-extension? path) 1)
+                                     (eq (psci-generated-source? path) 0)) 1 0))
+                (let nested (if (or (eq source 1)
+                                    (eq (psci-hidden-name? name) 1)) 0
+                    (do
+                        (let children (fs-list path))
+                        (if (nil? children) 0
+                            (psci-count-source-names-at path children)))))
+                (add source
+                    (add nested
+                        (psci-count-source-names-at dir (tail names)))))))
+    (defn psci-count-repository-family-at (root family)
+        (do
+            (let f (psci-find-family family (psci-families)))
+            (if (not (eq (len f) 2)) 0
+                (do
+                    (let dir (fs-path-join root (psci-family-root f)))
+                    (psci-count-source-names-at dir (fs-list dir))))))
+    (defn psci-percent (part whole)
+        (if (le whole 0) 0 (div (mul part 100) whole)))
+    ; family row = (schema family registered current repository current-percent)
+    (defn psci-family-coverage-rows-at (root entries families)
+        (if (nil? families) (empty)
+            (do
+                (let family (psci-family-id (head families)))
+                (let registered (psci-count-registered-family entries family))
+                (let current (psci-count-current-family-at root entries family))
+                (let repository (psci-count-repository-family-at root family))
+                (cons (list "public-source-family-coverage-v1" family registered
+                            current repository (psci-percent current repository))
+                    (psci-family-coverage-rows-at root entries
+                        (tail families))))))
+    (defn psci-sum-row-field (rows at)
+        (if (nil? rows) 0
+            (add (nth (head rows) at)
+                 (psci-sum-row-field (tail rows) at))))
+    (defn psci-count-families-at-least-two (rows)
+        (if (nil? rows) 0
+            (add (if (and (ge (nth (head rows) 2) 2)
+                          (ge (nth (head rows) 3) 2)) 1 0)
+                 (psci-count-families-at-least-two (tail rows)))))
+    ; coverage = (schema index-id families families-at-least-two registered
+    ;             index-integrated repository registered-percent
+    ;             index-integrated-percent model-integrated
+    ;             model-integrated-percent concept-keys family-rows)
+    (defn psci-coverage-at (root index)
+        (if (eq (psci-index-valid? index) 0) (nothing)
+            (do
+                (let rows (psci-family-coverage-rows-at root
+                    (psci-index-entries index) (psci-families)))
+                (let registered (psci-sum-row-field rows 2))
+                (let integrated (psci-sum-row-field rows 3))
+                (let repository (psci-sum-row-field rows 4))
+                (list "public-source-concept-coverage-v1" (psci-node-key index)
+                    (len rows) (psci-count-families-at-least-two rows)
+                    registered integrated repository
+                    (psci-percent registered repository)
+                    (psci-percent integrated repository)
+                    0 0 (psci-count-entry-keys (psci-index-entries index)) rows))))
+    (defn psci-coverage-family-count (c) (nth c 2))
+    (defn psci-coverage-families-at-least-two (c) (nth c 3))
+    (defn psci-coverage-registered (c) (nth c 4))
+    (defn psci-coverage-index-integrated (c) (nth c 5))
+    (defn psci-coverage-repository (c) (nth c 6))
+    (defn psci-coverage-registered-percent (c) (nth c 7))
+    (defn psci-coverage-index-integrated-percent (c) (nth c 8))
+    (defn psci-coverage-model-integrated (c) (nth c 9))
+    (defn psci-coverage-model-integrated-percent (c) (nth c 10))
+    (defn psci-coverage-concept-keys (c) (nth c 11))
+    (defn psci-coverage-family-rows (c) (nth c 12))
+
+    ; ---- bounded public seed: two sources per family, nothing more ----------
+    (defn psci-seed-spec (family path keys) (list family path keys))
+    (defn psci-public-sample-specs ()
+        (list
+            (psci-seed-spec "axioms" "axioms/core-axioms.form"
+                (list "axiom-nothing-whole" "nothing-zero-one-distinct"))
+            (psci-seed-spec "axioms" "axioms/host-kernel.form"
+                (list "axiom-host-resources"))
+            (psci-seed-spec "bootstrap" "bootstrap/ground.fk"
+                (list "bootstrap-direct-source"))
+            (psci-seed-spec "bootstrap" "bootstrap/ground-recursive.fk"
+                (list "bootstrap-recursion"))
+            (psci-seed-spec "form-stdlib" "form/form-stdlib/core.fk"
+                (list "form-core-primitives" "one-form-kernel"))
+            (psci-seed-spec "form-stdlib" "form/form-stdlib/form-knowledge-query-token.fk"
+                (list "form-query-token" "scannerless-query-envelope"))
+            (psci-seed-spec "grammars" "grammars/grammar-loader.fk"
+                (list "grammar-loader-bmf"))
+            (psci-seed-spec "grammars" "grammars/form-eval.fk"
+                (list "grammar-source-eval"))
+            (psci-seed-spec "cognition" "cognition/text-frequency.fk"
+                (list "cognition-frequency-sense"))
+            (psci-seed-spec "cognition" "cognition/dialogue-covenant.fk"
+                (list "cognition-dialogue-covenant"))
+            (psci-seed-spec "learn" "learn/homecoming-distillation-corpus.fk"
+                (list "learn-homecoming-distillation"))
+            (psci-seed-spec "learn" "learn/sema-reason-multistep.fk"
+                (list "learn-multistep-reasoning"))
+            (psci-seed-spec "observe" "observe/preflight.fk"
+                (list "observe-preflight-verdict"))
+            (psci-seed-spec "observe" "observe/belief-freshness.fk"
+                (list "observe-belief-freshness"))
+            (psci-seed-spec "teachings" "teachings/uplifting-dialogue.md"
+                (list "teaching-uplifting-dialogue"))
+            (psci-seed-spec "teachings" "teachings/concepts/lc-trust-over-fear.md"
+                (list "teaching-trust-over-fear"))
+            (psci-seed-spec "receipts"
+                "receipts/2026-08-23-share-is-computed-apply-is-one.md"
+                (list "receipt-share-computed"))
+            (psci-seed-spec "receipts"
+                "receipts/2026-07-18-jit-bands-closure-parity.md"
+                (list "receipt-jit-closure-parity"))
+            (psci-seed-spec "model" "model/form-neutral-token-space.fk"
+                (list "model-neutral-token-space"))
+            (psci-seed-spec "model" "model/form-neutral-language-world-model.fk"
+                (list "model-language-world"))
+            (psci-seed-spec "proof" "proof/four-way-run-recipe42.fk"
+                (list "proof-four-way-recipe"))
+            (psci-seed-spec "proof" "proof/recipe42.fk"
+                (list "proof-recipe-forty-two"))
+            (psci-seed-spec "control" "control/choice-lane-core.fk"
+                (list "control-choice-lane"))
+            (psci-seed-spec "control" "control/session-recording-lifecycle.fk"
+                (list "control-recording-lifecycle"))
+            (psci-seed-spec "ingest" "ingest/name-build-observe.fk"
+                (list "ingest-name-build-observe"))
+            (psci-seed-spec "ingest" "ingest/satsang-transmute.fk"
+                (list "ingest-satsang-transmute"))
+            (psci-seed-spec "presence" "presence/inquiry-planes.fk"
+                (list "presence-inquiry-planes"))
+            (psci-seed-spec "presence" "presence/device-identity.fk"
+                (list "presence-device-identity"))
+            (psci-seed-spec "docs" "docs/local-reasoning-homecoming-lanes.md"
+                (list "docs-reasoning-homecoming"))
+            (psci-seed-spec "docs" "docs/live-dynamic-diagnostics.md"
+                (list "docs-dynamic-diagnostics"))))
+    (defn psci-build-specs-at (root specs index)
+        (if (nil? specs) index
+            (do
+                (let spec (head specs))
+                (let entry (psci-register-at root (nth spec 0) (nth spec 1)
+                    (nth spec 2)))
+                (if (nothing? entry) (nothing)
+                    (psci-build-specs-at root (tail specs)
+                        (psci-add-entry index entry))))))
+    (defn psci-public-sample-index-at (root)
+        (psci-build-specs-at root (psci-public-sample-specs)
+            (psci-index-empty)))
+    0)
