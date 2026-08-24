@@ -1,0 +1,598 @@
+; session-neutral-semantic-frequency.fk — session tokens into neutral meaning.
+;
+; This organ observes every non-whitespace token yielded by the byte-honest
+; session tokenizer, then keeps three different questions separate:
+;   1. was the token observed?              (always yes in the returned rows)
+;   2. did a neutral meaning candidate sit? (lexical or structural coverage)
+;   3. did field evidence sit?              (direct or definition projection)
+;
+; Natural-language words resolve against the complete 10,000 x 13 surface
+; substrate. A first hit is used only to address the committed collision index;
+; every byte-identical concept candidate is returned. Each candidate retains
+; its English anchor, source, corpus occurrence frequency, effective semantic
+; definition, sense count, and its own field result. Corpus occurrence
+; frequency is never presented as semantic frequency.
+;
+; The 13-axis semantic field is computed in this order: an exact locale core
+; field surface, an exact English field surface, or an average of the witnessed
+; field words occurring in the candidate definition. The last path is named
+; `definition-projection-v1`: it is a reproducible projection, not an intrinsic
+; property of the word and not a speaker-reviewed universal geometry.
+;
+  ; Programming and punctuation symbols resolve through typed recipe groups.
+  ; Ambiguous spellings such as `!`, `*`, `#`, `//`, and `=>` deliberately return
+  ; multiple candidates. Printable ASCII and common session punctuation across
+  ; Latin/CJK typography are seated; an unseated Unicode mark receives a
+  ; content-bound residue address so its bytes are not lost, but residue is not
+  ; counted as semantic or field coverage.
+; Structural recipes are candidate senses, not context-selected PL semantics;
+; their field axes are authored hypotheses under the same boundary as words.
+;
+; Tokenization is replaceable. `snsf-resolve-tokens` is the primary door for
+; callers with locale-aware segmentation; `snsf-resolve-text` is the convenient
+; byte-honest door. It keeps UTF-8 words intact but does not claim Chinese or
+; Japanese word segmentation. Those sessions should offer segmented tokens or
+; use the existing sentence-span detector until a native segmenter is seated.
+;
+; witnessed: 2026-08-24 -> session band 33554431; request 46/46 candidate,
+; prior response 651/657 candidate; final independent review PASS
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk
+; preludes: form/form-stdlib/sha256.fk form/form-stdlib/native-model-evidence.fk
+; preludes: model/concept-10000-data.fk model/concept-10000-substantive-repair-data.fk
+; preludes: model/concept-10000.fk model/concept-semantics-10000-data.fk
+; preludes: model/concept-semantics-10000.fk model/concept-semantics-10000-wiktionary-data.fk
+; preludes: model/concept-semantics-10000-wiktionary.fk
+; preludes: model/concept-semantics-10000-wiktionary-lexical-data.fk
+; preludes: model/concept-semantics-10000-wiktionary-lexical.fk
+; preludes: cognition/concept-nl-semantic-13-runtime.fk
+; preludes: cognition/concept-text-roundtrip-10000-13-metadata.fk
+; preludes: cognition/concept-text-roundtrip-10000-13.fk
+; preludes: cognition/form-neutral-word-field.fk
+; preludes: cognition/response-word-field-dictionary.fk
+; preludes: cognition/form-neutral-word-field-locales.fk
+
+(do
+  ; runtime = multilingual surface table, effective semantics, English lexical
+  ; index, complete surface-collision index, complete candidate-id payload.
+  (defn snsf-open ()
+    (list (cnl13-runtime-open) (cs10l-open)
+      (read_file (c10-lexical-index-path))
+      (read_file (ctr13-index-path)) (read_file (ctr13-candidates-path))))
+  (defn snsf-rt-nl (r) (nth r 0))
+  (defn snsf-rt-semantics (r) (nth r 1))
+  (defn snsf-rt-ranked (r) (nth (snsf-rt-semantics r) 0))
+  (defn snsf-rt-lexical (r) (nth r 2))
+  (defn snsf-rt-surface-index (r) (nth r 3))
+  (defn snsf-rt-candidate-data (r) (nth r 4))
+
+  ; A neutral address names its plane and namespace before its local id.
+  (defn snsf-address (namespace id) (list 31013 namespace id))
+  (defn snsf-concept-address (id) (snsf-address 1 id))
+  (defn snsf-field-address (id) (snsf-address 2 id))
+  (defn snsf-structure-address (id) (snsf-address 3 id))
+  (defn snsf-number-address (surface)
+    (snsf-address 4 (nmfe-string-bytes surface)))
+  (defn snsf-residue-address (surface)
+    (snsf-address 9 (nmfe-string-bytes surface)))
+
+  ; candidate = address, label, definition-kind, definition, source,
+  ; occurrence-frequency, sense-count, field-state, field, field-evidence.
+  (defn snsf-candidate
+    (address label definition-kind definition source occurrence-frequency
+     sense-count field-state field field-evidence)
+    (list address label definition-kind definition source occurrence-frequency
+      sense-count field-state field field-evidence))
+  (defn snsf-c-address (c) (nth c 0))
+  (defn snsf-c-label (c) (nth c 1))
+  (defn snsf-c-definition-kind (c) (nth c 2))
+  (defn snsf-c-definition (c) (nth c 3))
+  (defn snsf-c-source (c) (nth c 4))
+  (defn snsf-c-occurrence-frequency (c) (nth c 5))
+  (defn snsf-c-sense-count (c) (nth c 6))
+  (defn snsf-c-field-state (c) (nth c 7))
+  (defn snsf-c-field (c) (nth c 8))
+  (defn snsf-c-field-evidence (c) (nth c 9))
+
+  ; token = ordinal, surface, kind, locale, candidates, semantic-state,
+  ; expression-case. Casing is an expression coordinate, never a replacement
+  ; concept: all-lower is the authored self-centered view, all-upper is the
+  ; field-centered view, and mixed case retains contextual surface evidence.
+  ; Scripts without ASCII case remain explicitly uncased. The token stores a
+  ; numeric neutral expression symbol; labels below are generated surfaces.
+  (defn snsf-expression-symbol (id) (snsf-address 7 id))
+  (defn snsf-expression-self () (snsf-expression-symbol 0))
+  (defn snsf-expression-field () (snsf-expression-symbol 1))
+  (defn snsf-expression-context () (snsf-expression-symbol 2))
+  (defn snsf-expression-uncased () (snsf-expression-symbol 3))
+  (defn snsf-expression-na () (snsf-expression-symbol 4))
+  (defn snsf-expression-code (symbol) (nth symbol 2))
+  (defn snsf-expression-label (symbol)
+    (if (eq (snsf-expression-code symbol) 0) "self-centered-expression"
+      (if (eq (snsf-expression-code symbol) 1) "field-centered-expression"
+        (if (eq (snsf-expression-code symbol) 2) "context-carried-expression"
+          (if (eq (snsf-expression-code symbol) 3) "uncased-script-expression"
+            "not-applicable")))))
+  (defn snsf-expression-description (symbol)
+    (if (eq (snsf-expression-code symbol) 0)
+      (list "what" "a" "self" "say" "is" "here")
+      (if (eq (snsf-expression-code symbol) 1)
+        (list "many" "part" "do" "as" "one" "whole")
+        (if (eq (snsf-expression-code symbol) 2)
+          (list "what" "is" "before" "and" "after" "make" "this")
+          (if (eq (snsf-expression-code symbol) 3)
+            (list "a" "self" "say" "and" "not" "this" "part")
+            (list "not" "a" "thing"))))))
+  (defn snsf-expression-descriptions-closed-loop? (symbols)
+    (if (eq (len symbols) 0) 1
+      (if (eq (rwfd-desc-closed?
+                (snsf-expression-description (head symbols))) 1)
+        (snsf-expression-descriptions-closed-loop? (tail symbols)) 0)))
+  (defn snsf-expression-descriptions-closed? ()
+    (snsf-expression-descriptions-closed-loop?
+      (list (snsf-expression-self) (snsf-expression-field)
+        (snsf-expression-context) (snsf-expression-uncased)
+        (snsf-expression-na))))
+  (defn snsf-case-flags-loop (surface i lower upper)
+    (if (ge i (str_len surface)) (list lower upper)
+      (do
+        (let b (str_byte_at surface i))
+        (snsf-case-flags-loop surface (add i 1)
+          (if (and (ge b 97) (le b 122)) 1 lower)
+          (if (and (ge b 65) (le b 90)) 1 upper)))))
+  (defn snsf-expression-case (surface kind)
+    (if (not (str_eq kind "word")) (snsf-expression-na)
+      (do
+        (let flags (snsf-case-flags-loop surface 0 0 0))
+        (if (and (eq (nth flags 0) 1) (eq (nth flags 1) 0))
+          (snsf-expression-self)
+          (if (and (eq (nth flags 0) 0) (eq (nth flags 1) 1))
+            (snsf-expression-field)
+            (if (and (eq (nth flags 0) 0) (eq (nth flags 1) 0))
+              (snsf-expression-uncased) (snsf-expression-context)))))))
+  (defn snsf-token (ordinal surface kind locale candidates state)
+    (list ordinal surface kind locale candidates state
+      (snsf-expression-case surface kind)))
+  (defn snsf-t-ordinal (t) (nth t 0))
+  (defn snsf-t-surface (t) (nth t 1))
+  (defn snsf-t-kind (t) (nth t 2))
+  (defn snsf-t-locale (t) (nth t 3))
+  (defn snsf-t-candidates (t) (nth t 4))
+  (defn snsf-t-state (t) (nth t 5))
+  (defn snsf-t-expression-case (t) (nth t 6))
+
+  ; ── typed structural symbol recipes ───────────────────────────────
+  ; group = id, axis, description, recipe, aliases. Aliases are surfaces;
+  ; identity and field stay on the group. Surface ambiguity is retained.
+  (defn snsf-symbol-group (id axis desc recipe aliases)
+    (list id axis desc recipe aliases))
+  (defn snsf-sg-id (g) (nth g 0))
+  (defn snsf-sg-axis (g) (nth g 1))
+  (defn snsf-sg-desc (g) (nth g 2))
+  (defn snsf-sg-recipe (g) (nth g 3))
+  (defn snsf-sg-aliases (g) (nth g 4))
+  (defn snsf-symbol-groups ()
+    (list
+      (snsf-symbol-group 0 11 (list "not" "before" "and" "here" "now") "begin"
+        (list "(" "[" "{" "（" "［" "｛" "「" "『" "〈" "《" "«" "“" "‘"))
+      (snsf-symbol-group 1 11 (list "here" "now" "and" "not" "after") "end"
+        (list ")" "]" "}" "）" "］" "｝" "」" "』" "〉" "》" "»" "”" "’"))
+      (snsf-symbol-group 2 1 (list "make" "this" "and" "other" "more") "join"
+        (list "+" "+=" "++" "&" "&&" "＋" "±"))
+      (snsf-symbol-group 3 8 (list "make" "this" "not" "the" "same" "as" "other") "separate"
+        (list "-" "-=" "--" "!" "!=" "!==" "−" "–" "—" "¬" "≠"))
+      (snsf-symbol-group 4 12 (list "make" "a" "thing" "do" "again") "repeat"
+        (list "*" "**" "*=" "×"))
+      (snsf-symbol-group 5 3 (list "make" "a" "whole" "be" "many" "part") "divide"
+        (list "/" "//" "/=" "%" "%=" "÷"))
+      (snsf-symbol-group 6 11 (list "this" "and" "other" "are" "the" "same") "equal"
+        (list "=" "==" "===" ":=" "=>" "＝" "≡"))
+      (snsf-symbol-group 7 3 (list "ask" "how" "this" "and" "other" "are") "compare"
+        (list "<" ">" "<=" ">=" "!=" "!==" "<=>" "＜" "＞" "≤" "≥" "≠" "≈"))
+      (snsf-symbol-group 8 11 (list "this" "or" "other" "do" "as" "one") "logical-join"
+        (list "|" "||" "&" "&&" "^" "~" "∧" "∨" "¬"))
+      (snsf-symbol-group 9 10 (list "from" "this" "to" "other") "flow"
+        (list "->" "<-" "=>" "::" "." ".." "..." "|>"
+          "→" "←" "⇒" "⇐" "↔" "⇔"))
+      (snsf-symbol-group 10 11 (list "make" "part" "known" "in" "a" "whole") "separate-parts"
+        (list "," ";" ":" "_" "，" "、" "；" "：" "。" "…" "•" "·" "–" "—"))
+      (snsf-symbol-group 11 3 (list "what" "a" "self" "say" "is" "here") "quote"
+        (list "\"" "'" "`" "“" "”" "‘" "’" "«" "»" "「" "」" "『" "』"))
+      (snsf-symbol-group 12 3 (list "a" "self" "want" "to" "know") "question"
+        (list "?" "？"))
+      (snsf-symbol-group 13 6 (list "make" "what" "is" "said" "more") "emphasis"
+        (list "!" "!!" "！"))
+      (snsf-symbol-group 14 3 (list "a" "thing" "that" "make" "other" "known") "reference"
+        (list "@" "#" "$" "§" "©" "™"))
+      (snsf-symbol-group 15 10 (list "make" "what" "is" "after" "be" "this") "escape"
+        (list "\\"))
+      (snsf-symbol-group 16 4 (list "one" "thing" "that" "is" "many" "thing") "wildcard"
+        (list "*"))
+      (snsf-symbol-group 17 3 (list "what" "is" "after" "this" "say" "more" "of" "the" "whole") "comment"
+        (list "#" "//"))))
+
+  (defn snsf-string-in? (surface xs)
+    (if (eq (len xs) 0) 0
+      (if (str_eq surface (head xs)) 1 (snsf-string-in? surface (tail xs)))))
+  (defn snsf-symbol-find-all-loop (groups surface out)
+    (if (eq (len groups) 0) (reverse out)
+      (do (let g (head groups))
+          (snsf-symbol-find-all-loop (tail groups) surface
+            (if (eq (snsf-string-in? surface (snsf-sg-aliases g)) 1)
+              (cons g out) out)))))
+  (defn snsf-symbol-find-all (surface)
+    (snsf-symbol-find-all-loop (snsf-symbol-groups) surface (empty)))
+  (defn snsf-known-symbol? (surface)
+    (if (gt (len (snsf-symbol-find-all surface)) 0) 1 0))
+  (defn snsf-symbol-descriptions-closed? (groups)
+    (if (eq (len groups) 0) 1
+      (if (eq (rwfd-desc-closed? (snsf-sg-desc (head groups))) 1)
+        (snsf-symbol-descriptions-closed? (tail groups)) 0)))
+  (defn snsf-ascii-symbols-covered-loop (surface i)
+    (if (ge i (str_len surface)) 1
+      (if (eq (snsf-known-symbol? (substring surface i (add i 1))) 1)
+        (snsf-ascii-symbols-covered-loop surface (add i 1)) 0)))
+  (defn snsf-ascii-symbols-covered? ()
+    (snsf-ascii-symbols-covered-loop
+      "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~" 0))
+  (defn snsf-ascii-only? (surface i)
+    (if (ge i (str_len surface)) 1
+      (if (le (str_byte_at surface i) 127)
+        (snsf-ascii-only? surface (add i 1)) 0)))
+  (defn snsf-unicode-alias-count (aliases)
+    (if (eq (len aliases) 0) 0
+      (add (if (eq (snsf-ascii-only? (head aliases) 0) 1) 0 1)
+        (snsf-unicode-alias-count (tail aliases)))))
+  (defn snsf-unicode-symbol-alias-count-loop (groups)
+    (if (eq (len groups) 0) 0
+      (add (snsf-unicode-alias-count (snsf-sg-aliases (head groups)))
+        (snsf-unicode-symbol-alias-count-loop (tail groups)))))
+  (defn snsf-unicode-symbol-alias-count ()
+    (snsf-unicode-symbol-alias-count-loop (snsf-symbol-groups)))
+  (defn snsf-symbol-candidates (groups)
+    (if (eq (len groups) 0) (empty)
+      (do (let g (head groups))
+          (cons (snsf-candidate (snsf-structure-address (snsf-sg-id g))
+                  (snsf-sg-recipe g) "core-token-recipe" (snsf-sg-desc g)
+                  "authored-structural-recipe" 0 1 "authored-structural-axis"
+                  (fwf-shape (fwf-at (snsf-sg-axis g)))
+                  (list (snsf-sg-recipe g)))
+                (snsf-symbol-candidates (tail groups))))))
+
+  ; Raw-text tokenization retains punctuation adjacency. The earlier path fed
+  ; punctuation through a tokenizer that discarded whitespace and then joined
+  ; known operators, which could turn `- >` into `->`. Here longest matching
+  ; is attempted at the original byte position. Caller-supplied token lists are
+  ; never joined: their boundaries are authoritative.
+  (defn snsf-symbol-width-at (text i)
+    (do
+      (let remaining (sub (str_len text) i))
+      (let four (if (ge remaining 4) (substring text i (add i 4)) ""))
+      (let three (if (ge remaining 3) (substring text i (add i 3)) ""))
+      (let two (if (ge remaining 2) (substring text i (add i 2)) ""))
+      (let one (substring text i (add i 1)))
+      (if (and (not (str_eq four "")) (eq (snsf-known-symbol? four) 1)) 4
+        (if (and (not (str_eq three "")) (eq (snsf-known-symbol? three) 1)) 3
+          (if (and (not (str_eq two "")) (eq (snsf-known-symbol? two) 1)) 2
+            (if (eq (snsf-known-symbol? one) 1) 1 0))))))
+  (defn snsf-text-token-end (text i)
+    (if (ge i (str_len text)) i
+      (if (or (eq (nmfe-ascii-ws? (str_byte_at text i)) 1)
+              (gt (snsf-symbol-width-at text i) 0)) i
+        (snsf-text-token-end text (add i 1)))))
+  (defn snsf-fold-range (text i end out)
+    (if (ge i end) out
+      (snsf-fold-range text (add i 1) end
+        (str_concat out
+          (byte_to_str (nmfe-ascii-lower-byte (str_byte_at text i)))))))
+  (defn snsf-text-tokenize-loop (text i out)
+    (if (ge i (str_len text)) (reverse out)
+      (if (eq (nmfe-ascii-ws? (str_byte_at text i)) 1)
+        (snsf-text-tokenize-loop text (add i 1) out)
+        (do
+          (let width (snsf-symbol-width-at text i))
+          (if (gt width 0)
+            (snsf-text-tokenize-loop text (add i width)
+              (cons (substring text i (add i width)) out))
+            (do
+              (let end (snsf-text-token-end text (add i 1)))
+              (snsf-text-tokenize-loop text end
+                (cons (substring text i end) out))))))))
+  (defn snsf-text-tokens (text)
+    (snsf-text-tokenize-loop text 0 (empty)))
+
+  ; ── field projection ──────────────────────────────────────────────
+  (defn snsf-zero-shape () (list 0 0 0 0 0 0 0 0 0 0 0 0 0))
+  (defn snsf-shape-add (a b)
+    (if (eq (len a) 0) (empty)
+      (cons (add (head a) (head b))
+        (snsf-shape-add (tail a) (tail b)))))
+  (defn snsf-shape-div (a n)
+    (if (eq (len a) 0) (empty)
+      (cons (div (head a) n) (snsf-shape-div (tail a) n))))
+  ; projection = accumulated shape, evidence count, evidence surfaces.
+  (defn snsf-projection-empty () (list (snsf-zero-shape) 0 (empty)))
+  (defn snsf-p-shape (p) (nth p 0))
+  (defn snsf-p-count (p) (nth p 1))
+  (defn snsf-p-evidence (p) (nth p 2))
+  (defn snsf-direct-field (surface)
+    (do
+      (let seed (fwf-find surface))
+      (if (gt (len seed) 0) (list (fwf-shape seed) "authored-core-axis")
+        (do
+          (let responses (snsf-response-lexical-fields (rwfd-find-all surface)))
+          ; More than one response sense remains ambiguous and contributes no
+          ; single projection. No first-row collapse is allowed here.
+          (if (eq (len responses) 1)
+            (list (rwfd-field (head responses))
+              "authored-response-lexical-axis") (empty))))))
+  (defn snsf-response-lexical-fields (rows)
+    (if (eq (len rows) 0) (empty)
+      (if (and (eq (rwfd-kind (head rows)) (rwfd-kind-lexical))
+               (eq (rwfd-specificity (head rows)) 2))
+        (cons (head rows) (snsf-response-lexical-fields (tail rows)))
+        (snsf-response-lexical-fields (tail rows)))))
+  (defn snsf-project-token (surface projection)
+    (do
+      (let direct (snsf-direct-field surface))
+      (if (eq (len direct) 0) projection
+        (list (snsf-shape-add (snsf-p-shape projection) (nth direct 0))
+          (add (snsf-p-count projection) 1)
+          (cons surface (snsf-p-evidence projection))))))
+  (defn snsf-project-tokens (tokens projection)
+    (if (eq (len tokens) 0) projection
+      (snsf-project-tokens (tail tokens)
+        (snsf-project-token (head tokens) projection))))
+  (defn snsf-project-definition (definition)
+    (do
+      (let p (snsf-project-tokens (nmfe-tokens definition)
+        (snsf-projection-empty)))
+      (if (eq (snsf-p-count p) 0) p
+        (list (snsf-shape-div (snsf-p-shape p) (snsf-p-count p))
+          (snsf-p-count p) (reverse (snsf-p-evidence p))))))
+
+  (defn snsf-fwfl-locale (code)
+    (if (or (str_eq code "de") (str_eq code "de-Latn")) (fwfl-de)
+      (if (or (str_eq code "zh") (str_eq code "zh-Hans")) (fwfl-zh)
+        (if (or (str_eq code "pt-br") (str_eq code "pt-Latn")) (fwfl-pt)
+          (if (or (str_eq code "fr") (str_eq code "fr-Latn")) (fwfl-fr)
+            (if (or (str_eq code "id") (str_eq code "id-Latn")) (fwfl-id)
+              (if (or (str_eq code "ban") (str_eq code "ban-Latn")) (fwfl-ban)
+                (if (or (str_eq code "sa") (str_eq code "sa-Deva"))
+                  (fwfl-sa) -1))))))))
+  (defn snsf-locale-field-id (runtime code surface)
+    (do
+      (let locale (snsf-fwfl-locale code))
+      (if (lt locale 0) -1
+        (do
+          (let symbol (fwfl-resolve-in (snsf-rt-nl runtime) locale surface))
+          (if (nothing? symbol) -1 (fwfl-symbol-id symbol))))))
+
+  ; ── lexical resolution with complete ambiguity ───────────────────
+  (defn snsf-first-id (runtime code surface)
+    (if (str_eq code "en")
+      (do
+        (let record (c10-detect-text-in (snsf-rt-ranked runtime)
+          (snsf-rt-lexical runtime) surface))
+        (if (c10-missing? record) -1 (c10-concept-id record)))
+      (do
+        (let hit (cnl13-runtime-detect-first (snsf-rt-nl runtime) code surface))
+        (if (eq (len hit) 0) -1 (nth hit 0)))))
+  (defn snsf-candidate-ids (runtime code surface)
+    (do
+      (let first (snsf-first-id runtime code surface))
+      (if (lt first 0) (empty)
+        (do
+          (let cell (ctr13-detect-cell-in
+            (cnl13-runtime-data (snsf-rt-nl runtime))
+            (cnl13-runtime-offsets (snsf-rt-nl runtime))
+            (snsf-rt-surface-index runtime) (snsf-rt-candidate-data runtime)
+            first code))
+          (if (eq (len cell) 0) (list first) (nth (nth cell 5) 1))))))
+  (defn snsf-concept-field (runtime code surface anchor definition)
+    (do
+      (let locale-id (snsf-locale-field-id runtime code surface))
+      (if (ge locale-id 0)
+        (list "authored-locale-axis" (fwf-shape (fwf-at locale-id))
+          (list surface))
+        (do
+          (let direct (snsf-direct-field anchor))
+          (if (gt (len direct) 0)
+            (list (nth direct 1) (nth direct 0) (list anchor))
+            (do
+              (let projected (snsf-project-definition definition))
+              (if (eq (snsf-p-count projected) 0)
+                (list "field-absence" (empty) (empty))
+                (list "definition-projection-v1" (snsf-p-shape projected)
+                  (snsf-p-evidence projected)))))))))
+  (defn snsf-concept-candidate (runtime code surface id lookup-mode)
+    (do
+      (let record (c10-concept-at-in (snsf-rt-ranked runtime) id))
+      (let semantic (cs10l-open-at (snsf-rt-semantics runtime) id))
+      (let definition (cs10-gloss semantic))
+      (let field (snsf-concept-field runtime code surface
+        (c10-concept-label record) definition))
+      (let source-code (cnl13-runtime-source-at (snsf-rt-nl runtime) id code))
+      (snsf-candidate (snsf-concept-address id) (c10-concept-label record)
+        (cs10l-method-label semantic) definition
+        (list source-code (cnl13-source-name source-code)
+          (cnl13-sourced-state source-code) lookup-mode)
+        (c10-concept-frequency record) (cs10-sense-count semantic)
+        (nth field 0) (nth field 1) (nth field 2))))
+  (defn snsf-concept-candidates (runtime code surface ids lookup-mode)
+    (if (eq (len ids) 0) (empty)
+      (cons (snsf-concept-candidate runtime code surface (head ids) lookup-mode)
+        (snsf-concept-candidates runtime code surface (tail ids) lookup-mode))))
+
+  ; The 13 field surfaces also seat Balinese and Sanskrit words that are not
+  ; columns in the 10k x 13 lexical substrate.
+  (defn snsf-local-field-candidate (runtime code surface)
+    (do
+      (let field-id (snsf-locale-field-id runtime code surface))
+      (if (ge field-id 0)
+        (list (snsf-candidate (snsf-field-address field-id)
+          (fwf-surface (fwf-at field-id)) "core-token-recipe"
+          (fwf-desc (fwf-at field-id)) "authored-locale-bridge" 0 1
+          "authored-locale-axis" (fwf-shape (fwf-at field-id))
+          (list surface)))
+        (empty))))
+  (defn snsf-english-field-candidates (surface)
+    (do
+      (let seed (fwf-find surface))
+      (if (gt (len seed) 0)
+        (list (snsf-candidate (snsf-field-address (fwf-id seed))
+          (fwf-surface seed) "core-token-recipe" (fwf-desc seed)
+          "authored-core-field" 0 1 "authored-core-axis"
+          (fwf-shape seed) (list surface)))
+        (do
+          (let rows (rwfd-find-all surface))
+          (snsf-response-candidates rows)))))
+  (defn snsf-response-candidates (rows)
+    (if (eq (len rows) 0) (empty)
+      (do
+        (let row (head rows))
+        (cons (snsf-candidate (snsf-address 5 (rwfd-id row)) (rwfd-surface row)
+                "core-token-recipe" (rwfd-expanded-desc row)
+                "authored-response-field" 0 1 "authored-response-axis"
+                (rwfd-field row) (list (rwfd-surface row)))
+              (snsf-response-candidates (tail rows))))))
+
+  ; Small session-native overlay for stream language that is absent from the
+  ; ranked 10k body. It stays outside the response-fixture dictionary so that
+  ; fixture-local IDs and scope do not drift. Rows are appended here only after
+  ; an exact 10k and core/response field miss.
+  (defn snsf-session-word-candidates (surface)
+    (if (str_eq surface "tokens")
+      (list (snsf-candidate (snsf-address 6 0) "token"
+        "core-token-recipe"
+        (list "many" "thing" "that" "are" "part" "of" "what" "a" "self" "say")
+        "authored-session-stream-recipe" 0 1 "authored-session-axis"
+        (fwf-shape (fwf-at 3)) (list surface)))
+      (empty)))
+
+  (defn snsf-digits-loop? (surface i)
+    (if (ge i (str_len surface)) 1
+      (do
+        (let b (str_byte_at surface i))
+        (if (and (ge b 48) (le b 57))
+          (snsf-digits-loop? surface (add i 1)) 0))))
+  (defn snsf-digits? (surface)
+    (if (eq (str_len surface) 0) 0 (snsf-digits-loop? surface 0)))
+  (defn snsf-number-candidate (surface)
+    (snsf-candidate (snsf-number-address surface) surface
+      "core-token-recipe" (list "a" "thing" "that" "say" "how" "many")
+      "exact-decimal-notation" 0 1 "field-absence" (empty) (empty)))
+  (defn snsf-residue-candidate (surface)
+    (snsf-candidate (snsf-residue-address surface) surface "unresolved-residue"
+      (empty) "exact-surface-bytes-only" 0 0 "field-absence" (empty) (empty)))
+
+  (defn snsf-resolve-one (runtime code surface ordinal)
+    (do
+      (let symbol-groups (snsf-symbol-find-all surface))
+      (if (gt (len symbol-groups) 0)
+        (snsf-token ordinal surface "symbol" code
+          (snsf-symbol-candidates symbol-groups)
+          (if (gt (len symbol-groups) 1) "multiple-structural-candidates"
+            "structural-candidate"))
+        (if (eq (snsf-digits? surface) 1)
+          (snsf-token ordinal surface "number" code
+            (list (snsf-number-candidate surface)) "numeric-notation")
+          (do
+            ; Exact spelling is tried first. ASCII case folding is a labeled
+            ; lookup fallback only; the token row retains arrival bytes.
+            (let exact-ids (snsf-candidate-ids runtime code surface))
+            (let folded-surface
+              (snsf-fold-range surface 0 (str_len surface) ""))
+            (let ids (if (gt (len exact-ids) 0) exact-ids
+              (if (str_eq surface folded-surface) exact-ids
+                (snsf-candidate-ids runtime code folded-surface))))
+            (let lookup-surface
+              (if (gt (len exact-ids) 0) surface folded-surface))
+            (let lookup-mode
+              (if (or (gt (len exact-ids) 0)
+                      (str_eq surface folded-surface))
+                "exact-surface" "ascii-fold-fallback"))
+            (let concepts (snsf-concept-candidates runtime code
+              lookup-surface ids lookup-mode))
+            (let local (if (gt (len concepts) 0) (empty)
+              (snsf-local-field-candidate runtime code lookup-surface)))
+            (let english (if (or (gt (len concepts) 0) (gt (len local) 0))
+              (empty) (if (str_eq code "en")
+                (snsf-english-field-candidates lookup-surface) (empty))))
+            (let session (if (or (gt (len concepts) 0)
+                                (or (gt (len local) 0) (gt (len english) 0)))
+              (empty) (if (str_eq code "en")
+                (snsf-session-word-candidates lookup-surface) (empty))))
+            (let candidates (if (gt (len concepts) 0) concepts
+              (if (gt (len local) 0) local
+                (if (gt (len english) 0) english
+                  (if (gt (len session) 0) session
+                    (list (snsf-residue-candidate surface)))))))
+            (snsf-token ordinal surface "word" code candidates
+              (if (gt (len concepts) 1) "multiple-concepts"
+                (if (eq (len concepts) 1)
+                  (if (gt (snsf-c-sense-count (head concepts)) 1)
+                    "one-concept-many-senses" "unique-concept")
+                  (if (or (gt (len local) 0)
+                          (or (gt (len english) 0) (gt (len session) 0)))
+                    "local-field-meaning" "unresolved-residue")))))))))
+
+  (defn snsf-resolve-token-loop (runtime code tokens ordinal out)
+    (if (eq (len tokens) 0) (reverse out)
+      (if (eq (str_len (head tokens)) 0)
+        (snsf-resolve-token-loop runtime code (tail tokens) ordinal out)
+        (snsf-resolve-token-loop runtime code (tail tokens) (add ordinal 1)
+          (cons (snsf-resolve-one runtime code (head tokens) ordinal) out)))))
+  (defn snsf-resolve-tokens (runtime code tokens)
+    (snsf-resolve-token-loop runtime code tokens 0 (empty)))
+  (defn snsf-resolve-text (runtime code text)
+    (snsf-resolve-tokens runtime code (snsf-text-tokens text)))
+
+  ; ── honest coverage ───────────────────────────────────────────────
+  (defn snsf-token-residue? (token)
+    (if (str_eq (snsf-t-state token) "unresolved-residue") 1 0))
+  (defn snsf-token-field? (candidates)
+    (if (eq (len candidates) 0) 0
+      (if (str_eq (snsf-c-field-state (head candidates)) "field-absence")
+        (snsf-token-field? (tail candidates)) 1)))
+  ; coverage = rows, total, observed, semantic, field, residue,
+  ; word-count, symbol-count, number-count.
+  (defn snsf-coverage-loop (rows rest observed semantic field residue words symbols numbers)
+    (if (eq (len rest) 0)
+      (list rows (len rows) observed semantic field residue words symbols numbers)
+      (do
+        (let row (head rest))
+        (let is-residue (snsf-token-residue? row))
+        (snsf-coverage-loop rows (tail rest) (add observed 1)
+          (add semantic (if (eq is-residue 1) 0 1))
+          (add field (snsf-token-field? (snsf-t-candidates row)))
+          (add residue is-residue)
+          (add words (if (str_eq (snsf-t-kind row) "word") 1 0))
+          (add symbols (if (str_eq (snsf-t-kind row) "symbol") 1 0))
+          (add numbers (if (str_eq (snsf-t-kind row) "number") 1 0))))))
+  (defn snsf-coverage (rows)
+    (snsf-coverage-loop rows rows 0 0 0 0 0 0 0))
+  (defn snsf-cov-rows (c) (nth c 0))
+  (defn snsf-cov-total (c) (nth c 1))
+  (defn snsf-cov-observed (c) (nth c 2))
+  (defn snsf-cov-semantic (c) (nth c 3))
+  (defn snsf-cov-field (c) (nth c 4))
+  (defn snsf-cov-residue (c) (nth c 5))
+  (defn snsf-cov-words (c) (nth c 6))
+  (defn snsf-cov-symbols (c) (nth c 7))
+  (defn snsf-cov-numbers (c) (nth c 8))
+  (defn snsf-expression-count (rows wanted)
+    (if (eq (len rows) 0) 0
+      (add (if (eq (snsf-expression-code (snsf-t-expression-case (head rows)))
+                   (snsf-expression-code wanted)) 1 0)
+        (snsf-expression-count (tail rows) wanted))))
+  (defn snsf-bp (part whole)
+    (if (eq whole 0) -1 (div (mul part 10000) whole)))
+  (defn snsf-cov-observed-bp (c)
+    (snsf-bp (snsf-cov-observed c) (snsf-cov-total c)))
+  (defn snsf-cov-semantic-bp (c)
+    (snsf-bp (snsf-cov-semantic c) (snsf-cov-total c)))
+  (defn snsf-cov-field-bp (c)
+    (snsf-bp (snsf-cov-field c) (snsf-cov-total c)))
+
+  0)
