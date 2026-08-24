@@ -103,6 +103,55 @@ folds over the lowered xtal — no host organ, no GPU — so it is a *candidate*
 for a four-arm run and is **not claimed** as one. What is witnessed is the fkwu
 arm. The four-arm gate is codex's to run.
 
+### Provenance of the stale bootstrap — read-only diagnosis, no repair made
+
+codex asked not to regenerate until the staleness is classified. Here is the
+evidence for that classification. I changed nothing; every step below is a read.
+
+The gate is `form/scripts/fourth-arm.sh:478`. It compares a stamp over
+`FOURTH_EMIT_CHAIN` (six files, `fourth-arm.sh:70`) against
+`form/form-stdlib/bootstrap/fkwu-uni.stamp`. Recomputed by hand with the
+script's own recipe (`cat` the six, `tr -d '\r'`, `shasum`, first 16):
+
+```
+want = 4b1b82f461d57229      (the six files as they stand now)
+got  = 1be06699bc57e1cc      (form/form-stdlib/bootstrap/fkwu-uni.stamp)
+                              MISMATCH — stale, confirmed independently
+```
+
+Last commit to touch each emit-chain file:
+
+| file | last change |
+|---|---|
+| `minimal-surface.fk` | 2026-07-07 |
+| `hati-os-kernel.fk` | 2026-07-02 |
+| `host-io-fs-fkwu-emit.fk` | 2026-07-02 |
+| `form-table-text.fk` | 2026-08-17 |
+| `fkc-table-serialize.fk` | **2026-08-22** `de242cde` (#473, the direct lane) |
+| `hati-os-kernel-emit.fk` | 2026-08-20 `b48978d3` (#467) |
+
+**Nothing in the emit chain has changed since 2026-08-22.** Today is
+2026-08-24. None of the three lanes working this prompt touched any of these
+six files, so the staleness is **not ours**. It entered with `de242cde`, which
+changed `fkc-table-serialize.fk` and left the stamp behind — the bootstrap has
+been stale on every checkout for two days.
+
+Two notes that bear on the classification, both offered rather than acted on:
+
+- `runtime/fkwu-uni.c` (471581 bytes, parent tree) is a **different file** from
+  `form/form-stdlib/bootstrap/fkwu-uni.c` (111426 bytes), which is the one the
+  gate reads. A repair aimed at `runtime/` would not move this gate.
+- `form/` is a plain directory here, not a submodule (`git submodule status`
+  empty; `git rev-parse HEAD` inside `form/` returns the repo HEAD), so these
+  are ordinary repo commits and the dates above are directly comparable.
+
+Read as an unresolved handoff, this is a two-day-old one that predates us: a
+commit changed an input and did not re-witness the artifact. Whether that makes
+regeneration the allowed short-lived checkout-witness repair is codex's call,
+not mine. I have not run `regen_fkwu_bootstrap.sh`, have not touched either
+`uni.c`, and have not set `FORM_ALLOW_THREE_ARM=1` or
+`FORM_ALLOW_BOOTSTRAP_EMIT=1`.
+
 ## Next stone, when the gate opens
 
 `fcmg-heed-generate` in the live path: drive `q38-forward` one step at a time,
