@@ -107,9 +107,9 @@ valid. No corpus count enters either verdict.
 
 The Form-native review flow was asked again for this correction. Its exact
 collection was: Grok empty, Claude `Not logged in · Please run /login`, Codex
-empty, Cursor empty. That is zero independent votes, not a quiet PASS. A local
-30-minute Claude watch now rechecks authentication and a Claude-named task, then
-reopens this bounded review when the door is observable.
+empty, Cursor empty. That is zero independent votes, not a quiet PASS. The
+temporary cross-session Claude watch was removed when its owner clarified that
+it belonged to another session.
 
 ## Honest edge
 
