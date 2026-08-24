@@ -209,6 +209,72 @@
                 (nth geo 0))
             1))
 
+    ; ── the batched matmul, dispatched ─────────────────────────────────────
+    ; form_q8_0_matmul_batch_f32 takes rows, cols and ntok, reads x[t*cols+j] and
+    ; writes y[t*rows+r]. Grid is rows * ceil(ntok/8) * 32 with a threadgroup that
+    ; is a multiple of 32, and mode 0 so the threads argument is the total thread
+    ; count rather than a group count.
+    ;
+    ; At ntok 1 this replaces one matvec with one matmul over a single column —
+    ; the same work, the same dispatch count, through the batched path. That is
+    ; the point of running it at 1 first: it puts the binding, the grid and the
+    ; token-major layout under the body's own witness before the loop order
+    ; changes underneath them.
+    (defn q38-mv-batch (ps tv xh yh ntok barrier)
+        (metal_enqueue (nth ps 31)
+            (md-bind16 (list (kth-tv-h tv) xh yh)
+                (list (kth-tv-r tv) (kth-tv-c tv) ntok)
+                256 0 0 barrier)
+            (mul (mul (kth-tv-r tv) (div (add ntok 7) 8)) 32)))
+
+    ; The FFN with its three matmuls on the batched kernel. rms, the swiglu gate
+    ; and the residual add are unchanged: at ntok 1 they are already right, and at
+    ; ntok > 1 they are the next three kernels to widen.
+    (defn q38-ffn-b (ps bs geo lay ntok)
+        (do
+            (q38-rms ps (nth bs 0) (nth lay 1) (nth bs 1) (nth geo 0) (nth geo 6) 1)
+            (q38-mv-batch ps (nth lay 2) (nth bs 1) (nth bs 14) ntok 1)
+            (q38-mv-batch ps (nth lay 3) (nth bs 1) (nth bs 15) ntok 0)
+            (metal_enqueue (nth ps 18)
+                (q38-b16 (list (nth bs 14) (nth bs 15) (nth bs 16))
+                    (list (nth geo 10)) 0 1)
+                (nth geo 10))
+            (q38-mv-batch ps (nth lay 4) (nth bs 16) (nth bs 17) ntok 1)
+            (metal_enqueue (nth ps 19)
+                (q38-b16 (list (nth bs 0) (nth bs 17) (nth bs 0)) (list (nth geo 0)) 0 1)
+                (nth geo 0))
+            1))
+
+    (defn q38-blocks-b (ps bs geo lays sts pos l n interval ntok)
+        (if (ge l n) 1
+            (do (if (kth-full? l interval)
+                    (q38-full-attn ps bs geo (nth lays l) (nth sts l) pos)
+                    (q38-linear-attn ps bs geo (nth lays l) (nth sts l)))
+                (q38-ffn-b ps bs geo (nth lays l) ntok)
+                (q38-blocks-b ps bs geo lays sts pos (add l 1) n interval ntok))))
+
+    (defn q38-forward-state-b (ps bs geo lays sts embTv id pos barrier ntok)
+        (do
+            (metal_enqueue (nth ps 30)
+                (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
+                         (list (mul id (nth geo 0)) (nth geo 0)) 0 barrier)
+                (nth geo 0))
+            (q38-blocks-b ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22) ntok)
+            1))
+
+    (defn q38-prefill-mvb-go (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (if (eq (len ids) 1)
+            (do (metal_sync)
+                (list (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos)
+                      (add pos 1)))
+            (do (q38-forward-state-b ps bs geo lays sts embTv (head ids) pos 1 1)
+                (q38-prefill-mvb-go ps bs geo lays sts embTv onormTv projTv
+                    (tail ids) (add pos 1)))))
+
+    (defn q38-prefill-mvb (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (do (metal_batch_concurrent)
+            (q38-prefill-mvb-go ps bs geo lays sts embTv onormTv projTv ids pos)))
+
     (defn q38-blocks (ps bs geo lays sts pos l n interval)
         (if (ge l n) 1
             (do (if (kth-full? l interval)
@@ -350,11 +416,13 @@
     ; chunk 0 = one batch for the whole span, ordering by barrier.
     ; chunk n>1 = settle every n positions (the probe that answered no).
     (defn q38-prefill-chunked (ps bs geo lays sts embTv onormTv projTv ids pos chunk)
+        (if (lt chunk 0)
+            (q38-prefill-mvb ps bs geo lays sts embTv onormTv projTv ids pos)
         (if (eq chunk 0)
             (q38-prefill-span ps bs geo lays sts embTv onormTv projTv ids pos)
             (if (le chunk 1)
                 (q38-prefill ps bs geo lays sts embTv onormTv projTv ids pos)
-                (q38-prefill-chunk-go ps bs geo lays sts embTv onormTv projTv ids pos chunk 0))))
+                (q38-prefill-chunk-go ps bs geo lays sts embTv onormTv projTv ids pos chunk 0)))))
 
     (defn q38-key (arch suffix) (str_concat arch (str_concat "." suffix)))
 
@@ -414,7 +482,12 @@
     ; Returns the same setup shape as KAT plus the selected path at index 9.  No model path or model
     ; geometry is compiled in.  The header window is a carrier window; egg-data-base determines the
     ; real data boundary (10,996,704 bytes on the observed Qwen3.8 Q8_0 file).
-    (defn q38-open (path maxpos)
+    ; span is how many positions the scratch may hold at once, token-major.
+    ; q38-open is q38-open-span at span 1 — the same allocation the lane has
+    ; always made. ctx slot 10 carries the span so the stack can read it.
+    (defn q38-open (path maxpos) (q38-open-span path maxpos 1))
+
+    (defn q38-open-span (path maxpos span)
         (if (eq (q38-artifact-complete? path) 0) (empty)
         (do (let src (eqr-of-file path 0 40000000))
             (let base (egg-data-base src 32))
@@ -422,14 +495,16 @@
             (let ps (q38-pipes (q38-msl)))
             (let qout (mul 2 (mul (nth geo 12) (nth geo 14))))
             (let convcap (if (gt qout (nth geo 1)) qout (nth geo 1)))
-            (let bs (kth-bufs (nth geo 0) convcap (mul (nth geo 3) (nth geo 5)) (nth geo 3)
+            (let bs (kth-bufs-span (nth geo 0) convcap (mul (nth geo 3) (nth geo 5)) (nth geo 3)
                               (nth geo 10) 1 (mul (nth geo 12) (nth geo 14))
-                              (nth geo 20) maxpos (nth geo 12) (nth geo 19)))
+                              (nth geo 20) maxpos (nth geo 12) (nth geo 19) span))
             (let lays (q38-layers src base path (nth geo 21) (nth geo 22)))
             (let embTv (kth-tv-at src base path (egg-find-tensor src "token_embd.weight")))
             (let onormTv (kth-tv-at src base path (egg-find-tensor src "output_norm.weight")))
             (let projTv (kth-tv-at src base path (egg-find-tensor src "output.weight")))
-            (list ps bs geo lays embTv onormTv projTv src base path))))
+            (list ps bs geo lays embTv onormTv projTv src base path span))))
+
+    (defn q38-ctx-span (ctx) (if (gt (len ctx) 10) (nth ctx 10) 1))
 
     (defn q38-new-state (geo)
         (kth-stream-state (nth geo 21) (nth geo 22) (nth geo 1) (nth geo 23)
