@@ -104,7 +104,7 @@
     (defn fhcs-query-source-path (query)
         (fhcs-query-source-path-go query 0))
 
-    (defn fhcs-path-result (root relative atoms)
+    (defn fhcs-path-result-with-reason (root relative atoms hit-reason)
         (do
             (let full (fs-path-join root relative))
             (let size (fs-stat-size full))
@@ -117,10 +117,13 @@
                     (let candidate (fkss-candidate relative full
                         (nth observed 0) (nth observed 1) size))
                     (let answer-start (fkss-answer-start (nth observed 1) size))
-                    (fkss-result "hit" "current-source-path-hit"
+                    (fkss-result "hit" hit-reason
                         (fkss-source-id full) relative
                         (nth observed 0) (nth observed 1)
                         (fkss-answer-for candidate) 1 1 1 size answer-start)))))
+    (defn fhcs-path-result (root relative atoms)
+        (fhcs-path-result-with-reason root relative atoms
+            "current-source-path-hit"))
 
     (defn fhcs-answer-key (answer)
         (if (str_eq answer "") ""
@@ -223,7 +226,14 @@
                       (fhcs-render request result atom-count local-ready)
                       (fkss-reason result)))))
 
-    (defn fhcs-lookup-at-fuel (root ctx surface local-ready global-fuel)
+    ; A carrier that already holds a validated repo-relative path from the user
+    ; prompt may offer it as a bounded hint. The model-emitted query still owns
+    ; the search atoms. An emitted valid path wins; the prompt hint is consulted
+    ; only when the emitted query contains no usable path. This composes an
+    ; ahead-of-time path choice with an on-demand model query without authorizing
+    ; a global scan or fabricating an answer.
+    (defn fhcs-lookup-at-fuel-hinted
+        (root ctx surface local-ready global-fuel path-hint)
         (do
             (let request (fkqt-parse surface))
             (if (eq (fkqt-request-ready? request) 0)
@@ -233,11 +243,20 @@
                     (if (nil? atoms)
                         (fhcs-refused "no-query-atoms")
                         (do
-                            (let relative (fhcs-query-source-path
+                            (let emitted-relative (fhcs-query-source-path
                                 (fkqt-request-query request)))
+                            (let hinted-relative
+                                (if (eq (fhcs-relative-source-path? path-hint) 1)
+                                    path-hint ""))
+                            (let relative
+                                (if (not (str_eq emitted-relative ""))
+                                    emitted-relative hinted-relative))
                             (if (not (str_eq relative ""))
                                 (fhcs-of-result request
-                                    (fhcs-path-result root relative atoms)
+                                    (fhcs-path-result-with-reason root relative atoms
+                                        (if (str_eq emitted-relative "")
+                                            "current-source-context-path-hit"
+                                            "current-source-path-hit"))
                                     (len atoms) local-ready)
                                 (if (le global-fuel 0)
                                     (fhcs-refused "global-source-scan-fuel-exhausted")
@@ -245,17 +264,22 @@
                                         (fkss-search-at root atoms)
                                         (len atoms) local-ready)))))))))
 
+    (defn fhcs-lookup-at-fuel (root ctx surface local-ready global-fuel)
+        (fhcs-lookup-at-fuel-hinted root ctx surface local-ready global-fuel ""))
+
     ; Explicit lookup-at callers authorize one whole-tree scan when no exact
     ; path is present. The live default does not.
     (defn fhcs-lookup-at (root ctx surface local-ready)
         (fhcs-lookup-at-fuel root ctx surface local-ready 1))
 
-    (defn fhcs-lookup (ctx surface local-ready)
+    (defn fhcs-lookup-hinted (ctx surface local-ready path-hint)
         (do
             (let root (fhcs-default-root))
             (if (str_eq root "") (fhcs-refused "body-root-unresolved")
-                (fhcs-lookup-at-fuel root ctx surface local-ready
-                    (fhcs-live-global-scan-fuel)))))
+                (fhcs-lookup-at-fuel-hinted root ctx surface local-ready
+                    (fhcs-live-global-scan-fuel) path-hint))))
+    (defn fhcs-lookup (ctx surface local-ready)
+        (fhcs-lookup-hinted ctx surface local-ready ""))
 
     (defn fhcs-grammar-agrees-at (open close)
         (if (and (str_eq (fkqt-open) open)
