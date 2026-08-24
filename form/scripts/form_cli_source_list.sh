@@ -122,6 +122,7 @@ form-stdlib/ask-lane-router.fk
 form-stdlib/form-cli-gguf-cell.fk
 form-stdlib/dsv4-tokenizer.fk
 form-stdlib/qwen35-tokenizer.fk
+form-stdlib/qwen35-tokfast-v2.fk
 form-stdlib/kernel-http.fk
 form-stdlib/form-asm.fk
 form-stdlib/metal-door.fk
@@ -137,7 +138,9 @@ form-stdlib/q3k-dequant.fk
 form-stdlib/q3k-equireach.fk
 form-stdlib/kat-coder-embed.fk
 native/metal/kat-token-handle.fk
+native/metal/qwen35-linear-span-layout-contract.fk
 native/metal/qwen35-dense-token-handle.fk
+native/metal/qwen35-crystal.fk
 native/metal/model-bandwidth.fk
 form-stdlib/form-cli-qwen-teach-layer.fk
 form-stdlib/form-cli-model-generate.fk
