@@ -1,0 +1,38 @@
+; qwen38-q4-adopt-run.fk — adopt the already-local Q4_K_M artifact only when
+; its full Form SHA-256 equals the upstream linked digest.
+;
+; Effectful: do not preflight. The network supplies only the signed redirect
+; manifest; Form hashes the 16.8GB local file and atomically writes a seal on an
+; exact size+digest match. Mismatch and unavailable instruments refuse.
+;
+; preludes: form/form-stdlib/qwen35-artifact-fetch.fk
+
+(do
+    (defn q4a-path ()
+        "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q4_K_M.gguf")
+    (defn q4a-spec ()
+        (qaf-spec "qwen3.8-27b-q4_k_m"
+            "https://huggingface.co/ggml-org/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_K_M.gguf?download=true"
+            (q4a-path)
+            "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q4_K_M.form-adopt.state"
+            134217728))
+    (let manifest (qaf-observe-manifest (q4a-spec)))
+    (let actual (file_size (q4a-path)))
+    (if (not (qaf-manifest-ready? manifest))
+        (list "refused" "manifest" (qaf-manifest-detail manifest) actual)
+        (if (not (eq actual (qaf-manifest-size manifest)))
+            (list "refused" "size" actual (qaf-manifest-size manifest))
+            (do
+                (let full-blocks (sub actual (mod actual 64)))
+                (let state (saj-file-prefix-state (q4a-path) full-blocks))
+                (let tail-size (mod actual 64))
+                (let tail (read_file_slice (q4a-path) full-blocks tail-size))
+                (let digest (saj-final-digest-from-state state tail actual))
+                (let digest-hex (qaf-string-hex digest))
+                (if (not (str_eq digest-hex (qaf-manifest-sha manifest)))
+                    (list "refused" "sha256" digest-hex
+                          (qaf-manifest-sha manifest) (metal_status))
+                    (if (eq (qaf-commit-seal (q4a-path) actual digest-hex) 1)
+                        (list "sealed" (q4a-path) actual digest-hex (metal_status))
+                        (list "refused" "atomic-seal-write" (q4a-path)
+                              actual digest-hex)))))))
