@@ -1,0 +1,834 @@
+; form-cli-resident-recipe-birth-exec.fk — one resident local-Qwen context
+; can birth an affine recipe from raw bytes, receive its content identity, then
+; address that born NodeID for generated-on-demand Metal in the same KV stream.
+;
+; TWO CROSSINGS, ONE RESIDENCE.
+;
+;   model bytes -> <|form:recipe-birth|>... -> frbt byte grammar
+;               -> typed birth observation -> fcms-observe
+;   same KV     -> <|form:recipe-exec|>@born... -> bounded byte cursor
+;               -> born-recipe request -> Form-composed MSL -> Metal
+;               -> typed execution observation -> fcms-observe -> same KV
+;
+; BPE remains only the transformer's embedding boundary. Grammar recognition
+; sees decoded bytes as they arrive and has no token-list pre-step, flattening,
+; operations table, or compiler subprocess. The recipe children directly make
+; the MSL source; metal_pipeline is the JIT door.
+;
+; IDENTITIES AND AUTHORSHIP. Birth observation, invocation request, request
+; observation, generated code, code observation, execution, and execution
+; observation are separate content-addressed cells. `model-executed` remains 0
+; throughout: the model authors/request bytes; Form parses and composes; Metal
+; executes. Model bytes and both injected observation lanes remain separate.
+;
+; SIGNALS. status, value-present, and value are independent, so nothing is not
+; integer 0 or 1. Ready, nothing, failure, and timeout preserve choice, cut,
+; undo, refine, crystallize, dissolve, and release where those movements occur.
+;
+; This file defines the composition but performs no top-level model or Metal
+; work. The live driver is effectful and must never be preflighted.
+;
+; preludes: form-stdlib/form-recipe-birth-token.fk
+; preludes: form-stdlib/form-cli-recipe-exec-session.fk
+; preludes: form-stdlib/form-cli-resident-recipe-birth-exec-categories.fk
+; Pure shape:
+; form-stdlib/tests/form-cli-resident-recipe-birth-exec-band.fk
+
+(do
+    (defn frbe-absent ()
+        (intern_node (frbe-absent-category)
+            (list (intern_trivial_string "nothing"))))
+    (defn frbe-node-or-absent (node)
+        (if (nothing? node) (frbe-absent) node))
+    (defn frbe-model-executed-form? () 0)
+    (defn frbe-scannerless? () 1)
+    (defn frbe-pretokenized? () 0)
+
+    ; ── generic bounded raw-byte frame cursor ───────────────────────
+    ; frame cursor = window scan terminal total-bytes chunks frame
+    (defn frbe-frame-cursor (window scan terminal bytes chunks frame)
+        (list window scan terminal bytes chunks frame))
+    (defn frbe-frame-window (c) (nth c 0))
+    (defn frbe-frame-scan (c) (nth c 1))
+    (defn frbe-frame-terminal (c) (nth c 2))
+    (defn frbe-frame-bytes (c) (nth c 3))
+    (defn frbe-frame-chunks (c) (nth c 4))
+    (defn frbe-frame-value (c) (nth c 5))
+    (defn frbe-frame-fresh ()
+        (frbe-frame-cursor "" "none" "open" 0 0 ""))
+    (defn frbe-frame-open? (c)
+        (if (str_eq (frbe-frame-terminal c) "open") 1 0))
+    (defn frbe-clip-right (text cap)
+        (if (le (str_len text) cap) text
+            (substring text 0 cap)))
+    (defn frbe-clip-left (text cap)
+        (if (le (str_len text) cap) text
+            (substring text (sub (str_len text) cap) (str_len text))))
+    (defn frbe-detect-window (window chunk open cap)
+        (do
+            (let joined (str_concat window chunk))
+            (let at (str_find joined open 0))
+            (if (lt at 0)
+                (frbe-clip-left joined (sub (str_len open) 1))
+                (frbe-clip-right
+                    (substring joined at (str_len joined))
+                    (add cap 1)))))
+    (defn frbe-close-at (window open close)
+        (str_find window close (str_len open)))
+    (defn frbe-scan-window (window open close cap)
+        (do
+            (let open-at (str_find window open 0))
+            (if (lt open-at 0) "none"
+                (do
+                    (let close-at (frbe-close-at window open close))
+                    (if (ge close-at 0)
+                        (if (gt (add close-at (str_len close)) cap)
+                            "timeout" "complete")
+                        (if (gt (str_len window) cap)
+                            "timeout" "held"))))))
+    (defn frbe-complete-frame (window open close)
+        (do
+            (let close-at (frbe-close-at window open close))
+            (if (lt close-at 0) ""
+                (substring window 0 (add close-at (str_len close))))))
+    (defn frbe-frame-feed (cursor chunk open close cap)
+        (if (not (eq (frbe-frame-open? cursor) 1)) cursor
+            (do
+                (let window (frbe-detect-window
+                    (frbe-frame-window cursor) chunk open cap))
+                (let scan (frbe-scan-window window open close cap))
+                (let terminal
+                    (if (str_eq scan "complete") "complete"
+                    (if (str_eq scan "timeout") "timeout" "open")))
+                (let frame
+                    (if (str_eq scan "complete")
+                        (frbe-complete-frame window open close)
+                    (if (str_eq scan "timeout") window "")))
+                (frbe-frame-cursor window scan terminal
+                    (add (frbe-frame-bytes cursor) (str_len chunk))
+                    (add (frbe-frame-chunks cursor) 1) frame))))
+    (defn frbe-birth-frame-feed (cursor chunk)
+        (frbe-frame-feed cursor chunk (frbt-open) (frbt-close)
+            (frbt-max-frame-bytes)))
+    (defn frbe-exec-frame-feed (cursor chunk)
+        (frbe-frame-feed cursor chunk (frex-open) (frex-close)
+            (frex-max-frame-bytes)))
+
+    ; ── birth projection ─────────────────────────────────────────────
+    ; birth crossing = result observation rendered
+    (defn frbe-birth-crossing (result observation rendered)
+        (list result observation rendered))
+    (defn frbe-birth-result (b) (nth b 0))
+    (defn frbe-birth-observation (b) (nth b 1))
+    (defn frbe-birth-rendered (b) (nth b 2))
+    (defn frbe-birth-from-frame (frame)
+        (do
+            (let result (frbt-parse-stream frame))
+            (let observation (frbt-observe result))
+            (frbe-birth-crossing result observation
+                (frbt-render observation))))
+
+    ; ── born-NodeID invocation request ──────────────────────────────
+    ; request = state reason recipe input carrier token stream-bytes
+    (defn frbe-request (state reason recipe input carrier token bytes)
+        (list state reason recipe input carrier token bytes))
+    (defn frbe-request-state (r) (nth r 0))
+    (defn frbe-request-reason (r) (nth r 1))
+    (defn frbe-request-recipe (r) (nth r 2))
+    (defn frbe-request-input (r) (nth r 3))
+    (defn frbe-request-carrier (r) (nth r 4))
+    (defn frbe-request-token (r) (nth r 5))
+    (defn frbe-request-stream-bytes (r) (nth r 6))
+    (defn frbe-request-ready? (r)
+        (if (str_eq (frbe-request-state r) "ready") 1 0))
+    (defn frbe-request-node (recipe input carrier)
+        (intern_node (frbe-request-category)
+            (list recipe
+                  (intern_trivial_int input)
+                  (intern_trivial_string carrier)
+                  (intern_trivial_string "born-affine-nodeid-exec-v1"))))
+    (defn frbe-nothing-request (reason recipe bytes)
+        (frbe-request "nothing" reason recipe 0 "" (nothing) bytes))
+    (defn frbe-timeout-request (reason recipe bytes)
+        (frbe-request "timeout" reason recipe 0 "" (nothing) bytes))
+    (defn frbe-request-node-valid? (request)
+        (if (not (eq (frbe-request-ready? request) 1)) 0
+        (if (not (eq (frbt-recipe-shape?
+                          (frbe-request-recipe request)) 1)) 0
+        (if (not (node_eq (frbe-request-token request)
+                (frbe-request-node (frbe-request-recipe request)
+                    (frbe-request-input request)
+                    (frbe-request-carrier request)))) 0
+            (if (eq (frex-carrier? (frbe-request-carrier request)) 1) 1 0)))))
+
+    (defn frbe-recipe-from-coordinate (coordinate born-recipe)
+        (do
+            (let reconstructed (frex-node-from-coordinate coordinate))
+            (if (nothing? reconstructed) (nothing)
+                (if (and (eq (frbt-recipe-shape? born-recipe) 1)
+                         (eq (frex-node-coordinate-eq?
+                                reconstructed born-recipe) 1))
+                    born-recipe (nothing)))))
+
+    (defn frbe-request-event (request action signal attempt)
+        (intern_node (frbe-event-category)
+            (list (frbe-node-or-absent
+                        (if (eq (frbe-request-ready? request) 1)
+                            (frbe-request-token request) (nothing)))
+                  (frbe-node-or-absent (frbe-request-recipe request))
+                  (intern_trivial_string "request")
+                  (intern_trivial_string action)
+                  (intern_trivial_string signal)
+                  (intern_trivial_int attempt))))
+    (defn frbe-event-stage (event)
+        (node_value (nth (node_children event) 2)))
+    (defn frbe-event-action (event)
+        (node_value (nth (node_children event) 3)))
+    (defn frbe-trace-has? (trace action)
+        (if (eq (len trace) 0) 0
+            (if (str_eq (frbe-event-action (head trace)) action) 1
+                (frbe-trace-has? (tail trace) action))))
+    (defn frbe-trace-actions (trace)
+        (if (eq (len trace) 0) ""
+            (if (eq (len (tail trace)) 0)
+                (frbe-event-action (head trace))
+                (str_concat (frbe-event-action (head trace))
+                    (str_concat "," (frbe-trace-actions (tail trace)))))))
+    (defn frbe-request-ready-trace (request)
+        (list (frbe-request-event request "choice" "born-nodeid" 0)
+              (frbe-request-event request "cut" "one-addressed-recipe" 0)
+              (frbe-request-event request "release" "request-cursor" 0)))
+    (defn frbe-request-failure-trace (request reason)
+        (list (frbe-request-event request "choice" "born-nodeid" 0)
+              (frbe-request-event request "failure" reason 0)
+              (frbe-request-event request "undo" reason 0)
+              (frbe-request-event request "refine" "request-frame" 0)
+              (frbe-request-event request "cut" reason 0)
+              (frbe-request-event request "release" "request-cursor" 0)))
+    (defn frbe-request-timeout-trace (request reason)
+        (list (frbe-request-event request "choice" "born-nodeid" 0)
+              (frbe-request-event request "timeout" reason 0)
+              (frbe-request-event request "cut" reason 0)
+              (frbe-request-event request "undo" "partial-request" 0)
+              (frbe-request-event request "refine" "bounded-new-cursor" 0)
+              (frbe-request-event request "release" "request-cursor" 0)))
+    (defn frbe-request-trace (request)
+        (if (eq (frbe-request-ready? request) 1)
+            (frbe-request-ready-trace request)
+            (if (str_eq (frbe-request-state request) "timeout")
+                (frbe-request-timeout-trace request
+                    (frbe-request-reason request))
+                (frbe-request-failure-trace request
+                    (frbe-request-reason request)))))
+    (defn frbe-request-observation-node (request trace)
+        (intern_node (frbe-request-observation-category)
+            (append
+                (list
+                    (frbe-node-or-absent
+                        (if (eq (frbe-request-ready? request) 1)
+                            (frbe-request-token request) (nothing)))
+                    (frbe-node-or-absent (frbe-request-recipe request))
+                    (intern_trivial_string (frbe-request-state request))
+                    (intern_trivial_string (frbe-request-reason request))
+                    (intern_trivial_int (frbe-request-stream-bytes request))
+                    (intern_trivial_int 0)
+                    (intern_trivial_int 0))
+                trace)))
+
+    (defn frbe-parse-exec-payload (born-recipe payload stream-bytes)
+        (do
+            (let n (str_len payload))
+            (let s1 (str_find payload ";" 0))
+            (let s2 (if (lt s1 0) -1
+                (str_find payload ";" (add s1 1))))
+            (let s3 (if (lt s2 0) -1
+                (str_find payload ";" (add s2 1))))
+            (if (or (lt s1 0) (or (lt s2 0) (not (lt s3 0))))
+                (frbe-nothing-request "field-shape" born-recipe stream-bytes)
+                (do
+                    (let coordinate (substring payload 0 s1))
+                    (let input-field (substring payload (add s1 1) s2))
+                    (let carrier-field (substring payload (add s2 1) n))
+                    (if (not (eq (str_find input-field "input=" 0) 0))
+                        (frbe-nothing-request "input-field"
+                            born-recipe stream-bytes)
+                    (if (not (eq (str_find carrier-field "carrier=" 0) 0))
+                        (frbe-nothing-request "carrier-field"
+                            born-recipe stream-bytes)
+                        (do
+                            (let input-text (substring input-field 6
+                                (str_len input-field)))
+                            (let carrier (substring carrier-field 8
+                                (str_len carrier-field)))
+                            (let recipe (frbe-recipe-from-coordinate
+                                coordinate born-recipe))
+                            (if (nothing? recipe)
+                                (frbe-nothing-request "unknown-born-recipe"
+                                    born-recipe stream-bytes)
+                            (if (not (eq (frex-input-text? input-text) 1))
+                                (frbe-nothing-request "input-integer"
+                                    born-recipe stream-bytes)
+                            (if (not (eq (frex-carrier? carrier) 1))
+                                (frbe-nothing-request "carrier-choice"
+                                    born-recipe stream-bytes)
+                                (do
+                                    (let input (str_to_int input-text))
+                                    (frbe-request "ready" "ready" recipe
+                                        input carrier
+                                        (frbe-request-node recipe input carrier)
+                                        stream-bytes))))))))))))
+
+    (defn frbe-parse-exec-frame (born-recipe surface)
+        (do
+            (let bytes (str_len surface))
+            (if (not (eq (str_find surface (frex-open) 0) 0))
+                (frbe-nothing-request "no-recipe-token" born-recipe bytes)
+                (do
+                    (let close-at (str_find surface (frex-close)
+                        (str_len (frex-open))))
+                    (if (lt close-at 0)
+                        (frbe-nothing-request "held-incomplete"
+                            born-recipe bytes)
+                    (if (gt bytes (frex-max-frame-bytes))
+                        (frbe-timeout-request "frame-budget-exceeded"
+                            born-recipe bytes)
+                    (if (not (eq (add close-at (str_len (frex-close))) bytes))
+                        (frbe-nothing-request "trailing-bytes"
+                            born-recipe bytes)
+                        (frbe-parse-exec-payload born-recipe
+                            (substring surface (str_len (frex-open)) close-at)
+                            bytes))))))))
+    (defn frbe-request-observation (request)
+        (do
+            (let trace (frbe-request-trace request))
+            (list request
+                  (frbe-request-observation-node request trace)
+                  trace)))
+    (defn frbe-request-observation-request (o) (nth o 0))
+    (defn frbe-request-observation-token (o) (nth o 1))
+    (defn frbe-request-observation-trace (o) (nth o 2))
+
+    ; ── generated code and execution observations ───────────────────
+    (defn frbe-exec-event (request action signal attempt)
+        (intern_node (frbe-event-category)
+            (list (frbe-node-or-absent
+                        (if (eq (frbe-request-ready? request) 1)
+                            (frbe-request-token request) (nothing)))
+                  (frbe-node-or-absent (frbe-request-recipe request))
+                  (intern_trivial_string "execution")
+                  (intern_trivial_string action)
+                  (intern_trivial_string signal)
+                  (intern_trivial_int attempt))))
+    (defn frbe-exec-trace (request status reason)
+        (if (str_eq status "value")
+            (list (frbe-exec-event request "choice" "metal" 1)
+                  (frbe-exec-event request "crystallize" reason 1)
+                  (frbe-exec-event request "dissolve" "unselected" 1)
+                  (frbe-exec-event request "release" "execution-context" 1))
+        (if (str_eq status "nothing")
+            (list (frbe-exec-event request "choice" "metal" 1)
+                  (frbe-exec-event request "nothing" reason 1)
+                  (frbe-exec-event request "dissolve" "unselected" 1)
+                  (frbe-exec-event request "release" "execution-context" 1))
+        (if (str_eq status "timeout")
+            (list (frbe-exec-event request "choice" "metal" 1)
+                  (frbe-exec-event request "timeout" reason 1)
+                  (frbe-exec-event request "cut" reason 1)
+                  (frbe-exec-event request "undo" reason 1)
+                  (frbe-exec-event request "refine" "new-offer" 1)
+                  (frbe-exec-event request "release" "execution-context" 1))
+            (list (frbe-exec-event request "choice" "metal" 1)
+                  (frbe-exec-event request "failure" reason 1)
+                  (frbe-exec-event request "undo" reason 1)
+                  (frbe-exec-event request "refine" "new-offer" 1)
+                  (frbe-exec-event request "release" "execution-context" 1))))))
+
+    (defn frbe-code-observation-node (request code source-generated)
+        (intern_node (frbe-code-observation-category)
+            (list (frbe-node-or-absent
+                        (if (eq (frbe-request-ready? request) 1)
+                            (frbe-request-token request) (nothing)))
+                  (frbe-node-or-absent (frbe-request-recipe request))
+                  (frbe-node-or-absent code)
+                  (intern_trivial_int source-generated)
+                  (intern_trivial_int 0))))
+    (defn frbe-execution-node
+        (request request-observation code code-observation carrier status reason
+         value present stream-bytes source-generated native-generated executed
+         pipeline-created buffer-released wrote enqueued synced read-bytes trace)
+        (intern_node (frbe-execution-category)
+            (append
+                (list
+                    (frbe-node-or-absent
+                        (if (eq (frbe-request-ready? request) 1)
+                            (frbe-request-token request) (nothing)))
+                    request-observation
+                    (frbe-node-or-absent (frbe-request-recipe request))
+                    (frbe-node-or-absent code)
+                    code-observation
+                    (intern_trivial_string carrier)
+                    (intern_trivial_string status)
+                    (intern_trivial_string reason)
+                    (intern_trivial_int value)
+                    (intern_trivial_int present)
+                    (intern_trivial_int stream-bytes)
+                    (intern_trivial_int 0)
+                    (intern_trivial_int source-generated)
+                    (intern_trivial_int native-generated)
+                    (intern_trivial_int executed)
+                    (intern_trivial_int 0)
+                    (intern_trivial_int pipeline-created)
+                    (intern_trivial_int buffer-released)
+                    (intern_trivial_int wrote)
+                    (intern_trivial_int enqueued)
+                    (intern_trivial_int synced)
+                    (intern_trivial_int read-bytes))
+                trace)))
+    (defn frbe-execution-observation-node
+        (birth-observation request-observation code-observation execution
+         status reason value present trace)
+        (intern_node (frbe-execution-observation-category)
+            (append
+                (list birth-observation request-observation code-observation
+                      execution
+                      (intern_trivial_string status)
+                      (intern_trivial_string reason)
+                      (intern_trivial_int value)
+                      (intern_trivial_int present)
+                      (intern_trivial_int 0))
+                trace)))
+
+    ; result fields:
+    ; status reason request request-observation recipe code code-observation
+    ; execution execution-observation carrier value present stream-bytes
+    ; pretokenized source-generated native-generated executed model-executed
+    ; pipeline-created buffer-released wrote enqueued synced read-bytes trace
+    (defn frbe-result
+        (birth-observation request status reason carrier value present code
+         source-generated native-generated executed pipeline-created
+         buffer-released wrote enqueued synced read-bytes)
+        (do
+            (let request-observed (frbe-request-observation request))
+            (let request-observation
+                (frbe-request-observation-token request-observed))
+            (let code-observation
+                (frbe-code-observation-node request code source-generated))
+            (let trace (frbe-exec-trace request status reason))
+            (let execution (frbe-execution-node request request-observation
+                code code-observation carrier status reason value present
+                (frbe-request-stream-bytes request) source-generated
+                native-generated executed pipeline-created buffer-released
+                wrote enqueued synced read-bytes trace))
+            (let observation (frbe-execution-observation-node
+                birth-observation request-observation code-observation
+                execution status reason value present trace))
+            (list status reason request request-observation
+                  (frbe-node-or-absent (frbe-request-recipe request))
+                  (frbe-node-or-absent code) code-observation execution
+                  observation carrier value present
+                  (frbe-request-stream-bytes request) 0 source-generated
+                  native-generated executed 0 pipeline-created buffer-released
+                  wrote enqueued synced read-bytes trace)))
+    (defn frbe-result-status (r) (nth r 0))
+    (defn frbe-result-reason (r) (nth r 1))
+    (defn frbe-result-request (r) (nth r 2))
+    (defn frbe-result-request-observation (r) (nth r 3))
+    (defn frbe-result-recipe (r) (nth r 4))
+    (defn frbe-result-code (r) (nth r 5))
+    (defn frbe-result-code-observation (r) (nth r 6))
+    (defn frbe-result-execution (r) (nth r 7))
+    (defn frbe-result-observation (r) (nth r 8))
+    (defn frbe-result-carrier (r) (nth r 9))
+    (defn frbe-result-value (r) (nth r 10))
+    (defn frbe-result-value-present? (r) (nth r 11))
+    (defn frbe-result-stream-bytes (r) (nth r 12))
+    (defn frbe-result-pretokenized? (r) (nth r 13))
+    (defn frbe-result-source-generated? (r) (nth r 14))
+    (defn frbe-result-native-code-generated? (r) (nth r 15))
+    (defn frbe-result-executed? (r) (nth r 16))
+    (defn frbe-result-model-executed? (r) (nth r 17))
+    (defn frbe-result-pipeline-created? (r) (nth r 18))
+    (defn frbe-result-buffer-released? (r) (nth r 19))
+    (defn frbe-result-wrote-bytes (r) (nth r 20))
+    (defn frbe-result-enqueued (r) (nth r 21))
+    (defn frbe-result-synced (r) (nth r 22))
+    (defn frbe-result-read-bytes (r) (nth r 23))
+    (defn frbe-result-trace (r) (nth r 24))
+
+    (defn frbe-scripted-result
+        (birth-observation request status reason value present)
+        (do
+            (let code (if (eq (frbe-request-ready? request) 1)
+                (frexl-code-node (frbe-request-recipe request)) (nothing)))
+            (frbe-result birth-observation request status reason "metal"
+                value present code
+                (if (nothing? code) 0 1) 0 0 0 0 0 0 0 0)))
+
+    (defn frbe-status-timeout? (status)
+        (if (or (ge (str_find status "timeout" 0) 0)
+                (ge (str_find status "timed out" 0) 0)) 1 0))
+    (defn frbe-failure-status ()
+        (if (eq (frbe-status-timeout? (metal_status)) 1)
+            "timeout" "failure"))
+    (defn frbe-nonexecution-result
+        (birth-observation request status reason)
+        (frbe-result birth-observation request status reason "metal" 0 0
+            (nothing) 0 0 0 0 0 0 0 0 0))
+
+    ; This is the only effectful definition in this source. It is dormant until
+    ; a live driver calls it after a model-authored, born-NodeID request.
+    (defn frbe-execute-request (birth-observation request)
+        (if (not (eq (frbe-request-ready? request) 1))
+            (frbe-nonexecution-result birth-observation request
+                (if (str_eq (frbe-request-state request) "timeout")
+                    "timeout" "nothing")
+                (frbe-request-reason request))
+        (if (not (or (str_eq (frbe-request-carrier request) "auto")
+                     (str_eq (frbe-request-carrier request) "metal")))
+            (frbe-nonexecution-result birth-observation request
+                "nothing" "metal-not-requested")
+        (if (not (eq (frexl-i32? (frbe-request-input request)) 1))
+            (frbe-nonexecution-result birth-observation request
+                "nothing" "input-outside-i32")
+        (if (not (md-door-live?))
+            (frbe-nonexecution-result birth-observation request
+                "nothing" "metal-unavailable")
+            (do
+                (let recipe (frbe-request-recipe request))
+                (let source (frexl-msl recipe))
+                (let code (frexl-code-node recipe))
+                (let buffer (metal_buf_alloc 4))
+                (if (le buffer 0)
+                    (frbe-result birth-observation request
+                        (frbe-failure-status) "buffer-allocation-failure"
+                        "metal" 0 0 code 1 0 0 0 0 0 0 0 0)
+                    (do
+                        (let wrote (metal_buf_write buffer 0
+                            (frexl-i32-bytes (frbe-request-input request))))
+                        (if (not (eq wrote 4))
+                            (do
+                                (let released (metal_buf_free buffer))
+                                (frbe-result birth-observation request
+                                    (frbe-failure-status)
+                                    "buffer-write-failure" "metal" 0 0 code
+                                    1 0 0 0 (if (eq released 1) 1 0)
+                                    wrote 0 0 0))
+                            (do
+                                (let pipeline (metal_pipeline source
+                                    (frexl-kernel-name)))
+                                (if (le pipeline 0)
+                                    (do
+                                        (let released (metal_buf_free buffer))
+                                        (frbe-result birth-observation request
+                                            (frbe-failure-status)
+                                            "compile-failure" "metal" 0 0 code
+                                            1 0 0 0
+                                            (if (eq released 1) 1 0)
+                                            wrote 0 0 0))
+                                    (do
+                                        (let enqueued (metal_enqueue pipeline
+                                            (md-bind (list buffer) (empty)) 1))
+                                        (if (not (eq enqueued 1))
+                                            (do
+                                                (let released
+                                                    (metal_buf_free buffer))
+                                                (frbe-result birth-observation
+                                                    request
+                                                    (frbe-failure-status)
+                                                    "enqueue-failure" "metal"
+                                                    0 0 code 1 1 0 1
+                                                    (if (eq released 1) 1 0)
+                                                    wrote enqueued 0 0))
+                                            (do
+                                                (let synced (metal_sync))
+                                                (if (not (eq synced 1))
+                                                    (do
+                                                        (let released
+                                                            (metal_buf_free
+                                                                buffer))
+                                                        (frbe-result
+                                                            birth-observation
+                                                            request
+                                                            (frbe-failure-status)
+                                                            "sync-failure"
+                                                            "metal" 0 0 code
+                                                            1 1 0 1
+                                                            (if (eq released 1)
+                                                                1 0)
+                                                            wrote enqueued
+                                                            synced 0))
+                                                    (do
+                                                        (let bytes
+                                                            (metal_buf_read
+                                                                buffer 0 4))
+                                                        (let read-bytes
+                                                            (str_len bytes))
+                                                        (let value
+                                                            (if (eq read-bytes 4)
+                                                                (frexl-i32-at
+                                                                    bytes 0) 0))
+                                                        (let released
+                                                            (metal_buf_free
+                                                                buffer))
+                                                        (let expected
+                                                            (frexl-recipe-expected
+                                                                recipe
+                                                                (frbe-request-input
+                                                                    request)))
+                                                        (if (not
+                                                                (eq read-bytes
+                                                                    4))
+                                                            (frbe-result
+                                                                birth-observation
+                                                                request
+                                                                "failure"
+                                                                "read-failure"
+                                                                "metal" 0 0 code
+                                                                1 1 1 1
+                                                                (if (eq released
+                                                                        1) 1 0)
+                                                                wrote enqueued
+                                                                synced
+                                                                read-bytes)
+                                                        (if (not
+                                                                (eq released 1))
+                                                            (frbe-result
+                                                                birth-observation
+                                                                request
+                                                                "failure"
+                                                                "buffer-release-failure"
+                                                                "metal" value 1
+                                                                code 1 1 1 1 0
+                                                                wrote enqueued
+                                                                synced
+                                                                read-bytes)
+                                                        (if (not
+                                                                (eq value
+                                                                    expected))
+                                                            (frbe-result
+                                                                birth-observation
+                                                                request
+                                                                "failure"
+                                                                "value-mismatch"
+                                                                "metal" value 1
+                                                                code 1 1 1 1 1
+                                                                wrote enqueued
+                                                                synced
+                                                                read-bytes)
+                                                            (frbe-result
+                                                                birth-observation
+                                                                request
+                                                                "value"
+                                                                "metal-value"
+                                                                "metal" value 1
+                                                                code 1 1 1 1 1
+                                                                wrote enqueued
+                                                                synced
+                                                                read-bytes))))))))))))))))))))
+
+    ; ── bounded execution observation rendering ─────────────────────
+    (defn frbe-observation-open ()
+        "<|form:born-recipe-execution-observation|>")
+    (defn frbe-observation-close ()
+        "<|/form:born-recipe-execution-observation|>")
+    (defn frbe-max-render-bytes () 1536)
+    (defn frbe-cat (parts)
+        (if (eq (len parts) 0) ""
+            (str_concat (head parts) (frbe-cat (tail parts)))))
+    (defn frbe-result-render (birth-observation result)
+        (do
+            (let request (frbe-result-request result))
+            (let rendered (frbe-cat (list
+                (frbe-observation-open)
+                "\nstatus=" (frbe-result-status result)
+                "\nreason=" (frbe-result-reason result)
+                "\nbirth-observation-node=@" (frbt-node-key birth-observation)
+                "\nrecipe-node=@" (frex-node-key (frbe-result-recipe result))
+                "\nrequest-node=@" (frex-node-key
+                    (frbe-node-or-absent
+                        (if (eq (frbe-request-ready? request) 1)
+                            (frbe-request-token request) (nothing))))
+                "\nrequest-observation-node=@" (frex-node-key
+                    (frbe-result-request-observation result))
+                "\ncode-node=@" (frex-node-key (frbe-result-code result))
+                "\ncode-observation-node=@" (frex-node-key
+                    (frbe-result-code-observation result))
+                "\nexecution-node=@" (frex-node-key
+                    (frbe-result-execution result))
+                "\nexecution-observation-node=@" (frex-node-key
+                    (frbe-result-observation result))
+                "\ncarrier=" (frbe-result-carrier result)
+                "\nvalue-present=" (int_to_str
+                    (frbe-result-value-present? result))
+                "\nvalue=" (if (eq (frbe-result-value-present? result) 1)
+                    (int_to_str (frbe-result-value result)) "absent")
+                "\npretokenized=" (int_to_str
+                    (frbe-result-pretokenized? result))
+                "\nscannerless=" (int_to_str (frbe-scannerless?))
+                "\nsource-generated=" (int_to_str
+                    (frbe-result-source-generated? result))
+                "\nnative-code-generated=" (int_to_str
+                    (frbe-result-native-code-generated? result))
+                "\nexecuted=" (int_to_str (frbe-result-executed? result))
+                "\nmodel-executed=" (int_to_str
+                    (frbe-result-model-executed? result))
+                "\nbuffer-released=" (int_to_str
+                    (frbe-result-buffer-released? result))
+                "\nlifecycle=" (frbe-trace-actions
+                    (frbe-result-trace result))
+                "\n" (frbe-observation-close))))
+            (if (le (str_len rendered) (frbe-max-render-bytes)) rendered "")))
+
+    ; ── one resident model/KV movement ───────────────────────────────
+    ; movement fields:
+    ; session phase birth-cursor exec-cursor birth-observation request result
+    ; birth-model invoke-model answer-model birth-injected exec-injected
+    ; birth-ids invoke-ids answer-ids
+    (defn frbe-movement
+        (session phase birth-cursor exec-cursor birth-observation request result
+         birth-model invoke-model answer-model birth-injected exec-injected
+         birth-ids invoke-ids answer-ids)
+        (list "form-cli-resident-recipe-birth-exec-v1" session phase
+              birth-cursor exec-cursor birth-observation request result
+              birth-model invoke-model answer-model birth-injected exec-injected
+              birth-ids invoke-ids answer-ids))
+    (defn frbe-movement-session (r) (nth r 1))
+    (defn frbe-movement-phase (r) (nth r 2))
+    (defn frbe-movement-birth-cursor (r) (nth r 3))
+    (defn frbe-movement-exec-cursor (r) (nth r 4))
+    (defn frbe-movement-birth-observation (r) (nth r 5))
+    (defn frbe-movement-request (r) (nth r 6))
+    (defn frbe-movement-result (r) (nth r 7))
+    (defn frbe-movement-birth-model (r) (nth r 8))
+    (defn frbe-movement-invoke-model (r) (nth r 9))
+    (defn frbe-movement-answer-model (r) (nth r 10))
+    (defn frbe-movement-birth-injected (r) (nth r 11))
+    (defn frbe-movement-exec-injected (r) (nth r 12))
+    (defn frbe-movement-birth-ids (r) (nth r 13))
+    (defn frbe-movement-invoke-ids (r) (nth r 14))
+    (defn frbe-movement-answer-ids (r) (nth r 15))
+    (defn frbe-movement-model-bytes (r)
+        (add (str_len (frbe-movement-birth-model r))
+        (add (str_len (frbe-movement-invoke-model r))
+             (str_len (frbe-movement-answer-model r)))))
+    (defn frbe-movement-injected-bytes (r)
+        (add (str_len (frbe-movement-birth-injected r))
+             (str_len (frbe-movement-exec-injected r))))
+    (defn frbe-movement-crossings (r)
+        (add (if (gt (str_len (frbe-movement-birth-injected r)) 0) 1 0)
+             (if (gt (str_len (frbe-movement-exec-injected r)) 0) 1 0)))
+
+    (defn frbe-finish
+        (s phase bc ec bo request result birth invoke answer bi ei bids iids aids)
+        (frbe-movement s phase bc ec bo request result birth invoke answer
+            bi ei bids iids aids))
+
+    (defn frbe-walk
+        (s phase bc ec bo recipe request result id pos left stops
+         birth invoke answer bi ei bids iids aids)
+        (if (le left 0)
+            (frbe-finish s phase bc ec bo request result birth invoke answer
+                bi ei bids iids aids)
+        (if (lt id 0)
+            (frbe-finish
+                (frxs-fail s "model-forward-refused" pos -1 1 0)
+                phase bc ec bo request result birth invoke answer
+                bi ei bids iids aids)
+        (if (eq (q38-stop? id stops) 1)
+            (frbe-finish (frxs-with-generated s pos id 1 0)
+                phase bc ec bo request result birth invoke answer
+                bi ei bids iids aids)
+        (if (ge pos (fcms-maxpos s))
+            (frbe-finish
+                (frxs-fail s "session-position-refused" pos id 0 0)
+                phase bc ec bo request result birth invoke answer
+                bi ei bids iids aids)
+            (do
+                (let chunk (tkz-decode-text (fcms-src s) (list id)))
+                (let birth2 (if (eq phase 0) (str_concat birth chunk) birth))
+                (let invoke2 (if (eq phase 1) (str_concat invoke chunk) invoke))
+                (let answer2 (if (ge phase 2) (str_concat answer chunk) answer))
+                (let bids2 (if (eq phase 0) (append bids (list id)) bids))
+                (let iids2 (if (eq phase 1) (append iids (list id)) iids))
+                (let aids2 (if (ge phase 2) (append aids (list id)) aids))
+                (let bc2 (if (eq phase 0)
+                    (frbe-birth-frame-feed bc chunk) bc))
+                (let ec2 (if (eq phase 1)
+                    (frbe-exec-frame-feed ec chunk) ec))
+                (let spoken (frxs-with-generated s pos id 0 1))
+                (if (and (eq phase 0)
+                        (not (eq (frbe-frame-open? bc2) 1)))
+                    (do
+                        (let born (frbe-birth-from-frame
+                            (frbe-frame-value bc2)))
+                        (let born-result (frbe-birth-result born))
+                        (let born-observation
+                            (frbt-observation-token
+                                (frbe-birth-observation born)))
+                        (let injected (frbe-birth-rendered born))
+                        (let resumed (fcms-observe spoken injected))
+                        (let next-phase (if (str_eq
+                            (frbt-result-status born-result) "ready") 1 3))
+                        (let next-recipe (if (eq next-phase 1)
+                            (frbt-result-recipe born-result) (nothing)))
+                        (if (not (eq (fcms-live? resumed) 1))
+                            (frbe-finish resumed next-phase bc2 ec
+                                born-observation request result
+                                birth2 invoke2 answer2 injected ei
+                                bids2 iids2 aids2)
+                            (frbe-walk resumed next-phase bc2 ec
+                                born-observation next-recipe request result
+                                (fcms-pending resumed) (fcms-pos resumed)
+                                (sub left 1) stops birth2 invoke2 answer2
+                                injected ei bids2 iids2 aids2)))
+                (if (and (eq phase 1)
+                        (not (eq (frbe-frame-open? ec2) 1)))
+                    (do
+                        (let requested (if (str_eq
+                                (frbe-frame-terminal ec2) "timeout")
+                            (frbe-timeout-request "frame-budget-exceeded"
+                                recipe (str_len (frbe-frame-value ec2)))
+                            (frbe-parse-exec-frame recipe
+                                (frbe-frame-value ec2))))
+                        (let executed (frbe-execute-request bo requested))
+                        (let injected (frbe-result-render bo executed))
+                        (let resumed (fcms-observe spoken injected))
+                        (if (not (eq (fcms-live? resumed) 1))
+                            (frbe-finish resumed 2 bc ec2 bo requested executed
+                                birth2 invoke2 answer2 bi injected
+                                bids2 iids2 aids2)
+                            (frbe-walk resumed 2 bc ec2 bo recipe requested
+                                executed (fcms-pending resumed)
+                                (fcms-pos resumed) (sub left 1) stops
+                                birth2 invoke2 answer2 bi injected
+                                bids2 iids2 aids2)))
+                    (if (eq left 1)
+                        (frbe-finish spoken phase bc2 ec2 bo request result
+                            birth2 invoke2 answer2 bi ei bids2 iids2 aids2)
+                        (do
+                            (let next-id (frxs-forward spoken id pos))
+                            (let next (frxs-with-generated spoken (add pos 1)
+                                next-id
+                                (if (or (lt next-id 0)
+                                        (eq (q38-stop? next-id stops) 1)) 1 0)
+                                0))
+                            (frbe-walk next phase bc2 ec2 bo recipe request result
+                                next-id (add pos 1) (sub left 1) stops
+                                birth2 invoke2 answer2 bi ei
+                                bids2 iids2 aids2)))))))))))
+
+    (defn frbe-run (session max-generated)
+        (if (or (not (eq (fcms-live? session) 1))
+                (le max-generated 0))
+            (frbe-movement session 0 (frbe-frame-fresh)
+                (frbe-frame-fresh) (frbe-absent)
+                (frbe-nothing-request "unrequested" (nothing) 0)
+                (nothing) "" "" "" "" "" (empty) (empty) (empty))
+            (frbe-walk session 0 (frbe-frame-fresh) (frbe-frame-fresh)
+                (frbe-absent) (nothing)
+                (frbe-nothing-request "unrequested" (nothing) 0)
+                (nothing) (fcms-pending session) (fcms-pos session)
+                max-generated (fcmg-q35-stops (fcms-src session))
+                "" "" "" "" "" (empty) (empty) (empty))))
+
+    0)
