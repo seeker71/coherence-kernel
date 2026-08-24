@@ -113,3 +113,16 @@ bandwidth probes could never have said.
 ; prefill 9.34->11.03, effective 246->294 GB/s, unique-byte stream 492.7,
 ; bands qwen35 131071 / kat 262143 / llama 255 / dense-family 1023,
 ; form-cli regenerated, text unchanged
+
+## AMENDED 2026-08-24 (sibling correction 0e3e58b6)
+
+Every number in this receipt was measured while q38-rms dispatched the
+cooperative kernel whose threadgroup scratch is sq[4096] at model width
+5120 — past its declared radius, undefined behavior that happened to
+answer identically. Those figures are execution evidence, not defined
+correctness. With the bound applied on this branch (cooperative only at
+n<=4096; serial attestant above), the corrected live rates are prefill
+6.27 tok/s and decode 4.54 tok/s — slower and defined. The
+width-independent cooperative RMS (simd tree, no sq[n] scratch, additive
+kernel like the GQA repair above) is the named next stone.
+
