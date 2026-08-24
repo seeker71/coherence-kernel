@@ -1,0 +1,160 @@
+; form-cli-heed-grounded.fk — a knowledge substrate for the heed cursor, over the
+; nodeid-rag-v2 grounded index this checkout already holds.
+;
+; WHAT IT IS. The cursor's lookupf contract is (ctx surface local-ready) ->
+; (list status span reason) and nothing else. This cell parses the envelope the
+; cursor hands it, performs AT MOST ONE grounded retrieval, and renders a typed
+; observation. It is the adapter the live floor has been one wide since morning.
+;
+; THE CUCKOOMARK IS SANITIZED HERE, NOT LATER. A retrieved answer is a slice of
+; somebody's source and the corpus is this repository, so the slice can contain
+; the very marks that frame it. A slice carrying the observation close mark would
+; forge a premature end, and everything after it would read to the model as
+; though it were outside the observation — the reader doing the forging,
+; faithfully. Every mark of either family found inside retrieved content is
+; replaced with NeutralMark BEFORE rendering, and the substitution COUNT is
+; reported as marks-neutralized. Sanitizing in silence would be its own
+; dishonesty: a witness has to be able to see that the body altered what it
+; quotes.
+;
+; ANCHOR FIRST, PATH SECOND. The observation leads with the NodeID that fixes
+; WHICH cell answered, and only then says where a copy of it was found today. A
+; reader that leads with the path binds to a location; a reader that leads with
+; the anchor binds to the meaning and survives the file moving.
+;
+; NO LOGIT EXECUTED THIS. The model emitted bytes; the cursor recognized a frame;
+; this cell did the retrieval. model-executed is 0 in every rendering.
+;
+; BOUNDS. One complete envelope causes at most one retrieval. Query at most
+; MaxQueryBytes; answer clipped to 768 and the clipping REPORTED; source path
+; clipped to 192 and reported. An unparseable, empty, nested or over-long frame
+; returns `nothing` with a named reason and performs no retrieval at all.
+;
+; PRELUDE ORDER IS LOAD-BEARING — str-byte-at before sha256, and the retrieval
+; chain before this cell — or the chain reports a lane seam and every field
+; below is a fold over nothing.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
+; preludes: form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
+; preludes: form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk form-stdlib/rag-ask.fk
+; preludes: form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk
+;
+; Proven by: form-stdlib/tests/form-cli-heed-grounded-band.fk
+
+(do
+    (defn fhg-max-answer () 768)
+    (defn fhg-max-source () 192)
+
+    ; ── bounded parse of the frame the cursor hands over ───────────────────
+    ; The cursor guarantees a surface that opens with HeedOpen and ends with
+    ; HeedClose. What is still open to abuse is what lies BETWEEN them.
+    (defn fhg-query-of (surface)
+        (do (let o (str_len (HeedOpen)))
+            (let c (sub (str_len surface) (str_len (HeedClose))))
+            (if (le c o) "" (substring surface o c))))
+
+    (defn fhg-parse-reason (surface)
+        (if (not (eq (str_find surface (HeedOpen) 0) 0)) "no-query-token"
+            (do (let q (fhg-query-of surface))
+                (if (eq (str_len q) 0) "empty-query"
+                    (if (ge (str_find q (HeedOpen) 0) 0) "nested-query-token"
+                        (if (gt (str_len q) (MaxQueryBytes)) "query-budget-exceeded"
+                            "ready"))))))
+
+    ; ── the sanitizer ──────────────────────────────────────────────────────
+    (defn fhg-replace-all (s needle repl)
+        (do (let i (str_find s needle 0))
+            (if (lt i 0) s
+                (str_concat (substring s 0 i)
+                    (str_concat repl
+                        (fhg-replace-all
+                            (substring s (add i (str_len needle)) (str_len s))
+                            needle repl))))))
+
+    (defn fhg-count-occ (s needle acc)
+        (do (let i (str_find s needle 0))
+            (if (lt i 0) acc
+                (fhg-count-occ (substring s (add i (str_len needle)) (str_len s))
+                    needle (add acc 1)))))
+
+    (defn fhg-marks () (list (ObsClose) (ObsOpen) (HeedClose) (HeedOpen)))
+
+    (defn fhg-mark-count (s marks acc)
+        (if (eq (len marks) 0) acc
+            (fhg-mark-count s (tail marks) (add acc (fhg-count-occ s (head marks) 0)))))
+    (defn fhg-marks-in (s) (fhg-mark-count s (fhg-marks) 0))
+
+    (defn fhg-scrub-loop (s marks)
+        (if (eq (len marks) 0) s
+            (fhg-scrub-loop (fhg-replace-all s (head marks) (NeutralMark)) (tail marks))))
+    (defn fhg-scrub (s) (fhg-scrub-loop s (fhg-marks)))
+
+    ; ── bounded rendering, anchor first ────────────────────────────────────
+    (defn fhg-clip (s n) (if (le (str_len s) n) s (substring s 0 n)))
+    (defn fhg-cut? (s n) (if (gt (str_len s) n) 1 0))
+    (defn fhg-cat (parts)
+        (if (eq (len parts) 0) "" (str_concat (head parts) (fhg-cat (tail parts)))))
+
+    (defn fhg-render (status reason anchor content-anchor path key answer-key
+                      raw-answer score confidence)
+        (do
+            (let clipped (fhg-clip raw-answer (fhg-max-answer)))
+            (let neutralized (fhg-marks-in clipped))
+            (let answer (fhg-scrub clipped))
+            (let src (fhg-clip path (fhg-max-source)))
+            (fhg-cat (list
+                (ObsOpen)
+                "\nstatus=" status
+                "\nreason=" reason
+                "\nanchor=" anchor
+                "\ncontent-anchor=" content-anchor
+                "\nprovenance-schema=nodeid-rag-v2"
+                "\nsource-path=" src
+                "\nsource-key=" key
+                "\nanswer-key=" answer-key
+                "\nretrieval-score=" (int_to_str score)
+                "\nretrieval-confidence=" (int_to_str confidence)
+                "\nmodel-executed=0"
+                "\nlookup-count=1"
+                "\nmarks-neutralized=" (int_to_str neutralized)
+                "\nanswer-truncated=" (int_to_str (fhg-cut? raw-answer (fhg-max-answer)))
+                "\nsource-truncated=" (int_to_str (fhg-cut? path (fhg-max-source)))
+                "\nanswer-byte-length=" (int_to_str (str_len answer))
+                "\nanswer:" answer
+                "\n" (ObsClose)))))
+
+    (defn fhg-miss-span (reason)
+        (fhg-render "miss" reason "" "" "" "" "" "" 0 0))
+
+    ; A hit must resolve, be sufficient, and carry a valid anchor. Anything less
+    ; is a miss — a body that cannot name which cell answered has not answered.
+    (defn fhg-admissible? (hit)
+        (if (and (eq (ra-hit? hit) 1)
+                 (and (eq (ra-hit-resolves? hit) 1)
+                      (and (eq (ra-hit-sufficient? hit) 1)
+                           (gt (str_len (ra-hit-node-id hit)) 0)))) 1 0))
+
+    (defn fhg-of-hit (hit)
+        (if (eq (fhg-admissible? hit) 0)
+            (list "miss" (fhg-miss-span "grounded-miss") "grounded-miss")
+            (list "hit"
+                (fhg-render "hit" "grounded-hit"
+                    (ra-hit-node-id hit) (ra-hit-content-node-id hit)
+                    (ra-hit-source-path hit) (ra-hit-key hit) (ra-hit-answer-key hit)
+                    (ra-hit-answer hit) (ra-hit-score hit) (ra-hit-confidence hit))
+                "grounded-hit")))
+
+    ; ── the cursor's lookupf ───────────────────────────────────────────────
+    ; Parsing completes before any index IO begins.
+    (defn fhg-lookup-at (index-path ctx surface local-ready)
+        (do (let reason (fhg-parse-reason surface))
+            (if (not (str_eq reason "ready"))
+                (list "nothing" "" reason)
+                (fhg-of-hit (ra-grounded-hit-at index-path (fhg-query-of surface))))))
+
+    (defn fhg-lookup (ctx surface local-ready)
+        (fhg-lookup-at (ra-default-index) ctx surface local-ready))
+
+    (defn fhg-model-executed () 0)
+
+    0)
