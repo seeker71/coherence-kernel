@@ -1,0 +1,143 @@
+; qwen38-bmf-live-reuse-run.fk — diagnostic resident BMF continuation with
+; double-spending removed by cutting, avoiding, and reusing (2026-08-24).
+;
+; HONEST PROMPT SEAM: this driver calls qsx-chat-ids directly. The baseline
+; enters through fcmg-generate-with and, while ftl-armed? is on, carries the
+; Form teaching-layer system turn. Therefore these two drivers do not yet
+; encode the same prompt. The live timings and reuse mechanism are observed;
+; like-for-like speed and behavior comparisons wait on a resident entry that
+; preserves fcmg-chat-ids-profile exactly.
+;
+;   REUSE  the ids the model itself emitted — q38-generate returns ids;
+;          the baseline detokenized them to text and re-encoded that text
+;          (measured 181,052 ms for what 0 ms of reuse replaces).
+;   REUSE  the KV/stream state across turns — one state, positions continue;
+;          turn 1 is never re-prefilled.
+;   AVOID  the second seal and second open — one admission, one residence
+;          sized for the conversation (maxpos 900), not the first prompt.
+;   CUT    the tokenizer down to the only genuinely new bytes each turn:
+;          prompt 1 once, then the feedback line (~29 tokens, ~3 s).
+;
+; The seedslip seam is handled explicitly: a turn that ended on the stop id
+; consumed every kept id (the stop itself was emitted, never consumed — the
+; delta begins by feeding it); a turn that ended on the count cap leaves its
+; last kept id unconsumed — the delta begins with that id. Positions follow.
+;
+; The grammar path is unchanged: raw bytes through the scannerless cursor;
+; no tokenizer shapes or constrains the grammar.
+;
+; preludes: observe/qwen38-bmf-mechanism.fk
+
+(do
+    (defn qbr-last (xs) (nth xs (sub (len xs) 1)))
+    (defn qbr-turn1-cap () 220)
+    (defn qbr-turn2-cap () 120)
+
+    (let t0 (now_unix_ms))
+    (let path (qbl-path))
+    (let sealv (qaf-seal-verdict path))
+    (let x (qsx-load path))
+    (let src (eqr-of-file path 0 40000000))
+    (let t-adm (now_unix_ms))
+    (let s0 (qbl-say (str_concat "admission_ms=" (str_concat (int_to_str (sub t-adm t0))
+        (str_concat " seal_verdict=" (str_concat (int_to_str sealv)
+        (str_concat " crystal=" (int_to_str (nth x 0)))))))))
+
+    (let ids1 (qsx-chat-ids src (qbl-prompt1) x))
+    (let t-enc1 (now_unix_ms))
+    (let s1 (qbl-say (str_concat "encode_prompt1_ms=" (str_concat (int_to_str (sub t-enc1 t-adm))
+        (str_concat " prompt1_tokens=" (int_to_str (len ids1)))))))
+
+    (let ctx (qsx-open path 900 x))
+    (let ps (nth ctx 0)) (let bs (nth ctx 1)) (let geo (nth ctx 2)) (let lays (nth ctx 3))
+    (let embTv (nth ctx 4)) (let onormTv (nth ctx 5)) (let projTv (nth ctx 6))
+    (let sts (q38-new-state geo))
+    (let stops (list (gmt-u32 src "tokenizer.ggml.eos_token_id") (qsx-ime x)))
+    (let t-open (now_unix_ms))
+    (let s2 (qbl-say (str_concat "open_ms=" (str_concat (int_to_str (sub t-open t-enc1))
+        (str_concat " maxpos=900 ctx_ok=" (int_to_str (q38-context-ok? ctx)))))))
+
+    ; ---- turn 1: prefill the prompt once, generate, KEEP THE IDS -----------
+    (let pf1 (q38-prefill ps bs geo lays sts embTv onormTv projTv ids1 0))
+    (let first1 (nth pf1 0))
+    (let pos1 (nth pf1 1))
+    (let rest1 (if (if (lt first1 0) 1 (q38-stop? first1 stops)) (empty)
+                   (q38-generate ps bs geo lays sts embTv onormTv projTv
+                                 first1 pos1 (sub (qbr-turn1-cap) 1) stops (empty))))
+    (let out1 (if (if (lt first1 0) 1 (q38-stop? first1 stops)) (empty)
+                  (cons first1 rest1)))
+    (let text1 (tkz-decode-text src out1))
+    (let t1 (now_unix_ms))
+    (let s3 (qbl-say "=== turn 1: the model's grammar, verbatim ==="))
+    (let s4 (qbl-say text1))
+    (let s5 (qbl-say (str_concat "turn1_ms=" (str_concat (int_to_str (sub t1 t-open))
+        (str_concat " out_tokens=" (int_to_str (len out1)))))))
+
+    ; ---- the grammar path: raw bytes, no tokenizer -------------------------
+    (let low1 (qbl-lower text1))
+    (let m1 (if (str_eq (nth low1 0) "ok")
+                (qbl-run-match (nth low1 1) (nth low1 2) (nth low1 3) 500)
+                (list (nothing) (list 500 0 0 0))))
+    (let fb1 (qbl-feedback low1 m1))
+    (let s6 (qbl-say (str_concat "[feedback->model] " fb1)))
+
+    ; ---- turn 2: DELTA ids only, continuing the same state -----------------
+    (let stop-ended (lt (len out1) (qbr-turn1-cap)))
+    (let pos2 (if stop-ended (add pos1 (len out1)) (add pos1 (sub (len out1) 1))))
+    (let fb-ids (q35-encode src fb1))
+    (let t-enc2 (now_unix_ms))
+    (let delta
+        (tkz-cat (if stop-ended (empty) (list (qbr-last out1)))
+        (tkz-cat (list (nth x 2))
+        (tkz-cat (nth x 6)
+        (tkz-cat (list (nth x 1))
+        (tkz-cat (nth x 5)
+        (tkz-cat fb-ids
+        (tkz-cat (list (nth x 2))
+        (tkz-cat (nth x 6)
+        (tkz-cat (list (nth x 1))
+        (tkz-cat (nth x 7)
+        (tkz-cat (list (nth x 3))
+        (tkz-cat (nth x 8)
+        (tkz-cat (list (nth x 4)) (nth x 8)))))))))))))))
+    (let s7 (qbl-say (str_concat "encode_feedback_ms=" (str_concat (int_to_str (sub t-enc2 t1))
+        (str_concat " new_tokens=" (str_concat (int_to_str (len fb-ids))
+        (str_concat " reused_ids=" (str_concat (int_to_str (len out1))
+        (str_concat " delta_tokens=" (str_concat (int_to_str (len delta))
+        (str_concat " continue_at_pos=" (int_to_str pos2))))))))))))
+
+    (let pf2 (q38-prefill ps bs geo lays sts embTv onormTv projTv delta pos2))
+    (let first2 (nth pf2 0))
+    (let pos3 (nth pf2 1))
+    (let rest2 (if (if (lt first2 0) 1 (q38-stop? first2 stops)) (empty)
+                   (q38-generate ps bs geo lays sts embTv onormTv projTv
+                                 first2 pos3 (sub (qbr-turn2-cap) 1) stops (empty))))
+    (let out2 (if (if (lt first2 0) 1 (q38-stop? first2 stops)) (empty)
+                  (cons first2 rest2)))
+    (let text2 (tkz-decode-text src out2))
+    (let t2 (now_unix_ms))
+    (let s8 (qbl-say "=== turn 2: the model's reply, verbatim ==="))
+    (let s9 (qbl-say text2))
+    (let s10 (qbl-say (str_concat "turn2_ms=" (str_concat (int_to_str (sub t2 t-enc2))
+        (str_concat " out_tokens=" (int_to_str (len out2)))))))
+
+    ; ---- score and close ----------------------------------------------------
+    (let abstained (if (ge (str_find text2 "abstain" 0) 0) 1 0))
+    (let low2 (if (eq abstained 1) (list "abstained" (empty) "" "") (qbl-lower text2)))
+    (let m2 (if (str_eq (nth low2 0) "ok")
+                (qbl-run-match (nth low2 1) (nth low2 2) (nth low2 3) 500)
+                (list (nothing) (list 500 0 0 0))))
+    (let closed (if (eq (q38-close ctx sts) (q38-close-expected ctx sts)) 1 0))
+    (let s11 (qbl-say "=== scored observation (not a law) ==="))
+    (let s12 (qbl-say (str_concat "S1_turn1_lowered="
+        (if (str_eq (nth low1 0) "ok") "1" (nth low1 0)))))
+    (let s13 (qbl-say (str_concat "S2_turn1_verdict=" (qbl-verdict-str (nth m1 0)))))
+    (let s14 (qbl-say (str_concat "S3_turn2="
+        (if (eq abstained 1) "abstain"
+            (if (str_eq (nth low2 0) "ok")
+                (str_concat "corrected_verdict=" (qbl-verdict-str (nth m2 0)))
+                (nth low2 0))))))
+    (let s15 (qbl-say (str_concat "S4_all_handles_released=" (int_to_str closed))))
+    (let s16 (qbl-say (str_concat "total_ms=" (str_concat (int_to_str (sub t2 t0))
+        " (spend baseline was 595608)"))))
+    0)

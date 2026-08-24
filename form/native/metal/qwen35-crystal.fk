@@ -1,0 +1,220 @@
+; qwen35-crystal.fk — pre-crystallized open: the long chain's derived integers,
+; frozen once, keyed by the artifact's content seal.
+;
+; Measured 2026-08-24 (open-cost-probe, open-split): a fresh generate paid
+; 16.3 s of open (7.1 s q38-tabs, 15.0 s layer tv derivation, 1.1 s three
+; head-tensor scans), 7.0 s of tokenizer (four full-vocab special-id scans and
+; five constant scaffold encodes), and 0.7 s of required-size — ~25 s of walker
+; re-deriving integers that cannot change while the seal holds. This cell uses
+; the observed crystallize-on-heat relation (jit-decision.fk) one level up: the
+; recipe here is not a function's asm but an OPEN's derived table. Both doors:
+;   pre  — observe/qwen38-precrystallize-run.fk freezes ahead of any ask;
+;   heat — fcmg-fresh freezes on the first ask that finds no crystal
+; (this recipe's one firing costs seconds, so the crystallize threshold is 1
+; where jd-crystallize? asks 5 of a cheap one; same relation, heat priced in ms).
+; Either way every later open walks the sealed sequential recording, not the header.
+;
+; The key is the .form-seal line (content hash), never mtime — the .fkb cache
+; taught that lesson (an edit inside one second was invisible). A crystal
+; whose key line differs from the live seal is dead ice: ignored, refrozen.
+;
+; Nothing here is trusted unfrozen: tests/qwen35-crystal-band.fk re-derives
+; the scan path and demands row-for-row equality plus the same first token
+; from both opens.
+;
+; preludes: native/metal/qwen35-dense-token-handle.fk form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-artifact-fetch.fk
+
+(do
+    (defn qsx-path (path) (str_concat path ".form-crystal"))
+    (defn qsx-magic () 9380001)
+
+    ; ---- trim a possible trailing newline from a whole-file read ----------
+    (defn qsx-trim (s)
+        (do (let n (str_len s))
+            (if (eq n 0) s
+                (if (eq (str_byte_at s (sub n 1)) 10) (substring s 0 (sub n 1)) s))))
+    (defn qsx-seal-line (path) (qsx-trim (read_file (qaf-seal-path-for path))))
+
+    ; ---- one derived tensor row: everything kth-tv-at computes, as ints ---
+    (defn qsx-row (src base off)
+        (list (add base (egg-ti-dataoff src off))
+              (kth-bytes src off)
+              (if (gt (egg-ti-ndims src off) 1) (egg-ti-dim src off 1) 1)
+              (egg-ti-dim src off 0)
+              (egg-ti-type src off)))
+    (defn qsx-row-for (src base tabs k l)
+        (qsx-row src base (gti-off-for (nth tabs k) l)))
+    ; mirror of q38-layer, collecting rows instead of buffer views
+    (defn qsx-common-rows (src base tabs l)
+        (list (qsx-row-for src base tabs 0 l) (qsx-row-for src base tabs 1 l)
+              (qsx-row-for src base tabs 2 l) (qsx-row-for src base tabs 3 l)
+              (qsx-row-for src base tabs 4 l)))
+    (defn qsx-layer-rows (src base tabs l interval)
+        (if (kth-full? l interval)
+            (append (qsx-common-rows src base tabs l)
+                (list (qsx-row-for src base tabs 14 l) (qsx-row-for src base tabs 15 l)
+                      (qsx-row-for src base tabs 16 l) (qsx-row-for src base tabs 17 l)
+                      (qsx-row-for src base tabs 18 l) (qsx-row-for src base tabs 19 l)))
+            (append (qsx-common-rows src base tabs l)
+                (list (qsx-row-for src base tabs 5 l) (qsx-row-for src base tabs 6 l)
+                      (qsx-row-for src base tabs 7 l) (qsx-row-for src base tabs 8 l)
+                      (qsx-row-for src base tabs 9 l) (qsx-row-for src base tabs 10 l)
+                      (qsx-row-for src base tabs 11 l) (qsx-row-for src base tabs 12 l)
+                      (qsx-row-for src base tabs 13 l)))))
+    (defn qsx-all-layer-rows (src base tabs l n interval acc)
+        (if (ge l n) acc
+            (qsx-all-layer-rows src base tabs (add l 1) n interval
+                (append acc (list (qsx-layer-rows src base tabs l interval))))))
+
+    ; ---- serialization: one int per line under the key line ---------------
+    (defn qsx-int-line (v) (str_concat (int_to_str v) "\n"))
+    (defn qsx-ints-text (xs acc)
+        (if (eq (len xs) 0) acc
+            (qsx-ints-text (tail xs) (str_concat acc (qsx-int-line (head xs))))))
+    (defn qsx-seq-text (ids) (qsx-ints-text ids (qsx-int-line (len ids))))
+    (defn qsx-row-text (row) (qsx-ints-text row ""))
+    (defn qsx-rows-text (rows acc)
+        (if (eq (len rows) 0) acc
+            (qsx-rows-text (tail rows) (str_concat acc (qsx-row-text (head rows))))))
+    (defn qsx-layer-text (rows)
+        (str_concat (qsx-int-line (len rows)) (qsx-rows-text rows "")))
+    (defn qsx-layers-text (lrows acc)
+        (if (eq (len lrows) 0) acc
+            (qsx-layers-text (tail lrows) (str_concat acc (qsx-layer-text (head lrows))))))
+
+    ; ---- freeze: derive once, write the recording --------------------------
+    ; Freeze pays the full scan exactly once; that firing IS the heat.
+    (defn qsx-freeze (path)
+        (do (let src (eqr-of-file path 0 40000000))
+            (let base (egg-data-base src 32))
+            (let tabs (q38-tabs src))
+            (let geo (q38-geo src 128))
+            (let n (nth geo 21))
+            (let interval (nth geo 22))
+            (let lrows (qsx-all-layer-rows src base tabs 0 n interval (empty)))
+            (let erow (qsx-row src base (egg-find-tensor src "token_embd.weight")))
+            (let orow (qsx-row src base (egg-find-tensor src "output_norm.weight")))
+            (let prow (qsx-row src base (egg-find-tensor src "output.weight")))
+            (let required (q38-required-size src base))
+            (let ims (q35-special-id src "<|im_start|>"))
+            (let ime (q35-special-id src "<|im_end|>"))
+            (let ths (q35-special-id src "<think>"))
+            (let the (q35-special-id src "</think>"))
+            (let text
+                (str_concat (str_concat (qsx-seal-line path) "\n")
+                (str_concat (qsx-int-line (qsx-magic))
+                (str_concat (qsx-ints-text (list ims ime ths the) "")
+                (str_concat (qsx-seq-text (q35-encode src "user\n"))
+                (str_concat (qsx-seq-text (q35-encode src "\n"))
+                (str_concat (qsx-seq-text (q35-encode src "assistant\n"))
+                (str_concat (qsx-seq-text (q35-encode src "\n\n"))
+                (str_concat (qsx-int-line required)
+                (str_concat (qsx-int-line n)
+                (str_concat (qsx-int-line interval)
+                (str_concat (qsx-layers-text lrows "")
+                            (qsx-rows-text (list erow orow prow) "")))))))))))))
+            (write_file (qsx-path path) text)))
+
+    ; ---- parse: a cursor over the int lines --------------------------------
+    ; each reader answers (list value next-pos)
+    (defn qsx-parse-int (s n i acc)
+        (if (ge i n) (list acc i)
+            (do (let c (str_byte_at s i))
+                (if (eq c 10) (list acc (add i 1))
+                    (qsx-parse-int s n (add i 1) (add (mul acc 10) (sub c 48)))))))
+    (defn qsx-take-ints (s n i k acc)
+        (if (eq k 0) (list (reverse acc) i)
+            (do (let r (qsx-parse-int s n i 0))
+                (qsx-take-ints s n (nth r 1) (sub k 1) (cons (nth r 0) acc)))))
+    (defn qsx-take-seq (s n i)
+        (do (let c (qsx-parse-int s n i 0))
+            (qsx-take-ints s n (nth c 1) (nth c 0) (empty))))
+    (defn qsx-take-rows (s n i k acc)
+        (if (eq k 0) (list (reverse acc) i)
+            (do (let r (qsx-take-ints s n i 5 (empty)))
+                (qsx-take-rows s n (nth r 1) (sub k 1) (cons (nth r 0) acc)))))
+    (defn qsx-take-layers (s n i k acc)
+        (if (eq k 0) (list (reverse acc) i)
+            (do (let cnt (qsx-parse-int s n i 0))
+                (let rows (qsx-take-rows s (str_len s) (nth cnt 1) (nth cnt 0) (empty)))
+                (qsx-take-layers s n (nth rows 1) (sub k 1) (cons (nth rows 0) acc)))))
+
+    ; qsx-load -> (list 0) when absent, keyless, or foreign; else
+    ; (list 1 ims ime ths the useq nlseq aseq tseq required nlayers interval
+    ;         layer-rows erow orow prow)
+    (defn qsx-load-parsed (s n i)
+        (do (let magic (qsx-parse-int s n i 0))
+            (if (not (eq (nth magic 0) (qsx-magic))) (list 0)
+                (do (let sp (qsx-take-ints s n (nth magic 1) 4 (empty)))
+                    (let u (qsx-take-seq s n (nth sp 1)))
+                    (let nl (qsx-take-seq s n (nth u 1)))
+                    (let a (qsx-take-seq s n (nth nl 1)))
+                    (let t (qsx-take-seq s n (nth a 1)))
+                    (let req (qsx-parse-int s n (nth t 1) 0))
+                    (let nlay (qsx-parse-int s n (nth req 1) 0))
+                    (let ivl (qsx-parse-int s n (nth nlay 1) 0))
+                    (let lrows (qsx-take-layers s n (nth ivl 1) (nth nlay 0) (empty)))
+                    (let heads (qsx-take-rows s n (nth lrows 1) 3 (empty)))
+                    (list 1 (nth (nth sp 0) 0) (nth (nth sp 0) 1)
+                            (nth (nth sp 0) 2) (nth (nth sp 0) 3)
+                            (nth u 0) (nth nl 0) (nth a 0) (nth t 0)
+                            (nth req 0) (nth nlay 0) (nth ivl 0)
+                            (nth lrows 0)
+                            (nth (nth heads 0) 0) (nth (nth heads 0) 1)
+                            (nth (nth heads 0) 2))))))
+    (defn qsx-load (path)
+        (if (eq (fs_exists (qsx-path path)) 0) (list 0)
+            (do (let s (read_file (qsx-path path)))
+                (let n (str_len s))
+                (let key (qsx-seal-line path))
+                (let kn (str_len key))
+                (if (lt n (add kn 2)) (list 0)
+                    (if (not (str_eq (substring s 0 kn) key)) (list 0)
+                        (qsx-load-parsed s n (add kn 1)))))))
+
+    ; ---- rebuild: the open that walks the recording ------------------------
+    (defn qsx-tv (path row)
+        (list (metal_buf_from_file path (nth row 0) (nth row 1))
+              (nth row 2) (nth row 3) (nth row 4)))
+    (defn qsx-tvs (path rows acc)
+        (if (eq (len rows) 0) acc
+            (qsx-tvs path (tail rows) (append acc (list (qsx-tv path (head rows)))))))
+    (defn qsx-lays (path lrows acc)
+        (if (eq (len lrows) 0) acc
+            (qsx-lays path (tail lrows)
+                (append acc (list (qsx-tvs path (head lrows) (empty)))))))
+    ; mirror of q38-open-span, tensor views from the recording instead of the
+    ; scan. The context stays list-compatible with q38-open-span: slot 10 is
+    ; the scratch span. q38-open and qsx-open are both the span-1 delegates.
+    (defn qsx-open (path maxpos x) (qsx-open-span path maxpos 1 x))
+    (defn qsx-open-span (path maxpos span x)
+        (do (let src (eqr-of-file path 0 40000000))
+            (let base (egg-data-base src 32))
+            (let geo (q38-geo src maxpos))
+            (let ps (q38-pipes (q38-msl)))
+            (let qout (mul 2 (mul (nth geo 12) (nth geo 14))))
+            (let convcap (if (gt qout (nth geo 1)) qout (nth geo 1)))
+            (let bs (kth-bufs-span (nth geo 0) convcap (mul (nth geo 3) (nth geo 5)) (nth geo 3)
+                              (nth geo 10) 1 (mul (nth geo 12) (nth geo 14))
+                              (nth geo 20) maxpos (nth geo 12) (nth geo 19) span))
+            (let lays (qsx-lays path (nth x 12) (empty)))
+            (let embTv (qsx-tv path (nth x 13)))
+            (let onormTv (qsx-tv path (nth x 14)))
+            (let projTv (qsx-tv path (nth x 15)))
+            (list ps bs geo lays embTv onormTv projTv src base path span)))
+
+    ; ---- the chat sequence with every constant piece already ice ----------
+    (defn qsx-chat-ids (src prompt x)
+        (tkz-cat (list (nth x 1))
+        (tkz-cat (nth x 5)
+        (tkz-cat (q35-encode src prompt)
+        (tkz-cat (list (nth x 2))
+        (tkz-cat (nth x 6)
+        (tkz-cat (list (nth x 1))
+        (tkz-cat (nth x 7)
+        (tkz-cat (list (nth x 3))
+        (tkz-cat (nth x 8)
+        (tkz-cat (list (nth x 4)) (nth x 8))))))))))))
+    (defn qsx-required (x) (nth x 9))
+    (defn qsx-ime (x) (nth x 2))
+    0)
