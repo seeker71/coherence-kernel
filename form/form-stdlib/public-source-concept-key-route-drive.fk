@@ -1,0 +1,233 @@
+; public-source-concept-key-route-drive.fk -- PROPOSED effectful, bounded door
+; for deriving concept-key routes from committed PSCI shard artifacts.
+;
+; IMPORTANT: this top-level driver reads a request and may write route reference
+; and source-manifest artifacts.  Do not preflight it: preflight executes
+; top-level Form.  It is intentionally not run by the movement that introduced
+; it.  A later live witness must choose one explicit family/two-hex source
+; bucket, observe the result, and only then offer another bucket.
+;
+; Request file (hex keeps paths delimiter-safe):
+;   action|root-hex|artifact-hex|family|two-hex-source-bucket
+;
+; Actions:
+;   build   incrementally upsert at most 64 source records from one bucket
+;   report  validate the corresponding at-most-64 source manifests/references
+;
+; This never starts a repository-wide rebuild.  Repeating `build` is
+; idempotent.  A source removed from the public registry is released explicitly
+; through `psckr-dissolve-source-at`; report refuses to pretend it disappeared.
+;
+; PROOF LEVEL: PROPOSED FOURTH-ARM LIVE DOOR (not executed here)
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/bmf-core.fk form-stdlib/form-fs.fk
+; preludes: form-stdlib/file-byte-window.fk form-stdlib/sha256.fk
+; preludes: form-stdlib/hex.fk form-stdlib/form-knowledge-source-search.fk
+; preludes: form-stdlib/public-source-concept-index.fk
+; preludes: form-stdlib/public-source-concept-shards.fk
+; preludes: form-stdlib/public-source-concept-key-routes.fk
+
+(do
+    (defn psckrd-schema () "public-source-concept-key-route-drive-v1")
+    (defn psckrd-max-source-records () 64)
+    (defn psckrd-max-request-bytes () 1024)
+    (defn psckrd-request-path ()
+        (fs-path-join (fs-temp-dir)
+            "public-source-concept-key-route-request-v1"))
+    (defn psckrd-bucket-valid? (bucket)
+        (if (not (eq (str_len bucket) 2)) 0 (hex-valid? bucket)))
+    (defn psckrd-request-valid? (r)
+        (if (not (eq (len r) 5)) 0
+        (if (not (or (str_eq (nth r 0) "build")
+                     (str_eq (nth r 0) "report"))) 0
+        (if (or (eq (str_len (nth r 1)) 0)
+                (eq (str_len (nth r 2)) 0)) 0
+        (if (eq (psci-family-valid? (nth r 3)) 0) 0
+            (psckrd-bucket-valid? (nth r 4)))))))
+    (defn psckrd-read-request ()
+        (do
+            (let path (psckrd-request-path))
+            (let size (fs-stat-size path))
+            (if (or (lt size 0) (gt size (psckrd-max-request-bytes)))
+                (empty)
+                (do
+                    (let f (pscish-split (fs-read-slice path 0 size) "|"))
+                    (if (not (eq (len f) 5)) (empty)
+                        (do
+                            (let r (list (nth f 0)
+                                (pscish-hex-string (nth f 1))
+                                (pscish-hex-string (nth f 2))
+                                (nth f 3) (nth f 4)))
+                            (if (eq (psckrd-request-valid? r) 1) r
+                                (empty))))))))
+    (defn psckrd-source-bucket-root (artifact family bucket)
+        (fs-path-join (pscish-family-shard-root artifact family) bucket))
+    (defn psckrd-source-record-names (names acc)
+        (if (nil? names) acc
+            (psckrd-source-record-names (tail names)
+                (if (eq (psci-ends-with? (head names) ".psci") 1)
+                    (cons (head names) acc) acc))))
+    (defn psckrd-manifest-names (names acc)
+        (if (nil? names) acc
+            (psckrd-manifest-names (tail names)
+                (if (eq (psci-ends-with? (head names) ".manifest") 1)
+                    (cons (head names) acc) acc))))
+    (defn psckrd-read-source-record (path)
+        (do
+            (let size (fs-stat-size path))
+            (if (or (lt size 0) (gt size (psckr-max-reference-bytes)))
+                (empty)
+                (pscish-parse-entry (fs-read-slice path 0 size)))))
+
+    ; build accumulator = visited upserted failed references dissolved undos
+    ;                     refinements releases collisions
+    (defn psckrd-build-loop (artifact dir names acc)
+        (if (nil? names) acc
+            (do
+                (let record (psckrd-read-source-record
+                    (fs-path-join dir (head names))))
+                (if (eq (len record) 0)
+                    (psckrd-build-loop artifact dir (tail names)
+                        (list (add (nth acc 0) 1) (nth acc 1)
+                            (add (nth acc 2) 1) (nth acc 3) (nth acc 4)
+                            (nth acc 5) (add (nth acc 6) 1) (nth acc 7)
+                            (nth acc 8)))
+                    (do
+                        (let outcome (psckr-upsert-record-at artifact record))
+                        (psckrd-build-loop artifact dir (tail names)
+                            (list (add (nth acc 0) 1)
+                                (add (nth acc 1)
+                                    (if (str_eq (nth outcome 1) "hit") 1 0))
+                                (add (nth acc 2)
+                                    (if (str_eq (nth outcome 1) "hit") 0 1))
+                                (add (nth acc 3) (nth outcome 3))
+                                (add (nth acc 4) (nth outcome 4))
+                                (add (nth acc 5) (nth outcome 5))
+                                (add (nth acc 6) (nth outcome 6))
+                                (add (nth acc 7) (nth outcome 7))
+                                (add (nth acc 8) (nth outcome 8)))))))))
+    ; result = schema status reason action family bucket source-records
+    ;          upserted failures references dissolved undos refinements
+    ;          releases collisions trace model-executed
+    (defn psckrd-build-at (artifact family bucket)
+        (do
+            (let dir (psckrd-source-bucket-root artifact family bucket))
+            (let names (psckrd-source-record-names (fs-list dir) (empty)))
+            (if (gt (len names) (psckrd-max-source-records))
+                (list (psckrd-schema) "nothing" "source-bucket-timeout"
+                    "build" family bucket (len names) 0 0 0 0 0 1 0 0
+                    (list "choice" "timeout" "cut" "undo" "refine"
+                        "release") 0)
+                (do
+                    (let acc (psckrd-build-loop artifact dir names
+                        (list 0 0 0 0 0 0 0 0 0)))
+                    (list (psckrd-schema)
+                        (if (eq (nth acc 2) 0) "hit" "nothing")
+                        (if (eq (nth acc 2) 0)
+                            "bounded-source-bucket-upserted"
+                            "bounded-source-bucket-needs-refine")
+                        "build" family bucket
+                        (nth acc 0) (nth acc 1) (nth acc 2) (nth acc 3)
+                        (nth acc 4) (nth acc 5) (nth acc 6) (nth acc 7)
+                        (nth acc 8)
+                        (if (eq (nth acc 2) 0)
+                            (list "choice" "cut" "refine" "release")
+                            (list "choice" "failure" "cut" "undo" "refine"
+                                "release")) 0)))))
+
+    ; manifest inspection = references missing invalid
+    (defn psckrd-inspect-manifest-keys (artifact manifest keys acc)
+        (if (nil? keys) acc
+            (do
+                (let path (psckr-reference-path-at artifact (head keys)
+                    (psckr-manifest-family manifest)
+                    (psckr-manifest-path manifest)))
+                (let held (psckr-read-bounded-reference-at path))
+                (if (not (str_eq (nth held 0) "ready"))
+                    (psckrd-inspect-manifest-keys artifact manifest (tail keys)
+                        (list (nth acc 0) (add (nth acc 1) 1)
+                            (nth acc 2)))
+                    (do
+                        (let ref (nth held 2))
+                        (let current (if (and
+                                (str_eq (psckr-reference-source-key ref)
+                                    (psckr-manifest-source-key manifest))
+                                (str_eq (psckr-reference-entry-key ref)
+                                    (psckr-manifest-entry-key manifest))) 1 0))
+                        (psckrd-inspect-manifest-keys artifact manifest
+                            (tail keys)
+                            (list (add (nth acc 0) current)
+                                (nth acc 1)
+                                (add (nth acc 2) (if (eq current 1) 0 1)))))))))
+    ; report accumulator = manifests current refs missing invalid
+    (defn psckrd-report-loop (artifact dir names acc)
+        (if (nil? names) acc
+            (do
+                (let manifest (psckr-read-bounded-manifest-at
+                    (fs-path-join dir (head names))))
+                (if (eq (psckr-manifest-valid? manifest) 0)
+                    (psckrd-report-loop artifact dir (tail names)
+                        (list (add (nth acc 0) 1) (nth acc 1) (nth acc 2)
+                            (nth acc 3) (add (nth acc 4) 1)))
+                    (do
+                        (let refs (psckrd-inspect-manifest-keys artifact manifest
+                            (psckr-manifest-keys manifest) (list 0 0 0)))
+                        (psckrd-report-loop artifact dir (tail names)
+                            (list (add (nth acc 0) 1) (add (nth acc 1) 1)
+                                (add (nth acc 2) (nth refs 0))
+                                (add (nth acc 3) (nth refs 1))
+                                (add (nth acc 4) (nth refs 2)))))))))
+    ; result shape matches build result positions; upserted becomes current
+    ; manifests, references stays current references.
+    (defn psckrd-report-at (artifact family bucket)
+        (do
+            (let dir (fs-path-join
+                (psckr-manifest-family-root artifact family) bucket))
+            (let names (psckrd-manifest-names (fs-list dir) (empty)))
+            (if (gt (len names) (psckrd-max-source-records))
+                (list (psckrd-schema) "nothing" "manifest-bucket-timeout"
+                    "report" family bucket (len names) 0 0 0 0 0 1 0 0
+                    (list "choice" "timeout" "cut" "undo" "refine"
+                        "release") 0)
+                (do
+                    (let acc (psckrd-report-loop artifact dir names
+                        (list 0 0 0 0 0)))
+                    (let faults (add (nth acc 3) (nth acc 4)))
+                    (list (psckrd-schema)
+                        (if (eq faults 0) "hit" "nothing")
+                        (if (eq faults 0) "bounded-route-bucket-current"
+                            "bounded-route-bucket-needs-refine")
+                        "report" family bucket (nth acc 0) (nth acc 1)
+                        faults (nth acc 2) 0 0
+                        (if (eq faults 0) 0 1) 0 0
+                        (if (eq faults 0)
+                            (list "choice" "cut" "release")
+                            (list "choice" "failure" "cut" "undo" "refine"
+                                "release")) 0)))))
+    (defn psckrd-held-result (reason)
+        (list (psckrd-schema) "nothing" reason "" "" "" 0 0 0 0 0 0
+            0 0 0 (list "choice" "cut" "release") 0))
+    (defn psckrd-run ()
+        (do
+            (let request (psckrd-read-request))
+            (if (eq (psckrd-request-valid? request) 0)
+                (psckrd-held-result "held-incomplete-request")
+                (if (str_eq (nth request 0) "build")
+                    (psckrd-build-at (nth request 2) (nth request 3)
+                        (nth request 4))
+                    (psckrd-report-at (nth request 2) (nth request 3)
+                        (nth request 4))))))
+    (defn psckrd-render-result (r)
+        (pscish-join
+            (list (nth r 0) (nth r 1) (nth r 2) (nth r 3) (nth r 4)
+                (nth r 5) (int_to_str (nth r 6)) (int_to_str (nth r 7))
+                (int_to_str (nth r 8)) (int_to_str (nth r 9))
+                (int_to_str (nth r 10)) (int_to_str (nth r 11))
+                (int_to_str (nth r 12)) (int_to_str (nth r 13))
+                (int_to_str (nth r 14)) (pscish-join (nth r 15) ",")
+                (int_to_str (nth r 16))) "|"))
+
+    ; Effectful top-level: intentionally proposed but not run/preflighted by
+    ; the introducing movement.
+    (print_str (str_concat (psckrd-render-result (psckrd-run)) "\n"))
+    0)
