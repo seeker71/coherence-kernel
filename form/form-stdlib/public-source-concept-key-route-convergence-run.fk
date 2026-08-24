@@ -1,0 +1,147 @@
+; public-source-concept-key-route-convergence-run.fk -- effectful bounded
+; repository convergence and route-coverage report.
+;
+; IMPORTANT: this top-level cell writes the route-drive request and launches
+; one fresh fkwu worker for each nonempty family/two-hex source bucket, followed
+; by one report worker for the union of source and held-manifest buckets.  Do
+; not preflight it: preflight executes top-level Form.  The worker refuses more
+; than 64 source records, and the driver retains scalar aggregates only.
+;
+; Stale/missing source manifestations and malformed/oversized/timed-out worker
+; rows remain typed `nothing`; no partial bucket is credited.  This builds and
+; measures route materialization only.  It does not execute a model or claim
+; concept uniqueness, held-out mastery, prefix exposure, or learned weights.
+;
+; PROOF LEVEL: FOURTH-ARM EFFECTFUL ORCHESTRATOR
+; observed 2026-08-25: build/report 1589 buckets, 5959 current sources,
+; 21165 references, zero faults/timeouts/model calls, ready95=1
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/bmf-core.fk form-stdlib/form-fs.fk
+; preludes: form-stdlib/file-byte-window.fk form-stdlib/sha256.fk
+; preludes: form-stdlib/hex.fk form-stdlib/form-knowledge-source-search.fk
+; preludes: form-stdlib/public-source-concept-index.fk
+; preludes: form-stdlib/public-source-concept-shards.fk
+; preludes: form-stdlib/public-source-concept-key-routes.fk
+; preludes: form-stdlib/public-source-concept-key-route-convergence.fk
+
+(do
+    (defn psckrcr-artifact ()
+        (fs-path-join (fs-temp-dir) "public-source-concept-registry-v1"))
+    (defn psckrcr-request-path ()
+        (fs-path-join (fs-temp-dir)
+            "public-source-concept-key-route-request-v1"))
+    (defn psckrcr-worker-command ()
+        "./fkwu form/form-stdlib/public-source-concept-key-route-drive.fk </dev/null 2>/dev/null")
+    (defn psckrcr-request-text (action root artifact family bucket)
+        (pscish-join
+            (list action (pscish-string-hex root) (pscish-string-hex artifact)
+                family bucket) "|"))
+    (defn psckrcr-run-worker (action root artifact family bucket)
+        (do
+            (let wrote (fs-write-text (psckrcr-request-path)
+                (psckrcr-request-text action root artifact family bucket)))
+            (if (le wrote 0) (empty)
+                (psckrc-correlate-worker-row
+                    (psckrc-parse-worker-row
+                        (host-exec (psckrcr-worker-command) ""))
+                    action family bucket))))
+    (defn psckrcr-run-buckets (action root artifact family buckets aggregate)
+        (if (nil? buckets) aggregate
+            (psckrcr-run-buckets action root artifact family (tail buckets)
+                (psckrc-accept-worker-row aggregate
+                    (psckrcr-run-worker action root artifact family
+                        (head buckets))))))
+    (defn psckrcr-source-buckets (artifact family)
+        (psckrc-bucket-names
+            (fs-list (pscish-family-shard-root artifact family))))
+    (defn psckrcr-manifest-buckets (artifact family)
+        (psckrc-bucket-names
+            (fs-list (psckr-manifest-family-root artifact family))))
+    (defn psckrcr-build-families (root artifact families aggregate)
+        (if (nil? families) aggregate
+            (do
+                (let family (psci-family-id (head families)))
+                (let next (psckrcr-run-buckets "build" root artifact family
+                    (psckrcr-source-buckets artifact family) aggregate))
+                (psckrcr-build-families root artifact (tail families) next))))
+    (defn psckrcr-report-families (root artifact families aggregate)
+        (if (nil? families) aggregate
+            (do
+                (let family (psci-family-id (head families)))
+                (let buckets (psckrc-union-buckets
+                    (psckrcr-source-buckets artifact family)
+                    (psckrcr-manifest-buckets artifact family)))
+                (let next (psckrcr-run-buckets "report" root artifact family
+                    buckets aggregate))
+                (psckrcr-report-families root artifact (tail families) next))))
+    (defn psckrcr-print-aggregate (prefix a)
+        (do
+            (print_str (str_concat prefix (str_concat "-status="
+                (str_concat (psckrc-aggregate-status a) "\n"))))
+            (print_str (str_concat prefix (str_concat "-reason="
+                (str_concat (psckrc-aggregate-reason a) "\n"))))
+            (print_str (str_concat prefix (str_concat "-worker-invocations="
+                (str_concat (int_to_str (psckrc-aggregate-invocations a))
+                    "\n"))))
+            (print_str (str_concat prefix (str_concat "-buckets="
+                (str_concat (int_to_str (psckrc-aggregate-buckets a))
+                    "\n"))))
+            (print_str (str_concat prefix (str_concat "-source-records="
+                (str_concat (int_to_str (psckrc-aggregate-records a))
+                    "\n"))))
+            (print_str (str_concat prefix (str_concat "-current="
+                (str_concat (int_to_str (psckrc-aggregate-current a))
+                    "\n"))))
+            (print_str (str_concat prefix (str_concat "-faults="
+                (str_concat (int_to_str (psckrc-aggregate-faults a))
+                    "\n"))))
+            (print_str (str_concat prefix (str_concat "-references="
+                (str_concat (int_to_str (psckrc-aggregate-references a))
+                    "\n"))))
+            (print_str (str_concat prefix (str_concat "-timeouts="
+                (str_concat (int_to_str (psckrc-aggregate-timeouts a))
+                    "\n"))))
+            (print_str (str_concat prefix (str_concat "-model-executed="
+                (str_concat (int_to_str
+                    (psckrc-aggregate-model-executed? a)) "\n"))))))
+    (let root ".")
+    (let artifact (psckrcr-artifact))
+    (let families (psci-families))
+    (let build (psckrcr-build-families root artifact families
+        (psckrc-empty-aggregate "build")))
+    (let report (psckrcr-report-families root artifact families
+        (psckrc-empty-aggregate "report")))
+    (let registry (pscish-report-at root artifact))
+    (let coverage (psckrc-coverage
+        (pscish-report-denominator registry) report))
+    (let registry-ready (if (and
+        (eq (pscish-report-threshold95? registry) 1)
+        (eq (pscish-report-plan-current? registry) 1)) 1 0))
+    (let ready (if (and (eq registry-ready 1)
+        (and (str_eq (psckrc-aggregate-status build) "hit")
+             (eq (psckrc-coverage-ready95? coverage) 1))) 1 0))
+    (print_str (str_concat "schema=" (str_concat (psckrc-schema) "\n")))
+    (print_str (str_concat "artifact=" (str_concat artifact "\n")))
+    (print_str (str_concat "worker-source-record-bound="
+        (str_concat (int_to_str (psckrc-max-source-records)) "\n")))
+    (psckrcr-print-aggregate "build" build)
+    (psckrcr-print-aggregate "report" report)
+    (print_str (str_concat "repository-source-denominator=" (str_concat
+        (int_to_str (psckrc-coverage-denominator coverage)) "\n")))
+    (print_str (str_concat "registry-current=" (str_concat
+        (int_to_str (pscish-report-current registry)) "\n")))
+    (print_str (str_concat "registry-source-ready95=" (str_concat
+        (int_to_str registry-ready) "\n")))
+    (print_str (str_concat "route-current=" (str_concat
+        (int_to_str (psckrc-coverage-current coverage)) "\n")))
+    (print_str (str_concat "route-missing=" (str_concat
+        (int_to_str (psckrc-coverage-missing coverage)) "\n")))
+    (print_str (str_concat "route-coverage-percent=" (str_concat
+        (int_to_str (psckrc-coverage-percent coverage)) "\n")))
+    (print_str (str_concat "route-current-references=" (str_concat
+        (int_to_str (psckrc-coverage-references coverage)) "\n")))
+    (print_str (str_concat "route-ready95=" (str_concat
+        (int_to_str (psckrc-coverage-ready95? coverage)) "\n")))
+    (print_str (str_concat "convergence-ready95=" (str_concat
+        (int_to_str ready) "\n")))
+    0)
