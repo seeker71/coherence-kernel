@@ -7,21 +7,29 @@
 ; MSL is assembled by Form and passed to metal_pipeline, so every kernel is JIT-compiled for the
 ; device that actually answered metal_status.  Model bytes remain mmap-backed no-copy buffers.
 ;
-; preludes: native/metal/kat-token-handle.fk
+; preludes: native/metal/kat-token-handle.fk form-stdlib/qk-matmul-batch.fk
 
 (do
     ; Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
     ; proven kernel at pipeline 17; dense appends the wide Q8_0 matvec whose 256-thread group owns
     ; two output rows.  The ordinary kth Q8 lane remains available to its existing callers.
+    ; The batched Q8_0 matmul rides along: one weight decode serving eight
+    ; activation columns, so a prefill span is one dispatch per weight tensor
+    ; instead of one per token. Stone 7 proved the shape on the K-quant lane in
+    ; July (metal_batched_prefill.sh, 5 gates); this lane never inherited it
+    ; because the generator hardcoded a 256-weight superblock and Q8_0's is 32.
     (defn q38-msl ()
-        (str_concat (kth-msl) (q80-matvec-wide-body "form_q8_0_matvec_wide_f32")))
+        (str_concat (kth-msl)
+        (str_concat (q80-matvec-wide-body "form_q8_0_matvec_wide_f32")
+                    (qmb-q80-batch))))
 
     ; kth-pipes owns indices 0..28.  Dense Qwen adds the cooperative Q8_0 matvec and the Q8_0 row
     ; dequant used by token_embd.weight.
     (defn q38-pipes (msl)
         (append (kth-pipes msl)
             (list (metal_pipeline msl "form_q8_0_matvec_wide_f32")
-                  (metal_pipeline msl "form_q8_0_dequant_f32"))))
+                  (metal_pipeline msl "form_q8_0_dequant_f32")
+                  (metal_pipeline msl "form_q8_0_matmul_batch_f32"))))
 
     ; One exact 256-thread group per output-row pair for Q8_0.  All other declared types retain the
     ; already-proven KAT dispatches.  Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
@@ -276,6 +284,77 @@
             (list (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos) (add pos 1))
             (do (q38-advance ps bs geo lays sts embTv (head ids) pos)
                 (q38-prefill ps bs geo lays sts embTv onormTv projTv (tail ids) (add pos 1)))))
+
+    ; ── prefill without a barrier at every position ────────────────────────
+    ; q38-blocks enqueues all 48 layers into one batch with NO sync between
+    ; them, so ordering inside a batch is already the carrier's job and already
+    ; works. The per-position metal_sync in q38-advance is therefore not about
+    ; KV ordering the way its comment reads — it is about the scratch buffers
+    ; (bs 0, bs 1, ...) being reused by every position, so two positions in
+    ; flight would write each other's working memory.
+    ;
+    ; That is a claim about this body, and this body can answer it. `chunk` says
+    ; how many positions may be in flight before the carrier is asked to settle.
+    ; chunk=1 IS q38-prefill, barrier for barrier. Larger chunks are the
+    ; question, and the answer is whatever the same prompt produces through both.
+    (defn q38-advance-open (ps bs geo lays sts embTv id pos)
+        (do (q38-forward-state ps bs geo lays sts embTv id pos) 1))
+
+    (defn q38-prefill-chunk-go (ps bs geo lays sts embTv onormTv projTv ids pos chunk k)
+        (if (eq (len ids) 1)
+            (do (metal_sync)
+                (list (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos)
+                      (add pos 1)))
+            (do (q38-advance-open ps bs geo lays sts embTv (head ids) pos)
+                (let settle (if (ge (add k 1) chunk) 1 0))
+                (if (eq settle 1) (metal_sync) 0)
+                (q38-prefill-chunk-go ps bs geo lays sts embTv onormTv projTv
+                    (tail ids) (add pos 1) chunk (if (eq settle 1) 0 (add k 1))))))
+
+    ; ── one batch for the whole span ───────────────────────────────────────
+    ; chunk 64 answered no: the scratch buffers bs 0, bs 1, ... are reused by
+    ; every position, so two positions in flight overwrite each other's working
+    ; memory. The sync was buying ORDERING, and paying a CPU round trip for it.
+    ;
+    ; md-bind16's own comment names the cheaper coin: barrier_before, "1 =
+    ; memoryBarrier before this dispatch; legal only in a concurrent batch".
+    ; Today q38-forward-state opens a fresh concurrent batch per position and its
+    ; embedding dispatch carries barrier 0 — correct, because a sync had just
+    ; drained everything. Open the batch ONCE for the span and give each
+    ; position's first dispatch barrier 1 instead, and the ordering that the
+    ; round trip was buying is expressed inside the command buffer, where it
+    ; costs a barrier rather than a stall.
+    (defn q38-forward-state-after (ps bs geo lays sts embTv id pos barrier)
+        (do
+            (metal_enqueue (nth ps 30)
+                (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
+                         (list (mul id (nth geo 0)) (nth geo 0)) 0 barrier)
+                (nth geo 0))
+            (q38-blocks ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22))
+            1))
+
+    (defn q38-prefill-span-go (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (if (eq (len ids) 1)
+            (do (metal_sync)
+                (list (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos)
+                      (add pos 1)))
+            (do (q38-forward-state-after ps bs geo lays sts embTv (head ids) pos 1)
+                (q38-prefill-span-go ps bs geo lays sts embTv onormTv projTv
+                    (tail ids) (add pos 1) ))))
+
+    (defn q38-prefill-span (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (do (metal_batch_concurrent)
+            (q38-prefill-span-go ps bs geo lays sts embTv onormTv projTv ids pos)))
+
+    ; chunk 1 = a barrier-per-position sync, the lane as it has always been.
+    ; chunk 0 = one batch for the whole span, ordering by barrier.
+    ; chunk n>1 = settle every n positions (the probe that answered no).
+    (defn q38-prefill-chunked (ps bs geo lays sts embTv onormTv projTv ids pos chunk)
+        (if (eq chunk 0)
+            (q38-prefill-span ps bs geo lays sts embTv onormTv projTv ids pos)
+            (if (le chunk 1)
+                (q38-prefill ps bs geo lays sts embTv onormTv projTv ids pos)
+                (q38-prefill-chunk-go ps bs geo lays sts embTv onormTv projTv ids pos chunk 0))))
 
     (defn q38-key (arch suffix) (str_concat arch (str_concat "." suffix)))
 
