@@ -285,6 +285,37 @@
             (do (q38-advance ps bs geo lays sts embTv (head ids) pos)
                 (q38-prefill ps bs geo lays sts embTv onormTv projTv (tail ids) (add pos 1)))))
 
+    ; ── prefill without a barrier at every position ────────────────────────
+    ; q38-blocks enqueues all 48 layers into one batch with NO sync between
+    ; them, so ordering inside a batch is already the carrier's job and already
+    ; works. The per-position metal_sync in q38-advance is therefore not about
+    ; KV ordering the way its comment reads — it is about the scratch buffers
+    ; (bs 0, bs 1, ...) being reused by every position, so two positions in
+    ; flight would write each other's working memory.
+    ;
+    ; That is a claim about this body, and this body can answer it. `chunk` says
+    ; how many positions may be in flight before the carrier is asked to settle.
+    ; chunk=1 IS q38-prefill, barrier for barrier. Larger chunks are the
+    ; question, and the answer is whatever the same prompt produces through both.
+    (defn q38-advance-open (ps bs geo lays sts embTv id pos)
+        (do (q38-forward-state ps bs geo lays sts embTv id pos) 1))
+
+    (defn q38-prefill-chunk-go (ps bs geo lays sts embTv onormTv projTv ids pos chunk k)
+        (if (eq (len ids) 1)
+            (do (metal_sync)
+                (list (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos)
+                      (add pos 1)))
+            (do (q38-advance-open ps bs geo lays sts embTv (head ids) pos)
+                (let settle (if (ge (add k 1) chunk) 1 0))
+                (if (eq settle 1) (metal_sync) 0)
+                (q38-prefill-chunk-go ps bs geo lays sts embTv onormTv projTv
+                    (tail ids) (add pos 1) chunk (if (eq settle 1) 0 (add k 1))))))
+
+    (defn q38-prefill-chunked (ps bs geo lays sts embTv onormTv projTv ids pos chunk)
+        (if (le chunk 1)
+            (q38-prefill ps bs geo lays sts embTv onormTv projTv ids pos)
+            (q38-prefill-chunk-go ps bs geo lays sts embTv onormTv projTv ids pos chunk 0)))
+
     (defn q38-key (arch suffix) (str_concat arch (str_concat "." suffix)))
 
     ; A pipeline can compile against a sparse/truncated file, and mmap can accept many early tensor

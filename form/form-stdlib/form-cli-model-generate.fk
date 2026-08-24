@@ -193,15 +193,18 @@
     ; The five function values need the pipelines, buffers, geometry, layers,
     ; decode state and tensor views, and this dialect has no lambda — so they
     ; travel as one opaque ctx the cursor never opens.
-    (defn fcmg-heed-ctx (ctx sts src)
+    ; slot 9 is `chunk`: how many prefill positions may be in flight before the
+    ; carrier is asked to settle. 1 is the barrier-per-position the lane has
+    ; always had; larger is the question this body can answer about itself.
+    (defn fcmg-heed-ctx (ctx sts src chunk)
         (list (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
-              (nth ctx 4) (nth ctx 5) (nth ctx 6) src))
+              (nth ctx 4) (nth ctx 5) (nth ctx 6) src chunk))
     (defn fcmg-heed-step (h id pos)
         (q38-forward (nth h 0) (nth h 1) (nth h 2) (nth h 3) (nth h 4)
                      (nth h 5) (nth h 6) (nth h 7) id pos))
     (defn fcmg-heed-prefill (h ids pos)
-        (q38-prefill (nth h 0) (nth h 1) (nth h 2) (nth h 3) (nth h 4)
-                     (nth h 5) (nth h 6) (nth h 7) ids pos))
+        (q38-prefill-chunked (nth h 0) (nth h 1) (nth h 2) (nth h 3) (nth h 4)
+                             (nth h 5) (nth h 6) (nth h 7) ids pos (nth h 9)))
     (defn fcmg-heed-decode (h ids) (tkz-decode-text (nth h 8) ids))
     (defn fcmg-heed-encode (h text) (q35-encode (nth h 8) text))
 
@@ -224,11 +227,11 @@
     ; query that closes on its last query slot still gets a full reserve to
     ; answer from — which one fungible budget could not give it.
     (defn fcmg-heed-generate-2p (src ctx sts ids stops lookupf local-ready
-                                 heeds query reserve)
+                                 heeds query reserve chunk)
         (do
-            (let pf (q38-prefill (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
-                                 (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0))
-            (fhc-run-seeded-2p (fcmg-heed-ctx ctx sts src)
+            (let pf (q38-prefill-chunked (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                                 (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0 chunk))
+            (fhc-run-seeded-2p (fcmg-heed-ctx ctx sts src chunk)
                 fcmg-heed-step fcmg-heed-prefill fcmg-heed-decode fcmg-heed-encode
                 lookupf local-ready
                 (nth pf 0) (nth pf 1) stops heeds query reserve)))
@@ -238,7 +241,7 @@
         (do
             (let pf (q38-prefill (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
                                  (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0))
-            (fhc-run-seeded (fcmg-heed-ctx ctx sts src)
+            (fhc-run-seeded (fcmg-heed-ctx ctx sts src 1)
                 fcmg-heed-step fcmg-heed-prefill fcmg-heed-decode fcmg-heed-encode
                 lookupf local-ready
                 (nth pf 0) (nth pf 1) n stops budget)))
@@ -276,7 +279,7 @@
     ; ── where the time goes ───────────────────────────────────────────────
     ; Wall clock at each stage boundary plus the Metal counter, so the turn can
     ; be read as seal / open / decode rather than argued about from a total.
-    (defn fcmg-heed-witness-with (path prompt query reserve lookupf)
+    (defn fcmg-heed-witness-with (path prompt query reserve lookupf chunk)
         (do
             (let t-enter (now_unix_ms))
             (let gpu-enter (mbw-status-int (metal_status) "gpu_busy_us_total"))
@@ -312,13 +315,14 @@
                                             (fcmg-heed-int "prompt-tokens" (len ids))
                                             (fcmg-heed-int "query-budget" query)
                                             (fcmg-heed-int "answer-reserve" reserve)
+                                            (fcmg-heed-int "prefill-chunk" chunk)
                                             (let t-pre-run (now_unix_ms))
                                             (let gpu-pre-run
                                                 (mbw-status-int (metal_status) "gpu_busy_us_total"))
                                             (let r (fcmg-heed-generate-2p src ctx sts ids
                                                         (fcmg-q35-stops src)
                                                         lookupf 1
-                                                        (MaxHeeds) query reserve))
+                                                        (MaxHeeds) query reserve chunk))
                                             (metal_sync)
                                             (let t-done (now_unix_ms))
                                             (let gpu-done
@@ -565,8 +569,10 @@
     ; host honestly holds no knowledge. The grounded witness names the substrate
     ; this checkout DOES hold, so a hit can open the answer reserve for real.
     (defn fcmg-heed-witness (path prompt query reserve)
-        (fcmg-heed-witness-with path prompt query reserve fcmg-heed-lookup-nothing))
+        (fcmg-heed-witness-with path prompt query reserve fcmg-heed-lookup-nothing 1))
     (defn fcmg-heed-witness-grounded (path prompt query reserve)
-        (fcmg-heed-witness-with path prompt query reserve fhg-lookup))
+        (fcmg-heed-witness-with path prompt query reserve fhg-lookup 1))
+    (defn fcmg-heed-witness-grounded-chunk (path prompt query reserve chunk)
+        (fcmg-heed-witness-with path prompt query reserve fhg-lookup chunk))
 
     0)
