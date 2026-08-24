@@ -1,0 +1,85 @@
+; form-knowledge-qwen-heldout-v3-eval-run.fk -- consented resident Qwen audit.
+;
+; The 29GB model is admitted only when the exact V3 dataset-bound consent
+; token is present.  Raw output stays in memory long enough to hash, parse,
+; and score.  Stdout receives only ids, families, scalar evidence, counts,
+; and safe hashes through fkh3-report-lines.
+;
+; This file was authored and preflighted without placing the consent token and
+; without running the model.
+;
+; preludes: form-stdlib/form-knowledge-qwen-heldout-v3-eval.fk
+; preludes: form-stdlib/form-cli-model-generate.fk
+
+(do
+    (defn fkh3r-model-path ()
+        "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf")
+    (defn fkh3r-model-id () "qwen3.8-27b-q8_0-form-native-metal-jit-v3")
+    (defn fkh3r-query-budget () (fcmg-current-source-query-budget))
+    (defn fkh3r-answer-reserve () (fcmg-current-source-answer-reserve))
+    (defn fkh3r-consented? ()
+        (fkh3-consent-valid? (read_file (fkh3-consent-path))))
+
+    ; result = tag reversed-scores residence executed-count
+    (defn fkh3r-result (scores residence executed)
+        (list "form-knowledge-qwen-heldout-v3-live-loop" scores residence executed))
+    (defn fkh3r-scores (r) (nth r 1))
+    (defn fkh3r-residence (r) (nth r 2))
+    (defn fkh3r-executed (r) (nth r 3))
+    (defn fkh3r-progress-start (row)
+        (do
+            (print_str (fkh3-line "id" (fkh3-id row)))
+            (print_str (fkh3-line "family" (fkh3-family row)))
+            0))
+    (defn fkh3r-progress-score (score)
+        (print_str (fkh3-score-lines (list score))))
+
+    (defn fkh3r-loop (rows residence path scores executed)
+        (if (eq (len rows) 0)
+            (fkh3r-result scores residence executed)
+            (do
+                (let row (head rows))
+                (let effective (fqt-knowledge-prompt (fkh3-prompt row)))
+                (let _started (fkh3r-progress-start row))
+                (let before (now_unix_ms))
+                (let generated
+                    (fcmg-generate-knowledge-resident-2p-hinted residence path
+                        (fkh3-prompt row) (fkh3r-query-budget)
+                        (fkh3r-answer-reserve) (fkh3-source row)))
+                (let after (now_unix_ms))
+                (let parsed (fkh3-parse-resident-output (nth generated 0)))
+                (let score (fkh3-score row effective parsed (sub after before)))
+                (let _observed (fkh3r-progress-score score))
+                (fkh3r-loop (tail rows) (nth generated 1) path
+                    (cons score scores)
+                    (add executed (if (eq (fkh3-output-error parsed) 0) 1 0))))))
+
+    (defn fkh3r-run-live (audit)
+        (do
+            (let result
+                (fkh3r-loop (fkh3-rows) (fcmr-none) (fkh3r-model-path)
+                            (list) 0))
+            (let scores (nmfe-reverse (fkh3r-scores result)))
+            (let release-ok (fcmr-release-ok? (fkh3r-residence result)))
+            (let model-executed
+                (if (eq (fkh3r-executed result) (fkh3-row-count)) 1 0))
+            (let report
+                (fkh3-report-with-audit (fkh3-live-scope) (fkh3r-model-id)
+                    model-executed release-ok scores audit))
+            (print_str (fkh3-report-lines report))
+            0))
+
+    (if (eq (fkh3r-consented?) 1)
+        (do
+            (let rows (fkh3-rows))
+            (let audit (fkh3-leakage-audit rows))
+            (if (eq (fkh3-dataset-valid-with? rows audit) 1)
+                (fkh3r-run-live audit)
+                (do
+                    (print_str (fkh3-line "dataset-sha256" (fkh3-dataset-seal)))
+                    (print_str (fkh3-line "dataset-valid" "0"))
+                    0)))
+        (do
+            (print_str (fkh3-line "dataset-sha256" (fkh3-dataset-seal)))
+            (print_str (fkh3-line "consent-present" "0"))
+            0)))

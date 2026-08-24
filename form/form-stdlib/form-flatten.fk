@@ -86,24 +86,24 @@
           (list "metal_matvec_fixture" 0 203)(list "metal_matvec_f32" 3 204)
           (list "metal_pipeline" 2 245)(list "metal_buf_alloc" 1 246)
           (list "metal_buf_from_file" 3 247)(list "metal_buf_write" 3 248)
-          (list "metal_enqueue" 3 249)(list "metal_sync" 0 250)
-          (list "metal_buf_read" 3 251)(list "metal_status" 0 252)
-          (list "metal_batch_concurrent" 0 253)(list "metal_buf_free" 1 254)
-          (list "metal_submit" 0 255)(list "metal_fence_wait" 1 142)
-          (list "mlx_status" 0 143)(list "mlx_add" 2 144)(list "mlx_run" 1 145)
-          (list "file_open" 1 133)(list "file_read" 2 134) (list "file_close" 1 135)
-          (list "http_get" 3 105)(list "sock_request" 3 118) (list "tls_request" 3 119)
-          (list "socket_listen" 1 120)(list "socket_port" 1 121) (list "socket_accept" 1 122)
-          (list "socket_connect" 2 123)(list "socket_send" 2 124) (list "socket_recv" 2 125)
-          (list "socket_close" 1 126)(list "_get" 2 106) (list "host_file_mtime" 1 107)
-          (list "file_mtime" 1 107)(list "scan_run" 3 108) (list "record_get" 2 65)
-          (list "record_set" 3 66)(list "record_has" 2 67) (list "record?" 1 68)
-          (list "record_keys" 1 99)(list "record_blueprint" 1 100) (list "now_unix_ms" 0 15)
-          (list "string_bytes" 1 205)(list "string_byte_fold" 3 206)
+          (list "metal_enqueue" 3 249)(list "metal_sync" 0 250) (list "metal_buf_read" 3 251)
+          (list "metal_status" 0 252)(list "metal_batch_concurrent" 0 253)
+          (list "metal_buf_free" 1 254)(list "metal_submit" 0 255)
+          (list "metal_fence_wait" 1 142)(list "mlx_status" 0 143) (list "mlx_add" 2 144)
+          (list "mlx_run" 1 145)(list "file_open" 1 133) (list "file_read" 2 134)
+          (list "file_close" 1 135)(list "http_get" 3 105) (list "sock_request" 3 118)
+          (list "tls_request" 3 119)(list "socket_listen" 1 120) (list "socket_port" 1 121)
+          (list "socket_accept" 1 122)(list "socket_connect" 2 123) (list "socket_send" 2 124)
+          (list "socket_recv" 2 125)(list "socket_close" 1 126) (list "_get" 2 106)
+          (list "host_file_mtime" 1 107)(list "file_mtime" 1 107) (list "scan_run" 3 108)
+          (list "record_get" 2 65)(list "record_set" 3 66) (list "record_has" 2 67)
+          (list "record?" 1 68)(list "record_keys" 1 99) (list "record_blueprint" 1 100)
+          (list "now_unix_ms" 0 15)(list "string_bytes" 1 205) (list "string_byte_fold" 3 206)
           (list "form_table_text" 2 207)(list "form_error" 1 238) (list "div" 2 10)
           (list "mod" 2 11)(list "band" 2 34) (list "bor" 2 35) (list "bxor" 2 36)
           (list "shl_u32" 2 37)(list "shr_u32" 2 38) (list "rotr_u32" 2 39)
-          (list "add_u32" 2 40)(list "bnot_u32" 1 41) (list "mul" 2 42)))
+          (list "add_u32" 2 40)(list "bnot_u32" 1 41) (list "mul" 2 42)
+          (list "jit_arm64_u32_leaf" 3 215)(list "jit_leaf_inram" 2 146)))
 
 (defn flt-assoc (name rows)
     (if (eq (len rows) 0) (list)
@@ -335,18 +335,70 @@
 (defn flt-do-let-n (s pos fns env val)
     (flt-do-let-v (flt-word s pos) s (fp-sym-end s pos) fns env val))
 (defn flt-do-let-v (name s pos fns env val)
-    (flt-do-let-done name (flt-peek s (fp-skip s pos)) s (flt-expr s pos fns env) fns env val))
+    (flt-do-let-done name (flt-peek s (fp-skip s pos)) (fp-skip s pos) s
+                     (flt-expr s pos fns env) fns env val))
 (defn flt-do-let-effect-op (op)
     (host-effect-op? op))
-(defn flt-do-let-done (name op s ve fns env val)
-    (if (eq (flt-do-let-store-op op fns env) 1)
+(defn flt-do-let-done (name op start s ve fns env val)
+    (if (eq (flt-do-let-store-op op start s (nth ve 1) fns env) 1)
         (flt-do-let-frame name s ve fns env val (add (flt-current-letdepth env) 1))
         (flt-do2 s (fp-skip s (fp-close s (nth ve 1))) fns
                  (cons (list name (nth ve 0)) env) val)))
-(defn flt-do-let-store-op (op fns env)
-    (if (eq (flt-do-let-effect-op op) 1) 1
-        (if (eq (flt-current-recursive env) 1) 0
-            (if (eq (len (flt-assoc op fns)) 0) 0 1))))
+; A LET IS A BINDING, and the test for that was reading one word deep.
+; flt-do-let-store-op asked only whether the value's HEAD op is an effect, so
+; `(let h (metal_buf_alloc 32))` stored while `(let r (if c (metal_enqueue …) 0))`
+; and `(let n (sub (metal_buf_alloc 16) 0))` were SUBSTITUTED — their expressions
+; copied to every mention and re-run there. Witnessed 2026-08-20 in the emitted
+; walker against the source runner, which binds once:
+;     (let arith (sub (metal_buf_alloc 16) 0))
+;     source runner  arith1=3 arith2=3     emitted walker  arith1=4 arith2=5
+; The cost in the standard path was not subtle: fcmg-run-context binds
+; `(let out (if … (q38-generate …)))` and reads `out` four times, so the built
+; form-cli RE-RAN a whole generation at each mention and answered a different
+; sentence than the same cells give under the source runner.
+; The law is unchanged — an effecting let stores — but it is now asked of the
+; WHOLE value, not of its first word. flt-span-effect? walks the value's own
+; source span and answers 1 if any symbol in it names an effect. The two cheap
+; tests run first so the common paths cost nothing new; the scan is the last
+; resort, and a false positive (an effect name inside a string literal) only ever
+; stores a let that could have been inlined, which is the safe direction.
+; Does the source span [pos,end) mention any effect op? Parens and delimiters are
+; stepped over; every symbol is asked of the vocabulary. Text, not tree, because
+; the value's cell is already built by the time the question matters and its span
+; is exactly what flt-expr just consumed.
+(defn flt-span-effect? (s pos end)
+    (if (ge pos end) 0
+        (do (let p (fp-skip s pos))
+            (if (ge p end) 0
+                (if (eq (fp-isdelim (fp-at s p)) 1)
+                    (flt-span-effect? s (add p 1) end)
+                    (do (let e (fp-sym-end s p))
+                        (if (eq (host-effect-op? (substring s p e)) 1) 1
+                            (flt-span-effect? s (if (gt e p) e (add p 1)) end))))))))
+; AND THE SPAN SCAN WAS STILL TOO SHALLOW. It sees the effects a value MENTIONS,
+; not the effects a value REACHES: `(let out (if … (q38-generate …)))` names no
+; effect op — every effect it performs is inside the recipe it calls — so the
+; built form-cli went on re-running a whole generation at each mention of `out`
+; even after the vocabulary was right. The scan is kept (it is what proves a
+; compound value effecting when the head alone does not), but the decision above
+; it is now the plain reading of what a `let` IS:
+;
+;   a COMPOUND value binds once. Only an atom — a literal or a bare name, where
+;   re-reading is re-reading and nothing more — may still be substituted.
+;
+; That is not a new law, it is the old one stopped from being clever. The cost is
+; frame slots for lets that used to be copied; the gain is that a name means the
+; same thing at its second mention as at its first, which is the whole of what a
+; binding promises. Measured after: no band moved, and the flattened table got
+; SMALLER — the copies it was making were never free.
+(defn flt-do-let-store-op (op start s end fns env)
+    (if (eq (fp-at s start) 40) 1
+        (if (eq (flt-do-let-effect-op op) 1) 1
+            (if (eq (flt-current-recursive env) 1)
+                (flt-span-effect? s start end)
+                (if (eq (len (flt-assoc op fns)) 0)
+                    (flt-span-effect? s start end)
+                    1)))))
 ; A stored let lowers to LETF: walk the value once, write it to the reserved
 ; frame slot fp+offset, walk the rest of the do with a frame-relative FARG
 ; binding. No fk_vsp push — the slot is pre-reserved, so it survives sub-calls

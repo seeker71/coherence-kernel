@@ -1,0 +1,576 @@
+; form-cli-heed-cursor.fk — the production bridge: a live streaming cursor that
+; carries a Form knowledge query from the model's own decoded stream into a
+; Form lookup, and the typed observation back in as ordinary prefill.
+;
+; THE HONEST SEAM, and it is the same one form-knowledge-query-token.fk names.
+; The model emits ids. A forward pass produces a distribution over ids and
+; NOTHING ELSE — no logit executed the lookup. This cursor recognizes a COMPLETE
+; envelope in the bytes those ids decode to, pauses decoding, and offers the
+; surface to a lookup. The answer re-enters as prefill before the next model
+; token. `fhc-model-executed` is 0 by construction.
+;
+; STREAMING, NOT PRE-MATERIALIZED. There is no ops table, no flattened surface,
+; no pre-built token index, and no pretokenization here. The cursor holds bytes
+; only, under two named caps in the current mechanism:
+;
+;   before an open mark   at most fhm-detect-cap() — just enough tail for an
+;                         open mark split across tokens to still form
+;   while holding a frame from the open mark onward, refused past fhm-hold-cap()
+;
+; THE OPEN MARK IS NEVER CLIPPED AWAY. An earlier draft kept one rolling window
+; clipped from the left at frame width. An over-long query pushed its own open
+; mark out of that window, the frame never completed, and the model asked and
+; heard nothing back — no observation, no reason, no status. Silence that a
+; status could have named is the one failure this cell must not have. Now, once
+; an open mark is seen the window holds FROM it, and outgrowing fhm-hold-cap()
+; is an observation: `nothing` with reason query-budget-exceeded, and no IO.
+;
+; TIMEOUT IS A NAMED OBSERVATION CARRYING ITS MEASUREMENT, never a bit. A lookup
+; that runs long is reported as nothing with reason lookup-late-<n>ms, and the
+; elapsed reading is kept in the cursor so a witness reads the margin rather
+; than a verdict someone already collapsed to 0/1.
+;
+; THE MODEL CROSSES AS FIVE FUNCTION VALUES OVER AN OPAQUE CTX, so this cell
+; names no model, no device, and no corpus, and preflights clean on any kernel:
+;   stepf    (ctx id pos)   -> next id            one forward pass, argmax
+;   prefillf (ctx ids pos)  -> (list first pos')  incremental prefill, SAME state
+;   decodef  (ctx ids)      -> text               ids to bytes
+;   encodef  (ctx text)     -> ids                bytes to ids
+;   lookupf  (ctx surface local-ready) -> (list status span reason)
+;
+; WHY THE CTX IS THREADED AND NOT CLOSED OVER. This dialect has no lambda, so a
+; two-argument stepf could never reach a live model's pipelines, buffers,
+; geometry, layers, decode state and tensor views. ctx carries exactly that,
+; and this cell never looks inside it. The live Qwen lane packs
+; (ps bs geo lays sts embTv onormTv projTv src); a band packs 0.
+;
+; WHY lookupf RETURNS A TRIPLE AND NOT AN ABI RESULT. This cell names no ABI at
+; all. status is one of hit/miss/nothing, span is the already-rendered typed
+; observation, reason is free text. The adapter that turns a knowledge ABI into
+; that triple lives beside it, so the cursor mechanism and any ABI can land in either
+; order and a second substrate needs a second adapter, not a second cursor.
+;
+; WHY PREFILL IS THE WHOLE PERFORMANCE ARGUMENT. prefillf threads the SAME
+; decode state at a position, so every position before the injection keeps the
+; KV rows it was written with. An injected observation costs its own span, not
+; the context it lands in.
+;
+; THE BOUND is form-cli-heedmark's, mapped onto the adapter's status:
+;   hit         the typed observation enters, attribution carried by the adapter
+;   miss        the typed observation enters, answer empty — a model told
+;               nothing invents the row the body does not hold
+;   nothing     nothing enters; axiom-1. Covers a declined frame, an over-budget
+;               frame (no IO at all), and a late lookup (named with its ms)
+;   spent       the per-turn budget is gone; the envelope is NOT executed and
+;               the mark stays plain text. Checked BEFORE any lookup.
+;
+; PRELUDE ORDER IS LOAD-BEARING. language-model.fk comes BEFORE the xtal: the
+; lowered HeedRequest template calls language-template-with-members, and without
+; it first the chain reports a ts-only lane seam and every verdict downstream is
+; a fold over nothing. Dependency-first, full closure — a sibling's prelude does
+; not count for this unit.
+;
+; preludes: form-stdlib/core.fk form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk
+;
+; Proven by: form-stdlib/tests/form-cli-heed-cursor-band.fk
+;            form-stdlib/tests/form-cli-heed-cursor-adversarial-band.fk
+
+(do
+    ; ── the two bounded windows ────────────────────────────────────────────
+    (defn fhc-detect-cap () (fhm-detect-cap))
+    (defn fhc-hold-cap () (fhm-hold-cap))
+
+    (defn fhc-clip-left (s cap)
+        (if (le (str_len s) cap) s (substring s (sub (str_len s) cap) (str_len s))))
+
+    ; Feed one token's bytes. Before an open mark, keep only enough tail for a
+    ; split open mark to form. From an open mark onward, keep FROM it — the
+    ; mark is never clipped away, which is what makes an over-long query
+    ; observable instead of silent.
+    (defn fhc-feed (window text)
+        (do (let w (str_concat window text))
+            (let o (str_find w (HeedOpen) 0))
+            (if (lt o 0)
+                (fhc-clip-left w (fhc-detect-cap))
+                (substring w o (str_len w)))))
+
+    ; ── the scan: none | held | complete | over-budget ─────────────────────
+    ; held is not a failure. It is the cursor waiting for the close mark, and it
+    ; is why a multi-token envelope survives a byte-BPE that splits it.
+    (defn fhc-has-close? (window o)
+        (if (ge (str_find window (HeedClose) (add o (str_len (HeedOpen)))) 0) 1 0))
+
+    (defn fhc-scan (window)
+        (do (let o (str_find window (HeedOpen) 0))
+            (if (lt o 0) (fhm-state-none)
+                (do (let hc (fhc-has-close? window o))
+                    (if (eq hc 1) (fhm-state-complete)
+                        (if (eq (fhm-over-budget? (str_len window) hc) 1)
+                            (fhm-state-over) (fhm-state-held)))))))
+
+    ; The surface fkqt-parse wants: opens with the open mark, closes with the
+    ; close mark, no trailing bytes. The stream grammar intentionally permits
+    ; that exact frame inside ordinary decoded output: leading/trailing model
+    ; bytes remain in `out`, while only this sliced frame crosses the strict
+    ; parser. Prompt examples never cross this cursor; only newly decoded ids do.
+    (defn fhc-frame (window)
+        (do (let o (str_find window (HeedOpen) 0))
+            (if (lt o 0) ""
+                (do (let c (str_find window (HeedClose) (add o (str_len (HeedOpen)))))
+                    (if (lt c 0) ""
+                        (substring window o (add c (str_len (HeedClose)))))))))
+
+    ; ── the two-phase ledger ───────────────────────────────────────────────
+    ; (phase query-left answer-left cut timeout). answer-left holds the reserve
+    ; from the start and is UNTOUCHABLE while phase is PhaseQuery — that is what
+    ; non-borrowable means here, and it is why query verbosity can never reach
+    ; the answer. Opening the answer phase zeroes the query remainder into `cut`
+    ; rather than carrying it: unused query fuel is cut, not banked.
+    (defn fhc-ledger (phase query-left answer-left cut timeout)
+        (list phase query-left answer-left cut timeout))
+    (defn fhc-ledger-phase (l) (nth l 0))
+    (defn fhc-ledger-query (l) (nth l 1))
+    (defn fhc-ledger-answer (l) (nth l 2))
+    (defn fhc-ledger-cut (l) (nth l 3))
+    (defn fhc-ledger-timeout (l) (nth l 4))
+
+    (defn fhc-ledger-two-phase (query reserve) (fhc-ledger (PhaseQuery) query reserve 0 0))
+    ; A fungible budget is one phase with no reserve — the old contract, kept
+    ; exactly so the existing entry points mean what they always meant.
+    (defn fhc-ledger-fungible (n) (fhc-ledger (PhaseQuery) n 0 0 0))
+
+    (defn fhc-steps-left (l)
+        (if (eq (fhc-ledger-phase l) (PhaseQuery)) (fhc-ledger-query l) (fhc-ledger-answer l)))
+
+    (defn fhc-ledger-spend (l)
+        (if (eq (fhc-ledger-phase l) (PhaseQuery))
+            (fhc-ledger (PhaseQuery) (sub (fhc-ledger-query l) 1) (fhc-ledger-answer l)
+                (fhc-ledger-cut l) (fhc-ledger-timeout l))
+            (fhc-ledger (PhaseAnswer) (fhc-ledger-query l) (sub (fhc-ledger-answer l) 1)
+                (fhc-ledger-cut l) (fhc-ledger-timeout l))))
+
+    ; Opened ONLY after a typed hit/miss observation has actually been injected.
+    (defn fhc-ledger-open-answer (l)
+        (fhc-ledger (PhaseAnswer) 0 (fhc-ledger-answer l)
+            (add (fhc-ledger-cut l) (fhc-ledger-query l)) (fhc-ledger-timeout l)))
+
+    (defn fhc-ledger-mark-timeout (l)
+        (fhc-ledger (fhc-ledger-phase l) (fhc-ledger-query l) (fhc-ledger-answer l)
+            (fhc-ledger-cut l) 1))
+
+    ; ── cursor state ───────────────────────────────────────────────────────
+    ; Internal shape:
+    ;   (window budget honor-attempts injected-ids records
+    ;    close-commits terminal-forwards injection-refusals
+    ;    frame-refusals elapsed-ms ledger query-tokens answer-tokens
+    ;    bytes stopped)
+    ;
+    ; The adapter contract remains the generic triple `(status span reason)`.
+    ; Records retain a bounded copy plus one cursor-owned injection note; a live
+    ; report can therefore distinguish an honor attempt from source IO without
+    ; teaching this model-neutral cell any source schema.
+    (defn fhc-evidence-span-cap () 2048)
+    (defn fhc-evidence-reason-cap () 192)
+    (defn fhc-evidence-clip (s cap)
+        (if (le (str_len s) cap) s (substring s 0 cap)))
+    (defn fhc-record (status span reason note)
+        (list status
+              (fhc-evidence-clip span (fhc-evidence-span-cap))
+              (fhc-evidence-clip reason (fhc-evidence-reason-cap))
+              note))
+    (defn fhc-record-status (r) (nth r 0))
+    (defn fhc-record-span (r) (nth r 1))
+    (defn fhc-record-reason (r) (nth r 2))
+    (defn fhc-record-note (r) (nth r 3))
+    (defn fhc-record-of-honor (h note)
+        (fhc-record (fhc-honor-status h) (fhc-honor-span h)
+                    (fhc-honor-reason h) note))
+    (defn fhc-records-of-statuses (statuses)
+        (if (nil? statuses) (empty)
+            (cons (fhc-record (head statuses) "" "" "")
+                  (fhc-records-of-statuses (tail statuses)))))
+    ; Compatibility constructor for pure callers that only carry statuses.
+    (defn fhc-cursor (window budget attempts injected honored)
+        (fhc-state-full window budget attempts injected
+            (fhc-records-of-statuses honored) 0 0 0 0 0))
+    (defn fhc-state (window budget attempts injected records commits terminals refusals)
+        (fhc-state-full window budget attempts injected records commits terminals
+            refusals 0 0))
+    (defn fhc-state-full (window budget attempts injected records commits terminals
+                          injection-refusals frame-refusals elapsed)
+        (fhc-state-2p-full window budget attempts injected records commits terminals
+            injection-refusals frame-refusals elapsed
+            (fhc-ledger-fungible 0) 0 0 0 0))
+    (defn fhc-state-2p-full (window budget attempts injected records commits terminals
+                             injection-refusals frame-refusals elapsed ledger
+                             query-tokens answer-tokens bytes stopped)
+        (list window budget attempts injected records commits terminals
+              injection-refusals frame-refusals elapsed ledger query-tokens
+              answer-tokens bytes stopped))
+    (defn fhc-window (c) (nth c 0))
+    (defn fhc-budget (c) (nth c 1))
+    (defn fhc-attempts (c) (nth c 2))
+    ; Kept as a compatibility alias. It never claims source IO; reports use the
+    ; explicit honor-attempt and source-search names.
+    (defn fhc-lookups (c) (fhc-attempts c))
+    (defn fhc-injected (c) (nth c 3))
+    (defn fhc-records (c) (nth c 4))
+    (defn fhc-statuses-of-records (records)
+        (if (nil? records) (empty)
+            (cons (fhc-record-status (head records))
+                  (fhc-statuses-of-records (tail records)))))
+    (defn fhc-honored (c) (fhc-statuses-of-records (fhc-records c)))
+    (defn fhc-close-commits (c) (nth c 5))
+    (defn fhc-terminal-forwards (c) (nth c 6))
+    (defn fhc-injection-refusals (c) (nth c 7))
+    (defn fhc-frame-refusals (c) (nth c 8))
+    ; Compatibility name used by the adversarial cursor band.
+    (defn fhc-refused (c) (fhc-frame-refusals c))
+    (defn fhc-elapsed (c) (nth c 9))
+    (defn fhc-ledger-of (c) (nth c 10))
+    (defn fhc-query-tokens (c) (nth c 11))
+    (defn fhc-answer-tokens (c) (nth c 12))
+    (defn fhc-bytes (c) (nth c 13))
+    (defn fhc-stopped? (c) (nth c 14))
+
+    (defn fhc-phase (c) (fhc-ledger-phase (fhc-ledger-of c)))
+    (defn fhc-cut (c) (fhc-ledger-cut (fhc-ledger-of c)))
+    (defn fhc-timeout? (c) (fhc-ledger-timeout (fhc-ledger-of c)))
+    (defn fhc-query-left (c) (fhc-ledger-query (fhc-ledger-of c)))
+    (defn fhc-answer-left (c) (fhc-ledger-answer (fhc-ledger-of c)))
+
+    (defn fhc-fresh (budget)
+        (fhc-state-full "" budget 0 0 (empty) 0 0 0 0 0))
+    (defn fhc-fresh-2p (heeds query reserve)
+        (fhc-state-2p-full "" heeds 0 0 (empty) 0 0 0 0 0
+            (fhc-ledger-two-phase query reserve) 0 0 0 0))
+    (defn fhc-with-ledger (c ledger)
+        (fhc-state-2p-full (fhc-window c) (fhc-budget c) (fhc-attempts c)
+            (fhc-injected c) (fhc-records c) (fhc-close-commits c)
+            (fhc-terminal-forwards c) (fhc-injection-refusals c)
+            (fhc-frame-refusals c) (fhc-elapsed c) ledger
+            (fhc-query-tokens c) (fhc-answer-tokens c) (fhc-bytes c)
+            (fhc-stopped? c)))
+    (defn fhc-with-window (c window)
+        (fhc-state-2p-full window (fhc-budget c) (fhc-attempts c) (fhc-injected c)
+            (fhc-records c) (fhc-close-commits c) (fhc-terminal-forwards c)
+            (fhc-injection-refusals c) (fhc-frame-refusals c) (fhc-elapsed c)
+            (fhc-ledger-of c) (fhc-query-tokens c) (fhc-answer-tokens c)
+            (fhc-bytes c) (fhc-stopped? c)))
+    (defn fhc-with-terminal-forward (c)
+        (fhc-state-2p-full (fhc-window c) (fhc-budget c) (fhc-attempts c)
+            (fhc-injected c)
+            (fhc-records c) (fhc-close-commits c)
+            (add (fhc-terminal-forwards c) 1) (fhc-injection-refusals c)
+            (fhc-frame-refusals c) (fhc-elapsed c) (fhc-ledger-of c)
+            (fhc-query-tokens c) (fhc-answer-tokens c) (fhc-bytes c)
+            (fhc-stopped? c)))
+
+    ; ── status -> the current heedmark mechanism ───────────────────────────
+    (defn fhc-outcome-of (status)
+        (if (str_eq status "hit") (OutHit)
+            (if (str_eq status "miss") (OutMiss)
+                (if (str_eq status "spent") (OutSpent) (OutNothing)))))
+
+    (defn fhc-enters? (status) (fhm-injects-span (fhc-outcome-of status)))
+    (defn fhc-knowledge? (status) (fhm-injects-knowledge (fhc-outcome-of status)))
+
+    (defn fhc-stop? (id stops)
+        (if (eq (len stops) 0) 0
+            (if (eq id (head stops)) 1 (fhc-stop? id (tail stops)))))
+
+    ; ── honoring one complete envelope ─────────────────────────────────────
+    ; Budget is read BEFORE the lookup: a spent turn performs no IO. The clock
+    ; is read on both sides, so lateness is measured rather than assumed.
+    ; Returns (status span reason elapsed-ms).
+    (defn fhc-honor (ctx lookupf local-ready budget frame)
+        (if (le budget 0)
+            (list "spent" "" "budget-spent" 0)
+            (do (let t0 (now_unix_ms))
+                (let r (lookupf ctx frame local-ready))
+                (let elapsed (sub (now_unix_ms) t0))
+                (if (eq (fhm-late? elapsed) 1)
+                    (list "nothing" "" (fhm-late-reason elapsed) elapsed)
+                    (list (nth r 0) (nth r 1) (nth r 2) elapsed)))))
+
+    ; An over-budget frame: named, and NO lookup runs at all.
+    (defn fhc-refusal () (list "nothing" "" (fhm-over-reason) 0))
+
+    (defn fhc-honor-status (h) (nth h 0))
+    (defn fhc-honor-span (h) (nth h 1))
+    (defn fhc-honor-reason (h) (nth h 2))
+    (defn fhc-honor-elapsed (h) (nth h 3))
+
+    ; The span that enters is whatever the adapter rendered. This cell does not
+    ; invent a second format and does not read an ABI to find out. The mechanism
+    ; still gates: nothing and spent enter nothing whatever the adapter handed
+    ; back.
+    (defn fhc-span-of (status span)
+        (if (eq (fhc-enters? status) 0) "" span))
+
+    ; ── the loop ───────────────────────────────────────────────────────────
+    ; Returns (out cursor pos). out is the model's own id stream; injected
+    ; observation ids are counted in the cursor, never mixed into out, so a
+    ; witness can always tell what the model said from what the body answered.
+    ; ── closing, and the three different ways a walk can end ───────────────
+    ; STOP, TIMEOUT and ordinary end are three facts, not one. A scorer that
+    ; cannot tell them apart records a miss the model never made.
+    ;   stop     the model emitted a stop id — it finished on purpose
+    ;   timeout  the query budget ran out while a frame was still HELD. The
+    ;            decode timed out and the answer alternative was never tried;
+    ;            that is a named observation, NOT exhaustion.
+    ;   end      steps ran out with nothing held
+    ; Already-emitted model state is never undone here. The walk records what
+    ; happened; it does not rewind the stream.
+    (defn fhc-note (c reason)
+        (fhc-state-2p-full (fhc-window c) (fhc-budget c) (fhc-attempts c)
+            (fhc-injected c)
+            (append (fhc-records c)
+                (list (fhc-record reason "" reason (fhm-timeout-alternative))))
+            (fhc-close-commits c) (fhc-terminal-forwards c)
+            (fhc-injection-refusals c) (fhc-frame-refusals c) (fhc-elapsed c)
+            (fhc-ledger-mark-timeout (fhc-ledger-of c))
+            (fhc-query-tokens c) (fhc-answer-tokens c) (fhc-bytes c) (fhc-stopped? c)))
+
+    (defn fhc-mark-stopped (c)
+        (fhc-state-2p-full (fhc-window c) (fhc-budget c) (fhc-attempts c)
+            (fhc-injected c) (fhc-records c) (fhc-close-commits c)
+            (fhc-terminal-forwards c) (fhc-injection-refusals c)
+            (fhc-frame-refusals c) (fhc-elapsed c) (fhc-ledger-of c)
+            (fhc-query-tokens c) (fhc-answer-tokens c) (fhc-bytes c) 1))
+
+    (defn fhc-close (c out pos)
+        (if (and (eq (fhc-phase c) (PhaseQuery))
+                 (str_eq (fhc-scan (fhc-window c)) (fhm-state-held)))
+            (list out (fhc-note c (fhm-timeout-reason)) pos)
+            (list out c pos)))
+
+    ; Bounded non-content telemetry, counted AT the live cursor: how many tokens
+    ; and bytes streamed in which phase. Never the stream itself.
+    (defn fhc-count (c txt)
+        (do (let l (fhc-ledger-of c))
+            (let query? (eq (fhc-ledger-phase l) (PhaseQuery)))
+            (fhc-state-2p-full (fhc-window c) (fhc-budget c) (fhc-attempts c)
+                (fhc-injected c) (fhc-records c) (fhc-close-commits c)
+                (fhc-terminal-forwards c) (fhc-injection-refusals c)
+                (fhc-frame-refusals c) (fhc-elapsed c) (fhc-ledger-spend l)
+                (if query? (add (fhc-query-tokens c) 1) (fhc-query-tokens c))
+                (if query? (fhc-answer-tokens c) (add (fhc-answer-tokens c) 1))
+                (add (fhc-bytes c) (str_len txt)) (fhc-stopped? c))))
+
+    ; ── the walk ───────────────────────────────────────────────────────────
+    (defn fhc-walk (ctx stepf prefillf decodef encodef lookupf local-ready
+                    id pos stops c out)
+        (if (le (fhc-steps-left (fhc-ledger-of c)) 0) (fhc-close c out pos)
+            (do
+                (let nid (stepf ctx id pos))
+                ; stepf consumed `id` at pos even when the id it predicts is a
+                ; stop. Position and telemetry both retain that terminal step.
+                (if (lt nid 0)
+                    (fhc-close (fhc-with-terminal-forward c) out (add pos 1))
+                    (if (eq (fhc-stop? nid stops) 1)
+                        (list out (fhc-mark-stopped (fhc-with-terminal-forward c))
+                            (add pos 1))
+                        (do
+                            (let txt (decodef ctx (list nid)))
+                            (fhc-dispatch ctx stepf prefillf decodef encodef lookupf
+                                local-ready nid (add pos 1) stops (fhc-count c txt)
+                                (fhc-feed (fhc-window c) txt)
+                                (append out (list nid)))))))))
+
+    ; One token has been fed into the window; decide what it made.
+    (defn fhc-dispatch (ctx stepf prefillf decodef encodef lookupf local-ready
+                        id pos stops c w out)
+        (do
+            (let state (fhc-scan w))
+            (if (str_eq state (fhm-state-complete))
+                (fhc-resume ctx stepf prefillf decodef encodef lookupf
+                    local-ready id pos stops c w out)
+                (if (str_eq state (fhm-state-over))
+                    (fhc-refuse ctx stepf prefillf decodef encodef lookupf
+                        local-ready id pos stops c out)
+                    (fhc-walk ctx stepf prefillf decodef encodef lookupf
+                        local-ready id pos stops (fhc-with-window c w)
+                        out)))))
+
+    ; ── compatibility delegates ────────────────────────────────────────────
+    ; The old entry points keep their exact signatures and their exact meaning:
+    ; one fungible budget, no reserve. Everything already written against them
+    ; reads what it always read. New callers take the two-phase entries below.
+    (defn fhc-run (ctx stepf prefillf decodef encodef lookupf local-ready
+                   id pos n stops c out)
+        (fhc-walk ctx stepf prefillf decodef encodef lookupf local-ready
+            id pos stops (fhc-with-ledger c (fhc-ledger-fungible n)) out))
+
+    ; ── the seeded entry, and why it exists ────────────────────────────────
+    ; A prefill answers with the FIRST GENERATED TOKEN — the argmax at the last
+    ; prompt position — and the position after it. That token is part of the
+    ; model's reply. An earlier wiring passed it to fhc-run as the `id` input
+    ; only, so it drove the next forward pass but its own bytes never reached
+    ; the window and it never reached `out`.
+    ;
+    ; The live witness is what found this. Qwen emitted a complete envelope and
+    ; the cursor read `|form:knowledge-query|>` — the leading `<` was the seed
+    ; token, dropped — so the open mark never matched and lookups stayed 0.
+    ; Three green bands had missed it, because a scripted stepper starts from a
+    ; synthetic id that was never meant to be part of the stream.
+    ;
+    ; Seed the window and the output with that token, then walk. A seed that is
+    ; itself a whole envelope is honored like any other completion.
+    (defn fhc-seed-into (ctx stepf prefillf decodef encodef lookupf local-ready
+                         seed pos stops c)
+        (if (lt seed 0) (list (empty) c pos)
+            (if (eq (fhc-stop? seed stops) 1)
+                (list (empty) (fhc-mark-stopped c) pos)
+                (do (let txt (decodef ctx (list seed)))
+                    (fhc-dispatch ctx stepf prefillf decodef encodef lookupf
+                        local-ready seed pos stops (fhc-count c txt)
+                        (fhc-feed "" txt) (list seed))))))
+
+    (defn fhc-run-seeded (ctx stepf prefillf decodef encodef lookupf local-ready
+                          seed pos n stops budget)
+        (fhc-seed-into ctx stepf prefillf decodef encodef lookupf local-ready
+            seed pos stops
+            (fhc-with-ledger (fhc-fresh budget) (fhc-ledger-fungible n))))
+
+    ; ── the two-phase entries ──────────────────────────────────────────────
+    ; heeds is the lookup budget; query is the step budget for composing a
+    ; knowledge query; reserve is the non-borrowable answer budget that opens
+    ; only once a typed observation has actually been injected.
+    (defn fhc-run-2p (ctx stepf prefillf decodef encodef lookupf local-ready
+                      id pos stops heeds query reserve out)
+        (fhc-walk ctx stepf prefillf decodef encodef lookupf local-ready
+            id pos stops (fhc-fresh-2p heeds query reserve) out))
+
+    (defn fhc-run-seeded-2p (ctx stepf prefillf decodef encodef lookupf local-ready
+                             seed pos stops heeds query reserve)
+        (fhc-seed-into ctx stepf prefillf decodef encodef lookupf local-ready
+            seed pos stops (fhc-fresh-2p heeds query reserve)))
+
+    ; An over-long query. The window is reset so the stream can carry on, the
+    ; refusal is counted, and the budget is UNTOUCHED — no lookup ran, so none
+    ; was spent. The reason is the parser's own named nothing.
+    (defn fhc-refuse (ctx stepf prefillf decodef encodef lookupf local-ready
+                      id pos stops c out)
+        (fhc-walk ctx stepf prefillf decodef encodef lookupf local-ready
+            id pos stops
+            (fhc-state-2p-full "" (fhc-budget c) (fhc-attempts c)
+                (fhc-injected c)
+                (append (fhc-records c)
+                    (list (fhc-record (fhm-over-reason) ""
+                        (fhm-over-reason) "no-source-io")))
+                (fhc-close-commits c) (fhc-terminal-forwards c)
+                (fhc-injection-refusals c)
+                (add (fhc-frame-refusals c) 1) (fhc-elapsed c)
+                (fhc-ledger-of c)
+                (fhc-query-tokens c) (fhc-answer-tokens c) (fhc-bytes c)
+                (fhc-stopped? c))
+            out))
+
+    ; q38-prefill has already answered its first id: it is a decoded model
+    ; token, not the prior id that stepf consumes. Accept it into BOTH the
+    ; bounded byte window and model output before asking for another forward.
+    ; Calling fhc-run directly at this seam would step first and silently lose
+    ; it. pos remains the position where first will be consumed on the next
+    ; step, exactly like the `(cons first (q38-generate ...))` contract.
+    (defn fhc-walk-decoded-first
+        (ctx stepf prefillf decodef encodef lookupf local-ready
+         first pos stops c out)
+        (if (le (fhc-steps-left (fhc-ledger-of c)) 0) (fhc-close c out pos)
+            (if (lt first 0) (fhc-close c out pos)
+                (if (eq (fhc-stop? first stops) 1)
+                    (list out (fhc-mark-stopped c) pos)
+                (do
+                    (let txt (decodef ctx (list first)))
+                    (let w (fhc-feed (fhc-window c) txt))
+                    (let out2 (append out (list first)))
+                    (fhc-dispatch ctx stepf prefillf decodef encodef lookupf
+                        local-ready first pos stops (fhc-count c txt) w out2))))))
+
+    ; Compatibility door: one fungible budget, as before.
+    (defn fhc-run-decoded-first
+        (ctx stepf prefillf decodef encodef lookupf local-ready
+         first pos n stops c out)
+        (fhc-walk-decoded-first ctx stepf prefillf decodef encodef lookupf
+            local-ready first pos stops
+            (fhc-with-ledger c (fhc-ledger-fungible n)) out))
+
+    ; A complete frame: honor it, prefill what enters, RESET the window so the
+    ; same envelope cannot fire twice, and carry on from where prefill left off.
+    ; A complete frame: honor it, prefill what enters, RESET the window so the
+    ; same envelope cannot fire twice, and carry on from where prefill left off.
+    ;
+    ; THE RESERVE OPENS HERE AND NOWHERE ELSE, and only when a span was actually
+    ; injected. A hit or a miss puts a typed observation in the stream, so the
+    ; model is owed room to answer it: the answer phase opens at full reserve and
+    ; whatever query budget is left is CUT into the ledger's `cut` rather than
+    ; carried. This is what makes the last query slot safe — a valid query that
+    ; closes on its final step still opens a full reserve.
+    ;
+    ; nothing and spent inject nothing, so they open nothing, cut nothing, and
+    ; spend no reserve. The walk simply continues in the phase it was already in.
+    (defn fhc-resume (ctx stepf prefillf decodef encodef lookupf local-ready
+                      id pos stops c w out)
+        (do
+            (let h (fhc-honor ctx lookupf local-ready (fhc-budget c) (fhc-frame w)))
+            (let status (fhc-honor-status h))
+            (let span (fhc-span-of status (fhc-honor-span h)))
+            (let ids (if (eq (str_len span) 0) (empty) (encodef ctx span)))
+            (let spent? (str_eq status "spent"))
+            (let l (fhc-ledger-of c))
+            (let opens? (if (and (eq (fhm-opens-reserve (fhc-outcome-of status)) 1)
+                                  (gt (fhc-ledger-answer l) 0)) 1 0))
+            ; The current ledger or a real non-borrowable reserve must leave at
+            ; least one model-output slot after the observation. In particular,
+            ; a two-phase close on the final query slot may enter because its
+            ; answer reserve is still whole; a fungible final slot may not.
+            (let has-output? (if (eq opens? 1) 1
+                                  (if (gt (fhc-steps-left l) 0) 1 0)))
+            ; A typed observation is useful only if at least one subsequent
+            ; model token can be returned. The lookup outcome and its bounded
+            ; evidence remain visible, but no close commit or observation
+            ; prefill is spent at the end of the output budget.
+            (let no-output? (if (and (gt (len ids) 0) (eq has-output? 0)) 1 0))
+            (let enters? (if (and (gt (len ids) 0) (eq no-output? 0)) 1 0))
+            (let note (if (eq no-output? 1) "no-post-observation-output-budget" ""))
+            (let entered-ids (if (eq enters? 1) ids (empty)))
+            (let l2 (if (and (eq enters? 1) (eq opens? 1))
+                        (fhc-ledger-open-answer l) l))
+            (let c2 (fhc-state-2p-full ""
+                        (if spent? (fhc-budget c) (sub (fhc-budget c) 1))
+                        (if spent? (fhc-attempts c) (add (fhc-attempts c) 1))
+                        (add (fhc-injected c) (len entered-ids))
+                        (append (fhc-records c) (list (fhc-record-of-honor h note)))
+                        (add (fhc-close-commits c) enters?)
+                        (fhc-terminal-forwards c)
+                        (add (fhc-injection-refusals c) no-output?)
+                        (fhc-frame-refusals c)
+                        (add (fhc-elapsed c) (fhc-honor-elapsed h))
+                        l2 (fhc-query-tokens c) (fhc-answer-tokens c)
+                        (fhc-bytes c) (fhc-stopped? c)))
+            (if (eq enters? 0)
+                ; No observation enters: preserve the ordinary autoregressive
+                ; path. The completed closing id is consumed by the next stepf.
+                (fhc-walk ctx stepf prefillf decodef encodef lookupf local-ready
+                    id pos stops c2 out)
+                (do
+                    ; The close id is output but not yet in KV: stepf predicted
+                    ; it from the prior id. Commit it first, then place the
+                    ; observation at the returned next position. The first id
+                    ; decoded by observation prefill is model output too, so it
+                    ; crosses the same bounded first-token door rather than
+                    ; becoming a hidden resume seed.
+                    (let committed (prefillf ctx (list id) pos))
+                    (let pf (prefillf ctx entered-ids (nth committed 1)))
+                    (fhc-walk-decoded-first ctx
+                        stepf prefillf decodef encodef lookupf local-ready
+                        (nth pf 0) (nth pf 1) stops c2 out)))))
+
+    ; ── the seam a carrier reads ───────────────────────────────────────────
+    (defn fhc-out (r) (nth r 0))
+    (defn fhc-cursor-of (r) (nth r 1))
+    (defn fhc-pos (r) (nth r 2))
+    (defn fhc-model-executed () 0)
+
+    0)
+

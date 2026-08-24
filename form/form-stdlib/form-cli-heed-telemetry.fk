@@ -1,0 +1,92 @@
+; form-cli-heed-telemetry.fk — what a held-out run may report about itself.
+;
+; THE RULE THIS CELL EXISTS TO KEEP. A held-out evaluation that prints the
+; model's output has stopped being held out. Every field below is a COUNT, a
+; STATUS, or a HASH — never the stream. The output is reported as its SHA-256
+; and its byte length, which is enough to prove two runs produced the same reply
+; and not enough to read either one.
+;
+; The counts are taken at the live cursor as bytes arrive (fhc-count), so this
+; cell computes nothing about tokenization; it only reads what streaming already
+; counted. No tokenizer pre-step, no flatten, no ops table, no runtime C.
+;
+; THE THREE ENDINGS STAY THREE. stopped, timeout and ordinary end are reported
+; separately, because a scorer that folds them together records a miss the model
+; never made: a decode that timed out with the answer alternative untried is a
+; different fact from a model that answered and stopped.
+;
+; PRELUDE ORDER IS LOAD-BEARING: str-byte-at.fk before sha256.fk, or the chain
+; reports a ts-only lane seam and every number below is a fold over nothing.
+; Dependency-first, full closure — a sibling's prelude does not count here.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
+; preludes: form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk
+; preludes: form-stdlib/form-cli-heed-cursor.fk
+;
+; Proven by: form-stdlib/tests/form-cli-heed-twophase-band.fk (the counting mechanism)
+
+(do
+    (defn fht-count-loop (xs name acc)
+        (if (eq (len xs) 0) acc
+            (fht-count-loop (tail xs) name (add acc (if (str_eq (head xs) name) 1 0)))))
+    (defn fht-count (c name) (fht-count-loop (fhc-honored c) name 0))
+
+    (defn fht-sha (text)
+        (if (eq (str_len text) 0) "" (hex-encode (sha256-stream-string text))))
+
+    (defn fht-line (name value)
+        (print_str (str_concat "heed " (str_concat name (str_concat "=" (str_concat value "\n"))))))
+    (defn fht-int (name value) (fht-line name (int_to_str value)))
+
+    ; Read one bounded integer from a structured generation report. The held-out
+    ; carrier re-renders only this integer; missing, unterminated, or oversized
+    ; fields become -1, so no prompt or answer bytes can cross through this door.
+    (defn fht-report-int (raw name)
+        (do
+            (let marker (str_concat "\n" (str_concat name "=")))
+            (let at (str_find raw marker 0))
+            (if (lt at 0) -1
+                (do
+                    (let start (add at (str_len marker)))
+                    (let end (str_find raw "\n" start))
+                    (if (or (lt end 0) (gt (sub end start) 20)) -1
+                        (str_to_int (substring raw start end)))))))
+
+    ; The full bounded report. Nothing here can carry held-out content.
+    (defn fht-report (c out-text)
+        (do
+            (fht-int "model-executed" (fhc-model-executed))
+            (fht-int "phase" (fhc-phase c))
+            (fht-int "query-tokens" (fhc-query-tokens c))
+            (fht-int "answer-tokens" (fhc-answer-tokens c))
+            (fht-int "query-left" (fhc-query-left c))
+            (fht-int "answer-left" (fhc-answer-left c))
+            (fht-int "query-fuel-cut" (fhc-cut c))
+            (fht-int "stream-bytes" (fhc-bytes c))
+            (fht-int "lookups" (fhc-lookups c))
+            (fht-int "injected-ids" (fhc-injected c))
+            (fht-int "injection-refused" (fhc-injection-refusals c))
+            (fht-int "frame-refused" (fhc-frame-refusals c))
+            (fht-int "heeds-left" (fhc-budget c))
+            (fht-int "lookup-ms-total" (fhc-elapsed c))
+            (fht-int "hit" (fht-count c "hit"))
+            (fht-int "miss" (fht-count c "miss"))
+            (fht-int "nothing" (fht-count c "nothing"))
+            (fht-int "spent" (fht-count c "spent"))
+            (fht-int "over-budget" (fht-count c (fhm-over-reason)))
+            (fht-int "decode-timeout" (fhc-timeout? c))
+            (fht-int "stopped" (fhc-stopped? c))
+            (fht-line "timeout-alternative"
+                (if (eq (fhc-timeout? c) 1) (fhm-timeout-alternative) ""))
+            (fht-int "output-bytes" (str_len out-text))
+            (fht-line "output-sha256" (fht-sha out-text))
+            0))
+
+    ; A witness that wants to READ the reply is not a held-out witness. This is
+    ; named so that using it is a decision someone made on purpose.
+    (defn fht-report-with-content (c out-text)
+        (do (fht-report c out-text)
+            (fht-line "output-content-NOT-HELD-OUT" out-text)
+            0))
+
+    0)

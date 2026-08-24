@@ -1,0 +1,224 @@
+; form-cli-model-session.fk — one resident Qwen context across executable
+; Form observations, without re-encoding model output the body already holds.
+;
+; A Qwen transformer consumes integer embedding IDs. That boundary remains the
+; model's physical shape. What this cell removes is the avoidable round trip:
+;
+;   generated ids -> decoded bytes -> whole transcript -> generated ids again
+;
+; The initial user turn is encoded once. Generation then returns both decoded
+; text and the exact IDs that produced it while retaining the same q38 stream
+; state and KV rows. A Form observation encodes only its newly born bytes plus
+; the small ChatML role crossing, prefills those IDs at the current position,
+; and resumes from the first predicted reply ID. BML/BMF still consumes the
+; decoded bytes directly through its own cursor; no tokenizer pre-step shapes
+; that grammar.
+;
+; The final generated ID is deliberately held pending. q38-forward consumes an
+; ID at a position and predicts the next one, so the newest prediction has not
+; entered KV yet. Before an observation is injected, that pending ID is placed
+; exactly once. If it is already a stop ID, it supplies the assistant close;
+; otherwise the close ID is appended after it. This is the same seed boundary
+; whose earlier omission the live heed cursor exposed.
+;
+; This cell owns stream state, not weights: the surrounding q38 context and the
+; per-conversation state are both explicit and both released. No persistence,
+; model weight update, or remote call is implied.
+;
+; preludes: form-stdlib/form-cli-model-generate.fk
+; Proven by: form-stdlib/tests/form-cli-model-session-band.fk
+
+(do
+    ; session = tag status reason path src ctx sts maxpos pos pending
+    ;           stopped prompt-ids generated-ids injected-ids observation-count
+    (defn fcms-session (status reason path src ctx sts maxpos pos pending stopped
+                        prompt-ids generated-ids injected-ids observations)
+        (list "form-cli-model-session-v1" status reason path src ctx sts maxpos
+              pos pending stopped prompt-ids generated-ids injected-ids observations))
+    (defn fcms-status (s) (nth s 1))
+    (defn fcms-reason (s) (nth s 2))
+    (defn fcms-path (s) (nth s 3))
+    (defn fcms-src (s) (nth s 4))
+    (defn fcms-ctx (s) (nth s 5))
+    (defn fcms-sts (s) (nth s 6))
+    (defn fcms-maxpos (s) (nth s 7))
+    (defn fcms-pos (s) (nth s 8))
+    (defn fcms-pending (s) (nth s 9))
+    (defn fcms-stopped? (s) (nth s 10))
+    (defn fcms-prompt-ids (s) (nth s 11))
+    (defn fcms-generated-ids (s) (nth s 12))
+    (defn fcms-injected-ids (s) (nth s 13))
+    (defn fcms-observations (s) (nth s 14))
+    (defn fcms-live? (s) (if (str_eq (fcms-status s) "live") 1 0))
+    (defn fcms-pending? (s) (if (ge (fcms-pending s) 0) 1 0))
+    ; Status and ownership are deliberately separate. A context-window refusal
+    ; can make the conversational operation `nothing` while the already-opened
+    ; context and stream state still need their physical release.
+    (defn fcms-resident? (s)
+        (if (and (gt (len (fcms-ctx s)) 0) (gt (len (fcms-sts s)) 0)) 1 0))
+
+    (defn fcms-none (reason)
+        (fcms-session "nothing" reason "" "" (empty) (empty) 0 0 -1 0
+                      0 0 0 0))
+    (defn fcms-with-stream (s pos pending stopped generated injected observations)
+        (fcms-session (fcms-status s) (fcms-reason s) (fcms-path s)
+            (fcms-src s) (fcms-ctx s) (fcms-sts s) (fcms-maxpos s)
+            pos pending stopped (fcms-prompt-ids s) generated injected observations))
+
+    ; The API names what is and is not encoded. A live observation can report
+    ; these strings without reproducing model or user content.
+    (defn fcms-initial-encode-scope () "initial-user-turn-once")
+    (defn fcms-resume-encode-scope () "new-observation-bytes-and-role-crossing-only")
+    (defn fcms-generated-id-policy () "carry-original-generated-ids-and-kv")
+    (defn fcms-model-executed-form? () 0)
+
+    (defn fcms-open (path prompt maxpos)
+        (do
+            (let verdict (qaf-seal-verdict path))
+            (if (not (eq verdict 1))
+                (fcms-none (fcmg-seal-refusal verdict))
+                (do
+                    (let src (fcmg-src path))
+                    (let arch (fcmg-arch src))
+                    (let ids (fcmg-chat-ids src prompt))
+                    (if (not (str_eq arch "qwen35"))
+                        (fcms-none (str_concat "architecture=" arch))
+                    (if (eq (len ids) 0)
+                        (fcms-none "initial-turn-encoded-no-ids")
+                    (if (or (le maxpos (len ids))
+                            (gt maxpos (gmt-u32 src (q38-key arch "context_length"))))
+                        (fcms-none "session-context-window-refused")
+                        (do
+                            (let ctx (q38-open path maxpos))
+                            (if (not (eq (q38-context-ok? ctx) 1))
+                                (do
+                                    (let closed (if (lt (len ctx) 10) 0
+                                        (q38-close ctx (empty))))
+                                    (fcms-none "model-context-open-refused"))
+                                (do
+                                    (let sts (q38-new-state (nth ctx 2)))
+                                    (if (not (eq (q38-state-ok? sts) 1))
+                                        (do
+                                            (let state-closed (q38-free-state sts))
+                                            (let context-closed (q38-close ctx (empty)))
+                                            (fcms-none "model-stream-state-refused"))
+                                        (do
+                                            (let pf (q38-prefill
+                                                (nth ctx 0) (nth ctx 1) (nth ctx 2)
+                                                (nth ctx 3) sts (nth ctx 4) (nth ctx 5)
+                                                (nth ctx 6) ids 0))
+                                            (fcms-session "live" "opened" path src ctx sts
+                                                maxpos (nth pf 1) (nth pf 0) 0
+                                                (len ids) 0 0 0)))))))))))))
+
+    ; result = (ids pending pos stopped). Returned ids are model speech only;
+    ; the stop/control prediction is retained separately for the next crossing.
+    (defn fcms-walk (s id pos left stops out)
+        (if (lt id 0) (list out -1 pos 1)
+        (if (eq (q38-stop? id stops) 1) (list out id pos 1)
+        (if (le left 0) (list out id pos 0)
+            (do
+                (let out2 (append out (list id)))
+                (if (eq left 1) (list out2 id pos 0)
+                    (do
+                        (let ctx (fcms-ctx s))
+                        (let nid (q38-forward
+                            (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
+                            (fcms-sts s) (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                            id pos))
+                        (if (lt nid 0) (list out2 -1 (add pos 1) 1)
+                        (if (eq (q38-stop? nid stops) 1)
+                            (list out2 nid (add pos 1) 1)
+                            (fcms-walk s nid (add pos 1) (sub left 1)
+                                stops out2))))))))))
+
+    ; generation = tag text ids updated-session. No generated text is needed to
+    ; resume; the bytes are exposed only for the Form/BMF boundary that asks.
+    (defn fcms-generation (text ids session)
+        (list "form-cli-model-session-generation-v1" text ids session))
+    (defn fcms-generation-text (g) (nth g 1))
+    (defn fcms-generation-ids (g) (nth g 2))
+    (defn fcms-generation-session (g) (nth g 3))
+    (defn fcms-generate (s n)
+        (if (or (not (eq (fcms-live? s) 1)) (le n 0))
+            (fcms-generation "" (empty) s)
+            (do
+                (let stops (fcmg-q35-stops (fcms-src s)))
+                (let walked (fcms-walk s (fcms-pending s) (fcms-pos s)
+                    n stops (empty)))
+                (let ids (nth walked 0))
+                (let next (fcms-with-stream s (nth walked 2) (nth walked 1)
+                    (nth walked 3) (add (fcms-generated-ids s) (len ids))
+                    (fcms-injected-ids s) (fcms-observations s)))
+                (fcms-generation (tkz-decode-text (fcms-src s) ids) ids next))))
+
+    ; The tail begins after an assistant close. It contains only newly born
+    ; role/observation bytes and the fresh assistant opening.
+    (defn fcms-tool-tail-ids (src text)
+        (do
+            (let ims (q35-special-id src "<|im_start|>"))
+            (let ime (q35-special-id src "<|im_end|>"))
+            (let ths (q35-special-id src "<think>"))
+            (let the (q35-special-id src "</think>"))
+            (tkz-cat (q35-encode src "\n")
+            (tkz-cat (q35-one ims)
+            (tkz-cat (q35-encode src "tool\n")
+            (tkz-cat (q35-encode src text)
+            (tkz-cat (q35-one ime)
+            (tkz-cat (q35-encode src "\n")
+            (tkz-cat (q35-one ims)
+            (tkz-cat (q35-encode src "assistant\n")
+            (tkz-cat (q35-one ths)
+            (tkz-cat (q35-encode src "\n\n")
+            (tkz-cat (q35-one the)
+                     (q35-encode src "\n\n"))))))))))))))
+
+    (defn fcms-observation-ids (s text)
+        (do
+            (let src (fcms-src s))
+            (let stops (fcmg-q35-stops src))
+            (let pending (fcms-pending s))
+            (let close-needed
+                (if (and (ge pending 0) (eq (q38-stop? pending stops) 1)) 0 1))
+            (let prefix (if (ge pending 0) (q35-one pending) (empty)))
+            (let closed (if (eq close-needed 1)
+                (tkz-cat prefix (q35-one (q35-special-id src "<|im_end|>")))
+                prefix))
+            (tkz-cat closed (fcms-tool-tail-ids src text))))
+
+    ; Injects one typed Form observation into the SAME q38 state. It returns a
+    ; session whose pending ID is the first prediction after the observation.
+    (defn fcms-observe (s text)
+        (if (not (eq (fcms-live? s) 1)) s
+            (do
+                (let ids (fcms-observation-ids s text))
+                (if (or (eq (len ids) 0)
+                        (gt (add (fcms-pos s) (len ids)) (fcms-maxpos s)))
+                    (fcms-session "nothing" "observation-context-window-refused"
+                        (fcms-path s) (fcms-src s) (fcms-ctx s) (fcms-sts s)
+                        (fcms-maxpos s) (fcms-pos s) (fcms-pending s)
+                        (fcms-stopped? s) (fcms-prompt-ids s)
+                        (fcms-generated-ids s) (fcms-injected-ids s)
+                        (fcms-observations s))
+                    (do
+                        (let ctx (fcms-ctx s))
+                        (let pf (q38-prefill
+                            (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
+                            (fcms-sts s) (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                            ids (fcms-pos s)))
+                        (fcms-with-stream s (nth pf 1) (nth pf 0) 0
+                            (fcms-generated-ids s)
+                            (add (fcms-injected-ids s) (len ids))
+                            (add (fcms-observations s) 1)))))))
+
+    (defn fcms-release-ok? (s)
+        (if (eq (fcms-resident? s) 0) 1
+            (do
+                (let state-expected (q38-state-handle-count (fcms-sts s)))
+                (let state-closed (q38-free-state (fcms-sts s)))
+                (let context-expected (q38-close-expected (fcms-ctx s) (empty)))
+                (let context-closed (q38-close (fcms-ctx s) (empty)))
+                (if (and (eq state-closed state-expected)
+                         (eq context-closed context-expected)) 1 0))))
+
+    0)

@@ -1,0 +1,193 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-cli-heedmark.bml — high-grammar authority for the heedmark:
+// a mark the model emits and the carrier heeds.
+//
+// A heedmark is a Form-native execution token. The model writes it into
+// its own output as ordinary text. The carrier reads the emitted tail,
+// recognizes the mark, and performs a Form knowledge lookup. The answer
+// re-enters the stream as ordinary prefill at the current position.
+//
+// THE STANDING REFUSAL. LogitsExecuted = 0. The logits executed nothing.
+// A forward pass produces a distribution over ids and nothing else. The
+// model asked; the carrier answered. Naming that constant here means the
+// claim cannot drift into "the model called a tool" later.
+//
+// FOUR OUTCOMES, BOUNDED. hit (a grounded row, attribution required),
+// miss (the lookup ran and found no row — a named status enters so the
+// model is not left to invent one), nothing (the lookup could not answer
+// inside the window — axiom-1, silence is whole, no span enters), spent
+// (the per-turn budget is exhausted — the mark is not heeded and stays
+// plain text). Spent is the bound.
+//
+// THE PREFIX SEAM. The answer enters through prefill at the current
+// position, so every position before it keeps the KV rows it was written
+// with. Cost is the span, not the prefix. That is the whole performance
+// argument and it is a named function here.
+//
+// Executable lowering: form-stdlib/form-cli-heedmark.bml
+// Proven by: form-stdlib/tests/form-cli-heedmark-band.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+package Form.cli.heedmark;
+
+import Form.kernel.*;
+import Form.cli.flow.*;
+import Form.cli.oneturn.*;
+
+enum HeedOutcome [public] {
+   HIT,
+   MISS,
+   NOTHING,
+   SPENT
+}
+
+interface IHeedmark [public, witness, reusable] {
+   section [public] {
+      const int MaxHeeds = 2;
+      const int MaxQueryBytes = 256;
+      const int LookupLateMs = 2000;
+      const int QueryBudget = 48;
+      const int AnswerReserve = 32;
+      const int PhaseQuery = 1;
+      const int PhaseAnswer = 2;
+      const int LogitsExecuted = 0;
+      const int OutHit = 1;
+      const int OutMiss = 2;
+      const int OutNothing = 3;
+      const int OutSpent = 4;
+
+      int Outcome( int nBudgetLeft, int nIndexReady, int nLate, int nHits ) [abstract];
+      int Heeded( int nOutcome ) [abstract];
+      int InjectsSpan( int nOutcome ) [abstract];
+      int InjectsKnowledge( int nOutcome ) [abstract];
+      int AttributionRequired( int nOutcome ) [abstract];
+      int PrefillCost( int nPrefix, int nSpan ) [abstract];
+      int ForwardsSaved( int nPrefix, int nSpan ) [abstract];
+      int Bounded( int nMarks ) [abstract];
+      int FrameCap() [abstract];
+      int HoldCap() [abstract];
+      int DetectCap() [abstract];
+      int OverBudget( int nHeld, int nHasClose ) [abstract];
+      int Late( int nElapsedMs ) [abstract];
+      String LateReason( int nElapsedMs ) [abstract];
+      int FramingScore( String strFraming ) [abstract];
+   }
+}
+
+// The four states a streaming cursor can be in over its bounded byte window.
+// held is not a failure — it is the cursor waiting for a close mark, and it is
+// why an envelope split across many BPE pieces still completes. over-budget is
+// the state an earlier draft could not reach: it clipped from the left at frame
+// width, ate the open mark of an over-long query, and went silent where a
+// status could have spoken.
+enum StreamState [public] {
+   NONE,
+   HELD,
+   COMPLETE,
+   OVER_BUDGET
+}
+
+template HeedRequest<TQuery> [public, reusable] {
+   section [public] {
+      TQuery Query() [get];
+      int Outcome() [get];
+      String Attribution() [get];
+   }
+}
+
+class FormHeedmark [public, reusable, flow] : IHeedmark {
+   section [public] {
+      const String TrustRule = "the model marks; the carrier heeds; the answer enters as context, never as a return value";
+      const String RefusalRule = "logits execute nothing; a hit without a source is refused";
+      const String SilenceRule = "every way this can fail is a named observation; an over-long query is refused by name, never dropped";
+      const String TimeoutRule = "a late lookup reports how late; timeout carries its measurement and is never collapsed to a bit";
+      const String ExecutablePath = "form/form-stdlib/form-cli-heedmark.bml";
+
+      int Outcome( int nBudgetLeft, int nIndexReady, int nLate, int nHits ) [abstract] {}
+      int Heeded( int nOutcome ) [abstract] {}
+      int InjectsSpan( int nOutcome ) [abstract] {}
+      int InjectsKnowledge( int nOutcome ) [abstract] {}
+      int AttributionRequired( int nOutcome ) [abstract] {}
+      int PrefillCost( int nPrefix, int nSpan ) [abstract] {}
+      int ForwardsSaved( int nPrefix, int nSpan ) [abstract] {}
+      int Bounded( int nMarks ) [abstract] {}
+   }
+}
+
+// ── the two-phase ledger ────────────────────────────────────────────────────
+// One fungible step budget shared by query emission and the post-observation
+// answer is the defect. A valid query closing on its LAST slot gets its
+// observation injected and then has nothing left to answer with, and the scorer
+// records a miss the model never made. Query verbosity silently eats the answer.
+//
+// AnswerReserve is NON-BORROWABLE: untouchable until a typed hit or miss has
+// actually been injected, then opened at full size while the unused query
+// remainder is CUT rather than carried. Running out of query budget with a frame
+// still held is not exhaustion — it is a named observation.
+template PhaseLedger<TSteps> [public, reusable] {
+   section [public] {
+      TSteps QueryLeft() [get];
+      TSteps AnswerLeft() [get];
+      TSteps Cut() [get];
+      int Phase() [get];
+      int TimedOut() [get];
+   }
+}
+
+// The three ways a walk ends are three different facts. Folding them into one
+// makes a timed-out decode indistinguishable from a model that answered and
+// stopped, and a scorer cannot recover the difference afterwards.
+enum WalkEnding [public] {
+   STOP,
+   TIMEOUT,
+   END
+}
+
+// ── the curriculum ──────────────────────────────────────────────────────────
+// ANCHOR FIRST, PATH SECOND. An observation is read by the content address that
+// fixes WHICH cell answered, before the path that only says where a copy of it
+// was found today. A reader that leads with the path binds to a location; a
+// reader that leads with the anchor binds to the meaning and survives the file
+// moving.
+//
+// SIX KINDS A BIT CANNOT CARRY. Each of these is routinely collapsed to 0/1, and
+// each collapse throws away the part a reader actually needs:
+//   choice   the alternatives, and whose consent selects among them
+//   lanes    which lane answered — native, local, or remote
+//   cut      what was pruned, and on what observation
+//   undo     the prior state, exactly, to restore into
+//   timeout  how long was waited before the window closed
+//   nothing  the reason there is nothing, which is not failure
+// Named here so the local model can be taught the distinction rather than
+// guessing it from examples that already threw it away.
+interface IHeedCurriculum [public, witness, reusable] {
+   section [public] {
+      const String ReadOrder = "anchor-first-path-second";
+      const String CollapseRule = "choice, lanes, cut, undo, timeout and nothing are never 0/1";
+
+      int AnchorBeforePath() [abstract];
+      String Carries( String strKind ) [abstract];
+      int IsBoolean( String strKind ) [abstract];
+   }
+}
+
+class FormHeedCurriculum [public, reusable, flow] : IHeedCurriculum {
+   section [public] {
+      int AnchorBeforePath() [abstract] {}
+      String Carries( String strKind ) [abstract] {}
+      int IsBoolean( String strKind ) [abstract] {}
+   }
+}
+
+class FormHeedmarkSelf [public, selfHosting, flow, observable] {
+   section [public] {
+      const String CoreName = "form-cli-heedmark-self";
+      const String Pattern = "mark heed lookup prefill resume";
+
+      bool Observable() [witness] { return true; }
+      bool Executable() [witness] { return true; }
+      bool Trustable() [witness] { return true; }
+   }
+}

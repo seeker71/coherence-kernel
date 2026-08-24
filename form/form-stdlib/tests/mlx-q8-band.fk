@@ -1,0 +1,80 @@
+; mlx-q8-band.fk — the GPU lane reads where the weight actually lives.
+;
+; THE STONE. The f32 door reads the norms. Every large matrix in a Q8_0 model —
+; the whole of what a forward pass multiplies — is stored quantized, so a lane
+; that can only read f32 can read everything about the model except the model.
+;
+;   block_q8_0 = { half d; int8_t qs[32] }   34 bytes per 32 weights, w_i = d*q_i
+;
+; One f16 super-scale and thirty-two signed bytes: no sub-scales, no nibbles, no
+; high-bit plane, no mins. The simplest quant ggml has, which is why it is the
+; right first one to carry. The product is EXACT in f32 and does not round once —
+; d has an 11-bit significand and q at most 8, so d*q needs at most 19 of f32's
+; 24. That is why this door can be checked against an independent reader digit
+; for digit instead of within an epsilon.
+;
+; WITNESSED ON THE REAL MODEL, in the receipt rather than here. Qwen3.8-27B-Q8_0:
+; blk.0.attn_qkv.weight is 5120x10240 of type 8 at absolute offset 2,746,182,624,
+; found by the body's own equireach-gguf. On the GPU, scaled by 1e5 so the value
+; survives an integer door:
+;   one row summed                                  -265521
+;   that row dotted with blk.0.attn_norm (f32)      -254245
+;   token_embd.weight row 0 summed                    39152
+; An independent dequantizer of the same bytes says the same three. The last one
+; taught its own lesson: a first reference printed 39153 because it read a
+; ROUNDED sum; the true value is 0.39152968 and the GPU had been right all along.
+;
+; THE INTEGER DOOR IS REAL AND IS NOT HIDDEN. mlx_run answers a long long, and a
+; weight is about 0.02, so an unscaled sum truncates to nothing. Scaling belongs
+; in the PROGRAM — `... sum 100000 mul` — because scaling is arithmetic, and
+; arithmetic is what this lane is for. Bit 2 below asserts the raw truncation
+; honestly rather than pretending the door is float.
+;
+; fkwu-only organ. Every claim is guarded by bit 1 so an unlinked host reads 1
+; rather than a false green.
+;
+; Verdict 63.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-fs.fk
+
+(do
+    (defn mqb-score (ok bit) (if ok bit 0))
+    (defn mqb-has (hay needle) (if (lt (str_find hay needle 0) 0) 0 1))
+    (defn mqb-live? () (mqb-has (mlx_status) "mlx_linked=true"))
+    (defn mqb-path () "/tmp/fk-mlx-q8-band-fixture.bin")
+    ; q bytes 1..32 — with d = 1.0 every weight IS its q, so the sum is 528
+    (defn mqb-qs (k acc) (if (gt k 32) acc (mqb-qs (add k 1) (str_concat acc (byte_to_str k)))))
+    ; f16 1.0 is 0x3C00 and f16 2.0 is 0x4000, little-endian
+    (defn mqb-block (lo hi) (str_concat (byte_to_str lo) (str_concat (byte_to_str hi) (mqb-qs 1 ""))))
+    (defn mqb-bytes () (str_concat (mqb-block 0 60) (mqb-block 0 64)))
+    (defn mqb-prog (off r c tail)
+        (str_concat "q8 " (str_concat (mqb-path)
+        (str_concat " " (str_concat (int_to_str off)
+        (str_concat " " (str_concat (int_to_str r)
+        (str_concat " " (str_concat (int_to_str c) (str_concat " " tail))))))))))
+    (defn mlx-q8-band ()
+        (do
+    (let wrote (fs-write-text (mqb-path) (mqb-bytes)))
+    ; two blocks, 34 bytes each, written by the band itself
+    (let c0 (mqb-score (and (eq wrote 68) (eq (mqb-live?) 1)) 1))
+    ; block 0: d = 1.0, q = 1..32, so the weights ARE 1..32 and sum to 528
+    (let c1 (mqb-score (if (eq (mqb-live?) 1)
+                           (eq (mlx_run (mqb-prog 0 1 32 "sum")) 528) 0) 2))
+    ; block 1: the SAME q bytes with d = 2.0 — the super-scale is really applied
+    (let c2 (mqb-score (if (eq (mqb-live?) 1)
+                           (eq (mlx_run (mqb-prog 34 1 32 "sum")) 1056) 0) 4))
+    ; and it multiplies: (1x32) . (32x1 of ones) is the same 528
+    (let c3 (mqb-score (if (eq (mqb-live?) 1)
+                           (eq (mlx_run (mqb-prog 0 1 32
+                               "m32x1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 matmul"))
+                               528) 0) 8))
+    ; a shape that is not a whole number of 32-weight blocks has no honest
+    ; reading, so it is REFUSED rather than rounded
+    (let c4 (mqb-score (if (eq (mqb-live?) 1)
+                           (eq (mlx_run (mqb-prog 0 1 33 "sum")) 0) 0) 16))
+    ; and a shape longer than the file is refused, never padded
+    (let c5 (mqb-score (if (eq (mqb-live?) 1)
+                           (eq (mlx_run (mqb-prog 0 1 320 "sum")) 0) 0) 32))
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))
+    )
+    (mlx-q8-band))
