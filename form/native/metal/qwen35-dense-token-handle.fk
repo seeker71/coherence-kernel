@@ -7,21 +7,29 @@
 ; MSL is assembled by Form and passed to metal_pipeline, so every kernel is JIT-compiled for the
 ; device that actually answered metal_status.  Model bytes remain mmap-backed no-copy buffers.
 ;
-; preludes: native/metal/kat-token-handle.fk
+; preludes: native/metal/kat-token-handle.fk form-stdlib/qk-matmul-batch.fk
 
 (do
     ; Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
     ; proven kernel at pipeline 17; dense appends the wide Q8_0 matvec whose 256-thread group owns
     ; two output rows.  The ordinary kth Q8 lane remains available to its existing callers.
+    ; The batched Q8_0 matmul rides along: one weight decode serving eight
+    ; activation columns, so a prefill span is one dispatch per weight tensor
+    ; instead of one per token. Stone 7 proved the shape on the K-quant lane in
+    ; July (metal_batched_prefill.sh, 5 gates); this lane never inherited it
+    ; because the generator hardcoded a 256-weight superblock and Q8_0's is 32.
     (defn q38-msl ()
-        (str_concat (kth-msl) (q80-matvec-wide-body "form_q8_0_matvec_wide_f32")))
+        (str_concat (kth-msl)
+        (str_concat (q80-matvec-wide-body "form_q8_0_matvec_wide_f32")
+                    (qmb-q80-batch))))
 
     ; kth-pipes owns indices 0..28.  Dense Qwen adds the cooperative Q8_0 matvec and the Q8_0 row
     ; dequant used by token_embd.weight.
     (defn q38-pipes (msl)
         (append (kth-pipes msl)
             (list (metal_pipeline msl "form_q8_0_matvec_wide_f32")
-                  (metal_pipeline msl "form_q8_0_dequant_f32"))))
+                  (metal_pipeline msl "form_q8_0_dequant_f32")
+                  (metal_pipeline msl "form_q8_0_matmul_batch_f32"))))
 
     ; One exact 256-thread group per output-row pair for Q8_0.  All other declared types retain the
     ; already-proven KAT dispatches.  Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
