@@ -113,6 +113,19 @@
         (str_concat "kernel void "
         (str_concat fname
             " (device float* S [[buffer(0)]], device const float* c [[buffer(1)]], device const float* alpha [[buffer(2)]], device const float* beta [[buffer(3)]], device float* o [[buffer(4)]], constant uint& nv [[buffer(5)]], constant uint& dv [[buffer(6)]], constant uint& dk [[buffer(7)]], constant uint& nk [[buffer(8)]], constant float& qscale [[buffer(9)]], constant uint& toff [[buffer(10)]], constant uint& goff [[buffer(11)]], constant uint& ooff [[buffer(12)]], uint gid [[thread_position_in_grid]]) { if (gid >= nv * dv) return; uint h = gid / dv; uint i = gid - h * dv; uint kh = h - (h / nk) * nk; device const float* q = c + toff + kh * dk; device const float* k = c + toff + nk * dk + kh * dk; float v = c[toff + 2u * nk * dk + h * dv + i]; uint r = (h * dv + i) * dk; float al = alpha[goff + h]; float pred = 0.0f; for (uint j = 0u; j < dk; ++j) { float sp = al * S[r + j]; S[r + j] = sp; pred = pred + sp * k[j]; } float err = v - pred; float bw = beta[goff + h] * err; float acc = 0.0f; for (uint j = 0u; j < dk; ++j) { float sn = S[r + j] + bw * k[j]; S[r + j] = sn; acc = acc + sn * (qscale * q[j]); } o[ooff + h * dv + i] = acc; }")))
+    ; GQA decode with one 256-thread THREADGROUP per query head, replacing the
+    ; one-thread-per-head dispatch for this walker only. Measured 2026-08-24
+    ; (layer-kind-probe): the full-attention block cost 2113 us of GPU per
+    ; token against ~450 us of weight traffic, and the serial kernel — 24
+    ; threads for the whole layer on ~5120 ALUs — was the largest resident.
+    ; Same buffers, same constants, same math; the reductions are simdgroup
+    ; trees instead of one thread's loop, so float summation ORDER differs —
+    ; an argmax could flip on a near-tie. The serial body stays in kth-msl for
+    ; its other tenants (llama, kat); this is a new name, not a rewrite.
+    (defn q38-gqa-tg-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device float* y [[buffer(3)]], device float* sc [[buffer(4)]], constant uint& npos [[buffer(5)]], constant uint& nq [[buffer(6)]], constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant float& scale [[buffer(9)]], constant uint& sstride [[buffer(10)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { uint h = tgpig.x; if (h >= nq) return; threadgroup float sh[16]; uint lid = (uint)sgitg * 32u + (uint)tiisg; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint qoff = h * hd; uint koff = kvh * hd; uint S = h * sstride; uint E = (nq + h) * sstride; for (uint t = lid; t < npos; t += 256u) { float acc = 0.0f; for (uint c = 0u; c < hd; ++c) { acc = metal::fma(q[qoff + c], kc[t * KVD + koff + c], acc); } sc[S + t] = acc * scale; } metal::threadgroup_barrier(metal::mem_flags::mem_device); float mx = -3.4e38f; for (uint t = lid; t < npos; t += 256u) { float v = sc[S + t]; if (v > mx) { mx = v; } } mx = metal::simd_max(mx); if (tiisg == 0) { sh[sgitg] = mx; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float gmx = sh[0]; for (uint k = 1u; k < 8u; ++k) { if (sh[k] > gmx) { gmx = sh[k]; } } float se = 0.0f; for (uint t = lid; t < npos; t += 256u) { float e = fexp(sc[S + t] - gmx); sc[E + t] = e; se = se + e; } se = metal::simd_sum(se); if (tiisg == 0) { sh[8u + sgitg] = se; } metal::threadgroup_barrier(metal::mem_flags::mem_device | metal::mem_flags::mem_threadgroup); float tot = 0.0f; for (uint k = 0u; k < 8u; ++k) { tot = tot + sh[8u + k]; } float inv = 1.0f / tot; for (uint c = lid; c < hd; c += 256u) { float acc = 0.0f; for (uint t = 0u; t < npos; ++t) { acc = metal::fma(vc[t * KVD + koff + c], sc[E + t], acc); } y[qoff + c] = acc * inv; } }")))
 
     (defn q38-msl ()
         (str_concat (kth-msl)
@@ -125,11 +138,12 @@
         (str_concat (q38-rope-span-msl    "form_partial_rope_span_f32")
         (str_concat (q38-cachespan-msl    "form_cache_span_f32")
         (str_concat (q38-attn-span-msl    "form_gqa_span_f32")
+        (str_concat (q38-gqa-tg-msl       "form_gqa_decode_tg_f32")
         (str_concat (q38-l2norm-span-msl  "form_gdn_l2norm_span_f32")
         (str_concat (q38-gates-span-msl   "form_gdn_gates_span_f32")
         (str_concat (q38-gnorm-span-msl   "form_gdn_norm_gate_span_f32")
         (str_concat (q38-conv-off-msl     "form_gdn_conv_off_f32")
-                    (q38-delta-off-msl    "form_gdn_delta_off_f32"))))))))))))))))
+                    (q38-delta-off-msl    "form_gdn_delta_off_f32")))))))))))))))))
 
     ; kth-pipes owns indices 0..28.  Dense Qwen adds the cooperative Q8_0 matvec and the Q8_0 row
     ; dequant used by token_embd.weight.
@@ -145,6 +159,7 @@
                   (metal_pipeline msl "form_partial_rope_span_f32")
                   (metal_pipeline msl "form_cache_span_f32")
                   (metal_pipeline msl "form_gqa_span_f32")
+                  (metal_pipeline msl "form_gqa_decode_tg_f32")
                   (metal_pipeline msl "form_gdn_l2norm_span_f32")
                   (metal_pipeline msl "form_gdn_gates_span_f32")
                   (metal_pipeline msl "form_gdn_norm_gate_span_f32")
@@ -307,10 +322,14 @@
                 (q38-b16 (list (nth bs 25) (nth st 3))
                     (list (nth geo 20) (mul pos (nth geo 20))) 0 0)
                 (nth geo 20))
-            (metal_enqueue (nth ps 16)
+            ; pipeline 34: one 256-thread threadgroup per head (mode 1 makes the
+            ; threads argument a GROUP count). The serial one-thread-per-head
+            ; dispatch this replaces cost the block ~1.7 ms of its 2.1 ms
+            ; (2026-08-24, layer-kind-probe: 2113 -> 553 us per block).
+            (metal_enqueue (nth ps 34)
                 (q38-b16 (list (nth bs 22) (nth st 2) (nth st 3) (nth bs 26) (nth bs 27))
                          (list (add pos 1) (nth geo 12) (nth geo 13) (nth geo 14)
-                               (nth geo 17) (nth geo 18)) 0 1)
+                               (nth geo 17) (nth geo 18)) 1 1)
                 (nth geo 12))
             (metal_enqueue (nth ps 17)
                 (q38-b16 (list (nth bs 26) (nth bs 23))
