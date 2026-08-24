@@ -1,0 +1,183 @@
+; form-cli-heed-cursor-band.fk — the streaming cursor carries a knowledge query
+; out of a live decode stream and the typed observation back in as prefill.
+;
+; THE PROPERTY THAT MATTERS MOST, and bit 4 is exactly it: the envelope arrives
+; SPLIT ACROSS TOKENS. A byte-BPE tokenizer has no reason to keep
+; `<|form:knowledge-query|>` whole, so a carrier that only looked at the token it
+; just received would never see a mark. Here the open mark spans three ids and
+; the query spans four more. The cursor holds a bounded byte WINDOW, not a
+; token, which is the only reason it closes.
+;
+; NO PRE-MATERIALIZATION. The window is capped at fhm-frame-cap() = 305 bytes,
+; one legal envelope wide. Bit 256 drives 60 steps of prose — 780 bytes — through
+; it and reads the window back to witness the cap holding while the stream grows.
+; There is no ops table, no flattened surface and no token index in this lane.
+;
+; THE MODEL CROSSES AS FIVE FUNCTION VALUES, so this band needs no GPU, no
+; weights and no index. The scripted stepper below IS the substitution the live
+; lane makes with q38-forward / q38-prefill / tkz-decode-text / q35-encode and
+; the fkqt adapter. What is proven here is the LAW of the carry — not Qwen's
+; logits, and emphatically not that any logit executed a lookup.
+;
+; PROOF LEVEL: pure arithmetic, string and list folds. No host organ, no GPU, no
+; file organ. A candidate for a four-arm run; NOT claimed as one here — the
+; four-arm gate is source_jit_gate's. What is witnessed below is the fkwu arm.
+;
+; Verdict 1023:
+;   1     a stream with no mark is carried through untouched — no lookup at all
+;   2     a complete envelope is recognized and honored
+;   4     the envelope survives being split across seven ids (the real case)
+;   8     hit: the typed observation enters, and attribution rides with it
+;   16    miss: a named status enters; no knowledge does
+;   32    nothing: a frame the adapter declined enters nothing — axiom-1
+;   64    spent: past the budget no lookup runs and no span enters
+;   128   the window resets — a second envelope fires, and the bound stops it
+;   256   the bounded window holds under a long stream (no pre-materialization)
+;   512   model-executed is 0, and the model's ids stay separable from the body's
+;
+; preludes: form-stdlib/core.fk form-stdlib/language-model.fk
+; preludes: form-stdlib/form-cli-heedmark-xtal.fk
+; preludes: form-stdlib/form-cli-heed-cursor.fk
+; witnessed: 2026-08-24 -> 1023 on fkwu; frame-cap 305 held over 60 steps
+
+(do
+    ; ── the scripted stream ────────────────────────────────────────────────
+    ; id -> the bytes it decodes to. The envelope is fragmented the way a byte
+    ; BPE fragments it: three pieces of open mark, four of query, one of close.
+    (defn fhcb-piece (id)
+        (if (eq id 0) "the"
+        (if (eq id 1) " answer"
+        (if (eq id 2) " is"
+        (if (eq id 3) "<|form"
+        (if (eq id 4) ":knowledge"
+        (if (eq id 5) "-query|>"
+        (if (eq id 6) "what"
+        (if (eq id 7) " is"
+        (if (eq id 8) " axiom"
+        (if (eq id 9) " 1"
+        (if (eq id 10) "<|/form:knowledge-query|>"
+        (if (eq id 11) " done"
+        (if (eq id 12) "<|form:knowledge-query|>"
+        (if (eq id 13) "second"
+        (if (eq id 14) "<|/form:knowledge-query|>"
+        (if (eq id 15) " end"
+        (if (eq id 800) " lorem ipsum "
+        (if (eq id 900) ""
+            " x")))))))))))))))))))
+
+    ; The walk. 900 is the resume id a prefill hands back — it decodes to no
+    ; bytes and rejoins the script after the first envelope, so a second
+    ; envelope really does arrive and bit 128 can watch the window reset.
+    (defn fhcb-next (id)
+        (if (lt id 0) 0
+        (if (eq id 800) 800
+        (if (eq id 900) 11
+        (if (lt id 15) (add id 1)
+            999)))))
+
+    (defn fhcb-decode-loop (ids acc)
+        (if (eq (len ids) 0) acc
+            (fhcb-decode-loop (tail ids) (str_concat acc (fhcb-piece (head ids))))))
+    (defn fhcb-decodef (ctx ids) (fhcb-decode-loop ids ""))
+
+    ; stepf — one forward pass. Scripted, so every branch below is reachable.
+    (defn fhcb-stepf (ctx id pos) (fhcb-next id))
+
+    ; encodef — the span crosses back as ids, one per 8 bytes. The live lane
+    ; uses the real q35-encode; what matters here is that a span has a LENGTH,
+    ; because that length is what prefill charges and pos advances by.
+    (defn fhcb-encode-n (n i acc)
+        (if (ge i n) acc (fhcb-encode-n n (add i 1) (append acc (list 901)))))
+    (defn fhcb-encodef (ctx text)
+        (if (eq (str_len text) 0) (empty)
+            (fhcb-encode-n (add (div (str_len text) 8) 1) 0 (empty))))
+
+    ; prefillf — the seam. pos advances by the span (those are real KV
+    ; positions), and the resume id is what the model says next. This is
+    ; q38-prefill's contract: (list first pos').
+    (defn fhcb-prefillf (ctx ids pos) (list 900 (add pos (len ids))))
+
+    ; ── one adapter per status ─────────────────────────────────────────────
+    (defn fhcb-hit-span ()
+        (str_concat "<|form:knowledge-observation|>\nstatus=hit"
+        (str_concat "\nsource-path=form/form-stdlib/core.fk"
+        (str_concat "\nsource-ref=@1.2.3.4\nanswer-key=abc123"
+                    "\nanswer:quiet answers as nothing\n<|/form:knowledge-observation|>"))))
+    (defn fhcb-miss-span ()
+        "<|form:knowledge-observation|>\nstatus=miss\nanswer:\n<|/form:knowledge-observation|>")
+    (defn fhcb-lookup-hit (ctx surface local-ready) (list "hit" (fhcb-hit-span) "grounded-hit"))
+    (defn fhcb-lookup-miss (ctx surface local-ready) (list "miss" (fhcb-miss-span) "grounded-miss"))
+    (defn fhcb-lookup-nothing (ctx surface local-ready) (list "nothing" "" "trailing-bytes"))
+
+    (defn fhcb-run (start lookupf budget n)
+        (fhc-run 0 fhcb-stepf fhcb-prefillf fhcb-decodef fhcb-encodef lookupf 1
+            start 0 n (list 999) (fhc-fresh budget) (empty)))
+
+    ; ── reading a run back ─────────────────────────────────────────────────
+    (defn fhcb-cur (r) (fhc-cursor-of r))
+    (defn fhcb-count-loop (xs name acc)
+        (if (eq (len xs) 0) acc
+            (fhcb-count-loop (tail xs) name
+                (add acc (if (str_eq (head xs) name) 1 0)))))
+    (defn fhcb-honored-count (r name) (fhcb-count-loop (fhc-honored (fhcb-cur r)) name 0))
+    (defn fhcb-has-id (xs id)
+        (if (eq (len xs) 0) 0
+            (if (eq (head xs) id) 1 (fhcb-has-id (tail xs) id))))
+
+    (defn fhcb-bit (ok bit) (if ok bit 0))
+
+    ; ── the runs ───────────────────────────────────────────────────────────
+    ; prose only: start before the mark, stop before it is reached
+    (let prose (fhcb-run (sub 0 1) fhcb-lookup-hit 2 3))
+    ; the split envelope: ids 0..10 reach the close, so 12 steps clear it
+    (let hit (fhcb-run (sub 0 1) fhcb-lookup-hit 2 12))
+    (let miss (fhcb-run (sub 0 1) fhcb-lookup-miss 2 12))
+    (let none (fhcb-run (sub 0 1) fhcb-lookup-nothing 2 12))
+    (let spent (fhcb-run (sub 0 1) fhcb-lookup-hit 0 12))
+    ; ONE STEP SHORT of the close mark: the cursor must be HOLDING, not firing
+    (let held (fhcb-run (sub 0 1) fhcb-lookup-hit 2 10))
+    ; long enough to reach the SECOND envelope, budget 1 so the bound bites
+    (let two (fhcb-run (sub 0 1) fhcb-lookup-hit 2 40))
+    (let bound (fhcb-run (sub 0 1) fhcb-lookup-hit 1 40))
+    ; a long stream of prose, to watch the window cap hold
+    (let long (fhcb-run 800 fhcb-lookup-hit 2 60))
+
+    (let b0 (fhcb-bit (and (eq (fhc-lookups (fhcb-cur prose)) 0)
+                      (and (eq (fhc-injected (fhcb-cur prose)) 0)
+                           (eq (len (fhc-out prose)) 3))) 1))
+    (let b1 (fhcb-bit (and (eq (fhc-lookups (fhcb-cur hit)) 1)
+                           (eq (fhcb-honored-count hit "hit") 1)) 2))
+    ; The open mark alone spans ids 3,4,5 and the query 6,7,8,9 — seven ids
+    ; before the close at 10. One step SHORT of the close nothing has fired and
+    ; the scan reads `held`; one step later it fires exactly once. That pair is
+    ; the proof the cursor carried the frame across the split rather than
+    ; matching something early.
+    (let b2 (fhcb-bit (and (and (eq (fhc-lookups (fhcb-cur held)) 0)
+                                (str_eq (fhc-scan (fhc-window (fhcb-cur held))) "held"))
+                      (and (eq (fhc-lookups (fhcb-cur hit)) 1)
+                           (ge (len (fhc-out hit)) 11))) 4))
+    (let b3 (fhcb-bit (and (gt (fhc-injected (fhcb-cur hit)) 0)
+                      (and (eq (fhm-injects-knowledge (OutHit)) 1)
+                           (ge (str_find (fhcb-hit-span) "source-path=" 0) 0))) 8))
+    (let b4 (fhcb-bit (and (gt (fhc-injected (fhcb-cur miss)) 0)
+                      (and (eq (fhm-injects-knowledge (OutMiss)) 0)
+                           (eq (fhcb-honored-count miss "miss") 1))) 16))
+    (let b5 (fhcb-bit (and (eq (fhc-injected (fhcb-cur none)) 0)
+                      (and (eq (fhcb-honored-count none "nothing") 1)
+                           (eq (fhm-injects-span (OutNothing)) 0))) 32))
+    (let b6 (fhcb-bit (and (eq (fhc-lookups (fhcb-cur spent)) 0)
+                      (and (eq (fhc-injected (fhcb-cur spent)) 0)
+                           (eq (fhcb-honored-count spent "spent") 1))) 64))
+    (let b7 (fhcb-bit (and (eq (fhcb-honored-count two "hit") 2)
+                      (and (eq (fhcb-honored-count bound "hit") 1)
+                           (eq (fhcb-honored-count bound "spent") 1))) 128))
+    (let b8 (fhcb-bit (and (le (str_len (fhc-window (fhcb-cur long))) (fhm-frame-cap))
+                      (and (eq (fhm-frame-cap) 305)
+                           (eq (len (fhc-out long)) 60))) 256))
+    ; the model's ids and the body's never mix: 901 is an injected id and 900 is
+    ; the resume marker; neither may appear in the model's own stream
+    (let b9 (fhcb-bit (and (eq (fhc-model-executed) 0)
+                      (and (eq (fhcb-has-id (fhc-out two) 901) 0)
+                           (eq (fhcb-has-id (fhc-out two) 900) 0))) 512))
+
+    (add b0 (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 (add b8 b9))))))))))
