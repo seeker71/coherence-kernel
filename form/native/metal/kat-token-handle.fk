@@ -367,40 +367,56 @@
     ;       9 G(dinner) 10 T(d) 11 Log(nExp) 12 Ids 13 Wts 14 Ge(ff) 15 Ue(ff) 16 Act(ff)
     ;       17 Eo(d) 18 MoE(d) 19 ShAct(ff) 20 ShOut(d) 21 ShGate 22 Q(nq*hd) 23 Gate(nq*hd)
     ;       24 K(kvd) 25 V(kvd) 26 Attn(nq*hd) 27 Scratch 28 Voc 29 Pi 30 Pv 31 OutI 32 OutV
-    (defn kth-bufs (d convdim dinner nv ff nExp nqhd kvd maxpos nq vocabN)
-        (list (metal_buf_alloc (mul d 4))
-              (metal_buf_alloc (mul d 4))
-              (metal_buf_alloc (mul convdim 4))
-              (metal_buf_alloc (mul nv 4))
-              (metal_buf_alloc (mul nv 4))
-              (metal_buf_alloc (mul nv 4))
-              (metal_buf_alloc (mul nv 4))
-              (metal_buf_alloc (mul dinner 4))
-              (metal_buf_alloc (mul dinner 4))
-              (metal_buf_alloc (mul dinner 4))
-              (metal_buf_alloc (mul d 4))
-              (metal_buf_alloc (mul nExp 4))
+    ; ── span-wide scratch ──────────────────────────────────────────────────
+    ; Every buffer below that holds ONE position's working values is multiplied
+    ; by `span`, token-major: slot i of token t lives at [t * n + i]. That is the
+    ; layout the batched matmul already writes (y[t * rows + r]) and reads
+    ; (x[t * cols + j]), so widening here is what lets a batched kernel be
+    ; dispatched at all.
+    ;
+    ; Not widened: the two 32-byte and three 16-byte constant slots, the 4096
+    ; scratch pair, the attention scratch at 27 (already 2*nq*maxpos, position
+    ; wide by construction), and the vocab logits at 28 — prefill asks the head
+    ; at one position only, so a span of logits would be allocated and unread.
+    ;
+    ; span 1 allocates exactly what kth-bufs always allocated.
+    (defn kth-bufs-span (d convdim dinner nv ff nExp nqhd kvd maxpos nq vocabN span)
+        (list (metal_buf_alloc (mul (mul d span) 4))
+              (metal_buf_alloc (mul (mul d span) 4))
+              (metal_buf_alloc (mul (mul convdim span) 4))
+              (metal_buf_alloc (mul (mul nv span) 4))
+              (metal_buf_alloc (mul (mul nv span) 4))
+              (metal_buf_alloc (mul (mul nv span) 4))
+              (metal_buf_alloc (mul (mul nv span) 4))
+              (metal_buf_alloc (mul (mul dinner span) 4))
+              (metal_buf_alloc (mul (mul dinner span) 4))
+              (metal_buf_alloc (mul (mul dinner span) 4))
+              (metal_buf_alloc (mul (mul d span) 4))
+              (metal_buf_alloc (mul (mul nExp span) 4))
               (metal_buf_alloc 32)
               (metal_buf_alloc 32)
-              (metal_buf_alloc (mul ff 4))
-              (metal_buf_alloc (mul ff 4))
-              (metal_buf_alloc (mul ff 4))
-              (metal_buf_alloc (mul d 4))
-              (metal_buf_alloc (mul d 4))
-              (metal_buf_alloc (mul ff 4))
-              (metal_buf_alloc (mul d 4))
+              (metal_buf_alloc (mul (mul ff span) 4))
+              (metal_buf_alloc (mul (mul ff span) 4))
+              (metal_buf_alloc (mul (mul ff span) 4))
+              (metal_buf_alloc (mul (mul d span) 4))
+              (metal_buf_alloc (mul (mul d span) 4))
+              (metal_buf_alloc (mul (mul ff span) 4))
+              (metal_buf_alloc (mul (mul d span) 4))
               (metal_buf_alloc 16)
-              (metal_buf_alloc (mul nqhd 4))
-              (metal_buf_alloc (mul nqhd 4))
-              (metal_buf_alloc (mul kvd 4))
-              (metal_buf_alloc (mul kvd 4))
-              (metal_buf_alloc (mul nqhd 4))
+              (metal_buf_alloc (mul (mul nqhd span) 4))
+              (metal_buf_alloc (mul (mul nqhd span) 4))
+              (metal_buf_alloc (mul (mul kvd span) 4))
+              (metal_buf_alloc (mul (mul kvd span) 4))
+              (metal_buf_alloc (mul (mul nqhd span) 4))
               (metal_buf_alloc (mul (mul (mul 2 nq) maxpos) 4))
               (metal_buf_alloc (mul vocabN 4))
               (metal_buf_alloc 4096)
               (metal_buf_alloc 4096)
               (metal_buf_alloc 16)
               (metal_buf_alloc 16)))
+
+    (defn kth-bufs (d convdim dinner nv ff nExp nqhd kvd maxpos nq vocabN)
+        (kth-bufs-span d convdim dinner nv ff nExp nqhd kvd maxpos nq vocabN 1))
 
     ; per-STREAM state: one conv window + one delta state per linear block, one K + one V cache
     ; per full block; indexed BY LAYER (non-owners carry 0, never dispatched). Zero-filled by
