@@ -1,0 +1,119 @@
+; qwen35-tokfast-v2-band.fk — pure synthetic witness for the fixed-row,
+; seal-keyed tokenizer index. No GGUF, host file, tokenizer monolith, model,
+; Metal, MLX, or remote carrier is opened.
+;
+; Verdict 65535:
+;   1      vocab and merge rows have their declared constant widths
+;   2      a key containing NUL, newline, '|', and 255 round-trips byte-exact
+;   4      token id 0 is present, not nothing
+;   8      token id 1 is present, not nothing
+;   16     an absent token is explicit nothing with present=0
+;   32     a current manifest is admitted by exact seal and extents
+;   64     a foreign live seal is stale
+;   128    vocab and merge artifacts have separate names and paths
+;   256    exact merge lookup returns its rank
+;   512    the lowest-rank adjacent pair is selected
+;   1024   equal minimum ranks retain the leftmost pair
+;   2048   byte and merge-key comparisons establish strict sorted order
+;   4096   a truncated fixed row is rejected rather than plausibly decoded
+;   8192   an absent index returns fallback nothing without converting it to 0
+;   16384  a stale index returns fallback nothing without converting it to 1
+;   32768  a manifest whose row-file extent differs by one byte is rejected
+;
+; preludes: form-stdlib/qwen35-tokfast-v2.fk
+
+(do
+    (defn qtf2b-bit (ok bit) (if ok bit 0))
+    (defn qtf2b-bytes-eq (a b)
+        (if (nil? a) (if (nil? b) 1 0)
+            (if (nil? b) 0
+                (if (eq (head a) (head b))
+                    (qtf2b-bytes-eq (tail a) (tail b)) 0))))
+
+    (let seal "sha256:synthetic-qwen")
+    (let binary (list 0 10 124 255))
+    (let a (list 65))
+    (let b (list 66))
+    (let c (list 67))
+    (let d (list 68))
+    (let vcap 4)
+    (let lcap 1)
+    (let rcap 1)
+    ; Strict raw-byte order: binary, A, B.
+    (let vr0 (qtf2-vocab-row-text vcap binary 7))
+    (let vr1 (qtf2-vocab-row-text vcap a 0))
+    (let vr2 (qtf2-vocab-row-text vcap b 1))
+    (let vtext (str_concat vr0 (str_concat vr1 vr2)))
+    ; Strict pair order: A.B, B.C, C.D. The first and last share the
+    ; minimum rank, so a left-to-right selection must keep A.B.
+    (let mr0 (qtf2-merge-row-text lcap rcap a b 1))
+    (let mr1 (qtf2-merge-row-text lcap rcap b c 5))
+    (let mr2 (qtf2-merge-row-text lcap rcap c d 1))
+    (let mtext (str_concat mr0 (str_concat mr1 mr2)))
+    (let manifest (qtf2-manifest seal 3 vcap (qtf2-vocab-width vcap)
+        3 lcap rcap (qtf2-merge-width lcap rcap)))
+    (let mtext-row (qtf2-manifest-text manifest))
+    (let current (qtf2-index-from-text "mem" mtext-row seal
+        (str_len vtext) (str_len mtext)))
+    (let stale (qtf2-index-from-text "mem" mtext-row "sha256:other"
+        (str_len vtext) (str_len mtext)))
+    (let bad-size (qtf2-index-from-text "mem" mtext-row seal
+        (add (str_len vtext) 1) (str_len mtext)))
+    (let absent (qtf2-index-empty "absent" "manifest-absent" "mem"))
+
+    (let binary-hit (qtf2-vocab-find-index-in current vtext binary))
+    (let zero-hit (qtf2-vocab-find-index-in current vtext a))
+    (let one-hit (qtf2-vocab-find-index-in current vtext b))
+    (let miss (qtf2-vocab-find-index-in current vtext (list 90)))
+    (let merge-hit (qtf2-merge-find-index-in current mtext b c))
+    (let lower (qtf2-best-pair-in mtext 3 lcap rcap
+        (list b c d)))
+    (let leftmost (qtf2-best-pair-in mtext 3 lcap rcap
+        (list a b c d)))
+    (let truncated (substring vtext 0 (sub (str_len vtext) 1)))
+    (let broken (qtf2-vocab-find-in truncated 3 vcap b))
+    (let absent-out (qtf2-vocab-find-index-in absent vtext a))
+    (let stale-out (qtf2-vocab-find-index-in stale vtext b))
+
+    (sum (list
+        (qtf2b-bit (and (eq (str_len vr0) (qtf2-vocab-width vcap))
+            (and (eq (str_len vr1) (qtf2-vocab-width vcap))
+            (and (eq (str_len mr0) (qtf2-merge-width lcap rcap))
+                 (eq (str_len mr2) (qtf2-merge-width lcap rcap))))) 1)
+        (qtf2b-bit (and (eq (qtf2-outcome-present? binary-hit) 1)
+            (qtf2b-bytes-eq
+                (qtf2-row-left (qtf2-parse-vocab-row (cursor-str vr0) vcap))
+                binary)) 2)
+        (qtf2b-bit (and (eq (qtf2-outcome-present? zero-hit) 1)
+            (and (eq (qtf2-outcome-value zero-hit) 0)
+                 (eq (nothing? (qtf2-outcome-value zero-hit)) 0))) 4)
+        (qtf2b-bit (and (eq (qtf2-outcome-present? one-hit) 1)
+            (and (eq (qtf2-outcome-value one-hit) 1)
+                 (eq (nothing? (qtf2-outcome-value one-hit)) 0))) 8)
+        (qtf2b-bit (and (eq (qtf2-outcome-present? miss) 0)
+            (eq (nothing? (qtf2-outcome-value miss)) 1)) 16)
+        (qtf2b-bit (eq (qtf2-index-current? current) 1) 32)
+        (qtf2b-bit (str_eq (qtf2-index-status stale) "stale") 64)
+        (qtf2b-bit (and (not (str_eq (qtf2-vocab-name) (qtf2-merge-name)))
+            (not (str_eq (qtf2-vocab-path "root")
+                         (qtf2-merge-path "root")))) 128)
+        (qtf2b-bit (and (eq (qtf2-outcome-present? merge-hit) 1)
+            (eq (qtf2-outcome-value merge-hit) 5)) 256)
+        (qtf2b-bit (and (eq (qtf2-pair-choice-present? lower) 1)
+            (and (eq (qtf2-pair-choice-position lower) 1)
+                 (eq (qtf2-pair-choice-rank lower) 1))) 512)
+        (qtf2b-bit (and (eq (qtf2-pair-choice-present? leftmost) 1)
+            (and (eq (qtf2-pair-choice-position leftmost) 0)
+                 (eq (qtf2-pair-choice-rank leftmost) 1))) 1024)
+        (qtf2b-bit (and (lt (qtf2-bytes-cmp binary a) 0)
+            (and (lt (qtf2-bytes-cmp a b) 0)
+                 (lt (qtf2-merge-key-cmp a b b c) 0))) 2048)
+        (qtf2b-bit (str_eq (qtf2-outcome-status broken) "failure") 4096)
+        (qtf2b-bit (and (str_eq (qtf2-outcome-status absent-out) "absent")
+            (and (eq (qtf2-outcome-present? absent-out) 0)
+                 (eq (nothing? (qtf2-outcome-value absent-out)) 1))) 8192)
+        (qtf2b-bit (and (str_eq (qtf2-outcome-status stale-out) "stale")
+            (and (eq (qtf2-outcome-present? stale-out) 0)
+                 (eq (nothing? (qtf2-outcome-value stale-out)) 1))) 16384)
+        (qtf2b-bit (and (str_eq (qtf2-index-status bad-size) "failure")
+            (str_eq (qtf2-index-reason bad-size) "vocab-size")) 32768))))
