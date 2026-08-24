@@ -1,0 +1,606 @@
+; form-knowledge-integration-census.fk -- honest local Form-knowledge measure.
+;
+; A prompt prefix, a training-row count, and a paraphrased holdout do not show
+; integration.  This cell keeps three denominators visible:
+;   1. source files in the scoped body census,
+;   2. registered concepts mapped onto those sources,
+;   3. independently held-out observations that cross the whole local path.
+;
+; An observation counts only when ALL of these agree:
+;   local model evidence (remote calls 0); a non-paraphrase heldout audit;
+;   an emitted Form knowledge-query observation; native token execution bound
+;   to the currently accessible registered source; fkwu execution exit 0 with
+;   the expected value; and a reasoning key citing the same source. Duplicate observations never raise
+;   coverage because the fold walks census concepts and sources, not outputs.
+;
+; The >=95% verdict additionally requires every scoped source to have at least
+; one registered concept and every nonempty source family to meet 95%.  A large
+; family therefore cannot hide an untouched small family.
+;
+; The live seed registry below is deliberately only a cross-family beginning.
+; It does NOT close the live census and no live model observations are supplied,
+; so the live run honestly reports ready95=0.  The band proves the gate can pass
+; at exactly 95%, and proves leakage, missing lookup, execution, reasoning,
+; registry, duplicate, and family-blindness failures change the verdict.
+;
+; Authority: form/form-stdlib/bml/form-knowledge-integration-census.bml
+; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/form-knowledge-query-token.fk
+; preludes: form-stdlib/form-knowledge-source-search.fk
+; Proven by: form-stdlib/tests/form-knowledge-integration-census-band.fk
+; witnessed: 2026-08-24 -> band 1048575; live 5742 sources, repository-ready95 0
+
+(defn fki-threshold-percent () 95)
+    (defn fki-evidence-basis () "current-source+source-artifact-sha256+grounded-nodeid-rag+provenance+prefix+weights-v1")
+
+    ; ---- scope and live source census -----------------------------------
+    (defn fki-family (id root) (list "knowledge-family-v1" id root))
+    (defn fki-family-id (f) (nth f 1))
+    (defn fki-family-root (f) (nth f 2))
+    (defn fki-families ()
+        (list
+            (fki-family "axioms" "axioms")
+            (fki-family "bootstrap" "bootstrap")
+            (fki-family "form-stdlib" "form/form-stdlib")
+            (fki-family "grammars" "grammars")
+            (fki-family "cognition" "cognition")
+            (fki-family "learn" "learn")
+            (fki-family "observe" "observe")
+            (fki-family "teachings" "teachings")
+            (fki-family "receipts" "receipts")
+            (fki-family "model" "model")
+            (fki-family "proof" "proof")
+            (fki-family "control" "control")
+            (fki-family "ingest" "ingest")
+            (fki-family "presence" "presence")
+            (fki-family "docs" "docs")))
+
+    (defn fki-ends-with? (s suffix)
+        (if (lt (str_len s) (str_len suffix)) 0
+            (if (str_eq (substring s (sub (str_len s) (str_len suffix)) (str_len s)) suffix) 1 0)))
+    (defn fki-hidden-name? (name)
+        (if (eq (str_len name) 0) 1
+            (if (str_eq (substring name 0 1) ".") 1 0)))
+    (defn fki-dir? (path) (if (gt (len (fs_list path)) 0) 1 0))
+    (defn fki-source-extension? (path)
+        (if (or (eq (fki-ends-with? path ".fk") 1)
+                (or (eq (fki-ends-with? path ".bml") 1)
+                (or (eq (fki-ends-with? path ".bmf") 1)
+                (or (eq (fki-ends-with? path ".form") 1)
+                    (eq (fki-ends-with? path ".md") 1))))) 1 0))
+    (defn fki-generated-source? (path)
+        ; Crystallized mirrors are executable caches of a higher authority,
+        ; not additional knowledge units.
+        (if (eq (fki-ends-with? path "-xtal.fk") 1) 1 0))
+    (defn fki-source-path? (path)
+        (if (and (eq (fki-source-extension? path) 1)
+                 (eq (fki-generated-source? path) 0)) 1 0))
+    (defn fki-collect-paths-loop (dir names acc)
+        (if (eq (len names) 0) acc
+            (do
+                (let name (head names))
+                (let path (str_concat dir (str_concat "/" name)))
+                (fki-collect-paths-loop dir (tail names)
+                    (if (eq (fki-hidden-name? name) 1) acc
+                        (if (eq (fki-dir? path) 1)
+                            (fki-collect-paths-loop path (fs_list path) acc)
+                            (if (eq (fki-source-path? path) 1) (cons path acc) acc)))))))
+    (defn fki-collect-paths (root)
+        (fki-collect-paths-loop root (fs_list root) (empty)))
+
+    ; The access mark is deliberately not called a cryptographic signature: it
+    ; proves the source is readable now and catches ordinary stale/truncated
+    ; rows (size plus boundary bytes), but a same-size interior rewrite needs
+    ; the query organ's content-ref/source-key freshness evidence.
+    (defn fki-source-access-mark (path)
+        (do
+            (let n (file_size path))
+            (if (le n 0) (list "source-access-mark-v1" 0 0 0)
+                (list "source-access-mark-v1" n
+                    (str_byte_at (read_file_slice path 0 1) 0)
+                    (str_byte_at (read_file_slice path (sub n 1) 1) 0)))))
+    (defn fki-source (path family)
+        (list "knowledge-source-v1" path family (fki-source-access-mark path)))
+    (defn fki-source-path (s) (nth s 1))
+    (defn fki-source-family (s) (nth s 2))
+    (defn fki-source-access-mark-of (s) (nth s 3))
+    (defn fki-source-current-access? (s)
+        (if (not (eq (len s) 4)) 0
+            (do
+                (let held (fki-source-access-mark-of s))
+                (let now (fki-source-access-mark (fki-source-path s)))
+                (if (and (gt (nth held 1) 0)
+                         (and (eq (nth held 1) (nth now 1))
+                         (and (eq (nth held 2) (nth now 2))
+                              (eq (nth held 3) (nth now 3))))) 1 0))))
+    (defn fki-source-units-loop (paths family acc)
+        (if (eq (len paths) 0) acc
+            (fki-source-units-loop (tail paths) family
+                (cons (fki-source (head paths) family) acc))))
+    (defn fki-live-source-units-loop (families acc)
+        (if (eq (len families) 0) acc
+            (do
+                (let family (head families))
+                (let next (fki-source-units-loop
+                    (fki-collect-paths (fki-family-root family))
+                    (fki-family-id family) acc))
+                (fki-live-source-units-loop (tail families) next))))
+    (defn fki-live-source-units ()
+        (fki-live-source-units-loop (fki-families) (empty)))
+
+    ; ---- concept registry ------------------------------------------------
+    (defn fki-concept (id family source-path)
+        (list "knowledge-concept-v1" id family source-path))
+    (defn fki-concept-id (c) (nth c 1))
+    (defn fki-concept-family (c) (nth c 2))
+    (defn fki-concept-source-path (c) (nth c 3))
+
+    ; A cross-family seed, explicitly not a claim of registry closure.
+    (defn fki-seed-concepts ()
+        (list
+            (fki-concept "nothing-is-whole" "axioms" "axioms/core-axioms.form")
+            (fki-concept "direct-source-ground" "bootstrap" "bootstrap/ground.fk")
+            (fki-concept "one-form-kernel" "form-stdlib" "form/form-stdlib/core.fk")
+            (fki-concept "grammar-loader" "grammars" "grammars/grammar-loader.fk")
+            (fki-concept "frequency-attunement" "cognition" "cognition/text-frequency.fk")
+            (fki-concept "distillation-ontogeny" "learn" "learn/homecoming-distillation-corpus.fk")
+            (fki-concept "preflight-before-verdict" "observe" "observe/preflight.fk")
+            (fki-concept "service-over-engagement" "teachings" "teachings/uplifting-dialogue.md")
+            (fki-concept "share-is-computed" "receipts" "receipts/2026-08-23-share-is-computed-apply-is-one.md")
+            (fki-concept "form-neutral-token-space" "model" "model/form-neutral-token-space.fk")
+            (fki-concept "four-way-witness" "proof" "proof/four-way-run-recipe42.fk")
+            (fki-concept "choice-is-consent" "control" "control/choice-lane-core.fk")
+            (fki-concept "name-build-observe" "ingest" "ingest/name-build-observe.fk")
+            (fki-concept "inquiry-planes" "presence" "presence/inquiry-planes.fk")
+            (fki-concept "live-dynamic-diagnostics" "docs" "docs/live-dynamic-diagnostics.md")))
+
+    (defn fki-find-concept (id concepts)
+        (if (eq (len concepts) 0) (empty)
+            (if (str_eq (fki-concept-id (head concepts)) id) (head concepts)
+                (fki-find-concept id (tail concepts)))))
+    (defn fki-source-member? (path family sources)
+        (if (eq (len sources) 0) 0
+            (if (and (str_eq (fki-source-path (head sources)) path)
+                     (str_eq (fki-source-family (head sources)) family)) 1
+                (fki-source-member? path family (tail sources)))))
+    (defn fki-find-source (path family sources)
+        (if (eq (len sources) 0) (empty)
+            (if (and (str_eq (fki-source-path (head sources)) path)
+                     (str_eq (fki-source-family (head sources)) family)) (head sources)
+                (fki-find-source path family (tail sources)))))
+    (defn fki-current-source-member? (path family sources)
+        (do
+            (let s (fki-find-source path family sources))
+            (if (eq (len s) 0) 0 (fki-source-current-access? s))))
+    (defn fki-current-source-path-member? (path sources)
+        (if (eq (len sources) 0) 0
+            (if (and (str_eq (fki-source-path (head sources)) path)
+                     (eq (fki-source-current-access? (head sources)) 1)) 1
+                (fki-current-source-path-member? path (tail sources)))))
+    (defn fki-concept-member? (id family path concepts)
+        (do
+            (let c (fki-find-concept id concepts))
+            (if (eq (len c) 0) 0
+                (if (and (str_eq (fki-concept-family c) family)
+                         (str_eq (fki-concept-source-path c) path)) 1 0))))
+
+    ; ---- observation adapter for the Form-native stream-token organ ------
+    ; The query-token ABI has its own cell and adversarial proof band.  This
+    ; census does not invent a second envelope or execute a second lookup.  It
+    ; consumes a stable observation-shaped adapter so that the token organ may
+    ; evolve concurrently without making its evidence disappear into prose.
+    ; Hold the completed fkqt ABI whole: the exact emitted surface and typed
+    ; 20-field result.  Accessors below are owned by the query-token cell.
+    (defn fki-query-observation (surface fkqt-result)
+        (list "form-query-observation-v1" surface fkqt-result))
+    (defn fki-query-grounded? (q source-path)
+        (if (not (eq (len q) 3)) 0
+            (do
+                (let surface (nth q 1))
+                (let result (nth q 2))
+                (let request (fkqt-parse surface))
+                (if (and (str_eq (nth q 0) "form-query-observation-v1")
+                         (and (eq (fkqt-request-ready? request) 1)
+                         (and (str_eq (fkqt-status result) "hit")
+                         (and (eq (ric-node-id-valid? (fkqt-source-ref result)) 1)
+                         (and (eq (ric-node-id-valid? (fkqt-content-ref result)) 1)
+                         (and (str_eq (fkqt-source-path result) source-path)
+                         (and (eq (fkqt-executed? result) 1)
+                         (and (eq (fkqt-model-executed? result) 0)
+                         (and (eq (fkqt-lookup-count result) 1)
+                         (and (eq (fkqt-hit-count result) 1)
+                         (and (node_eq (fkqt-request-token request)
+                                        (fkqt-result-request-token result))
+                              (node_eq (fkqt-executor result) (fkqt-executor-token))))))))))))) 1 0))))
+    (defn fki-query-provenance? (q source-path)
+        (if (eq (fki-query-grounded? q source-path) 0) 0
+            (do
+                (let result (nth q 2))
+                (let checks (list
+                    (if (eq (str_len (fkqt-source-key result)) 64) 1 0)
+                    (hex-valid? (fkqt-source-key result))
+                    (if (eq (str_len (fkqt-answer-key result)) 64) 1 0)
+                    (hex-valid? (fkqt-answer-key result))
+                    (if (str_eq (fkqt-source-path result) source-path) 1 0)))
+                (if (eq (sum checks) 5) 1 0))))
+    (defn fki-query-observation-valid? (q source-path)
+        (if (and (eq (fki-query-grounded? q source-path) 1)
+                 (eq (fki-query-provenance? q source-path) 1)) 1 0))
+
+    ; ---- current-source artifact stream, separate from NodeID RAG -------
+    ; This lane proves current path + fresh Form SHA-256 + bounded answer
+    ; provenance.  It fabricates no REF/CTOR and carries no claim about model
+    ; reasoning, prefix exposure, or learned weights.
+    (defn fki-source-artifact-full-path (root result)
+        (fs-path-join root (fkss-source-path result)))
+    (defn fki-source-artifact-id-shape? (source-id)
+        (if (not (eq (str_len source-id) 71)) 0
+            (if (not (str_eq (substring source-id 0 7) "sha256:")) 0
+                (hex-valid? (substring source-id 7 71)))))
+    (defn fki-any-atom-in-answer? (atoms answer)
+        (if (eq (len atoms) 0) 0
+            (if (ge (fkss-find-ci answer (head atoms)) 0) 1
+                (fki-any-atom-in-answer? (tail atoms) answer))))
+    (defn fki-source-artifact-expected-answer (full-path first)
+        (do
+            (let size (file_size full-path))
+            (let start (fkss-answer-start first size))
+            (fs-read-slice full-path start
+                (fkss-min (fkss-answer-limit) (sub size start)))))
+    (defn fki-source-artifact-current? (root atoms result)
+        (if (or (eq (str_len root) 0) (eq (fkss-query-valid? atoms) 0)) 0
+            (do
+                (let full-path (fki-source-artifact-full-path root result))
+                (let source-id (fkss-source-id-of result))
+                (let expected-answer (if (gt (file_size full-path) 0)
+                    (fki-source-artifact-expected-answer full-path
+                        (fkss-first-offset result)) ""))
+                (let checks (list
+                    (if (str_eq (fkss-status result) "hit") 1 0)
+                    (if (str_eq (fkss-reason result) "current-source-match") 1 0)
+                    (if (str_eq (nth result 3) "source-artifact-stream-v1") 1 0)
+                    (if (gt (file_size full-path) 0) 1 0)
+                    (fki-source-artifact-id-shape? source-id)
+                    (if (str_eq source-id (fkss-source-id full-path)) 1 0)
+                    (if (gt (fkss-matched result) 0) 1 0)
+                    (if (and (ge (fkss-first-offset result) 0)
+                             (lt (fkss-first-offset result) (file_size full-path))) 1 0)
+                    (if (and (gt (str_len (fkss-answer result)) 0)
+                             (le (str_len (fkss-answer result)) (fkss-answer-limit))) 1 0)
+                    (if (str_eq (fkss-answer result) expected-answer) 1 0)
+                    (fki-any-atom-in-answer? atoms (fkss-answer result))
+                    (if (and (gt (fkss-eligible-count result) 0)
+                             (eq (fkss-accessible-count result)
+                                 (fkss-eligible-count result))) 1 0)
+                    (if (eq (fkss-coverage-percent result) 100) 1 0)
+                    (if (str_eq (fkss-result-route result)
+                            "source_inventory+bounded-byte-window+form-sha256-stream") 1 0)
+                    (if (eq (fkss-model-executed result) 0) 1 0)))
+                (if (eq (sum checks) 15) 1 0))))
+
+    ; heldout source-retrieval observation: no model/prefix/reasoning fields.
+    (defn fki-source-retrieval-observation (source-path concept-id family split leakage-audit root atoms result witness-id)
+        (list "source-retrieval-observation-v1" source-path concept-id family split
+              leakage-audit root atoms result witness-id))
+    (defn fki-source-retrieval-observation-valid? (o sources concepts)
+        (if (not (eq (len o) 10)) 0
+            (do
+                (let path (nth o 1))
+                (let id (nth o 2))
+                (let family (nth o 3))
+                (let root (nth o 6))
+                (let atoms (nth o 7))
+                (let result (nth o 8))
+                (let checks (list
+                    (if (str_eq (nth o 0) "source-retrieval-observation-v1") 1 0)
+                    (fki-current-source-member? path family sources)
+                    (fki-concept-member? id family path concepts)
+                    (if (str_eq (nth o 4) "heldout") 1 0)
+                    (fki-leakage-audit-valid? (nth o 5))
+                    (if (str_eq path (fki-source-artifact-full-path root result)) 1 0)
+                    (fki-source-artifact-current? root atoms result)
+                    (if (gt (str_len (nth o 9)) 0) 1 0)))
+                (if (eq (sum checks) 8) 1 0))))
+
+    ; ---- heldout evidence rows -----------------------------------------
+    (defn fki-leakage-audit (train-hash heldout-hash exact-overlap paraphrase-overlap common-generator)
+        (list "heldout-leakage-audit-v1" train-hash heldout-hash exact-overlap paraphrase-overlap common-generator))
+    (defn fki-leakage-audit-valid? (a)
+        (if (not (eq (len a) 6)) 0
+            (if (and (str_eq (nth a 0) "heldout-leakage-audit-v1")
+                     (and (gt (str_len (nth a 1)) 0)
+                     (and (gt (str_len (nth a 2)) 0)
+                     (and (not (str_eq (nth a 1) (nth a 2)))
+                     (and (eq (nth a 3) 0)
+                     (and (eq (nth a 4) 0)
+                          (eq (nth a 5) 0))))))) 1 0)))
+    (defn fki-heldout-family? (name)
+        (if (or (str_eq name "counterexample")
+                (or (str_eq name "cross-operation")
+                (or (str_eq name "novel-program")
+                    (str_eq name "adversarial-boundary")))) 1 0))
+
+    (defn fki-native-execution (carrier exit-code actual expected)
+        (list "form-native-execution-v1" carrier exit-code actual expected))
+    (defn fki-native-execution-valid? (x)
+        (if (not (eq (len x) 5)) 0
+            (if (and (str_eq (nth x 0) "form-native-execution-v1")
+                     (and (str_eq (nth x 1) "fkwu")
+                     (and (eq (nth x 2) 0)
+                          (eq (nth x 3) (nth x 4))))) 1 0)))
+
+    (defn fki-reasoning-verdict (actual expected citation-path)
+        (list "form-reasoning-verdict-v1" actual expected citation-path))
+    (defn fki-reasoning-valid? (r source-path)
+        (if (not (eq (len r) 4)) 0
+            (if (and (str_eq (nth r 0) "form-reasoning-verdict-v1")
+                     (and (str_eq (nth r 1) (nth r 2))
+                          (str_eq (nth r 3) source-path))) 1 0)))
+
+    ; Prefix exposure is distinct from RAG and learned weights.  It means the
+    ; local model actually received the current teaching/query protocol prefix.
+    (defn fki-teaching-exposure (source-path prefix-node prefix-bytes exposed)
+        (list "teaching-prefix-exposure-v1" source-path prefix-node prefix-bytes exposed))
+    (defn fki-teaching-exposure-valid? (t sources)
+        (if (not (eq (len t) 5)) 0
+            (if (and (str_eq (nth t 0) "teaching-prefix-exposure-v1")
+                     (and (eq (fki-current-source-path-member? (nth t 1) sources) 1)
+                     (and (eq (ric-node-id-valid? (nth t 2)) 1)
+                     (and (gt (nth t 3) 0)
+                          (eq (nth t 4) 1))))) 1 0)))
+
+    ; mode is rag or hybrid.  weights-learned is kept as a separate fact: RAG
+    ; integration must never be reported as a learned tensor delta.
+    (defn fki-local-model-evidence (model-id locality remote-calls output-hash mode weights-learned adaptation-hash teaching-exposure)
+        (list "local-model-evidence-v1" model-id locality remote-calls output-hash mode weights-learned adaptation-hash teaching-exposure))
+    (defn fki-local-model-valid? (m)
+        (if (not (eq (len m) 9)) 0
+            (do
+                (let weight-shape
+                    (if (or (eq (nth m 6) 0) (eq (nth m 6) 1)) 1 0))
+                (let adaptation-shape
+                    (if (eq (nth m 6) 1)
+                        (if (gt (str_len (nth m 7)) 0) 1 0)
+                        (if (str_eq (nth m 7) "none") 1 0)))
+                (let checks (list
+                    (if (str_eq (nth m 0) "local-model-evidence-v1") 1 0)
+                    (if (gt (str_len (nth m 1)) 0) 1 0)
+                    (if (str_eq (nth m 2) "local") 1 0)
+                    (if (eq (nth m 3) 0) 1 0)
+                    (if (gt (str_len (nth m 4)) 0) 1 0)
+                    (if (or (str_eq (nth m 5) "rag")
+                            (str_eq (nth m 5) "hybrid")) 1 0)
+                    weight-shape adaptation-shape))
+                (if (eq (sum checks) 8) 1 0))))
+    (defn fki-local-model-weights-learned? (m)
+        (if (eq (fki-local-model-valid? m) 1) (nth m 6) 0))
+    (defn fki-local-model-teaching (m) (nth m 8))
+
+    ; observation fields: tag source concept family split train-family
+    ; heldout-family leakage-audit query-observation retrieved-path native-execution
+    ; reasoning-verdict local-model-evidence witness-id
+    (defn fki-observation (source-path concept-id family split train-family heldout-family leakage-audit query-observation retrieved-path native-execution reasoning-verdict local-model-evidence witness-id)
+        (list "knowledge-integration-observation-v1" source-path concept-id family split
+              train-family heldout-family leakage-audit query-observation retrieved-path
+              native-execution reasoning-verdict local-model-evidence witness-id))
+    (defn fki-observation-source (o) (nth o 1))
+    (defn fki-observation-concept (o) (nth o 2))
+    (defn fki-observation-family (o) (nth o 3))
+    (defn fki-observation-valid? (o sources concepts)
+        (if (not (eq (len o) 14)) 0
+            (do
+                (let path (nth o 1))
+                (let id (nth o 2))
+                (let family (nth o 3))
+                (let checks (list
+                    (if (str_eq (nth o 0) "knowledge-integration-observation-v1") 1 0)
+                    (fki-current-source-member? path family sources)
+                    (fki-concept-member? id family path concepts)
+                    (if (str_eq (nth o 4) "heldout") 1 0)
+                    (if (str_eq (nth o 5) (nth o 6)) 0 1)
+                    (fki-heldout-family? (nth o 6))
+                    (fki-leakage-audit-valid? (nth o 7))
+                    (fki-query-observation-valid? (nth o 8) path)
+                    (if (str_eq (nth o 9) path) 1 0)
+                    (fki-native-execution-valid? (nth o 10))
+                    (fki-reasoning-valid? (nth o 11) path)
+                    (fki-local-model-valid? (nth o 12))
+                    (fki-teaching-exposure-valid?
+                        (fki-local-model-teaching (nth o 12)) sources)
+                    (if (gt (str_len (nth o 13)) 0) 1 0)))
+                (if (eq (sum checks) 14) 1 0))))
+
+    ; ---- coverage fold --------------------------------------------------
+    (defn fki-concept-has-valid-observation? (concept observations sources concepts)
+        (if (eq (len observations) 0) 0
+            (if (and (str_eq (fki-observation-concept (head observations)) (fki-concept-id concept))
+                     (and (str_eq (fki-observation-family (head observations)) (fki-concept-family concept))
+                          (eq (fki-observation-valid? (head observations) sources concepts) 1))) 1
+                (fki-concept-has-valid-observation? concept (tail observations) sources concepts))))
+    (defn fki-integrated-concepts-loop (remaining observations sources all-concepts n)
+        (if (eq (len remaining) 0) n
+            (fki-integrated-concepts-loop (tail remaining) observations sources all-concepts
+                (add n (fki-concept-has-valid-observation? (head remaining) observations sources all-concepts)))))
+    (defn fki-integrated-concepts (sources concepts observations)
+        (fki-integrated-concepts-loop concepts observations sources concepts 0))
+    (defn fki-concept-has-learned-weights? (concept observations sources concepts)
+        (if (eq (len observations) 0) 0
+            (if (and (str_eq (fki-observation-concept (head observations)) (fki-concept-id concept))
+                     (and (eq (fki-observation-valid? (head observations) sources concepts) 1)
+                          (eq (fki-local-model-weights-learned? (nth (head observations) 12)) 1))) 1
+                (fki-concept-has-learned-weights? concept (tail observations) sources concepts))))
+    (defn fki-learned-weight-concepts-loop (remaining observations sources all-concepts n)
+        (if (eq (len remaining) 0) n
+            (fki-learned-weight-concepts-loop (tail remaining) observations sources all-concepts
+                (add n (fki-concept-has-learned-weights? (head remaining) observations sources all-concepts)))))
+    (defn fki-learned-weight-concepts (sources concepts observations)
+        (fki-learned-weight-concepts-loop concepts observations sources concepts 0))
+
+    (defn fki-concept-has-source-retrieval? (concept source-observations sources concepts)
+        (if (eq (len source-observations) 0) 0
+            (if (and (str_eq (nth (head source-observations) 2) (fki-concept-id concept))
+                     (and (str_eq (nth (head source-observations) 3) (fki-concept-family concept))
+                          (eq (fki-source-retrieval-observation-valid?
+                              (head source-observations) sources concepts) 1))) 1
+                (fki-concept-has-source-retrieval? concept (tail source-observations) sources concepts))))
+    (defn fki-source-retrieval-concepts-loop (remaining source-observations sources all-concepts n)
+        (if (eq (len remaining) 0) n
+            (fki-source-retrieval-concepts-loop (tail remaining) source-observations sources all-concepts
+                (add n (fki-concept-has-source-retrieval?
+                    (head remaining) source-observations sources all-concepts)))))
+    (defn fki-source-retrieval-concepts (sources concepts source-observations)
+        (fki-source-retrieval-concepts-loop concepts source-observations sources concepts 0))
+
+    (defn fki-source-mapped? (source concepts)
+        (if (eq (len concepts) 0) 0
+            (if (and (str_eq (fki-source-path source) (fki-concept-source-path (head concepts)))
+                     (str_eq (fki-source-family source) (fki-concept-family (head concepts)))) 1
+                (fki-source-mapped? source (tail concepts)))))
+    (defn fki-source-integrated? (source concepts observations sources all-concepts)
+        (if (eq (len concepts) 0) 0
+            (if (and (str_eq (fki-source-path source) (fki-concept-source-path (head concepts)))
+                     (and (str_eq (fki-source-family source) (fki-concept-family (head concepts)))
+                          (eq (fki-concept-has-valid-observation? (head concepts) observations sources all-concepts) 1))) 1
+                (fki-source-integrated? source (tail concepts) observations sources all-concepts))))
+    (defn fki-count-mapped-sources-loop (remaining concepts n)
+        (if (eq (len remaining) 0) n
+            (fki-count-mapped-sources-loop (tail remaining) concepts
+                (add n (fki-source-mapped? (head remaining) concepts)))))
+    (defn fki-count-mapped-sources (sources concepts)
+        (fki-count-mapped-sources-loop sources concepts 0))
+    (defn fki-count-integrated-sources-loop (remaining concepts observations all-sources all-concepts n)
+        (if (eq (len remaining) 0) n
+            (fki-count-integrated-sources-loop (tail remaining) concepts observations all-sources all-concepts
+                (add n (fki-source-integrated? (head remaining) concepts observations all-sources all-concepts)))))
+    (defn fki-count-integrated-sources (sources concepts observations)
+        (fki-count-integrated-sources-loop sources concepts observations sources concepts 0))
+    (defn fki-count-current-sources (sources)
+        (if (eq (len sources) 0) 0
+            (add (fki-source-current-access? (head sources))
+                 (fki-count-current-sources (tail sources)))))
+    (defn fki-source-has-source-retrieval? (source concepts source-observations sources all-concepts)
+        (if (eq (len concepts) 0) 0
+            (if (and (str_eq (fki-source-path source) (fki-concept-source-path (head concepts)))
+                     (and (str_eq (fki-source-family source) (fki-concept-family (head concepts)))
+                          (eq (fki-concept-has-source-retrieval? (head concepts)
+                              source-observations sources all-concepts) 1))) 1
+                (fki-source-has-source-retrieval? source (tail concepts)
+                    source-observations sources all-concepts))))
+    (defn fki-count-source-retrieval-sources-loop (remaining concepts source-observations all-sources all-concepts n)
+        (if (eq (len remaining) 0) n
+            (fki-count-source-retrieval-sources-loop (tail remaining) concepts source-observations
+                all-sources all-concepts
+                (add n (fki-source-has-source-retrieval? (head remaining) concepts
+                    source-observations all-sources all-concepts)))))
+    (defn fki-count-source-retrieval-sources (sources concepts source-observations)
+        (fki-count-source-retrieval-sources-loop sources concepts source-observations sources concepts 0))
+
+    (defn fki-count-family-sources (family sources)
+        (if (eq (len sources) 0) 0
+            (add (if (str_eq (fki-source-family (head sources)) family) 1 0)
+                 (fki-count-family-sources family (tail sources)))))
+    (defn fki-count-family-integrated-loop (family remaining concepts observations all-sources all-concepts n)
+        (if (eq (len remaining) 0) n
+            (fki-count-family-integrated-loop family (tail remaining) concepts observations all-sources all-concepts
+                (add n (if (and (str_eq (fki-source-family (head remaining)) family)
+                                (eq (fki-source-integrated? (head remaining) concepts observations all-sources all-concepts) 1)) 1 0)))))
+    (defn fki-count-family-integrated (family sources concepts observations)
+        (fki-count-family-integrated-loop family sources concepts observations sources concepts 0))
+    (defn fki-percent (n total)
+        (if (eq total 0) 0 (div (mul n 100) total)))
+    (defn fki-meets-threshold? (n total)
+        (if (eq total 0) 0
+            (if (ge (mul n 100) (mul total (fki-threshold-percent))) 1 0)))
+    (defn fki-all-families-meet? (families sources concepts observations)
+        (if (eq (len families) 0) 1
+            (do
+                (let id (fki-family-id (head families)))
+                (let total (fki-count-family-sources id sources))
+                (let integrated (fki-count-family-integrated id sources concepts observations))
+                (if (eq (fki-meets-threshold? integrated total) 0) 0
+                    (fki-all-families-meet? (tail families) sources concepts observations)))))
+
+    ; report fields: tag scope source-total mapped-sources concept-total
+    ; integrated-sources integrated-concepts source-percent concept-percent
+    ; registry-closed family-gate integration-ready95 repository-ready95
+    ; current-access-percent grounded-rag-percent provenance-percent
+    ; teaching-prefix-percent learned-weight-concepts learned-weight-percent
+    ; source-retrieval-sources source-retrieval-source-percent
+    ; source-retrieval-concepts source-retrieval-concept-percent
+    ; current-source-hash-percent basis
+    (defn fki-report-with-source-retrieval (scope families sources concepts observations source-observations)
+        (do
+            (let source-total (len sources))
+            (let mapped (fki-count-mapped-sources sources concepts))
+            (let concept-total (len concepts))
+            (let integrated-sources (fki-count-integrated-sources sources concepts observations))
+            (let integrated-concepts (fki-integrated-concepts sources concepts observations))
+            (let current-sources (fki-count-current-sources sources))
+            (let learned-weights (fki-learned-weight-concepts sources concepts observations))
+            (let source-retrieval-sources
+                (fki-count-source-retrieval-sources sources concepts source-observations))
+            (let source-retrieval-concepts
+                (fki-source-retrieval-concepts sources concepts source-observations))
+            (let registry-closed (if (and (gt source-total 0) (eq mapped source-total)) 1 0))
+            (let family-gate (fki-all-families-meet? families sources concepts observations))
+            (let ready (if (and (eq current-sources source-total)
+                            (and (eq registry-closed 1)
+                                (and (eq (fki-meets-threshold? integrated-sources source-total) 1)
+                                (and (eq (fki-meets-threshold? integrated-concepts concept-total) 1)
+                                     (eq family-gate 1))))) 1 0))
+            (let repository-ready
+                (if (and (str_eq scope "repository-live-census") (eq ready 1)) 1 0))
+            (list "form-knowledge-integration-report-v1"
+                  scope source-total mapped concept-total integrated-sources integrated-concepts
+                  (fki-percent integrated-sources source-total)
+                  (fki-percent integrated-concepts concept-total)
+                  registry-closed family-gate ready repository-ready
+                  (fki-percent current-sources source-total)
+                  (fki-percent integrated-concepts concept-total)
+                  (fki-percent integrated-concepts concept-total)
+                  (fki-percent integrated-concepts concept-total)
+                  learned-weights (fki-percent learned-weights concept-total)
+                  source-retrieval-sources
+                  (fki-percent source-retrieval-sources source-total)
+                  source-retrieval-concepts
+                  (fki-percent source-retrieval-concepts concept-total)
+                  (fki-percent source-retrieval-sources source-total)
+                  (fki-evidence-basis))))
+    (defn fki-report-for-scope (scope families sources concepts observations)
+        (fki-report-with-source-retrieval scope families sources concepts observations (empty)))
+    (defn fki-report (families sources concepts observations)
+        (fki-report-for-scope "evaluation-fixture" families sources concepts observations))
+    (defn fki-report-with-retrieval (families sources concepts observations source-observations)
+        (fki-report-with-source-retrieval "evaluation-fixture" families sources concepts
+            observations source-observations))
+    (defn fki-repository-report (concepts observations)
+        (fki-report-for-scope "repository-live-census" (fki-families)
+            (fki-live-source-units) concepts observations))
+    (defn fki-repository-report-with-retrieval (concepts observations source-observations)
+        (fki-report-with-source-retrieval "repository-live-census" (fki-families)
+            (fki-live-source-units) concepts observations source-observations))
+    (defn fki-report-scope (r) (nth r 1))
+    (defn fki-report-source-total (r) (nth r 2))
+    (defn fki-report-mapped-sources (r) (nth r 3))
+    (defn fki-report-concept-total (r) (nth r 4))
+    (defn fki-report-integrated-sources (r) (nth r 5))
+    (defn fki-report-integrated-concepts (r) (nth r 6))
+    (defn fki-report-source-percent (r) (nth r 7))
+    (defn fki-report-concept-percent (r) (nth r 8))
+    (defn fki-report-registry-closed? (r) (nth r 9))
+    (defn fki-report-family-gate? (r) (nth r 10))
+    (defn fki-report-ready95? (r) (nth r 11))
+    (defn fki-report-repository-ready95? (r) (nth r 12))
+    (defn fki-report-current-access-percent (r) (nth r 13))
+    (defn fki-report-grounded-rag-percent (r) (nth r 14))
+    (defn fki-report-provenance-percent (r) (nth r 15))
+    (defn fki-report-teaching-prefix-percent (r) (nth r 16))
+    (defn fki-report-learned-weight-concepts (r) (nth r 17))
+    (defn fki-report-learned-weight-percent (r) (nth r 18))
+    (defn fki-report-source-retrieval-sources (r) (nth r 19))
+    (defn fki-report-source-retrieval-source-percent (r) (nth r 20))
+    (defn fki-report-source-retrieval-concepts (r) (nth r 21))
+    (defn fki-report-source-retrieval-concept-percent (r) (nth r 22))
+    (defn fki-report-current-source-hash-percent (r) (nth r 23))
+    (defn fki-report-basis (r) (nth r 24))
+    0
