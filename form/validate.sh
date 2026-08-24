@@ -236,10 +236,12 @@ fk_band_declared_verdict() {
     awk '/^;/ { if (match($0, /Verdict [0-9]+/)) { print substr($0, RSTART + 8, RLENGTH - 8); exit } } !/^;/ && NF { exit }' "$1" 2>/dev/null
 }
 
-# The fourth sibling — the universal walker binary emitted from Form
-# recipes — joins covered bands as a fourth leg. Built AFTER the Go kernel
-# (its C source is emitted by running the Go walker); everything degrades
-# honestly when clang or the manifest is absent. See scripts/fourth-arm.sh.
+# The fourth sibling is the repo-root fkwu source/JIT door. It resolves the
+# band's Form dependency graph and executes source directly; hot CPU/Metal/MLX
+# recipes may crystallize on demand, while flatten tables remain an explicit
+# maintenance/benchmark lane rather than a validation prerequisite.
+FORM_FOURTH_EXECUTION_MODE="${FORM_FOURTH_EXECUTION_MODE:-source}"
+FORM_FOURTH_SOURCE_FKWU="${FORM_FOURTH_SOURCE_FKWU:-$FKWU_SRC}"
 # shellcheck source=scripts/fourth-arm.sh
 source scripts/fourth-arm.sh
 build_fourth
@@ -273,7 +275,7 @@ if ! fourth_available; then
         echo "validate.sh: the fourth arm is ABSENT — refusing to report a three-arm run as green." >&2
         echo "  A ✓ here would mean 'three kernels agreed', not 'four kernels agreed', and nothing" >&2
         echo "  in the output would say which. See the reason build_fourth printed above." >&2
-        echo "  Heal it (scripts/regen_fkwu_bootstrap.sh), or say so out loud: FORM_ALLOW_THREE_ARM=1" >&2
+        echo "  Heal the repo-root fkwu source/JIT door, or say so out loud: FORM_ALLOW_THREE_ARM=1" >&2
         exit 1
     fi
 fi
@@ -446,11 +448,17 @@ fk_expand_declared_deps() {
 SOURCE_CACHE_DIR="form-stdlib/.cache/source-compiled"
 mkdir -p "$SOURCE_CACHE_DIR"
 compiler_stamp=""
-# The go lane's explicit closure. The walkers do not read `; preludes:` lines,
-# so this list exists for them alone; the fkwu lane below needs no list at all.
+# The Go lane's explicit source-lens closure. The sibling walkers do not read
+# `; preludes:` lines, so this list is the local host-I/O carrier for lowering;
+# fkwu receives only the resulting dependency-complete Form source below.
 # engine-constants / compiler-objects / form-ontology-bp joined 2026-08-18 when
 # their births in Form broke this hand-held mirror silently for a day.
-compiler_chain=("form-stdlib/engine-constants.fk" "form-stdlib/compiler-objects.fk" "form-stdlib/form-ontology-bp.fk" "form-stdlib/form-ontology-loader.fk" "form-stdlib/line-grammar.fk" "form-stdlib/bmf-core.fk" "form-stdlib/bmf-grammar.fk" "form-stdlib/bml.fk" "form-stdlib/bml-source.fk" "form-stdlib/source-compiler.fk" "form-stdlib/grammars/form-bml.fk" "form-stdlib/grammars/form-lift.fk" "form-stdlib/form-bml-lower.fk")
+# Validation needs executable Form source on every arm. Keep the runtime-image
+# compiler as the primary body, then select its explicit text lens at the edge;
+# this is the same Recipe lowering, expressed as source rather than hidden
+# behind sibling-only read_form_binary/walk_recipe_here natives. Including the
+# lens in the content stamp also invalidates old cached loader drivers.
+compiler_chain=("form-stdlib/engine-constants.fk" "form-stdlib/compiler-objects.fk" "form-stdlib/form-ontology-bp.fk" "form-stdlib/form-ontology-loader.fk" "form-stdlib/line-grammar.fk" "form-stdlib/bmf-core.fk" "form-stdlib/bmf-grammar.fk" "form-stdlib/bml.fk" "form-stdlib/bml-source.fk" "form-stdlib/source-compiler.fk" "form-stdlib/grammars/form-bml.fk" "form-stdlib/grammars/form-lift.fk" "form-stdlib/form-bml-lower.fk" "form-stdlib/source-compiler-text-lens.fk")
 compiler_stamp="$(form_hash16 "${compiler_chain[@]}" "${FKWU_SRC:-}" "$GO_BIN")"
 
 prepared_args=()
@@ -463,30 +471,20 @@ prepare_sources() {
             cached="$SOURCE_CACHE_DIR/$key.fk"
             if [[ ! -s "$cached" ]]; then
                 safe="${src//\//__}"
-                # fkwu first: the driver names one cell and fkwu's resolver
-                # walks the body's own preludes graph -- no chain list to drift.
-                if [[ -n "${FKWU_SRC:-}" && -x "${FKWU_SRC:-}" ]]; then
-                    out="$(mktemp "$SOURCE_CACHE_DIR/.${key}.XXXXXX")"
-                    driver="$(mktemp "$source_compile_dir/compile-${safe}.XXXXXX.fk")"
-                    {
-                        printf '; generated lens driver -- the closure is the preludes graph.\n'
-                        printf '; preludes: form-stdlib/source-compiler-text-lens.fk\n'
-                        printf '(do (form-source-compile-file "%s" "%s") 0)\n' "$src" "$out"
-                    } > "$driver"
-                    if "$FKWU_SRC" "$driver" >/dev/null 2>&1 && [[ -s "$out" ]]; then
-                        mv -f "$out" "$cached"
-                    fi
-                    rm -f "$out" "$driver" "${driver%.fk}.fkb" "${driver%.fk}.sym" 2>/dev/null
+                # The compiler remains Form source, but its full chain declares
+                # three host-I/O calls that are valid on the proof siblings and
+                # absent on fkwu. Run the explicit text lens on that valid local
+                # lane, then hand the resulting pure Form source to every arm.
+                # This preserves the seam instead of suppressing fkwu compiler
+                # diagnostics; the fourth witness below executes the prepared
+                # closure itself on fkwu with zero unresolved calls.
+                out="$(mktemp "$SOURCE_CACHE_DIR/.${key}.XXXXXX")"
+                driver="$(mktemp "$source_compile_dir/compile-${safe}.XXXXXX")"
+                printf '(do (form-source-compile-file "%s" "%s"))\n' "$src" "$out" > "$driver"
+                if "$GO_BIN" "${compiler_chain[@]}" "$driver" >/dev/null && [[ -s "$out" ]]; then
+                    mv -f "$out" "$cached"
                 fi
-                if [[ ! -s "$cached" ]]; then
-                    out="$(mktemp "$SOURCE_CACHE_DIR/.${key}.XXXXXX")"
-                    driver="$(mktemp "$source_compile_dir/compile-${safe}.XXXXXX")"
-                    printf '(do (form-source-compile-file "%s" "%s"))\n' "$src" "$out" > "$driver"
-                    if "$GO_BIN" "${compiler_chain[@]}" "$driver" >/dev/null && [[ -s "$out" ]]; then
-                        mv -f "$out" "$cached"
-                    fi
-                    rm -f "$out" "$driver"
-                fi
+                rm -f "$out" "$driver"
             fi
             if [[ -s "$cached" ]]; then
                 prepared_args+=("$cached")
@@ -494,7 +492,7 @@ prepare_sources() {
                 # No silent raw fallback: a raw section-bearing source cannot
                 # agree on any arm, so handing it forward only moves the failure
                 # somewhere quieter. Refusing HERE names the real seam.
-                echo "validate.sh: source lens failed for $src on both fkwu and go lanes" >&2
+                echo "validate.sh: source lens failed for $src on the declared sibling host-I/O lane" >&2
                 echo "  a section-bearing source cannot run raw; fix the lens, not the band" >&2
                 exit 1
             fi
@@ -530,25 +528,14 @@ run_siblings() {
     local label="$1"; shift
     local go_out rs_out ts_out legs
     prepare_sources "$@"
-    # Fourth leg: when the workload's band is in the fourth-arm manifest,
-    # its pre-flattened table runs on the emitted universal walker (fkwu)
-    # alongside the three walkers. Native execution answers in milliseconds,
-    # so max(legs) — the band's wall time — does not move.
-    local fourth_tbl="" fk_out=""
+    # Fourth leg: a manifest-covered band runs from source on runtime fkwu.
+    # There is no table/index preparation and no cold flatten build. A nonzero
+    # exit or source diagnostic is a failed fourth witness even when the last
+    # printed scalar happens to match (verdict-parity numbness).
+    local fourth_src="" fk_out="" fk_rc=0 fk_diags=0
+    local fourth_stem=""
     if fourth_available; then
-        # AXIOM-4 again, per band. A band DECLARED in fourth-arm-bands.txt whose
-        # table fails to prepare used to leave $fourth_tbl empty, and the band
-        # then ran three-arm and was stamped ✓ like any other — the manifest
-        # said four, the run gave three, and the output said nothing. Declared
-        # means mandatory: if the manifest names this band, its table must exist.
-        local fourth_stem
         fourth_stem="$(fourth_band_stem "${*: -1}" || true)"
-        fourth_tbl="$(fourth_table_for_band "${*: -1}" || true)"
-        if [[ -n "$fourth_stem" && -z "$fourth_tbl" ]]; then
-            echo "validate.sh: $fourth_stem is declared in $FOURTH_MANIFEST but its fourth-arm table" >&2
-            echo "  did not prepare. Refusing to run it three-arm under a four-arm declaration." >&2
-            exit 1
-        fi
     fi
     # The three kernels run CONCURRENTLY: a band's wall time is max(leg), not
     # sum — on compiler-heavy bands the Go+Rust legs ride inside the TS leg's
@@ -585,18 +572,30 @@ run_siblings() {
     ( TMPDIR="$legs/tmp-go" "$GO_BIN" "${go_args[@]}" > "$legs/go" 2>&1 || true ) &
     ( TMPDIR="$legs/tmp-rs" "$RS_BIN" "${rs_args[@]}" > "$legs/rs" 2>&1 || true ) &
     ( TMPDIR="$legs/tmp-ts" run_ts "${ts_args[@]}" > "$legs/ts" 2>&1 || true ) &
-    if [[ -n "$fourth_tbl" ]]; then
-        # Consume the complete arm-profile stream while retaining the verdict.
-        # `head -1` closed the pipe early and could SIGPIPE the emitted worker
-        # thread during process teardown, leaving macOS in an unkillable UE wait.
-        ( TMPDIR="$legs/tmp-fk" "$FKWU" "$fourth_tbl" 0 2>/dev/null | sed -n '1p' > "$legs/fk" || true ) &
+    if [[ -n "$fourth_stem" ]]; then
+        fourth_src="$(fourth_prepare_source_workload "$FOURTH_SOURCE_RUN_DIR" "${prepared_args[@]}")"
+        if [[ -z "$fourth_src" ]]; then
+            echo "validate.sh: $fourth_stem is declared in $FOURTH_MANIFEST but its source closure" >&2
+            echo "  did not prepare. Refusing to run it three-arm under a four-arm declaration." >&2
+            rm -rf "$legs" 2>/dev/null || true
+            exit 1
+        fi
+        (
+            set +e
+            TMPDIR="$legs/tmp-fk" "$FOURTH_SOURCE_FKWU" "$fourth_src" > "$legs/fk" 2> "$legs/fk.err"
+            printf '%s\n' "$?" > "$legs/fk.rc"
+        ) &
     fi
     wait
     go_out=$(cat "$legs/go"); rs_out=$(cat "$legs/rs"); ts_out=$(cat "$legs/ts")
-    if [[ -n "$fourth_tbl" ]]; then fk_out=$(cat "$legs/fk" 2>/dev/null || true); fi
+    if [[ -n "$fourth_stem" ]]; then
+        fk_out=$(cat "$legs/fk" 2>/dev/null || true)
+        fk_rc=$(cat "$legs/fk.rc" 2>/dev/null || echo 1)
+        fk_diags=$(grep -c 'unresolved-call\|error:' "$legs/fk.err" 2>/dev/null || true)
+    fi
     rm -rf "$legs" 2>/dev/null || true
     if [[ "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]] \
-        && { [[ -z "$fourth_tbl" ]] || [[ "$fk_out" == "$go_out" ]]; }; then
+        && { [[ -z "$fourth_stem" ]] || { [[ "$fk_rc" == 0 && "$fk_diags" == 0 && "$fk_out" == "$go_out" ]]; }; }; then
         # REGISTERED-VERDICT GATE (2026-08-17). fourth-arm-bands.txt column 3 is
         # the band's registered verdict, and until today NOTHING read it — every
         # consumer parsed `stem kind _`, so the column was write-only and 114
@@ -628,13 +627,13 @@ run_siblings() {
         fi
         printf "  ✓  %-30s  → %s\n" "$label" "$go_out"
         ok=$((ok + 1))
-        if [[ -n "$fourth_tbl" ]]; then fourth_ok=$((fourth_ok + 1)); fi
+        if [[ -n "$fourth_stem" ]]; then fourth_ok=$((fourth_ok + 1)); fi
         if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then
-            if [[ -n "$fourth_tbl" ]]; then echo "ok fourth" > "$SUITE_STATUS_FILE"; else echo "ok" > "$SUITE_STATUS_FILE"; fi
+            if [[ -n "$fourth_stem" ]]; then echo "ok fourth" > "$SUITE_STATUS_FILE"; else echo "ok" > "$SUITE_STATUS_FILE"; fi
         fi
-    elif [[ -n "$fourth_tbl" ]]; then
-        printf "  ✗  %-30s\n      go         = %s\n      rust       = %s\n      typescript = %s\n      fourth     = %s\n" \
-            "$label" "$go_out" "$rs_out" "$ts_out" "$fk_out"
+    elif [[ -n "$fourth_stem" ]]; then
+        printf "  ✗  %-30s\n      go         = %s\n      rust       = %s\n      typescript = %s\n      fourth-src = %s\n      fourth-rc  = %s  diagnostics=%s\n" \
+            "$label" "$go_out" "$rs_out" "$ts_out" "$fk_out" "$fk_rc" "$fk_diags"
         fail=$((fail + 1))
         if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
     else
@@ -773,8 +772,8 @@ if [[ $# -gt 0 ]]; then
     done
     run_workload "$label" "${explicit_args[@]}"
 else
-    # Pre-flatten every covered band's table in one Go run before the
-    # suite fans out — cold cache pays ~20s once; warm runs skip it.
+    # Direct source/JIT mode has no global flatten phase. The call remains so
+    # an explicitly selected table-maintenance mode can warm its optional cache.
     fourth_prepare_all
     # Pre-compile the one prelude every band shares so the pool's first
     # wave doesn't race N copies of the same compile (atomic mv converges
@@ -865,8 +864,8 @@ fi
 
 echo ""
 if [[ $fourth_ok -gt 0 ]]; then
-    echo "  fourth arm: $fourth_ok band(s) four-way (fkwu + pre-flattened tables)"
-elif [[ $ok -gt 0 ]]; then
+    echo "  fourth arm: $fourth_ok band(s) four-way (runtime fkwu source/JIT; no flatten gate)"
+elif [[ $((ok - fkwu_only)) -gt 0 ]]; then
     # The SECOND way a zero happens, and the one the fourth_available refusal
     # above cannot see. That gate asks "can the arm be built at all" and exits 1
     # when it cannot. This asks the different question: the arm built fine, and
@@ -882,8 +881,7 @@ elif [[ $ok -gt 0 ]]; then
     # validate.sh run would have said so. Say the zero out loud instead.
     echo "  fourth arm: 0 band(s) — built, but no band in this run is covered;"
     echo "              every ✓ above speaks for three kernels. Register the band in"
-    echo "              fourth-arm-bands.txt, or check bootstrap/fkwu-uni.stamp against"
-    echo "              scripts/fourth-arm.sh fourth_emit_chain_stamp."
+    echo "              fourth-arm-bands.txt. The source/JIT door itself is present."
 fi
 if [[ $fkwu_only -gt 0 ]]; then
     echo "  fkwu-only lanes: $fkwu_only band(s) at declared proof level (runtime fkwu)"

@@ -23,7 +23,7 @@
 ; file organ. A candidate for a four-arm run; NOT claimed as one here — the
 ; four-arm gate is source_jit_gate's. What is witnessed below is the fkwu arm.
 ;
-; Verdict 1023:
+; Verdict 65535:
 ;   1     a stream with no mark is carried through untouched — no lookup at all
 ;   2     a complete envelope is recognized and honored
 ;   4     the envelope survives being split across seven ids (the real case)
@@ -34,11 +34,19 @@
 ;   128   the window resets — a second envelope fires, and the bound stops it
 ;   256   the bounded window holds under a long stream (no pre-materialization)
 ;   512   model-executed is 0, and the model's ids stay separable from the body's
+;   1024  a prefill-decoded FIRST id enters output and the bounded window before
+;         any step; without it the split open mark cannot complete
+;   2048  before observation prefill, the emitted close id is committed at pos;
+;         the returned position advances by close + injected ids, never overwrite
+;   4096  a close on the final output slot records the hit but refuses injection
+;   8192  terminal stop consumes one real forward and advances the KV position
+;   16384 bounded records retain status, reason and attribution span separately
+;   32768 injected observations count exactly one explicit close commit
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/language-model.fk
 ; preludes: form-stdlib/form-cli-heedmark-xtal.fk
 ; preludes: form-stdlib/form-cli-heed-cursor.fk
-; witnessed: 2026-08-24 -> 1023 on fkwu; frame-cap 305 held over 60 steps
+; witnessed: 2026-08-24 -> 4095 on fkwu; first/close seams and frame-cap 305 held
 
 (do
     ; ── the scripted stream ────────────────────────────────────────────────
@@ -65,9 +73,9 @@
         (if (eq id 900) ""
             " x")))))))))))))))))))
 
-    ; The walk. 900 is the resume id a prefill hands back — it decodes to no
-    ; bytes and rejoins the script after the first envelope, so a second
-    ; envelope really does arrive and bit 128 can watch the window reset.
+    ; The walk. 900 is the first MODEL id an observation prefill hands back — it
+    ; decodes to no bytes and rejoins the script after the first envelope, so a
+    ; second envelope really does arrive and bit 128 can watch the window reset.
     (defn fhcb-next (id)
         (if (lt id 0) 0
         (if (eq id 800) 800
@@ -92,9 +100,10 @@
         (if (eq (str_len text) 0) (empty)
             (fhcb-encode-n (add (div (str_len text) 8) 1) 0 (empty))))
 
-    ; prefillf — the seam. pos advances by the span (those are real KV
-    ; positions), and the resume id is what the model says next. This is
-    ; q38-prefill's contract: (list first pos').
+    ; prefillf — the seam. The cursor calls it once with the emitted close id,
+    ; then with the observation ids at the returned next position. pos advances
+    ; by each span's real KV positions, and 900 is the model's decoded first id.
+    ; This is q38-prefill's contract: (list first pos').
     (defn fhcb-prefillf (ctx ids pos) (list 900 (add pos (len ids))))
 
     ; ── one adapter per status ─────────────────────────────────────────────
@@ -112,6 +121,10 @@
     (defn fhcb-run (start lookupf budget n)
         (fhc-run 0 fhcb-stepf fhcb-prefillf fhcb-decodef fhcb-encodef lookupf 1
             start 0 n (list 999) (fhc-fresh budget) (empty)))
+    (defn fhcb-run-decoded-first (first lookupf budget n)
+        (fhc-run-decoded-first 0
+            fhcb-stepf fhcb-prefillf fhcb-decodef fhcb-encodef lookupf 1
+            first 0 n (list 999) (fhc-fresh budget) (empty)))
 
     ; ── reading a run back ─────────────────────────────────────────────────
     (defn fhcb-cur (r) (fhc-cursor-of r))
@@ -141,6 +154,13 @@
     (let bound (fhcb-run (sub 0 1) fhcb-lookup-hit 1 40))
     ; a long stream of prose, to watch the window cap hold
     (let long (fhcb-run 800 fhcb-lookup-hit 2 60))
+    ; q38-prefill already decoded id 3. It is the FIRST third of the open mark;
+    ; accepting it before stepping is the only way ids 3..10 close the frame.
+    (let decoded-first (fhcb-run-decoded-first 3 fhcb-lookup-hit 2 8))
+    ; Exactly through the close, with no slot left for a post-observation token.
+    (let final-close (fhcb-run (sub 0 1) fhcb-lookup-hit 2 11))
+    ; stepf consumes id 15 at pos 0 and predicts the configured stop id 999.
+    (let terminal (fhcb-run 15 fhcb-lookup-hit 2 2))
 
     (let b0 (fhcb-bit (and (eq (fhc-lookups (fhcb-cur prose)) 0)
                       (and (eq (fhc-injected (fhcb-cur prose)) 0)
@@ -174,10 +194,40 @@
     (let b8 (fhcb-bit (and (le (str_len (fhc-window (fhcb-cur long))) (fhm-frame-cap))
                       (and (eq (fhm-frame-cap) 305)
                            (eq (len (fhc-out long)) 60))) 256))
-    ; the model's ids and the body's never mix: 901 is an injected id and 900 is
-    ; the resume marker; neither may appear in the model's own stream
+    ; the model's ids and the body's never mix: 901 is injected and must stay
+    ; out; 900 is q38-prefill's decoded model id and must now stay IN.
     (let b9 (fhcb-bit (and (eq (fhc-model-executed) 0)
                       (and (eq (fhcb-has-id (fhc-out two) 901) 0)
-                           (eq (fhcb-has-id (fhc-out two) 900) 0))) 512))
+                           (eq (fhcb-has-id (fhc-out two) 900) 1))) 512))
+    (let b10 (fhcb-bit
+        (and (eq (head (fhc-out decoded-first)) 3)
+        (and (eq (len (fhc-out decoded-first)) 8)
+        (and (eq (fhc-lookups (fhcb-cur decoded-first)) 1)
+             (eq (fhcb-honored-count decoded-first "hit") 1)))) 1024))
+    ; A hit output ends with an unconsumed model id. Every earlier model id has
+    ; one KV position, including the close delimiter; injected ids have their
+    ; own positions. Omitting the explicit close commit makes this one short.
+    (let b11 (fhcb-bit
+        (eq (fhc-pos hit) (add (len (fhc-out hit)) (fhc-injected (fhcb-cur hit))))
+        2048))
+    (let b12 (fhcb-bit
+        (and (eq (fhc-injected (fhcb-cur final-close)) 0)
+        (and (eq (fhc-injection-refusals (fhcb-cur final-close)) 1)
+        (and (eq (fhc-close-commits (fhcb-cur final-close)) 0)
+             (eq (fhcb-honored-count final-close "hit") 1)))) 4096))
+    (let b13 (fhcb-bit
+        (and (eq (fhc-terminal-forwards (fhcb-cur terminal)) 1)
+        (and (eq (fhc-pos terminal) 1)
+             (eq (len (fhc-out terminal)) 0))) 8192))
+    (let first-record (head (fhc-records (fhcb-cur hit))))
+    (let b14 (fhcb-bit
+        (and (str_eq (fhc-record-status first-record) "hit")
+        (and (str_eq (fhc-record-reason first-record) "grounded-hit")
+             (ge (str_find (fhc-record-span first-record) "source-path=" 0) 0))) 16384))
+    (let b15 (fhcb-bit
+        (and (eq (fhc-close-commits (fhcb-cur hit)) 1)
+             (eq (fhc-terminal-forwards (fhcb-cur hit)) 0)) 32768))
 
-    (add b0 (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 (add b8 b9))))))))))
+    (add b0 (add b1 (add b2 (add b3 (add b4 (add b5 (add b6
+        (add b7 (add b8 (add b9 (add b10 (add b11 (add b12
+        (add b13 (add b14 b15))))))))))))))))
