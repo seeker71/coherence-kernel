@@ -311,10 +311,50 @@
                 (q38-prefill-chunk-go ps bs geo lays sts embTv onormTv projTv
                     (tail ids) (add pos 1) chunk (if (eq settle 1) 0 (add k 1))))))
 
+    ; ── one batch for the whole span ───────────────────────────────────────
+    ; chunk 64 answered no: the scratch buffers bs 0, bs 1, ... are reused by
+    ; every position, so two positions in flight overwrite each other's working
+    ; memory. The sync was buying ORDERING, and paying a CPU round trip for it.
+    ;
+    ; md-bind16's own comment names the cheaper coin: barrier_before, "1 =
+    ; memoryBarrier before this dispatch; legal only in a concurrent batch".
+    ; Today q38-forward-state opens a fresh concurrent batch per position and its
+    ; embedding dispatch carries barrier 0 — correct, because a sync had just
+    ; drained everything. Open the batch ONCE for the span and give each
+    ; position's first dispatch barrier 1 instead, and the ordering that the
+    ; round trip was buying is expressed inside the command buffer, where it
+    ; costs a barrier rather than a stall.
+    (defn q38-forward-state-after (ps bs geo lays sts embTv id pos barrier)
+        (do
+            (metal_enqueue (nth ps 30)
+                (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
+                         (list (mul id (nth geo 0)) (nth geo 0)) 0 barrier)
+                (nth geo 0))
+            (q38-blocks ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22))
+            1))
+
+    (defn q38-prefill-span-go (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (if (eq (len ids) 1)
+            (do (metal_sync)
+                (list (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos)
+                      (add pos 1)))
+            (do (q38-forward-state-after ps bs geo lays sts embTv (head ids) pos 1)
+                (q38-prefill-span-go ps bs geo lays sts embTv onormTv projTv
+                    (tail ids) (add pos 1) ))))
+
+    (defn q38-prefill-span (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (do (metal_batch_concurrent)
+            (q38-prefill-span-go ps bs geo lays sts embTv onormTv projTv ids pos)))
+
+    ; chunk 1 = a barrier-per-position sync, the lane as it has always been.
+    ; chunk 0 = one batch for the whole span, ordering by barrier.
+    ; chunk n>1 = settle every n positions (the probe that answered no).
     (defn q38-prefill-chunked (ps bs geo lays sts embTv onormTv projTv ids pos chunk)
-        (if (le chunk 1)
-            (q38-prefill ps bs geo lays sts embTv onormTv projTv ids pos)
-            (q38-prefill-chunk-go ps bs geo lays sts embTv onormTv projTv ids pos chunk 0)))
+        (if (eq chunk 0)
+            (q38-prefill-span ps bs geo lays sts embTv onormTv projTv ids pos)
+            (if (le chunk 1)
+                (q38-prefill ps bs geo lays sts embTv onormTv projTv ids pos)
+                (q38-prefill-chunk-go ps bs geo lays sts embTv onormTv projTv ids pos chunk 0))))
 
     (defn q38-key (arch suffix) (str_concat arch (str_concat "." suffix)))
 
