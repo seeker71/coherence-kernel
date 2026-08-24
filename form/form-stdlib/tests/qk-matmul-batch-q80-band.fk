@@ -1,0 +1,94 @@
+; qk-matmul-batch-q80-band.fk — the batched matmul reaches the quant the Qwen
+; lane actually runs.
+;
+; WHY THIS WAS NOT ALREADY TRUE. Stone 7 proved a batched prefill pass bit-exact
+; against P lane matvecs in July (form/native/metal/metal_batched_prefill.sh,
+; VERDICT PASS, 5 gates) and GPU_GAPS.md records it as DONE. The Qwen lane, built
+; in August, never inherited it — and the reason was one literal. qmb-step
+; advertised itself as parameterized on `pfx` and `stride`, the two things that
+; vary between Q4_K and Q6_K, and hardcoded `idx / 256u` because both of those
+; quants use a 256-weight superblock. Q8_0's block is 32 weights in 34 bytes, so
+; the generator could not be instantiated for it at all. The signature promised a
+; generality the body did not have, and the promise held right up until the first
+; caller it excluded.
+;
+; Bit 512 is that literal, held down: the block size must actually change the
+; emitted text, or `blockn` is decoration.
+;
+; NO REGRESSION — bit 1. The K-quant emissions must be byte-identical to what
+; they were, because they were proven bit-exact on the GPU and nothing about
+; them changed.
+;
+; WHAT IS NOT CLAIMED HERE. This band is string folds over emitted MSL. That the
+; Q8_0 batched kernel COMPILES is witnessed separately and live
+; (observe/q80-batch-pipeline-run.fk: compiled=yes, pipeline 1, Apple M4 Max).
+; That it is BIT-EXACT against the Q8_0 lane kernel is a GPU claim, is gate B2's
+; job, and is NOT made anywhere yet.
+;
+; PROOF LEVEL: pure string folds, no host organ, no GPU. A candidate for a
+; four-arm run; not claimed as one — that surface is source_jit_gate's.
+;
+; Verdict 1023:
+;   1     the K-quant emissions are byte-identical — no regression
+;   2     a Q8_0 batched kernel is emitted at all
+;   4     it carries Q8_0's block (32), not the K-quants' 256
+;   8     it carries Q8_0's stride (34)
+;   16    the decode helper pair is present, both halves
+;   32    the decode reads the lane's own shape: f16 scale, signed byte
+;   64    the scale is applied per weight, as q6k_wi and q4k_wi apply theirs
+;   128   the kernel keeps the batch spine: 8 accumulators, simd_sum, y[t*rows+r]
+;   256   the Q8_0 kernel differs from the K-quant ones only where it should
+;   512   THE LITERAL: block size actually varies the emitted text
+;
+; preludes: form-stdlib/qk-matmul-batch.fk
+; witnessed: 2026-08-24 -> 1023 on fkwu; compiled live on Apple M4 Max
+
+(do
+    (defn qb8-has? (s n) (if (ge (str_find s n 0) 0) 1 0))
+    (defn qb8-bit (ok bit) (if ok bit 0))
+
+    (let q80 (qmb-q80-batch))
+    (let helpers (qmb-q80-helpers))
+    (let k256 (qmb-step-n "q8_0" "34" "256"))
+    (let k32 (qmb-step-n "q8_0" "34" "32"))
+
+    ; the K-quant emissions, before-and-after in one expression
+    (let b0 (qb8-bit (and (str_eq (qmb-batch-msl "form_q6k_matmul_batch_f32" "q6k" "210")
+                                  (qmb-batch-msl-n "form_q6k_matmul_batch_f32" "q6k" "210" "256"))
+                     (and (str_eq (qmb-batch-msl "form_q4k_matmul_batch_f32" "q4k" "144")
+                                  (qmb-batch-msl-n "form_q4k_matmul_batch_f32" "q4k" "144" "256"))
+                          (eq (qb8-has? (qmb-msl-appendix) "form_q6k_matmul_batch_f32") 1))) 1))
+    (let b1 (qb8-bit (and (eq (qb8-has? q80 "kernel void form_q8_0_matmul_batch_f32") 1)
+                          (gt (str_len q80) 0)) 2))
+    (let b2 (qb8-bit (and (eq (qb8-has? q80 "idx / 32u") 1)
+                     (and (eq (qb8-has? q80 "blk * 32u") 1)
+                          (eq (qb8-has? q80 "idx / 256u") 0))) 4))
+    (let b3 (qb8-bit (and (eq (qb8-has? q80 "b = blk * 34u") 1)
+                     (and (str_eq (qmb-q80-stride) "34")
+                          (str_eq (qmb-q80-block) "32"))) 8))
+    (let b4 (qb8-bit (and (eq (qb8-has? q80 "q8_0_inv(device const uchar* qb, uint b)") 1)
+                          (eq (qb8-has? q80 "q8_0_wi(device const uchar* qb, uint b, int i, float2 inv)") 1)) 16))
+    ; the lane's own decode: a 2-byte f16 scale, then signed bytes
+    (let b5 (qb8-bit (and (eq (qb8-has? helpers "as_type<half>(h)") 1)
+                     (and (eq (qb8-has? helpers "(ushort)qb[b] | ((ushort)qb[b + 1u] << 8)") 1)
+                          (eq (qb8-has? helpers "(char)qb[b + 2u + (uint)i]") 1))) 32))
+    (let b6 (qb8-bit (eq (qb8-has? helpers "return inv.x * float((char)qb[b + 2u + (uint)i]);") 1) 64))
+    ; the batch spine survives instantiation
+    (let b7 (qb8-bit (and (eq (qb8-has? q80 "float acc[8]") 1)
+                     (and (eq (qb8-has? q80 "metal::simd_sum(acc[i])") 1)
+                          (eq (qb8-has? q80 "y[t * rows + r] = s") 1))) 128))
+    ; distinct from the K-quant kernels exactly where it should be, and nowhere
+    ; else. (That the QWEN LANE's assembled MSL carries it is witnessed live in
+    ; observe/q80-batch-pipeline-run.fk, not here — this band preludes only the
+    ; generator, and a check reaching past its own preludes would fold over
+    ; nothing and report a number anyway.)
+    (let b8 (qb8-bit (and (eq (qb8-has? q80 "q6k_wi(") 0)
+                     (and (eq (qb8-has? q80 "q4k_wi(") 0)
+                          (and (eq (qb8-has? q80 "uint ntile = (ntok + 7u) / 8u") 1)
+                               (eq (qb8-has? q80 "constant uint& ntok [[buffer(5)]]") 1)))) 256))
+    ; THE LITERAL: blockn is load-bearing, not decoration
+    (let b9 (qb8-bit (and (eq (str_eq k256 k32) 0)
+                     (and (eq (qb8-has? k32 "idx / 32u") 1)
+                          (eq (qb8-has? k256 "idx / 256u") 1))) 512))
+
+    (add b0 (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 (add b8 b9))))))))))
