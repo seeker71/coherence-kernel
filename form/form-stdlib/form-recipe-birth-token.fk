@@ -1,0 +1,369 @@
+; form-recipe-birth-token.fk — scannerless raw-byte birth of an affine signed-
+; i32 recipe, returning content identity as a typed observation.
+;
+; STREAM SURFACE
+;
+;   <|form:recipe-birth|>affine-i32;mul=-3;add=1<|/form:recipe-birth|>
+;
+; A local model may emit those bytes, but it does not create a recipe merely by
+; saying them. frbt-feed-byte walks the frame one byte at a time with no token
+; vocabulary or pre-step. A complete canonical payload is parsed by Form,
+; interned as recipe content, and returned through a separate birth-observation
+; NodeID. The raw surface is never reproduced by the renderer.
+;
+; DIRECT CONSTRUCTION. The affine grammar constructs meaning as tag, multiplier,
+; addend, input shape, result shape and recipe-version node children.
+; The stable accessors frbt-recipe-mul/frbt-recipe-add make that shape available
+; to a later direct source emitter. This cell performs no arithmetic execution,
+; native generation, persistence, carrier call, or model call.
+;
+; SIGNALS. A prefix or body still arriving is held. Ordinary non-envelope input
+; is nothing. Malformed grammar is failure. Frame-budget exhaustion is timeout.
+; Valid multiplier/addend 0 and 1 are ordinary present integers, never confused
+; with nothing. Every terminal observation carries content-addressed lifecycle
+; events; these name what the parser/reducer observed, not external effects.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+;
+; Proven by: form-stdlib/tests/form-recipe-birth-token-band.fk
+
+(do
+    ; ── fixed byte grammar and bounds ────────────────────────────────
+    (defn frbt-open () "<|form:recipe-birth|>")
+    (defn frbt-close () "<|/form:recipe-birth|>")
+    (defn frbt-observation-open () "<|form:recipe-birth-observation|>")
+    (defn frbt-observation-close () "<|/form:recipe-birth-observation|>")
+    (defn frbt-kind () "affine-i32")
+    (defn frbt-mul-field () "mul=")
+    (defn frbt-add-field () "add=")
+    (defn frbt-max-payload-bytes () 64)
+    (defn frbt-max-int-bytes () 11)
+    (defn frbt-max-render-bytes () 1024)
+    (defn frbt-max-frame-bytes ()
+        (add (str_len (frbt-open))
+             (add (frbt-max-payload-bytes) (str_len (frbt-close)))))
+
+    ; ── content identities ──────────────────────────────────────────
+    (defn frbt-recipe-category () (make_nodeid 31 2 0 65))
+    (defn frbt-birth-category () (make_nodeid 31 2 0 66))
+    (defn frbt-event-category () (make_nodeid 31 2 0 67))
+    (defn frbt-observation-category () (make_nodeid 31 2 0 68))
+    (defn frbt-absent-category () (make_nodeid 31 2 0 69))
+    (defn frbt-absent ()
+        (intern_node (frbt-absent-category)
+            (list (intern_trivial_string "nothing"))))
+
+    ; The first three children intentionally match the direct affine emitter
+    ; shape: semantic tag, multiplier, addend. The remaining children make the
+    ; signed width and birth version part of content identity.
+    (defn frbt-affine-recipe (mul-value add-value)
+        (intern_node (frbt-recipe-category)
+            (list
+                (intern_trivial_string "affine-scalar-v1")
+                (intern_trivial_int mul-value)
+                (intern_trivial_int add-value)
+                (intern_trivial_string "signed-i32")
+                (intern_trivial_string "signed-i32")
+                (intern_trivial_string "scannerless-recipe-birth-v1"))))
+    (defn frbt-recipe-tag (recipe)
+        (node_value (nth (node_children recipe) 0)))
+    (defn frbt-recipe-mul (recipe)
+        (node_value (nth (node_children recipe) 1)))
+    (defn frbt-recipe-add (recipe)
+        (node_value (nth (node_children recipe) 2)))
+    (defn frbt-i32? (v)
+        (if (and (ge v (sub 0 2147483648)) (le v 2147483647)) 1 0))
+    (defn frbt-recipe-shape? (recipe)
+        (if (nothing? recipe) 0
+        (if (not (node_eq (node_category recipe) (frbt-recipe-category))) 0
+        (if (not (eq (len (node_children recipe)) 6)) 0
+        (if (not (str_eq (frbt-recipe-tag recipe) "affine-scalar-v1")) 0
+        (if (not (eq (frbt-i32? (frbt-recipe-mul recipe)) 1)) 0
+        (if (not (eq (frbt-i32? (frbt-recipe-add recipe)) 1)) 0
+        (if (not (str_eq (node_value (nth (node_children recipe) 3))
+                         "signed-i32")) 0
+        (if (not (str_eq (node_value (nth (node_children recipe) 4))
+                         "signed-i32")) 0
+            (if (str_eq (node_value (nth (node_children recipe) 5))
+                        "scannerless-recipe-birth-v1") 1 0))))))))))
+
+    (defn frbt-node-key (node)
+        (str_concat (int_to_str (node_pkg node))
+        (str_concat "." (str_concat (int_to_str (node_level node))
+        (str_concat "." (str_concat (int_to_str (node_type node))
+        (str_concat "." (int_to_str (node_inst node)))))))))
+
+    ; ── scannerless byte cursor ─────────────────────────────────────
+    ; cursor = (status reason bytes frame complete)
+    (defn frbt-cursor () (list "held" "held-open" 0 "" 0))
+    (defn frbt-cursor-status (c) (nth c 0))
+    (defn frbt-cursor-reason (c) (nth c 1))
+    (defn frbt-cursor-bytes (c) (nth c 2))
+    (defn frbt-cursor-frame (c) (nth c 3))
+    (defn frbt-cursor-complete? (c) (nth c 4))
+    (defn frbt-prefix-of-open? (text)
+        (if (gt (str_len text) (str_len (frbt-open))) 0
+            (if (str_eq text (substring (frbt-open) 0 (str_len text))) 1 0)))
+    (defn frbt-tail-close? (text)
+        (do
+            (let n (str_len text))
+            (let m (str_len (frbt-close)))
+            (if (lt n m) 0
+                (if (str_eq (substring text (sub n m) n) (frbt-close)) 1 0))))
+    (defn frbt-cursor-terminal? (cursor)
+        (if (or (str_eq (frbt-cursor-status cursor) "nothing")
+                (or (str_eq (frbt-cursor-status cursor) "failure")
+                    (str_eq (frbt-cursor-status cursor) "timeout"))) 1 0))
+    (defn frbt-feed-byte (cursor byte)
+        (if (eq (frbt-cursor-terminal? cursor) 1) cursor
+        (if (eq (frbt-cursor-complete? cursor) 1)
+            (list "failure" "trailing-bytes"
+                  (add (frbt-cursor-bytes cursor) 1)
+                  (frbt-cursor-frame cursor) 0)
+        (if (ge (frbt-cursor-bytes cursor) (frbt-max-frame-bytes))
+            (list "timeout" "frame-budget-exceeded"
+                  (frbt-cursor-bytes cursor) (frbt-cursor-frame cursor) 0)
+            (do
+                (let next (str_concat (frbt-cursor-frame cursor)
+                                      (byte_to_str byte)))
+                (let bytes (add (frbt-cursor-bytes cursor) 1))
+                (if (and (le bytes (str_len (frbt-open)))
+                         (not (eq (frbt-prefix-of-open? next) 1)))
+                    (list "nothing" "no-birth-token" bytes next 0)
+                    (if (eq (frbt-tail-close? next) 1)
+                        (list "ready" "frame-complete" bytes next 1)
+                        (list "held" "held-frame" bytes next 0))))))))
+    (defn frbt-feed-from (text at cursor)
+        (if (ge at (str_len text)) cursor
+            (frbt-feed-from text (add at 1)
+                (frbt-feed-byte cursor (str_byte_at text at)))))
+    (defn frbt-feed-text (text)
+        (frbt-feed-from text 0 (frbt-cursor)))
+
+    ; ── strict canonical signed-i32 payload ─────────────────────────
+    (defn frbt-canonical-i32? (text)
+        (if (or (eq (str_len text) 0)
+                (gt (str_len text) (frbt-max-int-bytes))) 0
+            (do
+                (let value (str_to_int text))
+                (if (and (str_eq text (int_to_str value))
+                         (eq (frbt-i32? value) 1)) 1 0))))
+    ; payload result = (status reason recipe)
+    (defn frbt-payload-result (status reason recipe)
+        (list status reason recipe))
+    (defn frbt-parse-payload (payload)
+        (do
+            (let n (str_len payload))
+            (let s1 (str_find payload ";" 0))
+            (let s2 (if (lt s1 0) -1 (str_find payload ";" (add s1 1))))
+            (let s3 (if (lt s2 0) -1 (str_find payload ";" (add s2 1))))
+            (if (or (lt s1 0) (or (lt s2 0) (not (lt s3 0))))
+                (frbt-payload-result "failure" "field-shape" (nothing))
+                (do
+                    (let kind (substring payload 0 s1))
+                    (let mul-field (substring payload (add s1 1) s2))
+                    (let add-field (substring payload (add s2 1) n))
+                    (if (not (str_eq kind (frbt-kind)))
+                        (frbt-payload-result "failure" "recipe-kind" (nothing))
+                    (if (not (eq (str_find mul-field (frbt-mul-field) 0) 0))
+                        (frbt-payload-result "failure" "mul-field" (nothing))
+                    (if (not (eq (str_find add-field (frbt-add-field) 0) 0))
+                        (frbt-payload-result "failure" "add-field" (nothing))
+                        (do
+                            (let mul-text (substring mul-field 4
+                                                     (str_len mul-field)))
+                            (let add-text (substring add-field 4
+                                                     (str_len add-field)))
+                            (if (not (eq (frbt-canonical-i32? mul-text) 1))
+                                (frbt-payload-result "failure" "mul-integer"
+                                                     (nothing))
+                            (if (not (eq (frbt-canonical-i32? add-text) 1))
+                                (frbt-payload-result "failure" "add-integer"
+                                                     (nothing))
+                                (frbt-payload-result "ready" "recipe-born"
+                                    (frbt-affine-recipe (str_to_int mul-text)
+                                                        (str_to_int add-text)))))))))))))
+
+    ; birth result = (status reason recipe birth-token cursor pretokenized)
+    (defn frbt-birth-token (recipe)
+        (intern_node (frbt-birth-category)
+            (list recipe
+                  (intern_trivial_string "scannerless-affine-i32-v1")
+                  (intern_trivial_int (frbt-max-frame-bytes)))))
+    (defn frbt-result (status reason recipe birth-token cursor)
+        (list status reason recipe birth-token cursor 0))
+    (defn frbt-result-status (r) (nth r 0))
+    (defn frbt-result-reason (r) (nth r 1))
+    (defn frbt-result-recipe (r) (nth r 2))
+    (defn frbt-result-birth-token (r) (nth r 3))
+    (defn frbt-result-cursor (r) (nth r 4))
+    (defn frbt-result-pretokenized? (r) (nth r 5))
+    (defn frbt-parse-cursor (cursor)
+        (do
+            (let status (frbt-cursor-status cursor))
+            (if (str_eq status "ready")
+                (do
+                    (let frame (frbt-cursor-frame cursor))
+                    (let payload (substring frame (str_len (frbt-open))
+                        (sub (str_len frame) (str_len (frbt-close)))))
+                    (if (gt (str_len payload) (frbt-max-payload-bytes))
+                        (frbt-result "timeout" "payload-budget-exceeded"
+                            (nothing) (nothing) cursor)
+                    (if (ge (str_find payload (frbt-open) 0) 0)
+                        (frbt-result "failure" "nested-birth-token"
+                            (nothing) (nothing) cursor)
+                        (do
+                            (let parsed (frbt-parse-payload payload))
+                            (let parsed-status (nth parsed 0))
+                            (let parsed-reason (nth parsed 1))
+                            (let recipe (nth parsed 2))
+                            (if (str_eq parsed-status "ready")
+                                (frbt-result "ready" parsed-reason recipe
+                                    (frbt-birth-token recipe) cursor)
+                                (frbt-result parsed-status parsed-reason recipe
+                                    (nothing) cursor))))))
+                (frbt-result status (frbt-cursor-reason cursor)
+                    (nothing) (nothing) cursor))))
+    (defn frbt-parse-stream (surface)
+        (frbt-parse-cursor (frbt-feed-text surface)))
+    (defn frbt-surface (mul-value add-value)
+        (str_concat (frbt-open)
+        (str_concat (frbt-kind)
+        (str_concat ";mul="
+        (str_concat (int_to_str mul-value)
+        (str_concat ";add="
+        (str_concat (int_to_str add-value) (frbt-close))))))))
+
+    ; ── observed lifecycle and typed birth observation ──────────────
+    (defn frbt-result-node-or-absent (node)
+        (if (nothing? node) (frbt-absent) node))
+    (defn frbt-event (result action)
+        (intern_node (frbt-event-category)
+            (list
+                (frbt-result-node-or-absent (frbt-result-birth-token result))
+                (frbt-result-node-or-absent (frbt-result-recipe result))
+                (intern_trivial_string action)
+                (intern_trivial_string (frbt-result-status result))
+                (intern_trivial_string (frbt-result-reason result))
+                (intern_trivial_int
+                    (frbt-cursor-bytes (frbt-result-cursor result))))))
+    (defn frbt-event-action (event)
+        (node_value (nth (node_children event) 2)))
+    (defn frbt-trace-ready (result)
+        (list (frbt-event result "choice")
+              (frbt-event result "crystallize")
+              (frbt-event result "dissolve")
+              (frbt-event result "release")))
+    (defn frbt-trace-held (result)
+        (list (frbt-event result "choice")
+              (frbt-event result "held")))
+    (defn frbt-trace-nothing (result)
+        (list (frbt-event result "choice")
+              (frbt-event result "nothing")
+              (frbt-event result "dissolve")
+              (frbt-event result "release")))
+    (defn frbt-trace-failure (result)
+        (list (frbt-event result "choice")
+              (frbt-event result "failure")
+              (frbt-event result "undo")
+              (frbt-event result "refine")
+              (frbt-event result "release")))
+    (defn frbt-trace-timeout (result)
+        (list (frbt-event result "choice")
+              (frbt-event result "timeout")
+              (frbt-event result "cut")
+              (frbt-event result "undo")
+              (frbt-event result "refine")
+              (frbt-event result "release")))
+    (defn frbt-trace (result)
+        (do (let status (frbt-result-status result))
+            (if (str_eq status "ready") (frbt-trace-ready result)
+            (if (str_eq status "held") (frbt-trace-held result)
+            (if (str_eq status "nothing") (frbt-trace-nothing result)
+            (if (str_eq status "failure") (frbt-trace-failure result)
+                (frbt-trace-timeout result)))))))
+    (defn frbt-trace-has? (trace action)
+        (if (eq (len trace) 0) 0
+            (if (str_eq (frbt-event-action (head trace)) action) 1
+                (frbt-trace-has? (tail trace) action))))
+    (defn frbt-trace-actions (trace)
+        (if (eq (len trace) 0) ""
+            (if (eq (len (tail trace)) 0)
+                (frbt-event-action (head trace))
+                (str_concat (frbt-event-action (head trace))
+                    (str_concat "," (frbt-trace-actions (tail trace)))))))
+
+    ; observation = (status reason recipe birth-token observation trace bytes
+    ;                pretokenized scannerless carrier-executed model-executed)
+    (defn frbt-observation-node (result trace)
+        (intern_node (frbt-observation-category)
+            (append
+                (list
+                    (intern_trivial_string (frbt-result-status result))
+                    (intern_trivial_string (frbt-result-reason result))
+                    (frbt-result-node-or-absent (frbt-result-recipe result))
+                    (frbt-result-node-or-absent
+                        (frbt-result-birth-token result))
+                    (intern_trivial_int
+                        (frbt-cursor-bytes (frbt-result-cursor result)))
+                    (intern_trivial_int 0)
+                    (intern_trivial_int 1)
+                    (intern_trivial_int 0)
+                    (intern_trivial_int 0))
+                trace)))
+    (defn frbt-observe (result)
+        (do
+            (let trace (frbt-trace result))
+            (let observation (frbt-observation-node result trace))
+            (list (frbt-result-status result) (frbt-result-reason result)
+                  (frbt-result-node-or-absent (frbt-result-recipe result))
+                  (frbt-result-node-or-absent (frbt-result-birth-token result))
+                  observation trace
+                  (frbt-cursor-bytes (frbt-result-cursor result))
+                  0 1 0 0)))
+    (defn frbt-observation-status (o) (nth o 0))
+    (defn frbt-observation-reason (o) (nth o 1))
+    (defn frbt-observation-recipe (o) (nth o 2))
+    (defn frbt-observation-birth-token (o) (nth o 3))
+    (defn frbt-observation-token (o) (nth o 4))
+    (defn frbt-observation-trace (o) (nth o 5))
+    (defn frbt-observation-bytes (o) (nth o 6))
+    (defn frbt-observation-pretokenized? (o) (nth o 7))
+    (defn frbt-observation-scannerless? (o) (nth o 8))
+    (defn frbt-observation-carrier-executed? (o) (nth o 9))
+    (defn frbt-observation-model-executed? (o) (nth o 10))
+
+    ; ── bounded witness rendering ────────────────────────────────────
+    (defn frbt-cat (parts)
+        (if (eq (len parts) 0) ""
+            (str_concat (head parts) (frbt-cat (tail parts)))))
+    (defn frbt-render (observation)
+        (do
+            (let recipe (frbt-observation-recipe observation))
+            (let present (if (node_eq recipe (frbt-absent)) 0 1))
+            (let rendered (frbt-cat (list
+                (frbt-observation-open)
+                "\nstatus=" (frbt-observation-status observation)
+                "\nreason=" (frbt-observation-reason observation)
+                "\nrecipe-present=" (int_to_str present)
+                "\nrecipe-node=@" (frbt-node-key recipe)
+                "\nbirth-node=@" (frbt-node-key
+                    (frbt-observation-birth-token observation))
+                "\nobservation-node=@" (frbt-node-key
+                    (frbt-observation-token observation))
+                "\nstream-bytes=" (int_to_str
+                    (frbt-observation-bytes observation))
+                "\npretokenized=" (int_to_str
+                    (frbt-observation-pretokenized? observation))
+                "\nscannerless=" (int_to_str
+                    (frbt-observation-scannerless? observation))
+                "\ncarrier-executed=" (int_to_str
+                    (frbt-observation-carrier-executed? observation))
+                "\nmodel-executed=" (int_to_str
+                    (frbt-observation-model-executed? observation))
+                "\nlifecycle=" (frbt-trace-actions
+                    (frbt-observation-trace observation))
+                "\n" (frbt-observation-close))))
+            (if (le (str_len rendered) (frbt-max-render-bytes)) rendered "")))
+
+    0)

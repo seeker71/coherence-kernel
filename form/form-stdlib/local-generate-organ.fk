@@ -1,0 +1,137 @@
+; local-generate-organ.fk — local offer whose thought kernel evaluates Form cells.
+;
+; NAME / PLANE / CARRIER name the organ. The kernel is source-resonance-stream
+; for recipe opcodes it owns (add, eq); mul/sub evaluate natively. A prompt may
+; carry many cells and NL catalog rows. Each thought is one evaluated emit.
+; Generate commits those emits into the token stream — once or many times.
+;
+; preludes: form-stdlib/core.fk form-stdlib/substrate-phase.fk form-stdlib/source-resonance-stream.fk
+
+(do
+    (defn lg-organ (name plane carrier)
+        (list "lg-organ" name plane carrier))
+    (defn lg-name (o) (nth o 1))
+    (defn lg-plane (o) (nth o 2))
+    (defn lg-carrier (o) (nth o 3))
+
+    (defn lg-digit? (c)
+        (if (and (ge c 48) (le c 57)) 1 0))
+    (defn lg-skip-space (s i L)
+        (if (ge i L) i
+            (if (eq (str_byte_at s i) 32) (lg-skip-space s (add i 1) L) i)))
+    (defn lg-num-end (s i L)
+        (if (ge i L) i
+            (if (eq (lg-digit? (str_byte_at s i)) 1) (lg-num-end s (add i 1) L) i)))
+    (defn lg-read-num (s i)
+        (do
+            (let L (str_len s))
+            (let j (lg-skip-space s i L))
+            (let k (lg-num-end s j L))
+            (if (eq j k) (list 0 k)
+                (list (str_to_int (substring s j k)) k))))
+
+    ; thought = (op a b value text)
+    (defn lg-thought (op a b value)
+        (list op a b value
+            (str_concat "("
+            (str_concat op
+            (str_concat " "
+            (str_concat (int_to_str a)
+            (str_concat " "
+            (str_concat (int_to_str b)
+            (str_concat ")=" (int_to_str value))))))))))
+    (defn lg-thought-op (t) (nth t 0))
+    (defn lg-thought-a (t) (nth t 1))
+    (defn lg-thought-b (t) (nth t 2))
+    (defn lg-thought-value (t) (nth t 3))
+    (defn lg-thought-text (t) (nth t 4))
+
+    (defn lg-eval (op a b)
+        (if (str_eq op "add")
+            (srs-step (srs-token (srs-tok-recipe) (srs-op-add)) a b)
+            (if (str_eq op "eq")
+                (srs-step (srs-token (srs-tok-recipe) (srs-op-eq)) a b)
+                (if (str_eq op "mul") (mul a b)
+                    (if (str_eq op "sub") (sub a b)
+                        (sub 0 1))))))
+
+    (defn lg-parse-op-at (prompt op from)
+        (do
+            (let needle (str_concat "(" (str_concat op " ")))
+            (let at (str_find prompt needle from))
+            (if (lt at 0) (empty)
+                (do
+                    (let p (lg-read-num prompt (add at (str_len needle))))
+                    (let q (lg-read-num prompt (nth p 1)))
+                    (list op (nth p 0) (nth q 0) at (nth q 1))))))
+
+    (defn lg-earlier (a b)
+        (if (eq (len a) 0) b
+            (if (eq (len b) 0) a
+                (if (lt (nth a 3) (nth b 3)) a b))))
+
+    (defn lg-parse-next (prompt from)
+        (lg-earlier (lg-parse-op-at prompt "add" from)
+        (lg-earlier (lg-parse-op-at prompt "mul" from)
+        (lg-earlier (lg-parse-op-at prompt "sub" from)
+                    (lg-parse-op-at prompt "eq" from)))))
+
+    (defn lg-parse-all (prompt from acc)
+        (do
+            (let hit (lg-parse-next prompt from))
+            (if (eq (len hit) 0) acc
+                (do
+                    (let op (nth hit 0))
+                    (let a (nth hit 1))
+                    (let b (nth hit 2))
+                    (let value (lg-eval op a b))
+                    (lg-parse-all prompt (nth hit 4)
+                        (cons (lg-thought op a b value) acc))))))
+
+    (defn lg-rev (xs acc)
+        (if (eq (len xs) 0) acc (lg-rev (tail xs) (cons (head xs) acc))))
+
+    ; NL surfaces → Form cells. Grow the catalog; the loop does not wait on a rented voice.
+    (defn lg-row (nl op a b) (list nl op a b))
+    (defn lg-catalog ()
+        (list
+            (lg-row "2 plus 3" "add" 2 3)
+            (lg-row "the square of 7" "mul" 7 7)
+            (lg-row "six times seven" "mul" 6 7)
+            (lg-row "nine minus four" "sub" 9 4)
+            (lg-row "does 5 equal 5" "eq" 5 5)))
+
+    (defn lg-catalog-find (prompt rows)
+        (if (eq (len rows) 0) (empty)
+            (if (ge (str_find prompt (nth (head rows) 0) 0) 0)
+                (do
+                    (let r (head rows))
+                    (let op (nth r 1))
+                    (let a (nth r 2))
+                    (let b (nth r 3))
+                    (list (lg-thought op a b (lg-eval op a b))))
+                (lg-catalog-find prompt (tail rows)))))
+
+    (defn lg-cat (a b)
+        (if (eq (len a) 0) b (cons (head a) (lg-cat (tail a) b))))
+
+    ; All thoughts for this prompt: paren cells in order, then at most one catalog hit.
+    (defn lg-think-all (prompt)
+        (lg-cat (lg-rev (lg-parse-all prompt 0 (empty)) (empty))
+                (lg-catalog-find prompt (lg-catalog))))
+
+    ; One thought: first of the stream (compat with the earlier door).
+    (defn lg-think (prompt)
+        (do
+            (let all (lg-think-all prompt))
+            (if (eq (len all) 0) (empty) (head all))))
+
+    (defn lg-values-line (ts)
+        (if (eq (len ts) 0) ""
+            (if (eq (len (tail ts)) 0) (int_to_str (lg-thought-value (head ts)))
+                (str_concat (int_to_str (lg-thought-value (head ts)))
+                    (str_concat "|" (lg-values-line (tail ts)))))))
+
+    ; How many tokens the kernel will ask the stream for between offers.
+    (defn lg-gap-default () 2)
+    0)

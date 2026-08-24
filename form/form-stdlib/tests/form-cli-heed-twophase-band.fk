@@ -1,0 +1,178 @@
+; form-cli-heed-twophase-band.fk — the query budget and the answer reserve are
+; two ledgers, and the second one is not borrowable.
+;
+; THE DEFECT THIS BAND EXISTS FOR. One fungible step budget shared by query
+; emission and the post-observation answer. A valid query that closes on the
+; LAST slot gets its observation injected and then has nothing left to answer
+; with — the scorer reads an empty answer and records a miss the model never
+; made. Verbosity in the query silently eats the answer. Bit 1024 witnesses both
+; halves on the SAME stream: fungible gives 0 answer tokens, two-phase gives the
+; full reserve.
+;
+; STREAM-COUNTED AT THE CURSOR. Token and byte counts are taken as bytes arrive
+; (fhc-count), never from a tokenizer pre-step. No flatten, no ops table, no
+; runtime C. The telemetry is counts and statuses only — never held-out content.
+;
+; THREE ENDINGS ARE THREE FACTS. stop is the model finishing on purpose; timeout
+; is the query budget running out with a frame still HELD, which is a named
+; observation and NOT exhaustion; ordinary end is neither. A scorer that folds
+; them together measures the wrong thing. Already-emitted model state is never
+; undone — the walk records, it does not rewind.
+;
+; PROOF LEVEL: pure arithmetic, string and list folds over the lowered xtal, plus
+; now_unix_ms inside fhc-honor (toy lookups return at once, so elapsed is 0 and
+; the verdict is deterministic). No GPU, no weights, no index. A candidate for a
+; four-arm run; NOT claimed as one — the four-arm surface is source_jit_gate's.
+; What is witnessed below is the fkwu arm.
+;
+; Verdict 2047:
+;   1     a query closing on its FINAL slot still opens a full answer reserve
+;   2     and the model then actually writes: answer tokens reach the reserve
+;   4     unused query fuel is CUT into the ledger, never carried
+;   8     non-borrowable: query verbosity leaves the reserve untouched
+;   16    an incomplete query at budget end is a typed nothing, named, timeout=1
+;   32    the alternative is named too: timeout-answer-alternative-untried
+;   64    a typed nothing spends no reserve, cuts nothing, opens no phase
+;   128   STOP right after injection stays DISTINCT from timeout, and undoes nothing
+;   256   telemetry is bounded and non-content: counts add up, statuses only
+;   512   curriculum: anchor before path, and none of the six kinds is boolean
+;   1024  THE DEFECT, both halves on one stream: fungible 0 answer tokens,
+;         two-phase the full reserve
+;
+; preludes: form-stdlib/core.fk form-stdlib/language-model.fk
+; preludes: form-stdlib/form-cli-heedmark-xtal.fk
+; preludes: form-stdlib/form-cli-heed-cursor.fk
+; witnessed: 2026-08-24 -> 2047 on fkwu; query 48 / reserve 32 observed in this mechanism
+
+(do
+    ; ── pieces ─────────────────────────────────────────────────────────────
+    ;   10..13  a whole envelope in three steps, then answer prose
+    ;   40      prose with no mark at all
+    ;   50..51  an open mark that never closes
+    (defn f2-piece (id)
+        (if (eq id 10) (HeedOpen)
+        (if (eq id 11) "a"
+        (if (eq id 12) (HeedClose)
+        (if (eq id 13) " word"
+        (if (eq id 40) " prose"
+        (if (eq id 50) (HeedOpen)
+        (if (eq id 51) " more"
+        (if (eq id 900) ""
+            " z")))))))))
+
+    (defn f2-next (id)
+        (if (eq id 900) 13
+        (if (and (ge id 9) (lt id 13)) (add id 1)
+        (if (eq id 13) 13
+        (if (eq id 39) 40
+        (if (eq id 40) 40
+        (if (eq id 49) 50
+        (if (eq id 50) 51
+        (if (eq id 51) 51
+            999)))))))))
+
+    (defn f2-dec (ids acc)
+        (if (eq (len ids) 0) acc (f2-dec (tail ids) (str_concat acc (f2-piece (head ids))))))
+    (defn f2-decodef (ctx ids) (f2-dec ids ""))
+    (defn f2-stepf (ctx id pos) (f2-next id))
+    ; the same walk, except the token after an injection is a stop
+    (defn f2-stepf-stop (ctx id pos) (if (eq id 900) 999 (f2-next id)))
+
+    (defn f2-en (n i acc) (if (ge i n) acc (f2-en n (add i 1) (append acc (list 901)))))
+    (defn f2-encodef (ctx t)
+        (if (eq (str_len t) 0) (empty) (f2-en (add (div (str_len t) 8) 1) 0 (empty))))
+    (defn f2-prefillf (ctx ids pos) (list 900 (add pos (len ids))))
+
+    (defn f2-obs ()
+        (str_concat "<|form:knowledge-observation|>\nstatus=hit\nsource-path=core.fk"
+                    "\nanswer:quiet\n<|/form:knowledge-observation|>"))
+    (defn f2-hit (ctx s lr) (list "hit" (f2-obs) "grounded-hit"))
+    (defn f2-nothing (ctx s lr) (list "nothing" "" "declined-by-adapter"))
+
+    (defn f2-2p (stepf lookupf start query reserve)
+        (fhc-run-2p 0 stepf f2-prefillf f2-decodef f2-encodef lookupf 1
+            start 0 (list 999) 2 query reserve (empty)))
+    (defn f2-fungible (start n)
+        (fhc-run 0 f2-stepf f2-prefillf f2-decodef f2-encodef f2-hit 1
+            start 0 n (list 999) (fhc-fresh 2) (empty)))
+
+    (defn f2-cur (r) (fhc-cursor-of r))
+    (defn f2-has (r name)
+        (f2-has-loop (fhc-honored (f2-cur r)) name))
+    (defn f2-has-loop (xs name)
+        (if (eq (len xs) 0) 0
+            (if (str_eq (head xs) name) 1 (f2-has-loop (tail xs) name))))
+    (defn f2-bit (ok bit) (if ok bit 0))
+
+    ; ── the runs ───────────────────────────────────────────────────────────
+    ; final: query budget 3, and the close lands exactly on slot 3
+    (let final (f2-2p f2-stepf f2-hit 9 3 8))
+    ; early: the same envelope with 10 slots — 7 go unused and must be CUT
+    (let early (f2-2p f2-stepf f2-hit 9 10 8))
+    ; verbose: five slots of prose, no mark — the reserve must not be touched
+    (let verbose (f2-2p f2-stepf f2-hit 39 5 8))
+    ; timeout: an open mark that never closes, budget runs out while HELD
+    (let timeout (f2-2p f2-stepf f2-hit 49 5 8))
+    ; nothing: the adapter declines — no span, no cut, no reserve
+    (let none (f2-2p f2-stepf f2-nothing 9 10 8))
+    ; stopnow: a stop id arrives immediately after the injection
+    (let stopnow (f2-2p f2-stepf-stop f2-hit 9 10 8))
+    ; the defect: one fungible budget, close on the last slot
+    (let fung (f2-fungible 9 3))
+
+    ; the final slot still opened a full reserve
+    (let b1 (f2-bit (and (eq (fhc-phase (f2-cur final)) (PhaseAnswer))
+                    (and (eq (fhc-lookups (f2-cur final)) 1)
+                         (eq (fhc-query-left (f2-cur final)) 0))) 1))
+    ; and the model actually wrote into it
+    (let b2 (f2-bit (and (eq (fhc-answer-tokens (f2-cur final)) 8)
+                    (and (eq (fhc-query-tokens (f2-cur final)) 3)
+                         (eq (fhc-answer-left (f2-cur final)) 0))) 2))
+    ; unused query fuel is cut, not carried
+    (let b3 (f2-bit (and (eq (fhc-cut (f2-cur early)) 7)
+                    (and (eq (fhc-query-left (f2-cur early)) 0)
+                         (eq (fhc-answer-tokens (f2-cur early)) 8))) 4))
+    ; non-borrowable: prose burns query budget and never reaches the reserve
+    (let b4 (f2-bit (and (eq (fhc-answer-left (f2-cur verbose)) 8)
+                    (and (eq (fhc-phase (f2-cur verbose)) (PhaseQuery))
+                         (and (eq (fhc-query-tokens (f2-cur verbose)) 5)
+                              (eq (fhc-answer-tokens (f2-cur verbose)) 0)))) 8))
+    ; an incomplete query at budget end is a NAMED nothing, not exhaustion
+    (let b5 (f2-bit (and (eq (fhc-timeout? (f2-cur timeout)) 1)
+                    (and (eq (f2-has timeout (fhm-timeout-reason)) 1)
+                         (eq (fhc-lookups (f2-cur timeout)) 0))) 16))
+    ; the untried alternative is named as well
+    (let b6 (f2-bit (and (str_eq (fhm-timeout-alternative) "timeout-answer-alternative-untried")
+                    (and (str_eq (fhm-timeout-reason) "knowledge-query-decode-timeout")
+                         (eq (fhc-answer-left (f2-cur timeout)) 8))) 32))
+    ; a typed nothing spends no reserve, cuts nothing, opens no phase
+    (let b7 (f2-bit (and (eq (fhc-phase (f2-cur none)) (PhaseQuery))
+                    (and (eq (fhc-cut (f2-cur none)) 0)
+                         (and (eq (fhc-answer-left (f2-cur none)) 8)
+                              (eq (fhc-injected (f2-cur none)) 0)))) 64))
+    ; STOP is its own fact: distinct from timeout, and nothing is undone. The
+    ; observation prefill's predicted id is the first answer token, so it has
+    ; already spent one of the eight reserved slots before STOP is predicted.
+    (let b8 (f2-bit (and (eq (fhc-stopped? (f2-cur stopnow)) 1)
+                    (and (eq (fhc-timeout? (f2-cur stopnow)) 0)
+                         (and (eq (fhc-phase (f2-cur stopnow)) (PhaseAnswer))
+                              (and (eq (fhc-answer-left (f2-cur stopnow)) 7)
+                                   (gt (len (fhc-out stopnow)) 0))))) 128))
+    ; telemetry: bounded counts that add up, and no content anywhere in them
+    (let b9 (f2-bit (and (eq (add (fhc-query-tokens (f2-cur final))
+                                 (fhc-answer-tokens (f2-cur final)))
+                             (len (fhc-out final)))
+                    (and (gt (fhc-bytes (f2-cur final)) 0)
+                         (eq (f2-has final "hit") 1))) 256))
+    ; the curriculum stands on its own
+    (let b10 (f2-bit (and (eq (fhu-curriculum-ok) 1)
+                     (and (eq (fhu-anchor-before-path) 1)
+                          (and (eq (fhu-is-boolean "timeout") 0)
+                               (gt (str_len (fhu-carries "nothing")) 0)))) 512))
+    ; THE DEFECT, both halves on one stream
+    (let b11 (f2-bit (and (eq (fhc-answer-tokens (f2-cur fung)) 0)
+                     (and (eq (fhc-lookups (f2-cur fung)) 1)
+                          (and (eq (fhc-answer-tokens (f2-cur final)) 8)
+                               (eq (fhm-query-budget) 48)))) 1024))
+
+    (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 (add b8 (add b9 (add b10 b11)))))))))))

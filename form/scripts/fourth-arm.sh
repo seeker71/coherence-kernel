@@ -1,20 +1,18 @@
 #!/usr/bin/env zsh
-# fourth-arm.sh — the emitted fourth kernel as a validate.sh leg.
+# fourth-arm.sh — the native fkwu source/JIT door as a validate.sh leg.
 #
-# Sourced by validate.sh (cwd = form/). The fourth sibling is the universal
-# walker binary (fkwu) whose C source is emitted entirely by Form recipes
-# (fourth-walker-emit.fk, fkc-emit-universal). Bands listed in
-# fourth-arm-bands.txt — each one already gated four-way by
-# scripts/hati_os_kernel_audit.sh — run on it as a fourth leg: the band's
-# UNMODIFIED source is flattened once into a node-table file (the
-# pre-compiled artifact), cached by content, and the binary answers in
-# milliseconds. A band's wall time stays max(legs); the fourth witness is
-# effectively free.
+# Sourced by validate.sh (cwd = form/). Validation's fourth sibling is the
+# repo-root fkwu source runner: it resolves the band's own `; preludes:` graph,
+# walks source directly, and lets the same binary's Form-native CPU/Metal/MLX
+# JIT doors crystallize only what execution asks for. No band table, T_flat, or
+# table index is an admission condition for the proof.
 #
-# An unavailable optional toolchain can leave the fourth sibling absent. Once
-# the committed bootstrap and manifest are present, every declared fourth-arm
-# workload is mandatory: preparation, execution, and agreement failures fail
-# validation instead of silently reducing the proof to three siblings.
+# The emitted universal walker and its flattened table cache remain below as an
+# OPTIONAL artifact/benchmark lane for the maintenance scripts that explicitly
+# select `FORM_FOURTH_EXECUTION_MODE=table`. They are not validate.sh's default
+# and a cold/missing cache never starts an 898-table build there. Every manifest
+# workload is still mandatory: source execution, diagnostics, and agreement are
+# checked, never silently reduced to three siblings.
 
 # The flatten lists are zero-based. Zsh normally indexes arrays from 1, which
 # would silently turn ${srcs[0]} into an empty read_file row and shift the
@@ -66,6 +64,10 @@ FOURTH_FLATTEN_CHAIN=(
 # string stones resolve as ordinary function rows; band defns shadow it
 FOURTH_SHIM="form-stdlib/fourth-shim.fk"
 FKWU=""
+# `source` is validate.sh's architecture. `table` is an explicit maintenance
+# lane retained for bootstrap/artifact regeneration and timing comparisons.
+FOURTH_EXECUTION_MODE="${FORM_FOURTH_EXECUTION_MODE:-table}"
+FOURTH_SOURCE_FKWU="${FORM_FOURTH_SOURCE_FKWU:-}"
 # Emitter chain (walker C emission) — lighter than FOURTH_CHAIN; committed as bootstrap/fkwu-uni.c
 FOURTH_EMIT_CHAIN=(
     form-stdlib/minimal-surface.fk
@@ -98,6 +100,11 @@ FOURTH_FLATTEN_STACK_MB="${FOURTH_FLATTEN_STACK_MB:-2048}"
 # primary source compiler emits a durable .fkb image + loader; the final module
 # in this dedicated chain is a late text lens for consumers that flatten source.
 FOURTH_SOURCE_TEXT_DIR="form-stdlib/.cache/fourth-source-text"
+# Direct validation copies each band into a content+carrier-keyed source cache.
+# This keeps stale/error-bearing .fkb/.sym files beside the authored test from
+# deciding a new run, while allowing fkwu's own source artifact/JIT cache to be
+# reused on the next run. It is source caching, not a flattened op table.
+FOURTH_SOURCE_RUN_DIR="$FOURTH_DIR/source-run"
 FOURTH_SOURCE_COMPILER_CHAIN=(
     form-stdlib/engine-constants.fk
     form-stdlib/compiler-objects.fk
@@ -114,7 +121,15 @@ FOURTH_SOURCE_COMPILER_CHAIN=(
     form-stdlib/source-compiler-text-lens.fk
 )
 
-fourth_available() { [[ -n "$FKWU" && -x "$FKWU" ]]; }
+fourth_source_mode() { [[ "$FOURTH_EXECUTION_MODE" == "source" ]]; }
+
+fourth_available() {
+    if fourth_source_mode; then
+        [[ -n "$FOURTH_SOURCE_FKWU" && -x "$FOURTH_SOURCE_FKWU" ]]
+    else
+        [[ -n "$FKWU" && -x "$FKWU" ]]
+    fi
+}
 
 # fourth_selfhost — true when the committed flattener table is present, so the
 # fourth arm flattens its own band tables on fkwu.  The Windows build patch puts
@@ -434,6 +449,14 @@ fourth_patch_windows_emitted_c() {
 build_fourth() {
     [[ -f "$FOURTH_MANIFEST" ]] || return 0
     mkdir -p "$FOURTH_DIR"
+    if fourth_source_mode; then
+        if [[ -n "$FOURTH_SOURCE_FKWU" && -x "$FOURTH_SOURCE_FKWU" ]]; then
+            echo "  fourth kernel: runtime fkwu source/JIT door (no flatten tables)" >&2
+        else
+            echo "  fourth kernel: runtime fkwu source/JIT door unavailable" >&2
+        fi
+        return 0
+    fi
     local stamp out tmp d is_windows uni_c want got slug boot got_boot
     local -a clang_args
     is_windows=0
@@ -523,6 +546,98 @@ build_fourth() {
     rm -rf "$d"
     [[ -x "$out" ]] && FKWU="$out"
     find "$FOURTH_DIR" -maxdepth 1 -name 'fkwu-*' ! -name "$(basename "$out")" -delete 2>/dev/null || true
+}
+
+# fourth_prepare_source_band — return the source file the direct fourth leg
+# executes. Almost every registered band already declares its own dependency
+# graph. A small legacy set relied on the old flattener's implicit core shim;
+# give only those files an ephemeral `core.fk` header without changing their
+# source body. This is source composition, not a flattened artifact, and the
+# generated file lives inside the leg's private scratch directory.
+fourth_prepare_source_band() {
+    local band="$1" outdir="$2" out tmp abs key carrier_key
+    [[ -f "$band" ]] || return 1
+    mkdir -p "$outdir"
+    carrier_key="$(fourth_raw_hash16 "$FOURTH_SOURCE_FKWU")"
+    key="$(fourth_hash16 "$band")-$carrier_key"
+    out="$outdir/s-v2-$key-$(basename "$band")"
+    if [[ ! -s "$out" ]]; then
+        tmp="$(mktemp "$outdir/.s-v2-$key.XXXXXX")"
+        if grep -Eq '^;[[:space:]]*(preludes:|import)' "$band"; then
+            cat "$band" > "$tmp"
+        else
+            {
+                printf '; generated direct-source closure; body is byte-for-byte below.\n'
+                printf '; preludes: form-stdlib/core.fk\n'
+                cat "$band"
+            } > "$tmp"
+        fi
+        mv -f "$tmp" "$out"
+    fi
+    case "$out" in
+        /*|[A-Za-z]:*) abs="$out" ;;
+        *) abs="$PWD/$out" ;;
+    esac
+    printf '%s\n' "$abs"
+}
+
+# fourth_prepare_source_workload — compose validate.sh's already-prepared
+# sibling workload into one direct-source root. Section-bearing BML arguments
+# have already crossed the Form source-text lens; every non-root source becomes
+# an absolute prelude and the prepared root remains executable source. This is
+# the source analogue of passing N files to Go/Rust/TS, not a flatten/table
+# transformation. The original root's dependency directives are removed from
+# the cached copy because their prepared absolute equivalents are authoritative
+# for this run.
+fourth_prepare_source_workload() {
+    local outdir="$1"; shift
+    local srcs=("$@") count last band out tmp key carrier_key abs f
+    count="${#srcs[@]}"
+    [[ "$count" -ge 1 ]] || return 1
+    last=$((count - 1))
+    band="${srcs[$last]}"
+    [[ -f "$band" ]] || return 1
+    mkdir -p "$outdir"
+    carrier_key="$(fourth_raw_hash16 "$FOURTH_SOURCE_FKWU")"
+    key="$(fourth_hash16 "${srcs[@]}")-$carrier_key"
+    out="$outdir/w-v1-$key-$(basename "$band")"
+    if [[ ! -s "$out" ]]; then
+        tmp="$(mktemp "$outdir/.w-v1-$key.XXXXXX")"
+        {
+            printf '; generated direct-source workload; prepared source closure follows.\n'
+            if [[ "$last" -gt 0 ]]; then
+                printf '; preludes:'
+                local i
+                for ((i = 0; i < last; i++)); do
+                    f="${srcs[$i]}"
+                    [[ -f "$f" ]] || { rm -f "$tmp"; return 1; }
+                    case "$f" in
+                        /*|[A-Za-z]:*) abs="$f" ;;
+                        *) abs="$PWD/$f" ;;
+                    esac
+                    printf ' %s' "$abs"
+                done
+                printf '\n'
+            else
+                printf '; preludes: form-stdlib/core.fk\n'
+            fi
+            # Dependency declarations have already been expanded into the
+            # absolute prelude list above. Keeping the old relative directive
+            # would load a second, sometimes BML-bearing, copy of the module.
+            awk '
+                /^;[[:space:]]*preludes:/ { next }
+                /^[[:space:]]*import([[:space:]:]|\")/ { next }
+                /^;[[:space:]]*import([[:space:]:]|\")/ { next }
+                { print }
+            ' "$band"
+        } > "$tmp"
+        mv -f "$tmp" "$out"
+    fi
+    case "$out" in
+        /*|[A-Za-z]:*) abs="$out" ;;
+        *) abs="$PWD/$out" ;;
+    esac
+    printf '%s\n' "$abs"
 }
 
 # fourth_band_stem — manifest stem for a band file path, or empty. The fourth
@@ -931,6 +1046,11 @@ fourth_seal_chunk() {
 fourth_prepare_all() {
     fourth_available || return 0
     [[ -f "$FOURTH_MANIFEST" ]] || return 0
+    # Direct source/JIT validation has no global preparation phase. Source and
+    # its dependency graph are the artifact; any hot native recipe may
+    # crystallize on demand inside fkwu. In particular, do not consult or mint
+    # FOURTH_INDEX here: flatten is optional speed, never a proof gate.
+    fourth_source_mode && return 0
     local workdir stem kind key out missing=0 f prepared_srcs srcs driver plan cidx=0 ccount=0
     local batch_max="${FOURTH_PREPARE_ALL_BATCH_MAX:-1}"
     local selfhost=0; fourth_selfhost && selfhost=1

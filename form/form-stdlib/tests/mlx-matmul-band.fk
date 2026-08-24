@@ -1,0 +1,60 @@
+; mlx-matmul-band.fk — the GPU lane learns the op generation is made of.
+;
+; WHY MATMUL AND NOT ANOTHER ELEMENTWISE. add/mul/sub/max/sum could as well have
+; run on the CPU; nothing about them needs a GPU. A matmul is the whole cost of
+; a forward pass, and MLX's own kernel is what makes asking the GPU worth it.
+; This is the first token in the IR that a generation lane would actually spend
+; its time in.
+;
+; HOW IT GREW. The carrier's own rule: "new shapes are new tokens in the program
+; (and a table row here), not new opcodes in fkwu-uni.c." So: a two-dimensional
+; shape token `mRxC` with R*C lanes following, and `matmul` joining the binop
+; table beside add/mul/sub/max. fkwu-uni.c did not change.
+;
+; TWO THINGS THE FIRST RUN TAUGHT, both kept as bits below:
+;   MLX's matmul is floating point only — "Only inexact types are supported" —
+;   so an `m` shape is FLOAT32 while `v` stays int. The tier is decided by the
+;   shape, not by the lanes, which are written as integers because a program is
+;   text.
+;   And mlx_array_item_int32 SUCCEEDS on a float32 array, handing back the raw
+;   bits: a matvec that really computed 32.0 read as 1107296256, which is
+;   0x42000000. Right arithmetic, wrong reading, and nothing in mlx_status would
+;   have said so. The door now asks the DTYPE before it reads. Bit 8 is that
+;   lesson standing guard.
+;
+; fkwu-only organ (same seat as Metal). Weak stubs answer linked=false when the
+; carrier is not linked, and every claim below is guarded by bit 1 so an
+; unlinked host reads 1 rather than a false green.
+;
+; Verdict 63.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn mmb-score (ok bit) (if ok bit 0))
+    (defn mmb-has (hay needle) (if (lt (str_find hay needle 0) 0) 0 1))
+    (defn mmb-live? () (mmb-has (mlx_status) "mlx_linked=true"))
+    (defn mlx-matmul-band ()
+        (do
+    ; the carrier is linked and the GPU is the device this ran on
+    (let c0 (mmb-score (eq (mmb-live?) 1) 1))
+    ; a matvec on the GPU: [1 2 3] . [4 5 6] = 4 + 10 + 18
+    (let c1 (mmb-score (if (eq (mmb-live?) 1)
+                           (eq (mlx_run "m1x3 1 2 3 m3x1 4 5 6 matmul") 32) 0) 2))
+    ; a real 2x2 matmul: [[1,2],[3,4]] x [[5,6],[7,8]] = [[19,22],[43,50]], sum 134
+    (let c2 (mmb-score (if (eq (mmb-live?) 1)
+                           (eq (mlx_run "m2x2 1 2 3 4 m2x2 5 6 7 8 matmul sum") 134) 0) 4))
+    ; and the answer is the VALUE, not the float's bits — 0x42000000 is 32.0f,
+    ; and reading it as an integer was the first run's silent wrong answer
+    (let c3 (mmb-score (if (eq (mmb-live?) 1)
+                           (if (eq (mlx_run "m1x3 1 2 3 m3x1 4 5 6 matmul") 1107296256) 0 1) 0) 8))
+    ; the elementwise vocabulary is untouched, and stays on the integer tier
+    (let c4 (mmb-score (if (eq (mmb-live?) 1)
+                           (if (eq (mlx_run "v2 10 20 v2 1 2 add sum") 33)
+                               (if (eq (mlx_run "2 3 add") 5) 1 0) 0) 0) 16))
+    ; a shape mismatch is DECLINED, not guessed: 1x3 against 2x2 has no product
+    (let c5 (mmb-score (if (eq (mmb-live?) 1)
+                           (eq (mlx_run "m1x3 1 2 3 m2x2 1 2 3 4 matmul") 0) 0) 32))
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))
+    )
+    (mlx-matmul-band))

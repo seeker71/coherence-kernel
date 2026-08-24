@@ -1,15 +1,23 @@
-; qwen35-dense-token-handle-band.fk (verdict 524287) — the observed Qwen3.8 GGUF declares the
+; qwen35-dense-token-handle-band.fk — the observed Qwen3.8 GGUF declares the
 ; geometry and Form emits every Metal pipeline the dense hybrid walker needs.
 ;
 ; It reads configuration from the sealed GGUF header; no Qwen3.8 geometry is
 ; admitted from this test as runtime config.
+;
+; The first 31 handles retain their established order. Handles 31..33 are the
+; generated Q8_0 batched matmul, source-offset copy, and width-independent span
+; RMS. Adding them must not renumber an older lane.
+;
+; Verdict 8388607.
 ;
 ; preludes: native/metal/qwen35-dense-token-handle.fk
 (do
     (let path "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf")
     (let src (eqr-of-file path 0 40000000))
     (let geo (q38-geo src 128))
-    (let pipes (q38-pipes (q38-msl)))
+    (let msl (q38-msl))
+    (let span-msl (q38-rmsspan-msl "form_rmsnorm_span_f32"))
+    (let pipes (q38-pipes msl))
     (sum (list
         (if (str_eq (gmt-str src "general.architecture") "qwen35") 1 0)
         (if (eq (nth geo 0) 5120) 2 0)
@@ -26,11 +34,17 @@
         (if (eq (nth geo 21) 64) 4096 0)
         (if (eq (nth geo 22) 4) 8192 0)
         (if (eq (nth geo 23) 4) 16384 0)
-        (if (eq (len pipes) 32) 32768 0)
+        (if (eq (len pipes) 35) 32768 0)
         (if (kth-pipes-ok? pipes) 65536 0)
-        ; the RMS radius bound (sibling correction 0e3e58b6, hand-applied):
-        ; the cooperative kernel's sq[4096] scratch admits rows to 4096 only,
-        ; and THIS file's width 5120 must select the serial attestant.
-        (if (if (eq (q38-rms-cooperative? 4096) 1)
-                (eq (q38-rms-cooperative? 5120) 0) 0) 131072 0)
-        (if (gt (nth geo 0) 4096) 262144 0))))
+        (if (gt (nth pipes 31) 0) 131072 0)
+        (if (gt (nth pipes 32) 0) 262144 0)
+        (if (gt (nth pipes 33) 0) 524288 0)
+        (if (and (ge (str_find span-msl "uint tok [[thread_position_in_grid]]" 0) 0)
+                 (and (ge (str_find span-msl "if (tok >= ntok) return" 0) 0)
+                      (lt (str_find span-msl "threadgroup float sq[4096]" 0) 0)))
+            1048576 0)
+        (if (and (q38-rms-cooperative? 0) (q38-rms-cooperative? 4096)) 2097152 0)
+        (if (and (not (q38-rms-cooperative? 4097))
+                 (not (q38-rms-cooperative? (nth geo 0)))) 4194304 0)
+        ; the union's added pipeline: the threadgroup GQA decode at index 34
+        (if (gt (nth pipes 34) 0) 8388608 0))))

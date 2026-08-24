@@ -1,0 +1,373 @@
+; form-cli-recipe-exec-cursor.fk — a bounded raw-byte cursor joining a
+; decoded local-model stream to the Form recipe-execution token protocol.
+;
+; THE HONEST SEAM. This cell does not run a model, Metal, MLX, CPU emission,
+; or a recipe. It receives already-decoded byte chunks. Once one complete,
+; strict `<|form:recipe-exec|>` frame exists, it reuses `frex-parse` to recover
+; the content-addressed request and offers that request exactly once through a
+; generic `(executor ctx request)` function. A valid `frex-result` is rendered
+; as one typed `<|form:recipe-observation|>` span for a caller to encode and
+; prefill. The callback is the future carrier boundary; it is only scripted
+; pure data in this cell's witness band.
+;
+; STREAMING IS THE MECHANISM. There is no tokenizer pre-step, flattened form,
+; operations table, compiler subprocess, or jump table. Before an open mark,
+; the cursor holds only the suffix long enough to recognize a mark split across
+; chunks. After the mark, it holds from that mark through a bounded frame. An
+; over-budget frame is named `over`, cleared, and never offered.
+;
+; TWO BYTE LANES. Every feed returns `(cursor model-bytes injected-bytes)`.
+; `model-bytes` is exactly the chunk the model emitted, including control
+; syntax. `injected-bytes` is only a validated typed observation and is never
+; appended to model output. The cursor retains bounded counters and the last
+; bounded injected span, not an unbounded transcript. A live owner can stream
+; the two deltas to its output and prefill sinks without confusing authorship.
+;
+; DISTINCT SIGNALS. none, held, complete, and over are scan states. A typed
+; result keeps status nothing/value/failure/timeout, value-present, and value
+; separately, so integer 0 and integer 1 cannot collapse into absence. The
+; callback's content-addressed trace carries choice, nothing, failure, timeout,
+; cut, undo, refine, crystallize, dissolve, and release. Cursor-side refusal
+; and held-frame timeout create the corresponding bounded lifecycle trace too.
+;
+; SINGLE OFFER. This cursor owns one execution-token crossing. Once a complete
+; frame, refusal, over-budget frame, or held timeout terminates it, later model
+; bytes still pass through the model lane but cannot call the executor again.
+; A caller opens a fresh cursor for another crossing.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/form-recipe-exec-token.fk
+;
+; Proven by: form-stdlib/tests/form-cli-recipe-exec-cursor-band.fk
+
+(do
+    ; ── bounded byte recognition ─────────────────────────────────────
+    (defn frxc-state-none () "none")
+    (defn frxc-state-held () "held")
+    (defn frxc-state-complete () "complete")
+    (defn frxc-state-over () "over")
+
+    (defn frxc-detect-cap () (sub (str_len (frex-open)) 1))
+    (defn frxc-hold-cap () (frex-max-frame-bytes))
+    (defn frxc-injection-cap () (frex-max-render-bytes))
+    (defn frxc-max-offers () 1)
+
+    (defn frxc-clip-left (text cap)
+        (if (le (str_len text) cap) text
+            (substring text (sub (str_len text) cap) (str_len text))))
+
+    ; Before a mark, retain only a possible split prefix. Once found, retain
+    ; from it so the opener cannot fall out of the held window.
+    (defn frxc-feed-window (window chunk)
+        (do
+            (let joined (str_concat window chunk))
+            (let at (str_find joined (frex-open) 0))
+            (if (lt at 0)
+                (frxc-clip-left joined (frxc-detect-cap))
+                (substring joined at (str_len joined)))))
+
+    (defn frxc-close-at (window open-at)
+        (str_find window (frex-close)
+            (add open-at (str_len (frex-open)))))
+
+    ; Complete is decided by the extracted frame length, not by trailing model
+    ; prose in the same chunk. The frame alone crosses the parser.
+    (defn frxc-scan (window)
+        (do
+            (let open-at (str_find window (frex-open) 0))
+            (if (lt open-at 0) (frxc-state-none)
+                (do
+                    (let close-at (frxc-close-at window open-at))
+                    (if (ge close-at 0)
+                        (if (gt (sub (add close-at (str_len (frex-close)))
+                                     open-at)
+                                (frxc-hold-cap))
+                            (frxc-state-over) (frxc-state-complete))
+                        (if (gt (str_len window) (frxc-hold-cap))
+                            (frxc-state-over) (frxc-state-held)))))))
+
+    (defn frxc-frame (window)
+        (do
+            (let open-at (str_find window (frex-open) 0))
+            (if (lt open-at 0) ""
+                (do
+                    (let close-at (frxc-close-at window open-at))
+                    (if (lt close-at 0) ""
+                        (substring window open-at
+                            (add close-at (str_len (frex-close)))))))))
+
+    ; ── cursor and transfer shapes ───────────────────────────────────
+    ; cursor = (window scan terminal offered refused injections
+    ;           injected-byte-count model-byte-count model-chunk-count
+    ;           request result trace status reason carrier value present
+    ;           observation)
+    ;
+    ; `observation` is bounded by frxc-injection-cap. Model bytes are returned
+    ; as deltas and represented here only by counts.
+    (defn frxc-cursor
+        (window scan terminal offered refused injections injected-bytes
+         model-bytes model-chunks request result trace status reason carrier
+         value present observation)
+        (list window scan terminal offered refused injections injected-bytes
+              model-bytes model-chunks request result trace status reason
+              carrier value present observation))
+
+    (defn frxc-window (c) (nth c 0))
+    (defn frxc-scan-state (c) (nth c 1))
+    (defn frxc-terminal (c) (nth c 2))
+    (defn frxc-offered (c) (nth c 3))
+    (defn frxc-refused (c) (nth c 4))
+    (defn frxc-injections (c) (nth c 5))
+    (defn frxc-injected-bytes (c) (nth c 6))
+    (defn frxc-model-bytes (c) (nth c 7))
+    (defn frxc-model-chunks (c) (nth c 8))
+    (defn frxc-request (c) (nth c 9))
+    (defn frxc-result (c) (nth c 10))
+    (defn frxc-trace (c) (nth c 11))
+    (defn frxc-status (c) (nth c 12))
+    (defn frxc-reason (c) (nth c 13))
+    (defn frxc-carrier (c) (nth c 14))
+    (defn frxc-value (c) (nth c 15))
+    (defn frxc-value-present? (c) (nth c 16))
+    (defn frxc-observation (c) (nth c 17))
+
+    ; Pure join values for a resident model session. The request surface is
+    ; reconstructed from the strict parsed request, so it is canonical and
+    ; contains no surrounding model prose. The prefill value exists only after
+    ; the once-only injection was accepted.
+    (defn frxc-completed-request-surface (c)
+        (if (eq (frex-request-ready? (frxc-request c)) 1)
+            (frex-surface
+                (frex-request-recipe (frxc-request c))
+                (frex-request-input (frxc-request c))
+                (frex-request-carrier (frxc-request c)))
+            ""))
+    (defn frxc-prefill-observation (c)
+        (if (eq (frxc-injections c) 1) (frxc-observation c) ""))
+    (defn frxc-callback-calls (c) (frxc-offered c))
+
+    ; raw-byte ledger = (model-bytes model-chunks injected-bytes injections
+    ;                    callback-calls held-bytes scan-state)
+    (defn frxc-byte-ledger (c)
+        (list (frxc-model-bytes c) (frxc-model-chunks c)
+              (frxc-injected-bytes c) (frxc-injections c)
+              (frxc-callback-calls c) (str_len (frxc-window c))
+              (frxc-scan-state c)))
+    (defn frxc-ledger-model-bytes (l) (nth l 0))
+    (defn frxc-ledger-model-chunks (l) (nth l 1))
+    (defn frxc-ledger-injected-bytes (l) (nth l 2))
+    (defn frxc-ledger-injections (l) (nth l 3))
+    (defn frxc-ledger-callback-calls (l) (nth l 4))
+    (defn frxc-ledger-held-bytes (l) (nth l 5))
+    (defn frxc-ledger-scan-state (l) (nth l 6))
+
+    (defn frxc-open? (c)
+        (if (str_eq (frxc-terminal c) "open") 1 0))
+    (defn frxc-model-executed? (c) 0)
+    (defn frxc-callback-observed-executed? (c)
+        (if (nothing? (frxc-result c)) 0
+            (frex-result-executed? (frxc-result c))))
+    (defn frxc-callback-observed-code-generated? (c)
+        (if (nothing? (frxc-result c)) 0
+            (frex-result-native-code-generated? (frxc-result c))))
+
+    (defn frxc-fresh ()
+        (frxc-cursor "" (frxc-state-none) "open" 0 0 0 0 0 0
+            (frex-nothing-request "unoffered") (nothing) (empty)
+            "nothing" "waiting" "" 0 0 ""))
+
+    ; transfer = (cursor exact-model-delta exact-injection-delta)
+    (defn frxc-transfer (cursor model-delta injection-delta)
+        (list cursor model-delta injection-delta))
+    (defn frxc-transfer-cursor (x) (nth x 0))
+    (defn frxc-transfer-model (x) (nth x 1))
+    (defn frxc-transfer-injected (x) (nth x 2))
+
+    (defn frxc-streamed (c window scan chunk)
+        (frxc-cursor window scan (frxc-terminal c)
+            (frxc-offered c) (frxc-refused c) (frxc-injections c)
+            (frxc-injected-bytes c)
+            (add (frxc-model-bytes c) (str_len chunk))
+            (add (frxc-model-chunks c) 1)
+            (frxc-request c) (frxc-result c) (frxc-trace c)
+            (frxc-status c) (frxc-reason c) (frxc-carrier c)
+            (frxc-value c) (frxc-value-present? c) (frxc-observation c)))
+
+    ; ── typed result validation ──────────────────────────────────────
+    (defn frxc-result-status? (status)
+        (if (or (str_eq status "nothing")
+                (or (str_eq status "value")
+                (or (str_eq status "failure")
+                    (str_eq status "timeout")))) 1 0))
+
+    (defn frxc-result-valid? (request result)
+        (if (nothing? result) 0
+        (if (not (eq (len result) 13)) 0
+        (if (not (eq (frxc-result-status? (frex-result-status result)) 1)) 0
+        (if (not (node_eq (frex-result-request result)
+                          (frex-request-token request))) 0
+        (if (not (node_eq (frex-result-recipe result)
+                          (frex-request-recipe request))) 0
+        (if (not (eq (frex-result-value-present? result)
+                     (if (str_eq (frex-result-status result) "value") 1 0))) 0
+        (if (not (or (eq (frex-result-executed? result) 0)
+                     (eq (frex-result-executed? result) 1))) 0
+        (if (not (eq (frex-result-model-executed? result) 0)) 0
+        (if (not (or (eq (frex-result-native-code-generated? result) 0)
+                     (eq (frex-result-native-code-generated? result) 1))) 0
+        (if (or (lt (frex-result-attempts result) 0)
+                (gt (frex-result-attempts result) (frex-max-attempts))) 0
+            (node_eq (frex-result-observation result)
+                (frex-observation-token-with-flags
+                    (frex-result-status result)
+                    (frex-result-reason result)
+                    request
+                    (frex-result-carrier result)
+                    (frex-result-value result)
+                    (frex-result-value-present? result)
+                    (frex-result-trace result)
+                    (frex-result-executed? result)
+                    (frex-result-model-executed? result)
+                    (frex-result-native-code-generated? result))))))))))))))
+
+    ; Only one exact outer observation may enter. Callback-controlled reasons
+    ; cannot smuggle another recipe request or prematurely close the span.
+    (defn frxc-observation-valid? (text)
+        (do
+            (let n (str_len text))
+            (let open-n (str_len (frex-observation-open)))
+            (let close-n (str_len (frex-observation-close)))
+            (let expected-close (sub n close-n))
+            (let close-at (str_find text (frex-observation-close) open-n))
+            (let nested-observation
+                (str_find text (frex-observation-open) open-n))
+            (if (or (eq n 0) (gt n (frxc-injection-cap))) 0
+            (if (not (eq (str_find text (frex-observation-open) 0) 0)) 0
+            (if (not (eq close-at expected-close)) 0
+            (if (ge nested-observation 0) 0
+            (if (ge (str_find text (frex-open) open-n) 0) 0
+            (if (ge (str_find text (frex-close) open-n) 0) 0
+                1))))))))
+
+    ; ── lifecycle traces for cursor-side outcomes ────────────────────
+    (defn frxc-add-event (trace request action signal attempt)
+        (append trace (list (frex-event request action "cursor" signal attempt))))
+
+    (defn frxc-refusal-trace (request reason)
+        (do
+            (let a (frxc-add-event (empty) request "failure" reason 0))
+            (let b (frxc-add-event a request "undo" reason 0))
+            (let d (frxc-add-event b request "refine" "next-cursor" 0))
+            (let e (frxc-add-event d request "cut" reason 0))
+            (frxc-add-event e request "release" "cursor-context" 0)))
+
+    (defn frxc-timeout-trace (request reason)
+        (do
+            (let a (frxc-add-event (empty) request "timeout" reason 0))
+            (let b (frxc-add-event a request "cut" reason 0))
+            (let d (frxc-add-event b request "undo" reason 0))
+            (let e (frxc-add-event d request "refine" "next-cursor" 0))
+            (frxc-add-event e request "release" "cursor-context" 0)))
+
+    (defn frxc-terminal-state
+        (c scan terminal request result trace status reason carrier value present
+         observation offered-add refused-add injection-add)
+        (frxc-cursor "" scan terminal
+            (add (frxc-offered c) offered-add)
+            (add (frxc-refused c) refused-add)
+            (add (frxc-injections c) injection-add)
+            (add (frxc-injected-bytes c) (str_len observation))
+            (frxc-model-bytes c) (frxc-model-chunks c)
+            request result trace status reason carrier value present observation))
+
+    (defn frxc-refuse (c scan reason)
+        (do
+            (let request (frex-nothing-request reason))
+            (frxc-terminal-state c scan "refused" request (nothing)
+                (frxc-refusal-trace request reason)
+                "failure" reason "cursor" 0 0 "" 0 1 0)))
+
+    (defn frxc-over (c)
+        (do
+            (let request (frex-nothing-request "frame-budget-exceeded"))
+            (frxc-terminal-state c (frxc-state-over) "over" request (nothing)
+                (frxc-refusal-trace request "frame-budget-exceeded")
+                "failure" "frame-budget-exceeded" "cursor" 0 0 "" 0 1 0)))
+
+    ; ── one complete request crossing ────────────────────────────────
+    (defn frxc-accept-result (c request result observation)
+        (frxc-terminal-state c (frxc-state-complete) "complete"
+            request result (frex-result-trace result)
+            (frex-result-status result) (frex-result-reason result)
+            (frex-result-carrier result) (frex-result-value result)
+            (frex-result-value-present? result) observation 1 0 1))
+
+    (defn frxc-offer-once (ctx executor c frame)
+        (do
+            (let request (frex-parse frame))
+            (if (not (eq (frex-request-ready? request) 1))
+                (frxc-refuse c (frxc-state-complete)
+                    (frex-request-reason request))
+                (do
+                    (let result (executor ctx request))
+                    (if (not (eq (frxc-result-valid? request result) 1))
+                        (frxc-terminal-state c (frxc-state-complete) "refused"
+                            request result
+                            (frxc-refusal-trace request
+                                "executor-result-invalid")
+                            "failure" "executor-result-invalid" "cursor"
+                            0 0 "" 1 1 0)
+                        (do
+                            (let observation (frex-render result))
+                            (if (not (eq
+                                    (frxc-observation-valid? observation) 1))
+                                (frxc-terminal-state c
+                                    (frxc-state-complete) "refused"
+                                    request result
+                                    (frxc-refusal-trace request
+                                        "executor-observation-refused")
+                                    "failure" "executor-observation-refused"
+                                    "cursor" 0 0 "" 1 1 0)
+                                (frxc-accept-result c request result
+                                    observation))))))))
+
+    ; Feed one arbitrary decoded byte chunk. The exact chunk returns on the
+    ; model lane even after this one-off cursor has terminated.
+    (defn frxc-feed (ctx executor cursor chunk)
+        (if (not (eq (frxc-open? cursor) 1))
+            (frxc-transfer
+                (frxc-streamed cursor (frxc-window cursor)
+                    (frxc-scan-state cursor) chunk)
+                chunk "")
+            (do
+                (let window (frxc-feed-window (frxc-window cursor) chunk))
+                (let scan (frxc-scan window))
+                (let streamed (frxc-streamed cursor window scan chunk))
+                (if (str_eq scan (frxc-state-complete))
+                    (do
+                        (let completed
+                            (frxc-offer-once ctx executor streamed
+                                (frxc-frame window)))
+                        (frxc-transfer completed chunk
+                            (frxc-observation completed)))
+                    (if (str_eq scan (frxc-state-over))
+                        (frxc-transfer (frxc-over streamed) chunk "")
+                        (frxc-transfer streamed chunk ""))))))
+
+    ; The owner names timeout only while a frame is genuinely held. No callback
+    ; runs and no fabricated carrier observation enters.
+    (defn frxc-timeout (cursor)
+        (if (and (eq (frxc-open? cursor) 1)
+                 (str_eq (frxc-scan-state cursor) (frxc-state-held)))
+            (do
+                (let request (frex-nothing-request "held-frame-timeout"))
+                (frxc-transfer
+                    (frxc-terminal-state cursor (frxc-state-held) "timeout"
+                        request (nothing)
+                        (frxc-timeout-trace request "held-frame-timeout")
+                        "timeout" "held-frame-timeout" "cursor" 0 0 ""
+                        0 0 0)
+                    "" ""))
+            (frxc-transfer cursor "" "")))
+
+    0)

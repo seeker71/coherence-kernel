@@ -1,0 +1,208 @@
+; local-model-choice.fk — DeepSeek and Qwen live side by side; the branch is learned.
+;
+; Native / local / remote is already alt-route (active-learning-tier-cycle.fk).
+; This cell is the next fork: which local architecture answers this task.
+; The pair on this host is deepseek4 and qwen35. Any later local arch joins
+; the present list and can win by observation — the prior does not lock them out.
+;
+; Prediction is Laplace win-rate among the arches that are present:
+;   (wins+1)*100 / (attempts+2)
+; Ties keep the home arch for that task. Home is a prior, not a switch:
+;   control, reason  -> deepseek4  (reserved CONTROL bank at 128000)
+;   form, generate   -> qwen35     (Form-native generate door)
+; choose-observe updates the ledger; the next predict reads it. That is the
+; active-learning update of the branch-choice prediction.
+;
+; The ledger is session memory (.form-model-choice.tsv), not the commons.
+; The band never opens it.
+;
+; preludes: form-stdlib/core.fk form-stdlib/active-learning-tier-cycle.fk
+; Proven by: form-stdlib/tests/local-model-choice-band.fk
+; witnessed: 2026-08-19 -> 1023
+
+(do
+    (defn lmc-ledger-path () ".form-model-choice.tsv")
+    (defn lmc-pair () (list "deepseek4" "qwen35"))
+    (defn lmc-row (arch task wins attempts) (list arch task wins attempts))
+    (defn lmc-arch (r) (nth r 0))
+    (defn lmc-task (r) (nth r 1))
+    (defn lmc-wins (r) (nth r 2))
+    (defn lmc-attempts (r) (nth r 3))
+
+    (defn lmc-home (task)
+        (if (or (str_eq task "control") (str_eq task "reason")) "deepseek4" "qwen35"))
+
+    ; How this host runs an architecture. A new local arch joins as local-generic
+    ; until a door is witnessed — the name of the file is never this string.
+    (defn lmc-mode (arch)
+        (if (str_eq arch "deepseek4") "ds4-control-stack"
+            (if (str_eq arch "llama") "llama-metal-ask"
+                (if (str_eq arch "qwen35moe") "qwen35moe-kat"
+                    (if (str_eq arch "qwen35") "form-native-generate"
+                        (if (str_eq arch "") "none" "local-generic"))))))
+
+    (defn lmc-in? (name xs)
+        (if (eq (len xs) 0) 0
+            (if (str_eq name (head xs)) 1 (lmc-in? name (tail xs)))))
+
+    (defn lmc-present-with (arch)
+        (if (or (str_eq arch "") (eq (lmc-in? arch (lmc-pair)) 1))
+            (lmc-pair)
+            (cons arch (lmc-pair))))
+
+    (defn lmc-has? (s w)
+        (if (ge (str_find s w 0) 0) 1 0))
+
+    (defn lmc-task-of (prompt)
+        (if (or (eq (lmc-has? prompt "<CHOICE>") 1)
+            (or (eq (lmc-has? prompt "<CUT>") 1)
+            (or (eq (lmc-has? prompt "<FAIL>") 1)
+                (eq (lmc-has? prompt "<TIMEOUT>") 1))))
+            "control"
+            (if (or (eq (lmc-has? prompt "Recipe") 1)
+                (or (eq (lmc-has? prompt "Blueprint") 1)
+                (or (eq (lmc-has? prompt "form-cli") 1)
+                    (eq (lmc-has? prompt "NL-to-form") 1))))
+                "form"
+                (if (or (eq (lmc-has? prompt "reason") 1)
+                        (eq (lmc-has? prompt "think") 1))
+                    "reason"
+                    "generate"))))
+
+    (defn lmc-find (rows arch task)
+        (if (eq (len rows) 0) (empty)
+            (if (and (str_eq (lmc-arch (head rows)) arch)
+                     (str_eq (lmc-task (head rows)) task))
+                (head rows)
+                (lmc-find (tail rows) arch task))))
+
+    (defn lmc-drop (rows arch task)
+        (if (eq (len rows) 0) (empty)
+            (if (and (str_eq (lmc-arch (head rows)) arch)
+                     (str_eq (lmc-task (head rows)) task))
+                (lmc-drop (tail rows) arch task)
+                (cons (head rows) (lmc-drop (tail rows) arch task)))))
+
+    (defn lmc-score-of (rows arch task)
+        (do
+            (let r (lmc-find rows arch task))
+            (if (eq (len r) 0)
+                (div (mul 1 100) 2)
+                (div (mul (add (lmc-wins r) 1) 100) (add (lmc-attempts r) 2)))))
+
+    (defn lmc-better (task arch-a score-a arch-b score-b)
+        (if (gt score-b score-a) arch-b
+            (if (gt score-a score-b) arch-a
+                (if (str_eq arch-b (lmc-home task)) arch-b arch-a))))
+
+    (defn lmc-best (rows task present best-arch best-score)
+        (if (eq (len present) 0) best-arch
+            (do
+                (let arch (head present))
+                (let score (lmc-score-of rows arch task))
+                (lmc-best rows task (tail present)
+                    (lmc-better task best-arch best-score arch score)
+                    (if (str_eq (lmc-better task best-arch best-score arch score) arch)
+                        score best-score)))))
+
+    (defn lmc-predict (rows task present)
+        (if (eq (len present) 0) ""
+            (lmc-best rows task (tail present) (head present)
+                (lmc-score-of rows (head present) task))))
+
+    (defn lmc-observe (rows task arch win)
+        (do
+            (let old (lmc-find rows arch task))
+            (if (eq (len old) 0)
+                (cons (lmc-row arch task win 1) rows)
+                (cons (lmc-row arch task (add (lmc-wins old) win) (add (lmc-attempts old) 1))
+                    (lmc-drop rows arch task)))))
+
+    ; Native first (alt-route). When the local tier answers, pick an arch.
+    (defn lmc-branch (rows task present native-ready local-ready)
+        (do
+            (let tier (alt-route native-ready local-ready))
+            (let arch (if (eq tier (alt-local)) (lmc-predict rows task present) ""))
+            (list tier arch task)))
+
+    (defn lmc-row-line (r)
+        (str_concat (lmc-arch r)
+        (str_concat "|"
+        (str_concat (lmc-task r)
+        (str_concat "|"
+        (str_concat (int_to_str (lmc-wins r))
+        (str_concat "|" (int_to_str (lmc-attempts r)))))))))
+
+    (defn lmc-dump (rows)
+        (if (eq (len rows) 0) ""
+            (str_concat (lmc-row-line (head rows))
+                (str_concat "\n" (lmc-dump (tail rows))))))
+
+    (defn lmc-parse-line (s)
+        (if (eq (str_len s) 0) (empty)
+            (do
+                (let a (str_find s "|" 0))
+                (if (lt a 0) (empty)
+                    (do
+                        (let b (str_find s "|" (add a 1)))
+                        (if (lt b 0) (empty)
+                            (do
+                                (let c (str_find s "|" (add b 1)))
+                                (if (lt c 0) (empty)
+                                    (lmc-row (substring s 0 a)
+                                        (substring s (add a 1) b)
+                                        (str_to_int (substring s (add b 1) c))
+                                        (str_to_int (substring s (add c 1) (str_len s))))))))))))
+
+    (defn lmc-parse-text (s)
+        (if (eq (str_len s) 0) (empty)
+            (do
+                (let at (str_find s "\n" 0))
+                (if (lt at 0)
+                    (do
+                        (let row (lmc-parse-line s))
+                        (if (eq (len row) 0) (empty) (list row)))
+                    (do
+                        (let row (lmc-parse-line (substring s 0 at)))
+                        (let rest (lmc-parse-text (substring s (add at 1) (str_len s))))
+                        (if (eq (len row) 0) rest (cons row rest)))))))
+
+    (defn lmc-load () (lmc-parse-text (read_file (lmc-ledger-path))))
+    (defn lmc-save (rows) (write_file_text (lmc-ledger-path) (lmc-dump rows)))
+
+    (defn lmc-say (prompt arch model)
+        (do
+            (let task (lmc-task-of prompt))
+            (let pick (lmc-predict (lmc-load) task (lmc-present-with arch)))
+            (str_concat "choice-task="
+            (str_concat task
+            (str_concat "\nchoice-arch="
+            (str_concat pick
+            (str_concat "\nchoice-mode="
+            (str_concat (lmc-mode pick)
+            (str_concat "\nchoice-home="
+            (str_concat (lmc-home task)
+            (str_concat "\nselected-model="
+            (str_concat (if (str_eq model "") "none" model)
+            (str_concat "\nselected-arch="
+            (str_concat (if (str_eq arch "") "none" arch)
+            (str_concat "\nselected-mode="
+            (str_concat (lmc-mode arch)
+            (str_concat "\nchoice-match="
+                (if (str_eq pick arch) "1" "0"))))))))))))))))))
+
+    (defn lmc-cli-observe (task arch outcome)
+        (do
+            (let win (if (or (str_eq outcome "win") (str_eq outcome "win\n")) 1 0))
+            (let rows (lmc-observe (lmc-load) task arch win))
+            (lmc-save rows)
+            (str_concat "observed task="
+            (str_concat task
+            (str_concat " arch="
+            (str_concat arch
+            (str_concat " win="
+            (str_concat (int_to_str win)
+            (str_concat " next="
+                (lmc-predict rows task (lmc-present-with arch)))))))))))
+
+    0)

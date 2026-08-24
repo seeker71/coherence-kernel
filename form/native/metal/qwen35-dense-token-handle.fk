@@ -7,12 +7,34 @@
 ; MSL is assembled by Form and passed to metal_pipeline, so every kernel is JIT-compiled for the
 ; device that actually answered metal_status.  Model bytes remain mmap-backed no-copy buffers.
 ;
-; preludes: native/metal/kat-token-handle.fk
+; preludes: native/metal/kat-token-handle.fk form-stdlib/qk-matmul-batch.fk
 
 (do
     ; Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
     ; proven kernel at pipeline 17; dense appends the wide Q8_0 matvec whose 256-thread group owns
     ; two output rows.  The ordinary kth Q8 lane remains available to its existing callers.
+    ; The batched Q8_0 matmul rides along: one weight decode serving eight
+    ; activation columns, so a prefill span is one dispatch per weight tensor
+    ; instead of one per token. Stone 7 proved the shape on the K-quant lane in
+    ; July (metal_batched_prefill.sh, 5 gates); this lane never inherited it
+    ; because the generator hardcoded a 256-weight superblock and Q8_0's is 32.
+    ; A source-offset copy to sit beside kth-copyoff-msl's destination-offset one,
+    ; and an rmsnorm over a span of rows. The span form is ONE THREAD PER TOKEN.
+    ; That thread walks its row in ascending order, keeping ldm-rmsnorm-msl's
+    ; serial sum and Newton-50 reciprocal exactly while remaining independent of
+    ; model width. A first version copied ldm-rmsnorm-tg-msl's fixed sq[4096]
+    ; scratch even though Qwen3.8 declares n=5120; a matching output from that
+    ; out-of-radius kernel was useful evidence, never a correctness witness.
+    (defn q38-copysoff-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& soff [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; d[i] = s[soff + i]; }")))
+
+    (defn q38-rmsspan-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], constant uint& ntok [[buffer(5)]], uint tok [[thread_position_in_grid]]) { if (tok >= ntok) return; uint off = tok * n; float ss = 0.0f; uint j = 0u; while (j < n) { float xv = x[off + j]; ss = ss + xv * xv; j += 1u; } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } float inv = 1.0f / gg; j = 0u; while (j < n) { float nm = x[off + j] * inv; y[off + j] = nm * g[j]; j += 1u; } }")))
+
     ; GQA decode with one 256-thread THREADGROUP per query head, replacing the
     ; one-thread-per-head dispatch for this walker only. Measured 2026-08-24
     ; (layer-kind-probe): the full-attention block cost 2113 us of GPU per
@@ -30,14 +52,20 @@
     (defn q38-msl ()
         (str_concat (kth-msl)
         (str_concat (q80-matvec-wide-body "form_q8_0_matvec_wide_f32")
-                    (q38-gqa-tg-msl "form_gqa_decode_tg_f32"))))
+        (str_concat (qmb-q80-batch)
+        (str_concat (q38-copysoff-msl "form_copy_soff_f32")
+        (str_concat (q38-rmsspan-msl  "form_rmsnorm_span_f32")
+                    (q38-gqa-tg-msl "form_gqa_decode_tg_f32")))))))
 
-    ; kth-pipes owns indices 0..28.  Dense Qwen adds the cooperative Q8_0 matvec (29), the Q8_0
-    ; row dequant used by token_embd.weight (30), and the threadgroup GQA decode (31).
+    ; kth-pipes owns indices 0..28.  Dense Qwen adds the cooperative Q8_0 matvec and the Q8_0 row
+    ; dequant used by token_embd.weight.
     (defn q38-pipes (msl)
         (append (kth-pipes msl)
             (list (metal_pipeline msl "form_q8_0_matvec_wide_f32")
                   (metal_pipeline msl "form_q8_0_dequant_f32")
+                  (metal_pipeline msl "form_q8_0_matmul_batch_f32")
+                  (metal_pipeline msl "form_copy_soff_f32")
+                  (metal_pipeline msl "form_rmsnorm_span_f32")
                   (metal_pipeline msl "form_gqa_decode_tg_f32"))))
 
     ; One exact 256-thread group per output-row pair for Q8_0.  All other declared types retain the
@@ -48,14 +76,10 @@
     ; consumer carries 1.  Nothing about dependency order is left to encoder insertion order.
     (defn q38-b16 (bufs consts mode barrier)
         (md-bind16 bufs consts 256 0 mode barrier))
-    ; Correction inherited from sibling 0e3e58b6 (2026-08-24): the cooperative
-    ; RMS kernel declares threadgroup float sq[4096], and this GGUF's width is
-    ; 5120 — at that width the kernel writes past its declared scratch.
-    ; Matching output from that out-of-radius path was execution evidence,
-    ; never defined correctness. The cooperative twin is used only inside its
-    ; witnessed radius; wider rows take the serial attestant at pipeline 5
-    ; (same arithmetic, one thread, width-independent). Data, not a hardcoded
-    ; Qwen exception.
+    ; ldm-rmsnorm-tg-msl declares sq[4096]. Qwen3.8's model width is 5120,
+    ; so the cooperative twin is available only inside its witnessed radius;
+    ; wider rows use the serial attestant at pipeline 5. This choice is data,
+    ; not a hardcoded Qwen exception, and the band probes both sides.
     (defn q38-rms-cooperative? (n) (le n 4096))
     (defn q38-rms (ps xh gtv yh n epsBits barrier)
         (if (q38-rms-cooperative? n)
@@ -200,10 +224,11 @@
                 (q38-b16 (list (nth bs 25) (nth st 3))
                     (list (nth geo 20) (mul pos (nth geo 20))) 0 0)
                 (nth geo 20))
-            ; pipeline 31: one 256-thread threadgroup per head (mode 1 makes the
+            ; pipeline 34: one 256-thread threadgroup per head (mode 1 makes the
             ; threads argument a GROUP count). The serial one-thread-per-head
-            ; dispatch this replaces cost the block ~1.7 ms of its 2.1 ms.
-            (metal_enqueue (nth ps 31)
+            ; dispatch this replaces cost the block ~1.7 ms of its 2.1 ms
+            ; (2026-08-24, layer-kind-probe: 2113 -> 553 us per block).
+            (metal_enqueue (nth ps 34)
                 (q38-b16 (list (nth bs 22) (nth st 2) (nth st 3) (nth bs 26) (nth bs 27))
                          (list (add pos 1) (nth geo 12) (nth geo 13) (nth geo 14)
                                (nth geo 17) (nth geo 18)) 1 1)
@@ -232,6 +257,164 @@
                 (q38-b16 (list (nth bs 0) (nth bs 17) (nth bs 0)) (list (nth geo 0)) 0 1)
                 (nth geo 0))
             1))
+
+    ; ── the batched matmul, dispatched ─────────────────────────────────────
+    ; form_q8_0_matmul_batch_f32 takes rows, cols and ntok, reads x[t*cols+j] and
+    ; writes y[t*rows+r]. Grid is rows * ceil(ntok/8) * 32 with a threadgroup that
+    ; is a multiple of 32, and mode 0 so the threads argument is the total thread
+    ; count rather than a group count.
+    ;
+    ; At ntok 1 this replaces one matvec with one matmul over a single column —
+    ; the same work, the same dispatch count, through the batched path. That is
+    ; the point of running it at 1 first: it puts the binding, the grid and the
+    ; token-major layout under the body's own witness before the loop order
+    ; changes underneath them.
+    (defn q38-mv-batch (ps tv xh yh ntok barrier)
+        (metal_enqueue (nth ps 31)
+            (md-bind16 (list (kth-tv-h tv) xh yh)
+                (list (kth-tv-r tv) (kth-tv-c tv) ntok)
+                256 0 0 barrier)
+            (mul (mul (kth-tv-r tv) (div (add ntok 7) 8)) 32)))
+
+    ; The FFN with its three matmuls on the batched kernel. rms, the swiglu gate
+    ; and the residual add are unchanged: at ntok 1 they are already right, and at
+    ; ntok > 1 they are the next three kernels to widen.
+    (defn q38-ffn-b (ps bs geo lay ntok)
+        (do
+            (q38-rms ps (nth bs 0) (nth lay 1) (nth bs 1) (nth geo 0) (nth geo 6) 1)
+            (q38-mv-batch ps (nth lay 2) (nth bs 1) (nth bs 14) ntok 1)
+            (q38-mv-batch ps (nth lay 3) (nth bs 1) (nth bs 15) ntok 0)
+            (metal_enqueue (nth ps 18)
+                (q38-b16 (list (nth bs 14) (nth bs 15) (nth bs 16))
+                    (list (nth geo 10)) 0 1)
+                (nth geo 10))
+            (q38-mv-batch ps (nth lay 4) (nth bs 16) (nth bs 17) ntok 1)
+            (metal_enqueue (nth ps 19)
+                (q38-b16 (list (nth bs 0) (nth bs 17) (nth bs 0)) (list (nth geo 0)) 0 1)
+                (nth geo 0))
+            1))
+
+    (defn q38-blocks-b (ps bs geo lays sts pos l n interval ntok)
+        (if (ge l n) 1
+            (do (if (kth-full? l interval)
+                    (q38-full-attn ps bs geo (nth lays l) (nth sts l) pos)
+                    (q38-linear-attn ps bs geo (nth lays l) (nth sts l)))
+                (q38-ffn-b ps bs geo (nth lays l) ntok)
+                (q38-blocks-b ps bs geo lays sts pos (add l 1) n interval ntok))))
+
+    (defn q38-forward-state-b (ps bs geo lays sts embTv id pos barrier ntok)
+        (do
+            (metal_enqueue (nth ps 30)
+                (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
+                         (list (mul id (nth geo 0)) (nth geo 0)) 0 barrier)
+                (nth geo 0))
+            (q38-blocks-b ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22) ntok)
+            1))
+
+    (defn q38-prefill-mvb-go (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (if (eq (len ids) 1)
+            (do (metal_sync)
+                (list (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos)
+                      (add pos 1)))
+            (do (q38-forward-state-b ps bs geo lays sts embTv (head ids) pos 1 1)
+                (q38-prefill-mvb-go ps bs geo lays sts embTv onormTv projTv
+                    (tail ids) (add pos 1)))))
+
+    (defn q38-prefill-mvb (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (do (metal_batch_concurrent)
+            (q38-prefill-mvb-go ps bs geo lays sts embTv onormTv projTv ids pos)))
+
+    ; ── layer-major prefill ────────────────────────────────────────────────
+    ; dsv4-decode-loop.fk transcribed the shape from ds4.c: prefill is
+    ; LAYER-MAJOR — all prompt tokens pass through layer 0, then layer 1. Decode
+    ; is token-major. They are two schedules over the same rows.
+    ;
+    ; The recurrences are carried, not assumed away. Inside a layer the tokens
+    ; still walk in order, so form_gdn_conv_f32's window state and
+    ; form_gdn_delta_heads_f32's delta state evolve position by position exactly
+    ; as they do today, and form_gqa_decode_f32 sees every earlier position's KV
+    ; already written. What changes is only which loop is outer.
+    ;
+    ; Attention keeps its single-position working set: each token is gathered out
+    ; of the token-major residual stream (bs 33) into slot 0, run, and scattered
+    ; back. That costs two copies per token per layer and buys a FFN that sees
+    ; the whole span at once — six dispatches per layer instead of six per token.
+    (defn q38-scatter (ps bs geo t barrier)
+        (metal_enqueue (nth ps 24)
+            (q38-b16 (list (nth bs 0) (nth bs 33))
+                     (list (nth geo 0) (mul t (nth geo 0))) 0 barrier)
+            (nth geo 0)))
+
+    (defn q38-gather (ps bs geo t barrier)
+        (metal_enqueue (nth ps 32)
+            (q38-b16 (list (nth bs 33) (nth bs 0))
+                     (list (nth geo 0) (mul t (nth geo 0))) 0 barrier)
+            (nth geo 0)))
+
+    (defn q38-rms-span (ps xh gtv yh n epsBits ntok barrier)
+        (metal_enqueue (nth ps 33)
+            (md-bind16 (list xh (kth-tv-h gtv) yh) (list n epsBits ntok) 256 0 0 barrier)
+            ntok))
+
+    ; The FFN over the whole span. rms is per-row across ntok rows; the three
+    ; matmuls are the batched kernel at its real width; swiglu and the residual
+    ; add are elementwise, so they simply run over n * ntok contiguous values.
+    (defn q38-ffn-span (ps bs geo lay ntok)
+        (do
+            (q38-rms-span ps (nth bs 33) (nth lay 1) (nth bs 1) (nth geo 0) (nth geo 6) ntok 1)
+            (q38-mv-batch ps (nth lay 2) (nth bs 1) (nth bs 14) ntok 1)
+            (q38-mv-batch ps (nth lay 3) (nth bs 1) (nth bs 15) ntok 0)
+            (metal_enqueue (nth ps 18)
+                (q38-b16 (list (nth bs 14) (nth bs 15) (nth bs 16))
+                    (list (mul (nth geo 10) ntok)) 0 1)
+                (mul (nth geo 10) ntok))
+            (q38-mv-batch ps (nth lay 4) (nth bs 16) (nth bs 17) ntok 1)
+            (metal_enqueue (nth ps 19)
+                (q38-b16 (list (nth bs 33) (nth bs 17) (nth bs 33))
+                    (list (mul (nth geo 0) ntok)) 0 1)
+                (mul (nth geo 0) ntok))
+            1))
+
+    (defn q38-lm-embed (ps bs geo embTv ids t)
+        (if (eq (len ids) 0) t
+            (do (metal_enqueue (nth ps 30)
+                    (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
+                        (list (mul (head ids) (nth geo 0)) (nth geo 0)) 0 1)
+                    (nth geo 0))
+                (q38-scatter ps bs geo t 1)
+                (q38-lm-embed ps bs geo embTv (tail ids) (add t 1)))))
+
+    (defn q38-lm-attn (ps bs geo lays sts l t n pos0)
+        (if (ge t n) 1
+            (do (q38-gather ps bs geo t 1)
+                (if (kth-full? l (nth geo 22))
+                    (q38-full-attn ps bs geo (nth lays l) (nth sts l) (add pos0 t))
+                    (q38-linear-attn ps bs geo (nth lays l) (nth sts l)))
+                (q38-scatter ps bs geo t 1)
+                (q38-lm-attn ps bs geo lays sts l (add t 1) n pos0))))
+
+    (defn q38-lm-layers (ps bs geo lays sts l nL n pos0)
+        (if (ge l nL) 1
+            (do (q38-lm-attn ps bs geo lays sts l 0 n pos0)
+                (q38-ffn-span ps bs geo (nth lays l) n)
+                (q38-lm-layers ps bs geo lays sts (add l 1) nL n pos0))))
+
+    (defn q38-head-only (ps bs geo onormTv projTv)
+        (do (q38-head ps bs geo onormTv projTv)
+            (kth-u32at (metal_buf_read (nth bs 31) 0 4) 0)))
+
+    (defn q38-prefill-lm (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (do
+            (let n (len ids))
+            (metal_batch_concurrent)
+            (q38-lm-embed ps bs geo embTv ids 0)
+            (q38-lm-layers ps bs geo lays sts 0 (nth geo 21) n pos)
+            (q38-gather ps bs geo (sub n 1) 1)
+            ; No sync here. q38-forward does not sync before its read either —
+            ; metal_buf_read submits the open batch and waits. Syncing first
+            ; CLOSES the batch, and the head's dispatches then have no batch to
+            ; land in, so the argmax read comes back from a buffer nothing wrote.
+            (list (q38-head-only ps bs geo onormTv projTv) (add pos n))))
 
     (defn q38-blocks (ps bs geo lays sts pos l n interval)
         (if (ge l n) 1
@@ -309,6 +492,90 @@
             (do (q38-advance ps bs geo lays sts embTv (head ids) pos)
                 (q38-prefill ps bs geo lays sts embTv onormTv projTv (tail ids) (add pos 1)))))
 
+    ; ── prefill without a barrier at every position ────────────────────────
+    ; q38-blocks enqueues all 48 layers into one batch with NO sync between
+    ; them, so ordering inside a batch is already the carrier's job and already
+    ; works. The per-position metal_sync in q38-advance is therefore not about
+    ; KV ordering the way its comment reads — it is about the scratch buffers
+    ; (bs 0, bs 1, ...) being reused by every position, so two positions in
+    ; flight would write each other's working memory.
+    ;
+    ; That is a claim about this body, and this body can answer it. `chunk` says
+    ; how many positions may be in flight before the carrier is asked to settle.
+    ; chunk=1 IS q38-prefill, barrier for barrier. Larger chunks are the
+    ; question, and the answer is whatever the same prompt produces through both.
+    (defn q38-advance-open (ps bs geo lays sts embTv id pos)
+        (do (q38-forward-state ps bs geo lays sts embTv id pos) 1))
+
+    (defn q38-prefill-chunk-go (ps bs geo lays sts embTv onormTv projTv ids pos chunk k)
+        (if (eq (len ids) 1)
+            (do (metal_sync)
+                (list (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos)
+                      (add pos 1)))
+            (do (q38-advance-open ps bs geo lays sts embTv (head ids) pos)
+                (let settle (if (ge (add k 1) chunk) 1 0))
+                (if (eq settle 1) (metal_sync) 0)
+                (q38-prefill-chunk-go ps bs geo lays sts embTv onormTv projTv
+                    (tail ids) (add pos 1) chunk (if (eq settle 1) 0 (add k 1))))))
+
+    ; ── one batch for the whole span ───────────────────────────────────────
+    ; chunk 64 answered no: the scratch buffers bs 0, bs 1, ... are reused by
+    ; every position, so two positions in flight overwrite each other's working
+    ; memory. The sync was buying ORDERING, and paying a CPU round trip for it.
+    ;
+    ; md-bind16's own comment names the cheaper coin: barrier_before, "1 =
+    ; memoryBarrier before this dispatch; legal only in a concurrent batch".
+    ; Today q38-forward-state opens a fresh concurrent batch per position and its
+    ; embedding dispatch carries barrier 0 — correct, because a sync had just
+    ; drained everything. Open the batch ONCE for the span and give each
+    ; position's first dispatch barrier 1 instead, and the ordering that the
+    ; round trip was buying is expressed inside the command buffer, where it
+    ; costs a barrier rather than a stall.
+    (defn q38-forward-state-after (ps bs geo lays sts embTv id pos barrier)
+        (do
+            (metal_enqueue (nth ps 30)
+                (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
+                         (list (mul id (nth geo 0)) (nth geo 0)) 0 barrier)
+                (nth geo 0))
+            (q38-blocks ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22))
+            1))
+
+    (defn q38-prefill-span-go (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (if (eq (len ids) 1)
+            (do (metal_sync)
+                (list (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos)
+                      (add pos 1)))
+            (do (q38-forward-state-after ps bs geo lays sts embTv (head ids) pos 1)
+                (q38-prefill-span-go ps bs geo lays sts embTv onormTv projTv
+                    (tail ids) (add pos 1) ))))
+
+    (defn q38-prefill-span (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (do (metal_batch_concurrent)
+            (q38-prefill-span-go ps bs geo lays sts embTv onormTv projTv ids pos)))
+
+    ; chunk 1 = a barrier-per-position sync, the lane as it has always been.
+    ; chunk 0 = one batch for the whole span, ordering by barrier.
+    ; chunk n>1 = settle every n positions (the probe that answered no).
+    ; A layer-major walk needs the residual stream to hold every position of the
+    ; span. If the scratch was opened narrower than this prefill, the walk is not
+    ; refused and not silently truncated — it runs span mode, which needs no span
+    ; at all, and the caller sees which one ran in the reported dispatch counts.
+    (defn q38-prefill-chunked-span (ps bs geo lays sts embTv onormTv projTv ids pos chunk span)
+        (if (lt chunk (sub 0 1))
+            (if (gt (len ids) span)
+                (q38-prefill-span ps bs geo lays sts embTv onormTv projTv ids pos)
+                (q38-prefill-lm ps bs geo lays sts embTv onormTv projTv ids pos))
+        (if (lt chunk 0)
+            (q38-prefill-mvb ps bs geo lays sts embTv onormTv projTv ids pos)
+        (if (eq chunk 0)
+            (q38-prefill-span ps bs geo lays sts embTv onormTv projTv ids pos)
+            (if (le chunk 1)
+                (q38-prefill ps bs geo lays sts embTv onormTv projTv ids pos)
+                (q38-prefill-chunk-go ps bs geo lays sts embTv onormTv projTv ids pos chunk 0))))))
+
+    (defn q38-prefill-chunked (ps bs geo lays sts embTv onormTv projTv ids pos chunk)
+        (q38-prefill-chunked-span ps bs geo lays sts embTv onormTv projTv ids pos chunk 1))
+
     (defn q38-key (arch suffix) (str_concat arch (str_concat "." suffix)))
 
     ; A pipeline can compile against a sparse/truncated file, and mmap can accept many early tensor
@@ -367,7 +634,12 @@
     ; Returns the same setup shape as KAT plus the selected path at index 9.  No model path or model
     ; geometry is compiled in.  The header window is a carrier window; egg-data-base determines the
     ; real data boundary (10,996,704 bytes on the observed Qwen3.8 Q8_0 file).
-    (defn q38-open (path maxpos)
+    ; span is how many positions the scratch may hold at once, token-major.
+    ; q38-open is q38-open-span at span 1 — the same allocation the lane has
+    ; always made. ctx slot 10 carries the span so the stack can read it.
+    (defn q38-open (path maxpos) (q38-open-span path maxpos 1))
+
+    (defn q38-open-span (path maxpos span)
         (if (eq (q38-artifact-complete? path) 0) (empty)
         (do (let src (eqr-of-file path 0 40000000))
             (let base (egg-data-base src 32))
@@ -375,14 +647,16 @@
             (let ps (q38-pipes (q38-msl)))
             (let qout (mul 2 (mul (nth geo 12) (nth geo 14))))
             (let convcap (if (gt qout (nth geo 1)) qout (nth geo 1)))
-            (let bs (kth-bufs (nth geo 0) convcap (mul (nth geo 3) (nth geo 5)) (nth geo 3)
+            (let bs (kth-bufs-span (nth geo 0) convcap (mul (nth geo 3) (nth geo 5)) (nth geo 3)
                               (nth geo 10) 1 (mul (nth geo 12) (nth geo 14))
-                              (nth geo 20) maxpos (nth geo 12) (nth geo 19)))
+                              (nth geo 20) maxpos (nth geo 12) (nth geo 19) span))
             (let lays (q38-layers src base path (nth geo 21) (nth geo 22)))
             (let embTv (kth-tv-at src base path (egg-find-tensor src "token_embd.weight")))
             (let onormTv (kth-tv-at src base path (egg-find-tensor src "output_norm.weight")))
             (let projTv (kth-tv-at src base path (egg-find-tensor src "output.weight")))
-            (list ps bs geo lays embTv onormTv projTv src base path))))
+            (list ps bs geo lays embTv onormTv projTv src base path span))))
+
+    (defn q38-ctx-span (ctx) (if (gt (len ctx) 10) (nth ctx 10) 1))
 
     (defn q38-new-state (geo)
         (kth-stream-state (nth geo 21) (nth geo 22) (nth geo 1) (nth geo 23)

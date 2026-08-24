@@ -124,7 +124,7 @@
 ; main() just sizes the stack, joins, and returns its verdict. Windows keeps the
 ; main-thread entry (its bands don't deep-recurse); POSIX gets the sized thread.
 (defn fkc-stack-launcher-text ()
-    "\n#if defined(_WIN32)\nint main(int argc, char **argv) { return fk_run(argc, argv); }\n#else\nextern char *getenv(const char *); typedef void *fk_pthread_t; typedef struct { long fk_pa_sig; char fk_pa_opaque[64]; } fk_pthread_attr_t; extern int pthread_attr_init(fk_pthread_attr_t *); extern int pthread_attr_setstacksize(fk_pthread_attr_t *, unsigned long); extern int pthread_create(fk_pthread_t *, const fk_pthread_attr_t *, void *(*)(void *), void *); extern int pthread_join(fk_pthread_t, void **); static int fk_run_argc; static char **fk_run_argv; static int fk_run_ret; static void *fk_run_thunk(void *p) { (void)p; fk_run_ret = fk_run(fk_run_argc, fk_run_argv); return 0; } int main(int argc, char **argv) { fk_run_argc = argc; fk_run_argv = argv; unsigned long mb = 256; char *e = getenv(\"FORM_KERNEL_STACK_MB\"); if (e) { int v = atoi(e); if (v > 0) { mb = (unsigned long)v; } } fk_pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, mb * 1024UL * 1024UL); fk_pthread_t th; if (pthread_create(&th, &at, fk_run_thunk, 0) != 0) { return fk_run(argc, argv); } pthread_join(th, 0); return fk_run_ret; }\n#endif\n")
+    "\n#if defined(_WIN32)\nint main(int argc, char **argv) { return fk_run(argc, argv); }\n#else\nextern char *getenv(const char *); typedef void *fk_pthread_t; typedef struct { long fk_pa_sig; char fk_pa_opaque[64]; } fk_pthread_attr_t; extern int pthread_attr_init(fk_pthread_attr_t *); extern int pthread_attr_setstacksize(fk_pthread_attr_t *, unsigned long); extern int pthread_create(fk_pthread_t *, const fk_pthread_attr_t *, void *(*)(void *), void *); extern int pthread_join(fk_pthread_t, void **); static int fk_run_argc; static char **fk_run_argv; static int fk_run_ret; static void *fk_run_thunk(void *p) { (void)p; fk_run_ret = fk_run(fk_run_argc, fk_run_argv); return 0; } static int fk_run_try(unsigned long mb) { fk_pthread_attr_t at; fk_pthread_t th; if (pthread_attr_init(&at) != 0) { return 0; } if (pthread_attr_setstacksize(&at, mb * 1024UL * 1024UL) != 0) { return 0; } if (pthread_create(&th, &at, fk_run_thunk, 0) != 0) { return 0; } pthread_join(th, 0); return 1; } int main(int argc, char **argv) { fk_run_argc = argc; fk_run_argv = argv; unsigned long mb = 4096; char *e = getenv(\"FORM_KERNEL_STACK_MB\"); if (e) { int v = atoi(e); if (v > 0) { mb = (unsigned long)v; } } while (mb >= 64) { if (fk_run_try(mb)) { return fk_run_ret; } mb = mb / 2; } return fk_run(argc, argv); }\n#endif\n")
 
 ; the value entry: walk fk_fn[0], print its result, then dump the arm-hit profile
 ; (the framebuffer/JIT observation trace). Single-shot programs read line 1.
@@ -148,42 +148,35 @@
 ; copies the baked table into fk_buf, parses it with the shared loader, then walks
 ; fk_fn[0] for effect (the form-cli REPL drives its own stdout over fd 0). `table`
 ; is the flattened program string, baked at emit time.
-; The walker recurses, and a real program walks deeper than the OS main
-; thread's 8 MB. The fkwu seed's own main already hops to an explicit
-; FORM_KERNEL_STACK_MB thread (default 256 MB) for exactly this reason, and
-; says so at its site: the bare call "died silently at ~120 recursion levels".
-; The emitted entry never received that repair. Witnessed 2026-08-23 on this
-; host: `form-cli generate` against Qwen3.8-27B answered SIGSEGV with zero
-; bytes on stdout and stderr — "Thread stack size exceeded due to excessive
-; recursion", faulting in fk_walk_slow on com.apple.main-thread. Raising the
-; process stack to the darwin ceiling (65520 KB) did not reach it; only the
-; explicit thread stack does. Same law, same conf name, here.
-;
-; The default is NOT the seed's 256 MB, and the difference is the finding. The
-; seed walks a node in one small interpreter frame; the emitted walker gives
-; every node its own C frame, and those frames are fat. Bisected on this host
-; against the same generate: 256, 1024, 2048 all die on the stack wall, 3072
-; and 4096 answer. 4096 is the default so the door opens with nothing typed —
-; a pthread stack is reserved address space, committed by touch, so the unused
-; part costs no memory. The deeper repair is a slimmer emitted frame (or a
-; trampoline), which would let this default fall back toward the seed's; that
-; is named here, not claimed.
-(defn fkc-big-stack-walk-text ()
-    (str_concat "extern int atoi(const char *);\n#if defined(_WIN32)\nstatic void fk_repl_walk_on_big_stack(void) { fk_vs[0] = 0; fk_vsp = 1; fk_walk(fk_fn[0], 0); }\n#else\n"
-    (str_concat "typedef void *fk_repl_pthread_t; typedef struct { long fk_rpa_sig; char fk_rpa_opaque[64]; } fk_repl_pthread_attr_t; extern int pthread_attr_init(fk_repl_pthread_attr_t *); extern int pthread_attr_setstacksize(fk_repl_pthread_attr_t *, unsigned long); extern int pthread_create(fk_repl_pthread_t *, const fk_repl_pthread_attr_t *, void *(*)(void *), void *); extern int pthread_join(fk_repl_pthread_t, void **); "
-    (str_concat "static void *fk_repl_thunk(void *p) { (void)p; fk_vs[0] = 0; fk_vsp = 1; fk_walk(fk_fn[0], 0); return 0; } "
-                "static void fk_repl_walk_on_big_stack(void) { unsigned long mb = 4096; char *e = getenv(\"FORM_KERNEL_STACK_MB\"); if (e) { int v = atoi(e); if (v > 0) { mb = (unsigned long)v; } } fk_repl_pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, mb * 1024UL * 1024UL); fk_repl_pthread_t th; if (pthread_create(&th, &at, fk_repl_thunk, 0) != 0) { fk_repl_thunk(0); return; } pthread_join(th, 0); }\n#endif\n"))))
-
+; THE BAKED REPL RUNS ON ITS OWN STACK, and until 2026-08-20 it did not.
+; fkc-main-universal-text (above) has carried a 256 MB pthread since the walker
+; learned it: fk_walk recurses once per node, so a real program's depth is a
+; property of the PROGRAM, not of the host's 8 MB main thread.  This arm — the
+; one that becomes form-cli — was emitting a plain `int main`, so the same cells
+; that walk fine under the source runner died here with
+; "Thread stack size exceeded due to excessive recursion" (EXC_BAD_ACCESS,
+; exit 139) the moment `generate` opened a 65-layer model.  Witnessed against
+; Qwen3.8-27B-Q8_0 on an M4 Max; the crash report named the cause outright, and
+; a shell `ulimit -s` cannot reach it because macOS fixes the main thread's stack
+; at exec (receipts/2026-08-20-the-stack-the-repl-never-had.md).
+; No knob, and no guess either. Bisected on this M4 Max against the real
+; Qwen3.8-27B open (39-cell closure, 824 KB table): 256 / 512 / 1024 / 2048 MB all
+; die, 3072 and 4096 open the model and close all 884 handles — while the
+; handwritten runtime walks the SAME cells inside its 256 MB. That ~12x ratio is
+; the emitted walker's own frames-per-node and is the open thread, not something
+; a number here settles. What the number does settle is that the body asks for
+; the largest stack the host will give it: 4096 MB, halving until pthread accepts,
+; and only then falling back to the main thread. A stack is address space
+; reserved, not memory committed, so asking large costs a host nothing it does
+; not use.
 (defn fkc-main-baked-repl-text (table)
     (str_concat "static const char fk_prog[] = \""
     (str_concat table
-    (str_concat "\"; extern const unsigned char fk_genesis[] __attribute__((weak)); extern const long long fk_genesis_len __attribute__((weak)); "
-    (str_concat (fkc-big-stack-walk-text)
-    (str_concat "int main(int argc, char **argv) { (void)argc; (void)argv; if (&fk_genesis_len) { fk_gen = fk_genesis; fk_gen_len = fk_genesis_len; } long long ci = 0; while (fk_prog[ci] != 0) { if (ci >= "
+    (str_concat "\"; extern const unsigned char fk_genesis[] __attribute__((weak)); extern const long long fk_genesis_len __attribute__((weak)); static int fk_main_body(void) { if (&fk_genesis_len) { fk_gen = fk_genesis; fk_gen_len = fk_genesis_len; } long long ci = 0; while (fk_prog[ci] != 0) { if (ci >= "
     (str_concat (int_to_str (fkc-table-image-buffer-limit))
     (str_concat ") { printf(\"fkwu: baked form table exceeds emitted buffer capacity\\n\"); return 3; } fk_buf[ci] = fk_prog[ci]; ci = ci + 1; } fk_buf_len = ci; fk_buf[ci] = 0; "
     (str_concat (fkc-main-parse-text)
-                "fk_repl_walk_on_big_stack(); return 0; }")))))))))
+                "fk_vs[0] = 0; fk_vsp = 1; fk_walk(fk_fn[0], 0); return 0; }\n#if defined(_WIN32)\nint main(int argc, char **argv) { (void)argc; (void)argv; return fk_main_body(); }\n#else\ntypedef void *fk_pthread_t; typedef struct { long fk_pa_sig; char fk_pa_opaque[64]; } fk_pthread_attr_t; extern int pthread_attr_init(fk_pthread_attr_t *); extern int pthread_attr_setstacksize(fk_pthread_attr_t *, unsigned long); extern int pthread_create(fk_pthread_t *, const fk_pthread_attr_t *, void *(*)(void *), void *); extern int pthread_join(fk_pthread_t, void **); static int fk_repl_ret; static void *fk_repl_thunk(void *p) { (void)p; fk_repl_ret = fk_main_body(); return 0; } static int fk_repl_try(unsigned long mb) { fk_pthread_attr_t at; fk_pthread_t th; if (pthread_attr_init(&at) != 0) { return 0; } if (pthread_attr_setstacksize(&at, mb * 1024UL * 1024UL) != 0) { return 0; } if (pthread_create(&th, &at, fk_repl_thunk, 0) != 0) { return 0; } pthread_join(th, 0); return 1; } int main(int argc, char **argv) { (void)argc; (void)argv; unsigned long mb = 4096; while (mb >= 64) { if (fk_repl_try(mb)) { return fk_repl_ret; } mb = mb / 2; } return fk_main_body(); }\n#endif\n")))))))
 
 (defn fkc-emit-universal ()
     (str_concat (fkc-pr-text)

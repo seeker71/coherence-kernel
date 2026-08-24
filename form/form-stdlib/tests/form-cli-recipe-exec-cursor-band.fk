@@ -1,0 +1,422 @@
+; form-cli-recipe-exec-cursor-band.fk — raw-byte stream/control witness for
+; the content-addressed recipe execution token.
+;
+; Verdict 33554431 (25 bits):
+;   1         markers and stream/resource bounds come from the frex protocol
+;   2         none/held/complete/over are four distinct scan observations
+;   4         frame slicing excludes leading and trailing model prose
+;   8         every two-chunk split point offers once and injects once
+;   16        one-byte chunks carry both marks and the whole request
+;   32        an incomplete frame remains held, bounded, and unoffered
+;   64        held timeout records timeout/cut/undo/refine/release without offer
+;   128       over-budget partial input clears and records a bounded refusal
+;   256       an over-budget complete frame never reaches the callback
+;   512       nested and malformed complete frames are refused before callback
+;   1024      prose and model-emitted observation syntax are not requests
+;   2048      trailing/repeated request bytes cannot execute the cursor twice
+;   4096      returned integer 0 is present and injected as 0
+;   8192      returned integer 1 is present and injected as 1
+;   16384     returned nothing stays distinct, absent, and typed
+;   32768     returned failure keeps failure/undo/refine/release
+;   65536     returned timeout keeps timeout/cut/undo/refine/release
+;   131072    mixed choices retain every lifecycle signal before value 0
+;   262144    model and injected byte lanes remain byte-exact and separate
+;   524288    a valid typed observation is bounded and accepted once
+;   1048576   overlong/control-shaped callback observations are not injected
+;   2097152   mismatched/model-executed callback results are refused
+;   4194304   accepted request/result/observation identities agree
+;   8388608   long prose and partial marks never outgrow their held bounds
+;   16777216  this pure witness claims no model/carrier/code execution
+;
+; The callbacks below only compose `frex-result` data. They do not run a model,
+; a native carrier, generated code, or the affine recipe.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/form-recipe-exec-token.fk
+; preludes: form-stdlib/form-cli-recipe-exec-cursor.fk
+
+(do
+    (defn frxcb-bit (condition bit) (if condition bit 0))
+    (defn frxcb-repeat (chunk n out)
+        (if (le n 0) out
+            (frxcb-repeat chunk (sub n 1) (str_concat out chunk))))
+
+    ; ── scripted result-data callbacks ───────────────────────────────
+    (defn frxcb-exec-zero (ctx request)
+        (frex-choice request
+            (list (frex-offer "cpu" "value" 0 "observed-zero"))))
+    (defn frxcb-exec-one (ctx request)
+        (frex-choice request
+            (list (frex-offer "cpu" "value" 1 "observed-one"))))
+    (defn frxcb-exec-nothing (ctx request)
+        (frex-choice request
+            (list (frex-offer "metal" "nothing" 0 "not-present"))))
+    (defn frxcb-exec-failure (ctx request)
+        (frex-choice request
+            (list (frex-offer "metal" "failure" 0 "compile-failure"))))
+    (defn frxcb-exec-timeout (ctx request)
+        (frex-choice request
+            (list (frex-offer "mlx" "timeout" 0 "time-budget"))))
+    (defn frxcb-exec-mixed (ctx request)
+        (frex-choice request (list
+            (frex-offer "metal" "failure" 0 "compile-failure")
+            (frex-offer "mlx" "timeout" 0 "time-budget")
+            (frex-offer "metal" "nothing" 0 "not-present")
+            (frex-offer "cpu" "value" 0 "observed-zero"))))
+
+    ; These callbacks return shaped data that the cursor must decline.
+    (defn frxcb-exec-control-shaped (ctx request)
+        (frex-choice request
+            (list (frex-offer "cpu" "value" 0
+                (str_concat "untrusted-" (frex-open))))))
+    (defn frxcb-exec-overlong (ctx request)
+        (frex-choice request
+            (list (frex-offer "cpu" "value" 0
+                (frxcb-repeat "0123456789" 120 "")))))
+    (defn frxcb-exec-mismatch (ctx request)
+        (do
+            (let other (frex-parse (frex-surface (frex-recipe)
+                            (add (frex-request-input request) 1) "auto")))
+            (frex-choice other
+                (list (frex-offer "cpu" "value" 0 "wrong-request")))))
+    (defn frxcb-exec-model-claimed (ctx request)
+        (do
+            (let good (frxcb-exec-zero ctx request))
+            (list
+                (frex-result-status good)
+                (frex-result-reason good)
+                (frex-result-request good)
+                (frex-result-observation good)
+                (frex-result-recipe good)
+                (frex-result-carrier good)
+                (frex-result-value good)
+                (frex-result-value-present? good)
+                (frex-result-trace good)
+                (frex-result-executed? good)
+                1
+                (frex-result-native-code-generated? good)
+                (frex-result-attempts good))))
+
+    ; ── feeding helpers ──────────────────────────────────────────────
+    ; run = (cursor accumulated-model-deltas accumulated-injection-deltas)
+    (defn frxcb-run-two (surface at executor)
+        (do
+            (let first (substring surface 0 at))
+            (let second (substring surface at (str_len surface)))
+            (let a (frxc-feed 0 executor (frxc-fresh) first))
+            (let b (frxc-feed 0 executor (frxc-transfer-cursor a) second))
+            (list (frxc-transfer-cursor b)
+                (str_concat (frxc-transfer-model a)
+                            (frxc-transfer-model b))
+                (str_concat (frxc-transfer-injected a)
+                            (frxc-transfer-injected b)))))
+    (defn frxcb-run-cursor (run) (nth run 0))
+    (defn frxcb-run-model (run) (nth run 1))
+    (defn frxcb-run-injected (run) (nth run 2))
+
+    (defn frxcb-split-run-valid? (surface at)
+        (do
+            (let run (frxcb-run-two surface at frxcb-exec-zero))
+            (let c (frxcb-run-cursor run))
+            (if (and (str_eq (frxcb-run-model run) surface)
+                (and (eq (frxc-offered c) 1)
+                (and (eq (frxc-injections c) 1)
+                (and (str_eq (frxc-scan-state c) (frxc-state-complete))
+                (and (eq (frxc-value-present? c) 1)
+                (and (eq (frxc-value c) 0)
+                     (str_eq (frxcb-run-injected run)
+                             (frxc-observation c)))))))) 1 0)))
+    (defn frxcb-every-split? (surface at)
+        (if (gt at (str_len surface)) 1
+            (if (eq (frxcb-split-run-valid? surface at) 1)
+                (frxcb-every-split? surface (add at 1)) 0)))
+
+    (defn frxcb-byte-loop (surface at cursor model injected)
+        (if (ge at (str_len surface)) (list cursor model injected)
+            (do
+                (let chunk (substring surface at (add at 1)))
+                (let x (frxc-feed 0 frxcb-exec-zero cursor chunk))
+                (frxcb-byte-loop surface (add at 1)
+                    (frxc-transfer-cursor x)
+                    (str_concat model (frxc-transfer-model x))
+                    (str_concat injected (frxc-transfer-injected x))))))
+    (defn frxcb-run-bytes (surface)
+        (frxcb-byte-loop surface 0 (frxc-fresh) "" ""))
+
+    (defn frxcb-one-feed (surface executor)
+        (do
+            (let x (frxc-feed 0 executor (frxc-fresh) surface))
+            (list (frxc-transfer-cursor x)
+                  (frxc-transfer-model x)
+                  (frxc-transfer-injected x))))
+
+    (defn frxcb-trace-all? (trace actions)
+        (if (eq (len actions) 0) 1
+            (if (eq (frex-trace-has? trace (head actions)) 1)
+                (frxcb-trace-all? trace (tail actions)) 0)))
+
+    (defn form-cli-recipe-exec-cursor-band ()
+        (do
+            (let surface (frex-surface (frex-recipe) 5 "auto"))
+            (let zero-surface (frex-surface (frex-recipe) 0 "auto"))
+            (let one-surface (frex-surface (frex-recipe) 1 "auto"))
+
+            (let every-split (frxcb-every-split? surface 0))
+            (let byte-run (frxcb-run-bytes surface))
+            (let byte-c (frxcb-run-cursor byte-run))
+
+            (let partial-text (str_concat (frex-open) "@31.2"))
+            (let partial-x
+                (frxc-feed 0 frxcb-exec-zero (frxc-fresh) partial-text))
+            (let partial-c (frxc-transfer-cursor partial-x))
+            (let timeout-x (frxc-timeout partial-c))
+            (let timeout-c (frxc-transfer-cursor timeout-x))
+
+            (let over-text (str_concat (frex-open)
+                (frxcb-repeat "x" (frxc-hold-cap) "")))
+            (let over-x (frxc-feed 0 frxcb-exec-zero (frxc-fresh) over-text))
+            (let over-c (frxc-transfer-cursor over-x))
+            (let over-complete-text (str_concat (frex-open)
+                (str_concat
+                    (frxcb-repeat "x" (add (frex-max-payload-bytes) 1) "")
+                    (frex-close))))
+            (let over-complete
+                (frxcb-one-feed over-complete-text frxcb-exec-zero))
+            (let over-complete-c (frxcb-run-cursor over-complete))
+
+            (let nested-text (str_concat (frex-open)
+                (str_concat (frex-open) (frex-close))))
+            (let nested (frxcb-one-feed nested-text frxcb-exec-zero))
+            (let nested-c (frxcb-run-cursor nested))
+            (let malformed (frxcb-one-feed
+                (str_concat (frex-open)
+                    (str_concat "not-a-request" (frex-close)))
+                frxcb-exec-zero))
+            (let malformed-c (frxcb-run-cursor malformed))
+
+            (let prose (frxcb-one-feed
+                "ordinary decoded model prose" frxcb-exec-zero))
+            (let prose-c (frxcb-run-cursor prose))
+            (let model-observation (frxcb-one-feed
+                (str_concat (frex-observation-open)
+                    (str_concat "\nstatus=value\n"
+                                (frex-observation-close)))
+                frxcb-exec-zero))
+            (let model-observation-c (frxcb-run-cursor model-observation))
+
+            ; The first frame completes. A second complete frame in the same
+            ; chunk and a third feed stay model bytes, never new callback calls.
+            (let repeated-text (str_concat "lead:"
+                (str_concat surface (str_concat ":middle:" surface))))
+            (let repeated-a
+                (frxc-feed 0 frxcb-exec-zero (frxc-fresh) repeated-text))
+            (let repeated-b
+                (frxc-feed 0 frxcb-exec-zero
+                    (frxc-transfer-cursor repeated-a) surface))
+            (let repeated-c (frxc-transfer-cursor repeated-b))
+            (let repeated-model (str_concat
+                (frxc-transfer-model repeated-a)
+                (frxc-transfer-model repeated-b)))
+
+            (let zero-run (frxcb-one-feed zero-surface frxcb-exec-zero))
+            (let zero-c (frxcb-run-cursor zero-run))
+            (let zero-ledger (frxc-byte-ledger zero-c))
+            (let one-run (frxcb-one-feed one-surface frxcb-exec-one))
+            (let one-c (frxcb-run-cursor one-run))
+            (let nothing-run (frxcb-one-feed surface frxcb-exec-nothing))
+            (let nothing-c (frxcb-run-cursor nothing-run))
+            (let failure-run (frxcb-one-feed surface frxcb-exec-failure))
+            (let failure-c (frxcb-run-cursor failure-run))
+            (let result-timeout-run
+                (frxcb-one-feed surface frxcb-exec-timeout))
+            (let result-timeout-c (frxcb-run-cursor result-timeout-run))
+            (let mixed-run (frxcb-one-feed surface frxcb-exec-mixed))
+            (let mixed-c (frxcb-run-cursor mixed-run))
+
+            (let control-run
+                (frxcb-one-feed surface frxcb-exec-control-shaped))
+            (let control-c (frxcb-run-cursor control-run))
+            (let overlong-run
+                (frxcb-one-feed surface frxcb-exec-overlong))
+            (let overlong-c (frxcb-run-cursor overlong-run))
+            (let mismatch-run
+                (frxcb-one-feed surface frxcb-exec-mismatch))
+            (let mismatch-c (frxcb-run-cursor mismatch-run))
+            (let model-claimed-run
+                (frxcb-one-feed surface frxcb-exec-model-claimed))
+            (let model-claimed-c (frxcb-run-cursor model-claimed-run))
+
+            (let lead-tail (str_concat "leading-model-bytes"
+                (str_concat surface "trailing-model-bytes")))
+            (let frame-only (frxc-frame
+                (frxc-feed-window "" lead-tail)))
+
+            (let long-prose (frxcb-repeat "abcdefghij" 100 ""))
+            (let long-x
+                (frxc-feed 0 frxcb-exec-zero (frxc-fresh) long-prose))
+            (let long-c (frxc-transfer-cursor long-x))
+
+            (sum (list
+                (frxcb-bit (and
+                    (eq (frxc-detect-cap) (sub (str_len (frex-open)) 1))
+                    (and (eq (frxc-hold-cap) (frex-max-frame-bytes))
+                    (and (eq (frxc-injection-cap) (frex-max-render-bytes))
+                         (eq (frxc-max-offers) 1)))) 1)
+                (frxcb-bit (and
+                    (str_eq (frxc-scan "ordinary") (frxc-state-none))
+                    (and (str_eq (frxc-scan (frex-open)) (frxc-state-held))
+                    (and (str_eq (frxc-scan surface) (frxc-state-complete))
+                    (and (str_eq (frxc-scan lead-tail)
+                                 (frxc-state-complete))
+                         (str_eq (frxc-scan over-complete-text)
+                                 (frxc-state-over)))))) 2)
+                (frxcb-bit (str_eq frame-only surface) 4)
+                (frxcb-bit (eq every-split 1) 8)
+                (frxcb-bit (and (str_eq (frxcb-run-model byte-run) surface)
+                    (and (eq (frxc-offered byte-c) 1)
+                    (and (eq (frxc-injections byte-c) 1)
+                         (eq (frxc-model-chunks byte-c)
+                             (str_len surface))))) 16)
+                (frxcb-bit (and
+                    (str_eq (frxc-scan-state partial-c) (frxc-state-held))
+                    (and (le (str_len (frxc-window partial-c))
+                             (frxc-hold-cap))
+                    (and (eq (frxc-offered partial-c) 0)
+                         (eq (frxc-injections partial-c) 0)))) 32)
+                (frxcb-bit (and (str_eq (frxc-terminal timeout-c) "timeout")
+                    (and (eq (frxc-offered timeout-c) 0)
+                    (and (eq (frxc-injections timeout-c) 0)
+                         (eq (frxcb-trace-all? (frxc-trace timeout-c)
+                            (list "timeout" "cut" "undo" "refine" "release"))
+                             1)))) 64)
+                (frxcb-bit (and (str_eq (frxc-scan-state over-c)
+                                        (frxc-state-over))
+                    (and (eq (str_len (frxc-window over-c)) 0)
+                    (and (eq (frxc-offered over-c) 0)
+                    (and (eq (frxc-refused over-c) 1)
+                         (eq (frxcb-trace-all? (frxc-trace over-c)
+                            (list "failure" "cut" "undo" "refine" "release"))
+                             1))))) 128)
+                (frxcb-bit (and (str_eq (frxc-terminal over-complete-c) "over")
+                    (and (eq (frxc-offered over-complete-c) 0)
+                         (eq (frxc-injections over-complete-c) 0))) 256)
+                (frxcb-bit (and (eq (frxc-offered nested-c) 0)
+                    (and (eq (frxc-refused nested-c) 1)
+                    (and (eq (frxc-offered malformed-c) 0)
+                         (eq (frxc-refused malformed-c) 1)))) 512)
+                (frxcb-bit (and (eq (frxc-offered prose-c) 0)
+                    (and (str_eq (frxc-scan-state prose-c) (frxc-state-none))
+                    (and (eq (frxc-offered model-observation-c) 0)
+                         (str_eq (frxc-scan-state model-observation-c)
+                                 (frxc-state-none))))) 1024)
+                (frxcb-bit (and (eq (frxc-offered repeated-c) 1)
+                    (and (eq (frxc-injections repeated-c) 1)
+                    (and (str_eq repeated-model
+                            (str_concat repeated-text surface))
+                         (eq (frxc-model-bytes repeated-c)
+                             (str_len repeated-model))))) 2048)
+                (frxcb-bit (and (str_eq (frxc-status zero-c) "value")
+                    (and (eq (frxc-value-present? zero-c) 1)
+                    (and (eq (frxc-value zero-c) 0)
+                         (ge (str_find (frxc-observation zero-c)
+                             "\nvalue-present=1\nvalue=0\n" 0) 0)))) 4096)
+                (frxcb-bit (and (str_eq (frxc-status one-c) "value")
+                    (and (eq (frxc-value-present? one-c) 1)
+                    (and (eq (frxc-value one-c) 1)
+                         (ge (str_find (frxc-observation one-c)
+                             "\nvalue-present=1\nvalue=1\n" 0) 0)))) 8192)
+                (frxcb-bit (and (str_eq (frxc-status nothing-c) "nothing")
+                    (and (eq (frxc-value-present? nothing-c) 0)
+                    (and (eq (frxc-injections nothing-c) 1)
+                         (ge (str_find (frxc-observation nothing-c)
+                             "\nvalue-present=0\nvalue=absent\n" 0) 0)))) 16384)
+                (frxcb-bit (and (str_eq (frxc-status failure-c) "failure")
+                    (eq (frxcb-trace-all? (frxc-trace failure-c)
+                        (list "failure" "undo" "refine" "release")) 1)) 32768)
+                (frxcb-bit (and
+                    (str_eq (frxc-status result-timeout-c) "timeout")
+                    (eq (frxcb-trace-all? (frxc-trace result-timeout-c)
+                        (list "timeout" "cut" "undo" "refine" "release"))
+                        1)) 65536)
+                (frxcb-bit (and (eq (frxc-value-present? mixed-c) 1)
+                    (and (eq (frxc-value mixed-c) 0)
+                         (eq (frxcb-trace-all? (frxc-trace mixed-c)
+                            (list "choice" "nothing" "failure" "timeout"
+                                  "cut" "undo" "refine" "crystallize"
+                                  "dissolve" "release")) 1))) 131072)
+                (frxcb-bit (and
+                    (str_eq (frxcb-run-model zero-run) zero-surface)
+                    (and (str_eq (frxcb-run-injected zero-run)
+                                 (frxc-observation zero-c))
+                    (and (str_eq (frxc-completed-request-surface zero-c)
+                                 zero-surface)
+                    (and (str_eq (frxc-prefill-observation zero-c)
+                                 (frxcb-run-injected zero-run))
+                    (and (lt (str_find (frxcb-run-model zero-run)
+                                      (frex-observation-open) 0) 0)
+                         (lt (str_find (frxcb-run-injected zero-run)
+                                      (frex-open) 0) 0)))))) 262144)
+                (frxcb-bit (and (eq (frxc-injections zero-c) 1)
+                    (and (eq (frxc-injected-bytes zero-c)
+                             (str_len (frxc-observation zero-c)))
+                    (and (le (frxc-injected-bytes zero-c)
+                             (frxc-injection-cap))
+                         (eq (frxc-observation-valid?
+                                (frxc-observation zero-c)) 1)))) 524288)
+                (frxcb-bit (and (eq (frxc-offered control-c) 1)
+                    (and (eq (frxc-injections control-c) 0)
+                    (and (eq (frxc-refused control-c) 1)
+                    (and (eq (frxc-offered overlong-c) 1)
+                         (eq (frxc-injections overlong-c) 0))))) 1048576)
+                (frxcb-bit (and (eq (frxc-offered mismatch-c) 1)
+                    (and (eq (frxc-injections mismatch-c) 0)
+                    (and (eq (frxc-refused mismatch-c) 1)
+                    (and (eq (frxc-offered model-claimed-c) 1)
+                    (and (eq (frxc-injections model-claimed-c) 0)
+                         (eq (frxc-model-executed? model-claimed-c) 0))))))
+                    2097152)
+                (frxcb-bit (and
+                    (node_eq (frex-request-token (frxc-request zero-c))
+                             (frex-result-request (frxc-result zero-c)))
+                    (and (node_eq (frex-request-recipe (frxc-request zero-c))
+                                  (frex-result-recipe (frxc-result zero-c)))
+                    (and (node_eq (frex-result-observation (frxc-result zero-c))
+                                  (frex-observation-token-with-flags
+                                    (frex-result-status (frxc-result zero-c))
+                                    (frex-result-reason (frxc-result zero-c))
+                                    (frxc-request zero-c)
+                                    (frex-result-carrier (frxc-result zero-c))
+                                    (frex-result-value (frxc-result zero-c))
+                                    (frex-result-value-present?
+                                        (frxc-result zero-c))
+                                    (frex-result-trace
+                                        (frxc-result zero-c))
+                                    (frex-result-executed?
+                                        (frxc-result zero-c))
+                                    (frex-result-model-executed?
+                                        (frxc-result zero-c))
+                                    (frex-result-native-code-generated?
+                                        (frxc-result zero-c))))
+                    (and (eq (frxc-callback-calls zero-c) 1)
+                    (and (eq (frxc-ledger-model-bytes zero-ledger)
+                             (str_len zero-surface))
+                    (and (eq (frxc-ledger-injected-bytes zero-ledger)
+                             (str_len (frxc-observation zero-c)))
+                         (eq (frxc-ledger-callback-calls zero-ledger)
+                             1))))))) 4194304)
+                (frxcb-bit (and (le (str_len (frxc-window long-c))
+                                    (frxc-detect-cap))
+                    (and (eq (frxc-model-bytes long-c) (str_len long-prose))
+                    (and (le (str_len (frxc-window partial-c))
+                             (frxc-hold-cap))
+                         (eq (frxc-model-executed? partial-c) 0)))) 8388608)
+                (frxcb-bit (and (eq (frxc-model-executed? zero-c) 0)
+                    (and (eq (frxc-callback-observed-executed? zero-c) 0)
+                    (and (eq
+                        (frxc-callback-observed-code-generated? zero-c) 0)
+                    (and (eq (frex-result-model-executed?
+                                (frxc-result zero-c)) 0)
+                         (eq (frex-result-native-code-generated?
+                                (frxc-result zero-c)) 0))))) 16777216)))))
+
+    (form-cli-recipe-exec-cursor-band))

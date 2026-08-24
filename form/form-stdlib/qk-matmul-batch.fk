@@ -191,26 +191,60 @@
     ; the per-weight inner step: decode the weight ONCE, then spend it on all eight tokens of the tile.
     ; `pfx` is q6k / q4k and `stride` is that quant's superblock byte stride as a literal — the same two
     ; parameters qml-step takes, reaching into the same two functions.
-    (defn qmb-step (pfx stride)
-        (str_concat "uint idx = r * cols + j; uint blk = idx / 256u; if (blk != curblk) { curblk = blk; b = blk * "
+    ; The 256 was a literal because the two quants this cell was written for both
+    ; use a 256-weight superblock. Q8_0 does not — its block is 32 weights in 34
+    ; bytes — so a generator that hardcodes 256 is generic over the DECODE and
+    ; not over the BLOCK, and the Qwen lane could never instantiate it. `blockn`
+    ; is now the third thing that varies, alongside pfx and stride.
+    (defn qmb-step-n (pfx stride blockn)
+        (str_concat "uint idx = r * cols + j; uint blk = idx / "
+        (str_concat blockn
+        (str_concat "u; if (blk != curblk) { curblk = blk; b = blk * "
         (str_concat stride
         (str_concat "u; inv = "
         (str_concat pfx
         (str_concat "_inv(qb, b); } float w = "
         (str_concat pfx
-                    "_wi(qb, b, int(idx - blk * 256u), inv); for (uint i = 0; i < 8u; ++i) { uint t = t0 + i; if (t < ntok) { float pr = w * float(x[t * cols + j]); acc[i] = pr + acc[i]; } } }")))))))
+        (str_concat "_wi(qb, b, int(idx - blk * "
+        (str_concat blockn
+                    "u), inv); for (uint i = 0; i < 8u; ++i) { uint t = t0 + i; if (t < ntok) { float pr = w * float(x[t * cols + j]); acc[i] = pr + acc[i]; } } }")))))))))))
+
+    ; the K-quant arity, byte-identical to what it always emitted
+    (defn qmb-step (pfx stride) (qmb-step-n pfx stride "256"))
 
     ; THE BATCHED KERNEL. One SIMD group per (row, tile of 8 tokens). Grid is rows * ceil(ntok/8) * 32
     ; and the threadgroup MUST be a multiple of 32. k counts DOWN so every accumulator keeps tb-dot's
     ; right-fold direction, which is what makes this bit-identical to the lane kernel per token.
-    (defn qmb-batch-msl (fname pfx stride)
+    (defn qmb-batch-msl-n (fname pfx stride blockn)
         (str_concat "kernel void "
         (str_concat fname
         (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ntok [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint g = gid / 32u; uint ntile = (ntok + 7u) / 8u; uint r = g / ntile; uint tile = g - r * ntile; if (r >= rows) return; uint t0 = tile * 8u; "
         (str_concat (qmb-decl)
         (str_concat "uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0) { k -= 1; uint j = lane + k * 32u; "
-        (str_concat (qmb-step pfx stride)
+        (str_concat (qmb-step-n pfx stride blockn)
                     " for (uint i = 0; i < 8u; ++i) { float s = metal::simd_sum(acc[i]); uint t = t0 + i; if (lane == 0 && t < ntok) { y[t * rows + r] = s; } } }")))))))
+
+    (defn qmb-batch-msl (fname pfx stride) (qmb-batch-msl-n fname pfx stride "256"))
+
+    ; ── Q8_0, the quant the Qwen lane actually runs ────────────────────────
+    ; The decode is read straight off q8-0-msl.fk's own lane kernel so the two
+    ; agree by construction rather than by hope: a 2-byte f16 scale at b, then 32
+    ; signed bytes. Scale per weight, exactly as q6k_wi and q4k_wi apply theirs.
+    ; Bit-exactness against the Q8_0 LANE kernel is a GPU claim and is not made
+    ; here — it is the harness's gate B2, and it needs a run.
+    (defn qmb-q80-helpers ()
+        (str_concat "static inline float2 q8_0_inv(device const uchar* qb, uint b) { "
+        (str_concat "ushort h = (ushort)qb[b] | ((ushort)qb[b + 1u] << 8); "
+        (str_concat "return float2(float(as_type<half>(h)), 0.0f); } "
+        (str_concat "static inline float q8_0_wi(device const uchar* qb, uint b, int i, float2 inv) { "
+                    "return inv.x * float((char)qb[b + 2u + (uint)i]); } ")))))
+
+    (defn qmb-q80-block () "32")
+    (defn qmb-q80-stride () "34")
+    (defn qmb-q80-batch ()
+        (str_concat (qmb-q80-helpers)
+            (qmb-batch-msl-n "form_q8_0_matmul_batch_f32" "q8_0"
+                (qmb-q80-stride) (qmb-q80-block))))
 
     (defn qmb-msl-appendix ()
         (str_concat (qmb-batch-msl "form_q6k_matmul_batch_f32" "q6k" "210")
