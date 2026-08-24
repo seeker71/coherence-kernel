@@ -6,7 +6,8 @@
 ; the linked Metal carrier JIT-compiles it for the device that answered metal_status.
 ;
 ; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-form-layer.fk form-stdlib/local-model-choice.fk form-stdlib/local-generate-organ.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-dense-token-handle.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
-; preludes: form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk form-stdlib/form-cli-heed-cursor.fk form-stdlib/form-cli-heed-telemetry.fk form-stdlib/form-cli-heed-grounded.fk
+; preludes: form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk form-stdlib/form-cli-heed-cursor.fk form-stdlib/form-cli-heed-telemetry.fk
+; preludes: form-stdlib/form-cli-heed-current-source.fk form-stdlib/form-cli-heed-grounded.fk
 
 (do
     (defn fcmg-src (path) (eqr-of-file path 0 40000000))
@@ -136,7 +137,10 @@
             (let effective-gbps-x10
                 (if (gt busy-us 0)
                     (div (mul (mul weight-bytes forwards) 10) (mul busy-us 1000)) 0))
-            (let decode-forwards (if (gt (len out) thought-n) (sub (sub (len out) thought-n) 1) 0))
+            (let decode-forwards
+                (add (add (if (gt (len out) thought-n) (sub (sub (len out) thought-n) 1) 0)
+                          (fhc-injected heed))
+                     (add (fhc-close-commits heed) (fhc-terminal-forwards heed))))
             (let prefill-tokps-x1000
                 (if (gt prefill-us 0) (div (mul (add (len ids) thought-n) 1000000000) prefill-us) 0))
             (let decode-tokps-x1000
@@ -167,7 +171,8 @@
                 (int_to_str effective-gbps-x10))
             (str_concat (fcmg-line "end_to_end_tokps_x1000"
                 (int_to_str end-to-end-tokps-x1000))
-                            (str_concat "text:\n" text))))))))))))))))))))))))
+            (str_concat (fcmg-heed-report heed)
+                        (str_concat "text:\n" text)))))))))))))))))))))))))
 
     ; ── residence ─────────────────────────────────────────────────────────────
     ; A model admitted once should not be admitted again to answer a second
@@ -255,20 +260,29 @@
     ; only the model's final resident decode: decoded ids stream through one
     ; bounded cursor, a complete query may spend one current-source lookup, and
     ; the typed observation re-enters through incremental prefill.
+    ; The resident current-source cursor and the experimental prefill carrier
+    ; share one context. Source identity and carrier chunk are separate fields:
+    ; neither is smuggled through model prose or collapsed into the other.
+    (defn fcmg-heed-ctx-full
+        (ps bs geo lays sts embTv onormTv projTv src source-hint chunk)
+        (list ps bs geo lays sts embTv onormTv projTv src source-hint chunk))
     (defn fcmg-heed-ctx (ps bs geo lays sts embTv onormTv projTv src)
-        (list ps bs geo lays sts embTv onormTv projTv src))
+        (fcmg-heed-ctx-full ps bs geo lays sts embTv onormTv projTv src "" 1))
     (defn fcmg-heed-ctx-hinted
         (ps bs geo lays sts embTv onormTv projTv src source-hint)
-        (append (fcmg-heed-ctx ps bs geo lays sts embTv onormTv projTv src)
-                (list source-hint)))
+        (fcmg-heed-ctx-full ps bs geo lays sts embTv onormTv projTv
+            src source-hint 1))
     (defn fcmg-heed-source-hint (ctx)
         (if (gt (len ctx) 9) (nth ctx 9) ""))
+    (defn fcmg-heed-chunk (ctx)
+        (if (gt (len ctx) 10) (nth ctx 10) 1))
     (defn fcmg-heed-step (ctx id pos)
         (q38-forward (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
             (nth ctx 4) (nth ctx 5) (nth ctx 6) (nth ctx 7) id pos))
     (defn fcmg-heed-prefill (ctx ids pos)
-        (q38-prefill (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
-            (nth ctx 4) (nth ctx 5) (nth ctx 6) (nth ctx 7) ids pos))
+        (q38-prefill-chunked (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
+            (nth ctx 4) (nth ctx 5) (nth ctx 6) (nth ctx 7) ids pos
+            (fcmg-heed-chunk ctx)))
     (defn fcmg-heed-decode (ctx ids) (tkz-decode-text (nth ctx 8) ids))
     ; The cursor stays model-neutral; this encoder owns Qwen's role grammar.
     ; Raw observation bytes appended inside the assistant turn made the live
@@ -427,7 +441,10 @@
         (do
             (let pf (q38-prefill (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
                                  (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0))
-            (fhc-run-seeded (fcmg-heed-ctx ctx sts src 1)
+            (let hctx (fcmg-heed-ctx
+                (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                (nth ctx 4) (nth ctx 5) (nth ctx 6) src))
+            (fhc-run-seeded hctx
                 fcmg-heed-step fcmg-heed-prefill fcmg-heed-decode fcmg-heed-encode
                 lookupf local-ready
                 (nth pf 0) (nth pf 1) n stops budget)))
@@ -443,10 +460,13 @@
             (fcmg-heed-names (tail xs)
                 (str_concat acc (str_concat (if (str_eq acc "") "" ",") (head xs))))))
 
-    ; BOUNDED, NON-CONTENT. A held-out run that prints the model's reply has
-    ; stopped being held out, so the reply crosses as a SHA-256 and a byte count
-    ; (form-cli-heed-telemetry.fk). Reading the text is a separate, named act.
-    (defn fcmg-heed-report (src r)
+    ; Standalone live-witness printer. Kept distinct from fcmg-heed-report(c),
+    ; which returns the structured current-source fields embedded in the normal
+    ; generation report. Sharing the name made the two-argument printer shadow
+    ; the one-argument reporter and collapsed an otherwise valid run to -1. It
+    ; remains bounded and non-content: the held-out reply crosses only as the
+    ; SHA-256 and byte count emitted by form-cli-heed-telemetry.fk.
+    (defn fcmg-heed-witness-report (src r)
         (do
             (let c (fhc-cursor-of r))
             (fcmg-heed-int "model-tokens" (len (fhc-out r)))
@@ -457,14 +477,11 @@
 
     (defn fcmg-heed-report-with-content (src r)
         (do
-            (fcmg-heed-report src r)
+            (fcmg-heed-witness-report src r)
             (fcmg-heed-line "output-content-NOT-HELD-OUT"
                 (tkz-decode-text src (fhc-out r)))
             0))
 
-    ; ── where the time goes ───────────────────────────────────────────────
-    ; Wall clock at each stage boundary plus the Metal counter, so the turn can
-    ; be read as seal / open / decode rather than argued about from a total.
     (defn fcmg-heed-witness-with (path prompt query reserve lookupf chunk)
         (do
             (let t-enter (now_unix_ms))
@@ -520,7 +537,7 @@
                                             (let t-done (now_unix_ms))
                                             (let gpu-done
                                                 (mbw-status-int (metal_status) "gpu_busy_us_total"))
-                                            (fcmg-heed-report src r)
+                                            (fcmg-heed-witness-report src r)
                                             (fcmg-heed-int "ms-seal" (sub t-sealed t-enter))
                                             (fcmg-heed-int "ms-header-read" (sub t-pre-open t-sealed))
                                             (fcmg-heed-int "ms-open" (sub t-opened t-pre-open))
@@ -595,14 +612,18 @@
                     (let decode-us (sub
                         (mbw-status-int after-status "gpu_busy_us_total")
                         (mbw-status-int prefill-status "gpu_busy_us_total")))
-                    (let forwards (add (add (len ids) thought-n)
-                        (if (gt (add model-extra (len model-tail)) 0)
-                            (sub (add model-extra (len model-tail)) 1) 0)))
+                    (let forwards (add
+                        (add (add (len ids) thought-n)
+                            (if (gt (add model-extra (len model-tail)) 0)
+                                (sub (add model-extra (len model-tail)) 1) 0))
+                        (add (fhc-injected heed)
+                            (add (fhc-close-commits heed)
+                                 (fhc-terminal-forwards heed)))))
                     (let weight-bytes (q38-forward-weight-bytes ctx))
                     (fcmg-state-close-result sts
                         (fcmg-report model arch ids out (tkz-decode-text src out)
                             thought-eval offers thought-n
-                            forwards busy-us prefill-us decode-us weight-bytes))))))
+                            forwards busy-us prefill-us decode-us weight-bytes heed))))))
 
     ; Compatibility: every existing caller remains on the fungible tail.
     (defn fcmg-run-context (src arch model ids thought-lists thought-eval ctx n gap-n)
@@ -624,6 +645,14 @@
                 (tkz-cat (q35-encode src "\n")
                          (q35-chat-ids src prompt)))))))
             (q35-chat-ids src prompt)))
+
+    ; Knowledge-query profile: the compact fqt prompt already carries the exact
+    ; execution grammar, so do not replay the large general system glossary.
+    ; The ordinary form-cli generation door remains byte-identical on `full`.
+    (defn fcmg-chat-ids-profile (src prompt profile)
+        (if (str_eq profile "knowledge-query")
+            (q35-chat-ids src prompt)
+            (fcmg-chat-ids src prompt)))
 
     ; A first admission: the seal is verified before a single byte of the file is
     ; read for meaning, exactly as before.  What changed is only what is answered —
@@ -666,7 +695,7 @@
                 (let thought-eval (lg-values-line thoughts))
                 (let thought-n (fcmg-id-count thought-lists 0))
                 (let gap-n (if (gt (len thoughts) 1) (lg-gap-default) 0))
-                (let ids (fcmg-chat-ids src prompt))
+                (let ids (fcmg-chat-ids-profile src prompt profile))
                 (let arch (fcmg-arch src))
                 (let model (fcmg-name src))
                 (let model-max (gmt-u32 src (q38-key arch "context_length")))
@@ -751,7 +780,7 @@
                     (let thought-eval (lg-values-line thoughts))
                     (let thought-n (fcmg-id-count thought-lists 0))
                     (let gap-n (if (gt (len thoughts) 1) (lg-gap-default) 0))
-                    (let ids (fcmg-chat-ids src prompt))
+                    (let ids (fcmg-chat-ids-profile src prompt profile))
                     (let model-max (gmt-u32 src (q38-key arch "context_length")))
                     (let need (fcmg-context-need (len ids) thought-n
                         (mul gap-n (if (gt (len thoughts) 1)
@@ -873,5 +902,4 @@
         (fcmg-heed-witness-with path prompt query reserve fhg-lookup 0))
     (defn fcmg-heed-witness-grounded-chunk (path prompt query reserve chunk)
         (fcmg-heed-witness-with path prompt query reserve fhg-lookup chunk))
-
     0)
