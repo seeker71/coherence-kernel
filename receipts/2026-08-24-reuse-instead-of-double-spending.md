@@ -99,3 +99,13 @@ fear, is what made the first attempt the only attempt.
 ; witnessed: 2026-08-24 -> total 159308 ms vs 595608, turn2 10373 ms vs
 ; 449177, continue_at_pos=269, new_tokens=29 reused_ids=46 delta=43,
 ; S1=1 S2=1 S3=corrected_verdict=1 S4=1, both turns choice=3 cut=2 undo=1
+
+## AMENDED 2026-08-24 (sibling correction 0e3e58b6)
+
+The turn timings here were measured through the out-of-radius cooperative
+RMS (sq[4096] scratch at width 5120) — execution evidence, since the live
+answers matched, but not defined correctness. The reuse ratios (43x on
+turn 2, 3.7x whole) are ratios of like against like and stand; the
+absolute per-turn seconds will read slower under the bounded serial RMS
+until the width-independent cooperative kernel lands.
+
