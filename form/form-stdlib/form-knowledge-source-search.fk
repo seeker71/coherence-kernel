@@ -1,0 +1,257 @@
+; form-knowledge-source-search.fk — current-body retrieval over the live source
+; tree, through bounded byte windows rather than a tokenizer or flattened index.
+;
+; The model supplies already-parsed query atoms.  Parsing the heedmark stream is
+; a grammar concern and lives above this cell.  This cell never tokenizes source:
+; it walks the current body with source_inventory, searches each eligible source
+; through 4096-byte windows, overlaps windows by the atom length so a match split
+; at any boundary is still visible, and returns only one bounded source span.
+;
+; Identity is honest and deliberately separate from nodeid-rag-v2.  A selected
+; source is a source artifact, not a registered substrate REF.  Its SHA-256 is
+; folded window by window in Form and named `sha256:<hex>`; no REF or CTOR is
+; fabricated.  nodeid-rag-v2 remains the stronger grounded lane when it hits.
+;
+; Query cost is proportional to the current eligible source bytes times the
+; small number of query atoms.  That is the truthful no-index floor.  A Form-
+; native CPU/GPU/Metal/MLX JIT may accelerate the same window law without
+; changing its result.  No preflattened ops table is a dependency.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/form-fs.fk form-stdlib/file-byte-window.fk form-stdlib/sha256.fk form-stdlib/hex.fk
+;
+; Proven by: form-stdlib/tests/form-knowledge-source-search-band.fk
+
+(do
+    (defn fkss-schema () "source-artifact-stream-v1")
+    (defn fkss-route () "source_inventory+bounded-byte-window+form-sha256-stream")
+    (defn fkss-window-size () (fbw-max-window))
+    (defn fkss-answer-limit () 768)
+    (defn fkss-max-query-atom () 128)
+
+    (defn fkss-skip-dirs ()
+        (list ".git" ".coherence-network" ".cache" "node_modules" "target"
+              "dist" "build" "models" ".venv" "__pycache__"))
+
+    (defn fkss-knowledge-extension? (path)
+        (do
+            (let ext (fs-path-extension path))
+            (if (or (str_eq ext ".fk")
+                (or (str_eq ext ".bml")
+                (or (str_eq ext ".form")
+                (or (str_eq ext ".grammar")
+                (or (str_eq ext ".bmf")
+                    (str_eq ext ".md")))))) 1 0)))
+
+    (defn fkss-lower-byte (b)
+        (if (and (ge b 65) (le b 90)) (add b 32) b))
+
+    ; Case-insensitive ASCII byte comparison.  UTF-8 bytes compare exactly.
+    (defn fkss-match-at-loop (hay needle hi ni)
+        (if (ge ni (str_len needle)) 1
+            (if (ge hi (str_len hay)) 0
+                (if (eq (fkss-lower-byte (str_byte_at hay hi))
+                        (fkss-lower-byte (str_byte_at needle ni)))
+                    (fkss-match-at-loop hay needle (add hi 1) (add ni 1))
+                    0))))
+    (defn fkss-match-at? (hay needle at)
+        (if (or (lt at 0) (eq (str_len needle) 0)) 0
+            (fkss-match-at-loop hay needle at 0)))
+    (defn fkss-find-ci-loop (hay needle at)
+        (if (gt (add at (str_len needle)) (str_len hay)) -1
+            (if (eq (fkss-match-at? hay needle at) 1) at
+                (fkss-find-ci-loop hay needle (add at 1)))))
+    (defn fkss-find-ci (hay needle)
+        (if (eq (str_len needle) 0) -1 (fkss-find-ci-loop hay needle 0)))
+
+    (defn fkss-min (a b) (if (lt a b) a b))
+    (defn fkss-max (a b) (if (gt a b) a b))
+    (defn fkss-window-overlap (atom)
+        (fkss-min (sub (fkss-window-size) 1)
+            (fkss-max 0 (sub (str_len atom) 1))))
+    (defn fkss-window-step (atom)
+        (sub (fkss-window-size) (fkss-window-overlap atom)))
+
+    ; Find one atom in one file without materializing the file.  A short final
+    ; window closes the scan; overlap makes every cross-boundary start visible.
+    (defn fkss-find-file-loop (path atom offset)
+        (do
+            (let window (fbw-read-window path offset (fkss-window-size)))
+            (let observed (fbw-window-observed-len window))
+            (let local (fkss-find-ci (fbw-window-slice window) atom))
+            (if (ge local 0) (add offset local)
+                (if (lt observed (fkss-window-size)) -1
+                    (fkss-find-file-loop path atom
+                        (add offset (fkss-window-step atom)))))))
+    (defn fkss-find-file (path atom)
+        (if (or (eq (str_len atom) 0)
+                (gt (str_len atom) (fkss-max-query-atom))) -1
+            (fkss-find-file-loop path atom 0)))
+
+    ; observation = (matched-atom-count first-match-offset)
+    (defn fkss-observe-atoms-loop (path atoms matched first)
+        (if (nil? atoms) (list matched first)
+            (do
+                (let at (fkss-find-file path (head atoms)))
+                (fkss-observe-atoms-loop path (tail atoms)
+                    (add matched (if (ge at 0) 1 0))
+                    (if (and (lt first 0) (ge at 0)) at first)))))
+    (defn fkss-observe-atoms (path atoms)
+        (fkss-observe-atoms-loop path atoms 0 -1))
+
+    (defn fkss-query-valid-loop (atoms)
+        (if (nil? atoms) 1
+            (if (or (eq (str_len (head atoms)) 0)
+                    (gt (str_len (head atoms)) (fkss-max-query-atom))) 0
+                (fkss-query-valid-loop (tail atoms)))))
+    (defn fkss-query-valid? (atoms)
+        (if (nil? atoms) 0 (fkss-query-valid-loop atoms)))
+
+    ; candidate = (relative-path full-path matched first-offset size)
+    (defn fkss-candidate (relative full matched first size)
+        (list relative full matched first size))
+    (defn fkss-candidate-relative (c) (nth c 0))
+    (defn fkss-candidate-full (c) (nth c 1))
+    (defn fkss-candidate-matched (c) (nth c 2))
+    (defn fkss-candidate-first (c) (nth c 3))
+    (defn fkss-candidate-size (c) (nth c 4))
+    (defn fkss-empty-candidate () (fkss-candidate "" "" 0 -1 -1))
+
+    (defn fkss-str-less-loop (a b i n)
+        (if (ge i n) (if (lt (str_len a) (str_len b)) 1 0)
+            (do
+                (let aa (str_byte_at a i))
+                (let bb (str_byte_at b i))
+                (if (lt aa bb) 1
+                    (if (gt aa bb) 0
+                        (fkss-str-less-loop a b (add i 1) n))))))
+    (defn fkss-str-less? (a b)
+        (fkss-str-less-loop a b 0 (fkss-min (str_len a) (str_len b))))
+
+    ; More matched atoms wins.  Equal evidence prefers the smaller source,
+    ; then lexical path order, so filesystem traversal order cannot choose truth.
+    (defn fkss-candidate-better? (candidate best)
+        (if (gt (fkss-candidate-matched candidate)
+                (fkss-candidate-matched best)) 1
+            (if (lt (fkss-candidate-matched candidate)
+                    (fkss-candidate-matched best)) 0
+                (if (or (lt (fkss-candidate-size best) 0)
+                        (lt (fkss-candidate-size candidate)
+                            (fkss-candidate-size best))) 1
+                    (if (gt (fkss-candidate-size candidate)
+                            (fkss-candidate-size best)) 0
+                        (fkss-str-less? (fkss-candidate-relative candidate)
+                                        (fkss-candidate-relative best)))))))
+
+    ; scan = (best inventory-count eligible-count accessible-count)
+    (defn fkss-scan (best inventory eligible accessible)
+        (list best inventory eligible accessible))
+    (defn fkss-scan-best (s) (nth s 0))
+    (defn fkss-scan-inventory (s) (nth s 1))
+    (defn fkss-scan-eligible (s) (nth s 2))
+    (defn fkss-scan-accessible (s) (nth s 3))
+
+    (defn fkss-search-rows-loop (root rows atoms best inventory eligible accessible)
+        (if (nil? rows) (fkss-scan best inventory eligible accessible)
+            (do
+                (let relative (nth (head rows) 0))
+                (let full (fs-path-join root relative))
+                (let is-source (fkss-knowledge-extension? relative))
+                (if (eq is-source 0)
+                    (fkss-search-rows-loop root (tail rows) atoms best
+                        (add inventory 1) eligible accessible)
+                    (do
+                        (let size (fs-stat-size full))
+                        (let can-read (if (ge size 0) 1 0))
+                        (let observed (if (eq can-read 1)
+                            (fkss-observe-atoms full atoms) (list 0 -1)))
+                        (let candidate (fkss-candidate relative full
+                            (nth observed 0) (nth observed 1) size))
+                        (let next-best (if (and (gt (nth observed 0) 0)
+                                (eq (fkss-candidate-better? candidate best) 1))
+                            candidate best))
+                        (fkss-search-rows-loop root (tail rows) atoms next-best
+                            (add inventory 1) (add eligible 1)
+                            (add accessible can-read)))))))
+    (defn fkss-search-rows (root rows atoms)
+        (fkss-search-rows-loop root rows atoms (fkss-empty-candidate) 0 0 0))
+
+    ; Fold SHA-256 directly over bounded source slices.  The partial state is
+    ; at most 63 bytes; the current file is never converted to a byte list.
+    (defn fkss-hash-file-loop (path offset state)
+        (do
+            (let window (fbw-read-window path offset (fkss-window-size)))
+            (let observed (fbw-window-observed-len window))
+            (let next (sha256-stream-fold-string-from state
+                (fbw-window-slice window)))
+            (if (lt observed (fkss-window-size))
+                (sha256-stream-finalize next)
+                (fkss-hash-file-loop path (add offset observed) next))))
+    (defn fkss-source-id (path)
+        (str_concat "sha256:"
+            (hex-encode (fkss-hash-file-loop path 0 (sha256-stream-initial)))))
+
+    (defn fkss-answer-start (first size)
+        (fkss-min size (fkss-max 0 (sub first 128))))
+    (defn fkss-answer-for (candidate)
+        (do
+            (let start (fkss-answer-start (fkss-candidate-first candidate)
+                (fkss-candidate-size candidate)))
+            (fs-read-slice (fkss-candidate-full candidate) start
+                (fkss-min (fkss-answer-limit)
+                    (sub (fkss-candidate-size candidate) start)))))
+
+    ; result = (kind status reason schema source-id source-path matched first
+    ;           answer inventory eligible accessible coverage-percent route
+    ;           model-executed source-size answer-start)
+    (defn fkss-result (status reason source-id source-path matched first answer
+                       inventory eligible accessible source-size answer-start)
+        (list "form-knowledge-source-search-v1" status reason (fkss-schema)
+              source-id source-path matched first answer inventory eligible
+              accessible (if (le eligible 0) 0 (div (mul accessible 100) eligible))
+              (fkss-route) 0 source-size answer-start))
+    (defn fkss-status (r) (nth r 1))
+    (defn fkss-reason (r) (nth r 2))
+    (defn fkss-source-id-of (r) (nth r 4))
+    (defn fkss-source-path (r) (nth r 5))
+    (defn fkss-matched (r) (nth r 6))
+    (defn fkss-first-offset (r) (nth r 7))
+    (defn fkss-answer (r) (nth r 8))
+    (defn fkss-inventory-count (r) (nth r 9))
+    (defn fkss-eligible-count (r) (nth r 10))
+    (defn fkss-accessible-count (r) (nth r 11))
+    (defn fkss-coverage-percent (r) (nth r 12))
+    (defn fkss-result-route (r) (nth r 13))
+    (defn fkss-model-executed (r) (nth r 14))
+    (defn fkss-source-size (r) (nth r 15))
+    (defn fkss-result-answer-start (r) (nth r 16))
+    (defn fkss-answer-cut? (r)
+        (if (not (str_eq (fkss-status r) "hit")) 0
+            (if (or (gt (fkss-result-answer-start r) 0)
+                    (lt (add (fkss-result-answer-start r)
+                             (str_len (fkss-answer r)))
+                        (fkss-source-size r))) 1 0)))
+
+    (defn fkss-search-at (root atoms)
+        (if (eq (fkss-query-valid? atoms) 0)
+            (fkss-result "nothing" "invalid-query-atoms" "" "" 0 -1 ""
+                0 0 0 -1 0)
+            (do
+                (let rows (source_inventory root "" (fkss-skip-dirs)))
+                (let scan (fkss-search-rows root rows atoms))
+                (let best (fkss-scan-best scan))
+                (if (le (fkss-candidate-matched best) 0)
+                    (fkss-result "miss" "no-current-source-match" "" "" 0 -1 ""
+                        (fkss-scan-inventory scan) (fkss-scan-eligible scan)
+                        (fkss-scan-accessible scan) -1 0)
+                    (fkss-result "hit" "current-source-match"
+                        (fkss-source-id (fkss-candidate-full best))
+                        (fkss-candidate-relative best)
+                        (fkss-candidate-matched best)
+                        (fkss-candidate-first best)
+                        (fkss-answer-for best)
+                        (fkss-scan-inventory scan) (fkss-scan-eligible scan)
+                        (fkss-scan-accessible scan)
+                        (fkss-candidate-size best)
+                        (fkss-answer-start (fkss-candidate-first best)
+                                           (fkss-candidate-size best)))))))
+    0)
