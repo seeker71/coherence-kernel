@@ -1,0 +1,58 @@
+; matvec-shape-probe.fk — the same wide Q8 matvec kernel, isolated, at the two
+; shapes a forward actually runs: a layer tensor and the vocab head. The decode
+; counters say a forward's head half (one 1.35 GB matvec + argmax) costs 66 ms
+; of GPU — ~20 GB/s on the largest tensor in the file — while the state half
+; runs at 231 GB/s. One of those numbers is lying about the kernel; this cell
+; asks the kernel alone, one dispatch per command buffer, eight passes.
+;
+; preludes: native/metal/qwen35-dense-token-handle.fk
+
+(do
+    (defn msp-status-int (status name)
+        (do (let key (str_concat name "="))
+            (let at (str_find status key 0))
+            (if (lt at 0) -1
+                (do (let start (add at (str_len key)))
+                    (let stop (str_find status "\n" start))
+                    (if (lt stop 0) -1 (str_to_int (substring status start stop)))))))
+    (defn msp-mv-loop (ps tv xh yh rem)
+        (if (le rem 0) 0
+            (do (let one (metal_enqueue (nth ps 29)
+                    (md-bind16 (list (kth-tv-h tv) xh yh)
+                               (list (kth-tv-r tv) (kth-tv-c tv)) 256 0 1 0)
+                    (div (add (kth-tv-r tv) 1) 2)))
+                (let sy (metal_sync))
+                (msp-mv-loop ps tv xh yh (sub rem 1)))))
+    (defn msp-one (label ps tv passes)
+        (do (let r (kth-tv-r tv))
+            (let c (kth-tv-c tv))
+            (let xh (metal_buf_alloc (mul c 4)))
+            (let yh (metal_buf_alloc (mul r 4)))
+            (let warm (msp-mv-loop ps tv xh yh 1))
+            (let before (metal_status))
+            (let t0 (now_unix_ms))
+            (let ran (msp-mv-loop ps tv xh yh passes))
+            (let t1 (now_unix_ms))
+            (let after (metal_status))
+            (let us (sub (msp-status-int after "gpu_busy_us_total")
+                         (msp-status-int before "gpu_busy_us_total")))
+            (let bytes (mul (mul r (div c 32)) 34))
+            (do (print label)
+                (print (str_concat "  rows=" (int_to_str r)))
+                (print (str_concat " cols=" (int_to_str c)))
+                (print (str_concat " bytes_per_pass=" (int_to_str bytes)))
+                (print (str_concat " passes=" (int_to_str passes)))
+                (print (str_concat " gpu_us=" (int_to_str us)))
+                (print (str_concat " wall_ms=" (int_to_str (sub t1 t0))))
+                (print (str_concat " gbps_x10=" (int_to_str
+                    (if (gt us 0) (div (mul (mul bytes passes) 10) (mul us 1000)) 0))))
+                (print "\n") 0)))
+    (let st (q38-open "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf" 256))
+    (let ps (nth st 0))
+    (let lays (nth st 3))
+    (let projTv (nth st 6))
+    (let l0 (head lays))
+    (let a (msp-one "layer ffn_gate " ps (nth l0 2) 8))
+    (let b (msp-one "layer ffn_down " ps (nth l0 4) 8))
+    (let c2 (msp-one "vocab head     " ps projTv 8))
+    0)

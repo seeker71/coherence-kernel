@@ -1,0 +1,48 @@
+; serial-chain-probe.fk — the real layer matvec, 64 in one command buffer, twice:
+; barrier=1 (a layer stack's true shape — each waits on the last) and barrier=0
+; (free overlap). The difference is the price of seriality itself at layer size,
+; which no per-kernel or per-barrier number can show.
+;
+; preludes: native/metal/qwen35-dense-token-handle.fk
+
+(do
+    (defn scp-status-int (status name)
+        (do (let key (str_concat name "="))
+            (let at (str_find status key 0))
+            (if (lt at 0) -1
+                (do (let start (add at (str_len key)))
+                    (let stop (str_find status "\n" start))
+                    (if (lt stop 0) -1 (str_to_int (substring status start stop)))))))
+    (defn scp-gpu () (scp-status-int (metal_status) "gpu_busy_us_total"))
+    (defn scp-loop (ps tv xh yh rem barrier)
+        (if (le rem 0) 0
+            (do (let one (metal_enqueue (nth ps 29)
+                    (md-bind16 (list (kth-tv-h tv) xh yh)
+                               (list (kth-tv-r tv) (kth-tv-c tv)) 256 0 1 barrier)
+                    (div (add (kth-tv-r tv) 1) 2)))
+                (scp-loop ps tv xh yh (sub rem 1) barrier))))
+    (defn scp-run (label ps tv xh yh n barrier)
+        (do (let arm (metal_batch_concurrent))
+            (let g0 (scp-gpu))
+            (let arm2 (metal_batch_concurrent))
+            (let ran (scp-loop ps tv xh yh n barrier))
+            (let sy (metal_sync))
+            (let g1 (scp-gpu))
+            (let us (sub g1 g0))
+            (let bytes (mul (mul (mul (kth-tv-r tv) (div (kth-tv-c tv) 32)) 34) n))
+            (do (print label)
+                (print (str_concat " n=" (int_to_str n)))
+                (print (str_concat " gpu_us=" (int_to_str us)))
+                (print (str_concat " gbps_x10=" (int_to_str (if (gt us 0) (div (mul bytes 10) (mul us 1000)) 0))))
+                (print "\n") 0)))
+    (let st (q38-open "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf" 256))
+    (let ps (nth st 0)) (let lays (nth st 3))
+    (let tv (nth (head lays) 2))
+    (let xh (metal_buf_alloc (mul (kth-tv-c tv) 4)))
+    (let yh (metal_buf_alloc (mul (kth-tv-r tv) 4)))
+    (let warm (scp-run "warm            " ps tv xh yh 4 0))
+    (let a (scp-run "chain barrier=0 " ps tv xh yh 64 0))
+    (let b (scp-run "chain barrier=1 " ps tv xh yh 64 1))
+    (let c (scp-run "chain barrier=0 " ps tv xh yh 64 0))
+    (let d (scp-run "chain barrier=1 " ps tv xh yh 64 1))
+    0)

@@ -1,0 +1,43 @@
+; barrier-cost-probe.fk — what one memoryBarrierWithScope costs inside a
+; concurrent command buffer, priced against the identical chain without it.
+; A forward is ~1300 dispatches with dependency barriers; if a barrier drains
+; the pipe, the drain is bought ~N times per token and never shows in any
+; per-kernel number.
+;
+; preludes: form-stdlib/core.fk form-stdlib/metal-door.fk
+
+(do
+    (defn bar-msl ()
+        "#include <metal_stdlib>\nusing namespace metal; kernel void form_tiny_touch2(device uint* d [[buffer(0)]], constant uint& n [[buffer(1)]], uint i [[thread_position_in_grid]]) { if (i < n) d[i] = d[i] + 1u; }")
+    (defn bar-status-int (status name)
+        (do (let key (str_concat name "="))
+            (let at (str_find status key 0))
+            (if (lt at 0) -1
+                (do (let start (add at (str_len key)))
+                    (let stop (str_find status "\n" start))
+                    (if (lt stop 0) -1 (str_to_int (substring status start stop)))))))
+    (defn bar-gpu () (bar-status-int (metal_status) "gpu_busy_us_total"))
+    (defn bar-loop (p d rem barrier)
+        (if (le rem 0) 0
+            (do (let one (metal_enqueue p (md-bind16 (list d) (list 256) 256 0 0 barrier) 256))
+                (bar-loop p d (sub rem 1) barrier))))
+    (defn bar-run (label p d n barrier)
+        (do (let arm (metal_batch_concurrent))
+            (let w (metal_enqueue p (md-bind16 (list d) (list 256) 256 0 0 0) 256))
+            (let g0 (bar-gpu))
+            (let arm2 (metal_batch_concurrent))
+            (let ran (bar-loop p d n barrier))
+            (let sy (metal_sync))
+            (let g1 (bar-gpu))
+            (do (print label)
+                (print (str_concat " n=" (int_to_str n)))
+                (print (str_concat " gpu_us=" (int_to_str (sub g1 g0))))
+                (print (str_concat " us_per_dispatch_x10=" (int_to_str (div (mul (sub g1 g0) 10) n))))
+                (print "\n") 0)))
+    (let d (metal_buf_alloc 4096))
+    (let p (metal_pipeline (bar-msl) "form_tiny_touch2"))
+    (let a (bar-run "chain barrier=0" p d 1000 0))
+    (let b (bar-run "chain barrier=1" p d 1000 1))
+    (let c (bar-run "chain barrier=0" p d 1000 0))
+    (let e (bar-run "chain barrier=1" p d 1000 1))
+    0)
