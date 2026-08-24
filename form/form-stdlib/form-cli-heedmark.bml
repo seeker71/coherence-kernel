@@ -33,6 +33,10 @@ section [form.bml] {
         field MaxQueryBytes = 256;
         field MaxHeeds = 2;
         field LookupLateMs = 2000;
+        field QueryBudget = 48;
+        field AnswerReserve = 32;
+        field PhaseQuery = 1;
+        field PhaseAnswer = 2;
         field LogitsExecuted = 0;
         field OutHit = 1;
         field OutMiss = 2;
@@ -138,6 +142,58 @@ section [form.bml] {
 
         def fhm-best-of(fs, best, bestv) = if eq(len(fs), 0) then best else if gt(fhm-framing-score(head(fs)), bestv) then fhm-best-of(tail(fs), head(fs), fhm-framing-score(head(fs))) else fhm-best-of(tail(fs), best, bestv);
         def fhm-best-framing() = fhm-best-of(fhm-framings(), "", 0);
+
+        // ── the two-phase ledger ───────────────────────────────────────────
+        // ONE fungible step budget is the defect. If a valid query closes on the
+        // last slot, the observation is injected and the model has nothing left
+        // to answer with — the scorer reads an empty answer and calls it a miss
+        // the model never made. Verbosity in the query silently eats the answer.
+        //
+        // Two ledgers, and the second is NON-BORROWABLE. QueryBudget spends
+        // while the model composes its query. AnswerReserve is untouchable until
+        // a typed hit or miss observation has ACTUALLY been injected; then it
+        // opens at full size, whatever is left of the query budget is CUT rather
+        // than carried, and the answer is written from a reserve query verbosity
+        // could never have reached.
+        //
+        // Running out of query budget while still holding an unclosed frame is
+        // NOT exhaustion. It is a named observation — the decode timed out and
+        // the answer alternative was never tried. Those are different facts and
+        // a scorer that cannot tell them apart is measuring the wrong thing.
+        def fhm-query-budget() = QueryBudget();
+        def fhm-answer-reserve() = AnswerReserve();
+        def fhm-timeout-reason() = "knowledge-query-decode-timeout";
+        def fhm-timeout-alternative() = "timeout-answer-alternative-untried";
+
+        // Only a status that actually put a span in the stream opens the reserve.
+        def fhm-opens-reserve(o) = fhm-injects-span(o);
+
+        // nothing spends no reserve and cuts nothing.
+        def fhm-spends-reserve(o) = fhm-opens-reserve(o);
+        def fhm-cuts-query-fuel(o) = fhm-opens-reserve(o);
+
+        // ── the curriculum: anchor first, path second ──────────────────────
+        // An observation is read by its ANCHOR — the content address that fixes
+        // which cell answered — before its PATH, which only says where a copy of
+        // that cell was found today. A reader that leads with the path binds to
+        // a location; a reader that leads with the anchor binds to the meaning
+        // and can survive the file moving.
+        thought fhu-read-order = list("anchor", "path");
+        def fhu-anchor-first() = nth(fhu-read-order(), 0);
+        def fhu-path-second() = nth(fhu-read-order(), 1);
+        def fhu-anchor-before-path() = if str_eq(fhu-anchor-first(), "anchor") then if str_eq(fhu-path-second(), "path") then 1 else 0 else 0;
+
+        // ── the curriculum: six kinds that a bit cannot carry ──────────────
+        // Every one of these is routinely collapsed to 0/1, and every collapse
+        // throws away the part a reader needs. Named here so the local model can
+        // be taught the distinction rather than guessing it.
+        thought fhu-kinds = list("choice", "lanes", "cut", "undo", "timeout", "nothing");
+        def fhu-is-boolean(kind) = 0;
+        def fhu-carries(kind) = if str_eq(kind, "choice") then "the alternatives, and whose consent selects" else if str_eq(kind, "lanes") then "which lane answered: native, local, or remote" else if str_eq(kind, "cut") then "what was pruned, and on what observation" else if str_eq(kind, "undo") then "the prior state, exactly, to restore into" else if str_eq(kind, "timeout") then "how long was waited before the window closed" else "the reason there is nothing, which is not failure";
+        def fhu-collapsed-loses(kind) = if str_eq(fhu-carries(kind), "") then 0 else 1;
+        def fhu-all-carry(ks) = if eq(len(ks), 0) then 1 else if eq(fhu-collapsed-loses(head(ks)), 1) then fhu-all-carry(tail(ks)) else 0;
+        def fhu-none-boolean(ks) = if eq(len(ks), 0) then 1 else if eq(fhu-is-boolean(head(ks)), 0) then fhu-none-boolean(tail(ks)) else 0;
+        def fhu-curriculum-ok() = if eq(fhu-anchor-before-path(), 1) then if eq(fhu-all-carry(fhu-kinds()), 1) then fhu-none-boolean(fhu-kinds()) else 0 else 0;
 
         def fhm-marks-distinct() = if str_eq(HeedOpen(), HeedClose()) then 0 else 1;
         def fhm-logits-executed() = LogitsExecuted();
