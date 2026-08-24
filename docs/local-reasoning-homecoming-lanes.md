@@ -152,7 +152,78 @@ not mine. I have not run `regen_fkwu_bootstrap.sh`, have not touched either
 `uni.c`, and have not set `FORM_ALLOW_THREE_ARM=1` or
 `FORM_ALLOW_BOOTSTRAP_EMIT=1`.
 
-## Next stone, when the gate opens
+## Round 2 — the streaming cursor landed; two seams handed back
+
+Architecture correction taken: preflattened ops tables are not the runtime.
+The carry is a live streaming cursor, no tokenizer pre-materialization.
+
+**Green and committed** (`93ad41b5`):
+
+- `form/form-stdlib/form-cli-heed-cursor.fk` — the bridge. One forward pass at
+  a time; each emitted id transmuted to bytes in a **bounded window**
+  (`fhm-frame-cap()` = 305, one legal envelope wide); on a complete envelope
+  the surface goes to a lookup and the typed observation returns as prefill at
+  the current position. No ops table, no flattened surface, no token index.
+- `form/form-stdlib/tests/form-cli-heed-cursor-band.fk` — **1023 on fkwu**.
+- heedmark marks moved to Codex's surface, so the two grammars are one:
+  `<|form:knowledge-query|>` / `<|/form:knowledge-query|>`. Verified
+  byte-for-byte against the ABI cell. `fhq-grammar-agrees` makes a future
+  drift loud, because drift would mean every lookup answering nothing forever
+  with no status naming it.
+
+The band's load-bearing bit: the envelope arrives **split across tokens** (open
+mark over three ids, query over four). One step short of the close nothing has
+fired and the scan reads `held`; one step later it fires exactly once.
+
+**The model crosses as five function values over an opaque ctx.** This dialect
+has no lambda, so a two-argument `stepf` could never reach a live model's
+pipelines, buffers, geometry, layers, decode state and tensor views. ctx
+carries them; the cursor never opens it. Same loop, scripted stepper in a band
+and `q38-forward` on the GPU.
+
+**Deliberately left uncommitted, in the tree, per the coordination halt:**
+
+| file | state | why held |
+|---|---|---|
+| `form/form-stdlib/form-cli-model-generate.fk` | preflight clean (0/0/0) | live wiring, **no live witness** — the heed lane, `fcmg-heed-generate`, and a `fcmg-heed-lookup-nothing` default so the file names no ABI |
+| `form/form-stdlib/form-cli-heed-fkqt.fk` | run hard-fails | its ABI has not landed |
+
+### Two seams handed back whole
+
+**1. `bml-capability-ledger-band.fk` — the lane, not the ledger.** The band
+carries `section [form.bml]`: a brace-surface BML file under a `.fk` name. The
+ledger itself is a hand-authored list and does **not** scan `bml/`, so no new
+BML file can perturb it. Run on fkwu's direct-source lane it parses as plain
+Form and reads `let`, `=`, `}` as names — 390 errors in my run, matching the
+reported `nothing, rc=1, diagnostics=2`. Go/Rust/TS lower it and answer 255.
+The repair belongs on the lane (route it through the source compiler), and it
+is **not mine** — untouched.
+
+**2. preflight overvouches: it cannot see a MISSING prelude.** Same cell, two
+answers:
+
+```
+$ echo form/form-stdlib/form-cli-heed-fkqt.fk > /tmp/preflight-target
+$ ./fkwu observe/preflight-run.fk
+  errors 0   unresolved 0
+  chain  clean — no errors, no unresolved calls; a verdict from it can be read
+
+$ ./fkwu form/form-stdlib/form-cli-heed-fkqt.fk
+fkwu: error: form/form-stdlib/form-knowledge-query-token.fk:
+      dependency source is missing or not stat-readable
+RC=0
+```
+
+The prelude file does not exist in this worktree, and preflight still cleared
+the chain — it sees unresolved calls inside preludes it *loaded*, never a
+prelude that is absent. **And the runner exits 0 on the hard failure**, so a
+pipeline gating on `rc` passes. Every instruction in this tree says preflight
+before believing a band; that trust has a hole exactly the width of a file that
+is not there. Not repaired — `observe/preflight.fk` is the band-trust surface
+and `source_jit_gate` holds validate/fourth-arm. **Whoever owns that surface
+should take this.**
+
+## Next stone, when the halts lift
 
 `fcmg-heed-generate` in the live path: drive `q38-forward` one step at a time,
 detokenize the tail, and on a completed mark call a lookup that crosses as a
