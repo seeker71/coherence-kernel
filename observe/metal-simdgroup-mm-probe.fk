@@ -1,0 +1,51 @@
+; metal-simdgroup-mm-probe.fk — can this body emit a simdgroup matrix kernel?
+;
+; llama.cpp on this machine, this model, this hour: pp512 222.64 tok/s against
+; this lane's 9.43. The mechanism is named in ggml-metal-ops.cpp — it takes the
+; matrix-matrix path when
+;
+;     props_dev->has_simdgroup_mm && ne00 >= 64 && ne11 > ne11_mm_min   (=8)
+;
+; and dispatches threadgroups of 32 threads x nsg simdgroups. The device agrees
+; it has the unit: llama-bench printed "simdgroup matrix mul. = true" on this
+; M4 Max.
+;
+; Every kernel this lane emits does scalar fused multiply-add. A
+; simdgroup_float8x8 multiply-accumulate is an 8x8x8 matrix step issued once per
+; SIMD group — 512 multiply-adds where a scalar loop issues one per lane. That is
+; the difference between 47 GB/s and a prefill that amortizes.
+;
+; So: probe it. Emit the smallest kernel that uses the unit and hand it to
+; metal_pipeline. If it compiles, the GEMM path is open to Form emission and the
+; only remaining work is the tiling. If it refuses, the refusal names what is
+; missing.
+;
+; Effectful: touches the GPU. Do not preflight.
+; preludes: form-stdlib/metal-door.fk
+
+(do
+    (defn sgp-line (k v) (print_str (str_concat "sg " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+
+    ; the smallest honest use of the unit: load two 8x8 tiles, multiply-accumulate
+    ; into a third, store it back.
+    (defn sgp-msl ()
+        (str_concat "#include <metal_stdlib>\nusing namespace metal;\n"
+        (str_concat "kernel void form_sg_mm_probe (device const float* a [[buffer(0)]], "
+        (str_concat "device const float* b [[buffer(1)]], device float* c [[buffer(2)]], "
+        (str_concat "constant uint& n [[buffer(3)]], "
+        (str_concat "uint tg [[threadgroup_position_in_grid]], "
+        (str_concat "ushort lane [[thread_index_in_simdgroup]]) { "
+        (str_concat "simdgroup_float8x8 ma; simdgroup_float8x8 mb; "
+        (str_concat "simdgroup_float8x8 mc = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); "
+        (str_concat "simdgroup_load(ma, a, n); simdgroup_load(mb, b, n); "
+        (str_concat "simdgroup_multiply_accumulate(mc, ma, mb, mc); "
+                    "simdgroup_store(mc, c, n); }")))))))))))
+
+    (sgp-line "device" (metal_status))
+    (let msl (sgp-msl))
+    (sgp-line "msl-bytes" (int_to_str (str_len msl)))
+    (let p (metal_pipeline msl "form_sg_mm_probe"))
+    (sgp-line "pipeline" (int_to_str p))
+    (sgp-line "simdgroup-matrix-emittable" (if (gt p 0) "yes" "no"))
+    (sgp-line "status-after" (metal_status))
+    0)
