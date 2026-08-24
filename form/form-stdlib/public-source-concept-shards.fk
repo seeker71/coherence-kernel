@@ -17,10 +17,12 @@
 ; and the first visible defn/defdata/class/grammar name where present.  At least
 ; the unique source coordinate is always usable.  No source payload is stored.
 ;
-; Sources larger than 32768 bytes are honestly named `over-budget` by this
-; first registry breath.  The threshold is a resource boundary, not a semantic
-; judgment; coverage always divides current verified artifacts by the entire
-; fresh repository census.  It can be raised and the same cursors resumed.
+; Sources larger than 16 MiB are honestly named `over-budget` and remain in
+; every denominator.  The source digest is streamed through bounded windows
+; and concept extraction reads only the bounded head, so this is an elapsed-
+; work admission bound rather than a retained-source-body bound.  The current
+; body maximum is below 1 MiB; every present source can enter without claiming
+; that a finite worker has infinite fuel.
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/form-fs.fk form-stdlib/file-byte-window.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/form-knowledge-source-search.fk form-stdlib/public-source-concept-index.fk
 ; Proven by: form-stdlib/tests/public-source-concept-shards-band.fk
@@ -31,7 +33,9 @@
     (defn pscish-build-state-schema () "pscish-build-state-v1")
     (defn pscish-validate-state-schema () "pscish-validate-state-v1")
     (defn pscish-batch-size () 32)
-    (defn pscish-max-source-bytes () 32768)
+    (defn pscish-max-source-bytes () 16777216)
+    (defn pscish-source-over-budget? (size)
+        (if (gt size (pscish-max-source-bytes)) 1 0))
     (defn pscish-head-bytes () 4096)
     (defn pscish-plan-window () 1024)
     (defn pscish-request-path ()
@@ -337,6 +341,62 @@
     (defn pscish-write-build-state (artifact family state)
         (fs-write-text (pscish-build-state-path artifact family)
             (pscish-render-build-state state)))
+    ; A family replan replaces its owned per-source artifacts.  Merely
+    ; overwriting paths still present in the new plan leaves a removed or
+    ; renamed source as a valid-looking ghost in the physical shard buckets.
+    ; Bucket directories may remain; only this organ's .psci files are owned.
+    ; result = removed failures.
+    (defn pscish-clear-entry-files-loop (dir names removed failures)
+        (if (nil? names) (list removed failures)
+            (do
+                (let name (head names))
+                (let path (fs-path-join dir name))
+                (if (not (eq (psci-ends-with? name ".psci") 1))
+                    (pscish-clear-entry-files-loop dir (tail names)
+                        removed failures)
+                    (do
+                        (let _remove (fs-remove-file path))
+                        (let gone (if (lt (fs-stat-size path) 0) 1 0))
+                        (pscish-clear-entry-files-loop dir (tail names)
+                            (add removed gone)
+                            (add failures (if (eq gone 1) 0 1))))))))
+    (defn pscish-clear-family-buckets-loop
+            (family-root buckets removed failures)
+        (if (nil? buckets) (list removed failures)
+            (do
+                (let dir (fs-path-join family-root (head buckets)))
+                (let next (if (eq (fs-is-dir? dir) 1)
+                    (pscish-clear-entry-files-loop dir (fs-list dir)
+                        removed failures)
+                    (list removed failures)))
+                (pscish-clear-family-buckets-loop family-root (tail buckets)
+                    (nth next 0) (nth next 1)))))
+    (defn pscish-clear-family-artifacts-at (artifact family)
+        (do
+            (let family-root (pscish-family-shard-root artifact family))
+            (if (not (eq (fs-is-dir? family-root) 1)) (list 0 0)
+                (pscish-clear-family-buckets-loop family-root
+                    (fs-list family-root) 0 0))))
+    (defn pscish-count-entry-files-loop (names count)
+        (if (nil? names) count
+            (pscish-count-entry-files-loop (tail names)
+                (add count (if (eq (psci-ends-with? (head names)
+                                        ".psci") 1) 1 0)))))
+    (defn pscish-count-family-buckets-loop (family-root buckets count)
+        (if (nil? buckets) count
+            (do
+                (let dir (fs-path-join family-root (head buckets)))
+                (let next (if (eq (fs-is-dir? dir) 1)
+                    (pscish-count-entry-files-loop (fs-list dir) count)
+                    count))
+                (pscish-count-family-buckets-loop family-root
+                    (tail buckets) next))))
+    (defn pscish-entry-artifact-count-at (artifact family)
+        (do
+            (let family-root (pscish-family-shard-root artifact family))
+            (if (not (eq (fs-is-dir? family-root) 1)) 0
+                (pscish-count-family-buckets-loop family-root
+                    (fs-list family-root) 0))))
     (defn pscish-init-family-at (root artifact family)
         (do
             (let f (psci-find-family family (psci-families)))
@@ -345,13 +405,16 @@
                     (let _a (fs-mkdir artifact))
                     (let _s (fs-mkdir (pscish-shards-root artifact)))
                     (let _f (fs-mkdir (pscish-family-shard-root artifact family)))
+                    (let cleared (pscish-clear-family-artifacts-at
+                        artifact family))
                     (let plan (pscish-plan-path artifact family))
                     (let _empty (fs-write-text plan ""))
                     (let relative (psci-family-root f))
                     (let full (fs-path-join root relative))
                     (let planned (pscish-plan-dir-loop root relative
                         (fs-list full) family plan 0))
-                    (let state (pscish-build-state 0 planned 0 0 0 0
+                    (let state (pscish-build-state 0 planned 0 0
+                        (nth cleared 1) 0
                         (if (eq planned 0) 1 0)))
                     (let _bs (pscish-write-build-state artifact family state))
                     (let _vs (pscish-write-validate-state artifact family
@@ -379,7 +442,7 @@
         (if (eq (psci-path-valid-for-family? path family) 0) (list 0 0)
             (do
                 (let size (fs-stat-size (fs-path-join root path)))
-                (if (or (lt size 0) (gt size (pscish-max-source-bytes)))
+                (if (or (lt size 0) (eq (pscish-source-over-budget? size) 1))
                     (list 0 0)
                     (do
                         (let keys (pscish-derived-keys-at root family path))
@@ -423,7 +486,7 @@
                                 collisions (sub fuel 1))
                             (do
                                 (let size (fs-stat-size (fs-path-join root path)))
-                                (if (gt size (pscish-max-source-bytes))
+                                (if (eq (pscish-source-over-budget? size) 1)
                                     (pscish-build-batch-loop root artifact family plan
                                         next planned indexed (add over-budget 1)
                                         failures collisions (sub fuel 1))
@@ -514,7 +577,7 @@
                         (let size (fs-stat-size (fs-path-join root path)))
                         ; Over-budget sources remain in the denominator but are
                         ; not expected to have an artifact in this first breath.
-                        (if (gt size (pscish-max-source-bytes))
+                        (if (eq (pscish-source-over-budget? size) 1)
                             (pscish-validate-batch-loop root artifact family plan next
                                 checked current stale missing invalid (sub fuel 1))
                             (do
