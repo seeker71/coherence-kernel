@@ -1,8 +1,11 @@
 ; public-source-concept-shard-refresh-run.fk -- converge changed family plans
 ; into the persisted registry without deleting unaffected family shards.
 ;
-; A changed source count rebuilds only that family's plan and independently
-; replaceable per-source artifacts.  Completed unchanged families remain held.
+; A changed source count or an observed stale/missing/invalid row rebuilds only
+; that family's plan and independently replaceable per-source artifacts.
+; Completed current families remain held.  This matters when a source changes
+; without changing the family count: validation is the signal that the held
+; artifact must be replaced, not a report that can repair itself.
 ; The movement receipt is explicitly upserted before its family validation so
 ; a final evidence edit can be reconciled without another repository rebuild.
 ;
@@ -18,17 +21,38 @@
         (do
             (let denominator (psci-count-repository-family-at root family))
             (let before (pscish-read-build-state artifact family))
-            (let changed (if (eq denominator (nth before 2)) 0 1))
+            (let count-changed (if (eq denominator (nth before 2)) 0 1))
+            (let artifact-count (pscish-entry-artifact-count-at
+                artifact family))
+            (let artifact-drift (if (eq artifact-count (nth before 3)) 0 1))
+            ; A held green state predates any same-count edit.  Re-observe an
+            ; unchanged plan from live bytes before deciding it can stay held.
+            (let probe-needed (if (eq count-changed 0) 1 0))
+            (let probe-reset (if (eq probe-needed 1)
+                (pscid-worker-step "validate-reset" root artifact family) 1))
+            (let probe-ok (if (and (eq probe-needed 1) (eq probe-reset 1))
+                (pscid-validate-family-loop root artifact family
+                    (add 4 (div (add denominator
+                        (sub (pscish-batch-size) 1))
+                        (pscish-batch-size))))
+                (if (eq probe-needed 0) 1 0)))
+            (let observed-v (pscish-read-validate-state artifact family))
+            (let validation-drift (if (or (gt (nth observed-v 4) 0)
+                (or (gt (nth observed-v 5) 0)
+                    (gt (nth observed-v 6) 0))) 1 0))
+            (let changed (if (or (eq count-changed 1)
+                (or (eq artifact-drift 1)
+                    (eq validation-drift 1))) 1 0))
             (let init-ok (if (eq changed 1)
                 (pscid-worker-step "init" root artifact family) 1))
-            (let build-ok (if (eq init-ok 1)
+            (let build-ok (if (and (eq probe-ok 1) (eq init-ok 1))
                 (pscid-build-family-loop root artifact family
                     (add 4 (div (add denominator
                         (sub (pscish-batch-size) 1))
                         (pscish-batch-size)))) 0))
             (let old-v (pscish-read-validate-state artifact family))
             (let validate-needed (if (or (eq changed 1)
-                (or (eq force-validate 1) (eq (nth old-v 7) 0))) 1 0))
+                (and (eq force-validate 1) (eq probe-needed 0))) 1 0))
             (let reset-ok (if (and (eq build-ok 1) (eq validate-needed 1))
                 (pscid-worker-step "validate-reset" root artifact family) 1))
             (let validate-ok (if (and (eq reset-ok 1)
@@ -37,7 +61,7 @@
                     (add 4 (div (add denominator
                         (sub (pscish-batch-size) 1))
                         (pscish-batch-size))))
-                (if (eq (nth old-v 7) 1) 1 0)))
+                (if (and (eq probe-ok 1) (eq (nth old-v 7) 1)) 1 0)))
             (if (and (eq init-ok 1)
                 (and (eq build-ok 1)
                      (eq validate-ok 1))) 1 0)))
