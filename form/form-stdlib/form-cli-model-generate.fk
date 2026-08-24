@@ -6,7 +6,7 @@
 ; the linked Metal carrier JIT-compiles it for the device that answered metal_status.
 ;
 ; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-form-layer.fk form-stdlib/local-model-choice.fk form-stdlib/local-generate-organ.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-dense-token-handle.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
-; preludes: form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk form-stdlib/form-cli-heed-cursor.fk form-stdlib/form-cli-heed-telemetry.fk
+; preludes: form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk form-stdlib/form-cli-heed-cursor.fk form-stdlib/form-cli-heed-telemetry.fk form-stdlib/form-cli-heed-grounded.fk
 
 (do
     (defn fcmg-src (path) (eqr-of-file path 0 40000000))
@@ -273,9 +273,15 @@
                 (tkz-decode-text src (fhc-out r)))
             0))
 
-    (defn fcmg-heed-witness (path prompt query reserve)
+    ; ── where the time goes ───────────────────────────────────────────────
+    ; Wall clock at each stage boundary plus the Metal counter, so the turn can
+    ; be read as seal / open / decode rather than argued about from a total.
+    (defn fcmg-heed-witness-with (path prompt query reserve lookupf)
         (do
+            (let t-enter (now_unix_ms))
+            (let gpu-enter (mbw-status-int (metal_status) "gpu_busy_us_total"))
             (let verdict (qaf-seal-verdict path))
+            (let t-sealed (now_unix_ms))
             (if (not (eq verdict 1))
                 (fcmg-heed-line "refused" (fcmg-seal-refusal verdict))
                 (do
@@ -291,7 +297,9 @@
                             ; both ledgers plus room for what gets injected
                             (let need (add (len ids) (add (add query reserve) 512)))
                             (let maxpos (if (lt need model-max) need model-max))
+                            (let t-pre-open (now_unix_ms))
                             (let ctx (q38-open path maxpos))
+                            (let t-opened (now_unix_ms))
                             (if (lt (len ctx) 10)
                                 (fcmg-heed-line "refused"
                                     (str_concat "model context did not open; " (metal_status)))
@@ -304,11 +312,27 @@
                                             (fcmg-heed-int "prompt-tokens" (len ids))
                                             (fcmg-heed-int "query-budget" query)
                                             (fcmg-heed-int "answer-reserve" reserve)
-                                            (fcmg-heed-report src
-                                                (fcmg-heed-generate-2p src ctx sts ids
-                                                    (fcmg-q35-stops src)
-                                                    fcmg-heed-lookup-nothing 1
-                                                    (MaxHeeds) query reserve))
+                                            (let t-pre-run (now_unix_ms))
+                                            (let gpu-pre-run
+                                                (mbw-status-int (metal_status) "gpu_busy_us_total"))
+                                            (let r (fcmg-heed-generate-2p src ctx sts ids
+                                                        (fcmg-q35-stops src)
+                                                        lookupf 1
+                                                        (MaxHeeds) query reserve))
+                                            (metal_sync)
+                                            (let t-done (now_unix_ms))
+                                            (let gpu-done
+                                                (mbw-status-int (metal_status) "gpu_busy_us_total"))
+                                            (fcmg-heed-report src r)
+                                            (fcmg-heed-int "ms-seal" (sub t-sealed t-enter))
+                                            (fcmg-heed-int "ms-header-read" (sub t-pre-open t-sealed))
+                                            (fcmg-heed-int "ms-open" (sub t-opened t-pre-open))
+                                            (fcmg-heed-int "ms-state" (sub t-pre-run t-opened))
+                                            (fcmg-heed-int "ms-decode" (sub t-done t-pre-run))
+                                            (fcmg-heed-int "ms-total" (sub t-done t-enter))
+                                            (fcmg-heed-int "gpu-busy-us-decode" (sub gpu-done gpu-pre-run))
+                                            (fcmg-heed-int "gpu-busy-us-setup" (sub gpu-pre-run gpu-enter))
+                                            (fcmg-heed-int "positions-walked" (fhc-pos r))
                                             (q38-free-state sts)
                                             0)))))))))))
 
@@ -536,4 +560,13 @@
             (if (eq (qaf-verify-sealed-file path) 1)
                 (mbw-run path)
                 "bandwidth refused: selected artifact has no current Form-native SHA-256 seal")))
+
+    ; The default witness answers `nothing` for every envelope — an unconfigured
+    ; host honestly holds no knowledge. The grounded witness names the substrate
+    ; this checkout DOES hold, so a hit can open the answer reserve for real.
+    (defn fcmg-heed-witness (path prompt query reserve)
+        (fcmg-heed-witness-with path prompt query reserve fcmg-heed-lookup-nothing))
+    (defn fcmg-heed-witness-grounded (path prompt query reserve)
+        (fcmg-heed-witness-with path prompt query reserve fhg-lookup))
+
     0)
