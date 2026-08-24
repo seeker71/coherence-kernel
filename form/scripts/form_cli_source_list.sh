@@ -169,6 +169,7 @@ form-stdlib/form-nodeid-knowledge-query.fk
 form-stdlib/form-cli-nodeid-knowledge-session.fk
 form-stdlib/public-source-concept-key-routes.fk
 form-stdlib/form-nodeid-knowledge-routed-query.fk
+form-stdlib/form-cli-nodeid-knowledge-door.fk
 form-stdlib/form-recipe-birth-token.fk
 form-stdlib/form-recipe-exec-token.fk
 form-stdlib/form-cli-recipe-exec-cursor.fk

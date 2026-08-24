@@ -230,6 +230,7 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/form-cli-nodeid-knowledge-session.fk
     form-stdlib/public-source-concept-key-routes.fk
     form-stdlib/form-nodeid-knowledge-routed-query.fk
+    form-stdlib/form-cli-nodeid-knowledge-door.fk
     form-stdlib/form-recipe-birth-token.fk
     form-stdlib/form-recipe-exec-token.fk
     form-stdlib/form-cli-recipe-exec-cursor.fk
@@ -314,6 +315,7 @@ form_modules="${form_modules%)} (read_file \"form-stdlib/dsv4-tokenizer.fk\") (r
 form_modules="${form_modules%)} (read_file \"$stdlib/form-teach-layer.fk\") (read_file \"$stdlib/qwen35-form-layer.fk\") (read_file \"$stdlib/active-learning-tier-cycle.fk\") (read_file \"$stdlib/local-model-choice.fk\") (read_file \"$stdlib/substrate-phase.fk\") (read_file \"$stdlib/source-resonance-stream.fk\") (read_file \"$stdlib/local-generate-organ.fk\") (read_file \"$stdlib/language-model.fk\") (read_file \"$stdlib/form-cli-heedmark-xtal.fk\"))"
 form_modules="${form_modules%)} (read_file \"$stdlib/form-cli-heed-cursor.fk\") (read_file \"$stdlib/form-ontology-bp.fk\") (read_file \"$stdlib/form-cli-heed-telemetry.fk\") (read_file \"$stdlib/form-knowledge-query-token.fk\") (read_file \"$stdlib/file-byte-window.fk\") (read_file \"$stdlib/form-knowledge-source-search.fk\") (read_file \"$stdlib/form-cli-heed-current-source.fk\") (read_file \"$stdlib/form-cli-heed-grounded.fk\"))"
 form_modules="${form_modules%)} (read_file \"$stdlib/form-cli-model-session.fk\") (read_file \"$stdlib/bmf-byte-cursor.fk\") (read_file \"$stdlib/public-source-concept-index.fk\") (read_file \"$stdlib/public-source-concept-shards.fk\") (read_file \"$stdlib/form-nodeid-knowledge-query.fk\") (read_file \"$stdlib/form-cli-nodeid-knowledge-session.fk\") (read_file \"$stdlib/public-source-concept-key-routes.fk\") (read_file \"$stdlib/form-nodeid-knowledge-routed-query.fk\"))"
+form_modules="${form_modules%)} (read_file \"$stdlib/form-cli-nodeid-knowledge-door.fk\"))"
 form_modules="${form_modules%)} (read_file \"$stdlib/form-recipe-birth-token.fk\") (read_file \"$stdlib/form-recipe-exec-token.fk\") (read_file \"$stdlib/form-cli-recipe-exec-cursor.fk\") (read_file \"$stdlib/form-recipe-exec-token-live.fk\") (read_file \"$stdlib/form-cli-recipe-exec-session.fk\") (read_file \"$stdlib/form-cli-resident-recipe-birth-exec-categories.fk\") (read_file \"$stdlib/form-cli-resident-recipe-birth-exec.fk\"))"
 form_modules="${form_modules%)} (read_file \"$stdlib/form-nodeid-mastery-cell-categories.fk\") (read_file \"$stdlib/form-nodeid-mastery-cell-loop.fk\"))"
 band="(read_file \"$stdlib/form-cli-repl.fk\")"

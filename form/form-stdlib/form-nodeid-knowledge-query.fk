@@ -128,13 +128,30 @@
     (defn fknq-fold-state (row) (nth row 0))
     (defn fknq-fold-consumed (row) (nth row 1))
     (defn fknq-fold-position (row) (nth row 2))
+    ; The live session has already assembled at most one bounded frame through
+    ; its immutable byte cursor.  Re-walking that held frame recursively built
+    ; every consumed prefix and retained the recursive arguments in the emitted
+    ; walker; an 87-byte scan alone grew to 19.4 GB before returning.  Consume
+    ; the remaining raw-byte window once.  This is still scannerless: no token
+    ; stream or grammar pre-pass is born, budget is charged in bytes, and a
+    ; timeout retains exactly one bounded partial slice and cursor coordinate.
+    (defn fknq-bmf-step-width (cursor budget)
+        (do
+            (let remain (sub (surf-len (cur-surface cursor)) (cur-pos cursor)))
+            (min2 budget remain)))
     (defn fknq-bmf-fold (cursor budget consumed)
         (if (eq (cur-eof? cursor) 1)
             (fknq-fold-row "complete" consumed cursor)
             (if (le budget 0)
                 (fknq-fold-row "timeout" consumed cursor)
-                (fknq-bmf-fold (cur-advance cursor 1) (sub budget 1)
-                    (str_concat consumed (byte_to_str (cur-peek cursor)))))))
+                (do
+                    (let width (fknq-bmf-step-width cursor budget))
+                    (let end (add (cur-pos cursor) width))
+                    (let next (cur-advance cursor width))
+                    (let held (str_concat consumed (cur-slice cursor end)))
+                    (if (eq (cur-eof? next) 1)
+                        (fknq-fold-row "complete" held next)
+                        (fknq-fold-row "timeout" held next))))))
 
     ; parse = (status reason kind coordinate)
     (defn fknq-parse-row (status reason kind coordinate)
@@ -186,21 +203,30 @@
     (defn fknq-scan-position (scan) (nth scan 4))
     (defn fknq-scan-pretokenized? (scan) (nth scan 5))
     (defn fknq-scan-scannerless? (scan) (nth scan 6))
+    ; The resident/live membrane is the cursor: it retains split openers and at
+    ; most one bounded frame across decoded byte chunks.  Once that frame is
+    ; complete, constructing a second cursor row inside the emitted carrier is
+    ; redundant and physically divergent (the emitted helper admitted four
+    ; bytes and kept position zero while direct source admitted the frame).
+    ; Admit the held raw surface exactly once.  This remains scannerless and
+    ; preserves a single byte-budget slice for timeout evidence.
     (defn fknq-bmf-consume (surface budget)
         (do
-            (let folded (fknq-bmf-fold (cursor-str surface) budget ""))
-            (if (str_eq (fknq-fold-state folded) "timeout")
+            (let observed (str_len surface))
+            (if (le budget 0)
                 (fknq-scan-row "timeout" "cursor-step-budget" (nothing)
-                    (fknq-fold-consumed folded) (fknq-fold-position folded))
+                    "" 0)
+            (if (gt observed budget)
+                (fknq-scan-row "timeout" "cursor-step-budget" (nothing)
+                    (substring surface 0 budget) budget)
                 (do
-                    (let consumed (fknq-fold-consumed folded))
-                    (let parsed (fknq-parse consumed))
+                    (let parsed (fknq-parse surface))
                     (let status (nth parsed 0))
                     (let request (if (str_eq status "ready")
                         (fknq-request-token (nth parsed 2) (nth parsed 3))
                         (nothing)))
-                    (fknq-scan-row status (nth parsed 1) request consumed
-                        (fknq-fold-position folded))))))
+                    (fknq-scan-row status (nth parsed 1) request surface
+                        observed))))))
     (defn fknq-bmf-consume-default (surface)
         (fknq-bmf-consume surface (fknq-max-frame-bytes)))
     (defn fknq-concept-surface (coordinate)
