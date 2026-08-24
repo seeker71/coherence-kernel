@@ -1,0 +1,191 @@
+; form-cli-heed-cursor.fk — the production bridge: a live streaming cursor that
+; carries a Form knowledge query from the model's own decoded stream into a
+; Form lookup, and the typed observation back in as ordinary prefill.
+;
+; THE HONEST SEAM, and it is the same one form-knowledge-query-token.fk names.
+; The model emits ids. A forward pass produces a distribution over ids and
+; NOTHING ELSE — no logit executed the lookup. This cursor recognizes a COMPLETE
+; envelope in the bytes those ids decode to, pauses decoding, and offers the
+; surface to fkqt-execute. fkwu performs at most one native RAG lookup and hands
+; back a typed observation. The carrier prefills that observation before the next
+; model token. `model-executed` stays 0 in every result; `executor-node` names the
+; Form cell that actually crossed.
+;
+; STREAMING, NOT PRE-MATERIALIZED. There is no ops table, no flattened surface,
+; no pre-built token index here. The cursor holds ONE bounded byte window —
+; fkqt-max-frame-bytes, the largest a legal envelope can be — and transmutes each
+; newly emitted id to bytes as it arrives (fhc-feed). Bytes older than one frame
+; are dropped from the left, because a frame that has not closed inside one frame
+; width is over budget and fkqt-parse already answers that with nothing. The
+; window is the entire state; it resets the moment a frame is consumed.
+;
+; THE MODEL CROSSES AS FIVE FUNCTION VALUES OVER AN OPAQUE CTX, so this cell
+; names no model, no device, and no corpus, and preflights clean on any kernel:
+;   stepf    (ctx id pos)   -> next id            one forward pass, argmax
+;   prefillf (ctx ids pos)  -> (list first pos')  incremental prefill, SAME state
+;   decodef  (ctx ids)      -> text               ids to bytes
+;   encodef  (ctx text)     -> ids                bytes to ids
+;   lookupf  (ctx surface local-ready) -> (list status span reason)
+;
+; WHY THE CTX IS THREADED AND NOT CLOSED OVER. This dialect has no lambda, so a
+; two-argument stepf could never reach a live model's pipelines, buffers,
+; geometry, layers, decode state and tensor views. ctx carries exactly that,
+; and this cell never looks inside it. The live Qwen lane packs
+; (ps bs geo lays sts embTv onormTv projTv src); a band packs 0.
+; The live Qwen lane closes them over q38-forward / q38-prefill / tkz-decode-text
+; / q35-encode, and lookupf over the fkqt adapter. A band closes them over
+; anything it can check.
+;
+; WHY lookupf RETURNS A TRIPLE AND NOT AN fkqt RESULT. This cell names no ABI at
+; all — not codex's, not any successor's. status is one of hit/miss/nothing,
+; span is the already-rendered typed observation, reason is free text. The
+; adapter that turns fkqt-execute + fkqt-render into that triple lives in
+; form-cli-heed-fkqt.fk, which is the only cell that preludes the ABI. So the
+; cursor law and the ABI can land in either order, and a second knowledge
+; substrate needs a second adapter, not a second cursor.
+;
+; WHY PREFILL IS THE WHOLE PERFORMANCE ARGUMENT. prefillf threads the SAME
+; decode state at a position, so every position before the injection keeps the KV
+; rows it was written with. An injected observation costs its own span, not the
+; context it lands in. A carrier that rebuilt the prompt would pay both.
+;
+; THE BOUND is form-cli-heedmark's, mapped onto fkqt's status:
+;   hit     -> the typed observation enters (attribution carried by fkqt-render)
+;   miss    -> the typed observation enters, status=miss, answer empty — a model
+;              told nothing invents the row the body does not hold
+;   nothing -> nothing enters; axiom-1, a frame that did not parse is silence
+;   spent   -> the per-turn budget is gone; the envelope is NOT executed and the
+;              mark stays plain text. This is the bound, and it is checked BEFORE
+;              any lookup so an exhausted turn performs no IO at all.
+;
+; PRELUDE ORDER IS LOAD-BEARING. language-model.fk comes BEFORE the xtal: the
+; lowered HeedRequest template calls language-template-with-members, and without
+; it first the chain reports a ts-only lane seam and every verdict downstream is
+; a fold over nothing. Dependency-first, full closure — a sibling's prelude does
+; not count for this unit.
+;
+; preludes: form-stdlib/core.fk form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk
+;
+; Proven by: form-stdlib/tests/form-cli-heed-cursor-band.fk
+
+(do
+    ; ── the bounded window ─────────────────────────────────────────────────
+    ; One frame wide. This cap is the no-pre-materialization guarantee: the
+    ; cursor cannot grow into a table no matter how long the stream runs.
+    (defn fhc-window-cap () (fhm-frame-cap))
+
+    (defn fhc-clip-left (s cap)
+        (if (le (str_len s) cap) s (substring s (sub (str_len s) cap) (str_len s))))
+
+    (defn fhc-feed (window text)
+        (fhc-clip-left (str_concat window text) (fhc-window-cap)))
+
+    ; ── the scan: none | held | complete ───────────────────────────────────
+    ; held is not a failure. It is the cursor waiting for the close mark, and it
+    ; is why a multi-token envelope survives a byte-BPE that splits it.
+    (defn fhc-scan (window)
+        (do (let o (str_find window (HeedOpen) 0))
+            (if (lt o 0) "none"
+                (if (lt (str_find window (HeedClose) (add o (str_len (HeedOpen)))) 0)
+                    "held" "complete"))))
+
+    ; The surface fkqt-parse wants: opens with the open mark, closes with the
+    ; close mark, no trailing bytes.
+    (defn fhc-frame (window)
+        (do (let o (str_find window (HeedOpen) 0))
+            (if (lt o 0) ""
+                (do (let c (str_find window (HeedClose) (add o (str_len (HeedOpen)))))
+                    (if (lt c 0) ""
+                        (substring window o (add c (str_len (HeedClose)))))))))
+
+    ; ── cursor state ───────────────────────────────────────────────────────
+    ; (window budget lookups injected-ids honored)
+    (defn fhc-cursor (window budget lookups injected honored)
+        (list window budget lookups injected honored))
+    (defn fhc-window (c) (nth c 0))
+    (defn fhc-budget (c) (nth c 1))
+    (defn fhc-lookups (c) (nth c 2))
+    (defn fhc-injected (c) (nth c 3))
+    (defn fhc-honored (c) (nth c 4))
+    (defn fhc-fresh (budget) (fhc-cursor "" budget 0 0 (empty)))
+
+    ; ── status -> the heedmark law ─────────────────────────────────────────
+    (defn fhc-outcome-of (status)
+        (if (str_eq status "hit") (OutHit)
+            (if (str_eq status "miss") (OutMiss)
+                (if (str_eq status "spent") (OutSpent) (OutNothing)))))
+
+    (defn fhc-enters? (status) (fhm-injects-span (fhc-outcome-of status)))
+    (defn fhc-knowledge? (status) (fhm-injects-knowledge (fhc-outcome-of status)))
+
+    (defn fhc-stop? (id stops)
+        (if (eq (len stops) 0) 0
+            (if (eq id (head stops)) 1 (fhc-stop? id (tail stops)))))
+
+    ; ── honoring one complete envelope ─────────────────────────────────────
+    ; Budget is read BEFORE the lookup: a spent turn performs no IO.
+    (defn fhc-honor (ctx lookupf local-ready budget frame)
+        (if (le budget 0)
+            (list "spent" "" "budget-spent")
+            (lookupf ctx frame local-ready)))
+    (defn fhc-honor-status (h) (nth h 0))
+    (defn fhc-honor-span (h) (nth h 1))
+    (defn fhc-honor-reason (h) (nth h 2))
+
+    ; The span that enters is whatever the adapter rendered — for the fkqt
+    ; adapter that is fkqt-render's own typed observation, carrying source-ref,
+    ; content-ref, source-path, source-key and answer-key. This cell does not
+    ; invent a second format, and it does not read the ABI to find out.
+    ; The law still gates: nothing and spent enter nothing whatever the adapter
+    ; handed back.
+    (defn fhc-span-of (status span)
+        (if (eq (fhc-enters? status) 0) "" span))
+
+    ; ── the loop ───────────────────────────────────────────────────────────
+    ; Returns (out cursor pos). out is the model's own id stream; injected
+    ; observation ids are counted in the cursor, never mixed into out, so a
+    ; witness can always tell what the model said from what the body answered.
+    (defn fhc-run (ctx stepf prefillf decodef encodef lookupf local-ready
+                   id pos n stops c out)
+        (if (le n 0) (list out c pos)
+            (do
+                (let nid (stepf ctx id pos))
+                (if (if (lt nid 0) 1 (fhc-stop? nid stops)) (list out c pos)
+                    (do
+                        (let w (fhc-feed (fhc-window c) (decodef ctx (list nid))))
+                        (let out2 (append out (list nid)))
+                        (if (str_eq (fhc-scan w) "complete")
+                            (fhc-resume ctx stepf prefillf decodef encodef lookupf
+                                local-ready nid (add pos 1) (sub n 1) stops c w out2)
+                            (fhc-run ctx stepf prefillf decodef encodef lookupf local-ready
+                                nid (add pos 1) (sub n 1) stops
+                                (fhc-cursor w (fhc-budget c) (fhc-lookups c)
+                                    (fhc-injected c) (fhc-honored c))
+                                out2)))))))
+
+    ; A complete frame: honor it, prefill what enters, RESET the window so the
+    ; same envelope cannot fire twice, and carry on from where prefill left off.
+    (defn fhc-resume (ctx stepf prefillf decodef encodef lookupf local-ready
+                      id pos n stops c w out)
+        (do
+            (let h (fhc-honor ctx lookupf local-ready (fhc-budget c) (fhc-frame w)))
+            (let status (fhc-honor-status h))
+            (let span (fhc-span-of status (fhc-honor-span h)))
+            (let ids (if (eq (str_len span) 0) (empty) (encodef ctx span)))
+            (let pf (if (eq (len ids) 0) (list id pos) (prefillf ctx ids pos)))
+            (let spent? (str_eq status "spent"))
+            (let c2 (fhc-cursor ""
+                        (if spent? (fhc-budget c) (sub (fhc-budget c) 1))
+                        (if spent? (fhc-lookups c) (add (fhc-lookups c) 1))
+                        (add (fhc-injected c) (len ids))
+                        (append (fhc-honored c) (list status))))
+            (fhc-run ctx stepf prefillf decodef encodef lookupf local-ready
+                (nth pf 0) (nth pf 1) n stops c2 out)))
+
+    ; ── the seam a carrier reads ───────────────────────────────────────────
+    (defn fhc-out (r) (nth r 0))
+    (defn fhc-cursor-of (r) (nth r 1))
+    (defn fhc-pos (r) (nth r 2))
+    (defn fhc-model-executed () 0)
+
+    0)
