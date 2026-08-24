@@ -5,7 +5,7 @@
 ; and required byte extent are read from that GGUF.  Form emits the MSL at runtime;
 ; the linked Metal carrier JIT-compiles it for the device that answered metal_status.
 ;
-; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-dense-token-handle.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
+; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-crystal.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
 
 (do
     (defn fcmg-src (path) (eqr-of-file path 0 40000000))
@@ -115,7 +115,22 @@
                     (str_concat (int_to_str closed)
                         (str_concat ";expected=" (int_to_str expected)))))))
 
-    (defn fcmg-run-context (src arch ids ctx n)
+    ; the body's own heat, spoken: one line per op tag that fired, so the two
+    ; walkers' histograms can be diffed and the inflated op named by number.
+    (defn fcmg-arms-go (t acc)
+        (if (gt t 255) acc
+            (do (let c (kernel_stat (add 100 t)))
+                (fcmg-arms-go (add t 1)
+                    (if (gt c 0)
+                        (str_concat acc (fcmg-line (str_concat "arm_" (int_to_str t)) (int_to_str c)))
+                        acc)))))
+    (defn fcmg-stamp-lines (stamps)
+        (if (lt (len stamps) 4) ""
+            (str_concat (fcmg-line "stage_seal_ms" (int_to_str (nth stamps 0)))
+            (str_concat (fcmg-line "stage_crystal_ms" (int_to_str (nth stamps 1)))
+            (str_concat (fcmg-line "stage_ids_ms" (int_to_str (nth stamps 2)))
+                        (fcmg-line "stage_open_ms" (int_to_str (nth stamps 3))))))))
+    (defn fcmg-run-context (src arch ids ctx n stops stamps)
         (do
             (let geo (nth ctx 2))
             (let sts (q38-new-state geo))
@@ -123,14 +138,15 @@
                 (fcmg-state-close-result sts
                     (str_concat "generation refused: state allocation failed; " (metal_status)))
                 (do
+                    (let t-pf0 (now_unix_ms))
                     (let before-status (metal_status))
                     (let pf (q38-prefill
                         (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
                         (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0))
                     (let prefill-status (metal_status))
+                    (let t-pf1 (now_unix_ms))
                     (let first (nth pf 0))
                     (let pos (nth pf 1))
-                    (let stops (fcmg-q35-stops src))
                     (let out
                         (if (or (lt first 0) (q38-stop? first stops)) (empty)
                             (cons first
@@ -139,6 +155,7 @@
                                     (nth ctx 4) (nth ctx 5) (nth ctx 6)
                                     first pos (sub n 1) stops (empty)))))
                     (metal_sync)
+                    (let t-dec1 (now_unix_ms))
                     (let after-status (metal_status))
                     (let busy-us (sub
                         (mbw-status-int after-status "gpu_busy_us_total")
@@ -152,9 +169,19 @@
                     (let forwards (add (len ids)
                         (if (gt (len out) 0) (sub (len out) 1) 0)))
                     (let weight-bytes (q38-forward-weight-bytes ctx))
+                    (let t-detok (now_unix_ms))
+                    (let text-out (tkz-decode-text src out))
+                    (let t-detok1 (now_unix_ms))
+                    (let stamp-text
+                        (str_concat (fcmg-line "hottest_arm_count" (int_to_str (kernel_stat 3)))
+                        (str_concat (fcmg-stamp-lines stamps)
+                        (str_concat (fcmg-line "stage_prefill_wall_ms" (int_to_str (sub t-pf1 t-pf0)))
+                        (str_concat (fcmg-line "stage_decode_wall_ms" (int_to_str (sub t-dec1 t-pf1)))
+                                    (fcmg-line "stage_detok_ms" (int_to_str (sub t-detok1 t-detok))))))))
                     (fcmg-state-close-result sts
-                        (fcmg-report arch ids out (tkz-decode-text src out)
-                            forwards busy-us prefill-us decode-us weight-bytes))))))
+                        (str_concat stamp-text
+                            (fcmg-report arch ids out text-out
+                                forwards busy-us prefill-us decode-us weight-bytes)))))))
 
     ; A first admission: the seal is verified before a single byte of the file is
     ; read for meaning, exactly as before.  What changed is only what is answered —
@@ -172,17 +199,31 @@
 
     (defn fcmg-fresh (path prompt n)
         (do
+            (let t-in (now_unix_ms))
             (let verdict (qaf-seal-verdict path))
+            (let t-v (now_unix_ms))
         (if (not (eq verdict 1))
             (list (fcmg-seal-refusal verdict) (fcmr-none))
             (do
+                (let t-seal (now_unix_ms))
                 (let src (fcmg-src path))
-                (let ids (q35-chat-ids src prompt))
+                ; The crystal, both doors: load the recording if the seal keys
+                ; it; otherwise this first ask IS the heat — freeze, then load.
+                ; If even that load fails (e.g., an unwritable directory), the
+                ; scan path below still answers; ice is a speed, never a gate.
+                (let x0 (qsx-load path))
+                (let x (if (eq (nth x0 0) 1) x0
+                           (do (let heat (qsx-freeze path)) (qsx-load path))))
+                (let t-x (now_unix_ms))
+                (let iced (nth x 0))
+                (let ids (if (eq iced 1) (qsx-chat-ids src prompt x) (q35-chat-ids src prompt)))
+                (let t-ids (now_unix_ms))
                 (let arch (fcmg-arch src))
                 (let model-max (gmt-u32 src (q38-key arch "context_length")))
                 (let need (add (len ids) n))
                 (let maxpos (if (lt need model-max) need model-max))
-                (let required (q38-required-size src (egg-data-base src 32)))
+                (let required (if (eq iced 1) (qsx-required x)
+                                  (q38-required-size src (egg-data-base src 32))))
                 (let actual (file_size path))
                 (if (not (str_eq arch "qwen35"))
                     (list (str_concat "generation refused: unsupported GGUF architecture=" arch)
@@ -199,7 +240,9 @@
                                   (str_concat ";actual=" (int_to_str actual))))
                           (fcmr-none))
                     (do
-                        (let ctx (q38-open path maxpos))
+                        (let t-pre-open (now_unix_ms))
+                        (let ctx (if (eq iced 1) (qsx-open path maxpos x) (q38-open path maxpos)))
+                        (let t-open (now_unix_ms))
                         (if (lt (len ctx) 10)
                             (list (str_concat "generation refused: model context did not open; "
                                       (metal_status))
@@ -207,7 +250,12 @@
                             (if (not (eq (q38-context-ok? ctx) 1))
                                 (list (fcmg-open-refusal ctx "model context contains an invalid handle")
                                       (fcmr-none))
-                                (list (fcmg-run-context src arch ids ctx n)
+                                (list (fcmg-run-context src arch ids ctx n
+                                          (if (eq iced 1)
+                                              (list (gmt-u32 src "tokenizer.ggml.eos_token_id") (qsx-ime x))
+                                              (fcmg-q35-stops src))
+                                          (list (sub t-v t-in) (sub t-x t-v) (sub t-ids t-x)
+                                                (sub t-open t-pre-open)))
                                       (fcmr path maxpos ctx src arch)))))))))))))
 
     (defn fcmg-stale-close ()
@@ -224,7 +272,8 @@
                 (do
                     (let src (fcmr-src r))
                     (let arch (fcmr-arch r))
-                    (let ids (q35-chat-ids src prompt))
+                    (let x (qsx-load path))
+                    (let ids (if (eq (nth x 0) 1) (qsx-chat-ids src prompt x) (q35-chat-ids src prompt)))
                     (let model-max (gmt-u32 src (q38-key arch "context_length")))
                     (let need (add (len ids) n))
                     (if (eq (len ids) 0)
@@ -234,7 +283,12 @@
                                   (int_to_str model-max))
                               r)
                     (if (le need (fcmr-maxpos r))
-                        (list (fcmg-run-context src arch ids (fcmr-ctx r) n) r)
+                        (list (fcmg-run-context src arch ids (fcmr-ctx r) n
+                                  (if (eq (nth x 0) 1)
+                                      (list (gmt-u32 src "tokenizer.ggml.eos_token_id") (qsx-ime x))
+                                      (fcmg-q35-stops src))
+                                  (empty))
+                              r)
                         (if (eq (fcmr-release-ok? r) 1)
                             (fcmg-fresh path prompt n)
                             (fcmg-stale-close)))))))))
