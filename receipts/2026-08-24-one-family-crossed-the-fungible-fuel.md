@@ -65,7 +65,7 @@ ops table, or runtime-C growth is part of the repair.
 
 The most surprising teaching was that one exact row is enough to acquit the
 whole resident bridge, but not enough to credit the knowledge surface. The
-bridge works; its fuel law does not yet work uniformly.
+bridge works; its current fuel mechanism does not yet work uniformly.
 
 Discomfort turned to gold in the `66667`: it was tempting to read fourteen
 zeros as ignorance. Keeping `error` distinct from score exposed a smaller and
