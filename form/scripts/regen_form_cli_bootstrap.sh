@@ -203,8 +203,42 @@ FORM_CLI_SELFHOST_ORDER=(
     native/metal/qwen35-dense-token-handle.fk
     native/metal/qwen35-crystal.fk
     native/metal/model-bandwidth.fk
+    form-stdlib/form-teach-layer.fk
+    form-stdlib/qwen35-form-layer.fk
+    form-stdlib/active-learning-tier-cycle.fk
+    form-stdlib/local-model-choice.fk
+    form-stdlib/substrate-phase.fk
+    form-stdlib/source-resonance-stream.fk
+    form-stdlib/local-generate-organ.fk
+    form-stdlib/language-model.fk
+    form-stdlib/form-cli-heedmark-xtal.fk
     form-stdlib/form-cli-qwen-teach-layer.fk
+    form-stdlib/form-cli-heed-cursor.fk
+    form-stdlib/form-ontology-bp.fk
+    form-stdlib/form-cli-heed-telemetry.fk
+    form-stdlib/form-knowledge-query-token.fk
+    form-stdlib/file-byte-window.fk
+    form-stdlib/form-knowledge-source-search.fk
+    form-stdlib/form-cli-heed-current-source.fk
+    form-stdlib/form-cli-heed-grounded.fk
     form-stdlib/form-cli-model-generate.fk
+    form-stdlib/form-cli-model-session.fk
+    form-stdlib/bmf-byte-cursor.fk
+    form-stdlib/public-source-concept-index.fk
+    form-stdlib/public-source-concept-shards.fk
+    form-stdlib/form-nodeid-knowledge-query.fk
+    form-stdlib/form-cli-nodeid-knowledge-session.fk
+    form-stdlib/public-source-concept-key-routes.fk
+    form-stdlib/form-nodeid-knowledge-routed-query.fk
+    form-stdlib/form-recipe-birth-token.fk
+    form-stdlib/form-recipe-exec-token.fk
+    form-stdlib/form-cli-recipe-exec-cursor.fk
+    form-stdlib/form-recipe-exec-token-live.fk
+    form-stdlib/form-cli-recipe-exec-session.fk
+    form-stdlib/form-cli-resident-recipe-birth-exec-categories.fk
+    form-stdlib/form-cli-resident-recipe-birth-exec.fk
+    form-stdlib/form-nodeid-mastery-cell-categories.fk
+    form-stdlib/form-nodeid-mastery-cell-loop.fk
 )
 FORM_CLI_FLATTEN_SRCS=()
 for src in "${FORM_CLI_SELFHOST_ORDER[@]}"; do
@@ -277,6 +311,11 @@ form_modules="${form_modules%)} (read_file \"$stdlib/relational-inquiry-metaboli
 # in its preludes and NO build list carried it, so the built binary answered
 # `generate` from an unresolved name: instant, modelless, and wrong.
 form_modules="${form_modules%)} (read_file \"form-stdlib/dsv4-tokenizer.fk\") (read_file \"form-stdlib/qwen35-tokenizer.fk\") (read_file \"form-stdlib/qwen35-tokfast-v2.fk\") (read_file \"form-stdlib/kernel-http.fk\") (read_file \"form-stdlib/form-asm.fk\") (read_file \"form-stdlib/metal-door.fk\") (read_file \"native/metal/sha256-arm64-jit.fk\") (read_file \"form-stdlib/qwen35-artifact-fetch.fk\") (read_file \"form-stdlib/q6k-msl.fk\") (read_file \"form-stdlib/q8-0-msl.fk\") (read_file \"form-stdlib/q3k-msl.fk\") (read_file \"form-stdlib/q4k-msl.fk\") (read_file \"form-stdlib/gated-deltanet-msl.fk\") (read_file \"form-stdlib/transformer-numerics.fk\") (read_file \"form-stdlib/trig.fk\") (read_file \"form-stdlib/tensor-ir.fk\") (read_file \"form-stdlib/jit-tensor-emit.fk\") (read_file \"form-stdlib/llama-decode-msl.fk\") (read_file \"form-stdlib/mla-msl.fk\") (read_file \"form-stdlib/moe-route-wide-msl.fk\") (read_file \"form-stdlib/gguf-tensor-index.fk\") (read_file \"form-stdlib/q3k-dequant.fk\") (read_file \"form-stdlib/q3k-equireach.fk\") (read_file \"form-stdlib/kat-coder-embed.fk\") (read_file \"native/metal/kat-token-handle.fk\") (read_file \"native/metal/qwen35-linear-span-layout-contract.fk\") (read_file \"native/metal/qwen35-dense-token-handle.fk\") (read_file \"native/metal/qwen35-crystal.fk\") (read_file \"native/metal/model-bandwidth.fk\") (read_file \"form-stdlib/form-cli-qwen-teach-layer.fk\") (read_file \"form-stdlib/form-cli-model-generate.fk\"))"
+form_modules="${form_modules%)} (read_file \"$stdlib/form-teach-layer.fk\") (read_file \"$stdlib/qwen35-form-layer.fk\") (read_file \"$stdlib/active-learning-tier-cycle.fk\") (read_file \"$stdlib/local-model-choice.fk\") (read_file \"$stdlib/substrate-phase.fk\") (read_file \"$stdlib/source-resonance-stream.fk\") (read_file \"$stdlib/local-generate-organ.fk\") (read_file \"$stdlib/language-model.fk\") (read_file \"$stdlib/form-cli-heedmark-xtal.fk\"))"
+form_modules="${form_modules%)} (read_file \"$stdlib/form-cli-heed-cursor.fk\") (read_file \"$stdlib/form-ontology-bp.fk\") (read_file \"$stdlib/form-cli-heed-telemetry.fk\") (read_file \"$stdlib/form-knowledge-query-token.fk\") (read_file \"$stdlib/file-byte-window.fk\") (read_file \"$stdlib/form-knowledge-source-search.fk\") (read_file \"$stdlib/form-cli-heed-current-source.fk\") (read_file \"$stdlib/form-cli-heed-grounded.fk\"))"
+form_modules="${form_modules%)} (read_file \"$stdlib/form-cli-model-session.fk\") (read_file \"$stdlib/bmf-byte-cursor.fk\") (read_file \"$stdlib/public-source-concept-index.fk\") (read_file \"$stdlib/public-source-concept-shards.fk\") (read_file \"$stdlib/form-nodeid-knowledge-query.fk\") (read_file \"$stdlib/form-cli-nodeid-knowledge-session.fk\") (read_file \"$stdlib/public-source-concept-key-routes.fk\") (read_file \"$stdlib/form-nodeid-knowledge-routed-query.fk\"))"
+form_modules="${form_modules%)} (read_file \"$stdlib/form-recipe-birth-token.fk\") (read_file \"$stdlib/form-recipe-exec-token.fk\") (read_file \"$stdlib/form-cli-recipe-exec-cursor.fk\") (read_file \"$stdlib/form-recipe-exec-token-live.fk\") (read_file \"$stdlib/form-cli-recipe-exec-session.fk\") (read_file \"$stdlib/form-cli-resident-recipe-birth-exec-categories.fk\") (read_file \"$stdlib/form-cli-resident-recipe-birth-exec.fk\"))"
+form_modules="${form_modules%)} (read_file \"$stdlib/form-nodeid-mastery-cell-categories.fk\") (read_file \"$stdlib/form-nodeid-mastery-cell-loop.fk\"))"
 band="(read_file \"$stdlib/form-cli-repl.fk\")"
 FLATTEN_CHAIN=(
     form-stdlib/minimal-surface.fk
