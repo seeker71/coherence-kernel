@@ -1,0 +1,737 @@
+; response-dictionary-spectrum.fk — observe every word and symbol layer of one
+; response against the current Form-neutral dictionary, then expand every
+; available description and measure the resulting frequency field.
+;
+; The corpus boundary is explicit. Visible prose remains one layer. Inline
+; code, link targets, hashes, paths, and Codex carrier directives remain
+; observable in an artifact layer; they are not silently mistaken for NL.
+; Letter words are normalized only across ASCII case because the body's current
+; tokenizer is explicitly ASCII-parochial. Number runs and punctuation chunks
+; are counted separately, so dropping them cannot make coverage look better.
+;
+; Dictionary strata are also explicit:
+;   neutral-core  the content-addressed 64 x 14 field
+;   neutral-added trust/cell/recipe rows in nl-neutral-dictionary-query
+;   derived       name/done/give/hold, grounded but without neutral NodeIDs
+;   glue          definition syntax without dictionary meanings of its own
+;   purify-only   usage-lift rows without neutral meaning symbols
+;   missing       no current row; an invitation, never a negative verdict
+;
+; "Description" means nnd-description: the field-health how-token list. This
+; differs deliberately from core-lexicon's circular definitional sentence.
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/line-grammar.fk
+; preludes: form/form-stdlib/text-tokenize.fk form/form-stdlib/pretokenize.fk
+; preludes: form/form-stdlib/str-byte-at.fk
+; preludes: form/form-stdlib/core-lexicon.fk form/form-stdlib/core-lexicon-derived.fk
+; preludes: form/form-stdlib/core-dictionary-neutral-field.fk
+; preludes: form/form-stdlib/nl-neutral-dictionary-query.fk
+; preludes: form/form-stdlib/word-frequency-purify.fk
+; preludes: observe/review-operationalization.fk
+
+(do
+    (defn rds-visible-path ()
+        "observe/fixtures/2026-08-22-form-native-dialogue-response.txt")
+    (defn rds-carrier-path ()
+        "observe/fixtures/2026-08-22-form-native-dialogue-carrier.txt")
+
+    (defn rds-visible () (read_file (rds-visible-path)))
+    (defn rds-carrier () (read_file (rds-carrier-path)))
+    (defn rds-all-source ()
+        (str_concat (rds-visible) (str_concat "\n" (rds-carrier))))
+
+    ; Split visible Markdown into semantic prose and retained artifact text.
+    ; `code` is inside backticks; `target` is inside a Markdown link target.
+    (defn rds-layer-scan (s i n code target prose artifact)
+        (if (ge i n) (list prose artifact)
+            (do
+                (let ch (char_at s i))
+                (let next (if (lt (add i 1) n) (char_at s (add i 1)) ""))
+                (if (str_eq ch "`")
+                    (rds-layer-scan s (add i 1) n (if (eq code 1) 0 1)
+                        target (str_concat prose " ") (str_concat artifact " "))
+                (if (eq code 1)
+                    (rds-layer-scan s (add i 1) n code target prose
+                        (str_concat artifact ch))
+                (if (eq target 1)
+                    (if (str_eq ch ")")
+                        (rds-layer-scan s (add i 1) n code 0 prose
+                            (str_concat artifact " "))
+                        (rds-layer-scan s (add i 1) n code target prose
+                            (str_concat artifact ch)))
+                (if (and (str_eq ch "]") (str_eq next "("))
+                    (rds-layer-scan s (add i 2) n code 1
+                        (str_concat prose "] ") (str_concat artifact " "))
+                    (rds-layer-scan s (add i 1) n code target
+                        (str_concat prose ch) artifact))))))))
+
+    (defn rds-layers ()
+        (rds-layer-scan (rds-visible) 0 (str_len (rds-visible)) 0 0 "" ""))
+    (defn rds-prose () (nth (rds-layers) 0))
+    (defn rds-artifact ()
+        (str_concat (nth (rds-layers) 1) (str_concat "\n" (rds-carrier))))
+
+    (defn rds-words (text)
+        (do
+            (let joined (tk-words text 1))
+            (if (str_eq joined "") (list) (split-on joined " "))))
+    (defn rds-all-words () (rds-words (rds-all-source)))
+    (defn rds-prose-words () (rds-words (rds-prose)))
+    (defn rds-artifact-words () (rds-words (rds-artifact)))
+
+    ; Frequency row = (token occurrences), stable at first encounter.
+    (defn rds-fr (token occurrences) (list token occurrences))
+    (defn rds-fr-token (fr) (nth fr 0))
+    (defn rds-fr-n (fr) (nth fr 1))
+    (defn rds-freq-inc (rows token)
+        (if (eq (len rows) 0) (list (rds-fr token 1))
+            (if (str_eq (rds-fr-token (head rows)) token)
+                (cons (rds-fr token (add (rds-fr-n (head rows)) 1)) (tail rows))
+                (cons (head rows) (rds-freq-inc (tail rows) token)))))
+    (defn rds-freq-loop (tokens rows)
+        (if (eq (len tokens) 0) rows
+            (rds-freq-loop (tail tokens) (rds-freq-inc rows (head tokens)))))
+    (defn rds-freq (tokens) (rds-freq-loop tokens (list)))
+    (defn rds-freq-total (rows)
+        (if (eq (len rows) 0) 0
+            (add (rds-fr-n (head rows)) (rds-freq-total (tail rows)))))
+
+    (defn rds-sorted-insert (fr rows)
+        (if (eq (len rows) 0) (list fr)
+            (if (gt (rds-fr-n fr) (rds-fr-n (head rows)))
+                (cons fr rows)
+                (cons (head rows) (rds-sorted-insert fr (tail rows))))))
+    (defn rds-sort-freq (rows)
+        (if (eq (len rows) 0) (list)
+            (rds-sorted-insert (head rows) (rds-sort-freq (tail rows)))))
+
+    (defn rds-derived-find-loop (rows token)
+        (if (eq (len rows) 0) (list)
+            (if (str_eq (cld-word (head rows)) token) (head rows)
+                (rds-derived-find-loop (tail rows) token))))
+    (defn rds-derived-find (token) (rds-derived-find-loop (cld-rows) token))
+
+    (defn rds-overlay-find-loop (rows token)
+        (if (eq (len rows) 0) (list)
+            (if (str_eq (nnd-text (head rows)) token) (head rows)
+                (rds-overlay-find-loop (tail rows) token))))
+    (defn rds-overlay-find (token)
+        (rds-overlay-find-loop (nnd-overlay-entries) token))
+
+    ; The tokenizer lowercases I. The dictionary preserves its authored surface.
+    (defn rds-core-index (token)
+        (if (str_eq token "i") (cl-index-of "I") (cl-index-of token)))
+
+    (defn rds-cat-neutral-core () 1)
+    (defn rds-cat-neutral-added () 2)
+    (defn rds-cat-derived () 3)
+    (defn rds-cat-glue () 4)
+    (defn rds-cat-purify-only () 5)
+    (defn rds-cat-missing () 6)
+
+    (defn rds-category (token)
+        (if (ge (rds-core-index token) 0) (rds-cat-neutral-core)
+        (if (gt (len (rds-overlay-find token)) 0) (rds-cat-neutral-added)
+        (if (gt (len (rds-derived-find token)) 0) (rds-cat-derived)
+        (if (eq (cl-in-list? (cl-glue) token) 1) (rds-cat-glue)
+        (if (eq (wfp-known? token) 1) (rds-cat-purify-only)
+            (rds-cat-missing)))))))
+
+    (defn rds-cat-name (cat)
+        (if (eq cat (rds-cat-neutral-core)) "neutral-core"
+        (if (eq cat (rds-cat-neutral-added)) "neutral-added"
+        (if (eq cat (rds-cat-derived)) "derived"
+        (if (eq cat (rds-cat-glue)) "glue"
+        (if (eq cat (rds-cat-purify-only)) "purify-only" "missing"))))))
+
+    (defn rds-category-occurrences (freq cat)
+        (if (eq (len freq) 0) 0
+            (add (if (eq (rds-category (rds-fr-token (head freq))) cat)
+                    (rds-fr-n (head freq)) 0)
+                (rds-category-occurrences (tail freq) cat))))
+    (defn rds-category-unique (freq cat)
+        (if (eq (len freq) 0) 0
+            (add (if (eq (rds-category (rds-fr-token (head freq))) cat) 1 0)
+                (rds-category-unique (tail freq) cat))))
+
+    (defn rds-normalize-description-token (token)
+        (if (str_eq token "I") "i" token))
+    (defn rds-description (token)
+        (do
+            (let core-i (rds-core-index token))
+            (let overlay (rds-overlay-find token))
+            (let derived (rds-derived-find token))
+            (let purified (wfp-find token))
+            (if (ge core-i 0) (cdnf-h-how (cdnf-health-at core-i))
+            (if (gt (len overlay) 0) (nnd-desc overlay)
+            (if (gt (len derived) 0) (tail (cld-def derived))
+            (if (gt (len purified) 0) (rds-words (wfp-purified purified))
+                (list)))))))
+
+    (defn rds-freq-add-description (tokens freq)
+        (if (eq (len tokens) 0) freq
+            (rds-freq-add-description (tail tokens)
+                (rds-freq-inc freq
+                    (rds-normalize-description-token (head tokens))))))
+    (defn rds-description-frequency-loop (words freq)
+        (if (eq (len words) 0) freq
+            (rds-description-frequency-loop (tail words)
+                (rds-freq-add-description (rds-description (head words)) freq))))
+    (defn rds-description-frequency (words)
+        (rds-description-frequency-loop words (list)))
+
+    (defn rds-described-occurrences (words)
+        (if (eq (len words) 0) 0
+            (add (if (gt (len (rds-description (head words))) 0) 1 0)
+                (rds-described-occurrences (tail words)))))
+
+    (defn rds-join-tokens (tokens)
+        (if (eq (len tokens) 0) ""
+            (if (eq (len (tail tokens)) 0)
+                (rds-normalize-description-token (head tokens))
+                (str_concat (rds-normalize-description-token (head tokens))
+                    (str_concat " " (rds-join-tokens (tail tokens)))))))
+    (defn rds-string-in? (token rows)
+        (if (eq (len rows) 0) 0
+            (if (str_eq token (head rows)) 1 (rds-string-in? token (tail rows)))))
+    (defn rds-neutral-description-signatures-loop (freq signatures)
+        (if (eq (len freq) 0) signatures
+            (do
+                (let token (rds-fr-token (head freq)))
+                (let cat (rds-category token))
+                (let sig (rds-join-tokens (rds-description token)))
+                (if (and (or (eq cat (rds-cat-neutral-core))
+                             (eq cat (rds-cat-neutral-added)))
+                         (eq (rds-string-in? sig signatures) 0))
+                    (rds-neutral-description-signatures-loop (tail freq)
+                        (cons sig signatures))
+                    (rds-neutral-description-signatures-loop (tail freq) signatures)))))
+    (defn rds-neutral-description-signature-count (freq)
+        (len (rds-neutral-description-signatures-loop freq (list))))
+
+    (defn rds-core-description-signatures-loop (i signatures)
+        (if (ge i (cl-count)) signatures
+            (do
+                (let sig (rds-join-tokens (cdnf-h-how (cdnf-health-at i))))
+                (rds-core-description-signatures-loop (add i 1)
+                    (if (eq (rds-string-in? sig signatures) 1)
+                        signatures (cons sig signatures))))))
+    (defn rds-core-description-signature-count ()
+        (len (rds-core-description-signatures-loop 0 (list))))
+
+    ; Occurrence-weighted trust/sovereignty/vitality over neutral core rows.
+    ; Overlay rows have descriptions but no declared axis triple, so no score is
+    ; invented for them.
+    (defn rds-core-occurrences (words)
+        (if (eq (len words) 0) 0
+            (add (if (ge (rds-core-index (head words)) 0) 1 0)
+                (rds-core-occurrences (tail words)))))
+    (defn rds-axis-sum (words axis)
+        (if (eq (len words) 0) 0
+            (do
+                (let i (rds-core-index (head words)))
+                (let lift (if (lt i 0) 0
+                    (if (eq axis 0) (cdnf-h-trust (cdnf-health-at i))
+                    (if (eq axis 1) (cdnf-h-sov (cdnf-health-at i))
+                        (cdnf-h-vit (cdnf-health-at i))))))
+                (add lift (rds-axis-sum (tail words) axis)))))
+    (defn rds-family-occurrences (words family)
+        (if (eq (len words) 0) 0
+            (do
+                (let i (rds-core-index (head words)))
+                (add (if (and (ge i 0) (eq (cl-fam-of i) family)) 1 0)
+                    (rds-family-occurrences (tail words) family)))))
+
+    (defn rds-template-name (i)
+        (do
+            (let token (cl-word (cl-at i)))
+            (if (str_eq token "nothing") "special:nothing"
+            (if (str_eq token "it") "special:it"
+            (if (str_eq token "self") "special:self"
+            (if (str_eq token "thing") "special:thing"
+            (if (str_eq token "kind") "special:kind"
+            (if (str_eq token "whole") "special:whole"
+            (if (str_eq token "whether") "special:whether"
+                (if (or (eq (cl-fam-of i) 0) (eq (cl-fam-of i) 3)) "trust-template"
+                (if (or (eq (cl-fam-of i) 1) (eq (cl-fam-of i) 5)) "sovereignty-template"
+                (if (or (eq (cl-fam-of i) 2) (or (eq (cl-fam-of i) 4)
+                                                 (eq (cl-fam-of i) 6)))
+                    "vitality-template" "field-template"))))))))))))
+    (defn rds-template-frequency-loop (words freq)
+        (if (eq (len words) 0) freq
+            (do
+                (let i (rds-core-index (head words)))
+                (rds-template-frequency-loop (tail words)
+                    (if (lt i 0) freq
+                        (rds-freq-inc freq (rds-template-name i)))))))
+    (defn rds-template-frequency (words)
+        (rds-template-frequency-loop words (list)))
+
+    (defn rds-bp (part whole)
+        (if (eq whole 0) 0 (div (mul part 10000) whole)))
+    (defn rds-frequency-bin (freq low high)
+        (if (eq (len freq) 0) 0
+            (add (if (and (ge (rds-fr-n (head freq)) low)
+                          (or (lt high 0) (le (rds-fr-n (head freq)) high))) 1 0)
+                (rds-frequency-bin (tail freq) low high))))
+    (defn rds-take-mass (freq n)
+        (if (or (eq n 0) (eq (len freq) 0)) 0
+            (add (rds-fr-n (head freq)) (rds-take-mass (tail freq) (sub n 1)))))
+
+    ; Number and symbol units omitted by tk-words. The repository's GPT-style
+    ; pretokenizer does not advance over this corpus's UTF-8 em dash and reaches
+    ; the value-stack wall. This bounded scanner reads raw bytes, validates the
+    ; leading width, and advances by one complete UTF-8 scalar.
+    (defn rds-byte-alpha? (byte)
+        (if (or (and (ge byte 65) (le byte 90))
+                (and (ge byte 97) (le byte 122))) 1 0))
+    (defn rds-byte-digit? (byte)
+        (if (and (ge byte 48) (le byte 57)) 1 0))
+    (defn rds-byte-ws? (byte)
+        (if (or (eq byte 32) (or (eq byte 9)
+            (or (eq byte 10) (eq byte 13)))) 1 0))
+    (defn rds-utf8-width (lead)
+        (if (lt lead 128) 1
+        (if (and (ge lead 194) (le lead 223)) 2
+        (if (and (ge lead 224) (le lead 239)) 3
+        (if (and (ge lead 240) (le lead 244)) 4 1)))))
+    (defn rds-byte-run-end (text i n kind)
+        (if (ge i n) i
+            (do
+                (let byte (str-byte-at text i))
+                (let same (if (eq kind 1) (rds-byte-alpha? byte)
+                            (if (eq kind 2) (rds-byte-digit? byte)
+                                (rds-byte-ws? byte))))
+                (if (eq same 1) (rds-byte-run-end text (add i 1) n kind) i))))
+    (defn rds-min (a b) (if (lt a b) a b))
+    (defn rds-symbol-label (text i n)
+        (do
+            (let width (rds-utf8-width (str-byte-at text i)))
+            (substring text i (rds-min n (add i width)))))
+    (defn rds-pretoken-frequency-scan (text i n wanted freq)
+        (if (ge i n) freq
+            (do
+                (let byte (str-byte-at text i))
+                (if (eq (rds-byte-alpha? byte) 1)
+                    (rds-pretoken-frequency-scan text
+                        (rds-byte-run-end text (add i 1) n 1) n wanted freq)
+                (if (eq (rds-byte-digit? byte) 1)
+                    (do
+                        (let end (rds-byte-run-end text (add i 1) n 2))
+                        (rds-pretoken-frequency-scan text end n wanted
+                            (if (eq wanted 2)
+                                (rds-freq-inc freq (substring text i end)) freq)))
+                (if (eq (rds-byte-ws? byte) 1)
+                    (rds-pretoken-frequency-scan text
+                        (rds-byte-run-end text (add i 1) n 0) n wanted freq)
+                    (do
+                        (let width (rds-utf8-width byte))
+                        (rds-pretoken-frequency-scan text (add i width) n wanted
+                            (if (eq wanted 3)
+                                (rds-freq-inc freq (rds-symbol-label text i n))
+                                freq)))))))))
+    (defn rds-pretoken-frequency (text wanted)
+        (rds-pretoken-frequency-scan text 0 (str_len text) wanted (list)))
+
+    (defn rds-char-count-loop (text wanted i n total)
+        (if (ge i n) total
+            (rds-char-count-loop text wanted (add i 1) n
+                (add total (if (str_eq (char_at text i) wanted) 1 0)))))
+    (defn rds-char-count (text wanted)
+        (rds-char-count-loop text wanted 0 (str_len text) 0))
+
+    (defn rds-symbol-entry-find-loop (entries symbol)
+        (if (eq (len entries) 0) (list)
+            (if (str_eq (nnd-text (head entries)) symbol) (head entries)
+                (rds-symbol-entry-find-loop (tail entries) symbol))))
+    (defn rds-symbol-entry-find (symbol)
+        (rds-symbol-entry-find-loop (nnd-symbol-entries) symbol))
+    (defn rds-description-repeat (tokens times freq)
+        (if (eq times 0) freq
+            (rds-description-repeat tokens (sub times 1)
+                (rds-freq-add-description tokens freq))))
+    (defn rds-symbol-description-frequency-loop (entries text freq)
+        (if (eq (len entries) 0) freq
+            (do
+                (let entry (head entries))
+                (let occurrences (rds-char-count text (nnd-text entry)))
+                (rds-symbol-description-frequency-loop (tail entries) text
+                    (rds-description-repeat (nnd-desc entry) occurrences freq)))))
+    (defn rds-symbol-description-frequency (text)
+        (rds-symbol-description-frequency-loop (nnd-symbol-entries) text (list)))
+    (defn rds-symbol-recognized-occurrences-loop (entries text total)
+        (if (eq (len entries) 0) total
+            (rds-symbol-recognized-occurrences-loop (tail entries) text
+                (add total (rds-char-count text (nnd-text (head entries)))))))
+    (defn rds-symbol-recognized-occurrences (text)
+        (rds-symbol-recognized-occurrences-loop (nnd-symbol-entries) text 0))
+    (defn rds-symbol-recognized-unique-loop (entries text total)
+        (if (eq (len entries) 0) total
+            (rds-symbol-recognized-unique-loop (tail entries) text
+                (add total (if (gt (rds-char-count text (nnd-text (head entries))) 0)
+                    1 0)))))
+    (defn rds-symbol-recognized-unique (text)
+        (rds-symbol-recognized-unique-loop (nnd-symbol-entries) text 0))
+    (defn rds-description-outside-core (tokens)
+        (if (eq (len tokens) 0) 0
+            (add (if (eq (cl-ok-token? (head tokens)) 1) 0 1)
+                (rds-description-outside-core (tail tokens)))))
+    (defn rds-symbol-outside-weighted-loop (entries text total)
+        (if (eq (len entries) 0) total
+            (do
+                (let entry (head entries))
+                (rds-symbol-outside-weighted-loop (tail entries) text
+                    (add total (mul (rds-char-count text (nnd-text entry))
+                        (rds-description-outside-core (nnd-desc entry))))))))
+    (defn rds-symbol-outside-weighted (text)
+        (rds-symbol-outside-weighted-loop (nnd-symbol-entries) text 0))
+
+    (defn rds-freq-merge-loop (from into)
+        (if (eq (len from) 0) into
+            (do
+                (let fr (head from))
+                (rds-freq-merge-loop (tail from)
+                    (rds-description-repeat (list (rds-fr-token fr))
+                        (rds-fr-n fr) into)))))
+    (defn rds-freq-merge (a b) (rds-freq-merge-loop a b))
+
+    (defn rds-exact-purify-occurrences (words)
+        (if (eq (len words) 0) 0
+            (add (wfp-known? (head words))
+                (rds-exact-purify-occurrences (tail words)))))
+    (defn rds-exact-purify-unique (freq)
+        (if (eq (len freq) 0) 0
+            (add (wfp-known? (rds-fr-token (head freq)))
+                (rds-exact-purify-unique (tail freq)))))
+
+    ; The neutral id and description are checked through every seated tongue.
+    ; This verifies form-neutral identity; it does not pretend the descriptions
+    ; are localized (they are one English core-token rendering today).
+    (defn rds-id-all-tongues? (i tongues)
+        (if (eq (len tongues) 0) 1
+            (do
+                (let entry (nnd-core-entry i (head tongues)))
+                (if (and (eq (nnd-id entry) i)
+                         (str_eq (rds-join-tokens (nnd-desc entry))
+                                 (rds-join-tokens (cdnf-h-how (cdnf-health-at i)))))
+                    (rds-id-all-tongues? i (tail tongues)) 0))))
+    (defn rds-response-ids-all-tongues-loop (freq)
+        (if (eq (len freq) 0) 1
+            (do
+                (let i (rds-core-index (rds-fr-token (head freq))))
+                (if (or (lt i 0) (eq (rds-id-all-tongues? i (cdnf-tongues)) 1))
+                    (rds-response-ids-all-tongues-loop (tail freq)) 0))))
+
+    (defn rds-surface-shared-loop (i j tongue surface)
+        (if (ge j (cl-count)) 0
+            (if (and (not (eq i j))
+                     (str_eq surface (cdnf-surface j tongue))) 1
+                (rds-surface-shared-loop i (add j 1) tongue surface))))
+    (defn rds-homonym-rows-tongue-loop (i tongue total)
+        (if (ge i (cl-count)) total
+            (do
+                (let surface (cdnf-surface i tongue))
+                (rds-homonym-rows-tongue-loop (add i 1) tongue
+                    (add total (rds-surface-shared-loop i 0 tongue surface))))))
+    (defn rds-homonym-rows-tongue (tongue)
+        (rds-homonym-rows-tongue-loop 0 tongue 0))
+    (defn rds-homonym-rows-all-loop (tongues total)
+        (if (eq (len tongues) 0) total
+            (rds-homonym-rows-all-loop (tail tongues)
+                (add total (rds-homonym-rows-tongue (head tongues))))))
+    (defn rds-homonym-rows-all ()
+        (rds-homonym-rows-all-loop (cdnf-tongues) 0))
+
+    (defn rds-partition-total (freq)
+        (add (rds-category-occurrences freq 1)
+        (add (rds-category-occurrences freq 2)
+        (add (rds-category-occurrences freq 3)
+        (add (rds-category-occurrences freq 4)
+        (add (rds-category-occurrences freq 5)
+             (rds-category-occurrences freq 6)))))))
+
+    (defn rds-review-verdict ()
+        (do
+            (let all-words (rds-all-words))
+            (let freq (rds-freq all-words))
+            (let word-desc (rds-description-frequency all-words))
+            (let symbol-desc (rds-symbol-description-frequency (rds-all-source)))
+            (let desc (rds-freq-merge word-desc symbol-desc))
+            (let layer-balanced (if (eq (len all-words)
+                (add (len (rds-prose-words)) (len (rds-artifact-words)))) 1 0))
+            (let partitioned (if (eq (rds-partition-total freq) (len all-words)) 1 0))
+            (let expanded (if (gt (rds-freq-total desc) 0) 1 0))
+            (let translated (rds-response-ids-all-tongues-loop freq))
+            (let missing-control (if (eq (rds-category "zzunseatedcontrolzz")
+                                         (rds-cat-missing)) 1 0))
+            (ro-verdict
+                (list
+                    (ro-row 1 1 layer-balanced 1 0 0 1 1)
+                    (ro-row 2 1 partitioned 1 0 0 1 1)
+                    (ro-row 3 1 expanded 1 0 0 1 1)
+                    (ro-row 4 1 translated 1 0 0 1 1)
+                    (ro-row 5 1 missing-control 1 0 0 1 1))
+                5)))
+
+    (defn rds-print-freq-loop (freq n include-category)
+        (if (or (eq n 0) (eq (len freq) 0)) 0
+            (do
+                (print (rds-fr-token (head freq)))
+                (print "\t")
+                (print (int_to_str (rds-fr-n (head freq))))
+                (if (eq include-category 1)
+                    (do (print "\t")
+                        (print (rds-cat-name
+                            (rds-category (rds-fr-token (head freq)))))) 0)
+                (print "\n")
+                (rds-print-freq-loop (tail freq) (sub n 1) include-category))))
+    (defn rds-print-freq (freq n include-category)
+        (rds-print-freq-loop (rds-sort-freq freq) n include-category))
+    (defn rds-print-missing-loop (freq)
+        (if (eq (len freq) 0) 0
+            (do
+                (if (eq (rds-category (rds-fr-token (head freq)))
+                        (rds-cat-missing))
+                    (do
+                        (print (rds-fr-token (head freq)))
+                        (print "\t")
+                        (print (int_to_str (rds-fr-n (head freq))))
+                        (print "\n")) 0)
+                (rds-print-missing-loop (tail freq)))))
+    (defn rds-print-category-line (name freq cat)
+        (do
+            (print name) (print ".occ=")
+            (print (int_to_str (rds-category-occurrences freq cat)))
+            (print " unique=")
+            (print (int_to_str (rds-category-unique freq cat)))
+            (print "\n")))
+    (defn rds-print-tongue-homonyms (tongues)
+        (if (eq (len tongues) 0) 0
+            (do
+                (print (head tongues)) (print "=")
+                (print (int_to_str (rds-homonym-rows-tongue (head tongues))))
+                (print (if (eq (len (tail tongues)) 0) "\n" " "))
+                (rds-print-tongue-homonyms (tail tongues)))))
+
+    (defn rds-live ()
+        (do
+            (let all-words (rds-all-words))
+            (let prose-words (rds-prose-words))
+            (let artifact-words (rds-artifact-words))
+            (let all-freq (rds-freq all-words))
+            (let prose-freq (rds-freq prose-words))
+            (let artifact-freq (rds-freq artifact-words))
+            (let desc-freq (rds-description-frequency all-words))
+            (let symbol-desc-freq (rds-symbol-description-frequency (rds-all-source)))
+            (let combined-desc-freq (rds-freq-merge desc-freq symbol-desc-freq))
+            (let sorted-all (rds-sort-freq all-freq))
+            (let numbers (rds-pretoken-frequency (rds-all-source) 2))
+            (let symbols (rds-pretoken-frequency (rds-all-source) 3))
+            (let core-occ (rds-core-occurrences all-words))
+            (print "scope.visible-bytes=") (print (int_to_str (str_len (rds-visible))))
+            (print " carrier-bytes=") (print (int_to_str (str_len (rds-carrier))))
+            (print " all-word-occ=") (print (int_to_str (len all-words)))
+            (print " all-word-unique=") (print (int_to_str (len all-freq)))
+            (print "\n")
+            (print "layers.prose-word-occ=") (print (int_to_str (len prose-words)))
+            (print " prose-unique=") (print (int_to_str (len prose-freq)))
+            (print " artifact-word-occ=") (print (int_to_str (len artifact-words)))
+            (print " artifact-unique=") (print (int_to_str (len artifact-freq)))
+            (print " balanced=")
+            (print (int_to_str (eq (len all-words)
+                (add (len prose-words) (len artifact-words)))))
+            (print "\n")
+            (print "dictionary.core-meanings=") (print (int_to_str (cl-count)))
+            (print " tongues=") (print (int_to_str (cdnf-tongue-count)))
+            (print " surface-rows=")
+            (print (int_to_str (mul (cl-count) (cdnf-tongue-count))))
+            (print " description-rendering-languages=1")
+            (print " core-description-signatures=")
+            (print (int_to_str (rds-core-description-signature-count)))
+            (print " signature-bp-of-meanings=")
+            (print (int_to_str (rds-bp (rds-core-description-signature-count)
+                                       (cl-count))))
+            (print " homonym-rows=") (print (int_to_str (rds-homonym-rows-all)))
+            (print " homonym-row-bp=")
+            (print (int_to_str (rds-bp (rds-homonym-rows-all)
+                (mul (cl-count) (cdnf-tongue-count)))))
+            (print "\n")
+            (print "dictionary.homonym-rows-by-tongue ")
+            (rds-print-tongue-homonyms (cdnf-tongues))
+            (rds-print-category-line "coverage.all.neutral-core" all-freq 1)
+            (rds-print-category-line "coverage.all.neutral-added" all-freq 2)
+            (rds-print-category-line "coverage.all.derived" all-freq 3)
+            (rds-print-category-line "coverage.all.glue" all-freq 4)
+            (rds-print-category-line "coverage.all.purify-only" all-freq 5)
+            (rds-print-category-line "coverage.all.missing" all-freq 6)
+            (print "coverage.all.described-occ=")
+            (print (int_to_str (rds-described-occurrences all-words)))
+            (print " described-bp=")
+            (print (int_to_str (rds-bp (rds-described-occurrences all-words)
+                                       (len all-words))))
+            (print " neutral-core-bp=")
+            (print (int_to_str (rds-bp core-occ (len all-words))))
+            (print " missing-bp=")
+            (print (int_to_str (rds-bp
+                (rds-category-occurrences all-freq (rds-cat-missing))
+                (len all-words))))
+            (print "\n")
+            (rds-print-category-line "coverage.prose.neutral-core" prose-freq 1)
+            (rds-print-category-line "coverage.prose.neutral-added" prose-freq 2)
+            (rds-print-category-line "coverage.prose.derived" prose-freq 3)
+            (rds-print-category-line "coverage.prose.glue" prose-freq 4)
+            (rds-print-category-line "coverage.prose.purify-only" prose-freq 5)
+            (rds-print-category-line "coverage.prose.missing" prose-freq 6)
+            (print "coverage.prose.neutral-described-bp=")
+            (print (int_to_str (rds-bp
+                (add (rds-category-occurrences prose-freq 1)
+                     (rds-category-occurrences prose-freq 2))
+                (len prose-words))))
+            (print " prose-missing-bp=")
+            (print (int_to_str (rds-bp
+                (rds-category-occurrences prose-freq 6) (len prose-words))))
+            (print "\n")
+            (print "spectrum.hapax=")
+            (print (int_to_str (rds-frequency-bin all-freq 1 1)))
+            (print " f2=") (print (int_to_str (rds-frequency-bin all-freq 2 2)))
+            (print " f3=") (print (int_to_str (rds-frequency-bin all-freq 3 3)))
+            (print " f4=") (print (int_to_str (rds-frequency-bin all-freq 4 4)))
+            (print " f5plus=") (print (int_to_str (rds-frequency-bin all-freq 5 -1)))
+            (print " hapax-unique-bp=")
+            (print (int_to_str (rds-bp (rds-frequency-bin all-freq 1 1)
+                                       (len all-freq))))
+            (print " top1-bp=")
+            (print (int_to_str (rds-bp (rds-take-mass sorted-all 1) (len all-words))))
+            (print " top10-bp=")
+            (print (int_to_str (rds-bp (rds-take-mass sorted-all 10) (len all-words))))
+            (print "\n")
+            (print "description.word-expanded-tokens=")
+            (print (int_to_str (rds-freq-total desc-freq)))
+            (print " expanded-unique=") (print (int_to_str (len desc-freq)))
+            (print " neutral-response-types=")
+            (print (int_to_str (add (rds-category-unique all-freq 1)
+                                   (rds-category-unique all-freq 2))))
+            (print " neutral-description-signatures=")
+            (print (int_to_str (rds-neutral-description-signature-count all-freq)))
+            (print " signature-bp-of-response-types=")
+            (print (int_to_str (rds-bp
+                (rds-neutral-description-signature-count all-freq)
+                (add (rds-category-unique all-freq 1)
+                     (rds-category-unique all-freq 2)))))
+            (print "\n")
+            (print "description.symbol-expanded-tokens=")
+            (print (int_to_str (rds-freq-total symbol-desc-freq)))
+            (print " symbol-expanded-unique=")
+            (print (int_to_str (len symbol-desc-freq)))
+            (print " combined-expanded-tokens=")
+            (print (int_to_str (rds-freq-total combined-desc-freq)))
+            (print " combined-expanded-unique=")
+            (print (int_to_str (len combined-desc-freq)))
+            (print " symbol-description-outside-core-weighted=")
+            (print (int_to_str (rds-symbol-outside-weighted (rds-all-source))))
+            (print "\n")
+            (print "values.core-occ=") (print (int_to_str core-occ))
+            (print " trust-sum=") (print (int_to_str (rds-axis-sum all-words 0)))
+            (print " sovereignty-sum=") (print (int_to_str (rds-axis-sum all-words 1)))
+            (print " vitality-sum=") (print (int_to_str (rds-axis-sum all-words 2)))
+            (print " trust-mean-milli=")
+            (print (int_to_str (if (eq core-occ 0) 0
+                (div (mul (rds-axis-sum all-words 0) 1000) core-occ))))
+            (print " sovereignty-mean-milli=")
+            (print (int_to_str (if (eq core-occ 0) 0
+                (div (mul (rds-axis-sum all-words 1) 1000) core-occ))))
+            (print " vitality-mean-milli=")
+            (print (int_to_str (if (eq core-occ 0) 0
+                (div (mul (rds-axis-sum all-words 2) 1000) core-occ))))
+            (print "\n")
+            (print "values.family ground=")
+            (print (int_to_str (rds-family-occurrences all-words 0)))
+            (print " person=") (print (int_to_str (rds-family-occurrences all-words 1)))
+            (print " act=") (print (int_to_str (rds-family-occurrences all-words 2)))
+            (print " ask=") (print (int_to_str (rds-family-occurrences all-words 3)))
+            (print " time=") (print (int_to_str (rds-family-occurrences all-words 4)))
+            (print " place=") (print (int_to_str (rds-family-occurrences all-words 5)))
+            (print " degree=") (print (int_to_str (rds-family-occurrences all-words 6)))
+            (print " relation=") (print (int_to_str (rds-family-occurrences all-words 7)))
+            (print "\n")
+            (print "purify.exact-occ=")
+            (print (int_to_str (rds-exact-purify-occurrences all-words)))
+            (print " exact-unique=")
+            (print (int_to_str (rds-exact-purify-unique all-freq)))
+            (print "\n")
+            (print "symbols.number-runs=") (print (int_to_str (rds-freq-total numbers)))
+            (print " number-unique=") (print (int_to_str (len numbers)))
+            (print " punctuation-runs=") (print (int_to_str (rds-freq-total symbols)))
+            (print " punctuation-unique=") (print (int_to_str (len symbols)))
+            (print " recognized-symbol-occ=")
+            (print (int_to_str (rds-symbol-recognized-occurrences (rds-all-source))))
+            (print " recognized-symbol-unique=")
+            (print (int_to_str (rds-symbol-recognized-unique (rds-all-source))))
+            (print " recognized-symbol-bp=")
+            (print (int_to_str (rds-bp
+                (rds-symbol-recognized-occurrences (rds-all-source))
+                (rds-freq-total symbols))))
+            (print " form-open=") (print (int_to_str (rds-char-count (rds-all-source) "(")))
+            (print " form-close=") (print (int_to_str (rds-char-count (rds-all-source) ")")))
+            (print " form-add=") (print (int_to_str (rds-char-count (rds-all-source) "+")))
+            (print " form-eq=") (print (int_to_str (rds-char-count (rds-all-source) "=")))
+            (print "\n")
+            (print "review.identity-all-14=")
+            (print (int_to_str (rds-response-ids-all-tongues-loop all-freq)))
+            (print " native-review-verdict=")
+            (print (int_to_str (rds-review-verdict)))
+            (print "\n")
+            (print "\nTOP_ALL_WORDS token\tocc\tstratum\n")
+            (rds-print-freq all-freq 25 1)
+            (print "\nTOP_PROSE_WORDS token\tocc\tstratum\n")
+            (rds-print-freq prose-freq 25 1)
+            (print "\nTOP_ARTIFACT_WORDS token\tocc\tstratum\n")
+            (rds-print-freq artifact-freq 20 1)
+            (print "\nTOP_DESCRIPTION_WORDS token\tocc\tstratum\n")
+            (rds-print-freq desc-freq 25 1)
+            (print "\nTOP_SYMBOL_DESCRIPTION_WORDS token\tocc\tstratum\n")
+            (rds-print-freq symbol-desc-freq 25 1)
+            (print "\nTOP_COMBINED_DESCRIPTION_WORDS token\tocc\tstratum\n")
+            (rds-print-freq combined-desc-freq 25 1)
+            (print "\nDESCRIPTION_TEMPLATES template\tocc\n")
+            (rds-print-freq (rds-template-frequency all-words) 20 0)
+            (print "\nTOP_NUMBER_RUNS token\tocc\n")
+            (rds-print-freq numbers 20 0)
+            (print "\nTOP_PUNCTUATION_RUNS token\tocc\n")
+            (rds-print-freq symbols 20 0)
+            (print "\nALL_MISSING_WORDS token\tocc\n")
+            (rds-print-missing-loop (rds-sort-freq all-freq))
+            0))
+
+    (defn rds-check ()
+        (do
+            (let all-words (rds-all-words))
+            (let freq (rds-freq all-words))
+            (let word-desc (rds-description-frequency all-words))
+            (let symbol-desc (rds-symbol-description-frequency (rds-all-source)))
+            (let desc (rds-freq-merge word-desc symbol-desc))
+            (add (if (and (gt (str_len (rds-visible)) 0)
+                          (gt (str_len (rds-carrier)) 0)) 1 0)
+            (add (if (eq (len all-words)
+                         (add (len (rds-prose-words)) (len (rds-artifact-words)))) 2 0)
+            (add (if (eq (rds-partition-total freq) (len all-words)) 4 0)
+            (add (if (gt (rds-category-occurrences freq (rds-cat-neutral-core)) 0) 8 0)
+            (add (if (gt (rds-category-occurrences freq (rds-cat-missing)) 0) 16 0)
+            (add (if (gt (rds-freq-total desc) 0) 32 0)
+            (add (if (eq (rds-response-ids-all-tongues-loop freq) 1) 64 0)
+            (add (if (and (eq (cl-check) 262143)
+                          (eq (cdnf-check) 16383)) 128 0)
+            (add (if (and (eq (nnd-check) 8191)
+                          (eq (wfp-check) 8191)) 256 0)
+            (add (if (and (eq (cld-well-founded?) 1)
+                          (eq (cld-core-intact?) 1)) 512 0)
+            (add (if (gt (rds-core-description-signature-count) 1) 1024 0)
+            (add (if (gt (rds-homonym-rows-all) 0) 2048 0)
+            (add (if (and (gt (rds-char-count (rds-all-source) "(") 0)
+                          (gt (rds-char-count (rds-all-source) "=") 0)) 4096 0)
+            (add (if (eq (rds-category "zzunseatedcontrolzz")
+                         (rds-cat-missing)) 8192 0)
+            (add (if (eq (rds-review-verdict) (ro-pass)) 16384 0)
+                 0)))))))))))))))))
+
+    0)
