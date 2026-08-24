@@ -117,10 +117,58 @@
                     (if (lt c 0) ""
                         (substring window o (add c (str_len (HeedClose)))))))))
 
+    ; ── the two-phase ledger ───────────────────────────────────────────────
+    ; (phase query-left answer-left cut timeout). answer-left holds the reserve
+    ; from the start and is UNTOUCHABLE while phase is PhaseQuery — that is what
+    ; non-borrowable means here, and it is why query verbosity can never reach
+    ; the answer. Opening the answer phase zeroes the query remainder into `cut`
+    ; rather than carrying it: unused query fuel is cut, not banked.
+    (defn fhc-ledger (phase query-left answer-left cut timeout)
+        (list phase query-left answer-left cut timeout))
+    (defn fhc-ledger-phase (l) (nth l 0))
+    (defn fhc-ledger-query (l) (nth l 1))
+    (defn fhc-ledger-answer (l) (nth l 2))
+    (defn fhc-ledger-cut (l) (nth l 3))
+    (defn fhc-ledger-timeout (l) (nth l 4))
+
+    (defn fhc-ledger-two-phase (query reserve) (fhc-ledger (PhaseQuery) query reserve 0 0))
+    ; A fungible budget is one phase with no reserve — the old contract, kept
+    ; exactly so the existing entry points mean what they always meant.
+    (defn fhc-ledger-fungible (n) (fhc-ledger (PhaseQuery) n 0 0 0))
+
+    (defn fhc-steps-left (l)
+        (if (eq (fhc-ledger-phase l) (PhaseQuery)) (fhc-ledger-query l) (fhc-ledger-answer l)))
+
+    (defn fhc-ledger-spend (l)
+        (if (eq (fhc-ledger-phase l) (PhaseQuery))
+            (fhc-ledger (PhaseQuery) (sub (fhc-ledger-query l) 1) (fhc-ledger-answer l)
+                (fhc-ledger-cut l) (fhc-ledger-timeout l))
+            (fhc-ledger (PhaseAnswer) (fhc-ledger-query l) (sub (fhc-ledger-answer l) 1)
+                (fhc-ledger-cut l) (fhc-ledger-timeout l))))
+
+    ; Opened ONLY after a typed hit/miss observation has actually been injected.
+    (defn fhc-ledger-open-answer (l)
+        (fhc-ledger (PhaseAnswer) 0 (fhc-ledger-answer l)
+            (add (fhc-ledger-cut l) (fhc-ledger-query l)) (fhc-ledger-timeout l)))
+
+    (defn fhc-ledger-mark-timeout (l)
+        (fhc-ledger (fhc-ledger-phase l) (fhc-ledger-query l) (fhc-ledger-answer l)
+            (fhc-ledger-cut l) 1))
+
     ; ── cursor state ───────────────────────────────────────────────────────
-    ; (window budget lookups injected honored refused elapsed)
-    (defn fhc-cursor (window budget lookups injected honored refused elapsed)
-        (list window budget lookups injected honored refused elapsed))
+    ; (window heeds lookups injected honored refused elapsed ledger
+    ;  query-tokens answer-tokens bytes stopped)
+    ;
+    ; heeds is the LOOKUP budget (MaxHeeds) and is a different thing from the
+    ; step ledger; it keeps its old accessor name fhc-budget so every existing
+    ; reader still reads what it always read.
+    ;
+    ; query-tokens / answer-tokens / bytes are bounded non-content telemetry:
+    ; counts of what streamed, never the stream itself.
+    (defn fhc-cursor (window heeds lookups injected honored refused elapsed
+                      ledger qtok atok bytes stopped)
+        (list window heeds lookups injected honored refused elapsed
+              ledger qtok atok bytes stopped))
     (defn fhc-window (c) (nth c 0))
     (defn fhc-budget (c) (nth c 1))
     (defn fhc-lookups (c) (nth c 2))
@@ -128,7 +176,27 @@
     (defn fhc-honored (c) (nth c 4))
     (defn fhc-refused (c) (nth c 5))
     (defn fhc-elapsed (c) (nth c 6))
-    (defn fhc-fresh (budget) (fhc-cursor "" budget 0 0 (empty) 0 0))
+    (defn fhc-ledger-of (c) (nth c 7))
+    (defn fhc-query-tokens (c) (nth c 8))
+    (defn fhc-answer-tokens (c) (nth c 9))
+    (defn fhc-bytes (c) (nth c 10))
+    (defn fhc-stopped? (c) (nth c 11))
+
+    (defn fhc-phase (c) (fhc-ledger-phase (fhc-ledger-of c)))
+    (defn fhc-cut (c) (fhc-ledger-cut (fhc-ledger-of c)))
+    (defn fhc-timeout? (c) (fhc-ledger-timeout (fhc-ledger-of c)))
+    (defn fhc-query-left (c) (fhc-ledger-query (fhc-ledger-of c)))
+    (defn fhc-answer-left (c) (fhc-ledger-answer (fhc-ledger-of c)))
+
+    (defn fhc-with-ledger (c l)
+        (fhc-cursor (fhc-window c) (fhc-budget c) (fhc-lookups c) (fhc-injected c)
+            (fhc-honored c) (fhc-refused c) (fhc-elapsed c) l
+            (fhc-query-tokens c) (fhc-answer-tokens c) (fhc-bytes c) (fhc-stopped? c)))
+
+    (defn fhc-fresh-2p (heeds query reserve)
+        (fhc-cursor "" heeds 0 0 (empty) 0 0 (fhc-ledger-two-phase query reserve) 0 0 0 0))
+    (defn fhc-fresh (heeds)
+        (fhc-cursor "" heeds 0 0 (empty) 0 0 (fhc-ledger-fungible 0) 0 0 0 0))
 
     ; ── status -> the heedmark law ─────────────────────────────────────────
     (defn fhc-outcome-of (status)
@@ -176,34 +244,88 @@
     ; Returns (out cursor pos). out is the model's own id stream; injected
     ; observation ids are counted in the cursor, never mixed into out, so a
     ; witness can always tell what the model said from what the body answered.
-    (defn fhc-run (ctx stepf prefillf decodef encodef lookupf local-ready
-                   id pos n stops c out)
-        (if (le n 0) (list out c pos)
+    ; ── closing, and the three different ways a walk can end ───────────────
+    ; STOP, TIMEOUT and ordinary end are three facts, not one. A scorer that
+    ; cannot tell them apart records a miss the model never made.
+    ;   stop     the model emitted a stop id — it finished on purpose
+    ;   timeout  the query budget ran out while a frame was still HELD. The
+    ;            decode timed out and the answer alternative was never tried;
+    ;            that is a named observation, NOT exhaustion.
+    ;   end      steps ran out with nothing held
+    ; Already-emitted model state is never undone here. The walk records what
+    ; happened; it does not rewind the stream.
+    (defn fhc-note (c reason)
+        (fhc-cursor (fhc-window c) (fhc-budget c) (fhc-lookups c) (fhc-injected c)
+            (append (fhc-honored c) (list reason)) (fhc-refused c) (fhc-elapsed c)
+            (fhc-ledger-mark-timeout (fhc-ledger-of c))
+            (fhc-query-tokens c) (fhc-answer-tokens c) (fhc-bytes c) (fhc-stopped? c)))
+
+    (defn fhc-mark-stopped (c)
+        (fhc-cursor (fhc-window c) (fhc-budget c) (fhc-lookups c) (fhc-injected c)
+            (fhc-honored c) (fhc-refused c) (fhc-elapsed c) (fhc-ledger-of c)
+            (fhc-query-tokens c) (fhc-answer-tokens c) (fhc-bytes c) 1))
+
+    (defn fhc-close (c out pos)
+        (if (and (eq (fhc-phase c) (PhaseQuery))
+                 (str_eq (fhc-scan (fhc-window c)) (fhm-state-held)))
+            (list out (fhc-note c (fhm-timeout-reason)) pos)
+            (list out c pos)))
+
+    ; Bounded non-content telemetry, counted AT the live cursor: how many tokens
+    ; and bytes streamed in which phase. Never the stream itself.
+    (defn fhc-count (c txt)
+        (do (let l (fhc-ledger-of c))
+            (let query? (eq (fhc-ledger-phase l) (PhaseQuery)))
+            (fhc-cursor (fhc-window c) (fhc-budget c) (fhc-lookups c) (fhc-injected c)
+                (fhc-honored c) (fhc-refused c) (fhc-elapsed c) (fhc-ledger-spend l)
+                (if query? (add (fhc-query-tokens c) 1) (fhc-query-tokens c))
+                (if query? (fhc-answer-tokens c) (add (fhc-answer-tokens c) 1))
+                (add (fhc-bytes c) (str_len txt)) (fhc-stopped? c))))
+
+    ; ── the walk ───────────────────────────────────────────────────────────
+    (defn fhc-walk (ctx stepf prefillf decodef encodef lookupf local-ready
+                    id pos stops c out)
+        (if (le (fhc-steps-left (fhc-ledger-of c)) 0) (fhc-close c out pos)
             (do
                 (let nid (stepf ctx id pos))
-                (if (if (lt nid 0) 1 (fhc-stop? nid stops)) (list out c pos)
-                    (fhc-dispatch ctx stepf prefillf decodef encodef lookupf
-                        local-ready nid (add pos 1) (sub n 1) stops c
-                        (fhc-feed (fhc-window c) (decodef ctx (list nid)))
-                        (append out (list nid)))))))
+                (if (lt nid 0) (fhc-close c out pos)
+                    (if (eq (fhc-stop? nid stops) 1)
+                        (list out (fhc-mark-stopped c) pos)
+                        (do
+                            (let txt (decodef ctx (list nid)))
+                            (fhc-dispatch ctx stepf prefillf decodef encodef lookupf
+                                local-ready nid (add pos 1) stops (fhc-count c txt)
+                                (fhc-feed (fhc-window c) txt)
+                                (append out (list nid)))))))))
 
     ; One token has been fed into the window; decide what it made.
     (defn fhc-dispatch (ctx stepf prefillf decodef encodef lookupf local-ready
-                        id pos n stops c w out)
+                        id pos stops c w out)
         (do
             (let state (fhc-scan w))
             (if (str_eq state (fhm-state-complete))
                 (fhc-resume ctx stepf prefillf decodef encodef lookupf
-                    local-ready id pos n stops c w out)
+                    local-ready id pos stops c w out)
                 (if (str_eq state (fhm-state-over))
                     (fhc-refuse ctx stepf prefillf decodef encodef lookupf
-                        local-ready id pos n stops c out)
-                    (fhc-run ctx stepf prefillf decodef encodef lookupf
-                        local-ready id pos n stops
+                        local-ready id pos stops c out)
+                    (fhc-walk ctx stepf prefillf decodef encodef lookupf
+                        local-ready id pos stops
                         (fhc-cursor w (fhc-budget c) (fhc-lookups c)
-                            (fhc-injected c) (fhc-honored c)
-                            (fhc-refused c) (fhc-elapsed c))
+                            (fhc-injected c) (fhc-honored c) (fhc-refused c)
+                            (fhc-elapsed c) (fhc-ledger-of c)
+                            (fhc-query-tokens c) (fhc-answer-tokens c)
+                            (fhc-bytes c) (fhc-stopped? c))
                         out)))))
+
+    ; ── compatibility delegates ────────────────────────────────────────────
+    ; The old entry points keep their exact signatures and their exact meaning:
+    ; one fungible budget, no reserve. Everything already written against them
+    ; reads what it always read. New callers take the two-phase entries below.
+    (defn fhc-run (ctx stepf prefillf decodef encodef lookupf local-ready
+                   id pos n stops c out)
+        (fhc-walk ctx stepf prefillf decodef encodef lookupf local-ready
+            id pos stops (fhc-with-ledger c (fhc-ledger-fungible n)) out))
 
     ; ── the seeded entry, and why it exists ────────────────────────────────
     ; A prefill answers with the FIRST GENERATED TOKEN — the argmax at the last
@@ -220,47 +342,95 @@
     ;
     ; Seed the window and the output with that token, then walk. A seed that is
     ; itself a whole envelope is honored like any other completion.
+    (defn fhc-seed-into (ctx stepf prefillf decodef encodef lookupf local-ready
+                         seed pos stops c)
+        (if (lt seed 0) (list (empty) c pos)
+            (if (eq (fhc-stop? seed stops) 1)
+                (list (empty) (fhc-mark-stopped c) pos)
+                (do (let txt (decodef ctx (list seed)))
+                    (fhc-dispatch ctx stepf prefillf decodef encodef lookupf
+                        local-ready seed pos stops (fhc-count c txt)
+                        (fhc-feed "" txt) (list seed))))))
+
     (defn fhc-run-seeded (ctx stepf prefillf decodef encodef lookupf local-ready
                           seed pos n stops budget)
-        (if (if (lt seed 0) 1 (fhc-stop? seed stops))
-            (list (empty) (fhc-fresh budget) pos)
-            (fhc-dispatch ctx stepf prefillf decodef encodef lookupf local-ready
-                seed pos (sub n 1) stops (fhc-fresh budget)
-                (fhc-feed "" (decodef ctx (list seed)))
-                (list seed))))
+        (fhc-seed-into ctx stepf prefillf decodef encodef lookupf local-ready
+            seed pos stops
+            (fhc-with-ledger (fhc-fresh budget) (fhc-ledger-fungible n))))
+
+    ; ── the two-phase entries ──────────────────────────────────────────────
+    ; heeds is the lookup budget; query is the step budget for composing a
+    ; knowledge query; reserve is the non-borrowable answer budget that opens
+    ; only once a typed observation has actually been injected.
+    (defn fhc-run-2p (ctx stepf prefillf decodef encodef lookupf local-ready
+                      id pos stops heeds query reserve out)
+        (fhc-walk ctx stepf prefillf decodef encodef lookupf local-ready
+            id pos stops (fhc-fresh-2p heeds query reserve) out))
+
+    (defn fhc-run-seeded-2p (ctx stepf prefillf decodef encodef lookupf local-ready
+                             seed pos stops heeds query reserve)
+        (fhc-seed-into ctx stepf prefillf decodef encodef lookupf local-ready
+            seed pos stops (fhc-fresh-2p heeds query reserve)))
 
     ; An over-long query. The window is reset so the stream can carry on, the
     ; refusal is counted, and the budget is UNTOUCHED — no lookup ran, so none
     ; was spent. The reason is the parser's own named nothing.
     (defn fhc-refuse (ctx stepf prefillf decodef encodef lookupf local-ready
-                      id pos n stops c out)
-        (fhc-run ctx stepf prefillf decodef encodef lookupf local-ready
-            id pos n stops
+                      id pos stops c out)
+        (fhc-walk ctx stepf prefillf decodef encodef lookupf local-ready
+            id pos stops
             (fhc-cursor "" (fhc-budget c) (fhc-lookups c) (fhc-injected c)
                 (append (fhc-honored c) (list (fhm-over-reason)))
-                (add (fhc-refused c) 1) (fhc-elapsed c))
+                (add (fhc-refused c) 1) (fhc-elapsed c) (fhc-ledger-of c)
+                (fhc-query-tokens c) (fhc-answer-tokens c) (fhc-bytes c)
+                (fhc-stopped? c))
             out))
 
     ; A complete frame: honor it, prefill what enters, RESET the window so the
     ; same envelope cannot fire twice, and carry on from where prefill left off.
+    ; A complete frame: honor it, prefill what enters, RESET the window so the
+    ; same envelope cannot fire twice, and carry on from where prefill left off.
+    ;
+    ; THE RESERVE OPENS HERE AND NOWHERE ELSE, and only when a span was actually
+    ; injected. A hit or a miss puts a typed observation in the stream, so the
+    ; model is owed room to answer it: the answer phase opens at full reserve and
+    ; whatever query budget is left is CUT into the ledger's `cut` rather than
+    ; carried. This is what makes the last query slot safe — a valid query that
+    ; closes on its final step still opens a full reserve.
+    ;
+    ; nothing and spent inject nothing, so they open nothing, cut nothing, and
+    ; spend no reserve. The walk simply continues in the phase it was already in.
     (defn fhc-resume (ctx stepf prefillf decodef encodef lookupf local-ready
-                      id pos n stops c w out)
+                      id pos stops c w out)
         (do
             (let h (fhc-honor ctx lookupf local-ready (fhc-budget c) (fhc-frame w)))
             (let status (fhc-honor-status h))
             (let span (fhc-span-of status (fhc-honor-span h)))
             (let ids (if (eq (str_len span) 0) (empty) (encodef ctx span)))
-            (let pf (if (eq (len ids) 0) (list id pos) (prefillf ctx ids pos)))
+            (let injected? (if (gt (len ids) 0) 1 0))
+            (let pf (if (eq injected? 0) (list id pos) (prefillf ctx ids pos)))
             (let spent? (str_eq status "spent"))
+            (let l (fhc-ledger-of c))
+            ; A reserve of zero is not a reserve, and opening one would end the
+            ; walk the instant anything was injected. That is exactly how the
+            ; fungible delegate keeps its old meaning: it carries no reserve, so
+            ; it never changes phase and spends its single budget throughout.
+            ; The existing cursor band caught this the moment it was wrong.
+            (let l2 (if (and (eq injected? 1)
+                             (and (eq (fhm-opens-reserve (fhc-outcome-of status)) 1)
+                                  (gt (fhc-ledger-answer l) 0)))
+                        (fhc-ledger-open-answer l) l))
             (let c2 (fhc-cursor ""
                         (if spent? (fhc-budget c) (sub (fhc-budget c) 1))
                         (if spent? (fhc-lookups c) (add (fhc-lookups c) 1))
                         (add (fhc-injected c) (len ids))
                         (append (fhc-honored c) (list status))
                         (fhc-refused c)
-                        (add (fhc-elapsed c) (fhc-honor-elapsed h))))
-            (fhc-run ctx stepf prefillf decodef encodef lookupf local-ready
-                (nth pf 0) (nth pf 1) n stops c2 out)))
+                        (add (fhc-elapsed c) (fhc-honor-elapsed h))
+                        l2 (fhc-query-tokens c) (fhc-answer-tokens c)
+                        (fhc-bytes c) (fhc-stopped? c)))
+            (fhc-walk ctx stepf prefillf decodef encodef lookupf local-ready
+                (nth pf 0) (nth pf 1) stops c2 out)))
 
     ; ── the seam a carrier reads ───────────────────────────────────────────
     (defn fhc-out (r) (nth r 0))

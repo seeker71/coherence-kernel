@@ -6,7 +6,7 @@
 ; the linked Metal carrier JIT-compiles it for the device that answered metal_status.
 ;
 ; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-form-layer.fk form-stdlib/local-model-choice.fk form-stdlib/local-generate-organ.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-dense-token-handle.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
-; preludes: form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk form-stdlib/form-cli-heed-cursor.fk
+; preludes: form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk form-stdlib/form-cli-heed-cursor.fk form-stdlib/form-cli-heed-telemetry.fk
 
 (do
     (defn fcmg-src (path) (eqr-of-file path 0 40000000))
@@ -218,6 +218,22 @@
     ; the position after the prompt. An earlier draft took the first token from
     ; the prefill and the position from a parameter — the cursor then walked
     ; from a position the KV rows had never been written at.
+    ; Two ledgers, not one. `query` is what the model may spend composing a
+    ; knowledge query; `reserve` opens only after a typed observation has
+    ; actually been injected, and query verbosity can never reach it. A valid
+    ; query that closes on its last query slot still gets a full reserve to
+    ; answer from — which one fungible budget could not give it.
+    (defn fcmg-heed-generate-2p (src ctx sts ids stops lookupf local-ready
+                                 heeds query reserve)
+        (do
+            (let pf (q38-prefill (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                                 (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0))
+            (fhc-run-seeded-2p (fcmg-heed-ctx ctx sts src)
+                fcmg-heed-step fcmg-heed-prefill fcmg-heed-decode fcmg-heed-encode
+                lookupf local-ready
+                (nth pf 0) (nth pf 1) stops heeds query reserve)))
+
+    ; Compatibility delegate: the old fungible signature, unchanged in meaning.
     (defn fcmg-heed-generate (src ctx sts ids n stops lookupf local-ready budget)
         (do
             (let pf (q38-prefill (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
@@ -238,23 +254,26 @@
             (fcmg-heed-names (tail xs)
                 (str_concat acc (str_concat (if (str_eq acc "") "" ",") (head xs))))))
 
+    ; BOUNDED, NON-CONTENT. A held-out run that prints the model's reply has
+    ; stopped being held out, so the reply crosses as a SHA-256 and a byte count
+    ; (form-cli-heed-telemetry.fk). Reading the text is a separate, named act.
     (defn fcmg-heed-report (src r)
         (do
             (let c (fhc-cursor-of r))
-            (fcmg-heed-int "model-executed" (fhc-model-executed))
             (fcmg-heed-int "model-tokens" (len (fhc-out r)))
-            (fcmg-heed-int "lookups" (fhc-lookups c))
-            (fcmg-heed-int "refused" (fhc-refused c))
-            (fcmg-heed-int "injected-ids" (fhc-injected c))
-            (fcmg-heed-int "budget-left" (fhc-budget c))
-            (fcmg-heed-int "lookup-ms-total" (fhc-elapsed c))
             (fcmg-heed-int "end-pos" (fhc-pos r))
             (fcmg-heed-line "honored" (fcmg-heed-names (fhc-honored c) ""))
-            (fcmg-heed-line "window-tail" (fhc-window c))
-            (fcmg-heed-line "text" (tkz-decode-text src (fhc-out r)))
+            (fht-report c (tkz-decode-text src (fhc-out r)))
             0))
 
-    (defn fcmg-heed-witness (path prompt n budget)
+    (defn fcmg-heed-report-with-content (src r)
+        (do
+            (fcmg-heed-report src r)
+            (fcmg-heed-line "output-content-NOT-HELD-OUT"
+                (tkz-decode-text src (fhc-out r)))
+            0))
+
+    (defn fcmg-heed-witness (path prompt query reserve)
         (do
             (let verdict (qaf-seal-verdict path))
             (if (not (eq verdict 1))
@@ -269,7 +288,8 @@
                         (fcmg-heed-line "refused" "tokenizer produced no prompt tokens")
                         (do
                             (let model-max (gmt-u32 src (q38-key arch "context_length")))
-                            (let need (add (len ids) n))
+                            ; both ledgers plus room for what gets injected
+                            (let need (add (len ids) (add (add query reserve) 512)))
                             (let maxpos (if (lt need model-max) need model-max))
                             (let ctx (q38-open path maxpos))
                             (if (lt (len ctx) 10)
@@ -282,10 +302,13 @@
                                             (str_concat "state allocation failed; " (metal_status)))
                                         (do
                                             (fcmg-heed-int "prompt-tokens" (len ids))
+                                            (fcmg-heed-int "query-budget" query)
+                                            (fcmg-heed-int "answer-reserve" reserve)
                                             (fcmg-heed-report src
-                                                (fcmg-heed-generate src ctx sts ids n
+                                                (fcmg-heed-generate-2p src ctx sts ids
                                                     (fcmg-q35-stops src)
-                                                    fcmg-heed-lookup-nothing 1 budget))
+                                                    fcmg-heed-lookup-nothing 1
+                                                    (MaxHeeds) query reserve))
                                             (q38-free-state sts)
                                             0)))))))))))
 
