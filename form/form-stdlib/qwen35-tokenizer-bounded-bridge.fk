@@ -1,0 +1,493 @@
+; qwen35-tokenizer-bounded-bridge.fk -- one bounded GGUF breath and exact BPE.
+;
+; The bridge streams GGUF tokenizer records into qwen35-tokenizer-bounded-
+; artifact.fk's two-byte buckets.  One call processes at most 64 records,
+; appends each row immediately, writes a tiny source-bound progress snapshot,
+; and releases every row before the next.  It never builds the GGUF vocabulary
+; list, merge list, candidate list, or one joined tokenizer file.
+;
+; The completed artifact is a Qwen prompt-compatibility edge.  BML/BMF source,
+; generated grammars, and recipe/control frames continue to move through the
+; scannerless raw-byte cursor before this translation exists.
+;
+; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-tokenizer-bounded-artifact.fk
+
+(do
+    (defn q35tbb-phase-vocab () 0)
+    (defn q35tbb-phase-merge () 1)
+    (defn q35tbb-phase-done () 2)
+
+    ; progress = tag version source-size source-mtime phase next-index next-off
+    ;            vocab-built merge-built appended-bytes peak-row max-batch
+    (defn q35tbb-progress (version source-size source-mtime phase next-index next-off
+                           vocab-built merge-built appended-bytes peak-row max-batch)
+        (list "q35-tokenizer-bounded-progress" version source-size source-mtime
+              phase next-index next-off vocab-built merge-built appended-bytes
+              peak-row max-batch))
+    (defn q35tbb-progress-version (p) (nth p 1))
+    (defn q35tbb-progress-source-size (p) (nth p 2))
+    (defn q35tbb-progress-source-mtime (p) (nth p 3))
+    (defn q35tbb-progress-phase (p) (nth p 4))
+    (defn q35tbb-progress-next-index (p) (nth p 5))
+    (defn q35tbb-progress-next-off (p) (nth p 6))
+    (defn q35tbb-progress-vocab-built (p) (nth p 7))
+    (defn q35tbb-progress-merge-built (p) (nth p 8))
+    (defn q35tbb-progress-appended-bytes (p) (nth p 9))
+    (defn q35tbb-progress-peak-row (p) (nth p 10))
+    (defn q35tbb-progress-max-batch (p) (nth p 11))
+    (defn q35tbb-progress-current? (p source-size source-mtime)
+        (if (not (eq (q35tbb-progress-version p) (q35tba-version))) 0
+        (if (not (eq (q35tbb-progress-source-size p) source-size)) 0
+        (if (not (eq (q35tbb-progress-source-mtime p) source-mtime)) 0
+        (if (gt (q35tbb-progress-max-batch p) (q35tba-max-breath-rows)) 0
+        (if (gt (q35tbb-progress-peak-row p) (q35tba-max-row-bytes)) 0 1))))))
+    (defn q35tbb-progress-text (p)
+        (str_concat "P|"
+        (str_concat (int_to_str (q35tbb-progress-version p))
+        (str_concat "|" (str_concat (int_to_str (q35tbb-progress-source-size p))
+        (str_concat "|" (str_concat (int_to_str (q35tbb-progress-source-mtime p))
+        (str_concat "|" (str_concat (int_to_str (q35tbb-progress-phase p))
+        (str_concat "|" (str_concat (int_to_str (q35tbb-progress-next-index p))
+        (str_concat "|" (str_concat (int_to_str (q35tbb-progress-next-off p))
+        (str_concat "|" (str_concat (int_to_str (q35tbb-progress-vocab-built p))
+        (str_concat "|" (str_concat (int_to_str (q35tbb-progress-merge-built p))
+        (str_concat "|" (str_concat (int_to_str (q35tbb-progress-appended-bytes p))
+        (str_concat "|" (str_concat (int_to_str (q35tbb-progress-peak-row p))
+        (str_concat "|" (str_concat (int_to_str (q35tbb-progress-max-batch p))
+                                    (byte_to_str 10))))))))))))))))))))))))
+
+    (defn q35tbb-progress-result (status progress)
+        (list "q35-tokenizer-progress-result" status progress))
+    (defn q35tbb-progress-result-status (r) (nth r 1))
+    (defn q35tbb-progress-result-value (r) (nth r 2))
+    (defn q35tbb-parse-progress-cursor (c fuel)
+        (if (or (cur-eof? c) (not (eq (cur-peek c) 80)))
+            (q35tbb-progress-result "malformed" (list))
+            (do
+                (let bar (q35tba-expect (cur-advance c 1) 124 (sub fuel 1)))
+                (if (not (str_eq (nth bar 0) "ok"))
+                    (q35tbb-progress-result (nth bar 0) (list))
+                    (do
+                        (let vals (q35tba-parse-n-uints (nth bar 1) 11 10 (sub fuel 2) (list) 2))
+                        (if (not (str_eq (nth vals 0) "ok"))
+                            (q35tbb-progress-result (nth vals 0) (list))
+                            (do
+                                (let v (nth vals 1))
+                                (q35tbb-progress-result "ok"
+                                    (q35tbb-progress (nth v 0) (nth v 1) (nth v 2)
+                                        (nth v 3) (nth v 4) (nth v 5) (nth v 6)
+                                        (nth v 7) (nth v 8) (nth v 9) (nth v 10))))))))))
+    (defn q35tbb-initial-progress (src source-size source-mtime batch)
+        (q35tbb-progress (q35tba-version) source-size source-mtime
+            (q35tbb-phase-vocab) 0 (gmt-tokens-first src) 0 0 0 0 batch))
+    (defn q35tbb-load-progress (root src source-size source-mtime batch)
+        (do
+            (let path (fs-path-join root (q35tba-progress-name)))
+            (if (eq (fs-exists? path) 0)
+                (q35tbb-progress-result "new"
+                    (q35tbb-initial-progress src source-size source-mtime batch))
+                (do
+                    (let parsed (q35tbb-parse-progress-cursor
+                        (cursor-file-window path (q35tba-window-bytes))
+                        (q35tba-max-row-bytes)))
+                    (if (not (str_eq (q35tbb-progress-result-status parsed) "ok")) parsed
+                        (if (eq (q35tbb-progress-current?
+                                (q35tbb-progress-result-value parsed)
+                                source-size source-mtime) 1)
+                            parsed
+                            (q35tbb-progress-result "stale"
+                                (q35tbb-progress-result-value parsed))))))))
+    (defn q35tbb-save-progress (root p)
+        (do
+            (let candidate (fs-path-join root (q35tba-progress-candidate-name)))
+            (let final (fs-path-join root (q35tba-progress-name)))
+            (let wrote (fs-write-text candidate (q35tbb-progress-text p)))
+            (if (lt wrote 0) 0
+                (if (eq (fs-rename candidate final) 0) 1 0))))
+
+    ; ---- one GGUF record, immediately released ---------------------------
+    (defn q35tbb-token-file-bytes-loop (src at i n acc)
+        (if (eq i n) (reverse acc)
+            (q35tbb-token-file-bytes-loop src at (add i 1) n
+                (cons (gmt-token-byte src at i) acc))))
+    (defn q35tbb-token-file-bytes (src at)
+        (q35tbb-token-file-bytes-loop src at 0 (gmt-token-len src at) (list)))
+    ; decoded result = ok/mode/bytes.  mode 0 is GPT-2 byte-alphabet raw bytes;
+    ; mode 1 retains a literal-special token's exact UTF-8 file bytes.
+    (defn q35tbb-token-decoded (ok mode bytes)
+        (list "q35-token-decoded" ok mode bytes))
+    (defn q35tbb-token-decoded-ok? (r) (nth r 1))
+    (defn q35tbb-token-decoded-mode (r) (nth r 2))
+    (defn q35tbb-token-decoded-bytes (r) (nth r 3))
+    (defn q35tbb-token-decode-loop (src at j n acc)
+        (if (eq j n) (q35tbb-token-decoded 1 0 (reverse acc))
+            (do
+                (let b0 (gmt-token-byte src at j))
+                (let width (if (lt b0 128) 1 2))
+                (if (gt (add j width) n)
+                    (q35tbb-token-decoded 0 1 (q35tbb-token-file-bytes src at))
+                    (do
+                        (let cp (if (eq width 1) b0
+                            (add (mul (sub b0 192) 64)
+                                 (sub (gmt-token-byte src at (add j 1)) 128))))
+                        (let raw (tkz-cp2b cp))
+                        (if (lt raw 0)
+                            (q35tbb-token-decoded 1 1 (q35tbb-token-file-bytes src at))
+                            (q35tbb-token-decode-loop src at (add j width) n
+                                (cons raw acc))))))))
+    (defn q35tbb-token-decode (src at)
+        (q35tbb-token-decode-loop src at 0 (gmt-token-len src at) (list)))
+    (defn q35tbb-token-types-kv (src)
+        (gmt-find src "tokenizer.ggml.token_type"))
+    (defn q35tbb-token-type (src id)
+        (do
+            (let kv (q35tbb-token-types-kv src))
+            (if (eq kv (gmt-absent)) 0
+                (egg-u32 src (gmt-arr-elem src kv id)))))
+
+    ; one-row result = status next-off bytes mode/type-or-rank.
+    (defn q35tbb-one (status next-off row-bytes a b)
+        (list "q35-tokenizer-one-record" status next-off row-bytes a b))
+    (defn q35tbb-one-status (r) (nth r 1))
+    (defn q35tbb-one-next-off (r) (nth r 2))
+    (defn q35tbb-one-row-bytes (r) (nth r 3))
+    (defn q35tbb-one-a (r) (nth r 4))
+    (defn q35tbb-one-b (r) (nth r 5))
+    (defn q35tbb-append-ascii (path text)
+        (fs-append-bytes path (host-abi-string-to-bytes text)))
+    (defn q35tbb-vocab-one (root src at id)
+        (do
+            (let decoded (q35tbb-token-decode src at))
+            (if (not (eq (q35tbb-token-decoded-ok? decoded) 1))
+                (q35tbb-one "failure" at 0 0 0)
+                (do
+                    (let bytes (q35tbb-token-decoded-bytes decoded))
+                    (if (gt (len bytes) (q35tba-max-symbol-bytes))
+                        (q35tbb-one "failure" at 0 0 0)
+                        (do
+                            (let ty (q35tbb-token-type src id))
+                            (let text (q35tba-vocab-row-text id
+                                (q35tbb-token-decoded-mode decoded) ty bytes))
+                            (if (gt (str_len text) (q35tba-max-row-bytes))
+                                (q35tbb-one "failure" at (str_len text) 0 0)
+                                (do
+                                    (let wrote (q35tbb-append-ascii
+                                        (q35tba-vocab-path root bytes) text))
+                                    (if (lt wrote 0)
+                                        (q35tbb-one "failure" at (str_len text) 0 0)
+                                        (q35tbb-one "ok" (gmt-token-next src at)
+                                            (str_len text)
+                                            (q35tbb-token-decoded-mode decoded) ty))))))))))
+    (defn q35tbb-merge-one (root src at rank)
+        (do
+            (let n (tkz-rec-len src at))
+            (let left (tkz-mrg-left src at 0 n (list)))
+            (let right (tkz-mrg-right src at 0 n (list) 0))
+            (if (or (gt (len left) (q35tba-max-symbol-bytes))
+                    (gt (len right) (q35tba-max-symbol-bytes)))
+                (q35tbb-one "failure" at 0 0 0)
+                (do
+                    (let text (q35tba-merge-row-text rank left right))
+                    (if (gt (str_len text) (q35tba-max-row-bytes))
+                        (q35tbb-one "failure" at (str_len text) 0 0)
+                        (do
+                            (let wrote (q35tbb-append-ascii
+                                (q35tba-merge-path root left) text))
+                            (if (lt wrote 0)
+                                (q35tbb-one "failure" at (str_len text) 0 0)
+                                (q35tbb-one "ok" (tkz-rec-next src at)
+                                    (str_len text) rank 0))))))))
+
+    ; breath = status progress requested processed appended max-row window
+    ;          os-peak-rss choices cuts undos timeouts failures refinements
+    ;          releases reason
+    (defn q35tbb-breath-result (status progress requested processed appended max-row
+                                choices cuts undos timeouts failures refinements releases reason)
+        (list "q35-tokenizer-bounded-breath" status progress requested processed
+              appended max-row (q35tba-window-bytes) (nothing) choices cuts undos
+              timeouts failures refinements releases reason))
+    (defn q35tbb-breath-status (r) (nth r 1))
+    (defn q35tbb-breath-progress (r) (nth r 2))
+    (defn q35tbb-breath-requested (r) (nth r 3))
+    (defn q35tbb-breath-processed (r) (nth r 4))
+    (defn q35tbb-breath-appended (r) (nth r 5))
+    (defn q35tbb-breath-max-row (r) (nth r 6))
+    (defn q35tbb-breath-window (r) (nth r 7))
+    (defn q35tbb-breath-os-peak-rss (r) (nth r 8))
+    (defn q35tbb-breath-choices (r) (nth r 9))
+    (defn q35tbb-breath-cuts (r) (nth r 10))
+    (defn q35tbb-breath-undos (r) (nth r 11))
+    (defn q35tbb-breath-timeouts (r) (nth r 12))
+    (defn q35tbb-breath-failures (r) (nth r 13))
+    (defn q35tbb-breath-refinements (r) (nth r 14))
+    (defn q35tbb-breath-releases (r) (nth r 15))
+    (defn q35tbb-breath-reason (r) (nth r 16))
+
+    (defn q35tbb-progress-next (p phase next-index next-off vocab-built merge-built
+                                append-delta row-bytes batch)
+        (q35tbb-progress (q35tbb-progress-version p)
+            (q35tbb-progress-source-size p) (q35tbb-progress-source-mtime p)
+            phase next-index next-off vocab-built merge-built
+            (add (q35tbb-progress-appended-bytes p) append-delta)
+            (q35tba-max (q35tbb-progress-peak-row p) row-bytes)
+            (q35tba-max (q35tbb-progress-max-batch p) batch)))
+    (defn q35tbb-vocab-loop (root src p remaining requested processed appended max-row)
+        (if (or (eq remaining 0)
+                (ge (q35tbb-progress-next-index p) (gmt-vocab-n src)))
+            (do
+                (let done (ge (q35tbb-progress-next-index p) (gmt-vocab-n src)))
+                (let next (if done
+                    (q35tbb-progress-next p (q35tbb-phase-merge) 0
+                        (tkz-merges-first src)
+                        (q35tbb-progress-vocab-built p)
+                        (q35tbb-progress-merge-built p) 0 0 requested)
+                    p))
+                (let saved (q35tbb-save-progress root next))
+                (if (eq saved 1)
+                    (q35tbb-breath-result (if done "phase-complete" "progress") next
+                        requested processed appended max-row processed 1 0 0 0 0 processed
+                        (if done "vocab-complete" "breath-complete"))
+                    (q35tbb-breath-result "failure" p requested processed appended max-row
+                        processed 1 1 0 1 1 processed "progress-write-failed")))
+            (do
+                (let one (q35tbb-vocab-one root src
+                    (q35tbb-progress-next-off p) (q35tbb-progress-next-index p)))
+                (if (not (str_eq (q35tbb-one-status one) "ok"))
+                    (q35tbb-breath-result "failure" p requested processed appended
+                        (q35tba-max max-row (q35tbb-one-row-bytes one))
+                        (add processed 1) 1 1 0 1 1 processed "vocab-row-refused")
+                    (do
+                        (let next (q35tbb-progress-next p (q35tbb-phase-vocab)
+                            (add (q35tbb-progress-next-index p) 1)
+                            (q35tbb-one-next-off one)
+                            (add (q35tbb-progress-vocab-built p) 1)
+                            (q35tbb-progress-merge-built p)
+                            (q35tbb-one-row-bytes one) (q35tbb-one-row-bytes one) requested))
+                        (if (not (eq (q35tbb-save-progress root next) 1))
+                            (q35tbb-breath-result "failure" p requested processed appended max-row
+                                (add processed 1) 1 1 0 1 1 processed "progress-write-failed")
+                            (q35tbb-vocab-loop root src next (sub remaining 1) requested
+                                (add processed 1) (add appended (q35tbb-one-row-bytes one))
+                                (q35tba-max max-row (q35tbb-one-row-bytes one)))))))))
+
+    (defn q35tbb-merge-loop (root src p remaining requested processed appended max-row)
+        (if (or (eq remaining 0)
+                (ge (q35tbb-progress-next-index p) (tkz-merges-n src)))
+            (do
+                (let done (ge (q35tbb-progress-next-index p) (tkz-merges-n src)))
+                (let next (if done
+                    (q35tbb-progress-next p (q35tbb-phase-done)
+                        (q35tbb-progress-next-index p) (q35tbb-progress-next-off p)
+                        (q35tbb-progress-vocab-built p)
+                        (q35tbb-progress-merge-built p) 0 0 requested)
+                    p))
+                (let saved (q35tbb-save-progress root next))
+                (if (eq saved 1)
+                    (q35tbb-breath-result (if done "phase-complete" "progress") next
+                        requested processed appended max-row processed 1 0 0 0 0 processed
+                        (if done "merge-complete" "breath-complete"))
+                    (q35tbb-breath-result "failure" p requested processed appended max-row
+                        processed 1 1 0 1 1 processed "progress-write-failed")))
+            (do
+                (let one (q35tbb-merge-one root src
+                    (q35tbb-progress-next-off p) (q35tbb-progress-next-index p)))
+                (if (not (str_eq (q35tbb-one-status one) "ok"))
+                    (q35tbb-breath-result "failure" p requested processed appended
+                        (q35tba-max max-row (q35tbb-one-row-bytes one))
+                        (add processed 1) 1 1 0 1 1 processed "merge-row-refused")
+                    (do
+                        (let next (q35tbb-progress-next p (q35tbb-phase-merge)
+                            (add (q35tbb-progress-next-index p) 1)
+                            (q35tbb-one-next-off one)
+                            (q35tbb-progress-vocab-built p)
+                            (add (q35tbb-progress-merge-built p) 1)
+                            (q35tbb-one-row-bytes one) (q35tbb-one-row-bytes one) requested))
+                        (if (not (eq (q35tbb-save-progress root next) 1))
+                            (q35tbb-breath-result "failure" p requested processed appended max-row
+                                (add processed 1) 1 1 0 1 1 processed "progress-write-failed")
+                            (q35tbb-merge-loop root src next (sub remaining 1) requested
+                                (add processed 1) (add appended (q35tbb-one-row-bytes one))
+                                (q35tba-max max-row (q35tbb-one-row-bytes one)))))))))
+
+    (defn q35tbb-write-final-seal (root src p)
+        (do
+            (let seal (q35tba-seal (q35tba-version)
+                (q35tbb-progress-source-size p) (q35tbb-progress-source-mtime p)
+                (gmt-vocab-n src) (tkz-merges-n src)
+                (q35tbb-progress-vocab-built p) (q35tbb-progress-merge-built p)
+                1 1 (q35tba-window-bytes) (q35tbb-progress-max-batch p)
+                (q35tbb-progress-peak-row p)))
+            (let candidate (fs-path-join root "seal.candidate"))
+            (let final (fs-path-join root (q35tba-seal-name)))
+            (let wrote (fs-write-text candidate (q35tba-seal-text seal)))
+            (if (lt wrote 0) 0
+                (if (eq (fs-rename candidate final) 0) 1 0))))
+    (defn q35tbb-breath (root src source-size source-mtime requested)
+        (do
+            (let batch (if (lt requested 1) 1
+                (if (gt requested (q35tba-max-breath-rows))
+                    (q35tba-max-breath-rows) requested)))
+            (let made (fs-mkdir root))
+            (let opened (q35tbb-load-progress root src source-size source-mtime batch))
+            (if (str_eq (q35tbb-progress-result-status opened) "stale")
+                (q35tbb-breath-result "stale" (q35tbb-progress-result-value opened)
+                    batch 0 0 0 1 1 1 0 1 1 1 "stale-progress-refused")
+            (if (str_eq (q35tbb-progress-result-status opened) "malformed")
+                (q35tbb-breath-result "failure" (list) batch 0 0 0
+                    1 1 1 0 1 1 1 "malformed-progress-refused")
+                (do
+                    (let p (q35tbb-progress-result-value opened))
+                    (if (eq (q35tbb-progress-phase p) (q35tbb-phase-vocab))
+                        (q35tbb-vocab-loop root src p batch batch 0 0 0)
+                    (if (eq (q35tbb-progress-phase p) (q35tbb-phase-merge))
+                        (q35tbb-merge-loop root src p batch batch 0 0 0)
+                        (do
+                            (let sealed (q35tbb-write-final-seal root src p))
+                            (q35tbb-breath-result (if (eq sealed 1) "sealed" "failure") p
+                                batch 0 0 (q35tbb-progress-peak-row p)
+                                1 1 0 0 (if (eq sealed 1) 0 1)
+                                (if (eq sealed 1) 0 1) 1
+                                (if (eq sealed 1) "full-source-bound" "seal-write-failed"))))))))))
+
+    ; ---- exact artifact BPE for prompt compatibility ---------------------
+    (defn q35tbb-pair-choice (status pos rank lookups rows bytes)
+        (list "q35-tokenizer-pair-choice" status pos rank lookups rows bytes))
+    (defn q35tbb-pair-status (r) (nth r 1))
+    (defn q35tbb-pair-pos (r) (nth r 2))
+    (defn q35tbb-pair-rank (r) (nth r 3))
+    (defn q35tbb-pair-lookups (r) (nth r 4))
+    (defn q35tbb-pair-rows (r) (nth r 5))
+    (defn q35tbb-pair-bytes (r) (nth r 6))
+    (defn q35tbb-best-pair-loop (root source-size source-mtime syms i fuel
+                                 best-pos best-rank found lookups rows bytes)
+        (if (ge (add i 1) (len syms))
+            (q35tbb-pair-choice (if (eq found 1) "hit" "miss") best-pos best-rank
+                                lookups rows bytes)
+            (do
+                (let out (q35tba-merge-lookup root source-size source-mtime
+                    (nth syms i) (nth syms (add i 1)) fuel))
+                (if (or (str_eq (q35tba-outcome-status out) "failure")
+                        (or (str_eq (q35tba-outcome-status out) "timeout")
+                            (str_eq (q35tba-outcome-status out) "stale")))
+                    (q35tbb-pair-choice (q35tba-outcome-status out) i 0
+                        (add lookups 1) (add rows (q35tba-outcome-rows out))
+                        (add bytes (q35tba-outcome-bytes out)))
+                    (do
+                        (let hit (q35tba-outcome-present? out))
+                        (let rank (if hit (q35tba-outcome-value out) 0))
+                        (let better (and hit (or (eq found 0) (lt rank best-rank))))
+                        (q35tbb-best-pair-loop root source-size source-mtime syms
+                            (add i 1) fuel (if better i best-pos)
+                            (if better rank best-rank) (if hit 1 found)
+                            (add lookups 1) (add rows (q35tba-outcome-rows out))
+                            (add bytes (q35tba-outcome-bytes out))))))))
+    (defn q35tbb-best-pair (root source-size source-mtime syms fuel)
+        (q35tbb-best-pair-loop root source-size source-mtime syms 0 fuel 0 0 0 0 0 0))
+    (defn q35tbb-bpe-result (status syms merges lookups rows bytes reason)
+        (list "q35-tokenizer-bpe-result" status syms merges lookups rows bytes reason))
+    (defn q35tbb-bpe-status (r) (nth r 1))
+    (defn q35tbb-bpe-syms (r) (nth r 2))
+    (defn q35tbb-bpe-merges (r) (nth r 3))
+    (defn q35tbb-bpe-lookups (r) (nth r 4))
+    (defn q35tbb-bpe-rows (r) (nth r 5))
+    (defn q35tbb-bpe-bytes (r) (nth r 6))
+    (defn q35tbb-bpe-loop (root source-size source-mtime syms fuel merges lookups rows bytes)
+        (if (lt (len syms) 2)
+            (q35tbb-bpe-result "ok" syms merges lookups rows bytes "terminal")
+            (do
+                (let choice (q35tbb-best-pair root source-size source-mtime syms fuel))
+                (if (str_eq (q35tbb-pair-status choice) "miss")
+                    (q35tbb-bpe-result "ok" syms merges
+                        (add lookups (q35tbb-pair-lookups choice))
+                        (add rows (q35tbb-pair-rows choice))
+                        (add bytes (q35tbb-pair-bytes choice)) "no-merge")
+                (if (str_eq (q35tbb-pair-status choice) "hit")
+                    (q35tbb-bpe-loop root source-size source-mtime
+                        (tkz-apply syms (q35tbb-pair-pos choice)) fuel (add merges 1)
+                        (add lookups (q35tbb-pair-lookups choice))
+                        (add rows (q35tbb-pair-rows choice))
+                        (add bytes (q35tbb-pair-bytes choice)))
+                    (q35tbb-bpe-result (q35tbb-pair-status choice) (list) merges
+                        (add lookups (q35tbb-pair-lookups choice))
+                        (add rows (q35tbb-pair-rows choice))
+                        (add bytes (q35tbb-pair-bytes choice)) "lookup-refused"))))))
+    (defn q35tbb-bpe (root source-size source-mtime syms fuel)
+        (q35tbb-bpe-loop root source-size source-mtime syms fuel 0 0 0 0))
+
+    ; encode result = status ids present pieces merges lookups rows bytes
+    ;                 timeouts failures released reason.
+    (defn q35tbb-encode-result (status ids present pieces merges lookups rows bytes
+                                timeouts failures released reason)
+        (list "q35-tokenizer-bounded-encode" status ids present pieces merges
+              lookups rows bytes timeouts failures released reason))
+    (defn q35tbb-encode-status (r) (nth r 1))
+    (defn q35tbb-encode-ids (r) (nth r 2))
+    (defn q35tbb-encode-present? (r) (nth r 3))
+    (defn q35tbb-encode-pieces (r) (nth r 4))
+    (defn q35tbb-encode-merges (r) (nth r 5))
+    (defn q35tbb-encode-lookups (r) (nth r 6))
+    (defn q35tbb-encode-rows (r) (nth r 7))
+    (defn q35tbb-encode-bytes (r) (nth r 8))
+    (defn q35tbb-encode-timeouts (r) (nth r 9))
+    (defn q35tbb-encode-failures (r) (nth r 10))
+    (defn q35tbb-encode-released? (r) (nth r 11))
+    (defn q35tbb-symbol-ids (root source-size source-mtime syms fuel acc rows bytes lookups)
+        (if (nil? syms) (list "ok" acc rows bytes lookups)
+            (do
+                (let out (q35tba-vocab-lookup root source-size source-mtime
+                    (head syms) 0 1 0 fuel))
+                (if (not (eq (q35tba-outcome-present? out) 1))
+                    (list (q35tba-outcome-status out) (list)
+                        (add rows (q35tba-outcome-rows out))
+                        (add bytes (q35tba-outcome-bytes out)) (add lookups 1))
+                    (q35tbb-symbol-ids root source-size source-mtime (tail syms) fuel
+                        (append acc (list (q35tba-outcome-value out)))
+                        (add rows (q35tba-outcome-rows out))
+                        (add bytes (q35tba-outcome-bytes out)) (add lookups 1))))))
+    (defn q35tbb-encode-loop (root source-size source-mtime inp L pos fuel ids
+                              pieces merges lookups rows bytes)
+        (if (ge pos L)
+            (q35tbb-encode-result "ok" ids 1 pieces merges lookups rows bytes 0 0 1 "exact")
+            (do
+                (let end (q35-next-piece inp L pos))
+                (let bpe (q35tbb-bpe root source-size source-mtime (tkz-syms inp pos end) fuel))
+                (if (not (str_eq (q35tbb-bpe-status bpe) "ok"))
+                    (q35tbb-encode-result (q35tbb-bpe-status bpe) (list) 0 pieces merges
+                        (add lookups (q35tbb-bpe-lookups bpe))
+                        (add rows (q35tbb-bpe-rows bpe))
+                        (add bytes (q35tbb-bpe-bytes bpe))
+                        (if (str_eq (q35tbb-bpe-status bpe) "timeout") 1 0) 1 1 "bpe-refused")
+                    (do
+                        (let found (q35tbb-symbol-ids root source-size source-mtime
+                            (q35tbb-bpe-syms bpe) fuel (list) 0 0 0))
+                        (if (not (str_eq (nth found 0) "ok"))
+                            (q35tbb-encode-result (nth found 0) (list) 0 pieces
+                                (add merges (q35tbb-bpe-merges bpe))
+                                (add lookups (add (q35tbb-bpe-lookups bpe) (nth found 4)))
+                                (add rows (add (q35tbb-bpe-rows bpe) (nth found 2)))
+                                (add bytes (add (q35tbb-bpe-bytes bpe) (nth found 3)))
+                                (if (str_eq (nth found 0) "timeout") 1 0) 1 1 "vocab-refused")
+                            (q35tbb-encode-loop root source-size source-mtime inp L end fuel
+                                (tkz-cat ids (nth found 1)) (add pieces 1)
+                                (add merges (q35tbb-bpe-merges bpe))
+                                (add lookups (add (q35tbb-bpe-lookups bpe) (nth found 4)))
+                                (add rows (add (q35tbb-bpe-rows bpe) (nth found 2)))
+                                (add bytes (add (q35tbb-bpe-bytes bpe) (nth found 3))))))))))
+    (defn q35tbb-encode (root source-size source-mtime inp fuel)
+        (do
+            (let state (q35tba-seal-state root source-size source-mtime))
+            (if (not (str_eq (q35tba-outcome-status state) "current"))
+                (q35tbb-encode-result (q35tba-outcome-status state) (list) 0 0 0 0 0 0
+                    0 1 1 (q35tba-outcome-reason state))
+                (q35tbb-encode-loop root source-size source-mtime inp (str_len inp) 0 fuel
+                    (list) 0 0 0 0 0))))
+    (defn q35tbb-string-bytes-loop (s i n acc)
+        (if (eq i n) (reverse acc)
+            (q35tbb-string-bytes-loop s (add i 1) n (cons (str_byte_at s i) acc))))
+    (defn q35tbb-string-bytes (s)
+        (q35tbb-string-bytes-loop s 0 (str_len s) (list)))
+    (defn q35tbb-special-id (root source-size source-mtime literal fuel)
+        (q35tba-vocab-lookup root source-size source-mtime
+            (q35tbb-string-bytes literal) 0 3 1 fuel))
+
+    0)
