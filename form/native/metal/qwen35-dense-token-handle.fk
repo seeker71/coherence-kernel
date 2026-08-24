@@ -19,10 +19,12 @@
     ; July (metal_batched_prefill.sh, 5 gates); this lane never inherited it
     ; because the generator hardcoded a 256-weight superblock and Q8_0's is 32.
     ; A source-offset copy to sit beside kth-copyoff-msl's destination-offset one,
-    ; and an rmsnorm over a span of rows. The span form is ONE THREADGROUP PER
-    ; TOKEN and keeps ldm-rmsnorm-tg-msl's arithmetic exactly: the same
-    ; threadgroup square buffer, the same serial sum by thread 0 in the same
-    ; order, the same Newton-50 reciprocal. Only the row offset is new.
+    ; and an rmsnorm over a span of rows. The span form is ONE THREAD PER TOKEN.
+    ; That thread walks its row in ascending order, keeping ldm-rmsnorm-msl's
+    ; serial sum and Newton-50 reciprocal exactly while remaining independent of
+    ; model width. A first version copied ldm-rmsnorm-tg-msl's fixed sq[4096]
+    ; scratch even though Qwen3.8 declares n=5120; a matching output from that
+    ; out-of-radius kernel was useful evidence, never a correctness witness.
     (defn q38-copysoff-msl (fname)
         (str_concat "kernel void "
         (str_concat fname
@@ -31,7 +33,7 @@
     (defn q38-rmsspan-msl (fname)
         (str_concat "kernel void "
         (str_concat fname
-            " (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], constant uint& ntok [[buffer(5)]], uint tgid [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { if (tgid >= ntok) return; threadgroup float sq[4096]; threadgroup float sinv[1]; uint off = tgid * n; uint j = t; while (j < n) { float xv = x[off + j]; sq[j] = xv * xv; j += nt; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { float ss = 0.0f; uint k = 0u; while (k < n) { ss = ss + sq[k]; k += 1u; } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } sinv[0] = 1.0f / gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float inv = sinv[0]; j = t; while (j < n) { float nm = x[off + j] * inv; y[off + j] = nm * g[j]; j += nt; } }")))
+            " (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], constant uint& ntok [[buffer(5)]], uint tok [[thread_position_in_grid]]) { if (tok >= ntok) return; uint off = tok * n; float ss = 0.0f; uint j = 0u; while (j < n) { float xv = x[off + j]; ss = ss + xv * xv; j += 1u; } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } float inv = 1.0f / gg; j = 0u; while (j < n) { float nm = x[off + j] * inv; y[off + j] = nm * g[j]; j += 1u; } }")))
 
     ; ── the batch axis, put into the operations ────────────────────────────
     ; Each of these is its per-token kernel with one dimension added: the token
@@ -181,9 +183,17 @@
     ; consumer carries 1.  Nothing about dependency order is left to encoder insertion order.
     (defn q38-b16 (bufs consts mode barrier)
         (md-bind16 bufs consts 256 0 mode barrier))
+    ; ldm-rmsnorm-tg-msl declares sq[4096]. Qwen3.8's model width is 5120,
+    ; so the cooperative twin is available only inside its witnessed radius;
+    ; wider rows use the serial attestant at pipeline 5. This choice is data,
+    ; not a hardcoded Qwen exception, and the band probes both sides.
+    (defn q38-rms-cooperative? (n) (le n 4096))
     (defn q38-rms (ps xh gtv yh n epsBits barrier)
-        (metal_enqueue (nth ps 6)
-            (q38-b16 (list xh (kth-tv-h gtv) yh) (list n epsBits) 1 barrier) 1))
+        (if (q38-rms-cooperative? n)
+            (metal_enqueue (nth ps 6)
+                (q38-b16 (list xh (kth-tv-h gtv) yh) (list n epsBits) 1 barrier) 1)
+            (metal_enqueue (nth ps 5)
+                (q38-b16 (list xh (kth-tv-h gtv) yh) (list n epsBits) 0 barrier) 1)))
     (defn q38-mv (ps tv xh yh barrier)
         (if (eq (kth-tv-ty tv) 8)
             (metal_enqueue (nth ps 29)
@@ -461,7 +471,7 @@
 
     (defn q38-rms-span (ps xh gtv yh n epsBits ntok barrier)
         (metal_enqueue (nth ps 33)
-            (md-bind16 (list xh (kth-tv-h gtv) yh) (list n epsBits ntok) 256 0 1 barrier)
+            (md-bind16 (list xh (kth-tv-h gtv) yh) (list n epsBits ntok) 256 0 0 barrier)
             ntok))
 
     ; The FFN over the whole span. rms is per-row across ntok rows; the three
