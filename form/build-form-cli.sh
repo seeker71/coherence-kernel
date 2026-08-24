@@ -50,6 +50,19 @@ if [[ "$(uname -s 2>/dev/null)" == "Darwin" && -f "native/metal/fk-metal-carrier
     FORM_CLI_EXTRA_LDFLAGS="-framework Metal -framework Foundation -fobjc-arc${FORM_CLI_EXTRA_LDFLAGS:+ $FORM_CLI_EXTRA_LDFLAGS}"
 fi
 
+# The same law, one organ later. `fkwu` has linked the MLX carrier whenever
+# libmlxc is on the host since 2026-08-20 (AGENTS.md carries that recipe), but
+# form-cli did not, so the binary a session actually speaks through answered
+# mlx_linked=false on a machine whose MLX was live — the body not knowing what
+# it is capable of, in the exact shape the paragraph above names. Unlike Metal,
+# MLX is not shipped with the OS, so presence is the question, not the caller.
+FK_MLX_LIB="${FK_MLX_LIB:-/opt/homebrew/lib/libmlxc.dylib}"
+FK_MLX_PREFIX="${FK_MLX_LIB%/lib/libmlxc.dylib}"
+if [[ "$(uname -s 2>/dev/null)" == "Darwin" && -f "native/mlx/fk-mlx-carrier.c" && -f "$FK_MLX_LIB" ]]; then
+    FORM_CLI_EXTRA_SRC="native/mlx/fk-mlx-carrier.c${FORM_CLI_EXTRA_SRC:+ $FORM_CLI_EXTRA_SRC}"
+    FORM_CLI_EXTRA_LDFLAGS="-I$FK_MLX_PREFIX/include -L$FK_MLX_PREFIX/lib -lmlxc -Wl,-rpath,$FK_MLX_PREFIX/lib${FORM_CLI_EXTRA_LDFLAGS:+ $FORM_CLI_EXTRA_LDFLAGS}"
+fi
+
 is_windows_host() {
     [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]
 }
