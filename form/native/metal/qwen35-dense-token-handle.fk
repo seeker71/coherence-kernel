@@ -7,7 +7,7 @@
 ; MSL is assembled by Form and passed to metal_pipeline, so every kernel is JIT-compiled for the
 ; device that actually answered metal_status.  Model bytes remain mmap-backed no-copy buffers.
 ;
-; preludes: native/metal/kat-token-handle.fk form-stdlib/qk-matmul-batch.fk
+; preludes: native/metal/kat-token-handle.fk form-stdlib/qk-matmul-batch.fk native/metal/qwen35-linear-span-layout-contract.fk
 
 (do
     ; Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
@@ -127,27 +127,43 @@
         (str_concat fname
             " (device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device float* y [[buffer(3)]], device float* sc [[buffer(4)]], constant uint& npos [[buffer(5)]], constant uint& nq [[buffer(6)]], constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant float& scale [[buffer(9)]], constant uint& sstride [[buffer(10)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { uint h = tgpig.x; if (h >= nq) return; threadgroup float sh[16]; uint lid = (uint)sgitg * 32u + (uint)tiisg; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint qoff = h * hd; uint koff = kvh * hd; uint S = h * sstride; uint E = (nq + h) * sstride; for (uint t = lid; t < npos; t += 256u) { float acc = 0.0f; for (uint c = 0u; c < hd; ++c) { acc = metal::fma(q[qoff + c], kc[t * KVD + koff + c], acc); } sc[S + t] = acc * scale; } metal::threadgroup_barrier(metal::mem_flags::mem_device); float mx = -3.4e38f; for (uint t = lid; t < npos; t += 256u) { float v = sc[S + t]; if (v > mx) { mx = v; } } mx = metal::simd_max(mx); if (tiisg == 0) { sh[sgitg] = mx; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float gmx = sh[0]; for (uint k = 1u; k < 8u; ++k) { if (sh[k] > gmx) { gmx = sh[k]; } } float se = 0.0f; for (uint t = lid; t < npos; t += 256u) { float e = fexp(sc[S + t] - gmx); sc[E + t] = e; se = se + e; } se = metal::simd_sum(se); if (tiisg == 0) { sh[8u + sgitg] = se; } metal::threadgroup_barrier(metal::mem_flags::mem_device | metal::mem_flags::mem_threadgroup); float tot = 0.0f; for (uint k = 0u; k < 8u; ++k) { tot = tot + sh[8u + k]; } float inv = 1.0f / tot; for (uint c = lid; c < hd; c += 256u) { float acc = 0.0f; for (uint t = 0u; t < npos; ++t) { acc = metal::fma(vc[t * KVD + koff + c], sc[E + t], acc); } y[qoff + c] = acc * inv; } }")))
 
+    ; The individual span emitters above remain independently testable. These
+    ; two composers make their ordering data without redefining an emitter.
+    (defn q38-linear-span-msl ()
+        (str_concat (q38-l2norm-span-msl "form_gdn_l2norm_span_f32")
+        (str_concat (q38-gates-span-msl "form_gdn_gates_span_f32")
+        (str_concat (q38-gnorm-span-msl "form_gdn_norm_gate_span_f32")
+        (str_concat (q38-conv-off-msl "form_gdn_conv_off_f32")
+                    (q38-delta-off-msl "form_gdn_delta_off_f32"))))))
+
+    (defn q38-joined-attention-msl ()
+        (str_concat (q38-qsplit-span-msl "form_qsplit_span_f32")
+        (str_concat (q38-headrms-span-msl "form_headrms_span_f32")
+        (str_concat (q38-rope-span-msl "form_partial_rope_span_f32")
+        (str_concat (q38-cachespan-msl "form_cache_span_f32")
+        (str_concat (q38-attn-span-msl "form_gqa_span_f32")
+                    (q38-gqa-tg-msl "form_gqa_decode_tg_f32")))))))
     (defn q38-msl ()
         (str_concat (kth-msl)
         (str_concat (q80-matvec-wide-body "form_q8_0_matvec_wide_f32")
         (str_concat (qmb-q80-batch)
         (str_concat (q38-copysoff-msl "form_copy_soff_f32")
-        (str_concat (q38-rmsspan-msl  "form_rmsnorm_span_f32")
-        (str_concat (q38-qsplit-span-msl  "form_qsplit_span_f32")
-        (str_concat (q38-headrms-span-msl "form_headrms_span_f32")
-        (str_concat (q38-rope-span-msl    "form_partial_rope_span_f32")
-        (str_concat (q38-cachespan-msl    "form_cache_span_f32")
-        (str_concat (q38-attn-span-msl    "form_gqa_span_f32")
-        (str_concat (q38-gqa-tg-msl       "form_gqa_decode_tg_f32")
-        (str_concat (q38-l2norm-span-msl  "form_gdn_l2norm_span_f32")
-        (str_concat (q38-gates-span-msl   "form_gdn_gates_span_f32")
-        (str_concat (q38-gnorm-span-msl   "form_gdn_norm_gate_span_f32")
-        (str_concat (q38-conv-off-msl     "form_gdn_conv_off_f32")
-                    (q38-delta-off-msl    "form_gdn_delta_off_f32")))))))))))))))))
+        (str_concat (q38-rmsspan-msl "form_rmsnorm_span_f32")
+        (str_concat (q38-joined-attention-msl)
+                    (q38-linear-span-msl))))))))
+
+    (defn q38-linear-span-pipeline-names ()
+        (list "form_gdn_l2norm_span_f32"
+              "form_gdn_gates_span_f32"
+              "form_gdn_norm_gate_span_f32"
+              "form_gdn_conv_off_f32"
+              "form_gdn_delta_off_f32"))
 
     ; kth-pipes owns indices 0..28.  Dense Qwen adds the cooperative Q8_0 matvec and the Q8_0 row
     ; dequant used by token_embd.weight.
     (defn q38-pipes (msl)
+        (do
+        (let linear (q38-linear-span-pipeline-names))
         (append (kth-pipes msl)
             (list (metal_pipeline msl "form_q8_0_matvec_wide_f32")
                   (metal_pipeline msl "form_q8_0_dequant_f32")
@@ -160,11 +176,11 @@
                   (metal_pipeline msl "form_cache_span_f32")
                   (metal_pipeline msl "form_gqa_span_f32")
                   (metal_pipeline msl "form_gqa_decode_tg_f32")
-                  (metal_pipeline msl "form_gdn_l2norm_span_f32")
-                  (metal_pipeline msl "form_gdn_gates_span_f32")
-                  (metal_pipeline msl "form_gdn_norm_gate_span_f32")
-                  (metal_pipeline msl "form_gdn_conv_off_f32")
-                  (metal_pipeline msl "form_gdn_delta_off_f32"))))
+                  (metal_pipeline msl (nth linear 0))
+                  (metal_pipeline msl (nth linear 1))
+                  (metal_pipeline msl (nth linear 2))
+                  (metal_pipeline msl (nth linear 3))
+                  (metal_pipeline msl (nth linear 4))))))
 
     ; One exact 256-thread group per output-row pair for Q8_0.  All other declared types retain the
     ; already-proven KAT dispatches.  Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
@@ -322,11 +338,11 @@
                 (q38-b16 (list (nth bs 25) (nth st 3))
                     (list (nth geo 20) (mul pos (nth geo 20))) 0 0)
                 (nth geo 20))
-            ; pipeline 34: one 256-thread threadgroup per head (mode 1 makes the
+            ; pipeline 39: one 256-thread threadgroup per head (mode 1 makes the
             ; threads argument a GROUP count). The serial one-thread-per-head
             ; dispatch this replaces cost the block ~1.7 ms of its 2.1 ms
             ; (2026-08-24, layer-kind-probe: 2113 -> 553 us per block).
-            (metal_enqueue (nth ps 34)
+            (metal_enqueue (nth ps (qlslc-cooperative-gqa-pipeline))
                 (q38-b16 (list (nth bs 22) (nth st 2) (nth st 3) (nth bs 26) (nth bs 27))
                          (list (add pos 1) (nth geo 12) (nth geo 13) (nth geo 14)
                                (nth geo 17) (nth geo 18)) 1 1)
@@ -371,8 +387,7 @@
     ; not 2*nq*hd. Anything indexing a span of it must use that width; guessing
     ; either operand reads off the end of the token before it.
     (defn q38-bs2-stride (geo)
-        (do (let qout (mul 2 (mul (nth geo 12) (nth geo 14))))
-            (if (gt qout (nth geo 1)) qout (nth geo 1))))
+        (qlslc-bs2-output-pitch geo))
 
     ; ystride is the OUTPUT buffer's per-token width, which is not always rows:
     ; bs2 is allocated at convcap so that one buffer can serve both the fused
@@ -388,6 +403,17 @@
 
     (defn q38-mv-batch (ps tv xh yh ntok barrier)
         (q38-mv-batch-y ps tv xh yh ntok (kth-tv-r tv) barrier))
+
+    ; Independent identities for the three token-major linear-attention rows.
+    ; bs2 uses the producer-bound output pitch; gates are nv-wide, and delta
+    ; output is nv*dv-wide. The pitch may equal allocation capacity only because
+    ; q38-mv-batch-y writes it explicitly. Invalid tokens remain nothing rather
+    ; than becoming the present integer 0.
+    (defn q38-linear-span-offsets (geo token)
+        (if (lt token 0) (nothing)
+            (list (qlslc-bs2-token-offset geo token)
+                  (mul token (nth geo 3))
+                  (mul token (mul (nth geo 3) (nth geo 5))))))
 
     ; The FFN with its three matmuls on the batched kernel. rms, the swiglu gate
     ; and the residual add are unchanged: at ntok 1 they are already right, and at
@@ -545,53 +571,67 @@
                 (mul (nth geo 0) ntok))
             1))
 
-    ; A layer whose attention is linear carries two recurrences — the conv window
-    ; and the delta state — so its tokens still walk in order. Its FFN does not,
-    ; and neither does the full-attention block above.
-    ; the conv window and the delta state walk tokens in order; everything
-    ; around them takes the span. Two loops of N, eleven dispatches, per layer.
-    (defn q38-conv-loop (ps bs geo lay st t n)
-        (if (ge t n) 1
-            (do (metal_enqueue (nth ps 42)
-                    (q38-b16 (list (nth st 0) (nth bs 2) (kth-tv-h (nth lay 6)) (nth bs 2))
-                             (list (nth geo 1) (nth geo 23) (mul t (q38-bs2-stride geo))) 0 1)
+    ; A linear layer keeps the conv window and delta state recurrences ordered by
+    ; token. The surrounding projections, norms, gates, and residual own the
+    ; whole packed span. Two small Form loops retain causality; no carrier-side
+    ; state or hidden evaluator is introduced.
+    (defn q38-linear-conv-span (ps bs geo lay st t ntok)
+        (if (ge t ntok) 1
+            (do
+                (let offsets (q38-linear-span-offsets geo t))
+                (metal_enqueue (nth ps (qlslc-conv-offset-pipeline))
+                    (q38-b16
+                        (list (nth st 0) (nth bs 2) (kth-tv-h (nth lay 6)) (nth bs 2))
+                        (list (nth geo 1) (nth geo 23) (nth offsets 0)) 0 1)
                     (nth geo 1))
-                (q38-conv-loop ps bs geo lay st (add t 1) n))))
+                (q38-linear-conv-span ps bs geo lay st (add t 1) ntok))))
 
-    (defn q38-delta-loop (ps bs geo st t n)
-        (if (ge t n) 1
-            (do (metal_enqueue (nth ps 43)
-                    (q38-b16 (list (nth st 1) (nth bs 2) (nth bs 5) (nth bs 6) (nth bs 8))
-                             (list (nth geo 3) (nth geo 5) (nth geo 4) (nth geo 2) (nth geo 7)
-                                   (mul t (q38-bs2-stride geo)) (mul t (nth geo 3))
-                                   (mul t (mul (nth geo 3) (nth geo 5)))) 0 1)
+    (defn q38-linear-delta-span (ps bs geo st t ntok)
+        (if (ge t ntok) 1
+            (do
+                (let offsets (q38-linear-span-offsets geo t))
+                (metal_enqueue (nth ps (qlslc-delta-offset-pipeline))
+                    (q38-b16
+                        (list (nth st 1) (nth bs 2) (nth bs 5) (nth bs 6) (nth bs 8))
+                        (list (nth geo 3) (nth geo 5) (nth geo 4) (nth geo 2) (nth geo 7)
+                              (nth offsets 0) (nth offsets 1) (nth offsets 2)) 0 1)
                     (mul (nth geo 3) (nth geo 5)))
-                (q38-delta-loop ps bs geo st (add t 1) n))))
+                (q38-linear-delta-span ps bs geo st (add t 1) ntok))))
 
     (defn q38-linear-attn-span (ps bs geo lay st ntok)
         (do
-            (q38-rms-span ps (nth bs 33) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 6) ntok 1)
-            (q38-mv-batch-y ps (nth lay 5) (nth bs 1) (nth bs 2) ntok (q38-bs2-stride geo) 1)
-            (q38-mv-batch ps (nth lay 7)  (nth bs 1) (nth bs 3) ntok 0)
-            (q38-mv-batch ps (nth lay 8)  (nth bs 1) (nth bs 4) ntok 0)
+            (let bs2-pitch (qlslc-bs2-output-pitch geo))
+            (q38-rms-span ps (nth bs 33) (nth lay 0) (nth bs 1)
+                          (nth geo 0) (nth geo 6) ntok 1)
+            ; bs2 is deliberately pitched. The producer receives this value,
+            ; and every bs2 consumer receives the same value; no consumer
+            ; infers it from allocation size.
+            (q38-mv-batch-y ps (nth lay 5) (nth bs 1) (nth bs 2)
+                            ntok bs2-pitch 1)
+            (q38-mv-batch ps (nth lay 7) (nth bs 1) (nth bs 3) ntok 0)
+            (q38-mv-batch ps (nth lay 8) (nth bs 1) (nth bs 4) ntok 0)
             (q38-mv-batch ps (nth lay 12) (nth bs 1) (nth bs 7) ntok 0)
-            (q38-conv-loop ps bs geo lay st 0 ntok)
+            (q38-linear-conv-span ps bs geo lay st 0 ntok)
             (metal_enqueue (nth ps 8)
-                (q38-b16 (list (nth bs 2)) (list (mul (q38-bs2-stride geo) ntok)) 0 1)
-                (mul (q38-bs2-stride geo) ntok))
-            (metal_enqueue (nth ps 39)
                 (q38-b16 (list (nth bs 2))
-                    (list (mul 2 (nth geo 2)) (nth geo 4) (nth geo 6) (q38-bs2-stride geo) ntok) 0 1)
+                         (list (qlslc-bs2-allocation-elements geo ntok)) 0 1)
+                (qlslc-bs2-allocation-elements geo ntok))
+            (metal_enqueue (nth ps (qlslc-l2norm-span-pipeline))
+                (q38-b16 (list (nth bs 2))
+                    (list (mul 2 (nth geo 2)) (nth geo 4) (nth geo 6)
+                          bs2-pitch ntok) 0 1)
                 (mul (mul 2 (nth geo 2)) ntok))
-            (metal_enqueue (nth ps 40)
-                (q38-b16 (list (nth bs 3) (nth bs 4) (kth-tv-h (nth lay 9)) (kth-tv-h (nth lay 10))
-                               (nth bs 5) (nth bs 6))
-                         (list (nth geo 3) ntok) 0 1)
+            (metal_enqueue (nth ps (qlslc-gates-span-pipeline))
+                (q38-b16
+                    (list (nth bs 3) (nth bs 4) (kth-tv-h (nth lay 9))
+                          (kth-tv-h (nth lay 10)) (nth bs 5) (nth bs 6))
+                    (list (nth geo 3) ntok) 0 1)
                 (mul (nth geo 3) ntok))
-            (q38-delta-loop ps bs geo st 0 ntok)
-            (metal_enqueue (nth ps 41)
-                (q38-b16 (list (nth bs 8) (kth-tv-h (nth lay 11)) (nth bs 7) (nth bs 9))
-                         (list (nth geo 3) (nth geo 5) (nth geo 6) ntok) 0 1)
+            (q38-linear-delta-span ps bs geo st 0 ntok)
+            (metal_enqueue (nth ps (qlslc-norm-gate-span-pipeline))
+                (q38-b16
+                    (list (nth bs 8) (kth-tv-h (nth lay 11)) (nth bs 7) (nth bs 9))
+                    (list (nth geo 3) (nth geo 5) (nth geo 6) ntok) 0 1)
                 (mul (nth geo 3) ntok))
             (q38-mv-batch ps (nth lay 13) (nth bs 9) (nth bs 10) ntok 1)
             (metal_enqueue (nth ps 19)
@@ -600,6 +640,8 @@
                 (mul (nth geo 0) ntok))
             1))
 
+    ; The scalar/token-wise witness remains reachable unchanged for chunk=-2
+    ; and decode. Only the layer-major chunk=-3 lane selects the widened recipe.
     (defn q38-lm-linear (ps bs geo lays sts l t n)
         (if (ge t n) 1
             (do (q38-gather ps bs geo t 1)
