@@ -176,6 +176,7 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/native-model-control-plane.fk form-stdlib/ask-lane-router.fk
     form-stdlib/dsv4-tokenizer.fk
     form-stdlib/qwen35-tokenizer.fk
+    form-stdlib/qwen35-tokfast-v2.fk
     form-stdlib/kernel-http.fk
     form-stdlib/form-asm.fk
     form-stdlib/metal-door.fk
@@ -198,7 +199,9 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/q3k-equireach.fk
     form-stdlib/kat-coder-embed.fk
     native/metal/kat-token-handle.fk
+    native/metal/qwen35-linear-span-layout-contract.fk
     native/metal/qwen35-dense-token-handle.fk
+    native/metal/qwen35-crystal.fk
     native/metal/model-bandwidth.fk
     form-stdlib/form-cli-qwen-teach-layer.fk
     form-stdlib/form-cli-model-generate.fk
@@ -273,7 +276,7 @@ form_modules="${form_modules%)} (read_file \"$stdlib/relational-inquiry-metaboli
 # actually calls.  Until 2026-08-19 form-cli-repl.fk named form-cli-model-generate.fk
 # in its preludes and NO build list carried it, so the built binary answered
 # `generate` from an unresolved name: instant, modelless, and wrong.
-form_modules="${form_modules%)} (read_file \"form-stdlib/dsv4-tokenizer.fk\") (read_file \"form-stdlib/qwen35-tokenizer.fk\") (read_file \"form-stdlib/kernel-http.fk\") (read_file \"form-stdlib/form-asm.fk\") (read_file \"form-stdlib/metal-door.fk\") (read_file \"native/metal/sha256-arm64-jit.fk\") (read_file \"form-stdlib/qwen35-artifact-fetch.fk\") (read_file \"form-stdlib/q6k-msl.fk\") (read_file \"form-stdlib/q8-0-msl.fk\") (read_file \"form-stdlib/q3k-msl.fk\") (read_file \"form-stdlib/q4k-msl.fk\") (read_file \"form-stdlib/gated-deltanet-msl.fk\") (read_file \"form-stdlib/transformer-numerics.fk\") (read_file \"form-stdlib/trig.fk\") (read_file \"form-stdlib/tensor-ir.fk\") (read_file \"form-stdlib/jit-tensor-emit.fk\") (read_file \"form-stdlib/llama-decode-msl.fk\") (read_file \"form-stdlib/mla-msl.fk\") (read_file \"form-stdlib/moe-route-wide-msl.fk\") (read_file \"form-stdlib/gguf-tensor-index.fk\") (read_file \"form-stdlib/q3k-dequant.fk\") (read_file \"form-stdlib/q3k-equireach.fk\") (read_file \"form-stdlib/kat-coder-embed.fk\") (read_file \"native/metal/kat-token-handle.fk\") (read_file \"native/metal/qwen35-dense-token-handle.fk\") (read_file \"native/metal/model-bandwidth.fk\") (read_file \"form-stdlib/form-cli-qwen-teach-layer.fk\") (read_file \"form-stdlib/form-cli-model-generate.fk\"))"
+form_modules="${form_modules%)} (read_file \"form-stdlib/dsv4-tokenizer.fk\") (read_file \"form-stdlib/qwen35-tokenizer.fk\") (read_file \"form-stdlib/qwen35-tokfast-v2.fk\") (read_file \"form-stdlib/kernel-http.fk\") (read_file \"form-stdlib/form-asm.fk\") (read_file \"form-stdlib/metal-door.fk\") (read_file \"native/metal/sha256-arm64-jit.fk\") (read_file \"form-stdlib/qwen35-artifact-fetch.fk\") (read_file \"form-stdlib/q6k-msl.fk\") (read_file \"form-stdlib/q8-0-msl.fk\") (read_file \"form-stdlib/q3k-msl.fk\") (read_file \"form-stdlib/q4k-msl.fk\") (read_file \"form-stdlib/gated-deltanet-msl.fk\") (read_file \"form-stdlib/transformer-numerics.fk\") (read_file \"form-stdlib/trig.fk\") (read_file \"form-stdlib/tensor-ir.fk\") (read_file \"form-stdlib/jit-tensor-emit.fk\") (read_file \"form-stdlib/llama-decode-msl.fk\") (read_file \"form-stdlib/mla-msl.fk\") (read_file \"form-stdlib/moe-route-wide-msl.fk\") (read_file \"form-stdlib/gguf-tensor-index.fk\") (read_file \"form-stdlib/q3k-dequant.fk\") (read_file \"form-stdlib/q3k-equireach.fk\") (read_file \"form-stdlib/kat-coder-embed.fk\") (read_file \"native/metal/kat-token-handle.fk\") (read_file \"native/metal/qwen35-linear-span-layout-contract.fk\") (read_file \"native/metal/qwen35-dense-token-handle.fk\") (read_file \"native/metal/qwen35-crystal.fk\") (read_file \"native/metal/model-bandwidth.fk\") (read_file \"form-stdlib/form-cli-qwen-teach-layer.fk\") (read_file \"form-stdlib/form-cli-model-generate.fk\"))"
 band="(read_file \"$stdlib/form-cli-repl.fk\")"
 FLATTEN_CHAIN=(
     form-stdlib/minimal-surface.fk
