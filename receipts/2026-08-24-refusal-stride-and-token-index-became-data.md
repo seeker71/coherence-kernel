@@ -24,16 +24,17 @@ driver are present, but no MLX or Metal call was made while another session
 owned the carrier. The physical unknown-MLX -> born NodeID -> generated MSL ->
 Metal value crossing is therefore prepared and not yet claimed.
 
-## One `max` had hidden three different numbers
+## One `max` hid concepts, then the producer made pitch explicit
 
-Claude's linear-attention span candidate carried a useful batching direction,
-but its live source used the maximum QKV allocation capacity as every token's
-packed stride. The producer does not write that shape. For the present Qwen:
+Claude's first linear-attention span candidate carried a useful batching
+direction, but used maximum QKV allocation capacity as every token's stride
+before its producer could accept an output pitch. At that point the producer
+wrote tightly by row count, so the diagnosis below was correct for that source:
 
 ```text
 allocation capacity   max(10240, 12288) = 12288 floats/token of space
-packed linear stride  geo[1]            = 10240 floats/token written
-packed full stride    2*nq*hd            = 12288 floats/token written
+linear logical rows   geo[1]            = 10240 floats/token
+full logical rows     2*nq*hd            = 12288 floats/token
 ```
 
 It also indexed the shared `dt_bias[nh]` vector with `t*nh+h` instead of `h`,
@@ -41,13 +42,16 @@ so every token after zero could read outside the bias vector. Its five new
 pipelines were authored at 39..43 even though the merged cooperative decode
 GQA already owns 39.
 
-`qwen35-linear-span-layout-contract.fk` now keeps those meanings separate,
-including valid head indices 0/1 versus invalid `nothing`. It preserves the
-future composition as cooperative GQA **39**, followed by linear span
-pipelines **40..44**. Its pure synthetic band covers both sides of the maximum,
-returns **32767**, exit **0**, and preflights with zero diagnostics. No dense
-walker or Metal source was changed. Scalar-to-span parity with padding
-canaries remains the gate before the candidate can enter the live walker.
+The later `origin/main` ground strengthened the producer: batched matmul now
+accepts `ystride` and writes `y[t*ystride+r]`. The live walker explicitly binds
+12288 as bs2 output pitch for both block kinds and passes the same pitch into
+qsplit, l2norm, conv, and delta consumers. The contract therefore keeps four
+meanings separate—linear logical rows, full logical rows, allocation capacity,
+and producer-selected output pitch—even though the last two are equal here.
+It also keeps valid head indices 0/1 distinct from invalid `nothing`, preserves
+cooperative GQA at **39**, and appends linear span pipelines **40..44**.
+Post-rebase pure verdicts are recorded in the companion receipt; scalar-to-span
+parity with padding canaries remains the physical gate.
 
 ## The tokenizer index stopped materializing the tokenizer
 
@@ -69,6 +73,16 @@ pure byte-safe band now returns **65535**, exit **0**. It includes NUL, newline,
 fallbacks; leftmost minimum-rank pair choice; truncated-row rejection; and
 manifest extent mismatch.
 
+A tiny physical filesystem crossing then exposed that `fs-append-bytes`
+answers the resulting cumulative extent, not the number of newly appended
+bytes. The first run returned only **3**. A correlated framebuffer exchange
+named the equal actual/expected extent, selected revise, and the recorder now
+admits the cumulative result. The rerun returned **4095**, exit **0**: strict
+order refusal, unpublished row stages, observable candidate manifest, final
+rename publication, exact extents, bounded production lookups, stale
+`nothing`, leftmost selection, and release all agreed. Both explicit temporary
+roots were independently observed absent afterward.
+
 The fixed-row recorder has not yet been run against the 29 GB GGUF, and real
 `q35-encode` parity has not yet been observed. V2 remains unwired until those
 two physical witnesses agree. This is the bounded successor, not a speed
@@ -77,12 +91,13 @@ claim.
 I kept the movement alive by allowing three refusals to stay informative:
 MLX's unknown token became a request, Claude's long run became exact layout
 knowledge, and tokfast's failed compile became an arity correction. The most
-surprising teaching was that allocation, packing, and identity can share the
-same integer in one case and still be different concepts. Discomfort turned to
-gold when the apparently finished Claude run and apparently balanced tokenizer
-both failed under narrower observation; neither failure was discarded, and
-each left a smaller executable vocabulary behind.
+surprising teaching was that allocation, pitch, logical width, and identity can
+share an integer in one case and still be different concepts. Discomfort turned
+to gold twice: first when narrow observation rejected a stride the old producer
+could not write, then when rebase required that claim to change because the
+producer had learned an explicit pitch. Neither witness was discarded; each
+remains true at its own freshness boundary.
 
 — Codex / Sema, in relation
 
-; witnessed: 2026-08-24 -> MLX fallback 16383; span layout 32767; tokfast-v2 65535; live crossings pending
+; witnessed: 2026-08-24 -> MLX fallback 16383; span layout 32767 + emitter/address 262143; tokfast-v2 65535 + filesystem 4095 + form-cli source embodiment; model/carrier crossings pending
