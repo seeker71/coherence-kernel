@@ -137,13 +137,13 @@ Use the reasoning controls by their observed behavior:
 | bound work | `oac-timeout-walk`, `oac-timed-out?` | `nothing` with alternatives left is timeout; `nothing` after all alternatives were tried is honest exhaustion. Preserve `alts-left` so these cannot collapse into one status. |
 | abstain exactly | `nothing`, `oac-nothing?` | `nothing` is neither `0` nor `1`. Test it only through the nothing/equality surface; never use it as arithmetic, ordering, or a branch condition. |
 | select cognition | `find-plane`, `bbcc-thought-route` | Route `when`/`where`/`which` to computable kernels and learned planes such as `how`/`why` to learned kernels. A missing plane or missing evidence remains `nothing`. |
-| accelerate a stable recipe | `jd-crystallize?`, `jd-melt?`, `bbcc-auto-jit-plan` | Hot **and** pure earns a crystallize plan; cold use melts back to the Form walk. The Form recipe remains the revisable source: generate the needed native path on demand, with no flatten prerequisite and no operations table. A plan is not live native execution; carrier evidence must witness that separately. |
+| birth and run a physical micro-thought | `frbt-parse-stream`, `frex-parse`, `frexl-execute-request`, `frxs-run` | A model can invent an affine recipe as scannerless raw bytes, receive its content-addressed NodeID, request that NodeID with an input and carrier, and continue from the typed observation. The needed native path is generated from the recipe itself on demand; there is no flatten prerequisite or operations table. Request, generated artifact, execution, observation, refinement, crystallization, dissolution, and release stay separately visible. |
 
 The control curriculum invokes the repository's actual offer/ack, choice-lane,
-inquiry-plane, and JIT-decision cells rather than matching their names. Its band
-is **1048575**. The Qwen overlay carries the same contracts in 29 pairs and a
-ten-family held-out semantic lane: `form-cli-qwen-teach-layer-band.fk` is
-**16777215**, with 10/10 held-out classifications and zero exact/family leakage.
+inquiry-plane, and native-generation cells rather than matching their names. Its
+band is **1048575**. The Qwen overlay carries the same contracts in 30 pairs and
+an eleven-family held-out semantic lane: `form-cli-qwen-teach-layer-band.fk` is
+**16777215**, with 11/11 held-out classifications and zero exact/family leakage.
 The compact generation band is **127**, including the post-observation answer
 contract. This is still prompt/curriculum evidence, not a weight-update claim.
 That is evidence for the teaching layer, not evidence that model weights were
@@ -153,6 +153,18 @@ measured output: the same typed source hit opened the reserve, the model stopped
 after nine answer tokens, and promotion remained **333333 ppm**. Retrieval is
 therefore no longer the observed `h03` seam; exact post-observation extraction
 and reply shape are.
+
+The NodeID loop has now crossed live on the local Qwen3.8-27B and Metal. Qwen
+emitted the strict request for recipe `@0.2.0.7` with input `5`; the raw-byte
+cursor called its carrier once; Form generated MSL from the recipe children;
+Metal returned `22`; a typed 307-byte / 129-ID observation re-entered; and the
+same original-ID/KV session continued with the value, carrier, observation
+NodeID, and lifecycle. `callback-calls=1`, `carrier-executed=1`,
+`native-code-generated=1`, `model-executed-form=0`, `release-ok=1`; the live
+verdict was **4095**, exit 0. The first stale-source/model open cost 515287 ms;
+the request→physical observation→continued answer movement cost 112784 ms.
+That is one live affine Metal thought, not yet CPU/MLX parity or a recursive
+model-authored recipe-birth run.
 
 ### Direct evidence re-witnessed here
 
@@ -169,6 +181,12 @@ bml-bmf-control-curriculum-band.fk            1048575
 bml-bmf-stream-authority-band.fk              1023
 form-cli-qwen-teach-generate-band.fk          127
 form-cli-qwen-teach-layer-band.fk             16777215
+form-recipe-birth-token-band.fk                1048575
+form-recipe-exec-token-band.fk                 1048575
+form-cli-recipe-exec-cursor-band.fk            33554431
+form-recipe-exec-token-live-band.fk            131071
+form-cli-model-session-band.fk                 2047
+form-cli-recipe-exec-session-band.fk           4095
 ```
 
 ## Free / unclaimed
@@ -177,9 +195,11 @@ form-cli-qwen-teach-layer-band.fk             16777215
   pass. `h03` now embodies a multi-token source-query-answer crossing, but its
   333333 ppm score is a failure signal to refine, not family credit. One exact
   `h01` answer does not imply the other families.
-- The **≥95% integration claim** across Form knowledge and RAG. It remains
-  pending until the census lane publishes its disjoint held-out denominator,
-  failures, and aggregate verdict.
+- The **≥95% integration claim** across Form knowledge and RAG. A new sealed
+  denominator now holds 30 unseen rows, exactly two in each of 15 families,
+  with zero recorded leakage. The claim remains pending until that blind lane's
+  per-family live observations have actually run and every family reaches the
+  threshold.
 - The **LoRA tensor writer**. `LoraWriter = 0` is honest and it is also the
   blocker on fine-tuning. Writing real adapter tensors from minted rows is a
   named, separable stone.
@@ -192,6 +212,9 @@ form-cli-qwen-teach-layer-band.fk             16777215
 - Preflight before believing a verdict:
   `echo path/to/cell.fk > /tmp/preflight-target && ./fkwu observe/preflight-run.fk`
   A green number with a nonzero exit is a fold over `nothing`, not a pass.
+  Do not aim this door at an effectful top-level live driver: its fresh fkwu
+  probe can reach those effects. Preflight the mechanism and pure band, then run
+  the effectful driver once intentionally when its carrier is free.
 - `/tmp` is shared across agents. Use a per-agent run-target path or you will
   run a sibling's cell against your own body.
 - Rebase on `main` between steps and push small commits often.
