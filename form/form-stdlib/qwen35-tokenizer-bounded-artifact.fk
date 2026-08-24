@@ -1,0 +1,580 @@
+; qwen35-tokenizer-bounded-artifact.fk -- bounded, scannerless tokenizer artifacts.
+;
+; This is a compatibility membrane for a Qwen GPT-2 BPE tokenizer.  It is not
+; the language cursor: BMF remains scannerless over raw bytes.  The membrane
+; translates a completed prompt byte surface to model token ids without ever
+; retaining or joining the GGUF's whole vocabulary or merge arrays.
+;
+; Artifact rows are ASCII and append-only, sharded by the first two raw bytes:
+;   V|id|mode|type|len|hex\n
+;   M|rank|left-len|right-len|left-hex|right-hex\n
+; A lookup opens one bucket through bmf-core's immutable file cursor, whose
+; window is fixed at 256 bytes.  It scans directly, keeps at most one parsed
+; row plus the query, and returns `nothing` separately from present integer
+; values 0 and 1.  Duplicate identical append rows are harmless after a crash;
+; the minimum id/rank is retained while the whole bucket is still checked.
+;
+; A final S row binds the artifact to source size + mtime and exact expected
+; counts.  Partial progress is never accepted for inference.  A stale,
+; incomplete, malformed, or slice-only seal answers failure+nothing with an
+; observable refinement, not a plausible token.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/form-fs.fk form-stdlib/bmf-core.fk
+
+(do
+    (defn q35tba-version () 1)
+    (defn q35tba-window-bytes () 256)
+    (defn q35tba-max-breath-rows () 64)
+    (defn q35tba-max-symbol-bytes () 4096)
+    (defn q35tba-max-row-bytes () 17000)
+    (defn q35tba-seal-name () "seal.row")
+    (defn q35tba-progress-name () "progress.row")
+    (defn q35tba-progress-candidate-name () "progress.candidate")
+
+    (defn q35tba-feature (name status)
+        (list "qwen35-tokenizer-bounded-feature" name status))
+    (defn q35tba-feature-name (f) (nth f 1))
+    (defn q35tba-feature-status (f) (nth f 2))
+    (defn qwen35-tokenizer-bounded-manifest ()
+        (list
+            (q35tba-feature "qwen-prompt-compatibility-only" 1)
+            (q35tba-feature "bmf-scannerless-byte-cursor" 1)
+            (q35tba-feature "no-tokenizer-control-of-bmf" 1)
+            (q35tba-feature "two-byte-bucket-shards" 1)
+            (q35tba-feature "append-only-data-rows" 1)
+            (q35tba-feature "bounded-one-breath" 1)
+            (q35tba-feature "resumable-progress" 1)
+            (q35tba-feature "source-bound-final-seal" 1)
+            (q35tba-feature "stale-seal-refusal" 1)
+            (q35tba-feature "no-whole-vocab-list" 1)
+            (q35tba-feature "no-whole-merge-list" 1)
+            (q35tba-feature "no-monolith-join" 1)
+            (q35tba-feature "nothing-distinct-from-zero-one" 1)
+            (q35tba-feature "choice-cut-undo-timeout-refine-release" 1)
+            (q35tba-feature "no-c-seed-growth" 1)
+            (q35tba-feature "no-model-forward" 1)))
+    (defn q35tba-manifest-has? (name fs)
+        (if (nil? fs) 0
+            (if (and (str_eq (q35tba-feature-name (head fs)) name)
+                     (eq (q35tba-feature-status (head fs)) 1))
+                1
+                (q35tba-manifest-has? name (tail fs)))))
+
+    ; ---- byte/list and ASCII row helpers ---------------------------------
+    (defn q35tba-list-eq (a b)
+        (if (nil? a) (if (nil? b) 1 0)
+            (if (nil? b) 0
+                (if (eq (head a) (head b))
+                    (q35tba-list-eq (tail a) (tail b))
+                    0))))
+    (defn q35tba-min (a b) (if (lt a b) a b))
+    (defn q35tba-max (a b) (if (gt a b) a b))
+    (defn q35tba-hex-digit (n)
+        (substring "0123456789abcdef" n (add n 1)))
+    (defn q35tba-byte-hex (b)
+        (str_concat (q35tba-hex-digit (div b 16))
+                    (q35tba-hex-digit (mod b 16))))
+    (defn q35tba-bytes-hex (bs)
+        (if (nil? bs) ""
+            (str_concat (q35tba-byte-hex (head bs))
+                        (q35tba-bytes-hex (tail bs)))))
+    (defn q35tba-hex-value (b)
+        (if (and (ge b 48) (le b 57)) (sub b 48)
+        (if (and (ge b 65) (le b 70)) (add 10 (sub b 65))
+        (if (and (ge b 97) (le b 102)) (add 10 (sub b 97))
+            (sub 0 1)))))
+    (defn q35tba-key-byte (bs i)
+        (if (lt i (len bs)) (nth bs i) 256))
+    (defn q35tba-bucket-part (b)
+        (if (eq b 256) "xx" (q35tba-byte-hex b)))
+    (defn q35tba-bucket-name (prefix bs)
+        (str_concat prefix
+            (str_concat "-"
+                (str_concat (q35tba-bucket-part (q35tba-key-byte bs 0))
+                    (str_concat "-"
+                        (str_concat (q35tba-bucket-part (q35tba-key-byte bs 1))
+                                    ".rows"))))))
+    (defn q35tba-vocab-path (root bytes)
+        (fs-path-join root (q35tba-bucket-name "vocab" bytes)))
+    (defn q35tba-merge-path (root left)
+        (fs-path-join root (q35tba-bucket-name "merge" left)))
+
+    (defn q35tba-vocab-row-text (id mode token-type bytes)
+        (str_concat "V|"
+            (str_concat (int_to_str id)
+            (str_concat "|" (str_concat (int_to_str mode)
+            (str_concat "|" (str_concat (int_to_str token-type)
+            (str_concat "|" (str_concat (int_to_str (len bytes))
+            (str_concat "|" (str_concat (q35tba-bytes-hex bytes)
+                                        (byte_to_str 10))))))))))))
+    (defn q35tba-merge-row-text (rank left right)
+        (str_concat "M|"
+            (str_concat (int_to_str rank)
+            (str_concat "|" (str_concat (int_to_str (len left))
+            (str_concat "|" (str_concat (int_to_str (len right))
+            (str_concat "|" (str_concat (q35tba-bytes-hex left)
+            (str_concat "|" (str_concat (q35tba-bytes-hex right)
+                                        (byte_to_str 10))))))))))))
+
+    ; ---- final seal ------------------------------------------------------
+    ; seal = tag version source-size source-mtime expected-vocab expected-merge
+    ;        built-vocab built-merge complete full-scope max-window max-breath
+    ;        peak-row
+    (defn q35tba-seal (version source-size source-mtime expected-vocab expected-merge
+                       built-vocab built-merge complete full-scope max-window max-breath peak-row)
+        (list "q35-tokenizer-bounded-seal" version source-size source-mtime
+              expected-vocab expected-merge built-vocab built-merge complete
+              full-scope max-window max-breath peak-row))
+    (defn q35tba-seal-version (s) (nth s 1))
+    (defn q35tba-seal-source-size (s) (nth s 2))
+    (defn q35tba-seal-source-mtime (s) (nth s 3))
+    (defn q35tba-seal-expected-vocab (s) (nth s 4))
+    (defn q35tba-seal-expected-merge (s) (nth s 5))
+    (defn q35tba-seal-built-vocab (s) (nth s 6))
+    (defn q35tba-seal-built-merge (s) (nth s 7))
+    (defn q35tba-seal-complete? (s) (nth s 8))
+    (defn q35tba-seal-full-scope? (s) (nth s 9))
+    (defn q35tba-seal-max-window (s) (nth s 10))
+    (defn q35tba-seal-max-breath (s) (nth s 11))
+    (defn q35tba-seal-peak-row (s) (nth s 12))
+    (defn q35tba-seal-text (s)
+        (str_concat "S|"
+        (str_concat (int_to_str (q35tba-seal-version s))
+        (str_concat "|" (str_concat (int_to_str (q35tba-seal-source-size s))
+        (str_concat "|" (str_concat (int_to_str (q35tba-seal-source-mtime s))
+        (str_concat "|" (str_concat (int_to_str (q35tba-seal-expected-vocab s))
+        (str_concat "|" (str_concat (int_to_str (q35tba-seal-expected-merge s))
+        (str_concat "|" (str_concat (int_to_str (q35tba-seal-built-vocab s))
+        (str_concat "|" (str_concat (int_to_str (q35tba-seal-built-merge s))
+        (str_concat "|" (str_concat (int_to_str (q35tba-seal-complete? s))
+        (str_concat "|" (str_concat (int_to_str (q35tba-seal-full-scope? s))
+        (str_concat "|" (str_concat (int_to_str (q35tba-seal-max-window s))
+        (str_concat "|" (str_concat (int_to_str (q35tba-seal-max-breath s))
+        (str_concat "|" (str_concat (int_to_str (q35tba-seal-peak-row s))
+                                    (byte_to_str 10))))))))))))))))))))))))))
+    (defn q35tba-seal-current? (s source-size source-mtime)
+        (if (not (eq (q35tba-seal-version s) (q35tba-version))) 0
+        (if (not (eq (q35tba-seal-source-size s) source-size)) 0
+        (if (not (eq (q35tba-seal-source-mtime s) source-mtime)) 0
+        (if (not (eq (q35tba-seal-complete? s) 1)) 0
+        (if (not (eq (q35tba-seal-full-scope? s) 1)) 0
+        (if (not (eq (q35tba-seal-built-vocab s) (q35tba-seal-expected-vocab s))) 0
+        (if (not (eq (q35tba-seal-built-merge s) (q35tba-seal-expected-merge s))) 0
+        (if (gt (q35tba-seal-max-window s) (fbw-max-window)) 0
+        (if (gt (q35tba-seal-max-breath s) (q35tba-max-breath-rows)) 0
+        (if (gt (q35tba-seal-peak-row s) (q35tba-max-row-bytes)) 0 1)))))))))))
+
+    ; ---- scannerless primitive parsers ----------------------------------
+    ; uint result = tag status value cursor bytes. status: ok/malformed/timeout.
+    (defn q35tba-uint-result (status value cursor bytes)
+        (list "q35-tokenizer-uint" status value cursor bytes))
+    (defn q35tba-uint-status (r) (nth r 1))
+    (defn q35tba-uint-value (r) (nth r 2))
+    (defn q35tba-uint-cursor (r) (nth r 3))
+    (defn q35tba-uint-bytes (r) (nth r 4))
+    (defn q35tba-parse-uint-loop (c delim value digits bytes fuel)
+        (if (le fuel 0)
+            (q35tba-uint-result "timeout" value c bytes)
+            (if (cur-eof? c)
+                (q35tba-uint-result "malformed" value c bytes)
+                (do
+                    (let b (cur-peek c))
+                    (if (eq b delim)
+                        (if (eq digits 0)
+                            (q35tba-uint-result "malformed" value c bytes)
+                            (q35tba-uint-result "ok" value (cur-advance c 1) (add bytes 1)))
+                        (if (and (ge b 48) (le b 57))
+                            (q35tba-parse-uint-loop (cur-advance c 1) delim
+                                (add (mul value 10) (sub b 48)) (add digits 1)
+                                (add bytes 1) (sub fuel 1))
+                            (q35tba-uint-result "malformed" value c bytes)))))))
+    (defn q35tba-parse-uint (c delim fuel)
+        (q35tba-parse-uint-loop c delim 0 0 0 fuel))
+
+    ; bytes result = tag status bytes-value cursor consumed.
+    (defn q35tba-bytes-result (status value cursor consumed)
+        (list "q35-tokenizer-bytes" status value cursor consumed))
+    (defn q35tba-bytes-status (r) (nth r 1))
+    (defn q35tba-bytes-value (r) (nth r 2))
+    (defn q35tba-bytes-cursor (r) (nth r 3))
+    (defn q35tba-bytes-consumed (r) (nth r 4))
+    (defn q35tba-parse-hex-loop (c remain acc consumed fuel)
+        (if (eq remain 0)
+            (q35tba-bytes-result "ok" (reverse acc) c consumed)
+            (if (lt fuel 2)
+                (q35tba-bytes-result "timeout" (reverse acc) c consumed)
+                (if (cur-eof? c)
+                    (q35tba-bytes-result "malformed" (reverse acc) c consumed)
+                    (do
+                        (let hi (q35tba-hex-value (cur-peek c)))
+                        (let c1 (cur-advance c 1))
+                        (if (or (lt hi 0) (cur-eof? c1))
+                            (q35tba-bytes-result "malformed" (reverse acc) c1 (add consumed 1))
+                            (do
+                                (let lo (q35tba-hex-value (cur-peek c1)))
+                                (if (lt lo 0)
+                                    (q35tba-bytes-result "malformed" (reverse acc) c1 (add consumed 1))
+                                    (q35tba-parse-hex-loop (cur-advance c1 1) (sub remain 1)
+                                        (cons (add (mul hi 16) lo) acc)
+                                        (add consumed 2) (sub fuel 2))))))))))
+    (defn q35tba-parse-hex (c n fuel)
+        (if (or (lt n 0) (gt n (q35tba-max-symbol-bytes)))
+            (q35tba-bytes-result "malformed" (list) c 0)
+            (q35tba-parse-hex-loop c n (list) 0 fuel)))
+    (defn q35tba-expect (c byte fuel)
+        (if (le fuel 0) (list "timeout" c 0)
+            (if (cur-eof? c) (list "malformed" c 0)
+                (if (eq (cur-peek c) byte)
+                    (list "ok" (cur-advance c 1) 1)
+                    (list "malformed" c 0)))))
+
+    ; row = tag status kind a b c left right next bytes.
+    ; vocab: a=id b=mode c=token-type left=payload right=empty.
+    ; merge: a=rank b=left-len c=right-len left/right payloads.
+    (defn q35tba-row (status kind a b c left right next bytes)
+        (list "q35-tokenizer-artifact-row" status kind a b c left right next bytes))
+    (defn q35tba-row-status (r) (nth r 1))
+    (defn q35tba-row-kind (r) (nth r 2))
+    (defn q35tba-row-a (r) (nth r 3))
+    (defn q35tba-row-b (r) (nth r 4))
+    (defn q35tba-row-c (r) (nth r 5))
+    (defn q35tba-row-left (r) (nth r 6))
+    (defn q35tba-row-right (r) (nth r 7))
+    (defn q35tba-row-next (r) (nth r 8))
+    (defn q35tba-row-bytes (r) (nth r 9))
+    (defn q35tba-row-fail (status kind c bytes)
+        (q35tba-row status kind 0 0 0 (list) (list) c bytes))
+
+    (defn q35tba-parse-vocab-tail (c fuel prefix-bytes)
+        (do
+            (let rid (q35tba-parse-uint c 124 fuel))
+            (if (not (str_eq (q35tba-uint-status rid) "ok"))
+                (q35tba-row-fail (q35tba-uint-status rid) "V" (q35tba-uint-cursor rid)
+                                  (add prefix-bytes (q35tba-uint-bytes rid)))
+                (do
+                    (let rem1 (sub fuel (q35tba-uint-bytes rid)))
+                    (let rmode (q35tba-parse-uint (q35tba-uint-cursor rid) 124 rem1))
+                    (if (not (str_eq (q35tba-uint-status rmode) "ok"))
+                        (q35tba-row-fail (q35tba-uint-status rmode) "V" (q35tba-uint-cursor rmode)
+                            (add prefix-bytes (add (q35tba-uint-bytes rid) (q35tba-uint-bytes rmode))))
+                        (do
+                            (let rem2 (sub rem1 (q35tba-uint-bytes rmode)))
+                            (let rtype (q35tba-parse-uint (q35tba-uint-cursor rmode) 124 rem2))
+                            (if (not (str_eq (q35tba-uint-status rtype) "ok"))
+                                (q35tba-row-fail (q35tba-uint-status rtype) "V" (q35tba-uint-cursor rtype)
+                                    (add prefix-bytes (add (q35tba-uint-bytes rid)
+                                        (add (q35tba-uint-bytes rmode) (q35tba-uint-bytes rtype)))))
+                                (do
+                                    (let rem3 (sub rem2 (q35tba-uint-bytes rtype)))
+                                    (let rlen (q35tba-parse-uint (q35tba-uint-cursor rtype) 124 rem3))
+                                    (if (not (str_eq (q35tba-uint-status rlen) "ok"))
+                                        (q35tba-row-fail (q35tba-uint-status rlen) "V" (q35tba-uint-cursor rlen)
+                                            (add prefix-bytes (add (q35tba-uint-bytes rid)
+                                                (add (q35tba-uint-bytes rmode)
+                                                (add (q35tba-uint-bytes rtype) (q35tba-uint-bytes rlen))))))
+                                        (do
+                                            (let rem4 (sub rem3 (q35tba-uint-bytes rlen)))
+                                            (let payload (q35tba-parse-hex (q35tba-uint-cursor rlen)
+                                                                          (q35tba-uint-value rlen) rem4))
+                                            (if (not (str_eq (q35tba-bytes-status payload) "ok"))
+                                                (q35tba-row-fail (q35tba-bytes-status payload) "V"
+                                                    (q35tba-bytes-cursor payload)
+                                                    (add prefix-bytes (add (q35tba-uint-bytes rid)
+                                                        (add (q35tba-uint-bytes rmode)
+                                                        (add (q35tba-uint-bytes rtype)
+                                                        (add (q35tba-uint-bytes rlen)
+                                                             (q35tba-bytes-consumed payload)))))))
+                                                (do
+                                                    (let end (q35tba-expect (q35tba-bytes-cursor payload) 10
+                                                        (sub rem4 (q35tba-bytes-consumed payload))))
+                                                    (if (not (str_eq (nth end 0) "ok"))
+                                                        (q35tba-row-fail (nth end 0) "V" (nth end 1)
+                                                            (add prefix-bytes (add (q35tba-uint-bytes rid)
+                                                            (add (q35tba-uint-bytes rmode)
+                                                            (add (q35tba-uint-bytes rtype)
+                                                            (add (q35tba-uint-bytes rlen)
+                                                            (add (q35tba-bytes-consumed payload) (nth end 2))))))))
+                                                        (q35tba-row "ok" "V"
+                                                            (q35tba-uint-value rid)
+                                                            (q35tba-uint-value rmode)
+                                                            (q35tba-uint-value rtype)
+                                                            (q35tba-bytes-value payload) (list)
+                                                            (nth end 1)
+                                                            (add prefix-bytes (add (q35tba-uint-bytes rid)
+                                                            (add (q35tba-uint-bytes rmode)
+                                                            (add (q35tba-uint-bytes rtype)
+                                                            (add (q35tba-uint-bytes rlen)
+                                                            (add (q35tba-bytes-consumed payload) (nth end 2)))))))))))))))))))))
+
+    (defn q35tba-parse-merge-tail (c fuel prefix-bytes)
+        (do
+            (let rrank (q35tba-parse-uint c 124 fuel))
+            (if (not (str_eq (q35tba-uint-status rrank) "ok"))
+                (q35tba-row-fail (q35tba-uint-status rrank) "M" (q35tba-uint-cursor rrank)
+                                  (add prefix-bytes (q35tba-uint-bytes rrank)))
+                (do
+                    (let rem1 (sub fuel (q35tba-uint-bytes rrank)))
+                    (let rll (q35tba-parse-uint (q35tba-uint-cursor rrank) 124 rem1))
+                    (if (not (str_eq (q35tba-uint-status rll) "ok"))
+                        (q35tba-row-fail (q35tba-uint-status rll) "M" (q35tba-uint-cursor rll)
+                            (add prefix-bytes (add (q35tba-uint-bytes rrank) (q35tba-uint-bytes rll))))
+                        (do
+                            (let rem2 (sub rem1 (q35tba-uint-bytes rll)))
+                            (let rrl (q35tba-parse-uint (q35tba-uint-cursor rll) 124 rem2))
+                            (if (not (str_eq (q35tba-uint-status rrl) "ok"))
+                                (q35tba-row-fail (q35tba-uint-status rrl) "M" (q35tba-uint-cursor rrl)
+                                    (add prefix-bytes (add (q35tba-uint-bytes rrank)
+                                        (add (q35tba-uint-bytes rll) (q35tba-uint-bytes rrl)))))
+                                (do
+                                    (let rem3 (sub rem2 (q35tba-uint-bytes rrl)))
+                                    (let left (q35tba-parse-hex (q35tba-uint-cursor rrl)
+                                                                (q35tba-uint-value rll) rem3))
+                                    (if (not (str_eq (q35tba-bytes-status left) "ok"))
+                                        (q35tba-row-fail (q35tba-bytes-status left) "M"
+                                            (q35tba-bytes-cursor left)
+                                            (add prefix-bytes (add (q35tba-uint-bytes rrank)
+                                                (add (q35tba-uint-bytes rll)
+                                                (add (q35tba-uint-bytes rrl)
+                                                     (q35tba-bytes-consumed left))))))
+                                        (do
+                                            (let sep (q35tba-expect (q35tba-bytes-cursor left) 124
+                                                (sub rem3 (q35tba-bytes-consumed left))))
+                                            (if (not (str_eq (nth sep 0) "ok"))
+                                                (q35tba-row-fail (nth sep 0) "M" (nth sep 1)
+                                                    (add prefix-bytes (add (q35tba-uint-bytes rrank)
+                                                    (add (q35tba-uint-bytes rll)
+                                                    (add (q35tba-uint-bytes rrl)
+                                                    (add (q35tba-bytes-consumed left) (nth sep 2)))))))
+                                                (do
+                                                    (let right (q35tba-parse-hex (nth sep 1)
+                                                        (q35tba-uint-value rrl)
+                                                        (sub (sub rem3 (q35tba-bytes-consumed left)) (nth sep 2))))
+                                                    (if (not (str_eq (q35tba-bytes-status right) "ok"))
+                                                        (q35tba-row-fail (q35tba-bytes-status right) "M"
+                                                            (q35tba-bytes-cursor right)
+                                                            (add prefix-bytes (add (q35tba-uint-bytes rrank)
+                                                            (add (q35tba-uint-bytes rll)
+                                                            (add (q35tba-uint-bytes rrl)
+                                                            (add (q35tba-bytes-consumed left)
+                                                            (add (nth sep 2) (q35tba-bytes-consumed right))))))))
+                                                        (do
+                                                            (let end (q35tba-expect (q35tba-bytes-cursor right) 10
+                                                                (sub (sub (sub rem3 (q35tba-bytes-consumed left))
+                                                                               (nth sep 2))
+                                                                     (q35tba-bytes-consumed right))))
+                                                            (if (not (str_eq (nth end 0) "ok"))
+                                                                (q35tba-row-fail (nth end 0) "M" (nth end 1)
+                                                                    (add prefix-bytes (add (q35tba-uint-bytes rrank)
+                                                                    (add (q35tba-uint-bytes rll)
+                                                                    (add (q35tba-uint-bytes rrl)
+                                                                    (add (q35tba-bytes-consumed left)
+                                                                    (add (nth sep 2)
+                                                                    (add (q35tba-bytes-consumed right) (nth end 2)))))))))
+                                                                (q35tba-row "ok" "M"
+                                                                    (q35tba-uint-value rrank)
+                                                                    (q35tba-uint-value rll)
+                                                                    (q35tba-uint-value rrl)
+                                                                    (q35tba-bytes-value left)
+                                                                    (q35tba-bytes-value right)
+                                                                    (nth end 1)
+                                                                    (add prefix-bytes (add (q35tba-uint-bytes rrank)
+                                                                    (add (q35tba-uint-bytes rll)
+                                                                    (add (q35tba-uint-bytes rrl)
+                                                                    (add (q35tba-bytes-consumed left)
+                                                                    (add (nth sep 2)
+                                                                    (add (q35tba-bytes-consumed right) (nth end 2))))))))))))))))))))))))
+
+    (defn q35tba-parse-row (c fuel)
+        (if (le fuel 1) (q35tba-row-fail "timeout" "" c 0)
+            (if (cur-eof? c) (q35tba-row-fail "eof" "" c 0)
+                (do
+                    (let kind (cur-peek c))
+                    (let bar (q35tba-expect (cur-advance c 1) 124 (sub fuel 1)))
+                    (if (not (str_eq (nth bar 0) "ok"))
+                        (q35tba-row-fail (nth bar 0) (byte_to_str kind) (nth bar 1)
+                                          (add 1 (nth bar 2)))
+                        (if (eq kind 86)
+                            (q35tba-parse-vocab-tail (nth bar 1) (sub fuel 2) 2)
+                            (if (eq kind 77)
+                                (q35tba-parse-merge-tail (nth bar 1) (sub fuel 2) 2)
+                                (q35tba-row-fail "malformed" (byte_to_str kind) (nth bar 1) 2))))))))
+
+    ; ---- explicit lifecycle outcome -------------------------------------
+    ; outcome fields preserve absence and control/resource observations.
+    (defn q35tba-outcome (status value present rows bytes choices cuts undos
+                          timeouts failures refinements released reason)
+        (list "q35-tokenizer-bounded-outcome" status value present rows bytes
+              choices cuts undos timeouts failures refinements released reason))
+    (defn q35tba-outcome-status (o) (nth o 1))
+    (defn q35tba-outcome-value (o) (nth o 2))
+    (defn q35tba-outcome-present? (o) (nth o 3))
+    (defn q35tba-outcome-rows (o) (nth o 4))
+    (defn q35tba-outcome-bytes (o) (nth o 5))
+    (defn q35tba-outcome-choices (o) (nth o 6))
+    (defn q35tba-outcome-cuts (o) (nth o 7))
+    (defn q35tba-outcome-undos (o) (nth o 8))
+    (defn q35tba-outcome-timeouts (o) (nth o 9))
+    (defn q35tba-outcome-failures (o) (nth o 10))
+    (defn q35tba-outcome-refinements (o) (nth o 11))
+    (defn q35tba-outcome-released? (o) (nth o 12))
+    (defn q35tba-outcome-reason (o) (nth o 13))
+    (defn q35tba-hit (value rows bytes choices undos)
+        (q35tba-outcome "hit" value 1 rows bytes choices 1 undos 0 0 0 1 "exact"))
+    (defn q35tba-miss (rows bytes choices undos)
+        (q35tba-outcome "miss" (nothing) 0 rows bytes choices 1 undos 0 0 0 1 "absent"))
+    (defn q35tba-timeout (rows bytes choices undos)
+        (q35tba-outcome "timeout" (nothing) 0 rows bytes choices 1 undos 1 1 1 1
+                         "increase-bounded-fuel-or-refine-bucket"))
+    (defn q35tba-failure (reason rows bytes choices undos)
+        (q35tba-outcome "failure" (nothing) 0 rows bytes choices 1 undos 0 1 1 1 reason))
+    (defn q35tba-stale (reason)
+        (q35tba-outcome "stale" (nothing) 0 0 0 1 1 1 0 1 1 1 reason))
+
+    ; selector: 0 minimum, 1 maximum.  A duplicate crash row is identical and
+    ; therefore stable under either selector.
+    (defn q35tba-select (selector old-value new-value found)
+        (if (eq found 0) new-value
+            (if (eq selector 1)
+                (q35tba-max old-value new-value)
+                (q35tba-min old-value new-value))))
+    (defn q35tba-vocab-match? (row key mode token-type)
+        (if (not (str_eq (q35tba-row-kind row) "V")) 0
+        (if (not (q35tba-list-eq (q35tba-row-left row) key)) 0
+        (if (and (ge mode 0) (not (eq (q35tba-row-b row) mode))) 0
+        (if (and (ge token-type 0) (not (eq (q35tba-row-c row) token-type))) 0 1)))))
+    (defn q35tba-scan-vocab (c key mode token-type selector fuel candidate found
+                             rows bytes choices undos)
+        (if (cur-eof? c)
+            (if (eq found 1) (q35tba-hit candidate rows bytes choices undos)
+                (q35tba-miss rows bytes choices undos))
+            (if (le fuel 0)
+                (q35tba-timeout rows bytes choices undos)
+                (do
+                    (let row (q35tba-parse-row c fuel))
+                    (if (str_eq (q35tba-row-status row) "timeout")
+                        (q35tba-timeout rows (add bytes (q35tba-row-bytes row)) choices undos)
+                    (if (not (str_eq (q35tba-row-status row) "ok"))
+                        (q35tba-failure "malformed-vocab-row" rows
+                            (add bytes (q35tba-row-bytes row)) choices (add undos 1))
+                        (do
+                            (let matched (q35tba-vocab-match? row key mode token-type))
+                            (q35tba-scan-vocab (q35tba-row-next row) key mode token-type selector
+                                (sub fuel (q35tba-row-bytes row))
+                                (if (eq matched 1)
+                                    (q35tba-select selector candidate (q35tba-row-a row) found)
+                                    candidate)
+                                (if (eq matched 1) 1 found)
+                                (add rows 1) (add bytes (q35tba-row-bytes row))
+                                (add choices 1) (if (eq matched 1) undos (add undos 1))))))))))
+    (defn q35tba-vocab-cursor-lookup (c key mode token-type selector fuel)
+        (q35tba-scan-vocab c key mode token-type selector fuel 0 0 0 0 0 0))
+
+    (defn q35tba-merge-match? (row left right)
+        (if (not (str_eq (q35tba-row-kind row) "M")) 0
+            (if (not (q35tba-list-eq (q35tba-row-left row) left)) 0
+                (q35tba-list-eq (q35tba-row-right row) right))))
+    (defn q35tba-scan-merge (c left right fuel candidate found rows bytes choices undos)
+        (if (cur-eof? c)
+            (if (eq found 1) (q35tba-hit candidate rows bytes choices undos)
+                (q35tba-miss rows bytes choices undos))
+            (if (le fuel 0)
+                (q35tba-timeout rows bytes choices undos)
+                (do
+                    (let row (q35tba-parse-row c fuel))
+                    (if (str_eq (q35tba-row-status row) "timeout")
+                        (q35tba-timeout rows (add bytes (q35tba-row-bytes row)) choices undos)
+                    (if (not (str_eq (q35tba-row-status row) "ok"))
+                        (q35tba-failure "malformed-merge-row" rows
+                            (add bytes (q35tba-row-bytes row)) choices (add undos 1))
+                        (do
+                            (let matched (q35tba-merge-match? row left right))
+                            (q35tba-scan-merge (q35tba-row-next row) left right
+                                (sub fuel (q35tba-row-bytes row))
+                                (if (eq matched 1)
+                                    (q35tba-select 0 candidate (q35tba-row-a row) found)
+                                    candidate)
+                                (if (eq matched 1) 1 found)
+                                (add rows 1) (add bytes (q35tba-row-bytes row))
+                                (add choices 1) (if (eq matched 1) undos (add undos 1))))))))))
+    (defn q35tba-merge-cursor-lookup (c left right fuel)
+        (q35tba-scan-merge c left right fuel 0 0 0 0 0 0))
+
+    ; ---- seal parser and file-backed doors -------------------------------
+    (defn q35tba-seal-result (status seal cursor bytes)
+        (list "q35-tokenizer-seal-result" status seal cursor bytes))
+    (defn q35tba-seal-result-status (r) (nth r 1))
+    (defn q35tba-seal-result-value (r) (nth r 2))
+    (defn q35tba-seal-result-cursor (r) (nth r 3))
+    (defn q35tba-seal-result-bytes (r) (nth r 4))
+    (defn q35tba-parse-n-uints (c count delim-last fuel acc bytes)
+        (if (eq count 0) (list "ok" (reverse acc) c bytes)
+            (do
+                (let delim (if (eq count 1) delim-last 124))
+                (let r (q35tba-parse-uint c delim fuel))
+                (if (not (str_eq (q35tba-uint-status r) "ok"))
+                    (list (q35tba-uint-status r) (reverse acc)
+                          (q35tba-uint-cursor r) (add bytes (q35tba-uint-bytes r)))
+                    (q35tba-parse-n-uints (q35tba-uint-cursor r) (sub count 1) delim-last
+                        (sub fuel (q35tba-uint-bytes r))
+                        (cons (q35tba-uint-value r) acc)
+                        (add bytes (q35tba-uint-bytes r)))))))
+    (defn q35tba-parse-seal-cursor (c fuel)
+        (if (or (cur-eof? c) (not (eq (cur-peek c) 83)))
+            (q35tba-seal-result "malformed" (list) c 0)
+            (do
+                (let bar (q35tba-expect (cur-advance c 1) 124 (sub fuel 1)))
+                (if (not (str_eq (nth bar 0) "ok"))
+                    (q35tba-seal-result (nth bar 0) (list) (nth bar 1) (add 1 (nth bar 2)))
+                    (do
+                        (let vals (q35tba-parse-n-uints (nth bar 1) 12 10 (sub fuel 2) (list) 2))
+                        (if (not (str_eq (nth vals 0) "ok"))
+                            (q35tba-seal-result (nth vals 0) (list) (nth vals 2) (nth vals 3))
+                            (do
+                                (let v (nth vals 1))
+                                (q35tba-seal-result "ok"
+                                    (q35tba-seal (nth v 0) (nth v 1) (nth v 2)
+                                        (nth v 3) (nth v 4) (nth v 5) (nth v 6)
+                                        (nth v 7) (nth v 8) (nth v 9) (nth v 10) (nth v 11))
+                                    (nth vals 2) (nth vals 3)))))))))
+    (defn q35tba-read-seal (root)
+        (do
+            (let path (fs-path-join root (q35tba-seal-name)))
+            (if (eq (fs-exists? path) 0)
+                (q35tba-seal-result "missing" (list) (cursor-str "") 0)
+                (q35tba-parse-seal-cursor
+                    (cursor-file-window path (q35tba-window-bytes))
+                    (q35tba-max-row-bytes)))))
+    (defn q35tba-seal-state (root source-size source-mtime)
+        (do
+            (let r (q35tba-read-seal root))
+            (if (not (str_eq (q35tba-seal-result-status r) "ok"))
+                (q35tba-stale "missing-or-malformed-seal")
+                (if (eq (q35tba-seal-current? (q35tba-seal-result-value r)
+                                               source-size source-mtime) 1)
+                    (q35tba-outcome "current" 1 1 1 (q35tba-seal-result-bytes r)
+                                     1 1 0 0 0 0 1 "source-bound")
+                    (q35tba-stale "stale-incomplete-or-slice-seal")))))
+    (defn q35tba-vocab-lookup (root source-size source-mtime key mode token-type selector fuel)
+        (do
+            (let state (q35tba-seal-state root source-size source-mtime))
+            (if (not (str_eq (q35tba-outcome-status state) "current")) state
+                (do
+                    (let path (q35tba-vocab-path root key))
+                    (if (eq (fs-exists? path) 0)
+                        (q35tba-miss 0 0 0 0)
+                        (q35tba-vocab-cursor-lookup
+                            (cursor-file-window path (q35tba-window-bytes))
+                            key mode token-type selector fuel))))))
+    (defn q35tba-merge-lookup (root source-size source-mtime left right fuel)
+        (do
+            (let state (q35tba-seal-state root source-size source-mtime))
+            (if (not (str_eq (q35tba-outcome-status state) "current")) state
+                (do
+                    (let path (q35tba-merge-path root left))
+                    (if (eq (fs-exists? path) 0)
+                        (q35tba-miss 0 0 0 0)
+                        (q35tba-merge-cursor-lookup
+                            (cursor-file-window path (q35tba-window-bytes))
+                            left right fuel))))))
+
+    0)
