@@ -303,6 +303,7 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/form-cli-nodeid-knowledge-session.fk"
     "$S/public-source-concept-key-routes.fk"
     "$S/form-nodeid-knowledge-routed-query.fk"
+    "$S/form-cli-nodeid-knowledge-door.fk"
     "$S/form-recipe-birth-token.fk"
     "$S/form-recipe-exec-token.fk"
     "$S/form-cli-recipe-exec-cursor.fk"
