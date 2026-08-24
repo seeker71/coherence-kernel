@@ -103,7 +103,9 @@ fi
 # Duplicate fields are not a harmless alternate spelling of the identity.
 cp "$bootstrap_attestation" "$duplicate_attestation"
 printf 'source_sha256=%s\n' "$source_sha256" >> "$duplicate_attestation"
-if form_cli_generation_load_attestation "$duplicate_attestation" >/dev/null 2>&1; then
+if (
+    form_cli_generation_load_attestation "$duplicate_attestation"
+) >/dev/null 2>&1; then
     printf '%s\n' 'form_cli_generation_attestation_test: duplicate field unexpectedly accepted' >&2
     exit 1
 fi

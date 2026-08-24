@@ -1,0 +1,69 @@
+; qwen38-warm-forward-run.fk — one warm forward, wall against GPU.
+;
+; 167.9 s of a 351.9 s turn is not GPU busy. Four attributions have failed:
+; barriers, dispatch count, weight-traffic batching, and binding construction
+; (6 us each, 3.8 s across a whole turn). Paging is out too — 137 GB of RAM
+; against a 29 GB model, 91 GB free.
+;
+; So measure the gap where it lives: one forward pass, warm, wall clock beside
+; the GPU counter. If wall tracks GPU, the missing time is not per-forward and
+; the search moves. If wall is twice GPU on a single warm forward, it is, and
+; the next question is what the carrier does between submitting and returning.
+;
+; Effectful: opens a sealed 29GB GGUF and drives the GPU. Do not preflight.
+; preludes: form/form-stdlib/form-cli-model-generate.fk
+
+(do
+    (defn wf-line (k v) (print_str (str_concat "warm " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn wf-int (k v) (wf-line k (int_to_str v)))
+
+    ; one forward, timed both ways
+    (defn wf-once (ctx sts id pos)
+        (do (let g0 (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (let w0 (now_unix_ms))
+            (let tok (q38-forward (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                                  (nth ctx 4) (nth ctx 5) (nth ctx 6) id pos))
+            (metal_sync)
+            (let w1 (now_unix_ms))
+            (let g1 (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (list (sub w1 w0) (div (sub g1 g0) 1000) tok)))
+
+    ; one advance (prefill's kernel: state only, no head)
+    (defn wf-advance (ctx sts id pos)
+        (do (let g0 (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (let w0 (now_unix_ms))
+            (metal_batch_concurrent)
+            (q38-forward-state (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                               (nth ctx 4) id pos)
+            (metal_sync)
+            (let w1 (now_unix_ms))
+            (let g1 (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (list (sub w1 w0) (div (sub g1 g0) 1000) 0)))
+
+    (defn wf-show (name r)
+        (do (wf-int (str_concat name "-wall-ms") (nth r 0))
+            (wf-int (str_concat name "-gpu-ms") (nth r 1))
+            (wf-int (str_concat name "-gap-ms") (sub (nth r 0) (nth r 1)))))
+
+    (let path "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf")
+    (let ctx (q38-open-span path 1024 1))
+    (if (lt (len ctx) 10)
+        (wf-line "refused" (metal_status))
+        (do
+            (let sts (q38-new-state (nth ctx 2)))
+            ; page the weights in; this one is the disk, not the lane
+            (wf-show "cold" (wf-once ctx sts 100 0))
+            (wf-show "warm1" (wf-once ctx sts 101 1))
+            (wf-show "warm2" (wf-once ctx sts 102 2))
+            (wf-show "warm3" (wf-once ctx sts 103 3))
+            (wf-show "advance1" (wf-advance ctx sts 104 4))
+            ; does a forward get more expensive as the KV cache grows?
+            ; form_gqa_decode_f32 is dispatched with n_head threads and loops
+            ; over every earlier position, so this is the shape to test.
+            (wf-show "pos100" (wf-advance ctx sts 106 100))
+            (wf-show "pos250" (wf-advance ctx sts 107 250))
+            (wf-show "pos500" (wf-advance ctx sts 108 500))
+            (wf-show "pos900" (wf-advance ctx sts 109 900))
+            (q38-free-state sts)
+            (q38-close ctx (empty))
+            0)))

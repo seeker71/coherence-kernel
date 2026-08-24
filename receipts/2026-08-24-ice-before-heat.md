@@ -39,10 +39,12 @@ required-size, layer count and interval.
 
 The heat door: `fcmg-fresh` freezes on the first ask that finds no crystal —
 this recipe's single firing costs seconds, so its crystallize threshold is 1
-where jd-crystallize? asks 5 of a cheap one; same law, heat priced in ms. If
+where jd-crystallize? asks 5 of a cheap one; same observed relation, heat priced in ms. If
 even the freeze's write refuses (unwritable directory), the scan path still
-answers: ice is a speed, never a gate. The resident lane reads the same
-crystal, so the per-prompt vocab scans die there too.
+answers: ice is a speed, never a gate. The production generation lane now uses
+the crystal for required-size and tensor opening. It does not yet use
+`qsx-chat-ids` for the prompt; the per-prompt tokenizer scan remains until an
+exact teaching-layer-preserving resident entry is witnessed.
 
 ## Proven, not assumed
 
@@ -93,7 +95,7 @@ recursion families:
 3. **the per-forward walker** (~10 ms/forward) — q38-blocks' list traversal;
    third, already small next to the GPU's 92 ms.
 
-jd-crystallize?'s own law (hot AND pure, threshold 5) fits all three; the
+jd-crystallize?'s observed hot-and-pure relation (threshold 5) fits all three; the
 lowering exists (form-asm, ll-buffer, MAP_JIT proven by sha256-arm64-jit).
 Named, not claimed.
 

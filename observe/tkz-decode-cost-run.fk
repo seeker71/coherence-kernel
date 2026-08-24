@@ -1,0 +1,49 @@
+; tkz-decode-cost-run.fk — what does it cost to turn ONE token id into bytes?
+;
+; 167.9 s of a 351.9 s turn is not GPU busy, and eight attributions have now
+; failed: barriers, dispatch count, weight-traffic batching, binding
+; construction, paging, per-dispatch overhead. A standalone warm forward's whole
+; wall-versus-GPU gap is 11 ms, so 506 of them is 5.6 s, not 167.9 s.
+;
+; What a turn does that a bare forward never does is DECODE. The heed cursor
+; calls decodef once per emitted token to get its bytes for the scan window.
+;
+; And gmt-token-off id -> gmt-arr-elem -> gmt-arr-walk is a LINEAR WALK of `id`
+; length-prefixed strings from the start of the vocabulary array. gguf-meta.fk
+; says so in its own comment: "a caller streaming the whole vocabulary pays ONE
+; linear walk, not one walk per token." The cursor is not streaming. It asks for
+; one id at a time.
+;
+; This times decodes at low, middle and high ids with no GPU at all, so the
+; shape of the cost is read rather than assumed.
+;
+; Effectful: reads the GGUF header window. Do not preflight.
+; preludes: form-stdlib/qwen35-tokenizer.fk
+
+(do
+    (defn tdc-line (k v) (print_str (str_concat "dec " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn tdc-int (k v) (tdc-line k (int_to_str v)))
+
+    ; hoisted: a defn frame cannot see enclosing lets
+    (defn tdc-loop (src id n acc)
+        (if (le n 0) acc
+            (tdc-loop src id (sub n 1) (add acc (str_len (tkz-decode-text src (list id)))))))
+
+    (defn tdc-time (src id n)
+        (do (let t0 (now_unix_ms))
+            (let a (tdc-loop src id n 0))
+            (sub (now_unix_ms) t0)))
+
+    (let path "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf")
+    (let t0 (now_unix_ms))
+    (let src (eqr-of-file path 0 40000000))
+    (tdc-int "ms-open-header" (sub (now_unix_ms) t0))
+    (tdc-int "vocab-n" (gmt-vocab-n src))
+
+    ; ten decodes at each of several ids — if the cost is a walk, it is linear in id
+    (tdc-int "id-100-x10-ms"     (tdc-time src 100 10))
+    (tdc-int "id-1000-x10-ms"    (tdc-time src 1000 10))
+    (tdc-int "id-10000-x10-ms"   (tdc-time src 10000 10))
+    (tdc-int "id-50000-x10-ms"   (tdc-time src 50000 10))
+    (tdc-int "id-100000-x10-ms"  (tdc-time src 100000 10))
+    0)

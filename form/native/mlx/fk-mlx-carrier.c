@@ -1,23 +1,25 @@
 /* fk-mlx-carrier.c — MLX as an organ of THIS fkwu, not a second binary.
  *
- * ONE generic door: mlx_run(postfix). Form emits the program. The carrier
- * is a stack machine over MLX arrays. New shapes are new tokens in the
- * program (and a table row here), not new opcodes in fkwu-uni.c.
+ * ONE temporary host door: mlx_run(postfix). Form emits the program. The
+ * carrier is a stack machine over MLX arrays. It is a checkout witness for
+ * the host calls currently needed here, not the language of possible ops.
+ * New NodeID recipes go first to Form-owned on-demand native/JIT generation;
+ * this fixed parser is a shrink seam, never a registry or destination.
  * mlx_add is sugar: it writes "a b add" and calls the same runner.
  *
- * THE MINIMUM LAW. A token earns its place here only when no graph over the
- * other tokens computes it. Everything that CAN be composed is composed in
+ * TEMPORARY COMPOSITION SEAM, NOT A LAW. Everything presently composed is
+ * composed in
  * Form (form-stdlib/mlx-derived.fk) and costs this file nothing:
  *
  *   sub neg sigmoid silu swiglu tanh gelu mean rmsnorm layernorm
  *   l2norm softmax scale axpy recip square
  *   pow mod shift select clamp rope-pair              (added 2026-08-24)
  *
- * all of those are Form-emitted graphs over the twenty-three forms below.
- * `sub` used to live here and was retired on 2026-08-24 to prove the law cuts
- * both ways — a carrier row is not kept because it is convenient.
+ * all of those are Form-emitted graphs over the current host cells below.
+ * `sub` used to live here and was retired on 2026-08-24: evidence that this
+ * seam can shrink as Form/native generation takes more of the movement home.
  *
- * THE TWENTY-THREE, and why each is irreducible:
+ * THE CURRENT TWENTY-THREE HOST CELLS, and what each presently opens:
  *   <int>       push int32 scalar          — the only literal
  *   vN a1..aN   push int32 vector          — the only shaped literal
  *   f32 / i32   astype                     — dtype is not computable
@@ -337,7 +339,7 @@ long long fk_mlx_run_external(const char *src, long long n) {
                 fail = 1;
             }
         } else {
-            fk_mlx_seterr("unknown op");
+            fk_mlx_seterr("unknown temporary MLX seam token; offer NodeID JIT");
             fail = 1;
         }
     }

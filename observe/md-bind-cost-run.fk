@@ -1,0 +1,57 @@
+; md-bind-cost-run.fk — what does one dispatch cost BEFORE it reaches the GPU?
+;
+; 167.9 s of a 351.9 s turn is not GPU busy time. Barriers were not it (88%
+; removed, 2% returned). Dispatch count was not it (17.8% removed, the time rose).
+; Weight-traffic batching was not it (7.9x less traffic, 0% faster).
+;
+; What every dispatch does before the carrier ever sees it: md-bind16 builds the
+; binding as a STRING. Each 32-bit field goes through md-le32, which calls
+; md-byte-at four times, and md-byte-at calls fq-pow-int 256 k — a power function
+; — then byte_to_str, then str_concat. A three-buffer two-constant dispatch is
+; about eleven md-le32 calls: some forty-four power calls and a hundred-odd
+; string operations, in the interpreted walker, per dispatch.
+;
+; 640,326 dispatches in a turn. This measures one binding, with no GPU involved,
+; so the number can be multiplied out honestly.
+;
+; preludes: form-stdlib/metal-door.fk
+
+(do
+    (defn mbc-line (k v) (print_str (str_concat "bind " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn mbc-int (k v) (mbc-line k (int_to_str v)))
+
+    ; a binding shaped like q38-rms's: three buffers, two constants
+    (defn mbc-one () (md-bind16 (list 11 12 13) (list 5120 1065353216) 256 0 1 1))
+
+    (defn mbc-loop (n acc)
+        (if (le n 0) acc (mbc-loop (sub n 1) (add acc (str_len (mbc-one))))))
+
+    ; and the pieces, so the cost can be attributed rather than guessed
+    (defn mbc-le32-loop (n acc)
+        (if (le n 0) acc (mbc-le32-loop (sub n 1) (add acc (str_len (md-le32 1234567))))))
+    (defn mbc-byteat-loop (n acc)
+        (if (le n 0) acc (mbc-byteat-loop (sub n 1) (add acc (md-byte-at 1234567 3)))))
+
+    (mbc-int "binding-bytes" (str_len (mbc-one)))
+
+    (let t0 (now_unix_ms))
+    (let a (mbc-loop 2000 0))
+    (let t1 (now_unix_ms))
+    (mbc-int "bind16-x2000-ms" (sub t1 t0))
+    (mbc-int "bind16-us-each" (div (mul (sub t1 t0) 1000) 2000))
+
+    (let t2 (now_unix_ms))
+    (let b (mbc-le32-loop 20000 0))
+    (let t3 (now_unix_ms))
+    (mbc-int "le32-x20000-ms" (sub t3 t2))
+
+    (let t4 (now_unix_ms))
+    (let c (mbc-byteat-loop 20000 0))
+    (let t5 (now_unix_ms))
+    (mbc-int "byteat-x20000-ms" (sub t5 t4))
+
+    ; what a turn's worth of bindings costs, at 640326 dispatches
+    (mbc-int "turn-dispatches" 640326)
+    (mbc-int "projected-bind-seconds"
+        (div (mul (div (mul (sub t1 t0) 1000) 2000) 640326) 1000000))
+    0)
