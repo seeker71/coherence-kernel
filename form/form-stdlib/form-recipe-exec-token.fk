@@ -1,0 +1,524 @@
+; form-recipe-exec-token.fk — bounded streamed NodeID recipe requests and
+; typed lifecycle observations, before any native execution carrier is joined.
+;
+; THE HONEST SEAM. A decoded stream may offer this exact surface:
+;
+;   <|form:recipe-exec|>@p.l.t.i;input=N;carrier=auto<|/form:recipe-exec|>
+;
+; The surface does not execute anything. Form accepts one complete bounded
+; envelope, reconstructs the four-coordinate NodeID with make_nodeid, and
+; compares that reconstruction with the registered content-addressed recipe.
+; Only then does it intern a request TOKEN. Ordinary prose, partial/nested
+; envelopes, trailing bytes, non-canonical integers, unknown NodeIDs and extra
+; fields become `nothing` without an execution offer.
+;
+; This cell is the pure state seam only. Carrier observations are supplied as
+; typed testable data; model-executed, native-executed and native-code-generated
+; remain 0. `choice`, `cut`, `undo`, `refine`, `crystallize`, `dissolve`, and
+; `release` below are content-addressed lifecycle observations, not claims that
+; Metal/MLX/CPU work occurred. A later live cell may bind the same request and
+; observation shapes to those carriers without changing their identities.
+;
+; DISTINCT SIGNALS. `nothing` has value-present=0. Successful integer 0 and 1
+; both have status=value and value-present=1. failure and timeout remain named
+; outcomes when no later choice succeeds. During fallback, failure adds undo +
+; refine; timeout adds cut + undo + refine; nothing simply leaves room for the
+; next choice. A successful value crystallizes the selected observation, then
+; dissolves unselected alternatives and releases the bounded reducer context.
+;
+; PRIVACY. Rendering contains NodeIDs, bounded status names, carrier choice,
+; counters and value presence. It never reproduces the request surface or any
+; model/private payload.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+;
+; Proven by: form-stdlib/tests/form-recipe-exec-token-band.fk
+
+(do
+    ; ── stream grammar and resource bounds ───────────────────────────
+    (defn frex-open () "<|form:recipe-exec|>")
+    (defn frex-close () "<|/form:recipe-exec|>")
+    (defn frex-observation-open () "<|form:recipe-observation|>")
+    (defn frex-observation-close () "<|/form:recipe-observation|>")
+    (defn frex-max-payload-bytes () 128)
+    (defn frex-max-input-bytes () 12)
+    (defn frex-max-attempts () 4)
+    (defn frex-max-render-bytes () 1024)
+    (defn frex-max-frame-bytes ()
+        (add (str_len (frex-open))
+             (add (frex-max-payload-bytes) (str_len (frex-close)))))
+
+    ; ── content-addressed identities ─────────────────────────────────
+    ; Category slots separate token families. Composition supplies identity.
+    (defn frex-recipe-category () (make_nodeid 31 2 0 56))
+    (defn frex-request-category () (make_nodeid 31 2 0 57))
+    (defn frex-offer-category () (make_nodeid 31 2 0 58))
+    (defn frex-event-category () (make_nodeid 31 2 0 59))
+    (defn frex-observation-category () (make_nodeid 31 2 0 60))
+    (defn frex-absent-category () (make_nodeid 31 2 0 61))
+    (defn frex-absent-token ()
+        (intern_node (frex-absent-category)
+            (list (intern_trivial_string "nothing"))))
+
+    ; One direct recipe. Its children say what this protocol example means and
+    ; keep its schema/lifecycle version in identity.
+    ; This file does not evaluate the recipe.
+    (defn frex-recipe ()
+        (intern_node (frex-recipe-category)
+            (list
+                (intern_trivial_string "affine-scalar-v1")
+                (intern_trivial_int 3)
+                (intern_trivial_int 7)
+                (intern_trivial_string "signed-int")
+                (intern_trivial_string "signed-int")
+                (intern_trivial_string "recipe-exec-lifecycle-v1"))))
+    (defn frex-recipe-valid? (node)
+        (if (nothing? node) 0
+            (if (not (node_eq node (frex-recipe))) 0
+                (if (not (node_eq (node_category node)
+                                  (frex-recipe-category))) 0
+                    (if (eq (len (node_children node)) 6) 1 0)))))
+
+    (defn frex-node-key (node)
+        (str_concat (int_to_str (node_pkg node))
+        (str_concat "." (str_concat (int_to_str (node_level node))
+        (str_concat "." (str_concat (int_to_str (node_type node))
+        (str_concat "." (int_to_str (node_inst node)))))))))
+    (defn frex-node-coordinate (node)
+        (str_concat "@" (frex-node-key node)))
+
+    ; Strict canonical @p.l.t.i reader. It walks raw bytes and reconstructs the
+    ; NodeID; it does not tokenize the surrounding stream.
+    (defn frex-digit? (s at)
+        (do (let b (str_byte_at s at))
+            (if (and (ge b 48) (le b 57)) 1 0)))
+    (defn frex-digits? (s at end)
+        (if (ge at end) 1
+            (if (eq (frex-digit? s at) 1)
+                (frex-digits? s (add at 1) end) 0)))
+    (defn frex-coordinate-parts (text)
+        (do
+            (let n (str_len text))
+            (let d1 (str_find text "." 1))
+            (let d2 (if (lt d1 0) -1 (str_find text "." (add d1 1))))
+            (let d3 (if (lt d2 0) -1 (str_find text "." (add d2 1))))
+            (let d4 (if (lt d3 0) -1 (str_find text "." (add d3 1))))
+            (if (or (lt n 8)
+                    (or (not (str_eq (substring text 0 1) "@"))
+                    (or (lt d1 2)
+                    (or (lt d2 (add d1 2))
+                    (or (lt d3 (add d2 2))
+                    (or (not (lt d3 (sub n 1)))
+                        (not (lt d4 0))))))))
+                (nothing)
+                (do
+                    (let p (substring text 1 d1))
+                    (let l (substring text (add d1 1) d2))
+                    (let t (substring text (add d2 1) d3))
+                    (let i (substring text (add d3 1) n))
+                    (if (and (eq (frex-digits? text 1 d1) 1)
+                        (and (eq (frex-digits? text (add d1 1) d2) 1)
+                        (and (eq (frex-digits? text (add d2 1) d3) 1)
+                             (eq (frex-digits? text (add d3 1) n) 1))))
+                        (if (and (str_eq p (int_to_str (str_to_int p)))
+                            (and (str_eq l (int_to_str (str_to_int l)))
+                            (and (str_eq t (int_to_str (str_to_int t)))
+                                 (str_eq i (int_to_str (str_to_int i))))))
+                            (list (str_to_int p) (str_to_int l)
+                                  (str_to_int t) (str_to_int i))
+                            (nothing))
+                        (nothing))))))
+    (defn frex-node-from-coordinate (text)
+        (do (let parts (frex-coordinate-parts text))
+            (if (nothing? parts) (nothing)
+                (do (let node (make_nodeid (nth parts 0) (nth parts 1)
+                                           (nth parts 2) (nth parts 3)))
+                    (if (str_eq (frex-node-coordinate node) text)
+                        node (nothing))))))
+    ; On fkwu, make_nodeid reconstructs the four visible coordinate fields but
+    ; does not turn that coordinate into the already-interned node object:
+    ; node_eq may therefore be 0 even when all four fields agree. Resolution is
+    ; explicit through this one-recipe registry. The request reconstructs first,
+    ; compares every coordinate field, and only then receives the registered
+    ; content-addressed recipe node used in request identity.
+    (defn frex-node-coordinate-eq? (a b)
+        (if (and (eq (node_pkg a) (node_pkg b))
+            (and (eq (node_level a) (node_level b))
+            (and (eq (node_type a) (node_type b))
+                 (eq (node_inst a) (node_inst b))))) 1 0))
+    (defn frex-recipe-from-coordinate (text)
+        (do (let reconstructed (frex-node-from-coordinate text))
+            (if (nothing? reconstructed) (nothing)
+                (if (eq (frex-node-coordinate-eq? reconstructed
+                                                     (frex-recipe)) 1)
+                    (frex-recipe) (nothing)))))
+
+    ; ── request token and strict surface parser ──────────────────────
+    ; request = (state reason recipe input carrier token)
+    (defn frex-request (state reason recipe input carrier token)
+        (list state reason recipe input carrier token))
+    (defn frex-request-state (r) (nth r 0))
+    (defn frex-request-reason (r) (nth r 1))
+    (defn frex-request-recipe (r) (nth r 2))
+    (defn frex-request-input (r) (nth r 3))
+    (defn frex-request-carrier (r) (nth r 4))
+    (defn frex-request-token (r) (nth r 5))
+    (defn frex-request-ready? (r)
+        (if (str_eq (frex-request-state r) "ready") 1 0))
+    (defn frex-nothing-request (reason)
+        (frex-request "nothing" reason (nothing) 0 "" (nothing)))
+    (defn frex-carrier? (carrier)
+        (if (or (str_eq carrier "auto")
+                (or (str_eq carrier "metal")
+                (or (str_eq carrier "mlx") (str_eq carrier "cpu")))) 1 0))
+    (defn frex-input-text? (text)
+        (if (or (eq (str_len text) 0)
+                (gt (str_len text) (frex-max-input-bytes))) 0
+            (if (str_eq text (int_to_str (str_to_int text))) 1 0)))
+    (defn frex-request-node (recipe input carrier)
+        (intern_node (frex-request-category)
+            (list recipe
+                  (intern_trivial_int input)
+                  (intern_trivial_string carrier)
+                  (intern_trivial_int (frex-max-attempts)))))
+    (defn frex-request-node-valid? (token)
+        (if (nothing? token) 0
+        (if (not (node_eq (node_category token) (frex-request-category))) 0
+        (if (not (eq (len (node_children token)) 4)) 0
+        (if (not (eq (frex-recipe-valid? (nth (node_children token) 0)) 1)) 0
+        (if (not (eq (frex-carrier?
+                    (node_value (nth (node_children token) 2))) 1)) 0
+            (if (eq (node_value (nth (node_children token) 3))
+                    (frex-max-attempts)) 1 0)))))))
+
+    (defn frex-parse-payload (payload)
+        (do
+            (let n (str_len payload))
+            (let s1 (str_find payload ";" 0))
+            (let s2 (if (lt s1 0) -1 (str_find payload ";" (add s1 1))))
+            (let s3 (if (lt s2 0) -1 (str_find payload ";" (add s2 1))))
+            (if (or (lt s1 0) (or (lt s2 0) (not (lt s3 0))))
+                (frex-nothing-request "field-shape")
+                (do
+                    (let coordinate (substring payload 0 s1))
+                    (let input-field (substring payload (add s1 1) s2))
+                    (let carrier-field (substring payload (add s2 1) n))
+                    (if (not (eq (str_find input-field "input=" 0) 0))
+                        (frex-nothing-request "input-field")
+                    (if (not (eq (str_find carrier-field "carrier=" 0) 0))
+                        (frex-nothing-request "carrier-field")
+                        (do
+                            (let input-text (substring input-field 6
+                                                      (str_len input-field)))
+                            (let carrier (substring carrier-field 8
+                                                   (str_len carrier-field)))
+                            (let reconstructed
+                                (frex-node-from-coordinate coordinate))
+                            (let recipe (frex-recipe-from-coordinate coordinate))
+                            (if (nothing? reconstructed)
+                                (frex-nothing-request "node-coordinate")
+                            (if (nothing? recipe)
+                                (frex-nothing-request "unknown-recipe")
+                            (if (not (eq (frex-input-text? input-text) 1))
+                                (frex-nothing-request "input-integer")
+                            (if (not (eq (frex-carrier? carrier) 1))
+                                (frex-nothing-request "carrier-choice")
+                                (do
+                                    (let input (str_to_int input-text))
+                                    (let token (frex-request-node recipe input carrier))
+                                    (frex-request "ready" "ready" recipe input
+                                                  carrier token)))))))))))))
+
+    (defn frex-parse (surface)
+        (if (not (eq (str_find surface (frex-open) 0) 0))
+            (frex-nothing-request "no-recipe-token")
+            (do
+                (let close-at (str_find surface (frex-close)
+                                         (str_len (frex-open))))
+                (if (lt close-at 0)
+                    (if (gt (str_len surface) (frex-max-frame-bytes))
+                        (frex-nothing-request "payload-budget-exceeded")
+                        (frex-nothing-request "held-incomplete"))
+                    (if (not (eq (add close-at (str_len (frex-close)))
+                                 (str_len surface)))
+                        (frex-nothing-request "trailing-bytes")
+                        (do
+                            (let payload (substring surface (str_len (frex-open))
+                                                     close-at))
+                            (if (eq (str_len payload) 0)
+                                (frex-nothing-request "empty-payload")
+                            (if (gt (str_len payload) (frex-max-payload-bytes))
+                                (frex-nothing-request "payload-budget-exceeded")
+                            (if (ge (str_find payload (frex-open) 0) 0)
+                                (frex-nothing-request "nested-recipe-token")
+                                (frex-parse-payload payload))))))))))
+    (defn frex-surface (recipe input carrier)
+        (str_concat (frex-open)
+        (str_concat (frex-node-coordinate recipe)
+        (str_concat ";input="
+        (str_concat (int_to_str input)
+        (str_concat ";carrier="
+        (str_concat carrier (frex-close))))))))
+
+    ; ── typed carrier observations offered to the pure reducer ───────
+    ; An offer is evidence supplied by a later carrier boundary. This file
+    ; neither makes nor verifies the underlying execution claim.
+    ; offer = (carrier status value value-present reason token)
+    (defn frex-offer-status? (status)
+        (if (or (str_eq status "nothing")
+                (or (str_eq status "value")
+                (or (str_eq status "failure") (str_eq status "timeout")))) 1 0))
+    (defn frex-offer (carrier status value reason)
+        (do
+            (let present (if (str_eq status "value") 1 0))
+            (let token (intern_node (frex-offer-category)
+                (list (intern_trivial_string carrier)
+                      (intern_trivial_string status)
+                      (intern_trivial_int value)
+                      (intern_trivial_int present)
+                      (intern_trivial_string reason))))
+            (list carrier status value present reason token)))
+    (defn frex-offer-carrier (o) (nth o 0))
+    (defn frex-offer-status (o) (nth o 1))
+    (defn frex-offer-value (o) (nth o 2))
+    (defn frex-offer-value-present? (o) (nth o 3))
+    (defn frex-offer-reason (o) (nth o 4))
+    (defn frex-offer-token (o) (nth o 5))
+    (defn frex-offer-valid? (o)
+        (if (not (eq (len o) 6)) 0
+        (if (not (eq (frex-carrier? (frex-offer-carrier o)) 1)) 0
+        (if (str_eq (frex-offer-carrier o) "auto") 0
+        (if (not (eq (frex-offer-status? (frex-offer-status o)) 1)) 0
+        (if (not (eq (frex-offer-value-present? o)
+                     (if (str_eq (frex-offer-status o) "value") 1 0))) 0
+            (node_eq (frex-offer-token o)
+                (intern_node (frex-offer-category)
+                    (list
+                        (intern_trivial_string (frex-offer-carrier o))
+                        (intern_trivial_string (frex-offer-status o))
+                        (intern_trivial_int (frex-offer-value o))
+                        (intern_trivial_int (frex-offer-value-present? o))
+                        (intern_trivial_string (frex-offer-reason o)))))))))))
+
+    ; ── lifecycle observations and bounded fallback ──────────────────
+    (defn frex-request-or-absent (request)
+        (if (eq (frex-request-ready? request) 1)
+            (frex-request-token request) (frex-absent-token)))
+    (defn frex-event (request action carrier signal attempt)
+        (intern_node (frex-event-category)
+            (list (frex-request-or-absent request)
+                  (intern_trivial_string action)
+                  (intern_trivial_string carrier)
+                  (intern_trivial_string signal)
+                  (intern_trivial_int attempt))))
+    (defn frex-event-action (event)
+        (node_value (nth (node_children event) 1)))
+    (defn frex-event-carrier (event)
+        (node_value (nth (node_children event) 2)))
+    (defn frex-event-signal (event)
+        (node_value (nth (node_children event) 3)))
+    (defn frex-trace-has? (trace action)
+        (if (eq (len trace) 0) 0
+            (if (str_eq (frex-event-action (head trace)) action) 1
+                (frex-trace-has? (tail trace) action))))
+    (defn frex-trace-count (trace action)
+        (if (eq (len trace) 0) 0
+            (add (if (str_eq (frex-event-action (head trace)) action) 1 0)
+                 (frex-trace-count (tail trace) action))))
+    (defn frex-trace-add (trace event)
+        (append trace (list event)))
+    (defn frex-trace-actions (trace)
+        (if (eq (len trace) 0) ""
+            (if (eq (len (tail trace)) 0)
+                (frex-event-action (head trace))
+                (str_concat (frex-event-action (head trace))
+                    (str_concat "," (frex-trace-actions (tail trace)))))))
+
+    ; result = (status reason request-token observation-token recipe-token
+    ;           carrier value value-present trace executed model-executed
+    ;           native-code-generated attempts)
+    (defn frex-observation-token-with-flags
+        (status reason request carrier value present trace
+         executed model-executed native-code-generated)
+        (intern_node (frex-observation-category)
+            (append
+                (list
+                    (intern_trivial_string status)
+                    (intern_trivial_string reason)
+                    (frex-request-or-absent request)
+                    (if (eq (frex-request-ready? request) 1)
+                        (frex-request-recipe request) (frex-absent-token))
+                    (intern_trivial_string carrier)
+                    (intern_trivial_int value)
+                    (intern_trivial_int present)
+                    (intern_trivial_int executed)
+                    (intern_trivial_int model-executed)
+                    (intern_trivial_int native-code-generated))
+                trace)))
+    (defn frex-observation-token (status reason request carrier value present trace)
+        (frex-observation-token-with-flags status reason request carrier value
+            present trace 0 0 0))
+    (defn frex-result-with-flags
+        (status reason request carrier value present trace attempts
+         executed model-executed native-code-generated)
+        (do
+            (let observation (frex-observation-token-with-flags status reason
+                request carrier value present trace executed model-executed
+                native-code-generated))
+            (list status reason (frex-request-or-absent request) observation
+                  (if (eq (frex-request-ready? request) 1)
+                      (frex-request-recipe request) (frex-absent-token))
+                  carrier value present trace executed model-executed
+                  native-code-generated attempts)))
+    (defn frex-result (status reason request carrier value present trace attempts)
+        (frex-result-with-flags status reason request carrier value present trace
+            attempts 0 0 0))
+    (defn frex-result-status (r) (nth r 0))
+    (defn frex-result-reason (r) (nth r 1))
+    (defn frex-result-request (r) (nth r 2))
+    (defn frex-result-observation (r) (nth r 3))
+    (defn frex-result-recipe (r) (nth r 4))
+    (defn frex-result-carrier (r) (nth r 5))
+    (defn frex-result-value (r) (nth r 6))
+    (defn frex-result-value-present? (r) (nth r 7))
+    (defn frex-result-trace (r) (nth r 8))
+    (defn frex-result-executed? (r) (nth r 9))
+    (defn frex-result-model-executed? (r) (nth r 10))
+    (defn frex-result-native-code-generated? (r) (nth r 11))
+    (defn frex-result-attempts (r) (nth r 12))
+
+    (defn frex-carrier-admitted? (request offer)
+        (if (str_eq (frex-request-carrier request) "auto") 1
+            (if (str_eq (frex-request-carrier request)
+                        (frex-offer-carrier offer)) 1 0)))
+    (defn frex-finish (request status reason carrier trace attempts)
+        (do
+            (let released (frex-trace-add trace
+                (frex-event request "release" carrier status attempts)))
+            (frex-result status reason request carrier 0 0 released attempts)))
+    (defn frex-choice-loop (request offers attempt trace last-status last-reason)
+        (if (ge attempt (frex-max-attempts))
+            (do
+                (let cut-trace (frex-trace-add trace
+                    (frex-event request "cut" "" "attempt-budget" attempt)))
+                (frex-finish request "timeout" "attempt-budget" ""
+                             cut-trace attempt))
+            (if (eq (len offers) 0)
+                (if (eq attempt 0)
+                    (do
+                        (let nothing-trace (frex-trace-add trace
+                            (frex-event request "nothing" "" "no-offer" 0)))
+                        (frex-finish request "nothing" "no-offer" ""
+                                     nothing-trace 0))
+                    (frex-finish request last-status last-reason ""
+                                 trace attempt))
+                (do
+                    (let offer (head offers))
+                    (let carrier (if (eq (len offer) 6)
+                                     (frex-offer-carrier offer) ""))
+                    (let selected (frex-trace-add trace
+                        (frex-event request "choice" carrier "offered" attempt)))
+                    (if (or (not (eq (frex-offer-valid? offer) 1))
+                            (not (eq (frex-carrier-admitted? request offer) 1)))
+                        (do
+                            (let failed (frex-trace-add selected
+                                (frex-event request "failure" carrier
+                                            "invalid-offer" attempt)))
+                            (let undone (frex-trace-add failed
+                                (frex-event request "undo" carrier
+                                            "invalid-offer" attempt)))
+                            (let refined (frex-trace-add undone
+                                (frex-event request "refine" carrier
+                                            "next-choice" attempt)))
+                            (frex-choice-loop request (tail offers) (add attempt 1)
+                                refined "failure" "invalid-offer"))
+                        (do
+                            (let status (frex-offer-status offer))
+                            (let reason (frex-offer-reason offer))
+                            (if (str_eq status "value")
+                                (do
+                                    (let crystal (frex-trace-add selected
+                                        (frex-event request "crystallize" carrier
+                                                    "value" attempt)))
+                                    (let dissolved (frex-trace-add crystal
+                                        (frex-event request "dissolve" carrier
+                                                    "alternatives" attempt)))
+                                    (let released (frex-trace-add dissolved
+                                        (frex-event request "release" carrier
+                                                    "value" attempt)))
+                                    (frex-result "value" reason request carrier
+                                        (frex-offer-value offer) 1 released
+                                        (add attempt 1)))
+                            (if (str_eq status "nothing")
+                                (do
+                                    (let saw (frex-trace-add selected
+                                        (frex-event request "nothing" carrier
+                                                    reason attempt)))
+                                    (let refined (frex-trace-add saw
+                                        (frex-event request "refine" carrier
+                                                    "next-choice" attempt)))
+                                    (frex-choice-loop request (tail offers)
+                                        (add attempt 1) refined "nothing" reason))
+                            (if (str_eq status "failure")
+                                (do
+                                    (let failed (frex-trace-add selected
+                                        (frex-event request "failure" carrier
+                                                    reason attempt)))
+                                    (let undone (frex-trace-add failed
+                                        (frex-event request "undo" carrier
+                                                    reason attempt)))
+                                    (let refined (frex-trace-add undone
+                                        (frex-event request "refine" carrier
+                                                    "next-choice" attempt)))
+                                    (frex-choice-loop request (tail offers)
+                                        (add attempt 1) refined "failure" reason))
+                                (do
+                                    (let timed (frex-trace-add selected
+                                        (frex-event request "timeout" carrier
+                                                    reason attempt)))
+                                    (let cut (frex-trace-add timed
+                                        (frex-event request "cut" carrier
+                                                    reason attempt)))
+                                    (let undone (frex-trace-add cut
+                                        (frex-event request "undo" carrier
+                                                    reason attempt)))
+                                    (let refined (frex-trace-add undone
+                                        (frex-event request "refine" carrier
+                                                    "next-choice" attempt)))
+                                    (frex-choice-loop request (tail offers)
+                                        (add attempt 1) refined "timeout" reason)))))))))))
+    (defn frex-choice (request offers)
+        (if (not (eq (frex-request-ready? request) 1))
+            (frex-result "nothing" (frex-request-reason request) request
+                         "" 0 0 (empty) 0)
+            (frex-choice-loop request offers 0 (empty) "nothing" "no-offer")))
+
+    ; ── bounded witness rendering ────────────────────────────────────
+    (defn frex-cat (parts)
+        (if (eq (len parts) 0) ""
+            (str_concat (head parts) (frex-cat (tail parts)))))
+    (defn frex-render (result)
+        (do
+            (let value-text (if (eq (frex-result-value-present? result) 1)
+                                (int_to_str (frex-result-value result)) "absent"))
+            (let rendered (frex-cat (list
+                (frex-observation-open)
+                "\nstatus=" (frex-result-status result)
+                "\nreason=" (frex-result-reason result)
+                "\nrequest-node=@" (frex-node-key (frex-result-request result))
+                "\nrecipe-node=@" (frex-node-key (frex-result-recipe result))
+                "\nobservation-node=@" (frex-node-key (frex-result-observation result))
+                "\ncarrier=" (frex-result-carrier result)
+                "\nvalue-present=" (int_to_str (frex-result-value-present? result))
+                "\nvalue=" value-text
+                "\nattempts=" (int_to_str (frex-result-attempts result))
+                "\nexecuted=" (int_to_str (frex-result-executed? result))
+                "\nmodel-executed=" (int_to_str (frex-result-model-executed? result))
+                "\nnative-code-generated="
+                    (int_to_str (frex-result-native-code-generated? result))
+                "\nlifecycle=" (frex-trace-actions (frex-result-trace result))
+                "\n" (frex-observation-close))))
+            (if (le (str_len rendered) (frex-max-render-bytes))
+                rendered "")))
+
+    0)
