@@ -25,8 +25,11 @@
         (str_concat "run-local-qwen-heldout-v1:"
                     (fkhe-dataset-seal)))
     (defn fkher-consented? ()
-        (if (str_eq (read_file (fkher-consent-path))
-                    (fkher-consent-token)) 1 0))
+        (do
+            (let supplied (read_file (fkher-consent-path)))
+            (if (str_eq supplied (fkher-consent-token)) 1
+                (if (str_eq supplied
+                        (str_concat (fkher-consent-token) "\n")) 1 0))))
 
     ; result = tag reversed-scores residence model-executed-count stopped
     (defn fkher-result (scores residence executed stopped)
@@ -34,6 +37,24 @@
     (defn fkher-scores (r) (nth r 1))
     (defn fkher-residence (r) (nth r 2))
     (defn fkher-executed (r) (nth r 3))
+    (defn fkher-progress-line (name value)
+        (print_str (str_concat name (str_concat "=" (str_concat value "\n")))))
+    (defn fkher-progress-start (row)
+        (do
+            (fkher-progress-line "row-start" (fkhe-id row))
+            (fkher-progress-line "row-family" (fkhe-family row))
+            0))
+    (defn fkher-progress-score (score)
+        (do
+            (let o (fkhe-score-observation score))
+            (fkher-progress-line "row-done" (fkhe-score-id score))
+            (fkher-progress-line "row-promotion-ppm"
+                (int_to_str (nmfe-obs-promotion o)))
+            (fkher-progress-line "row-error"
+                (int_to_str (nmfe-obs-error o)))
+            (fkher-progress-line "row-latency-ms"
+                (int_to_str (nmfe-obs-latency o)))
+            0))
 
     (defn fkher-loop (rows residence path scores executed)
         (if (eq (len rows) 0)
@@ -41,6 +62,7 @@
             (do
                 (let row (head rows))
                 (let effective (fqt-knowledge-prompt (fkhe-prompt row)))
+                (let _started (fkher-progress-start row))
                 (let before (now_unix_ms))
                 (let generated
                     (fcmg-generate-knowledge-resident residence path
@@ -48,14 +70,15 @@
                 (let after (now_unix_ms))
                 (let parsed (fkhe-parse-resident-output (nth generated 0)))
                 (let score (fkhe-score row effective parsed (sub after before)))
+                (let _observed (fkher-progress-score score))
                 (let next-scores (cons score scores))
                 (let next-executed
                     (add executed (if (eq (fkhe-output-error parsed) 0) 1 0)))
-                (if (eq (fkhe-output-error parsed) 1)
-                    (fkher-result next-scores (nth generated 1)
-                                  next-executed 1)
-                    (fkher-loop (tail rows) (nth generated 1) path
-                                next-scores next-executed)))))
+                ; A bad row is evidence, not permission to erase the remaining
+                ; denominator. Keep the same admitted residence and score all
+                ; fifteen families; the aggregate will retain every error.
+                (fkher-loop (tail rows) (nth generated 1) path
+                            next-scores next-executed))))
 
     (defn fkher-run-live ()
         (do
