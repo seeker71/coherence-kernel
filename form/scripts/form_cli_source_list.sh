@@ -138,6 +138,7 @@ form-stdlib/q3k-equireach.fk
 form-stdlib/kat-coder-embed.fk
 native/metal/kat-token-handle.fk
 native/metal/qwen35-dense-token-handle.fk
+native/metal/qwen35-crystal.fk
 native/metal/model-bandwidth.fk
 form-stdlib/form-cli-qwen-teach-layer.fk
 form-stdlib/form-cli-model-generate.fk
@@ -499,12 +500,12 @@ form_cli_verify_generation_attestation() {
     }
     actual="$(form_cli_generation_sha256_file "$platform_carrier")"
     [[ "$FORM_CLI_GENERATION_PLATFORM_CARRIER_SHA256" == "$actual" ]] || {
-        printf 'form-cli generation attestation: platform carrier hash mismatch in %s\n' "$path" >&2
+        printf 'form-cli generation attestation: platform carrier hash mismatch in %s\n' "$file_path" >&2
         return 1
     }
     actual="$(form_cli_generation_sha256_file "$bootstrap_attestation")"
     [[ "$FORM_CLI_GENERATION_BOOTSTRAP_ATTESTATION_SHA256" == "$actual" ]] || {
-        printf 'form-cli generation attestation: bootstrap attestation hash mismatch in %s\n' "$path" >&2
+        printf 'form-cli generation attestation: bootstrap attestation hash mismatch in %s\n' "$file_path" >&2
         return 1
     }
 }
