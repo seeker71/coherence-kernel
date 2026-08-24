@@ -19,10 +19,14 @@
     (defn fkher-model-path ()
         "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf")
     (defn fkher-model-id () "qwen3.8-27b-q8_0-form-native-metal-jit")
-    (defn fkher-max-tokens () 48)
+    (defn fkher-query-budget () (fcmg-current-source-query-budget))
+    (defn fkher-answer-reserve () (fcmg-current-source-answer-reserve))
+    ; Compatibility name for readers of the v1 harness. It is query fuel only;
+    ; the answer now has its own non-borrowable ledger.
+    (defn fkher-max-tokens () (fkher-query-budget))
     (defn fkher-consent-path () ".form-knowledge-qwen-heldout-eval-consent")
     (defn fkher-consent-token ()
-        (str_concat "run-local-qwen-heldout-v1:"
+        (str_concat "run-local-qwen-heldout-v2:"
                     (fkhe-dataset-seal)))
     (defn fkher-consented? ()
         (do
@@ -33,7 +37,7 @@
 
     ; result = tag reversed-scores residence model-executed-count stopped
     (defn fkher-result (scores residence executed stopped)
-        (list "form-knowledge-qwen-live-loop-v1" scores residence executed stopped))
+        (list "form-knowledge-qwen-live-loop-v2" scores residence executed stopped))
     (defn fkher-scores (r) (nth r 1))
     (defn fkher-residence (r) (nth r 2))
     (defn fkher-executed (r) (nth r 3))
@@ -44,7 +48,7 @@
             (fkher-progress-line "row-start" (fkhe-id row))
             (fkher-progress-line "row-family" (fkhe-family row))
             0))
-    (defn fkher-progress-score (score)
+    (defn fkher-progress-score (score parsed raw)
         (do
             (let o (fkhe-score-observation score))
             (fkher-progress-line "row-done" (fkhe-score-id score))
@@ -54,6 +58,20 @@
                 (int_to_str (nmfe-obs-error o)))
             (fkher-progress-line "row-latency-ms"
                 (int_to_str (nmfe-obs-latency o)))
+            (fkher-progress-line "row-timeout"
+                (int_to_str (fht-report-int raw "heed_decode_timeout")))
+            (fkher-progress-line "row-refusal"
+                (int_to_str (fkhe-output-refusal parsed)))
+            (fkher-progress-line "row-injection-refusals"
+                (int_to_str (fht-report-int raw "heed_injection_refusals")))
+            (fkher-progress-line "row-frame-refusals"
+                (int_to_str (fht-report-int raw "heed_frame_refusals")))
+            (fkher-progress-line "row-empty"
+                (int_to_str (if (eq (str_len (fkhe-output-answer parsed)) 0) 1 0)))
+            (fkher-progress-line "row-query-tokens"
+                (int_to_str (fht-report-int raw "heed_query_tokens")))
+            (fkher-progress-line "row-answer-tokens"
+                (int_to_str (fht-report-int raw "heed_answer_tokens")))
             0))
 
     (defn fkher-loop (rows residence path scores executed)
@@ -65,12 +83,13 @@
                 (let _started (fkher-progress-start row))
                 (let before (now_unix_ms))
                 (let generated
-                    (fcmg-generate-knowledge-resident residence path
-                        (fkhe-prompt row) (fkher-max-tokens)))
+                    (fcmg-generate-knowledge-resident-2p-hinted residence path
+                        (fkhe-prompt row) (fkher-query-budget)
+                        (fkher-answer-reserve) (fkhe-source row)))
                 (let after (now_unix_ms))
                 (let parsed (fkhe-parse-resident-output (nth generated 0)))
                 (let score (fkhe-score row effective parsed (sub after before)))
-                (let _observed (fkher-progress-score score))
+                (let _observed (fkher-progress-score score parsed (nth generated 0)))
                 (let next-scores (cons score scores))
                 (let next-executed
                     (add executed (if (eq (fkhe-output-error parsed) 0) 1 0)))
