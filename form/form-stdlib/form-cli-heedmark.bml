@@ -32,6 +32,7 @@ section [form.bml] {
         field HeedClose = "<|/form:knowledge-query|>";
         field MaxQueryBytes = 256;
         field MaxHeeds = 2;
+        field LookupLateMs = 2000;
         field LogitsExecuted = 0;
         field OutHit = 1;
         field OutMiss = 2;
@@ -41,6 +42,8 @@ section [form.bml] {
         ref fhm-authority = FormHeedmarkAuthority;
         thought fhm-pattern = list("mark", "heed", "lookup", "prefill", "resume");
         thought fhm-outcomes = list("hit", "miss", "nothing", "spent");
+        thought fhm-states = list("none", "held", "complete", "over-budget");
+        thought fhm-framings = list("clip-left-silent", "hold-refuse-typed", "hold-truncate-lookup");
 
         // ── the carrier's decision, once per completed mark ──────────────
         // Budget first: an exhausted turn does not look anything up, and the
@@ -81,12 +84,60 @@ section [form.bml] {
 
         def fhm-bounded(marks) = fhm-walk(marks, 0, MaxHeeds(), 0);
 
-        // ── the marks, and the one bounded window a streaming cursor needs ──
-        // The widest a legal envelope can be. A cursor that holds this many
-        // bytes and no more cannot grow into a materialized table, however
-        // long the stream runs. This is the whole no-pre-materialization
-        // guarantee, and it is one number.
+        // ── the marks, and the two bounded windows a streaming cursor needs ──
+        // FrameCap is the widest a legal envelope can be. HoldCap is the most
+        // that can be HELD before a close mark must appear — open plus the
+        // largest legal query. A cursor bounded by these cannot grow into a
+        // materialized table however long the stream runs, and that is the
+        // whole no-pre-materialization guarantee: two numbers, no table.
+        //
+        // The distinction is load-bearing. Clipping to FrameCap from the left
+        // silently eats the open mark of an over-long query, and the frame then
+        // never completes: the model asked and heard nothing back, with no
+        // reason and no status. HoldCap lets the cursor SEE that the query
+        // outran its budget and say so.
         def fhm-frame-cap() = add(str_len(HeedOpen()), add(MaxQueryBytes(), str_len(HeedClose())));
+        def fhm-hold-cap() = add(str_len(HeedOpen()), MaxQueryBytes());
+
+        // Enough tail to let an open mark split across tokens still form.
+        def fhm-detect-cap() = str_len(HeedOpen());
+
+        // ── the four streaming states ──────────────────────────────────────
+        def fhm-state-none() = "none";
+        def fhm-state-held() = "held";
+        def fhm-state-complete() = "complete";
+        def fhm-state-over() = "over-budget";
+        def fhm-over-reason() = "query-budget-exceeded";
+
+        // Over budget only when NO close has arrived and the held bytes already
+        // exceed open+MaxQueryBytes. A close arriving late in one large token
+        // is NOT refused here — the envelope completes and the parser answers
+        // query-budget-exceeded itself, which is the same named nothing from
+        // the one place that owns query length.
+        def fhm-over-budget?(held, has_close) = if eq(has_close, 1) then 0 else if gt(held, fhm-hold-cap()) then 1 else 0;
+
+        // ── timeout is a named observation carrying its measurement ─────────
+        // Not a bit. A late lookup reports how late, so a witness can see the
+        // margin rather than a verdict someone already collapsed.
+        def fhm-late?(elapsed_ms) = if gt(elapsed_ms, LookupLateMs()) then 1 else 0;
+        def fhm-late-reason(elapsed_ms) = str_concat("lookup-late-", str_concat(int_to_str(elapsed_ms), "ms"));
+        def fhm-late-observation(elapsed_ms) = list("timeout", int_to_str(elapsed_ms), fhm-late-reason(elapsed_ms));
+
+        // ── comparing candidate framings before cutting ─────────────────────
+        // Three ways to meet an over-long query. Scored on four observable
+        // criteria, so the cut is made against evidence rather than taste.
+        //   names-reason   does the model receive a named reason?
+        //   no-io          does an over-budget frame avoid the lookup?
+        //   bounded        is held memory bounded?
+        //   no-fabrication does it avoid looking up a query the model never wrote?
+        def fhm-framing-names-reason(f) = if str_eq(f, "clip-left-silent") then 0 else 1;
+        def fhm-framing-no-io(f) = if str_eq(f, "hold-truncate-lookup") then 0 else 1;
+        def fhm-framing-bounded(f) = 1;
+        def fhm-framing-no-fabrication(f) = if str_eq(f, "hold-truncate-lookup") then 0 else 1;
+        def fhm-framing-score(f) = add(fhm-framing-names-reason(f), add(fhm-framing-no-io(f), add(fhm-framing-bounded(f), fhm-framing-no-fabrication(f))));
+
+        def fhm-best-of(fs, best, bestv) = if eq(len(fs), 0) then best else if gt(fhm-framing-score(head(fs)), bestv) then fhm-best-of(tail(fs), head(fs), fhm-framing-score(head(fs))) else fhm-best-of(tail(fs), best, bestv);
+        def fhm-best-framing() = fhm-best-of(fhm-framings(), "", 0);
 
         def fhm-marks-distinct() = if str_eq(HeedOpen(), HeedClose()) then 0 else 1;
         def fhm-logits-executed() = LogitsExecuted();
