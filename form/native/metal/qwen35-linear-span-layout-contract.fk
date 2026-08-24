@@ -1,0 +1,91 @@
+; qwen35-linear-span-layout-contract.fk — pure geometry for a future Qwen3.8
+; linear-attention span, kept separate from the live dense walker while that
+; walker is shared by another merge.
+;
+; THREE NUMBERS, THREE MEANINGS.
+;
+;   allocation capacity   max(geo[1], 2 * nq * hd)
+;   packed linear stride  geo[1]
+;   packed full stride    2 * nq * hd
+;
+; The allocation admits either block kind. It is not the stride written by the
+; batched matmul: token t begins at t*geo[1] in a linear block and at
+; t*(2*nq*hd) in a full-attention block. A larger allocation is spare capacity,
+; never padding silently inserted between packed token rows.
+;
+; Shared per-head parameters use h. The packed activation index t*nh+h is not a
+; bias index: every token observes the same dt_bias[h]. Invalid token/head input
+; returns nothing; valid indices 0 and 1 remain ordinary present integers.
+;
+; PIPELINE CONTINUITY. The already-merged cooperative decode GQA owns 39.
+; Future linear-span kernels append, without renumbering it:
+;   40 l2norm-span · 41 gates-span · 42 norm-gate-span
+;   43 conv-offset · 44 delta-offset
+;
+; This file allocates nothing, emits no MSL, and opens no carrier.
+;
+; preludes: form-stdlib/core.fk
+; Proven by: native/metal/tests/qwen35-linear-span-layout-contract-band.fk
+
+(do
+    ; Only geo[1], geo[12], and geo[14] participate. This constructor makes
+    ; synthetic geometry readable while retaining the live walker's indices.
+    (defn qlslc-geometry (linear-stride nq hd)
+        (list 5120 linear-stride 16 48 128 128 0 0 0 0 17408 17408
+              nq 4 hd))
+
+    (defn qlslc-packed-linear-stride (geo) (nth geo 1))
+    (defn qlslc-packed-full-stride (geo)
+        (mul 2 (mul (nth geo 12) (nth geo 14))))
+    (defn qlslc-allocation-capacity (geo)
+        (do
+            (let linear (qlslc-packed-linear-stride geo))
+            (let full (qlslc-packed-full-stride geo))
+            (if (gt full linear) full linear)))
+    (defn qlslc-allocation-elements (geo ntok)
+        (mul (qlslc-allocation-capacity geo) ntok))
+    (defn qlslc-packed-linear-elements (geo ntok)
+        (mul (qlslc-packed-linear-stride geo) ntok))
+    (defn qlslc-packed-full-elements (geo ntok)
+        (mul (qlslc-packed-full-stride geo) ntok))
+    (defn qlslc-linear-token-offset (geo token)
+        (if (lt token 0) (nothing)
+            (mul token (qlslc-packed-linear-stride geo))))
+    (defn qlslc-full-token-offset (geo token)
+        (if (lt token 0) (nothing)
+            (mul token (qlslc-packed-full-stride geo))))
+    (defn qlslc-layout-valid? (geo ntok)
+        (if (le ntok 0) 0
+            (do
+                (let allocated (qlslc-allocation-elements geo ntok))
+                (if (and
+                        (le (qlslc-packed-linear-elements geo ntok) allocated)
+                        (le (qlslc-packed-full-elements geo ntok) allocated))
+                    1 0))))
+
+    (defn qlslc-valid-head? (head nh)
+        (if (and (ge head 0) (lt head nh)) 1 0))
+    (defn qlslc-packed-head-index (token head nh)
+        (if (or (lt token 0) (not (eq (qlslc-valid-head? head nh) 1)))
+            (nothing)
+            (add (mul token nh) head)))
+    (defn qlslc-shared-head-bias-index (token head nh)
+        (if (or (lt token 0) (not (eq (qlslc-valid-head? head nh) 1)))
+            (nothing)
+            head))
+
+    ; Named getters make this an index contract, not a dispatch table.
+    (defn qlslc-cooperative-gqa-pipeline () 39)
+    (defn qlslc-l2norm-span-pipeline () 40)
+    (defn qlslc-gates-span-pipeline () 41)
+    (defn qlslc-norm-gate-span-pipeline () 42)
+    (defn qlslc-conv-offset-pipeline () 43)
+    (defn qlslc-delta-offset-pipeline () 44)
+    (defn qlslc-pipeline-contract ()
+        (list (qlslc-cooperative-gqa-pipeline)
+              (qlslc-l2norm-span-pipeline)
+              (qlslc-gates-span-pipeline)
+              (qlslc-norm-gate-span-pipeline)
+              (qlslc-conv-offset-pipeline)
+              (qlslc-delta-offset-pipeline)))
+    0)
