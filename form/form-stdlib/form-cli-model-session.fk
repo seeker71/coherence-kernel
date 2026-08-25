@@ -72,6 +72,48 @@
     (defn fcms-generated-id-policy () "carry-original-generated-ids-and-kv")
     (defn fcms-model-executed-form? () 0)
 
+    (defn fcms-open-context
+        (path src maxpos prompt-count cursor ids live-cursor x iced)
+        (do
+            (let ctx (if (eq iced 1)
+                (qsx-open path maxpos x) (q38-open path maxpos)))
+            (if (not (eq (q38-context-ok? ctx) 1))
+                (do
+                    (let closed (if (lt (len ctx) 10) 0
+                        (q38-close ctx (empty))))
+                    (fcms-none "model-context-open-refused"))
+                (do
+                    (let sts (q38-new-state (nth ctx 2)))
+                    (if (not (eq (q38-state-ok? sts) 1))
+                        (do
+                            (let state-closed (q38-free-state sts))
+                            (let context-closed (q38-close ctx (empty)))
+                            (fcms-none "model-stream-state-refused"))
+                        (if (eq live-cursor 1)
+                            (do
+                                (let pf (fcmg-live-prefill ctx sts cursor 64))
+                                (if (not (str_eq (nth pf 1) "ok"))
+                                    (do
+                                        (let state-closed
+                                            (q38-free-state sts))
+                                        (let context-closed
+                                            (q38-close ctx (empty)))
+                                        (fcms-none (str_concat
+                                            "live-prompt-cursor-refused:"
+                                            (nth pf 5))))
+                                    (fcms-session "live" "opened-live-cursor"
+                                        path src ctx sts maxpos (nth pf 3)
+                                        (nth pf 2) 0 prompt-count 0 0 0)))
+                            (do
+                                (let pf (q38-prefill
+                                    (nth ctx 0) (nth ctx 1) (nth ctx 2)
+                                    (nth ctx 3) sts (nth ctx 4) (nth ctx 5)
+                                    (nth ctx 6) ids 0))
+                                (fcms-session "live"
+                                    "opened-scanner-fallback" path src ctx sts
+                                    maxpos (nth pf 1) (nth pf 0) 0
+                                    prompt-count 0 0 0))))))))
+
     (defn fcms-open (path prompt maxpos)
         (do
             (let verdict (qaf-seal-verdict path))
@@ -80,36 +122,48 @@
                 (do
                     (let src (fcmg-src path))
                     (let arch (fcmg-arch src))
-                    (let ids (fcmg-chat-ids src prompt))
                     (if (not (str_eq arch "qwen35"))
                         (fcms-none (str_concat "architecture=" arch))
-                    (if (eq (len ids) 0)
-                        (fcms-none "initial-turn-encoded-no-ids")
-                    (if (or (le maxpos (len ids))
-                            (gt maxpos (gmt-u32 src (q38-key arch "context_length"))))
-                        (fcms-none "session-context-window-refused")
                         (do
-                            (let ctx (q38-open path maxpos))
-                            (if (not (eq (q38-context-ok? ctx) 1))
-                                (do
-                                    (let closed (if (lt (len ctx) 10) 0
-                                        (q38-close ctx (empty))))
-                                    (fcms-none "model-context-open-refused"))
-                                (do
-                                    (let sts (q38-new-state (nth ctx 2)))
-                                    (if (not (eq (q38-state-ok? sts) 1))
-                                        (do
-                                            (let state-closed (q38-free-state sts))
-                                            (let context-closed (q38-close ctx (empty)))
-                                            (fcms-none "model-stream-state-refused"))
-                                        (do
-                                            (let pf (q38-prefill
-                                                (nth ctx 0) (nth ctx 1) (nth ctx 2)
-                                                (nth ctx 3) sts (nth ctx 4) (nth ctx 5)
-                                                (nth ctx 6) ids 0))
-                                            (fcms-session "live" "opened" path src ctx sts
-                                                maxpos (nth pf 1) (nth pf 0) 0
-                                                (len ids) 0 0 0)))))))))))))
+                            (let x (qsx-load path))
+                            (let iced (if (eq (nth x 0) 1) 1 0))
+                            (let cursor0 (if (eq iced 1)
+                                (fcmg-chat-cursor-profile
+                                    path prompt "full" x)
+                                (qtlc-open-index
+                                    (list "absent" "crystal-absent" ""
+                                        0 0 0 0 0 0 0) (empty))))
+                            (let live-cursor
+                                (if (str_eq (qtlc-status cursor0) "open")
+                                    1 0))
+                            ; Exact count without a retained prompt-ID list.
+                            ; The immutable cursor is then reopened for prefill.
+                            (let counted (if (eq live-cursor 1)
+                                (qtlc-count cursor0)
+                                (list "fallback" cursor0)))
+                            (let count-ok (if (eq live-cursor 1)
+                                (if (str_eq (nth counted 0) "done") 1 0) 1))
+                            (let ids (if (eq live-cursor 1) (empty)
+                                (fcmg-chat-ids src prompt)))
+                            (let prompt-count (if (eq live-cursor 1)
+                                (qtlc-token-count (nth counted 1))
+                                (len ids)))
+                            (let cursor (if (eq live-cursor 1)
+                                (fcmg-chat-cursor-profile
+                                    path prompt "full" x)
+                                cursor0))
+                            (if (not (eq count-ok 1))
+                                (fcms-none (str_concat
+                                    "live-prompt-count-refused:"
+                                    (qtlc-reason (nth counted 1))))
+                            (if (le prompt-count 0)
+                                (fcms-none "initial-turn-encoded-no-ids")
+                            (if (or (le maxpos prompt-count)
+                                    (gt maxpos (gmt-u32 src
+                                        (q38-key arch "context_length"))))
+                                (fcms-none "session-context-window-refused")
+                                (fcms-open-context path src maxpos prompt-count
+                                    cursor ids live-cursor x iced))))))))))
 
     ; result = (ids pending pos stopped). Returned ids are model speech only;
     ; the stop/control prediction is retained separately for the next crossing.

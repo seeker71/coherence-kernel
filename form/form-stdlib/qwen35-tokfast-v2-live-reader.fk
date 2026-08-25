@@ -1,0 +1,187 @@
+; qwen35-tokfast-v2-live-reader.fk -- the bounded read-only qtf2 waist.
+;
+; qwen35-tokfast-v2.fk owns artifact birth, ordered recording, publication,
+; synthetic mirrors, and their proof surface.  A running form-cli needs none of
+; those meanings: it opens an already-published seal-keyed manifest and reads
+; one fixed row per binary-search probe.  Keeping this reader separate prevents
+; the recorder from occupying the source kernel's finite bootstrap function
+; space while preserving the exact same BMF row contract.
+;
+; No token table is flattened or loaded.  The cursor asks fs-read-slice for one
+; row at a time.  Presence is explicit, so vocabulary ids 0 and 1 remain values
+; rather than being mistaken for absence.
+;
+; index  = [status reason root vcount vcap vwidth mcount lcap rcap mwidth]
+; lookup = [status value present probes]
+; choice = [status position rank present probes]
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-fs.fk form-stdlib/line-grammar.fk
+; Proven through: form-stdlib/tests/qwen35-tokenizer-live-cursor-band.fk
+
+(do
+    (defn qtf2r-bytes-string (bs acc)
+        (if (nil? bs) acc
+            (qtf2r-bytes-string (tail bs)
+                (str_concat acc (byte_to_str (head bs))))))
+
+    (defn qtf2r-bytes-cmp (a b)
+        (if (nil? a) (if (nil? b) 0 -1)
+            (if (nil? b) 1
+                (if (lt (head a) (head b)) -1
+                    (if (gt (head a) (head b)) 1
+                        (qtf2r-bytes-cmp (tail a) (tail b)))))))
+
+    ; Decode only the bounded key slice already named by a row length.  Invalid
+    ; hex is `nothing`; a valid zero-byte key is the distinct empty list.
+    (defn qtf2r-hex (s i n acc)
+        (if (ge i n) (reverse acc)
+            (do
+                (let hb (str_byte_at s i))
+                (let lb (str_byte_at s (add i 1)))
+                (let hi (if (and (ge hb 48) (le hb 57)) (sub hb 48)
+                    (if (and (ge hb 65) (le hb 70)) (add 10 (sub hb 65))
+                    (if (and (ge hb 97) (le hb 102)) (add 10 (sub hb 97)) -1))))
+                (let lo (if (and (ge lb 48) (le lb 57)) (sub lb 48)
+                    (if (and (ge lb 65) (le lb 70)) (add 10 (sub lb 65))
+                    (if (and (ge lb 97) (le lb 102)) (add 10 (sub lb 97)) -1))))
+                (if (or (lt hi 0) (lt lo 0)) (nothing)
+                    (qtf2r-hex s (add i 2) n
+                        (cons (add (mul hi 16) lo) acc))))))
+
+    (defn qtf2r-open (path live-seal)
+        (do
+            (let root (str_concat path ".form-tokfast-v2"))
+            (let manifest-path (fs-path-join root "manifest.row"))
+            (let vocab-path (fs-path-join root "vocab.rows"))
+            (let merge-path (fs-path-join root "merge.rows"))
+            (if (eq (fs-exists? manifest-path) 0)
+                (list "absent" "manifest-absent" root 0 0 0 0 0 0 0)
+            (if (or (eq (fs-exists? vocab-path) 0)
+                    (eq (fs-exists? merge-path) 0))
+                (list "absent" "row-artifact-absent" root 0 0 0 0 0 0 0)
+                (do
+                    (let fields (split-on (fs-read-text manifest-path) "|"))
+                    (if (not (eq (len fields) 10))
+                        (list "failure" "manifest-fields" root 0 0 0 0 0 0 0)
+                        (do
+                            (let raw-seal (nth fields 9))
+                            (let newline-ok (and (gt (str_len raw-seal) 0)
+                                (eq (str_byte_at raw-seal
+                                    (sub (str_len raw-seal) 1)) 10)))
+                            (let seal-hex (if newline-ok
+                                (substring raw-seal 0 (sub (str_len raw-seal) 1)) ""))
+                            (let seal-bytes (qtf2r-hex seal-hex 0
+                                (str_len seal-hex) (empty)))
+                            (let seal-ok (and newline-ok
+                                (not (nothing? seal-bytes))))
+                            (let seal (if seal-ok
+                                (qtf2r-bytes-string seal-bytes "") ""))
+                            (let vcount (str_to_int (nth fields 2)))
+                            (let vcap (str_to_int (nth fields 3)))
+                            (let vwidth (str_to_int (nth fields 4)))
+                            (let mcount (str_to_int (nth fields 5)))
+                            (let lcap (str_to_int (nth fields 6)))
+                            (let rcap (str_to_int (nth fields 7)))
+                            (let mwidth (str_to_int (nth fields 8)))
+                            (if (or (not (str_eq (nth fields 0) "QTF2"))
+                                    (or (not seal-ok)
+                                    (not (eq (str_to_int (nth fields 1))
+                                             (len seal-bytes)))))
+                                (list "failure" "manifest-shape" root 0 0 0 0 0 0 0)
+                            (if (not (str_eq seal live-seal))
+                                (list "stale" "seal-mismatch" root vcount vcap
+                                    vwidth mcount lcap rcap mwidth)
+                            (if (or (not (eq vwidth (add 21 (mul 2 vcap))))
+                                    (not (eq mwidth
+                                        (add 28 (mul 2 (add lcap rcap))))))
+                                (list "failure" "row-width" root vcount vcap
+                                    vwidth mcount lcap rcap mwidth)
+                            (if (or (not (eq (fs-stat-size vocab-path)
+                                            (mul vcount vwidth)))
+                                    (not (eq (fs-stat-size merge-path)
+                                            (mul mcount mwidth))))
+                                (list "failure" "row-extents" root vcount vcap
+                                    vwidth mcount lcap rcap mwidth)
+                                (list "current" "seal-and-extents-current" root
+                                    vcount vcap vwidth mcount lcap rcap mwidth))))))))))))
+
+    ; One recursion serves both vocab and merge files.  Fixed offsets are the
+    ; published qtf2 grammar, not an operation table: each probe still parses
+    ; the row it observes and validates its framing before comparing bytes.
+    (defn qtf2r-find (index kind left right lo hi probes)
+        (if (not (str_eq (nth index 0) "current"))
+            (list (nth index 0) (nothing) 0 probes)
+        (if (ge lo hi) (list "miss" (nothing) 0 probes)
+            (do
+                (let vocab (str_eq kind "vocab"))
+                (let width (if vocab (nth index 5) (nth index 9)))
+                (let mid (div (add lo hi) 2))
+                (let row (fs-read-slice
+                    (fs-path-join (nth index 2)
+                        (if vocab "vocab.rows" "merge.rows"))
+                    (mul mid width) width))
+                (if (not (eq (str_len row) width))
+                    (list "failure" (nothing) 0 probes)
+                    (do
+                        (let ll (str_to_int (substring row 2 8)))
+                        (let rl (if vocab 0
+                            (str_to_int (substring row 9 15))))
+                        (let value (str_to_int (substring row
+                            (if vocab 9 16) (if vocab 19 26))))
+                        (let lcap (if vocab (nth index 4) (nth index 7)))
+                        (let rcap (if vocab 0 (nth index 8)))
+                        (let hex-start (if vocab 20 27))
+                        (let left-hex (substring row hex-start
+                            (add hex-start (mul 2 ll))))
+                        (let row-left (qtf2r-hex left-hex 0
+                            (str_len left-hex) (empty)))
+                        (let right-start (add hex-start (mul 2 lcap)))
+                        (let right-hex (if vocab "" (substring row right-start
+                            (add right-start (mul 2 rl)))))
+                        (let row-right (if vocab (empty)
+                            (qtf2r-hex right-hex 0 (str_len right-hex) (empty))))
+                        (let framed (and
+                            (str_eq (substring row 0 2)
+                                (if vocab "V|" "M|"))
+                            (and (eq (str_byte_at row (sub width 1)) 10)
+                            (and (le ll lcap) (le rl rcap)))))
+                        (let decoded (and
+                            (not (nothing? row-left))
+                            (if vocab 1
+                                (not (nothing? row-right)))))
+                        (if (not (and framed decoded))
+                            (list "failure" (nothing) 0 probes)
+                            (do
+                                (let left-cmp (qtf2r-bytes-cmp row-left left))
+                                (let cmp (if (or vocab (not (eq left-cmp 0)))
+                                    left-cmp
+                                    (qtf2r-bytes-cmp row-right right)))
+                                (if (eq cmp 0)
+                                    (list "hit" value 1 (add probes 1))
+                                    (if (lt cmp 0)
+                                        (qtf2r-find index kind left right
+                                            (add mid 1) hi (add probes 1))
+                                        (qtf2r-find index kind left right
+                                            lo mid (add probes 1))))))))))))
+
+    (defn qtf2r-best (index syms i found best-pos best-rank probes)
+        (if (ge (add i 1) (len syms))
+            (list "ok" best-pos best-rank found probes)
+            (do
+                (let one (qtf2r-find index "merge" (nth syms i)
+                    (nth syms (add i 1)) 0 (nth index 6) 0))
+                (if (not (or (str_eq (nth one 0) "hit")
+                             (str_eq (nth one 0) "miss")))
+                    (list (nth one 0) 0 0 0 (add probes (nth one 3)))
+                    (do
+                        (let hit (nth one 2))
+                        (let rank (if hit (nth one 1) 0))
+                        (let better (and hit
+                            (or (eq found 0) (lt rank best-rank))))
+                        (qtf2r-best index syms (add i 1)
+                            (if hit 1 found)
+                            (if better i best-pos)
+                            (if better rank best-rank)
+                            (add probes (nth one 3))))))))
+
+    0)

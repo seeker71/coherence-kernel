@@ -1,0 +1,69 @@
+; qwen38-generation-admission-stages-live.fk -- expose the Form work before a
+; local Qwen context is opened.
+;
+; This probe deliberately stops before q38-open and performs no model forward.
+; It measures the exact shared admission stages used by fcmg-q35-run: whole-file
+; seal, GGUF source view, seal-keyed crystal lookup, thought preparation,
+; scannerless tokenizer/chat IDs, metadata/context sizing, and tensor extent.
+; The public prompt is fixed.  No heldout prompt or answer is printed or read.
+;
+; preludes: form-stdlib/form-cli-model-generate.fk
+
+(do
+    (defn qgas-line (name value)
+        (print_str (str_concat name (str_concat "="
+            (str_concat value "\n")))))
+    (defn qgas-ms (name before after)
+        (qgas-line name (int_to_str (sub after before))))
+
+    (let path "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf")
+    (let prompt "Reply with exactly: LOCAL FORM ALIVE")
+    (let t0 (now_unix_ms))
+    (let verdict (qaf-seal-verdict path))
+    (let t1 (now_unix_ms))
+    (qgas-ms "admission-seal-ms" t0 t1)
+    (qgas-line "admission-seal-verdict" (int_to_str verdict))
+
+    (let src (fcmg-src path))
+    (let t2 (now_unix_ms))
+    (qgas-ms "admission-gguf-source-ms" t1 t2)
+
+    (let crystal (qsx-load path))
+    (let t3 (now_unix_ms))
+    (qgas-ms "admission-crystal-load-ms" t2 t3)
+    (qgas-line "admission-crystal-present" (int_to_str (nth crystal 0)))
+
+    (let thoughts (lg-think-all prompt))
+    (let t4 (now_unix_ms))
+    (qgas-ms "admission-thought-plan-ms" t3 t4)
+    (let thought-lists (fcmg-encode-thoughts src thoughts (empty)))
+    (let t5 (now_unix_ms))
+    (qgas-ms "admission-thought-encode-ms" t4 t5)
+    (qgas-line "admission-thought-count" (int_to_str (len thoughts)))
+
+    (let ids (fcmg-chat-ids-profile src prompt "full"))
+    (let t6 (now_unix_ms))
+    (qgas-ms "admission-chat-ids-ms" t5 t6)
+    (qgas-line "admission-prompt-tokens" (int_to_str (len ids)))
+
+    (let arch (fcmg-arch src))
+    (let model-max (gmt-u32 src (q38-key arch "context_length")))
+    (let thought-n (fcmg-id-count thought-lists 0))
+    (let gap-n (if (gt (len thoughts) 1) (lg-gap-default) 0))
+    (let need (fcmg-context-need (len ids) thought-n
+        (mul gap-n (if (gt (len thoughts) 1)
+            (sub (len thoughts) 1) 0)) 24 0 0))
+    (let t7 (now_unix_ms))
+    (qgas-ms "admission-metadata-context-ms" t6 t7)
+    (qgas-line "admission-context-need" (int_to_str need))
+    (qgas-line "admission-model-max" (int_to_str model-max))
+
+    (let required (if (eq (nth crystal 0) 1)
+        (qsx-required crystal)
+        (q38-required-size src (egg-data-base src 32))))
+    (let t8 (now_unix_ms))
+    (qgas-ms "admission-tensor-extent-ms" t7 t8)
+    (qgas-line "admission-required-bytes" (int_to_str required))
+    (qgas-line "admission-actual-bytes" (int_to_str (file_size path)))
+    (qgas-ms "admission-total-ms" t0 t8)
+    0)

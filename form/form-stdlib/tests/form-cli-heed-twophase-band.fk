@@ -25,7 +25,7 @@
 ; four-arm run; NOT claimed as one — the four-arm surface is source_jit_gate's.
 ; What is witnessed below is the fkwu arm.
 ;
-; Verdict 2047:
+; Verdict 65535:
 ;   1     a query closing on its FINAL slot still opens a full answer reserve
 ;   2     and the model then actually writes: answer tokens reach the reserve
 ;   4     unused query fuel is CUT into the ledger, never carried
@@ -38,8 +38,13 @@
 ;   512   curriculum: anchor before path, and none of the six kinds is boolean
 ;   1024  THE DEFECT, both halves on one stream: fungible 0 answer tokens,
 ;         two-phase the full reserve
+;   2048  a second query closing on its final OLD answer slot opens fresh fuel
+;   4096  unused old answer fuel is cut visibly, never banked into the refresh
+;   8192  a typed miss also opens fresh answer fuel after recursive lookup
+;   16384 a typed nothing opens no fresh fuel and commits no second observation
+;   32768 a third query is spent without a third source call or injection
 ;
-; preludes: form-stdlib/core.fk form-stdlib/language-model.fk
+; preludes: form-stdlib/core.fk form-stdlib/language-template.fk
 ; preludes: form-stdlib/form-cli-heedmark-xtal.fk
 ; preludes: form-stdlib/form-cli-heed-cursor.fk
 ; witnessed: 2026-08-24 -> 2047 on fkwu; query 48 / reserve 32 observed in this mechanism
@@ -102,7 +107,77 @@
     (defn f2-has-loop (xs name)
         (if (eq (len xs) 0) 0
             (if (str_eq (head xs) name) 1 (f2-has-loop (tail xs) name))))
+    (defn f2-count-loop (xs name)
+        (if (eq (len xs) 0) 0
+            (add (if (str_eq (head xs) name) 1 0)
+                 (f2-count-loop (tail xs) name))))
+    (defn f2-count (r name)
+        (f2-count-loop (fhc-honored (f2-cur r)) name))
     (defn f2-bit (ok bit) (if ok bit 0))
+
+    ; ── recursive source requests inside the first answer reserve ──────────
+    ; The first query is 10..12. Observation prefill births 20..22 as a more
+    ; precise second query. A second observation births id 30 as the answer.
+    ; The three-frame variant births 40..42 instead, after which the exhausted
+    ; heed budget makes that complete third frame `spent` with no source call.
+    (defn f2r-piece (id)
+        (if (or (eq id 10) (or (eq id 20) (eq id 40))) (HeedOpen)
+        (if (eq id 11) "a"
+        (if (eq id 21) "b"
+        (if (eq id 41) "c"
+        (if (or (eq id 12) (or (eq id 22) (eq id 42))) (HeedClose)
+        (if (eq id 30) " answer"
+        (if (eq id 43) " after-spent" ""))))))))
+    (defn f2r-next (id)
+        (if (eq id 9) 10
+        (if (eq id 10) 11
+        (if (eq id 11) 12
+        (if (eq id 20) 21
+        (if (eq id 21) 22
+        (if (eq id 30) 999 999)))))))
+    (defn f2r-next-three (id)
+        (if (eq id 9) 10
+        (if (eq id 10) 11
+        (if (eq id 11) 12
+        (if (eq id 20) 21
+        (if (eq id 21) 22
+        (if (eq id 40) 41
+        (if (eq id 41) 42
+        (if (eq id 42) 43
+        (if (eq id 43) 999 999))))))))))
+    (defn f2r-dec (ids acc)
+        (if (eq (len ids) 0) acc
+            (f2r-dec (tail ids) (str_concat acc (f2r-piece (head ids))))))
+    (defn f2r-decodef (ctx ids) (f2r-dec ids ""))
+    (defn f2r-stepf (ctx id pos) (f2r-next id))
+    (defn f2r-stepf-three (ctx id pos) (f2r-next-three id))
+    (defn f2r-encodef (ctx text)
+        (if (eq (str_len text) 0) (empty) (list 901)))
+    (defn f2r-prefillf (ctx ids pos)
+        (if (and (gt (len ids) 0) (eq (head ids) 901))
+            (list (if (lt pos 8) 20 30) (add pos (len ids)))
+            (list 0 (add pos (len ids)))))
+    (defn f2r-prefillf-three (ctx ids pos)
+        (if (and (gt (len ids) 0) (eq (head ids) 901))
+            (list (if (lt pos 8) 20 40) (add pos (len ids)))
+            (list 0 (add pos (len ids)))))
+    (defn f2r-hit (ctx surface lr) (list "hit" (f2-obs) "grounded-hit"))
+    (defn f2r-miss-span ()
+        "<|form:knowledge-observation|>\nstatus=miss\nanswer:\n<|/form:knowledge-observation|>")
+    (defn f2r-miss-second (ctx surface lr)
+        (if (ge (str_find surface "b" 0) 0)
+            (list "miss" (f2r-miss-span) "grounded-miss")
+            (f2r-hit ctx surface lr)))
+    (defn f2r-nothing-second (ctx surface lr)
+        (if (ge (str_find surface "b" 0) 0)
+            (list "nothing" "" "second-declined")
+            (f2r-hit ctx surface lr)))
+    (defn f2r-run (lookupf reserve)
+        (fhc-run-2p 0 f2r-stepf f2r-prefillf f2r-decodef f2r-encodef
+            lookupf 1 9 0 (list 999) 2 3 reserve (empty)))
+    (defn f2r-run-three ()
+        (fhc-run-2p 0 f2r-stepf-three f2r-prefillf-three f2r-decodef
+            f2r-encodef f2r-hit 1 9 0 (list 999) 2 3 4 (empty)))
 
     ; ── the runs ───────────────────────────────────────────────────────────
     ; final: query budget 3, and the close lands exactly on slot 3
@@ -119,6 +194,11 @@
     (let stopnow (f2-2p f2-stepf-stop f2-hit 9 10 8))
     ; the defect: one fungible budget, close on the last slot
     (let fung (f2-fungible 9 3))
+    (let recursive-final (f2r-run f2r-hit 3))
+    (let recursive-cut (f2r-run f2r-hit 5))
+    (let recursive-miss (f2r-run f2r-miss-second 3))
+    (let recursive-nothing (f2r-run f2r-nothing-second 3))
+    (let recursive-spent (f2r-run-three))
 
     ; the final slot still opened a full reserve
     (let b1 (f2-bit (and (eq (fhc-phase (f2-cur final)) (PhaseAnswer))
@@ -175,4 +255,29 @@
                           (and (eq (fhc-answer-tokens (f2-cur final)) 8)
                                (eq (fhm-query-budget) 48)))) 1024))
 
-    (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 (add b8 (add b9 (add b10 b11)))))))))))
+    ; The second close spends the last OLD reserve token. Reopening is decided
+    ; from immutable capacity, so the model still receives a fresh reserve and
+    ; reaches its answer/stop instead of being stranded after lookup two.
+    (let b12 (f2-bit (and (eq (f2-count recursive-final "hit") 2)
+                      (and (eq (fhc-close-commits (f2-cur recursive-final)) 2)
+                      (and (eq (fhc-answer-cap (f2-cur recursive-final)) 3)
+                      (and (eq (fhc-answer-left (f2-cur recursive-final)) 2)
+                           (eq (fhc-stopped? (f2-cur recursive-final)) 1))))) 2048))
+    (let b13 (f2-bit (and (eq (fhc-answer-cut (f2-cur recursive-cut)) 2)
+                      (and (eq (fhc-answer-cap (f2-cur recursive-cut)) 5)
+                           (eq (fhc-answer-left (f2-cur recursive-cut)) 4))) 4096))
+    (let b14 (f2-bit (and (eq (f2-count recursive-miss "hit") 1)
+                      (and (eq (f2-count recursive-miss "miss") 1)
+                      (and (eq (fhc-close-commits (f2-cur recursive-miss)) 2)
+                           (eq (fhc-answer-left (f2-cur recursive-miss)) 2)))) 8192))
+    (let b15 (f2-bit (and (eq (f2-count recursive-nothing "nothing") 1)
+                      (and (eq (fhc-close-commits (f2-cur recursive-nothing)) 1)
+                      (and (eq (fhc-answer-left (f2-cur recursive-nothing)) 0)
+                           (eq (fhc-answer-cut (f2-cur recursive-nothing)) 0)))) 16384))
+    (let b16 (f2-bit (and (eq (f2-count recursive-spent "hit") 2)
+                      (and (eq (f2-count recursive-spent "spent") 1)
+                      (and (eq (fhc-lookups (f2-cur recursive-spent)) 2)
+                      (and (eq (fhc-close-commits (f2-cur recursive-spent)) 2)
+                           (eq (fhc-budget (f2-cur recursive-spent)) 0))))) 32768))
+
+    (sum (list b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16)))
