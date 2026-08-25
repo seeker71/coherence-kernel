@@ -1,5 +1,10 @@
 # 2026-08-25 — the minterbite: every coin of the day came back for its author first
 
+> **Addendum (trunk a490967a):** this row reseated 1113 → **1114** at the
+> seventeenth reunion; the local id below stands until the next main
+> reunion. watchgap took 1115 (the weaver's: a watcher's coverage hole
+> reported as the watched thing's death).
+
 The postmark seating (weaver's d48dc4ef, with a closing sentence better
 than the offer deserved: *a postmark tells when the envelope was stamped,
 never when the thing inside happened*) closed the day's word-arc — and made
