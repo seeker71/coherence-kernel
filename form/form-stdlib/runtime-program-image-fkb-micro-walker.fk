@@ -35,6 +35,9 @@
             (rpmw-feature "string-pool-bytes-decode-to-form-strings" 1)
             (rpmw-feature "string-child-kinds-and-bounds-refused-loudly" 1)
             (rpmw-feature "explicit-result-value-kind-provenance" 1)
+            (rpmw-feature "tag-109-110-111-sparse-explicit-frames" 1)
+            (rpmw-feature "frame-bindings-retain-value-kind-and-occupancy" 1)
+            (rpmw-feature "logical-frame-reserve-allocates-no-global-seats" 1)
             (rpmw-feature "unsupported-tags-are-loud-errors" 1)
             (rpmw-feature "child-range-errors-are-loud" 1)
             (rpmw-feature "budget-exhaustion-is-timeout-trace" 1)
@@ -68,6 +71,10 @@
     (defn rpmw-reason-string-value-required () "string-value-required")
     (defn rpmw-reason-integer-value-required () "integer-value-required")
     (defn rpmw-reason-list-value-required () "list-value-required")
+    (defn rpmw-reason-negative-frame-offset () "negative-frame-offset")
+    (defn rpmw-reason-negative-frame-reserve () "negative-frame-reserve")
+    (defn rpmw-reason-frame-slot-out-of-range () "frame-slot-out-of-range")
+    (defn rpmw-reason-frame-slot-uninitialized () "frame-slot-uninitialized")
     (defn rpmw-reason-string-byte-index-out-of-range () "string-byte-index-out-of-range")
     (defn rpmw-reason-substring-bounds-invalid () "substring-bounds-invalid")
     (defn rpmw-reason-malformed-envelope () "malformed-envelope")
@@ -94,6 +101,10 @@
             (rpmw-reason-string-value-required)
             (rpmw-reason-integer-value-required)
             (rpmw-reason-list-value-required)
+            (rpmw-reason-negative-frame-offset)
+            (rpmw-reason-negative-frame-reserve)
+            (rpmw-reason-frame-slot-out-of-range)
+            (rpmw-reason-frame-slot-uninitialized)
             (rpmw-reason-string-byte-index-out-of-range)
             (rpmw-reason-substring-bounds-invalid)
             (rpmw-reason-malformed-envelope)
@@ -130,6 +141,53 @@
     (defn rpmw-kind-named? (kind name)
         (str_eq (rpmw-kind-name kind) name))
 
+    ; A resident frame is sparse Form data, never a preallocated global slot
+    ; arena. Capacity is a logical bound established by RESERVE; bindings name
+    ; only occupied offsets. This makes a large reserve constant-space and lets
+    ; FARG distinguish an uninitialized slot from a slot containing `nothing`,
+    ; integer 0, or integer 1.
+    ; frame = ("runtime-program-image-fkb-frame" capacity bindings)
+    ; binding = (offset value kind)
+    (defn rpmw-frame-row (capacity bindings)
+        (list "runtime-program-image-fkb-frame" capacity bindings))
+    (defn rpmw-frame? (frame)
+        (if (eq (len frame) 3)
+            (str_eq (nth frame 0) "runtime-program-image-fkb-frame")
+            0))
+    (defn rpmw-frame-capacity (frame) (nth frame 1))
+    (defn rpmw-frame-bindings (frame) (nth frame 2))
+    (defn rpmw-frame-binding (offset value kind) (list offset value kind))
+    (defn rpmw-frame-binding-offset (binding) (nth binding 0))
+    (defn rpmw-frame-binding-value (binding) (nth binding 1))
+    (defn rpmw-frame-binding-kind (binding) (nth binding 2))
+    (defn rpmw-frame-find (bindings offset)
+        (if (nil? bindings)
+            (nothing)
+            (if (eq (rpmw-frame-binding-offset (head bindings)) offset)
+                (head bindings)
+                (rpmw-frame-find (tail bindings) offset))))
+    (defn rpmw-frame-put-binding (bindings binding)
+        (if (nil? bindings)
+            (list binding)
+            (if (eq (rpmw-frame-binding-offset (head bindings))
+                    (rpmw-frame-binding-offset binding))
+                (cons binding (tail bindings))
+                (cons (head bindings)
+                      (rpmw-frame-put-binding (tail bindings) binding)))))
+    (defn rpmw-frame-one (value kind)
+        (rpmw-frame-row 1 (list (rpmw-frame-binding 0 value kind))))
+    (defn rpmw-frame-reserve (frame let-slots)
+        (do
+            (let needed (add 1 let-slots))
+            (rpmw-frame-row
+                (if (gt needed (rpmw-frame-capacity frame))
+                    needed (rpmw-frame-capacity frame))
+                (rpmw-frame-bindings frame))))
+    (defn rpmw-frame-put (frame offset value kind)
+        (rpmw-frame-row (rpmw-frame-capacity frame)
+            (rpmw-frame-put-binding (rpmw-frame-bindings frame)
+                                    (rpmw-frame-binding offset value kind))))
+
     ; result = ("runtime-program-image-fkb-micro-walker-result" value kind
     ;           steps trace-status stop-reason reason detail)
     (defn rpmw-result-row (value kind steps trace-status stop-reason reason detail)
@@ -165,6 +223,14 @@
         (rpmw-result-row (rpmw-result-value r)
                          (rpmw-result-kind r)
                          (add 1 (rpmw-result-steps r))
+                         (rpmw-result-trace-status r)
+                         (rpmw-result-stop-reason r)
+                         (rpmw-result-reason r)
+                         (rpmw-result-detail r)))
+    (defn rpmw-result-add-prefix (r prefix-steps)
+        (rpmw-result-row (rpmw-result-value r)
+                         (rpmw-result-kind r)
+                         (add prefix-steps (rpmw-result-steps r))
                          (rpmw-result-trace-status r)
                          (rpmw-result-stop-reason r)
                          (rpmw-result-reason r)
@@ -677,6 +743,125 @@
                 (rpmw-eval-node table (rpmw-row-a row) (sub budget 1)
                                 input-value input-kind))))
 
+    ; Explicit source frames. The evaluator carries one immutable sparse frame
+    ; through a function walk. LETF gives only its body the updated binding;
+    ; returning or timing out therefore releases it without a mutation path.
+    (defn rpmw-frame-read-result (frame offset spent)
+        (if (not (rpmw-frame? frame))
+            (rpmw-result-error spent (rpmw-reason-frame-slot-out-of-range))
+            (if (lt offset 0)
+                (rpmw-result-error spent (rpmw-reason-negative-frame-offset))
+                (if (ge offset (rpmw-frame-capacity frame))
+                    (rpmw-result-error spent (rpmw-reason-frame-slot-out-of-range))
+                    (do
+                        (let binding (rpmw-frame-find
+                            (rpmw-frame-bindings frame) offset))
+                        (if (nothing? binding)
+                            (rpmw-result-error spent
+                                (rpmw-reason-frame-slot-uninitialized))
+                            (rpmw-result-ok
+                                (rpmw-frame-binding-value binding)
+                                (rpmw-frame-binding-kind binding)
+                                spent)))))))
+    (defn rpmw-eval-frame-read-after-offset (frame offset-result)
+        (if (not (rpmw-result-ok? offset-result))
+            (rpmw-result-add-parent offset-result)
+            (do
+                (let spent (add 1 (rpmw-result-steps offset-result)))
+                (if (not (rpmw-int? (rpmw-result-kind offset-result)))
+                    (rpmw-result-error spent
+                        (rpmw-reason-integer-value-required))
+                    (rpmw-frame-read-result frame
+                        (rpmw-result-value offset-result) spent)))))
+    (defn rpmw-eval-frame-read (table row budget frame input-kind)
+        (if (not (rpmw-node-id-valid? table (rpmw-row-a row)))
+            (rpmw-result-error 1 (rpmw-reason-child-out-of-range))
+            (rpmw-eval-frame-read-after-offset frame
+                (rpmw-eval-node table (rpmw-row-a row) (sub budget 1)
+                                frame input-kind))))
+
+    (defn rpmw-eval-frame-store-after-value
+        (table row budget frame input-kind offset-result spent-offset value-result)
+        (if (not (rpmw-result-ok? value-result))
+            (rpmw-result-add-prefix value-result spent-offset)
+            (do
+                (let spent-value
+                    (add spent-offset (rpmw-result-steps value-result)))
+                (let remaining (sub budget spent-value))
+                (if (le remaining 0)
+                    (rpmw-result-timeout spent-value)
+                    (rpmw-result-add-prefix
+                        (rpmw-eval-node table (rpmw-row-c row) remaining
+                            (rpmw-frame-put frame
+                                (rpmw-result-value offset-result)
+                                (rpmw-result-value value-result)
+                                (rpmw-result-kind value-result))
+                            input-kind)
+                        spent-value)))))
+    (defn rpmw-eval-frame-store-after-offset
+        (table row budget frame input-kind offset-result)
+        (if (not (rpmw-result-ok? offset-result))
+            (rpmw-result-add-parent offset-result)
+            (do
+                (let spent-offset (add 1 (rpmw-result-steps offset-result)))
+                (if (not (rpmw-int? (rpmw-result-kind offset-result)))
+                    (rpmw-result-error spent-offset
+                        (rpmw-reason-integer-value-required))
+                    (if (lt (rpmw-result-value offset-result) 0)
+                        (rpmw-result-error spent-offset
+                            (rpmw-reason-negative-frame-offset))
+                        (if (ge (rpmw-result-value offset-result)
+                                (rpmw-frame-capacity frame))
+                            (rpmw-result-error spent-offset
+                                (rpmw-reason-frame-slot-out-of-range))
+                            (do
+                                (let remaining (sub budget spent-offset))
+                                (if (le remaining 0)
+                                    (rpmw-result-timeout spent-offset)
+                                    (rpmw-eval-frame-store-after-value
+                                        table row budget frame input-kind
+                                        offset-result spent-offset
+                                        (rpmw-eval-node table (rpmw-row-b row)
+                                            remaining frame input-kind))))))))))
+    (defn rpmw-eval-frame-store (table row budget frame input-kind)
+        (if (not (rpmw-if-child-valid? table row))
+            (rpmw-result-error 1 (rpmw-reason-child-out-of-range))
+            (rpmw-eval-frame-store-after-offset
+                table row budget frame input-kind
+                (rpmw-eval-node table (rpmw-row-a row) (sub budget 1)
+                                frame input-kind))))
+
+    (defn rpmw-eval-frame-reserve-after-size
+        (table row budget frame input-kind size-result)
+        (if (not (rpmw-result-ok? size-result))
+            (rpmw-result-add-parent size-result)
+            (do
+                (let spent-size (add 1 (rpmw-result-steps size-result)))
+                (if (not (rpmw-int? (rpmw-result-kind size-result)))
+                    (rpmw-result-error spent-size
+                        (rpmw-reason-integer-value-required))
+                    (if (lt (rpmw-result-value size-result) 0)
+                        (rpmw-result-error spent-size
+                            (rpmw-reason-negative-frame-reserve))
+                        (do
+                            (let remaining (sub budget spent-size))
+                            (if (le remaining 0)
+                                (rpmw-result-timeout spent-size)
+                                (rpmw-result-add-prefix
+                                    (rpmw-eval-node table (rpmw-row-b row)
+                                        remaining
+                                        (rpmw-frame-reserve frame
+                                            (rpmw-result-value size-result))
+                                        input-kind)
+                                    spent-size))))))))
+    (defn rpmw-eval-frame-reserve (table row budget frame input-kind)
+        (if (not (rpmw-binary-child-valid? table row))
+            (rpmw-result-error 1 (rpmw-reason-child-out-of-range))
+            (rpmw-eval-frame-reserve-after-size
+                table row budget frame input-kind
+                (rpmw-eval-node table (rpmw-row-a row) (sub budget 1)
+                                frame input-kind))))
+
     ; Tag 12 is the source runner's one-argument direct call. The PIF keeps
     ; function roots in its own admitted table, so this crossing spends no
     ; global fk_fn seat: evaluate the argument, bind it as the callee input,
@@ -695,8 +880,10 @@
                             (rpmw-result-error spent-with-call (rpmw-reason-root-node-out-of-range))
                             (do
                                 (let out (rpmw-eval-node table target-root remaining
-                                                        (rpmw-result-value argument)
-                                                        (rpmw-result-kind argument)))
+                                        (rpmw-frame-one
+                                            (rpmw-result-value argument)
+                                            (rpmw-result-kind argument))
+                                        (rpmw-kind-absent)))
                                 (rpmw-result-row
                                     (rpmw-result-value out)
                                     (rpmw-result-kind out)
@@ -726,7 +913,7 @@
                     (if (eq tag 1)
                         (rpmw-result-ok (rpmw-row-a row) (rpmw-kind-int) 1)
                         (if (eq tag 2)
-                            (rpmw-result-ok input-value input-kind 1)
+                            (rpmw-frame-read-result input-value 0 1)
                             (if (eq tag 12)
                                 (rpmw-eval-call table row budget input-value input-kind)
                                 (if (eq tag 18)
@@ -751,7 +938,13 @@
                                                                     (rpmw-eval-binary table row budget input-value input-kind)
                                                                     (if (eq tag 6)
                                                                         (rpmw-eval-if table row budget input-value input-kind)
-                                                                        (rpmw-result-error 1 (rpmw-reason-unsupported-tag)))))))))))))))))))
+                                                                        (if (eq tag 109)
+                                                                            (rpmw-eval-frame-store table row budget input-value input-kind)
+                                                                            (if (eq tag 110)
+                                                                                (rpmw-eval-frame-read table row budget input-value input-kind)
+                                                                                (if (eq tag 111)
+                                                                                    (rpmw-eval-frame-reserve table row budget input-value input-kind)
+                                                                                    (rpmw-result-error 1 (rpmw-reason-unsupported-tag))))))))))))))))))))))
 
     (defn rpmw-trace-from-result (envelope pif entry-index root-node step-budget result)
         (rpiwt-trace (rale-envelope-artifact-path envelope)
@@ -772,7 +965,9 @@
     (defn rpmw-walk-after-valid-entry (envelope admission entry-index step-budget input-value pif root-node)
         (do
             (let result (rpmw-eval-node (pif-envelope-table pif) root-node
-                                        step-budget input-value (rpmw-kind-int)))
+                                        step-budget
+                                        (rpmw-frame-one input-value (rpmw-kind-int))
+                                        (rpmw-kind-absent)))
             (let trace (rpmw-trace-from-result envelope pif entry-index root-node step-budget result))
             (rpmw-produced envelope admission entry-index root-node step-budget input-value trace result)))
     (defn rpmw-walk-after-ready (envelope admission entry-index step-budget input-value)
