@@ -1,431 +1,182 @@
 # Current Floor
 
-Date: 2026-07-19 (reground on base `7667fad`, after the 2026-07-17 floor)
+Date: 2026-08-25 (full reground on the three-line reunion; prior floor was
+2026-07-19, amended 2026-08-13)
 
-Amended 2026-08-13 only for the binary-freshness canary: bit 16 landed on
-2026-08-03 to witness runtime-built string values, so the current verdict is
-31. All other observations below retain their original witness dates.
-
-This file is the current release floor for this worktree. Receipts preserve the
-history, but the claims below are only the state that is present now. Every
-witness value below was re-measured on this date through the resolver-driven
-`./fkwu` door unless a different door is named; a claim whose witness
-could not be located or re-run today is said so plainly, not carried forward.
+This file is the current release floor for this worktree. Receipts preserve
+history; the claims below are only the state present NOW. Every witness was
+re-measured on 2026-08-25 morning through the resolver-driven `./fkwu` door
+on this Apple M4 Max unless a different date is stated beside it. A claim
+whose witness could not be re-run today says so plainly.
 
 ## Grounding
 
-The checkout witness is still the C-seeded `fkwu` runner. It was rebuilt before
-this floor was written.
+The checkout witness is the C-seeded `fkwu` runner with both host carriers
+linked. Rebuilt fresh before this floor was written:
 
 ```text
-cc -O2 -o fkwu runtime/fkwu-uni.c
-./fkwu bootstrap/ground.fk -> 42
-./fkwu bootstrap/ground-recursive.fk 10 -> 55
-./fkwu form/form-stdlib/tests/binary-freshness-band.fk -> 31
-./fkwu form/form-stdlib/tests/native-vs-rented-band.fk -> 11111
+cc -O2 -o fkwu runtime/fkwu-uni.c \
+  form/native/metal/fk-metal-carrier.m form/native/mlx/fk-mlx-carrier.c \
+  -framework Metal -framework Foundation -fobjc-arc \
+  -I/opt/homebrew/include -L/opt/homebrew/lib -lmlxc -Wl,-rpath,/opt/homebrew/lib
+
+./fkwu bootstrap/ground.fk                                    -> 42
+./fkwu bootstrap/ground-recursive.fk 10                       -> 55
+./fkwu form/form-stdlib/tests/binary-freshness-band.fk        -> 31
+./fkwu form/form-stdlib/tests/native-vs-rented-band.fk        -> 11111
 ```
 
-The C file is a checkout witness and shrink target. New runtime meaning belongs
-in Form/native-walker cells, not in a larger C seed.
+The C file remains a temporary seed and shrink target, not the destination.
 
-## New since 2026-07-17 (re-measured 2026-07-19 on base `7667fad`)
+## Band witnesses, all re-run 2026-08-25
 
 ```text
-cc -O2 -o fkwu runtime/fkwu-uni.c
-./fkwu bootstrap/ground.fk -> 42
-./fkwu bootstrap/ground-recursive.fk 10 -> 55
-./fkwu cognition/tests/nl-neutral-trace-band.fk -> 4194303   (22 bits)
+metal-door-band                        -> 15
+qwen35-dense-token-handle-band         -> 536870911   (29 bits: geometry from
+                                          the sealed GGUF, 35+ pipelines, RMS
+                                          radius bound both sides, threadgroup
+                                          GQA present, batched-block gates)
+qwen35-crystal-band                    -> 255         (frozen open == scanned
+                                          open, row-for-row, same first token)
+mlx-derived-band                       -> 16777215    (24 ops; 16 with no
+                                          carrier row at all)
+form-cli-mlx-band                      -> 63
+form-cli-live-band                     -> 255
+jit-metal-lanes-band                   -> 8191
+metal-handle-door-band                 -> 65535
+kat-token-handle-band                  -> 262143
+llama-token-handle-band                -> 255
+form-knowledge-integration-census-band -> 1048575
+form-knowledge-source-search-band      -> 262143
+form-knowledge-qwen-heldout-v3-eval-band -> 65535
 ```
 
-- **The nl-neutral-trace lane** (`cognition/nl-neutral-trace.fk`, live door
-  `cognition/tests/nl-neutral-trace-live.fk`): one command streams the whole
-  NL -> neutral -> NL concept query — locale choice paths with measured
-  tried/failed/cut counters, WordNet 3.1 descriptions and senses, hypernym
-  parents, the 120k-cell machine dictionary as a scored local-oracle lane,
-  a persisted content-addressed rag index, measured choice receipts, and a
-  comparison ledger. Every line is emitted the moment its fact exists
-  (`print_str` op 115 now flushes per line — pipes behave like ttys).
-- **The 10k sweep** (`cognition/tests/nl-neutral-trace-sweep-live.fk`)
-  lands every concept row in the persisted `nodeid-rag-v2` home with
-  sha256-of-row-bytes keys, plus a rank sidecar (a regenerable cache in the
-  `T_flat` sense); the production codec and cryptographic admission run on
-  the selected row. Measured and named: a full production stream over the
-  9.3 MB index needs >4 min on the Form-implemented `str_find` — a native
-  or crystallized `str_find` is the open stone that retires the cache.
-- **Four tongues on the one pivot** (`cognition/nl-pivot-de.fk`,
-  `cognition/nl-pivot-es.fk` on `nl-translate.fk`'s engine): the same
-  meaning from es/de/en/id interns to the SAME pivot cell, witnessed by
-  `node_eq`; articles and adjective gender agreement live in each tongue's
-  column, never in the pivot. Seed rows are agent-authored, awaiting
-  native-speaker review — said on every seat.
-- **HatiOS** (`os/hati-os/`): a bare-metal i386 operating system in
-  freestanding C + GNU assembler — boot sector, protected mode, IDT/PIC/PIT,
-  preemptive scheduler with a real context switch, page allocator, ramfs,
-  serial shell — with a committed qemu execution witness
-  (`os/hati-os/witness/first-boot.txt`, clean debug-exit). Its floors are
-  named in its README: ring 0 only, no paging, ramfs only.
-- Carrier boundaries recorded at their sites in `nl-neutral-trace.fk`:
-  do/let nested in a let value loses bindings; a host string returned as a
-  let-bound name through an if branch loses its value category; `len` per
-  step of a 10k scan is quadratic; line-counting an 8 MB file recurses into
-  the stack wall (a row-meta cell answers instead).
+## The local-model lane (Qwen3.8-27B Q8_0, Form-native, Metal JIT)
 
-The 2026-07-17 witnesses below were NOT re-run on 2026-07-19; they are
-carried as that reground's claims, in that reground's words.
+All MSL is Form-emitted and JIT-compiled at runtime for the device that
+answered metal_status; weights stay mmap-backed no-copy; the file is admitted
+by a whole-file Form SHA-256 seal.
 
-A grounding correction from this reground: the 2026-07-05 floor listed a
-"kernel source intake framebuffer policy witness -> 16383" among its focused
-witnesses. No band by that description can be located in the body today (the
-phrase appears only in RELEASE_HISTORY.md and this file). The claim is retired
-here as unfalsifiable-as-written; if the witness exists it must be reintroduced
-by file path so it can be re-run.
-
-## Repo Floor
-
-The repo floor is an organic intelligence floor, not a voice-only floor. The
-present organs include:
-
-- Form-native choice receipts for success, fail, and silence:
-  `form/form-stdlib/choice-receipt.fk`.
-- Channel/interface/protocol choice floor:
-  `form/form-stdlib/channel-protocol-choice-floor.fk`.
-- Sovereign allow/stop/witness/re-entry boundary protocol:
-  `form/form-stdlib/sovereign-boundary-protocol.fk`.
-- Host OS membrane and C-seed shrink law:
-  `form/form-stdlib/host-os-membrane.fk`.
-- Satsang witnessing circle:
-  `form/form-stdlib/satsang.fk`.
-- Reception consent policy:
-  `form/form-stdlib/reception-consent.fk`.
-- Local and remote oracle teacher catalog:
-  `form/form-stdlib/oracle-catalog.fk`.
-- Trust and vitality organs across `trust-row`, `trust-decay`,
-  `trust-weighted-colearning`, `proof-trust`, `model-vitality`,
-  `skill-vitality`, and `observe/sovereignty-guide.fk`.
-
-These organs are the repo north-star floor: native choice, fail, cut, stop,
-timeout/nothing, satsang, consent, minimal kernel, host membrane, observability,
-trust, sovereignty, vitality, play, and wonder. Audio is one current organ using
-that floor.
-
-Focused direct-source witnesses observed in this reground (all re-run
-2026-07-17 through `./fkwu`):
+Measured this morning, one-shot generate through the fcmg door:
 
 ```text
-host-os-membrane-band -> 8191   (healed this reground: its preludes were
-                                 declared multi-line, which the one-line
-                                 preludes reader reads as empty -- it
-                                 answered 0 until the line was joined)
-reception-consent-band -> 255
-satsang-band -> 127
-oracle-catalog-band -> 16383    (healed this reground: its preludes line
-                                 omitted core.fk, so `sum` was unresolved
-                                 and it answered nothing)
-trust-row-band -> 2047
-trust-decay-band -> 127
-trust-weighted-colearning-band -> 127
-proof-trust-band -> 1023
-model-vitality-band -> 4095
-skill-vitality-band -> 65535
+prefill  6.55 tok/s      decode  6.41 tok/s      text: LOCAL FORM ALIVE
+metal stream ceiling this morning: 414.7 GB/s (438–452 witnessed 2026-08-24)
 ```
 
-Organ-proof honesty, measured this reground:
+Correctness bounds now in force (all 2026-08-24, live-witnessed):
+- Cooperative RMS only at width <= 4096 (its scratch is sq[4096]); wider rows
+  take the serial attestant. Earlier faster numbers through the out-of-radius
+  kernel are execution evidence only; receipts carry AMENDED blocks.
+- GQA decode: one 256-thread threadgroup per head (was 24 threads/layer;
+  full-attention block 2113 -> 553 us).
+- Both block kinds batched (sibling, 2026-08-25 merge): 5.4x fewer
+  dispatches, 2x less GPU, identical output — folded into the handle band.
+- Batched span prefill (chunk 0) is the DEFAULT for hinted current-source
+  contexts; the plain fcmg one-shot still walks token-major prefill.
 
-- Three north-star organ bands are written in BML call syntax and cannot run
-  through the the source door s-expr door at all: `choice-receipt-band`,
-  `channel-protocol-choice-floor-band`, `sovereign-boundary-protocol-band`.
-  The s-expr parser desyncs on them and the boundedness repair halts the parse
-  at the AST node cap with diagnostics (the repair working as designed; before
-  it this was the 18-20 GB RSS case). The organ cells themselves are s-expr
-  and load. Until these bands are ported or routed through a BML door, the
-  choice/fail/silence and allow/stop/witness/re-entry proofs are shapes
-  without a runnable witness in this checkout.
-- `observe/sovereignty-guide.fk` has no band.
-- 151 band files across form/presence/learn/observe still declare preludes in
-  the retired multi-line style; every one of them runs numb (axiom-5 lowers
-  the unresolved calls, verdict is a silent wrong number) when invoked via
-  the source door. host-os-membrane-band above was one; 150 remain.
-
-## Form Kernel Floor (new since 2026-07-05)
-
-- The natural-language keystone family is four-way proven again:
-  `scripts/fourth-arm-gate.sh` answers PASS-4WAY for `nl-reason` (255),
-  `nl-translate` (32767), `natural-language` (262143), and `translate-lane`.
-  The heal was a recension, not an invention: `form-ontology-loader.fk`'s
-  hand-held bp table had drifted from `blueprint-registry.json`; the missing
-  family (fact/property/isa/relation/question/meaning) was re-seated at the
-  registry's curated coordinates 1/2/99/32-37, which the three generated
-  kernel mirrors already carried.
-- Of the ~95 manifest bands whose preludes include form-ontology-loader.fk,
-  12 are PASS-4WAY and 56 remain DIVERGENT (28 NO-FOURTH). A stash-baseline
-  sweep proved all 56 divergences are pre-existing, most in the same wound
-  class: bp names used by cells but never copied into the Form-level table,
-  though already curated in the registry.
-- The fourth arm currently cannot testify to failure: `form_error` (with
-  value_kind, read_form_binary, write_form_binary, walk_recipe_here) is an
-  unresolved op in the fkwu image, axiom-5-lowered to nothing at parse. A
-  band that raises form_error crashes go/rust honestly and sails green on
-  fkwu. Any verdict that is green only on ts+fkwu is not yet evidence.
-
-## Audio Floor
-
-The current real audio shape is local progress using borrowed acoustic runtime
-plus a Form/BML control plane. This is not enterprise shipping, not a commercial
-release process, and not a public product lane. The current source voice is the
-audio.cpp public-demo voice package, used as real borrowed data so the lane can
-work end-to-end now. Replacing it with a personal voice package is a later
-source-swap task, not a pipeline blocker.
-
-Form/BML owns:
-
-- metadata
-- source provenance
-- evidence caches and sidecars
-- WER/native-rate/confidence reporting
-- champion/challenger scoring
-- promotion gates
-- OOM diagnostics and repeat prevention
-
-audio.cpp owns the acoustic runtime used by the current no-stand-in lane:
-
-- ASR: `qwen3_asr`
-- forced alignment: `qwen3_forced_aligner`
-- TTS: `qwen3_tts`
-- voice mode: `voice_ref_clone`
-
-There is now also a functional local stand-in loop for immediate end-to-end
-talk/listen/translate testing:
+The open crystal (`<gguf>.form-crystal`, seal-keyed, never mtime):
 
 ```text
-presence/fkwu-local-audio-loop.fk
-presence/tests/fkwu-local-audio-loop-band.fk -> 16383
-audio-training-runs/current/fkwu-local-audio-loop/summary
-status: functional_local_talk_listen_translate_loop
-source_text: Open speech flows.
-source_transcript: Open speech flows.
-source_wer_pct: 0
-translation_oracle: ollama:llama3.2:1b
-translation_text: Offene Rede fließt.
-reply_transcript: Offene Rede fließt.
-reply_wer_pct: 0
-score: 16383
-expected_score: 16383
+crystal load 3 ms · crystal open 465 ms (GPU-residency warm)
+residency-cold open ~16 s (2026-08-24: wiring 27 GB into the GPU residency
+set at ~1.7 GB/s — returns whenever the residency lapses; the daemon that
+keeps one residence alive is the named repair)
+chat-ids, short prompt: 1.77 s (the prompt's own encode; scaffolds are ice)
 ```
 
-This loop is Form-owned orchestration over local stand-ins: `say` for temporary
-TTS, `ffmpeg` for wav normalization, `whisper-cli` for ASR, and bounded local
-Ollama HTTP for translation. It is functional now, but it is not the real local
-personal voice lane and does not train or promote a base model.
+Outside denominator (2026-08-24, llama-bench 10360, same file, this host):
+llama.cpp decode 13.39 tok/s, prefill 222.6 tok/s. This lane's decode is
+2.1x from parity under the correctness bounds; prefill parity requires the
+span lane promoted into the plain door.
 
-The loop now has a typed task surface and direct sidecar readback:
+## The knowledge denominator (first live, sealed measurement)
+
+Census this morning: **5,960 source files across 15 families**; 22 registered
+sources, 23 concepts; integrated-source-percent honestly 0 (registration is
+not integration).
+
+The blind v3 heldout — 30 sealed rows, 2/family, exact-normalized verifier,
+no lexical credit, consent dataset-bound — ran LIVE overnight to completion
+(2026-08-25, artifact: observe/artifacts-v3-live-2026-08-25.txt):
 
 ```text
-presence/fkwu-audio-task-surface.fk
-presence/tests/fkwu-audio-task-surface-band.fk -> 4095
-audio-training-runs/current/fkwu-audio-task-surface/summary
-status: local_loop_functional_audio_cpp_adapters_observed_not_swapped
-score: 65534
-expected_score: 65535
-task_slots: source_tts,source_asr,translation,reply_tts,reply_asr
-audio_cpp_asr_observed: 1
-audio_cpp_tts_observed: 1
-production_authority: 0
-personal_lane_authority: 0
-next_gap: rerun audio.cpp ASR/TTS support packets or inspect their command/resource artifacts
+30/30 rows executed, aggregate-errors=0
+13/30 promoted (433,333 ppm)  ·  aggregate-f1 535,754 ppm
+per family (promoted/2): bootstrap 2, form-stdlib 2, docs 2,
+  grammars 1, cognition 1, observe 1, receipts 1, model 1, proof 1,
+  presence 1, axioms 0, learn 0, teachings 0, control 0, ingest 0
+overall95=0  family95=0  row95=0  live-credit=0
+per-row cost ~14 min (dominated by heed source-search + decode, NOT prefill:
+  the same row cost 891.7 s token-major and 882.2 s span — measured A/B)
 ```
 
-That task surface is now secondary. It means the local stand-in loop and
-adapter evidence are observable, while the no-stand-in lane below carries the
-audio lane's history — and, as of this reground, only its history.
+This is the body's first defined-correctness integration number: the model
+plus the current-source heed cycle knows its machinery families and does not
+yet know axioms, learn, teachings, control, ingest.
 
-The no-stand-in lane ran end-to-end once (2026-07-05) and its derived
-artifacts still exist in the primary checkout. But re-measured today, the lane
-is a relict: its contract band answers 2063, not the 4095 it answered when the
-floor was written.
+## The emitted walker (form-cli), measured and standing
 
-```text
-presence/tests/fkwu-production-audio-end-to-end-band.fk -> 2063 (was 4095)
-  dark bits, each measured to its cause:
-  cli_ready 0        /tmp/audio.cpp-current/.../audiocpp_cli is gone
-  models_ready 0     /tmp/audio.cpp/models/Qwen3-{TTS,ASR,ForcedAligner}* gone
-  package_files 0    audio-training-runs/ is untracked; this worktree's copy
-                     is empty (the voice package exists only in the primary
-                     checkout at audio-training-runs/current/voice-reference-package/)
-  ready_to_run 0, blocker != none, status regressed  (all downstream of the above)
-```
+- form-cli answers correctly and runs the generate lane at ~19x the
+  interpreter's node visits (19.89B vs 1.06B for identical work,
+  2026-08-24, kernel_stat on both walkers): on the flatten lane every
+  parameter reference compiles to nth(args-list, k) with per-call cons
+  lists, where the interpreter binds O(1) frame slots. Unhealed; T_flat
+  frame-slot convention is the named stone.
+- On that lane, let-bound effects whose names go unread are pruned, and
+  now_unix_ms sites collapse (stamps read 0). Instrumentation there cannot
+  testify; kernel_stat can.
+- The emitted entry runs on an explicit big-stack thread (4 GiB with
+  retry-halving — the sibling's refinement of this branch's repair).
 
-Two distinct wounds, both already named in the body's memory, did this: the
-acoustic runtime and models live at fixed volatile `/tmp` paths (a reboot or
-cleanup evaporates them), and the lane's artifacts are untracked host state (a
-fresh worktree inherits none of them). The 2026-07-05 summary block that
-previously stood here — `status: local_progress_audio_end_to_end_complete,
-score: 131071/131071, executed_audio_cpp: 1, wer_pct: 0, source_mode:
-borrowed_public_demo, package_scope: public-demo` — is preserved in the
-summary file and in receipts as a historical receipt of that day's run. It is
-not a present-tense claim: today nothing in this checkout can execute
-audio.cpp until the cli and models are re-provisioned at (preferably durable,
-non-/tmp) paths.
+## The string law, measured and standing
 
-What remains true and re-proven today: the lane's Form-owned orchestration,
-artifact schema, and contract band all still parse, load, and honestly report
-exactly which substrate is missing — the band's 2063 is itself the receipt.
+core.fk COMPOSES substring / str_find / str_to_int over the four-native
+waist (str_len, str_byte_at, byte_to_str, str_concat) by design. Priced
+2026-08-24: one str_find over an 11 MB blob = 31 s; a 5.5 MB substring =
+O(n^2) concat, OOM (rc 137). Consequences in force:
+- The tokenizer blob recording (qwen35-tokfast) is frozen and correct at
+  the lookup level but PRICED OUT as a route; fixed-width sorted rows with
+  str_byte_at binary search is the named next candidate.
+- Encoding remains the walker's largest fair-priced cost: ~1.77 s for a
+  20-token prompt; ~83 s was measured for a 223-token prompt (2026-08-24).
 
-## Arena And Scoreboard (re-measured 2026-07-17)
+## What remains — each item measured, not remembered
 
-The arena remains not alive: no `fkwu`/audio-arena process matched and launchd
-has no `com.sema.audio-arena.5586` service. What launchd does carry today:
-`com.sema.audio-resident.5586` is loaded with a live PID, and
-`earth.hati.sema-phone-link` is registered but not running. The 2026-07-05
-floor's stored-snapshot readings (cycle `10`, champion `multiseed_form_sweep`,
-`investigation_required: 1`) are historical; no arena snapshot files were
-found under `audio-training-runs/` today.
+1. **Tokenizer speed** — measured today (1.77 s / short prompt): the merge
+   table walk per encode stands. Repair candidates: sorted fixed-width
+   rows + str_byte_at binary search; form-asm crystallization.
+2. **Prefill parity** — plain-door prefill 6.55 tok/s vs llama.cpp 222.6:
+   the span lane exists, is witnessed at identical output, and is default
+   only on heed lanes. Promotion to the plain door is bounded work.
+3. **Decode parity** — 6.41 vs 13.39 tok/s (2.1x): the width-independent
+   cooperative RMS (simd tree, no sq[n]) is the named kernel; the
+   remaining GDN small kernels stand at ~604 us/block (2026-08-24).
+4. **Residency-cold open ~16 s** — returns whenever the GPU residency
+   lapses; the resident daemon (one admission per artifact lifetime) is
+   the named structural repair.
+5. **The emitted walker's 19x** — T_flat frame-slot calling convention;
+   its own battery when taken.
+6. **Knowledge integration 13/30** — the numerator now moves only through
+   the sealed gate; the five zero families name the next curriculum. The
+   >=95 goal needs the full census denominator (5,960), not 30 rows: the
+   source-shard indexing lane (sibling, 2026-08-25) is the live front.
+7. **v3 per-row cost ~14 min** — dominated by heed source-search at
+   composed-string prices and decode; falls with (1) and (3).
 
-`audio-training-runs/current/scoreboard.md` no longer exists. The 2026-07-05
-floor's Live Lane WER table (teacher acoustic 0, voice teacher 100, formant
-oracle 100, roundtrip 100, audio.cpp TTS 0) is therefore a relict of a witness
-that has left the body: it is preserved in receipts and git history, and it is
-retired from this floor. A WER claim may return here only with a present,
-re-runnable witness path.
+Retired since the last floor (no longer remaining): the 4096-byte emitted
+stack wall; the out-of-radius RMS; the 24-thread attention; the unbatched
+FFN/attention blocks; per-encode full-vocab special-id scans and per-open
+header re-derivation (both iced under the seal); MLX as a 5-op stub (now 23
+irreducible rows + 24 derived); the fkb-lane 2^53 verdict folds (bit
+weights); form-cli lacking MLX/Metal carriers.
 
-Boundary values such as WER `0`, WER `100`, unknown, or sentinel confidence
-remain investigation signals unless another measured field explains them.
+## Honest seams carried forward
 
-## Real-World Gaps
-
-(Re-trued the same day, evening reground on `4dc98a36d`, after the three
-door-voice lanes merged: PR #285 seated 353 registry rows, PR #286 ported the
-BML organ bands, PR #287 wired form_error end to end.)
-
-- `form_error` now speaks on the fourth arm (tag 238 through seed walker, JIT
-  prim + carrier, flatten coverage, emitted bootstrap kernel): a raise prints
-  its message and exits nonzero on fresh-parse and cached-flat paths alike.
-  Still numb, named plainly: `value_kind` (fkwu's tagged-word representation
-  cannot answer kinds honestly without boxing work), `read_form_binary`,
-  `write_form_binary`, `walk_recipe_here`.
-- New seam, measured not guessed: `bp` is a NATIVE fkwu op (tag 45, the old
-  identity stub) that intercepts call-position resolution before the loader's
-  Form-level `bp` ever runs — so the loader's own form_error guard still
-  cannot fire on the fourth arm. bp resolution parity (the call-position
-  shadowing defect) is the next voice gap. Sibling seam: the two flt-ops
-  tables (flatten/ hand lane vs native-op-manifest lane) have diverged tag
-  spaces at 205-208, and the walker's internal call opcodes live at 240-244
-  in the same numeric space.
-- The multi-line-preludes sweep (150 bands loading empty prelude lists) is in
-  flight on its own branch; until it lands, those bands still run numb via
-  the source door.
-- Ontology-loader triage on today's main: 21 DIVERGENT resolved into families
-  — 11 bp-unreviewed (now seated from the registry; 4 went PASS-4WAY, 2
-  surfaced their real fourth-arm value mismatches from under the crash),
-  2 as_int:null, 4 value-mismatch, 4 other (each named in
-  receipts/2026-07-17-ontology-band-triage.md); 63 more are three-leg-green
-  with a silent fourth arm. Zero names needed new curation — the registry
-  already carried every coordinate.
-- The three BML-syntax organ bands came home to s-expr and answer four-way at
-  full bitmasks (choice-receipt 4294967295, channel-protocol-choice-floor
-  262143, sovereign-boundary-protocol 16383); `sovereignty-guide` was found
-  already rostered and passing at 11111 — the earlier "has no band" claim in
-  this floor was wrong and is corrected here. json-emitter carries a
-  pre-existing fourth-arm disagreement (6 vs 31), proven older than the ports.
-- The audio no-stand-in lane's substrate evaporated (volatile `/tmp` cli and
-  models; untracked artifacts absent from fresh worktrees). Re-provisioning at
-  durable paths — and declaring those paths as Form data rather than fixed
-  `/tmp` strings — is the re-entry condition for every downstream audio claim
-  (personal voice swap, formant probes, realtime-rate work all wait on it).
-- The source voice remains borrowed public-demo data whenever the lane runs
-  again; `source_mode: borrowed_public_demo` must stay visible.
-- The deeper source-runner/compiler obligation remains: manually authored wide
-  expressions must compile/evaluate within a resource envelope or fail with a
-  precise diagnostic and framebuffer/source context, never unbounded RSS. The
-  AST-cap halt with byte/line/column diagnostics (witnessed live on the BML
-  bands this reground) is the bounded floor of that obligation, not its
-  completion — desynced BML input should be routed or refused, not merely
-  capped.
-- The body is diglossic (measured 2026-07-17 evening): ~254,600 s-expr code
-  lines (46,639 defns, 25% comment prose) against ~4,700 BML-authored lines
-  (9 authority cells + fixtures), ~1,300 BML-in-.fk, and ~14,200 .form
-  section-DSL — the high grammar is ~2.3% of what runs (~7.4% with .form).
-  The high-grammar DOOR is proven four-way (form-bml-cursor lane,
-  kernel-core-self-proof) and the authority pattern exists (form-fs.fk:
-  "High-grammar authority ... lowered executable backing"), but the body
-  writes its daily life in the low tongue — and this same day three BML
-  bands were ported DOWN to s-expr because BML-in-.fk fell between doors.
-  The rising direction (CN's introspection-and-lift star) wants the
-  opposite motion: route BML at the door, author new organs
-  authority-first, lift hot s-expr cells into teachings.
-- The repo-wide north-star organs are present in focused cells, but not every
-  runtime choice, host crossing, arena lane, and training loop is forced
-  through choice receipts, sovereign boundary receipts, trust/vitality policy,
-  and oracle provenance yet.
-- Sema still does not have a native generative mind with real open weights
-  loaded as recipe-data through the body.
-
-### 10,000-concept / 26-lens multimodal floor (2026-07-18)
-
-- Exactly 10,000 attributed OpenSubtitles2018 frequency-ranked English lexical
-  anchors are now addressable without allocating a 10,000-row Form list;
-  rank lookup is fixed-width arithmetic and exact text detection is a bounded
-  binary search. They are lexical anchors, not disambiguated senses.
-- Thirteen repository-ready natural-language phrase lenses and thirteen
-  programming-language bounded code lenses generate and detect four-way.
-  The joined live `water` witness re-detects all 26 generated surfaces.
-- Every concept ID and all thirteen lens slots have an independently exhausted
-  18-bit address membrane (130,000 valid concept/lens addresses). Actual PCM
-  audio and lossless FFV1 video generation recover the same address in Form.
-- Semantic completion remains zero: the audio is a tone code, the video is a
-  colour-bit code, NL generation is bounded phrase framing, PL generation is
-  bounded arithmetic-function emission, and the full 10,000 × 13 NL × 13 PL
-  semantic matrix has not been learned or executed.
-- Exact witness and work orders:
-  `receipts/2026-07-18-concept-10000-26-lens-multimodal.md`.
-
-## Next Step Toward The North Star
-
-The star's sharpest present distance is not a missing organ — it is that the
-body's proof doors can lie by silence. Every claim above that drifted
-(bp table, preludes style, evaporated audio substrate, retired scoreboard)
-drifted *quietly*, because the door that should have said "fail" said nothing.
-The north star names Fail as "a valid outcome with a receipt, not a swallowed
-exception"; the floor shows three swallowing mouths. So:
-
-**Next step: give every proof door a voice — no verdict without the power to
-refuse.**
-
-Progress the same day (evening): step 1's core landed (form_error real on
-every fkwu path, PR #287 — value_kind and three kin still numb, named above);
-step 3 landed beyond its ask (353 registry rows seated, triage complete, zero
-new curation needed, PR #285) plus the organ bands came home (PR #286); step
-2 is in flight on its own branch. What remains of this step, in order:
-
-1. bp resolution parity: the native fkwu `bp` op (tag 45 identity stub)
-   intercepts call-position resolution ahead of the loader's Form-level `bp`,
-   so the loader's guard still cannot raise on the fourth arm. Acceptance:
-   with the loader's "property" row removed on a scratch branch,
-   `fkwu .../nl-reason-band.fk` dies with the RUNTIME form_error raise
-   (not merely compile diagnostics), matching go/rust.
-2. Land the multi-line-preludes sweep; then no band can load an empty
-   prelude list silently.
-3. Reunite the diverged flt-ops tag spaces (flatten/ hand lane vs
-   native-op-manifest lane, 205-208) and give value_kind an honest answer or
-   an honest refusal.
-4. The 63 three-leg-green bands: decide per band whether the fourth arm
-   should cross (manifest row) or the band should say `3-kernel only`
-   honestly, per the parent's proof-level rule.
-
-When these land, a green band means what it says on all four arms, and every
-later claim — audio re-provisioning, oracle retirement lanes, the generative
-mind — inherits doors that cannot nod along silently.
-
-## Do Not Claim
-
-- Do not claim the current source voice is personal while it is public-demo.
-- Do not claim native neural ASR/TTS ownership.
-- Do not claim the base STT/TTS models were trained here.
-- Do not treat WER `0` as sufficient without source provenance, speaker evidence,
-  alignment confidence, native-rate, and listener-review gates.
-- Do not treat WER `100` as normal. It must name the observed failure axis and
-  the next measurable repair.
-- Do not claim a verdict from a door that cannot raise `form_error`: a band
-  green only on ts+fkwu, or run with an unread preludes list, is not evidence.
-- Do not carry a floor claim forward without a present, re-runnable witness
-  path; a claim whose witness has left the body is history, and belongs in
-  receipts.
+- The reuse-driver comparisons (595->159 s) are physical timings but not
+  like-for-like prompts (teach-layer turn differed); re-witness requires
+  exact-id-sequence parity first. The state-reuse mechanism itself stands.
+- decode_gpu_busy=0 through form-cli (2026-08-23) still unhealed.
+- The consent file for v3 is a per-run local act, never committed.
+- Timings taken while a sibling process computes on the same host are
+  contention-noised; bands are exact regardless.
