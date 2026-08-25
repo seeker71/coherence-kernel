@@ -25,6 +25,8 @@
             (rpmw-feature "function-root-entry-only" 1)
             (rpmw-feature "flat-row-semantics-pinned" 1)
             (rpmw-feature "lit-add-sub-mul-le-if-subset" 1)
+            (rpmw-feature "tag-12-multi-function-call" 1)
+            (rpmw-feature "call-target-range-errors-are-loud" 1)
             (rpmw-feature "unsupported-tags-are-loud-errors" 1)
             (rpmw-feature "child-range-errors-are-loud" 1)
             (rpmw-feature "budget-exhaustion-is-timeout-trace" 1)
@@ -52,6 +54,7 @@
     (defn rpmw-reason-step-budget-exhausted () "step-budget-exhausted")
     (defn rpmw-reason-unsupported-tag () "unsupported-tag")
     (defn rpmw-reason-child-out-of-range () "child-out-of-range")
+    (defn rpmw-reason-call-target-out-of-range () "call-target-out-of-range")
     (defn rpmw-reason-malformed-envelope () "malformed-envelope")
     (defn rpmw-reason-non-program-image-envelope () "non-program-image-envelope")
     (defn rpmw-reason-malformed-admission () "malformed-admission")
@@ -70,6 +73,7 @@
             (rpmw-reason-step-budget-exhausted)
             (rpmw-reason-unsupported-tag)
             (rpmw-reason-child-out-of-range)
+            (rpmw-reason-call-target-out-of-range)
             (rpmw-reason-malformed-envelope)
             (rpmw-reason-non-program-image-envelope)
             (rpmw-reason-malformed-admission)
@@ -290,6 +294,41 @@
             (rpmw-eval-if-after-cond table row budget input-value
                                      (rpmw-eval-node table (rpmw-row-a row) (sub budget 1) input-value))))
 
+    ; Tag 12 is the source runner's one-argument direct call. The PIF keeps
+    ; function roots in its own admitted table, so this crossing spends no
+    ; global fk_fn seat: evaluate the argument, bind it as the callee input,
+    ; and continue at the target root under the remaining budget.
+    (defn rpmw-eval-call-after-argument (table row budget argument)
+        (if (not (rpmw-result-ok? argument))
+            (rpmw-result-add-parent argument)
+            (do
+                (let spent-with-call (add 1 (rpmw-result-steps argument)))
+                (let remaining (sub budget spent-with-call))
+                (if (le remaining 0)
+                    (rpmw-result-timeout spent-with-call)
+                    (do
+                        (let target-root (nth (pif-table-fn-roots table) (rpmw-row-a row)))
+                        (if (not (rpmw-node-id-valid? table target-root))
+                            (rpmw-result-error spent-with-call (rpmw-reason-root-node-out-of-range))
+                            (do
+                                (let out (rpmw-eval-node table target-root remaining
+                                                        (rpmw-result-value argument)))
+                                (rpmw-result-row
+                                    (rpmw-result-value out)
+                                    (add spent-with-call (rpmw-result-steps out))
+                                    (rpmw-result-trace-status out)
+                                    (rpmw-result-stop-reason out)
+                                    (rpmw-result-reason out)
+                                    (rpmw-result-detail out)))))))))
+    (defn rpmw-eval-call (table row budget input-value)
+        (if (not (rpmw-entry-index-valid? table (rpmw-row-a row)))
+            (rpmw-result-error 1 (rpmw-reason-call-target-out-of-range))
+            (if (not (rpmw-node-id-valid? table (rpmw-row-b row)))
+                (rpmw-result-error 1 (rpmw-reason-child-out-of-range))
+                (rpmw-eval-call-after-argument
+                    table row budget
+                    (rpmw-eval-node table (rpmw-row-b row) (sub budget 1) input-value)))))
+
     (defn rpmw-eval-node (table node-id budget input-value)
         (if (le budget 0)
             (rpmw-result-timeout 0)
@@ -302,11 +341,13 @@
                         (rpmw-result-ok (rpmw-row-a row) 1)
                         (if (eq tag 2)
                             (rpmw-result-ok input-value 1)
-                            (if (rpmw-binary-supported? tag)
-                                (rpmw-eval-binary table row budget input-value)
-                                (if (eq tag 6)
-                                    (rpmw-eval-if table row budget input-value)
-                                    (rpmw-result-error 1 (rpmw-reason-unsupported-tag))))))))))
+                            (if (eq tag 12)
+                                (rpmw-eval-call table row budget input-value)
+                                (if (rpmw-binary-supported? tag)
+                                    (rpmw-eval-binary table row budget input-value)
+                                    (if (eq tag 6)
+                                        (rpmw-eval-if table row budget input-value)
+                                        (rpmw-result-error 1 (rpmw-reason-unsupported-tag)))))))))))
 
     (defn rpmw-trace-from-result (envelope pif entry-index root-node step-budget result)
         (rpiwt-trace (rale-envelope-artifact-path envelope)
