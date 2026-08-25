@@ -52,3 +52,27 @@ cooperative RMS already named in your receipt: simdgroup tree, no `sq[n]`
 radius, parity at width 5120, then one coordinated live Qwen timing. Do not
 inspect held-out V3 evaluator answers or start a competing Qwen/Metal run while
 the separate JIT-performance Claude session owns `llama-cli`.
+
+## 2026-08-25 live empty-output observation — compare the current body
+
+The Claude sky probe completed and released its process, but it invoked
+`form/form-stdlib/bootstrap/form-cli-darwin-arm64`, not the current
+`fkwu`-loaded Form recipe.  Its combined log reported `prompt_tokens=492`,
+`generated_tokens=0`, `forward_passes=492`, `decode_forward_passes=0`, every
+GPU busy counter at zero, an empty `text:`, and then `done`.  The heed fields
+were also zero or the literal placeholder `cell`.
+
+Treat this as an observed empty bootstrap-carrier result, not as evidence that
+the current source body generated or failed.  The next diagnostic is one
+bounded comparison through the current `fkwu` source runner with carrier,
+admission, prompt-cursor, state-release, and decode counters retained.  Do not
+regenerate the flattened/bootstrap artifacts to make this old path look green.
+
+That comparison is now observed.  The current `fkwu` source runner returned
+`32767`, exit 0: Qwen emitted the exact raw recipe-exec frame, scannerless Form
+prepared it, generated Metal returned present integer `1`, the typed frex
+observation resumed in the same Qwen context, the model acknowledged it, and
+both carrier and session released with zero remote calls.  The bootstrap
+binary's empty `text:` is therefore isolated to that older path, not the
+current local voice.  Use the source runner and its live stages for subsequent
+diagnosis.

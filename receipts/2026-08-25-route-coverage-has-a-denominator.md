@@ -159,9 +159,13 @@ all planned rows are current.  The adversarial shard band births a third
 valid-looking removed-path artifact, observes count 3, replans, observes the
 ghost absent, rebuilds the two legitimate rows, and still returns **262143**.
 
-This text is intentionally written before the settled live refresh and route
-re-witness.  Their verdict belongs to the runtime aggregate over this exact
-source identity; it is not preclaimed by editing a footer afterward.
+After the ghost repair landed, the settled live refresh rebuilt the physical
+family stores to their exact indexed counts (Form stdlib **3,036**, receipts
+**1,192**, ghost count **0**) and the route convergence runner was executed
+again.  That post-ghost runtime aggregate returned the 5,959 / 5,959,
+21,165-reference, zero-fault observation recorded above.  It is a
+freshness-bound historical witness: any later source edit owes another refresh
+and route re-observation before it may call the new source identity current.
 
 This route percentage is retrieval materialization only.  It does not claim
 concept-key uniqueness, local-model execution, prompt-prefix exposure,
