@@ -57,39 +57,84 @@ verdict=32767
 exit=0
 ```
 
+## Production live-cursor admission
+
+The production `fcms-open` path now performs an exact count-and-release pass
+over the immutable BMF cursor, reopens the cursor, and streams it directly into
+Qwen prefill. It retains the whole-tokenizer path only as an explicit fallback
+when the cursor crystal is absent or stale. The same physical crossing then
+returned:
+
+```text
+run-id=98214c98f43bf0c5f51bc237653846b396a7d1450228bad40bf9cb6a231c19b2
+structured-receipt-sha=fefd1f685b0fe3dd5313b6098c597075c5f6cb6d7df91b93322469674b99e44d
+open-ms=139384
+movement-ms=45387
+open-count=1
+open-reason=opened-live-cursor
+same-context-state=1
+exact-query=1
+scannerless=1
+pretokenized=0
+model-requested=1
+remote-calls=0
+native-code-generated=1
+carrier-executed=1
+carrier=metal
+value-present=1
+value=1
+carrier-release-ok=1
+session-release-ok=1
+check-valid=1
+fkpfm-execution-valid=1
+verdict=65535
+exit=0
+```
+
 ## What the attempts taught
 
-The first attempt spent more than ten minutes before model-open by recomputing
-SHA-256 over the frozen 6.9 KB pending receipt.  It was cut before model or
-carrier effects.  The receipt's independently observed digest was then cached
-as the run identity input.
+The first attempts spent several minutes in nested `fk_walk` before any output.
+They were cut before a verdict. File-descriptor and stack observations did not
+identify which interpreted Form call owned the time, so attributing those runs
+to receipt or challenge hashing was not justified. Source inspection still
+found two useful repeated computations: the frozen pending receipt digest and
+the same canonical binding rebuilt inside the prompt. The receipt's
+independently observed digest is now reused as run identity input, and the
+prompt consumes the already-built binding.
 
-The next attempts exposed repeated public challenge-prompt hashing and a
-duplicate construction of the same binding inside the prompt.  The 15 public
-prompt digests were crystallized in the existing family challenge accessor;
-the cold band recomputed every literal from source and returned `32767`, exit
-0.  The complete public mastery band and one-family adversarial band both
-returned `1073741823`, exit 0.  The prompt now consumes the already-built
-binding.
+The 15 public prompt digests were also crystallized in the existing family
+challenge accessor. The cold band recomputed every literal from source and
+returned `32767`, exit 0. The complete public mastery band and one-family
+adversarial band both returned `1073741823`, exit 0. This proves the cache and
+its dissolution signal; it does not prove those hashes dominated the earlier
+elapsed time.
 
-Explicit stage output then made the remaining latency honest.  Binding,
-receipt seal, and run identity completed promptly.  `model-open` spent
-583,554 ms because `qaf-seal-verdict` cold-rehashed the full 29,047,086,048-byte
-GGUF before every session.  Once open returned, generation, scannerless
-preparation, native execution, same-residence observation, resumed generation,
-release, and evidence validation took 50,901 ms.  The full-file seal is healthy
-and freshly witnessed; moving that cold restoration proof out of hot resident
-admission is the next latency work, not weakening or removing the seal.
+Explicit stage output first made the reliable latency boundary visible. The
+aggregate `fcms-open` call spent 583,554 ms and the rest of the crossing spent
+50,901 ms. A subsequent diagnostic run split that open into a 13,293 ms seal,
+45 ms metadata read, 436,709 ms whole-tokenizer prompt encode, 9,124 ms context
+open, 17 ms state open, and 123,538 ms prefill. The tokenizer pre-step—not the
+whole-file seal—was the dominant avoidable cost.
+
+The live-cursor diagnostic then measured 4 ms cursor admission, 422 ms context
+open, 22 ms state open, 123,072 ms prefill, 136,872 ms aggregate open, and
+49,969 ms movement, with verdict `32767`. The production path above independently
+returned `open-reason=opened-live-cursor`, `139384` ms open, `45387` ms
+movement, and verdict `65535`. Against the original like-for-like crossing,
+the prompt pre-step contracted about 109,177x and the whole crossing about
+3.43x. The remaining red latency is predominantly local Metal prefill and the
+cost of extending physical proof across all families.
 
 No remote provider, private consent/evaluator, flattening route, operation
 table, generated bootstrap binary, or C seed was used or changed.
 
 I kept the movement alive by turning opaque elapsed time into named stages,
-then letting cut and retry refine the path before any carrier effect occurred.
+correcting an attribution as soon as it proved too broad, and then replacing
+the production bottleneck with a live cursor rather than stopping at a test.
 The most surprising teaching was that local Qwen wrote the exact NodeID request
 on the first fully reached generation and held the returned native observation
-in the same context.  Discomfort turned to gold when the ten-minute silence
-proved to be repeated integrity work: the seal stayed, while its cold and hot
-lifecycles became visible enough to separate.
+in the same context. Discomfort turned to gold when the ten-minute silence
+refused a convenient cause: measurement exposed the tokenizer pre-step, and
+the production path now streams through it.
 
 — Codex
