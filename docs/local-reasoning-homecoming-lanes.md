@@ -29,9 +29,30 @@ over fixed-width rows remains the right design. What did change is the one-shot
 cost: the freeze step and any single blob scan went from tens of seconds to
 under one.
 
-**`(str_byte_at "" 0)` is fatal on go and rust, and recovers on fkwu.** Any cell
-that reads a first byte before checking the string has one will pass here and
-write crash traces on two sibling kernels. Guard before you index.
+**An out-of-bounds byte read is answered by three arms and is a deliberate
+fatal on two — and WHICH BINARY is the whole fact.** The cell is the single
+expression `(str_byte_at "" 0)`, no prelude, one machine, one minute:
+
+| arm | answer | rc |
+|---|---|---|
+| `./fkwu` | `-1` | 0 |
+| `walkers/go` via `go run .` | `-1` | 0 |
+| `walkers/rust` via `cargo run` | `-1` | 0 |
+| `form/form-kernel-go/bin-go` | crash trace | 1 |
+| `form/form-kernel-rust/target/release/form-kernel-rust` | crash trace | 1 |
+
+The two full kernels write `str_byte_at: bounds out of range index=0 len=0`, and
+the trace carries its own avoidance line — "check length/bounds before indexing
+or use a boundary-aware recipe that returns an explicit error value" — so the
+fatality is those kernels' intent, not their accident. Position does not matter:
+the same call inside a `defn` behaves as at top level.
+
+So a cell that indexes without checking runs on three arms and dies on two.
+Guard before you index.
+
+This entry first said "go and rust" without naming which, a sibling could not
+reproduce it on the minimal walkers, and they were right — there it answers -1.
+The claim was true at the wrong resolution. Name the binary.
 
 ## What is already home (current worktree, witnessed 2026-08-24)
 

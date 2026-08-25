@@ -76,10 +76,43 @@
     ; routing through slower fallback string reconstruction. Other same-named
     ; Form bindings remain ordinary user definitions.
 
+    ; substring — the same bytes, joined as a BALANCED TREE instead of grown one
+    ; byte at a time. Measured on fkwu, 2026-08-25:
+    ;
+    ;         bytes     one-at-a-time      halved
+    ;        20,000          0.36 s        0.07 s
+    ;        80,000          4.85 s        0.09 s
+    ;       200,000         31.23 s        0.11 s
+    ;       800,000        (~500 s)        0.28 s
+    ;
+    ; The first form was n^1.94 — quadratic. It appended byte i to an
+    ; accumulator already i bytes long, so building n bytes copied about n*n/2
+    ; of them, and `substring` sits under char_at and 847 call sites here.
+    ;
+    ; Halving changes NOTHING about which bytes are read or in what order:
+    ; the same `str_byte_at`/`byte_to_str` pair runs at each of the n leaves,
+    ; left to right, and str_concat is associative on bytes. Only the shape of
+    ; the joins changes, from a comb to a balanced tree, which takes the bytes
+    ; copied from n*n/2 to about n*log2(n).
+    ;
+    ; Depth is log2(n) rather than n, so a megabyte slice nests about twenty
+    ; deep instead of a million.
+    ;
+    ; ONLY FKWU REACHES THIS. On go, rust and ts the kernel's dispatch override
+    ; keeps the native `substring`, which floors byte offsets to character
+    ; starts — measured in the header above and unchanged by this. The Form
+    ; recipe is fkwu's, where it is byte-indexed, and that is where the cost was.
     (defn fstr-substring-loop (s i end acc)
         (if (ge i end) acc
             (fstr-substring-loop s (add i 1) end (str_concat acc (byte_to_str (str_byte_at s i))))))
-    (defn substring (s start end) (fstr-substring-loop s start end ""))
+    (defn fstr-substring-halve (s start end)
+        (do (let n (sub end start))
+            (if (le n 0) ""
+                (if (eq n 1) (byte_to_str (str_byte_at s start))
+                    (do (let mid (add start (div n 2)))
+                        (str_concat (fstr-substring-halve s start mid)
+                                    (fstr-substring-halve s mid end)))))))
+    (defn substring (s start end) (fstr-substring-halve s start end))
 
     (defn char_at (s i) (substring s i (add i 1)))
     (defn ord (c) (if (eq (str_len c) 0) -1 (str_byte_at c 0)))
@@ -186,18 +219,37 @@
     ; nowhere — both readings taken from the loop this replaced, not assumed.
     ;
     ; THE GUARD MUST STAY AHEAD OF `(str_byte_at n 0)`, and that is not a
-    ; nicety. `str_byte_at` on an empty string diverges across the arms:
+    ; nicety. An out-of-bounds byte read is ANSWERED by three arms and is a
+    ; deliberate fatal on two. Measured 2026-08-25 on one machine in one minute,
+    ; the cell being the single expression `(str_byte_at "" 0)` with no prelude:
     ;
-    ;   (str_byte_at "" 0)   fkwu recovers to nothing and keeps going
-    ;                        go   FATAL bounds_violation, index=0 len=0
-    ;                        rust FATAL, the same
+    ;   ./fkwu                                            -1   rc 0
+    ;   walkers/go        `go run .`                      -1   rc 0
+    ;   walkers/rust      `cargo run`                     -1   rc 0
+    ;   form/form-kernel-go/bin-go                      FATAL  rc 1
+    ;   form/form-kernel-rust/target/release/...        FATAL  rc 1
     ;
-    ; So a str_find that reads the needle's first byte before checking whether
-    ; the needle has one would run on fkwu and take down two sibling kernels on
+    ; The two full kernels write a crash trace reading `str_byte_at: bounds out
+    ; of range index=0 len=0`, and the trace carries its own avoidance line:
+    ; "check length/bounds before indexing or use a boundary-aware recipe that
+    ; returns an explicit error value". So the fatality is those kernels'
+    ; intent, not their accident — and the same call inside a `defn` behaves
+    ; exactly as at top level, so it is the arm that decides, not the position.
+    ;
+    ; A str_find that read the needle's first byte before checking whether the
+    ; needle has one would therefore answer on three arms and take down two on
     ; `(str_find s "" 0)`. Found by a probe that omitted the guard: fkwu
-    ; answered a plausible 3 while go and rust both wrote crash traces.
-    ; Witnessed 2026-08-25, all three arms on the shipped form below:
-    ;   [0, 3, -1, 0, -1, -1, 5, 1, 2] identical on fkwu, go and rust
+    ; returned a plausible 3 from the search while the two full kernels wrote
+    ; crash traces.
+    ;
+    ; NAME THE BINARY. An earlier version of this note said "go" and "rust"
+    ; without saying which, and a sibling could not reproduce it on the minimal
+    ; walkers — correctly, because there it answers -1. The claim was true at
+    ; the wrong resolution.
+    ;
+    ; Witnessed 2026-08-25, the shipped form below on fkwu, form-kernel-go and
+    ; form-kernel-rust, all three identical:
+    ;   [0, 3, -1, 0, -1, -1, 5, 1, 2]
     ;   for ("abc" "" 0) ("abc" "" 3) ("abc" "" 99) ("" "" 0) ("" "abc" 0)
     ;       ("" "" 5) ("a—b中c" "中" 0) ("aΩb" "Ω" 0) ("abc" "c" 0)
     (defn str_find (h n from)
