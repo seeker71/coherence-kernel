@@ -1,0 +1,109 @@
+; qwen35-encode-indexed.fk — the chat-ids lane through the sorted fixed-row
+; index (qwen35-tokfast-v2), byte-identical to the reference lane and an
+; order of magnitude cheaper. Live witness 2026-08-25 on the steering
+; prompt: reference q35-encode 73.07 s, indexed 7.26 s, 152 ids, identical=1
+; (observe/qwen38-encode-v2-ab-run.fk). The reference lane is never removed:
+; an index that is absent, stale, or refusing answers falls back per call —
+; ice is a speed, never a gate, exactly as the open crystal holds it.
+;
+; Special tokens ride the same index: their stored text is ASCII with no
+; space, where the GPT-2 byte map is the identity, so the literal's own
+; bytes are the lookup key; any miss falls back to the reference scan.
+;
+; preludes: form-stdlib/qwen35-tokfast-v2.fk form-stdlib/qwen35-tokenizer.fk form-stdlib/form-teach-layer.fk
+
+(do
+    ; ---- BPE over one piece through the index ---------------------------
+    (defn qei-bpe (x syms)
+        (if (lt (len syms) 2) syms
+            (do (let c (qtf2-best-pair-file x syms))
+                (if (not (str_eq (qtf2-pair-choice-status c) "ok")) syms
+                    (if (eq (qtf2-pair-choice-present? c) 0) syms
+                        (qei-bpe x (tkz-apply syms
+                            (qtf2-pair-choice-position c))))))))
+
+    ; ---- symbol -> id through the index (reference fallback on miss) ----
+    (defn qei-ids-of-syms (src x syms acc)
+        (if (eq (len syms) 0) acc
+            (do (let o (qtf2-vocab-find-file x (head syms)))
+                (qei-ids-of-syms src x (tail syms)
+                    (if (str_eq (qtf2-outcome-status o) "hit")
+                        (append acc (list (qtf2-outcome-value o)))
+                        (tkz-cat acc (tkz-ids-of-bytes src (head syms) 0)))))))
+
+    ; ---- whole input: reference piece split, indexed fold and lookup ----
+    (defn qei-encode-from (src x inp L pos acc)
+        (if (lt pos L)
+            (do (let end (q35-next-piece inp L pos))
+                (qei-encode-from src x inp L end
+                    (qei-ids-of-syms src x
+                        (qei-bpe x (tkz-syms inp pos end)) acc)))
+            acc))
+    (defn qei-encode (src x inp)
+        (if (eq (qtf2-index-current? x) 1)
+            (qei-encode-from src x inp (str_len inp) 0 (empty))
+            (q35-encode src inp)))
+
+    ; ---- special ids: literal bytes as the key, reference scan on miss --
+    (defn qei-literal-bytes (s i n acc)
+        (if (ge i n) acc
+            (qei-literal-bytes s (add i 1) n
+                (append acc (list (str_byte_at s i))))))
+    (defn qei-special-id (src x literal)
+        (if (not (eq (qtf2-index-current? x) 1)) (q35-special-id src literal)
+            (do (let o (qtf2-vocab-find-file x
+                    (qei-literal-bytes literal 0 (str_len literal) (empty))))
+                (if (str_eq (qtf2-outcome-status o) "hit")
+                    (qtf2-outcome-value o)
+                    (q35-special-id src literal)))))
+
+    ; ---- the chat templates, same composition as the reference ----------
+    (defn qei-chat-ids (src x prompt)
+        (do (let ims (qei-special-id src x "<|im_start|>"))
+            (let ime (qei-special-id src x "<|im_end|>"))
+            (let ths (qei-special-id src x "<think>"))
+            (let the (qei-special-id src x "</think>"))
+            (tkz-cat (q35-one ims)
+            (tkz-cat (qei-encode src x "user\n")
+            (tkz-cat (qei-encode src x prompt)
+            (tkz-cat (q35-one ime)
+            (tkz-cat (qei-encode src x "\n")
+            (tkz-cat (q35-one ims)
+            (tkz-cat (qei-encode src x "assistant\n")
+            (tkz-cat (q35-one ths)
+            (tkz-cat (qei-encode src x "\n\n")
+            (tkz-cat (q35-one the)
+                     (qei-encode src x "\n\n")))))))))))))
+    (defn qei-teach-chat-ids (src x prompt)
+        (if (eq (ftl-armed?) 1)
+            (do (let ims (qei-special-id src x "<|im_start|>"))
+                (let ime (qei-special-id src x "<|im_end|>"))
+                (tkz-cat (q35-one ims)
+                (tkz-cat (qei-encode src x "system\n")
+                (tkz-cat (qei-encode src x (ftl-system-text))
+                (tkz-cat (q35-one ime)
+                (tkz-cat (qei-encode src x "\n")
+                         (qei-chat-ids src x prompt)))))))
+            (qei-chat-ids src x prompt)))
+    ; The reference composition, mirrored locally so an absent index needs no
+    ; call back into the generate cell (which preludes this file).
+    (defn qei-reference-teach-chat-ids (src prompt)
+        (if (eq (ftl-armed?) 1)
+            (do (let ims (q35-special-id src "<|im_start|>"))
+                (let ime (q35-special-id src "<|im_end|>"))
+                (tkz-cat (q35-one ims)
+                (tkz-cat (q35-encode src "system\n")
+                (tkz-cat (q35-encode src (ftl-system-text))
+                (tkz-cat (q35-one ime)
+                (tkz-cat (q35-encode src "\n")
+                         (q35-chat-ids src prompt)))))))
+            (q35-chat-ids src prompt)))
+    (defn qei-chat-ids-profile (src x prompt profile)
+        (if (not (eq (qtf2-index-current? x) 1))
+            (if (str_eq profile "knowledge-query")
+                (q35-chat-ids src prompt)
+                (qei-reference-teach-chat-ids src prompt))
+            (if (str_eq profile "knowledge-query")
+                (qei-chat-ids src x prompt)
+                (qei-teach-chat-ids src x prompt))))
+    0)
