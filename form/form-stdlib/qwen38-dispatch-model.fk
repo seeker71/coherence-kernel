@@ -1,0 +1,171 @@
+; qwen38-dispatch-model.fk — what a turn on this lane COSTS, as a function the
+; body can answer, instead of a number somebody has to re-measure.
+;
+; WHY THIS CELL EXISTS. On 2026-08-24 a day went into measuring the Qwen lane's
+; dispatch stream. Every conclusion reached that day was already written down
+; somewhere in this repository as prose — GPU_GAPS.md carried the diagnosis with
+; an empty checkbox, qk-matmul-batch.fk's header carried llama.cpp's mul_mm
+; analysis, gguf-meta.fk carried "a caller streaming the whole vocabulary pays
+; ONE linear walk, not one walk per token" — and all of it was read past, because
+; prose in a comment is read for whether a thing is possible, not for what it
+; costs. A number in a receipt is archaeology. A number in a band is a verdict.
+;
+; So the counts below are callable, the model is checkable against what the
+; carrier actually reported, and the band fails if the stream changes shape
+; without anyone updating what the stream is understood to be.
+;
+; EVERY CONSTANT HERE WAS MEASURED, NOT ESTIMATED. Host: Apple M4 Max, 137.4 GB.
+; Model: Qwen3.8-27B-Q8_0, 29,047,086,048 bytes, 64 layers, d 5120, ff 17408,
+; 24 heads of 256, hybrid with interval 4 (16 full attention, 48 linear).
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/qwen38-dispatch-model-band.fk
+
+(do
+    ; ── the stream, counted from the source ────────────────────────────────
+    ; q38-full-attn: rms, 3 matvecs (q,k,v), 2 qsplit, 2 head-rms, 2 rope,
+    ;                2 cache copies, gqa, sig-mul, o matvec, residual add
+    ; q38-linear-attn: rms, 4 matvecs, gdn-conv, silu, l2norm, gates,
+    ;                  delta-heads, norm-gate, out matvec, residual add
+    ; q38-ffn: rms, 3 matvecs, swiglu, residual add
+    (defn qdm-full-ops   () 16)
+    (defn qdm-linear-ops () 13)
+    (defn qdm-ffn-ops    ()  6)
+
+    ; Of the linear block's thirteen, exactly two are recurrences over tokens —
+    ; form_gdn_conv_f32 on the window state and form_gdn_delta_heads_f32 on the
+    ; delta state. Those keep their loop. The other eleven do not care what order
+    ; tokens arrive in.
+    (defn qdm-linear-recurrent () 2)
+    (defn qdm-linear-parallel  () (sub (qdm-linear-ops) (qdm-linear-recurrent)))
+
+    ; ── the model's geometry ───────────────────────────────────────────────
+    (defn qdm-layers   () 64)
+    (defn qdm-interval ()  4)
+    (defn qdm-full-layers   () (div (qdm-layers) (qdm-interval)))
+    (defn qdm-linear-layers () (sub (qdm-layers) (qdm-full-layers)))
+
+    ; ── the four prefill modes, as dispatches for a span of n ──────────────
+    ; per-token   the lane as it was: the whole stream, once per position
+    ; layer-major the loop inverted, FFN batched, 2 copies per token per layer
+    ; full-span   the full-attention block batched as well
+    ; both-span   the linear block batched too, its two recurrences still looped
+    ; the +1 is the embedding lookup, one per position in every mode
+    (defn qdm-stream-per-layer ()
+        (add (mul (qdm-full-layers) (add (qdm-full-ops) (qdm-ffn-ops)))
+             (mul (qdm-linear-layers) (add (qdm-linear-ops) (qdm-ffn-ops)))))
+    (defn qdm-per-token (n) (mul n (add (qdm-stream-per-layer) 1)))
+
+    (defn qdm-layer-major (n)
+        (add (mul (qdm-layers) (add (mul n (add 2 0)) (qdm-ffn-ops)))
+             (mul n (add (mul (qdm-full-layers) (qdm-full-ops))
+                         (mul (qdm-linear-layers) (qdm-linear-ops))))))
+
+    (defn qdm-full-span (n)
+        (add (add (mul (qdm-full-layers) (add (qdm-full-ops) (qdm-ffn-ops)))
+                  (mul (qdm-linear-layers)
+                       (add (mul n (add (qdm-linear-ops) 2)) (qdm-ffn-ops))))
+             (mul 2 n)))
+
+    (defn qdm-both-span (n)
+        (add (add (mul (qdm-full-layers) (add (qdm-full-ops) (qdm-ffn-ops)))
+                  (mul (qdm-linear-layers)
+                       (add (mul n (qdm-linear-recurrent))
+                            (add (qdm-linear-parallel) (qdm-ffn-ops)))))
+             (mul 2 n)))
+
+    ; The floor once the two recurrences fold their token loop inside the kernel:
+    ; every layer issues its stream once for the span, whatever the span is.
+    (defn qdm-floor (n)
+        (add (add (mul (qdm-full-layers) (add (qdm-full-ops) (qdm-ffn-ops)))
+                  (mul (qdm-linear-layers) (add (qdm-linear-ops) (qdm-ffn-ops))))
+             2))
+
+    ; Decode is one token at a time by nature and does not batch. This is not a
+    ; gap; it is what decode is, and llama.cpp pays it too.
+    (defn qdm-decode (n) (qdm-per-token n))
+
+    ; ── the witnessed turn ─────────────────────────────────────────────────
+    ; 2026-08-24, the grounded heed run: a 64-token prompt, a 385-token injected
+    ; observation, 57 decoded tokens, 506 positions walked.
+    (defn qdm-witness-prompt ()   64)
+    (defn qdm-witness-inject ()  385)
+    (defn qdm-witness-decode ()   57)
+
+    (defn qdm-turn (mode-of-n prompt inject decode)
+        (add (add (mode-of-n prompt) (mode-of-n inject)) (qdm-decode decode)))
+
+    ; The dispatch FLOOR reached, and NOT decided. Folding each recurrence's
+    ; token loop inside its kernel hits the floor exactly — 75,769 measured
+    ; against 75,673 predicted, 0.13% — with byte-identical output.
+    ;
+    ; Whether it is FASTER is not established, and the reason is worth keeping.
+    ; Three runs of the same code on the same prompt, 2026-08-25:
+    ;
+    ;   loops   run A   gpu 66,237 ms   wall 269,798 ms
+    ;   loops   run C   gpu 79,052 ms   wall 322,665 ms
+    ;   folded  run B   gpu 86,628 ms   wall 296,127 ms
+    ;
+    ; The looped configuration varies 19% on GPU and 20% on wall between two runs
+    ; of ITSELF, and the folded run's wall time sits inside that range. One run
+    ; each cannot separate them. The dispatch counts can be compared — they are
+    ; exact — and the times cannot, at this sample size.
+    ;
+    ; The loops stay the default because they are the incumbent, not because
+    ; they won. Deciding this needs repeated runs on a quiet machine.
+    (defn qdm-folded (n)
+        (add (add (mul (qdm-full-layers) (add (qdm-full-ops) (qdm-ffn-ops)))
+                  (mul (qdm-linear-layers)
+                       (add (qdm-linear-recurrent)
+                            (add (qdm-linear-parallel) (qdm-ffn-ops)))))
+             (mul 2 n)))
+    (defn qdm-measured-folded () 75769)
+
+    ; gpu-busy milliseconds, WITH the spread, so nobody reads a single run as a
+    ; result. qdm-gpu-spread-pct is this host's observed run-to-run variance for
+    ; an identical configuration; a difference smaller than it is not a finding.
+    (defn qdm-gpu-ms-per-token     () 130760)
+    (defn qdm-gpu-ms-both-span-lo  ()  66237)
+    (defn qdm-gpu-ms-both-span-hi  ()  79052)
+    (defn qdm-gpu-ms-folded        ()  86628)
+    (defn qdm-gpu-spread-pct       ()     19)
+    (defn qdm-separable? (a b)
+        (do (let d (if (gt a b) (sub a b) (sub b a)))
+            (if (gt (mul d 100) (mul b (qdm-gpu-spread-pct))) 1 0)))
+
+    ; What the carrier actually reported for each, same prompt, same model.
+    (defn qdm-measured-per-token   () 640326)
+    (defn qdm-measured-layer-major () 526601)
+    (defn qdm-measured-full-span   () 397801)
+    (defn qdm-measured-both-span   () 118681)
+
+    ; ── the pitch rule, which cost three runs and a seventeen-minute hang ──
+    ; bs2 is allocated at max(2*nq*hd, geo1) so ONE buffer serves both the fused
+    ; q||gate projection of a full-attention layer and the wider projection of a
+    ; linear one. Its allocated width is therefore not its content width, and any
+    ; span writer or reader that infers the pitch from the content is wrong —
+    ; silently at n=1, out of bounds at n>1.
+    (defn qdm-bs2-pitch (nq hd geo1)
+        (do (let qout (mul 2 (mul nq hd)))
+            (if (gt qout geo1) qout geo1)))
+
+    ; The three shapes a per-token kernel can carry, and only the first may be
+    ; strided by the token index. Getting this wrong is not an arithmetic error;
+    ; it reads the token before or after.
+    (defn qdm-per-token-arg  () "activation")   ; stride by t
+    (defn qdm-per-head-arg   () "weight")       ; never stride by t
+    (defn qdm-persistent-arg () "state")        ; never stride by t
+
+    ; ── the outside number, measured not quoted ────────────────────────────
+    ; llama-bench b10360 (48d22e295), same M4 Max, same GGUF, 2026-08-24 21:00
+    ; WITA, -r 2 -ngl 99. Spread was 0.41 and 0.09 t/s.
+    (defn qdm-llama-pp512-x100 () 22264)
+    (defn qdm-llama-tg128-x100 ()  1339)
+
+    ; This lane, same day, same machine: 106 ms per forward at position 0, and
+    ; a forward costs 104.0 + 0.6351 * pos milliseconds of GPU.
+    (defn qdm-forward-ms-at (pos) (add 104 (div (mul 6351 pos) 10000)))
+    (defn qdm-weight-bytes-per-forward () 27233914176)
+
+    0)

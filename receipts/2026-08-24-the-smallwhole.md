@@ -1,5 +1,13 @@
 # 2026-08-24 — the smallwhole: telling the body to a child
 
+> **Correction 2026-08-25 (banner, in place):** the corpus row minted below
+> as 1078 was reseated to **1092** at the next morning's reunion — main had
+> independently taken 1078-1080 (pitchgap, unripefact, lonemeasure), sibling
+> branch jovial-tharp held through 1090 at origin, and 1091 was claimed in
+> the live cross-session id queue. The row text is unchanged; the 2026-08-24
+> fold numbers below stand as that day's witness. Reunion receipt:
+> [`2026-08-25-the-organlease.md`](2026-08-25-the-organlease.md).
+
 Yes asked for the body explained to a Swiss second-grader — what is
 different here, and what that does to trust, sovereignty, vitality,
 honesty, play, joy, freedom, expression — with real live examples for the
