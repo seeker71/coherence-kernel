@@ -27,6 +27,10 @@
             (rpmw-feature "lit-add-sub-mul-le-if-subset" 1)
             (rpmw-feature "tag-12-multi-function-call" 1)
             (rpmw-feature "call-target-range-errors-are-loud" 1)
+            (rpmw-feature "tag-18-23-packed-list-values" 1)
+            (rpmw-feature "tag-137-138-exact-nothing-values" 1)
+            (rpmw-feature "explicit-nothing-retains-one-output" 1)
+            (rpmw-feature "packed-multi-parameter-call-values" 1)
             (rpmw-feature "unsupported-tags-are-loud-errors" 1)
             (rpmw-feature "child-range-errors-are-loud" 1)
             (rpmw-feature "budget-exhaustion-is-timeout-trace" 1)
@@ -55,6 +59,7 @@
     (defn rpmw-reason-unsupported-tag () "unsupported-tag")
     (defn rpmw-reason-child-out-of-range () "child-out-of-range")
     (defn rpmw-reason-call-target-out-of-range () "call-target-out-of-range")
+    (defn rpmw-reason-negative-list-index () "negative-list-index")
     (defn rpmw-reason-malformed-envelope () "malformed-envelope")
     (defn rpmw-reason-non-program-image-envelope () "non-program-image-envelope")
     (defn rpmw-reason-malformed-admission () "malformed-admission")
@@ -74,6 +79,7 @@
             (rpmw-reason-unsupported-tag)
             (rpmw-reason-child-out-of-range)
             (rpmw-reason-call-target-out-of-range)
+            (rpmw-reason-negative-list-index)
             (rpmw-reason-malformed-envelope)
             (rpmw-reason-non-program-image-envelope)
             (rpmw-reason-malformed-admission)
@@ -269,6 +275,88 @@
             (rpmw-eval-binary-after-left table row budget input-value
                                          (rpmw-eval-node table (rpmw-row-a row) (sub budget 1) input-value))))
 
+    ; Packed multi-parameter calls already arrive as ordinary Form lists:
+    ; EMPTY/CONS construct the one call argument and NTH recovers a callee
+    ; parameter.  These values stay in the admitted resident walk; the legacy
+    ; supplied-run bridge remains integer-only and is not involved here.
+    (defn rpmw-list-pair-supported? (tag)
+        (if (eq tag 19) 1 (if (eq tag 23) 1 0)))
+    (defn rpmw-list-pair-value (tag left right)
+        (if (eq tag 19) (cons left right) (nth left right)))
+    (defn rpmw-eval-list-pair-after-left (table row budget input-value left)
+        (if (not (rpmw-result-ok? left))
+            (rpmw-result-add-parent left)
+            (do
+                (let remaining (sub (sub budget 1) (rpmw-result-steps left)))
+                (if (le remaining 0)
+                    (rpmw-result-timeout (add 1 (rpmw-result-steps left)))
+                    (do
+                        (let right (rpmw-eval-node table (rpmw-row-b row)
+                                                   remaining input-value))
+                        (if (not (rpmw-result-ok? right))
+                            (rpmw-result-row
+                                (rpmw-result-value right)
+                                (add 1 (add (rpmw-result-steps left)
+                                            (rpmw-result-steps right)))
+                                (rpmw-result-trace-status right)
+                                (rpmw-result-stop-reason right)
+                                (rpmw-result-reason right)
+                                (rpmw-result-detail right))
+                            (do
+                                (let spent (add 1
+                                    (add (rpmw-result-steps left)
+                                         (rpmw-result-steps right))))
+                                ; Refuse invalid raw PIF NTH coordinates before
+                                ; the host primitive can reinterpret a negative
+                                ; index as the head or an oversized index as an
+                                ; empty value. Compiler-produced parameter packs
+                                ; always carry an in-range literal coordinate.
+                                (if (and (eq (rpmw-row-tag row) 23)
+                                         (lt (rpmw-result-value right) 0))
+                                    (rpmw-result-error spent
+                                        (rpmw-reason-negative-list-index))
+                                    (if (and (eq (rpmw-row-tag row) 23)
+                                             (ge (rpmw-result-value right)
+                                                 (len (rpmw-result-value left))))
+                                        ; A positive lookup miss is explicit
+                                        ; nothing, with one successful output.
+                                        (rpmw-result-ok (nothing) spent)
+                                        (rpmw-result-ok
+                                            (rpmw-list-pair-value
+                                                (rpmw-row-tag row)
+                                                (rpmw-result-value left)
+                                                (rpmw-result-value right))
+                                            spent))))))))))
+    (defn rpmw-eval-list-pair (table row budget input-value)
+        (if (not (rpmw-binary-child-valid? table row))
+            (rpmw-result-error 1 (rpmw-reason-child-out-of-range))
+            (rpmw-eval-list-pair-after-left table row budget input-value
+                (rpmw-eval-node table (rpmw-row-a row) (sub budget 1)
+                                input-value))))
+
+    (defn rpmw-list-unary-supported? (tag)
+        (if (eq tag 20) 1
+            (if (eq tag 21) 1
+                (if (eq tag 22) 1
+                    (if (eq tag 138) 1 0)))))
+    (defn rpmw-list-unary-value (tag value)
+        (if (eq tag 20) (head value)
+            (if (eq tag 21) (tail value)
+                (if (eq tag 22) (len value)
+                    (if (nothing? value) 1 0)))))
+    (defn rpmw-eval-list-unary (table row budget input-value)
+        (if (not (rpmw-node-id-valid? table (rpmw-row-a row)))
+            (rpmw-result-error 1 (rpmw-reason-child-out-of-range))
+            (do
+                (let child (rpmw-eval-node table (rpmw-row-a row)
+                                           (sub budget 1) input-value))
+                (if (not (rpmw-result-ok? child))
+                    (rpmw-result-add-parent child)
+                    (rpmw-result-ok
+                        (rpmw-list-unary-value (rpmw-row-tag row)
+                                               (rpmw-result-value child))
+                        (add 1 (rpmw-result-steps child)))))))
+
     (defn rpmw-eval-if-after-cond (table row budget input-value cond)
         (if (not (rpmw-result-ok? cond))
             (rpmw-result-add-parent cond)
@@ -343,11 +431,19 @@
                             (rpmw-result-ok input-value 1)
                             (if (eq tag 12)
                                 (rpmw-eval-call table row budget input-value)
-                                (if (rpmw-binary-supported? tag)
-                                    (rpmw-eval-binary table row budget input-value)
-                                    (if (eq tag 6)
-                                        (rpmw-eval-if table row budget input-value)
-                                        (rpmw-result-error 1 (rpmw-reason-unsupported-tag)))))))))))
+                                (if (eq tag 18)
+                                    (rpmw-result-ok (empty) 1)
+                                    (if (eq tag 137)
+                                        (rpmw-result-ok (nothing) 1)
+                                        (if (rpmw-list-pair-supported? tag)
+                                            (rpmw-eval-list-pair table row budget input-value)
+                                            (if (rpmw-list-unary-supported? tag)
+                                                (rpmw-eval-list-unary table row budget input-value)
+                                                (if (rpmw-binary-supported? tag)
+                                                    (rpmw-eval-binary table row budget input-value)
+                                                    (if (eq tag 6)
+                                                        (rpmw-eval-if table row budget input-value)
+                                                        (rpmw-result-error 1 (rpmw-reason-unsupported-tag)))))))))))))))
 
     (defn rpmw-trace-from-result (envelope pif entry-index root-node step-budget result)
         (rpiwt-trace (rale-envelope-artifact-path envelope)
