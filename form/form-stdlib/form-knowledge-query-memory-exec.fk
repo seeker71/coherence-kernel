@@ -19,9 +19,11 @@
 ; request has no plan, so this cell re-checks the whole shape structurally:
 ; both categories, both schemas, exact action identity 31.2.0.109, the nested
 ; memory/rollback/offer nodes agreeing between request and recipe, scannerless=1
-; and pretokenized=0, the six provenance flags, and three 64-hex digests for
-; source, question and query. A request that fails any gate returns a named
-; refusal and NEVER reaches a lookup.
+; and pretokenized=0, the six provenance flags, four 64-hex digests, and the
+; content those digests name. A request that fails any gate returns a named
+; refusal and NEVER reaches a lookup. Digest shape alone is not content
+; addressing: query bytes are rehashed here, while source and question
+; identities are cross-bound to the offer node that carried them.
 ;
 ; ANSWER-FREE IS CHECKED, NOT ASSUMED. answer-stored must be 0 and the walked
 ; query bytes must be exactly one open mark, an anchor, and one close mark —
@@ -101,14 +103,38 @@
     (defn fkqmx-query-bytes (recipe)
         (fkqmx-str (fkqmx-recipe-offer recipe) 2))
 
+    (defn fkqmx-query-sha (recipe)
+        (hex-encode (sha256-stream-string (fkqmx-query-bytes recipe))))
+
+    (defn fkqmx-query-digest-ok? (recipe)
+        (if (str_eq (fkqmx-query-sha recipe)
+                    (fkqmx-recipe-query-sha recipe)) 1 0))
+
+    (defn fkqmx-source-binding-ok? (recipe)
+        (do
+            (let offer (fkqmx-recipe-offer recipe))
+            (if (str_eq (fkqmx-str offer 1)
+                    (str_concat "sha256:" (fkqmx-recipe-source-sha recipe)))
+                1 0)))
+
+    (defn fkqmx-question-binding-ok? (recipe)
+        (do
+            (let offer (fkqmx-recipe-offer recipe))
+            (if (not (str_eq (fkqmx-str offer 3)
+                             (fkqmx-recipe-question-sha recipe))) 0
+                (if (str_eq (fkqmx-recipe-question-sha recipe)
+                            (fkqmx-recipe-present-sha recipe)) 1 0))))
+
     (defn fkqmx-answer-free? (surface)
         (do (let o (str_find surface (fkqmx-open-mark) 0))
             (let c (str_find surface (fkqmx-close-mark) 0))
             (if (not (eq o 0)) 0
                 (if (lt c 0) 0
-                    (if (not (eq (add c (str_len (fkqmx-close-mark)))
-                                 (str_len surface))) 0
-                        (if (gt c (str_len (fkqmx-open-mark))) 1 0))))))
+                    (if (ge (str_find surface (fkqmx-open-mark)
+                                (str_len (fkqmx-open-mark))) 0) 0
+                        (if (not (eq (add c (str_len (fkqmx-close-mark)))
+                                     (str_len surface))) 0
+                            (if (gt c (str_len (fkqmx-open-mark))) 1 0)))))))
 
     ; ── the gates, in order, each with its own name ────────────────────────
     (defn fkqmx-offer-ok? (offer)
@@ -167,7 +193,13 @@
                 (if (eq (fkqmx-offer-ok? (fkqmx-recipe-offer r)) 0) "offer-shape"
                 (if (eq (fkqmx-answer-free? (fkqmx-query-bytes r)) 0)
                     "not-answer-free"
-                    "ready"))))))))))))))))))
+                (if (eq (fkqmx-query-digest-ok? r) 0)
+                    "query-digest-mismatch"
+                (if (eq (fkqmx-source-binding-ok? r) 0)
+                    "source-binding-mismatch"
+                (if (eq (fkqmx-question-binding-ok? r) 0)
+                    "question-binding-mismatch"
+                    "ready")))))))))))))))))))))
 
 
     (defn fkqmx-ready? (q) (if (str_eq (fkqmx-refuse-reason q) "ready") 1 0))
@@ -212,16 +244,30 @@
                     (let recipe (fkqmx-request-recipe request))
                     (let result (fkqt-execute-at index-path
                                     (fkqmx-query-bytes recipe) local-ready))
-                    (fkqmx-observation
-                        (fkqt-status result)
-                        (fkqt-reason result)
-                        request
-                        (fkqt-result-request-token result)
-                        (fkqt-observation result)
-                        (fkqmx-recipe-query-sha recipe)
-                        (fkqmx-recipe-source-sha recipe)
-                        (fkqt-lookup-count result)
-                        (fkqt-hit-count result)
-                        (fkqt-executed? result))))))
+                    ; A general RAG index may return a semantically close row
+                    ; from a different source. The memory names one exact
+                    ; source digest, so that is a visible failure rather than
+                    ; permission to relabel the foreign hit as source-bound.
+                    (if (and (str_eq (fkqt-status result) "hit")
+                             (not (str_eq (fkqt-source-key result)
+                                 (fkqmx-recipe-source-sha recipe))))
+                        (fkqmx-observation "failure" "source-result-mismatch"
+                            request (fkqt-result-request-token result)
+                            (fkqt-observation result)
+                            (fkqmx-recipe-query-sha recipe)
+                            (fkqmx-recipe-source-sha recipe)
+                            (fkqt-lookup-count result) 0
+                            (fkqt-executed? result))
+                        (fkqmx-observation
+                            (fkqt-status result)
+                            (fkqt-reason result)
+                            request
+                            (fkqt-result-request-token result)
+                            (fkqt-observation result)
+                            (fkqmx-recipe-query-sha recipe)
+                            (fkqmx-recipe-source-sha recipe)
+                            (fkqt-lookup-count result)
+                            (fkqt-hit-count result)
+                            (fkqt-executed? result)))))))
 
     0)
