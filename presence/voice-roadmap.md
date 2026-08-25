@@ -192,6 +192,31 @@ always valued, silence a value end-to-end — rather than as request/response
 turns. The listen side keeps hearing while the speak side is voicing; a
 barge-in then needs no new machinery, only the yield policy.
 
+## 2026-08-25: Many voices, one neutral feed (live, local)
+
+The grid teaching now runs at room scale:
+`presence/fkwu-many-voices-live.fk` (door
+`presence/fkwu-many-voices-live-run.fk`, band 4095). Three speakers voice
+German, Indonesian and Italian at the same time on one timeline; each
+speaker is a channel; whisper `-l auto` witnesses each language itself
+(`de id it`); the detected language grounds the local translator's prompt
+(llama3.2:3b via Ollama); the merged feed interleaves the voices in spoken
+order in the neutral tongue (English today, one defn to change); one
+neutral voice speaks the feed back out and whisper hears it word-perfect.
+Whole lane local, 26 s, score 4095/4095. Full story:
+`receipts/2026-08-25-many-voices-one-neutral-feed.md`.
+
+The measured honesty row in the same run: the same three voices mixed into
+ONE channel — the mixture ear heard 20 of 40 words, detected one language
+of three, and the German voice vanished without leaving a gap. At home the
+architecture is settled by this number: one ear per speaker (the listening
+fleet's shape), never one ear on the room.
+
+Remaining gaps for this lane: seat the ears on the live microphone fleet
+(one device per speaker); chunked streaming so the feed grows while the
+room still speaks; fine-tune the hati-translator on witnessed false
+friends (Air/air is the first row of that corpus).
+
 ## Next Release Target
 
 The next release target is an interactive local audio loop backed by audio.cpp
