@@ -1,0 +1,78 @@
+; qwen38-span-invariant-band.fk — the rules a span kernel must keep, checked.
+;
+; Three bugs on 2026-08-24 and every one was the same bug: a per-token pitch
+; inferred from something that is not the pitch. They cost three model runs and a
+; seventeen-minute hang, and none of them was in the arithmetic.
+;
+;   bs2 is allocated at max(2*nq*hd, geo1) so ONE buffer serves both the fused
+;   q||gate projection of a full-attention layer and the wider projection of a
+;   linear one. Its allocated width is not its content width. A writer that lays
+;   tokens at `rows`, or a reader that strides by `geo1`, is correct at n=1 and
+;   reads the neighbouring token at n>1.
+;
+;   gates takes four buffers: `a` and `b` are per-token ACTIVATIONS, `A` and
+;   `dtb` are per-head WEIGHTS. Only the first two may be strided by t.
+;
+; This band reads the lane's own source and holds those rules. It is textual on
+; purpose: the next person to add a span kernel gets a red verdict, not a hang.
+;
+; PROOF LEVEL: read_file over the lane source plus string folds. A file organ,
+; no GPU. FKWU-STAGED, not a four-arm candidate.
+;
+; Verdict 1023:
+;   1     q38-bs2-stride exists and is the max of both consumers
+;   2     both bs2 writers go through it, not through rows
+;   4     the two recurrences take their offset from it, not from geo1
+;   8     the batched matmul writes at an explicit ystride
+;   16    no span kernel still writes y[t * rows + r]
+;   32    gates reads its weight argument by head, never by token
+;   64    every span kernel emitted declares an ntok constant
+;   128   the ten span pipelines are all registered
+;   256   the recurrences are still looped — they are not silently batched
+;   512   the cost model names the pitch rule, so the number has a home
+;
+; preludes: form-stdlib/core.fk form-stdlib/qwen38-dispatch-model.fk
+; witnessed: 2026-08-25 -> 1023 on fkwu
+
+(do
+    (defn qsi-has? (s n) (if (ge (str_find s n 0) 0) 1 0))
+    (defn qsi-count (s n acc)
+        (do (let i (str_find s n 0))
+            (if (lt i 0) acc
+                (qsi-count (substring s (add i (str_len n)) (str_len s)) n (add acc 1)))))
+    (defn qsi-bit (ok bit) (if ok bit 0))
+
+    (let src (read_file "form/native/metal/qwen35-dense-token-handle.fk"))
+
+    (let b0 (qsi-bit (and (eq (qsi-has? src "(defn q38-bs2-stride (geo)") 1)
+                     (and (eq (qsi-has? src "(if (gt qout (nth geo 1)) qout (nth geo 1))") 1)
+                          (eq (qdm-bs2-pitch 24 256 5000) 12288))) 1))
+    ; every write into bs2 uses the pitch helper
+    (let b1 (qsi-bit (and (eq (qsi-count src "(nth bs 2) ntok (q38-bs2-stride geo)" 0) 2)
+                          (eq (qsi-has? src "q38-mv-batch-y") 1)) 2))
+    ; the recurrence offsets too
+    (let b2 (qsi-bit (and (eq (qsi-count src "(mul t (q38-bs2-stride geo))" 0) 2)
+                          (eq (qsi-has? src "(mul t (nth geo 1))") 0)) 4))
+    (let b3 (qsi-bit (and (eq (qsi-has? src "(list (kth-tv-r tv) (kth-tv-c tv) ntok ystride)") 1)
+                          (eq (qsi-has? src "(q38-mv-batch-y ps tv xh yh ntok (kth-tv-r tv) barrier)") 1)) 8))
+    (let b4 (qsi-bit (eq (qsi-has? src "y[t * rows + r]") 0) 16))
+    ; gates: the weight argument is indexed by head, the activations by token
+    (let b5 (qsi-bit (and (eq (qsi-has? src "float x = a[o] + dtb[h];") 1)
+                          (eq (qsi-has? src "float x = a[o] + dtb[o];") 0)) 32))
+    ; every span kernel declares ntok
+    (let b6 (qsi-bit (and (ge (qsi-count src "constant uint& ntok" 0) 8)
+                          (ge (qsi-count src "_span_f32" 0) 6)) 64))
+    (let b7 (qsi-bit (and (eq (qsi-has? src "form_gqa_span_f32") 1)
+                     (and (eq (qsi-has? src "form_rmsnorm_span_f32") 1)
+                     (and (eq (qsi-has? src "form_gdn_l2norm_span_f32") 1)
+                     (and (eq (qsi-has? src "form_gdn_gates_span_f32") 1)
+                          (eq (qsi-has? src "form_gdn_norm_gate_span_f32") 1))))) 128))
+    ; the two recurrences are still dispatched from a loop, by name
+    (let b8 (qsi-bit (and (eq (qsi-has? src "(defn q38-conv-loop") 1)
+                     (and (eq (qsi-has? src "(defn q38-delta-loop") 1)
+                          (eq (qdm-linear-recurrent) 2))) 256))
+    (let b9 (qsi-bit (and (str_eq (qdm-per-head-arg) "weight")
+                     (and (str_eq (qdm-per-token-arg) "activation")
+                          (str_eq (qdm-persistent-arg) "state"))) 512))
+
+    (add b0 (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 (add b8 b9))))))))))
