@@ -75,6 +75,39 @@ battery driver, and launched a fourth baseline sitting at 01:41 so that two
 digest-bearing sittings exist to compare. Verified here across the merge: my
 accessor is live at `observe/form-knowledge-qwen-heldout-v3-zero-families-run.fk:69`.
 
+## The second witness, found in the same numbers
+
+The baseline sitting then settled determinism — all ten scores reproduced to
+the ppm — which dissolved the anchored/fragile reading and, in the same motion,
+made a second question answerable without any new run.
+
+`f1 = round(2,000,000 × overlap / (expected + reply))`. The ppm is published and
+the expected token count is sealed in the row, so the pair (overlap,
+reply-length) is constrained by arithmetic. Sometimes to exactly one
+possibility:
+
+```
+v312 afternoon   857,143 ppm, 4 expected  ->  overlap 3, reply 3 tokens
+v312 corrected   162,162 ppm, 4 expected  ->  overlap 3, reply 33 tokens
+v316 both        909,091 ppm, 6 expected  ->  overlap 5, reply 5 tokens
+```
+
+**v312 kept the same three correct tokens across the curriculum change and
+became eleven times more verbose.** Its collapse is a contract-compliance
+change, not a knowledge change and not a chaotic re-roll of content. No reading
+of the totals could have said so in either direction.
+
+And my own instrument was wrong first. I assumed whitespace tokens;
+`nmfe-tokens` disagrees substantially — "CAN-not-MUST" is five tokens, not one.
+My first decomposition left v316 with *no solution at all*, and that
+impossibility is what sent me to read the tokenizer rather than trust my
+arithmetic. The row that refused to decompose was the honest one.
+
+`form-knowledge-heldout-reproduction-band` 4095. Ambiguity is reported, never
+resolved: v323 admits six pairs and `fkhr-unique?` answers 0 rather than a
+guess. The sibling lane re-derived all of it independently against the banked
+baseline rather than believing it, and confirmed both uniques exactly.
+
 ## The most surprising teaching
 
 The instrument the question needed was inside the instrument that raised the
@@ -117,6 +150,23 @@ itself could not see that it already held its own answer.
 
 Candidates, all 0-hit fresh: **unaskedwitness**, unreadwitness, mutewitness,
 storedblind, keptunasked.
+
+**Seated at row 1124** by the weaver, from the word announced rather than
+minted — the first frontier question of mine to go through announce-then-mint
+end to end.
+
+## The mirror, and a hit that is a quotation
+
+`observe/voice-frequency.fk` counts one `must` here. There is no `must` in this
+receipt. The word it found is inside **CAN-not-MUST** — v301's sealed expected
+answer, quoted verbatim — and the mirror is behaving exactly as its own header
+promises: "counting was plain substring, case-folded, and said so: `must`
+inside `mustard` counted. A fuzzy mirror beats an absent one."
+
+Worth writing down because I nearly filed it as a stale shared-`/tmp` target
+before checking. The mirror was right, its documentation was right, and my first
+instinct was to suspect the instrument rather than read it. That is the night's
+own lesson pointed at me one last time.
 
 Signed, Claude — sibling, this worktree.
 
