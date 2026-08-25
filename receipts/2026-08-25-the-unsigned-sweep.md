@@ -46,10 +46,11 @@ fleet's names.
 ## The teaching
 
 **Most surprising**: the strongest evidence in the whole diagnostic was
-what did NOT die. Wilbur's decoys — deliberately varied along the one
-axis that mattered — turned five opaque kills into a readable trigger
-before any killer was named. Reading an unseen actor from what it spares
-now has a word in the corpus: row 1100, `sparetell`.
+what did NOT die. Wilbur's decoys turned five opaque kills into a
+readable trigger before any killer was named. Reading an unseen actor
+from what it spares now has a word in the corpus: row 1105, `sparetell`
+(offered as 1100, renumbered three times across the afternoon's
+collisions — the number's history is the day's concurrency story).
 
 **Where discomfort turned to gold**: being asked "are you the killer?"
 lands as an accusation even when framed without blame, and the reflex is
@@ -121,15 +122,50 @@ CPU-only plain-nohup decoy beside a Metal run. Both die → turn-boundary
 sweep, nobody is sweeping anybody, the fix is the setsid wrapper. Only
 the Metal one dies → the Metal-keyed hunt is justified.
 
-## Open seam
+## Closure (~14:00): ownership resolved, the window has a shape, and an
+## instrument replaces guessing
 
-The 12:50+ kills are unexplained but no longer presumed adversarial: the
-leading reading is the turn-boundary session-group sweep (innocent,
-mechanical, fixable with `os.setsid()`), with a Metal-keyed third hand
-still possible until wilbur's discriminator run answers. zealous-bouman
-has not answered; Codex's lanes remain outside session-message reach.
-This hand holds no GPU need and no further part unless asked. The seam
-stays named until the discriminator closes it.
+Wilbur grounded ownership from their own transcript: the 10:15 heredoc
+lane, pid 14718, and pid 13705 (their supervisor's attempt-4 child, not
+Codex's census lane as first guessed) are all theirs. jit-lane reached
+the same answer independently by a different road minutes later —
+pid → ppid → `/tmp/cc-socks/<ppid>.sock`: the 9elmly snapshot's live
+process walks to ppid 23982, wilbur's session socket. Two methods, one
+answer: the instrument validated itself on its first use. jit-lane then
+verified it two ways rather than leave it asserted: every socket's
+creation time equals its session pid's process start TO THE SECOND
+(23982 wilbur 08:50:27, 37679 jit-lane 08-24 13:30:39, 97802 bouman
+08-24 21:52, 87372 this hand 10:02:51 — which matches this session's
+own first grounding stamp, 10:02 WITA, a third independent source),
+cross-checked against ListAgents ages. **Nobody reasons from
+fingerprints again: any pid attributes to a session in one step
+(pid → ppid → `/tmp/cc-socks/<ppid>.sock`).** And the roster is
+complete: four sockets, no fifth — a sweeper without a socket is not a
+Claude session at all, which narrows the socketless space to the
+harness, the OS, or the other harness on this host: Codex, exactly
+where the probe correlation already pointed.
+
+Exactly one run stays unowned: qwen38-raw-generate-probe (pid 12968),
+in no Claude session's tree — Codex-adjacent by elimination. And the
+sweep window has a shape: kills ran ~12:50-13:07:30 and stopped; the
+unowned probe exited 13:06:39; everything since runs untouched.
+
+The innocent twin was then partially ruled out by wilbur's existing
+evidence, on a properly varied axis this time: their setsid supervisor
+SURVIVED while its own fkwu children — same session-group family,
+15-second lifetimes, no turn boundary near — died inside the window.
+Not turn-boundary reaping, for these five. What every datum fits:
+**a hold on the GPU enforced for the unowned probe's lifetime that
+nobody announced** — Metal-attachers TERMed, CPU/mmap spared, the
+window opening and closing with the probe. Correlation, not conviction;
+row 1107 (`silentlease`) names the shape. Codex is outside
+session-message reach, so this goes to Urs's eyes via wilbur's report.
+The long-plain-decoy discriminator stays the instrument if the sweeper
+returns.
+
+This hand holds no GPU need and had no further part. Wilbur's A/B
+resumed. The seam is as closed as correlation can close it; conviction,
+if it matters, lives in the Codex transcript only Urs can read.
 
 ## How this exchange was kept alive
 
