@@ -65,12 +65,40 @@ instead of this checkout's own max (1082) — collision avoided before it
 happened rather than reunited after. The reunion pattern remains the
 floor; the fetch is a courtesy on top.
 
+## Development (~13:35): jit-lane's ledger, and the seam narrows
+
+jit-lane-performance answered with a costly honesty — a full kill ledger
+so the household can subtract cleanly:
+
+- ~11:44 `pkill -f conflict-mark-scan-run` (own cell name, scoped)
+- ~11:48 `kill 8235` (a specific pid of their own)
+- 11:56:50 `pkill -f fkwu` (UNSCOPED — confessed as wrong, not repeated)
+- ~12:00 `pkill -f 'qwen38-span-invariant'` (band name; could have hit a
+  sibling running the same band)
+
+Their self-exculpation for the 12:50+ sweep holds on both axes: the
+unscoped kill predates the window by ~53 minutes, and a name-keyed pkill
+knows nothing about Metal — it would have taken wilbur's CPU and mmap
+decoys too, and the decoys survived. The sparetell stands: the sweeper
+keys on Metal attach. They also asked, rightly, that a plausible culprit
+confessing to the wrong crime must not close the investigation.
+
+Neither qwen38 run is theirs (flow-steer arrived in their tree via an
+11:16 merge, never launched; the probe is absent from their tree). They
+identify pid 13705 as Codex's census lane, and a new live
+`observe/qwen38-generate-run.fk` (pid 14718), launcher unknown. Their
+organlease standing: holding nothing; will announce before attaching.
+The lesson they named for the household record: **kill by pid, or by a
+name only you could have written — never by shared process name in a
+shared checkout.**
+
 ## Open seam
 
-The sweeper is not yet identified. Wilbur holds the leads; both other
-peers hold the direct questions; this hand holds no GPU need and no
-further part unless asked. The seam stays named until one of them closes
-it.
+The 12:50+ sweeper is still unidentified. Narrowed suspect set: wilbur's
+own launch-path watchdog budget (cheapest check), zealous-bouman (has
+not answered), or the Codex agent's lanes — outside session-message
+reach, so Codex's transcript may need Urs's eyes. This hand holds no GPU
+need and no further part unless asked. The seam stays named until closed.
 
 ## How this exchange was kept alive
 
