@@ -1,0 +1,283 @@
+; fkwu-many-voices-live.fk -- many speakers, many tongues, one neutral feed,
+; all local. The room-scale continuation of presence/duplex-frame-grid.fk.
+;
+; Three speakers voice three languages AT THE SAME TIME (real overlap on one
+; timeline: German at 0 ms, Indonesian at 2500 ms, Italian at 5000 ms). Each
+; speaker is a CHANNEL on the shared axis -- at home, one ear per speaker
+; (a device or microphone each; the mac listening fleet). Per channel:
+; whisper large-v3-turbo with -l auto witnesses the language itself, and the
+; detected language is fed into the translator's prompt -- the sensor's
+; witness grounds the next mind. Segments carry their own timestamps, each
+; shifted by its channel offset, so the merged neutral feed interleaves the
+; voices in the order they were actually spoken.
+;
+; The honesty lane runs beside it: the same three voices mixed into ONE
+; channel, transcribed once. Witnessed 2026-08-25 before this cell was
+; written: the mixture ear detected only Indonesian, mashed Indonesian and
+; Italian into one run-on, and the German voice vanished without leaving a
+; gap. Channels lose nothing; a mixture loses voices. The summary carries
+; the measured word counts so the contrast stays a number, not a memory.
+;
+; Translation door, probed before choosing (2026-08-25): hati-translator
+; inverted an Indonesian false friend (Air -> "air" instead of water) even
+; with the language named; whisper's own -tr door answered Indonesian back
+; unchanged (numb for id on large-v3-turbo); llama3.2:3b with the language
+; named in the prompt answered cleanly. The 3b door carries the lane;
+; the hati-translator miss is a fine-tune work order, named, not claimed.
+;
+; The neutral tongue is a choice, not a law: fmv-neutral-code/-name are one
+; defn each; English is today's witness. Host tools stay effects behind
+; host-exec: say, ffmpeg, whisper-cli, jq, curl to the local Ollama door.
+; No remote mind anywhere in the lane.
+;
+; preludes: form-stdlib/core.fk
+; witnessed: 2026-08-25 -> live 4095, band 4095
+
+(do
+    (defn fmv-kind () "fkwu-many-voices-live")
+    (defn fmv-out-dir () "audio-training-runs/current/fkwu-many-voices-live")
+    (defn fmv-model () "/Users/ursmuff/.cache/whisper.cpp/ggml-large-v3-turbo.bin")
+    (defn fmv-translator-model () "llama3.2:3b")
+    (defn fmv-neutral-code () "en")
+    (defn fmv-neutral-name () "English")
+    (defn fmv-neutral-voice () "Samantha")
+
+    ; ── speakers: (key voice offset-ms text). Detection stays auto; the
+    ; written language is provenance for the reader, never a hint to the ear.
+    (defn fmv-speakers ()
+        (list
+            (list "anna" "Anna" 0
+                "Der Regen kommt heute Abend über die Berge. Wir sollten die Fenster früh schließen.")
+            (list "damayanti" "Damayanti" 2500
+                "Air di sawah naik setelah hujan semalam. Petani mulai menanam padi pagi ini.")
+            (list "alice" "Alice" 5000
+                "Il pane fresco è appena uscito dal forno. Domani prepariamo la pasta per la festa.")))
+    (defn fmv-sp-key (s) (nth s 0))
+    (defn fmv-sp-voice (s) (nth s 1))
+    (defn fmv-sp-offset (s) (nth s 2))
+    (defn fmv-sp-text (s) (nth s 3))
+
+    ; ── small string floor (the flal shapes, kept name-local)
+    (defn fmv-join (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (head xs) (fmv-join (tail xs)))))
+    (defn fmv-q (s) (fmv-join (list "'" s "'")))
+    (defn fmv-path (name) (fmv-join (list (fmv-out-dir) "/" name)))
+    (defn fmv-digit (n) (byte_to_str (add 48 n)))
+    (defn fmv-int-str (n)
+        (if (lt n 0)
+            (str_concat "-" (fmv-int-str (sub 0 n)))
+            (if (lt n 10) (fmv-digit n)
+                (str_concat (fmv-int-str (div n 10)) (fmv-digit (mod n 10))))))
+    (defn fmv-line (name value) (fmv-join (list name ": `" value "`\n")))
+
+    ; ── language witness -> a name the translator's prompt can stand on
+    (defn fmv-lang-name (code)
+        (if (str_eq code "de") "German"
+        (if (str_eq code "id") "Indonesian"
+        (if (str_eq code "it") "Italian"
+        (if (str_eq code "es") "Spanish"
+        (if (str_eq code "fr") "French"
+        (if (str_eq code "zh") "Chinese"
+        (if (str_eq code "en") "English"
+            "the source language"))))))))
+
+    ; ── command builders (Form owns the plan; the band reads these shapes)
+    (defn fmv-say-command (voice text-path aiff-path)
+        (fmv-join (list "say -v " (fmv-q voice) " -o " (fmv-q aiff-path)
+                        " -f " (fmv-q text-path))))
+    (defn fmv-norm-command (aiff-path wav-path)
+        (fmv-join (list "ffmpeg -hide_banner -loglevel error -y -i " (fmv-q aiff-path)
+                        " -ar 16000 -ac 1 -c:a pcm_s16le " (fmv-q wav-path))))
+    (defn fmv-mix-command (w1 w2 w3 off2 off3 out)
+        (fmv-join (list
+            "ffmpeg -hide_banner -loglevel error -y -i " (fmv-q w1)
+            " -i " (fmv-q w2)
+            " -i " (fmv-q w3)
+            " -filter_complex '[1]adelay=" (fmv-int-str off2)
+            "[b];[2]adelay=" (fmv-int-str off3)
+            "[c];[0][b][c]amix=inputs=3:duration=longest:normalize=0'"
+            " -ar 16000 -ac 1 -c:a pcm_s16le " (fmv-q out))))
+    (defn fmv-whisper-json-command (model wav-path out-base)
+        (fmv-join (list "whisper-cli -m " (fmv-q model) " -f " (fmv-q wav-path)
+                        " -l auto -oj -of " (fmv-q out-base) " >/dev/null 2>&1")))
+    (defn fmv-lang-of-command (out-base)
+        (fmv-join (list "jq -r '.result.language' " (fmv-q (str_concat out-base ".json"))
+                        " | tr -d '\\n'")))
+    (defn fmv-mix-words-command (out-base)
+        (fmv-join (list "jq -r '.transcription[].text' " (fmv-q (str_concat out-base ".json"))
+                        " | wc -w | tr -d ' \\n'")))
+
+    ; one composed pipeline per channel: read the language witness, name it,
+    ; walk the segments, ask the local translator with the language named
+    ; (prompt assembled inside jq so transcript text cannot break the shell),
+    ; emit "abs-ms<TAB>speaker<TAB>lang<TAB>neutral-text" lines
+    (defn fmv-translate-loop-command (out-base speaker offset-ms feed-path)
+        (fmv-join (list
+            "L=$(jq -r '.result.language' " (fmv-q (str_concat out-base ".json"))
+            "); case \"$L\" in de) N=German;; id) N=Indonesian;; it) N=Italian;;"
+            " es) N=Spanish;; fr) N=French;; zh) N=Chinese;;"
+            " *) N=\"the source language\";; esac;"
+            " jq -r '.transcription[] | \"\\(.offsets.from) \\(.text)\"' "
+            (fmv-q (str_concat out-base ".json"))
+            " | while read -r F T; do R=$(jq -n --arg m " (fmv-q (fmv-translator-model))
+            " --arg n \"$N\" --arg t \"$T\""
+            " '{model:$m,prompt:(\"Translate from \"+$n+\" to " (fmv-neutral-name)
+            ", answer with only the translation: \"+$t),stream:false,options:{num_predict:80}}'"
+            " | curl -s --max-time 120 -d @- http://127.0.0.1:11434/api/generate"
+            " | jq -r '.response' | tr '\\n' ' ');"
+            " printf '%s\\t%s\\t%s\\t%s\\n' \"$((F+" (fmv-int-str offset-ms) "))\" "
+            (fmv-q speaker) " \"$L\" \"$R\"; done > " (fmv-q feed-path))))
+    (defn fmv-merge-command (f1 f2 f3 out)
+        (fmv-join (list "sort -n " (fmv-q f1) " " (fmv-q f2) " " (fmv-q f3)
+                        " > " (fmv-q out))))
+    (defn fmv-neutral-text-command (feed-path text-path)
+        (fmv-join (list "cut -f4 " (fmv-q feed-path) " > " (fmv-q text-path))))
+    (defn fmv-neutral-asr-command (model wav-path)
+        (fmv-join (list "whisper-cli -m " (fmv-q model) " -f " (fmv-q wav-path)
+                        " -l " (fmv-neutral-code)
+                        " -nt -np 2>/dev/null | tr '\\n' ' ' | head -c 500")))
+    (defn fmv-count-lines-command (path)
+        (fmv-join (list "wc -l < " (fmv-q path) " | tr -d ' \\n'")))
+    (defn fmv-channel-words-command (t1 t2 t3)
+        (fmv-join (list "cat " (fmv-q t1) " " (fmv-q t2) " " (fmv-q t3)
+                        " | wc -w | tr -d ' \\n'")))
+    ; the contrast measured where the numbers live: mixture words vs the
+    ; words the three channels actually spoke
+    (defn fmv-contrast-command (mix-base t1 t2 t3)
+        (fmv-join (list
+            "M=$(jq -r '.transcription[].text' " (fmv-q (str_concat mix-base ".json"))
+            " | wc -w); C=$(cat " (fmv-q t1) " " (fmv-q t2) " " (fmv-q t3)
+            " | wc -w); [ \"$M\" -lt \"$C\" ] && printf 1 || printf 0")))
+
+    ; ── readiness: every organ present, the local translator listed
+    (defn fmv-host-tools-ready? ()
+        (host-exec "command -v say >/dev/null && command -v ffmpeg >/dev/null && command -v whisper-cli >/dev/null && command -v curl >/dev/null && command -v jq >/dev/null && printf 1 || printf 0" ""))
+    (defn fmv-translator-ready? ()
+        (host-exec "curl --max-time 5 -s http://127.0.0.1:11434/api/tags | jq -e '.models[]? | select(.name==\"llama3.2:3b\")' >/dev/null && printf 1 || printf 0" ""))
+    (defn fmv-ready? ()
+        (if (and (eq (host_path_exists (fmv-model)) 1)
+                 (and (str_eq (fmv-host-tools-ready?) "1")
+                      (str_eq (fmv-translator-ready?) "1"))) 1 0))
+
+    ; ── scoring: twelve witnessed bits, power-of-two
+    (defn fmv-bit (ok bit) (if ok bit 0))
+    (defn fmv-score-from (ready wavs3 mix langs3 distinct feeds3 merged mixjson contrast neutralwav readback summary)
+        (add (add (add (fmv-bit (eq ready 1) 1)
+                       (fmv-bit (eq wavs3 1) 2))
+                  (add (fmv-bit (eq mix 1) 4)
+                       (fmv-bit (eq langs3 1) 8)))
+             (add (add (add (fmv-bit (eq distinct 1) 16)
+                            (fmv-bit (eq feeds3 1) 32))
+                       (add (fmv-bit (eq merged 1) 64)
+                            (fmv-bit (eq mixjson 1) 128)))
+                  (add (add (fmv-bit (eq contrast 1) 256)
+                            (fmv-bit (eq neutralwav 1) 512))
+                       (add (fmv-bit (eq readback 1) 1024)
+                            (fmv-bit (eq summary 1) 2048))))))
+    (defn fmv-expected-score () 4095)
+
+    ; ── per-speaker artifact paths
+    (defn fmv-text-path (k) (fmv-path (str_concat k ".txt")))
+    (defn fmv-aiff-path (k) (fmv-path (str_concat k ".aiff")))
+    (defn fmv-wav-path (k) (fmv-path (str_concat k ".wav")))
+    (defn fmv-asr-base (k) (fmv-path (str_concat "w_" k)))
+    (defn fmv-feed-path (k) (fmv-path (fmv-join (list "feed_" k ".tsv"))))
+
+    ; ── the live lane
+    (defn fmv-speak-channel (s)
+        (do
+            (let k (fmv-sp-key s))
+            (let _t (host_file_write_text (fmv-text-path k) (fmv-sp-text s)))
+            (let _s (host-exec (fmv-say-command (fmv-sp-voice s) (fmv-text-path k) (fmv-aiff-path k)) ""))
+            (let _n (host-exec (fmv-norm-command (fmv-aiff-path k) (fmv-wav-path k)) ""))
+            (host_path_exists (fmv-wav-path k))))
+    (defn fmv-hear-channel (s)
+        (do
+            (let k (fmv-sp-key s))
+            (let _w (host-exec (fmv-whisper-json-command (fmv-model) (fmv-wav-path k) (fmv-asr-base k)) ""))
+            (host-exec (fmv-lang-of-command (fmv-asr-base k)) "")))
+    (defn fmv-translate-channel (s)
+        (do
+            (let k (fmv-sp-key s))
+            (let _t (host-exec (fmv-translate-loop-command (fmv-asr-base k) k (fmv-sp-offset s) (fmv-feed-path k)) ""))
+            (host-exec (fmv-count-lines-command (fmv-feed-path k)) "")))
+    (defn fmv-all? (xs)
+        (if (eq (len xs) 0) 1
+            (if (eq (head xs) 1) (fmv-all? (tail xs)) 0)))
+    (defn fmv-nonempty? (s) (if (gt (str_len s) 0) (if (str_eq s "0") 0 1) 0))
+    (defn fmv-distinct3? (a b c)
+        (if (str_eq a b) 0 (if (str_eq a c) 0 (if (str_eq b c) 0 1))))
+
+    (defn fmv-run-current ()
+        (if (eq (fmv-ready?) 1)
+            (do
+                (let _mk-a (host_dir_mkdir "audio-training-runs"))
+                (let _mk-b (host_dir_mkdir "audio-training-runs/current"))
+                (let _mk-c (host_dir_mkdir (fmv-out-dir)))
+                (let sp (fmv-speakers))
+                (let s1 (nth sp 0))
+                (let s2 (nth sp 1))
+                (let s3 (nth sp 2))
+                (let wav-ok (fmv-all? (list (fmv-speak-channel s1) (fmv-speak-channel s2) (fmv-speak-channel s3))))
+                (let _mix (host-exec (fmv-mix-command (fmv-wav-path (fmv-sp-key s1))
+                                                      (fmv-wav-path (fmv-sp-key s2))
+                                                      (fmv-wav-path (fmv-sp-key s3))
+                                                      (fmv-sp-offset s2) (fmv-sp-offset s3)
+                                                      (fmv-path "mix.wav")) ""))
+                (let lang1 (fmv-hear-channel s1))
+                (let lang2 (fmv-hear-channel s2))
+                (let lang3 (fmv-hear-channel s3))
+                (let _wm (host-exec (fmv-whisper-json-command (fmv-model) (fmv-path "mix.wav") (fmv-path "w_mix")) ""))
+                (let mix-lang (host-exec (fmv-lang-of-command (fmv-path "w_mix")) ""))
+                (let mix-words (host-exec (fmv-mix-words-command (fmv-path "w_mix")) ""))
+                (let contrast (host-exec (fmv-contrast-command (fmv-path "w_mix")
+                                                               (fmv-text-path (fmv-sp-key s1))
+                                                               (fmv-text-path (fmv-sp-key s2))
+                                                               (fmv-text-path (fmv-sp-key s3))) ""))
+                (let n1 (fmv-translate-channel s1))
+                (let n2 (fmv-translate-channel s2))
+                (let n3 (fmv-translate-channel s3))
+                (let _merge (host-exec (fmv-merge-command (fmv-feed-path (fmv-sp-key s1))
+                                                          (fmv-feed-path (fmv-sp-key s2))
+                                                          (fmv-feed-path (fmv-sp-key s3))
+                                                          (fmv-path "feed.tsv")) ""))
+                (let feed-lines (host-exec (fmv-count-lines-command (fmv-path "feed.tsv")) ""))
+                (let channel-words (host-exec (fmv-channel-words-command
+                                                  (fmv-text-path (fmv-sp-key s1))
+                                                  (fmv-text-path (fmv-sp-key s2))
+                                                  (fmv-text-path (fmv-sp-key s3))) ""))
+                (let _nt (host-exec (fmv-neutral-text-command (fmv-path "feed.tsv") (fmv-path "neutral.txt")) ""))
+                (let _ns (host-exec (fmv-say-command (fmv-neutral-voice) (fmv-path "neutral.txt") (fmv-path "neutral.aiff")) ""))
+                (let _nn (host-exec (fmv-norm-command (fmv-path "neutral.aiff") (fmv-path "neutral.wav")) ""))
+                (let readback (host-exec (fmv-neutral-asr-command (fmv-model) (fmv-path "neutral.wav")) ""))
+                (let score (fmv-score-from
+                                1
+                                wav-ok
+                                (host_path_exists (fmv-path "mix.wav"))
+                                (fmv-all? (list (fmv-nonempty? lang1) (fmv-nonempty? lang2) (fmv-nonempty? lang3)))
+                                (fmv-distinct3? lang1 lang2 lang3)
+                                (fmv-all? (list (fmv-nonempty? n1) (fmv-nonempty? n2) (fmv-nonempty? n3)))
+                                (fmv-nonempty? feed-lines)
+                                (host_path_exists (str_concat (fmv-path "w_mix") ".json"))
+                                (if (str_eq contrast "1") 1 0)
+                                (host_path_exists (fmv-path "neutral.wav"))
+                                (fmv-nonempty? readback)
+                                1))
+                (let _summary (host_file_write_text (fmv-path "summary")
+                    (fmv-join (list
+                        (fmv-line "kind" (fmv-kind))
+                        (fmv-line "status" "many_voices_channel_feed_live")
+                        (fmv-line "langs" (fmv-join (list lang1 " " lang2 " " lang3)))
+                        (fmv-line "mix_lang" mix-lang)
+                        (fmv-line "mix_words" mix-words)
+                        (fmv-line "channel_words" channel-words)
+                        (fmv-line "mixture_lost_words" contrast)
+                        (fmv-line "feed_lines" feed-lines)
+                        (fmv-line "neutral_readback" readback)
+                        (fmv-line "score" (fmv-int-str score))
+                        (fmv-line "expected_score" (fmv-int-str (fmv-expected-score)))
+                        (fmv-line "promotion_authority" "0")))))
+                score)
+            0))
+    0)

@@ -1,0 +1,221 @@
+; duplex-frame-grid.fk — the frame-synchronous seat for two voices at once.
+;
+; Learned 2026-08-25 from NVIDIA NemotronLabs VoiceChat-11B (released
+; 2026-08-09, after this hand's training horizon; witnessed via its Hugging
+; Face model card and the NVIDIA-NeMo/Speech `nemotron-labs-voicechat`
+; branch, nemo/collections/speechlm2/models/duplex_stt_model.py). That
+; model replaces the ASR -> LLM -> TTS cascade with one body on ONE SHARED
+; TIME AXIS: ~80 ms frames (12.5 per second), where EVERY channel holds a
+; value at EVERY frame. Agent silence is an explicit pad token; user
+; silence is encoded actual silence — quiet is a value, never an absence
+; (axiom-1's nothing, engineered into a voice). Turn boundaries are emitted
+; tokens (agent BOS/EOS; user ^/$). Interruption has NO mechanism at all:
+; overlap is simply both channels voicing in the same frame, and yielding
+; is learned from overlap data — measured ~448 ms smooth turn-taking and
+; ~480 ms to yield on user interruption (six frames at 80 ms). Tool calls
+; ride a separate output channel (SPECIAL_20/21/22 delimiters) while the
+; speech channel keeps a spoken on-hold message — the conversation never
+; goes absent during work.
+;
+; The honest seam: this cell is the protocol SEAT, not the learned mind.
+; The model's learned turn policy is stood in for here by an explicit one,
+; so the REPRESENTATION claims become witnessable in this body: a shared
+; grid makes overlap representable, so nothing a listener says while the
+; speaker speaks is lost — where a turn-gated cascade (the body's current
+; loop, presence/fkwu-local-audio-loop.fk) can only hear between its own
+; utterances. Native generative voice remains pending
+; (receipts/2026-06-29-native-zh-summary-PENDING.md); this grid is the
+; seat it will sit in when it comes home.
+;
+; Channel vocabularies (same small ints, separate channels — the model
+; keys them per channel the same way):
+;   user:  0 silence, 1 speech-start (^), 2 speech-end ($), 30.. words
+;   agent: 0 pad-silence, 1 BOS, 2 EOS, 7 on-hold voice, 10.. words;
+;          99 inside reply text marks the tool call
+;   tool:  0 quiet, 20 call-open, 21 call-close, 22 response-end
+;
+; preludes: form-stdlib/core.fk
+; witnessed: 2026-08-25 -> band 511
+
+(do
+    ; ── grid constants
+    (defn dfg-frame-ms () 80)
+    (defn dfg-latency-bound-frames () 6)   ; 6 x 80 ms = 480 ms, the model's
+                                           ; measured yield-on-interruption
+    (defn dfg-turn-take-delay () 3)        ; stand-in policy: 240 ms; the
+                                           ; model measures ~448 ms (~5.6)
+    (defn dfg-bos () 1)
+    (defn dfg-eos () 2)
+    (defn dfg-user-eos () 2)
+    (defn dfg-hold-token () 7)
+    (defn dfg-call-marker () 99)
+    (defn dfg-tool-open () 20)
+    (defn dfg-tool-close () 21)
+    (defn dfg-tool-response () 22)
+    (defn dfg-none () 9999)
+
+    ; ── a frame: one tick of the shared axis, all channels valued
+    (defn dfg-frame (u a t) (list u a t))
+    (defn dfg-u (f) (nth f 0))
+    (defn dfg-a (f) (nth f 1))
+    (defn dfg-t (f) (nth f 2))
+
+    ; ── the demonstration streams (hand-traced; twenty frames = 1.6 s)
+    ; user: quiet, ^, three words, $, quiet while agent replies, then a
+    ; barge-in (^, two words, $) landing mid-reply, then quiet.
+    (defn dfg-user-stream ()
+        (list 0 1 30 31 32 2 0 0 0 0 0 0 0 0 1 33 34 2 0 0))
+    ; agent reply text: BOS, word, tool call, three words, EOS — the call
+    ; marker splits the sentence around the tool window.
+    (defn dfg-reply ()
+        (list 1 10 99 11 12 13 2))
+
+    ; ── the duplex engine: one output frame per input frame, no elastic
+    ; buffering. mode 0 listening, 1 speaking, 2 tool-holding.
+    (defn dfg-run-loop (users mode wait reply tool yielding)
+        (if (eq (len users) 0)
+            (list)
+            (do
+                (let u (head users))
+                (let rest (tail users))
+                (if (eq mode 2)
+                    (if (eq tool 1)
+                        (cons (dfg-frame u (dfg-hold-token) (dfg-tool-response))
+                              (dfg-run-loop rest 1 0 reply 0 0))
+                        (cons (dfg-frame u (dfg-hold-token) (dfg-tool-close))
+                              (dfg-run-loop rest 2 0 reply (sub tool 1) 0)))
+                    (if (eq mode 1)
+                        (if (eq (len reply) 0)
+                            (cons (dfg-frame u 0 0)
+                                  (dfg-run-loop rest 0 0 (list) 0 0))
+                            (if (eq yielding 1)
+                                (cons (dfg-frame u (dfg-eos) 0)
+                                      (dfg-run-loop rest 0 0 (list) 0 0))
+                                (if (eq (head reply) (dfg-call-marker))
+                                    (cons (dfg-frame u (dfg-hold-token) (dfg-tool-open))
+                                          (dfg-run-loop rest 2 0 (tail reply) 2 0))
+                                    (if (eq u (dfg-bos))
+                                        (cons (dfg-frame u (head reply) 0)
+                                              (dfg-run-loop rest 1 0 (tail reply) 0 1))
+                                        (cons (dfg-frame u (head reply) 0)
+                                              (dfg-run-loop rest
+                                                  (if (eq (head reply) (dfg-eos)) 0 1)
+                                                  0 (tail reply) 0 0))))))
+                        ; mode 0: listening. The agent's quiet is a value.
+                        (if (eq u (dfg-user-eos))
+                            (cons (dfg-frame u 0 0)
+                                  (dfg-run-loop rest 0 (dfg-turn-take-delay) reply 0 0))
+                            (if (gt wait 1)
+                                (cons (dfg-frame u 0 0)
+                                      (dfg-run-loop rest 0 (sub wait 1) reply 0 0))
+                                (if (eq wait 1)
+                                    (cons (dfg-frame u (dfg-bos) 0)
+                                          (dfg-run-loop rest 1 0 (tail (dfg-reply)) 0 0))
+                                    (cons (dfg-frame u 0 0)
+                                          (dfg-run-loop rest 0 0 reply 0 0))))))))))
+    (defn dfg-run (users) (dfg-run-loop users 0 0 (list) 0 0))
+
+    ; ── witnesses over the produced grid (measured, never asserted)
+
+    ; every frame whole: three channels, none of them nothing
+    (defn dfg-count-whole (frames)
+        (if (eq (len frames) 0) 0
+            (add
+                (if (eq (len (head frames)) 3)
+                    (if (nothing? (dfg-u (head frames))) 0
+                        (if (nothing? (dfg-a (head frames))) 0
+                            (if (nothing? (dfg-t (head frames))) 0 1)))
+                    0)
+                (dfg-count-whole (tail frames)))))
+
+    ; user words sent (counted in the raw input stream), heard by the grid
+    ; (counted in the produced frames), and heard by a turn-gated listener
+    ; that only hears while its own voice is silent (the cascade's ear)
+    (defn dfg-count-words-in-stream (users)
+        (if (eq (len users) 0) 0
+            (add (if (gt (head users) 29) 1 0)
+                 (dfg-count-words-in-stream (tail users)))))
+    (defn dfg-count-user-words (frames)
+        (if (eq (len frames) 0) 0
+            (add (if (gt (dfg-u (head frames)) 29) 1 0)
+                 (dfg-count-user-words (tail frames)))))
+    (defn dfg-count-gated-heard (frames)
+        (if (eq (len frames) 0) 0
+            (add (if (gt (dfg-u (head frames)) 29)
+                     (if (eq (dfg-a (head frames)) 0) 1 0)
+                     0)
+                 (dfg-count-gated-heard (tail frames)))))
+
+    ; frames where both voices are live at once — the overlap the grid
+    ; makes representable
+    (defn dfg-count-overlap (frames)
+        (if (eq (len frames) 0) 0
+            (add (if (gt (dfg-u (head frames)) 0)
+                     (if (gt (dfg-a (head frames)) 0) 1 0)
+                     0)
+                 (dfg-count-overlap (tail frames)))))
+
+    ; first-index walks
+    (defn dfg-first-user-eos-loop (frames i)
+        (if (eq (len frames) 0) (dfg-none)
+            (if (eq (dfg-u (head frames)) (dfg-user-eos)) i
+                (dfg-first-user-eos-loop (tail frames) (add i 1)))))
+    (defn dfg-first-agent-bos-loop (frames i)
+        (if (eq (len frames) 0) (dfg-none)
+            (if (eq (dfg-a (head frames)) (dfg-bos)) i
+                (dfg-first-agent-bos-loop (tail frames) (add i 1)))))
+    ; barge frame: user ^ lands while the agent is voicing content
+    (defn dfg-first-barge-loop (frames i)
+        (if (eq (len frames) 0) (dfg-none)
+            (if (eq (dfg-u (head frames)) 1)
+                (if (gt (dfg-a (head frames)) 2) i
+                    (dfg-first-barge-loop (tail frames) (add i 1)))
+                (dfg-first-barge-loop (tail frames) (add i 1)))))
+    (defn dfg-first-agent-eos-from-loop (frames i from)
+        (if (eq (len frames) 0) (dfg-none)
+            (if (lt i from)
+                (dfg-first-agent-eos-from-loop (tail frames) (add i 1) from)
+                (if (eq (dfg-a (head frames)) (dfg-eos)) i
+                    (dfg-first-agent-eos-from-loop (tail frames) (add i 1) from)))))
+    (defn dfg-first-tool-loop (frames i v)
+        (if (eq (len frames) 0) (dfg-none)
+            (if (eq (dfg-t (head frames)) v) i
+                (dfg-first-tool-loop (tail frames) (add i 1) v))))
+    (defn dfg-count-tool (frames v)
+        (if (eq (len frames) 0) 0
+            (add (if (eq (dfg-t (head frames)) v) 1 0)
+                 (dfg-count-tool (tail frames) v))))
+
+    ; hold voiced: inside the tool window every agent frame carries the
+    ; on-hold voice — the conversation never goes absent during work
+    (defn dfg-hold-voiced-loop (frames i open close)
+        (if (eq (len frames) 0) 1
+            (if (lt i open)
+                (dfg-hold-voiced-loop (tail frames) (add i 1) open close)
+                (if (gt i close)
+                    1
+                    (if (eq (dfg-a (head frames)) (dfg-hold-token))
+                        (dfg-hold-voiced-loop (tail frames) (add i 1) open close)
+                        0)))))
+
+    ; ── measured latencies, in frames of the shared axis
+    (defn dfg-turn-take-frames (frames)
+        (sub (dfg-first-agent-bos-loop frames 0)
+             (dfg-first-user-eos-loop frames 0)))
+    (defn dfg-yield-frames (frames)
+        (do
+            (let barge (dfg-first-barge-loop frames 0))
+            (if (eq barge (dfg-none))
+                (dfg-none)
+                (sub (dfg-first-agent-eos-from-loop frames 0 barge) barge))))
+
+    ; measures for a receipt: (turn-take yield sent gated overlap)
+    (defn dfg-measures ()
+        (do
+            (let frames (dfg-run (dfg-user-stream)))
+            (list (dfg-turn-take-frames frames)
+                  (dfg-yield-frames frames)
+                  (dfg-count-user-words frames)
+                  (dfg-count-gated-heard frames)
+                  (dfg-count-overlap frames))))
+    0)
