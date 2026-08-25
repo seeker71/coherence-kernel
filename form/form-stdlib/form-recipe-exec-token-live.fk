@@ -1,0 +1,438 @@
+; form-recipe-exec-token-live.fk — a streamed NodeID request crosses the
+; registered recipe into a generated-on-demand Metal micro-thought.
+;
+; THE CROSSING. frexl-stream-parse folds the request surface one raw byte at a
+; time and invokes frex-parse only after that bounded cursor has seen the whole
+; frame. No tokenizer, vocabulary, merge pass, or model payload participates.
+; An accepted request resolves the interned affine recipe, reads its multiplier
+; and addend children, and composes one MSL kernel directly from those values.
+; The emitted source is itself carried by a content-addressed code NodeID.
+;
+; THE EFFECT. frexl-execute-request allocates and writes one four-byte buffer,
+; asks the Metal door to compile the generated source, enqueues one thread,
+; syncs, reads one signed 32-bit value, and releases the buffer. Every stage is
+; retained as bounded scalar state in a separate live execution NodeID. The MSL
+; and request surface never appear in witness rendering.
+;
+; HONEST FLAGS. source-generated means Form composed MSL bytes. native-code-
+; generated means metal_pipeline returned a live handle. executed means enqueue
+; and sync both acknowledged the dispatch. model-executed remains 0. The buffer
+; release flag reports only metal_buf_free; the pure lifecycle's `release` event
+; reports the bounded reducer context and is not substituted for physical free.
+;
+; SIGNALS. An absent Metal door offers nothing. A carrier refusal after the
+; door is live offers failure, unless metal_status explicitly names timeout.
+; A four-byte result is value-present even when its value is 0 or 1. A wrong
+; value and a failed buffer release remain failures after execution rather than
+; being dressed as success.
+;
+; This cell emits no persistent cache and no mesh/broadcast claim. It changes
+; no C seed. The only carrier program is the MSL composed here from the recipe.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/format-arith.fk form-stdlib/metal-door.fk
+; preludes: form-stdlib/form-recipe-exec-token.fk
+;
+; Pure shape proven by: form-stdlib/tests/form-recipe-exec-token-live-band.fk
+
+(do
+    ; ── raw byte cursor ──────────────────────────────────────────────
+    ; cursor = (buffer byte-count overflow complete)
+    (defn frexl-cursor () (list "" 0 0 0))
+    (defn frexl-cursor-buffer (c) (nth c 0))
+    (defn frexl-cursor-bytes (c) (nth c 1))
+    (defn frexl-cursor-overflow? (c) (nth c 2))
+    (defn frexl-cursor-complete? (c) (nth c 3))
+    (defn frexl-tail-is-close? (text)
+        (do
+            (let n (str_len text))
+            (let m (str_len (frex-close)))
+            (if (lt n m) 0
+                (if (str_eq (substring text (sub n m) n) (frex-close)) 1 0))))
+    (defn frexl-cursor-feed (cursor byte)
+        (if (eq (frexl-cursor-overflow? cursor) 1) cursor
+            (if (ge (frexl-cursor-bytes cursor) (frex-max-frame-bytes))
+                (list (frexl-cursor-buffer cursor)
+                      (frexl-cursor-bytes cursor) 1 0)
+                (do
+                    (let next (str_concat (frexl-cursor-buffer cursor)
+                                          (byte_to_str byte)))
+                    (list next (add (frexl-cursor-bytes cursor) 1) 0
+                          (frexl-tail-is-close? next))))))
+    (defn frexl-stream-fold (surface at cursor)
+        (if (ge at (str_len surface)) cursor
+            (frexl-stream-fold surface (add at 1)
+                (frexl-cursor-feed cursor (str_byte_at surface at)))))
+    ; stream-result = (request cursor pretokenized)
+    (defn frexl-stream-parse (surface)
+        (do
+            (let cursor (frexl-stream-fold surface 0 (frexl-cursor)))
+            (let request
+                (if (eq (frexl-cursor-overflow? cursor) 1)
+                    (frex-nothing-request "stream-frame-budget-exceeded")
+                    (if (eq (frexl-cursor-complete? cursor) 0)
+                        (frex-nothing-request "stream-incomplete")
+                        (frex-parse (frexl-cursor-buffer cursor)))))
+            (list request cursor 0)))
+    (defn frexl-stream-request (r) (nth r 0))
+    (defn frexl-stream-cursor (r) (nth r 1))
+    (defn frexl-stream-pretokenized? (r) (nth r 2))
+
+    ; ── direct recipe-to-MSL composition ────────────────────────────
+    (defn frexl-code-category () (make_nodeid 31 2 0 62))
+    (defn frexl-execution-category () (make_nodeid 31 2 0 63))
+    (defn frexl-observation-category () (make_nodeid 31 2 0 64))
+    (defn frexl-kernel-name () "form_recipe_exec_affine_i32")
+    (defn frexl-recipe-mul (recipe)
+        (node_value (nth (node_children recipe) 1)))
+    (defn frexl-recipe-add (recipe)
+        (node_value (nth (node_children recipe) 2)))
+    (defn frexl-recipe-expected (recipe input)
+        (add (mul input (frexl-recipe-mul recipe))
+             (frexl-recipe-add recipe)))
+    (defn frexl-msl (recipe)
+        (str_concat "#include <metal_stdlib>\n"
+        (str_concat "using namespace metal;\n"
+        (str_concat "kernel void "
+        (str_concat (frexl-kernel-name)
+        (str_concat "(device int *a [[buffer(0)]], uint gid [[thread_position_in_grid]]) { if (gid == 0) a[0] = a[0] * "
+        (str_concat (int_to_str (frexl-recipe-mul recipe))
+        (str_concat " + "
+        (str_concat (int_to_str (frexl-recipe-add recipe)) "; }")))))))))
+    (defn frexl-code-node (recipe)
+        (intern_node (frexl-code-category)
+            (list recipe
+                  (intern_trivial_string (frexl-kernel-name))
+                  (intern_trivial_string (frexl-msl recipe))
+                  (intern_trivial_string "form-recipe-direct-msl-v1"))))
+    (defn frexl-code-valid? (code recipe)
+        (if (nothing? code) 0
+        (if (not (node_eq (node_category code) (frexl-code-category))) 0
+        (if (not (eq (len (node_children code)) 4)) 0
+            (if (node_eq code (frexl-code-node recipe)) 1 0)))))
+
+    ; signed i32 bytes over metal-door's exact little-endian u32 writer.
+    (defn frexl-i32? (v)
+        (if (and (ge v (sub 0 2147483648)) (le v 2147483647)) 1 0))
+    (defn frexl-i32-word (v)
+        (if (lt v 0) (add 4294967296 v) v))
+    (defn frexl-i32-bytes (v) (md-le32 (frexl-i32-word v)))
+    (defn frexl-u32-at (s at)
+        (add (str_byte_at s at)
+        (add (mul (str_byte_at s (add at 1)) 256)
+        (add (mul (str_byte_at s (add at 2)) 65536)
+             (mul (str_byte_at s (add at 3)) 16777216)))))
+    (defn frexl-i32-at (s at)
+        (do (let word (frexl-u32-at s at))
+            (if (gt word 2147483647) (sub word 4294967296) word)))
+
+    ; ── live content identities and typed result ────────────────────
+    (defn frexl-execution-node (request code carrier status reason value present
+                                stream-bytes source-generated native-generated
+                                executed pipeline-created buffer-released wrote
+                                enqueued synced read-bytes)
+        (intern_node (frexl-execution-category)
+            (list
+                (frex-request-or-absent request)
+                (if (nothing? code) (frex-absent-token) code)
+                (intern_trivial_string carrier)
+                (intern_trivial_string status)
+                (intern_trivial_string reason)
+                (intern_trivial_int value)
+                (intern_trivial_int present)
+                (intern_trivial_int stream-bytes)
+                (intern_trivial_int 0)
+                (intern_trivial_int source-generated)
+                (intern_trivial_int native-generated)
+                (intern_trivial_int executed)
+                (intern_trivial_int 0)
+                (intern_trivial_int pipeline-created)
+                (intern_trivial_int buffer-released)
+                (intern_trivial_int wrote)
+                (intern_trivial_int enqueued)
+                (intern_trivial_int synced)
+                (intern_trivial_int read-bytes))))
+    (defn frexl-observation-node (execution pure-result)
+        (intern_node (frexl-observation-category)
+            (list execution
+                  (frex-result-observation pure-result)
+                  (intern_trivial_string (frex-result-status pure-result))
+                  (intern_trivial_string (frex-result-reason pure-result))
+                  (intern_trivial_int (frex-result-value pure-result))
+                  (intern_trivial_int (frex-result-value-present? pure-result)))))
+
+    ; live result fields:
+    ;  0 status             1 reason              2 pure result
+    ;  3 code node          4 execution node      5 observation node
+    ;  6 carrier            7 value               8 value-present
+    ;  9 stream bytes      10 pretokenized       11 source-generated
+    ; 12 native-generated  13 executed           14 model-executed
+    ; 15 pipeline-created  16 buffer-released    17 wrote bytes
+    ; 18 enqueued          19 synced              20 read bytes
+    ; 21 lifecycle
+    (defn frexl-result-from-offer (request offer code stream-bytes
+                                   source-generated native-generated executed
+                                   pipeline-created buffer-released wrote
+                                   enqueued synced read-bytes)
+        (do
+            (let pure-result (frex-choice request (list offer)))
+            (let status (frex-result-status pure-result))
+            (let reason (frex-result-reason pure-result))
+            (let value (frex-result-value pure-result))
+            (let present (frex-result-value-present? pure-result))
+            (let carrier (frex-offer-carrier offer))
+            (let execution (frexl-execution-node request code carrier status
+                reason value present stream-bytes source-generated
+                native-generated executed pipeline-created buffer-released
+                wrote enqueued synced read-bytes))
+            (let observation (frexl-observation-node execution pure-result))
+            (list status reason pure-result
+                  (if (nothing? code) (frex-absent-token) code)
+                  execution observation carrier value present stream-bytes 0
+                  source-generated native-generated executed 0 pipeline-created
+                  buffer-released wrote enqueued synced read-bytes
+                  (frex-result-trace pure-result))))
+    (defn frexl-result-status (r) (nth r 0))
+    (defn frexl-result-reason (r) (nth r 1))
+    (defn frexl-result-pure (r) (nth r 2))
+    (defn frexl-result-code (r) (nth r 3))
+    (defn frexl-result-execution (r) (nth r 4))
+    (defn frexl-result-observation (r) (nth r 5))
+    (defn frexl-result-carrier (r) (nth r 6))
+    (defn frexl-result-value (r) (nth r 7))
+    (defn frexl-result-value-present? (r) (nth r 8))
+    (defn frexl-result-stream-bytes (r) (nth r 9))
+    (defn frexl-result-pretokenized? (r) (nth r 10))
+    (defn frexl-result-source-generated? (r) (nth r 11))
+    (defn frexl-result-native-code-generated? (r) (nth r 12))
+    (defn frexl-result-executed? (r) (nth r 13))
+    (defn frexl-result-model-executed? (r) (nth r 14))
+    (defn frexl-result-pipeline-created? (r) (nth r 15))
+    (defn frexl-result-buffer-released? (r) (nth r 16))
+    (defn frexl-result-wrote-bytes (r) (nth r 17))
+    (defn frexl-result-enqueued (r) (nth r 18))
+    (defn frexl-result-synced (r) (nth r 19))
+    (defn frexl-result-read-bytes (r) (nth r 20))
+    (defn frexl-result-lifecycle (r) (nth r 21))
+
+    ; The raw-byte cursor speaks the protocol's compact frex-result shape. This
+    ; projection keeps the physical carrier flags in that observation's content
+    ; identity; the pure protocol constructor remains the all-zero delegate.
+    (defn frexl-result-as-frex (request live-result)
+        (do
+            (let pure (frexl-result-pure live-result))
+            (frex-result-with-flags
+                (frexl-result-status live-result)
+                (frexl-result-reason live-result)
+                request
+                (frexl-result-carrier live-result)
+                (frexl-result-value live-result)
+                (frexl-result-value-present? live-result)
+                (frexl-result-lifecycle live-result)
+                (frex-result-attempts pure)
+                (frexl-result-executed? live-result)
+                (frexl-result-model-executed? live-result)
+                (frexl-result-native-code-generated? live-result))))
+
+    (defn frexl-status-timeout? (status)
+        (if (or (ge (str_find status "timeout" 0) 0)
+                (ge (str_find status "timed out" 0) 0)) 1 0))
+    (defn frexl-failure-offer (status reason)
+        (if (eq (frexl-status-timeout? status) 1)
+            (frex-offer "metal" "timeout" 0 reason)
+            (frex-offer "metal" "failure" 0 reason)))
+    (defn frexl-metal-requested? (request)
+        (if (or (str_eq (frex-request-carrier request) "auto")
+                (str_eq (frex-request-carrier request) "metal")) 1 0))
+
+    ; A small constructor for non-effectful exits. `carrier` is kept admissible
+    ; to the pure request so nothing remains nothing rather than invalid-offer.
+    (defn frexl-nothing (request reason stream-bytes)
+        (do
+            (let carrier (if (str_eq (frex-request-carrier request) "auto")
+                              "metal" (frex-request-carrier request)))
+            (frexl-result-from-offer request
+                (frex-offer carrier "nothing" 0 reason)
+                (nothing) stream-bytes 0 0 0 0 0 0 0 0 0)))
+
+    ; ── effectful Metal crossing ─────────────────────────────────────
+    (defn frexl-execute-request (request stream-bytes)
+        (if (not (eq (frex-request-ready? request) 1))
+            (frexl-result-from-offer request
+                (frex-offer "metal" "nothing" 0 (frex-request-reason request))
+                (nothing) stream-bytes 0 0 0 0 0 0 0 0 0)
+        (if (not (eq (frexl-metal-requested? request) 1))
+            (frexl-nothing request "metal-not-requested" stream-bytes)
+        (if (not (eq (frexl-i32? (frex-request-input request)) 1))
+            (frexl-nothing request "input-outside-i32" stream-bytes)
+        (if (not (md-door-live?))
+            (frexl-nothing request "metal-unavailable" stream-bytes)
+            (do
+                (let recipe (frex-request-recipe request))
+                (let source (frexl-msl recipe))
+                (let code (frexl-code-node recipe))
+                (let buffer (metal_buf_alloc 4))
+                (if (le buffer 0)
+                    (frexl-result-from-offer request
+                        (frexl-failure-offer (metal_status) "buffer-allocation-failure")
+                        code stream-bytes 1 0 0 0 0 0 0 0 0)
+                    (do
+                        (let wrote (metal_buf_write buffer 0
+                            (frexl-i32-bytes (frex-request-input request))))
+                        (if (not (eq wrote 4))
+                            (do
+                                (let released (metal_buf_free buffer))
+                                (frexl-result-from-offer request
+                                    (frexl-failure-offer (metal_status)
+                                                         "buffer-write-failure")
+                                    code stream-bytes 1 0 0 0
+                                    (if (eq released 1) 1 0) wrote 0 0 0))
+                            (do
+                                (let pipeline (metal_pipeline source
+                                                        (frexl-kernel-name)))
+                                (if (le pipeline 0)
+                                    (do
+                                        (let released (metal_buf_free buffer))
+                                        (frexl-result-from-offer request
+                                            (frexl-failure-offer (metal_status)
+                                                                 "compile-failure")
+                                            code stream-bytes 1 0 0 0
+                                            (if (eq released 1) 1 0)
+                                            wrote 0 0 0))
+                                    (do
+                                        (let enqueued (metal_enqueue pipeline
+                                            (md-bind (list buffer) (empty)) 1))
+                                        (if (not (eq enqueued 1))
+                                            (do
+                                                (let released (metal_buf_free buffer))
+                                                (frexl-result-from-offer request
+                                                    (frexl-failure-offer (metal_status)
+                                                                         "enqueue-failure")
+                                                    code stream-bytes 1 1 0 1
+                                                    (if (eq released 1) 1 0)
+                                                    wrote enqueued 0 0))
+                                            (do
+                                                (let synced (metal_sync))
+                                                (if (le synced 0)
+                                                    (do
+                                                        (let released
+                                                            (metal_buf_free buffer))
+                                                        (frexl-result-from-offer request
+                                                            (frexl-failure-offer
+                                                                (metal_status)
+                                                                "sync-failure")
+                                                            code stream-bytes 1 1 0 1
+                                                            (if (eq released 1) 1 0)
+                                                            wrote enqueued synced 0))
+                                                    (do
+                                                        (let bytes
+                                                            (metal_buf_read buffer 0 4))
+                                                        (let read-bytes (str_len bytes))
+                                                        (if (not (eq read-bytes 4))
+                                                            (do
+                                                                (let released
+                                                                    (metal_buf_free buffer))
+                                                                (frexl-result-from-offer request
+                                                                    (frexl-failure-offer
+                                                                        (metal_status)
+                                                                        "read-failure")
+                                                                    code stream-bytes 1 1 1 1
+                                                                    (if (eq released 1) 1 0)
+                                                                    wrote enqueued synced
+                                                                    read-bytes))
+                                                            (do
+                                                                (let value
+                                                                    (frexl-i32-at bytes 0))
+                                                                (let released
+                                                                    (metal_buf_free buffer))
+                                                                (if (not (eq released 1))
+                                                                    (frexl-result-from-offer request
+                                                                        (frex-offer "metal"
+                                                                            "failure" 0
+                                                                            "buffer-release-failure")
+                                                                        code stream-bytes 1 1 1 1 0
+                                                                        wrote enqueued synced read-bytes)
+                                                                (if (not (eq value
+                                                                    (frexl-recipe-expected recipe
+                                                                        (frex-request-input request))))
+                                                                    (frexl-result-from-offer request
+                                                                        (frex-offer "metal"
+                                                                            "failure" 0
+                                                                            "value-mismatch")
+                                                                        code stream-bytes 1 1 1 1 1
+                                                                        wrote enqueued synced read-bytes)
+                                                                    (frexl-result-from-offer request
+                                                                        (frex-offer "metal" "value"
+                                                                            value "metal-value")
+                                                                        code stream-bytes 1 1 1 1 1
+                                                                        wrote enqueued synced
+                                                                        read-bytes)))))))))))))))))))))
+
+    (defn frexl-execute-stream (surface)
+        (do
+            (let streamed (frexl-stream-parse surface))
+            (frexl-execute-request (frexl-stream-request streamed)
+                (frexl-cursor-bytes (frexl-stream-cursor streamed)))))
+
+    ; Generic callback for form-cli-recipe-exec-cursor. The strict parser has
+    ; already recovered a canonical request, so the exact accepted-frame byte
+    ; count is reconstructed from that request rather than trusted from a caller.
+    ; The callback runs the carrier once and returns the compact, physically
+    ; flagged observation shape.
+    (defn frexl-cursor-executor (ctx request)
+        (do
+            (let stream-bytes (str_len (frex-surface
+                (frex-request-recipe request)
+                (frex-request-input request)
+                (frex-request-carrier request))))
+            (let live (frexl-execute-request request stream-bytes))
+            (frexl-result-as-frex request live)))
+
+    ; ── bounded scalar/NodeID rendering ──────────────────────────────
+    (defn frexl-live-open () "<|form:recipe-live-observation|>")
+    (defn frexl-live-close () "<|/form:recipe-live-observation|>")
+    (defn frexl-live-render (result)
+        (do
+            (let value-text (if (eq (frexl-result-value-present? result) 1)
+                                (int_to_str (frexl-result-value result)) "absent"))
+            (let rendered (frex-cat (list
+                (frexl-live-open)
+                "\nstatus=" (frexl-result-status result)
+                "\nreason=" (frexl-result-reason result)
+                "\nrecipe-node=@" (frex-node-key
+                    (frex-result-recipe (frexl-result-pure result)))
+                "\nrequest-node=@" (frex-node-key
+                    (frex-result-request (frexl-result-pure result)))
+                "\ncode-node=@" (frex-node-key (frexl-result-code result))
+                "\nexecution-node=@" (frex-node-key
+                    (frexl-result-execution result))
+                "\nobservation-node=@" (frex-node-key
+                    (frexl-result-observation result))
+                "\ncarrier=" (frexl-result-carrier result)
+                "\nvalue-present=" (int_to_str
+                    (frexl-result-value-present? result))
+                "\nvalue=" value-text
+                "\nstream-bytes=" (int_to_str (frexl-result-stream-bytes result))
+                "\npretokenized=" (int_to_str
+                    (frexl-result-pretokenized? result))
+                "\nsource-generated=" (int_to_str
+                    (frexl-result-source-generated? result))
+                "\nnative-code-generated=" (int_to_str
+                    (frexl-result-native-code-generated? result))
+                "\npipeline-created=" (int_to_str
+                    (frexl-result-pipeline-created? result))
+                "\nexecuted=" (int_to_str (frexl-result-executed? result))
+                "\nmodel-executed=" (int_to_str
+                    (frexl-result-model-executed? result))
+                "\nbuffer-released=" (int_to_str
+                    (frexl-result-buffer-released? result))
+                "\nwrote-bytes=" (int_to_str (frexl-result-wrote-bytes result))
+                "\nenqueued=" (int_to_str (frexl-result-enqueued result))
+                "\nsynced=" (int_to_str (frexl-result-synced result))
+                "\nread-bytes=" (int_to_str (frexl-result-read-bytes result))
+                "\nlifecycle=" (frex-trace-actions
+                    (frexl-result-lifecycle result))
+                "\n" (frexl-live-close))))
+            (if (le (str_len rendered) (frex-max-render-bytes)) rendered "")))
+
+    0)

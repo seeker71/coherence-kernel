@@ -1,0 +1,117 @@
+; qwen35-linear-span-layout-contract.fk — pure geometry for the Qwen3.8
+; linear-attention span and its explicitly pitched shared bs2 buffer.
+;
+; THREE NUMBERS, THREE MEANINGS.
+;
+;   linear logical rows   geo[1]
+;   full logical rows     2 * nq * hd
+;   bs2 output pitch      max(linear logical rows, full logical rows)
+;
+; Output pitch is not inferred from allocation. q38-mv-batch-y passes this
+; number into the producer, which writes y[t*pitch+r], and every bs2 consumer
+; receives the same number. On this body the selected pitch equals per-token
+; allocation capacity so either block kind fits. That equality becomes valid
+; through the producer binding, not through the allocation arithmetic alone.
+;
+; Shared per-head parameters use h. The packed activation index t*nh+h is not a
+; bias index: every token observes the same dt_bias[h]. Invalid token/head input
+; returns nothing; valid indices 0 and 1 remain ordinary present integers.
+;
+; PIPELINE CONTINUITY. The already-merged cooperative decode GQA owns 39.
+; Future linear-span kernels append, without renumbering it:
+;   40 l2norm-span · 41 gates-span · 42 norm-gate-span
+;   43 conv-offset · 44 delta-offset · 45 conv-span · 46 delta-span
+;
+; THE MERGE THIS CONTRACT ALREADY CAUGHT. Two lines worked this file the same
+; day. One inserted the cooperative decode GQA at 39; the other had written
+; (nth ps 41), (nth ps 44) and (nth ps 45) by hand for norm-gate and the two
+; folded recurrences. Merged as written, those literals would have dispatched
+; gates-span where norm-gate was meant, delta-offset where conv-span was meant,
+; and read one past the end — with no error, because a pipeline index is only
+; wrong relative to a list nobody had written down. Names cannot shift under an
+; insertion; that is the whole reason they are here.
+;
+; This file allocates nothing, emits no MSL, and opens no carrier.
+;
+; preludes: form-stdlib/core.fk
+; Proven by: native/metal/tests/qwen35-linear-span-layout-contract-band.fk
+
+(do
+    ; Only geo[1], geo[12], and geo[14] participate. This constructor makes
+    ; synthetic geometry readable while retaining the live walker's indices.
+    (defn qlslc-geometry (linear-stride nq hd)
+        (list 5120 linear-stride 16 48 128 128 0 0 0 0 17408 17408
+              nq 4 hd))
+
+    (defn qlslc-linear-logical-rows (geo) (nth geo 1))
+    (defn qlslc-full-logical-rows (geo)
+        (mul 2 (mul (nth geo 12) (nth geo 14))))
+    (defn qlslc-bs2-allocation-capacity (geo)
+        (do
+            (let linear (qlslc-linear-logical-rows geo))
+            (let full (qlslc-full-logical-rows geo))
+            (if (gt full linear) full linear)))
+    ; This is the producer-selected pitch. The emitter/address band separately
+    ; proves that the same value is bound into the matmul and its consumers.
+    (defn qlslc-bs2-output-pitch (geo)
+        (qlslc-bs2-allocation-capacity geo))
+    (defn qlslc-bs2-allocation-elements (geo ntok)
+        (mul (qlslc-bs2-allocation-capacity geo) ntok))
+    (defn qlslc-bs2-linear-written-extent (geo ntok)
+        (if (le ntok 0) 0
+            (add (mul (sub ntok 1) (qlslc-bs2-output-pitch geo))
+                 (qlslc-linear-logical-rows geo))))
+    (defn qlslc-bs2-full-written-extent (geo ntok)
+        (if (le ntok 0) 0
+            (add (mul (sub ntok 1) (qlslc-bs2-output-pitch geo))
+                 (qlslc-full-logical-rows geo))))
+    (defn qlslc-bs2-token-offset (geo token)
+        (if (lt token 0) (nothing)
+            (mul token (qlslc-bs2-output-pitch geo))))
+    (defn qlslc-layout-valid? (geo ntok)
+        (if (le ntok 0) 0
+            (do
+                (let pitch (qlslc-bs2-output-pitch geo))
+                (let allocated (qlslc-bs2-allocation-elements geo ntok))
+                (if (and
+                        (and
+                            (ge pitch (qlslc-linear-logical-rows geo))
+                            (ge pitch (qlslc-full-logical-rows geo)))
+                        (and
+                            (le (qlslc-bs2-linear-written-extent geo ntok) allocated)
+                            (le (qlslc-bs2-full-written-extent geo ntok) allocated)))
+                    1 0))))
+
+    (defn qlslc-valid-head? (head nh)
+        (if (and (ge head 0) (lt head nh)) 1 0))
+    (defn qlslc-packed-head-index (token head nh)
+        (if (or (lt token 0) (not (eq (qlslc-valid-head? head nh) 1)))
+            (nothing)
+            (add (mul token nh) head)))
+    (defn qlslc-shared-head-bias-index (token head nh)
+        (if (or (lt token 0) (not (eq (qlslc-valid-head? head nh) 1)))
+            (nothing)
+            head))
+
+    ; Named getters make this an index contract, not a dispatch table.
+    (defn qlslc-cooperative-gqa-pipeline () 39)
+    (defn qlslc-l2norm-span-pipeline () 40)
+    (defn qlslc-gates-span-pipeline () 41)
+    (defn qlslc-norm-gate-span-pipeline () 42)
+    (defn qlslc-conv-offset-pipeline () 43)
+    (defn qlslc-delta-offset-pipeline () 44)
+    ; The two folded recurrences. Same state, same arithmetic, same order — the
+    ; token loop moved from outside the dispatch to inside the thread. Reached
+    ; only through fold=1; the offset kernels above stay the default.
+    (defn qlslc-conv-span-pipeline () 45)
+    (defn qlslc-delta-span-pipeline () 46)
+    (defn qlslc-pipeline-contract ()
+        (list (qlslc-cooperative-gqa-pipeline)
+              (qlslc-l2norm-span-pipeline)
+              (qlslc-gates-span-pipeline)
+              (qlslc-norm-gate-span-pipeline)
+              (qlslc-conv-offset-pipeline)
+              (qlslc-delta-offset-pipeline)
+              (qlslc-conv-span-pipeline)
+              (qlslc-delta-span-pipeline)))
+    0)
