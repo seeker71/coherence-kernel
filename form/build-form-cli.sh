@@ -50,6 +50,19 @@ if [[ "$(uname -s 2>/dev/null)" == "Darwin" && -f "native/metal/fk-metal-carrier
     FORM_CLI_EXTRA_LDFLAGS="-framework Metal -framework Foundation -fobjc-arc${FORM_CLI_EXTRA_LDFLAGS:+ $FORM_CLI_EXTRA_LDFLAGS}"
 fi
 
+# The same law, one organ later. `fkwu` has linked the MLX carrier whenever
+# libmlxc is on the host since 2026-08-20 (AGENTS.md carries that recipe), but
+# form-cli did not, so the binary a session actually speaks through answered
+# mlx_linked=false on a machine whose MLX was live — the body not knowing what
+# it is capable of, in the exact shape the paragraph above names. Unlike Metal,
+# MLX is not shipped with the OS, so presence is the question, not the caller.
+FK_MLX_LIB="${FK_MLX_LIB:-/opt/homebrew/lib/libmlxc.dylib}"
+FK_MLX_PREFIX="${FK_MLX_LIB%/lib/libmlxc.dylib}"
+if [[ "$(uname -s 2>/dev/null)" == "Darwin" && -f "native/mlx/fk-mlx-carrier.c" && -f "$FK_MLX_LIB" ]]; then
+    FORM_CLI_EXTRA_SRC="native/mlx/fk-mlx-carrier.c${FORM_CLI_EXTRA_SRC:+ $FORM_CLI_EXTRA_SRC}"
+    FORM_CLI_EXTRA_LDFLAGS="-I$FK_MLX_PREFIX/include -L$FK_MLX_PREFIX/lib -lmlxc -Wl,-rpath,$FK_MLX_PREFIX/lib${FORM_CLI_EXTRA_LDFLAGS:+ $FORM_CLI_EXTRA_LDFLAGS}"
+fi
+
 is_windows_host() {
     [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]
 }
@@ -236,6 +249,7 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/ask-lane-router.fk"
     "$S/dsv4-tokenizer.fk"
     "$S/qwen35-tokenizer.fk"
+    "$S/qwen35-tokfast-v2.fk"
     "$S/kernel-http.fk"
     "$S/form-asm.fk"
     "$S/metal-door.fk"
@@ -258,10 +272,47 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/q3k-equireach.fk"
     "$S/kat-coder-embed.fk"
     "native/metal/kat-token-handle.fk"
+    "native/metal/qwen35-linear-span-layout-contract.fk"
     "native/metal/qwen35-dense-token-handle.fk"
+    "native/metal/qwen35-crystal.fk"
     "native/metal/model-bandwidth.fk"
+    "$S/form-teach-layer.fk"
+    "$S/qwen35-form-layer.fk"
+    "$S/active-learning-tier-cycle.fk"
+    "$S/local-model-choice.fk"
+    "$S/substrate-phase.fk"
+    "$S/source-resonance-stream.fk"
+    "$S/local-generate-organ.fk"
+    "$S/language-model.fk"
+    "$S/form-cli-heedmark-xtal.fk"
     "$S/form-cli-qwen-teach-layer.fk"
+    "$S/form-cli-heed-cursor.fk"
+    "$S/form-ontology-bp.fk"
+    "$S/form-cli-heed-telemetry.fk"
+    "$S/form-knowledge-query-token.fk"
+    "$S/file-byte-window.fk"
+    "$S/form-knowledge-source-search.fk"
+    "$S/form-cli-heed-current-source.fk"
+    "$S/form-cli-heed-grounded.fk"
     "$S/form-cli-model-generate.fk"
+    "$S/form-cli-model-session.fk"
+    "$S/bmf-byte-cursor.fk"
+    "$S/public-source-concept-index.fk"
+    "$S/public-source-concept-shards.fk"
+    "$S/form-nodeid-knowledge-query.fk"
+    "$S/form-cli-nodeid-knowledge-session.fk"
+    "$S/public-source-concept-key-routes.fk"
+    "$S/form-nodeid-knowledge-routed-query.fk"
+    "$S/form-cli-nodeid-knowledge-door.fk"
+    "$S/form-recipe-birth-token.fk"
+    "$S/form-recipe-exec-token.fk"
+    "$S/form-cli-recipe-exec-cursor.fk"
+    "$S/form-recipe-exec-token-live.fk"
+    "$S/form-cli-recipe-exec-session.fk"
+    "$S/form-cli-resident-recipe-birth-exec-categories.fk"
+    "$S/form-cli-resident-recipe-birth-exec.fk"
+    "$S/form-nodeid-mastery-cell-categories.fk"
+    "$S/form-nodeid-mastery-cell-loop.fk"
     "$S/form-cli-repl.fk"
 )
 if [[ "$bootstrap_carrier_fresh" == 1 ]]; then

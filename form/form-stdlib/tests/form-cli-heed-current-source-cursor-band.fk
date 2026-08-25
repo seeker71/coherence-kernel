@@ -1,0 +1,110 @@
+; form-cli-heed-current-source-cursor-band.fk — end-to-end local knowledge
+; crossing: model ids decode to a split query envelope, the bounded cursor
+; recognizes it, one current-source lookup runs, and the typed observation is
+; incrementally prefetched before generation resumes.
+;
+; Model ids and injected observation ids remain separate.  The model did not
+; execute the lookup; the Form cursor and current-source substrate did.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY (host filesystem + source_inventory)
+; Expected: 65535
+; preludes: form-stdlib/core.fk form-stdlib/form-cli-heed-cursor.fk
+; preludes: form-stdlib/form-knowledge-query-token.fk
+; preludes: form-stdlib/form-knowledge-source-search.fk
+; preludes: form-stdlib/form-cli-heed-current-source.fk
+
+(do
+    (defn fhccsb-bit (ok bit) (if ok bit 0))
+    (defn fhccsb-root ()
+        (fs-path-join (fs-temp-dir) "form-cli-heed-current-source-cursor-band"))
+    (defn fhccsb-setup ()
+        (do
+            (let root (fhccsb-root))
+            (let _old (fs-remove-tree root))
+            (let _mk (fs-mkdir root))
+            (let _docs (fs-mkdir (fs-path-join root "docs")))
+            (let _a (fs-write-text (fs-path-join root "docs/control.md")
+                "Choice skips a nothing acknowledgement. Cut commits to the first acknowledgement and prunes every remaining lane."))
+            0))
+    (defn fhccsb-cleanup () (fs-remove-tree (fhccsb-root)))
+
+    ; The open mark is split across three ids, the query across three, and the
+    ; close mark arrives separately.  99 is the model stop id.  90 is returned
+    ; after observation prefill and resumes directly at stop.
+    (defn fhccsb-piece (id)
+        (if (eq id 0) "<|form"
+        (if (eq id 1) ":knowledge"
+        (if (eq id 2) "-query|>"
+        (if (eq id 3) "choice"
+        (if (eq id 4) " cut"
+        (if (eq id 5) " acknowledgement"
+        (if (eq id 6) "<|/form:knowledge-query|>"
+        (if (eq id 7) " after"
+        (if (eq id 90) "" ""))))))))))
+    (defn fhccsb-next (id)
+        (if (lt id 0) 0
+        (if (lt id 7) (add id 1)
+        (if (eq id 7) 99
+        (if (eq id 90) 99 99)))))
+    (defn fhccsb-step (ctx id pos) (fhccsb-next id))
+    (defn fhccsb-decode-loop (ids out)
+        (if (nil? ids) out
+            (fhccsb-decode-loop (tail ids)
+                (str_concat out (fhccsb-piece (head ids))))))
+    (defn fhccsb-decode (ctx ids) (fhccsb-decode-loop ids ""))
+
+    ; One sentinel id represents the complete typed observation for this
+    ; scripted model.  It advances the shared position but never enters output.
+    (defn fhccsb-encode (ctx text)
+        (if (eq (str_len text) 0) (empty) (list 901)))
+    (defn fhccsb-prefill (ctx ids pos) (list 90 (add pos (len ids))))
+    (defn fhccsb-lookup (ctx surface local-ready)
+        (fhcs-lookup-at (head ctx) ctx surface local-ready))
+    (defn fhccsb-has-id (ids wanted)
+        (if (nil? ids) 0
+            (if (eq (head ids) wanted) 1
+                (fhccsb-has-id (tail ids) wanted))))
+    (defn fhccsb-count-status (statuses wanted)
+        (if (nil? statuses) 0
+            (add (if (str_eq (head statuses) wanted) 1 0)
+                 (fhccsb-count-status (tail statuses) wanted))))
+
+    (defn form-cli-heed-current-source-cursor-band ()
+        (do
+            (let _setup (fhccsb-setup))
+            (let ctx (list (fhccsb-root)))
+            (let run (fhc-run ctx fhccsb-step fhccsb-prefill fhccsb-decode
+                fhccsb-encode fhccsb-lookup 1
+                -1 0 20 (list 99) (fhc-fresh 1) (empty)))
+            (let cur (fhc-cursor-of run))
+            (let out (fhc-out run))
+            (let direct (fhcs-lookup-at (fhccsb-root) ctx
+                "<|form:knowledge-query|>choice cut acknowledgement<|/form:knowledge-query|>" 1))
+            (let span (nth direct 1))
+            (let score (sum (list
+                (fhccsb-bit (eq (fhc-lookups cur) 1) 1)
+                (fhccsb-bit (eq (fhccsb-count-status (fhc-honored cur) "hit") 1) 2)
+                (fhccsb-bit (eq (fhc-injected cur) 1) 4)
+                (fhccsb-bit (eq (fhccsb-has-id out 901) 0) 8)
+                (fhccsb-bit (and (eq (fhccsb-has-id out 0) 1)
+                                 (eq (fhccsb-has-id out 6) 1)) 16)
+                (fhccsb-bit (str_eq (fhc-window cur) "") 32)
+                (fhccsb-bit (eq (fhc-budget cur) 0) 64)
+                (fhccsb-bit (eq (fhc-model-executed) 0) 128)
+                (fhccsb-bit (str_eq (nth direct 0) "hit") 256)
+                (fhccsb-bit (ge (str_find span
+                    "source-path=docs/control.md" 0) 0) 512)
+                (fhccsb-bit (ge (str_find span
+                    "provenance-schema=source-artifact-stream-v1" 0) 0) 1024)
+                (fhccsb-bit (ge (str_find span "model-executed=0" 0) 0) 2048)
+                (fhccsb-bit (ge (str_find span "lookup-count=1" 0) 0) 4096)
+                (fhccsb-bit (ge (str_find span "source-artifact=sha256:" 0) 0) 8192)
+                (fhccsb-bit (and (eq (fhcs-lookup-limit) 1)
+                                 (eq (fhcs-model-executed) 0)) 16384)
+                (fhccsb-bit (and (eq (fhcs-grammar-agrees-at
+                                        (HeedOpen) (HeedClose)) 1)
+                                  (eq (fhcs-grammar-agrees-at
+                                        (HeedOpen) "drifted-close") 0)) 32768))))
+            (let _cleanup (fhccsb-cleanup))
+            score))
+    (form-cli-heed-current-source-cursor-band))

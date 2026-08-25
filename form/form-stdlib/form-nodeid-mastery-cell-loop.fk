@@ -1,0 +1,679 @@
+; form-nodeid-mastery-cell-loop.fk -- a public-source NodeID becomes a
+; teachable, observable cell movement rather than a coverage integer.
+;
+; A mastery cell retains concept/source/entry identity, the attempt and request
+; that met it, execution and answer observation, surprise/failure signals,
+; lifecycle, bounded timeout, optional persistence, and the identities offered
+; for a later cell/channel/mesh continuation.  Channel and mesh identities are
+; carried with transported=0: this mechanism does not claim a crossing.
+;
+; A resident decoder may emit, as decoded bytes:
+;   <|form:mastery-thought|>concept=KEY;attempt=LABEL<|/form:mastery-thought|>
+; The immutable BMF cursor consumes those bytes with finite fuel.  No token
+; list, vocabulary pass, flattening, operations table, C seed, model call, or
+; native execution occurs here.
+;
+; `fmcl-retrieve-with` and `fmcl-execute-with` accept generic callbacks.  A
+; callback returns typed evidence; it never gains authority merely by being
+; called. `model-executed` is 0 unless execution evidence contains both the
+; literal flag 1 and a supplied local-Qwen observation NodeID.  The mechanism
+; cannot prove the physical provenance of that supplied observation; the live
+; boundary must do so and receipt it.
+;
+; Present verdict 0, present verdict 1, and `nothing` are separate: presence is
+; stored independently and `fmcl-observed-verdict` returns real `nothing` when
+; no verdict arrived.
+;
+; This is an offered mechanism for learning, not a law or enforcement gate.
+;
+; categories 31.2.0.108..119:
+; concept, attempt, request, execution, observation, signal, lifecycle, state,
+; continuation, channel, mesh, persistence.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/bmf-core.fk
+; preludes: form-stdlib/form-nodeid-mastery-cell-categories.fk
+; Pure proof: form-stdlib/tests/form-nodeid-mastery-cell-loop-band.fk
+
+(do
+    (defn fmcl-absent () (intern_trivial_string "fmcl:nothing"))
+    (defn fmcl-node-or-absent (node)
+        (if (nothing? node) (fmcl-absent) node))
+    (defn fmcl-node-absent? (node) (node_eq node (fmcl-absent)))
+    (defn fmcl-node-or-nothing (node)
+        (if (eq (fmcl-node-absent? node) 1) (nothing) node))
+
+    ; -- carried continuation, channel, mesh, persistence -------------
+    (defn fmcl-channel (protocol identity)
+        (intern_node (fmcl-channel-category)
+            (list (intern_trivial_string protocol)
+                  (intern_trivial_string identity)
+                  (intern_trivial_int 0))))
+    (defn fmcl-channel-transported? (channel)
+        (node_value (nth (node_children channel) 2)))
+    (defn fmcl-mesh (identity lenses)
+        (intern_node (fmcl-mesh-category)
+            (list (intern_trivial_string identity)
+                  (intern_trivial_string lenses)
+                  (intern_trivial_int 0)
+                  (intern_trivial_int 0))))
+    (defn fmcl-mesh-transported? (mesh)
+        (node_value (nth (node_children mesh) 2)))
+    (defn fmcl-mesh-broadcast? (mesh)
+        (node_value (nth (node_children mesh) 3)))
+
+    (defn fmcl-persistence-off ()
+        (intern_node (fmcl-persistence-category)
+            (list (intern_trivial_string "off")
+                  (intern_trivial_string "")
+                  (intern_trivial_int 0)
+                  (intern_trivial_int 0)
+                  (fmcl-absent))))
+    (defn fmcl-persistence-offer (target)
+        (intern_node (fmcl-persistence-category)
+            (list (intern_trivial_string "offered")
+                  (intern_trivial_string target)
+                  (intern_trivial_int 1)
+                  (intern_trivial_int 0)
+                  (fmcl-absent))))
+    (defn fmcl-persistence-requested? (p)
+        (node_value (nth (node_children p) 2)))
+    (defn fmcl-persistence-observed? (p)
+        (node_value (nth (node_children p) 3)))
+    ; This records a supplied observation; it performs no write.
+    (defn fmcl-persistence-from-observation (p observation)
+        (if (nothing? observation) p
+            (intern_node (fmcl-persistence-category)
+                (list (intern_trivial_string "observed")
+                      (nth (node_children p) 1)
+                      (intern_trivial_int
+                          (fmcl-persistence-requested? p))
+                      (intern_trivial_int 1)
+                      observation))))
+
+    (defn fmcl-continuation-none (channel mesh)
+        (intern_node (fmcl-continuation-category)
+            (list (fmcl-absent) (fmcl-absent)
+                  channel mesh (intern_trivial_int 0)
+                  (intern_trivial_int 0))))
+    (defn fmcl-continuation (previous previous-continuation channel mesh generation)
+        (intern_node (fmcl-continuation-category)
+            (list previous previous-continuation channel mesh
+                  (intern_trivial_int generation)
+                  (intern_trivial_int 0))))
+    (defn fmcl-continuation-generation (c)
+        (node_value (nth (node_children c) 4)))
+    (defn fmcl-continuation-transported? (c)
+        (node_value (nth (node_children c) 5)))
+
+    ; -- concept and attempt identity --------------------------------
+    (defn fmcl-concept (key source entry)
+        (intern_node (fmcl-concept-category)
+            (list (intern_trivial_string key)
+                  (fmcl-node-or-absent source)
+                  (fmcl-node-or-absent entry))))
+    (defn fmcl-concept-key (concept)
+        (node_value (nth (node_children concept) 0)))
+    (defn fmcl-concept-source (concept)
+        (fmcl-node-or-nothing (nth (node_children concept) 1)))
+    (defn fmcl-concept-entry (concept)
+        (fmcl-node-or-nothing (nth (node_children concept) 2)))
+
+    (defn fmcl-attempt (concept label ordinal parent)
+        (intern_node (fmcl-attempt-category)
+            (list concept (intern_trivial_string label)
+                  (intern_trivial_int ordinal)
+                  (fmcl-node-or-absent parent))))
+    (defn fmcl-attempt-concept (attempt) (nth (node_children attempt) 0))
+    (defn fmcl-attempt-label (attempt)
+        (node_value (nth (node_children attempt) 1)))
+    (defn fmcl-attempt-ordinal (attempt)
+        (node_value (nth (node_children attempt) 2)))
+
+    ; -- scannerless mastery-thought request --------------------------
+    (defn fmcl-open () "<|form:mastery-thought|>")
+    (defn fmcl-close () "<|/form:mastery-thought|>")
+    (defn fmcl-max-concept-bytes () 96)
+    (defn fmcl-max-attempt-bytes () 96)
+    (defn fmcl-max-frame-bytes ()
+        (add 17
+            (add (str_len (fmcl-open))
+                (add (fmcl-max-concept-bytes)
+                    (add (fmcl-max-attempt-bytes)
+                         (str_len (fmcl-close)))))))
+    (defn fmcl-default-timeout-budget () (fmcl-max-frame-bytes))
+    (defn fmcl-request-surface (concept-key attempt-label)
+        (str_concat (fmcl-open)
+            (str_concat "concept="
+                (str_concat concept-key
+                    (str_concat ";attempt="
+                        (str_concat attempt-label (fmcl-close)))))))
+
+    ; scan = status reason consumed position concept-key attempt-label
+    (defn fmcl-scan (status reason consumed position concept-key attempt-label)
+        (list status reason consumed position concept-key attempt-label))
+    (defn fmcl-scan-status (scan) (nth scan 0))
+    (defn fmcl-scan-reason (scan) (nth scan 1))
+    (defn fmcl-scan-consumed (scan) (nth scan 2))
+    (defn fmcl-scan-position (scan) (nth scan 3))
+    (defn fmcl-scan-concept (scan) (nth scan 4))
+    (defn fmcl-scan-attempt (scan) (nth scan 5))
+    (defn fmcl-fold (cursor budget consumed)
+        (if (eq (cur-eof? cursor) 1)
+            (list "complete" consumed (cur-pos cursor))
+            (if (le budget 0)
+                (list "timeout" consumed (cur-pos cursor))
+                (fmcl-fold (cur-advance cursor 1) (sub budget 1)
+                    (str_concat consumed (byte_to_str (cur-peek cursor)))))))
+    (defn fmcl-parse-consumed (surface)
+        (if (not (eq (str_find surface (fmcl-open) 0) 0))
+            (fmcl-scan "nothing" "no-mastery-thought" surface
+                (str_len surface) "" "")
+            (do
+                (let close-at (str_find surface (fmcl-close)
+                    (str_len (fmcl-open))))
+                (if (lt close-at 0)
+                    (fmcl-scan "nothing" "held-incomplete" surface
+                        (str_len surface) "" "")
+                (if (not (eq (add close-at (str_len (fmcl-close)))
+                             (str_len surface)))
+                    (fmcl-scan "failure" "trailing-bytes" surface
+                        (str_len surface) "" "")
+                    (do
+                        (let payload (substring surface
+                            (str_len (fmcl-open)) close-at))
+                        (let split (str_find payload ";attempt=" 0))
+                        (if (or (lt split 0)
+                                (not (eq (str_find payload "concept=" 0) 0)))
+                            (fmcl-scan "failure" "field-shape" surface
+                                (str_len surface) "" "")
+                            (do
+                                (let key (substring payload 8 split))
+                                (let label (substring payload (add split 9)
+                                    (str_len payload)))
+                                (if (or (eq (str_len key) 0)
+                                        (gt (str_len key)
+                                            (fmcl-max-concept-bytes)))
+                                    (fmcl-scan "failure" "concept-budget"
+                                        surface (str_len surface) "" "")
+                                (if (or (eq (str_len label) 0)
+                                        (gt (str_len label)
+                                            (fmcl-max-attempt-bytes)))
+                                    (fmcl-scan "failure" "attempt-budget"
+                                        surface (str_len surface) "" "")
+                                    (fmcl-scan "ready" "ready" surface
+                                        (str_len surface) key label)))))))))))
+    (defn fmcl-bmf-consume (surface budget)
+        (do
+            (let folded (fmcl-fold (cursor-str surface) budget ""))
+            (if (str_eq (nth folded 0) "timeout")
+                (fmcl-scan "timeout" "cursor-step-budget"
+                    (nth folded 1) (nth folded 2) "" "")
+                (fmcl-parse-consumed (nth folded 1)))))
+
+    (defn fmcl-request (attempt surface scan lookup-door execution-door budget)
+        (intern_node (fmcl-request-category)
+            (list attempt
+                  (intern_trivial_string surface)
+                  (intern_trivial_string (fmcl-scan-status scan))
+                  (intern_trivial_string (fmcl-scan-reason scan))
+                  (intern_trivial_int (fmcl-scan-position scan))
+                  (intern_trivial_int budget)
+                  (intern_trivial_string lookup-door)
+                  (intern_trivial_string execution-door)
+                  (intern_trivial_int 0)
+                  (intern_trivial_int 1))))
+    (defn fmcl-request-attempt (request) (nth (node_children request) 0))
+    (defn fmcl-request-status (request)
+        (node_value (nth (node_children request) 2)))
+    (defn fmcl-request-scannerless? (request)
+        (node_value (nth (node_children request) 9)))
+    (defn fmcl-request-pretokenized? (request)
+        (node_value (nth (node_children request) 8)))
+    (defn fmcl-request-from-surface
+        (attempt surface lookup-door execution-door budget)
+        (do
+            (let scan (fmcl-bmf-consume surface budget))
+            (if (and (str_eq (fmcl-scan-status scan) "ready")
+                     (and (str_eq (fmcl-scan-concept scan)
+                            (fmcl-concept-key (fmcl-attempt-concept attempt)))
+                          (str_eq (fmcl-scan-attempt scan)
+                            (fmcl-attempt-label attempt))))
+                (fmcl-request attempt surface scan lookup-door execution-door
+                    budget)
+                (fmcl-request attempt surface
+                    (if (str_eq (fmcl-scan-status scan) "ready")
+                        (fmcl-scan "failure" "identity-mismatch"
+                            (fmcl-scan-consumed scan)
+                            (fmcl-scan-position scan) "" "")
+                        scan)
+                    lookup-door execution-door budget))))
+
+    ; -- callback evidence -------------------------------------------
+    ; retrieval = status reason source entry observation lookup-count
+    (defn fmcl-retrieval-evidence
+        (status reason source entry observation lookup-count)
+        (list status reason source entry observation lookup-count))
+    (defn fmcl-retrieval-status (r) (nth r 0))
+    (defn fmcl-retrieval-reason (r) (nth r 1))
+    (defn fmcl-retrieval-source (r) (nth r 2))
+    (defn fmcl-retrieval-entry (r) (nth r 3))
+    (defn fmcl-retrieval-observation (r) (nth r 4))
+    (defn fmcl-retrieval-lookup-count (r) (nth r 5))
+    (defn fmcl-retrieval-status? (status)
+        (if (or (str_eq status "hit") (str_eq status "miss")) 1
+        (if (or (str_eq status "nothing") (str_eq status "stale")) 1
+        (if (or (str_eq status "ambiguous") (str_eq status "timeout")) 1
+            (if (str_eq status "failure") 1 0)))))
+    (defn fmcl-retrieval-valid? (r)
+        (if (not (eq (len r) 6)) 0
+        (if (not (eq (fmcl-retrieval-status?
+                          (fmcl-retrieval-status r)) 1)) 0
+        (if (or (lt (fmcl-retrieval-lookup-count r) 0)
+                (gt (fmcl-retrieval-lookup-count r) 1)) 0
+            (if (str_eq (fmcl-retrieval-status r) "hit")
+                (if (or (nothing? (fmcl-retrieval-source r))
+                        (nothing? (fmcl-retrieval-entry r))) 0 1)
+                1)))))
+
+    ; execution = status reason answer verdict-present verdict-value surprise
+    ;             failure model-executed model-observation execution-count
+    ;             timeout-spent
+    (defn fmcl-execution-evidence
+        (status reason answer verdict-present verdict-value surprise failure
+         model-executed model-observation execution-count timeout-spent)
+        (list status reason answer verdict-present verdict-value surprise failure
+              model-executed model-observation execution-count timeout-spent))
+    (defn fmcl-ee-status (e) (nth e 0))
+    (defn fmcl-ee-reason (e) (nth e 1))
+    (defn fmcl-ee-answer (e) (nth e 2))
+    (defn fmcl-ee-verdict-present? (e) (nth e 3))
+    (defn fmcl-ee-verdict-value (e) (nth e 4))
+    (defn fmcl-ee-surprise? (e) (nth e 5))
+    (defn fmcl-ee-failure? (e) (nth e 6))
+    (defn fmcl-ee-model-executed? (e) (nth e 7))
+    (defn fmcl-ee-model-observation (e) (nth e 8))
+    (defn fmcl-ee-execution-count (e) (nth e 9))
+    (defn fmcl-ee-timeout-spent (e) (nth e 10))
+    (defn fmcl-bit? (x) (if (or (eq x 0) (eq x 1)) 1 0))
+    (defn fmcl-execution-status? (status)
+        (if (or (str_eq status "value") (str_eq status "nothing")) 1
+            (if (or (str_eq status "timeout")
+                    (str_eq status "failure")) 1 0)))
+    (defn fmcl-execution-valid? (e budget)
+        (if (not (eq (len e) 11)) 0
+        (if (not (eq (fmcl-execution-status? (fmcl-ee-status e)) 1)) 0
+        (if (not (eq (fmcl-bit? (fmcl-ee-verdict-present? e)) 1)) 0
+        (if (not (eq (fmcl-bit? (fmcl-ee-verdict-value e)) 1)) 0
+        (if (not (eq (fmcl-bit? (fmcl-ee-surprise? e)) 1)) 0
+        (if (not (eq (fmcl-bit? (fmcl-ee-failure? e)) 1)) 0
+        (if (not (eq (fmcl-bit? (fmcl-ee-model-executed? e)) 1)) 0
+        (if (or (lt (fmcl-ee-execution-count e) 0)
+                (gt (fmcl-ee-execution-count e) 1)) 0
+        (if (or (lt (fmcl-ee-timeout-spent e) 0)
+                (gt (fmcl-ee-timeout-spent e) budget)) 0
+        (if (and (eq (fmcl-ee-model-executed? e) 1)
+                 (nothing? (fmcl-ee-model-observation e))) 0
+        (if (and (eq (fmcl-ee-model-executed? e) 0)
+                 (not (nothing? (fmcl-ee-model-observation e)))) 0
+            1))))))))))))
+
+    ; -- observations, signals, lifecycle ----------------------------
+    (defn fmcl-retrieval-observation-node (request retrieval)
+        (intern_node (fmcl-observation-category)
+            (list (intern_trivial_string "retrieval") request
+                  (intern_trivial_string (fmcl-retrieval-status retrieval))
+                  (intern_trivial_string (fmcl-retrieval-reason retrieval))
+                  (fmcl-node-or-absent
+                      (fmcl-retrieval-observation retrieval))
+                  (intern_trivial_int
+                      (fmcl-retrieval-lookup-count retrieval)))))
+    (defn fmcl-execution-node (request evidence)
+        (intern_node (fmcl-execution-category)
+            (list request
+                  (intern_trivial_string (fmcl-ee-status evidence))
+                  (intern_trivial_string (fmcl-ee-reason evidence))
+                  (fmcl-node-or-absent (fmcl-ee-answer evidence))
+                  (intern_trivial_int (fmcl-ee-verdict-present? evidence))
+                  (intern_trivial_int (fmcl-ee-verdict-value evidence))
+                  (intern_trivial_int (fmcl-ee-model-executed? evidence))
+                  (fmcl-node-or-absent
+                      (fmcl-ee-model-observation evidence))
+                  (intern_trivial_int (fmcl-ee-execution-count evidence))
+                  (intern_trivial_int (fmcl-ee-timeout-spent evidence)))))
+    (defn fmcl-execution-answer (execution)
+        (fmcl-node-or-nothing (nth (node_children execution) 3)))
+    (defn fmcl-execution-verdict-present? (execution)
+        (node_value (nth (node_children execution) 4)))
+    (defn fmcl-execution-verdict-value (execution)
+        (node_value (nth (node_children execution) 5)))
+    (defn fmcl-execution-model-executed? (execution)
+        (node_value (nth (node_children execution) 6)))
+    (defn fmcl-observed-verdict (execution)
+        (if (eq (fmcl-execution-verdict-present? execution) 1)
+            (fmcl-execution-verdict-value execution) (nothing)))
+    (defn fmcl-execution-observation-node (execution evidence)
+        (intern_node (fmcl-observation-category)
+            (list (intern_trivial_string "execution") execution
+                  (fmcl-node-or-absent (fmcl-ee-answer evidence))
+                  (intern_trivial_int (fmcl-ee-verdict-present? evidence))
+                  (intern_trivial_int (fmcl-ee-verdict-value evidence))
+                  (intern_trivial_int (fmcl-ee-surprise? evidence))
+                  (intern_trivial_int (fmcl-ee-failure? evidence))
+                  (intern_trivial_int (fmcl-ee-model-executed? evidence))
+                  (fmcl-node-or-absent
+                      (fmcl-ee-model-observation evidence)))))
+    (defn fmcl-signal (observation evidence)
+        (intern_node (fmcl-signal-category)
+            (list observation
+                  (intern_trivial_string
+                      (if (eq (fmcl-ee-failure? evidence) 1) "failure"
+                      (if (eq (fmcl-ee-surprise? evidence) 1) "surprise"
+                      (if (str_eq (fmcl-ee-status evidence) "nothing")
+                          "nothing" "observed"))))
+                  (intern_trivial_string (fmcl-ee-reason evidence))
+                  (intern_trivial_int (fmcl-ee-surprise? evidence))
+                  (intern_trivial_int (fmcl-ee-failure? evidence)))))
+    (defn fmcl-signal-kind (signal)
+        (node_value (nth (node_children signal) 1)))
+
+    (defn fmcl-event (stage action signal ordinal)
+        (intern_node (fmcl-lifecycle-category)
+            (list (intern_trivial_string "event")
+                  (intern_trivial_string stage)
+                  (intern_trivial_string action)
+                  (intern_trivial_string signal)
+                  (intern_trivial_int ordinal))))
+    (defn fmcl-event-action (event)
+        (node_value (nth (node_children event) 2)))
+    (defn fmcl-trace (events)
+        (intern_node (fmcl-lifecycle-category)
+            (cons (intern_trivial_string "trace") events)))
+    (defn fmcl-trace-events (trace) (tail (node_children trace)))
+    (defn fmcl-trace-add (trace event)
+        (fmcl-trace (append (fmcl-trace-events trace) (list event))))
+    (defn fmcl-trace-has? (trace action)
+        (fmcl-events-have? (fmcl-trace-events trace) action))
+    (defn fmcl-events-have? (events action)
+        (if (nil? events) 0
+            (if (str_eq (fmcl-event-action (head events)) action) 1
+                (fmcl-events-have? (tail events) action))))
+    (defn fmcl-trace-actions-from (events)
+        (if (nil? events) ""
+            (if (nil? (tail events)) (fmcl-event-action (head events))
+                (str_concat (fmcl-event-action (head events))
+                    (str_concat "," (fmcl-trace-actions-from
+                        (tail events)))))))
+    (defn fmcl-trace-actions (trace)
+        (fmcl-trace-actions-from (fmcl-trace-events trace)))
+
+    ; -- mastery state ------------------------------------------------
+    ; stage status concept attempt request execution observation signal trace
+    ; budget persistence continuation channel mesh previous lookup-count
+    ; execution-count model-executed
+    (defn fmcl-state
+        (stage status concept attempt request execution observation signal trace
+         budget persistence continuation channel mesh previous lookup-count
+         execution-count model-executed)
+        (intern_node (fmcl-state-category)
+            (list (intern_trivial_string stage)
+                  (intern_trivial_string status)
+                  concept
+                  (fmcl-node-or-absent attempt)
+                  (fmcl-node-or-absent request)
+                  (fmcl-node-or-absent execution)
+                  (fmcl-node-or-absent observation)
+                  (fmcl-node-or-absent signal)
+                  trace
+                  (intern_trivial_int budget)
+                  persistence continuation channel mesh
+                  (fmcl-node-or-absent previous)
+                  (intern_trivial_int lookup-count)
+                  (intern_trivial_int execution-count)
+                  (intern_trivial_int model-executed))))
+    (defn fmcl-stage (s) (node_value (nth (node_children s) 0)))
+    (defn fmcl-status (s) (node_value (nth (node_children s) 1)))
+    (defn fmcl-state-concept (s) (nth (node_children s) 2))
+    (defn fmcl-state-attempt (s)
+        (fmcl-node-or-nothing (nth (node_children s) 3)))
+    (defn fmcl-state-request (s)
+        (fmcl-node-or-nothing (nth (node_children s) 4)))
+    (defn fmcl-state-execution (s)
+        (fmcl-node-or-nothing (nth (node_children s) 5)))
+    (defn fmcl-state-observation (s)
+        (fmcl-node-or-nothing (nth (node_children s) 6)))
+    (defn fmcl-state-signal (s)
+        (fmcl-node-or-nothing (nth (node_children s) 7)))
+    (defn fmcl-state-trace (s) (nth (node_children s) 8))
+    (defn fmcl-state-budget (s) (node_value (nth (node_children s) 9)))
+    (defn fmcl-state-persistence (s) (nth (node_children s) 10))
+    (defn fmcl-state-continuation (s) (nth (node_children s) 11))
+    (defn fmcl-state-channel (s) (nth (node_children s) 12))
+    (defn fmcl-state-mesh (s) (nth (node_children s) 13))
+    (defn fmcl-state-previous (s)
+        (fmcl-node-or-nothing (nth (node_children s) 14)))
+    (defn fmcl-state-lookup-count (s)
+        (node_value (nth (node_children s) 15)))
+    (defn fmcl-state-execution-count (s)
+        (node_value (nth (node_children s) 16)))
+    (defn fmcl-state-model-executed? (s)
+        (node_value (nth (node_children s) 17)))
+
+    (defn fmcl-discover
+        (concept-key budget persistence continuation channel mesh)
+        (do
+            (let concept (fmcl-concept concept-key (nothing) (nothing)))
+            (let trace (fmcl-trace
+                (list (fmcl-event "discover" "discover" concept-key 0))))
+            (fmcl-state "discover" "ready" concept (nothing) (nothing)
+                (nothing) (nothing) (nothing) trace budget persistence
+                continuation channel mesh (nothing) 0 0 0)))
+    (defn fmcl-choose (s label)
+        (do
+            (let attempt (fmcl-attempt (fmcl-state-concept s) label 1
+                (nothing)))
+            (let trace (fmcl-trace-add (fmcl-state-trace s)
+                (fmcl-event "choose" "choice" label 1)))
+            (fmcl-state "choose" "ready" (fmcl-state-concept s) attempt
+                (nothing) (nothing) (nothing) (nothing) trace
+                (fmcl-state-budget s) (fmcl-state-persistence s)
+                (fmcl-state-continuation s) (fmcl-state-channel s)
+                (fmcl-state-mesh s) s 0 0 0)))
+    (defn fmcl-address (s surface lookup-door execution-door)
+        (do
+            (let request (fmcl-request-from-surface (fmcl-state-attempt s)
+                surface lookup-door execution-door (fmcl-state-budget s)))
+            (let action (if (str_eq (fmcl-request-status request) "ready")
+                "request" (fmcl-request-status request)))
+            (let trace (fmcl-trace-add (fmcl-state-trace s)
+                (fmcl-event "choose" action (fmcl-request-status request)
+                    (fmcl-attempt-ordinal (fmcl-state-attempt s)))))
+            (fmcl-state "choose" (fmcl-request-status request)
+                (fmcl-state-concept s) (fmcl-state-attempt s) request
+                (nothing) (nothing) (nothing) trace (fmcl-state-budget s)
+                (fmcl-state-persistence s) (fmcl-state-continuation s)
+                (fmcl-state-channel s) (fmcl-state-mesh s) s 0 0 0)))
+
+    ; lookup is called once only for a ready, scannerless request.
+    (defn fmcl-retrieve-with (ctx lookup s)
+        (if (or (nothing? (fmcl-state-request s))
+                (not (str_eq (fmcl-status s) "ready"))) s
+            (do
+                (let retrieval (lookup ctx (fmcl-state-request s)))
+                (if (not (eq (fmcl-retrieval-valid? retrieval) 1))
+                    (do
+                        (let bad (fmcl-retrieval-evidence "failure"
+                            "invalid-lookup-evidence" (nothing) (nothing)
+                            (nothing) 0))
+                        (fmcl-after-retrieval s bad))
+                    (fmcl-after-retrieval s retrieval)))))
+    (defn fmcl-after-retrieval (s retrieval)
+        (do
+            (let hit (str_eq (fmcl-retrieval-status retrieval) "hit"))
+            (let concept (if hit
+                (fmcl-concept
+                    (fmcl-concept-key (fmcl-state-concept s))
+                    (fmcl-retrieval-source retrieval)
+                    (fmcl-retrieval-entry retrieval))
+                (fmcl-state-concept s)))
+            (let observation (fmcl-retrieval-observation-node
+                (fmcl-state-request s) retrieval))
+            (let trace1 (fmcl-trace-add (fmcl-state-trace s)
+                (fmcl-event "retrieve" "retrieve"
+                    (fmcl-retrieval-status retrieval)
+                    (fmcl-attempt-ordinal (fmcl-state-attempt s)))))
+            (let trace2 (if hit
+                (fmcl-trace-add trace1 (fmcl-event "retrieve" "cut"
+                    "one-public-source" 1))
+                (fmcl-trace-add trace1 (fmcl-event "retrieve" "refine"
+                    (fmcl-retrieval-reason retrieval) 1))))
+            (fmcl-state (if hit "retrieve" "refine")
+                (fmcl-retrieval-status retrieval) concept
+                (fmcl-state-attempt s) (fmcl-state-request s) (nothing)
+                observation (nothing) trace2 (fmcl-state-budget s)
+                (fmcl-state-persistence s) (fmcl-state-continuation s)
+                (fmcl-state-channel s) (fmcl-state-mesh s) s
+                (fmcl-retrieval-lookup-count retrieval) 0 0)))
+    (defn fmcl-begin-attempt (s)
+        (if (not (str_eq (fmcl-stage s) "retrieve")) s
+            (do
+                (let trace (fmcl-trace-add (fmcl-state-trace s)
+                    (fmcl-event "attempt" "attempt"
+                        (fmcl-attempt-label (fmcl-state-attempt s))
+                        (fmcl-attempt-ordinal (fmcl-state-attempt s)))))
+                (fmcl-state "attempt" "ready" (fmcl-state-concept s)
+                    (fmcl-state-attempt s) (fmcl-state-request s) (nothing)
+                    (fmcl-state-observation s) (nothing) trace
+                    (fmcl-state-budget s) (fmcl-state-persistence s)
+                    (fmcl-state-continuation s) (fmcl-state-channel s)
+                    (fmcl-state-mesh s) s (fmcl-state-lookup-count s) 0 0))))
+
+    ; execute is called once only after a retrieved source became an attempt.
+    (defn fmcl-execute-with (ctx execute s)
+        (if (not (str_eq (fmcl-stage s) "attempt")) s
+            (do
+                (let evidence (execute ctx s))
+                (if (not (eq (fmcl-execution-valid? evidence
+                                  (fmcl-state-budget s)) 1))
+                    (fmcl-after-execution s
+                        (fmcl-execution-evidence "failure"
+                            "invalid-execution-evidence" (nothing) 0 0 0 1
+                            0 (nothing) 0 0))
+                    (fmcl-after-execution s evidence)))))
+    (defn fmcl-after-execution (s evidence)
+        (do
+            (let execution (fmcl-execution-node
+                (fmcl-state-request s) evidence))
+            (let observation (fmcl-execution-observation-node execution evidence))
+            (let signal (fmcl-signal observation evidence))
+            (let trace1 (fmcl-trace-add (fmcl-state-trace s)
+                (fmcl-event "execute" "execute" (fmcl-ee-status evidence)
+                    (fmcl-attempt-ordinal (fmcl-state-attempt s)))))
+            (let trace2 (fmcl-trace-add trace1
+                (fmcl-event "observe" "observe" (fmcl-signal-kind signal)
+                    (fmcl-attempt-ordinal (fmcl-state-attempt s)))))
+            (fmcl-state "observe" (fmcl-ee-status evidence)
+                (fmcl-state-concept s) (fmcl-state-attempt s)
+                (fmcl-state-request s) execution observation signal trace2
+                (fmcl-state-budget s) (fmcl-state-persistence s)
+                (fmcl-state-continuation s) (fmcl-state-channel s)
+                (fmcl-state-mesh s) s (fmcl-state-lookup-count s)
+                (fmcl-ee-execution-count evidence)
+                (fmcl-ee-model-executed? evidence))))
+
+    (defn fmcl-mastered? (s)
+        (if (not (str_eq (fmcl-stage s) "observe")) 0
+            (do
+                (let execution (fmcl-state-execution s))
+                (if (and (str_eq (fmcl-status s) "value")
+                         (and (eq (fmcl-execution-verdict-present? execution) 1)
+                              (eq (fmcl-execution-verdict-value execution) 1)))
+                    1 0))))
+    (defn fmcl-decide (s)
+        (if (eq (fmcl-mastered? s) 1) (fmcl-crystallize s)
+            (fmcl-undo-refine s)))
+    (defn fmcl-crystallize (s)
+        (do
+            (let trace (fmcl-trace-add (fmcl-state-trace s)
+                (fmcl-event "crystallize" "crystallize"
+                    "observed-verdict-1"
+                    (fmcl-attempt-ordinal (fmcl-state-attempt s)))))
+            (fmcl-state "crystallize" "value" (fmcl-state-concept s)
+                (fmcl-state-attempt s) (fmcl-state-request s)
+                (fmcl-state-execution s) (fmcl-state-observation s)
+                (fmcl-state-signal s) trace (fmcl-state-budget s)
+                (fmcl-state-persistence s) (fmcl-state-continuation s)
+                (fmcl-state-channel s) (fmcl-state-mesh s) s
+                (fmcl-state-lookup-count s) (fmcl-state-execution-count s)
+                (fmcl-state-model-executed? s))))
+    (defn fmcl-undo-refine (s)
+        (do
+            (let trace1 (fmcl-trace-add (fmcl-state-trace s)
+                (fmcl-event "refine" "undo" (fmcl-status s)
+                    (fmcl-attempt-ordinal (fmcl-state-attempt s)))))
+            (let trace2 (fmcl-trace-add trace1
+                (fmcl-event "refine" "refine" (fmcl-status s)
+                    (add 1 (fmcl-attempt-ordinal (fmcl-state-attempt s))))))
+            (fmcl-state "refine" (fmcl-status s) (fmcl-state-concept s)
+                (fmcl-state-attempt s) (fmcl-state-request s)
+                (fmcl-state-execution s) (fmcl-state-observation s)
+                (fmcl-state-signal s) trace2 (fmcl-state-budget s)
+                (fmcl-state-persistence s) (fmcl-state-continuation s)
+                (fmcl-state-channel s) (fmcl-state-mesh s) s
+                (fmcl-state-lookup-count s) (fmcl-state-execution-count s)
+                (fmcl-state-model-executed? s))))
+    (defn fmcl-next-attempt (s label)
+        (if (not (str_eq (fmcl-stage s) "refine")) s
+            (do
+                (let old (fmcl-state-attempt s))
+                (let attempt (fmcl-attempt (fmcl-state-concept s) label
+                    (add 1 (fmcl-attempt-ordinal old)) old))
+                (let trace (fmcl-trace-add (fmcl-state-trace s)
+                    (fmcl-event "choose" "choice" label
+                        (fmcl-attempt-ordinal attempt))))
+                (fmcl-state "choose" "ready" (fmcl-state-concept s)
+                    attempt (nothing) (nothing) (nothing) (nothing) trace
+                    (fmcl-state-budget s) (fmcl-state-persistence s)
+                    (fmcl-state-continuation s) (fmcl-state-channel s)
+                    (fmcl-state-mesh s) s (fmcl-state-lookup-count s)
+                    (fmcl-state-execution-count s)
+                    (fmcl-state-model-executed? s)))))
+    (defn fmcl-dissolve (s)
+        (do
+            (let trace (fmcl-trace-add (fmcl-state-trace s)
+                (fmcl-event "dissolve" "dissolve" "optional-release"
+                    (fmcl-attempt-ordinal (fmcl-state-attempt s)))))
+            (fmcl-state "dissolve" (fmcl-status s) (fmcl-state-concept s)
+                (fmcl-state-attempt s) (fmcl-state-request s)
+                (fmcl-state-execution s) (fmcl-state-observation s)
+                (fmcl-state-signal s) trace (fmcl-state-budget s)
+                (fmcl-state-persistence s) (fmcl-state-continuation s)
+                (fmcl-state-channel s) (fmcl-state-mesh s) s
+                (fmcl-state-lookup-count s) (fmcl-state-execution-count s)
+                (fmcl-state-model-executed? s))))
+    (defn fmcl-release (s)
+        (do
+            (let trace (fmcl-trace-add (fmcl-state-trace s)
+                (fmcl-event "release" "release" "cell-context"
+                    (fmcl-attempt-ordinal (fmcl-state-attempt s)))))
+            (fmcl-state "release" (fmcl-status s) (fmcl-state-concept s)
+                (fmcl-state-attempt s) (fmcl-state-request s)
+                (fmcl-state-execution s) (fmcl-state-observation s)
+                (fmcl-state-signal s) trace (fmcl-state-budget s)
+                (fmcl-state-persistence s) (fmcl-state-continuation s)
+                (fmcl-state-channel s) (fmcl-state-mesh s) s
+                (fmcl-state-lookup-count s) (fmcl-state-execution-count s)
+                (fmcl-state-model-executed? s))))
+
+    ; A later cell inherits identities. Transport remains explicitly zero.
+    (defn fmcl-continue-cell (s new-concept-key persistence)
+        (do
+            (let generation (add 1 (fmcl-continuation-generation
+                (fmcl-state-continuation s))))
+            (let continuation (fmcl-continuation s
+                (fmcl-state-continuation s) (fmcl-state-channel s)
+                (fmcl-state-mesh s) generation))
+            (fmcl-discover new-concept-key (fmcl-state-budget s) persistence
+                continuation (fmcl-state-channel s) (fmcl-state-mesh s))))
+
+    0)

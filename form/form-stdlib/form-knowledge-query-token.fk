@@ -1,0 +1,362 @@
+; form-knowledge-query-token.fk — a bounded Form-native knowledge-query
+; envelope that may occur inside a local model's decoded stream.
+;
+; THE HONEST SEAM.  Model logits may emit the query envelope.  They do not
+; execute a tool.  A carrier recognizes a COMPLETE envelope, pauses decoding,
+; and offers it to fkqt-execute/fkqt-execute-at.  fkwu then parses the request,
+; performs at most one native RAG lookup, and returns a typed observation.  The
+; carrier may append that observation as a tool/observation turn before the next
+; model token.  `model-executed` is therefore always 0; `executor-node` names
+; the Form cell that actually crossed the boundary.
+;
+; STREAM SURFACE (a tokenizer may split these into many BPE pieces):
+;   <|form:knowledge-query|>question<|/form:knowledge-query|>
+;
+; The surface is evidence, not identity.  A successfully parsed request is an
+; interned query TOKEN whose NodeID includes the exact question and its fixed
+; fuel/answer budget.  A result is a second interned observation TOKEN whose
+; NodeID includes status, request, executor, source attribution, bounded answer,
+; and reason.  Same request/observation shape therefore converges by content.
+;
+; BOUNDS.  One envelope, one lookup, one hit, query <= 256 bytes, returned
+; answer <= 768 bytes, rendered source path <= 192 bytes.  Ordinary prose,
+; quotation, partial/nested envelopes, trailing bytes, and over-budget requests
+; ack `nothing` and execute no lookup.  A complete lookup with no grounded cell
+; is `miss`, distinct from `nothing`.  A hit carries NamedCell REF NodeID,
+; current content CTOR NodeID, source path/key, answer key, retrieval score and
+; confidence.  No result dresses a cache row as model reasoning.
+;
+; ROUTING.  hit -> native; miss -> local when the local reasoning lane is ready,
+; otherwise remote; nothing -> continue/no-offer.  The formula delegates the
+; first three lanes to form-cli-router.fk and adds only the no-offer state.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-cli-router.fk
+; preludes: form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
+; preludes: form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
+; preludes: form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk form-stdlib/rag-ask.fk
+;
+; Proven by: form-stdlib/tests/form-knowledge-query-token-band.fk
+
+(do
+    ; ── fixed stream grammar and budgets ───────────────────────────────
+    (defn fkqt-open () "<|form:knowledge-query|>")
+    (defn fkqt-close () "<|/form:knowledge-query|>")
+    (defn fkqt-observation-open () "<|form:knowledge-observation|>")
+    (defn fkqt-observation-close () "<|/form:knowledge-observation|>")
+    (defn fkqt-max-query-bytes () 256)
+    (defn fkqt-max-answer-bytes () 768)
+    (defn fkqt-max-source-bytes () 192)
+    (defn fkqt-max-render-bytes () 2048)
+    (defn fkqt-max-lookups () 1)
+    (defn fkqt-max-hits () 1)
+    (defn fkqt-fuel () 1)
+    (defn fkqt-max-frame-bytes ()
+        (add (str_len (fkqt-open))
+             (add (fkqt-max-query-bytes) (str_len (fkqt-close)))))
+
+    ; Source text is data inside an observation, never observation grammar.
+    ; This byte-stream transducer makes that distinction structural: every '&'
+    ; and '<' in a payload becomes an ASCII entity as it crosses the cursor.
+    ; The rendered payload therefore contains no '<' byte and cannot speak an
+    ; open or close control mark of its own. The transform is incremental and
+    ; fuelled; it neither tokenizes nor materializes a source-byte table.
+    (defn fkqt-observation-encoding () "form-stream-entity-v1")
+    (defn fkqt-observation-piece (text at)
+        (do
+            (let b (str_byte_at text at))
+            (if (eq b 38) "&amp;"
+                (if (eq b 60) "&lt;"
+                    (substring text at (add at 1))))))
+    ; Returns (rendered-bytes consumed-source-bytes). A piece is indivisible:
+    ; exhaustion stops before it, so an entity is never clipped into ambiguity.
+    (defn fkqt-observation-take-loop (text at fuel rendered)
+        (if (ge at (str_len text)) (list rendered at)
+            (do
+                (let piece (fkqt-observation-piece text at))
+                (if (gt (str_len piece) fuel) (list rendered at)
+                    (fkqt-observation-take-loop text (add at 1)
+                        (sub fuel (str_len piece))
+                        (str_concat rendered piece))))))
+    (defn fkqt-observation-take (text fuel)
+        (fkqt-observation-take-loop text 0 (if (lt fuel 0) 0 fuel) ""))
+    (defn fkqt-observation-escape (text)
+        (nth (fkqt-observation-take text (mul (str_len text) 5)) 0))
+    (defn fkqt-observation-boundary-safe? (rendered)
+        (if (lt (str_find rendered "<" 0) 0) 1 0))
+    (defn fkqt-observation-mark-at? (text mark at)
+        (if (eq (str_find text mark at) at) 1 0))
+    (defn fkqt-observation-decode-loop (text at decoded)
+        (if (ge at (str_len text)) decoded
+            (if (eq (fkqt-observation-mark-at? text "&lt;" at) 1)
+                (fkqt-observation-decode-loop text (add at 4)
+                    (str_concat decoded "<"))
+                (if (eq (fkqt-observation-mark-at? text "&amp;" at) 1)
+                    (fkqt-observation-decode-loop text (add at 5)
+                        (str_concat decoded "&"))
+                    (fkqt-observation-decode-loop text (add at 1)
+                        (str_concat decoded
+                            (substring text at (add at 1))))))))
+    (defn fkqt-observation-decode (text)
+        (fkqt-observation-decode-loop text 0 ""))
+
+    ; Reserved Form-neutral categories.  The composed children carry content
+    ; identity; the integer category slots only keep this token family apart.
+    (defn fkqt-query-category () (make_nodeid 31 2 0 51))
+    (defn fkqt-executor-category () (make_nodeid 31 2 0 52))
+    (defn fkqt-observation-category () (make_nodeid 31 2 0 53))
+    (defn fkqt-absent-category () (make_nodeid 31 2 0 54))
+    (defn fkqt-absent-token ()
+        (intern_node (fkqt-absent-category)
+            (list (intern_trivial_string "nothing"))))
+
+    (defn fkqt-node-key (node)
+        (str_concat (int_to_str (node_pkg node))
+        (str_concat "." (str_concat (int_to_str (node_level node))
+        (str_concat "." (str_concat (int_to_str (node_type node))
+        (str_concat "." (int_to_str (node_inst node)))))))))
+
+    (defn fkqt-query-token (query)
+        (intern_node (fkqt-query-category)
+            (list (intern_trivial_string query)
+                  (intern_trivial_int (fkqt-max-answer-bytes))
+                  (intern_trivial_int (fkqt-fuel)))))
+    (defn fkqt-query-token-valid? (token)
+        (if (nothing? token) 0
+        (if (not (node_eq (node_category token) (fkqt-query-category))) 0
+        (if (not (eq (len (node_children token)) 3)) 0
+        (if (gt (str_len (node_value (nth (node_children token) 0)))
+                (fkqt-max-query-bytes)) 0
+        (if (not (eq (node_value (nth (node_children token) 1))
+                     (fkqt-max-answer-bytes))) 0
+            (if (eq (node_value (nth (node_children token) 2))
+                    (fkqt-fuel)) 1 0)))))))
+    (defn fkqt-query-of-token (token)
+        (if (eq (fkqt-query-token-valid? token) 1)
+            (node_value (nth (node_children token) 0)) ""))
+
+    (defn fkqt-executor-token ()
+        (intern_node (fkqt-executor-category)
+            (list
+                (intern_trivial_string "form/form-stdlib/form-knowledge-query-token.fk")
+                (intern_trivial_string "fkwu-after-stream-parse")
+                (intern_trivial_int 1))))
+
+    ; ── parser: surface -> ready/nothing request ───────────────────────
+    ; request = (state reason query query-token).  Only state=ready may execute.
+    (defn fkqt-request (state reason query token)
+        (list state reason query token))
+    (defn fkqt-request-state (r) (nth r 0))
+    (defn fkqt-request-reason (r) (nth r 1))
+    (defn fkqt-request-query (r) (nth r 2))
+    (defn fkqt-request-token (r) (nth r 3))
+    (defn fkqt-request-ready? (r)
+        (if (str_eq (fkqt-request-state r) "ready") 1 0))
+    (defn fkqt-nothing-request (reason)
+        (fkqt-request "nothing" reason "" (nothing)))
+
+    (defn fkqt-parse (surface)
+        (if (not (eq (str_find surface (fkqt-open) 0) 0))
+            (fkqt-nothing-request "no-query-token")
+            (do
+                (let close-at (str_find surface (fkqt-close) (str_len (fkqt-open))))
+                (if (lt close-at 0)
+                    (if (gt (str_len surface) (fkqt-max-frame-bytes))
+                        (fkqt-nothing-request "query-budget-exceeded")
+                        (fkqt-nothing-request "held-incomplete"))
+                    (if (not (eq (add close-at (str_len (fkqt-close)))
+                                 (str_len surface)))
+                        (fkqt-nothing-request "trailing-bytes")
+                        (do
+                            (let query (substring surface (str_len (fkqt-open)) close-at))
+                            (if (ge (str_find query (fkqt-open) 0) 0)
+                                (fkqt-nothing-request "nested-query-token")
+                            (if (eq (str_len query) 0)
+                                (fkqt-nothing-request "empty-query")
+                            (if (gt (str_len query) (fkqt-max-query-bytes))
+                                (fkqt-nothing-request "query-budget-exceeded")
+                                (fkqt-request "ready" "ready" query
+                                    (fkqt-query-token query)))))))))))
+
+    ; ── typed result and routing ───────────────────────────────────────
+    ; result fields:
+    ;  0 status       hit | miss | nothing
+    ;  1 reason       grounded-hit | grounded-miss | parser reason
+    ;  2 request      query token or absent token
+    ;  3 observation  content-addressed observation token
+    ;  4 executor     Form executor token
+    ;  5 source-ref   NamedCell REF NodeID string (hit only)
+    ;  6 content-ref  current CTOR NodeID string (hit only)
+    ;  7 source-path  bounded, inspectable source path
+    ;  8 source-key   substrate source key/hash
+    ;  9 answer-key   SHA-256 binding for the exact indexed answer
+    ; 10 answer       bounded decoded answer
+    ; 11 answer-cut   1 when the indexed answer exceeded the stream budget
+    ; 12 source-cut   1 when source path exceeded the render budget
+    ; 13 score
+    ; 14 confidence
+    ; 15 lane         0 native | 1 local | 2 remote | 3 continue/no-offer
+    ; 16 executed     1 only after the RAG offer actually ran
+    ; 17 model-executed (always 0)
+    ; 18 lookup-count 0 or 1
+    ; 19 hit-count    0 or 1
+    (defn fkqt-route-lane (status local-ready)
+        (if (str_eq status "hit") (fcr-walk 1 local-ready)
+            (if (str_eq status "miss") (fcr-walk 0 local-ready) 3)))
+
+    (defn fkqt-clip (s max-bytes)
+        (if (le (str_len s) max-bytes) s (substring s 0 max-bytes)))
+    (defn fkqt-cut? (s max-bytes)
+        (if (gt (str_len s) max-bytes) 1 0))
+    (defn fkqt-request-or-absent (request)
+        (if (eq (fkqt-request-ready? request) 1)
+            (fkqt-request-token request) (fkqt-absent-token)))
+
+    (defn fkqt-observation-token (status reason request source-ref content-ref
+                                  source-path source-key answer-key answer lane executed)
+        (intern_node (fkqt-observation-category)
+            (list
+                (intern_trivial_string status)
+                (intern_trivial_string reason)
+                (fkqt-request-or-absent request)
+                (fkqt-executor-token)
+                (intern_trivial_string source-ref)
+                (intern_trivial_string content-ref)
+                (intern_trivial_string source-path)
+                (intern_trivial_string source-key)
+                (intern_trivial_string answer-key)
+                (intern_trivial_string answer)
+                (intern_trivial_int lane)
+                (intern_trivial_int executed)
+                (intern_trivial_int 0))))
+
+    (defn fkqt-result (status reason request source-ref content-ref source-path
+                       source-key answer-key answer answer-cut source-cut score
+                       confidence lane executed lookup-count hit-count)
+        (do
+            (let observation (fkqt-observation-token status reason request
+                source-ref content-ref source-path source-key answer-key answer
+                lane executed))
+            (list status reason (fkqt-request-or-absent request) observation
+                (fkqt-executor-token) source-ref content-ref source-path source-key
+                answer-key answer answer-cut source-cut score confidence lane
+                executed 0 lookup-count hit-count)))
+
+    (defn fkqt-status (r) (nth r 0))
+    (defn fkqt-reason (r) (nth r 1))
+    (defn fkqt-result-request-token (r) (nth r 2))
+    (defn fkqt-observation (r) (nth r 3))
+    (defn fkqt-executor (r) (nth r 4))
+    (defn fkqt-source-ref (r) (nth r 5))
+    (defn fkqt-content-ref (r) (nth r 6))
+    (defn fkqt-source-path (r) (nth r 7))
+    (defn fkqt-source-key (r) (nth r 8))
+    (defn fkqt-answer-key (r) (nth r 9))
+    (defn fkqt-answer (r) (nth r 10))
+    (defn fkqt-answer-cut? (r) (nth r 11))
+    (defn fkqt-source-cut? (r) (nth r 12))
+    (defn fkqt-score (r) (nth r 13))
+    (defn fkqt-confidence (r) (nth r 14))
+    (defn fkqt-lane (r) (nth r 15))
+    (defn fkqt-executed? (r) (nth r 16))
+    (defn fkqt-model-executed? (r) (nth r 17))
+    (defn fkqt-lookup-count (r) (nth r 18))
+    (defn fkqt-hit-count (r) (nth r 19))
+
+    (defn fkqt-nothing-result (request local-ready)
+        (fkqt-result "nothing" (fkqt-request-reason request) request
+            "" "" "" "" "" "" 0 0 0 0
+            (fkqt-route-lane "nothing" local-ready) 0 0 0))
+    (defn fkqt-miss-result (request local-ready)
+        (fkqt-result "miss" "grounded-miss" request
+            "" "" "" "" "" "" 0 0 0 0
+            (fkqt-route-lane "miss" local-ready) 1 1 0))
+
+    (defn fkqt-hit-admissible? (hit)
+        (if (and (eq (ra-hit? hit) 1)
+                 (and (eq (ra-hit-resolves? hit) 1)
+                 (and (eq (ra-hit-sufficient? hit) 1)
+                 (and (eq (ric-node-id-valid? (ra-hit-node-id hit)) 1)
+                 (and (eq (ric-node-id-valid? (ra-hit-content-node-id hit)) 1)
+                      (gt (str_len (ra-hit-source-path hit)) 0)))))) 1 0))
+
+    (defn fkqt-result-from-hit (request hit local-ready)
+        (if (eq (fkqt-hit-admissible? hit) 0)
+            (fkqt-miss-result request local-ready)
+            (do
+                (let raw-source (ra-hit-source-path hit))
+                (let raw-answer (ra-hit-answer hit))
+                (let source (fkqt-clip raw-source (fkqt-max-source-bytes)))
+                (let answer (fkqt-clip raw-answer (fkqt-max-answer-bytes)))
+                (fkqt-result "hit" "grounded-hit" request
+                    (ra-hit-node-id hit) (ra-hit-content-node-id hit)
+                    source (ra-hit-key hit) (ra-hit-answer-key hit) answer
+                    (fkqt-cut? raw-answer (fkqt-max-answer-bytes))
+                    (fkqt-cut? raw-source (fkqt-max-source-bytes))
+                    (ra-hit-score hit) (ra-hit-confidence hit)
+                    (fkqt-route-lane "hit" local-ready) 1 1 1))))
+
+    ; This is the live offer.  Parsing must complete before file IO begins.
+    (defn fkqt-execute-at (index-path surface local-ready)
+        (do
+            (let request (fkqt-parse surface))
+            (if (eq (fkqt-request-ready? request) 0)
+                (fkqt-nothing-result request local-ready)
+                (fkqt-result-from-hit request
+                    (ra-grounded-hit-at index-path (fkqt-request-query request))
+                    local-ready))))
+    (defn fkqt-execute (surface local-ready)
+        (fkqt-execute-at (ra-default-index) surface local-ready))
+
+    ; ── inspectable rendering ─────────────────────────────────────────
+    ; Render is for witnesses/debugging.  Integration should pass the typed
+    ; result as a tool/observation role, not splice it into assistant prose.
+    (defn fkqt-cat (parts)
+        (if (eq (len parts) 0) ""
+            (str_concat (head parts) (fkqt-cat (tail parts)))))
+    (defn fkqt-render-prefix (result answer-cut render-cut)
+        (fkqt-cat (list
+            (fkqt-observation-open)
+            "\nstatus=" (fkqt-status result)
+            "\nreason=" (fkqt-reason result)
+            "\nrequest-node=@" (fkqt-node-key (fkqt-result-request-token result))
+            "\nobservation-node=@" (fkqt-node-key (fkqt-observation result))
+            "\nexecutor-node=@" (fkqt-node-key (fkqt-executor result))
+            "\nsource-ref=" (fkqt-source-ref result)
+            "\ncontent-ref=" (fkqt-content-ref result)
+            "\nsource-path=" (fkqt-source-path result)
+            "\nsource-key=" (fkqt-source-key result)
+            "\nanswer-key=" (fkqt-answer-key result)
+            "\nretrieval-score=" (int_to_str (fkqt-score result))
+            "\nretrieval-confidence=" (int_to_str (fkqt-confidence result))
+            "\nlane=" (int_to_str (fkqt-lane result))
+            "\nexecuted=" (int_to_str (fkqt-executed? result))
+            "\nmodel-executed=" (int_to_str (fkqt-model-executed? result))
+            "\nlookup-count=" (int_to_str (fkqt-lookup-count result))
+            "\nhit-count=" (int_to_str (fkqt-hit-count result))
+            "\nanswer-encoding=" (fkqt-observation-encoding)
+            "\nanswer-truncated=" (int_to_str answer-cut)
+            "\nanswer-source-truncated=" (int_to_str (fkqt-answer-cut? result))
+            "\nanswer-render-truncated=" (int_to_str render-cut)
+            "\nsource-truncated=" (int_to_str (fkqt-source-cut? result))
+            "\nanswer-byte-length=" (int_to_str (str_len (fkqt-answer result)))
+            "\nanswer:")))
+    (defn fkqt-render (result)
+        (do
+            ; Both truncation digits are one byte, so the provisional prefix has
+            ; exactly the same width as the final one. The payload receives the
+            ; remaining render fuel; the close mark is reserved before it runs.
+            (let provisional (fkqt-render-prefix result
+                (fkqt-answer-cut? result) 0))
+            (let fuel (sub (fkqt-max-render-bytes)
+                (add (str_len provisional)
+                     (add 1 (str_len (fkqt-observation-close))))))
+            (let escaped (fkqt-observation-take (fkqt-answer result) fuel))
+            (let render-cut (if (lt (nth escaped 1)
+                                    (str_len (fkqt-answer result))) 1 0))
+            (let answer-cut (if (or (eq (fkqt-answer-cut? result) 1)
+                                    (eq render-cut 1)) 1 0))
+            (let prefix (fkqt-render-prefix result answer-cut render-cut))
+            (fkqt-cat (list prefix (nth escaped 0) "\n"
+                            (fkqt-observation-close)))))
+
+    0)

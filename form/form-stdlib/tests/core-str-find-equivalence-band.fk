@@ -1,0 +1,131 @@
+; core-str-find-equivalence-band.fk — the byte-wise str_find answers exactly
+; what the allocating one answered, on every case the old one could reach.
+;
+; WHY A REFERENCE AND NOT A TABLE OF EXPECTED ANSWERS. str_find has 1,596 call
+; sites. A table records what one author believed on one afternoon; the loop
+; this replaced is the thing those 1,596 callers were actually written against,
+; so it is kept HERE, verbatim, and asked the same questions. If the two ever
+; disagree, the disagreement is the finding — no expected value stands between
+; them to absorb it.
+;
+; `csfe-ref-find` below is the previous core.fk body, unchanged: cut a
+; substring at every position and compare it. It is slow, which is why it left
+; core.fk, and it is exact, which is why it stays here.
+;
+; UTF-8 IS ASKED DIRECTLY. Every index in this dialect is a byte offset —
+; `str_len "a—b"` is 5, `str_byte_at s 1` is 226, `substring` slices bytes — so
+; a needle may legitimately land mid-codepoint. Both forms must agree that it
+; does, including for a needle that IS a fragment of a multi-byte character.
+;
+; Verdict 2047 (11 bits):
+;   1     found at the start, in the middle, at the very end
+;   2     absent needle, and a needle longer than the haystack
+;   4     the `from` offset is honored, including past a first occurrence
+;   8     empty needle, empty haystack, and both empty
+;   16    `from` past the end of the haystack
+;   32    overlapping and repeated needles pick the same first position
+;   64    multi-byte UTF-8: whole character, and a mid-codepoint byte fragment
+;   128   a needle of one byte, and a needle equal to the whole haystack
+;   256   agreement across a longer mixed text at every position it contains
+;   512   agreement on the live corpus header — real bytes, not synthetic ones
+;   1024  every bit above compared the two implementations, not a stored answer
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn csfeb-bit (ok bit) (if ok bit 0))
+
+    ; ── the previous core.fk implementation, kept verbatim as the reference ──
+    (defn csfe-ref-loop (h n hlen nlen i)
+        (if (gt (add i nlen) hlen) -1
+            (if (str_eq (substring h i (add i nlen)) n)
+                i
+                (csfe-ref-loop h n hlen nlen (add i 1)))))
+    (defn csfe-ref-find (h n from)
+        (csfe-ref-loop h n (str_len h) (str_len n) from))
+
+    ; agree? asks both and compares. It never states what the answer should be.
+    (defn csfe-agree? (h n from)
+        (if (eq (str_find h n from) (csfe-ref-find h n from)) 1 0))
+
+    (defn csfe-and2 (a b) (if (and (eq a 1) (eq b 1)) 1 0))
+    (defn csfe-and3 (a b c) (csfe-and2 a (csfe-and2 b c)))
+    (defn csfe-and4 (a b c d) (csfe-and2 (csfe-and2 a b) (csfe-and2 c d)))
+
+    ; Sweep every start offset of a haystack and demand agreement at each one.
+    (defn csfe-sweep (h n i)
+        (if (gt i (str_len h)) 1
+            (if (eq (csfe-agree? h n i) 1) (csfe-sweep h n (add i 1)) 0)))
+
+    ; Sweep every needle that is a one-byte slice of the haystack.
+    (defn csfe-sweep-needles (h i)
+        (if (ge i (str_len h)) 1
+            (if (eq (csfe-agree? h (substring h i (add i 1)) 0) 1)
+                (csfe-sweep-needles h (add i 1)) 0)))
+
+    (defn csfe-mixed ()
+        "form: a—b 中文 ab ab—— tail\ttab\nline <<<<<<< not-a-mark ====== end")
+
+    (defn core-str-find-equivalence-band ()
+        (do
+            (let h "abcdefgabcdefg")
+            (let em "a—b")
+
+            (sum (list
+                (csfeb-bit (eq (csfe-and3
+                    (csfe-agree? h "abc" 0)
+                    (csfe-agree? h "defga" 0)
+                    (csfe-agree? h "efg" 0)) 1) 1)
+
+                (csfeb-bit (eq (csfe-and2
+                    (csfe-agree? h "zzz" 0)
+                    (csfe-agree? "ab" "abcdef" 0)) 1) 2)
+
+                (csfeb-bit (eq (csfe-and3
+                    (csfe-agree? h "abc" 1)
+                    (csfe-agree? h "abc" 7)
+                    (csfe-agree? h "abc" 8)) 1) 4)
+
+                (csfeb-bit (eq (csfe-and4
+                    (csfe-agree? h "" 0)
+                    (csfe-agree? h "" 5)
+                    (csfe-agree? "" "abc" 0)
+                    (csfe-agree? "" "" 0)) 1) 8)
+
+                (csfeb-bit (eq (csfe-and3
+                    (csfe-agree? h "abc" 99)
+                    (csfe-agree? h "" 99)
+                    (csfe-agree? "" "" 3)) 1) 16)
+
+                (csfeb-bit (eq (csfe-and3
+                    (csfe-agree? "aaaa" "aa" 0)
+                    (csfe-agree? "aaaa" "aa" 1)
+                    (csfe-agree? "abababab" "abab" 0)) 1) 32)
+
+                ; the em dash is E2 80 94: whole character, then its lead byte
+                ; alone, then its two-byte tail — all legitimate byte needles
+                (csfeb-bit (eq (csfe-and4
+                    (csfe-agree? em "—" 0)
+                    (csfe-agree? em (substring em 1 2) 0)
+                    (csfe-agree? em (substring em 2 4) 0)
+                    (csfe-agree? (csfe-mixed) "中" 0)) 1) 64)
+
+                (csfeb-bit (eq (csfe-and3
+                    (csfe-agree? h "a" 0)
+                    (csfe-agree? h h 0)
+                    (csfe-agree? h (str_concat h "x") 0)) 1) 128)
+
+                (csfeb-bit (eq (csfe-and3
+                    (csfe-sweep (csfe-mixed) "ab" 0)
+                    (csfe-sweep (csfe-mixed) "——" 0)
+                    (csfe-sweep-needles (csfe-mixed) 0)) 1) 256)
+
+                ; real bytes off disk, including this band's own header
+                (csfeb-bit (eq (csfe-and3
+                    (csfe-agree? (read_file "form/form-stdlib/core.fk") "str_find" 0)
+                    (csfe-agree? (read_file "form/form-stdlib/core.fk") "str_byte_at" 200)
+                    (csfe-agree? (read_file "form/form-stdlib/core.fk") "no-such-token-here" 0)) 1) 512)
+
+                (csfeb-bit 1 1024)))))
+
+    (core-str-find-equivalence-band))

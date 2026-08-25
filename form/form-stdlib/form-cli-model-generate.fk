@@ -5,8 +5,9 @@
 ; and required byte extent are read from that GGUF.  Form emits the MSL at runtime;
 ; the linked Metal carrier JIT-compiles it for the device that answered metal_status.
 ;
-; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-form-layer.fk form-stdlib/local-model-choice.fk form-stdlib/local-generate-organ.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-dense-token-handle.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
-; preludes: form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk form-stdlib/form-cli-heed-cursor.fk form-stdlib/form-cli-heed-telemetry.fk form-stdlib/form-cli-heed-grounded.fk
+; preludes: form-stdlib/qwen35-tokfast-v2.fk form-stdlib/qwen35-encode-indexed.fk form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-form-layer.fk form-stdlib/local-model-choice.fk form-stdlib/local-generate-organ.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-crystal.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
+; preludes: form-stdlib/language-model.fk form-stdlib/form-cli-heedmark-xtal.fk form-stdlib/form-cli-heed-cursor.fk form-stdlib/form-cli-heed-telemetry.fk
+; preludes: form-stdlib/form-cli-heed-current-source.fk form-stdlib/form-cli-heed-grounded.fk
 
 (do
     (defn fcmg-src (path) (eqr-of-file path 0 40000000))
@@ -21,12 +22,125 @@
     (defn fcmg-name (src)
         (do (let n (gmt-str src "general.name"))
             (if (str_eq n "") "(header names no model)" n)))
-    (defn fcmg-report (model arch ids out text thought-eval thought-offers thought-n forwards busy-us prefill-us decode-us weight-bytes)
+    (defn fcmg-status-count (statuses wanted)
+        (if (nil? statuses) 0
+            (add (if (str_eq (head statuses) wanted) 1 0)
+                 (fcmg-status-count (tail statuses) wanted))))
+    (defn fcmg-source-search-record? (record)
+        (if (or (str_eq (fhc-record-status record) "hit")
+                (str_eq (fhc-record-status record) "miss")) 1
+            (if (str_eq (fhc-record-reason record)
+                    "observation-budget-exceeded-after-source-search") 1 0)))
+    (defn fcmg-source-searches (records)
+        (if (nil? records) 0
+            (add (fcmg-source-search-record? (head records))
+                 (fcmg-source-searches (tail records)))))
+    (defn fcmg-empty-heed-record () (fhc-record "" "" "" ""))
+    (defn fcmg-first-record (records)
+        (if (nil? records) (fcmg-empty-heed-record) (head records)))
+    (defn fcmg-source-record (records)
+        (if (nil? records) (fcmg-empty-heed-record)
+            (if (eq (fcmg-source-search-record? (head records)) 1) (head records)
+                (fcmg-source-record (tail records)))))
+    (defn fcmg-evidence-record (records)
+        (do
+            (let source (fcmg-source-record records))
+            (if (str_eq (fhc-record-status source) "")
+                (fcmg-first-record records) source)))
+    (defn fcmg-span-field (span name)
+        (do
+            (let marker (str_concat "\n" (str_concat name "=")))
+            (let at (str_find span marker 0))
+            (if (lt at 0) ""
+                (do
+                    (let start (add at (str_len marker)))
+                    (let end (str_find span "\n" start))
+                    (substring span start (if (lt end 0) (str_len span) end))))))
+    (defn fcmg-heed-budget () (fhcs-lookup-limit))
+    ; q35 byte fallback cannot produce more ids than input bytes. Reserve the
+    ; bounded rendered observation once, plus the small ChatML role crossing
+    ; that closes the querying assistant turn, carries the Form observation as
+    ; a tool turn, and opens a fresh assistant answer.
+    (defn fcmg-heed-context-reserve ()
+        (mul (fcmg-heed-budget) (add (fkqt-max-render-bytes) 96)))
+    (defn fcmg-current-source-query-budget () (fhm-query-budget))
+    (defn fcmg-current-source-answer-reserve () (fhm-answer-reserve))
+    ; `n` is the old fungible tail. query and answer are the explicit two-ledger
+    ; tail. Exactly one side is nonzero at either public door.
+    (defn fcmg-context-tail-reserve (n query answer)
+        (add n (add query (add answer (fcmg-heed-context-reserve)))))
+    (defn fcmg-tail-budget-ok? (n query answer)
+        (if (and (gt n 0) (and (eq query 0) (eq answer 0))) 1
+            (if (and (eq n 0) (and (gt query 0) (gt answer 0))) 1 0)))
+    (defn fcmg-context-need (prompt-n thought-n gap-total n query answer)
+        (add (add (add prompt-n thought-n) gap-total)
+             (fcmg-context-tail-reserve n query answer)))
+    (defn fcmg-heed-ledger-report (c)
+        (str_concat (fcmg-line "heed_phase" (int_to_str (fhc-phase c)))
+        (str_concat (fcmg-line "heed_query_budget"
+            (int_to_str (add (fhc-query-tokens c)
+                (add (fhc-query-left c) (fhc-cut c)))))
+        (str_concat (fcmg-line "heed_answer_reserve"
+            (int_to_str (add (fhc-answer-tokens c) (fhc-answer-left c))))
+        (str_concat (fcmg-line "heed_query_tokens" (int_to_str (fhc-query-tokens c)))
+        (str_concat (fcmg-line "heed_answer_tokens" (int_to_str (fhc-answer-tokens c)))
+        (str_concat (fcmg-line "heed_query_left" (int_to_str (fhc-query-left c)))
+        (str_concat (fcmg-line "heed_answer_left" (int_to_str (fhc-answer-left c)))
+        (str_concat (fcmg-line "heed_query_fuel_cut" (int_to_str (fhc-cut c)))
+        (str_concat (fcmg-line "heed_stream_bytes" (int_to_str (fhc-bytes c)))
+        (str_concat (fcmg-line "heed_decode_timeout" (int_to_str (fhc-timeout? c)))
+        (str_concat (fcmg-line "heed_stopped" (int_to_str (fhc-stopped? c)))
+                    (fcmg-line "heed_frame_refusals"
+                        (int_to_str (fhc-frame-refusals c)))))))))))))))
+    (defn fcmg-heed-report-at (c root root-status)
+        (do
+        (let records (fhc-records c))
+        (let evidence (fcmg-evidence-record records))
+        (let searches (fcmg-source-searches records))
+        (str_concat (fcmg-line "heed_cursor" "bounded-current-source-v1")
+        (str_concat (fcmg-line "heed_lookup_budget" (int_to_str (fcmg-heed-budget)))
+        (str_concat (fcmg-line "heed_lookup_budget_remaining" (int_to_str (fhc-budget c)))
+        (str_concat (fcmg-line "heed_honor_attempts" (int_to_str (fhc-attempts c)))
+        (str_concat (fcmg-line "heed_lookups" (int_to_str searches))
+        (str_concat (fcmg-line "heed_source_searches" (int_to_str searches))
+        (str_concat (fcmg-line "heed_honored" (int_to_str (len (fhc-honored c))))
+        (str_concat (fcmg-line "heed_hits"
+            (int_to_str (fcmg-status-count (fhc-honored c) "hit")))
+        (str_concat (fcmg-line "heed_misses"
+            (int_to_str (fcmg-status-count (fhc-honored c) "miss")))
+        (str_concat (fcmg-line "heed_nothings"
+            (int_to_str (fcmg-status-count (fhc-honored c) "nothing")))
+        (str_concat (fcmg-line "heed_spent"
+            (int_to_str (fcmg-status-count (fhc-honored c) "spent")))
+        (str_concat (fcmg-line "heed_injected_tokens" (int_to_str (fhc-injected c)))
+        (str_concat (fcmg-line "heed_close_commits" (int_to_str (fhc-close-commits c)))
+        (str_concat (fcmg-line "heed_terminal_forwards" (int_to_str (fhc-terminal-forwards c)))
+        (str_concat (fcmg-line "heed_injection_refusals" (int_to_str (fhc-injection-refusals c)))
+        (str_concat (fcmg-line "heed_window_bytes" (int_to_str (str_len (fhc-window c))))
+        (str_concat (fcmg-line "heed_evidence_status" (fhc-record-status evidence))
+        (str_concat (fcmg-line "heed_evidence_reason" (fhc-record-reason evidence))
+        (str_concat (fcmg-line "heed_source_path"
+            (fkqt-clip (fcmg-span-field (fhc-record-span evidence) "source-path")
+                (fkqt-max-source-bytes)))
+        (str_concat (fcmg-line "heed_source_artifact"
+            (fkqt-clip (fcmg-span-field (fhc-record-span evidence) "source-artifact") 96))
+        (str_concat (fcmg-line "heed_answer_key"
+            (fkqt-clip (fcmg-span-field (fhc-record-span evidence) "answer-key") 80))
+        (str_concat (fcmg-line "heed_source_root_status" root-status)
+        (str_concat (fcmg-line "heed_source_root" (fkqt-clip root 192))
+        (str_concat (fcmg-heed-ledger-report c)
+                    (fcmg-line "heed_model_executed" (int_to_str (fhc-model-executed)))))))))))))))))))))))))))))
+    (defn fcmg-heed-report (c)
+        (fcmg-heed-report-at c (fhcs-default-root) (fhcs-root-status)))
+    (defn fcmg-report (model arch ids out text thought-eval thought-offers thought-n forwards busy-us prefill-us decode-us weight-bytes heed)
         (do
             (let effective-gbps-x10
                 (if (gt busy-us 0)
                     (div (mul (mul weight-bytes forwards) 10) (mul busy-us 1000)) 0))
-            (let decode-forwards (if (gt (len out) thought-n) (sub (sub (len out) thought-n) 1) 0))
+            (let decode-forwards
+                (add (add (if (gt (len out) thought-n) (sub (sub (len out) thought-n) 1) 0)
+                          (fhc-injected heed))
+                     (add (fhc-close-commits heed) (fhc-terminal-forwards heed))))
             (let prefill-tokps-x1000
                 (if (gt prefill-us 0) (div (mul (add (len ids) thought-n) 1000000000) prefill-us) 0))
             (let decode-tokps-x1000
@@ -34,6 +148,10 @@
                     (div (mul decode-forwards 1000000000) decode-us) 0))
             (let end-to-end-tokps-x1000
                 (if (gt busy-us 0) (div (mul (len out) 1000000000) busy-us) 0))
+            ; the walker's own heat total, printed so the two walkers'
+            ; visit counts can be compared for the same work (kernel_stat 3
+            ; is the hottest arm's count — identical metric on both arms).
+            (str_concat (fcmg-line "hottest_arm_count" (int_to_str (kernel_stat 3)))
             (str_concat (fcmg-line "backend" "form-native-metal-jit")
             (str_concat (fcmg-line "form-layer" (if (eq (ftl-armed?) 1) "on" "off"))
             (str_concat (fcmg-line "model" model)
@@ -57,7 +175,8 @@
                 (int_to_str effective-gbps-x10))
             (str_concat (fcmg-line "end_to_end_tokps_x1000"
                 (int_to_str end-to-end-tokps-x1000))
-                            (str_concat "text:\n" text))))))))))))))))))))))))
+            (str_concat (fcmg-heed-report heed)
+                        (str_concat "text:\n" text))))))))))))))))))))))))))
 
     ; ── residence ─────────────────────────────────────────────────────────────
     ; A model admitted once should not be admitted again to answer a second
@@ -140,6 +259,101 @@
         (if (eq (len lists) 0) acc
             (fcmg-flat-ids (tail lists) (tkz-cat acc (head lists)))))
 
+    ; ── resident live heed tail ───────────────────────────────────────────
+    ; The thought offers above remain the prefill/gap source. This tail is
+    ; only the model's final resident decode: decoded ids stream through one
+    ; bounded cursor, a complete query may spend one current-source lookup, and
+    ; the typed observation re-enters through incremental prefill.
+    ; The resident current-source cursor and the experimental prefill carrier
+    ; share one context. Source identity and carrier chunk are separate fields:
+    ; neither is smuggled through model prose or collapsed into the other.
+    (defn fcmg-heed-ctx-full
+        (ps bs geo lays sts embTv onormTv projTv src source-hint chunk tfx)
+        (list ps bs geo lays sts embTv onormTv projTv src source-hint chunk tfx))
+    (defn fcmg-heed-ctx (ps bs geo lays sts embTv onormTv projTv src tfx)
+        (fcmg-heed-ctx-full ps bs geo lays sts embTv onormTv projTv src "" 1 tfx))
+    (defn fcmg-heed-ctx-hinted
+        (ps bs geo lays sts embTv onormTv projTv src source-hint tfx)
+        (fcmg-heed-ctx-full ps bs geo lays sts embTv onormTv projTv
+            ; The live three-way witness kept output SHA, hit, 26/32 answer
+            ; shape and 385 injected ids identical at chunk 0 while reducing
+            ; carrier settlements 506 -> 61. Current-source observations use
+            ; that measured span node; explicit probes can still choose 1/-1.
+            src source-hint 0 tfx))
+    ; The tokenizer index rides the handle; a handle built before the index
+    ; existed answers an absent one and every encode falls back to the
+    ; reference lane — ice is a speed, never a gate.
+    (defn fcmg-heed-index (ctx)
+        (if (gt (len ctx) 11) (nth ctx 11)
+            (qtf2-index-empty "absent" "unthreaded" "")))
+    (defn fcmg-heed-source-hint (ctx)
+        (if (gt (len ctx) 9) (nth ctx 9) ""))
+    (defn fcmg-heed-chunk (ctx)
+        (if (gt (len ctx) 10) (nth ctx 10) 1))
+    (defn fcmg-heed-step (ctx id pos)
+        (q38-forward (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
+            (nth ctx 4) (nth ctx 5) (nth ctx 6) (nth ctx 7) id pos))
+    (defn fcmg-heed-prefill (ctx ids pos)
+        (q38-prefill-chunked (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
+            (nth ctx 4) (nth ctx 5) (nth ctx 6) (nth ctx 7) ids pos
+            (fcmg-heed-chunk ctx)))
+    (defn fcmg-heed-decode (ctx ids) (tkz-decode-text (nth ctx 8) ids))
+    ; The cursor stays model-neutral; this encoder owns Qwen's role grammar.
+    ; Raw observation bytes appended inside the assistant turn made the live
+    ; model emit its end token immediately after a successful source hit. Close
+    ; that turn, offer the typed Form observation as a tool message, then open a
+    ; fresh assistant turn with the same no-think prefix used by q35-chat-ids.
+    (defn fcmg-heed-encode (ctx text)
+        (do
+            (let src (nth ctx 8))
+            (let tfx (fcmg-heed-index ctx))
+            (let ims (qei-special-id src tfx "<|im_start|>"))
+            (let ime (qei-special-id src tfx "<|im_end|>"))
+            (let ths (qei-special-id src tfx "<think>"))
+            (let the (qei-special-id src tfx "</think>"))
+            (tkz-cat (q35-one ime)
+            (tkz-cat (qei-encode src tfx "\n")
+            (tkz-cat (q35-one ims)
+            (tkz-cat (qei-encode src tfx "tool\n")
+            (tkz-cat (qei-encode src tfx text)
+            (tkz-cat (q35-one ime)
+            (tkz-cat (qei-encode src tfx "\n")
+            (tkz-cat (q35-one ims)
+            (tkz-cat (qei-encode src tfx "assistant\n")
+            (tkz-cat (q35-one ths)
+            (tkz-cat (qei-encode src tfx "\n\n")
+            (tkz-cat (q35-one the)
+                     (qei-encode src tfx "\n\n")))))))))))))))
+    (defn fcmg-heed-bound-honor (h)
+        (if (gt (str_len (nth h 1)) (fkqt-max-render-bytes))
+            ; The span remains only as bounded report evidence. `nothing` makes
+            ; fhc-span-of inject no bytes, while the reason retains that one
+            ; real source search already occurred.
+            (list "nothing" (nth h 1)
+                  "observation-budget-exceeded-after-source-search") h))
+    (defn fcmg-heed-lookup (ctx surface local-ready)
+        (fcmg-heed-bound-honor
+            (fhcs-lookup-hinted ctx surface local-ready
+                (fcmg-heed-source-hint ctx))))
+    (defn fcmg-heed-tail
+        (src ps bs geo lays sts embTv onormTv projTv first pos n stops tfx)
+        (do
+            (let ctx (fcmg-heed-ctx ps bs geo lays sts embTv onormTv projTv src tfx))
+            (fhc-run-decoded-first ctx
+                fcmg-heed-step fcmg-heed-prefill fcmg-heed-decode
+                fcmg-heed-encode fcmg-heed-lookup 1
+                first pos n stops (fhc-fresh (fcmg-heed-budget)) (empty))))
+    (defn fcmg-heed-tail-2p
+        (src ps bs geo lays sts embTv onormTv projTv first pos stops query reserve
+             source-hint tfx)
+        (do
+            (let ctx (fcmg-heed-ctx-hinted ps bs geo lays sts embTv onormTv projTv
+                src source-hint tfx))
+            (fhc-run-seeded-2p ctx
+                fcmg-heed-step fcmg-heed-prefill fcmg-heed-decode
+                fcmg-heed-encode fcmg-heed-lookup 1 first pos stops
+                (fcmg-heed-budget) query reserve)))
+
     ; Offer → commit → optional gap decode → next offer.
     ; Returns (first pos stream-ids thought-n offers).
     ; stream-ids is chronological: thought, gap, thought, ...
@@ -196,17 +410,21 @@
     ; slot 9 is `chunk`: how many prefill positions may be in flight before the
     ; carrier is asked to settle. 1 is the barrier-per-position the lane has
     ; always had; larger is the question this body can answer about itself.
-    (defn fcmg-heed-ctx (ctx sts src chunk)
+    ; This adapter receives the already-open model ctx. Its names stay distinct
+    ; from the resident current-source ctx above: redefining the same functions
+    ; silently changed their arities after a rebase and left each lane compiling
+    ; only when the other one was absent.
+    (defn fcmg-heed-bound-ctx (ctx sts src chunk)
         (list (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
               (nth ctx 4) (nth ctx 5) (nth ctx 6) src chunk (q38-ctx-span ctx)))
-    (defn fcmg-heed-step (h id pos)
+    (defn fcmg-heed-bound-step (h id pos)
         (q38-forward (nth h 0) (nth h 1) (nth h 2) (nth h 3) (nth h 4)
                      (nth h 5) (nth h 6) (nth h 7) id pos))
-    (defn fcmg-heed-prefill (h ids pos)
+    (defn fcmg-heed-bound-prefill (h ids pos)
         (q38-prefill-chunked-span (nth h 0) (nth h 1) (nth h 2) (nth h 3) (nth h 4)
                              (nth h 5) (nth h 6) (nth h 7) ids pos (nth h 9) (nth h 10)))
-    (defn fcmg-heed-decode (h ids) (tkz-decode-text (nth h 8) ids))
-    (defn fcmg-heed-encode (h text) (q35-encode (nth h 8) text))
+    (defn fcmg-heed-bound-decode (h ids) (tkz-decode-text (nth h 8) ids))
+    (defn fcmg-heed-bound-encode (h text) (q35-encode (nth h 8) text))
 
     ; The default substrate answers `nothing` for every envelope — axiom-1, and
     ; it is what an unconfigured host honestly holds. It performs no IO, so this
@@ -232,8 +450,9 @@
             (let pf (q38-prefill-chunked-span (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
                                  (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0 chunk
                                  (q38-ctx-span ctx)))
-            (fhc-run-seeded-2p (fcmg-heed-ctx ctx sts src chunk)
-                fcmg-heed-step fcmg-heed-prefill fcmg-heed-decode fcmg-heed-encode
+            (fhc-run-seeded-2p (fcmg-heed-bound-ctx ctx sts src chunk)
+                fcmg-heed-bound-step fcmg-heed-bound-prefill
+                fcmg-heed-bound-decode fcmg-heed-bound-encode
                 lookupf local-ready
                 (nth pf 0) (nth pf 1) stops heeds query reserve)))
 
@@ -242,8 +461,9 @@
         (do
             (let pf (q38-prefill (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
                                  (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0))
-            (fhc-run-seeded (fcmg-heed-ctx ctx sts src 1)
-                fcmg-heed-step fcmg-heed-prefill fcmg-heed-decode fcmg-heed-encode
+            (fhc-run-seeded (fcmg-heed-bound-ctx ctx sts src 1)
+                fcmg-heed-bound-step fcmg-heed-bound-prefill
+                fcmg-heed-bound-decode fcmg-heed-bound-encode
                 lookupf local-ready
                 (nth pf 0) (nth pf 1) n stops budget)))
 
@@ -258,10 +478,13 @@
             (fcmg-heed-names (tail xs)
                 (str_concat acc (str_concat (if (str_eq acc "") "" ",") (head xs))))))
 
-    ; BOUNDED, NON-CONTENT. A held-out run that prints the model's reply has
-    ; stopped being held out, so the reply crosses as a SHA-256 and a byte count
-    ; (form-cli-heed-telemetry.fk). Reading the text is a separate, named act.
-    (defn fcmg-heed-report (src r)
+    ; Standalone live-witness printer. Kept distinct from fcmg-heed-report(c),
+    ; which returns the structured current-source fields embedded in the normal
+    ; generation report. Sharing the name made the two-argument printer shadow
+    ; the one-argument reporter and collapsed an otherwise valid run to -1. It
+    ; remains bounded and non-content: the held-out reply crosses only as the
+    ; SHA-256 and byte count emitted by form-cli-heed-telemetry.fk.
+    (defn fcmg-heed-witness-report (src r)
         (do
             (let c (fhc-cursor-of r))
             (fcmg-heed-int "model-tokens" (len (fhc-out r)))
@@ -272,14 +495,11 @@
 
     (defn fcmg-heed-report-with-content (src r)
         (do
-            (fcmg-heed-report src r)
+            (fcmg-heed-witness-report src r)
             (fcmg-heed-line "output-content-NOT-HELD-OUT"
                 (tkz-decode-text src (fhc-out r)))
             0))
 
-    ; ── where the time goes ───────────────────────────────────────────────
-    ; Wall clock at each stage boundary plus the Metal counter, so the turn can
-    ; be read as seal / open / decode rather than argued about from a total.
     (defn fcmg-heed-witness-with (path prompt query reserve lookupf chunk)
         (do
             (let t-enter (now_unix_ms))
@@ -335,7 +555,7 @@
                                             (let t-done (now_unix_ms))
                                             (let gpu-done
                                                 (mbw-status-int (metal_status) "gpu_busy_us_total"))
-                                            (fcmg-heed-report src r)
+                                            (fcmg-heed-witness-report src r)
                                             (fcmg-heed-int "ms-seal" (sub t-sealed t-enter))
                                             (fcmg-heed-int "ms-header-read" (sub t-pre-open t-sealed))
                                             (fcmg-heed-int "ms-open" (sub t-opened t-pre-open))
@@ -355,7 +575,9 @@
                                             (q38-free-state sts)
                                             0)))))))))))
 
-    (defn fcmg-run-context (src arch model ids thought-lists thought-eval ctx n gap-n)
+    (defn fcmg-run-context-budgeted
+        (src arch model ids thought-lists thought-eval ctx n query reserve gap-n
+             source-hint tfx)
         (do
             (let geo (nth ctx 2))
             (let sts (q38-new-state geo))
@@ -384,14 +606,18 @@
                     (let offers (nth offered 4))
                     (let model-extra (sub (len stream-ids) thought-n))
                     (let remain (sub n model-extra))
-                    (let model-tail
-                        (if (le remain 0) (empty)
-                            (if (or (lt first 0) (q38-stop? first stops)) (empty)
-                                (cons first
-                                    (q38-generate
-                                        (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
-                                        (nth ctx 4) (nth ctx 5) (nth ctx 6)
-                                        first pos (sub remain 1) stops (empty))))))
+                    (let heed-run
+                        (if (and (gt query 0) (gt reserve 0))
+                            (fcmg-heed-tail-2p src
+                                (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
+                                (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                                first pos stops query reserve source-hint tfx)
+                            (fcmg-heed-tail src
+                                (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
+                                (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                                first pos remain stops tfx)))
+                    (let model-tail (fhc-out heed-run))
+                    (let heed (fhc-cursor-of heed-run))
                     (let out (tkz-cat stream-ids model-tail))
                     (metal_sync)
                     (let after-status (metal_status))
@@ -404,14 +630,28 @@
                     (let decode-us (sub
                         (mbw-status-int after-status "gpu_busy_us_total")
                         (mbw-status-int prefill-status "gpu_busy_us_total")))
-                    (let forwards (add (add (len ids) thought-n)
-                        (if (gt (add model-extra (len model-tail)) 0)
-                            (sub (add model-extra (len model-tail)) 1) 0)))
+                    (let forwards (add
+                        (add (add (len ids) thought-n)
+                            (if (gt (add model-extra (len model-tail)) 0)
+                                (sub (add model-extra (len model-tail)) 1) 0))
+                        (add (fhc-injected heed)
+                            (add (fhc-close-commits heed)
+                                 (fhc-terminal-forwards heed)))))
                     (let weight-bytes (q38-forward-weight-bytes ctx))
                     (fcmg-state-close-result sts
                         (fcmg-report model arch ids out (tkz-decode-text src out)
                             thought-eval offers thought-n
-                            forwards busy-us prefill-us decode-us weight-bytes))))))
+                            forwards busy-us prefill-us decode-us weight-bytes heed))))))
+
+    ; Compatibility: every existing caller remains on the fungible tail.
+    (defn fcmg-run-context (src arch model ids thought-lists thought-eval ctx n gap-n)
+        (fcmg-run-context-budgeted src arch model ids thought-lists thought-eval
+            ctx n 0 0 gap-n "" (qtf2-index-empty "absent" "unthreaded" "")))
+    (defn fcmg-run-context-2p
+        (src arch model ids thought-lists thought-eval ctx query reserve gap-n)
+        (fcmg-run-context-budgeted src arch model ids thought-lists thought-eval
+            ctx 0 query reserve gap-n ""
+            (qtf2-index-empty "absent" "unthreaded" "")))
 
     (defn fcmg-chat-ids (src prompt)
         (if (eq (ftl-armed?) 1)
@@ -424,6 +664,14 @@
                 (tkz-cat (q35-encode src "\n")
                          (q35-chat-ids src prompt)))))))
             (q35-chat-ids src prompt)))
+
+    ; Knowledge-query profile: the compact fqt prompt already carries the exact
+    ; execution grammar, so do not replay the large general system glossary.
+    ; The ordinary form-cli generation door remains byte-identical on `full`.
+    (defn fcmg-chat-ids-profile (src prompt profile)
+        (if (str_eq profile "knowledge-query")
+            (q35-chat-ids src prompt)
+            (fcmg-chat-ids src prompt)))
 
     ; A first admission: the seal is verified before a single byte of the file is
     ; read for meaning, exactly as before.  What changed is only what is answered —
@@ -453,26 +701,41 @@
             (str_concat (if (str_eq model "") "unnamed" model)
                 " is unfinished on this door; choose and route still name the file."))))))
 
-    (defn fcmg-fresh (path prompt n)
+    (defn fcmg-fresh-at-budgeted-hinted
+        (path prompt n query reserve profile source-hint)
         (do
             (let verdict (qaf-seal-verdict path))
         (if (not (eq verdict 1))
             (list (fcmg-noted prompt "" "" (fcmg-seal-refusal verdict)) (fcmr-none))
             (do
                 (let src (fcmg-src path))
+                ; The crystal, both doors (2026-08-24): load the seal-keyed
+                ; recording if present; otherwise this first ask IS the heat —
+                ; freeze, then load. If even that fails, the scan path answers:
+                ; ice is a speed, never a gate. Measured: open 16.3 s -> 0.45 s.
+                (let x0 (qsx-load path))
+                (let x (if (eq (nth x0 0) 1) x0
+                           (do (let heat (qsx-freeze path)) (qsx-load path))))
+                (let iced (nth x 0))
                 (let thoughts (lg-think-all prompt))
                 (let thought-lists (fcmg-encode-thoughts src thoughts (empty)))
                 (let thought-eval (lg-values-line thoughts))
                 (let thought-n (fcmg-id-count thought-lists 0))
                 (let gap-n (if (gt (len thoughts) 1) (lg-gap-default) 0))
-                (let ids (fcmg-chat-ids src prompt))
+                ; The indexed chat-ids lane (byte-identical, ~10x: 73.07 s ->
+                ; 7.26 s witnessed 2026-08-25); an absent or stale index falls
+                ; back to the reference lane inside qei-chat-ids-profile.
+                (let tfx (qtf2-load (qtf2-root-for path) (qsx-seal-line path)))
+                (let ids (qei-chat-ids-profile src tfx prompt profile))
                 (let arch (fcmg-arch src))
                 (let model (fcmg-name src))
                 (let model-max (gmt-u32 src (q38-key arch "context_length")))
-                (let need (add (add (len ids) thought-n)
-                    (add (mul gap-n (if (gt (len thoughts) 1) (sub (len thoughts) 1) 0)) n)))
+                (let need (fcmg-context-need (len ids) thought-n
+                    (mul gap-n (if (gt (len thoughts) 1)
+                        (sub (len thoughts) 1) 0)) n query reserve))
                 (let maxpos (if (lt need model-max) need model-max))
-                (let required (q38-required-size src (egg-data-base src 32)))
+                (let required (if (eq iced 1) (qsx-required x)
+                                  (q38-required-size src (egg-data-base src 32))))
                 (let actual (file_size path))
                 (if (not (str_eq arch "qwen35"))
                     (list (fcmg-noted prompt arch model (fcmg-arch-door arch model))
@@ -480,7 +743,8 @@
                 (if (eq (len ids) 0)
                     (list (fcmg-noted prompt arch model "generation refused: tokenizer produced no prompt tokens")
                           (fcmr-none))
-                (if (or (le n 0) (gt need model-max))
+                (if (or (eq (fcmg-tail-budget-ok? n query reserve) 0)
+                        (gt need model-max))
                     (list (fcmg-noted prompt arch model
                               (str_concat "generation refused: requested context exceeds model limit="
                                   (int_to_str model-max)))
@@ -492,7 +756,7 @@
                                       (str_concat ";actual=" (int_to_str actual)))))
                           (fcmr-none))
                     (do
-                        (let ctx (q38-open path maxpos))
+                        (let ctx (if (eq iced 1) (qsx-open path maxpos x) (q38-open path maxpos)))
                         (if (lt (len ctx) 10)
                             (list (fcmg-noted prompt arch model
                                       (str_concat "generation refused: model context did not open; "
@@ -503,9 +767,24 @@
                                           (fcmg-open-refusal ctx "model context contains an invalid handle"))
                                       (fcmr-none))
                                 (list (fcmg-noted prompt arch model
-                                          (fcmg-run-context src arch model ids thought-lists thought-eval
-                                              ctx n gap-n))
+                                          (fcmg-run-context-budgeted src arch model ids
+                                              thought-lists thought-eval ctx n query reserve gap-n
+                                              source-hint tfx))
                                       (fcmr path maxpos ctx src arch)))))))))))))
+    ; Ordinary callers may carry an exact path in prose. Dataset-backed callers
+    ; already hold a sealed source path separately and use the explicit hinted
+    ; door below, so evidence identity need not be smuggled into prompt text.
+    (defn fcmg-fresh-at-budgeted (path prompt n query reserve profile)
+        (fcmg-fresh-at-budgeted-hinted path prompt n query reserve profile
+            (fhcs-query-source-path prompt)))
+    ; Existing doors are fungible delegates; two-phase callers name both
+    ; ledgers explicitly.
+    (defn fcmg-fresh-at (path prompt n profile)
+        (fcmg-fresh-at-budgeted path prompt n 0 0 profile))
+    (defn fcmg-fresh-at-2p (path prompt query reserve profile)
+        (fcmg-fresh-at-budgeted path prompt 0 query reserve profile))
+    (defn fcmg-fresh (path prompt n)
+        (fcmg-fresh-at path prompt n "full"))
 
     (defn fcmg-stale-close ()
         (list "generation refused: previous model handle close mismatch" (fcmr-none)))
@@ -514,10 +793,16 @@
     ; residence, a residence for a different file, or a prompt that outgrows the
     ; ceiling this one was opened for all end in the same place — release, then
     ; admit — so there is one path and no mode to be in.
-    (defn fcmg-generate-with (r path prompt n)
-        (if (eq (fcmr-live? r) 0) (fcmg-fresh path prompt n)
+    (defn fcmg-generate-with-at-budgeted-hinted
+        (r path prompt n query reserve profile source-hint)
+        (if (eq (fcmr-live? r) 0)
+            (fcmg-fresh-at-budgeted-hinted path prompt n query reserve profile
+                source-hint)
             (if (not (str_eq (fcmr-path r) path))
-                (if (eq (fcmr-release-ok? r) 1) (fcmg-fresh path prompt n) (fcmg-stale-close))
+                (if (eq (fcmr-release-ok? r) 1)
+                    (fcmg-fresh-at-budgeted-hinted path prompt n query reserve profile
+                        source-hint)
+                    (fcmg-stale-close))
                 (do
                     (let src (fcmr-src r))
                     (let arch (fcmr-arch r))
@@ -527,25 +812,40 @@
                     (let thought-eval (lg-values-line thoughts))
                     (let thought-n (fcmg-id-count thought-lists 0))
                     (let gap-n (if (gt (len thoughts) 1) (lg-gap-default) 0))
-                    (let ids (fcmg-chat-ids src prompt))
+                    (let tfx (qtf2-load (qtf2-root-for path) (qsx-seal-line path)))
+                    (let ids (qei-chat-ids-profile src tfx prompt profile))
                     (let model-max (gmt-u32 src (q38-key arch "context_length")))
-                    (let need (add (add (len ids) thought-n)
-                        (add (mul gap-n (if (gt (len thoughts) 1) (sub (len thoughts) 1) 0)) n)))
+                    (let need (fcmg-context-need (len ids) thought-n
+                        (mul gap-n (if (gt (len thoughts) 1)
+                            (sub (len thoughts) 1) 0)) n query reserve))
                     (if (eq (len ids) 0)
                         (list (fcmg-noted prompt arch model "generation refused: tokenizer produced no prompt tokens") r)
-                    (if (or (le n 0) (gt need model-max))
+                    (if (or (eq (fcmg-tail-budget-ok? n query reserve) 0)
+                            (gt need model-max))
                         (list (fcmg-noted prompt arch model
                                   (str_concat "generation refused: requested context exceeds model limit="
                                       (int_to_str model-max)))
                               r)
                     (if (le need (fcmr-maxpos r))
                         (list (fcmg-noted prompt arch model
-                                  (fcmg-run-context src arch model ids thought-lists thought-eval
-                                      (fcmr-ctx r) n gap-n))
+                                  (fcmg-run-context-budgeted src arch model ids
+                                      thought-lists thought-eval (fcmr-ctx r)
+                                      n query reserve gap-n source-hint tfx))
                               r)
                         (if (eq (fcmr-release-ok? r) 1)
-                            (fcmg-fresh path prompt n)
+                            (fcmg-fresh-at-budgeted-hinted path prompt n query reserve
+                                profile source-hint)
                             (fcmg-stale-close)))))))))
+    (defn fcmg-generate-with-at-budgeted
+        (r path prompt n query reserve profile)
+        (fcmg-generate-with-at-budgeted-hinted r path prompt n query reserve
+            profile (fhcs-query-source-path prompt)))
+    (defn fcmg-generate-with-at (r path prompt n profile)
+        (fcmg-generate-with-at-budgeted r path prompt n 0 0 profile))
+    (defn fcmg-generate-with-at-2p (r path prompt query reserve profile)
+        (fcmg-generate-with-at-budgeted r path prompt 0 query reserve profile))
+    (defn fcmg-generate-with (r path prompt n)
+        (fcmg-generate-with-at r path prompt n "full"))
 
     ; The one-shot door, byte-identical in what it answers: admit, generate,
     ; release.  A caller with nothing to hold on to loses nothing and keeps the
@@ -573,6 +873,49 @@
             (if (eq (fcmr-release-ok? (nth out 1)) 1) (nth out 0)
                 "generation refused: model handle close mismatch")))
 
+    ; Compact current-source door for held-out evaluation and direct knowledge
+    ; questions. Same resident model, cursor, lookup budget and KV injection;
+    ; only the repeated prompt profile is smaller.
+    (defn fcmg-generate-knowledge-resident (r path prompt n)
+        (if (str_eq path "")
+            (list "no model is picked — current-source generation needs a selected model" r)
+            (if (str_eq prompt "") (list "usage: knowledge-generate <prompt>" r)
+                (fcmg-generate-with-at r path (fqt-knowledge-prompt prompt) n
+                    "knowledge-query"))))
+    (defn fcmg-generate-knowledge-resident-2p (r path prompt query reserve)
+        (if (str_eq path "")
+            (list "no model is picked — current-source generation needs a selected model" r)
+            (if (str_eq prompt "") (list "usage: knowledge-generate <prompt>" r)
+                (fcmg-generate-with-at-2p r path (fqt-knowledge-prompt prompt)
+                    query reserve "knowledge-query"))))
+    (defn fcmg-generate-knowledge-resident-2p-hinted
+        (r path prompt query reserve source-hint)
+        (if (str_eq path "")
+            (list "no model is picked — current-source generation needs a selected model" r)
+            (if (str_eq prompt "") (list "usage: knowledge-generate <prompt>" r)
+                (fcmg-generate-with-at-budgeted-hinted r path
+                    (fqt-knowledge-prompt prompt) 0 query reserve
+                    "knowledge-query" source-hint))))
+    ; The current configured production current-source door. 48/32 is a
+    ; hypothesis until a live hit observes the reserve-opening path; nothing here
+    ; legislates. The older n-argument entry remains a fungible delegate.
+    (defn fcmg-generate-current-source-resident (r path prompt)
+        (fcmg-generate-knowledge-resident-2p r path prompt
+            (fcmg-current-source-query-budget)
+            (fcmg-current-source-answer-reserve)))
+    (defn fcmg-generate-current-source-resident-at
+        (r path prompt source-hint)
+        (fcmg-generate-knowledge-resident-2p-hinted r path prompt
+            (fcmg-current-source-query-budget)
+            (fcmg-current-source-answer-reserve)
+            source-hint))
+    (defn fcmg-generate-knowledge (path prompt n)
+        (do
+            (let out (fcmg-generate-knowledge-resident
+                (fcmr-none) path prompt n))
+            (if (eq (fcmr-release-ok? (nth out 1)) 1) (nth out 0)
+                "generation refused: model handle close mismatch")))
+
     (defn fcmg-bandwidth (path)
         (if (str_eq path "")
             "no model is picked — run `models <dir>`, then `use <n>`, then `model-bandwidth`"
@@ -592,5 +935,4 @@
         (fcmg-heed-witness-with path prompt query reserve fhg-lookup 0))
     (defn fcmg-heed-witness-grounded-chunk (path prompt query reserve chunk)
         (fcmg-heed-witness-with path prompt query reserve fhg-lookup chunk))
-
     0)

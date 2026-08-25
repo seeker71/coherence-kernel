@@ -1,0 +1,210 @@
+; qwen35-tokfast-v2-filesystem-live.fk — tiny physical recorder/readback
+; witness for the fixed-row tokenizer index. It touches only the two explicit
+; /tmp roots below and releases both before returning.
+;
+; NEVER PREFLIGHT THIS DRIVER. Importing it performs filesystem effects.
+; It opens no GGUF, model, Metal, MLX, network, or remote carrier.
+;
+; Verdict 4095:
+;   1      descending vocab input is refused before a second row is appended
+;   2      begin creates empty row files but no candidate or manifest
+;   4      completed vocab rows remain unpublished
+;   8      completed merge rows remain unpublished at their exact extent
+;   16     candidate is observable only after rows, then rename publishes last
+;   32     published row extents equal manifest count times fixed width
+;   64     the exact live seal admits the published index as current
+;   128    production vocab slices recover a byte-hostile key and value
+;   256    production merge slices recover a byte-hostile pair and rank
+;   512    production pair selection retains the leftmost minimum rank
+;   1024   a foreign seal returns explicit stale fallback nothing
+;   2048   both synthetic roots are released
+;
+; preludes: form-stdlib/qwen35-tokfast-v2.fk
+
+import "bidirectional-framebuffer-channel.fk"
+
+(do
+    (defn qtf2l-root () "/tmp/form-qtf2-v2-filesystem-live")
+    (defn qtf2l-order-root () "/tmp/form-qtf2-v2-order-live")
+    (defn qtf2l-seal () "artifact-seal sha256:synthetic-physical-v2")
+    (defn qtf2l-all (xs) (if (eq (sum xs) (len xs)) 1 0))
+    (defn qtf2l-bit (ok bit) (if ok bit 0))
+    ; form-fs currently maps remove-tree to the host's empty-directory rmdir,
+    ; so this witness releases its four known files explicitly before rmdir.
+    (defn qtf2l-release-root (root)
+        (do
+            (let _manifest (fs-remove-file (qtf2-manifest-path root)))
+            (let _candidate (fs-remove-file
+                (qtf2-manifest-candidate-path root)))
+            (let _vocab (fs-remove-file (qtf2-vocab-path root)))
+            (let _merge (fs-remove-file (qtf2-merge-path root)))
+            (fs-remove-tree root)))
+
+    (framebuffer-clear)
+    (let root (qtf2l-root))
+    (let order-root (qtf2l-order-root))
+    (let _clear-main-before (qtf2l-release-root root))
+    (let _clear-order-before (qtf2l-release-root order-root))
+    (let binary (list 0 10 124 255))
+    (let a (list 65))
+    (let b (list 66))
+    (let c (list 67))
+    (let vcap 4)
+    (let lcap 4)
+    (let rcap 1)
+    (let vw (qtf2-vocab-width vcap))
+    (let mw (qtf2-merge-width lcap rcap))
+
+    ; A rejected ordering attempt gets its own root. The first row is real;
+    ; the descending second key must not alter that physical extent.
+    (let ob0 (qtf2-rec-begin order-root (qtf2l-seal) vcap lcap rcap))
+    (let ob1 (qtf2-rec-vocab ob0 b 1))
+    (let ob2 (qtf2-rec-vocab ob1 a 0))
+    (let strict-order (qtf2l-all (list
+        (str_eq (qtf2-rec-status ob2) "failure")
+        (str_eq (qtf2-rec-reason ob2) "vocab-not-strictly-sorted")
+        (eq (fs-stat-size (qtf2-vocab-path order-root)) vw)
+        (eq (fs-exists? (qtf2-manifest-candidate-path order-root)) 0)
+        (eq (fs-exists? (qtf2-manifest-path order-root)) 0))))
+
+    ; The admitted artifact records both sorted tables before any publication.
+    (let r0 (qtf2-rec-begin root (qtf2l-seal) vcap lcap rcap))
+    (let begin-withheld (qtf2l-all (list
+        (str_eq (qtf2-rec-status r0) "open")
+        (eq (fs-stat-size (qtf2-vocab-path root)) 0)
+        (eq (fs-stat-size (qtf2-merge-path root)) 0)
+        (eq (fs-exists? (qtf2-manifest-candidate-path root)) 0)
+        (eq (fs-exists? (qtf2-manifest-path root)) 0))))
+    (let r1 (qtf2-rec-vocab r0 binary 7))
+    (let r2 (qtf2-rec-vocab r1 a 0))
+    ; One bounded diagnostic exchange owns the first multi-row transition.
+    ; A failure selects revise; a healthy transition selects continue.
+    (let append-failed (if (str_eq (qtf2-rec-status r2) "failure") 1 0))
+    (let append-actual (fs-stat-size (qtf2-vocab-path root)))
+    (let append-expected (mul 2 vw))
+    (let diag-out (bfc-envelope 0 2401 0
+        (list append-failed append-actual append-expected) 8))
+    (let _diag-out-event (bfc-record-out diag-out 4802))
+    (let diag-action (if append-failed 2 0))
+    (let diag-in (bfc-control diag-out diag-action))
+    (let _diag-in-event (bfc-record-in diag-in 4803))
+    (let diag-applied (bfc-apply diag-out diag-in diag-action 5))
+    (let dt0 (str_concat "qtf2-live-diagnostic|exchange=2401|reason="
+        (qtf2-rec-reason r2)))
+    (let dt1 (str_concat dt0 "|actual="))
+    (let dt2 (str_concat dt1 (int_to_str append-actual)))
+    (let dt3 (str_concat dt2 "|expected="))
+    (let dt4 (str_concat dt3 (int_to_str append-expected)))
+    (let dt5 (str_concat dt4 "|control="))
+    (let dt6 (str_concat dt5 (int_to_str diag-action)))
+    (let dt7 (str_concat dt6 "|applied="))
+    (let dt8 (str_concat dt7 (int_to_str diag-applied)))
+    (let dt9 (str_concat dt8 "|events="))
+    (let dt10 (str_concat dt9 (int_to_str (len (framebuffer-events)))))
+    (print_str (str_concat dt10 "\n"))
+    (let r3 (qtf2-rec-vocab r2 b 1))
+    (let vocab-withheld (qtf2l-all (list
+        (str_eq (qtf2-rec-status r3) "open")
+        (eq (qtf2-rec-vcount r3) 3)
+        (eq (fs-stat-size (qtf2-vocab-path root)) (mul 3 vw))
+        (eq (fs-stat-size (qtf2-merge-path root)) 0)
+        (eq (fs-exists? (qtf2-manifest-candidate-path root)) 0)
+        (eq (fs-exists? (qtf2-manifest-path root)) 0))))
+    (let m0 (qtf2-rec-begin-merges r3))
+    (let m1 (qtf2-rec-merge m0 binary a 1))
+    (let m2 (qtf2-rec-merge m1 a b 5))
+    (let m3 (qtf2-rec-merge m2 b c 1))
+    (let merge-withheld (qtf2l-all (list
+        (str_eq (qtf2-rec-status m3) "open")
+        (eq (qtf2-rec-mcount m3) 3)
+        (eq (fs-stat-size (qtf2-vocab-path root)) (mul 3 vw))
+        (eq (fs-stat-size (qtf2-merge-path root)) (mul 3 mw))
+        (eq (fs-exists? (qtf2-manifest-candidate-path root)) 0)
+        (eq (fs-exists? (qtf2-manifest-path root)) 0))))
+
+    (let staged (qtf2-rec-stage-manifest m3))
+    (let candidate-ready (qtf2l-all (list
+        (str_eq (qtf2-rec-status staged) "candidate")
+        (str_eq (qtf2-rec-reason staged) "manifest-staged")
+        (eq (fs-exists? (qtf2-manifest-candidate-path root)) 1)
+        (eq (fs-exists? (qtf2-manifest-path root)) 0)
+        (eq (fs-stat-size (qtf2-vocab-path root)) (mul 3 vw))
+        (eq (fs-stat-size (qtf2-merge-path root)) (mul 3 mw)))))
+    (let sealed (qtf2-rec-publish staged))
+    (let published-last (qtf2l-all (list
+        merge-withheld
+        candidate-ready
+        (str_eq (qtf2-rec-status sealed) "sealed")
+        (str_eq (qtf2-rec-reason sealed) "published")
+        (eq (fs-exists? (qtf2-manifest-path root)) 1)
+        (eq (fs-exists? (qtf2-manifest-candidate-path root)) 0))))
+    (let current (qtf2-load root (qtf2l-seal)))
+    (let manifest (qtf2-index-manifest current))
+    (let exact-extents (qtf2l-all (list
+        (eq (qtf2-manifest-vcount manifest) 3)
+        (eq (qtf2-manifest-vwidth manifest) vw)
+        (eq (fs-stat-size (qtf2-vocab-path root))
+            (mul (qtf2-manifest-vcount manifest)
+                 (qtf2-manifest-vwidth manifest)))
+        (eq (qtf2-manifest-mcount manifest) 3)
+        (eq (qtf2-manifest-mwidth manifest) mw)
+        (eq (fs-stat-size (qtf2-merge-path root))
+            (mul (qtf2-manifest-mcount manifest)
+                 (qtf2-manifest-mwidth manifest))))))
+    (let exact-seal (qtf2l-all (list
+        (str_eq (qtf2-index-status current) "current")
+        (str_eq (qtf2-index-reason current)
+            "seal-and-extents-current")
+        (str_eq (qtf2-manifest-seal manifest) (qtf2l-seal)))))
+
+    ; These calls cross the production door: one exact fs-read-slice for each
+    ; reported binary-search probe, never the in-memory proof mirror.
+    (let vocab-hit (qtf2-vocab-find-file current binary))
+    (let merge-hit (qtf2-merge-find-file current binary a))
+    (let leftmost (qtf2-best-pair-file current (list binary a b c)))
+    (let vocab-readback (qtf2l-all (list
+        (str_eq (qtf2-outcome-status vocab-hit) "hit")
+        (eq (qtf2-outcome-present? vocab-hit) 1)
+        (eq (qtf2-outcome-value vocab-hit) 7)
+        (eq (qtf2-outcome-probes vocab-hit) 2))))
+    (let merge-readback (qtf2l-all (list
+        (str_eq (qtf2-outcome-status merge-hit) "hit")
+        (eq (qtf2-outcome-present? merge-hit) 1)
+        (eq (qtf2-outcome-value merge-hit) 1)
+        (eq (qtf2-outcome-probes merge-hit) 2))))
+    (let leftmost-readback (qtf2l-all (list
+        (str_eq (qtf2-pair-choice-status leftmost) "ok")
+        (eq (qtf2-pair-choice-present? leftmost) 1)
+        (eq (qtf2-pair-choice-position leftmost) 0)
+        (eq (qtf2-pair-choice-rank leftmost) 1))))
+
+    (let stale (qtf2-load root "artifact-seal sha256:foreign"))
+    (let stale-out (qtf2-vocab-find-file stale a))
+    (let stale-fallback (qtf2l-all (list
+        (str_eq (qtf2-index-status stale) "stale")
+        (str_eq (qtf2-outcome-status stale-out) "stale")
+        (eq (qtf2-outcome-present? stale-out) 0)
+        (eq (nothing? (qtf2-outcome-value stale-out)) 1)
+        (eq (qtf2-outcome-probes stale-out) 0))))
+
+    ; Release happens before the verdict is formed, so the cleanup bit reads
+    ; the physical postcondition rather than trusting remove-tree's return.
+    (let _release-main (qtf2l-release-root root))
+    (let _release-order (qtf2l-release-root order-root))
+    (let released (qtf2l-all (list
+        (eq (fs-exists? root) 0)
+        (eq (fs-exists? order-root) 0))))
+
+    (sum (list
+        (qtf2l-bit strict-order 1)
+        (qtf2l-bit begin-withheld 2)
+        (qtf2l-bit vocab-withheld 4)
+        (qtf2l-bit merge-withheld 8)
+        (qtf2l-bit published-last 16)
+        (qtf2l-bit exact-extents 32)
+        (qtf2l-bit exact-seal 64)
+        (qtf2l-bit vocab-readback 128)
+        (qtf2l-bit merge-readback 256)
+        (qtf2l-bit leftmost-readback 512)
+        (qtf2l-bit stale-fallback 1024)
+        (qtf2l-bit released 2048))))

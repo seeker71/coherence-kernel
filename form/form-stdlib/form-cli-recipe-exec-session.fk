@@ -1,0 +1,141 @@
+; form-cli-recipe-exec-session.fk — one resident local-Qwen context can emit a
+; NodeID recipe request, cross a raw-byte cursor, receive a typed physical
+; observation, and continue without rebuilding its transcript or KV state.
+;
+; This is the joined loop. Each predicted model ID is decoded to its byte chunk
+; and offered directly to frxc-feed. BPE remains the transformer's embedding
+; boundary; it is not a grammar pre-pass. The scannerless cursor alone decides
+; whether those bytes form a recipe request. When a frame completes, its generic
+; callback generates and executes Metal exactly once. The physically flagged
+; observation then enters fcms-observe, which consumes the pending generated ID
+; once, encodes only the new observation plus its role crossing, and continues
+; on the same q38 state and KV rows.
+;
+; Model bytes before the crossing, model bytes after it, and injected Form bytes
+; are three separate values and ledgers. The local model requests execution; it
+; does not execute Form or native code inside logits. A cursor permits only one
+; crossing. Another micro-thought opens another cursor in the same residence.
+;
+; This cell defines the movement but performs no top-level model or Metal work.
+; The live run is separate. It changes no C seed, uses no flattening and has no
+; operations table.
+;
+; preludes: form-stdlib/form-cli-model-session.fk
+; preludes: form-stdlib/form-cli-recipe-exec-cursor.fk
+; preludes: form-stdlib/form-recipe-exec-token-live.fk
+;
+; Pure shape proven by: form-stdlib/tests/form-cli-recipe-exec-session-band.fk
+
+(do
+    ; result = tag session cursor before-text after-text injected-text
+    ;              before-ids after-ids
+    (defn frxs-result (session cursor before after injected before-ids after-ids)
+        (list "form-cli-recipe-exec-session-v1" session cursor before after
+              injected before-ids after-ids))
+    (defn frxs-session (r) (nth r 1))
+    (defn frxs-cursor (r) (nth r 2))
+    (defn frxs-before-text (r) (nth r 3))
+    (defn frxs-after-text (r) (nth r 4))
+    (defn frxs-injected-text (r) (nth r 5))
+    (defn frxs-before-ids (r) (nth r 6))
+    (defn frxs-after-ids (r) (nth r 7))
+    (defn frxs-model-bytes (r)
+        (add (str_len (frxs-before-text r)) (str_len (frxs-after-text r))))
+    (defn frxs-injected-bytes (r) (str_len (frxs-injected-text r)))
+    (defn frxs-crossed? (r)
+        (if (eq (frxc-injections (frxs-cursor r)) 1) 1 0))
+    (defn frxs-callback-calls (r)
+        (frxc-callback-calls (frxs-cursor r)))
+    (defn frxs-carrier-executed? (r)
+        (frxc-callback-observed-executed? (frxs-cursor r)))
+    (defn frxs-native-code-generated? (r)
+        (frxc-callback-observed-code-generated? (frxs-cursor r)))
+    (defn frxs-model-executed-form? (r) 0)
+
+    (defn frxs-with-generated (s pos pending stopped added)
+        (fcms-with-stream s pos pending stopped
+            (add (fcms-generated-ids s) added)
+            (fcms-injected-ids s) (fcms-observations s)))
+    (defn frxs-fail (s reason pos pending stopped added)
+        (fcms-session "nothing" reason (fcms-path s) (fcms-src s)
+            (fcms-ctx s) (fcms-sts s) (fcms-maxpos s) pos pending stopped
+            (fcms-prompt-ids s) (add (fcms-generated-ids s) added)
+            (fcms-injected-ids s) (fcms-observations s)))
+    (defn frxs-forward (s id pos)
+        (do
+            (let ctx (fcms-ctx s))
+            (q38-forward
+                (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
+                (fcms-sts s) (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                id pos)))
+
+    (defn frxs-finish (s c before after injected before-ids after-ids)
+        (frxs-result s c before after injected before-ids after-ids))
+
+    (defn frxs-walk
+        (s c id pos left stops phase before after injected before-ids after-ids)
+        (if (le left 0)
+            (frxs-finish s c before after injected before-ids after-ids)
+        (if (lt id 0)
+            (frxs-finish (frxs-fail s "model-forward-refused" pos -1 1 0)
+                c before after injected before-ids after-ids)
+        (if (eq (q38-stop? id stops) 1)
+            (frxs-finish (frxs-with-generated s pos id 1 0)
+                c before after injected before-ids after-ids)
+        (if (ge pos (fcms-maxpos s))
+            (frxs-finish (frxs-fail s "session-position-refused" pos id 0 0)
+                c before after injected before-ids after-ids)
+            (do
+                (let chunk (tkz-decode-text (fcms-src s) (list id)))
+                (let transfer (frxc-feed 0 frexl-cursor-executor c chunk))
+                (let c2 (frxc-transfer-cursor transfer))
+                (let model-delta (frxc-transfer-model transfer))
+                (let injection-delta (frxc-transfer-injected transfer))
+                (let before2 (if (eq phase 0)
+                    (str_concat before model-delta) before))
+                (let after2 (if (eq phase 0)
+                    after (str_concat after model-delta)))
+                (let before-ids2 (if (eq phase 0)
+                    (append before-ids (list id)) before-ids))
+                (let after-ids2 (if (eq phase 0)
+                    after-ids (append after-ids (list id))))
+                (let spoken (frxs-with-generated s pos id 0 1))
+                (if (gt (str_len injection-delta) 0)
+                    (do
+                        ; spoken still holds this just-decoded ID as pending.
+                        ; fcms-observe consumes it exactly once before the typed
+                        ; observation and returns the resumed reply prediction.
+                        (let resumed (fcms-observe spoken injection-delta))
+                        (if (not (eq (fcms-live? resumed) 1))
+                            (frxs-finish resumed c2 before2 after2
+                                (str_concat injected injection-delta)
+                                before-ids2 after-ids2)
+                            (frxs-walk resumed c2 (fcms-pending resumed)
+                                (fcms-pos resumed) (sub left 1) stops 1
+                                before2 after2
+                                (str_concat injected injection-delta)
+                                before-ids2 after-ids2)))
+                (if (eq left 1)
+                    (frxs-finish spoken c2 before2 after2 injected
+                        before-ids2 after-ids2)
+                    (do
+                        (let next-id (frxs-forward spoken id pos))
+                        (let next (frxs-with-generated spoken (add pos 1)
+                            next-id
+                            (if (or (lt next-id 0)
+                                    (eq (q38-stop? next-id stops) 1)) 1 0)
+                            0))
+                        (frxs-walk next c2 next-id (add pos 1) (sub left 1)
+                            stops phase before2 after2 injected
+                            before-ids2 after-ids2))))))))))
+
+    (defn frxs-run (session max-generated)
+        (if (or (not (eq (fcms-live? session) 1))
+                (le max-generated 0))
+            (frxs-result session (frxc-fresh) "" "" "" (empty) (empty))
+            (frxs-walk session (frxc-fresh)
+                (fcms-pending session) (fcms-pos session) max-generated
+                (fcmg-q35-stops (fcms-src session)) 0
+                "" "" "" (empty) (empty))))
+
+    0)

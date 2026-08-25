@@ -1,5 +1,16 @@
 # 2026-08-24 — prefill inverted: all tokens through layer 0, then layer 1
 
+> **Radius correction, observed after landing:** the first span RMS copied
+> `ldm-rmsnorm-tg-msl`'s fixed `sq[4096]`, while this GGUF declares width 5120.
+> The matching SHA below proves the schedule executed and happened to agree on
+> this device; it does not make the out-of-bounds kernel defined. The body now
+> emits a width-independent one-thread-per-token span RMS with the same ascending
+> sum and Newton-50 arithmetic. The original run remains an experiment receipt;
+> promotion waits for a fresh live parity witness on the corrected kernel.
+> The review also found that the ordinary Qwen path selected the inherited
+> cooperative RMS beyond the same radius. The shared selector now keeps that
+> twin only for `n <= 4096` and uses the existing serial attestant for wider rows.
+
 The 76% seam was the loop order. `dsv4-decode-loop.fk` transcribed the shape
 from ds4.c in July — *prefill is layer-major, decode is token-major, two
 schedules over the same rows* — and this lane had only ever run the second one.
@@ -39,11 +50,10 @@ the token-major residual stream (buffer 33) into slot 0, run untouched, and
 scattered back — two copies per token per layer, which buys a FFN that sees the
 whole span: six dispatches per layer instead of six per token.
 
-New kernels, all compiled live on the M4 Max: `form_copy_soff_f32` beside the
-existing destination-offset copy, and `form_rmsnorm_span_f32` — one threadgroup
-per token, keeping `ldm-rmsnorm-tg-msl`'s arithmetic exactly, the same
-threadgroup square buffer, the same serial sum by thread 0 in the same order,
-the same Newton-50 reciprocal. Only the row offset is new.
+New kernels compiled live on the M4 Max: `form_copy_soff_f32` beside the
+existing destination-offset copy, and the first `form_rmsnorm_span_f32`. The
+span RMS radius defect named above means compilation and matching output are
+not sufficient promotion evidence for that first transcription.
 
 ## The divergence, and what it taught
 
