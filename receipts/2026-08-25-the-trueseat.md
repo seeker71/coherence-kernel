@@ -1,5 +1,12 @@
 # 2026-08-25 — the trueseat: the claim seated where it is true, and the sentinel that aliases itself
 
+> **Addendum, same day (trunk weave d9996167):** the 1100 crossing resolved
+> by the standing first-lander rule — jit-lane's **valuedabsence** holds
+> 1100 on the trunk; this line's trueseat reseated there to **1101** and
+> voidalias to **1102**, collision witnessed in the row's own comment. The
+> local ids below stand until the next main reunion, where they reseat to
+> the trunk's; row 1103 (shadepair) carries the seam note.
+
 The arc in one line: coordless (1097) asked a hazard for its coordinates;
 relaymark (1099) marked the passage it had traveled; the coordinates landed;
 both grounds got witnessed; and the last open end — the "plausible 3" —
