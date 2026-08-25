@@ -1,8 +1,17 @@
 ; qwen38-span-invariant-band.fk — the rules a span kernel must keep, checked.
 ;
 ; Three bugs on 2026-08-24 and every one was the same bug: a per-token pitch
-; inferred from something that is not the pitch. They cost three model runs and a
-; seventeen-minute hang, and none of them was in the arithmetic.
+; inferred from something that is not the pitch. They cost three model runs, and
+; none of them was in the arithmetic.
+;
+; An earlier version of this header also blamed them for a seventeen-minute
+; hang. That attribution is withdrawn. A sibling lane reported on 2026-08-25
+; that an unbounded wait on Metal residency — several holders of the same 27 GB
+; at once, only one of them computing — produces a stall with the same
+; signature: no output, no error, a process that looks busy. One run cannot tell
+; the two apart, and the run that was blamed was never repeated. The pitch bugs
+; are witnessed on their own evidence, which is the divergent output; the hang
+; is not evidence for them.
 ;
 ;   bs2 is allocated at max(2*nq*hd, geo1) so ONE buffer serves both the fused
 ;   q||gate projection of a full-attention layer and the wider projection of a
@@ -20,9 +29,9 @@
 ; no GPU. FKWU-STAGED, not a four-arm candidate.
 ;
 ; Verdict 1023:
-;   1     q38-bs2-stride exists and is the max of both consumers
-;   2     both bs2 writers go through it, not through rows
-;   4     the two recurrences take their offset from it, not from geo1
+;   1     the pitch has one home in the layout contract, and the lane asks it
+;   2     the span walker binds that pitch once and passes the same value on
+;   4     the recurrences take their offset from the contract, not from geo1
 ;   8     the batched matmul writes at an explicit ystride
 ;   16    no span kernel still writes y[t * rows + r]
 ;   32    gates reads its weight argument by head, never by token
@@ -32,26 +41,44 @@
 ;   512   the cost model names the pitch rule, so the number has a home
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/qwen38-dispatch-model.fk
-; witnessed: 2026-08-25 -> 1023 on fkwu
+; witnessed: 2026-08-25 -> 1023 on fkwu, after the reunion with jovial-tharp
+; moved the pitch rule into qwen35-linear-span-layout-contract.fk
 
 (do
     (defn qsi-has? (s n) (if (ge (str_find s n 0) 0) 1 0))
-    (defn qsi-count (s n acc)
-        (do (let i (str_find s n 0))
+    ; Counts by ADVANCING AN OFFSET, never by re-slicing. The first form cut a
+    ; fresh copy of everything after each match, so counting k needles in an
+    ; n-byte source copied O(n*k) bytes through `substring`, which builds a
+    ; string one byte at a time. On this 72 KB lane with 22 matches of one
+    ; needle that was over a million single-byte concatenations, and this band
+    ; took minutes. str_find already accepts a start offset; using it makes the
+    ; same count a single walk. Same shape as the rest of today: move the
+    ; offset, do not rebuild the remainder.
+    (defn qsi-count-from (s n from acc)
+        (do (let i (str_find s n from))
             (if (lt i 0) acc
-                (qsi-count (substring s (add i (str_len n)) (str_len s)) n (add acc 1)))))
+                (qsi-count-from s n (add i (str_len n)) (add acc 1)))))
+    (defn qsi-count (s n acc) (qsi-count-from s n 0 acc))
     (defn qsi-bit (ok bit) (if ok bit 0))
 
     (let src (read_file "form/native/metal/qwen35-dense-token-handle.fk"))
 
+    ; The rule now has ONE home: qwen35-linear-span-layout-contract.fk. This
+    ; band no longer checks how the max is spelled here — it checks that the
+    ; lane asks the contract for it instead of recomputing it, which is the
+    ; thing that actually prevents a second, drifting derivation.
     (let b0 (qsi-bit (and (eq (qsi-has? src "(defn q38-bs2-stride (geo)") 1)
-                     (and (eq (qsi-has? src "(if (gt qout (nth geo 1)) qout (nth geo 1))") 1)
-                          (eq (qdm-bs2-pitch 24 256 5000) 12288))) 1))
+                     (and (eq (qsi-has? src "(qlslc-bs2-output-pitch geo)") 1)
+                     (and (eq (qsi-has? src "(if (gt qout (nth geo 1)) qout (nth geo 1))") 0)
+                          (eq (qdm-bs2-pitch 24 256 5000) 12288)))) 1))
     ; every write into bs2 uses the pitch helper
-    (let b1 (qsi-bit (and (eq (qsi-count src "(nth bs 2) ntok (q38-bs2-stride geo)" 0) 2)
-                          (eq (qsi-has? src "q38-mv-batch-y") 1)) 2))
+    ; The span walker binds the pitch once and hands the SAME value to the
+    ; producer and to every consumer, rather than each site re-deriving it.
+    (let b1 (qsi-bit (and (eq (qsi-has? src "(let bs2-pitch (qlslc-bs2-output-pitch geo))") 1)
+                     (and (ge (qsi-count src "bs2-pitch" 0) 4)
+                          (eq (qsi-has? src "q38-mv-batch-y") 1))) 2))
     ; the recurrence offsets too
-    (let b2 (qsi-bit (and (eq (qsi-count src "(mul t (q38-bs2-stride geo))" 0) 2)
+    (let b2 (qsi-bit (and (eq (qsi-has? src "(qlslc-bs2-token-offset geo token)") 1)
                           (eq (qsi-has? src "(mul t (nth geo 1))") 0)) 4))
     (let b3 (qsi-bit (and (eq (qsi-has? src "(list (kth-tv-r tv) (kth-tv-c tv) ntok ystride)") 1)
                           (eq (qsi-has? src "(q38-mv-batch-y ps tv xh yh ntok (kth-tv-r tv) barrier)") 1)) 8))
@@ -68,9 +95,14 @@
                      (and (eq (qsi-has? src "form_gdn_gates_span_f32") 1)
                           (eq (qsi-has? src "form_gdn_norm_gate_span_f32") 1))))) 128))
     ; the two recurrences are still dispatched from a loop, by name
-    (let b8 (qsi-bit (and (eq (qsi-has? src "(defn q38-conv-loop") 1)
-                     (and (eq (qsi-has? src "(defn q38-delta-loop") 1)
-                          (eq (qdm-linear-recurrent) 2))) 256))
+    ; The default still walks the tokens. The folded twins exist and are
+    ; reachable, and reaching them takes an explicit fold=1 — so this bit fails
+    ; if they ever become the quiet default while the timing is unseparated.
+    (let b8 (qsi-bit (and (eq (qsi-has? src "(defn q38-linear-conv-span") 1)
+                     (and (eq (qsi-has? src "(defn q38-linear-delta-span") 1)
+                     (and (eq (qsi-has? src "(q38-linear-attn-span-f ps bs geo lay st ntok 0)") 1)
+                     (and (eq (qsi-has? src "(qlslc-conv-span-pipeline)") 1)
+                          (eq (qdm-linear-recurrent) 2))))) 256))
     (let b9 (qsi-bit (and (str_eq (qdm-per-head-arg) "weight")
                      (and (str_eq (qdm-per-token-arg) "activation")
                           (str_eq (qdm-persistent-arg) "state"))) 512))

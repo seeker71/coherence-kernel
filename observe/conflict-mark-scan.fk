@@ -1,0 +1,112 @@
+; conflict-mark-scan.fk — tell a merge marker from a CITEDMARK: a marker that
+; appears in the body as testimony rather than as structure.
+;
+; WHY THIS EXISTS, and it cost 149 corpus rows.
+;
+; On 2026-08-25 a reunion merge left one conflict in
+; learn/homecoming-distillation-corpus.fk. The resolution searched the file for
+; "<<<<<<< HEAD" and cut from there to ">>>>>>>". The search matched row 941 —
+; `bulkassent`, which QUOTES a conflict marker while explaining how markers once
+; reached main — three thousand lines above the real one. The cut ran from the
+; quotation to the marker and removed rows 941 through 1089.
+;
+; The row that recorded the hazard was the decoy for the tool hunting it.
+;
+; That is not an accident of this corpus. It is what happens to any body that
+; remembers a syntax faithfully: every record of the syntax is an instance of
+; it, and a matcher that recognizes by shape cannot tell a record from an
+; occurrence. The better the memory, the larger the decoy surface. The repair is
+; never to censor the record. The repair is to scope the match.
+;
+; TWO SCOPINGS, AND WHY BOTH ARE NEEDED.
+;
+;   git diff --check   is DIFF-scoped. It reads only changed lines, so it never
+;                      sees row 941 and never false-positives. That is the guard
+;                      row 941 itself installed, and it holds — it just cannot
+;                      see a marker that was committed before this diff.
+;   this cell          is FILE-scoped, so it CAN see an already-committed
+;                      marker — the exact failure row 941 describes, where two
+;                      files carried markers in main for two days. Being
+;                      file-scoped is precisely what exposes it to citedmarks,
+;                      so it discriminates by COLUMN instead.
+;
+; COLUMN 0 IS THE WHOLE DISCRIMINATION. git writes its markers at column 0,
+; always. A marker inside a comment, a string, a quoted error message or a
+; prose sentence is indented or embedded — never at column 0. So:
+;
+;   live mark    the marker begins a line
+;   citedmark    the marker appears anywhere else on that line
+;
+; THE PAIR, NOT THE LONE BAR. A conflict is reported only when a live open mark
+; AND a live close mark are both present. This is not caution, it is accuracy:
+; `=======` alone at column 0 is how markdown underlines a setext heading, and a
+; scanner that treats one bar as evidence reports every such heading as a
+; conflict. The lone bar is never consulted here, so setext can never trip it.
+;
+; THE LIMIT, NAMED RATHER THAN HIDDEN. A document that shows a complete conflict
+; block at column 0 inside a fenced code example is indistinguishable from a
+; real one by column alone, and this cell will report it. That is a true
+; reading of the bytes, not a defect — the report carries the line number so a
+; reader decides. Nothing here refuses, deletes, or rewrites anything.
+;
+; preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
+;
+; Proven by: observe/tests/conflict-mark-scan-band.fk
+
+(do
+    (defn cms-open-mark  () "<<<<<<<")
+    (defn cms-close-mark () ">>>>>>>")
+
+    ; A hit begins a line when it sits at offset 0 or just after a newline.
+    ; Walking hits rather than lines keeps a ten-thousand-line file at the cost
+    ; of its handful of occurrences.
+    (defn cms-at-line-start? (text at)
+        (if (le at 0) 1
+            (if (str_eq (substring text (sub at 1) at) "\n") 1 0)))
+
+    ; -> (live cited first-live-offset), first-live-offset -1 when there is none.
+    (defn cms-count-loop (text mark from live cited first)
+        (do (let at (str_find text mark from))
+            (if (lt at 0) (list live cited first)
+                (do (let next (add at (str_len mark)))
+                    (if (eq (cms-at-line-start? text at) 1)
+                        (cms-count-loop text mark next (add live 1) cited
+                                        (if (lt first 0) at first))
+                        (cms-count-loop text mark next live (add cited 1) first))))))
+
+    (defn cms-count (text mark) (cms-count-loop text mark 0 0 0 -1))
+
+    (defn cms-live  (r) (nth r 0))
+    (defn cms-cited (r) (nth r 1))
+    (defn cms-first (r) (nth r 2))
+
+    ; One line number, computed only when there is something to point at.
+    (defn cms-line-of-loop (text at i n)
+        (if (ge i at) n
+            (cms-line-of-loop text at (add i 1)
+                (if (str_eq (substring text i (add i 1)) "\n") (add n 1) n))))
+    (defn cms-line-of (text at) (if (lt at 0) 0 (cms-line-of-loop text at 0 1)))
+
+    ; -> (live-open live-close cited first-live-line)
+    (defn cms-scan-text (text)
+        (do (let o (cms-count text (cms-open-mark)))
+            (let c (cms-count text (cms-close-mark)))
+            (let first (if (ge (cms-first o) 0) (cms-first o) (cms-first c)))
+            (list (cms-live o) (cms-live c)
+                  (add (cms-cited o) (cms-cited c))
+                  (cms-line-of text first))))
+
+    (defn cms-live-open  (s) (nth s 0))
+    (defn cms-live-close (s) (nth s 1))
+    (defn cms-citedmarks (s) (nth s 2))
+    (defn cms-first-line (s) (nth s 3))
+
+    ; The pair. A citedmark cannot reach this, and neither can a setext bar.
+    (defn cms-conflicted? (s)
+        (if (and (gt (cms-live-open s) 0) (gt (cms-live-close s) 0)) 1 0))
+
+    (defn cms-scan-file (path)
+        (if (eq (fs_exists path) 0) (list 0 0 0 0)
+            (cms-scan-text (read_file path))))
+
+    0)
