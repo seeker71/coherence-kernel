@@ -44,7 +44,7 @@ preflight form/form-stdlib/tests/generative-form-skill-gate-band.fk
   chain         clean
 
 ./fkwu form/form-stdlib/tests/generative-form-skill-gate-band.fk
-1048575
+2097151
 ```
 
 The first band run answered `523543`, honestly refusing BML and Form candidates
@@ -52,34 +52,45 @@ whose intended text did not yet cross their runtime identities.  Typed
 observations exposed two distinct seams: `nil?` was not a valid NodeID tag test,
 and the recipe request had named the recipe category rather than the recipe's
 content-addressed NodeID.  Repairing the observations—not weakening the gate—
-produced the full witness.
+produced the full witness.  A later semantic review found that the leakage fold
+covered only the three named evaluation descriptions, not the generated
+candidate.  The verifier now checks every extracted BML/BMF/Form artifact too;
+an adversarial candidate equal to a training row is refused, giving the new
+21-bit witness above.
 
 ## Leakage boundary
 
-The three evaluation situations are compared for exact equality against every
-existing `bml-bmf-stream-curriculum` and `bml-bmf-control-curriculum` train and
-held-out prompt/target.  Exact leakage is `0`.
+The three evaluation situations and every extracted candidate artifact are
+compared for exact equality against every existing
+`bml-bmf-stream-curriculum` and `bml-bmf-control-curriculum` train and held-out
+prompt/target.  The physical driver additionally checks its actual prompt and
+complete response.  The positive synthetic band candidate has exact leakage
+`0`.
 
 This is deliberately narrow evidence.  It does not establish absence of
 paraphrase, repository-RAG, base-model-pretraining, or human-memory
 contamination.  The evaluation prompt is public, not a secret held-out set.
 
-## Physical model gate still owed
+## First physical model gate: a useful refusal
 
-`observe/qwen38-generative-form-skill-gate-live-run.fk` is a dormant effectful
-driver.  It was neither preflighted nor run while the V3 evaluator owned the
-shared local-model carrier.  After that carrier is released, the exact owed
-observation is:
+After V3 released the shared carrier, the effectful driver was run once.  The
+local model returned a Form control artifact that executed, but its BML and BMF
+artifacts did not cross their runtimes:
 
-```sh
-./fkwu observe/qwen38-generative-form-skill-gate-live-run.fk
+```text
+overall=0
+bml-executed=0
+bmf-scannerless-executed=0
+form-nodeid-control-executed=1
+residence-released=1
 ```
 
-A physical pass requires `overall=1`, `bml-executed=1`,
-`bmf-scannerless-executed=1`, `form-nodeid-control-executed=1`,
-`exact-row-leakage=0`, and `residence-released=1` from one actual local-Qwen
-generation.  Until that run exists, the verifier is proven and the model's
-generative embodiment remains pending.
+That source also printed `exact-row-leakage=0`, but the later review proved the
+metric was not candidate-scoped, so that field is explicitly inadmissible.
+The driver now prints its bounded generated response and
+`prompt-candidate-exact-row-leakage`; that revised physical door has not yet
+passed.  The failure became teaching input for the one-residence loop rather
+than a reason to weaken execution admission.
 
 ## Closing
 
