@@ -419,6 +419,37 @@ long long fk_metal_sync_external(void);
 
 static void fk_err(NSString *s) { fk_last_err = s; }
 
+// A committed buffer's completion is observed, not presumed. waitUntilCompleted
+// carries no deadline, and a buffer lost to a residency collision (witnessed
+// 2026-08-25: two residents of one 27 GB artifact on this host — the second
+// walker hung 17+ min on an idle GPU) holds the walker forever. This door polls
+// status with adaptive backoff and, after a patience far above any witnessed
+// legitimate wait (residency-cold open ~16 s), reports the buffer's status as a
+// typed error instead of waiting eternally. Completion still means completion;
+// nothing is fabricated on the timeout path — the caller sees a red line.
+// Patience: the longest witnessed legitimate wait on this host is a model open
+// at 41-56 s (sibling measurement, 2026-08-25), and identical runs vary ~20%;
+// 300 s stands a factor of ~4 above that spread so a healthy triple-contended
+// open cannot fire it, while a lost buffer answers in five minutes, not never.
+static int fk_wait_observed(id<MTLCommandBuffer> cb) {
+    const double patience_s = 300.0;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:patience_s];
+    double backoff = 0.00005;   // 50 us, doubling to a 4 ms ceiling
+    for (;;) {
+        MTLCommandBufferStatus st = [cb status];
+        if (st == MTLCommandBufferStatusCompleted ||
+            st == MTLCommandBufferStatusError) { return 0; }
+        if ([deadline timeIntervalSinceNow] < 0.0) {
+            fk_err([NSString stringWithFormat:
+                @"sync: command buffer status=%lu after %.0f s — abandoned, not awaited",
+                (unsigned long)st, patience_s]);
+            return -1;
+        }
+        [NSThread sleepForTimeInterval:backoff];
+        if (backoff < 0.004) { backoff *= 2.0; }
+    }
+}
+
 static unsigned int fk_le32(const unsigned char *p) {
     return (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
            ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
@@ -858,7 +889,7 @@ long long fk_metal_sync_external(void) {
         if (fk_inflight != nil && [fk_inflight count] > 0) {
             for (NSNumber *key in [fk_inflight allKeys]) {
                 id<MTLCommandBuffer> cb = fk_inflight[key];
-                [cb waitUntilCompleted];
+                if (fk_wait_observed(cb) < 0) { return -1; }
                 // GPUStartTime/GPUEndTime are valid now — the buffer just completed.
                 // Real device-busy span for THIS command buffer, added to the
                 // process-wide running total.
@@ -878,7 +909,15 @@ long long fk_metal_sync_external(void) {
             n += fk_pending;
             [fk_enc endEncoding];
             [fk_cb commit];
-            [fk_cb waitUntilCompleted];
+            if (fk_wait_observed(fk_cb) < 0) {
+                // The batch is abandoned, not awaited: clear the walker's side
+                // so the next admission starts clean, and answer the red line.
+                fk_enc = nil;
+                fk_cb = nil;
+                fk_pending = 0;
+                fk_batch_concurrent = 0;
+                return -1;
+            }
             // Same accumulation as the inflight loop above: this ONE command
             // buffer's real device-busy span, covering every dispatch enqueued
             // into it since the batch opened (all fk_pending of them together —
@@ -985,7 +1024,7 @@ long long fk_metal_submit_external(void) {
             // nothing, and a fence id for nothing is a number wearing a meaning.
             [fk_enc endEncoding];
             [fk_cb commit];
-            [fk_cb waitUntilCompleted];
+            (void)fk_wait_observed(fk_cb);
             fk_enc = nil;
             fk_cb = nil;
             fk_batch_concurrent = 0;
@@ -1021,7 +1060,11 @@ long long fk_metal_fence_wait_external(long long fence) {
         }
         id<MTLCommandBuffer> cb = fk_inflight[@(fence)];
         long long n = [fk_inflight_n[@(fence)] longLongValue];
-        [cb waitUntilCompleted];
+        if (fk_wait_observed(cb) < 0) {
+            [fk_inflight removeObjectForKey:@(fence)];
+            [fk_inflight_n removeObjectForKey:@(fence)];
+            return -1;
+        }
         [fk_inflight removeObjectForKey:@(fence)];
         [fk_inflight_n removeObjectForKey:@(fence)];
         if ([cb error] != nil) {
