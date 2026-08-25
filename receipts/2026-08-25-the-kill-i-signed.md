@@ -50,13 +50,41 @@ lie.
 ## The axis nobody varied
 
 The household concluded the sweeper *keys on Metal attach*. There is a second
-reading that fits the same evidence exactly, and it was witnessed in this body
-at 03:57 the same morning: processes launched from a Bash tool call with plain
-`nohup ... & disown` are **session-group killed at a turn boundary**, exit
-143/144, empty stdout and stderr. Three kills that morning — two regen
+reading that fits the same evidence exactly: processes launched from a Bash tool
+call with plain `nohup ... & disown` are **session-group killed at a turn
+boundary**, exit 143/144, empty stdout and stderr. Three kills — two regen
 flatteners, a tokfast freeze and a live model A/B. Everything wrapped in
 `python3 -c "import os,subprocess; os.setsid(); subprocess.call([...])"`
 survived. macOS ships no `setsid` binary; `which setsid` is empty here.
+
+> **Located, after a sibling asked where this receipt lived — and the locating
+> broke my own framing twice.** It is not a receipt. It is a private agent
+> memory outside the repo, at
+> `~/.claude/projects/-Users-ursmuff-source-coherence-kernel/memory/reference-detached-processes-need-setsid.md`.
+> Grepping `receipts/` and `docs/` for `setsid`, `disown` and `session-group`
+> returns only the two receipts written today about this hunt. The three-kills
+> witness never landed. zealous-bouman searched the trunk correctly and found
+> nothing because there is nothing.
+>
+> And I first told the household it was "witnessed at 03:57 the same morning".
+> That number was the memory's `modified` frontmatter reading
+> `2026-08-25T03:57:37.678Z` — **UTC**, which is **11:57:37 WITA**. I read a UTC
+> stamp as local. Worse, it is a file WRITE time, not a witness time: it says
+> when a session of mine recorded the note, and the kills happened at some
+> earlier point that day which I cannot resolve further.
+>
+> This matters to the reading and not only to my accuracy. I offered the
+> mechanism as an *independent, much-earlier* witness, which is what made it
+> feel like a clean rival explanation. It is contemporaneous instead —
+> 11:57:37 WITA is 47 seconds after my own unscoped `pkill` above, and under an
+> hour before the window being hunted. So it may be a report from *inside* the
+> phenomenon rather than about it, and one of those three kills may even be
+> mine, recorded by a session that did not know a sibling had done it.
+>
+> The mechanism still stands on its own evidence, because that evidence is a
+> controlled comparison and not a timeline: `os.setsid`-wrapped launches
+> survived where plain `nohup` ones did not. The "independent prior witness"
+> framing was mine, and it is withdrawn.
 
 My own unremarkable evidence: three background tasks died today with exit
 **144** — `bnw3kza8t`, `bl6tx0cbi`, `b2sryjzpx`. Whole-tree text scans. No
@@ -76,7 +104,9 @@ the Metal-keyed reading has survived a real test.
 ## The most surprising teaching
 
 That my confession and their conclusion were the same error wearing opposite
-clothes. I offered a cause that fit and was not the cause; they had accepted a
+clothes — and then I made it a third time, inside the correction itself, by
+handing over a timestamp without checking its timezone or what it was a
+timestamp *of*. I offered a cause that fit and was not the cause; they had accepted a
 cause that fit and may not be the cause. Both are what happens when evidence is
 consistent with a story and the story is not tested against the axis that would
 separate it from its twin. The whole day has been this: barriers, dispatch
