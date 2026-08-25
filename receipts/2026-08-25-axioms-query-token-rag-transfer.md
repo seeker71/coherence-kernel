@@ -37,9 +37,10 @@ binding-sha=66ee9a6bbce5937e656bb5c0bfe813a3f2555d51a9c6fc4b63998312ba98a8cc
 effective-prompt-sha=02923a57150a68d75a9ff6ea6ecb121a7efea14963864f651f65a4808fe96d46
 expected-frame-sha=ec543fe301c403275641265fa224899e01debb596367a2c09a27adf5ef8ccc46
 actual-frame-sha=ec543fe301c403275641265fa224899e01debb596367a2c09a27adf5ef8ccc46
-raw-sha=e21308762343a4f548f67bda9c8f184b5cfdb8bb093099f2b8d3e46e065d9e74
+raw-sha=4d7db831fdb44d9a7dbc7cc934c1177e94117f3f94852219bdc51153a2d0ac50
 answer-sha=222b0bd51fcef7e65c2e62db2ed65457013bab56be6fafeb19ee11d453153c80
 answer-key=d4610fbe9d17783baa32a1343e1923b461c3b3fd9bb6909faa82f6e1610c4cd0
+reported-source-artifact=sha256:893d1a85f5a9475705e59f1bac50b9b19076e2fafb55751b52897af3a6d5bcad
 source-sha=893d1a85f5a9475705e59f1bac50b9b19076e2fafb55751b52897af3a6d5bcad
 live-cursor=1
 query-frame-exact=1
@@ -61,24 +62,24 @@ answer-score95=1
 error=0
 state-release=1
 residence-release=1
-latency-ms=516416
+latency-ms=515907
 verdict=134217727
-@form fkwu 0 1088 148 1236
+@form fkwu 0 1186 237 1423
 ```
 
-The verifier also required one lookup, source search, honor, hit and close
-commit; positive injected tokens; zero spent/refusal/timeout/model-executed
-lookup; the exact bound path and hit reason; and a nonempty answer key. Prompt,
-source-window and answer bytes were not printed or written.
+The first observed verifier required one lookup, source search, honor, hit and
+close commit; positive injected tokens; zero spent/refusal/timeout/
+model-executed lookup; the exact bound path and hit reason; and a nonempty
+answer key. It did not compare the report's `heed_source_artifact` field to the
+offer's source ID, so that earlier run did not claim time-of-use source
+identity.
 
-That observed verifier did not yet compare the report's
-`heed_source_artifact` field to the offer's source ID, and it checked only that
-the answer key was nonempty. No intentional source change occurred during the
-run, but time-of-use source identity is therefore not claimed by this receipt.
-The revised dormant runner now requires exact source-artifact equality, a
-SHA-256-shaped answer key, and a positive answer phase before its same 27-bit
-transport verdict can hold. A future run will witness that stronger
-correlation rather than retroactively assigning it here.
+The physical observation above is the subsequent strengthened run. Its same
+27-bit verdict additionally required exact equality between the reported
+source artifact and the offer's source ID, a SHA-256-shaped answer key, and a
+positive answer phase. `reported-source-artifact` and `source-sha` reconcile
+to the same digest. Prompt, source-window and answer bytes were not printed or
+written.
 
 ## Honest boundary and next movement
 
