@@ -1,0 +1,137 @@
+; form-knowledge-qwen-heldout-eval-run.fk -- effectful 15-family local audit.
+;
+; DO NOT preflight this cell: its top level is intentionally effectful when the
+; explicit consent token is present. Without that token it refuses before model
+; admission. The 29GB model was not run while this harness was authored.
+;
+; Raw resident output is never printed or written. It exists in memory long
+; enough to retain a SHA-256, detect refusal, parse after `\ntext:\n`, strip a
+; completed knowledge-query envelope from the scoring view, and pass only that
+; answer view to native-model-evidence.
+;
+; To run deliberately, place exactly the value printed by fkher-consent-token in
+; .form-knowledge-qwen-heldout-eval-consent, then execute this cell once.
+;
+; preludes: form-stdlib/form-knowledge-qwen-heldout-eval.fk
+; preludes: form-stdlib/form-cli-model-generate.fk
+
+(do
+    (defn fkher-model-path ()
+        "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf")
+    (defn fkher-model-id () "qwen3.8-27b-q8_0-form-native-metal-jit")
+    (defn fkher-query-budget () (fcmg-current-source-query-budget))
+    (defn fkher-answer-reserve () (fcmg-current-source-answer-reserve))
+    ; Compatibility name for readers of the v1 harness. It is query fuel only;
+    ; the answer now has its own non-borrowable ledger.
+    (defn fkher-max-tokens () (fkher-query-budget))
+    (defn fkher-consent-path () ".form-knowledge-qwen-heldout-eval-consent")
+    (defn fkher-consent-token ()
+        (str_concat "run-local-qwen-heldout-v2:"
+                    (fkhe-dataset-seal)))
+    (defn fkher-consented? ()
+        (do
+            (let supplied (read_file (fkher-consent-path)))
+            (if (str_eq supplied (fkher-consent-token)) 1
+                (if (str_eq supplied
+                        (str_concat (fkher-consent-token) "\n")) 1 0))))
+
+    ; result = tag reversed-scores residence model-executed-count stopped
+    (defn fkher-result (scores residence executed stopped)
+        (list "form-knowledge-qwen-live-loop-v2" scores residence executed stopped))
+    (defn fkher-scores (r) (nth r 1))
+    (defn fkher-residence (r) (nth r 2))
+    (defn fkher-executed (r) (nth r 3))
+    (defn fkher-progress-line (name value)
+        (print_str (str_concat name (str_concat "=" (str_concat value "\n")))))
+    (defn fkher-progress-start (row)
+        (do
+            (fkher-progress-line "row-start" (fkhe-id row))
+            (fkher-progress-line "row-family" (fkhe-family row))
+            0))
+    (defn fkher-progress-score (score parsed raw)
+        (do
+            (let o (fkhe-score-observation score))
+            (fkher-progress-line "row-done" (fkhe-score-id score))
+            (fkher-progress-line "row-promotion-ppm"
+                (int_to_str (nmfe-obs-promotion o)))
+            (fkher-progress-line "row-error"
+                (int_to_str (nmfe-obs-error o)))
+            (fkher-progress-line "row-latency-ms"
+                (int_to_str (nmfe-obs-latency o)))
+            (fkher-progress-line "row-timeout"
+                (int_to_str (fht-report-int raw "heed_decode_timeout")))
+            (fkher-progress-line "row-refusal"
+                (int_to_str (fkhe-output-refusal parsed)))
+            (fkher-progress-line "row-injection-refusals"
+                (int_to_str (fht-report-int raw "heed_injection_refusals")))
+            (fkher-progress-line "row-frame-refusals"
+                (int_to_str (fht-report-int raw "heed_frame_refusals")))
+            (fkher-progress-line "row-empty"
+                (int_to_str (if (eq (str_len (fkhe-output-answer parsed)) 0) 1 0)))
+            (fkher-progress-line "row-query-tokens"
+                (int_to_str (fht-report-int raw "heed_query_tokens")))
+            (fkher-progress-line "row-answer-tokens"
+                (int_to_str (fht-report-int raw "heed_answer_tokens")))
+            0))
+
+    (defn fkher-loop (rows residence path scores executed)
+        (if (eq (len rows) 0)
+            (fkher-result scores residence executed 0)
+            (do
+                (let row (head rows))
+                (let effective (fqt-knowledge-prompt (fkhe-prompt row)))
+                (let _started (fkher-progress-start row))
+                (let before (now_unix_ms))
+                (let generated
+                    (fcmg-generate-knowledge-resident-2p-hinted residence path
+                        (fkhe-prompt row) (fkher-query-budget)
+                        (fkher-answer-reserve) (fkhe-source row)))
+                (let after (now_unix_ms))
+                (let parsed (fkhe-parse-resident-output (nth generated 0)))
+                (let score (fkhe-score row effective parsed (sub after before)))
+                (let _observed (fkher-progress-score score parsed (nth generated 0)))
+                (let next-scores (cons score scores))
+                (let next-executed
+                    (add executed (if (eq (fkhe-output-error parsed) 0) 1 0)))
+                ; A bad row is evidence, not permission to erase the remaining
+                ; denominator. Keep the same admitted residence and score all
+                ; fifteen families; the aggregate will retain every error.
+                (fkher-loop (tail rows) (nth generated 1) path
+                            next-scores next-executed))))
+
+    (defn fkher-run-live ()
+        (do
+            (let result
+                (fkher-loop (fkhe-rows) (fcmr-none) (fkher-model-path)
+                            (list) 0))
+            (let scores (nmfe-reverse (fkher-scores result)))
+            (let release-ok (fcmr-release-ok? (fkher-residence result)))
+            (let model-executed
+                (if (eq (fkher-executed result) (len (fkhe-rows))) 1 0))
+            (let report
+                (fkhe-report (fkhe-live-scope) (fkher-model-id)
+                             model-executed release-ok scores))
+            (let aggregate (fkhe-report-aggregate report))
+            (print_str (str_concat "dataset-sha256="
+                (str_concat (fkhe-dataset-seal) "\n")))
+            (print_str (str_concat "families="
+                (str_concat (int_to_str (len (fkhe-families))) "\n")))
+            (print_str (str_concat "samples="
+                (str_concat (int_to_str (nth aggregate 0)) "\n")))
+            (print_str (str_concat "promotion-ppm="
+                (str_concat (int_to_str (nth aggregate 4)) "\n")))
+            (print_str (str_concat "errors="
+                (str_concat (int_to_str (nth aggregate 6)) "\n")))
+            (print_str (str_concat "release-ok="
+                (str_concat (int_to_str release-ok) "\n")))
+            (print_str (str_concat "local-qwen-heldout-ready95="
+                (str_concat (int_to_str (fkhe-report-live-credit report)) "\n")))
+            0))
+
+    (if (eq (fkher-consented?) 1)
+        (fkher-run-live)
+        (do
+            (print_str "local-Qwen heldout run refused: explicit dataset-bound consent token absent\n")
+            (print_str (str_concat "required-token="
+                (str_concat (fkher-consent-token) "\n")))
+            0)))

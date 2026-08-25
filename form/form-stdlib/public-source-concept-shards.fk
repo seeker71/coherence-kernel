@@ -1,0 +1,773 @@
+; public-source-concept-shards.fk -- streamed, resumable repository registry.
+;
+; The 30-source public-source-concept-index is the small in-memory proof.  This
+; cell carries the same source/entry NodeIDs across the live repository without
+; retaining one giant path or entry list:
+;
+;   family source tree -> hex path plan -> bounded cursor batches
+;                      -> family / path-hash-bucket / one entry artifact
+;
+; Every artifact is an independently replaceable typed record.  Incremental
+; rebuild overwrites exactly that source coordinate; it never appends a stale
+; historical entry or needs a flattened table.  Worker processes may stop at
+; any batch boundary and resume from the persisted byte cursor.
+;
+; Concept keys are born scannerlessly from public source observations: a
+; path-hash-unique coordinate, normalized path stem, bounded first title line,
+; and the first visible defn/defdata/class/grammar name where present.  At least
+; the unique source coordinate is always usable.  No source payload is stored.
+;
+; Sources larger than 16 MiB are honestly named `over-budget` and remain in
+; every denominator.  The source digest is streamed through bounded windows
+; and concept extraction reads only the bounded head, so this is an elapsed-
+; work admission bound rather than a retained-source-body bound.  The current
+; body maximum is below 1 MiB; every present source can enter without claiming
+; that a finite worker has infinite fuel.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/form-fs.fk form-stdlib/file-byte-window.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/form-knowledge-source-search.fk form-stdlib/public-source-concept-index.fk
+; Proven by: form-stdlib/tests/public-source-concept-shards-band.fk
+
+(do
+    (defn pscish-schema () "public-source-concept-shards-v1")
+    (defn pscish-record-schema () "pscish-entry-v2")
+    (defn pscish-build-state-schema () "pscish-build-state-v1")
+    (defn pscish-validate-state-schema () "pscish-validate-state-v1")
+    (defn pscish-batch-size () 32)
+    (defn pscish-max-source-bytes () 16777216)
+    (defn pscish-source-over-budget? (size)
+        (if (gt size (pscish-max-source-bytes)) 1 0))
+    (defn pscish-head-bytes () 4096)
+    (defn pscish-plan-window () 1024)
+    (defn pscish-request-path ()
+        (fs-path-join (fs-temp-dir) "public-source-concept-shard-request-v1"))
+
+    ; ---- bounded scannerless concept birth -------------------------------
+    (defn pscish-lower-byte (b)
+        (if (and (ge b 65) (le b 90)) (add b 32) b))
+    (defn pscish-key-byte? (b)
+        (if (or (and (ge b 97) (le b 122))
+                (and (ge b 48) (le b 57))) 1 0))
+    (defn pscish-source-name-byte? (b)
+        (if (or (and (ge b 65) (le b 90))
+            (or (and (ge b 97) (le b 122))
+            (or (and (ge b 48) (le b 57))
+            (or (eq b 45) (or (eq b 95) (or (eq b 63) (eq b 33))))))) 1 0))
+    (defn pscish-normalize-loop (raw at max out pending-separator)
+        (if (or (ge at (str_len raw)) (ge (str_len out) max)) out
+            (do
+                (let b (pscish-lower-byte (str-byte-at raw at)))
+                (if (eq (pscish-key-byte? b) 1)
+                    (do
+                        (let room (sub max (str_len out)))
+                        (let separated (if (and (eq pending-separator 1)
+                                                (gt (str_len out) 0))
+                            (if (gt room 1) (str_concat out "-") out) out))
+                        (if (ge (str_len separated) max) separated
+                            (pscish-normalize-loop raw (add at 1) max
+                                (str_concat separated (byte_to_str b)) 0)))
+                    (pscish-normalize-loop raw (add at 1) max out
+                        (if (gt (str_len out) 0) 1 0))))))
+    (defn pscish-normalize (raw max)
+        (pscish-normalize-loop raw 0 max "" 0))
+    (defn pscish-clip-key (key)
+        (if (le (str_len key) (psci-max-concept-key-bytes)) key
+            (substring key 0 (psci-max-concept-key-bytes))))
+    (defn pscish-prefixed-key (prefix value)
+        (if (eq (str_len value) 0) ""
+            (pscish-clip-key (str_concat prefix value))))
+    (defn pscish-path-hash (path)
+        (hex-encode (sha256-stream-string path)))
+    (defn pscish-path-stem (path)
+        (do
+            (let base (fs-path-basename path))
+            (let ext (fs-path-extension base))
+            (if (eq (str_len ext) 0) base
+                (substring base 0 (sub (str_len base) (str_len ext))))))
+    (defn pscish-unique-key (family path)
+        (do
+            (let stem (pscish-normalize (pscish-path-stem path) 24))
+            (let named (if (eq (str_len stem) 0) "source" stem))
+            (pscish-clip-key
+                (str_concat "source-" (str_concat family
+                (str_concat "-" (str_concat named
+                (str_concat "-" (substring (pscish-path-hash path) 0 16)))))))))
+    (defn pscish-first-line (text)
+        (do
+            (let at (str_find text "\n" 0))
+            (if (lt at 0) text (substring text 0 at))))
+    (defn pscish-title-key (head)
+        (pscish-prefixed-key "title-"
+            (pscish-normalize (pscish-first-line head) 40)))
+    (defn pscish-name-end (text at)
+        (if (ge at (str_len text)) at
+            (if (eq (pscish-source-name-byte? (str-byte-at text at)) 1)
+                (pscish-name-end text (add at 1)) at)))
+    (defn pscish-name-after (text marker)
+        (do
+            (let found (str_find text marker 0))
+            (if (lt found 0) ""
+                (do
+                    (let start (add found (str_len marker)))
+                    (let end (pscish-name-end text start))
+                    (if (le end start) ""
+                        (substring text start end))))))
+    (defn pscish-defn-key (head)
+        (pscish-prefixed-key "defn-"
+            (pscish-normalize (pscish-name-after head "(defn ") 40)))
+    (defn pscish-defdata-key (head)
+        (pscish-prefixed-key "defdata-"
+            (pscish-normalize (pscish-name-after head "(defdata ") 36)))
+    (defn pscish-class-key (head)
+        (pscish-prefixed-key "class-"
+            (pscish-normalize (pscish-name-after head "class ") 40)))
+    (defn pscish-line-start-before (text at)
+        (if (le at 0) 0
+            (if (eq (str-byte-at text (sub at 1)) 10) at
+                (pscish-line-start-before text (sub at 1)))))
+    (defn pscish-grammar-key (head)
+        (do
+            (let at (str_find head "::=" 0))
+            (if (lt at 0) ""
+                (do
+                    (let start (pscish-line-start-before head at))
+                    (pscish-prefixed-key "grammar-"
+                        (pscish-normalize (substring head start at) 38))))))
+    (defn pscish-key-member? (key keys)
+        (if (nil? keys) 0
+            (if (str_eq key (head keys)) 1
+                (pscish-key-member? key (tail keys)))))
+    (defn pscish-add-key (keys key)
+        (if (or (eq (psci-concept-key-valid? key) 0)
+                (eq (pscish-key-member? key keys) 1)) keys
+            (if (ge (len keys) (psci-max-concept-keys)) keys
+                (cons key keys))))
+    (defn pscish-derived-keys-at (root family path)
+        (do
+            (let full (fs-path-join root path))
+            (let head (fs-read-slice full 0
+                (if (lt (fs-stat-size full) (pscish-head-bytes))
+                    (fs-stat-size full) (pscish-head-bytes))))
+            (let k0 (pscish-add-key (empty) (pscish-unique-key family path)))
+            (let k1 (pscish-add-key k0
+                (pscish-prefixed-key "path-"
+                    (pscish-normalize (pscish-path-stem path) 40))))
+            (let k2 (pscish-add-key k1 (pscish-title-key head)))
+            (let k3 (pscish-add-key k2 (pscish-defn-key head)))
+            (let k4 (pscish-add-key k3 (pscish-defdata-key head)))
+            (let k5 (pscish-add-key k4 (pscish-class-key head)))
+            (let k6 (pscish-add-key k5 (pscish-grammar-key head)))
+            (reverse k6)))
+
+    ; ---- small typed text codecs ----------------------------------------
+    (defn pscish-split-loop (text delimiter start acc)
+        (do
+            (let at (str_find text delimiter start))
+            (if (lt at 0)
+                (reverse (cons (substring text start (str_len text)) acc))
+                (pscish-split-loop text delimiter (add at (str_len delimiter))
+                    (cons (substring text start at) acc)))))
+    (defn pscish-split (text delimiter)
+        (pscish-split-loop text delimiter 0 (empty)))
+    (defn pscish-join-loop (parts delimiter out)
+        (if (nil? parts) out
+            (pscish-join-loop (tail parts) delimiter
+                (if (eq (str_len out) 0) (head parts)
+                    (str_concat out (str_concat delimiter (head parts)))))))
+    (defn pscish-join (parts delimiter)
+        (pscish-join-loop parts delimiter ""))
+    (defn pscish-string-hex (s)
+        (hex-encode (host-abi-string-to-bytes s)))
+    (defn pscish-hex-string (h)
+        (if (eq (hex-valid? h) 0) ""
+            (host-abi-bytes-to-string (hex-decode h))))
+
+    ; Worker restarts expose a narrow seam: numeric intern_node coordinates are
+    ; process-local observations, not stable serialized addresses.  Keep those
+    ; observed NodeIDs as telemetry, while these canonical child digests carry
+    ; stable cross-process content identity.  Validation reconstructs the node
+    ; in its own process and checks these keys; it never compares local numeric
+    ; coordinates from two different processes.
+    (defn pscish-source-content-key (source)
+        (hex-encode (sha256-stream-string
+            (pscish-join
+                (list (psci-source-family source)
+                    (pscish-string-hex (psci-source-path source))
+                    (psci-source-id source)
+                    (int_to_str (psci-source-size source))) "|"))))
+    (defn pscish-entry-content-key (entry)
+        (hex-encode (sha256-stream-string
+            (pscish-join
+                (list (pscish-source-content-key (psci-entry-source entry))
+                    (pscish-join (psci-entry-keys entry) ",")) "|"))))
+    ; record fields: schema | family | path-hex | digest-hex | size |
+    ;   observed-source-nodeid | observed-entry-nodeid |
+    ;   source-content-key | entry-content-key | unique-key | keys-csv
+    (defn pscish-render-entry (entry)
+        (do
+            (let source (psci-entry-source entry))
+            (let family (psci-source-family source))
+            (let path (psci-source-path source))
+            (let keys (psci-entry-keys entry))
+            (pscish-join
+                (list (pscish-record-schema) family (pscish-string-hex path)
+                    (substring (psci-source-id source) 7 71)
+                    (int_to_str (psci-source-size source))
+                    (psci-node-key source) (psci-node-key entry)
+                    (pscish-source-content-key source)
+                    (pscish-entry-content-key entry)
+                    (pscish-unique-key family path) (pscish-join keys ",")) "|")))
+    ; parsed record = (schema family path source-id size source entry unique keys
+    ;                  observed-source-nodeid observed-entry-nodeid
+    ;                  source-content-key entry-content-key)
+    (defn pscish-parse-entry (text)
+        (do
+            (let fields (pscish-split text "|"))
+            (if (not (eq (len fields) 11)) (empty)
+            (if (not (str_eq (nth fields 0) (pscish-record-schema))) (empty)
+                (do
+                    (let family (nth fields 1))
+                    (let path (pscish-hex-string (nth fields 2)))
+                    (let source-id (str_concat "sha256:" (nth fields 3)))
+                    (let size (str_to_int (nth fields 4)))
+                    (let keys (pscish-split (nth fields 10) ","))
+                    (if (or (eq (psci-path-valid-for-family? path family) 0)
+                        (or (eq (psci-source-id-valid? source-id) 0)
+                        (or (lt size 0)
+                            (eq (psci-concept-keys-valid? keys) 0)))) (empty)
+                        (do
+                            (let source (psci-source-node family path source-id size))
+                            (let entry (psci-entry source keys))
+                            (if (or (not (str_eq (nth fields 7)
+                                            (pscish-source-content-key source)))
+                                (or (not (str_eq (nth fields 8)
+                                            (pscish-entry-content-key entry)))
+                                (or (not (str_eq (nth fields 9)
+                                            (pscish-unique-key family path)))
+                                    (eq (pscish-key-member? (nth fields 9) keys) 0))))
+                                (empty)
+                                (list (pscish-record-schema) family path source-id size
+                                    source entry (nth fields 9) keys
+                                    (nth fields 5) (nth fields 6)
+                                    (nth fields 7) (nth fields 8))))))))))
+    (defn pscish-record-family (r) (nth r 1))
+    (defn pscish-record-path (r) (nth r 2))
+    (defn pscish-record-source-id (r) (nth r 3))
+    (defn pscish-record-size (r) (nth r 4))
+    (defn pscish-record-source (r) (nth r 5))
+    (defn pscish-record-entry (r) (nth r 6))
+    (defn pscish-record-unique-key (r) (nth r 7))
+    (defn pscish-record-keys (r) (nth r 8))
+    (defn pscish-record-observed-source-nodeid (r) (nth r 9))
+    (defn pscish-record-observed-entry-nodeid (r) (nth r 10))
+    (defn pscish-record-source-content-key (r) (nth r 11))
+    (defn pscish-record-entry-content-key (r) (nth r 12))
+
+    ; ---- sharded artifact coordinates -----------------------------------
+    (defn pscish-plan-path (artifact family)
+        (fs-path-join artifact (str_concat family ".plan")))
+    (defn pscish-build-state-path (artifact family)
+        (fs-path-join artifact (str_concat family ".build.state")))
+    (defn pscish-validate-state-path (artifact family)
+        (fs-path-join artifact (str_concat family ".validate.state")))
+    (defn pscish-shards-root (artifact)
+        (fs-path-join artifact "shards"))
+    (defn pscish-family-shard-root (artifact family)
+        (fs-path-join (pscish-shards-root artifact) family))
+    (defn pscish-entry-artifact-path (artifact family path)
+        (do
+            (let hash (pscish-path-hash path))
+            (fs-path-join
+                (fs-path-join (pscish-family-shard-root artifact family)
+                    (substring hash 0 2))
+                (str_concat hash ".psci"))))
+    (defn pscish-ensure-artifact-dirs (artifact family path)
+        (do
+            (let _a (fs-mkdir artifact))
+            (let _s (fs-mkdir (pscish-shards-root artifact)))
+            (let _f (fs-mkdir (pscish-family-shard-root artifact family)))
+            (let hash (pscish-path-hash path))
+            (let _b (fs-mkdir (fs-path-join
+                (pscish-family-shard-root artifact family)
+                (substring hash 0 2))))
+            1))
+
+    ; ---- streamed family plan -------------------------------------------
+    (defn pscish-plan-append (plan path)
+        (fs-append-bytes plan (host-abi-string-to-bytes
+            (str_concat (pscish-string-hex path) "\n"))))
+    (defn pscish-plan-dir-loop (root relative names family plan count)
+        (if (nil? names) count
+            (do
+                (let name (head names))
+                (let path (fs-path-join relative name))
+                (let full (fs-path-join root path))
+                (if (eq (psci-hidden-name? name) 1)
+                    (pscish-plan-dir-loop root relative (tail names)
+                        family plan count)
+                (if (eq (psci-path-valid-for-family? path family) 1)
+                    (do
+                        (let _append (pscish-plan-append plan path))
+                        (pscish-plan-dir-loop root relative (tail names)
+                            family plan (add count 1)))
+                    (do
+                        (let children (fs-list full))
+                        (let nested (if (nil? children) count
+                            (pscish-plan-dir-loop root path children family plan count)))
+                        (pscish-plan-dir-loop root relative (tail names)
+                            family plan nested)))))))
+    (defn pscish-build-state (cursor planned indexed over-budget failures
+                              collisions done)
+        (list (pscish-build-state-schema) cursor planned indexed over-budget
+            failures collisions done))
+    (defn pscish-render-build-state (s)
+        (pscish-join
+            (list (nth s 0) (int_to_str (nth s 1)) (int_to_str (nth s 2))
+                (int_to_str (nth s 3)) (int_to_str (nth s 4))
+                (int_to_str (nth s 5)) (int_to_str (nth s 6))
+                (int_to_str (nth s 7))) "|"))
+    (defn pscish-parse-build-state (text)
+        (do
+            (let f (pscish-split text "|"))
+            (if (or (not (eq (len f) 8))
+                    (not (str_eq (nth f 0) (pscish-build-state-schema))))
+                (pscish-build-state 0 0 0 0 0 0 0)
+                (pscish-build-state (str_to_int (nth f 1))
+                    (str_to_int (nth f 2)) (str_to_int (nth f 3))
+                    (str_to_int (nth f 4)) (str_to_int (nth f 5))
+                    (str_to_int (nth f 6)) (str_to_int (nth f 7))))))
+    (defn pscish-read-build-state (artifact family)
+        (pscish-parse-build-state
+            (fs-read-text (pscish-build-state-path artifact family))))
+    (defn pscish-write-build-state (artifact family state)
+        (fs-write-text (pscish-build-state-path artifact family)
+            (pscish-render-build-state state)))
+    ; A family replan replaces its owned per-source artifacts.  Merely
+    ; overwriting paths still present in the new plan leaves a removed or
+    ; renamed source as a valid-looking ghost in the physical shard buckets.
+    ; Bucket directories may remain; only this organ's .psci files are owned.
+    ; result = removed failures.
+    (defn pscish-clear-entry-files-loop (dir names removed failures)
+        (if (nil? names) (list removed failures)
+            (do
+                (let name (head names))
+                (let path (fs-path-join dir name))
+                (if (not (eq (psci-ends-with? name ".psci") 1))
+                    (pscish-clear-entry-files-loop dir (tail names)
+                        removed failures)
+                    (do
+                        (let _remove (fs-remove-file path))
+                        (let gone (if (lt (fs-stat-size path) 0) 1 0))
+                        (pscish-clear-entry-files-loop dir (tail names)
+                            (add removed gone)
+                            (add failures (if (eq gone 1) 0 1))))))))
+    (defn pscish-clear-family-buckets-loop
+            (family-root buckets removed failures)
+        (if (nil? buckets) (list removed failures)
+            (do
+                (let dir (fs-path-join family-root (head buckets)))
+                (let next (if (eq (fs-is-dir? dir) 1)
+                    (pscish-clear-entry-files-loop dir (fs-list dir)
+                        removed failures)
+                    (list removed failures)))
+                (pscish-clear-family-buckets-loop family-root (tail buckets)
+                    (nth next 0) (nth next 1)))))
+    (defn pscish-clear-family-artifacts-at (artifact family)
+        (do
+            (let family-root (pscish-family-shard-root artifact family))
+            (if (not (eq (fs-is-dir? family-root) 1)) (list 0 0)
+                (pscish-clear-family-buckets-loop family-root
+                    (fs-list family-root) 0 0))))
+    (defn pscish-count-entry-files-loop (names count)
+        (if (nil? names) count
+            (pscish-count-entry-files-loop (tail names)
+                (add count (if (eq (psci-ends-with? (head names)
+                                        ".psci") 1) 1 0)))))
+    (defn pscish-count-family-buckets-loop (family-root buckets count)
+        (if (nil? buckets) count
+            (do
+                (let dir (fs-path-join family-root (head buckets)))
+                (let next (if (eq (fs-is-dir? dir) 1)
+                    (pscish-count-entry-files-loop (fs-list dir) count)
+                    count))
+                (pscish-count-family-buckets-loop family-root
+                    (tail buckets) next))))
+    (defn pscish-entry-artifact-count-at (artifact family)
+        (do
+            (let family-root (pscish-family-shard-root artifact family))
+            (if (not (eq (fs-is-dir? family-root) 1)) 0
+                (pscish-count-family-buckets-loop family-root
+                    (fs-list family-root) 0))))
+    (defn pscish-init-family-at (root artifact family)
+        (do
+            (let f (psci-find-family family (psci-families)))
+            (if (not (eq (len f) 2)) 0
+                (do
+                    (let _a (fs-mkdir artifact))
+                    (let _s (fs-mkdir (pscish-shards-root artifact)))
+                    (let _f (fs-mkdir (pscish-family-shard-root artifact family)))
+                    (let cleared (pscish-clear-family-artifacts-at
+                        artifact family))
+                    (let plan (pscish-plan-path artifact family))
+                    (let _empty (fs-write-text plan ""))
+                    (let relative (psci-family-root f))
+                    (let full (fs-path-join root relative))
+                    (let planned (pscish-plan-dir-loop root relative
+                        (fs-list full) family plan 0))
+                    (let state (pscish-build-state 0 planned 0 0
+                        (nth cleared 1) 0
+                        (if (eq planned 0) 1 0)))
+                    (let _bs (pscish-write-build-state artifact family state))
+                    (let _vs (pscish-write-validate-state artifact family
+                        (pscish-validate-state 0 0 0 0 0 0 0)))
+                    planned))))
+
+    ; plan step = (status encoded-line next-cursor), status 1 row, 0 EOF,
+    ; -1 malformed/over-budget line.
+    (defn pscish-plan-step (plan cursor)
+        (do
+            (let size (fs-stat-size plan))
+            (if (or (lt size 0) (ge cursor size)) (list 0 "" cursor)
+                (do
+                    (let window (fs-read-slice plan cursor (pscish-plan-window)))
+                    (let at (str_find window "\n" 0))
+                    (if (lt at 0) (list -1 "" size)
+                        (list 1 (substring window 0 at)
+                            (add cursor (add at 1))))))))
+    (defn pscish-plan-decode-path (encoded)
+        (pscish-hex-string encoded))
+
+    ; upsert result = (ok collision).  A path-hash collision never overwrites
+    ; the other coordinate; it remains visible for the live ambiguity count.
+    (defn pscish-upsert-source-at (root artifact family path)
+        (if (eq (psci-path-valid-for-family? path family) 0) (list 0 0)
+            (do
+                (let size (fs-stat-size (fs-path-join root path)))
+                (if (or (lt size 0) (eq (pscish-source-over-budget? size) 1))
+                    (list 0 0)
+                    (do
+                        (let keys (pscish-derived-keys-at root family path))
+                        (let entry (psci-register-at root family path keys))
+                        (if (nothing? entry) (list 0 0)
+                            (do
+                                (let _dirs (pscish-ensure-artifact-dirs
+                                    artifact family path))
+                                (let target (pscish-entry-artifact-path
+                                    artifact family path))
+                                (let existing (if (ge (fs-stat-size target) 0)
+                                    (pscish-parse-entry (fs-read-text target))
+                                    (empty)))
+                                (if (and (gt (len existing) 0)
+                                         (not (str_eq (pscish-record-path existing)
+                                                      path)))
+                                    (list 0 1)
+                                    (if (gt (fs-write-text target
+                                                (pscish-render-entry entry)) 0)
+                                        (list 1 0) (list 0 0))))))))))
+
+    (defn pscish-build-batch-loop (root artifact family plan cursor planned
+                                   indexed over-budget failures collisions fuel)
+        (if (le fuel 0)
+            (pscish-build-state cursor planned indexed over-budget failures
+                collisions (if (ge cursor (fs-stat-size plan)) 1 0))
+            (do
+                (let step (pscish-plan-step plan cursor))
+                (if (eq (nth step 0) 0)
+                    (pscish-build-state cursor planned indexed over-budget
+                        failures collisions 1)
+                (if (lt (nth step 0) 0)
+                    (pscish-build-state (nth step 2) planned indexed over-budget
+                        (add failures 1) collisions 1)
+                    (do
+                        (let path (pscish-plan-decode-path (nth step 1)))
+                        (let next (nth step 2))
+                        (if (eq (psci-path-valid-for-family? path family) 0)
+                            (pscish-build-batch-loop root artifact family plan next
+                                planned indexed over-budget (add failures 1)
+                                collisions (sub fuel 1))
+                            (do
+                                (let size (fs-stat-size (fs-path-join root path)))
+                                (if (eq (pscish-source-over-budget? size) 1)
+                                    (pscish-build-batch-loop root artifact family plan
+                                        next planned indexed (add over-budget 1)
+                                        failures collisions (sub fuel 1))
+                                    (do
+                                        (let outcome (pscish-upsert-source-at root
+                                            artifact family path))
+                                        (pscish-build-batch-loop root artifact family
+                                            plan next planned
+                                            (add indexed (nth outcome 0)) over-budget
+                                            (add failures (if (and (eq (nth outcome 0) 0)
+                                                                   (eq (nth outcome 1) 0)) 1 0))
+                                            (add collisions (nth outcome 1))
+                                            (sub fuel 1))))))))))))
+    (defn pscish-build-batch-at (root artifact family fuel)
+        (do
+            (let plan (pscish-plan-path artifact family))
+            (let old (pscish-read-build-state artifact family))
+            (let next (pscish-build-batch-loop root artifact family plan
+                (nth old 1) (nth old 2) (nth old 3) (nth old 4)
+                (nth old 5) (nth old 6) fuel))
+            (let _write (pscish-write-build-state artifact family next))
+            next))
+
+    ; ---- streamed current-content validation -----------------------------
+    (defn pscish-validate-state (cursor checked current stale missing invalid done)
+        (list (pscish-validate-state-schema) cursor checked current stale missing
+            invalid done))
+    (defn pscish-render-validate-state (s)
+        (pscish-join
+            (list (nth s 0) (int_to_str (nth s 1)) (int_to_str (nth s 2))
+                (int_to_str (nth s 3)) (int_to_str (nth s 4))
+                (int_to_str (nth s 5)) (int_to_str (nth s 6))
+                (int_to_str (nth s 7))) "|"))
+    (defn pscish-parse-validate-state (text)
+        (do
+            (let f (pscish-split text "|"))
+            (if (or (not (eq (len f) 8))
+                    (not (str_eq (nth f 0) (pscish-validate-state-schema))))
+                (pscish-validate-state 0 0 0 0 0 0 0)
+                (pscish-validate-state (str_to_int (nth f 1))
+                    (str_to_int (nth f 2)) (str_to_int (nth f 3))
+                    (str_to_int (nth f 4)) (str_to_int (nth f 5))
+                    (str_to_int (nth f 6)) (str_to_int (nth f 7))))))
+    (defn pscish-read-validate-state (artifact family)
+        (pscish-parse-validate-state
+            (fs-read-text (pscish-validate-state-path artifact family))))
+    (defn pscish-write-validate-state (artifact family state)
+        (fs-write-text (pscish-validate-state-path artifact family)
+            (pscish-render-validate-state state)))
+    (defn pscish-reset-validation-at (artifact family)
+        (pscish-write-validate-state artifact family
+            (pscish-validate-state 0 0 0 0 0 0 0)))
+    ; row validation = current/stale/missing/invalid flags.
+    (defn pscish-validate-source-at (root artifact family path)
+        (do
+            (let target (pscish-entry-artifact-path artifact family path))
+            (if (lt (fs-stat-size target) 0) (list 0 0 1 0)
+                (do
+                    (let record (pscish-parse-entry (fs-read-text target)))
+                    (if (eq (len record) 0) (list 0 0 0 1)
+                    (if (not (str_eq (pscish-record-path record) path))
+                        (list 0 0 0 1)
+                        (do
+                            (let full (fs-path-join root path))
+                            (let size (fs-stat-size full))
+                            (if (lt size 0) (list 0 1 0 0)
+                                (do
+                                    (let current (psci-source-node family path
+                                        (fkss-source-id full) size))
+                                    (if (node_eq current (pscish-record-source record))
+                                        (list 1 0 0 0)
+                                        (list 0 1 0 0)))))))))))
+    (defn pscish-validate-batch-loop (root artifact family plan cursor checked
+                                      current stale missing invalid fuel)
+        (if (le fuel 0)
+            (pscish-validate-state cursor checked current stale missing invalid
+                (if (ge cursor (fs-stat-size plan)) 1 0))
+            (do
+                (let step (pscish-plan-step plan cursor))
+                (if (eq (nth step 0) 0)
+                    (pscish-validate-state cursor checked current stale missing invalid 1)
+                (if (lt (nth step 0) 0)
+                    (pscish-validate-state (nth step 2) checked current stale missing
+                        (add invalid 1) 1)
+                    (do
+                        (let path (pscish-plan-decode-path (nth step 1)))
+                        (let next (nth step 2))
+                        (let size (fs-stat-size (fs-path-join root path)))
+                        ; Over-budget sources remain in the denominator but are
+                        ; not expected to have an artifact in this first breath.
+                        (if (eq (pscish-source-over-budget? size) 1)
+                            (pscish-validate-batch-loop root artifact family plan next
+                                checked current stale missing invalid (sub fuel 1))
+                            (do
+                                (let v (pscish-validate-source-at root artifact family path))
+                                (pscish-validate-batch-loop root artifact family plan next
+                                    (add checked 1) (add current (nth v 0))
+                                    (add stale (nth v 1)) (add missing (nth v 2))
+                                    (add invalid (nth v 3)) (sub fuel 1))))))))))
+    (defn pscish-validate-batch-at (root artifact family fuel)
+        (do
+            (let plan (pscish-plan-path artifact family))
+            (let old (pscish-read-validate-state artifact family))
+            (let next (pscish-validate-batch-loop root artifact family plan
+                (nth old 1) (nth old 2) (nth old 3) (nth old 4)
+                (nth old 5) (nth old 6) fuel))
+            (let _write (pscish-write-validate-state artifact family next))
+            next))
+
+    ; ---- exact lookup over entry artifacts, no source path input ----------
+    ; lookup accumulator = (distinct-match-count record)
+    (defn pscish-lookup-record-acc (record key acc)
+        (if (or (eq (len record) 0)
+                (eq (pscish-key-member? key (pscish-record-keys record)) 0)) acc
+            (if (eq (nth acc 0) 0) (list 1 record)
+                (if (str_eq (pscish-record-path record)
+                            (pscish-record-path (nth acc 1))) acc
+                    (list (add (nth acc 0) 1) (nth acc 1))))))
+    (defn pscish-lookup-files-loop (dir names key acc)
+        (if (nil? names) acc
+            (do
+                (let name (head names))
+                (let path (fs-path-join dir name))
+                (let record (if (eq (psci-ends-with? name ".psci") 1)
+                    (pscish-parse-entry (fs-read-text path)) (empty)))
+                (pscish-lookup-files-loop dir (tail names) key
+                    (pscish-lookup-record-acc record key acc)))))
+    (defn pscish-lookup-buckets-loop (family-root buckets key acc)
+        (if (nil? buckets) acc
+            (do
+                (let dir (fs-path-join family-root (head buckets)))
+                (let next (pscish-lookup-files-loop dir (fs-list dir) key acc))
+                (pscish-lookup-buckets-loop family-root (tail buckets) key next))))
+    (defn pscish-lookup-family-acc (artifact family key acc)
+        (do
+            (let root (pscish-family-shard-root artifact family))
+            (pscish-lookup-buckets-loop root (fs-list root) key acc)))
+    (defn pscish-lookup-families-loop (artifact families key acc)
+        (if (nil? families) acc
+            (pscish-lookup-families-loop artifact (tail families) key
+                (pscish-lookup-family-acc artifact
+                    (psci-family-id (head families)) key acc))))
+    ; result = (schema status reason key family path source-id fresh rebuild
+    ;           match-count source-node entry-node model-executed)
+    (defn pscish-lookup-at (root artifact key)
+        (if (eq (psci-concept-key-valid? key) 0)
+            (list (pscish-schema) "nothing" "invalid-concept-key" "" "" "" ""
+                0 0 0 (psci-absent-node) (psci-absent-node) 0)
+            (do
+                (let acc (pscish-lookup-families-loop artifact
+                    (psci-families) key (list 0 (empty))))
+                (if (eq (nth acc 0) 0)
+                    (list (pscish-schema) "nothing" "concept-not-registered" key
+                        "" "" "" 0 0 0 (psci-absent-node) (psci-absent-node) 0)
+                (if (gt (nth acc 0) 1)
+                    (list (pscish-schema) "nothing" "ambiguous-concept-key" key
+                        "" "" "" 0 0 (nth acc 0) (psci-absent-node)
+                        (psci-absent-node) 0)
+                    (do
+                        (let record (nth acc 1))
+                        (let v (pscish-validate-source-at root artifact
+                            (pscish-record-family record) (pscish-record-path record)))
+                        (if (eq (nth v 0) 1)
+                            (list (pscish-schema) "hit" "current-content-addressed-source"
+                                key (pscish-record-family record)
+                                (pscish-record-path record)
+                                (pscish-record-source-id record) 1 0 1
+                                (pscish-record-source record)
+                                (pscish-record-entry record) 0)
+                            (list (pscish-schema) "nothing" "source-rebuild-needed"
+                                key (pscish-record-family record)
+                                (pscish-record-path record)
+                                (pscish-record-source-id record) 0 1 1
+                                (pscish-record-source record)
+                                (pscish-record-entry record) 0))))))))
+    (defn pscish-lookup-status (r) (nth r 1))
+    (defn pscish-lookup-reason (r) (nth r 2))
+    (defn pscish-lookup-family (r) (nth r 4))
+    (defn pscish-lookup-path (r) (nth r 5))
+    (defn pscish-lookup-fresh? (r) (nth r 7))
+    (defn pscish-lookup-rebuild? (r) (nth r 8))
+    (defn pscish-lookup-match-count (r) (nth r 9))
+
+    ; ---- request and worker protocol ------------------------------------
+    ; request = action|root-hex|artifact-hex|family
+    (defn pscish-render-request (action root artifact family)
+        (pscish-join (list action (pscish-string-hex root)
+            (pscish-string-hex artifact) family) "|"))
+    (defn pscish-parse-request (text)
+        (do
+            (let f (pscish-split text "|"))
+            (if (not (eq (len f) 4)) (empty)
+                (do
+                    (let action (nth f 0))
+                    (let root (pscish-hex-string (nth f 1)))
+                    (let artifact (pscish-hex-string (nth f 2)))
+                    (let family (nth f 3))
+                    (if (or (eq (str_len root) 0)
+                        (or (eq (str_len artifact) 0)
+                            (eq (psci-family-valid? family) 0))) (empty)
+                        (list action root artifact family))))))
+    (defn pscish-write-request (action root artifact family)
+        (fs-write-text (pscish-request-path)
+            (pscish-render-request action root artifact family)))
+
+    ; ---- live coverage from persisted states + fresh census --------------
+    ; family row = (schema family denominator planned indexed current
+    ;               over-budget failures collisions stale missing invalid
+    ;               percent plan-current rebuild-needed)
+    (defn pscish-family-report-at (root artifact family)
+        (do
+            (let b (pscish-read-build-state artifact family))
+            (let v (pscish-read-validate-state artifact family))
+            (let denominator (psci-count-repository-family-at root family))
+            (let current (nth v 3))
+            (let plan-current (if (eq denominator (nth b 2)) 1 0))
+            (let rebuild (if (and (eq plan-current 1)
+                (and (eq (nth b 5) 0)
+                (and (eq (nth b 6) 0)
+                (and (eq (nth v 4) 0)
+                (and (eq (nth v 5) 0)
+                     (eq (nth v 6) 0)))))) 0 1))
+            (list "public-source-shard-family-report-v1" family denominator
+                (nth b 2) (nth b 3) current (nth b 4) (nth b 5) (nth b 6)
+                (nth v 4) (nth v 5) (nth v 6)
+                (psci-percent current denominator) plan-current rebuild)))
+    (defn pscish-family-reports-at (root artifact families)
+        (if (nil? families) (empty)
+            (cons (pscish-family-report-at root artifact
+                    (psci-family-id (head families)))
+                (pscish-family-reports-at root artifact (tail families)))))
+    (defn pscish-report-sum (rows at)
+        (if (nil? rows) 0
+            (add (nth (head rows) at) (pscish-report-sum (tail rows) at))))
+    (defn pscish-report-all (rows at expected)
+        (if (nil? rows) 1
+            (if (eq (nth (head rows) at) expected)
+                (pscish-report-all (tail rows) at expected) 0)))
+    ; report = (schema denominator planned indexed current over-budget
+    ;           failures unique-coordinate-ambiguities stale missing invalid
+    ;           retrieval-percent threshold95 plan-current rebuild-needed
+    ;           model-executed family-rows)
+    (defn pscish-report-at (root artifact)
+        (do
+            (let rows (pscish-family-reports-at root artifact (psci-families)))
+            (let denominator (pscish-report-sum rows 2))
+            (let planned (pscish-report-sum rows 3))
+            (let indexed (pscish-report-sum rows 4))
+            (let current (pscish-report-sum rows 5))
+            (let over-budget (pscish-report-sum rows 6))
+            (let failures (pscish-report-sum rows 7))
+            (let collisions (pscish-report-sum rows 8))
+            (let stale (pscish-report-sum rows 9))
+            (let missing (pscish-report-sum rows 10))
+            (let invalid (pscish-report-sum rows 11))
+            (let percent (psci-percent current denominator))
+            (let plan-current (pscish-report-all rows 13 1))
+            (let rebuild (if (and (eq plan-current 1)
+                (and (eq failures 0)
+                (and (eq collisions 0)
+                (and (eq stale 0)
+                (and (eq missing 0) (eq invalid 0)))))) 0 1))
+            (list "public-source-concept-shard-report-v1" denominator planned
+                indexed current over-budget failures collisions stale missing
+                invalid percent
+                (if (and (ge percent 95) (eq rebuild 0)) 1 0)
+                plan-current rebuild 0 rows)))
+    (defn pscish-report-denominator (r) (nth r 1))
+    (defn pscish-report-planned (r) (nth r 2))
+    (defn pscish-report-indexed (r) (nth r 3))
+    (defn pscish-report-current (r) (nth r 4))
+    (defn pscish-report-over-budget (r) (nth r 5))
+    (defn pscish-report-failures (r) (nth r 6))
+    (defn pscish-report-ambiguities (r) (nth r 7))
+    (defn pscish-report-stale (r) (nth r 8))
+    (defn pscish-report-missing (r) (nth r 9))
+    (defn pscish-report-invalid (r) (nth r 10))
+    (defn pscish-report-retrieval-percent (r) (nth r 11))
+    (defn pscish-report-threshold95? (r) (nth r 12))
+    (defn pscish-report-plan-current? (r) (nth r 13))
+    (defn pscish-report-rebuild-needed? (r) (nth r 14))
+    (defn pscish-report-model-executed? (r) (nth r 15))
+    (defn pscish-report-family-rows (r) (nth r 16))
+    0)

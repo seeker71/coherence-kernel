@@ -1,0 +1,473 @@
+; form-cli-nodeid-knowledge-session.fk — one resident local-Qwen context can
+; emit a path-free concept/NodeID query, receive the current Form source as a
+; typed observation, and continue without rebuilding its transcript or KV.
+;
+; Each predicted model ID is decoded to its exact raw byte chunk and offered
+; directly to this cell's bounded scannerless cursor. BPE remains only the
+; transformer's embedding boundary; it is not a grammar pre-pass. The cursor
+; retains at most one split opener or one bounded frame. A complete canonical
+; frame is offered once to a generic executor. The public executor composes the
+; existing `fknq-execute-at` door, whose persisted shard walk is bounded to one
+; lookup and whose unique path opens one bounded current-source observation.
+;
+; The returned bytes keep the original PSCI source/entry NodeIDs, the bridge
+; source/entry/request/executor/observation NodeIDs, and the existing FHCS
+; observation NodeID. They enter `fcms-observe` as NEW observation bytes plus
+; one role crossing. The already-generated IDs and q38 state/KV rows remain in
+; place; generation resumes from the prediction born after that prefill.
+;
+; hit, miss, nothing, stale, ambiguous, timeout and failure remain distinct.
+; Their choice/cut/undo/refine/release traces cross as data. Retrieval always
+; says model-executed=0: the model requests; Form reads and observes.
+;
+; No top-level model, registry, source, carrier, or remote work occurs here.
+; No C seed, tokenizer pre-step, flattening, or operations table participates.
+;
+; preludes: form-stdlib/form-cli-model-session.fk
+; preludes: form-stdlib/form-nodeid-knowledge-query.fk
+;
+; Pure shape proven by:
+;   form-stdlib/tests/form-cli-nodeid-knowledge-session-band.fk
+
+(do
+    ; ---- bounded raw-byte recognition ---------------------------------
+    (defn fknsc-state-none () "none")
+    (defn fknsc-state-held () "held")
+    (defn fknsc-state-complete () "complete")
+    (defn fknsc-state-over () "over")
+    (defn fknsc-detect-cap () (sub (str_len (fknq-open)) 1))
+    (defn fknsc-hold-cap () (fknq-max-frame-bytes))
+    (defn fknsc-injection-cap () (fkqt-max-render-bytes))
+    (defn fknsc-max-offers () 1)
+
+    (defn fknsc-clip-left (text cap)
+        (if (le (str_len text) cap) text
+            (substring text (sub (str_len text) cap) (str_len text))))
+    (defn fknsc-feed-window (window chunk)
+        (do
+            (let joined (str_concat window chunk))
+            (let at (str_find joined (fknq-open) 0))
+            (if (lt at 0)
+                (fknsc-clip-left joined (fknsc-detect-cap))
+                (substring joined at (str_len joined)))))
+    (defn fknsc-close-at (window open-at)
+        (str_find window (fknq-close)
+            (add open-at (str_len (fknq-open)))))
+    (defn fknsc-scan (window)
+        (do
+            (let open-at (str_find window (fknq-open) 0))
+            (if (lt open-at 0) (fknsc-state-none)
+                (do
+                    (let close-at (fknsc-close-at window open-at))
+                    (if (ge close-at 0)
+                        (if (gt (sub (add close-at (str_len (fknq-close)))
+                                     open-at)
+                                (fknsc-hold-cap))
+                            (fknsc-state-over) (fknsc-state-complete))
+                        (if (gt (str_len window) (fknsc-hold-cap))
+                            (fknsc-state-over) (fknsc-state-held)))))))
+    (defn fknsc-frame (window)
+        (do
+            (let open-at (str_find window (fknq-open) 0))
+            (if (lt open-at 0) ""
+                (do
+                    (let close-at (fknsc-close-at window open-at))
+                    (if (lt close-at 0) ""
+                        (substring window open-at
+                            (add close-at (str_len (fknq-close)))))))))
+
+    ; cursor = window scan terminal offered refused injections injected-bytes
+    ;          model-bytes model-chunks result status reason observation
+    (defn fknsc-cursor (window scan terminal offered refused injections
+                        injected-bytes model-bytes model-chunks result status
+                        reason observation)
+        (list window scan terminal offered refused injections injected-bytes
+              model-bytes model-chunks result status reason observation))
+    (defn fknsc-window (c) (nth c 0))
+    (defn fknsc-scan-state (c) (nth c 1))
+    (defn fknsc-terminal (c) (nth c 2))
+    (defn fknsc-offered (c) (nth c 3))
+    (defn fknsc-refused (c) (nth c 4))
+    (defn fknsc-injections (c) (nth c 5))
+    (defn fknsc-injected-bytes (c) (nth c 6))
+    (defn fknsc-model-bytes (c) (nth c 7))
+    (defn fknsc-model-chunks (c) (nth c 8))
+    (defn fknsc-result (c) (nth c 9))
+    (defn fknsc-status (c) (nth c 10))
+    (defn fknsc-reason (c) (nth c 11))
+    (defn fknsc-observation (c) (nth c 12))
+    (defn fknsc-open? (c)
+        (if (str_eq (fknsc-terminal c) "open") 1 0))
+    (defn fknsc-model-executed? (c) 0)
+    (defn fknsc-callback-calls (c) (fknsc-offered c))
+    (defn fknsc-lookup-count (c)
+        (if (nothing? (fknsc-result c)) 0
+            (fknq-lookup-count (fknsc-result c))))
+    (defn fknsc-fresh ()
+        (fknsc-cursor "" (fknsc-state-none) "open" 0 0 0 0 0 0
+            (nothing) "nothing" "waiting" ""))
+
+    ; The two byte lanes never alias. Model bytes are returned exactly as the
+    ; decoder offered them. Only a validated typed observation is injected.
+    (defn fknsc-transfer (cursor model-delta injection-delta)
+        (list cursor model-delta injection-delta))
+    (defn fknsc-transfer-cursor (x) (nth x 0))
+    (defn fknsc-transfer-model (x) (nth x 1))
+    (defn fknsc-transfer-injected (x) (nth x 2))
+    (defn fknsc-streamed (c window scan chunk)
+        (fknsc-cursor window scan (fknsc-terminal c)
+            (fknsc-offered c) (fknsc-refused c) (fknsc-injections c)
+            (fknsc-injected-bytes c)
+            (add (fknsc-model-bytes c) (str_len chunk))
+            (add (fknsc-model-chunks c) 1)
+            (fknsc-result c) (fknsc-status c) (fknsc-reason c)
+            (fknsc-observation c)))
+
+    ; ---- identity/result validation -----------------------------------
+    (defn fknsc-status? (status)
+        (if (or (str_eq status "hit")
+            (or (str_eq status "miss")
+            (or (str_eq status "nothing")
+            (or (str_eq status "stale")
+            (or (str_eq status "ambiguous")
+            (or (str_eq status "timeout")
+                (str_eq status "failure"))))))) 1 0))
+    (defn fknsc-source-continuity? (result)
+        (if (eq (psci-source-node-valid? (fknq-source-original-of result)) 1)
+            (if (and (eq (fknq-source-token-valid? (fknq-source result)) 1)
+                     (node_eq (fknq-source-original (fknq-source result))
+                              (fknq-source-original-of result))) 1 0)
+            (if (and (node_eq (fknq-source result) (fknq-absent))
+                     (node_eq (fknq-source-original-of result)
+                              (fknq-absent))) 1 0)))
+    (defn fknsc-entry-continuity? (result)
+        (if (eq (psci-entry-valid? (fknq-entry-original-of result)) 1)
+            (if (and (eq (fknq-entry-token-valid? (fknq-entry result)) 1)
+                     (node_eq (fknq-entry-original (fknq-entry result))
+                              (fknq-entry-original-of result))) 1 0)
+            (if (and (node_eq (fknq-entry result) (fknq-absent))
+                     (node_eq (fknq-entry-original-of result)
+                              (fknq-absent))) 1 0)))
+    (defn fknsc-current-observation-continuity? (result)
+        (if (node_eq (fknq-existing-current-observation result)
+                     (fknq-absent)) 1
+            (if (node_eq
+                    (node_category (fknq-existing-current-observation result))
+                    (fhcs-observation-category)) 1 0)))
+    (defn fknsc-result-valid? (request result)
+        (if (nothing? result) 0
+        (if (not (eq (len result) 22)) 0
+        (if (not (eq (fknsc-status? (fknq-status result)) 1)) 0
+        (if (not (eq (fknq-request-valid? request) 1)) 0
+        (if (not (node_eq request (fknq-request result))) 0
+        (if (not (node_eq (fknq-executor result)
+                          (fknq-executor-token))) 0
+        (if (not (node_eq (node_category (fknq-observation result))
+                          (fknq-observation-category))) 0
+        (if (not (eq (fknq-model-executed? result) 0)) 0
+        (if (not (and (eq (fknq-pretokenized? result) 0)
+                      (eq (fknq-scannerless? result) 1))) 0
+        (if (or (lt (fknq-lookup-count result) 0)
+                (gt (fknq-lookup-count result) (fknq-max-lookups))) 0
+        (if (not (eq (fknq-executed? result)
+                     (fknq-lookup-count result))) 0
+        (if (not (str_eq (fknq-trace-actions (fknq-trace result))
+                         (fknq-trace-actions
+                             (fknq-trace-for (fknq-status result))))) 0
+        (if (not (eq (fknsc-source-continuity? result) 1)) 0
+        (if (not (eq (fknsc-entry-continuity? result) 1)) 0
+            (fknsc-current-observation-continuity? result))))))))))))))))
+
+    ; ---- bounded typed observation bytes ------------------------------
+    (defn fknsc-node-key (node) (fknq-node-key node))
+    (defn fknsc-source-id (result)
+        (if (eq (psci-source-node-valid?
+                    (fknq-source-original-of result)) 1)
+            (psci-source-id (fknq-source-original-of result)) ""))
+    (defn fknsc-render-prefix (result answer-cut render-cut)
+        (do
+            (let raw-path (fknq-source-path result))
+            (let path (fkqt-clip raw-path (fkqt-max-source-bytes)))
+            (fhcs-cat (list
+                (fknq-observation-open)
+                "\nstatus=" (fknq-status result)
+                "\nreason=" (fknq-reason result)
+                "\nsource-node=@" (fknsc-node-key
+                    (fknq-source-original-of result))
+                "\nentry-node=@" (fknsc-node-key
+                    (fknq-entry-original-of result))
+                "\nbridge-source-node=@" (fknsc-node-key (fknq-source result))
+                "\nbridge-entry-node=@" (fknsc-node-key (fknq-entry result))
+                "\nrequest-node=@" (fknsc-node-key (fknq-request result))
+                "\nexecutor-node=@" (fknsc-node-key (fknq-executor result))
+                "\nobservation-node=@" (fknsc-node-key
+                    (fknq-observation result))
+                "\ncurrent-source-observation-node=@" (fknsc-node-key
+                    (fknq-existing-current-observation result))
+                "\nprovenance-schema=" (fhcs-schema)
+                "\nsource-artifact=" (fknsc-source-id result)
+                "\nsource-path=" path
+                "\nfresh=" (int_to_str (fknq-fresh? result))
+                "\nrebuild-needed=" (int_to_str (fknq-rebuild? result))
+                "\nmatch-count=" (int_to_str (fknq-match-count result))
+                "\nlookup-count=" (int_to_str (fknq-lookup-count result))
+                "\nhit-count=" (int_to_str (fknq-hit-count result))
+                "\nexecuted=" (int_to_str (fknq-executed? result))
+                "\nmodel-executed=" (int_to_str
+                    (fknq-model-executed? result))
+                "\npretokenized=" (int_to_str (fknq-pretokenized? result))
+                "\nscannerless=" (int_to_str (fknq-scannerless? result))
+                "\nlifecycle=" (fknq-trace-actions (fknq-trace result))
+                "\nanswer-encoding=" (fkqt-observation-encoding)
+                "\nanswer-truncated=" (int_to_str answer-cut)
+                "\nanswer-render-truncated=" (int_to_str render-cut)
+                "\nsource-truncated=" (int_to_str
+                    (fkqt-cut? raw-path (fkqt-max-source-bytes)))
+                "\nanswer-byte-length=" (int_to_str
+                    (str_len (fknq-answer result)))
+                "\nanswer:"))))
+    (defn fknsc-render (result)
+        (do
+            (let provisional (fknsc-render-prefix result 0 0))
+            (let fuel (sub (fknsc-injection-cap)
+                (add (str_len provisional)
+                     (add 1 (str_len (fknq-observation-close))))))
+            (let escaped (fkqt-observation-take (fknq-answer result) fuel))
+            (let render-cut
+                (if (lt (nth escaped 1) (str_len (fknq-answer result))) 1 0))
+            (let prefix (fknsc-render-prefix result render-cut render-cut))
+            (fhcs-cat (list prefix (nth escaped 0) "\n"
+                            (fknq-observation-close)))))
+    (defn fknsc-observation-valid? (text)
+        (do
+            (let n (str_len text))
+            (let open-n (str_len (fknq-observation-open)))
+            (let close-n (str_len (fknq-observation-close)))
+            (let expected-close (sub n close-n))
+            (let close-at
+                (str_find text (fknq-observation-close) open-n))
+            (if (or (eq n 0) (gt n (fknsc-injection-cap))) 0
+            (if (not (eq (str_find text (fknq-observation-open) 0) 0)) 0
+            (if (not (eq close-at expected-close)) 0
+            (if (ge (str_find text (fknq-observation-open) open-n) 0) 0
+            (if (ge (str_find text (fknq-open) open-n) 0) 0
+            (if (ge (str_find text (fknq-close) open-n) 0) 0
+                1))))))))
+
+    ; ---- one offer and explicit terminal signals ----------------------
+    (defn fknsc-terminal-state (c scan terminal result observation
+                                 offered-add refused-add injection-add)
+        (fknsc-cursor "" scan terminal
+            (add (fknsc-offered c) offered-add)
+            (add (fknsc-refused c) refused-add)
+            (add (fknsc-injections c) injection-add)
+            (add (fknsc-injected-bytes c) (str_len observation))
+            (fknsc-model-bytes c) (fknsc-model-chunks c)
+            result (fknq-status result) (fknq-reason result) observation))
+    (defn fknsc-accept (c result offered-add refused-add)
+        (do
+            (let observation (fknsc-render result))
+            (if (not (eq (fknsc-observation-valid? observation) 1))
+                (do
+                    (let fallback (fknq-result-from-scan
+                        (fknq-scan-row "failure"
+                            "executor-observation-refused" (nothing) "" 0)))
+                    (let rendered (fknsc-render fallback))
+                    (fknsc-terminal-state c (fknsc-state-complete) "refused"
+                        fallback rendered offered-add 1 1))
+                (fknsc-terminal-state c (fknsc-state-complete) "complete"
+                    result observation offered-add refused-add 1))))
+    (defn fknsc-cursor-result (status reason)
+        (fknq-result-from-scan
+            (fknq-scan-row status reason (nothing) "" 0)))
+    (defn fknsc-refuse-result (c status reason terminal)
+        (do
+            (let result (fknsc-cursor-result status reason))
+            (let observation (fknsc-render result))
+            (let scan (if (str_eq terminal "over") (fknsc-state-over)
+                (if (str_eq terminal "timeout") (fknsc-state-held)
+                    (fknsc-state-complete))))
+            (fknsc-terminal-state c scan terminal result observation 0 1 1)))
+    (defn fknsc-offer-once (ctx executor c frame)
+        (do
+            (let scan (fknq-bmf-consume-default frame))
+            (if (not (str_eq (fknq-scan-status scan) "ready"))
+                (fknsc-accept c (fknq-result-from-scan scan) 0 1)
+                (do
+                    (let result (executor ctx frame))
+                    (if (not (eq (fknsc-result-valid?
+                                    (fknq-scan-request scan) result) 1))
+                        (fknsc-refuse-result c "failure"
+                            "executor-result-invalid" "refused")
+                        (fknsc-accept c result 1 0))))))
+    (defn fknsc-over (c)
+        (fknsc-refuse-result c "failure" "frame-budget-exceeded" "over"))
+    (defn fknsc-feed (ctx executor cursor chunk)
+        (if (not (eq (fknsc-open? cursor) 1))
+            (fknsc-transfer
+                (fknsc-streamed cursor (fknsc-window cursor)
+                    (fknsc-scan-state cursor) chunk)
+                chunk "")
+            (do
+                (let window (fknsc-feed-window (fknsc-window cursor) chunk))
+                (let scan (fknsc-scan window))
+                (let streamed (fknsc-streamed cursor window scan chunk))
+                (if (str_eq scan (fknsc-state-complete))
+                    (do
+                        (let completed (fknsc-offer-once ctx executor streamed
+                            (fknsc-frame window)))
+                        (fknsc-transfer completed chunk
+                            (fknsc-observation completed)))
+                    (if (str_eq scan (fknsc-state-over))
+                        (do
+                            (let over (fknsc-over streamed))
+                            (fknsc-transfer over chunk
+                                (fknsc-observation over)))
+                        (fknsc-transfer streamed chunk ""))))))
+    (defn fknsc-timeout (cursor)
+        (if (and (eq (fknsc-open? cursor) 1)
+                 (str_eq (fknsc-scan-state cursor)
+                         (fknsc-state-held)))
+            (do
+                (let timed (fknsc-refuse-result cursor "timeout"
+                    "held-frame-timeout" "timeout"))
+                (fknsc-transfer timed "" (fknsc-observation timed)))
+            (fknsc-transfer cursor "" "")))
+
+    ; This executor is dormant until a caller intentionally drives the live
+    ; session. Its context carries the already-resolved body root and artifact.
+    ; fknq itself enforces the one-lookup boundary.
+    (defn fknsc-public-context (root artifact local-ready budget)
+        (list root artifact local-ready budget))
+    (defn fknsc-public-executor (ctx surface)
+        (fknq-execute-at (nth ctx 0) (nth ctx 1) surface (nth ctx 2)
+            (if (gt (nth ctx 3) (fknq-max-frame-bytes))
+                (fknq-max-frame-bytes) (nth ctx 3))))
+
+    ; ---- same-residence Qwen composition ------------------------------
+    ; result = tag session cursor before-text after-text injected-text
+    ;              before-ids after-ids
+    (defn fknss-result (session cursor before after injected before-ids after-ids)
+        (list "form-cli-nodeid-knowledge-session-v1" session cursor before
+              after injected before-ids after-ids))
+    (defn fknss-session (r) (nth r 1))
+    (defn fknss-cursor (r) (nth r 2))
+    (defn fknss-before-text (r) (nth r 3))
+    (defn fknss-after-text (r) (nth r 4))
+    (defn fknss-injected-text (r) (nth r 5))
+    (defn fknss-before-ids (r) (nth r 6))
+    (defn fknss-after-ids (r) (nth r 7))
+    (defn fknss-model-bytes (r)
+        (add (str_len (fknss-before-text r))
+             (str_len (fknss-after-text r))))
+    (defn fknss-injected-bytes (r) (str_len (fknss-injected-text r)))
+    (defn fknss-crossed? (r)
+        (if (eq (fknsc-injections (fknss-cursor r)) 1) 1 0))
+    (defn fknss-callback-calls (r)
+        (fknsc-callback-calls (fknss-cursor r)))
+    (defn fknss-lookup-count (r)
+        (fknsc-lookup-count (fknss-cursor r)))
+    (defn fknss-model-executed-form? (r) 0)
+
+    ; Direct identity accessors make the crossing inspectable without parsing
+    ; rendered prose back into structure.
+    (defn fknss-bridge-result (r) (fknsc-result (fknss-cursor r)))
+    (defn fknss-source (r) (fknq-source (fknss-bridge-result r)))
+    (defn fknss-entry (r) (fknq-entry (fknss-bridge-result r)))
+    (defn fknss-request (r) (fknq-request (fknss-bridge-result r)))
+    (defn fknss-executor (r) (fknq-executor (fknss-bridge-result r)))
+    (defn fknss-observation (r)
+        (fknq-observation (fknss-bridge-result r)))
+    (defn fknss-current-observation (r)
+        (fknq-existing-current-observation (fknss-bridge-result r)))
+
+    (defn fknss-with-generated (s pos pending stopped added)
+        (fcms-with-stream s pos pending stopped
+            (add (fcms-generated-ids s) added)
+            (fcms-injected-ids s) (fcms-observations s)))
+    (defn fknss-fail (s reason pos pending stopped added)
+        (fcms-session "nothing" reason (fcms-path s) (fcms-src s)
+            (fcms-ctx s) (fcms-sts s) (fcms-maxpos s) pos pending stopped
+            (fcms-prompt-ids s) (add (fcms-generated-ids s) added)
+            (fcms-injected-ids s) (fcms-observations s)))
+    (defn fknss-forward (s id pos)
+        (do
+            (let ctx (fcms-ctx s))
+            (q38-forward
+                (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
+                (fcms-sts s) (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                id pos)))
+    (defn fknss-finish (s c before after injected before-ids after-ids)
+        (fknss-result s c before after injected before-ids after-ids))
+
+    (defn fknss-walk
+        (s c id pos left stops phase before after injected before-ids after-ids
+         exec-ctx executor)
+        (if (le left 0)
+            (fknss-finish s c before after injected before-ids after-ids)
+        (if (lt id 0)
+            (fknss-finish
+                (fknss-fail s "model-forward-refused" pos -1 1 0)
+                c before after injected before-ids after-ids)
+        (if (eq (q38-stop? id stops) 1)
+            (fknss-finish (fknss-with-generated s pos id 1 0)
+                c before after injected before-ids after-ids)
+        (if (ge pos (fcms-maxpos s))
+            (fknss-finish
+                (fknss-fail s "session-position-refused" pos id 0 0)
+                c before after injected before-ids after-ids)
+            (do
+                (let chunk (tkz-decode-text (fcms-src s) (list id)))
+                (let transfer (fknsc-feed exec-ctx executor c chunk))
+                (let c2 (fknsc-transfer-cursor transfer))
+                (let model-delta (fknsc-transfer-model transfer))
+                (let injection-delta (fknsc-transfer-injected transfer))
+                (let before2 (if (eq phase 0)
+                    (str_concat before model-delta) before))
+                (let after2 (if (eq phase 0)
+                    after (str_concat after model-delta)))
+                (let before-ids2 (if (eq phase 0)
+                    (append before-ids (list id)) before-ids))
+                (let after-ids2 (if (eq phase 0)
+                    after-ids (append after-ids (list id))))
+                (let spoken (fknss-with-generated s pos id 0 1))
+                (if (gt (str_len injection-delta) 0)
+                    (do
+                        ; spoken holds the decoded model ID pending. Observe
+                        ; consumes it once, encodes only new bytes/role, and
+                        ; returns the first prediction after that same-KV prefill.
+                        (let resumed (fcms-observe spoken injection-delta))
+                        (if (not (eq (fcms-live? resumed) 1))
+                            (fknss-finish resumed c2 before2 after2
+                                (str_concat injected injection-delta)
+                                before-ids2 after-ids2)
+                            (fknss-walk resumed c2 (fcms-pending resumed)
+                                (fcms-pos resumed) (sub left 1) stops 1
+                                before2 after2
+                                (str_concat injected injection-delta)
+                                before-ids2 after-ids2 exec-ctx executor)))
+                (if (eq left 1)
+                    (fknss-finish spoken c2 before2 after2 injected
+                        before-ids2 after-ids2)
+                    (do
+                        (let next-id (fknss-forward spoken id pos))
+                        (let next (fknss-with-generated spoken (add pos 1)
+                            next-id
+                            (if (or (lt next-id 0)
+                                    (eq (q38-stop? next-id stops) 1)) 1 0)
+                            0))
+                        (fknss-walk next c2 next-id (add pos 1) (sub left 1)
+                            stops phase before2 after2 injected
+                            before-ids2 after-ids2 exec-ctx executor))))))))))
+
+    (defn fknss-run-with (session max-generated exec-ctx executor)
+        (if (or (not (eq (fcms-live? session) 1))
+                (le max-generated 0))
+            (fknss-result session (fknsc-fresh) "" "" ""
+                (empty) (empty))
+            (fknss-walk session (fknsc-fresh)
+                (fcms-pending session) (fcms-pos session) max-generated
+                (fcmg-q35-stops (fcms-src session)) 0
+                "" "" "" (empty) (empty) exec-ctx executor)))
+
+    0)

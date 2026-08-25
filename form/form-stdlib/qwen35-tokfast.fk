@@ -1,0 +1,184 @@
+; qwen35-tokfast.fk — the tokenizer's two constant tables, frozen once under
+; the artifact seal, looked up natively instead of scanned per use.
+;
+; Measured 2026-08-24: encoding a 223-token prompt cost 82.9 s because every
+; encode walks all 247,587 merge records (tkz-cands' one pass) and every
+; final symbol walks the whole 248,320-token vocab (tkz-id-of). Both tables
+; are constants of the sealed file. This cell is the ice pattern from
+; qwen35-crystal.fk applied to them: freeze once into `<gguf>.form-tokfast`,
+; then every lookup is one native str_find over a blob instead of a Form
+; walk over records.
+;
+; SAME ANSWER, argued and then witnessed: BPE picks the lowest-rank
+; applicable merge, leftmost pair (tkz-cbest's order). Computing each
+; adjacent pair's rank directly and taking the minimum (leftmost on ties)
+; chooses the identical pair. Token reachability is mirrored exactly: the
+; freeze walks each record with the SAME two-byte codepoint decoder and the
+; SAME cp2b mapping the reference uses, and skips exactly the tokens the
+; reference could never match. tests/qwen35-tokfast-band.fk demands id
+; equality with q35-encode on live strings — the blob is not trusted, it is
+; witnessed.
+;
+; Blob format (byte-safe: token bytes may be anything, so lines carry hex):
+;   line 0: the .form-seal content line (the key)
+;   line 1: 9380002 (magic)
+;   vocab section:  one line per reachable token  "\n<hex-bytes> <id>"
+;   separator line: "\n=M="
+;   merge section:  one line per merge            "\n<hexL>.<hexR> <rank>"
+;
+; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-crystal.fk
+; Proven by: form-stdlib/tests/qwen35-tokfast-band.fk
+
+(do
+    (defn qtf-path (path) (str_concat path ".form-tokfast"))
+    (defn qtf-magic () "9380002")
+
+    ; ---- hex of a byte list ------------------------------------------------
+    (defn qtf-hexd (n) (substring "0123456789abcdef" n (add n 1)))
+    (defn qtf-hex1 (b) (str_concat (qtf-hexd (div b 16)) (qtf-hexd (sub b (mul (div b 16) 16)))))
+    (defn qtf-hex (bs acc)
+        (if (eq (len bs) 0) acc (qtf-hex (tail bs) (str_concat acc (qtf-hex1 (head bs))))))
+
+    ; ---- the reference decoders, reused byte for byte ----------------------
+    ; a token record's raw-byte list via the SAME 2-byte cp walk + cp2b the
+    ; reference comparator uses; ("bad") when any cp has no byte — exactly
+    ; the records tkz-tok-eq can never match.
+    (defn qtf-tok-bytes (src tat to plen acc)
+        (if (lt to plen)
+            (do (let b0 (gmt-token-byte src tat to))
+                (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (gmt-token-byte src tat (add to 1)) 128))))
+                (let by (tkz-cp2b cp))
+                (if (lt by 0) (list "bad")
+                    (qtf-tok-bytes src tat (add to (if (lt b0 128) 1 2)) plen (append acc (list by)))))
+            acc))
+
+    ; ---- freeze: one pass over each table, chunked so text builds O(n) -----
+    (defn qtf-vocab-go (src tat id n seg segs)
+        (if (eq id n) (append segs (list seg))
+            (do (let bs (qtf-tok-bytes src tat 0 (gmt-token-len src tat) (empty)))
+                (let line (if (if (gt (len bs) 0) (str_eq (nth bs 0) "bad") 0) ""
+                    (if (eq (len bs) 0) ""
+                        (str_concat "\n" (str_concat (qtf-hex bs "")
+                            (str_concat " " (int_to_str id)))))))
+                (let seg2 (str_concat seg line))
+                (if (eq (sub id (mul (div id 512) 512)) 511)
+                    (qtf-vocab-go src (gmt-token-next src tat) (add id 1) n "" (append segs (list seg2)))
+                    (qtf-vocab-go src (gmt-token-next src tat) (add id 1) n seg2 segs)))))
+    (defn qtf-merge-go (src at rank n seg segs)
+        (if (eq rank n) (append segs (list seg))
+            (do (let mlen (tkz-rec-len src at))
+                (let lb (tkz-mrg-left src at 0 mlen (empty)))
+                (let rb (tkz-mrg-right src at 0 mlen (empty) 0))
+                (let line (if (if (gt (len lb) 0) (gt (len rb) 0) 0)
+                    (str_concat "\n" (str_concat (qtf-hex lb "")
+                        (str_concat "." (str_concat (qtf-hex rb "")
+                            (str_concat " " (int_to_str rank)))))) ""))
+                (let seg2 (str_concat seg line))
+                (if (eq (sub rank (mul (div rank 512) 512)) 511)
+                    (qtf-merge-go src (tkz-rec-next src at) (add rank 1) n "" (append segs (list seg2)))
+                    (qtf-merge-go src (tkz-rec-next src at) (add rank 1) n seg2 segs)))))
+    (defn qtf-join (segs acc)
+        (if (eq (len segs) 0) acc (qtf-join (tail segs) (str_concat acc (head segs)))))
+    (defn qtf-freeze (path)
+        (do (let src (eqr-of-file path 0 40000000))
+            (let vsegs (qtf-vocab-go src (gmt-tokens-first src) 0 (gmt-vocab-n src) "" (empty)))
+            (let msegs (qtf-merge-go src (tkz-merges-first src) 0 (tkz-merges-n src) "" (empty)))
+            (let text (str_concat (qsx-seal-line path)
+                      (str_concat "\n" (str_concat (qtf-magic)
+                      (str_concat (qtf-join vsegs "")
+                      (str_concat "\n=M=" (str_concat (qtf-join msegs "") "\n")))))))
+            (write_file (qtf-path path) text)))
+
+    ; ---- load: key check, split the two sections ---------------------------
+    ; The runtime's whole-file text door carries the seed's 64 KiB buffer
+    ; (receipts/2026-08-19-qwen38-form-native-lands.md keeps it 64 KiB on
+    ; purpose); an 11 MB blob cannot pass it and the crystal's 25 KB can.
+    ; So this file is read in bounded slices through read_file_slice, joined
+    ; two-level so the text builds O(n).
+    (defn qtf-read-go (path size at step segs)
+        (if (ge at size) segs
+            (do (let stop (if (lt (add at step) size) (add at step) size))
+                (qtf-read-go path size stop step
+                    (append segs (list (read_file_slice path at (sub stop at))))))))
+    (defn qtf-read-all (path)
+        (do (let size (file_size path))
+            (qtf-join (qtf-read-go path size 0 60000 (empty)) "")))
+    ; answers (list 1 wholeblob) or (list 0). The two sections are NOT sliced
+    ; out: `substring` resolves to core.fk's per-byte Form fallback in this
+    ; chain (witnessed 2026-08-24: a 5.5 MB slice OOM-killed the process,
+    ; rc 137 — the O(n^2) concat loop), and slicing is unnecessary anyway —
+    ; a vocab needle contains no '.', a merge needle does, so neither can
+    ; match a line of the other section. Both lookups search the one string.
+    ; The key check compares by str_find at position 0 for the same reason.
+    (defn qtf-load (path)
+        (if (eq (fs_exists (qtf-path path)) 0) (list 0)
+            (do (let s (qtf-read-all (qtf-path path)))
+                (let key (qsx-seal-line path))
+                (if (lt (str_len s) (add (str_len key) 10)) (list 0)
+                (if (not (eq (str_find s (str_concat key (str_concat "\n" (qtf-magic))) 0) 0)) (list 0)
+                (if (lt (str_find s "\n=M=" 0) 0) (list 0)
+                    (list 1 s)))))))
+
+    ; ---- lookups: one native str_find each ---------------------------------
+    (defn qtf-int-at (s i acc)
+        (do (let c (str_byte_at s i))
+            (if (if (ge c 48) (le c 57) 0) (qtf-int-at s (add i 1) (add (mul acc 10) (sub c 48))) acc)))
+    (defn qtf-vocab-id (vb sym)
+        (do (let needle (str_concat "\n" (str_concat (qtf-hex sym "") " ")))
+            (let at (str_find vb needle 0))
+            (if (lt at 0) (sub 0 1) (qtf-int-at vb (add at (str_len needle)) 0))))
+    (defn qtf-pair-rank (mb l r)
+        (do (let needle (str_concat "\n" (str_concat (qtf-hex l "")
+                        (str_concat "." (str_concat (qtf-hex r "") " ")))))
+            (let at (str_find mb needle 0))
+            (if (lt at 0) (sub 0 1) (qtf-int-at mb (add at (str_len needle)) 0))))
+
+    ; ---- BPE: minimum-rank adjacent pair, leftmost on ties -----------------
+    (defn qtf-best-go (mb syms i bestp bestr)
+        (if (ge (add i 1) (len syms)) (list bestp bestr)
+            (do (let rk (qtf-pair-rank mb (nth syms i) (nth syms (add i 1))))
+                (if (if (ge rk 0) (if (lt bestr 0) 1 (lt rk bestr)) 0)
+                    (qtf-best-go mb syms (add i 1) i rk)
+                    (qtf-best-go mb syms (add i 1) bestp bestr)))))
+    (defn qtf-bpe (mb syms)
+        (if (lt (len syms) 2) syms
+            (do (let best (qtf-best-go mb syms 0 (sub 0 1) (sub 0 1)))
+                (if (lt (nth best 0) 0) syms
+                    (qtf-bpe mb (tkz-apply syms (nth best 0)))))))
+
+    ; ---- symbol list -> ids, with the reference's per-byte fallback --------
+    (defn qtf-ids-of-syms (vb syms acc)
+        (if (eq (len syms) 0) acc
+            (do (let id (qtf-vocab-id vb (head syms)))
+                (qtf-ids-of-syms vb (tail syms)
+                    (if (lt id 0)
+                        (tkz-cat acc (qtf-ids-of-bytes vb (head syms) 0))
+                        (append acc (list id)))))))
+    (defn qtf-ids-of-bytes (vb sym k)
+        (if (lt k (len sym))
+            (cons (qtf-vocab-id vb (list (nth sym k))) (qtf-ids-of-bytes vb sym (add k 1)))
+            (empty)))
+
+    ; ---- the encode: reference pre-tokenizer, blob-backed BPE + ids --------
+    (defn qtf-encode-from (vb mb inp L pos acc)
+        (if (lt pos L)
+            (do (let end (q35-next-piece inp L pos))
+                (qtf-encode-from vb mb inp L end
+                    (qtf-ids-of-syms vb (qtf-bpe mb (tkz-syms inp pos end)) acc)))
+            acc))
+    (defn qtf-encode (tf inp)
+        (qtf-encode-from (nth tf 1) (nth tf 1) inp (str_len inp) 0 (empty)))
+
+    ; the chat sequence with crystal scaffolds and the fast prompt encode
+    (defn qtf-chat-ids (prompt x tf)
+        (tkz-cat (list (nth x 1))
+        (tkz-cat (nth x 5)
+        (tkz-cat (qtf-encode tf prompt)
+        (tkz-cat (list (nth x 2))
+        (tkz-cat (nth x 6)
+        (tkz-cat (list (nth x 1))
+        (tkz-cat (nth x 7)
+        (tkz-cat (list (nth x 3))
+        (tkz-cat (nth x 8)
+        (tkz-cat (list (nth x 4)) (nth x 8))))))))))))
+    0)

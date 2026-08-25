@@ -1,0 +1,294 @@
+; form-cli-heed-current-source.fk — one current-body knowledge substrate for the
+; live heed cursor.  It parses the Form knowledge-query envelope, derives a
+; small bounded set of query atoms through the repository's Form byte scanner.
+; A named, validated repo-relative path takes the interactive one-file lane;
+; an explicitly fuelled caller may instead perform ONE source_inventory plus
+; bounded-window lookup over the body that is present now.
+;
+; This is deliberately parallel to nodeid-rag-v2, not disguised as it.  A
+; current source file is a source artifact with a fresh Form SHA-256; it is not
+; a registered NamedCell REF or CTOR.  The observation therefore leaves those
+; fields empty and names provenance-schema=source-artifact-stream-v1.  The
+; stronger nodeid-rag-v2 adapter remains form-cli-heed-fkqt.fk.
+;
+; One complete envelope causes at most one search.  Invalid, partial, nested,
+; trailing, empty, or over-budget envelopes return `nothing` before source IO.
+; A completed search with no match returns `miss`, which is distinct from
+; `nothing` and enters the model as a typed observation so it cannot silently
+; invent a source row.  `model-executed` is always 0: the cursor recognizes the
+; decoded bytes, this Form cell performs the lookup, and the carrier prefills
+; the resulting observation before the next model step.
+;
+; This is live retrieval, not learned weights and not proof of model reasoning.
+; It makes the current body available on demand while held-out model evaluation
+; and weight training remain separate axes in the integration census.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-knowledge-query-token.fk
+; preludes: form-stdlib/form-knowledge-source-search.fk
+;
+; Proven by: form-stdlib/tests/form-cli-heed-current-source-band.fk
+
+(do
+    (defn fhcs-schema () "source-artifact-stream-v1")
+    ; The live root is discovered from repo-native marker files, walking upward
+    ; from the process directory. An arbitrary cwd is never silently accepted as
+    ; the body. Twelve parent edges cover the repo's own nested doors; failure is
+    ; an explicit `body-root-unresolved` nothing before source IO.
+    (defn fhcs-body-root-fuel () 12)
+    (defn fhcs-body-root-ok? (root)
+        (if (and (eq (fs-is-file? (fs-path-join root "AGENTS.md")) 1)
+                 (eq (fs-is-file? (fs-path-join root "HOMECOMING.md")) 1))
+            (if (and (eq (fs-is-file? (fs-path-join root "bootstrap/ground.fk")) 1)
+                     (eq (fs-is-file? (fs-path-join root "form/form-stdlib/core.fk")) 1))
+                1 0) 0))
+    (defn fhcs-body-root-go (root fuel)
+        (if (eq (fhcs-body-root-ok? root) 1) root
+            (if (le fuel 0) ""
+                (fhcs-body-root-go (fs-path-join root "..") (sub fuel 1)))))
+    (defn fhcs-default-root ()
+        (fhcs-body-root-go "." (fhcs-body-root-fuel)))
+    (defn fhcs-root-status ()
+        (if (str_eq (fhcs-default-root) "") "body-root-unresolved"
+            "body-root-anchored-upward-v1"))
+    (defn fhcs-max-atoms () 8)
+    (defn fhcs-model-executed () 0)
+    (defn fhcs-lookup-limit () 1)
+    ; The observed 823MB body took longer than ten minutes through a whole-tree
+    ; files×atoms walk. Live lookup therefore has no implicit global-scan fuel.
+    ; Explicit test/tool callers may offer one bounded traversal themselves.
+    (defn fhcs-live-global-scan-fuel () 0)
+
+    ; Query words are scanned byte-by-byte by re-words (already in fkqt's
+    ; grounded RAG prelude).  Stop words carry little retrieval evidence and
+    ; are removed; at most eight content atoms cross into the source walk.
+    (defn fhcs-atoms-loop (words fuel)
+        (if (or (nil? words) (le fuel 0)) (empty)
+            (if (eq (re-stop-word? (head words)) 1)
+                (fhcs-atoms-loop (tail words) fuel)
+                (cons (head words) (fhcs-atoms-loop (tail words) (sub fuel 1))))))
+    (defn fhcs-atoms (query)
+        (fhcs-atoms-loop (re-words query) (fhcs-max-atoms)))
+
+    ; A query may name one exact repo-relative knowledge path. This is the
+    ; interactive fast lane: one eligible file, one bounded atom observation,
+    ; one whole-file stream hash, one bounded answer window. Absolute paths,
+    ; parent traversal, backslashes, and non-knowledge extensions never cross.
+    (defn fhcs-path-byte? (b)
+        (if (or (and (ge b 48) (le b 57))
+                (or (and (ge b 65) (le b 90))
+                (or (and (ge b 97) (le b 122))
+                    (or (eq b 45) (or (eq b 46) (or (eq b 47) (eq b 95))))))) 1 0))
+    (defn fhcs-path-skip (s i)
+        (if (ge i (str_len s)) i
+            (if (eq (fhcs-path-byte? (str_byte_at s i)) 1) i
+                (fhcs-path-skip s (add i 1)))))
+    (defn fhcs-path-end (s i)
+        (if (ge i (str_len s)) i
+            (if (eq (fhcs-path-byte? (str_byte_at s i)) 1)
+                (fhcs-path-end s (add i 1)) i)))
+    (defn fhcs-relative-source-path? (path)
+        (if (or (eq (str_len path) 0) (gt (str_len path) (fkqt-max-source-bytes))) 0
+            (if (or (eq (str_byte_at path 0) 47)
+                    (ge (str_find path ".." 0) 0)) 0
+                (if (and (ge (str_find path "/" 0) 0)
+                         (eq (fkss-knowledge-extension? path) 1)) 1 0))))
+    (defn fhcs-query-source-path-go (query at)
+        (do
+            (let start (fhcs-path-skip query at))
+            (if (ge start (str_len query)) ""
+                (do
+                    (let end (fhcs-path-end query start))
+                    (let candidate (substring query start end))
+                    (if (eq (fhcs-relative-source-path? candidate) 1) candidate
+                        (fhcs-query-source-path-go query (add end 1)))))))
+    (defn fhcs-query-source-path (query)
+        (fhcs-query-source-path-go query 0))
+
+    (defn fhcs-path-result-with-reason (root relative atoms hit-reason)
+        (do
+            (let full (fs-path-join root relative))
+            (let size (fs-stat-size full))
+            (if (or (eq (fhcs-relative-source-path? relative) 0)
+                    (or (lt size 0) (not (eq (fs-is-file? full) 1))))
+                (fkss-result "miss" "direct-source-path-unavailable" "" relative
+                    0 -1 "" 1 1 0 -1 0)
+                (do
+                    (let observed (fkss-observe-atoms full atoms))
+                    (let candidate (fkss-candidate relative full
+                        (nth observed 0) (nth observed 1) size))
+                    (let answer-start (fkss-answer-start (nth observed 1) size))
+                    (fkss-result "hit" hit-reason
+                        (fkss-source-id full) relative
+                        (nth observed 0) (nth observed 1)
+                        (fkss-answer-for candidate) 1 1 1 size answer-start)))))
+    (defn fhcs-path-result (root relative atoms)
+        (fhcs-path-result-with-reason root relative atoms
+            "current-source-path-hit"))
+
+    (defn fhcs-answer-key (answer)
+        (if (str_eq answer "") ""
+            (hex-encode (sha256-stream-string answer))))
+    (defn fhcs-confidence (matched atom-count)
+        (if (le atom-count 0) 0 (div (mul matched 100) atom-count)))
+
+    ; A separate content-addressed observation family.  Its children name the
+    ; exact query token, Form executor, source artifact, bounded path and answer
+    ; hash.  No substrate REF/CTOR is synthesized.
+    (defn fhcs-observation-category () (make_nodeid 31 2 0 55))
+    (defn fhcs-observation-token (request result path answer answer-key lane)
+        (intern_node (fhcs-observation-category)
+            (list
+                (fkqt-request-token request)
+                (fkqt-executor-token)
+                (intern_trivial_string (fhcs-schema))
+                (intern_trivial_string (fkss-source-id-of result))
+                (intern_trivial_string path)
+                (intern_trivial_string answer-key)
+                (intern_trivial_string answer)
+                (intern_trivial_int lane)
+                (intern_trivial_int 1)
+                (intern_trivial_int 0))))
+
+    (defn fhcs-cat (parts)
+        (if (nil? parts) ""
+            (str_concat (head parts) (fhcs-cat (tail parts)))))
+
+    (defn fhcs-render-prefix (request result atom-count local-ready
+                              answer-cut render-cut)
+        (do
+            (let status (fkss-status result))
+            (let hit? (if (str_eq status "hit") 1 0))
+            (let raw-path (fkss-source-path result))
+            (let path (fkqt-clip raw-path (fkqt-max-source-bytes)))
+            (let answer (fkss-answer result))
+            (let answer-key (fhcs-answer-key answer))
+            (let lane (fkqt-route-lane status local-ready))
+            (let observation (fhcs-observation-token request result path answer answer-key lane))
+            (fhcs-cat (list
+                (fkqt-observation-open)
+                "\nstatus=" status
+                "\nreason=" (fkss-reason result)
+                "\nrequest-node=@" (fkqt-node-key (fkqt-request-token request))
+                "\nobservation-node=@" (fkqt-node-key observation)
+                "\nexecutor-node=@" (fkqt-node-key (fkqt-executor-token))
+                "\nprovenance-schema=" (fhcs-schema)
+                "\nsource-ref="
+                "\ncontent-ref="
+                "\nsource-artifact=" (fkss-source-id-of result)
+                "\nsource-path=" path
+                "\nanswer-key=" answer-key
+                "\nretrieval-matched-atoms=" (int_to_str (fkss-matched result))
+                "\nretrieval-query-atoms=" (int_to_str atom-count)
+                "\nretrieval-confidence="
+                    (int_to_str (fhcs-confidence (fkss-matched result) atom-count))
+                "\nsource-inventory=" (int_to_str (fkss-inventory-count result))
+                "\nsource-eligible=" (int_to_str (fkss-eligible-count result))
+                "\nsource-accessible=" (int_to_str (fkss-accessible-count result))
+                "\nsource-access-percent=" (int_to_str (fkss-coverage-percent result))
+                "\nlane=" (int_to_str lane)
+                "\nexecuted=1"
+                "\nmodel-executed=0"
+                "\nlookup-count=1"
+                "\nhit-count=" (int_to_str hit?)
+                "\nanswer-encoding=" (fkqt-observation-encoding)
+                "\nanswer-truncated=" (int_to_str answer-cut)
+                "\nanswer-source-truncated=" (int_to_str (fkss-answer-cut? result))
+                "\nanswer-render-truncated=" (int_to_str render-cut)
+                "\nsource-truncated=" (int_to_str (fkqt-cut? raw-path (fkqt-max-source-bytes)))
+                "\nanswer-byte-length=" (int_to_str (str_len answer))
+                "\nanswer:"))))
+    (defn fhcs-render (request result atom-count local-ready)
+        (do
+            (let provisional (fhcs-render-prefix request result atom-count
+                local-ready (fkss-answer-cut? result) 0))
+            (let fuel (sub (fkqt-max-render-bytes)
+                (add (str_len provisional)
+                     (add 1 (str_len (fkqt-observation-close))))))
+            (let escaped (fkqt-observation-take (fkss-answer result) fuel))
+            (let render-cut (if (lt (nth escaped 1)
+                                    (str_len (fkss-answer result))) 1 0))
+            (let answer-cut (if (or (eq (fkss-answer-cut? result) 1)
+                                    (eq render-cut 1)) 1 0))
+            (let prefix (fhcs-render-prefix request result atom-count
+                local-ready answer-cut render-cut))
+            (fhcs-cat (list prefix (nth escaped 0) "\n"
+                            (fkqt-observation-close)))))
+
+    ; Cursor adapter result: (status rendered-span reason).  `nothing` carries
+    ; no span; hit and miss carry a typed observation.
+    (defn fhcs-refused (reason) (list "nothing" "" reason))
+    (defn fhcs-of-result (request result atom-count local-ready)
+        (if (not (eq (fkss-model-executed result) 0))
+            (fhcs-refused "model-executed-refused")
+            (if (str_eq (fkss-status result) "nothing")
+                (fhcs-refused (fkss-reason result))
+                (list (fkss-status result)
+                      (fhcs-render request result atom-count local-ready)
+                      (fkss-reason result)))))
+
+    ; A carrier that already holds a validated repo-relative path from the user
+    ; prompt may offer it as a bounded hint. The model-emitted query still owns
+    ; the search atoms. An emitted valid path wins; the prompt hint is consulted
+    ; only when the emitted query contains no usable path. This composes an
+    ; ahead-of-time path choice with an on-demand model query without authorizing
+    ; a global scan or fabricating an answer.
+    (defn fhcs-lookup-at-fuel-hinted
+        (root ctx surface local-ready global-fuel path-hint)
+        (do
+            (let request (fkqt-parse surface))
+            (if (eq (fkqt-request-ready? request) 0)
+                (fhcs-refused (fkqt-request-reason request))
+                (do
+                    (let atoms (fhcs-atoms (fkqt-request-query request)))
+                    (if (nil? atoms)
+                        (fhcs-refused "no-query-atoms")
+                        (do
+                            (let emitted-relative (fhcs-query-source-path
+                                (fkqt-request-query request)))
+                            (let hinted-relative
+                                (if (eq (fhcs-relative-source-path? path-hint) 1)
+                                    path-hint ""))
+                            (let relative
+                                (if (not (str_eq emitted-relative ""))
+                                    emitted-relative hinted-relative))
+                            (if (not (str_eq relative ""))
+                                (fhcs-of-result request
+                                    (fhcs-path-result-with-reason root relative atoms
+                                        (if (str_eq emitted-relative "")
+                                            "current-source-context-path-hit"
+                                            "current-source-path-hit"))
+                                    (len atoms) local-ready)
+                                (if (le global-fuel 0)
+                                    (fhcs-refused "global-source-scan-fuel-exhausted")
+                                    (fhcs-of-result request
+                                        (fkss-search-at root atoms)
+                                        (len atoms) local-ready)))))))))
+
+    (defn fhcs-lookup-at-fuel (root ctx surface local-ready global-fuel)
+        (fhcs-lookup-at-fuel-hinted root ctx surface local-ready global-fuel ""))
+
+    ; Explicit lookup-at callers authorize one whole-tree scan when no exact
+    ; path is present. The live default does not.
+    (defn fhcs-lookup-at (root ctx surface local-ready)
+        (fhcs-lookup-at-fuel root ctx surface local-ready 1))
+
+    (defn fhcs-lookup-hinted (ctx surface local-ready path-hint)
+        (do
+            (let root (fhcs-default-root))
+            (if (str_eq root "") (fhcs-refused "body-root-unresolved")
+                (fhcs-lookup-at-fuel-hinted root ctx surface local-ready
+                    (fhcs-live-global-scan-fuel) path-hint))))
+    (defn fhcs-lookup (ctx surface local-ready)
+        (fhcs-lookup-hinted ctx surface local-ready ""))
+
+    (defn fhcs-grammar-agrees-at (open close)
+        (if (and (str_eq (fkqt-open) open)
+                 (str_eq (fkqt-close) close)) 1 0))
+    ; Compatibility witness for callers that do not prelude a cursor. The
+    ; end-to-end cursor band calls grammar-agrees-at with HeedOpen/HeedClose so
+    ; a drift between the two live cells is observed rather than assumed.
+    (defn fhcs-grammar-agrees ()
+        (fhcs-grammar-agrees-at "<|form:knowledge-query|>"
+                               "<|/form:knowledge-query|>"))
+
+    0)

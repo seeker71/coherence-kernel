@@ -1,0 +1,781 @@
+; qwen35-tokfast-v2.fk — a seal-keyed, fixed-row tokenizer index whose
+; runtime lookup reads one bounded slice per binary-search probe.
+;
+; This is deliberately separate from qwen35-tokfast.fk.  That experiment's
+; 11 MB joined blob is correct-shaped but priced out on the present fkwu
+; string waist: lookup must not depend on a whole-blob str_find.  V2 records
+; two independently sorted artifacts instead:
+;
+;   vocab.rows   V|LLLLLL|VVVVVVVVVV|<hex key, dot padded>\n
+;   merge.rows   M|LLLLLL|RRRRRR|VVVVVVVVVV|<hex left><hex right, padded>\n
+; Each file has one constant row width named by manifest.row.  A lookup reads
+; exactly that row with fs-read-slice, parses it through an immutable raw-byte
+; BMF cursor, compares the recovered bytes, and chooses the next half.  No
+; token list, merge list, flattened Form table, C seed, or operation registry
+; participates.
+;
+; The recorder accepts rows only in strict key order.  Until finish publishes
+; the manifest by rename, the artifact is absent to readers.  The manifest is
+; keyed by the caller's exact live artifact-seal line.  Missing, stale,
+; malformed, and size-mismatched indexes return an explicit fallback outcome;
+; a present value of 0 or 1 remains distinct from nothing.
+;
+; This cell is only the recording/lookup organ.  It is not wired into model
+; generation and does not freeze or open a GGUF.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-fs.fk form-stdlib/bmf-core.fk
+; Proven by: form-stdlib/tests/qwen35-tokfast-v2-band.fk
+
+(do
+    (defn qtf2-version () 2)
+    (defn qtf2-magic () "QTF2|")
+    (defn qtf2-manifest-name () "manifest.row")
+    (defn qtf2-manifest-candidate-name () "manifest.candidate")
+    (defn qtf2-vocab-name () "vocab.rows")
+    (defn qtf2-merge-name () "merge.rows")
+    (defn qtf2-root-for (path) (str_concat path ".form-tokfast-v2"))
+    (defn qtf2-manifest-path (root)
+        (fs-path-join root (qtf2-manifest-name)))
+    (defn qtf2-manifest-candidate-path (root)
+        (fs-path-join root (qtf2-manifest-candidate-name)))
+    (defn qtf2-vocab-path (root)
+        (fs-path-join root (qtf2-vocab-name)))
+    (defn qtf2-merge-path (root)
+        (fs-path-join root (qtf2-merge-name)))
+
+    ; ---- byte, hex, and fixed integer waist ------------------------------
+    (defn qtf2-repeat (s n acc)
+        (if (le n 0) acc (qtf2-repeat s (sub n 1) (str_concat acc s))))
+    (defn qtf2-string-bytes-go (s i n acc)
+        (if (ge i n) (reverse acc)
+            (qtf2-string-bytes-go s (add i 1) n
+                (cons (str_byte_at s i) acc))))
+    (defn qtf2-string-bytes (s)
+        (qtf2-string-bytes-go s 0 (str_len s) (empty)))
+    (defn qtf2-bytes-string (bs acc)
+        (if (nil? bs) acc
+            (qtf2-bytes-string (tail bs)
+                (str_concat acc (byte_to_str (head bs))))))
+    (defn qtf2-hex-digit (n)
+        (substring "0123456789abcdef" n (add n 1)))
+    (defn qtf2-byte-hex (b)
+        (str_concat (qtf2-hex-digit (div b 16))
+                    (qtf2-hex-digit (mod b 16))))
+    (defn qtf2-bytes-hex (bs acc)
+        (if (nil? bs) acc
+            (qtf2-bytes-hex (tail bs)
+                (str_concat acc (qtf2-byte-hex (head bs))))))
+    (defn qtf2-hex-value (b)
+        (if (and (ge b 48) (le b 57)) (sub b 48)
+        (if (and (ge b 65) (le b 70)) (add 10 (sub b 65))
+        (if (and (ge b 97) (le b 102)) (add 10 (sub b 97)) -1))))
+    (defn qtf2-fixed-nat (n width)
+        (if (lt n 0) ""
+            (do
+                (let s (int_to_str n))
+                (if (gt (str_len s) width) ""
+                    (str_concat (qtf2-repeat "0" (sub width (str_len s)) "") s)))))
+    (defn qtf2-bytes-cmp (a b)
+        (if (nil? a) (if (nil? b) 0 -1)
+            (if (nil? b) 1
+                (if (lt (head a) (head b)) -1
+                (if (gt (head a) (head b)) 1
+                    (qtf2-bytes-cmp (tail a) (tail b)))))))
+    (defn qtf2-merge-key-cmp (al ar bl br)
+        (do
+            (let left (qtf2-bytes-cmp al bl))
+            (if (eq left 0) (qtf2-bytes-cmp ar br) left)))
+
+    ; ---- fixed row text ---------------------------------------------------
+    (defn qtf2-vocab-width (cap) (add 21 (mul 2 cap)))
+    (defn qtf2-merge-width (lcap rcap)
+        (add 28 (mul 2 (add lcap rcap))))
+    (defn qtf2-padded-hex (bs cap)
+        (if (gt (len bs) cap) ""
+            (str_concat (qtf2-bytes-hex bs "")
+                (qtf2-repeat "." (mul 2 (sub cap (len bs))) ""))))
+    (defn qtf2-vocab-row-text (cap key value)
+        (do
+            (let ls (qtf2-fixed-nat (len key) 6))
+            (let vs (qtf2-fixed-nat value 10))
+            (let hs (qtf2-padded-hex key cap))
+            (if (or (str_eq ls "") (or (str_eq vs "") (str_eq hs ""))) ""
+                (str_concat "V|" (str_concat ls
+                (str_concat "|" (str_concat vs
+                (str_concat "|" (str_concat hs "\n")))))))))
+    (defn qtf2-merge-row-text (lcap rcap left right rank)
+        (do
+            (let ls (qtf2-fixed-nat (len left) 6))
+            (let rs (qtf2-fixed-nat (len right) 6))
+            (let vs (qtf2-fixed-nat rank 10))
+            (let lh (qtf2-padded-hex left lcap))
+            (let rh (qtf2-padded-hex right rcap))
+            (if (or (str_eq ls "") (or (str_eq rs "")
+                    (or (str_eq vs "") (or (str_eq lh "") (str_eq rh ""))))) ""
+                (str_concat "M|" (str_concat ls
+                (str_concat "|" (str_concat rs
+                (str_concat "|" (str_concat vs
+                (str_concat "|" (str_concat lh (str_concat rh "\n"))))))))))))
+
+    ; ---- scannerless fixed-field parsing ---------------------------------
+    (defn qtf2-step (status value cursor)
+        (list status value cursor))
+    (defn qtf2-step-status (r) (nth r 0))
+    (defn qtf2-step-value (r) (nth r 1))
+    (defn qtf2-step-cursor (r) (nth r 2))
+    (defn qtf2-expect-byte (c byte)
+        (if (cur-eof? c) (qtf2-step "malformed" 0 c)
+            (if (eq (cur-peek c) byte)
+                (qtf2-step "ok" byte (cur-advance c 1))
+                (qtf2-step "malformed" 0 c))))
+    (defn qtf2-expect-text-go (c s i n)
+        (if (ge i n) (qtf2-step "ok" 1 c)
+            (do
+                (let one (qtf2-expect-byte c (str_byte_at s i)))
+                (if (not (str_eq (qtf2-step-status one) "ok")) one
+                    (qtf2-expect-text-go (qtf2-step-cursor one) s
+                        (add i 1) n)))))
+    (defn qtf2-expect-text (c s)
+        (qtf2-expect-text-go c s 0 (str_len s)))
+    (defn qtf2-read-fixed-nat-go (c remain value)
+        (if (eq remain 0) (qtf2-step "ok" value c)
+            (if (cur-eof? c) (qtf2-step "malformed" 0 c)
+                (do
+                    (let b (cur-peek c))
+                    (if (and (ge b 48) (le b 57))
+                        (qtf2-read-fixed-nat-go (cur-advance c 1)
+                            (sub remain 1) (add (mul value 10) (sub b 48)))
+                        (qtf2-step "malformed" 0 c))))))
+    (defn qtf2-read-fixed-nat (c width)
+        (qtf2-read-fixed-nat-go c width 0))
+    (defn qtf2-read-field (c width)
+        (do
+            (let n (qtf2-read-fixed-nat c width))
+            (if (not (str_eq (qtf2-step-status n) "ok")) n
+                (do
+                    (let bar (qtf2-expect-byte (qtf2-step-cursor n) 124))
+                    (if (not (str_eq (qtf2-step-status bar) "ok")) bar
+                        (qtf2-step "ok" (qtf2-step-value n)
+                            (qtf2-step-cursor bar)))))))
+    (defn qtf2-read-hex-go (c remain acc)
+        (if (eq remain 0) (qtf2-step "ok" (reverse acc) c)
+            (if (cur-eof? c) (qtf2-step "malformed" (empty) c)
+                (do
+                    (let hi (qtf2-hex-value (cur-peek c)))
+                    (let c1 (cur-advance c 1))
+                    (if (or (lt hi 0) (cur-eof? c1))
+                        (qtf2-step "malformed" (empty) c1)
+                        (do
+                            (let lo (qtf2-hex-value (cur-peek c1)))
+                            (if (lt lo 0) (qtf2-step "malformed" (empty) c1)
+                                (qtf2-read-hex-go (cur-advance c1 1)
+                                    (sub remain 1)
+                                    (cons (add (mul hi 16) lo) acc)))))))))
+    (defn qtf2-read-hex (c n) (qtf2-read-hex-go c n (empty)))
+    (defn qtf2-skip-byte-go (c byte remain)
+        (if (eq remain 0) (qtf2-step "ok" 1 c)
+            (do
+                (let one (qtf2-expect-byte c byte))
+                (if (not (str_eq (qtf2-step-status one) "ok")) one
+                    (qtf2-skip-byte-go (qtf2-step-cursor one) byte
+                        (sub remain 1))))))
+
+    ; row result = status left right value
+    (defn qtf2-row-result (status left right value)
+        (list status left right value))
+    (defn qtf2-row-status (r) (nth r 0))
+    (defn qtf2-row-left (r) (nth r 1))
+    (defn qtf2-row-right (r) (nth r 2))
+    (defn qtf2-row-value (r) (nth r 3))
+    (defn qtf2-row-failure ()
+        (qtf2-row-result "malformed" (empty) (empty) 0))
+    (defn qtf2-row-end-ok? (c)
+        (do
+            (let nl (qtf2-expect-byte c 10))
+            (if (str_eq (qtf2-step-status nl) "ok") 1 0)))
+    (defn qtf2-document-end-ok? (c)
+        (do
+            (let nl (qtf2-expect-byte c 10))
+            (if (not (str_eq (qtf2-step-status nl) "ok")) 0
+                (if (cur-eof? (qtf2-step-cursor nl)) 1 0))))
+    (defn qtf2-parse-vocab-row (c cap)
+        (do
+            (let pre (qtf2-expect-text c "V|"))
+            (if (not (str_eq (qtf2-step-status pre) "ok"))
+                (qtf2-row-failure)
+                (do
+                    (let kl (qtf2-read-field (qtf2-step-cursor pre) 6))
+                    (if (or (not (str_eq (qtf2-step-status kl) "ok"))
+                            (gt (qtf2-step-value kl) cap))
+                        (qtf2-row-failure)
+                        (do
+                            (let val (qtf2-read-field (qtf2-step-cursor kl) 10))
+                            (if (not (str_eq (qtf2-step-status val) "ok"))
+                                (qtf2-row-failure)
+                                (do
+                                    (let key (qtf2-read-hex (qtf2-step-cursor val)
+                                        (qtf2-step-value kl)))
+                                    (if (not (str_eq (qtf2-step-status key) "ok"))
+                                        (qtf2-row-failure)
+                                        (do
+                                            (let pad (qtf2-skip-byte-go
+                                                (qtf2-step-cursor key) 46
+                                                (mul 2 (sub cap (qtf2-step-value kl)))))
+                                            (if (or (not (str_eq (qtf2-step-status pad) "ok"))
+                                                    (not (eq (qtf2-row-end-ok?
+                                                        (qtf2-step-cursor pad)) 1)))
+                                                (qtf2-row-failure)
+                                                (qtf2-row-result "ok"
+                                                    (qtf2-step-value key) (empty)
+                                                    (qtf2-step-value val)))))))))))))
+    (defn qtf2-parse-merge-row (c lcap rcap)
+        (do
+            (let pre (qtf2-expect-text c "M|"))
+            (if (not (str_eq (qtf2-step-status pre) "ok"))
+                (qtf2-row-failure)
+                (do
+                    (let ll (qtf2-read-field (qtf2-step-cursor pre) 6))
+                    (if (or (not (str_eq (qtf2-step-status ll) "ok"))
+                            (gt (qtf2-step-value ll) lcap))
+                        (qtf2-row-failure)
+                        (do
+                            (let rl (qtf2-read-field (qtf2-step-cursor ll) 6))
+                            (if (or (not (str_eq (qtf2-step-status rl) "ok"))
+                                    (gt (qtf2-step-value rl) rcap))
+                                (qtf2-row-failure)
+                                (do
+                                    (let val (qtf2-read-field (qtf2-step-cursor rl) 10))
+                                    (if (not (str_eq (qtf2-step-status val) "ok"))
+                                        (qtf2-row-failure)
+                                        (do
+                                            (let left (qtf2-read-hex
+                                                (qtf2-step-cursor val)
+                                                (qtf2-step-value ll)))
+                                            (if (not (str_eq (qtf2-step-status left) "ok"))
+                                                (qtf2-row-failure)
+                                                (do
+                                                    (let lpad (qtf2-skip-byte-go
+                                                        (qtf2-step-cursor left) 46
+                                                        (mul 2 (sub lcap
+                                                            (qtf2-step-value ll)))))
+                                                    (if (not (str_eq
+                                                            (qtf2-step-status lpad) "ok"))
+                                                        (qtf2-row-failure)
+                                                        (do
+                                                            (let right (qtf2-read-hex
+                                                                (qtf2-step-cursor lpad)
+                                                                (qtf2-step-value rl)))
+                                                            (if (not (str_eq
+                                                                    (qtf2-step-status right) "ok"))
+                                                                (qtf2-row-failure)
+                                                                (do
+                                                                    (let rpad (qtf2-skip-byte-go
+                                                                        (qtf2-step-cursor right) 46
+                                                                        (mul 2 (sub rcap
+                                                                            (qtf2-step-value rl)))))
+                                                                    (if (or (not (str_eq
+                                                                            (qtf2-step-status rpad) "ok"))
+                                                                            (not (eq (qtf2-row-end-ok?
+                                                                                (qtf2-step-cursor rpad)) 1)))
+                                                                        (qtf2-row-failure)
+                                                                        (qtf2-row-result "ok"
+                                                                            (qtf2-step-value left)
+                                                                            (qtf2-step-value right)
+                                                                            (qtf2-step-value val)))))))))))))))))))
+
+    ; ---- seal-keyed manifest ---------------------------------------------
+    ; manifest = seal vcount vcap vwidth mcount lcap rcap mwidth
+    (defn qtf2-manifest (seal vcount vcap vwidth mcount lcap rcap mwidth)
+        (list "qtf2-manifest" seal vcount vcap vwidth mcount lcap rcap mwidth))
+    (defn qtf2-manifest-seal (m) (nth m 1))
+    (defn qtf2-manifest-vcount (m) (nth m 2))
+    (defn qtf2-manifest-vcap (m) (nth m 3))
+    (defn qtf2-manifest-vwidth (m) (nth m 4))
+    (defn qtf2-manifest-mcount (m) (nth m 5))
+    (defn qtf2-manifest-lcap (m) (nth m 6))
+    (defn qtf2-manifest-rcap (m) (nth m 7))
+    (defn qtf2-manifest-mwidth (m) (nth m 8))
+    (defn qtf2-manifest-field (text value width)
+        (str_concat text
+            (str_concat (qtf2-fixed-nat value width) "|")))
+    (defn qtf2-manifest-text (m)
+        (do
+            (let seal-bs (qtf2-string-bytes (qtf2-manifest-seal m)))
+            (let a (qtf2-manifest-field (qtf2-magic) (len seal-bs) 6))
+            (let b (qtf2-manifest-field a (qtf2-manifest-vcount m) 10))
+            (let c (qtf2-manifest-field b (qtf2-manifest-vcap m) 6))
+            (let d (qtf2-manifest-field c (qtf2-manifest-vwidth m) 6))
+            (let e (qtf2-manifest-field d (qtf2-manifest-mcount m) 10))
+            (let f (qtf2-manifest-field e (qtf2-manifest-lcap m) 6))
+            (let g (qtf2-manifest-field f (qtf2-manifest-rcap m) 6))
+            (let h (qtf2-manifest-field g (qtf2-manifest-mwidth m) 6))
+            (str_concat h
+                (str_concat (qtf2-bytes-hex seal-bs "") "\n"))))
+    ; parse result = status manifest reason
+    (defn qtf2-manifest-result (status manifest reason)
+        (list status manifest reason))
+    (defn qtf2-manifest-result-status (r) (nth r 0))
+    (defn qtf2-manifest-result-value (r) (nth r 1))
+    (defn qtf2-manifest-result-reason (r) (nth r 2))
+    (defn qtf2-parse-manifest (text)
+        (do
+            (let pre (qtf2-expect-text (cursor-str text) (qtf2-magic)))
+            (if (not (str_eq (qtf2-step-status pre) "ok"))
+                (qtf2-manifest-result "failure" (empty) "manifest-magic")
+                (do
+                    (let sl (qtf2-read-field (qtf2-step-cursor pre) 6))
+                    (let vc (if (str_eq (qtf2-step-status sl) "ok")
+                        (qtf2-read-field (qtf2-step-cursor sl) 10) sl))
+                    (let vp (if (str_eq (qtf2-step-status vc) "ok")
+                        (qtf2-read-field (qtf2-step-cursor vc) 6) vc))
+                    (let vw (if (str_eq (qtf2-step-status vp) "ok")
+                        (qtf2-read-field (qtf2-step-cursor vp) 6) vp))
+                    (let mc (if (str_eq (qtf2-step-status vw) "ok")
+                        (qtf2-read-field (qtf2-step-cursor vw) 10) vw))
+                    (let lp (if (str_eq (qtf2-step-status mc) "ok")
+                        (qtf2-read-field (qtf2-step-cursor mc) 6) mc))
+                    (let rp (if (str_eq (qtf2-step-status lp) "ok")
+                        (qtf2-read-field (qtf2-step-cursor lp) 6) lp))
+                    (let mw (if (str_eq (qtf2-step-status rp) "ok")
+                        (qtf2-read-field (qtf2-step-cursor rp) 6) rp))
+                    (if (not (str_eq (qtf2-step-status mw) "ok"))
+                        (qtf2-manifest-result "failure" (empty) "manifest-fields")
+                        (do
+                            (let seal (qtf2-read-hex (qtf2-step-cursor mw)
+                                (qtf2-step-value sl)))
+                            (if (or (not (str_eq (qtf2-step-status seal) "ok"))
+                                    (not (eq (qtf2-document-end-ok?
+                                        (qtf2-step-cursor seal)) 1)))
+                                (qtf2-manifest-result "failure" (empty)
+                                    "manifest-seal")
+                                (qtf2-manifest-result "ok"
+                                    (qtf2-manifest
+                                        (qtf2-bytes-string
+                                            (qtf2-step-value seal) "")
+                                        (qtf2-step-value vc)
+                                        (qtf2-step-value vp)
+                                        (qtf2-step-value vw)
+                                        (qtf2-step-value mc)
+                                        (qtf2-step-value lp)
+                                        (qtf2-step-value rp)
+                                        (qtf2-step-value mw))
+                                    "parsed"))))))))
+
+    ; index = status reason root manifest
+    (defn qtf2-index (status reason root manifest)
+        (list "qtf2-index" status reason root manifest))
+    (defn qtf2-index-status (x) (nth x 1))
+    (defn qtf2-index-reason (x) (nth x 2))
+    (defn qtf2-index-root (x) (nth x 3))
+    (defn qtf2-index-manifest (x) (nth x 4))
+    (defn qtf2-index-current? (x)
+        (if (str_eq (qtf2-index-status x) "current") 1 0))
+    (defn qtf2-index-empty (status reason root)
+        (qtf2-index status reason root (empty)))
+    (defn qtf2-index-from-text (root text live-seal vocab-size merge-size)
+        (do
+            (let parsed (qtf2-parse-manifest text))
+            (if (not (str_eq (qtf2-manifest-result-status parsed) "ok"))
+                (qtf2-index-empty "failure"
+                    (qtf2-manifest-result-reason parsed) root)
+                (do
+                    (let m (qtf2-manifest-result-value parsed))
+                    (if (not (str_eq (qtf2-manifest-seal m) live-seal))
+                        (qtf2-index "stale" "seal-mismatch" root m)
+                    (if (not (eq (qtf2-manifest-vwidth m)
+                                 (qtf2-vocab-width (qtf2-manifest-vcap m))))
+                        (qtf2-index "failure" "vocab-width" root m)
+                    (if (not (eq (qtf2-manifest-mwidth m)
+                                 (qtf2-merge-width (qtf2-manifest-lcap m)
+                                                   (qtf2-manifest-rcap m))))
+                        (qtf2-index "failure" "merge-width" root m)
+                    (if (not (eq vocab-size
+                                 (mul (qtf2-manifest-vcount m)
+                                      (qtf2-manifest-vwidth m))))
+                        (qtf2-index "failure" "vocab-size" root m)
+                    (if (not (eq merge-size
+                                 (mul (qtf2-manifest-mcount m)
+                                      (qtf2-manifest-mwidth m))))
+                        (qtf2-index "failure" "merge-size" root m)
+                        (qtf2-index "current" "seal-and-extents-current"
+                            root m))))))))))
+    (defn qtf2-load (root live-seal)
+        (if (eq (fs-exists? (qtf2-manifest-path root)) 0)
+            (qtf2-index-empty "absent" "manifest-absent" root)
+        (if (or (eq (fs-exists? (qtf2-vocab-path root)) 0)
+                (eq (fs-exists? (qtf2-merge-path root)) 0))
+            (qtf2-index-empty "absent" "row-artifact-absent" root)
+            (qtf2-index-from-text root
+                (fs-read-text (qtf2-manifest-path root)) live-seal
+                (fs-stat-size (qtf2-vocab-path root))
+                (fs-stat-size (qtf2-merge-path root))))))
+
+    ; ---- explicit lookup outcome -----------------------------------------
+    ; A present bit owns presence. value may honestly be 0 or 1.
+    (defn qtf2-outcome (status value present reason probes)
+        (list "qtf2-outcome" status value present reason probes))
+    (defn qtf2-outcome-status (o) (nth o 1))
+    (defn qtf2-outcome-value (o) (nth o 2))
+    (defn qtf2-outcome-present? (o) (nth o 3))
+    (defn qtf2-outcome-reason (o) (nth o 4))
+    (defn qtf2-outcome-probes (o) (nth o 5))
+    (defn qtf2-hit (value probes)
+        (qtf2-outcome "hit" value 1 "exact" probes))
+    (defn qtf2-miss (probes)
+        (qtf2-outcome "miss" (nothing) 0 "absent" probes))
+    (defn qtf2-refusal (status reason)
+        (qtf2-outcome status (nothing) 0 reason 0))
+
+    ; ---- in-memory binary search: same row codec, synthetic proof door ----
+    (defn qtf2-vocab-find-in-go (text count cap width key lo hi probes)
+        (if (ge lo hi) (qtf2-miss probes)
+            (do
+                (let mid (div (add lo hi) 2))
+                (let c (cur-advance (cursor-str text) (mul mid width)))
+                (let row (qtf2-parse-vocab-row c cap))
+                (if (not (str_eq (qtf2-row-status row) "ok"))
+                    (qtf2-refusal "failure" "malformed-vocab-row")
+                    (do
+                        (let cmp (qtf2-bytes-cmp (qtf2-row-left row) key))
+                        (if (eq cmp 0) (qtf2-hit (qtf2-row-value row)
+                                                (add probes 1))
+                        (if (lt cmp 0)
+                            (qtf2-vocab-find-in-go text count cap width key
+                                (add mid 1) hi (add probes 1))
+                            (qtf2-vocab-find-in-go text count cap width key
+                                lo mid (add probes 1)))))))))
+    (defn qtf2-vocab-find-in (text count cap key)
+        (qtf2-vocab-find-in-go text count cap (qtf2-vocab-width cap)
+            key 0 count 0))
+    (defn qtf2-merge-find-in-go
+        (text count lcap rcap width left right lo hi probes)
+        (if (ge lo hi) (qtf2-miss probes)
+            (do
+                (let mid (div (add lo hi) 2))
+                (let c (cur-advance (cursor-str text) (mul mid width)))
+                (let row (qtf2-parse-merge-row c lcap rcap))
+                (if (not (str_eq (qtf2-row-status row) "ok"))
+                    (qtf2-refusal "failure" "malformed-merge-row")
+                    (do
+                        (let cmp (qtf2-merge-key-cmp
+                            (qtf2-row-left row) (qtf2-row-right row)
+                            left right))
+                        (if (eq cmp 0) (qtf2-hit (qtf2-row-value row)
+                                                (add probes 1))
+                        (if (lt cmp 0)
+                            (qtf2-merge-find-in-go text count lcap rcap width
+                                left right (add mid 1) hi (add probes 1))
+                            (qtf2-merge-find-in-go text count lcap rcap width
+                                left right lo mid (add probes 1)))))))))
+    (defn qtf2-merge-find-in (text count lcap rcap left right)
+        (qtf2-merge-find-in-go text count lcap rcap
+            (qtf2-merge-width lcap rcap) left right 0 count 0))
+
+    ; ---- bounded file-slice binary search: production lookup door --------
+    (defn qtf2-file-row-cursor (path width index)
+        (do
+            (let s (fs-read-slice path (mul index width) width))
+            (if (eq (str_len s) width) (list 1 (cursor-str s))
+                (list 0 (cursor-str "")))))
+    (defn qtf2-vocab-find-file-go (x key lo hi probes)
+        (if (ge lo hi) (qtf2-miss probes)
+            (do
+                (let m (qtf2-index-manifest x))
+                (let mid (div (add lo hi) 2))
+                (let got (qtf2-file-row-cursor (qtf2-vocab-path
+                    (qtf2-index-root x)) (qtf2-manifest-vwidth m) mid))
+                (if (eq (nth got 0) 0)
+                    (qtf2-refusal "failure" "short-vocab-slice")
+                    (do
+                        (let row (qtf2-parse-vocab-row (nth got 1)
+                            (qtf2-manifest-vcap m)))
+                        (if (not (str_eq (qtf2-row-status row) "ok"))
+                            (qtf2-refusal "failure" "malformed-vocab-row")
+                            (do
+                                (let cmp (qtf2-bytes-cmp
+                                    (qtf2-row-left row) key))
+                                (if (eq cmp 0) (qtf2-hit
+                                    (qtf2-row-value row) (add probes 1))
+                                (if (lt cmp 0)
+                                    (qtf2-vocab-find-file-go x key
+                                        (add mid 1) hi (add probes 1))
+                                    (qtf2-vocab-find-file-go x key
+                                        lo mid (add probes 1)))))))))))
+    (defn qtf2-vocab-find-file (x key)
+        (if (not (eq (qtf2-index-current? x) 1))
+            (qtf2-refusal (qtf2-index-status x) (qtf2-index-reason x))
+            (qtf2-vocab-find-file-go x key 0
+                (qtf2-manifest-vcount (qtf2-index-manifest x)) 0)))
+    (defn qtf2-merge-find-file-go (x left right lo hi probes)
+        (if (ge lo hi) (qtf2-miss probes)
+            (do
+                (let m (qtf2-index-manifest x))
+                (let mid (div (add lo hi) 2))
+                (let got (qtf2-file-row-cursor (qtf2-merge-path
+                    (qtf2-index-root x)) (qtf2-manifest-mwidth m) mid))
+                (if (eq (nth got 0) 0)
+                    (qtf2-refusal "failure" "short-merge-slice")
+                    (do
+                        (let row (qtf2-parse-merge-row (nth got 1)
+                            (qtf2-manifest-lcap m)
+                            (qtf2-manifest-rcap m)))
+                        (if (not (str_eq (qtf2-row-status row) "ok"))
+                            (qtf2-refusal "failure" "malformed-merge-row")
+                            (do
+                                (let cmp (qtf2-merge-key-cmp
+                                    (qtf2-row-left row) (qtf2-row-right row)
+                                    left right))
+                                (if (eq cmp 0) (qtf2-hit
+                                    (qtf2-row-value row) (add probes 1))
+                                (if (lt cmp 0)
+                                    (qtf2-merge-find-file-go x left right
+                                        (add mid 1) hi (add probes 1))
+                                    (qtf2-merge-find-file-go x left right
+                                        lo mid (add probes 1)))))))))))
+    (defn qtf2-merge-find-file (x left right)
+        (if (not (eq (qtf2-index-current? x) 1))
+            (qtf2-refusal (qtf2-index-status x) (qtf2-index-reason x))
+            (qtf2-merge-find-file-go x left right 0
+                (qtf2-manifest-mcount (qtf2-index-manifest x)) 0)))
+
+    ; Pure index-aware mirrors let the band prove stale/absent fallback
+    ; without touching a filesystem. A current in-memory index uses the same
+    ; fixed-row parser and comparison as the file-slice door above.
+    (defn qtf2-vocab-find-index-in (x text key)
+        (if (not (eq (qtf2-index-current? x) 1))
+            (qtf2-refusal (qtf2-index-status x) (qtf2-index-reason x))
+            (do
+                (let m (qtf2-index-manifest x))
+                (qtf2-vocab-find-in text (qtf2-manifest-vcount m)
+                    (qtf2-manifest-vcap m) key))))
+    (defn qtf2-merge-find-index-in (x text left right)
+        (if (not (eq (qtf2-index-current? x) 1))
+            (qtf2-refusal (qtf2-index-status x) (qtf2-index-reason x))
+            (do
+                (let m (qtf2-index-manifest x))
+                (qtf2-merge-find-in text (qtf2-manifest-mcount m)
+                    (qtf2-manifest-lcap m) (qtf2-manifest-rcap m)
+                    left right))))
+
+    ; ---- leftmost minimum-rank choice ------------------------------------
+    ; choice = status position rank present probes
+    (defn qtf2-pair-choice (status position rank present probes)
+        (list status position rank present probes))
+    (defn qtf2-pair-choice-status (c) (nth c 0))
+    (defn qtf2-pair-choice-position (c) (nth c 1))
+    (defn qtf2-pair-choice-rank (c) (nth c 2))
+    (defn qtf2-pair-choice-present? (c) (nth c 3))
+    (defn qtf2-pair-choice-probes (c) (nth c 4))
+    (defn qtf2-best-pair-in-go
+        (text count lcap rcap syms i found best-pos best-rank probes)
+        (if (ge (add i 1) (len syms))
+            (qtf2-pair-choice "ok" best-pos best-rank found probes)
+            (do
+                (let one (qtf2-merge-find-in text count lcap rcap
+                    (nth syms i) (nth syms (add i 1))))
+                (if (or (str_eq (qtf2-outcome-status one) "failure")
+                        (str_eq (qtf2-outcome-status one) "stale"))
+                    (qtf2-pair-choice (qtf2-outcome-status one) 0 0 0
+                        (add probes (qtf2-outcome-probes one)))
+                    (do
+                        (let hit (qtf2-outcome-present? one))
+                        (let rank (if hit (qtf2-outcome-value one) 0))
+                        ; Strictly lower only: equality retains the earlier
+                        ; position, which is the reference BPE's leftmost tie.
+                        (let better (and hit
+                            (or (eq found 0) (lt rank best-rank))))
+                        (qtf2-best-pair-in-go text count lcap rcap syms
+                            (add i 1) (if hit 1 found)
+                            (if better i best-pos)
+                            (if better rank best-rank)
+                            (add probes (qtf2-outcome-probes one))))))))
+    (defn qtf2-best-pair-in (text count lcap rcap syms)
+        (qtf2-best-pair-in-go text count lcap rcap syms 0 0 0 0 0))
+    (defn qtf2-best-pair-file-go
+        (x syms i found best-pos best-rank probes)
+        (if (ge (add i 1) (len syms))
+            (qtf2-pair-choice "ok" best-pos best-rank found probes)
+            (do
+                (let one (qtf2-merge-find-file x
+                    (nth syms i) (nth syms (add i 1))))
+                (if (not (or (str_eq (qtf2-outcome-status one) "hit")
+                             (str_eq (qtf2-outcome-status one) "miss")))
+                    (qtf2-pair-choice (qtf2-outcome-status one) 0 0 0
+                        (add probes (qtf2-outcome-probes one)))
+                    (do
+                        (let hit (qtf2-outcome-present? one))
+                        (let rank (if hit (qtf2-outcome-value one) 0))
+                        (let better (and hit
+                            (or (eq found 0) (lt rank best-rank))))
+                        (qtf2-best-pair-file-go x syms (add i 1)
+                            (if hit 1 found)
+                            (if better i best-pos)
+                            (if better rank best-rank)
+                            (add probes (qtf2-outcome-probes one))))))))
+    (defn qtf2-best-pair-file (x syms)
+        (if (not (eq (qtf2-index-current? x) 1))
+            (qtf2-pair-choice (qtf2-index-status x) 0 0 0 0)
+            (qtf2-best-pair-file-go x syms 0 0 0 0 0)))
+
+    ; ---- ordered, crash-refusing recorder --------------------------------
+    ; recorder = status reason root seal caps phase counts previous keys
+    (defn qtf2-recorder
+        (status reason root seal vcap lcap rcap phase vcount mcount
+         has-v last-v has-m last-l last-r)
+        (list "qtf2-recorder" status reason root seal vcap lcap rcap phase
+              vcount mcount has-v last-v has-m last-l last-r))
+    (defn qtf2-rec-status (r) (nth r 1))
+    (defn qtf2-rec-reason (r) (nth r 2))
+    (defn qtf2-rec-root (r) (nth r 3))
+    (defn qtf2-rec-seal (r) (nth r 4))
+    (defn qtf2-rec-vcap (r) (nth r 5))
+    (defn qtf2-rec-lcap (r) (nth r 6))
+    (defn qtf2-rec-rcap (r) (nth r 7))
+    (defn qtf2-rec-phase (r) (nth r 8))
+    (defn qtf2-rec-vcount (r) (nth r 9))
+    (defn qtf2-rec-mcount (r) (nth r 10))
+    (defn qtf2-rec-has-v? (r) (nth r 11))
+    (defn qtf2-rec-last-v (r) (nth r 12))
+    (defn qtf2-rec-has-m? (r) (nth r 13))
+    (defn qtf2-rec-last-l (r) (nth r 14))
+    (defn qtf2-rec-last-r (r) (nth r 15))
+    (defn qtf2-rec-fail (r reason)
+        (qtf2-recorder "failure" reason (qtf2-rec-root r)
+            (qtf2-rec-seal r) (qtf2-rec-vcap r) (qtf2-rec-lcap r)
+            (qtf2-rec-rcap r) (qtf2-rec-phase r) (qtf2-rec-vcount r)
+            (qtf2-rec-mcount r) (qtf2-rec-has-v? r) (qtf2-rec-last-v r)
+            (qtf2-rec-has-m? r) (qtf2-rec-last-l r)
+            (qtf2-rec-last-r r)))
+    (defn qtf2-rec-begin (root seal vcap lcap rcap)
+        (if (or (le vcap 0) (or (le lcap 0) (le rcap 0)))
+            (qtf2-recorder "failure" "invalid-cap" root seal vcap lcap rcap
+                "vocab" 0 0 0 (empty) 0 (empty) (empty))
+            (do
+                (let made (fs-mkdir root))
+                (if (or (eq (fs-exists? (qtf2-manifest-path root)) 1)
+                        (or (eq (fs-exists? (qtf2-vocab-path root)) 1)
+                            (eq (fs-exists? (qtf2-merge-path root)) 1)))
+                    (qtf2-recorder "failure" "artifact-exists" root seal
+                        vcap lcap rcap "vocab" 0 0 0 (empty) 0
+                        (empty) (empty))
+                    (do
+                        (let vw (fs-write-text (qtf2-vocab-path root) ""))
+                        (let mw (fs-write-text (qtf2-merge-path root) ""))
+                        (qtf2-recorder
+                            (if (and (ge vw 0) (ge mw 0)) "open" "failure")
+                            (if (and (ge vw 0) (ge mw 0)) "recording"
+                                "row-file-create")
+                            root seal vcap lcap rcap "vocab" 0 0 0
+                            (empty) 0 (empty) (empty)))))))
+    (defn qtf2-rec-vocab (r key value)
+        (if (not (str_eq (qtf2-rec-status r) "open")) r
+        (if (not (str_eq (qtf2-rec-phase r) "vocab"))
+            (qtf2-rec-fail r "vocab-after-merge")
+        (if (and (eq (qtf2-rec-has-v? r) 1)
+                 (not (lt (qtf2-bytes-cmp (qtf2-rec-last-v r) key) 0)))
+            (qtf2-rec-fail r "vocab-not-strictly-sorted")
+            (do
+                (let row (qtf2-vocab-row-text (qtf2-rec-vcap r) key value))
+                (if (str_eq row "") (qtf2-rec-fail r "vocab-row-shape")
+                    (do
+                        (let wrote (fs-append-bytes (qtf2-vocab-path
+                            (qtf2-rec-root r)) (qtf2-string-bytes row)))
+                        ; append-bytes answers the resulting file extent, not
+                        ; the bytes added by this call.
+                        (let expected (mul (add (qtf2-rec-vcount r) 1)
+                            (qtf2-vocab-width (qtf2-rec-vcap r))))
+                        (if (not (eq wrote expected))
+                            (qtf2-rec-fail r "vocab-append")
+                            (qtf2-recorder "open" "recording"
+                                (qtf2-rec-root r) (qtf2-rec-seal r)
+                                (qtf2-rec-vcap r) (qtf2-rec-lcap r)
+                                (qtf2-rec-rcap r) "vocab"
+                                (add (qtf2-rec-vcount r) 1)
+                                (qtf2-rec-mcount r) 1 key
+                                (qtf2-rec-has-m? r) (qtf2-rec-last-l r)
+                                (qtf2-rec-last-r r))))))))))
+    (defn qtf2-rec-begin-merges (r)
+        (if (not (str_eq (qtf2-rec-status r) "open")) r
+            (qtf2-recorder "open" "recording"
+                (qtf2-rec-root r) (qtf2-rec-seal r)
+                (qtf2-rec-vcap r) (qtf2-rec-lcap r) (qtf2-rec-rcap r)
+                "merge" (qtf2-rec-vcount r) (qtf2-rec-mcount r)
+                (qtf2-rec-has-v? r) (qtf2-rec-last-v r)
+                (qtf2-rec-has-m? r) (qtf2-rec-last-l r)
+                (qtf2-rec-last-r r))))
+    (defn qtf2-rec-merge (r left right rank)
+        (if (not (str_eq (qtf2-rec-status r) "open")) r
+        (if (not (str_eq (qtf2-rec-phase r) "merge"))
+            (qtf2-rec-fail r "merge-before-phase")
+        (if (and (eq (qtf2-rec-has-m? r) 1)
+                 (not (lt (qtf2-merge-key-cmp
+                    (qtf2-rec-last-l r) (qtf2-rec-last-r r)
+                    left right) 0)))
+            (qtf2-rec-fail r "merge-not-strictly-sorted")
+            (do
+                (let row (qtf2-merge-row-text (qtf2-rec-lcap r)
+                    (qtf2-rec-rcap r) left right rank))
+                (if (str_eq row "") (qtf2-rec-fail r "merge-row-shape")
+                    (do
+                        (let wrote (fs-append-bytes (qtf2-merge-path
+                            (qtf2-rec-root r)) (qtf2-string-bytes row)))
+                        (let expected (mul (add (qtf2-rec-mcount r) 1)
+                            (qtf2-merge-width (qtf2-rec-lcap r)
+                                (qtf2-rec-rcap r))))
+                        (if (not (eq wrote expected))
+                            (qtf2-rec-fail r "merge-append")
+                            (qtf2-recorder "open" "recording"
+                                (qtf2-rec-root r) (qtf2-rec-seal r)
+                                (qtf2-rec-vcap r) (qtf2-rec-lcap r)
+                                (qtf2-rec-rcap r) "merge"
+                                (qtf2-rec-vcount r)
+                                (add (qtf2-rec-mcount r) 1)
+                                (qtf2-rec-has-v? r) (qtf2-rec-last-v r)
+                                1 left right)))))))))
+    (defn qtf2-rec-stage-manifest (r)
+        (if (not (str_eq (qtf2-rec-status r) "open")) r
+        (if (not (str_eq (qtf2-rec-phase r) "merge"))
+            (qtf2-rec-fail r "finish-before-merge")
+            (do
+                (let m (qtf2-manifest (qtf2-rec-seal r)
+                    (qtf2-rec-vcount r) (qtf2-rec-vcap r)
+                    (qtf2-vocab-width (qtf2-rec-vcap r))
+                    (qtf2-rec-mcount r) (qtf2-rec-lcap r)
+                    (qtf2-rec-rcap r)
+                    (qtf2-merge-width (qtf2-rec-lcap r)
+                                      (qtf2-rec-rcap r))))
+                (let candidate (qtf2-manifest-candidate-path
+                    (qtf2-rec-root r)))
+                (let text (qtf2-manifest-text m))
+                (let wrote (fs-write-text candidate text))
+                (if (not (eq wrote (str_len text)))
+                    (qtf2-rec-fail r "manifest-write")
+                    (qtf2-recorder "candidate" "manifest-staged"
+                        (qtf2-rec-root r) (qtf2-rec-seal r)
+                        (qtf2-rec-vcap r) (qtf2-rec-lcap r)
+                        (qtf2-rec-rcap r) "publish"
+                        (qtf2-rec-vcount r) (qtf2-rec-mcount r)
+                        (qtf2-rec-has-v? r) (qtf2-rec-last-v r)
+                        (qtf2-rec-has-m? r) (qtf2-rec-last-l r)
+                        (qtf2-rec-last-r r)))))))
+    (defn qtf2-rec-publish (r)
+        (if (not (str_eq (qtf2-rec-status r) "candidate")) r
+            (if (not (eq (fs-rename
+                    (qtf2-manifest-candidate-path (qtf2-rec-root r))
+                    (qtf2-manifest-path (qtf2-rec-root r))) 0))
+                (qtf2-rec-fail r "manifest-publish")
+                (qtf2-recorder "sealed" "published"
+                    (qtf2-rec-root r) (qtf2-rec-seal r)
+                    (qtf2-rec-vcap r) (qtf2-rec-lcap r)
+                    (qtf2-rec-rcap r) "done"
+                    (qtf2-rec-vcount r) (qtf2-rec-mcount r)
+                    (qtf2-rec-has-v? r) (qtf2-rec-last-v r)
+                    (qtf2-rec-has-m? r) (qtf2-rec-last-l r)
+                    (qtf2-rec-last-r r)))))
+    (defn qtf2-rec-finish (r)
+        (if (str_eq (qtf2-rec-status r) "candidate")
+            (qtf2-rec-publish r)
+            (if (not (str_eq (qtf2-rec-status r) "open")) r
+                (qtf2-rec-publish (qtf2-rec-stage-manifest r)))))
+
+    0)

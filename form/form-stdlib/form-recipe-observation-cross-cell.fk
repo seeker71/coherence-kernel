@@ -1,0 +1,739 @@
+; form-recipe-observation-cross-cell.fk — one recipe-execution observation
+; crosses a typed native channel from one content-addressed cell identity to a
+; distinct receiver, stays attributable through two simultaneous lenses, and
+; may round-trip through the existing Form persistence surface.
+;
+; THE LIVE CHANNEL. `froc-emit` serializes the complete envelope cell through
+; cell-serialize.fk and writes it to a typed single-writer file channel;
+; `froc-receive` rereads and reconstructs the cell from that file. This is the
+; fkwu-native growing-file channel primitive already embodied by live-loop.fk,
+; not a list passed directly between the two cells. node-exchange.fk first
+; witnesses that the addressed, bounded observation is offered through the
+; receiver's interface. The .fkb channel alternative is not selected because
+; this direct-source fkwu does not currently bind read_form_binary or
+; write_form_binary; preflight observed that lane seam before this carrier was
+; chosen.
+;
+; IDENTITIES DO NOT BLEND. The emitter, receiver, channel, envelope,
+; observation, lens readings, received cell, persistence receipt, and ack are
+; separate content-addressed nodes. Meaning and vitality are read together from
+; one received observation. Each lens retains the same observation, emitter,
+; receiver, and channel children plus its own lens/carrier identity. There is no
+; fused value that can erase where either reading came from.
+;
+; OPTIONAL PERSISTENCE. When requested, `froc-persist-received` uses
+; relationship-store.fk's real native file surface, stores the serialized
+; received cell, reloads it, and verifies that deserialization returns the same
+; received NodeID. Skipping persistence is typed `nothing`, not success. A
+; failed store stays failure while the already-read observation remains
+; received.
+;
+; MESH BOUNDARY. mesh-relay.fk receives the same envelope as an opaque payload
+; and computes one honest managed-flood transition. It is retained as a relay
+; projection with `mesh-transported=0`; the typed file channel is the transport
+; this cell actually performs. A future mesh carrier can consume the projection
+; without changing envelope identity.
+;
+; SIGNALS. Acks carry status, value-present, and value independently, keeping
+; nothing distinct from present integer 0 and 1. Successful transport records
+; choice/send/receive/release. Withheld or failed transport records
+; choice/failure/undo/refine/cut/release. An empty immediate read is nothing;
+; only the explicit `froc-receive-timeout` entry records
+; timeout/cut/undo/refine/release.
+;
+; This mechanism does not itself execute a recipe or model. `froc-cross-live`
+; joins the already-existing frexl Metal execution cell when a caller invokes
+; that effectful entry. `froc-cross-frex` carries an already-composed protocol
+; observation for pure and edge witnesses.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/format-arith.fk form-stdlib/metal-door.fk
+; preludes: form-stdlib/form-recipe-exec-token.fk
+; preludes: form-stdlib/form-recipe-exec-token-live.fk
+; preludes: form-stdlib/channel-interface.fk form-stdlib/hati-mesh.fk
+; preludes: form-stdlib/cell-organ-layer.fk form-stdlib/node-exchange.fk
+; preludes: form-stdlib/wire-registry.fk form-stdlib/cell-serialize.fk
+; preludes: form-stdlib/relationship-store.fk
+; preludes: form-stdlib/guidance-channel.fk form-stdlib/cjk-channel.fk
+; preludes: form-stdlib/lenses.fk form-stdlib/mesh-relay.fk
+;
+; Proven by: form-stdlib/tests/form-recipe-observation-cross-cell-band.fk
+
+(do
+    ; ── content-addressed identities ─────────────────────────────────
+    (defn froc-participant-category () (make_nodeid 31 2 0 70))
+    (defn froc-channel-category () (make_nodeid 31 2 0 71))
+    (defn froc-envelope-category () (make_nodeid 31 2 0 72))
+    (defn froc-lens-category () (make_nodeid 31 2 0 73))
+    (defn froc-received-category () (make_nodeid 31 2 0 74))
+    (defn froc-persistence-category () (make_nodeid 31 2 0 75))
+    (defn froc-ack-category () (make_nodeid 31 2 0 76))
+    (defn froc-event-category () (make_nodeid 31 2 0 77))
+    (defn froc-trace-category () (make_nodeid 31 2 0 78))
+
+    (defn froc-participant (role name)
+        (intern_node (froc-participant-category)
+            (list (intern_trivial_string role)
+                  (intern_trivial_string name)
+                  (intern_trivial_string "recipe-observation-cross-cell-v1"))))
+    (defn froc-emitter ()
+        (froc-participant "emitter" "recipe-execution-observer"))
+    (defn froc-receiver ()
+        (froc-participant "receiver" "two-lens-observation-cell"))
+    (defn froc-participant-role (cell)
+        (node_value (nth (node_children cell) 0)))
+    (defn froc-participant-name (cell)
+        (node_value (nth (node_children cell) 1)))
+    (defn froc-participant-valid? (cell)
+        (if (nothing? cell) 0
+        (if (not (node_eq (node_category cell)
+                          (froc-participant-category))) 0
+            (if (eq (len (node_children cell)) 3) 1 0))))
+
+    (defn froc-channel (emitter receiver)
+        (intern_node (froc-channel-category)
+            (list emitter receiver
+                  (intern_trivial_string "typed-file-channel")
+                  (intern_trivial_string "recipe-execution-observation")
+                  (intern_trivial_string "single-writer-v1"))))
+    (defn froc-channel-emitter (channel)
+        (nth (node_children channel) 0))
+    (defn froc-channel-receiver (channel)
+        (nth (node_children channel) 1))
+    (defn froc-channel-valid? (channel emitter receiver)
+        (if (nothing? channel) 0
+        (if (not (node_eq (node_category channel) (froc-channel-category))) 0
+        (if (not (eq (len (node_children channel)) 5)) 0
+            (if (and (node_eq (froc-channel-emitter channel) emitter)
+                     (node_eq (froc-channel-receiver channel) receiver)) 1 0)))))
+
+    (defn froc-node-text (node) (frex-node-coordinate node))
+
+    ; The wire registry is the explicit inverse of bp/category identity used by
+    ; cell-serialize.fk. It covers every composite that can occur beneath a
+    ; frex/frexl observation envelope and every cross-cell composite persisted
+    ; here. Trivial int/string children need no registry entries.
+    (defn froc-wire-registry ()
+        (list
+            (wr-entry "FREX-RECIPE" (frex-recipe-category))
+            (wr-entry "FREX-REQUEST" (frex-request-category))
+            (wr-entry "FREX-OFFER" (frex-offer-category))
+            (wr-entry "FREX-EVENT" (frex-event-category))
+            (wr-entry "FREX-OBSERVATION" (frex-observation-category))
+            (wr-entry "FREX-ABSENT" (frex-absent-category))
+            (wr-entry "FREXL-CODE" (frexl-code-category))
+            (wr-entry "FREXL-EXECUTION" (frexl-execution-category))
+            (wr-entry "FREXL-OBSERVATION" (frexl-observation-category))
+            (wr-entry "FROC-PARTICIPANT" (froc-participant-category))
+            (wr-entry "FROC-CHANNEL" (froc-channel-category))
+            (wr-entry "FROC-ENVELOPE" (froc-envelope-category))
+            (wr-entry "FROC-LENS" (froc-lens-category))
+            (wr-entry "FROC-RECEIVED" (froc-received-category))
+            (wr-entry "FROC-PERSISTENCE" (froc-persistence-category))
+            (wr-entry "FROC-ACK" (froc-ack-category))
+            (wr-entry "FROC-EVENT" (froc-event-category))
+            (wr-entry "FROC-TRACE" (froc-trace-category))))
+
+    ; A strict one-cell file channel. The full content-addressed composition is
+    ; the payload; the outer marks let a receiver refuse a partial or
+    ; control-shaped write before entering the cell parser.
+    (defn froc-wire-open () "<|form:recipe-observation-channel|>\n")
+    (defn froc-wire-close () "\n<|/form:recipe-observation-channel|>")
+    (defn froc-wire-text (node)
+        (str_concat (froc-wire-open)
+            (str_concat (cell-to-json node (froc-wire-registry))
+                        (froc-wire-close))))
+    (defn froc-wire-payload (text)
+        (do
+            (let open-n (str_len (froc-wire-open)))
+            (let close-at (str_find text (froc-wire-close) open-n))
+            (let expected (sub (str_len text) (str_len (froc-wire-close))))
+            (if (and (eq (str_find text (froc-wire-open) 0) 0)
+                     (eq close-at expected))
+                (substring text open-n close-at) "")))
+    (defn froc-wire-valid? (text)
+        (if (gt (str_len (froc-wire-payload text)) 0) 1 0))
+    (defn froc-wire-node (text)
+        (if (eq (froc-wire-valid? text) 1)
+            (json-to-cell (froc-wire-payload text) (froc-wire-registry))
+            (nothing)))
+
+    ; write/read rows retain actual byte counts and never carry the node beside
+    ; the wire. The receiver obtains its node only by deserializing read bytes.
+    (defn froc-channel-write-row (status reason written expected)
+        (list status reason written expected))
+    (defn froc-channel-write-status (r) (nth r 0))
+    (defn froc-channel-write-reason (r) (nth r 1))
+    (defn froc-channel-written (r) (nth r 2))
+    (defn froc-channel-expected (r) (nth r 3))
+    (defn froc-channel-write (path node)
+        (do
+            (let text (froc-wire-text node))
+            (let removed (fs_remove path))
+            (let written (write_file_text path text))
+            (if (and (eq written (str_len text))
+                     (eq (file_size path) (str_len text)))
+                (froc-channel-write-row "written" "byte-exact" written
+                                        (str_len text))
+                (froc-channel-write-row "failure" "channel-write-mismatch"
+                                        written (str_len text)))))
+
+    ; read row = status reason node bytes
+    (defn froc-channel-read-row (status reason node bytes)
+        (list status reason node bytes))
+    (defn froc-channel-read-status (r) (nth r 0))
+    (defn froc-channel-read-reason (r) (nth r 1))
+    (defn froc-channel-read-node (r) (nth r 2))
+    (defn froc-channel-read-bytes (r) (nth r 3))
+    (defn froc-channel-read (path seen)
+        (if (gt seen 0)
+            (froc-channel-read-row "nothing" "already-seen" (nothing) 0)
+            (if (le (file_size path) 0)
+                (froc-channel-read-row "nothing" "no-message-yet"
+                                       (nothing) 0)
+                (do
+                    (let text (read_file path))
+                    (if (not (eq (froc-wire-valid? text) 1))
+                        (froc-channel-read-row "failure" "wire-frame-invalid"
+                                               (nothing) (str_len text))
+                        (froc-channel-read-row "read" "byte-exact"
+                            (froc-wire-node text) (str_len text)))))))
+
+    ; ── execution and cross-cell trace nodes ────────────────────────
+    (defn froc-trace-node (kind events)
+        (intern_node (froc-trace-category)
+            (cons (intern_trivial_string kind) events)))
+    (defn froc-trace-kind (trace)
+        (node_value (head (node_children trace))))
+    (defn froc-trace-events (trace)
+        (tail (node_children trace)))
+
+    (defn froc-event (emitter receiver channel action signal)
+        (intern_node (froc-event-category)
+            (list emitter receiver channel
+                  (intern_trivial_string action)
+                  (intern_trivial_string signal))))
+    (defn froc-event-action (event)
+        (node_value (nth (node_children event) 3)))
+    (defn froc-event-signal (event)
+        (node_value (nth (node_children event) 4)))
+    (defn froc-trace-has? (trace action)
+        (froc-events-have? (froc-trace-events trace) action))
+    (defn froc-events-have? (events action)
+        (if (eq (len events) 0) 0
+            (if (str_eq (froc-event-action (head events)) action) 1
+                (froc-events-have? (tail events) action))))
+    (defn froc-add-event (events emitter receiver channel action signal)
+        (append events
+            (list (froc-event emitter receiver channel action signal))))
+
+    (defn froc-failure-events (emitter receiver channel reason)
+        (do
+            (let a (froc-add-event (empty) emitter receiver channel
+                                   "choice" "typed-file-channel"))
+            (let b (froc-add-event a emitter receiver channel
+                                   "failure" reason))
+            (let c (froc-add-event b emitter receiver channel
+                                   "undo" reason))
+            (let d (froc-add-event c emitter receiver channel
+                                   "refine" "next-channel-choice"))
+            (let e (froc-add-event d emitter receiver channel
+                                   "cut" reason))
+            (froc-add-event e emitter receiver channel
+                            "release" "crossing-context")))
+    (defn froc-timeout-events (emitter receiver channel reason)
+        (do
+            (let a (froc-add-event (empty) emitter receiver channel
+                                   "timeout" reason))
+            (let b (froc-add-event a emitter receiver channel
+                                   "cut" reason))
+            (let c (froc-add-event b emitter receiver channel
+                                   "undo" reason))
+            (let d (froc-add-event c emitter receiver channel
+                                   "refine" "next-channel-choice"))
+            (froc-add-event d emitter receiver channel
+                            "release" "crossing-context")))
+
+    ; ── typed observation envelope ──────────────────────────────────
+    ; envelope children:
+    ; emitter receiver channel observation status carrier present value
+    ; execution-trace model-executed
+    (defn froc-status-valid? (status present)
+        (if (or (str_eq status "nothing")
+                (or (str_eq status "value")
+                (or (str_eq status "failure")
+                    (str_eq status "timeout"))))
+            (if (eq present (if (str_eq status "value") 1 0)) 1 0)
+            0))
+    (defn froc-envelope (emitter receiver channel observation status carrier
+                         present value execution-events model-executed)
+        (intern_node (froc-envelope-category)
+            (list emitter receiver channel observation
+                  (intern_trivial_string status)
+                  (intern_trivial_string carrier)
+                  (intern_trivial_int present)
+                  (intern_trivial_int value)
+                  (froc-trace-node "recipe-execution" execution-events)
+                  (intern_trivial_int model-executed))))
+    (defn froc-envelope-emitter (e) (nth (node_children e) 0))
+    (defn froc-envelope-receiver (e) (nth (node_children e) 1))
+    (defn froc-envelope-channel (e) (nth (node_children e) 2))
+    (defn froc-envelope-observation (e) (nth (node_children e) 3))
+    (defn froc-envelope-status (e) (node_value (nth (node_children e) 4)))
+    (defn froc-envelope-carrier (e) (node_value (nth (node_children e) 5)))
+    (defn froc-envelope-value-present? (e)
+        (node_value (nth (node_children e) 6)))
+    (defn froc-envelope-value (e) (node_value (nth (node_children e) 7)))
+    (defn froc-envelope-execution-trace (e) (nth (node_children e) 8))
+    (defn froc-envelope-model-executed? (e)
+        (node_value (nth (node_children e) 9)))
+    (defn froc-envelope-valid? (e emitter receiver channel)
+        (if (nothing? e) 0
+        (if (not (node_eq (node_category e) (froc-envelope-category))) 0
+        (if (not (eq (len (node_children e)) 10)) 0
+        (if (not (node_eq (froc-envelope-emitter e) emitter)) 0
+        (if (not (node_eq (froc-envelope-receiver e) receiver)) 0
+        (if (not (node_eq (froc-envelope-channel e) channel)) 0
+        (if (nothing? (froc-envelope-observation e)) 0
+        (if (not (eq (froc-status-valid?
+                        (froc-envelope-status e)
+                        (froc-envelope-value-present? e)) 1)) 0
+            (if (or (eq (froc-envelope-model-executed? e) 0)
+                    (eq (froc-envelope-model-executed? e) 1)) 1 0))))))))))
+
+    (defn froc-envelope-from-frex (emitter receiver channel result)
+        (froc-envelope emitter receiver channel
+            (frex-result-observation result)
+            (frex-result-status result)
+            (frex-result-carrier result)
+            (frex-result-value-present? result)
+            (frex-result-value result)
+            (frex-result-trace result)
+            (frex-result-model-executed? result)))
+    (defn froc-envelope-from-live (emitter receiver channel live)
+        (froc-envelope emitter receiver channel
+            (frexl-result-observation live)
+            (frexl-result-status live)
+            (frexl-result-carrier live)
+            (frexl-result-value-present? live)
+            (frexl-result-value live)
+            (frexl-result-lifecycle live)
+            (frexl-result-model-executed? live)))
+
+    ; ── node-exchange and actual channel emission ───────────────────
+    (defn froc-exchange-channel (emitter receiver)
+        (hm-open-channel
+            (froc-node-text emitter) (froc-node-text receiver)
+            "substrate:node" "offer:recipe-execution-observation"
+            "cap.node.deliver" "cell-json" 1 4096))
+    (defn froc-node-offer (envelope observation-bytes)
+        (do
+            (let emitter (froc-envelope-emitter envelope))
+            (let observation (froc-envelope-observation envelope))
+            (nx-offer
+                (str_concat "offer:" (froc-node-text envelope))
+                (froc-node-text emitter)
+                (nx-node (froc-node-text observation)
+                    "recipe-execution-observation" 1 observation-bytes
+                    "execution-observation" 1)
+                (list (m-offer) (m-witness)) 0 1 4096 1)))
+    (defn froc-node-request (envelope)
+        (nx-request
+            (str_concat "request:" (froc-node-text envelope))
+            (froc-node-text (froc-envelope-receiver envelope))
+            "recipe-execution-observation" (m-offer)
+            (list (m-witness)) 1 4096 1))
+
+    ; emit row = status reason envelope delivery count trace mesh-forward
+    ;            mesh-transported channel-write-row
+    (defn froc-emit-row (status reason envelope delivery count trace
+                         mesh-forward mesh-transported create-result)
+        (list status reason envelope delivery count trace mesh-forward
+              mesh-transported create-result))
+    (defn froc-emit-status (r) (nth r 0))
+    (defn froc-emit-reason (r) (nth r 1))
+    (defn froc-emit-envelope (r) (nth r 2))
+    (defn froc-emit-delivery (r) (nth r 3))
+    (defn froc-emit-count (r) (nth r 4))
+    (defn froc-emit-trace (r) (nth r 5))
+    (defn froc-emit-mesh-forward (r) (nth r 6))
+    (defn froc-emit-mesh-transported? (r) (nth r 7))
+    (defn froc-emit-write-row (r) (nth r 8))
+    (defn froc-emit-ok? (r)
+        (if (str_eq (froc-emit-status r) "sent") 1 0))
+
+    (defn froc-mesh-message (envelope)
+        (list (froc-node-text envelope)
+              (froc-node-text (froc-envelope-emitter envelope))
+              (list "hop-1" "hop-2") envelope))
+    (defn froc-mesh-projection (envelope)
+        (do
+            (let message (froc-mesh-message envelope))
+            (if (eq (mr-relay? message (empty)) 1)
+                (mr-forward message) (empty))))
+
+    (defn froc-emit-with-exchange (path envelope observation-bytes exchange)
+        (do
+            (let emitter (froc-envelope-emitter envelope))
+            (let receiver (froc-envelope-receiver envelope))
+            (let channel (froc-envelope-channel envelope))
+            (let delivery (nx-deliver
+                (froc-node-offer envelope observation-bytes)
+                (froc-node-request envelope) exchange 1))
+            (if (not (str_eq (nx-delivery-status delivery) "delivered"))
+                (froc-emit-row "failure" "node-exchange-withheld"
+                    envelope delivery 0
+                    (froc-trace-node "cross-cell"
+                        (froc-failure-events emitter receiver channel
+                            "node-exchange-withheld"))
+                    (empty) 0
+                    (froc-channel-write-row "nothing" "not-offered" 0 0))
+                (do
+                    (let write-row (froc-channel-write path envelope))
+                    (if (not (str_eq (froc-channel-write-status write-row)
+                                     "written"))
+                        (froc-emit-row "failure"
+                            (froc-channel-write-reason write-row)
+                            envelope delivery 0
+                            (froc-trace-node "cross-cell"
+                                (froc-failure-events emitter receiver channel
+                                    (froc-channel-write-reason write-row)))
+                            (empty) 0 write-row)
+                        (do
+                            (let a (froc-add-event (empty) emitter receiver
+                                channel "choice" "typed-file-channel"))
+                            (let b (froc-add-event a emitter receiver channel
+                                "send" "write-file-text"))
+                            (froc-emit-row "sent" "channel-written"
+                                envelope delivery 1
+                                (froc-trace-node "cross-cell" b)
+                                (froc-mesh-projection envelope) 0
+                                write-row)))))))
+
+    (defn froc-emit (path envelope observation-bytes)
+        (froc-emit-with-exchange path envelope observation-bytes
+            (froc-exchange-channel
+                (froc-envelope-emitter envelope)
+                (froc-envelope-receiver envelope))))
+
+    ; ── two simultaneous, source-preserving lens readings ───────────
+    (defn froc-lens-reading (lens envelope)
+        (intern_node (froc-lens-category)
+            (list
+                (intern_trivial_string lens)
+                (intern_trivial_string (lens-carrier lens))
+                (froc-envelope-observation envelope)
+                (froc-envelope-emitter envelope)
+                (froc-envelope-receiver envelope)
+                (froc-envelope-channel envelope)
+                (intern_trivial_string (froc-envelope-status envelope))
+                (intern_trivial_int (froc-envelope-value-present? envelope))
+                (intern_trivial_int (froc-envelope-value envelope)))))
+    (defn froc-lens-name (reading)
+        (node_value (nth (node_children reading) 0)))
+    (defn froc-lens-carrier (reading)
+        (node_value (nth (node_children reading) 1)))
+    (defn froc-lens-observation (reading) (nth (node_children reading) 2))
+    (defn froc-lens-emitter (reading) (nth (node_children reading) 3))
+    (defn froc-lens-receiver (reading) (nth (node_children reading) 4))
+    (defn froc-lens-channel (reading) (nth (node_children reading) 5))
+    (defn froc-lens-status (reading)
+        (node_value (nth (node_children reading) 6)))
+    (defn froc-lens-value-present? (reading)
+        (node_value (nth (node_children reading) 7)))
+    (defn froc-lens-value (reading)
+        (node_value (nth (node_children reading) 8)))
+    (defn froc-two-lenses (envelope)
+        (list (froc-lens-reading "meaning" envelope)
+              (froc-lens-reading "vitality" envelope)))
+    (defn froc-lens-retains-source? (reading envelope)
+        (if (and
+                (node_eq (froc-lens-observation reading)
+                         (froc-envelope-observation envelope))
+                (and
+                    (node_eq (froc-lens-emitter reading)
+                             (froc-envelope-emitter envelope))
+                    (and
+                        (node_eq (froc-lens-receiver reading)
+                                 (froc-envelope-receiver envelope))
+                        (node_eq (froc-lens-channel reading)
+                                 (froc-envelope-channel envelope))))) 1 0))
+    (defn froc-lenses-preserve-source? (readings envelope)
+        (if (not (eq (len readings) 2)) 0
+            (do
+                (let a (nth readings 0))
+                (let b (nth readings 1))
+                (if (and (not (node_eq a b))
+                         (and (eq (froc-lens-retains-source? a envelope) 1)
+                              (eq (froc-lens-retains-source? b envelope) 1)))
+                    1 0))))
+
+    (defn froc-received (envelope lenses)
+        (intern_node (froc-received-category)
+            (list envelope
+                  (froc-envelope-observation envelope)
+                  (froc-envelope-emitter envelope)
+                  (froc-envelope-receiver envelope)
+                  (froc-envelope-channel envelope)
+                  (nth lenses 0) (nth lenses 1)
+                  (intern_trivial_string (froc-envelope-status envelope))
+                  (intern_trivial_int (froc-envelope-value-present? envelope))
+                  (intern_trivial_int (froc-envelope-value envelope)))))
+    (defn froc-received-envelope (r) (nth (node_children r) 0))
+    (defn froc-received-observation (r) (nth (node_children r) 1))
+    (defn froc-received-emitter (r) (nth (node_children r) 2))
+    (defn froc-received-receiver (r) (nth (node_children r) 3))
+    (defn froc-received-channel (r) (nth (node_children r) 4))
+    (defn froc-received-meaning (r) (nth (node_children r) 5))
+    (defn froc-received-vitality (r) (nth (node_children r) 6))
+    (defn froc-received-status (r)
+        (node_value (nth (node_children r) 7)))
+    (defn froc-received-value-present? (r)
+        (node_value (nth (node_children r) 8)))
+    (defn froc-received-value (r)
+        (node_value (nth (node_children r) 9)))
+
+    ; ── optional native persistence/reload ───────────────────────────
+    ; persistence receipt children: status attempted persisted reloaded
+    ; received reason
+    (defn froc-persistence (status attempted persisted reloaded received reason)
+        (intern_node (froc-persistence-category)
+            (list (intern_trivial_string status)
+                  (intern_trivial_int attempted)
+                  (intern_trivial_int persisted)
+                  (intern_trivial_int reloaded)
+                  (if (nothing? received) (frex-absent-token) received)
+                  (intern_trivial_string reason))))
+    (defn froc-persistence-status (p)
+        (node_value (nth (node_children p) 0)))
+    (defn froc-persistence-attempted? (p)
+        (node_value (nth (node_children p) 1)))
+    (defn froc-persistence-persisted? (p)
+        (node_value (nth (node_children p) 2)))
+    (defn froc-persistence-reloaded? (p)
+        (node_value (nth (node_children p) 3)))
+    (defn froc-persistence-received (p) (nth (node_children p) 4))
+    (defn froc-persistence-reason (p)
+        (node_value (nth (node_children p) 5)))
+
+    (defn froc-persist-received (path received requested)
+        (if (eq requested 0)
+            (froc-persistence "nothing" 0 0 0 received
+                              "persistence-not-requested")
+            (do
+                (let name "latest-recipe-observation-node")
+                (let text (cell-to-json received (froc-wire-registry)))
+                (let wrote (rs-remember path name text))
+                (if (not (eq (rs-known? path name) 1))
+                    (froc-persistence "failure" 1 0 0 received
+                                      "persistence-write-miss")
+                    (do
+                        (let recalled (rs-recall path name))
+                        (if (not (str_eq recalled text))
+                            (froc-persistence "failure" 1 1 0 received
+                                              "persistence-byte-mismatch")
+                            (do
+                                (let loaded (json-to-cell recalled
+                                                (froc-wire-registry)))
+                                (if (node_eq loaded received)
+                                    (froc-persistence "reloaded" 1 1 1 loaded
+                                        "content-addressed-match")
+                                    (froc-persistence "failure" 1 1 0 loaded
+                                        "persistence-node-mismatch")))))))))
+
+    ; ── acknowledgment ──────────────────────────────────────────────
+    ; ack children:
+    ; emitter receiver channel envelope observation received meaning vitality
+    ; status reason carrier present value persistence execution-trace
+    ; cross-trace delivery-status model-executed transported mesh-transported
+    (defn froc-ack-node (emitter receiver channel envelope observation received
+                         meaning vitality status reason carrier present value
+                         persistence execution-trace cross-trace delivery-status
+                         model-executed transported mesh-transported)
+        (intern_node (froc-ack-category)
+            (list emitter receiver channel envelope observation received
+                  meaning vitality
+                  (intern_trivial_string status)
+                  (intern_trivial_string reason)
+                  (intern_trivial_string carrier)
+                  (intern_trivial_int present)
+                  (intern_trivial_int value)
+                  persistence execution-trace cross-trace
+                  (intern_trivial_string delivery-status)
+                  (intern_trivial_int model-executed)
+                  (intern_trivial_int transported)
+                  (intern_trivial_int mesh-transported))))
+    (defn froc-ack-emitter (a) (nth (node_children a) 0))
+    (defn froc-ack-receiver (a) (nth (node_children a) 1))
+    (defn froc-ack-channel (a) (nth (node_children a) 2))
+    (defn froc-ack-envelope (a) (nth (node_children a) 3))
+    (defn froc-ack-observation (a) (nth (node_children a) 4))
+    (defn froc-ack-received (a) (nth (node_children a) 5))
+    (defn froc-ack-meaning (a) (nth (node_children a) 6))
+    (defn froc-ack-vitality (a) (nth (node_children a) 7))
+    (defn froc-ack-status (a) (node_value (nth (node_children a) 8)))
+    (defn froc-ack-reason (a) (node_value (nth (node_children a) 9)))
+    (defn froc-ack-carrier (a) (node_value (nth (node_children a) 10)))
+    (defn froc-ack-value-present? (a)
+        (node_value (nth (node_children a) 11)))
+    (defn froc-ack-value (a) (node_value (nth (node_children a) 12)))
+    (defn froc-ack-persistence (a) (nth (node_children a) 13))
+    (defn froc-ack-execution-trace (a) (nth (node_children a) 14))
+    (defn froc-ack-cross-trace (a) (nth (node_children a) 15))
+    (defn froc-ack-delivery-status (a)
+        (node_value (nth (node_children a) 16)))
+    (defn froc-ack-model-executed? (a)
+        (node_value (nth (node_children a) 17)))
+    (defn froc-ack-transported? (a)
+        (node_value (nth (node_children a) 18)))
+    (defn froc-ack-mesh-transported? (a)
+        (node_value (nth (node_children a) 19)))
+
+    (defn froc-absent-ack (receiver channel status reason events)
+        (do
+            (let absent (frex-absent-token))
+            (froc-ack-node absent receiver channel absent absent absent absent
+                absent status reason "" 0 0
+                (froc-persistence "nothing" 0 0 0 (nothing)
+                                  "no-received-node")
+                (froc-trace-node "recipe-execution" (empty))
+                (froc-trace-node "cross-cell" events)
+                "withheld" 0 0 0)))
+
+    (defn froc-persistence-events (base emitter receiver channel persistence)
+        (if (str_eq (froc-persistence-status persistence) "nothing") base
+            (if (str_eq (froc-persistence-status persistence) "reloaded")
+                (do
+                    (let a (froc-add-event base emitter receiver channel
+                                           "persist" "relationship-store"))
+                    (froc-add-event a emitter receiver channel
+                                    "reload" "content-addressed-match"))
+                (do
+                    (let a (froc-add-event base emitter receiver channel
+                        "failure" (froc-persistence-reason persistence)))
+                    (let b (froc-add-event a emitter receiver channel
+                        "undo" "persistence-attempt"))
+                    (let c (froc-add-event b emitter receiver channel
+                        "refine" "retain-received-without-persistence"))
+                    (froc-add-event c emitter receiver channel
+                        "cut" "persistence-choice")))))
+
+    (defn froc-receive (path seen receiver channel emit persistence-path
+                        persistence-requested)
+        (if (not (eq (froc-emit-ok? emit) 1))
+            (froc-absent-ack receiver channel "failure"
+                (froc-emit-reason emit)
+                (froc-trace-events (froc-emit-trace emit)))
+            (do
+                (let read-row (froc-channel-read path seen))
+                (if (str_eq (froc-channel-read-status read-row) "nothing")
+                    (do
+                        (let emitter (froc-channel-emitter channel))
+                        (let a (froc-add-event (empty) emitter receiver channel
+                                               "choice" "typed-file-channel"))
+                        (let b (froc-add-event a emitter receiver channel
+                                               "nothing"
+                                               (froc-channel-read-reason
+                                                   read-row)))
+                        (let c (froc-add-event b emitter receiver channel
+                                               "refine" "receive-later"))
+                        (froc-absent-ack receiver channel "nothing"
+                            (froc-channel-read-reason read-row)
+                            (froc-add-event c emitter receiver channel
+                                "release" "read-context")))
+                    (if (str_eq (froc-channel-read-status read-row) "failure")
+                        (do
+                            (let emitter (froc-channel-emitter channel))
+                            (froc-absent-ack receiver channel "failure"
+                                (froc-channel-read-reason read-row)
+                                (froc-failure-events emitter receiver channel
+                                    (froc-channel-read-reason read-row))))
+                        (do
+                            (let envelope (froc-channel-read-node read-row))
+                            (let emitter (froc-channel-emitter channel))
+                            (if (not (eq (froc-envelope-valid? envelope emitter
+                                                receiver channel) 1))
+                                (froc-absent-ack receiver channel "failure"
+                                    "received-envelope-invalid"
+                                    (froc-failure-events emitter receiver channel
+                                        "received-envelope-invalid"))
+                                (do
+                                    (let readings (froc-two-lenses envelope))
+                                    (let received (froc-received envelope readings))
+                                    (let persistence (froc-persist-received
+                                        persistence-path received
+                                        persistence-requested))
+                                    (let base (froc-trace-events
+                                        (froc-emit-trace emit)))
+                                    (let got (froc-add-event base emitter receiver
+                                        channel "receive"
+                                        "read-file+json-to-cell"))
+                                    (let persisted (froc-persistence-events got
+                                        emitter receiver channel persistence))
+                                    (let closed (froc-add-event persisted emitter
+                                        receiver channel "release"
+                                        "receive-context"))
+                                    (froc-ack-node emitter receiver channel envelope
+                                        (froc-envelope-observation envelope)
+                                        received (nth readings 0) (nth readings 1)
+                                        (froc-envelope-status envelope)
+                                        "received" (froc-envelope-carrier envelope)
+                                        (froc-envelope-value-present? envelope)
+                                        (froc-envelope-value envelope)
+                                        persistence
+                                        (froc-envelope-execution-trace envelope)
+                                        (froc-trace-node "cross-cell" closed)
+                                        (nx-delivery-status
+                                            (froc-emit-delivery emit))
+                                        (froc-envelope-model-executed? envelope)
+                                        1 (froc-emit-mesh-transported? emit))))))))))
+
+    ; An owner calls this only after its receive deadline has genuinely elapsed.
+    (defn froc-receive-timeout (receiver channel)
+        (do
+            (let emitter (froc-channel-emitter channel))
+            (froc-absent-ack receiver channel "timeout"
+                "receive-deadline-elapsed"
+                (froc-timeout-events emitter receiver channel
+                                     "receive-deadline-elapsed"))))
+
+    ; ── whole crossings ─────────────────────────────────────────────
+    ; crossing = execution-result envelope emit ack
+    (defn froc-crossing (execution envelope emit ack)
+        (list execution envelope emit ack))
+    (defn froc-cross-execution (x) (nth x 0))
+    (defn froc-cross-envelope (x) (nth x 1))
+    (defn froc-cross-emit (x) (nth x 2))
+    (defn froc-cross-ack (x) (nth x 3))
+
+    (defn froc-cross-frex (channel-path persistence-path
+                           persistence-requested result observation-bytes)
+        (do
+            (let emitter (froc-emitter))
+            (let receiver (froc-receiver))
+            (let channel (froc-channel emitter receiver))
+            (let envelope
+                (froc-envelope-from-frex emitter receiver channel result))
+            (let emit (froc-emit channel-path envelope observation-bytes))
+            (let ack (froc-receive channel-path 0 receiver channel emit
+                                   persistence-path persistence-requested))
+            (froc-crossing result envelope emit ack)))
+
+    ; This is the sole recipe-execution effectful join in this cell. The live
+    ; result and all physical flags remain readable beside the cross-cell ack.
+    (defn froc-cross-live (surface channel-path persistence-path
+                           persistence-requested)
+        (do
+            (let live (frexl-execute-stream surface))
+            (let emitter (froc-emitter))
+            (let receiver (froc-receiver))
+            (let channel (froc-channel emitter receiver))
+            (let envelope
+                (froc-envelope-from-live emitter receiver channel live))
+            (let observation-bytes (str_len (frexl-live-render live)))
+            (let emit (froc-emit channel-path envelope observation-bytes))
+            (let ack (froc-receive channel-path 0 receiver channel emit
+                                   persistence-path persistence-requested))
+            (froc-crossing live envelope emit ack)))
+
+    0)

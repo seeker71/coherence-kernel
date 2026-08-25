@@ -1,0 +1,49 @@
+; dispatch-cost-probe.fk — what does ONE dispatch cost when the kernel is nothing?
+;
+; The 2026-08-24 end-to-end reading found the GPU busy for 12% of a generate's
+; wall clock and the Form walker holding the other 64%. This separates the two:
+; a kernel that touches one word, enqueued N times, so wall/N is the price of
+; asking rather than the price of the work.
+;
+; preludes: form-stdlib/core.fk form-stdlib/metal-door.fk
+
+(do
+    (defn dcp-msl ()
+        "#include <metal_stdlib>\nusing namespace metal; kernel void form_tiny_touch(device uint* d [[buffer(0)]], constant uint& n [[buffer(1)]], uint i [[thread_position_in_grid]]) { if (i < n) d[i] = d[i] + 1u; }")
+    (defn dcp-status-int (status name)
+        (do
+            (let key (str_concat name "="))
+            (let at (str_find status key 0))
+            (if (lt at 0) -1
+                (do (let start (add at (str_len key)))
+                    (let stop (str_find status "\n" start))
+                    (if (lt stop 0) -1 (str_to_int (substring status start stop)))))))
+    (defn dcp-loop (p d rem)
+        (if (le rem 0) 0
+            (do (let one (metal_enqueue p (md-bind16 (list d) (list 256) 256 0 0 0) 256))
+                (dcp-loop p d (sub rem 1)))))
+    (defn dcp-run (n)
+        (do
+            (let d (metal_buf_alloc 4096))
+            (let p (metal_pipeline (dcp-msl) "form_tiny_touch"))
+            (let warm (metal_enqueue p (md-bind16 (list d) (list 256) 256 0 0 0) 256))
+            (let s0 (metal_sync))
+            (let before (metal_status))
+            (let t0 (now_unix_ms))
+            (let ran (dcp-loop p d n))
+            (let s1 (metal_sync))
+            (let t1 (now_unix_ms))
+            (let after (metal_status))
+            (let ms (sub t1 t0))
+            (let gpu-us (sub (dcp-status-int after "gpu_busy_us_total")
+                             (dcp-status-int before "gpu_busy_us_total")))
+            (do (print (str_concat "dispatches=" (int_to_str n)))
+                (print (str_concat "  wall_ms=" (int_to_str ms)))
+                (print (str_concat "  gpu_busy_us=" (int_to_str gpu-us)))
+                (print (str_concat "  wall_us_per_dispatch=" (int_to_str (if (gt n 0) (div (mul ms 1000) n) 0))))
+                (print (str_concat "  gpu_us_per_dispatch=" (int_to_str (if (gt n 0) (div gpu-us n) 0))))
+                (print "\n") 0)))
+    (let a (dcp-run 1000))
+    (let b (dcp-run 10000))
+    (let c (dcp-run 20000))
+    0)
