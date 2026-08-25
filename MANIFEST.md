@@ -33,8 +33,15 @@ go/rust/clang/bash/python in the runtime* — is the **floor this repo starts on
   mind that can be watched thinking and trusted exactly as far as it has measured itself.
 
 **OUT (stays in the origin / private repo, never here):**
-- The Python app and carriers (~3,400 `.py`), the full Go/Rust/TS kernels, the web/API/substrate-service.
+- The Python app and carriers (~3,400 `.py`), the web/API/substrate-service.
 - Private tissue: `memory/`, lineage docs, partner/personal context, anything not for a public commons kernel.
+
+(The full Go/Rust/TS kernels were on this OUT list until they moved in-tree
+as `form/form-kernel-go|rust|ts` — proof siblings the regen carriers snapshot,
+and, since 2026-08-25, located witnesses in their own right: their deliberate
+bounds fatality is the loud horn of the sentinel tradeoff the corpus rows
+valuedabsence/voidalias carry. The minimal walkers stay the thin four-way
+surface; the full kernels are heavier arms, not the proof floor.)
 
 This repo is **public-able by construction** — there are no private parts to excise. That serves the
 "commons no one owns" north star directly.
@@ -114,8 +121,10 @@ Current state per region. **Chronology is deliberately not kept here** — the f
 
 ### Standard library & agent surface
 - **`form/form-stdlib/`** — the living stdlib and sole agent dispatch surface. Its canonical
-  `form-cli-*.fk`, `fsh-*.fk`, and focused bands build the self-contained `form/form-cli` binary; there
-  is no parallel top-level agent-source room. Core vocabulary (`core.fk`:
+  `form-cli-*.fk`, `fsh-*.fk`, and focused bands are the body; `form/form-cli` is the thin launcher that
+  asks the repository `fkwu` to run the current `form-cli-repl.fk` source recipe. Generated program images
+  remain optional caches, not the semantic authority, and there is no parallel top-level agent-source room.
+  Core vocabulary (`core.fk`:
   narrow-waist string ops, `int_to_str`/`str_to_int`/`str_find`/`float_to_str`/`intern_node_at`, Num/List/Cell/Task);
   the **wire-serialization lane** — `wire-registry.fk` (registry + universal `WIRE-NULL`), `cell-serialize.fk`
   (JSON, values+types+identity round-trip by axiom-3), `wire-xml.fk`, `wire-corba-cdr.fk` (real IEEE754 doubles),

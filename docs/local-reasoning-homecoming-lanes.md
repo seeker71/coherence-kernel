@@ -9,6 +9,50 @@ a later witness lands.
 | Form-knowledge census + ≥95% held-out integration metric | Codex + local Qwen | v1 baseline was 1/15; v2 `h01` is a live source-hit answer at 1,000,000 ppm; `h03` retrieves cleanly but remains 333,333 ppm after answer-contract retry; full denominator still owed |
 | Form-native query execution token + current-source substrate | Codex + Claude crossing | one streamed query, sealed path hint, attributed hit, typed injection, and answer are directly witnessed on real Qwen weights |
 | unseen BML/BMF live-stream embodiment | Claude | tasked after pushed commit `c427ea85`; live movement in progress, no result claimed here |
+| Qwen dispatch/prefill cost, and the body's own text speed | Claude (jit-lane) | prefill 640,326 → 118,681 dispatches byte-identical, floor reached at 75,769 but NOT decided (19% host spread); `str_find` rewritten byte-wise, 44x at 3.7 MB and no longer degrading, at 1,596 call sites |
+
+## Two cross-lane facts, 2026-08-25, that change what other lanes may assume
+
+**`str_find` is 44x faster and no longer degrades with length.** It is not a
+fkwu native; `core.fk`'s definition is the only one the body has. It used to cut
+a fresh `substring` at every position: 3.30 s over 1 MB, 21.92 s over 3.7 MB,
+and rising per megabyte. Byte-wise now: 0.21 s and 0.50 s. Ten core/string bands
+byte-identical, and `core-str-find-equivalence-band` (2047) keeps the old loop
+verbatim as its reference.
+
+For the tokenizer lane specifically: `qwen35-tokfast.fk` records that v1's
+11 MB joined blob was "priced out on the present fkwu string waist: lookup must
+not depend on a whole-blob `str_find`." Re-measured on the new one, a whole-blob
+`str_find` over 11.07 MB costs **0.92 s** worst case. That constraint still
+holds — 0.92 s per lookup is 205 s for a 223-token prompt, so v2's binary search
+over fixed-width rows remains the right design. What did change is the one-shot
+cost: the freeze step and any single blob scan went from tens of seconds to
+under one.
+
+**An out-of-bounds byte read is answered by three arms and is a deliberate
+fatal on two — and WHICH BINARY is the whole fact.** The cell is the single
+expression `(str_byte_at "" 0)`, no prelude, one machine, one minute:
+
+| arm | answer | rc |
+|---|---|---|
+| `./fkwu` | `-1` | 0 |
+| `walkers/go` via `go run .` | `-1` | 0 |
+| `walkers/rust` via `cargo run` | `-1` | 0 |
+| `form/form-kernel-go/bin-go` | crash trace | 1 |
+| `form/form-kernel-rust/target/release/form-kernel-rust` | crash trace | 1 |
+
+The two full kernels write `str_byte_at: bounds out of range index=0 len=0`, and
+the trace carries its own avoidance line — "check length/bounds before indexing
+or use a boundary-aware recipe that returns an explicit error value" — so the
+fatality is those kernels' intent, not their accident. Position does not matter:
+the same call inside a `defn` behaves as at top level.
+
+So a cell that indexes without checking runs on three arms and dies on two.
+Guard before you index.
+
+This entry first said "go and rust" without naming which, a sibling could not
+reproduce it on the minimal walkers, and they were right — there it answers -1.
+The claim was true at the wrong resolution. Name the binary.
 
 ## What is already home (current worktree, witnessed 2026-08-24)
 
