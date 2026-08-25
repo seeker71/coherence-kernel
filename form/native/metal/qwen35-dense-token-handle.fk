@@ -143,6 +143,27 @@
         (str_concat (q38-cachespan-msl "form_cache_span_f32")
         (str_concat (q38-attn-span-msl "form_gqa_span_f32")
                     (q38-gqa-tg-msl "form_gqa_decode_tg_f32")))))))
+
+    ; ── the recurrences, with their token loop folded inside ───────────────
+    ; These two are sequential OVER TOKENS and independent over everything else:
+    ; the conv window belongs to a channel, the delta state to an (h, i) pair,
+    ; and no channel or pair ever reads another's. So the order that must be kept
+    ; is a loop INSIDE each thread, not a loop outside the dispatch.
+    ;
+    ; The thread decomposition is unchanged — same threads, same state, same
+    ; arithmetic in the same order — and 48 layers x 2 kernels x N tokens becomes
+    ; 48 x 2. Nothing about the recurrence is weakened; it is simply not asked
+    ; 385 separate times whether it would like to advance one step.
+    (defn q38-conv-span-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* win [[buffer(0)]], device const float* x [[buffer(1)]], device const float* w [[buffer(2)]], device float* y [[buffer(3)]], constant uint& nch [[buffer(4)]], constant uint& kw [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& ntok [[buffer(7)]], uint c [[thread_position_in_grid]]) { if (c >= nch) return; uint b = c * kw; for (uint t = 0u; t < ntok; ++t) { for (uint j = 0u; j + 1u < kw; ++j) { win[b + j] = win[b + j + 1u]; } win[b + kw - 1u] = x[t * stride + c]; float acc = 0.0f; for (uint j = 0u; j < kw; ++j) { acc = acc + win[b + j] * w[b + j]; } y[t * stride + c] = acc; } }")))
+
+    (defn q38-delta-span-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* S [[buffer(0)]], device const float* c [[buffer(1)]], device const float* alpha [[buffer(2)]], device const float* beta [[buffer(3)]], device float* o [[buffer(4)]], constant uint& nv [[buffer(5)]], constant uint& dv [[buffer(6)]], constant uint& dk [[buffer(7)]], constant uint& nk [[buffer(8)]], constant float& qscale [[buffer(9)]], constant uint& cstride [[buffer(10)]], constant uint& gstride [[buffer(11)]], constant uint& ostride [[buffer(12)]], constant uint& ntok [[buffer(13)]], uint gid [[thread_position_in_grid]]) { if (gid >= nv * dv) return; uint h = gid / dv; uint i = gid - h * dv; uint kh = h - (h / nk) * nk; uint r = (h * dv + i) * dk; for (uint t = 0u; t < ntok; ++t) { uint co = t * cstride; device const float* q = c + co + kh * dk; device const float* k = c + co + nk * dk + kh * dk; float v = c[co + 2u * nk * dk + h * dv + i]; float al = alpha[t * gstride + h]; float pred = 0.0f; for (uint j = 0u; j < dk; ++j) { float sp = al * S[r + j]; S[r + j] = sp; pred = pred + sp * k[j]; } float err = v - pred; float bw = beta[t * gstride + h] * err; float acc = 0.0f; for (uint j = 0u; j < dk; ++j) { float sn = S[r + j] + bw * k[j]; S[r + j] = sn; acc = acc + sn * (qscale * q[j]); } o[t * ostride + h * dv + i] = acc; } }")))
+
     (defn q38-msl ()
         (str_concat (kth-msl)
         (str_concat (q80-matvec-wide-body "form_q8_0_matvec_wide_f32")
@@ -150,7 +171,9 @@
         (str_concat (q38-copysoff-msl "form_copy_soff_f32")
         (str_concat (q38-rmsspan-msl "form_rmsnorm_span_f32")
         (str_concat (q38-joined-attention-msl)
-                    (q38-linear-span-msl))))))))
+        (str_concat (q38-linear-span-msl)
+        (str_concat (q38-conv-span-msl "form_gdn_conv_span_f32")
+                    (q38-delta-span-msl "form_gdn_delta_span_f32"))))))))))
 
     (defn q38-linear-span-pipeline-names ()
         (list "form_gdn_l2norm_span_f32"
@@ -180,7 +203,9 @@
                   (metal_pipeline msl (nth linear 1))
                   (metal_pipeline msl (nth linear 2))
                   (metal_pipeline msl (nth linear 3))
-                  (metal_pipeline msl (nth linear 4))))))
+                  (metal_pipeline msl (nth linear 4))
+                  (metal_pipeline msl "form_gdn_conv_span_f32")
+                  (metal_pipeline msl "form_gdn_delta_span_f32")))))
 
     ; One exact 256-thread group per output-row pair for Q8_0.  All other declared types retain the
     ; already-proven KAT dispatches.  Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
@@ -598,7 +623,13 @@
                     (mul (nth geo 3) (nth geo 5)))
                 (q38-linear-delta-span ps bs geo st (add t 1) ntok))))
 
-    (defn q38-linear-attn-span (ps bs geo lay st ntok)
+        ; fold = 1 issues each recurrence once with its token loop inside. MEASURED
+    ; 2026-08-25 and NOT the default: it reaches the dispatch floor exactly
+    ; (75,769 against a predicted 75,673) and costs 31% more GPU and 10% more
+    ; wall, because one long low-occupancy kernel that nothing can overlap is
+    ; worse than N short ones inside a concurrent batch. Kept reachable so the
+    ; measurement stands and nobody pays for it twice.
+    (defn q38-linear-attn-span-f (ps bs geo lay st ntok fold)
         (do
             (let bs2-pitch (qlslc-bs2-output-pitch geo))
             (q38-rms-span ps (nth bs 33) (nth lay 0) (nth bs 1)
@@ -611,7 +642,12 @@
             (q38-mv-batch ps (nth lay 7) (nth bs 1) (nth bs 3) ntok 0)
             (q38-mv-batch ps (nth lay 8) (nth bs 1) (nth bs 4) ntok 0)
             (q38-mv-batch ps (nth lay 12) (nth bs 1) (nth bs 7) ntok 0)
-            (q38-linear-conv-span ps bs geo lay st 0 ntok)
+            (if (eq fold 1)
+                (metal_enqueue (nth ps (qlslc-conv-span-pipeline))
+                    (q38-b16 (list (nth st 0) (nth bs 2) (kth-tv-h (nth lay 6)) (nth bs 2))
+                             (list (nth geo 1) (nth geo 23) (q38-bs2-stride geo) ntok) 0 1)
+                    (nth geo 1))
+                (q38-linear-conv-span ps bs geo lay st 0 ntok))
             (metal_enqueue (nth ps 8)
                 (q38-b16 (list (nth bs 2))
                          (list (qlslc-bs2-allocation-elements geo ntok)) 0 1)
@@ -627,7 +663,14 @@
                           (kth-tv-h (nth lay 10)) (nth bs 5) (nth bs 6))
                     (list (nth geo 3) ntok) 0 1)
                 (mul (nth geo 3) ntok))
-            (q38-linear-delta-span ps bs geo st 0 ntok)
+            (if (eq fold 1)
+                (metal_enqueue (nth ps (qlslc-delta-span-pipeline))
+                    (q38-b16 (list (nth st 1) (nth bs 2) (nth bs 5) (nth bs 6) (nth bs 8))
+                             (list (nth geo 3) (nth geo 5) (nth geo 4) (nth geo 2) (nth geo 7)
+                                   (q38-bs2-stride geo) (nth geo 3)
+                                   (mul (nth geo 3) (nth geo 5)) ntok) 0 1)
+                    (mul (nth geo 3) (nth geo 5)))
+                (q38-linear-delta-span ps bs geo st 0 ntok))
             (metal_enqueue (nth ps (qlslc-norm-gate-span-pipeline))
                 (q38-b16
                     (list (nth bs 8) (kth-tv-h (nth lay 11)) (nth bs 7) (nth bs 9))
@@ -648,6 +691,11 @@
                 (q38-linear-attn ps bs geo (nth lays l) (nth sts l))
                 (q38-scatter ps bs geo t 1)
                 (q38-lm-linear ps bs geo lays sts l (add t 1) n))))
+
+    (defn q38-linear-attn-span (ps bs geo lay st ntok)
+        (q38-linear-attn-span-f ps bs geo lay st ntok 0))
+    (defn q38-linear-attn-span-folded (ps bs geo lay st ntok)
+        (q38-linear-attn-span-f ps bs geo lay st ntok 1))
 
     (defn q38-lm-layers-span (ps bs geo lays sts l nL n pos0)
         (if (ge l nL) 1
