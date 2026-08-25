@@ -169,8 +169,31 @@ compiler or source-runner, the runtime is wrong. The voice pipeline must keep
 lane, command, source context, resource use, and frame-buffer state available
 for every failure.
 
+## 2026-08-25: The Duplex Frame Grid (VoiceChat-11B teaching)
+
+NVIDIA's NemotronLabs VoiceChat-11B (released 2026-08-09) replaces the
+ASR -> LLM -> TTS cascade with one network on one shared ~80 ms frame axis:
+every channel holds a value at every frame, agent silence is an explicit pad
+token, user silence is encoded actual silence, speech boundaries are emitted
+tokens, and interruption has no mechanism at all — overlap is representable
+on the shared axis and yielding is learned (~448 ms turn-taking, ~480 ms
+yield on interruption). Tool calls ride a separate channel while a spoken
+on-hold message keeps the conversation present during work.
+
+The teaching lives in this body as `presence/duplex-frame-grid.fk` (band
+`presence/tests/duplex-frame-grid-band.fk`, verdict 511): the
+frame-synchronous seat, measured — over the same twenty frames, a
+turn-gated ear loses one of five user words; the grid loses none. The full
+story: `receipts/2026-08-25-voicechat-11b-duplex-teaching.md`.
+
+Consequence for the interactive wiring named in the gaps above: seat the
+microphone -> ASR -> reply -> TTS loop on the frame grid — both channels
+always valued, silence a value end-to-end — rather than as request/response
+turns. The listen side keeps hearing while the speak side is voicing; a
+barge-in then needs no new machinery, only the yield policy.
+
 ## Next Release Target
 
 The next release target is an interactive local audio loop backed by audio.cpp
 for ASR/TTS, using the borrowed public-demo source until a better source voice
-is chosen.
+is chosen — seated on the duplex frame grid above.
