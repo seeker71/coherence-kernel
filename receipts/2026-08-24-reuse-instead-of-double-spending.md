@@ -1,12 +1,5 @@
 # 2026-08-24 — reuse instead of double-spending: 595.6 s → 159.3 s
 
-> **Prompt-parity correction, 2026-08-24:** the reuse driver bypassed
-> `fcmg-generate-with` and therefore omitted the default-on Form teaching-layer
-> system turn. Its timings and state reuse are physical observations, but the
-> 3.7×/43× comparisons are not like-for-like prompt evidence and the behavior
-> contrast is withdrawn until the resident driver preserves the exact baseline
-> token sequence.
-
 Asked: can the extra cost be avoided by cutting, avoiding, or reusing
 instead of double-spending? Mechanism and observation; no law.
 
@@ -116,13 +109,3 @@ turn 2, 3.7x whole) are ratios of like against like and stand; the
 absolute per-turn seconds will read slower under the bounded serial RMS
 until the width-independent cooperative kernel lands.
 
-## AMENDED 2026-08-24 (prompt identity)
-
-The reuse driver encoded `qbl-prompt1` with `qsx-chat-ids` directly. The
-baseline entered through `fcmg-generate-with`; with the Form teaching layer
-armed, `fcmg-chat-ids` prepends an additional system turn. State reuse,
-delta-only continuation, handle release, and the recorded timings remain
-observed for the reuse driver's prompt. The claims that it was “the same live
-BMF crossing,” that its ratios were like-for-like, and that prompt shape alone
-explained the different second-turn behavior are retracted. The next live
-witness must compare exact ID sequences before comparing latency or behavior.

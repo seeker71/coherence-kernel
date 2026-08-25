@@ -1,0 +1,134 @@
+; qwen35-linear-span-emitter-address-band.fk — pure observation of the five
+; generated span kernels, the pitched batch producer, and the Form addresses
+; that bind them.
+;
+; No model is opened, no Metal source is compiled, and no carrier function is
+; called. The witness distinguishes a guessed allocation-derived stride from an
+; explicit output pitch: the batch producer accepts ystride and writes through
+; it, qsplit accepts the same sstride, and the Form offset contract advances by
+; that pitch. It also rejects dt_bias indexed by t*nh+h and pipeline collision.
+;
+; Verdict 262143 (18 bits):
+;   1       qsplit reads bs2 as t*sstride plus head-local identity
+;   2       qsplit declares sstride as its explicit buffer-6 constant
+;   4       batched matmul writes y[t*ystride+r]
+;   8       batched matmul declares ystride as its explicit buffer-6 constant
+;   16      bs2 offsets advance by the producer-selected 12288 pitch
+;   32      that pitch equals capacity but remains distinct from logical rows
+;   64      gate offsets advance independently by nv
+;   128     delta outputs advance independently by nv*dv
+;   256     all three token-2 offsets are exact and distinct
+;   512     invalid token is nothing; valid token 0 remains present 0s
+;   1024    gates MSL reads dtb[h] and never dtb[o]
+;   2048    activation gates retain packed t*nh+h identity
+;   4096    l2norm uses the supplied producer pitch for token rows
+;   8192    delta applies independent qkv/gate/output offsets
+;   16384   five emitted function names are unique
+;   32768   every emitted function name occurs exactly once
+;   65536   cooperative decode remains 39 and new indices are exactly 40..44
+;   131072  pitched extents and generated-name/index extents reconcile
+;
+; preludes: native/metal/qwen35-dense-token-handle.fk
+
+(do
+    (defn q38lsb-bit (ok bit) (if ok bit 0))
+    (defn q38lsb-list-eq? (a b)
+        (if (not (eq (len a) (len b))) 0
+            (if (eq (len a) 0) 1
+                (if (eq (head a) (head b))
+                    (q38lsb-list-eq? (tail a) (tail b)) 0))))
+    (defn q38lsb-member? (x xs)
+        (if (eq (len xs) 0) 0
+            (if (str_eq x (head xs)) 1 (q38lsb-member? x (tail xs)))))
+    (defn q38lsb-unique? (xs)
+        (if (eq (len xs) 0) 1
+            (if (eq (q38lsb-member? (head xs) (tail xs)) 1) 0
+                (q38lsb-unique? (tail xs)))))
+    (defn q38lsb-once? (source needle)
+        (do
+            (let first (str_find source needle 0))
+            (if (lt first 0) 0
+                (if (lt (str_find source needle (add first 1)) 0) 1 0))))
+    (defn q38lsb-all-once? (source names)
+        (if (eq (len names) 0) 1
+            (if (eq (q38lsb-once? source (head names)) 1)
+                (q38lsb-all-once? source (tail names)) 0)))
+
+    (defn qwen35-linear-span-emitter-address-band ()
+        (do
+            ; Qwen-like side: the shared bs2 pitch/capacity 12288 exceeds the
+            ; linear block's 10240 logical rows.
+            (let geo (qlslc-geometry 10240 24 256))
+            (let qsplit (q38-qsplit-span-msl "form_qsplit_span_f32"))
+            (let batch (qmb-q80-batch))
+            (let l2 (q38-l2norm-span-msl "form_gdn_l2norm_span_f32"))
+            (let gates (q38-gates-span-msl "form_gdn_gates_span_f32"))
+            (let delta (q38-delta-off-msl "form_gdn_delta_off_f32"))
+            (let linear-msl (q38-linear-span-msl))
+            (let names (q38-linear-span-pipeline-names))
+            (let pipelines (qlslc-pipeline-contract))
+            (let off0 (q38-linear-span-offsets geo 0))
+            (let off1 (q38-linear-span-offsets geo 1))
+            (let off2 (q38-linear-span-offsets geo 2))
+            (let bad (q38-linear-span-offsets geo -1))
+
+            (sum (list
+                (q38lsb-bit
+                    (ge (str_find qsplit "s[t * sstride + h * 2u * hd" 0) 0) 1)
+                (q38lsb-bit
+                    (ge (str_find qsplit
+                        "constant uint& sstride [[buffer(6)]]" 0) 0) 2)
+                (q38lsb-bit
+                    (ge (str_find batch "y[t * ystride + r]" 0) 0) 4)
+                (q38lsb-bit
+                    (ge (str_find batch
+                        "constant uint& ystride [[buffer(6)]]" 0) 0) 8)
+                (q38lsb-bit (and
+                    (eq (nth off1 0) 12288)
+                    (eq (nth off2 0) 24576)) 16)
+                (q38lsb-bit (and
+                    (eq (qlslc-bs2-output-pitch geo)
+                        (qlslc-bs2-allocation-capacity geo))
+                    (not (eq (qlslc-bs2-output-pitch geo)
+                             (qlslc-linear-logical-rows geo)))) 32)
+                (q38lsb-bit (and
+                    (eq (nth off1 1) 48)
+                    (eq (nth off2 1) 96)) 64)
+                (q38lsb-bit (and
+                    (eq (nth off1 2) 6144)
+                    (eq (nth off2 2) 12288)) 128)
+                (q38lsb-bit
+                    (q38lsb-list-eq? off2 (list 24576 96 12288)) 256)
+                (q38lsb-bit (and (nothing? bad)
+                    (and (not (nothing? off0))
+                         (q38lsb-list-eq? off0 (list 0 0 0)))) 512)
+                (q38lsb-bit (and
+                    (ge (str_find gates "a[o] + dtb[h]" 0) 0)
+                    (lt (str_find gates "dtb[o]" 0) 0)) 1024)
+                (q38lsb-bit (and
+                    (ge (str_find gates "uint o = t * nh + h" 0) 0)
+                    (ge (str_find gates "alpha[o]" 0) 0)) 2048)
+                (q38lsb-bit (and
+                    (ge (str_find l2 "uint o = t * stride + h * hd" 0) 0)
+                    (ge (str_find l2 "constant uint& stride" 0) 0)) 4096)
+                (q38lsb-bit (and
+                    (ge (str_find delta "constant uint& toff" 0) 0)
+                    (and (ge (str_find delta "constant uint& goff" 0) 0)
+                         (and (ge (str_find delta "constant uint& ooff" 0) 0)
+                         (and (ge (str_find delta "c + toff" 0) 0)
+                         (and (ge (str_find delta "alpha[goff + h]" 0) 0)
+                              (ge (str_find delta "o[ooff + h * dv + i]" 0) 0)))))) 8192)
+                (q38lsb-bit (and
+                    (eq (len names) 5)
+                    (eq (q38lsb-unique? names) 1)) 16384)
+                (q38lsb-bit
+                    (eq (q38lsb-all-once? linear-msl names) 1) 32768)
+                (q38lsb-bit
+                    (q38lsb-list-eq? pipelines (list 39 40 41 42 43 44)) 65536)
+                (q38lsb-bit (and
+                    (eq (len names) 5)
+                    (and (eq (sub (len pipelines) 1) (len names))
+                    (and (eq (qlslc-bs2-linear-written-extent geo 3) 34816)
+                         (eq (qlslc-bs2-full-written-extent geo 3) 36864)))) 131072)))))
+
+    (qwen35-linear-span-emitter-address-band))

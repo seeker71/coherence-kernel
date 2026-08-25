@@ -38,6 +38,10 @@
     (defn fknqr-absent-route-fallback-lane ()
         "linear-route-artifact-absent-fallback")
     (defn fknqr-invalid-lane () "invalid-request")
+    (defn fknqr-strict-nodeid-refusal-lane ()
+        "strict-nodeid-route-unavailable")
+    (defn fknqr-strict-absent-route-refusal-lane ()
+        "strict-concept-route-unavailable")
 
     ; The choice is pure so the band can witness that fallback authority is
     ; narrow. route-present is literal 0/1; nothing is not coerced to either.
@@ -47,6 +51,23 @@
                 (fknqr-nodeid-fallback-lane)
                 (if (eq route-present 1) (fknqr-concept-route-lane)
                     (fknqr-absent-route-fallback-lane)))))
+
+    ; The emitted CLI door has a stronger admission boundary than the resident
+    ; compatibility adapter above.  It never opens the linear shard walk:
+    ; exactly one present concept bucket is admitted, while an absent bucket or
+    ; a NodeID without a direct persisted route becomes typed nothing with
+    ; lookup-count=0.  This keeps cut and failure observable at the door rather
+    ; than turning absence into an unbounded compatibility search.
+    (defn fknqr-strict-lane (request route-present)
+        (if (eq (fknq-request-valid? request) 0) (fknqr-invalid-lane)
+            (if (str_eq (fknq-request-kind request) "nodeid")
+                (fknqr-strict-nodeid-refusal-lane)
+                (if (eq route-present 1) (fknqr-concept-route-lane)
+                    (fknqr-strict-absent-route-refusal-lane)))))
+
+    (defn fknqr-strict-refusal (request reason)
+        (fknq-registry-result "nothing" reason request "" "" "" 0 0 0
+            (nothing) (nothing) 0))
 
     (defn fknqr-route-timeout? (r)
         (if (or
@@ -103,6 +124,18 @@
                         (fknq-request-coordinate request)))
                 (fknq-registry-lookup-at root source-artifact request))))
 
+    (defn fknqr-strict-registry-lookup-at
+            (root source-artifact route-artifact request)
+        (do
+            (let route-present
+                (fknqr-concept-bucket-present? route-artifact request))
+            (let lane (fknqr-strict-lane request route-present))
+            (if (str_eq lane (fknqr-concept-route-lane))
+                (fknqr-registry-from-route request
+                    (psckr-lookup-at root source-artifact route-artifact
+                        (fknq-request-coordinate request)))
+                (fknqr-strict-refusal request lane))))
+
     ; Route-aware counterpart of fknq-execute-at.  Scannerless BMF parsing,
     ; current-source observation, typed bridge identities, result shape, and
     ; model-executed=0 all remain the existing fknq implementation.
@@ -115,6 +148,24 @@
                 (do
                     (let request (fknq-scan-request scan))
                     (let registry (fknqr-registry-lookup-at root
+                        source-artifact route-artifact request))
+                    (let current
+                        (if (str_eq (fknq-registry-status registry) "hit")
+                            (fknq-current-source-result-at root registry request)
+                            (fknq-empty-current-result
+                                (fknq-registry-reason registry))))
+                    (fknq-result-from-evidence scan registry current
+                        local-ready)))))
+
+    (defn fknqr-execute-strict-at
+            (root source-artifact route-artifact surface local-ready budget)
+        (do
+            (let scan (fknq-bmf-consume surface budget))
+            (if (not (str_eq (fknq-scan-status scan) "ready"))
+                (fknq-result-from-scan scan)
+                (do
+                    (let request (fknq-scan-request scan))
+                    (let registry (fknqr-strict-registry-lookup-at root
                         source-artifact route-artifact request))
                     (let current
                         (if (str_eq (fknq-registry-status registry) "hit")
@@ -142,6 +193,17 @@
                 (do
                     (let artifact (fknq-default-artifact))
                     (fknqr-execute-at root artifact artifact surface
+                        local-ready (fknq-max-frame-bytes))))))
+    (defn fknqr-execute-strict (surface local-ready)
+        (do
+            (let root (fhcs-default-root))
+            (if (str_eq root "")
+                (fknq-result-from-scan
+                    (fknq-scan-row "failure" "body-root-unresolved"
+                        (nothing) "" 0))
+                (do
+                    (let artifact (fknq-default-artifact))
+                    (fknqr-execute-strict-at root artifact artifact surface
                         local-ready (fknq-max-frame-bytes))))))
 
     0)
