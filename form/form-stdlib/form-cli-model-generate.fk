@@ -8,7 +8,7 @@
 ; The compatibility qfl wrappers add no behavior here; this generator and the
 ; REPL call the canonical form-teach-layer API directly.
 ;
-; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/form-teach-layer.fk form-stdlib/local-model-choice.fk form-stdlib/local-generate-organ.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-crystal.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
+; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-tokenizer-live-cursor.fk form-stdlib/form-teach-layer.fk form-stdlib/local-model-choice.fk form-stdlib/local-generate-organ.fk form-stdlib/qwen35-artifact-seal-reader.fk native/metal/qwen35-dense-token-handle.fk native/metal/qwen35-crystal.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
 ; preludes: form-stdlib/language-template.fk form-stdlib/form-cli-heedmark-xtal.fk form-stdlib/form-cli-heed-cursor.fk form-stdlib/form-cli-heed-telemetry.fk
 ; preludes: form-stdlib/form-cli-heed-current-source.fk form-stdlib/form-cli-heed-grounded.fk
 
@@ -135,7 +135,7 @@
                     (fcmg-line "heed_model_executed" (int_to_str (fhc-model-executed)))))))))))))))))))))))))))))
     (defn fcmg-heed-report (c)
         (fcmg-heed-report-at c (fhcs-default-root) (fhcs-root-status)))
-    (defn fcmg-report (model arch ids out text thought-eval thought-offers thought-n forwards busy-us prefill-us decode-us weight-bytes heed)
+    (defn fcmg-report-count (model arch prompt-n out text thought-eval thought-offers thought-n forwards busy-us prefill-us decode-us weight-bytes heed)
         (do
             (let effective-gbps-x10
                 (if (gt busy-us 0)
@@ -145,7 +145,7 @@
                           (fhc-injected heed))
                      (add (fhc-close-commits heed) (fhc-terminal-forwards heed))))
             (let prefill-tokps-x1000
-                (if (gt prefill-us 0) (div (mul (add (len ids) thought-n) 1000000000) prefill-us) 0))
+                (if (gt prefill-us 0) (div (mul (add prompt-n thought-n) 1000000000) prefill-us) 0))
             (let decode-tokps-x1000
                 (if (and (gt decode-us 0) (gt decode-forwards 0))
                     (div (mul decode-forwards 1000000000) decode-us) 0))
@@ -164,7 +164,7 @@
             (str_concat (fcmg-line "thought-eval" thought-eval)
             (str_concat (fcmg-line "thought-offers" (int_to_str thought-offers))
             (str_concat (fcmg-line "thought-tokens" (int_to_str thought-n))
-            (str_concat (fcmg-line "prompt_tokens" (int_to_str (len ids)))
+            (str_concat (fcmg-line "prompt_tokens" (int_to_str prompt-n))
             (str_concat (fcmg-line "generated_tokens" (int_to_str (len out)))
             (str_concat (fcmg-line "forward_passes" (int_to_str forwards))
             (str_concat (fcmg-line "weight_bytes_per_forward" (int_to_str weight-bytes))
@@ -180,6 +180,10 @@
                 (int_to_str end-to-end-tokps-x1000))
             (str_concat (fcmg-heed-report heed)
                         (str_concat "text:\n" text))))))))))))))))))))))))))
+    (defn fcmg-report (model arch ids out text thought-eval thought-offers thought-n forwards busy-us prefill-us decode-us weight-bytes heed)
+        (fcmg-report-count model arch (len ids) out text thought-eval
+            thought-offers thought-n forwards busy-us prefill-us decode-us
+            weight-bytes heed))
 
     ; ── residence ─────────────────────────────────────────────────────────────
     ; A model admitted once should not be admitted again to answer a second
@@ -583,6 +587,135 @@
                                             (q38-free-state sts)
                                             0)))))))))))
 
+    ; ── live prompt cursor -> bounded Metal prefill ───────────────────────
+    ; The cursor keeps at most one pre-tokenized piece.  Prefill keeps one token
+    ; of lookahead so only the true final prompt position asks the LM head.
+    ; Every `chunk` advanced positions settle and reopen the command buffer;
+    ; neither prompt ids nor an unbounded command stream must exist first.
+    (defn fcmg-live-pf (status first pos cursor reason)
+        (list "fcmg-live-prefill" status first pos cursor reason))
+    (defn fcmg-live-prefill-go (ctx sts cursor held pos in-batch chunk)
+        (do
+            (let one (qtlc-next cursor))
+            (if (eq (qtlc-next-present? one) 1)
+                (do
+                    (q38-forward-state-after
+                        (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                        (nth ctx 4) held pos 1)
+                    (let filled (add in-batch 1))
+                    (if (ge filled chunk)
+                        (do (metal_sync) (metal_batch_concurrent)) 0)
+                    (fcmg-live-prefill-go ctx sts (qtlc-next-cursor one)
+                        (qtlc-next-value one) (add pos 1)
+                        (if (ge filled chunk) 0 filled) chunk))
+                (if (str_eq (qtlc-next-status one) "done")
+                    (do
+                        (q38-forward-state-after
+                            (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                            (nth ctx 4) held pos 1)
+                        (let first (q38-head-only
+                            (nth ctx 0) (nth ctx 1) (nth ctx 2)
+                            (nth ctx 5) (nth ctx 6)))
+                        (fcmg-live-pf "ok" first (add pos 1)
+                            (qtlc-next-cursor one) "complete"))
+                    (do
+                        ; Any already-enqueued prefix is made observable before
+                        ; state release; a refusal never leaves an open batch.
+                        (metal_sync)
+                        (fcmg-live-pf (qtlc-next-status one) (sub 0 1) pos
+                            (qtlc-next-cursor one)
+                            (qtlc-reason (qtlc-next-cursor one))))))))
+    (defn fcmg-live-prefill (ctx sts cursor chunk)
+        (do
+            (let first (qtlc-next cursor))
+            (if (not (eq (qtlc-next-present? first) 1))
+                (fcmg-live-pf (qtlc-next-status first) (sub 0 1) 0
+                    (qtlc-next-cursor first)
+                    (qtlc-reason (qtlc-next-cursor first)))
+                (do
+                    (metal_batch_concurrent)
+                    (fcmg-live-prefill-go ctx sts (qtlc-next-cursor first)
+                        (qtlc-next-value first) 0 0 chunk)))))
+
+    (defn fcmg-run-context-cursor-budgeted
+        (src arch model cursor thought-lists thought-eval ctx n query reserve gap-n
+             source-hint)
+        (do
+            (let geo (nth ctx 2))
+            (let sts (q38-new-state geo))
+            (if (not (eq (q38-state-ok? sts) 1))
+                (fcmg-state-close-result sts
+                    (str_concat "generation refused: state allocation failed; " (metal_status)))
+                (do
+                    (let before-status (metal_status))
+                    (let live-pf (fcmg-live-prefill ctx sts cursor 64))
+                    (if (not (str_eq (nth live-pf 1) "ok"))
+                        (fcmg-state-close-result sts
+                            (str_concat "generation refused: live prompt cursor="
+                                (str_concat (nth live-pf 1)
+                                    (str_concat ";reason="
+                                        (nth live-pf 5)))))
+                        (do
+                            (let final-cursor (nth live-pf 4))
+                            (let prompt-n (qtlc-token-count final-cursor))
+                            (let stops (fcmg-q35-stops src))
+                            (let offered
+                                (if (eq (len thought-lists) 0)
+                                    (list (nth live-pf 2)
+                                        (nth live-pf 3) (empty) 0 0)
+                                    (fcmg-offer-stream
+                                        (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
+                                        (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                                        thought-lists (nth live-pf 3) gap-n
+                                        stops (empty) 0 0)))
+                            (let prefill-status (metal_status))
+                            (let first (nth offered 0))
+                            (let pos (nth offered 1))
+                            (let stream-ids (nth offered 2))
+                            (let thought-n (nth offered 3))
+                            (let offers (nth offered 4))
+                            (let model-extra (sub (len stream-ids) thought-n))
+                            (let remain (sub n model-extra))
+                            (let heed-run
+                                (if (and (gt query 0) (gt reserve 0))
+                                    (fcmg-heed-tail-2p src
+                                        (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
+                                        (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                                        first pos stops query reserve source-hint)
+                                    (fcmg-heed-tail src
+                                        (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
+                                        (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                                        first pos remain stops)))
+                            (let model-tail (fhc-out heed-run))
+                            (let heed (fhc-cursor-of heed-run))
+                            (let out (tkz-cat stream-ids model-tail))
+                            (metal_sync)
+                            (let after-status (metal_status))
+                            (let busy-us (sub
+                                (mbw-status-int after-status "gpu_busy_us_total")
+                                (mbw-status-int before-status "gpu_busy_us_total")))
+                            (let prefill-us (sub
+                                (mbw-status-int prefill-status "gpu_busy_us_total")
+                                (mbw-status-int before-status "gpu_busy_us_total")))
+                            (let decode-us (sub
+                                (mbw-status-int after-status "gpu_busy_us_total")
+                                (mbw-status-int prefill-status "gpu_busy_us_total")))
+                            (let forwards (add
+                                (add (add prompt-n thought-n)
+                                    (if (gt (add model-extra (len model-tail)) 0)
+                                        (sub (add model-extra (len model-tail)) 1) 0))
+                                (add (fhc-injected heed)
+                                    (add (fhc-close-commits heed)
+                                         (fhc-terminal-forwards heed)))))
+                            (let weight-bytes (q38-forward-weight-bytes ctx))
+                            (fcmg-state-close-result sts
+                                (str_concat (fcmg-line "prompt_cursor"
+                                                "bmf-qtf2-live-v1")
+                                    (fcmg-report-count model arch prompt-n out
+                                        (tkz-decode-text src out) thought-eval
+                                        offers thought-n forwards busy-us prefill-us
+                                        decode-us weight-bytes heed)))))))))
+
     (defn fcmg-run-context-budgeted
         (src arch model ids thought-lists thought-eval ctx n query reserve gap-n
              source-hint)
@@ -680,6 +813,16 @@
             (q35-chat-ids src prompt)
             (fcmg-chat-ids src prompt)))
 
+    (defn fcmg-chat-segments-profile (prompt profile x)
+        (if (str_eq profile "knowledge-query")
+            (qtlc-chat-segments prompt x)
+            (if (eq (ftl-armed?) 1)
+                (qtlc-full-chat-segments prompt (ftl-system-text) x)
+                (qtlc-chat-segments prompt x))))
+    (defn fcmg-chat-cursor-profile (path prompt profile x)
+        (qtlc-open path (qsx-seal-line path)
+            (fcmg-chat-segments-profile prompt profile x)))
+
     ; A first admission: the seal is verified before a single byte of the file is
     ; read for meaning, exactly as before.  What changed is only what is answered —
     ; the text AND the residence the admission earned, so a caller that keeps it
@@ -729,11 +872,25 @@
                 (let thought-eval (lg-values-line thoughts))
                 (let thought-n (fcmg-id-count thought-lists 0))
                 (let gap-n (if (gt (len thoughts) 1) (lg-gap-default) 0))
-                (let ids (fcmg-chat-ids-profile src prompt profile))
+                (let segments (if (eq iced 1)
+                    (fcmg-chat-segments-profile prompt profile x) (empty)))
+                (let cursor (if (eq iced 1)
+                    (fcmg-chat-cursor-profile path prompt profile x)
+                    (qtlc-open-index
+                        (list "absent" "crystal-absent" "" 0 0 0 0 0 0 0)
+                        (empty))))
+                (let live-cursor (if (str_eq (qtlc-status cursor) "open") 1 0))
+                ; The scanner remains an offline recovery lane when the sealed
+                ; qtf2 organ is absent/stale.  A current cursor never creates a
+                ; whole prompt-id list.
+                (let ids (if (eq live-cursor 1) (empty)
+                    (fcmg-chat-ids-profile src prompt profile)))
+                (let prompt-bound (if (eq live-cursor 1)
+                    (qtlc-segments-upper-bound segments 0) (len ids)))
                 (let arch (fcmg-arch src))
                 (let model (fcmg-name src))
                 (let model-max (gmt-u32 src (q38-key arch "context_length")))
-                (let need (fcmg-context-need (len ids) thought-n
+                (let need (fcmg-context-need prompt-bound thought-n
                     (mul gap-n (if (gt (len thoughts) 1)
                         (sub (len thoughts) 1) 0)) n query reserve))
                 (let maxpos (if (lt need model-max) need model-max))
@@ -743,7 +900,7 @@
                 (if (not (str_eq arch "qwen35"))
                     (list (fcmg-noted prompt arch model (fcmg-arch-door arch model))
                           (fcmr-none))
-                (if (eq (len ids) 0)
+                (if (le prompt-bound 0)
                     (list (fcmg-noted prompt arch model "generation refused: tokenizer produced no prompt tokens")
                           (fcmr-none))
                 (if (or (eq (fcmg-tail-budget-ok? n query reserve) 0)
@@ -770,9 +927,14 @@
                                           (fcmg-open-refusal ctx "model context contains an invalid handle"))
                                       (fcmr-none))
                                 (list (fcmg-noted prompt arch model
-                                          (fcmg-run-context-budgeted src arch model ids
-                                              thought-lists thought-eval ctx n query reserve gap-n
-                                              source-hint))
+                                          (if (eq live-cursor 1)
+                                              (fcmg-run-context-cursor-budgeted
+                                                  src arch model cursor thought-lists
+                                                  thought-eval ctx n query reserve gap-n
+                                                  source-hint)
+                                              (fcmg-run-context-budgeted src arch model ids
+                                                  thought-lists thought-eval ctx n query reserve
+                                                  gap-n source-hint)))
                                       (fcmr path maxpos ctx src arch)))))))))))))
     ; Ordinary callers may carry an exact path in prose. Dataset-backed callers
     ; already hold a sealed source path separately and use the explicit hinted
@@ -815,12 +977,25 @@
                     (let thought-eval (lg-values-line thoughts))
                     (let thought-n (fcmg-id-count thought-lists 0))
                     (let gap-n (if (gt (len thoughts) 1) (lg-gap-default) 0))
-                    (let ids (fcmg-chat-ids-profile src prompt profile))
+                    (let x (qsx-load path))
+                    (let iced (if (eq (nth x 0) 1) 1 0))
+                    (let segments (if (eq iced 1)
+                        (fcmg-chat-segments-profile prompt profile x) (empty)))
+                    (let cursor (if (eq iced 1)
+                        (fcmg-chat-cursor-profile path prompt profile x)
+                        (qtlc-open-index
+                            (list "absent" "crystal-absent" "" 0 0 0 0 0 0 0)
+                            (empty))))
+                    (let live-cursor (if (str_eq (qtlc-status cursor) "open") 1 0))
+                    (let ids (if (eq live-cursor 1) (empty)
+                        (fcmg-chat-ids-profile src prompt profile)))
+                    (let prompt-bound (if (eq live-cursor 1)
+                        (qtlc-segments-upper-bound segments 0) (len ids)))
                     (let model-max (gmt-u32 src (q38-key arch "context_length")))
-                    (let need (fcmg-context-need (len ids) thought-n
+                    (let need (fcmg-context-need prompt-bound thought-n
                         (mul gap-n (if (gt (len thoughts) 1)
                             (sub (len thoughts) 1) 0)) n query reserve))
-                    (if (eq (len ids) 0)
+                    (if (le prompt-bound 0)
                         (list (fcmg-noted prompt arch model "generation refused: tokenizer produced no prompt tokens") r)
                     (if (or (eq (fcmg-tail-budget-ok? n query reserve) 0)
                             (gt need model-max))
@@ -830,9 +1005,14 @@
                               r)
                     (if (le need (fcmr-maxpos r))
                         (list (fcmg-noted prompt arch model
-                                  (fcmg-run-context-budgeted src arch model ids
-                                      thought-lists thought-eval (fcmr-ctx r)
-                                      n query reserve gap-n source-hint))
+                                  (if (eq live-cursor 1)
+                                      (fcmg-run-context-cursor-budgeted
+                                          src arch model cursor thought-lists
+                                          thought-eval (fcmr-ctx r) n query reserve
+                                          gap-n source-hint)
+                                      (fcmg-run-context-budgeted src arch model ids
+                                          thought-lists thought-eval (fcmr-ctx r)
+                                          n query reserve gap-n source-hint)))
                               r)
                         (if (eq (fcmr-release-ok? r) 1)
                             (fcmg-fresh-at-budgeted-hinted path prompt n query reserve

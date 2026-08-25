@@ -176,12 +176,13 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/native-model-control-plane.fk form-stdlib/ask-lane-router.fk
     form-stdlib/dsv4-tokenizer.fk
     form-stdlib/qwen35-tokenizer.fk
-    form-stdlib/qwen35-tokfast-v2.fk
+    form-stdlib/qwen35-tokfast-v2-live-reader.fk
+    form-stdlib/kernel-http-header.fk
     form-stdlib/kernel-http.fk
     form-stdlib/form-asm.fk
     form-stdlib/metal-door.fk
     native/metal/sha256-arm64-jit.fk
-    form-stdlib/qwen35-artifact-fetch.fk
+    form-stdlib/qwen35-artifact-seal-reader.fk
     form-stdlib/q6k-msl.fk
     form-stdlib/q8-0-msl.fk
     form-stdlib/q3k-msl.fk
@@ -210,6 +211,7 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/substrate-phase.fk
     form-stdlib/source-resonance-stream.fk
     form-stdlib/local-generate-organ.fk
+    form-stdlib/language-template.fk
     form-stdlib/language-model.fk
     form-stdlib/form-cli-heedmark-xtal.fk
     form-stdlib/form-cli-qwen-teach-layer.fk
@@ -221,6 +223,7 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/form-knowledge-source-search.fk
     form-stdlib/form-cli-heed-current-source.fk
     form-stdlib/form-cli-heed-grounded.fk
+    form-stdlib/qwen35-tokenizer-live-cursor.fk
     form-stdlib/form-cli-model-generate.fk
     form-stdlib/form-cli-model-session.fk
     form-stdlib/bmf-byte-cursor.fk
@@ -311,8 +314,8 @@ form_modules="${form_modules%)} (read_file \"$stdlib/relational-inquiry-metaboli
 # actually calls.  Until 2026-08-19 form-cli-repl.fk named form-cli-model-generate.fk
 # in its preludes and NO build list carried it, so the built binary answered
 # `generate` from an unresolved name: instant, modelless, and wrong.
-form_modules="${form_modules%)} (read_file \"form-stdlib/dsv4-tokenizer.fk\") (read_file \"form-stdlib/qwen35-tokenizer.fk\") (read_file \"form-stdlib/qwen35-tokfast-v2.fk\") (read_file \"form-stdlib/kernel-http.fk\") (read_file \"form-stdlib/form-asm.fk\") (read_file \"form-stdlib/metal-door.fk\") (read_file \"native/metal/sha256-arm64-jit.fk\") (read_file \"form-stdlib/qwen35-artifact-fetch.fk\") (read_file \"form-stdlib/q6k-msl.fk\") (read_file \"form-stdlib/q8-0-msl.fk\") (read_file \"form-stdlib/q3k-msl.fk\") (read_file \"form-stdlib/q4k-msl.fk\") (read_file \"form-stdlib/gated-deltanet-msl.fk\") (read_file \"form-stdlib/transformer-numerics.fk\") (read_file \"form-stdlib/trig.fk\") (read_file \"form-stdlib/tensor-ir.fk\") (read_file \"form-stdlib/jit-tensor-emit.fk\") (read_file \"form-stdlib/llama-decode-msl.fk\") (read_file \"form-stdlib/mla-msl.fk\") (read_file \"form-stdlib/moe-route-wide-msl.fk\") (read_file \"form-stdlib/gguf-tensor-index.fk\") (read_file \"form-stdlib/q3k-dequant.fk\") (read_file \"form-stdlib/q3k-equireach.fk\") (read_file \"form-stdlib/kat-coder-embed.fk\") (read_file \"native/metal/kat-token-handle.fk\") (read_file \"native/metal/qwen35-linear-span-layout-contract.fk\") (read_file \"native/metal/qwen35-dense-token-handle.fk\") (read_file \"native/metal/qwen35-crystal.fk\") (read_file \"native/metal/model-bandwidth.fk\") (read_file \"form-stdlib/form-cli-qwen-teach-layer.fk\") (read_file \"form-stdlib/form-cli-model-generate.fk\"))"
-form_modules="${form_modules%)} (read_file \"$stdlib/form-teach-layer.fk\") (read_file \"$stdlib/qwen35-form-layer.fk\") (read_file \"$stdlib/active-learning-tier-cycle.fk\") (read_file \"$stdlib/local-model-choice.fk\") (read_file \"$stdlib/substrate-phase.fk\") (read_file \"$stdlib/source-resonance-stream.fk\") (read_file \"$stdlib/local-generate-organ.fk\") (read_file \"$stdlib/language-model.fk\") (read_file \"$stdlib/form-cli-heedmark-xtal.fk\"))"
+form_modules="${form_modules%)} (read_file \"form-stdlib/dsv4-tokenizer.fk\") (read_file \"form-stdlib/qwen35-tokenizer.fk\") (read_file \"form-stdlib/qwen35-tokfast-v2-live-reader.fk\") (read_file \"form-stdlib/kernel-http-header.fk\") (read_file \"form-stdlib/kernel-http.fk\") (read_file \"form-stdlib/form-asm.fk\") (read_file \"form-stdlib/metal-door.fk\") (read_file \"native/metal/sha256-arm64-jit.fk\") (read_file \"form-stdlib/qwen35-artifact-seal-reader.fk\") (read_file \"form-stdlib/q6k-msl.fk\") (read_file \"form-stdlib/q8-0-msl.fk\") (read_file \"form-stdlib/q3k-msl.fk\") (read_file \"form-stdlib/q4k-msl.fk\") (read_file \"form-stdlib/gated-deltanet-msl.fk\") (read_file \"form-stdlib/transformer-numerics.fk\") (read_file \"form-stdlib/trig.fk\") (read_file \"form-stdlib/tensor-ir.fk\") (read_file \"form-stdlib/jit-tensor-emit.fk\") (read_file \"form-stdlib/llama-decode-msl.fk\") (read_file \"form-stdlib/mla-msl.fk\") (read_file \"form-stdlib/moe-route-wide-msl.fk\") (read_file \"form-stdlib/gguf-tensor-index.fk\") (read_file \"form-stdlib/q3k-dequant.fk\") (read_file \"form-stdlib/q3k-equireach.fk\") (read_file \"form-stdlib/kat-coder-embed.fk\") (read_file \"native/metal/kat-token-handle.fk\") (read_file \"native/metal/qwen35-linear-span-layout-contract.fk\") (read_file \"native/metal/qwen35-dense-token-handle.fk\") (read_file \"native/metal/qwen35-crystal.fk\") (read_file \"native/metal/model-bandwidth.fk\") (read_file \"form-stdlib/form-cli-qwen-teach-layer.fk\") (read_file \"form-stdlib/qwen35-tokenizer-live-cursor.fk\") (read_file \"form-stdlib/form-cli-model-generate.fk\"))"
+form_modules="${form_modules%)} (read_file \"$stdlib/form-teach-layer.fk\") (read_file \"$stdlib/qwen35-form-layer.fk\") (read_file \"$stdlib/active-learning-tier-cycle.fk\") (read_file \"$stdlib/local-model-choice.fk\") (read_file \"$stdlib/substrate-phase.fk\") (read_file \"$stdlib/source-resonance-stream.fk\") (read_file \"$stdlib/local-generate-organ.fk\") (read_file \"$stdlib/language-template.fk\") (read_file \"$stdlib/language-model.fk\") (read_file \"$stdlib/form-cli-heedmark-xtal.fk\"))"
 form_modules="${form_modules%)} (read_file \"$stdlib/form-cli-heed-cursor.fk\") (read_file \"$stdlib/form-ontology-bp.fk\") (read_file \"$stdlib/form-cli-heed-telemetry.fk\") (read_file \"$stdlib/form-knowledge-query-token.fk\") (read_file \"$stdlib/file-byte-window.fk\") (read_file \"$stdlib/form-knowledge-source-search.fk\") (read_file \"$stdlib/form-cli-heed-current-source.fk\") (read_file \"$stdlib/form-cli-heed-grounded.fk\"))"
 form_modules="${form_modules%)} (read_file \"$stdlib/form-cli-model-session.fk\") (read_file \"$stdlib/bmf-byte-cursor.fk\") (read_file \"$stdlib/public-source-concept-index.fk\") (read_file \"$stdlib/public-source-concept-shards.fk\") (read_file \"$stdlib/form-nodeid-knowledge-query.fk\") (read_file \"$stdlib/form-cli-nodeid-knowledge-session.fk\") (read_file \"$stdlib/public-source-concept-key-routes.fk\") (read_file \"$stdlib/form-nodeid-knowledge-routed-query.fk\"))"
 form_modules="${form_modules%)} (read_file \"$stdlib/form-cli-nodeid-knowledge-door.fk\"))"
