@@ -6,7 +6,7 @@
 ; pure bridge constructors after the real bmf-core raw-byte cursor scans each
 ; request surface.
 ;
-; Expected verdict: 1073741823.
+; Expected verdict: 68719476735.
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
 ; preludes: form-stdlib/bmf-core.fk
@@ -21,13 +21,21 @@
     (defn fknqb-bit (held weight) (if held weight 0))
     (defn fknqb-source-id ()
         "sha256:0000000000000000000000000000000000000000000000000000000000000000")
+    (defn fknqb-other-source-id ()
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111")
     (defn fknqb-path () "form/form-stdlib/synthetic-knowledge.fk")
     (defn fknqb-key () "defn-synthetic-knowledge")
     (defn fknqb-answer () "(defn synthetic-knowledge () 1)")
     (defn fknqb-source ()
         (psci-source-node "form-stdlib" (fknqb-path) (fknqb-source-id) 32))
+    (defn fknqb-other-source ()
+        (psci-source-node "form-stdlib"
+            "form/form-stdlib/other-knowledge.fk"
+            (fknqb-other-source-id) 33))
     (defn fknqb-entry ()
         (psci-entry (fknqb-source) (list (fknqb-key) "path-synthetic-knowledge")))
+    (defn fknqb-other-entry ()
+        (psci-entry (fknqb-other-source) (list (fknqb-key))))
     (defn fknqb-record ()
         (list (pscish-record-schema) "form-stdlib" (fknqb-path)
               (fknqb-source-id) 32 (fknqb-source) (fknqb-entry)
@@ -37,11 +45,17 @@
         (fkss-result "hit" "concept-registry-current-source-hit"
             (fknqb-source-id) (fknqb-path) 1 6 (fknqb-answer)
             1 1 1 32 0))
+    (defn fknqb-current-hit-as (source-id path size)
+        (fkss-result "hit" "concept-registry-current-source-hit"
+            source-id path 1 6 (fknqb-answer) 1 1 1 size 0))
     (defn fknqb-current-miss ()
         (fkss-result "miss" "concept-not-in-current-source"
             (fknqb-source-id) (fknqb-path) 0 -1 "" 1 1 1 32 0))
     (defn fknqb-current-nothing ()
         (fknq-empty-current-result "current-source-unavailable"))
+    (defn fknqb-current-state (status reason)
+        (fkss-result status reason (fknqb-source-id) (fknqb-path)
+            0 -1 "" 1 1 1 32 0))
     (defn fknqb-registry (status reason request fresh rebuild matches source entry)
         (fknq-registry-result status reason request
             (if (eq (psci-source-node-valid? source) 1) "form-stdlib" "")
@@ -90,6 +104,90 @@
                 (fknqb-hit-registry concept-request) (fknqb-current-miss)))
             (let current-nothing (fknqb-result-with-registry concept-scan
                 (fknqb-hit-registry concept-request) (fknqb-current-nothing)))
+            ; Each current result is independently well-shaped.  None may bind
+            ; to the registry hit unless digest, path and size all agree.
+            (let digest-drift (fknqb-result-with-registry concept-scan
+                (fknqb-hit-registry concept-request)
+                (fknqb-current-hit-as (fknqb-other-source-id)
+                    (fknqb-path) 32)))
+            (let path-drift (fknqb-result-with-registry concept-scan
+                (fknqb-hit-registry concept-request)
+                (fknqb-current-hit-as (fknqb-source-id)
+                    "form/form-stdlib/other-knowledge.fk" 32)))
+            (let size-drift (fknqb-result-with-registry concept-scan
+                (fknqb-hit-registry concept-request)
+                (fknqb-current-hit-as (fknqb-source-id) (fknqb-path) 33)))
+            (let registry-drift (fknqb-result-with-registry concept-scan
+                (fknq-registry-result "hit" "current-content-addressed-source"
+                    concept-request "form-stdlib" (fknqb-path)
+                    (fknqb-other-source-id) 1 0 1
+                    (fknqb-source) (fknqb-entry) 1)
+                (fknqb-current-hit)))
+            ; Inject the second observation made after the bounded answer read.
+            ; Same path/size but different digest models changed bytes.
+            (let recheck-drift (fknq-current-result-recheck
+                (fknqb-current-hit) (fknqb-other-source-id) 32))
+            (let recheck-size-drift (fknq-current-result-recheck
+                (fknqb-current-hit) (fknqb-source-id) 33))
+            (let recheck-stable (fknq-current-result-recheck
+                (fknqb-current-hit) (fknqb-source-id) 32))
+            (let recheck-result (fknqb-result-with-registry concept-scan
+                (fknqb-hit-registry concept-request) recheck-drift))
+            ; A registry row calling itself hit cannot let a current nothing,
+            ; stale, or failure state hide that its own source/entry binding is
+            ; malformed.
+            (let invalid-source (fknqb-result-with-registry concept-scan
+                (fknq-registry-result "hit" "current-content-addressed-source"
+                    concept-request "form-stdlib" (fknqb-path)
+                    (fknqb-source-id) 1 0 1 (nothing) (fknqb-entry) 1)
+                (fknqb-current-nothing)))
+            (let malformed-registry (fknq-registry-result "hit"
+                "current-content-addressed-source" concept-request
+                "form-stdlib" (fknqb-path) (fknqb-source-id)
+                1 0 1 (nothing) (fknqb-entry) 1))
+            (let malformed-current-hit (fknqb-result-with-registry concept-scan
+                malformed-registry (fknqb-current-hit)))
+            (let malformed-current-miss (fknqb-result-with-registry concept-scan
+                malformed-registry (fknqb-current-miss)))
+            (let malformed-current-stale (fknqb-result-with-registry concept-scan
+                malformed-registry (fknqb-current-state "stale"
+                    "current-source-changed-during-read")))
+            (let malformed-current-failure (fknqb-result-with-registry concept-scan
+                malformed-registry (fknqb-current-state "failure"
+                    "source-read-failure")))
+            (let invalid-entry (fknqb-result-with-registry concept-scan
+                (fknq-registry-result "hit" "current-content-addressed-source"
+                    concept-request "form-stdlib" (fknqb-path)
+                    (fknqb-source-id) 1 0 1 (fknqb-source) (nothing) 1)
+                (fknqb-current-nothing)))
+            (let split-entry-source (fknqb-result-with-registry concept-scan
+                (fknq-registry-result "hit" "current-content-addressed-source"
+                    concept-request "form-stdlib" (fknqb-path)
+                    (fknqb-source-id) 1 0 1
+                    (fknqb-source) (fknqb-other-entry) 1)
+                (fknqb-current-nothing)))
+            (let current-stale-result (fknqb-result-with-registry concept-scan
+                (fknqb-hit-registry concept-request)
+                (fknqb-current-state "stale"
+                    "current-source-changed-during-read")))
+            (let current-failure-result (fknqb-result-with-registry concept-scan
+                (fknqb-hit-registry concept-request)
+                (fknqb-current-state "failure" "source-read-failure")))
+            (let snapshot-text (fknqb-answer))
+            (let snapshot-result (fknq-current-snapshot-result
+                (fknqb-path) (list "synthetic-knowledge")
+                "concept-registry-current-source-hit" snapshot-text 1
+                (str_len snapshot-text)))
+            (let snapshot-size-drift (fknq-current-snapshot-result
+                (fknqb-path) (list "synthetic-knowledge")
+                "concept-registry-current-source-hit" snapshot-text 1
+                (add (str_len snapshot-text) 1)))
+            (let empty-snapshot (fknq-current-snapshot-result
+                (fknqb-path) (list "synthetic-knowledge")
+                "concept-registry-current-source-hit" "" 1 0))
+            (let unavailable-snapshot (fknq-current-snapshot-result
+                (fknqb-path) (list "synthetic-knowledge")
+                "concept-registry-current-source-hit" "" 0 -1))
             (sum (list
                 (fknqb-bit (str_eq (fknq-scan-status concept-scan) "ready") 1)
                 (fknqb-bit (eq (fknq-request-valid? concept-request) 1) 2)
@@ -173,6 +271,112 @@
                     (and (node_eq (node_category (fknq-request hit)) (fknq-request-category))
                     (and (node_eq (node_category (fknq-executor hit)) (fknq-executor-category))
                          (node_eq (node_category (fknq-observation hit))
-                                  (fknq-observation-category)))))) 536870912)))))
+                                  (fknq-observation-category)))))) 536870912)
+                (fknqb-bit (and
+                    (and (str_eq (fknq-status digest-drift) "stale")
+                         (str_eq (fknq-status path-drift) "stale"))
+                    (and (str_eq (fknq-status size-drift) "stale")
+                    (and (str_eq (fknq-status registry-drift) "stale")
+                    (and (str_eq (fknq-reason digest-drift)
+                                 "current-source-binding-drift")
+                    (and (eq (fknq-fresh? digest-drift) 0)
+                    (and (eq (fknq-rebuild? digest-drift) 1)
+                    (and (eq (fknq-hit-count digest-drift) 0)
+                    (and (str_eq (fknq-answer digest-drift) "")
+                    (and (node_eq (fknq-existing-current-observation digest-drift)
+                                  (fknq-absent))
+                    (and (eq (fknq-trace-has? (fknq-trace digest-drift)
+                                              "undo") 1)
+                         (eq (fknq-trace-has? (fknq-trace digest-drift)
+                                              "refine") 1)))))))))))
+                    1073741824)
+                (fknqb-bit (and
+                    (and (str_eq (fkss-status recheck-drift) "stale")
+                         (str_eq (fkss-reason recheck-drift)
+                                 "current-source-changed-during-read"))
+                    (and (str_eq (fkss-answer recheck-drift) "")
+                    (and (str_eq (fkss-status recheck-size-drift) "stale")
+                    (and (str_eq (fkss-status recheck-stable) "hit")
+                    (and (str_eq (fkss-answer recheck-stable) (fknqb-answer))
+                    (and (str_eq (fknq-status recheck-result) "stale")
+                    (and (str_eq (fknq-reason recheck-result)
+                                 "current-source-changed-during-read")
+                    (and (eq (fknq-fresh? recheck-result) 0)
+                         (eq (fknq-rebuild? recheck-result) 1)))))))))
+                    2147483648)
+                (fknqb-bit (and
+                    (and (str_eq (fknq-status invalid-source) "stale")
+                         (str_eq (fknq-status invalid-entry) "stale"))
+                    (and (str_eq (fknq-status split-entry-source) "stale")
+                    (and (str_eq (fknq-status malformed-current-hit) "stale")
+                    (and (str_eq (fknq-status malformed-current-miss) "stale")
+                    (and (str_eq (fknq-status malformed-current-stale) "stale")
+                    (and (str_eq (fknq-status malformed-current-failure) "stale")
+                    (and (str_eq (fknq-reason invalid-source)
+                                 "current-source-binding-drift")
+                    (and (str_eq (fknq-reason invalid-entry)
+                                 "current-source-binding-drift")
+                    (and (str_eq (fknq-reason split-entry-source)
+                                 "current-source-binding-drift")
+                    (and (eq (fknq-fresh? invalid-source) 0)
+                    (and (eq (fknq-rebuild? invalid-source) 1)
+                    (and (str_eq (fknq-answer invalid-source) "")
+                    (and (node_eq
+                            (fknq-existing-current-observation invalid-source)
+                            (fknq-absent))
+                    (and (str_eq (node_value
+                            (fknqb-observation-child invalid-source 12)) "")
+                         (str_eq (node_value
+                            (fknqb-observation-child invalid-source 13))
+                            "")))))))))))))))
+                    4294967296)
+                (fknqb-bit (and
+                    (and (str_eq (fknq-status current-stale-result) "stale")
+                         (str_eq (fknq-reason current-stale-result)
+                                 "current-source-changed-during-read"))
+                    (and (eq (fknq-fresh? current-stale-result) 0)
+                    (and (eq (fknq-rebuild? current-stale-result) 1)
+                    (and (str_eq (fknq-status current-failure-result) "failure")
+                    (and (str_eq (fknq-reason current-failure-result)
+                                 "source-read-failure")
+                    (and (eq (fknq-fresh? current-failure-result) 0)
+                    (and (eq (fknq-rebuild? current-failure-result) 0)
+                    (and (eq (len hit) 22)
+                    (and (eq (len digest-drift) 22)
+                    (and (eq (len invalid-source) 22)
+                    (and (eq (len current-stale-result) 22)
+                         (eq (len current-failure-result) 22))))))))))))
+                    8589934592)
+                (fknqb-bit (and
+                    (and (str_eq (fkss-status snapshot-result) "hit")
+                         (str_eq (fkss-source-id-of snapshot-result)
+                            (str_concat "sha256:"
+                                (hex-encode
+                                    (sha256-stream-string snapshot-text)))))
+                    (and (eq (fkss-matched snapshot-result) 1)
+                    (and (str_eq (fkss-answer snapshot-result) snapshot-text)
+                    (and (str_eq (fkss-status snapshot-size-drift) "stale")
+                    (and (str_eq (fkss-reason snapshot-size-drift)
+                                 "current-source-changed-during-snapshot")
+                    (and (str_eq (fkss-answer snapshot-size-drift) "")
+                    (and (eq (len (node_children (fknq-observation hit))) 27)
+                    (and (str_eq (fknq-current-source-id-of digest-drift)
+                                 (fknqb-other-source-id))
+                    (and (str_eq (fknq-current-source-path-of path-drift)
+                                 "form/form-stdlib/other-knowledge.fk")
+                    (and (eq (fknq-current-source-size-of size-drift) 33)
+                         (str_eq (fknq-current-source-id-of recheck-result)
+                                 (fknqb-other-source-id))))))))))))
+                    17179869184)
+                (fknqb-bit (and
+                    (and (str_eq (fkss-status empty-snapshot) "hit")
+                         (eq (fkss-source-size empty-snapshot) 0))
+                    (and (str_eq (fkss-answer empty-snapshot) "")
+                    (and (str_eq (fkss-source-id-of empty-snapshot)
+                        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+                    (and (str_eq (fkss-status unavailable-snapshot) "stale")
+                         (str_eq (fkss-reason unavailable-snapshot)
+                             "current-source-changed-during-snapshot")))))
+                    34359738368)))))
 
     (form-nodeid-knowledge-query-band))
