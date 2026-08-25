@@ -1,7 +1,8 @@
 # Axioms one-family vertical — PENDING physical crossing
 
 Date: 2026-08-25
-Status: **pure finalizer proven; physical evidence not yet generated**
+Status: **pure finalizer proven; supervised generative and native physical
+axes observed, canonical heldout readiness still pending**
 
 ## Bounded result now available
 
@@ -37,10 +38,10 @@ local model ID and run ID. A valid row from another model or run remains present
 sets `cross-axis-correlated=0`, `complete=0`, and `ready=0`. The positive result
 exposes `cross-axis-correlated=1`, `present=1`, `complete=1`, and `ready=1`.
 This is a one-family vertical diagnostic. It does not edit, bypass, or enlarge
-the finalizer for the body's current observed fifteen-family census, and it
-does not turn that census into a fixed target or claim 1/15 or 100% corpus
-mastery. The knowledge projection is re-observed after this crossing before
-another execution window is chosen.
+the finalizer for the body's current dynamically observed family census, and
+it does not turn that census into a fixed target or claim a fixed fraction or
+100% corpus mastery. The knowledge projection is re-observed after this
+crossing before another execution window is chosen.
 
 ## Pure observations
 
@@ -61,7 +62,7 @@ another execution window is chosen.
 The band's synthetic executable fixtures are contract tests only. They opened
 no model or carrier and create no physical evidence or mastery credit.
 
-## Exact three-phase physical integration plan
+## Three-phase physical integration now exercised
 
 A dormant live runner now exists at
 `observe/qwen38-axioms-one-family-complete-live-run.fk`. It retains the four
@@ -69,17 +70,19 @@ values in one transaction instead of treating independent logs as inputs. Its
 failure path is also explicit: a heldout surprise requests evidence and enters
 the public curriculum/generative/native experiment; it does not turn a
 curriculum-exposed retry into heldout credit or stop before embodiment. The
-physical crossing remains pending until that runner is invoked and its actual
-state transitions are admitted here.
+physical crossing remains pending because the canonical heldout lanes stayed
+below 95 and the final complete-run tail was not retained, even though the
+runner was invoked and later phases were physically observed.
 
 The honest runner is one new orchestration cell with this movement:
 
 ### 1. Resident public reasoning, lanes a and b
 
-- Bind consent to the canonical `axioms` row ID, source SHA, prompt SHA,
-  challenge SHA, both presentation IDs/nonces, model seal/model ID, and the
-  single cross-phase run ID plus full phase-2/phase-3 plan hashes before
-  opening anything.
+- Bind the canonical `axioms` row ID, source SHA, prompt SHA, challenge SHA,
+  both presentation IDs/nonces, selected path, model seal fields/model ID, and
+  the single cross-phase run ID before opening anything. Consent remains an
+  external owner boundary; this public runner does not fabricate a consent
+  witness inside its result.
 - Open the local Qwen model context/weights once. Create a fresh stream state
   for lane `a`, generate from only the sealed public prompt, retain the complete
   generation report as a Form string, then release that state.
@@ -111,7 +114,7 @@ The honest runner is one new orchestration cell with this movement:
 - In a fresh state of the same residence, ask for the exact canonical `axioms`
   NodeID recipe request surface. Retain the model's exact request bytes; do not
   replace them with a host-authored equivalent after generation.
-- Parse those bytes with `frex-parse`, execute the requested recipe through the
+- Prepare those bytes with `fkfne-prepare`, execute the requested recipe through the
   existing Form-native choice/JIT path, and retain the structured `frex` result
   as a live Form value. The selected CPU/Metal/MLX carrier may generate its
   native operation on demand; no ops table or flattening gate is introduced.
@@ -130,10 +133,21 @@ The honest runner is one new orchestration cell with this movement:
   On any refusal, preserve the actual partial values so `nothing` or `0`
   remains visible; never synthesize the missing axis.
 
-Expected local model generations are four when every first attempt passes:
-two resident reasoning trials, one generative candidate, and one native-request
-generation. The maximum is five because only the generative phase permits one
-supervised repair. Native recipe execution is a separate local carrier action,
-not an extra model generation. No physical phase was run in this movement.
+Expected local model-generation segments are five when every first attempt
+passes: two resident reasoning trials, one generative candidate, one
+native-request generation, and one post-injection resume. The maximum is six
+because only the generative phase permits one supervised repair. Native recipe
+execution is a separate local carrier action, not an extra model generation.
+
+Physical observation has now reached all three phases: both heldout lanes ran
+and remained honest surprises; a focused supervised exemplar held BML, BMF and
+Form at `1023`; a later complete attempt held the repair, opened the native
+state through the live cursor, accepted the exact request, and generated and
+executed Metal. The final capture overflowed after reinjection/resume began, so
+release/finalizer/crossing output is not claimed. Residence state freshness
+bits for pre-native phases remain asserted from the generation report's exact
+state-close counters rather than independently authenticated handles. The
+framebuffer's inbound controls are Form-constructed synchronously in-process;
+no external polling owner injected them.
 
 — Codex, grounded in Sema's public body
