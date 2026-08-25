@@ -59,6 +59,18 @@
                     (let start (add at (str_len marker)))
                     (let end (str_find span "\n" start))
                     (substring span start (if (lt end 0) (str_len span) end))))))
+    (defn fcmg-record-bound-source? (record source-path source-artifact)
+        (if (eq (fcmg-source-search-record? record) 0) 0
+            (if (and (str_eq (fcmg-span-field (fhc-record-span record)
+                                  "source-path") source-path)
+                     (str_eq (fcmg-span-field (fhc-record-span record)
+                                  "source-artifact") source-artifact)) 1 0)))
+    (defn fcmg-bound-source-matches (records source-path source-artifact)
+        (if (nil? records) 0
+            (add (fcmg-record-bound-source? (head records)
+                     source-path source-artifact)
+                 (fcmg-bound-source-matches (tail records)
+                     source-path source-artifact))))
     (defn fcmg-heed-budget () (fhcs-lookup-limit))
     ; q35 byte fallback cannot produce more ids than input bytes. Reserve the
     ; bounded rendered observation once, plus the small ChatML role crossing
@@ -69,9 +81,12 @@
     (defn fcmg-current-source-query-budget () (fhm-query-budget))
     (defn fcmg-current-source-answer-reserve () (fhm-answer-reserve))
     ; `n` is the old fungible tail. query and answer are the explicit two-ledger
-    ; tail. Exactly one side is nonzero at either public door.
+    ; tail. A recursive query consumes the current answer reserve, then a typed
+    ; observation opens a fresh reserve, so every allowed heed is bounded here.
     (defn fcmg-context-tail-reserve (n query answer)
-        (add n (add query (add answer (fcmg-heed-context-reserve)))))
+        (add n (add query
+            (add (mul (fcmg-heed-budget) answer)
+                 (fcmg-heed-context-reserve)))))
     (defn fcmg-tail-budget-ok? (n query answer)
         (if (and (gt n 0) (and (eq query 0) (eq answer 0))) 1
             (if (and (eq n 0) (and (gt query 0) (gt answer 0))) 1 0)))
@@ -84,28 +99,37 @@
             (int_to_str (add (fhc-query-tokens c)
                 (add (fhc-query-left c) (fhc-cut c)))))
         (str_concat (fcmg-line "heed_answer_reserve"
-            (int_to_str (add (fhc-answer-tokens c) (fhc-answer-left c))))
+            (int_to_str (fhc-answer-cap c)))
         (str_concat (fcmg-line "heed_query_tokens" (int_to_str (fhc-query-tokens c)))
         (str_concat (fcmg-line "heed_answer_tokens" (int_to_str (fhc-answer-tokens c)))
         (str_concat (fcmg-line "heed_query_left" (int_to_str (fhc-query-left c)))
         (str_concat (fcmg-line "heed_answer_left" (int_to_str (fhc-answer-left c)))
         (str_concat (fcmg-line "heed_query_fuel_cut" (int_to_str (fhc-cut c)))
+        (str_concat (fcmg-line "heed_answer_fuel_cut" (int_to_str (fhc-answer-cut c)))
         (str_concat (fcmg-line "heed_stream_bytes" (int_to_str (fhc-bytes c)))
         (str_concat (fcmg-line "heed_decode_timeout" (int_to_str (fhc-timeout? c)))
         (str_concat (fcmg-line "heed_stopped" (int_to_str (fhc-stopped? c)))
                     (fcmg-line "heed_frame_refusals"
-                        (int_to_str (fhc-frame-refusals c)))))))))))))))
+                        (int_to_str (fhc-frame-refusals c))))))))))))))))
     (defn fcmg-heed-report-at (c root root-status)
         (do
         (let records (fhc-records c))
         (let evidence (fcmg-evidence-record records))
         (let searches (fcmg-source-searches records))
+        (let evidence-path (fcmg-span-field (fhc-record-span evidence) "source-path"))
+        (let evidence-artifact (fcmg-span-field (fhc-record-span evidence)
+                                  "source-artifact"))
+        (let bound-matches (fcmg-bound-source-matches records
+                               evidence-path evidence-artifact))
         (str_concat (fcmg-line "heed_cursor" "bounded-current-source-v1")
         (str_concat (fcmg-line "heed_lookup_budget" (int_to_str (fcmg-heed-budget)))
         (str_concat (fcmg-line "heed_lookup_budget_remaining" (int_to_str (fhc-budget c)))
         (str_concat (fcmg-line "heed_honor_attempts" (int_to_str (fhc-attempts c)))
         (str_concat (fcmg-line "heed_lookups" (int_to_str searches))
         (str_concat (fcmg-line "heed_source_searches" (int_to_str searches))
+        (str_concat (fcmg-line "heed_bound_source_matches" (int_to_str bound-matches))
+        (str_concat (fcmg-line "heed_bound_source_mismatches"
+            (int_to_str (sub searches bound-matches)))
         (str_concat (fcmg-line "heed_honored" (int_to_str (len (fhc-honored c))))
         (str_concat (fcmg-line "heed_hits"
             (int_to_str (fcmg-status-count (fhc-honored c) "hit")))
@@ -123,16 +147,15 @@
         (str_concat (fcmg-line "heed_evidence_status" (fhc-record-status evidence))
         (str_concat (fcmg-line "heed_evidence_reason" (fhc-record-reason evidence))
         (str_concat (fcmg-line "heed_source_path"
-            (fkqt-clip (fcmg-span-field (fhc-record-span evidence) "source-path")
-                (fkqt-max-source-bytes)))
+            (fkqt-clip evidence-path (fkqt-max-source-bytes)))
         (str_concat (fcmg-line "heed_source_artifact"
-            (fkqt-clip (fcmg-span-field (fhc-record-span evidence) "source-artifact") 96))
+            (fkqt-clip evidence-artifact 96))
         (str_concat (fcmg-line "heed_answer_key"
             (fkqt-clip (fcmg-span-field (fhc-record-span evidence) "answer-key") 80))
         (str_concat (fcmg-line "heed_source_root_status" root-status)
         (str_concat (fcmg-line "heed_source_root" (fkqt-clip root 192))
         (str_concat (fcmg-heed-ledger-report c)
-                    (fcmg-line "heed_model_executed" (int_to_str (fhc-model-executed)))))))))))))))))))))))))))))
+                    (fcmg-line "heed_model_executed" (int_to_str (fhc-model-executed)))))))))))))))))))))))))))))))
     (defn fcmg-heed-report (c)
         (fcmg-heed-report-at c (fhcs-default-root) (fhcs-root-status)))
     (defn fcmg-report-count (model arch prompt-n out text thought-eval thought-offers thought-n forwards busy-us prefill-us decode-us weight-bytes heed)

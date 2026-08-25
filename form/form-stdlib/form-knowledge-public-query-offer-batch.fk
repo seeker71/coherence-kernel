@@ -22,6 +22,7 @@
 ;
 ; preludes: form-stdlib/form-knowledge-public-resident-eval.fk
 ; preludes: form-stdlib/form-knowledge-axioms-public-curriculum.fk
+; preludes: form-stdlib/form-cli-heedmark-xtal.fk
 ; Proven by: form-stdlib/tests/form-knowledge-public-query-offer-batch-band.fk
 
 (do
@@ -294,6 +295,73 @@
                         (substring generated open-at
                             (add close-at (str_len (fkqt-close)))))))))
 
+    ; A generated reply may recursively ask for one refined observation, but
+    ; the verifier never performs an unbounded text walk.  Once MaxHeeds valid
+    ; frames have been seen, one more open marker is enough to reject.  A stray
+    ; close, nested open, incomplete close, or parser-invalid frame is distinct
+    ; evidence that the transport did not complete.
+    ; scan = valid complete-frame-count
+    (defn fkpqo-frame-scan (valid count) (list valid count))
+    (defn fkpqo-frame-scan-valid (scan) (nth scan 0))
+    (defn fkpqo-frame-scan-count (scan) (nth scan 1))
+    (defn fkpqo-generated-frames-from (generated at count)
+        (do
+            (let open-at (str_find generated (fkqt-open) at))
+            (let close-at (str_find generated (fkqt-close) at))
+            (if (lt open-at 0)
+                (if (lt close-at 0)
+                    (fkpqo-frame-scan 1 count)
+                    (fkpqo-frame-scan 0 count))
+                (if (or (ge count (MaxHeeds))
+                        (and (ge close-at 0) (lt close-at open-at)))
+                    (fkpqo-frame-scan 0 count)
+                    (do
+                        (let body-at (add open-at (str_len (fkqt-open))))
+                        (let frame-close (str_find generated (fkqt-close) body-at))
+                        (let nested-open (str_find generated (fkqt-open) body-at))
+                        (if (or (lt frame-close 0)
+                                (and (ge nested-open 0)
+                                     (lt nested-open frame-close)))
+                            (fkpqo-frame-scan 0 count)
+                            (do
+                                (let end (add frame-close
+                                    (str_len (fkqt-close))))
+                                (let frame (substring generated open-at end))
+                                (let request (fkqt-parse frame))
+                                (if (eq (fkqt-request-ready? request) 0)
+                                    (fkpqo-frame-scan 0 count)
+                                    (fkpqo-generated-frames-from generated end
+                                        (add count 1))))))))))
+    (defn fkpqo-generated-frames (generated)
+        (fkpqo-generated-frames-from generated 0 0))
+    (defn fkpqo-frame-count-ready? (scan)
+        (if (and (eq (fkpqo-frame-scan-valid scan) 1)
+                 (and (ge (fkpqo-frame-scan-count scan) 1)
+                      (le (fkpqo-frame-scan-count scan) (MaxHeeds)))) 1 0))
+
+    (defn fkpqo-transport-counts-ready? (raw frame-count)
+        (if (and (eq (fkpqo-report-int raw "heed_lookups") frame-count)
+            (and (eq (fkpqo-report-int raw "heed_source_searches") frame-count)
+            (and (eq (fkpqo-report-int raw "heed_honored") frame-count)
+            (and (eq (fkpqo-report-int raw "heed_hits") frame-count)
+                 (eq (fkpqo-report-int raw "heed_close_commits")
+                     frame-count))))) 1 0))
+    (defn fkpqo-transport-failures-zero? (raw)
+        (if (and (eq (fkpqo-report-int raw "heed_misses") 0)
+            (and (eq (fkpqo-report-int raw "heed_nothings") 0)
+            (and (eq (fkpqo-report-int raw "heed_spent") 0)
+            (and (eq (fkpqo-report-int raw "heed_injection_refusals") 0)
+            (and (eq (fkpqo-report-int raw "heed_decode_timeout") 0)
+                 (eq (fkpqo-report-int raw "heed_frame_refusals") 0)))))) 1 0))
+    (defn fkpqo-transport-source-bound? (offer raw frame-count)
+        (if (and (eq (fkpqo-report-int raw "heed_bound_source_matches")
+                     frame-count)
+            (and (eq (fkpqo-report-int raw "heed_bound_source_mismatches") 0)
+            (and (str_eq (fkpqo-report-field raw "heed_source_path")
+                         (fkpqo-offer-path offer))
+                 (str_eq (fkpqo-report-field raw "heed_source_artifact")
+                         (fkpqo-offer-source-id offer))))) 1 0))
+
     ; Transport success and answer quality are intentionally independent.
     ; The lookup's `model-executed=0` is not the Qwen generation flag.
     (defn fkpqo-transport-ready? (offer raw same-residence)
@@ -301,43 +369,45 @@
             (let parsed (fkhe-parse-resident-output raw))
             (let generated (fkhe-output-generated parsed))
             (let query (fkpqo-offer-query offer))
-            (if (and (eq (fkpqo-offer-valid? offer) 1)
+            (let frames (fkpqo-generated-frames generated))
+            (let frame-count (fkpqo-frame-scan-count frames))
+            (let doors-ready (if (and
+                (eq (fkpqo-offer-valid? offer) 1)
                 (and (str_eq (fkpqo-report-field raw "prompt_cursor")
                              "bmf-qtf2-live-v1")
-                (and (str_eq (fkpqo-generated-frame generated) query)
+                     (str_eq (fkpqo-report-field raw "heed_cursor")
+                             "bounded-current-source-v1"))) 1 0))
+            (let frames-ready (if (and
+                (str_eq (fkpqo-generated-frame generated) query)
                 (and (eq (str_find generated query 0) 0)
                 (and (eq (fkpqo-query-once? generated query) 1)
-                (and (str_eq (fkpqo-report-field raw "heed_cursor")
-                             "bounded-current-source-v1")
-                (and (eq (fkpqo-report-int raw "heed_lookups") 1)
-                (and (eq (fkpqo-report-int raw "heed_source_searches") 1)
-                (and (eq (fkpqo-report-int raw "heed_honored") 1)
-                (and (eq (fkpqo-report-int raw "heed_hits") 1)
-                (and (eq (fkpqo-report-int raw "heed_close_commits") 1)
-                (and (eq (fkpqo-report-int raw "heed_misses") 0)
-                (and (eq (fkpqo-report-int raw "heed_nothings") 0)
-                (and (eq (fkpqo-report-int raw "heed_spent") 0)
-                (and (eq (fkpqo-report-int raw "heed_injection_refusals") 0)
-                (and (eq (fkpqo-report-int raw "heed_decode_timeout") 0)
-                (and (eq (fkpqo-report-int raw "heed_frame_refusals") 0)
-                (and (gt (fkpqo-report-int raw "heed_injected_tokens") 0)
+                     (eq (fkpqo-frame-count-ready? frames) 1)))) 1 0))
+            (let counts-ready (if (and
+                (eq (fkpqo-transport-counts-ready? raw frame-count) 1)
+                (and (eq (fkpqo-transport-failures-zero? raw) 1)
+                     (eq (fkpqo-transport-source-bound?
+                            offer raw frame-count) 1))) 1 0))
+            (let evidence-ready (if (and
+                (gt (fkpqo-report-int raw "heed_injected_tokens") 0)
                 (and (str_eq (fkpqo-report-field raw "heed_evidence_status")
                              "hit")
                 (and (str_eq (fkpqo-report-field raw "heed_evidence_reason")
                              "current-source-context-path-hit")
-                (and (str_eq (fkpqo-report-field raw "heed_source_path")
-                             (fkpqo-offer-path offer))
-                (and (str_eq (fkpqo-report-field raw "heed_source_artifact")
-                             (fkpqo-offer-source-id offer))
-                (and (eq (nmfe-sha256?
-                             (fkpqo-report-field raw "heed_answer_key")) 1)
-                (and (eq (fkpqo-report-int raw "heed_model_executed") 0)
+                     (eq (nmfe-sha256?
+                            (fkpqo-report-field raw "heed_answer_key")) 1)))) 1 0))
+            (let execution-ready (if (and
+                (eq (fkpqo-report-int raw "heed_model_executed") 0)
                 (and (eq (fkpqo-state-released raw) 1)
                 (and (eq same-residence 1)
                 (and (gt (fkpqo-report-int raw "heed_query_tokens") 0)
                 (and (gt (fkpqo-report-int raw "heed_answer_tokens") 0)
                 (and (gt (fkpqo-report-int raw "generated_tokens") 0)
-                     (gt (fkpqo-report-int raw "forward_passes") 0)))))))))))))))))))))))))))))) 1 0)))
+                     (gt (fkpqo-report-int raw "forward_passes") 0))))))) 1 0))
+            (if (and (eq doors-ready 1)
+                (and (eq frames-ready 1)
+                (and (eq counts-ready 1)
+                (and (eq evidence-ready 1)
+                     (eq execution-ready 1))))) 1 0)))
 
     (defn fkpqo-family-nonce
         (offer plan-sha run-id model-id residence-id)

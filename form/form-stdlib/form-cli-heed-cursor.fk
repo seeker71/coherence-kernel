@@ -121,23 +121,27 @@
                         (substring window o (add c (str_len (HeedClose)))))))))
 
     ; ── the two-phase ledger ───────────────────────────────────────────────
-    ; (phase query-left answer-left cut timeout). answer-left holds the reserve
+    ; (phase query-left answer-left query-cut timeout answer-cap answer-cut).
+    ; answer-left holds the reserve
     ; from the start and is UNTOUCHABLE while phase is PhaseQuery — that is what
     ; non-borrowable means here, and it is why query verbosity can never reach
     ; the answer. Opening the answer phase zeroes the query remainder into `cut`
     ; rather than carrying it: unused query fuel is cut, not banked.
-    (defn fhc-ledger (phase query-left answer-left cut timeout)
-        (list phase query-left answer-left cut timeout))
+    (defn fhc-ledger (phase query-left answer-left cut timeout answer-cap answer-cut)
+        (list phase query-left answer-left cut timeout answer-cap answer-cut))
     (defn fhc-ledger-phase (l) (nth l 0))
     (defn fhc-ledger-query (l) (nth l 1))
     (defn fhc-ledger-answer (l) (nth l 2))
     (defn fhc-ledger-cut (l) (nth l 3))
     (defn fhc-ledger-timeout (l) (nth l 4))
+    (defn fhc-ledger-answer-cap (l) (nth l 5))
+    (defn fhc-ledger-answer-cut (l) (nth l 6))
 
-    (defn fhc-ledger-two-phase (query reserve) (fhc-ledger (PhaseQuery) query reserve 0 0))
+    (defn fhc-ledger-two-phase (query reserve)
+        (fhc-ledger (PhaseQuery) query reserve 0 0 reserve 0))
     ; A fungible budget is one phase with no reserve — the old contract, kept
     ; exactly so the existing entry points mean what they always meant.
-    (defn fhc-ledger-fungible (n) (fhc-ledger (PhaseQuery) n 0 0 0))
+    (defn fhc-ledger-fungible (n) (fhc-ledger (PhaseQuery) n 0 0 0 0 0))
 
     (defn fhc-steps-left (l)
         (if (eq (fhc-ledger-phase l) (PhaseQuery)) (fhc-ledger-query l) (fhc-ledger-answer l)))
@@ -145,18 +149,29 @@
     (defn fhc-ledger-spend (l)
         (if (eq (fhc-ledger-phase l) (PhaseQuery))
             (fhc-ledger (PhaseQuery) (sub (fhc-ledger-query l) 1) (fhc-ledger-answer l)
-                (fhc-ledger-cut l) (fhc-ledger-timeout l))
+                (fhc-ledger-cut l) (fhc-ledger-timeout l)
+                (fhc-ledger-answer-cap l) (fhc-ledger-answer-cut l))
             (fhc-ledger (PhaseAnswer) (fhc-ledger-query l) (sub (fhc-ledger-answer l) 1)
-                (fhc-ledger-cut l) (fhc-ledger-timeout l))))
+                (fhc-ledger-cut l) (fhc-ledger-timeout l)
+                (fhc-ledger-answer-cap l) (fhc-ledger-answer-cut l))))
 
     ; Opened ONLY after a typed hit/miss observation has actually been injected.
     (defn fhc-ledger-open-answer (l)
-        (fhc-ledger (PhaseAnswer) 0 (fhc-ledger-answer l)
-            (add (fhc-ledger-cut l) (fhc-ledger-query l)) (fhc-ledger-timeout l)))
+        (do
+            ; A recursive query is composed inside the current answer phase.
+            ; When it closes, unused answer fuel is cut and a fresh immutable
+            ; reserve opens.  It is observable separately from query fuel cut.
+            (let answer-cut (if (eq (fhc-ledger-phase l) (PhaseAnswer))
+                                  (fhc-ledger-answer l) 0))
+            (fhc-ledger (PhaseAnswer) 0 (fhc-ledger-answer-cap l)
+                (add (fhc-ledger-cut l) (fhc-ledger-query l))
+                (fhc-ledger-timeout l) (fhc-ledger-answer-cap l)
+                (add (fhc-ledger-answer-cut l) answer-cut))))
 
     (defn fhc-ledger-mark-timeout (l)
         (fhc-ledger (fhc-ledger-phase l) (fhc-ledger-query l) (fhc-ledger-answer l)
-            (fhc-ledger-cut l) 1))
+            (fhc-ledger-cut l) 1 (fhc-ledger-answer-cap l)
+            (fhc-ledger-answer-cut l)))
 
     ; ── cursor state ───────────────────────────────────────────────────────
     ; Internal shape:
@@ -238,6 +253,8 @@
     (defn fhc-timeout? (c) (fhc-ledger-timeout (fhc-ledger-of c)))
     (defn fhc-query-left (c) (fhc-ledger-query (fhc-ledger-of c)))
     (defn fhc-answer-left (c) (fhc-ledger-answer (fhc-ledger-of c)))
+    (defn fhc-answer-cap (c) (fhc-ledger-answer-cap (fhc-ledger-of c)))
+    (defn fhc-answer-cut (c) (fhc-ledger-answer-cut (fhc-ledger-of c)))
 
     (defn fhc-fresh (budget)
         (fhc-state-full "" budget 0 0 (empty) 0 0 0 0 0))
@@ -519,7 +536,7 @@
             (let spent? (str_eq status "spent"))
             (let l (fhc-ledger-of c))
             (let opens? (if (and (eq (fhm-opens-reserve (fhc-outcome-of status)) 1)
-                                  (gt (fhc-ledger-answer l) 0)) 1 0))
+                                  (gt (fhc-ledger-answer-cap l) 0)) 1 0))
             ; The current ledger or a real non-borrowable reserve must leave at
             ; least one model-output slot after the observation. In particular,
             ; a two-phase close on the final query slot may enter because its
