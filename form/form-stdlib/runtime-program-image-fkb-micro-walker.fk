@@ -38,6 +38,11 @@
             (rpmw-feature "tag-109-110-111-sparse-explicit-frames" 1)
             (rpmw-feature "frame-bindings-retain-value-kind-and-occupancy" 1)
             (rpmw-feature "logical-frame-reserve-allocates-no-global-seats" 1)
+            (rpmw-feature "tag-91-four-coordinate-nodeid-values" 1)
+            (rpmw-feature "tag-43-46-47-typed-native-node-values" 1)
+            (rpmw-feature "tag-48-49-92-node-readers" 1)
+            (rpmw-feature "tag-80-structural-node-equality" 1)
+            (rpmw-feature "composite-child-kinds-retained" 1)
             (rpmw-feature "unsupported-tags-are-loud-errors" 1)
             (rpmw-feature "child-range-errors-are-loud" 1)
             (rpmw-feature "budget-exhaustion-is-timeout-trace" 1)
@@ -75,6 +80,12 @@
     (defn rpmw-reason-negative-frame-reserve () "negative-frame-reserve")
     (defn rpmw-reason-frame-slot-out-of-range () "frame-slot-out-of-range")
     (defn rpmw-reason-frame-slot-uninitialized () "frame-slot-uninitialized")
+    (defn rpmw-reason-nodeid-components-required () "nodeid-components-required")
+    (defn rpmw-reason-nodeid-coordinate-integer-required () "nodeid-coordinate-integer-required")
+    (defn rpmw-reason-node-value-required () "node-value-required")
+    (defn rpmw-reason-composite-node-required () "composite-node-required")
+    (defn rpmw-reason-trivial-node-required () "trivial-node-required")
+    (defn rpmw-reason-node-children-required () "node-children-required")
     (defn rpmw-reason-string-byte-index-out-of-range () "string-byte-index-out-of-range")
     (defn rpmw-reason-substring-bounds-invalid () "substring-bounds-invalid")
     (defn rpmw-reason-malformed-envelope () "malformed-envelope")
@@ -105,6 +116,12 @@
             (rpmw-reason-negative-frame-reserve)
             (rpmw-reason-frame-slot-out-of-range)
             (rpmw-reason-frame-slot-uninitialized)
+            (rpmw-reason-nodeid-components-required)
+            (rpmw-reason-nodeid-coordinate-integer-required)
+            (rpmw-reason-node-value-required)
+            (rpmw-reason-composite-node-required)
+            (rpmw-reason-trivial-node-required)
+            (rpmw-reason-node-children-required)
             (rpmw-reason-string-byte-index-out-of-range)
             (rpmw-reason-substring-bounds-invalid)
             (rpmw-reason-malformed-envelope)
@@ -136,10 +153,39 @@
     (defn rpmw-kind-nothing () (rpmw-kind-row "nothing" (empty)))
     (defn rpmw-kind-absent () (rpmw-kind-row "absent" (empty)))
     (defn rpmw-kind-list (children) (rpmw-kind-row "list" children))
+    (defn rpmw-kind-nodeid () (rpmw-kind-row "nodeid" (empty)))
+    (defn rpmw-kind-trivial-int-node ()
+        (rpmw-kind-row "trivial-int-node" (empty)))
+    (defn rpmw-kind-trivial-string-node ()
+        (rpmw-kind-row "trivial-string-node" (empty)))
+    (defn rpmw-kind-composite-node (children)
+        (rpmw-kind-row "composite-node" children))
     (defn rpmw-kind-name (kind) (nth kind 1))
     (defn rpmw-kind-children (kind) (nth kind 2))
     (defn rpmw-kind-named? (kind name)
         (str_eq (rpmw-kind-name kind) name))
+    (defn rpmw-nodeid? (kind) (rpmw-kind-named? kind "nodeid"))
+    (defn rpmw-trivial-int-node? (kind)
+        (rpmw-kind-named? kind "trivial-int-node"))
+    (defn rpmw-trivial-string-node? (kind)
+        (rpmw-kind-named? kind "trivial-string-node"))
+    (defn rpmw-composite-node? (kind)
+        (rpmw-kind-named? kind "composite-node"))
+    (defn rpmw-native-node? (kind)
+        (if (rpmw-nodeid? kind) 1
+            (if (rpmw-trivial-int-node? kind) 1
+                (if (rpmw-trivial-string-node? kind) 1
+                    (if (rpmw-composite-node? kind) 1 0)))))
+    (defn rpmw-native-node-kinds? (kinds)
+        (if (nil? kinds)
+            1
+            (if (rpmw-native-node? (head kinds))
+                (rpmw-native-node-kinds? (tail kinds)) 0)))
+    (defn rpmw-int-kinds? (kinds)
+        (if (nil? kinds)
+            1
+            (if (rpmw-kind-named? (head kinds) "int")
+                (rpmw-int-kinds? (tail kinds)) 0)))
 
     ; A resident frame is sparse Form data, never a preallocated global slot
     ; arena. Capacity is a logical bound established by RESERVE; bindings name
@@ -743,6 +789,174 @@
                 (rpmw-eval-node table (rpmw-row-a row) (sub budget 1)
                                 input-value input-kind))))
 
+    ; Native Form nodes stay native across the resident image.  The host
+    ; value is never inspected to rediscover its subtype: every constructor
+    ; creates an exact kind, composite kinds retain their child kinds, and
+    ; readers recover provenance from that lineage.
+    (defn rpmw-node-unary-supported? (tag)
+        (if (eq tag 43) 1
+            (if (eq tag 46) 1
+                (if (eq tag 48) 1
+                    (if (eq tag 49) 1
+                        (if (eq tag 91) 1
+                            (if (eq tag 92) 1 0)))))))
+    (defn rpmw-node-binary-supported? (tag)
+        (if (eq tag 47) 1 (if (eq tag 80) 1 0)))
+    (defn rpmw-eval-node-unary-after-child (row child)
+        (if (not (rpmw-result-ok? child))
+            (rpmw-result-add-parent child)
+            (do
+                (let spent (add 1 (rpmw-result-steps child)))
+                (let tag (rpmw-row-tag row))
+                (if (eq tag 91)
+                    (if (not (rpmw-list? (rpmw-result-kind child)))
+                        (rpmw-result-error spent
+                            (rpmw-reason-nodeid-components-required))
+                        (if (not (eq (len (rpmw-result-value child)) 4))
+                            (rpmw-result-error spent
+                                (rpmw-reason-nodeid-components-required))
+                            (if (not (rpmw-int-kinds?
+                                        (rpmw-kind-children
+                                            (rpmw-result-kind child))))
+                                (rpmw-result-error spent
+                                    (rpmw-reason-nodeid-coordinate-integer-required))
+                                (rpmw-result-ok
+                                    (make_nodeid
+                                        (nth (rpmw-result-value child) 0)
+                                        (nth (rpmw-result-value child) 1)
+                                        (nth (rpmw-result-value child) 2)
+                                        (nth (rpmw-result-value child) 3))
+                                    (rpmw-kind-nodeid) spent))))
+                    (if (eq tag 43)
+                        (if (not (rpmw-int? (rpmw-result-kind child)))
+                            (rpmw-result-error spent
+                                (rpmw-reason-integer-value-required))
+                            (rpmw-result-ok
+                                (intern_trivial_int (rpmw-result-value child))
+                                (rpmw-kind-trivial-int-node) spent))
+                        (if (eq tag 46)
+                            (if (not (rpmw-string? (rpmw-result-kind child)))
+                                (rpmw-result-error spent
+                                    (rpmw-reason-string-value-required))
+                                (rpmw-result-ok
+                                    (intern_trivial_string
+                                        (rpmw-result-value child))
+                                    (rpmw-kind-trivial-string-node) spent))
+                            (if (eq tag 48)
+                                (if (not (rpmw-composite-node?
+                                            (rpmw-result-kind child)))
+                                    (rpmw-result-error spent
+                                        (rpmw-reason-composite-node-required))
+                                    (rpmw-result-ok
+                                        (node_children
+                                            (rpmw-result-value child))
+                                        (rpmw-kind-list
+                                            (rpmw-kind-children
+                                                (rpmw-result-kind child)))
+                                        spent))
+                                (if (eq tag 49)
+                                    (if (rpmw-trivial-int-node?
+                                            (rpmw-result-kind child))
+                                        (rpmw-result-ok
+                                            (node_value
+                                                (rpmw-result-value child))
+                                            (rpmw-kind-int) spent)
+                                        (if (rpmw-trivial-string-node?
+                                                (rpmw-result-kind child))
+                                            (rpmw-result-ok
+                                                (node_value
+                                                    (rpmw-result-value child))
+                                                (rpmw-kind-string) spent)
+                                            (rpmw-result-error spent
+                                                (rpmw-reason-trivial-node-required))))
+                                    (if (not (rpmw-composite-node?
+                                                (rpmw-result-kind child)))
+                                        (rpmw-result-error spent
+                                            (rpmw-reason-composite-node-required))
+                                        (rpmw-result-ok
+                                            (node_category
+                                                (rpmw-result-value child))
+                                            (rpmw-kind-nodeid) spent))))))))))
+    (defn rpmw-eval-node-unary
+        (table row budget input-value input-kind)
+        (if (not (rpmw-node-id-valid? table (rpmw-row-a row)))
+            (rpmw-result-error 1 (rpmw-reason-child-out-of-range))
+            (rpmw-eval-node-unary-after-child row
+                (rpmw-eval-node table (rpmw-row-a row) (sub budget 1)
+                                input-value input-kind))))
+
+    (defn rpmw-eval-node-binary-after-left
+        (table row budget input-value input-kind left)
+        (if (not (rpmw-result-ok? left))
+            (rpmw-result-add-parent left)
+            (do
+                (let remaining
+                    (sub (sub budget 1) (rpmw-result-steps left)))
+                (if (le remaining 0)
+                    (rpmw-result-timeout
+                        (add 1 (rpmw-result-steps left)))
+                    (do
+                        (let right
+                            (rpmw-eval-node table (rpmw-row-b row) remaining
+                                            input-value input-kind))
+                        (if (not (rpmw-result-ok? right))
+                            (rpmw-result-row
+                                (rpmw-result-value right)
+                                (rpmw-result-kind right)
+                                (add 1 (add (rpmw-result-steps left)
+                                            (rpmw-result-steps right)))
+                                (rpmw-result-trace-status right)
+                                (rpmw-result-stop-reason right)
+                                (rpmw-result-reason right)
+                                (rpmw-result-detail right))
+                            (do
+                                (let spent
+                                    (add 1 (add (rpmw-result-steps left)
+                                                (rpmw-result-steps right))))
+                                (if (eq (rpmw-row-tag row) 47)
+                                    (if (not (rpmw-nodeid?
+                                                (rpmw-result-kind left)))
+                                        (rpmw-result-error spent
+                                            (rpmw-reason-node-value-required))
+                                        (if (not (rpmw-list?
+                                                    (rpmw-result-kind right)))
+                                            (rpmw-result-error spent
+                                                (rpmw-reason-node-children-required))
+                                            (if (not (rpmw-native-node-kinds?
+                                                        (rpmw-kind-children
+                                                            (rpmw-result-kind right))))
+                                                (rpmw-result-error spent
+                                                    (rpmw-reason-node-children-required))
+                                                (rpmw-result-ok
+                                                    (intern_node
+                                                        (rpmw-result-value left)
+                                                        (rpmw-result-value right))
+                                                    (rpmw-kind-composite-node
+                                                        (rpmw-kind-children
+                                                            (rpmw-result-kind right)))
+                                                    spent))))
+                                    (if (or
+                                            (not (rpmw-native-node?
+                                                    (rpmw-result-kind left)))
+                                            (not (rpmw-native-node?
+                                                    (rpmw-result-kind right))))
+                                        (rpmw-result-error spent
+                                            (rpmw-reason-node-value-required))
+                                        (rpmw-result-ok
+                                            (if (node_eq
+                                                    (rpmw-result-value left)
+                                                    (rpmw-result-value right))
+                                                1 0)
+                                            (rpmw-kind-int) spent))))))))))
+    (defn rpmw-eval-node-binary
+        (table row budget input-value input-kind)
+        (if (not (rpmw-binary-child-valid? table row))
+            (rpmw-result-error 1 (rpmw-reason-child-out-of-range))
+            (rpmw-eval-node-binary-after-left
+                table row budget input-value input-kind
+                (rpmw-eval-node table (rpmw-row-a row) (sub budget 1)
+                                input-value input-kind))))
+
     ; Explicit source frames. The evaluator carries one immutable sparse frame
     ; through a function walk. LETF gives only its body the updated binding;
     ; returning or timing out therefore releases it without a mutation path.
@@ -928,23 +1142,27 @@
                                                 (rpmw-eval-list-pair table row budget input-value input-kind)
                                                 (if (rpmw-list-unary-supported? tag)
                                                     (rpmw-eval-list-unary table row budget input-value input-kind)
-                                                    (if (rpmw-string-unary-supported? tag)
-                                                        (rpmw-eval-string-unary table row budget input-value input-kind)
-                                                        (if (rpmw-string-binary-supported? tag)
-                                                            (rpmw-eval-string-binary table row budget input-value input-kind)
-                                                            (if (rpmw-string-ternary-supported? tag)
-                                                                (rpmw-eval-string-ternary table row budget input-value input-kind)
-                                                                (if (rpmw-binary-supported? tag)
-                                                                    (rpmw-eval-binary table row budget input-value input-kind)
-                                                                    (if (eq tag 6)
-                                                                        (rpmw-eval-if table row budget input-value input-kind)
-                                                                        (if (eq tag 109)
-                                                                            (rpmw-eval-frame-store table row budget input-value input-kind)
-                                                                            (if (eq tag 110)
-                                                                                (rpmw-eval-frame-read table row budget input-value input-kind)
-                                                                                (if (eq tag 111)
-                                                                                    (rpmw-eval-frame-reserve table row budget input-value input-kind)
-                                                                                    (rpmw-result-error 1 (rpmw-reason-unsupported-tag))))))))))))))))))))))
+                                                    (if (rpmw-node-unary-supported? tag)
+                                                        (rpmw-eval-node-unary table row budget input-value input-kind)
+                                                        (if (rpmw-node-binary-supported? tag)
+                                                            (rpmw-eval-node-binary table row budget input-value input-kind)
+                                                            (if (rpmw-string-unary-supported? tag)
+                                                                (rpmw-eval-string-unary table row budget input-value input-kind)
+                                                                (if (rpmw-string-binary-supported? tag)
+                                                                    (rpmw-eval-string-binary table row budget input-value input-kind)
+                                                                    (if (rpmw-string-ternary-supported? tag)
+                                                                        (rpmw-eval-string-ternary table row budget input-value input-kind)
+                                                                        (if (rpmw-binary-supported? tag)
+                                                                            (rpmw-eval-binary table row budget input-value input-kind)
+                                                                            (if (eq tag 6)
+                                                                                (rpmw-eval-if table row budget input-value input-kind)
+                                                                                (if (eq tag 109)
+                                                                                    (rpmw-eval-frame-store table row budget input-value input-kind)
+                                                                                    (if (eq tag 110)
+                                                                                        (rpmw-eval-frame-read table row budget input-value input-kind)
+                                                                                        (if (eq tag 111)
+                                                                                            (rpmw-eval-frame-reserve table row budget input-value input-kind)
+                                                                                            (rpmw-result-error 1 (rpmw-reason-unsupported-tag))))))))))))))))))))))))
 
     (defn rpmw-trace-from-result (envelope pif entry-index root-node step-budget result)
         (rpiwt-trace (rale-envelope-artifact-path envelope)
