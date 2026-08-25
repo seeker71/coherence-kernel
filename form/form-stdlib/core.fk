@@ -146,18 +146,66 @@
                 (sub 0 (fstr-to-int-loop s (add fi 1) flen 0))
                 (fstr-to-int-loop s fi flen 0))))
 
-    ; str_find — naive substring search from `from`, over the floor.
-    ; O(n*m); nothing in this codebase calls it in a hot loop over long
-    ; strings. -1 when not found, matching fkwu's native convention exactly
-    ; (verified: an empty needle matches immediately at `from`, same as the
-    ; native).
-    (defn fstr-find-loop (h n hlen nlen i)
+    ; str_find — substring search from `from`, over the floor, comparing BYTES.
+    ; -1 when not found. There is no fkwu native to fall through to: probed
+    ; 2026-08-25 with a preludeless cell, `str_find` answers [unresolved-call].
+    ; This defn is the only str_find the body has, at 1,596 call sites.
+    ;
+    ; WHY IT NO LONGER ALLOCATES. The first form of this loop cut
+    ; `(substring h i (add i nlen))` at EVERY position and compared the piece.
+    ; Its header said "nothing in this codebase calls it in a hot loop over long
+    ; strings", which was true when written and quietly stopped being true. A
+    ; whole-file scan measured 3.30 s for one call over 1 MB, 8.04 s over 2 MB
+    ; and 21.92 s over 3.7 MB — 3.3, 3.9 then 5.9 seconds per megabyte, so not
+    ; merely slow but DEGRADING with length, which is the signature of the
+    ; per-position allocation filling the intern pool rather than of the search.
+    ;
+    ; Now the scan reads one byte per position through the `str_byte_at` native
+    ; and only compares further when that byte matches the needle's first, so a
+    ; miss costs one native call and nothing is interned. The comparison is
+    ; byte-for-byte, which is exactly what the old one did: `str_len "a—b"` is
+    ; 5, `str_byte_at s 1` is 226, and `substring` slices bytes — every index in
+    ; this dialect is a byte offset, so multi-byte UTF-8 behaves identically
+    ; under both forms and a needle can still land mid-codepoint if a caller
+    ; asks for that.
+    ;
+    ; The worst case is still O(n*m); this removes the constant and the
+    ; degradation, not the asymptote.
+    (defn fstr-find-eq-at (h n i j nlen)
+        (if (ge j nlen) 1
+            (if (eq (str_byte_at h (add i j)) (str_byte_at n j))
+                (fstr-find-eq-at h n i (add j 1) nlen)
+                0)))
+    (defn fstr-find-loop (h n hlen nlen i b0)
         (if (gt (add i nlen) hlen) -1
-            (if (str_eq (substring h i (add i nlen)) n)
-                i
-                (fstr-find-loop h n hlen nlen (add i 1)))))
+            (if (eq (str_byte_at h i) b0)
+                (if (eq (fstr-find-eq-at h n i 0 nlen) 1) i
+                    (fstr-find-loop h n hlen nlen (add i 1) b0))
+                (fstr-find-loop h n hlen nlen (add i 1) b0))))
+    ; An empty needle matches immediately at `from`, and past the end matches
+    ; nowhere — both readings taken from the loop this replaced, not assumed.
+    ;
+    ; THE GUARD MUST STAY AHEAD OF `(str_byte_at n 0)`, and that is not a
+    ; nicety. `str_byte_at` on an empty string diverges across the arms:
+    ;
+    ;   (str_byte_at "" 0)   fkwu recovers to nothing and keeps going
+    ;                        go   FATAL bounds_violation, index=0 len=0
+    ;                        rust FATAL, the same
+    ;
+    ; So a str_find that reads the needle's first byte before checking whether
+    ; the needle has one would run on fkwu and take down two sibling kernels on
+    ; `(str_find s "" 0)`. Found by a probe that omitted the guard: fkwu
+    ; answered a plausible 3 while go and rust both wrote crash traces.
+    ; Witnessed 2026-08-25, all three arms on the shipped form below:
+    ;   [0, 3, -1, 0, -1, -1, 5, 1, 2] identical on fkwu, go and rust
+    ;   for ("abc" "" 0) ("abc" "" 3) ("abc" "" 99) ("" "" 0) ("" "abc" 0)
+    ;       ("" "" 5) ("a—b中c" "中" 0) ("aΩb" "Ω" 0) ("abc" "c" 0)
     (defn str_find (h n from)
-        (fstr-find-loop h n (str_len h) (str_len n) from))
+        (do (let hlen (str_len h))
+            (let nlen (str_len n))
+            (if (eq nlen 0)
+                (if (gt from hlen) -1 from)
+                (fstr-find-loop h n hlen nlen from (str_byte_at n 0)))))
 
     ; float_to_str — the missing dual of the native str_to_float. Scoped
     ; honestly: fixed 6 fractional digits, trailing zeros trimmed, decimal
