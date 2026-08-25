@@ -57,13 +57,14 @@ pretends they did.
   3 frames after user speech-end; yield 1 frame after barge-in; five user
   words sent; a turn-gated ear — the cascade's — hears four; the grid
   hears all five, two frames of genuine overlap.
-- Corpus row **1081** (`learn/homecoming-distillation-corpus.fk`), fresh
-  word `shapegrant`: a capability a representation grants with no
-  mechanism built. Verified 0-hit before offering; `hdc-locate` answers
-  the row id for the question tokens. (Offered as 1079; renumbered twice
-  across the two same-day reunions — siblings' `unripefact` and
-  `lonemeasure` landed on main first, and every row stays, per the
-  row-719 anastomosis pattern.)
+- Corpus row **1108 on the woven trunk** (witnessed at weave de584356;
+  `learn/homecoming-distillation-corpus.fk`), fresh word `shapegrant`: a
+  capability a representation grants with no mechanism built. Verified
+  0-hit before offering; `hdc-locate` answers the current seat for the
+  question tokens wherever it reads. (Offered as 1079, reseated across
+  the day's reunions — every row stays, per the row-719 anastomosis
+  pattern; the sibling rows it yielded to: `unripefact`, `lonemeasure`,
+  and the trunk's duty-share line.)
 - A dated section in [`presence/voice-roadmap.md`](../presence/voice-roadmap.md):
   the interactive loop the roadmap already owes should be seated on this
   grid, so silence stays a value end-to-end.
