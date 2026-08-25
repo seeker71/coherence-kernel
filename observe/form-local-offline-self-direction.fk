@@ -1,0 +1,187 @@
+; form-local-offline-self-direction.fk -- one honest local health movement.
+;
+; This organ is deliberately a tick, not an hourly daemon.  It maps the state,
+; selects the current priority, correlates a framebuffer control, invokes one
+; supplied Form actuator, and observes the returned state again.  It owns no
+; native wake primitive: a caller must invoke a due tick.  An fmcl category is
+; not silently treated as an executable recipe NodeID.
+;
+; Apply result:
+; [schema,status,reason,selected-identity,selected-action,next-state,apply-count]
+; status is applied, nothing, or refused.  Only applied may carry apply-count 1.
+;
+; Tick result:
+; [schema,status,reason,before-map,selected-identity,selected-action,
+;  outbound,inbound,apply-result,after-map,applied,reobserved,
+;  health-transition,before-gaps,after-gaps,before-health,after-health,
+;  next-due-ms,native-wake-owned,wake-seam,next-state]
+;
+; preludes: form-stdlib/form-local-offline-health-map.fk
+; preludes: observe/bidirectional-framebuffer-channel.fk
+
+import "../form/form-stdlib/form-local-offline-health-map.fk"
+import "bidirectional-framebuffer-channel.fk"
+
+(do
+    (defn flosd-hour-ms () 3600000)
+    (defn flosd-native-wake-owned? () 0)
+    (defn flosd-wake-seam () "native-bounded-wake-primitive-absent")
+    (defn flosd-due? (now-ms last-run-ms)
+        (if (le last-run-ms 0) 1
+            (if (ge now-ms (add last-run-ms (flosd-hour-ms))) 1 0)))
+
+    (defn flosd-apply-result (status reason identity action next-state count)
+        (list "form-local-offline-apply-v1" status reason identity action next-state count))
+    (defn flosd-apply-status (result) (nth result 1))
+    (defn flosd-apply-reason (result) (nth result 2))
+    (defn flosd-apply-state (result) (nth result 5))
+
+    (defn flosd-identity-eq? (a b)
+        (if (nothing? a)
+            (if (nothing? b) 1 0)
+            (if (nothing? b) 0 (if (str_eq a b) 1 0))))
+    (defn flosd-action-eq? (a b)
+        (if (nothing? a)
+            (if (nothing? b) 1 0)
+            (if (nothing? b) 0 (if (node_eq a b) 1 0))))
+
+    (defn flosd-map-valid? (map)
+        (if (nothing? map) 0
+            (if (not (eq (len map) 11)) 0
+                (if (lt (flohm-valid-count map) 0) 0
+                    (if (lt (flohm-gap-count map) 0) 0 1)))))
+
+    (defn flosd-apply-result-valid? (result selected)
+        (if (nothing? result) 0
+            (if (not (eq (len result) 7)) 0
+                (if (not (str_eq (nth result 0) "form-local-offline-apply-v1")) 0
+                    (if (eq (flosd-identity-eq? (nth result 3)
+                            (flohm-identity selected)) 0) 0
+                        (if (eq (flosd-action-eq? (nth result 4)
+                                (flohm-action-token selected)) 0) 0
+                            (if (str_eq (flosd-apply-status result) "applied")
+                                (if (eq (nth result 6) 1) 1 0)
+                                (if (or (str_eq (flosd-apply-status result) "nothing")
+                                        (str_eq (flosd-apply-status result) "refused"))
+                                    (if (eq (nth result 6) 0) 1 0)
+                                    0))))))))
+
+    (defn flosd-control-valid? (outbound inbound)
+        (if (nothing? inbound) 0
+            (if (not (eq (bfc-direction inbound) 1)) 0
+                (if (not (eq (bfc-kind inbound) 1)) 0
+                    (if (not (eq (bfc-exchange outbound) (bfc-exchange inbound))) 0
+                        (if (not (eq (bfc-payload inbound) 0)) 0
+                            (flosd-action-eq? (bfc-alternative outbound)
+                                (bfc-alternative inbound))))))))
+
+    (defn flosd-health-transition? (before after)
+        (if (not (eq (flohm-ready-count before) (flohm-ready-count after))) 1
+            (if (not (eq (flohm-gap-count before) (flohm-gap-count after))) 1
+                (if (not (eq (flohm-unknown-count before) (flohm-unknown-count after))) 1
+                    (if (not (eq (flohm-invalid-count before) (flohm-invalid-count after))) 1
+                        (if (not (eq (flohm-health-permille before)
+                                (flohm-health-permille after))) 1
+                            (if (eq (flosd-identity-eq?
+                                    (flohm-priority-identity before)
+                                    (flohm-priority-identity after)) 0) 1
+                                (if (eq (flosd-action-eq?
+                                        (flohm-priority-action before)
+                                        (flohm-priority-action after)) 0) 1 0))))))))
+
+    (defn flosd-tick-result (status reason before identity action outbound inbound
+            apply-result after applied reobserved transition next-due next-state)
+        (list "form-local-offline-self-direction-v1" status reason before identity action
+            outbound inbound apply-result after applied reobserved transition
+            (if (nothing? before) (nothing) (flohm-gap-count before))
+            (if (nothing? after) (nothing) (flohm-gap-count after))
+            (if (nothing? before) (nothing) (flohm-health-permille before))
+            (if (nothing? after) (nothing) (flohm-health-permille after))
+            next-due (flosd-native-wake-owned?) (flosd-wake-seam) next-state))
+
+    (defn flosd-record-missing-control (exchange)
+        (fb_record (intern_trivial_int (add (mul exchange 10) 2))
+            "form-local-offline-self-direction.fk" (add (mul exchange 2) 1)))
+
+    (defn flosd-finish-apply (observef state stamp selected before outbound inbound
+            apply-result next-due)
+        (if (eq (flosd-apply-result-valid? apply-result selected) 0)
+            (do
+                (let after (observef state (add stamp 1)))
+                (flosd-tick-result "refused" "actuator-result-unbound" before
+                    (flohm-identity selected) (flohm-action-token selected)
+                    outbound inbound apply-result after 0 1
+                    (flosd-health-transition? before after) next-due state))
+            (if (str_eq (flosd-apply-status apply-result) "applied")
+                (do
+                    (let next-state (flosd-apply-state apply-result))
+                    (let after (observef next-state (add stamp 1)))
+                    (flosd-tick-result "applied" (flosd-apply-reason apply-result) before
+                        (flohm-identity selected) (flohm-action-token selected)
+                        outbound inbound apply-result after 1 1
+                        (flosd-health-transition? before after) next-due next-state))
+                (do
+                    ; A nothing/refused actuator may explain the seam, but it
+                    ; cannot smuggle a state transition through next-state.
+                    (let after (observef state (add stamp 1)))
+                    (flosd-tick-result (flosd-apply-status apply-result)
+                        (flosd-apply-reason apply-result) before
+                        (flohm-identity selected) (flohm-action-token selected)
+                        outbound inbound apply-result after 0 1
+                        (flosd-health-transition? before after) next-due state)))))
+
+    (defn flosd-actuate (observef controlf applyf state stamp exchange before selected now-ms)
+        (do
+            ; Diagnostic payload contains counters and identity only, never the
+            ; selected organ's detail/source or any prompt/answer bytes.
+            (let outbound (bfc-envelope 0 exchange 0
+                (list stamp (flohm-valid-count before) (flohm-ready-count before)
+                    (flohm-gap-count before) (flohm-unknown-count before)
+                    (flohm-invalid-count before) (flohm-health-permille before)
+                    (flohm-identity selected))
+                (flohm-action-token selected)))
+            (let out-event (bfc-record-out outbound (mul exchange 2)))
+            (let inbound (controlf outbound))
+            (let in-event (if (nothing? inbound)
+                (flosd-record-missing-control exchange)
+                (bfc-record-in inbound (add (mul exchange 2) 1))))
+            (let next-due (add now-ms (flosd-hour-ms)))
+            (if (eq (flosd-control-valid? outbound inbound) 0)
+                (do
+                    (let after (observef state (add stamp 1)))
+                    (flosd-tick-result "refused" "correlated-continue-control-required"
+                        before (flohm-identity selected) (flohm-action-token selected)
+                        outbound inbound (nothing) after 0 1
+                        (flosd-health-transition? before after) next-due state))
+                (do
+                    ; This is the sole actuator call in a due, correlated tick.
+                    (let apply-result (applyf state selected before))
+                    (flosd-finish-apply observef state stamp selected before outbound
+                        inbound apply-result next-due)))))
+
+    (defn flosd-due-tick (observef controlf applyf state stamp exchange now-ms)
+        (do
+            (let before (observef state stamp))
+            (if (eq (flosd-map-valid? before) 0)
+                (flosd-tick-result "refused" "observer-map-invalid" before
+                    (nothing) (nothing) (nothing) (nothing) (nothing) (nothing)
+                    0 0 0 (add now-ms (flosd-hour-ms)) state)
+                (do
+                    (let selected (flohm-best-gap (nth before 10)))
+                    (if (nothing? selected)
+                        (do
+                            (let after (observef state (add stamp 1)))
+                            (flosd-tick-result "idle" "no-observed-gap" before
+                                (nothing) (nothing) (nothing) (nothing) (nothing) after
+                                0 1 (flosd-health-transition? before after)
+                                (add now-ms (flosd-hour-ms)) state))
+                        (flosd-actuate observef controlf applyf state stamp exchange
+                            before selected now-ms))))))
+
+    (defn flosd-tick (observef controlf applyf state stamp exchange now-ms last-run-ms)
+        (if (eq (flosd-due? now-ms last-run-ms) 0)
+            (flosd-tick-result "not-due" "native-wake-not-entered" (nothing)
+                (nothing) (nothing) (nothing) (nothing) (nothing) (nothing)
+                0 0 0 (add last-run-ms (flosd-hour-ms)) state)
+            (flosd-due-tick observef controlf applyf state stamp exchange now-ms)))
+    0)
