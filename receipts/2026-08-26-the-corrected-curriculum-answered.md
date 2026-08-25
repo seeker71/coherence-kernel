@@ -50,6 +50,20 @@ before the next battery. Also witnessed: the sweeper touched again at
 attempt 1 (rc=-15, three rows in — night window, same signature), and
 the resume design turned it into a zero-loss event.
 
+## CORRECTED SAME NIGHT (jit-lane, 15be79a6): ratio, not yet reply
+
+Equal f1 does not mean equal answer: 909,091 ppm is 10/11 — many different
+replies reach it. What reproduced across the changed curriculum is a
+SCORE; whether the ANSWER reproduced is undetermined, because the
+actual-answer digest (computed on every row at fkh3-observation index 3)
+was never persisted. The anchored/fragile reading downgrades to
+score-anchored pending answer evidence. The companion evaluator
+(form-knowledge-heldout-reproduction.fk, band 255) names the three
+relations — anchored (answer reproduced), coincident (score reproduced,
+answer did not — evidence of the OPPOSITE), moved — and the next battery
+persists the digest at zero cost. The two sittings already run cannot be
+settled retroactively; that is what unpersisted evidence costs.
+
 ## The most surprising teaching
 
 Two numbers reproducing to six digits across a deliberately changed
