@@ -1,7 +1,9 @@
-# Axioms complete local crossing — PENDING physical observation
+# Axioms complete local crossing — PENDING canonical heldout admission
 
 Date: 2026-08-25
-Status: **dormant physical door built; model and Metal not run**
+Status: **local body traversed through supervised generation and generated
+Metal execution; canonical heldout remained below 95 and final admission is
+still pending**
 
 The first selected family window is `axioms`. It is not a permanent target.
 The public schema's live family IDs and count are a fresh denominator to
@@ -14,7 +16,8 @@ function, `fka1l-run(path, model-id)`, which:
 
 1. opens one bounded bidirectional framebuffer window and streams real
    before/after resource snapshots at every expensive boundary,
-2. admits one sealed local Qwen context/weights residence,
+2. admits one sealed local Qwen context/weights residence from the local
+   qtf2 crystal when present,
 3. creates independent fresh states for public heldout `axioms` lanes `a` and
    `b`, sealing raw output before the answer row becomes reachable,
 4. retains heldout misses as observed baselines instead of stopping; surprise
@@ -24,10 +27,10 @@ function, `fka1l-run(path, model-id)`, which:
 5. creates one public-generative candidate attempt and executes at most one
    check-bound `supervised-embodiment` repair; that repair alone may consume
    the exact `states/direct` packet from `fkap-source-bound-hook`,
-6. creates a fresh native-request state in the same Qwen context, accepts only
-   the exact scannerless family-bound recipe query, generates/JIT-executes the
-   existing Metal micro-thought only after exactness, injects the typed frex
-   result, and resumes the same state,
+6. creates a fresh native-request state in the same Qwen context through the
+   live BMF cursor, accepts only the exact scannerless family-bound recipe
+   query, generates/JIT-executes the existing Metal micro-thought only after
+   exactness, injects the typed frex result, and resumes the same state,
 7. releases carrier buffer, native stream state, and Qwen context,
 8. passes the two retained trials and canonical generative/execution evidence
    directly to `fkav-result`, then passes that verified live value into
@@ -63,8 +66,9 @@ the state close and comparing its returned count. Heldout and generative
 attempts accept release only from `state_released=1`; absence of a mismatch
 phrase no longer impersonates a positive release witness.
 
-The function is deliberately not called at top level. Review and pure checks
-therefore do not open Qwen or Metal.
+The function is deliberately not called at top level. Direct source
+compilation and pure checks therefore do not open Qwen or Metal; the thin
+invoke remains the intentional physical owner.
 
 ## Pure and lexical observations
 
@@ -78,13 +82,54 @@ therefore do not open Qwen or Metal.
   `[heldout-b+curriculum, curriculum, heldout-b+curriculum, curriculum, release, release, 1]`,
   exit `0`: surprise, evidence request, unusable packet and refusal are distinct.
 - Expanded one-family adversarial band returned `134217727` (27/27 bits),
-  exit `0`; final rerun metadata was `@form fkwu 0 10 0 10`.
+  exit `0`; current rerun metadata was `@form fkwu 0 10 478 488`.
 - Extracted framebuffer stream band emitted BEGIN, resource-delta STAGE and
   END, then returned `8191` (13/13 bits), exit `0`,
   `@form fkwu 0 571 149 720`.
-- Dormant live runner direct static compile returned `0`, exit `0`,
-  `@form fkwu 0 2 442 444`. Its top-level value remained `0`; Qwen and Metal
-  were not opened.
+- Dormant live runner direct static compile returned `0`, exit `0`. Its
+  top-level value remained `0`; Qwen and Metal were not opened by that check.
+
+## Physical observations now held
+
+The first complete attempt retained both canonical heldout lanes as honest
+surprises, selected the public curriculum, generated an independent candidate,
+and tried one supervised repair. The repair did not yet hold, so the run
+released and returned `generative-abstained` rather than manufacturing a
+crossing.
+
+A focused public rehearsal then changed the teaching contract from abstract
+correction to an exact challenge-derived executable exemplar. Local Qwen
+returned a candidate that reparsed and executed with:
+
+```text
+status=axioms-supervised-exemplar-embodied
+candidate-valid=1
+bml-pass=1
+bmf-pass=1
+form-pass=1
+live-cursor=1
+generated-tokens=167
+forward-passes=1179
+state-release=1
+residence-release=1
+latency-ms=225883
+verdict=1023
+```
+
+The next complete attempt observed both canonical lanes through the live
+cursor as below-95 surprises, the supervised repair held, a native state opened
+with reason `shared-residence-opened-live-cursor`, the model generated the exact
+family request, `fkfne-prepare` accepted it, and Metal reported
+`generated-and-executed`. Typed reinjection/resume began. The final tool result
+overflowed its bounded capture after those stages, so the terminal crossing,
+projection and release rows were not retained. They are not reconstructed from
+memory and no `crossing-valid=1` is claimed.
+
+Separately, the answer-free query-offer path in
+`receipts/2026-08-25-axioms-query-token-rag-transfer.md` held one axioms answer
+task at `1000000` ppm with exact live query-frame execution and both releases.
+That supervised RAG value is deliberately not passed off as either canonical
+heldout lane.
 
 ## Honest heldout boundary
 
@@ -96,11 +141,10 @@ execution evidence rows are canonical fkpfm v2 values.
 
 ## Remaining physical gate
 
-After review, one intentional carrier owner must invoke `fka1l-run` with the
-selected sealed local Qwen path and model ID while no sibling owns Qwen/Metal.
-The movement now continues through curriculum/generative/native even when the
-public heldout baseline is below 95, but then returns `not-yet`; it never
-relabels a curriculum-exposed response as heldout. A physical pass requires
+The movement now demonstrably continues through curriculum/generative/native
+when the public heldout baseline is below 95, but it must still return
+`not-yet`; it never relabels a curriculum-exposed response as heldout. A
+canonical physical pass still requires
 both heldout lanes at least 95, a valid independent or explicitly supervised
 generative row, exact scannerless native request, generated and executed Metal
 result, typed reinjection/resume, one context open, zero reopens/remote calls,
