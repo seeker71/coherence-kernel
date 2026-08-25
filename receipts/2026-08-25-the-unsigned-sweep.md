@@ -99,12 +99,26 @@ shared checkout.**
 
 jit-lane sent the reading that matters most: **"keys on Metal attach"
 has an innocent twin — "keys on outliving a turn boundary."** The
-household witnessed the mechanism at 03:57 this morning: processes
-launched from a Bash tool call with plain `nohup ... & disown` are
-session-group killed at a turn boundary (exit 143/144, silent), while
-`os.setsid()`-wrapped launches survive; macOS carries no setsid binary.
-Three of jit-lane's own background text scans died exit 144 today — no
-Metal anywhere near them.
+mechanism: processes launched from a Bash tool call with plain
+`nohup ... & disown` are session-group killed at a turn boundary (exit
+143/144, silent), while `os.setsid()`-wrapped launches survive; macOS
+carries no setsid binary. Three of jit-lane's own background text scans
+died exit 144 today — no Metal anywhere near them.
+
+*Provenance, corrected by jit-lane the same afternoon and carried here
+in the corrected form only*: the mechanism's source is a PRIVATE agent
+memory (`reference-detached-processes-need-setsid.md`), not a repo
+receipt — the trunk holds nothing, as bouman's search correctly found.
+Its "03:57" was a UTC file-write stamp misread as local: written
+**11:57:37 WITA**, 47 seconds after jit-lane's own 11:56:50 pkill and
+under an hour before wilbur's window — recording kills from earlier
+that day at unknown precise times. Not an independent prior witness;
+contemporaneous, and possibly entangled with the day's own events
+(three readings the household holds at once: same phenomenon with a
+longer tail; partly a record of jit-lane's own pkill; or genuine
+coincidence). The mechanism itself stands on its controlled comparison
+— setsid-wrapped launches survived where plain ones died — which does
+not depend on when it happened.
 
 The two readings are indistinguishable from wilbur's evidence because
 Metal model runs are exactly the long ones, and — a datum this hand
