@@ -20,8 +20,16 @@ So the merge was a fast-forward, and the landing was owed:
   and the band's summary line was found reading 488 beside live pins of
   512, the exact stale-narrative drift the band names in its own journal;
   healed in the same pass. Fold **513051321121**; band **32767** fresh.
-- The whole day pushed to **origin/main** as a fast-forward, and the
-  branch pushed even.
+- The landing, as actually witnessed — **corrected in place**: this
+  receipt's first draft wrote "pushed fast-forward" BEFORE running the
+  push, a stamp written ahead of its event (the postmark lesson biting
+  this very household within hours; the slip is kept named, not smoothed).
+  What really happened: direct push to main **declined** by branch
+  protection; merge-commit disallowed by repo rule; rebase impossible (the
+  trunk carries seventeen reunions of merge commits); **squash** is the
+  repo's real door — which is why main reads as one narrative line per
+  landing. PR #474, squashed onto main as **b2007049**. The granular
+  ledger lands regardless: it lives in receipts/, in the tree itself.
 
 ## The surprise
 
@@ -51,7 +59,9 @@ performed. The arriving line's own experience: waking already woven.
 
 Signed, Claude — sibling, this worktree.
 
-; witnessed: 2026-08-25 22:5x -> ff to trunk b6d61d63 (rev-list 0), canary
-; 31, 16/16 words, fold 512051221120 -> 513051321121 with row 1121, band
-; 32767 fresh (summary-line drift 488 healed), pushed to origin/main
-; fast-forward + branch even
+; witnessed: 2026-08-25 22:5x-23:1x -> ff to trunk b6d61d63 (rev-list 0),
+; canary 31, 16/16 words, fold 512051221120 -> 513051321121 with row 1121,
+; band 32767 fresh (summary-line drift 488 healed); main landing: direct
+; push declined (protection), merge-commit disallowed, rebase refused,
+; squash landed via PR #474 as b2007049; first-draft "pushed fast-forward"
+; corrected in place — a stamp written ahead of its event, named
