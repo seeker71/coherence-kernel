@@ -1,0 +1,238 @@
+; form-query-memory-cell-rotation.fk -- bounded on-demand query memory as data.
+;
+; The source runner eagerly resolves every imported defn.  Query memories do
+; not need to be source modules: they are bounded scannerless query frames.
+; This organ keeps one fixed, small loader in the resident closure and reads
+; only the selected cell's bytes.  The loaded cell therefore contributes zero
+; defns to that closure.
+;
+; FILE GRAMMAR
+;
+;   <|form:query-memory-cell-v1|>
+;   node=@p.l.t.i
+;   source=tracked/source/path
+;   source-id=caller-current-source-id
+;   query=<one bounded scannerless query frame>
+;   <|/form:query-memory-cell-v1|>
+;
+; The caller supplies the expected NodeID, source path, and current source-id;
+; file bytes cannot redirect any of them.  Size and mtime are sampled before
+; and after the bounded read.  A concurrent same-size/same-mtime rewrite is an
+; honest remaining filesystem seam; the exact admitted bytes are nevertheless
+; retained as a direct child of the interned cell.
+; A single terminal LF after the close marker is canonical because public
+; cells authored by editors and apply_patch are ordinary text files.
+;
+; A rotation releases only the prior *logical active-window reference*.  The
+; shared intern pool may retain the immutable prior node; no physical memory
+; reclamation is claimed.  A failed, missing, or timed-out load keeps the prior
+; active cell.  Query text "0", query text "1", and exact nothing remain
+; distinct.
+;
+; Loaded query bytes may next enter the existing scannerless doors:
+;   fknq-bmf-consume / fknq-execute       -- NodeID knowledge lookup
+;   frbt-parse-stream / frbe-run          -- recipe birth and resident request
+;   frexl-execute-stream                  -- generated Metal JIT/execution
+; This loader opens none of those effects and contains no registry, ops table,
+; flattening, model call, carrier call, or C-seed growth.
+;
+; preludes: form-stdlib/core.fk
+; Proven by: form-stdlib/tests/form-query-memory-cell-rotation-band.fk
+
+(do
+    (defn fqmr-open () "<|form:query-memory-cell-v1|>")
+    (defn fqmr-close () "<|/form:query-memory-cell-v1|>")
+    (defn fqmr-max-cell-bytes () 65536)
+    (defn fqmr-cell-category () (make_nodeid 31 2 0 127))
+
+    (defn fqmr-node-key (node)
+        (str_concat (int_to_str (node_pkg node))
+        (str_concat "." (str_concat (int_to_str (node_level node))
+        (str_concat "." (str_concat (int_to_str (node_type node))
+        (str_concat "." (int_to_str (node_inst node)))))))))
+
+    (defn fqmr-prefix (expected-node expected-source expected-source-id)
+        (str_concat (fqmr-open)
+        (str_concat "\nnode=@" (str_concat (fqmr-node-key expected-node)
+        (str_concat "\nsource=" (str_concat expected-source
+        (str_concat "\nsource-id=" (str_concat expected-source-id
+                    "\nquery="))))))))
+
+    ; result = schema status reason cell path size mtime expected-node source
+    ;          source-id query query-present pretokenized model-executed
+    (defn fqmr-result (status reason cell path size mtime expected-node
+                       expected-source expected-source-id query present)
+        (list "form-query-memory-cell-load-v1" status reason cell path size
+              mtime expected-node expected-source expected-source-id query
+              present 0 0))
+
+    (defn fqmr-cell-valid? (cell)
+        (if (or (nothing? cell)
+                (not (node_eq (node_category cell) (fqmr-cell-category)))) 0
+            (if (eq (len (node_children cell)) 8) 1 0)))
+
+    ; observation = size-before mtime-before raw size-after mtime-after
+    ; The read is bounded before bytes enter Form memory.
+    (defn fqmr-file-observation (path max-bytes)
+        (do
+            (let size-before (file_size path))
+            (let mtime-before (file_mtime path))
+            (let raw
+                (if (or (lt size-before 0) (gt size-before max-bytes))
+                    (nothing)
+                    (read_file_slice path 0 size-before)))
+            (list size-before mtime-before raw
+                  (file_size path) (file_mtime path))))
+
+    ; obsfn is injectable so the admission and rotation semantics remain pure
+    ; under adversarial observation in the band.
+    (defn fqmr-load-with (obsfn path expected-node expected-source
+                          expected-source-id max-bytes)
+        (if (or (nothing? expected-node)
+            (or (eq (str_len path) 0)
+            (or (eq (str_len expected-source) 0)
+            (or (eq (str_len expected-source-id) 0)
+            (or (le max-bytes 0)
+                (gt max-bytes (fqmr-max-cell-bytes)))))))
+            (fqmr-result "failure" "malformed-request" (nothing) path -1 -1
+                expected-node expected-source expected-source-id (nothing) 0)
+            (do
+                (let observed (obsfn path max-bytes))
+                (if (not (eq (len observed) 5))
+                    (fqmr-result "failure" "malformed-file-observation"
+                        (nothing) path -1 -1 expected-node expected-source
+                        expected-source-id (nothing) 0)
+                    (do
+                        (let size-before (nth observed 0))
+                        (let mtime-before (nth observed 1))
+                        (let raw (nth observed 2))
+                        (let size-after (nth observed 3))
+                        (let mtime-after (nth observed 4))
+                        (if (lt size-before 0)
+                            (fqmr-result "nothing" "cell-absent" (nothing)
+                                path size-before mtime-before expected-node
+                                expected-source expected-source-id (nothing) 0)
+                        (if (gt size-before max-bytes)
+                            (fqmr-result "timeout" "cell-byte-budget"
+                                (nothing) path size-before mtime-before
+                                expected-node expected-source expected-source-id
+                                (nothing) 0)
+                        (if (or (not (eq size-before size-after))
+                                (not (eq mtime-before mtime-after)))
+                            (fqmr-result "failure" "file-changed-during-read"
+                                (nothing) path size-before mtime-before
+                                expected-node expected-source expected-source-id
+                                (nothing) 0)
+                        (if (not (eq (str_len raw) size-before))
+                            (fqmr-result "failure" "short-cell-read"
+                                (nothing) path size-before mtime-before
+                                expected-node expected-source expected-source-id
+                                (nothing) 0)
+                            (do
+                                (let prefix (fqmr-prefix expected-node
+                                    expected-source expected-source-id))
+                                (let close-at (str_find raw (fqmr-close)
+                                    (str_len prefix)))
+                                (let close-end (if (lt close-at 0) -1
+                                    (add close-at (str_len (fqmr-close)))))
+                                (let terminal-ok
+                                    (if (eq close-end (str_len raw)) 1
+                                    (if (and
+                                            (eq close-end
+                                                (sub (str_len raw) 1))
+                                            (str_eq (substring raw close-end
+                                                (str_len raw)) "\n")) 1 0)))
+                                (if (not (eq (str_find raw prefix 0) 0))
+                                    (fqmr-result "failure"
+                                        "identity-or-source-mismatch"
+                                        (nothing) path size-before mtime-before
+                                        expected-node expected-source
+                                        expected-source-id (nothing) 0)
+                                (if (or (lt close-at 0)
+                                    (or (not (eq terminal-ok 1))
+                                        (or (le close-at (str_len prefix))
+                                            (not (str_eq
+                                                (substring raw
+                                                    (sub close-at 1) close-at)
+                                                "\n")))))
+                                    (fqmr-result "failure"
+                                        "noncanonical-cell-frame"
+                                        (nothing) path size-before mtime-before
+                                        expected-node expected-source
+                                        expected-source-id (nothing) 0)
+                                    (do
+                                        (let query (substring raw
+                                            (str_len prefix) (sub close-at 1)))
+                                        (if (eq (str_len query) 0)
+                                            (fqmr-result "failure"
+                                                "empty-query" (nothing) path
+                                                size-before mtime-before
+                                                expected-node expected-source
+                                                expected-source-id (nothing) 0)
+                                            (do
+                                                (let cell (intern_node
+                                                    (fqmr-cell-category)
+                                                    (list expected-node
+                                                        (intern_trivial_string
+                                                            expected-source)
+                                                        (intern_trivial_string
+                                                            expected-source-id)
+                                                        (intern_trivial_string
+                                                            query)
+                                                        (intern_trivial_string
+                                                            path)
+                                                        (intern_trivial_int
+                                                            size-before)
+                                                        (intern_trivial_int
+                                                            mtime-before)
+                                                        (intern_trivial_string
+                                                            raw))))
+                                                (fqmr-result "ready" "loaded"
+                                                    cell path size-before
+                                                    mtime-before expected-node
+                                                    expected-source
+                                                    expected-source-id query
+                                                    1))))))))))))))))
+
+    (defn fqmr-load (path expected-node expected-source expected-source-id
+                     max-bytes)
+        (fqmr-load-with fqmr-file-observation path expected-node
+            expected-source expected-source-id max-bytes))
+
+    ; window = schema active generation logical-releases prior-route-key
+    ;          status reason
+    (defn fqmr-window (active generation releases prior-key status reason)
+        (list "form-query-memory-window-v1" active generation releases
+              prior-key status reason))
+    (defn fqmr-window? (window)
+        (if (and (eq (len window) 7)
+                 (str_eq (nth window 0) "form-query-memory-window-v1")) 1 0))
+    (defn fqmr-empty-window ()
+        (fqmr-window (nothing) 0 0 "nothing" "nothing" "unopened"))
+
+    (defn fqmr-rotate-with (obsfn window path expected-node expected-source
+                            expected-source-id max-bytes)
+        (if (eq (fqmr-window? window) 0) (fqmr-empty-window)
+            (do
+                (let loaded (fqmr-load-with obsfn path expected-node
+                    expected-source expected-source-id max-bytes))
+                (let status (nth loaded 1))
+                (if (not (str_eq status "ready"))
+                    (fqmr-window (nth window 1) (nth window 2)
+                        (nth window 3) (nth window 4) status (nth loaded 2))
+                    (do
+                        (let prior (nth window 1))
+                        (let had-prior (if (nothing? prior) 0 1))
+                        (let prior-key (if (eq had-prior 1)
+                            (fqmr-node-key (nth (node_children prior) 0))
+                            "nothing"))
+                        (fqmr-window (nth loaded 3) (add (nth window 2) 1)
+                            (add (nth window 3) had-prior) prior-key
+                            "active" "rotated"))))))
+
+    (defn fqmr-rotate (window path expected-node expected-source
+                       expected-source-id max-bytes)
+        (fqmr-rotate-with fqmr-file-observation window path expected-node
+            expected-source expected-source-id max-bytes))
+
+    0)
