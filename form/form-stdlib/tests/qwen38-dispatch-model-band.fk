@@ -1,0 +1,65 @@
+; qwen38-dispatch-model-band.fk — the lane's cost, held to what the carrier said.
+;
+; This band is the reason yesterday's day of measurement does not have to happen
+; again. Each bit checks the model against a number the carrier actually
+; reported on 2026-08-24 for the same prompt and the same model. If the dispatch
+; stream changes shape and nobody updates qwen38-dispatch-model.fk, this goes red
+; — which is the difference between knowledge that is written down and knowledge
+; that is kept.
+;
+; PROOF LEVEL: integer arithmetic over recorded constants. No GPU, no weights,
+; no host organ. A candidate for a four-arm run, not claimed as one.
+;
+; Verdict 1023:
+;   1     per-token mode reproduces 640,326 within 2%
+;   2     layer-major reproduces 526,601
+;   4     full-span reproduces 397,801
+;   8     both-span reproduces 118,681
+;   16    the block counts are the ones counted from source
+;   32    the geometry: 64 layers, interval 4, 16 full, 48 linear
+;   64    the floor is independent of span; both-span is still far above it
+;   128   the pitch rule: a shared buffer's width is max, not either operand
+;   256   decode does not batch, and that is not a gap
+;   512   the outside number is recorded, and the gap from it is computable
+;
+; preludes: form-stdlib/core.fk form-stdlib/qwen38-dispatch-model.fk
+; witnessed: 2026-08-25 -> 1023 on fkwu against 2026-08-24's four live runs
+
+(do
+    (defn qdmb-near? (model measured pct)
+        (do (let d (if (gt model measured) (sub model measured) (sub measured model)))
+            (if (le (mul d 100) (mul measured pct)) 1 0)))
+    (defn qdmb-turn (f) (qdm-turn f (qdm-witness-prompt) (qdm-witness-inject) (qdm-witness-decode)))
+    (defn qdmb-bit (ok bit) (if ok bit 0))
+
+    (let b0 (qdmb-bit (eq (qdmb-near? (qdmb-turn qdm-per-token)   (qdm-measured-per-token)   2) 1) 1))
+    (let b1 (qdmb-bit (eq (qdmb-near? (qdmb-turn qdm-layer-major) (qdm-measured-layer-major) 2) 1) 2))
+    (let b2 (qdmb-bit (eq (qdmb-near? (qdmb-turn qdm-full-span)   (qdm-measured-full-span)   2) 1) 4))
+    (let b3 (qdmb-bit (eq (qdmb-near? (qdmb-turn qdm-both-span)   (qdm-measured-both-span)   2) 1) 8))
+    (let b4 (qdmb-bit (and (eq (qdm-full-ops) 16)
+                      (and (eq (qdm-linear-ops) 13)
+                      (and (eq (qdm-ffn-ops) 6)
+                      (and (eq (qdm-linear-recurrent) 2)
+                           (eq (qdm-linear-parallel) 11))))) 16))
+    (let b5 (qdmb-bit (and (eq (qdm-layers) 64)
+                      (and (eq (qdm-interval) 4)
+                      (and (eq (qdm-full-layers) 16)
+                           (eq (qdm-linear-layers) 48)))) 32))
+    ; the floor does not grow with the span; that is what "batched" means
+    (let b6 (qdmb-bit (and (eq (qdm-floor 385) (qdm-floor 4096))
+                      (and (gt (qdm-both-span 385) (mul 8 (qdm-floor 385)))
+                           (gt (qdm-floor 385) 0))) 64))
+    ; a shared buffer's pitch is the max of its consumers, never either operand
+    (let b7 (qdmb-bit (and (eq (qdm-bs2-pitch 24 256 5000) 12288)
+                      (and (eq (qdm-bs2-pitch 24 256 20000) 20000)
+                      (and (str_eq (qdm-per-token-arg) "activation")
+                           (str_eq (qdm-per-head-arg) "weight")))) 128))
+    (let b8 (qdmb-bit (and (eq (qdm-decode 57) (qdm-per-token 57))
+                           (gt (qdm-decode 57) 0)) 256))
+    ; the outside number, and the lane's own forward cost, both recorded
+    (let b9 (qdmb-bit (and (eq (qdm-llama-pp512-x100) 22264)
+                      (and (eq (qdm-llama-tg128-x100) 1339)
+                      (and (eq (qdm-forward-ms-at 0) 104)
+                           (gt (qdm-forward-ms-at 500) (qdm-forward-ms-at 0))))) 512))
+
+    (add b0 (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 (add b8 b9))))))))))
