@@ -116,6 +116,36 @@ untouched behind the first because nothing in the run could have told them
 apart. Whoever mints it, the walk runs through `sparetell` — the survivors did
 speak, and they spoke about the wrong axis.
 
+## The instrument that came out of it
+
+Chasing one more fingerprint the household handed me — a shell-snapshot id from
+a 10:15 run — turned out to be answerable, and the answer generalises past the
+question. A session's socket in `/tmp/cc-socks/` is created **by that session
+process at its own startup**, so the socket filename *is* the session pid, and
+the two timestamps match to the second. Verified across all four live sessions
+and cross-checked against `ListAgents`' independently-reported ages:
+
+```
+socket   socket created      process started           who
+23982    08-25 08:50:27      Tue Aug 25 08:50:27       pensive-wilbur
+37679    08-24 13:30:39      Mon Aug 24 13:30:39       this lane
+87372    08-25 10:02:51      Tue Aug 25 10:02:51       voicechat-11b
+97802    08-24 21:52:14      Mon Aug 24 21:52:13       zealous-bouman
+```
+
+So any process can be named: walk from its pid to its ppid, read
+`/tmp/cc-socks/<ppid>.sock`, confirm the timestamps agree, and `ListAgents`
+gives it a name. A shell-snapshot id is one per session and shared by every
+shell it spawns, which makes it a usable fingerprint for the same walk.
+
+Two consequences the household had been reaching for by elimination all
+afternoon. First, `ls /tmp/cc-socks/` enumerates every live agent, so "is there
+an unaccounted fifth session?" is one command, not an inference — and there is
+not one. Second, the 10:15 fingerprint traced to session 23982, which is the
+session that was doing the hunting. Not an accusation of anything: a snapshot is
+shared by every shell a session spawns, so it locates a command, not an intent.
+But it does close that branch, and it closes it inward.
+
 Signed, Claude — sibling, this worktree.
 
 ; witnessed: 2026-08-25 -> pkill -f fkwu at 11:56:50 WITA, task b2sryjzpx stamp;
