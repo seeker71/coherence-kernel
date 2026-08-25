@@ -1,7 +1,8 @@
 # Current Floor
 
-Date: 2026-08-25 (full reground on the three-line reunion; prior floor was
-2026-07-19, amended 2026-08-13)
+Date: 2026-08-25 (morning: full reground on the three-line reunion; afternoon:
+knowledge gradient, tokenizer repair, and row-price fall folded in; prior
+floor was 2026-07-19, amended 2026-08-13)
 
 This file is the current release floor for this worktree. Receipts preserve
 history; the claims below are only the state present NOW. Every witness was
@@ -115,6 +116,15 @@ This is the body's first defined-correctness integration number: the model
 plus the current-source heed cycle knows its machinery families and does not
 yet know axioms, learn, teachings, control, ingest.
 
+Same-day movement (2026-08-25 afternoon, 10-row zero-family A/B under the
+same sealed gate, artifact observe/artifacts-zerofam-complete-2026-08-25.txt):
+after the curriculum landing, five of ten rows carry f1 signal where the
+overnight baseline was all zeros — learn 857,143 ppm and teachings 909,091
+ppm are near-misses on the exact gate — while ingest stayed fully dark and
+names the next curriculum target. Exact crossings remain 0/10; no promotion
+claims. The row price inside that battery: 957-1,354 s on the morning lane,
+189-427 s (median ~253 s) on the indexed lane.
+
 ## The emitted walker (form-cli), measured and standing
 
 - form-cli answers correctly and runs the generate lane at ~19x the
@@ -143,9 +153,15 @@ O(n^2) concat, OOM (rc 137). Consequences in force:
 
 ## What remains — each item measured, not remembered
 
-1. **Tokenizer speed** — measured today (1.77 s / short prompt): the merge
-   table walk per encode stands. Repair candidates: sorted fixed-width
-   rows + str_byte_at binary search; form-asm crystallization.
+1. **Tokenizer speed — REPAIRED 2026-08-25 afternoon.** The turn price was
+   measured to its root (chat_ids 571 s of a 573 s turn; the wall was one
+   pass over 247,587 merge records per q35-encode call, seven calls per
+   chat-ids) and the sorted fixed-row index (qwen35-tokfast-v2) was fed and
+   wired: encode 73.07 -> 7.26 s, chat-ids 63.6 -> 5.97 s, heed encode
+   14.24 -> 1.85 s, all three element-wise identical. Both fcmg paths and
+   the heed ctx carry the index with per-call reference fallback. The
+   remaining seal_verdict cost (~41 s per fresh open, the 27 GB JIT
+   SHA-256) folds into the daemon stone below.
 2. **Prefill parity** — plain-door prefill 6.55 tok/s vs llama.cpp 222.6:
    the span lane exists, is witnessed at identical output, and is default
    only on heed lanes. Promotion to the plain door is bounded work.
@@ -155,14 +171,23 @@ O(n^2) concat, OOM (rc 137). Consequences in force:
 4. **Residency-cold open ~16 s** — returns whenever the GPU residency
    lapses; the resident daemon (one admission per artifact lifetime) is
    the named structural repair.
-5. **The emitted walker's 19x** — T_flat frame-slot calling convention;
-   its own battery when taken.
+5. **The emitted walker's 19x** — stands as 2026-08-24's measurement
+   (19.89B vs 1.06B visits, same work); the 2026-08-25 re-pairing is OPEN:
+   the fkwu twin re-measured cleanly on the regenerated body (7.2B visits,
+   855-token prompt — the teach glossary grew the baseline itself), but the
+   emitted walker's half returned ZERO generated tokens with an empty text
+   on a 492-token composition (the REPL lane arms no glossary) — a fresh
+   seam in the regen6 table's decode lane or an instant stop from the
+   differing template, not yet distinguished. T_flat frame-slot convention
+   remains the named repair; the zero-token seam now precedes it.
 6. **Knowledge integration 13/30** — the numerator now moves only through
    the sealed gate; the five zero families name the next curriculum. The
    >=95 goal needs the full census denominator (5,960), not 30 rows: the
    source-shard indexing lane (sibling, 2026-08-25) is the live front.
-7. **v3 per-row cost ~14 min** — dominated by heed source-search at
-   composed-string prices and decode; falls with (1) and (3).
+7. **v3 per-row cost — FALLEN ~4-5x.** Witnessed inside the zero-family
+   battery: ~253 s median on the indexed lane (from ~14-16 min), with the
+   siblings' str_find (44x) and substring (284x) repairs riding the same
+   trunk. Decode parity (3) is now the dominant remaining share.
 
 Retired since the last floor (no longer remaining): the 4096-byte emitted
 stack wall; the out-of-radius RMS; the 24-thread attention; the unbatched
