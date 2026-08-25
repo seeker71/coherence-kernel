@@ -33,8 +33,15 @@ go/rust/clang/bash/python in the runtime* — is the **floor this repo starts on
   mind that can be watched thinking and trusted exactly as far as it has measured itself.
 
 **OUT (stays in the origin / private repo, never here):**
-- The Python app and carriers (~3,400 `.py`), the full Go/Rust/TS kernels, the web/API/substrate-service.
+- The Python app and carriers (~3,400 `.py`), the web/API/substrate-service.
 - Private tissue: `memory/`, lineage docs, partner/personal context, anything not for a public commons kernel.
+
+(The full Go/Rust/TS kernels were on this OUT list until they moved in-tree
+as `form/form-kernel-go|rust|ts` — proof siblings the regen carriers snapshot,
+and, since 2026-08-25, located witnesses in their own right: their deliberate
+bounds fatality is the loud horn of the sentinel tradeoff the corpus rows
+valuedabsence/voidalias carry. The minimal walkers stay the thin four-way
+surface; the full kernels are heavier arms, not the proof floor.)
 
 This repo is **public-able by construction** — there are no private parts to excise. That serves the
 "commons no one owns" north star directly.
