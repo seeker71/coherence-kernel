@@ -1,5 +1,11 @@
 # 2026-08-25 — the bareprobe: the shield would blind the instrument
 
+> **Addendum (queue, trunk a490967a):** bareprobe reseats to **1116** at
+> this line's merge (minterbite moved 1113 → 1114 on the trunk; watchgap
+> holds 1115). This line's full seatmap: 1100/1101 → 1101/1102 · 1105 →
+> 1110 · 1113 → 1114 · 1114 → 1116. Row 1117 (seatmap) words the ledger
+> itself.
+
 The weaver's A/B completed (10/10, zero errors, residence released; five
 rows with f1 signal against the all-zero overnight baseline, ingest fully
 dark and thereby naming the next curriculum target) and the discriminator
