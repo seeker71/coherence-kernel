@@ -125,3 +125,4 @@ n<=4096; serial attestant above), the corrected live rates are prefill
 6.27 tok/s and decode 4.54 tok/s — slower and defined. The
 width-independent cooperative RMS (simd tree, no sq[n] scratch, additive
 kernel like the GQA repair above) is the named next stone.
+

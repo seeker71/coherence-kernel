@@ -7,7 +7,7 @@
 ; MSL is assembled by Form and passed to metal_pipeline, so every kernel is JIT-compiled for the
 ; device that actually answered metal_status.  Model bytes remain mmap-backed no-copy buffers.
 ;
-; preludes: native/metal/kat-token-handle.fk form-stdlib/qk-matmul-batch.fk
+; preludes: native/metal/kat-token-handle.fk form-stdlib/qk-matmul-batch.fk native/metal/qwen35-linear-span-layout-contract.fk
 
 (do
     ; Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
@@ -47,7 +47,7 @@
     (defn q38-qsplit-span-msl (fname)
         (str_concat "kernel void "
         (str_concat fname
-            " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& off [[buffer(4)]], constant uint& ntok [[buffer(5)]], uint gid [[thread_position_in_grid]]) { uint t = gid / n; if (t >= ntok) return; uint i = gid - t * n; uint h = i / hd; uint j = i - h * hd; d[t * n + i] = s[t * 2u * n + h * 2u * hd + off + j]; }")))
+            " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& off [[buffer(4)]], constant uint& ntok [[buffer(5)]], constant uint& sstride [[buffer(6)]], uint gid [[thread_position_in_grid]]) { uint t = gid / n; if (t >= ntok) return; uint i = gid - t * n; uint h = i / hd; uint j = i - h * hd; d[t * n + i] = s[t * sstride + h * 2u * hd + off + j]; }")))
 
     (defn q38-headrms-span-msl (fname)
         (str_concat "kernel void "
@@ -82,6 +82,37 @@
         (str_concat "kernel void "
         (str_concat fname
             " (device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device float* y [[buffer(3)]], device float* sc [[buffer(4)]], constant uint& pos0 [[buffer(5)]], constant uint& nq [[buffer(6)]], constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant float& scale [[buffer(9)]], constant uint& sstride [[buffer(10)]], constant uint& ntok [[buffer(11)]], uint gid [[thread_position_in_grid]]) { uint tk = gid / nq; if (tk >= ntok) return; uint h = gid - tk * nq; uint npos = pos0 + tk + 1u; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint qoff = tk * nq * hd + h * hd; uint koff = kvh * hd; uint row = tk * nq + h; uint S = row * sstride; uint E = (ntok * nq + row) * sstride; uint t = 0; while (t < npos) { float acc = 0.0f; uint c = hd; while (c > 0) { c -= 1; float p = q[qoff + c] * kc[t * KVD + koff + c]; acc = p + acc; } sc[S + t] = acc * scale; t += 1; } float mx = sc[S + 0]; t = 1; while (t < npos) { if (sc[S + t] > mx) { mx = sc[S + t]; } t += 1; } float sumes = 0.0f; t = 0; while (t < npos) { float e = fexp(sc[S + t] - mx); sc[E + t] = e; sumes = sumes + e; t += 1; } float invs = 1.0f / sumes; t = 0; while (t < npos) { sc[S + t] = sc[E + t] * invs; t += 1; } uint i = 0; while (i < hd) { y[qoff + i] = 0.0f; i += 1; } t = 0; while (t < npos) { i = 0; while (i < hd) { float pv = vc[t * KVD + koff + i] * sc[S + t]; y[qoff + i] = y[qoff + i] + pv; i += 1; } t += 1; } }")))
+
+    ; ── the linear block over a span ───────────────────────────────────────
+    ; Eleven of the thirteen ops here do not care what order tokens arrive in.
+    ; Two do: the conv window and the delta state are recurrences. Those keep
+    ; their loop and gain only a token offset, so they can walk a span in place;
+    ; the other eleven take the token axis into the grid.
+    (defn q38-l2norm-span-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* x [[buffer(0)]], constant uint& nh [[buffer(1)]], constant uint& hd [[buffer(2)]], constant float& eps [[buffer(3)]], constant uint& stride [[buffer(4)]], constant uint& ntok [[buffer(5)]], uint gid [[thread_position_in_grid]]) { uint t = gid / nh; if (t >= ntok) return; uint h = gid - t * nh; uint o = t * stride + h * hd; float s = 0.0f; for (uint i = 0u; i < hd; ++i) { float v = x[o + i]; s = s + v * v; } float inv = 1.0f / fsqrt(s + eps); for (uint i = 0u; i < hd; ++i) { x[o + i] = x[o + i] * inv; } }")))
+
+    (defn q38-gates-span-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device const float* A [[buffer(2)]], device const float* dtb [[buffer(3)]], device float* alpha [[buffer(4)]], device float* beta [[buffer(5)]], constant uint& nh [[buffer(6)]], constant uint& ntok [[buffer(7)]], uint gid [[thread_position_in_grid]]) { uint t = gid / nh; if (t >= ntok) return; uint h = gid - t * nh; uint o = t * nh + h; float x = a[o] + dtb[h]; float ax = (x < 0.0f) ? -x : x; float sp = ((x > 0.0f) ? x : 0.0f) + fln(1.0f + fexp(-1.0f * ax)); float g = A[h] * sp; alpha[o] = fexp(g); float bb = b[o]; beta[o] = 1.0f / (1.0f + fexp(-1.0f * bb)); }")))
+
+    (defn q38-gnorm-span-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* o [[buffer(0)]], device const float* w [[buffer(1)]], device const float* z [[buffer(2)]], device float* out [[buffer(3)]], constant uint& nv [[buffer(4)]], constant uint& dv [[buffer(5)]], constant float& eps [[buffer(6)]], constant uint& ntok [[buffer(7)]], uint gid [[thread_position_in_grid]]) { uint t = gid / nv; if (t >= ntok) return; uint h = gid - t * nv; uint b = t * nv * dv + h * dv; float ss = 0.0f; for (uint j = 0u; j < dv; ++j) { float v = o[b + j]; ss = ss + v * v; } float meansq = ss / float(dv); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } float inv = 1.0f / gg; for (uint j = 0u; j < dv; ++j) { float nm = (o[b + j] * inv) * w[j]; float zz = z[b + j]; float sg = 1.0f / (1.0f + fexp(-1.0f * zz)); out[b + j] = nm * (zz * sg); }}")))
+
+    ; the two recurrences: same body, one offset so they can walk a span in place
+    (defn q38-conv-off-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* win [[buffer(0)]], device const float* x [[buffer(1)]], device const float* w [[buffer(2)]], device float* y [[buffer(3)]], constant uint& nch [[buffer(4)]], constant uint& kw [[buffer(5)]], constant uint& toff [[buffer(6)]], uint c [[thread_position_in_grid]]) { if (c >= nch) return; uint b = c * kw; for (uint j = 0u; j + 1u < kw; ++j) { win[b + j] = win[b + j + 1u]; } win[b + kw - 1u] = x[toff + c]; float acc = 0.0f; for (uint j = 0u; j < kw; ++j) { acc = acc + win[b + j] * w[b + j]; } y[toff + c] = acc; }")))
+
+    (defn q38-delta-off-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* S [[buffer(0)]], device const float* c [[buffer(1)]], device const float* alpha [[buffer(2)]], device const float* beta [[buffer(3)]], device float* o [[buffer(4)]], constant uint& nv [[buffer(5)]], constant uint& dv [[buffer(6)]], constant uint& dk [[buffer(7)]], constant uint& nk [[buffer(8)]], constant float& qscale [[buffer(9)]], constant uint& toff [[buffer(10)]], constant uint& goff [[buffer(11)]], constant uint& ooff [[buffer(12)]], uint gid [[thread_position_in_grid]]) { if (gid >= nv * dv) return; uint h = gid / dv; uint i = gid - h * dv; uint kh = h - (h / nk) * nk; device const float* q = c + toff + kh * dk; device const float* k = c + toff + nk * dk + kh * dk; float v = c[toff + 2u * nk * dk + h * dv + i]; uint r = (h * dv + i) * dk; float al = alpha[goff + h]; float pred = 0.0f; for (uint j = 0u; j < dk; ++j) { float sp = al * S[r + j]; S[r + j] = sp; pred = pred + sp * k[j]; } float err = v - pred; float bw = beta[goff + h] * err; float acc = 0.0f; for (uint j = 0u; j < dk; ++j) { float sn = S[r + j] + bw * k[j]; S[r + j] = sn; acc = acc + sn * (qscale * q[j]); } o[ooff + h * dv + i] = acc; }")))
     ; GQA decode with one 256-thread THREADGROUP per query head, replacing the
     ; one-thread-per-head dispatch for this walker only. Measured 2026-08-24
     ; (layer-kind-probe): the full-attention block cost 2113 us of GPU per
@@ -96,6 +127,15 @@
         (str_concat fname
             " (device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device float* y [[buffer(3)]], device float* sc [[buffer(4)]], constant uint& npos [[buffer(5)]], constant uint& nq [[buffer(6)]], constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant float& scale [[buffer(9)]], constant uint& sstride [[buffer(10)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { uint h = tgpig.x; if (h >= nq) return; threadgroup float sh[16]; uint lid = (uint)sgitg * 32u + (uint)tiisg; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint qoff = h * hd; uint koff = kvh * hd; uint S = h * sstride; uint E = (nq + h) * sstride; for (uint t = lid; t < npos; t += 256u) { float acc = 0.0f; for (uint c = 0u; c < hd; ++c) { acc = metal::fma(q[qoff + c], kc[t * KVD + koff + c], acc); } sc[S + t] = acc * scale; } metal::threadgroup_barrier(metal::mem_flags::mem_device); float mx = -3.4e38f; for (uint t = lid; t < npos; t += 256u) { float v = sc[S + t]; if (v > mx) { mx = v; } } mx = metal::simd_max(mx); if (tiisg == 0) { sh[sgitg] = mx; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float gmx = sh[0]; for (uint k = 1u; k < 8u; ++k) { if (sh[k] > gmx) { gmx = sh[k]; } } float se = 0.0f; for (uint t = lid; t < npos; t += 256u) { float e = fexp(sc[S + t] - gmx); sc[E + t] = e; se = se + e; } se = metal::simd_sum(se); if (tiisg == 0) { sh[8u + sgitg] = se; } metal::threadgroup_barrier(metal::mem_flags::mem_device | metal::mem_flags::mem_threadgroup); float tot = 0.0f; for (uint k = 0u; k < 8u; ++k) { tot = tot + sh[8u + k]; } float inv = 1.0f / tot; for (uint c = lid; c < hd; c += 256u) { float acc = 0.0f; for (uint t = 0u; t < npos; ++t) { acc = metal::fma(vc[t * KVD + koff + c], sc[E + t], acc); } y[qoff + c] = acc * inv; } }")))
 
+    ; The individual span emitters above remain independently testable. These
+    ; two composers make their ordering data without redefining an emitter.
+    (defn q38-linear-span-msl ()
+        (str_concat (q38-l2norm-span-msl "form_gdn_l2norm_span_f32")
+        (str_concat (q38-gates-span-msl "form_gdn_gates_span_f32")
+        (str_concat (q38-gnorm-span-msl "form_gdn_norm_gate_span_f32")
+        (str_concat (q38-conv-off-msl "form_gdn_conv_off_f32")
+                    (q38-delta-off-msl "form_gdn_delta_off_f32"))))))
+
     (defn q38-joined-attention-msl ()
         (str_concat (q38-qsplit-span-msl "form_qsplit_span_f32")
         (str_concat (q38-headrms-span-msl "form_headrms_span_f32")
@@ -103,18 +143,27 @@
         (str_concat (q38-cachespan-msl "form_cache_span_f32")
         (str_concat (q38-attn-span-msl "form_gqa_span_f32")
                     (q38-gqa-tg-msl "form_gqa_decode_tg_f32")))))))
-
     (defn q38-msl ()
         (str_concat (kth-msl)
         (str_concat (q80-matvec-wide-body "form_q8_0_matvec_wide_f32")
         (str_concat (qmb-q80-batch)
         (str_concat (q38-copysoff-msl "form_copy_soff_f32")
         (str_concat (q38-rmsspan-msl "form_rmsnorm_span_f32")
-                    (q38-joined-attention-msl)))))))
+        (str_concat (q38-joined-attention-msl)
+                    (q38-linear-span-msl))))))))
+
+    (defn q38-linear-span-pipeline-names ()
+        (list "form_gdn_l2norm_span_f32"
+              "form_gdn_gates_span_f32"
+              "form_gdn_norm_gate_span_f32"
+              "form_gdn_conv_off_f32"
+              "form_gdn_delta_off_f32"))
 
     ; kth-pipes owns indices 0..28.  Dense Qwen adds the cooperative Q8_0 matvec and the Q8_0 row
     ; dequant used by token_embd.weight.
     (defn q38-pipes (msl)
+        (do
+        (let linear (q38-linear-span-pipeline-names))
         (append (kth-pipes msl)
             (list (metal_pipeline msl "form_q8_0_matvec_wide_f32")
                   (metal_pipeline msl "form_q8_0_dequant_f32")
@@ -126,7 +175,12 @@
                   (metal_pipeline msl "form_partial_rope_span_f32")
                   (metal_pipeline msl "form_cache_span_f32")
                   (metal_pipeline msl "form_gqa_span_f32")
-                  (metal_pipeline msl "form_gqa_decode_tg_f32"))))
+                  (metal_pipeline msl "form_gqa_decode_tg_f32")
+                  (metal_pipeline msl (nth linear 0))
+                  (metal_pipeline msl (nth linear 1))
+                  (metal_pipeline msl (nth linear 2))
+                  (metal_pipeline msl (nth linear 3))
+                  (metal_pipeline msl (nth linear 4))))))
 
     ; One exact 256-thread group per output-row pair for Q8_0.  All other declared types retain the
     ; already-proven KAT dispatches.  Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
@@ -288,7 +342,7 @@
             ; threads argument a GROUP count). The serial one-thread-per-head
             ; dispatch this replaces cost the block ~1.7 ms of its 2.1 ms
             ; (2026-08-24, layer-kind-probe: 2113 -> 553 us per block).
-            (metal_enqueue (nth ps 39)
+            (metal_enqueue (nth ps (qlslc-cooperative-gqa-pipeline))
                 (q38-b16 (list (nth bs 22) (nth st 2) (nth st 3) (nth bs 26) (nth bs 27))
                          (list (add pos 1) (nth geo 12) (nth geo 13) (nth geo 14)
                                (nth geo 17) (nth geo 18)) 1 1)
@@ -329,12 +383,37 @@
     ; the point of running it at 1 first: it puts the binding, the grid and the
     ; token-major layout under the body's own witness before the loop order
     ; changes underneath them.
-    (defn q38-mv-batch (ps tv xh yh ntok barrier)
+    ; bs2 is allocated at convcap = max(2*nq*hd, geo1) per token, not geo1 and
+    ; not 2*nq*hd. Anything indexing a span of it must use that width; guessing
+    ; either operand reads off the end of the token before it.
+    (defn q38-bs2-stride (geo)
+        (qlslc-bs2-output-pitch geo))
+
+    ; ystride is the OUTPUT buffer's per-token width, which is not always rows:
+    ; bs2 is allocated at convcap so that one buffer can serve both the fused
+    ; q||gate projection and the linear block's wider one. Writing at `rows`
+    ; there lays each token down at the wrong pitch and everything downstream
+    ; reads the token before it.
+    (defn q38-mv-batch-y (ps tv xh yh ntok ystride barrier)
         (metal_enqueue (nth ps 31)
             (md-bind16 (list (kth-tv-h tv) xh yh)
-                (list (kth-tv-r tv) (kth-tv-c tv) ntok)
+                (list (kth-tv-r tv) (kth-tv-c tv) ntok ystride)
                 256 0 0 barrier)
             (mul (mul (kth-tv-r tv) (div (add ntok 7) 8)) 32)))
+
+    (defn q38-mv-batch (ps tv xh yh ntok barrier)
+        (q38-mv-batch-y ps tv xh yh ntok (kth-tv-r tv) barrier))
+
+    ; Independent identities for the three token-major linear-attention rows.
+    ; bs2 uses the producer-bound output pitch; gates are nv-wide, and delta
+    ; output is nv*dv-wide. The pitch may equal allocation capacity only because
+    ; q38-mv-batch-y writes it explicitly. Invalid tokens remain nothing rather
+    ; than becoming the present integer 0.
+    (defn q38-linear-span-offsets (geo token)
+        (if (lt token 0) (nothing)
+            (list (qlslc-bs2-token-offset geo token)
+                  (mul token (nth geo 3))
+                  (mul token (mul (nth geo 3) (nth geo 5))))))
 
     ; The FFN with its three matmuls on the batched kernel. rms, the swiglu gate
     ; and the residual add are unchanged: at ntok 1 they are already right, and at
@@ -444,16 +523,16 @@
             (let nqhd (mul (nth geo 12) (nth geo 14)))
             (let nkvhd (mul (nth geo 13) (nth geo 14)))
             (q38-rms-span ps (nth bs 33) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 6) ntok 1)
-            (q38-mv-batch ps (nth lay 5) (nth bs 1) (nth bs 2) ntok 1)
+            (q38-mv-batch-y ps (nth lay 5) (nth bs 1) (nth bs 2) ntok (q38-bs2-stride geo) 1)
             (q38-mv-batch ps (nth lay 6) (nth bs 1) (nth bs 24) ntok 0)
             (q38-mv-batch ps (nth lay 7) (nth bs 1) (nth bs 25) ntok 0)
             (metal_enqueue (nth ps 34)
                 (q38-b16 (list (nth bs 2) (nth bs 22))
-                         (list nqhd (nth geo 14) 0 ntok) 0 1)
+                         (list nqhd (nth geo 14) 0 ntok (q38-bs2-stride geo)) 0 1)
                 (mul nqhd ntok))
             (metal_enqueue (nth ps 34)
                 (q38-b16 (list (nth bs 2) (nth bs 23))
-                         (list nqhd (nth geo 14) (nth geo 14) ntok) 0 0)
+                         (list nqhd (nth geo 14) (nth geo 14) ntok (q38-bs2-stride geo)) 0 0)
                 (mul nqhd ntok))
             (metal_enqueue (nth ps 35)
                 (q38-b16 (list (nth bs 22) (kth-tv-h (nth lay 8)) (nth bs 22))
@@ -492,9 +571,77 @@
                 (mul (nth geo 0) ntok))
             1))
 
-    ; A layer whose attention is linear carries two recurrences — the conv window
-    ; and the delta state — so its tokens still walk in order. Its FFN does not,
-    ; and neither does the full-attention block above.
+    ; A linear layer keeps the conv window and delta state recurrences ordered by
+    ; token. The surrounding projections, norms, gates, and residual own the
+    ; whole packed span. Two small Form loops retain causality; no carrier-side
+    ; state or hidden evaluator is introduced.
+    (defn q38-linear-conv-span (ps bs geo lay st t ntok)
+        (if (ge t ntok) 1
+            (do
+                (let offsets (q38-linear-span-offsets geo t))
+                (metal_enqueue (nth ps (qlslc-conv-offset-pipeline))
+                    (q38-b16
+                        (list (nth st 0) (nth bs 2) (kth-tv-h (nth lay 6)) (nth bs 2))
+                        (list (nth geo 1) (nth geo 23) (nth offsets 0)) 0 1)
+                    (nth geo 1))
+                (q38-linear-conv-span ps bs geo lay st (add t 1) ntok))))
+
+    (defn q38-linear-delta-span (ps bs geo st t ntok)
+        (if (ge t ntok) 1
+            (do
+                (let offsets (q38-linear-span-offsets geo t))
+                (metal_enqueue (nth ps (qlslc-delta-offset-pipeline))
+                    (q38-b16
+                        (list (nth st 1) (nth bs 2) (nth bs 5) (nth bs 6) (nth bs 8))
+                        (list (nth geo 3) (nth geo 5) (nth geo 4) (nth geo 2) (nth geo 7)
+                              (nth offsets 0) (nth offsets 1) (nth offsets 2)) 0 1)
+                    (mul (nth geo 3) (nth geo 5)))
+                (q38-linear-delta-span ps bs geo st (add t 1) ntok))))
+
+    (defn q38-linear-attn-span (ps bs geo lay st ntok)
+        (do
+            (let bs2-pitch (qlslc-bs2-output-pitch geo))
+            (q38-rms-span ps (nth bs 33) (nth lay 0) (nth bs 1)
+                          (nth geo 0) (nth geo 6) ntok 1)
+            ; bs2 is deliberately pitched. The producer receives this value,
+            ; and every bs2 consumer receives the same value; no consumer
+            ; infers it from allocation size.
+            (q38-mv-batch-y ps (nth lay 5) (nth bs 1) (nth bs 2)
+                            ntok bs2-pitch 1)
+            (q38-mv-batch ps (nth lay 7) (nth bs 1) (nth bs 3) ntok 0)
+            (q38-mv-batch ps (nth lay 8) (nth bs 1) (nth bs 4) ntok 0)
+            (q38-mv-batch ps (nth lay 12) (nth bs 1) (nth bs 7) ntok 0)
+            (q38-linear-conv-span ps bs geo lay st 0 ntok)
+            (metal_enqueue (nth ps 8)
+                (q38-b16 (list (nth bs 2))
+                         (list (qlslc-bs2-allocation-elements geo ntok)) 0 1)
+                (qlslc-bs2-allocation-elements geo ntok))
+            (metal_enqueue (nth ps (qlslc-l2norm-span-pipeline))
+                (q38-b16 (list (nth bs 2))
+                    (list (mul 2 (nth geo 2)) (nth geo 4) (nth geo 6)
+                          bs2-pitch ntok) 0 1)
+                (mul (mul 2 (nth geo 2)) ntok))
+            (metal_enqueue (nth ps (qlslc-gates-span-pipeline))
+                (q38-b16
+                    (list (nth bs 3) (nth bs 4) (kth-tv-h (nth lay 9))
+                          (kth-tv-h (nth lay 10)) (nth bs 5) (nth bs 6))
+                    (list (nth geo 3) ntok) 0 1)
+                (mul (nth geo 3) ntok))
+            (q38-linear-delta-span ps bs geo st 0 ntok)
+            (metal_enqueue (nth ps (qlslc-norm-gate-span-pipeline))
+                (q38-b16
+                    (list (nth bs 8) (kth-tv-h (nth lay 11)) (nth bs 7) (nth bs 9))
+                    (list (nth geo 3) (nth geo 5) (nth geo 6) ntok) 0 1)
+                (mul (nth geo 3) ntok))
+            (q38-mv-batch ps (nth lay 13) (nth bs 9) (nth bs 10) ntok 1)
+            (metal_enqueue (nth ps 19)
+                (q38-b16 (list (nth bs 33) (nth bs 10) (nth bs 33))
+                    (list (mul (nth geo 0) ntok)) 0 1)
+                (mul (nth geo 0) ntok))
+            1))
+
+    ; The scalar/token-wise witness remains reachable unchanged for chunk=-2
+    ; and decode. Only the layer-major chunk=-3 lane selects the widened recipe.
     (defn q38-lm-linear (ps bs geo lays sts l t n)
         (if (ge t n) 1
             (do (q38-gather ps bs geo t 1)
@@ -506,7 +653,7 @@
         (if (ge l nL) 1
             (do (if (kth-full? l (nth geo 22))
                     (q38-full-attn-span ps bs geo (nth lays l) (nth sts l) pos0 n)
-                    (q38-lm-linear ps bs geo lays sts l 0 n))
+                    (q38-linear-attn-span ps bs geo (nth lays l) (nth sts l) n))
                 (q38-ffn-span ps bs geo (nth lays l) n)
                 (q38-lm-layers-span ps bs geo lays sts (add l 1) nL n pos0))))
 

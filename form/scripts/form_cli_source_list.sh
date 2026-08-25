@@ -122,6 +122,7 @@ form-stdlib/ask-lane-router.fk
 form-stdlib/form-cli-gguf-cell.fk
 form-stdlib/dsv4-tokenizer.fk
 form-stdlib/qwen35-tokenizer.fk
+form-stdlib/qwen35-tokfast-v2.fk
 form-stdlib/kernel-http.fk
 form-stdlib/form-asm.fk
 form-stdlib/metal-door.fk
@@ -137,11 +138,47 @@ form-stdlib/q3k-dequant.fk
 form-stdlib/q3k-equireach.fk
 form-stdlib/kat-coder-embed.fk
 native/metal/kat-token-handle.fk
+native/metal/qwen35-linear-span-layout-contract.fk
 native/metal/qwen35-dense-token-handle.fk
 native/metal/qwen35-crystal.fk
 native/metal/model-bandwidth.fk
+form-stdlib/form-teach-layer.fk
+form-stdlib/qwen35-form-layer.fk
+form-stdlib/active-learning-tier-cycle.fk
+form-stdlib/local-model-choice.fk
+form-stdlib/substrate-phase.fk
+form-stdlib/source-resonance-stream.fk
+form-stdlib/local-generate-organ.fk
+form-stdlib/language-model.fk
+form-stdlib/form-cli-heedmark-xtal.fk
 form-stdlib/form-cli-qwen-teach-layer.fk
+form-stdlib/form-cli-heed-cursor.fk
+form-stdlib/form-ontology-bp.fk
+form-stdlib/form-cli-heed-telemetry.fk
+form-stdlib/form-knowledge-query-token.fk
+form-stdlib/file-byte-window.fk
+form-stdlib/form-knowledge-source-search.fk
+form-stdlib/form-cli-heed-current-source.fk
+form-stdlib/form-cli-heed-grounded.fk
 form-stdlib/form-cli-model-generate.fk
+form-stdlib/form-cli-model-session.fk
+form-stdlib/bmf-byte-cursor.fk
+form-stdlib/public-source-concept-index.fk
+form-stdlib/public-source-concept-shards.fk
+form-stdlib/form-nodeid-knowledge-query.fk
+form-stdlib/form-cli-nodeid-knowledge-session.fk
+form-stdlib/public-source-concept-key-routes.fk
+form-stdlib/form-nodeid-knowledge-routed-query.fk
+form-stdlib/form-cli-nodeid-knowledge-door.fk
+form-stdlib/form-recipe-birth-token.fk
+form-stdlib/form-recipe-exec-token.fk
+form-stdlib/form-cli-recipe-exec-cursor.fk
+form-stdlib/form-recipe-exec-token-live.fk
+form-stdlib/form-cli-recipe-exec-session.fk
+form-stdlib/form-cli-resident-recipe-birth-exec-categories.fk
+form-stdlib/form-cli-resident-recipe-birth-exec.fk
+form-stdlib/form-nodeid-mastery-cell-categories.fk
+form-stdlib/form-nodeid-mastery-cell-loop.fk
 form-stdlib/form-cli-repl.fk
 scripts/form_cli_source_list.sh
 EOF
@@ -500,12 +537,12 @@ form_cli_verify_generation_attestation() {
     }
     actual="$(form_cli_generation_sha256_file "$platform_carrier")"
     [[ "$FORM_CLI_GENERATION_PLATFORM_CARRIER_SHA256" == "$actual" ]] || {
-        printf 'form-cli generation attestation: platform carrier hash mismatch in %s\n' "$file_path" >&2
+        printf 'form-cli generation attestation: platform carrier hash mismatch in %s\n' "$path" >&2
         return 1
     }
     actual="$(form_cli_generation_sha256_file "$bootstrap_attestation")"
     [[ "$FORM_CLI_GENERATION_BOOTSTRAP_ATTESTATION_SHA256" == "$actual" ]] || {
-        printf 'form-cli generation attestation: bootstrap attestation hash mismatch in %s\n' "$file_path" >&2
+        printf 'form-cli generation attestation: bootstrap attestation hash mismatch in %s\n' "$path" >&2
         return 1
     }
 }
