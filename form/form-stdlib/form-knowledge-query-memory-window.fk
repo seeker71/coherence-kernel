@@ -1,0 +1,179 @@
+; form-knowledge-query-memory-window.fk — a bounded scannerless active window
+; that carries raw bytes to exactly one query-memory crossing.
+;
+; WHY THE FRAME CARRIES DIGESTS AND NOT A COORDINATE. A visible NodeID
+; coordinate `@p.l.t.i` identifies a CATEGORY, not the particular children a
+; request was built from — two different memories mint two different request
+; nodes under the same category 31.2.0.129. So a coordinate in the stream
+; cannot say WHICH memory is meant, and resolving one would need a global
+; registry mapping coordinates to nodes. This cell refuses to invent that.
+;
+; Instead the frame carries the two digests the recipe already holds, and the
+; cursor binds them against a RESIDENT EXPECTED REQUEST it was opened with:
+;
+;   <|form:query-memory-exec|>SOURCE-SHA;QUERY-SHA<|/form:query-memory-exec|>
+;
+; A frame whose digests do not match the resident request is refused by name.
+; Nothing is looked up, nothing is registered, and the carrier holds exactly
+; one request at a time — which is what "resident" means here.
+;
+; SCANNERLESS AND BOUNDED. Bytes arrive in arbitrary chunks and are folded one
+; window at a time with no tokenizer, no pre-step and no vocabulary. Before an
+; open mark the window keeps only enough tail for a split mark to still form.
+; From an open mark onward it holds FROM the mark, so an over-long frame is
+; observable as `timeout` rather than silently losing its own opening. The
+; caps are named, and exceeding one performs NO lookup at all.
+;
+; EXACTLY ONE CROSSING. Once the window has executed, it is done: later bytes,
+; including a second well-formed frame, cannot reach fkqmx-execute-at again.
+; The lookup count in the observation comes from the lookup path's own report.
+;
+; FIVE OUTCOMES STAY FIVE. hit and miss and nothing come from the lookup;
+; timeout is an over-budget frame with the crossing untried; failure is a
+; refusal at a named gate. Folding any pair together would record an outcome
+; nobody observed.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-cli-router.fk
+; preludes: form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
+; preludes: form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
+; preludes: form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk form-stdlib/rag-ask.fk
+; preludes: form-stdlib/form-knowledge-query-token.fk
+; preludes: form-stdlib/form-knowledge-query-memory-rotation-token.fk
+; preludes: form-stdlib/form-knowledge-query-memory-exec.fk
+;
+; Proven by: form-stdlib/tests/form-knowledge-query-memory-exec-band.fk
+
+(do
+    (defn fkqmw-open-mark ()  "<|form:query-memory-exec|>")
+    (defn fkqmw-close-mark () "<|/form:query-memory-exec|>")
+    ; two 64-hex digests, one separator, both marks, and a little air
+    (defn fkqmw-frame-cap () 192)
+    (defn fkqmw-detect-cap () 64)
+
+    (defn fkqmw-state-none () "none")
+    (defn fkqmw-state-held () "held")
+    (defn fkqmw-state-done () "done")
+
+    ; cursor = (state window observation bytes-seen)
+    (defn fkqmw-cursor (state window observation seen)
+        (list state window observation seen))
+    (defn fkqmw-state (c)  (nth c 0))
+    (defn fkqmw-window (c) (nth c 1))
+    (defn fkqmw-observation (c) (nth c 2))
+    (defn fkqmw-seen (c) (nth c 3))
+    (defn fkqmw-done? (c) (if (str_eq (fkqmw-state c) (fkqmw-state-done)) 1 0))
+
+    (defn fkqmw-open () (fkqmw-cursor (fkqmw-state-none) "" (nothing) 0))
+
+    ; ── the two bounded windows ────────────────────────────────────────────
+    (defn fkqmw-clip-left (s cap)
+        (if (le (str_len s) cap) s
+            (substring s (sub (str_len s) cap) (str_len s))))
+
+    (defn fkqmw-fold (window text)
+        (do (let w (str_concat window text))
+            (let o (str_find w (fkqmw-open-mark) 0))
+            (if (lt o 0) (fkqmw-clip-left w (fkqmw-detect-cap))
+                (substring w o (str_len w)))))
+
+    (defn fkqmw-complete? (window)
+        (do (let o (str_find window (fkqmw-open-mark) 0))
+            (if (lt o 0) 0
+                (if (ge (str_find window (fkqmw-close-mark)
+                            (add o (str_len (fkqmw-open-mark)))) 0) 1 0))))
+
+    (defn fkqmw-over? (window)
+        (if (lt (str_find window (fkqmw-open-mark) 0) 0) 0
+            (if (gt (str_len window) (fkqmw-frame-cap)) 1 0)))
+
+    ; ── the frame's two digests, read scannerlessly ────────────────────────
+    (defn fkqmw-payload (window)
+        (do (let o (str_find window (fkqmw-open-mark) 0))
+            (let s (add o (str_len (fkqmw-open-mark))))
+            (let c (str_find window (fkqmw-close-mark) s))
+            (if (lt c 0) "" (substring window s c))))
+
+    (defn fkqmw-source-of (payload)
+        (do (let i (str_find payload ";" 0))
+            (if (lt i 0) "" (substring payload 0 i))))
+    (defn fkqmw-query-of (payload)
+        (do (let i (str_find payload ";" 0))
+            (if (lt i 0) ""
+                (substring payload (add i 1) (str_len payload)))))
+
+    ; ── binding to the RESIDENT expected request ───────────────────────────
+    ; No registry: the carrier already holds the one request it expects, and
+    ; the frame either names that request's digests or it names nothing this
+    ; carrier can serve.
+    (defn fkqmw-binds? (expected payload)
+        (do (let r (fkqmx-request-recipe expected))
+            (if (nothing? r) 0
+                (if (not (str_eq (fkqmw-source-of payload)
+                                 (fkqmx-recipe-source-sha r))) 0
+                    (if (str_eq (fkqmw-query-of payload)
+                                (fkqmx-recipe-query-sha r)) 1 0)))))
+
+    (defn fkqmw-frame-reason (expected payload)
+        (if (eq (str_len payload) 0) "frame-empty"
+            (if (lt (str_find payload ";" 0) 0) "frame-no-separator"
+                (if (not (eq (fkqmx-hex64? (fkqmw-source-of payload)) 1))
+                    "frame-source-digest"
+                    (if (not (eq (fkqmx-hex64? (fkqmw-query-of payload)) 1))
+                        "frame-query-digest"
+                        (if (eq (fkqmw-binds? expected payload) 0)
+                            "expected-request-mismatch"
+                            "ready"))))))
+
+    ; ── feeding, and the single crossing ───────────────────────────────────
+    (defn fkqmw-timeout-obs (expected)
+        (fkqmx-observation "timeout" "frame-budget-exceeded" expected
+            (nothing) (nothing) "" "" 0 0 0))
+
+    (defn fkqmw-settle (index-path expected local-ready window seen)
+        (do
+            (let payload (fkqmw-payload window))
+            (let reason (fkqmw-frame-reason expected payload))
+            (if (not (str_eq reason "ready"))
+                (fkqmw-cursor (fkqmw-state-done) window
+                    (fkqmx-refusal expected reason) seen)
+                (fkqmw-cursor (fkqmw-state-done) window
+                    (fkqmx-execute-at index-path expected local-ready) seen))))
+
+    ; One chunk of raw bytes. A done cursor is inert: later bytes are counted
+    ; and dropped, never executed.
+    (defn fkqmw-feed (c index-path expected local-ready chunk)
+        (do
+            (let seen (add (fkqmw-seen c) (str_len chunk)))
+            (if (eq (fkqmw-done? c) 1)
+                (fkqmw-cursor (fkqmw-state-done) (fkqmw-window c)
+                    (fkqmw-observation c) seen)
+                (do
+                    (let w (fkqmw-fold (fkqmw-window c) chunk))
+                    (if (eq (fkqmw-complete? w) 1)
+                        (fkqmw-settle index-path expected local-ready w seen)
+                        (if (eq (fkqmw-over? w) 1)
+                            (fkqmw-cursor (fkqmw-state-done) w
+                                (fkqmw-timeout-obs expected) seen)
+                            (fkqmw-cursor
+                                (if (lt (str_find w (fkqmw-open-mark) 0) 0)
+                                    (fkqmw-state-none) (fkqmw-state-held))
+                                w (nothing) seen)))))))
+
+    ; Feed a list of chunks in order — the same bytes split any way at all.
+    (defn fkqmw-feed-all (c index-path expected local-ready chunks)
+        (if (eq (len chunks) 0) c
+            (fkqmw-feed-all
+                (fkqmw-feed c index-path expected local-ready (head chunks))
+                index-path expected local-ready (tail chunks))))
+
+    ; The frame a cooperating carrier would emit for a request it holds.
+    (defn fkqmw-frame-for (request)
+        (do (let r (fkqmx-request-recipe request))
+            (if (nothing? r) ""
+                (str_concat (fkqmw-open-mark)
+                    (str_concat (fkqmx-recipe-source-sha r)
+                        (str_concat ";"
+                            (str_concat (fkqmx-recipe-query-sha r)
+                                (fkqmw-close-mark))))))))
+
+    0)
