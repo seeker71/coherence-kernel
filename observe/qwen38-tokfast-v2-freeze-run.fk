@@ -1,0 +1,136 @@
+; qwen38-tokfast-v2-freeze-run.fk — feed the sorted fixed-row tokenizer
+; index (qwen35-tokfast-v2.fk, band-proven, until now never fed) from the
+; live GGUF: walk vocab and merges through the same cp2b byte mapping the
+; encoder compares with, merge-sort by the index's own comparators, and
+; record in strict key order. One freeze per artifact, keyed by the live
+; .form-seal line. Ground for this movement: the measured turn price —
+; chat_ids=571164ms for 530 ids (2026-08-25), with tkz-id-of walking the
+; whole vocab once per emitted symbol.
+;
+; preludes: form-stdlib/qwen35-tokfast-v2.fk form/native/metal/qwen35-crystal.fk form-stdlib/form-cli-model-generate.fk
+
+(do
+    (defn qv2f-path () "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf")
+
+    ; ---- one token's key: its stored codepoint-UTF8 bytes mapped by cp2b ----
+    (defn qv2f-token-key-go (src tat to plen acc)
+        (if (lt to plen)
+            (do (let b0 (gmt-token-byte src tat to))
+                (let cp (if (lt b0 128) b0
+                    (add (mul (sub b0 192) 64)
+                         (sub (gmt-token-byte src tat (add to 1)) 128))))
+                (qv2f-token-key-go src tat (add to (if (lt b0 128) 1 2)) plen
+                    (append acc (list (tkz-cp2b cp)))))
+            acc))
+    (defn qv2f-token-key (src tat)
+        (qv2f-token-key-go src tat 0 (gmt-token-len src tat) (empty)))
+
+    ; ---- gather (key id) for every vocab token --------------------------
+    (defn qv2f-vocab-gather (src tat id n acc)
+        (if (eq id n) acc
+            (qv2f-vocab-gather src (gmt-token-next src tat) (add id 1) n
+                (cons (list (qv2f-token-key src tat) id) acc))))
+
+    ; ---- gather (left right rank) for every merge record ----------------
+    (defn qv2f-merge-gather (src at rank n acc)
+        (if (eq rank n) acc
+            (do (let mlen (tkz-rec-len src at))
+                (qv2f-merge-gather src (tkz-rec-next src at) (add rank 1) n
+                    (cons (list (tkz-mrg-left src at 0 mlen (empty))
+                                (tkz-mrg-right src at 0 mlen (empty) 0)
+                                rank)
+                          acc)))))
+
+    ; ---- merge sort over entry lists with a caller-named comparator -----
+    ; cmpk: 0 = vocab entries (key at slot 0), 1 = merge entries (left/right)
+    (defn qv2f-lt? (cmpk a b)
+        (if (eq cmpk 0)
+            (lt (qtf2-bytes-cmp (nth a 0) (nth b 0)) 0)
+            (lt (qtf2-merge-key-cmp (nth a 0) (nth a 1) (nth b 0) (nth b 1)) 0)))
+    (defn qv2f-split (xs n acc)
+        (if (eq n 0) (list acc xs)
+            (qv2f-split (tail xs) (sub n 1) (cons (head xs) acc))))
+    (defn qv2f-merge2 (cmpk a b acc)
+        (if (nil? a) (qv2f-rev-onto acc b)
+        (if (nil? b) (qv2f-rev-onto acc a)
+            (if (qv2f-lt? cmpk (head b) (head a))
+                (qv2f-merge2 cmpk a (tail b) (cons (head b) acc))
+                (qv2f-merge2 cmpk (tail a) b (cons (head a) acc))))))
+    (defn qv2f-rev-onto (acc xs)
+        (if (nil? acc) xs (qv2f-rev-onto (tail acc) (cons (head acc) xs))))
+    (defn qv2f-sort (cmpk xs)
+        (do (let n (len xs))
+            (if (lt n 2) xs
+                (do (let halves (qv2f-split xs (div n 2) (empty)))
+                    (qv2f-merge2 cmpk
+                        (qv2f-sort cmpk (nth halves 0))
+                        (qv2f-sort cmpk (nth halves 1)) (empty))))))
+
+    ; ---- caps -----------------------------------------------------------
+    (defn qv2f-max-len (xs slot best)
+        (if (nil? xs) best
+            (do (let l (len (nth (head xs) slot)))
+                (qv2f-max-len (tail xs) slot (if (gt l best) l best)))))
+
+    ; ---- record in order ------------------------------------------------
+    (defn qv2f-rec-vocab-all (r xs)
+        (if (nil? xs) r
+            (qv2f-rec-vocab-all
+                (qtf2-rec-vocab r (nth (head xs) 0) (nth (head xs) 1))
+                (tail xs))))
+    (defn qv2f-rec-merge-all (r xs)
+        (if (nil? xs) r
+            (qv2f-rec-merge-all
+                (qtf2-rec-merge r (nth (head xs) 0) (nth (head xs) 1)
+                                  (nth (head xs) 2))
+                (tail xs))))
+
+    (defn qv2f-say (label t0 t1)
+        (print (str_concat label (str_concat "="
+            (str_concat (int_to_str (sub t1 t0)) "ms")))))
+
+    (let path (qv2f-path))
+    (let src (fcmg-src path))
+    (let seal (qsx-trim (read_file (qaf-seal-path-for path))))
+    (let root (qtf2-root-for path))
+
+    (let a0 (now_unix_ms))
+    (let vocab (qv2f-vocab-gather src (gmt-tokens-first src) 0
+                                  (gmt-vocab-n src) (empty)))
+    (let a1 (now_unix_ms))
+    (let s0 (qv2f-say "vocab_gather" a0 a1))
+    (let s1 (print (str_concat "vocab_n=" (int_to_str (len vocab)))))
+    (let sorted-v (qv2f-sort 0 vocab))
+    (let a2 (now_unix_ms))
+    (let s2 (qv2f-say "vocab_sort" a1 a2))
+
+    (let merges (qv2f-merge-gather src (tkz-merges-first src) 0
+                                   (tkz-merges-n src) (empty)))
+    (let a3 (now_unix_ms))
+    (let s3 (qv2f-say "merge_gather" a2 a3))
+    (let s4 (print (str_concat "merge_n=" (int_to_str (len merges)))))
+    (let sorted-m (qv2f-sort 1 merges))
+    (let a4 (now_unix_ms))
+    (let s5 (qv2f-say "merge_sort" a3 a4))
+
+    (let vcap (qv2f-max-len sorted-v 0 1))
+    (let lcap (qv2f-max-len sorted-m 0 1))
+    (let rcap (qv2f-max-len sorted-m 1 1))
+    (let s6 (print (str_concat "caps=" (str_concat (int_to_str vcap)
+        (str_concat "/" (str_concat (int_to_str lcap)
+        (str_concat "/" (int_to_str rcap))))))))
+
+    (let r0 (qtf2-rec-begin root seal vcap lcap rcap))
+    (let r1 (qv2f-rec-vocab-all r0 sorted-v))
+    (let r2 (qtf2-rec-begin-merges r1))
+    (let r3 (qv2f-rec-merge-all r2 sorted-m))
+    (let r4 (qtf2-rec-finish r3))
+    (let a5 (now_unix_ms))
+    (let s7 (qv2f-say "record_publish" a4 a5))
+    (let s8 (print (str_concat "rec_status=" (qtf2-rec-status r4))))
+    (let s9 (print (str_concat "rec_reason=" (qtf2-rec-reason r4))))
+
+    ; re-load through the reader door: the freeze is only real if it answers
+    (let x (qtf2-load root seal))
+    (let s10 (print (str_concat "load_status=" (qtf2-index-status x))))
+    0)
