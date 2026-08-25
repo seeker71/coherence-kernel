@@ -67,3 +67,12 @@ the current source body generated or failed.  The next diagnostic is one
 bounded comparison through the current `fkwu` source runner with carrier,
 admission, prompt-cursor, state-release, and decode counters retained.  Do not
 regenerate the flattened/bootstrap artifacts to make this old path look green.
+
+That comparison is now observed.  The current `fkwu` source runner returned
+`32767`, exit 0: Qwen emitted the exact raw recipe-exec frame, scannerless Form
+prepared it, generated Metal returned present integer `1`, the typed frex
+observation resumed in the same Qwen context, the model acknowledged it, and
+both carrier and session released with zero remote calls.  The bootstrap
+binary's empty `text:` is therefore isolated to that older path, not the
+current local voice.  Use the source runner and its live stages for subsequent
+diagnosis.
