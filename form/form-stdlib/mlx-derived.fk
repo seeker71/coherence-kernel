@@ -1,0 +1,123 @@
+; mlx-derived.fk — the ops that are NOT carrier rows, and the proof they need none.
+;
+; The MLX carrier holds eighteen forms and no more (fk-mlx-carrier.c states the
+; law and the reason for each). Everything below is a Form-emitted graph over
+; those eighteen. Not one of them costs a line of C, and `sub` — which used to
+; be a carrier row — is here now to show the law cuts both ways.
+;
+; Each emitter returns POSTFIX TEXT that acts on whatever the stack already
+; holds, so they compose by concatenation. mld-land is the ending every float
+; pipeline says: scale by a thousand, round half up, and land an int32, because
+; the carrier owns no float return path and needs no float parser.
+;
+; preludes: form-stdlib/core.fk
+; Proven by: form-stdlib/tests/mlx-derived-band.fk
+
+(do
+    (defn mld-j (a b) (str_concat a (str_concat " " b)))
+
+    ; -- the ending: x -> round(x * 1000) as int32 -------------------------
+    (defn mld-land () "1000 mul 1 f32 2 div add i32")
+    (defn mld-close (body) (mld-j body (mld-land)))
+
+    ; -- arithmetic that add/mul/div already contain -----------------------
+    ; neg is a multiply by minus one; sub is neg then add. The carrier row
+    ; for sub was retired on 2026-08-24 and this line replaced it.
+    (defn mld-neg () "-1 mul")
+    (defn mld-sub () (mld-j (mld-neg) "add"))
+    (defn mld-square () "dup mul")
+    ; div computes a/b with b on top, so a reciprocal needs the shuffle:
+    ; that is the whole reason `swap` is one of the eighteen.
+    (defn mld-recip () "1 swap div")
+
+    ; -- activations, all from exp and the four arithmetic rows ------------
+    (defn mld-sigmoid () (mld-j (mld-neg) (mld-j "exp 1 add" (mld-recip))))
+    (defn mld-silu () (mld-j "dup" (mld-j (mld-sigmoid) "mul")))
+    ; swiglu(gate, up) with up beneath gate: silu the gate, multiply through.
+    (defn mld-swiglu () (mld-j (mld-silu) "mul"))
+    ; tanh(x) = (e-1)/(e+1) with e = exp(2x)
+    (defn mld-tanh () (mld-j "2 mul exp dup 1" (mld-j (mld-sub) "swap 1 add div")))
+
+    ; -- reductions and norms, all from sum, rmax, rsqrt -------------------
+    (defn mld-mean (n) (mld-j "sum" (mld-j (int_to_str n) "div")))
+    ; rmsnorm(x) = x * rsqrt(mean(x^2)); the two dups keep x alive twice.
+    (defn mld-rmsnorm (n) (mld-j "dup dup mul" (mld-j (mld-mean n) "rsqrt mul")))
+    (defn mld-l2norm () "dup dup mul sum rsqrt mul")
+    ; softmax(x) = exp(x - rmax x) / sum(exp(x - rmax x))
+    (defn mld-softmax () (mld-j "dup rmax" (mld-j (mld-neg) "add exp dup sum div")))
+
+    ; -- the sixteen witnesses --------------------------------------------
+    (defn mld-p-sub () (mld-j "7 3" (mld-j (mld-sub) "i32")))
+    (defn mld-p-neg () (mld-j "5" (mld-j (mld-neg) "i32")))
+    (defn mld-p-square () (mld-j "6" (mld-j (mld-square) "i32")))
+    (defn mld-p-recip () (mld-close (mld-j "4 f32" (mld-recip))))
+    (defn mld-p-sigmoid () (mld-close (mld-j "0 f32" (mld-sigmoid))))
+    (defn mld-p-silu () (mld-close (mld-j "0 f32" (mld-silu))))
+    (defn mld-p-tanh () (mld-close (mld-j "0 f32" (mld-tanh))))
+    ; swiglu's zero is load-bearing: silu(0) is exactly 0, so a derivation
+    ; that lost the gate would answer 3000 here, not 0.
+    (defn mld-p-swiglu () (mld-close (mld-j "6 f32 0 f32" (mld-swiglu))))
+    ; the same gate without silu — sigmoid(0) * 6 = 3
+    (defn mld-p-gated () (mld-close (mld-j "6 f32 0 f32" (mld-j (mld-sigmoid) "mul"))))
+    (defn mld-p-mean () (mld-close (mld-j "v4 1 2 3 4 f32" (mld-mean 4))))
+    (defn mld-p-l2norm () (mld-close (mld-j "v2 3 4 f32" (mld-j (mld-l2norm) "sum"))))
+    (defn mld-p-rmsnorm () (mld-close (mld-j "v2 3 3 f32" (mld-j (mld-rmsnorm 2) "sum"))))
+    (defn mld-p-softmax () (mld-close (mld-j "v2 1 1 f32" (mld-j (mld-softmax) "sum"))))
+    ; matmul is the one row MLX refuses on integers, so the f32 comes first.
+    (defn mld-p-matmul () (mld-close "v4 1 2 3 4 f32 r2 2 2 dup matmul sum"))
+    (defn mld-p-take () "v4 10 20 30 40 v1 2 take sum i32")
+    (defn mld-p-argmax () "v4 1 9 3 4 argmax i32")
+
+    ; -- the five rows added 2026-08-24, and what they let Form derive --------
+    ; The op census that day read every kernel the qwen35 Metal path emits and
+    ; found four needing sin/cos (rope, partial_rope, rope_pair, q6k_matvec)
+    ; that this carrier could not say at all. log came with them because it
+    ; retires `pow` — the miss named in the 2026-08-20 receipt — as a Form line.
+    (defn mld-pow () "swap log mul exp")           ; a^b : stack [b, a]
+    (defn mld-where () "dup 7 mul swap 1 swap -1 mul add 9 mul add")
+    ; MLX `div` on two int32 is TRUE division, not floor — witnessed
+    ; 2026-08-24, 17/5 came back 3.4 and the mod derived from it read 0.
+    ; The `i32` is the floor, and it is why dtype had to be a row.
+    (defn mld-mod (n) (mld-j "dup" (mld-j (int_to_str n) (mld-j "div i32" (mld-j (int_to_str n) (mld-j "mul" (mld-sub)))))))
+
+    (defn mld-p-sin () (mld-close "0 f32 sin"))
+    (defn mld-p-cos () (mld-close "0 f32 cos"))
+    (defn mld-p-log () (mld-close "1 f32 log"))
+    ; a^b wants the BASE pushed first: swap lifts it under log.
+    (defn mld-p-pow () (mld-close (mld-j "2 f32 3" (mld-pow))))
+    (defn mld-p-gt () "5 3 gt i32")
+    (defn mld-p-iota () "5 iota sum i32")
+    ; where(1>0, 7, 9) with no select row: c*7 + (1-c)*9
+    (defn mld-p-where () (mld-j "1 0 gt i32" (mld-j (mld-where) "i32")))
+    ; 17 mod 5 = 2, with no remainder row: a - (a/n)*n
+    (defn mld-p-mod () (mld-j "17" (mld-j (mld-mod 5) "i32")))
+
+    ; -- run them ----------------------------------------------------------
+    (defn mld-run (p) (mlx_run p))
+
+    (defn mld-check ()
+        (add (if (eq (mld-run (mld-p-sub)) 4) 1 0)
+        (add (if (eq (mld-run (mld-p-neg)) (sub 0 5)) 2 0)
+        (add (if (eq (mld-run (mld-p-square)) 36) 4 0)
+        (add (if (eq (mld-run (mld-p-recip)) 250) 8 0)
+        (add (if (eq (mld-run (mld-p-sigmoid)) 500) 16 0)
+        (add (if (eq (mld-run (mld-p-silu)) 0) 32 0)
+        (add (if (eq (mld-run (mld-p-tanh)) 0) 64 0)
+        (add (if (eq (mld-run (mld-p-swiglu)) 0) 128 0)
+        (add (if (eq (mld-run (mld-p-mean)) 2500) 256 0)
+        (add (if (eq (mld-run (mld-p-l2norm)) 1400) 512 0)
+        (add (if (eq (mld-run (mld-p-rmsnorm)) 2000) 1024 0)
+        (add (if (eq (mld-run (mld-p-softmax)) 1000) 2048 0)
+        (add (if (eq (mld-run (mld-p-matmul)) 54000) 4096 0)
+        (add (if (eq (mld-run (mld-p-take)) 30) 8192 0)
+        (add (if (eq (mld-run (mld-p-argmax)) 1) 16384 0)
+        (add (if (eq (mld-run (mld-p-gated)) 3000) 32768 0)
+        (add (if (eq (mld-run (mld-p-sin)) 0) 65536 0)
+        (add (if (eq (mld-run (mld-p-cos)) 1000) 131072 0)
+        (add (if (eq (mld-run (mld-p-log)) 0) 262144 0)
+        (add (if (eq (mld-run (mld-p-pow)) 8000) 524288 0)
+        (add (if (eq (mld-run (mld-p-gt)) 1) 1048576 0)
+        (add (if (eq (mld-run (mld-p-iota)) 10) 2097152 0)
+        (add (if (eq (mld-run (mld-p-where)) 7) 4194304 0)
+             (if (eq (mld-run (mld-p-mod)) 2) 8388608 0)))))))))))))))))))))))))
+    0)

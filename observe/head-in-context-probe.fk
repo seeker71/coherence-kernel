@@ -1,0 +1,47 @@
+; head-in-context-probe.fk — the head's cost where it actually runs: at the end
+; of a 65-layer barriered command buffer, on live stream state. Isolated, the
+; head matvec answers 452 GB/s (matvec-shape-probe); the generate counters say
+; a full forward costs 66 ms more than a state-only advance. Same door, same
+; state, adjacent positions: the delta here is the head's true in-context price.
+;
+; preludes: native/metal/qwen35-dense-token-handle.fk
+
+(do
+    (defn hcp-status-int (status name)
+        (do (let key (str_concat name "="))
+            (let at (str_find status key 0))
+            (if (lt at 0) -1
+                (do (let start (add at (str_len key)))
+                    (let stop (str_find status "\n" start))
+                    (if (lt stop 0) -1 (str_to_int (substring status start stop)))))))
+    (defn hcp-gpu () (hcp-status-int (metal_status) "gpu_busy_us_total"))
+    (defn hcp-advances (ps bs geo lays sts embTv pos rem)
+        (if (le rem 0) 0
+            (do (let one (q38-advance ps bs geo lays sts embTv 100 pos))
+                (hcp-advances ps bs geo lays sts embTv (add pos 1) (sub rem 1)))))
+    (defn hcp-forwards (ps bs geo lays sts embTv onormTv projTv pos rem)
+        (if (le rem 0) 0
+            (do (let one (q38-forward ps bs geo lays sts embTv onormTv projTv 100 pos))
+                (hcp-forwards ps bs geo lays sts embTv onormTv projTv (add pos 1) (sub rem 1)))))
+    (let st (q38-open "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.gguf" 256))
+    (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2)) (let lays (nth st 3))
+    (let embTv (nth st 4)) (let onormTv (nth st 5)) (let projTv (nth st 6))
+    (let sts (q38-new-state geo))
+    (let warm (hcp-advances ps bs geo lays sts embTv 0 1))
+    (let g0 (hcp-gpu))
+    (let t0 (now_unix_ms))
+    (let a (hcp-advances ps bs geo lays sts embTv 1 6))
+    (let g1 (hcp-gpu))
+    (let t1 (now_unix_ms))
+    (let b (hcp-forwards ps bs geo lays sts embTv onormTv projTv 7 6))
+    (let g2 (hcp-gpu))
+    (let t2 (now_unix_ms))
+    (print (str_concat "advance_gpu_us_each=" (int_to_str (div (sub g1 g0) 6))))
+    (print (str_concat "  advance_wall_ms_each=" (int_to_str (div (sub t1 t0) 6))))
+    (print "\n")
+    (print (str_concat "forward_gpu_us_each=" (int_to_str (div (sub g2 g1) 6))))
+    (print (str_concat "  forward_wall_ms_each=" (int_to_str (div (sub t2 t1) 6))))
+    (print "\n")
+    (print (str_concat "head_in_context_gpu_us=" (int_to_str (sub (div (sub g2 g1) 6) (div (sub g1 g0) 6)))))
+    (print "\n")
+    0)

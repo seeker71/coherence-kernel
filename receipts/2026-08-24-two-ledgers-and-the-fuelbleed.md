@@ -37,7 +37,7 @@ form-cli-heed-twophase-band             2047
 
 All four preflight clean before any verdict was read. Existing entry points keep
 their exact signatures and meaning through compatibility delegates that build a
-fungible ledger; the law is regenerated from BML, and the authority carries the
+fungible ledger; the proposed mechanism is regenerated from BML, and the current grammar carries the
 `PhaseLedger` template, the `WalkEnding` enum, and an `IHeedCurriculum` for
 anchor-first/path-second and the six kinds a bit cannot carry.
 
@@ -62,7 +62,7 @@ turned, the reserve stayed whole at 32, nothing was cut, and the model stopped
 on purpose with `decode-timeout` still 0**. Telemetry is counts, statuses and a
 hash — the reply crosses as SHA-256 and a byte length, never as text.
 
-**The floor, named after reaching it:** the `nothing` path of the two-phase law
+**The floor, named after reaching it:** the `nothing` path of the two-phase mechanism
 is live-witnessed end to end. The reserve-**opening** path is not, because
 opening requires a hit or a miss, and a hit or a miss requires a knowledge
 adapter this checkout does not hold. The floor is the same one adapter wide it

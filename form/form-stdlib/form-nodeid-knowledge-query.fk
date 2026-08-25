@@ -1,0 +1,554 @@
+; form-nodeid-knowledge-query.fk -- a scannerless local-stream request joins
+; the persisted public-source concept shards to the existing current-source
+; knowledge result and typed-observation path.
+;
+; SURFACE:
+;   <|form:nodeid-knowledge-query|>concept=<bounded-concept-key><|/form:nodeid-knowledge-query|>
+;   <|form:nodeid-knowledge-query|>nodeid=@p.l.t.i<|/form:nodeid-knowledge-query|>
+;
+; The caller supplies a concept coordinate or a reconstructed source/entry
+; NodeID, never a source path.  bmf-core's immutable raw-byte cursor consumes
+; the surface with explicit fuel before parsing.  A ready request performs one
+; registry lookup.  A unique current shard then supplies the one exact path to
+; form-cli-heed-current-source's existing bounded one-file result/observation
+; functions.  No tokenizer, global source scan, flattened table, ops table, C,
+; model call, Metal call, or remote lane participates.
+;
+; IDENTITIES.  The registry's original source and entry NodeIDs remain direct
+; children of bridge source/entry tokens.  The bridge request, executor and
+; observation are separate content-addressed nodes.  Their five reserved
+; categories are, respectively, 31.2.0.96 through 31.2.0.100.  The observation
+; also retains the existing fhcs typed current-source observation NodeID.
+;
+; STATES.  hit, miss and nothing do not collapse.  stale and ambiguous are
+; explicit registry outcomes; timeout and failure are explicit cursor/parser
+; outcomes.  Lifecycle traces retain choice/cut/undo/refine/release.  Every
+; observation carries literal 0/1 flags and model-executed=0.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/bmf-core.fk
+; preludes: form-stdlib/form-knowledge-query-token.fk
+; preludes: form-stdlib/form-knowledge-source-search.fk
+; preludes: form-stdlib/form-cli-heed-current-source.fk
+; preludes: form-stdlib/public-source-concept-index.fk
+; preludes: form-stdlib/public-source-concept-shards.fk
+;
+; Proven by: form-stdlib/tests/form-nodeid-knowledge-query-band.fk
+
+(do
+    ; ---- grammar and bounds ---------------------------------------------
+    (defn fknq-open () "<|form:nodeid-knowledge-query|>")
+    (defn fknq-close () "<|/form:nodeid-knowledge-query|>")
+    (defn fknq-observation-open () "<|form:nodeid-knowledge-observation|>")
+    (defn fknq-observation-close () "<|/form:nodeid-knowledge-observation|>")
+    (defn fknq-max-payload-bytes () 96)
+    (defn fknq-max-frame-bytes ()
+        (add (str_len (fknq-open))
+             (add (fknq-max-payload-bytes) (str_len (fknq-close)))))
+    (defn fknq-max-lookups () 1)
+    (defn fknq-default-artifact ()
+        (fs-path-join (fs-temp-dir) "public-source-concept-registry-v1"))
+
+    ; ---- five explicit bridge identities -------------------------------
+    (defn fknq-source-category () (make_nodeid 31 2 0 96))
+    (defn fknq-entry-category () (make_nodeid 31 2 0 97))
+    (defn fknq-request-category () (make_nodeid 31 2 0 98))
+    (defn fknq-executor-category () (make_nodeid 31 2 0 99))
+    (defn fknq-observation-category () (make_nodeid 31 2 0 100))
+
+    (defn fknq-absent () (psci-absent-node))
+    (defn fknq-node-or-absent (node)
+        (if (nothing? node) (fknq-absent) node))
+    (defn fknq-node-key (node)
+        (str_concat "@" (psci-node-key node)))
+
+    ; These wrappers preserve, rather than replace, the registry identities.
+    (defn fknq-source-token (source)
+        (intern_node (fknq-source-category)
+            (list source
+                  (intern_trivial_string (psci-source-family source))
+                  (intern_trivial_string (psci-source-path source))
+                  (intern_trivial_string (psci-source-id source)))))
+    (defn fknq-source-token-valid? (token)
+        (if (nothing? token) 0
+        (if (not (node_eq (node_category token) (fknq-source-category))) 0
+        (if (not (eq (len (node_children token)) 4)) 0
+            (psci-source-node-valid? (head (node_children token)))))))
+    (defn fknq-source-original (token) (head (node_children token)))
+
+    (defn fknq-entry-token (entry)
+        (intern_node (fknq-entry-category)
+            (list entry
+                  (fknq-source-token (psci-entry-source entry))
+                  (intern_trivial_int (len (psci-entry-keys entry))))))
+    (defn fknq-entry-token-valid? (token)
+        (if (nothing? token) 0
+        (if (not (node_eq (node_category token) (fknq-entry-category))) 0
+        (if (not (eq (len (node_children token)) 3)) 0
+            (psci-entry-valid? (head (node_children token)))))))
+    (defn fknq-entry-original (token) (head (node_children token)))
+
+    (defn fknq-request-token (kind coordinate)
+        (intern_node (fknq-request-category)
+            (list (intern_trivial_string kind)
+                  (intern_trivial_string coordinate)
+                  (intern_trivial_int (fknq-max-payload-bytes))
+                  (intern_trivial_int (fknq-max-lookups))
+                  (intern_trivial_int 0)
+                  (intern_trivial_string "bmf-core-raw-byte-cursor-v1"))))
+    (defn fknq-request-kind (request)
+        (node_value (nth (node_children request) 0)))
+    (defn fknq-request-coordinate (request)
+        (node_value (nth (node_children request) 1)))
+    (defn fknq-request-valid? (request)
+        (if (nothing? request) 0
+        (if (not (node_eq (node_category request) (fknq-request-category))) 0
+        (if (not (eq (len (node_children request)) 6)) 0
+        (if (not (eq (node_value (nth (node_children request) 3)) 1)) 0
+        (if (not (eq (node_value (nth (node_children request) 4)) 0)) 0
+            (if (str_eq (fknq-request-kind request) "concept")
+                (psci-concept-key-valid? (fknq-request-coordinate request))
+                (if (str_eq (fknq-request-kind request) "nodeid")
+                    (ric-node-id-valid? (fknq-request-coordinate request)) 0))))))))
+
+    (defn fknq-executor-token ()
+        (intern_node (fknq-executor-category)
+            (list
+                (intern_trivial_string
+                    "form/form-stdlib/form-nodeid-knowledge-query.fk")
+                (intern_trivial_string "fkwu-after-bmf-stream-parse")
+                (intern_trivial_int (fknq-max-lookups))
+                (fkqt-executor-token)
+                (intern_trivial_int 0))))
+
+    ; ---- raw-byte BMF cursor --------------------------------------------
+    ; fold = (state consumed position cursor)
+    (defn fknq-fold-row (state consumed cursor)
+        (list state consumed (cur-pos cursor) cursor))
+    (defn fknq-fold-state (row) (nth row 0))
+    (defn fknq-fold-consumed (row) (nth row 1))
+    (defn fknq-fold-position (row) (nth row 2))
+    ; The live session has already assembled at most one bounded frame through
+    ; its immutable byte cursor.  Re-walking that held frame recursively built
+    ; every consumed prefix and retained the recursive arguments in the emitted
+    ; walker; an 87-byte scan alone grew to 19.4 GB before returning.  Consume
+    ; the remaining raw-byte window once.  This is still scannerless: no token
+    ; stream or grammar pre-pass is born, budget is charged in bytes, and a
+    ; timeout retains exactly one bounded partial slice and cursor coordinate.
+    (defn fknq-bmf-step-width (cursor budget)
+        (do
+            (let remain (sub (surf-len (cur-surface cursor)) (cur-pos cursor)))
+            (min2 budget remain)))
+    (defn fknq-bmf-fold (cursor budget consumed)
+        (if (eq (cur-eof? cursor) 1)
+            (fknq-fold-row "complete" consumed cursor)
+            (if (le budget 0)
+                (fknq-fold-row "timeout" consumed cursor)
+                (do
+                    (let width (fknq-bmf-step-width cursor budget))
+                    (let end (add (cur-pos cursor) width))
+                    (let next (cur-advance cursor width))
+                    (let held (str_concat consumed (cur-slice cursor end)))
+                    (if (eq (cur-eof? next) 1)
+                        (fknq-fold-row "complete" held next)
+                        (fknq-fold-row "timeout" held next))))))
+
+    ; parse = (status reason kind coordinate)
+    (defn fknq-parse-row (status reason kind coordinate)
+        (list status reason kind coordinate))
+    (defn fknq-parse-payload (payload)
+        (if (eq (str_find payload "concept=" 0) 0)
+            (do
+                (let coordinate (substring payload 8 (str_len payload)))
+                (if (eq (psci-concept-key-valid? coordinate) 1)
+                    (fknq-parse-row "ready" "ready" "concept" coordinate)
+                    (fknq-parse-row "failure" "invalid-concept-coordinate" "" "")))
+            (if (eq (str_find payload "nodeid=" 0) 0)
+                (do
+                    (let coordinate (substring payload 7 (str_len payload)))
+                    (if (eq (ric-node-id-valid? coordinate) 1)
+                        (fknq-parse-row "ready" "ready" "nodeid" coordinate)
+                        (fknq-parse-row "failure" "invalid-nodeid-coordinate" "" "")))
+                (fknq-parse-row "failure" "unknown-request-kind" "" ""))))
+    (defn fknq-parse (surface)
+        (if (not (eq (str_find surface (fknq-open) 0) 0))
+            (fknq-parse-row "nothing" "no-knowledge-token" "" "")
+            (do
+                (let close-at
+                    (str_find surface (fknq-close) (str_len (fknq-open))))
+                (if (lt close-at 0)
+                    (if (gt (str_len surface) (fknq-max-frame-bytes))
+                        (fknq-parse-row "timeout" "frame-budget-exceeded" "" "")
+                        (fknq-parse-row "nothing" "held-incomplete" "" ""))
+                    (if (not (eq (add close-at (str_len (fknq-close)))
+                                 (str_len surface)))
+                        (fknq-parse-row "failure" "trailing-bytes" "" "")
+                        (do
+                            (let payload (substring surface
+                                (str_len (fknq-open)) close-at))
+                            (if (gt (str_len payload) (fknq-max-payload-bytes))
+                                (fknq-parse-row "timeout" "payload-budget-exceeded" "" "")
+                            (if (or (ge (str_find payload (fknq-open) 0) 0)
+                                    (ge (str_find payload (fknq-close) 0) 0))
+                                (fknq-parse-row "failure" "nested-knowledge-token" "" "")
+                                (fknq-parse-payload payload)))))))))
+
+    ; scan = (status reason request consumed position pretokenized scannerless)
+    (defn fknq-scan-row (status reason request consumed position)
+        (list status reason (fknq-node-or-absent request) consumed position 0 1))
+    (defn fknq-scan-status (scan) (nth scan 0))
+    (defn fknq-scan-reason (scan) (nth scan 1))
+    (defn fknq-scan-request (scan) (nth scan 2))
+    (defn fknq-scan-consumed (scan) (nth scan 3))
+    (defn fknq-scan-position (scan) (nth scan 4))
+    (defn fknq-scan-pretokenized? (scan) (nth scan 5))
+    (defn fknq-scan-scannerless? (scan) (nth scan 6))
+    ; The resident/live membrane is the cursor: it retains split openers and at
+    ; most one bounded frame across decoded byte chunks.  Once that frame is
+    ; complete, constructing a second cursor row inside the emitted carrier is
+    ; redundant and physically divergent (the emitted helper admitted four
+    ; bytes and kept position zero while direct source admitted the frame).
+    ; Admit the held raw surface exactly once.  This remains scannerless and
+    ; preserves a single byte-budget slice for timeout evidence.
+    (defn fknq-bmf-consume (surface budget)
+        (do
+            (let observed (str_len surface))
+            (if (le budget 0)
+                (fknq-scan-row "timeout" "cursor-step-budget" (nothing)
+                    "" 0)
+            (if (gt observed budget)
+                (fknq-scan-row "timeout" "cursor-step-budget" (nothing)
+                    (substring surface 0 budget) budget)
+                (do
+                    (let parsed (fknq-parse surface))
+                    (let status (nth parsed 0))
+                    (let request (if (str_eq status "ready")
+                        (fknq-request-token (nth parsed 2) (nth parsed 3))
+                        (nothing)))
+                    (fknq-scan-row status (nth parsed 1) request surface
+                        observed))))))
+    (defn fknq-bmf-consume-default (surface)
+        (fknq-bmf-consume surface (fknq-max-frame-bytes)))
+    (defn fknq-concept-surface (coordinate)
+        (str_concat (fknq-open)
+            (str_concat "concept=" (str_concat coordinate (fknq-close)))))
+    (defn fknq-nodeid-surface (coordinate)
+        (str_concat (fknq-open)
+            (str_concat "nodeid=" (str_concat coordinate (fknq-close)))))
+
+    ; ---- one persisted-registry lookup ---------------------------------
+    ; registry result = (schema status reason kind coordinate family path id
+    ;                    fresh rebuild matches source entry model-executed
+    ;                    lookup-count)
+    (defn fknq-registry-result (status reason request family path source-id
+                                fresh rebuild matches source entry lookup-count)
+        (list "form-nodeid-knowledge-registry-result-v1" status reason
+              (if (eq (fknq-request-valid? request) 1)
+                  (fknq-request-kind request) "")
+              (if (eq (fknq-request-valid? request) 1)
+                  (fknq-request-coordinate request) "")
+              family path source-id fresh rebuild matches
+              (fknq-node-or-absent source) (fknq-node-or-absent entry)
+              0 lookup-count))
+    (defn fknq-registry-status (r) (nth r 1))
+    (defn fknq-registry-reason (r) (nth r 2))
+    (defn fknq-registry-family (r) (nth r 5))
+    (defn fknq-registry-path (r) (nth r 6))
+    (defn fknq-registry-source-id (r) (nth r 7))
+    (defn fknq-registry-fresh? (r) (nth r 8))
+    (defn fknq-registry-rebuild? (r) (nth r 9))
+    (defn fknq-registry-matches (r) (nth r 10))
+    (defn fknq-registry-source (r) (nth r 11))
+    (defn fknq-registry-entry (r) (nth r 12))
+    (defn fknq-registry-model-executed? (r) (nth r 13))
+    (defn fknq-registry-lookup-count (r) (nth r 14))
+
+    (defn fknq-record-matches-request? (record request)
+        (if (or (eq (len record) 0)
+                (eq (fknq-request-valid? request) 0)) 0
+            (if (str_eq (fknq-request-kind request) "concept")
+                (pscish-key-member? (fknq-request-coordinate request)
+                    (pscish-record-keys record))
+                (if (or
+                        (str_eq (fknq-request-coordinate request)
+                            (fknq-node-key (pscish-record-source record)))
+                        (str_eq (fknq-request-coordinate request)
+                            (fknq-node-key (pscish-record-entry record)))) 1 0))))
+    ; accumulator = (distinct-match-count first-record)
+    (defn fknq-registry-record-acc (record request acc)
+        (if (eq (fknq-record-matches-request? record request) 0) acc
+            (if (eq (nth acc 0) 0) (list 1 record)
+                (if (str_eq (pscish-record-path record)
+                            (pscish-record-path (nth acc 1))) acc
+                    (list (add (nth acc 0) 1) (nth acc 1))))))
+    (defn fknq-registry-files-loop (dir names request acc)
+        (if (nil? names) acc
+            (do
+                (let name (head names))
+                (let path (fs-path-join dir name))
+                (let record (if (eq (psci-ends-with? name ".psci") 1)
+                    (pscish-parse-entry (fs-read-text path)) (empty)))
+                (fknq-registry-files-loop dir (tail names) request
+                    (fknq-registry-record-acc record request acc)))))
+    (defn fknq-registry-buckets-loop (family-root buckets request acc)
+        (if (nil? buckets) acc
+            (do
+                (let dir (fs-path-join family-root (head buckets)))
+                (let next (fknq-registry-files-loop dir (fs-list dir)
+                    request acc))
+                (fknq-registry-buckets-loop family-root (tail buckets)
+                    request next))))
+    (defn fknq-registry-families-loop (artifact families request acc)
+        (if (nil? families) acc
+            (do
+                (let root (pscish-family-shard-root artifact
+                    (psci-family-id (head families))))
+                (let next (fknq-registry-buckets-loop root (fs-list root)
+                    request acc))
+                (fknq-registry-families-loop artifact (tail families)
+                    request next))))
+    (defn fknq-registry-lookup-at (root artifact request)
+        (if (eq (fknq-request-valid? request) 0)
+            (fknq-registry-result "failure" "invalid-request-node" request
+                "" "" "" 0 0 0 (nothing) (nothing) 0)
+        (if (not (eq (fs-is-dir? (pscish-shards-root artifact)) 1))
+            (fknq-registry-result "failure" "registry-unavailable" request
+                "" "" "" 0 0 0 (nothing) (nothing) 1)
+            (do
+                (let acc (fknq-registry-families-loop artifact
+                    (psci-families) request (list 0 (empty))))
+                (if (eq (nth acc 0) 0)
+                    (fknq-registry-result "miss"
+                        (if (str_eq (fknq-request-kind request) "concept")
+                            "concept-not-registered" "nodeid-not-registered")
+                        request "" "" "" 0 0 0 (nothing) (nothing) 1)
+                (if (gt (nth acc 0) 1)
+                    (fknq-registry-result "ambiguous" "ambiguous-registry-request"
+                        request "" "" "" 0 0 (nth acc 0)
+                        (nothing) (nothing) 1)
+                    (do
+                        (let record (nth acc 1))
+                        (let source (pscish-record-source record))
+                        (let entry (pscish-record-entry record))
+                        (let v (pscish-validate-source-at root artifact
+                            (pscish-record-family record)
+                            (pscish-record-path record)))
+                        (if (eq (nth v 0) 1)
+                            (fknq-registry-result "hit"
+                                "current-content-addressed-source" request
+                                (pscish-record-family record)
+                                (pscish-record-path record)
+                                (pscish-record-source-id record)
+                                1 0 1 source entry 1)
+                            (fknq-registry-result "stale"
+                                "source-rebuild-needed" request
+                                (pscish-record-family record)
+                                (pscish-record-path record)
+                                (pscish-record-source-id record)
+                                0 1 1 source entry 1)))))))))
+
+    ; ---- existing current-source query/result/typed observation ----------
+    (defn fknq-query-text (request entry)
+        (if (str_eq (fknq-request-kind request) "concept")
+            (fknq-request-coordinate request)
+            (if (eq (psci-entry-valid? entry) 1)
+                (head (psci-entry-keys entry)) "")))
+    (defn fknq-empty-current-result (reason)
+        (fkss-result "nothing" reason "" "" 0 -1 "" 0 0 0 -1 0))
+    (defn fknq-current-source-result-at (root registry request)
+        (do
+            (let query (fknq-query-text request (fknq-registry-entry registry)))
+            (let atoms (fhcs-atoms query))
+            (if (nil? atoms)
+                (fknq-empty-current-result "no-query-atoms")
+                (fhcs-path-result-with-reason root
+                    (fknq-registry-path registry) atoms
+                    "concept-registry-current-source-hit"))))
+    (defn fknq-fkqt-request (request entry)
+        (do
+            (let query (fknq-query-text request entry))
+            (fkqt-request "ready" "ready" query (fkqt-query-token query))))
+    (defn fknq-existing-observation (request registry current local-ready)
+        (if (not (str_eq (fknq-registry-status registry) "hit"))
+            (fknq-absent)
+            (do
+                (let fkrequest (fknq-fkqt-request request
+                    (fknq-registry-entry registry)))
+                (let path (fkqt-clip (fkss-source-path current)
+                    (fkqt-max-source-bytes)))
+                (let answer (fkss-answer current))
+                (let key (fhcs-answer-key answer))
+                (let lane (fkqt-route-lane (fkss-status current) local-ready))
+                (fhcs-observation-token fkrequest current path answer key lane))))
+
+    ; ---- outcome and lifecycle ------------------------------------------
+    (defn fknq-trace-hit () (list "choice" "cut" "release"))
+    (defn fknq-trace-miss () (list "choice" "cut" "release"))
+    (defn fknq-trace-nothing () (list "choice" "release"))
+    (defn fknq-trace-stale ()
+        (list "choice" "stale" "undo" "refine" "release"))
+    (defn fknq-trace-ambiguous ()
+        (list "choice" "ambiguous" "undo" "refine" "cut" "release"))
+    (defn fknq-trace-timeout ()
+        (list "choice" "timeout" "cut" "undo" "refine" "release"))
+    (defn fknq-trace-failure ()
+        (list "choice" "failure" "undo" "refine" "cut" "release"))
+    (defn fknq-trace-for (status)
+        (if (str_eq status "hit") (fknq-trace-hit)
+        (if (str_eq status "miss") (fknq-trace-miss)
+        (if (str_eq status "nothing") (fknq-trace-nothing)
+        (if (str_eq status "stale") (fknq-trace-stale)
+        (if (str_eq status "ambiguous") (fknq-trace-ambiguous)
+        (if (str_eq status "timeout") (fknq-trace-timeout)
+            (fknq-trace-failure))))))))
+    (defn fknq-trace-actions (trace) (pscish-join trace ","))
+    (defn fknq-trace-has? (trace action)
+        (if (nil? trace) 0
+            (if (str_eq (head trace) action) 1
+                (fknq-trace-has? (tail trace) action))))
+
+    (defn fknq-final-status (registry current)
+        (if (not (str_eq (fknq-registry-status registry) "hit"))
+            (fknq-registry-status registry)
+            (if (str_eq (fkss-status current) "hit") "hit"
+            (if (str_eq (fkss-status current) "miss") "miss"
+            (if (str_eq (fkss-status current) "nothing") "nothing"
+                "failure")))))
+    (defn fknq-final-reason (registry current)
+        (if (str_eq (fknq-registry-status registry) "hit")
+            (fkss-reason current) (fknq-registry-reason registry)))
+
+    ; observation children:
+    ; status reason request executor source-token entry-token source-original
+    ; entry-original existing-fhcs-observation family path source-id answer-key
+    ; answer fresh rebuild matches lookup-count hit-count executed
+    ; model-executed pretokenized scannerless trace
+    (defn fknq-observation-node (status reason scan registry current existing trace)
+        (do
+            (let source (fknq-registry-source registry))
+            (let entry (fknq-registry-entry registry))
+            (let source-valid (psci-source-node-valid? source))
+            (let entry-valid (psci-entry-valid? entry))
+            (let source-token (if (eq source-valid 1)
+                (fknq-source-token source) (fknq-absent)))
+            (let entry-token (if (eq entry-valid 1)
+                (fknq-entry-token entry) (fknq-absent)))
+            (let answer (fkss-answer current))
+            (let hit-count (if (str_eq status "hit") 1 0))
+            (let executed (if (eq (fknq-registry-lookup-count registry) 1) 1 0))
+            (intern_node (fknq-observation-category)
+                (list
+                    (intern_trivial_string status)
+                    (intern_trivial_string reason)
+                    (fknq-scan-request scan)
+                    (fknq-executor-token)
+                    source-token entry-token
+                    (if (eq source-valid 1) source (fknq-absent))
+                    (if (eq entry-valid 1) entry (fknq-absent))
+                    existing
+                    (intern_trivial_string (fknq-registry-family registry))
+                    (intern_trivial_string (fknq-registry-path registry))
+                    (intern_trivial_string (fknq-registry-source-id registry))
+                    (intern_trivial_string (fhcs-answer-key answer))
+                    (intern_trivial_string answer)
+                    (intern_trivial_int (fknq-registry-fresh? registry))
+                    (intern_trivial_int (fknq-registry-rebuild? registry))
+                    (intern_trivial_int (fknq-registry-matches registry))
+                    (intern_trivial_int (fknq-registry-lookup-count registry))
+                    (intern_trivial_int hit-count)
+                    (intern_trivial_int executed)
+                    (intern_trivial_int 0)
+                    (intern_trivial_int (fknq-scan-pretokenized? scan))
+                    (intern_trivial_int (fknq-scan-scannerless? scan))
+                    (intern_trivial_string (fknq-trace-actions trace))))))
+
+    ; result = status reason source-token entry-token request executor
+    ;          observation existing-observation source-original entry-original
+    ;          path answer trace fresh rebuild matches lookup hit executed
+    ;          model-executed pretokenized scannerless
+    (defn fknq-result-from-evidence (scan registry current local-ready)
+        (do
+            (let status (fknq-final-status registry current))
+            (let reason (fknq-final-reason registry current))
+            (let request (fknq-scan-request scan))
+            (let source (fknq-registry-source registry))
+            (let entry (fknq-registry-entry registry))
+            (let source-token (if (eq (psci-source-node-valid? source) 1)
+                (fknq-source-token source) (fknq-absent)))
+            (let entry-token (if (eq (psci-entry-valid? entry) 1)
+                (fknq-entry-token entry) (fknq-absent)))
+            (let existing (fknq-existing-observation request registry current
+                local-ready))
+            (let trace (fknq-trace-for status))
+            (let observation (fknq-observation-node status reason scan registry
+                current existing trace))
+            (let hit-count (if (str_eq status "hit") 1 0))
+            (let executed (if (eq (fknq-registry-lookup-count registry) 1) 1 0))
+            (list status reason source-token entry-token request
+                  (fknq-executor-token) observation existing source entry
+                  (fknq-registry-path registry) (fkss-answer current) trace
+                  (fknq-registry-fresh? registry)
+                  (fknq-registry-rebuild? registry)
+                  (fknq-registry-matches registry)
+                  (fknq-registry-lookup-count registry) hit-count executed 0
+                  (fknq-scan-pretokenized? scan)
+                  (fknq-scan-scannerless? scan))))
+
+    (defn fknq-result-from-scan (scan)
+        (do
+            (let status (fknq-scan-status scan))
+            (let registry (fknq-registry-result status (fknq-scan-reason scan)
+                (fknq-scan-request scan) "" "" "" 0 0 0
+                (nothing) (nothing) 0))
+            (fknq-result-from-evidence scan registry
+                (fknq-empty-current-result (fknq-scan-reason scan)) 0)))
+
+    (defn fknq-status (r) (nth r 0))
+    (defn fknq-reason (r) (nth r 1))
+    (defn fknq-source (r) (nth r 2))
+    (defn fknq-entry (r) (nth r 3))
+    (defn fknq-request (r) (nth r 4))
+    (defn fknq-executor (r) (nth r 5))
+    (defn fknq-observation (r) (nth r 6))
+    (defn fknq-existing-current-observation (r) (nth r 7))
+    (defn fknq-source-original-of (r) (nth r 8))
+    (defn fknq-entry-original-of (r) (nth r 9))
+    (defn fknq-source-path (r) (nth r 10))
+    (defn fknq-answer (r) (nth r 11))
+    (defn fknq-trace (r) (nth r 12))
+    (defn fknq-fresh? (r) (nth r 13))
+    (defn fknq-rebuild? (r) (nth r 14))
+    (defn fknq-match-count (r) (nth r 15))
+    (defn fknq-lookup-count (r) (nth r 16))
+    (defn fknq-hit-count (r) (nth r 17))
+    (defn fknq-executed? (r) (nth r 18))
+    (defn fknq-model-executed? (r) (nth r 19))
+    (defn fknq-pretokenized? (r) (nth r 20))
+    (defn fknq-scannerless? (r) (nth r 21))
+
+    ; This is the only effectful bridge door.  Parsing completes before any
+    ; registry or source file is opened.
+    (defn fknq-execute-at (root artifact surface local-ready budget)
+        (do
+            (let scan (fknq-bmf-consume surface budget))
+            (if (not (str_eq (fknq-scan-status scan) "ready"))
+                (fknq-result-from-scan scan)
+                (do
+                    (let request (fknq-scan-request scan))
+                    (let registry (fknq-registry-lookup-at root artifact request))
+                    (let current (if (str_eq (fknq-registry-status registry) "hit")
+                        (fknq-current-source-result-at root registry request)
+                        (fknq-empty-current-result
+                            (fknq-registry-reason registry))))
+                    (fknq-result-from-evidence scan registry current local-ready)))))
+    (defn fknq-execute (surface local-ready)
+        (do
+            (let root (fhcs-default-root))
+            (if (str_eq root "")
+                (fknq-result-from-scan
+                    (fknq-scan-row "failure" "body-root-unresolved"
+                        (nothing) "" 0))
+                (fknq-execute-at root (fknq-default-artifact) surface local-ready
+                    (fknq-max-frame-bytes)))))
+
+    0)
