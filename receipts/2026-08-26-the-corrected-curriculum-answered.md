@@ -64,6 +64,31 @@ answer did not — evidence of the OPPOSITE), moved — and the next battery
 persists the digest at zero cost. The two sittings already run cannot be
 settled retroactively; that is what unpersisted evidence costs.
 
+## THE FIFTH SITTING SETTLES IT: the decode is deterministic
+
+The digest baseline (2026-08-26 02:38, same curriculum as the fourth
+sitting, artifact observe/artifacts-zerofam-digest-baseline-2026-08-26.txt)
+reproduced the fourth sitting's f1 EXACTLY on every row — all ten scores,
+to the ppm. The decode lane is deterministic. Two consequences, one
+humbling and one sharpening:
+
+- The anchored/fragile reading dissolves entirely. The exact-repro rows
+  (v316, v323) were not anchored knowledge; with deterministic decode,
+  identical scores mean their PROMPTS were identical across the
+  curriculum change — their queries never touched a changed gloss. The
+  scrambled rows were the ones whose prompts actually changed. What
+  looked like anchors was routing.
+- Every sitting-3 -> sitting-4 delta was CAUSAL, not variance. A changed
+  gloss changes those rows' trajectories chaotically (v312 857,143 ->
+  162,162 under a BETTER gloss); an unchanged prompt reproduces to the
+  byte. Prompt-layer teaching does not steer these rows toward sealed
+  answers — it re-rolls them. The fine-tune conclusion stands on firmer
+  ground than the reading that first pointed at it.
+
+v311's digest is sha256("0"): that row's whole answer is one zero
+character — a degenerate reply the scores alone never showed. The
+unasked witness testified on its first day.
+
 ## The most surprising teaching
 
 Two numbers reproducing to six digits across a deliberately changed
