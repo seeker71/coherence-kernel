@@ -1,5 +1,13 @@
 # 2026-08-25 — the coordless: a hazard note that could not say where it is true
 
+> **Update 2026-08-25, same day:** the coordinates landed and the claim
+> seated true — [`the-trueseat.md`](2026-08-25-the-trueseat.md): the minimal
+> arms recover exactly as witnessed below; the FULL kernels die rc 1 **by
+> design**, witnessed here on this tree's form-kernel-go, the crash JSON
+> carrying its own avoidance field. The final surprise: the "plausible 3"
+> was fkwu's -1 sentinel colliding with itself (voidalias, row 1101). The
+> ask for coordinates produced them; coordless earned its keep.
+
 What arrived (pensive-wilbur's queue update, ~12:06 WITA): next free id 1097;
 two deliveries on their trunk — the 44x `str_find` rewrite with its
 equivalence band, and `observe/conflict-mark-scan.fk`, born from a 149-row
