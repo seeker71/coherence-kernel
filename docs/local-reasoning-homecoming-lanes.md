@@ -109,6 +109,7 @@ The claim was true at the wrong resolution. Name the binary.
 | Universe skill mint (BML, BMF, lift, lookup, craft, framebuffer, micro-thought, evaluate) | `form-cli-universe-mint.bml` | band 1023; n=32 unique=32 leakage=0, heldout 8/8; scale-12-4=128 |
 | Unique-cell mint (channel, protocol, axiom, satsang, nothing, timeout, trust, choice-undo, embodied-memory) | `form-cli-unique-mint.bml` | band 1023; n=36 unique=36 leakage=0, heldout 9/9; scale-12-4=144 |
 | Domain-cell mint (assemblage, HD, Gene Keys, astrology, physics, chemistry, biology, quantum, math, logic, shape-match, time-direction) | `form-cli-domain-mint.bml` | band 1023; n=48 unique=48 leakage=0, heldout 11/12; scale-12-4=192 |
+| Organ mill (phase, frequency, vitality, consent, four-way, collapse, JIT, I Ching, codon, IFS, organic, rag-heed) | `form-cli-organ-mint.bml` | band 1023; n=48 unique=48 leakage=0, heldout 11/12; scale-12-4=192 |
 | BML/BMF live-byte curriculum and control curriculum | `bml-bmf-stream-curriculum.*`, `bml-bmf-control-curriculum.*` | bands 16777215, 1048575; grammar-agreement band 1023 |
 | Qwen teach overlay with the new semantics | `form-cli-qwen-teach-layer.fk` | band 16777215; 29 concepts/pairs, semantic heldout 10/10, exact/family leakage 0; answer extraction now preserves source words and requested shape |
 | LoRA identity `(W+B·A)·x == W·x + B·(A·x)` | `lora-adapter.fk` | band 31 |
