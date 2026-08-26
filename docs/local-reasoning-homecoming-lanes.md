@@ -173,9 +173,13 @@ prefill-cost=12  naive-cost=1012  forwards-saved=1000  prefix-preserved=1
 ```
 
 Preflight is clean (`parens balanced, errors 0, warnings 0, unresolved 0`).
-The three `[unresolved-call]` lines the compile emits (`walk_recipe_here`,
-`write_form_binary`, `file_byte_at`) are **pre-existing** — the already-proven
-`form-cli-one-turn-compile.fk` emits the same three on this checkout.
+The former three-call compile seam is now separated by meaning.  Pure Form text
+compilation no longer preludes the ontology loader's `walk_recipe_here`, runtime
+image persistence moved to the explicit `source-compiler-runtime-image.fk`
+carrier, and file-prefix reads use the cursor's bounded `read_file_slice`
+window rather than `file_byte_at`.  `form-cli-one-turn-compile.fk` and the mint
+compilers preflight clean on fkwu; the optional runtime-image carrier remains
+loud on fkwu because `write_form_binary` is still a genuine sibling capability.
 
 ### What the current observations say, in four rows
 
