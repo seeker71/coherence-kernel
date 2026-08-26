@@ -1,0 +1,379 @@
+; form-cli-bml-prefix-session.fk -- the caller that crosses a local Qwen
+; prediction into scannerless BML, semantic execution, and resident feedback.
+;
+; `fcms-pending` is predicted but uncommitted. Its bytes are offered directly
+; to a scannerless continuation cursor. Continue commits that ID through
+; q38-forward. Syntax failure discards it through fcms-observe-rejection. The
+; typed observation closes that assistant turn, but the BML byte channel is
+; separate from ChatML roles: the next model-byte delta resumes from the exact
+; immutable grammar checkpoint. The canonical recursive BMF gate is asked once
+; at a candidate boundary, or once to explain a structural rejection; ordinary
+; tokens never replay the accumulated prefix. This preservation is the
+; backtracking job.
+;
+; Syntax `ready` is not cut. A caller-supplied `(judge raw-bml)` executes the
+; module and returns an offer/ack. Exact one commits the final pending ID and
+; cuts. Exact zero means execution was observed and rejected: it commits the
+; syntactically accepted final ID through ordinary fcms-observe and begins a
+; replacement attempt. Exact nothing means no execution verdict exists: it
+; holds session, final pending ID and prefix unchanged. Parser timeout likewise
+; leaves them unchanged so an
+; explicit caller may retry with more fuel or abstain.
+;
+; With one greedy candidate, cut is physically derived: committing that ID to
+; KV makes it unreachable. A non-derived plural `oac-choice`/cut waits for a
+; bounded top-k carrier. This is the one job missing from adjacent proofs:
+; backtracking at the
+; uncommitted model-token boundary. Structured offers after parsing stay
+; ordinary Form data; this cell does not reconstruct a transport VM.
+;
+; preludes: form-stdlib/form-cli-model-session.fk
+; preludes: form-stdlib/form-bml-prefix-choice.fk
+;
+; Pure shape proven by: form-stdlib/tests/form-cli-bml-prefix-session-band.fk
+
+(do
+    ; result = tag status reason session prefix current-attempt-ids
+    ;          offers cuts undos timeouts failures refinements releases
+    ;          semantic-ack-kind events cursor
+    (defn fcbps-result
+        (status reason session prefix ids offers cuts undos timeouts failures
+         refinements releases semantic-kind events cursor)
+        (list "form-cli-bml-prefix-session-v2" status reason session prefix ids
+              offers cuts undos timeouts failures refinements releases
+              semantic-kind events cursor))
+    (defn fcbps-status (r) (nth r 1))
+    (defn fcbps-reason (r) (nth r 2))
+    (defn fcbps-session (r) (nth r 3))
+    (defn fcbps-prefix (r) (nth r 4))
+    (defn fcbps-attempt-ids (r) (nth r 5))
+    (defn fcbps-offers (r) (nth r 6))
+    (defn fcbps-cuts (r) (nth r 7))
+    (defn fcbps-undos (r) (nth r 8))
+    (defn fcbps-timeouts (r) (nth r 9))
+    (defn fcbps-failures (r) (nth r 10))
+    (defn fcbps-refinements (r) (nth r 11))
+    (defn fcbps-releases (r) (nth r 12))
+    (defn fcbps-semantic-kind (r) (nth r 13))
+    (defn fcbps-events (r) (nth r 14))
+    (defn fcbps-cursor (r)
+        (if (gt (len r) 15) (nth r 15)
+            (blc-fresh 256 (fcbpc-default-material-cap))))
+
+    (defn fcbps-event-traced (kind reason token prefix-bytes trace)
+        (list kind reason token prefix-bytes trace))
+    (defn fcbps-event (kind reason token prefix-bytes)
+        (fcbps-event-traced kind reason token prefix-bytes (empty)))
+    (defn fcbps-event-kind (e) (nth e 0))
+    (defn fcbps-event-reason (e) (nth e 1))
+    (defn fcbps-event-token (e) (nth e 2))
+    (defn fcbps-event-prefix-bytes (e) (nth e 3))
+    (defn fcbps-event-trace (e) (if (gt (len e) 4) (nth e 4) (empty)))
+
+    ; No prompt/model content enters this bounded observation.
+    (defn fcbps-observation (status reason prefix-bytes token action)
+        (str_concat "<|form:bml-observation|>\nstatus="
+        (str_concat status
+        (str_concat "\nreason="
+        (str_concat reason
+        (str_concat "\naccepted-prefix-bytes="
+        (str_concat (int_to_str prefix-bytes)
+        (str_concat "\ncandidate-token-id="
+        (str_concat (int_to_str token)
+        (str_concat "\naction="
+        (str_concat action "\n<|/form:bml-observation|>")))))))))))
+
+    (defn fcbps-semantic-status (ack)
+        (if (eq (oac-one? ack) 1) "one"
+            (if (eq (oac-zero? ack) 1) "zero"
+                (if (eq (oac-nothing? ack) 1) "nothing" "node"))))
+    (defn fcbps-semantic-reason (ack)
+        (str_concat "semantic-" (fcbps-semantic-status ack)))
+    (defn fcbps-semantic-move (ack)
+        (if (eq (oac-one? ack) 1) "cut"
+            (if (eq (oac-zero? ack) 1) "refine"
+                (if (eq (oac-nothing? ack) 1) "hold" "refine"))))
+    (defn fcbps-semantic-lane (args) (nth args 0))
+
+    (defn fcbps-with-generated (s pos pending stopped added)
+        (fcms-with-stream s pos pending stopped
+            (add (fcms-generated-ids s) added)
+            (fcms-injected-ids s) (fcms-observations s)))
+    (defn fcbps-forward (s id pos)
+        (do
+            (let ctx (fcms-ctx s))
+            (q38-forward
+                (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
+                (fcms-sts s) (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                id pos)))
+    (defn fcbps-stopped (src id)
+        (if (or (lt id 0) (eq (q38-stop? id (fcmg-q35-stops src)) 1)) 1 0))
+
+    (defn fcbps-finish
+        (status reason s prefix ids offers cuts undos timeouts failures
+         refinements releases semantic-kind events cursor)
+        (fcbps-result status reason s prefix ids offers cuts undos timeouts
+            failures refinements releases semantic-kind events cursor))
+
+    (defn fcbps-walk
+        (s prefix cursor ids left refinements-left parser-fuel judge
+         offers cuts undos timeouts failures refinements releases
+         semantic-kind events)
+        (if (not (eq (fcms-live? s) 1))
+            (fcbps-finish "nothing" (fcms-reason s) s prefix ids offers cuts
+                undos timeouts failures refinements releases semantic-kind events
+                cursor)
+        (if (le left 0)
+            (fcbps-finish "bounded" "prediction-budget-exhausted" s prefix ids
+                offers cuts undos timeouts failures refinements releases
+                semantic-kind events cursor)
+            (do
+                (let id (fcms-pending s))
+                (if (lt id 0)
+                    (fcbps-finish "nothing" "candidate-absent" s prefix ids
+                        offers cuts undos timeouts failures refinements releases
+                        semantic-kind (append events (list
+                            (fcbps-event "nothing" "candidate-absent" id
+                                (str_len prefix)))) cursor)
+                (if (eq (q38-stop? id (fcmg-q35-stops (fcms-src s))) 1)
+                    (if (le refinements-left 0)
+                        (fcbps-finish "failure" "stop-before-ready" s prefix ids
+                            offers cuts undos timeouts (add failures 1) refinements
+                            releases semantic-kind (append events (list
+                                (fcbps-event "failure" "stop-before-ready" id
+                                    (str_len prefix)))) cursor)
+                        (do
+                            ; Stop is a valid control prediction, not malformed
+                            ; BML bytes. Ordinary observation commits it once.
+                            (let observation (fcbps-observation "failure"
+                                "stop-before-ready" (str_len prefix) id
+                                "continue-from-checkpoint"))
+                            (let resumed (fcms-observe s observation))
+                            (fcbps-walk resumed prefix cursor ids (sub left 1)
+                                (sub refinements-left 1) parser-fuel judge
+                                offers cuts undos timeouts (add failures 1)
+                                (add refinements 1) releases semantic-kind
+                                (append events (list (fcbps-event "failure"
+                                    "stop-before-ready" id
+                                    (str_len prefix)))))))
+                    (do
+                        (let bytes (tkz-decode-text (fcms-src s) (list id)))
+                        (let decision (fcbpc-decide-live cursor id 1 bytes
+                            parser-fuel))
+                        (let action (fcbpc-action decision))
+                        (let state (fcbpc-parser-state decision))
+                        (let reason (fcbpc-reason decision))
+                        (let next-cursor (fcbpc-next-cursor decision))
+                        (let offer-count (add offers 1))
+                        (if (str_eq action "timeout")
+                            ; No observation and no q38-forward: retry is possible
+                            ; with the exact same session, prefix and pending ID.
+                            (fcbps-finish "timeout" reason s prefix ids offer-count
+                                cuts undos (add timeouts 1) failures refinements
+                                releases (oac-tag-nothing) (append events (list
+                                    (fcbps-event-traced "timeout" reason id
+                                        (str_len prefix)
+                                        (gsp-state-trace state)))) next-cursor)
+                        (if (str_eq action "nothing")
+                            (fcbps-finish "nothing" reason s prefix ids offer-count
+                                cuts undos timeouts failures refinements releases
+                                (oac-tag-nothing) (append events (list
+                                    (fcbps-event-traced "nothing" reason id
+                                        (str_len prefix)
+                                        (gsp-state-trace state)))) next-cursor)
+                        (if (str_eq action "capacity")
+                            (fcbps-finish "capacity" reason s prefix ids
+                                offer-count cuts undos timeouts failures
+                                refinements releases (oac-tag-nothing)
+                                (append events (list (fcbps-event-traced
+                                    "capacity" reason id (str_len prefix)
+                                    (gsp-state-trace state)))) next-cursor)
+                        (if (str_eq action "undo")
+                            (if (le refinements-left 0)
+                                (fcbps-finish "failure" reason s
+                                    (fcbpc-next-prefix decision) ids offer-count cuts
+                                    (add undos 1) timeouts (add failures 1)
+                                    refinements releases semantic-kind
+                                    (append events (list (fcbps-event-traced
+                                        "undo" reason id
+                                        (str_len (fcbpc-next-prefix decision))
+                                        (gsp-state-trace state)))) next-cursor)
+                                (do
+                                    (let observation (fcbps-observation "failure"
+                                        reason (str_len (fcbpc-next-prefix decision))
+                                        id "continue-from-checkpoint"))
+                                    (let resumed (fcms-observe-rejection s observation))
+                                    ; The invalid pending ID was not committed.
+                                    ; The ChatML crossing is outside the BML byte
+                                    ; channel, which restores this checkpoint.
+                                    (fcbps-walk resumed
+                                        (fcbpc-next-prefix decision) next-cursor ids
+                                        (sub left 1) (sub refinements-left 1)
+                                        parser-fuel judge offer-count cuts
+                                        (add undos 1) timeouts
+                                        (add failures 1) (add refinements 1) releases
+                                        semantic-kind (append events (list
+                                            (fcbps-event-traced "undo" reason id
+                                                (str_len
+                                                    (fcbpc-next-prefix decision))
+                                                (gsp-state-trace state)))))))
+                        (if (str_eq action "ready")
+                            (do
+                                ; Semantic execution sees the complete source
+                                ; while its final predicted ID is still pending.
+                                (let candidate (fcbpc-next-prefix decision))
+                                (let candidate-ids (append ids (list id)))
+                                (let ack (judge candidate))
+                                (let kind (oac-kind ack))
+                                (let ready-events (append events (list
+                                    (fcbps-event-traced "ready" reason id
+                                        (str_len candidate)
+                                        (gsp-state-trace state)))))
+                                (if (eq (oac-one? ack) 1)
+                                    (do
+                                        ; Only exact semantic one earns physical
+                                        ; commitment; with one candidate this is
+                                        ; the physical, derived cut.
+                                        (let next-id (fcbps-forward s id (fcms-pos s)))
+                                        (let committed (fcbps-with-generated s
+                                            (add (fcms-pos s) 1) next-id
+                                            (fcbps-stopped (fcms-src s) next-id) 1))
+                                        (fcbps-finish "complete" "semantic-one"
+                                            committed candidate candidate-ids
+                                            offer-count (add cuts 1) undos timeouts
+                                            failures refinements (add releases 1)
+                                            kind (append ready-events (list
+                                                (fcbps-event "cut-derived-by-kv-commit"
+                                                    "semantic-one" id
+                                                    (str_len candidate))))
+                                            next-cursor))
+                                    (if (eq (oac-nothing? ack) 1)
+                                        ; No execution observation exists. Do not
+                                        ; commit the final ID or manufacture feedback.
+                                        (fcbps-finish "nothing" "semantic-nothing"
+                                            s candidate candidate-ids offer-count cuts
+                                            undos timeouts failures refinements releases
+                                            kind (append ready-events (list
+                                                (fcbps-event "hold" "semantic-nothing"
+                                                    id (str_len candidate))))
+                                            next-cursor)
+                                    (if (le refinements-left 0)
+                                        (fcbps-finish "failure"
+                                            (fcbps-semantic-reason ack) s candidate
+                                            candidate-ids offer-count cuts undos
+                                            timeouts (add failures 1) refinements
+                                            releases kind (append ready-events (list
+                                                (fcbps-event "failure"
+                                                    (fcbps-semantic-reason ack) id
+                                                    (str_len candidate))))
+                                            next-cursor)
+                                        (do
+                                            (let observation (fcbps-observation
+                                                (fcbps-semantic-status ack)
+                                                (fcbps-semantic-reason ack)
+                                                (str_len candidate) id
+                                                "replace-complete-module"))
+                                            ; Ordinary crossing commits the valid
+                                            ; final token. Zero and nothing remain
+                                            ; distinct in the typed observation.
+                                            (let resumed (fcms-observe s observation))
+                                            (fcbps-walk resumed ""
+                                                (blc-fresh (blc-window-cap cursor)
+                                                    (blc-material-cap cursor))
+                                                (empty)
+                                                (sub left 1)
+                                                (sub refinements-left 1)
+                                                parser-fuel judge
+                                                offer-count cuts undos timeouts
+                                                (add failures 1) (add refinements 1)
+                                                releases kind
+                                                (append ready-events (list
+                                                    (fcbps-event "refine"
+                                                        (fcbps-semantic-reason ack)
+                                                        id 0)))))))))
+                            (do
+                                ; Continue is the only nonterminal path that
+                                ; commits the offered token to KV.
+                                (let next-id (fcbps-forward s id (fcms-pos s)))
+                                (let next-session (fcbps-with-generated s
+                                    (add (fcms-pos s) 1) next-id
+                                    (fcbps-stopped (fcms-src s) next-id) 1))
+                                (let next-prefix (fcbpc-next-prefix decision))
+                                (fcbps-walk next-session next-prefix next-cursor
+                                    (append ids (list id)) (sub left 1)
+                                    refinements-left parser-fuel judge
+                                    offer-count cuts undos timeouts failures
+                                    refinements releases semantic-kind
+                                    (append events (list (fcbps-event-traced "accept"
+                                        reason id (str_len next-prefix)
+                                        (gsp-state-trace state)))))))))))))))))
+
+        )
+
+    (defn fcbps-run
+        (session max-predictions max-refinements material-cap parser-fuel judge)
+        (fcbps-walk session "" (blc-fresh 256 material-cap) (empty)
+            max-predictions max-refinements parser-fuel judge 0 0 0 0 0 0 0
+            (oac-tag-nothing) (empty)))
+
+    ; Parser timeout spends no model token and changes no session state. The
+    ; expenditure decision therefore belongs to the live caller. This explicit
+    ; actuator resumes the same pending ID, immutable BML checkpoint, attempt
+    ; IDs, counters, semantic kind and event history with newly offered fuel.
+    ; Any non-timeout result passes through byte-for-byte.
+    (defn fcbps-retryable? (result)
+        (if (str_eq (fcbps-status result) "timeout") 1 0))
+    (defn fcbps-retry-timeout
+        (result extra-predictions extra-refinements material-cap parser-fuel judge)
+        (if (not (eq (fcbps-retryable? result) 1)) result
+            (fcbps-walk
+                (fcbps-session result)
+                (fcbps-prefix result)
+                (blc-with-material-cap (fcbps-cursor result) material-cap)
+                (fcbps-attempt-ids result)
+                extra-predictions extra-refinements parser-fuel judge
+                (fcbps-offers result) (fcbps-cuts result)
+                (fcbps-undos result) (fcbps-timeouts result)
+                (fcbps-failures result) (fcbps-refinements result)
+                (fcbps-releases result) (fcbps-semantic-kind result)
+                (fcbps-events result))))
+
+    ; A prediction window is an attention pulse, not a fixed target. Exhausting
+    ; one pulse also preserves the exact resident state and cursor, so a live
+    ; control may offer another pulse without restarting or pretending the
+    ; candidate failed.
+    (defn fcbps-expandable? (result)
+        (if (str_eq (fcbps-status result) "bounded") 1 0))
+    (defn fcbps-expand
+        (result extra-predictions extra-refinements material-cap parser-fuel judge)
+        (if (not (eq (fcbps-expandable? result) 1)) result
+            (fcbps-walk
+                (fcbps-session result)
+                (fcbps-prefix result)
+                (blc-with-material-cap (fcbps-cursor result) material-cap)
+                (fcbps-attempt-ids result)
+                extra-predictions extra-refinements parser-fuel judge
+                (fcbps-offers result) (fcbps-cuts result)
+                (fcbps-undos result) (fcbps-timeouts result)
+                (fcbps-failures result) (fcbps-refinements result)
+                (fcbps-releases result) (fcbps-semantic-kind result)
+                (fcbps-events result))))
+
+    (defn fcbps-capacity-expandable? (result)
+        (if (str_eq (fcbps-status result) "capacity") 1 0))
+    (defn fcbps-expand-material
+        (result material-cap extra-predictions extra-refinements parser-fuel judge)
+        (if (not (eq (fcbps-capacity-expandable? result) 1)) result
+            (fcbps-walk
+                (fcbps-session result)
+                (fcbps-prefix result)
+                (blc-with-material-cap (fcbps-cursor result) material-cap)
+                (fcbps-attempt-ids result)
+                extra-predictions extra-refinements parser-fuel judge
+                (fcbps-offers result) (fcbps-cuts result)
+                (fcbps-undos result) (fcbps-timeouts result)
+                (fcbps-failures result) (fcbps-refinements result)
+                (fcbps-releases result) (fcbps-semantic-kind result)
+                (fcbps-events result))))
+
+    0)
