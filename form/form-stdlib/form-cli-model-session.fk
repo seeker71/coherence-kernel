@@ -71,6 +71,50 @@
     (defn fcms-resume-encode-scope () "new-observation-bytes-and-role-crossing-only")
     (defn fcms-generated-id-policy () "carry-original-generated-ids-and-kv")
     (defn fcms-model-executed-form? () 0)
+    (defn fcms-rejection-pending-policy ()
+        "discard-uncommitted-pending-id-before-typed-observation")
+
+    (defn fcms-open-context
+        (path src maxpos prompt-count cursor ids live-cursor x iced)
+        (do
+            (let ctx (if (eq iced 1)
+                (qsx-open path maxpos x) (q38-open path maxpos)))
+            (if (not (eq (q38-context-ok? ctx) 1))
+                (do
+                    (let closed (if (lt (len ctx) 10) 0
+                        (q38-close ctx (empty))))
+                    (fcms-none "model-context-open-refused"))
+                (do
+                    (let sts (q38-new-state (nth ctx 2)))
+                    (if (not (eq (q38-state-ok? sts) 1))
+                        (do
+                            (let state-closed (q38-free-state sts))
+                            (let context-closed (q38-close ctx (empty)))
+                            (fcms-none "model-stream-state-refused"))
+                        (if (eq live-cursor 1)
+                            (do
+                                (let pf (fcmg-live-prefill ctx sts cursor 64))
+                                (if (not (str_eq (nth pf 1) "ok"))
+                                    (do
+                                        (let state-closed
+                                            (q38-free-state sts))
+                                        (let context-closed
+                                            (q38-close ctx (empty)))
+                                        (fcms-none (str_concat
+                                            "live-prompt-cursor-refused:"
+                                            (nth pf 5))))
+                                    (fcms-session "live" "opened-live-cursor"
+                                        path src ctx sts maxpos (nth pf 3)
+                                        (nth pf 2) 0 prompt-count 0 0 0)))
+                            (do
+                                (let pf (q38-prefill
+                                    (nth ctx 0) (nth ctx 1) (nth ctx 2)
+                                    (nth ctx 3) sts (nth ctx 4) (nth ctx 5)
+                                    (nth ctx 6) ids 0))
+                                (fcms-session "live"
+                                    "opened-scanner-fallback" path src ctx sts
+                                    maxpos (nth pf 1) (nth pf 0) 0
+                                    prompt-count 0 0 0))))))))
 
     (defn fcms-open-context
         (path src maxpos prompt-count cursor ids live-cursor x iced)
@@ -227,43 +271,70 @@
             (tkz-cat (q35-one the)
                      (q35-encode src "\n\n"))))))))))))))
 
+    ; The ordinary observation crossing commits the pending model token exactly
+    ; once.  A rejection crossing does the opposite: that pending prediction
+    ; has not entered KV, so it is discarded and only the assistant close is
+    ; placed at its position.  Keeping this as one pure helper makes token 0/1
+    ; testable without opening a model.
+    (defn fcms-crossing-prefix-ids
+        (pending pending-is-stop close-id retain-pending)
+        (if (eq retain-pending 0) (list close-id)
+            (do
+                (let prefix (if (ge pending 0) (list pending) (empty)))
+                (let close-needed
+                    (if (and (ge pending 0) (eq pending-is-stop 1)) 0 1))
+                (if (eq close-needed 1)
+                    (tkz-cat prefix (list close-id)) prefix))))
+
     (defn fcms-observation-ids (s text)
         (do
             (let src (fcms-src s))
             (let stops (fcmg-q35-stops src))
             (let pending (fcms-pending s))
-            (let close-needed
-                (if (and (ge pending 0) (eq (q38-stop? pending stops) 1)) 0 1))
-            (let prefix (if (ge pending 0) (q35-one pending) (empty)))
-            (let closed (if (eq close-needed 1)
-                (tkz-cat prefix (q35-one (q35-special-id src "<|im_end|>")))
-                prefix))
+            (let closed (fcms-crossing-prefix-ids pending
+                (if (ge pending 0) (q38-stop? pending stops) 0)
+                (q35-special-id src "<|im_end|>") 1))
             (tkz-cat closed (fcms-tool-tail-ids src text))))
 
-    ; Injects one typed Form observation into the SAME q38 state. It returns a
-    ; session whose pending ID is the first prediction after the observation.
-    (defn fcms-observe (s text)
+    (defn fcms-rejection-observation-ids (s text)
+        (do
+            (let src (fcms-src s))
+            (let closed (fcms-crossing-prefix-ids (fcms-pending s) 0
+                (q35-special-id src "<|im_end|>") 0))
+            (tkz-cat closed (fcms-tool-tail-ids src text))))
+
+    (defn fcms-observe-ids (s ids refusal-reason)
         (if (not (eq (fcms-live? s) 1)) s
-            (do
-                (let ids (fcms-observation-ids s text))
-                (if (or (eq (len ids) 0)
-                        (gt (add (fcms-pos s) (len ids)) (fcms-maxpos s)))
-                    (fcms-session "nothing" "observation-context-window-refused"
+            (if (or (eq (len ids) 0)
+                    (gt (add (fcms-pos s) (len ids)) (fcms-maxpos s)))
+                    (fcms-session "nothing" refusal-reason
                         (fcms-path s) (fcms-src s) (fcms-ctx s) (fcms-sts s)
                         (fcms-maxpos s) (fcms-pos s) (fcms-pending s)
                         (fcms-stopped? s) (fcms-prompt-ids s)
                         (fcms-generated-ids s) (fcms-injected-ids s)
                         (fcms-observations s))
-                    (do
-                        (let ctx (fcms-ctx s))
-                        (let pf (q38-prefill
-                            (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
-                            (fcms-sts s) (nth ctx 4) (nth ctx 5) (nth ctx 6)
-                            ids (fcms-pos s)))
-                        (fcms-with-stream s (nth pf 1) (nth pf 0) 0
-                            (fcms-generated-ids s)
-                            (add (fcms-injected-ids s) (len ids))
-                            (add (fcms-observations s) 1)))))))
+                (do
+                    (let ctx (fcms-ctx s))
+                    (let pf (q38-prefill
+                        (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
+                        (fcms-sts s) (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                        ids (fcms-pos s)))
+                    (fcms-with-stream s (nth pf 1) (nth pf 0) 0
+                        (fcms-generated-ids s)
+                        (add (fcms-injected-ids s) (len ids))
+                        (add (fcms-observations s) 1))))))
+
+    ; Injects one typed Form observation into the SAME q38 state. It returns a
+    ; session whose pending ID is the first prediction after the observation.
+    (defn fcms-observe (s text)
+        (fcms-observe-ids s (fcms-observation-ids s text)
+            "observation-context-window-refused"))
+
+    ; Grammar/execution rejection enters at the pending token's exact position.
+    ; The rejected prediction is not included in ids and never reaches q38-forward.
+    (defn fcms-observe-rejection (s text)
+        (fcms-observe-ids s (fcms-rejection-observation-ids s text)
+            "rejection-observation-context-window-refused"))
 
     (defn fcms-release-ok? (s)
         (if (eq (fcms-resident? s) 0) 1

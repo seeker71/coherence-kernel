@@ -1,0 +1,213 @@
+; form-bml-prefix-choice.fk -- one predicted token offered to the canonical
+; BML prefix gate before it becomes resident model state.
+;
+; The current Qwen carrier exposes one argmax ID, so this cell does not pretend
+; that accept and reject are two model alternatives. It records one offer and
+; dispatches directly on the recursive BMF prefix status. A viable offer acks
+; one; a malformed/unsupported/materialization-full offer acks nothing and `oac-undo`
+; restores the immutable checkpoint. Parser-fuel timeout remains undecided and
+; changes neither prefix nor pending token. Actual `oac-choice` begins when a
+; bounded same-logit candidate list exists.
+;
+; Syntax completion is only `ready`: the caller's semantic execution must ack
+; exact one before cut. The canonical module convention is structural: the
+; last AST child must be the integer leaf 0. Text ending in `0;` is not enough.
+;
+; decision = tag action parser-state token present next-prefix checkpoint
+;            ack-kind cut-pruned timed-out reason events
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/bmf-core.fk form-stdlib/bmf-grammar.fk
+; preludes: form-stdlib/grammars/form-bml.fk form-stdlib/bmf-prefix-state.fk
+; preludes: form-stdlib/bmf-live-cursor.fk
+; preludes: control/offer-ack-core.fk control/choice-lane-core.fk
+
+(do
+    (defn fcbpc-default-material-cap () 4096)
+    (defn fcbpc-default-fuel () 65536)
+
+    (defn fcbpc-bmf-category (name)
+        (node_category (intern_node (bmf-bp name)
+            (list (intern_trivial_string "")))))
+    (defn fcbpc-ast-is? (node name)
+        (if (value_eq (node_category node) (fcbpc-bmf-category name)) 1 0))
+    (defn fcbpc-final-zero-ast? (ast)
+        (if (not (eq (fcbpc-ast-is? ast "do") 1)) 0
+            (do
+                (let kids (node_children ast))
+                (if (nil? kids) 0
+                    (do
+                        (let final (nth kids (sub (len kids) 1)))
+                        ; node_type 1 is the integer leaf; bool false and string
+                        ; "0" have different types and do not close a module.
+                        (if (and (eq (node_type final) 1)
+                                 (and (nil? (node_children final))
+                                      (eq (node_value final) 0))) 1 0))))))
+    (defn fcbpc-final-zero? (raw)
+        (do
+            (let parsed (g-parse-full (form-bml-section-grammar) raw))
+            (if (str_eq (node_value parsed) "PARSE-FAIL") 0
+                (fcbpc-final-zero-ast? parsed))))
+
+    (defn fcbpc-material-state (raw material-cap fuel)
+        (do
+            (let state (gsp-material-state
+                (form-bml-section-grammar) raw material-cap fuel))
+            ; A syntactically whole sequence without structural final integer
+            ; zero is a viable module prefix: the canonical close may follow.
+            (if (and (str_eq (gsp-state-status state) "complete")
+                     (eq (fcbpc-final-zero? raw) 0))
+                (gsp-state "continue" (gsp-state-consumed state)
+                    (gsp-state-fuel state) "canonical-final-zero-pending")
+                state)))
+
+    (defn fcbpc-decision
+        (action parser-state token present next-prefix checkpoint ack-kind
+         cut-pruned timed-out reason events)
+        (list "form-bml-prefix-choice-v2" action parser-state token present
+              next-prefix checkpoint ack-kind cut-pruned timed-out reason events))
+    (defn fcbpc-action (d) (nth d 1))
+    (defn fcbpc-parser-state (d) (nth d 2))
+    (defn fcbpc-token (d) (nth d 3))
+    (defn fcbpc-token-present? (d) (nth d 4))
+    (defn fcbpc-next-prefix (d) (nth d 5))
+    (defn fcbpc-checkpoint (d) (nth d 6))
+    (defn fcbpc-ack-kind (d) (nth d 7))
+    (defn fcbpc-cut-pruned (d) (nth d 8))
+    (defn fcbpc-timed-out? (d) (nth d 9))
+    (defn fcbpc-reason (d) (nth d 10))
+    (defn fcbpc-events (d) (nth d 11))
+    (defn fcbpc-next-cursor (d)
+        (if (gt (len d) 12) (nth d 12)
+            (blc-fresh 256 (fcbpc-default-material-cap))))
+
+    (defn fcbpc-live-decision
+        (action parser-state token present next-cursor checkpoint ack-kind
+         cut-pruned timed-out reason events)
+        (append (fcbpc-decision action parser-state token present
+                    (blc-material next-cursor) (blc-material checkpoint)
+                    ack-kind cut-pruned timed-out reason events)
+            (list next-cursor)))
+    (defn fcbpc-live-state (status cursor fuel reason kind)
+        (gsp-state-traced status (blc-pos cursor) fuel reason
+            (list (gsp-frame kind reason (blc-pos cursor)
+                (blc-pos cursor) status))))
+
+    ; Delta-only decision door. Ordinary bytes advance only the structural
+    ; continuation. The canonical recursive grammar is asked once, at a
+    ; candidate or structural failure boundary, never for every accumulated
+    ; prefix. The offered model token remains atomic: timeout and capacity hold
+    ; restore the immutable cursor checkpoint so the same ID can be retried.
+    (defn fcbpc-decide-live (cursor token present token-bytes fuel)
+        (do
+            (let checkpoint (blc-checkpoint cursor))
+            (if (eq present 0)
+                (fcbpc-live-decision "nothing"
+                    (fcbpc-live-state "continue" cursor fuel
+                        "candidate-absent" "offer")
+                    token 0 checkpoint checkpoint (oac-tag-nothing) 0 0
+                    "candidate-absent" (list "offer" "nothing"))
+            (if (eq (str_len token-bytes) 0)
+                (fcbpc-live-decision "nothing"
+                    (fcbpc-live-state "continue" cursor fuel
+                        "candidate-empty-bytes" "offer")
+                    token 1 checkpoint checkpoint (oac-tag-nothing) 0 0
+                    "candidate-empty-bytes" (list "offer" "nothing"))
+                (do
+                    (let fed (blc-feed cursor token-bytes fuel))
+                    (let next (blc-result-cursor fed))
+                    (let status (blc-result-status fed))
+                    (if (str_eq status "timeout")
+                        (fcbpc-live-decision "timeout"
+                            (fcbpc-live-state "timeout" next 0
+                                (blc-result-reason fed) "cursor")
+                            token 1 checkpoint checkpoint (oac-tag-nothing) 0 1
+                            (blc-result-reason fed)
+                            (list "offer" "timeout" "nothing"))
+                    (if (str_eq status "materialization-full")
+                        (fcbpc-live-decision "capacity"
+                            (fcbpc-live-state "materialization-full" next
+                                (blc-result-fuel fed) (blc-result-reason fed)
+                                "material-envelope")
+                            token 1 checkpoint checkpoint (oac-tag-nothing) 0 0
+                            (blc-result-reason fed)
+                            (list "offer" "capacity" "hold"))
+                    (if (str_eq status "candidate")
+                        (do
+                            (let state (fcbpc-material-state (blc-material next)
+                                (blc-material-cap next) (blc-result-fuel fed)))
+                            (let canonical (gsp-state-status state))
+                            (if (str_eq canonical "complete")
+                                (fcbpc-live-decision "ready" state token 1 next
+                                    checkpoint (oac-tag-one) 0 0
+                                    (gsp-state-reason state)
+                                    (list "offer" "ready-to-judge"))
+                            (if (str_eq canonical "timeout")
+                                (fcbpc-live-decision "timeout" state token 1
+                                    checkpoint checkpoint (oac-tag-nothing) 0 1
+                                    (gsp-state-reason state)
+                                    (list "offer" "timeout" "nothing"))
+                                (fcbpc-live-decision "undo" state token 1
+                                    checkpoint checkpoint (oac-tag-nothing) 0 0
+                                    (gsp-state-reason state)
+                                    (list "offer" "failure" "undo" "refine")))))
+                    (if (str_eq status "malformed")
+                        (do
+                            (let state (fcbpc-material-state (blc-material next)
+                                (blc-material-cap next) (blc-result-fuel fed)))
+                            (fcbpc-live-decision "undo" state token 1 checkpoint
+                                checkpoint (oac-tag-nothing) 0 0
+                                (blc-result-reason fed)
+                                (list "offer" "failure" "undo" "refine")))
+                        (fcbpc-live-decision "accept"
+                            (fcbpc-live-state "continue" next
+                                (blc-result-fuel fed) (blc-result-reason fed)
+                                "cursor")
+                            token 1 next checkpoint (oac-tag-one) 0 0
+                            (blc-result-reason fed)
+                            (list "offer" "accept")))))))))))
+
+    ; Materialized compatibility witness. The live session does not call this
+    ; whole-prefix door; it exists to compare canonical frontier outcomes.
+    (defn fcbpc-decide-materialized
+        (prefix token present token-bytes material-cap fuel)
+        (do
+            (let checkpoint (oac-store prefix))
+            (if (eq present 0)
+                (fcbpc-decision "nothing" (gsp-state "continue"
+                    (str_len prefix) fuel "candidate-absent") token 0
+                    checkpoint checkpoint (oac-tag-nothing) 0 0
+                    "candidate-absent" (list "offer" "nothing"))
+            (if (eq (str_len token-bytes) 0)
+                (fcbpc-decision "nothing" (gsp-state "continue"
+                    (str_len prefix) fuel "candidate-empty-bytes") token 1
+                    checkpoint checkpoint (oac-tag-nothing) 0 0
+                    "candidate-empty-bytes" (list "offer" "nothing"))
+                (do
+                    (let proposed (str_concat prefix token-bytes))
+                    (let state (fcbpc-material-state proposed material-cap fuel))
+                    (let status (gsp-state-status state))
+                    (if (str_eq status "timeout")
+                        (fcbpc-decision "timeout" state token 1 checkpoint
+                            checkpoint (oac-tag-nothing) 0 1
+                            (gsp-state-reason state)
+                            (list "offer" "timeout" "nothing"))
+                    (if (or (str_eq status "continue")
+                            (str_eq status "complete"))
+                        (fcbpc-decision
+                            (if (str_eq status "complete") "ready" "accept")
+                            state token 1 proposed checkpoint (oac-tag-one) 0 0
+                            (gsp-state-reason state)
+                            (if (str_eq status "complete")
+                                (list "offer" "ready-to-judge")
+                                (list "offer" "accept")))
+                        (do
+                            ; Failure stays nothing. Undo, not a fabricated one
+                            ; acknowledgement, carries the exact checkpoint back.
+                            (let restored (oac-undo (oac-nothing)
+                                checkpoint proposed))
+                            (fcbpc-decision "undo" state token 1 restored
+                                checkpoint (oac-tag-nothing) 0 0
+                                (gsp-state-reason state)
+                                (list "offer" "failure" "undo" "refine"))))))))))
+    0)

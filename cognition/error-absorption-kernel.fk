@@ -1,0 +1,139 @@
+; error-absorption-kernel.fk — receive one error, derive one low-rank update,
+; and ask an untouched lesson whether anything transferred.
+;
+; Four surfaces belong to the target lesson family: two train, one error-
+; teaching, one sealed. The error and sealed surfaces never enter base fit.
+; The update is not sample-byte seeding: A is the error surface's Form feature
+; vector and B carries positive credit to the expected class and negative
+; credit away from the observed class. lora-modality.fk applies B·(A·x).
+;
+; The error receipt is retained after the update. A corrected teaching surface
+; alone is memorization; the sealed surface must also move before this cell
+; reports transfer. Executable nothing/0/1 behavior remains a separate axis.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-cli-qwen-teach-layer.fk
+; preludes: form-stdlib/lora-modality.fk cognition/error-loving-attention.fk
+; Pure proof: cognition/tests/error-absorption-kernel-band.fk
+
+(do
+    (defn eak-absent () "absent")
+    (defn eak-negative () "negative")
+    (defn eak-positive () "positive")
+    (defn eak-names () (list (eak-absent) (eak-negative) (eak-positive)))
+
+    ; Only these six rows enter base fit.
+    (defn eak-train-rows ()
+        (list
+            (list "train" (eak-absent)
+                "no observation arrived and unknown alternatives remain open")
+            (list "train" (eak-absent)
+                "timeout leaves untried lanes unknown so evidence is requested")
+            (list "train" (eak-negative)
+                "present disagreement is a real value that guides a turn")
+            (list "train" (eak-negative)
+                "an observed mismatch remains evidence rather than absence")
+            (list "train" (eak-positive)
+                "fresh observation agrees and confirms the expected result")
+            (list "train" (eak-positive)
+                "reconciled evidence confirms the witnessed outcome")))
+
+    ; Neither row enters base fit. They share lesson meaning, not text.
+    (defn eak-error-row ()
+        (list "error-teaching" (eak-negative)
+            "a measured divergence arrived as evidence and asks the path to turn"))
+    (defn eak-sealed-row ()
+        (list "sealed" (eak-negative)
+            "the arriving difference stays present and steers another observable lane"))
+
+    (defn eak-row-class (row) (nth row 1))
+    (defn eak-row-surface (row) (nth row 2))
+    (defn eak-target-index () 1)
+
+    (defn eak-times-1000-loop (v)
+        (if (eq (len v) 0) (list)
+            (cons (mul (head v) 1000) (eak-times-1000-loop (tail v)))))
+    (defn eak-times-1000-matrix (rows)
+        (if (eq (len rows) 0) (list)
+            (cons (eak-times-1000-loop (head rows))
+                  (eak-times-1000-matrix (tail rows)))))
+    (defn eak-feature (surface)
+        (eak-times-1000-loop (fqt-features surface)))
+    (defn eak-base-models ()
+        (eak-times-1000-matrix (fqt-fit (eak-train-rows) (eak-names))))
+
+    (defn eak-argmax-loop (values i best-i best-value)
+        (if (eq (len values) 0) best-i
+            (if (gt (head values) best-value)
+                (eak-argmax-loop (tail values) (add i 1) i (head values))
+                (eak-argmax-loop (tail values) (add i 1) best-i best-value))))
+    (defn eak-argmax (values)
+        (if (eq (len values) 0) (nothing)
+            (eak-argmax-loop (tail values) 1 0 (head values))))
+
+    (defn eak-base-logits (surface)
+        (lm-matvec (eak-base-models) (eak-feature surface)))
+    (defn eak-base-prediction (surface)
+        (eak-argmax (eak-base-logits surface)))
+
+    ; B is one class-space vector. The expected class receives credit; the
+    ; mistaken class releases the same amount. The error remains in receipt.
+    (defn eak-b-loop (i n observed)
+        (if (eq i n) (list)
+            (cons
+                (if (eq i (eak-target-index)) 1000
+                    (if (eq i observed) (sub 0 1000) 0))
+                (eak-b-loop (add i 1) n observed))))
+    (defn eak-b (observed)
+        (eak-b-loop 0 (len (eak-names)) observed))
+    (defn eak-a ()
+        (eak-feature (eak-row-surface (eak-error-row))))
+
+    (defn eak-adapted-logits (surface)
+        (do
+            (let observed
+                (eak-base-prediction (eak-row-surface (eak-error-row))))
+            (lm-forward (eak-base-models)
+                (list (eak-b observed))
+                (list (eak-a))
+                (eak-feature surface))))
+    (defn eak-adapted-prediction (surface)
+        (eak-argmax (eak-adapted-logits surface)))
+
+    (defn eak-error-receipt ()
+        (do
+            (let row (eak-error-row))
+            (list "error-received-v1"
+                  (eak-row-class row)
+                  (eak-target-index)
+                  (eak-base-prediction (eak-row-surface row))
+                  (eak-row-surface row))))
+
+    ; The behavior door distinguishes absence, present negative, and present
+    ; positive without asking the classifier to stand in for execution.
+    (defn eak-behavior (value)
+        (if (nothing? value) (eak-absent)
+            (if (eq value 0) (eak-negative)
+                (if (eq value 1) (eak-positive) (nothing)))))
+
+    ; [train error sealed receipt
+    ;  base-error base-sealed adapted-error adapted-sealed
+    ;  error-corrected sealed-transfer behavior-distinction attention]
+    (defn eak-observe ()
+        (do
+            (let er (eak-error-row))
+            (let sr (eak-sealed-row))
+            (let ep (eak-base-prediction (eak-row-surface er)))
+            (let sp (eak-base-prediction (eak-row-surface sr)))
+            (let ea (eak-adapted-prediction (eak-row-surface er)))
+            (let sa (eak-adapted-prediction (eak-row-surface sr)))
+            (let signal (ela-signal "error" (eak-target-index) ep
+                                    "error-absorption/error-teaching"))
+            (list (len (eak-train-rows)) 1 1 (eak-error-receipt)
+                  ep sp ea sa
+                  (if (eq ea (eak-target-index)) 1 0)
+                  (if (eq sa (eak-target-index)) 1 0)
+                  (if (and (str_eq (eak-behavior (nothing)) (eak-absent))
+                      (and (str_eq (eak-behavior 0) (eak-negative))
+                           (str_eq (eak-behavior 1) (eak-positive)))) 1 0)
+                  (ela-health signal))))
+    0)
