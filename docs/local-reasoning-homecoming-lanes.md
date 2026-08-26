@@ -107,6 +107,7 @@ The claim was true at the wrong resolution. Name the binary.
 | teach overlay, local-ready marks, one-turn budget | `form-cli-local-ready.bml`, `form-cli-one-turn.bml` | band 1023 each |
 | Form knowledge mint | `form-cli-knowledge-mint.bml` | band 1023; n=24 unique=24 leakage=0, heldout 6/6 |
 | Universe skill mint (BML, BMF, lift, lookup, craft, framebuffer, micro-thought, evaluate) | `form-cli-universe-mint.bml` | band 1023; n=32 unique=32 leakage=0, heldout 8/8; scale-12-4=128 |
+| Unique-cell mint (channel, protocol, axiom, satsang, nothing, timeout, trust, choice-undo, embodied-memory) | `form-cli-unique-mint.bml` | band 1023; n=36 unique=36 leakage=0, heldout 9/9; scale-12-4=144 |
 | BML/BMF live-byte curriculum and control curriculum | `bml-bmf-stream-curriculum.*`, `bml-bmf-control-curriculum.*` | bands 16777215, 1048575; grammar-agreement band 1023 |
 | Qwen teach overlay with the new semantics | `form-cli-qwen-teach-layer.fk` | band 16777215; 29 concepts/pairs, semantic heldout 10/10, exact/family leakage 0; answer extraction now preserves source words and requested shape |
 | LoRA identity `(W+B·A)·x == W·x + B·(A·x)` | `lora-adapter.fk` | band 31 |
