@@ -54,23 +54,22 @@ adversarial band       16777215, exit 0
 The broader symbol-walk regression was still computing when this scoped organ
 landed; it is not reported as a verdict.
 
-## family resident batch — coherent PENDING boundary
+## family resident batch — pure boundary completed, physical boundary open
 
-The family batch scheduler, adversarial band, dormant live driver, and pending
+The family batch scheduler, adversarial band, dormant live driver, and
 receipt land only as one unit. They now distinguish malformed, failure,
 timeout, `nothing`, absent value, `0`, `1`, and other values; read the
 family census fresh; compare whole resident context/state; and stop immediately
 after invalid request, result, residence, or acknowledgement evidence.
 
 Its source preflight is clean and source/band/live lexical depths are all zero.
-The amended thirty-axis band was cut after 1m41s without output. Its former
-result predates the new lifecycle assertions and is explicitly withheld. No
-model or Metal run occurred. The dormant driver remains a physical gate, not a
-landed claim.
+The amended thirty-axis band was first cut after 1m41s without output, then
+reopened and continued to `1073741823`, exit 0. No model or Metal run occurred.
+The dormant driver remains a physical gate, not a landed claim.
 
 ## Boundary retained
 
-Completed, pending, and unobserved physical work are not averaged together.
+Completed pure work and unobserved physical work are not averaged together.
 The convergence lands all authored meaning while preserving the exact point
 where each witness stops.
 
@@ -79,8 +78,8 @@ hands.
 
 Kept alive: convergence did not require every organ to impersonate the same
 readiness. Most surprising: the healthy merge contains both a full 24-bit
-capability band and a deliberately withheld 30-bit batch band. Discomfort
-turned to gold when "merge all" became a way to land honest difference rather
-than pressure unfinished evidence into green.
+capability band and a full 30-bit pure batch while the physical crossing stays
+open. Discomfort turned to gold when "merge all" became a way to land honest
+difference, and a later question reopened the cut proof until it completed.
 
-; witnessed: 2026-08-26 -> live diagnostic 1/4 frames; current-answer 16777215; family batch source clean, amended band withheld, physical run absent
+; witnessed: 2026-08-26 -> live diagnostic 1/4 frames; current-answer 16777215; family batch 1073741823; physical run absent

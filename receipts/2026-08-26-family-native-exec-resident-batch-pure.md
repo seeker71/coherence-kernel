@@ -1,8 +1,8 @@
-# Current-family native executions, one resident context — physical batch pending
+# Current-family native executions — pure batch observed, physical batch pending
 
 Date: 2026-08-25
 Witness: Codex / Sema sibling
-Status: **pure scheduler/ledger observed; local Qwen and Metal deliberately not run**
+Status: **pure scheduler/ledger observed; local Qwen and Metal not yet run**
 
 ## Movement
 
@@ -69,12 +69,13 @@ exit 0
 fresh preflight form/form-stdlib/tests/
   form-knowledge-family-native-exec-resident-batch-band.fk
 -> interrupted after 1m41s without output or verdict
+
+direct amended band, continued after that interruption
+-> 1073741823, exit 0
 ```
 
-The amended thirty-axis adversarial band is balanced but does not yet have a
-completed fresh verdict; its earlier result predates the distinct
-failure/timeout lifecycle assertions and is not reused. The dormant live driver
-was checked only with the lexical balance organ. An accidental
+The amended thirty-axis adversarial band now has a completed fresh verdict.
+The dormant live driver was checked only with the lexical balance organ. An accidental
 execution-capable preflight attempt against that driver was interrupted before
 it produced any target output or verdict; it contributes no physical evidence.
 Model and carrier execution remain explicitly outside this movement.
@@ -88,19 +89,12 @@ themselves: `fkpfm` still requires independently valid held-out and generative
 evidence for every family. No training row, held-out answer, or private V3
 material is added here.
 
-The pure band uses synthetic physically shaped frex results. Once its amended
-verdict completes, it can prove schema, binding, scannerless parsing, result
+The pure band uses synthetic physically shaped frex results. Its fresh verdict
+proves schema, binding, scannerless parsing, result
 semantics, replay resistance, and batch accounting; it cannot prove that Qwen
 emitted a request or that Metal ran.
 
 ## Exact remaining physical gate
-
-First complete the fresh pure band witness:
-
-```text
-./fkwu form/form-stdlib/tests/form-knowledge-family-native-exec-resident-batch-band.fk
-# expected only after observation: 1073741823, exit 0
-```
 
 When no sibling owns Qwen or Metal, intentionally run:
 
@@ -108,7 +102,8 @@ When no sibling owns Qwen or Metal, intentionally run:
 ./fkwu observe/qwen38-family-native-exec-resident-batch-live-run.fk
 ```
 
-The honest pass is `65535`, exit 0, with family/capture/row counts all equal to
+The next honest observation is whatever this live run returns. The currently
+named full vector is `65535`, with family/capture/row counts all equal to
 the fresh `fkpfm-family-ids` census,
 open-count 1, remote-calls 0, exact/scannerless/model-requested all 1,
 pretokenized and model-executed-form all 0, native-generated/executed/carrier
@@ -116,6 +111,8 @@ release all 1, exact held acknowledgements, one context release, and a valid
 current-census ledger. Any non-exact raw reply remains typed `nothing` and never
 opens Metal; carrier failure and timeout remain separately named and also stop
 the batch. Until that run lands, this receipt claims no physical batch.
+
+; witnessed: 2026-08-26 -> pure batch 1073741823, exit 0; physical batch absent
 
 ## Practice close
 
