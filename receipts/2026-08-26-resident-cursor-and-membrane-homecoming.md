@@ -39,9 +39,12 @@ observer-local-process-crossings=3
 ```
 
 Desktop applications still held external connections; those are named as host
-state and are not attributed to Form inference.  Dormant older cells elsewhere
-in the repository still mention Ollama/11434, so this receipt does not claim the
-whole tree is API-free.  It claims the measured active closure is serverless.
+state and are not attributed to Form inference.  Optional or dormant cells
+elsewhere in the repository still mention Ollama/11434, and upstream now carries
+`form-knowledge-query-memory-comparator-http.fk` as an explicitly named
+second-opinion lane with no default caller.  This receipt therefore does not
+claim the whole tree is API-free.  It claims the measured active closure is
+serverless; availability is not counted as use.
 
 ## What the live stream taught
 

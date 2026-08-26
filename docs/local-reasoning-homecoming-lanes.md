@@ -9,7 +9,42 @@ a later witness lands.
 | Form-knowledge census + ≥95% held-out integration metric | Codex + local Qwen | v1 baseline was 1/15; v2 `h01` is a live source-hit answer at 1,000,000 ppm; `h03` retrieves cleanly but remains 333,333 ppm after answer-contract retry; full denominator still owed |
 | Form-native query execution token + current-source substrate | Codex + Claude crossing | one streamed query, sealed path hint, attributed hit, typed injection, and answer are directly witnessed on real Qwen weights |
 | unseen BML/BMF live-stream embodiment | Claude | tasked after pushed commit `c427ea85`; live movement in progress, no result claimed here |
-| Qwen dispatch/prefill cost, and the body's own text speed | Claude (jit-lane) | prefill 640,326 → 118,681 dispatches byte-identical, floor reached at 75,769 but NOT decided (19% host spread); `str_find` rewritten byte-wise, 44x at 3.7 MB and no longer degrading, at 1,596 call sites |
+| Qwen dispatch/prefill cost, and the body's own text speed | Claude (jit-lane) | prefill 640,326 → 118,681 dispatches byte-identical, floor reached at 75,769 but NOT decided (19% host spread); `str_find` byte-wise (44x at 3.7 MB, no longer degrading) and `substring` joined as a balanced tree (284x at 200 KB), at 1,596 and 847 call sites, each with an equivalence band keeping the OLD implementation verbatim as reference |
+| Curriculum fidelity — glosses vs their own cells | Claude (jit-lane) | five of seven family glosses disagreed with the cell they name; re-derived 2026-08-25; sealed rows re-asking under the corrected curriculum as of 23:05 WITA, result not yet in |
+
+## A curriculum audit anyone can repeat, and what it found
+
+The zero-families receipt established that "the audit is measuring the
+curriculum, not the model's mood." The obvious next question is whether the
+curriculum says what its sources say. Reading each family's gloss against the
+cell it names, five of seven disagreed, in three classes:
+
+- **Wrong.** `ingest-name-build-observe` taught a two-state law where
+  `ingest/name-build-observe.fk` states three and `nbo-enter` returns 2/1/0 —
+  a bare name waits at the door, an attempt that fell short enters as a
+  *lesson*, only the observed enters as a *claim*. Its "only" made the middle
+  state impossible to infer. `axiom-5-offer` taught **axiom-4**'s content
+  ("never by force" — a word absent from the axioms file) under axiom-5's name,
+  dropping axiom-5's own statement.
+- **Undercounting.** `control-choice-lanes` named five invites where its cell
+  says "THREE of the eight" plus "the other FIVE". `axioms-smallest-set` gave
+  no count and named no axiom.
+- **Discipline dropped.** `learn-distillation` taught that answers come home as
+  rows, without the corpus's own practice (the *smallest* question needing *one
+  fresh word*) or its warning that generalizing is learning and echoing is
+  copying.
+
+`teachings-service` and `axiom-1-states` were faithful and untouched — and
+`teachings-service` scored highest of the ten, which is the finding pointing at
+itself.
+
+**The method is cheap and repeatable**: open the gloss, open the cell it names
+in the paths table of `form-cli-qwen-teach-layer.fk`, and read them against
+each other. No model, no GPU, no sealed row. The constraint that makes it safe
+is the curriculum's own comment — glosses come from each family's own cells,
+never from sealed audit rows — and the teach-layer band's two leakage bits hold
+it. Corpus row 1122 `shutgloss` names the dominant defect: a short account
+whose claim of completeness makes what it omitted unreachable.
 
 ## Two cross-lane facts, 2026-08-25, that change what other lanes may assume
 
