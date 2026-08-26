@@ -48,7 +48,7 @@
 ;
 ;       op            go    rust  ts    fkwu
 ;       host-exec     YES   no    no    YES
-;       nothing       no    no    no    YES
+;       nothing       YES   YES   YES   YES   (re-witnessed 2026-08-26)
 ;       walk_recipe   YES   YES   YES   no
 ;
 ;   Go has host-exec and returns the same five bytes fkwu does. The sentence was
@@ -89,6 +89,22 @@
             (if (lt i 0) s
                 (str_concat (substring s 0 i)
                     (str_concat v (substring s (add i (str_len mark)) (str_len s)))))))
+
+    ;; Fresh artifact removal is defined only for .fk source. `pf-sub` returns
+    ;; its input unchanged when the mark is absent; using that result as a
+    ;; removal path deleted a .bml source while trying to remove its .fkb and
+    ;; .sym on 2026-08-26. Unsupported source is now a visible refusal and the
+    ;; source remains byte-identical. A BML-aware compiler pass can be added as
+    ;; its own observed lane; it must never be guessed through the .fk lane.
+    (defn pf-ends-with? (s suffix)
+        (do (let sn (str_len s))
+            (let xn (str_len suffix))
+            (if (lt sn xn) 0
+                (if (str_eq (substring s (sub sn xn) sn) suffix) 1 0))))
+    (defn pf-fresh-supported? (path) (pf-ends-with? path ".fk"))
+    (defn pf-unsupported-mark () "[preflight-unsupported-source-kind]")
+    (defn pf-unsupported? (out)
+        (if (ge (str_find out (pf-unsupported-mark) 0) 0) 1 0))
 
     (defn pf-dir () (do (fs_mkdir (str_concat (temp_dir) "/preflight"))
                         (str_concat (temp_dir) "/preflight")))
@@ -146,9 +162,11 @@
     ;; The artifacts are removed first ON PURPOSE. A warm run reports a tally
     ;; and drops the name and the line, and a tally is not an insight.
     (defn pf-fresh (path)
-        (do (fs_remove (pf-sub path ".fk" ".fkb"))
-            (fs_remove (pf-sub path ".fk" ".sym"))
-            (pf-run (str_concat "./fkwu " path))))
+        (if (eq (pf-fresh-supported? path) 0)
+            (pf-cat (list (pf-unsupported-mark) " source-preserved path=" path))
+            (do (fs_remove (pf-sub path ".fk" ".fkb"))
+                (fs_remove (pf-sub path ".fk" ".sym"))
+                (pf-run (str_concat "./fkwu " path)))))
 
     ;; ── the unresolved names in that output ─────────────────────────
     (defn pf-mark () "[unresolved-call] '")
@@ -239,7 +257,9 @@
     ;; questioned — those two are the harness saying it rebuilt a foreign .fkb
     ;; and emitted no .dylib, which fkwu itself does not count and neither
     ;; should this page.
-    (defn pf-errors (out) (pf-num-before out " error(s)" 0))
+    (defn pf-errors (out)
+        (if (eq (pf-unsupported? out) 1) 1
+            (pf-num-before out " error(s)" 0)))
     (defn pf-warnings (out) (pf-num-before out " warning(s)" 0))
     (defn pf-clean? (out) (if (eq (pf-errors out) 0) 1 0))
 
@@ -258,6 +278,9 @@
                 "  errors        " (int_to_str (pf-errors out)) (pf-nl)
                 "  warnings      " (int_to_str (pf-warnings out)) (pf-nl)
                 "  unresolved    " (int_to_str (len ns)) (pf-nl)
+                (if (eq (pf-unsupported? out) 1)
+                    "  source-kind   unsupported — source preserved; fresh compile currently accepts .fk only\n"
+                    "")
                 ;; SAY WHAT THE NUMBERS MEAN, and no more than that.
                 ;; The same reviewer: "pf-report prints counts but no pass/fail
                 ;; word and itself exits 0 — the reader is left to know that 'errors 1'
@@ -278,11 +301,13 @@
                 ;; the failure it exists to catch, so unresolved now gets its own
                 ;; word instead of being folded into "clean".
                 "  chain         "
+                (if (eq (pf-unsupported? out) 1)
+                    "UNSUPPORTED SOURCE KIND — no compile verdict; source preserved"
                 (if (eq (pf-errors out) 0)
                     (if (eq (len (pf-unresolved out)) 0)
                         "clean — no errors, no unresolved calls; a verdict from it can be read"
                         "UNRESOLVED CALLS — the chain compiles, but each unresolved name answers `nothing`; every bit that touches one reads 0, so a verdict from it is partial, not a pass")
-                    "CARRIED ERRORS — any verdict from this chain is a fold over `nothing`, not a pass")
+                    "CARRIED ERRORS — any verdict from this chain is a fold over `nothing`, not a pass"))
                 (pf-nl)
                 (if (eq (len ns) 0) "" (pf-lines-loop ns))))))
 

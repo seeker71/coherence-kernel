@@ -1,11 +1,14 @@
 # Local reasoning homecoming — who holds which lane
 
-2026-08-24. Three lanes work this prompt. This file is the seam between us —
+Observed through 2026-08-26. This file is the seam between us —
 read it before you claim, append when you land, and replace stale status when
 a later witness lands.
 
 | lane | agent | current witnessed state |
 |---|---|---|
+| Frontier-token admission | Form body + Codex | posterior `local-gap` has no network authority; `frontier-admit` requires one exact exhausted local failure, canonical numeric evidence, matching available capability, zero used frontier turns, and ready teach-back capture; compact packet contains identifiers only; band 32767 |
+| Resident next-tool speaker | local Qwen + Form body | two real Form-native Metal turns in one held residence now return typed `ready/preflight` then `ready/land`; initial local miss (`execute` before preflight) was retained and corrected locally; final wall 93,448 ms + 133,255 ms, release 1; no frontier/HTTP/server |
+| Typed move → addressed execution | unclaimed | local output is now a validated Form move symbol; binding general moves such as preflight/land to registered recipe NodeIDs and executing them inside the same loop remains the next seam, and is not claimed by the existing affine-scalar recipe token |
 | Form-knowledge census + ≥95% held-out integration metric | Codex + local Qwen | v1 baseline was 1/15; v2 `h01` is a live source-hit answer at 1,000,000 ppm; `h03` retrieves cleanly but remains 333,333 ppm after answer-contract retry; full denominator still owed |
 | Form-native query execution token + current-source substrate | Codex + Claude crossing | one streamed query, sealed path hint, attributed hit, typed injection, and answer are directly witnessed on real Qwen weights |
 | unseen BML/BMF live-stream embodiment | Claude | tasked after pushed commit `c427ea85`; live movement in progress, no result claimed here |
@@ -113,10 +116,10 @@ The claim was true at the wrong resolution. Name the binary.
 | Query-lane expansion (41 skills × 7 inquiry planes + knowledge-query + form-cli walk) | `form-cli-lane-mint.bml` | band 1023; n=738 unique=738 leakage=0, heldout 356/369, covers-all; scale-2-1=1107 |
 | Lens and staking mill (perception, NL/PL, jacobian movement, Steiner stake, compiler, field, lens-move) | `form-cli-lens-mint.bml` | band 1023; n=144 unique=144 leakage=0, heldout 72/72, covers-all; scale-2-1=216 |
 | LoRA corpus homecoming (lens x lane, train 12 + heldout 4) | `form-cli-lora-corpus.bml` | band 1023; n=1152 minted, unique-2-1=216 leakage 0, gitignored `.form-lora-corpus`; adapter seeded; `fqt-lora?` 0; scale-20-5=1800 |
-| LoRA coverage curve (train overlay, remaining N honest) | `form-cli-lora-cover.bml` | band 1023; lens tn=1 72/72 ppm 1e6; tn=2 71/72; train 12/4 258/288; lane 356/369 need 10 hits for 990k; session need 95 events; more mill N = -1 |
-| Remote planner mill (ground, walk, one-turn, tool-pick, mill-observe, land, no-transcript, pending) | `form-cli-planner-mint.bml` | band 1023; n=144 unique leakage 0, heldout 72/72, covers-all; need-events 95 named; no chat bytes; scale-12-4=1152 |
+| LoRA coverage curve (train overlay, observed census) | `form-cli-lora-cover.bml` | historical band 1023; lens tn=1 72/72 ppm 1e6; tn=2 71/72; train 12/4 258/288; lane 356/369. Earlier 990k/95 numbers were experimental targets, not body goals; every later denominator must be freshly counted |
+| Local planner corpus (ground, walk, one-turn, tool-pick, mill-observe, land, no-transcript, pending) | `form-cli-planner-mint.bml` | band 1023; n=144 unique leakage 0, heldout 72/72, covers-all; observed counts are census evidence, never a fixed target; no chat bytes; scale-12-4=1152 |
 | Embodiment census (one picture of all mills) | `form-cli-embody-census.bml` | band 1023; proof-n 1214, organs 57, lane-kinds 513, corpus 1152, need-events 95, overlay 45, fqt-lora 0 |
-| Speaker home (planner overlay on generate door) | `form-cli-speaker-home.bml` | band 1023; home=1; heldout 72/72; live Qwen `GROUND WALK TOOL HOME`; native-voice 0; need-events 95 |
+| Speaker home (planner overlay + resident local-plan door) | `form-cli-speaker-home.bml`, `form-cli-model-generate.fk` | bands 1023 and 255; home=1; heldout 72/72; typed live Qwen moves `preflight`, `land`; native-voice 0; the historical 95 is named `ObservedRemoteEvents`, not work owed or a target |
 | BML/BMF live-byte curriculum and control curriculum | `bml-bmf-stream-curriculum.*`, `bml-bmf-control-curriculum.*` | bands 16777215, 1048575; grammar-agreement band 1023 |
 | Qwen teach overlay with the new semantics | `form-cli-qwen-teach-layer.fk` | band 16777215; 29 concepts/pairs, semantic heldout 10/10, exact/family leakage 0; answer extraction now preserves source words and requested shape |
 | LoRA identity `(W+B·A)·x == W·x + B·(A·x)` | `lora-adapter.fk` | band 31 |
