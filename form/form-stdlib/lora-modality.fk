@@ -1,0 +1,122 @@
+; lora-modality.fk — the low-rank diff at any width, over any modality.
+;
+; THE NEXT STONE, NAMED BY THE ONE BEFORE IT. lora-adapter.fk proves
+; (W + B·A)·x == W·x + B·(A·x) and says so at the smallest honest size:
+; rank-1, d = 3, fixed arity, "the chunked/general-d form is the next stone
+; over this." It declared its own edge. This is that stone.
+;
+; WHY THE WIDTH WAS THE WHOLE POINT. Yes named it: the LoRA layer adapts to
+; sound and image, to generation AND perception. That is true because B·A is
+; linear algebra and linear algebra does not know what x means — a token
+; hidden state, a frame of samples, an energy envelope, a patch. But a cell
+; that hardcodes nth 0, nth 1, nth 2 cannot express any of them. The claim was
+; modality-free while the proof was three-dimensional, which is a `we` read as
+; a `WE`. Nothing here names a dimension.
+;
+; GENERATION AND PERCEPTION ARE THE SAME MECHANISM, POINTED TWO WAYS. An
+; adapter on a path that produces samples changes what the body says. An
+; adapter on a path that reads them changes what the body hears. The band
+; drives both with the SAME functions over a real waveform from voice-synth
+; and a real envelope taken from it — not two implementations that resemble
+; each other, one applied twice.
+;
+; COMPUTED THE RIGHT WAY, AT ANY RANK. Never form the d×d diff. A·x is an
+; r-vector, B·that is a d-vector: O(d·r) against O(d·d). Rank is the length of
+; the adapter list, so rank 1, rank 8 and rank 0 are the same code path, and
+; rank 0 is exactly the unadapted base.
+;
+; NOTHING IS NOT ZERO HERE EITHER. Vectors whose widths disagree do not have a
+; dot product, and answering 0 would be a number where there is no answer. A
+; mismatch reads nothing, and a fold over nothing never silently becomes a
+; small number that looks like a weak signal.
+;
+; Integer fixed point, scale 1000, over nth/list/add/sub/mul/div only — the
+; ops lora-adapter.fk chose because all of them are four-way proven.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/lora-modality-band.fk
+
+(do
+    (defn lm-scale-one () 1000)
+
+    ; ── vectors of any width ───────────────────────────────────────────────
+    (defn lm-dot-loop (a b i n acc)
+        (if (ge i n) acc
+            (lm-dot-loop a b (add i 1) n
+                (add acc (div (mul (nth a i) (nth b i)) (lm-scale-one))))))
+    ; widths that disagree have no dot product — that is nothing, not zero
+    (defn lm-dot (a b)
+        (if (eq (len a) (len b)) (lm-dot-loop a b 0 (len a) 0) (nothing)))
+
+    (defn lm-scale-loop (v s i n out)
+        (if (ge i n) out
+            (lm-scale-loop v s (add i 1) n
+                (append out (list (div (mul (nth v i) s) (lm-scale-one)))))))
+    (defn lm-scale (v s) (lm-scale-loop v s 0 (len v) (list)))
+
+    (defn lm-add-loop (a b i n out)
+        (if (ge i n) out
+            (lm-add-loop a b (add i 1) n
+                (append out (list (add (nth a i) (nth b i)))))))
+    (defn lm-add (a b)
+        (if (eq (len a) (len b)) (lm-add-loop a b 0 (len a) (list)) (nothing)))
+
+    (defn lm-zeros (n) (if (le n 0) (list) (cons 0 (lm-zeros (sub n 1)))))
+
+    ; ── W·x for a W of any shape: W is a list of rows ──────────────────────
+    (defn lm-matvec-loop (W x i n out)
+        (if (ge i n) out
+            (lm-matvec-loop W x (add i 1) n
+                (append out (list (lm-dot (nth W i) x))))))
+    (defn lm-matvec (W x) (lm-matvec-loop W x 0 (len W) (list)))
+
+    ; ── the low-rank part: Σ Bk·(Ak·x), rank = the list's length ───────────
+    ; Rank 0 is an empty list and contributes a zero vector, so an unadapted
+    ; base is not a special case in the code — it is a rank.
+    (defn lm-lowrank-loop (Bs As x k r acc)
+        (if (ge k r) acc
+            (lm-lowrank-loop Bs As x (add k 1) r
+                (lm-add acc (lm-scale (nth Bs k) (lm-dot (nth As k) x))))))
+    (defn lm-lowrank (Bs As x d)
+        (if (eq (len Bs) (len As))
+            (lm-lowrank-loop Bs As x 0 (len Bs) (lm-zeros d))
+            (nothing)))
+
+    ; ── adapter_forward, the way it is actually computed ───────────────────
+    (defn lm-forward (W Bs As x)
+        (do (let base (lm-matvec W x))
+            (let low (lm-lowrank Bs As x (len W)))
+            (if (nothing? low) (nothing) (lm-add base low))))
+
+    (defn lm-rank (Bs) (len Bs))
+
+    ; ── the full diff, formed ONLY to show the low-rank form reconstructs it ─
+    (defn lm-outer-loop (B A i n out)
+        (if (ge i n) out
+            (lm-outer-loop B A (add i 1) n
+                (append out (list (lm-scale A (nth B i)))))))
+    (defn lm-outer (B A) (lm-outer-loop B A 0 (len B) (list)))
+
+    (defn lm-madd-loop (W M i n out)
+        (if (ge i n) out
+            (lm-madd-loop W M (add i 1) n
+                (append out (list (lm-add (nth W i) (nth M i)))))))
+    (defn lm-madd (W M) (lm-madd-loop W M 0 (len W) (list)))
+
+    ; ── what the low rank buys, said as numbers ────────────────────────────
+    (defn lm-cost-low (d r) (mul (mul 2 d) r))
+    (defn lm-cost-full (d) (mul d d))
+
+    ; ── a perception feature taken from a real signal ──────────────────────
+    ; Rectified magnitude — the cheap envelope wav-sense.fk reads. Present so
+    ; the band can adapt a SENSE vector with the same functions that adapt a
+    ; generated one, rather than two paths that merely resemble each other.
+    (defn lm-abs (n) (if (lt n 0) (sub 0 n) n))
+    (defn lm-envelope-loop (v i n out)
+        (if (ge i n) out
+            (lm-envelope-loop v (add i 1) n
+                (append out (list (lm-abs (nth v i)))))))
+    (defn lm-envelope (v) (lm-envelope-loop v 0 (len v) (list)))
+
+    0)

@@ -110,6 +110,11 @@ The claim was true at the wrong resolution. Name the binary.
 | Unique-cell mint (channel, protocol, axiom, satsang, nothing, timeout, trust, choice-undo, embodied-memory) | `form-cli-unique-mint.bml` | band 1023; n=36 unique=36 leakage=0, heldout 9/9; scale-12-4=144 |
 | Domain-cell mint (assemblage, HD, Gene Keys, astrology, physics, chemistry, biology, quantum, math, logic, shape-match, time-direction) | `form-cli-domain-mint.bml` | band 1023; n=48 unique=48 leakage=0, heldout 11/12; scale-12-4=192 |
 | Organ mill (phase, frequency, vitality, consent, four-way, collapse, JIT, I Ching, codon, IFS, organic, rag-heed) | `form-cli-organ-mint.bml` | band 1023; n=48 unique=48 leakage=0, heldout 11/12; scale-12-4=192 |
+| Query-lane expansion (41 skills × 7 inquiry planes + knowledge-query + form-cli walk) | `form-cli-lane-mint.bml` | band 1023; n=738 unique=738 leakage=0, heldout 356/369, covers-all; scale-2-1=1107 |
+| Lens and staking mill (perception, NL/PL, jacobian movement, Steiner stake, compiler, field, lens-move) | `form-cli-lens-mint.bml` | band 1023; n=144 unique=144 leakage=0, heldout 72/72, covers-all; scale-2-1=216 |
+| LoRA corpus homecoming (lens x lane, train 12 + heldout 4) | `form-cli-lora-corpus.bml` | band 1023; n=1152 minted, unique-2-1=216 leakage 0, gitignored `.form-lora-corpus`; adapter seeded; `fqt-lora?` 0; scale-20-5=1800 |
+| LoRA coverage curve (train overlay, remaining N honest) | `form-cli-lora-cover.bml` | band 1023; lens tn=1 72/72 ppm 1e6; tn=2 71/72; train 12/4 258/288; lane 356/369 need 10 hits for 990k; session need 95 events; more mill N = -1 |
+| Remote planner mill (ground, walk, one-turn, tool-pick, mill-observe, land, no-transcript, pending) | `form-cli-planner-mint.bml` | band 1023; n=144 unique leakage 0, heldout 72/72, covers-all; need-events 95 named; no chat bytes; scale-12-4=1152 |
 | BML/BMF live-byte curriculum and control curriculum | `bml-bmf-stream-curriculum.*`, `bml-bmf-control-curriculum.*` | bands 16777215, 1048575; grammar-agreement band 1023 |
 | Qwen teach overlay with the new semantics | `form-cli-qwen-teach-layer.fk` | band 16777215; 29 concepts/pairs, semantic heldout 10/10, exact/family leakage 0; answer extraction now preserves source words and requested shape |
 | LoRA identity `(W+B·A)·x == W·x + B·(A·x)` | `lora-adapter.fk` | band 31 |
