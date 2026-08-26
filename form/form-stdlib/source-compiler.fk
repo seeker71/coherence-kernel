@@ -1,16 +1,11 @@
 ; source-compiler.fk - Form-native source section compiler
 ;
-; preludes: form-stdlib/core.fk form-stdlib/form-ontology-loader.fk form-stdlib/engine.fk form-stdlib/compiler-objects.fk form-stdlib/bmf-grammar.fk form-stdlib/bml-source.fk form-stdlib/bml.fk
+; preludes: form-stdlib/core.fk form-stdlib/form-ontology-source-categories.fk form-stdlib/engine.fk form-stdlib/compiler-objects.fk form-stdlib/bmf-grammar.fk form-stdlib/bml-source.fk form-stdlib/bml.fk
 ;
-; This module is runtime tissue above the kernel. It reads source text,
-; lowers first-class BMF sections into ordinary Form object definitions,
-; and writes compiled Form source through native file I/O.
-;
-; source-door surface seam (2026-07-17): `write_form_binary` (the .fkb image
-; emission, one call in fsc-compile-section's persist lane) and
-; `file_byte_at` are sibling-kernel natives with no fkwu counterpart — they
-; stay loud under fresh `fkwu` compile. Recorded, not shimmed: a numb
-; writer would report a persisted image that was never written.
+; This module is runtime tissue above the kernel. It reads source text and
+; lowers first-class BMF sections into ordinary Form source. Durable .fkb
+; persistence is an optional, explicit carrier in
+; source-compiler-runtime-image.fk; pure text lowering does not inherit it.
 
 ;; --- text scanning ------------------------------------------------
 
@@ -1585,12 +1580,12 @@
         (fsc-compile-form-bml-section-recipe body))
 
 
-    ;; --- Legacy recipe source emitter --------------------------------
+    ;; --- Recipe source emitter ---------------------------------------
     ;;
-    ;; The BML compiler builds Form Recipe nodes directly. This emitter is kept
-    ;; only as a debug/compatibility lens. The active source compiler path below
-    ;; writes recipe images to .fkb and emits an explicit walk_recipe_here driver;
-    ;; it no longer round-trips runtime meaning through text.
+    ;; The BML compiler builds Form Recipe nodes directly.  This native source
+    ;; view emits their executable Form text.  Optional runtime-image persistence
+    ;; lives in source-compiler-runtime-image.fk and shadows only the final
+    ;; section carrier when explicitly preluded.
 
     (defn fsc-source-emit-join (items)
         (if (fsc-empty? items) ""
@@ -1677,7 +1672,22 @@
 	                            (fsc-source-emit-call "do" kids)
 	                            (fsc-source-emit-call prim-name kids))))))))))))))
 
-    ;; --- compile section as runtime image ----------------------------
+    ;; A compiled section is rooted at DO.  Emitting that root as one `(do ...)`
+    ;; would turn module bindings into lexical bindings, so the native text path
+    ;; emits the root children as top-level forms.
+    (defn fsc-source-emit-module-loop (recipes)
+        (if (fsc-empty? recipes) ""
+            (str_concat
+                (fsc-source-emit-recipe (head recipes))
+                (str_concat "\n"
+                    (fsc-source-emit-module-loop (tail recipes))))))
+
+    (defn fsc-source-emit-module (recipe)
+        (if (node_eq (node_category recipe) fsc-rec-DO-CAT)
+            (fsc-source-emit-module-loop (node_children recipe))
+            (str_concat (fsc-source-emit-recipe recipe) "\n")))
+
+    ;; --- compile section as Form source ------------------------------
 
     (defn fsc-compile-section-recipe (dialect-name body)
         (if (str_eq dialect-name "form.route")
@@ -1690,22 +1700,9 @@
             (g-parse (bml-grammar) body)
             (fsc-bmf-section-recipe dialect-name body))))))
 
-    (defn fsc-section-image-path (out-path dialect-name)
-        (str_concat out-path (str_concat "." (str_concat dialect-name ".fkb"))))
-
-    (defn fsc-section-load-driver (path)
-        (str_concat "(walk_recipe_here (read_form_binary "
-            (str_concat (fsc-q path) "))\n")))
-
     (defn fsc-compile-section (dialect-name body out-path)
-        (do
-            (let recipe (fsc-compile-section-recipe dialect-name body))
-            (let image-path (fsc-section-image-path out-path dialect-name))
-            (let wrote (write_form_binary image-path recipe))
-            (if (le wrote 0)
-                (fsc-compiler-error
-                    (str_concat "failed to write section image: " image-path))
-                (fsc-section-load-driver image-path))))
+        (fsc-source-emit-module
+            (fsc-compile-section-recipe dialect-name body)))
 
     ;; --- form.action BMF object rules --------------------------------
     ;; The text lowering above is the bootstrap path for source sections. The
@@ -2151,17 +2148,18 @@
                     0))))
 
     (defn fsc-source-cursor-file-prefix? (cursor prefix j)
-        (if (eq j (str_len prefix)) true
-            (if (ge (add (fsc-source-cursor-offset cursor) j)
-                    (fsc-source-cursor-source-len cursor))
-                false
-                (if (eq
-                        (file_byte_at
-                            (fsc-source-cursor-source cursor)
-                            (add (fsc-source-cursor-offset cursor) j))
-                        (ord (char_at prefix j)))
-                    (fsc-source-cursor-file-prefix? cursor prefix (add j 1))
-                    false))))
+        (do
+            (let remaining (substring prefix j (str_len prefix)))
+            (let available
+                (sub (fsc-source-cursor-source-len cursor)
+                     (add (fsc-source-cursor-offset cursor) j)))
+            (if (lt available (str_len remaining)) false
+                (str_eq
+                    (read_file_slice
+                        (fsc-source-cursor-source cursor)
+                        (add (fsc-source-cursor-offset cursor) j)
+                        (str_len remaining))
+                    remaining))))
 
     (defn fsc-source-match-op (cursor ops)
         (if (nil? ops) (fsc-source-cursor-char cursor)

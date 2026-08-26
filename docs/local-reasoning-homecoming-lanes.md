@@ -122,6 +122,25 @@ The claim was true at the wrong resolution. Name the binary.
 | LoRA identity `(W+B·A)·x == W·x + B·(A·x)` | `lora-adapter.fk` | band 31 |
 | LoRA tensor writer | — | **0**. `LoraWriter = 0`, `fqt-lora?` 0 |
 
+The row counts and historical held-out scores above are corpus/overlay
+observations, not claims that Qwen learned those lessons. Fresh split-lineage
+adoption on the universe, unique, domain, and organ mints keeps exact leakage
+at zero but exposes lesson-disjoint transfer of **2/8, 2/9, 0/12, and 4/12**.
+The formerly high scores reused the same small stem families under changed
+presentation. They remain visible as the earlier surface-transfer witness;
+the lower values are the current learning signal and are not retuned away.
+
+One pure local error-absorption experiment now goes beyond sample-byte adapter
+seeding. `cognition/error-absorption-kernel.fk` fits six train surfaces,
+receives one withheld classification error, derives rank-1 `B·(A·x)` from
+that error through `lora-modality.fk`, and re-observes both the error surface
+and one untouched sealed surface. Freshly, baseline predicts class 0 for both;
+the update moves both to expected class 1, while a separate executable behavior
+door distinguishes `nothing`, present `0`, and present `1`. Its band is 4095.
+This is sealed-surface transfer in the local Form feature classifier; the
+behavior door is a separate execution distinction. It is not
+yet a Qwen tensor update, and `fqt-lora?` remains 0.
+
 ## Current seam: one resident source-hit answer, full denominator still owed
 
 `form-cli-model-generate.fk` constructs the live Qwen context and sends every
@@ -180,9 +199,13 @@ prefill-cost=12  naive-cost=1012  forwards-saved=1000  prefix-preserved=1
 ```
 
 Preflight is clean (`parens balanced, errors 0, warnings 0, unresolved 0`).
-The three `[unresolved-call]` lines the compile emits (`walk_recipe_here`,
-`write_form_binary`, `file_byte_at`) are **pre-existing** — the already-proven
-`form-cli-one-turn-compile.fk` emits the same three on this checkout.
+The former three-call compile seam is now separated by meaning.  Pure Form text
+compilation no longer preludes the ontology loader's `walk_recipe_here`, runtime
+image persistence moved to the explicit `source-compiler-runtime-image.fk`
+carrier, and file-prefix reads use the cursor's bounded `read_file_slice`
+window rather than `file_byte_at`.  `form-cli-one-turn-compile.fk` and the mint
+compilers preflight clean on fkwu; the optional runtime-image carrier remains
+loud on fkwu because `write_form_binary` is still a genuine sibling capability.
 
 ### What the current observations say, in four rows
 
