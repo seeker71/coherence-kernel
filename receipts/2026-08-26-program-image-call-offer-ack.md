@@ -166,11 +166,12 @@ bytes and a non-evidencing receipt coexist; the receipt does not inherit the
 bytes' truth. No trainer, llama-server, or Ollama process remained at this
 witness.
 
-The bounded recovery inventory freshly reported `23 valid / 22 observed / 18
-healthy / 4 gaps / 1 unknown / 0 invalid / 818 permille`. The current dirty
-movement, repository garbage, an independently restore-tested repository copy,
-and an independently restore-tested Qwen copy remain the observed recovery
-gaps; the fresh whole-file Qwen seal remains unknown in this bounded pulse.
+After PR #512 landed, the bounded recovery inventory freshly reported `23
+valid / 22 observed / 19 healthy / 3 gaps / 1 unknown / 0 invalid / 863
+permille`. Landing closed the uncommitted-movement gap. Repository garbage, an
+independently restore-tested repository copy, and an independently
+restore-tested Qwen copy remain the observed recovery gaps; the fresh
+whole-file Qwen seal remains unknown in this bounded pulse.
 
 ## Next locally actionable crossing
 
