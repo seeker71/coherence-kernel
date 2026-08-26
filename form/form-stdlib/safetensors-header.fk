@@ -1,0 +1,130 @@
+; safetensors-header.fk — the tensor index, read by Form from the file's own
+; bytes, with no carrier and no new door.
+;
+; WHY THIS EXISTS. metal_buf_from_file takes (path, offset, bytes) and mmaps a
+; tensor resident with no per-call copy. It is the whole door a LoRA overlay
+; needs. But nobody can call it without the offset and the length, and those
+; live in the safetensors JSON header — which safetensors-bf16-slice.fk says a
+; CARRIER resolves. So the door was reachable and the numbers to give it were
+; not, from Form.
+;
+; They are. Measured 2026-08-26 against a real 27,811,400-byte adapter:
+; file_size and read_file's str_len agree exactly, so read_file is NUL-clean
+; and binary-safe; byte 8 is '{'; the eight-byte little-endian prefix reads
+; 24,128. Nothing here is a new primitive. This is str_byte_at, str_find,
+; substring and read_file, which the body already had.
+;
+; THE HEADER IS TAKEN ONCE. Every lookup runs against a 24KB substring, never
+; against the 27MB file. A str_find for a name that is absent would otherwise
+; scan every byte of the weights — the search bounded to the header is the
+; difference between a lookup and a file scan.
+;
+; NOTHING IS NOT ZERO, AND HERE IT IS LOAD-BEARING. sfh-lora-present? answers
+; three ways: nothing when there is no file to look at, 0 when a real file was
+; read and carries no low-rank pair, 1 when it does. An adapter that is absent
+; and an adapter that is empty are different facts about the world, and a
+; promotion or a bind that cannot tell them apart is deciding on a coin flip.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/safetensors-header-band.fk
+
+(do
+    ; ── the eight-byte little-endian header length ─────────────────────────
+    (defn sfh-le-loop (s i n acc mul)
+        (if (ge i n) acc
+            (sfh-le-loop s (add i 1) n
+                (add acc (mul (str_byte_at s i) mul)) (mul mul 256))))
+    (defn sfh-header-len (s) (sfh-le-loop s 0 8 0 1))
+    (defn sfh-data-start (s) (add 8 (sfh-header-len s)))
+
+    ; The header, taken once. Every lookup below runs against THIS.
+    (defn sfh-header (s) (substring s 8 (sfh-data-start s)))
+
+    ; ── decimal parsing inside the header ──────────────────────────────────
+    (defn sfh-digit? (b) (if (and (ge b 48) (le b 57)) 1 0))
+    (defn sfh-skip-nondigit (h i n)
+        (if (ge i n) i
+            (if (eq (sfh-digit? (str_byte_at h i)) 1) i
+                (sfh-skip-nondigit h (add i 1) n))))
+    (defn sfh-num-loop (h i n acc)
+        (if (ge i n) acc
+            (do (let b (str_byte_at h i))
+                (if (eq (sfh-digit? b) 1)
+                    (sfh-num-loop h (add i 1) n (add (mul acc 10) (sub b 48)))
+                    acc))))
+    ; the first integer at or after i; nothing when the header ends first
+    (defn sfh-int-after (h i)
+        (do (let n (str_len h))
+            (let j (sfh-skip-nondigit h i n))
+            (if (ge j n) (nothing) (sfh-num-loop h j n 0))))
+    (defn sfh-int-end (h i)
+        (do (let n (str_len h))
+            (let j (sfh-skip-nondigit h i n))
+            (sfh-skip-digit h j n)))
+    (defn sfh-skip-digit (h i n)
+        (if (ge i n) i
+            (if (eq (sfh-digit? (str_byte_at h i)) 1)
+                (sfh-skip-digit h (add i 1) n) i)))
+
+    ; ── one tensor's window ────────────────────────────────────────────────
+    ; nothing when the name is not in the index — an absent tensor is not a
+    ; tensor at offset zero.
+    (defn sfh-tensor-at (h name) (str_find h name 0))
+    (defn sfh-dataoff (h name)
+        (do (let at (sfh-tensor-at h name))
+            (if (lt at 0) (nothing)
+                (do (let k (str_find h "\"data_offsets\"" at))
+                    (if (lt k 0) (nothing)
+                        (do (let a (sfh-int-after h k))
+                            (let ae (sfh-int-end h k))
+                            (let b (sfh-int-after h ae))
+                            (if (or (nothing? a) (nothing? b)) (nothing)
+                                (list a b))))))))
+
+    ; ── exactly what metal_buf_from_file takes: (path offset bytes) ────────
+    ; The offset is absolute in the file: the eight-byte prefix, plus the JSON
+    ; header, plus the tensor's own start within the data block.
+    (defn sfh-bind (s h name)
+        (do (let d (sfh-dataoff h name))
+            (if (nothing? d) (nothing)
+                (list (add (sfh-data-start s) (nth d 0))
+                      (sub (nth d 1) (nth d 0))))))
+    (defn sfh-bind-offset (b) (nth b 0))
+    (defn sfh-bind-bytes (b)  (nth b 1))
+
+    ; A file that is not safetensors-shaped computes a nonsense header length,
+    ; and substring past the end is fatal on the full kernels. So the shape is
+    ; checked before it is trusted: eight bytes must exist, the declared header
+    ; must be positive, and it must fit inside the file.
+    (defn sfh-well-formed? (s)
+        (do (let n (str_len s))
+            (if (lt n 9) 0
+                (do (let h (sfh-header-len s))
+                    (if (and (gt h 0) (le (add 8 h) n)) 1 0)))))
+
+    ; ── the three-state observation that replaces a constant ───────────────
+    (defn sfh-lora-mark () "lora_a")
+    (defn sfh-lora-present-in? (h)
+        (if (lt (str_find h (sfh-lora-mark) 0) 0) 0 1))
+
+    ; nothing: there was no file to look at.
+    ; 0: a real file was read and carries no low-rank pair.
+    ; 1: it does.
+    (defn sfh-lora-present? (path)
+        (if (lt (file_size path) 0) (nothing)
+            (do (let s (read_file path))
+                (if (eq (sfh-well-formed? s) 0) 0
+                    (sfh-lora-present-in? (sfh-header s))))))
+
+    ; the rank, from a lora_a shape's trailing dimension
+    (defn sfh-shape-second (h name)
+        (do (let at (sfh-tensor-at h name))
+            (if (lt at 0) (nothing)
+                (do (let k (str_find h "\"shape\"" at))
+                    (if (lt k 0) (nothing)
+                        (do (let a (sfh-int-after h k))
+                            (let ae (sfh-int-end h k))
+                            (sfh-int-after h ae)))))))
+
+    0)
