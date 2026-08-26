@@ -115,6 +115,7 @@ The claim was true at the wrong resolution. Name the binary.
 | LoRA corpus homecoming (lens x lane, train 12 + heldout 4) | `form-cli-lora-corpus.bml` | band 1023; n=1152 minted, unique-2-1=216 leakage 0, gitignored `.form-lora-corpus`; adapter seeded; `fqt-lora?` 0; scale-20-5=1800 |
 | LoRA coverage curve (train overlay, remaining N honest) | `form-cli-lora-cover.bml` | band 1023; lens tn=1 72/72 ppm 1e6; tn=2 71/72; train 12/4 258/288; lane 356/369 need 10 hits for 990k; session need 95 events; more mill N = -1 |
 | Remote planner mill (ground, walk, one-turn, tool-pick, mill-observe, land, no-transcript, pending) | `form-cli-planner-mint.bml` | band 1023; n=144 unique leakage 0, heldout 72/72, covers-all; need-events 95 named; no chat bytes; scale-12-4=1152 |
+| Embodiment census (one picture of all mills) | `form-cli-embody-census.bml` | band 1023; proof-n 1214, organs 57, lane-kinds 513, corpus 1152, need-events 95, overlay 45, fqt-lora 0 |
 | BML/BMF live-byte curriculum and control curriculum | `bml-bmf-stream-curriculum.*`, `bml-bmf-control-curriculum.*` | bands 16777215, 1048575; grammar-agreement band 1023 |
 | Qwen teach overlay with the new semantics | `form-cli-qwen-teach-layer.fk` | band 16777215; 29 concepts/pairs, semantic heldout 10/10, exact/family leakage 0; answer extraction now preserves source words and requested shape |
 | LoRA identity `(W+B·A)·x == W·x + B·(A·x)` | `lora-adapter.fk` | band 31 |
