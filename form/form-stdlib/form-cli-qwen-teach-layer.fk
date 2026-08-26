@@ -370,12 +370,64 @@
     (defn fqt-predict-index (models s)
         (fqt-best models (fqt-features s) 0 0 -1 1))
 
+    (defn fqt-lora-path () ".form-lora-adapter")
+    (defn fqt-lora-scale () 1000)
+    (defn fqt-pipe-head (s)
+        (do (let p (str_find s "|" 0))
+            (if (lt p 0) s (substring s 0 p))))
+    (defn fqt-pipe-rest (s)
+        (do (let p (str_find s "|" 0))
+            (if (lt p 0) "" (substring s (add p 1) (str_len s)))))
+    (defn fqt-pipe-nth (s n)
+        (if (eq n 0) (fqt-pipe-head s)
+            (fqt-pipe-nth (fqt-pipe-rest s) (sub n 1))))
+    (defn fqt-comma-ints (s)
+        (if (eq (str_len s) 0) (empty)
+            (do (let p (str_find s "," 0))
+                (if (lt p 0) (cons (str_to_int s) (empty))
+                    (cons (str_to_int (substring s 0 p))
+                          (fqt-comma-ints (substring s (add p 1) (str_len s))))))))
+    (defn fqt-lora-dot (a b)
+        (if (eq (len a) 0) 0
+            (add (div (mul (head a) (head b)) (fqt-lora-scale))
+                 (fqt-lora-dot (tail a) (tail b)))))
+    (defn fqt-lora-scale-vec (v s)
+        (if (eq (len v) 0) (empty)
+            (cons (div (mul (head v) s) (fqt-lora-scale))
+                  (fqt-lora-scale-vec (tail v) s))))
+    (defn fqt-lora-add (a b)
+        (if (eq (len a) 0) (empty)
+            (cons (add (head a) (head b)) (fqt-lora-add (tail a) (tail b)))))
+    ; Generate's Control: line uses this. Heldout centroid stays on raw features
+    ; so the teach band does not depend on a gitignored adapter file.
+    (defn fqt-lora-apply (feat)
+        (if (le (file_size (fqt-lora-path)) 0) feat
+            (do
+                (let s (read_file (fqt-lora-path)))
+                (if (not (str_eq (fqt-pipe-nth s 0) "lora-v1")) feat
+                    (do
+                        (let A (fqt-comma-ints (fqt-pipe-nth s 4)))
+                        (let B (fqt-comma-ints (fqt-pipe-nth s 5)))
+                        (if (and (eq (len A) (len feat)) (eq (len B) (len feat)))
+                            (fqt-lora-add feat
+                                (fqt-lora-scale-vec B (fqt-lora-dot A feat)))
+                            feat))))))
+    (defn fqt-adapted-features (s) (fqt-lora-apply (fqt-features s)))
+    (defn fqt-adapter-applied? ()
+        (if (le (file_size (fqt-lora-path)) 0) 0
+            (if (eq (len (fqt-comma-ints (fqt-pipe-nth (read_file (fqt-lora-path)) 4)))
+                    (fqt-dim))
+                1 0)))
+
     (defn fqt-models () (fqt-fit (fqt-rows) (fqt-controls)))
     ; Short probes have no control situation. Do not invent a face for "hello".
     (defn fqt-verdict-index (s)
         (if (lt (str_len s) 16) 0
             (fqt-predict-index (fqt-models) s)))
-    (defn fqt-verdict-name (s) (fqt-control-name (fqt-verdict-index s)))
+    (defn fqt-verdict-index-live (s)
+        (if (lt (str_len s) 16) 0
+            (fqt-best (fqt-models) (fqt-adapted-features s) 0 0 -1 1)))
+    (defn fqt-verdict-name (s) (fqt-control-name (fqt-verdict-index-live s)))
 
     (defn fqt-heldout-of-loop (rows class)
         (if (eq (len rows) 0) ""
