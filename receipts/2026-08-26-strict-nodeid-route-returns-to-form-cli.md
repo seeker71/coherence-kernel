@@ -60,7 +60,7 @@ framebuffer-status after both queries: events=2, fb_record=2
 
 The live `diagnose` response came from current fkwu counters.  A process census
 found no llama-server, Ollama, trainer, or Python carrier; no model, Metal,
-HTTP, or remote-provider ownership was opened for this movement.
+HTTP, or remote-provider call was opened for this movement.
 
 ## Error became attention
 
@@ -110,12 +110,12 @@ dissolve without replacing it with another fixed table.
 The landing rebase also brought in the Form-authored model observer and
 coverage mint.  A merged live observation returned 1000/1000/0/0 and selected
 `rest-and-fuse`, while the mint band returned 255.  The fuse carrier emitted an
-unauthenticated HF Hub warning, and a process census then revealed a separate
-Claude-owned 4,284-iteration MLX training run already live.  The short
-observation had overlapped that ownership and is retained here as a coordination
-failure; no further model or Metal command was opened.  The health map now
-names path-only offline model resolution and an explicit carrier lease before
-the next observation.
+unauthenticated HF Hub warning, and a process census then revealed a concurrent
+4,284-iteration MLX training movement already live.  The short observation had
+flowed beside it; this is retained as evidence that live carrier presence must
+be an inclusive scheduling input rather than an exclusion boundary.  No further
+model or Metal command was opened.  The health map now names path-only offline
+model resolution and shared carrier observation before the next actuation.
 
 Kept alive: the crossing was removed in the same movement that named its deeper
 placement seam, and every surprising outcome retained its distinct signal.
