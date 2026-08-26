@@ -19,7 +19,7 @@
 ; with one word would pass bits 32 through 256 and be useless the first time
 ; someone had to ask WHY. Bit 4096 demands the reasons be pairwise distinct.
 ;
-; Verdict 65535 (16 bits):
+; Verdict 524287 (19 bits):
 ;   1      a locally built request reads as ready from its own children
 ;   2      LIVE HIT off a temporary index: status hit, one lookup, one hit
 ;   4      LIVE MISS off the same index: status miss, one lookup, zero hits
@@ -36,6 +36,9 @@
 ;   8192   answer-free is enforced: trailing bytes after the close mark refuse
 ;   16384  provenance is enforced: answer-stored=1 refuses before any lookup
 ;   32768  the temporary index existed, was read, and is removed again
+;   65536  the exact query bytes must hash to the recipe's query digest
+;   131072 source and question identities bind across recipe and offer nodes
+;   262144 a hit from a different source digest is observed and refused
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/form-cli-router.fk
 ; preludes: form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
@@ -60,38 +63,53 @@
         (fqmb-rev (fqmb-bytes-loop s 0 (str_len s) (empty)) (empty)))
 
     ; ── ONE builder. Every request below comes through it. ─────────────────
-    (defn fqmb-offer (anchor)
+    (defn fqmb-source-sha ()
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    (defn fqmb-question-sha (tag) (fqmb-sha (str_concat tag "-q")))
+
+    (defn fqmb-offer-with (anchor tag source-id question-sha)
         (intern_node (fkqmx-offer-category)
             (list (intern_trivial_string (fkqmx-offer-schema))
-                  (intern_trivial_string "band-source")
+                  (intern_trivial_string source-id)
                   (intern_trivial_string
                       (str_concat (fkqmx-open-mark)
                           (str_concat anchor (fkqmx-close-mark))))
-                  (intern_trivial_string (fqmb-sha anchor)))))
+                  (intern_trivial_string question-sha))))
 
-    (defn fqmb-offer-raw (surface)
+    (defn fqmb-offer (anchor tag)
+        (fqmb-offer-with anchor tag
+            (str_concat "sha256:" (fqmb-source-sha))
+            (fqmb-question-sha tag)))
+
+    (defn fqmb-offer-raw (surface tag)
         (intern_node (fkqmx-offer-category)
             (list (intern_trivial_string (fkqmx-offer-schema))
-                  (intern_trivial_string "band-source")
+                  (intern_trivial_string
+                      (str_concat "sha256:" (fqmb-source-sha)))
                   (intern_trivial_string surface)
-                  (intern_trivial_string (fqmb-sha surface)))))
+                  (intern_trivial_string (fqmb-question-sha tag)))))
 
     (defn fqmb-mem (tag) (intern_node (make_nodeid 31 2 0 127)
         (list (intern_trivial_string tag))))
 
-    (defn fqmb-recipe (memory rollback offer tag stored)
+    (defn fqmb-recipe-with-query-sha
+        (memory rollback offer tag stored query-sha)
         (intern_node (fkqmrt-recipe-category)
             (list (intern_trivial_string (fkqmrt-recipe-schema))
                   memory rollback offer
-                  (intern_trivial_string (fqmb-sha (str_concat tag "-q")))
-                  (intern_trivial_string (fqmb-sha (str_concat tag "-src")))
-                  (intern_trivial_string (fqmb-sha (str_concat tag "-pres")))
-                  (intern_trivial_string (fqmb-sha (str_concat tag "-query")))
+                  (intern_trivial_string (fqmb-question-sha tag))
+                  (intern_trivial_string (fqmb-source-sha))
+                  (intern_trivial_string (fqmb-question-sha tag))
+                  (intern_trivial_string query-sha)
                   (intern_trivial_string tag)
                   (intern_trivial_string "band-lane")
                   (intern_trivial_int 1) (intern_trivial_int 1)
                   (intern_trivial_int 0) (intern_trivial_int 0)
                   (intern_trivial_int stored) (intern_trivial_int 0))))
+
+    (defn fqmb-recipe (memory rollback offer tag stored)
+        (fqmb-recipe-with-query-sha memory rollback offer tag stored
+            (fqmb-sha (fkqmx-str offer 2))))
 
     (defn fqmb-request-of (recipe memory rollback tag)
         (intern_node (fkqmrt-request-category)
@@ -105,33 +123,58 @@
     (defn fqmb-request (anchor tag)
         (do (let m (fqmb-mem (str_concat tag "-m")))
             (let b (fqmb-mem (str_concat tag "-b")))
-            (fqmb-request-of (fqmb-recipe m b (fqmb-offer anchor) tag 0)
+            (fqmb-request-of (fqmb-recipe m b (fqmb-offer anchor tag) tag 0)
                              m b tag)))
 
     (defn fqmb-request-stored (anchor tag)
         (do (let m (fqmb-mem (str_concat tag "-m")))
             (let b (fqmb-mem (str_concat tag "-b")))
-            (fqmb-request-of (fqmb-recipe m b (fqmb-offer anchor) tag 1)
+            (fqmb-request-of (fqmb-recipe m b (fqmb-offer anchor tag) tag 1)
                              m b tag)))
 
     (defn fqmb-request-raw (surface tag)
         (do (let m (fqmb-mem (str_concat tag "-m")))
             (let b (fqmb-mem (str_concat tag "-b")))
-            (fqmb-request-of (fqmb-recipe m b (fqmb-offer-raw surface) tag 0)
+            (fqmb-request-of (fqmb-recipe m b
+                                (fqmb-offer-raw surface tag) tag 0)
                              m b tag)))
 
+    (defn fqmb-request-bad-query-digest (anchor tag)
+        (do (let m (fqmb-mem (str_concat tag "-m")))
+            (let b (fqmb-mem (str_concat tag "-b")))
+            (let offer (fqmb-offer anchor tag))
+            (fqmb-request-of (fqmb-recipe-with-query-sha m b offer tag 0
+                    (fqmb-sha "different-query-bytes")) m b tag)))
+
+    (defn fqmb-request-bad-source-binding (anchor tag)
+        (do (let m (fqmb-mem (str_concat tag "-m")))
+            (let b (fqmb-mem (str_concat tag "-b")))
+            (let offer (fqmb-offer-with anchor tag
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                (fqmb-question-sha tag)))
+            (fqmb-request-of (fqmb-recipe m b offer tag 0) m b tag)))
+
+    (defn fqmb-request-bad-question-binding (anchor tag)
+        (do (let m (fqmb-mem (str_concat tag "-m")))
+            (let b (fqmb-mem (str_concat tag "-b")))
+            (let offer (fqmb-offer-with anchor tag
+                (str_concat "sha256:" (fqmb-source-sha))
+                (fqmb-sha "different-question")))
+            (fqmb-request-of (fqmb-recipe m b offer tag 0) m b tag)))
+
     ; ── the temporary index ────────────────────────────────────────────────
-    (defn fqmb-index-line ()
+    (defn fqmb-index-line-with-source (source-key)
         (do
             (let answer "Kernel deployment is live and verified by current production evidence.")
             (let vec (re-semantic-vec
                 "deployment evidence kernel production verified witness"))
             (ric-emit-grounded "@1.1.9.41" "@8.4.4.12" "docs/deployment.form"
-                "cell"
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "cell" source-key
                 (hex-encode (sha256 (fqmb-bytes answer)))
                 (hex-encode (fqmb-bytes answer))
                 answer vec)))
+    (defn fqmb-index-line ()
+        (fqmb-index-line-with-source (fqmb-source-sha)))
 
     ; ── byte-by-byte chunking, to prove the window is scannerless ──────────
     (defn fqmb-explode (s i acc)
@@ -148,7 +191,12 @@
         (do
             (let path (str_concat (temp_dir)
                 "/form-knowledge-query-memory-exec-band.jsonl"))
+            (let wrong-path (str_concat (temp_dir)
+                "/form-knowledge-query-memory-exec-wrong-source-band.jsonl"))
             (let wrote (write_file path (fqmb-index-line)))
+            (let wrote-wrong (write_file wrong-path
+                (fqmb-index-line-with-source
+                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")))
 
             (let hit-req  (fqmb-request "deployed proof kernel" "t1"))
             (let miss-req (fqmb-request "banana photosynthesis galaxy" "t2"))
@@ -166,6 +214,22 @@
                     (str_concat "deployment" (str_concat (fkqmx-close-mark)
                         "ANSWER-LEAK"))) "t5"))
             (let raw-obs (fkqmx-execute-at path raw-req 0))
+            (let nested-req (fqmb-request-raw
+                (str_concat (fkqmx-open-mark)
+                    (str_concat "outer" (str_concat (fkqmx-open-mark)
+                    (str_concat "inner" (fkqmx-close-mark))))) "t5n"))
+            (let nested-obs (fkqmx-execute-at path nested-req 0))
+            (let bad-digest-req
+                (fqmb-request-bad-query-digest "deployed proof kernel" "t6"))
+            (let bad-digest-obs (fkqmx-execute-at path bad-digest-req 0))
+            (let bad-source-req
+                (fqmb-request-bad-source-binding "deployed proof kernel" "t7"))
+            (let bad-source-obs (fkqmx-execute-at path bad-source-req 0))
+            (let bad-question-req
+                (fqmb-request-bad-question-binding "deployed proof kernel" "t8"))
+            (let bad-question-obs (fkqmx-execute-at path bad-question-req 0))
+            (let wrong-source-obs
+                (fkqmx-execute-at wrong-path hit-req 0))
 
             ; the window, fed whole and byte-by-byte
             (let frame (fkqmw-frame-for hit-req))
@@ -191,6 +255,7 @@
 
             ; the fixture is removed here, after every read above has happened
             (let cleaned (fs_remove path))
+            (let cleaned-wrong (fs_remove wrong-path))
 
             (sum (list
                 (fqmb-bit (and (gt wrote 0)
@@ -260,7 +325,10 @@
 
                 (fqmb-bit (and (str_eq (fkqmx-obs-reason raw-obs)
                                        "not-answer-free")
-                               (eq (fkqmx-obs-lookups raw-obs) 0)) 8192)
+                          (and (eq (fkqmx-obs-lookups raw-obs) 0)
+                          (and (str_eq (fkqmx-obs-reason nested-obs)
+                                      "not-answer-free")
+                               (eq (fkqmx-obs-lookups nested-obs) 0)))) 8192)
 
                 (fqmb-bit (and (str_eq (fkqmx-obs-reason stored-obs)
                                        "provenance-flags")
@@ -274,6 +342,27 @@
                 ; probed rather than assumed, after the first two were assumed
                 ; and were wrong.
                 (fqmb-bit (and (eq cleaned 0)
-                               (eq (file_size path) -1)) 32768)))))
+                          (and (eq (file_size path) -1)
+                          (and (gt wrote-wrong 0)
+                          (and (eq cleaned-wrong 0)
+                               (eq (file_size wrong-path) -1))))) 32768)
+
+                (fqmb-bit (and (str_eq (fkqmx-obs-reason bad-digest-obs)
+                                       "query-digest-mismatch")
+                               (eq (fkqmx-obs-lookups bad-digest-obs) 0)) 65536)
+
+                (fqmb-bit (and (str_eq (fkqmx-obs-reason bad-source-obs)
+                                       "source-binding-mismatch")
+                          (and (eq (fkqmx-obs-lookups bad-source-obs) 0)
+                          (and (str_eq (fkqmx-obs-reason bad-question-obs)
+                                      "question-binding-mismatch")
+                               (eq (fkqmx-obs-lookups bad-question-obs) 0)))) 131072)
+
+                (fqmb-bit (and (str_eq (fkqmx-obs-status wrong-source-obs)
+                                       "failure")
+                          (and (str_eq (fkqmx-obs-reason wrong-source-obs)
+                                      "source-result-mismatch")
+                          (and (eq (fkqmx-obs-lookups wrong-source-obs) 1)
+                               (eq (fkqmx-obs-hits wrong-source-obs) 0)))) 262144)))))
 
     (form-knowledge-query-memory-exec-band))
