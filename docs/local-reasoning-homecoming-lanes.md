@@ -120,6 +120,24 @@ The claim was true at the wrong resolution. Name the binary.
 | LoRA identity `(W+B·A)·x == W·x + B·(A·x)` | `lora-adapter.fk` | band 31 |
 | LoRA tensor writer | — | **0**. `LoraWriter = 0`, `fqt-lora?` 0 |
 
+The row counts and historical held-out scores above are corpus/overlay
+observations, not claims that Qwen learned those lessons. Fresh split-lineage
+adoption on the universe, unique, domain, and organ mints keeps exact leakage
+at zero but exposes lesson-disjoint transfer of **2/8, 2/9, 0/12, and 4/12**.
+The formerly high scores reused the same small stem families under changed
+presentation. They remain visible as the earlier surface-transfer witness;
+the lower values are the current learning signal and are not retuned away.
+
+One pure local error-absorption experiment now goes beyond sample-byte adapter
+seeding. `cognition/error-absorption-kernel.fk` fits six train surfaces,
+receives one withheld classification error, derives rank-1 `B·(A·x)` from
+that error through `lora-modality.fk`, and re-observes both the error surface
+and one untouched sealed surface. Freshly, baseline predicts class 0 for both;
+the update moves both to expected class 1, while a separate executable behavior
+door preserves `nothing`, present `0`, and present `1`. Its band is 4095.
+This is transferable learning in the local Form feature classifier; it is not
+yet a Qwen tensor update, and `fqt-lora?` remains 0.
+
 ## Current seam: one resident source-hit answer, full denominator still owed
 
 `form-cli-model-generate.fk` constructs the live Qwen context and sends every
