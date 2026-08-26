@@ -1,0 +1,93 @@
+; train-loop-observe.fk — the eye. The body asks its own model and measures,
+; so the loop's observation is a cell, not a hand-typed script.
+;
+; The model is reached through host-exec and the installed mlx_lm.generate;
+; the reply sits between ========== fences and awk hands back exactly it.
+; Probes: the three held-out unknown stems (never trained), a fact sample
+; from valid2.jsonl (seen facts, unseen phrasing), and the same facts under
+; the nothing-permission. Rates return as permille in tlr-obs shape, so
+; tlr-decide can read them with no translation.
+;
+; A model that cannot be reached is NOTHING, not a zero observation — a loop
+; that reads silence as failure would retrain forever against an absent door.
+;
+; preludes: form-stdlib/core.fk learn/train-loop-rules.fk
+
+(do
+    (defn tlo-model () "mlx-community/Llama-3.2-3B-Instruct-4bit")
+    (defn tlo-valid2 () "/Users/ursmuff/.coherence-network/form-corpus-lora-data/valid2.jsonl")
+
+    (defn tlo-ask (adapter prompt)
+        (do (let cmd (str_concat "/Users/ursmuff/.local/bin/mlx_lm.generate --model "
+                (str_concat (tlo-model)
+                (str_concat " --adapter-path " (str_concat adapter
+                (str_concat " --max-tokens 8 --prompt " (str_concat "'" (str_concat prompt "'"))))))))
+            (let out (host-exec (str_concat cmd
+                " 2>/dev/null | awk '/^==========/{f=!f;next} f'") ""))
+            (if (eq (str_len out) 0) (nothing) (fqmn-trim-like out))))
+    ; trim trailing newline the pipe leaves
+    (defn fqmn-trim-like (s)
+        (if (eq (str_len s) 0) s
+            (if (eq (str_byte_at s (sub (str_len s) 1)) 10)
+                (substring s 0 (sub (str_len s) 1)) s)))
+
+    ; ── JSONL row parsing: question and answer out of one line ─────────────
+    (defn tlo-field (line key)
+        (do (let k (str_concat "\"" (str_concat key "\":\"")))
+            (let a (str_find line k 0))
+            (if (lt a 0) (nothing)
+                (do (let s (add a (str_len k)))
+                    (let e (str_find line "\"}" s))
+                    (if (lt e 0) (nothing) (substring line s e))))))
+    (defn tlo-line-at (s want)
+        (do (let e (str_find s "\n" want))
+            (if (lt e 0) (nothing) (substring s want e))))
+
+    ; ── contains-match scoring, case-blind enough for one-word targets ─────
+    (defn tlo-hit? (want got)
+        (if (nothing? got) 0 (if (ge (str_find got want 0) 0) 1 0)))
+
+    ; ── the unknowns: the three held-out stems ─────────────────────────────
+    (defn tlo-unknowns () (list "cragmoor" "duskwrit" "fenlode"))
+    (defn tlo-unknown-q (w)
+        (str_concat "Answer with one word only. what does the body mean by "
+            (str_concat w "? If it is not a word the body holds, reply exactly: nothing.")))
+
+    (defn tlo-unk-loop (adapter ws fabricated asked)
+        (if (eq (len ws) 0) (list fabricated asked)
+            (do (let got (tlo-ask adapter (tlo-unknown-q (head ws))))
+                (tlo-unk-loop adapter (tail ws)
+                    (add fabricated (if (nothing? got) 0
+                        (if (eq (tlo-hit? "nothing" got) 1) 0 1)))
+                    (add asked 1)))))
+
+    ; ── facts: rows read off valid2 at fixed offsets ───────────────────────
+    (defn tlo-fact-loop (adapter s pos left hits abstained asked perm)
+        (if (le left 0) (list hits abstained asked)
+            (do (let line (tlo-line-at s pos))
+                (if (nothing? line) (list hits abstained asked)
+                    (do (let q (tlo-field line "content"))
+                        (let a (tlo-field (substring line (add (str_find line "assistant" 0) 0) (str_len line)) "content"))
+                        (let ask-q (if (eq perm 1)
+                            (str_concat q " If it is not a word the body holds, reply exactly: nothing.") q))
+                        (let got (tlo-ask adapter ask-q))
+                        (tlo-fact-loop adapter s (add pos (add (str_len line) 1)) (sub left 1)
+                            (add hits (tlo-hit? a got))
+                            (add abstained (if (and (eq (tlo-hit? a got) 0)
+                                                    (eq (tlo-hit? "nothing" got) 1)) 1 0))
+                            (add asked 1) perm))))))
+
+    (defn tlo-pm (n d) (if (eq d 0) 0 (div (mul n 1000) d)))
+
+    ; ── one observation of one adapter, in tlr-obs shape ───────────────────
+    (defn tlo-observe (adapter fact-count)
+        (do (let s (read_file (tlo-valid2)))
+            (if (lt (str_len s) 2) (nothing)
+                (do (let u (tlo-unk-loop adapter (tlo-unknowns) 0 0))
+                    (let f (tlo-fact-loop adapter s 0 fact-count 0 0 0 0))
+                    (let p (tlo-fact-loop adapter s 0 fact-count 0 0 0 1))
+                    (tlr-obs 1000
+                        (tlo-pm (nth f 0) (nth f 2))
+                        (tlo-pm (nth u 0) (nth u 1))
+                        (tlo-pm (nth p 1) (nth p 2)))))))
+    0)
