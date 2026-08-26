@@ -1,0 +1,259 @@
+; form-knowledge-query-memory-resident.fk — one request token crosses to a
+; resident lookup, and the resident model answers FROM what the body found.
+;
+; THE CROSSING THIS CLOSES. form-knowledge-query-memory-exec.fk validates a
+; query-memory request from its own children and performs exactly one grounded
+; lookup. What it could not do was let anything ANSWER from that lookup. This
+; cell adds the last stage over the host socket floor, so a request token
+; reaches resident lookup AND resident answer execution in one movement.
+;
+; NO NEW MODEL OWNER. The carrier speaks to an already-running server on a host
+; and port the caller names. It launches nothing, restarts nothing, and holds no
+; model. If the peer is absent every stage after `ask` reports nothing, and the
+; stages before it keep their observations — a dead server costs the answer, not
+; the lookup.
+;
+; PER-STAGE FRAMES, AND THE TRANSITIONS ARE THE POINT. Each stage emits one
+; frame (stage state detail) and the run returns them in order, so a reader sees
+; WHERE a crossing stopped rather than only that it did:
+;
+;   request  the token validated from its own children, or the gate it failed
+;   query    the answer-free bytes walked out of the recipe node
+;   lookup   exactly one grounded retrieval: hit / miss / nothing
+;   ask      the typed observation carried to the resident peer
+;   answer   what came back, extracted from the peer's own reply
+;
+; NOTHING IS NOT ZERO, AT EVERY STAGE. A stage that could not run reports
+; `nothing` — axiom-1's third state. A stage that ran and found zero reports a
+; grounded 0. `fqmr-state-nothing?` and a 0 detail are different readings and
+; this cell never lets one wear the other's clothes: a lookup with zero hits is
+; a MISS that ran, and an absent peer is nothing that did not.
+;
+; THE MODEL IS NOT THE SOURCE. The answer stage carries the retrieved
+; observation into the prompt and asks the peer to answer only from it. The
+; observation's own attribution rides along, so a reader can always ask which
+; cell the content came from. No logit performed the retrieval.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-cli-router.fk
+; preludes: form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
+; preludes: form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
+; preludes: form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk form-stdlib/rag-ask.fk
+; preludes: form-stdlib/form-knowledge-query-token.fk
+; preludes: form-stdlib/form-knowledge-query-memory-rotation-token.fk
+; preludes: form-stdlib/form-knowledge-query-memory-exec.fk
+;
+; Proven by: form-stdlib/tests/form-knowledge-query-memory-resident-band.fk
+
+(do
+    ; ── frames ─────────────────────────────────────────────────────────────
+    (defn fqmr-frame (stage state detail) (list "frame" stage state detail))
+    (defn fqmr-frame-stage (f)  (nth f 1))
+    (defn fqmr-frame-state (f)  (nth f 2))
+    (defn fqmr-frame-detail (f) (nth f 3))
+
+    (defn fqmr-state-ran ()     "ran")
+    (defn fqmr-state-refused () "refused")
+    (defn fqmr-state-nothing () "nothing")
+    (defn fqmr-state? (s)
+        (if (or (str_eq s (fqmr-state-ran))
+                (or (str_eq s (fqmr-state-refused))
+                    (str_eq s (fqmr-state-nothing)))) 1 0))
+    (defn fqmr-nothing-frame? (f)
+        (if (str_eq (fqmr-frame-state f) (fqmr-state-nothing)) 1 0))
+
+    (defn fqmr-stage-at (frames i) (if (lt i (len frames)) (nth frames i) (nothing)))
+    (defn fqmr-stage-state (frames i)
+        (do (let f (fqmr-stage-at frames i))
+            (if (nothing? f) (fqmr-state-nothing) (fqmr-frame-state f))))
+
+    ; ── the host socket carrier: no shell, no python, no new owner ─────────
+    (defn fqmr-crlf () (str_concat (byte_to_str 13) (byte_to_str 10)))
+    (defn fqmr-cat3 (a b c) (str_concat a (str_concat b c)))
+
+    (defn fqmr-request-bytes (host port path body)
+        (fqmr-cat3
+            (fqmr-cat3 "POST " path (str_concat " HTTP/1.1" (fqmr-crlf)))
+            (fqmr-cat3 "Host: " host
+                (fqmr-cat3 ":" (int_to_str port) (fqmr-crlf)))
+            (fqmr-cat3
+                (str_concat "Content-Type: application/json" (fqmr-crlf))
+                (fqmr-cat3 "Content-Length: " (int_to_str (str_len body))
+                           (fqmr-crlf))
+                (fqmr-cat3 "Connection: close" (fqmr-crlf)
+                           (str_concat (fqmr-crlf) body)))))
+
+    ; Drain in bounded chunks. A peer that closes returns what it sent; a peer
+    ; that never answers ends the loop at the cap rather than hanging on it.
+    (defn fqmr-drain (sock acc left)
+        (if (le left 0) acc
+            (do (let c (socket_recv sock 65536))
+                (if (eq (str_len c) 0) acc
+                    (fqmr-drain sock (str_concat acc c) (sub left 1))))))
+
+    (defn fqmr-post (host port path body)
+        (do (let s (socket_connect host port))
+            (if (le s 0) ""
+                (do (let sent (socket_send s (fqmr-request-bytes host port path body)))
+                    (if (le sent 0) (do (socket_close s) "")
+                        (do (let got (fqmr-drain s "" 64))
+                            (socket_close s)
+                            got))))))
+
+    ; ── minimal JSON reading, only what the peer's reply needs ─────────────
+    ; Walks bytes and honours one level of backslash escaping, so a reply
+    ; containing an escaped quote does not truncate the answer.
+    (defn fqmr-scan-close (text i)
+        (if (ge i (str_len text)) -1
+            (do (let b (str_byte_at text i))
+                (if (eq b 92) (fqmr-scan-close text (add i 2))
+                    (if (eq b 34) i (fqmr-scan-close text (add i 1)))))))
+
+    ; A JSON string carries ESCAPES, not the bytes they stand for: "\n" in the
+    ; wire is backslash followed by n, two characters. Handing those through
+    ; unread makes a trimmer blind to its own leading whitespace and puts
+    ; literal backslashes into an answer a person will read. Decoded here, at
+    ; the one place the wire is turned into text.
+    (defn fqmr-unesc-loop (s i n acc)
+        (if (ge i n) acc
+            (do (let b (str_byte_at s i))
+                (if (not (eq b 92)) (fqmr-unesc-loop s (add i 1) n
+                                        (str_concat acc (byte_to_str b)))
+                    (do (let e (if (lt (add i 1) n) (str_byte_at s (add i 1)) 0))
+                        (fqmr-unesc-loop s (add i 2) n
+                            (str_concat acc
+                                (if (eq e 110) (byte_to_str 10)
+                                (if (eq e 114) (byte_to_str 13)
+                                (if (eq e 116) (byte_to_str 9)
+                                (if (eq e 34) "\""
+                                (if (eq e 92) "\\"
+                                (if (eq e 47) "/" (byte_to_str e))))))))))))))
+    (defn fqmr-unesc (s) (fqmr-unesc-loop s 0 (str_len s) ""))
+
+    (defn fqmr-json-string (text key)
+        (do (let mark (fqmr-cat3 "\"" key "\":\""))
+            (let at (str_find text mark 0))
+            (if (lt at 0) (nothing)
+                (do (let start (add at (str_len mark)))
+                    (let end (fqmr-scan-close text start))
+                    (if (lt end 0) (nothing)
+                        (fqmr-unesc (substring text start end)))))))
+
+    ; ── writing a JSON string, so an observation can ride in a prompt ──────
+    (defn fqmr-esc-byte (b)
+        (if (eq b 34) "\\\""
+            (if (eq b 92) "\\\\"
+                (if (eq b 10) "\\n"
+                    (if (eq b 13) "\\r"
+                        (if (eq b 9) "\\t"
+                            (if (lt b 32) " " (byte_to_str b))))))))
+    (defn fqmr-esc-loop (s i n acc)
+        (if (ge i n) acc
+            (fqmr-esc-loop s (add i 1) n
+                (str_concat acc (fqmr-esc-byte (str_byte_at s i))))))
+    (defn fqmr-esc (s) (fqmr-esc-loop s 0 (str_len s) ""))
+
+    (defn fqmr-completion-body (prompt predict)
+        (fqmr-cat3 "{\"prompt\":\"" (fqmr-esc prompt)
+            (fqmr-cat3 "\",\"n_predict\":" (int_to_str predict)
+                       ",\"temperature\":0,\"cache_prompt\":false}")))
+
+    ; ── asking the resident peer ───────────────────────────────────────────
+    ; nothing when the peer did not answer; the reply text when it did, even if
+    ; that text is empty — an empty reply is a grounded answer, not an absence.
+    (defn fqmr-ask (host port prompt predict)
+        (do (let raw (fqmr-post host port "/completion"
+                        (fqmr-completion-body prompt predict)))
+            (if (eq (str_len raw) 0) (nothing)
+                (fqmr-json-string raw "content"))))
+
+    ; ── this peer thinks out loud, and the thought is not the answer ──────
+    ; Qwen3.8 opens a reply with a <think> block. Reporting that block as the
+    ; observed answer would be reporting the model's deliberation as its
+    ; finding — and truncating it mid-thought, as a short budget does, reports
+    ; a fragment of deliberation as a finding. The closing mark is the seam:
+    ; everything after it is the answer, everything before it is how the peer
+    ; got there. Both are kept, in different fields, because a reader auditing
+    ; a grounded answer may want the route and must never be handed it by
+    ; mistake.
+    (defn fqmr-think-close () "</think>")
+    (defn fqmr-thought? (reply)
+        (if (ge (str_find reply (fqmr-think-close) 0) 0) 1 0))
+    (defn fqmr-trim-loop (s i n)
+        (if (ge i n) ""
+            (do (let b (str_byte_at s i))
+                (if (or (eq b 32) (or (eq b 10) (or (eq b 13) (eq b 9))))
+                    (fqmr-trim-loop s (add i 1) n)
+                    (substring s i n)))))
+    (defn fqmr-trim (s) (fqmr-trim-loop s 0 (str_len s)))
+    ; nothing when the peer was still thinking at the budget's end: an
+    ; unfinished deliberation is not a short answer.
+    (defn fqmr-answer-part (reply)
+        (do (let at (str_find reply (fqmr-think-close) 0))
+            (if (lt at 0)
+                (if (ge (str_find reply "<think>" 0) 0) (nothing)
+                    (fqmr-trim reply))
+                (fqmr-trim (substring reply
+                    (add at (str_len (fqmr-think-close))) (str_len reply))))))
+
+    ; The prompt the answer stage carries: the retrieved observation first, the
+    ; question second, and an instruction to answer only from what was found.
+    (defn fqmr-answer-prompt (observation question)
+        (fqmr-cat3
+            "Answer only from the observation below. If it does not contain the answer, reply exactly: nothing.\n\n"
+            observation
+            (fqmr-cat3 "\n\nQuestion: " question "\nAnswer: ")))
+
+    ; ── the five-stage crossing ────────────────────────────────────────────
+    ; Frames accumulate in order and are returned whatever happens, so a
+    ; stopped crossing still says where it stopped and with what.
+    (defn fqmr-cross (index-path request question host port predict)
+        (do
+            (let reason (fkqmx-refuse-reason request))
+            (if (not (str_eq reason "ready"))
+                (list (fqmr-frame "request" (fqmr-state-refused) reason))
+                (do
+                    (let recipe (fkqmx-request-recipe request))
+                    (let bytes (fkqmx-query-bytes recipe))
+                    (let obs (fkqmx-execute-at index-path request 0))
+                    (let status (fkqmx-obs-status obs))
+                    (let f1 (fqmr-frame "request" (fqmr-state-ran) reason))
+                    (let f2 (fqmr-frame "query" (fqmr-state-ran) bytes))
+                    (let f3 (fqmr-frame "lookup" (fqmr-state-ran) status))
+                    (if (not (str_eq status "hit"))
+                        ; the lookup RAN and found nothing to answer from: the
+                        ; ask stage is nothing, and that is not a zero
+                        (list f1 f2 f3
+                            (fqmr-frame "ask" (fqmr-state-nothing) status)
+                            (fqmr-frame "answer" (fqmr-state-nothing) status))
+                        (do
+                            (let span (fkqmx-obs-span obs))
+                            (let reply (fqmr-ask host port
+                                (fqmr-answer-prompt span question) predict))
+                            (if (nothing? reply)
+                                (list f1 f2 f3
+                                    (fqmr-frame "ask" (fqmr-state-nothing) "peer-silent")
+                                    (fqmr-frame "answer" (fqmr-state-nothing) "peer-silent"))
+                                (do (let part (fqmr-answer-part reply))
+                                    (if (nothing? part)
+                                        (list f1 f2 f3
+                                            (fqmr-frame "ask" (fqmr-state-ran) "peer-answered")
+                                            (fqmr-frame "answer" (fqmr-state-nothing)
+                                                "thought-unfinished"))
+                                        (list f1 f2 f3
+                                            (fqmr-frame "ask" (fqmr-state-ran) "peer-answered")
+                                            (fqmr-frame "answer" (fqmr-state-ran) part)))))))))))
+
+    (defn fqmr-answer-of (frames)
+        (do (let f (fqmr-stage-at frames 4))
+            (if (nothing? f) (nothing)
+                (if (eq (fqmr-nothing-frame? f) 1) (nothing)
+                    (fqmr-frame-detail f)))))
+
+    (defn fqmr-reached? (frames stage)
+        (if (eq (len frames) 0) 0
+            (if (str_eq (fqmr-frame-stage (head frames)) stage) 1
+                (fqmr-reached? (tail frames) stage))))
+
+    (defn fqmr-model-executed () 0)
+
+    0)

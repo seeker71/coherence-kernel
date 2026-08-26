@@ -122,12 +122,13 @@ form-stdlib/ask-lane-router.fk
 form-stdlib/form-cli-gguf-cell.fk
 form-stdlib/dsv4-tokenizer.fk
 form-stdlib/qwen35-tokenizer.fk
-form-stdlib/qwen35-tokfast-v2.fk
+form-stdlib/qwen35-tokfast-v2-live-reader.fk
+form-stdlib/kernel-http-header.fk
 form-stdlib/kernel-http.fk
 form-stdlib/form-asm.fk
 form-stdlib/metal-door.fk
 native/metal/sha256-arm64-jit.fk
-form-stdlib/qwen35-artifact-fetch.fk
+form-stdlib/qwen35-artifact-seal-reader.fk
 form-stdlib/q8-0-msl.fk
 form-stdlib/q3k-msl.fk
 form-stdlib/gated-deltanet-msl.fk
@@ -149,6 +150,7 @@ form-stdlib/local-model-choice.fk
 form-stdlib/substrate-phase.fk
 form-stdlib/source-resonance-stream.fk
 form-stdlib/local-generate-organ.fk
+form-stdlib/language-template.fk
 form-stdlib/language-model.fk
 form-stdlib/form-cli-heedmark-xtal.fk
 form-stdlib/form-cli-qwen-teach-layer.fk
@@ -160,6 +162,7 @@ form-stdlib/file-byte-window.fk
 form-stdlib/form-knowledge-source-search.fk
 form-stdlib/form-cli-heed-current-source.fk
 form-stdlib/form-cli-heed-grounded.fk
+form-stdlib/qwen35-tokenizer-live-cursor.fk
 form-stdlib/form-cli-model-generate.fk
 form-stdlib/form-cli-model-session.fk
 form-stdlib/bmf-byte-cursor.fk
@@ -329,83 +332,83 @@ form_cli_generation_load_attestation() {
                 ;;
             source_sha256)
                 [[ -z "$FORM_CLI_GENERATION_SOURCE_SHA256" ]] || {
-                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$path" >&2
+                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$file_path" >&2
                     return 1
                 }
                 FORM_CLI_GENERATION_SOURCE_SHA256="$value"
                 ;;
             source_stamp)
                 [[ -z "$FORM_CLI_GENERATION_SOURCE_STAMP" ]] || {
-                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$path" >&2
+                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$file_path" >&2
                     return 1
                 }
                 FORM_CLI_GENERATION_SOURCE_STAMP="$value"
                 ;;
             table_sha256)
                 [[ -z "$FORM_CLI_GENERATION_TABLE_SHA256" ]] || {
-                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$path" >&2
+                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$file_path" >&2
                     return 1
                 }
                 FORM_CLI_GENERATION_TABLE_SHA256="$value"
                 ;;
             emitted_c_sha256)
                 [[ -z "$FORM_CLI_GENERATION_EMITTED_C_SHA256" ]] || {
-                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$path" >&2
+                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$file_path" >&2
                     return 1
                 }
                 FORM_CLI_GENERATION_EMITTED_C_SHA256="$value"
                 ;;
             bootstrap_attestation_sha256)
                 [[ -z "$FORM_CLI_GENERATION_BOOTSTRAP_ATTESTATION_SHA256" ]] || {
-                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$path" >&2
+                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$file_path" >&2
                     return 1
                 }
                 FORM_CLI_GENERATION_BOOTSTRAP_ATTESTATION_SHA256="$value"
                 ;;
             bml_compiler_kind)
                 [[ -z "$FORM_CLI_GENERATION_BML_COMPILER_KIND" ]] || {
-                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$path" >&2
+                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$file_path" >&2
                     return 1
                 }
                 FORM_CLI_GENERATION_BML_COMPILER_KIND="$value"
                 ;;
             bml_compiler_sha256)
                 [[ -z "$FORM_CLI_GENERATION_BML_COMPILER_SHA256" ]] || {
-                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$path" >&2
+                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$file_path" >&2
                     return 1
                 }
                 FORM_CLI_GENERATION_BML_COMPILER_SHA256="$value"
                 ;;
             flattener_kind)
                 [[ -z "$FORM_CLI_GENERATION_FLATTENER_KIND" ]] || {
-                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$path" >&2
+                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$file_path" >&2
                     return 1
                 }
                 FORM_CLI_GENERATION_FLATTENER_KIND="$value"
                 ;;
             flattener_binary_sha256)
                 [[ -z "$FORM_CLI_GENERATION_FLATTENER_BINARY_SHA256" ]] || {
-                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$path" >&2
+                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$file_path" >&2
                     return 1
                 }
                 FORM_CLI_GENERATION_FLATTENER_BINARY_SHA256="$value"
                 ;;
             platform_slug)
                 [[ -z "$FORM_CLI_GENERATION_PLATFORM_SLUG" ]] || {
-                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$path" >&2
+                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$file_path" >&2
                     return 1
                 }
                 FORM_CLI_GENERATION_PLATFORM_SLUG="$value"
                 ;;
             platform_carrier_sha256)
                 [[ -z "$FORM_CLI_GENERATION_PLATFORM_CARRIER_SHA256" ]] || {
-                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$path" >&2
+                    printf 'form-cli generation attestation: duplicate field %s in %s\n' "$key" "$file_path" >&2
                     return 1
                 }
                 FORM_CLI_GENERATION_PLATFORM_CARRIER_SHA256="$value"
                 ;;
             *)
-                printf 'form-cli generation attestation: unknown field %s in %s\n' "$key" "$path" >&2
+                printf 'form-cli generation attestation: unknown field %s in %s\n' "$key" "$file_path" >&2
                 return 1
                 ;;
         esac
@@ -537,12 +540,12 @@ form_cli_verify_generation_attestation() {
     }
     actual="$(form_cli_generation_sha256_file "$platform_carrier")"
     [[ "$FORM_CLI_GENERATION_PLATFORM_CARRIER_SHA256" == "$actual" ]] || {
-        printf 'form-cli generation attestation: platform carrier hash mismatch in %s\n' "$path" >&2
+        printf 'form-cli generation attestation: platform carrier hash mismatch in %s\n' "$file_path" >&2
         return 1
     }
     actual="$(form_cli_generation_sha256_file "$bootstrap_attestation")"
     [[ "$FORM_CLI_GENERATION_BOOTSTRAP_ATTESTATION_SHA256" == "$actual" ]] || {
-        printf 'form-cli generation attestation: bootstrap attestation hash mismatch in %s\n' "$path" >&2
+        printf 'form-cli generation attestation: bootstrap attestation hash mismatch in %s\n' "$file_path" >&2
         return 1
     }
 }
