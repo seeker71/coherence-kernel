@@ -1,0 +1,338 @@
+; train-loop-outcome-ack.fk — a local carrier outcome becomes a structural ACK
+; and exactly one atomic ledger row, never an interpreted stdout fragment.
+;
+; TERMINAL VOCABULARY.  The status names are the already-admitted program-image
+; OFFER/ACK arms: returned, refused, nothing, choice, failure, timeout.  This
+; adapter does not invent a second lattice.  A carrier that was offered but did
+; not leave a valid record is failure, never nothing.  Returned requires exact
+; exit 0, offline residence, an input-adapter seal, and all six stable output
+; files.  A duplicate correlation is refused without another append.
+;
+; OBSERVATION.  Each file crosses one explicit host-exec effect leaf.  The leaf
+; reports size -> full SHA-256 -> size; Form admits it only when both sizes are
+; the same positive canonical integer and the digest is canonical lowercase
+; SHA-256.  The output manifest and ACK are interned nodes, so their NodeIDs
+; change whenever any role, path, byte count, seal, correlation, or outcome
+; changes.  Categories 31.2.0.137..139 were absent in a fresh whole-source
+; census after the shared program-image protocol occupied 131..136.
+;
+; PERSISTENCE. file_append_bytes is the kernel's atomic O_APPEND door.  One
+; complete row crosses it; a reread must observe before+1 rows and one exact
+; correlation.  The second same offer returns refused/duplicate with append=0.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/native-model-evidence.fk learn/train-loop-local-paths.fk
+
+(do
+    (defn tloa-category (instance) (make_nodeid 31 2 0 instance))
+    (defn tloa-file-category () (tloa-category 137))
+    (defn tloa-manifest-category () (tloa-category 138))
+    (defn tloa-ack-category () (tloa-category 139))
+
+    (defn tloa-status-returned () "returned")
+    (defn tloa-status-refused () "refused")
+    (defn tloa-status-nothing () "nothing")
+    (defn tloa-status-choice () "choice")
+    (defn tloa-status-failure () "failure")
+    (defn tloa-status-timeout () "timeout")
+    (defn tloa-status? (s)
+        (if (str_eq s (tloa-status-returned)) 1
+        (if (str_eq s (tloa-status-refused)) 1
+        (if (str_eq s (tloa-status-nothing)) 1
+        (if (str_eq s (tloa-status-choice)) 1
+        (if (str_eq s (tloa-status-failure)) 1
+        (if (str_eq s (tloa-status-timeout)) 1 0)))))))
+
+    (defn tloa-node-coordinate (node)
+        (str_concat "@" (str_concat (int_to_str (node_pkg node))
+        (str_concat "." (str_concat (int_to_str (node_level node))
+        (str_concat "." (str_concat (int_to_str (node_type node))
+        (str_concat "." (int_to_str (node_inst node))))))))))
+
+    ; Shell quoting is confined to local paths.  No prompt or model text enters
+    ; this membrane.
+    (defn tloa-shq-loop (s i acc)
+        (if (ge i (str_len s)) acc
+            (tloa-shq-loop s (add i 1)
+                (str_concat acc
+                    (if (eq (str_byte_at s i) 39) "'\\''"
+                        (byte_to_str (str_byte_at s i)))))))
+    (defn tloa-shq (s)
+        (str_concat "'" (str_concat (tloa-shq-loop s 0 "") "'")))
+
+    (defn tloa-report-value (report key)
+        (do
+            (let mark (str_concat key "="))
+            (let at (str_find report mark 0))
+            (if (lt at 0) (nothing)
+                (do
+                    (let start (add at (str_len mark)))
+                    (let end0 (str_find report "\n" start))
+                    (let end (if (lt end0 0) (str_len report) end0))
+                    (substring report start end)))))
+    (defn tloa-canonical-int? (s)
+        (if (nothing? s) 0
+            (if (str_eq s (int_to_str (str_to_int s))) 1 0)))
+
+    ; Result: tag role path exit before after sha report-sha.
+    (defn tloa-file-observation (role path exit before after sha report-sha)
+        (list "train-loop-file-observation-v1" role path exit before after sha
+              report-sha))
+    (defn tloa-fo-role (o) (nth o 1))
+    (defn tloa-fo-path (o) (nth o 2))
+    (defn tloa-fo-exit (o) (nth o 3))
+    (defn tloa-fo-before (o) (nth o 4))
+    (defn tloa-fo-after (o) (nth o 5))
+    (defn tloa-fo-sha (o) (nth o 6))
+    (defn tloa-fo-report-sha (o) (nth o 7))
+    (defn tloa-file-observation-valid? (o)
+        (if (not (eq (len o) 8)) 0
+        (if (not (str_eq (nth o 0) "train-loop-file-observation-v1")) 0
+        (if (not (eq (tloa-fo-exit o) 0)) 0
+        (if (not (gt (tloa-fo-before o) 0)) 0
+        (if (not (eq (tloa-fo-before o) (tloa-fo-after o))) 0
+        (if (not (eq (nmfe-sha256? (tloa-fo-sha o)) 1)) 0
+        (if (not (eq (nmfe-sha256? (tloa-fo-report-sha o)) 1)) 0
+        (if (eq (str_len (tloa-fo-role o)) 0) 0
+        (if (eq (str_len (tloa-fo-path o)) 0) 0 1))))))))))
+
+    (defn tloa-observe-file (role path)
+        (do
+            (let q (tloa-shq path))
+            (let cmd
+                (str_concat (tlp-offline-env)
+                (str_concat "; p=" (str_concat q
+                (str_concat "; b=$(/usr/bin/stat -f %z \"$p\" 2>/dev/null); "
+                (str_concat (str_concat "if " (str_concat (tloa-shq (tlp-test-executable)) " -s \"$p\"; then "))
+                (str_concat "h=$(/usr/bin/shasum -a 256 \"$p\" 2>/dev/null | /usr/bin/cut -d ' ' -f 1); a=$(/usr/bin/stat -f %z \"$p\" 2>/dev/null); "
+                (str_concat "if [ \"$b\" = \"$a\" ] && [ \"${#h}\" -eq 64 ]; then r=0; else r=65; fi; "
+                            "else r=66; a=-1; h=; fi; /usr/bin/printf 'exit=%s\\nbefore=%s\\nafter=%s\\nsha256=%s\\n' \"$r\" \"$b\" \"$a\" \"$h\""))))))))
+            (let report (host-exec cmd ""))
+            (let ex (tloa-report-value report "exit"))
+            (let before (tloa-report-value report "before"))
+            (let after (tloa-report-value report "after"))
+            (let sha (tloa-report-value report "sha256"))
+            (tloa-file-observation role path
+                (if (eq (tloa-canonical-int? ex) 1) (str_to_int ex) -1)
+                (if (eq (tloa-canonical-int? before) 1) (str_to_int before) -1)
+                (if (eq (tloa-canonical-int? after) 1) (str_to_int after) -1)
+                (if (nothing? sha) "" sha)
+                (nmfe-sha256 report))))
+
+    (defn tloa-file-node (o)
+        (intern_node (tloa-file-category)
+            (list (intern_trivial_string (tloa-fo-role o))
+                  (intern_trivial_string (tloa-fo-path o))
+                  (intern_trivial_int (tloa-fo-after o))
+                  (intern_trivial_string (tloa-fo-sha o))
+                  (intern_trivial_string (tloa-fo-report-sha o)))))
+    (defn tloa-file-node-valid? (node)
+        (if (nothing? node) 0
+        (if (not (node_eq (node_category node) (tloa-file-category))) 0
+        (if (not (eq (len (node_children node)) 5)) 0
+        (if (not (eq (node_type (nth (node_children node) 0)) 2)) 0
+        (if (not (eq (node_type (nth (node_children node) 1)) 2)) 0
+        (if (not (eq (node_type (nth (node_children node) 2)) 1)) 0
+        (if (not (eq (node_type (nth (node_children node) 3)) 2)) 0
+        (if (not (eq (node_type (nth (node_children node) 4)) 2)) 0
+        (if (not (gt (node_value (nth (node_children node) 2)) 0)) 0
+        (if (not (eq (nmfe-sha256? (node_value (nth (node_children node) 3))) 1)) 0
+            (if (eq (nmfe-sha256? (node_value (nth (node_children node) 4))) 1) 1 0))))))))))))
+
+    (defn tloa-observe-many (roles paths acc)
+        (if (eq (len roles) 0) acc
+            (tloa-observe-many (tail roles) (tail paths)
+                (append acc (list (tloa-observe-file (head roles) (head paths)))))))
+    (defn tloa-observe-manifest (dir)
+        (tloa-observe-many (tlp-fused-roles) (tlp-fused-paths dir) (list)))
+    (defn tloa-observations-valid? (observations)
+        (if (eq (len observations) 0) 1
+            (if (eq (tloa-file-observation-valid? (head observations)) 1)
+                (tloa-observations-valid? (tail observations)) 0)))
+    (defn tloa-file-nodes (observations)
+        (if (eq (len observations) 0) (list)
+            (cons (tloa-file-node (head observations))
+                  (tloa-file-nodes (tail observations)))))
+    (defn tloa-nodes-valid? (nodes)
+        (if (eq (len nodes) 0) 1
+            (if (eq (tloa-file-node-valid? (head nodes)) 1)
+                (tloa-nodes-valid? (tail nodes)) 0)))
+    (defn tloa-manifest (observations)
+        (intern_node (tloa-manifest-category) (tloa-file-nodes observations)))
+    (defn tloa-manifest-valid? (manifest)
+        (if (nothing? manifest) 0
+        (if (not (node_eq (node_category manifest) (tloa-manifest-category))) 0
+        (if (not (eq (len (node_children manifest)) 6)) 0
+            (tloa-nodes-valid? (node_children manifest))))))
+    (defn tloa-node-size (node)
+        (node_value (nth (node_children node) 2)))
+    (defn tloa-total-size (nodes)
+        (if (eq (len nodes) 0) 0
+            (add (tloa-node-size (head nodes)) (tloa-total-size (tail nodes)))))
+    (defn tloa-manifest-text (observations)
+        (if (eq (len observations) 0) ""
+            (do
+                (let o (head observations))
+                (str_concat (nmfe-fields
+                    (list (tloa-fo-role o) (tloa-fo-path o)
+                          (int_to_str (tloa-fo-after o)) (tloa-fo-sha o)
+                          (tloa-fo-report-sha o)))
+                    (tloa-manifest-text (tail observations))))))
+    (defn tloa-manifest-seal (observations)
+        (nmfe-sha256 (tloa-manifest-text observations)))
+
+    ; ACK children: invocation directive status reason carrier exit adapter
+    ; manifest before-rows after-rows append offline output-dir total-size seal.
+    (defn tloa-ack (invocation directive status reason exit adapter manifest
+                    before after appended offline output-dir total-size seal)
+        (intern_node (tloa-ack-category)
+            (list
+                (intern_trivial_string invocation)
+                (intern_trivial_string directive)
+                (intern_trivial_string status)
+                (intern_trivial_string reason)
+                (intern_trivial_string "host-exec-local-artifact-admit-v1")
+                (intern_trivial_int exit)
+                adapter manifest
+                (intern_trivial_int before)
+                (intern_trivial_int after)
+                (intern_trivial_int appended)
+                (intern_trivial_int offline)
+                (intern_trivial_string output-dir)
+                (intern_trivial_int total-size)
+                (intern_trivial_string seal))))
+    (defn tloa-ack-child (ack at) (nth (node_children ack) at))
+    (defn tloa-ack-str (ack at) (node_value (tloa-ack-child ack at)))
+    (defn tloa-ack-int (ack at) (node_value (tloa-ack-child ack at)))
+    (defn tloa-ack-status (ack) (tloa-ack-str ack 2))
+    (defn tloa-ack-reason (ack) (tloa-ack-str ack 3))
+    (defn tloa-ack-appended (ack) (tloa-ack-int ack 10))
+    (defn tloa-ack-valid? (ack)
+        (if (nothing? ack) 0
+        (if (not (node_eq (node_category ack) (tloa-ack-category))) 0
+        (if (not (eq (len (node_children ack)) 15)) 0
+        (if (not (eq (tloa-status? (tloa-ack-status ack)) 1)) 0
+        (if (not (eq (node_type (tloa-ack-child ack 5)) 1)) 0
+        (if (not (eq (node_type (tloa-ack-child ack 8)) 1)) 0
+        (if (not (eq (node_type (tloa-ack-child ack 9)) 1)) 0
+        (if (not (eq (node_type (tloa-ack-child ack 10)) 1)) 0
+        (if (not (eq (node_type (tloa-ack-child ack 11)) 1)) 0
+            (do
+                (let status (tloa-ack-status ack))
+                (let before (tloa-ack-int ack 8))
+                (let after (tloa-ack-int ack 9))
+                (let appended (tloa-ack-int ack 10))
+                (let returned (str_eq status (tloa-status-returned)))
+                (let duplicate (and (str_eq status (tloa-status-refused))
+                                    (str_eq (tloa-ack-reason ack) "duplicate-invocation")))
+                (if returned
+                    (if (and (eq (tloa-ack-int ack 5) 0)
+                        (and (eq appended 1)
+                        (and (eq after (add before 1))
+                        (and (eq (tloa-ack-int ack 11) 1)
+                        (and (eq (tloa-file-node-valid? (tloa-ack-child ack 6)) 1)
+                        (and (eq (tloa-manifest-valid? (tloa-ack-child ack 7)) 1)
+                             (eq (nmfe-sha256? (tloa-ack-str ack 14)) 1))))))) 1 0)
+                    (if duplicate
+                        (if (and (eq appended 0) (eq after before)) 1 0)
+                        (if (and (eq appended 1) (eq after (add before 1))) 1 0))))))))))))))
+
+    (defn tloa-count-newlines-loop (s i acc)
+        (if (ge i (str_len s)) acc
+            (tloa-count-newlines-loop s (add i 1)
+                (add acc (if (eq (str_byte_at s i) 10) 1 0)))))
+    (defn tloa-count-rows (s) (tloa-count-newlines-loop s 0 0))
+    (defn tloa-count-mark-loop (s mark at acc)
+        (do
+            (let found (str_find s mark at))
+            (if (lt found 0) acc
+                (tloa-count-mark-loop s mark (add found (str_len mark))
+                    (add acc 1)))))
+    (defn tloa-invocation-mark (invocation)
+        (str_concat "|invocation=" (str_concat invocation "|")))
+    (defn tloa-count-invocation (ledger-text invocation)
+        (tloa-count-mark-loop ledger-text (tloa-invocation-mark invocation) 0 0))
+
+    (defn tloa-row-fields (fields)
+        (if (eq (len fields) 0) ""
+            (str_concat "|" (str_concat (head fields)
+                (tloa-row-fields (tail fields))))))
+    (defn tloa-row (ack)
+        (do
+            (let adapter (tloa-ack-child ack 6))
+            (let manifest (tloa-ack-child ack 7))
+            (str_concat "train-loop-outcome-ack-v1"
+                (str_concat (tloa-row-fields
+                    (list
+                        (str_concat "invocation=" (tloa-ack-str ack 0))
+                        (str_concat "directive=" (tloa-ack-str ack 1))
+                        (str_concat "status=" (tloa-ack-str ack 2))
+                        (str_concat "reason=" (tloa-ack-str ack 3))
+                        (str_concat "carrier=" (tloa-ack-str ack 4))
+                        (str_concat "exit=" (int_to_str (tloa-ack-int ack 5)))
+                        (str_concat "adapter_node=" (tloa-node-coordinate adapter))
+                        (str_concat "artifact_node=" (tloa-node-coordinate manifest))
+                        (str_concat "artifact_path=" (tloa-ack-str ack 12))
+                        (str_concat "artifact_size=" (int_to_str (tloa-ack-int ack 13)))
+                        (str_concat "artifact_seal=" (tloa-ack-str ack 14))
+                        (str_concat "rows_before=" (int_to_str (tloa-ack-int ack 8)))
+                        (str_concat "rows_after=" (int_to_str (tloa-ack-int ack 9)))
+                        (str_concat "append=" (int_to_str (tloa-ack-int ack 10)))
+                        (str_concat "offline=" (int_to_str (tloa-ack-int ack 11)))
+                        (str_concat "ack_node=" (tloa-node-coordinate ack))))
+                    "\n"))))
+
+    (defn tloa-duplicate-ack (invocation directive before adapter output-dir)
+        (do
+            (let empty-manifest (intern_node (tloa-manifest-category) (list)))
+            (tloa-ack invocation directive (tloa-status-refused)
+                "duplicate-invocation" -1 adapter empty-manifest before before 0 1
+                output-dir 0 (nmfe-sha256 "duplicate-invocation"))))
+
+    ; One marker cycle.  It never starts MLX: it admits the already-created
+    ; local fused artifact and the adapter that produced it.  The normal fuse
+    ; door remains separate and is used only when the six-file output is absent.
+    (defn tloa-run-marker-at (ledger invocation directive adapter-dir output-dir)
+        (do
+            (let prior0 (read_file ledger))
+            (let prior (if (nothing? prior0) "" prior0))
+            (let before (tloa-count-rows prior))
+            (let adapter-observation
+                (tloa-observe-file "input-adapter"
+                    (tlp-join adapter-dir "adapters.safetensors")))
+            (let adapter-node (tloa-file-node adapter-observation))
+            (if (gt (tloa-count-invocation prior invocation) 0)
+                (tloa-duplicate-ack invocation directive before adapter-node output-dir)
+                (do
+                    (let observations (tloa-observe-manifest output-dir))
+                    (let manifest (tloa-manifest observations))
+                    (let admitted
+                        (and (eq (tloa-file-observation-valid? adapter-observation) 1)
+                             (eq (tloa-observations-valid? observations) 1)))
+                    (let status (if admitted (tloa-status-returned)
+                                            (tloa-status-failure)))
+                    (let reason (if admitted "artifact-admitted"
+                                            "artifact-seal-invalid"))
+                    (let exit (if admitted 0 65))
+                    (let seal (tloa-manifest-seal observations))
+                    (let total (if admitted
+                        (tloa-total-size (node_children manifest)) 0))
+                    (let candidate
+                        (tloa-ack invocation directive status reason exit
+                            adapter-node manifest before (add before 1) 1 1
+                            output-dir total seal))
+                    (let appended-end
+                        (file_append_bytes ledger
+                            (nmfe-string-bytes (tloa-row candidate))))
+                    (let after-text (read_file ledger))
+                    (let after (tloa-count-rows after-text))
+                    (let occurrences (tloa-count-invocation after-text invocation))
+                    ; A failed append is returned as a structural failure.  It
+                    ; cannot be appended recursively without risking two rows.
+                    (if (and (ge appended-end 0)
+                             (and (eq after (add before 1))
+                                  (eq occurrences 1)))
+                        candidate
+                        (tloa-ack invocation directive (tloa-status-failure)
+                            "atomic-append-unobserved" 74 adapter-node manifest
+                            before after 0 1 output-dir total seal))))))
+    0)
