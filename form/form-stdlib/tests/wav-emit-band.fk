@@ -1,0 +1,101 @@
+; wav-emit-band.fk — the body's own sound, written and read back byte for byte.
+;
+; PROOF LEVEL: FKWU-STAGED, and the reason is measured rather than assumed.
+; byte_to_str is the exact dual on fkwu only; go, rust and ts UTF-8 inflate
+; every byte above 127 into two, and their byte-exact door, write_file_bytes,
+; is unbound on fkwu and recovers to `nothing` — writing no file and saying
+; nothing. core.fk's own sentence, from 2026-07-26: "No door is open on all
+; four." A four-way run of this band would produce a file that looks written
+; and plays as noise.
+;
+; BIT 512 IS THE ONE THAT MATTERS. It writes a real tone, reads the file back
+; with read_file, and asserts the bytes are identical to what was composed —
+; every one, including the ones above 127. That is only checkable because
+; read_file was measured NUL-clean and binary-exact this same day against a
+; 27,811,400-byte adapter, where file_size and str_len agreed to the byte.
+; The afferent proof is what makes the efferent one possible.
+;
+; Verdict 4095 (12 bits):
+;   1     u16le and u32le are little-endian, two and four bytes
+;   2     s16le carries a negative sample as its unsigned partner
+;   4     the header is exactly 44 bytes
+;   8     it opens RIFF, carries WAVE, fmt and data in order
+;   16    the RIFF chunk size is 36 plus the data bytes
+;   32    the declared data size is frames times block align
+;   64    a tone of n samples yields a file of we-size n bytes
+;   128   the join preserves order — a wav is not a set of bytes
+;   256   samples beyond full scale clamp rather than wrapping to the
+;         opposite sign, which is what an overflowing sample would sound like
+;   512   written and read back, byte for byte, bytes above 127 included
+;   1024  an EMPTY sample list writes a valid 44-byte file — silence that
+;         exists is present-0, and is not the same as not having spoken
+;   2048  an unwritable path answers nothing, never a byte count of zero
+;
+; preludes: form-stdlib/wav-emit.fk
+
+(do
+    (defn wb-bit (ok bit) (if ok bit 0))
+    (defn wb-at (s i) (str_byte_at s i))
+    (defn wb-path () "/tmp/form-wav-emit-band.wav")
+    (defn wb-bad () "/tmp/no-such-dir-at-all/x.wav")
+
+    (defn wb-same-loop (a b i n)
+        (if (ge i n) 1
+            (if (eq (wb-at a i) (wb-at b i)) (wb-same-loop a b (add i 1) n) 0)))
+    (defn wb-same? (a b)
+        (if (eq (str_len a) (str_len b)) (wb-same-loop a b 0 (str_len a)) 0))
+
+    (defn wav-emit-band ()
+        (do
+            (let h (we-header 8000 100))
+            (let tone (we-tone 220.0 8000.0 200))
+            (let wav (we-wav tone 8000))
+            (let w (we-write (wb-path) tone 8000))
+            (let back (read_file (wb-path)))
+            (let empty (we-wav (list) 8000))
+
+            (sum (list
+                (wb-bit (and (eq (str_len (we-u16le 513)) 2)
+                        (and (eq (wb-at (we-u16le 513) 0) 1)
+                        (and (eq (wb-at (we-u16le 513) 1) 2)
+                        (and (eq (str_len (we-u32le 8000)) 4)
+                             (eq (wb-at (we-u32le 8000) 0) 64))))) 1)
+
+                ; -1 is 0xFFFF; -32767 is 0x8001
+                (wb-bit (and (eq (wb-at (we-s16le -1) 0) 255)
+                        (and (eq (wb-at (we-s16le -1) 1) 255)
+                        (and (eq (wb-at (we-s16le -32767) 0) 1)
+                             (eq (wb-at (we-s16le -32767) 1) 128)))) 2)
+
+                (wb-bit (eq (str_len h) 44) 4)
+
+                (wb-bit (and (eq (str_find h "RIFF" 0) 0)
+                        (and (eq (str_find h "WAVE" 0) 8)
+                        (and (eq (str_find h "fmt " 0) 12)
+                             (eq (str_find h "data" 0) 36)))) 8)
+
+                (wb-bit (eq (wb-at h 4) (mod (add 36 200) 256)) 16)
+                (wb-bit (eq (wb-at h 40) (mod 200 256)) 32)
+
+                (wb-bit (and (eq (str_len wav) (we-size 200))
+                             (eq (str_len wav) (add 44 400))) 64)
+
+                ; order: the first frame's bytes sit at 44 and 45, not elsewhere
+                (wb-bit (and (eq (wb-at wav 44) (wb-at (head (we-frames tone)) 0))
+                             (eq (wb-at wav 45) (wb-at (head (we-frames tone)) 1))) 128)
+
+                ; a sample past full scale clamps; it does not wrap to negative
+                (wb-bit (and (eq (we-clamp 40000) 32767)
+                        (and (eq (we-clamp -40000) -32767)
+                             (eq (wb-at (we-frame 2.0) 1) 127))) 256)
+
+                (wb-bit (and (not (nothing? w))
+                        (and (eq w (we-size 200))
+                             (eq (wb-same? wav back) 1))) 512)
+
+                (wb-bit (and (eq (str_len empty) 44)
+                             (eq (wb-at empty 40) 0)) 1024)
+
+                (wb-bit (nothing? (we-write (wb-bad) tone 8000)) 2048)))))
+
+    (wav-emit-band))
