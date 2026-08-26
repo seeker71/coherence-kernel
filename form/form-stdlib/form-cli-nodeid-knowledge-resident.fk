@@ -1,0 +1,670 @@
+; form-cli-nodeid-knowledge-resident.fk -- the strict concept route and its
+; current source answer stay inside the resident form-cli process.
+;
+; The mapping is the persisted content-addressed body, never a function or
+; operations table:
+;
+;   SHA256(concept) -> one bounded .route -> one bounded .psci source record
+;                   -> one current repo source snapshot
+;
+; A route is admitted only when its key hash, source/entry content keys, source
+; coordinate, current byte count, and current SHA-256 all agree.  The answer is
+; cut from the same immutable snapshot whose identity is checked, then the file
+; is rehashed once before return.  Missing, ambiguous, malformed, stale, and
+; timeout remain typed outcomes.  A leading @ is refused without opening the
+; old linear NodeID fallback.  No host-exec, HTTP, model, Metal, flattening, or
+; ambient source-path argument participates.
+;
+; On a hit the correlated held/current source tokens, answer, outcome, counts,
+; and lifecycle are offered to the resident content-addressed thought image.
+; That image returns present 1 only when every binding agrees; a non-hit does
+; not walk and retains exact nothing with output-count 0.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/bmf-core.fk
+; preludes: form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/form-fs.fk
+; preludes: form-stdlib/form-knowledge-source-search.fk
+; preludes: form-stdlib/form-cli-heed-current-source.fk
+; preludes: form-stdlib/form-cli-current-answer-thought-walk.fk
+; Proven by: form-stdlib/tests/form-cli-nodeid-knowledge-resident-band.fk
+
+(do
+    (defn fcnkr-schema () "form-cli-nodeid-knowledge-resident-v1")
+    (defn fcnkr-route-schema () "psckr-reference-v1")
+    (defn fcnkr-source-schema () "pscish-entry-v2")
+    (defn fcnkr-source-node-schema () "public-source-artifact-node-v1")
+    (defn fcnkr-max-key-bytes () 64)
+    (defn fcnkr-max-path-bytes () 320)
+    (defn fcnkr-max-route-bytes () 2048)
+    (defn fcnkr-max-source-row-bytes () 2048)
+    (defn fcnkr-max-candidates () 64)
+    (defn fcnkr-open () "<|form:nodeid-knowledge-query|>")
+    (defn fcnkr-close () "<|/form:nodeid-knowledge-query|>")
+    (defn fcnkr-max-payload-bytes () 96)
+    (defn fcnkr-max-frame-bytes ()
+        (add (str_len (fcnkr-open))
+            (add (fcnkr-max-payload-bytes) (str_len (fcnkr-close)))))
+
+    (defn fcnkr-byte-key? (b)
+        (if (or (and (ge b 97) (le b 122))
+                (or (and (ge b 48) (le b 57)) (eq b 45))) 1 0))
+    (defn fcnkr-key-loop? (key at)
+        (if (ge at (str_len key)) 1
+            (if (eq (fcnkr-byte-key? (str_byte_at key at)) 1)
+                (fcnkr-key-loop? key (add at 1)) 0)))
+    (defn fcnkr-key-valid? (key)
+        (if (or (eq (str_len key) 0)
+                (gt (str_len key) (fcnkr-max-key-bytes))) 0
+            (fcnkr-key-loop? key 0)))
+    (defn fcnkr-keys-valid-loop? (keys count)
+        (if (nil? keys) (if (and (gt count 0) (le count 6)) 1 0)
+            (if (eq (fcnkr-key-valid? (head keys)) 0) 0
+                (fcnkr-keys-valid-loop? (tail keys) (add count 1)))))
+    (defn fcnkr-keys-valid? (keys) (fcnkr-keys-valid-loop? keys 0))
+    (defn fcnkr-lower-byte (b)
+        (if (and (ge b 65) (le b 90)) (add b 32) b))
+    (defn fcnkr-normalize-byte? (b)
+        (if (or (and (ge b 97) (le b 122))
+                (and (ge b 48) (le b 57))) 1 0))
+    (defn fcnkr-normalize-loop (raw at max out pending-separator)
+        (if (or (ge at (str_len raw)) (ge (str_len out) max)) out
+            (do
+                (let b (fcnkr-lower-byte (str_byte_at raw at)))
+                (if (eq (fcnkr-normalize-byte? b) 1)
+                    (do
+                        (let room (sub max (str_len out)))
+                        (let separated (if (and (eq pending-separator 1)
+                                                (gt (str_len out) 0))
+                            (if (gt room 1) (str_concat out "-") out) out))
+                        (if (ge (str_len separated) max) separated
+                            (fcnkr-normalize-loop raw (add at 1) max
+                                (str_concat separated (byte_to_str b)) 0)))
+                    (fcnkr-normalize-loop raw (add at 1) max out
+                        (if (gt (str_len out) 0) 1 0))))))
+    (defn fcnkr-normalize (raw max)
+        (fcnkr-normalize-loop raw 0 max "" 0))
+    (defn fcnkr-clip-key (key)
+        (if (le (str_len key) (fcnkr-max-key-bytes)) key
+            (substring key 0 (fcnkr-max-key-bytes))))
+    (defn fcnkr-path-stem (path)
+        (do
+            (let base (fs-path-basename path))
+            (let ext (fs-path-extension base))
+            (if (str_eq ext "") base
+                (substring base 0 (sub (str_len base) (str_len ext))))))
+    (defn fcnkr-ends-with? (s suffix)
+        (if (lt (str_len s) (str_len suffix)) 0
+            (if (str_eq (substring s
+                    (sub (str_len s) (str_len suffix)) (str_len s)) suffix)
+                1 0)))
+    (defn fcnkr-source-extension? (path)
+        (if (or (eq (fcnkr-ends-with? path ".fk") 1)
+            (or (eq (fcnkr-ends-with? path ".bml") 1)
+            (or (eq (fcnkr-ends-with? path ".bmf") 1)
+            (or (eq (fcnkr-ends-with? path ".form") 1)
+                (eq (fcnkr-ends-with? path ".md") 1))))) 1 0))
+    ; This is the source-family schema carried as Form data, not a mapping from
+    ; concepts to functions.  A route may authorize only the same public body
+    ; roots from which the persisted registry was born.
+    (defn fcnkr-family-roots ()
+        (list
+            (list "axioms" "axioms")
+            (list "bootstrap" "bootstrap")
+            (list "form-stdlib" "form/form-stdlib")
+            (list "grammars" "grammars")
+            (list "cognition" "cognition")
+            (list "learn" "learn")
+            (list "observe" "observe")
+            (list "teachings" "teachings")
+            (list "receipts" "receipts")
+            (list "model" "model")
+            (list "proof" "proof")
+            (list "control" "control")
+            (list "ingest" "ingest")
+            (list "presence" "presence")
+            (list "docs" "docs")))
+    (defn fcnkr-family-root (family rows)
+        (if (nil? rows) ""
+            (if (str_eq family (nth (head rows) 0)) (nth (head rows) 1)
+                (fcnkr-family-root family (tail rows)))))
+    (defn fcnkr-path-under-root? (path root)
+        (if (or (str_eq root "") (le (str_len path) (str_len root))) 0
+            (if (not (str_eq (substring path 0 (str_len root)) root)) 0
+                (if (str_eq (substring path (str_len root)
+                        (add (str_len root) 1)) "/") 1 0))))
+    (defn fcnkr-relative-source? (path)
+        (if (or (eq (str_len path) 0)
+                (gt (str_len path) (fcnkr-max-path-bytes))) 0
+        (if (eq (str_byte_at path 0) 47) 0
+        (if (ge (str_find path ".." 0) 0) 0
+            (fcnkr-source-extension? path)))))
+    (defn fcnkr-path-valid-for-family? (family path)
+        (do
+            (let root (fcnkr-family-root family (fcnkr-family-roots)))
+            (if (eq (fcnkr-relative-source? path) 0) 0
+            (if (eq (fcnkr-ends-with? path "-xtal.fk") 1) 0
+                (fcnkr-path-under-root? path root)))))
+
+    (defn fcnkr-split-loop (text delimiter start acc)
+        (do
+            (let at (str_find text delimiter start))
+            (if (lt at 0)
+                (reverse (cons (substring text start (str_len text)) acc))
+                (fcnkr-split-loop text delimiter
+                    (add at (str_len delimiter))
+                    (cons (substring text start at) acc)))))
+    (defn fcnkr-split (text delimiter)
+        (fcnkr-split-loop text delimiter 0 (empty)))
+    (defn fcnkr-join-loop (parts delimiter out)
+        (if (nil? parts) out
+            (fcnkr-join-loop (tail parts) delimiter
+                (if (str_eq out "") (head parts)
+                    (str_concat out (str_concat delimiter (head parts)))))))
+    (defn fcnkr-join (parts delimiter)
+        (fcnkr-join-loop parts delimiter ""))
+    (defn fcnkr-string-hex (s)
+        (hex-encode (host-abi-string-to-bytes s)))
+    (defn fcnkr-hex-string (h)
+        (if (eq (hex-valid? h) 0) ""
+            (host-abi-bytes-to-string (hex-decode h))))
+    (defn fcnkr-hex64? (h)
+        (if (and (eq (str_len h) 64) (eq (hex-valid? h) 1)) 1 0))
+    (defn fcnkr-key-member? (key keys)
+        (if (nil? keys) 0
+            (if (str_eq key (head keys)) 1
+                (fcnkr-key-member? key (tail keys)))))
+    (defn fcnkr-string-nodes (xs)
+        (if (nil? xs) (empty)
+            (cons (intern_trivial_string (head xs))
+                  (fcnkr-string-nodes (tail xs)))))
+
+    (defn fcnkr-hash (s) (hex-encode (sha256-stream-string s)))
+    (defn fcnkr-unique-key (family path)
+        (do
+            (let stem (fcnkr-normalize (fcnkr-path-stem path) 24))
+            (let named (if (str_eq stem "") "source" stem))
+            (fcnkr-clip-key
+                (str_concat "source-" (str_concat family
+                (str_concat "-" (str_concat named
+                (str_concat "-" (substring (fcnkr-hash path) 0 16)))))))))
+    (defn fcnkr-artifact ()
+        (fs-path-join (fs-temp-dir) "public-source-concept-registry-v1"))
+    (defn fcnkr-route-root-at (artifact)
+        (fs-path-join artifact "concept-key-routes-v1/routes"))
+    (defn fcnkr-route-root () (fcnkr-route-root-at (fcnkr-artifact)))
+    (defn fcnkr-bucket-at (artifact key)
+        (do
+            (let hash (fcnkr-hash key))
+            (fs-path-join
+                (fs-path-join (fcnkr-route-root-at artifact)
+                    (substring hash 0 2)) hash)))
+    (defn fcnkr-bucket (key) (fcnkr-bucket-at (fcnkr-artifact) key))
+    (defn fcnkr-route-files (names acc)
+        (if (nil? names) (reverse acc)
+            (fcnkr-route-files (tail names)
+                (if (eq (fcnkr-ends-with? (head names) ".route") 1)
+                    (cons (head names) acc) acc))))
+    ; read row = status reason text.  Missing and over-window are not both an
+    ; empty string: absence is nothing; a held artifact beyond fuel is timeout.
+    (defn fcnkr-read-row (status reason text) (list status reason text))
+    (defn fcnkr-read-status (r) (nth r 0))
+    (defn fcnkr-read-reason (r) (nth r 1))
+    (defn fcnkr-read-text (r) (nth r 2))
+    (defn fcnkr-read-bounded (path limit)
+        (do
+            (let size (fs-stat-size path))
+            (if (lt size 0)
+                (fcnkr-read-row "nothing" "artifact-missing" "")
+            (if (gt size limit)
+                (fcnkr-read-row "timeout" "artifact-over-window" "")
+                (fcnkr-read-row "ready" "bounded-artifact"
+                    (fs-read-slice path 0 size))))))
+
+    ; route = schema key key-hash family path source-key entry-key
+    (defn fcnkr-route-valid? (r key)
+        (if (not (eq (len r) 7)) 0
+        (if (not (str_eq (nth r 0) (fcnkr-route-schema))) 0
+        (if (not (str_eq (fcnkr-hex-string (nth r 1)) key)) 0
+        (if (not (str_eq (nth r 2) (fcnkr-hash key))) 0
+        (if (eq (str_len (nth r 3)) 0) 0
+        (if (eq (fcnkr-path-valid-for-family? (nth r 3)
+                    (fcnkr-hex-string (nth r 4))) 0) 0
+        (if (eq (fcnkr-hex64? (nth r 5)) 0) 0
+            (fcnkr-hex64? (nth r 6))))))))))
+    (defn fcnkr-parse-route (text key)
+        (do
+            (let r (fcnkr-split text "|"))
+            (if (eq (fcnkr-route-valid? r key) 1)
+                (list (nth r 0) key (nth r 2) (nth r 3)
+                    (fcnkr-hex-string (nth r 4)) (nth r 5) (nth r 6))
+                (empty))))
+    (defn fcnkr-source-artifact-path-at (artifact family path)
+        (do
+            (let hash (fcnkr-hash path))
+            (fs-path-join
+                (fs-path-join
+                    (fs-path-join
+                        (fs-path-join artifact "shards") family)
+                    (substring hash 0 2))
+                (str_concat hash ".psci"))))
+    (defn fcnkr-source-artifact-path (family path)
+        (fcnkr-source-artifact-path-at (fcnkr-artifact) family path))
+
+    (defn fcnkr-source-key (family path source-id size)
+        (fcnkr-hash (fcnkr-join
+            (list family (fcnkr-string-hex path) source-id (int_to_str size))
+            "|")))
+    (defn fcnkr-entry-key (source-key keys)
+        (fcnkr-hash (fcnkr-join
+            (list source-key (fcnkr-join keys ",")) "|")))
+    ; row = schema family path source-id size keys source-key entry-key unique
+    (defn fcnkr-source-row-valid? (row route key)
+        (if (not (eq (len row) 9)) 0
+        (if (not (str_eq (nth row 0) (fcnkr-source-schema))) 0
+        (if (not (str_eq (nth row 1) (nth route 3))) 0
+        (if (not (str_eq (nth row 2) (nth route 4))) 0
+        (if (eq (fcnkr-path-valid-for-family?
+                    (nth row 1) (nth row 2)) 0) 0
+        (if (eq (fcnkr-keys-valid? (nth row 5)) 0) 0
+        (if (not (eq (fcnkr-key-member? key (nth row 5)) 1)) 0
+        (if (lt (nth row 4) 0) 0
+        (if (not (str_eq (nth row 6) (nth route 5))) 0
+        (if (not (str_eq (nth row 7) (nth route 6))) 0
+        (if (not (str_eq (nth row 6)
+                (fcnkr-source-key (nth row 1) (nth row 2)
+                    (nth row 3) (nth row 4)))) 0
+        (if (not (str_eq (nth row 7)
+                    (fcnkr-entry-key (nth row 6) (nth row 5)))) 0
+        (if (not (str_eq (nth row 8)
+                    (fcnkr-unique-key (nth row 1) (nth row 2)))) 0
+            (fcnkr-key-member? (nth row 8) (nth row 5))))))))))))))))
+    (defn fcnkr-parse-source-row (text route key)
+        (do
+            (let f (fcnkr-split text "|"))
+            (if (not (eq (len f) 11)) (empty)
+                (do
+                    (let size (str_to_int (nth f 4)))
+                    (let path (fcnkr-hex-string (nth f 2)))
+                    (let source-id (str_concat "sha256:" (nth f 3)))
+                    (let keys (fcnkr-split (nth f 10) ","))
+                    (let row (list (nth f 0) (nth f 1) path source-id
+                        size keys (nth f 7) (nth f 8) (nth f 9)))
+                    (if (or (not (str_eq (int_to_str size) (nth f 4)))
+                        (or (eq (fcnkr-hex64? (nth f 3)) 0)
+                            (eq (fcnkr-source-row-valid? row route key) 0)))
+                        (empty) row)))))
+
+    ; These are byte-for-byte the source/entry structures held by PSCI.  Their
+    ; categories are protocol families; identity remains recursive content.
+    (defn fcnkr-source-category () (make_nodeid 31 2 0 86))
+    (defn fcnkr-entry-category () (make_nodeid 31 2 0 87))
+    (defn fcnkr-absent-category () (make_nodeid 31 2 0 90))
+    (defn fcnkr-source-token-category () (make_nodeid 31 2 0 96))
+    (defn fcnkr-entry-token-category () (make_nodeid 31 2 0 97))
+    (defn fcnkr-absent ()
+        (intern_node (fcnkr-absent-category)
+            (list (intern_trivial_string "nothing"))))
+    (defn fcnkr-source-node (row source-id size)
+        (intern_node (fcnkr-source-category)
+            (list (intern_trivial_string (fcnkr-source-node-schema))
+                  (intern_trivial_string (nth row 1))
+                  (intern_trivial_string (nth row 2))
+                  (intern_trivial_string source-id)
+                  (intern_trivial_int size))))
+    (defn fcnkr-entry-node (source row)
+        (intern_node (fcnkr-entry-category)
+            (cons source (fcnkr-string-nodes (nth row 5)))))
+    (defn fcnkr-source-token (source row source-id)
+        (intern_node (fcnkr-source-token-category)
+            (list source (intern_trivial_string (nth row 1))
+                (intern_trivial_string (nth row 2))
+                (intern_trivial_string source-id))))
+    (defn fcnkr-entry-token (entry source-token row)
+        (intern_node (fcnkr-entry-token-category)
+            (list entry source-token (intern_trivial_int (len (nth row 5))))))
+    (defn fcnkr-node-key (node)
+        (str_concat "@" (str_concat (int_to_str (node_pkg node))
+        (str_concat "." (str_concat (int_to_str (node_level node))
+        (str_concat "." (str_concat (int_to_str (node_type node))
+        (str_concat "." (int_to_str (node_inst node))))))))))
+
+    ; result = schema status reason key family path held current entry answer
+    ;          held-id current-id size lookup hit executed trace artifact
+    (defn fcnkr-result (status reason key family path held current entry answer
+                        held-id current-id size lookup hit executed trace)
+        (list (fcnkr-schema) status reason key family path held current entry
+            answer held-id current-id size lookup hit executed trace
+            (fcnkr-artifact)))
+    (defn fcnkr-status (r) (nth r 1))
+    (defn fcnkr-reason (r) (nth r 2))
+    (defn fcnkr-key (r) (nth r 3))
+    (defn fcnkr-family (r) (nth r 4))
+    (defn fcnkr-path (r) (nth r 5))
+    (defn fcnkr-held (r) (nth r 6))
+    (defn fcnkr-current (r) (nth r 7))
+    (defn fcnkr-entry (r) (nth r 8))
+    (defn fcnkr-answer (r) (nth r 9))
+    (defn fcnkr-held-id (r) (nth r 10))
+    (defn fcnkr-current-id (r) (nth r 11))
+    (defn fcnkr-source-size (r) (nth r 12))
+    (defn fcnkr-lookup-count (r) (nth r 13))
+    (defn fcnkr-hit-count (r) (nth r 14))
+    (defn fcnkr-executed? (r) (nth r 15))
+    (defn fcnkr-trace (r) (nth r 16))
+    (defn fcnkr-result-artifact (r) (nth r 17))
+    (defn fcnkr-empty-result (status reason key lookup trace)
+        (fcnkr-result status reason key "" "" (fcnkr-absent)
+            (fcnkr-absent) (fcnkr-absent) "" "" "" -1 lookup 0
+            (if (gt lookup 0) 1 0) trace))
+
+    (defn fcnkr-answer-from-snapshot (snapshot key)
+        (do
+            (let atoms (fhcs-atoms key))
+            (let first (if (nil? atoms) -1
+                (fkss-find-ci snapshot (head atoms))))
+            (let start (fkss-answer-start first (str_len snapshot)))
+            (let end (fkss-min (str_len snapshot)
+                (add start (fkss-answer-limit))))
+            (substring snapshot start end)))
+    (defn fcnkr-current-result (root key row)
+        (do
+            (let relative (nth row 2))
+            (let full (fs-path-join root relative))
+            (let before (fs-stat-size full))
+            (if (or (lt before 0) (not (eq (fs-is-file? full) 1)))
+                (fcnkr-empty-result "stale" "source-unavailable" key 1
+                    "choice,stale,undo,refine,release")
+                (do
+                    (let snapshot (fs-read-text full))
+                    (let after (fs-stat-size full))
+                    (let current-id (str_concat "sha256:"
+                        (fcnkr-hash snapshot)))
+                    (let stable-id (if (and (eq after (str_len snapshot))
+                        (eq (fs-is-file? full) 1)) (fkss-source-id full) ""))
+                    (if (or (not (eq before (nth row 4)))
+                        (or (not (eq after (nth row 4)))
+                        (or (not (str_eq current-id (nth row 3)))
+                            (not (str_eq stable-id current-id)))))
+                        (fcnkr-empty-result "stale" "source-rebuild-needed"
+                            key 1 "choice,stale,undo,refine,release")
+                        (do
+                            (let held-source (fcnkr-source-node row
+                                (nth row 3) (nth row 4)))
+                            (let current-source (fcnkr-source-node row
+                                current-id after))
+                            (let entry (fcnkr-entry-node held-source row))
+                            (let source-token (fcnkr-source-token held-source
+                                row (nth row 3)))
+                            (let current-token (fcnkr-source-token current-source
+                                row current-id))
+                            (let entry-token (fcnkr-entry-token entry
+                                source-token row))
+                            (fcnkr-result "hit"
+                                "concept-registry-current-source-hit" key
+                                (nth row 1) relative source-token current-token
+                                entry-token (fcnkr-answer-from-snapshot snapshot key)
+                                (nth row 3) current-id after 1 1 1
+                                "choice,cut,release")))))))
+
+    (defn fcnkr-inspect-route-at (root artifact bucket key name)
+        (do
+            (let route-read (fcnkr-read-bounded
+                (fs-path-join bucket name) (fcnkr-max-route-bytes)))
+            (if (str_eq (fcnkr-read-status route-read) "timeout")
+                (fcnkr-empty-result "timeout" "route-reference-timeout" key 1
+                    "choice,timeout,cut,undo,refine,release")
+            (if (not (str_eq (fcnkr-read-status route-read) "ready"))
+                (fcnkr-empty-result "nothing" "route-reference-missing" key 1
+                    "choice,cut,undo,refine,release")
+                (do
+                    (let route (fcnkr-parse-route
+                        (fcnkr-read-text route-read) key))
+                    (if (eq (len route) 0)
+                        (fcnkr-empty-result "failure"
+                            "invalid-route-reference" key 1
+                            "choice,failure,cut,undo,refine,release")
+                        (do
+                            (let source-read (fcnkr-read-bounded
+                                (fcnkr-source-artifact-path-at artifact
+                                    (nth route 3) (nth route 4))
+                                (fcnkr-max-source-row-bytes)))
+                            (if (str_eq (fcnkr-read-status source-read) "timeout")
+                                (fcnkr-empty-result "timeout"
+                                    "source-artifact-over-window" key 1
+                                    "choice,timeout,cut,undo,refine,release")
+                            (if (not (str_eq
+                                    (fcnkr-read-status source-read) "ready"))
+                                (fcnkr-empty-result "nothing"
+                                    "source-artifact-missing" key 1
+                                    "choice,cut,undo,refine,release")
+                                (do
+                                    (let row (fcnkr-parse-source-row
+                                        (fcnkr-read-text source-read) route key))
+                                    (if (eq (len row) 0)
+                                        (fcnkr-empty-result "failure"
+                                            "invalid-source-artifact" key 1
+                                            "choice,failure,cut,undo,refine,release")
+                                        (fcnkr-current-result root key row))))))))))))
+
+    (defn fcnkr-resolve-files-loop (root artifact bucket files key first
+                                     hits stale missing invalid timeout)
+        (if (nil? files)
+            (if (gt timeout 0)
+                (fcnkr-empty-result "timeout" "route-reference-timeout" key 1
+                    "choice,timeout,cut,undo,refine,release")
+            (if (gt stale 0)
+                (fcnkr-empty-result "stale" "route-reference-refused" key 1
+                    "choice,stale,undo,refine,release")
+            (if (gt (add missing invalid) 0)
+                (fcnkr-empty-result "nothing" "route-reference-refused" key 1
+                    "choice,cut,undo,refine,release")
+            (if (eq hits 0)
+                (fcnkr-empty-result "nothing" "concept-not-routed" key 1
+                    "choice,cut,release")
+            (if (gt hits 1)
+                (fcnkr-empty-result "ambiguous" "ambiguous-concept-key" key 1
+                    "choice,ambiguous,undo,refine,cut,release")
+                first)))))
+            (do
+                (let observed (fcnkr-inspect-route-at root artifact bucket key
+                    (head files)))
+                (let status (fcnkr-status observed))
+                (fcnkr-resolve-files-loop root artifact bucket (tail files) key
+                    (if (and (str_eq status "hit") (eq hits 0)) observed first)
+                    (add hits (if (str_eq status "hit") 1 0))
+                    (add stale (if (str_eq status "stale") 1 0))
+                    (add missing (if (str_eq status "nothing") 1 0))
+                    (add invalid (if (str_eq status "failure") 1 0))
+                    (add timeout (if (str_eq status "timeout") 1 0))))))
+
+    (defn fcnkr-execute-concept-at (root artifact key)
+        (do
+            (let bucket (fcnkr-bucket-at artifact key))
+            (if (not (eq (fs-is-dir? bucket) 1))
+                (fcnkr-empty-result "nothing" "concept-not-routed" key 0
+                    "choice,cut,release")
+                (do
+                    (let files (fcnkr-route-files (fs-list bucket) (empty)))
+                    (if (gt (len files) (fcnkr-max-candidates))
+                        (fcnkr-empty-result "timeout" "candidate-window-timeout"
+                            key 1 "choice,timeout,cut,undo,refine,release")
+                        (fcnkr-resolve-files-loop root artifact bucket files key
+                            (fcnkr-empty-result "nothing"
+                                "concept-not-routed" key 1
+                                "choice,cut,release")
+                            0 0 0 0 0))))))
+    (defn fcnkr-execute-concept (key)
+        (do
+            (let root (fhcs-default-root))
+            (if (str_eq root "")
+                (fcnkr-empty-result "failure" "body-root-unresolved" key 0
+                    "choice,failure,cut,undo,refine,release")
+                (fcnkr-execute-concept-at root (fcnkr-artifact) key))))
+    ; A real immutable BMF raw-byte cursor consumes the canonical surface.
+    ; Direct CLI input cannot be incomplete or trailing because this organ
+    ; births the envelope; cursor fuel still retains timeout independently.
+    (defn fcnkr-scan-row (status reason position)
+        (list status reason position 1))
+    (defn fcnkr-scan-status (scan) (nth scan 0))
+    (defn fcnkr-scan-reason (scan) (nth scan 1))
+    (defn fcnkr-scan-position (scan) (nth scan 2))
+    (defn fcnkr-scan-cursor (cursor fuel)
+        (if (eq (cur-eof? cursor) 1)
+            (fcnkr-scan-row "ready" "complete" (cur-pos cursor))
+        (if (le fuel 0)
+            (fcnkr-scan-row "timeout" "cursor-step-budget" (cur-pos cursor))
+            (do
+                (let observed-byte (cur-peek cursor))
+                (fcnkr-scan-cursor (cur-advance cursor 1) (sub fuel 1))))))
+    (defn fcnkr-scan (surface)
+        (fcnkr-scan-cursor (cursor-str surface) (fcnkr-max-frame-bytes)))
+    (defn fcnkr-execute (input)
+        (do
+        (let scan (fcnkr-scan (fcnkr-surface input)))
+        (if (str_eq (fcnkr-scan-status scan) "timeout")
+            (fcnkr-empty-result "timeout" (fcnkr-scan-reason scan) input 0
+                "choice,timeout,cut,undo,refine,release")
+        (if (eq (str_len input) 0)
+            (fcnkr-empty-result "nothing" "empty-request" "" 0
+                "choice,release")
+        (if (eq (str_byte_at input 0) 64)
+            (if (eq (ric-node-id-valid? input) 0)
+                (fcnkr-empty-result "failure" "invalid-nodeid-coordinate"
+                    input 0 "choice,failure,cut,undo,refine,release")
+            (fcnkr-empty-result "nothing" "strict-nodeid-route-unavailable"
+                input 0 "choice,cut,release"))
+        (if (eq (fcnkr-key-valid? input) 0)
+            (fcnkr-empty-result "failure" "invalid-concept-key" input 0
+                "choice,failure,cut,undo,refine,release")
+            (fcnkr-execute-concept input)))))))
+
+    (defn fcnkr-thought-values (r)
+        (list (fcnkr-held r) (fcnkr-current r)
+            (fcnkr-answer r) (fcnkr-answer r)
+            (fcnkr-status r) (fcnkr-status r)
+            (fcnkr-reason r) (fcnkr-reason r)
+            (fcnkr-lookup-count r) (fcnkr-lookup-count r)
+            (fcnkr-hit-count r) (fcnkr-hit-count r)
+            (fcnkr-executed? r) (fcnkr-executed? r)
+            (fcnkr-trace r) (fcnkr-trace r)))
+    (defn fcnkr-thought-kinds ()
+        (list (fcatw-kind-node) (fcatw-kind-node)
+            (fcatw-kind-string) (fcatw-kind-string)
+            (fcatw-kind-string) (fcatw-kind-string)
+            (fcatw-kind-string) (fcatw-kind-string)
+            (fcatw-kind-int) (fcatw-kind-int)
+            (fcatw-kind-int) (fcatw-kind-int)
+            (fcatw-kind-int) (fcatw-kind-int)
+            (fcatw-kind-string) (fcatw-kind-string)))
+    (defn fcnkr-thought (r)
+        (if (not (str_eq (fcnkr-status r) "hit")) (nothing)
+            (fcatw-run (fcnkr-thought-values r) (fcnkr-thought-kinds) 93)))
+    (defn fcnkr-thought-status (thought)
+        (if (nothing? thought) "nothing" (fcatw-status thought)))
+    (defn fcnkr-thought-value-text (thought)
+        (if (nothing? thought) "nothing"
+            (if (eq (fcatw-output-count thought) 0) "nothing"
+                (int_to_str (fcatw-value thought)))))
+    (defn fcnkr-thought-output-count (thought)
+        (if (nothing? thought) 0 (fcatw-output-count thought)))
+
+    (defn fcnkr-line (acc key value)
+        (str_concat acc
+            (str_concat "\n" (str_concat key (str_concat "=" value)))))
+    (defn fcnkr-render (r)
+        (do
+            (let thought (fcnkr-thought r))
+            (let r0 (fcnkr-line "nodeid-knowledge" "status" (fcnkr-status r)))
+            (let r1 (fcnkr-line r0 "route-mode" "strict-one-bucket"))
+            (let r2 (fcnkr-line r1 "reason" (fcnkr-reason r)))
+            (let r3 (fcnkr-line r2 "source" (fcnkr-node-key (fcnkr-held r))))
+            (let r4 (fcnkr-line r3 "entry" (fcnkr-node-key (fcnkr-entry r))))
+            (let r5 (fcnkr-line r4 "path" (fcnkr-path r)))
+            (let r6 (fcnkr-line r5 "lookup-count"
+                (int_to_str (fcnkr-lookup-count r))))
+            (let r7 (fcnkr-line r6 "scannerless" "1"))
+            (let r8 (fcnkr-line r7 "model-executed" "0"))
+            (let r9 (fcnkr-line r8 "trace" (fcnkr-trace r)))
+            (let r10 (fcnkr-line r9 "resident-thought-self-consistency-symbol"
+                (fcatw-symbol)))
+            (let r11 (fcnkr-line r10 "resident-thought-self-consistency-status"
+                (fcnkr-thought-status thought)))
+            (let r12 (fcnkr-line r11 "resident-thought-self-consistency-value"
+                (fcnkr-thought-value-text thought)))
+            (let r13 (fcnkr-line r12
+                "resident-thought-self-consistency-output-count"
+                (int_to_str (fcnkr-thought-output-count thought))))
+            (let r14 (fcnkr-line r13 "carrier" "resident-form-source-unit"))
+            (let r15 (fcnkr-line r14 "carrier-boundary" "none"))
+            (let r16 (fcnkr-line r15 "artifact" (fcnkr-result-artifact r)))
+            (fcnkr-line r16 "answer" (fcnkr-answer r))))
+    (defn fcnkr-query (input)
+        (if (eq (str_len input) 0)
+            "usage: nodeid-knowledge <concept-key|@p.l.t.i>"
+            (do
+                (let result (fcnkr-execute input))
+                ; Retain only the correlated source/absence NodeID and this
+                ; organ's coordinate.  Query and answer bytes never enter the
+                ; framebuffer.  The live framebuffer-status verb can observe
+                ; this crossing before the session flows onward.
+                (let event (fb_record (fcnkr-held result)
+                    "form-cli-nodeid-knowledge-resident.fk" 1))
+                (fcnkr-line (fcnkr-render result)
+                    "framebuffer-event"
+                    (if (str_eq (fcnkr-status result) "hit")
+                        "source-coordinate-retained"
+                        "absence-coordinate-retained")))))
+
+    (defn fcnkr-surface (input)
+        (if (eq (str_len input) 0) ""
+            (str_concat (fcnkr-open)
+                (str_concat
+                    (if (eq (str_byte_at input 0) 64) "nodeid=" "concept=")
+                    (str_concat input (fcnkr-close))))))
+    (defn fcnkr-stage-head (stage)
+        (fcnkr-line "nodeid-stage" "stage" stage))
+    (defn fcnkr-stage (stage input)
+        (if (eq (str_len input) 0)
+            "usage: nodeid-stage surface|scan|route|lookup|current <concept-key|@p.l.t.i>"
+        (if (str_eq stage "surface")
+            (fcnkr-line (fcnkr-stage-head stage) "surface"
+                (fcnkr-surface input))
+        (if (str_eq stage "scan")
+            (do
+                (let ok (if (eq (str_byte_at input 0) 64)
+                    (ric-node-id-valid? input)
+                    (fcnkr-key-valid? input)))
+                (let scan (fcnkr-scan (fcnkr-surface input)))
+                (let status (if (eq ok 0) "failure"
+                    (fcnkr-scan-status scan)))
+                (let r0 (fcnkr-line (fcnkr-stage-head stage) "status" status))
+                (let r1 (fcnkr-line r0 "reason"
+                    (if (eq ok 0) "invalid-coordinate"
+                        (fcnkr-scan-reason scan))))
+                (let r2 (fcnkr-line r1 "consumed-bytes"
+                    (int_to_str (fcnkr-scan-position scan))))
+                (fcnkr-line r2 "scannerless" "1"))
+        (if (str_eq stage "route")
+            (do
+                (let bucket (if (eq (fcnkr-key-valid? input) 1)
+                    (fcnkr-bucket input) ""))
+                (let r0 (fcnkr-line (fcnkr-stage-head stage) "artifact"
+                    (fcnkr-artifact)))
+                (let r1 (fcnkr-line r0 "bucket" bucket))
+                (fcnkr-line r1 "present" (int_to_str
+                    (if (str_eq bucket "") 0 (fs-is-dir? bucket)))))
+        (if (or (str_eq stage "lookup") (str_eq stage "current"))
+            (do
+                (let r (fcnkr-execute input))
+                (let r0 (fcnkr-line (fcnkr-stage-head stage) "status"
+                    (fcnkr-status r)))
+                (let r1 (fcnkr-line r0 "reason" (fcnkr-reason r)))
+                (let r2 (fcnkr-line r1 "path" (fcnkr-path r)))
+                (let r3 (fcnkr-line r2 "lookup-count"
+                    (int_to_str (fcnkr-lookup-count r))))
+                (if (str_eq stage "current")
+                    (fcnkr-line r3 "answer-bytes"
+                        (int_to_str (str_len (fcnkr-answer r)))) r3))
+            "usage: nodeid-stage surface|scan|route|lookup|current <concept-key|@p.l.t.i>"))))))
+
+    0)
