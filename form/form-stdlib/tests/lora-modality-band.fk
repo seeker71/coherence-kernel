@@ -1,0 +1,174 @@
+; lora-modality-band.fk — one adapter, three widths, two modalities.
+;
+; BITS 64 AND 128 ARE THE CLAIM. 64 adapts a real waveform frame taken from
+; voice-synth — the generation side. 128 adapts the ENVELOPE of that same
+; frame — the perception side. Not two implementations that resemble each
+; other: the identical lm-forward, over vectors that mean different things.
+; That is what "the layer adapts to sound and image, generation and
+; perception" means when it is witnessed rather than asserted.
+;
+; BIT 2048 READS THIS BAND'S OWN SUBJECT FOR HARDCODED ARITY. lora-adapter.fk
+; proves the same identity and cannot express any of this, because its dot
+; product is (nth a 0), (nth a 1), (nth a 2) written out. Its header said so
+; honestly — "the chunked/general-d form is the next stone over this." A claim
+; that is modality-free while its proof is three-dimensional is a `we` read as
+; a `WE`, and the fix is not a bigger constant. It is no constant.
+;
+; WHAT PLACING THE STONE TAUGHT THAT NAMING IT DID NOT. Bits 2 and 4 agree
+; EXACTLY at d = 3 and d = 8. Bit 64, at d = 16 over a waveform, does not: 14
+; of 16 elements differ, worst by 6 at scale 1000. The identity is exact in
+; real arithmetic and only approximate in fixed point, because the two orders
+; divide at different moments — the low-rank path after A·x and again after
+; B·scalar, the full path when forming the outer product and again in the
+; matvec. Over d terms each truncating by under a unit, they can differ by up
+; to d units, which is the bound bits 64 and 128 assert.
+;
+; The dangerous part is that this is data- and width-dependent. Had the stone
+; been laid at d = 3 and left there, every test would have read exact. The
+; real adapter on this host is F32, where the drift is far smaller — but any
+; fixed-point overlay carries it, and it is invisible until the width grows.
+;
+; Verdict 4095 (12 bits):
+;   1     a dot product at width 5, and the identity matrix at width 4 leaves
+;         a vector unchanged — W·x == x
+;   2     the low-rank forward equals the full-matrix forward at d = 3, the
+;         width the stone before this one could reach
+;   4     the same, at d = 8 — a width that cell cannot express
+;   8     rank 2, not only rank 1
+;   16    rank 0 is exactly the base; an unadapted layer is a rank, not a
+;         special case in the code
+;   32    adapters STACK: one rank-2 equals two rank-1s summed
+;   64    GENERATION — on a real 16-sample waveform from voice-synth the two
+;         paths agree within the truncation bound and are NOT exact. The bit
+;         asserts both, so the inexactness is a claim and not an absence.
+;   128   PERCEPTION — the same, on that frame's envelope, same functions
+;   256   the low-rank form reconstructs the full d×d diff exactly
+;   512   2·d·r is smaller than d·d where r is small, said as numbers
+;   1024  vectors of disagreeing width read NOTHING, never 0 — a fold over
+;         nothing does not become a small number that looks like weak signal
+;   2048  the general cell's source holds no fixed-arity index at all
+;
+; preludes: form-stdlib/lora-modality.fk form-stdlib/voice-synth.fk
+
+(do
+    (defn lmb-bit (ok bit) (if ok bit 0))
+
+    ; identity matrix at any width, scale 1000
+    (defn lmb-row (n i j out)
+        (if (ge j n) out
+            (lmb-row n i (add j 1) (append out (list (if (eq i j) 1000 0))))))
+    (defn lmb-eye-loop (n i out)
+        (if (ge i n) out
+            (lmb-eye-loop n (add i 1) (append out (list (lmb-row n i 0 (list)))))))
+    (defn lmb-eye (n) (lmb-eye-loop n 0 (list)))
+
+    ; a ramp vector, and a real waveform, both at scale 1000
+    (defn lmb-ramp (n i out)
+        (if (ge i n) out (lmb-ramp n (add i 1) (append out (list (mul (add i 1) 100))))))
+    (defn lmb-vec (n) (lmb-ramp n 0 (list)))
+
+    (defn lmb-fix-loop (fs out)
+        (if (eq (len fs) 0) out
+            (lmb-fix-loop (tail fs) (append out (list (round (mul (head fs) 1000.0)))))))
+    (defn lmb-wave (n) (lmb-fix-loop (vs-frame 1.0 220.0 8000.0 n) (list)))
+
+    (defn lmb-same-loop (a b i n)
+        (if (ge i n) 1
+            (if (eq (nth a i) (nth b i)) (lmb-same-loop a b (add i 1) n) 0)))
+    (defn lmb-same? (a b)
+        (if (and (not (nothing? a)) (and (not (nothing? b))
+                 (eq (len a) (len b))))
+            (lmb-same-loop a b 0 (len a)) 0))
+
+    ; the low-rank forward against the full-matrix forward, at any width
+    (defn lmb-agrees? (W Bs As x)
+        (do (let low (lm-forward W Bs As x))
+            (let full (lm-matvec (lm-madd W (lm-outer (nth Bs 0) (nth As 0))) x))
+            (if (eq (lm-rank Bs) 1) (lmb-same? low full) 0)))
+
+    ; Each fixed-point division truncates by less than one unit, and the two
+    ; orders divide at different moments, so over d terms the paths can differ
+    ; by at most d units at scale 1000. That is a derived bound, not the
+    ; measurement: at d=16 on a waveform the worst observed was 6.
+    (defn lmb-within-loop (a b i n bound)
+        (if (ge i n) 1
+            (if (le (lm-abs (sub (nth a i) (nth b i))) bound)
+                (lmb-within-loop a b (add i 1) n bound) 0)))
+    (defn lmb-within? (a b bound)
+        (if (and (not (nothing? a)) (and (not (nothing? b))
+                 (eq (len a) (len b))))
+            (lmb-within-loop a b 0 (len a) bound) 0))
+    (defn lmb-close? (W Bs As x bound)
+        (lmb-within? (lm-forward W Bs As x)
+            (lm-matvec (lm-madd W (lm-outer (nth Bs 0) (nth As 0))) x) bound))
+
+    (defn lmb-src ()
+        (read_file "form/form-stdlib/lora-modality.fk"))
+
+    (defn lora-modality-band ()
+        (do
+            (let x3 (lmb-vec 3))
+            (let x8 (lmb-vec 8))
+            (let w (lmb-wave 16))
+            (let env (lm-envelope w))
+
+            (let B3 (list (list 200 300 400)))
+            (let A3 (list (list 500 100 200)))
+            (let B8 (list (lmb-vec 8)))
+            (let A8 (list (lmb-ramp 8 0 (list))))
+            (let B16 (list (lmb-vec 16)))
+            (let A16 (list (lmb-ramp 16 0 (list))))
+
+            (let two-B (list (lmb-vec 8) (lmb-ramp 8 0 (list))))
+            (let two-A (list (lmb-ramp 8 0 (list)) (lmb-vec 8)))
+
+            (sum (list
+                (lmb-bit (and (eq (lm-dot (lmb-vec 5) (lmb-vec 5))
+                                  (lm-dot-loop (lmb-vec 5) (lmb-vec 5) 0 5 0))
+                              (eq (lmb-same? (lm-matvec (lmb-eye 4) (lmb-vec 4))
+                                             (lmb-vec 4)) 1)) 1)
+
+                (lmb-bit (eq (lmb-agrees? (lmb-eye 3) B3 A3 x3) 1) 2)
+                (lmb-bit (eq (lmb-agrees? (lmb-eye 8) B8 A8 x8) 1) 4)
+
+                (lmb-bit (and (eq (lm-rank two-B) 2)
+                              (not (nothing? (lm-forward (lmb-eye 8) two-B two-A x8)))) 8)
+
+                ; rank 0 IS the base
+                (lmb-bit (eq (lmb-same? (lm-forward (lmb-eye 8) (list) (list) x8)
+                                        (lm-matvec (lmb-eye 8) x8)) 1) 16)
+
+                ; stacking: rank-2 == the two rank-1 contributions summed
+                (lmb-bit (eq (lmb-same?
+                        (lm-lowrank two-B two-A x8 8)
+                        (lm-add (lm-lowrank (list (nth two-B 0)) (list (nth two-A 0)) x8 8)
+                                (lm-lowrank (list (nth two-B 1)) (list (nth two-A 1)) x8 8))) 1) 32)
+
+                ; GENERATION — a real waveform
+                (lmb-bit (and (eq (len w) 16)
+                         (and (eq (lmb-close? (lmb-eye 16) B16 A16 w 16) 1)
+                              (eq (lmb-agrees? (lmb-eye 16) B16 A16 w) 0))) 64)
+
+                ; PERCEPTION — that waveform's envelope, same functions
+                (lmb-bit (and (eq (len env) 16)
+                         (and (ge (nth env 3) 0)
+                              (eq (lmb-close? (lmb-eye 16) B16 A16 env 16) 1))) 128)
+
+                (lmb-bit (eq (lmb-same? (nth (lm-outer (nth B3 0) (nth A3 0)) 0)
+                                        (lm-scale (nth A3 0) (nth (nth B3 0) 0))) 1) 256)
+
+                (lmb-bit (and (lt (lm-cost-low 4096 8) (lm-cost-full 4096))
+                         (and (eq (lm-cost-low 4096 8) 65536)
+                              (eq (lm-cost-full 4096) 16777216))) 512)
+
+                ; a width mismatch is nothing, and it propagates as nothing
+                (lmb-bit (and (nothing? (lm-dot (lmb-vec 3) (lmb-vec 4)))
+                         (and (nothing? (lm-add (lmb-vec 3) (lmb-vec 4)))
+                              (nothing? (lm-lowrank (list (lmb-vec 3)) (list) x3 3)))) 1024)
+
+                ; no fixed arity anywhere in the general cell
+                (lmb-bit (and (lt (str_find (lmb-src) "nth a 1)" 0) 0)
+                         (and (lt (str_find (lmb-src) "nth a 2)" 0) 0)
+                              (lt (str_find (lmb-src) "nth v 2)" 0) 0))) 2048)))))
+
+    (lora-modality-band))
