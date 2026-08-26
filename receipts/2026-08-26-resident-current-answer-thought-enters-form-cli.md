@@ -98,12 +98,14 @@ error string.
 
 ## Changed census and honest seam
 
-After rebasing Claude's concurrently landed training-loop rules (band 255) and
-directive actuator (fresh band 63), the health census is now 45 observed rows:
-37 ready, 8 gaps, 0 unknown, 0 invalid, 822 per thousand. The actuator row is
-narrow: corpus byte emission and the explicit trainer door are ready; it does
-not claim a physical training run in this pulse. The former combined placement
-gap was split because one number hid two different bodies:
+After rebasing Claude's concurrently landed training-loop rules (band 255),
+directive actuator (fresh band 63), and first full cycle receipt, the health
+census is now 45 observed rows: 37 ready, 8 gaps, 0 unknown, 0 invalid, 822 per
+thousand. The physical cycle ran 3,969 local-GPU iterations and re-observed
+unknown→nothing 3/3, reworded facts 12/12, and permission facts 6/6. Its honest
+seam is now evaluation: those measurements still came through a hand-typed
+Python script, and coverage-mint remains exact nothing. The former combined
+placement gap was split because one number hid two different bodies:
 
 - `form-cli-resident-current-answer-thought-execution`: ready, now with actual
   content-addressed image identity and post-reducer program birth;
