@@ -1,0 +1,318 @@
+; bmf-live-cursor.fk -- scannerless live-channel byte continuation.
+;
+; The cursor has no maximum byte position.  It carries an unbounded logical
+; coordinate, a bounded diagnostic window, structural continuation
+; (delimiter/quote/comment stack), and immutable checkpoints.  Candidate
+; materialization is a separate envelope: when its offered capacity fills the
+; cursor holds at the exact byte so a caller may persist, enlarge, branch or
+; abstain without misnaming materialization capacity as cursor exhaustion.
+;
+; Each feed consumes only the newly offered bytes.  It does not tokenize and it
+; does not replay the prior module.  A top-level final statement whose trimmed
+; bytes are exactly `0;` marks a candidate boundary; canonical BMF still owns
+; grammatical acceptance at that boundary.
+;
+; Fuel controls attention over the offered delta.  Timeout returns the exact
+; immutable cursor and the unconsumed chunk offset.  Empty input is `nothing`,
+; distinct from the bytes `0;` and from successful candidate recognition.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; Proven by: form-stdlib/tests/bmf-live-cursor-band.fk
+
+(do
+    (defn blc-version () "bmf-live-cursor-v1")
+    (defn blc-feature (name) (list "bmf-live-cursor-feature" name 1))
+    (defn blc-manifest ()
+        (list (blc-feature "unbounded-logical-position")
+              (blc-feature "bounded-diagnostic-window")
+              (blc-feature "separate-materialization-envelope")
+              (blc-feature "immutable-checkpoint-restore")
+              (blc-feature "delta-only-feed")
+              (blc-feature "scannerless")
+              (blc-feature "no-token-stream")
+              (blc-feature "quote-comment-delimiter-continuation")
+              (blc-feature "fuel-is-attention-not-size")))
+    (defn blc-manifest-has? (name rows)
+        (if (nil? rows) 0
+            (if (str_eq (nth (head rows) 1) name) 1
+                (blc-manifest-has? name (tail rows)))))
+
+    ; cursor fields:
+    ; schema logical-pos line col window window-cap material material-cap
+    ; status reason mode escaped pending-slash block-star stack statement-start
+    ; chunks terminal-count
+    (defn blc-cursor-row
+        (pos line col window window-cap material material-cap status reason mode
+         escaped pending-slash block-star stack statement-start chunks terminals)
+        (list (blc-version) pos line col window window-cap material material-cap
+              status reason mode escaped pending-slash block-star stack
+              statement-start chunks terminals))
+    (defn blc-pos (c) (nth c 1))
+    (defn blc-line (c) (nth c 2))
+    (defn blc-col (c) (nth c 3))
+    (defn blc-window (c) (nth c 4))
+    (defn blc-window-cap (c) (nth c 5))
+    (defn blc-material (c) (nth c 6))
+    (defn blc-material-cap (c) (nth c 7))
+    (defn blc-status (c) (nth c 8))
+    (defn blc-reason (c) (nth c 9))
+    (defn blc-mode (c) (nth c 10))
+    (defn blc-escaped? (c) (nth c 11))
+    (defn blc-pending-slash? (c) (nth c 12))
+    (defn blc-block-star? (c) (nth c 13))
+    (defn blc-stack (c) (nth c 14))
+    (defn blc-statement-start (c) (nth c 15))
+    (defn blc-chunks (c) (nth c 16))
+    (defn blc-terminal-count (c) (nth c 17))
+    (defn blc-open? (c) (if (str_eq (blc-status c) "open") 1 0))
+
+    (defn blc-clamp-window-cap (cap) (if (lt cap 1) 1 cap))
+    (defn blc-clamp-material-cap (cap) (if (lt cap 1) 1 cap))
+    (defn blc-fresh (window-cap material-cap)
+        (blc-cursor-row 0 1 0 "" (blc-clamp-window-cap window-cap) ""
+            (blc-clamp-material-cap material-cap) "open" "open" "code"
+            0 0 0 (empty) 0 0 0))
+    (defn blc-checkpoint (c) c)
+    (defn blc-restore (checkpoint) checkpoint)
+    (defn blc-with-material-cap (c material-cap)
+        (blc-cursor-row (blc-pos c) (blc-line c) (blc-col c)
+            (blc-window c) (blc-window-cap c) (blc-material c)
+            (if (lt material-cap (str_len (blc-material c)))
+                (str_len (blc-material c))
+                (blc-clamp-material-cap material-cap))
+            (if (str_eq (blc-status c) "materialization-full")
+                "open" (blc-status c))
+            (if (str_eq (blc-status c) "materialization-full")
+                "capacity-enlarged" (blc-reason c))
+            (blc-mode c) (blc-escaped? c) (blc-pending-slash? c)
+            (blc-block-star? c) (blc-stack c) (blc-statement-start c)
+            (blc-chunks c) (blc-terminal-count c)))
+
+    (defn blc-clip-left (text cap)
+        (if (le (str_len text) cap) text
+            (substring text (sub (str_len text) cap) (str_len text))))
+    (defn blc-window-add (c byte-text)
+        (blc-clip-left (str_concat (blc-window c) byte-text)
+            (blc-window-cap c)))
+    (defn blc-next-line (c byte)
+        (if (eq byte 10) (add (blc-line c) 1) (blc-line c)))
+    (defn blc-next-col (c byte)
+        (if (eq byte 10) 0 (add (blc-col c) 1)))
+    (defn blc-byte-text (byte) (byte_to_str byte))
+    (defn blc-can-materialize? (c)
+        (if (lt (str_len (blc-material c)) (blc-material-cap c)) 1 0))
+
+    ; stack frame = opener expected-close logical-pos line col
+    (defn blc-frame (opener close pos line col)
+        (list opener close pos line col))
+    (defn blc-frame-open (f) (nth f 0))
+    (defn blc-frame-close (f) (nth f 1))
+    (defn blc-frame-pos (f) (nth f 2))
+    (defn blc-frame-line (f) (nth f 3))
+    (defn blc-frame-col (f) (nth f 4))
+    (defn blc-close-for (byte)
+        (if (eq byte 40) 41 (if (eq byte 91) 93 (if (eq byte 123) 125 0))))
+    (defn blc-opening? (byte)
+        (if (or (eq byte 40) (or (eq byte 91) (eq byte 123))) 1 0))
+    (defn blc-closing? (byte)
+        (if (or (eq byte 41) (or (eq byte 93) (eq byte 125))) 1 0))
+
+    (defn blc-ws-byte? (byte)
+        (if (or (eq byte 32) (or (eq byte 9)
+                (or (eq byte 10) (eq byte 13)))) 1 0))
+    (defn blc-trim-left-at (text i)
+        (if (ge i (str_len text)) i
+            (if (eq (blc-ws-byte? (str_byte_at text i)) 1)
+                (blc-trim-left-at text (add i 1)) i)))
+    (defn blc-trim-right-at (text i)
+        (if (le i 0) 0
+            (if (eq (blc-ws-byte? (str-byte-at text (sub i 1))) 1)
+                (blc-trim-right-at text (sub i 1)) i)))
+    (defn blc-trim (text)
+        (substring text (blc-trim-left-at text 0)
+            (blc-trim-right-at text (str_len text))))
+    (defn blc-current-statement (c material-after)
+        (if (gt (blc-statement-start c) (str_len material-after)) ""
+            (substring material-after (blc-statement-start c)
+                (str_len material-after))))
+    (defn blc-leading-comment? (c)
+        (if (or (not (nil? (blc-stack c)))
+                (or (lt (blc-statement-start c) 0)
+                    (le (str_len (blc-material c)) 0))) 0
+            (if (str_eq (blc-trim (substring (blc-material c)
+                    (blc-statement-start c)
+                    (sub (str_len (blc-material c)) 1))) "") 1 0)))
+    (defn blc-comment-statement-start (c)
+        (if (eq (blc-leading-comment? c) 1) -1
+            (blc-statement-start c)))
+
+    (defn blc-rebuild
+        (c pos line col window material status reason mode escaped pending-slash
+         block-star stack statement-start chunks terminals)
+        (blc-cursor-row pos line col window (blc-window-cap c) material
+            (blc-material-cap c) status reason mode escaped pending-slash
+            block-star stack statement-start chunks terminals))
+
+    (defn blc-advance-state
+        (c byte status reason mode escaped pending-slash block-star stack
+         statement-start terminals)
+        (do
+            (let text (blc-byte-text byte))
+            (let material (str_concat (blc-material c) text))
+            (blc-rebuild c (add (blc-pos c) 1)
+                (blc-next-line c byte) (blc-next-col c byte)
+                (blc-window-add c text) material status reason mode escaped
+                pending-slash block-star stack statement-start
+                (blc-chunks c) terminals)))
+
+    (defn blc-code-byte (c byte)
+        (if (eq (blc-pending-slash? c) 1)
+            (if (eq byte 47)
+                (blc-advance-state c byte "open" "line-comment"
+                    "line-comment" 0 0 0 (blc-stack c)
+                    (blc-comment-statement-start c) (blc-terminal-count c))
+            (if (eq byte 42)
+                (blc-advance-state c byte "open" "block-comment"
+                    "block-comment" 0 0 0 (blc-stack c)
+                    (blc-comment-statement-start c) (blc-terminal-count c))
+                ; The pending slash was ordinary. Process this byte normally.
+                (blc-code-byte (blc-rebuild c (blc-pos c) (blc-line c)
+                    (blc-col c) (blc-window c) (blc-material c)
+                    (blc-status c) (blc-reason c) "code" 0 0 0
+                    (blc-stack c) (blc-statement-start c) (blc-chunks c)
+                    (blc-terminal-count c)) byte)))
+        (if (eq byte 47)
+            (blc-advance-state c byte "open" "slash-pending" "code" 0 1 0
+                (blc-stack c) (blc-statement-start c)
+                (blc-terminal-count c))
+        (if (or (eq byte 34) (eq byte 39))
+            (blc-advance-state c byte "open" "quoted"
+                (if (eq byte 34) "double-quote" "single-quote")
+                0 0 0 (blc-stack c) (blc-statement-start c)
+                (blc-terminal-count c))
+        (if (eq (blc-opening? byte) 1)
+            (blc-advance-state c byte "open" "delimiter-open" "code" 0 0 0
+                (cons (blc-frame byte (blc-close-for byte) (blc-pos c)
+                        (blc-line c) (blc-col c))
+                    (blc-stack c))
+                (blc-statement-start c) (blc-terminal-count c))
+        (if (eq (blc-closing? byte) 1)
+            (if (nil? (blc-stack c))
+                (blc-advance-state c byte "malformed" "closing-without-open"
+                    "code" 0 0 0 (blc-stack c) (blc-statement-start c)
+                    (blc-terminal-count c))
+                (if (not (eq (blc-frame-close (head (blc-stack c))) byte))
+                    (blc-advance-state c byte "malformed" "closing-mismatch"
+                        "code" 0 0 0 (blc-stack c) (blc-statement-start c)
+                        (blc-terminal-count c))
+                    (blc-advance-state c byte "open" "delimiter-close" "code"
+                        0 0 0 (tail (blc-stack c)) (blc-statement-start c)
+                        (blc-terminal-count c))))
+        (if (and (eq byte 59) (nil? (blc-stack c)))
+            (do
+                (let material-after (str_concat (blc-material c)
+                    (blc-byte-text byte)))
+                (let statement (blc-trim
+                    (blc-current-statement c material-after)))
+                (if (str_eq statement "0;")
+                    (blc-advance-state c byte "candidate" "top-level-final-zero"
+                        "code" 0 0 0 (blc-stack c)
+                        (add (blc-pos c) 1)
+                        (add (blc-terminal-count c) 1))
+                    (blc-advance-state c byte "open" "top-level-statement"
+                        "code" 0 0 0 (blc-stack c)
+                        (add (blc-pos c) 1)
+                        (add (blc-terminal-count c) 1))))
+            (blc-advance-state c byte "open" "byte" "code" 0 0 0
+                (blc-stack c) (blc-statement-start c)
+                (blc-terminal-count c)))))))))
+
+    (defn blc-quoted-byte (c byte)
+        (if (eq (blc-escaped? c) 1)
+            (blc-advance-state c byte "open" "quoted-escaped" (blc-mode c)
+                0 0 0 (blc-stack c) (blc-statement-start c)
+                (blc-terminal-count c))
+            (if (eq byte 92)
+                (blc-advance-state c byte "open" "quoted-escape" (blc-mode c)
+                    1 0 0 (blc-stack c) (blc-statement-start c)
+                    (blc-terminal-count c))
+                (if (or (and (str_eq (blc-mode c) "double-quote")
+                             (eq byte 34))
+                        (and (str_eq (blc-mode c) "single-quote")
+                             (eq byte 39)))
+                    (blc-advance-state c byte "open" "quoted-close" "code"
+                        0 0 0 (blc-stack c) (blc-statement-start c)
+                        (blc-terminal-count c))
+                    (blc-advance-state c byte "open" "quoted-byte" (blc-mode c)
+                        0 0 0 (blc-stack c) (blc-statement-start c)
+                        (blc-terminal-count c))))))
+    (defn blc-line-comment-byte (c byte)
+        (blc-advance-state c byte "open"
+            (if (eq byte 10) "line-comment-close" "line-comment-byte")
+            (if (eq byte 10) "code" "line-comment") 0 0 0 (blc-stack c)
+            (if (and (eq byte 10) (lt (blc-statement-start c) 0))
+                (add (blc-pos c) 1) (blc-statement-start c))
+            (blc-terminal-count c)))
+    (defn blc-block-comment-byte (c byte)
+        (if (and (eq (blc-block-star? c) 1) (eq byte 47))
+            (blc-advance-state c byte "open" "block-comment-close" "code"
+                0 0 0 (blc-stack c)
+                (if (lt (blc-statement-start c) 0)
+                    (add (blc-pos c) 1) (blc-statement-start c))
+                (blc-terminal-count c))
+            (blc-advance-state c byte "open" "block-comment-byte"
+                "block-comment" 0 0 (if (eq byte 42) 1 0) (blc-stack c)
+                (blc-statement-start c) (blc-terminal-count c))))
+
+    (defn blc-step (c byte)
+        (if (not (eq (blc-can-materialize? c) 1))
+            (blc-rebuild c (blc-pos c) (blc-line c) (blc-col c)
+                (blc-window c) (blc-material c) "materialization-full"
+                "material-capacity-needed" (blc-mode c) (blc-escaped? c)
+                (blc-pending-slash? c) (blc-block-star? c) (blc-stack c)
+                (blc-statement-start c) (blc-chunks c)
+                (blc-terminal-count c))
+        (if (or (str_eq (blc-mode c) "double-quote")
+                (str_eq (blc-mode c) "single-quote"))
+            (blc-quoted-byte c byte)
+        (if (str_eq (blc-mode c) "line-comment")
+            (blc-line-comment-byte c byte)
+        (if (str_eq (blc-mode c) "block-comment")
+            (blc-block-comment-byte c byte)
+            (blc-code-byte c byte))))))
+
+    ; feed result = schema status reason cursor consumed chunk-offset fuel-left
+    (defn blc-result (status reason cursor consumed offset fuel)
+        (list "bmf-live-feed-v1" status reason cursor consumed offset fuel))
+    (defn blc-result-status (r) (nth r 1))
+    (defn blc-result-reason (r) (nth r 2))
+    (defn blc-result-cursor (r) (nth r 3))
+    (defn blc-result-consumed (r) (nth r 4))
+    (defn blc-result-offset (r) (nth r 5))
+    (defn blc-result-fuel (r) (nth r 6))
+    (defn blc-feed-go (cursor chunk i fuel)
+        (if (ge i (str_len chunk))
+            (blc-result (blc-status cursor) (blc-reason cursor) cursor i i fuel)
+        (if (le fuel 0)
+            (blc-result "timeout" "delta-fuel-spent" cursor i i 0)
+        (if (not (eq (blc-open? cursor) 1))
+            (blc-result (blc-status cursor) (blc-reason cursor) cursor i i fuel)
+            (do
+                (let next (blc-step cursor (str-byte-at chunk i)))
+                (if (not (eq (blc-open? next) 1))
+                    (blc-result (blc-status next) (blc-reason next) next
+                        (add i 1) (add i 1) (sub fuel 1))
+                    (blc-feed-go next chunk (add i 1) (sub fuel 1))))))))
+    (defn blc-with-chunk (cursor)
+        (blc-rebuild cursor (blc-pos cursor) (blc-line cursor)
+            (blc-col cursor) (blc-window cursor) (blc-material cursor)
+            (blc-status cursor) (blc-reason cursor) (blc-mode cursor)
+            (blc-escaped? cursor) (blc-pending-slash? cursor)
+            (blc-block-star? cursor) (blc-stack cursor)
+            (blc-statement-start cursor) (add (blc-chunks cursor) 1)
+            (blc-terminal-count cursor)))
+    (defn blc-feed (cursor chunk fuel)
+        (if (eq (str_len chunk) 0)
+            (blc-result "nothing" "empty-delta" cursor 0 0 fuel)
+            (blc-feed-go (blc-with-chunk cursor) chunk 0 fuel)))
+    0)

@@ -1,0 +1,92 @@
+; bmf-prefix-state-band.fk -- recursive BMF grammar prefixes remain distinct
+; as continue, complete, malformed, materialization-full, timeout and unsupported.
+;
+; Expected: 262143 (18 bits)
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/bmf-core.fk form-stdlib/bmf-grammar.fk
+; preludes: form-stdlib/grammars/form-bml.fk
+; preludes: form-stdlib/bmf-prefix-state.fk
+
+(do
+    (defn gspb-bit (ok bit) (if ok bit 0))
+    (defn gspb-status (g raw)
+        (gsp-state-status (gsp-material-state g raw 512 4096)))
+    (defn gspb-custom ()
+        (grammar "packet" (list
+            (rule3 "packet"
+                (list "seq" (p-lit "ask(")
+                    (p-sep (p-run "alnum") (p-lit ",")) (p-lit ");"))
+                (t-emit "packet" (list))))))
+    (defn gspb-unsupported ()
+        (grammar "x" (list
+            (rule3 "x" (list "infix" (p-num) (empty))
+                (t-emit "x" (list))))))
+    (defn gspb-trace-frontier? (state)
+        (do
+            (let trace (gsp-state-trace state))
+            (if (nil? trace) 0
+                (do
+                    (let frame (head trace))
+                    (if (and (str_eq (gsp-frame-kind frame) "frontier")
+                        (and (str_eq (gsp-frame-name frame)
+                                "unconsumed-byte")
+                             (eq (gsp-frame-start frame)
+                                (gsp-state-consumed state)))) 1 0)))))
+    (defn gspb-run ()
+        (do
+            (let bml (form-bml-section-grammar))
+            (let custom (gspb-custom))
+            (let traced (gsp-material-state bml
+                "def amber-main() = ;" 512 4096))
+            (let material-full (gsp-material-state bml
+                "def amber-main() = 1;" 8 4096))
+            (let timed-out (gsp-material-state bml
+                "def amber-main()" 512 0))
+            (sum (list
+                (gspb-bit (str_eq (gspb-status bml "") "continue") 1)
+                (gspb-bit (str_eq (gspb-status bml "d") "continue") 2)
+                (gspb-bit (str_eq (gspb-status bml
+                    "def amber-main(") "continue") 4)
+                (gspb-bit (str_eq (gspb-status bml
+                    "def amber-main() = add(1,") "continue") 8)
+                (gspb-bit (str_eq (gspb-status bml
+                    "def amber-main() = add(1,2);\n0;") "complete") 16)
+                (gspb-bit (str_eq (gspb-status bml
+                    "def amber-main() = ;") "malformed") 32)
+                (gspb-bit (str_eq (gspb-status bml
+                    "def amber-main() = \"open") "continue") 64)
+                (gspb-bit (str_eq (gspb-status bml
+                    "def amber-main(): 1;") "malformed") 128)
+                (gspb-bit (str_eq (gsp-state-status
+                    (gsp-material-state bml "def amber-main() = 1;" 8 4096))
+                    "materialization-full") 256)
+                (gspb-bit (str_eq (gsp-state-status
+                    (gsp-material-state bml "def amber-main()" 512 0))
+                    "timeout") 512)
+                (gspb-bit (str_eq (gspb-status custom "ask(") "continue") 1024)
+                (gspb-bit (str_eq (gspb-status custom "ask(one,two);")
+                    "complete") 2048)
+                (gspb-bit (str_eq (gspb-status custom "ask(one,);")
+                    "malformed") 4096)
+                (gspb-bit (str_eq (gspb-status bml
+                    "def blocky(x) { let y = add(x,1); list(y,")
+                    "continue") 8192)
+                (gspb-bit (str_eq (gsp-state-status
+                    (gsp-material-state (gspb-unsupported) "1+" 512 4096))
+                    "unsupported") 16384)
+                (gspb-bit (eq (gspb-trace-frontier? traced) 1) 32768)
+                (gspb-bit (and (eq (gsp-state-consumed material-full) 8)
+                    (and (str_eq (gsp-frame-kind
+                            (head (gsp-state-trace material-full)))
+                            "material-envelope")
+                         (str_eq (gsp-frame-name
+                            (head (gsp-state-trace material-full)))
+                            "material-cap")))
+                    65536)
+                (gspb-bit (and (str_eq (gsp-frame-kind
+                        (head (gsp-state-trace timed-out))) "control")
+                    (str_eq (gsp-frame-name
+                        (head (gsp-state-trace timed-out))) "parser-fuel"))
+                    131072)))))
+    (gspb-run))

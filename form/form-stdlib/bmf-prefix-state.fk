@@ -1,0 +1,396 @@
+; bmf-prefix-state.fk -- materialized scannerless continue/complete/malformed
+; observation over a recursive BMF grammar value.
+;
+; `g-match-rule` is a prefix matcher and `g-parse-full` is the trusted whole
+; door.  Neither says whether a failed whole parse is incomplete-but-viable or
+; already impossible.  This organ walks the same grammar data without building
+; an AST and retains that missing state.  It reads raw bytes through the BMF
+; cursor; there is no lexical token stream or tokenizer pre-step.
+;
+; Supported pattern data: lit, run, ref, seq, alt, opt, cap, rep, sep, str,
+; char, num and chain (calls, members, indexes and postfix ++/--).  A grammar
+; that offers another pattern receives `unsupported`, never a guessed verdict.
+; Fuel and the separately offered materialization envelope are explicit. Empty
+; input is a viable prefix, distinct from a complete parse and malformed input.
+; A live cursor has no maximum position; `materialization-full` says only that
+; this particular whole-source observation needs a larger material envelope.
+;
+; result = tag status cursor fuel-left reason rule-pattern-trace
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/bmf-core.fk form-stdlib/bmf-grammar.fk
+
+(do
+    (defn gsp-result-traced (status cursor fuel reason trace)
+        (list "bmf-prefix-result-v2" status cursor fuel reason trace))
+    (defn gsp-result (status cursor fuel reason)
+        (gsp-result-traced status cursor fuel reason (empty)))
+    (defn gsp-status (r) (nth r 1))
+    (defn gsp-cur (r) (nth r 2))
+    (defn gsp-fuel (r) (nth r 3))
+    (defn gsp-reason (r) (nth r 4))
+    (defn gsp-trace (r) (if (gt (len r) 5) (nth r 5) (empty)))
+    (defn gsp-ok (c fuel) (gsp-result "ok" c fuel "matched"))
+    (defn gsp-wait (c fuel reason) (gsp-result "wait" c fuel reason))
+    (defn gsp-no (c fuel reason) (gsp-result "no" c fuel reason))
+    (defn gsp-timeout (c) (gsp-result "timeout" c 0 "fuel-spent"))
+    (defn gsp-unsupported (c fuel tag)
+        (gsp-result "unsupported" c fuel (str_concat "pattern:" tag)))
+    (defn gsp-status? (r status) (str_eq (gsp-status r) status))
+    ; Frame = kind, name, input-byte, frontier-byte, terminal-status. Frames
+    ; are added only while a non-ok result unwinds, so the retained path is the
+    ; actual active rule/pattern frontier rather than every attempted branch.
+    (defn gsp-frame (kind name start finish status)
+        (list kind name start finish status))
+    (defn gsp-frame-kind (frame) (nth frame 0))
+    (defn gsp-frame-name (frame) (nth frame 1))
+    (defn gsp-frame-start (frame) (nth frame 2))
+    (defn gsp-frame-finish (frame) (nth frame 3))
+    (defn gsp-frame-status (frame) (nth frame 4))
+    (defn gsp-with-frame (result kind name start)
+        (if (gsp-status? result "ok") result
+            (gsp-result-traced (gsp-status result) (gsp-cur result)
+                (gsp-fuel result) (gsp-reason result)
+                (cons (gsp-frame kind name start
+                    (cur-pos (gsp-cur result)) (gsp-status result))
+                    (gsp-trace result)))))
+
+    (defn gsp-lit-loop (text i c fuel)
+        (if (le fuel 0) (gsp-timeout c)
+        (if (ge i (str_len text)) (gsp-ok c fuel)
+        (if (cur-eof? c) (gsp-wait c fuel "literal-prefix")
+            (if (eq (cur-peek c) (str_byte_at text i))
+                (gsp-lit-loop text (add i 1) (cur-advance c 1)
+                    (sub fuel 1))
+                (gsp-no c fuel "literal-mismatch"))))))
+    (defn gsp-lit (text c fuel)
+        (gsp-lit-loop text 0 (skip-ws c) fuel))
+
+    (defn gsp-run-loop (class-name c fuel)
+        (if (le fuel 0) (gsp-timeout c)
+            (if (cur-eof? c) (gsp-ok c fuel)
+                (if (cp-in-class? (cur-peek c) class-name)
+                    (gsp-run-loop class-name (cur-advance c 1)
+                        (sub fuel 1))
+                    (gsp-ok c fuel)))))
+    (defn gsp-run (class-name c fuel)
+        (do
+            (let cc (skip-ws c))
+            (if (le fuel 0) (gsp-timeout cc)
+            (if (cur-eof? cc) (gsp-wait cc fuel "class-byte")
+            (if (cp-in-class? (cur-peek cc) class-name)
+                (gsp-run-loop class-name (cur-advance cc 1) (sub fuel 1))
+                (gsp-no cc fuel "class-mismatch"))))))
+
+    (defn gsp-quoted-loop (quote c fuel escaped)
+        (if (le fuel 0) (gsp-timeout c)
+        (if (cur-eof? c) (gsp-wait c fuel "quoted-close")
+            (do
+                (let byte (cur-peek c))
+                (if (eq escaped 1)
+                    (gsp-quoted-loop quote (cur-advance c 1)
+                        (sub fuel 1) 0)
+                (if (eq byte 92)
+                    (gsp-quoted-loop quote (cur-advance c 1)
+                        (sub fuel 1) 1)
+                (if (eq byte quote)
+                    (gsp-ok (cur-advance c 1) (sub fuel 1))
+                    (gsp-quoted-loop quote (cur-advance c 1)
+                        (sub fuel 1) 0))))))))
+    (defn gsp-quoted (quote c fuel)
+        (do
+            (let cc (skip-ws c))
+            (if (le fuel 0) (gsp-timeout cc)
+            (if (cur-eof? cc) (gsp-wait cc fuel "quoted-open")
+            (if (eq (cur-peek cc) quote)
+                (gsp-quoted-loop quote (cur-advance cc 1) (sub fuel 1) 0)
+                (gsp-no cc fuel "quoted-open-mismatch"))))))
+
+    (defn gsp-num-loop (c fuel seen-dot)
+        (if (le fuel 0) (gsp-timeout c)
+        (if (cur-eof? c) (gsp-ok c fuel)
+            (if (is-digit-cp (cur-peek c))
+                (gsp-num-loop (cur-advance c 1) (sub fuel 1) seen-dot)
+            (if (and (eq seen-dot 0) (eq (cur-peek c) 46))
+                (do
+                    (let after (cur-advance c 1))
+                    (if (cur-eof? after)
+                        (gsp-wait after (sub fuel 1) "fraction-digit")
+                    (if (is-digit-cp (cur-peek after))
+                        (gsp-num-loop (cur-advance after 1)
+                            (sub fuel 2) 1)
+                        (gsp-ok c fuel))))
+                (gsp-ok c fuel))))))
+    (defn gsp-num (c fuel)
+        (do
+            (let cc (skip-ws c))
+            (if (le fuel 0) (gsp-timeout cc)
+            (if (cur-eof? cc) (gsp-wait cc fuel "number")
+            (if (is-digit-cp (cur-peek cc))
+                (gsp-num-loop (cur-advance cc 1) (sub fuel 1) 0)
+                (gsp-no cc fuel "number-mismatch"))))))
+
+    (defn gsp-rule (g name c fuel)
+        (do
+            (let rule (g-rule g name))
+            (let result (if (nil? rule) (gsp-no c fuel "rule-missing")
+                (gsp-match g (r3-pat rule) c fuel)))
+            (gsp-with-frame result "rule" name (cur-pos c))))
+    (defn gsp-seq (g parts c fuel)
+        (if (nil? parts) (gsp-ok c fuel)
+            (do
+                (let one (gsp-match g (head parts) c fuel))
+                (if (gsp-status? one "ok")
+                    (gsp-seq g (tail parts) (gsp-cur one) (gsp-fuel one))
+                    one))))
+    (defn gsp-alt (g alts c fuel)
+        (if (nil? alts) (gsp-no c fuel "alternatives-exhausted")
+            (do
+                (let one (gsp-match g (head alts) c fuel))
+                (if (gsp-status? one "no")
+                    (gsp-alt g (tail alts) c (gsp-fuel one))
+                    one))))
+    (defn gsp-rep (g inner c fuel)
+        (do
+            (let one (gsp-match g inner c fuel))
+            (if (gsp-status? one "ok")
+                (if (gt (cur-pos (gsp-cur one)) (cur-pos c))
+                    (gsp-rep g inner (gsp-cur one) (gsp-fuel one))
+                    (gsp-ok c (gsp-fuel one)))
+            (if (gsp-status? one "no")
+                (gsp-ok c (gsp-fuel one))
+                one))))
+    (defn gsp-sep-loop (g inner separator c fuel)
+        (do
+            (let sep (gsp-match g separator c fuel))
+            (if (gsp-status? sep "no")
+                (gsp-ok c (gsp-fuel sep))
+            (if (not (gsp-status? sep "ok")) sep
+                (do
+                    (let item (gsp-match g inner (gsp-cur sep) (gsp-fuel sep)))
+                    (if (gsp-status? item "ok")
+                        (gsp-sep-loop g inner separator
+                            (gsp-cur item) (gsp-fuel item))
+                    (if (gsp-status? item "no")
+                        (gsp-no (gsp-cur sep) (gsp-fuel item)
+                            "separator-without-item")
+                        item)))))))
+    (defn gsp-sep (g inner separator c fuel)
+        (do
+            (let first (gsp-match g inner c fuel))
+            (if (gsp-status? first "no")
+                (gsp-ok c (gsp-fuel first))
+            (if (not (gsp-status? first "ok")) first
+                (gsp-sep-loop g inner separator
+                    (gsp-cur first) (gsp-fuel first))))))
+
+    (defn gsp-after-index (g exprp c fuel)
+        (do
+            (let item (gsp-match g exprp c fuel))
+            (if (not (gsp-status? item "ok")) item
+                (do
+                    (let close (gsp-lit "]" (gsp-cur item) (gsp-fuel item)))
+                    (if (gsp-status? close "ok")
+                        (gsp-chain-loop g exprp (gsp-cur close)
+                            (gsp-fuel close))
+                        close)))))
+    (defn gsp-args-loop (g exprp c fuel)
+        (do
+            (let item (gsp-match g exprp c fuel))
+            (if (not (gsp-status? item "ok")) item
+                (do
+                    (let cc (skip-ws (gsp-cur item)))
+                    (if (cur-eof? cc)
+                        (gsp-wait cc (gsp-fuel item) "call-close")
+                    (if (eq (cur-peek cc) 41)
+                        (gsp-chain-loop g exprp (cur-advance cc 1)
+                            (sub (gsp-fuel item) 1))
+                    (if (eq (cur-peek cc) 44)
+                        (gsp-args-loop g exprp (cur-advance cc 1)
+                            (sub (gsp-fuel item) 1))
+                        (gsp-no cc (gsp-fuel item)
+                            "call-delimiter"))))))))
+    (defn gsp-args (g exprp c fuel)
+        (do
+            (let cc (skip-ws c))
+            (if (le fuel 0) (gsp-timeout cc)
+            (if (cur-eof? cc) (gsp-wait cc fuel "call-argument-or-close")
+            (if (eq (cur-peek cc) 41)
+                (gsp-chain-loop g exprp (cur-advance cc 1) (sub fuel 1))
+                (gsp-args-loop g exprp cc fuel))))))
+    (defn gsp-generic-loop (c fuel depth)
+        (if (le fuel 0) (gsp-timeout c)
+        (if (cur-eof? c) (gsp-wait c fuel "generic-close")
+            (do
+                (let byte (cur-peek c))
+                (if (eq byte 62)
+                    (if (eq depth 1)
+                        (gsp-ok (cur-advance c 1) (sub fuel 1))
+                        (gsp-generic-loop (cur-advance c 1)
+                            (sub fuel 1) (sub depth 1)))
+                (if (eq byte 60)
+                    (gsp-generic-loop (cur-advance c 1)
+                        (sub fuel 1) (add depth 1))
+                (if (or (eq byte 40)
+                        (or (eq byte 41)
+                        (or (eq byte 59)
+                        (or (eq byte 123) (eq byte 125)))))
+                    (gsp-no c fuel "generic-delimiter")
+                    (gsp-generic-loop (cur-advance c 1)
+                        (sub fuel 1) depth))))))))
+    (defn gsp-generic-call (g exprp c fuel)
+        (do
+            (let generic (gsp-generic-loop (cur-advance c 1)
+                (sub fuel 1) 1))
+            (if (not (gsp-status? generic "ok")) generic
+                (do
+                    (let after (skip-ws (gsp-cur generic)))
+                    (if (cur-eof? after)
+                        (gsp-wait after (gsp-fuel generic) "generic-call-open")
+                    (if (eq (cur-peek after) 40)
+                        (gsp-args g exprp (cur-advance after 1)
+                            (sub (gsp-fuel generic) 1))
+                        (gsp-no after (gsp-fuel generic)
+                            "generic-call-open-mismatch")))))))
+    (defn gsp-chain-loop (g exprp c fuel)
+        (do
+            (let cc (skip-ws c))
+            (if (le fuel 0) (gsp-timeout cc)
+            (if (cur-eof? cc) (gsp-ok c fuel)
+                (do
+                    (let byte (cur-peek cc))
+                    (if (eq byte 60)
+                        (gsp-generic-call g exprp cc fuel)
+                    (if (eq byte 40)
+                        (gsp-args g exprp (cur-advance cc 1) (sub fuel 1))
+                    (if (eq byte 46)
+                        (do
+                            (let name (gsp-run "alnum" (cur-advance cc 1)
+                                (sub fuel 1)))
+                            (if (gsp-status? name "ok")
+                                (gsp-chain-loop g exprp (gsp-cur name)
+                                    (gsp-fuel name))
+                                name))
+                    (if (eq byte 91)
+                        (gsp-after-index g exprp (cur-advance cc 1)
+                            (sub fuel 1))
+                    (if (or (eq byte 43) (eq byte 45))
+                        (do
+                            (let after (cur-advance cc 1))
+                            (if (cur-eof? after)
+                                (gsp-wait after (sub fuel 1) "postfix-pair")
+                            (if (eq (cur-peek after) byte)
+                                (gsp-ok (cur-advance after 1) (sub fuel 2))
+                                (gsp-ok c fuel))))
+                        (gsp-ok c fuel)))))))))))
+    (defn gsp-chain (g base exprp c fuel)
+        (do
+            (let first (gsp-match g base c fuel))
+            (if (gsp-status? first "ok")
+                (gsp-chain-loop g exprp (gsp-cur first) (gsp-fuel first))
+                first)))
+
+    (defn gsp-match-tag (g pat c fuel tag)
+        (if (le fuel 0) (gsp-timeout c)
+            (do
+                (let left (sub fuel 1))
+                (if (str_eq tag "lit") (gsp-lit (nth pat 1) c left)
+                (if (str_eq tag "run") (gsp-run (nth pat 1) c left)
+                (if (str_eq tag "ref") (gsp-rule g (nth pat 1) c left)
+                (if (str_eq tag "seq") (gsp-seq g (tail pat) c left)
+                (if (str_eq tag "alt") (gsp-alt g (tail pat) c left)
+                (if (str_eq tag "opt")
+                    (do
+                        (let one (gsp-match g (nth pat 1) c left))
+                        (if (gsp-status? one "no")
+                            (gsp-ok c (gsp-fuel one)) one))
+                (if (str_eq tag "cap") (gsp-match g (nth pat 2) c left)
+                (if (str_eq tag "rep") (gsp-rep g (nth pat 1) c left)
+                (if (str_eq tag "sep")
+                    (gsp-sep g (nth pat 1) (nth pat 2) c left)
+                (if (str_eq tag "str") (gsp-quoted 34 c left)
+                (if (str_eq tag "char") (gsp-quoted 39 c left)
+                (if (str_eq tag "num") (gsp-num c left)
+                (if (str_eq tag "chain")
+                    (gsp-chain g (nth pat 1) (nth pat 2) c left)
+                    (gsp-unsupported c left tag)))))))))))))))))
+    (defn gsp-match (g pat c fuel)
+        (do
+            (let tag (head pat))
+            (let matched (gsp-match-tag g pat c fuel tag))
+            (gsp-with-frame matched "pattern" tag (cur-pos c))))
+
+    ; Public state = tag status consumed fuel-left reason rule-pattern-trace.
+    (defn gsp-state-traced (status consumed fuel reason trace)
+        (list "bmf-prefix-state-v2" status consumed fuel reason trace))
+    (defn gsp-state (status consumed fuel reason)
+        (gsp-state-traced status consumed fuel reason (empty)))
+    (defn gsp-state-status (s) (nth s 1))
+    (defn gsp-state-consumed (s) (nth s 2))
+    (defn gsp-state-fuel (s) (nth s 3))
+    (defn gsp-state-reason (s) (nth s 4))
+    (defn gsp-state-trace (s) (if (gt (len s) 5) (nth s 5) (empty)))
+    (defn gsp-material-state (g raw material-cap fuel)
+        (if (gt (str_len raw) material-cap)
+            (gsp-state-traced "materialization-full" material-cap fuel
+                "material-capacity-needed"
+                (list (gsp-frame "material-envelope" "material-cap" 0
+                    (str_len raw) "materialization-full")))
+        (if (eq (str_len raw) 0)
+            (gsp-state-traced "continue" 0 fuel "empty-prefix"
+                (list (gsp-frame "rule" (g-start g) 0 0 "wait")))
+        (if (le fuel 0)
+            (gsp-state-traced "timeout" 0 0 "fuel-spent"
+                (list (gsp-frame "control" "parser-fuel" 0 0 "timeout")))
+            (do
+                ; Meter the recursive prefix walk before asking the existing
+                ; whole parser for its AST. A fuel-zero complete-looking source
+                ; is timeout, never an unmetered success.
+                (let partial (gsp-rule g (g-start g) (cursor-str raw) fuel))
+                (if (gsp-status? partial "wait")
+                    (do
+                        ; A repeating section asks whether another statement may
+                        ; begin at EOF. The metered walk therefore says wait even
+                        ; when the existing whole is complete; only now is the
+                        ; whole parser allowed to distinguish those two cases.
+                        (let whole (g-match-rule g (g-start g)
+                            (cursor-str raw)))
+                        (if (g-complete? whole)
+                            (gsp-state "complete" (cur-pos (rok-cur whole))
+                                (gsp-fuel partial) "whole-grammar")
+                            (gsp-state-traced "continue"
+                                (cur-pos (gsp-cur partial))
+                                (gsp-fuel partial) (gsp-reason partial)
+                                (gsp-trace partial))))
+                (if (gsp-status? partial "timeout")
+                            (gsp-state-traced "timeout"
+                                (cur-pos (gsp-cur partial)) 0
+                                (gsp-reason partial) (gsp-trace partial))
+                (if (gsp-status? partial "unsupported")
+                            (gsp-state-traced "unsupported"
+                                (cur-pos (gsp-cur partial))
+                                (gsp-fuel partial) (gsp-reason partial)
+                                (gsp-trace partial))
+                (if (and (gsp-status? partial "ok")
+                         (cur-eof? (skip-ws (gsp-cur partial))))
+                    (do
+                        (let whole (g-match-rule g (g-start g)
+                            (cursor-str raw)))
+                        (if (g-complete? whole)
+                            (gsp-state "complete" (cur-pos (rok-cur whole))
+                                (gsp-fuel partial) "whole-grammar")
+                            (gsp-state "continue" (cur-pos (gsp-cur partial))
+                                (gsp-fuel partial) "matched-prefix")))
+                    (do
+                        (let consumed (cur-pos (gsp-cur partial)))
+                        (let trace (gsp-trace partial))
+                        (gsp-state-traced "malformed" consumed
+                            (gsp-fuel partial)
+                            (if (nil? trace) "unconsumed-byte"
+                                (gsp-reason partial))
+                            (if (nil? trace)
+                                (list (gsp-frame "frontier"
+                                    "unconsumed-byte" consumed
+                                    (str_len raw) "malformed"))
+                                trace))))))))))))
+    0)
