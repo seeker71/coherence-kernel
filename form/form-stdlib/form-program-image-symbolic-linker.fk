@@ -1,0 +1,134 @@
+; form-program-image-symbolic-linker.fk -- bounded symbolic rows become one PIF table.
+;
+; A compiler should name relationships while it grows an image, not count numeric
+; seats in its source.  This leaf is the two-pass waist: pass one is the ordered
+; definition lists themselves; pass two resolves node, string and image-local
+; function labels and emits exact numeric PIF rows.  No unresolved or duplicate
+; label can escape as a partial table.
+;
+; This is deliberately below BMF lowering.  It removes caller-computed offsets
+; from the selected grammar->PIF movement without pretending that grammar lowering
+; is already complete.
+;
+; preludes: form-stdlib/core.fk form-stdlib/program-image-fkb.fk
+
+(do
+    (defn fpis-imm (value) (list "imm" value))
+    (defn fpis-node-ref (label) (list "node" label))
+    (defn fpis-string-ref (label) (list "string" label))
+    (defn fpis-function-ref (label) (list "function" label))
+
+    ; Definitions contain labels only.  Numeric indices are never accepted from
+    ; the caller for a relationship which the linker can resolve itself.
+    (defn fpis-node-def (label tag a b c) (list label tag a b c))
+    (defn fpis-string-def (label bytes) (list label bytes))
+    (defn fpis-function-def (label root-node-label) (list label root-node-label))
+    (defn fpis-ir (functions nodes strings) (list "symbolic-pif-ir-v1" functions nodes strings))
+
+    (defn fpis-linked (table) (list "linked" table))
+    (defn fpis-refused (reason) (list "refused" reason (nothing)))
+    (defn fpis-linked? (result) (str_eq (head result) "linked"))
+    (defn fpis-reason (result) (if (fpis-linked? result) "" (nth result 1)))
+    (defn fpis-table (result) (if (fpis-linked? result) (nth result 1) (nothing)))
+
+    (defn fpis-definition-label (definition) (head definition))
+    (defn fpis-label-present? (definitions label)
+        (if (nil? definitions) 0
+            (if (str_eq (fpis-definition-label (head definitions)) label) 1
+                (fpis-label-present? (tail definitions) label))))
+    (defn fpis-unique-labels? (definitions)
+        (if (nil? definitions) 1
+            (if (fpis-label-present? (tail definitions) (fpis-definition-label (head definitions))) 0
+                (fpis-unique-labels? (tail definitions)))))
+    (defn fpis-label-index-loop (definitions label index)
+        (if (nil? definitions) (sub 0 1)
+            (if (str_eq (fpis-definition-label (head definitions)) label) index
+                (fpis-label-index-loop (tail definitions) label (add index 1)))))
+    (defn fpis-label-index (definitions label)
+        (fpis-label-index-loop definitions label 0))
+
+    (defn fpis-definition-shapes? (definitions arity)
+        (if (nil? definitions) 1
+            (if (eq (len (head definitions)) arity)
+                (fpis-definition-shapes? (tail definitions) arity) 0)))
+    (defn fpis-ir-shape? (ir)
+        (if (eq (len ir) 4)
+            (if (str_eq (nth ir 0) "symbolic-pif-ir-v1")
+                (if (fpis-definition-shapes? (nth ir 1) 2)
+                    (if (fpis-definition-shapes? (nth ir 2) 5)
+                        (fpis-definition-shapes? (nth ir 3) 2) 0) 0) 0) 0))
+
+    (defn fpis-resolve-operand (operand nodes strings functions)
+        (if (not (eq (len operand) 2)) (list 0 "operand-shape" 0)
+            (do
+                (let kind (nth operand 0))
+                (let value (nth operand 1))
+                (if (str_eq kind "imm") (list 1 "" value)
+                (if (str_eq kind "node")
+                    (do (let index (fpis-label-index nodes value))
+                        (if (lt index 0) (list 0 "unresolved-node" 0) (list 1 "" index)))
+                (if (str_eq kind "string")
+                    (do (let index (fpis-label-index strings value))
+                        (if (lt index 0) (list 0 "unresolved-string" 0) (list 1 "" index)))
+                (if (str_eq kind "function")
+                    (do (let index (fpis-label-index functions value))
+                        (if (lt index 0) (list 0 "unresolved-function" 0) (list 1 "" index)))
+                    (list 0 "unsupported-reference-kind" 0))))))))
+    (defn fpis-resolution-ok? (resolution) (eq (head resolution) 1))
+    (defn fpis-resolution-reason (resolution) (nth resolution 1))
+    (defn fpis-resolution-value (resolution) (nth resolution 2))
+
+    (defn fpis-resolve-node (definition nodes strings functions)
+        (do
+            (let a (fpis-resolve-operand (nth definition 2) nodes strings functions))
+            (let b (fpis-resolve-operand (nth definition 3) nodes strings functions))
+            (let c (fpis-resolve-operand (nth definition 4) nodes strings functions))
+            (if (not (fpis-resolution-ok? a)) (list 0 (fpis-resolution-reason a) (nothing))
+            (if (not (fpis-resolution-ok? b)) (list 0 (fpis-resolution-reason b) (nothing))
+            (if (not (fpis-resolution-ok? c)) (list 0 (fpis-resolution-reason c) (nothing))
+                (list 1 "" (pif-node-row (nth definition 1)
+                                          (fpis-resolution-value a)
+                                          (fpis-resolution-value b)
+                                          (fpis-resolution-value c))))))))
+    (defn fpis-resolve-nodes (remaining all-nodes strings functions acc)
+        (if (nil? remaining) (list 1 "" acc)
+            (do
+                (let resolution (fpis-resolve-node (head remaining) all-nodes strings functions))
+                (if (eq (head resolution) 1)
+                    (fpis-resolve-nodes (tail remaining) all-nodes strings functions
+                                        (append acc (list (nth resolution 2))))
+                    (list 0 (nth resolution 1) (nothing))))))
+
+    (defn fpis-resolve-functions (remaining nodes acc)
+        (if (nil? remaining) (list 1 "" acc)
+            (do
+                (let index (fpis-label-index nodes (nth (head remaining) 1)))
+                (if (lt index 0) (list 0 "unresolved-function-root" (nothing))
+                    (fpis-resolve-functions (tail remaining) nodes (append acc (list index)))))))
+    (defn fpis-string-rows (definitions)
+        (if (nil? definitions) (list)
+            (cons (nth (head definitions) 1) (fpis-string-rows (tail definitions)))))
+
+    (defn fpis-link (ir)
+        (if (not (fpis-ir-shape? ir)) (fpis-refused "ir-shape")
+            (do
+                (let functions (nth ir 1))
+                (let nodes (nth ir 2))
+                (let strings (nth ir 3))
+                (if (not (fpis-unique-labels? functions)) (fpis-refused "duplicate-function-label")
+                (if (not (fpis-unique-labels? nodes)) (fpis-refused "duplicate-node-label")
+                (if (not (fpis-unique-labels? strings)) (fpis-refused "duplicate-string-label")
+                    (do
+                        (let roots (fpis-resolve-functions functions nodes (list)))
+                        (if (not (eq (head roots) 1)) (fpis-refused (nth roots 1))
+                            (do
+                                (let rows (fpis-resolve-nodes nodes nodes strings functions (list)))
+                                (if (not (eq (head rows) 1)) (fpis-refused (nth rows 1))
+                                    (do
+                                        (let table (pif-table-image-from-parts
+                                                        (nth roots 2)
+                                                        (nth rows 2)
+                                                        (fpis-string-rows strings)))
+                                        (if (pif-table-valid? table) (fpis-linked table)
+                                            (fpis-refused "invalid-pif-table")))))))))))))
+)
