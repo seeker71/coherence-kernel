@@ -1,0 +1,102 @@
+; wav-emit.fk — the body writes its own sound. Samples to a playable file.
+;
+; PROOF LEVEL: FKWU-STAGED. This is stated first because it is a real boundary
+; and not a caveat. core.fk measured it on 2026-07-26: byte_to_str is the exact
+; dual on fkwu and returns ONE byte for every n in 0..255, while go, rust and
+; ts UTF-8 inflate every byte above 127 into two. Those three have their own
+; byte-exact door, write_file_bytes, which on fkwu is unbound and recovers to
+; `nothing` — writing no file and saying nothing about it. core.fk's own
+; sentence: "No door is open on all four."
+;
+; So a byte-exact writer is arm-shaped today. This one is fkwu's. Running it on
+; another arm would produce a file that looks written and plays as noise, which
+; is why the level is declared at the top rather than discovered by ear.
+;
+; WHAT THIS COMPLETES. voice-synth.fk already turns pitch and amplitude into
+; real samples — additive synthesis with an inline range-reduced Taylor sine,
+; four-way, no trig native anywhere. wav-sense.fk already reads a 16-bit PCM
+; WAV and computes its envelope in Form. The body could make a waveform and
+; could hear one. It could not put one on disk. That was the whole gap between
+; a signal and a voice.
+;
+; NOTHING IS NOT SILENCE. An empty sample list is a valid WAV of zero frames —
+; a file that exists and says nothing. That is present-0. A path that could not
+; be written answers nothing. A reader must be able to tell a body that spoke
+; silence from a body that did not speak.
+;
+; JOINING IS HALVED, NOT ACCUMULATED. One second at 8 kHz is 16,000 bytes; a
+; left-fold of str_concat copies the whole prefix each time and is quadratic.
+; The join splits the list instead, the same shape core.fk's substring uses.
+;
+; preludes: form-stdlib/core.fk form-stdlib/voice-synth.fk
+;
+; Proven by: form-stdlib/tests/wav-emit-band.fk
+
+(do
+    ; ── little-endian byte strings ─────────────────────────────────────────
+    (defn we-b (n) (byte_to_str (mod n 256)))
+    (defn we-u16le (n) (str_concat (we-b n) (we-b (div n 256))))
+    (defn we-u32le (n)
+        (str_concat (we-u16le (mod n 65536)) (we-u16le (div n 65536))))
+
+    ; two's complement: a negative sample is its unsigned partner
+    (defn we-s16le (n) (we-u16le (if (lt n 0) (add n 65536) n)))
+
+    ; ── a float sample in -1..1 becomes a signed 16-bit frame ──────────────
+    (defn we-clamp (n)
+        (if (gt n 32767) 32767 (if (lt n -32767) -32767 n)))
+    (defn we-frame (f) (we-s16le (we-clamp (round (mul f 32767.0)))))
+
+    ; ── halving join: O(n log n), never a quadratic prefix copy ────────────
+    (defn we-take (xs k)
+        (if (le k 0) (list)
+            (if (eq (len xs) 0) (list)
+                (cons (head xs) (we-take (tail xs) (sub k 1))))))
+    (defn we-drop (xs k)
+        (if (le k 0) xs
+            (if (eq (len xs) 0) (list) (we-drop (tail xs) (sub k 1)))))
+    (defn we-join (xs)
+        (if (eq (len xs) 0) ""
+            (if (eq (len xs) 1) (head xs)
+                (do (let m (div (len xs) 2))
+                    (str_concat (we-join (we-take xs m))
+                                (we-join (we-drop xs m)))))))
+
+    (defn we-frames (samples)
+        (if (eq (len samples) 0) (list)
+            (cons (we-frame (head samples)) (we-frames (tail samples)))))
+
+    ; ── the 44-byte RIFF header ────────────────────────────────────────────
+    (defn we-bits () 16)
+    (defn we-channels () 1)
+    (defn we-block-align () (mul (we-channels) 2))
+    (defn we-header-bytes () 44)
+
+    ; Flat, over the join that already exists. The first draft nested eleven
+    ; str_concats and closed one paren too many — a header is a LIST of fields,
+    ; and writing it as one says so.
+    (defn we-header (sr n)
+        (do (let data (mul n (we-block-align)))
+            (we-join (list
+                "RIFF" (we-u32le (add 36 data)) "WAVEfmt "
+                (we-u32le 16) (we-u16le 1) (we-u16le (we-channels))
+                (we-u32le sr) (we-u32le (mul sr (we-block-align)))
+                (we-u16le (we-block-align)) (we-u16le (we-bits))
+                "data" (we-u32le data)))))
+
+    ; ── the file ───────────────────────────────────────────────────────────
+    (defn we-wav (samples sr)
+        (str_concat (we-header sr (len samples)) (we-join (we-frames samples))))
+    (defn we-size (n) (add (we-header-bytes) (mul n (we-block-align))))
+
+    ; A path that could not be written answers nothing; a written file answers
+    ; the byte count it actually placed. Zero frames is a real, silent file.
+    (defn we-write (path samples sr)
+        (do (let s (we-wav samples sr))
+            (let w (write_file path s))
+            (if (lt w 0) (nothing) w)))
+
+    ; ── a tone, for anything that wants to hear the body ───────────────────
+    (defn we-tone (freq sr n) (vs-frame 1.0 freq sr n))
+
+    0)
