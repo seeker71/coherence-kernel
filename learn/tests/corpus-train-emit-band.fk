@@ -1,0 +1,119 @@
+; corpus-train-emit-band.fk — the corpus becomes a training file, and the file
+; is well-formed, split without leakage, and made of single words.
+;
+; NO MODEL AND NO TRAINING. This writes two files into the host temp directory,
+; reads them back, and removes them. What it proves is that the artifact a
+; training run would eat is the artifact this body meant to hand it.
+;
+; BIT 64 IS THE ONE THAT MATTERS FOR LEARNING. Every assistant target is a
+; SINGLE WORD. The June adapter's targets had a median of 44 words and 0.5% were
+; eight words or fewer; the sealed audit asks for one. This file is the first
+; training data the body has produced in the shape it is scored on.
+;
+; Verdict 2047 (11 bits):
+;   1     both files are written and both carry bytes
+;   2     every corpus row lands in exactly one split, none lost, none doubled
+;   4     the split is deterministic: two renderings are byte-identical
+;   8     no row appears in both splits — the held-out set is truly held out
+;   16    every emitted line parses as one message pair by its own markers
+;   32    the questions are the corpus's own, ending in a question mark
+;   64    every assistant target is exactly one word
+;   128   a target containing a quote or backslash would be escaped, so the
+;         wire format survives content it did not choose
+;   256   valid is roughly a seventh, and neither split is empty
+;   512   the emitted line count equals the counted rows, so the counter and
+;         the renderer cannot drift apart
+;   1024  the fixtures are removed again
+;
+; preludes: learn/corpus-train-emit.fk
+
+(do
+    (defn cteb-bit (ok bit) (if ok bit 0))
+
+    (defn cteb-count-from (text needle at)
+        (do (let f (str_find text needle at))
+            (if (lt f 0) 0
+                (add 1 (cteb-count-from text needle (add f (str_len needle)))))))
+    (defn cteb-count (text needle) (cteb-count-from text needle 0))
+
+    ; a line's assistant content, read back out of the wire format
+    (defn cteb-target-at (text at)
+        (do (let m "\"role\":\"assistant\",\"content\":\"")
+            (let s (str_find text m at))
+            (if (lt s 0) ""
+                (do (let b (add s (str_len m)))
+                    (let e (str_find text "\"}]}" b))
+                    (if (lt e 0) "" (substring text b e))))))
+
+    (defn cteb-words (s)
+        (if (eq (str_len s) 0) 0
+            (add 1 (cteb-count s " "))))
+
+    ; every assistant target in the text is one word
+    (defn cteb-all-single-go (text at n)
+        (do (let m "\"role\":\"assistant\",\"content\":\"")
+            (let s (str_find text m at))
+            (if (lt s 0) n
+                (do (let t (cteb-target-at text at))
+                    (if (not (eq (cteb-words t) 1)) 0
+                        (cteb-all-single-go text (add s (str_len m)) (add n 1)))))))
+    (defn cteb-all-single (text) (cteb-all-single-go text 0 0))
+
+    ; is any of a split's targets present in the other split?
+    (defn cteb-overlap-go (a b at found)
+        (do (let m "\"role\":\"assistant\",\"content\":\"")
+            (let s (str_find a m at))
+            (if (lt s 0) found
+                (do (let t (cteb-target-at a at))
+                    (cteb-overlap-go a b (add s (str_len m))
+                        (if (ge (str_find b (str_concat "\"content\":\""
+                                    (str_concat t "\"}]}")) 0) 0)
+                            (add found 1) found))))))
+    (defn cteb-overlap (a b) (cteb-overlap-go a b 0 0))
+
+    (defn corpus-train-emit-band ()
+        (do
+            (let dir (temp_dir))
+            (let e (cte-emit dir))
+            (let tp (str_concat dir "/train.jsonl"))
+            (let vp (str_concat dir "/valid.jsonl"))
+            (let t (read_file tp))
+            (let v (read_file vp))
+            (let t2 (cte-train-text))
+            (let rows (len (hdc-rows)))
+            (let tn (cteb-count t "{\"messages\":"))
+            (let vn (cteb-count v "{\"messages\":"))
+            (let ct (fs_remove tp))
+            (let cv (fs_remove vp))
+
+            (sum (list
+                (cteb-bit (and (gt (cte-emit-train-bytes e) 0)
+                               (gt (cte-emit-valid-bytes e) 0)) 1)
+
+                (cteb-bit (eq (add tn vn) rows) 2)
+
+                (cteb-bit (str_eq t t2) 4)
+
+                (cteb-bit (eq (cteb-overlap v t) 0) 8)
+
+                (cteb-bit (and (eq (cteb-count t "\"role\":\"user\"") tn)
+                               (eq (cteb-count t "\"role\":\"assistant\"") tn)) 16)
+
+                (cteb-bit (eq (cteb-count t "?\"}") tn) 32)
+
+                (cteb-bit (eq (cteb-all-single t) tn) 64)
+
+                (cteb-bit (and (str_eq (cte-esc "a\"b") "a\\\"b")
+                          (and (str_eq (cte-esc "c\\d") "c\\\\d")
+                               (str_eq (cte-esc "e\nf") "e\\nf"))) 128)
+
+                (cteb-bit (and (gt vn 0)
+                          (and (gt tn vn)
+                               (eq vn (cte-valid-count)))) 256)
+
+                (cteb-bit (and (eq tn (cte-train-count))
+                               (eq (add (cte-train-count) (cte-valid-count)) rows)) 512)
+
+                (cteb-bit (and (eq ct 0) (eq cv 0)) 1024)))))
+
+    (corpus-train-emit-band))
