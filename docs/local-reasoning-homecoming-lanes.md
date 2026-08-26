@@ -135,8 +135,9 @@ receives one withheld classification error, derives rank-1 `B·(A·x)` from
 that error through `lora-modality.fk`, and re-observes both the error surface
 and one untouched sealed surface. Freshly, baseline predicts class 0 for both;
 the update moves both to expected class 1, while a separate executable behavior
-door preserves `nothing`, present `0`, and present `1`. Its band is 4095.
-This is transferable learning in the local Form feature classifier; it is not
+door distinguishes `nothing`, present `0`, and present `1`. Its band is 4095.
+This is sealed-surface transfer in the local Form feature classifier; the
+behavior door is a separate execution distinction. It is not
 yet a Qwen tensor update, and `fqt-lora?` remains 0.
 
 ## Current seam: one resident source-hit answer, full denominator still owed
