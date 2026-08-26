@@ -1,0 +1,126 @@
+; form-cli-bml-flow-control.fk -- adaptive outer control for a live BML stream.
+;
+; Prediction fuel bounds one model movement, but it does not bound an outer
+; caller that keeps granting another movement. This cell observes the current
+; attempt IDs and asks for evidence when a multi-token suffix motif has repeated
+; three times. The motif width is discovered from the live attempt; there is no
+; global turn target, cursor byte ceiling, or elapsed-time promise.
+;
+; A detected cycle is surprise, not failure. It produces framebuffer action 4
+; (request-evidence) and an exact timeout/hold result. Session, pending token,
+; prefix, cursor, attempt IDs, semantic nothing/0/1, choice/cut/undo/failure and
+; refinement counts are preserved. A correlated controller may later resume,
+; branch, revise, dissolve, or abstain from that checkpoint.
+;
+; One-token punctuation runs are deliberately not called cycles. The evidence
+; floor is a four-ID motif repeated three times; these are local pattern
+; requirements, not a fixed lifetime or completion denominator.
+;
+; preludes: form-stdlib/form-cli-bml-prefix-session.fk
+; Proven by: form-stdlib/tests/form-cli-bml-flow-control-band.fk
+
+(do
+    (defn fcbfc-version () "form-cli-bml-flow-control-v1")
+    (defn fcbfc-min-motif-width () 4)
+    (defn fcbfc-evidence-repetitions () 3)
+
+    ; signal = tag status reason action period repetitions observed-ids
+    (defn fcbfc-signal
+        (status reason action period repetitions observed-ids)
+        (list (fcbfc-version) status reason action period repetitions
+            observed-ids))
+    (defn fcbfc-status (s) (nth s 1))
+    (defn fcbfc-reason (s) (nth s 2))
+    (defn fcbfc-action (s) (nth s 3))
+    (defn fcbfc-period (s) (nth s 4))
+    (defn fcbfc-repetitions (s) (nth s 5))
+    (defn fcbfc-observed-ids (s) (nth s 6))
+    (defn fcbfc-surprise? (s)
+        (if (str_eq (fcbfc-status s) "surprise") 1 0))
+
+    (defn fcbfc-block-eq? (ids a b left)
+        (if (le left 0) 1
+            (if (eq (nth ids a) (nth ids b))
+                (fcbfc-block-eq? ids (add a 1) (add b 1) (sub left 1))
+                0)))
+    (defn fcbfc-repeated-blocks? (ids period repetitions index)
+        (if (ge index repetitions) 1
+            (do
+                (let n (len ids))
+                (let last-start (sub n period))
+                (let other-start (sub last-start (mul index period)))
+                (if (lt other-start 0) 0
+                    (if (eq (fcbfc-block-eq? ids last-start other-start
+                                period) 1)
+                        (fcbfc-repeated-blocks? ids period repetitions
+                            (add index 1))
+                        0)))))
+    (defn fcbfc-range-has-different? (ids index end first-id)
+        (if (ge index end) 0
+            (if (eq (nth ids index) first-id)
+                (fcbfc-range-has-different? ids (add index 1) end first-id)
+                1)))
+    (defn fcbfc-motif-varied? (ids period)
+        (do
+            (let end (len ids))
+            (let start (sub end period))
+            (fcbfc-range-has-different? ids (add start 1) end
+                (nth ids start))))
+    (defn fcbfc-period-search (ids period largest repetitions)
+        (if (gt period largest) 0
+            (if (and
+                    (eq (fcbfc-motif-varied? ids period) 1)
+                    (eq (fcbfc-repeated-blocks? ids period repetitions 1) 1))
+                period
+                (fcbfc-period-search ids (add period 1) largest repetitions))))
+    (defn fcbfc-discovered-period (ids)
+        (do
+            (let repetitions (fcbfc-evidence-repetitions))
+            (let largest (div (len ids) repetitions))
+            (if (lt largest (fcbfc-min-motif-width)) 0
+                (fcbfc-period-search ids (fcbfc-min-motif-width) largest
+                    repetitions))))
+
+    (defn fcbfc-observe-ids (ids)
+        (do
+            (let period (fcbfc-discovered-period ids))
+            (if (gt period 0)
+                (fcbfc-signal "surprise" "periodic-suffix-evidence" 4 period
+                    (fcbfc-evidence-repetitions) (len ids))
+                (fcbfc-signal "continue" "novel-or-insufficient-evidence" 0 0
+                    0 (len ids)))))
+    (defn fcbfc-observe (result)
+        (fcbfc-observe-ids (fcbps-attempt-ids result)))
+
+    ; Live framebuffer action derived entirely from the held result. Surprise
+    ; asks for evidence before the ordinary retry/expand path can spend another
+    ; prediction pulse.
+    (defn fcbfc-control-action (result)
+        (do
+            (let signal (fcbfc-observe result))
+            (if (eq (fcbfc-surprise? signal) 1) 4
+                (if (or (eq (fcbps-retryable? result) 1)
+                        (or (eq (fcbps-expandable? result) 1)
+                            (eq (fcbps-capacity-expandable? result) 1))) 0
+                    (if (str_eq (fcbps-status result) "complete") 0
+                        (if (str_eq (fcbps-status result) "nothing") 7 3))))))
+
+    ; No model token is committed and no observation is injected. This is the
+    ; outer timeout that one-token prediction fuel cannot express by itself.
+    (defn fcbfc-timeout-hold (result signal)
+        (if (eq (fcbfc-surprise? signal) 0) result
+            (do
+                (let session (fcbps-session result))
+                (let reason (fcbfc-reason signal))
+                (fcbps-result "timeout" reason session
+                    (fcbps-prefix result) (fcbps-attempt-ids result)
+                    (fcbps-offers result) (fcbps-cuts result)
+                    (fcbps-undos result) (add (fcbps-timeouts result) 1)
+                    (fcbps-failures result) (fcbps-refinements result)
+                    (fcbps-releases result) (fcbps-semantic-kind result)
+                    (append (fcbps-events result) (list
+                        (fcbps-event "timeout" reason (fcms-pending session)
+                            (str_len (fcbps-prefix result)))))
+                    (fcbps-cursor result)))))
+
+    0)
