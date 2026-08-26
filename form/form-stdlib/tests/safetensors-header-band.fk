@@ -1,0 +1,125 @@
+; safetensors-header-band.fk — the tensor index parses, and the observation
+; has three states.
+;
+; THE BIT THAT ANSWERS A STANDING QUESTION IS 1024. Two mints landed today
+; reporting `lora-writer=0`, and that field is declared `field LoraWriter = 0;`
+; with the band asserting eq(LoraWriter(), 0). It asserts a constant equals
+; itself. It cannot become 1 when an adapter loads, because nothing writes it.
+; The prose around it was honest — "LoRA waits on lift" — but the NUMBER was
+; not evidence for the prose.
+;
+; sfh-lora-present? is the same question asked so the world can answer it. It
+; reads a real path and returns nothing when there is nothing to look at, 0
+; when a real file carries no low-rank pair, and 1 when it does. Bit 1024
+; drives all three against real files on this host.
+;
+; THE HERMETIC BITS BUILD THEIR OWN SAFETENSORS. Bits 1 through 256 parse a
+; header this band constructs, so the proof needs no file and no model. Bit
+; 2048 reads a real 27MB adapter and is allowed to answer nothing — an adapter
+; that has been moved is not a failing adapter, and a band that turns red when
+; a file is elsewhere is asserting the filesystem, not the parser.
+;
+; Verdict 4095 (12 bits):
+;   1     the eight-byte little-endian prefix decodes
+;   2     data-start is the prefix plus the declared header
+;   4     the header substring is exactly the declared length
+;   8     a tensor's data_offsets pair parses in order
+;   16    bind offset is absolute: data-start plus the tensor's own start
+;   32    bind bytes is end minus start, and matches the declared shape
+;   64    a name absent from the index reads NOTHING, not offset zero
+;   128   the trailing shape dimension parses — the rank
+;   256   a second tensor in the same header parses independently
+;   512   a file that is not safetensors-shaped is not well-formed, and is
+;         never substringed past its end
+;   1024  the three states, against real paths on this host
+;   2048  the live adapter reads 1, or nothing if it has moved — never 0
+;   4096  the header-passed-as-file confusion is DETECTABLE: a header
+;         substring is not well-formed as a file, and a header length that
+;         disagrees with a data start does not cohere
+;
+; BIT 4096 EXISTS BECAUSE THE BAND WAS GREEN WHILE THE REPORTER LIED. A
+; sibling ran observe/lora-index-run.fk after this landed at 4095 and found it
+; printing header bytes -2201022797451419013 beside a correct data start of
+; 24136 — it had passed the JSON header substring to sfh-header-len, which
+; takes the FILE. Nothing in the argument name says which. The parser was
+; never wrong; no hermetic bit ran the reporter, so no hermetic bit could see
+; it. A proof that covers only the pure surface leaves the effectful one
+; unwitnessed, and that is where a reader actually looks.
+;
+; preludes: form-stdlib/safetensors-header.fk
+
+(do
+    (defn sfhb-bit (ok bit) (if ok bit 0))
+
+    ; ── a safetensors file this band builds itself ─────────────────────────
+    (defn sfhb-b8 (n)
+        (str_concat (byte_to_str (mod n 256))
+        (str_concat (byte_to_str (mod (div n 256) 256))
+        (str_concat (byte_to_str (mod (div n 65536) 256))
+        (str_concat (byte_to_str 0)
+        (str_concat (byte_to_str 0)
+        (str_concat (byte_to_str 0)
+        (str_concat (byte_to_str 0) (byte_to_str 0)))))))))
+
+    (defn sfhb-json ()
+        (str_concat
+            "{\"model.layers.12.mlp.down_proj.lora_a\":{\"dtype\":\"F32\",\"shape\":[8192,8],\"data_offsets\":[25591808,25853952]},"
+            "\"model.layers.12.mlp.down_proj.lora_b\":{\"dtype\":\"F32\",\"shape\":[8,3072],\"data_offsets\":[26148864,26247168]}}"))
+
+    (defn sfhb-file ()
+        (do (let j (sfhb-json))
+            (str_concat (sfhb-b8 (str_len j)) j)))
+
+    (defn sfhb-a () "model.layers.12.mlp.down_proj.lora_a")
+    (defn sfhb-b () "model.layers.12.mlp.down_proj.lora_b")
+
+    (defn sfhb-live ()
+        "/Users/ursmuff/.coherence-network/form-train-runs/bml-exec-adapter-20260826-0330-v2/adapters.safetensors")
+    (defn sfhb-not-lora () "form/form-stdlib/core.fk")
+    (defn sfhb-absent () "form/form-stdlib/no-such-file-at-all.safetensors")
+
+    (defn safetensors-header-band ()
+        (do
+            (let s (sfhb-file))
+            (let h (sfh-header s))
+            (let jl (str_len (sfhb-json)))
+            (let da (sfh-dataoff h (sfhb-a)))
+            (let ba (sfh-bind s h (sfhb-a)))
+            (let bb (sfh-bind s h (sfhb-b)))
+            (let live (sfh-lora-present? (sfhb-live)))
+
+            (sum (list
+                (sfhb-bit (eq (sfh-header-len s) jl) 1)
+                (sfhb-bit (eq (sfh-data-start s) (add 8 jl)) 2)
+                (sfhb-bit (eq (str_len h) jl) 4)
+                (sfhb-bit (and (eq (nth da 0) 25591808)
+                               (eq (nth da 1) 25853952)) 8)
+                (sfhb-bit (eq (sfh-bind-offset ba)
+                              (add (add 8 jl) 25591808)) 16)
+                ; 8192 * 8 * 4 bytes of F32 = 262144 = the declared window
+                (sfhb-bit (and (eq (sfh-bind-bytes ba) 262144)
+                               (eq (sfh-bind-bytes ba) (mul (mul 8192 8) 4))) 32)
+                (sfhb-bit (and (nothing? (sfh-dataoff h "model.layers.99.absent"))
+                               (nothing? (sfh-bind s h "model.layers.99.absent"))) 64)
+                (sfhb-bit (eq (sfh-shape-second h (sfhb-a)) 8) 128)
+                (sfhb-bit (and (eq (sfh-bind-bytes bb) 98304)
+                               (eq (sfh-bind-bytes bb) (mul (mul 8 3072) 4))) 256)
+                (sfhb-bit (and (eq (sfh-well-formed? s) 1)
+                               (eq (sfh-well-formed? (read_file (sfhb-not-lora))) 0)) 512)
+
+                ; the three states, against this host
+                (sfhb-bit (and (nothing? (sfh-lora-present? (sfhb-absent)))
+                          (and (eq (sfh-lora-present? (sfhb-not-lora)) 0)
+                               (eq (sfh-lora-present-in? h) 1))) 1024)
+
+                ; a moved adapter is not a failing adapter — but it is never 0
+                (sfhb-bit (if (nothing? live) 1 (eq live 1)) 2048)
+
+                ; the confusion that made a green band print a lie
+                (sfhb-bit (and (eq (sfh-well-formed? h) 0)
+                          (and (eq (sfh-reading-coherent? s (sfh-header-len s)
+                                                            (sfh-data-start s)) 1)
+                               (eq (sfh-reading-coherent? s (sfh-header-len h)
+                                                            (sfh-data-start s)) 0))) 4096)))))
+
+    (safetensors-header-band))
