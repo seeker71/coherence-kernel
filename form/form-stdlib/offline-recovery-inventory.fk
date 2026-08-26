@@ -1,0 +1,116 @@
+; offline-recovery-inventory.fk -- adaptive evidence for offline restoration.
+;
+; This cell owns no permanent checklist.  A live caller supplies the rows it can
+; observe now and the rehearsal steps available now.  `nothing`, 0, and 1 stay
+; distinct: unobserved, observed gap, and observed healthy.  The denominator is
+; the number of valid rows whose state was actually observed; unknown and
+; malformed rows cannot quietly improve or worsen the health fraction.
+;
+; Evidence row = [offline-recovery-evidence-v1,area,identity,state,stamp,
+;                 evidence,actual,restore-step]
+; Rehearsal step = [offline-recovery-step-v1,order,identity,action,verify]
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn ori-row (area identity state stamp evidence actual restore-step)
+        (list "offline-recovery-evidence-v1" area identity state stamp
+            evidence actual restore-step))
+
+    (defn ori-row-area (row) (nth row 1))
+    (defn ori-row-identity (row) (nth row 2))
+    (defn ori-row-state (row) (nth row 3))
+    (defn ori-row-stamp (row) (nth row 4))
+    (defn ori-row-evidence (row) (nth row 5))
+    (defn ori-row-actual (row) (nth row 6))
+    (defn ori-row-restore (row) (nth row 7))
+
+    (defn ori-state-valid? (state)
+        (if (nothing? state) 1
+            (if (or (eq state 0) (eq state 1)) 1 0)))
+
+    ; Shape is staged before any nested access.  The fourth arm has no general
+    ; value-kind witness, so identity/source text is admitted by presence here;
+    ; consumers may impose a narrower vocabulary without changing this organ.
+    (defn ori-row-valid? (row)
+        (if (not (eq (len row) 8)) 0
+            (if (not (str_eq (nth row 0) "offline-recovery-evidence-v1")) 0
+                (if (or (nothing? (ori-row-area row))
+                        (nothing? (ori-row-identity row))) 0
+                    (if (eq (ori-state-valid? (ori-row-state row)) 0) 0
+                        (if (le (ori-row-stamp row) 0) 0
+                            (if (or (nothing? (ori-row-evidence row))
+                                    (nothing? (ori-row-restore row))) 0 1)))))))
+
+    (defn ori-step (order identity action verify)
+        (list "offline-recovery-step-v1" order identity action verify))
+
+    (defn ori-step-valid? (step)
+        (if (not (eq (len step) 5)) 0
+            (if (not (str_eq (nth step 0) "offline-recovery-step-v1")) 0
+                (if (le (nth step 1) 0) 0
+                    (if (or (nothing? (nth step 2))
+                            (or (nothing? (nth step 3))
+                                (nothing? (nth step 4)))) 0 1)))))
+
+    ; [valid,observed,healthy,gap,unknown,invalid]
+    (defn ori-count-loop (rows valid observed healthy gap unknown invalid)
+        (if (nil? rows) (list valid observed healthy gap unknown invalid)
+            (do
+                (let row (head rows))
+                (if (eq (ori-row-valid? row) 0)
+                    (ori-count-loop (tail rows) valid observed healthy gap unknown
+                        (add invalid 1))
+                    (if (nothing? (ori-row-state row))
+                        (ori-count-loop (tail rows) (add valid 1) observed healthy gap
+                            (add unknown 1) invalid)
+                        (if (eq (ori-row-state row) 1)
+                            (ori-count-loop (tail rows) (add valid 1) (add observed 1)
+                                (add healthy 1) gap unknown invalid)
+                            (ori-count-loop (tail rows) (add valid 1) (add observed 1)
+                                healthy (add gap 1) unknown invalid)))))))
+
+    (defn ori-count (rows) (ori-count-loop rows 0 0 0 0 0 0))
+
+    (defn ori-first-gap (rows)
+        (if (nil? rows) (nothing)
+            (if (and (eq (ori-row-valid? (head rows)) 1)
+                     (and (not (nothing? (ori-row-state (head rows))))
+                          (eq (ori-row-state (head rows)) 0)))
+                (ori-row-identity (head rows))
+                (ori-first-gap (tail rows)))))
+
+    ; [valid,invalid]
+    (defn ori-step-count-loop (steps valid invalid)
+        (if (nil? steps) (list valid invalid)
+            (if (eq (ori-step-valid? (head steps)) 1)
+                (ori-step-count-loop (tail steps) (add valid 1) invalid)
+                (ori-step-count-loop (tail steps) valid (add invalid 1)))))
+
+    (defn ori-step-count (steps) (ori-step-count-loop steps 0 0))
+
+    ; [tag,stamp,valid,observed-denominator,healthy,gap,unknown,invalid,
+    ;  health-permille-or-nothing,first-gap,valid-steps,invalid-steps,rows,steps]
+    (defn ori-report (stamp rows steps)
+        (do
+            (let counts (ori-count rows))
+            (let observed (nth counts 1))
+            (let step-counts (ori-step-count steps))
+            (list "offline-recovery-inventory-v1" stamp
+                (nth counts 0) observed (nth counts 2) (nth counts 3)
+                (nth counts 4) (nth counts 5)
+                (if (eq observed 0) (nothing)
+                    (div (mul (nth counts 2) 1000) observed))
+                (ori-first-gap rows)
+                (nth step-counts 0) (nth step-counts 1) rows steps)))
+
+    (defn ori-valid-count (report) (nth report 2))
+    (defn ori-observed-denominator (report) (nth report 3))
+    (defn ori-healthy-count (report) (nth report 4))
+    (defn ori-gap-count (report) (nth report 5))
+    (defn ori-unknown-count (report) (nth report 6))
+    (defn ori-invalid-count (report) (nth report 7))
+    (defn ori-health-permille (report) (nth report 8))
+    (defn ori-first-gap-identity (report) (nth report 9))
+    (defn ori-valid-step-count (report) (nth report 10))
+    (defn ori-invalid-step-count (report) (nth report 11))
+    0)

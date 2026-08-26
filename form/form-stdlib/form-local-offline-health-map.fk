@@ -1,0 +1,134 @@
+; form-local-offline-health-map.fk -- adaptive offline-health observation.
+;
+; This cell does not install a permanent checklist.  Each pulse supplies the
+; organs it can currently observe.  `nothing`, 0, and 1 retain their distinct
+; meanings: unobserved, observed gap, and observed healthy.  The map computes
+; its denominator from those rows and returns the most leveraged observed gap
+; as an action token that a caller may actually route and then re-observe.
+;
+; Organ = [identity,state,impact,leverage,freshness,source,action-token,detail]
+; state: nothing=not observed, 0=observed gap, 1=observed healthy
+; impact/leverage: local pulse ordering signals, each 1..5
+; freshness: caller-supplied observation stamp; it is not eternal truth
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn flohm-organ (identity state impact leverage freshness source action-token detail)
+        (list identity state impact leverage freshness source action-token detail))
+
+    (defn flohm-identity (row) (nth row 0))
+    (defn flohm-state (row) (nth row 1))
+    (defn flohm-impact (row) (nth row 2))
+    (defn flohm-leverage (row) (nth row 3))
+    (defn flohm-freshness (row) (nth row 4))
+    (defn flohm-source (row) (nth row 5))
+    (defn flohm-action-token (row) (nth row 6))
+    (defn flohm-detail (row) (nth row 7))
+
+    (defn flohm-state-valid? (state)
+        (if (nothing? state) 1
+            (if (or (eq state 0) (eq state 1)) 1 0)))
+
+    (defn flohm-row-valid? (row)
+        (if (not (eq (len row) 8)) 0
+            (if (nothing? (flohm-identity row)) 0
+                (if (eq (flohm-state-valid? (flohm-state row)) 0) 0
+                    (if (or (lt (flohm-impact row) 1) (gt (flohm-impact row) 5)) 0
+                        (if (or (lt (flohm-leverage row) 1) (gt (flohm-leverage row) 5)) 0
+                            (if (le (flohm-freshness row) 0) 0
+                                (if (nothing? (flohm-action-token row)) 0 1))))))))
+
+    ; [valid,ready,gap,unknown,invalid]
+    (defn flohm-count-loop (rows valid ready gap unknown invalid)
+        (if (nil? rows) (list valid ready gap unknown invalid)
+            (do
+                (let row (head rows))
+                (if (eq (flohm-row-valid? row) 0)
+                    (flohm-count-loop (tail rows) valid ready gap unknown (add invalid 1))
+                    (if (nothing? (flohm-state row))
+                        (flohm-count-loop (tail rows) (add valid 1) ready gap (add unknown 1) invalid)
+                        (if (eq (flohm-state row) 1)
+                            (flohm-count-loop (tail rows) (add valid 1) (add ready 1) gap unknown invalid)
+                            (flohm-count-loop (tail rows) (add valid 1) ready (add gap 1) unknown invalid)))))))
+
+    (defn flohm-count (rows) (flohm-count-loop rows 0 0 0 0 0))
+    (defn flohm-gap-score (row) (mul (flohm-impact row) (flohm-leverage row)))
+
+    (defn flohm-best-gap-loop (rows best best-score)
+        (if (nil? rows) best
+            (do
+                (let row (head rows))
+                (if (and (eq (flohm-row-valid? row) 1)
+                         (and (not (nothing? (flohm-state row)))
+                              (eq (flohm-state row) 0)))
+                    (if (gt (flohm-gap-score row) best-score)
+                        (flohm-best-gap-loop (tail rows) row (flohm-gap-score row))
+                        (flohm-best-gap-loop (tail rows) best best-score))
+                    (flohm-best-gap-loop (tail rows) best best-score)))))
+
+    (defn flohm-best-gap (rows) (flohm-best-gap-loop rows (nothing) -1))
+
+    ; Preserve the first maximum for existing actuators, while also exposing
+    ; every equal maximum. Source order is not causal evidence.
+    (defn flohm-best-gaps-loop (rows score acc)
+        (if (nil? rows) (reverse acc)
+            (do
+                (let row (head rows))
+                (if (and (eq (flohm-row-valid? row) 1)
+                         (and (not (nothing? (flohm-state row)))
+                              (and (eq (flohm-state row) 0)
+                                   (eq (flohm-gap-score row) score))))
+                    (flohm-best-gaps-loop (tail rows) score (cons row acc))
+                    (flohm-best-gaps-loop (tail rows) score acc)))))
+
+    (defn flohm-best-gaps (rows)
+        (do
+            (let best (flohm-best-gap rows))
+            (if (nothing? best) (empty)
+                (flohm-best-gaps-loop rows (flohm-gap-score best) (empty)))))
+
+    (defn flohm-identities-loop (rows acc)
+        (if (nil? rows) (reverse acc)
+            (flohm-identities-loop (tail rows)
+                (cons (flohm-identity (head rows)) acc))))
+
+    (defn flohm-identities (rows) (flohm-identities-loop rows (empty)))
+
+    (defn flohm-first-unknown (rows)
+        (if (nil? rows) (nothing)
+            (if (and (eq (flohm-row-valid? (head rows)) 1)
+                     (nothing? (flohm-state (head rows))))
+                (head rows)
+                (flohm-first-unknown (tail rows)))))
+
+    ; [stamp,valid,ready,gap,unknown,invalid,health-permille,
+    ;  priority-identity,priority-action,next-unknown-identity,rows,
+    ;  tied-priority-identities]
+    (defn flohm-map (stamp rows)
+        (do
+            (let counts (flohm-count rows))
+            (let valid (nth counts 0))
+            (let ready (nth counts 1))
+            (let priority (flohm-best-gap rows))
+            (let tied (flohm-best-gaps rows))
+            (let unknown (flohm-first-unknown rows))
+            (list stamp valid ready (nth counts 2) (nth counts 3) (nth counts 4)
+                (if (eq valid 0) 0 (div (mul ready 1000) valid))
+                (if (nothing? priority) (nothing) (flohm-identity priority))
+                (if (nothing? priority) (nothing) (flohm-action-token priority))
+                (if (nothing? unknown) (nothing) (flohm-identity unknown))
+                rows (flohm-identities tied))))
+
+    (defn flohm-valid-count (map) (nth map 1))
+    (defn flohm-ready-count (map) (nth map 2))
+    (defn flohm-gap-count (map) (nth map 3))
+    (defn flohm-unknown-count (map) (nth map 4))
+    (defn flohm-invalid-count (map) (nth map 5))
+    (defn flohm-health-permille (map) (nth map 6))
+    (defn flohm-priority-identity (map) (nth map 7))
+    (defn flohm-priority-action (map) (nth map 8))
+    (defn flohm-next-unknown (map) (nth map 9))
+    (defn flohm-priority-identities (map) (nth map 11))
+    (defn flohm-priority-tie-count (map)
+        (len (flohm-priority-identities map)))
+    0)

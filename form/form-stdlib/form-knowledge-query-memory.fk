@@ -1,0 +1,124 @@
+; form-knowledge-query-memory.fk -- reversible answer-free local RAG memory.
+;
+; A successful supervised query rehearsal may persist the query route that
+; worked without persisting its answer. The memory binds the query-offer
+; NodeID, current source identity, independent question hash, physical
+; evidence hash, score and releases. A source or question change makes select
+; return exact nothing. Promotion therefore improves operational recall but
+; never turns the already-seen question into heldout evidence.
+;
+; The rollback child is explicit. The first memory points to an answer-free
+; nothing alternative; a later memory may point to the previous memory NodeID.
+; No model weights are changed and no answer bytes enter this cell.
+;
+; preludes: form-stdlib/form-knowledge-axioms-public-curriculum.fk
+; Proven by: form-stdlib/tests/form-knowledge-query-memory-band.fk
+
+(do
+    (defn fkqm-scope () "supervised-answer-free-rag-memory-v1")
+    (defn fkqm-status () "active")
+    (defn fkqm-sha256? (value)
+        (if (and (eq (str_len value) 64) (eq (hex-valid? value) 1)) 1 0))
+
+    (defn fkqm-empty-rollback-node ()
+        (intern_node (make_nodeid 31 2 0 125)
+            (list
+                (intern_trivial_string
+                    "form-knowledge-query-memory-nothing-v1")
+                (intern_trivial_string "nothing"))))
+    (defn fkqm-node-key (node) (fkap-node-key node))
+
+    (defn fkqm-memory-shaped? (memory)
+        (if (or (nothing? memory) (not (eq (len memory) 19))) 0
+            (if (and (str_eq (nth memory 0)
+                              "form-knowledge-query-memory-v1")
+                (and (str_eq (nth memory 17) (fkqm-scope))
+                     (str_eq (nth memory 18) (fkqm-status)))) 1 0)))
+
+    (defn fkqm-rollback-node-for (previous)
+        (if (nothing? previous) (fkqm-empty-rollback-node)
+            (if (eq (fkqm-memory-shaped? previous) 1)
+                (nth previous 1) (nothing))))
+
+    (defn fkqm-node (offer evidence-sha promotion rollback-node)
+        (intern_node (make_nodeid 31 2 0 124)
+            (list
+                (intern_trivial_string "form-knowledge-query-memory-v1")
+                (nth offer 1)
+                (intern_trivial_string (nth offer 5))
+                (intern_trivial_string (nth offer 7))
+                (intern_trivial_string evidence-sha)
+                (intern_trivial_string (int_to_str promotion))
+                rollback-node
+                (intern_trivial_string (fkqm-scope)))))
+
+    ; memory = schema node node-key offer-key query path source-id anchor
+    ;          question-sha evidence-sha promotion state-release
+    ;          residence-release rollback-node rollback-key model-executed
+    ;          answer-stored scope status
+    (defn fkqm-promote
+        (offer question evidence-sha promotion state-release
+         residence-release previous)
+        (do
+            (let rollback-node (fkqm-rollback-node-for previous))
+            (if (or (eq (fkap-rag-query-offer-valid? offer question) 0)
+                (or (eq (fkqm-sha256? evidence-sha) 0)
+                (or (lt promotion 950000)
+                (or (gt promotion 1000000)
+                (or (not (eq state-release 1))
+                (or (not (eq residence-release 1))
+                    (nothing? rollback-node))))))) (nothing)
+                (do
+                    (let node (fkqm-node offer evidence-sha promotion
+                        rollback-node))
+                    (list "form-knowledge-query-memory-v1"
+                        node (fkqm-node-key node) (nth offer 2)
+                        (nth offer 3) (nth offer 4) (nth offer 5)
+                        (nth offer 6) (nth offer 7) evidence-sha promotion
+                        state-release residence-release rollback-node
+                        (fkqm-node-key rollback-node) 0 0
+                        (fkqm-scope) (fkqm-status))))))
+
+    (defn fkqm-memory-valid? (memory question)
+        (if (eq (fkqm-memory-shaped? memory) 0) 0
+            (do
+                (let offer (fkap-rag-query-offer
+                    (nth memory 5) (nth memory 7) question))
+                (if (nothing? offer) 0
+                    (do
+                        (let rebuilt-node (fkqm-node offer (nth memory 9)
+                            (nth memory 10) (nth memory 13)))
+                        (let checks (list
+                            (node_eq (nth memory 1) rebuilt-node)
+                            (str_eq (nth memory 2)
+                                (fkqm-node-key rebuilt-node))
+                            (str_eq (nth memory 3) (nth offer 2))
+                            (str_eq (nth memory 4) (nth offer 3))
+                            (str_eq (nth memory 5) (nth offer 4))
+                            (str_eq (nth memory 6) (nth offer 5))
+                            (str_eq (nth memory 7) (nth offer 6))
+                            (str_eq (nth memory 8) (nth offer 7))
+                            (if (eq (fkqm-sha256? (nth memory 9)) 1) 1 0)
+                            (if (and (ge (nth memory 10) 950000)
+                                     (le (nth memory 10) 1000000)) 1 0)
+                            (if (eq (nth memory 11) 1) 1 0)
+                            (if (eq (nth memory 12) 1) 1 0)
+                            (str_eq (nth memory 14)
+                                (fkqm-node-key (nth memory 13)))
+                            (if (eq (nth memory 15) 0) 1 0)
+                            (if (eq (nth memory 16) 0) 1 0)))
+                        (if (eq (sum checks) 15) 1 0))))))
+
+    ; Exact query bytes or exact nothing. A changed source is detected because
+    ; rebuilding the offer produces a different source-bound NodeID.
+    (defn fkqm-select (memory question)
+        (if (eq (fkqm-memory-valid? memory question) 1)
+            (nth memory 4) (nothing)))
+
+    ; Undo exposes the immutable predecessor identity. The initial memory's
+    ; predecessor is the explicit answer-free nothing alternative.
+    (defn fkqm-undo-node (memory)
+        (if (eq (fkqm-memory-shaped? memory) 1)
+            (nth memory 13) (nothing)))
+
+    0)

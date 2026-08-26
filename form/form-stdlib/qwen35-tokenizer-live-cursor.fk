@@ -1,0 +1,225 @@
+; qwen35-tokenizer-live-cursor.fk -- bounded exact BPE as a live token cursor.
+;
+; The ordinary Qwen tokenizer first materializes every candidate merge and then
+; every prompt id.  This organ reads the seal-keyed qtf2 row artifacts through
+; their BMF file cursors, holds no more than one pre-tokenized piece, and offers
+; one token at a time.  A consumer can therefore advance model state while the
+; prompt is still being transmuted instead of waiting for a tokenizer pre-step.
+;
+; Token ids 0 and 1 are ordinary present values.  End-of-stream and refusal
+; carry present=0 and value=nothing, so neither can be confused with a token.
+; Missing/stale qtf2 artifacts are explicit outcomes; they never become an
+; empty prompt and never authorize an implicit artifact build.
+;
+; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-tokfast-v2-live-reader.fk native/metal/qwen35-crystal.fk
+; Proven by: form-stdlib/tests/qwen35-tokenizer-live-cursor-band.fk
+
+(do
+    ; BPE result = status symbols merges probes reason.
+    (defn qtlc-bpe-result (status syms merges probes reason)
+        (list "qtlc-bpe" status syms merges probes reason))
+    (defn qtlc-bpe-status (r) (nth r 1))
+    (defn qtlc-bpe-syms (r) (nth r 2))
+    (defn qtlc-bpe-merges (r) (nth r 3))
+    (defn qtlc-bpe-probes (r) (nth r 4))
+    (defn qtlc-bpe-loop (index syms merges probes)
+        (if (lt (len syms) 2)
+            (qtlc-bpe-result "ok" syms merges probes "terminal")
+            (do
+                (let choice (qtf2r-best index syms 0 0 0 0 0))
+                (let next-probes (add probes (nth choice 4)))
+                (if (not (str_eq (nth choice 0) "ok"))
+                    (qtlc-bpe-result (nth choice 0)
+                        (empty) merges next-probes "merge-lookup-refused")
+                (if (eq (nth choice 3) 0)
+                    (qtlc-bpe-result "ok" syms merges next-probes "no-merge")
+                    (qtlc-bpe-loop index
+                        (tkz-apply syms (nth choice 1))
+                        (add merges 1) next-probes))))))
+    (defn qtlc-bpe (index syms)
+        (qtlc-bpe-loop index syms 0 0))
+
+    ; Symbol-id result = status ids probes reason.
+    (defn qtlc-ids-result (status ids probes reason)
+        (list "qtlc-ids" status ids probes reason))
+    (defn qtlc-ids-status (r) (nth r 1))
+    (defn qtlc-ids-values (r) (nth r 2))
+    (defn qtlc-ids-probes (r) (nth r 3))
+    (defn qtlc-symbol-ids (index syms acc probes)
+        (if (nil? syms) (qtlc-ids-result "ok" acc probes "exact")
+            (do
+                (let found (qtf2r-find index "vocab" (head syms) (empty)
+                    0 (nth index 3) 0))
+                (let next-probes (add probes (nth found 3)))
+                (if (not (eq (nth found 2) 1))
+                    (qtlc-ids-result (nth found 0) (empty)
+                        next-probes "vocab-lookup-refused")
+                    (qtlc-symbol-ids index (tail syms)
+                        (append acc (list (nth found 1)))
+                        next-probes)))))
+
+    ; A segment is either already-known ids or text still to transmute.
+    (defn qtlc-id-segment (ids) (list "ids" ids))
+    (defn qtlc-text-segment (text) (list "text" text))
+    (defn qtlc-segment-kind (s) (nth s 0))
+    (defn qtlc-segment-value (s) (nth s 1))
+
+    ; cursor = status index segments text text-pos pending token-count
+    ;          pieces merges probes reason released.
+    (defn qtlc-cursor (status index segments text text-pos pending token-count
+                       pieces merges probes reason released)
+        (list "qtlc-cursor" status index segments text text-pos pending
+              token-count pieces merges probes reason released))
+    (defn qtlc-status (c) (nth c 1))
+    (defn qtlc-index (c) (nth c 2))
+    (defn qtlc-segments (c) (nth c 3))
+    (defn qtlc-text (c) (nth c 4))
+    (defn qtlc-text-pos (c) (nth c 5))
+    (defn qtlc-pending (c) (nth c 6))
+    (defn qtlc-token-count (c) (nth c 7))
+    (defn qtlc-pieces (c) (nth c 8))
+    (defn qtlc-merges (c) (nth c 9))
+    (defn qtlc-probes (c) (nth c 10))
+    (defn qtlc-reason (c) (nth c 11))
+    (defn qtlc-released? (c) (nth c 12))
+    (defn qtlc-with (c status segments text text-pos pending token-count
+                     pieces merges probes reason released)
+        (qtlc-cursor status (qtlc-index c) segments text text-pos pending
+            token-count pieces merges probes reason released))
+    (defn qtlc-open-index (index segments)
+        (if (str_eq (nth index 0) "current")
+            (qtlc-cursor "open" index segments "" 0 (empty) 0 0 0 0
+                "streaming" 0)
+            (qtlc-cursor (nth index 0) index (empty) "" 0
+                (empty) 0 0 0 0 (nth index 1) 1)))
+    (defn qtlc-open (path live-seal segments)
+        (qtlc-open-index (qtf2r-open path live-seal) segments))
+
+    ; result = status value present next-cursor.  Presence, not numeric truth,
+    ; distinguishes token 0/1 from completion.
+    (defn qtlc-next-result (status value present cursor)
+        (list "qtlc-next" status value present cursor))
+    (defn qtlc-next-status (r) (nth r 1))
+    (defn qtlc-next-value (r) (nth r 2))
+    (defn qtlc-next-present? (r) (nth r 3))
+    (defn qtlc-next-cursor (r) (nth r 4))
+    (defn qtlc-token-result (c token pending)
+        (do
+            (let next (qtlc-with c "open" (qtlc-segments c)
+                (qtlc-text c) (qtlc-text-pos c) pending
+                (add (qtlc-token-count c) 1) (qtlc-pieces c)
+                (qtlc-merges c) (qtlc-probes c) "streaming" 0))
+            (qtlc-next-result "token" token 1 next)))
+    (defn qtlc-refuse-result (c status reason probes merges pieces)
+        (do
+            (let stopped (qtlc-with c status (empty) "" 0 (empty)
+                (qtlc-token-count c) pieces merges probes reason 1))
+            (qtlc-next-result status (nothing) 0 stopped)))
+    (defn qtlc-next (c)
+        (if (not (str_eq (qtlc-status c) "open"))
+            (qtlc-next-result (qtlc-status c) (nothing) 0 c)
+        (if (not (nil? (qtlc-pending c)))
+            (qtlc-token-result c (head (qtlc-pending c))
+                (tail (qtlc-pending c)))
+        (if (lt (qtlc-text-pos c) (str_len (qtlc-text c)))
+            (do
+                (let end (q35-next-piece (qtlc-text c)
+                    (str_len (qtlc-text c)) (qtlc-text-pos c)))
+                (let bpe (qtlc-bpe (qtlc-index c)
+                    (tkz-syms (qtlc-text c) (qtlc-text-pos c) end)))
+                (let merges (add (qtlc-merges c) (qtlc-bpe-merges bpe)))
+                (let probes (add (qtlc-probes c) (qtlc-bpe-probes bpe)))
+                (let pieces (add (qtlc-pieces c) 1))
+                (if (not (str_eq (qtlc-bpe-status bpe) "ok"))
+                    (qtlc-refuse-result c (qtlc-bpe-status bpe)
+                        "merge-lookup-refused" probes merges pieces)
+                    (do
+                        (let ids (qtlc-symbol-ids (qtlc-index c)
+                            (qtlc-bpe-syms bpe) (empty) 0))
+                        (let all-probes (add probes (qtlc-ids-probes ids)))
+                        (if (not (str_eq (qtlc-ids-status ids) "ok"))
+                            (qtlc-refuse-result c (qtlc-ids-status ids)
+                                (nth ids 4) all-probes merges pieces)
+                            (do
+                                (let advanced (qtlc-with c "open"
+                                    (qtlc-segments c) (qtlc-text c) end
+                                    (qtlc-ids-values ids) (qtlc-token-count c)
+                                    pieces merges all-probes "streaming" 0))
+                                (qtlc-next advanced))))))
+        (if (nil? (qtlc-segments c))
+            (do
+                (let done (qtlc-with c "done" (empty) "" 0 (empty)
+                    (qtlc-token-count c) (qtlc-pieces c) (qtlc-merges c)
+                    (qtlc-probes c) "complete" 1))
+                (qtlc-next-result "done" (nothing) 0 done))
+            (do
+                (let seg (head (qtlc-segments c)))
+                (let rest (tail (qtlc-segments c)))
+                (if (str_eq (qtlc-segment-kind seg) "ids")
+                    (qtlc-next (qtlc-with c "open" rest "" 0
+                        (qtlc-segment-value seg) (qtlc-token-count c)
+                        (qtlc-pieces c) (qtlc-merges c) (qtlc-probes c)
+                        "streaming" 0))
+                (if (str_eq (qtlc-segment-kind seg) "text")
+                    (qtlc-next (qtlc-with c "open" rest
+                        (qtlc-segment-value seg) 0 (empty)
+                        (qtlc-token-count c) (qtlc-pieces c)
+                        (qtlc-merges c) (qtlc-probes c) "streaming" 0))
+                    (qtlc-refuse-result c "failure" "unknown-segment"
+                        (qtlc-probes c) (qtlc-merges c)
+                        (qtlc-pieces c))))))))))
+
+    (defn qtlc-drain-loop (c acc)
+        (do
+            (let one (qtlc-next c))
+            (if (eq (qtlc-next-present? one) 1)
+                (qtlc-drain-loop (qtlc-next-cursor one)
+                    (append acc (list (qtlc-next-value one))))
+                (list (qtlc-next-status one) acc (qtlc-next-cursor one)))))
+    (defn qtlc-drain (c) (qtlc-drain-loop c (empty)))
+
+    ; Count/release without retaining an ID list. Session admission can prove
+    ; an exact context bound, reopen the same immutable cursor, and then stream
+    ; directly into prefill. Result = status final-cursor.
+    (defn qtlc-count (c)
+        (do
+            (let one (qtlc-next c))
+            (if (eq (qtlc-next-present? one) 1)
+                (qtlc-count (qtlc-next-cursor one))
+                (list (qtlc-next-status one) (qtlc-next-cursor one)))))
+
+    ; Exact crystal-backed ChatML segments.  The prompt alone remains live;
+    ; already-proven constant scaffold ids are offered directly.
+    (defn qtlc-chat-segments (prompt x)
+        (list (qtlc-id-segment (list (nth x 1)))
+              (qtlc-id-segment (nth x 5))
+              (qtlc-text-segment prompt)
+              (qtlc-id-segment (list (nth x 2)))
+              (qtlc-id-segment (nth x 6))
+              (qtlc-id-segment (list (nth x 1)))
+              (qtlc-id-segment (nth x 7))
+              (qtlc-id-segment (list (nth x 3)))
+              (qtlc-id-segment (nth x 8))
+              (qtlc-id-segment (list (nth x 4)))
+              (qtlc-id-segment (nth x 8))))
+    (defn qtlc-full-chat-segments (prompt system-text x)
+        (tkz-cat
+            (list (qtlc-id-segment (list (nth x 1)))
+                  (qtlc-text-segment "system\n")
+                  (qtlc-text-segment system-text)
+                  (qtlc-id-segment (list (nth x 2)))
+                  (qtlc-id-segment (nth x 6)))
+            (qtlc-chat-segments prompt x)))
+
+    ; Conservative context admission without tokenizing first: GPT-2 byte BPE
+    ; emits no more ids than input bytes, while known-id segments are exact.
+    (defn qtlc-segments-upper-bound (segments acc)
+        (if (nil? segments) acc
+            (do
+                (let seg (head segments))
+                (qtlc-segments-upper-bound (tail segments)
+                    (add acc (if (str_eq (qtlc-segment-kind seg) "ids")
+                        (len (qtlc-segment-value seg))
+                        (str_len (qtlc-segment-value seg))))))))
+
+    0)

@@ -355,21 +355,91 @@
                 (head (psci-entry-keys entry)) "")))
     (defn fknq-empty-current-result (reason)
         (fkss-result "nothing" reason "" "" 0 -1 "" 0 0 0 -1 0))
+    ; One carrier read births one immutable Form string.  Digest, atom matches,
+    ; answer offset and answer bytes are all derived from that same value, so an
+    ; A -> B -> A filesystem mutation cannot pair B answer bytes with A's
+    ; digest.  The final streaming rehash below is a separate freshness
+    ; observation; it never supplies the retained answer.
+    (defn fknq-snapshot-source-id (snapshot)
+        (str_concat "sha256:"
+            (hex-encode (sha256-stream-string snapshot))))
+    (defn fknq-snapshot-observe-loop (snapshot atoms matched first)
+        (if (nil? atoms) (list matched first)
+            (do
+                (let at (fkss-find-ci snapshot (head atoms)))
+                (fknq-snapshot-observe-loop snapshot (tail atoms)
+                    (add matched (if (ge at 0) 1 0))
+                    (if (and (lt first 0) (ge at 0)) at first)))))
+    (defn fknq-current-snapshot-result (relative atoms hit-reason snapshot
+                                         available observed-size)
+        (do
+            (let size (str_len snapshot))
+            (let source-id (fknq-snapshot-source-id snapshot))
+            (if (or (not (eq available 1)) (not (eq observed-size size)))
+                (fkss-result "stale" "current-source-changed-during-snapshot"
+                    source-id relative 0 -1 "" 1 1 available size 0)
+                (do
+                    (let observed
+                        (fknq-snapshot-observe-loop snapshot atoms 0 -1))
+                    (let first (nth observed 1))
+                    (let start (fkss-answer-start first size))
+                    (let end (fkss-min size (add start (fkss-answer-limit))))
+                    (fkss-result "hit" hit-reason source-id relative
+                        (nth observed 0) first (substring snapshot start end)
+                        1 1 1 size start)))))
+    (defn fknq-current-snapshot-result-at (root relative atoms hit-reason)
+        (do
+            (let full (fs-path-join root relative))
+            (let before-size (fs-stat-size full))
+            (if (or (eq (fhcs-relative-source-path? relative) 0)
+                    (or (lt before-size 0) (not (eq (fs-is-file? full) 1))))
+                (fkss-result "miss" "direct-source-path-unavailable" "" relative
+                    0 -1 "" 1 1 0 -1 0)
+                (do
+                    (let snapshot (fs-read-text full))
+                    (let after-size (fs-stat-size full))
+                    (let available (fs-is-file? full))
+                    (fknq-current-snapshot-result relative atoms hit-reason
+                        snapshot available after-size)))))
+
+    ; This pure constructor is the injection seam for the final currentness
+    ; proof: disagreement retains the latest identity evidence, clears the
+    ; answer, and becomes stale rather than hit, miss, or numeric zero.
+    (defn fknq-current-result-recheck (current source-id size)
+        (if (not (str_eq (fkss-status current) "hit")) current
+            (if (and (str_eq source-id (fkss-source-id-of current))
+                     (eq size (fkss-source-size current))) current
+                (fkss-result "stale" "current-source-changed-during-read"
+                    source-id (fkss-source-path current) 0 -1 ""
+                    (fkss-inventory-count current)
+                    (fkss-eligible-count current)
+                    (fkss-accessible-count current) size 0))))
+    (defn fknq-current-result-recheck-at (root current)
+        (if (not (str_eq (fkss-status current) "hit")) current
+            (do
+                (let full (fs-path-join root (fkss-source-path current)))
+                (let size (fs-stat-size full))
+                (if (lt size 0)
+                    (fknq-current-result-recheck current "" -1)
+                    (fknq-current-result-recheck current
+                        (fkss-source-id full) size)))))
     (defn fknq-current-source-result-at (root registry request)
         (do
             (let query (fknq-query-text request (fknq-registry-entry registry)))
             (let atoms (fhcs-atoms query))
             (if (nil? atoms)
                 (fknq-empty-current-result "no-query-atoms")
-                (fhcs-path-result-with-reason root
-                    (fknq-registry-path registry) atoms
-                    "concept-registry-current-source-hit"))))
+                (do
+                    (let current (fknq-current-snapshot-result-at root
+                        (fknq-registry-path registry) atoms
+                        "concept-registry-current-source-hit"))
+                    (fknq-current-result-recheck-at root current)))))
     (defn fknq-fkqt-request (request entry)
         (do
             (let query (fknq-query-text request entry))
             (fkqt-request "ready" "ready" query (fkqt-query-token query))))
     (defn fknq-existing-observation (request registry current local-ready)
-        (if (not (str_eq (fknq-registry-status registry) "hit"))
+        (if (not (str_eq (fknq-final-status registry current) "hit"))
             (fknq-absent)
             (do
                 (let fkrequest (fknq-fkqt-request request
@@ -407,22 +477,88 @@
             (if (str_eq (head trace) action) 1
                 (fknq-trace-has? (tail trace) action))))
 
+    ; A registry hit is only one axis of the claim.  Correlate its held source
+    ; and entry with one another and with the later current-source identity.
+    ; This is deliberately stricter than checking two independent "hit"
+    ; strings: path, digest, size, family, freshness, and lookup cardinality
+    ; must describe one source coordinate.
+    (defn fknq-registry-source-bound? (registry)
+        (if (not (str_eq (fknq-registry-status registry) "hit")) 0
+            (do
+                (let source (fknq-registry-source registry))
+                (let entry (fknq-registry-entry registry))
+                (if (eq (psci-source-node-valid? source) 0) 0
+                (if (eq (psci-entry-valid? entry) 0) 0
+                (if (not (node_eq (psci-entry-source entry) source)) 0
+                (if (not (str_eq (fknq-registry-family registry)
+                                 (psci-source-family source))) 0
+                (if (not (str_eq (fknq-registry-path registry)
+                                 (psci-source-path source))) 0
+                (if (not (str_eq (fknq-registry-source-id registry)
+                                 (psci-source-id source))) 0
+                (if (not (eq (fknq-registry-fresh? registry) 1)) 0
+                (if (not (eq (fknq-registry-rebuild? registry) 0)) 0
+                (if (not (eq (fknq-registry-matches registry) 1)) 0
+                    (if (eq (fknq-registry-lookup-count registry) 1)
+                        1 0)))))))))))))
+    (defn fknq-current-identity-bound? (registry current)
+        (if (eq (fknq-registry-source-bound? registry) 0) 0
+            (do
+                (let source (fknq-registry-source registry))
+                (if (not (str_eq (fkss-source-id-of current)
+                                 (psci-source-id source))) 0
+                (if (not (str_eq (fkss-source-path current)
+                                 (psci-source-path source))) 0
+                    (if (eq (fkss-source-size current)
+                            (psci-source-size source)) 1 0))))))
+    (defn fknq-current-hit-bound? (registry current)
+        (if (not (str_eq (fkss-status current) "hit")) 0
+            (fknq-current-identity-bound? registry current)))
+
     (defn fknq-final-status (registry current)
         (if (not (str_eq (fknq-registry-status registry) "hit"))
             (fknq-registry-status registry)
-            (if (str_eq (fkss-status current) "hit") "hit"
-            (if (str_eq (fkss-status current) "miss") "miss"
+            (if (eq (fknq-registry-source-bound? registry) 0) "stale"
+            (if (str_eq (fkss-status current) "hit")
+                (if (eq (fknq-current-hit-bound? registry current) 1)
+                    "hit" "stale")
+            (if (str_eq (fkss-status current) "miss")
+                (if (eq (fknq-current-identity-bound? registry current) 1)
+                    "miss" "stale")
             (if (str_eq (fkss-status current) "nothing") "nothing"
-                "failure")))))
+            (if (str_eq (fkss-status current) "stale") "stale"
+                "failure")))))))
     (defn fknq-final-reason (registry current)
-        (if (str_eq (fknq-registry-status registry) "hit")
-            (fkss-reason current) (fknq-registry-reason registry)))
+        (if (not (str_eq (fknq-registry-status registry) "hit"))
+            (fknq-registry-reason registry)
+            (if (eq (fknq-registry-source-bound? registry) 0)
+                "current-source-binding-drift"
+            (if (or
+                    (and (str_eq (fkss-status current) "hit")
+                         (eq (fknq-current-hit-bound? registry current) 0))
+                    (and (str_eq (fkss-status current) "miss")
+                         (eq (fknq-current-identity-bound? registry current) 0)))
+                "current-source-binding-drift"
+                (fkss-reason current)))))
+    (defn fknq-final-fresh? (registry current)
+        (if (not (str_eq (fknq-registry-status registry) "hit"))
+            (fknq-registry-fresh? registry)
+            (if (eq (fknq-registry-source-bound? registry) 0) 0
+            (if (or (str_eq (fkss-status current) "hit")
+                    (str_eq (fkss-status current) "miss"))
+                (if (eq (fknq-current-identity-bound? registry current) 1)
+                    (fknq-registry-fresh? registry) 0)
+                0))))
+    (defn fknq-final-rebuild? (registry current)
+        (if (str_eq (fknq-final-status registry current) "stale") 1
+            (fknq-registry-rebuild? registry)))
 
     ; observation children:
     ; status reason request executor source-token entry-token source-original
     ; entry-original existing-fhcs-observation family path source-id answer-key
     ; answer fresh rebuild matches lookup-count hit-count executed
-    ; model-executed pretokenized scannerless trace
+    ; model-executed pretokenized scannerless trace current-path current-id
+    ; current-size
     (defn fknq-observation-node (status reason scan registry current existing trace)
         (do
             (let source (fknq-registry-source registry))
@@ -433,7 +569,7 @@
                 (fknq-source-token source) (fknq-absent)))
             (let entry-token (if (eq entry-valid 1)
                 (fknq-entry-token entry) (fknq-absent)))
-            (let answer (fkss-answer current))
+            (let answer (if (str_eq status "hit") (fkss-answer current) ""))
             (let hit-count (if (str_eq status "hit") 1 0))
             (let executed (if (eq (fknq-registry-lookup-count registry) 1) 1 0))
             (intern_node (fknq-observation-category)
@@ -451,8 +587,8 @@
                     (intern_trivial_string (fknq-registry-source-id registry))
                     (intern_trivial_string (fhcs-answer-key answer))
                     (intern_trivial_string answer)
-                    (intern_trivial_int (fknq-registry-fresh? registry))
-                    (intern_trivial_int (fknq-registry-rebuild? registry))
+                    (intern_trivial_int (fknq-final-fresh? registry current))
+                    (intern_trivial_int (fknq-final-rebuild? registry current))
                     (intern_trivial_int (fknq-registry-matches registry))
                     (intern_trivial_int (fknq-registry-lookup-count registry))
                     (intern_trivial_int hit-count)
@@ -460,7 +596,10 @@
                     (intern_trivial_int 0)
                     (intern_trivial_int (fknq-scan-pretokenized? scan))
                     (intern_trivial_int (fknq-scan-scannerless? scan))
-                    (intern_trivial_string (fknq-trace-actions trace))))))
+                    (intern_trivial_string (fknq-trace-actions trace))
+                    (intern_trivial_string (fkss-source-path current))
+                    (intern_trivial_string (fkss-source-id-of current))
+                    (intern_trivial_int (fkss-source-size current))))))
 
     ; result = status reason source-token entry-token request executor
     ;          observation existing-observation source-original entry-original
@@ -484,11 +623,12 @@
                 current existing trace))
             (let hit-count (if (str_eq status "hit") 1 0))
             (let executed (if (eq (fknq-registry-lookup-count registry) 1) 1 0))
+            (let answer (if (str_eq status "hit") (fkss-answer current) ""))
             (list status reason source-token entry-token request
                   (fknq-executor-token) observation existing source entry
-                  (fknq-registry-path registry) (fkss-answer current) trace
-                  (fknq-registry-fresh? registry)
-                  (fknq-registry-rebuild? registry)
+                  (fknq-registry-path registry) answer trace
+                  (fknq-final-fresh? registry current)
+                  (fknq-final-rebuild? registry current)
                   (fknq-registry-matches registry)
                   (fknq-registry-lookup-count registry) hit-count executed 0
                   (fknq-scan-pretokenized? scan)
@@ -525,6 +665,12 @@
     (defn fknq-model-executed? (r) (nth r 19))
     (defn fknq-pretokenized? (r) (nth r 20))
     (defn fknq-scannerless? (r) (nth r 21))
+    (defn fknq-current-source-path-of (r)
+        (node_value (nth (node_children (fknq-observation r)) 24)))
+    (defn fknq-current-source-id-of (r)
+        (node_value (nth (node_children (fknq-observation r)) 25)))
+    (defn fknq-current-source-size-of (r)
+        (node_value (nth (node_children (fknq-observation r)) 26)))
 
     ; This is the only effectful bridge door.  Parsing completes before any
     ; registry or source file is opened.
