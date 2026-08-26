@@ -1,0 +1,109 @@
+; corpus-train-emit.fk — the corpus becomes trainable data, in the shape a
+; training run actually eats.
+;
+; WHY THIS, AND WHY NOW. The adapter trained 2026-06-17 saw 2,538 session
+; transcripts with a median target of 44 words. The sealed audit asks for
+; one-word answers — eleven of its thirty rows say "reply with only the
+; integer". Those distributions have nothing to do with each other, which is a
+; complete explanation for three control-plane rows reading
+; `trained-unpromoted` for two months against a validation metric they were
+; never trained toward.
+;
+; Meanwhile learn/homecoming-distillation-corpus.fk holds hundreds of rows of
+; exactly the right shape: a question describing a phenomenon, and the ONE WORD
+; that answers it. corpus-teach-samples.fk renders them as Q:/A: text and stops
+; there — nothing has ever written them where a training run could read them.
+; This cell writes the file.
+;
+; THE SHAPE IS THE ONE ALREADY ON DISK. ~/.coherence-network/lora-data-v2 holds
+; {"messages":[{"role":"user",...},{"role":"assistant",...}]} per line, so this
+; emits the same, and a run that read that can read this without changing.
+;
+; THE SPLIT IS DETERMINISTIC AND STATED. No randomness is available here and
+; none is wanted: every Nth row by position goes to valid, the rest to train.
+; Same corpus, same split, every time — a training run and a later audit that
+; disagree about which rows were held out would be worse than no split at all.
+;
+; WHY COINED WORDS MAKE THIS A CLEAN TEST. Every answer is a word minted for its
+; row — citedmark, valuedabsence, stampblind. No base model has seen any of
+; them, so nothing here can be scored by accident: the guess floor of a coined
+; word is zero, and exact-match means exactly what it says. That is the one
+; place the body's own f1 is trustworthy, measured in
+; form-knowledge-signal-floor.fk.
+;
+; THIS CELL RUNS NO MODEL AND TRAINS NOTHING. It writes two files.
+;
+; preludes: form-stdlib/core.fk learn/homecoming-distillation-corpus.fk
+; preludes: learn/corpus-teach-samples.fk
+;
+; Proven by: learn/tests/corpus-train-emit-band.fk
+
+(do
+    ; ── JSON string escaping, for the one place text meets a wire format ───
+    (defn cte-esc-byte (b)
+        (if (eq b 34) "\\\""
+            (if (eq b 92) "\\\\"
+                (if (eq b 10) "\\n"
+                    (if (eq b 13) "\\r"
+                        (if (eq b 9) "\\t"
+                            (if (lt b 32) " " (byte_to_str b))))))))
+    (defn cte-esc-loop (s i n acc)
+        (if (ge i n) acc
+            (cte-esc-loop s (add i 1) n
+                (str_concat acc (cte-esc-byte (str_byte_at s i))))))
+    (defn cte-esc (s) (cte-esc-loop s 0 (str_len s) ""))
+
+    ; ── one row as one JSONL line ─────────────────────────────────────────
+    (defn cte-line (r)
+        (str_concat "{\"messages\":[{\"role\":\"user\",\"content\":\""
+        (str_concat (cte-esc (cts-question r))
+        (str_concat "\"},{\"role\":\"assistant\",\"content\":\""
+        (str_concat (cte-esc (cts-answer r))
+                    "\"}]}")))))
+
+    ; ── the split is BY ANSWER WORD, not by position ──────────────────────
+    ; A positional split leaks. The corpus holds words that answer more than
+    ; one row — thawtax, reification, inert-knowledge, constellation and
+    ; confabulation each answer two — so splitting on position can put one row
+    ; in train and its twin in valid, and the model meets the held-out answer
+    ; during training. The band caught it: the no-leakage bit stayed dark until
+    ; this changed.
+    ;
+    ; Folding the ANSWER's own bytes means identical words always land on the
+    ; same side, whatever their positions. Deterministic, and nothing depends on
+    ; a clock or a seed this dialect does not have.
+    (defn cte-every () 7)
+    (defn cte-fold-go (s i n acc)
+        (if (ge i n) acc
+            (cte-fold-go s (add i 1) n (add acc (str_byte_at s i)))))
+    (defn cte-fold (s) (cte-fold-go s 0 (str_len s) 0))
+    (defn cte-valid-row? (r)
+        (if (eq (mod (cte-fold (cts-answer r)) (cte-every)) 0) 1 0))
+
+    (defn cte-render-go (rs i want acc)
+        (if (eq (len rs) 0) acc
+            (cte-render-go (tail rs) (add i 1) want
+                (if (eq (cte-valid-row? (head rs)) want)
+                    (str_concat acc (str_concat (cte-line (head rs)) "\n"))
+                    acc))))
+    (defn cte-train-text () (cte-render-go (hdc-rows) 0 0 ""))
+    (defn cte-valid-text () (cte-render-go (hdc-rows) 0 1 ""))
+
+    (defn cte-count-go (rs i want n)
+        (if (eq (len rs) 0) n
+            (cte-count-go (tail rs) (add i 1) want
+                (if (eq (cte-valid-row? (head rs)) want) (add n 1) n))))
+    (defn cte-train-count () (cte-count-go (hdc-rows) 0 0 0))
+    (defn cte-valid-count () (cte-count-go (hdc-rows) 0 1 0))
+
+    ; ── writing, with the byte counts returned so a caller can witness ────
+    (defn cte-emit (dir)
+        (do (let t (write_file (str_concat dir "/train.jsonl") (cte-train-text)))
+            (let v (write_file (str_concat dir "/valid.jsonl") (cte-valid-text)))
+            (list t v (cte-train-count) (cte-valid-count))))
+    (defn cte-emit-train-bytes (e) (nth e 0))
+    (defn cte-emit-valid-bytes (e) (nth e 1))
+    (defn cte-emit-train-rows (e)  (nth e 2))
+    (defn cte-emit-valid-rows (e)  (nth e 3))
+
+    0)

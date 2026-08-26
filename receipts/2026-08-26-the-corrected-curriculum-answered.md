@@ -64,6 +64,50 @@ answer did not — evidence of the OPPOSITE), moved — and the next battery
 persists the digest at zero cost. The two sittings already run cannot be
 settled retroactively; that is what unpersisted evidence costs.
 
+## THE FIFTH SITTING SETTLES IT: the decode is deterministic
+
+The digest baseline (2026-08-26 02:38, same curriculum as the fourth
+sitting, artifact observe/artifacts-zerofam-digest-baseline-2026-08-26.txt)
+reproduced the fourth sitting's f1 EXACTLY on every row — all ten scores,
+to the ppm. The decode lane is deterministic. Two consequences, one
+humbling and one sharpening:
+
+- The anchored/fragile reading dissolves entirely. The exact-repro rows
+  (v316, v323) were not anchored knowledge; with deterministic decode,
+  identical scores mean their PROMPTS were identical across the
+  curriculum change — their queries never touched a changed gloss. The
+  scrambled rows were the ones whose prompts actually changed. What
+  looked like anchors was routing.
+- Every sitting-3 -> sitting-4 delta was CAUSAL, not variance. A changed
+  gloss changes those rows' trajectories chaotically (v312 857,143 ->
+  162,162 under a BETTER gloss); an unchanged prompt reproduces to the
+  byte. Prompt-layer teaching does not steer these rows toward sealed
+  answers — it re-rolls them. The fine-tune conclusion stands on firmer
+  ground than the reading that first pointed at it.
+
+v311's digest is sha256("0"): that row's whole answer is one zero
+character — a degenerate reply the scores alone never showed. The
+unasked witness testified on its first day.
+
+## THIRD LAYER (jit-lane c1725b06, verified here): the length was in the f1
+
+v311's "0" is not degenerate: the row asks for ONLY an integer, and the
+model obeyed the contract perfectly and gave the wrong integer — the
+digest told contract-collapse from wrong-knowledge. And the f1 arithmetic
+decomposes: re-derived here over the banked baseline through
+fkhr-decompose, v312 is UNIQUE at overlap 3 / reply 33 — it kept the same
+three correct tokens across the curriculum change and became eleven times
+more verbose. Its collapse was contract compliance, not knowledge. v316
+is unique at 5-of-6 in a five-token reply, twice. Ambiguous rows report
+their solution counts (v301: 5, v323: 6) rather than a guess.
+
+STANDING CAVEAT BEFORE THE FINE-TUNE CONCLUSION HARDENS: if zero rows
+are verbose-but-overlapping rather than empty, the binding constraint
+may be the answer contract's grip, not the weights. The separation is
+one sitting with a terser contract — same prompts, same gate — and it
+is named as this lane's next experiment. A weight delta must not be
+bought to fix a length problem.
+
 ## The most surprising teaching
 
 Two numbers reproducing to six digits across a deliberately changed

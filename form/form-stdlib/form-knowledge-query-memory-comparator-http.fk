@@ -1,0 +1,128 @@
+; form-knowledge-query-memory-comparator-http.fk — an OPTIONAL comparator.
+; Never the primary path, and reachable only by a caller that names it.
+;
+; WHAT THIS IS FOR. Asking a second answerer the same question, to compare
+; against the body's own resident generator. That is its entire purpose. It is
+; not a fallback: form-knowledge-query-memory-neutral.fk has no default
+; answerer, so nothing reaches this cell unless a caller preludes it AND hands
+; its context to fqmn-cross by name. A comparator that could be arrived at by
+; omission would be a primary wearing a comparator's label.
+;
+; WHY THIS RENDERS ITS OWN REQUEST INSTEAD OF USING THE BML METHOD LAYER.
+; http-client.fk already carries kh-render-request(method, path, host, body) and
+; http-send-on-socket, with its own band (verdict 127) proving a non-GET verb
+; over real socket calls — so no new kernel door is needed and none is added
+; here. But that surface is BML, and a plain Form cell cannot prelude it:
+; measured 2026-08-26, `; preludes: form-stdlib/http-client.fk` from a .fk
+; yields 495 unresolved errors with `section`, `[form.bml]` and `{` arriving as
+; unbound names. Every existing consumer of that surface is itself BML. So the
+; consolidation is real work, not an oversight, and it belongs to whoever moves
+; this comparator into BML beside its kin. Recorded here rather than repeated as
+; a discovery later.
+;
+; THE PEER IS NEVER THE SOURCE. Whatever comes back is a second opinion about
+; an observation the body retrieved. The retrieval already happened, with its
+; own attribution, before this cell was reached.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: the neutral band proves the seam; this cell's own live exercise is
+; deferred with its run door.
+
+(do
+    ; ctx = (mark host port steps)
+    (defn fqmch-mark () "fqmc-http1")
+    (defn fqmch-ctx (host port steps) (list (fqmch-mark) host port steps))
+    (defn fqmch-ctx? (c)
+        (if (eq (len c) 4) (if (str_eq (nth c 0) (fqmch-mark)) 1 0) 0))
+    (defn fqmch-host (c)  (nth c 1))
+    (defn fqmch-port (c)  (nth c 2))
+    (defn fqmch-steps (c) (nth c 3))
+
+    (defn fqmch-crlf () (str_concat (byte_to_str 13) (byte_to_str 10)))
+    (defn fqmch-cat3 (a b c) (str_concat a (str_concat b c)))
+
+    (defn fqmch-request-bytes (host port path body)
+        (fqmch-cat3
+            (fqmch-cat3 "POST " path (str_concat " HTTP/1.1" (fqmch-crlf)))
+            (fqmch-cat3 "Host: " host
+                (fqmch-cat3 ":" (int_to_str port) (fqmch-crlf)))
+            (fqmch-cat3
+                (str_concat "Content-Type: application/json" (fqmch-crlf))
+                (fqmch-cat3 "Content-Length: " (int_to_str (str_len body))
+                            (fqmch-crlf))
+                (fqmch-cat3 "Connection: close" (fqmch-crlf)
+                            (str_concat (fqmch-crlf) body)))))
+
+    (defn fqmch-drain (sock acc left)
+        (if (le left 0) acc
+            (do (let c (socket_recv sock 65536))
+                (if (eq (str_len c) 0) acc
+                    (fqmch-drain sock (str_concat acc c) (sub left 1))))))
+
+    (defn fqmch-post (host port path body)
+        (do (let s (socket_connect host port))
+            (if (le s 0) ""
+                (do (let sent (socket_send s (fqmch-request-bytes host port path body)))
+                    (if (le sent 0) (do (socket_close s) "")
+                        (do (let got (fqmch-drain s "" 64))
+                            (socket_close s) got))))))
+
+    ; a JSON string carries escapes, not the bytes they stand for
+    (defn fqmch-unesc-loop (s i n acc)
+        (if (ge i n) acc
+            (do (let b (str_byte_at s i))
+                (if (not (eq b 92))
+                    (fqmch-unesc-loop s (add i 1) n (str_concat acc (byte_to_str b)))
+                    (do (let e (if (lt (add i 1) n) (str_byte_at s (add i 1)) 0))
+                        (fqmch-unesc-loop s (add i 2) n
+                            (str_concat acc
+                                (if (eq e 110) (byte_to_str 10)
+                                (if (eq e 114) (byte_to_str 13)
+                                (if (eq e 116) (byte_to_str 9)
+                                (if (eq e 34) "\""
+                                (if (eq e 92) "\\"
+                                (if (eq e 47) "/" (byte_to_str e))))))))))))))
+    (defn fqmch-unesc (s) (fqmch-unesc-loop s 0 (str_len s) ""))
+
+    (defn fqmch-scan-close (text i)
+        (if (ge i (str_len text)) -1
+            (do (let b (str_byte_at text i))
+                (if (eq b 92) (fqmch-scan-close text (add i 2))
+                    (if (eq b 34) i (fqmch-scan-close text (add i 1)))))))
+    (defn fqmch-json-string (text key)
+        (do (let mark (fqmch-cat3 "\"" key "\":\""))
+            (let at (str_find text mark 0))
+            (if (lt at 0) (nothing)
+                (do (let start (add at (str_len mark)))
+                    (let end (fqmch-scan-close text start))
+                    (if (lt end 0) (nothing)
+                        (fqmch-unesc (substring text start end)))))))
+
+    (defn fqmch-esc-byte (b)
+        (if (eq b 34) "\\\""
+            (if (eq b 92) "\\\\"
+                (if (eq b 10) "\\n"
+                    (if (eq b 13) "\\r"
+                        (if (eq b 9) "\\t"
+                            (if (lt b 32) " " (byte_to_str b))))))))
+    (defn fqmch-esc-loop (s i n acc)
+        (if (ge i n) acc
+            (fqmch-esc-loop s (add i 1) n
+                (str_concat acc (fqmch-esc-byte (str_byte_at s i))))))
+    (defn fqmch-esc (s) (fqmch-esc-loop s 0 (str_len s) ""))
+
+    (defn fqmch-body (prompt steps)
+        (fqmch-cat3 "{\"prompt\":\"" (fqmch-esc prompt)
+            (fqmch-cat3 "\",\"n_predict\":" (int_to_str steps)
+                        ",\"temperature\":0,\"cache_prompt\":false}")))
+
+    ; the answerer shape: (ctx prompt) -> (list reply ctx')
+    (defn fqmch-answerer (ctx prompt)
+        (if (eq (fqmch-ctx? ctx) 0) (list (nothing) ctx)
+            (do (let raw (fqmch-post (fqmch-host ctx) (fqmch-port ctx)
+                            "/completion" (fqmch-body prompt (fqmch-steps ctx))))
+                (if (eq (str_len raw) 0) (list (nothing) ctx)
+                    (list (fqmch-json-string raw "content") ctx)))))
+
+    0)
