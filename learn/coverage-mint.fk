@@ -1,0 +1,155 @@
+; coverage-mint.fk — the last directive gets its emitter: training rows minted
+; FROM a body source, questions written by the body's own fused model,
+; verified by round-trip, sealed heldout phrasings guarded out.
+;
+; THE PROPOSER IS THE LOCAL MODEL, THE VERIFIER IS THE BODY. A fact here is a
+; (key value) pair read off the source's own s-expressions, with its # comment
+; as context. The fused model is asked to write ONE question whose exact
+; answer is the value. The row lands only if the model, asked its own question
+; fresh with the one-word discipline, answers the value back — a question that
+; cannot be answered from its own content is not a teaching row, whoever wrote
+; it. Failed round-trips are dropped, not repaired.
+;
+; THE LEAKAGE GUARD IS THE SEALED PROMPT, NOT THE FACT. The heldout tests
+; whether facts were learned from sources, so the FACT is exactly what a
+; coverage row should carry; what stays unseen is the sealed QUESTION. A
+; minted question that contains any sealed prompt's first eight words is
+; rejected. Facts may coincide with sealed answers — that is coverage working.
+;
+; preludes: form-stdlib/core.fk learn/train-loop-observe.fk
+
+(do
+    (defn cm-fused ()
+        "/Users/ursmuff/.coherence-network/form-train-runs/form-llama-3b-fused-20260826")
+
+    ; ── (key value) pairs off the source's own lines ───────────────────────
+    (defn cm-line-pair (line)
+        (do (let o (str_find line "(" 0))
+            (if (lt o 0) (nothing)
+                (do (let inner (substring line (add o 1) (str_len line)))
+                    (let sp (str_find inner " " 0))
+                    (if (lt sp 0) (nothing)
+                        (do (let key (substring inner 0 sp))
+                            (let rest (fqmn-trim-like inner))
+                            (let vs (cm-skip-space inner sp))
+                            (let ve (cm-token-end inner vs))
+                            (if (le ve vs) (nothing)
+                                (list key (substring inner vs ve)))))))))
+    (defn cm-skip-space (s i)
+        (if (ge i (str_len s)) i
+            (if (eq (str_byte_at s i) 32) (cm-skip-space s (add i 1)) i)))
+    (defn cm-token-end (s i)
+        (if (ge i (str_len s)) i
+            (do (let b (str_byte_at s i))
+                (if (or (eq b 32) (or (eq b 41) (eq b 10))) i
+                    (cm-token-end s (add i 1))))))
+    (defn cm-comment (line)
+        (do (let h (str_find line "#" 0))
+            (if (lt h 0) "" (fqmn-trim-like (substring line (add h 1) (str_len line))))))
+
+    ; a value is fact-shaped when it carries a hyphen — the body's compound
+    ; teachings look like CAN-not-MUST, allow-its-presence. Keys and values
+    ; from prose that happens to hold a paren are rejected: a clean name is
+    ; letters, digits and hyphens only, and never empty.
+    (defn cm-clean? (s i)
+        (if (ge i (str_len s)) (if (gt (str_len s) 0) 1 0)
+            (do (let b (str_byte_at s i))
+                (if (or (and (ge b 97) (le b 122))
+                    (or (and (ge b 65) (le b 90))
+                    (or (and (ge b 48) (le b 57)) (eq b 45))))
+                    (cm-clean? s (add i 1)) 0))))
+    (defn cm-fact? (v) (if (ge (str_find v "-" 0) 0) 1 0))
+
+    (defn cm-pairs-loop (s pos out)
+        (do (let e (str_find s "\n" pos))
+            (if (lt e 0) out
+                (do (let line (substring s pos e))
+                    (let p (cm-line-pair line))
+                    (cm-pairs-loop s (add e 1)
+                        (if (nothing? p) out
+                            (if (or (eq (cm-clean? (nth p 0) 0) 0)
+                                (or (eq (cm-clean? (nth p 1) 0) 0)
+                                (or (eq (cm-fact? (nth p 1)) 0)
+                                    (eq (str_len (cm-comment line)) 0)))) out
+                                (append out (list (list (nth p 0) (nth p 1)
+                                                        (cm-comment line)))))))))))
+    (defn cm-pairs (path) (cm-pairs-loop (read_file path) 0 (list)))
+
+    ; ── two minds, two roles: the BASE authors, the FUSED answers ──────────
+    ; The fused model was trained into a one-word answerer — witnessed: asked
+    ; to write a question, it answered "native-replace", one word, exactly as
+    ; taught. Format lock cuts both ways. So the base model (instruction-
+    ; strong, knowledge-weak) writes the question, and the fused model
+    ; (knowledge-strong) answers it fresh. A row lands only when the two
+    ; agree through the fact — proposer and verifier cannot be the same mind
+    ; wearing one training.
+    ; AUTHORING IS MECHANICAL — the comment IS the question material. The
+    ; model-authored path produced vague questions no token could answer
+    ; (witnessed: "Which of the following best describes..." with no
+    ; following), and 0 of 8 survived. The source line already says what the
+    ; token names; the question only has to ask it back.
+    (defn cm-mint-q (source-name key value comment)
+        (if (eq (str_len comment) 0) (nothing)
+            (str_concat "In " (str_concat source-name
+                (str_concat ", which token names: " (str_concat comment "?"))))))
+
+    ; ATTESTATION, NOT VETO. Five runs taught the order of authority here.
+    ; The fused model could not author (format lock). The base could not
+    ; read-and-copy a compound token: handed a context CONTAINING CAN-not-MUST
+    ; it answered CPUMASK, and simplified it answers CAN — it splits compounds
+    ; at the first hyphen, every time. A weak reader was VETOING rows whose
+    ; truth never came from a model at all: the question is the source's own
+    ; comment and the answer is the source's own token, both by construction.
+    ; So provenance keeps the row, and the model's reading is COUNTED as
+    ; attestation — first-hyphen-segment copy, the most this reader can say —
+    ; reported beside the yield, never above it.
+    (defn cm-first-seg (s)
+        (do (let h (str_find s "-" 0))
+            (if (lt h 0) s (substring s 0 h))))
+    (defn cm-attest? (q value key comment)
+        (do (let got (tlo-ask-model (tlo-model)
+                (str_concat "Context: (" (str_concat key (str_concat " " (str_concat value
+                (str_concat ")  # " (str_concat comment
+                (str_concat "\nCopy from the context the one exact token that answers, and reply with only it. " q)))))))))
+            (if (nothing? got) 0
+                (if (ge (str_find got (cm-first-seg value) 0) 0) 1 0))))
+
+    ; ── sealed-prompt guard: first eight words of any fkh3 prompt ──────────
+    (defn cm-words8 (s) (cm-w8 s 0 0 (str_len s)))
+    (defn cm-w8 (s i n len)
+        (if (ge i len) s
+            (if (eq (str_byte_at s i) 32)
+                (if (ge (add n 1) 8) (substring s 0 i)
+                    (cm-w8 s (add i 1) (add n 1) len))
+                (cm-w8 s (add i 1) n len))))
+    (defn cm-guard-ok? (q sealed-prompts)
+        (if (eq (len sealed-prompts) 0) 1
+            (if (ge (str_find q (cm-words8 (head sealed-prompts)) 0) 0) 0
+                (cm-guard-ok? q (tail sealed-prompts)))))
+
+    ; ── mint one source into JSONL rows, verified and guarded ──────────────
+    (defn cm-row (q a)
+        (str_concat "{\"messages\":[{\"role\":\"user\",\"content\":\"Answer with one word only. "
+        (str_concat q
+        (str_concat "\"},{\"role\":\"assistant\",\"content\":\"" (str_concat a "\"}]}")))))
+
+    (defn cm-mint-loop (name pairs sealed acc kept attested tried)
+        (if (eq (len pairs) 0) (list acc kept attested tried)
+            (do (let p (head pairs))
+                (let q (cm-mint-q name (nth p 0) (nth p 1) (nth p 2)))
+                (if (or (nothing? q)
+                    (or (eq (cm-guard-ok? q sealed) 0)
+                        (ge (str_find q (nth p 1) 0) 0)))
+                    (cm-mint-loop name (tail pairs) sealed acc kept attested (add tried 1))
+                    (cm-mint-loop name (tail pairs) sealed
+                        (str_concat acc (str_concat (cm-row q (nth p 1)) "\n"))
+                        (add kept 1)
+                        (add attested (cm-attest? q (nth p 1) (nth p 0) (nth p 2)))
+                        (add tried 1))))))
+
+    (defn cm-take (xs k)
+        (if (le k 0) (list)
+            (if (eq (len xs) 0) (list) (cons (head xs) (cm-take (tail xs) (sub k 1))))))
+    (defn cm-mint (name path sealed-prompts cap)
+        (cm-mint-loop name (cm-take (cm-pairs path) cap) sealed-prompts "" 0 0 0))
+    0)
