@@ -138,6 +138,14 @@ offline self-direction                      1048575
 The bidirectional live diagnostic returned four framebuffer events and final
 field `1`: error -> correlated control -> applied movement -> re-observation.
 
+After rebasing the already-merged local-authoring work, its stale dispatcher
+band was also re-observed. The bit that still expected coverage mint to be
+unimplemented now opened the real MLX generator. That run was stopped and all
+of its processes released. The bounded band now asks an actually unknown
+directive for `nothing`; the separate model-free `coverage-mint-band` retains
+coverage-mint's mechanical proof. Test observation no longer opens the model
+carrier by surprise.
+
 ## Fresh local health map
 
 The pre-movement census was `45 observed / 37 ready / 8 gaps / 0 unknown /
