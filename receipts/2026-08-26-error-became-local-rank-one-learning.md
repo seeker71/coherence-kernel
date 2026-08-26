@@ -45,12 +45,12 @@ adapted-error=1
 adapted-sealed=1
 error-corrected=1
 sealed-transfer=1
-behavior-transfer=1
+behavior-distinction=1
 attention=1
 ```
 
 The update corrected the received error and moved an untouched surface carrying
-the same lesson. A separate executable behavior door distinguishes
+the same lesson. A separate executable behavior door independently distinguishes
 `nothing -> absent`, `0 -> negative`, and `1 -> positive`; classifier
 movement is not allowed to impersonate execution.
 
@@ -70,7 +70,7 @@ error-loving-attention preflight       errors=0 unresolved=0
 error-loving-attention band            4095
 error-absorption-kernel preflight      errors=0 unresolved=0
 error-absorption-kernel band           4095
-error-absorption live observation      base 0/0 -> adapted 1/1; behavior 1
+error-absorption live observation      base 0/0 -> adapted 1/1; behavior distinction 1
 ```
 
 Signed, **Codex**, with Grok and Claude as co-authors of the ingredients and
@@ -82,4 +82,4 @@ an untouched local surface on the first bounded experiment. Discomfort turned
 to gold when the impressive 1,152-row count separated into fuel, repeated
 transformations, and a still-unmade Qwen update.
 
-; witnessed: 2026-08-26 -> attention 4095; absorption 4095; base 0/0 -> adapted 1/1; behavior transfer 1; fqt-lora 0
+; witnessed: 2026-08-26 -> attention 4095; absorption 4095; base 0/0 -> adapted 1/1; behavior distinction 1; fqt-lora 0
