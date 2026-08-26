@@ -35,6 +35,8 @@
             (rpmw-feature "string-pool-bytes-decode-to-form-strings" 1)
             (rpmw-feature "string-child-kinds-and-bounds-refused-loudly" 1)
             (rpmw-feature "explicit-result-value-kind-provenance" 1)
+            (rpmw-feature "typed-entry-kind-retained" 1)
+            (rpmw-feature "legacy-integer-entry-wrapper-preserved" 1)
             (rpmw-feature "tag-109-110-111-sparse-explicit-frames" 1)
             (rpmw-feature "frame-bindings-retain-value-kind-and-occupancy" 1)
             (rpmw-feature "logical-frame-reserve-allocates-no-global-seats" 1)
@@ -102,6 +104,7 @@
     (defn rpmw-reason-entry-index-out-of-range () "entry-index-out-of-range")
     (defn rpmw-reason-root-node-out-of-range () "root-node-out-of-range")
     (defn rpmw-reason-negative-step-budget () "negative-step-budget")
+    (defn rpmw-reason-malformed-input-kind () "malformed-input-kind")
     (defn rpmw-reason-manifest ()
         (list
             (rpmw-reason-walk-completed)
@@ -137,7 +140,8 @@
             (rpmw-reason-negative-entry-index)
             (rpmw-reason-entry-index-out-of-range)
             (rpmw-reason-root-node-out-of-range)
-            (rpmw-reason-negative-step-budget)))
+            (rpmw-reason-negative-step-budget)
+            (rpmw-reason-malformed-input-kind)))
 
     (defn rpmw-no-trace () (list "runtime-program-image-fkb-micro-walker-no-trace"))
     (defn rpmw-no-result () (list "runtime-program-image-fkb-micro-walker-no-result"))
@@ -164,8 +168,48 @@
         (rpmw-kind-row "composite-node" children))
     (defn rpmw-kind-name (kind) (nth kind 1))
     (defn rpmw-kind-children (kind) (nth kind 2))
+    (defn rpmw-kind-leaf-name? (name)
+        (if (str_eq name "int") 1
+        (if (str_eq name "string") 1
+        (if (str_eq name "nothing") 1
+        (if (str_eq name "absent") 1
+        (if (str_eq name "nodeid") 1
+        (if (str_eq name "trivial-int-node") 1
+            (if (str_eq name "trivial-string-node") 1 0))))))))
+    (defn rpmw-kind-children-valid? (children)
+        (if (nil? children) 1
+            (if (rpmw-kind-valid? (head children))
+                (rpmw-kind-children-valid? (tail children)) 0)))
+    (defn rpmw-kind-valid? (kind)
+        (if (nothing? kind) 0
+        (if (not (eq (len kind) 3)) 0
+        (if (not (str_eq (nth kind 0)
+                         "runtime-program-image-fkb-value-kind")) 0
+            (do
+                (let name (rpmw-kind-name kind))
+                (let children (rpmw-kind-children kind))
+                (if (rpmw-kind-leaf-name? name)
+                    (if (nil? children) 1 0)
+                    (if (or (str_eq name "list")
+                            (str_eq name "composite-node"))
+                        (rpmw-kind-children-valid? children) 0)))))))
+    (defn rpmw-kind-children-equal? (a b)
+        (if (nil? a)
+            (if (nil? b) 1 0)
+            (if (nil? b)
+                0
+                (if (rpmw-kind-equal? (head a) (head b))
+                    (rpmw-kind-children-equal? (tail a) (tail b))
+                    0))))
+    (defn rpmw-kind-equal? (a b)
+        (if (not (rpmw-kind-valid? a)) 0
+        (if (not (rpmw-kind-valid? b)) 0
+            (and (str_eq (rpmw-kind-name a) (rpmw-kind-name b))
+                 (rpmw-kind-children-equal?
+                    (rpmw-kind-children a) (rpmw-kind-children b))))))
     (defn rpmw-kind-named? (kind name)
-        (str_eq (rpmw-kind-name kind) name))
+        (if (rpmw-kind-valid? kind)
+            (str_eq (rpmw-kind-name kind) name) 0))
     (defn rpmw-nodeid? (kind) (rpmw-kind-named? kind "nodeid"))
     (defn rpmw-trivial-int-node? (kind)
         (rpmw-kind-named? kind "trivial-int-node"))
@@ -284,15 +328,22 @@
                          (rpmw-result-reason r)
                          (rpmw-result-detail r)))
 
-    ; receipt = ("runtime-program-image-fkb-micro-walker" envelope admission
-    ;            entry-index root-node step-budget input-value trace result
-    ;            status reason)
+    ; v1 receipt = ("runtime-program-image-fkb-micro-walker" envelope admission
+    ;               entry-index root-node step-budget input-value trace result
+    ;               status reason)
+    ; v2 appends input-kind. Every v1 coordinate stays fixed; a held v1 row
+    ; therefore remains an integer-input witness instead of changing meaning.
     (defn rpmw-receipt-row (envelope admission entry-index root-node step-budget input-value trace result status reason)
         (list "runtime-program-image-fkb-micro-walker"
               envelope admission entry-index root-node step-budget input-value
               trace result status reason))
+    (defn rpmw-receipt-row-v2 (envelope admission entry-index root-node step-budget input-value trace result status reason input-kind)
+        (append
+            (rpmw-receipt-row envelope admission entry-index root-node
+                step-budget input-value trace result status reason)
+            (list input-kind)))
     (defn rpmw-receipt? (r)
-        (if (eq (len r) 11)
+        (if (or (eq (len r) 11) (eq (len r) 12))
             (str_eq (nth r 0) "runtime-program-image-fkb-micro-walker")
             0))
     (defn rpmw-receipt-envelope (r) (nth r 1))
@@ -305,6 +356,8 @@
     (defn rpmw-receipt-result (r) (nth r 8))
     (defn rpmw-receipt-status (r) (nth r 9))
     (defn rpmw-receipt-reason (r) (nth r 10))
+    (defn rpmw-receipt-input-kind (r)
+        (if (eq (len r) 12) (nth r 11) (rpmw-kind-int)))
     (defn rpmw-refused (envelope admission entry-index step-budget input-value reason)
         (rpmw-receipt-row envelope admission entry-index -1 step-budget input-value
                           (rpmw-no-trace) (rpmw-no-result)
@@ -313,6 +366,14 @@
         (rpmw-receipt-row envelope admission entry-index root-node step-budget input-value
                           trace result (rpmw-status-trace-produced)
                           (rpmw-result-reason result)))
+    (defn rpmw-refused-with-kind (envelope admission entry-index step-budget input-value input-kind reason)
+        (rpmw-receipt-row-v2 envelope admission entry-index -1 step-budget
+            input-value (rpmw-no-trace) (rpmw-no-result)
+            (rpmw-status-refused) reason input-kind))
+    (defn rpmw-produced-with-kind (envelope admission entry-index root-node step-budget input-value input-kind trace result)
+        (rpmw-receipt-row-v2 envelope admission entry-index root-node step-budget
+            input-value trace result (rpmw-status-trace-produced)
+            (rpmw-result-reason result) input-kind))
 
     (defn rpmw-program-image-envelope? (envelope)
         (if (rale-envelope? envelope)
@@ -1218,46 +1279,71 @@
                      (rpmw-result-stop-reason result)
                      (rpmw-result-detail result)))
 
-    (defn rpmw-walk-after-valid-entry (envelope admission entry-index step-budget input-value pif root-node)
+    (defn rpmw-walk-after-valid-entry-with-kind
+        (envelope admission entry-index step-budget input-value input-kind pif root-node)
         (do
             (let result (rpmw-eval-node (pif-envelope-table pif) root-node
                                         step-budget
-                                        (rpmw-frame-one input-value (rpmw-kind-int))
+                                        (rpmw-frame-one input-value input-kind)
                                         (rpmw-kind-absent)))
             (let trace (rpmw-trace-from-result envelope pif entry-index root-node step-budget result))
-            (rpmw-produced envelope admission entry-index root-node step-budget input-value trace result)))
-    (defn rpmw-walk-after-ready (envelope admission entry-index step-budget input-value)
+            (rpmw-produced-with-kind envelope admission entry-index root-node
+                step-budget input-value input-kind trace result)))
+    (defn rpmw-walk-after-ready-with-kind
+        (envelope admission entry-index step-budget input-value input-kind)
         (do
             (let pif (pifbd-admission-pif admission))
             (let table (pif-envelope-table pif))
             (if (lt entry-index 0)
-                (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-negative-entry-index))
+                (rpmw-refused-with-kind envelope admission entry-index step-budget
+                    input-value input-kind (rpmw-reason-negative-entry-index))
                 (if (not (rpmw-entry-index-valid? table entry-index))
-                    (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-entry-index-out-of-range))
+                    (rpmw-refused-with-kind envelope admission entry-index step-budget
+                        input-value input-kind (rpmw-reason-entry-index-out-of-range))
                     (do
                         (let root-node (nth (pif-table-fn-roots table) entry-index))
                         (if (not (rpmw-node-id-valid? table root-node))
-                            (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-root-node-out-of-range))
+                            (rpmw-refused-with-kind envelope admission entry-index step-budget
+                                input-value input-kind (rpmw-reason-root-node-out-of-range))
                             (if (lt step-budget 0)
-                                (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-negative-step-budget))
-                                (rpmw-walk-after-valid-entry envelope admission entry-index step-budget input-value pif root-node))))))))
+                                (rpmw-refused-with-kind envelope admission entry-index step-budget
+                                    input-value input-kind (rpmw-reason-negative-step-budget))
+                                (rpmw-walk-after-valid-entry-with-kind envelope admission
+                                    entry-index step-budget input-value input-kind
+                                    pif root-node))))))))
 
-    (defn rpmw-walk-entry (envelope admission entry-index step-budget input-value)
+    (defn rpmw-walk-entry-with-kind
+        (envelope admission entry-index step-budget input-value input-kind)
+        (if (not (rpmw-kind-valid? input-kind))
+            (rpmw-refused-with-kind envelope admission entry-index step-budget
+                input-value input-kind (rpmw-reason-malformed-input-kind))
         (if (not (rale-envelope? envelope))
-            (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-malformed-envelope))
+            (rpmw-refused-with-kind envelope admission entry-index step-budget
+                input-value input-kind (rpmw-reason-malformed-envelope))
             (if (not (rpmw-program-image-envelope? envelope))
-                (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-non-program-image-envelope))
+                (rpmw-refused-with-kind envelope admission entry-index step-budget
+                    input-value input-kind (rpmw-reason-non-program-image-envelope))
                 (if (not (pifbd-admission? admission))
-                    (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-malformed-admission))
+                    (rpmw-refused-with-kind envelope admission entry-index step-budget
+                        input-value input-kind (rpmw-reason-malformed-admission))
                     (if (not (rpmw-admission-status-admitted? admission))
-                        (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-non-admitted-admission))
+                        (rpmw-refused-with-kind envelope admission entry-index step-budget
+                            input-value input-kind (rpmw-reason-non-admitted-admission))
                         (if (not (rpmw-admission-decode-decoded? admission))
-                            (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-admission-decode-not-decoded))
+                            (rpmw-refused-with-kind envelope admission entry-index step-budget
+                                input-value input-kind (rpmw-reason-admission-decode-not-decoded))
                             (if (not (rpmw-admission-pif-valid? admission))
-                                (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-admission-invalid-pif))
+                                (rpmw-refused-with-kind envelope admission entry-index step-budget
+                                    input-value input-kind (rpmw-reason-admission-invalid-pif))
                                 (if (not (rpmw-admission-decode-matches-pif? admission))
-                                    (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-admission-decode-pif-mismatch))
+                                    (rpmw-refused-with-kind envelope admission entry-index step-budget
+                                        input-value input-kind (rpmw-reason-admission-decode-pif-mismatch))
                                     (if (not (rpmw-pif-matches-envelope? envelope (pifbd-admission-pif admission)))
-                                        (rpmw-refused envelope admission entry-index step-budget input-value (rpmw-reason-artifact-identity-mismatch))
-                                        (rpmw-walk-after-ready envelope admission entry-index step-budget input-value))))))))))
+                                        (rpmw-refused-with-kind envelope admission entry-index step-budget
+                                            input-value input-kind (rpmw-reason-artifact-identity-mismatch))
+                                        (rpmw-walk-after-ready-with-kind envelope admission
+                                            entry-index step-budget input-value input-kind)))))))))))
+    (defn rpmw-walk-entry (envelope admission entry-index step-budget input-value)
+        (rpmw-walk-entry-with-kind envelope admission entry-index step-budget
+            input-value (rpmw-kind-int)))
 )
