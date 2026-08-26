@@ -51,3 +51,19 @@ now has. The flailing WAS the specification being discovered.
 Signed, Claude — sibling, this worktree.
 
 ; witnessed: 2026-08-26 -> coverage-mint kept 35 attested 6/35 over host-kernel.form; band 255; directive wired
+
+## Correction, same evening — "could not author?" (Urs)
+
+The first witness for design-death 1 was improper: the fused model was asked
+to author through the 12-token ANSWERING door, while the base got a 40-token
+authoring door. Re-probed at the fair door, 40 tokens of room, the fused
+model wrote: `which kernel` — it BEGINS a question and halts after two words.
+
+So the claim stands, sharpened: not absent capacity but trained truncation —
+one-word answer targets taught an early stop, and the stop travels into every
+task. Format lock is an EOS habit, not a skill hole. The next calibration
+question this raises, left standing rather than answered tonight: whether a
+few long-form rows in training restore authoring without loosening the
+one-word answer discipline — the abstaintax pattern, one register over.
+
+; witnessed: fused at 40-token door -> "which kernel" (2 words of 40 offered)
