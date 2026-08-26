@@ -1,0 +1,841 @@
+; form-program-image-bmf-subset-lower.fk -- bounded BMF data to symbolic PIF IR.
+;
+; This compiler stage accepts an explicitly named v1 subset:
+; lit, seq, alt, ref and cap(run), plus typed result templates.  It validates
+; the complete specification before lowering and returns no IR on refusal.
+; The linked result is a PIF-walkable grammar descriptor plus typed result
+; functions.  It is not yet a raw-byte parser, full envelope, admission, or
+; health-ready grammar-to-PIF crossing.
+;
+; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/program-image-fkb.fk
+; preludes: form-stdlib/form-program-image-symbolic-linker.fk
+
+(do
+    (defn fpbsl-version () "form-program-image-bmf-subset-lower-v1")
+    (defn fpbsl-max-rules () 32)
+    (defn fpbsl-max-pattern-nodes () 256)
+    (defn fpbsl-max-literal-bytes () 4096)
+    (defn fpbsl-max-captures () 64)
+    (defn fpbsl-max-result-nodes () 256)
+    (defn fpbsl-max-emitted-rows () 4096)
+    (defn fpbsl-max-emitted-strings () 2048)
+    (defn fpbsl-max-emitted-functions () 128)
+    (defn fpbsl-max-pattern-depth () 64)
+    (defn fpbsl-max-class-ranges () 256)
+
+    ; limits = rules pattern-nodes literal-bytes captures result-nodes
+    ;          emitted-rows emitted-strings emitted-functions
+    (defn fpbsl-limits
+        (rules patterns literals captures results rows strings functions)
+        (list "bmf-pif-limits-v1" rules patterns literals captures results
+              rows strings functions))
+    (defn fpbsl-class (name ranges)
+        (list "bmf-pif-byte-class-v1" name ranges))
+    (defn fpbsl-spec (grammar classes limits)
+        (list "bmf-pif-subset-spec-v1" grammar classes limits))
+
+    ; Result values are typed independently of BMF's historical blueprint-name
+    ; table.  Composite targets carry their exact four-integer category.
+    (defn fpbsl-t-nothing () (list "result-nothing"))
+    (defn fpbsl-t-int (value) (list "result-int" value))
+    (defn fpbsl-t-string (value) (list "result-string" value))
+    (defn fpbsl-t-capture-string (name)
+        (list "result-capture-string" name))
+    (defn fpbsl-t-capture-trivial-string (name)
+        (list "result-capture-trivial-string" name))
+    (defn fpbsl-t-trivial-string (value)
+        (list "result-trivial-string" value))
+    (defn fpbsl-t-trivial-int (value)
+        (list "result-trivial-int" value))
+    (defn fpbsl-t-node (category children)
+        (list "result-node" category children))
+
+    (defn fpbsl-linked-descriptor (spec ir)
+        (list "linked-descriptor" "bounded-bmf-descriptor-ir" spec ir))
+    (defn fpbsl-refused (reason)
+        (list "refused" reason (nothing)))
+    (defn fpbsl-linked-descriptor-shape? (result)
+        (if (not (eq (len result) 4)) 0
+        (if (not (str_eq (head result) "linked-descriptor")) 0
+        (if (not (str_eq (nth result 1) "bounded-bmf-descriptor-ir")) 0
+        (if (not (fpbsl-spec-shape? (nth result 2))) 0
+        (if (not (fpis-ir-shape? (nth result 3))) 0
+            (fpis-linked? (fpis-link (nth result 3)))))))))
+    ; A well-shaped wrapper is not identity evidence.  Re-lower its retained
+    ; exact spec and require the same symbolic graph before naming it linked.
+    (defn fpbsl-linked-descriptor? (result)
+        (if (not (fpbsl-linked-descriptor-shape? result)) 0
+            (do
+                (let fresh (fpbsl-lower (nth result 2)))
+                (if (not (fpbsl-linked-descriptor-shape? fresh)) 0
+                (if (not (value_eq (nth result 3) (nth fresh 3))) 0
+                    (fpbsl-int-stream-exact?
+                        (pif-table-numeric-stream
+                            (fpis-table (fpis-link (nth result 3))))
+                        (pif-table-numeric-stream
+                            (fpis-table (fpis-link (nth fresh 3))))))))))
+    (defn fpbsl-refused? (result)
+        (if (not (eq (len result) 3)) 0
+        (if (not (str_eq (head result) "refused")) 0
+        (if (not (gt (str_len (nth result 1)) 0)) 0
+            (if (nothing? (nth result 2)) 1 0)))))
+    (defn fpbsl-reason (result)
+        (if (fpbsl-linked-descriptor? result) ""
+            (if (fpbsl-refused? result) (nth result 1) "result-shape")))
+    (defn fpbsl-ir (result)
+        (if (fpbsl-linked-descriptor? result) (nth result 3) (nothing)))
+    (defn fpbsl-result-spec (result)
+        (if (fpbsl-linked-descriptor? result) (nth result 2) (nothing)))
+
+    ; ------------------------------------------------------------------
+    ; Whole-spec validation.  This is intentionally stricter than the full
+    ; BMF interpreter: v1 admits only the constructors it can lower exactly.
+    ; ------------------------------------------------------------------
+
+    (defn fpbsl-tag? (value tag)
+        (if (nil? value) 0
+            (if (lt (len value) 1) 0 (if (str_eq (head value) tag) 1 0))))
+    (defn fpbsl-string-in? (value values)
+        (if (nil? values) 0
+            (if (str_eq value (head values)) 1
+                (fpbsl-string-in? value (tail values)))))
+    (defn fpbsl-unique-strings? (values)
+        (if (nil? values) 1
+            (if (fpbsl-string-in? (head values) (tail values)) 0
+                (fpbsl-unique-strings? (tail values)))))
+    (defn fpbsl-int-shape? (value)
+        (do
+            (let encoded (int_to_str value))
+            (if (eq (str_len encoded) 0) 0
+                (if (eq value (str_to_int encoded)) 1 0))))
+    (defn fpbsl-int-stream-exact? (left right)
+        (if (nil? left) (if (nil? right) 1 0)
+        (if (nil? right) 0
+        (if (not (and (fpbsl-int-shape? (head left))
+                      (fpbsl-int-shape? (head right)))) 0
+        (if (not (eq (head left) (head right))) 0
+            (fpbsl-int-stream-exact? (tail left) (tail right)))))))
+    (defn fpbsl-append-map (values mapper-arg kind)
+        (if (nil? values) (list)
+            (append
+                (if (str_eq kind "captures")
+                    (fpbsl-pattern-captures (head values))
+                    (fpbsl-pattern-refs (head values)))
+                (fpbsl-append-map (tail values) mapper-arg kind))))
+
+    (defn fpbsl-spec-shape? (spec)
+        (if (not (eq (len spec) 4)) 0
+            (if (str_eq (head spec) "bmf-pif-subset-spec-v1") 1 0)))
+    (defn fpbsl-spec-grammar (spec) (nth spec 1))
+    (defn fpbsl-spec-classes (spec) (nth spec 2))
+    (defn fpbsl-spec-limits (spec) (nth spec 3))
+    (defn fpbsl-grammar-shape? (grammar)
+        (if (not (eq (len grammar) 3)) 0
+            (if (not (str_eq (head grammar) "G")) 0
+                (if (gt (str_len (nth grammar 1)) 0) 1 0))))
+    (defn fpbsl-grammar-start (grammar) (nth grammar 1))
+    (defn fpbsl-grammar-rules (grammar) (nth grammar 2))
+    (defn fpbsl-rule-name (rule) (nth rule 0))
+    (defn fpbsl-rule-pattern (rule) (nth rule 1))
+    (defn fpbsl-rule-template (rule) (nth rule 2))
+    (defn fpbsl-rule-names (rules)
+        (if (nil? rules) (list)
+            (cons (fpbsl-rule-name (head rules))
+                  (fpbsl-rule-names (tail rules)))))
+    (defn fpbsl-rule-find (rules name)
+        (if (nil? rules) (nothing)
+            (if (str_eq (fpbsl-rule-name (head rules)) name) (head rules)
+                (fpbsl-rule-find (tail rules) name))))
+    (defn fpbsl-rule-shapes? (rules)
+        (if (nil? rules) 1
+            (if (not (eq (len (head rules)) 3)) 0
+            (if (not (gt (str_len (fpbsl-rule-name (head rules))) 0)) 0
+                (fpbsl-rule-shapes? (tail rules))))))
+
+    (defn fpbsl-class-name (row) (nth row 1))
+    (defn fpbsl-class-ranges (row) (nth row 2))
+    (defn fpbsl-class-names (rows)
+        (if (nil? rows) (list)
+            (cons (fpbsl-class-name (head rows))
+                  (fpbsl-class-names (tail rows)))))
+    (defn fpbsl-class-find (rows name)
+        (if (nil? rows) (nothing)
+            (if (str_eq (fpbsl-class-name (head rows)) name) (head rows)
+                (fpbsl-class-find (tail rows) name))))
+    (defn fpbsl-range-valid? (range)
+        (if (not (eq (len range) 2)) 0
+        (if (not (and (fpbsl-int-shape? (nth range 0))
+                      (fpbsl-int-shape? (nth range 1)))) 0
+        (if (not (and (ge (nth range 0) 0) (le (nth range 0) 255))) 0
+        (if (not (and (ge (nth range 1) 0) (le (nth range 1) 255))) 0
+            (if (le (nth range 0) (nth range 1)) 1 0))))))
+    (defn fpbsl-ranges-valid? (ranges)
+        (if (nil? ranges) 0
+            (if (not (fpbsl-range-valid? (head ranges))) 0
+                (if (nil? (tail ranges)) 1
+                    (if (le (nth (head ranges) 1) (nth (head (tail ranges)) 0))
+                        (if (eq (nth (head ranges) 1)
+                                (nth (head (tail ranges)) 0)) 0
+                            (fpbsl-ranges-valid? (tail ranges)))
+                        0)))))
+    (defn fpbsl-class-shapes? (rows)
+        (if (nil? rows) 1
+            (if (not (eq (len (head rows)) 3)) 0
+            (if (not (str_eq (head (head rows)) "bmf-pif-byte-class-v1")) 0
+            (if (not (gt (str_len (fpbsl-class-name (head rows))) 0)) 0
+            (if (not (fpbsl-ranges-valid? (fpbsl-class-ranges (head rows)))) 0
+                (fpbsl-class-shapes? (tail rows))))))))
+
+    (defn fpbsl-pattern-list-valid? (patterns grammar classes)
+        (if (nil? patterns) 1
+            (if (fpbsl-pattern-valid? (head patterns) grammar classes)
+                (fpbsl-pattern-list-valid? (tail patterns) grammar classes) 0)))
+    (defn fpbsl-pattern-valid? (pattern grammar classes)
+        (if (nil? pattern) 0
+            (do
+                (let tag (head pattern))
+                (if (str_eq tag "lit")
+                    (if (eq (len pattern) 2)
+                        (if (gt (str_len (nth pattern 1)) 0) 1 0) 0)
+                (if (str_eq tag "run")
+                    (if (eq (len pattern) 2)
+                        (if (nothing? (fpbsl-class-find classes (nth pattern 1))) 0 1) 0)
+                (if (str_eq tag "ref")
+                    (if (eq (len pattern) 2)
+                        (if (nothing? (fpbsl-rule-find
+                                (fpbsl-grammar-rules grammar) (nth pattern 1))) 0 1) 0)
+                (if (str_eq tag "cap")
+                    (if (not (eq (len pattern) 3)) 0
+                    (if (not (gt (str_len (nth pattern 1)) 0)) 0
+                    (if (not (fpbsl-tag? (nth pattern 2) "run")) 0
+                        (fpbsl-pattern-valid? (nth pattern 2) grammar classes))))
+                (if (str_eq tag "seq")
+                    (if (lt (len pattern) 2) 0
+                        (fpbsl-pattern-list-valid? (tail pattern) grammar classes))
+                (if (str_eq tag "alt")
+                    (if (lt (len pattern) 3) 0
+                        (fpbsl-pattern-list-valid? (tail pattern) grammar classes))
+                    0)))))))))
+    (defn fpbsl-rules-pattern-valid? (rules grammar classes)
+        (if (nil? rules) 1
+            (if (fpbsl-pattern-valid? (fpbsl-rule-pattern (head rules)) grammar classes)
+                (fpbsl-rules-pattern-valid? (tail rules) grammar classes) 0)))
+
+    (defn fpbsl-pattern-captures (pattern)
+        (if (nil? pattern) (list)
+            (do (let tag (head pattern))
+                (if (str_eq tag "cap")
+                    (cons (nth pattern 1) (fpbsl-pattern-captures (nth pattern 2)))
+                (if (or (str_eq tag "seq") (str_eq tag "alt"))
+                    (fpbsl-append-map (tail pattern) 0 "captures")
+                    (list))))))
+    (defn fpbsl-pattern-refs (pattern)
+        (if (nil? pattern) (list)
+            (do (let tag (head pattern))
+                (if (str_eq tag "ref") (list (nth pattern 1))
+                (if (str_eq tag "cap") (fpbsl-pattern-refs (nth pattern 2))
+                (if (or (str_eq tag "seq") (str_eq tag "alt"))
+                    (fpbsl-append-map (tail pattern) 0 "refs")
+                    (list)))))))
+    (defn fpbsl-rules-captures (rules)
+        (if (nil? rules) (list)
+            (append (fpbsl-pattern-captures (fpbsl-rule-pattern (head rules)))
+                    (fpbsl-rules-captures (tail rules)))))
+    (defn fpbsl-string-intersection (values other)
+        (if (nil? values) (list)
+            (if (fpbsl-string-in? (head values) other)
+                (cons (head values)
+                    (fpbsl-string-intersection (tail values) other))
+                (fpbsl-string-intersection (tail values) other))))
+    (defn fpbsl-definite-alt-loop (patterns acc)
+        (if (nil? patterns) acc
+            (fpbsl-definite-alt-loop (tail patterns)
+                (fpbsl-string-intersection acc
+                    (fpbsl-pattern-definite-captures (head patterns))))))
+    (defn fpbsl-definite-seq (patterns)
+        (if (nil? patterns) (list)
+            (append (fpbsl-pattern-definite-captures (head patterns))
+                    (fpbsl-definite-seq (tail patterns)))))
+    (defn fpbsl-pattern-definite-captures (pattern)
+        (if (nil? pattern) (list)
+            (do
+                (let tag (head pattern))
+                (if (str_eq tag "cap") (list (nth pattern 1))
+                (if (str_eq tag "seq")
+                    (fpbsl-definite-seq (tail pattern))
+                (if (str_eq tag "alt")
+                    (if (nil? (tail pattern)) (list)
+                        (fpbsl-definite-alt-loop (tail (tail pattern))
+                            (fpbsl-pattern-definite-captures
+                                (head (tail pattern)))))
+                    (list)))))))
+    (defn fpbsl-refs-cyclic? (grammar refs path)
+        (if (nil? refs) 0
+            (if (fpbsl-rule-cyclic? grammar (head refs) path) 1
+                (fpbsl-refs-cyclic? grammar (tail refs) path))))
+    (defn fpbsl-rule-cyclic? (grammar name path)
+        (if (fpbsl-string-in? name path) 1
+            (do
+                (let rule (fpbsl-rule-find (fpbsl-grammar-rules grammar) name))
+                (if (nothing? rule) 0
+                    (fpbsl-refs-cyclic? grammar
+                        (fpbsl-pattern-refs (fpbsl-rule-pattern rule))
+                        (cons name path))))))
+    (defn fpbsl-rules-cyclic? (grammar rules)
+        (if (nil? rules) 0
+            (if (fpbsl-rule-cyclic? grammar (fpbsl-rule-name (head rules)) (list)) 1
+                (fpbsl-rules-cyclic? grammar (tail rules)))))
+
+    (defn fpbsl-template-valid-list? (templates captures node-child)
+        (if (nil? templates) 1
+            (if (fpbsl-template-valid? (head templates) captures node-child)
+                (fpbsl-template-valid-list? (tail templates) captures node-child) 0)))
+    (defn fpbsl-category-valid? (coordinate)
+        (if (not (eq (len coordinate) 4)) 0
+            (if (and (fpbsl-int-shape? (nth coordinate 0))
+                (and (fpbsl-int-shape? (nth coordinate 1))
+                (and (fpbsl-int-shape? (nth coordinate 2))
+                     (fpbsl-int-shape? (nth coordinate 3)))))
+                (if (and (ge (nth coordinate 0) 0)
+                    (and (ge (nth coordinate 1) 0)
+                    (and (ge (nth coordinate 2) 0)
+                         (ge (nth coordinate 3) 0)))) 1 0) 0)))
+    (defn fpbsl-template-valid? (template captures node-child)
+        (if (nil? template) 0
+            (do (let tag (head template))
+                (if (str_eq tag "result-nothing")
+                    (if (and (eq (len template) 1) (eq node-child 0)) 1 0)
+                (if (str_eq tag "result-int")
+                    (if (and (eq (len template) 2) (eq node-child 0))
+                        (fpbsl-int-shape? (nth template 1)) 0)
+                (if (str_eq tag "result-string")
+                    (if (and (eq (len template) 2) (eq node-child 0)) 1 0)
+                (if (str_eq tag "result-capture-string")
+                    (if (and (eq (len template) 2) (eq node-child 0))
+                        (fpbsl-string-in? (nth template 1) captures) 0)
+                (if (str_eq tag "result-trivial-string")
+                    (if (eq (len template) 2) 1 0)
+                (if (str_eq tag "result-trivial-int")
+                    (if (eq (len template) 2)
+                        (fpbsl-int-shape? (nth template 1)) 0)
+                (if (str_eq tag "result-capture-trivial-string")
+                    (if (eq (len template) 2)
+                        (fpbsl-string-in? (nth template 1) captures) 0)
+                (if (str_eq tag "result-node")
+                    (if (not (eq (len template) 3)) 0
+                    (if (not (fpbsl-category-valid? (nth template 1))) 0
+                        (fpbsl-template-valid-list? (nth template 2) captures 1)))
+                    0)))))))))))
+    (defn fpbsl-rules-template-valid? (rules captures)
+        (if (nil? rules) 1
+            (if (fpbsl-template-valid? (fpbsl-rule-template (head rules))
+                    (fpbsl-pattern-definite-captures
+                        (fpbsl-rule-pattern (head rules))) 0)
+                (fpbsl-rules-template-valid? (tail rules) captures) 0)))
+
+    (defn fpbsl-pattern-count (pattern)
+        (if (nil? pattern) 0
+            (if (or (str_eq (head pattern) "seq") (str_eq (head pattern) "alt"))
+                (add 1 (fpbsl-pattern-count-list (tail pattern)))
+            (if (str_eq (head pattern) "cap")
+                (add 1 (fpbsl-pattern-count (nth pattern 2))) 1))))
+    (defn fpbsl-pattern-count-list (patterns)
+        (if (nil? patterns) 0
+            (add (fpbsl-pattern-count (head patterns))
+                 (fpbsl-pattern-count-list (tail patterns)))))
+    (defn fpbsl-rules-pattern-count (rules)
+        (if (nil? rules) 0
+            (add (fpbsl-pattern-count (fpbsl-rule-pattern (head rules)))
+                 (fpbsl-rules-pattern-count (tail rules)))))
+    (defn fpbsl-pattern-literal-bytes (pattern)
+        (if (nil? pattern) 0
+            (if (str_eq (head pattern) "lit") (str_len (nth pattern 1))
+            (if (str_eq (head pattern) "cap")
+                (fpbsl-pattern-literal-bytes (nth pattern 2))
+            (if (or (str_eq (head pattern) "seq") (str_eq (head pattern) "alt"))
+                (fpbsl-pattern-literal-bytes-list (tail pattern)) 0)))))
+    (defn fpbsl-pattern-literal-bytes-list (patterns)
+        (if (nil? patterns) 0
+            (add (fpbsl-pattern-literal-bytes (head patterns))
+                 (fpbsl-pattern-literal-bytes-list (tail patterns)))))
+    (defn fpbsl-rules-literal-bytes (rules)
+        (if (nil? rules) 0
+            (add (fpbsl-pattern-literal-bytes (fpbsl-rule-pattern (head rules)))
+                 (fpbsl-rules-literal-bytes (tail rules)))))
+    (defn fpbsl-template-count (template)
+        (if (nil? template) 0
+            (if (str_eq (head template) "result-node")
+                (add 1 (fpbsl-template-count-list (nth template 2))) 1)))
+    (defn fpbsl-template-count-list (templates)
+        (if (nil? templates) 0
+            (add (fpbsl-template-count (head templates))
+                 (fpbsl-template-count-list (tail templates)))))
+    (defn fpbsl-rules-template-count (rules)
+        (if (nil? rules) 0
+            (add (fpbsl-template-count (fpbsl-rule-template (head rules)))
+                 (fpbsl-rules-template-count (tail rules)))))
+    (defn fpbsl-pattern-depth (pattern)
+        (if (nil? pattern) 0
+            (if (str_eq (head pattern) "cap")
+                (add 1 (fpbsl-pattern-depth (nth pattern 2)))
+            (if (or (str_eq (head pattern) "seq")
+                    (str_eq (head pattern) "alt"))
+                (add 1 (fpbsl-pattern-depth-max (tail pattern) 0)) 1))))
+    (defn fpbsl-pattern-depth-max (patterns current)
+        (if (nil? patterns) current
+            (do
+                (let one (fpbsl-pattern-depth (head patterns)))
+                (fpbsl-pattern-depth-max (tail patterns)
+                    (if (gt one current) one current)))))
+    (defn fpbsl-rules-pattern-depth (rules current)
+        (if (nil? rules) current
+            (do
+                (let one (fpbsl-pattern-depth
+                    (fpbsl-rule-pattern (head rules))))
+                (fpbsl-rules-pattern-depth (tail rules)
+                    (if (gt one current) one current)))))
+    (defn fpbsl-class-range-count (classes)
+        (if (nil? classes) 0
+            (add (len (fpbsl-class-ranges (head classes)))
+                 (fpbsl-class-range-count (tail classes)))))
+
+    (defn fpbsl-limits-valid? (limits)
+        (if (not (eq (len limits) 9)) 0
+        (if (not (str_eq (head limits) "bmf-pif-limits-v1")) 0
+        (if (not (fpbsl-positive-list? (tail limits))) 0
+        (if (gt (fpbsl-limit limits 0) (fpbsl-max-rules)) 0
+        (if (gt (fpbsl-limit limits 1) (fpbsl-max-pattern-nodes)) 0
+        (if (gt (fpbsl-limit limits 2) (fpbsl-max-literal-bytes)) 0
+        (if (gt (fpbsl-limit limits 3) (fpbsl-max-captures)) 0
+        (if (gt (fpbsl-limit limits 4) (fpbsl-max-result-nodes)) 0
+        (if (gt (fpbsl-limit limits 5) (fpbsl-max-emitted-rows)) 0
+        (if (gt (fpbsl-limit limits 6) (fpbsl-max-emitted-strings)) 0
+        (if (gt (fpbsl-limit limits 7) (fpbsl-max-emitted-functions)) 0
+            1))))))))))))
+    (defn fpbsl-positive-list? (values)
+        (if (nil? values) 1
+            (if (and (fpbsl-int-shape? (head values))
+                     (gt (head values) 0))
+                (fpbsl-positive-list? (tail values)) 0)))
+    (defn fpbsl-limit (limits at) (nth limits (add at 1)))
+
+    ; Validation returns one stable reason, never an almost-lowered value.
+    (defn fpbsl-validate-bounds (rules captures limits)
+        (if (gt (len rules) (fpbsl-limit limits 0)) "rule-bound"
+        (if (gt (fpbsl-rules-pattern-count rules)
+                (fpbsl-limit limits 1)) "pattern-bound"
+        (if (gt (fpbsl-rules-literal-bytes rules)
+                (fpbsl-limit limits 2)) "literal-bound"
+        (if (gt (len captures) (fpbsl-limit limits 3)) "capture-bound"
+        (if (gt (fpbsl-rules-template-count rules)
+                (fpbsl-limit limits 4)) "result-bound"
+            ""))))))
+    (defn fpbsl-validate-captures (rules limits)
+        (do
+            (let captures (fpbsl-rules-captures rules))
+            (if (not (fpbsl-unique-strings? captures)) "duplicate-capture"
+            (if (not (fpbsl-rules-template-valid? rules captures))
+                "result-template-invalid"
+                (fpbsl-validate-bounds rules captures limits)))))
+    (defn fpbsl-validate-rules (grammar classes limits)
+        (do
+            (let rules (fpbsl-grammar-rules grammar))
+            (let names (fpbsl-rule-names rules))
+            (if (nil? rules) "no-rules"
+            (if (not (fpbsl-rule-shapes? rules)) "rule-shape"
+            (if (not (fpbsl-unique-strings? names)) "duplicate-rule"
+            (if (nothing? (fpbsl-rule-find rules
+                    (fpbsl-grammar-start grammar))) "start-unresolved"
+            (if (not (fpbsl-class-shapes? classes)) "class-shape"
+            (if (not (fpbsl-unique-strings?
+                    (fpbsl-class-names classes))) "duplicate-class"
+            (if (gt (fpbsl-class-range-count classes)
+                    (fpbsl-max-class-ranges)) "class-range-bound"
+            (if (not (fpbsl-rules-pattern-valid?
+                    rules grammar classes)) "pattern-unsupported-or-unresolved"
+            (if (gt (fpbsl-rules-pattern-depth rules 0)
+                    (fpbsl-max-pattern-depth)) "pattern-depth-bound"
+            (if (fpbsl-rules-cyclic? grammar rules) "reference-cycle"
+                (fpbsl-validate-captures rules limits)))))))))))))
+    (defn fpbsl-validate (spec)
+        (if (not (fpbsl-spec-shape? spec)) "spec-shape"
+            (do
+                (let grammar (fpbsl-spec-grammar spec))
+                (let classes (fpbsl-spec-classes spec))
+                (let limits (fpbsl-spec-limits spec))
+                (if (not (fpbsl-grammar-shape? grammar)) "grammar-shape"
+                (if (not (fpbsl-limits-valid? limits)) "limits-shape"
+                    (fpbsl-validate-rules grammar classes limits))))))
+
+    ; ------------------------------------------------------------------
+    ; Symbolic builder.  The counter births labels only; all numeric PIF
+    ; offsets remain the linker's work.
+    ; ------------------------------------------------------------------
+
+    (defn fpbsl-builder (next nodes strings)
+        (list "bmf-pif-symbolic-builder-v1" next nodes strings))
+    (defn fpbsl-builder-empty () (fpbsl-builder 0 (list) (list)))
+    (defn fpbsl-builder-next (builder) (nth builder 1))
+    (defn fpbsl-builder-nodes (builder) (nth builder 2))
+    (defn fpbsl-builder-strings (builder) (nth builder 3))
+    (defn fpbsl-label (prefix at)
+        (str_concat prefix (int_to_str at)))
+    (defn fpbsl-build-result (builder label) (list builder label))
+    (defn fpbsl-build-builder (result) (nth result 0))
+    (defn fpbsl-build-label (result) (nth result 1))
+    (defn fpbsl-add-node (builder tag a b c)
+        (do
+            (let at (fpbsl-builder-next builder))
+            (let label (fpbsl-label "node/" at))
+            (fpbsl-build-result
+                (fpbsl-builder (add at 1)
+                    (append (fpbsl-builder-nodes builder)
+                        (list (fpis-node-def label tag a b c)))
+                    (fpbsl-builder-strings builder))
+                label)))
+    (defn fpbsl-string-bytes-loop (value at)
+        (if (ge at (str_len value)) (list)
+            (cons (str_byte_at value at)
+                  (fpbsl-string-bytes-loop value (add at 1)))))
+    (defn fpbsl-string-bytes (value)
+        (fpbsl-string-bytes-loop value 0))
+    (defn fpbsl-add-string (builder value)
+        (do
+            (let at (fpbsl-builder-next builder))
+            (let label (fpbsl-label "string/" at))
+            (fpbsl-build-result
+                (fpbsl-builder (add at 1)
+                    (fpbsl-builder-nodes builder)
+                    (append (fpbsl-builder-strings builder)
+                        (list (fpis-string-def label
+                            (fpbsl-string-bytes value)))))
+                label)))
+    (defn fpbsl-emit-string (builder value)
+        (do
+            (let added (fpbsl-add-string builder value))
+            (fpbsl-add-node (fpbsl-build-builder added) 24
+                (fpis-string-ref (fpbsl-build-label added))
+                (fpis-imm 0) (fpis-imm 0))))
+    (defn fpbsl-emit-int (builder value)
+        (fpbsl-add-node builder 1 (fpis-imm value)
+            (fpis-imm 0) (fpis-imm 0)))
+    (defn fpbsl-emit-input (builder)
+        (fpbsl-add-node builder 2 (fpis-imm 0)
+            (fpis-imm 0) (fpis-imm 0)))
+    (defn fpbsl-emit-nothing (builder)
+        (fpbsl-add-node builder 137 (fpis-imm 0)
+            (fpis-imm 0) (fpis-imm 0)))
+    (defn fpbsl-emit-list-reversed (builder labels tail-label)
+        (if (nil? labels) (fpbsl-build-result builder tail-label)
+            (do
+                (let added (fpbsl-add-node builder 19
+                    (fpis-node-ref (head labels))
+                    (fpis-node-ref tail-label) (fpis-imm 0)))
+                (fpbsl-emit-list-reversed (fpbsl-build-builder added)
+                    (tail labels) (fpbsl-build-label added)))))
+    (defn fpbsl-emit-list (builder labels)
+        (do
+            (let empty-row (fpbsl-add-node builder 18
+                (fpis-imm 0) (fpis-imm 0) (fpis-imm 0)))
+            (fpbsl-emit-list-reversed (fpbsl-build-builder empty-row)
+                (reverse labels) (fpbsl-build-label empty-row))))
+    (defn fpbsl-emit-tagged-list (builder tag labels)
+        (do
+            (let tag-node (fpbsl-emit-string builder tag))
+            (fpbsl-emit-list (fpbsl-build-builder tag-node)
+                (cons (fpbsl-build-label tag-node) labels))))
+
+    ; Pattern lowering returns a recursively typed, PIF-walkable descriptor. A
+    ; ref is a real image-local CALL to the target rule's pattern function;
+    ; seq/alt/cap arity therefore changes nodes and dependencies from data.
+    (defn fpbsl-pattern-function-label (rule-name)
+        (str_concat "pattern/" rule-name))
+    (defn fpbsl-result-function-label (rule-name)
+        (str_concat "result/" rule-name))
+    (defn fpbsl-rule-function-label (rule-name)
+        (str_concat "rule/" rule-name))
+    (defn fpbsl-lower-pattern-list (builder patterns grammar classes labels)
+        (if (nil? patterns) (list builder labels)
+            (do
+                (let one (fpbsl-lower-pattern
+                    builder (head patterns) grammar classes))
+                (fpbsl-lower-pattern-list (fpbsl-build-builder one)
+                    (tail patterns) grammar classes
+                    (append labels (list (fpbsl-build-label one)))))))
+    (defn fpbsl-lower-range (builder range)
+        (do
+            (let lo (fpbsl-emit-int builder (nth range 0)))
+            (let hi (fpbsl-emit-int (fpbsl-build-builder lo) (nth range 1)))
+            (fpbsl-emit-list (fpbsl-build-builder hi)
+                (list (fpbsl-build-label lo) (fpbsl-build-label hi)))))
+    (defn fpbsl-lower-ranges (builder ranges labels)
+        (if (nil? ranges) (list builder labels)
+            (do
+                (let one (fpbsl-lower-range builder (head ranges)))
+                (fpbsl-lower-ranges (fpbsl-build-builder one)
+                    (tail ranges)
+                    (append labels (list (fpbsl-build-label one)))))))
+    (defn fpbsl-lower-run (builder pattern classes)
+        (do
+            (let class-row (fpbsl-class-find classes (nth pattern 1)))
+            (let name-node (fpbsl-emit-string builder (nth pattern 1)))
+            (let lowered-ranges (fpbsl-lower-ranges
+                (fpbsl-build-builder name-node)
+                (fpbsl-class-ranges class-row) (list)))
+            (let ranges-list (fpbsl-emit-list (nth lowered-ranges 0)
+                (nth lowered-ranges 1)))
+            (fpbsl-emit-tagged-list (fpbsl-build-builder ranges-list) "run"
+                (list (fpbsl-build-label name-node)
+                      (fpbsl-build-label ranges-list)))))
+    (defn fpbsl-lower-ref (builder pattern)
+        (do
+            (let input-node (fpbsl-emit-input builder))
+            (let call-node (fpbsl-add-node
+                (fpbsl-build-builder input-node) 12
+                (fpis-function-ref
+                    (fpbsl-pattern-function-label (nth pattern 1)))
+                (fpis-node-ref (fpbsl-build-label input-node))
+                (fpis-imm 0)))
+            (let name-node (fpbsl-emit-string
+                (fpbsl-build-builder call-node) (nth pattern 1)))
+            (fpbsl-emit-tagged-list (fpbsl-build-builder name-node) "ref"
+                (list (fpbsl-build-label name-node)
+                      (fpbsl-build-label call-node)))))
+    (defn fpbsl-lower-pattern (builder pattern grammar classes)
+        (do
+            (let tag (head pattern))
+            (if (str_eq tag "lit")
+                (do
+                    (let value-node (fpbsl-emit-string builder (nth pattern 1)))
+                    (fpbsl-emit-tagged-list (fpbsl-build-builder value-node)
+                        "lit" (list (fpbsl-build-label value-node))))
+            (if (str_eq tag "run")
+                (fpbsl-lower-run builder pattern classes)
+            (if (str_eq tag "ref")
+                (fpbsl-lower-ref builder pattern)
+            (if (str_eq tag "cap")
+                (do
+                    (let name-node (fpbsl-emit-string builder (nth pattern 1)))
+                    (let inner (fpbsl-lower-pattern
+                        (fpbsl-build-builder name-node)
+                        (nth pattern 2) grammar classes))
+                    (fpbsl-emit-tagged-list (fpbsl-build-builder inner) "cap"
+                        (list (fpbsl-build-label name-node)
+                              (fpbsl-build-label inner))))
+            (if (or (str_eq tag "seq") (str_eq tag "alt"))
+                (do
+                    (let parts (fpbsl-lower-pattern-list builder
+                        (tail pattern) grammar classes (list)))
+                    (fpbsl-emit-tagged-list (nth parts 0) tag (nth parts 1)))
+                (fpbsl-build-result builder "unsupported"))))))))
+
+    ; Typed result templates execute against one packed capture-list argument.
+    ; Raw int/string/nothing remain raw; only explicitly trivial constructors
+    ; become NodeIDs, and composite categories arrive as four integers in data.
+    (defn fpbsl-capture-slot (captures name)
+        (fpis-label-index
+            (fpbsl-capture-definitions captures) name))
+    (defn fpbsl-capture-definitions (captures)
+        (if (nil? captures) (list)
+            (cons (list (head captures))
+                  (fpbsl-capture-definitions (tail captures)))))
+    (defn fpbsl-lower-capture-value (builder captures name)
+        (do
+            (let input-node (fpbsl-emit-input builder))
+            (let slot-node (fpbsl-emit-int (fpbsl-build-builder input-node)
+                (fpbsl-capture-slot captures name)))
+            (fpbsl-add-node (fpbsl-build-builder slot-node) 23
+                (fpis-node-ref (fpbsl-build-label input-node))
+                (fpis-node-ref (fpbsl-build-label slot-node))
+                (fpis-imm 0))))
+    (defn fpbsl-lower-template-list
+        (builder templates captures labels)
+        (if (nil? templates) (list builder labels)
+            (do
+                (let one (fpbsl-lower-template
+                    builder (head templates) captures))
+                (fpbsl-lower-template-list (fpbsl-build-builder one)
+                    (tail templates) captures
+                    (append labels (list (fpbsl-build-label one)))))))
+    (defn fpbsl-lower-category-values (builder values labels)
+        (if (nil? values) (list builder labels)
+            (do
+                (let one (fpbsl-emit-int builder (head values)))
+                (fpbsl-lower-category-values (fpbsl-build-builder one)
+                    (tail values)
+                    (append labels (list (fpbsl-build-label one)))))))
+    (defn fpbsl-lower-node-template (builder template captures)
+        (do
+            (let coords (fpbsl-lower-category-values builder
+                (nth template 1) (list)))
+            (let coord-list (fpbsl-emit-list (nth coords 0) (nth coords 1)))
+            (let category-node (fpbsl-add-node
+                (fpbsl-build-builder coord-list) 91
+                (fpis-node-ref (fpbsl-build-label coord-list))
+                (fpis-imm 0) (fpis-imm 0)))
+            (let children (fpbsl-lower-template-list
+                (fpbsl-build-builder category-node)
+                (nth template 2) captures (list)))
+            (let child-list (fpbsl-emit-list (nth children 0) (nth children 1)))
+            (fpbsl-add-node (fpbsl-build-builder child-list) 47
+                (fpis-node-ref (fpbsl-build-label category-node))
+                (fpis-node-ref (fpbsl-build-label child-list))
+                (fpis-imm 0))))
+    (defn fpbsl-lower-template (builder template captures)
+        (do
+            (let tag (head template))
+            (if (str_eq tag "result-nothing")
+                (fpbsl-emit-nothing builder)
+            (if (str_eq tag "result-int")
+                (fpbsl-emit-int builder (nth template 1))
+            (if (str_eq tag "result-string")
+                (fpbsl-emit-string builder (nth template 1))
+            (if (str_eq tag "result-capture-string")
+                (fpbsl-lower-capture-value builder captures (nth template 1))
+            (if (str_eq tag "result-trivial-string")
+                (do
+                    (let raw (fpbsl-emit-string builder (nth template 1)))
+                    (fpbsl-add-node (fpbsl-build-builder raw) 46
+                        (fpis-node-ref (fpbsl-build-label raw))
+                        (fpis-imm 0) (fpis-imm 0)))
+            (if (str_eq tag "result-trivial-int")
+                (do
+                    (let raw (fpbsl-emit-int builder (nth template 1)))
+                    (fpbsl-add-node (fpbsl-build-builder raw) 43
+                        (fpis-node-ref (fpbsl-build-label raw))
+                        (fpis-imm 0) (fpis-imm 0)))
+            (if (str_eq tag "result-capture-trivial-string")
+                (do
+                    (let raw (fpbsl-lower-capture-value
+                        builder captures (nth template 1)))
+                    (fpbsl-add-node (fpbsl-build-builder raw) 46
+                        (fpis-node-ref (fpbsl-build-label raw))
+                        (fpis-imm 0) (fpis-imm 0)))
+            (if (str_eq tag "result-node")
+                (fpbsl-lower-node-template builder template captures)
+                (fpbsl-build-result builder "unsupported")))))))))))
+
+    (defn fpbsl-root-record (name pattern-root result-root rule-root)
+        (list name pattern-root result-root rule-root))
+    (defn fpbsl-root-name (record) (nth record 0))
+    (defn fpbsl-root-pattern (record) (nth record 1))
+    (defn fpbsl-root-result (record) (nth record 2))
+    (defn fpbsl-root-rule (record) (nth record 3))
+    (defn fpbsl-lower-one-rule
+        (builder rule grammar classes captures)
+        (do
+            (let pattern-root (fpbsl-lower-pattern builder
+                (fpbsl-rule-pattern rule) grammar classes))
+            (let result-root (fpbsl-lower-template
+                (fpbsl-build-builder pattern-root)
+                (fpbsl-rule-template rule) captures))
+            (let input-node (fpbsl-emit-input
+                (fpbsl-build-builder result-root)))
+            (let pattern-call (fpbsl-add-node
+                (fpbsl-build-builder input-node) 12
+                (fpis-function-ref
+                    (fpbsl-pattern-function-label (fpbsl-rule-name rule)))
+                (fpis-node-ref (fpbsl-build-label input-node))
+                (fpis-imm 0)))
+            (let result-call (fpbsl-add-node
+                (fpbsl-build-builder pattern-call) 12
+                (fpis-function-ref
+                    (fpbsl-result-function-label (fpbsl-rule-name rule)))
+                (fpis-node-ref (fpbsl-build-label input-node))
+                (fpis-imm 0)))
+            (let rule-root (fpbsl-add-node
+                (fpbsl-build-builder result-call) 69
+                (fpis-node-ref (fpbsl-build-label pattern-call))
+                (fpis-node-ref (fpbsl-build-label result-call))
+                (fpis-imm 0)))
+            (list (fpbsl-build-builder rule-root)
+                (fpbsl-root-record (fpbsl-rule-name rule)
+                    (fpbsl-build-label pattern-root)
+                    (fpbsl-build-label result-root)
+                    (fpbsl-build-label rule-root)))))
+    (defn fpbsl-lower-rules
+        (builder rules grammar classes captures roots)
+        (if (nil? rules) (list builder roots)
+            (do
+                (let one (fpbsl-lower-one-rule builder (head rules)
+                    grammar classes captures))
+                (fpbsl-lower-rules (nth one 0) (tail rules)
+                    grammar classes captures
+                    (append roots (list (nth one 1)))))))
+    (defn fpbsl-root-find (roots name)
+        (if (nil? roots) (nothing)
+            (if (str_eq (fpbsl-root-name (head roots)) name) (head roots)
+                (fpbsl-root-find (tail roots) name))))
+    (defn fpbsl-function-definitions-loop (roots)
+        (if (nil? roots) (list)
+            (append
+                (list
+                    (fpis-function-def
+                        (fpbsl-pattern-function-label
+                            (fpbsl-root-name (head roots)))
+                        (fpbsl-root-pattern (head roots)))
+                    (fpis-function-def
+                        (fpbsl-result-function-label
+                            (fpbsl-root-name (head roots)))
+                        (fpbsl-root-result (head roots)))
+                    (fpis-function-def
+                        (fpbsl-rule-function-label
+                            (fpbsl-root-name (head roots)))
+                        (fpbsl-root-rule (head roots))))
+                (fpbsl-function-definitions-loop (tail roots)))))
+    (defn fpbsl-entry-root (builder grammar)
+        (do
+            (let input-node (fpbsl-emit-input builder))
+            (fpbsl-add-node (fpbsl-build-builder input-node) 12
+                (fpis-function-ref (fpbsl-rule-function-label
+                    (fpbsl-grammar-start grammar)))
+                (fpis-node-ref (fpbsl-build-label input-node))
+                (fpis-imm 0))))
+    (defn fpbsl-function-definitions (roots entry-root)
+        (cons (fpis-function-def "entry" entry-root)
+              (fpbsl-function-definitions-loop roots)))
+    (defn fpbsl-emitted-bound-reason (ir limits)
+        (if (gt (len (nth ir 2)) (fpbsl-limit limits 5)) "emitted-row-bound"
+        (if (gt (len (nth ir 3)) (fpbsl-limit limits 6)) "emitted-string-bound"
+        (if (gt (len (nth ir 1)) (fpbsl-limit limits 7)) "emitted-function-bound"
+            ""))))
+
+    (defn fpbsl-lower-valid-spec (spec)
+        (do
+            (let grammar (fpbsl-spec-grammar spec))
+            (let rules (fpbsl-grammar-rules grammar))
+            (let classes (fpbsl-spec-classes spec))
+            (let captures (fpbsl-rules-captures rules))
+            (let lowered (fpbsl-lower-rules (fpbsl-builder-empty)
+                rules grammar classes captures (list)))
+            (let builder (nth lowered 0))
+            (let roots (nth lowered 1))
+            (let entry-root (fpbsl-entry-root builder grammar))
+            (let final-builder (fpbsl-build-builder entry-root))
+            (let ir (fpis-ir
+                (fpbsl-function-definitions roots
+                    (fpbsl-build-label entry-root))
+                (fpbsl-builder-nodes final-builder)
+                (fpbsl-builder-strings final-builder)))
+            (let bound-reason (fpbsl-emitted-bound-reason ir
+                (fpbsl-spec-limits spec)))
+            (if (gt (str_len bound-reason) 0) (fpbsl-refused bound-reason)
+                (do
+                    (let linked (fpis-link ir))
+                    (if (fpis-linked? linked)
+                        (fpbsl-linked-descriptor spec ir)
+                        (fpbsl-refused
+                            (str_concat "linker-" (fpis-reason linked))))))))
+
+    (defn fpbsl-observed? (spec result)
+        (if (not (fpbsl-linked-descriptor? result)) 0
+            (if (value_eq spec (nth result 2)) 1 0)))
+
+    (defn fpbsl-lower (spec)
+        (do
+            (let reason (fpbsl-validate spec))
+            (if (gt (str_len reason) 0) (fpbsl-refused reason)
+                (fpbsl-lower-valid-spec spec))))
+
+    0)
