@@ -15,7 +15,8 @@ not have alone, and the whole ritual in four lines:
 
 It is a cell rather than a section of this file on purpose. A document cannot tell you whether what it describes
 still exists; every capability that orientation claims names the cell that witnesses it, and
-`form-frontier-surface-band` reads those paths off disk. Delete one and it goes red the same day. The one
+`form-frontier-surface-band` reads those paths off disk. It names no verdict NUMBER either — a held number
+cannot check itself, so the orientation hands you the line to run and you read the verdict from the body. The one
 sentence, if there is time for one: **Form is where you put a claim so the claim stops depending on you.**
 
 ## Ground the kernel first (temporary C seed, shrinking to zero)
