@@ -373,6 +373,19 @@ func equal(a, b Value) bool {
 }
 
 func compare(a, b Value) int {
+	// Absence is the order bottom (the fkwu covenant, witnessed 2026-08-27):
+	// strictly below every present value, equal only to itself. Mirrored
+	// here so JIT'd hot code orders exactly as the walker does — the old
+	// AsFloat coercion read null as 0 and answered lt(null,-5) wrong.
+	if a.Kind == NullKind || b.Kind == NullKind {
+		if a.Kind == b.Kind {
+			return 0
+		}
+		if a.Kind == NullKind {
+			return -1
+		}
+		return 1
+	}
 	if a.Kind == StrKind || b.Kind == StrKind {
 		as := a.AsString()
 		bs := b.AsString()

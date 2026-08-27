@@ -4536,11 +4536,39 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 			// Checked before the float lane so a null beside a float never
 			// reaches AsFloat.
 			if lv.Kind == VNull || rv.Kind == VNull {
+				ln := lv.Kind == VNull
+				rn := rv.Kind == VNull
+				// Absence is the ORDER BOTTOM on the reference arm
+				// (witnessed 2026-08-27, negatives and floats included):
+				// nothing sorts strictly below every present value and is
+				// equal only to itself. lt(n,x)=1, lt(x,n)=0, lt(n,n)=0,
+				// le(n,n)=1, ge(n,n)=1, lt(n,-5)=1, lt(n,0.5)=1.
 				switch cat.Inst {
 				case RCompareEq:
-					return boolInt(lv.Kind == VNull && rv.Kind == VNull)
+					return boolInt(ln && rn)
 				case RCompareNe:
-					return boolInt(!(lv.Kind == VNull && rv.Kind == VNull))
+					return boolInt(!(ln && rn))
+				case RCompareLt:
+					return boolInt(ln && !rn)
+				case RCompareLe:
+					return boolInt(ln)
+				case RCompareGt:
+					return boolInt(rn && !ln)
+				case RCompareGe:
+					return boolInt(rn)
+				}
+			}
+			// Strings: equality is IDENTITY of text (the reference's word
+			// identity — eq "a" "a" -> 1, eq "a" "b" -> 0), and a string
+			// never equals a non-string (eq "a" 1 -> 0, witnessed). Ordering
+			// with strings stays a loud contract until witnessed.
+			if lv.Kind == VStr || rv.Kind == VStr {
+				same := lv.Kind == VStr && rv.Kind == VStr && lv.Str == rv.Str
+				switch cat.Inst {
+				case RCompareEq:
+					return boolInt(same)
+				case RCompareNe:
+					return boolInt(!same)
 				}
 			}
 			// Same width-promotion rule as math: float on either side forces
@@ -5056,13 +5084,17 @@ func (k *Kernel) walkMatchSwitch(node NodeID, kids []NodeID, env *Frame) Value {
 }
 
 func truthy(v Value) bool {
+	// Truthiness is WORD-level on the reference arm (witnessed 2026-08-27,
+	// receipts/2026-08-27-hosts-lifted.md): only the exact int-zero word
+	// (and bool false) is false. Absence is truthy — (not nothing) -> 0,
+	// (if nothing 7 9) -> 7 — and every float word is truthy, 0.0 included,
+	// even though (eq 0.0 0) -> 1: falsity and equality are two different
+	// questions, word-level and value-level, deliberately.
 	switch v.Kind {
 	case VBool:
 		return v.Bool
 	case VInt:
 		return v.Int != 0
-	case VNull:
-		return false
 	}
 	return true
 }
@@ -5339,6 +5371,13 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 	case "let":
 		// (let <ident> <value>) — repackage the identifier wrapper as the
 		// bare string trivial so the walker reads NameID directly from `inst`.
+		// EXACTLY two slots: a lisp-style body-carrying let is foreign-
+		// dialect source, and silently discarding its body answered a wrong
+		// number with no complaint (the body-drop, witnessed 2026-08-27).
+		// Refuse it loudly, as ts and the fkwu top-level reader do.
+		if len(args) != 2 {
+			panic(fmt.Sprintf("let: (let name value) takes exactly two slots, got %d — a body-carrying let is foreign-dialect source; bind inside a do instead", len(args)))
+		}
 		nameID := k.identID(args[0])
 		nameTrivial := NodeID{Pkg: 1, Level: LevelTrivial, Type: TrivString, Inst: uint32(nameID)}
 		return k.intern(catBlock(RBlockLet), []NodeID{nameTrivial, args[1]})
