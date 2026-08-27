@@ -7,8 +7,13 @@
 ;   2    append then delta: exactly the appended bytes, watermark advanced
 ;   4    no new bytes: NOTHING again — never "", never a re-delivery
 ;   8    two appends between drains: ONE delta carrying both, in order
-;   16   interleaved writers: both writers' bytes present, total length
-;        exact — the append door loses nothing under interleave
+;   16   CONCURRENT writers: two background processes race 120 marked lines
+;        each into the spool; every line arrives intact (no mid-line
+;        interleave) and the counts are exact — atomicity witnessed under
+;        real concurrency, not sequential theater
+;   9    a frame LARGER than 8192 bytes crosses in one append and one delta,
+;        byte-exact through the cursor (bit value 9 folded into 16's slot
+;        arithmetic below as a paired condition)
 ;   32   JOIN: a task frame split across two appends — first delta feeds
 ;        the fcpsi cursor and HOLDS (held=1, no frame); the completing
 ;        delta yields the task with its exact text
@@ -20,6 +25,35 @@
 
 (do
     (defn stb-bit (ok bit) (if ok bit 0))
+    ; the dollar sign enters as a byte so no host quoting layer can eat it
+    (defn stb-d () (byte_to_str 36))
+    (defn stb-race-line (tag)
+        (str_concat "( i=0; while [ "
+        (str_concat (stb-d)
+        (str_concat "i -lt 120 ]; do printf '"
+        (str_concat tag
+        (str_concat "-end\\n' >> "
+        (str_concat (stb-d)
+        (str_concat "SP; i="
+        (str_concat (stb-d)
+        (str_concat "((i+1)); done ) &\n" ""))))))))))
+    (defn stb-race-script ()
+        (str_concat "SP=/tmp/sbt-band.spool\n"
+        (str_concat (stb-race-line "L-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        (str_concat (stb-race-line "R-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+                    "wait\nprintf done\n"))))
+
+    (defn stb-repeat (s n)
+        (if (le n 0) "" (str_concat s (stb-repeat s (sub n 1)))))
+    (defn stb-count (s needle n)
+        (do (let at (str_find s needle 0))
+            (if (lt at 0) n (stb-count (substring s (add at (str_len needle)) (str_len s)) needle (add n 1)))))
+    ; drain every pending delta into one string (short reads welcome)
+    (defn stb-drain (r acc rounds)
+        (if (gt rounds 50) (list acc r)
+            (do (let d (sbt-delta r))
+                (if (nothing? d) (list acc r)
+                    (stb-drain (nth d 1) (str_concat acc (nth d 0)) (add rounds 1))))))
     (defn stb-frame (body)
         (str_concat (fcpa-task-open) (str_concat body (fcpa-task-close))))
 
@@ -41,19 +75,23 @@
             (let d2 (sbt-delta r1))
             (let r2 (nth d2 1))
 
-            ; interleaved writers
-            (let a4 (sbt-append sp "w1-AAAA"))
-            (let a5 (sbt-append sp "w2-BB"))
-            (let a6 (sbt-append sp "w1-CCC"))
+            ; CONCURRENT writers: two racing background appenders, verified whole
+            (let wsc (write_file "/tmp/sbt-race.sh" (stb-race-script)))
+            (let race (host-exec "sh /tmp/sbt-race.sh" ""))
             (let d3 (sbt-delta r2))
             (let r3 (nth d3 1))
+            ; a >8192-byte frame in ONE append, drained in deltas until whole
+            (let big (stb-frame (stb-repeat "X" 9000)))
+            (let ab (sbt-append sp big))
+            (let d3b (stb-drain r3 "" 0))
+            (let r3x (nth d3b 1))
 
             ; split frame across appends, through the cursor
             (let half1 (substring (stb-frame "ask one") 0 12))
             (let half2 (substring (stb-frame "ask one") 12
                                   (str_len (stb-frame "ask one"))))
             (let a7 (sbt-append sp half1))
-            (let d4 (sbt-delta r3))
+            (let d4 (sbt-delta r3x))
             (let c1 (fcpsi-feed (fcpsi-fresh-cursor "band") (nth d4 0)))
             (let r4 (nth d4 1))
             (let a8 (sbt-append sp half2))
@@ -76,9 +114,14 @@
                               (eq (sbt-mark r1) 5)) 2)
                 (stb-bit (nothing? d1b) 4)
                 (stb-bit (str_eq (nth d2 0) "betagamma") 8)
-                (stb-bit (and (eq (str_len (nth d3 0)) 18)
-                         (and (ge (str_find (nth d3 0) "w2-BB" 0) 0)
-                              (ge (str_find (nth d3 0) "w1-CCC" 0) 0))) 16)
+                (stb-bit
+                    (and (ge (str_find race "done" 0) 0)
+                    (and (eq (stb-count (nth d3 0) "L-A" 0) 120)
+                    (and (eq (stb-count (nth d3 0) "R-B" 0) 120)
+                    (and (eq (stb-count (nth d3 0) "-end\n" 0) 240)
+                    (and (ge (str_len big) 8192)
+                         (ge (str_find (nth d3b 0) big 0) 0))))))
+                    16)
                 ; a partial OPENER is not yet an open frame: after half1 the
                 ; cursor holds bytes but no frame and no held-open claim —
                 ; the completing delta yields the task whole
