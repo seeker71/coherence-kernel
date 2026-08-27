@@ -1,6 +1,6 @@
 ; resident-async-ingress-band.fk — cooperative async ingress semantics.
 ;
-; Verdict 32767:
+; Verdict 262143:
 ;   1 dynamic multi-channel offers are admitted independently
 ;   2 round-robin yield moves one envelope per cooperative quantum
 ;   4 nothing is distinct from accepted 0 and accepted 1
@@ -16,6 +16,9 @@
 ;4096 a symbol absent at session start arrives, defines, and invokes by NodeID
 ;8192 replacement keeps the NodeID, advances version, and changes the result
 ;16384 wrong-NodeID invocation is nothing, not 0 or a borrowed binding
+;32768 file-poll backpressure retains its cursor and later yields exact bytes
+;65536 a positive short read commits only received bytes, then resumes
+;131072 an empty short read is present 0 and changes neither cursor nor gas
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/substrate-phase.fk form-stdlib/form-eval-full.fk form-stdlib/resident-async-ingress.fk
 
@@ -152,4 +155,57 @@
                          (and (nothing? (rai-session-result-value wrong))
                               (not (eq (rai-session-result-value wrong) 0)))) 16384))
 
-    (sum (list c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14)))
+    ; File-size observation is not cursor authority. A full queue rejects the
+    ; read without advancing; after its prior water yields, the exact same
+    ; append is admitted and becomes visible once.
+    (let poll-path "/tmp/form-resident-ingress-transactional.txt")
+    (let poll-written (write_file_text poll-path "abc"))
+    (let poll0 (rai-organ (list (rai-channel alpha 1 3 0)) 8))
+    (let poll-filled (nth (rai-offer poll0
+        (rai-envelope alpha 1 101 "prior" "held" "hold" -1)) 0))
+    (let poll-blocked (rai-poll-file poll-filled alpha poll-path 102
+        "task-bytes" "retry" -1))
+    (let poll-drained (rai-yield (nth poll-blocked 0) 100))
+    (let poll-retried (rai-poll-file (nth poll-drained 0) alpha poll-path 103
+        "task-bytes" "retry" -1))
+    (let poll-bytes (rai-yield (nth poll-retried 0) 100))
+    (let c15 (raib-bit (and (eq poll-written 3)
+        (and (eq (nth poll-blocked 1) 0)
+        (and (eq (rai-channel-cursor (rai-find-channel
+            (rai-channels (nth poll-blocked 0)) alpha)) 0)
+        (and (eq (nth poll-retried 1) 1)
+        (and (eq (rai-channel-cursor (rai-find-channel
+            (rai-channels (nth poll-retried 0)) alpha)) 3)
+             (str_eq (rai-env-payload (nth poll-bytes 1)) "abc")))))) 32768))
+
+    ; The pure admission seam makes a short host read deterministic to test.
+    ; A positive prefix enters water and commits only its own length; the next
+    ; poll begins at that exact byte. The full advertised size is never guessed.
+    (let short0 (rai-organ (list (rai-channel alpha 4 4 0)) 8))
+    (let short1 (rai-poll-admit short0 alpha 5 111 "task-bytes"
+        "ab" "retry" -1))
+    (let short-y1 (rai-yield (nth short1 0) 100))
+    (let short2 (rai-poll-admit (nth short-y1 0) alpha 5 112 "task-bytes"
+        "cde" "retry" -1))
+    (let short-y2 (rai-yield (nth short2 0) 100))
+    (let c16 (raib-bit (and (eq (nth short1 1) 1)
+        (and (eq (rai-channel-cursor (rai-find-channel
+            (rai-channels (nth short1 0)) alpha)) 2)
+        (and (str_eq (rai-env-payload (nth short-y1 1)) "ab")
+        (and (eq (rai-channel-cursor (rai-find-channel
+            (rai-channels (nth short2 0)) alpha)) 5)
+             (str_eq (rai-env-payload (nth short-y2 1)) "cde"))))) 65536))
+
+    ; Empty despite advertised availability is an observed present 0, not
+    ; nothing and not acceptance. It consumes neither cursor nor channel gas.
+    (let empty0 (rai-organ (list (rai-channel beta 2 3 0)) 8))
+    (let empty1 (rai-poll-admit empty0 beta 5 121 "task-bytes"
+        "" "retry" -1))
+    (let empty-channel (rai-find-channel (rai-channels (nth empty1 0)) beta))
+    (let c17 (raib-bit (and (eq (nth empty1 1) 0)
+        (and (str_eq (nth empty1 2) "short-read")
+        (and (eq (rai-channel-cursor empty-channel) 0)
+             (eq (rai-channel-gas empty-channel) 3)))) 131072))
+
+    (sum (list c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11 c12 c13 c14
+               c15 c16 c17)))
