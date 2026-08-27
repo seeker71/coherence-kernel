@@ -4744,8 +4744,28 @@ function walkCompare(
   // still owed. Equality alone is covenant here. Checked before the float
   // lane so a null beside a float never reaches the numeric coercion.
   if (av.kind === "null" || bv.kind === "null") {
-    if (op === RCmp.EQ) return boolInt(av.kind === "null" && bv.kind === "null");
-    if (op === RCmp.NE) return boolInt(!(av.kind === "null" && bv.kind === "null"));
+    // Absence is the ORDER BOTTOM on the reference arm (witnessed
+    // 2026-08-27, negatives and floats included): strictly below every
+    // present value, equal only to itself.
+    const an = av.kind === "null";
+    const bn = bv.kind === "null";
+    switch (op) {
+      case RCmp.EQ: return boolInt(an && bn);
+      case RCmp.NE: return boolInt(!(an && bn));
+      case RCmp.LT: return boolInt(an && !bn);
+      case RCmp.LE: return boolInt(an);
+      case RCmp.GT: return boolInt(bn && !an);
+      case RCmp.GE: return boolInt(bn);
+    }
+  }
+
+  // Strings: equality is identity of text (eq "a" "a" -> 1, eq "a" "b" ->
+  // 0) and a string never equals a non-string (eq "a" 1 -> 0, witnessed).
+  // Ordering with strings stays a loud contract until witnessed.
+  if (av.kind === "str" || bv.kind === "str") {
+    const same = av.kind === "str" && bv.kind === "str" && av.str === bv.str;
+    if (op === RCmp.EQ) return boolInt(same);
+    if (op === RCmp.NE) return boolInt(!same);
   }
 
   // Width-mixing: if either side is float, compare as float; if either
@@ -4885,11 +4905,13 @@ function numericToBig(v: Value): bigint {
 }
 
 function truthy(v: Value): boolean {
+  // Truthiness is WORD-level on the reference arm (witnessed 2026-08-27):
+  // only the exact int-zero word (and bool false) is false. Absence is
+  // truthy and every float word is truthy, 0.0 included — falsity is
+  // word-level while equality stays value-level, deliberately.
   switch (v.kind) {
     case "bool":
       return v.bool;
-    case "null":
-      return false;
     case "int":
     case "i8":
     case "i16":
@@ -4900,9 +4922,6 @@ function truthy(v: Value): boolean {
     case "i64":
     case "u64":
       return v.bigint !== 0n;
-    case "f32":
-    case "f64":
-      return v.float !== 0 && !isNaN(v.float);
     default:
       return true;
   }

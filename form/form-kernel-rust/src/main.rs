@@ -2617,11 +2617,14 @@ impl Value {
     }
 
     fn as_bool(&self) -> bool {
+        // Truthiness is WORD-level on the reference arm (witnessed
+        // 2026-08-27): only the exact int-zero word (and bool false) is
+        // false. Absence is truthy and every float word is truthy, 0.0
+        // included — falsity is word-level while equality stays
+        // value-level, deliberately.
         match self {
             Value::Bool(b) => *b,
             Value::Int(n) => *n != 0,
-            Value::Float(f) => *f != 0.0,
-            Value::Null => false,
             _ => true,
         }
     }
@@ -7308,10 +7311,34 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                 // float lane so a null beside a float never reaches
                 // as_float.
                 if matches!(lv, Value::Null) || matches!(rv, Value::Null) {
-                    let both = matches!(lv, Value::Null) && matches!(rv, Value::Null);
+                    // Absence is the ORDER BOTTOM on the reference arm
+                    // (witnessed 2026-08-27, negatives and floats included):
+                    // strictly below every present value, equal only to
+                    // itself.
+                    let ln = matches!(lv, Value::Null);
+                    let rn = matches!(rv, Value::Null);
+                    return bool_int(match cat.inst {
+                        RCMP_EQ => ln && rn,
+                        RCMP_NE => !(ln && rn),
+                        RCMP_LT => ln && !rn,
+                        RCMP_LE => ln,
+                        RCMP_GT => rn && !ln,
+                        RCMP_GE => rn,
+                        _ => panic!("compare.null: unknown op {}", cat.inst),
+                    });
+                }
+                // Strings: equality is identity of text (eq "a" "a" -> 1,
+                // eq "a" "b" -> 0) and a string never equals a non-string
+                // (eq "a" 1 -> 0, witnessed). Ordering with strings stays a
+                // loud contract until witnessed.
+                if matches!(lv, Value::Str(_)) || matches!(rv, Value::Str(_)) {
+                    let same = match (&lv, &rv) {
+                        (Value::Str(a), Value::Str(b)) => a == b,
+                        _ => false,
+                    };
                     match cat.inst {
-                        RCMP_EQ => return bool_int(both),
-                        RCMP_NE => return bool_int(!both),
+                        RCMP_EQ => return bool_int(same),
+                        RCMP_NE => return bool_int(!same),
                         _ => {}
                     }
                 }
@@ -8010,6 +8037,15 @@ fn build_verb(k: &mut Kernel, verb: &str, args: Vec<NodeID>) -> NodeID {
         "let" => {
             // (let <ident> <value>) — args[0] is an Identifier recipe wrapping
             // a string trivial. Repackage as the bare string trivial.
+            // EXACTLY two slots: a lisp-style body-carrying let is foreign-
+            // dialect source; silently discarding its body answered a wrong
+            // number with no complaint (the body-drop, witnessed 2026-08-27).
+            if args.len() != 2 {
+                panic!(
+                    "let: (let name value) takes exactly two slots, got {} — a body-carrying let is foreign-dialect source; bind inside a do instead",
+                    args.len()
+                );
+            }
             let name_id = k.ident_id(args[0]);
             let name_trivial = NodeID {
                 pkg: 1,
