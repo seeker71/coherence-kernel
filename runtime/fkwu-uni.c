@@ -5622,7 +5622,13 @@ static long long fk_host_exec(long long cmdv, long long inputv) {
     fk_cstr(cmdv, cmd, 8192);
     void *fp = popen(cmd, "r");
     if (fp == 0) {
-        return fk_sbuf("", 0);
+        /* Launch failure (fork starvation: popen NULL) answers the axiom-1 nothing,
+         * never "" — "" means the command RAN and spoke zero bytes. Witnessed
+         * 2026-08-27: under ulimit -u starvation ten calls answered ten empty
+         * strings rc 0 and a 10s window silently closed in 0.008s. str_len of
+         * nothing is 0, so length-guarded callers keep their old reading; only
+         * nothing? sees the difference. Go arm mirrors this shape. */
+        return fk_nothing;
     }
     static char hbuf[262144];
     long long total = 0;
