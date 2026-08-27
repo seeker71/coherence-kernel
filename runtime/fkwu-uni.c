@@ -5650,17 +5650,34 @@ static long long fk_host_exec(long long cmdv, long long inputv) {
          * loud (op 25), on this arm and on Go alike. */
         return fk_nothing;
     }
-    static char hbuf[262144];
+    /* Heap-grown: the old static 256KB silently amputated a command's output
+     * past 262,143 bytes — a partial answer wearing a whole one's skin (the
+     * same family as fs_list's 512 wall; healed 2026-08-27). Growth is the
+     * capability answer, never a quiet cap. */
+    long long hcap = 262144;
+    char *hbuf = malloc(hcap);
+    if (hbuf == 0) {
+        fk_die("fk_host_exec: out of memory for output buffer");
+    }
     long long total = 0;
-    while (total < 262143) {
-        long long got = read(fileno(fp), hbuf + total, (unsigned long)(262143 - total));
+    for (;;) {
+        if (total + 65536 > hcap) {
+            hcap = hcap * 2;
+            hbuf = realloc(hbuf, hcap);
+            if (hbuf == 0) {
+                fk_die("fk_host_exec: out of memory growing output buffer");
+            }
+        }
+        long long got = read(fileno(fp), hbuf + total, 65536);
         if (got <= 0) {
             break;
         }
         total = total + got;
     }
     pclose(fp);
-    return fk_sbuf(hbuf, total);
+    long long ans = fk_sbuf(hbuf, total);
+    free(hbuf);
+    return ans;
 }
 static long long fk_sock_request(long long hostv, long long portv, long long reqv) {
     /* Never-connected (DNS failure, no reachable peer) answers the axiom-1 nothing,
