@@ -473,12 +473,21 @@
     ; offsets remain the linker's work.
     ; ------------------------------------------------------------------
 
-    (defn fpbsl-builder (next nodes strings)
-        (list "bmf-pif-symbolic-builder-v1" next nodes strings))
-    (defn fpbsl-builder-empty () (fpbsl-builder 0 (list) (list)))
-    (defn fpbsl-builder-next (builder) (nth builder 1))
-    (defn fpbsl-builder-nodes (builder) (nth builder 2))
-    (defn fpbsl-builder-strings (builder) (nth builder 3))
+    ; Nodes and strings grow as stacks.  The former append-at-every-row shape
+    ; made grammar lowering quadratic in emitted rows; public access reverses
+    ; once at the image boundary and preserves the exact historical order.
+    (defn fpbsl-builder (next-node next-string node-stack string-stack)
+        (list "bmf-pif-symbolic-builder-v2-ranked-stacks"
+            next-node next-string node-stack string-stack))
+    (defn fpbsl-builder-empty () (fpbsl-builder 0 0 (list) (list)))
+    (defn fpbsl-builder-next-node (builder) (nth builder 1))
+    (defn fpbsl-builder-next-string (builder) (nth builder 2))
+    (defn fpbsl-builder-node-stack (builder) (nth builder 3))
+    (defn fpbsl-builder-string-stack (builder) (nth builder 4))
+    (defn fpbsl-builder-nodes (builder)
+        (reverse (fpbsl-builder-node-stack builder)))
+    (defn fpbsl-builder-strings (builder)
+        (reverse (fpbsl-builder-string-stack builder)))
     (defn fpbsl-label (prefix at)
         (str_concat prefix (int_to_str at)))
     (defn fpbsl-build-result (builder label) (list builder label))
@@ -486,13 +495,14 @@
     (defn fpbsl-build-label (result) (nth result 1))
     (defn fpbsl-add-node (builder tag a b c)
         (do
-            (let at (fpbsl-builder-next builder))
+            (let at (fpbsl-builder-next-node builder))
             (let label (fpbsl-label "node/" at))
             (fpbsl-build-result
                 (fpbsl-builder (add at 1)
-                    (append (fpbsl-builder-nodes builder)
-                        (list (fpis-node-def label tag a b c)))
-                    (fpbsl-builder-strings builder))
+                    (fpbsl-builder-next-string builder)
+                    (cons (fpis-node-def label tag a b c)
+                        (fpbsl-builder-node-stack builder))
+                    (fpbsl-builder-string-stack builder))
                 label)))
     (defn fpbsl-string-bytes-loop (value at)
         (if (ge at (str_len value)) (list)
@@ -502,14 +512,15 @@
         (fpbsl-string-bytes-loop value 0))
     (defn fpbsl-add-string (builder value)
         (do
-            (let at (fpbsl-builder-next builder))
+            (let at (fpbsl-builder-next-string builder))
             (let label (fpbsl-label "string/" at))
             (fpbsl-build-result
-                (fpbsl-builder (add at 1)
-                    (fpbsl-builder-nodes builder)
-                    (append (fpbsl-builder-strings builder)
-                        (list (fpis-string-def label
-                            (fpbsl-string-bytes value)))))
+                (fpbsl-builder (fpbsl-builder-next-node builder)
+                    (add at 1)
+                    (fpbsl-builder-node-stack builder)
+                    (cons (fpis-string-def label
+                            (fpbsl-string-bytes value))
+                        (fpbsl-builder-string-stack builder)))
                 label)))
     (defn fpbsl-emit-string (builder value)
         (do
@@ -556,13 +567,13 @@
     (defn fpbsl-rule-function-label (rule-name)
         (str_concat "rule/" rule-name))
     (defn fpbsl-lower-pattern-list (builder patterns grammar classes labels)
-        (if (nil? patterns) (list builder labels)
+        (if (nil? patterns) (list builder (reverse labels))
             (do
                 (let one (fpbsl-lower-pattern
                     builder (head patterns) grammar classes))
                 (fpbsl-lower-pattern-list (fpbsl-build-builder one)
                     (tail patterns) grammar classes
-                    (append labels (list (fpbsl-build-label one)))))))
+                    (cons (fpbsl-build-label one) labels)))))
     (defn fpbsl-lower-range (builder range)
         (do
             (let lo (fpbsl-emit-int builder (nth range 0)))
@@ -570,12 +581,12 @@
             (fpbsl-emit-list (fpbsl-build-builder hi)
                 (list (fpbsl-build-label lo) (fpbsl-build-label hi)))))
     (defn fpbsl-lower-ranges (builder ranges labels)
-        (if (nil? ranges) (list builder labels)
+        (if (nil? ranges) (list builder (reverse labels))
             (do
                 (let one (fpbsl-lower-range builder (head ranges)))
                 (fpbsl-lower-ranges (fpbsl-build-builder one)
                     (tail ranges)
-                    (append labels (list (fpbsl-build-label one)))))))
+                    (cons (fpbsl-build-label one) labels)))))
     (defn fpbsl-lower-run (builder pattern classes)
         (do
             (let class-row (fpbsl-class-find classes (nth pattern 1)))
@@ -651,20 +662,20 @@
                 (fpis-imm 0))))
     (defn fpbsl-lower-template-list
         (builder templates captures labels)
-        (if (nil? templates) (list builder labels)
+        (if (nil? templates) (list builder (reverse labels))
             (do
                 (let one (fpbsl-lower-template
                     builder (head templates) captures))
                 (fpbsl-lower-template-list (fpbsl-build-builder one)
                     (tail templates) captures
-                    (append labels (list (fpbsl-build-label one)))))))
+                    (cons (fpbsl-build-label one) labels)))))
     (defn fpbsl-lower-category-values (builder values labels)
-        (if (nil? values) (list builder labels)
+        (if (nil? values) (list builder (reverse labels))
             (do
                 (let one (fpbsl-emit-int builder (head values)))
                 (fpbsl-lower-category-values (fpbsl-build-builder one)
                     (tail values)
-                    (append labels (list (fpbsl-build-label one)))))))
+                    (cons (fpbsl-build-label one) labels)))))
     (defn fpbsl-lower-node-template (builder template captures)
         (do
             (let coords (fpbsl-lower-category-values builder
@@ -756,13 +767,13 @@
                     (fpbsl-build-label rule-root)))))
     (defn fpbsl-lower-rules
         (builder rules grammar classes captures roots)
-        (if (nil? rules) (list builder roots)
+        (if (nil? rules) (list builder (reverse roots))
             (do
                 (let one (fpbsl-lower-one-rule builder (head rules)
                     grammar classes captures))
                 (fpbsl-lower-rules (nth one 0) (tail rules)
                     grammar classes captures
-                    (append roots (list (nth one 1)))))))
+                    (cons (nth one 1) roots)))))
     (defn fpbsl-root-find (roots name)
         (if (nil? roots) (nothing)
             (if (str_eq (fpbsl-root-name (head roots)) name) (head roots)
