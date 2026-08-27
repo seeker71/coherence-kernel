@@ -1,0 +1,312 @@
+; form-cli-peer-contribution-turnwheel.fk — the resident Form peer joins the
+; append-only scannerless turnwheel without surrendering its model/KV residence.
+;
+; A model result is staged as data before egress.  The exact response bytes and
+; their byte count are appended in one physical call; only an observed append
+; promotes the returned session and marks the task NodeID seen.  A failed append
+; keeps the stage, so the next turn retries persistence without regenerating.
+;
+; The physical live door may wait on spool-bell-transport between turns.  This
+; cell itself neither opens a model nor waits: callers supply an already-live
+; session.  CPU/file work and native Metal model work therefore remain distinct
+; observable stages, while an external MLX trainer may continue independently.
+;
+; preludes: form-stdlib/form-cli-peer-append-turnwheel.fk
+; Proven by: form-stdlib/tests/form-cli-peer-contribution-turnwheel-band.fk
+
+(do
+    (defn fcpct-output-open () "<|form:peer-contribution|>")
+    (defn fcpct-response-open () "<|form:response|>\n")
+    (defn fcpct-output-close () "\n<|/form:peer-contribution|>")
+
+    ; The response is length-carried rather than line-carried. Newlines and
+    ; marker-looking bytes inside model speech are ordinary payload bytes.
+    (defn fcpct-output-frame
+        (task candidate signal contribution elapsed response cursor)
+        (str_concat (fcpct-output-open)
+        (str_concat (fcpat-field "task-node"
+                        (fcpat-node-text (fcpsi-task-node task)))
+        (str_concat (fcpat-field "candidate-node"
+                        (fcpat-node-text (fcpsi-candidate-node candidate)))
+        (str_concat (fcpat-field "exchange"
+                        (int_to_str (fcpsi-task-exchange task)))
+        (str_concat (fcpat-field "turn"
+                        (int_to_str (fcpsi-task-turn task)))
+        (str_concat (fcpat-field "signal" signal)
+        (str_concat (fcpat-field "contribution" (int_to_str contribution))
+        (str_concat (fcpat-field "elapsed-ms" (int_to_str elapsed))
+        (str_concat (fcpat-field "callback-calls"
+                        (int_to_str (frxc-callback-calls cursor)))
+        (str_concat (fcpat-field "tool-status" (frxc-status cursor))
+        (str_concat (fcpat-field "carrier" (frxc-carrier cursor))
+        (str_concat (fcpat-field "value-present"
+                        (int_to_str (frxc-value-present? cursor)))
+        (str_concat (fcpat-field "value"
+                        (if (eq (frxc-value-present? cursor) 1)
+                            (int_to_str (frxc-value cursor)) ""))
+        (str_concat (fcpat-field "native-code-generated"
+                        (int_to_str
+                            (frxc-callback-observed-code-generated? cursor)))
+        (str_concat (fcpat-field "injected-bytes"
+                        (int_to_str (frxc-injected-bytes cursor)))
+        (str_concat (fcpat-field "lifecycle"
+                        (frex-trace-actions (frxc-trace cursor)))
+        (str_concat (fcpat-field "response-bytes"
+                        (int_to_str (str_len response)))
+        (str_concat "\n" (str_concat (fcpct-response-open)
+        (str_concat response (fcpct-output-close))))))))))))))))))))))
+
+    (defn fcpct-output-response (frame)
+        (do
+            (let key "\nresponse-bytes=")
+            (let key-at (str_find frame key 0))
+            (if (lt key-at 0) (nothing)
+                (do
+                    (let n-start (add key-at (str_len key)))
+                    (let n-end (str_find frame "\n" n-start))
+                    (let body-mark (str_find frame (fcpct-response-open) n-end))
+                    (if (or (lt n-end 0) (lt body-mark 0)) (nothing)
+                        (do
+                            (let count (str_to_int
+                                (substring frame n-start n-end)))
+                            (let body-start
+                                (add body-mark (str_len (fcpct-response-open))))
+                            (let body-end (add body-start count))
+                            (if (or (lt count 0) (gt body-end (str_len frame)))
+                                (nothing)
+                                (substring frame body-start body-end))))))))
+
+    (defn fcpct-node-from-text (text)
+        (do
+            (let start (if (and (gt (str_len text) 0)
+                                (eq (str_byte_at text 0) 64)) 1 0))
+            (let a (str_find text "." start))
+            (let b (if (lt a 0) -1 (str_find text "." (add a 1))))
+            (let c (if (lt b 0) -1 (str_find text "." (add b 1))))
+            (if (or (lt a 0) (or (lt b 0) (lt c 0))) (nothing)
+                (make_nodeid
+                    (str_to_int (substring text start a))
+                    (str_to_int (substring text (add a 1) b))
+                    (str_to_int (substring text (add b 1) c))
+                    (str_to_int (substring text (add c 1) (str_len text)))))))
+
+    ; Startup recovery is one bounded sequential scan of durable egress. The
+    ; hot path thereafter uses structural NodeIDs already held in memory.
+    (defn fcpct-recovery-nodes-go (text at out)
+        (do
+            (let key "\ntask-node=")
+            (let found (str_find text key at))
+            (if (lt found 0) (reverse out)
+                (do
+                    (let start (add found (str_len key)))
+                    (let stop (str_find text "\n" start))
+                    (if (lt stop 0) (reverse out)
+                        (do
+                            (let node (fcpct-node-from-text
+                                (substring text start stop)))
+                            (fcpct-recovery-nodes-go text (add stop 1)
+                                (if (nothing? node) out (cons node out)))))))))
+    (defn fcpct-recovery-nodes (text)
+        (if (nothing? text) (list) (fcpct-recovery-nodes-go text 0 (list))))
+
+    ; Cross-residence replay identity comes from the protocol, not from an
+    ; intern table's visible instance coordinate. Within one endpoint,
+    ; exchange+turn is stable while intern order may evolve after hot swaps.
+    (defn fcpct-task-key (task)
+        (str_concat (int_to_str (fcpsi-task-exchange task))
+            (str_concat "/" (int_to_str (fcpsi-task-turn task)))))
+    (defn fcpct-key-seen? (keys key)
+        (if (eq (len keys) 0) 0
+            (if (str_eq (head keys) key) 1
+                (fcpct-key-seen? (tail keys) key))))
+    (defn fcpct-recovery-keys-go (text at out)
+        (do
+            (let exchange-key "\nexchange=")
+            (let turn-key "\nturn=")
+            (let exchange-at (str_find text exchange-key at))
+            (if (lt exchange-at 0) (reverse out)
+                (do
+                    (let exchange-start
+                        (add exchange-at (str_len exchange-key)))
+                    (let exchange-end (str_find text "\n" exchange-start))
+                    (let turn-at (if (lt exchange-end 0) -1
+                        (str_find text turn-key exchange-end)))
+                    (let turn-start (if (lt turn-at 0) -1
+                        (add turn-at (str_len turn-key))))
+                    (let turn-end (if (lt turn-start 0) -1
+                        (str_find text "\n" turn-start)))
+                    (if (or (lt exchange-end 0)
+                            (or (lt turn-start 0) (lt turn-end 0)))
+                        (reverse out)
+                        (fcpct-recovery-keys-go text (add turn-end 1)
+                            (cons (str_concat
+                                (substring text exchange-start exchange-end)
+                                (str_concat "/"
+                                    (substring text turn-start turn-end)))
+                                out)))))))
+    (defn fcpct-recovery-keys-from (text)
+        (if (nothing? text) (list)
+            (fcpct-recovery-keys-go text 0 (list))))
+
+    ; stage = exact task, peer result/new session, candidate, in-memory ack,
+    ; and exact bytes waiting for one append.
+    (defn fcpct-stage (task peer candidate ack frame)
+        (list "form-cli-peer-contribution-stage-v1"
+              task peer candidate ack frame))
+    (defn fcpct-stage-task (s) (nth s 1))
+    (defn fcpct-stage-peer (s) (nth s 2))
+    (defn fcpct-stage-candidate (s) (nth s 3))
+    (defn fcpct-stage-ack (s) (nth s 4))
+    (defn fcpct-stage-frame (s) (nth s 5))
+
+    (defn fcpct-make-stage (transport task peer candidate-result)
+        (do
+            (let candidate (fcpsi-result-value candidate-result))
+            (let signal (fcpsi-result-signal candidate-result))
+            (let contribution (fcpa-contribution peer))
+            (let response (fcpa-response peer))
+            (let ack (fcpat-task-ack transport task "agent" signal 1
+                (fcpsi-candidate-node candidate)
+                (fcpsi-candidate-state candidate) ""))
+            (fcpct-stage task peer candidate ack
+                (fcpct-output-frame task candidate signal contribution
+                    (fcpa-elapsed-ms peer) response (fcpa-cursor peer)))))
+
+    ; state = transport, currently committed session, optional durable-output
+    ; stage, completed count, executed-recipe contribution count, and stable
+    ; protocol replay keys recovered from durable egress.
+    (defn fcpct-state
+        (transport session staged completed contributions recovery-keys)
+        (list "form-cli-peer-contribution-turnwheel-v1" transport session
+              staged completed contributions recovery-keys))
+    (defn fcpct-transport (s) (nth s 1))
+    (defn fcpct-session (s) (nth s 2))
+    (defn fcpct-staged (s) (nth s 3))
+    (defn fcpct-completed (s) (nth s 4))
+    (defn fcpct-contributions (s) (nth s 5))
+    (defn fcpct-recovery-keys (s) (nth s 6))
+    (defn fcpct-new (transport session)
+        (fcpct-state transport session (nothing) 0 0 (list)))
+    (defn fcpct-with (s transport session staged completed contributions)
+        (fcpct-state transport session staged completed contributions
+            (fcpct-recovery-keys s)))
+    (defn fcpct-with-recovery-keys (s keys)
+        (fcpct-state (fcpct-transport s) (fcpct-session s)
+            (fcpct-staged s) (fcpct-completed s) (fcpct-contributions s) keys))
+    (defn fcpct-recover (s durable-egress)
+        (fcpct-with-recovery-keys s
+            (fcpct-recovery-keys-from durable-egress)))
+    (defn fcpct-task-durable? (s task)
+        (fcpct-key-seen? (fcpct-recovery-keys s) (fcpct-task-key task)))
+
+    (defn fcpct-result (state signal present value reason)
+        (list "form-cli-peer-contribution-result-v1"
+              state signal present value reason))
+    (defn fcpct-result-state (r) (nth r 1))
+    (defn fcpct-result-signal (r) (nth r 2))
+    (defn fcpct-result-present? (r) (nth r 3))
+    (defn fcpct-result-value (r) (nth r 4))
+    (defn fcpct-result-reason (r) (nth r 5))
+
+    (defn fcpct-transport-with-peer-pending (transport peer pending)
+        (fcpat-with transport (fcpat-join transport) peer
+            (fcpat-reader-row transport) pending (fcpat-acks transport)
+            (fcpat-events transport) (fcpat-released? transport)))
+
+    ; Append is the commit point. Session promotion and seen admission occur
+    ; only after the durable carrier accepted the whole length-framed result.
+    (defn fcpct-persist-staged (s)
+        (if (nothing? (fcpct-staged s))
+            (fcpct-result s "nothing" 0 (nothing) "no-staged-result")
+            (do
+                (let staged (fcpct-staged s))
+                (let transport (fcpct-transport s))
+                (let task (fcpct-stage-task staged))
+                (let ack (fcpct-stage-ack staged))
+                (let total (file_append_bytes (fcpat-egress transport)
+                    (fcpat-bytes (str_concat (fcpct-stage-frame staged) "\n"))))
+                (if (lt total 0)
+                    (do
+                        (let failed (fcpat-observe transport
+                            (fcpsi-task-exchange task) "agent-egress"
+                            "failure" total))
+                        (fcpct-result
+                            (fcpct-with s failed (fcpct-session s) staged
+                                (fcpct-completed s) (fcpct-contributions s))
+                            "failure" 0 (nothing) "egress-append-refused"))
+                    (do
+                        (let t1 (fcpat-with transport
+                            (fcpat-join transport) (fcpat-peer transport)
+                            (fcpat-reader-row transport) (fcpat-pending transport)
+                            (append (fcpat-acks transport) (list ack))
+                            (fcpat-events transport) (fcpat-released? transport)))
+                        (let t2 (fcpat-with-seen t1
+                            (cons (fcpsi-task-node task) (fcpat-seen t1))))
+                        (let t3 (fcpat-observe t2 (fcpsi-task-exchange task)
+                            "agent-egress" (fcpat-ack-signal ack) total))
+                        (let peer (fcpct-stage-peer staged))
+                        (let contribution (fcpa-contribution peer))
+                        (let next0 (fcpct-with s t3 (fcpa-session peer) (nothing)
+                            (add (fcpct-completed s) 1)
+                            (add (fcpct-contributions s) contribution)))
+                        (let next (fcpct-with-recovery-keys next0
+                            (cons (fcpct-task-key task)
+                                (fcpct-recovery-keys next0))))
+                        (fcpct-result next (fcpat-ack-signal ack) 1
+                            (fcpct-stage-candidate staged)
+                            "durable-before-seen"))))))
+
+    ; Pure staging seam used by the band and by alternative model carriers.
+    (defn fcpct-stage-peer-result (s task peer candidate-result peer-state)
+        (do
+            (let transport (fcpct-transport s))
+            (let t2 (fcpct-transport-with-peer-pending transport peer-state
+                (tail (fcpat-pending transport))))
+            (fcpct-with s t2 (fcpct-session s)
+                (fcpct-make-stage t2 task peer candidate-result)
+                (fcpct-completed s) (fcpct-contributions s))))
+
+    ; The only effectful model crossing: an already-live session enters and the
+    ; returned session remains staged until its result is durable.
+    (defn fcpct-run-head-peer (s budget)
+        (do
+            (let transport (fcpct-transport s))
+            (if (eq (len (fcpat-pending transport)) 0)
+                (fcpct-result s "nothing" 0 (nothing) "no-complete-task")
+                (do
+                    (let task (head (fcpat-pending transport)))
+                    (if (or (eq (fcpat-task-seen? transport task) 1)
+                            (eq (fcpct-task-durable? s task) 1))
+                        (do
+                            (let t2 (fcpct-transport-with-peer-pending transport
+                                (fcpat-peer transport) (tail (fcpat-pending transport))))
+                            (fcpct-result (fcpct-with s t2 (fcpct-session s)
+                                (fcpct-staged s) (fcpct-completed s)
+                                (fcpct-contributions s))
+                                "deduplicated" 1 (fcpsi-task-node task)
+                                "durable-task-node-seen"))
+                        (do
+                            (let ran (fcpsi-run-peer (fcpat-peer transport)
+                                (fcpct-session s) (fcpsi-task-node task) budget))
+                            (let peer (nth ran 1))
+                            (let candidate-result (nth ran 2))
+                            (let staged (fcpct-stage-peer-result s task peer
+                                candidate-result (nth ran 0)))
+                            (fcpct-persist-staged staged)))))))
+
+    ; One shared revolution: retry durable output first; otherwise admit one
+    ; bounded byte delta and actuate at most one complete task.
+    (defn fcpct-turn (s now budget)
+        (if (not (nothing? (fcpct-staged s))) (fcpct-persist-staged s)
+            (do
+                (let read (fcpat-reader-step (fcpct-transport s) now))
+                (let s1 (fcpct-with s (fcpat-result-state read)
+                    (fcpct-session s) (nothing) (fcpct-completed s)
+                    (fcpct-contributions s)))
+                (if (eq (len (fcpat-pending (fcpct-transport s1))) 0)
+                    (fcpct-result s1 (fcpat-result-signal read)
+                        (fcpat-result-present? read) (fcpat-result-value read)
+                        "reader-quantum")
+                    (fcpct-run-head-peer s1 budget)))))
+
+    0)
