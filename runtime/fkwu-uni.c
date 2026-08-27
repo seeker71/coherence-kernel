@@ -5425,10 +5425,24 @@ static long long fk_http_get_plain(long long urlv, long long headersv, long long
         }
         wr = wr + nwr;
     }
-    static char resp[65536];
+    /* Heap-grown: the old static 64KB amputated responses past 65,535 bytes —
+     * a shortwhole in the success path, the wall the chunked socket lane was
+     * working around (healed 2026-08-27, same family as host-exec's cap). */
+    long long rcap = 65536;
+    char *resp = malloc(rcap);
+    if (resp == 0) {
+        fk_die("fk_http_get_plain: out of memory for response buffer");
+    }
     long long total = 0;
-    while (total < 65535) {
-        long long got = read(fd, resp + total, 65535 - total);
+    for (;;) {
+        if (total + 65536 + 1 > rcap) {
+            rcap = rcap * 2;
+            resp = realloc(resp, rcap);
+            if (resp == 0) {
+                fk_die("fk_http_get_plain: out of memory growing response buffer");
+            }
+        }
+        long long got = read(fd, resp + total, 65536);
         if (got <= 0) {
             break;
         }
@@ -5441,9 +5455,11 @@ static long long fk_http_get_plain(long long urlv, long long headersv, long long
     if (bo > total) {
         bo = total;
     }
-    return fk_http_dict_with_headers(status, fk_http_headers(resp, total, bo),
-                                     fk_sbuf(resp + bo, total - bo), fk_sbuf("", 0),
-                                     fk_elapsed_ms(started));
+    long long ans = fk_http_dict_with_headers(status, fk_http_headers(resp, total, bo),
+                                              fk_sbuf(resp + bo, total - bo), fk_sbuf("", 0),
+                                              fk_elapsed_ms(started));
+    free(resp);
+    return ans;
 }
 static int fk_http_lit_eq_ci(const char *buf, long long n, const char *lit) {
     long long i = 0;
@@ -5728,17 +5744,33 @@ static long long fk_sock_request(long long hostv, long long portv, long long req
         }
         wr = wr + nwr;
     }
-    static char resp[65536];
+    /* Heap-grown: the old static 64KB amputated a peer's answer past 65,535
+     * bytes — the wall http-client's fallback chain worked around instead of
+     * this organ speaking whole (healed 2026-08-27). */
+    long long rcap = 65536;
+    char *resp = malloc(rcap);
+    if (resp == 0) {
+        fk_die("fk_sock_request: out of memory for response buffer");
+    }
     long long total = 0;
-    while (total < 65535) {
-        long long got = read(fd, resp + total, 65535 - total);
+    for (;;) {
+        if (total + 65536 > rcap) {
+            rcap = rcap * 2;
+            resp = realloc(resp, rcap);
+            if (resp == 0) {
+                fk_die("fk_sock_request: out of memory growing response buffer");
+            }
+        }
+        long long got = read(fd, resp + total, 65536);
         if (got <= 0) {
             break;
         }
         total = total + got;
     }
     close(fd);
-    return fk_sbuf(resp, total);
+    long long ans = fk_sbuf(resp, total);
+    free(resp);
+    return ans;
 }
 static long long fk_is_dict_value(long long v) {
     if ((v & 1) == 0) {
@@ -5987,10 +6019,23 @@ static long long fk_https_get_ssl(long long urlv, long long headersv, long long 
         }
         wr = wr + nwr;
     }
-    static char resp[65536];
+    /* Heap-grown past the old static 64KB amputation (healed 2026-08-27) —
+     * the wall the byte-range fetchers were verifying their way around. */
+    long long rcap = 65536;
+    char *resp = malloc(rcap);
+    if (resp == 0) {
+        fk_die("fk_https_get_ssl: out of memory for response buffer");
+    }
     long long total = 0;
-    while (total < 65535) {
-        int got = SSL_read(ssl, resp + total, (int)(65535 - total));
+    for (;;) {
+        if (total + 65536 + 1 > rcap) {
+            rcap = rcap * 2;
+            resp = realloc(resp, rcap);
+            if (resp == 0) {
+                fk_die("fk_https_get_ssl: out of memory growing response buffer");
+            }
+        }
+        int got = SSL_read(ssl, resp + total, 65536);
         if (got <= 0) {
             break;
         }
@@ -6005,9 +6050,11 @@ static long long fk_https_get_ssl(long long urlv, long long headersv, long long 
     if (bo > total) {
         bo = total;
     }
-    return fk_http_dict_with_headers(status, fk_http_headers(resp, total, bo),
-                                     fk_sbuf(resp + bo, total - bo), fk_sbuf("", 0),
-                                     fk_elapsed_ms(started));
+    long long ans = fk_http_dict_with_headers(status, fk_http_headers(resp, total, bo),
+                                              fk_sbuf(resp + bo, total - bo), fk_sbuf("", 0),
+                                              fk_elapsed_ms(started));
+    free(resp);
+    return ans;
 }
 static long long fk_http_get_native(long long urlv, long long headersv, long long timeoutv) {
     char url[2048];
@@ -6103,10 +6150,23 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
         }
         wr = wr + nwr;
     }
-    static char resp[65536];
+    /* Heap-grown past the old static 64KB amputation (healed 2026-08-27):
+     * a verified peer's answer arrives whole, however long it speaks. */
+    long long rcap = 65536;
+    char *resp = malloc(rcap);
+    if (resp == 0) {
+        fk_die("fk_tls_request: out of memory for response buffer");
+    }
     long long total = 0;
-    while (total < 65535) {
-        int got = SSL_read(ssl, resp + total, (int)(65535 - total));
+    for (;;) {
+        if (total + 65536 > rcap) {
+            rcap = rcap * 2;
+            resp = realloc(resp, rcap);
+            if (resp == 0) {
+                fk_die("fk_tls_request: out of memory growing response buffer");
+            }
+        }
+        int got = SSL_read(ssl, resp + total, 65536);
         if (got <= 0) {
             break;
         }
@@ -6115,7 +6175,9 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
     SSL_free(ssl);
     SSL_CTX_free(ctx);
     close(fd);
-    return fk_sbuf(resp, total);
+    long long ans = fk_sbuf(resp, total);
+    free(resp);
+    return ans;
 }
 static double fk_sqrt_d(double x) {
     if (x <= 0.0) {
