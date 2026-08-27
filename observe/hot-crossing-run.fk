@@ -9,6 +9,40 @@
 ; either, so no fk_fn seat can be — the proof is by construction, and the
 ; run prints what it witnessed.
 ;
+; DIAGNOSED 2026-08-27: the first await polled 50x with
+; (host-exec "sleep 0.2" "") between file_size checks. fk_host_exec
+; (runtime/fkwu-uni.c) answers "" when popen() itself fails — fork pressure
+; from the agent fleet — indistinguishable from a successful empty-stdout
+; run, so sh never launches, the sleep never holds, and each "0.2s" poll
+; costs ~0.15ms. Witnessed: ten sleep-0.2 calls = 2.14s unstarved but 0.008s
+; under fork starvation (ulimit -u 100 with 485 live user procs; ten
+; `date +%s%N` calls answered ten EMPTY strings — sh never ran); the whole
+; "10s" window closed in 0.008s, FAIL printed, rc 0. A sibling's 0.5–4s
+; window = intermittent starvation (some popens got through, some did not).
+;
+; REBUILT: the await is now a NAMED-PIPE door. read_file on a fifo blocks in
+; open() until an external writer delivers — fork-free on the reader side,
+; zero polls, zero CPU (probed: blocked 3.011s under a 3s writer, exact
+; bytes returned). A detached 60s guard writes an '@timeout' sentinel so a
+; missed window still closes as nothing. Every door shell SPEAKS a token
+; ("ok"/"armed"): a popen that never ran is a witnessed line, never a
+; silently vanished window. If the guard could not arm, the window is
+; unbounded and says so — the cut is killing the process.
+; WITNESSED across two back-to-back runs: a prior run's sleeping guard fired
+; into the next run's fresh fifo and closed its window at ~30s. So each guard
+; SIGNS its sentinel with its own shell pid ('@timeout <pid>'), the arm call
+; answers that same pid as the arming token, and a sentinel whose pid is not
+; this window's token is absorbed — the reader re-blocks. A late delivery
+; also leaves a stale REGULAR file at the fifo path that would feed the next
+; run a consumed offer; the door clears any non-fifo occupant before mkfifo.
+; Deliver only after this run prints "await door stands".
+; CAUTION: file_size and write_file on a fifo BLOCK in open(); only
+; read_file may touch the fifo.
+;
+; Deliver offers externally (each window is 60s from its door line):
+;   printf '4 2 1 7 1 2 2 1 3 3 5 1 2 3 3 3 0' > /tmp/crossing/offer-1.fifo
+;   printf '3 2 1 1 1 2 3 5 1 1 3 3 2 0' > /tmp/crossing/offer-2.fifo
+;
 ; preludes: form-stdlib/jit-once-born.fk
 (do
     (defn hx-say (s) (print (str_concat s "\n")))
@@ -41,17 +75,55 @@
         (do (let is (hx-ints s 0 (str_len s) (list)))
             (list (hx-rows (tail is) (list)) (head is))))
 
-    ; ── poll for an offer: bounded, sleep between, timeout honest ──────────
-    (defn hx-await (path tries)
+    ; ── await an offer at a NAMED PIPE: event-driven, zero polls ───────────
+    (defn hx-cat (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (head xs) (hx-cat (tail xs)))))
+    (defn hx-door (path k)
+        (if (le k 0) 0
+            (do (let tok (host-exec (hx-cat (list
+                    "mkdir -p /tmp/crossing 2>/dev/null; [ -p " path
+                    " ] || rm -f " path
+                    "; mkfifo " path
+                    " 2>/dev/null; [ -p " path " ] && echo ok")) ""))
+                (if (gt (str_len tok) 0) 1 (hx-door path (sub k 1))))))
+    (defn hx-arm (path secs)
+        (host-exec (hx-cat (list
+            "( /bin/sleep " secs
+            "; [ -p " path
+            " ] && printf '@timeout '$$ > " path
+            " ) >/dev/null 2>&1 & echo $$")) ""))
+    (defn hx-stale? (s nonce)
+        (do (let is (hx-ints s 0 (str_len s) (list)))
+            (if (eq (len is) 0) (if (eq nonce 0) 0 1)
+                (if (eq (head is) nonce) 0 1))))
+    (defn hx-read (path nonce tries)
         (if (le tries 0) (nothing)
-            (if (gt (file_size path) 0) (read_file path)
-                (do (let z (host-exec "sleep 0.2" ""))
-                    (hx-await path (sub tries 1))))))
+            (do (let s (read_file path))
+                (if (le (str_len s) 0) (hx-read path nonce (sub tries 1))
+                    (if (eq (str_byte_at s 0) 64)
+                        (if (eq (hx-stale? s nonce) 1)
+                            (hx-read path nonce (sub tries 1))
+                            (nothing))
+                        s)))))
+    (defn hx-await (path)
+        (do (if (eq (hx-door path 25) 1)
+                (hx-say (str_concat "await door stands: " path))
+                (hx-say (str_concat "await door could not stand (mkfifo popen answered empty 25x): " path)))
+            (let tok (hx-arm path "60"))
+            (let tis (hx-ints tok 0 (str_len tok) (list)))
+            (let nonce (if (eq (len tis) 0) 0 (head tis)))
+            (if (eq nonce 0)
+                (hx-say "timeout guard UNARMED (popen answered empty); window unbounded -- cut = kill this process")
+                0)
+            (let s (hx-read path nonce 12))
+            (let z (host-exec (str_concat "rm -f " path) ""))
+            s))
 
     ; ── the crossing ───────────────────────────────────────────────────────
     (hx-say "resident: started; no crossing symbol exists in any startup source")
     (let reg0 (jonb-registry 1))
-    (let offer1 (hx-await "/tmp/crossing/offer-1.txt" 50))
+    (let offer1 (hx-await "/tmp/crossing/offer-1.fifo"))
     (if (nothing? offer1) (hx-say "FAIL: offer-1 never arrived (timeout)")
         (do
             (let p1 (hx-parse offer1))
@@ -63,7 +135,7 @@
             (hx-say (str_concat "invoke by NodeID, arg 5 -> "
                 (str_concat (int_to_str (nth r1 0))
                     (str_concat "  route " (nth r1 1)))))
-            (let offer2 (hx-await "/tmp/crossing/offer-2.txt" 50))
+            (let offer2 (hx-await "/tmp/crossing/offer-2.fifo"))
             (if (nothing? offer2) (hx-say "FAIL: offer-2 never arrived")
                 (do
                     (let p2 (hx-parse offer2))
