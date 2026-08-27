@@ -69,6 +69,36 @@ above the old boundary both fresh and from `.fkb`. Source-symbol discovery in
 that temporary seed is still linear; dynamic capacity removes the ceiling but
 does not claim the Form/native NodeID mapping movement is complete.
 
+## The process field: sister awareness and the one-residence preference
+
+Agents that start and interact with Form now share one awareness surface and
+one preference, both witnessed 2026-08-27
+(receipts/2026-08-27-process-field-coordination.md):
+
+- `observe/process-field-live.fk` — the census. Sister fkwu processes with the
+  cell each carries, agent shells and python, CPU hogs anywhere on the host,
+  zombies with the parent that owes the reap, parent→child wait edges (which
+  process you or a sibling is waiting for), and system-wide GPU utilization
+  read from IOAccelerator — the read process-local `metal_status` cannot make.
+  Pure classification is four-way proven
+  (`form-stdlib/tests/process-field-band.fk`, 1023).
+- The presence noticeboard: a long-lived fkwu writes `<pid>.presence` into
+  `/tmp/form-field/` naming its role, task spool, reply spool, bell and
+  worktree. The census separates live presence, ghost (dead pid — a death's
+  honest residue), and unannounced siblings; `observe/process-field-sweep.fk`
+  clears exactly the ghosts.
+- `observe/form-cell-resident-live.fk` — ONE resident fkwu that compiles and
+  executes arriving Form source without restarting, environment retained
+  across tasks (a defn born in turn 1 answered turn 2 live), fed through the
+  same spool/bell transport and the same
+  `observe/form-cli-peer-task-send.fk` client, kind `cell-eval`. Turnwheel
+  four-way proven (`form-stdlib/tests/form-cell-servant-band.fk`, 127).
+
+The preference: before birthing another fkwu for a cell, read the noticeboard;
+a living residence that serves `cell-eval` is the door. A new process is for
+what no residence serves yet — and a residence that dies serving you is
+visible as a ghost, never a silence.
+
 ## What remains northward
 
 - Join client acknowledgement to compaction consent. Until durable client ack,
@@ -77,11 +107,18 @@ does not claim the Form/native NodeID mapping movement is complete.
   add a crash-complete intent/preimage journal. The actuator is presently
   proven on bounded fixtures with dynamic verifier/test callbacks, but arbitrary
   repository band NodeIDs are not yet executed in-process by that transaction.
-- Hot-swap the contribution recipe/turnwheel in a live residence. The current
-  model/KV remains resident across tasks, but a source change still waits for a
-  new process.
-- Sense system-wide CPU/GPU/MLX pressure from a native host carrier rather than
-  relying on process-local counters plus an explicit external reservation.
+- Hot-swap the contribution recipe/turnwheel in a live MODEL residence. The
+  cell residence above already takes arbitrary source without restart; the
+  model-holding contribution turnwheel still waits for a new process on source
+  change, and the two residences are not yet one.
+- Widen the resident evaluator's grammar: form-eval-full's proven core serves
+  today (integers, control, user calls); strings/lists/floats live in
+  grammars/form-eval.fk and native dispatch from inside eval is the named next
+  stone. An unbound name in a served task is a loud residence death — the
+  census shows it; a quieter repair is owed.
+- Sense MLX queue pressure from a native host carrier. GPU utilization is now
+  read system-wide through the census's IOAccelerator crossing; another
+  process's MLX reservation still enters as supplied observation.
 - Move the demand-grown function identity mechanism out of the temporary C seed
   and into the Form/native walker so the bootstrap repair can shrink away.
 - Re-run the composed resident source turn when the current MLX training
