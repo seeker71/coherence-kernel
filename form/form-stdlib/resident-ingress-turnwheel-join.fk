@@ -1,0 +1,221 @@
+; resident-ingress-turnwheel-join.fk — one cooperative crossing from yielded
+; resident ingress envelopes into the already-living form-cli turnwheel.
+;
+; The host and its shared session exist before `ritj-offer` can admit an
+; externally represented envelope.  `ritj-ready` opens one correlation
+; exchange.  Publish and accept envelopes for another exchange become an
+; explicit choice of their alternative; they do not move the host.  A valid
+; publish reaches fcrt-publish, and a valid accept reaches fcrt-accept-program
+; or fcrt-accept-prompt.  Program rows remain dynamic NodeID data and execute
+; through jonb's JIT-once-born door; this join adds no callable seat.
+;
+; Polling and yielding remain cooperative: this cell claims no kernel thread,
+; socket readiness, or physical Qwen run.  Its bounded event window contains
+; only exchange, movement, signal and identity/reason — never recipe, prompt,
+; or model bytes.  Absence, present 0, present 1, choice, timeout, cut, undo and
+; refusal remain different results.
+;
+; preludes: form-stdlib/resident-async-ingress.fk
+; preludes: form-stdlib/form-cli-resident-turnwheel.fk
+; Proven by: form-stdlib/tests/resident-ingress-turnwheel-join-band.fk
+
+(do
+    ; state = host, ingress, channel, ready-exchange, current-route-nodeid,
+    ; bounded causal events, event capacity.
+    (defn ritj-state (host ingress channel ready-exchange current-id events capacity)
+        (list "resident-ingress-turnwheel-join-v1" host ingress channel
+              ready-exchange current-id events capacity))
+    (defn ritj-host (s) (nth s 1))
+    (defn ritj-ingress (s) (nth s 2))
+    (defn ritj-channel (s) (nth s 3))
+    (defn ritj-ready-exchange (s) (nth s 4))
+    (defn ritj-current-id (s) (nth s 5))
+    (defn ritj-events (s) (nth s 6))
+    (defn ritj-event-capacity (s) (nth s 7))
+    (defn ritj-new (host ingress channel event-capacity)
+        (ritj-state host ingress channel (nothing) (nothing) (list)
+            event-capacity))
+    (defn ritj-with (s host ingress ready-exchange current-id events)
+        (ritj-state host ingress (ritj-channel s) ready-exchange current-id
+            events (ritj-event-capacity s)))
+
+    (defn ritj-event (exchange movement signal detail)
+        (list exchange movement signal detail))
+    (defn ritj-observe (s exchange movement signal detail)
+        (ritj-with s (ritj-host s) (ritj-ingress s)
+            (ritj-ready-exchange s) (ritj-current-id s)
+            (rai-bounded-events
+                (append (ritj-events s)
+                    (list (ritj-event exchange movement signal detail)))
+                (ritj-event-capacity s))))
+
+    ; result = state, signal, present, value, detail, yielded-envelope.
+    (defn ritj-result (state signal present value detail envelope)
+        (list "resident-ingress-turnwheel-result-v1" state signal present
+              value detail envelope))
+    (defn ritj-result-state (r) (nth r 1))
+    (defn ritj-result-signal (r) (nth r 2))
+    (defn ritj-result-present? (r) (nth r 3))
+    (defn ritj-result-value (r) (nth r 4))
+    (defn ritj-result-detail (r) (nth r 5))
+    (defn ritj-result-envelope (r) (nth r 6))
+
+    ; Ready is emitted from an existing host and changes no host/session/KV
+    ; state.  It returns [state', fcrt-ready-receipt].
+    (defn ritj-ready (s exchange)
+        (do
+            (let receipt (fcrt-ready (ritj-host s) exchange))
+            (let opened (ritj-with s (ritj-host s) (ritj-ingress s)
+                exchange (ritj-current-id s) (ritj-events s)))
+            (list (ritj-observe opened exchange "ready" "value"
+                      (nth receipt 2))
+                  receipt)))
+
+    ; An offer from before ready is absence.  A different exchange is a
+    ; first-class choice of the envelope alternative.  Only a correlated
+    ; offer reaches the ingress water.
+    (defn ritj-offer (s envelope)
+        (if (nothing? (ritj-ready-exchange s))
+            (ritj-result s "nothing" 0 (nothing) "ready-not-observed" envelope)
+            (if (not (eq (rai-env-exchange envelope)
+                         (ritj-ready-exchange s)))
+                (do
+                    (let s2 (ritj-observe s (rai-env-exchange envelope)
+                        (rai-env-kind envelope) "choice" "exchange-mismatch"))
+                    (ritj-result s2 "choice" 1
+                        (rai-env-alternative envelope) "exchange-mismatch" envelope))
+                (do
+                    (let offered (rai-offer (ritj-ingress s) envelope))
+                    (let s2 (ritj-with s (ritj-host s) (nth offered 0)
+                        (ritj-ready-exchange s) (ritj-current-id s)
+                        (ritj-events s)))
+                    (let s3 (ritj-observe s2 (rai-env-exchange envelope)
+                        (rai-env-kind envelope) (nth offered 2)
+                        (rai-env-alternative envelope)))
+                    (ritj-result s3 (nth offered 2)
+                        (if (nothing? (nth offered 1)) 0 1)
+                        (nth offered 1) (nth offered 2) envelope)))))
+
+    (defn ritj-from-act (s envelope act movement)
+        (do
+            (let host2 (fcrt-act-host act))
+            (let s2 (ritj-with s host2 (ritj-ingress s)
+                (ritj-ready-exchange s) (ritj-current-id s) (ritj-events s)))
+            (let s3 (ritj-observe s2 (rai-env-exchange envelope) movement
+                (fcrt-act-signal act) (fcrt-act-reason act)))
+            (ritj-result s3 (fcrt-act-signal act)
+                (if (nothing? (fcrt-act-value act)) 0 1)
+                (fcrt-act-value act) (fcrt-act-reason act) envelope)))
+
+    (defn ritj-publish-yielded (s envelope)
+        (do
+            (let p (rai-env-payload envelope))
+            (let route (nth p 2))
+            (let act (fcrt-publish (ritj-host s) (nth p 0) (nth p 1)
+                route (rai-env-exchange envelope)))
+            (if (not (str_eq (fcrt-act-signal act) "value"))
+                (ritj-from-act s envelope act "publish")
+                (do
+                    (let s2 (ritj-with s (fcrt-act-host act) (ritj-ingress s)
+                        (ritj-ready-exchange s) (fcrt-route-identity route)
+                        (ritj-events s)))
+                    (let s3 (ritj-observe s2 (rai-env-exchange envelope)
+                        "publish" "value" (fcrt-route-identity route)))
+                    (ritj-result s3 "value" 1 (fcrt-route-identity route)
+                        (fcrt-act-reason act) envelope)))))
+
+    (defn ritj-route-correlated? (s envelope)
+        (if (nothing? (ritj-current-id s)) 0
+            (if (nothing? (rai-env-alternative envelope)) 0
+                (node_eq (ritj-current-id s)
+                    (rai-env-alternative envelope)))))
+
+    (defn ritj-accept-program-yielded (s envelope)
+        (if (eq (ritj-route-correlated? s envelope) 0)
+            (do
+                (let s2 (ritj-observe s (rai-env-exchange envelope)
+                    "accept-program" "choice" "route-nodeid-mismatch"))
+                (ritj-result s2 "choice" 1 (rai-env-alternative envelope)
+                    "route-nodeid-mismatch" envelope))
+            (do
+                (let p (rai-env-payload envelope))
+                (ritj-from-act s envelope
+                    (fcrt-accept-program (ritj-host s) (nth p 0) (nth p 1)
+                        (nth p 2) (nth p 3))
+                    "accept-program"))))
+
+    ; This branch is compile-present but stays cold in the pure band.  A live
+    ; q38 residence can use the same correlated ingress without another API.
+    (defn ritj-accept-prompt-yielded (s envelope)
+        (if (eq (ritj-route-correlated? s envelope) 0)
+            (do
+                (let s2 (ritj-observe s (rai-env-exchange envelope)
+                    "accept-prompt" "choice" "route-nodeid-mismatch"))
+                (ritj-result s2 "choice" 1 (rai-env-alternative envelope)
+                    "route-nodeid-mismatch" envelope))
+            (do
+                (let p (rai-env-payload envelope))
+                (ritj-from-act s envelope
+                    (fcrt-accept-prompt (ritj-host s) (nth p 0) (nth p 1)
+                        (nth p 2) (nth p 3))
+                    "accept-prompt"))))
+
+    (defn ritj-cut-yielded (s envelope)
+        (do
+            (let cut (fcrt-cut (ritj-host s) (rai-env-payload envelope)))
+            (let s2 (ritj-with s (nth cut 0) (ritj-ingress s)
+                (ritj-ready-exchange s) (ritj-current-id s) (ritj-events s)))
+            (let present (if (nothing? (nth cut 1)) 0 1))
+            (let s3 (ritj-observe s2 (rai-env-exchange envelope)
+                "cut-flow" "cut" present))
+            (ritj-result s3 "cut" present (list (nth cut 1) (nth cut 2))
+                "flow-cut-returned-to-caller" envelope)))
+
+    (defn ritj-undo-yielded (s envelope)
+        (do
+            (let replay (fcrt-undo-of (ritj-host s)
+                (rai-env-payload envelope)))
+            (let s2 (ritj-observe s (rai-env-exchange envelope) "undo"
+                (if (nothing? replay) "nothing" "value")
+                (rai-env-payload envelope)))
+            (ritj-result s2 (if (nothing? replay) "nothing" "value")
+                (if (nothing? replay) 0 1) replay "replay-seam-observed" envelope)))
+
+    (defn ritj-dispatch (s envelope)
+        (if (str_eq (rai-env-kind envelope) "publish")
+            (ritj-publish-yielded s envelope)
+        (if (str_eq (rai-env-kind envelope) "accept-program")
+            (ritj-accept-program-yielded s envelope)
+        (if (str_eq (rai-env-kind envelope) "accept-prompt")
+            (ritj-accept-prompt-yielded s envelope)
+        (if (str_eq (rai-env-kind envelope) "cut-flow")
+            (ritj-cut-yielded s envelope)
+        (if (str_eq (rai-env-kind envelope) "undo")
+            (ritj-undo-yielded s envelope)
+            (do
+                (let s2 (ritj-observe s (rai-env-exchange envelope)
+                    (rai-env-kind envelope) "choice" "movement-not-selected"))
+                (ritj-result s2 "choice" 1 (rai-env-alternative envelope)
+                    "movement-not-selected" envelope))))))))
+
+    ; One cooperative quantum: at most one ingress envelope and at most one
+    ; turnwheel act.  Timeout/cut/release signals from ingress never dispatch
+    ; their payload as a recipe or prompt.
+    (defn ritj-step (s now)
+        (do
+            (let yielded (rai-yield (ritj-ingress s) now))
+            (let s1 (ritj-with s (ritj-host s) (nth yielded 0)
+                (ritj-ready-exchange s) (ritj-current-id s) (ritj-events s)))
+            (let envelope (nth yielded 1))
+            (let signal (nth yielded 2))
+            (if (nothing? envelope)
+                (ritj-result s1 "nothing" 0 (nothing) "ingress-idle" (nothing))
+                (if (not (str_eq signal "value"))
+                    (do
+                        (let s2 (ritj-observe s1 (rai-env-exchange envelope)
+                            (rai-env-kind envelope) signal
+                            (rai-env-alternative envelope)))
+                        (ritj-result s2 signal 0 (nothing)
+                            (rai-env-alternative envelope) envelope))
+                    (ritj-dispatch s1 envelope)))))
+    0)
