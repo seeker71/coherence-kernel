@@ -1,0 +1,88 @@
+; peer-turnwheel-band.fk — N requests, one shared context, every signal
+; structural. Steppers are synthetic function values (the fqmn discipline):
+; one counts down and stops, one echoes its state, one declines, one never
+; stops — so fairness, isolation, cut, undo-as-replay, timeout, and the
+; three distinct closings are all decided by the band.
+;
+; Verdict 2047 (11 bits):
+;   1     two rows interleave fairly: after 3 turns each holds 3 tokens
+;   2     isolation: each row's tokens are ITS OWN (5,4,3 vs 100,99,98) —
+;         KV branches never bleed
+;   4     the shared sctx is threaded through every step: it counts total
+;         steps across all rows exactly
+;   8     a finishing row closes "done" and leaves the wheel; the survivor
+;         keeps stepping — choice stays with the reader
+;   16    a declining stepper closes its row "declined" — distinct from done
+;   32    a budget-exhausted row closes "timeout" with its partial KEPT
+;   64    wt-cut drops a row now, status "cut", and returns its releaser
+;         UNINVOKED for the caller to fire — a GPU state's explicit death
+;   128   cutting an absent id: wheel unchanged, releaser NOTHING
+;   256   undo-as-replay: the cut row's full token history comes back for
+;         re-prefill; an absent id replays NOTHING
+;   512   wt-run halts when all rows closed, before its wheel budget
+;   1024  a wheel of ONE behaves as plain generation — the scheduler adds
+;         nothing when nothing needs scheduling
+;
+; preludes: form-stdlib/peer-turnwheel.fk
+
+(do
+    (defn twb-bit (ok bit) (if ok bit 0))
+
+    ; stepper: rstate = (countdown), emits countdown then stop; sctx counts
+    (defn twb-count (sctx rstate)
+        (do (let n (nth rstate 0))
+            (if (le n 0) (list (wt-stop) rstate (add sctx 1))
+                (list n (list (sub n 1)) (add sctx 1)))))
+    (defn twb-decline (sctx rstate) (list (nothing) rstate (add sctx 1)))
+    (defn twb-forever (sctx rstate) (list 7 rstate (add sctx 1)))
+
+    (defn peer-turnwheel-band ()
+        (do
+            ; two counters from different heights
+            (let w0 (wt-wheel (list (wt-row 1 (list 5) 99 "rel-1")
+                                    (wt-row 2 (list 100) 99 "rel-2")) 0))
+            (let w3 (wt-turn (wt-turn (wt-turn w0 twb-count) twb-count) twb-count))
+            (let r1 (wt-find (wt-rows w3) 1))
+            (let r2 (wt-find (wt-rows w3) 2))
+
+            ; run to completion: row 1 stops after 5 emits, row 2 after 100 —
+            ; use small heights for the run test
+            (let wr (wt-run (wt-wheel (list (wt-row 1 (list 2) 99 "a")
+                                            (wt-row 2 (list 4) 99 "b")) 0) twb-count 50))
+
+            (let wd (wt-turn (wt-wheel (list (wt-row 9 (list) 99 "r")) 0) twb-decline))
+            (let wt- (wt-run (wt-wheel (list (wt-row 3 (list) 4 "r")) 0) twb-forever 20))
+            (let cutg (wt-cut w3 2))
+            (let cutn (wt-cut w3 77))
+
+            (sum (list
+                (twb-bit (and (eq (len (wt-toks r1)) 3) (eq (len (wt-toks r2)) 3)) 1)
+                (twb-bit (and (eq (nth (wt-toks r1) 0) 5)
+                         (and (eq (nth (wt-toks r1) 2) 3)
+                         (and (eq (nth (wt-toks r2) 0) 100)
+                              (eq (nth (wt-toks r2) 2) 98)))) 2)
+                (twb-bit (eq (wt-sctx w3) 6) 4)
+                (twb-bit (do (let a (wt-find (wt-rows wr) 1))
+                         (let b (wt-find (wt-rows wr) 2))
+                         (if (and (str_eq (wt-status a) "done")
+                              (and (str_eq (wt-status b) "done")
+                                   (eq (len (wt-toks b)) 4))) 1 0)) 8)
+                (twb-bit (str_eq (wt-status (wt-find (wt-rows wd) 9)) "declined") 16)
+                (twb-bit (do (let r (wt-find (wt-rows wt-) 3))
+                         (if (and (str_eq (wt-status r) "timeout")
+                                  (eq (len (wt-toks r)) 4)) 1 0)) 32)
+                (twb-bit (and (str_eq (wt-status (wt-find (wt-rows (nth cutg 0)) 2)) "cut")
+                              (str_eq (nth cutg 1) "rel-2")) 64)
+                (twb-bit (and (nothing? (nth cutn 1))
+                              (eq (wt-live-count (wt-rows (nth cutn 0)) 0)
+                                  (wt-live-count (wt-rows w3) 0))) 128)
+                (twb-bit (and (eq (len (wt-replay-of (nth cutg 0) 2)) 3)
+                              (nothing? (wt-replay-of w3 77))) 256)
+                (twb-bit (eq (wt-live-count (wt-rows wr) 0) 0) 512)
+                (twb-bit (do (let w1 (wt-run (wt-wheel (list (wt-row 1 (list 3) 99 "s")) 0) twb-count 10))
+                         (let r (wt-find (wt-rows w1) 1))
+                         (if (and (str_eq (wt-status r) "done")
+                              (and (eq (len (wt-toks r)) 3)
+                                   (eq (nth (wt-toks r) 0) 3))) 1 0)) 1024)))))
+
+    (peer-turnwheel-band))
