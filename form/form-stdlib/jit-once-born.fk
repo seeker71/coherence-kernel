@@ -1,0 +1,78 @@
+; jit-once-born.fk — one birth per program shape, threaded through a whole
+; flow as data. Request by content key; compile only on first meeting; the
+; retained image answers every later request. No fixed function table, no
+; rebirth per node — the registry is an ordinary value the flow threads, the
+; same discipline fqmn-cross uses for its caller context.
+;
+; THE KEY IS STRUCTURAL, AND NAMED AS A STAND-IN. make_nodeid is flatten-only
+; today, so the key here is a position-weighted fold over the program's own
+; node ints plus the root — order-sensitive, collision-visible, deterministic
+; across runs. When structural NodeID reaches eval, jonb-key is the ONE defn
+; that changes; every caller already speaks request-by-key.
+;
+; THE BARE-NOTHING TRAP, MADE STRUCTURAL. A sibling returned bare `nothing`
+; (a function value) where (nothing) (the absence) belonged; it entered an
+; index and a millisecond flow read as a minute-long hang. This registry
+; cannot ingest that class: jonb-retain REFUSES an empty or absent image —
+; the registry stays unchanged and the refusal is the return — so a corrupt
+; birth can never sit behind a healthy key answering requests.
+;
+; HONEST BOUNDS, stated not hedged: the door is unary i64 (jit_leaf_inram,
+; darwin/arm64); lookup here is O(n) assoc — the SEED of request-by-key, not
+; its O(1) home, which lives kernel-side where the dispatch table already is.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-asm.fk form-stdlib/form-lower.fk
+;
+; Proven by: form-stdlib/tests/jit-once-born-band.fk
+
+(do
+    ; ── the content key: every node int, position-weighted, then the root ──
+    (defn jonb-fold-ints (xs i acc)
+        (if (eq (len xs) 0) acc
+            (jonb-fold-ints (tail xs) (add i 1)
+                (add acc (mul (head xs) i)))))
+    (defn jonb-fold-nodes (ns i acc)
+        (if (eq (len ns) 0) acc
+            (do (let node (head ns))
+                (jonb-fold-nodes (tail ns) (add i (len node))
+                    (jonb-fold-ints node i acc)))))
+    (defn jonb-key (prog root)
+        (add (mul (jonb-fold-nodes prog 1 0) 64) root))
+
+    ; ── the registry: (list (list key image) ...) — data, never dispatch ───
+    (defn jonb-empty () (list))
+    (defn jonb-lookup (reg key)
+        (if (eq (len reg) 0) (nothing)
+            (if (eq (nth (head reg) 0) key) (nth (head reg) 1)
+                (jonb-lookup (tail reg) key))))
+    (defn jonb-size (reg) (len reg))
+
+    ; a birth that did not produce an image is refused, never indexed
+    (defn jonb-retain (reg key image)
+        (if (nothing? image) (nothing)
+            (if (eq (len image) 0) (nothing)
+                (cons (list key image) reg))))
+
+    ; ── request-by-key: exactly one birth per shape, ever ──────────────────
+    ; returns (list result reg' born) — born is 1 only when this request
+    ; compiled; a threaded flow sums borns to audit its own birth count.
+    (defn jonb-request (reg prog root arg)
+        (do (let key (jonb-key prog root))
+            (let hit (jonb-lookup reg key))
+            (if (nothing? hit)
+                (do (let img (lo-compile-fn prog root))
+                    (let reg2 (jonb-retain reg key img))
+                    (if (nothing? reg2)
+                        (list (nothing) reg 0)
+                        (list (jit_leaf_inram img arg) reg2 1)))
+                (list (jit_leaf_inram hit arg) reg 0))))
+
+    ; ── thread a whole flow: many requests, one registry, births audited ───
+    (defn jonb-run-all (reg jobs results borns)
+        (if (eq (len jobs) 0) (list results reg borns)
+            (do (let j (head jobs))
+                (let r (jonb-request reg (nth j 0) (nth j 1) (nth j 2)))
+                (jonb-run-all (nth r 1) (tail jobs)
+                    (append results (list (nth r 0)))
+                    (add borns (nth r 2))))))
+    0)
