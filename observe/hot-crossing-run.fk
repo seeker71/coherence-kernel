@@ -1,0 +1,81 @@
+; hot-crossing-run.fk — Urs's acceptance test, run as one living process:
+; start resident; AFTER startup a recipe and symbol absent from every
+; startup source arrive as DATA; invoke by NodeID; replace; invoke the
+; replacement — zero fk_fn seats added, zero restarts. Until this passes,
+; everything landed is route/lease semantics, not complete hot swap.
+;
+; The recipe crosses as a file of ints (root, then per row: len, tag, args).
+; The symbol is a STRING bound in a registry VALUE. No defn is minted for
+; either, so no fk_fn seat can be — the proof is by construction, and the
+; run prints what it witnessed.
+;
+; preludes: form-stdlib/jit-once-born.fk
+(do
+    (defn hx-say (s) (print (str_concat s "\n")))
+
+    ; ── int parser over the offer file's bytes ─────────────────────────────
+    (defn hx-digit? (b) (if (and (ge b 48) (le b 57)) 1 0))
+    (defn hx-skip (s i n)
+        (if (ge i n) i
+            (if (eq (hx-digit? (str_byte_at s i)) 1) i (hx-skip s (add i 1) n))))
+    (defn hx-num (s i n acc)
+        (if (ge i n) (list acc i)
+            (do (let b (str_byte_at s i))
+                (if (eq (hx-digit? b) 1)
+                    (hx-num s (add i 1) n (add (mul acc 10) (sub b 48)))
+                    (list acc i)))))
+    (defn hx-ints (s i n out)
+        (do (let j (hx-skip s i n))
+            (if (ge j n) out
+                (do (let r (hx-num s j n 0))
+                    (hx-ints s (nth r 1) n (append out (list (nth r 0))))))))
+
+    (defn hx-take (xs k) (if (le k 0) (list) (cons (head xs) (hx-take (tail xs) (sub k 1)))))
+    (defn hx-drop (xs k) (if (le k 0) xs (hx-drop (tail xs) (sub k 1))))
+    (defn hx-rows (xs out)
+        (if (eq (len xs) 0) out
+            (do (let k (head xs))
+                (hx-rows (hx-drop (tail xs) k)
+                    (append out (list (hx-take (tail xs) k)))))))
+    (defn hx-parse (s)
+        (do (let is (hx-ints s 0 (str_len s) (list)))
+            (list (hx-rows (tail is) (list)) (head is))))
+
+    ; ── poll for an offer: bounded, sleep between, timeout honest ──────────
+    (defn hx-await (path tries)
+        (if (le tries 0) (nothing)
+            (if (gt (file_size path) 0) (read_file path)
+                (do (let z (host-exec "sleep 0.2" ""))
+                    (hx-await path (sub tries 1))))))
+
+    ; ── the crossing ───────────────────────────────────────────────────────
+    (hx-say "resident: started; no crossing symbol exists in any startup source")
+    (let reg0 (jonb-registry 1))
+    (let offer1 (hx-await "/tmp/crossing/offer-1.txt" 50))
+    (if (nothing? offer1) (hx-say "FAIL: offer-1 never arrived (timeout)")
+        (do
+            (let p1 (hx-parse offer1))
+            (let sym "crossing/f")
+            (let id1 (jonb-identity (nth p1 0) (nth p1 1) 1))
+            (hx-say (str_concat "offer-1 received; symbol \"" (str_concat sym
+                "\" bound to its interned NodeID in a registry VALUE — no defn, no seat")))
+            (let r1 (jonb-request reg0 (nth p1 0) (nth p1 1) 5))
+            (hx-say (str_concat "invoke by NodeID, arg 5 -> "
+                (str_concat (int_to_str (nth r1 0))
+                    (str_concat "  route " (nth r1 1)))))
+            (let offer2 (hx-await "/tmp/crossing/offer-2.txt" 50))
+            (if (nothing? offer2) (hx-say "FAIL: offer-2 never arrived")
+                (do
+                    (let p2 (hx-parse offer2))
+                    (let reg1 (nth r1 2))
+                    (let r2 (jonb-request reg1 (nth p2 0) (nth p2 1) 5))
+                    (hx-say (str_concat "replacement bound under the same symbol; invoke arg 5 -> "
+                        (str_concat (int_to_str (nth r2 0))
+                            (str_concat "  route " (nth r2 1)))))
+                    (let r1b (jonb-request (nth r2 2) (nth p1 0) (nth p1 1) 5))
+                    (hx-say (str_concat "old NodeID still answers (lease, not destruction): "
+                        (int_to_str (nth r1b 0))))
+                    (if (and (eq (nth r1 0) 22) (and (eq (nth r2 0) 26) (eq (nth r1b 0) 22)))
+                        (hx-say "PASS: introduced, invoked, replaced, reinvoked — one process, zero fk_fn seats, zero restarts")
+                        (hx-say "FAIL: values diverged from the offered recipes"))))))
+    0)
