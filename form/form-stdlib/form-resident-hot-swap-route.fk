@@ -1,0 +1,185 @@
+; form-resident-hot-swap-route.fk -- versioned recipe indirection for a living
+; runtime.  The kernel, model weights, KV branches and carrier handles may stay
+; resident while the recipe selected by a logical route changes as Form data.
+;
+; A version is content-addressed: logical route NodeID, epoch, recipe NodeID,
+; callable bundle NodeID, gas/water/ice state, and an evidence NodeID.  The
+; registry is an immutable list, never a fixed function/operations table.  A
+; lease retains the exact version selected at entry, so a publication changes
+; new turns without rewriting an in-flight turn.  The caller decides how to
+; invoke the opaque callable bundle; the full-PIF bridge is a separate cell so
+; a small resident composition need not import that whole walker closure.
+;
+; Gas is retained and inspectable but not selected.  Observed water or ice may
+; become current.  A different recipe offered at the same epoch is `choice`
+; and leaves the current registry untouched.  Invalid evidence is `refused`,
+; absence is `nothing`, and none of those collapse into integer 0 or 1.
+;
+; preludes: form-stdlib/core.fk
+; Proven by: form-stdlib/tests/form-resident-hot-swap-route-band.fk
+
+(do
+    (defn frhs-gas () 0)
+    (defn frhs-water () 1)
+    (defn frhs-ice () 2)
+
+    (defn frhs-version-category () (bp "FORM-RESIDENT-HOT-SWAP-VERSION"))
+    (defn frhs-lease-category () (bp "FORM-RESIDENT-HOT-SWAP-LEASE"))
+    (defn frhs-event-category () (bp "FORM-RESIDENT-HOT-SWAP-EVENT"))
+    (defn frhs-no-evidence ()
+        (intern_node (bp "FORM-RESIDENT-HOT-SWAP-NO-EVIDENCE") (empty)))
+
+    ; version children = route, epoch, recipe, callable, phase, evidence
+    (defn frhs-version (route epoch recipe callable phase evidence)
+        (intern_node (frhs-version-category)
+            (list route (intern_trivial_int epoch) recipe callable
+                  (intern_trivial_int phase) evidence)))
+    (defn frhs-v-child (version at) (nth (node_children version) at))
+    (defn frhs-route (version) (frhs-v-child version 0))
+    (defn frhs-epoch (version) (node_value (frhs-v-child version 1)))
+    (defn frhs-recipe (version) (frhs-v-child version 2))
+    (defn frhs-callable (version) (frhs-v-child version 3))
+    (defn frhs-phase (version) (node_value (frhs-v-child version 4)))
+    (defn frhs-evidence (version) (frhs-v-child version 5))
+    (defn frhs-observed (version)
+        (if (node_eq (frhs-evidence version) (frhs-no-evidence)) 0 1))
+
+    (defn frhs-phase-valid? (phase)
+        (if (or (eq phase (frhs-gas))
+                (or (eq phase (frhs-water)) (eq phase (frhs-ice)))) 1 0))
+    (defn frhs-version-valid? (version)
+        (if (nothing? version) 0
+        (if (not (node_eq (node_category version)
+                          (frhs-version-category))) 0
+        (if (not (eq (len (node_children version)) 6)) 0
+        (if (nothing? (frhs-route version)) 0
+        (if (lt (frhs-epoch version) 0) 0
+        (if (nothing? (frhs-recipe version)) 0
+        (if (nothing? (frhs-callable version)) 0
+        (if (eq (frhs-phase-valid? (frhs-phase version)) 0) 0
+        (if (nothing? (frhs-evidence version)) 0 1))))))))))
+
+    (defn frhs-selectable? (version)
+        (if (and (eq (frhs-version-valid? version) 1)
+            (and (eq (frhs-observed version) 1)
+                 (or (eq (frhs-phase version) (frhs-water))
+                     (eq (frhs-phase version) (frhs-ice))))) 1 0))
+
+    ; Resolution = [status, selected-version].  `choice` remains distinct from
+    ; no selected route (`nothing`).
+    (defn frhs-resolution (status version) (list status version))
+    (defn frhs-resolution-status (resolution) (nth resolution 0))
+    (defn frhs-resolution-version (resolution) (nth resolution 1))
+    (defn frhs-resolve-go (registry route best)
+        (if (nil? registry)
+            (if (nothing? best)
+                (frhs-resolution "nothing" (nothing))
+                (frhs-resolution "ready" best))
+            (do
+                (let candidate (head registry))
+                (if (or (eq (frhs-selectable? candidate) 0)
+                        (not (node_eq (frhs-route candidate) route)))
+                    (frhs-resolve-go (tail registry) route best)
+                (if (nothing? best)
+                    (frhs-resolve-go (tail registry) route candidate)
+                (if (gt (frhs-epoch candidate) (frhs-epoch best))
+                    (frhs-resolve-go (tail registry) route candidate)
+                (if (lt (frhs-epoch candidate) (frhs-epoch best))
+                    (frhs-resolve-go (tail registry) route best)
+                (if (node_eq (frhs-recipe candidate) (frhs-recipe best))
+                    (frhs-resolve-go (tail registry) route best)
+                    (frhs-resolution "choice" (nothing))))))))))
+    (defn frhs-resolve (registry route)
+        (frhs-resolve-go registry route (nothing)))
+
+    (defn frhs-same-version? (a b)
+        (if (and (node_eq (frhs-route a) (frhs-route b))
+            (and (eq (frhs-epoch a) (frhs-epoch b))
+                 (node_eq (frhs-recipe a) (frhs-recipe b)))) 1 0))
+    (defn frhs-without-same (registry candidate)
+        (if (nil? registry) (empty)
+            (if (eq (frhs-same-version? (head registry) candidate) 1)
+                (frhs-without-same (tail registry) candidate)
+                (cons (head registry)
+                      (frhs-without-same (tail registry) candidate)))))
+
+    ; Publication = [status, before, after, candidate, previous-resolution].
+    ; The before/after pair is the cut/undo material; no state is overwritten.
+    (defn frhs-publication (status before after candidate previous)
+        (list status before after candidate previous))
+    (defn frhs-publication-status (p) (nth p 0))
+    (defn frhs-before (p) (nth p 1))
+    (defn frhs-after (p) (nth p 2))
+    (defn frhs-candidate (p) (nth p 3))
+    (defn frhs-previous (p) (nth p 4))
+
+    (defn frhs-publish (registry candidate)
+        (if (eq (frhs-version-valid? candidate) 0)
+            (frhs-publication "refused" registry registry candidate
+                (frhs-resolution "nothing" (nothing)))
+            (do
+                (let previous (frhs-resolve registry (frhs-route candidate)))
+                (let current (frhs-resolution-version previous))
+                (if (and (str_eq (frhs-resolution-status previous) "ready")
+                         (and (eq (frhs-epoch candidate) (frhs-epoch current))
+                              (not (node_eq (frhs-recipe candidate)
+                                            (frhs-recipe current)))))
+                    (frhs-publication "choice" registry registry candidate previous)
+                (if (and (str_eq (frhs-resolution-status previous) "ready")
+                         (lt (frhs-epoch candidate) (frhs-epoch current)))
+                    (frhs-publication "held-stale" registry registry candidate previous)
+                    (do
+                        (let after (cons candidate
+                            (frhs-without-same registry candidate)))
+                        (frhs-publication
+                            (if (eq (frhs-selectable? candidate) 1)
+                                "published" "retained-gas")
+                            registry after candidate previous)))))))
+
+    ; A lease is the immutable selected version plus a correlation NodeID.
+    ; Publication may proceed while this value remains valid for its turn.
+    (defn frhs-enter (resolution correlation)
+        (if (not (str_eq (frhs-resolution-status resolution) "ready"))
+            (nothing)
+            (intern_node (frhs-lease-category)
+                (list (frhs-resolution-version resolution) correlation))))
+    (defn frhs-lease-valid? (lease)
+        (if (nothing? lease) 0
+        (if (not (node_eq (node_category lease) (frhs-lease-category))) 0
+        (if (not (eq (len (node_children lease)) 2)) 0
+            (frhs-version-valid? (head (node_children lease)))))))
+    (defn frhs-leased-version (lease) (head (node_children lease)))
+    (defn frhs-leased-recipe (lease) (frhs-recipe (frhs-leased-version lease)))
+    (defn frhs-leased-callable (lease) (frhs-callable (frhs-leased-version lease)))
+
+    ; Cut commits the selected publication image; undo returns its prior root,
+    ; matching fcatw-cut/fcatw-undo.  Both are O(1) list selections because
+    ; registry values are immutable.
+    (defn frhs-cut (publication) (frhs-after publication))
+    (defn frhs-undo (publication) (frhs-before publication))
+
+    ; Inspection is ordinary Form data, suitable for one or many framebuffer
+    ; channels without exposing prompts or private content.
+    (defn frhs-inspect-version (version)
+        (list (frhs-route version) (frhs-epoch version)
+              (frhs-recipe version) (frhs-callable version)
+              (frhs-phase version) (frhs-evidence version)
+              (frhs-observed version)
+              (frhs-selectable? version)))
+    (defn frhs-inspect-registry (registry)
+        (if (nil? registry) (empty)
+            (cons (frhs-inspect-version (head registry))
+                  (frhs-inspect-registry (tail registry)))))
+    ; Logical channels multiplex over the kernel framebuffer without creating
+    ; an HTTP/server membrane.  A scheduler may poll and actuate them between
+    ; token/JIT steps; this cell claims typed multiplexing, not preemptive I/O.
+    (defn frhs-event (channel action version)
+        (intern_node (frhs-event-category)
+            (list channel (intern_trivial_string action) version)))
+    (defn frhs-event-channel (event) (nth (node_children event) 0))
+    (defn frhs-event-action (event)
+        (node_value (nth (node_children event) 1)))
+    (defn frhs-event-version (event) (nth (node_children event) 2))
+    (defn frhs-record (channel action version file line)
+        (fb_record (frhs-event channel action version) file line))
+    0)
