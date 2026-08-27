@@ -17,6 +17,11 @@ not a wrapper around llama-server or Ollama. Its working path is:
    the same KV stream. A `source-concept` or `source-nodeid` task instead enters
    the strict persisted concept-key bucket, opens one bounded current source,
    and injects that typed observation without a repository-wide fallback walk.
+   The source session accepts an observer function value. The resident offers a
+   content-free live observer that streams run/model-forward/source-lookup/
+   observation-injection stages while execution is moving and records the same
+   typed rows in the framebuffer. The generic session remains silent by
+   default.
 7. Stage model response and cursor evidence as one length-carried output frame.
    Append it durably before promoting the returned session or marking the task
    seen.
@@ -39,6 +44,8 @@ The live doors are:
   contribution turnwheel, diagnostics and durable output.
 - `observe/form-cli-peer-task-send.fk` — short-lived Form-native append/ring
   client; the task body may contain arbitrary newlines.
+- `observe/form-cli-peer-knowledge-stage-live.fk` — CPU-only strict-source probe
+  that streams and retains the same lookup stage events without opening a model.
 
 ## Resource flow
 
@@ -77,7 +84,9 @@ does not claim the Form/native NodeID mapping movement is complete.
   relying on process-local counters plus an explicit external reservation.
 - Move the demand-grown function identity mechanism out of the temporary C seed
   and into the Form/native walker so the bootstrap repair can shrink away.
-- Emit async resident stage observations around model emit, scannerless cursor
-  completion, source lookup, observation injection, and post-observation decode.
-  The strict route is independently fast, while one composed source turn stayed
-  in recursive `fk_walk` for about ten minutes without producing egress.
+- Re-run the composed resident source turn when the current MLX training
+  residence releases Metal. Its new live stages distinguish model emission,
+  source lookup, observation injection, and continued decode. The CPU-only
+  strict probe currently reaches `hit` with one lookup and two framebuffer
+  events in 2,103 ms; the earlier composed turn stayed in recursive `fk_walk`
+  for about ten minutes without producing egress.
