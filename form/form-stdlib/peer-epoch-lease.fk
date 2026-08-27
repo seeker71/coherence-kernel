@@ -1,0 +1,204 @@
+; peer-epoch-lease.fk — hot-swap over the turnwheel: recipes change while the
+; wheel turns, and no mid-utterance row ever feels it. An adversarial review
+; of the design shaped every load-bearing choice here before code existed;
+; each is named with the failure it forecloses.
+;
+; EPOCH IDENTITY IS A PAIR (swap-seq, meaning-epoch), never a bare counter.
+;   Forecloses ABA: a restarted wheel counting swaps from zero reaches "3"
+;   with different recipes — under a bare counter a replayed pinned row would
+;   re-ground on the wrong recipes, the exact mid-utterance change the pin
+;   exists to forbid, delivered by the pin itself. The meaning component ties
+;   this system to jit-meaning-epoch's membrane, so a resolver swap and a
+;   meaning change cannot drift apart silently: same swap-seq under a new
+;   meaning IS a different epoch.
+;
+; PIN AT ENQUEUE, ATOMICALLY. A row pins and retains its epoch in the one
+;   act that creates it. Forecloses the lazy-pin window where a swap lands
+;   between enqueue and first step and the row is pinned-in-spirit but
+;   uncounted — the early-dissolve hole.
+;
+; RETAIN COUNTS SEED FROM LIVE PINS, RELEASE FIRES ONCE, FROM "live" ONLY.
+;   Forecloses double-release (cut-then-timeout) and the off-by-one that
+;   dissolves an epoch under a live row.
+;
+; A RESOLVER ANSWERING NOTHING IS A LOUD TERMINAL: status "dissolved-ground",
+;   distinct from declined/done/timeout/cut. Forecloses the green fold: in
+;   this body a fold over nothing is a plausible number (axiom-5), so a row
+;   whose ground dissolved must stop SAYING so, not keep emitting.
+;
+; SWAP IS A REVOLUTION-BOUNDARY MEMBRANE — chosen over per-turn deliberately:
+;   pins make both equally safe, and the coarser membrane makes the swap
+;   ledger one row per revolution, never interleaved. The cost, named: a
+;   swap waits out the longest revolution. The cooperative wheel's honest
+;   bound stays what it was: a stepper that never yields stalls everything —
+;   that is the stepper's nature, not this cell's to fix.
+;
+; REPLAY CARRIES ITS SEAM. Cut-then-replay under a new epoch may diverge —
+;   that is the POINT (migration is chosen, visible, paid), so the replay
+;   record is (tokens pinned-epoch), and a continuation is a chimera whose
+;   seam is data, not a mystery.
+;
+; RETENTION IS OBSERVABLE, NOT YET CHARGED. le-load reports epochs resident
+;   and pins per epoch; a slow client holding K epochs is a VISIBLE number.
+;   Charging it (gas per revolution of residency) is policy this cell
+;   exposes the meter for and does not set.
+;
+; Budgets are REQUIRED positive at enqueue — an unlimited row is a pin leak
+;   by construction and is refused, nothing, never clamped silently.
+;
+; preludes: form-stdlib/core.fk form-stdlib/peer-turnwheel.fk
+;
+; Proven by: form-stdlib/tests/peer-epoch-lease-band.fk
+
+(do
+    ; ── epoch identity: (swap-seq meaning) ─────────────────────────────────
+    (defn le-eid (seq meaning) (list seq meaning))
+    (defn le-eid-eq? (a b)
+        (if (and (eq (nth a 0) (nth b 0)) (eq (nth a 1) (nth b 1))) 1 0))
+
+    ; ── the lease table: (eid recipes retain) rows, newest first ───────────
+    (defn le-table (eid recipes) (list (list eid recipes 0)))
+    (defn le-find (tbl eid)
+        (if (eq (len tbl) 0) (nothing)
+            (if (eq (le-eid-eq? (nth (head tbl) 0) eid) 1) (head tbl)
+                (le-find (tail tbl) eid))))
+    (defn le-recipes (tbl eid)
+        (do (let r (le-find tbl eid))
+            (if (nothing? r) (nothing) (nth r 1))))
+    (defn le-retain-of (tbl eid)
+        (do (let r (le-find tbl eid))
+            (if (nothing? r) 0 (nth r 2))))
+    (defn le-bump (tbl eid d)
+        (if (eq (len tbl) 0) (list)
+            (if (eq (le-eid-eq? (nth (head tbl) 0) eid) 1)
+                (cons (list (nth (head tbl) 0) (nth (head tbl) 1)
+                            (add (nth (head tbl) 2) d)) (tail tbl))
+                (cons (head tbl) (le-bump (tail tbl) eid d)))))
+
+    ; an epoch whose retain fell to zero and is not current DISSOLVES — the
+    ; drop is returned beside the table so it is an event, never a vanishing
+    (defn le-sweep (tbl current out gone)
+        (if (eq (len tbl) 0) (list (reverse out) gone)
+            (do (let row (head tbl))
+                (if (and (eq (nth row 2) 0)
+                         (eq (le-eid-eq? (nth row 0) current) 0))
+                    (le-sweep (tail tbl) current out (add gone 1))
+                    (le-sweep (tail tbl) current (cons row out) gone)))))
+
+    ; ── the leased wheel: (wheel table current-eid ledger) ─────────────────
+    (defn le-wheel (eid recipes)
+        (list (wt-wheel (list) 0) (le-table eid recipes) eid (list)))
+    (defn le-w (lw)   (nth lw 0))
+    (defn le-tbl (lw) (nth lw 1))
+    (defn le-cur (lw) (nth lw 2))
+    (defn le-ledger (lw) (nth lw 3))
+
+    ; ── enqueue: pin + retain in the one creating act; budget must be >0 ───
+    (defn le-enqueue (lw id rstate budget releaser)
+        (if (le budget 0) (nothing)
+            (do (let row (append (wt-row id rstate budget releaser)
+                                 (list (le-cur lw))))
+                (list (wt-wheel (append (wt-rows (le-w lw)) (list row))
+                               (wt-sctx (le-w lw)))
+                      (le-bump (le-tbl lw) (le-cur lw) 1)
+                      (le-cur lw) (le-ledger lw)))))
+    (defn le-pin-of (row) (nth row 6))
+
+    ; ── swap: revolution-boundary membrane; new rows bind the new epoch ────
+    (defn le-swap (lw seq meaning recipes)
+        (do (let eid (le-eid seq meaning))
+            (if (not (nothing? (le-find (le-tbl lw) eid))) (nothing)
+                (list (le-w lw)
+                      (cons (list eid recipes 0) (le-tbl lw))
+                      eid
+                      (append (le-ledger lw) (list (list "swap" eid)))))))
+
+    ; ── one revolution: each live row steps under ITS pinned recipes ───────
+    ; stepper: (stepper recipes sctx rstate) -> (list token rstate' sctx')
+    ; recipes nothing (ground dissolved under a counting bug) -> the row
+    ; closes LOUD as "dissolved-ground"; release fires ONCE, from live only.
+    (defn le-step-row (stepper tbl sctx row)
+        (if (eq (wt-live? row) 0) (list row sctx 0)
+            (do (let recipes (le-recipes tbl (le-pin-of row)))
+                (if (nothing? recipes)
+                    (list (le-close row "dissolved-ground") sctx 1)
+                    (if (le (wt-budget row) 0)
+                        (list (le-close row "timeout") sctx 1)
+                        (do (let out (stepper recipes sctx (wt-rstate row)))
+                            (let tok (nth out 0))
+                            (if (nothing? tok)
+                                (list (le-close-with row (nth out 1) "declined") (nth out 2) 1)
+                                (if (eq tok (wt-stop))
+                                    (list (le-close-with row (nth out 1) "done") (nth out 2) 1)
+                                    (list (le-keep row (nth out 1) tok) (nth out 2) 0)))))))))
+    (defn le-close (row status)
+        (append (wt-with row (wt-rstate row) (wt-budget row) (wt-toks row) status)
+                (list (le-pin-of row))))
+    (defn le-close-with (row rstate status)
+        (append (wt-with row rstate (wt-budget row) (wt-toks row) status)
+                (list (le-pin-of row))))
+    (defn le-keep (row rstate tok)
+        (append (wt-with row rstate (sub (wt-budget row) 1)
+                    (append (wt-toks row) (list tok)) "live")
+                (list (le-pin-of row))))
+
+    (defn le-rev-go (stepper tbl rs sctx out)
+        (if (eq (len rs) 0) (list (reverse out) sctx tbl)
+            (do (let sr (le-step-row stepper tbl sctx (head rs)))
+                (let row2 (nth sr 0))
+                (let tbl2 (if (eq (nth sr 2) 1)
+                              (le-bump tbl (le-pin-of row2) -1) tbl))
+                (le-rev-go stepper tbl2 (tail rs) (nth sr 1) (cons row2 out)))))
+
+    ; a revolution, then the sweep: dissolutions are ledger rows, not silence
+    (defn le-revolve (lw stepper)
+        (do (let g (le-rev-go stepper (le-tbl lw) (wt-rows (le-w lw))
+                              (wt-sctx (le-w lw)) (list)))
+            (let swept (le-sweep (nth g 2) (le-cur lw) (list) 0))
+            (list (wt-wheel (nth g 0) (nth g 1))
+                  (nth swept 0)
+                  (le-cur lw)
+                  (if (gt (nth swept 1) 0)
+                      (append (le-ledger lw)
+                          (list (list "dissolved" (nth swept 1))))
+                      (le-ledger lw)))))
+
+    ; ── cut: the wt discipline, seam kept; replay carries its epoch ────────
+    ; The pin is read BEFORE the base wheel touches the row: wt-cut rebuilds
+    ; the cut row through wt-with, a six-field constructor that cannot know
+    ; about the seventh — the first band run caught the pin silently dropped
+    ; and the retain never released. The base row shape is the base's; the
+    ; lease reads its own field on the way in and restores it on the way out.
+    (defn le-cut (lw id)
+        (do (let pre (wt-find (wt-rows (le-w lw)) id))
+            (let c (wt-cut (le-w lw) id))
+            (let w2 (if (nothing? pre) (nth c 0)
+                        (wt-wheel (le-repin (wt-rows (nth c 0)) id (le-pin-of pre))
+                                  (wt-sctx (nth c 0)))))
+            (let tbl2 (if (nothing? (nth c 1)) (le-tbl lw)
+                          (le-bump (le-tbl lw) (le-pin-of pre) -1)))
+            (let swept (le-sweep tbl2 (le-cur lw) (list) 0))
+            (list (list w2 (nth swept 0) (le-cur lw)
+                        (if (gt (nth swept 1) 0)
+                            (append (le-ledger lw) (list (list "dissolved" (nth swept 1))))
+                            (le-ledger lw)))
+                  (nth c 1))))
+    (defn le-repin (rs id pin)
+        (if (eq (len rs) 0) (list)
+            (if (eq (wt-id (head rs)) id)
+                (cons (append (head rs) (list pin)) (tail rs))
+                (cons (head rs) (le-repin (tail rs) id pin)))))
+
+    (defn le-replay-of (lw id)
+        (do (let row (wt-find (wt-rows (le-w lw)) id))
+            (if (nothing? row) (nothing)
+                (list (wt-toks row) (le-pin-of row)))))
+
+    ; ── the meter: epochs resident, pins per epoch — visible, not charged ──
+    (defn le-load (lw)
+        (le-load-go (le-tbl lw) (list)))
+    (defn le-load-go (tbl out)
+        (if (eq (len tbl) 0) (reverse out)
+            (le-load-go (tail tbl)
+                (cons (list (nth (head tbl) 0) (nth (head tbl) 2)) out))))
+    0)
