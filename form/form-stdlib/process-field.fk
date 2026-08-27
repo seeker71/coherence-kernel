@@ -1,0 +1,238 @@
+; process-field.fk — the body's read of its own host process field: sister fkwu
+; processes, agent shells (bash/zsh/python), CPU hogs, zombies with the parent
+; that owes the reap, and parent->child wait edges, all as pure recipes over
+; pre-normalized rows. The live census (observe/process-field-live.fk) supplies
+; rows through host-exec; this cell never touches the host itself, so every
+; classification here is four-way provable on synthetic rows.
+;
+; Row wire shape, one process per line, first five fields bar-separated, the
+; sixth field the untouched remainder (command arguments — retained only for
+; fkwu/form-run rows by the census, absent for every other process):
+;
+;   pid|ppid|stat|pcpu|comm|args
+;
+; pcpu travels as text ("12.3") and is held as integer TENTHS (123) — exact,
+; no float compare. stat is the macOS state word: leading Z = zombie (dead,
+; unreaped — the ppid owes the wait call), leading T = stopped, leading U =
+; uninterruptible, a '+' anywhere = foreground of its terminal.
+;
+; The presence frame is the coordination noticeboard: a long-lived fkwu writes
+; one <pid>.presence file into the shared field directory (/tmp/form-field by
+; convention) naming its role, task spool, reply spool, bell and worktree, so
+; any agent can find a living residence and append work to it instead of
+; birthing another process. A presence whose pid no longer answers ps is a
+; GHOST — sweepable evidence of a death; a live fkwu with no presence is
+; UNANNOUNCED — a sibling not yet coordinating.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/process-field-band.fk
+
+(do
+    ; ── row parsing ────────────────────────────────────────────────────────
+    (defn fpf-field-end (line from)
+        (do (let at (str_find line "|" from))
+            (if (lt at 0) (str_len line) at)))
+    (defn fpf-split-go (line from n acc)
+        (if (eq n 0) (append acc (list (substring line from (str_len line))))
+            (do (let end (fpf-field-end line from))
+                (fpf-split-go line
+                    (if (ge end (str_len line)) (str_len line) (add end 1))
+                    (sub n 1)
+                    (append acc (list (substring line from end)))))))
+    (defn fpf-row-parse (line) (fpf-split-go line 0 5 (list)))
+
+    ; "12.3" -> 123, "3" -> 30, "0.0" -> 0 — integer tenths, exact.
+    (defn fpf-tenths (s)
+        (do (let dot (str_find s "." 0))
+            (if (lt dot 0) (mul (str_to_int s) 10)
+                (add (mul (str_to_int (substring s 0 dot)) 10)
+                     (if (ge (add dot 2) (add (str_len s) 1)) 0
+                         (str_to_int (substring s (add dot 1) (add dot 2))))))))
+
+    (defn fpf-row-pid (r) (str_to_int (nth r 0)))
+    (defn fpf-row-ppid (r) (str_to_int (nth r 1)))
+    (defn fpf-row-stat (r) (nth r 2))
+    (defn fpf-row-cpu (r) (fpf-tenths (nth r 3)))
+    (defn fpf-row-comm (r) (nth r 4))
+    (defn fpf-row-args (r) (nth r 5))
+
+    ; text -> rows, skipping empty lines
+    (defn fpf-line-end (text from)
+        (do (let at (str_find text "\n" from))
+            (if (lt at 0) (str_len text) at)))
+    (defn fpf-rows-go (text from acc)
+        (if (ge from (str_len text)) acc
+            (do (let end (fpf-line-end text from))
+                (fpf-rows-go text (add end 1)
+                    (if (eq end from) acc
+                        (append acc (list (fpf-row-parse
+                            (substring text from end)))))))))
+    (defn fpf-rows (text) (fpf-rows-go text 0 (list)))
+
+    ; ── classification ─────────────────────────────────────────────────────
+    (defn fpf-basename-go (path from best)
+        (do (let at (str_find path "/" from))
+            (if (lt at 0) (substring path best (str_len path))
+                (fpf-basename-go path (add at 1) (add at 1)))))
+    (defn fpf-basename (path) (fpf-basename-go path 0 0))
+    (defn fpf-kind (comm)
+        (do (let name (fpf-basename comm))
+            (if (str_eq name "fkwu") "fkwu"
+            (if (or (str_eq name "bash")
+                    (or (str_eq name "zsh") (str_eq name "sh"))) "shell"
+            (if (or (str_eq name "python") (str_eq name "python3")) "python"
+                "other")))))
+
+    (defn fpf-stat-leads? (stat ch)
+        (if (eq (str_len stat) 0) 0
+            (if (str_eq (substring stat 0 1) ch) 1 0)))
+    (defn fpf-zombie? (stat) (fpf-stat-leads? stat "Z"))
+    (defn fpf-stopped? (stat) (fpf-stat-leads? stat "T"))
+    (defn fpf-uninterruptible? (stat) (fpf-stat-leads? stat "U"))
+    (defn fpf-sleeping? (stat) (fpf-stat-leads? stat "S"))
+    (defn fpf-foreground? (stat) (if (ge (str_find stat "+" 0) 0) 1 0))
+
+    ; A hog holds a quarter of one core or more. This is a definition of the
+    ; word, not a switch: the census reports the exact tenths beside it, so the
+    ; reader always sees the measure, never only the label.
+    (defn fpf-hog-floor () 250)
+    (defn fpf-hog? (r) (if (ge (fpf-row-cpu r) (fpf-hog-floor)) 1 0))
+
+    ; ── field folds ────────────────────────────────────────────────────────
+    (defn fpf-find-pid (rows pid)
+        (if (eq (len rows) 0) (nothing)
+            (if (eq (fpf-row-pid (head rows)) pid) (head rows)
+                (fpf-find-pid (tail rows) pid))))
+    (defn fpf-alive? (rows pid) (if (nothing? (fpf-find-pid rows pid)) 0 1))
+
+    (defn fpf-of-kind-go (rows kind acc)
+        (if (eq (len rows) 0) acc
+            (fpf-of-kind-go (tail rows) kind
+                (if (str_eq (fpf-kind (fpf-row-comm (head rows))) kind)
+                    (append acc (list (head rows))) acc))))
+    (defn fpf-of-kind (rows kind) (fpf-of-kind-go rows kind (list)))
+
+    (defn fpf-zombies-go (rows acc)
+        (if (eq (len rows) 0) acc
+            (fpf-zombies-go (tail rows)
+                (if (eq (fpf-zombie? (fpf-row-stat (head rows))) 1)
+                    (append acc (list (head rows))) acc))))
+    (defn fpf-zombies (rows) (fpf-zombies-go rows (list)))
+
+    (defn fpf-hogs-go (rows acc)
+        (if (eq (len rows) 0) acc
+            (fpf-hogs-go (tail rows)
+                (if (eq (fpf-hog? (head rows)) 1)
+                    (append acc (list (head rows))) acc))))
+    (defn fpf-hogs (rows) (fpf-hogs-go rows (list)))
+
+    ; A zombie's reap is owed by its parent: (zombie-pid zombie-comm ppid
+    ; parent-comm). A parent absent from the rows is named by pid alone.
+    (defn fpf-reap-owed-go (zombies rows acc)
+        (if (eq (len zombies) 0) acc
+            (do (let z (head zombies))
+                (let parent (fpf-find-pid rows (fpf-row-ppid z)))
+                (fpf-reap-owed-go (tail zombies) rows
+                    (append acc (list (list (fpf-row-pid z) (fpf-row-comm z)
+                        (fpf-row-ppid z)
+                        (if (nothing? parent) "absent"
+                            (fpf-row-comm parent)))))))))
+    (defn fpf-reap-owed (rows) (fpf-reap-owed-go (fpf-zombies rows) rows (list)))
+
+    ; Wait edges: a sleeping shell/fkwu/python parent with a live (non-zombie)
+    ; child present in the rows is read as waiting on that child. Each edge is
+    ; (parent-pid parent-comm child-pid child-comm child-stat).
+    (defn fpf-waiter-kind? (kind)
+        (if (or (str_eq kind "fkwu")
+                (or (str_eq kind "shell") (str_eq kind "python"))) 1 0))
+    (defn fpf-wait-edges-go (rows all acc)
+        (if (eq (len rows) 0) acc
+            (do (let c (head rows))
+                (let parent (fpf-find-pid all (fpf-row-ppid c)))
+                (fpf-wait-edges-go (tail rows) all
+                    (if (or (nothing? parent)
+                            (or (eq (fpf-zombie? (fpf-row-stat c)) 1)
+                            (or (not (fpf-sleeping? (fpf-row-stat parent)))
+                                (not (fpf-waiter-kind?
+                                    (fpf-kind (fpf-row-comm parent)))))))
+                        acc
+                        (append acc (list (list (fpf-row-pid parent)
+                            (fpf-row-comm parent) (fpf-row-pid c)
+                            (fpf-row-comm c) (fpf-row-stat c)))))))))
+    (defn fpf-wait-edges (rows) (fpf-wait-edges-go rows rows (list)))
+
+    ; census counts: (fkwu shells pythons zombies hogs)
+    (defn fpf-census (rows)
+        (list (len (fpf-of-kind rows "fkwu"))
+              (len (fpf-of-kind rows "shell"))
+              (len (fpf-of-kind rows "python"))
+              (len (fpf-zombies rows))
+              (len (fpf-hogs rows))))
+
+    ; ── the presence noticeboard ───────────────────────────────────────────
+    (defn fpf-presence-open () "form-presence-v1")
+    (defn fpf-presence-line (name value)
+        (str_concat "\n" (str_concat name (str_concat "=" value))))
+    (defn fpf-presence-frame (pid role task reply bell worktree started)
+        (str_concat (fpf-presence-open)
+        (str_concat (fpf-presence-line "pid" pid)
+        (str_concat (fpf-presence-line "role" role)
+        (str_concat (fpf-presence-line "task" task)
+        (str_concat (fpf-presence-line "reply" reply)
+        (str_concat (fpf-presence-line "bell" bell)
+        (str_concat (fpf-presence-line "worktree" worktree)
+        (str_concat (fpf-presence-line "started-ms" (int_to_str started))
+            "\n")))))))))
+    (defn fpf-presence-field (text name)
+        (do (let key (str_concat "\n" (str_concat name "=")))
+            (let at (str_find text key 0))
+            (if (lt at 0) ""
+                (do (let start (add at (str_len key)))
+                    (let stop (str_find text "\n" start))
+                    (substring text start
+                        (if (lt stop 0) (str_len text) stop))))))
+    (defn fpf-presence-pid (text)
+        (str_to_int (fpf-presence-field text "pid")))
+
+    ; concatenated presence files -> one text per frame
+    (defn fpf-presences-go (text from acc)
+        (do (let at (str_find text (fpf-presence-open) from))
+            (if (lt at 0) acc
+                (do (let next (str_find text (fpf-presence-open)
+                        (add at (str_len (fpf-presence-open)))))
+                    (let end (if (lt next 0) (str_len text) next))
+                    (fpf-presences-go text end
+                        (append acc (list (substring text at end))))))))
+    (defn fpf-presences (text) (fpf-presences-go text 0 (list)))
+
+    ; presence whose pid no longer answers ps — a death's residue, sweepable
+    (defn fpf-ghosts-go (frames rows acc)
+        (if (eq (len frames) 0) acc
+            (fpf-ghosts-go (tail frames) rows
+                (if (eq (fpf-alive? rows (fpf-presence-pid (head frames))) 0)
+                    (append acc (list (head frames))) acc))))
+    (defn fpf-ghosts (frames rows) (fpf-ghosts-go frames rows (list)))
+    (defn fpf-live-presences-go (frames rows acc)
+        (if (eq (len frames) 0) acc
+            (fpf-live-presences-go (tail frames) rows
+                (if (eq (fpf-alive? rows (fpf-presence-pid (head frames))) 1)
+                    (append acc (list (head frames))) acc))))
+    (defn fpf-live-presences (frames rows)
+        (fpf-live-presences-go frames rows (list)))
+
+    ; live fkwu siblings that wrote no presence — not yet coordinating. The
+    ; observer's own pid is excluded: the census is itself an fkwu.
+    (defn fpf-announced? (frames pid)
+        (if (eq (len frames) 0) 0
+            (if (eq (fpf-presence-pid (head frames)) pid) 1
+                (fpf-announced? (tail frames) pid))))
+    (defn fpf-unannounced-go (siblings frames self acc)
+        (if (eq (len siblings) 0) acc
+            (do (let pid (fpf-row-pid (head siblings)))
+                (fpf-unannounced-go (tail siblings) frames self
+                    (if (or (eq pid self) (eq (fpf-announced? frames pid) 1))
+                        acc (append acc (list pid)))))))
+    (defn fpf-unannounced (rows frames self)
+        (fpf-unannounced-go (fpf-of-kind rows "fkwu") frames self (list)))
+    0)
