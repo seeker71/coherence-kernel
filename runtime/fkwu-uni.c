@@ -3188,14 +3188,23 @@ static void *fk_arm64_u32_keep(const fk_arm64_u32_node *nodes, long long nodes_n
 #define FK_INRAM_CACHE 32
 typedef struct {
     int live;
-    int keyed;          /* 1: key is an interned-node word; matched by word, never by bytes */
-    long long key;
     long long n;
     unsigned char code[FK_INRAM_CODE_CAP];
     void *mem;
+    unsigned int generation;
+    unsigned int residents;
 } fk_inram_entry;
 static fk_inram_entry fk_inram_cache[FK_INRAM_CACHE];
 static long long fk_inram_cursor = 0;
+/* A NodeID is already an interned value-node handle.  Its node-table index is
+ * therefore the cheapest resident key the carrier can receive: no SHA, byte
+ * fold, image reconstruction or table scan belongs on the hot call.  The
+ * generation pair makes slot eviction O(1) too -- stale aliases simply stop
+ * matching rather than requiring a sweep over the node table. */
+static unsigned char fk_inram_node_slot[FK_NODE_CAP];
+static unsigned int fk_inram_node_generation[FK_NODE_CAP];
+static unsigned char fk_inram_node_released[FK_NODE_CAP];
+static long long fk_inram_last_slot = -1;
 
 static long long fk_inram_bytes(long long image, unsigned char *out, long long cap) {
     long long cursor = image;
@@ -3219,26 +3228,17 @@ static long long fk_inram_bytes(long long image, unsigned char *out, long long c
     return n;
 }
 
-static long long fk_jit_leaf_run(long long key, int keyed, long long image, long long arg_value) {
+static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
     unsigned char code[FK_INRAM_CODE_CAP];
     long long n;
     long long i;
     long long arg;
     void *mem = 0;
+    fk_inram_last_slot = -1;
     if ((arg_value & 1) != 0) {
         return fk_nothing;
     }
     arg = arg_value >> 1;
-    if (keyed) {
-        for (i = 0; i < FK_INRAM_CACHE; i = i + 1) {
-            if (fk_inram_cache[i].live && fk_inram_cache[i].keyed &&
-                fk_inram_cache[i].key == key) {
-                long long (*hot)(long long) =
-                    (long long (*)(long long))fk_inram_cache[i].mem;
-                return (hot(arg)) << 1;
-            }
-        }
-    }
     n = fk_inram_bytes(image, code, FK_INRAM_CODE_CAP);
     if (n <= 0 || (n % 4) != 0) {
         return fk_nothing;
@@ -3252,6 +3252,7 @@ static long long fk_jit_leaf_run(long long key, int keyed, long long image, long
             if (j == n) {
                 long long (*hot)(long long) =
                     (long long (*)(long long))fk_inram_cache[i].mem;
+                fk_inram_last_slot = i;
                 return (hot(arg)) << 1;
             }
         }
@@ -3271,14 +3272,18 @@ static long long fk_jit_leaf_run(long long key, int keyed, long long image, long
         if (e->live && e->mem != 0) {
             munmap(e->mem, FK_INRAM_CODE_CAP);
         }
+        e->generation = e->generation + 1;
+        if (e->generation == 0) {
+            e->generation = 1;
+        }
         e->live = 1;
-        e->keyed = keyed;
-        e->key = key;
+        e->residents = 0;
         e->n = n;
         for (i = 0; i < n; i = i + 1) {
             e->code[i] = code[i];
         }
         e->mem = mem;
+        fk_inram_last_slot = fk_inram_cursor;
         fk_inram_cursor = (fk_inram_cursor + 1) % FK_INRAM_CACHE;
     }
     {
@@ -3287,41 +3292,128 @@ static long long fk_jit_leaf_run(long long key, int keyed, long long image, long
     }
 }
 
-static long long fk_jit_leaf_inram(long long image, long long arg_value) {
-    return fk_jit_leaf_run(0, 0, image, arg_value);
+/* The existing two-argument door also accepts a Form-native resident request:
+ *
+ *   [0, structural-nodeid, image]  birth if unseen, then invoke
+ *   [1, structural-nodeid, []]     dissolve, answering 1/0/nothing
+ *
+ * A raw byte list keeps the legacy behavior above.  This avoids minting three
+ * new fixed op-table seats just to express lifecycle around the same carrier.
+ * Birth is the cold trust membrane and may walk bytes.  Invocation reaches the
+ * executable page by the interned NodeID's stable value-node index in O(1).
+ * That index is SESSION-EPHEMERAL: persistence carries program/meaning data and
+ * interns it again after restart; it never stores this process-local index.
+ *
+ * A byte image cannot be mistaken for this envelope even when its first byte
+ * is 0 or 1: field two is required to be a negative interned node, while every
+ * admitted raw image field is a nonnegative byte. Release tombstones the index
+ * for this session. The same dead meaning cannot silently rebirth; a changed
+ * meaning earns a changed NodeID at the Form membrane.
+ */
+static int fk_inram_resident_request(long long request, long long *action,
+                                      long long *identity, long long *image) {
+    long long h0;
+    long long h1;
+    long long h2;
+    long long rest;
+    if (!fk_arm64_u32_cons(request, &h0, &rest) || (h0 & 1) != 0 ||
+        !fk_arm64_u32_cons(rest, &h1, &rest) || h1 >= 0 ||
+        !fk_arm64_u32_cons(rest, &h2, &rest) || rest != 1) {
+        return 0;
+    }
+    *action = h0 >> 1;
+    *identity = h1;
+    *image = h2;
+    return 1;
 }
 
-/* jit_leaf_hot (key, image, arg) — key is an interned identity node: interning
- * makes content-address equal word-equality, so a cache hit is ONE integer
- * compare per slot and the image is never walked. A keyed miss builds from the
- * image and stamps the key; the ring evicts as before. The door TRUSTS its
- * key exactly as far as interning reaches: two different images under one
- * key would answer wrongly, which is why the one caller derives the key by
- * intern_node over the injectively-flattened program. */
-static long long fk_jit_leaf_hot(long long key, long long image, long long arg_value) {
-    return fk_jit_leaf_run(key, 1, image, arg_value);
+static int fk_inram_node_index(long long identity, long long *index) {
+    long long ix;
+    if (identity >= 0) {
+        return 0;
+    }
+    ix = fk_nidx(identity);
+    if (ix < 1 || ix > fk_np || ix >= FK_NODE_CAP) {
+        return 0;
+    }
+    *index = ix;
+    return 1;
 }
 
-/* jit_leaf_call (key, arg) — the O(1) door: no image crosses the call, so
- * dispatch never walks one. A key not resident answers nothing; the caller
- * births through jit_leaf_hot and retries. Absence is the honest miss, never
- * a rebuild the caller cannot see. */
-static long long fk_jit_leaf_call(long long key, long long arg_value) {
-    long long i;
-    long long arg;
-    if ((arg_value & 1) != 0) {
+static long long fk_jit_leaf_inram_resident(long long action, long long identity,
+                                             long long image, long long arg_value) {
+    long long ix;
+    unsigned int encoded_slot;
+    fk_inram_entry *e;
+    if (!fk_inram_node_index(identity, &ix)) {
         return fk_nothing;
     }
-    arg = arg_value >> 1;
-    for (i = 0; i < FK_INRAM_CACHE; i = i + 1) {
-        if (fk_inram_cache[i].live && fk_inram_cache[i].keyed &&
-            fk_inram_cache[i].key == key) {
-            long long (*hot)(long long) =
-                (long long (*)(long long))fk_inram_cache[i].mem;
-            return (hot(arg)) << 1;
+    encoded_slot = fk_inram_node_slot[ix];
+    if (action == 1) {
+        if (encoded_slot == 0) {
+            if (fk_inram_node_released[ix]) {
+                return 0;
+            }
+            return 0;
         }
+        e = &fk_inram_cache[encoded_slot - 1];
+        if (!e->live || fk_inram_node_generation[ix] != e->generation) {
+            fk_inram_node_slot[ix] = 0;
+            return 0;
+        }
+        fk_inram_node_slot[ix] = 0;
+        fk_inram_node_released[ix] = 1;
+        if (e->residents > 0) {
+            e->residents = e->residents - 1;
+        }
+        if (e->residents == 0) {
+            if (e->mem != 0) {
+                munmap(e->mem, FK_INRAM_CODE_CAP);
+            }
+            e->mem = 0;
+            e->live = 0;
+            e->generation = e->generation + 1;
+            if (e->generation == 0) {
+                e->generation = 1;
+            }
+        }
+        return 2;
     }
-    return fk_nothing;
+    if (action != 0 || (arg_value & 1) != 0) {
+        return fk_nothing;
+    }
+    if (fk_inram_node_released[ix]) {
+        return fk_nothing;
+    }
+    if (encoded_slot != 0) {
+        e = &fk_inram_cache[encoded_slot - 1];
+        if (e->live && fk_inram_node_generation[ix] == e->generation) {
+            long long (*hot)(long long) = (long long (*)(long long))e->mem;
+            return (hot(arg_value >> 1)) << 1;
+        }
+        fk_inram_node_slot[ix] = 0;
+    }
+    {
+        long long answer = fk_jit_leaf_inram_image(image, arg_value);
+        if (fk_inram_last_slot < 0 || fk_is_nothing(answer)) {
+            return answer;
+        }
+        e = &fk_inram_cache[fk_inram_last_slot];
+        fk_inram_node_slot[ix] = (unsigned char)(fk_inram_last_slot + 1);
+        fk_inram_node_generation[ix] = e->generation;
+        e->residents = e->residents + 1;
+        return answer;
+    }
+}
+
+static long long fk_jit_leaf_inram(long long request_or_image, long long arg_value) {
+    long long action;
+    long long identity;
+    long long image;
+    if (fk_inram_resident_request(request_or_image, &action, &identity, &image)) {
+        return fk_jit_leaf_inram_resident(action, identity, image, arg_value);
+    }
+    return fk_jit_leaf_inram_image(request_or_image, arg_value);
 }
 
 static long long fk_native_call_arm64_u32_leaf(long long program, long long root_value,
@@ -8282,28 +8374,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long arg215 = fk_walk(fk_node[i][3], fp);
         fk_vsp = fk_vsp - 2;
         return fk_native_call_arm64_u32_leaf(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], arg215);
-    }
-    if (t == 32) {
-        long long key32 = fk_walk(fk_node[i][1], fp);
-        fk_vp(key32);
-        {
-            long long arg32 = fk_walk(fk_node[i][2], fp);
-            fk_vsp = fk_vsp - 1;
-            return fk_jit_leaf_call(fk_vs[fk_vsp], arg32);
-        }
-    }
-    if (t == 29) {
-        long long key30 = fk_walk(fk_node[i][1], fp);
-        fk_vp(key30);
-        {
-            long long image30 = fk_walk(fk_node[i][2], fp);
-            fk_vp(image30);
-            {
-                long long arg30 = fk_walk(fk_node[i][3], fp);
-                fk_vsp = fk_vsp - 2;
-                return fk_jit_leaf_hot(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], arg30);
-            }
-        }
     }
     if (t == 146) {
         long long image146 = fk_walk(fk_node[i][1], fp);
