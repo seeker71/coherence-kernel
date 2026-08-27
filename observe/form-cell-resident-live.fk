@@ -1,0 +1,96 @@
+; form-cell-resident-live.fk — one long-lived fkwu that compiles and executes
+; arriving Form source without restarting, and ANNOUNCES itself on the process
+; field so agents route work here instead of birthing another fkwu per cell.
+;
+; Startup stdin, one line each: task spool, reply spool, fifo bell,
+; presence directory ("" -> /tmp/form-field), role ("" -> cell-servant).
+; After startup stdin is irrelevant. Any local client appends fcpa-task-frame
+; bytes (kind cell-eval, body arbitrary Form source, newlines welcome) to the
+; task spool and rings the bell — observe/form-cli-peer-task-send.fk is the
+; ready-made client. Replies append to the reply spool as fcsv reply frames.
+; The residence blocks on the bell at idle: no polling, no HTTP, no model.
+;
+; On start it learns its own pid through the host-exec shell's parent, writes
+; <pid>.presence into the shared field directory, and removes it on release —
+; so observe/process-field-live.fk shows this residence as live presence, and
+; a death leaves a ghost the sweep door clears. A `release` written to the
+; bell closes the residence.
+;
+; Effectful; fkwu host-io door — the turnwheel under it is four-way proven by
+; form-stdlib/tests/form-cell-servant-band.fk.
+;
+; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/spool-bell-transport.fk
+; preludes: form-stdlib/process-field.fk
+; preludes: form-stdlib/form-eval-full.fk
+; preludes: form-stdlib/form-cli-peer-agent.fk
+; preludes: form-stdlib/form-cli-peer-stream-ingress.fk
+; preludes: form-stdlib/form-cell-servant.fk
+
+(do
+    (defn fcrl-line (name value)
+        (print_str (str_concat "form-cell-resident "
+            (str_concat name (str_concat "=" (str_concat value "\n"))))))
+    (defn fcrl-int (name value) (fcrl-line name (int_to_str value)))
+    (defn fcrl-trim (s)
+        (if (eq (str_len s) 0) s
+            (if (eq (str-byte-at s (sub (str_len s) 1)) 10)
+                (substring s 0 (sub (str_len s) 1)) s)))
+    (defn fcrl-or-default (line fallback)
+        (if (or (nothing? line) (str_eq line "")) fallback line))
+
+    (defn fcrl-replies-append (reply-spool replies)
+        (if (eq (len replies) 0) 0
+            (do (sbt-append reply-spool (head replies))
+                (fcrl-replies-append reply-spool (tail replies)))))
+
+    ; drain every byte this bell made present; partial frames hold in the
+    ; cursor as nothing-yet and complete on a later wake.
+    (defn fcrl-drain (s reader reply-spool)
+        (do (let d (sbt-delta reader))
+            (if (nothing? d) (list s reader)
+                (do (let out (fcsv-feed s (nth d 0)))
+                    (fcrl-replies-append reply-spool (nth out 1))
+                    (fcrl-drain (nth out 0) (nth d 1) reply-spool)))))
+
+    (defn fcrl-loop (s reader bell reply-spool presence-path)
+        (do (fcrl-line "ready" "1")
+            (let wake (sbt-bell-wait bell))
+            (if (or (nothing? wake) (ge (str_find wake "release" 0) 0))
+                (do (host-exec (str_concat "rm -f " presence-path) "")
+                    (fcrl-int "served" (fcsv-served s))
+                    (fcrl-line "released" "1")
+                    0)
+                (do (let next (fcrl-drain s reader reply-spool))
+                    (fcrl-loop (nth next 0) (nth next 1) bell reply-spool
+                        presence-path)))))
+
+    (let task-spool (read_line))
+    (let reply-spool (read_line))
+    (let bell (read_line))
+    (let presence-dir (fcrl-or-default (read_line) "/tmp/form-field"))
+    (let role (fcrl-or-default (read_line) "cell-servant"))
+    (if (or (nothing? task-spool)
+            (or (nothing? reply-spool) (nothing? bell)))
+        (do (fcrl-line "signal" "nothing")
+            (fcrl-line "reason" "spool-input-absent")
+            0)
+        (do
+            (let pid (fcrl-trim (host-exec "echo $PPID" "")))
+            (let worktree (fcrl-trim (host-exec "pwd" "")))
+            (host-exec (str_concat "mkdir -p " presence-dir) "")
+            (host-exec (str_concat "test -p " (str_concat bell
+                (str_concat " || mkfifo " bell))) "")
+            (let presence-path (str_concat presence-dir
+                (str_concat "/" (str_concat pid ".presence"))))
+            (write_file presence-path (fpf-presence-frame pid role task-spool
+                reply-spool bell worktree (now_unix_ms)))
+            (fcrl-line "pid" pid)
+            (fcrl-line "role" role)
+            (fcrl-line "task-spool" task-spool)
+            (fcrl-line "reply-spool" reply-spool)
+            (fcrl-line "bell" bell)
+            (fcrl-line "presence" presence-path)
+            (fcrl-loop (fcsv-new) (sbt-reader task-spool) bell reply-spool
+                presence-path))))
