@@ -2087,7 +2087,17 @@ func (k *Kernel) registerNatives() {
 		if len(args) > 1 {
 			cmd.Stdin = strings.NewReader(argStr(args, 1))
 		}
-		out, _ := cmd.CombinedOutput()
+		out, err := cmd.CombinedOutput()
+		// Launch failure (fork starvation — sh never ran) answers the axiom-1
+		// nothing (the same null head-of-empty carries), never "": "" means the
+		// command RAN and spoke zero bytes. An *exec.ExitError is a process that
+		// DID run and exited nonzero — its output still crosses. Mirrors
+		// fk_host_exec in runtime/fkwu-uni.c (witnessed 2026-08-27, PR #542).
+		if err != nil {
+			if _, ran := err.(*exec.ExitError); !ran {
+				return Value{Kind: VNull}
+			}
+		}
 		return Value{Kind: VStr, Str: string(out)}
 	})
 	k.registerNative("host-read", catMethod(), func(_ *Kernel, args []Value) Value {
