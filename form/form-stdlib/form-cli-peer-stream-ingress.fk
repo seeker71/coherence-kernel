@@ -1,0 +1,437 @@
+; form-cli-peer-stream-ingress.fk — scannerless, cooperative ingress for one
+; resident local Form peer.
+;
+; This defines the Form-native replacement organ for whole-line task timing:
+; resident-async-ingress deltas become scannerless peer tasks. It is not yet
+; installed in `observe/form-cli-peer-agent-live.fk`; that physical witness
+; still blocks on read_line and is named as the next crossing in the receipt.
+; Explicit <|form:agent-task|> marks are the protocol clock: an opener, body,
+; and closer may cross any number of chunks, and one chunk may carry several
+; frames. Newline is ordinary frame data and an optional separator outside a
+; frame; it never causes dispatch. Incomplete frames retain their bytes until
+; more arrive, timeout, cut, or release. An absolute complete-through watermark
+; advances only past a whole close mark, so mid-frame bytes are nothing-yet
+; rather than present-empty. Resource choice lives in the dynamic channel's
+; gas/deadline rather than a fixed cursor byte ceiling.
+;
+; Direct research speech is not called zero contribution. It becomes a
+; present, content-addressed `candidate` whose acceptance is still nothing.
+; A correlated evaluation later supplies exact 0 or 1 and changes it to
+; `revise` or `accepted`. A physically executed recipe remains immediately
+; `observed-executed`. This makes unvalidated speech visible without flattering
+; it into accepted evidence.
+;
+; `fcpsi-run-peer` is the effectful seam for an already-live fcms session. This
+; cell performs no top-level model or Metal work. Results are values and may be
+; wrapped as output envelopes; correctness does not depend on stdout flushing.
+;
+; preludes: form-stdlib/form-cli-peer-agent.fk
+; preludes: form-stdlib/resident-async-ingress.fk
+; Proven by: form-stdlib/tests/form-cli-peer-stream-ingress-band.fk
+
+(do
+    ; ── scannerless marker cursor, one per dynamic channel ──────────
+    (defn fcpsi-cursor (channel window bytes chunks completed complete-through)
+        (list "form-cli-peer-stream-cursor-v1" channel window bytes chunks
+              completed complete-through))
+    (defn fcpsi-cursor-channel (c) (nth c 1))
+    (defn fcpsi-cursor-window (c) (nth c 2))
+    (defn fcpsi-cursor-bytes (c) (nth c 3))
+    (defn fcpsi-cursor-chunks (c) (nth c 4))
+    (defn fcpsi-cursor-completed (c) (nth c 5))
+    (defn fcpsi-cursor-complete-through (c) (nth c 6))
+    (defn fcpsi-fresh-cursor (channel) (fcpsi-cursor channel "" 0 0 0 0))
+
+    (defn fcpsi-clip-left (text count)
+        (if (le (str_len text) count) text
+            (substring text (sub (str_len text) count) (str_len text))))
+    ; extraction = remaining-window, completed-frames, held-open-bit,
+    ; last-complete end offset in the joined cursor window. Mid-frame bytes do
+    ; not advance this watermark and therefore remain nothing-yet.
+    (defn fcpsi-extract-go (text frames base last-complete)
+        (do
+            (let open-at (str_find text (fcpa-task-open) 0))
+            (if (lt open-at 0)
+                (list (fcpsi-clip-left text
+                          (sub (str_len (fcpa-task-open)) 1)) frames 0
+                      last-complete)
+                (do
+                    (let close-at (str_find text (fcpa-task-close)
+                        (add open-at (str_len (fcpa-task-open)))))
+                    (if (lt close-at 0)
+                        (list (substring text open-at (str_len text)) frames 1
+                              last-complete)
+                        (do
+                            (let end (add close-at
+                                (str_len (fcpa-task-close))))
+                            (let frame (substring text open-at end))
+                            (let rest (substring text end (str_len text)))
+                            (fcpsi-extract-go rest
+                                (append frames (list frame)) (add base end)
+                                (add base end))))))))
+    (defn fcpsi-extract (text frames)
+        (fcpsi-extract-go text frames 0 0))
+    ; feed result = cursor, frames, held-open-bit. Only arriving delta bytes
+    ; are examined; there is no tokenizer and no line read.
+    (defn fcpsi-feed (cursor chunk)
+        (do
+            (let joined (str_concat (fcpsi-cursor-window cursor) chunk))
+            (let joined-start (sub (fcpsi-cursor-bytes cursor)
+                (str_len (fcpsi-cursor-window cursor))))
+            (let extracted (fcpsi-extract joined (list)))
+            (let frames (nth extracted 1))
+            (list
+                (fcpsi-cursor (fcpsi-cursor-channel cursor) (nth extracted 0)
+                    (add (fcpsi-cursor-bytes cursor) (str_len chunk))
+                    (add (fcpsi-cursor-chunks cursor) 1)
+                    (add (fcpsi-cursor-completed cursor) (len frames))
+                    (if (gt (nth extracted 3) 0)
+                        (add joined-start (nth extracted 3))
+                        (fcpsi-cursor-complete-through cursor)))
+                frames (nth extracted 2))))
+
+    ; ── exact task parsing and content identity ─────────────────────
+    (defn fcpsi-task-category () (make_nodeid 31 2 0 222))
+    (defn fcpsi-task
+        (node channel sequence exchange turn kind text frame)
+        (list "form-cli-peer-stream-task-v1" node channel sequence exchange
+              turn kind text frame))
+    (defn fcpsi-task-node (t) (nth t 1))
+    (defn fcpsi-task-channel (t) (nth t 2))
+    (defn fcpsi-task-sequence (t) (nth t 3))
+    (defn fcpsi-task-exchange (t) (nth t 4))
+    (defn fcpsi-task-turn (t) (nth t 5))
+    (defn fcpsi-task-kind (t) (nth t 6))
+    (defn fcpsi-task-text (t) (nth t 7))
+    (defn fcpsi-task-frame (t) (nth t 8))
+    (defn fcpsi-task-id (channel sequence exchange turn kind text)
+        (intern_node (fcpsi-task-category)
+            (list (intern_trivial_string channel)
+                  (intern_trivial_int sequence)
+                  (intern_trivial_int exchange)
+                  (intern_trivial_int turn)
+                  (intern_trivial_string kind)
+                  (intern_trivial_string text))))
+    (defn fcpsi-frame-parse (channel sequence exchange frame)
+        (do
+            (let open-n (str_len (fcpa-task-open)))
+            (let close-n (str_len (fcpa-task-close)))
+            (let close-at (sub (str_len frame) close-n))
+            (let turn-prefix "\nturn=")
+            (let kind-prefix "\nkind=")
+            (let task-prefix "\ntask=")
+            (let turn-start (add open-n (str_len turn-prefix)))
+            (let kind-mark (str_find frame kind-prefix turn-start))
+            (let task-mark (str_find frame task-prefix
+                (if (lt kind-mark 0) turn-start kind-mark)))
+            (if (or (not (eq (str_find frame (fcpa-task-open) 0) 0))
+                    (or (lt close-at 0)
+                    (or (not (eq (str_find frame (fcpa-task-close) open-n)
+                                 close-at))
+                    (or (not (eq (str_find frame turn-prefix open-n) open-n))
+                    (or (lt kind-mark 0) (lt task-mark 0))))))
+                (nothing)
+                (do
+                    (let turn-text (substring frame turn-start kind-mark))
+                    (let turn (str_to_int turn-text))
+                    (let kind-start (add kind-mark (str_len kind-prefix)))
+                    (let task-start (add task-mark (str_len task-prefix)))
+                    (let task-end (if (and (gt close-at task-start)
+                        (eq (str-byte-at frame (sub close-at 1)) 10))
+                        (sub close-at 1) close-at))
+                    (let kind (substring frame kind-start task-mark))
+                    (let text (substring frame task-start task-end))
+                    (if (or (not (str_eq (int_to_str turn) turn-text))
+                            (or (str_eq kind "") (str_eq text "")))
+                        (nothing)
+                        (fcpsi-task
+                            (fcpsi-task-id channel sequence exchange turn kind text)
+                            channel sequence exchange turn kind text frame))))))
+    (defn fcpsi-parse-frames (channel sequence exchange frames tasks bad)
+        (if (eq (len frames) 0) (list tasks bad)
+            (do
+                (let task (fcpsi-frame-parse channel sequence exchange
+                    (head frames)))
+                (if (nothing? task)
+                    (fcpsi-parse-frames channel sequence exchange (tail frames)
+                        tasks (add bad 1))
+                    (fcpsi-parse-frames channel sequence exchange (tail frames)
+                        (append tasks (list task)) bad)))))
+
+    ; ── candidates and observed evaluation ──────────────────────────
+    ; candidate = node task-node exchange response contribution-state accepted
+    ; accepted is nothing before evaluation, then exact 0 or 1.
+    (defn fcpsi-candidate-category () (make_nodeid 31 2 0 223))
+    (defn fcpsi-candidate
+        (node task-node exchange response contribution-state accepted reason)
+        (list "form-cli-peer-stream-candidate-v1" node task-node exchange
+              response contribution-state accepted reason))
+    (defn fcpsi-candidate-node (c) (nth c 1))
+    (defn fcpsi-candidate-task-node (c) (nth c 2))
+    (defn fcpsi-candidate-exchange (c) (nth c 3))
+    (defn fcpsi-candidate-response (c) (nth c 4))
+    (defn fcpsi-candidate-state (c) (nth c 5))
+    (defn fcpsi-candidate-accepted (c) (nth c 6))
+    (defn fcpsi-candidate-reason (c) (nth c 7))
+    (defn fcpsi-candidate-id (task-node response)
+        (intern_node (fcpsi-candidate-category)
+            (list task-node (intern_trivial_string response))))
+
+    (defn fcpsi-find-task (tasks node)
+        (if (eq (len tasks) 0) (nothing)
+            (if (node_eq (fcpsi-task-node (head tasks)) node) (head tasks)
+                (fcpsi-find-task (tail tasks) node))))
+    (defn fcpsi-find-candidate (candidates node)
+        (if (eq (len candidates) 0) (nothing)
+            (if (node_eq (fcpsi-candidate-node (head candidates)) node)
+                (head candidates) (fcpsi-find-candidate (tail candidates) node))))
+    (defn fcpsi-replace-candidate (candidates node replacement)
+        (if (eq (len candidates) 0) (list)
+            (if (node_eq (fcpsi-candidate-node (head candidates)) node)
+                (cons replacement (tail candidates))
+                (cons (head candidates)
+                    (fcpsi-replace-candidate (tail candidates) node replacement)))))
+
+    ; ── resident interface state and bounded evidence ───────────────
+    (defn fcpsi-state (ingress cursors tasks candidates events event-capacity)
+        (list "form-cli-peer-stream-ingress-v1" ingress cursors tasks candidates
+              events event-capacity))
+    (defn fcpsi-ingress (s) (nth s 1))
+    (defn fcpsi-cursors (s) (nth s 2))
+    (defn fcpsi-tasks (s) (nth s 3))
+    (defn fcpsi-candidates (s) (nth s 4))
+    (defn fcpsi-events (s) (nth s 5))
+    (defn fcpsi-event-capacity (s) (nth s 6))
+    (defn fcpsi-new (ingress event-capacity)
+        (fcpsi-state ingress (list) (list) (list) (list) event-capacity))
+    (defn fcpsi-with (s ingress cursors tasks candidates events)
+        (fcpsi-state ingress cursors tasks candidates events
+            (fcpsi-event-capacity s)))
+    (defn fcpsi-event (exchange channel movement signal detail)
+        (list exchange channel movement signal detail))
+    (defn fcpsi-observe (s exchange channel movement signal detail)
+        (fcpsi-with s (fcpsi-ingress s) (fcpsi-cursors s) (fcpsi-tasks s)
+            (fcpsi-candidates s)
+            (rai-bounded-events
+                (append (fcpsi-events s)
+                    (list (fcpsi-event exchange channel movement signal detail)))
+                (fcpsi-event-capacity s))))
+    (defn fcpsi-find-cursor (cursors channel)
+        (if (eq (len cursors) 0) (nothing)
+            (if (str_eq (fcpsi-cursor-channel (head cursors)) channel)
+                (head cursors) (fcpsi-find-cursor (tail cursors) channel))))
+    (defn fcpsi-replace-cursor (cursors channel replacement)
+        (if (eq (len cursors) 0) (list replacement)
+            (if (str_eq (fcpsi-cursor-channel (head cursors)) channel)
+                (cons replacement (tail cursors))
+                (cons (head cursors)
+                    (fcpsi-replace-cursor (tail cursors) channel replacement)))))
+    (defn fcpsi-cursor-of (s channel)
+        (do
+            (let c (fcpsi-find-cursor (fcpsi-cursors s) channel))
+            (if (nothing? c) (fcpsi-fresh-cursor channel) c)))
+
+    ; result = state signal present value reason envelope.
+    (defn fcpsi-result (state signal present value reason envelope)
+        (list "form-cli-peer-stream-result-v1" state signal present value
+              reason envelope))
+    (defn fcpsi-result-state (r) (nth r 1))
+    (defn fcpsi-result-signal (r) (nth r 2))
+    (defn fcpsi-result-present? (r) (nth r 3))
+    (defn fcpsi-result-value (r) (nth r 4))
+    (defn fcpsi-result-reason (r) (nth r 5))
+    (defn fcpsi-result-envelope (r) (nth r 6))
+
+    (defn fcpsi-offer (s envelope)
+        (do
+            (let offered (rai-offer (fcpsi-ingress s) envelope))
+            (let s1 (fcpsi-with s (nth offered 0) (fcpsi-cursors s)
+                (fcpsi-tasks s) (fcpsi-candidates s) (fcpsi-events s)))
+            (let s2 (fcpsi-observe s1 (rai-env-exchange envelope)
+                (rai-env-channel envelope) (rai-env-kind envelope)
+                (nth offered 2) (rai-env-sequence envelope)))
+            (fcpsi-result s2 (nth offered 2)
+                (if (nothing? (nth offered 1)) 0 1)
+                (nth offered 1) (nth offered 2) envelope)))
+
+    (defn fcpsi-feed-yielded (s envelope)
+        (do
+            (let channel (rai-env-channel envelope))
+            (let old (fcpsi-cursor-of s channel))
+            (let fed (fcpsi-feed old (rai-env-payload envelope)))
+            (let parsed (fcpsi-parse-frames channel
+                (rai-env-sequence envelope) (rai-env-exchange envelope)
+                (nth fed 1) (list) 0))
+            (let next-cursors (fcpsi-replace-cursor (fcpsi-cursors s) channel
+                (nth fed 0)))
+            (let bad (nth parsed 1))
+            (let tasks (nth parsed 0))
+            (let s1 (fcpsi-with s (fcpsi-ingress s) next-cursors
+                (if (gt bad 0) (fcpsi-tasks s)
+                    (append (fcpsi-tasks s) tasks))
+                (fcpsi-candidates s) (fcpsi-events s)))
+            (if (gt bad 0)
+                (do
+                    (let s2 (fcpsi-observe s1 (rai-env-exchange envelope)
+                        channel "task-frame" "failure" bad))
+                    (fcpsi-result s2 "failure" 0 (nothing)
+                        "task-frame-malformed" envelope))
+                (if (gt (len tasks) 0)
+                    (do
+                        (let s2 (fcpsi-observe s1 (rai-env-exchange envelope)
+                            channel "task-frame" "value" (len tasks)))
+                        (fcpsi-result s2 "value" 1 tasks
+                            "scannerless-task-frame-complete" envelope))
+                    (do
+                        (let signal (if (eq (nth fed 2) 1) "held" "nothing"))
+                        (let s2 (fcpsi-observe s1 (rai-env-exchange envelope)
+                            channel "task-bytes" signal
+                            (str_len (rai-env-payload envelope))))
+                        (fcpsi-result s2 signal 0 (nothing)
+                            (if (str_eq signal "held")
+                                "scannerless-task-frame-held"
+                                "no-task-frame") envelope))))))
+
+    (defn fcpsi-peer-result (s task-node response recipe-contribution envelope)
+        (do
+            (let task (fcpsi-find-task (fcpsi-tasks s) task-node))
+            (if (nothing? task)
+                (fcpsi-result s "nothing" 0 (nothing) "task-node-absent" envelope)
+                (do
+                    (let node (fcpsi-candidate-id task-node response))
+                    (let executed (if (eq recipe-contribution 1) 1 0))
+                    (let candidate (fcpsi-candidate node task-node
+                        (fcpsi-task-exchange task) response
+                        (if (eq executed 1) "observed-executed" "candidate")
+                        (if (eq executed 1) 1 (nothing))
+                        (if (eq executed 1) "typed-recipe-callback"
+                            "evaluation-not-yet-observed")))
+                    (let s1 (fcpsi-with s (fcpsi-ingress s) (fcpsi-cursors s)
+                        (fcpsi-tasks s)
+                        (cons candidate (fcpsi-candidates s)) (fcpsi-events s)))
+                    (let s2 (fcpsi-observe s1 (fcpsi-task-exchange task)
+                        (fcpsi-task-channel task) "peer-result"
+                        (fcpsi-candidate-state candidate) node))
+                    (fcpsi-result s2 (fcpsi-candidate-state candidate) 1
+                        candidate (fcpsi-candidate-reason candidate) envelope)))))
+
+    (defn fcpsi-evaluate (s candidate-node accepted reason exchange envelope)
+        (do
+            (let candidate (fcpsi-find-candidate
+                (fcpsi-candidates s) candidate-node))
+            (if (nothing? candidate)
+                (fcpsi-result s "nothing" 0 (nothing)
+                    "candidate-node-absent" envelope)
+            (if (not (eq (fcpsi-candidate-exchange candidate) exchange))
+                (fcpsi-result s "choice" 1 candidate-node
+                    "candidate-exchange-mismatch" envelope)
+            (if (not (or (eq accepted 0) (eq accepted 1)))
+                (fcpsi-result s "failure" 0 (nothing)
+                    "evaluation-not-zero-or-one" envelope)
+                (do
+                    (let next (fcpsi-candidate candidate-node
+                        (fcpsi-candidate-task-node candidate)
+                        (fcpsi-candidate-exchange candidate)
+                        (fcpsi-candidate-response candidate)
+                        (if (eq accepted 1) "accepted" "revise")
+                        accepted reason))
+                    (let s1 (fcpsi-with s (fcpsi-ingress s) (fcpsi-cursors s)
+                        (fcpsi-tasks s)
+                        (fcpsi-replace-candidate (fcpsi-candidates s)
+                            candidate-node next)
+                        (fcpsi-events s)))
+                    (let s2 (fcpsi-observe s1 exchange "evaluation"
+                        "evaluation" (if (eq accepted 1) "accepted" "revise")
+                        candidate-node))
+                    (fcpsi-result s2 (if (eq accepted 1) "accepted" "revise")
+                        1 accepted reason envelope)))))))
+
+    (defn fcpsi-undo (s candidate-node exchange envelope)
+        (do
+            (let candidate (fcpsi-find-candidate
+                (fcpsi-candidates s) candidate-node))
+            (if (nothing? candidate)
+                (fcpsi-result s "nothing" 0 (nothing)
+                    "candidate-node-absent" envelope)
+                (do
+                    (let next (fcpsi-candidate candidate-node
+                        (fcpsi-candidate-task-node candidate)
+                        (fcpsi-candidate-exchange candidate)
+                        (fcpsi-candidate-response candidate) "candidate"
+                        (nothing) "evaluation-undone"))
+                    (let s1 (fcpsi-with s (fcpsi-ingress s) (fcpsi-cursors s)
+                        (fcpsi-tasks s)
+                        (fcpsi-replace-candidate (fcpsi-candidates s)
+                            candidate-node next) (fcpsi-events s)))
+                    (let s2 (fcpsi-observe s1 exchange "evaluation" "undo"
+                        "undo" candidate-node))
+                    (fcpsi-result s2 "undo" 1 next "evaluation-undone"
+                        envelope)))))
+
+    (defn fcpsi-dispatch (s envelope)
+        (if (str_eq (rai-env-kind envelope) "task-bytes")
+            (fcpsi-feed-yielded s envelope)
+        (if (str_eq (rai-env-kind envelope) "peer-result")
+            (do
+                (let p (rai-env-payload envelope))
+                (fcpsi-peer-result s (nth p 0) (nth p 1) (nth p 2) envelope))
+        (if (str_eq (rai-env-kind envelope) "evaluation")
+            (do
+                (let p (rai-env-payload envelope))
+                (fcpsi-evaluate s (nth p 0) (nth p 1) (nth p 2)
+                    (rai-env-exchange envelope) envelope))
+        (if (str_eq (rai-env-kind envelope) "undo")
+            (fcpsi-undo s (rai-env-payload envelope)
+                (rai-env-exchange envelope) envelope)
+            (do
+                (let s1 (fcpsi-observe s (rai-env-exchange envelope)
+                    (rai-env-channel envelope) (rai-env-kind envelope)
+                    "choice" (rai-env-alternative envelope)))
+                (fcpsi-result s1 "choice" 1 (rai-env-alternative envelope)
+                    "movement-not-selected" envelope)))))))
+
+    ; One cooperative quantum. rai owns dynamic-channel round robin and exact
+    ; timeout/cut/release signals; only value envelopes reach task dispatch.
+    (defn fcpsi-step (s now)
+        (do
+            (let yielded (rai-yield (fcpsi-ingress s) now))
+            (let s1 (fcpsi-with s (nth yielded 0) (fcpsi-cursors s)
+                (fcpsi-tasks s) (fcpsi-candidates s) (fcpsi-events s)))
+            (let envelope (nth yielded 1))
+            (let signal (nth yielded 2))
+            (if (nothing? envelope)
+                (fcpsi-result s1 "nothing" 0 (nothing) "ingress-idle" (nothing))
+                (if (not (str_eq signal "value"))
+                    (do
+                        (let s2 (fcpsi-observe s1 (rai-env-exchange envelope)
+                            (rai-env-channel envelope) (rai-env-kind envelope)
+                            signal (rai-env-alternative envelope)))
+                        (fcpsi-result s2 signal 0 (nothing)
+                            (rai-env-alternative envelope) envelope))
+                    (fcpsi-dispatch s1 envelope)))))
+
+    ; Effectful only when explicitly called with an already-live session.
+    ; Direct speech returns a present candidate rather than contribution=0.
+    (defn fcpsi-run-peer (s session task-node budget)
+        (do
+            (let task (fcpsi-find-task (fcpsi-tasks s) task-node))
+            (if (nothing? task)
+                (list s (nothing)
+                    (fcpsi-result s "nothing" 0 (nothing)
+                        "task-node-absent" (nothing)))
+                (do
+                    (let observed (fcpa-observe-task session
+                        (fcpsi-task-turn task) (fcpsi-task-kind task)
+                        (fcpsi-task-text task)))
+                    (let peer (fcpa-run observed budget))
+                    (let candidate (fcpsi-peer-result s task-node
+                        (fcpa-response peer) (fcpa-contribution peer) (nothing)))
+                    (list (fcpsi-result-state candidate) peer candidate)))))
+
+    ; A result can travel on another dynamic channel without stdout, a server,
+    ; or a process restart. Payload retains typed structure, including 0/1.
+    (defn fcpsi-output-envelope
+        (result channel sequence exchange alternative deadline)
+        (rai-envelope channel sequence exchange "peer-observation" result
+            alternative deadline))
+    0)
