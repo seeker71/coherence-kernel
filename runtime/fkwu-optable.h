@@ -117,8 +117,6 @@ static const struct fk_optab_row fk_optab[] = {
   { "sense_stream", 1, 214 },
   { "jit_arm64_u32_leaf", 3, 215 },
   { "jit_leaf_inram", 2, 146 },
-  { "jit_leaf_hot", 3, 29 },
-  { "jit_leaf_call", 2, 32 },
   { "sense_wifi_ssid", 0, 216 },
   { "sense_wifi_signal", 0, 217 },
   { "sense_bt_present", 0, 218 },
