@@ -1,0 +1,91 @@
+; spool-bell-transport-band.fk — bytes cross exactly once, in order, without
+; blocking either side; nothing-yet is never an empty delivery; and the join
+; with the scannerless cursor holds a frame split across appends.
+;
+; Verdict 255 (8 bits):
+;   1    a fresh reader on an absent spool: delta NOTHING (no delivery)
+;   2    append then delta: exactly the appended bytes, watermark advanced
+;   4    no new bytes: NOTHING again — never "", never a re-delivery
+;   8    two appends between drains: ONE delta carrying both, in order
+;   16   interleaved writers: both writers' bytes present, total length
+;        exact — the append door loses nothing under interleave
+;   32   JOIN: a task frame split across two appends — first delta feeds
+;        the fcpsi cursor and HOLDS (held=1, no frame); the completing
+;        delta yields the task with its exact text
+;   64   two frames arriving in one delta both extract
+;   128  the reply direction is the same discipline: agent appends, client
+;        reader drains the reply exactly once
+;
+; preludes: form-stdlib/spool-bell-transport.fk form-stdlib/form-cli-peer-stream-ingress.fk
+
+(do
+    (defn stb-bit (ok bit) (if ok bit 0))
+    (defn stb-frame (body)
+        (str_concat (fcpa-task-open) (str_concat body (fcpa-task-close))))
+
+    (defn spool-bell-transport-band ()
+        (do
+            (let sp "/tmp/sbt-band.spool")
+            (let rp "/tmp/sbt-band.reply")
+            (let clr (host-exec "rm -f /tmp/sbt-band.spool /tmp/sbt-band.reply" ""))
+            (let r0 (sbt-reader sp))
+            (let d0 (sbt-delta r0))
+
+            (let a1 (sbt-append sp "alpha"))
+            (let d1 (sbt-delta r0))
+            (let r1 (nth d1 1))
+            (let d1b (sbt-delta r1))
+
+            (let a2 (sbt-append sp "beta"))
+            (let a3 (sbt-append sp "gamma"))
+            (let d2 (sbt-delta r1))
+            (let r2 (nth d2 1))
+
+            ; interleaved writers
+            (let a4 (sbt-append sp "w1-AAAA"))
+            (let a5 (sbt-append sp "w2-BB"))
+            (let a6 (sbt-append sp "w1-CCC"))
+            (let d3 (sbt-delta r2))
+            (let r3 (nth d3 1))
+
+            ; split frame across appends, through the cursor
+            (let half1 (substring (stb-frame "ask one") 0 12))
+            (let half2 (substring (stb-frame "ask one") 12
+                                  (str_len (stb-frame "ask one"))))
+            (let a7 (sbt-append sp half1))
+            (let d4 (sbt-delta r3))
+            (let c1 (fcpsi-feed (fcpsi-fresh-cursor "band") (nth d4 0)))
+            (let r4 (nth d4 1))
+            (let a8 (sbt-append sp half2))
+            (let d5 (sbt-delta r4))
+            (let c2 (fcpsi-feed (nth c1 0) (nth d5 0)))
+            (let r5 (nth d5 1))
+
+            ; two frames in one delta
+            (let a9 (sbt-append sp (str_concat (stb-frame "two") (stb-frame "three"))))
+            (let d6 (sbt-delta r5))
+            (let c3 (fcpsi-feed (fcpsi-fresh-cursor "band2") (nth d6 0)))
+
+            ; reply direction
+            (let ra (sbt-append rp "answer: 42"))
+            (let dr (sbt-delta (sbt-reader rp)))
+
+            (sum (list
+                (stb-bit (nothing? d0) 1)
+                (stb-bit (and (str_eq (nth d1 0) "alpha")
+                              (eq (sbt-mark r1) 5)) 2)
+                (stb-bit (nothing? d1b) 4)
+                (stb-bit (str_eq (nth d2 0) "betagamma") 8)
+                (stb-bit (and (eq (str_len (nth d3 0)) 18)
+                         (and (ge (str_find (nth d3 0) "w2-BB" 0) 0)
+                              (ge (str_find (nth d3 0) "w1-CCC" 0) 0))) 16)
+                ; a partial OPENER is not yet an open frame: after half1 the
+                ; cursor holds bytes but no frame and no held-open claim —
+                ; the completing delta yields the task whole
+                (stb-bit (and (eq (len (nth c1 1)) 0)
+                         (and (eq (len (nth c2 1)) 1)
+                              (str_eq (head (nth c2 1)) (stb-frame "ask one")))) 32)
+                (stb-bit (eq (len (nth c3 1)) 2) 64)
+                (stb-bit (str_eq (nth dr 0) "answer: 42") 128)))))
+
+    (spool-bell-transport-band))
