@@ -400,9 +400,15 @@
     (defn fknss-finish (s c before after injected before-ids after-ids)
         (fknss-result s c before after injected before-ids after-ids))
 
+    ; Observer is a function value, not a global mode or dispatcher seat.  The
+    ; default stays silent.  A live residence may offer a content-free observer
+    ; that streams stage/counter events while this recursive walk is still
+    ; moving; no prompt, generated text, or source bytes cross this surface.
+    (defn fknss-observe-none (stage phase cursor generated) 0)
+
     (defn fknss-walk
         (s c id pos left stops phase before after injected before-ids after-ids
-         exec-ctx executor)
+         exec-ctx executor observer)
         (if (le left 0)
             (fknss-finish s c before after injected before-ids after-ids)
         (if (lt id 0)
@@ -417,6 +423,10 @@
                 (fknss-fail s "session-position-refused" pos id 0 0)
                 c before after injected before-ids after-ids)
             (do
+                (let generated (add (len before-ids) (len after-ids)))
+                (let pulse (if (eq (mod generated 8) 0) 1 0))
+                (let progress (if (eq pulse 1)
+                    (observer "model-stream" "progress" c generated) 0))
                 (let chunk (tkz-decode-text (fcms-src s) (list id)))
                 (let transfer (fknsc-feed exec-ctx executor c chunk))
                 (let c2 (fknsc-transfer-cursor transfer))
@@ -436,7 +446,11 @@
                         ; spoken holds the decoded model ID pending. Observe
                         ; consumes it once, encodes only new bytes/role, and
                         ; returns the first prediction after that same-KV prefill.
+                        (let injection-begin (observer "observation-inject"
+                            "begin" c2 generated))
                         (let resumed (fcms-observe spoken injection-delta))
+                        (let injection-end (observer "observation-inject"
+                            "end" c2 generated))
                         (if (not (eq (fcms-live? resumed) 1))
                             (fknss-finish resumed c2 before2 after2
                                 (str_concat injected injection-delta)
@@ -445,12 +459,17 @@
                                 (fcms-pos resumed) (sub left 1) stops 1
                                 before2 after2
                                 (str_concat injected injection-delta)
-                                before-ids2 after-ids2 exec-ctx executor)))
+                                before-ids2 after-ids2 exec-ctx executor
+                                observer)))
                 (if (eq left 1)
                     (fknss-finish spoken c2 before2 after2 injected
                         before-ids2 after-ids2)
                     (do
+                        (let forward-begin (if (eq pulse 1)
+                            (observer "model-forward" "begin" c2 generated) 0))
                         (let next-id (fknss-forward spoken id pos))
+                        (let forward-end (if (eq pulse 1)
+                            (observer "model-forward" "end" c2 generated) 0))
                         (let next (fknss-with-generated spoken (add pos 1)
                             next-id
                             (if (or (lt next-id 0)
@@ -458,16 +477,30 @@
                             0))
                         (fknss-walk next c2 next-id (add pos 1) (sub left 1)
                             stops phase before2 after2 injected
-                            before-ids2 after-ids2 exec-ctx executor))))))))))
+                            before-ids2 after-ids2 exec-ctx executor
+                            observer))))))))))
 
-    (defn fknss-run-with (session max-generated exec-ctx executor)
+    (defn fknss-run-with-observer
+        (session max-generated exec-ctx executor observer)
         (if (or (not (eq (fcms-live? session) 1))
                 (le max-generated 0))
             (fknss-result session (fknsc-fresh) "" "" ""
                 (empty) (empty))
-            (fknss-walk session (fknsc-fresh)
-                (fcms-pending session) (fcms-pos session) max-generated
-                (fcmg-q35-stops (fcms-src session)) 0
-                "" "" "" (empty) (empty) exec-ctx executor)))
+            (do
+                (let cursor (fknsc-fresh))
+                (let begin (observer "run" "begin" cursor 0))
+                (let result (fknss-walk session cursor
+                    (fcms-pending session) (fcms-pos session) max-generated
+                    (fcmg-q35-stops (fcms-src session)) 0
+                    "" "" "" (empty) (empty) exec-ctx executor observer))
+                (let generated (add (len (fknss-before-ids result))
+                    (len (fknss-after-ids result))))
+                (let end (observer "run" "end" (fknss-cursor result)
+                    generated))
+                result)))
+
+    (defn fknss-run-with (session max-generated exec-ctx executor)
+        (fknss-run-with-observer session max-generated exec-ctx executor
+            fknss-observe-none))
 
     0)
