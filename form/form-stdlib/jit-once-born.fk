@@ -88,7 +88,8 @@
         (if (nothing? img) (nothing)
             (if (eq (len img) 0) (nothing)
                 (list (jonb-epoch reg)
-                      (cons (list id img (jonb-image-id img))
+                      (cons (list id img (jonb-image-id img)
+                                  (list 0 id img))
                             (jonb-entries reg))))))
 
     ; ── the form route: the same program, interpreted ──────────────────────
@@ -108,19 +109,15 @@
                 (nothing)))))))))
 
     ; ── request: exactly one birth per (shape, meaning); routes explicit ───
-    ; returns (list value route reg' born). The hot path degrades honestly:
-    ; jit_leaf_call (key only — O(1), no image crosses dispatch) answers when
-    ; the key is resident; a miss is NOTHING, and the request falls to
-    ; jit_leaf_hot (key + image — births resident and stamps the key), and a
-    ; kernel carrying neither door falls to jit_leaf_inram. Measured on this
-    ; host at a 3,612-byte image: 13.6us/call inram, 7.2 hot, 3.4 call —
-    ; the call door's cost does not move with image size.
-    (defn jonb-exec (id img arg)
-        (do (let fast (jit_leaf_call id arg))
-            (if (nothing? fast)
-                (do (let warm (jit_leaf_hot id img arg))
-                    (if (nothing? warm) (jit_leaf_inram img arg) warm))
-                fast)))
+    ; returns (list value route reg' born). One retained Form request carries
+    ; [invoke, structural identity, image] through the existing inram door.
+    ; The carrier reads the image only at cold birth; later calls reach its page
+    ; by the interned NodeID index. No new fixed primitive seat names this flow.
+    (defn jonb-exec (request prog root arg reg born)
+        (do (let native (jit_leaf_inram request arg))
+            (if (nothing? native)
+                (list (jonb-eval prog root arg) "form" reg born)
+                (list native "native" reg born))))
     (defn jonb-request (reg prog root arg)
         (do (let id (jonb-identity prog root (jonb-epoch reg)))
             (let e (jonb-find (jonb-entries reg) id))
@@ -129,8 +126,9 @@
                     (let reg2 (jonb-retain reg id img))
                     (if (nothing? reg2)
                         (list (jonb-eval prog root arg) "refused" reg 0)
-                        (list (jonb-exec id img arg) "native" reg2 1)))
-                (list (jonb-exec id (nth e 1) arg) "native" reg 0))))
+                        (jonb-exec (nth (head (jonb-entries reg2)) 3)
+                                   prog root arg reg2 1)))
+                (jonb-exec (nth e 3) prog root arg reg 0))))
 
     ; the form route, requestable by name — a host without the door, or a
     ; caller checking agreement, asks for it explicitly
@@ -147,10 +145,14 @@
             (list (list new-epoch (reverse kept)) st co (len kept))
             (do (let e (head es))
                 (if (eq same 0)
-                    (jonb-sweep-go (tail es) new-epoch same kept (add st 1) co)
+                    (do (let released (jonb-release-entry e))
+                        (jonb-sweep-go (tail es) new-epoch same kept (add st 1) co))
                     (if (eq (jonb-image-id (nth e 1)) (nth e 2))
                         (jonb-sweep-go (tail es) new-epoch same (cons e kept) st co)
-                        (jonb-sweep-go (tail es) new-epoch same kept st (add co 1)))))))
+                        (do (let released (jonb-release-entry e))
+                            (jonb-sweep-go (tail es) new-epoch same kept st (add co 1))))))))
+    (defn jonb-release-entry (e)
+        (jit_leaf_inram (list 1 (nth e 0) (empty)) 0))
 
     ; ── the audited flow ───────────────────────────────────────────────────
     (defn jonb-run-all (reg jobs results borns)
