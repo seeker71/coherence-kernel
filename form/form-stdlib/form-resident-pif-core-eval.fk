@@ -1,0 +1,104 @@
+; form-resident-pif-core-eval.fk -- NodeID calls into a persistent scannerless
+; Form evaluator environment.
+;
+; Source arriving after process startup is interpreted into immutable function
+; bindings.  Each body is resident source data addressed by a recursively
+; interned NodeID; it is not compiled into the kernel's fixed fk_fn array.
+; Re-definition conses a new binding and births a new identity.  Exact NodeID
+; calls resolve the requested body, while ordinary source calls resolve the
+; newest binding by name.  The same live environment is returned after every
+; movement.
+;
+; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/form-eval-full.fk
+; Proven by: form-stdlib/tests/form-resident-pif-core-eval-band.fk
+
+(do
+    (defn frpce-version () "form-resident-pif-core-eval-v1")
+    ; state keeps a NodeID->binding registry beside the evaluator environment.
+    ; Identity is minted once at definition entry; calls compare NodeIDs only
+    ; and never recursively re-intern every older body on the hot path.
+    (defn frpce-state (value env identity status reason registry)
+        (list (frpce-version) value env identity status reason registry))
+    (defn frpce-value (state) (nth state 1))
+    (defn frpce-env (state) (nth state 2))
+    (defn frpce-identity (state) (nth state 3))
+    (defn frpce-status (state) (nth state 4))
+    (defn frpce-reason (state) (nth state 5))
+    (defn frpce-registry (state) (nth state 6))
+
+    (defn frpce-empty () (frpce-state 0 (fef-empty-env) (nothing)
+        "ready" "resident-environment-open" (empty)))
+    (defn frpce-function-binding? (binding)
+        (if (ge (len binding) 4) (eq (fef-bkind binding) 1) 0))
+    (defn frpce-binding-identity (binding)
+        ; The pure evaluator stays four-way and stores only source data.  At
+        ; this resident boundary, 1.2.31 is the reviewed fndef family:
+        ; recursively interning [name,body] discovers the local content
+        ; instance, then a raw NodeID makes that identity transmissible over
+        ; the live cursor. No SHA bookkeeping participates.
+        (do
+            (let content (intern_node (make_nodeid 1 2 31 1)
+                (list (intern_trivial_string (fef-bname binding))
+                      (intern_trivial_string (fef-bb binding)))))
+            (make_nodeid 1 2 31 (node_inst content))))
+    (defn frpce-latest-identity (before after)
+        (if (gt (len after) (len before))
+            (if (frpce-function-binding? (head after))
+                (frpce-binding-identity (head after)) (nothing))
+            (nothing)))
+    (defn frpce-register (registry identity binding)
+        (if (nothing? identity) registry
+            (cons (list identity binding) registry)))
+    (defn frpce-eval (state source)
+        (do
+            (let before (frpce-env state))
+            (let result (fef-eval-state source before))
+            (let after (fef-e result))
+            (let identity (frpce-latest-identity before after))
+            (frpce-state (fef-v result) after identity
+                "returned" "source-interpreted-resident"
+                (frpce-register (frpce-registry state) identity
+                    (if (nothing? identity) (nothing) (head after))))))
+
+    (defn frpce-find-node (registry identity)
+        (if (nil? registry) (nothing)
+            (do
+                (let row (head registry))
+                (if (node_eq (nth row 0) identity)
+                    (nth row 1)
+                    (frpce-find-node (tail registry) identity)))))
+
+    ; receipt = marker, identity, status, reason, value, output-count, env,
+    ;           lifecycle. A returned language-level nothing has output=1.
+    (defn frpce-receipt (identity status reason value output env trace)
+        (list "form-resident-pif-core-eval-receipt" identity status reason
+              value output env trace))
+    (defn frpce-receipt-identity (receipt) (nth receipt 1))
+    (defn frpce-receipt-status (receipt) (nth receipt 2))
+    (defn frpce-receipt-reason (receipt) (nth receipt 3))
+    (defn frpce-receipt-value (receipt) (nth receipt 4))
+    (defn frpce-receipt-output (receipt) (nth receipt 5))
+    (defn frpce-receipt-env (receipt) (nth receipt 6))
+    (defn frpce-receipt-trace (receipt) (nth receipt 7))
+    (defn frpce-signal (value)
+        (if (nothing? value) "nothing"
+            (if (eq value 0) "zero" (if (eq value 1) "one" "value"))))
+
+    (defn frpce-invoke-one (state identity argument)
+        (do
+            (let binding (frpce-find-node (frpce-registry state) identity))
+            (if (nothing? binding)
+                (frpce-receipt identity "nothing" "recipe-node-not-found"
+                    (nothing) 0 (frpce-env state)
+                    "resolve,nothing,observe,release")
+                (do
+                    (let body-env
+                        (fef-zip (fef-ba binding) (list argument)
+                            (frpce-env state)))
+                    (let result (fef-eval-state (fef-bb binding) body-env))
+                    (frpce-receipt identity "returned"
+                        "recipe-node-invoked" (fef-v result) 1
+                        (frpce-env state)
+                        "resolve,call,return,observe,release")))))
+)
