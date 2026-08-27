@@ -2102,8 +2102,12 @@ func (k *Kernel) registerNatives() {
 	})
 	k.registerNative("host-read", catMethod(), func(_ *Kernel, args []Value) Value {
 		b, err := os.ReadFile(argStr(args, 0))
+		// A file that never was answers nothing, never "" — "" means the file
+		// EXISTS and holds zero bytes. This kernel's own read_file already
+		// answered VNull here; host-read was the lone masked read organ left
+		// (2026-08-27). Callers name the absence with nothing? before measuring.
 		if err != nil {
-			return Value{Kind: VStr, Str: ""}
+			return Value{Kind: VNull}
 		}
 		return Value{Kind: VStr, Str: string(b)}
 	})
