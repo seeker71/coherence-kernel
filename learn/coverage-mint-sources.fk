@@ -1,0 +1,107 @@
+; coverage-mint-sources.fk — the provenance-only mint, widened to many sources.
+;
+; coverage-mint.fk taught the order of authority: the question is the source's
+; own comment asked back (cm-mint-q), the answer is the source's own token
+; (cm-pairs), and a model's reading is at most attestation. This cell keeps
+; only the part that needs no mind at all: provenance IS the guarantee, so no
+; model is called anywhere here — cm-mint and cm-attest? stay untouched.
+;
+; MANY SOURCES, ONE FILE. cms-mint-all walks a source list, mints each source
+; that yields fact pairs, and folds everything into one JSONL text. A source
+; path that is not on disk contributes zero rows and is COUNTED as skipped —
+; the count row says so, and the mint continues. An empty source list yields
+; a present empty text, never nothing.
+;
+; THE SEALED GUARD travels with the mint: every fkh4 heldout prompt is sealed,
+; and a minted question containing any sealed prompt's first eight words is
+; rejected through cm-guard-ok? before its row lands.
+;
+; preludes: form-stdlib/core.fk learn/coverage-mint.fk learn/form-knowledge-heldout-v4.fk
+; Proven by: form-stdlib/tests/coverage-mint-sources-band.fk
+
+(do
+    (defn cms-out-dir ()
+        "/Users/ursmuff/.coherence-network/form-corpus-lora-data-v5")
+    (defn cms-out-path ()
+        (str_concat (cms-out-dir) "/train-coverage.jsonl"))
+
+    ; the survey: the three axioms sources on disk, plus resource-port.fk —
+    ; named by host-kernel.form's own compose list yet not present as a file
+    ; here, so it stands as the honest counted-skipped member of the list
+    (defn cms-sources ()
+        (list "axioms/core-axioms.form"
+              "axioms/host-kernel.form"
+              "axioms/kernel-self-composition.form"
+              "axioms/resource-port.fk"))
+
+    ; sealed prompts: every fkh4 heldout prompt, so the mint can never write
+    ; a training question that opens like a sealed one
+    (defn cms-prompts-of (rows)
+        (if (eq (len rows) 0) (list)
+            (cons (fkh4-prompt (head rows)) (cms-prompts-of (tail rows)))))
+    (defn cms-sealed-prompts () (cms-prompts-of (fkh4-rows)))
+
+    (defn cms-basename (path)
+        (do (let s (str_find path "/" 0))
+            (if (lt s 0) path
+                (cms-basename (substring path (add s 1) (str_len path))))))
+
+    ; a missing source reads as zero pairs; file_size of a missing path is -1
+    (defn cms-source-pairs (path)
+        (if (lt (file_size path) 0) (list) (cm-pairs path)))
+
+    ; mint one source's pairs: drop a question that is nothing, that carries
+    ; its own answer, or that a sealed prompt already owns (cm-guard-ok?);
+    ; every field that lands is escaped by cm-row's cte-esc
+    (defn cms-mint-pairs (name pairs sealed acc kept)
+        (if (eq (len pairs) 0) (list acc kept)
+            (do (let p (head pairs))
+                (let q (cm-mint-q name (nth p 0) (nth p 1) (nth p 2)))
+                (if (or (nothing? q)
+                    (or (eq (cm-guard-ok? q sealed) 0)
+                        (ge (str_find q (nth p 1) 0) 0)))
+                    (cms-mint-pairs name (tail pairs) sealed acc kept)
+                    (cms-mint-pairs name (tail pairs) sealed
+                        (str_concat acc
+                            (str_concat (cm-row q (nth p 1)) "\n"))
+                        (add kept 1))))))
+
+    ; count row = (path pair-count kept-count skipped)
+    (defn cms-count-row (path pairs kept skipped)
+        (list path pairs kept skipped))
+    (defn cms-count-path (c) (nth c 0))
+    (defn cms-count-pairs (c) (nth c 1))
+    (defn cms-count-kept (c) (nth c 2))
+    (defn cms-count-skipped (c) (nth c 3))
+
+    (defn cms-mint-loop (sources sealed acc kept counts)
+        (if (eq (len sources) 0) (list acc kept counts)
+            (do (let path (head sources))
+                (let skipped (if (lt (file_size path) 0) 1 0))
+                (let ps (cms-source-pairs path))
+                (let m (cms-mint-pairs (cms-basename path) ps sealed "" 0))
+                (cms-mint-loop (tail sources) sealed
+                    (str_concat acc (nth m 0))
+                    (add kept (nth m 1))
+                    (append counts
+                        (list (cms-count-row path (len ps) (nth m 1)
+                                             skipped)))))))
+
+    ; the parameterized core, and the door with the standing sealed set
+    (defn cms-mint-all-with (sources sealed)
+        (cms-mint-loop sources sealed "" 0 (list)))
+    (defn cms-mint-all (sources)
+        (cms-mint-all-with sources (cms-sealed-prompts)))
+
+    ; ── the write door: dir made first, byte count returned ────────────────
+    (defn cms-write (text)
+        (do (let made (host-exec
+                (str_concat "mkdir -p " (cms-out-dir)) ""))
+            (write_file (cms-out-path) text)))
+
+    ; emit receipt = (bytes-written kept-count per-source-counts)
+    (defn cms-emit ()
+        (do (let m (cms-mint-all (cms-sources)))
+            (list (cms-write (nth m 0)) (nth m 1) (nth m 2))))
+
+    (cms-emit))
