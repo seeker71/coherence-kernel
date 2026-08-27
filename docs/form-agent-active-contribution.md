@@ -111,11 +111,27 @@ visible as a ghost, never a silence.
   cell residence above already takes arbitrary source without restart; the
   model-holding contribution turnwheel still waits for a new process on source
   change, and the two residences are not yet one.
-- Widen the resident evaluator's grammar: form-eval-full's proven core serves
-  today (integers, control, user calls); strings/lists/floats live in
-  grammars/form-eval.fk and native dispatch from inside eval is the named next
-  stone. An unbound name in a served task is a loud residence death — the
-  census shows it; a quieter repair is owed.
+- ~~Widen the resident evaluator's grammar~~ — placed 2026-08-27: string and
+  float literals plus a 19-op eval-native prim table now live in
+  form-eval-full itself (`form-eval-full-band.fk` → 1181 four-way), and the
+  servant's resolver gate answers `unbound-name:<sym>` per task instead of a
+  residence death (`form-cell-servant-band.fk` → 2047 four-way; render lanes
+  are declared — `cell-eval` / `cell-eval-str` / `cell-eval-float` — because
+  value_kind is absent on the fkwu arm, mask 7). Placing it re-witnessed an
+  aged four-way stamp: the walkers' `eq` had drifted to dying on
+  `(eq nothing 0)`; go/rust/ts now carry the fkwu covenant — absence is
+  self-equal, equal only to itself, and equality against absence ANSWERS
+  (ordering against absence still diverges: the reference answers a
+  tagged-word total order, the hosts die loudly — the covenant choice is
+  flagged as its own task). An adversarial fleet then hardened the landing:
+  a missing name answers absence instead of spinning the residence, a
+  trailing lone backslash is literal instead of minting '?', a malformed
+  digit-led literal answers absence instead of swallowing an argument, and
+  the go JIT compare mirror carries self-equal (fef band → 1433).
+  Floors that remain:
+  the gate is membership, not scope (use-before-definition still dies at
+  eval, visible as a ghost); a kind-carrying eval triple or a four-way
+  value_kind would let one render lane serve every value.
 - Sense MLX queue pressure from a native host carrier. GPU utilization is now
   read system-wide through the census's IOAccelerator crossing; another
   process's MLX reservation still enters as supplied observation.

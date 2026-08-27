@@ -4734,6 +4734,20 @@ function walkCompare(
   // Sibling to the Go and Rust walkers; proven three-way by
   // tests/eq-shape-band.fk.
   //
+  // Equality against absence ANSWERS, never dies — the fkwu covenant
+  // (eq nothing 0 -> 0, eq nothing nothing -> 1; form-eval-full-band's
+  // nothing claim, re-witnessed 2026-08-27). nil is its own word, equal
+  // only to itself. Ordering against absence is NOT yet a chosen covenant:
+  // this walker dies loudly in the lanes below, while the fkwu reference
+  // currently answers a tagged-word total order (absence below every int) —
+  // divergence witnessed 2026-08-27, named in the receipt, its resolution
+  // still owed. Equality alone is covenant here. Checked before the float
+  // lane so a null beside a float never reaches the numeric coercion.
+  if (av.kind === "null" || bv.kind === "null") {
+    if (op === RCmp.EQ) return boolInt(av.kind === "null" && bv.kind === "null");
+    if (op === RCmp.NE) return boolInt(!(av.kind === "null" && bv.kind === "null"));
+  }
+
   // Width-mixing: if either side is float, compare as float; if either
   // side is bigint, compare as bigint; else as int.
   let r: boolean;

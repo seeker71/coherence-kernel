@@ -10,6 +10,15 @@
 ; the defn's binding (so recursion sees itself), then evaluates the retained body source. State threads as
 ; (value, end-pos, env). Self-contained over core (head/tail only — no nth/neq; (not (eq ..)) for inequality).
 ;
+; 2026-08-27, the named next stone placed: STRING literals (escapes \n \" \\), FLOAT literals
+; ('.'/'e'/'E' in a number token), and an eval-native PRIM TABLE (str/list/float kernel ops as
+; data rows, applied by tag) now live in THIS fragment-crossing evaluator — grammars/form-eval.fk's
+; proven reads, ported onto the (value pos env) triple whose defn bindings copy body SOURCE and so
+; survive across resident tasks. The skip walk is string-aware for the same reason the grammars
+; cell's is: a quoted string may hold parens. Floors that remain: an unbound name still dies loudly
+; in fef-lookup (the resident's resolver gate answers first); value kinds are not carried by the
+; triple (value_kind is absent on the fkwu arm — mask 7 — so render lanes stay declared).
+;
 ; Four-way by tests/form-eval-full-band.fk.
 ;
 ; preludes: form-stdlib/core.fk
@@ -54,9 +63,18 @@
     (defn fef-bkind (b) (head (tail b)))
     (defn fef-ba (b) (head (tail (tail b))))
     (defn fef-bb (b) (head (tail (tail (tail b)))))
-    ; lookup: return the binding whose name matches; assumes presence (witness binds before use)
+    ; lookup: the binding whose name matches, or the ABSENCE binding when the
+    ; env exhausts — a missing name answers nothing, never a spin. (The fleet
+    ; of 2026-08-27 witnessed the old assume-presence walk spinning forever on
+    ; the fkwu floor, where head/tail of the empty list answer values instead
+    ; of dying: an invisible residence hang, the exact wait-class the
+    ; process-field census exists to see. Absence is the honest in-band
+    ; answer; the servant's resolver gate still refuses never-bound names
+    ; before evaluation.)
     (defn fef-lookup (name env)
-        (if (str_eq (fef-bname (head env)) name) (head env) (fef-lookup name (tail env))))
+        (if (eq (len env) 0) (list "" 0 (nothing) 0)
+            (if (str_eq (fef-bname (head env)) name) (head env)
+                (fef-lookup name (tail env)))))
 
     ; --- the evaluator: fef-expr s pos env -> (value pos env) ---
     (defn fef-expr (s pos env) (fef-expr2 s (fef-skip s pos) env))
@@ -64,15 +82,68 @@
         (if (eq (fef-at s pos) 40)
             (fef-list s (add pos 1) env)
             (fef-atom s pos env)))
-    ; atom: a digit-led token is an integer literal; a keyword literal (true/false/nothing) is its
-    ; value; anything else is a symbol reference (var lookup). The literal keywords are DATA too — one
+    ; atom: '"' opens a STRING literal; a digit-led token is a number literal
+    ; (FLOAT when it carries '.'/'e'/'E' — grammars/form-eval.fk's proven read,
+    ; ported here so the fragment-crossing evaluator speaks the same values);
+    ; a keyword literal (true/false/nothing) is its value; anything else is a
+    ; symbol reference (var lookup). The literal keywords are DATA too — one
     ; (name value) table, so a new literal is a row, not an if-branch.
     (defn fef-atom (s pos env)
-        (if (eq (fef-isdigit (fef-at s pos)) 1)
-            (fef-num s pos env)
-            (fef-sym-or-lit s pos env)))
-    (defn fef-num (s pos env) (fef-num2 (fef-digits s pos 0) env))
+        (if (eq (fef-at s pos) 34)
+            (fef-str s pos env)
+            (if (eq (fef-isdigit (fef-at s pos)) 1)
+                (fef-num s pos env)
+                (fef-sym-or-lit s pos env))))
+    ; number literal: the whole token; '.'/'e'/'E' inside marks a float. A
+    ; digit-led token that is neither a clean float nor all digits (123abc)
+    ; is a malformed literal and answers absence for the WHOLE token — the
+    ; old digit-fold silently split it into two tokens and swallowed a
+    ; following argument (fleet-witnessed 2026-08-27).
+    (defn fef-num (s pos env) (fef-num-tok s pos (fef-sym-end s pos) env))
+    (defn fef-alldigits (s a b)
+        (if (ge a b) 1
+            (if (eq (fef-isdigit (fef-at s a)) 1)
+                (fef-alldigits s (add a 1) b) 0)))
+    (defn fef-num-tok (s a b env)
+        (if (eq (fef-isfloat s a b) 1)
+            (fef-res (str_to_float (substring s a b)) b env)
+            (if (eq (fef-alldigits s a b) 1)
+                (fef-num2 (fef-digits s a 0) env)
+                (fef-res (nothing) b env))))
+    (defn fef-isfloat (s a b)
+        (if (ge a b) 0
+            (if (eq (fef-at s a) 46) 1
+                (if (eq (fef-at s a) 101) 1
+                    (if (eq (fef-at s a) 69) 1 (fef-isfloat s (add a 1) b))))))
     (defn fef-num2 (dp env) (fef-res (head dp) (head (tail dp)) env))
+    ; string literal: value is the unescaped inner text; end-pos passes the
+    ; closing quote. Escapes \n \" \\ — the same minimal set the source
+    ; reader itself honors; any other escaped char answers '?'.
+    (defn fef-str (s pos env)
+        (fef-str2 s (add pos 1) (fef-str-end s (add pos 1)) env))
+    ; A lone backslash as the LAST source byte cannot escape anything: it is
+    ; held as a literal backslash and the string ends at source end. Without
+    ; the two guards below, the scan jumped past EOF and the fkwu floor
+    ; minted a '?' character the source never held while go died at a bounds
+    ; check (fleet-witnessed 2026-08-27). An unterminated string still
+    ; answers its inner text — that floor stands, named.
+    (defn fef-str-end (s i)
+        (if (ge i (fef-len s)) i
+            (if (eq (fef-at s i) 34) i
+                (if (eq (fef-at s i) 92)
+                    (if (ge (add i 1) (fef-len s)) (fef-len s)
+                        (fef-str-end s (add i 2)))
+                    (fef-str-end s (add i 1))))))
+    (defn fef-str2 (s a b env) (fef-res (fef-unesc s a b "") (add b 1) env))
+    (defn fef-unesc (s i b acc)
+        (if (ge i b) acc
+            (if (and (eq (fef-at s i) 92) (lt (add i 1) b))
+                (fef-unesc s (add i 2) b
+                    (str_concat acc (fef-esc-ch (fef-at s (add i 1)))))
+                (fef-unesc s (add i 1) b
+                    (str_concat acc (substring s i (add i 1)))))))
+    (defn fef-esc-ch (c)
+        (if (eq c 110) "\n" (if (eq c 34) "\"" (if (eq c 92) "\\" "?"))))
     ; literal-keyword table: (name value). `nothing` was the absence-as-zero floor here — a value the
     ; reducer could carry, at the cost that eval "nothing", eval "false" and eval "0" all answered 0.
     ; The stone this comment used to name was placed 2026-08-26: the table now carries a FIRST-CLASS
@@ -147,6 +218,56 @@
         (if (eq tag 14) (if (not a) 1 0) 0)))))))))))))))
     (defn fef-apply (op a b) (fef-apply-tag (fef-optag op) a b))
 
+    ; --- the prim table: string/list/float kernel ops as DATA — the eval-native apply this file's
+    ; op-table comment had named the next stone. Each row is (name tag); args are collected like a
+    ; user call's (variadic), then applied by tag in the single prim switch. The values stay OPAQUE:
+    ; a string, list or float passes straight through the (value pos env) triple; the kernel
+    ; primitive does the work. Every name here answers on all four arms (pf-arm-mask 15, probed
+    ; 2026-08-27); value_kind (mask 7 — absent on fkwu) is deliberately NOT a row.
+    (defn fef-primtable ()
+        (list
+            (list "str_concat" 1) (list "str_eq" 2) (list "substring" 3)
+            (list "str_len" 4) (list "str_byte_at" 5) (list "str_to_float" 6)
+            (list "list" 7) (list "cons" 8) (list "head" 9) (list "tail" 10)
+            (list "empty" 11) (list "nth" 12) (list "len" 13)
+            (list "str_find" 14) (list "str_to_int" 15) (list "int_to_str" 16)
+            (list "append" 17) (list "nothing?" 18) (list "float_to_str" 19)))
+    (defn fef-primrow (name rows)
+        (if (eq (len rows) 0) (fef-empty)
+            (if (str_eq (fef-row-name (head rows)) name) (head rows)
+                (fef-primrow name (tail rows)))))
+    (defn fef-primtag (name) (fef-primtag2 (fef-primrow name (fef-primtable))))
+    (defn fef-primtag2 (row) (if (fef-null row) 0 (fef-row-tag row)))
+    (defn fef-isprim (k) (if (eq (fef-primtag k) 0) 0 1))
+    (defn fef-a0 (vs) (head vs))
+    (defn fef-a1 (vs) (head (tail vs)))
+    (defn fef-a2 (vs) (head (tail (tail vs))))
+    (defn fef-prim-apply (tag vs)
+        (if (eq tag 1) (str_concat (fef-a0 vs) (fef-a1 vs))
+        (if (eq tag 2) (if (str_eq (fef-a0 vs) (fef-a1 vs)) 1 0)
+        (if (eq tag 3) (substring (fef-a0 vs) (fef-a1 vs) (fef-a2 vs))
+        (if (eq tag 4) (str_len (fef-a0 vs))
+        (if (eq tag 5) (str_byte_at (fef-a0 vs) (fef-a1 vs))
+        (if (eq tag 6) (str_to_float (fef-a0 vs))
+        (if (eq tag 7) vs
+        (if (eq tag 8) (cons (fef-a0 vs) (fef-a1 vs))
+        (if (eq tag 9) (head (fef-a0 vs))
+        (if (eq tag 10) (tail (fef-a0 vs))
+        (if (eq tag 11) (fef-empty)
+        (if (eq tag 12) (nth (fef-a0 vs) (fef-a1 vs))
+        (if (eq tag 13) (len (fef-a0 vs))
+        (if (eq tag 14) (str_find (fef-a0 vs) (fef-a1 vs) (fef-a2 vs))
+        (if (eq tag 15) (str_to_int (fef-a0 vs))
+        (if (eq tag 16) (int_to_str (fef-a0 vs))
+        (if (eq tag 17) (append (fef-a0 vs) (fef-a1 vs))
+        (if (eq tag 18) (if (nothing? (fef-a0 vs)) 1 0)
+        (if (eq tag 19) (float_to_str (fef-a0 vs)) 0))))))))))))))))))))
+    ; collect args exactly as a user call does (fef-args reverses; restore order), apply, close.
+    (defn fef-prim (k s pos env)
+        (fef-prim-fin (fef-primtag k) (fef-args s pos env (fef-empty)) env))
+    (defn fef-prim-fin (tag ar env)
+        (fef-res (fef-prim-apply tag (fef-rev (head ar))) (head (tail ar)) env))
+
     ; --- list head: dispatch on the operator/keyword symbol ---
     ; The CONTROL forms (if/do/let/defn) stay a small keyword cond — they are not value ops, they
     ; thread env and source position in ways a uniform (eval-args, apply) table cannot express. The
@@ -160,7 +281,8 @@
                     (if (str_eq k "defn") (fef-defn s pos env)
                         (if (eq (fef-isbinop k) 1) (fef-bin k s pos env)
                             (if (eq (fef-isunop k) 1) (fef-un k s pos env)
-                                (fef-call k s pos env))))))))
+                                (if (eq (fef-isprim k) 1) (fef-prim k s pos env)
+                                    (fef-call k s pos env)))))))))
 
     ; --- binary ops: eval a, eval b, apply via the table tag, close ---
     (defn fef-bin (op s pos env) (fef-bin-a op s (fef-expr s pos env)))
@@ -242,14 +364,20 @@
             (let body-source (substring s bodypos bodyend))
             (fef-res 0 (fef-close s bodyend)
                 (fef-bind-fn name prms body-source env))))
-    ; skip one expression's source without evaluating (to find where the defn body ends)
+    ; skip one expression's source without evaluating (to find where the defn
+    ; body ends and to pass an unchosen if arm). A string literal is skipped to
+    ; just past its closing quote — checked BEFORE the atom cases, since a
+    ; quoted string may hold whitespace and parens that would derail the token
+    ; walk. A number token (int or float) and a symbol both end at the next
+    ; delimiter, so one fef-sym-end serves them.
     (defn fef-skip-expr (s pos) (fef-skip-expr2 s (fef-skip s pos)))
     (defn fef-skip-expr2 (s pos)
         (if (eq (fef-at s pos) 40)
             (fef-skip-rest s (add pos 1))
-            (fef-skip-atom s pos)))
-    (defn fef-skip-atom (s pos)
-        (if (eq (fef-isdigit (fef-at s pos)) 1) (head (tail (fef-digits s pos 0))) (fef-sym-end s pos)))
+            (if (eq (fef-at s pos) 34)
+                (add (fef-str-end s (add pos 1)) 1)
+                (fef-skip-atom s pos))))
+    (defn fef-skip-atom (s pos) (fef-sym-end s pos))
     ; inside a paren: skip sub-exprs until the matching ')'
     (defn fef-skip-rest (s pos)
         (if (eq (fef-at s (fef-skip s pos)) 41)
@@ -263,8 +391,14 @@
     ; NOTE: a parameter literally named `params` makes the Go and Rust walkers register the recipe with one fewer
     ; arg (they read `params` as a rest/varargs marker) → a false arity divergence while fkwu/TS agree. Hence `prms`.
     (defn fef-call (k s pos env) (fef-call-go (fef-lookup k env) s pos env))
+    ; only a FUNCTION binding (kind 1) is callable; calling a var, or a name
+    ; the env never bound, walks the argument source for position and answers
+    ; absence — deterministic on every arm, never a spin, never a fabricated 0.
     (defn fef-call-go (b s pos env)
-        (fef-call-run b s (fef-args s pos env (fef-empty)) env))
+        (if (eq (fef-bkind b) 1)
+            (fef-call-run b s (fef-args s pos env (fef-empty)) env)
+            (fef-res (nothing)
+                (head (tail (fef-args s pos env (fef-empty)))) env)))
     ; fef-args: evaluate arguments until the call's ')'; returns (reversed-values-list, pos-after-close).
     ; we stop at the close paren; values accumulate reversed (cons), restored to order in the bind zip.
     (defn fef-args (s pos env acc)
