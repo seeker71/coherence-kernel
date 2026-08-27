@@ -1,0 +1,108 @@
+; form-resident-hot-swap-full-pif.fk -- invoke a leased hot-swap route through
+; the admitted full-PIF CALL_BINDING / OFFER / ACK walker.
+;
+; The lean route stores only a callable NodeID.  This companion maps that ID to
+; the larger resident protocol/call/receiver data needed by the full typed
+; walker.  Keeping the association as a dynamic Form list avoids a fixed
+; function table and lets small model-resident compositions carry the route
+; protocol without importing this whole closure until the program-image walker
+; itself can arrive as a runtime image.
+;
+; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/form-resident-hot-swap-route.fk
+; preludes: form-stdlib/form-program-image-full-pif-call-adapter.fk
+; Proven by: form-stdlib/tests/form-resident-hot-swap-full-pif-band.fk
+
+(do
+    ; bundle = [callable-id, protocol, call, receiver]
+    (defn frhpf-callable-id (call receiver)
+        (intern_node (bp "FORM-RESIDENT-HOT-SWAP-FULL-PIF-CALLABLE")
+            (list call
+                  (fpcpf-binding-recipe
+                      (fpcpf-receiver-binding receiver)))))
+    (defn frhpf-bundle (protocol call receiver)
+        (list (frhpf-callable-id call receiver) protocol call receiver))
+    (defn frhpf-bundle-id (bundle) (nth bundle 0))
+    (defn frhpf-bundle-protocol (bundle) (nth bundle 1))
+    (defn frhpf-bundle-call (bundle) (nth bundle 2))
+    (defn frhpf-bundle-receiver (bundle) (nth bundle 3))
+    (defn frhpf-bundle-valid? (bundle)
+        (if (not (eq (len bundle) 4)) 0
+        (if (eq (fpcpf-registry-valid? (frhpf-bundle-protocol bundle)) 0) 0
+        (if (eq (fpcpf-call-valid? (frhpf-bundle-call bundle)) 0) 0
+        (if (eq (fpcpf-receiver-valid? (frhpf-bundle-receiver bundle)) 0) 0
+            (if (node_eq (frhpf-bundle-id bundle)
+                    (frhpf-callable-id (frhpf-bundle-call bundle)
+                        (frhpf-bundle-receiver bundle))) 1 0))))))
+
+    ; Bundle resolution also preserves choice instead of silently taking the
+    ; first association.  result = [status, bundle]
+    (defn frhpf-find-go (bundles callable found count)
+        (if (nil? bundles)
+            (if (eq count 0) (list "nothing" (nothing))
+            (if (eq count 1) (list "ready" found)
+                (list "choice" (nothing))))
+            (if (and (eq (frhpf-bundle-valid? (head bundles)) 1)
+                     (node_eq (frhpf-bundle-id (head bundles)) callable))
+                (frhpf-find-go (tail bundles) callable (head bundles)
+                    (add count 1))
+                (frhpf-find-go (tail bundles) callable found count))))
+    (defn frhpf-find (bundles callable)
+        (frhpf-find-go bundles callable (nothing) 0))
+
+    ; A candidate is observed before publication through the same deterministic
+    ; full-PIF receipt door used after leasing.  The evidence NodeID retains the
+    ; callable identity and exact ACK; a forged or swapped receipt yields
+    ; `nothing` and therefore cannot construct a selectable version here.
+    (defn frhpf-probe (bundle correlation values fuel)
+        (if (eq (frhpf-bundle-valid? bundle) 0) (nothing)
+            (do
+                (let offer (fpcpf-offer (frhpf-bundle-call bundle)
+                    correlation values fuel))
+                (fpcpf-execute (frhpf-bundle-protocol bundle) offer
+                    (frhpf-bundle-receiver bundle)))))
+    (defn frhpf-evidence (bundle receipt)
+        (if (or (nothing? receipt)
+                (not (fpcpf-receipt-observed?
+                    (frhpf-bundle-protocol bundle)
+                    (fpcpf-receipt-offer receipt)
+                    (frhpf-bundle-receiver bundle) receipt)))
+            (nothing)
+            (intern_node (bp "FORM-RESIDENT-HOT-SWAP-FULL-PIF-EVIDENCE")
+                (list (frhpf-bundle-id bundle)
+                      (fpcpf-receipt-ack receipt)))))
+    (defn frhpf-version (route epoch bundle phase receipt)
+        (do
+            (let evidence (frhpf-evidence bundle receipt))
+            (if (nothing? evidence) (nothing)
+                (frhs-version route epoch
+                    (fpcpf-binding-recipe
+                        (fpcpf-receiver-binding
+                            (frhpf-bundle-receiver bundle)))
+                    (frhpf-bundle-id bundle) phase evidence))))
+
+    ; result = [status, receipt].  Once the bundle resolves, the status comes
+    ; from the full-PIF ACK and therefore retains returned nothing, returned
+    ; 0, returned 1, timeout, failure and refusal exactly.
+    (defn frhpf-result (status receipt) (list status receipt))
+    (defn frhpf-result-status (result) (nth result 0))
+    (defn frhpf-result-receipt (result) (nth result 1))
+    (defn frhpf-execute (lease bundles correlation values fuel)
+        (if (eq (frhs-lease-valid? lease) 0)
+            (frhpf-result "nothing" (nothing))
+            (do
+                (let resolved (frhpf-find bundles
+                    (frhs-leased-callable lease)))
+                (if (not (str_eq (head resolved) "ready"))
+                    (frhpf-result (head resolved) (nothing))
+                    (do
+                        (let bundle (nth resolved 1))
+                        (let offer (fpcpf-offer
+                            (frhpf-bundle-call bundle) correlation values fuel))
+                        (let receipt (fpcpf-execute
+                            (frhpf-bundle-protocol bundle) offer
+                            (frhpf-bundle-receiver bundle)))
+                        (frhpf-result
+                            (fpcp-ack-status (fpcpf-receipt-ack receipt))
+                            receipt))))))
+    0)

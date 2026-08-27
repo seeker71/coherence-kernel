@@ -1,0 +1,70 @@
+; form-cli-peer-agent-live.fk -- one long-lived local Form peer over stdin.
+;
+; stdin line 1: an existing sealed qwen35 GGUF path.
+; later lines: tasks; `release`, `quit`, EOF or nothing closes every handle.
+; The process admits/prefills once, keeps weights and KV in RAM, and opens one
+; fresh scannerless recipe cursor per task. No HTTP, llama-server or Ollama.
+;
+; Effectful: run only while no sibling owns the local Qwen/Metal lane.
+; preludes: form-stdlib/form-cli-peer-agent.fk
+
+(do
+    (defn fcpal-line (name value)
+        (print_str (str_concat "form-peer "
+            (str_concat name (str_concat "=" value)))))
+    (defn fcpal-int (name value) (fcpal-line name (int_to_str value)))
+
+    (defn fcpal-report (turn result)
+        (do
+            (let c (fcpa-cursor result))
+            (fcpal-int "turn" turn)
+            (fcpal-line "signal" (fcpa-signal (fcpa-session result)))
+            (fcpal-int "elapsed-ms" (fcpa-elapsed-ms result))
+            (fcpal-int "contribution" (fcpa-contribution result))
+            (fcpal-int "callback-calls" (frxc-callback-calls c))
+            (fcpal-line "tool-status" (frxc-status c))
+            (fcpal-int "value-present" (frxc-value-present? c))
+            (fcpal-int "value" (frxc-value c))
+            (fcpal-line "response-begin" "")
+            (print_str (fcpa-response result))
+            (print_str "\n")
+            (fcpal-line "response-end" "")
+            (fcpal-line "ready" "1")
+            0))
+
+    (defn fcpal-loop (session turn accepted)
+        (do
+            (let line (read_line))
+            (if (or (nothing? line)
+                    (or (str_eq line "release") (str_eq line "quit")))
+                (do
+                    (let released (fcms-release-ok? session))
+                    (fcpal-int "accepted-contributions" accepted)
+                    (fcpal-int "release-ok" released)
+                    released)
+                (do
+                    (let moved (fcpa-observe-task session turn "task" line))
+                    (let result (fcpa-run moved 160))
+                    (fcpal-report turn result)
+                    (fcpal-loop (fcpa-session result) (add turn 1)
+                        (add accepted (fcpa-contribution result)))))))
+
+    (let path (read_line))
+    (let started (now_unix_ms))
+    (let opened (if (or (nothing? path) (str_eq path ""))
+        (fcms-none "model-path-absent")
+        (fcms-open path (fcpa-bootstrap) 4096)))
+    (if (not (eq (fcms-live? opened) 1))
+        (do
+            (fcpal-line "signal" (fcpa-signal opened))
+            (fcpal-line "reason" (fcms-reason opened))
+            (fcpal-int "release-ok" (fcms-release-ok? opened))
+            0)
+        (do
+            ; Consume the bootstrap reply once, retaining its IDs and KV.
+            (let boot (fcms-generate opened 24))
+            (let resident (fcms-generation-session boot))
+            (fcpal-int "admit-prefill-ms" (sub (now_unix_ms) started))
+            (fcpal-line "bootstrap" (fcms-generation-text boot))
+            (fcpal-line "ready" "1")
+            (fcpal-loop resident 1 0))))
