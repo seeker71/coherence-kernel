@@ -3188,6 +3188,8 @@ static void *fk_arm64_u32_keep(const fk_arm64_u32_node *nodes, long long nodes_n
 #define FK_INRAM_CACHE 32
 typedef struct {
     int live;
+    int keyed;          /* 1: key is an interned-node word; matched by word, never by bytes */
+    long long key;
     long long n;
     unsigned char code[FK_INRAM_CODE_CAP];
     void *mem;
@@ -3217,7 +3219,7 @@ static long long fk_inram_bytes(long long image, unsigned char *out, long long c
     return n;
 }
 
-static long long fk_jit_leaf_inram(long long image, long long arg_value) {
+static long long fk_jit_leaf_run(long long key, int keyed, long long image, long long arg_value) {
     unsigned char code[FK_INRAM_CODE_CAP];
     long long n;
     long long i;
@@ -3227,6 +3229,16 @@ static long long fk_jit_leaf_inram(long long image, long long arg_value) {
         return fk_nothing;
     }
     arg = arg_value >> 1;
+    if (keyed) {
+        for (i = 0; i < FK_INRAM_CACHE; i = i + 1) {
+            if (fk_inram_cache[i].live && fk_inram_cache[i].keyed &&
+                fk_inram_cache[i].key == key) {
+                long long (*hot)(long long) =
+                    (long long (*)(long long))fk_inram_cache[i].mem;
+                return (hot(arg)) << 1;
+            }
+        }
+    }
     n = fk_inram_bytes(image, code, FK_INRAM_CODE_CAP);
     if (n <= 0 || (n % 4) != 0) {
         return fk_nothing;
@@ -3260,6 +3272,8 @@ static long long fk_jit_leaf_inram(long long image, long long arg_value) {
             munmap(e->mem, FK_INRAM_CODE_CAP);
         }
         e->live = 1;
+        e->keyed = keyed;
+        e->key = key;
         e->n = n;
         for (i = 0; i < n; i = i + 1) {
             e->code[i] = code[i];
@@ -3271,6 +3285,43 @@ static long long fk_jit_leaf_inram(long long image, long long arg_value) {
         long long (*fn)(long long) = (long long (*)(long long))mem;
         return (fn(arg)) << 1;
     }
+}
+
+static long long fk_jit_leaf_inram(long long image, long long arg_value) {
+    return fk_jit_leaf_run(0, 0, image, arg_value);
+}
+
+/* jit_leaf_hot (key, image, arg) — key is an interned identity node: interning
+ * makes content-address equal word-equality, so a cache hit is ONE integer
+ * compare per slot and the image is never walked. A keyed miss builds from the
+ * image and stamps the key; the ring evicts as before. The door TRUSTS its
+ * key exactly as far as interning reaches: two different images under one
+ * key would answer wrongly, which is why the one caller derives the key by
+ * intern_node over the injectively-flattened program. */
+static long long fk_jit_leaf_hot(long long key, long long image, long long arg_value) {
+    return fk_jit_leaf_run(key, 1, image, arg_value);
+}
+
+/* jit_leaf_call (key, arg) — the O(1) door: no image crosses the call, so
+ * dispatch never walks one. A key not resident answers nothing; the caller
+ * births through jit_leaf_hot and retries. Absence is the honest miss, never
+ * a rebuild the caller cannot see. */
+static long long fk_jit_leaf_call(long long key, long long arg_value) {
+    long long i;
+    long long arg;
+    if ((arg_value & 1) != 0) {
+        return fk_nothing;
+    }
+    arg = arg_value >> 1;
+    for (i = 0; i < FK_INRAM_CACHE; i = i + 1) {
+        if (fk_inram_cache[i].live && fk_inram_cache[i].keyed &&
+            fk_inram_cache[i].key == key) {
+            long long (*hot)(long long) =
+                (long long (*)(long long))fk_inram_cache[i].mem;
+            return (hot(arg)) << 1;
+        }
+    }
+    return fk_nothing;
 }
 
 static long long fk_native_call_arm64_u32_leaf(long long program, long long root_value,
@@ -8231,6 +8282,28 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long arg215 = fk_walk(fk_node[i][3], fp);
         fk_vsp = fk_vsp - 2;
         return fk_native_call_arm64_u32_leaf(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], arg215);
+    }
+    if (t == 32) {
+        long long key32 = fk_walk(fk_node[i][1], fp);
+        fk_vp(key32);
+        {
+            long long arg32 = fk_walk(fk_node[i][2], fp);
+            fk_vsp = fk_vsp - 1;
+            return fk_jit_leaf_call(fk_vs[fk_vsp], arg32);
+        }
+    }
+    if (t == 29) {
+        long long key30 = fk_walk(fk_node[i][1], fp);
+        fk_vp(key30);
+        {
+            long long image30 = fk_walk(fk_node[i][2], fp);
+            fk_vp(image30);
+            {
+                long long arg30 = fk_walk(fk_node[i][3], fp);
+                fk_vsp = fk_vsp - 2;
+                return fk_jit_leaf_hot(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], arg30);
+            }
+        }
     }
     if (t == 146) {
         long long image146 = fk_walk(fk_node[i][1], fp);
