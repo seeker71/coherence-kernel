@@ -81,6 +81,10 @@ SOURCE_COMPILE_CHAIN=(
     form-stdlib/engine-constants.fk
     form-stdlib/compiler-objects.fk
     form-stdlib/form-ontology-bp.fk
+    # source-categories joined 2026-08-27: the loader's top-level fol-cat calls
+    # resolve here; the drift hid behind a warm compile cache until a bin-go
+    # rebuild cold-started it (same family as the 2026-08-19 fol-core-row note).
+    form-stdlib/form-ontology-source-categories.fk
     form-stdlib/form-ontology-loader.fk
     form-stdlib/line-grammar.fk
     form-stdlib/bmf-core.fk

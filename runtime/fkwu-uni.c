@@ -5643,6 +5643,9 @@ static long long fk_host_exec(long long cmdv, long long inputv) {
     return fk_sbuf(hbuf, total);
 }
 static long long fk_sock_request(long long hostv, long long portv, long long reqv) {
+    /* Never-connected (DNS failure, no reachable peer) answers the axiom-1 nothing,
+     * never "" -- "" means a peer CONNECTED and spoke zero bytes. Same contract as
+     * fk_host_exec above; silent error hides illness (2026-08-27). */
     char host[512];
     char port[16];
     fk_cstr(hostv, host, 512);
@@ -5660,7 +5663,7 @@ static long long fk_sock_request(long long hostv, long long portv, long long req
     hints.ai_next = 0;
     struct addrinfo *res = 0;
     if (getaddrinfo(host, port, &hints, &res) != 0 || res == 0) {
-        return fk_sbuf("", 0);
+        return fk_nothing;
     }
     int fd = -1;
     struct addrinfo *rp = res;
@@ -5677,7 +5680,7 @@ static long long fk_sock_request(long long hostv, long long portv, long long req
     }
     freeaddrinfo(res);
     if (fd < 0) {
-        return fk_sbuf("", 0);
+        return fk_nothing;
     }
     const char *rptr = fk_sb + fk_so[rsa];
     long long wr = 0;
@@ -5978,6 +5981,10 @@ static long long fk_http_get_native(long long urlv, long long headersv, long lon
     return fk_http_get_plain(urlv, headersv, timeoutv);
 }
 static long long fk_tls_request(long long hostv, long long portv, long long reqv) {
+    /* Every branch where no byte ever arrived from a VERIFIED peer -- no libssl,
+     * missing symbols, TCP/TLS failure, and above all a certificate-verify
+     * failure -- answers the axiom-1 nothing, never "": a trust verdict must not
+     * wear the skin of a measured-empty body (2026-08-27). */
     char host[512];
     char port[16];
     fk_cstr(hostv, host, 512);
@@ -5986,7 +5993,7 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
     long long rlen = (rsa >= 0 && rsa < fk_sp) ? fk_sl[rsa] : 0;
     void *lib = fk_ssl_lib();
     if (lib == 0) {
-        return fk_sbuf("", 0);
+        return fk_nothing;
     }
     fk_tls_method_fn TLS_client_method = (fk_tls_method_fn)dlsym(lib, "TLS_client_method");
     fk_ctx_new_fn SSL_CTX_new = (fk_ctx_new_fn)dlsym(lib, "SSL_CTX_new");
@@ -6009,16 +6016,16 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
         SSL_free == 0 || SSL_set_fd == 0 || SSL_ctrl == 0 || SSL_set1_host == 0 ||
         SSL_connect == 0 || SSL_write == 0 || SSL_read == 0 || SSL_get_verify_result == 0 ||
         SSL_CTX_set_verify == 0 || SSL_CTX_set_default_verify_paths == 0) {
-        return fk_sbuf("", 0);
+        return fk_nothing;
     }
     int fd = fk_tcp_connect(host, port);
     if (fd < 0) {
-        return fk_sbuf("", 0);
+        return fk_nothing;
     }
     void *ctx = SSL_CTX_new(TLS_client_method());
     if (ctx == 0) {
         close(fd);
-        return fk_sbuf("", 0);
+        return fk_nothing;
     }
     SSL_CTX_set_verify(ctx, 1, 0);
     SSL_CTX_set_default_verify_paths(ctx);
@@ -6026,26 +6033,26 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
     if (ssl == 0) {
         SSL_CTX_free(ctx);
         close(fd);
-        return fk_sbuf("", 0);
+        return fk_nothing;
     }
     SSL_ctrl(ssl, 55, 0, host);
     if (SSL_set1_host(ssl, host) != 1) {
         SSL_free(ssl);
         SSL_CTX_free(ctx);
         close(fd);
-        return fk_sbuf("", 0);
+        return fk_nothing;
     }
     if (SSL_set_fd(ssl, fd) != 1 || SSL_connect(ssl) != 1) {
         SSL_free(ssl);
         SSL_CTX_free(ctx);
         close(fd);
-        return fk_sbuf("", 0);
+        return fk_nothing;
     }
     if (SSL_get_verify_result(ssl) != 0) {
         SSL_free(ssl);
         SSL_CTX_free(ctx);
         close(fd);
-        return fk_sbuf("", 0);
+        return fk_nothing;
     }
     const char *rptr = fk_sb + fk_so[rsa];
     long long wr = 0;
@@ -6055,7 +6062,7 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
             SSL_free(ssl);
             SSL_CTX_free(ctx);
             close(fd);
-            return fk_sbuf("", 0);
+            return fk_nothing;
         }
         wr = wr + nwr;
     }
@@ -7932,11 +7939,16 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                         fk_nreads, p, pv63, sa63, (sa63 >= 0 && sa63 < fk_sp) ? fk_sl[sa63] : -1,
                         (sa63 >= 0 && sa63 < fk_sp) ? fk_so[sa63] : -1, fk_sp);
             }
-            return fk_sbuf("", 0);
+            /* A file that never was answers the axiom-1 nothing, never "" —
+             * "" means the file EXISTS and holds zero bytes. The Go arm's
+             * read_file already answered VNull here (main.go readFileTextNative);
+             * this heals a live cross-arm divergence (2026-08-27). */
+            return fk_nothing;
         }
         fk_sinit();
         long long base = fk_sbp;
         long long total = 0;
+        long long rerr63 = 0;
         for (;;) {
             while (base + total + 65536 > fk_scap_b) {
                 fk_scap_b = fk_scap_b * 2;
@@ -7948,12 +7960,23 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 }
             }
             long long got = read(fd, fk_sb + base + total, 65536);
-            if (got <= 0) {
+            if (got < 0) {
+                rerr63 = 1;
+                break;
+            }
+            if (got == 0) {
                 break;
             }
             total = total + got;
         }
         close(fd);
+        if (rerr63 && total == 0) {
+            /* Opened but not one byte ever measured (a directory, an unreadable
+             * device): no content was witnessed — nothing, matching the Go arm.
+             * A mid-read error after bytes arrived stays a named cousin
+             * (partial-as-whole) for its own movement. */
+            return fk_nothing;
+        }
         return fk_strv(fk_sintern(base, total));
     }
     if (t == 64) {

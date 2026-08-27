@@ -109,6 +109,9 @@ FOURTH_SOURCE_COMPILER_CHAIN=(
     form-stdlib/engine-constants.fk
     form-stdlib/compiler-objects.fk
     form-stdlib/form-ontology-bp.fk
+    # source-categories joined 2026-08-27: form-ontology-loader's top-level
+    # fol-cat calls resolve here (mirror of the regen script's chain heal).
+    form-stdlib/form-ontology-source-categories.fk
     form-stdlib/form-ontology-loader.fk
     form-stdlib/line-grammar.fk
     form-stdlib/bmf-core.fk

@@ -62,6 +62,23 @@ func TestHostExecLaunchFailureAnswersNothing(t *testing.T) {
 	}
 }
 
+// TestHostReadAbsentAnswersNothing — a file that never was answers nothing,
+// never "": "" means the file EXISTS and holds zero bytes. host-read was the
+// lone masked read organ on this arm (read_file already answered VNull);
+// healed 2026-08-27.
+func TestHostReadAbsentAnswersNothing(t *testing.T) {
+	k := NewKernel()
+	read := func(p string) Value {
+		return k.natives[k.internName("host-read")].Fn(k, []Value{{Kind: VStr, Str: p}})
+	}
+	if v := read("/nonexistent-host-read-absence-probe"); v.Kind != VNull {
+		t.Fatalf("absent file must answer nothing (VNull): kind=%v str=%q", v.Kind, v.Str)
+	}
+	if v := read("/dev/null"); v.Kind != VStr || v.Str != "" {
+		t.Fatalf("present empty file must answer \"\": kind=%v str=%q", v.Kind, v.Str)
+	}
+}
+
 // TestStrLenOfNothingDiesLoud — measuring an absence must not answer a
 // counterfeit 0: str_len over the null head-of-empty carries (the value a
 // starved host-exec now answers) dies loud, on this arm as on fkwu's op 25.
