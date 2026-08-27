@@ -143,13 +143,10 @@ static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
 #define FK_NODE_CAP 262144              /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots. Raised 65536->262144 (2026-07-02): a 1,200-clip --src program filled the value-node table mid-run and every guard silently returned handle 0 -- a deterministic all-zero result with no error. Same raisable-constant class as FK_AST_NODE_CAP; overflow now dies loudly instead of returning 0. 262144*104B ~= 27MB. */
 #define FK_RECORD_CAP 256               /* fk_rkey/rval/rcnt/rbp: max live mutable records (fk_rp bound) */
 #define FK_RECORD_MAX_KEYS 128          /* fk_rkey/rval second dimension: max keys per record */
-/* fn-value reserved band (see stone 2c below): the band WIDTH (8192, in raw
- * sentinel-space units before the <<1) is intentionally wider than the actual
- * valid index CAP (4096) -- headroom already present in the original design, not
- * a bug; named as two distinct constants so that relationship stays visible
- * rather than reading as two unrelated bare numbers. */
-#define FK_FNVAL_BAND_WIDTH 8192
-#define FK_FNVAL_MAX_INDEX 4096
+/* Function values occupy odd words below fk_fnbase and above the string-value
+ * region. Validity follows the functions actually present in the current image;
+ * it is not a second fixed function-table ceiling. */
+static long long fk_fn_count;
 /* ASCII byte constants for the text-processing code (the parser's own character
  * classification, and the OS-layer's path/URL splitting) -- NOT used in the
  * evaluator's `if (t == N)` opcode-tag dispatch, which is a completely
@@ -220,6 +217,7 @@ static long long fk_is_nothing(long long v) {
  * call offers the fn it names (tag 244). CLOSURE is the NAMED next gap: the fn-value carries only
  * the fn-index, no captured env-cell yet. */
 static const long long fk_fnbase = -8000000000000000000LL;
+static const long long fk_fnval_floor = -8500000000000000000LL;
 static long long fk_fnval(long long f) {
     return fk_fnbase - (f << 1) - 1;
 }
@@ -230,14 +228,14 @@ static long long fk_is_fnval(long long v) {
     if (v >= fk_fnbase) {
         return 0;
     }
-    if (v <= fk_fnbase - (FK_FNVAL_BAND_WIDTH << 1)) {
+    if (v <= fk_fnval_floor) {
         return 0;
     }
     if (((fk_fnbase - v) & 1) == 0) {
         return 0;
     }
     long long fi = fk_fnval_idx(v);
-    return (fi >= 0 && fi < FK_FNVAL_MAX_INDEX) ? 1 : 0;
+    return (fi >= 0 && fi < fk_fn_count) ? 1 : 0;
 }
 /* Float boxes are ODD words at/below fk_fbase-3: fk_fbase - (fp<<1) - 1. They were
  * even (fk_fbase - (fp<<1)) until 2026-07-17, which let a deep-negative INT word
@@ -6474,25 +6472,48 @@ static void fk_vp(long long v) {
     fk_vs[fk_vsp] = v;
     fk_vsp = fk_vsp + 1;
 }
-/* FK_FN_CAP: every function-index-shaped table in the seed (fk_fnar,
- * the fn-value sentinel band's FK_FNVAL_MAX_INDEX) is consistently sized/bounded
- * at 4096 -- except fk_fn[] itself, which was declared at half that (2048) while
- * every check gating access to it (`idx < 4096`, scattered across the parser,
- * evaluator) used the LARGER bound. A program defining more than 2048
- * (but fewer than 4096) functions could pass every existing bounds check and
- * still write fk_fn[idx] past the end of its actual array -- a real, reachable
- * overflow. Widening fk_fn[] to match its siblings (rather than tightening every
- * check down to 2048) is the fix: it makes the already-consistent 4096 convention
- * true everywhere, changes nothing for any program that worked before, and turns
- * the previously-silent corruption case into correct behavior instead of a new
- * failure mode. */
-#define FK_FN_CAP 4096
-#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144 STANDS (2026-07-18): a doubling probe disproved a capacity misread — the match-switch band's fill died at the SAME source position at 2x budget, exposing fk_sparse's stray-rparen zero-advance mint spin (fixed in the bare-symbol path), not honest growth; the source-compiler family's full ~514KB prelude closure parses well within 256K nodes. Measure (does the fill position move with the cap?) before raising. */
+/* Function roots, arities, and source symbols grow as one organ. The old five
+ * parallel 4096-seat arrays made program composition depend on a historical
+ * bootstrap number. A geometric reserve keeps append amortized O(1), retains
+ * stable numeric function indices, and fails only when allocation itself cannot
+ * continue. This remains temporary seed mechanics; function identity belongs in
+ * the Form/native-walker body. */
+static long long *fk_fn, *fk_fnar, *fk_fnsym_s, *fk_fnsym_n, *fk_fnidx;
+static long long fk_fn_capacity;
+static long long fk_fntop, fk_defn_next, fk_root;
+static void fk_fn_reserve(long long needed) {
+    if (needed <= fk_fn_capacity) {
+        return;
+    }
+    long long next = fk_fn_capacity > 0 ? fk_fn_capacity : 256;
+    while (next < needed) {
+        long long grown = next << 1;
+        if (grown <= next) {
+            fk_die("fk_fn_reserve: function capacity overflow");
+        }
+        next = grown;
+    }
+    fk_fn = realloc(fk_fn, (unsigned long)next * 8);
+    fk_fnar = realloc(fk_fnar, (unsigned long)next * 8);
+    fk_fnsym_s = realloc(fk_fnsym_s, (unsigned long)next * 8);
+    fk_fnsym_n = realloc(fk_fnsym_n, (unsigned long)next * 8);
+    fk_fnidx = realloc(fk_fnidx, (unsigned long)next * 8);
+    if (fk_fn == 0 || fk_fnar == 0 || fk_fnsym_s == 0 || fk_fnsym_n == 0 ||
+        fk_fnidx == 0) {
+        fk_die("fk_fn_reserve: out of memory growing function image");
+    }
+    long long i = fk_fn_capacity;
+    while (i < next) {
+        fk_fn[i] = 0;
+        fk_fnar[i] = 0;
+        i = i + 1;
+    }
+    fk_fn_capacity = next;
+}
+#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as the former top-function-symbol cap), not a fundamental limit. 262144 STANDS (2026-07-18): a doubling probe disproved a capacity misread — the match-switch band's fill died at the SAME source position at 2x budget, exposing fk_sparse's stray-rparen zero-advance mint spin (fixed in the bare-symbol path), not honest growth; the source-compiler family's full ~514KB prelude closure parses well within 256K nodes. Measure (does the fill position move with the cap?) before raising. */
 #define FK_PARSE_BUF_CAP 16777216 /* fk_buf: scratch buffer for source artifact reads. Raised 1048576->16777216 (2026-07-16): the v4 .fkb signed lane is 9 bytes (was 5), and a measured band-chain artifact (program-image-fkb-byte-decode-band.fkb, 1,292,944 bytes) exceeded the old 1MiB cap, so fresh caches died on reload with "artifact exceeds FK_PARSE_BUF_CAP". Worst case bounded by FK_AST_NODE_CAP (262144) * 4 lanes * 9B = ~9.4MB plus strings/symbols, so 16MiB holds the format at current capacity constants. */
-static long long fk_fn_count;
 static long long fk_node_count;
 static long long fk_ast_full; /* set once when the AST node table overflows; halts the parse (fk_spos:=fk_slen) so the collect-and-continue recovery cannot spin re-minting sentinels forever. Reset per run. */
-static long long fk_fn[FK_FN_CAP];
 static long long fk_node[FK_AST_NODE_CAP][4];
 static char fk_buf[FK_PARSE_BUF_CAP];
 static long long fk_pos;
@@ -6656,7 +6677,7 @@ static long long fk_walk_body(long long i, long long fp) {
         if (t == 12) {
             long long v12 = fk_walk(fk_node[i][2], fp);
             long long c12 = fk_node[i][1];
-            if (c12 < 0 || c12 >= FK_FN_CAP) {
+            if (c12 < 0 || c12 >= fk_fn_count) {
                 fk_vsp = fp;
                 return fk_nothing;
             }
@@ -6669,7 +6690,7 @@ static long long fk_walk_body(long long i, long long fp) {
             long long a0 = fk_walk(fk_node[i][2], fp);
             long long a1 = fk_walk(fk_node[i][3], fp);
             long long c240 = fk_node[i][1];
-            if (c240 < 0 || c240 >= FK_FN_CAP) {
+            if (c240 < 0 || c240 >= fk_fn_count) {
                 fk_vsp = fp;
                 return fk_nothing;
             }
@@ -6688,7 +6709,7 @@ static long long fk_walk_body(long long i, long long fp) {
             }
             long long n241 = fk_vsp - base241;
             long long c241 = fk_node[i][1];
-            if (c241 < 0 || c241 >= FK_FN_CAP) {
+            if (c241 < 0 || c241 >= fk_fn_count) {
                 fk_vsp = fp;
                 return fk_nothing;
             }
@@ -6779,7 +6800,7 @@ static long long fk_walk_body(long long i, long long fp) {
                     carg44 = comb44;
                 }
             }
-            if (f44 < 0 || f44 >= FK_FN_CAP) {
+            if (f44 < 0 || f44 >= fk_fn_count) {
                 fk_vsp = fp;
                 return 0;
             }
@@ -6871,7 +6892,7 @@ static long long fk_walk(long long i, long long fp) {
     }
     if (t == 12) {
         long long c12 = fk_node[i][1];
-        if (c12 < 0 || c12 >= FK_FN_CAP) {
+        if (c12 < 0 || c12 >= fk_fn_count) {
             return fk_nothing;
         }
         long long v12 = fk_walk(fk_node[i][2], fp);
@@ -6883,7 +6904,7 @@ static long long fk_walk(long long i, long long fp) {
     }
     if (t == 240) {
         long long c240 = fk_node[i][1];
-        if (c240 < 0 || c240 >= FK_FN_CAP) {
+        if (c240 < 0 || c240 >= fk_fn_count) {
             return fk_nothing;
         }
         long long a0 = fk_walk(fk_node[i][2], fp);
@@ -6897,7 +6918,7 @@ static long long fk_walk(long long i, long long fp) {
     }
     if (t == 241) {
         long long c241 = fk_node[i][1];
-        if (c241 < 0 || c241 >= FK_FN_CAP) {
+        if (c241 < 0 || c241 >= fk_fn_count) {
             return fk_nothing;
         }
         long long base241 = fk_vsp;
@@ -7082,7 +7103,7 @@ static long long fk_walk(long long i, long long fp) {
                 carg44 = comb44;
             }
         }
-        if (f44 < 0 || f44 >= FK_FN_CAP) {
+        if (f44 < 0 || f44 >= fk_fn_count) {
             fk_vsp = fk_vsp - 2;
             return 0;
         }
@@ -9258,18 +9279,7 @@ static void fk_parse_top(void);
 /* stone 4: a function table. Each top-level (defn name ...) gets its own fn-index (>=1); a call to
  * a registered name lowers to tag 12 (call-by-index, single-arg). A non-defn top form is the root
  * (fn[0]). */
-/* FK_TOP_FN_SYM_CAP now matches FK_FN_CAP. It was 256 ("deliberately smaller",
- * degrading to "unregistered, allocate fresh" past the cap) — but for any
- * cross-calling program the degradation is SILENT breakage, not grace: defn
- * number 257's name never registers, every call to it allocates a fresh
- * body-less index, and the call returns nothing with no diagnostic. Witnessed
- * 2026-07-02: a 258-defn direct-source learning chain returned garbage at
- * exactly this boundary (253 defns ran; +5 more crossed 256 and broke) — the
- * "direct-source function-table ceiling" several receipts had to duck under
- * was this constant. Three arrays x 4096 x 8B = 96KB, a trivial price. */
-#define FK_TOP_FN_SYM_CAP FK_FN_CAP
-static long long fk_fnsym_s[FK_TOP_FN_SYM_CAP], fk_fnsym_n[FK_TOP_FN_SYM_CAP],
-    fk_fnidx[FK_TOP_FN_SYM_CAP], fk_fntop, fk_defn_next, fk_root, fk_fnar[FK_FN_CAP];
+/* Function symbols share the demand-grown storage declared with fk_fn. */
 #define FK_TOP_CONST_CAP 512
 static long long fk_const_s[FK_TOP_CONST_CAP], fk_const_n[FK_TOP_CONST_CAP],
     fk_const_node[FK_TOP_CONST_CAP], fk_const_top;
@@ -9570,7 +9580,7 @@ static long long fk_sparse(void) {
              * chain left-to-right, pushing each arg via fk_vp exactly as the table path packs N
              * args — same mechanism, any N. ar==0 parses no args (chain -1, inert); ar==1/2/8 are
              * the same code. */
-            long long ar = (fidx >= 0 && fidx < FK_FN_CAP) ? fk_fnar[fidx] : 1;
+            long long ar = (fidx >= 0 && fidx < fk_fn_capacity) ? fk_fnar[fidx] : 1;
             long long over = 0;
             if (ar > 256) {
                 /* COMPILE-PHASE: over-arity is a diagnosable source error, not
@@ -10139,23 +10149,11 @@ static void fk_prescan_form(long long *pp) {
         /* register the name at the NEXT fn-index, mirroring the body pass's allocation order */
         long long idx = fk_defn_next;
         fk_defn_next = fk_defn_next + 1;
-        if (fk_defn_next > FK_FN_CAP) {
-            /* COMPILE-PHASE prescan: program-size limit, not corruption. Diagnose
-             * and STOP registering (the fk_fntop<CAP guard below already skips the
-             * write, and the idx<FK_FN_CAP guard skips the fk_fnar[idx] write);
-             * keep scanning so EVERY over-cap defn is reported, not just the first.
-             * Calls to unregistered names fall through to the unresolved-call
-             * witness -- already a recovery path. */
-            fk_diag(FK_DIAG_ERR, ns,
-                    "[fn-cap] defn '%.*s' at #%lld exceeds FK_FN_CAP (%d); not registered",
-                    (int)nlen, fk_srctext + ns, idx, (int)FK_FN_CAP);
-        }
-        if (fk_fntop < FK_TOP_FN_SYM_CAP) {
-            fk_fnsym_s[fk_fntop] = ns;
-            fk_fnsym_n[fk_fntop] = nlen;
-            fk_fnidx[fk_fntop] = idx;
-            fk_fntop = fk_fntop + 1;
-        }
+        fk_fn_reserve(fk_defn_next);
+        fk_fnsym_s[fk_fntop] = ns;
+        fk_fnsym_n[fk_fntop] = nlen;
+        fk_fnidx[fk_fntop] = idx;
+        fk_fntop = fk_fntop + 1;
 
         /* count arity from the (ARGS...) list so self/forward calls read it */
         long long a = ne;
@@ -10172,9 +10170,7 @@ static void fk_prescan_form(long long *pp) {
                 na = na + 1;
             }
         }
-        if (idx >= 0 && idx < FK_FN_CAP) {
-            fk_fnar[idx] = na;
-        }
+        fk_fnar[idx] = na;
         *pp = fk_skip_balanced(p);
         /* skip the whole defn form opaquely */
         return;
@@ -10280,22 +10276,11 @@ static void fk_parse_top(void) {
             if (idx < 0) {
                 idx = fk_defn_next;
                 fk_defn_next = fk_defn_next + 1;
-                if (fk_defn_next > FK_FN_CAP) {
-                    /* COMPILE-PHASE: same capacity class as the prescan site.
-                     * Diagnose, skip storing this body (the idx<FK_FN_CAP guards
-                     * at fk_fnar[idx]/fk_fn[idx] below already decline the write),
-                     * but keep consuming the whole defn form so the parse loop
-                     * reaches the next top-level form. Every offender reported. */
-                    fk_diag(FK_DIAG_ERR, ns2,
-                            "[fn-cap] defn '%.*s' over FK_FN_CAP (%d); body not stored",
-                            (int)nlen2, fk_srctext + ns2, (int)FK_FN_CAP);
-                }
-                if (fk_fntop < FK_TOP_FN_SYM_CAP) {
-                    fk_fnsym_s[fk_fntop] = ns2;
-                    fk_fnsym_n[fk_fntop] = nlen2;
-                    fk_fnidx[fk_fntop] = idx;
-                    fk_fntop = fk_fntop + 1;
-                }
+                fk_fn_reserve(fk_defn_next);
+                fk_fnsym_s[fk_fntop] = ns2;
+                fk_fnsym_n[fk_fntop] = nlen2;
+                fk_fnidx[fk_fntop] = idx;
+                fk_fntop = fk_fntop + 1;
             }
             fk_fname_s = ns2;
             fk_fname_n = nlen2;
@@ -10335,9 +10320,7 @@ static void fk_parse_top(void) {
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
-            if (idx >= 0 && idx < FK_FN_CAP) {
-                fk_fnar[idx] = na;
-            }
+            fk_fnar[idx] = na;
             /* arity known before body -> self-recursive calls read it */
             long long body = fk_sparse();
             fk_sskip();
@@ -10347,9 +10330,7 @@ static void fk_parse_top(void) {
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
-            if (idx >= 0 && idx < FK_FN_CAP) {
-                fk_fn[idx] = body;
-            }
+            fk_fn[idx] = body;
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
             return;
@@ -11235,7 +11216,7 @@ static long long fk_src_symbol_id_for_node(long long node) {
     long long i = 0;
     while (i < fk_fntop) {
         long long fi = fk_fnidx[i];
-        if (fi >= 0 && fi < FK_FN_CAP && fk_fn[fi] == node) {
+        if (fi >= 0 && fi < fk_fn_count && fk_fn[fi] == node) {
             return i;
         }
         i = i + 1;
@@ -11322,7 +11303,7 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
         long long dep_fn = fk_src_direct_call_fn(node);
         long long dep_sym = fk_src_symbol_id_for_fn(dep_fn);
         if (defined >= 0 || dep_sym >= 0) {
-            long long target = (dep_fn >= 0 && dep_fn < FK_FN_CAP) ? fk_fn[dep_fn] : -1;
+            long long target = (dep_fn >= 0 && dep_fn < fk_fn_count) ? fk_fn[dep_fn] : -1;
             int n = sprintf(line, "node %lld defines %lld depends %lld target %lld\n", node,
                             defined, dep_sym, target);
             if (!fk_write_all_raw(fd, line, (unsigned long)n)) {
@@ -11512,7 +11493,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     i = 0;
     while (ok && i < fk_fntop) {
         long long fnidx = fk_fnidx[i];
-        long long arity = (fnidx >= 0 && fnidx < FK_FN_CAP) ? fk_fnar[fnidx] : 0;
+        long long arity = (fnidx >= 0 && fnidx < fk_fn_count) ? fk_fnar[fnidx] : 0;
         ok = fk_fkb_write_signed(fd, i) && fk_fkb_write_signed(fd, fnidx) &&
              fk_fkb_write_signed(fd, arity) &&
              fk_fkb_write_srctext_slice(fd, fk_fnsym_s[i], fk_fnsym_n[i]);
@@ -11528,7 +11509,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
         ok = fk_fkb_write_signed(fd, i) && fk_fkb_write_signed(fd, defined) &&
              fk_fkb_write_signed(fd, dep_count);
         if (ok && dep_count == 1) {
-            long long target = (dep_fn >= 0 && dep_fn < FK_FN_CAP) ? fk_fn[dep_fn] : -1;
+            long long target = (dep_fn >= 0 && dep_fn < fk_fn_count) ? fk_fn[dep_fn] : -1;
             ok = fk_fkb_write_signed(fd, dep_sym) && fk_fkb_write_signed(fd, target);
         }
         i = i + 1;
@@ -11841,9 +11822,10 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         return 0;
     }
     long long nf = fk_fkb_read_signed();
-    if (nf < 1 || fk_defn_next + nf - 1 > FK_FN_CAP) {
+    if (nf < 1 || nf > fk_fkb_len) {
         return 0;
     }
+    fk_fn_reserve(fk_defn_next + nf - 1);
     long long *fn_roots = malloc((unsigned long)nf * 8);
     if (fn_roots == 0) {
         fk_die("fk_import_fkb: out of memory reading function roots");
@@ -11895,6 +11877,10 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     }
     free(fn_roots);
     long long symbol_count = fk_fkb_read_signed();
+    if (symbol_count < 0 || symbol_count > fk_fkb_len) {
+        return 0;
+    }
+    fk_fn_reserve(fk_fntop + symbol_count + 1);
     i = 0;
     while (!fk_fkb_bad && i < symbol_count) {
         (void)fk_fkb_read_signed();
@@ -11908,12 +11894,12 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
             }
             return 0;
         }
-        if (old_fnidx > 0 && fk_fntop < FK_TOP_FN_SYM_CAP) {
+        if (old_fnidx > 0) {
             long long new_fnidx = fk_fkb_remap_fn(old_fnidx, fn_base);
             fk_fnsym_s[fk_fntop] = name_s;
             fk_fnsym_n[fk_fntop] = name_n;
             fk_fnidx[fk_fntop] = new_fnidx;
-            if (new_fnidx >= 0 && new_fnidx < FK_FN_CAP) {
+            if (new_fnidx >= 0 && new_fnidx < fk_fn_capacity) {
                 fk_fnar[new_fnidx] = arity;
             }
             fk_fntop = fk_fntop + 1;
@@ -12053,10 +12039,11 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         return 0;
     }
     long long nf = fk_fkb_read_signed();
-    if (nf < 0 || nf > FK_FN_CAP) {
-        fk_fkb_mark_bad("function count exceeds capacity");
+    if (nf < 0 || nf > fk_fkb_len) {
+        fk_fkb_mark_bad("function count exceeds artifact bounds");
         return 0;
     }
+    fk_fn_reserve(nf > 0 ? nf : 1);
     fk_fn_count = nf;
     long long i = 0;
     while (!fk_fkb_bad && i < nf) {
@@ -12245,6 +12232,7 @@ static long long fk_src_sym_recorded_unrunnable(const char *sym_path) {
     return -1;
 }
 static void fk_src_reset_compile_state(void) {
+    fk_fn_reserve(1);
     fk_arg_n = 0;
     fk_fname_n = 0;
     fk_fn_count = 1;
@@ -12797,6 +12785,8 @@ static int fk_run_feval(const char *path) {
     fk_src_truncated = 0;
     fk_src_unrunnable = 0;
     fk_sinit();
+    fk_fn_reserve(1);
+    fk_fn_count = 1;
     fk_fntop = 0;
     fk_const_top = 0;
     fk_defn_next = 1;
