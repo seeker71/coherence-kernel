@@ -458,7 +458,7 @@ compiler_stamp=""
 # this is the same Recipe lowering, expressed as source rather than hidden
 # behind sibling-only read_form_binary/walk_recipe_here natives. Including the
 # lens in the content stamp also invalidates old cached loader drivers.
-compiler_chain=("form-stdlib/engine-constants.fk" "form-stdlib/compiler-objects.fk" "form-stdlib/form-ontology-bp.fk" "form-stdlib/form-ontology-loader.fk" "form-stdlib/line-grammar.fk" "form-stdlib/bmf-core.fk" "form-stdlib/bmf-grammar.fk" "form-stdlib/bml.fk" "form-stdlib/bml-source.fk" "form-stdlib/source-compiler.fk" "form-stdlib/grammars/form-bml.fk" "form-stdlib/grammars/form-lift.fk" "form-stdlib/form-bml-lower.fk" "form-stdlib/source-compiler-text-lens.fk")
+compiler_chain=("form-stdlib/engine-constants.fk" "form-stdlib/compiler-objects.fk" "form-stdlib/form-ontology-bp.fk" "form-stdlib/form-ontology-source-categories.fk" "form-stdlib/form-ontology-loader.fk" "form-stdlib/line-grammar.fk" "form-stdlib/bmf-core.fk" "form-stdlib/bmf-grammar.fk" "form-stdlib/bml.fk" "form-stdlib/bml-source.fk" "form-stdlib/source-compiler.fk" "form-stdlib/grammars/form-bml.fk" "form-stdlib/grammars/form-lift.fk" "form-stdlib/form-bml-lower.fk" "form-stdlib/source-compiler-text-lens.fk")
 compiler_stamp="$(form_hash16 "${compiler_chain[@]}" "${FKWU_SRC:-}" "$GO_BIN")"
 
 prepared_args=()
