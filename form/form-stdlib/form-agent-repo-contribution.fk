@@ -1,0 +1,254 @@
+; form-agent-repo-contribution.fk — a bounded repository sense-and-change
+; transaction for a resident Form agent.
+;
+; This is capability data, not an operation table.  A caller offers one root,
+; one allowed relative-path prefix, a byte extent, and a test-route NodeID.
+; Source discovery and testing arrive as function values, so new lookup organs
+; and new test recipes do not require another dispatcher seat here.
+;
+; A change is proposed before it can move.  Apply re-reads the current bytes,
+; requires one exact old span, writes candidate and recovery siblings, asks the
+; supplied test callback before and after the atomic rename, and restores the
+; recovery image when the live-path test does not answer value.  `nothing`,
+; refusal, choice, failure and timeout remain distinct results; integer 0 and 1
+; are values only inside a successful test result.
+;
+; No SHA is paid for bookkeeping.  The proposal NodeID is interned from the
+; exact capability/path/old/new/test values already in hand.  The source body is
+; truth, that NodeID is the within-residence address, and the exact-old match is
+; the freshness membrane.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-fs.fk form-stdlib/native-edit.fk
+; Proven by: form-stdlib/tests/form-agent-repo-contribution-band.fk
+
+(do
+    (defn farc-capability (root prefix max-bytes test-route)
+        (list "form-agent-repo-capability-v1" root prefix max-bytes test-route))
+    (defn farc-capability? (c)
+        (if (nothing? c) 0
+        (if (not (eq (len c) 5)) 0
+        (if (not (str_eq (nth c 0) "form-agent-repo-capability-v1")) 0
+        (if (or (eq (str_len (nth c 1)) 0) (eq (str_len (nth c 2)) 0)) 0
+        (if (le (nth c 3) 0) 0
+            (if (nothing? (nth c 4)) 0 1)))))))
+    (defn farc-cap-root (c) (nth c 1))
+    (defn farc-cap-prefix (c) (nth c 2))
+    (defn farc-cap-max-bytes (c) (nth c 3))
+    (defn farc-cap-test-route (c) (nth c 4))
+
+    (defn farc-relative-path? (path)
+        (if (or (eq (str_len path) 0)
+                (or (eq (str_byte_at path 0) 47)
+                    (or (ge (str_find path ".." 0) 0)
+                        (ge (str_find path "\\" 0) 0)))) 0 1))
+    (defn farc-path-admitted? (cap path)
+        (if (eq (farc-capability? cap) 0) 0
+            (if (eq (farc-relative-path? path) 0) 0
+                (if (and (eq (str_find path (farc-cap-prefix cap) 0) 0)
+                         (eq (fs-suffix? path ".fk") 1)) 1 0))))
+    (defn farc-full-path (cap path)
+        (fs-path-join (farc-cap-root cap) path))
+
+    ; A discovery callback returns source-of's honest shape:
+    ;   ("one" path), ("choice" paths), or nothing.
+    (defn farc-discovery-paths-admitted? (cap paths)
+        (if (nil? paths) 1
+            (if (eq (farc-path-admitted? cap (head paths)) 1)
+                (farc-discovery-paths-admitted? cap (tail paths)) 0)))
+    (defn farc-source-result (status reason paths text)
+        (list "form-agent-repo-source-v1" status reason paths text))
+    (defn farc-source-status (r) (nth r 1))
+    (defn farc-source-reason (r) (nth r 2))
+    (defn farc-source-paths (r) (nth r 3))
+    (defn farc-source-text (r) (nth r 4))
+    (defn farc-read (cap path)
+        (if (eq (farc-path-admitted? cap path) 0)
+            (farc-source-result "refused" "path-capability-refused" (list) "")
+            (do
+                (let full (farc-full-path cap path))
+                (let size (fs-stat-size full))
+                (if (lt size 0)
+                    (farc-source-result "nothing" "source-absent" (list path) "")
+                (if (gt size (farc-cap-max-bytes cap))
+                    (farc-source-result "refused" "source-byte-extent-refused" (list path) "")
+                    (farc-source-result "value" "source-read" (list path)
+                        (fs-read-slice full 0 size)))))))
+    (defn farc-find (cap lookupf ctx name)
+        (do
+            (let found (lookupf ctx name))
+            (if (nothing? found)
+                (farc-source-result "nothing" "source-name-unborn" (list) "")
+            (if (str_eq (head found) "one")
+                (farc-read cap (nth found 1))
+            (if (str_eq (head found) "choice")
+                (do
+                    (let paths (nth found 1))
+                    (if (eq (farc-discovery-paths-admitted? cap paths) 1)
+                        (farc-source-result "choice" "source-name-plural" paths "")
+                        (farc-source-result "refused" "discovery-left-capability" paths "")))
+                (farc-source-result "failure" "discovery-shape-malformed" (list) ""))))))
+
+    ; Proposal identity is computed from exact values.  It is not a curated
+    ; function number and does not claim persistence across a fresh intern table.
+    (defn farc-proposal-category ()
+        (intern_trivial_string "form-agent-repo-proposal-v1"))
+    (defn farc-capability-token (cap)
+        (intern_node (intern_trivial_string "form-agent-repo-capability-v1")
+            (list (intern_trivial_string (farc-cap-root cap))
+                  (intern_trivial_string (farc-cap-prefix cap))
+                  (intern_trivial_int (farc-cap-max-bytes cap))
+                  (farc-cap-test-route cap))))
+    (defn farc-proposal (cap path old new)
+        (intern_node (farc-proposal-category)
+            (list (farc-capability-token cap)
+                  (intern_trivial_string path)
+                  (intern_trivial_string old)
+                  (intern_trivial_string new)
+                  (farc-cap-test-route cap))))
+    (defn farc-proposal? (p)
+        (if (nothing? p) 0
+            (if (not (node_eq (node_category p) (farc-proposal-category))) 0
+                (if (eq (len (node_children p)) 5) 1 0))))
+    (defn farc-proposal-capability (p) (nth (node_children p) 0))
+    (defn farc-proposal-path (p) (node_value (nth (node_children p) 1)))
+    (defn farc-proposal-old (p) (node_value (nth (node_children p) 2)))
+    (defn farc-proposal-new (p) (node_value (nth (node_children p) 3)))
+    (defn farc-proposal-test-route (p) (nth (node_children p) 4))
+    (defn farc-proposal-bound? (cap p)
+        (if (eq (farc-proposal? p) 0) 0
+            (if (not (node_eq (farc-proposal-capability p)
+                              (farc-capability-token cap))) 0
+                (if (not (node_eq (farc-proposal-test-route p)
+                                  (farc-cap-test-route cap))) 0
+                    (farc-path-admitted? cap (farc-proposal-path p))))))
+
+    ; Test callbacks answer this typed shape.  A zero or one is present only
+    ; when status=value; raw numbers and raw nothing are never interpreted.
+    (defn farc-test-result (status reason present value)
+        (list "form-agent-repo-test-v1" status reason present value))
+    (defn farc-test-result? (r)
+        (if (nothing? r) 0
+            (if (not (eq (len r) 5)) 0
+                (if (str_eq (nth r 0) "form-agent-repo-test-v1") 1 0))))
+    (defn farc-test-status (r) (nth r 1))
+    (defn farc-test-reason (r) (nth r 2))
+    (defn farc-test-present? (r) (nth r 3))
+    (defn farc-test-value (r) (nth r 4))
+    (defn farc-test-passed? (r)
+        (if (eq (farc-test-result? r) 0) 0
+            (if (and (str_eq (farc-test-status r) "value")
+                     (eq (farc-test-present? r) 1))
+                (if (eq (farc-test-value r) 1) 1 0) 0)))
+
+    ; Receipt keeps before/after path, proposal NodeID, exact signal, test
+    ; observations, byte counts and lifecycle.  No prose is asked to stand in
+    ; for an effect.
+    (defn farc-receipt (status reason proposal before-bytes after-bytes pre post trace)
+        (list "form-agent-repo-receipt-v1" status reason proposal before-bytes
+              after-bytes pre post trace))
+    (defn farc-status (r) (nth r 1))
+    (defn farc-reason (r) (nth r 2))
+    (defn farc-receipt-proposal (r) (nth r 3))
+    (defn farc-before-bytes (r) (nth r 4))
+    (defn farc-after-bytes (r) (nth r 5))
+    (defn farc-pretest (r) (nth r 6))
+    (defn farc-posttest (r) (nth r 7))
+    (defn farc-trace (r) (nth r 8))
+    (defn farc-no (status reason proposal trace)
+        (farc-receipt status reason proposal 0 0 (nothing) (nothing) trace))
+
+    (defn farc-apply (cap grants verifyf testf ctx proposal)
+        (if (eq (farc-proposal-bound? cap proposal) 0)
+            (farc-no "refused" "proposal-capability-refused" proposal
+                (list "choice" "refused" "release"))
+        (if (not (node_eq grants (farc-capability-token cap)))
+            (farc-no "refused" "capability-not-granted" proposal
+                (list "choice" "refused" "release"))
+            (do
+                (let path (farc-proposal-path proposal))
+                (let full (farc-full-path cap path))
+                (let before (fs-read-text full))
+                (let old (farc-proposal-old proposal))
+                (let new (farc-proposal-new proposal))
+                (let occurrences (ne-count before old))
+                (if (eq occurrences 0)
+                    (farc-no "nothing" "expected-old-absent" proposal
+                        (list "choice" "nothing" "release"))
+                (if (gt occurrences 1)
+                    (farc-no "choice" "expected-old-plural" proposal
+                        (list "choice" "release"))
+                    (do
+                        (let candidate (ne-replace-first before old new))
+                        (if (gt (str_len candidate) (farc-cap-max-bytes cap))
+                            (farc-no "refused" "candidate-byte-extent-refused" proposal
+                                (list "choice" "refused" "release"))
+                            (do
+                                (let pre (verifyf ctx
+                                    (farc-proposal-test-route proposal) candidate))
+                                (if (eq (farc-test-passed? pre) 0)
+                                    (farc-receipt (if (eq (farc-test-result? pre) 1)
+                                            (farc-test-status pre) "failure")
+                                        (if (eq (farc-test-result? pre) 1)
+                                            (farc-test-reason pre) "pretest-shape-malformed")
+                                        proposal (str_len before) (str_len before)
+                                        pre (nothing)
+                                        (list "choice" "failure" "undo" "release"))
+                                    (do
+                                        (let suffix (str_concat ".form-agent-"
+                                            (int_to_str (node_inst proposal))))
+                                        (let candidate-path (str_concat full
+                                            (str_concat suffix ".candidate")))
+                                        (let recovery-path (str_concat full
+                                            (str_concat suffix ".recovery")))
+                                        (let backup-write (fs-write-text recovery-path before))
+                                        (let candidate-write (if (eq backup-write (str_len before))
+                                            (fs-write-text candidate-path candidate) -1))
+                                        (if (or (not (eq backup-write (str_len before)))
+                                                (not (eq candidate-write (str_len candidate))))
+                                            (do
+                                                (fs-remove-file candidate-path)
+                                                (fs-remove-file recovery-path)
+                                                (farc-receipt "failure" "stage-write-refused"
+                                                    proposal (str_len before) (str_len before)
+                                                    pre (nothing)
+                                                    (list "choice" "failure" "undo" "release")))
+                                            (if (not (str_eq (fs-read-text candidate-path) candidate))
+                                                (do
+                                                    (fs-remove-file candidate-path)
+                                                    (fs-remove-file recovery-path)
+                                                    (farc-receipt "failure" "stage-readback-mismatch"
+                                                        proposal (str_len before) (str_len before)
+                                                        pre (nothing)
+                                                        (list "choice" "failure" "undo" "release")))
+                                                (if (not (eq (fs-rename candidate-path full) 0))
+                                                    (do
+                                                        (fs-remove-file candidate-path)
+                                                        (fs-remove-file recovery-path)
+                                                        (farc-receipt "failure" "atomic-rename-refused"
+                                                            proposal (str_len before) (str_len before)
+                                                            pre (nothing)
+                                                            (list "choice" "failure" "undo" "release")))
+                                                    (do
+                                                        (let post (testf ctx
+                                                            (farc-proposal-test-route proposal) full))
+                                                        (if (eq (farc-test-passed? post) 1)
+                                                            (do
+                                                                (fs-remove-file recovery-path)
+                                                                (farc-receipt "value" "applied-and-observed"
+                                                                    proposal (str_len before)
+                                                                    (str_len candidate) pre post
+                                                                    (list "choice" "crystallize" "release")))
+                                                            (do
+                                                                (let restored (fs-rename recovery-path full))
+                                                                (farc-receipt
+                                                                    (if (eq restored 0) "failure" "failure")
+                                                                    (if (eq restored 0)
+                                                                        "posttest-failed-restored"
+                                                                        "posttest-failed-restore-refused")
+                                                                    proposal (str_len before)
+                                                                    (if (eq restored 0) (str_len before)
+                                                                        (str_len candidate))
+                                                                    pre post
+                                                                    (list "choice" "failure" "undo" "release")))))))))))))))))))
+
+    0)
