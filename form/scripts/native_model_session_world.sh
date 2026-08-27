@@ -1,6 +1,6 @@
 #!/bin/sh
-# Train/evaluate an order-2 next-action world model on the complete frozen real
-# Codex session benchmark. Raw prompts, reasoning, commands, and tool results
+# Train/evaluate an order-2 next-action world model on the current, bounded
+# project-session carrier. Raw prompts, reasoning, commands, and tool results
 # never enter the durable episode set. The shell transports structural rows;
 # Form owns classification, fixed-shape count learning, heldout scoring,
 # semantic hashes, baseline comparison, and day-over-day delta.
@@ -15,15 +15,14 @@ temp_dir=$(nm_new_temp_dir)
 before="$temp_dir/artifacts-before"
 after="$temp_dir/artifacts-after"
 sessions="$temp_dir/sessions"
-recent_sessions="$temp_dir/recent-sessions"
-recent_root_sessions="$temp_dir/recent-root-sessions"
+root_sessions="$temp_dir/root-sessions"
+quiescent_sessions="$temp_dir/quiescent-sessions.tsv"
 train_sessions="$temp_dir/train-sessions"
-heldout_candidates="$temp_dir/heldout-candidates"
 heldout_sessions="$temp_dir/heldout-sessions"
 train_actions="$temp_dir/train-actions.tsv"
 heldout_actions="$temp_dir/heldout-actions.tsv"
-train_episodes_all="$temp_dir/train-episodes-all.tsv"
-heldout_episodes_all="$temp_dir/heldout-episodes-all.tsv"
+train_episodes="$temp_dir/train-episodes.tsv"
+heldout_episodes="$temp_dir/heldout-episodes.tsv"
 episodes="$temp_dir/episodes.tsv"
 form_input="$temp_dir/form-input"
 band_source="$temp_dir/session-world-band.fk"
@@ -44,46 +43,60 @@ if [ ! -x "$NM_FKWU" ]; then
 fi
 
 cd "$NM_REPO_ROOT"
-nm_discover_all_sessions() {
-    destination=$1
-    : > "$destination"
-    for session_root in \
-        "$NM_CODEX_HOME/sessions" "$NM_CODEX_HOME/archived_sessions"
+# The live carrier is limited to recent sessions whose declared cwd belongs to
+# this project. It is intentionally not a fixed historical date set. Only
+# user-root sessions that have been quiet for six hours may enter; quiescence
+# is an observable boundary, not an assertion that a session is complete.
+# Whole sessions—not individual rows—are split chronologically 80/20.
+nm_discover_project_sessions "$sessions"
+nm_root_project_sessions "$sessions" "$root_sessions"
+recent_session_count=$(wc -l < "$sessions" | tr -d ' ')
+recent_root_session_count=$(wc -l < "$root_sessions" | tr -d ' ')
+quiescence_seconds=21600
+nm_select_quiescent_sessions() {
+    nmsw_source_sessions=$1
+    nmsw_destination=$2
+    nmsw_now=$(date +%s)
+    while IFS= read -r nmsw_session_file
     do
-        if [ -d "$session_root" ]; then
-            find "$session_root" -type f -name 'rollout-*.jsonl' -print
+        nmsw_modified=$(stat -f %m "$nmsw_session_file")
+        if [ $((nmsw_now - nmsw_modified)) -ge "$quiescence_seconds" ]; then
+            printf '%s\t%s\n' "$nmsw_modified" "$nmsw_session_file"
         fi
-    done | sort -u > "$destination"
+    done < "$nmsw_source_sessions" | sort -n -k1,1 -k2,2 > "$nmsw_destination"
 }
-
-# The benchmark dates are frozen, so their discovery must not inherit the
-# shared recent-session helper's -mtime window. Recent counts remain useful
-# observation metadata but cannot make historical evidence disappear.
-nm_discover_all_sessions "$sessions"
-nm_discover_recent_sessions "$recent_sessions"
-nm_root_project_sessions "$recent_sessions" "$recent_root_sessions"
-recent_session_count=$(wc -l < "$recent_sessions" | tr -d ' ')
-recent_root_session_count=$(wc -l < "$recent_root_sessions" | tr -d ' ')
-if [ ! -s "$sessions" ]; then
-    printf 'no real Codex sessions found in active or archived roots\n' >&2
+nm_select_quiescent_sessions "$root_sessions" "$quiescent_sessions"
+eligible_session_count=$(wc -l < "$quiescent_sessions" | tr -d ' ')
+if [ "$eligible_session_count" -lt 3 ]; then
+    printf 'insufficient quiescent user-root project sessions: eligible=%s quiescence_seconds=%s\n' \
+        "$eligible_session_count" "$quiescence_seconds" >&2
     exit 1
 fi
-
-# Freeze a lineage-safe historical benchmark: July 2-4 roots/descendants train;
-# July 8/10/11/14 user-root sessions are future heldout. July 5-7 is an embargo,
-# and the still-changing July 15 sessions remain shadow-only.
-awk -F/ '
-    $NF ~ /^rollout-2026-07-02/ ||
-    $NF ~ /^rollout-2026-07-03/ ||
-    $NF ~ /^rollout-2026-07-04/ { print }
-' "$sessions" > "$train_sessions"
-awk -F/ '
-    $NF ~ /^rollout-2026-07-08/ ||
-    $NF ~ /^rollout-2026-07-10/ ||
-    $NF ~ /^rollout-2026-07-11/ ||
-    $NF ~ /^rollout-2026-07-14/ { print }
-' "$sessions" > "$heldout_candidates"
-nm_root_project_sessions "$heldout_candidates" "$heldout_sessions"
+train_session_count=$((eligible_session_count * 4 / 5))
+heldout_session_count=$((eligible_session_count - train_session_count))
+if [ "$train_session_count" -lt 2 ] || [ "$heldout_session_count" -lt 1 ]; then
+    printf 'invalid session-disjoint split: eligible=%s train=%s heldout=%s\n' \
+        "$eligible_session_count" "$train_session_count" "$heldout_session_count" >&2
+    exit 1
+fi
+awk -F '\t' -v count="$train_session_count" 'NR <= count { print $2 }' \
+    "$quiescent_sessions" > "$train_sessions"
+awk -F '\t' -v count="$train_session_count" 'NR > count { print $2 }' \
+    "$quiescent_sessions" > "$heldout_sessions"
+if sort "$train_sessions" "$heldout_sessions" | uniq -d | grep -q .; then
+    printf 'session-disjoint split failed: a session entered both train and heldout\n' >&2
+    exit 1
+fi
+train_latest=$(awk -F '\t' -v count="$train_session_count" 'NR == count { print $1 }' \
+    "$quiescent_sessions")
+heldout_earliest=$(awk -F '\t' -v count="$train_session_count" 'NR == count + 1 { print $1 }' \
+    "$quiescent_sessions")
+if [ "$train_latest" -gt "$heldout_earliest" ]; then
+    printf 'session temporal split failed: train_latest=%s heldout_earliest=%s\n' \
+        "$train_latest" "$heldout_earliest" >&2
+    exit 1
+fi
+session_split_valid=1
 
 salt=$(nm_session_hash_salt)
 nm_extract_session_actions() {
@@ -144,21 +157,21 @@ nm_actions_to_episodes() {
 
 nm_extract_session_actions "$train_sessions" "$train_actions"
 nm_extract_session_actions "$heldout_sessions" "$heldout_actions"
-nm_actions_to_episodes "$train_actions" "$train_episodes_all"
-nm_actions_to_episodes "$heldout_actions" "$heldout_episodes_all"
+nm_actions_to_episodes "$train_actions" "$train_episodes"
+nm_actions_to_episodes "$heldout_actions" "$heldout_episodes"
 
-source_train_count=$(wc -l < "$train_episodes_all" | tr -d ' ')
-source_heldout_count=$(wc -l < "$heldout_episodes_all" | tr -d ' ')
-expected_train_count=31827
-expected_heldout_count=1364
-if [ "$source_train_count" -ne "$expected_train_count" ] || \
-   [ "$source_heldout_count" -ne "$expected_heldout_count" ]; then
-    printf 'frozen session-world pool drift: expected train=%s heldout=%s; observed train=%s heldout=%s\n' \
-        "$expected_train_count" "$expected_heldout_count" \
+source_train_count=$(wc -l < "$train_episodes" | tr -d ' ')
+source_heldout_count=$(wc -l < "$heldout_episodes" | tr -d ' ')
+if [ "$source_train_count" -lt 32 ] || [ "$source_heldout_count" -lt 8 ]; then
+    printf 'insufficient closed user-root project episodes: train=%s heldout=%s\n' \
         "$source_train_count" "$source_heldout_count" >&2
     exit 1
 fi
-cat "$train_episodes_all" "$heldout_episodes_all" > "$episodes"
+train_count=$source_train_count
+heldout_count=$source_heldout_count
+episode_count=$((train_count + heldout_count))
+split_id=session-disjoint-recent-45d-user-root-quiescent-6h-temporal-80-20
+cat "$train_episodes" "$heldout_episodes" > "$episodes"
 episode_sha=$(nm_sha256_file "$episodes")
 
 nm_build_session_world_source() {
@@ -179,19 +192,11 @@ nm_build_session_world_source() {
 
 # Hash the exact generated source that fkwu will execute, including the core,
 # evidence, model, and CLI entry closure. Daily deltas are comparable only
-# when both the frozen carrier and this evaluation contract are identical.
+# when both the live carrier and this evaluation contract are identical.
 nm_build_session_world_source "$cli_source" \
     form/form-stdlib/native-model-session-world-cli.fk
 evaluation_contract_sha256=$(nm_sha256_file "$cli_source")
 
-train_count=$source_train_count
-heldout_count=$source_heldout_count
-episode_count=$(wc -l < "$episodes" | tr -d ' ')
-if [ "$train_count" -lt 32 ] || [ "$heldout_count" -lt 8 ]; then
-    printf 'insufficient lineage-safe episodes: train=%s heldout=%s\n' \
-        "$train_count" "$heldout_count" >&2
-    exit 1
-fi
 actions_observed=$(( $(sort -u "$train_actions" | wc -l) + \
                       $(sort -u "$heldout_actions" | wc -l) ))
 
@@ -201,16 +206,14 @@ previous_report=$(
         -name 'session-world-*.txt' -print | sort -r | \
     while IFS= read -r candidate
     do
-        if grep -q '^schema=native-model-session-world-report-v2$' \
+        if grep -q '^schema=native-model-session-world-report-v5$' \
                 "$candidate" && \
            grep -q '^full_pool_evaluated=1$' "$candidate" && \
-           grep -q '^train_episodes=31827$' "$candidate" && \
-           grep -q '^heldout_episodes=1364$' "$candidate" && \
            grep -q "^episode_carrier_sha256=${episode_sha}$" \
                 "$candidate" && \
            grep -q "^evaluation_contract_sha256=${evaluation_contract_sha256}$" \
                 "$candidate" && \
-           grep -q '^split=frozen-lineage-safe-20260702-04-train-20260708-14-heldout$' \
+           grep -q "^split=${split_id}$" \
                 "$candidate"
         then
             printf '%s\n' "$candidate"
@@ -229,6 +232,10 @@ fi
         "$recent_root_session_count"
     printf '%s\n' "$actions_observed" "$source_train_count" \
         "$source_heldout_count" 1 "$train_count" "$heldout_count"
+    printf '%s\n' "$split_id"
+    printf '%s\n' "$eligible_session_count" "$train_session_count" \
+        "$heldout_session_count" "$quiescence_seconds"
+    printf '%s\n' "$session_split_valid"
     awk -F '\t' '{print $1; print $2; print $3; print $4; print $5}' "$episodes"
 } > "$form_input"
 chmod 600 "$form_input"
@@ -251,9 +258,10 @@ if ! grep -q '^world_model_valid=1$' "$report"; then
     exit 1
 fi
 if ! grep -q '^full_pool_evaluated=1$' "$report" || \
-   ! grep -q "^train_episodes=${expected_train_count}$" "$report" || \
-   ! grep -q "^heldout_episodes=${expected_heldout_count}$" "$report"; then
-    printf 'real session world-model did not evaluate the complete frozen pool\n' >&2
+   ! grep -q "^train_episodes=${train_count}$" "$report" || \
+   ! grep -q "^heldout_episodes=${heldout_count}$" "$report" || \
+   ! grep -q "^split=${split_id}$" "$report"; then
+    printf 'real session world-model did not evaluate the complete current pool\n' >&2
     cat "$report" >&2
     exit 1
 fi
