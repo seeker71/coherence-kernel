@@ -7,14 +7,28 @@
 ; process, with no new fkwu. Starting a fresh process per cell is the shape
 ; this replaces; one residence, fed through a spool, is the preferred door.
 ;
-; The served grammar today is form-eval-full's proven core: integers, if/do/
-; let/defn, user calls, and the fourteen-op table. Strings, lists and floats
-; live in grammars/form-eval.fk's fe-eval and join when that door gains the
-; resident environment; native dispatch from inside eval is the named next
-; stone (form-eval-full.fk's own words at its op table). An unbound name in a
-; task is a loud death of the residence, never a quiet wrong answer — the
-; process-field census then shows the ghost presence, which is the honest
-; residue the sweep door clears.
+; The served grammar (2026-08-27, the next stone placed): form-eval-full's
+; proven core PLUS string literals, float literals, and the eval-native prim
+; table (str/list/float kernel ops as data) — band verdict 1181, four-way.
+; Render lanes are DECLARED by the task's kind, because value_kind is absent
+; on the fkwu arm (pf-arm-mask 7): `cell-eval` renders the value as integer
+; text, `cell-eval-str` passes a string value through, `cell-eval-float`
+; renders through float_to_str (whose exact digits are each arm's own).
+;
+; The resolver gate answers BEFORE evaluation: every symbol in the task must
+; be known — a keyword, an op/prim/literal row, a name bound anywhere in the
+; task (defn, params, let), or a name living in the resident environment.
+; An unknown symbol earns a loud failure reply naming it, and the residence
+; continues with its environment intact. The gate is MEMBERSHIP, not scope:
+; a name bound later in the task but called earlier still passes the gate —
+; and since the fleet-healed lookup covenant (2026-08-27) that call ANSWERS
+; ABSENCE, deterministic on every arm, never a spin and never a death; the
+; reply renders the word nothing. Calling a non-function (a let-bound var)
+; answers absence the same way. The integer render lane roundtrips its own
+; text (str_to_int of the rendering equals the value) so a mis-declared
+; lane earns failure/render-not-integer instead of the silent sentinel
+; digits the fleet witnessed. Symbols inside string literals are data,
+; never scanned as names.
 ;
 ; preludes: form-stdlib/core.fk
 ; preludes: form-stdlib/form-eval-full.fk
@@ -53,18 +67,120 @@
                     (substring frame start
                         (if (lt stop 0) (str_len frame) stop))))))
 
+    ; ── the resolver gate: membership before evaluation ────────────────────
+    ; Pass A walks the task source linearly (string literals jumped as data)
+    ; collecting every name the task itself binds: defn names, their params,
+    ; let names. Pass B walks every symbol token and asks fcsv-known?; the
+    ; first unknown name is returned, "" when all resolve.
+    (defn fcsv-scan-binders (s pos acc)
+        (if (ge pos (str_len s)) acc
+            (do (let c (fef-at s pos))
+                (if (eq c 34)
+                    (fcsv-scan-binders s (add (fef-str-end s (add pos 1)) 1)
+                        acc)
+                (if (eq c 40)
+                    (fcsv-binders-head s (fef-skip s (add pos 1)) acc)
+                (if (or (eq c 41) (eq (fef-isws c) 1))
+                    (fcsv-scan-binders s (add pos 1) acc)
+                    (fcsv-scan-binders s (fef-sym-end s pos) acc)))))))
+    (defn fcsv-binders-head (s pos acc)
+        (do (let end (fef-sym-end s pos))
+            (let head-sym (substring s pos end))
+            (if (str_eq head-sym "defn") (fcsv-binders-defn s end acc)
+                (if (str_eq head-sym "let") (fcsv-binders-let s end acc)
+                    (fcsv-scan-binders s pos acc)))))
+    (defn fcsv-binders-defn (s pos acc)
+        (do (let nstart (fef-skip s pos))
+            (let nend (fef-sym-end s nstart))
+            (fcsv-binders-params s
+                (add (fef-skip s nend) 1)
+                (cons (substring s nstart nend) acc))))
+    (defn fcsv-binders-params (s pos acc)
+        (do (let p (fef-skip s pos))
+            (if (ge p (str_len s)) acc
+                (if (eq (fef-at s p) 41) (fcsv-scan-binders s (add p 1) acc)
+                    (fcsv-binders-params s (fef-sym-end s p)
+                        (cons (substring s p (fef-sym-end s p)) acc))))))
+    (defn fcsv-binders-let (s pos acc)
+        (do (let nstart (fef-skip s pos))
+            (let nend (fef-sym-end s nstart))
+            (fcsv-scan-binders s nend
+                (cons (substring s nstart nend) acc))))
+
+    (defn fcsv-keyword? (name)
+        (if (str_eq name "if") 1 (if (str_eq name "do") 1
+            (if (str_eq name "let") 1 (if (str_eq name "defn") 1 0)))))
+    (defn fcsv-in-list? (name names)
+        (if (eq (len names) 0) 0
+            (if (str_eq (head names) name) 1
+                (fcsv-in-list? name (tail names)))))
+    (defn fcsv-env-known? (name env)
+        (if (eq (len env) 0) 0
+            (if (str_eq (fef-bname (head env)) name) 1
+                (fcsv-env-known? name (tail env)))))
+    (defn fcsv-known? (name env binders)
+        (if (eq (fcsv-keyword? name) 1) 1
+        (if (not (fef-null (fef-oprow name (fef-optable)))) 1
+        (if (not (fef-null (fef-primrow name (fef-primtable)))) 1
+        (if (not (fef-null (fef-litrow name (fef-littable)))) 1
+        (if (eq (fcsv-in-list? name binders) 1) 1
+            (fcsv-env-known? name env)))))))
+    (defn fcsv-first-unbound (s pos env binders)
+        (if (ge pos (str_len s)) ""
+            (do (let c (fef-at s pos))
+                (if (eq c 34)
+                    (fcsv-first-unbound s (add (fef-str-end s (add pos 1)) 1)
+                        env binders)
+                (if (or (eq c 40) (or (eq c 41) (eq (fef-isws c) 1)))
+                    (fcsv-first-unbound s (add pos 1) env binders)
+                (if (eq (fef-isdigit c) 1)
+                    (fcsv-first-unbound s (fef-sym-end s pos) env binders)
+                    (do (let end (fef-sym-end s pos))
+                        (let name (substring s pos end))
+                        (if (eq (fcsv-known? name env binders) 1)
+                            (fcsv-first-unbound s end env binders)
+                            name))))))))
+    (defn fcsv-resolve (s env)
+        (fcsv-first-unbound s 0 env (fcsv-scan-binders s 0 (list))))
+
     ; ── one task through the resident evaluator ────────────────────────────
-    ; -> (reply-text env'). A kind this servant does not serve answers
-    ; `choice`, environment untouched; the task stays visible, never silently
-    ; swallowed.
+    ; -> (reply-text env'). The render lane is the task's declared kind; a
+    ; kind this servant does not serve answers `choice`, environment
+    ; untouched; the task stays visible, never silently swallowed.
+    (defn fcsv-eval-kind? (kind)
+        (if (str_eq kind "cell-eval") 1
+        (if (str_eq kind "cell-eval-str") 1
+        (if (str_eq kind "cell-eval-float") 1 0))))
+    ; a render answers (signal text): the integer lane roundtrips its own
+    ; rendering so a mis-declared lane earns failure/render-not-integer
+    ; instead of silent sentinel digits; absence renders as its word. The
+    ; string and float lanes stay declared trust — mis-declaring those dies
+    ; loudly on the host arms rather than silently anywhere.
+    (defn fcsv-render (kind v)
+        (if (str_eq kind "cell-eval-str") (list "value" v)
+            (if (str_eq kind "cell-eval-float")
+                (list "value" (float_to_str v))
+                (fcsv-render-int v))))
+    (defn fcsv-render-int (v)
+        (if (nothing? v) (list "value" (int_to_str v))
+            (do (let text (int_to_str v))
+                (if (eq (str_to_int text) v) (list "value" text)
+                    (list "failure" "render-not-integer")))))
     (defn fcsv-task-reply (env task)
         (do (let kind (fcpsi-task-kind task))
-            (if (str_eq kind "cell-eval")
-                (do (let r (fef-eval-state (fcpsi-task-text task) env))
-                    (list (fcsv-reply-frame (fcpsi-task-turn task) kind
-                        "value" (int_to_str (fef-v r))) (fef-e r)))
+            (if (eq (fcsv-eval-kind? kind) 1)
+                (fcsv-task-eval env task kind (fcpsi-task-text task))
                 (list (fcsv-reply-frame (fcpsi-task-turn task) kind
                     "choice" "kind-not-served") env))))
+    (defn fcsv-task-eval (env task kind src)
+        (do (let unbound (fcsv-resolve src env))
+            (if (str_eq unbound "")
+                (do (let r (fef-eval-state src env))
+                    (let rendered (fcsv-render kind (fef-v r)))
+                    (list (fcsv-reply-frame (fcpsi-task-turn task) kind
+                        (nth rendered 0) (nth rendered 1)) (fef-e r)))
+                (list (fcsv-reply-frame (fcpsi-task-turn task) kind
+                    "failure" (str_concat "unbound-name:" unbound)) env))))
 
     ; walk the completed frames of one feed: -> (env served replies)
     (defn fcsv-frames-go (env frames ends served replies)

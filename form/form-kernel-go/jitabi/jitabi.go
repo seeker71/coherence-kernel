@@ -334,6 +334,13 @@ func (v Value) AsString() string {
 }
 
 func equal(a, b Value) bool {
+	// Absence is self-equal, equal only to itself — the fkwu covenant
+	// (re-witnessed 2026-08-27), mirrored here because JIT'd hot code must
+	// answer exactly what the walker answers. Checked before the float lane
+	// so a null beside a float never coerces to 0.0 and silently equals it.
+	if a.Kind == NullKind || b.Kind == NullKind {
+		return a.Kind == NullKind && b.Kind == NullKind
+	}
 	if a.Kind == FloatKind || b.Kind == FloatKind {
 		return a.AsFloat() == b.AsFloat()
 	}

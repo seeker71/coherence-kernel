@@ -4524,6 +4524,25 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 		case RBasicCompare:
 			lv := k.walk(kids[0], env)
 			rv := k.walk(kids[1], env)
+			// Equality against absence ANSWERS, never dies — the fkwu
+			// covenant (eq nothing 0 -> 0, eq nothing nothing -> 1;
+			// form-eval-full-band's nothing claim, re-witnessed 2026-08-27).
+			// nil is its own word, equal only to itself. Ordering against
+			// absence is NOT yet a chosen covenant: this walker dies loudly
+			// in the lanes below, while the fkwu reference currently answers
+			// a tagged-word total order (absence below every int) —
+			// divergence witnessed 2026-08-27, named in the receipt, its
+			// resolution still owed. Equality alone is covenant here.
+			// Checked before the float lane so a null beside a float never
+			// reaches AsFloat.
+			if lv.Kind == VNull || rv.Kind == VNull {
+				switch cat.Inst {
+				case RCompareEq:
+					return boolInt(lv.Kind == VNull && rv.Kind == VNull)
+				case RCompareNe:
+					return boolInt(!(lv.Kind == VNull && rv.Kind == VNull))
+				}
+			}
 			// Same width-promotion rule as math: float on either side forces
 			// an IEEE comparison. Pure int/int stays integer. Mirrors Rust.
 			// A comparison acknowledges with the 0/1 integer states (axiom-1,
