@@ -65,10 +65,12 @@ full-PIF adapter has 1,910; only 280 overlap.  Their union is 4,579, which is 48
 above the temporary C seed's `FK_FN_CAP=4096`.  Directly importing the full
 adapter into the peer would therefore be a knowingly unrunnable composition.
 
-The narrow next movement is a reduced admitted-PIF callable core adding at most
-1,147 unique meanings to the peer, or preferably a PIF-resident interpreter so
-compiler/walker versions themselves arrive as recipe data rather than occupying
-`fk_fn[]`.  After that, bind the already-landed cooperative turnwheel to the
+The 1,147-seat headroom is diagnostic evidence about the temporary seed, not an
+architectural budget.  Squeezing a living callable core beneath it would teach
+the body the wrong constraint.  The straight next movement is a PIF-resident
+interpreter so compiler/walker versions and their symbols arrive as dynamic
+NodeID-addressed recipe data outside `fk_fn[]`.  After that, bind the
+already-landed cooperative turnwheel to the
 physical model loop and poll typed ingress between token/JIT steps.  The current
 framebuffer multiplexes logical channels but its controller is synchronous;
 asynchronous external writes and preemptive execution are not claimed.
