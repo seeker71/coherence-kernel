@@ -1,0 +1,126 @@
+; pif-need-set.fk — the reduced callable core, COMPUTED, never curated. The
+; admitted image already carries its call graph (pif-node-symbol-row:
+; node-id, defined-symbol-id, dependency-targets), so the answer to "which
+; of 4,579 union symbols fit a 4,096-seat table" is not a judgment call — it
+; is reachability from the roots the peer actually enters, walked over edges
+; the image itself testifies to.
+;
+; THE MEASURED JOIN THIS SERVES: resident peer 2,949 symbols + full-PIF
+; adapter union 4,579 = 483 over FK_FN_CAP (4096, runtime/fkwu-uni.c:6489).
+; A hand-curated core would be a fixed seat wearing a new name. This cell
+; computes need = reach(roots); cut = defined − need; and the fit verdict
+; against any cap, with the margin as a number.
+;
+; THREE STATES AT THE VERDICT, each load-bearing:
+;   an EMPTY root set needs zero symbols — present-0, a real (vacuous) core;
+;   a root NO ROW DEFINES is nothing — the closure cannot be promised over
+;   an undefined entry, and promising it anyway would admit an image whose
+;   first call resolves to a hole;
+;   anonymous nodes (defined-symbol-id -1) still CARRY edges: their deps are
+;   reachable through whoever reaches the node's defined ancestors — here,
+;   conservatively, an anonymous node's deps join the need-set when any of
+;   its deps' definers are… no: honesty over cleverness. Anonymous nodes'
+;   edges attach to NO symbol, so this walk cannot reach THROUGH them by
+;   symbol alone; they are counted and reported (pns-anonymous-deps) so the
+;   caller sees exactly what symbol-reachability cannot see, instead of a
+;   need-set quietly missing runtime edges.
+;
+; Cycles terminate by a visited set; duplicate definitions of one symbol
+; both stay (the walk unions their edges) — a selection between them is the
+; resolver's choice, not this cell's to hide.
+;
+; preludes: form-stdlib/core.fk form-stdlib/program-image-fkb.fk
+;
+; Proven by: form-stdlib/tests/pif-need-set-band.fk
+
+(do
+    (defn pns-member? (x xs)
+        (if (eq (len xs) 0) 0
+            (if (eq x (head xs)) 1 (pns-member? x (tail xs)))))
+
+    ; every row defining symbol s (duplicates both count)
+    (defn pns-definers (rows s out)
+        (if (eq (len rows) 0) out
+            (pns-definers (tail rows) s
+                (if (eq (pif-node-symbol-row-defined (head rows)) s)
+                    (append out (list (head rows))) out))))
+
+    (defn pns-defined? (rows s)
+        (if (eq (len rows) 0) 0
+            (if (eq (pif-node-symbol-row-defined (head rows)) s) 1
+                (pns-defined? (tail rows) s))))
+
+    ; the dependency SYMBOL ids of one row
+    (defn pns-dep-syms (row out)
+        (pns-dep-go (pif-node-symbol-row-deps row) out))
+    (defn pns-dep-go (deps out)
+        (if (eq (len deps) 0) out
+            (pns-dep-go (tail deps)
+                (append out (list (pif-symbol-dependency-target-symbol (head deps)))))))
+
+    ; union of dep symbols over every definer of s
+    (defn pns-edges (rows s)
+        (pns-edges-go (pns-definers rows s (list)) (list)))
+    (defn pns-edges-go (definers out)
+        (if (eq (len definers) 0) out
+            (pns-edges-go (tail definers) (pns-dep-syms (head definers) out))))
+
+    ; ── the walk: BFS over symbol ids, visited-guarded ─────────────────────
+    (defn pns-reach-go (rows queue seen)
+        (if (eq (len queue) 0) seen
+            (do (let s (head queue))
+                (if (eq (pns-member? s seen) 1)
+                    (pns-reach-go rows (tail queue) seen)
+                    (pns-reach-go rows
+                        (pns-enqueue (pns-edges rows s) (tail queue) seen)
+                        (append seen (list s)))))))
+    (defn pns-enqueue (es q seen)
+        (if (eq (len es) 0) q
+            (pns-enqueue (tail es)
+                (if (eq (pns-member? (head es) seen) 1) q
+                    (append q (list (head es))))
+                seen)))
+
+    ; nothing when any root is undefined — a closure over a hole is no closure
+    (defn pns-roots-defined? (rows roots)
+        (if (eq (len roots) 0) 1
+            (if (eq (pns-defined? rows (head roots)) 0) 0
+                (pns-roots-defined? rows (tail roots)))))
+    (defn pns-need (rows roots)
+        (if (eq (pns-roots-defined? rows roots) 0) (nothing)
+            (pns-reach-go rows roots (list))))
+
+    ; ── the cut: defined symbols the roots never reach ─────────────────────
+    (defn pns-defined-set (rows out)
+        (if (eq (len rows) 0) out
+            (pns-defined-set (tail rows)
+                (do (let d (pif-node-symbol-row-defined (head rows)))
+                    (if (or (lt d 0) (eq (pns-member? d out) 1)) out
+                        (append out (list d)))))))
+    (defn pns-cut (rows roots)
+        (do (let need (pns-need rows roots))
+            (if (nothing? need) (nothing)
+                (pns-cut-go (pns-defined-set rows (list)) need (list)))))
+    (defn pns-cut-go (defined need out)
+        (if (eq (len defined) 0) out
+            (pns-cut-go (tail defined) need
+                (if (eq (pns-member? (head defined) need) 1) out
+                    (append out (list (head defined)))))))
+
+    ; ── what symbol-reachability cannot see, counted not hidden ────────────
+    (defn pns-anonymous-deps (rows n)
+        (if (eq (len rows) 0) n
+            (pns-anonymous-deps (tail rows)
+                (if (and (lt (pif-node-symbol-row-defined (head rows)) 0)
+                         (gt (len (pif-node-symbol-row-deps (head rows))) 0))
+                    (add n 1) n))))
+
+    ; ── the verdict: does the computed core fit the cap? ───────────────────
+    ; (list fits margin need-count) ; nothing when the need is nothing
+    (defn pns-fit (rows roots cap)
+        (do (let need (pns-need rows roots))
+            (if (nothing? need) (nothing)
+                (list (if (le (len need) cap) 1 0)
+                      (sub cap (len need))
+                      (len need)))))
+    0)
