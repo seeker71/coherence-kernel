@@ -5625,9 +5625,9 @@ static long long fk_host_exec(long long cmdv, long long inputv) {
         /* Launch failure (fork starvation: popen NULL) answers the axiom-1 nothing,
          * never "" — "" means the command RAN and spoke zero bytes. Witnessed
          * 2026-08-27: under ulimit -u starvation ten calls answered ten empty
-         * strings rc 0 and a 10s window silently closed in 0.008s. str_len of
-         * nothing is 0, so length-guarded callers keep their old reading; only
-         * nothing? sees the difference. Go arm mirrors this shape. */
+         * strings rc 0 and a 10s window silently closed in 0.008s. Callers name
+         * the absence with nothing? before measuring — str_len of nothing dies
+         * loud (op 25), on this arm and on Go alike. */
         return fk_nothing;
     }
     static char hbuf[262144];
@@ -7350,7 +7350,19 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_strv(fk_node[i][1]);
     }
     if (t == 25) {
-        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
+        long long sv25 = fk_walk(fk_node[i][1], fp);
+        if (sv25 == fk_nothing) {
+            /* Measuring an absence must not answer a counterfeit 0 — the
+             * fk_nothing stone: no-value is never conflated with 0. A silent 0
+             * here dressed a vanished host-exec launch as "empty" (2026-08-27);
+             * silent error hides illness. This is the op-238 class of
+             * legitimate runtime death (a state the program cannot honestly
+             * continue past), not a bounds check: Go's str_len dies this same
+             * death, and callers name the absence with nothing? before
+             * measuring. */
+            fk_die("fkwu: str_len: nothing has no length -- ask nothing? before measuring");
+        }
+        long long sa = fk_stri(sv25);
         if (sa < 0 || sa >= fk_sp) {
             return 0;
         }

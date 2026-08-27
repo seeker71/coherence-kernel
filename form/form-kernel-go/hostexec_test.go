@@ -61,3 +61,17 @@ func TestHostExecLaunchFailureAnswersNothing(t *testing.T) {
 		t.Fatalf("after restore host-exec must speak again: kind=%v str=%q", v.Kind, v.Str)
 	}
 }
+
+// TestStrLenOfNothingDiesLoud — measuring an absence must not answer a
+// counterfeit 0: str_len over the null head-of-empty carries (the value a
+// starved host-exec now answers) dies loud, on this arm as on fkwu's op 25.
+// Silent error hides illness (2026-08-27).
+func TestStrLenOfNothingDiesLoud(t *testing.T) {
+	k := NewKernel()
+	defer func() {
+		if recover() == nil {
+			t.Fatalf("str_len of nothing answered instead of dying")
+		}
+	}()
+	k.natives[k.internName("str_len")].Fn(k, []Value{{Kind: VNull}})
+}
