@@ -5,9 +5,9 @@
 ;
 ; The new ingredient is an ENVIRONMENT threaded alongside (value, end-pos): a list of bindings.
 ;   var binding   = (name 0 value 0)              ; a let/param name resolves to a value
-;   defn binding  = (name 1 params body-pos)      ; a name resolves to (param-name-list, body source position)
+;   defn binding  = (name 1 params body-source)     ; body is resident data across source fragments
 ; A symbol reference looks itself up; a call binds the defn's params to the argument values in a fresh env over
-; the defn's binding (so recursion sees itself), then evaluates the body source at body-pos. State threads as
+; the defn's binding (so recursion sees itself), then evaluates the retained body source. State threads as
 ; (value, end-pos, env). Self-contained over core (head/tail only — no nth/neq; (not (eq ..)) for inequality).
 ;
 ; Four-way by tests/form-eval-full-band.fk.
@@ -48,7 +48,8 @@
 
     ; --- environment: a list of (name kind a b) bindings ---
     (defn fef-bind-var (name value env) (cons (list name 0 value 0) env))
-    (defn fef-bind-fn (name prms body-pos env) (cons (list name 1 prms body-pos) env))
+    (defn fef-bind-fn (name prms body-source env)
+        (cons (list name 1 prms body-source) env))
     (defn fef-bname (b) (head b))
     (defn fef-bkind (b) (head (tail b)))
     (defn fef-ba (b) (head (tail (tail b))))
@@ -171,12 +172,28 @@
     (defn fef-un-a (op s ar)
         (fef-res (fef-apply op (fef-v ar) 0) (fef-close s (fef-p ar)) (fef-e ar)))
 
-    ; --- if: eval cond, then both branches' source must be walked to find the close ---
+    ; --- if: evaluate only the selected arm; scan past the other arm without evaluating it ---
+    ; Selection is load-bearing for recursive resident recipes: evaluating the unchosen recursive
+    ; arm makes a base case recurse forever.  fef-skip-expr is the same scannerless cursor walk used
+    ; to retain defn bodies; it advances over nested source without resolving symbols or changing env.
+    ; The selected arm alone supplies both the value and the continuing environment.
     (defn fef-if (s pos env) (fef-if-c s (fef-expr s pos env)))
-    (defn fef-if-c (s cr) (fef-if-t s (fef-v cr) (fef-expr s (fef-p cr) (fef-e cr))))
-    (defn fef-if-t (s c tr) (fef-if-e s c (fef-v tr) (fef-expr s (fef-p tr) (fef-e tr))))
-    (defn fef-if-e (s c t er)
-        (fef-res (if (eq c 0) (fef-v er) t) (fef-close s (fef-p er)) (fef-e er)))
+    (defn fef-if-c (s cr)
+        (fef-if-select s (fef-v cr) (fef-p cr) (fef-e cr)))
+    (defn fef-if-select (s c thenpos env)
+        (if (eq c 0)
+            (fef-if-else s env (fef-skip-expr s thenpos))
+            (fef-if-then s (fef-expr s thenpos env))))
+    ; true: the selected result ends at the else source; scan that source, then close the if.
+    (defn fef-if-then (s tr)
+        (fef-res (fef-v tr)
+            (fef-close s (fef-skip-expr s (fef-p tr)))
+            (fef-e tr)))
+    ; false: then source was already scanned; evaluate else and close the if.
+    (defn fef-if-else (s env elsepos)
+        (fef-if-else-fin s (fef-expr s elsepos env)))
+    (defn fef-if-else-fin (s er)
+        (fef-res (fef-v er) (fef-close s (fef-p er)) (fef-e er)))
 
     ; --- do: evaluate each sub-expr in sequence, threading env, until the close paren ---
     (defn fef-do (s pos env) (fef-do-loop s (fef-skip s pos) env 0))
@@ -213,12 +230,18 @@
                 (fef-snoc acc (substring s (fef-skip s pos) (fef-sym-end s (fef-skip s pos)))))))
     ; append to end of list (preserve param order) — head/tail only
     (defn fef-snoc (xs x) (if (fef-null xs) (list x) (cons (head xs) (fef-snoc (tail xs) x))))
-    ; body starts at (head (tail params-result)); bind fn(name, params, body-pos); skip body to defn close
+    ; Body source is copied into the immutable binding rather than retaining a
+    ; coordinate into the current input line.  That lets the environment cross
+    ; cursor/line boundaries: later lines can call this recipe without keeping
+    ; the defining source buffer as an implicit global.
     (defn fef-defn-body (name s pr env)
         (fef-defn-fin name (head pr) (head (tail pr)) s env))
     (defn fef-defn-fin (name prms bodypos s env)
-        (fef-res 0 (fef-close s (fef-skip-expr s bodypos))
-            (fef-bind-fn name prms bodypos env)))
+        (do
+            (let bodyend (fef-skip-expr s bodypos))
+            (let body-source (substring s bodypos bodyend))
+            (fef-res 0 (fef-close s bodyend)
+                (fef-bind-fn name prms body-source env))))
     ; skip one expression's source without evaluating (to find where the defn body ends)
     (defn fef-skip-expr (s pos) (fef-skip-expr2 s (fef-skip s pos)))
     (defn fef-skip-expr2 (s pos)
@@ -236,7 +259,7 @@
     ; --- user call: (name arg1 arg2 ...) ---
     ; A call runs in two passes. Pass 1 (fef-args): walk the arg source in the CALLER env, evaluating each argument
     ; to a value, collecting (values-list, pos-after-last-arg). Pass 2 (fef-call-run): zip the defn's param names
-    ; with those values into a fresh body env, evaluate the body source, then close the call.
+    ; with those values into a fresh body env, evaluate the retained body source, then close the call.
     ; NOTE: a parameter literally named `params` makes the Go and Rust walkers register the recipe with one fewer
     ; arg (they read `params` as a rest/varargs marker) → a false arity divergence while fkwu/TS agree. Hence `prms`.
     (defn fef-call (k s pos env) (fef-call-go (fef-lookup k env) s pos env))
@@ -253,7 +276,7 @@
     ; ar-res = (reversed-values, end-pos). bind params (in source order) to values, eval body, return value + pos.
     (defn fef-call-run (b s ar-res env)
         (fef-res
-            (fef-v (fef-expr s (fef-bb b)
+            (fef-v (fef-expr (fef-bb b) 0
                 (fef-zip (fef-ba b) (fef-rev (head ar-res)) env)))
             (head (tail ar-res)) env))
     ; zip param-names (in order) with value-list (in order) onto env
@@ -265,6 +288,11 @@
     (defn fef-rev (xs) (fef-rev2 xs (fef-empty)))
     (defn fef-rev2 (xs acc) (if (fef-null xs) acc (fef-rev2 (tail xs) (cons (head xs) acc))))
 
-    ; --- top entry ---
-    (defn fef-eval (s) (fef-v (fef-expr s 0 (list (list "" 0 0 0)))))
+    ; --- top entries ---
+    ; fef-eval-state is the resident door: callers retain fef-e(result) and
+    ; feed it to the next scannerless source fragment. fef-eval preserves the
+    ; historical one-shot surface for every existing caller and proof band.
+    (defn fef-empty-env () (list (list "" 0 0 0)))
+    (defn fef-eval-state (s env) (fef-expr s 0 env))
+    (defn fef-eval (s) (fef-v (fef-eval-state s (fef-empty-env))))
 )

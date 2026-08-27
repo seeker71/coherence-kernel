@@ -1,0 +1,502 @@
+; form-cli-resident-turnwheel.fk -- one local Qwen residence, many isolated
+; streams, and an op-tag program-image recipe door on every pinned epoch.
+;
+; A route is not a source function name and not a slot in fk_fn[]. It carries
+; a dynamic symbol, structural NodeID, op-tag rows and root. `jonb-request`
+; checks that identity, lowers/JITs the arriving image once, and retains it by
+; NodeID outside fixed function seats. le-swap replaces that route at a revolution
+; boundary.  A row already alive keeps its old (swap-seq, meaning-epoch) pin;
+; a later row sees the newly arrived image.  No model context is reopened.
+;
+; The shared value holds the one q38 context (pipelines, scratch, mapped tensor
+; views and weights).  Every prompt flow allocates only q38-new-state, so KV is
+; isolated per request.  Prompt cursors advance in bounded quanta and yield to
+; the wheel between quanta.  Decode commits exactly one pending token per turn.
+; This is cooperative asynchronous progress: an external live channel can add
+; rows between revolutions without rebuilding or restarting the residence.
+;
+; Outcome presence is structural. Integer 0 and integer 1 are present values,
+; never resolver absence. Resolver nothing, choice, timeout,
+; failure, cut and release remain separate status/events.
+;
+; The current source compiler still gives this startup adapter a legacy symbol
+; closure. Newly received image symbols do not enlarge it: jonb walks them as
+; data.  Closure measurements therefore expose the old membrane; they are not
+; a design budget and never justify a static route table.
+;
+; preludes: form-stdlib/form-cli-model-session.fk
+; preludes: form-stdlib/peer-epoch-lease.fk
+; preludes: form-stdlib/jit-once-born.fk
+; Proven by: form-stdlib/tests/form-cli-resident-turnwheel-band.fk
+
+(do
+    ; Every field can arrive as data after startup. The symbol is descriptive;
+    ; invocation authority is the verified structural NodeID.
+    (defn fcrt-route (symbol identity program root)
+        (list "form-cli-resident-program-route-v1" symbol identity program root))
+    (defn fcrt-route? (r)
+        (if (eq (len r) 5)
+            (str_eq (nth r 0) "form-cli-resident-program-route-v1") 0))
+    (defn fcrt-route-symbol (r) (nth r 1))
+    (defn fcrt-route-identity (r) (nth r 2))
+    (defn fcrt-route-program (r) (nth r 3))
+    (defn fcrt-route-root (r) (nth r 4))
+    (defn fcrt-unbound-route () (fcrt-route "" (nothing) (empty) 0))
+
+    ; route result = signal, present bit, raw value, receipt, reason, shared'.
+    (defn fcrt-route-result (signal present value receipt reason shared)
+        (list "form-cli-resident-route-result-v1" signal present value receipt reason shared))
+    (defn fcrt-route-signal (r) (nth r 1))
+    (defn fcrt-route-present? (r) (nth r 2))
+    (defn fcrt-route-value (r) (nth r 3))
+    (defn fcrt-route-receipt (r) (nth r 4))
+    (defn fcrt-route-reason (r) (nth r 5))
+    (defn fcrt-route-shared (r) (nth r 6))
+
+    (defn fcrt-route-invoke (route shared value)
+        (if (not (fcrt-route? route))
+            (fcrt-route-result "nothing" 0 (nothing) (nothing)
+                "dynamic-program-route-absent" shared)
+        (if (nothing? (fcrt-route-identity route))
+            (fcrt-route-result "nothing" 0 (nothing) (nothing)
+                "dynamic-program-route-unbound" shared)
+            (do
+                (let registry (fcrt-shared-registry shared))
+                (let expected (jonb-identity (fcrt-route-program route)
+                    (fcrt-route-root route) (jonb-epoch registry)))
+                (if (not (node_eq expected (fcrt-route-identity route)))
+                    (fcrt-route-result "refused" 0 (nothing)
+                        (list (fcrt-route-symbol route) expected)
+                        "dynamic-program-nodeid-mismatch" shared)
+                    (do
+                        (let moved (jonb-request registry
+                            (fcrt-route-program route) (fcrt-route-root route) value))
+                        (let shared2 (fcrt-shared-with-registry shared (nth moved 2)))
+                        (let receipt (list (fcrt-route-symbol route)
+                            (fcrt-route-identity route) (nth moved 1) (nth moved 3)))
+                        (if (nothing? (nth moved 0))
+                            (fcrt-route-result "refused" 0 (nothing) receipt
+                                "dynamic-program-op-refused" shared2)
+                            (fcrt-route-result "returned" 1 (nth moved 0) receipt
+                                "dynamic-program-nodeid-invoked" shared2))))))))
+
+    ; One physical residence. `x` is the already loaded tokenizer crystal;
+    ; ctx is shared, while no stream state appears here.
+    (defn fcrt-shared (path src ctx x maxpos prefill-quanta registry)
+        (list "form-cli-resident-shared-v1" path src ctx x maxpos prefill-quanta registry))
+    (defn fcrt-shared-path (s) (nth s 1))
+    (defn fcrt-shared-src (s) (nth s 2))
+    (defn fcrt-shared-ctx (s) (nth s 3))
+    (defn fcrt-shared-x (s) (nth s 4))
+    (defn fcrt-shared-maxpos (s) (nth s 5))
+    (defn fcrt-shared-prefill-quanta (s) (nth s 6))
+    (defn fcrt-shared-registry (s) (nth s 7))
+    (defn fcrt-shared-with-registry (s registry)
+        (fcrt-shared (fcrt-shared-path s) (fcrt-shared-src s)
+            (fcrt-shared-ctx s) (fcrt-shared-x s) (fcrt-shared-maxpos s)
+            (fcrt-shared-prefill-quanta s) registry))
+
+    ; flow phases: program, prefill, model, prefill-error, program-returned.
+    (defn fcrt-flow (phase payload receipt)
+        (list "form-cli-resident-flow-v1" phase payload receipt))
+    (defn fcrt-flow-phase (f) (nth f 1))
+    (defn fcrt-flow-payload (f) (nth f 2))
+    (defn fcrt-flow-receipt (f) (nth f 3))
+    (defn fcrt-program-flow (arg)
+        (fcrt-flow "program" arg (nothing)))
+    (defn fcrt-model-flow (session receipt)
+        (fcrt-flow "model" session receipt))
+
+    ; prefill payload = sts cursor held pos prompt-count reason
+    (defn fcrt-prefill-payload (sts cursor held pos count reason)
+        (list sts cursor held pos count reason))
+    (defn fcrt-pf-sts (p) (nth p 0))
+    (defn fcrt-pf-cursor (p) (nth p 1))
+    (defn fcrt-pf-held (p) (nth p 2))
+    (defn fcrt-pf-pos (p) (nth p 3))
+    (defn fcrt-pf-count (p) (nth p 4))
+    (defn fcrt-pf-reason (p) (nth p 5))
+
+    ; host result keeps the living host even when the requested act is nothing.
+    (defn fcrt-act (signal host value reason)
+        (list "form-cli-resident-act-v1" signal host value reason))
+    (defn fcrt-act-signal (a) (nth a 1))
+    (defn fcrt-act-host (a) (nth a 2))
+    (defn fcrt-act-value (a) (nth a 3))
+    (defn fcrt-act-reason (a) (nth a 4))
+
+    ; host wraps the leased wheel and an append-only event stream.
+    (defn fcrt-host (lw events)
+        (list "form-cli-resident-turnwheel-v1" lw events))
+    (defn fcrt-lw (h) (nth h 1))
+    (defn fcrt-events (h) (nth h 2))
+    (defn fcrt-event (kind id detail)
+        (list kind id detail))
+    (defn fcrt-with (h lw event)
+        (fcrt-host lw (append (fcrt-events h) (list event))))
+
+    ; Construct around an already admitted context. This pure seam is also how
+    ; a resident process can receive its first route after startup.
+    (defn fcrt-host-from-shared (shared seq meaning route)
+        (do
+            (let eid (le-eid seq meaning))
+            (let base (le-wheel eid route))
+            (fcrt-host
+                (list (wt-wheel (empty) shared) (le-tbl base)
+                      (le-cur base) (le-ledger base))
+                (list (fcrt-event "residence" 0 eid)))))
+
+    ; An independently timed carrier waits for this correlated projection
+    ; before delivering an image. Inspection changes neither wheel nor gas.
+    (defn fcrt-ready (host exchange)
+        (list "form-cli-resident-ready-v1" exchange
+            (le-cur (fcrt-lw host))
+            (wt-live-count (wt-rows (le-w (fcrt-lw host))) 0)
+            (len (fcrt-events host))))
+
+    ; Adopt a live fcms seed without reopening its q38 context. qsx-load reads
+    ; tokenizer data once for future scannerless prompt cursors; weights stay in
+    ; the seed's existing ctx. The seed itself becomes one isolated model row.
+    (defn fcrt-adopt (seed seq meaning route prefill-quanta id budget releaser)
+        (if (or (not (eq (fcms-live? seed) 1)) (le budget 0)) (nothing)
+            (do
+                (let shared (fcrt-shared (fcms-path seed) (fcms-src seed)
+                    (fcms-ctx seed) (qsx-load (fcms-path seed))
+                    (fcms-maxpos seed) prefill-quanta (jonb-registry meaning)))
+                (let host (fcrt-host-from-shared shared seq meaning route))
+                (fcrt-enqueue-flow host id (fcrt-model-flow seed (nothing))
+                    budget releaser))))
+
+    (defn fcrt-enqueue-flow (host id flow budget releaser)
+        (do
+            (let next (le-enqueue (fcrt-lw host) id flow budget releaser))
+            (if (nothing? next)
+                (fcrt-act "nothing" host (nothing) "nonpositive-gas-refused")
+                (fcrt-act "value"
+                    (fcrt-with host next
+                        (fcrt-event "enqueue" id (le-cur next)))
+                    id "row-pinned-at-enqueue"))))
+
+    (defn fcrt-accept-program (host id arg budget releaser)
+        (fcrt-enqueue-flow host id (fcrt-program-flow arg) budget releaser))
+
+    ; Open a scannerless prompt cursor and allocate only this branch's KV.
+    ; The actual prefill happens later in bounded wheel turns.
+    (defn fcrt-accept-prompt (host id prompt budget releaser)
+        (if (le budget 0)
+            (fcrt-act "nothing" host (nothing) "nonpositive-gas-refused")
+            (do
+                (let shared (wt-sctx (le-w (fcrt-lw host))))
+                (let sts (q38-new-state (nth (fcrt-shared-ctx shared) 2)))
+                (if (not (eq (q38-state-ok? sts) 1))
+                    (fcrt-act "failure" host (nothing)
+                        "isolated-kv-state-allocation-refused")
+                    (do
+                        (let cursor (fcmg-chat-cursor-profile
+                            (fcrt-shared-path shared) prompt "full"
+                            (fcrt-shared-x shared)))
+                        (let one (qtlc-next cursor))
+                        (if (not (eq (qtlc-next-present? one) 1))
+                            (do
+                                (let released (q38-free-state sts))
+                                (fcrt-act "nothing" host released
+                                    (qtlc-reason (qtlc-next-cursor one))))
+                            (fcrt-enqueue-flow host id
+                                (fcrt-flow "prefill"
+                                    (fcrt-prefill-payload sts
+                                        (qtlc-next-cursor one)
+                                        (qtlc-next-value one) 0 1 "open")
+                                    (nothing))
+                                budget releaser)))))))
+
+    ; step outcome: signal/presence/value/flow/shared/receipt/reason.
+    (defn fcrt-step-out (signal present value flow shared receipt reason)
+        (list "form-cli-resident-step-v1" signal present value flow
+              shared receipt reason))
+    (defn fcrt-so-signal (o) (nth o 1))
+    (defn fcrt-so-present? (o) (nth o 2))
+    (defn fcrt-so-value (o) (nth o 3))
+    (defn fcrt-so-flow (o) (nth o 4))
+    (defn fcrt-so-shared (o) (nth o 5))
+    (defn fcrt-so-receipt (o) (nth o 6))
+    (defn fcrt-so-reason (o) (nth o 7))
+
+    (defn fcrt-program-step (route shared flow)
+        (do
+            (let invoked (fcrt-route-invoke route shared (fcrt-flow-payload flow)))
+            (if (str_eq (fcrt-route-signal invoked) "returned")
+                (fcrt-step-out "returned" (fcrt-route-present? invoked)
+                    (fcrt-route-value invoked)
+                    (fcrt-flow "program-returned" (fcrt-route-value invoked)
+                        (fcrt-route-receipt invoked))
+                    (fcrt-route-shared invoked) (fcrt-route-receipt invoked)
+                    (fcrt-route-reason invoked))
+                (fcrt-step-out (fcrt-route-signal invoked) 0 (nothing)
+                    flow (fcrt-route-shared invoked) (fcrt-route-receipt invoked)
+                    (fcrt-route-reason invoked)))))
+
+    ; One bounded prompt quantum. A Metal batch is opened and settled inside
+    ; this turn; the next row can then progress. No recursive call spans more
+    ; than `left` prompt positions.
+    (defn fcrt-prefill-go (shared payload left)
+        (if (le left 0)
+            (do
+                (metal_sync)
+                (fcrt-flow "prefill" payload (nothing)))
+            (do
+                (let one (qtlc-next (fcrt-pf-cursor payload)))
+                (if (eq (qtlc-next-present? one) 1)
+                    (if (ge (fcrt-pf-pos payload) (fcrt-shared-maxpos shared))
+                        (do
+                            (metal_sync)
+                            (fcrt-flow "prefill-error"
+                                (fcrt-prefill-payload (fcrt-pf-sts payload)
+                                    (qtlc-next-cursor one) (fcrt-pf-held payload)
+                                    (fcrt-pf-pos payload) (fcrt-pf-count payload)
+                                    "prompt-context-window-refused")
+                                (nothing)))
+                        (do
+                            (let ctx (fcrt-shared-ctx shared))
+                            (q38-forward-state-after
+                                (nth ctx 0) (nth ctx 1) (nth ctx 2)
+                                (nth ctx 3) (fcrt-pf-sts payload) (nth ctx 4)
+                                (fcrt-pf-held payload) (fcrt-pf-pos payload) 1)
+                            (fcrt-prefill-go shared
+                                (fcrt-prefill-payload (fcrt-pf-sts payload)
+                                    (qtlc-next-cursor one) (qtlc-next-value one)
+                                    (add (fcrt-pf-pos payload) 1)
+                                    (add (fcrt-pf-count payload) 1) "open")
+                                (sub left 1))))
+                    (if (str_eq (qtlc-next-status one) "done")
+                        (if (ge (fcrt-pf-pos payload)
+                                (fcrt-shared-maxpos shared))
+                            (do
+                                (metal_sync)
+                                (fcrt-flow "prefill-error"
+                                    (fcrt-prefill-payload (fcrt-pf-sts payload)
+                                        (qtlc-next-cursor one) (fcrt-pf-held payload)
+                                        (fcrt-pf-pos payload) (fcrt-pf-count payload)
+                                        "prompt-context-window-refused")
+                                    (nothing)))
+                            (do
+                                (let ctx (fcrt-shared-ctx shared))
+                                (q38-forward-state-after
+                                    (nth ctx 0) (nth ctx 1) (nth ctx 2)
+                                    (nth ctx 3) (fcrt-pf-sts payload) (nth ctx 4)
+                                    (fcrt-pf-held payload) (fcrt-pf-pos payload) 1)
+                                (metal_sync)
+                                (let first (q38-head-only
+                                    (nth ctx 0) (nth ctx 1) (nth ctx 2)
+                                    (nth ctx 5) (nth ctx 6)))
+                                (let pos (add (fcrt-pf-pos payload) 1))
+                                (fcrt-model-flow
+                                    (fcms-session "live" "prefill-complete"
+                                        (fcrt-shared-path shared)
+                                        (fcrt-shared-src shared) ctx
+                                        (fcrt-pf-sts payload)
+                                        (fcrt-shared-maxpos shared) pos first 0
+                                        (fcrt-pf-count payload) 0 0 0)
+                                    (nothing))))
+                        (do
+                            (metal_sync)
+                            (fcrt-flow "prefill-error"
+                                (fcrt-prefill-payload (fcrt-pf-sts payload)
+                                    (qtlc-next-cursor one) (fcrt-pf-held payload)
+                                    (fcrt-pf-pos payload) (fcrt-pf-count payload)
+                                    (qtlc-reason (qtlc-next-cursor one)))
+                                (nothing))))))))
+
+    (defn fcrt-prefill-step (shared flow)
+        (do
+            (metal_batch_concurrent)
+            (let moved (fcrt-prefill-go shared (fcrt-flow-payload flow)
+                (fcrt-shared-prefill-quanta shared)))
+            (if (str_eq (fcrt-flow-phase moved) "prefill-error")
+                (fcrt-step-out "failure" 0 (nothing) moved shared (nothing)
+                    (fcrt-pf-reason (fcrt-flow-payload moved)))
+                (fcrt-step-out "yield" 0 (nothing) moved shared (nothing)
+                    (if (str_eq (fcrt-flow-phase moved) "model")
+                        "prefill-complete" "prefill-quantum-complete")))))
+
+    ; A dynamic program-image route is invoked before every model token. Its returned
+    ; value is retained in the flow receipt; terminal route signals steer the
+    ; row. A returned value does not silently rewrite token identity.
+    (defn fcrt-model-step (route shared flow)
+        (do
+            (let session (fcrt-flow-payload flow))
+            (let pending (fcms-pending session))
+            (let invoked (fcrt-route-invoke route shared pending))
+            (if (not (str_eq (fcrt-route-signal invoked) "returned"))
+                (fcrt-step-out (fcrt-route-signal invoked) 0 (nothing)
+                    flow (fcrt-route-shared invoked) (fcrt-route-receipt invoked)
+                    (fcrt-route-reason invoked))
+            (if (lt pending 0)
+                (fcrt-step-out "failure" 0 (nothing) flow (fcrt-route-shared invoked)
+                    (fcrt-route-receipt invoked) "model-pending-id-negative")
+                (do
+                    (let stops (fcmg-q35-stops (fcms-src session)))
+                    (if (eq (q38-stop? pending stops) 1)
+                        (fcrt-step-out "done" 0 (nothing) flow (fcrt-route-shared invoked)
+                            (fcrt-route-receipt invoked) "model-stop-token")
+                        (do
+                            (let ctx (fcrt-shared-ctx (fcrt-route-shared invoked)))
+                            (let next (q38-forward
+                                (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
+                                (fcms-sts session) (nth ctx 4) (nth ctx 5)
+                                (nth ctx 6) pending (fcms-pos session)))
+                            (let session2 (fcms-with-stream session
+                                (add (fcms-pos session) 1) next
+                                (if (lt next 0) 1 0)
+                                (add (fcms-generated-ids session) 1)
+                                (fcms-injected-ids session)
+                                (fcms-observations session)))
+                            (fcrt-step-out "value" 1 pending
+                                (fcrt-model-flow session2
+                                    (fcrt-route-receipt invoked))
+                                (fcrt-route-shared invoked) (fcrt-route-receipt invoked)
+                                "model-token-committed"))))))))
+
+    (defn fcrt-step (route shared flow)
+        (if (str_eq (fcrt-flow-phase flow) "program")
+            (fcrt-program-step route shared flow)
+        (if (str_eq (fcrt-flow-phase flow) "prefill")
+            (fcrt-prefill-step shared flow)
+        (if (str_eq (fcrt-flow-phase flow) "model")
+            (fcrt-model-step route shared flow)
+            (fcrt-step-out "failure" 0 (nothing) flow shared
+                (fcrt-flow-receipt flow) "flow-phase-not-runnable")))))
+
+    (defn fcrt-row-with (row flow budget values status)
+        (append (wt-with row flow budget values status)
+                (list (le-pin-of row))))
+    (defn fcrt-terminal? (signal)
+        (if (str_eq signal "returned") 1
+        (if (str_eq signal "done") 1
+        (if (str_eq signal "nothing") 1
+        (if (str_eq signal "choice") 1
+        (if (str_eq signal "timeout") 1
+        (if (str_eq signal "failure") 1
+        (if (str_eq signal "refused") 1 0))))))))
+
+    ; Custom revolution preserves returned-with-present-nothing and yield.
+    ; le-revolve's token-only ABI cannot state either one, so this joins the
+    ; same row/table/pin contract without collapsing their meaning.
+    (defn fcrt-step-row (table shared row)
+        (if (eq (wt-live? row) 0) (list row shared table 0)
+        (if (le (wt-budget row) 0)
+            (list (fcrt-row-with row (wt-rstate row) 0 (wt-toks row)
+                    "timeout") shared (le-bump table (le-pin-of row) -1) 1)
+            (do
+                (let route (le-recipes table (le-pin-of row)))
+                (if (nothing? route)
+                    (list (fcrt-row-with row (wt-rstate row) (wt-budget row)
+                            (wt-toks row) "dissolved-ground")
+                        shared table 1)
+                    (do
+                        (let moved (fcrt-step route shared (wt-rstate row)))
+                        (let signal (fcrt-so-signal moved))
+                        (let values (if (eq (fcrt-so-present? moved) 1)
+                            (append (wt-toks row) (list (fcrt-so-value moved)))
+                            (wt-toks row)))
+                        (let gas (sub (wt-budget row) 1))
+                        (if (eq (fcrt-terminal? signal) 1)
+                            (list (fcrt-row-with row (fcrt-so-flow moved) gas
+                                    values signal)
+                                (fcrt-so-shared moved)
+                                (le-bump table (le-pin-of row) -1) 1)
+                            (list (fcrt-row-with row (fcrt-so-flow moved) gas
+                                    values "live")
+                                (fcrt-so-shared moved) table 0))))))))
+
+    (defn fcrt-rev-go (table rows shared out closed)
+        (if (eq (len rows) 0) (list (reverse out) shared table closed)
+            (do
+                (let one (fcrt-step-row table shared (head rows)))
+                (fcrt-rev-go (nth one 2) (tail rows) (nth one 1)
+                    (cons (nth one 0) out) (add closed (nth one 3))))))
+
+    (defn fcrt-revolve (host)
+        (do
+            (let lw (fcrt-lw host))
+            (let moved (fcrt-rev-go (le-tbl lw) (wt-rows (le-w lw))
+                (wt-sctx (le-w lw)) (empty) 0))
+            (let swept (le-sweep (nth moved 2) (le-cur lw) (empty) 0))
+            (let lw2 (list (wt-wheel (nth moved 0) (nth moved 1))
+                (nth swept 0) (le-cur lw)
+                (if (gt (nth swept 1) 0)
+                    (append (le-ledger lw)
+                        (list (list "dissolved" (nth swept 1))))
+                    (le-ledger lw))))
+            (fcrt-with host lw2
+                (fcrt-event "revolution" (nth moved 3) (nth swept 1)))))
+
+    (defn fcrt-run (host revolutions)
+        (if (le revolutions 0) host
+            (if (eq (wt-live-count (wt-rows (le-w (fcrt-lw host))) 0) 0) host
+                (fcrt-run (fcrt-revolve host) (sub revolutions 1)))))
+
+    (defn fcrt-swap (host seq meaning route)
+        (do
+            (let next (le-swap (fcrt-lw host) seq meaning route))
+            (if (nothing? next)
+                (fcrt-act "nothing" host (nothing) "epoch-pair-already-present")
+                (fcrt-act "value"
+                    (fcrt-with host next
+                        (fcrt-event "swap" seq (le-eid seq meaning)))
+                    (le-eid seq meaning) "dynamic-program-route-published"))))
+
+    ; Publish is the correlated arrival door. It validates the supplied NodeID
+    ; against the arriving rows before moving the current epoch, so a malformed
+    ; file-poll offer cannot become the route merely because it arrived later.
+    (defn fcrt-publish (host seq meaning route exchange)
+        (if (not (fcrt-route? route))
+            (fcrt-act "refused" host (nothing) "dynamic-program-route-malformed")
+            (do
+                (let shared (wt-sctx (le-w (fcrt-lw host))))
+                (let expected (jonb-identity (fcrt-route-program route)
+                    (fcrt-route-root route)
+                    (jonb-epoch (fcrt-shared-registry shared))))
+                (if (or (nothing? (fcrt-route-identity route))
+                        (not (node_eq expected (fcrt-route-identity route))))
+                    (fcrt-act "refused" host (nothing)
+                        "dynamic-program-nodeid-mismatch")
+                    (do
+                        (let moved (fcrt-swap host seq meaning route))
+                        (if (not (str_eq (fcrt-act-signal moved) "value")) moved
+                            (fcrt-act "value"
+                                (fcrt-with (fcrt-act-host moved) (fcrt-lw
+                                        (fcrt-act-host moved))
+                                    (fcrt-event "publish" exchange
+                                        (fcrt-route-identity route)))
+                                (fcrt-act-value moved)
+                                "correlated-dynamic-program-published")))))))
+
+    ; Cut returns both the caller-owned releaser and the flow whose KV state is
+    ; now eligible for explicit release. Nothing is freed behind the caller.
+    (defn fcrt-cut (host id)
+        (do
+            (let before (wt-find (wt-rows (le-w (fcrt-lw host))) id))
+            (let cut (le-cut (fcrt-lw host) id))
+            (list (fcrt-with host (nth cut 0)
+                    (fcrt-event "cut" id (if (nothing? before) 0 1)))
+                  (nth cut 1)
+                  (if (nothing? before) (nothing) (wt-rstate before)))))
+
+    (defn fcrt-undo-of (host id)
+        (le-replay-of (fcrt-lw host) id))
+
+    (defn fcrt-flow-sts (flow)
+        (if (str_eq (fcrt-flow-phase flow) "model")
+            (fcms-sts (fcrt-flow-payload flow))
+        (if (or (str_eq (fcrt-flow-phase flow) "prefill")
+                (str_eq (fcrt-flow-phase flow) "prefill-error"))
+            (fcrt-pf-sts (fcrt-flow-payload flow))
+            (nothing))))
+    (defn fcrt-release-flow (flow)
+        (do
+            (let sts (fcrt-flow-sts flow))
+            (if (nothing? sts) 0 (q38-free-state sts))))
+    (defn fcrt-close-shared (host)
+        (q38-close (fcrt-shared-ctx
+            (wt-sctx (le-w (fcrt-lw host)))) (empty)))
+    0)
