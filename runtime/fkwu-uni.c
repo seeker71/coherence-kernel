@@ -3203,6 +3203,7 @@ static long long fk_inram_cursor = 0;
  * matching rather than requiring a sweep over the node table. */
 static unsigned char fk_inram_node_slot[FK_NODE_CAP];
 static unsigned int fk_inram_node_generation[FK_NODE_CAP];
+static unsigned char fk_inram_node_released[FK_NODE_CAP];
 static long long fk_inram_last_slot = -1;
 
 static long long fk_inram_bytes(long long image, unsigned char *out, long long cap) {
@@ -3293,13 +3294,21 @@ static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
 
 /* The existing two-argument door also accepts a Form-native resident request:
  *
- *   [0, structural-nodeid, image]  birth if absent, then invoke
+ *   [0, structural-nodeid, image]  birth if unseen, then invoke
  *   [1, structural-nodeid, []]     dissolve, answering 1/0/nothing
  *
  * A raw byte list keeps the legacy behavior above.  This avoids minting three
  * new fixed op-table seats just to express lifecycle around the same carrier.
  * Birth is the cold trust membrane and may walk bytes.  Invocation reaches the
  * executable page by the interned NodeID's stable value-node index in O(1).
+ * That index is SESSION-EPHEMERAL: persistence carries program/meaning data and
+ * interns it again after restart; it never stores this process-local index.
+ *
+ * A byte image cannot be mistaken for this envelope even when its first byte
+ * is 0 or 1: field two is required to be a negative interned node, while every
+ * admitted raw image field is a nonnegative byte. Release tombstones the index
+ * for this session. The same dead meaning cannot silently rebirth; a changed
+ * meaning earns a changed NodeID at the Form membrane.
  */
 static int fk_inram_resident_request(long long request, long long *action,
                                       long long *identity, long long *image) {
@@ -3342,6 +3351,9 @@ static long long fk_jit_leaf_inram_resident(long long action, long long identity
     encoded_slot = fk_inram_node_slot[ix];
     if (action == 1) {
         if (encoded_slot == 0) {
+            if (fk_inram_node_released[ix]) {
+                return 0;
+            }
             return 0;
         }
         e = &fk_inram_cache[encoded_slot - 1];
@@ -3350,6 +3362,7 @@ static long long fk_jit_leaf_inram_resident(long long action, long long identity
             return 0;
         }
         fk_inram_node_slot[ix] = 0;
+        fk_inram_node_released[ix] = 1;
         if (e->residents > 0) {
             e->residents = e->residents - 1;
         }
@@ -3367,6 +3380,9 @@ static long long fk_jit_leaf_inram_resident(long long action, long long identity
         return 2;
     }
     if (action != 0 || (arg_value & 1) != 0) {
+        return fk_nothing;
+    }
+    if (fk_inram_node_released[ix]) {
         return fk_nothing;
     }
     if (encoded_slot != 0) {
