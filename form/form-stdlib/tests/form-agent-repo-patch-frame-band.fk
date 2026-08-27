@@ -1,0 +1,117 @@
+; form-agent-repo-patch-frame-band.fk — exact scannerless proposal framing,
+; preimage-before-effect journal, observed apply, timeout, refusal and undo.
+; PROOF LEVEL: FOURTH-ARM ONLY (filesystem effects + higher-order callbacks)
+; Expected: 4194303
+; preludes: form-stdlib/core.fk form-stdlib/form-fs.fk form-stdlib/line-grammar.fk
+; preludes: form-stdlib/native-edit.fk form-stdlib/hex.fk
+; preludes: form-stdlib/form-agent-repo-contribution.fk
+; preludes: form-stdlib/form-agent-repo-patch-frame.fk
+
+(do
+    (defn farpb-bit (ok bit) (if ok bit 0))
+    (defn farpb-root ()
+        (fs-path-join (fs-temp-dir) "form-agent-repo-patch-frame-band"))
+    (defn farpb-journal () (fs-path-join (farpb-root) "patch.journal"))
+    (defn farpb-route ()
+        (intern_node (intern_trivial_string "form-agent-patch-test-route")
+            (list (intern_trivial_string "focused-band"))))
+    (defn farpb-cap () (farc-capability (farpb-root) "form/" 4096 (farpb-route)))
+    (defn farpb-path () "form/live.fk")
+    (defn farpb-full () (fs-path-join (farpb-root) (farpb-path)))
+    (defn farpb-v1 () "(do (defn pulse () 1) (pulse))\n")
+    (defn farpb-v2 () "(do (defn pulse () 2) (pulse))\n")
+    (defn farpb-v3 () "(do (defn pulse () 3) (pulse))\n")
+    (defn farpb-verify (ctx route candidate)
+        (if (and (farp-coordinate-eq? route (farpb-route))
+                 (ge (str_find candidate "(pulse)" 0) 0))
+            (farc-test-result "value" "candidate-structure" 1 1)
+            (farc-test-result "failure" "candidate-structure" 1 0)))
+    (defn farpb-test-v2 (ctx route path)
+        (if (str_eq (fs-read-text path) (farpb-v2))
+            (farc-test-result "value" "focused-band" 1 1)
+            (farc-test-result "failure" "focused-band" 1 0)))
+    (defn farpb-test-v3 (ctx route path)
+        (if (str_eq (fs-read-text path) (farpb-v3))
+            (farc-test-result "value" "focused-band-v3" 1 1)
+            (farc-test-result "failure" "focused-band-v3" 1 0)))
+    (defn farpb-fail (ctx route path)
+        (farc-test-result "failure" "negative-control" 1 0))
+
+    (defn form-agent-repo-patch-frame-band ()
+        (do
+            (fs-remove-tree (farpb-root))
+            (fs-mkdir (farpb-root))
+            (fs-mkdir (fs-path-join (farpb-root) "form"))
+            (fs-write-text (farpb-full) (farpb-v1))
+            (let cap (farpb-cap))
+            (let grant (farc-capability-token cap))
+            (let frame (farp-frame cap (farpb-path) (farpb-v1) (farpb-v2)))
+            (let parsed (farp-parse cap grant frame))
+            (let found-frame (farp-find-frame cap
+                (str_concat "offer:\n" (str_concat frame "\nend"))))
+            (let malformed (farp-parse cap grant (str_concat frame "x")))
+            (let denied (farp-parse cap (intern_trivial_string "not-granted") frame))
+            (let timed (farp-execute (farp-context cap grant farpb-verify
+                farpb-test-v2 0 (farpb-journal) 11 10) frame))
+            (let applied (farp-execute (farp-context cap grant farpb-verify
+                farpb-test-v2 0 (farpb-journal) 10 11) frame))
+            (let journal-after-apply (fs-read-text (farpb-journal)))
+            (let v3-frame (farp-frame cap (farpb-path) (farpb-v2) (farpb-v3)))
+            (let undone (farp-execute (farp-context cap grant farpb-verify
+                farpb-fail 0 (farpb-journal) 10 11) v3-frame))
+            (let source-after-undo (fs-read-text (farpb-full)))
+            (let journal-final (fs-read-text (farpb-journal)))
+            (let observation (farp-render-result applied))
+            ; The same protocol crosses arbitrary decoded-byte boundaries and
+            ; injects its observation on completion, before another model ID.
+            (let cursor-ctx (farp-context cap grant farpb-verify farpb-test-v3
+                0 (farpb-journal) (now_unix_ms) (add (now_unix_ms) 100000)))
+            (let cut 24)
+            (let ct1 (farp-cursor-feed cursor-ctx (farp-cursor-fresh)
+                (substring v3-frame 0 cut)))
+            (let timed-cursor (farp-cursor-timeout (nth ct1 0)))
+            (let ct2 (farp-cursor-feed cursor-ctx (nth ct1 0)
+                (substring v3-frame cut (str_len v3-frame))))
+            (let live-cursor (nth ct2 0))
+            (let score (sum (list
+                (farpb-bit (eq (farp-request-ready? parsed) 1) 1)
+                (farpb-bit (node_eq (farp-request-proposal parsed)
+                    (farc-proposal cap (farpb-path) (farpb-v1) (farpb-v2))) 2)
+                (farpb-bit (str_eq (farp-request-reason malformed)
+                    "held-or-trailing") 4)
+                (farpb-bit (str_eq (farp-request-reason denied)
+                    "capability-not-granted") 8)
+                (farpb-bit (str_eq (farp-status timed) "timeout") 16)
+                (farpb-bit (eq (farp-journaled? timed) 0) 32)
+                (farpb-bit (str_eq (farp-status applied) "value") 64)
+                (farpb-bit (eq (farp-contribution applied) 1) 128)
+                (farpb-bit (eq (farp-journaled? applied) 1) 256)
+                (farpb-bit (str_eq source-after-undo (farpb-v2)) 512)
+                (farpb-bit (ge (str_find journal-after-apply "phase=intent" 0) 0) 1024)
+                (farpb-bit (ge (str_find journal-after-apply "phase=terminal" 0) 0) 2048)
+                (farpb-bit (ge (str_find journal-after-apply
+                    (str_concat "preimage-hex=" (farp-string-hex (farpb-v1))) 0) 0) 4096)
+                (farpb-bit (str_eq (farp-status undone) "failure") 8192)
+                (farpb-bit (str_eq (farp-reason undone)
+                    "posttest-failed-restored") 16384)
+                (farpb-bit (and (str_eq source-after-undo (farpb-v2))
+                    (gt (str_len journal-final) (str_len journal-after-apply))) 32768)
+                (farpb-bit (str_eq found-frame frame) 65536)
+                (farpb-bit (and (ge (str_find observation
+                    "\nstatus=value" 0) 0)
+                    (and (ge (str_find observation "\njournaled=1" 0) 0)
+                         (lt (str_find observation (farpb-v1) 0) 0))) 131072)
+                (farpb-bit (str_eq (farp-cursor-scan (nth ct1 0)) "held") 262144)
+                (farpb-bit (and (eq (farp-cursor-callbacks live-cursor) 1)
+                    (and (eq (farp-cursor-injections live-cursor) 1)
+                         (gt (str_len (nth ct2 2)) 0))) 524288)
+                (farpb-bit (and (str_eq (farp-status
+                        (farp-cursor-result live-cursor)) "value")
+                    (str_eq (fs-read-text (farpb-full)) (farpb-v3))) 1048576)
+                (farpb-bit (and (str_eq (farp-status
+                        (farp-cursor-result timed-cursor)) "timeout")
+                    (and (eq (farp-cursor-callbacks timed-cursor) 0)
+                         (eq (farp-cursor-injections timed-cursor) 1))) 2097152))))
+            (fs-remove-tree (farpb-root))
+            score))
+    (form-agent-repo-patch-frame-band))
