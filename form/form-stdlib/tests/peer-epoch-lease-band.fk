@@ -1,0 +1,108 @@
+; peer-epoch-lease-band.fk — hot-swap under live rows, every adversary
+; finding driven as a bit. Steppers are synthetic; recipes are values the
+; stepper reads, so a swap's effect is decidable from tokens alone.
+;
+; Verdict 8191 (13 bits):
+;   1     a row enqueued under E1 emits E1's recipe value; after a swap to
+;         E2 the SAME row still emits E1's — the pin holds mid-utterance
+;   2     a row enqueued after the swap emits E2's — new rows bind new
+;   4     pin is at ENQUEUE: enqueue, swap, then first step — old epoch
+;   8     budget <= 0 at enqueue is REFUSED, nothing — no unlimited pins
+;   16    retain counts are exact: two pins on E1, one on E2 (le-load)
+;   32    when E1's last row closes, E1 DISSOLVES — table shrinks and the
+;         ledger records it; the dissolution is an event, never a vanishing
+;   64    the CURRENT epoch at retain 0 survives the sweep — a fresh wheel
+;         does not dissolve its own ground
+;   128   cut releases once: cut a row, then let its (already-cut) budget
+;         path run — retain never goes negative, table never over-shrinks
+;   256   a resolver ground pulled from under a live row (table corrupted
+;         by hand) closes it "dissolved-ground" — loud, distinct, never a
+;         green fold over nothing
+;   512   replay carries the seam: (tokens pinned-epoch) — the chimera's
+;         join is data; absent id replays nothing
+;   1024  ABA: same swap-seq under a DIFFERENT meaning is a different epoch
+;         — le-eid-eq? refuses, and a swap reusing a live eid is refused
+;   2048  the swap ledger holds one row per swap, in order
+;   4096  epochs and turnwheel compose: statuses done/timeout still close
+;         exactly as the base wheel closes them (no regression underneath)
+;
+; preludes: form-stdlib/peer-epoch-lease.fk
+
+(do
+    (defn leb-bit (ok bit) (if ok bit 0))
+    ; stepper: emits the recipe value; rstate = remaining emits then stop
+    (defn leb-step (recipes sctx rstate)
+        (do (let n (nth rstate 0))
+            (if (le n 0) (list (wt-stop) rstate (add sctx 1))
+                (list recipes (list (sub n 1)) (add sctx 1)))))
+
+    (defn peer-epoch-lease-band ()
+        (do
+            (let lw0 (le-wheel (le-eid 1 777) 11))
+            (let lw1 (le-enqueue lw0 1 (list 3) 9 "rel-1"))
+            (let lw2 (le-enqueue lw1 2 (list 2) 9 "rel-2"))
+            ; swap to epoch (2,777) carrying recipe value 22
+            (let lw3 (le-swap lw2 2 777 22))
+            (let lw4 (le-enqueue lw3 3 (list 2) 9 "rel-3"))
+            (let r1 (le-revolve lw4 leb-step))
+            (let r2 (le-revolve r1 leb-step))
+            (let rowA (wt-find (wt-rows (le-w r2)) 1))
+            (let rowC (wt-find (wt-rows (le-w r2)) 3))
+
+            ; run to full closure
+            (let r3 (le-revolve (le-revolve r2 leb-step) leb-step))
+            (let r4 (le-revolve r3 leb-step))
+
+            ; dissolved-ground: corrupt the table by hand under a live row
+            (let lwg (le-enqueue (le-wheel (le-eid 5 9) 1) 7 (list 5) 9 "r"))
+            (let broken (list (le-w lwg) (list) (le-cur lwg) (le-ledger lwg)))
+            (let rg (le-revolve broken leb-step))
+
+            ; cut + release-once
+            (let lwc (le-enqueue (le-wheel (le-eid 8 1) 1) 4 (list 9) 9 "rel-4"))
+            (let cutg (le-cut lwc 4))
+            (let after (le-revolve (nth cutg 0) leb-step))
+
+            ; refusals
+            (let bad (le-enqueue lw0 9 (list 1) 0 "r"))
+            (let dup (le-swap lw3 2 777 33))
+
+            (sum (list
+                (leb-bit (and (eq (len (wt-toks rowA)) 2)
+                         (and (eq (nth (wt-toks rowA) 0) 11)
+                              (eq (nth (wt-toks rowA) 1) 11))) 1)
+                (leb-bit (eq (nth (wt-toks rowC) 0) 22) 2)
+                (leb-bit (eq (le-eid-eq? (le-pin-of rowA) (le-eid 1 777)) 1) 4)
+                (leb-bit (nothing? bad) 8)
+                (leb-bit (and (eq (le-retain-of (le-tbl lw4) (le-eid 1 777)) 2)
+                              (eq (le-retain-of (le-tbl lw4) (le-eid 2 777)) 1)) 16)
+                (leb-bit (and (eq (len (le-tbl r4)) 1)
+                              (leb-has-dissolved (le-ledger r4))) 32)
+                (leb-bit (eq (len (le-tbl (le-revolve (le-wheel (le-eid 1 1) 5) leb-step))) 1) 64)
+                (leb-bit (and (eq (le-retain-of (nth (nth cutg 0) 1) (le-eid 8 1)) 0)
+                              (eq (le-retain-of (le-tbl after) (le-eid 8 1)) 0)) 128)
+                (leb-bit (str_eq (wt-status (wt-find (wt-rows (le-w rg)) 7))
+                                 "dissolved-ground") 256)
+                (leb-bit (do (let rp (le-replay-of r2 1))
+                         (if (and (eq (len (nth rp 0)) 2)
+                              (and (eq (le-eid-eq? (nth rp 1) (le-eid 1 777)) 1)
+                                   (nothing? (le-replay-of r2 99)))) 1 0)) 512)
+                (leb-bit (and (eq (le-eid-eq? (le-eid 2 777) (le-eid 2 778)) 0)
+                              (nothing? dup)) 1024)
+                (leb-bit (do (let sw (leb-swaps (le-ledger lw4) 0))
+                         (if (eq sw 1) 1 0)) 2048)
+                (leb-bit (do (let a (wt-find (wt-rows (le-w r4)) 1))
+                         (let c (wt-find (wt-rows (le-w r4)) 3))
+                         (if (and (str_eq (wt-status a) "done")
+                                  (str_eq (wt-status c) "done")) 1 0)) 4096)))))
+
+    (defn leb-has-dissolved (led)
+        (if (eq (len led) 0) 0
+            (if (str_eq (nth (head led) 0) "dissolved") 1
+                (leb-has-dissolved (tail led)))))
+    (defn leb-swaps (led n)
+        (if (eq (len led) 0) n
+            (leb-swaps (tail led)
+                (add n (if (str_eq (nth (head led) 0) "swap") 1 0)))))
+
+    (peer-epoch-lease-band))
