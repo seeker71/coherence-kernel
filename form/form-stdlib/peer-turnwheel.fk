@@ -1,0 +1,117 @@
+; peer-turnwheel.fk — many requests, one admitted residence: a cooperative
+; token-step scheduler in pure Form. Weights are shared because the residence
+; already shares them; KV branches are isolated because q38-new-state already
+; hands each conversation its own buffer-handle value. What was missing was
+; only the wheel.
+;
+; THE SHAPE, grounded in the cells it composes with:
+;   fcmg's residence header: "the stream state is NOT part of it: state is
+;   what one conversation writes" — so one residence, N states, is the
+;   EXISTING contract, not an extension. Every q38 decode step threads sts
+;   explicitly, so a scheduler that holds N rows and steps them round-robin
+;   is continuous batching at interleave granularity — request concurrency,
+;   fairness, cancellation and budgets — with zero carrier growth. True
+;   batched matmul (one kernel, many rows) is the carrier's later win and is
+;   named, not needed, for concurrency to be real.
+;
+; THE STEPPER IS A FUNCTION VALUE, the answerer discipline again:
+;   (stepper sctx row-state) -> (list token row-state' sctx')
+; where token is an int, nothing when the model declined, or the stop mark.
+; The band drives synthetic steppers; the live q38 stepper binds in the
+; resident process, one seam, no reshaping.
+;
+; THE SIGNALS, each structural:
+;   choice   a row finishing leaves the wheel smaller; whoever reads results
+;            chooses what to do with them — the wheel never picks a winner
+;   cut      wt-cut drops a row NOW; its releaser is returned to the caller,
+;            never invoked behind its back (a GPU state deserves an explicit
+;            death, and q38-free-state is that door)
+;   undo     KV is mutable GPU memory, so undo is REPLAY: every row keeps
+;            its emitted tokens, and wt-replay-of hands back the history a
+;            fresh state can re-prefill — undo that pretends KV can rewind
+;            in place would be the .fkb bug in a new body
+;   timeout  per-row step budgets, decremented by the wheel itself; an
+;            exhausted row closes as "timeout" with its partial kept
+;   nothing  a stepper answering nothing closes the row as "declined",
+;            distinct from a row that emitted the stop mark ("done") and
+;            from one that ran out ("timeout")
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/peer-turnwheel-band.fk
+
+(do
+    (defn wt-stop () -1)
+
+    ; ── a row: one request's whole life on the wheel ───────────────────────
+    (defn wt-row (id rstate budget releaser)
+        (list id rstate budget (list) "live" releaser))
+    (defn wt-id (r) (nth r 0))
+    (defn wt-rstate (r) (nth r 1))
+    (defn wt-budget (r) (nth r 2))
+    (defn wt-toks (r) (nth r 3))
+    (defn wt-status (r) (nth r 4))
+    (defn wt-releaser (r) (nth r 5))
+    (defn wt-with (r rstate budget toks status)
+        (list (wt-id r) rstate budget toks status (wt-releaser r)))
+
+    ; ── the wheel: rows + the shared stepper context, threaded whole ───────
+    (defn wt-wheel (rows sctx) (list rows sctx))
+    (defn wt-rows (w) (nth w 0))
+    (defn wt-sctx (w) (nth w 1))
+    (defn wt-live? (r) (if (str_eq (wt-status r) "live") 1 0))
+    (defn wt-live-count (rs n)
+        (if (eq (len rs) 0) n
+            (wt-live-count (tail rs) (add n (wt-live? (head rs))))))
+
+    ; ── one revolution: every live row steps once, in order ────────────────
+    (defn wt-step-row (stepper sctx r)
+        (if (eq (wt-live? r) 0) (list r sctx)
+            (if (le (wt-budget r) 0)
+                (list (wt-with r (wt-rstate r) 0 (wt-toks r) "timeout") sctx)
+                (do (let out (stepper sctx (wt-rstate r)))
+                    (let tok (nth out 0))
+                    (let rs2 (nth out 1))
+                    (let sc2 (nth out 2))
+                    (if (nothing? tok)
+                        (list (wt-with r rs2 (wt-budget r) (wt-toks r) "declined") sc2)
+                        (if (eq tok (wt-stop))
+                            (list (wt-with r rs2 (wt-budget r) (wt-toks r) "done") sc2)
+                            (list (wt-with r rs2 (sub (wt-budget r) 1)
+                                    (append (wt-toks r) (list tok)) "live") sc2)))))))
+
+    (defn wt-turn-go (stepper rs sctx out)
+        (if (eq (len rs) 0) (wt-wheel (reverse out) sctx)
+            (do (let sr (wt-step-row stepper sctx (head rs)))
+                (wt-turn-go stepper (tail rs) (nth sr 1)
+                    (cons (nth sr 0) out)))))
+    (defn wt-turn (w stepper) (wt-turn-go stepper (wt-rows w) (wt-sctx w) (list)))
+
+    ; run revolutions until no row is live or the wheel budget ends
+    (defn wt-run (w stepper wheels)
+        (if (le wheels 0) w
+            (if (eq (wt-live-count (wt-rows w) 0) 0) w
+                (wt-run (wt-turn w stepper) stepper (sub wheels 1)))))
+
+    ; ── cut: drop a row NOW; hand its releaser back, never invoke it ───────
+    ; returns (list wheel' releaser) — releaser is nothing if the id is absent
+    (defn wt-cut-go (rs id out found)
+        (if (eq (len rs) 0) (list (reverse out) found)
+            (if (eq (wt-id (head rs)) id)
+                (wt-cut-go (tail rs) id
+                    (cons (wt-with (head rs) (wt-rstate (head rs))
+                        (wt-budget (head rs)) (wt-toks (head rs)) "cut") out)
+                    (wt-releaser (head rs)))
+                (wt-cut-go (tail rs) id (cons (head rs) out) found))))
+    (defn wt-cut (w id)
+        (do (let g (wt-cut-go (wt-rows w) id (list) (nothing)))
+            (list (wt-wheel (nth g 0) (wt-sctx w)) (nth g 1))))
+
+    ; ── undo as replay: the tokens a fresh state can re-prefill ────────────
+    (defn wt-replay-of (w id)
+        (do (let r (wt-find (wt-rows w) id))
+            (if (nothing? r) (nothing) (wt-toks r))))
+    (defn wt-find (rs id)
+        (if (eq (len rs) 0) (nothing)
+            (if (eq (wt-id (head rs)) id) (head rs) (wt-find (tail rs) id))))
+    0)
