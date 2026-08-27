@@ -50,6 +50,11 @@ not a wrapper around llama-server or Ollama. Its working path is:
     source-free receipt is injected into the same Qwen/KV residence while
     generation is still moving. Nothing, refusal, choice, timeout, failure,
     undo, `0`, `1`, and value remain distinct.
+12. The hot return crossing does not replay that durable record as prose. It
+    interns the exact result as a live NodeID and injects compact scannerless
+    BML: result identity, status, contribution, journal presence and the
+    choice/crystallize/release trace. The journal remains restart truth; the
+    NodeID is the O(1) address inside this residence.
 
 The live doors are:
 
@@ -110,7 +115,8 @@ does not claim the Form/native NodeID mapping movement is complete.
   strict probe currently reaches `hit` with one lookup and two framebuffer
   events in 2,103 ms; the earlier composed turn stayed in recursive `fk_walk`
   for about ten minutes without producing egress.
-- Reduce incremental `fcms-observe` cost. The guarded effect completed within
-  the sub-second interval between decoded-token and injection stages, while a
-  236-byte same-KV observation took 44,129 ms to encode/prefill in the live
-  patch witness.
+- Build a true multi-token local prefill schedule. Compact BML/NodeID return
+  reduced the guarded patch observation from 236 to 91 bytes and its same-KV
+  injection from 44,129 to 21,493 ms, but the remaining time still scales with
+  token-wise 27B forwards. The existing span path removes host syncs, not the
+  dominant per-token model/dispatch work.
