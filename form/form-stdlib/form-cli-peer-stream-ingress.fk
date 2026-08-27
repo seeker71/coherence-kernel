@@ -67,10 +67,24 @@
                             (let frame (substring text open-at end))
                             (let rest (substring text end (str_len text)))
                             (fcpsi-extract-go rest
-                                (append frames (list frame)) (add base end)
+                                (append frames (list (list frame (add base end))))
+                                (add base end)
                                 (add base end))))))))
     (defn fcpsi-extract (text frames)
         (fcpsi-extract-go text frames 0 0))
+    (defn fcpsi-absolute-frames (frames joined-start out)
+        (if (eq (len frames) 0) out
+            (fcpsi-absolute-frames (tail frames) joined-start
+                (append out (list (list (nth (head frames) 0)
+                    (add joined-start (nth (head frames) 1))))))))
+    (defn fcpsi-frame-texts (frames out)
+        (if (eq (len frames) 0) out
+            (fcpsi-frame-texts (tail frames)
+                (append out (list (nth (head frames) 0))))))
+    (defn fcpsi-frame-ends (frames out)
+        (if (eq (len frames) 0) out
+            (fcpsi-frame-ends (tail frames)
+                (append out (list (nth (head frames) 1))))))
     ; feed result = cursor, frames, held-open-bit. Only arriving delta bytes
     ; are examined; there is no tokenizer and no line read.
     (defn fcpsi-feed (cursor chunk)
@@ -79,7 +93,9 @@
             (let joined-start (sub (fcpsi-cursor-bytes cursor)
                 (str_len (fcpsi-cursor-window cursor))))
             (let extracted (fcpsi-extract joined (list)))
-            (let frames (nth extracted 1))
+            (let pairs (fcpsi-absolute-frames (nth extracted 1)
+                joined-start (list)))
+            (let frames (fcpsi-frame-texts pairs (list)))
             (list
                 (fcpsi-cursor (fcpsi-cursor-channel cursor) (nth extracted 0)
                     (add (fcpsi-cursor-bytes cursor) (str_len chunk))
@@ -88,14 +104,14 @@
                     (if (gt (nth extracted 3) 0)
                         (add joined-start (nth extracted 3))
                         (fcpsi-cursor-complete-through cursor)))
-                frames (nth extracted 2))))
+                frames (nth extracted 2) (fcpsi-frame-ends pairs (list)))))
 
     ; ── exact task parsing and content identity ─────────────────────
     (defn fcpsi-task-category () (make_nodeid 31 2 0 222))
     (defn fcpsi-task
-        (node channel sequence exchange turn kind text frame)
+        (node channel sequence exchange turn kind text frame complete-through)
         (list "form-cli-peer-stream-task-v1" node channel sequence exchange
-              turn kind text frame))
+              turn kind text frame complete-through))
     (defn fcpsi-task-node (t) (nth t 1))
     (defn fcpsi-task-channel (t) (nth t 2))
     (defn fcpsi-task-sequence (t) (nth t 3))
@@ -104,15 +120,16 @@
     (defn fcpsi-task-kind (t) (nth t 6))
     (defn fcpsi-task-text (t) (nth t 7))
     (defn fcpsi-task-frame (t) (nth t 8))
+    (defn fcpsi-task-complete-through (t) (nth t 9))
     (defn fcpsi-task-id (channel sequence exchange turn kind text)
         (intern_node (fcpsi-task-category)
             (list (intern_trivial_string channel)
-                  (intern_trivial_int sequence)
                   (intern_trivial_int exchange)
                   (intern_trivial_int turn)
                   (intern_trivial_string kind)
                   (intern_trivial_string text))))
-    (defn fcpsi-frame-parse (channel sequence exchange frame)
+    (defn fcpsi-frame-parse
+        (channel sequence exchange frame complete-through)
         (do
             (let open-n (str_len (fcpa-task-open)))
             (let close-n (str_len (fcpa-task-close)))
@@ -146,16 +163,19 @@
                         (nothing)
                         (fcpsi-task
                             (fcpsi-task-id channel sequence exchange turn kind text)
-                            channel sequence exchange turn kind text frame))))))
-    (defn fcpsi-parse-frames (channel sequence exchange frames tasks bad)
+                            channel sequence exchange turn kind text frame
+                            complete-through))))))
+    (defn fcpsi-parse-frames
+        (channel sequence exchange frames ends tasks bad)
         (if (eq (len frames) 0) (list tasks bad)
             (do
                 (let task (fcpsi-frame-parse channel sequence exchange
-                    (head frames)))
+                    (head frames) (head ends)))
                 (if (nothing? task)
-                    (fcpsi-parse-frames channel sequence exchange (tail frames)
-                        tasks (add bad 1))
-                    (fcpsi-parse-frames channel sequence exchange (tail frames)
+                    (fcpsi-parse-frames channel sequence exchange
+                        (tail frames) (tail ends) tasks (add bad 1))
+                    (fcpsi-parse-frames channel sequence exchange
+                        (tail frames) (tail ends)
                         (append tasks (list task)) bad)))))
 
     ; ── candidates and observed evaluation ──────────────────────────
@@ -261,7 +281,7 @@
             (let fed (fcpsi-feed old (rai-env-payload envelope)))
             (let parsed (fcpsi-parse-frames channel
                 (rai-env-sequence envelope) (rai-env-exchange envelope)
-                (nth fed 1) (list) 0))
+                (nth fed 1) (nth fed 3) (list) 0))
             (let next-cursors (fcpsi-replace-cursor (fcpsi-cursors s) channel
                 (nth fed 0)))
             (let bad (nth parsed 1))

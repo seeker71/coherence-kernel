@@ -1,0 +1,448 @@
+; form-cli-peer-append-turnwheel.fk — one append-only reader row shares a
+; bounded cooperative revolution with the resident Form turnwheel.
+;
+; One revolution performs at most: one O(1)/O(bounded-delta) file poll, one
+; scannerless ingress yield, one task act, one selected fcrt row step, and one
+; atomic egress append.
+; A large append may complete many frames, but only one enters the resident
+; wheel per revolution. Newline is never the task clock. complete-through stays
+; unchanged until a whole close mark exists.
+;
+; The reader path has one writer per channel; this process is the sole writer
+; of its egress path. The host, route, ready exchange and session exist before
+; external bytes are represented as work. Nothing, present 0, present 1,
+; choice, timeout, cut, undo, release and failure stay typed in memory and in
+; append-only acknowledgement frames.
+;
+; This cell opens no model and performs no top-level effects. A caller supplies
+; an already-living ritj/fcrt state and an ordinary dynamic reader row. Program
+; images remain NodeID data lowered through JIT-once-born, not fixed call seats.
+;
+; preludes: form-stdlib/form-cli-peer-stream-ingress.fk
+; preludes: form-stdlib/resident-ingress-turnwheel-join.fk
+; Proven by: form-stdlib/tests/form-cli-peer-append-turnwheel-band.fk
+
+(do
+    (defn fcpat-reader
+        (identity channel path exchange alternative deadline max-bytes turns)
+        (list "form-cli-peer-append-reader-row-v1" identity channel path
+              exchange alternative deadline max-bytes turns))
+    (defn fcpat-reader-id (r) (nth r 1))
+    (defn fcpat-reader-channel (r) (nth r 2))
+    (defn fcpat-reader-path (r) (nth r 3))
+    (defn fcpat-reader-exchange (r) (nth r 4))
+    (defn fcpat-reader-alternative (r) (nth r 5))
+    (defn fcpat-reader-deadline (r) (nth r 6))
+    (defn fcpat-reader-max-bytes (r) (nth r 7))
+    (defn fcpat-reader-turns (r) (nth r 8))
+    (defn fcpat-reader-stepped (r)
+        (fcpat-reader (fcpat-reader-id r) (fcpat-reader-channel r)
+            (fcpat-reader-path r) (fcpat-reader-exchange r)
+            (fcpat-reader-alternative r) (fcpat-reader-deadline r)
+            (fcpat-reader-max-bytes r) (add (fcpat-reader-turns r) 1)))
+
+    ; Acknowledgement keeps raw value separate from its physical text form.
+    (defn fcpat-ack
+        (exchange turn movement signal present value value-kind value-text
+                  complete-through task-node)
+        (list "form-cli-peer-append-ack-v1" exchange turn movement signal
+              present value value-kind value-text complete-through task-node))
+    (defn fcpat-ack-exchange (a) (nth a 1))
+    (defn fcpat-ack-turn (a) (nth a 2))
+    (defn fcpat-ack-movement (a) (nth a 3))
+    (defn fcpat-ack-signal (a) (nth a 4))
+    (defn fcpat-ack-present? (a) (nth a 5))
+    (defn fcpat-ack-value (a) (nth a 6))
+    (defn fcpat-ack-value-kind (a) (nth a 7))
+    (defn fcpat-ack-value-text (a) (nth a 8))
+    (defn fcpat-ack-complete-through (a) (nth a 9))
+    (defn fcpat-ack-task-node (a) (nth a 10))
+    (defn fcpat-node-text (node)
+        (str_concat "@" (str_concat (int_to_str (node_pkg node))
+        (str_concat "." (str_concat (int_to_str (node_level node))
+        (str_concat "." (str_concat (int_to_str (node_type node))
+        (str_concat "." (int_to_str (node_inst node))))))))))
+
+    (defn fcpat-field (name value)
+        (str_concat "\n" (str_concat name (str_concat "=" value))))
+    (defn fcpat-ack-open () "<|form:peer-ack|>")
+    (defn fcpat-ack-close () "<|/form:peer-ack|>")
+    (defn fcpat-ack-text (a)
+        (str_concat (fcpat-ack-open)
+        (str_concat (fcpat-field "exchange" (int_to_str (fcpat-ack-exchange a)))
+        (str_concat (fcpat-field "turn" (int_to_str (fcpat-ack-turn a)))
+        (str_concat (fcpat-field "movement" (fcpat-ack-movement a))
+        (str_concat (fcpat-field "signal" (fcpat-ack-signal a))
+        (str_concat (fcpat-field "present" (int_to_str (fcpat-ack-present? a)))
+        (str_concat (fcpat-field "value-kind" (fcpat-ack-value-kind a))
+        (str_concat (fcpat-field "value" (fcpat-ack-value-text a))
+        (str_concat (fcpat-field "complete-through"
+                        (int_to_str (fcpat-ack-complete-through a)))
+        (str_concat (fcpat-field "task-node"
+                        (fcpat-node-text (fcpat-ack-task-node a)))
+        (str_concat "\n" (fcpat-ack-close)))))))))))))
+    (defn fcpat-bytes-go (text at out)
+        (if (ge at (str_len text)) (reverse out)
+            (fcpat-bytes-go text (add at 1)
+                (cons (str_byte_at text at) out))))
+    (defn fcpat-bytes (text) (fcpat-bytes-go text 0 (list)))
+    (defn fcpat-node-seen? (nodes node)
+        (if (eq (len nodes) 0) 0
+            (if (node_eq (head nodes) node) 1
+                (fcpat-node-seen? (tail nodes) node))))
+    (defn fcpat-task-seen? (s task)
+        (fcpat-node-seen? (fcpat-seen s) (fcpsi-task-node task)))
+    (defn fcpat-client-ack-open () "<|form:client-ack|>")
+    (defn fcpat-client-ack-close () "<|/form:client-ack|>")
+    (defn fcpat-client-ack-text (task-node)
+        (str_concat (fcpat-client-ack-open)
+            (str_concat (fcpat-field "task-node" (fcpat-node-text task-node))
+                (str_concat "\n" (fcpat-client-ack-close)))))
+    (defn fcpat-client-acknowledged? (path task-node)
+        (do
+            (let text (read_file path))
+            (if (nothing? text) 0
+                (if (lt (str_find text
+                    (fcpat-field "task-node" (fcpat-node-text task-node)) 0) 0)
+                    0 1))))
+
+    ; state = join, peer scanner, reader row, pending tasks, emitted acks,
+    ; egress path, bounded events/capacity, program gas, released bit, and an
+    ; in-memory NodeID set seeded once by explicit recovery.
+    (defn fcpat-state
+        (join peer reader pending acks egress events capacity program-gas
+              released seen)
+        (list "form-cli-peer-append-turnwheel-v1" join peer reader pending
+              acks egress events capacity program-gas released seen))
+    (defn fcpat-join (s) (nth s 1))
+    (defn fcpat-peer (s) (nth s 2))
+    (defn fcpat-reader-row (s) (nth s 3))
+    (defn fcpat-pending (s) (nth s 4))
+    (defn fcpat-acks (s) (nth s 5))
+    (defn fcpat-egress (s) (nth s 6))
+    (defn fcpat-events (s) (nth s 7))
+    (defn fcpat-capacity (s) (nth s 8))
+    (defn fcpat-program-gas (s) (nth s 9))
+    (defn fcpat-released? (s) (nth s 10))
+    (defn fcpat-seen (s) (nth s 11))
+    (defn fcpat-new (join peer reader egress capacity program-gas)
+        (fcpat-state join peer reader (list) (list) egress (list) capacity
+            program-gas 0 (list)))
+    (defn fcpat-with
+        (s join peer reader pending acks events released)
+        (fcpat-state join peer reader pending acks (fcpat-egress s) events
+            (fcpat-capacity s) (fcpat-program-gas s) released (fcpat-seen s)))
+    (defn fcpat-with-seen (s seen)
+        (fcpat-state (fcpat-join s) (fcpat-peer s) (fcpat-reader-row s)
+            (fcpat-pending s) (fcpat-acks s) (fcpat-egress s)
+            (fcpat-events s) (fcpat-capacity s) (fcpat-program-gas s)
+            (fcpat-released? s) seen))
+    ; Recovery scans or keyed storage live outside the hot dispatch path. The
+    ; caller supplies the NodeIDs observed durable before this residence opens.
+    (defn fcpat-recover (s durable-task-nodes)
+        (fcpat-with-seen s durable-task-nodes))
+    (defn fcpat-event (exchange movement signal detail)
+        (list exchange movement signal detail))
+    (defn fcpat-observe (s exchange movement signal detail)
+        (fcpat-with s (fcpat-join s) (fcpat-peer s) (fcpat-reader-row s)
+            (fcpat-pending s) (fcpat-acks s)
+            (rai-bounded-events
+                (append (fcpat-events s)
+                    (list (fcpat-event exchange movement signal detail)))
+                (fcpat-capacity s))
+            (fcpat-released? s)))
+
+    (defn fcpat-result (state signal present value ack)
+        (list "form-cli-peer-append-turn-result-v1" state signal present value ack))
+    (defn fcpat-result-state (r) (nth r 1))
+    (defn fcpat-result-signal (r) (nth r 2))
+    (defn fcpat-result-present? (r) (nth r 3))
+    (defn fcpat-result-value (r) (nth r 4))
+    (defn fcpat-result-ack (r) (nth r 5))
+
+    (defn fcpat-offer (s envelope)
+        (do
+            (let offered (fcpsi-offer (fcpat-peer s) envelope))
+            (let s1 (fcpat-with s (fcpat-join s)
+                (fcpsi-result-state offered) (fcpat-reader-row s)
+                (fcpat-pending s) (fcpat-acks s) (fcpat-events s)
+                (fcpat-released? s)))
+            (fcpat-result s1 (fcpsi-result-signal offered)
+                (fcpsi-result-present? offered) (fcpsi-result-value offered)
+                (nothing))))
+
+    (defn fcpat-peer-with-ingress (peer ingress)
+        (fcpsi-with peer ingress (fcpsi-cursors peer) (fcpsi-tasks peer)
+            (fcpsi-candidates peer) (fcpsi-events peer)))
+    (defn fcpat-complete-through (s channel)
+        (fcpsi-cursor-complete-through
+            (fcpsi-cursor-of (fcpat-peer s) channel)))
+    (defn fcpat-canonical-int? (text)
+        (str_eq (int_to_str (str_to_int text)) text))
+
+    (defn fcpat-store-ack (s ack)
+        (do
+            (let total (file_append_bytes (fcpat-egress s)
+                (fcpat-bytes (str_concat (fcpat-ack-text ack) "\n"))))
+            (let accepted (if (lt total 0) 0 1))
+            (let s1 (if (eq accepted 1)
+                (fcpat-with-seen
+                    (fcpat-with s (fcpat-join s) (fcpat-peer s)
+                        (fcpat-reader-row s) (fcpat-pending s)
+                        (append (fcpat-acks s) (list ack)) (fcpat-events s)
+                        (fcpat-released? s))
+                    (cons (fcpat-ack-task-node ack) (fcpat-seen s)))
+                s))
+            (let s2 (fcpat-observe s1 (fcpat-ack-exchange ack) "egress"
+                (if (eq accepted 1) "accepted" "failure") total))
+            (fcpat-result s2 (if (eq accepted 1)
+                (fcpat-ack-signal ack) "failure") accepted
+                (fcpat-ack-value ack) ack)))
+
+    ; A bounded physical file poll. max-bytes is a caller-owned live resource
+    ; choice, not a compiler seat. Cursor commit remains rai-poll-admit's
+    ; transaction and advances only by bytes actually admitted to water.
+    (defn fcpat-poll-file (o identity path exchange kind alternative deadline max-bytes)
+        (do
+            (let c (rai-find-channel (rai-channels o) identity))
+            (if (nothing? c) (list o (nothing) "nothing" 0)
+            (if (le max-bytes 0) (list o 0 "failure" 0)
+                (do
+                    (let size (file_size path))
+                    (if (lt size 0) (list o (nothing) "nothing" 0)
+                    (if (lt size (rai-channel-cursor c))
+                        (do
+                            (let reset (rai-channel-with-cursor o identity 0))
+                            (let reset2 (rai-observe-event reset
+                                (rai-event reset identity exchange kind "rotated")))
+                            (list reset2 0 "rotated" 0))
+                    (if (eq size (rai-channel-cursor c))
+                        (list o (nothing) "nothing" 0)
+                        (do
+                            (let available (sub size (rai-channel-cursor c)))
+                            (let take (if (lt available max-bytes)
+                                available max-bytes))
+                            (let observed (add (rai-channel-cursor c) take))
+                            (let bytes (read_file_slice path
+                                (rai-channel-cursor c) take))
+                            (rai-poll-admit o identity observed exchange kind
+                                bytes alternative deadline))))))))))
+
+    ; One reader-row quantum: transactional poll, then one scannerless yield.
+    ; Completed tasks join pending water; no task is actuated here.
+    (defn fcpat-reader-step (s now)
+        (if (eq (fcpat-released? s) 1)
+            (fcpat-result s "release" 0 (nothing) (nothing))
+            (do
+                (let reader (fcpat-reader-row s))
+                (let peer (fcpat-peer s))
+                (let polled (fcpat-poll-file (fcpsi-ingress peer)
+                    (fcpat-reader-channel reader) (fcpat-reader-path reader)
+                    (fcpat-reader-exchange reader) "task-bytes"
+                    (fcpat-reader-alternative reader)
+                    (fcpat-reader-deadline reader)
+                    (fcpat-reader-max-bytes reader)))
+                (let peer1 (fcpat-peer-with-ingress peer (nth polled 0)))
+                (let yielded (fcpsi-step peer1 now))
+                (let peer2 (fcpsi-result-state yielded))
+                (let tasks (if (str_eq (fcpsi-result-signal yielded) "value")
+                    (fcpsi-result-value yielded) (list)))
+                (let s1 (fcpat-with s (fcpat-join s) peer2
+                    (fcpat-reader-stepped reader)
+                    (append (fcpat-pending s) tasks) (fcpat-acks s)
+                    (fcpat-events s) (fcpat-released? s)))
+                (let s2 (fcpat-observe s1 (fcpat-reader-exchange reader)
+                    "reader-row" (fcpsi-result-signal yielded)
+                    (nth polled 3)))
+                (fcpat-result s2 (fcpsi-result-signal yielded)
+                    (fcpsi-result-present? yielded)
+                    (fcpsi-result-value yielded)
+                    (fcpsi-result-envelope yielded)))))
+
+    (defn fcpat-transport-signal? (signal)
+        (if (str_eq signal "timeout") 1
+        (if (str_eq signal "cut") 1
+        (if (str_eq signal "release") 1
+        (if (str_eq signal "choice") 1
+        (if (str_eq signal "failure") 1 0))))))
+    (defn fcpat-store-transport-ack (s read)
+        (do
+            (let envelope (fcpat-result-ack read))
+            (if (nothing? envelope) read
+                (do
+                    (let signal (fcpat-result-signal read))
+                    (let value (fcpat-result-value read))
+                    (let present (fcpat-result-present? read))
+                    (let choice (if (and (eq present 1)
+                        (str_eq signal "choice")) value ""))
+                    (fcpat-store-ack s
+                        (fcpat-ack (rai-env-exchange envelope) 0
+                            (rai-env-kind envelope) signal present value
+                            (if (eq present 1) "choice" "nothing") choice
+                            (fcpat-complete-through s
+                                (rai-env-channel envelope))
+                            (make_nodeid 0 0 0 0)))))))
+
+    (defn fcpat-task-ack
+        (s task movement signal present value value-kind value-text)
+        (fcpat-ack (fcpsi-task-exchange task) (fcpsi-task-turn task) movement
+            signal present value value-kind value-text
+            (fcpsi-task-complete-through task)
+            (fcpsi-task-node task)))
+
+    (defn fcpat-join-with-host (join host)
+        (ritj-with join host (ritj-ingress join) (ritj-ready-exchange join)
+            (ritj-current-id join) (ritj-events join)))
+    (defn fcpat-offer-join (join envelope now)
+        (do
+            (let offered (ritj-offer join envelope))
+            (ritj-step (ritj-result-state offered) now)))
+
+    (defn fcpat-replace-row (rows id replacement)
+        (if (eq (len rows) 0) (list)
+            (if (eq (wt-id (head rows)) id)
+                (cons replacement (tail rows))
+                (cons (head rows)
+                    (fcpat-replace-row (tail rows) id replacement)))))
+    ; Advance exactly one selected resident row, not every row in the host.
+    ; This is the strict compute bound paired with the reader's byte bound.
+    (defn fcpat-step-host-row (host id)
+        (do
+            (let lw (fcrt-lw host))
+            (let row (wt-find (wt-rows (le-w lw)) id))
+            (if (nothing? row) host
+                (do
+                    (let moved (fcrt-step-row (le-tbl lw)
+                        (wt-sctx (le-w lw)) row))
+                    (let swept (le-sweep (nth moved 2) (le-cur lw) (list) 0))
+                    (let lw2 (list
+                        (wt-wheel (fcpat-replace-row
+                                (wt-rows (le-w lw)) id (nth moved 0))
+                            (nth moved 1))
+                        (nth swept 0) (le-cur lw)
+                        (if (gt (nth swept 1) 0)
+                            (append (le-ledger lw)
+                                (list (list "dissolved" (nth swept 1))))
+                            (le-ledger lw))))
+                    (fcrt-with host lw2
+                        (fcrt-event "selected-row-step" id (nth moved 3)))))))
+
+    (defn fcpat-program-task (s task now)
+        (if (eq (fcpat-canonical-int? (fcpsi-task-text task)) 0)
+            (fcpat-store-ack s (fcpat-task-ack s task "program" "failure" 0
+                (nothing) "nothing" ""))
+            (do
+                (let arg (str_to_int (fcpsi-task-text task)))
+                (let join-result (fcpat-offer-join (fcpat-join s)
+                    (rai-envelope (fcpsi-task-channel task)
+                        (fcpsi-task-sequence task) (fcpsi-task-exchange task)
+                        "accept-program"
+                        (list (fcpsi-task-turn task) arg
+                            (fcpat-program-gas s) "reader-row-release")
+                        (ritj-current-id (fcpat-join s)) -1) now))
+                (let join1 (ritj-result-state join-result))
+                (if (not (str_eq (ritj-result-signal join-result) "value"))
+                    (fcpat-store-ack s (fcpat-task-ack s task "program"
+                        (ritj-result-signal join-result)
+                        (ritj-result-present? join-result)
+                        (ritj-result-value join-result)
+                        (if (nothing? (ritj-result-value join-result))
+                            "nothing" "choice")
+                        (if (nothing? (ritj-result-value join-result)) ""
+                            (fcpsi-task-kind task))))
+                    (do
+                        ; The same macro-revolution advances only this selected
+                        ; resident row. Program-image work returns in one step.
+                        (let host2 (fcpat-step-host-row (ritj-host join1)
+                            (fcpsi-task-turn task)))
+                        (let join2 (fcpat-join-with-host join1 host2))
+                        (let row (wt-find (wt-rows (le-w (fcrt-lw host2)))
+                            (fcpsi-task-turn task)))
+                        (let present (if (or (nothing? row)
+                            (eq (len (wt-toks row)) 0)) 0 1))
+                        (let value (if (eq present 1)
+                            (head (wt-toks row)) (nothing)))
+                        (let signal (if (nothing? row) "nothing"
+                            (wt-status row)))
+                        (let s1 (fcpat-with s join2 (fcpat-peer s)
+                            (fcpat-reader-row s) (fcpat-pending s)
+                            (fcpat-acks s) (fcpat-events s)
+                            (fcpat-released? s)))
+                        (fcpat-store-ack s1 (fcpat-task-ack s1 task "program"
+                            signal present value
+                            (if (eq present 1) "integer" "nothing")
+                            (if (eq present 1) (int_to_str value) ""))))))))
+
+    (defn fcpat-control-task (s task now movement)
+        (if (eq (fcpat-canonical-int? (fcpsi-task-text task)) 0)
+            (fcpat-store-ack s (fcpat-task-ack s task movement "failure" 0
+                (nothing) "nothing" ""))
+            (do
+                (let id (str_to_int (fcpsi-task-text task)))
+                (let result (fcpat-offer-join (fcpat-join s)
+                    (rai-envelope (fcpsi-task-channel task)
+                        (fcpsi-task-sequence task) (fcpsi-task-exchange task)
+                        movement id "abstain" -1) now))
+                (let s1 (fcpat-with s (ritj-result-state result)
+                    (fcpat-peer s) (fcpat-reader-row s) (fcpat-pending s)
+                    (fcpat-acks s) (fcpat-events s) (fcpat-released? s)))
+                (fcpat-store-ack s1 (fcpat-task-ack s1 task movement
+                    (ritj-result-signal result) (ritj-result-present? result)
+                    (ritj-result-value result)
+                    (if (nothing? (ritj-result-value result)) "nothing" "typed")
+                    (if (nothing? (ritj-result-value result)) "" movement))))))
+
+    (defn fcpat-release-task (s task)
+        (do
+            (let peer (fcpat-peer s))
+            (let ingress (rai-release-channel (fcpsi-ingress peer)
+                (fcpsi-task-channel task) (fcpsi-task-exchange task)))
+            (let peer1 (fcpat-peer-with-ingress peer ingress))
+            (let s1 (fcpat-with s (fcpat-join s) peer1
+                (fcpat-reader-row s) (fcpat-pending s) (fcpat-acks s)
+                (fcpat-events s) 1))
+            (fcpat-store-ack s1 (fcpat-task-ack s1 task "release" "release"
+                0 (nothing) "nothing" ""))))
+
+    (defn fcpat-dispatch-task (s task now)
+        (if (eq (fcpat-task-seen? s task) 1)
+            (do
+                (let s1 (fcpat-observe s (fcpsi-task-exchange task)
+                    "deduplicate" "value" (fcpsi-task-node task)))
+                (fcpat-result s1 "deduplicated" 1
+                    (fcpsi-task-node task) (nothing)))
+        (if (str_eq (fcpsi-task-kind task) "program")
+            (fcpat-program-task s task now)
+        (if (str_eq (fcpsi-task-kind task) "cut")
+            (fcpat-control-task s task now "cut-flow")
+        (if (str_eq (fcpsi-task-kind task) "undo")
+            (fcpat-control-task s task now "undo")
+        (if (str_eq (fcpsi-task-kind task) "release")
+            (fcpat-release-task s task)
+            (fcpat-store-ack s (fcpat-task-ack s task
+                (fcpsi-task-kind task) "choice" 1
+                (fcpsi-task-kind task) "choice" (fcpsi-task-kind task)))))))))
+
+    ; One bounded shared revolution. Reader row always observes first; at most
+    ; one already-complete task is then actuated and acknowledged.
+    (defn fcpat-turn (s now)
+        (do
+            (let read (fcpat-reader-step s now))
+            (let s1 (fcpat-result-state read))
+            (if (eq (len (fcpat-pending s1)) 0)
+                (if (eq (fcpat-transport-signal?
+                        (fcpat-result-signal read)) 1)
+                    (fcpat-store-transport-ack s1 read) read)
+                (do
+                    (let task (head (fcpat-pending s1)))
+                    (let s2 (fcpat-with s1 (fcpat-join s1) (fcpat-peer s1)
+                        (fcpat-reader-row s1) (tail (fcpat-pending s1))
+                        (fcpat-acks s1) (fcpat-events s1)
+                        (fcpat-released? s1)))
+                    (fcpat-dispatch-task s2 task now)))))
+
+    (defn fcpat-run (s now turns)
+        (if (or (le turns 0) (eq (fcpat-released? s) 1)) s
+            (fcpat-run (fcpat-result-state (fcpat-turn s now))
+                (add now 1) (sub turns 1))))
+    0)
