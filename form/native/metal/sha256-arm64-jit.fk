@@ -200,6 +200,225 @@
                         (if (and (eq freed 1) (eq (str_len raw) 32))
                             (saj-state-digest raw) ""))))))
 
+    ; A byte-list can enter the same Form-emitted arm64 compressor without a
+    ; filesystem crossing.  The bridge materializes only one bounded 64-byte
+    ; string at a time; it never builds a second whole-message string and it
+    ; walks the list once.  The remaining tail is at most 63 bytes.
+    (defn saj-split-byte-string (bytes remaining acc)
+        (if (eq remaining 0) (list acc bytes)
+            (if (nil? bytes) (list "" (list))
+                (saj-split-byte-string
+                    (tail bytes) (sub remaining 1)
+                    (str_concat acc (byte_to_str (head bytes)))))))
+
+    (defn saj-write-byte-blocks (message bytes block-count offset)
+        (if (eq block-count 0) (list bytes 1)
+            (do
+                (let split (saj-split-byte-string bytes 64 ""))
+                (let block (nth split 0))
+                (let rest (nth split 1))
+                (let wrote (metal_buf_write message offset block))
+                (if (eq wrote 64)
+                    (saj-write-byte-blocks
+                        message rest (sub block-count 1) (add offset 64))
+                    (list bytes 0)))))
+
+    (defn saj-prefix-byte-state (bytes prefix-size)
+        (if (eq prefix-size 0)
+            (list (saj-initial-state-bytes) bytes 1)
+            (do
+                (let message (metal_buf_alloc prefix-size))
+                (if (le message 0) (list "" bytes 0)
+                    (do
+                        (let written (saj-write-byte-blocks
+                            message bytes (div prefix-size 64) 0))
+                        (let state
+                            (if (eq (nth written 1) 1)
+                                (saj-compress-handle-state message
+                                    (saj-initial-state-bytes)
+                                    (div prefix-size 64))
+                                ""))
+                        (let freed (metal_buf_free message))
+                        (if (and (eq freed 1) (eq (str_len state) 32))
+                            (list state (nth written 0) 1)
+                            (list "" bytes 0)))))))
+
+    ; Unlike the older downloader helper, this padding accepts either final
+    ; SHA shape: one block for tails 0..55, two blocks for tails 56..63.
+    (defn saj-padding-string (tail-bytes total-bytes)
+        (do
+            (let used (str_len tail-bytes))
+            (let zeros
+                (if (le used 55) (sub 55 used) (sub 119 used)))
+            (str_concat tail-bytes
+                (str_concat (byte_to_str 128)
+                    (str_concat (saj-zero-string zeros)
+                        (saj-byte-string
+                            (saj-be64-list (mul total-bytes 8) 8 (list))))))))
+
+    (defn saj-compress-padding-written
+        (padding state-raw wrote block-count)
+        (if (eq wrote (mul block-count 64))
+            (saj-compress-handle-state padding state-raw block-count) ""))
+
+    (defn saj-final-byte-list-digest (state-raw tail total-bytes)
+        (if (not (eq (len tail) (mod total-bytes 64))) ""
+            (do
+                (let tail-bytes (saj-byte-string tail))
+                (let padding-bytes
+                    (saj-padding-string tail-bytes total-bytes))
+                (let padding-size (str_len padding-bytes))
+                (let padding (metal_buf_alloc padding-size))
+                (if (le padding 0) ""
+                    (do
+                        (let wrote
+                            (metal_buf_write padding 0 padding-bytes))
+                        (let raw (saj-compress-padding-written padding
+                            state-raw wrote (div padding-size 64)))
+                        (let freed (metal_buf_free padding))
+                        (if (and (eq freed 1) (eq (str_len raw) 32))
+                            (saj-state-digest raw) ""))))))
+
+    (defn saj-final-tail-digest (state-raw tail-bytes total-bytes)
+        (if (not (eq (str_len tail-bytes) (mod total-bytes 64))) ""
+            (do
+                (let padding-bytes
+                    (saj-padding-string tail-bytes total-bytes))
+                (let padding-size (str_len padding-bytes))
+                (let padding (metal_buf_alloc padding-size))
+                (if (le padding 0) ""
+                    (do
+                        (let wrote
+                            (metal_buf_write padding 0 padding-bytes))
+                        (let raw (saj-compress-padding-written padding
+                            state-raw wrote (div padding-size 64)))
+                        (let freed (metal_buf_free padding))
+                        (if (and (eq freed 1) (eq (str_len raw) 32))
+                            (saj-state-digest raw) ""))))))
+
+    ; Canonical 32 digest bytes, or "" when the carrier declines.  The Form
+    ; recipe still owns padding, constants and emitted instructions; Metal is
+    ; the chosen execution organ for the compression rounds.
+    (defn saj-bytes-digest (bytes)
+        (do
+            (let total-bytes (len bytes))
+            (let tail-size (mod total-bytes 64))
+            (let prefix-size (sub total-bytes tail-size))
+            (let prefix (saj-prefix-byte-state bytes prefix-size))
+            (if (not (eq (nth prefix 2) 1)) ""
+                (saj-final-byte-list-digest
+                    (nth prefix 0) (nth prefix 1) total-bytes))))
+
+    ; The current carrier has a bulk byte-list -> file door and a no-copy
+    ; file -> Metal handle door, but no bulk byte-list -> Metal handle door.
+    ; This explicitly named crossing uses those two existing doors so the SHA
+    ; rounds take milliseconds rather than hundreds of evaluator transitions.
+    ; Its directory claim is atomic, its result retains all release evidence,
+    ; and a caller can turn any non-ready row toward the resident bridge above.
+    (defn saj-bulk-row
+        (status digest byte-count wrote file-released dir-released)
+        (list "sha256-arm64-jit-bulk-byte-crossing-v1" status digest
+              byte-count wrote file-released dir-released))
+    (defn saj-bulk-row? (row)
+        (if (eq (len row) 7)
+            (str_eq (nth row 0)
+                "sha256-arm64-jit-bulk-byte-crossing-v1") 0))
+    (defn saj-bulk-ready? (row)
+        (if (saj-bulk-row? row) (str_eq (nth row 1) "ready") 0))
+    (defn saj-bulk-digest (row) (nth row 2))
+    (defn saj-bulk-dir-candidate (scope stamp byte-count attempt)
+        (str_concat (temp_dir)
+            (str_concat "/form-sha256-jit-"
+            (str_concat scope
+            (str_concat "-"
+            (str_concat (int_to_str stamp)
+            (str_concat "-"
+            (str_concat (int_to_str byte-count)
+            (str_concat "-" (int_to_str attempt))))))))))
+    (defn saj-bulk-claim-dir (scope stamp byte-count attempt)
+        (if (ge attempt 64) (nothing)
+            (do
+                (let path
+                    (saj-bulk-dir-candidate
+                        scope stamp byte-count attempt))
+                (let made (host_dir_mkdir path))
+                (if (eq made 1) path
+                    (saj-bulk-claim-dir
+                        scope stamp byte-count (add attempt 1))))))
+    (defn saj-file-digest-any-tail (path total-bytes)
+        (if (lt total-bytes 0) ""
+            (do
+                (let tail-size (mod total-bytes 64))
+                (let prefix-size (sub total-bytes tail-size))
+                (let state-raw (saj-file-prefix-state path prefix-size))
+                (let tail (read_file_slice path prefix-size tail-size))
+                (saj-final-tail-digest state-raw tail total-bytes))))
+    (defn saj-bytes-digest-bulk (bytes scope)
+        (do
+            (let byte-count (len bytes))
+            (let dir
+                (saj-bulk-claim-dir scope (now_unix_ms) byte-count 0))
+            (if (nothing? dir)
+                (saj-bulk-row "scratch-claim-refused" ""
+                    byte-count 0 (nothing) (nothing))
+                (do
+                    (let path (str_concat dir "/bytes"))
+                    (let wrote (file_append_bytes path bytes))
+                    (let digest
+                        (if (eq wrote byte-count)
+                            (saj-file-digest-any-tail path byte-count) ""))
+                    (let file-released (fs_remove path))
+                    (let dir-released (fs_rmdir dir))
+                    (if (and (eq (str_len digest) 32)
+                             (and (eq file-released 0)
+                                  (eq dir-released 0)))
+                        (saj-bulk-row "ready" digest byte-count wrote
+                            file-released dir-released)
+                        (saj-bulk-row "crossing-refused" digest byte-count
+                            wrote file-released dir-released))))))
+
+    ; A cold byte-admission boundary often needs both the digest and one raw
+    ; string cursor.  This sibling performs the bulk write once, reads the same
+    ; bytes once, and releases the scratch carrier before returning either.
+    (defn saj-carrier-row
+        (status digest raw byte-count wrote file-released dir-released)
+        (list "sha256-arm64-jit-byte-carrier-v1" status digest raw
+              byte-count wrote file-released dir-released))
+    (defn saj-carrier-row? (row)
+        (if (eq (len row) 8)
+            (str_eq (nth row 0) "sha256-arm64-jit-byte-carrier-v1") 0))
+    (defn saj-carrier-ready? (row)
+        (if (saj-carrier-row? row) (str_eq (nth row 1) "ready") 0))
+    (defn saj-carrier-digest (row) (nth row 2))
+    (defn saj-carrier-raw (row) (nth row 3))
+    (defn saj-bytes-observe-bulk (bytes scope)
+        (do
+            (let byte-count (len bytes))
+            (let dir
+                (saj-bulk-claim-dir scope (now_unix_ms) byte-count 0))
+            (if (nothing? dir)
+                (saj-carrier-row "scratch-claim-refused" "" ""
+                    byte-count 0 (nothing) (nothing))
+                (do
+                    (let path (str_concat dir "/bytes"))
+                    (let wrote (file_append_bytes path bytes))
+                    (let digest
+                        (if (eq wrote byte-count)
+                            (saj-file-digest-any-tail path byte-count) ""))
+                    (let raw
+                        (if (eq wrote byte-count)
+                            (read_file_slice path 0 byte-count) ""))
+                    (let file-released (fs_remove path))
+                    (let dir-released (fs_rmdir dir))
+                    (if (and (eq (str_len digest) 32)
+                             (and (eq (str_len raw) byte-count)
+                             (and (eq file-released 0)
+                                  (eq dir-released 0))))
+                        (saj-carrier-row "ready" digest raw byte-count wrote
+                            file-released dir-released)
+                        (saj-carrier-row "crossing-refused" digest raw
+                            byte-count wrote file-released dir-released))))))
+
     ; Returns canonical 32 digest bytes, or an empty string on any admission
     ; failure.  The caller compares it with artifact manifest data.
     (defn saj-file-digest (path total-bytes)

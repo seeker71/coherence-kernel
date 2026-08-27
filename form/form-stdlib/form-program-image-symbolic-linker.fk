@@ -47,6 +47,39 @@
     (defn fpis-label-index (definitions label)
         (fpis-label-index-loop definitions label 0))
 
+    ; Compiler-born node/N and string/N labels already carry their symbolic
+    ; rank.  Validate that convention once, then resolve each reference from
+    ; its name in constant list work.  Arbitrary human labels retain the exact
+    ; generic lookup path; this is a data-observed index, not a fixed table.
+    (defn fpis-label-has-prefix? (label prefix)
+        (if (lt (str_len label) (str_len prefix)) 0
+            (if (str_eq (substring label 0 (str_len prefix)) prefix) 1 0)))
+    (defn fpis-label-rank (label prefix)
+        (if (not (fpis-label-has-prefix? label prefix)) (sub 0 1)
+            (do
+                (let suffix (substring label (str_len prefix)
+                    (str_len label)))
+                (let rank (str_to_int suffix))
+                (if (and (ge rank 0)
+                         (str_eq suffix (int_to_str rank)))
+                    rank (sub 0 1)))))
+    (defn fpis-ranked-definitions-loop? (definitions prefix rank)
+        (if (nil? definitions) 1
+            (if (str_eq (fpis-definition-label (head definitions))
+                    (str_concat prefix (int_to_str rank)))
+                (fpis-ranked-definitions-loop?
+                    (tail definitions) prefix (add rank 1)) 0)))
+    (defn fpis-ranked-definitions? (definitions prefix)
+        (fpis-ranked-definitions-loop? definitions prefix 0))
+    (defn fpis-resolve-label-index
+        (definitions label prefix ranked)
+        (if ranked
+            (do
+                (let rank (fpis-label-rank label prefix))
+                (if (and (ge rank 0) (lt rank (len definitions)))
+                    rank (sub 0 1)))
+            (fpis-label-index definitions label)))
+
     (defn fpis-definition-shapes? (definitions arity)
         (if (nil? definitions) 1
             (if (eq (len (head definitions)) arity)
@@ -58,17 +91,20 @@
                     (if (fpis-definition-shapes? (nth ir 2) 5)
                         (fpis-definition-shapes? (nth ir 3) 2) 0) 0) 0) 0))
 
-    (defn fpis-resolve-operand (operand nodes strings functions)
+    (defn fpis-resolve-operand
+        (operand nodes strings functions nodes-ranked strings-ranked)
         (if (not (eq (len operand) 2)) (list 0 "operand-shape" 0)
             (do
                 (let kind (nth operand 0))
                 (let value (nth operand 1))
                 (if (str_eq kind "imm") (list 1 "" value)
                 (if (str_eq kind "node")
-                    (do (let index (fpis-label-index nodes value))
+                    (do (let index (fpis-resolve-label-index
+                            nodes value "node/" nodes-ranked))
                         (if (lt index 0) (list 0 "unresolved-node" 0) (list 1 "" index)))
                 (if (str_eq kind "string")
-                    (do (let index (fpis-label-index strings value))
+                    (do (let index (fpis-resolve-label-index
+                            strings value "string/" strings-ranked))
                         (if (lt index 0) (list 0 "unresolved-string" 0) (list 1 "" index)))
                 (if (str_eq kind "function")
                     (do (let index (fpis-label-index functions value))
@@ -78,11 +114,15 @@
     (defn fpis-resolution-reason (resolution) (nth resolution 1))
     (defn fpis-resolution-value (resolution) (nth resolution 2))
 
-    (defn fpis-resolve-node (definition nodes strings functions)
+    (defn fpis-resolve-node
+        (definition nodes strings functions nodes-ranked strings-ranked)
         (do
-            (let a (fpis-resolve-operand (nth definition 2) nodes strings functions))
-            (let b (fpis-resolve-operand (nth definition 3) nodes strings functions))
-            (let c (fpis-resolve-operand (nth definition 4) nodes strings functions))
+            (let a (fpis-resolve-operand (nth definition 2)
+                nodes strings functions nodes-ranked strings-ranked))
+            (let b (fpis-resolve-operand (nth definition 3)
+                nodes strings functions nodes-ranked strings-ranked))
+            (let c (fpis-resolve-operand (nth definition 4)
+                nodes strings functions nodes-ranked strings-ranked))
             (if (not (fpis-resolution-ok? a)) (list 0 (fpis-resolution-reason a) (nothing))
             (if (not (fpis-resolution-ok? b)) (list 0 (fpis-resolution-reason b) (nothing))
             (if (not (fpis-resolution-ok? c)) (list 0 (fpis-resolution-reason c) (nothing))
@@ -90,21 +130,26 @@
                                           (fpis-resolution-value a)
                                           (fpis-resolution-value b)
                                           (fpis-resolution-value c))))))))
-    (defn fpis-resolve-nodes (remaining all-nodes strings functions acc)
-        (if (nil? remaining) (list 1 "" acc)
+    (defn fpis-resolve-nodes
+        (remaining all-nodes strings functions nodes-ranked strings-ranked acc)
+        (if (nil? remaining) (list 1 "" (reverse acc))
             (do
-                (let resolution (fpis-resolve-node (head remaining) all-nodes strings functions))
+                (let resolution (fpis-resolve-node (head remaining)
+                    all-nodes strings functions nodes-ranked strings-ranked))
                 (if (eq (head resolution) 1)
-                    (fpis-resolve-nodes (tail remaining) all-nodes strings functions
-                                        (append acc (list (nth resolution 2))))
+                    (fpis-resolve-nodes (tail remaining) all-nodes strings
+                        functions nodes-ranked strings-ranked
+                        (cons (nth resolution 2) acc))
                     (list 0 (nth resolution 1) (nothing))))))
 
-    (defn fpis-resolve-functions (remaining nodes acc)
-        (if (nil? remaining) (list 1 "" acc)
+    (defn fpis-resolve-functions (remaining nodes nodes-ranked acc)
+        (if (nil? remaining) (list 1 "" (reverse acc))
             (do
-                (let index (fpis-label-index nodes (nth (head remaining) 1)))
+                (let index (fpis-resolve-label-index nodes
+                    (nth (head remaining) 1) "node/" nodes-ranked))
                 (if (lt index 0) (list 0 "unresolved-function-root" (nothing))
-                    (fpis-resolve-functions (tail remaining) nodes (append acc (list index)))))))
+                    (fpis-resolve-functions
+                        (tail remaining) nodes nodes-ranked (cons index acc))))))
     (defn fpis-string-rows (definitions)
         (if (nil? definitions) (list)
             (cons (nth (head definitions) 1) (fpis-string-rows (tail definitions)))))
@@ -115,14 +160,22 @@
                 (let functions (nth ir 1))
                 (let nodes (nth ir 2))
                 (let strings (nth ir 3))
+                (let nodes-ranked (fpis-ranked-definitions? nodes "node/"))
+                (let strings-ranked
+                    (fpis-ranked-definitions? strings "string/"))
                 (if (not (fpis-unique-labels? functions)) (fpis-refused "duplicate-function-label")
-                (if (not (fpis-unique-labels? nodes)) (fpis-refused "duplicate-node-label")
-                (if (not (fpis-unique-labels? strings)) (fpis-refused "duplicate-string-label")
+                (if (not (if nodes-ranked 1 (fpis-unique-labels? nodes)))
+                    (fpis-refused "duplicate-node-label")
+                (if (not (if strings-ranked 1
+                        (fpis-unique-labels? strings)))
+                    (fpis-refused "duplicate-string-label")
                     (do
-                        (let roots (fpis-resolve-functions functions nodes (list)))
+                        (let roots (fpis-resolve-functions functions nodes
+                            nodes-ranked (list)))
                         (if (not (eq (head roots) 1)) (fpis-refused (nth roots 1))
                             (do
-                                (let rows (fpis-resolve-nodes nodes nodes strings functions (list)))
+                                (let rows (fpis-resolve-nodes nodes nodes strings
+                                    functions nodes-ranked strings-ranked (list)))
                                 (if (not (eq (head rows) 1)) (fpis-refused (nth rows 1))
                                     (do
                                         (let table (pif-table-image-from-parts

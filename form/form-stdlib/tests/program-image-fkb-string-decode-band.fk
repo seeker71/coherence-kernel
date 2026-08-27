@@ -1,0 +1,239 @@
+; program-image-fkb-string-decode-band.fk -- semantic equivalence and the
+; compiler-sized linear-cursor witness.
+;
+; The small rows compare the complete public decode value with pifbd, including
+; refusal position/status/reason.  The large row is a canonical 51,649-byte PIF:
+; 1 root + 1,430 four-int node rows.  Bytes cross into one raw string through
+; fs-append-bytes + fs-read-slice, the same bulk local byte carrier used by the
+; resident path; conversion time is outside both decoder timings.
+;
+; Expected: 32767, followed by a timing line naming raw bytes, list ms, string ms.
+;
+; preludes: form-stdlib/program-image-fkb-string-decode.fk
+
+(do
+    (defn pifsdb-score (ok bit) (if ok bit 0))
+    (defn pifsdb-root ()
+        (fs-path-join (fs-temp-dir) "program-image-fkb-string-decode-band"))
+    (defn pifsdb-path (name) (fs-path-join (pifsdb-root) name))
+    (defn pifsdb-setup ()
+        (do (let _drop (fs-remove-tree (pifsdb-root)))
+            (fs-mkdir (pifsdb-root))))
+    (defn pifsdb-cleanup () (fs-remove-tree (pifsdb-root)))
+
+    ; The append carrier consumes a byte list directly.  Reading the whole file
+    ; returns the raw string without rebuilding it one byte/concat at a time.
+    (defn pifsdb-raw (name bytes)
+        (do
+            (let path (pifsdb-path name))
+            (let _empty (fs-write-text path ""))
+            (let _wrote (fs-append-bytes path bytes))
+            (fs-read-slice path 0 (len bytes))))
+    (defn pifsdb-take (xs n)
+        (if (or (le n 0) (nil? xs)) (empty)
+            (cons (head xs) (pifsdb-take (tail xs) (sub n 1)))))
+    (defn pifsdb-replace (xs i value)
+        (if (nil? xs) (empty)
+            (if (eq i 0) (cons value (tail xs))
+                (cons (head xs) (pifsdb-replace (tail xs) (sub i 1) value)))))
+
+    (defn pifsdb-zero-hash ()
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000")
+    (defn pifsdb-table ()
+        (pif-table-image 1 (list 0) 2
+            (list (pif-node-row 1 42 0 0)
+                  (pif-node-row 12 (sub 0 3) 0 0))
+            1 (list (list 65 66))))
+    (defn pifsdb-symbol-image ()
+        (pif-symbol-image 2
+            (list (pif-symbol-row 0 "core/main")
+                  (pif-symbol-row 1 "core/add"))
+            2
+            (list (pif-node-symbol-row 0 0
+                      (list (pif-symbol-dependency-target 1 1)))
+                  (pif-node-symbol-row 1 1 (empty)))))
+    (defn pifsdb-envelope-with (path content-hash)
+        (pif-envelope-with-symbols "s.fk" "sha256:src" 100 path content-hash
+            101 1 (pifsdb-table) (pifsdb-symbol-image)))
+    (defn pifsdb-actual-hash (path)
+        (sai-sha256-hex
+            (pifbc-payload-bytes (pifsdb-envelope-with path (pifsdb-zero-hash)))))
+    (defn pifsdb-envelope (path)
+        (pifsdb-envelope-with path (pifsdb-actual-hash path)))
+    (defn pifsdb-bytes ()
+        (pifbc-payload-bytes (pifsdb-envelope "s.fkb")))
+
+    (defn pifsdb-equivalent? (bytes name)
+        (do
+            (let raw (pifsdb-raw name bytes))
+            (value_eq (pifbd-decode-bytes bytes) (pifsd-decode-string raw))))
+
+    (defn pifsdb-valid-bits ()
+        (do
+            (let symbol-bytes (pifsdb-bytes))
+            (let symbol-raw (pifsdb-raw "symbol-valid.bin" symbol-bytes))
+            (let old (pifbd-decode-bytes symbol-bytes))
+            (let fresh (pifsd-decode-string symbol-raw))
+            (sum (list
+                (pifsdb-score (value_eq old fresh) 1)
+                (pifsdb-score
+                    (and (pifbd-decoded? fresh)
+                         (eq (pifbd-decode-next fresh) (str_len symbol-raw))) 2)
+                (pifsdb-score
+                    (pifsd-list-eq-string?
+                        (pifbd-payload-bytes (pifbd-decode-payload fresh)) symbol-raw)
+                    4)))))
+
+    (defn pifsdb-malformed-bits ()
+        (do
+            (let bytes (pifsdb-bytes))
+            (let truncated-magic (pifsdb-take bytes 4))
+            (let bad-magic (pifsdb-replace bytes 0 99))
+            (let bad-version (pifsdb-replace bytes 11 1))
+            (let truncated-length (pifsdb-take bytes 14))
+            (let truncated-string (pifsdb-take bytes 30))
+            (let malformed-sign (pifsdb-replace bytes 78 2))
+            (let tail (append-list bytes (list 9)))
+            (let invalid-symbol (pifsdb-replace bytes 324 2))
+            (let tail-old (pifbd-decode-bytes tail))
+            (let tail-fresh
+                (pifsd-decode-string (pifsdb-raw "tail-reason.bin" tail)))
+            (let suite-ok
+                (and (pifsdb-equivalent? truncated-magic "truncated-magic.bin")
+                (and (pifsdb-equivalent? bad-magic "bad-magic.bin")
+                (and (pifsdb-equivalent? bad-version "bad-version.bin")
+                (and (pifsdb-equivalent? truncated-length "truncated-length.bin")
+                (and (pifsdb-equivalent? truncated-string "truncated-string.bin")
+                     (pifsdb-equivalent? malformed-sign "malformed-sign.bin")))))))
+            (sum (list
+                (pifsdb-score suite-ok 8)
+                (pifsdb-score
+                    (and (value_eq tail-old tail-fresh)
+                         (str_eq
+                            (pifbd-decode-reason tail-fresh)
+                            (pifbd-reason-tail-garbage))) 16)
+                (pifsdb-score
+                    (and (pifsdb-equivalent? invalid-symbol "invalid-symbol.bin")
+                         (str_eq
+                            (pifbd-decode-reason
+                                (pifsd-decode-string
+                                    (pifsdb-raw "invalid-symbol-reason.bin" invalid-symbol)))
+                            (pifbd-reason-invalid-symbol-image))) 32)))))
+
+    (defn pifsdb-ready-container ()
+        (pifbc-container-from-envelope
+            (pifsdb-envelope (pifsdb-path "admitted.fkb"))))
+    (defn pifsdb-ready-witness ()
+        (pifbf-file-witness-from-container (pifsdb-ready-container)))
+    (defn pifsdb-nonready-container ()
+        (pifbc-container-from-envelope
+            (pifsdb-envelope-with (pifsdb-path "nonready.fkb") (pifsdb-zero-hash))))
+    (defn pifsdb-admission-bits ()
+        (do
+            (let w (pifsdb-ready-witness))
+            (let bytes (fbw-window-bytes (pifbf-witness-window w)))
+            (let raw (fs-read-slice (pifbf-witness-path w) 0 (len bytes)))
+            (let old (pifbd-admit-witness w))
+            (let fresh (pifsd-admit-string w raw))
+            (let nw (pifbf-file-witness-from-container (pifsdb-nonready-container)))
+            (let nbytes (fbw-window-bytes (pifbf-witness-window nw)))
+            (let nraw
+                (if (gt (len nbytes) 0)
+                    (fs-read-slice (pifbf-witness-path nw) 0 (len nbytes)) ""))
+            (let nold (pifbd-admit-witness nw))
+            (let nfresh (pifsd-admit-string nw nraw))
+            (let malformed (list "not-witness"))
+            (let malformed-old (pifbd-admit-witness malformed))
+            (let malformed-fresh (pifsd-admit-string malformed ""))
+            (let altered (str_concat raw (byte_to_str 9)))
+            (let mismatch (pifsd-admit-string w altered))
+            (sum (list
+                (pifsdb-score (and (pifbd-admitted? fresh) (value_eq old fresh)) 64)
+                (pifsdb-score
+                    (and (str_eq (pifbd-admission-status nfresh)
+                                 (pifbd-admission-status nold))
+                    (and (str_eq (pifbd-admission-reason nfresh)
+                                 (pifbd-admission-reason nold))
+                         (value_eq malformed-old malformed-fresh))) 128)
+                (pifsdb-score
+                    (and (str_eq (pifbd-admission-status mismatch)
+                                 (pifbd-status-investigate))
+                         (str_eq (pifbd-admission-reason mismatch)
+                                 (pifbd-reason-readback-bytes-mismatch))) 256)))))
+
+    (defn pifsdb-presence-bit ()
+        (do
+            (let absent (pifsd-decode-string (nothing)))
+            (let zero (pifsd-decode-string 0))
+            (let one (pifsd-decode-string 1))
+            (let present-empty (pifsd-decode-string ""))
+            (pifsdb-score
+                (and (nothing? absent)
+                (and (str_eq (pifbd-decode-reason zero) (pifbd-reason-invalid-byte))
+                (and (str_eq (pifbd-decode-reason one) (pifbd-reason-invalid-byte))
+                     (str_eq (pifbd-decode-reason present-empty)
+                             (pifbd-reason-truncated-magic))))) 512)))
+
+    (defn pifsdb-large-node-rows-loop (n acc)
+        (if (eq n 0) (reverse acc)
+            (pifsdb-large-node-rows-loop (sub n 1)
+                (cons (pif-node-row 1 42 0 0) acc))))
+    (defn pifsdb-large-node-rows ()
+        (pifsdb-large-node-rows-loop 1430 (empty)))
+    (defn pifsdb-large-envelope ()
+        (pif-envelope "large.fk" "sha256:large" 100 "large.fkb"
+            "sha256:external-content" 101 1
+            (pif-table-image 1 (list 0) 1430 (pifsdb-large-node-rows) 0 (empty))))
+    (defn pifsdb-performance-bits ()
+        (do
+            (let bytes (pifbc-payload-bytes (pifsdb-large-envelope)))
+            (let raw (pifsdb-raw "compiler-sized.bin" bytes))
+            (let t0 (now_unix_ms))
+            (let old (pifbd-decode-bytes bytes))
+            (let t1 (now_unix_ms))
+            (let fresh (pifsd-decode-string raw))
+            (let t2 (now_unix_ms))
+            (let old-ms (sub t1 t0))
+            (let fresh-ms (sub t2 t1))
+            (print_str (str_concat "pifsd-performance bytes="
+                (str_concat (int_to_str (str_len raw))
+                (str_concat " list-ms=" (str_concat (int_to_str old-ms)
+                (str_concat " string-ms=" (int_to_str fresh-ms)))))))
+            (sum (list
+                (pifsdb-score
+                    (and (ge (str_len raw) 51000) (le (str_len raw) 52000)) 1024)
+                (pifsdb-score
+                    (and (pifbd-decoded? old)
+                    (and (pifbd-decoded? fresh) (value_eq old fresh))) 2048)
+                (pifsdb-score (lt fresh-ms old-ms) 4096)
+                (pifsdb-score
+                    (and (gt old-ms 0) (le (mul fresh-ms 2) old-ms)) 8192)))))
+
+    (defn pifsdb-static-bit ()
+        (do
+            (let source
+                (if (ge (file_size "form/form-stdlib/program-image-fkb-string-decode.fk") 0)
+                    (read_file "form/form-stdlib/program-image-fkb-string-decode.fk")
+                    (read_file "../form/form-stdlib/program-image-fkb-string-decode.fk")))
+            (pifsdb-score
+                (and (ge (str_find source "str_byte_at raw pos" 0) 0)
+                (and (lt (str_find source "host-exec" 0) 0)
+                (and (lt (str_find source "http_" 0) 0)
+                (and (lt (str_find source "flatten" 0) 0)
+                (and (lt (str_find source "runtime/fkwu-uni.c" 0) 0)
+                     (lt (str_find source "ops-table" 0) 0)))))) 16384)))
+
+    (defn program-image-fkb-string-decode-band ()
+        (do
+            (let _setup (pifsdb-setup))
+            (let total (sum (list
+                (pifsdb-valid-bits)
+                (pifsdb-malformed-bits)
+                (pifsdb-admission-bits)
+                (pifsdb-presence-bit)
+                (pifsdb-performance-bits)
+                (pifsdb-static-bit))))
+            (let _cleanup (pifsdb-cleanup))
+            total))
+
+    (program-image-fkb-string-decode-band))

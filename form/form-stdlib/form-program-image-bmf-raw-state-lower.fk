@@ -1,0 +1,900 @@
+; form-program-image-bmf-raw-state-lower.fk -- bounded grammar data to raw-state PIF IR.
+;
+; External matcher state is exactly [raw-bytes-string, at, captures]. Pattern
+; results are exactly [code, at, captures, semantic], where 0=no, 1=ready,
+; 2=incomplete, 3=malformed and 4=semantic-timeout. Outer micro-walker fuel
+; timeout remains outside this value and therefore cannot masquerade as code 4.
+;
+; This component stage lowers validated bounded grammar data into linked raw-
+; state PIF IR and witnesses that IR through the micro-walker. It does not yet
+; claim an envelope, admission, FPCPF adapter or health transition.
+;
+; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/program-image-fkb.fk
+; preludes: form-stdlib/form-program-image-symbolic-linker.fk
+; preludes: form-stdlib/form-program-image-bmf-subset-lower.fk
+
+(do
+    (defn fprsl-version () "form-program-image-bmf-raw-state-lower-v1")
+    (defn fprsl-code-no () 0)
+    (defn fprsl-code-ready () 1)
+    (defn fprsl-code-incomplete () 2)
+    (defn fprsl-code-malformed () 3)
+    (defn fprsl-code-semantic-timeout () 4)
+    (defn fprsl-run-byte-limit () 256)
+
+    (defn fprsl-state (raw at captures) (list raw at captures))
+    (defn fprsl-state-raw (state) (nth state 0))
+    (defn fprsl-state-at (state) (nth state 1))
+    (defn fprsl-state-captures (state) (nth state 2))
+    (defn fprsl-result (code at captures semantic)
+        (list code at captures semantic))
+    (defn fprsl-result-code (result) (nth result 0))
+    (defn fprsl-result-at (result) (nth result 1))
+    (defn fprsl-result-captures (result) (nth result 2))
+    (defn fprsl-result-semantic (result) (nth result 3))
+
+    (defn fprsl-image (spec ir)
+        (list "raw-state-descriptor" "bounded-bmf-raw-state-ir" spec ir))
+    (defn fprsl-refused (reason)
+        (list "refused" reason (nothing)))
+    (defn fprsl-image-shape? (result)
+        (if (not (eq (len result) 4)) 0
+        (if (not (str_eq (head result) "raw-state-descriptor")) 0
+        (if (not (str_eq (nth result 1) "bounded-bmf-raw-state-ir")) 0
+        (if (not (fpbsl-spec-shape? (nth result 2))) 0
+        (if (not (fpis-ir-shape? (nth result 3))) 0
+            (fpis-linked? (fpis-link (nth result 3)))))))))
+    (defn fprsl-image? (result)
+        (if (not (fprsl-image-shape? result)) 0
+            (do
+                (let fresh (fprsl-lower (nth result 2)))
+                (if (not (fprsl-image-shape? fresh)) 0
+                (if (not (value_eq (nth result 3) (nth fresh 3))) 0
+                    (fpbsl-int-stream-exact?
+                        (pif-table-numeric-stream
+                            (fpis-table (fpis-link (nth result 3))))
+                        (pif-table-numeric-stream
+                            (fpis-table (fpis-link (nth fresh 3))))))))))
+    (defn fprsl-refused? (result)
+        (if (not (eq (len result) 3)) 0
+        (if (not (str_eq (head result) "refused")) 0
+        (if (not (gt (str_len (nth result 1)) 0)) 0
+            (if (nothing? (nth result 2)) 1 0)))))
+    (defn fprsl-reason (result)
+        (if (fprsl-image? result) ""
+            (if (fprsl-refused? result) (nth result 1) "result-shape")))
+    (defn fprsl-ir (result)
+        (if (fprsl-image? result) (nth result 3) (nothing)))
+
+    ; Compiler state extends the landed symbolic builder with generated
+    ; function definitions. Function labels are data-derived and image-local.
+    ; Function definitions also grow as a stack.  Reversing once at the image
+    ; boundary keeps generation order while avoiding one whole-list copy per
+    ; emitted helper.
+    (defn fprsl-compiler (builder next-function function-stack)
+        (list "bmf-raw-state-compiler-v1" builder next-function function-stack))
+    (defn fprsl-compiler-empty ()
+        (fprsl-compiler (fpbsl-builder-empty) 0 (list)))
+    (defn fprsl-compiler-builder (compiler) (nth compiler 1))
+    (defn fprsl-compiler-next-function (compiler) (nth compiler 2))
+    (defn fprsl-compiler-function-stack (compiler) (nth compiler 3))
+    (defn fprsl-compiler-functions (compiler)
+        (reverse (fprsl-compiler-function-stack compiler)))
+    (defn fprsl-with-builder (compiler builder)
+        (fprsl-compiler builder (fprsl-compiler-next-function compiler)
+            (fprsl-compiler-function-stack compiler)))
+    (defn fprsl-add-function (compiler label root)
+        (fprsl-compiler (fprsl-compiler-builder compiler)
+            (fprsl-compiler-next-function compiler)
+            (cons (fpis-function-def label root)
+                (fprsl-compiler-function-stack compiler))))
+    (defn fprsl-fresh-function-label (compiler prefix)
+        (str_concat prefix
+            (int_to_str (fprsl-compiler-next-function compiler))))
+    (defn fprsl-advance-function (compiler)
+        (fprsl-compiler (fprsl-compiler-builder compiler)
+            (add (fprsl-compiler-next-function compiler) 1)
+            (fprsl-compiler-function-stack compiler)))
+
+    ; A small compiler-only expression vocabulary keeps generated PIF roots
+    ; readable. These tags never enter the image: fprsl-emit-expression lowers
+    ; each one immediately to a symbolic PIF row.
+    (defn fprsl-x0 (tag) (list tag))
+    (defn fprsl-x1 (tag a) (list tag a))
+    (defn fprsl-x2 (tag a b) (list tag a b))
+    (defn fprsl-x3 (tag a b c) (list tag a b c))
+    (defn fprsl-x-int (value) (fprsl-x1 "int" value))
+    (defn fprsl-x-string (value) (fprsl-x1 "string" value))
+    (defn fprsl-x-input () (fprsl-x0 "input"))
+    (defn fprsl-x-nothing () (fprsl-x0 "nothing"))
+    (defn fprsl-x-empty () (fprsl-x0 "empty"))
+    (defn fprsl-x-call (label argument)
+        (list "call" label argument))
+    (defn fprsl-x-list (values)
+        (list "list" values))
+    (defn fprsl-x-add (a b) (fprsl-x2 "add" a b))
+    (defn fprsl-x-sub (a b) (fprsl-x2 "sub" a b))
+    (defn fprsl-x-le (a b) (fprsl-x2 "le" a b))
+    (defn fprsl-x-eq (a b) (fprsl-x2 "eq" a b))
+    (defn fprsl-x-lt (a b) (fprsl-x2 "lt" a b))
+    (defn fprsl-x-if (condition yes no)
+        (fprsl-x3 "if" condition yes no))
+    (defn fprsl-x-and (a b)
+        (fprsl-x-if a b (fprsl-x-int 0)))
+    (defn fprsl-x-or (a b)
+        (fprsl-x-if a (fprsl-x-int 1) b))
+    (defn fprsl-x-nth (value at) (fprsl-x2 "nth" value at))
+    (defn fprsl-x-cons (value tail) (fprsl-x2 "cons" value tail))
+    (defn fprsl-x-head (value) (fprsl-x1 "head" value))
+    (defn fprsl-x-tail (value) (fprsl-x1 "tail" value))
+    (defn fprsl-x-len (value) (fprsl-x1 "len" value))
+    (defn fprsl-x-str-len (value) (fprsl-x1 "str-len" value))
+    (defn fprsl-x-str-eq (a b) (fprsl-x2 "str-eq" a b))
+    (defn fprsl-x-byte-at (value at) (fprsl-x2 "byte-at" value at))
+    (defn fprsl-x-substring (value start end)
+        (fprsl-x3 "substring" value start end))
+    (defn fprsl-x-nothing? (value) (fprsl-x1 "nothing?" value))
+    (defn fprsl-x-trivial-int (value)
+        (fprsl-x1 "trivial-int" value))
+    (defn fprsl-x-trivial-string (value)
+        (fprsl-x1 "trivial-string" value))
+    (defn fprsl-x-nodeid (category)
+        (fprsl-x1 "nodeid" category))
+    (defn fprsl-x-node (category children)
+        (fprsl-x2 "node" category children))
+
+    (defn fprsl-expression-pif-tag (tag)
+        (if (str_eq tag "input") 2
+        (if (str_eq tag "add") 3
+        (if (str_eq tag "sub") 4
+        (if (str_eq tag "le") 5
+        (if (str_eq tag "if") 6
+        (if (str_eq tag "empty") 18
+        (if (str_eq tag "cons") 19
+        (if (str_eq tag "head") 20
+        (if (str_eq tag "tail") 21
+        (if (str_eq tag "len") 22
+        (if (str_eq tag "nth") 23
+        (if (str_eq tag "str-len") 25
+        (if (str_eq tag "str-eq") 26
+        (if (str_eq tag "byte-at") 28
+        (if (str_eq tag "substring") 29
+        (if (str_eq tag "trivial-int") 43
+        (if (str_eq tag "trivial-string") 46
+        (if (str_eq tag "node") 47
+        (if (str_eq tag "nodeid") 91
+        (if (str_eq tag "eq") 102
+        (if (str_eq tag "lt") 103
+        (if (str_eq tag "nothing") 137
+        (if (str_eq tag "nothing?") 138
+            (sub 0 1)))))))))))))))))))))))))
+
+    (defn fprsl-emit-expression-list (builder expressions labels)
+        (if (nil? expressions) (list builder (reverse labels))
+            (do
+                (let one (fprsl-emit-expression builder (head expressions)))
+                (fprsl-emit-expression-list (fpbsl-build-builder one)
+                    (tail expressions)
+                    (cons (fpbsl-build-label one) labels)))))
+    (defn fprsl-emit-expression-children (builder expression)
+        (do
+            (let left (fprsl-emit-expression builder (nth expression 1)))
+            (if (eq (len expression) 2)
+                (fpbsl-add-node (fpbsl-build-builder left)
+                    (fprsl-expression-pif-tag (head expression))
+                    (fpis-node-ref (fpbsl-build-label left))
+                    (fpis-imm 0) (fpis-imm 0))
+                (do
+                    (let right (fprsl-emit-expression
+                        (fpbsl-build-builder left) (nth expression 2)))
+                    (if (eq (len expression) 3)
+                        (fpbsl-add-node (fpbsl-build-builder right)
+                            (fprsl-expression-pif-tag (head expression))
+                            (fpis-node-ref (fpbsl-build-label left))
+                            (fpis-node-ref (fpbsl-build-label right))
+                            (fpis-imm 0))
+                        (do
+                            (let third (fprsl-emit-expression
+                                (fpbsl-build-builder right)
+                                (nth expression 3)))
+                            (fpbsl-add-node (fpbsl-build-builder third)
+                                (fprsl-expression-pif-tag (head expression))
+                                (fpis-node-ref (fpbsl-build-label left))
+                                (fpis-node-ref (fpbsl-build-label right))
+                                (fpis-node-ref
+                                    (fpbsl-build-label third)))))))))
+    (defn fprsl-emit-expression (builder expression)
+        (do
+            (let tag (head expression))
+            (if (str_eq tag "int")
+                (fpbsl-emit-int builder (nth expression 1))
+            (if (str_eq tag "string")
+                (fpbsl-emit-string builder (nth expression 1))
+            (if (str_eq tag "call")
+                (do
+                    (let argument (fprsl-emit-expression
+                        builder (nth expression 2)))
+                    (fpbsl-add-node (fpbsl-build-builder argument) 12
+                        (fpis-function-ref (nth expression 1))
+                        (fpis-node-ref (fpbsl-build-label argument))
+                        (fpis-imm 0)))
+            (if (str_eq tag "list")
+                (do
+                    (let children (fprsl-emit-expression-list builder
+                        (nth expression 1) (list)))
+                    (fpbsl-emit-list (nth children 0) (nth children 1)))
+            (if (or (str_eq tag "input")
+                    (or (str_eq tag "empty")
+                        (str_eq tag "nothing")))
+                (fpbsl-add-node builder (fprsl-expression-pif-tag tag)
+                    (fpis-imm 0) (fpis-imm 0) (fpis-imm 0))
+                (fprsl-emit-expression-children builder expression))))))))
+
+    (defn fprsl-compile-function (compiler label expression)
+        (do
+            (let emitted (fprsl-emit-expression
+                (fprsl-compiler-builder compiler) expression))
+            (fprsl-add-function
+                (fprsl-with-builder compiler
+                    (fpbsl-build-builder emitted))
+                label (fpbsl-build-label emitted))))
+
+    (defn fprsl-label-entry () "raw/entry")
+    (defn fprsl-label-match () "raw/match")
+    (defn fprsl-label-rule () "raw/rule")
+    (defn fprsl-label-rule-cont () "raw/rule-cont")
+    (defn fprsl-label-entry-cont () "raw/entry-cont")
+    (defn fprsl-label-lit () "raw/lit")
+    (defn fprsl-label-range () "raw/range")
+    (defn fprsl-label-run () "raw/run")
+    (defn fprsl-label-run-cont () "raw/run-cont")
+    (defn fprsl-label-seq () "raw/seq")
+    (defn fprsl-label-seq-cont () "raw/seq-cont")
+    (defn fprsl-label-alt () "raw/alt")
+    (defn fprsl-label-alt-cont () "raw/alt-cont")
+    (defn fprsl-label-cap-cont () "raw/cap-cont")
+    (defn fprsl-label-ref-cont () "raw/ref-cont")
+    (defn fprsl-label-rule-find () "raw/rule-find")
+    (defn fprsl-label-capture-find () "raw/capture-find")
+    (defn fprsl-label-template () "raw/template")
+    (defn fprsl-label-template-list () "raw/template-list")
+
+    (defn fprsl-x-at (value at)
+        (fprsl-x-nth value (fprsl-x-int at)))
+    (defn fprsl-x-state (raw at captures)
+        (fprsl-x-list (list raw at captures)))
+    (defn fprsl-x-result (code at captures semantic)
+        (fprsl-x-list (list code at captures semantic)))
+    (defn fprsl-x-state-raw (state) (fprsl-x-at state 0))
+    (defn fprsl-x-state-at (state) (fprsl-x-at state 1))
+    (defn fprsl-x-state-captures (state) (fprsl-x-at state 2))
+    (defn fprsl-x-result-code (result) (fprsl-x-at result 0))
+    (defn fprsl-x-result-at (result) (fprsl-x-at result 1))
+    (defn fprsl-x-result-captures (result) (fprsl-x-at result 2))
+    (defn fprsl-x-result-semantic (result) (fprsl-x-at result 3))
+    (defn fprsl-x-status (code at captures)
+        (fprsl-x-result (fprsl-x-int code) at captures
+            (fprsl-x-nothing)))
+
+    ; raw/lit([state,literal,literal-at,origin-at]) consumes one unseen raw
+    ; byte per recursive CALL. Mismatch returns the origin coordinate; raw
+    ; exhaustion before literal completion is incomplete, never no.
+    (defn fprsl-program-lit ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let literal (fprsl-x-at input 1))
+            (let literal-at (fprsl-x-at input 2))
+            (let origin-at (fprsl-x-at input 3))
+            (let raw (fprsl-x-state-raw state))
+            (let at (fprsl-x-state-at state))
+            (let captures (fprsl-x-state-captures state))
+            (let raw-length (fprsl-x-str-len raw))
+            (let literal-length (fprsl-x-str-len literal))
+            (let malformed (fprsl-x-or
+                (fprsl-x-lt at (fprsl-x-int 0))
+                (fprsl-x-or
+                    (fprsl-x-lt raw-length at)
+                    (fprsl-x-or
+                        (fprsl-x-lt literal-at (fprsl-x-int 0))
+                        (fprsl-x-lt literal-length literal-at)))))
+            (fprsl-x-if malformed
+                (fprsl-x-status (fprsl-code-malformed) at captures)
+                (fprsl-x-if (fprsl-x-eq literal-at literal-length)
+                    (fprsl-x-status (fprsl-code-ready) at captures)
+                    (fprsl-x-if (fprsl-x-eq at raw-length)
+                        (fprsl-x-status
+                            (fprsl-code-incomplete) at captures)
+                        (fprsl-x-if
+                            (fprsl-x-eq
+                                (fprsl-x-byte-at raw at)
+                                (fprsl-x-byte-at literal literal-at))
+                            (fprsl-x-call (fprsl-label-lit)
+                                (fprsl-x-list (list
+                                    (fprsl-x-state raw
+                                        (fprsl-x-add at (fprsl-x-int 1))
+                                        captures)
+                                    literal
+                                    (fprsl-x-add literal-at
+                                        (fprsl-x-int 1))
+                                    origin-at)))
+                            (fprsl-x-status
+                                (fprsl-code-no) origin-at captures)))))))
+
+    ; raw/range([byte,ranges]) returns only exact 0/1. Each range is [lo,hi].
+    (defn fprsl-program-range ()
+        (do
+            (let input (fprsl-x-input))
+            (let byte (fprsl-x-at input 0))
+            (let ranges (fprsl-x-at input 1))
+            (fprsl-x-if
+                (fprsl-x-eq (fprsl-x-len ranges) (fprsl-x-int 0))
+                (fprsl-x-int 0)
+                (fprsl-x-if
+                    (fprsl-x-and
+                        (fprsl-x-le
+                            (fprsl-x-at (fprsl-x-head ranges) 0) byte)
+                        (fprsl-x-le byte
+                            (fprsl-x-at (fprsl-x-head ranges) 1)))
+                    (fprsl-x-int 1)
+                    (fprsl-x-call (fprsl-label-range)
+                        (fprsl-x-list
+                            (list byte (fprsl-x-tail ranges))))))))
+
+    ; raw/run([state,ranges,origin-at,consumed,limit]) delegates the one class
+    ; decision to raw/run-cont so the byte-range walk executes exactly once.
+    (defn fprsl-program-run ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let ranges (fprsl-x-at input 1))
+            (let origin-at (fprsl-x-at input 2))
+            (let consumed (fprsl-x-at input 3))
+            (let limit (fprsl-x-at input 4))
+            (let raw (fprsl-x-state-raw state))
+            (let at (fprsl-x-state-at state))
+            (let captures (fprsl-x-state-captures state))
+            (let raw-length (fprsl-x-str-len raw))
+            (let malformed (fprsl-x-or
+                (fprsl-x-lt at (fprsl-x-int 0))
+                (fprsl-x-lt raw-length at)))
+            (fprsl-x-if malformed
+                (fprsl-x-status (fprsl-code-malformed) at captures)
+                (fprsl-x-if (fprsl-x-eq at raw-length)
+                    (fprsl-x-if
+                        (fprsl-x-eq consumed (fprsl-x-int 0))
+                        (fprsl-x-status
+                            (fprsl-code-incomplete) at captures)
+                        (fprsl-x-status
+                            (fprsl-code-ready) at captures))
+                    (fprsl-x-call (fprsl-label-run-cont)
+                        (fprsl-x-list (list state ranges origin-at consumed
+                            limit
+                            (fprsl-x-call (fprsl-label-range)
+                                (fprsl-x-list (list
+                                    (fprsl-x-byte-at raw at) ranges))))))))))
+
+    (defn fprsl-program-run-cont ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let ranges (fprsl-x-at input 1))
+            (let origin-at (fprsl-x-at input 2))
+            (let consumed (fprsl-x-at input 3))
+            (let limit (fprsl-x-at input 4))
+            (let in-class (fprsl-x-at input 5))
+            (let raw (fprsl-x-state-raw state))
+            (let at (fprsl-x-state-at state))
+            (let captures (fprsl-x-state-captures state))
+            (fprsl-x-if (fprsl-x-eq in-class (fprsl-x-int 1))
+                (fprsl-x-if (fprsl-x-le limit consumed)
+                    (fprsl-x-status
+                        (fprsl-code-semantic-timeout) at captures)
+                    (fprsl-x-call (fprsl-label-run)
+                        (fprsl-x-list (list
+                            (fprsl-x-state raw
+                                (fprsl-x-add at (fprsl-x-int 1)) captures)
+                            ranges origin-at
+                            (fprsl-x-add consumed (fprsl-x-int 1))
+                            limit))))
+                (fprsl-x-if (fprsl-x-eq consumed (fprsl-x-int 0))
+                    (fprsl-x-status
+                        (fprsl-code-no) origin-at captures)
+                    (fprsl-x-status
+                        (fprsl-code-ready) at captures)))))
+
+    ; Sequence and alternative continuations retain the one child result in
+    ; their INPUT. They therefore observe each child CALL exactly once.
+    (defn fprsl-program-seq ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let patterns (fprsl-x-at input 1))
+            (let rules (fprsl-x-at input 2))
+            (fprsl-x-if
+                (fprsl-x-eq (fprsl-x-len patterns) (fprsl-x-int 0))
+                (fprsl-x-status (fprsl-code-ready)
+                    (fprsl-x-state-at state)
+                    (fprsl-x-state-captures state))
+                (fprsl-x-call (fprsl-label-seq-cont)
+                    (fprsl-x-list (list state (fprsl-x-tail patterns) rules
+                        (fprsl-x-call (fprsl-label-match)
+                            (fprsl-x-list (list state
+                                (fprsl-x-head patterns) rules)))))))))
+
+    (defn fprsl-program-seq-cont ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let remaining (fprsl-x-at input 1))
+            (let rules (fprsl-x-at input 2))
+            (let child (fprsl-x-at input 3))
+            (fprsl-x-if
+                (fprsl-x-eq (fprsl-x-result-code child)
+                    (fprsl-x-int (fprsl-code-ready)))
+                (fprsl-x-call (fprsl-label-seq)
+                    (fprsl-x-list (list
+                        (fprsl-x-state (fprsl-x-state-raw state)
+                            (fprsl-x-result-at child)
+                            (fprsl-x-result-captures child))
+                        remaining rules)))
+                child)))
+
+    (defn fprsl-program-alt ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let patterns (fprsl-x-at input 1))
+            (let rules (fprsl-x-at input 2))
+            (fprsl-x-if
+                (fprsl-x-eq (fprsl-x-len patterns) (fprsl-x-int 0))
+                (fprsl-x-status (fprsl-code-no)
+                    (fprsl-x-state-at state)
+                    (fprsl-x-state-captures state))
+                (fprsl-x-call (fprsl-label-alt-cont)
+                    (fprsl-x-list (list state (fprsl-x-tail patterns) rules
+                        (fprsl-x-call (fprsl-label-match)
+                            (fprsl-x-list (list state
+                                (fprsl-x-head patterns) rules)))))))))
+
+    (defn fprsl-program-alt-cont ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let remaining (fprsl-x-at input 1))
+            (let rules (fprsl-x-at input 2))
+            (let child (fprsl-x-at input 3))
+            ; Only exact no retries. ready cuts; incomplete, malformed and
+            ; semantic-timeout propagate without touching the second arm.
+            (fprsl-x-if
+                (fprsl-x-eq (fprsl-x-result-code child)
+                    (fprsl-x-int (fprsl-code-no)))
+                (fprsl-x-call (fprsl-label-alt)
+                    (fprsl-x-list (list state remaining rules)))
+                child)))
+
+    (defn fprsl-program-cap-cont ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let name (fprsl-x-at input 1))
+            (let child (fprsl-x-at input 2))
+            (let raw (fprsl-x-state-raw state))
+            (let start (fprsl-x-state-at state))
+            (fprsl-x-if
+                (fprsl-x-eq (fprsl-x-result-code child)
+                    (fprsl-x-int (fprsl-code-ready)))
+                (fprsl-x-result
+                    (fprsl-x-int (fprsl-code-ready))
+                    (fprsl-x-result-at child)
+                    (fprsl-x-cons
+                        (fprsl-x-list (list name
+                            (fprsl-x-substring raw start
+                                (fprsl-x-result-at child))))
+                        (fprsl-x-result-captures child))
+                    (fprsl-x-result-semantic child))
+                child)))
+
+    (defn fprsl-program-ref-cont ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let child (fprsl-x-at input 1))
+            (fprsl-x-result
+                (fprsl-x-result-code child)
+                (fprsl-x-result-at child)
+                (fprsl-x-state-captures state)
+                (fprsl-x-result-semantic child))))
+
+    (defn fprsl-program-rule-find ()
+        (do
+            (let input (fprsl-x-input))
+            (let name (fprsl-x-at input 0))
+            (let rules (fprsl-x-at input 1))
+            (fprsl-x-if
+                (fprsl-x-eq (fprsl-x-len rules) (fprsl-x-int 0))
+                (fprsl-x-nothing)
+                (fprsl-x-if
+                    (fprsl-x-str-eq name
+                        (fprsl-x-at (fprsl-x-head rules) 0))
+                    (fprsl-x-head rules)
+                    (fprsl-x-call (fprsl-label-rule-find)
+                        (fprsl-x-list
+                            (list name (fprsl-x-tail rules))))))))
+
+    (defn fprsl-program-capture-find ()
+        (do
+            (let input (fprsl-x-input))
+            (let name (fprsl-x-at input 0))
+            (let captures (fprsl-x-at input 1))
+            (fprsl-x-if
+                (fprsl-x-eq (fprsl-x-len captures) (fprsl-x-int 0))
+                (fprsl-x-nothing)
+                (fprsl-x-if
+                    (fprsl-x-str-eq name
+                        (fprsl-x-at (fprsl-x-head captures) 0))
+                    (fprsl-x-at (fprsl-x-head captures) 1)
+                    (fprsl-x-call (fprsl-label-capture-find)
+                        (fprsl-x-list
+                            (list name (fprsl-x-tail captures))))))))
+
+    (defn fprsl-program-template-list ()
+        (do
+            (let input (fprsl-x-input))
+            (let templates (fprsl-x-at input 0))
+            (let captures (fprsl-x-at input 1))
+            (fprsl-x-if
+                (fprsl-x-eq (fprsl-x-len templates) (fprsl-x-int 0))
+                (fprsl-x-empty)
+                (fprsl-x-cons
+                    (fprsl-x-call (fprsl-label-template)
+                        (fprsl-x-list
+                            (list (fprsl-x-head templates) captures)))
+                    (fprsl-x-call (fprsl-label-template-list)
+                        (fprsl-x-list
+                            (list (fprsl-x-tail templates) captures)))))))
+
+    (defn fprsl-program-template ()
+        (do
+            (let input (fprsl-x-input))
+            (let template (fprsl-x-at input 0))
+            (let captures (fprsl-x-at input 1))
+            (let tag (fprsl-x-at template 0))
+            (fprsl-x-if (fprsl-x-str-eq tag
+                    (fprsl-x-string "result-nothing"))
+                (fprsl-x-nothing)
+            (fprsl-x-if (fprsl-x-str-eq tag
+                    (fprsl-x-string "result-int"))
+                (fprsl-x-at template 1)
+            (fprsl-x-if (fprsl-x-str-eq tag
+                    (fprsl-x-string "result-string"))
+                (fprsl-x-at template 1)
+            (fprsl-x-if (fprsl-x-str-eq tag
+                    (fprsl-x-string "result-capture-string"))
+                (fprsl-x-call (fprsl-label-capture-find)
+                    (fprsl-x-list
+                        (list (fprsl-x-at template 1) captures)))
+            (fprsl-x-if (fprsl-x-str-eq tag
+                    (fprsl-x-string "result-trivial-string"))
+                (fprsl-x-trivial-string (fprsl-x-at template 1))
+            (fprsl-x-if (fprsl-x-str-eq tag
+                    (fprsl-x-string "result-trivial-int"))
+                (fprsl-x-trivial-int (fprsl-x-at template 1))
+            (fprsl-x-if (fprsl-x-str-eq tag
+                    (fprsl-x-string "result-capture-trivial-string"))
+                (fprsl-x-trivial-string
+                    (fprsl-x-call (fprsl-label-capture-find)
+                        (fprsl-x-list
+                            (list (fprsl-x-at template 1) captures))))
+            (fprsl-x-if (fprsl-x-str-eq tag
+                    (fprsl-x-string "result-node"))
+                (fprsl-x-node
+                    (fprsl-x-nodeid (fprsl-x-at template 1))
+                    (fprsl-x-call (fprsl-label-template-list)
+                        (fprsl-x-list
+                            (list (fprsl-x-at template 2) captures))))
+                (fprsl-x-nothing)))))))))))
+
+    (defn fprsl-program-match ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let pattern (fprsl-x-at input 1))
+            (let rules (fprsl-x-at input 2))
+            (let tag (fprsl-x-at pattern 0))
+            (let at (fprsl-x-state-at state))
+            (let captures (fprsl-x-state-captures state))
+            (fprsl-x-if (fprsl-x-str-eq tag (fprsl-x-string "lit"))
+                (fprsl-x-call (fprsl-label-lit)
+                    (fprsl-x-list (list state (fprsl-x-at pattern 1)
+                        (fprsl-x-int 0) at)))
+            (fprsl-x-if (fprsl-x-str-eq tag (fprsl-x-string "run"))
+                (fprsl-x-call (fprsl-label-run)
+                    (fprsl-x-list (list state (fprsl-x-at pattern 1) at
+                        (fprsl-x-int 0)
+                        (fprsl-x-int (fprsl-run-byte-limit)))))
+            (fprsl-x-if (fprsl-x-str-eq tag (fprsl-x-string "seq"))
+                (fprsl-x-call (fprsl-label-seq)
+                    (fprsl-x-list (list state (fprsl-x-tail pattern) rules)))
+            (fprsl-x-if (fprsl-x-str-eq tag (fprsl-x-string "alt"))
+                (fprsl-x-call (fprsl-label-alt)
+                    (fprsl-x-list (list state (fprsl-x-tail pattern) rules)))
+            (fprsl-x-if (fprsl-x-str-eq tag (fprsl-x-string "cap"))
+                (fprsl-x-call (fprsl-label-cap-cont)
+                    (fprsl-x-list (list state (fprsl-x-at pattern 1)
+                        (fprsl-x-call (fprsl-label-match)
+                            (fprsl-x-list (list state
+                                (fprsl-x-at pattern 2) rules))))))
+            (fprsl-x-if (fprsl-x-str-eq tag (fprsl-x-string "ref"))
+                (fprsl-x-call (fprsl-label-ref-cont)
+                    (fprsl-x-list (list state
+                        (fprsl-x-call (fprsl-label-rule)
+                            (fprsl-x-list (list state
+                                (fprsl-x-call (fprsl-label-rule-find)
+                                    (fprsl-x-list (list
+                                        (fprsl-x-at pattern 1) rules)))
+                                rules))))))
+                (fprsl-x-status
+                    (fprsl-code-malformed) at captures)))))))))
+
+    (defn fprsl-program-rule ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let rule (fprsl-x-at input 1))
+            (let rules (fprsl-x-at input 2))
+            (fprsl-x-call (fprsl-label-rule-cont)
+                (fprsl-x-list (list state (fprsl-x-at rule 2)
+                    (fprsl-x-call (fprsl-label-match)
+                        (fprsl-x-list
+                            (list state (fprsl-x-at rule 1) rules))))))))
+
+    (defn fprsl-program-rule-cont ()
+        (do
+            (let input (fprsl-x-input))
+            (let template (fprsl-x-at input 1))
+            (let child (fprsl-x-at input 2))
+            (let template-tag (fprsl-x-at template 0))
+            (fprsl-x-if
+                (fprsl-x-eq (fprsl-x-result-code child)
+                    (fprsl-x-int (fprsl-code-ready)))
+                (fprsl-x-result
+                    (fprsl-x-int (fprsl-code-ready))
+                    (fprsl-x-result-at child)
+                    (fprsl-x-result-captures child)
+                    ; result-nothing is semantic identity for this raw stage:
+                    ; exact ref-born 0/1 survives; absent semantic stays nothing.
+                    (fprsl-x-if
+                        (fprsl-x-str-eq template-tag
+                            (fprsl-x-string "result-nothing"))
+                        (fprsl-x-result-semantic child)
+                        (fprsl-x-call (fprsl-label-template)
+                            (fprsl-x-list (list template
+                                (fprsl-x-result-captures child))))))
+                child)))
+
+    (defn fprsl-program-entry-cont ()
+        (do
+            (let input (fprsl-x-input))
+            (let state (fprsl-x-at input 0))
+            (let child (fprsl-x-at input 1))
+            (fprsl-x-if
+                (fprsl-x-eq (fprsl-x-result-code child)
+                    (fprsl-x-int (fprsl-code-ready)))
+                (fprsl-x-if
+                    (fprsl-x-eq (fprsl-x-result-at child)
+                        (fprsl-x-str-len (fprsl-x-state-raw state)))
+                    child
+                    (fprsl-x-status (fprsl-code-malformed)
+                        (fprsl-x-result-at child)
+                        (fprsl-x-result-captures child)))
+                child)))
+
+    ; Validated Form grammar values become ordinary in-image list data. Run
+    ; class names disappear here: their exact byte ranges replace them, so the
+    ; raw reducer never consults a caller-side registry.
+    (defn fprsl-range-expression (range)
+        (fprsl-x-list (list
+            (fprsl-x-int (nth range 0))
+            (fprsl-x-int (nth range 1)))))
+    (defn fprsl-ranges-expressions (ranges)
+        (if (nil? ranges) (list)
+            (cons (fprsl-range-expression (head ranges))
+                (fprsl-ranges-expressions (tail ranges)))))
+    (defn fprsl-pattern-expressions (patterns classes)
+        (if (nil? patterns) (list)
+            (cons (fprsl-pattern-expression (head patterns) classes)
+                (fprsl-pattern-expressions (tail patterns) classes))))
+    (defn fprsl-pattern-expression (pattern classes)
+        (do
+            (let tag (head pattern))
+            (if (str_eq tag "lit")
+                (fprsl-x-list (list
+                    (fprsl-x-string "lit")
+                    (fprsl-x-string (nth pattern 1))))
+            (if (str_eq tag "run")
+                (do
+                    (let class-row
+                        (fpbsl-class-find classes (nth pattern 1)))
+                    (fprsl-x-list (list
+                        (fprsl-x-string "run")
+                        (fprsl-x-list (fprsl-ranges-expressions
+                            (fpbsl-class-ranges class-row))))))
+            (if (str_eq tag "ref")
+                (fprsl-x-list (list
+                    (fprsl-x-string "ref")
+                    (fprsl-x-string (nth pattern 1))))
+            (if (str_eq tag "cap")
+                (fprsl-x-list (list
+                    (fprsl-x-string "cap")
+                    (fprsl-x-string (nth pattern 1))
+                    (fprsl-pattern-expression (nth pattern 2) classes)))
+            (if (or (str_eq tag "seq") (str_eq tag "alt"))
+                (fprsl-x-list
+                    (cons (fprsl-x-string tag)
+                        (fprsl-pattern-expressions
+                            (tail pattern) classes)))
+                (fprsl-x-list (list
+                    (fprsl-x-string "unsupported"))))))))))
+
+    (defn fprsl-category-expressions (values)
+        (if (nil? values) (list)
+            (cons (fprsl-x-int (head values))
+                (fprsl-category-expressions (tail values)))))
+    (defn fprsl-template-expressions (templates)
+        (if (nil? templates) (list)
+            (cons (fprsl-template-expression (head templates))
+                (fprsl-template-expressions (tail templates)))))
+    (defn fprsl-template-expression (template)
+        (do
+            (let tag (head template))
+            (if (str_eq tag "result-nothing")
+                (fprsl-x-list (list (fprsl-x-string tag)))
+            (if (or (str_eq tag "result-int")
+                    (str_eq tag "result-trivial-int"))
+                (fprsl-x-list (list
+                    (fprsl-x-string tag)
+                    (fprsl-x-int (nth template 1))))
+            (if (or (str_eq tag "result-string")
+                    (or (str_eq tag "result-capture-string")
+                    (or (str_eq tag "result-trivial-string")
+                        (str_eq tag "result-capture-trivial-string"))))
+                (fprsl-x-list (list
+                    (fprsl-x-string tag)
+                    (fprsl-x-string (nth template 1))))
+            (if (str_eq tag "result-node")
+                (fprsl-x-list (list
+                    (fprsl-x-string tag)
+                    (fprsl-x-list (fprsl-category-expressions
+                        (nth template 1)))
+                    (fprsl-x-list (fprsl-template-expressions
+                        (nth template 2)))))
+                (fprsl-x-list (list
+                    (fprsl-x-string "unsupported")))))))))
+
+    (defn fprsl-rule-expression (rule classes)
+        (fprsl-x-list (list
+            (fprsl-x-string (fpbsl-rule-name rule))
+            (fprsl-pattern-expression (fpbsl-rule-pattern rule) classes)
+            (fprsl-template-expression (fpbsl-rule-template rule)))))
+    (defn fprsl-rules-expressions (rules classes)
+        (if (nil? rules) (list)
+            (cons (fprsl-rule-expression (head rules) classes)
+                (fprsl-rules-expressions (tail rules) classes))))
+
+    (defn fprsl-program-entry (spec)
+        (do
+            (let grammar (fpbsl-spec-grammar spec))
+            (let classes (fpbsl-spec-classes spec))
+            (let rules (fpbsl-grammar-rules grammar))
+            (let start-rule (fpbsl-rule-find rules
+                (fpbsl-grammar-start grammar)))
+            (let rules-expression
+                (fprsl-x-list (fprsl-rules-expressions rules classes)))
+            ; The public entry accepts raw string only. Cursor zero and the
+            ; empty capture association list are born inside this image.
+            (let state (fprsl-x-state (fprsl-x-input)
+                (fprsl-x-int 0) (fprsl-x-empty)))
+            (fprsl-x-call (fprsl-label-entry-cont)
+                (fprsl-x-list (list state
+                    (fprsl-x-call (fprsl-label-rule)
+                        (fprsl-x-list (list state
+                            (fprsl-rule-expression start-rule classes)
+                            rules-expression))))))))
+
+    (defn fprsl-compile-full-reducer (compiler)
+        (do
+            (let c1 (fprsl-compile-raw-helper-slice compiler))
+            (let c2 (fprsl-compile-function c1
+                (fprsl-label-seq) (fprsl-program-seq)))
+            (let c3 (fprsl-compile-function c2
+                (fprsl-label-seq-cont) (fprsl-program-seq-cont)))
+            (let c4 (fprsl-compile-function c3
+                (fprsl-label-alt) (fprsl-program-alt)))
+            (let c5 (fprsl-compile-function c4
+                (fprsl-label-alt-cont) (fprsl-program-alt-cont)))
+            (let c6 (fprsl-compile-function c5
+                (fprsl-label-cap-cont) (fprsl-program-cap-cont)))
+            (let c7 (fprsl-compile-function c6
+                (fprsl-label-ref-cont) (fprsl-program-ref-cont)))
+            (let c8 (fprsl-compile-function c7
+                (fprsl-label-rule-find) (fprsl-program-rule-find)))
+            (let c9 (fprsl-compile-function c8
+                (fprsl-label-capture-find) (fprsl-program-capture-find)))
+            (let c10 (fprsl-compile-function c9
+                (fprsl-label-template) (fprsl-program-template)))
+            (let c11 (fprsl-compile-function c10
+                (fprsl-label-template-list)
+                (fprsl-program-template-list)))
+            (let c12 (fprsl-compile-function c11
+                (fprsl-label-match) (fprsl-program-match)))
+            (let c13 (fprsl-compile-function c12
+                (fprsl-label-rule) (fprsl-program-rule)))
+            (let c14 (fprsl-compile-function c13
+                (fprsl-label-rule-cont) (fprsl-program-rule-cont)))
+            (fprsl-compile-function c14
+                (fprsl-label-entry-cont) (fprsl-program-entry-cont))))
+
+    (defn fprsl-compile-spec (spec)
+        (do
+            (let reducer (fprsl-compile-full-reducer
+                (fprsl-compiler-empty)))
+            (fprsl-compile-function reducer
+                (fprsl-label-entry) (fprsl-program-entry spec))))
+
+    (defn fprsl-ir-from-compiler (compiler)
+        (do
+            (let builder (fprsl-compiler-builder compiler))
+            (fpis-ir (fprsl-compiler-functions compiler)
+                (fpbsl-builder-nodes builder)
+                (fpbsl-builder-strings builder))))
+
+    (defn fprsl-compile-raw-helper-slice (compiler)
+        (do
+            (let c1 (fprsl-compile-function compiler
+                (fprsl-label-lit) (fprsl-program-lit)))
+            (let c2 (fprsl-compile-function c1
+                (fprsl-label-range) (fprsl-program-range)))
+            (let c3 (fprsl-compile-function c2
+                (fprsl-label-run) (fprsl-program-run)))
+            (fprsl-compile-function c3
+                (fprsl-label-run-cont) (fprsl-program-run-cont))))
+
+    ; Early executable slice used only by the focused band while the complete
+    ; grammar lowerer is still refusing. The literal bytes arrive as data and
+    ; the raw value remains the only matcher input.
+    (defn fprsl-literal-probe-ir (literal)
+        (do
+            (let helpers (fprsl-compile-raw-helper-slice
+                (fprsl-compiler-empty)))
+            (let input (fprsl-x-input))
+            (let at (fprsl-x-state-at input))
+            (let entry (fprsl-compile-function helpers "raw/literal-probe"
+                (fprsl-x-call (fprsl-label-lit)
+                    (fprsl-x-list (list input (fprsl-x-string literal)
+                        (fprsl-x-int 0) at)))))
+            (let builder (fprsl-compiler-builder entry))
+            (fpis-ir (fprsl-compiler-functions entry)
+                (fpbsl-builder-nodes builder)
+                (fpbsl-builder-strings builder))))
+
+    (defn fprsl-lower (spec)
+        (do
+            (let reason (fpbsl-validate spec))
+            (if (gt (str_len reason) 0) (fprsl-refused reason)
+                (do
+                    (let compiler (fprsl-compile-spec spec))
+                    (let ir (fprsl-ir-from-compiler compiler))
+                    (let bound-reason (fpbsl-emitted-bound-reason ir
+                        (fpbsl-spec-limits spec)))
+                    (if (gt (str_len bound-reason) 0)
+                        (fprsl-refused bound-reason)
+                        (do
+                            (let linked (fpis-link ir))
+                            (if (fpis-linked? linked)
+                                (fprsl-image spec ir)
+                                (fprsl-refused (str_concat "linker-"
+                                    (fpis-reason linked))))))))))
+
+    0)
