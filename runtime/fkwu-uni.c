@@ -3993,16 +3993,25 @@ static long long fk_row_pair(long long relsv, long long loc) {
     row = fk_list_push(row, relsv);
     return row;
 }
-static long long fk_ls_buf[512];
+/* Heap-grown: the old static 512 silently dropped a directory's 513th entry —
+ * a partial listing wearing a whole one's skin (the silent-partial family;
+ * healed 2026-08-27). Growth is the capability answer, never a quiet cap. */
+static long long *fk_ls_buf = 0;
+static long long fk_ls_cap = 0;
 static long long fk_ls_n = 0;
 static void fk_ls_reset(void) {
     fk_ls_n = 0;
 }
 static void fk_ls_add(long long sv) {
-    if (fk_ls_n < 512) {
-        fk_ls_buf[fk_ls_n] = sv;
-        fk_ls_n = fk_ls_n + 1;
+    if (fk_ls_n >= fk_ls_cap) {
+        fk_ls_cap = fk_ls_cap == 0 ? 512 : fk_ls_cap * 2;
+        fk_ls_buf = realloc(fk_ls_buf, fk_ls_cap * 8);
+        if (fk_ls_buf == 0) {
+            fk_die("fk_ls_add: out of memory growing directory listing");
+        }
     }
+    fk_ls_buf[fk_ls_n] = sv;
+    fk_ls_n = fk_ls_n + 1;
 }
 static int fk_sv_less(long long a, long long b) {
     long long aa = fk_stri(a);
@@ -4463,7 +4472,15 @@ static long long fk_socket_send_native(long long h, long long sv) {
 }
 static long long fk_socket_recv_native(long long h, long long maxn) {
     fk_os_socket_t s = fk_sock_lookup(h, 2);
-    if (!fk_os_socket_ok(s) || maxn <= 0) {
+    /* Three answers, three meanings (2026-08-27): a dead handle or a recv
+     * ERROR answers the axiom-1 nothing — no byte was measured, and reading
+     * either as "" let a mid-stream failure pass as end-of-response, handing
+     * back a truncated reply as complete. "" is reserved for the two honest
+     * empties: asked-for-zero, and the peer's orderly close. */
+    if (!fk_os_socket_ok(s)) {
+        return fk_nothing;
+    }
+    if (maxn <= 0) {
         return fk_sbuf("", 0);
     }
     static char tmp[65536];
@@ -4471,7 +4488,10 @@ static long long fk_socket_recv_native(long long h, long long maxn) {
         maxn = 65536;
     }
     long long got = fk_os_recv_socket(s, tmp, (unsigned long)maxn);
-    if (got <= 0) {
+    if (got < 0) {
+        return fk_nothing;
+    }
+    if (got == 0) {
         return fk_sbuf("", 0);
     }
     return fk_sbuf(tmp, got);
@@ -7909,7 +7929,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         int fd = open(p, O_RDBIN);
         if (fd < 0) {
-            return fk_sbuf("", 0);
+            /* a file that never was answers nothing, matching read_file (t==63) */
+            return fk_nothing;
         }
         lseek(fd, off, 0);
         fk_sinit();
@@ -7921,7 +7942,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long got = read(fd, fk_sb + fk_sbp, len);
         close(fd);
         if (got < 0) {
-            got = 0;
+            /* a read ERROR is not a short slice: no byte was measured — nothing,
+             * never a silent zero-length truncation (2026-08-27) */
+            return fk_nothing;
         }
         return fk_strv(fk_sintern(fk_sbp, got));
     }
