@@ -14,11 +14,12 @@
 ; pure projection: looking at state/gas/water consumes no gas and changes no
 ; channel.  gas is remaining admitted ingress work; water is queued movement.
 ;
-; One append-only file can carry one logical channel.  A writer appends framed
-; BMF/BML bytes; the recipient gets exactly the new byte suffix.  Parsing those
-; scannerless frames remains the receiving recipe's work.  File truncation is a
-; visible rotation signal, never silently read as the old stream.  Socket and
-; stdin carriers can enqueue through the same rai-offer door when their caller
+; One append-only file can carry one logical channel.  The current physical
+; contract is one writer per channel: that writer appends framed BMF/BML bytes;
+; the recipient gets exactly the new byte suffix. Parsing those scannerless
+; frames remains the receiving recipe's work. File truncation is a visible
+; rotation signal, never silently read as the old stream. Socket and stdin
+; carriers can enqueue through the same rai-offer door when their caller
 ; already has bytes; this organ deliberately never calls their blocking reads.
 ;
 ; Correlated framebuffer control uses the same envelope shape as the canonical
@@ -301,6 +302,53 @@
                             (rai-channel-releases c) (rai-channel-last-exchange c)))
                     (rai-next o) (rai-tick o) (rai-events o)
                     (rai-next-sequence o)))))
+    ; Admission owns the file cursor commit. The observed file size is only an
+    ; upper bound: a concurrent append or short host read may return fewer
+    ; bytes. Positive partial reads enter water as ordinary deltas and advance
+    ; only by their actual byte count. Backpressure, closure, exhausted gas,
+    ; empty short reads and malformed over-reads leave the cursor unchanged.
+    ; Returns [organ, accepted-or-nothing, signal, actual-read-bytes].
+    (defn rai-poll-admit
+        (o identity observed-size exchange kind bytes alternative deadline)
+        (do
+            (let c (rai-find-channel (rai-channels o) identity))
+            (if (nothing? c) (list o (nothing) "nothing" 0)
+                (do
+                    (let cursor (rai-channel-cursor c))
+                    (let available (sub observed-size cursor))
+                    (let received (str_len bytes))
+                    (if (le available 0)
+                        (list o (nothing) "nothing" 0)
+                    (if (gt received available)
+                        (do
+                            (let o2 (rai-observe-event o
+                                (rai-event o identity exchange kind
+                                    "read-beyond-observed-size")))
+                            (list o2 0 "failure" 0))
+                    (if (eq received 0)
+                        (do
+                            (let o2 (rai-observe-event o
+                                (rai-event o identity exchange kind
+                                    "short-read")))
+                            (list o2 0 "short-read" 0))
+                        (do
+                            (let offered (rai-offer o
+                                (rai-envelope identity (rai-next-sequence o)
+                                    exchange kind bytes alternative deadline)))
+                            (if (not (eq (nth offered 1) 1))
+                                (list (nth offered 0) (nth offered 1)
+                                    (nth offered 2) received)
+                                (do
+                                    (let committed (rai-channel-with-cursor
+                                        (nth offered 0) identity
+                                        (add cursor received)))
+                                    (let observed (if (lt received available)
+                                        (rai-observe-event committed
+                                            (rai-event committed identity exchange
+                                                kind "short-read"))
+                                        committed))
+                                    (list observed 1 (nth offered 2)
+                                        received)))))))))))
     (defn rai-poll-file (o identity path exchange kind alternative deadline)
         (do (let c (rai-find-channel (rai-channels o) identity))
             (if (nothing? c) (list o (nothing) "nothing" 0)
@@ -316,13 +364,8 @@
                                 (do (let delta (sub size (rai-channel-cursor c)))
                                     (let bytes (read_file_slice path
                                         (rai-channel-cursor c) delta))
-                                    (let advanced (rai-channel-with-cursor o identity size))
-                                    (let offered (rai-offer advanced
-                                        (rai-envelope identity
-                                            (rai-next-sequence advanced) exchange kind
-                                            bytes alternative deadline)))
-                                    (list (nth offered 0) (nth offered 1)
-                                        (nth offered 2) delta)))))))))
+                                    (rai-poll-admit o identity size exchange kind
+                                        bytes alternative deadline)))))))))
 
     ; Correlated framebuffer observation/control.  Shape is
     ; [direction,exchange,kind,payload,alternative], matching the canonical
