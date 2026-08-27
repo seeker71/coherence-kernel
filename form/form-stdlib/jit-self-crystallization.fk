@@ -1,0 +1,145 @@
+; jit-self-crystallization.fk — let the Form JIT crystallize one of the
+; decisions used by its own lowering engine.
+;
+; This cell observes a bounded integer decision directly from a live Form
+; function, turns its answers into a balanced decision program, lowers it through
+; form-lower.fk, and offers the resulting arm64 image to jit_leaf_inram.  The
+; emitter and the decision-tree birth both live in Form; the host only carries
+; bytes and executes the one-argument leaf ABI.
+;
+; The retained handle keeps identity, source values, program, root and image in
+; one value.  Its NodeID is structural over the complete source value list: no
+; SHA bookkeeping and no fixed function/operation registry mediate identity.
+; Native absence is not rewritten as zero.  jssc-route answers which path spoke,
+; while jssc-apply falls back to the same retained Form data when the carrier is
+; absent.  An invalid tag remains `nothing`.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-asm.fk form-stdlib/form-lower.fk
+
+(do
+    (defn jssc-category () (make_nodeid 31 2 0 180))
+    (defn jssc-version () "jit-self-shape-crystallization-v1")
+
+    (defn jssc-int-nodes-onto (xs acc)
+        (if (eq (len xs) 0) (reverse acc)
+            (jssc-int-nodes-onto (tail xs)
+                (cons (intern_trivial_int (head xs)) acc))))
+    (defn jssc-int-nodes (xs) (jssc-int-nodes-onto xs (empty)))
+    (defn jssc-identity (values)
+        (intern_node (jssc-category)
+            (cons (intern_trivial_string (jssc-version))
+                  (jssc-int-nodes values))))
+
+    ; Builder state = (rows-in-reverse, next-index, most-recent-root).
+    (defn jssc-state (rows next root) (list rows next root))
+    (defn jssc-rows (s) (nth s 0))
+    (defn jssc-next (s) (nth s 1))
+    (defn jssc-root (s) (nth s 2))
+    (defn jssc-emit (row s)
+        (jssc-state (cons row (jssc-rows s))
+                    (add (jssc-next s) 1)
+                    (jssc-next s)))
+
+    ; Emit leaves and comparisons post-order.  Row 0 is the shared ARG.  Every
+    ; generated COND asks ARG <= midpoint and therefore reaches one source value
+    ; in logarithmic native branch depth without a hand-written dispatch table.
+    (defn jssc-build-range (values lo hi s)
+        (if (eq lo hi)
+            (jssc-emit (list 1 (nth values lo)) s)
+            (do (let mid (div (add lo hi) 2))
+                (let ls (jssc-build-range values lo mid s))
+                (let lr (jssc-root ls))
+                (let rs (jssc-build-range values (add mid 1) hi ls))
+                (let rr (jssc-root rs))
+                (let ms (jssc-emit (list 1 mid) rs))
+                (let mi (jssc-root ms))
+                (let cs (jssc-emit (list 5 0 mi 0) ms))
+                (let ci (jssc-root cs))
+                (jssc-emit (list 6 ci lr rr) cs))))
+
+    (defn jssc-build (values)
+        (if (eq (len values) 0) (nothing)
+            (do (let initial (jssc-state (list (list 2)) 1 0))
+                (let tree (jssc-build-range values 0 (sub (len values) 1) initial))
+                (let tree-root (jssc-root tree))
+                ; One outer bound keeps invalid positive tags distinct from a
+                ; legitimate shape value 0 at a valid tag.
+                (let bs (jssc-emit (list 1 (sub (len values) 1)) tree))
+                (let bi (jssc-root bs))
+                (let cs (jssc-emit (list 5 0 bi 0) bs))
+                (let ci (jssc-root cs))
+                (let zs (jssc-emit (list 1 0) cs))
+                (let zi (jssc-root zs))
+                (let top (jssc-emit (list 6 ci tree-root zi) zs))
+                (list (reverse (jssc-rows top)) (jssc-root top)))))
+
+    ; Handle = identity, values, program, root, image, carrier-live.
+    (defn jssc-handle (identity values program root image carrier-live)
+        (list identity values program root image carrier-live))
+    (defn jssc-handle? (h) (if (nothing? h) 0 (if (eq (len h) 6) 1 0)))
+    (defn jssc-handle-identity (h) (nth h 0))
+    (defn jssc-handle-values (h) (nth h 1))
+    (defn jssc-handle-program (h) (nth h 2))
+    (defn jssc-handle-root (h) (nth h 3))
+    (defn jssc-handle-image (h) (nth h 4))
+    (defn jssc-handle-carrier-live? (h) (nth h 5))
+
+    (defn jssc-birth (values)
+        (if (eq (len values) 0) (nothing)
+            (do (let built (jssc-build values))
+                (let program (nth built 0))
+                (let root (nth built 1))
+                (let image (lo-compile-fn program root))
+                (let probe (jit_leaf_inram image 0))
+                (jssc-handle (jssc-identity values) values program root image
+                             (if (nothing? probe) 0 1)))))
+
+    (defn jssc-tag-in-range? (h tag)
+        (if (jssc-handle? h)
+            (if (ge tag 0) (if (le (len (jssc-handle-values h)) tag) 0 1) 0)
+            0))
+    (defn jssc-interpreted (h tag)
+        (if (jssc-tag-in-range? h tag)
+            (nth (jssc-handle-values h) tag)
+            (nothing)))
+    (defn jssc-native (h tag)
+        (if (jssc-tag-in-range? h tag)
+            (if (eq (jssc-handle-carrier-live? h) 1)
+                (jit_leaf_inram (jssc-handle-image h) tag)
+                (nothing))
+            (nothing)))
+    (defn jssc-route (h tag)
+        (if (eq (jssc-tag-in-range? h tag) 0) (list "nothing" (nothing))
+            (do (let native (jssc-native h tag))
+                (if (nothing? native)
+                    (list "form" (jssc-interpreted h tag))
+                    (list "native" native)))))
+    (defn jssc-apply (h tag) (nth (jssc-route h tag) 1))
+    ; Request-by-NodeID: mismatch is a refusal, not an interpreted detour and
+    ; not the legitimate value 0.  The convenience route above is handle-local;
+    ; crossings use this identity-bearing door.
+    (defn jssc-route-at (h requested tag)
+        (if (eq (jssc-handle? h) 0) (list "nothing" (nothing))
+            (if (node_eq requested (jssc-handle-identity h))
+                (jssc-route h tag)
+                (list "refused" (nothing)))))
+    (defn jssc-apply-at (h requested tag) (nth (jssc-route-at h requested tag) 1))
+
+    ; Observe the lowerer's live non-default condition lane rather than copying
+    ; its outputs into another registry.  Tags 14..18 are contiguous, so native
+    ; input is the O(1) slot (tag-14); every other tag keeps lo-cmp-skip's explicit
+    ; default 12 in Form.  Five cases make cold birth small enough to stay inside
+    ; the seconds-scale budget before the route is widened.
+    (defn jssc-lo-cmp-values-onto (tag acc)
+        (if (ge tag 19) (reverse acc)
+            (jssc-lo-cmp-values-onto (add tag 1)
+                (cons (lo-cmp-skip tag) acc))))
+    (defn jssc-lo-cmp-values () (jssc-lo-cmp-values-onto 14 (empty)))
+    (defn jssc-lo-cmp-skip-birth () (jssc-birth (jssc-lo-cmp-values)))
+    (defn jssc-lo-cmp-skip-at (h requested tag)
+        (if (ge tag 14)
+            (if (le tag 18)
+                (jssc-apply-at h requested (sub tag 14))
+                12)
+            12))
+)
