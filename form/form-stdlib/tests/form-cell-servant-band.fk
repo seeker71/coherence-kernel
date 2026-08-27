@@ -1,0 +1,106 @@
+; form-cell-servant-band.fk — one residence compiles and executes arriving
+; source without restarting: frames eval in place, the environment persists
+; across tasks, mid-frame bytes hold as nothing-yet, and a malformed frame
+; fails loudly without ending the residence.
+;
+; Verdict 127 (7 bits):
+;   1    a complete cell-eval frame answers value=42 — a defn is born and
+;        called inside one task
+;   2    THE RESIDENCE CLAIM: the next task calls the defn born in the last
+;        one — (f 5) -> 6 with no new process, no re-send of f's source
+;   4    a frame split across two feeds: the first holds (no reply), the
+;        completing feed answers — nothing-yet, never present-empty
+;   8    two frames in one chunk both answer, in arrival order
+;   16   a malformed frame earns a failure reply and the residence continues:
+;        the next good frame still answers, environment intact
+;   32   a kind this servant does not serve answers choice/kind-not-served
+;   64   a reply frame's fields parse back exactly
+;
+; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/form-eval-full.fk
+; preludes: form-stdlib/form-cli-peer-agent.fk
+; preludes: form-stdlib/form-cli-peer-stream-ingress.fk
+; preludes: form-stdlib/form-cell-servant.fk
+
+(do
+    (defn fcsb-bit (ok weight) (if ok weight 0))
+
+    (defn form-cell-servant-band ()
+        (do
+            ; 1: birth a defn and call it, one task, one reply
+            (let t1 (fcpa-task-frame 1 "cell-eval"
+                "(do (defn f (n) (add n 1))\n    (f 41))"))
+            (let fed1 (fcsv-feed (fcsv-new) t1))
+            (let r1 (nth fed1 1))
+            (let c0 (fcsb-bit
+                (and (eq (len r1) 1)
+                (and (str_eq (fcsv-reply-field (head r1) "signal") "value")
+                     (str_eq (fcsv-reply-field (head r1) "value") "42"))) 1))
+
+            ; 2: the residence claim — f survives into the next task
+            (let fed2 (fcsv-feed (nth fed1 0) (fcpa-task-frame 2 "cell-eval"
+                "(f 5)")))
+            (let r2 (nth fed2 1))
+            (let c1 (fcsb-bit
+                (and (eq (len r2) 1)
+                (and (str_eq (fcsv-reply-field (head r2) "value") "6")
+                     (str_eq (fcsv-reply-field (head r2) "turn") "2"))) 2))
+
+            ; 4: a split frame holds, then completes
+            (let t3 (fcpa-task-frame 3 "cell-eval" "(add 3 4)"))
+            (let cut 24)
+            (let fed3a (fcsv-feed (nth fed2 0) (substring t3 0 cut)))
+            (let fed3b (fcsv-feed (nth fed3a 0)
+                (substring t3 cut (str_len t3))))
+            (let c2 (fcsb-bit
+                (and (eq (len (nth fed3a 1)) 0)
+                (and (eq (len (nth fed3b 1)) 1)
+                     (str_eq (fcsv-reply-field (head (nth fed3b 1)) "value")
+                        "7"))) 4))
+
+            ; 8: two frames in one chunk, replies in arrival order
+            (let fed4 (fcsv-feed (nth fed3b 0)
+                (str_concat (fcpa-task-frame 4 "cell-eval" "(mul 2 3)")
+                    (fcpa-task-frame 5 "cell-eval" "(sub 10 1)"))))
+            (let r4 (nth fed4 1))
+            (let c3 (fcsb-bit
+                (and (eq (len r4) 2)
+                (and (str_eq (fcsv-reply-field (nth r4 0) "value") "6")
+                     (str_eq (fcsv-reply-field (nth r4 1) "value") "9"))) 8))
+
+            ; 16: malformed fails loudly; the residence and its env continue
+            (let bad (str_concat (fcpa-task-open)
+                (str_concat "\nturn=6\nkind=cell-eval\n"
+                    (fcpa-task-close))))
+            (let fed5 (fcsv-feed (nth fed4 0) bad))
+            (let fed6 (fcsv-feed (nth fed5 0) (fcpa-task-frame 7 "cell-eval"
+                "(f 100)")))
+            (let c4 (fcsb-bit
+                (and (eq (len (nth fed5 1)) 1)
+                (and (str_eq (fcsv-reply-field (head (nth fed5 1)) "signal")
+                        "failure")
+                (and (eq (len (nth fed6 1)) 1)
+                     (str_eq (fcsv-reply-field (head (nth fed6 1)) "value")
+                        "101")))) 16))
+
+            ; 32: an unserved kind answers choice, never silence
+            (let fed7 (fcsv-feed (nth fed6 0)
+                (fcpa-task-frame 8 "prose" "hello")))
+            (let c5 (fcsb-bit
+                (and (eq (len (nth fed7 1)) 1)
+                (and (str_eq (fcsv-reply-field (head (nth fed7 1)) "signal")
+                        "choice")
+                     (str_eq (fcsv-reply-field (head (nth fed7 1)) "value")
+                        "kind-not-served"))) 32))
+
+            ; 64: the reply frame round-trips its fields
+            (let reply (fcsv-reply-frame 9 "cell-eval" "value" "77"))
+            (let c6 (fcsb-bit
+                (and (str_eq (fcsv-reply-field reply "turn") "9")
+                (and (str_eq (fcsv-reply-field reply "kind") "cell-eval")
+                (and (str_eq (fcsv-reply-field reply "signal") "value")
+                     (str_eq (fcsv-reply-field reply "value") "77")))) 64))
+
+            (sum (list c0 c1 c2 c3 c4 c5 c6))))
+
+    (form-cell-servant-band))
