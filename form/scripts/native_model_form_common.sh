@@ -65,13 +65,18 @@ nm_discover_recent_sessions() {
     done | sort -u > "$destination"
 }
 
-nm_discover_project_sessions() {
-    destination=$1
-    recent=$(nm_new_temp_dir)
-    all_sessions="$recent/sessions"
-    nm_discover_recent_sessions "$all_sessions"
-    : > "$destination"
-    while IFS= read -r session_file
+nm_discover_project_sessions() (
+    project_destination=$1
+    {
+        for project_session_root in \
+            "$NM_CODEX_HOME/sessions" "$NM_CODEX_HOME/archived_sessions"
+        do
+            if [ -d "$project_session_root" ]; then
+                find "$project_session_root" -type f -name 'rollout-*.jsonl' \
+                    -mtime -45 -print
+            fi
+        done
+    } | sort -u | while IFS= read -r session_file
     do
         session_cwd=$(sed -n '1p' "$session_file" | jq -r \
             '.payload.cwd // ""' 2>/dev/null | \
@@ -80,9 +85,8 @@ nm_discover_project_sessions() {
             *coherence-kernel*|*coherence-network*)
                 printf '%s\n' "$session_file" ;;
         esac
-    done > "$destination"
-    rm -rf "$recent"
-}
+    done > "$project_destination"
+)
 
 nm_root_project_sessions() {
     source_list=$1
