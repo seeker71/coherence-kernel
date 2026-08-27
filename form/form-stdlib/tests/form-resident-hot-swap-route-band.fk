@@ -1,0 +1,107 @@
+; form-resident-hot-swap-route-band.fk -- dynamic NodeID recipe routing and
+; immutable in-flight leases. Expected: 8191.
+;
+; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/form-resident-hot-swap-route.fk
+
+(do
+    (defn frhsb-bit (held weight) (if held weight 0))
+    (defn frhsb-route ()
+        (intern_node (bp "FORM-RESIDENT-HOT-SWAP-ROUTE")
+            (list (intern_trivial_string "model-flow"))))
+    (defn frhsb-recipe (name)
+        (intern_node (bp "FORM-RESIDENT-HOT-SWAP-RECIPE")
+            (list (intern_trivial_string name))))
+    (defn frhsb-callable (name)
+        (intern_node (bp "FORM-RESIDENT-HOT-SWAP-CALLABLE")
+            (list (intern_trivial_string name))))
+    (defn frhsb-evidence (name)
+        (intern_node (bp "FORM-RESIDENT-HOT-SWAP-EVIDENCE")
+            (list (intern_trivial_string name))))
+
+    (let route (frhsb-route))
+    (let gas (frhs-version route 1 (frhsb-recipe "v1")
+        (frhsb-callable "v1") (frhs-gas) (frhs-no-evidence)))
+    (let water (frhs-version route 1 (frhsb-recipe "v1")
+        (frhsb-callable "v1") (frhs-water) (frhsb-evidence "v1")))
+    (let v2 (frhs-version route 2 (frhsb-recipe "v2")
+        (frhsb-callable "v2") (frhs-ice) (frhsb-evidence "v2")))
+    (let conflict (frhs-version route 2 (frhsb-recipe "other-v2")
+        (frhsb-callable "other-v2") (frhs-water) (frhsb-evidence "other-v2")))
+    (let stale (frhs-version route 0 (frhsb-recipe "stale")
+        (frhsb-callable "stale") (frhs-water) (frhsb-evidence "stale")))
+
+    (let pgas (frhs-publish (empty) gas))
+    (let rgas (frhs-resolve (frhs-after pgas) route))
+    (let pwater (frhs-publish (frhs-after pgas) water))
+    (let r1 (frhs-resolve (frhs-after pwater) route))
+    (let lease1 (frhs-enter r1 (intern_trivial_string "turn-1")))
+    (let pv2 (frhs-publish (frhs-after pwater) v2))
+    (let r2 (frhs-resolve (frhs-after pv2) route))
+    (let lease2 (frhs-enter r2 (intern_trivial_string "turn-2")))
+    (let pchoice (frhs-publish (frhs-after pv2) conflict))
+    (let pstale (frhs-publish (frhs-after pv2) stale))
+    (let missing (frhs-resolve (frhs-after pv2)
+        (intern_node (bp "FORM-RESIDENT-HOT-SWAP-ROUTE")
+            (list (intern_trivial_string "missing")))))
+
+    (framebuffer-clear)
+    (let control-channel (intern_node (bp "FORM-CHANNEL")
+        (list (intern_trivial_string "control"))))
+    (let execution-channel (intern_node (bp "FORM-CHANNEL")
+        (list (intern_trivial_string "execution"))))
+    (let e1 (frhs-record control-channel "publish"
+        (frhs-leased-version lease1)
+        "form-resident-hot-swap-route-band.fk" 1))
+    (let e2 (frhs-record execution-channel "enter"
+        (frhs-leased-version lease2)
+        "form-resident-hot-swap-route-band.fk" 2))
+    (let events (framebuffer-events))
+    (let inspection (frhs-inspect-registry (frhs-after pv2)))
+
+    (add
+      (frhsb-bit (str_eq (frhs-publication-status pgas) "retained-gas") 1)
+    (add
+      (frhsb-bit (and (str_eq (frhs-resolution-status rgas) "nothing")
+                      (nothing? (frhs-resolution-version rgas))) 2)
+    (add
+      (frhsb-bit (str_eq (frhs-publication-status pwater) "published") 4)
+    (add
+      (frhsb-bit (and (frhs-lease-valid? lease1)
+                      (node_eq (frhs-leased-recipe lease1)
+                               (frhsb-recipe "v1"))) 8)
+    (add
+      (frhsb-bit (str_eq (frhs-publication-status pv2) "published") 16)
+    (add
+      (frhsb-bit (and (frhs-lease-valid? lease2)
+                      (node_eq (frhs-leased-recipe lease2)
+                               (frhsb-recipe "v2"))) 32)
+    (add
+      ; Publishing v2 never rewrites the v1 lease already flowing.
+      (frhsb-bit (node_eq (frhs-leased-recipe lease1)
+                          (frhsb-recipe "v1")) 64)
+    (add
+      (frhsb-bit (and (str_eq (frhs-publication-status pchoice) "choice")
+                      (eq (len (frhs-after pchoice))
+                          (len (frhs-after pv2)))) 128)
+    (add
+      (frhsb-bit (and (str_eq (frhs-publication-status pstale) "held-stale")
+                      (eq (len (frhs-after pstale))
+                          (len (frhs-after pv2)))) 256)
+    (add
+      (frhsb-bit (and (str_eq (frhs-resolution-status missing) "nothing")
+                      (nothing? (frhs-enter missing
+                          (intern_trivial_string "missing-turn")))) 512)
+    (add
+      (frhsb-bit (and (eq (len (frhs-cut pv2)) 2)
+                      (eq (len (frhs-undo pv2)) 1)) 1024)
+    (add
+      (frhsb-bit (and (eq (len inspection) 2)
+                      (and (eq (nth (head inspection) 4) (frhs-ice))
+                           (eq (nth (head inspection) 6) 1))) 2048)
+      (frhsb-bit (and (eq (len events) 2)
+                  (and (node_eq (frhs-event-channel (head events))
+                                control-channel)
+                  (and (str_eq (frhs-event-action (head events)) "publish")
+                       (node_eq (frhs-event-version (nth events 1))
+                                (frhs-leased-version lease2))))) 4096))))))))))))))

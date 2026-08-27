@@ -1,0 +1,143 @@
+; form-resident-hot-swap-full-pif-band.fk -- two real PIF versions execute
+; through leases in one process. Expected: 1023.
+;
+; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/form-resident-hot-swap-full-pif.fk
+
+(do
+    (defn frhpfb-bit (held weight) (if held weight 0))
+    (defn frhpfb-key () "resident/hot-swap")
+    (defn frhpfb-node (kind value)
+        (if (eq kind 0) (pif-node-row 1 value 0 0)
+            (pif-node-row 137 0 0 0)))
+    (defn frhpfb-pif (name kind value)
+        (pif-envelope-with-symbols
+            (str_concat "resident:" name)
+            (str_concat "source:" name) 1
+            (str_concat "artifact:" name)
+            (str_concat "content:" name) 1 1
+            (pif-table-image 1 (list 0) 1
+                (list (frhpfb-node kind value)) 0 (empty))
+            (pif-symbol-image 1
+                (list (pif-symbol-row 0 (frhpfb-key))) 1
+                (list (pif-node-symbol-row 0 0 (empty))))))
+    (defn frhpfb-envelope (pif)
+        (do
+            (let source (pif-source-from-envelope pif))
+            (let fkb (pif-descriptor-from-envelope pif))
+            (rale-envelope-from-selection source fkb (sad-no-artifact)
+                (ras-selection-from-plan
+                    (rap-plan-from-descriptors source fkb
+                        (sad-no-artifact))))))
+    (defn frhpfb-admission (pif)
+        (do
+            (let payload (pifbd-payload
+                (pif-envelope-source-path pif)
+                (pif-envelope-source-hash pif)
+                (pif-envelope-source-mtime pif)
+                (pif-envelope-artifact-path pif)
+                (pif-envelope-seal-ok pif)
+                (pif-envelope-table pif)
+                (pif-envelope-symbol-image pif)))
+            (pifbd-admission (list "resident-hot-swap-admission")
+                (pifbd-decoded-row payload 1) pif
+                (pifbd-status-admitted) (pifbd-reason-admitted))))
+    (defn frhpfb-binding (pif)
+        (fpcpf-binding (frhpfb-key) (fpcpf-pirc-envelope pif)))
+    (defn frhpfb-receiver (pif binding)
+        (fpcpf-receiver binding (frhpfb-envelope pif)
+            (frhpfb-admission pif)
+            (pise-request-by-canonical-key (frhpfb-key))))
+    (defn frhpfb-bundle (pif caller capability)
+        (do
+            (let binding (frhpfb-binding pif))
+            (let receiver (frhpfb-receiver pif binding))
+            (let call (fpcpf-call-binding caller "invoke" binding capability))
+            (let protocol (fpcpf-registry (list caller binding)
+                (list capability) (list call)))
+            (frhpf-bundle protocol call receiver)))
+    (defn frhpfb-ack-value (result)
+        (fpcp-ack-value
+            (fpcpf-receipt-ack (frhpf-result-receipt result))))
+
+    (let p0 (frhpfb-pif "v0" 0 0))
+    (let p1 (frhpfb-pif "v1" 0 1))
+    (let pn (frhpfb-pif "vn" 1 0))
+    (let caller (fpcpf-binding "resident/caller"
+        (fpcpf-pirc-envelope p0)))
+    (let capability (intern_trivial_string "capability/resident-hot-swap"))
+    (let b0 (frhpfb-bundle p0 caller capability))
+    (let b1 (frhpfb-bundle p1 caller capability))
+    (let bn (frhpfb-bundle pn caller capability))
+    (let bundles (list bn b1 b0))
+    (let argument (list (fpcpf-value (rpmw-kind-int) 0)))
+    (let probe0 (frhpf-probe b0 (intern_trivial_string "probe-0")
+        argument 1))
+    (let probe1 (frhpf-probe b1 (intern_trivial_string "probe-1")
+        argument 1))
+    (let proben (frhpf-probe bn (intern_trivial_string "probe-nothing")
+        argument 1))
+    (let route (intern_node (bp "FORM-RESIDENT-HOT-SWAP-ROUTE")
+        (list (intern_trivial_string "main-flow"))))
+    (let v0 (frhpf-version route 1 b0 (frhs-water) probe0))
+    (let v1 (frhpf-version route 2 b1 (frhs-ice) probe1))
+    (let vn (frhpf-version route 3 bn (frhs-water) proben))
+
+    (let pub0 (frhs-publish (empty) v0))
+    (let lease0 (frhs-enter (frhs-resolve (frhs-cut pub0) route)
+        (intern_trivial_string "turn-0")))
+    (let pub1 (frhs-publish (frhs-cut pub0) v1))
+    (let lease1 (frhs-enter (frhs-resolve (frhs-cut pub1) route)
+        (intern_trivial_string "turn-1")))
+    (let zero (frhpf-execute lease0 bundles
+        (intern_trivial_string "call-0") argument 1))
+    (let one (frhpf-execute lease1 bundles
+        (intern_trivial_string "call-1") argument 1))
+    ; Old lease executes after publication and still reaches v0.
+    (let zero-again (frhpf-execute lease0 bundles
+        (intern_trivial_string "call-0-again") argument 1))
+    (let timed (frhpf-execute lease1 bundles
+        (intern_trivial_string "call-timeout") argument 0))
+    (let pubn (frhs-publish (frhs-cut pub1) vn))
+    (let leasen (frhs-enter (frhs-resolve (frhs-cut pubn) route)
+        (intern_trivial_string "turn-nothing")))
+    (let absent (frhpf-execute leasen bundles
+        (intern_trivial_string "call-nothing") argument 1))
+    (let absent-ack (fpcpf-receipt-ack
+        (frhpf-result-receipt absent)))
+    (let missing (frhpf-execute lease1 (empty)
+        (intern_trivial_string "missing-bundle") argument 1))
+
+    (add
+      (frhpfb-bit (and (str_eq (frhpf-result-status zero) "returned")
+                       (eq (fpcpf-value-raw (frhpfb-ack-value zero)) 0)) 1)
+    (add
+      (frhpfb-bit (and (str_eq (frhpf-result-status one) "returned")
+                       (eq (fpcpf-value-raw (frhpfb-ack-value one)) 1)) 2)
+    (add
+      (frhpfb-bit (and (str_eq (frhpf-result-status zero-again) "returned")
+                       (eq (fpcpf-value-raw (frhpfb-ack-value zero-again)) 0)) 4)
+    (add
+      (frhpfb-bit (str_eq (frhpf-result-status timed) "timeout") 8)
+    (add
+      (frhpfb-bit (and (str_eq (frhpf-result-status absent) "returned")
+                       (and (eq (fpcp-ack-output absent-ack) 1)
+                            (nothing? (fpcpf-value-raw
+                                (fpcp-ack-value absent-ack))))) 16)
+    (add
+      (frhpfb-bit (and (str_eq (frhpf-result-status missing) "nothing")
+                       (nothing? (frhpf-result-receipt missing))) 32)
+    (add
+      (frhpfb-bit (and (node_eq (frhs-leased-recipe lease0)
+                                 (fpcpf-pirc-envelope p0))
+                       (node_eq (frhs-leased-recipe lease1)
+                                 (fpcpf-pirc-envelope p1))) 64)
+    (add
+      (frhpfb-bit (and (eq (len (frhs-cut pub1)) 2)
+                       (eq (len (frhs-undo pub1)) 1)) 128)
+    (add
+      (frhpfb-bit (and (frhpf-bundle-valid? b0)
+                       (frhpf-bundle-valid? b1)) 256)
+      (frhpfb-bit (and (frhs-lease-valid? leasen)
+                       (eq (len (frhs-inspect-registry
+                           (frhs-cut pubn))) 3)) 512)))))))))))
