@@ -1,0 +1,183 @@
+; form-cli-peer-alias-action-cursor.fk -- scannerless decoded-byte action
+; grammar for a locally announced task alias.  The model emits a tiny explicit
+; BML action; Form resolves the caller-born alias and applies only the held,
+; capability-bound frame.  No tokenizer pre-step, global table, or model-made
+; authority participates.
+;
+; preludes: form-stdlib/form-cli-peer-agent.fk
+; Proven by: form-stdlib/tests/form-cli-peer-alias-action-cursor-band.fk
+
+(do
+    ; context = patch-context alias-registry alias action-reference
+    (defn fcpaac-context (patch-ctx registry alias action-ref)
+        (list "form-cli-peer-alias-action-context-v1" patch-ctx registry alias
+              action-ref))
+    (defn fcpaac-patch-context (ctx) (nth ctx 1))
+    (defn fcpaac-registry (ctx) (nth ctx 2))
+    (defn fcpaac-alias (ctx) (nth ctx 3))
+    (defn fcpaac-action-ref (ctx) (nth ctx 4))
+    (defn fcpaac-task-kind (task-ref)
+        (node_value (head (node_children task-ref))))
+    (defn fcpaac-task-payload (task-ref)
+        (node_value (nth (node_children task-ref) 1)))
+    (defn fcpaac-task-patch-ready? (task-ref)
+        (if (eq (fcpa-task-ref? task-ref) 0) 0
+        (if (not (eq (node_type (head (node_children task-ref))) 2)) 0
+        (if (not (eq (node_type (nth (node_children task-ref) 1)) 2)) 0
+        (if (not (str_eq (fcpaac-task-kind task-ref) "repo-patch")) 0
+            (if (gt (str_len (fcpaac-task-payload task-ref)) 0) 1 0))))))
+    (defn fcpaac-resolution (ctx)
+        (fcpa-task-alias-resolve (fcpaac-registry ctx) (fcpaac-alias ctx)))
+    (defn fcpaac-ready? (ctx)
+        (if (nothing? (fcpaac-patch-context ctx)) 0
+        (if (eq (fcpa-action-ref? (fcpaac-action-ref ctx)) 0) 0
+            (do
+                (let resolved (fcpaac-resolution ctx))
+                (if (not (str_eq (fcpa-alias-resolution-status resolved)
+                                 "value")) 0
+                    (fcpaac-task-patch-ready?
+                        (fcpa-alias-resolution-target resolved)))))))
+    ; The action verb stays literal. The alias is resolved by Form before
+    ; execution, so it cannot become a model-authored patch or a restart key.
+    (defn fcpaac-surface (ctx)
+        (if (eq (fcpaac-ready? ctx) 0) ""
+            (str_concat "(agent-act "
+                (str_concat (node_value (head (node_children
+                              (fcpaac-action-ref ctx))))
+                (str_concat " " (str_concat (fcpaac-alias ctx) ")"))))))
+
+    ; The cursor retains only an expected-action sized suffix.  It receives
+    ; decoded byte chunks directly from frxs; no tokenizer boundary, newline,
+    ; or completed-quantum rescan decides the grammar clock.
+    (defn fcpaac-stream-window (expected window chunk)
+        (do
+            (let joined (str_concat window chunk))
+            (if (le (str_len joined) (str_len expected)) joined
+                (substring joined (sub (str_len joined) (str_len expected))
+                    (str_len joined)))))
+    (defn fcpaac-scan (expected window)
+        (if (eq (str_len expected) 0) "failure"
+            (if (ge (str_find window expected 0) 0) "complete"
+                (if (ge (str_find window "(agent-act " 0) 0) "held"
+                    "none"))))
+    ; The first ten seats deliberately match farp-cursor, allowing the
+    ; existing route-neutral result/evidence machinery to observe this grammar
+    ; without relabelling it as a model-generated patch frame.
+    (defn fcpaac-cursor (window scan terminal callbacks injections injected-bytes
+                         model-bytes model-chunks result observation)
+        (list "form-cli-peer-alias-action-cursor-v1" window scan terminal
+              callbacks injections injected-bytes model-bytes model-chunks
+              result observation))
+    (defn fcpaac-fresh ()
+        (fcpaac-cursor "" "none" "open" 0 0 0 0 0 (nothing) ""))
+    (defn fcpaac-streamed (cursor window scan chunk)
+        (fcpaac-cursor window scan (farp-cursor-terminal cursor)
+            (farp-cursor-callbacks cursor) (farp-cursor-injections cursor)
+            (farp-cursor-injected-bytes cursor)
+            (add (farp-cursor-model-bytes cursor) (str_len chunk))
+            (add (farp-cursor-model-chunks cursor) 1)
+            (farp-cursor-result cursor) (farp-cursor-observation cursor)))
+    (defn fcpaac-refusal (reason)
+        (farp-result "failure" reason (farp-no-request reason "") 0 0
+            (nothing) (list "choice" "failure" "cut" "undo" "release")))
+    (defn fcpaac-execute (ctx)
+        (do
+            (let resolved (fcpaac-resolution ctx))
+            (if (or (not (str_eq (fcpa-alias-resolution-status resolved)
+                                 "value"))
+                    (eq (fcpaac-task-patch-ready?
+                         (fcpa-alias-resolution-target resolved)) 0))
+                (fcpaac-refusal "alias-action-resolution-refused")
+                (farp-execute
+                    (farp-context-at-now (fcpaac-patch-context ctx)
+                        (now_unix_ms))
+                    (fcpaac-task-payload
+                        (fcpa-alias-resolution-target resolved))))))
+    (defn fcpaac-feed (ctx cursor chunk)
+        (if (eq (farp-cursor-open? cursor) 0)
+            (farp-transfer
+                (fcpaac-streamed cursor (farp-cursor-window cursor)
+                    (farp-cursor-scan cursor) chunk) chunk "")
+            (if (eq (fcpaac-ready? ctx) 0)
+                (do
+                    (let result (fcpaac-refusal "alias-action-context-refused"))
+                    (let observation (farp-render-result-bml result))
+                    (farp-transfer (farp-cursor-finished cursor "failure"
+                        result observation 0 1) chunk observation))
+                (do
+                    (let expected (fcpaac-surface ctx))
+                    (let window (fcpaac-stream-window expected
+                        (farp-cursor-window cursor) chunk))
+                    (let scan (fcpaac-scan expected window))
+                    (let streamed (fcpaac-streamed cursor window scan chunk))
+                    (if (str_eq scan "complete")
+                        (do
+                            (let result (fcpaac-execute ctx))
+                            (let observation (farp-render-result-bml result))
+                            (farp-transfer (farp-cursor-finished streamed
+                                "complete" result observation 1 1)
+                                chunk observation))
+                        (farp-transfer streamed chunk ""))))))
+    (defn fcpaac-timeout (cursor)
+        (if (and (eq (farp-cursor-open? cursor) 1)
+                 (str_eq (farp-cursor-scan cursor) "held"))
+            (do
+                (let result (farp-result "timeout" "held-action-timeout"
+                    (farp-no-request "held-action-timeout"
+                        (farp-cursor-window cursor)) 0 0 (nothing)
+                    (list "choice" "timeout" "cut" "undo" "release")))
+                (let observation (farp-render-result-bml result))
+                (farp-cursor-finished cursor "timeout" result observation 0 1))
+            cursor))
+
+    ; A complete model action activates the already-held patch frame.  The
+    ; action response, its scanner result, and the guarded effect remain
+    ; distinct: callback evidence is never inferred from fluent text.
+    (defn fcpaac-run-patch (session budget action-ctx)
+        (do
+            (let started (now_unix_ms))
+            (if (eq (fcpaac-ready? action-ctx) 0)
+                (fcpa-result-full session (fcpaac-fresh) ""
+                    (sub (now_unix_ms) started) 0 "repo-patch-alias-action"
+                    0 "nothing" "form-repo-guard" 0 0 0 0
+                    "choice,nothing,cut,undo,release" 0)
+                (do
+                    (let moved (frxs-run-protocol-with-injector session budget
+                        (fcpaac-fresh) action-ctx fcpaac-feed
+                        fcpa-patch-stage-observer fcms-observe-inline-bml))
+                    (let raw-cursor (frxs-cursor moved))
+                    (let held-timeout (if (and
+                        (nothing? (farp-cursor-result raw-cursor))
+                        (str_eq (farp-cursor-scan raw-cursor) "held")) 1 0))
+                    (let cursor (if (eq held-timeout 1)
+                        (fcpaac-timeout raw-cursor) raw-cursor))
+                    (let timeout-session (if (eq held-timeout 1)
+                        (fcms-observe-inline-bml (frxs-session moved)
+                            (farp-cursor-observation cursor))
+                        (frxs-session moved)))
+                    (let kept-session (if (eq (fcms-live? timeout-session) 1)
+                        timeout-session (frxs-session moved)))
+                    (let response (str_concat (frxs-before-text moved)
+                        (frxs-after-text moved)))
+                    (let patch-result (farp-cursor-result cursor))
+                    (if (nothing? patch-result)
+                        (fcpa-result-full kept-session cursor response
+                            (sub (now_unix_ms) started) 0
+                            "repo-patch-alias-action"
+                            (farp-cursor-callbacks cursor) "nothing"
+                            "form-repo-guard" 0 0 0
+                            (farp-cursor-injected-bytes cursor)
+                            (if (str_eq (farp-cursor-scan cursor) "held")
+                                "choice,timeout,cut,undo,release"
+                                "choice,nothing,release") 0)
+                        (fcpa-result-full kept-session cursor response
+                            (sub (now_unix_ms) started)
+                            (farp-contribution patch-result)
+                            "repo-patch-alias-action"
+                            (farp-cursor-callbacks cursor)
+                            (farp-status patch-result) "form-repo-guard"
+                            (if (str_eq (farp-status patch-result) "value") 1 0)
+                            (if (str_eq (farp-status patch-result) "value") 1 0)
+                            0 (farp-cursor-injected-bytes cursor)
+                            (farp-trace-text (farp-trace patch-result)) 0))))))
+    0)
