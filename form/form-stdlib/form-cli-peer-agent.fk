@@ -25,6 +25,147 @@
             (str_concat (fcpa-task-field "task" task)
             (str_concat "\n" (fcpa-task-close)))))))
 
+    ; A meaning already taught during this residence does not need its bytes
+    ; replayed on every turn. The exact kind/payload and action are interned as
+    ; separate nodes; the hot task needs only its payload coordinate plus the
+    ; explicit action verb. The action node remains available to the resident
+    ; registry, but the verb already carries that relation to the current model.
+    ; These coordinates are residence-local by design and are never used as
+    ; restart identity or accepted from another process without resolution here.
+    (defn fcpa-task-ref-category ()
+        (intern_trivial_string "form-cli-peer-task-reference-v1"))
+    (defn fcpa-action-ref-category ()
+        (intern_trivial_string "form-cli-peer-action-reference-v1"))
+    (defn fcpa-task-ref (kind payload)
+        (intern_node (fcpa-task-ref-category)
+            (list (intern_trivial_string kind)
+                  (intern_trivial_string payload))))
+    (defn fcpa-action-ref (action)
+        (intern_node (fcpa-action-ref-category)
+            (list (intern_trivial_string action))))
+    (defn fcpa-task-ref? (node)
+        (if (nothing? node) 0
+            (if (not (node_eq (node_category node)
+                              (fcpa-task-ref-category))) 0
+                (if (eq (len (node_children node)) 2) 1 0))))
+    (defn fcpa-action-ref? (node)
+        (if (nothing? node) 0
+            (if (not (node_eq (node_category node)
+                              (fcpa-action-ref-category))) 0
+                (if (eq (len (node_children node)) 1) 1 0))))
+    (defn fcpa-task-ref-surface (task-ref action-ref)
+        (if (or (eq (fcpa-task-ref? task-ref) 0)
+                (eq (fcpa-action-ref? action-ref) 0))
+            "(agent-task nothing)"
+            (str_concat "(agent-task "
+                (str_concat (node_value (head (node_children action-ref)))
+                (str_concat " "
+                (str_concat (frex-node-coordinate task-ref) ")"))))))
+
+    ; An alias is an announced, residence-local compression of a NodeID.  It
+    ; is never a global symbol table: each registry is supplied by the live
+    ; caller, validates every binding, and preserves absent and competing
+    ; meanings as typed observations instead of silently choosing one.
+    (defn fcpa-alias-binding-category ()
+        (intern_trivial_string "form-cli-peer-alias-binding-v1"))
+    (defn fcpa-alias-registry-category ()
+        (intern_trivial_string "form-cli-peer-alias-registry-v1"))
+    (defn fcpa-alias-byte? (byte)
+        (if (and (ge byte 97) (le byte 122)) 1
+            (if (and (ge byte 48) (le byte 57)) 1
+                (if (eq byte 45) 1 0))))
+    (defn fcpa-alias-safe-at? (alias at)
+        (if (eq at (str_len alias)) 1
+            (if (eq (fcpa-alias-byte? (str_byte_at alias at)) 1)
+                (fcpa-alias-safe-at? alias (add at 1)) 0)))
+    (defn fcpa-alias-safe? (alias)
+        (if (or (nothing? alias) (eq (str_len alias) 0)) 0
+            (fcpa-alias-safe-at? alias 0)))
+    (defn fcpa-alias-binding (alias target)
+        (intern_node (fcpa-alias-binding-category)
+            (list (intern_trivial_string alias) target)))
+    (defn fcpa-alias-binding-alias (binding)
+        (node_value (head (node_children binding))))
+    (defn fcpa-alias-binding-target (binding)
+        (nth (node_children binding) 1))
+    (defn fcpa-alias-binding-valid? (binding)
+        (if (nothing? binding) 0
+        (if (not (node_eq (node_category binding)
+                          (fcpa-alias-binding-category))) 0
+        (if (not (eq (len (node_children binding)) 2)) 0
+        (if (not (eq (node_type (head (node_children binding))) 2)) 0
+        (if (eq (fcpa-alias-safe? (fcpa-alias-binding-alias binding)) 0) 0
+            (if (nothing? (fcpa-alias-binding-target binding)) 0 1)))))))
+    (defn fcpa-alias-registry (bindings)
+        (intern_node (fcpa-alias-registry-category) bindings))
+    (defn fcpa-alias-registry-bindings (registry)
+        (node_children registry))
+    (defn fcpa-alias-bindings-valid? (bindings)
+        (if (nil? bindings) 1
+            (if (eq (fcpa-alias-binding-valid? (head bindings)) 1)
+                (fcpa-alias-bindings-valid? (tail bindings)) 0)))
+    (defn fcpa-alias-binding-matches (bindings alias)
+        (if (nil? bindings) (empty)
+            (if (str_eq (fcpa-alias-binding-alias (head bindings)) alias)
+                (cons (head bindings)
+                    (fcpa-alias-binding-matches (tail bindings) alias))
+                (fcpa-alias-binding-matches (tail bindings) alias))))
+    ; resolution = status reason target choice-count.  `value` is the only
+    ; branch permitted to reach the model; nothing, choice and failure remain
+    ; locally observable signals.
+    (defn fcpa-alias-resolution (status reason target choices)
+        (list status reason target choices))
+    (defn fcpa-alias-resolution-status (resolution) (nth resolution 0))
+    (defn fcpa-alias-resolution-reason (resolution) (nth resolution 1))
+    (defn fcpa-alias-resolution-target (resolution) (nth resolution 2))
+    (defn fcpa-alias-resolution-choices (resolution) (nth resolution 3))
+    (defn fcpa-alias-resolve (registry alias)
+        (if (or (nothing? registry)
+                (not (node_eq (node_category registry)
+                              (fcpa-alias-registry-category))))
+            (fcpa-alias-resolution "failure" "registry-malformed"
+                (nothing) 0)
+            (if (eq (fcpa-alias-safe? alias) 0)
+                (fcpa-alias-resolution "failure" "alias-malformed"
+                    (nothing) 0)
+                (if (eq (fcpa-alias-bindings-valid?
+                         (fcpa-alias-registry-bindings registry)) 0)
+                    (fcpa-alias-resolution "failure" "binding-malformed"
+                        (nothing) 0)
+                    (do
+                        (let matches (fcpa-alias-binding-matches
+                            (fcpa-alias-registry-bindings registry) alias))
+                        (if (eq (len matches) 0)
+                            (fcpa-alias-resolution "nothing" "alias-absent"
+                                (nothing) 0)
+                            (if (gt (len matches) 1)
+                                (fcpa-alias-resolution "choice"
+                                    "alias-ambiguous" (nothing) (len matches))
+                                (fcpa-alias-resolution "value"
+                                    "alias-node-resolved"
+                                    (fcpa-alias-binding-target (head matches))
+                                    1))))))))
+    (defn fcpa-task-alias-resolve (registry alias)
+        (do
+            (let resolved (fcpa-alias-resolve registry alias))
+            (if (and (str_eq (fcpa-alias-resolution-status resolved) "value")
+                     (eq (fcpa-task-ref?
+                          (fcpa-alias-resolution-target resolved)) 0))
+                (fcpa-alias-resolution "failure"
+                    "alias-target-not-task-reference" (nothing) 0)
+                resolved)))
+    (defn fcpa-task-alias-surface (registry alias action-ref)
+        (do
+            (let resolved (fcpa-task-alias-resolve registry alias))
+            (if (or (not (str_eq (fcpa-alias-resolution-status resolved)
+                                 "value"))
+                    (eq (fcpa-action-ref? action-ref) 0))
+                "(agent-task nothing)"
+                (str_concat "(agent-task "
+                    (str_concat
+                        (node_value (head (node_children action-ref)))
+                        (str_concat " " (str_concat alias ")")))))))
+
     (defn fcpa-bootstrap ()
         (str_concat
             "You are a resident local Form peer inside one living fkwu process. "
@@ -35,8 +176,10 @@
         (str_concat
             "Each later tool observation tagged form:agent-task is a new task. "
         (str_concat
+            "Held meanings may arrive as (agent-task verb @task) or (agent-task verb alias); the verb remains explicit while resident-born NodeIDs or locally announced aliases replace repeated nouns. Absent or ambiguous aliases are signals, never guesses. "
+        (str_concat
             "When a task supplies a form:recipe-exec surface and physical execution serves it, emit that exact surface once, then read the typed observation and answer. "
-            "For tasks needing no recipe, answer directly and tersely. Reply now with exactly READY."))))))
+            "For tasks needing no recipe, answer directly and tersely. Reply now with exactly READY.")))))))
 
     ; The first six seats are the original result ABI.  The remaining seats
     ; are route-neutral effect evidence so durable egress never has to pretend
@@ -325,9 +468,9 @@
                         "nothing" "form-repo-guard" 0 0 0 0
                         "choice,nothing,release" 0))
                 (do
-                    (let moved (frxs-run-protocol-with-observer session budget
+                    (let moved (frxs-run-protocol-with-injector session budget
                         (farp-cursor-fresh) patch-ctx farp-cursor-feed
-                        fcpa-patch-stage-observer))
+                        fcpa-patch-stage-observer fcms-observe-inline-bml))
                     (let raw-cursor (frxs-cursor moved))
                     (let held-timeout (if (and
                         (nothing? (farp-cursor-result raw-cursor))
@@ -397,6 +540,41 @@
             (let end (fcpa-task-stage-write "end" turn kind
                 (str_len frame) (fcms-status observed)))
             observed))
+
+    (defn fcpa-observe-task-ref
+        (session turn kind task-ref action-ref)
+        (do
+            (let frame (fcpa-task-ref-surface task-ref action-ref))
+            (let begin (fcpa-task-stage-write "begin" turn kind
+                (str_len frame) "choice"))
+            ; This remains an external task role. Semantic compression removes
+            ; replayed meaning, not the speaker boundary.
+            (let observed (fcms-observe session frame))
+            (let end (fcpa-task-stage-write "end" turn kind
+                (str_len frame) (fcms-status observed)))
+            observed))
+
+    ; Resolve before crossing the model membrane.  A registry miss, conflict,
+    ; or malformed binding emits a content-free stage and keeps the resident
+    ; state untouched; it must not manufacture `(agent-task nothing)` as if it
+    ; were a requested task.
+    (defn fcpa-observe-task-alias
+        (session turn kind registry alias action-ref)
+        (do
+            (let resolved (fcpa-task-alias-resolve registry alias))
+            (if (not (str_eq (fcpa-alias-resolution-status resolved) "value"))
+                (do
+                    (let blocked (fcpa-task-stage-write "resolve" turn kind 0
+                        (fcpa-alias-resolution-status resolved)))
+                    session)
+                (do
+                    (let frame (fcpa-task-alias-surface registry alias action-ref))
+                    (let begin (fcpa-task-stage-write "begin" turn kind
+                        (str_len frame) "choice"))
+                    (let observed (fcms-observe session frame))
+                    (let end (fcpa-task-stage-write "end" turn kind
+                        (str_len frame) (fcms-status observed)))
+                    observed))))
 
     (defn fcpa-signal (session)
         (if (eq (fcms-live? session) 1) "value"
