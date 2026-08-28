@@ -11,7 +11,7 @@
 ; session.  CPU/file work and native Metal model work therefore remain distinct
 ; observable stages, while an external MLX trainer may continue independently.
 ;
-; preludes: form-stdlib/form-cli-peer-append-turnwheel.fk
+; preludes: form-stdlib/form-cli-peer-policy-route.fk
 ; Proven by: form-stdlib/tests/form-cli-peer-contribution-turnwheel-band.fk
 
 (do
@@ -160,6 +160,9 @@
     (defn fcpct-stage-candidate (s) (nth s 3))
     (defn fcpct-stage-ack (s) (nth s 4))
     (defn fcpct-stage-frame (s) (nth s 5))
+    (defn fcpct-stage-with-frame (s frame)
+        (fcpct-stage (fcpct-stage-task s) (fcpct-stage-peer s)
+            (fcpct-stage-candidate s) (fcpct-stage-ack s) frame))
 
     (defn fcpct-make-stage (transport task peer candidate-result)
         (do
@@ -274,9 +277,42 @@
                 (fcpct-make-stage t2 task peer candidate-result)
                 (fcpct-completed s) (fcpct-contributions s))))
 
+    ; A policy transition is a real durable event but never a generated model
+    ; answer or recipe contribution. It keeps the same session value and uses
+    ; the ordinary candidate/append transaction so a failed egress cannot make
+    ; the task seen. The content-free policy frame precedes the result frame.
+    (defn fcpct-policy-peer (session response)
+        (fcpa-result-full session (nothing) response 0 0 "policy" 0 "hit"
+            "form-jit-policy" 0 (nothing) 0 0 "choice,cut,release" 0))
+    (defn fcpct-policy-response (phase selection)
+        (str_concat "policy "
+            (str_concat phase
+                (str_concat ": "
+                    (str_concat (fcpr-selection-signal selection)
+                        (str_concat " / "
+                            (fcpr-selection-reason selection)))))))
+    (defn fcpct-stage-with-policy-frame (s task selection phase)
+        (do
+            (let staged (fcpct-staged s))
+            (fcpct-with s (fcpct-transport s) (fcpct-session s)
+                (fcpct-stage-with-frame staged
+                    (str_concat (fcpr-frame task selection phase)
+                        (fcpct-stage-frame staged)))
+                (fcpct-completed s) (fcpct-contributions s))))
+    (defn fcpct-stage-policy-result (s task selection phase)
+        (do
+            (let transport (fcpct-transport s))
+            (let response (fcpct-policy-response phase selection))
+            (let peer (fcpct-policy-peer (fcpct-session s) response))
+            (let candidate (fcpsi-peer-result (fcpat-peer transport)
+                (fcpsi-task-node task) response 0 (nothing)))
+            (fcpct-stage-with-policy-frame
+                (fcpct-stage-peer-result s task peer candidate
+                    (fcpsi-result-state candidate)) task selection phase)))
+
     ; The only effectful model crossing: an already-live session enters and the
     ; returned session remains staged until its result is durable.
-    (defn fcpct-run-head-peer (s budget)
+    (defn fcpct-run-head-peer (s budget now)
         (do
             (let transport (fcpct-transport s))
             (if (eq (len (fcpat-pending transport)) 0)
@@ -293,23 +329,50 @@
                                 (fcpct-contributions s))
                                 "deduplicated" 1 (fcpsi-task-node task)
                                 "durable-task-node-seen"))
-                        (do
-                            (let stage-context
-                                (fcpa-knowledge-stage-egress-context
-                                    (fcpat-egress transport)
-                                    (fcpat-node-text (fcpsi-task-node task))
-                                    (fcpct-task-key task)))
-                            (let ran (fcpsi-run-peer-with-patch-with-stage-context
-                                (fcpat-peer transport) (fcpct-session s)
-                                (fcpsi-task-node task) budget
-                                (fcpct-patch-context s)
-                                fcpa-knowledge-stage-observer-with-context
-                                stage-context))
-                            (let peer (nth ran 1))
-                            (let candidate-result (nth ran 2))
-                            (let staged (fcpct-stage-peer-result s task peer
-                                candidate-result (nth ran 0)))
-                            (fcpct-persist-staged staged)))))))
+                        (if (str_eq (fcpsi-task-kind task) "publish")
+                            (do
+                                (let published (fcpr-publish transport task now))
+                                (let s1 (fcpct-with s
+                                    (fcpr-selection-transport published)
+                                    (fcpct-session s) (fcpct-staged s)
+                                    (fcpct-completed s) (fcpct-contributions s)))
+                                (fcpct-persist-staged
+                                    (fcpct-stage-policy-result s1 task published
+                                        "publish")))
+                            (do
+                                (let selected (fcpr-select transport task))
+                                (let s1 (fcpct-with s
+                                    (fcpr-selection-transport selected)
+                                    (fcpct-session s) (fcpct-staged s)
+                                    (fcpct-completed s) (fcpct-contributions s)))
+                                (if (nothing? (fcpr-selection-action selected))
+                                    (fcpct-persist-staged
+                                        (fcpct-stage-policy-result s1 task selected
+                                            "select"))
+                                    (do
+                                        (let transport1 (fcpct-transport s1))
+                                        (let stage-context
+                                            (fcpa-knowledge-stage-egress-context
+                                                (fcpat-egress transport1)
+                                                (fcpat-node-text
+                                                    (fcpsi-task-node task))
+                                                (fcpct-task-key task)))
+                                        (let ran
+                                            (fcpsi-run-peer-with-action-with-patch-with-stage-context
+                                                (fcpat-peer transport1)
+                                                (fcpct-session s1)
+                                                (fcpsi-task-node task) budget
+                                                (fcpct-patch-context s1)
+                                                (fcpr-selection-action selected)
+                                                fcpa-knowledge-stage-observer-with-context
+                                                stage-context))
+                                        (let peer (nth ran 1))
+                                        (let candidate-result (nth ran 2))
+                                        (let staged (fcpct-stage-peer-result s1 task peer
+                                            candidate-result (nth ran 0)))
+                                        (fcpct-persist-staged
+                                            (fcpct-stage-with-policy-frame staged task
+                                                selected "select")))))))))))
 
     ; One shared revolution: retry durable output first; otherwise admit one
     ; bounded byte delta and actuate at most one complete task.
@@ -324,6 +387,6 @@
                     (fcpct-result s1 (fcpat-result-signal read)
                         (fcpat-result-present? read) (fcpat-result-value read)
                         "reader-quantum")
-                    (fcpct-run-head-peer s1 budget)))))
+                    (fcpct-run-head-peer s1 budget now)))))
 
     0)
