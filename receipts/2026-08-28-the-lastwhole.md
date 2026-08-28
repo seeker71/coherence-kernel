@@ -83,9 +83,71 @@ keep their native renderer through the dispatch override; fkwu runs the
 Form recipe. Here the reference is the arm that is behind — the mirror of
 yesterday's directive, and the same answer applies to it.
 
-## The heal
+## The heal, first wave
 
-<!-- fleet results land here -->
+Ten healers over the fifty, each forbidden to touch a verdict, a claim, a
+manifest row, or any non-comment line of a band. **Eighteen healed**, and I
+re-ran every one myself cold-cache rather than trusting a self-report — all
+eighteen green:
+
+- **Eight shared one root.** `form/form-stdlib/geometric-learning.fk:200`
+  calls `tn-softmax`, defined only in `transformer-numerics.fk`, and the
+  cell carried **no `; preludes:` line at all** — while its own comment at
+  line 37 had been saying "needs transformer-numerics.fk preluded for
+  tn-softmax" for months. One line at the right depth healed eight bands.
+  Two healers raced to the same fix; the one who had patched it at band
+  level found the sibling's cell-level line, re-validated on theirs, and
+  dropped his own — the better location won, and he reported his footprint
+  as zero. That is the practice working between agents without an arbiter.
+- **`roadmap`** was not an unresolved call at all: `roadmap.fk:46` called
+  the six-parameter `rm-step` with five arguments, and the parser met `)`
+  where `status` belonged. The missing `band` placeholder `"-"` matches
+  every other row in the file.
+- **`symbols.fk`** named `recipe_to_bytes` / `bytes_to_recipe` — native on
+  go/rust/ts, absent on fkwu — so all eighteen cells preluding the symbol
+  algebra inherited two absences. The wire door moved to
+  `symbols-wire.fk`, exactly the repair `cache.fk` made in
+  `cache-binary.fk` on 2026-08-14.
+
+**Thirty-three did not heal, and their honesty is the finding.** Every one
+names a native fkwu does not carry — `write_form_binary`, `read_form_binary`,
+`pg_exec`, `read_file_bytes`, `_dict_get`, `sha256`, `substrate_gc`,
+`jit_compile`, `record_new` — in a branch the band never reaches. They
+resolve to only **three shared cells**: `channel.fk` (~14 bands),
+the `pg_exec` chain (~6), and `model-vitality.fk` (~6). The second wave
+applies the same seam-split to those three, so cells that want the algebra
+stop inheriting a door they cannot open.
+
+## The heal, second wave — the seam split
+
+Three cells, three agents, the `cache-binary.fk` precedent applied at each
+seam. Nine new sibling cells were born (`channel-wire.fk`,
+`persistence-wire.fk`, `model-vitality-store.fk`, and six `*-pg.fk`), each
+carrying only the functions that ask the host for bytes, each leaving a
+comment where the door used to be. **Twenty-four more bands green**, all
+re-verified cold by hand.
+
+The principle, in `channel-wire.fk`'s own words: *what stays behind is
+everything that is only shape... none of them opens a file, so anyone can
+hold them on any arm. What moves here is only the part that asks the host
+for bytes.* A cell should not hand its callers a door they cannot open on
+their own arm.
+
+The agents' discipline is worth recording: every band that stayed red, they
+proved red at HEAD before saying so — copying their files aside, writing
+`git show HEAD:` over them, re-running cold, and restoring byte-for-byte.
+Four such bands came back red and every one was already red at HEAD, each
+strictly better after the split (shamballa-channel `rc=1 diags=4` → `rc=0
+diags=0`; mesh-sensings-route 20 diagnostics → 16, exactly their four gone).
+
+**And the split unmasked the day's deepest catch.** `shamballa-light-channel`
+came back red *healed*: four unresolved calls gone, all four arms agreeing
+at `1111111111` — and the manifest registering `11111111`. The band grew two
+checks in commit `29992e9a`; its row has not been touched since the CN
+import (`1c6f456c`). For all that time the four unresolved calls failed the
+band **first**, so the stale row never got to speak. Healing the loud wound
+let the quiet one be heard. The row now reads the witnessed verdict, and the
+band is four-way green — a stamp re-earned, not restated.
 
 ## Honest floor
 

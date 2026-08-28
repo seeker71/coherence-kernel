@@ -38,6 +38,17 @@
 ; rows now forward through all kernels, including fkwu. The emitted fourth arm
 ; now measures elapsed request duration inside the native carrier. Next floor:
 ; larger bodies and streaming/backpressure rows.
+;
+; preludes: form-stdlib/core.fk form-stdlib/json.fk
+;
+; The store door lives next door. The functions that reach sha256 and the
+; cell-log-store cls-* family moved to form-stdlib/model-vitality-store.fk on
+; 2026-08-28, because cell-log-store.fk reaches `record_new`, which fkwu does not
+; carry — and fkwu resolves every call site in a whole prelude chain, so every
+; consumer of this cell walled on a door it never asked to open. json.fk is
+; named here instead of split out: parse-json / json-string-value /
+; json-int-value are Form all the way down and open on all four arms, so this
+; cell can hold them without handing anyone an absence.
 
 (do
     (defn mv-kind-model-architecture () "model/architecture")
@@ -357,25 +368,13 @@
                     (mv-bytes-eq? (tail a) (tail b))
                     0))))
 
-    (defn mv-payload-digest (payload)
-        (sha256 (cls-str-bytes payload)))
+    ;; mv-payload-digest moved to form-stdlib/model-vitality-store.fk — it is the
+    ;; sha256 door, and sha256.fk + cell-log-store.fk reach record_new, absent on fkwu.
 
     (defn mv-chunk-storage-key (chunk)
         (str_concat "model-chunk:" (mv-chunk-merkle chunk)))
 
-    (defn mv-store-chunk (store chunk payload)
-        (do
-            (let key (mv-chunk-storage-key chunk))
-            (let digest (mv-payload-digest payload))
-            (let next-store (cls-put store key payload))
-            (list
-                "model-chunk-store-receipt"
-                next-store
-                key
-                (mv-chunk-merkle chunk)
-                digest
-                (str_len payload)
-                "stored")))
+    ;; mv-store-chunk moved to form-stdlib/model-vitality-store.fk (cls-put).
     (defn mv-store-chunk-receipt? (value) (mv-row? value "model-chunk-store-receipt" 7))
     (defn mv-store-chunk-store (r) (nth r 1))
     (defn mv-store-chunk-key (r) (nth r 2))
@@ -392,19 +391,7 @@
                  (str_eq (mv-store-chunk-status r) "stored")))))
             false))
 
-    (defn mv-read-stored-chunk (store receipt)
-        (do
-            (let got (cls-get store (mv-store-chunk-key receipt)))
-            (let found (cls-found? got))
-            (let payload (if (eq found 1) (cls-value got) ""))
-            (let digest (if (eq found 1) (mv-payload-digest payload) (list)))
-            (list
-                "model-chunk-read-receipt"
-                (mv-store-chunk-key receipt)
-                found
-                digest
-                (str_len payload)
-                (mv-store-chunk-digest receipt))))
+    ;; mv-read-stored-chunk moved to form-stdlib/model-vitality-store.fk (cls-get).
     (defn mv-read-stored-chunk? (value) (mv-row? value "model-chunk-read-receipt" 6))
     (defn mv-read-chunk-key (r) (nth r 1))
     (defn mv-read-chunk-found (r) (nth r 2))
@@ -425,20 +412,8 @@
                 (if (str_eq carrier "mlx:array") 1
                     (if (str_eq carrier "metal:buffer") 1 0)))))
 
-    (defn mv-carrier-projection-rehash (carrier codec chunk source-digest returned-payload)
-        (do
-            (let returned-digest (mv-payload-digest returned-payload))
-            (list
-                "model-carrier-projection-rehash"
-                carrier
-                codec
-                (mv-chunk-merkle chunk)
-                source-digest
-                returned-digest
-                (str_len returned-payload)
-                (if (eq (mv-bytes-eq? source-digest returned-digest) 1)
-                    "rehash-ok"
-                    "rehash-mismatch"))))
+    ;; mv-carrier-projection-rehash moved to form-stdlib/model-vitality-store.fk
+    ;; (it re-hashes through mv-payload-digest). The row grammar below stays here.
     (defn mv-carrier-projection-rehash? (value)
         (mv-row? value "model-carrier-projection-rehash" 8))
     (defn mv-carrier-projection-carrier (r) (nth r 1))
@@ -532,38 +507,8 @@
                  (gt (len (mv-ingest-chunk-expected-digest c)) 0)))))))))
             false))
 
-    (defn mv-ingest-chunk-read (source spec)
-        (do
-            (let payload (read_file_slice
-                (mv-ingest-source-path source)
-                (mv-ingest-chunk-offset spec)
-                (mv-ingest-chunk-length spec)))
-            (let digest (mv-payload-digest payload))
-            (let chunk (mv-tensor-chunk
-                (mv-ingest-chunk-tensor-id spec)
-                (mv-ingest-chunk-index spec)
-                (mv-ingest-chunk-shape spec)
-                (mv-ingest-chunk-strides spec)
-                (mv-ingest-chunk-format spec)
-                (mv-ingest-chunk-provenance spec)
-                (str_concat "sha256:"
-                    (str_concat (mv-ingest-source-id source)
-                    (str_concat ":chunk-" (cls-int-str (mv-ingest-chunk-index spec)))))
-                1
-                (mv-ingest-chunk-length spec)
-                0))
-            (list
-                "model-ingest-chunk-read"
-                (mv-ingest-source-id source)
-                chunk
-                (mv-ingest-chunk-offset spec)
-                (mv-ingest-chunk-length spec)
-                digest
-                (mv-ingest-chunk-expected-digest spec)
-                payload
-                (if (eq (mv-bytes-eq? digest (mv-ingest-chunk-expected-digest spec)) 1)
-                    "chunk-digest-ok"
-                    "chunk-digest-mismatch"))))
+    ;; mv-ingest-chunk-read moved to form-stdlib/model-vitality-store.fk
+    ;; (mv-payload-digest + cls-int-str). The spec/read row grammar stays here.
     (defn mv-ingest-chunk-read? (value) (mv-row? value "model-ingest-chunk-read" 9))
     (defn mv-ingest-read-source-id (r) (nth r 1))
     (defn mv-ingest-read-chunk (r) (nth r 2))
@@ -583,8 +528,7 @@
                  (eq (mv-bytes-eq? (mv-ingest-read-digest r) (mv-ingest-read-expected-digest r)) 1))))))
             false))
 
-    (defn mv-store-ingest-chunk (store read)
-        (mv-store-chunk store (mv-ingest-read-chunk read) (mv-ingest-read-payload read)))
+    ;; mv-store-ingest-chunk moved to form-stdlib/model-vitality-store.fk (cls-put).
 
     (defn mv-chunk-set-root (source reads root-digest total-bytes)
         (list
@@ -610,25 +554,8 @@
             false))
 
     ;; ---- physical carrier materialize/dematerialize receipts -------------
-    (defn mv-physical-carrier-rehash
-        (carrier host device codec chunk source-digest materialized-bytes returned-payload witness)
-        (do
-            (let returned-digest (mv-payload-digest returned-payload))
-            (list
-                "model-physical-carrier-rehash"
-                carrier
-                host
-                device
-                codec
-                (mv-chunk-merkle chunk)
-                source-digest
-                returned-digest
-                materialized-bytes
-                (str_len returned-payload)
-                witness
-                (if (eq (mv-bytes-eq? source-digest returned-digest) 1)
-                    "physical-rehash-ok"
-                    "physical-rehash-mismatch"))))
+    ;; mv-physical-carrier-rehash moved to form-stdlib/model-vitality-store.fk
+    ;; (it re-hashes through mv-payload-digest). The row grammar below stays here.
     (defn mv-physical-carrier-rehash? (value)
         (mv-row? value "model-physical-carrier-rehash" 12))
     (defn mv-physical-carrier-name (r) (nth r 1))
@@ -693,20 +620,7 @@
             (str_concat "|"
             (str_concat (mv-body-read-eval-merkle body-read) "|row"))))))
     (defn mv-body-read-eval-merkle (body-read) (nth body-read 5))
-    (defn mv-store-live-vitality-row (store body-read)
-        (do
-            (let key (mv-live-vitality-key body-read))
-            (let text (mv-live-vitality-text body-read))
-            (let digest (mv-payload-digest text))
-            (let next-store (cls-put store key text))
-            (list
-                "model-live-vitality-store-row"
-                next-store
-                key
-                body-read
-                digest
-                (str_len text)
-                "stored")))
+    ;; mv-store-live-vitality-row moved to form-stdlib/model-vitality-store.fk (cls-put).
     (defn mv-live-vitality-store-row? (value)
         (mv-row? value "model-live-vitality-store-row" 7))
     (defn mv-live-row-store (r) (nth r 1))
@@ -724,23 +638,7 @@
                  (str_eq (mv-live-row-status r) "stored")))))
             false))
 
-    (defn mv-read-live-vitality-route (store row wellness-state pulse-state release-state)
-        (do
-            (let got (cls-get store (mv-live-row-key row)))
-            (let found (cls-found? got))
-            (let payload (if (eq found 1) (cls-value got) ""))
-            (let digest (if (eq found 1) (mv-payload-digest payload) (list)))
-            (let route (mv-vitality-route (mv-live-row-body-read row) wellness-state pulse-state release-state))
-            (list
-                "model-live-vitality-route-read"
-                (mv-live-row-key row)
-                found
-                digest
-                (mv-live-row-digest row)
-                route
-                (if (eq (mv-bytes-eq? digest (mv-live-row-digest row)) 1)
-                    "live-row-digest-ok"
-                    "live-row-digest-mismatch"))))
+    ;; mv-read-live-vitality-route moved to form-stdlib/model-vitality-store.fk (cls-get).
     (defn mv-live-vitality-route-read? (value)
         (mv-row? value "model-live-vitality-route-read" 7))
     (defn mv-live-route-found (r) (nth r 2))
@@ -850,25 +748,8 @@
             "slow"
             "fast"))
 
-    (defn mv-production-vitality-route (store row pulse runtime)
-        (do
-            (let live-read (mv-read-live-vitality-route
-                store
-                row
-                (mv-production-wellness-state pulse)
-                (mv-production-pulse-state pulse)
-                (mv-production-release-state runtime)))
-            (list
-                "model-production-vitality-route"
-                (mv-live-row-key row)
-                pulse
-                runtime
-                live-read
-                (if (and (mv-production-pulse-valid? pulse)
-                    (and (mv-production-runtime-valid? runtime)
-                         (mv-live-vitality-route-read-valid? live-read)))
-                    "production-route-ok"
-                    "production-route-gap"))))
+    ;; mv-production-vitality-route moved to form-stdlib/model-vitality-store.fk
+    ;; (it reads the live row through mv-read-live-vitality-route).
     (defn mv-production-vitality-route? (value)
         (mv-row? value "model-production-vitality-route" 6))
     (defn mv-production-vitality-route-key (r) (nth r 1))

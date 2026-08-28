@@ -1,0 +1,55 @@
+; native-mutation-side-effects-pg.fk — the Postgres door for the durable
+; side-effect carrier, split out of native-mutation-side-effects.fk 2026-08-28.
+;
+; preludes: form-stdlib/core.fk form-stdlib/native-mutation-side-effects.fk
+;
+; WHY THIS IS ITS OWN CELL. The five nms- wrappers below are the only things in
+; the side-effect carrier that reach pg_exec, and pg_exec is native on
+; go / rust / ts and ABSENT on fkwu. Because they were named inside
+; native-mutation-side-effects.fk, every chain that preluded that cell inherited
+; the absence as five unresolved calls — and fkwu resolves every call site in a
+; whole prelude chain while go / rust / ts bind lazily on execution, so a band
+; that never reaches the door still walled on the fourth arm. Measured
+; 2026-08-28 before this split: tests/native-mutation-side-effects-band.fk
+; answered 11111 on all four arms and still reported fourth-rc=1 diagnostics=5.
+;
+; The receipt and repair SQL — nms-receipts-ddl-sql, nms-receipt-sql,
+; nms-cache-invalidation-receipt-sql, nms-rollback-receipt-sql,
+; nms-parent-edge-repair-sql, nms-contributor-key-audit-sql — asks only for
+; str_concat, which every arm has. So the SQL stays in
+; native-mutation-side-effects.fk where anyone can hold it, and the execution
+; moves here where only its real callers reach for it.
+;
+; This is the repair cache-binary.fk made for read_form_binary /
+; write_form_binary on 2026-08-14, made once at the source instead of once per
+; consumer: a cell should not hand its callers a door they did not ask for and
+; cannot open on their own arm.
+;
+; Callers today: form-stdlib/native-mutation-route-side-effects-pg.fk,
+; form-stdlib/native-idea-valuation-audit-ledger-pg.fk,
+; form-stdlib/native-mutation-public-gate-pg.fk, the four
+; form-stdlib/integration/*-live.fk carriers, and the routers/ mirror
+; routers/native-mutation-route-side-effects.fk.
+
+(do
+    ;; (nms-create-receipts-table conn) → conn. Idempotent receipt table DDL.
+    (defn nms-create-receipts-table (conn)
+        (do (pg_exec conn (nms-receipts-ddl-sql)) conn))
+
+    ;; (nms-record-cache-invalidation conn mutation-id node-id) → conn.
+    (defn nms-record-cache-invalidation (conn mutation-id node-id)
+        (do (pg_exec conn (nms-cache-invalidation-receipt-sql mutation-id node-id)) conn))
+
+    ;; (nms-repair-parent-edge conn ...) → conn. Upserts the parent-of edge.
+    (defn nms-repair-parent-edge (conn edge-id mutation-id parent-id child-id author)
+        (do (pg_exec conn (nms-parent-edge-repair-sql edge-id mutation-id parent-id child-id author)) conn))
+
+    ;; (nms-audit-contributor-key conn key-hash) → conn. Refreshes last_used_at.
+    (defn nms-audit-contributor-key (conn key-hash)
+        (do (pg_exec conn (nms-contributor-key-audit-sql key-hash)) conn))
+
+    ;; (nms-record-rollback-receipt conn mutation-id node-id) → conn.
+    (defn nms-record-rollback-receipt (conn mutation-id node-id)
+        (do (pg_exec conn (nms-rollback-receipt-sql mutation-id node-id)) conn))
+
+    0)

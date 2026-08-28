@@ -1,0 +1,196 @@
+; model-vitality-store.fk — the segmented-store and digest door for model
+; vitality, split out of model-vitality.fk 2026-08-28.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/cell-log-store.fk form-stdlib/model-vitality.fk
+;
+; WHY THIS IS ITS OWN CELL. Ten functions in model-vitality.fk reach the cell
+; log store — sha256 / cls-str-bytes / cls-put / cls-get / cls-found? /
+; cls-value / cls-int-str — and cell-log-store.fk reaches `record_new`, which is
+; native on go / rust / ts and ABSENT on fkwu (probed 2026-08-28: of record_new,
+; record_set, record_get, record_keys, file_append_bytes, read_file_slice and
+; http_get, record_new alone answers [unresolved-call] on the fourth arm).
+; Because those ten were named inside model-vitality.fk, every chain that
+; preluded model-vitality.fk inherited the absence — eleven unresolved calls on
+; the fourth arm — and an unresolved call answers `nothing` quietly under
+; axiom-5, so a band's bits that touch one read 0 without the band saying so.
+; fkwu resolves every call site in a whole prelude chain; go / rust / ts bind
+; lazily on execution. So bands that never reach the store walled anyway.
+;
+; This is the repair cache-binary.fk made for read_form_binary /
+; write_form_binary on 2026-08-14, and symbols-wire.fk made for recipe_to_bytes
+; / bytes_to_recipe on 2026-08-28, made once at the source instead of once per
+; consumer: a cell should not hand its callers a door they did not ask for and
+; cannot open on their own arm. The vitality algebra — rows, scores, focus,
+; lineage, carrier grammar, production and HTTP receipt shapes, and every
+; validity gate — stays in model-vitality.fk where anyone can hold it on any
+; arm. The door is not smaller; it is where its callers reach for it.
+;
+; The digest helper mv-payload-digest travels with the door because sha256 is
+; the store's own hash, and the four re-hash receipt builders travel with it
+; because they are that digest under other names.
+;
+; Callers today: form-stdlib/tests/model-vitality-storage-band.fk,
+; form-stdlib/tests/model-vitality-physical-band.fk, and
+; form-stdlib/tests/model-vitality-production-band.fk — the three bands that
+; prove real file-backed storage. They already carried sha256.fk and
+; cell-log-store.fk; now they carry the door too, and no one else does.
+;
+; These bands stay red on the fourth arm until fkwu grows record_new. That
+; absence is now named in one cell instead of spread through every consumer.
+
+(do
+    (defn mv-payload-digest (payload)
+        (sha256 (cls-str-bytes payload)))
+
+    (defn mv-store-chunk (store chunk payload)
+        (do
+            (let key (mv-chunk-storage-key chunk))
+            (let digest (mv-payload-digest payload))
+            (let next-store (cls-put store key payload))
+            (list
+                "model-chunk-store-receipt"
+                next-store
+                key
+                (mv-chunk-merkle chunk)
+                digest
+                (str_len payload)
+                "stored")))
+
+    (defn mv-read-stored-chunk (store receipt)
+        (do
+            (let got (cls-get store (mv-store-chunk-key receipt)))
+            (let found (cls-found? got))
+            (let payload (if (eq found 1) (cls-value got) ""))
+            (let digest (if (eq found 1) (mv-payload-digest payload) (list)))
+            (list
+                "model-chunk-read-receipt"
+                (mv-store-chunk-key receipt)
+                found
+                digest
+                (str_len payload)
+                (mv-store-chunk-digest receipt))))
+
+    (defn mv-carrier-projection-rehash (carrier codec chunk source-digest returned-payload)
+        (do
+            (let returned-digest (mv-payload-digest returned-payload))
+            (list
+                "model-carrier-projection-rehash"
+                carrier
+                codec
+                (mv-chunk-merkle chunk)
+                source-digest
+                returned-digest
+                (str_len returned-payload)
+                (if (eq (mv-bytes-eq? source-digest returned-digest) 1)
+                    "rehash-ok"
+                    "rehash-mismatch"))))
+
+    (defn mv-ingest-chunk-read (source spec)
+        (do
+            (let payload (read_file_slice
+                (mv-ingest-source-path source)
+                (mv-ingest-chunk-offset spec)
+                (mv-ingest-chunk-length spec)))
+            (let digest (mv-payload-digest payload))
+            (let chunk (mv-tensor-chunk
+                (mv-ingest-chunk-tensor-id spec)
+                (mv-ingest-chunk-index spec)
+                (mv-ingest-chunk-shape spec)
+                (mv-ingest-chunk-strides spec)
+                (mv-ingest-chunk-format spec)
+                (mv-ingest-chunk-provenance spec)
+                (str_concat "sha256:"
+                    (str_concat (mv-ingest-source-id source)
+                    (str_concat ":chunk-" (cls-int-str (mv-ingest-chunk-index spec)))))
+                1
+                (mv-ingest-chunk-length spec)
+                0))
+            (list
+                "model-ingest-chunk-read"
+                (mv-ingest-source-id source)
+                chunk
+                (mv-ingest-chunk-offset spec)
+                (mv-ingest-chunk-length spec)
+                digest
+                (mv-ingest-chunk-expected-digest spec)
+                payload
+                (if (eq (mv-bytes-eq? digest (mv-ingest-chunk-expected-digest spec)) 1)
+                    "chunk-digest-ok"
+                    "chunk-digest-mismatch"))))
+
+    (defn mv-store-ingest-chunk (store read)
+        (mv-store-chunk store (mv-ingest-read-chunk read) (mv-ingest-read-payload read)))
+
+    (defn mv-physical-carrier-rehash
+        (carrier host device codec chunk source-digest materialized-bytes returned-payload witness)
+        (do
+            (let returned-digest (mv-payload-digest returned-payload))
+            (list
+                "model-physical-carrier-rehash"
+                carrier
+                host
+                device
+                codec
+                (mv-chunk-merkle chunk)
+                source-digest
+                returned-digest
+                materialized-bytes
+                (str_len returned-payload)
+                witness
+                (if (eq (mv-bytes-eq? source-digest returned-digest) 1)
+                    "physical-rehash-ok"
+                    "physical-rehash-mismatch"))))
+
+    (defn mv-store-live-vitality-row (store body-read)
+        (do
+            (let key (mv-live-vitality-key body-read))
+            (let text (mv-live-vitality-text body-read))
+            (let digest (mv-payload-digest text))
+            (let next-store (cls-put store key text))
+            (list
+                "model-live-vitality-store-row"
+                next-store
+                key
+                body-read
+                digest
+                (str_len text)
+                "stored")))
+
+    (defn mv-read-live-vitality-route (store row wellness-state pulse-state release-state)
+        (do
+            (let got (cls-get store (mv-live-row-key row)))
+            (let found (cls-found? got))
+            (let payload (if (eq found 1) (cls-value got) ""))
+            (let digest (if (eq found 1) (mv-payload-digest payload) (list)))
+            (let route (mv-vitality-route (mv-live-row-body-read row) wellness-state pulse-state release-state))
+            (list
+                "model-live-vitality-route-read"
+                (mv-live-row-key row)
+                found
+                digest
+                (mv-live-row-digest row)
+                route
+                (if (eq (mv-bytes-eq? digest (mv-live-row-digest row)) 1)
+                    "live-row-digest-ok"
+                    "live-row-digest-mismatch"))))
+
+    (defn mv-production-vitality-route (store row pulse runtime)
+        (do
+            (let live-read (mv-read-live-vitality-route
+                store
+                row
+                (mv-production-wellness-state pulse)
+                (mv-production-pulse-state pulse)
+                (mv-production-release-state runtime)))
+            (list
+                "model-production-vitality-route"
+                (mv-live-row-key row)
+                pulse
+                runtime
+                live-read
+                (if (and (mv-production-pulse-valid? pulse)
+                    (and (mv-production-runtime-valid? runtime)
+                         (mv-live-vitality-route-read-valid? live-read)))
+                    "production-route-ok"
+                    "production-route-gap"))))
+)
