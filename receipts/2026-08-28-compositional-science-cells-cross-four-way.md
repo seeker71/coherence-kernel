@@ -15,6 +15,10 @@ Physics now derives rather than merely labels its output dimensions:
 - mass × acceleration becomes force;
 - `1/2 × mass × speed²` becomes energy.
 
+The next physics row adds work: force × displacement derives energy, witnessed
+as `4 N × 3 m = 12 J` with the energy dimension derived by the same exponent
+composition rather than assigned by a special unit name.
+
 The same quantity surface now checks a conserved state transition. Two bodies
 carry total momentum `6 kg·m/s` before and after a simple velocity exchange;
 the model derives the momentum dimension from mass × speed and verifies the
@@ -28,12 +32,17 @@ G=3, T=4. The pairing is generic over an input relation, maps ACGT to TGCA,
 returns the original strand when applied twice, and returns `nothing` for an
 unknown base. The existing one-locus Mendelian model remains visibly narrow.
 
+Chemistry now also carries amount and volume through the same algebra:
+`concentration = amount / volume`, and dilution computes `C2 = C1 × V1 / V2`.
+The witness begins with 2 mol in 1 m³, dilutes to 4 m³, obtains 0.5 mol/m³,
+and independently reconstitutes 2 mol from the final concentration and volume.
+
 `form/form-stdlib/tests/basic-science-band.fk` passed clean preflight and
-returned `2097151` independently on fkwu, Go, Rust, and TypeScript. Its twenty-one
+returned `16777215` independently on fkwu, Go, Rust, and TypeScript. Its twenty-four
 claims include direct absence versus zero, three physical equations, water
 balance and its counterexample, Mendelian outcomes, dimensional composition,
-DNA complement/involution/refusal, unequal-dimension refusal, and momentum
-conservation.
+DNA complement/involution/refusal, unequal-dimension refusal, momentum
+conservation, work, concentration, dilution, and dissolved-amount conservation.
 
 Preflight caught two unclosed forms while the band grew. Tree-heal accepted a
 closer for the test fold; the source leak was then located directly and only
