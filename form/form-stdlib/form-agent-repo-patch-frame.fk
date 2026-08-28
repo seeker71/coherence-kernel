@@ -1,0 +1,450 @@
+; form-agent-repo-patch-frame.fk — a scannerless, authority-bound proposal
+; frame and exact durable journal around guarded repository contribution.
+;
+; The local model may describe a change, but it cannot mint authority.  The
+; live caller supplies the capability, its exact grant, callbacks, journal and
+; deadline.  The frame carries only that grant's visible coordinate plus hex
+; encoded path/old/new bytes.  Its extent is derived from the live capability;
+; there is no function table or global symbol ceiling.
+;
+; Before mutation, an append-only intent record retains the exact source
+; preimage and proposal bytes and is read back byte-for-byte.  NodeID is the
+; O(1) identity inside one residence; exact bytes are the restart truth.  A
+; terminal record follows observed apply or undo.  If terminal persistence
+; fails after a successful apply, the preimage is atomically restored before
+; the result is released.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/form-fs.fk form-stdlib/hex.fk
+; preludes: form-stdlib/form-agent-repo-contribution.fk
+; Proven by: form-stdlib/tests/form-agent-repo-patch-frame-band.fk
+
+(do
+    (defn farp-open () "<|form:repo-patch|>")
+    (defn farp-close () "<|/form:repo-patch|>")
+    (defn farp-journal-open () "<|form:repo-patch-journal|>")
+    (defn farp-journal-close () "<|/form:repo-patch-journal|>")
+
+    (defn farp-node-text (node)
+        (str_concat "@" (str_concat (int_to_str (node_pkg node))
+        (str_concat "." (str_concat (int_to_str (node_level node))
+        (str_concat "." (str_concat (int_to_str (node_type node))
+        (str_concat "." (int_to_str (node_inst node))))))))))
+    (defn farp-coordinate-eq? (a b)
+        (if (nothing? a) 0
+        (if (eq (node_pkg a) (node_pkg b))
+        (if (eq (node_level a) (node_level b))
+        (if (eq (node_type a) (node_type b))
+            (if (eq (node_inst a) (node_inst b)) 1 0) 0) 0) 0)))
+
+    (defn farp-string-hex (s)
+        (hex-encode (host-abi-string-to-bytes s)))
+    (defn farp-hex-string (h)
+        (if (eq (hex-valid? h) 0) (nothing)
+            (host-abi-bytes-to-string (hex-decode h))))
+    (defn farp-field (name value)
+        (str_concat name (str_concat "=" value)))
+    (defn farp-max-frame-bytes (cap)
+        ; path is bounded by the same capability extent; old + new each may
+        ; occupy that extent and hex carries two characters per source byte.
+        (add (str_len (farp-open))
+            (add (str_len (farp-close))
+                (add 160 (mul 6 (farc-cap-max-bytes cap))))))
+
+    ; request = state reason proposal exact-frame
+    (defn farp-request (state reason proposal frame)
+        (list "form-agent-repo-patch-request-v1" state reason proposal frame))
+    (defn farp-request-state (r) (nth r 1))
+    (defn farp-request-reason (r) (nth r 2))
+    (defn farp-request-proposal (r) (nth r 3))
+    (defn farp-request-frame (r) (nth r 4))
+    (defn farp-request-ready? (r)
+        (if (str_eq (farp-request-state r) "ready") 1 0))
+    (defn farp-no-request (reason frame)
+        (farp-request "nothing" reason (nothing) frame))
+
+    (defn farp-frame (cap path old new)
+        (str_concat (farp-open)
+        (str_concat (farp-field "grant" (farp-node-text
+            (farc-capability-token cap)))
+        (str_concat ";" (str_concat (farp-field "pathhex"
+            (farp-string-hex path))
+        (str_concat ";" (str_concat (farp-field "oldhex"
+            (farp-string-hex old))
+        (str_concat ";" (str_concat (farp-field "newhex"
+            (farp-string-hex new)) (farp-close))))))))))
+
+    ; Find one complete offer in arbitrary generated prose without treating a
+    ; line or tokenizer token as the clock.  The strict parser still decides
+    ; whether the extracted bytes are meaningful.
+    (defn farp-find-frame (cap text)
+        (do
+            (let open-at (str_find text (farp-open) 0))
+            (if (lt open-at 0) (nothing)
+                (do
+                    (let close-at (str_find text (farp-close)
+                        (add open-at (str_len (farp-open)))))
+                    (if (lt close-at 0) (nothing)
+                        (do
+                            (let end (add close-at (str_len (farp-close))))
+                            (if (gt (sub end open-at)
+                                    (farp-max-frame-bytes cap))
+                                (nothing)
+                                (substring text open-at end))))))))
+
+    ; ── live decoded-byte cursor ─────────────────────────────────────
+    ; This cursor is independent of tokenizer IDs and lines.  Before an opener
+    ; it retains only the possible split suffix; afterward it retains one
+    ; capability-sized frame.  One complete frame is offered exactly once.
+    (defn farp-detect-cap () (sub (str_len (farp-open)) 1))
+    (defn farp-clip-left (text count)
+        (if (le (str_len text) count) text
+            (substring text (sub (str_len text) count) (str_len text))))
+    (defn farp-stream-window (window chunk)
+        (do
+            (let joined (str_concat window chunk))
+            (let open-at (str_find joined (farp-open) 0))
+            (if (lt open-at 0) (farp-clip-left joined (farp-detect-cap))
+                (substring joined open-at (str_len joined)))))
+    (defn farp-scan-state (cap window)
+        (do
+            (let open-at (str_find window (farp-open) 0))
+            (if (lt open-at 0) "none"
+                (do
+                    (let close-at (str_find window (farp-close)
+                        (add open-at (str_len (farp-open)))))
+                    (if (ge close-at 0)
+                        (if (gt (sub (add close-at (str_len (farp-close)))
+                                         open-at)
+                                (farp-max-frame-bytes cap)) "over" "complete")
+                        (if (gt (str_len window) (farp-max-frame-bytes cap))
+                            "over" "held"))))))
+    ; cursor = tag window scan terminal callbacks injections injected-bytes
+    ;          model-bytes model-chunks result observation
+    (defn farp-cursor (window scan terminal callbacks injections injected-bytes
+                       model-bytes model-chunks result observation)
+        (list "form-agent-repo-patch-cursor-v1" window scan terminal callbacks
+              injections injected-bytes model-bytes model-chunks result
+              observation))
+    (defn farp-cursor-window (c) (nth c 1))
+    (defn farp-cursor-scan (c) (nth c 2))
+    (defn farp-cursor-terminal (c) (nth c 3))
+    (defn farp-cursor-callbacks (c) (nth c 4))
+    (defn farp-cursor-injections (c) (nth c 5))
+    (defn farp-cursor-injected-bytes (c) (nth c 6))
+    (defn farp-cursor-model-bytes (c) (nth c 7))
+    (defn farp-cursor-model-chunks (c) (nth c 8))
+    (defn farp-cursor-result (c) (nth c 9))
+    (defn farp-cursor-observation (c) (nth c 10))
+    (defn farp-cursor-open? (c)
+        (if (str_eq (farp-cursor-terminal c) "open") 1 0))
+    (defn farp-cursor-fresh ()
+        (farp-cursor "" "none" "open" 0 0 0 0 0 (nothing) ""))
+    ; The generic session walker consumes this common transfer triple.
+    (defn farp-transfer (cursor model-delta injected-delta)
+        (list cursor model-delta injected-delta))
+    (defn farp-cursor-streamed (c window scan chunk)
+        (farp-cursor window scan (farp-cursor-terminal c)
+            (farp-cursor-callbacks c) (farp-cursor-injections c)
+            (farp-cursor-injected-bytes c)
+            (add (farp-cursor-model-bytes c) (str_len chunk))
+            (add (farp-cursor-model-chunks c) 1)
+            (farp-cursor-result c) (farp-cursor-observation c)))
+    (defn farp-cursor-finished (c terminal result observation callback injection)
+        (farp-cursor "" "complete" terminal
+            (add (farp-cursor-callbacks c) callback)
+            (add (farp-cursor-injections c) injection)
+            (add (farp-cursor-injected-bytes c) (str_len observation))
+            (farp-cursor-model-bytes c) (farp-cursor-model-chunks c)
+            result observation))
+    (defn farp-cursor-feed (ctx cursor chunk)
+        (if (eq (farp-cursor-open? cursor) 0)
+            (farp-transfer
+                (farp-cursor-streamed cursor (farp-cursor-window cursor)
+                    (farp-cursor-scan cursor) chunk) chunk "")
+            (do
+                (let window (farp-stream-window (farp-cursor-window cursor) chunk))
+                (let scan (farp-scan-state (farp-ctx-cap ctx) window))
+                (let streamed (farp-cursor-streamed cursor window scan chunk))
+                (if (str_eq scan "over")
+                    (farp-transfer
+                        (farp-cursor-finished streamed "over" (nothing) "" 0 0)
+                        chunk "")
+                (if (str_eq scan "complete")
+                    (do
+                        (let frame (farp-find-frame (farp-ctx-cap ctx) window))
+                        (let result (farp-execute
+                            (farp-context-at-now ctx (now_unix_ms)) frame))
+                        (let observation (farp-render-result-bml result))
+                        (farp-transfer
+                            (farp-cursor-finished streamed "complete" result
+                                observation 1 1)
+                            chunk observation))
+                    (farp-transfer streamed chunk ""))))))
+    (defn farp-cursor-timeout (cursor)
+        (if (and (eq (farp-cursor-open? cursor) 1)
+                 (str_eq (farp-cursor-scan cursor) "held"))
+            (do
+                (let request (farp-no-request "held-frame-timeout"
+                    (farp-cursor-window cursor)))
+                (let result (farp-result "timeout" "held-frame-timeout"
+                    request 0 0 (nothing)
+                    (list "choice" "timeout" "cut" "undo" "release")))
+                (let observation (farp-render-result-bml result))
+                (farp-cursor-finished cursor "timeout" result observation 0 1))
+            cursor))
+
+    (defn farp-parse (cap grant frame)
+        (if (eq (farc-capability? cap) 0)
+            (farp-no-request "capability-malformed" frame)
+        (if (not (farp-coordinate-eq? grant (farc-capability-token cap)))
+            (farp-no-request "capability-not-granted" frame)
+        (if (gt (str_len frame) (farp-max-frame-bytes cap))
+            (farp-no-request "frame-extent-refused" frame)
+        (if (not (eq (str_find frame (farp-open) 0) 0))
+            (farp-no-request "no-patch-frame" frame)
+            (do
+                (let close-at (str_find frame (farp-close) (str_len (farp-open))))
+                (if (or (lt close-at 0)
+                        (not (eq (add close-at (str_len (farp-close)))
+                                 (str_len frame))))
+                    (farp-no-request "held-or-trailing" frame)
+                    (do
+                        (let payload (substring frame (str_len (farp-open)) close-at))
+                        (let s1 (str_find payload ";" 0))
+                        (let s2 (if (lt s1 0) -1 (str_find payload ";" (add s1 1))))
+                        (let s3 (if (lt s2 0) -1 (str_find payload ";" (add s2 1))))
+                        (let s4 (if (lt s3 0) -1 (str_find payload ";" (add s3 1))))
+                        (if (or (lt s1 0) (or (lt s2 0)
+                            (or (lt s3 0) (not (lt s4 0)))))
+                            (farp-no-request "field-shape" frame)
+                            (do
+                                (let grant-field (substring payload 0 s1))
+                                (let path-field (substring payload (add s1 1) s2))
+                                (let old-field (substring payload (add s2 1) s3))
+                                (let new-field (substring payload (add s3 1)
+                                    (str_len payload)))
+                                (if (not (str_eq grant-field
+                                        (farp-field "grant" (farp-node-text grant))))
+                                    (farp-no-request "grant-coordinate" frame)
+                                (if (not (eq (str_find path-field "pathhex=" 0) 0))
+                                    (farp-no-request "path-field" frame)
+                                (if (not (eq (str_find old-field "oldhex=" 0) 0))
+                                    (farp-no-request "old-field" frame)
+                                (if (not (eq (str_find new-field "newhex=" 0) 0))
+                                    (farp-no-request "new-field" frame)
+                                    (do
+                                        (let path (farp-hex-string (substring path-field 8
+                                            (str_len path-field))))
+                                        (let old (farp-hex-string (substring old-field 7
+                                            (str_len old-field))))
+                                        (let new (farp-hex-string (substring new-field 7
+                                            (str_len new-field))))
+                                        (if (or (nothing? path)
+                                            (or (nothing? old) (nothing? new)))
+                                            (farp-no-request "hex-malformed" frame)
+                                        (if (or (eq (str_len old) 0)
+                                            (or (gt (str_len path) (farc-cap-max-bytes cap))
+                                            (or (gt (str_len old) (farc-cap-max-bytes cap))
+                                                (gt (str_len new) (farc-cap-max-bytes cap)))))
+                                            (farp-no-request "field-extent-refused" frame)
+                                            (do
+                                                (let proposal (farc-proposal cap path old new))
+                                                (if (eq (farc-proposal-bound? cap proposal) 0)
+                                                    (farp-no-request
+                                                        "proposal-capability-refused" frame)
+                                                    (farp-request "ready" "ready" proposal
+                                                        frame))))))))))))))))))))
+
+    ; The journal is length-carried and exact.  Hex keeps delimiters out of
+    ; path/preimage/frame bytes, so restart inspection never guesses boundaries.
+    (defn farp-journal-record (phase proposal frame path preimage status reason)
+        (str_concat (farp-journal-open)
+        (str_concat "\n" (str_concat (farp-field "phase" phase)
+        (str_concat "\n" (str_concat (farp-field "proposal"
+            (farp-node-text proposal))
+        (str_concat "\n" (str_concat (farp-field "frame-bytes"
+            (int_to_str (str_len frame)))
+        (str_concat "\n" (str_concat (farp-field "frame-hex"
+            (farp-string-hex frame))
+        (str_concat "\n" (str_concat (farp-field "path-bytes"
+            (int_to_str (str_len path)))
+        (str_concat "\n" (str_concat (farp-field "path-hex"
+            (farp-string-hex path))
+        (str_concat "\n" (str_concat (farp-field "preimage-bytes"
+            (int_to_str (str_len preimage)))
+        (str_concat "\n" (str_concat (farp-field "preimage-hex"
+            (farp-string-hex preimage))
+        (str_concat "\n" (str_concat (farp-field "status" status)
+        (str_concat "\n" (str_concat (farp-field "reason" reason)
+        (str_concat "\n" (str_concat (farp-journal-close) "\n"))))))))))))))))))))))))
+
+    (defn farp-append-readback (path record)
+        (do
+            (let before (fs-stat-size path))
+            (let offset (if (lt before 0) 0 before))
+            (let wrote (fs-append-bytes path (host-abi-string-to-bytes record)))
+            (if (lt wrote 0) 0
+                (if (str_eq (fs-read-slice path offset (str_len record)) record)
+                    1 0))))
+
+    ; result = status reason request contribution journaled underlying trace
+    (defn farp-result (status reason request contribution journaled receipt trace)
+        (list "form-agent-repo-patch-result-v1" status reason request
+              contribution journaled receipt trace))
+    (defn farp-status (r) (nth r 1))
+    (defn farp-reason (r) (nth r 2))
+    (defn farp-result-request (r) (nth r 3))
+    (defn farp-contribution (r) (nth r 4))
+    (defn farp-journaled? (r) (nth r 5))
+    (defn farp-receipt (r) (nth r 6))
+    (defn farp-trace (r) (nth r 7))
+    (defn farp-trace-text (trace)
+        (if (nil? trace) ""
+            (if (nil? (tail trace)) (head trace)
+                (str_concat (head trace)
+                    (str_concat "," (farp-trace-text (tail trace)))))))
+    (defn farp-observation-open () "<|form:repo-patch-observation|>")
+    (defn farp-observation-close () "<|/form:repo-patch-observation|>")
+    ; No path, source, prompt, or model answer enters the observation. Reasons
+    ; and lifecycle are hex so callback text cannot close or nest the frame.
+    (defn farp-render-result (r)
+        (do
+            (let request (farp-result-request r))
+            (let proposal (if (eq (farp-request-ready? request) 1)
+                (farp-request-proposal request) (make_nodeid 0 0 0 0)))
+            (str_concat (farp-observation-open)
+            (str_concat "\n" (str_concat (farp-field "proposal"
+                (farp-node-text proposal))
+            (str_concat "\n" (str_concat (farp-field "status" (farp-status r))
+            (str_concat "\n" (str_concat (farp-field "reasonhex"
+                (farp-string-hex (farp-reason r)))
+            (str_concat "\n" (str_concat (farp-field "contribution"
+                (int_to_str (farp-contribution r)))
+            (str_concat "\n" (str_concat (farp-field "journaled"
+                (int_to_str (farp-journaled? r)))
+            (str_concat "\n" (str_concat (farp-field "tracehex"
+                (farp-string-hex (farp-trace-text (farp-trace r))))
+            (str_concat "\n" (farp-observation-close)))))))))))))))))
+
+    ; The durable journal above is the restart truth. Repeating that truth as
+    ; labelled prose through a 27B model spends a full forward pass per token.
+    ; Inside one live residence the exact result is already addressable in O(1)
+    ; as a NodeID, so the hot crossing carries that identity plus only the
+    ; irreducible control signals in scannerless BML. A later lookup may open
+    ; the node; no SHA and no fixed operation/function seat participates.
+    (defn farp-result-category ()
+        (intern_trivial_string "form-agent-repo-patch-result-node-v1"))
+    (defn farp-result-node (r)
+        (do
+            (let request (farp-result-request r))
+            (let proposal (if (eq (farp-request-ready? request) 1)
+                (farp-request-proposal request) (make_nodeid 0 0 0 0)))
+            (intern_node (farp-result-category)
+                (list proposal
+                      (intern_trivial_string (farp-status r))
+                      (intern_trivial_string (farp-reason r))
+                      (intern_trivial_int (farp-contribution r))
+                      (intern_trivial_int (farp-journaled? r))
+                      (intern_trivial_string
+                          (farp-trace-text (farp-trace r)))))))
+    (defn farp-bml-status (status)
+        (if (str_eq status "value") "value"
+        (if (str_eq status "nothing") "nothing"
+        (if (str_eq status "choice") "choice"
+        (if (str_eq status "timeout") "timeout"
+        (if (str_eq status "refused") "refused" "failure"))))))
+    (defn farp-render-result-bml (r)
+        (str_concat "(repo-patch-result "
+        (str_concat (farp-node-text (farp-result-node r))
+        (str_concat " "
+        (str_concat (farp-bml-status (farp-status r))
+        (str_concat " contribution="
+        (str_concat (int_to_str (farp-contribution r))
+        (str_concat " journaled="
+        (str_concat (int_to_str (farp-journaled? r))
+        (str_concat " ("
+        (str_concat (farp-trace-text (farp-trace r)) "))")))))))))))
+
+    (defn farp-restore (cap proposal preimage)
+        (do
+            (let full (farc-full-path cap (farc-proposal-path proposal)))
+            (let recovery (str_concat full
+                (str_concat ".form-agent-journal-"
+                    (str_concat (int_to_str (node_inst proposal)) ".recovery"))))
+            (let wrote (fs-write-text recovery preimage))
+            (if (not (eq wrote (str_len preimage))) 0
+                (if (not (str_eq (fs-read-text recovery) preimage)) 0
+                    (if (eq (fs-rename recovery full) 0) 1 0)))))
+
+    ; ctx = capability grant verifyf testf callback-ctx journal now deadline
+    (defn farp-context (cap grant verifyf testf callback-ctx journal now deadline)
+        (list cap grant verifyf testf callback-ctx journal now deadline))
+    (defn farp-ctx-cap (c) (nth c 0))
+    (defn farp-ctx-grant (c) (nth c 1))
+    (defn farp-ctx-verifyf (c) (nth c 2))
+    (defn farp-ctx-testf (c) (nth c 3))
+    (defn farp-ctx-callback (c) (nth c 4))
+    (defn farp-ctx-journal (c) (nth c 5))
+    (defn farp-ctx-now (c) (nth c 6))
+    (defn farp-ctx-deadline (c) (nth c 7))
+    (defn farp-context-at-now (c now)
+        (farp-context (farp-ctx-cap c) (farp-ctx-grant c)
+            (farp-ctx-verifyf c) (farp-ctx-testf c)
+            (farp-ctx-callback c) (farp-ctx-journal c) now
+            (farp-ctx-deadline c)))
+
+    (defn farp-execute (ctx frame)
+        (do
+            (let request (farp-parse (farp-ctx-cap ctx)
+                (farp-ctx-grant ctx) frame))
+            (if (eq (farp-request-ready? request) 0)
+                (farp-result "nothing" (farp-request-reason request) request
+                    0 0 (nothing) (list "choice" "nothing" "release"))
+            (if (gt (farp-ctx-now ctx) (farp-ctx-deadline ctx))
+                (farp-result "timeout" "proposal-deadline-observed" request
+                    0 0 (nothing) (list "choice" "timeout" "cut" "undo" "release"))
+                (do
+                    (let proposal (farp-request-proposal request))
+                    (let path (farc-proposal-path proposal))
+                    (let before-result (farc-read (farp-ctx-cap ctx) path))
+                    (if (not (str_eq (farc-source-status before-result) "value"))
+                        (farp-result (farc-source-status before-result)
+                            (farc-source-reason before-result) request 0 0
+                            (nothing) (list "choice" "nothing" "release"))
+                        (do
+                            (let before (farc-source-text before-result))
+                            (let intent (farp-journal-record "intent" proposal frame
+                                path before "choice" "prepared"))
+                            (if (eq (farp-append-readback
+                                    (farp-ctx-journal ctx) intent) 0)
+                                (farp-result "failure" "intent-journal-readback-failed"
+                                    request 0 0 (nothing)
+                                    (list "choice" "failure" "undo" "release"))
+                                (do
+                                    (let verifyf (farp-ctx-verifyf ctx))
+                                    (let testf (farp-ctx-testf ctx))
+                                    (let receipt (farc-apply (farp-ctx-cap ctx)
+                                        (farp-ctx-grant ctx) verifyf testf
+                                        (farp-ctx-callback ctx) proposal))
+                                    (let terminal (farp-journal-record "terminal"
+                                        proposal frame path before (farc-status receipt)
+                                        (farc-reason receipt)))
+                                    (if (eq (farp-append-readback
+                                            (farp-ctx-journal ctx) terminal) 1)
+                                        (farp-result (farc-status receipt)
+                                            (farc-reason receipt) request
+                                            (if (str_eq (farc-status receipt) "value") 1 0)
+                                            1 receipt (farc-trace receipt))
+                                        (if (and (str_eq (farc-status receipt) "value")
+                                                 (eq (farp-restore (farp-ctx-cap ctx)
+                                                     proposal before) 1))
+                                            (farp-result "failure"
+                                                "terminal-journal-failed-restored"
+                                                request 0 0 receipt
+                                                (list "choice" "failure" "undo" "release"))
+                                            (farp-result "failure"
+                                                "terminal-journal-readback-failed"
+                                                request 0 0 receipt
+                                                (list "choice" "failure" "undo" "release")))))))))))))
+    0)
