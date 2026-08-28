@@ -37,11 +37,24 @@ not a wrapper around llama-server or Ollama. Its working path is:
    callback is contribution; direct speech remains a candidate until correlated
    evaluation observes `0` or `1`; read-only source lookup remains observed
    retrieval and does not impersonate a landed mutation.
-10. A capability-scoped contribution may find/read within one allowed relative
-    prefix and offer an exact old/new-byte proposal. Its content-addressed
-    proposal NodeID, one-shot grant, candidate readback, dynamic verifier and
-    test callbacks, atomic replacement, and post-test undo keep nothing,
-    refusal, choice, failure, `0`, `1`, and value distinct.
+10. A `repo-patch` task may emit one bounded `form:repo-patch` frame. Every
+    decoded token's raw bytes enter the scannerless cursor immediately; a frame
+    split across tokens remains `held`, not malformed. The model carries only
+    grant coordinate plus hex path/old/new bytes. Authority, callbacks,
+    journal and deadline remain in caller-born Form context and cannot arrive
+    through task text.
+11. Before guarded mutation, the patch route appends and reads back an exact,
+    length-carried frame/path/preimage intent. It then reuses the existing
+    proposal NodeID, dynamic verifier/test callbacks, atomic replacement and
+    post-test undo. A terminal record follows the observed outcome. The bounded
+    source-free receipt is injected into the same Qwen/KV residence while
+    generation is still moving. Nothing, refusal, choice, timeout, failure,
+    undo, `0`, `1`, and value remain distinct.
+12. The hot return crossing does not replay that durable record as prose. It
+    interns the exact result as a live NodeID and injects compact scannerless
+    BML: result identity, status, contribution, journal presence and the
+    choice/crystallize/release trace. The journal remains restart truth; the
+    NodeID is the O(1) address inside this residence.
 
 The live doors are:
 
@@ -51,6 +64,9 @@ The live doors are:
   client; the task body may contain arbitrary newlines.
 - `observe/form-cli-peer-knowledge-stage-live.fk` — CPU-only strict-source probe
   that streams and retains the same lookup stage events without opening a model.
+- `observe/qwen38-resident-repo-patch-live-run.fk` — disposable-capability live
+  witness for token-edge patch interception, durable intent/terminal evidence,
+  guarded apply and same-KV receipt injection.
 
 ## Resource flow
 
@@ -108,6 +124,19 @@ visible as a ghost, never a silence.
 
 - Join client acknowledgement to compaction consent. Until durable client ack,
   reply frames remain append-only.
+- Add restart recovery that reads an unmatched patch intent, compares exact
+  preimage/current/candidate bytes, and completes or undoes it. Append readback
+  is live; power-loss durability and unmatched-intent replay are not yet
+  claimed.
+- Let a running residence receive a newly born request-scoped patch capability
+  and verifier/test recipe without restarting. The generic turnwheel holds an
+  optional in-memory patch context now; the long-lived public door still opens
+  without ambient checkout mutation authority.
+- Hot-swap the contribution recipe/turnwheel in a live residence. The current
+  model/KV remains resident across tasks, but a source change still waits for a
+  new process.
+- Sense system-wide CPU/GPU/MLX pressure from a native host carrier rather than
+  relying on process-local counters plus an explicit external reservation.
 - Join the guarded contribution actuator to a resident patch proposal frame and
   add a crash-complete intent/preimage journal. The actuator is presently
   proven on bounded fixtures with dynamic verifier/test callbacks, but arbitrary
@@ -116,6 +145,9 @@ visible as a ghost, never a silence.
   cell residence above already takes arbitrary source without restart; the
   model-holding contribution turnwheel still waits for a new process on source
   change, and the two residences are not yet one.
+- Sense MLX queue pressure from a native host carrier. GPU utilization is now
+  read system-wide through the census's IOAccelerator crossing; another
+  process's MLX reservation still enters as supplied observation.
 - ~~Widen the resident evaluator's grammar~~ — placed 2026-08-27: string and
   float literals plus a 19-op eval-native prim table now live in
   form-eval-full itself (`form-eval-full-band.fk` → 1181 four-way), and the
@@ -137,9 +169,6 @@ visible as a ghost, never a silence.
   the gate is membership, not scope (use-before-definition still dies at
   eval, visible as a ghost); a kind-carrying eval triple or a four-way
   value_kind would let one render lane serve every value.
-- Sense MLX queue pressure from a native host carrier. GPU utilization is now
-  read system-wide through the census's IOAccelerator crossing; another
-  process's MLX reservation still enters as supplied observation.
 - Move the demand-grown function identity mechanism out of the temporary C seed
   and into the Form/native walker so the bootstrap repair can shrink away.
 - Re-run the composed resident source turn when the current MLX training
@@ -148,3 +177,8 @@ visible as a ghost, never a silence.
   strict probe currently reaches `hit` with one lookup and two framebuffer
   events in 2,103 ms; the earlier composed turn stayed in recursive `fk_walk`
   for about ten minutes without producing egress.
+- Build a true multi-token local prefill schedule. Compact BML/NodeID return
+  reduced the guarded patch observation from 236 to 91 bytes and its same-KV
+  injection from 44,129 to 21,493 ms, but the remaining time still scales with
+  token-wise 27B forwards. The existing span path removes host syncs, not the
+  dominant per-token model/dispatch work.
