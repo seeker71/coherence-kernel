@@ -3,25 +3,31 @@
 ; A science answer becomes useful here when its quantities, assumptions, and failure
 ; edge can be run. This cell holds a deliberately modest first surface:
 ;
-;   physics   — compatible quantities, constant-velocity displacement, F = ma,
-;               and kinetic energy in named SI units;
+;   physics   — compositional SI dimensions, constant-velocity displacement,
+;               F = ma, and kinetic energy;
 ;   chemistry — atom conservation for a declared, finite element set;
-;   biology   — Mendelian segregation for one binary dominant/recessive locus.
+;   biology   — DNA complementary pairing and Mendelian segregation for one
+;               binary dominant/recessive locus.
 ;
 ; These are models, not a replacement for measurement. A dimensional mismatch is
 ; `nothing`, while zero remains a valid quantity. A reaction is checked only against
 ; the elements the caller declares. The inheritance model is a classroom allele model,
 ; not an account of whole organisms, human traits, or medical reality.
 ;
-;   (bsc-quantity value dimension)            -> (value, dimension)
+;   (bsc-quantity value dimension)            -> (value, SI-exponent-cell)
 ;   (bsc-add left right)                       -> compatible sum, or nothing
+;   (bsc-multiply left right)                  -> product with derived dimension
+;   (bsc-divide left right)                    -> quotient with derived dimension
 ;   (bsc-displacement speed-mps duration-s)    -> metres, or nothing
 ;   (bsc-force mass-kg accel-mps2)             -> newtons, or nothing
 ;   (bsc-kinetic-energy mass-kg speed-mps)     -> joules, or nothing
 ;   (bsc-balanced-elements? lhs rhs elements)  -> 1 / 0
+;   (bsc-dna-complement-strand strand)         -> paired strand, or nothing
 ;   (bsc-cross parent-a parent-b)              -> four offspring genotypes
 ;
-; Species: (list (list "H" 2) (list "O" 1)); a reaction term is
+; A dimension cell is `(length mass time current temperature amount luminous)`
+; in SI base-exponent order. Species use atomic numbers, for example
+; `(list (list 1 2) (list 8 1))` is water; a reaction term is
 ; (list coefficient species). Elements must be named explicitly at the call site.
 ;
 ; preludes: form-stdlib/core.fk
@@ -29,43 +35,91 @@
 
 (do
     ; --- quantities: value never carries a hidden unit. ---
+    ; Seven SI base dimensions, held as exponent cells rather than a fixed table
+    ; of named derived units.  Any new dimension can compose from these axes.
+    (defn bsc-dimensionless () (list 0 0 0 0 0 0 0))
+    (defn bsc-dim-length ()    (list 1 0 0 0 0 0 0))
+    (defn bsc-dim-mass ()      (list 0 1 0 0 0 0 0))
+    (defn bsc-dim-time ()      (list 0 0 1 0 0 0 0))
+    (defn bsc-dim-speed ()     (list 1 0 -1 0 0 0 0))
+    (defn bsc-dim-accel ()     (list 1 0 -2 0 0 0 0))
+    (defn bsc-dim-force ()     (list 1 1 -2 0 0 0 0))
+    (defn bsc-dim-energy ()    (list 2 1 -2 0 0 0 0))
+    (defn bsc-dimension? (dimension) (eq (len dimension) 7))
+    (defn bsc-dim-add-same-width (left right)
+        (if (eq (len left) 0) (empty)
+            (cons (add (head left) (head right))
+                  (bsc-dim-add-same-width (tail left) (tail right)))))
+    (defn bsc-dim-add (left right)
+        (if (eq (len left) (len right))
+            (bsc-dim-add-same-width left right)
+            (nothing)))
+    (defn bsc-dim-neg (dimension)
+        (if (eq (len dimension) 0) (empty)
+            (cons (sub 0 (head dimension)) (bsc-dim-neg (tail dimension)))))
+    (defn bsc-dim-sub (left right) (bsc-dim-add left (bsc-dim-neg right)))
+
     (defn bsc-quantity (value dimension) (list value dimension))
     (defn bsc-value (quantity) (nth quantity 0))
     (defn bsc-dimension (quantity) (nth quantity 1))
+    (defn bsc-quantity? (quantity)
+        (if (eq (len quantity) 2) (bsc-dimension? (bsc-dimension quantity)) 0))
     (defn bsc-same-dimension? (left right)
         (value_eq (bsc-dimension left) (bsc-dimension right)))
     (defn bsc-add (left right)
-        (if (bsc-same-dimension? left right)
-            (bsc-quantity (add (bsc-value left) (bsc-value right)) (bsc-dimension left))
+        (if (bsc-quantity? left)
+            (if (bsc-quantity? right)
+                (if (bsc-same-dimension? left right)
+                    (bsc-quantity (add (bsc-value left) (bsc-value right)) (bsc-dimension left))
+                    (nothing))
+                (nothing))
+            (nothing)))
+    (defn bsc-scale (quantity scalar)
+        (if (bsc-quantity? quantity)
+            (bsc-quantity (mul (bsc-value quantity) scalar) (bsc-dimension quantity))
+            (nothing)))
+    (defn bsc-multiply (left right)
+        (if (bsc-quantity? left)
+            (if (bsc-quantity? right)
+                (bsc-quantity (mul (bsc-value left) (bsc-value right))
+                              (bsc-dim-add (bsc-dimension left) (bsc-dimension right)))
+                (nothing))
+            (nothing)))
+    (defn bsc-divide (left right)
+        (if (bsc-quantity? left)
+            (if (bsc-quantity? right)
+                (if (eq (bsc-value right) 0) (nothing)
+                    (bsc-quantity (div (bsc-value left) (bsc-value right))
+                                  (bsc-dim-sub (bsc-dimension left) (bsc-dimension right))))
+                (nothing))
             (nothing)))
 
-    ; These named constructors intentionally prevent an unlabelled scalar from
-    ; masquerading as a physical measurement.
-    (defn bsc-speed-mps (value) (bsc-quantity value "speed-m-per-s"))
-    (defn bsc-duration-s (value) (bsc-quantity value "time-s"))
-    (defn bsc-length-m (value) (bsc-quantity value "length-m"))
-    (defn bsc-mass-kg (value) (bsc-quantity value "mass-kg"))
-    (defn bsc-accel-mps2 (value) (bsc-quantity value "accel-m-per-s2"))
-    (defn bsc-force-n (value) (bsc-quantity value "force-n"))
-    (defn bsc-energy-j (value) (bsc-quantity value "energy-j"))
+    ; SI-convention constructors: their value is in m, kg, or s as named.
+    (defn bsc-speed-mps (value) (bsc-quantity value (bsc-dim-speed)))
+    (defn bsc-duration-s (value) (bsc-quantity value (bsc-dim-time)))
+    (defn bsc-length-m (value) (bsc-quantity value (bsc-dim-length)))
+    (defn bsc-mass-kg (value) (bsc-quantity value (bsc-dim-mass)))
+    (defn bsc-accel-mps2 (value) (bsc-quantity value (bsc-dim-accel)))
+    (defn bsc-force-n (value) (bsc-quantity value (bsc-dim-force)))
+    (defn bsc-energy-j (value) (bsc-quantity value (bsc-dim-energy)))
 
     ; --- physics: equations have explicit expected input and output dimensions. ---
     (defn bsc-displacement (speed duration)
-        (if (value_eq (bsc-dimension speed) "speed-m-per-s")
-            (if (value_eq (bsc-dimension duration) "time-s")
-                (bsc-length-m (mul (bsc-value speed) (bsc-value duration)))
+        (if (value_eq (bsc-dimension speed) (bsc-dim-speed))
+            (if (value_eq (bsc-dimension duration) (bsc-dim-time))
+                (bsc-multiply speed duration)
                 (nothing))
             (nothing)))
     (defn bsc-force (mass acceleration)
-        (if (value_eq (bsc-dimension mass) "mass-kg")
-            (if (value_eq (bsc-dimension acceleration) "accel-m-per-s2")
-                (bsc-force-n (mul (bsc-value mass) (bsc-value acceleration)))
+        (if (value_eq (bsc-dimension mass) (bsc-dim-mass))
+            (if (value_eq (bsc-dimension acceleration) (bsc-dim-accel))
+                (bsc-multiply mass acceleration)
                 (nothing))
             (nothing)))
     (defn bsc-kinetic-energy (mass speed)
-        (if (value_eq (bsc-dimension mass) "mass-kg")
-            (if (value_eq (bsc-dimension speed) "speed-m-per-s")
-                (bsc-energy-j (mul 0.5 (mul (bsc-value mass) (mul (bsc-value speed) (bsc-value speed)))))
+        (if (value_eq (bsc-dimension mass) (bsc-dim-mass))
+            (if (value_eq (bsc-dimension speed) (bsc-dim-speed))
+                (bsc-scale (bsc-multiply mass (bsc-multiply speed speed)) 0.5)
                 (nothing))
             (nothing)))
 
@@ -92,9 +146,30 @@
                 (bsc-balanced-elements? left right (tail elements))
                 0)))
 
-    ; --- biology: one locus, two gametes, four equally represented offspring. ---
-    ; A genotype is (allele-a allele-b), with 1 = the model's dominant allele and
-    ; 0 = its recessive allele. These values are domain data, not absence/presence.
+    ; --- biology: DNA pairing is relationship data, not hidden control flow. ---
+    ; A=1, C=2, G=3, T=4. Each directed pair appears so lookup is generic and
+    ; complementing twice returns the original strand. The caller may provide a
+    ; different finite pairing relation to bsc-pair-partner for another alphabet.
+    (defn bsc-dna-pairs () (list (list 1 4) (list 2 3) (list 3 2) (list 4 1)))
+    (defn bsc-pair-partner (pairs member)
+        (if (eq (len pairs) 0) (nothing)
+            (if (eq (nth (head pairs) 0) member)
+                (nth (head pairs) 1)
+                (bsc-pair-partner (tail pairs) member))))
+    (defn bsc-dna-complement-base (base) (bsc-pair-partner (bsc-dna-pairs) base))
+    (defn bsc-dna-complement-join (paired-head paired-tail)
+        (if (nothing? paired-head) (nothing)
+            (if (nothing? paired-tail) (nothing)
+                (cons paired-head paired-tail))))
+    (defn bsc-dna-complement-strand (strand)
+        (if (eq (len strand) 0) (empty)
+            (bsc-dna-complement-join
+                (bsc-dna-complement-base (head strand))
+                (bsc-dna-complement-strand (tail strand)))))
+
+    ; One locus, two gametes, four equally represented offspring. A genotype is
+    ; (allele-a allele-b), with 1 = the model's dominant allele and 0 = its
+    ; recessive allele. These values are domain data, not absence/presence.
     (defn bsc-genotype (allele-a allele-b) (list allele-a allele-b))
     (defn bsc-gametes (parent) (list (nth parent 0) (nth parent 1)))
     (defn bsc-offspring-for-allele (allele gametes)
