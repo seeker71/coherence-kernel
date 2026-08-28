@@ -42,7 +42,14 @@ not a wrapper around llama-server or Ollama. Its working path is:
    speech. A physical
    callback is contribution; direct speech remains a candidate until correlated
    evaluation observes `0` or `1`; read-only source lookup remains observed
-   retrieval and does not impersonate a landed mutation.
+   retrieval and does not impersonate a landed mutation.  A terminal strict
+   source hit can now pass the existing current-answer capability contract and
+   enter the ordinary world model as one compact `source-knowledge` entity via
+   `form-agent-source-world-model.fk`.  Its path, current source identity and
+   answer length are world position; hit/freshness/lookup/execution/carrier
+   facts are its embedding.  Source bytes and progress-stage text do not enter
+   that projection.  This proves the typed join; the live peer turnwheel has
+   not yet consumed its tool-result message.
 10. A `repo-patch` task may emit one bounded `form:repo-patch` frame. Every
     decoded token's raw bytes enter the scannerless cursor immediately; a frame
     split across tokens remains `held`, not malformed. The model carries only
@@ -102,8 +109,11 @@ does not claim the Form/native NodeID mapping movement is complete.
   turnwheel.  The pure join now admits only execution-verified attempts,
   projects wrong values, silence, syntax failures and green endpoints through
   the ordinary world model, and returns an existing-protocol tool-result
-  message (`8191` on runtime fkwu).  This pulse did not claim that a live
-  residence has consumed that message yet.
+  message (`8191` on runtime fkwu).  The source companion independently admits
+  only a current-answer-contract hit, preserves knowledge contribution versus
+  mutation contribution, and also returns a tool-result message (`8191`).
+  This pulse did not claim that a live residence has consumed either message
+  yet.
 - Join client acknowledgement to compaction consent. Until durable client ack,
   reply frames remain append-only.
 - Add restart recovery that reads an unmatched patch intent, compares exact
