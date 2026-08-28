@@ -1,0 +1,60 @@
+; native-mutation-public-gate-pg.fk — the Postgres door for the reversible
+; public gate, split out of native-mutation-public-gate.fk 2026-08-28.
+;
+; preludes: form-stdlib/core.fk form-stdlib/application-graph-node-port.fk form-stdlib/application-graph-node-port-pg.fk form-stdlib/native-mutation-side-effects.fk form-stdlib/native-mutation-side-effects-pg.fk form-stdlib/native-mutation-route-side-effects.fk form-stdlib/native-mutation-route-side-effects-pg.fk form-stdlib/native-idea-valuation-audit-ledger.fk form-stdlib/native-idea-valuation-audit-ledger-pg.fk form-stdlib/native-mutation-public-gate.fk
+;
+; WHY THIS IS ITS OWN CELL. nmpg-record-public-gate-rollback-receipt is the only
+; thing in the public gate that reaches pg_exec, and pg_exec is native on
+; go / rust / ts and ABSENT on fkwu. The three nmpg-run-*-public-gate wrappers
+; name no native themselves but call that receipt writer and the route runners
+; that moved to their own -pg siblings, so they travel with the door.
+;
+; The gate's whole meaning — the contract JSON, the per-request decision
+; receipt, the native invitation shape, and the rollback receipt SQL — asks only
+; for str_concat, which every arm has. That is what the band proves, and it
+; stays in native-mutation-public-gate.fk where every arm can hold it.
+;
+; This follows cache-binary.fk (2026-08-14) and symbols-wire.fk (2026-08-28):
+; a cell should not hand its callers a door they did not ask for and cannot open
+; on their own arm.
+;
+; Callers today: form-stdlib/integration/native-mutation-public-gate-live.fk.
+
+(do
+    ;; (nmpg-record-public-gate-rollback-receipt conn gate-id node-id) → conn.
+    ;; The route-local, conflict-safe rollback receipt.
+    (defn nmpg-record-public-gate-rollback-receipt (conn gate-id node-id)
+        (do
+            (nms-create-receipts-table conn)
+            (pg_exec conn (nmpg-public-gate-rollback-receipt-sql gate-id node-id))
+            conn))
+
+    ;; (nmpg-run-idea-create-public-gate conn ...) → conn.
+    (defn nmpg-run-idea-create-public-gate
+        (conn gate-id revision-id node-id name description phase properties parent-id contributor-key-hash author)
+        (do
+            (nmrs-run-idea-create-with-side-effects
+                conn gate-id revision-id node-id name description phase properties parent-id contributor-key-hash author)
+            (nmpg-record-public-gate-rollback-receipt conn gate-id node-id)
+            conn))
+
+    ;; (nmpg-run-idea-update-public-gate conn ...) → conn. Routes through the
+    ;; valuation audit-ledger runner.
+    (defn nmpg-run-idea-update-public-gate
+        (conn gate-id revision-id node-id name description phase property-patch fields-changed contributor-key-hash author field old-value-json new-value-json)
+        (do
+            (nival-run-idea-update-with-valuation-audit
+                conn gate-id revision-id node-id name description phase property-patch fields-changed contributor-key-hash author field old-value-json new-value-json)
+            (nmpg-record-public-gate-rollback-receipt conn gate-id node-id)
+            conn))
+
+    ;; (nmpg-run-spec-update-public-gate conn ...) → conn.
+    (defn nmpg-run-spec-update-public-gate
+        (conn gate-id revision-id node-id title summary properties contributor-key-hash author)
+        (do
+            (nmrs-run-spec-update-with-side-effects
+                conn gate-id revision-id node-id title summary properties contributor-key-hash author)
+            (nmpg-record-public-gate-rollback-receipt conn gate-id node-id)
+            conn))
+
+    0)

@@ -1,0 +1,61 @@
+; native-mutation-route-side-effects-pg.fk — the live route runner for native
+; mutation side effects, split out of native-mutation-route-side-effects.fk
+; 2026-08-28.
+;
+; preludes: form-stdlib/core.fk form-stdlib/application-graph-node-port.fk form-stdlib/application-graph-node-port-pg.fk form-stdlib/native-mutation-side-effects.fk form-stdlib/native-mutation-side-effects-pg.fk form-stdlib/native-mutation-route-side-effects.fk
+;
+; WHY THIS IS ITS OWN CELL. These three runners never name pg_exec themselves —
+; they call agn-create-node / agn-update-node and the five nms- wrappers, all of
+; which moved to their own -pg siblings on 2026-08-28 because pg_exec is native
+; on go / rust / ts and ABSENT on fkwu. A function that calls a moved door has
+; to travel with it: leaving it behind would only rename the wound, since fkwu
+; resolves every call site in a whole prelude chain and would then report the
+; runner's own calls unresolved instead.
+;
+; The contract JSON and the edge-id builder — nmrs-route-binding-contract-json,
+; nmrs-edge-id — ask only for str_concat, which every arm has, so they stay in
+; native-mutation-route-side-effects.fk where the band can hold them four-way.
+;
+; This follows cache-binary.fk (2026-08-14) and symbols-wire.fk (2026-08-28):
+; a cell should not hand its callers a door they did not ask for and cannot open
+; on their own arm.
+;
+; Callers today: form-stdlib/native-mutation-public-gate-pg.fk and
+; form-stdlib/integration/native-mutation-route-side-effects-live.fk.
+
+(do
+    ;; (nmrs-bind-common-side-effects conn ...) → conn. Receipts table, cache
+    ;; invalidation, optional parent-edge repair, optional contributor-key
+    ;; audit, rollback receipt — the route-local side effects in one flow.
+    (defn nmrs-bind-common-side-effects (conn mutation-id node-id parent-id contributor-key-hash author)
+        (do
+            (nms-create-receipts-table conn)
+            (nms-record-cache-invalidation conn mutation-id node-id)
+            (if (gt (str_len parent-id) 0)
+                (nms-repair-parent-edge conn (nmrs-edge-id mutation-id) mutation-id parent-id node-id author)
+                conn)
+            (if (gt (str_len contributor-key-hash) 0)
+                (nms-audit-contributor-key conn contributor-key-hash)
+                conn)
+            (nms-record-rollback-receipt conn mutation-id node-id)
+            conn))
+
+    ;; (nmrs-run-idea-create-with-side-effects conn ...) → conn. Graph write
+    ;; plus the route-local side effects for an idea create.
+    (defn nmrs-run-idea-create-with-side-effects
+        (conn mutation-id revision-id node-id name description phase properties parent-id contributor-key-hash author)
+        (do
+            (agn-create-node conn revision-id node-id "idea" name description phase properties "kernel-route-runner" author)
+            (nmrs-bind-common-side-effects conn mutation-id node-id parent-id contributor-key-hash author)
+            conn))
+
+    ;; (nmrs-run-spec-update-with-side-effects conn ...) → conn. Graph write
+    ;; plus the route-local side effects for a spec update.
+    (defn nmrs-run-spec-update-with-side-effects
+        (conn mutation-id revision-id node-id title summary properties contributor-key-hash author)
+        (do
+            (agn-update-node conn revision-id node-id title summary "ice" properties "[\"title\",\"summary\",\"properties\"]" "kernel-route-runner" author)
+            (nmrs-bind-common-side-effects conn mutation-id node-id "" contributor-key-hash author)
+            conn))
+
+    0)
