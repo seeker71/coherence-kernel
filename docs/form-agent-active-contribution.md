@@ -98,6 +98,12 @@ does not claim the Form/native NodeID mapping movement is complete.
 
 ## What remains northward
 
+- Inject the new `form-agent-world-model.fk` guide into the live resident
+  turnwheel.  The pure join now admits only execution-verified attempts,
+  projects wrong values, silence, syntax failures and green endpoints through
+  the ordinary world model, and returns an existing-protocol tool-result
+  message (`8191` on runtime fkwu).  This pulse did not claim that a live
+  residence has consumed that message yet.
 - Join client acknowledgement to compaction consent. Until durable client ack,
   reply frames remain append-only.
 - Add restart recovery that reads an unmatched patch intent, compares exact
