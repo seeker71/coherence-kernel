@@ -430,12 +430,25 @@
                             (rai-env-alternative envelope) envelope))
                     (fcpsi-dispatch s1 envelope)))))
 
-    ; Effectful only when explicitly called with an already-live session.
-    ; `stage-observer` and `stage-context` are caller-born. They carry the
-    ; resident's content-free progress to its own channel without teaching a
-    ; task byte any path, global sink, server, or restart mechanism.
-    (defn fcpsi-run-peer-with-patch-with-stage-context
-        (s session task-node budget patch-ctx stage-observer stage-context)
+    ; The action name arrives from a caller-held policy route, never from task
+    ; bytes. It selects among existing source effects while their model/KV and
+    ; capability inputs remain caller-owned. An action/type mismatch is an
+    ; observed choice, not a fallback to a different effect.
+    (defn fcpsi-default-action (task)
+        (if (str_eq (fcpsi-task-kind task) "repo-patch") "repo-patch"
+        (if (or (str_eq (fcpsi-task-kind task) "source-concept")
+                (str_eq (fcpsi-task-kind task) "source-nodeid"))
+            "source-knowledge" "model")))
+    (defn fcpsi-action-result (session action reason)
+        (fcpa-result-full session (nothing)
+            (str_concat "policy action not selected: " reason)
+            0 0 "policy" 0 "choice" "form-policy" 0 (nothing) 0 0
+            "choice" 0))
+    (defn fcpsi-knowledge-task? (task)
+        (if (or (str_eq (fcpsi-task-kind task) "source-concept")
+                (str_eq (fcpsi-task-kind task) "source-nodeid")) 1 0))
+    (defn fcpsi-run-peer-with-action-with-patch-with-stage-context
+        (s session task-node budget patch-ctx action stage-observer stage-context)
         (do
             (let task (fcpsi-find-task (fcpsi-tasks s) task-node))
             (if (nothing? task)
@@ -446,17 +459,39 @@
                     (let observed (fcpa-observe-task session
                         (fcpsi-task-turn task) (fcpsi-task-kind task)
                         (fcpsi-task-text task)))
-                    (let peer (if (str_eq (fcpsi-task-kind task) "repo-patch")
-                        (fcpa-run-patch observed budget patch-ctx)
-                    (if (or
-                        (str_eq (fcpsi-task-kind task) "source-concept")
-                        (str_eq (fcpsi-task-kind task) "source-nodeid"))
+                    (let peer (if (str_eq action "model")
+                        (fcpa-run observed budget)
+                    (if (str_eq action "source-knowledge")
+                        (if (eq (fcpsi-knowledge-task? task) 1)
                         (fcpa-run-knowledge-with-context observed budget
                             stage-observer stage-context)
-                        (fcpa-run observed budget))))
+                        (fcpsi-action-result session action
+                            "source-knowledge-requires-source-task"))
+                    (if (str_eq action "repo-patch")
+                        (if (str_eq (fcpsi-task-kind task) "repo-patch")
+                            (fcpa-run-patch observed budget patch-ctx)
+                            (fcpsi-action-result session action
+                                "repo-patch-requires-repo-patch-task"))
+                        (fcpsi-action-result session action
+                            "policy-action-not-admitted")))))
                     (let candidate (fcpsi-peer-result s task-node
                         (fcpa-response peer) (fcpa-contribution peer) (nothing)))
                     (list (fcpsi-result-state candidate) peer candidate)))))
+
+    ; Effectful only when explicitly called with an already-live session.
+    ; Existing callers take the source-declared action; policy-aware callers
+    ; enter through the explicit action seam above.
+    (defn fcpsi-run-peer-with-patch-with-stage-context
+        (s session task-node budget patch-ctx stage-observer stage-context)
+        (do
+            (let task (fcpsi-find-task (fcpsi-tasks s) task-node))
+            (if (nothing? task)
+                (list s (nothing)
+                    (fcpsi-result s "nothing" 0 (nothing)
+                        "task-node-absent" (nothing)))
+                (fcpsi-run-peer-with-action-with-patch-with-stage-context
+                    s session task-node budget patch-ctx
+                    (fcpsi-default-action task) stage-observer stage-context))))
 
     ; Existing callers remain source-compatible and receive the original
     ; stdout/framebuffer observer through an explicit empty context.

@@ -1,0 +1,279 @@
+; form-cli-peer-policy-route.fk -- a scannerless, hot-swappable policy image
+; selects the already-born peer actions without taking ownership of Qwen/KV.
+;
+; A policy is an ordinary JIT-once-born op-tag program.  It receives a compact
+; task-intent integer and returns an action integer.  The image can arrive as
+; raw task bytes, is reconstructed by a byte cursor (never a tokenizer), and
+; is published through the existing leased resident ingress.  The selected
+; action remains a caller-born source effect: model/KV, source knowledge, and
+; guarded patch authority therefore never enter an arriving image merely
+; because its NodeID is valid.  The one model session remains outside this
+; policy host.
+;
+; `nothing` from a policy is absence; an unknown present integer is a choice;
+; zero and one are ordinary present program values.  No fk_fn table or static
+; function-slot registry participates.
+;
+; The initial identity image is itself JITable.  It reproduces the native task
+; intent, while a later published image may select another admitted action for
+; each following task.  Existing unbound historical residences retain their
+; declared legacy action until they are renewed; this compatibility state is
+; explicit in the selection receipt rather than being mistaken for a swap.
+;
+; preludes: form-stdlib/form-cli-peer-append-turnwheel.fk
+; Proven by: form-stdlib/tests/form-cli-peer-policy-route-band.fk
+
+(do
+    ; Intent/action integers are image data at the selection boundary, not
+    ; names in a fixed function table.  Their source effects remain below the
+    ; boundary where capability and session ownership are already explicit.
+    (defn fcpr-intent-model () 1)
+    (defn fcpr-intent-source-knowledge () 2)
+    (defn fcpr-intent-repo-patch () 3)
+    (defn fcpr-task-intent (task)
+        (if (str_eq (fcpsi-task-kind task) "repo-patch")
+            (fcpr-intent-repo-patch)
+        (if (or (str_eq (fcpsi-task-kind task) "source-concept")
+                (str_eq (fcpsi-task-kind task) "source-nodeid"))
+            (fcpr-intent-source-knowledge)
+            (fcpr-intent-model))))
+    (defn fcpr-action-name (code)
+        (if (eq code (fcpr-intent-model)) "model"
+        (if (eq code (fcpr-intent-source-knowledge)) "source-knowledge"
+        (if (eq code (fcpr-intent-repo-patch)) "repo-patch"
+            (nothing)))))
+
+    ; The JIT program `input` gives the resident a live default policy.  It is
+    ; deliberately tiny because its task is to preserve the native intent, not
+    ; to hide route choice in another source conditional.
+    (defn fcpr-default-program () (list (list 2)))
+    (defn fcpr-default-route (epoch)
+        (do
+            (let program (fcpr-default-program))
+            (fcrt-route "peer-action-policy/default"
+                (jonb-identity program 0 epoch) program 0)))
+
+    ; A byte-cursor grammar for one policy image carried inside an already
+    ; scannerless peer task:
+    ;
+    ; <|form:policy-program|>\n
+    ; symbol=<descriptive name>\n
+    ; root=<canonical integer>\n
+    ; program=<comma-separated row>;<comma-separated row>...\n
+    ; <|/form:policy-program|>
+    ;
+    ; It accepts no whitespace, no missing rows, no trailing bytes, and no
+    ; caller-supplied NodeID.  The route identity is recomputed from the exact
+    ; rows and the resident registry's meaning epoch.
+    (defn fcpr-open () "<|form:policy-program|>")
+    (defn fcpr-close () "<|/form:policy-program|>")
+    (defn fcpr-symbol-prefix () "symbol=")
+    (defn fcpr-root-prefix () "\nroot=")
+    (defn fcpr-program-prefix () "\nprogram=")
+    (defn fcpr-canonical-int? (text)
+        (str_eq (int_to_str (str_to_int text)) text))
+
+    (defn fcpr-split-go (text separator at out)
+        (do
+            (let found (str_find text separator at))
+            (if (lt found 0)
+                (reverse (cons (substring text at (str_len text)) out))
+                (fcpr-split-go text separator
+                    (add found (str_len separator))
+                    (cons (substring text at found) out)))))
+    (defn fcpr-split (text separator)
+        (fcpr-split-go text separator 0 (list)))
+    (defn fcpr-row-values-go (parts out)
+        (if (nil? parts) (reverse out)
+            (if (or (str_eq (head parts) "")
+                    (eq (fcpr-canonical-int? (head parts)) 0))
+                (nothing)
+                (do
+                    (let rest (fcpr-row-values-go (tail parts)
+                        (cons (str_to_int (head parts)) out)))
+                    (if (nothing? rest) (nothing) rest)))))
+    (defn fcpr-row-parse (text)
+        (if (str_eq text "") (nothing)
+            (fcpr-row-values-go (fcpr-split text ",") (list))))
+    (defn fcpr-program-rows-go (parts out)
+        (if (nil? parts) (reverse out)
+            (do
+                (let row (fcpr-row-parse (head parts)))
+                (if (nothing? row) (nothing)
+                    (do
+                        (let rest (fcpr-program-rows-go (tail parts)
+                            (cons row out)))
+                        (if (nothing? rest) (nothing) rest))))))
+    (defn fcpr-program-parse (text)
+        (if (str_eq text "") (nothing)
+            (fcpr-program-rows-go (fcpr-split text ";") (list))))
+
+    ; parsed = symbol, root, rows.  The three fields are ordered, which makes
+    ; every byte either accounted for or refused; no generic key/value map can
+    ; silently reinterpret an image.
+    (defn fcpr-parse (text)
+        (do
+            (let open (fcpr-open))
+            (let close (fcpr-close))
+            (let open-n (str_len open))
+            (let close-at (sub (str_len text) (str_len close)))
+            (if (or (not (eq (str_find text open 0) 0))
+                    (or (lt close-at open-n)
+                    (not (eq (str_find text close open-n) close-at))))
+                (nothing)
+                (do
+                    (let body (substring text open-n close-at))
+                    (let root-at (str_find body (fcpr-root-prefix) 0))
+                    (let program-at (if (lt root-at 0) -1
+                        (str_find body (fcpr-program-prefix) root-at)))
+                    (if (or (not (eq (str_find body (fcpr-symbol-prefix) 0) 0))
+                            (or (lt root-at 0) (lt program-at 0)))
+                        (nothing)
+                        (do
+                            (let symbol (substring body
+                                (str_len (fcpr-symbol-prefix)) root-at))
+                            (let root-text (substring body
+                                (add root-at (str_len (fcpr-root-prefix)))
+                                program-at))
+                            (let rows (fcpr-program-parse (substring body
+                                (add program-at (str_len (fcpr-program-prefix)))
+                                (str_len body))))
+                            (if (or (str_eq symbol "")
+                                    (or (not (eq (str_find symbol "\n" 0) -1))
+                                    (or (eq (fcpr-canonical-int? root-text) 0)
+                                        (nothing? rows))))
+                                (nothing)
+                                (do
+                                    (let root (str_to_int root-text))
+                                    (if (or (lt root 0) (ge root (len rows)))
+                                        (nothing)
+                                        (list symbol root rows))))))))))
+
+    ; A route is born only from the parsed image and current registry epoch;
+    ; a task cannot nominate an unrelated NodeID to borrow its authority.
+    (defn fcpr-route-from-text (host text)
+        (do
+            (let parsed (fcpr-parse text))
+            (if (nothing? parsed) (nothing)
+                (do
+                    (let shared (wt-sctx (le-w (fcrt-lw host))))
+                    (let epoch (jonb-epoch (fcrt-shared-registry shared)))
+                    (let program (nth parsed 2))
+                    (let root (nth parsed 1))
+                    (fcrt-route (nth parsed 0)
+                        (jonb-identity program root epoch) program root)))))
+
+    ; A route invocation may retain a newly JITted page in `shared`.  Preserve
+    ; that fact in the same host without changing rows, pins, or event history.
+    (defn fcpr-host-with-shared (host shared)
+        (do
+            (let lw (fcrt-lw host))
+            (fcrt-host
+                (list (wt-wheel (wt-rows (le-w lw)) shared)
+                    (le-tbl lw) (le-cur lw) (le-ledger lw))
+                (fcrt-events host))))
+    (defn fcpr-transport-with-join (transport join)
+        (fcpat-with transport join (fcpat-peer transport)
+            (fcpat-reader-row transport) (fcpat-pending transport)
+            (fcpat-acks transport) (fcpat-events transport)
+            (fcpat-released? transport)))
+
+    ; result = transport, signal, present, value, action, route-node, reason.
+    ; The selected integer is retained even when no source action names it, so
+    ; `choice` is inspectable rather than folded into absence.
+    (defn fcpr-selection
+        (transport signal present value action route-node reason)
+        (list "form-cli-peer-policy-selection-v1" transport signal present
+              value action route-node reason))
+    (defn fcpr-selection-transport (r) (nth r 1))
+    (defn fcpr-selection-signal (r) (nth r 2))
+    (defn fcpr-selection-present? (r) (nth r 3))
+    (defn fcpr-selection-value (r) (nth r 4))
+    (defn fcpr-selection-action (r) (nth r 5))
+    (defn fcpr-selection-route-node (r) (nth r 6))
+    (defn fcpr-selection-reason (r) (nth r 7))
+
+    (defn fcpr-select (transport task)
+        (do
+            (let join (fcpat-join transport))
+            (let host (ritj-host join))
+            (let lw (fcrt-lw host))
+            (let route (le-recipes (le-tbl lw) (le-cur lw)))
+            (let intent (fcpr-task-intent task))
+            (if (or (nothing? route)
+                    (nothing? (fcrt-route-identity route)))
+                (fcpr-selection transport "legacy" 1 intent
+                    (fcpr-action-name intent) (nothing)
+                    "policy-route-unbound")
+                (do
+                    (let moved (fcrt-route-invoke route
+                        (wt-sctx (le-w lw)) intent))
+                    (let host2 (fcpr-host-with-shared host
+                        (fcrt-route-shared moved)))
+                    (let join2 (fcpat-join-with-host join host2))
+                    (let transport2 (fcpr-transport-with-join transport join2))
+                    (if (not (str_eq (fcrt-route-signal moved) "returned"))
+                        (fcpr-selection transport2 (fcrt-route-signal moved) 0
+                            (nothing) (nothing) (fcrt-route-identity route)
+                            (fcrt-route-reason moved))
+                        (do
+                            (let code (fcrt-route-value moved))
+                            (let action (fcpr-action-name code))
+                            (if (nothing? action)
+                                (fcpr-selection transport2 "choice" 1 code
+                                    (nothing) (fcrt-route-identity route)
+                                    "policy-action-not-admitted")
+                                (fcpr-selection transport2 "returned" 1 code
+                                    action (fcrt-route-identity route)
+                                    (fcrt-route-reason moved)))))))))
+
+    ; A publish remains a pure state transition until the contribution wheel
+    ; stages and durably appends its receipt.  `next-swap` comes from the live
+    ; lease, so two same-epoch images cannot overwrite each other by a task
+    ; supplied counter.
+    (defn fcpr-publish (transport task now)
+        (do
+            (let join (fcpat-join transport))
+            (let host (ritj-host join))
+            (let route (fcpr-route-from-text host (fcpsi-task-text task)))
+            (if (nothing? route)
+                (fcpr-selection transport "refused" 0 (nothing) (nothing)
+                    (nothing) "policy-image-malformed")
+                (do
+                    (let eid (le-cur (fcrt-lw host)))
+                    (let offered (fcpat-offer-join join
+                        (rai-envelope (fcpsi-task-channel task)
+                            (fcpsi-task-sequence task)
+                            (fcpsi-task-exchange task) "publish"
+                            (list (add (nth eid 0) 1) (nth eid 1) route)
+                            (nothing) -1) now))
+                    (let transport2 (fcpr-transport-with-join transport
+                        (ritj-result-state offered)))
+                    (fcpr-selection transport2 (ritj-result-signal offered)
+                        (ritj-result-present? offered) (ritj-result-value offered)
+                        (nothing) (fcrt-route-identity route)
+                        (ritj-result-detail offered))))))
+
+    ; Content-free egress projection.  It carries structural task/route
+    ; identity and typed policy outcome, never task prompt or model response.
+    (defn fcpr-frame (task selection phase)
+        (str_concat "<|form:peer-policy|>"
+        (str_concat (fcpat-field "task-node"
+                        (fcpat-node-text (fcpsi-task-node task)))
+        (str_concat (fcpat-field "phase" phase)
+        (str_concat (fcpat-field "signal" (fcpr-selection-signal selection))
+        (str_concat (fcpat-field "present"
+                        (int_to_str (fcpr-selection-present? selection)))
+        (str_concat (fcpat-field "action"
+                        (if (nothing? (fcpr-selection-action selection)) ""
+                            (fcpr-selection-action selection)))
+        (str_concat (fcpat-field "value"
+                        (if (eq (fcpr-selection-present? selection) 1)
+                            (int_to_str (fcpr-selection-value selection)) ""))
+        (str_concat (fcpat-field "route-node"
+                        (if (nothing? (fcpr-selection-route-node selection)) ""
+                            (fcpat-node-text
+                                (fcpr-selection-route-node selection))))
+        (str_concat (fcpat-field "reason" (fcpr-selection-reason selection))
+            "\n<|/form:peer-policy|>\n"))))))))))
+    0)
