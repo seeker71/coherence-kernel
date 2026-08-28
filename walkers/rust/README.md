@@ -27,7 +27,7 @@ metal, GGUF / model, the binary formats, and all tests / benches.
 literals     integer, float (incl. scientific notation), string, true/false, ()
 build-verbs  do seq let if defn params  add sub mul div mod
              eq ne lt le gt ge  and or not
-natives      head tail cons empty list nth len  str_concat str_eq
+natives      head tail cons empty list nth len  str_concat str_eq value_eq
 ```
 
 ## Run

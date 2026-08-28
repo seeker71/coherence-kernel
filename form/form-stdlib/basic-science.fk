@@ -1,0 +1,249 @@
+; basic-science.fk — three small, executable science models in native Form.
+;
+; A science answer becomes useful here when its quantities, assumptions, and failure
+; edge can be run. This cell holds a deliberately modest first surface:
+;
+;   physics   — compositional SI dimensions, constant-velocity displacement,
+;               F = ma, work, kinetic energy, and momentum conservation;
+;   chemistry — atom conservation plus amount, concentration, and dilution;
+;   biology   — DNA complementary pairing and Mendelian segregation for one
+;               binary dominant/recessive locus.
+;
+; These are models, not a replacement for measurement. A dimensional mismatch is
+; `nothing`, while zero remains a valid quantity. A reaction is checked only against
+; the elements the caller declares. The inheritance model is a classroom allele model,
+; not an account of whole organisms, human traits, or medical reality.
+;
+;   (bsc-quantity value dimension)            -> (value, SI-exponent-cell)
+;   (bsc-add left right)                       -> compatible sum, or nothing
+;   (bsc-multiply left right)                  -> product with derived dimension
+;   (bsc-divide left right)                    -> quotient with derived dimension
+;   (bsc-displacement speed-mps duration-s)    -> metres, or nothing
+;   (bsc-force mass-kg accel-mps2)             -> newtons, or nothing
+;   (bsc-kinetic-energy mass-kg speed-mps)     -> joules, or nothing
+;   (bsc-momentum mass-kg speed-mps)           -> kg·m/s, or nothing
+;   (bsc-work force-n displacement-m)          -> joules, or nothing
+;   (bsc-conserved? before after)              -> 1 / 0
+;   (bsc-balanced-elements? lhs rhs elements)  -> 1 / 0
+;   (bsc-concentration amount-mol volume-m3)   -> mol/m³, or nothing
+;   (bsc-dilute-concentration c v1 v2)         -> mol/m³, or nothing
+;   (bsc-dna-complement-strand strand)         -> paired strand, or nothing
+;   (bsc-cross parent-a parent-b)              -> four offspring genotypes
+;
+; A dimension cell is `(length mass time current temperature amount luminous)`
+; in SI base-exponent order. Species use atomic numbers, for example
+; `(list (list 1 2) (list 8 1))` is water; a reaction term is
+; (list coefficient species). Elements must be named explicitly at the call site.
+;
+; preludes: form-stdlib/core.fk
+;
+
+(do
+    ; --- quantities: value never carries a hidden unit. ---
+    ; Seven SI base dimensions, held as exponent cells rather than a fixed table
+    ; of named derived units.  Any new dimension can compose from these axes.
+    (defn bsc-dimensionless () (list 0 0 0 0 0 0 0))
+    (defn bsc-dim-length ()    (list 1 0 0 0 0 0 0))
+    (defn bsc-dim-mass ()      (list 0 1 0 0 0 0 0))
+    (defn bsc-dim-time ()      (list 0 0 1 0 0 0 0))
+    (defn bsc-dim-speed ()     (list 1 0 -1 0 0 0 0))
+    (defn bsc-dim-accel ()     (list 1 0 -2 0 0 0 0))
+    (defn bsc-dim-force ()     (list 1 1 -2 0 0 0 0))
+    (defn bsc-dim-energy ()    (list 2 1 -2 0 0 0 0))
+    (defn bsc-dim-momentum ()  (list 1 1 -1 0 0 0 0))
+    (defn bsc-dim-volume ()    (list 3 0 0 0 0 0 0))
+    (defn bsc-dim-amount ()    (list 0 0 0 0 0 1 0))
+    (defn bsc-dim-concentration () (list -3 0 0 0 0 1 0))
+    (defn bsc-dimension? (dimension) (eq (len dimension) 7))
+    (defn bsc-dim-add-same-width (left right)
+        (if (eq (len left) 0) (empty)
+            (cons (add (head left) (head right))
+                  (bsc-dim-add-same-width (tail left) (tail right)))))
+    (defn bsc-dim-add (left right)
+        (if (eq (len left) (len right))
+            (bsc-dim-add-same-width left right)
+            (nothing)))
+    (defn bsc-dim-neg (dimension)
+        (if (eq (len dimension) 0) (empty)
+            (cons (sub 0 (head dimension)) (bsc-dim-neg (tail dimension)))))
+    (defn bsc-dim-sub (left right) (bsc-dim-add left (bsc-dim-neg right)))
+
+    (defn bsc-quantity (value dimension) (list value dimension))
+    (defn bsc-value (quantity) (nth quantity 0))
+    (defn bsc-dimension (quantity) (nth quantity 1))
+    (defn bsc-quantity? (quantity)
+        (if (eq (len quantity) 2) (bsc-dimension? (bsc-dimension quantity)) 0))
+    (defn bsc-same-dimension? (left right)
+        (value_eq (bsc-dimension left) (bsc-dimension right)))
+    (defn bsc-add (left right)
+        (if (bsc-quantity? left)
+            (if (bsc-quantity? right)
+                (if (bsc-same-dimension? left right)
+                    (bsc-quantity (add (bsc-value left) (bsc-value right)) (bsc-dimension left))
+                    (nothing))
+                (nothing))
+            (nothing)))
+    (defn bsc-scale (quantity scalar)
+        (if (bsc-quantity? quantity)
+            (bsc-quantity (mul (bsc-value quantity) scalar) (bsc-dimension quantity))
+            (nothing)))
+    (defn bsc-multiply (left right)
+        (if (bsc-quantity? left)
+            (if (bsc-quantity? right)
+                (bsc-quantity (mul (bsc-value left) (bsc-value right))
+                              (bsc-dim-add (bsc-dimension left) (bsc-dimension right)))
+                (nothing))
+            (nothing)))
+    (defn bsc-divide (left right)
+        (if (bsc-quantity? left)
+            (if (bsc-quantity? right)
+                (if (eq (bsc-value right) 0) (nothing)
+                    (bsc-quantity (div (bsc-value left) (bsc-value right))
+                                  (bsc-dim-sub (bsc-dimension left) (bsc-dimension right))))
+                (nothing))
+            (nothing)))
+    (defn bsc-conserved? (before after)
+        (if (bsc-quantity? before)
+            (if (bsc-quantity? after)
+                (if (bsc-same-dimension? before after)
+                    (eq (bsc-value before) (bsc-value after))
+                    0)
+                0)
+            0))
+
+    ; SI-convention constructors: their value is in m, kg, or s as named.
+    (defn bsc-speed-mps (value) (bsc-quantity value (bsc-dim-speed)))
+    (defn bsc-duration-s (value) (bsc-quantity value (bsc-dim-time)))
+    (defn bsc-length-m (value) (bsc-quantity value (bsc-dim-length)))
+    (defn bsc-mass-kg (value) (bsc-quantity value (bsc-dim-mass)))
+    (defn bsc-accel-mps2 (value) (bsc-quantity value (bsc-dim-accel)))
+    (defn bsc-force-n (value) (bsc-quantity value (bsc-dim-force)))
+    (defn bsc-energy-j (value) (bsc-quantity value (bsc-dim-energy)))
+    (defn bsc-volume-m3 (value) (bsc-quantity value (bsc-dim-volume)))
+    (defn bsc-amount-mol (value) (bsc-quantity value (bsc-dim-amount)))
+    (defn bsc-concentration-mol-per-m3 (value)
+        (bsc-quantity value (bsc-dim-concentration)))
+
+    ; --- physics: equations have explicit expected input and output dimensions. ---
+    (defn bsc-displacement (speed duration)
+        (if (value_eq (bsc-dimension speed) (bsc-dim-speed))
+            (if (value_eq (bsc-dimension duration) (bsc-dim-time))
+                (bsc-multiply speed duration)
+                (nothing))
+            (nothing)))
+    (defn bsc-force (mass acceleration)
+        (if (value_eq (bsc-dimension mass) (bsc-dim-mass))
+            (if (value_eq (bsc-dimension acceleration) (bsc-dim-accel))
+                (bsc-multiply mass acceleration)
+                (nothing))
+            (nothing)))
+    (defn bsc-kinetic-energy (mass speed)
+        (if (value_eq (bsc-dimension mass) (bsc-dim-mass))
+            (if (value_eq (bsc-dimension speed) (bsc-dim-speed))
+                (bsc-scale (bsc-multiply mass (bsc-multiply speed speed)) 0.5)
+                (nothing))
+            (nothing)))
+    (defn bsc-momentum (mass speed)
+        (if (value_eq (bsc-dimension mass) (bsc-dim-mass))
+            (if (value_eq (bsc-dimension speed) (bsc-dim-speed))
+                (bsc-multiply mass speed)
+                (nothing))
+            (nothing)))
+    (defn bsc-work (force displacement)
+        (if (value_eq (bsc-dimension force) (bsc-dim-force))
+            (if (value_eq (bsc-dimension displacement) (bsc-dim-length))
+                (bsc-multiply force displacement)
+                (nothing))
+            (nothing)))
+
+    ; --- chemistry: count a declared atom on one species / reaction side. ---
+    (defn bsc-species-atom-count (species atom)
+        (if (eq (len species) 0) 0
+            (if (value_eq (nth (head species) 0) atom)
+                (nth (head species) 1)
+                (bsc-species-atom-count (tail species) atom))))
+    (defn bsc-term-coefficient (term) (nth term 0))
+    (defn bsc-term-species (term) (nth term 1))
+    (defn bsc-term-atom-count (term atom)
+        (mul (bsc-term-coefficient term)
+             (bsc-species-atom-count (bsc-term-species term) atom)))
+    (defn bsc-side-atom-count (side atom)
+        (if (eq (len side) 0) 0
+            (add (bsc-term-atom-count (head side) atom)
+                 (bsc-side-atom-count (tail side) atom))))
+    (defn bsc-balanced-atom? (left right atom)
+        (eq (bsc-side-atom-count left atom) (bsc-side-atom-count right atom)))
+    (defn bsc-balanced-elements? (left right elements)
+        (if (eq (len elements) 0) 1
+            (if (bsc-balanced-atom? left right (head elements))
+                (bsc-balanced-elements? left right (tail elements))
+                0)))
+    ; Concentration is amount per volume. Dilution preserves the amount:
+    ; C2 = C1 × V1 / V2. A zero final volume declines as nothing through divide.
+    (defn bsc-concentration (amount volume)
+        (if (value_eq (bsc-dimension amount) (bsc-dim-amount))
+            (if (value_eq (bsc-dimension volume) (bsc-dim-volume))
+                (bsc-divide amount volume)
+                (nothing))
+            (nothing)))
+    (defn bsc-dilute-concentration (concentration initial-volume final-volume)
+        (if (value_eq (bsc-dimension concentration) (bsc-dim-concentration))
+            (if (value_eq (bsc-dimension initial-volume) (bsc-dim-volume))
+                (if (value_eq (bsc-dimension final-volume) (bsc-dim-volume))
+                    (bsc-divide (bsc-multiply concentration initial-volume) final-volume)
+                    (nothing))
+                (nothing))
+            (nothing)))
+
+    ; --- biology: DNA pairing is relationship data, not hidden control flow. ---
+    ; A=1, C=2, G=3, T=4. Each directed pair appears so lookup is generic and
+    ; complementing twice returns the original strand. The caller may provide a
+    ; different finite pairing relation to bsc-pair-partner for another alphabet.
+    (defn bsc-dna-pairs () (list (list 1 4) (list 2 3) (list 3 2) (list 4 1)))
+    (defn bsc-pair-partner (pairs member)
+        (if (eq (len pairs) 0) (nothing)
+            (if (eq (nth (head pairs) 0) member)
+                (nth (head pairs) 1)
+                (bsc-pair-partner (tail pairs) member))))
+    (defn bsc-dna-complement-base (base) (bsc-pair-partner (bsc-dna-pairs) base))
+    (defn bsc-dna-complement-join (paired-head paired-tail)
+        (if (nothing? paired-head) (nothing)
+            (if (nothing? paired-tail) (nothing)
+                (cons paired-head paired-tail))))
+    (defn bsc-dna-complement-strand (strand)
+        (if (eq (len strand) 0) (empty)
+            (bsc-dna-complement-join
+                (bsc-dna-complement-base (head strand))
+                (bsc-dna-complement-strand (tail strand)))))
+
+    ; One locus, two gametes, four equally represented offspring. A genotype is
+    ; (allele-a allele-b), with 1 = the model's dominant allele and 0 = its
+    ; recessive allele. These values are domain data, not absence/presence.
+    (defn bsc-genotype (allele-a allele-b) (list allele-a allele-b))
+    (defn bsc-gametes (parent) (list (nth parent 0) (nth parent 1)))
+    (defn bsc-offspring-for-allele (allele gametes)
+        (if (eq (len gametes) 0) (empty)
+            (cons (bsc-genotype allele (head gametes))
+                  (bsc-offspring-for-allele allele (tail gametes)))))
+    (defn bsc-append (left right)
+        (if (eq (len left) 0) right
+            (cons (head left) (bsc-append (tail left) right))))
+    (defn bsc-cross-rows (gametes-a gametes-b)
+        (if (eq (len gametes-a) 0) (empty)
+            (bsc-append (bsc-offspring-for-allele (head gametes-a) gametes-b)
+                        (bsc-cross-rows (tail gametes-a) gametes-b))))
+    (defn bsc-cross (parent-a parent-b)
+        (bsc-cross-rows (bsc-gametes parent-a) (bsc-gametes parent-b)))
+    (defn bsc-dominant-phenotype? (genotype)
+        (if (eq (nth genotype 0) 1) 1
+            (if (eq (nth genotype 1) 1) 1 0)))
+    (defn bsc-count-dominant (offspring)
+        (if (eq (len offspring) 0) 0
+            (add (bsc-dominant-phenotype? (head offspring))
+                 (bsc-count-dominant (tail offspring)))))
+    (defn bsc-count-recessive (offspring)
+        (if (eq (len offspring) 0) 0
+            (add (if (eq (bsc-dominant-phenotype? (head offspring)) 0) 1 0)
+                 (bsc-count-recessive (tail offspring)))))
+
+    0)
