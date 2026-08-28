@@ -15,6 +15,11 @@ Physics now derives rather than merely labels its output dimensions:
 - mass × acceleration becomes force;
 - `1/2 × mass × speed²` becomes energy.
 
+The same quantity surface now checks a conserved state transition. Two bodies
+carry total momentum `6 kg·m/s` before and after a simple velocity exchange;
+the model derives the momentum dimension from mass × speed and verifies the
+two total quantities are equal rather than comparing unlabelled scalars.
+
 The chemistry witness changed element identities from strings to atomic
 numbers, so water is the explicit composition `[(1,2), (8,1)]` and
 conservation is a comparison over caller-declared atoms. The biology surface
@@ -24,10 +29,11 @@ returns the original strand when applied twice, and returns `nothing` for an
 unknown base. The existing one-locus Mendelian model remains visibly narrow.
 
 `form/form-stdlib/tests/basic-science-band.fk` passed clean preflight and
-returned `1048575` independently on fkwu, Go, Rust, and TypeScript. Its twenty
+returned `2097151` independently on fkwu, Go, Rust, and TypeScript. Its twenty-one
 claims include direct absence versus zero, three physical equations, water
 balance and its counterexample, Mendelian outcomes, dimensional composition,
-DNA complement/involution/refusal, and unequal-dimension refusal.
+DNA complement/involution/refusal, unequal-dimension refusal, and momentum
+conservation.
 
 Preflight caught two unclosed forms while the band grew. Tree-heal accepted a
 closer for the test fold; the source leak was then located directly and only
