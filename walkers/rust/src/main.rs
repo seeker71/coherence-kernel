@@ -18,8 +18,8 @@
 //   literals: integer, float (incl. scientific notation), string, true/false, ()
 //   build-verbs: do seq let if defn params  add sub mul div mod
 //                eq ne lt le gt ge  and or not
-//   natives:    head tail cons empty list nth len  str_concat str_eq str_len
-//               str_byte_at byte_to_str
+//   natives:    head tail cons empty list nth len  str_concat str_eq value_eq
+//               str_len str_byte_at byte_to_str
 //
 // str_len/str_byte_at/byte_to_str are the deliberately minimal string "narrow
 // waist": str_len measures, str_byte_at decomposes (one raw byte, 0-255),
@@ -151,6 +151,25 @@ fn format_float(f: f64) -> String {
 // straight into arithmetic.
 fn bool_int(b: bool) -> Value {
     Value::Int(b as i64)
+}
+
+// value_equal — the shared structural equality relation.  `eq` remains the
+// numeric comparison family; this relation is for Form cells whose values may
+// be null, strings, or nested lists.  Its shape is copied from the full Rust
+// kernel and from the Go/TypeScript proof arms: same kind, recursively equal;
+// distinct kinds are never equal.
+fn value_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Int(x), Value::Int(y)) => x == y,
+        (Value::Float(x), Value::Float(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Bool(x), Value::Bool(y)) => x == y,
+        (Value::List(xs), Value::List(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| value_equal(x, y))
+        }
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -848,6 +867,11 @@ fn call_native(name: &str, arg_nodes: &[Rc<Node>], env: &Env) -> Option<Value> {
             Some(Value::Str(Rc::from(s.as_str())))
         }
         "str_eq" => Some(bool_int(str_of(&args[0]) == str_of(&args[1]))),
+        // value_eq — structural equality across the proof-walker's complete
+        // value surface.  This lets the Form-native nothing? helper remain
+        // truthful on Rust rather than forcing each recipe to inspect a
+        // representation detail such as list width.
+        "value_eq" => Some(bool_int(value_equal(&args[0], &args[1]))),
         // str_len: byte count, not codepoint count — `str::len()` in Rust
         // already IS byte length, matching fkwu's raw-byte semantics exactly.
         "str_len" => Some(Value::Int(str_of(&args[0]).len() as i64)),
