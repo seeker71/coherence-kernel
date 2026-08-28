@@ -331,6 +331,46 @@
                 (int_to_str injections))))
             (str_concat g (str_concat " stamp-ms="
                 (str_concat (int_to_str stamp) "\n")))))
+    (defn fcpa-peer-stage-open () "<|form:peer-stage|>")
+    (defn fcpa-peer-stage-close () "<|/form:peer-stage|>\n")
+    (defn fcpa-stage-field (name value)
+        (str_concat name (str_concat "=" (str_concat value "\n"))))
+    ; The host append primitive is a byte carrier. Keep the conversion at this
+    ; membrane explicit; the stage itself remains scannerless Form text.
+    (defn fcpa-bytes-go (text at out)
+        (if (ge at (str_len text)) (reverse out)
+            (fcpa-bytes-go text (add at 1)
+                (cons (str_byte_at text at) out))))
+    (defn fcpa-bytes (text) (fcpa-bytes-go text 0 (list)))
+    ; Caller-born context keeps progress on the task's own append-only Form
+    ; channel. It is structural only: no prompt, generated text, or source
+    ; bytes may cross this frame.
+    (defn fcpa-knowledge-stage-egress-context (path task-node task-key)
+        (list "form-cli-peer-stage-egress-v1" path task-node task-key))
+    (defn fcpa-knowledge-stage-egress-path (ctx) (nth ctx 1))
+    (defn fcpa-knowledge-stage-egress-task-node (ctx) (nth ctx 2))
+    (defn fcpa-knowledge-stage-egress-task-key (ctx) (nth ctx 3))
+    ; Do not name these fields `exchange` or `turn`: contribution replay
+    ; recovery scans exactly those names. Stages are observations, never a
+    ; completed contribution or a replay acknowledgement.
+    (defn fcpa-knowledge-stage-frame
+        (ctx stage phase status generated callbacks lookups injections stamp)
+        (str_concat (fcpa-peer-stage-open)
+        (str_concat "\n"
+        (str_concat (fcpa-stage-field "route" "source-knowledge")
+        (str_concat (fcpa-stage-field "task-node"
+            (fcpa-knowledge-stage-egress-task-node ctx))
+        (str_concat (fcpa-stage-field "task-key"
+            (fcpa-knowledge-stage-egress-task-key ctx))
+        (str_concat (fcpa-stage-field "stage" stage)
+        (str_concat (fcpa-stage-field "phase" phase)
+        (str_concat (fcpa-stage-field "status" status)
+        (str_concat (fcpa-stage-field "generated" (int_to_str generated))
+        (str_concat (fcpa-stage-field "callbacks" (int_to_str callbacks))
+        (str_concat (fcpa-stage-field "lookup-count" (int_to_str lookups))
+        (str_concat (fcpa-stage-field "injections" (int_to_str injections))
+        (str_concat (fcpa-stage-field "stamp-ms" (int_to_str stamp))
+            (fcpa-peer-stage-close)))))))))))))))
     (defn fcpa-knowledge-stage-write
         (stage phase status generated callbacks lookups injections)
         (do
@@ -340,8 +380,30 @@
             (print_str (fcpa-knowledge-stage-line stage phase status generated
                 callbacks lookups injections stamp))
             event))
+    (defn fcpa-knowledge-stage-write-with-context
+        (ctx stage phase status generated callbacks lookups injections)
+        (do
+            (let stamp (now_unix_ms))
+            (let event (fcpa-knowledge-stage-node stage phase status generated
+                callbacks lookups injections stamp))
+            (print_str (fcpa-knowledge-stage-line stage phase status generated
+                callbacks lookups injections stamp))
+            (if (nothing? ctx) event
+                (do
+                    (let frame (fcpa-knowledge-stage-frame ctx stage phase status generated
+                        callbacks lookups injections stamp))
+                    (let appended (file_append_bytes
+                        (fcpa-knowledge-stage-egress-path ctx) (fcpa-bytes frame)))
+                    event))))
     (defn fcpa-knowledge-stage-observer (stage phase cursor generated)
         (fcpa-knowledge-stage-write stage phase
+            (if (nothing? (fknsc-result cursor))
+                (fknsc-scan-state cursor) (fknsc-status cursor))
+            generated (fknsc-callback-calls cursor)
+            (fknsc-lookup-count cursor) (fknsc-injections cursor)))
+    (defn fcpa-knowledge-stage-observer-with-context
+        (ctx stage phase cursor generated)
+        (fcpa-knowledge-stage-write-with-context ctx stage phase
             (if (nothing? (fknsc-result cursor))
                 (fknsc-scan-state cursor) (fknsc-status cursor))
             generated (fknsc-callback-calls cursor)
@@ -394,7 +456,8 @@
     ; Same Qwen state and KV rows, different scannerless protocol.  Read-only
     ; retrieval is observable but does not impersonate an executed recipe or a
     ; landed mutation, so contribution remains zero here.
-    (defn fcpa-run-knowledge (session budget)
+    (defn fcpa-run-knowledge-with-context
+        (session budget stage-observer stage-context)
         (do
             (let started (now_unix_ms))
             (let root (fhcs-default-root))
@@ -409,8 +472,8 @@
                     ; A resident concept request chooses the already-built
                     ; concept-key bucket.  Route absence is a typed refusal;
                     ; it never buys a repository-wide compatibility walk.
-                    (let moved (fknss-run-with-observer session budget ctx
-                        fcpa-knowledge-executor fcpa-knowledge-stage-observer))
+                    (let moved (fknss-run-with-observer-context session budget ctx
+                        fcpa-knowledge-executor stage-observer stage-context))
                     (let cursor (fknss-cursor moved))
                     (let response (str_concat (fknss-before-text moved)
                         (fknss-after-text moved)))
@@ -421,6 +484,12 @@
                         (fknss-injected-bytes moved)
                         (fcpa-knowledge-lifecycle cursor)
                         (fknss-lookup-count moved))))))
+
+    ; Preserve the original direct observer door for callers that do not carry
+    ; a live egress context.
+    (defn fcpa-run-knowledge (session budget)
+        (fcpa-run-knowledge-with-context session budget
+            fcpa-knowledge-stage-observer-with-context (nothing)))
 
     (defn fcpa-patch-stage-category ()
         (intern_trivial_string "form-cli-peer-patch-stage-v1"))
