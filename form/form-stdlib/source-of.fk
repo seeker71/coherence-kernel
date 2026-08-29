@@ -27,7 +27,7 @@
 ; existed; this is the join that lets a REQUEST start the chain instead of
 ; a prelude line.
 ;
-; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/core.fk form-stdlib/keyed-map.fk
 ;
 ; Proven by: form-stdlib/tests/source-of-band.fk
 
@@ -132,6 +132,111 @@
         (if (eq (len rows) 0) acc
             (sof-cons-all (tail rows) (cons (head rows) acc))))
     (defn sof-index (dirs) (sof-index-go dirs (list)))
+
+    ; A scan is necessarily O(source bytes); a retained lookup must not be
+    ; O(all births).  The index therefore receives a second, computed shape:
+    ; a depth derived from the observed row count and a Form-native keyed map
+    ; from exact symbol bytes to its one-or-many paths.  The raw rows remain in
+    ; the snapshot for inspection/audit, while queries use the map.  This is
+    ; not a curated function table: both forms are born from the same scan.
+    (defn sof-index-map-go (rows lookup)
+        (if (eq (len rows) 0) lookup
+            (do
+                (let row (head rows))
+                (let name (nth row 0))
+                (let path (nth row 1))
+                (let key (km-key-of-string name))
+                (let paths (km-get lookup key (nothing)))
+                (sof-index-map-go (tail rows)
+                    (km-put lookup key
+                        (if (nothing? paths) (list path) (cons path paths)))))))
+    (defn sof-index-map (index)
+        (sof-index-map-go index (km-for (sof-size index))))
+    (defn sof-map-find (lookup name)
+        (do
+            (let paths (km-get lookup (km-key-of-string name) (nothing)))
+            (if (nothing? paths) (nothing)
+                (if (eq (len paths) 1) (list "one" (head paths))
+                    (list "choice" paths)))))
+
+    ; ── retained source index: one cold scan, many hot queries ─────────────
+    ; A snapshot is caller-owned resident data, not a global cache.  Its epoch
+    ; is supplied by the same live meaning membrane that owns the JIT route.
+    ; A changed epoch produces `choice` (rebuild is a decision) rather than
+    ; silently reusing stale births or spending another host scan in a query.
+    (defn sof-snapshot-version () "source-of-snapshot-v2")
+    (defn sof-snapshot (epoch dirs index)
+        (list (sof-snapshot-version) epoch dirs index (sof-index-map index)))
+    (defn sof-snapshot? (snapshot)
+        (if (nothing? snapshot) 0
+            (if (not (eq (len snapshot) 5)) 0
+                (str_eq (nth snapshot 0) (sof-snapshot-version)))))
+    (defn sof-snapshot-epoch (snapshot) (nth snapshot 1))
+    (defn sof-snapshot-dirs (snapshot) (nth snapshot 2))
+    (defn sof-snapshot-index (snapshot) (nth snapshot 3))
+    (defn sof-snapshot-lookup (snapshot) (nth snapshot 4))
+    (defn sof-snapshot-build (epoch dirs)
+        (sof-snapshot epoch dirs (sof-index dirs)))
+    (defn sof-snapshot-current? (snapshot epoch)
+        (if (eq (sof-snapshot? snapshot) 1)
+            (if (eq (sof-snapshot-epoch snapshot) epoch) 1 0) 0))
+
+    ; A symbol is source-map data, never a filename or shell fragment.  The
+    ; Form surface permits punctuation in names (for example `->`, `?`, `!`),
+    ; so this only refuses whitespace and parens: bytes that cannot name one
+    ; atom in the direct-source grammar.
+    (defn sof-symbol-byte? (byte)
+        (if (le byte 32) 0
+            (if (eq byte 40) 0
+                (if (eq byte 41) 0 1))))
+    (defn sof-symbol-at? (name at)
+        (if (eq at (str_len name)) 1
+            (if (eq (sof-symbol-byte? (str_byte_at name at)) 1)
+                (sof-symbol-at? name (add at 1)) 0)))
+    (defn sof-symbol? (name)
+        (if (or (nothing? name) (eq (str_len name) 0)) 0
+            (sof-symbol-at? name 0)))
+
+    ; result = signal, reason, name, requested epoch, snapshot epoch, raw
+    ; discovery. `raw` is exactly sof-find's one/choice/nothing result, so the
+    ; reader never has to decode rendered text to recover plurality.
+    (defn sof-snapshot-query-version () "source-of-snapshot-query-v1")
+    (defn sof-snapshot-query-result
+        (signal reason name requested-epoch snapshot-epoch raw)
+        (list (sof-snapshot-query-version) signal reason name requested-epoch
+              snapshot-epoch raw))
+    (defn sof-snapshot-query? (result)
+        (if (nothing? result) 0
+            (if (not (eq (len result) 7)) 0
+                (str_eq (nth result 0) (sof-snapshot-query-version)))))
+    (defn sof-query-signal (result) (nth result 1))
+    (defn sof-query-reason (result) (nth result 2))
+    (defn sof-query-name (result) (nth result 3))
+    (defn sof-query-requested-epoch (result) (nth result 4))
+    (defn sof-query-snapshot-epoch (result) (nth result 5))
+    (defn sof-query-raw (result) (nth result 6))
+    (defn sof-snapshot-query-current (snapshot epoch name)
+        (do
+            (let raw (sof-map-find (sof-snapshot-lookup snapshot) name))
+            (if (nothing? raw)
+                (sof-snapshot-query-result "nothing" "symbol-unborn" name
+                    epoch (sof-snapshot-epoch snapshot) raw)
+                (if (str_eq (nth raw 0) "one")
+                    (sof-snapshot-query-result "value" "symbol-one" name
+                        epoch (sof-snapshot-epoch snapshot) raw)
+                    (sof-snapshot-query-result "choice" "symbol-plural" name
+                        epoch (sof-snapshot-epoch snapshot) raw)))))
+    (defn sof-snapshot-query (snapshot epoch name)
+        (if (not (eq (sof-snapshot? snapshot) 1))
+            (sof-snapshot-query-result "choice" "source-index-absent" name
+                epoch (nothing) (nothing))
+            (if (not (eq (sof-symbol? name) 1))
+                (sof-snapshot-query-result "choice" "symbol-shape-refused"
+                    name epoch (sof-snapshot-epoch snapshot) (nothing))
+                (if (not (eq (sof-snapshot-current? snapshot epoch) 1))
+                    (sof-snapshot-query-result "choice" "source-index-stale"
+                        name epoch (sof-snapshot-epoch snapshot) (nothing))
+                    (sof-snapshot-query-current snapshot epoch name)))))
 
     ; ── discovery: one file, a choice of files, or nothing ─────────────────
     (defn sof-all (index name out)

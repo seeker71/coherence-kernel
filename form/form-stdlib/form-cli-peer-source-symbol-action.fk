@@ -1,0 +1,110 @@
+; form-cli-peer-source-symbol-action.fk -- a caller-owned, retained-index
+; source-definition action. It asks where a Form symbol is born without a
+; model forward, a tokenizer, a new filesystem read, or a static fn map.
+;
+; The index is built once by the live caller under its meaning epoch. A query
+; is one of value (one birth), choice (plurality, stale index, or malformed
+; atom), or nothing (no birth). It never turns a stale snapshot into a silent
+; rescan and never routes the question through Qwen as a fallback.
+;
+; preludes: form-stdlib/form-cli-peer-direct-source-action.fk form-stdlib/source-of.fk
+; Proven by: form-stdlib/tests/form-cli-peer-source-symbol-action-band.fk
+
+(do
+    ; result = session, snapshot query, response, elapsed, signal, reason,
+    ; knowledge contribution. The peer contribution remains zero: a source
+    ; relation is evidence for later work, not a repository mutation.
+    (defn fcpssa-version () "form-cli-peer-source-symbol-action-v1")
+    (defn fcpssa-result
+        (session query response elapsed-ms signal reason knowledge-contribution)
+        (list (fcpssa-version) session query response elapsed-ms signal reason
+              knowledge-contribution))
+    (defn fcpssa-session (r) (nth r 1))
+    (defn fcpssa-query (r) (nth r 2))
+    (defn fcpssa-response (r) (nth r 3))
+    (defn fcpssa-elapsed-ms (r) (nth r 4))
+    (defn fcpssa-signal (r) (nth r 5))
+    (defn fcpssa-reason (r) (nth r 6))
+    (defn fcpssa-knowledge-contribution (r) (nth r 7))
+    (defn fcpssa-result? (r)
+        (if (nothing? r) 0
+            (if (not (eq (len r) 8)) 0
+                (str_eq (nth r 0) (fcpssa-version)))))
+    (defn fcpssa-source-index (source-ctx)
+        (if (or (nothing? source-ctx) (lt (len source-ctx) 5))
+            (nothing) (nth source-ctx 4)))
+    (defn fcpssa-paths (query)
+        (do
+            (let raw (sof-query-raw query))
+            (if (nothing? raw) (list)
+                (if (str_eq (nth raw 0) "one") (list (nth raw 1))
+                    (nth raw 1)))))
+    (defn fcpssa-join-paths (paths)
+        (if (eq (len paths) 0) ""
+            (if (eq (len (tail paths)) 0) (head paths)
+                (str_concat (head paths)
+                    (str_concat "," (fcpssa-join-paths (tail paths)))))))
+    (defn fcpssa-render (query)
+        (str_concat "<|form:source-symbol|>\n"
+        (str_concat "signal=" (str_concat (sof-query-signal query)
+        (str_concat "\nreason=" (str_concat (sof-query-reason query)
+        (str_concat "\nsymbol=" (str_concat (sof-query-name query)
+        (str_concat "\nrequested-epoch=" (str_concat
+            (int_to_str (sof-query-requested-epoch query))
+        (str_concat "\nsnapshot-epoch=" (str_concat
+            (if (nothing? (sof-query-snapshot-epoch query)) ""
+                (int_to_str (sof-query-snapshot-epoch query)))
+        (str_concat "\nsource-paths=" (str_concat
+            (fcpssa-join-paths (fcpssa-paths query))
+            "\n<|/form:source-symbol|>"))))))))))))))
+    (defn fcpssa-from-query (session query elapsed-ms)
+        (fcpssa-result session query (fcpssa-render query) elapsed-ms
+            (sof-query-signal query) (sof-query-reason query)
+            (if (str_eq (sof-query-signal query) "value") 1 0)))
+    (defn fcpssa-refused (session reason)
+        (fcpssa-result session (sof-snapshot-query (nothing) 0 "") "" 0
+            "choice" reason 0))
+    (defn fcpssa-lookup-count (direct)
+        (do
+            (let query (fcpssa-query direct))
+            (if (or (not (eq (sof-snapshot-query? query) 1))
+                    (or (str_eq (sof-query-reason query) "source-index-absent")
+                        (or (str_eq (sof-query-reason query) "source-index-stale")
+                            (str_eq (sof-query-reason query)
+                                "symbol-shape-refused"))))
+                0 1)))
+    (defn fcpssa-lifecycle (direct)
+        (if (str_eq (fcpssa-signal direct) "choice")
+            "source-index,choice,release" "source-index,release"))
+    (defn fcpssa-peer (direct)
+        (fcpa-result-full (fcpssa-session direct) direct
+            (fcpssa-response direct) (fcpssa-elapsed-ms direct) 0
+            "source-symbol" 0 (fcpssa-signal direct) "form-source-index"
+            0 (nothing) 0 0 (fcpssa-lifecycle direct)
+            (fcpssa-lookup-count direct)))
+    (defn fcpssa-run
+        (session task-kind task-text source-ctx expected-epoch)
+        (if (not (str_eq task-kind "source-symbol"))
+            (fcpssa-refused session "source-symbol-requires-source-symbol-task")
+            (do
+                (let started (now_unix_ms))
+                (let query (sof-snapshot-query
+                    (fcpssa-source-index source-ctx) expected-epoch task-text))
+                (fcpssa-from-query session query
+                    (sub (now_unix_ms) started)))))
+    (defn fcpssa-run-peer
+        (stream session task-node source-ctx expected-epoch)
+        (do
+            (let task (fcpsi-find-task (fcpsi-tasks stream) task-node))
+            (if (nothing? task)
+                (list stream (nothing)
+                    (fcpsi-result stream "nothing" 0 (nothing)
+                        "task-node-absent" (nothing)))
+                (do
+                    (let direct (fcpssa-run session (fcpsi-task-kind task)
+                        (fcpsi-task-text task) source-ctx expected-epoch))
+                    (let peer (fcpssa-peer direct))
+                    (let candidate (fcpsi-peer-result stream task-node
+                        (fcpa-response peer) 0 (nothing)))
+                    (list (fcpsi-result-state candidate) peer candidate)))))
+    0)
