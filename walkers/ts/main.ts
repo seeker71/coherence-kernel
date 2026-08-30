@@ -17,6 +17,8 @@
 //   • the BMF s-expression parse and the RBasic op dispatch
 //   • plus list/nth/len and node_eq/value_eq/bp so a real four-way manifest
 //     band (eq-shape-band.fk → 524287) can verify, not just an ad-hoc band.
+//   • make_nodeid — a NodeID value, identity-by-content (the eq law of the
+//     fkwu tag-102 heal)
 //
 // Run:  node --import tsx walkers/ts/main.ts core.fk band.fk
 //   or: tsx walkers/ts/main.ts file.fk ...
@@ -511,6 +513,18 @@ export class Kernel {
       const b = args[1]!;
       return boolInt(valueEqual(a, b));
     });
+    // make_nodeid — the substrate write door: four integer coordinates become
+    // a NodeID value, identity-by-content (eq/value_eq compare coordinates,
+    // never the minting site). Body faithful to form-kernel-ts's native.
+    this.registerNative("make_nodeid", catWitness(), (_k, args) => ({
+      kind: "nodeid",
+      nodeid: {
+        pkg: argInt(args, 0),
+        level: argInt(args, 1),
+        type: argInt(args, 2),
+        inst: argInt(args, 3),
+      },
+    }));
   }
 }
 
@@ -1224,6 +1238,24 @@ function walkCompare(
     if (op === RCmp.EQ) return boolInt(both);
     if (op === RCmp.NE) return boolInt(!both);
     throw new Error("compare on nothing: ordering it against a number is not a number question");
+  }
+
+  // A NodeID is identity-by-content: eq of two NodeIDs answers 1 iff all four
+  // coordinates are equal — regardless of which mint built the value (the fkwu
+  // tag-102 heal, witnessed 2026-08-30). A NodeID never equals an int, a list,
+  // a string, or nothing. Ordering NodeIDs is declined, like ordering nothing:
+  // not a number question.
+  if (av.kind === "nodeid" || bv.kind === "nodeid") {
+    const same =
+      av.kind === "nodeid" &&
+      bv.kind === "nodeid" &&
+      av.nodeid.pkg === bv.nodeid.pkg &&
+      av.nodeid.level === bv.nodeid.level &&
+      av.nodeid.type === bv.nodeid.type &&
+      av.nodeid.inst === bv.nodeid.inst;
+    if (op === RCmp.EQ) return boolInt(same);
+    if (op === RCmp.NE) return boolInt(!same);
+    throw new Error("compare on nodeid: ordering it is not a number question");
   }
 
   let r: boolean;
