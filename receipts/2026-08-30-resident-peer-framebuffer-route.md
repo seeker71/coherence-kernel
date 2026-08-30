@@ -82,6 +82,20 @@ knowledge/mutation contribution.  Source-world query-and-receipt injection is
 the remaining semantic crossing before a Form-specific answer can be called
 grounded.
 
+## Resident teaching overlay
+
+The existing Form teaching overlay now enters `fcpa-bootstrap` before the
+resident's first local reply.  The previous bootstrap body remains a separate
+core function; the overlay wrapper is one explicit context seat rather than a
+second prompt truth.  Its BML rule is
+`resident-bootstrap-carries-current-form-teaching-overlay-before-local-answering`.
+
+The grammar band returned `8191`, the peer band returned `16383`, the direct
+action band returned `1023`, and continuity returned `65535`.  This teaches
+the existing local curriculum without a provider crossing.  It is not source
+retrieval: an answer still enters the source-world model only after a strict
+query and returned current-answer receipt.
+
 ## Honest floor
 
 The local peer answer call has not yet yielded a completed terminal frame to
