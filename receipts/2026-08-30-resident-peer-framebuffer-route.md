@@ -54,6 +54,14 @@ native per-token/progress publication plus a model-stop terminal frame, so a
 long decode can remain observable and controllable without imposing a fixed
 answer-token limit.
 
+`fcms-walk` now emits `model-session-decode-step` at every native decoder
+advance.  The event carries no token id, text, task, or model bytes; the
+process-local framebuffer holds only the stage.  The dedicated decode-pulse
+band returned `1`, and the resident BML grammar returned `4095`.  This proves
+that a waiting caller can distinguish active local generation from a stalled
+turn.  A future live answer receipt still needs to establish the model's stop
+terminal and measured decode rate.
+
 ## Honest floor
 
 The local peer answer call has not yet yielded a completed terminal frame to
