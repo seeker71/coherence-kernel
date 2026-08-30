@@ -35,18 +35,29 @@ compile failures when a name changes in one place. The scanner reports total,
 inline, and sectioned `(bp "NAME")` refs; a passing check means every name
 resolves, while the inline count is the remaining cleanup ratchet.
 
-## The two files
+## New meaning authors BML or higher
 
-New features that can live on the BML brace surface belong there:
-`section [form.bml] { def name(x) = ...; }`. For infix, unless/when,
-and ice/liquid/compost literals, use `section [form.lift]` — a local
-grammar upgrade crystallized the same way (`form-cli-lift-ice-compile.fk`).
-Crystallize with `form-source-compile-file` and call the emitted Form.
-Do not grow a hand-written s-expression twin. The grammar file is
-`form/form-stdlib/grammars/form-lift.fk`; edit it, then write in the
-new rules. No remote oracle.
+This is the guide, executable: `form-cli-author-high`. New meaning
+authors in BML or higher (`.bml`, `section [form.bml]`, `section [form.lift]`,
+BMF grammar, field `.form`). Crystallize with `form-source-compile-file`
+and call the emitted Form. Do not grow a hand-written s-expression twin.
+Existing `.fk` organs stay; `*-xtal.fk` is generated; `*-band.fk` proves;
+the C seed only shrinks. The guide is an offer (`force=0`), not a gate.
 
-A **recipe** `form/form-stdlib/<name>.fk` — a series of `defn`s ending in literal `0`:
+```
+printf "author-high\nquit\n" | ./form/form-cli
+  author-high new-meaning=bml-or-higher organ=keep-do-not-twin xtal=generated band=proof seed=shrink force=0
+```
+
+High-grammar authority lives in `form/form-stdlib/bml/<name>.bml`
+(package / interface / template / class). The executable lowering is
+`form/form-stdlib/<name>.bml` as `section [form.bml] { class Foo<T> { … } }`.
+For infix, unless/when, and ice/liquid/compost, use `section [form.lift]`
+(`form-cli-lift-ice-compile.fk`). Edit `form/form-stdlib/grammars/form-lift.fk`
+to grow that dialect, then write in the new rules. No remote oracle.
+
+A **recipe** `form/form-stdlib/<name>.fk` is the organ and the lowering —
+keep it, extend it, do not twin it as new meaning:
 
 ```lisp
 ; <name>.fk — one-line purpose. (the comment block is the human-facing teaching)
