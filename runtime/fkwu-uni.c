@@ -10918,6 +10918,8 @@ static int fk_src_append_text(const char *path, const char *text, long long n) {
     return 1;
 }
 static int fk_src_collect_file(const char *path, long long parent_idx);
+static int fk_src_collect_bytes(const char *path, char *owned, long long got,
+                                long long mtime, long long size, long long parent_idx);
 static char fk_ascii_lower_char(char c) {
     if (c >= FK_CH_UPPER_A && c <= FK_CH_UPPER_Z) {
         return (char)(c + (FK_CH_LOWER_A - FK_CH_UPPER_A));
@@ -10957,7 +10959,7 @@ static int fk_src_prelude_bml_token(const char *text, long long start, long long
     return n >= 4 && text[start + n - 4] == FK_CH_DOT && text[start + n - 3] == FK_CH_LOWER_B &&
            text[start + n - 2] == 'm' && text[start + n - 1] == 'l';
 }
-static int fk_bml_ensure_lowered(const char *bml_path, char *lowered, long long cap);
+static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len);
 static long long fk_src_trim_import_token(const char *text, long long start, long long *n) {
     long long s = start;
     long long e = start + *n;
@@ -11152,12 +11154,22 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
                             return 0;
                         }
                         if (fk_path_has_suffix(dep_path, ".bml")) {
-                            char bml_lowered[4200];
-                            if (!fk_bml_ensure_lowered(dep_path, bml_lowered, 4200)) {
-                                return 0;
-                            }
-                            if (!fk_src_collect_file(bml_lowered, owner_idx)) {
-                                return 0;
+                            if (fk_src_dep_index(dep_path) < 0) {
+                                long long bml_mtime = fk_path_mtime_raw(dep_path);
+                                if (bml_mtime <= 0) {
+                                    fk_diag_path("error", dep_path,
+                                            "bml prelude is missing or not stat-readable");
+                                    return 0;
+                                }
+                                long long low_len = 0;
+                                char *low = fk_bml_lower_to_mem(dep_path, &low_len);
+                                if (low == 0) {
+                                    return 0;
+                                }
+                                if (!fk_src_collect_bytes(dep_path, low, low_len,
+                                        bml_mtime, low_len, owner_idx)) {
+                                    return 0;
+                                }
                             }
                         } else if (!fk_src_collect_file(dep_path, owner_idx)) {
                             return 0;
@@ -11181,6 +11193,8 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
     }
     return 1;
 }
+static int fk_src_collect_bytes(const char *path, char *owned, long long got,
+                                long long mtime, long long size, long long parent_idx);
 static int fk_src_collect_file(const char *path, long long parent_idx) {
     if (fk_src_dep_index(path) >= 0) {
         return 1;
@@ -11220,6 +11234,16 @@ static int fk_src_collect_file(const char *path, long long parent_idx) {
         i = i + 1;
     }
     owned[got] = 0;
+    return fk_src_collect_bytes(path, owned, got, mtime, size, parent_idx);
+}
+/* the after-read half of collection, shared by the file lane and the BML
+ * floor's in-memory lane: the bytes arrive owned (freed here), registered
+ * under the given path identity — for a lowered .bml that is the .bml
+ * itself, so no derived source file ever exists on disk. */
+static int fk_src_collect_bytes(const char *path, char *owned, long long got,
+                                long long mtime, long long size, long long parent_idx) {
+    long long i = 0;
+    (void)i;
     if (!fk_src_dep_reserve(fk_src_dep_count + 1)) {
         free(owned);
         fk_diag_path("error", path, "could not grow .fk dependency metadata");
@@ -11268,6 +11292,30 @@ static int fk_src_load_unit(const char *root_path, char *source_hash, long long 
     fk_src_root_text[0] = 0;
     fk_cstr_copy(fk_src_root_path, root_path, 4096);
     if (!fk_src_collect_file(root_path, -1)) {
+        return 0;
+    }
+    if (!fk_src_unit_hash(source_hash, hash_cap)) {
+        fk_diag_path("error", root_path, "dependency identity exceeds hash buffer");
+        return 0;
+    }
+    *unit_mtime = fk_src_unit_mtime();
+    fk_spos = 0;
+    fk_srctext[fk_slen] = 0;
+    return 1;
+}
+/* the BML floor's root loader: the unit's root arrives as in-memory text
+ * (the lowered .bml) registered under the .bml's own path and mtime —
+ * no derived source file exists at any point. */
+static int fk_src_load_unit_buffer(const char *root_path, char *owned, long long got,
+                                   long long mtime, char *source_hash,
+                                   long long hash_cap, long long *unit_mtime) {
+    fk_slen = 0;
+    fk_srctext[0] = 0;
+    fk_src_dep_count = 0;
+    fk_src_root_len = 0;
+    fk_src_root_text[0] = 0;
+    fk_cstr_copy(fk_src_root_path, root_path, 4096);
+    if (!fk_src_collect_bytes(root_path, owned, got, mtime, got, -1)) {
         return 0;
     }
     if (!fk_src_unit_hash(source_hash, hash_cap)) {
@@ -13022,43 +13070,38 @@ static void fk_stage_input(const char *s) {
  * .bml.fk, .bml.fkb and .bml.sym files are cache artifacts, gitignored.
  * Shrink direction: this door retires when the runner's entry self-hosts. */
 static const char *fk_self_path = "./fkwu";
-static int fk_bml_ensure_lowered(const char *bml_path, char *lowered, long long cap) {
-    long long n = fk_path_len(bml_path);
-    if (n + 4 >= cap) {
-        fk_diag_path("error", bml_path, "bml path exceeds buffer");
-        return 0;
-    }
-    sprintf(lowered, "%s.fk", bml_path);
-    long long src_m = fk_path_mtime_raw(bml_path);
-    if (src_m <= 0) {
-        fk_diag_path("error", bml_path, "bml source is missing or not stat-readable");
-        return 0;
-    }
-    long long low_m = fk_path_mtime_raw(lowered);
-    if (low_m >= src_m) {
-        return 1;
-    }
+/* lower a .bml entirely in memory: the child prints the lowered text (its
+ * // preludes: line carried) closed by a sentinel; the parent captures it
+ * from the pipe. No derived source file is ever created. Returns a
+ * malloc'd NUL-terminated buffer (caller frees) or 0. */
+static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len) {
 #if defined(_WIN32)
     fk_diag_path("error", bml_path,
                  "bml lowering via self-spawn is not wired on this platform yet");
     return 0;
 #else
-    int fds[2];
-    if (pipe(fds) != 0) {
-        fk_diag_path("error", bml_path, "bml lowering could not open a pipe");
+    int in_fds[2];
+    int out_fds[2];
+    if (pipe(in_fds) != 0 || pipe(out_fds) != 0) {
+        fk_diag_path("error", bml_path, "bml lowering could not open pipes");
         return 0;
     }
     long long pid = fork();
     if (pid < 0) {
-        close(fds[0]);
-        close(fds[1]);
+        close(in_fds[0]);
+        close(in_fds[1]);
+        close(out_fds[0]);
+        close(out_fds[1]);
         fk_diag_path("error", bml_path, "bml lowering could not fork");
         return 0;
     }
     if (pid == 0) {
-        close(fds[1]);
-        dup2(fds[0], 0);
-        close(fds[0]);
+        close(in_fds[1]);
+        close(out_fds[0]);
+        dup2(in_fds[0], 0);
+        dup2(out_fds[1], 1);
+        close(in_fds[0]);
+        close(out_fds[1]);
         char *child_argv[3];
         child_argv[0] = (char *)fk_self_path;
         child_argv[1] = (char *)"form/form-stdlib/bml-floor-compile.fk";
@@ -13066,34 +13109,151 @@ static int fk_bml_ensure_lowered(const char *bml_path, char *lowered, long long 
         execvp(fk_self_path, child_argv);
         _exit(127);
     }
-    close(fds[0]);
+    close(in_fds[0]);
+    close(out_fds[1]);
     {
-        char line[8300];
-        int m = sprintf(line, "%s\n%s\n", bml_path, lowered);
+        char line[4300];
+        int m = sprintf(line, "%s\n-\n", bml_path);
         long long off = 0;
         while (off < m) {
-            long long put = write(fds[1], line + off, (unsigned long)(m - off));
+            long long put = write(in_fds[1], line + off, (unsigned long)(m - off));
             if (put <= 0) {
                 break;
             }
             off = off + put;
         }
     }
-    close(fds[1]);
+    close(in_fds[1]);
+    long long cap = 65536;
+    long long got = 0;
+    char *buf = malloc((unsigned long)cap);
+    if (buf == 0) {
+        fk_die("fk_bml_lower_to_mem: out of memory");
+    }
+    for (;;) {
+        if (got + 4096 >= cap) {
+            cap = cap * 2;
+            char *grown = malloc((unsigned long)cap);
+            if (grown == 0) {
+                fk_die("fk_bml_lower_to_mem: out of memory growing");
+            }
+            long long i = 0;
+            while (i < got) {
+                grown[i] = buf[i];
+                i = i + 1;
+            }
+            free(buf);
+            buf = grown;
+        }
+        long long r = read(out_fds[0], buf + got, 4096);
+        if (r <= 0) {
+            break;
+        }
+        got = got + r;
+    }
+    close(out_fds[0]);
     {
         int st = 0;
         waitpid((int)pid, &st, 0);
         if (st != 0) {
-            fk_diag_path("error", bml_path, "bml lowering child failed; run form/form-stdlib/bml-floor-compile.fk by hand to see its diagnostics");
+            free(buf);
+            fk_diag_path("error", bml_path,
+                    "bml lowering child failed; run form/form-stdlib/bml-floor-compile.fk by hand to see its diagnostics");
             return 0;
         }
     }
-    if (fk_path_mtime_raw(lowered) < src_m) {
-        fk_diag_path("error", bml_path, "bml lowering wrote nothing fresh");
-        return 0;
+    buf[got] = 0;
+    {
+        const char *sentinel = "\n@bml-floor-lowered\n";
+        long long sn = 20;
+        long long at = -1;
+        long long i = 0;
+        while (i + sn <= got) {
+            long long j = 0;
+            while (j < sn && buf[i + j] == sentinel[j]) {
+                j = j + 1;
+            }
+            if (j == sn) {
+                at = i;
+                break;
+            }
+            i = i + 1;
+        }
+        if (at < 0) {
+            free(buf);
+            fk_diag_path("error", bml_path, "bml lowering returned no sentinel-closed text");
+            return 0;
+        }
+        buf[at] = '\n';
+        buf[at + 1] = 0;
+        *out_len = at + 1;
     }
-    return 1;
+    return buf;
 #endif
+}
+/* run a .bml as itself, filelessly: warm runs load <x>.bml.fkb directly —
+ * the native cache is the ONLY artifact this lane ever writes; cold runs
+ * lower in memory and ride the ordinary compile+cache tail under the
+ * .bml's own identity. Root-mtime gates the warm path; an edited prelude
+ * beneath an untouched .bml wants its .bml.fkb removed (named seam: the
+ * hash-checked lane would re-lower on every run to know). */
+static int fk_run_bml(const char *path, long long arg) {
+    char fkb_path[4300];
+    char sym_path[4300];
+    long long n = fk_path_len(path);
+    if (n + 5 >= 4300) {
+        fk_diag_path("error", path, "bml path exceeds buffer");
+        return 2;
+    }
+    sprintf(fkb_path, "%s.fkb", path);
+    sprintf(sym_path, "%s.sym", path);
+    long long src_m = fk_path_mtime_raw(path);
+    if (src_m <= 0) {
+        fk_diag_path("error", path, "bml source is missing or not stat-readable");
+        return 2;
+    }
+    long long fkb_m = fk_path_mtime_raw(fkb_path);
+    if (fkb_m >= src_m) {
+        long long recorded = fk_src_sym_recorded_errors(sym_path);
+        long long unrunnable = fk_src_sym_recorded_unrunnable(sym_path);
+        if (unrunnable > 0) {
+            fk_diag_path("error", sym_path,
+                    "cached image was REFUSED at compile; fix the .bml and rerun");
+            fk_diag_flush();
+            return 1;
+        }
+        if (recorded >= 0 && unrunnable == 0 && fk_src_load_fkb(fkb_path)) {
+            if (recorded > 0) {
+                fk_diag_path("warning", sym_path,
+                        "cached image was compiled with errors; fix the .bml and rerun to clear");
+            }
+            int rc = fk_run_loaded_program_image(arg);
+            return recorded > 0 && rc == 0 ? 1 : rc;
+        }
+        fk_diag_path("warning", fkb_path, "bml cache incomplete or unusable; re-lowering");
+    }
+    long long low_len = 0;
+    char *low = fk_bml_lower_to_mem(path, &low_len);
+    if (low == 0) {
+        return 2;
+    }
+    char expected_source_hash[FK_SRC_HASH_CAP];
+    long long unit_mtime = 0;
+    if (!fk_src_load_unit_buffer(path, low, low_len, src_m,
+            expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
+        return 2;
+    }
+    fk_src_reset_compile_state();
+    fk_src_compile_current_unit(path, fkb_path, sym_path, unit_mtime,
+            expected_source_hash);
+    fk_vs[0] = arg << 1;
+    fk_vsp = 1;
+    fk_diag_flush();
+    if (fk_src_truncated || fk_src_unrunnable) {
+        return 1;
+    }
+    fk_pv_root(fk_walk(fk_fn[0], 0));
+    return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
 }
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
@@ -13120,11 +13280,7 @@ static int fk_run(int argc, char **argv) {
         return fk_run_src(argv[1], argc > 2 ? atoi(argv[2]) : 0);
     }
     if (fk_path_has_suffix(argv[1], ".bml")) {
-        char lowered[4200];
-        if (!fk_bml_ensure_lowered(argv[1], lowered, 4200)) {
-            return 2;
-        }
-        return fk_run_src(lowered, argc > 2 ? atoi(argv[2]) : 0);
+        return fk_run_bml(argv[1], argc > 2 ? atoi(argv[2]) : 0);
     }
     if (fk_path_has_suffix(argv[1], ".fkb")) {
         if (!fk_src_load_fkb(argv[1])) {
