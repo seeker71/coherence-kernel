@@ -1,0 +1,44 @@
+; qwen4exp-flash-next-quant-jit.fk — type-17 resident matvec through Form's Metal JIT door.
+;
+; The execution map is authored in bml/iq2xs-layout.bml and crystallized as
+; iq2xs-layout-xtal.fk. This cell is only its carrier lowering: assemble the MSL,
+; ask metal_pipeline to JIT it for the answering Apple GPU, bind resident GGUF
+; bytes, and dispatch the BML-owned four-row/one-SIMDgroup thread count.
+;
+; This is deliberately NARROW. Qwen3.8-Flash-Next UD-Q2_K_XL also carries
+; Q5_K, IQ3_XXS, IQ4_XS, Q6_K, Q8_0, BF16 and F32 tensors. Returning 0 for any
+; non-17 type is a spoken refusal, not a fallback decode. Model architecture
+; (hyper-connections, PLE, indexer/QSA, GDN and MoE composition) is outside this
+; quant lane and remains an explicit whole-model gap.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/iq2xxs-dequant.fk form-stdlib/iq2xxs-msl.fk form-stdlib/iq2xs-layout-xtal.fk form-stdlib/iq2xs-dequant.fk form-stdlib/iq2xs-msl.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/metal-door.fk
+;
+; Proven by: form-stdlib/tests/qwen4exp-flash-next-quant-jit-band.fk,
+;            observe/qwen4exp-flash-next-quant-jit-live-run.fk, and
+;            native/metal/metal_iq2xs_gpu.sh.
+
+(do
+    (defn q4eq-type () (IQ2XSGGMLType))
+    (defn q4eq-bytes (ty n)
+        (if (eq ty (q4eq-type))
+            (if (eq (iq2x-mod n (IQ2XSBlockElements)) 0)
+                (mul (div n (IQ2XSBlockElements)) (IQ2XSBlockBytes)) 0)
+            0))
+    (defn q4eq-admissible? (ty rows cols)
+        (if (eq ty (q4eq-type)) (iq2x-slot-admissible rows cols) 0))
+    (defn q4eq-threads (ty rows cols)
+        (if (eq (q4eq-admissible? ty rows cols) 1) (iq2x-slot-threads rows) 0))
+    (defn q4eq-msl ()
+        (str_concat (qml-msl-header)
+            (str_concat (iq2xsm-msl-helpers)
+                (iq2xsm-matvec-slot4-body "form_qwen4exp_iq2xs_slot4_f32"))))
+    (defn q4eq-pipeline ()
+        (metal_pipeline (q4eq-msl) "form_qwen4exp_iq2xs_slot4_f32"))
+    (defn q4eq-mv (pipe qh xh yh ty rows cols barrier)
+        (do
+            (let threads (q4eq-threads ty rows cols))
+            (if (le threads 0) 0
+                (metal_enqueue pipe
+                    (md-bind16 (list qh xh yh) (list rows cols) 32 0 0 barrier)
+                    threads))))
+    0)
