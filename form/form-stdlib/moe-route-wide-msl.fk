@@ -1,4 +1,4 @@
-; moe-route-wide-msl.fk — the softmax router at 256 experts, as Metal the BODY emits.
+; moe-route-wide-msl.fk — the softmax router at 512 experts, as Metal the BODY emits.
 ;
 ; A RECOMBINATION, not new arithmetic. Two proven routers already exist here and
 ; each has half of what KAT-Coder-V2.5-Dev needs:
@@ -16,11 +16,14 @@
 ;                                         selection, an unbiased floored weight,
 ;                                         and a wscale.
 ;
-; KAT-Coder routes 256 experts, 8 per token, plain softmax — so it wants the first
-; cell's arithmetic at the second cell's width. Nothing between them is new; the
-; 64 was never a property of the routing meaning, only of one transcription's
-; arrays (moe-route-radius.fk proves the recipe already answers at 256, checked
-; against a closed form).
+; KAT-Coder routes 256 experts, 8 per token; Qwen3.8-Flash-Next routes 512
+; experts, 10 per token. Both use plain softmax followed by top-k and selected
+; renormalization, so they want the first cell's arithmetic at the second cell's
+; width. Nothing between them is new; the smaller radii were never properties of
+; the routing meaning, only of earlier transcriptions' arrays. The BML-authored
+; qwen4exp-flash-next-router organ proves the recipe at 512/top-10 against a
+; closed-form ordering, while moe-route-radius.fk keeps the older 256/top-8
+; witness alive.
 ;
 ; THE ORDER IS LOAD-BEARING AND THE TWO SIBLINGS DISAGREE ON IT. Read this before
 ; touching the write loop. `dsv4-router` writes `ids[j] = pick[nused-1-j]` —
@@ -42,20 +45,20 @@
 ; already leans on, so this cell stays in that appendix family and introduces no
 ; second spine. It emits NO spine of its own and can never double-define anything.
 ;
-; RADIUS: ne <= 256, nsel <= 8. Beyond either the kernel writes NOTHING and
+; RADIUS: ne <= 512, nsel <= 10. Beyond either the kernel writes NOTHING and
 ; returns — a fixed-size array silently overrun is the aporon error with a stack
 ; trace, so refusing is the rule (mm-route-msl's own words, kept).
 ;
 ; preludes: form-stdlib/core.fk
 
 (do
-    (defn mrw-ne-cap () 256)
-    (defn mrw-nsel-cap () 8)
+    (defn mrw-ne-cap () 512)
+    (defn mrw-nsel-cap () 10)
 
     (defn mrw-route-msl (fname)
         (str_concat "kernel void "
         (str_concat fname
-            " (device const float* logits [[buffer(0)]], device uint* ids [[buffer(1)]], device float* wts [[buffer(2)]], constant uint& ne [[buffer(3)]], constant uint& nsel [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; if (ne > 256u) return; if (nsel > 8u) return; if (nsel > ne) return; float p[256]; float taken[256]; uint pick[8]; float mx = logits[0]; for (uint i = 1u; i < ne; ++i) { if (logits[i] > mx) { mx = logits[i]; } } float s = 0.0f; for (uint i = 0u; i < ne; ++i) { float e = fexp(logits[i] - mx); p[i] = e; taken[i] = 0.0f; s = s + e; } float inv = 1.0f / s; for (uint i = 0u; i < ne; ++i) { p[i] = p[i] * inv; } float wsum = 0.0f; for (uint k = 0u; k < nsel; ++k) { uint best = ne; float bv = -1.0e30f; for (uint i = 0u; i < ne; ++i) { if (taken[i] == 0.0f) { if (p[i] > bv) { bv = p[i]; best = i; } } } taken[best] = 1.0f; pick[k] = best; wsum = wsum + bv; } float winv = 1.0f / wsum; for (uint k = 0u; k < nsel; ++k) { ids[k] = pick[k]; wts[k] = p[pick[k]] * winv; } }")))
+            " (device const float* logits [[buffer(0)]], device uint* ids [[buffer(1)]], device float* wts [[buffer(2)]], constant uint& ne [[buffer(3)]], constant uint& nsel [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; if (ne > 512u) return; if (nsel > 10u) return; if (nsel > ne) return; float p[512]; float taken[512]; uint pick[10]; float mx = logits[0]; for (uint i = 1u; i < ne; ++i) { if (logits[i] > mx) { mx = logits[i]; } } float s = 0.0f; for (uint i = 0u; i < ne; ++i) { float e = fexp(logits[i] - mx); p[i] = e; taken[i] = 0.0f; s = s + e; } float inv = 1.0f / s; for (uint i = 0u; i < ne; ++i) { p[i] = p[i] * inv; } float wsum = 0.0f; for (uint k = 0u; k < nsel; ++k) { uint best = ne; float bv = -1.0e30f; for (uint i = 0u; i < ne; ++i) { if (taken[i] == 0.0f) { if (p[i] > bv) { bv = p[i]; best = i; } } } taken[best] = 1.0f; pick[k] = best; wsum = wsum + bv; } float winv = 1.0f / wsum; for (uint k = 0u; k < nsel; ++k) { ids[k] = pick[k]; wts[k] = p[pick[k]] * winv; } }")))
 
     (defn mrw-msl-appendix () (mrw-route-msl "form_moe_route_wide_f32"))
     0)
