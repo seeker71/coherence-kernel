@@ -54,6 +54,25 @@ door: the one-row baseline receipt, then the two still lanes' smallest
 tender moves (one provenance field on the turnwheel; pivot rows for the
 fresh words).
 
+## AMENDED 12:20 WITA, the same day — the wait was alive
+
+The second probe COMPLETED (exit 0) at 12:14. The wall was not a dead
+command buffer: each task was ~280 s of healthy GPU prefill made invisible
+— the plain door's armed-by-absence system prefix put ~949 tokens in front
+of a ~30-token question, at prefill 3.4 tok/s (half the floor's 6.55,
+telemetry in the probe output). Nothing was stuck; nothing could SAY it
+was not stuck.
+
+This amendment makes the case stronger and more precise, not weaker: the
+first probe I terminated was almost certainly healthy working prefill —
+the missing waitvoice did not merely hide a defect, it caused a needless
+kill of sound work. The vital move stands exactly as placed; what changes
+is the charge sheet: voicelessness's first witnessed casualty is not time
+lost to a hang, it is healthy work killed by a blind caller. And a second
+charge joins it, measured: the invisible 920-token prefix is ~85% of every
+plain-door turn's cost, which the armed-by-absence latch never shows the
+caller either.
+
 ## The most surprising teaching
 
 The vital move did not come from ranking roadmap items — it came from three
