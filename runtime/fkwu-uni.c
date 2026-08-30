@@ -7282,6 +7282,23 @@ static long long fk_walk(long long i, long long fp) {
         if (fk_isf(ae) || fk_isf(be)) {
             return (fk_num(ae) == fk_num(be)) ? 2 : 0;
         }
+        if (ae < 0 && be < 0) {
+            long long ia102 = fk_nidx(ae);
+            long long ib102 = fk_nidx(be);
+            if (ia102 >= 1 && ia102 <= fk_np && ib102 >= 1 && ib102 <= fk_np &&
+                fk_nkind[ia102] == 3 && fk_nkind[ib102] == 3) {
+                /* A NodeID is identity-by-content: equal coordinates ARE the
+                 * same identity regardless of which mint built the value node.
+                 * Before this case, two (make_nodeid p l t i) of the same
+                 * coordinates compared by handle and answered 0 (witnessed
+                 * 2026-08-30); fk_neq already knew the kind-3 law — eq just
+                 * never asked it. Only the nodeid/nodeid pair routes here. */
+                return (fk_nid[ia102][0] == fk_nid[ib102][0] &&
+                        fk_nid[ia102][1] == fk_nid[ib102][1] &&
+                        fk_nid[ia102][2] == fk_nid[ib102][2] &&
+                        fk_nid[ia102][3] == fk_nid[ib102][3]) ? 2 : 0;
+            }
+        }
         return (ae == be) ? 2 : 0;
     }
     if (t == 103) {
