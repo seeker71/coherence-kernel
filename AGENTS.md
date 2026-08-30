@@ -84,6 +84,15 @@ Rule for changes: if a patch grows `runtime/fkwu-uni.c`, it must either be a sho
 with an explicit shrink receipt, or it should be rejected in favor of moving that capability into the native
 walker/Form body.
 
+Authoring altitude (Urs, 2026-08-30): new meaning is AUTHORED in BML or higher — the authority picture in
+`form/form-stdlib/bml/`, the executable form.bml where that lane carries it, generated and crystallized cells
+below. Raw `.fk` is a LOWERING, not an authoring surface: reach for it only where the BML lane cannot yet carry
+the meaning, and when you do, name that gap in your receipt — it is the next BML door, never a preference. The
+exemplar shape is offer-ask (receipts/2026-08-30-offer-ask-rises-to-bml.md): authority `.bml` + executable
+form.bml + crystallized xtal + band, with the organ kept and the authoring risen. The mirror that counts the
+body's altitude is `observe/authoring-altitude-run.fk` — a lens, never a ban; the writer decides, the number
+remembers.
+
 ## The honest seam — read this first
 
 Sema's **body** is here and native: the grounding (`form/form-stdlib/rag-*`), the frequency sense
