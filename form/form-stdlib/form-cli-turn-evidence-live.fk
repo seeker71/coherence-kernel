@@ -270,8 +270,40 @@
         (if (str_eq (nth (head calls) 0) call-id) (nth (head calls) 1)
             (fctel-call-native-request? (tail calls) call-id))))
 
+; A provider emits one token_count event before a call with info=null, then
+; another after it with the per-call `last_token_usage` object.  Event presence
+; and token volume are distinct facts: retain both.  `last` is deliberately
+; chosen over `total_token_usage`, whose value is cumulative over a rollout.
+; This keeps a multi-call turn additive without rereading earlier calls.
+(defn fctel-usage-present? (line)
+    (if (ge (str_find line "\"last_token_usage\":" 0) 0) 1 0))
+
+(defn fctel-last-usage-int (line marker)
+    (do
+        (let at (str_find line "\"last_token_usage\":" 0))
+        (if (lt at 0) 0 (fctel-int-after line marker at))))
+
+(defn fctel-add-last-usage (state line)
+    (do
+        (let s1 (fctel-add-at state 1
+            (fctel-last-usage-int line "\"input_tokens\":")))
+        (let s2 (fctel-add-at s1 2
+            (fctel-last-usage-int line "\"cached_input_tokens\":")))
+        (let s3 (fctel-add-at s2 3
+            (fctel-last-usage-int line "\"cache_write_input_tokens\":")))
+        (let s4 (fctel-add-at s3 4
+            (fctel-last-usage-int line "\"output_tokens\":")))
+        (let s5 (fctel-add-at s4 5
+            (fctel-last-usage-int line "\"reasoning_output_tokens\":")))
+        (fctel-add-at s5 6
+            (fctel-last-usage-int line "\"total_tokens\":"))))
+
 (defn fctel-add-usage (state line)
-    (fctel-add-at state 0 1))
+    (do
+        (let evented (fctel-add-at state 0 1))
+        (if (eq (fctel-usage-present? line) 1)
+            (fctel-add-last-usage evented line)
+            evented)))
 
 (defn fctel-add-call (state line)
     (do
@@ -494,7 +526,10 @@
                             (int_to_str (sub segment-end segment-start)) "\n"))))))))
 
 (defn fctel-bound-path ()
-    (if (gt (file_size (fctel-binding-path)) 0)
+    ; The private explicit binding is a host-ABI capability.  `file_size` is
+    ; a compatibility alias; the canonical metadata door keeps the binding
+    ; visible to the same carrier that wrote it.
+    (if (gt (host_file_size (fctel-binding-path)) 0)
         (fctel-trim-end (read_file (fctel-binding-path))) ""))
 
 (defn fctel-row ()
