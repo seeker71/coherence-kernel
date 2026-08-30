@@ -53,7 +53,7 @@ Verify the direct source bootstrap first:
 ./fkwu bootstrap/ground.fk                 # -> 42
 ./fkwu bootstrap/ground-recursive.fk 10    # -> 55
 ./fkwu form/form-stdlib/tests/binary-freshness-band.fk </dev/null  # -> 31 (anything else: REBUILD fkwu first)
-./fkwu form/form-stdlib/form-cli-bml-cache-compile.fk && ./fkwu form/form-stdlib/form-cli-bml-cache-run.fk  # BML ice; xtal is local cache
+./fkwu form/form-stdlib/form-cli-bml-cache-run.fk  # BML authority runs itself; `.bml.fkb` is the local cache
 ./fkwu bootstrap/ground-numeric-list.fk    # -> [1, 2.5, [3, 4]]
 ```
 
@@ -97,8 +97,8 @@ converging doors built the same hour:
   artifact is the native `.bml.fkb`/`.bml.sym` cache beside the source
   (`form/form-stdlib/bml-floor-compile.fk` is the door; a `// preludes:` line in the .bml travels
   through; cold ~5 s, warm ~6 ms);
-- the ice lane: `./fkwu form/form-stdlib/form-cli-bml-cache-compile.fk && ./fkwu
-  form/form-stdlib/form-cli-bml-cache-run.fk` — BML ice; xtal is local cache, never tree truth.
+- the cache witness: `./fkwu form/form-stdlib/form-cli-bml-cache-run.fk` — the
+  BML authority runs itself; its `.bml.fkb` is local cache, never tree truth.
 
 `*-xtal.fk` committed to the tree is the **wrong shape** — a twin is a second truth. Existing Form
 organs stay welcome; bands witness. When a lowering still helps, name the next BML+native-cache

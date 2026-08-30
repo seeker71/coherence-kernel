@@ -42,8 +42,10 @@ BML (`.bml`, `section [form.bml]`, `section [form.lift]`, BMF, field `.form`)
 **with** the optimal cached native speed compiler (fresh `.fkb` / `.dylib`).
 See `grammars/bml-native-north-star.form`.
 
-`*-xtal.fk` is local cache of ice (gitignored, like `.fkb`), never authored.
-A miss: `form-cli-bml-cache-compile.fk` then `form-cli-bml-cache-run.fk`.
+The native `.bml.fkb` / `.bml.sym` pair is the cache; no source-shaped
+companion is authored or committed. Running the BML lane or
+`form-cli-bml-cache-run.fk` reaches that cache on demand, scoped to the lane
+being run rather than by an ambient repository sweep.
 Existing `.fk` organs are welcome; `*-band.fk` witnesses; the C seed
 shrinks gladly.
 
@@ -52,10 +54,9 @@ printf "author-high\nquit\n" | ./form/form-cli
   author-high floor=high-bml-cached-native xtal=wrong-shape organs-welcome bands-witness seed-shrink
 ```
 
-High-grammar authority lives in `form/form-stdlib/bml/<name>.bml`
-(package / interface / template / class). The executable surface is
-`form/form-stdlib/<name>.bml` as `section [form.bml] { class Foo<T> { … } }`.
-Compile for **native cache**, not as a destination in s-expression xtal.
+High-grammar authority and executable surface live together at
+`form/form-stdlib/bml/<name>.bml` as `section [form.bml] { class Foo<T> { … } }`.
+Run it for its **native cache**, not as a destination in generated Form source.
 For infix, unless/when, and ice/liquid/compost, use `section [form.lift]`
 (`form-cli-lift-ice-compile.fk`). Edit `form/form-stdlib/grammars/form-lift.fk`
 to grow that dialect, then write in the new rules. No remote oracle.
