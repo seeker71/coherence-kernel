@@ -1,14 +1,16 @@
 # Current Floor
 
-Date: 2026-08-25 (morning: full reground on the three-line reunion; afternoon:
-knowledge gradient, tokenizer repair, and row-price fall folded in; prior
-floor was 2026-07-19, amended 2026-08-13)
+Date: 2026-08-30 (band battery, census, and ground witnesses re-run fresh;
+model-lane timings stand on their 2026-08-25 stamps with same-day live
+receipts beside them; prior floor was 2026-08-25, before that 2026-07-19)
 
 This file is the current release floor for this worktree. Receipts preserve
-history; the claims below are only the state present NOW. Every witness was
-re-measured on 2026-08-25 morning through the resolver-driven `./fkwu` door
-on this Apple M4 Max unless a different date is stated beside it. A claim
-whose witness could not be re-run today says so plainly.
+history; the claims below are only the state present NOW. Every band and
+census number below was re-measured on 2026-08-30 morning through the
+resolver-driven `./fkwu` door on this Apple M4 Max (binary rebuilt first —
+the standing one predated the 2026-08-29 C-seed commit) unless a different
+date is stated beside it. A claim whose witness was not re-run today says so
+plainly, and names the receipt that carries its freshest live evidence.
 
 ## Grounding
 
@@ -29,14 +31,16 @@ cc -O2 -o fkwu runtime/fkwu-uni.c \
 
 The C file remains a temporary seed and shrink target, not the destination.
 
-## Band witnesses, all re-run 2026-08-25
+## Band witnesses, all re-run 2026-08-30
 
 ```text
 metal-door-band                        -> 15
-qwen35-dense-token-handle-band         -> 536870911   (29 bits: geometry from
-                                          the sealed GGUF, 35+ pipelines, RMS
+qwen35-dense-token-handle-band         -> 2147483647  (31 bits — grew from 29
+                                          on 2026-08-25: geometry from the
+                                          sealed GGUF, 35+ pipelines, RMS
                                           radius bound both sides, threadgroup
-                                          GQA present, batched-block gates)
+                                          GQA, batched-block gates, plus the
+                                          two gates landed since)
 qwen35-crystal-band                    -> 255         (frozen open == scanned
                                           open, row-for-row, same first token)
 mlx-derived-band                       -> 16777215    (24 ops; 16 with no
@@ -52,18 +56,50 @@ form-knowledge-source-search-band      -> 262143
 form-knowledge-qwen-heldout-v3-eval-band -> 65535
 ```
 
+New floor bands, born since 2026-08-25 and green on 2026-08-30:
+
+```text
+gate/tests/structural-gate-band        -> 8191        (live audit verdict:
+                                          [205, 0, 48, 3, 20, 57, 73, 4] —
+                                          zero unclassified .sh/.py; the
+                                          MANIFEST zero-claim contradiction
+                                          became a native refusal)
+form-cli-peer-direct-answer-action-band -> 255
+form-cli-peer-policy-route-band        -> 32767       (JIT policy selects the
+                                          direct-answer action 5, no forward)
+form-cli-peer-stream-ingress-band      -> 2097151
+form-cli-peer-contribution-turnwheel-band -> 4194303
+observed-auto-learning-band            -> 32767       (live promotion now
+                                          requires a retained equivalence
+                                          witness, not score alone)
+```
+
 ## The local-model lane (Qwen3.8-27B Q8_0, Form-native, Metal JIT)
 
 All MSL is Form-emitted and JIT-compiled at runtime for the device that
 answered metal_status; weights stay mmap-backed no-copy; the file is admitted
 by a whole-file Form SHA-256 seal.
 
-Measured this morning, one-shot generate through the fcmg door:
+Measured 2026-08-25 morning, one-shot generate through the fcmg door (not
+re-timed 2026-08-30 — a fresh admission was not spent on a number whose
+aliveness has a same-day live receipt: one resident direct-answer turn,
+1334 ms, three generated ids, clean `<|im_end|>` stop, no llama/Ollama/HTTP —
+receipts/2026-08-30-direct-answer-metal-boundary.md):
 
 ```text
 prefill  6.55 tok/s      decode  6.41 tok/s      text: LOCAL FORM ALIVE
-metal stream ceiling this morning: 414.7 GB/s (438–452 witnessed 2026-08-24)
+metal stream ceiling 2026-08-25: 414.7 GB/s (438–452 witnessed 2026-08-24)
 ```
+
+The residency daemon named on 2026-08-25 as "the structural repair" now
+EXISTS as an organ: the permanent resident
+(`observe/form-cli-peer-contribution-live.fk`) holds one model admission per
+artifact lifetime behind a FIFO bell, with hot-swappable JIT policy,
+declared birth capabilities, source/recipe/patch/direct-answer effects,
+turnwheel append, and content-free stage diagnostics. A policy can select
+only capabilities present at birth — an old image cannot gain a new effect
+by swap; a successor is born for that (receipts 2026-08-26..30, resident
+family).
 
 Correctness bounds now in force (all 2026-08-24, live-witnessed):
 - Cooperative RMS only at width <= 4096 (its scratch is sq[4096]); wider rows
@@ -91,11 +127,21 @@ llama.cpp decode 13.39 tok/s, prefill 222.6 tok/s. This lane's decode is
 2.1x from parity under the correctness bounds; prefill parity requires the
 span lane promoted into the plain door.
 
-## The knowledge denominator (first live, sealed measurement)
+## The knowledge denominator (live, sealed measurement)
 
-Census this morning: **5,960 source files across 15 families**; 22 registered
-sources, 23 concepts; integrated-source-percent honestly 0 (registration is
-not integration).
+Census re-run 2026-08-30: **6,608 source files across 15 families** (was
+5,960 on 2026-08-25 — the denominator grew 11% in five days, mostly
+form-stdlib 3,373 and receipts 1,384); 24 registered sources, 25 concepts;
+integrated-source-percent honestly 0 (registration is not integration);
+current-source-access 100%, source probe hit with a current hash.
+
+The unassisted local-answer baseline is still **0**, and it is now measured
+at route level, not guessed: the sealed v303 held-out row reached the warm
+resident and its recipe-only route answered a typed `<FAIL>` (2026-08-29);
+a successor born with the direct-answer effect then executed one live
+direct turn that ended cleanly after three generated ids — a genuine
+held-out miss, not a transport failure (2026-08-30). Curriculum/RAG/LoRA
+credit waits on that one-row baseline receipt.
 
 The blind v3 heldout — 30 sealed rows, 2/family, exact-normalized verifier,
 no lexical credit, consent dataset-bound — ran LIVE overnight to completion
@@ -168,9 +214,15 @@ O(n^2) concat, OOM (rc 137). Consequences in force:
 3. **Decode parity** — 6.41 vs 13.39 tok/s (2.1x): the width-independent
    cooperative RMS (simd tree, no sq[n]) is the named kernel; the
    remaining GDN small kernels stand at ~604 us/block (2026-08-24).
-4. **Residency-cold open ~16 s** — returns whenever the GPU residency
-   lapses; the resident daemon (one admission per artifact lifetime) is
-   the named structural repair.
+4. **Residency-cold open — the daemon now exists; visibility remains.**
+   The permanent resident holds one admission per artifact lifetime, so the
+   ~16 s cold open is paid once per residence, not per turn. What remains
+   (2026-08-30): cold admission itself measured 142.564 s in one successor
+   birth and was invisible to the client while the terminal pipe stayed
+   open; the carrier watchdog is a fixed five-minute poll. The named repair
+   is a caller-controlled, Form-visible readiness/sync deadline with typed
+   admission and command-buffer status frames — completed, error, timeout,
+   and release kept distinct.
 5. **The emitted walker's 19x** — stands as 2026-08-24's measurement
    (19.89B vs 1.06B visits, same work); the 2026-08-25 re-pairing is OPEN:
    the fkwu twin re-measured cleanly on the regenerated body (7.2B visits,
@@ -198,10 +250,19 @@ weights); form-cli lacking MLX/Metal carriers.
 
 ## Honest seams carried forward
 
+- The C seed grew +241 lines since 2026-08-25 (12,873 -> 13,114 over four
+  commits). One growth is already owned as temporary by its own receipt
+  (2026-08-29 source-loader dependency growth repair). The shrink law
+  stands; this number is on the floor so the debt stays visible.
 - The reuse-driver comparisons (595->159 s) are physical timings but not
   like-for-like prompts (teach-layer turn differed); re-witness requires
   exact-id-sequence parity first. The state-reuse mechanism itself stands.
 - decode_gpu_busy=0 through form-cli (2026-08-23) still unhealed.
 - The consent file for v3 is a per-run local act, never committed.
 - Timings taken while a sibling process computes on the same host are
-  contention-noised; bands are exact regardless.
+  contention-noised; bands are exact regardless. (2026-08-30's battery ran
+  with only two idle sibling fkwu processes present, ~0 CPU.)
+- The north-star document's corpus count (188 rows, stamped 2026-07-17) is
+  historical; the corpus answers for itself now: 549 rows, 549 admissible,
+  max meaning-id 1157 (field code 549054921157, asked 2026-08-30 after the
+  starstride row landed).
