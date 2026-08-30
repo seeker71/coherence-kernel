@@ -236,21 +236,37 @@
                                         "model-session-open-prefill-complete" 8388612))
                                     opened))))))))))
 
-    ; Each decoder step is observable without disclosing its token or text.
-    ; It lives beside the recursive native walk, so a long local turn remains
-    ; visible while its KV state stays wholly in this process.
-    (defn fcms-decode-pulse ()
-        (fcmg-live-stage "model-session-decode-step" 8388613))
+    ; Decoder progress is observable without disclosing its token or text.
+    ; Checkpoints arrive after 1, 2, 4, 8... local steps: O(log n) terminal
+    ; frames retain liveness for an unbounded turn without turning a long
+    ; answer into a second token stream.
+    (defn fcms-decode-checkpoint? (steps-to-checkpoint)
+        (if (le steps-to-checkpoint 1) 1 0))
+    (defn fcms-decode-next-left (steps-to-checkpoint checkpoint-width)
+        (if (eq (fcms-decode-checkpoint? steps-to-checkpoint) 1)
+            checkpoint-width
+            (sub steps-to-checkpoint 1)))
+    (defn fcms-decode-next-width (steps-to-checkpoint checkpoint-width)
+        (if (eq (fcms-decode-checkpoint? steps-to-checkpoint) 1)
+            (mul checkpoint-width 2)
+            checkpoint-width))
+    (defn fcms-decode-pulse (completed-steps)
+        (fcmg-live-stage (str_concat "model-session-decode-checkpoint-"
+            (int_to_str completed-steps)) 8388613))
 
     ; result = (ids pending pos stopped). Returned ids are model speech only;
     ; the stop/control prediction is retained separately for the next crossing.
-    (defn fcms-walk (s id pos left stops out)
+    (defn fcms-walk (s id pos left stops out steps-to-checkpoint checkpoint-width completed-steps)
         (if (lt id 0) (list out -1 pos 1)
         (if (eq (q38-stop? id stops) 1) (list out id pos 1)
         (if (le left 0) (list out id pos 0)
             (do
                 (let out2 (append out (list id)))
-                (let pulse (fcms-decode-pulse))
+                (let completed2 (add completed-steps 1))
+                (let pulse (if (eq (fcms-decode-checkpoint? steps-to-checkpoint) 1)
+                    (fcms-decode-pulse completed2) 0))
+                (let next-left (fcms-decode-next-left steps-to-checkpoint checkpoint-width))
+                (let next-width (fcms-decode-next-width steps-to-checkpoint checkpoint-width))
                 (if (eq left 1) (list out2 id pos 0)
                     (do
                         (let ctx (fcms-ctx s))
@@ -262,7 +278,7 @@
                         (if (eq (q38-stop? nid stops) 1)
                             (list out2 nid (add pos 1) 1)
                             (fcms-walk s nid (add pos 1) (sub left 1)
-                                stops out2))))))))))
+                                stops out2 next-left next-width completed2))))))))))
 
     ; generation = tag text ids updated-session. No generated text is needed to
     ; resume; the bytes are exposed only for the Form/BMF boundary that asks.
@@ -277,7 +293,7 @@
             (do
                 (let stops (fcmg-q35-stops (fcms-src s)))
                 (let walked (fcms-walk s (fcms-pending s) (fcms-pos s)
-                    n stops (empty)))
+                    n stops (empty) 1 1 0))
                 (let ids (nth walked 0))
                 (let next (fcms-with-stream s (nth walked 2) (nth walked 1)
                     (nth walked 3) (add (fcms-generated-ids s) (len ids))
