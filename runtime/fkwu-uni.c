@@ -12792,7 +12792,14 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     long long direct_count = 0;
     long long i = 1;
     while (i < fk_src_dep_count) {
-        if (fk_src_dep_parent[i] == 0) {
+        /* .bml deps are floor-lane units: their meaning lives with their
+         * carried prelude chain and their cache is the floor's own
+         * .bml.fkb ice. Probing one "alone" reads the RAW brace surface
+         * off disk, finds hundreds of unresolved names, and poisons the
+         * floor's cache with a REFUSED sym (witnessed 2026-08-30). The
+         * import lane skips them entirely. */
+        if (fk_src_dep_parent[i] == 0 &&
+            !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
             direct_count = direct_count + 1;
         }
         i = i + 1;
@@ -12802,7 +12809,8 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     }
     i = 1;
     while (i < fk_src_dep_count) {
-        if (fk_src_dep_parent[i] == 0) {
+        if (fk_src_dep_parent[i] == 0 &&
+            !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
             char dep_fkb_path[4096];
             long long dep_end = fk_src_dep_end[i];
             long long dep_mtime = fk_src_unit_mtime_range(i, dep_end);
@@ -13334,12 +13342,15 @@ static int fk_run_bml(const char *path, long long arg) {
         long long recorded = fk_src_sym_recorded_errors(sym_path);
         long long unrunnable = fk_src_sym_recorded_unrunnable(sym_path);
         if (unrunnable > 0) {
-            fk_diag_path("error", sym_path,
-                    "cached image was REFUSED at compile; fix the .bml and rerun");
-            fk_diag_flush();
-            return 1;
-        }
-        if (recorded >= 0 && unrunnable == 0 && fk_src_load_fkb(fkb_path)) {
+            /* an unrunnable mark on the ice may be the floor's own honest
+             * refusal or a foreign writer's (an import probe once compiled
+             * the raw surface alone and poisoned this exact path). Either
+             * way the honest move is the same: re-lower fresh. A .bml that
+             * truly refuses will refuse again, loudly, with today's
+             * diagnostics instead of a cached tombstone. */
+            fk_diag_path("warning", sym_path,
+                    "cached image carries a refusal mark; re-lowering fresh");
+        } else if (recorded >= 0 && fk_src_load_fkb(fkb_path)) {
             if (recorded > 0) {
                 fk_diag_path("warning", sym_path,
                         "cached image was compiled with errors; fix the .bml and rerun to clear");
