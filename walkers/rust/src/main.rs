@@ -21,6 +21,9 @@
 //   natives:    head tail cons empty list nth len  str_concat str_eq value_eq
 //               str_len str_byte_at byte_to_str  make_nodeid (identity-by-
 //               content, the eq law of the fkwu tag-102 heal)
+//               intern_node intern_trivial_int intern_trivial_string (the
+//               substrate write doors — jit-once-born's interned structural
+//               identity runs on these)
 //
 // str_len/str_byte_at/byte_to_str are the deliberately minimal string "narrow
 // waist": str_len measures, str_byte_at decomposes (one raw byte, 0-255),
@@ -48,14 +51,128 @@ use std::rc::Rc;
 // carries no content-addressing substrate.
 // ---------------------------------------------------------------------------
 // NodeID — a substrate coordinate (package, level, type, instance). Copied
-// from the full kernel's struct; the walker holds it only as a VALUE the
-// eq/value_eq law reads — no intern table, no content-addressing substrate.
-#[derive(Copy, Clone, PartialEq, Eq)]
+// from the full kernel's struct. The walker holds it as a VALUE the
+// eq/value_eq law reads, and carries the substrate WRITE doors the JIT-lane
+// cells run on (intern_node / intern_trivial_int / intern_trivial_string)
+// over the content-addressing tables below.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 struct NodeID {
     pkg: u32,
     level: u32,
     ty: u32,
     inst: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Substrate — the content-addressing tables behind the write doors. Copied
+// faithfully from the full kernel (intern / intern_trivial_int /
+// intern_string): a composite content-addresses by (category, children)
+// shape — same shape ⇒ same NodeID, a fresh shape mints pkg 0, the
+// category's level/ty, and the next inst (starting at 1, as the full kernel
+// does); a trivial int inlines in the inst slot while it fits i32 and
+// overflows into the i64 table as TRIV_INT64; a string content-addresses
+// into the string table as TRIV_STRING. The walker is single-threaded, so
+// the substrate lives in a thread_local RefCell — one mutable home, no
+// threading of kernel state through the pure native surface.
+// ---------------------------------------------------------------------------
+const LEVEL_TRIVIAL: u32 = 1;
+const TRIV_INT: u32 = 1;
+const TRIV_STRING: u32 = 2;
+const TRIV_INT64: u32 = 5;
+
+struct Substrate {
+    by_shape: std::collections::HashMap<(NodeID, Vec<NodeID>), NodeID>,
+    next_inst: u32,
+    strs: Vec<String>,
+    str_idx: std::collections::HashMap<String, u32>,
+    i64s: Vec<i64>,
+    i64_idx: std::collections::HashMap<i64, u32>,
+}
+
+impl Substrate {
+    fn new() -> Substrate {
+        Substrate {
+            by_shape: std::collections::HashMap::new(),
+            next_inst: 1,
+            strs: Vec::new(),
+            str_idx: std::collections::HashMap::new(),
+            i64s: Vec::new(),
+            i64_idx: std::collections::HashMap::new(),
+        }
+    }
+
+    // intern — content-addressed insertion. Same shape ⇒ same NodeID.
+    fn intern(&mut self, category: NodeID, children: Vec<NodeID>) -> NodeID {
+        let key = (category, children);
+        if let Some(&nid) = self.by_shape.get(&key) {
+            return nid;
+        }
+        let nid = NodeID {
+            pkg: 0,
+            level: category.level,
+            ty: category.ty,
+            inst: self.next_inst,
+        };
+        self.next_inst += 1;
+        self.by_shape.insert(key, nid);
+        nid
+    }
+
+    fn intern_trivial_int(&mut self, n: i64) -> NodeID {
+        // Inline while the value fits the 32-bit inst slot; overflow into
+        // `i64s` once it crosses the int32 ceiling — mirrors the full
+        // kernel's intern_trivial_int exactly.
+        if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
+            return NodeID {
+                pkg: 1,
+                level: LEVEL_TRIVIAL,
+                ty: TRIV_INT,
+                inst: (n as i32) as u32,
+            };
+        }
+        if let Some(&idx) = self.i64_idx.get(&n) {
+            return NodeID {
+                pkg: 1,
+                level: LEVEL_TRIVIAL,
+                ty: TRIV_INT64,
+                inst: idx,
+            };
+        }
+        let idx = self.i64s.len() as u32;
+        self.i64s.push(n);
+        self.i64_idx.insert(n, idx);
+        NodeID {
+            pkg: 1,
+            level: LEVEL_TRIVIAL,
+            ty: TRIV_INT64,
+            inst: idx,
+        }
+    }
+
+    fn intern_string(&mut self, s: &str) -> NodeID {
+        if let Some(&idx) = self.str_idx.get(s) {
+            return NodeID {
+                pkg: 1,
+                level: LEVEL_TRIVIAL,
+                ty: TRIV_STRING,
+                inst: idx,
+            };
+        }
+        let idx = self.strs.len() as u32;
+        self.strs.push(s.to_string());
+        self.str_idx.insert(s.to_string(), idx);
+        NodeID {
+            pkg: 1,
+            level: LEVEL_TRIVIAL,
+            ty: TRIV_STRING,
+            inst: idx,
+        }
+    }
+}
+
+thread_local! {
+    static SUBSTRATE: std::cell::RefCell<Substrate> =
+        std::cell::RefCell::new(Substrate::new());
 }
 
 #[derive(Clone)]
@@ -919,6 +1036,53 @@ fn call_native(name: &str, arg_nodes: &[Rc<Node>], env: &Env) -> Option<Value> {
             ty: args[2].as_int() as u32,
             inst: args[3].as_int() as u32,
         })),
+        // intern_node — the composite write door: category NodeID + child
+        // NodeIDs content-address into the substrate (same shape ⇒ same
+        // NodeID; a fresh shape mints pkg 0, the category's level/ty, and the
+        // next inst). Body faithful to the full kernel's
+        // register_native("intern_node", ...) over Substrate::intern.
+        "intern_node" => {
+            let cat = match &args[0] {
+                Value::Nid(n) => *n,
+                other => panic!(
+                    "intern_node: category must be NodeID, got {}",
+                    other.display()
+                ),
+            };
+            let kids: Vec<NodeID> = match &args[1] {
+                Value::List(xs) => xs
+                    .iter()
+                    .map(|v| match v {
+                        Value::Nid(n) => *n,
+                        other => panic!(
+                            "intern_node: children must be nodeids, got {}",
+                            other.display()
+                        ),
+                    })
+                    .collect(),
+                other => panic!(
+                    "intern_node: children must be a list, got {}",
+                    other.display()
+                ),
+            };
+            Some(Value::Nid(
+                SUBSTRATE.with(|s| s.borrow_mut().intern(cat, kids)),
+            ))
+        }
+        // intern_trivial_int / intern_trivial_string — the trivial write
+        // doors: an int inlines in the inst slot while it fits i32
+        // (overflowing into the i64 table as TRIV_INT64), a string
+        // content-addresses into the string table as TRIV_STRING. Bodies
+        // faithful to the full kernel's natives over the Substrate helpers.
+        "intern_trivial_int" => Some(Value::Nid(
+            SUBSTRATE.with(|s| s.borrow_mut().intern_trivial_int(args[0].as_int())),
+        )),
+        "intern_trivial_string" => {
+            let text = str_of(&args[0]);
+            Some(Value::Nid(
+                SUBSTRATE.with(|s| s.borrow_mut().intern_string(&text)),
+            ))
+        }
         // str_len: byte count, not codepoint count — `str::len()` in Rust
         // already IS byte length, matching fkwu's raw-byte semantics exactly.
         "str_len" => Some(Value::Int(str_of(&args[0]).len() as i64)),
