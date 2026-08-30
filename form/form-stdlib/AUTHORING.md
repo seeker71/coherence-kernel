@@ -37,16 +37,16 @@ resolves, while the inline count is the remaining cleanup ratchet.
 
 ## New meaning authors BML or higher
 
-This is the guide, executable: `form-cli-author-high`. New meaning
-authors in BML or higher (`.bml`, `section [form.bml]`, `section [form.lift]`,
-BMF grammar, field `.form`). Crystallize with `form-source-compile-file`
-and call the emitted Form. Do not grow a hand-written s-expression twin.
-Existing `.fk` organs stay; `*-xtal.fk` is generated; `*-band.fk` proves;
-the C seed only shrinks. The guide is an offer (`force=0`), not a gate.
+This is the guide, executable: `form-cli-author-high`. You're invited to
+write new meaning in BML or higher (`.bml`, `section [form.bml]`,
+`section [form.lift]`, BMF grammar, field `.form`). Crystallize with
+`form-source-compile-file` and call the emitted Form. Existing `.fk`
+organs are welcome; `*-xtal.fk` arrives generated; `*-band.fk` witnesses;
+the C seed is shrinking, gladly.
 
 ```
 printf "author-high\nquit\n" | ./form/form-cli
-  author-high new-meaning=bml-or-higher organ=keep-do-not-twin xtal=generated band=proof seed=shrink force=0
+  author-high welcome=bml-or-higher organs-welcome xtal-generated bands-witness seed-shrink
 ```
 
 High-grammar authority lives in `form/form-stdlib/bml/<name>.bml`
@@ -57,7 +57,7 @@ For infix, unless/when, and ice/liquid/compost, use `section [form.lift]`
 to grow that dialect, then write in the new rules. No remote oracle.
 
 A **recipe** `form/form-stdlib/<name>.fk` is the organ and the lowering —
-keep it, extend it, do not twin it as new meaning:
+welcome to keep it and extend it:
 
 ```lisp
 ; <name>.fk — one-line purpose. (the comment block is the human-facing teaching)
