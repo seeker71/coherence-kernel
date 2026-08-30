@@ -1,0 +1,220 @@
+; form-cli-peer-heldout-direct-learning.fk — caller-owned held-out evaluation
+; for a returned local direct answer.
+;
+; The direct-answer effect sees only its task text and held model/KV session.
+; This adapter runs after that effect has returned, in the turnwheel caller,
+; and keeps the sealed expected answer inside the existing v3 evaluator.  It
+; neither opens a model nor changes its session.  A single row becomes durable
+; learning evidence, never an automatic promotion: a champion comparison needs
+; more than one independently retained observation.
+;
+; preludes: form-stdlib/form-cli-peer-append-turnwheel.fk form-stdlib/form-knowledge-qwen-heldout-v3-eval.fk
+; Proven by: form-stdlib/tests/form-cli-peer-heldout-direct-learning-band.fk
+
+(do
+    ; result = state reason row-id family score observation equivalent decision
+    ;          direct-signal generated-tokens.  Score and observation carry
+    ; hashes/scalars only; answer and expected bytes remain evaluator-local.
+    (defn fcphtl-version () "form-cli-peer-heldout-direct-learning-v1")
+    (defn fcphtl-result
+        (state reason row-id family score observation equivalent decision
+         direct-signal generated-tokens)
+        (list (fcphtl-version) state reason row-id family score observation
+              equivalent decision direct-signal generated-tokens))
+    (defn fcphtl-state (r) (nth r 1))
+    (defn fcphtl-reason (r) (nth r 2))
+    (defn fcphtl-row-id (r) (nth r 3))
+    (defn fcphtl-family (r) (nth r 4))
+    (defn fcphtl-score (r) (nth r 5))
+    (defn fcphtl-observation (r) (nth r 6))
+    (defn fcphtl-equivalent (r) (nth r 7))
+    (defn fcphtl-decision (r) (nth r 8))
+    (defn fcphtl-direct-signal (r) (nth r 9))
+    (defn fcphtl-generated-tokens (r) (nth r 10))
+    (defn fcphtl-result? (r)
+        (if (nothing? r) 0
+            (if (eq (len r) 11)
+                (str_eq (nth r 0) (fcphtl-version)) 0)))
+
+    ; A task may be direct without belonging to the sealed denominator.  The
+    ; matching step is exact and local; task bytes never nominate a row id,
+    ; expected answer, source path, or verifier.
+    (defn fcphtl-direct-task? (task)
+        (if (str_eq (fcpsi-task-kind task) "direct-answer") 1 0))
+    (defn fcphtl-direct-peer? (peer)
+        (if (not (str_eq (fcpa-route peer) "direct-answer")) 0
+            (if (nothing? (fcpa-cursor peer)) 0
+                (fcpdaa-result? (fcpa-cursor peer)))))
+    (defn fcphtl-prompt-count (prompt rows)
+        (if (eq (len rows) 0) 0
+            (add (if (str_eq prompt (fkh3-prompt (head rows))) 1 0)
+                 (fcphtl-prompt-count prompt (tail rows)))))
+    (defn fcphtl-prompt-row (prompt rows)
+        (if (eq (len rows) 0) (list)
+            (if (str_eq prompt (fkh3-prompt (head rows))) (head rows)
+                (fcphtl-prompt-row prompt (tail rows)))))
+    (defn fcphtl-model-failure? (raw)
+        (if (str_eq raw "<FAIL>") 1 (fkh3-refusal? raw)))
+    ; The existing v3 score validates an effective source-assisted prompt. A
+    ; direct answer intentionally receives the sealed raw prompt instead, so
+    ; it has its own score identity rather than borrowing a provenance it did
+    ; not traverse. The common row/verifier/observation remain unchanged.
+    ; score = tag id family source-sha prompt-sha answer-sha verifier-sha
+    ;         direct-prompt-sha raw-output-sha actual-sha refusal observation
+    (defn fcphtl-direct-score (row parsed latency)
+        (list "form-cli-peer-heldout-direct-score-v1"
+              (fkh3-id row) (fkh3-family row) (fkh3-source-sha row)
+              (nmfe-sha256 (fkh3-prompt row)) (fkh3-answer-sha row)
+              (fkh3-verifier-sha (fkh3-row-verifier row))
+              (nmfe-sha256 (fkh3-prompt row))
+              (fkh3-output-raw-sha parsed)
+              (nmfe-sha256 (fkh3-output-answer parsed))
+              (fkh3-output-refusal parsed)
+              (fkh3-observation (fkh3-prompt row) (fkh3-expected row)
+                  (fkh3-output-answer parsed) (fkh3-row-verifier row)
+                  latency (fkh3-output-error parsed))))
+    (defn fcphtl-score-observation (score) (nth score 11))
+    (defn fcphtl-score-valid? (score rows)
+        (if (not (and (eq (len score) 12)
+                      (str_eq (nth score 0)
+                          "form-cli-peer-heldout-direct-score-v1"))) 0
+            (do
+                (let row (fkh3-find-row (nth score 1) rows))
+                (if (eq (len row) 0) 0
+                    (do
+                        (let observation (fcphtl-score-observation score))
+                        (fkh3-all-one? (list
+                            (str_eq (nth score 2) (fkh3-family row))
+                            (str_eq (nth score 3) (fkh3-source-sha row))
+                            (str_eq (nth score 4)
+                                (nmfe-sha256 (fkh3-prompt row)))
+                            (str_eq (nth score 5) (fkh3-answer-sha row))
+                            (str_eq (nth score 6)
+                                (fkh3-verifier-sha (fkh3-row-verifier row)))
+                            (str_eq (nth score 7)
+                                (nmfe-sha256 (fkh3-prompt row)))
+                            (nmfe-sha256? (nth score 8))
+                            (nmfe-sha256? (nth score 9))
+                            (fkh3-obs? observation)
+                            (str_eq (nth score 7) (nth observation 1))
+                            (str_eq (fkh3-answer-sha row)
+                                (nth observation 2))
+                            (str_eq (nth score 9)
+                                (nth observation 3)))))))))
+    (defn fcphtl-equivalent? (observation)
+        (if (nothing? observation) 0
+            (if (eq (fkh3-obs? observation) 1)
+                (if (eq (fkh3-obs-exact observation) 1000000) 1 0) 0)))
+    (defn fcphtl-decision-for (state equivalent)
+        (if (str_eq state "value")
+            (if (eq equivalent 1) "record-equivalent-heldout"
+                "record-heldout-mismatch")
+            (if (str_eq state "nothing") "record-heldout-nothing"
+                "record-heldout-choice")))
+    (defn fcphtl-unbound (reason)
+        (fcphtl-result "nothing" reason "" "" (nothing) (nothing) 0
+            "nothing" "nothing" 0))
+    (defn fcphtl-bound-nonvalue (row direct)
+        (do
+            (let state (fcpdaa-signal direct))
+            (fcphtl-result state (fcpdaa-reason direct) (fkh3-id row)
+                (fkh3-family row) (nothing) (nothing) 0
+                (fcphtl-decision-for state 0) state
+                (fcpdaa-generated-tokens direct))))
+    (defn fcphtl-score-direct (row direct)
+        (do
+            (let response (fcpdaa-response direct))
+            (let parsed (fkh3-output (nmfe-sha256 response) response
+                (fcphtl-model-failure? response) (fkh3-refusal? response)))
+            (let score (fcphtl-direct-score row parsed (fcpdaa-elapsed-ms direct)))
+            (let observation (fcphtl-score-observation score))
+            (let equivalent (fcphtl-equivalent? observation))
+            (fcphtl-result "value" "heldout-answer-scored" (fkh3-id row)
+                (fkh3-family row) score observation equivalent
+                (fcphtl-decision-for "value" equivalent)
+                (fcpdaa-signal direct) (fcpdaa-generated-tokens direct))))
+
+    ; The source-current check is one sealed source hash, performed after the
+    ; local model has returned.  It is the same per-row freshness proof used
+    ; by the existing one-row scorer, not a repeated all-corpus audit.
+    (defn fcphtl-run (task peer)
+        (if (eq (fcphtl-direct-task? task) 0)
+            (fcphtl-unbound "task-not-direct-answer")
+            (if (eq (fcphtl-direct-peer? peer) 0)
+                (fcphtl-unbound "direct-result-absent")
+                (do
+                    (let rows (fkh3-rows))
+                    (let prompt (fcpsi-task-text task))
+                    (let matches (fcphtl-prompt-count prompt rows))
+                    (if (not (str_eq (fkh3-dataset-sha256 rows)
+                                     (fkh3-dataset-seal)))
+                        (fcphtl-unbound "heldout-dataset-seal-mismatch")
+                        (if (eq matches 0)
+                            (fcphtl-unbound "direct-prompt-not-heldout")
+                            (if (gt matches 1)
+                                (fcphtl-unbound "heldout-prompt-ambiguous")
+                                (do
+                                    (let row (fcphtl-prompt-row prompt rows))
+                                    (let direct (fcpa-cursor peer))
+                                    (if (eq (fkh3-row-current? row) 0)
+                                        (fcphtl-result "choice"
+                                            "heldout-row-stale" (fkh3-id row)
+                                            (fkh3-family row) (nothing)
+                                            (nothing) 0 "record-heldout-choice"
+                                            (fcpdaa-signal direct)
+                                            (fcpdaa-generated-tokens direct))
+                                        (if (str_eq (fcpdaa-signal direct) "value")
+                                            (fcphtl-score-direct row direct)
+                                            (fcphtl-bound-nonvalue row direct)))))))))))
+
+    ; The terminal evidence intentionally carries only row identity, scalar
+    ; evaluation, and the learning disposition.  No task, expected, source,
+    ; answer, or hash bytes enter durable egress.
+    (defn fcphtl-field (name value)
+        (str_concat "\n" (str_concat name (str_concat "=" value))))
+    (defn fcphtl-frame (task peer)
+        (do
+            (let result (fcphtl-run task peer))
+            (if (str_eq (fcphtl-row-id result) "") ""
+                (do
+                    (let observation (fcphtl-observation result))
+                    (str_concat "<|form:heldout-local-answer|>"
+                    (str_concat (fcphtl-field "task-node"
+                        (fcpat-node-text (fcpsi-task-node task)))
+                    (str_concat (fcphtl-field "task-key"
+                        (str_concat (int_to_str (fcpsi-task-exchange task))
+                            (str_concat "/" (int_to_str (fcpsi-task-turn task)))))
+                    (str_concat (fcphtl-field "row" (fcphtl-row-id result))
+                    (str_concat (fcphtl-field "family" (fcphtl-family result))
+                    (str_concat (fcphtl-field "signal" (fcphtl-state result))
+                    (str_concat (fcphtl-field "reason" (fcphtl-reason result))
+                    (str_concat (fcphtl-field "direct-signal"
+                        (fcphtl-direct-signal result))
+                    (str_concat (fcphtl-field "generated-tokens"
+                        (int_to_str (fcphtl-generated-tokens result)))
+                    (str_concat (fcphtl-field "scored"
+                        (if (str_eq (fcphtl-state result) "value") "1" "0"))
+                    (str_concat (fcphtl-field "exact-ppm"
+                        (if (nothing? observation) ""
+                            (int_to_str (fkh3-obs-exact observation))))
+                    (str_concat (fcphtl-field "f1-ppm"
+                        (if (nothing? observation) ""
+                            (int_to_str (fkh3-obs-f1 observation))))
+                    (str_concat (fcphtl-field "sequence-ppm"
+                        (if (nothing? observation) ""
+                            (int_to_str (fkh3-obs-sequence observation))))
+                    (str_concat (fcphtl-field "semantic-ppm"
+                        (if (nothing? observation) ""
+                            (int_to_str (fkh3-obs-semantic observation))))
+                    (str_concat (fcphtl-field "promotion-ppm"
+                        (if (nothing? observation) ""
+                            (int_to_str (fkh3-obs-promotion observation))))
+                    (str_concat (fcphtl-field "error"
+                        (if (nothing? observation) ""
+                            (int_to_str (fkh3-obs-error observation))))
+                    (str_concat (fcphtl-field "equivalent"
+                        (int_to_str (fcphtl-equivalent result)))
+                    (str_concat (fcphtl-field "learning-decision"
+                        (fcphtl-decision result))
+                    "\n<|/form:heldout-local-answer|>"))))))))))))))))))))))
+    0)
