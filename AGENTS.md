@@ -91,8 +91,10 @@ where the lane carries you) **with the optimal cached native speed compiler** (f
 `.dylib` — see `grammars/bml-native-north-star.form`). That pair is the seat, reached by two
 converging doors built the same hour:
 
-- the executable surface **runs as itself**: `./fkwu x.bml` and `; preludes: ....bml` both lower
-  through the body's own compiler into gitignored `.bml.fk`/`.bml.fkb` caches beside the source
+- the executable surface **runs as itself, all in memory**: `./fkwu x.bml` and
+  `; preludes: ....bml` both lower through the body's own compiler with the lowered text living
+  only in the pipe between runner and compiler — no derived source file ever exists; the sole
+  artifact is the native `.bml.fkb`/`.bml.sym` cache beside the source
   (`form/form-stdlib/bml-floor-compile.fk` is the door; a `// preludes:` line in the .bml travels
   through; cold ~5 s, warm ~6 ms);
 - the ice lane: `./fkwu form/form-stdlib/form-cli-bml-cache-compile.fk && ./fkwu
