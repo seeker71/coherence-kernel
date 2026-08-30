@@ -6,7 +6,7 @@
 ; fresh scannerless recipe cursor per task. No HTTP, llama-server or Ollama.
 ;
 ; Effectful: run only while no sibling owns the local Qwen/Metal lane.
-; preludes: form-stdlib/form-cli-peer-agent.fk
+; preludes: form-stdlib/form-cli-peer-direct-answer-action.fk form-stdlib/form-cli-peer-live-grammar.fk form-stdlib/form-cli-peer-live-framebuffer.fk
 
 (do
     (defn fcpal-line (name value)
@@ -16,21 +16,41 @@
 
     (defn fcpal-report (turn result)
         (do
-            (let c (fcpa-cursor result))
             (fcpal-int "turn" turn)
             (fcpal-line "signal" (fcpa-signal (fcpa-session result)))
             (fcpal-int "elapsed-ms" (fcpa-elapsed-ms result))
             (fcpal-int "contribution" (fcpa-contribution result))
-            (fcpal-int "callback-calls" (frxc-callback-calls c))
-            (fcpal-line "tool-status" (frxc-status c))
-            (fcpal-int "value-present" (frxc-value-present? c))
-            (fcpal-int "value" (frxc-value c))
+            (fcpal-line "route" (fcpa-route result))
+            (fcpal-int "callback-calls" (fcpa-callback-calls result))
+            (fcpal-line "tool-status" (fcpa-tool-status result))
+            (fcpal-int "value-present" (fcpa-value-present? result))
+            (fcpal-int "value" (fcpa-value result))
             (fcpal-line "response-begin" "")
             (print_str (fcpa-response result))
             (print_str "\n")
             (fcpal-line "response-end" "")
             (fcpal-line "ready" "1")
             0))
+
+    ; One observed local control failure may be reframed once in the same KV
+    ; residence.  The retry is a task frame, not a hidden prompt rewrite, and a
+    ; second failure remains a local result for the caller to observe.
+    (defn fcpal-direct-run (session turn task)
+        (do
+            (let observed (fcpa-observe-task session turn "direct-answer" task))
+            (let first (fcpdaa-run (fcpa-session observed)
+                "direct-answer" task
+                (fcpdaa-remaining-capacity (fcpa-session observed))))
+            (if (and (eq (fcpalg-retry? (fcpdaa-signal first)) 1)
+                     (eq (fcpdaa-retryable? first) 1))
+                (do
+                    (let retry-task (fcpalg-retry-task task))
+                    (let retried (fcpa-observe-task (fcpdaa-session first)
+                        turn "direct-answer" retry-task))
+                    (fcpdaa-run (fcpa-session retried)
+                        "direct-answer" retry-task
+                        (fcpdaa-remaining-capacity (fcpa-session retried))))
+                first)))
 
     (defn fcpal-loop (session turn accepted)
         (do
@@ -43,8 +63,16 @@
                     (fcpal-int "release-ok" released)
                     released)
                 (do
-                    (let moved (fcpa-observe-task session turn "task" line))
-                    (let result (fcpa-run moved 160))
+                    (let kind (fcpalg-kind line))
+                    (let task (fcpalg-body line))
+                    (let task-frame (fcplf-record turn "task-begin" "ready"))
+                    (let result (if (str_eq kind "recipe")
+                        (do
+                            (let moved (fcpa-observe-task session turn kind task))
+                            (fcpa-run (fcpa-session moved) 160))
+                        (fcpdaa-peer (fcpal-direct-run session turn task))))
+                    (let terminal-frame (fcplf-record turn "task-terminal"
+                        (fcpa-signal (fcpa-session result))))
                     (fcpal-report turn result)
                     (fcpal-loop (fcpa-session result) (add turn 1)
                         (add accepted (fcpa-contribution result)))))))
@@ -53,7 +81,7 @@
     (let started (now_unix_ms))
     (let opened (if (or (nothing? path) (str_eq path ""))
         (fcms-none "model-path-absent")
-        (fcms-open path (fcpa-bootstrap) 4096)))
+        (fcms-open-resident-agent path (fcpa-bootstrap))))
     (if (not (eq (fcms-live? opened) 1))
         (do
             (fcpal-line "signal" (fcpa-signal opened))
@@ -64,6 +92,7 @@
             ; Consume the bootstrap reply once, retaining its IDs and KV.
             (let boot (fcms-generate opened 24))
             (let resident (fcms-generation-session boot))
+            (let prefill-frame (fcplf-record 0 "prefill-ready" "ready"))
             (fcpal-int "admit-prefill-ms" (sub (now_unix_ms) started))
             (fcpal-line "bootstrap" (fcms-generation-text boot))
             (fcpal-line "ready" "1")
