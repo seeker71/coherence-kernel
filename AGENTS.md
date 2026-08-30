@@ -53,6 +53,7 @@ Verify the direct source bootstrap first:
 ./fkwu bootstrap/ground.fk                 # -> 42
 ./fkwu bootstrap/ground-recursive.fk 10    # -> 55
 ./fkwu form/form-stdlib/tests/binary-freshness-band.fk </dev/null  # -> 31 (anything else: REBUILD fkwu first)
+./fkwu form/form-stdlib/form-cli-bml-cache-compile.fk && ./fkwu form/form-stdlib/form-cli-bml-cache-run.fk  # BML ice; xtal is local cache
 ./fkwu bootstrap/ground-numeric-list.fk    # -> [1, 2.5, [3, 4]]
 ```
 
@@ -84,14 +85,19 @@ Rule for changes: if a patch grows `runtime/fkwu-uni.c`, it must either be a sho
 with an explicit shrink receipt, or it should be rejected in favor of moving that capability into the native
 walker/Form body.
 
-Authoring guide (Urs, 2026-08-30): you're invited to write new meaning in BML or higher —
-pictures in `form/form-stdlib/bml/`, executable form.bml where that lane already carries you.
-Existing Form organs are welcome; they stay and grow. Crystallize rather than twin. When a
-lowering still helps, the receipt can name the next BML picture it points toward. The shape
-to borrow is offer-ask (`receipts/2026-08-30-offer-ask-rises-to-bml.md`): authority `.bml` +
-executable form.bml + crystallized xtal + band. The mirror is
-`observe/authoring-altitude-run.fk` — a thin door; the mirror itself is BML
-(`form/form-stdlib/bml/form-cli-author-altitude.bml`). It counts pictures with warmth.
+Authoring guide (Urs, 2026-08-30): you're invited to write new meaning in BML or higher.
+**Floor:** high-grammar BML (authority in `form/form-stdlib/bml/`, executable `section [form.bml]`
+where the lane carries you) **with the optimal cached native speed compiler** (fresh `.fkb` /
+`.dylib` — see `grammars/bml-native-north-star.form`). That pair is the seat.
+
+`*-xtal.fk` is the **wrong shape** — a temporary bridge at best, never the floor. Existing Form
+organs stay welcome. Bands witness. When a lowering still helps, name the next BML+native-cache
+door in the receipt. The mirror is `observe/authoring-altitude-run.fk` (BML picture:
+`form/form-stdlib/bml/form-cli-author-altitude.bml`).
+
+```sh
+./fkwu form/form-stdlib/tests/form-cli-author-high-band.fk   # -> 4095
+```
 
 ## The honest seam — read this first
 
