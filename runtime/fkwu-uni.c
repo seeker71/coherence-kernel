@@ -10460,11 +10460,15 @@ static void fk_diag_path(const char *level, const char *path, const char *msg) {
     fk_write_all_raw(2, msg, (unsigned long)fk_path_len(msg));
     fk_write_all_raw(2, "\n", 1);
 }
-#define FK_SRC_DEP_CAP 128
 #define FK_SRC_HASH_CAP 16384
-static char fk_src_dep_path[FK_SRC_DEP_CAP][4096];
-static long long fk_src_dep_mtime[FK_SRC_DEP_CAP];
-static long long fk_src_dep_size[FK_SRC_DEP_CAP];
+/* A source unit is a graph, not a fixed-width table.  The former 128-file
+ * collector meant an otherwise valid Form closure could disappear before the
+ * source/JIT door even parsed it.  Keep the metadata heap-backed and grow it
+ * with the observed graph; runtime meaning remains in Form, this is only the
+ * temporary seed's source-loader bookkeeping. */
+static char (*fk_src_dep_path)[4096];
+static long long *fk_src_dep_mtime;
+static long long *fk_src_dep_size;
 /* CONTENT DIGEST per dependency. The artifact identity used to be
  * path@mtime:size and the code that wrote it said "source path, content, or
  * mtime changed" -- but content was never in it. Two sources of the SAME LENGTH
@@ -10475,7 +10479,7 @@ static long long fk_src_dep_size[FK_SRC_DEP_CAP];
  * case, not the exotic one -- a verdict pin, a constant, an operator, a depth.
  * FNV-1a over the dependency's bytes, taken where the bytes are already in
  * hand, closes it. */
-static unsigned long long fk_src_dep_digest[FK_SRC_DEP_CAP];
+static unsigned long long *fk_src_dep_digest;
 static unsigned long long fk_bytes_fnv1a(const char *p, long long n) {
     unsigned long long h = 14695981039346656037ULL;
     long long k = 0;
@@ -10486,12 +10490,88 @@ static unsigned long long fk_bytes_fnv1a(const char *p, long long n) {
     }
     return h;
 }
-static long long fk_src_dep_parent[FK_SRC_DEP_CAP];
-static long long fk_src_dep_end[FK_SRC_DEP_CAP];
+static long long *fk_src_dep_parent;
+static long long *fk_src_dep_end;
 static long long fk_src_dep_count;
+static long long fk_src_dep_cap;
 static char fk_src_root_path[4096];
 static char fk_src_root_text[FK_SOURCE_TEXT_CAP];
 static long long fk_src_root_len;
+
+static void fk_cstr_copy(char *dst, const char *src, long long cap);
+
+static int fk_src_dep_reserve(long long want) {
+    long long cap = fk_src_dep_cap;
+    long long i = 0;
+    char (*paths)[4096];
+    long long *mtimes;
+    long long *sizes;
+    unsigned long long *digests;
+    long long *parents;
+    long long *ends;
+    if (want <= fk_src_dep_cap) {
+        return 1;
+    }
+    if (cap <= 0) {
+        cap = 32;
+    }
+    while (cap < want) {
+        if (cap > 4611686018427387903LL) {
+            return 0;
+        }
+        cap = cap * 2;
+    }
+    /* The path row is the widest allocation. Reject an allocation-size
+     * overflow before casting the observed count to the allocator's size. */
+    if ((unsigned long long)cap > (unsigned long long)(unsigned long)-1 ||
+        (unsigned long)cap > ((unsigned long)-1) / sizeof(*paths)) {
+        return 0;
+    }
+    paths = malloc(sizeof(*paths) * (unsigned long)cap);
+    mtimes = malloc(sizeof(*mtimes) * (unsigned long)cap);
+    sizes = malloc(sizeof(*sizes) * (unsigned long)cap);
+    digests = malloc(sizeof(*digests) * (unsigned long)cap);
+    parents = malloc(sizeof(*parents) * (unsigned long)cap);
+    ends = malloc(sizeof(*ends) * (unsigned long)cap);
+    if (paths == 0 || mtimes == 0 || sizes == 0 || digests == 0 ||
+        parents == 0 || ends == 0) {
+        free(paths); free(mtimes); free(sizes); free(digests);
+        free(parents); free(ends);
+        return 0;
+    }
+    while (i < fk_src_dep_count) {
+        fk_cstr_copy(paths[i], fk_src_dep_path[i], 4096);
+        mtimes[i] = fk_src_dep_mtime[i];
+        sizes[i] = fk_src_dep_size[i];
+        digests[i] = fk_src_dep_digest[i];
+        parents[i] = fk_src_dep_parent[i];
+        ends[i] = fk_src_dep_end[i];
+        i = i + 1;
+    }
+    free(fk_src_dep_path); free(fk_src_dep_mtime); free(fk_src_dep_size);
+    free(fk_src_dep_digest); free(fk_src_dep_parent); free(fk_src_dep_end);
+    fk_src_dep_path = paths;
+    fk_src_dep_mtime = mtimes;
+    fk_src_dep_size = sizes;
+    fk_src_dep_digest = digests;
+    fk_src_dep_parent = parents;
+    fk_src_dep_end = ends;
+    fk_src_dep_cap = cap;
+    return 1;
+}
+
+static void fk_src_dep_release(void) {
+    free(fk_src_dep_path); free(fk_src_dep_mtime); free(fk_src_dep_size);
+    free(fk_src_dep_digest); free(fk_src_dep_parent); free(fk_src_dep_end);
+    fk_src_dep_path = 0;
+    fk_src_dep_mtime = 0;
+    fk_src_dep_size = 0;
+    fk_src_dep_digest = 0;
+    fk_src_dep_parent = 0;
+    fk_src_dep_end = 0;
+    fk_src_dep_count = 0;
+    fk_src_dep_cap = 0;
+}
 
 static void fk_cstr_copy(char *dst, const char *src, long long cap) {
     long long i = 0;
@@ -11096,9 +11176,9 @@ static int fk_src_collect_file(const char *path, long long parent_idx) {
         i = i + 1;
     }
     owned[got] = 0;
-    if (fk_src_dep_count >= FK_SRC_DEP_CAP) {
+    if (!fk_src_dep_reserve(fk_src_dep_count + 1)) {
         free(owned);
-        fk_diag_path("error", path, "too many .fk dependencies");
+        fk_diag_path("error", path, "could not grow .fk dependency metadata");
         return 0;
     }
     long long idx = fk_src_dep_count;
@@ -12399,14 +12479,30 @@ static int fk_src_compile_artifact_only(const char *path) {
     long long saved_root_len = fk_src_root_len;
     char *saved_root_text = malloc(FK_SOURCE_TEXT_CAP);
     char *saved_srctext = malloc(FK_SOURCE_TEXT_CAP);
-    char (*saved_dep_path)[4096] = malloc(sizeof(fk_src_dep_path));
-    long long *saved_dep_mtime = malloc(sizeof(fk_src_dep_mtime));
-    long long *saved_dep_size = malloc(sizeof(fk_src_dep_size));
-    long long *saved_dep_parent = malloc(sizeof(fk_src_dep_parent));
-    long long *saved_dep_end = malloc(sizeof(fk_src_dep_end));
+    char (*saved_dep_path)[4096] = saved_dep_count > 0 ?
+        malloc(sizeof(*saved_dep_path) * (unsigned long)saved_dep_count) : 0;
+    long long *saved_dep_mtime = saved_dep_count > 0 ?
+        malloc(sizeof(*saved_dep_mtime) * (unsigned long)saved_dep_count) : 0;
+    long long *saved_dep_size = saved_dep_count > 0 ?
+        malloc(sizeof(*saved_dep_size) * (unsigned long)saved_dep_count) : 0;
+    unsigned long long *saved_dep_digest = saved_dep_count > 0 ?
+        malloc(sizeof(*saved_dep_digest) * (unsigned long)saved_dep_count) : 0;
+    long long *saved_dep_parent = saved_dep_count > 0 ?
+        malloc(sizeof(*saved_dep_parent) * (unsigned long)saved_dep_count) : 0;
+    long long *saved_dep_end = saved_dep_count > 0 ?
+        malloc(sizeof(*saved_dep_end) * (unsigned long)saved_dep_count) : 0;
     if (saved_root_text == 0 || saved_srctext == 0 || saved_dep_path == 0 ||
-        saved_dep_mtime == 0 || saved_dep_size == 0 || saved_dep_parent == 0 ||
-        saved_dep_end == 0) {
+        saved_dep_mtime == 0 || saved_dep_size == 0 || saved_dep_digest == 0 ||
+        saved_dep_parent == 0 || saved_dep_end == 0) {
+        if (saved_dep_count == 0 && saved_dep_path == 0 &&
+            saved_dep_mtime == 0 && saved_dep_size == 0 &&
+            saved_dep_digest == 0 && saved_dep_parent == 0 && saved_dep_end == 0) {
+            /* zero dependency entries need no snapshot allocation */
+        } else {
+            fk_die("fk_import_compile: out of memory saving source unit");
+        }
+    }
+    if (saved_root_text == 0 || saved_srctext == 0) {
         fk_die("fk_import_compile: out of memory saving source unit");
     }
     fk_cstr_copy(saved_root_path, fk_src_root_path, 4096);
@@ -12418,10 +12514,11 @@ static int fk_src_compile_artifact_only(const char *path) {
         i = i + 1;
     }
     i = 0;
-    while (i < FK_SRC_DEP_CAP) {
+    while (i < saved_dep_count) {
         fk_cstr_copy(saved_dep_path[i], fk_src_dep_path[i], 4096);
         saved_dep_mtime[i] = fk_src_dep_mtime[i];
         saved_dep_size[i] = fk_src_dep_size[i];
+        saved_dep_digest[i] = fk_src_dep_digest[i];
         saved_dep_parent[i] = fk_src_dep_parent[i];
         saved_dep_end[i] = fk_src_dep_end[i];
         i = i + 1;
@@ -12450,6 +12547,9 @@ static int fk_src_compile_artifact_only(const char *path) {
         ok = 1;
     }
     fk_src_dep_count = saved_dep_count;
+    if (!fk_src_dep_reserve(saved_dep_count)) {
+        fk_die("fk_import_compile: out of memory restoring source unit");
+    }
     fk_cstr_copy(fk_src_root_path, saved_root_path, 4096);
     fk_src_root_len = saved_root_len;
     fk_slen = saved_slen;
@@ -12460,10 +12560,11 @@ static int fk_src_compile_artifact_only(const char *path) {
         i = i + 1;
     }
     i = 0;
-    while (i < FK_SRC_DEP_CAP) {
+    while (i < saved_dep_count) {
         fk_cstr_copy(fk_src_dep_path[i], saved_dep_path[i], 4096);
         fk_src_dep_mtime[i] = saved_dep_mtime[i];
         fk_src_dep_size[i] = saved_dep_size[i];
+        fk_src_dep_digest[i] = saved_dep_digest[i];
         fk_src_dep_parent[i] = saved_dep_parent[i];
         fk_src_dep_end[i] = saved_dep_end[i];
         i = i + 1;
@@ -12473,6 +12574,7 @@ static int fk_src_compile_artifact_only(const char *path) {
     free(saved_dep_path);
     free(saved_dep_mtime);
     free(saved_dep_size);
+    free(saved_dep_digest);
     free(saved_dep_parent);
     free(saved_dep_end);
     return ok;
@@ -12938,6 +13040,7 @@ static int fk_run_ret_w;
 static unsigned int fk_run_thunk_w(void *p) {
     (void)p;
     fk_run_ret_w = fk_run(fk_run_argc_w, fk_run_argv_w);
+    fk_src_dep_release();
     return 0;
 }
 int main(int argc, char **argv) {
@@ -12956,7 +13059,9 @@ int main(int argc, char **argv) {
                             0x00010000u, (unsigned int *)0);
     if (th == 0) {
         fk_stack_wall = 6 * 1024 * 1024;
-        return fk_run(argc, argv);
+        int rc = fk_run(argc, argv);
+        fk_src_dep_release();
+        return rc;
     }
     WaitForSingleObject(th, 0xFFFFFFFFu);
     CloseHandle(th);
@@ -12979,6 +13084,7 @@ static int fk_run_ret;
 static void *fk_run_thunk(void *p) {
     (void)p;
     fk_run_ret = fk_run(fk_run_argc, fk_run_argv);
+    fk_src_dep_release();
     return 0;
 }
 int main(int argc, char **argv) {
@@ -12998,7 +13104,9 @@ int main(int argc, char **argv) {
     pthread_attr_setstacksize(&at, mb * 1024UL * 1024UL);
     fk_pthread_t th;
     if (pthread_create(&th, &at, fk_run_thunk, 0) != 0) {
-        return fk_run(argc, argv);
+        int rc = fk_run(argc, argv);
+        fk_src_dep_release();
+        return rc;
     }
     pthread_join(th, 0);
     return fk_run_ret;
