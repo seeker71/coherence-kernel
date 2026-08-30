@@ -1,0 +1,70 @@
+; iq2xs-msl-band.fk — read the type-17 Metal lowering back into Form before the GPU runs.
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/iq2xxs-dequant.fk form-stdlib/iq2xxs-msl.fk form-stdlib/iq2xs-layout-xtal.fk form-stdlib/iq2xs-dequant.fk form-stdlib/iq2xs-msl.fk
+;
+; Verdict 2047: mirror equality, exact constant tables, one helper spine, four kernels, and both
+; per-row SIMD and four-row slot execution maps. Metal execution is the sibling shell witness.
+
+(do
+    (defn iq2xmb-cat (xs ys)
+        (if (eq (len xs) 0) ys (cons (head xs) (iq2xmb-cat (tail xs) ys))))
+    (defn iq2xmb-u16 (v) (list (iq2xsm-mod v 256) (div v 256)))
+    (defn iq2xmb-word (k)
+        (add (iq2xsm-mod (mul 17 k) 512) (mul 512 (iq2xsm-mod (mul 13 k) 128))))
+    (defn iq2xmb-qbytes (k)
+        (if (ge k 32) (empty)
+            (iq2xmb-cat (iq2xmb-u16 (iq2xmb-word k)) (iq2xmb-qbytes (add k 1)))))
+    (defn iq2xmb-scales (i)
+        (if (ge i 8) (empty)
+            (cons (add i (mul 16 (sub 15 i))) (iq2xmb-scales (add i 1)))))
+    (defn iq2xmb-block ()
+        (iq2xmb-cat (list 0 60) (iq2xmb-cat (iq2xmb-qbytes 0) (iq2xmb-scales 0))))
+    (defn iq2xmb-agree (bytes i)
+        (if (ge i 256) 1
+            (if (eq (iq2xsm-flat-at bytes 0 i) (iq2xs-at-flat bytes 0 i))
+                (iq2xmb-agree bytes (add i 1)) 0)))
+    (defn iq2xmb-count-from (hay needle i acc)
+        (if (gt (add i (str_len needle)) (str_len hay)) acc
+            (iq2xmb-count-from hay needle (add i 1)
+                (if (str_eq (substring hay i (add i (str_len needle))) needle) (add acc 1) acc))))
+    (defn iq2xmb-count (hay needle) (iq2xmb-count-from hay needle 0 0))
+    (defn iq2xmb-bit (ok bit) (if ok bit 0))
+    (defn iq2xmb-all (xs)
+        (if (eq (len xs) 0) 1 (if (head xs) (iq2xmb-all (tail xs)) 0)))
+
+    (let block (iq2xmb-block))
+    (let gridtxt (iq2xsm-msl-grid))
+    (let signtxt (iq2xsm-msl-ksigns))
+    (let helpers (iq2xsm-msl-helpers))
+    (let unit (iq2xsm-msl-unit "form_iq2xs_dequant_f32" "form_iq2xs_matvec_f32" "form_iq2xs_matvec_simd_f32" "form_iq2xs_matvec_slot4_f32"))
+    (let c0 (iq2xmb-bit (eq (iq2xmb-agree block 0) 1) 1))
+    (let c1 (iq2xmb-bit (iq2xmb-all (list
+        (eq (iq2xmb-count gridtxt ",") 4095)
+        (eq (iq2xmb-count signtxt ",") 127))) 2))
+    (let c2 (iq2xmb-bit (iq2xmb-all (list
+        (eq (iq2xmb-count unit "constant uchar iq2xs_grid") 1)
+        (eq (iq2xmb-count unit "constant uchar iq2xs_ksigns") 1)
+        (eq (iq2xmb-count unit "static inline float iq2xs_f16") 1)
+        (eq (iq2xmb-count unit "static inline float iq2xs_w") 1))) 4))
+    (let c3 (iq2xmb-bit (eq (iq2xmb-count unit "kernel void form_iq2xs_dequant_f32") 1) 8))
+    (let c4 (iq2xmb-bit (eq (iq2xmb-count unit "kernel void form_iq2xs_matvec_f32") 1) 16))
+    (let c5 (iq2xmb-bit (eq (iq2xmb-count unit "kernel void form_iq2xs_matvec_simd_f32") 1) 32))
+    (let c6 (iq2xmb-bit (iq2xmb-all (list
+        (eq (iq2xmb-count unit "simd_sum") 3)
+        (eq (iq2xmb-count unit "threadgroup_barrier") 1)
+        (eq (iq2xmb-count unit "threadgroup float partial[8]") 1)
+        (eq (iq2xmb-count unit "j += 256u") 1))) 64))
+    (let c7 (iq2xmb-bit (eq (iq2xmb-count unit "74u") 3) 128))
+    (let c8 (iq2xmb-bit (iq2xmb-all (list
+        (eq (iq2xmb-count unit "4096") 1)
+        (eq (iq2xmb-count unit "512u") 3)
+        (eq (iq2xmb-count unit "128") 1))) 256))
+    (let c9 (iq2xmb-bit (iq2xmb-all (list
+        (eq (iq2xmb-count unit "metal_stdlib") 0)
+        (eq (iq2xmb-count unit "using namespace") 0))) 512))
+    (let c10 (iq2xmb-bit (iq2xmb-all (list
+        (eq (iq2xmb-count unit "kernel void form_iq2xs_matvec_slot4_f32") 1)
+        (eq (iq2xmb-count unit "float sumf[4]") 1)
+        (eq (iq2xmb-count unit "packed_ushort4") 1)
+        (eq (iq2xmb-count unit "r0 + rr < rows") 2))) 1024))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8 (add c9 c10)))))))))))
