@@ -76,11 +76,13 @@ via `proof/four-way-verdict` — no `validate.sh`, no origin repo in the loop (w
 that use fkwu-only natives (content-addressing, host-io, floats) are **fkwu-witnessed** with their own band
 tests — named as such, never claimed four-way.
 
-## Hard constraint — no bash, no python (the structural gate)
+## Hard constraint — named auxiliary scripts, shell/Python-free Form-owned meaning (the structural gate)
 
-This repo contains **zero `.sh` and zero `.py` files.** Ever. Orchestration is **form shell**
-(`.fsh`, fkwu-native), and the runtime/recipes/walkers carry no bash or python by their nature
-(`.c` / `.fk` / `.form` / `.go` / `.rs` / `.ts`).
+The Form-owned runtime and semantic body contain **no unclassified `.sh` or `.py` file.** Orchestration is
+**form shell** (`.fsh`, fkwu-native), and a shell/Python file may enter only through a named auxiliary
+boundary: carrier, local oracle, fixture, proof sibling, tooling, or the Python-BMF compatibility grammar.
+Those files are visible in the gate's live census; they are not rewritten as a fictitious zero and never become
+semantic authority.
 
 The one allowed seed is a **single `cc` command** that compiles `runtime/fkwu-uni.c` into the
 c-bootstrap `fkwu` binary — a documented one-liner, not a script in the tree. The fresh-checkout witness lives
@@ -97,7 +99,16 @@ The **binary-freshness canary** (third line) exists because `fkwu` is gitignored
 still passes the old `42` contract while silently lacking newer evaluator capabilities — a failure class that
 once cost a full day (`receipts/2026-07-01-stale-binary-root-cause.md`). Run it before believing anything else.
 
-A repo gate enforces the no-bash/no-python constraint: any `.sh` or `.py` landing in the tree fails the gate.
+The Form-native structural gate enforces the boundary:
+
+```sh
+./fkwu gate/structural-gate-run.fk
+```
+
+It prints the live role census and returns `1` only when every `.sh` or `.py` file has a declared boundary.
+`form/validate.sh` runs the same gate before its sibling sweep and converts a `0` into a nonzero repository
+exit, so normal validation cannot silently pass a structural violation. This explicit carrier conversion is
+needed because the current `fkwu` process reports a Form failure value without changing its own process status.
 
 ## The body today — the organ map
 

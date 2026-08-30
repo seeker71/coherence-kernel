@@ -59,6 +59,23 @@ _validate_seal() {
 }
 trap _validate_seal EXIT
 
+# Phase 0: the source tree cannot claim a shell/Python-free Form-owned body
+# while an unclassified script sits outside every declared auxiliary boundary.
+# fkwu's current failure values are typed Form results, not process status, so
+# this existing validation carrier owns the one transparent conversion: native
+# structural status 1 continues; 0 becomes this validator's nonzero refusal.
+if STRUCTURAL_GATE_RESULT="$(cd .. && ./fkwu gate/structural-gate-run.fk)"; then
+    STRUCTURAL_GATE_FKWU_RC=0
+else
+    STRUCTURAL_GATE_FKWU_RC=$?
+fi
+printf '%s\n' "$STRUCTURAL_GATE_RESULT"
+STRUCTURAL_GATE_STATUS="${STRUCTURAL_GATE_RESULT##*$'\n'}"
+if [[ "$STRUCTURAL_GATE_FKWU_RC" -ne 0 || "$STRUCTURAL_GATE_STATUS" != "1" ]]; then
+    printf '%s\n' 'validate.sh: structural gate refused an unclassified .sh or .py file.' >&2
+    exit 1
+fi
+
 # Keep package-manager advisory text out of sibling-kernel output comparison.
 # The TypeScript arm may invoke npm/npx when tsx is not locally installed; an
 # update notice on stdout makes identical kernel results look divergent.
