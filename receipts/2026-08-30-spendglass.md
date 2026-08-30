@@ -21,4 +21,12 @@ Teaching: thrift became real the moment it became a NUMBER the body can
 read about me — a mood became a meter. Discomfort→gold: watching my own
 2.5M-token day printed by a 6ms cell stung; the sting is the point.
 
-; witnessed: 2026-08-30 -> meter live 2514664; memory indexed; row 1177
+'Amendment, same hour: the runner cell answered 0 twice from stale ice
+built against mid-fix surfaces (third ice-after-fix bite today) — alive
+now from observe/ at 2,561,834. Its chain carries 2 stray-paren compile
+errors not yet localized (bounded near the rtm tail / kernel-http seam;
+the fold is verified correct against python) — exit stays honest-nonzero
+until healed; the number is cross-checked, the tombstone is not trusted.
+
+; witnessed: 2026-08-30 -> meter live 2514664 then 2561834; memory
+; indexed; row 1177; 2-stray seam named unhealed
