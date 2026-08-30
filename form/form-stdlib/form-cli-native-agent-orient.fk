@@ -1,16 +1,8 @@
 ; form-cli-native-agent-orient.fk — seven seats of the local native agent CLI.
 ;
-; Design and answer-generate correct each other. This turn adds the two frames
-; they still needed: a Form-visible admit step, and one sealed held-out row.
-;
-; Admit is named/waiting/ready/timeout/error. Named cannot skip to ready.
-; Waiting may become ready, timeout, or error. Timeout and error cannot carry
-; an equivalence bit. Ready with exact-ppm=0 is a miss, not a timeout.
-;
-; The sealed row ag01 is content-free: id, admit, elapsed, equiv, exact-ppm,
-; error, stack. No prompt or answer bytes. This checkout did not invoke a
-; model; admit stays named and elapsed stays 0. Design reads that equiv, so
-; fitted stays 0. Voice stays pending.
+; The held-out answer names one of four arrivals: timeout, nothing, node,
+; or a full expanded stream. A clock does not choose among them. Elapsed
+; is a recorded fact. Equiv may only be considered for a completed stream.
 ;
 ; preludes: form-stdlib/core.fk
 ; Proven by: form-stdlib/tests/form-cli-native-agent-orient-band.fk
@@ -35,40 +27,33 @@
     (defn fnao-next-name () "answer-generate")
     (defn fnao-voice-pending () "pending")
 
-    (defn fnao-admit-named () 0)
-    (defn fnao-admit-waiting () 1)
-    (defn fnao-admit-ready () 2)
-    (defn fnao-admit-timeout () 3)
-    (defn fnao-admit-error () 4)
-    (defn fnao-live-deadline-ms () 2000)
+    (defn fnao-obs-nothing () 0)
+    (defn fnao-obs-timeout () 1)
+    (defn fnao-obs-node () 2)
+    (defn fnao-obs-stream () 3)
 
-    (defn fnao-frame (admit elapsed) (list admit elapsed))
-    (defn fnao-frame-admit (f) (nth f 0))
-    (defn fnao-frame-elapsed (f) (nth f 1))
+    (defn fnao-obs-name (o)
+        (if (eq o (fnao-obs-nothing)) "nothing"
+            (if (eq o (fnao-obs-timeout)) "timeout"
+                (if (eq o (fnao-obs-node)) "node"
+                    "stream"))))
 
-    (defn fnao-admit-name-of (admit)
-        (if (eq admit (fnao-admit-named)) "named"
-            (if (eq admit (fnao-admit-waiting)) "waiting"
-                (if (eq admit (fnao-admit-ready)) "ready"
-                    (if (eq admit (fnao-admit-timeout)) "timeout"
-                        "error")))))
+    ; Four distinct arrivals. A clock does not decide them.
+    ; stream if the expanded generate completed; timeout only when the
+    ; carrier named timeout; node if a node arrived without a stream;
+    ; nothing if none of those arrived.
+    (defn fnao-observe (timeout-named node-len stopped generated)
+        (if (and (eq stopped 1) (gt generated 0)) (fnao-obs-stream)
+            (if (eq timeout-named 1) (fnao-obs-timeout)
+                (if (gt node-len 0) (fnao-obs-node)
+                    (fnao-obs-nothing)))))
 
-    ; named -> waiting. waiting -> ready|timeout|error. nothing else.
-    (defn fnao-step (from to)
-        (if (eq from (fnao-admit-named))
-            (if (eq to (fnao-admit-waiting)) 1 0)
-            (if (eq from (fnao-admit-waiting))
-                (if (or (eq to (fnao-admit-ready))
-                    (or (eq to (fnao-admit-timeout))
-                        (eq to (fnao-admit-error)))) 1 0)
-                0)))
+    ; only a full stream may even be considered for equivalence
+    (defn fnao-may-equiv? (observe error)
+        (if (and (eq observe (fnao-obs-stream)) (eq error 0)) 1 0))
 
-    ; equivalence needs a completed ready frame and no carrier error
-    (defn fnao-may-equiv? (admit error)
-        (if (and (eq admit (fnao-admit-ready)) (eq error 0)) 1 0))
-
-    (defn fnao-equiv-of (admit error exact-ppm)
-        (if (eq (fnao-may-equiv? admit error) 0) 0
+    (defn fnao-equiv-of (observe error exact-ppm)
+        (if (eq (fnao-may-equiv? observe error) 0) 0
             (if (gt exact-ppm 0) 1 0)))
 
     (defn fnao-seat-name (seat)
@@ -103,11 +88,11 @@
     (defn fnao-answer-stack ()
         (if (eq (fnao-door (fnao-seat-design)) 1) (fnao-arch-depth) 0))
 
-    ; sealed content-free row. this checkout: named, no model, no elapsed
-    (defn fnao-heldout (id admit elapsed equiv exact-ppm error stack)
-        (list "form-cli-heldout-v1" id admit elapsed equiv exact-ppm error stack))
+    ; sealed content-free row. named floor: nothing has arrived
+    (defn fnao-heldout (id observe elapsed equiv exact-ppm error stack)
+        (list "form-cli-heldout-v1" id observe elapsed equiv exact-ppm error stack))
     (defn fnao-heldout-id (r) (nth r 1))
-    (defn fnao-heldout-admit (r) (nth r 2))
+    (defn fnao-heldout-observe (r) (nth r 2))
     (defn fnao-heldout-elapsed (r) (nth r 3))
     (defn fnao-heldout-equiv (r) (nth r 4))
     (defn fnao-heldout-ppm (r) (nth r 5))
@@ -119,11 +104,11 @@
     (defn fnao-heldout-valid? (r)
         (if (eq (fnao-heldout? r) 0) 0
             (if (eq (fnao-heldout-equiv r)
-                    (fnao-equiv-of (fnao-heldout-admit r)
+                    (fnao-equiv-of (fnao-heldout-observe r)
                         (fnao-heldout-error r) (fnao-heldout-ppm r))) 1 0)))
 
     (defn fnao-sealed ()
-        (fnao-heldout "ag01" (fnao-admit-named) 0 0 0 0 (fnao-answer-stack)))
+        (fnao-heldout "ag01" (fnao-obs-nothing) 0 0 0 0 (fnao-answer-stack)))
 
     (defn fnao-arch-fitted ()
         (if (eq (fnao-heldout-equiv (fnao-sealed)) 1) 1 0))
@@ -140,7 +125,7 @@
 
     (defn fnao-heldout-speak-of (r)
         (str_concat "held-out id=" (str_concat (fnao-heldout-id r)
-        (str_concat " admit=" (str_concat (fnao-admit-name-of (fnao-heldout-admit r))
+        (str_concat " observe=" (str_concat (fnao-obs-name (fnao-heldout-observe r))
         (str_concat " elapsed-ms=" (str_concat (int_to_str (fnao-heldout-elapsed r))
         (str_concat " equiv=" (str_concat (int_to_str (fnao-heldout-equiv r))
         (str_concat " exact-ppm=" (str_concat (int_to_str (fnao-heldout-ppm r))
@@ -150,21 +135,12 @@
     (defn fnao-heldout-speak ()
         (fnao-heldout-speak-of (fnao-sealed)))
 
-    ; Live admit from a waiting step. Deadline wins over a late status so a
-    ; wait never becomes a guessed ready. Empty status is error, not timeout.
-    (defn fnao-live-admit (stepped elapsed status-len)
-        (if (eq stepped 0) (fnao-admit-named)
-            (if (ge elapsed (fnao-live-deadline-ms)) (fnao-admit-timeout)
-                (if (eq status-len 0) (fnao-admit-error)
-                    (fnao-admit-ready)))))
-
-    (defn fnao-live-row (elapsed status-len)
+    ; elapsed is a recorded fact. it does not choose timeout, nothing, node, or stream.
+    (defn fnao-live-row (elapsed timeout-named node-len stopped generated)
         (do
-            (let stepped (fnao-step (fnao-admit-named) (fnao-admit-waiting)))
-            (let admit (fnao-live-admit stepped elapsed status-len))
-            (let err (if (eq admit (fnao-admit-error)) 1 0))
-            (fnao-heldout "ag01" admit elapsed
-                (fnao-equiv-of admit err 0) 0 err (fnao-answer-stack))))
+            (let observe (fnao-observe timeout-named node-len stopped generated))
+            (fnao-heldout "ag01" observe elapsed
+                (fnao-equiv-of observe 0 0) 0 0 (fnao-answer-stack))))
 
     (defn fnao-design-speak ()
         (str_concat "design named depth=" (str_concat (int_to_str (fnao-arch-depth))
@@ -174,7 +150,7 @@
     (defn fnao-answer-generate-speak ()
         (do
             (let r (fnao-sealed))
-            (str_concat "answer-generate admit=" (str_concat (fnao-admit-name-of (fnao-heldout-admit r))
+            (str_concat "answer-generate observe=" (str_concat (fnao-obs-name (fnao-heldout-observe r))
             (str_concat " elapsed-ms=" (str_concat (int_to_str (fnao-heldout-elapsed r))
             (str_concat " equiv=" (str_concat (int_to_str (fnao-heldout-equiv r))
             (str_concat " stack=" (str_concat (int_to_str (fnao-heldout-stack r))
@@ -214,15 +190,15 @@
                 (fnao-none-observed (add seat 1)))))
 
     (defn fnao-frame-holds? ()
-        (if (eq (fnao-step (fnao-admit-named) (fnao-admit-waiting)) 1)
-        (if (eq (fnao-step (fnao-admit-named) (fnao-admit-ready)) 0)
-        (if (eq (fnao-step (fnao-admit-waiting) (fnao-admit-ready)) 1)
-        (if (eq (fnao-step (fnao-admit-waiting) (fnao-admit-timeout)) 1)
-        (if (eq (fnao-step (fnao-admit-waiting) (fnao-admit-error)) 1)
-        (if (eq (fnao-may-equiv? (fnao-admit-timeout) 0) 0)
-        (if (eq (fnao-may-equiv? (fnao-admit-error) 0) 0)
-        (if (eq (fnao-may-equiv? (fnao-admit-ready) 1) 0)
-        (if (eq (fnao-equiv-of (fnao-admit-ready) 0 0) 0)
+        (if (eq (fnao-observe 0 0 0 0) (fnao-obs-nothing))
+        (if (eq (fnao-observe 1 10 0 0) (fnao-obs-timeout))
+        (if (eq (fnao-observe 0 10 0 0) (fnao-obs-node))
+        (if (eq (fnao-observe 0 10 1 3) (fnao-obs-stream))
+        (if (eq (fnao-observe 0 10 1 0) (fnao-obs-node))
+        (if (eq (fnao-observe 1 10 1 3) (fnao-obs-stream))
+        (if (eq (fnao-may-equiv? (fnao-obs-node) 0) 0)
+        (if (eq (fnao-may-equiv? (fnao-obs-nothing) 0) 0)
+        (if (eq (fnao-may-equiv? (fnao-obs-timeout) 0) 0)
             1 0) 0) 0) 0) 0) 0) 0) 0) 0))
 
     (defn fnao-cross-holds? ()
@@ -232,7 +208,7 @@
                 (and (eq (fnao-answer-stack) (fnao-arch-depth))
                 (and (eq (fnao-heldout-valid? r) 1)
                 (and (str_eq (fnao-heldout-id r) "ag01")
-                (and (eq (fnao-heldout-admit r) (fnao-admit-named))
+                (and (eq (fnao-heldout-observe r) (fnao-obs-nothing))
                      (eq (fnao-heldout-equiv r) 0)))))) 1 0)))
 
     (defn fnaok (cond bit) (if cond bit 0))
@@ -260,11 +236,11 @@
                 (fnaok (and (eq (fnao-cross-holds?) 1)
                             (not (lt (str_find speak "cross=design-withholds-fit,answer-names-stack" 0) 0))) 4096)
                 (fnaok (and (eq (fnao-frame-holds?) 1)
-                            (not (lt (str_find speak "held-out id=ag01 admit=named" 0) 0))) 8192)
-                (fnaok (and (eq (fnao-live-deadline-ms) 2000)
-                    (and (eq (fnao-heldout-admit (fnao-live-row 0 1)) (fnao-admit-ready))
-                    (and (eq (fnao-heldout-admit (fnao-live-row 2000 1)) (fnao-admit-timeout))
-                    (and (eq (fnao-heldout-admit (fnao-live-row 0 0)) (fnao-admit-error))
-                    (and (eq (fnao-heldout-equiv (fnao-live-row 0 1)) 0)
-                         (eq (fnao-heldout-valid? (fnao-live-row 0 1)) 1)))))) 16384)))))
+                            (not (lt (str_find speak "held-out id=ag01 observe=nothing" 0) 0))) 8192)
+                (fnaok (and (eq (fnao-heldout-observe (fnao-live-row 0 0 0 0 0)) (fnao-obs-nothing))
+                    (and (eq (fnao-heldout-observe (fnao-live-row 99999 0 10 0 0)) (fnao-obs-node))
+                    (and (eq (fnao-heldout-observe (fnao-live-row 0 1 10 0 0)) (fnao-obs-timeout))
+                    (and (eq (fnao-heldout-observe (fnao-live-row 0 0 10 1 4)) (fnao-obs-stream))
+                    (and (eq (fnao-heldout-equiv (fnao-live-row 0 0 10 1 4)) 0)
+                         (eq (fnao-heldout-valid? (fnao-live-row 0 0 10 1 4)) 1)))))) 16384)))))
 )
