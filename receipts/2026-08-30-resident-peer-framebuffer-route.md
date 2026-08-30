@@ -27,6 +27,33 @@ The direct task route uses the resident remaining context instead of a fixed
 answer-token ceiling.  A malformed or stopped local turn remains a typed local
 result; it does not silently fall through to a remote model.
 
+The first live task exposed one direct-route wiring error: task observation
+already returns the live `fcms` session, rather than a wrapped peer result.
+The selected direct or recipe action now receives that raw session unchanged;
+it cannot accidentally substitute the session-reason field for the model.
+
+## Direct user-turn observation
+
+The selected action now owns a distinct `direct-user` crossing.  It closes the
+previous assistant stream, enters the task in a ChatML `user` turn, and opens a
+plain `assistant` turn.  Recipe/source work remains on the tool-observation
+tail.  The high-grammar rule is
+`direct-answer-enters-as-user-turn-then-opens-plain-assistant-turn`.
+
+On the real `Qwen3.8-27B-Q8_0.gguf` Metal route, the original 552-byte
+objective reached `direct-answer/observe=begin`, then
+`direct-answer/observe=value`, then `direct-answer/run=begin`; this establishes
+that the bytes entered the new user-turn rather than the old tool tail.  The
+initial residence prefill was 166,063 ms and the user-turn observation span
+was 138,584 ms.  No provider callback or fallback occurred.
+
+Decode produced no token or terminal frame across five 30-second observation
+windows, so the live channel applied an explicit interrupt and released the
+process.  This is a timeout signal, not an answer.  The next local crossing is
+native per-token/progress publication plus a model-stop terminal frame, so a
+long decode can remain observable and controllable without imposing a fixed
+answer-token limit.
+
 ## Honest floor
 
 The local peer answer call has not yet yielded a completed terminal frame to
