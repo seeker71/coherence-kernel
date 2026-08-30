@@ -1,0 +1,128 @@
+; iq2xs-msl.fk — GGUF type 17 as resident-byte Metal dequant and fused matvec kernels.
+;
+; The meaning is authored in bml/iq2xs-layout.bml and proven on the CPU in iq2xs-dequant.fk.
+; This cell is the Metal lowering. Raw MSL strings remain necessary because form.bml cannot yet emit
+; Metal address spaces, buffer attributes, SIMDgroup reductions, or a 4096-byte constant table; that
+; is the named BML door still closed, not a second authority for the format.
+;
+; Four kernels are emitted from one helper spine:
+;   * dequant: one thread per weight, for exact GPU-vs-CPU witnessing;
+;   * matvec: one thread per row, preserving the dense-family right-fold reference order;
+;   * matvec_simd: one 256-thread group per row, eight SIMDgroups and a two-stage simd_sum. This is
+;     the first parallel path: quantized bytes remain resident and no f32 matrix is materialized;
+;   * matvec_slot4: one SIMDgroup shares each 32-value activation tile across four output rows. It
+;     decodes a whole IQ2_XS 32-weight group at once, so d, scale and packed-word selectors are
+;     invariant inside the eight-magnitude inner work rather than recomputed per weight.
+;
+; The SIMD kernel deliberately changes reduction association, so it is judged by a numerical bound,
+; never bit equality. It requires the unit assembler to prepend qml-msl-header once; the helper and
+; serial kernels themselves use only arithmetic and carry no duplicate header.
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/iq2xxs-dequant.fk form-stdlib/iq2xxs-msl.fk form-stdlib/iq2xs-layout-xtal.fk form-stdlib/iq2xs-dequant.fk
+;
+; Proven by: form-stdlib/tests/iq2xs-msl-band.fk and
+;            form/native/metal/metal_iq2xs_gpu.sh (Mac-only GPU execution + timing).
+
+(do
+    ; ================= transcription read back into Form =================
+    ; This mirror is deliberately explicit rather than calling the BML layout helpers: a wrong MSL
+    ; offset must disagree with the independently written iq2xs-at-flat carver.
+    (defn iq2xsm-mod (a n) (sub a (mul (div a n) n)))
+    (defn iq2xsm-pow2i (k) (if (le k 0) 1 (mul 2 (iq2xsm-pow2i (sub k 1)))))
+    (defn iq2xsm-pow2f (e)
+        (if (lt e 0) (mul 0.5 (iq2xsm-pow2f (add e 1)))
+            (if (gt e 0) (mul 2.0 (iq2xsm-pow2f (sub e 1))) 1.0)))
+    (defn iq2xsm-f16 (bits)
+        (do
+            (let mant (iq2xsm-mod bits 1024))
+            (let ex (iq2xsm-mod (div bits 1024) 32))
+            (let sgn (div bits 32768))
+            (let frac (div (mul 1.0 mant) 1024.0))
+            (let mag (if (eq ex 0)
+                         (mul (iq2xsm-pow2f (sub 0 14)) frac)
+                         (mul (iq2xsm-pow2f (sub ex 15)) (add 1.0 frac))))
+            (if (eq sgn 1) (sub 0.0 mag) mag)))
+
+    (defn iq2xsm-flat-at (bytes base idx)
+        (do
+            (let blk (div idx 256))
+            (let within (iq2xsm-mod idx 256))
+            (let b (add base (mul blk 74)))
+            (let ib32 (div within 32))
+            (let rem (iq2xsm-mod within 32))
+            (let l (div rem 8))
+            (let j (iq2xsm-mod rem 8))
+            (let qidx (add (mul ib32 4) l))
+            (let qoff (add b (add 2 (mul qidx 2))))
+            (let qword (add (nth bytes qoff) (mul 256 (nth bytes (add qoff 1)))))
+            (let gidx (iq2xsm-mod qword 512))
+            (let signidx (div qword 512))
+            (let scb (nth bytes (add b (add 66 ib32))))
+            (let sc (if (lt l 2) (iq2xsm-mod scb 16) (div scb 16)))
+            (let hbits (add (nth bytes b) (mul 256 (nth bytes (add b 1)))))
+            (let d (iq2xsm-f16 hbits))
+            (let signs (nth (iq2-ksigns) signidx))
+            (let sbit (iq2xsm-mod (div signs (iq2xsm-pow2i j)) 2))
+            (let sgn (if (eq sbit 1) -1 1))
+            (let mag (nth (iq2xs-grid) (add (mul gidx 8) j)))
+            (mul (mul (mul (mul 0.25 d) (add 0.5 sc)) sgn) mag)))
+
+    ; ================= constant tables =================
+    ; iq2m-join is the existing head-wise O(n) emitter. The values themselves come from the type-17
+    ; carver, so CPU and GPU cannot drift by a second manual transcription.
+    (defn iq2xsm-msl-grid ()
+        (str_concat "constant uchar iq2xs_grid[4096] = { "
+            (str_concat (iq2m-join (iq2xs-grid)) " };\n")))
+    (defn iq2xsm-msl-ksigns ()
+        (str_concat "constant uchar iq2xs_ksigns[128] = { "
+            (str_concat (iq2m-join (iq2-ksigns)) " };\n")))
+
+    ; ================= emitted MSL =================
+    (defn iq2xsm-msl-spine ()
+        "static inline int iq2xs_mod(int a, int n) { return a - (a / n) * n; } static inline uint iq2xs_upow2(uint k) { uint a = 1u; for (uint i = 0u; i < k; ++i) a = a * 2u; return a; } static inline float iq2xs_pow2(int e) { float a = 1.0f; int k = 0; if (e >= 0) { while (k < e) { a = a * 2.0f; k = k + 1; } } else { while (k < -e) { a = a * 0.5f; k = k + 1; } } return a; } static inline float iq2xs_f16(int bits) { int mant = iq2xs_mod(bits, 1024); int ex = iq2xs_mod(bits / 1024, 32); int sgn = bits / 32768; float frac = float(mant) / 1024.0f; float mag = (ex == 0) ? iq2xs_pow2(-14) * frac : iq2xs_pow2(ex - 15) * (1.0f + frac); return (sgn == 1) ? -mag : mag; } ")
+    (defn iq2xsm-msl-weight ()
+        "static inline float iq2xs_w(device const uchar* qb, uint idx) { uint blk = idx / 256u; uint within = idx - blk * 256u; uint b = blk * 74u; uint ib32 = within / 32u; uint rem = within - ib32 * 32u; uint l = rem / 8u; uint j = rem - l * 8u; uint qidx = 4u * ib32 + l; uint qoff = b + 2u + 2u * qidx; uint qword = uint(qb[qoff]) + 256u * uint(qb[qoff + 1u]); uint gidx = qword - (qword / 512u) * 512u; uint signidx = qword / 512u; uint scb = uint(qb[b + 66u + ib32]); uint sc = (l < 2u) ? scb - (scb / 16u) * 16u : scb / 16u; int hbits = int(qb[b]) + 256 * int(qb[b + 1u]); float d = iq2xs_f16(hbits); int signs = int(iq2xs_ksigns[signidx]); int sbit = iq2xs_mod(signs / int(iq2xs_upow2(j)), 2); float sgn = (sbit == 1) ? -1.0f : 1.0f; int mag = int(iq2xs_grid[gidx * 8u + j]); return (((0.25f * d) * (0.5f + float(sc))) * sgn) * float(mag); } ")
+    (defn iq2xsm-msl-helpers ()
+        (str_concat (iq2xsm-msl-grid)
+        (str_concat (iq2xsm-msl-ksigns)
+        (str_concat (iq2xsm-msl-spine) (iq2xsm-msl-weight)))))
+
+    (defn iq2xsm-dequant-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = iq2xs_w(qb, off + i); }")))
+    (defn iq2xsm-matvec-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0u) { j -= 1u; float p = iq2xs_w(qb, i * cols + j) * x[j]; acc = p + acc; } y[i] = acc; }")))
+    (defn iq2xsm-matvec-simd-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint3 tg [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) { uint row = tg.x; if (row >= rows) return; float acc = 0.0f; for (uint j = uint(tid); j < cols; j += 256u) { acc += iq2xs_w(qb, row * cols + j) * x[j]; } float lane_sum = metal::simd_sum(acc); threadgroup float partial[8]; if (lane == 0) partial[sg] = lane_sum; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (sg == 0) { float v = (lane < 8) ? partial[lane] : 0.0f; float total = metal::simd_sum(v); if (lane == 0) y[row] = total; } }")))
+
+    ; The four-row slot is the type-17 analogue of the body-proven DSV4 IQ2_XXS rows4 map, derived
+    ; independently for IQ2_XS's 74-byte block. A lane owns one 32-weight group at a time. Its four
+    ; u16 words each name one trained 8-value grid row and one 8-bit sign mask; the paired scale byte
+    ; is loaded once, and the same 32 activations feed four output rows. Hardware half conversion is
+    ; exact for every finite GGUF f16 scale; changed product/reduction association is carrier-bounded.
+    ; rows need not be divisible by four: the last SIMDgroup refuses each absent row explicitly.
+    (defn iq2xsm-matvec-slot4-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0 = (gid / 32u) * 4u; if (r0 >= rows) return; uint nb = cols / 256u; uint ngrp = nb * 8u; ulong rstride = (ulong)nb * 74ul; float sumf[4]; for (uint rr = 0u; rr < 4u; ++rr) sumf[rr] = 0.0f; for (uint gg = lane; gg < ngrp; gg += 32u) { uint blk = gg / 8u; uint ib32 = gg - blk * 8u; device const float* xg = x + blk * 256u + ib32 * 32u; float xl[32]; for (uint j = 0u; j < 32u; ++j) xl[j] = xg[j]; for (uint rr = 0u; rr < 4u; ++rr) { if (r0 + rr < rows) { device const uchar* b = qb + (ulong)(r0 + rr) * rstride + (ulong)blk * 74ul; ushort hb = (ushort)b[0] | ((ushort)b[1] << 8); float d = float(as_type<half>(hb)); uint scb = uint(b[66u + ib32]); device const uchar* qbase = b + 2u + ib32 * 8u; ushort4 qv = ushort4(*(device const packed_ushort4*)(qbase)); for (uint l = 0u; l < 4u; ++l) { uint qw = uint(qv[l]); uint gidx = qw & 511u; uint signidx = qw >> 9u; uint sc = (l < 2u) ? (scb & 15u) : (scb >> 4u); float scale = 0.125f * d * float(2u * sc + 1u); constant uchar* g8 = iq2xs_grid + gidx * 8u; uint signs = uint(iq2xs_ksigns[signidx]); for (uint j = 0u; j < 8u; ++j) { float mag = float(g8[j]); float smag = (((signs >> j) & 1u) == 1u) ? -mag : mag; sumf[rr] += (scale * smag) * xl[l * 8u + j]; } } } } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sumf[rr]); if (lane == 0u && r0 + rr < rows) y[r0 + rr] = s; } }")))
+
+    (defn iq2xsm-dequant-msl (fname)
+        (str_concat (iq2xsm-msl-helpers) (iq2xsm-dequant-body fname)))
+    (defn iq2xsm-matvec-msl (fname)
+        (str_concat (iq2xsm-msl-helpers) (iq2xsm-matvec-body fname)))
+    (defn iq2xsm-matvec-simd-msl (fname)
+        (str_concat (iq2xsm-msl-helpers) (iq2xsm-matvec-simd-body fname)))
+    (defn iq2xsm-matvec-slot4-msl (fname)
+        (str_concat (iq2xsm-msl-helpers) (iq2xsm-matvec-slot4-body fname)))
+    (defn iq2xsm-msl-unit (dname mname sname qname)
+        (str_concat (iq2xsm-msl-helpers)
+        (str_concat (iq2xsm-dequant-body dname)
+        (str_concat (iq2xsm-matvec-body mname)
+        (str_concat (iq2xsm-matvec-simd-body sname) (iq2xsm-matvec-slot4-body qname))))))
+
+    0)

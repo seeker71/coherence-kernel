@@ -1,0 +1,47 @@
+; qwen4exp-flash-next-quant-jit-live-run.fk — Form owns compile, bind and dispatch.
+;
+; A four-row x 256-column all-zero IQ2_XS matrix is enough to prove the live
+; carrier route without claiming a model forward. Every x is 1.0f, so four zero
+; outputs also prove every row was written. The performance/correctness harness
+; separately uses nonzero trained-grid fixtures at the real 640x2560 shape.
+;
+; preludes: form/native/metal/qwen4exp-flash-next-quant-jit.fk
+
+(do
+    (defn q4eql-repeat-byte (v n acc)
+        (if (le n 0) acc
+            (q4eql-repeat-byte v (sub n 1) (str_concat acc (byte_to_str v)))))
+    (defn q4eql-fill-f32 (h i n bits)
+        (if (ge i n) 1
+            (if (eq (metal_buf_write h (mul i 4) (md-le32 bits)) 4)
+                (q4eql-fill-f32 h (add i 1) n bits) 0)))
+    (defn q4eql-all-zero (s i)
+        (if (ge i (str_len s)) 1
+            (if (eq (str_byte_at s i) 0) (q4eql-all-zero s (add i 1)) 0)))
+    (defn q4eql-bit (ok bit) (if ok bit 0))
+    (let rows 4)
+    (let cols 256)
+    (let qn (q4eq-bytes 17 (mul rows cols)))
+    (let qh (metal_buf_alloc qn))
+    (let xh (metal_buf_alloc (mul cols 4)))
+    (let yh (metal_buf_alloc (mul rows 4)))
+    (let qw (metal_buf_write qh 0 (q4eql-repeat-byte 0 qn "")))
+    (let xw (q4eql-fill-f32 xh 0 cols 1065353216))
+    (let pipe (q4eq-pipeline))
+    (let enq (q4eq-mv pipe qh xh yh 17 rows cols 0))
+    (let sync (metal_sync))
+    (let raw (metal_buf_read yh 0 (mul rows 4)))
+    (let c0 (q4eql-bit (md-door-live?) 1))
+    (let c1 (q4eql-bit (gt pipe 0) 2))
+    (let c2 (q4eql-bit (eq qw qn) 4))
+    (let c3 (q4eql-bit (eq xw 1) 8))
+    (let c4 (q4eql-bit (gt enq 0) 16))
+    (let c5 (q4eql-bit (gt sync 0) 32))
+    (let c6 (q4eql-bit (if (eq (str_len raw) 16) (eq (q4eql-all-zero raw 0) 1) 0) 64))
+    (metal_buf_free qh)
+    (metal_buf_free xh)
+    (metal_buf_free yh)
+    (print_str (str_concat "PIPELINE " (int_to_str pipe)))
+    (print_str (str_concat "THREADS " (int_to_str (q4eq-threads 17 rows cols))))
+    (print_str (str_concat "OUTPUT_BYTES " (int_to_str (str_len raw))))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 c6)))))))
