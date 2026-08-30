@@ -63,6 +63,25 @@ second O(n) token stream.  The dedicated decode-checkpoint band returned
 receipt still needs to establish the model's stop terminal and measured decode
 rate under this compressed channel.
 
+## Original-objective local completion
+
+The exact 552-byte objective was then answered by the real
+`Qwen3.8-27B-Q8_0.gguf` residence.  The cold prefill was 165,529 ms; its
+direct user-turn observation was 68,986 ms; decode returned with model-stop
+after 890 local tokens and 356,446 ms.  Its terminal receipt carried
+`callback-calls=0`, `route=direct-answer`, `stopped=1`, and one local
+observation.  Checkpoints reached 1, 2, 4, 8, 16, 32, 64, 128, 256, and 512;
+the next would be 1,024, so no missing event is inferred from model-stop at
+890.
+
+This proves the mechanical local route: one Qwen residence can receive the
+original objective, answer, stop, and release without a provider or HTTP
+crossing.  It does not admit the answer's prose as source knowledge: the
+model constructed unverified CLI measurements and names, so it has zero
+knowledge/mutation contribution.  Source-world query-and-receipt injection is
+the remaining semantic crossing before a Form-specific answer can be called
+grounded.
+
 ## Honest floor
 
 The local peer answer call has not yet yielded a completed terminal frame to
