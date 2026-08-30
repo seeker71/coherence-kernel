@@ -27,7 +27,7 @@
 ; preludes: form-stdlib/form-cli-model-session.fk
 ; preludes: form-stdlib/peer-epoch-lease.fk
 ; preludes: form-stdlib/jit-once-born.fk
-; preludes: form-stdlib/form-cli-resident-turnwheel-xtal.fk
+; preludes: form-stdlib/form-cli-resident-turnwheel-native-bml.fk
 ; Proven by: form-stdlib/tests/form-cli-resident-turnwheel-band.fk
 
 (do
@@ -84,7 +84,8 @@
     ; One physical residence. `x` is the already loaded tokenizer crystal;
     ; ctx is shared, while no stream state appears here.
     (defn fcrt-shared (path src ctx x maxpos prefill-quanta registry)
-        (list "form-cli-resident-shared-v1" path src ctx x maxpos prefill-quanta registry))
+        (list "form-cli-resident-shared-v2" path src ctx x maxpos prefill-quanta
+              registry (fcrtn-build)))
     (defn fcrt-shared-path (s) (nth s 1))
     (defn fcrt-shared-src (s) (nth s 2))
     (defn fcrt-shared-ctx (s) (nth s 3))
@@ -92,10 +93,12 @@
     (defn fcrt-shared-maxpos (s) (nth s 5))
     (defn fcrt-shared-prefill-quanta (s) (nth s 6))
     (defn fcrt-shared-registry (s) (nth s 7))
+    (defn fcrt-shared-bml-cache (s) (nth s 8))
     (defn fcrt-shared-with-registry (s registry)
-        (fcrt-shared (fcrt-shared-path s) (fcrt-shared-src s)
-            (fcrt-shared-ctx s) (fcrt-shared-x s) (fcrt-shared-maxpos s)
-            (fcrt-shared-prefill-quanta s) registry))
+        (list "form-cli-resident-shared-v2" (fcrt-shared-path s)
+            (fcrt-shared-src s) (fcrt-shared-ctx s) (fcrt-shared-x s)
+            (fcrt-shared-maxpos s) (fcrt-shared-prefill-quanta s) registry
+            (fcrt-shared-bml-cache s)))
 
     ; flow phases: program, prefill, model, prefill-error, program-returned.
     (defn fcrt-flow (phase payload receipt)
@@ -104,9 +107,9 @@
     (defn fcrt-flow-payload (f) (nth f 2))
     (defn fcrt-flow-receipt (f) (nth f 3))
     (defn fcrt-program-flow (arg)
-        (fcrt-flow (PhaseProgram) arg (nothing)))
+        (fcrt-flow (fcrtn-phase-program) arg (nothing)))
     (defn fcrt-model-flow (session receipt)
-        (fcrt-flow (PhaseModel) session receipt))
+        (fcrt-flow (fcrtn-phase-model) session receipt))
     ; A stop token is terminal model state, not merely a row status. Keep that
     ; fact in the carried fcms session so the next caller cannot mistake a
     ; completed stream for a live pending prediction after the row releases.
@@ -276,7 +279,7 @@
                                 (fcrt-act "nothing" host released
                                     (qtlc-reason (qtlc-next-cursor one))))
                             (fcrt-enqueue-flow host id
-                                (fcrt-flow (PhasePrefill)
+                                (fcrt-flow (fcrtn-phase-prefill)
                                     (fcrt-prefill-payload sts
                                         (qtlc-next-cursor one)
                                         (qtlc-next-value one) 0 1 "open")
@@ -301,7 +304,7 @@
             (if (str_eq (fcrt-route-signal invoked) "returned")
                 (fcrt-step-out "returned" (fcrt-route-present? invoked)
                     (fcrt-route-value invoked)
-                    (fcrt-flow (PhaseReturned) (fcrt-route-value invoked)
+                    (fcrt-flow (fcrtn-phase-returned) (fcrt-route-value invoked)
                         (fcrt-route-receipt invoked))
                     (fcrt-route-shared invoked) (fcrt-route-receipt invoked)
                     (fcrt-route-reason invoked))
@@ -316,14 +319,14 @@
         (if (le left 0)
             (do
                 (metal_sync)
-                (fcrt-flow (PhasePrefill) payload (nothing)))
+                (fcrt-flow (fcrtn-phase-prefill) payload (nothing)))
             (do
                 (let one (qtlc-next (fcrt-pf-cursor payload)))
                 (if (eq (qtlc-next-present? one) 1)
                     (if (ge (fcrt-pf-pos payload) (fcrt-shared-maxpos shared))
                         (do
                             (metal_sync)
-                            (fcrt-flow (PhasePrefillError)
+                            (fcrt-flow (fcrtn-phase-prefill-error)
                                 (fcrt-prefill-payload (fcrt-pf-sts payload)
                                     (qtlc-next-cursor one) (fcrt-pf-held payload)
                                     (fcrt-pf-pos payload) (fcrt-pf-count payload)
@@ -346,7 +349,7 @@
                                 (fcrt-shared-maxpos shared))
                             (do
                                 (metal_sync)
-                                (fcrt-flow (PhasePrefillError)
+                                (fcrt-flow (fcrtn-phase-prefill-error)
                                     (fcrt-prefill-payload (fcrt-pf-sts payload)
                                         (qtlc-next-cursor one) (fcrt-pf-held payload)
                                         (fcrt-pf-pos payload) (fcrt-pf-count payload)
@@ -373,7 +376,7 @@
                                     (nothing))))
                         (do
                             (metal_sync)
-                            (fcrt-flow (PhasePrefillError)
+                            (fcrt-flow (fcrtn-phase-prefill-error)
                                 (fcrt-prefill-payload (fcrt-pf-sts payload)
                                     (qtlc-next-cursor one) (fcrt-pf-held payload)
                                     (fcrt-pf-pos payload) (fcrt-pf-count payload)
@@ -385,11 +388,11 @@
             (metal_batch_concurrent)
             (let moved (fcrt-prefill-go shared (fcrt-flow-payload flow)
                 (fcrt-shared-prefill-quanta shared)))
-            (if (str_eq (fcrt-flow-phase moved) (PhasePrefillError))
+            (if (str_eq (fcrt-flow-phase moved) (fcrtn-phase-prefill-error))
                 (fcrt-step-out "failure" 0 (nothing) moved shared (nothing)
                     (fcrt-pf-reason (fcrt-flow-payload moved)))
                 (fcrt-step-out "yield" 0 (nothing) moved shared (nothing)
-                    (if (str_eq (fcrt-flow-phase moved) (PhaseModel))
+                    (if (str_eq (fcrt-flow-phase moved) (fcrtn-phase-model))
                         "prefill-complete" "prefill-quantum-complete")))))
 
     ; A dynamic program-image route is invoked before every model token. Its returned
@@ -433,11 +436,11 @@
                                 "model-token-committed"))))))))
 
     (defn fcrt-step (route shared flow)
-        (if (str_eq (fcrt-flow-phase flow) (PhaseProgram))
+        (if (str_eq (fcrt-flow-phase flow) (fcrtn-phase-program))
             (fcrt-program-step route shared flow)
-        (if (str_eq (fcrt-flow-phase flow) (PhasePrefill))
+        (if (str_eq (fcrt-flow-phase flow) (fcrtn-phase-prefill))
             (fcrt-prefill-step shared flow)
-        (if (str_eq (fcrt-flow-phase flow) (PhaseModel))
+        (if (str_eq (fcrt-flow-phase flow) (fcrtn-phase-model))
             (fcrt-model-step route shared flow)
             (fcrt-step-out "failure" 0 (nothing) flow shared
                 (fcrt-flow-receipt flow) "flow-phase-not-runnable")))))
@@ -445,12 +448,32 @@
     (defn fcrt-row-with (row flow budget values status)
         (append (wt-with row flow budget values status)
                 (list (le-pin-of row))))
-    ; The executable BML cell owns which status settles a row. `undo` remains
-    ; a control operation over retained state, not a terminal stream status.
-    ; This is intentionally a call, rather than a duplicated literal cascade:
-    ; the resident's live wheel now shares the same lowered language as its
-    ; scannerless BML source.
-    (defn fcrt-terminal? (signal) (fcrtbml-terminal signal))
+    ; The high-BML compiler decides which status settles a row.  Its source is
+    ; parsed only at resident birth; its NodeID image is born once in the
+    ; shared registry and every later call reaches the retained native page.
+    ; `undo` remains code 1 and therefore a control operation, not a terminal
+    ; stream status.  There is deliberately no source-text or Form-eval
+    ; compatibility route if the native page is unavailable.
+    ; terminal-call = status, terminal-bit, shared', route, reason.
+    (defn fcrt-terminal-call (shared signal)
+        (do
+            (let cache (fcrt-shared-bml-cache shared))
+            (let moved (fcrtn-invoke cache (fcrt-shared-registry shared)
+                (fcrtn-terminal-selector) (fcrtn-terminal-code cache signal)))
+            (let shared2 (fcrt-shared-with-registry shared
+                (fcrtn-call-registry moved)))
+            (if (str_eq (fcrtn-call-status moved) "returned")
+                (list "form-cli-resident-terminal-call-v1"
+                    "returned" (fcrtn-call-value moved) shared2
+                    (fcrtn-call-route moved) (fcrtn-call-reason moved))
+                (list "form-cli-resident-terminal-call-v1"
+                    "refused" 1 shared2
+                    (fcrtn-call-route moved) (fcrtn-call-reason moved)))))
+    (defn fcrt-tc-status (result) (nth result 1))
+    (defn fcrt-tc-terminal? (result) (nth result 2))
+    (defn fcrt-tc-shared (result) (nth result 3))
+    (defn fcrt-tc-route (result) (nth result 4))
+    (defn fcrt-tc-reason (result) (nth result 5))
 
     ; Custom revolution preserves returned-with-present-nothing and yield.
     ; le-revolve's token-only ABI cannot state either one, so this joins the
@@ -473,14 +496,19 @@
                             (append (wt-toks row) (list (fcrt-so-value moved)))
                             (wt-toks row)))
                         (let gas (sub (wt-budget row) 1))
-                        (if (eq (fcrt-terminal? signal) 1)
+                        (let terminal (fcrt-terminal-call (fcrt-so-shared moved)
+                            signal))
+                        (let settled-signal
+                            (if (str_eq (fcrt-tc-status terminal) "returned")
+                                signal "refused"))
+                        (if (eq (fcrt-tc-terminal? terminal) 1)
                             (list (fcrt-row-with row (fcrt-so-flow moved) gas
-                                    values signal)
-                                (fcrt-so-shared moved)
+                                    values settled-signal)
+                                (fcrt-tc-shared terminal)
                                 (le-bump table (le-pin-of row) -1) 1)
                             (list (fcrt-row-with row (fcrt-so-flow moved) gas
                                     values "live")
-                                (fcrt-so-shared moved) table 0))))))))
+                                (fcrt-tc-shared terminal) table 0))))))))
 
     ; Both `fcrt-revolve` and the selected-row peer path use this one wrapper,
     ; so neither can advance a resident row without emitting the same bounded
@@ -573,10 +601,10 @@
         (le-replay-of (fcrt-lw host) id))
 
     (defn fcrt-flow-sts (flow)
-        (if (str_eq (fcrt-flow-phase flow) (PhaseModel))
+        (if (str_eq (fcrt-flow-phase flow) (fcrtn-phase-model))
             (fcms-sts (fcrt-flow-payload flow))
-        (if (or (str_eq (fcrt-flow-phase flow) (PhasePrefill))
-                (str_eq (fcrt-flow-phase flow) (PhasePrefillError)))
+        (if (or (str_eq (fcrt-flow-phase flow) (fcrtn-phase-prefill))
+                (str_eq (fcrt-flow-phase flow) (fcrtn-phase-prefill-error)))
             (fcrt-pf-sts (fcrt-flow-payload flow))
             (nothing))))
     (defn fcrt-release-flow (flow)
