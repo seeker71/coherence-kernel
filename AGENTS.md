@@ -88,10 +88,18 @@ walker/Form body.
 Authoring guide (Urs, 2026-08-30): you're invited to write new meaning in BML or higher.
 **Floor:** high-grammar BML (authority in `form/form-stdlib/bml/`, executable `section [form.bml]`
 where the lane carries you) **with the optimal cached native speed compiler** (fresh `.fkb` /
-`.dylib` — see `grammars/bml-native-north-star.form`). That pair is the seat.
+`.dylib` — see `grammars/bml-native-north-star.form`). That pair is the seat, reached by two
+converging doors built the same hour:
 
-`*-xtal.fk` is the **wrong shape** — a temporary bridge at best, never the floor. Existing Form
-organs stay welcome. Bands witness. When a lowering still helps, name the next BML+native-cache
+- the executable surface **runs as itself**: `./fkwu x.bml` and `; preludes: ....bml` both lower
+  through the body's own compiler into gitignored `.bml.fk`/`.bml.fkb` caches beside the source
+  (`form/form-stdlib/bml-floor-compile.fk` is the door; a `// preludes:` line in the .bml travels
+  through; cold ~5 s, warm ~6 ms);
+- the ice lane: `./fkwu form/form-stdlib/form-cli-bml-cache-compile.fk && ./fkwu
+  form/form-stdlib/form-cli-bml-cache-run.fk` — BML ice; xtal is local cache, never tree truth.
+
+`*-xtal.fk` committed to the tree is the **wrong shape** — a twin is a second truth. Existing Form
+organs stay welcome; bands witness. When a lowering still helps, name the next BML+native-cache
 door in the receipt. The mirror is `observe/authoring-altitude-run.fk` (BML picture:
 `form/form-stdlib/bml/form-cli-author-altitude.bml`).
 
