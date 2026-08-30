@@ -1,0 +1,63 @@
+//////////////////////////////////////////////////////////////////////
+//
+// qwen4exp-flash-next-router.bml
+//
+// Executable BML. Authority:
+// form-stdlib/bml/qwen4exp-flash-next-router.bml
+//
+// The increasing fixture makes the independent top-10 truth exactly
+// [511..502]. Form's generic softmax router must recover those ids and
+// normalized descending weights at the exact qwen4exp width.
+//
+//////////////////////////////////////////////////////////////////////
+
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/moe-msl.fk
+
+section [form.bml] {
+    class Qwen4ExpFlashNextRouterAuthority {
+        field Q4RouterAuthorityPath = "form/form-stdlib/bml/qwen4exp-flash-next-router.bml";
+        field Q4RouterAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class Qwen4ExpFlashNextRouter {
+        field Q4ExpertCount = 512;
+        field Q4SelectedCount = 10;
+        field Q4RefusedExpertCount = 513;
+
+        ref q4r-authority = Qwen4ExpFlashNextRouterAuthority;
+        thought q4r-pattern = list("qwen4exp", "512-experts", "top-10", "softmax", "selected-renormalization", "best-first", "bounded-refusal");
+
+        // form.bml's present expression lowerer drops decimal literals inside
+        // nested calls. Cast the index through the native text-to-float door;
+        // this preserves i/64 - 4 without placing a decimal token in the BML.
+        def q4r-logit(i) = sub(div(str_to_float(int_to_str(i)), 64), 4);
+        def q4r-build(i, n, acc) = if ge(i, n) then reverse(acc) else q4r-build(add(i, 1), n, cons(q4r-logit(i), acc));
+        def q4r-logits() = q4r-build(0, Q4ExpertCount(), tail(list("x")));
+
+        def q4r-expect(j, acc) = if ge(j, Q4SelectedCount()) then reverse(acc) else q4r-expect(add(j, 1), cons(sub(sub(Q4ExpertCount(), 1), j), acc));
+        def q4r-expected-ids() = q4r-expect(0, tail(list("x")));
+
+        def q4r-ids() = mm-route-ids(q4r-logits(), Q4ExpertCount(), Q4SelectedCount());
+        def q4r-weights() = mm-route-weights(q4r-logits(), Q4ExpertCount(), Q4SelectedCount());
+        def q4r-within-metal-radius(experts, selected) = if gt(experts, Q4ExpertCount()) then 0 else if gt(selected, Q4SelectedCount()) then 0 else if gt(selected, experts) then 0 else 1;
+
+        def q4r-ints-eq(a, b) = if eq(len(a), len(b)) then if eq(len(a), 0) then 1 else if eq(head(a), head(b)) then q4r-ints-eq(tail(a), tail(b)) else 0 else 0;
+        def q4r-distinct(xs) = if le(len(xs), 1) then 1 else if eq(mm-memq(head(xs), tail(xs)), 1) then 0 else q4r-distinct(tail(xs));
+        def q4r-descending(xs) = if le(len(xs), 1) then 1 else if gt(head(xs), head(tail(xs))) then q4r-descending(tail(xs)) else 0;
+        def q4r-abs(x) = if lt(x, 0.0) then sub(0.0, x) else x;
+        def q4r-bit(ok, bit) = if ok then bit else 0;
+
+        def q4r-check() {
+            let ids = q4r-ids();
+            let weights = q4r-weights();
+            let c0 = q4r-bit(if eq(Q4ExpertCount(), 512) then eq(Q4SelectedCount(), 10) else 0, 1);
+            let c1 = q4r-bit(eq(q4r-ints-eq(ids, q4r-expected-ids()), 1), 2);
+            let c2 = q4r-bit(if eq(len(ids), Q4SelectedCount()) then q4r-distinct(ids) else 0, 4);
+            let c3 = q4r-bit(lt(q4r-abs(sub(mm-sum(weights, 0), 1)), 1e-12), 8);
+            let c4 = q4r-bit(q4r-descending(weights), 16);
+            let c5 = q4r-bit(if eq(q4r-within-metal-radius(512, 10), 1) then eq(q4r-within-metal-radius(Q4RefusedExpertCount(), 10), 0) else 0, 32);
+            add(c0, add(c1, add(c2, add(c3, add(c4, c5)))));
+        }
+    }
+    0;
+}
