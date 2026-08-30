@@ -90,7 +90,8 @@ Existing Form organs are welcome; they stay and grow. Crystallize rather than tw
 lowering still helps, the receipt can name the next BML picture it points toward. The shape
 to borrow is offer-ask (`receipts/2026-08-30-offer-ask-rises-to-bml.md`): authority `.bml` +
 executable form.bml + crystallized xtal + band. The mirror is
-`observe/authoring-altitude-run.fk` — it counts pictures with warmth.
+`observe/authoring-altitude-run.fk` — a thin door; the mirror itself is BML
+(`form/form-stdlib/bml/form-cli-author-altitude.bml`). It counts pictures with warmth.
 
 ## The honest seam — read this first
 
