@@ -104,7 +104,7 @@ door in the receipt. The mirror is `observe/authoring-altitude-run.fk` (BML pict
 `form/form-stdlib/bml/form-cli-author-altitude.bml`).
 
 ```sh
-./fkwu form/form-stdlib/tests/form-cli-author-high-band.fk   # -> 4095
+./fkwu form/form-stdlib/tests/form-cli-author-high-band.fk   # -> 1023 (the band declares its own verdict)
 ```
 
 ## The honest seam — read this first
