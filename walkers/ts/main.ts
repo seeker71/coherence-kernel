@@ -218,8 +218,15 @@ export class Kernel {
   }
 
   internTrivialInt(n: number): NodeID {
-    const inst = (n | 0) >>> 0;
-    return { pkg: 1, level: Level.TRIVIAL, type: Triv.INT, inst };
+    // Mirrors the full TS kernel (kernel.ts internTrivialInt): inline while
+    // the value fits the 32-bit inst slot; overflow into the i64 table once
+    // it crosses the int32 ceiling — the bare `(n | 0)` truncation destroyed
+    // every value above 2^31 silently.
+    if (n >= -2147483648 && n <= 2147483647) {
+      const inst = (n | 0) >>> 0;
+      return { pkg: 1, level: Level.TRIVIAL, type: Triv.INT, inst };
+    }
+    return this.internTrivialInt64(BigInt(n));
   }
 
   internString(s: string): NodeID {
@@ -524,6 +531,33 @@ export class Kernel {
         type: argInt(args, 2),
         inst: argInt(args, 3),
       },
+    }));
+    // intern_node — the composite write door: category NodeID + child NodeIDs
+    // content-address into the intern table (same shape ⇒ same NodeID; a fresh
+    // shape mints pkg 0, the category's level/type, and the next inst). Body
+    // faithful to form-kernel-ts's native over the same intern() this walker
+    // already carries from kernel.ts.
+    this.registerNative("intern_node", catWitness(), (k, args) => {
+      const cat = argNodeID(args, 0);
+      const kids = argList(args, 1).map((v) => {
+        if (v.kind !== "nodeid")
+          throw new Error("intern_node: children must be nodeids");
+        return v.nodeid;
+      });
+      return { kind: "nodeid", nodeid: k.intern(cat, kids) };
+    });
+    // intern_trivial_int / intern_trivial_string — the trivial write doors:
+    // an int inlines in the inst slot while it fits int32 (overflowing into
+    // the i64 table as Triv.INT64), a string content-addresses into the
+    // string table as Triv.STRING. Bodies faithful to form-kernel-ts's
+    // natives over the intern helpers this walker already carries.
+    this.registerNative("intern_trivial_int", catWitness(), (k, args) => ({
+      kind: "nodeid",
+      nodeid: k.internTrivialInt(argInt(args, 0)),
+    }));
+    this.registerNative("intern_trivial_string", catWitness(), (k, args) => ({
+      kind: "nodeid",
+      nodeid: k.internString(argStr(args, 0)),
     }));
   }
 }

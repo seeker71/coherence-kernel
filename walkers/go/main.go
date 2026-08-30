@@ -22,6 +22,9 @@
 // (tail-call optimized, like the origin); and/or/not; head tail cons list nth
 // empty; str_concat str_eq str_len str_byte_at byte_to_str; value_eq;
 // make_nodeid (identity-by-content, the eq law of the fkwu tag-102 heal);
+// intern_node / intern_trivial_int / intern_trivial_string (the substrate
+// write doors over the verbatim intern tables — jit-once-born's interned
+// structural identity runs on these);
 // match (switch). The BMF s-expression parse (the lexer), the
 // content-addressed intern, and the blueprint/op dispatch.
 //
@@ -1351,6 +1354,43 @@ func (k *Kernel) registerNatives() {
 			Type:  uint32(args[2].AsInt()),
 			Inst:  uint32(args[3].AsInt()),
 		}}
+	})
+
+	// intern_node — the composite write door: category NodeID + child NodeIDs
+	// content-address into the intern table (same shape ⇒ same NodeID; a fresh
+	// shape mints Pkg 0, the category's Level/Type, and the next inst). Body
+	// faithful to form-kernel-go's native over the same intern() this walker
+	// already carries verbatim.
+	k.registerNative("intern_node", func(k *Kernel, args []Value) Value {
+		if len(args) != 2 {
+			panic(fmt.Sprintf("intern_node: expected 2 args, got %d", len(args)))
+		}
+		if args[0].Kind != VNodeID {
+			panic(fmt.Sprintf("intern_node: category must be NodeID, got %s", args[0].String()))
+		}
+		if args[1].Kind != VList {
+			panic(fmt.Sprintf("intern_node: children must be list, got %s", args[1].String()))
+		}
+		cat := args[0].Nid
+		kids := make([]NodeID, len(args[1].List))
+		for i, c := range args[1].List {
+			if c.Kind != VNodeID {
+				panic(fmt.Sprintf("intern_node: child %d must be NodeID, got %s", i, c.String()))
+			}
+			kids[i] = c.Nid
+		}
+		return Value{Kind: VNodeID, Nid: k.intern(cat, kids)}
+	})
+	// intern_trivial_int / intern_trivial_string — the trivial write doors:
+	// an int inlines in the inst slot while it fits int32 (overflowing into
+	// the i64 table as TrivInt64), a string content-addresses into the string
+	// table as TrivString. Bodies faithful to form-kernel-go's natives over
+	// the internTrivialInt/internString this walker already carries verbatim.
+	k.registerNative("intern_trivial_int", func(k *Kernel, args []Value) Value {
+		return Value{Kind: VNodeID, Nid: k.internTrivialInt(args[0].AsInt())}
+	})
+	k.registerNative("intern_trivial_string", func(k *Kernel, args []Value) Value {
+		return Value{Kind: VNodeID, Nid: k.internString(args[0].Str)}
 	})
 }
 
