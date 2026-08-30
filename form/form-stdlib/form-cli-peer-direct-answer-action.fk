@@ -37,6 +37,23 @@
         (fcpdaa-result session "" 0 "choice" reason 0))
     (defn fcpdaa-unavailable (session)
         (fcpdaa-result session "" 0 "nothing" "model-session-not-live" 0))
+    ; Qwen's explicit control words are not answers.  Preserve the generated
+    ; bytes for observation while carrying a typed failure into the local retry
+    ; grammar; neither control word authorizes a provider crossing.
+    (defn fcpdaa-control-response? (response)
+        (if (or (str_eq response "<FAIL>")
+                (str_eq response "<STOP>")) 1 0))
+    ; A stopped generation has no reusable pending stream. Retrying into it is
+    ; neither learning nor recovery; retain the typed local signal instead.
+    (defn fcpdaa-retryable? (direct)
+        (if (eq (fcms-live? (fcpdaa-session direct)) 0) 0
+            (if (eq (fcms-stopped? (fcpdaa-session direct)) 1) 0
+                (if (or (str_eq (fcpdaa-signal direct) "failure")
+                        (str_eq (fcpdaa-signal direct) "nothing")) 1 0))))
+    (defn fcpdaa-remaining-capacity (session)
+        (if (eq (fcms-live? session) 0) 0
+            (if (le (fcms-maxpos session) (fcms-pos session)) 0
+                (sub (fcms-maxpos session) (fcms-pos session)))))
     (defn fcpdaa-finish (session generated elapsed-ms)
         (do
             (let response (fcms-generation-text generated))
@@ -45,8 +62,11 @@
             (if (eq (str_len response) 0)
                 (fcpdaa-result next response elapsed-ms "nothing"
                     "direct-answer-empty-or-stop" tokens)
-                (fcpdaa-result next response elapsed-ms "value"
-                    "direct-answer-generated" tokens))))
+                (if (eq (fcpdaa-control-response? response) 1)
+                    (fcpdaa-result next response elapsed-ms "failure"
+                        "direct-answer-model-control" tokens)
+                    (fcpdaa-result next response elapsed-ms "value"
+                        "direct-answer-generated" tokens)))))
     ; The event carries no question or response bytes.  The controller's
     ; before/after Metal counters remain the physical execution receipt.
     (defn fcpdaa-stage-category ()
@@ -74,7 +94,8 @@
     (defn fcpdaa-lifecycle (direct)
         (if (str_eq (fcpdaa-signal direct) "choice") "choice,release"
             (if (str_eq (fcpdaa-signal direct) "nothing") "nothing,release"
-                "generate,release")))
+                (if (str_eq (fcpdaa-signal direct) "failure") "failure,release"
+                    "generate,release"))))
     ; Control-plane evidence only: no task or response bytes cross this field.
     ; It keeps the next native generation boundary observable when a model
     ; produces a control token or a forward refusal.
