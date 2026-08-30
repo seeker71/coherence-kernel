@@ -13,6 +13,7 @@
 (defn fctel-binding-path () ".form-cli-turn-rollout")
 (defn fctel-target-turn-path () ".form-cli-turn-evidence-target")
 (defn fctel-progress-path () ".form-cli-turn-evidence-progress")
+(defn fctel-discovery-path () ".form-cli-turn-evidence-discovery")
 (defn fctel-observed-row-path () ".form-cli-turn-evidence-row")
 (defn fctel-candidate-row-path () ".form-cli-turn-evidence-candidate")
 (defn fctel-source-kind () "codex-rollout-jsonl+explicit-form-binding")
@@ -305,6 +306,38 @@
             (fctel-add-last-usage evented line)
             evented)))
 
+; An open task has no settled total.  Its last completed provider call is still
+; an exact, bounded remote-token pressure signal; content never leaves here.
+(defn fctel-find-last-usage-line (s from last)
+    (if (ge from (str_len s)) last
+        (do
+            (let end (scan_run s from 5))
+            (let prefix-end (fctel-min end (add from 256)))
+            (let prefix (substring s from prefix-end))
+            (let line (substring s from (fctel-min end (str_len s))))
+            (let last2 (if (and (eq (fctel-line-event? prefix "token_count" "") 1)
+                                (eq (fctel-usage-present? line) 1)) from last))
+            (if (ge end (str_len s)) last2
+                (fctel-find-last-usage-line s (add end 1) last2)))))
+
+(defn fctel-last-usage-state-from-segment (segment)
+    (do
+        (let at (fctel-find-last-usage-line segment 0 -1))
+        (if (lt at 0) (fctel-state)
+            (do
+                (let end (scan_run segment at 5))
+                (fctel-add-usage (fctel-state)
+                    (substring segment at (fctel-min end (str_len segment))))))))
+
+(defn fctel-last-usage-state (path)
+    (do
+        (let size (file_size path))
+        (if (le size 0) (fctel-state)
+            (do
+                (let start (fctel-max 0 (sub size (fctel-chunk-bytes))))
+                (fctel-last-usage-state-from-segment
+                    (read_file_slice path start (sub size start)))))))
+
 (defn fctel-add-call (state line)
     (do
         (let call-id (fctel-json-string-after line "\"call_id\":" 0))
@@ -464,24 +497,69 @@
         (split-on (fctel-trim-end (read_file (fctel-progress-path))) "|")
         (list)))
 
-(defn fctel-latest-complete-turn (path)
+; The rollout is append-only and can be much larger than a single turn. A
+; backward search retains its next byte cursor: each refresh scans one native
+; byte window and the next reaches older bytes instead of paying the same tail.
+; The bound stream size travels with that cursor. An append keeps the older
+; cursor alive; only a shrink (or an explicit rebind) begins at a new tail.
+(defn fctel-read-discovery ()
+    (if (gt (host_file_size (fctel-discovery-path)) 0)
+        (split-on (fctel-trim-end (read_file (fctel-discovery-path))) "|")
+        (list)))
+
+(defn fctel-discovery-cursor (parts size)
+    (if (and (eq (len parts) 2)
+             (ge size (str_to_int (nth parts 0))))
+        (do
+            (let cursor (str_to_int (nth parts 1)))
+            (if (and (gt cursor 0) (le cursor size)) cursor size))
+        size))
+
+(defn fctel-discovery-row (size cursor)
+    (str_concat (int_to_str size) (str_concat "|" (int_to_str cursor))))
+
+; Result: (found complete-byte turn-id next-cursor stream-size).
+(defn fctel-discover-latest-complete (path)
     (do
         (let size (file_size path))
         (let target (if (gt (file_size (fctel-target-turn-path)) 0)
             (fctel-trim-end (read_file (fctel-target-turn-path))) ""))
-        (let at (fctel-find-last-event-before path "task_complete" target size))
-        (if (lt at 0) (list -1 "")
-            (list at (fctel-json-string-after
-                (read_file_slice path at 512) "\"turn_id\":" 0)))))
+        (if (le size 0) (list 0 -1 "" 0 size)
+            (do
+                (let end (fctel-discovery-cursor (fctel-read-discovery) size))
+                (let start (fctel-max 0 (sub end (fctel-chunk-bytes))))
+                (let body (read_file_slice path start (sub end start)))
+                (let found (fctel-find-last-line-event body "task_complete" target 0 -1))
+                (if (ge found 0)
+                    (do
+                        (let at (add start found))
+                        (let turn-id (fctel-json-string-after
+                            (read_file_slice path at 512) "\"turn_id\":" 0))
+                        (write_file_text (fctel-discovery-path) "")
+                        (list 1 at turn-id end size))
+                    (do
+                        (let next (if (eq start 0) 0
+                            (fctel-min end (add start (fctel-overlap-bytes)))))
+                        (write_file_text (fctel-discovery-path)
+                            (fctel-discovery-row size next))
+                        (list 0 -1 "" next size)))))))
+
+(defn fctel-latest-complete-turn (path)
+    (do
+        (let found (fctel-discover-latest-complete path))
+        (list (nth found 1) (nth found 2))))
 
 (defn fctel-refresh-once (path)
     (do
         (let size (file_size path))
-        (let latest (fctel-latest-complete-turn path))
-        (let complete-at (nth latest 0))
-        (let turn-id (nth latest 1))
+        (let discovery (fctel-discover-latest-complete path))
+        (let complete-at (nth discovery 1))
+        (let turn-id (nth discovery 2))
         (if (or (le size 0) (or (lt complete-at 0) (str_eq turn-id "")))
-            "turn-evidence-refresh=withheld\n"
+            (if (le size 0) "turn-evidence-refresh=withheld\n"
+                (fctel-join (list "turn-evidence-refresh=discovering cursor="
+                    (int_to_str (nth discovery 3)) "/"
+                    (int_to_str (nth discovery 4)) "\n")))
             (do
                 (let start-at (fctel-find-last-event-before
                     path "task_started" turn-id complete-at))

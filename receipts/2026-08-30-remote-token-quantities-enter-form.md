@@ -13,8 +13,11 @@ reasoning-output, and total quantities.  The cumulative
 total and would count earlier calls again.
 
 `form/form-stdlib/form-cli-share-run.fk` now renders those remote quantities
-alongside the event share.  The event share is still an event-share only; it
-does not claim to measure semantic contribution or token cost.
+alongside the event share.  During an open task it separately exposes only the
+most recently completed provider call as `remote-token-pressure`; that value
+is not a settled share or a substitute for a completed-turn total.  The event
+share remains an event-share only; it does not claim to measure semantic
+contribution or token cost.
 
 The high-grammar authority is
 `form/form-stdlib/bml/form-cli-remote-token-evidence.bml`.  It names the
@@ -24,16 +27,19 @@ through the BML-to-native cache path—no `*-xtal.fk` mirror was made.
 Witnesses:
 
 - `./fkwu form/form-stdlib/bml/form-cli-remote-token-evidence.bml` → `0`
-- `./fkwu form/form-stdlib/tests/form-cli-remote-token-evidence-band.fk` → `255`
-- `./fkwu form/form-stdlib/tests/form-cli-turn-evidence-live-band.fk` → `1278`
+- `./fkwu form/form-stdlib/tests/form-cli-remote-token-evidence-band.fk` → `1023`
+- `./fkwu form/form-stdlib/tests/form-cli-turn-evidence-live-band.fk` → `5118`
 - `./fkwu form/form-stdlib/tests/form-cli-turn-evidence-band.fk` → `4095`
 
 The live binding is the explicit private capability
-`.form-cli-turn-rollout`, pointed at this Codex task.  During this still-open
-turn the collector withheld a value because no terminal completion frame was at
-the tail; that is the right `nothing`, not zero.  After this turn completes,
-the next refresh can admit a real remote token row without printing prompt,
-answer, or reasoning bytes.
+`.form-cli-turn-rollout`, pointed at this Codex task.  Its native discovery
+cursor persists across rollout appends, so a large open stream does not rescan
+the same tail.  During this still-open turn the collector withheld a settled
+row because no terminal completion frame was at the tail; that is the right
+`nothing`, not zero.  The active provider-pressure view also withheld because
+no completed provider-call usage event occurred in its native tail.  After
+this turn completes, the next refresh can admit a real remote token row without
+printing prompt, answer, or reasoning bytes.
 
 The next measurement is not a Qwen token ratio.  It is a paired remote-provider
 comparison: a task closed with the Form-native/local route versus a comparable
