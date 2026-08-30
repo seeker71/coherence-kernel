@@ -46,6 +46,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -1391,6 +1392,14 @@ func (k *Kernel) registerNatives() {
 	})
 	k.registerNative("intern_trivial_string", func(k *Kernel, args []Value) Value {
 		return Value{Kind: VNodeID, Nid: k.internString(args[0].Str)}
+	})
+	// now_unix_ms — current wall-clock as a millisecond unix timestamp.
+	// Body faithful to form-kernel-go's registerNative("now_unix_ms", ...):
+	// zero args, time.Now().UnixMilli(). Sibling parity holds on shape, not
+	// value — every kernel returns an int past a recent epoch, the exact
+	// milliseconds diverge between invocations; bands check shape only.
+	k.registerNative("now_unix_ms", func(_ *Kernel, _ []Value) Value {
+		return Value{Kind: VInt, Int: time.Now().UnixMilli()}
 	})
 }
 

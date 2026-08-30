@@ -559,6 +559,16 @@ export class Kernel {
       kind: "nodeid",
       nodeid: k.internString(argStr(args, 0)),
     }));
+    // now_unix_ms — current wall-clock as a millisecond unix timestamp.
+    // Body faithful to form-kernel-ts's registerNative("now_unix_ms", ...):
+    // zero args, Date.now(), catCall (external clock read). Sibling parity
+    // holds on shape, not value — every kernel returns an int past a recent
+    // epoch, the exact milliseconds diverge between invocations; bands check
+    // shape only.
+    this.registerNative("now_unix_ms", catCall(), () => ({
+      kind: "int",
+      int: Date.now(),
+    }));
   }
 }
 

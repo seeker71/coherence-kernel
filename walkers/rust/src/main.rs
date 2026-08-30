@@ -42,6 +42,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
 // Value — the runtime value the evaluator produces. The pure-compute subset of
@@ -1083,6 +1084,18 @@ fn call_native(name: &str, arg_nodes: &[Rc<Node>], env: &Env) -> Option<Value> {
                 SUBSTRATE.with(|s| s.borrow_mut().intern_string(&text)),
             ))
         }
+        // now_unix_ms — current wall-clock as a millisecond unix timestamp.
+        // Body faithful to form-kernel-rust's now_unix_ms_value(): zero args,
+        // duration since UNIX_EPOCH in ms as i64, 0 on a pre-epoch clock.
+        // Sibling parity holds on shape, not value — every kernel returns an
+        // int past a recent epoch, the exact milliseconds diverge between
+        // invocations; bands check shape only.
+        "now_unix_ms" => Some(Value::Int(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        )),
         // str_len: byte count, not codepoint count — `str::len()` in Rust
         // already IS byte length, matching fkwu's raw-byte semantics exactly.
         "str_len" => Some(Value::Int(str_of(&args[0]).len() as i64)),
