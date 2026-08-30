@@ -665,6 +665,89 @@ static long long fk_veq(long long a, long long b) {
     }
     return 0;
 }
+/* ── the intern index ───────────────────────────────────────────────────
+ * The four interning doors (trivial int t43, trivial string t46, bool
+ * t112, composite intern_node t47) each scanned the WHOLE value-node
+ * pool per call — a global quadratic that dominated every intern-heavy
+ * program (witnessed 2026-08-30: the BML compile of a 7KB surface spent
+ * 12s in emit at ~n^1.7; the interpreter's own floor, not the
+ * program's). This open-addressed index makes the doors O(1) expected
+ * while preserving their EXACT equivalence: a hash hit is only a
+ * CANDIDATE — each door's original predicate confirms before anything
+ * is returned, so a collision costs a compare, never a wrong node.
+ * Deep hashing mirrors fk_veq's structure over element handles and is
+ * stable across melt (value nodes never relocate; cons chains are
+ * hashed by content at call time). Kind-3 NodeIDs and kind-1 floats are
+ * minted without dedupe by design and stay outside the index — the
+ * doors never searched them. The table is 4x the node cap, so load
+ * stays low and probes short. */
+#define FK_INTERN_HASH_CAP 1048576
+static long long fk_intern_tab[FK_INTERN_HASH_CAP];
+static long long fk_nhash_memo[FK_NODE_CAP];
+static unsigned long long fk_mix64(unsigned long long h, unsigned long long v) {
+    h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    return h;
+}
+static long long fk_deep_hash(long long v);
+static long long fk_deep_hash_node(long long idx) {
+    if (fk_nhash_memo[idx]) {
+        return fk_nhash_memo[idx];
+    }
+    unsigned long long h = fk_mix64(7, (unsigned long long)fk_nkind[idx]);
+    if (fk_nkind[idx] == 1) {
+        h = fk_mix64(h, (unsigned long long)fk_nid[idx][2]);
+        h = fk_mix64(h, (unsigned long long)fk_nval[idx]);
+    } else if (fk_nkind[idx] == 3) {
+        h = fk_mix64(h, (unsigned long long)fk_nid[idx][0]);
+        h = fk_mix64(h, (unsigned long long)fk_nid[idx][1]);
+        h = fk_mix64(h, (unsigned long long)fk_nid[idx][2]);
+        h = fk_mix64(h, (unsigned long long)fk_nid[idx][3]);
+    } else {
+        h = fk_mix64(h, (unsigned long long)fk_deep_hash(fk_ncat[idx]));
+        h = fk_mix64(h, (unsigned long long)fk_deep_hash(fk_nkids[idx]));
+    }
+    long long out = (long long)(h >> 1);
+    if (out == 0) {
+        out = 1;
+    }
+    fk_nhash_memo[idx] = out;
+    return out;
+}
+static long long fk_deep_hash(long long v) {
+    if (v >= 0) {
+        if ((v & 1) == 0) {
+            return (long long)(fk_mix64(2, (unsigned long long)v) >> 1);
+        }
+        unsigned long long h = fk_mix64(3, 17);
+        long long p = v;
+        long long guard = 0;
+        while ((p & 1) && p != 1 && guard < 4194304) {
+            long long pa = p >> 1;
+            if (pa < 1 || pa > fk_hp) {
+                break;
+            }
+            h = fk_mix64(h, (unsigned long long)fk_deep_hash(fk_hh[pa]));
+            p = fk_ht[pa];
+            guard = guard + 1;
+        }
+        h = fk_mix64(h, (unsigned long long)p);
+        return (long long)(h >> 1);
+    }
+    long long idx = fk_nidx(v);
+    if (idx < 1 || idx > fk_np) {
+        return (long long)(fk_mix64(5, (unsigned long long)v) >> 1);
+    }
+    return fk_deep_hash_node(idx);
+}
+static long long fk_intern_key_trivial(long long type, long long val) {
+    unsigned long long h = fk_mix64(7, 1);
+    h = fk_mix64(h, (unsigned long long)type);
+    h = fk_mix64(h, (unsigned long long)val);
+    long long out = (long long)(h >> 1);
+    return out == 0 ? 1 : out;
+}
 static long long fk_nsfile[FK_NODE_CAP];
 static long long fk_nsline[FK_NODE_CAP];
 static long long fk_nscol[FK_NODE_CAP];
@@ -6422,6 +6505,18 @@ static void fk_melt(void) {
     while (ncap - nlive < fk_melt_want) {
         ncap = ncap * 2;
     }
+    /* churn amortization (2026-08-30): a melt walks the whole value-node
+     * pool, so its cost is O(fk_np) however little the heap holds. A
+     * tiny-live, high-churn program (witnessed: the BML emitter at cap
+     * 8192 / live 3.3k triggered 122,158 melts in one triple run, +9s per
+     * identical repetition as the pool grew) melts every few thousand
+     * conses and pays that walk each time. Guarantee headroom that scales
+     * with the walk: at least np/4 free pairs after compaction, so each
+     * O(np) melt is amortized over >= np/4 allocations. Worst-case extra
+     * memory is FK_NODE_CAP/4 pairs (~1MB). */
+    while (ncap - nlive < fk_np / 4 + FK_HASHCONS_INIT_CAP) {
+        ncap = ncap * 2;
+    }
     fk_nh = malloc(ncap * 8);
     fk_nt = malloc(ncap * 8);
     if (fk_nh == 0 || fk_nt == 0) {
@@ -7561,12 +7656,14 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 43) {
         long long iv43 = fk_walk(fk_node[i][1], fp);
-        long long ix43 = 1;
-        while (ix43 <= fk_np) {
+        long long h43 = fk_intern_key_trivial(1, iv43);
+        long long slot43 = h43 & (FK_INTERN_HASH_CAP - 1);
+        while (fk_intern_tab[slot43]) {
+            long long ix43 = fk_intern_tab[slot43];
             if (fk_nkind[ix43] == 1 && fk_nid[ix43][2] == 1 && fk_nval[ix43] == iv43) {
                 return fk_nbox(ix43);
             }
-            ix43 = ix43 + 1;
+            slot43 = (slot43 + 1) & (FK_INTERN_HASH_CAP - 1);
         }
         if (fk_np + 1 >= FK_NODE_CAP) {
             fk_die("fk value-node table full (FK_NODE_CAP)");
@@ -7580,17 +7677,21 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_nid[fk_np][1] = 1;
         fk_nid[fk_np][2] = 1;
         fk_nid[fk_np][3] = iv43 >> 1;
+        fk_intern_tab[slot43] = fk_np;
+        fk_nhash_memo[fk_np] = h43;
         return fk_nbox(fk_np);
     }
     if (t == 46) {
         long long sv46 = fk_walk(fk_node[i][1], fp);
         long long sa46 = fk_stri(sv46);
-        long long ix46 = 1;
-        while (ix46 <= fk_np) {
+        long long h46 = fk_intern_key_trivial(2, sv46);
+        long long slot46 = h46 & (FK_INTERN_HASH_CAP - 1);
+        while (fk_intern_tab[slot46]) {
+            long long ix46 = fk_intern_tab[slot46];
             if (fk_nkind[ix46] == 1 && fk_nid[ix46][2] == 2 && fk_nval[ix46] == sv46) {
                 return fk_nbox(ix46);
             }
-            ix46 = ix46 + 1;
+            slot46 = (slot46 + 1) & (FK_INTERN_HASH_CAP - 1);
         }
         if (sa46 < 0 || sa46 >= fk_sp) {
             return 0;
@@ -7607,18 +7708,28 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_nid[fk_np][1] = 1;
         fk_nid[fk_np][2] = 2;
         fk_nid[fk_np][3] = sa46;
+        fk_intern_tab[slot46] = fk_np;
+        fk_nhash_memo[fk_np] = h46;
         return fk_nbox(fk_np);
     }
     if (t == 47) {
         long long cat47 = fk_walk(fk_node[i][1], fp);
         long long kids47 = fk_walk(fk_node[i][2], fp);
-        long long ix47 = 1;
-        while (ix47 <= fk_np) {
+        unsigned long long hm47 = fk_mix64(7, 2);
+        hm47 = fk_mix64(hm47, (unsigned long long)fk_deep_hash(cat47));
+        hm47 = fk_mix64(hm47, (unsigned long long)fk_deep_hash(kids47));
+        long long h47 = (long long)(hm47 >> 1);
+        if (h47 == 0) {
+            h47 = 1;
+        }
+        long long slot47 = h47 & (FK_INTERN_HASH_CAP - 1);
+        while (fk_intern_tab[slot47]) {
+            long long ix47 = fk_intern_tab[slot47];
             if (fk_nkind[ix47] == 2 && fk_veq(fk_ncat[ix47], cat47) != 0 &&
                 fk_veq(fk_nkids[ix47], kids47) != 0) {
                 return fk_nbox(ix47);
             }
-            ix47 = ix47 + 1;
+            slot47 = (slot47 + 1) & (FK_INTERN_HASH_CAP - 1);
         }
         if (fk_np + 1 >= FK_NODE_CAP) {
             fk_die("fk value-node table full (FK_NODE_CAP)");
@@ -7628,6 +7739,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_ncat[fk_np] = cat47;
         fk_nkids[fk_np] = kids47;
         fk_nval[fk_np] = 0;
+        fk_intern_tab[slot47] = fk_np;
+        fk_nhash_memo[fk_np] = h47;
         fk_nid[fk_np][0] = 0;
         fk_nid[fk_np][1] = 0;
         fk_nid[fk_np][2] = 0;
@@ -7680,12 +7793,14 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 112) {
         long long bv112 = fk_walk(fk_node[i][1], fp);
         long long se112 = (bv112 != 0) ? (0 - 9223372036854775807LL) : (0 - 9223372036854775805LL);
-        long long ix112 = 1;
-        while (ix112 <= fk_np) {
+        long long h112 = fk_intern_key_trivial(3, se112);
+        long long slot112 = h112 & (FK_INTERN_HASH_CAP - 1);
+        while (fk_intern_tab[slot112]) {
+            long long ix112 = fk_intern_tab[slot112];
             if (fk_nkind[ix112] == 1 && fk_nid[ix112][2] == 3 && fk_nval[ix112] == se112) {
                 return fk_nbox(ix112);
             }
-            ix112 = ix112 + 1;
+            slot112 = (slot112 + 1) & (FK_INTERN_HASH_CAP - 1);
         }
         if (fk_np + 1 >= FK_NODE_CAP) {
             fk_die("fk value-node table full (FK_NODE_CAP)");
@@ -7698,6 +7813,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_nid[fk_np][0] = 1;
         fk_nid[fk_np][1] = 1;
         fk_nid[fk_np][2] = 3;
+        fk_intern_tab[slot112] = fk_np;
+        fk_nhash_memo[fk_np] = h112;
         fk_nid[fk_np][3] = (bv112 != 0) ? 1 : 0;
         return fk_nbox(fk_np);
     }
