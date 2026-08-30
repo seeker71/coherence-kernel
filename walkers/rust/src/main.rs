@@ -19,7 +19,8 @@
 //   build-verbs: do seq let if defn params  add sub mul div mod
 //                eq ne lt le gt ge  and or not
 //   natives:    head tail cons empty list nth len  str_concat str_eq value_eq
-//               str_len str_byte_at byte_to_str
+//               str_len str_byte_at byte_to_str  make_nodeid (identity-by-
+//               content, the eq law of the fkwu tag-102 heal)
 //
 // str_len/str_byte_at/byte_to_str are the deliberately minimal string "narrow
 // waist": str_len measures, str_byte_at decomposes (one raw byte, 0-255),
@@ -41,9 +42,22 @@ use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
 // Value — the runtime value the evaluator produces. The pure-compute subset of
-// the full kernel's Value: no Record (mutable objects), no Nid (substrate
-// passthrough), no Closure-over-NodeID. A closure here carries the AST body.
+// the full kernel's Value: no Record (mutable objects), no Closure-over-NodeID.
+// A closure here carries the AST body. Nid is the NodeID VALUE only (built by
+// make_nodeid, compared by the identity-by-content eq law) — the walker still
+// carries no content-addressing substrate.
 // ---------------------------------------------------------------------------
+// NodeID — a substrate coordinate (package, level, type, instance). Copied
+// from the full kernel's struct; the walker holds it only as a VALUE the
+// eq/value_eq law reads — no intern table, no content-addressing substrate.
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct NodeID {
+    pkg: u32,
+    level: u32,
+    ty: u32,
+    inst: u32,
+}
+
 #[derive(Clone)]
 enum Value {
     Null,
@@ -53,6 +67,7 @@ enum Value {
     Bool(bool),
     List(Rc<Vec<Value>>),
     Closure(Rc<Closure>),
+    Nid(NodeID),
 }
 
 struct Closure {
@@ -83,6 +98,7 @@ impl Value {
                 format!("[{}]", parts.join(", "))
             }
             Value::Closure(c) => format!("<closure #{}>", c.name),
+            Value::Nid(n) => format!("@{}.{}.{}.{}", n.pkg, n.level, n.ty, n.inst),
         }
     }
 
@@ -168,6 +184,9 @@ fn value_equal(a: &Value, b: &Value) -> bool {
         (Value::List(xs), Value::List(ys)) => {
             xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| value_equal(x, y))
         }
+        // A NodeID is identity-by-content: all four coordinates equal,
+        // whichever mint built the value node (the fkwu tag-102 heal).
+        (Value::Nid(x), Value::Nid(y)) => x == y,
         _ => false,
     }
 }
@@ -717,6 +736,24 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
                     ),
                 };
             }
+            // A NodeID is identity-by-content: eq of two NodeIDs answers 1 iff
+            // all four coordinates are equal — regardless of which mint built
+            // the value (the fkwu tag-102 heal, witnessed 2026-08-30). A NodeID
+            // never equals an int, a list, a string, or nothing. Ordering
+            // NodeIDs is declined, like ordering nothing: not a number question.
+            if matches!(lv, Value::Nid(_)) || matches!(rv, Value::Nid(_)) {
+                let same = match (&lv, &rv) {
+                    (Value::Nid(x), Value::Nid(y)) => x == y,
+                    _ => false,
+                };
+                return match *op {
+                    CMP_EQ => bool_int(same),
+                    CMP_NE => bool_int(!same),
+                    _ => panic!(
+                        "compare on nodeid: ordering it is not a number question"
+                    ),
+                };
+            }
             if matches!(lv, Value::Float(_)) || matches!(rv, Value::Float(_)) {
                 let l = lv.as_float();
                 let r = rv.as_float();
@@ -872,6 +909,16 @@ fn call_native(name: &str, arg_nodes: &[Rc<Node>], env: &Env) -> Option<Value> {
         // truthful on Rust rather than forcing each recipe to inspect a
         // representation detail such as list width.
         "value_eq" => Some(bool_int(value_equal(&args[0], &args[1]))),
+        // make_nodeid — the substrate write door: four integer coordinates
+        // become a NodeID value, identity-by-content (eq/value_eq compare
+        // coordinates, never the minting site). Body faithful to the full
+        // kernel's register_native("make_nodeid", ...).
+        "make_nodeid" => Some(Value::Nid(NodeID {
+            pkg: args[0].as_int() as u32,
+            level: args[1].as_int() as u32,
+            ty: args[2].as_int() as u32,
+            inst: args[3].as_int() as u32,
+        })),
         // str_len: byte count, not codepoint count — `str::len()` in Rust
         // already IS byte length, matching fkwu's raw-byte semantics exactly.
         "str_len" => Some(Value::Int(str_of(&args[0]).len() as i64)),

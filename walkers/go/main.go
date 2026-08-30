@@ -21,6 +21,7 @@
 // add sub mul div mod; eq ne lt le gt ge; if let do seq; defn + user calls
 // (tail-call optimized, like the origin); and/or/not; head tail cons list nth
 // empty; str_concat str_eq str_len str_byte_at byte_to_str; value_eq;
+// make_nodeid (identity-by-content, the eq law of the fkwu tag-102 heal);
 // match (switch). The BMF s-expression parse (the lexer), the
 // content-addressed intern, and the blueprint/op dispatch.
 //
@@ -552,6 +553,21 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 					return boolInt(!(lv.Kind == VNull && rv.Kind == VNull))
 				}
 				panic(fmt.Sprintf("compare on nothing: ordering %v against %v is not a number question", lv, rv))
+			}
+			// A NodeID is identity-by-content: eq of two NodeIDs answers 1 iff all
+			// four coordinates are equal — regardless of which mint built the value
+			// (the fkwu tag-102 heal, witnessed 2026-08-30). A NodeID never equals
+			// an int, a list, a string, or nothing. Ordering NodeIDs is declined,
+			// like ordering nothing: not a number question.
+			if lv.Kind == VNodeID || rv.Kind == VNodeID {
+				same := lv.Kind == VNodeID && rv.Kind == VNodeID && lv.Nid == rv.Nid
+				switch cat.Inst {
+				case RCompareEq:
+					return boolInt(same)
+				case RCompareNe:
+					return boolInt(!same)
+				}
+				panic(fmt.Sprintf("compare on nodeid: ordering %v against %v is not a number question", lv, rv))
 			}
 			if lv.Kind == VFloat || rv.Kind == VFloat {
 				l := lv.AsFloat()
@@ -1323,6 +1339,18 @@ func (k *Kernel) registerNatives() {
 	// value_eq — structural value equality across kinds.
 	k.registerNative("value_eq", func(k *Kernel, args []Value) Value {
 		return boolInt(valueEqual(args[0], args[1]))
+	})
+
+	// make_nodeid — the substrate write door: four integer coordinates become
+	// a NodeID value, identity-by-content (eq/value_eq compare coordinates,
+	// never the minting site). Body faithful to form-kernel-go's native.
+	k.registerNative("make_nodeid", func(_ *Kernel, args []Value) Value {
+		return Value{Kind: VNodeID, Nid: NodeID{
+			Pkg:   uint32(args[0].AsInt()),
+			Level: uint32(args[1].AsInt()),
+			Type:  uint32(args[2].AsInt()),
+			Inst:  uint32(args[3].AsInt()),
+		}}
 	})
 }
 
