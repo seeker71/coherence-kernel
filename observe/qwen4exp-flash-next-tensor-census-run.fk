@@ -1,0 +1,59 @@
+; qwen4exp-flash-next-tensor-census-run.fk — the exact split shards' declared
+; tensor types, read from their GGUF headers without waiting for tensor payloads.
+;
+; `PRICED` means the body knows the exact byte geometry, not that it can dequantize
+; or execute that type. DECLARED_END is the greatest tensor end named by the
+; shard's own offsets; FILE_SIZE may already show the nominal preallocated size
+; while aria2 is still filling sparse payload ranges.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/mxfp4-plane-dequant.fk form-stdlib/mxfp8-plane-dequant.fk form-stdlib/gguf-manifest.fk form-stdlib/gguf-tensor-index.fk
+
+(do
+    (defn q4tc-root ()
+        "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+    (defn q4tc-path (part) (str_concat (q4tc-root) (str_concat part "-of-00003.gguf")))
+    (defn q4tc-count (xs ty acc)
+        (if (eq (len xs) 0) acc
+            (q4tc-count (tail xs) ty (if (eq (head xs) ty) (add acc 1) acc))))
+    (defn q4tc-types (src ty max types)
+        (if (gt ty max) 0
+            (do
+                (let n (q4tc-count types ty 0))
+                (if (gt n 0)
+                    (print_str (str_concat "TYPE "
+                        (str_concat (int_to_str ty) (str_concat " " (int_to_str n))))) 0)
+                (q4tc-types src (add ty 1) max types))))
+    ; [priced-count, unpriced-count, tensor-byte-sum, greatest-absolute-end]
+    (defn q4tc-layout (src off n base priced unpriced bytes high)
+        (if (eq n 0) (list priced unpriced bytes high)
+            (do
+                (let ty (egg-ti-type src off))
+                (let known (gm-priced? ty))
+                (let nb (gm-bytes src off))
+                (let end (add base (add (egg-ti-dataoff src off) nb)))
+                (q4tc-layout src (egg-ti-next src off) (sub n 1) base
+                    (if (eq known 1) (add priced 1) priced)
+                    (if (eq known 1) unpriced (add unpriced 1))
+                    (add bytes nb)
+                    (if (gt end high) end high)))))
+    (defn q4tc-shard (part)
+        (do
+            (let path (q4tc-path part))
+            (let src (eqr-of-file path 0 16000000))
+            (let types (gti-types src))
+            (let base (egg-data-base src 32))
+            (let layout (q4tc-layout src (egg-tinfo-start src) (egg-tensor-count src) base 0 0 0 0))
+            (print_str (str_concat "SHARD " part))
+            (print_str (str_concat "SPLIT " (int_to_str (gmt-u16 src "split.no"))))
+            (print_str (str_concat "TENSORS " (int_to_str (egg-tensor-count src))))
+            (print_str (str_concat "DATABASE " (int_to_str base)))
+            (print_str (str_concat "PRICED " (int_to_str (nth layout 0))))
+            (print_str (str_concat "UNPRICED " (int_to_str (nth layout 1))))
+            (print_str (str_concat "TENSOR_BYTES " (int_to_str (nth layout 2))))
+            (print_str (str_concat "DECLARED_END " (int_to_str (nth layout 3))))
+            (print_str (str_concat "FILE_SIZE " (int_to_str (file_size path))))
+            (q4tc-types src 0 50 types)
+            0))
+    (q4tc-shard "00002")
+    (q4tc-shard "00003")
+    0)
