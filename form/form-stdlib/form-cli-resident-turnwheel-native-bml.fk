@@ -1,0 +1,274 @@
+; form-cli-resident-turnwheel-native-bml.fk -- high-grammar BML into one
+; retained Form-native decision image per resident meaning.
+;
+; The source of truth is the high-grammar BML declaration.  At resident birth
+; this cell reads that declaration through a scannerless byte cursor, derives
+; its signal and phase alphabets,
+; and constructs only native-lowerable Form decision programs.  `jonb-request`
+; gives each program a structural NodeID and retains the in-RAM JIT page in the
+; existing resident registry.  A missing parser, malformed declaration, or
+; unavailable native page returns a typed refusal; it never falls back to an
+; emitted source mirror or an interpreted compatibility path.
+;
+; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/form-asm.fk
+; preludes: form-stdlib/form-lower.fk
+; preludes: form-stdlib/jit-once-born.fk
+;
+; Proven by: form-stdlib/tests/form-cli-resident-turnwheel-bml-band.fk
+
+(do
+    (defn fcrtn-version () "form-cli-resident-turnwheel-native-bml-v1")
+    (defn fcrtn-source-path ()
+        (if (ge (file_size "form/form-stdlib/bml/form-cli-resident-turnwheel.bml") 0)
+            "form/form-stdlib/bml/form-cli-resident-turnwheel.bml"
+            "form-stdlib/bml/form-cli-resident-turnwheel.bml"))
+    (defn fcrtn-ready-tag () "form-cli-resident-turnwheel-native-cache-v1")
+    (defn fcrtn-refused-tag () "form-cli-resident-turnwheel-native-cache-refused-v1")
+    (defn fcrtn-terminal-selector () "terminal-code")
+    (defn fcrtn-phase-selector () "phase-runnable-code")
+    (defn fcrtn-stop-selector () "stop-carries-code")
+    ; These are BML grammar terminals, not a second policy table.  `build`
+    ; verifies that the current high-BML declaration carries each exact surface
+    ; before a resident can retain its native pages.
+    (defn fcrtn-phase-program () "program")
+    (defn fcrtn-phase-prefill () "prefill")
+    (defn fcrtn-phase-model () "model")
+    (defn fcrtn-phase-returned () "returned")
+    (defn fcrtn-phase-prefill-error () "prefill-error")
+
+    ; cache = tag, source-node, signal-map, phase-map, terminal-program,
+    ; terminal-root, phase-program, phase-root, stop-program, stop-root.
+    ; A cache grows structurally.  It is deliberately one program row rather
+    ; than a nine-seat compiler ABI: adding a native decision never changes a
+    ; function ceiling or recompiles callers that only carry the row.
+    (defn fcrtn-cache (parts)
+        (cons (fcrtn-ready-tag) parts))
+    (defn fcrtn-refused (reason)
+        (list (fcrtn-refused-tag) reason))
+    (defn fcrtn-cache-ready? (cache)
+        (if (eq (len cache) 10)
+            (str_eq (head cache) (fcrtn-ready-tag)) 0))
+    (defn fcrtn-cache-refused? (cache)
+        (if (eq (len cache) 2)
+            (str_eq (head cache) (fcrtn-refused-tag)) 0))
+    (defn fcrtn-cache-reason (cache)
+        (if (fcrtn-cache-refused? cache) (nth cache 1) "native-bml-cache-malformed"))
+    (defn fcrtn-cache-source (cache) (nth cache 1))
+    (defn fcrtn-cache-signals (cache) (nth cache 2))
+    (defn fcrtn-cache-phases (cache) (nth cache 3))
+    (defn fcrtn-cache-terminal-program (cache) (nth cache 4))
+    (defn fcrtn-cache-terminal-root (cache) (nth cache 5))
+    (defn fcrtn-cache-phase-program (cache) (nth cache 6))
+    (defn fcrtn-cache-phase-root (cache) (nth cache 7))
+    (defn fcrtn-cache-stop-program (cache) (nth cache 8))
+    (defn fcrtn-cache-stop-root (cache) (nth cache 9))
+
+    ; This is deliberately a cursor, not a tokenizing compatibility layer.
+    ; `str_find` is a kernel-native byte search; every declaration has one
+    ; exact high-BML surface and a changed surface refuses before a native page
+    ; can be born.  The full declaration grammar remains a compiler-stage
+    ; organ; this fresh-kernel floor cannot borrow its compiled cache.
+    (defn fcrtn-field-after (source prefix)
+        (do
+            (let at (str_find source prefix 0))
+            (if (lt at 0) (nothing)
+                (do
+                    (let start (add at (str_len prefix)))
+                    (let end (str_find source ";" start))
+                    (if (lt end 0) (nothing)
+                        (substring source start end))))))
+    (defn fcrtn-string (source name)
+        (do
+            (let raw (fcrtn-field-after source
+                (str_concat "const String " (str_concat name " = \""))))
+            (if (nothing? raw) (nothing)
+                (if (lt (str_len raw) 1) (nothing)
+                    (substring raw 0 (sub (str_len raw) 1))))))
+    (defn fcrtn-code (source name)
+        (do
+            (let raw (fcrtn-field-after source
+                (str_concat "const int " (str_concat name " = "))))
+            (if (nothing? raw) (nothing) (str_to_int raw))))
+    (defn fcrtn-pair (source surface code-name)
+        (do
+            (let signal (fcrtn-string source surface))
+            (let code (fcrtn-code source code-name))
+            (if (or (nothing? signal) (nothing? code))
+                (nothing)
+                (list signal code))))
+    (defn fcrtn-pairs-ready? (pairs)
+        (if (nil? pairs) 1
+            (if (nothing? (head pairs)) 0
+                (fcrtn-pairs-ready? (tail pairs)))))
+    (defn fcrtn-map-code (pairs surface)
+        (if (nil? pairs) 0
+            (if (str_eq (nth (head pairs) 0) surface)
+                (nth (head pairs) 1)
+                (fcrtn-map-code (tail pairs) surface))))
+    (defn fcrtn-map-has-surface? (pairs surface)
+        (if (nil? pairs) 0
+            (if (str_eq (nth (head pairs) 0) surface) 1
+                (fcrtn-map-has-surface? (tail pairs) surface))))
+
+    ; The native program alphabet is already understood by form-lower:
+    ; ARG=2, LIT=1, EQ=14, COND=6.  A decision is data, not a generated
+    ; function seat.  The cached NodeID route is therefore unconstrained by a
+    ; function table and the hot call reaches native bytes.
+    (defn fcrtn-eq-program (match yes no)
+        (list (list 2) (list 1 match) (list 14 0 1)
+              (list 1 yes) (list 1 no) (list 6 2 3 4)))
+    (defn fcrtn-eq-root () 5)
+    (defn fcrtn-exclude-two-program (first second no yes)
+        (list (list 2) (list 1 first) (list 14 0 1) (list 1 no)
+              (list 1 second) (list 14 0 4) (list 6 5 3 7)
+              (list 1 yes) (list 6 2 3 6)))
+    (defn fcrtn-exclude-two-root () 8)
+
+    (defn fcrtn-signal-map (source)
+        (list
+            (fcrtn-pair source "SignalLive" "SignalLiveCode")
+            (fcrtn-pair source "SignalUndo" "SignalUndoCode")
+            (fcrtn-pair source "SignalReturned" "SignalReturnedCode")
+            (fcrtn-pair source "SignalDone" "SignalDoneCode")
+            (fcrtn-pair source "SignalNothing" "SignalNothingCode")
+            (fcrtn-pair source "SignalChoice" "SignalChoiceCode")
+            (fcrtn-pair source "SignalCut" "SignalCutCode")
+            (fcrtn-pair source "SignalTimeout" "SignalTimeoutCode")
+            (fcrtn-pair source "SignalFailure" "SignalFailureCode")
+            (fcrtn-pair source "SignalRefused" "SignalRefusedCode")
+            (fcrtn-pair source "SignalRelease" "SignalReleaseCode")))
+    (defn fcrtn-phase-map (source)
+        (list
+            (fcrtn-pair source "PhaseProgram" "PhaseProgramCode")
+            (fcrtn-pair source "PhasePrefill" "PhasePrefillCode")
+            (fcrtn-pair source "PhaseModel" "PhaseModelCode")
+            (fcrtn-pair source "PhaseReturned" "PhaseReturnedCode")
+            (fcrtn-pair source "PhasePrefillError" "PhasePrefillErrorCode")))
+
+    (defn fcrtn-source-node (source)
+        (intern_node (make_nodeid 31 2 0 182)
+            (list (intern_trivial_string (fcrtn-version))
+                  (intern_trivial_string source))))
+    (defn fcrtn-program-literal (program row)
+        (nth (nth program row) 1))
+    (defn fcrtn-values-present? (values)
+        (if (nil? values) 1
+            (if (nothing? (head values)) 0
+                (fcrtn-values-present? (tail values)))))
+    (defn fcrtn-all-true? (bits)
+        (if (nil? bits) 1
+            (if (eq (head bits) 0) 0
+                (fcrtn-all-true? (tail bits)))))
+    (defn fcrtn-cache-codes-present? (cache)
+        (do
+            (let terminal (fcrtn-cache-terminal-program cache))
+            (let phase (fcrtn-cache-phase-program cache))
+            (let stop (fcrtn-cache-stop-program cache))
+            (fcrtn-values-present?
+                (list (fcrtn-program-literal terminal 1)
+                      (fcrtn-program-literal terminal 3)
+                      (fcrtn-program-literal terminal 4)
+                      (fcrtn-program-literal terminal 7)
+                      (fcrtn-program-literal phase 1)
+                      (fcrtn-program-literal phase 3)
+                      (fcrtn-program-literal phase 4)
+                      (fcrtn-program-literal stop 1)
+                      (fcrtn-program-literal stop 3)
+                      (fcrtn-program-literal stop 4)))))
+    (defn fcrtn-cache-declaration-valid? (source cache)
+        (fcrtn-all-true?
+            (list (ge (str_find source "class FormCliResidentTurnwheel" 0) 0)
+                  (fcrtn-pairs-ready? (fcrtn-cache-signals cache))
+                  (fcrtn-pairs-ready? (fcrtn-cache-phases cache))
+                  (fcrtn-map-has-surface?
+                      (fcrtn-cache-phases cache) (fcrtn-phase-program))
+                  (fcrtn-map-has-surface?
+                      (fcrtn-cache-phases cache) (fcrtn-phase-prefill))
+                  (fcrtn-map-has-surface?
+                      (fcrtn-cache-phases cache) (fcrtn-phase-model))
+                  (fcrtn-map-has-surface?
+                      (fcrtn-cache-phases cache) (fcrtn-phase-returned))
+                  (fcrtn-map-has-surface?
+                      (fcrtn-cache-phases cache) (fcrtn-phase-prefill-error))
+                  (fcrtn-cache-codes-present? cache))))
+    (defn fcrtn-finish-cache (source cache)
+        (if (fcrtn-cache-declaration-valid? source cache)
+            cache
+            (fcrtn-refused "high-bml-native-declaration-incomplete")))
+    ; The compiler carries the declaration as one source value, never through a
+    ; fixed function-seat table.  Each binding is a source coordinate or a
+    ; scalar declared by the high grammar; the resulting program is structural
+    ; data handed straight to the resident native registry.
+    (defn fcrtn-build-source (source)
+        (do
+            (let source-node (fcrtn-source-node source))
+            (let signals (fcrtn-signal-map source))
+            (let phases (fcrtn-phase-map source))
+            (let live (fcrtn-code source "SignalLiveCode"))
+            (let undo (fcrtn-code source "SignalUndoCode"))
+            (let inactive (fcrtn-code source "PhaseInactiveCode"))
+            (let false-value (fcrtn-code source "TerminalFalseCode"))
+            (let true-value (fcrtn-code source "TerminalTrueCode"))
+            (let not-carried (fcrtn-code source "StopNotCarriedCode"))
+            (let carried (fcrtn-code source "StopCarriedCode"))
+            (fcrtn-finish-cache source
+                (fcrtn-cache
+                    (list source-node signals phases
+                        (fcrtn-exclude-two-program live undo false-value true-value)
+                        (fcrtn-exclude-two-root)
+                        (fcrtn-eq-program inactive false-value true-value)
+                        (fcrtn-eq-root)
+                        (fcrtn-eq-program carried carried not-carried)
+                        (fcrtn-eq-root))))))
+    (defn fcrtn-build ()
+        (fcrtn-build-source (read_file (fcrtn-source-path))))
+
+    (defn fcrtn-selector-program (cache selector)
+        (if (str_eq selector (fcrtn-terminal-selector))
+            (list (fcrtn-cache-terminal-program cache)
+                  (fcrtn-cache-terminal-root cache))
+        (if (str_eq selector (fcrtn-phase-selector))
+            (list (fcrtn-cache-phase-program cache)
+                  (fcrtn-cache-phase-root cache))
+        (if (str_eq selector (fcrtn-stop-selector))
+            (list (fcrtn-cache-stop-program cache)
+                  (fcrtn-cache-stop-root cache))
+            (nothing)))))
+
+    ; call = tag, status, value, registry', route, born, reason.  The cache
+    ; itself remains resident-owned separately, and unknown surface vocabulary
+    ; maps to its declared nonterminal/inactive zero code.
+    (defn fcrtn-call (status value registry route born reason)
+        (list "form-cli-resident-bml-native-call-v1" status value registry
+              route born reason))
+    (defn fcrtn-call-status (call) (nth call 1))
+    (defn fcrtn-call-value (call) (nth call 2))
+    (defn fcrtn-call-registry (call) (nth call 3))
+    (defn fcrtn-call-route (call) (nth call 4))
+    (defn fcrtn-call-born (call) (nth call 5))
+    (defn fcrtn-call-reason (call) (nth call 6))
+    (defn fcrtn-invoke (cache registry selector code)
+        (if (not (fcrtn-cache-ready? cache))
+            (fcrtn-call "refused" (nothing) registry "none" 0
+                (fcrtn-cache-reason cache))
+            (do
+                (let selected (fcrtn-selector-program cache selector))
+                (if (nothing? selected)
+                    (fcrtn-call "refused" (nothing) registry "none" 0
+                        "high-bml-native-selector-absent")
+                    (do
+                        (let moved (jonb-request registry
+                            (nth selected 0) (nth selected 1) code))
+                        (if (str_eq (nth moved 1) "native")
+                            (fcrtn-call "returned" (nth moved 0) (nth moved 2)
+                                (nth moved 1) (nth moved 3)
+                                "high-bml-native-nodeid-invoked")
+                            (fcrtn-call "refused" (nothing) (nth moved 2)
+                                (nth moved 1) (nth moved 3)
+                                "high-bml-native-page-unavailable")))))))
+    (defn fcrtn-terminal-code (cache signal)
+        (fcrtn-map-code (fcrtn-cache-signals cache) signal))
+    (defn fcrtn-phase-code (cache phase)
+        (fcrtn-map-code (fcrtn-cache-phases cache) phase))
+    0)
