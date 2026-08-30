@@ -1,0 +1,171 @@
+; form-cli-peer-heldout-v3-one-score.fk — score exactly one durable response
+; from the live peer against a sealed v3 row.  Response bytes are located by
+; their carried length, never by a closing marker that model speech may mimic.
+; The receipt prints hashes and metrics only: neither question, expected answer,
+; nor resident response is rendered.
+;
+; stdin lines: reply spool, turn, held-out row id.
+;
+; preludes: form-stdlib/form-knowledge-qwen-heldout-v3-eval.fk form-stdlib/form-cli-peer-contribution-turnwheel.fk
+
+(do
+    (defn fch3o-line (name value)
+        (print_str (str_concat name (str_concat "=" (str_concat value "\n")))))
+    (defn fch3o-int (name value) (fch3o-line name (int_to_str value)))
+    (defn fch3o-canonical-int? (text)
+        (str_eq (int_to_str (str_to_int text)) text))
+    (defn fch3o-header-int (header name)
+        (do
+            (let marker (str_concat "\n" (str_concat name "=")))
+            (let at (str_find header marker 0))
+            (if (lt at 0) -1
+                (do
+                    (let start (add at (str_len marker)))
+                    (let end (str_find header "\n" start))
+                    (if (lt end 0) -1
+                        (do
+                            (let text (substring header start end))
+                            (if (eq (fch3o-canonical-int? text) 1)
+                                (str_to_int text) -1)))))))
+    (defn fch3o-header-text (header name)
+        (do
+            (let marker (str_concat "\n" (str_concat name "=")))
+            (let at (str_find header marker 0))
+            (if (lt at 0) ""
+                (do
+                    (let start (add at (str_len marker)))
+                    (let end (str_find header "\n" start))
+                    (if (lt end 0) "" (substring header start end))))))
+    ; step = state next response elapsed route.  `next` is computed from the
+    ; response byte count, so a marker-looking response cannot change framing.
+    (defn fch3o-step (text at turn)
+        (do
+            (let open-at (str_find text (fcpct-output-open) at))
+            (if (lt open-at 0)
+                (list "end" (str_len text) "" 0 "")
+                (do
+                    (let body-at (str_find text (fcpct-response-open) open-at))
+                    (let count-at (str_find text "\nresponse-bytes=" open-at))
+                    (if (or (lt body-at 0)
+                            (or (lt count-at 0) (ge count-at body-at)))
+                        (list "choice" (str_len text) "" 0 "")
+                        (do
+                            (let header (substring text open-at body-at))
+                            (let bytes (fch3o-header-int header "response-bytes"))
+                            (let elapsed (fch3o-header-int header "elapsed-ms"))
+                            (let route (fch3o-header-text header "route"))
+                            (let body-start (add body-at
+                                (str_len (fcpct-response-open))))
+                            (let body-end (add body-start bytes))
+                            (let next (add body-end
+                                (str_len (fcpct-output-close))))
+                            (if (or (or (lt bytes 0) (lt elapsed 0))
+                                    (or (gt next (str_len text))
+                                        (not (str_eq
+                                            (substring text body-end next)
+                                            (fcpct-output-close)))))
+                                (list "choice" (str_len text) "" 0 "")
+                                (do
+                                    (let frame (substring text open-at next))
+                                    (let response (fcpct-output-response frame))
+                                    (if (nothing? response)
+                                        (list "choice" (str_len text) "" 0 "")
+                                        (if (ge (str_find header
+                                                (str_concat "\nturn="
+                                                    (str_concat (int_to_str turn)
+                                                        "\n")) 0) 0)
+                                            (list "match" next response elapsed route)
+                                            (list "skip" next "" 0 "")))))))))))
+    ; result = state match-count first-response first-elapsed first-route.
+    ; Duplicate
+    ; turn frames are a choice; an absent frame is nothing.  Neither becomes
+    ; score=0, which keeps absence distinct from an observed wrong answer.
+    (defn fch3o-collect (text at turn count first elapsed route)
+        (do
+            (let step (fch3o-step text at turn))
+            (let state (nth step 0))
+            (if (str_eq state "end")
+                (list "value" count first elapsed route)
+                (if (str_eq state "choice")
+                    (list "choice" count first elapsed route)
+                    (if (str_eq state "match")
+                        (fch3o-collect text (nth step 1) turn (add count 1)
+                            (if (eq count 0) (nth step 2) first)
+                            (if (eq count 0) (nth step 3) elapsed)
+                            (if (eq count 0) (nth step 4) route))
+                        (fch3o-collect text (nth step 1) turn count first elapsed route))))))
+    (defn fch3o-reply (text turn)
+        (do
+            (let found (fch3o-collect text 0 turn 0 "" 0 ""))
+            (if (str_eq (nth found 0) "choice") found
+                (if (eq (nth found 1) 0)
+                    (list "nothing" 0 "" 0 "")
+                    (if (eq (nth found 1) 1) found
+                        (list "choice" (nth found 1)
+                            (nth found 2) (nth found 3) (nth found 4)))))))
+    (defn fch3o-model-failure? (raw)
+        (if (str_eq raw "<FAIL>") 1 (fkh3-refusal? raw)))
+    (defn fch3o-score (row raw elapsed)
+        ; `raw` is the peer's direct answer.  It is deliberately not passed
+        ; through the source-assisted resident-output parser: this receipt
+        ; measures what the existing local model carries by itself.
+        (fkh3-score row (fkh3-prompt row)
+            (fkh3-output (nmfe-sha256 raw) raw
+                (fch3o-model-failure? raw) (fkh3-refusal? raw)) elapsed))
+    (defn fch3o-refusal (reason)
+        (do (fch3o-line "signal" "choice") (fch3o-line "reason" reason) 0))
+    (defn fch3o-run (reply-path turn row-id)
+        (do
+            (let rows (fkh3-rows))
+            (let row (fkh3-find-row row-id rows))
+            ; Keep the all-row freshness/leakage proof at batch cadence.  The
+            ; receipt path verifies the immutable row manifest and hashes only
+            ; the requested source, so scoring an already-durable answer does
+            ; not repeat an O(all-sources) filesystem walk.
+            (if (not (str_eq (fkh3-dataset-sha256 rows)
+                             (fkh3-dataset-seal)))
+                (fch3o-refusal "heldout-dataset-seal-mismatch")
+                (if (eq (fkh3-row? row) 0)
+                    (fch3o-refusal "heldout-row-absent")
+                    (if (eq (fkh3-row-current? row) 0)
+                        (fch3o-refusal "heldout-row-stale")
+                        (if (le turn 0)
+                            (fch3o-refusal "turn-not-positive")
+                            (do
+                                (let reply (fch3o-reply
+                                    (read_file reply-path) turn))
+                                (fch3o-line "dataset-sha256"
+                                    (fkh3-dataset-seal))
+                                (fch3o-line "row" (fkh3-id row))
+                                (fch3o-line "family" (fkh3-family row))
+                                (fch3o-line "reply-state" (nth reply 0))
+                                (fch3o-int "reply-frame-count" (nth reply 1))
+                                (fch3o-line "reply-route" (nth reply 4))
+                                (if (or (not (str_eq (nth reply 0) "value"))
+                                        (not (str_eq (nth reply 4) "direct-answer")))
+                                    0
+                                    (do
+                                        (let score (fch3o-score row
+                                            (nth reply 2) (nth reply 3)))
+                                        (let obs (fkh3-score-observation score))
+                                        (fch3o-int "model-executed" 1)
+                                        (fch3o-int "response-sha256-present" 1)
+                                        (fch3o-line "response-sha256"
+                                            (fkh3-output-raw-sha
+                                                (fkh3-output
+                                                    (nmfe-sha256 (nth reply 2))
+                                                    (nth reply 2)
+                                                    (fch3o-model-failure? (nth reply 2))
+                                                    (fkh3-refusal? (nth reply 2)))))
+                                        (print_str (fkh3-score-lines (list score)))
+                                        (fch3o-int "exact-hit"
+                                            (if (eq (fkh3-obs-exact obs) 1000000) 1 0))
+                                        0)))))))))
+
+    (let reply-path (read_line))
+    (let turn (str_to_int (read_line)))
+    (let row-id (read_line))
+    (if (or (nothing? reply-path)
+            (or (str_eq reply-path "") (str_eq row-id "")))
+        (fch3o-refusal "scorer-input-absent")
+        (fch3o-run reply-path turn row-id)))

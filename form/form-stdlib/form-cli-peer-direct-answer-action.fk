@@ -1,0 +1,98 @@
+; form-cli-peer-direct-answer-action.fk -- a caller-born direct-answer effect
+; for a resident Form peer.  It uses the existing Qwen/KV session after the
+; task observation and does not create a recipe cursor, source lookup, HTTP
+; request, or second model residence.
+;
+; Policy may select this effect only when the successor was born with it.  The
+; action owns neither the task identity nor the model: its caller provides both
+; and durable egress remains outside this cell.
+;
+; preludes: form-stdlib/form-cli-peer-agent.fk
+; Proven by: form-stdlib/tests/form-cli-peer-direct-answer-action-band.fk
+
+(do
+    ; result = session response elapsed signal reason generated-tokens.
+    ; A value is text produced by the resident. `nothing` is an observed empty
+    ; model turn; `choice` is a malformed effect request. Neither is 0.
+    (defn fcpdaa-version () "form-cli-peer-direct-answer-v1")
+    (defn fcpdaa-result
+        (session response elapsed-ms signal reason generated-tokens)
+        (list (fcpdaa-version) session response elapsed-ms signal reason
+              generated-tokens))
+    (defn fcpdaa-session (r) (nth r 1))
+    (defn fcpdaa-response (r) (nth r 2))
+    (defn fcpdaa-elapsed-ms (r) (nth r 3))
+    (defn fcpdaa-signal (r) (nth r 4))
+    (defn fcpdaa-reason (r) (nth r 5))
+    (defn fcpdaa-generated-tokens (r) (nth r 6))
+    (defn fcpdaa-result? (r)
+        (if (nothing? r) 0
+            (if (not (eq (len r) 7)) 0
+                (str_eq (nth r 0) (fcpdaa-version)))))
+    (defn fcpdaa-kind? (kind) (str_eq kind "direct-answer"))
+    (defn fcpdaa-task-shape? (kind text)
+        (if (eq (fcpdaa-kind? kind) 0) 0
+            (if (or (nothing? text) (le (str_len text) 0)) 0 1)))
+    (defn fcpdaa-refused (session reason)
+        (fcpdaa-result session "" 0 "choice" reason 0))
+    (defn fcpdaa-unavailable (session)
+        (fcpdaa-result session "" 0 "nothing" "model-session-not-live" 0))
+    (defn fcpdaa-finish (session generated elapsed-ms)
+        (do
+            (let response (fcms-generation-text generated))
+            (let tokens (len (fcms-generation-ids generated)))
+            (let next (fcms-generation-session generated))
+            (if (eq (str_len response) 0)
+                (fcpdaa-result next response elapsed-ms "nothing"
+                    "direct-answer-empty-or-stop" tokens)
+                (fcpdaa-result next response elapsed-ms "value"
+                    "direct-answer-generated" tokens))))
+    ; The event carries no question or response bytes.  The controller's
+    ; before/after Metal counters remain the physical execution receipt.
+    (defn fcpdaa-stage-category ()
+        (intern_trivial_string "form-cli-peer-direct-answer-stage-v1"))
+    (defn fcpdaa-stage-node (phase status generated stamp)
+        (intern_node_at (fcpdaa-stage-category)
+            (list (intern_trivial_string "direct-answer")
+                  (intern_trivial_string phase)
+                  (intern_trivial_string status)
+                  (intern_trivial_int generated)
+                  (intern_trivial_int stamp))
+            "form-cli-peer-direct-answer-action.fk" 56 1))
+    (defn fcpdaa-stage-line (phase status generated stamp)
+        (str_concat "form-peer stage route=direct-answer phase="
+        (str_concat phase (str_concat " status="
+        (str_concat status (str_concat " generated="
+        (str_concat (int_to_str generated) (str_concat " stamp-ms="
+            (str_concat (int_to_str stamp) "\n")))))))))
+    (defn fcpdaa-stage-write (phase status generated)
+        (do
+            (let stamp (now_unix_ms))
+            (let event (fcpdaa-stage-node phase status generated stamp))
+            (print_str (fcpdaa-stage-line phase status generated stamp))
+            event))
+    (defn fcpdaa-lifecycle (direct)
+        (if (str_eq (fcpdaa-signal direct) "choice") "choice,release"
+            (if (str_eq (fcpdaa-signal direct) "nothing") "nothing,release"
+                "generate,release")))
+    (defn fcpdaa-peer (direct)
+        (fcpa-result-full (fcpdaa-session direct) direct
+            (fcpdaa-response direct) (fcpdaa-elapsed-ms direct) 0
+            "direct-answer" 0 (fcpdaa-signal direct)
+            "form-native-metal-jit" 0 (nothing) 0 0
+            (fcpdaa-lifecycle direct) 0))
+    (defn fcpdaa-run (session task-kind task-text max-generated)
+        (if (eq (fcpdaa-task-shape? task-kind task-text) 0)
+            (fcpdaa-refused session "direct-answer-requires-nonempty-direct-answer-task")
+            (if (eq (fcms-live? session) 0)
+                (fcpdaa-unavailable session)
+                (do
+                    (let started (now_unix_ms))
+                    (let begin (fcpdaa-stage-write "run" "begin" 0))
+                    (let generated (fcms-generate session max-generated))
+                    (let direct (fcpdaa-finish
+                        session generated (sub (now_unix_ms) started)))
+                    (let end (fcpdaa-stage-write "run" (fcpdaa-signal direct)
+                        (fcpdaa-generated-tokens direct)))
+                    direct))))
+    0)
