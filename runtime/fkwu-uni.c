@@ -698,6 +698,17 @@ extern int stat(const char *, void *);
 #include <errno.h>
 #endif
 #endif
+/* the BML floor's lowering door spawns the runner on itself; the seed
+ * declares its own POSIX signatures (system headers conflict with the
+ * file's hand-rolled read/write/lseek), so the door follows that idiom */
+#if !defined(_WIN32)
+extern int fork(void);
+extern int execvp(const char *, char *const *);
+extern int waitpid(int, int *, int);
+extern int pipe(int *);
+extern int dup2(int, int);
+extern void _exit(int);
+#endif
 #if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
 #define FK_HAVE_DARWIN_ARM64_JIT_WITNESS 1
 #endif
@@ -10940,6 +10951,13 @@ static int fk_src_prelude_fk_token(const char *text, long long start, long long 
     return n >= 3 && text[start + n - 3] == FK_CH_DOT && text[start + n - 2] == FK_CH_LOWER_F &&
            text[start + n - 1] == FK_CH_LOWER_K;
 }
+/* a "; preludes:" token may name a high-grammar .bml source directly; the
+ * collector lowers it through the BML floor and loads the derived .fk */
+static int fk_src_prelude_bml_token(const char *text, long long start, long long n) {
+    return n >= 4 && text[start + n - 4] == FK_CH_DOT && text[start + n - 3] == FK_CH_LOWER_B &&
+           text[start + n - 2] == 'm' && text[start + n - 1] == 'l';
+}
+static int fk_bml_ensure_lowered(const char *bml_path, char *lowered, long long cap);
 static long long fk_src_trim_import_token(const char *text, long long start, long long *n) {
     long long s = start;
     long long e = start + *n;
@@ -11124,7 +11142,8 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
                             }
                             continue;
                         }
-                        if (!fk_src_prelude_fk_token(text, start, tn)) {
+                        if (!fk_src_prelude_fk_token(text, start, tn) &&
+                            !fk_src_prelude_bml_token(text, start, tn)) {
                             break;
                         }
                         char dep_path[4096];
@@ -11132,7 +11151,15 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
                             fk_diag_path("error", owner_path, "prelude path exceeds buffer");
                             return 0;
                         }
-                        if (!fk_src_collect_file(dep_path, owner_idx)) {
+                        if (fk_path_has_suffix(dep_path, ".bml")) {
+                            char bml_lowered[4200];
+                            if (!fk_bml_ensure_lowered(dep_path, bml_lowered, 4200)) {
+                                return 0;
+                            }
+                            if (!fk_src_collect_file(bml_lowered, owner_idx)) {
+                                return 0;
+                            }
+                        } else if (!fk_src_collect_file(dep_path, owner_idx)) {
                             return 0;
                         }
                     }
@@ -12983,11 +13010,99 @@ static void fk_stage_input(const char *s) {
     fk_src[i] = 0;
     fk_src_len = i;
 }
+/* ── the BML floor ──────────────────────────────────────────────────────
+ * High-grammar .bml is a first-class source: the runner lowers it through
+ * the body's own Form compiler (spawning ITSELF on
+ * form/form-stdlib/bml-floor-compile.fk — the chain stays Form-owned; this
+ * door only checks freshness and opens it) into a derived <x>.bml.fk
+ * beside the source, which then rides the ordinary .fk lane and its .fkb
+ * cache: warm runs are native speed, and no crystallized twin lives in
+ * the tree (Urs, 2026-08-30: xtal is the wrong shape; high-grammar BML
+ * with an optimal cached native-speed compiler is the floor). Derived
+ * .bml.fk, .bml.fkb and .bml.sym files are cache artifacts, gitignored.
+ * Shrink direction: this door retires when the runner's entry self-hosts. */
+static const char *fk_self_path = "./fkwu";
+static int fk_bml_ensure_lowered(const char *bml_path, char *lowered, long long cap) {
+    long long n = fk_path_len(bml_path);
+    if (n + 4 >= cap) {
+        fk_diag_path("error", bml_path, "bml path exceeds buffer");
+        return 0;
+    }
+    sprintf(lowered, "%s.fk", bml_path);
+    long long src_m = fk_path_mtime_raw(bml_path);
+    if (src_m <= 0) {
+        fk_diag_path("error", bml_path, "bml source is missing or not stat-readable");
+        return 0;
+    }
+    long long low_m = fk_path_mtime_raw(lowered);
+    if (low_m >= src_m) {
+        return 1;
+    }
+#if defined(_WIN32)
+    fk_diag_path("error", bml_path,
+                 "bml lowering via self-spawn is not wired on this platform yet");
+    return 0;
+#else
+    int fds[2];
+    if (pipe(fds) != 0) {
+        fk_diag_path("error", bml_path, "bml lowering could not open a pipe");
+        return 0;
+    }
+    long long pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        fk_diag_path("error", bml_path, "bml lowering could not fork");
+        return 0;
+    }
+    if (pid == 0) {
+        close(fds[1]);
+        dup2(fds[0], 0);
+        close(fds[0]);
+        char *child_argv[3];
+        child_argv[0] = (char *)fk_self_path;
+        child_argv[1] = (char *)"form/form-stdlib/bml-floor-compile.fk";
+        child_argv[2] = 0;
+        execvp(fk_self_path, child_argv);
+        _exit(127);
+    }
+    close(fds[0]);
+    {
+        char line[8300];
+        int m = sprintf(line, "%s\n%s\n", bml_path, lowered);
+        long long off = 0;
+        while (off < m) {
+            long long put = write(fds[1], line + off, (unsigned long)(m - off));
+            if (put <= 0) {
+                break;
+            }
+            off = off + put;
+        }
+    }
+    close(fds[1]);
+    {
+        int st = 0;
+        waitpid((int)pid, &st, 0);
+        if (st != 0) {
+            fk_diag_path("error", bml_path, "bml lowering child failed; run form/form-stdlib/bml-floor-compile.fk by hand to see its diagnostics");
+            return 0;
+        }
+    }
+    if (fk_path_mtime_raw(lowered) < src_m) {
+        fk_diag_path("error", bml_path, "bml lowering wrote nothing fresh");
+        return 0;
+    }
+    return 1;
+#endif
+}
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
     fk_stack_base = &fk_stack_here;
     if (argc < 2) {
         return 1;
+    }
+    if (argv[0] && argv[0][0]) {
+        fk_self_path = argv[0];
     }
     if (argc > 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH) {
         fk_stage_input(argv[3]);
@@ -13003,6 +13118,13 @@ static int fk_run(int argc, char **argv) {
     }
     if (fk_path_has_suffix(argv[1], ".fk")) {
         return fk_run_src(argv[1], argc > 2 ? atoi(argv[2]) : 0);
+    }
+    if (fk_path_has_suffix(argv[1], ".bml")) {
+        char lowered[4200];
+        if (!fk_bml_ensure_lowered(argv[1], lowered, 4200)) {
+            return 2;
+        }
+        return fk_run_src(lowered, argc > 2 ? atoi(argv[2]) : 0);
     }
     if (fk_path_has_suffix(argv[1], ".fkb")) {
         if (!fk_src_load_fkb(argv[1])) {
