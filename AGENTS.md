@@ -140,6 +140,18 @@ Whoever works in a body root — Claude, Codex, Grok, or whoever is next — run
 closing a movement: the phase census (is your work freezing ice or leaving gas?), the kv and
 ice-miss lanes (did you reuse or rebuild?), the ledger, and the spendglass meter
 (`observe/rented-turn-meter-run.fk` — your own token spend, read from your own transcript).
+One door closes the measure-observe-improve loop for any agent:
+
+```sh
+./fkwu observe/lane-counsel-run.fk   # judges the performance lanes worst-first, names the worst lane's stone, diffs the previous reading
+```
+
+Advice rows live as data in `form-stdlib/lane-counsel.bml` — each judged lane carries its
+thresholds and the stone that improves it; the reading persists at the hearth's counsel path so
+the next run measures the improvement. `observe/lane-motion-witness.fk` (hold N seconds, diff
+all points) and `observe/lane-motion-drive.fk` (real asks, then the diff) are the same sample
+driven two other ways.
+
 Cite at least one panel number in each receipt. The glass's field and doing lanes show the
 siblings' processes and last landings, so no hand works invisible — and the panel you read
 about yourself is the one that guides you: self-awareness here is not introspection, it is
