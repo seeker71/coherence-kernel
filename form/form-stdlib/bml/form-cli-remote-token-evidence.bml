@@ -52,6 +52,7 @@ section [form.bml] {
         field ProviderSource = "provider-last-token-usage";
         field LocalDirectSource = "local-direct-no-provider";
         field ComparisonTag = "form-comparable-remote-token-receipt-v1";
+        field ProviderWindowTag = "form-provider-call-window-v1";
 
         def frte-event-name() = EventName();
         def frte-last-usage-name() = LastUsageName();
@@ -65,6 +66,7 @@ section [form.bml] {
         def frte-provider-source() = ProviderSource();
         def frte-local-direct-source() = LocalDirectSource();
         def frte-comparison-tag() = ComparisonTag();
+        def frte-provider-window-tag() = ProviderWindowTag();
         def frte-separate-quantity-from-event?() = if str_eq(frte-boundary-rule(), "event-count-is-not-token-volume") then 1 else 0;
         def frte-last-not-cumulative?() = if str_eq(frte-last-usage-name(), "last_token_usage") then 1 else 0;
         def frte-last-usage-marker() = str_concat(byte_to_str(34), str_concat(frte-last-usage-name(), str_concat(byte_to_str(34), ":")));
@@ -78,6 +80,54 @@ section [form.bml] {
         // joined to its terminal agent message. The legacy task_complete label
         // remains an additional witness, not the only way a rollout may end.
         def frte-terminal-completion-line?(line) = if eq(str_find(line, frte-turn-id-marker(), 0), sub(0, 1)) then 0 else if ge(str_find(line, "\"task_complete\"", 0), 0) then 1 else if ge(str_find(line, frte-terminal-message-marker(), 0), 0) then 1 else 0;
+
+        // Provider usage is sparse in a rollout.  This grammar walks only
+        // `last_token_usage` frames; it does not allocate one Form frame for
+        // every unrelated JSONL line.  A scanned zero is a present value,
+        // while unreadable or unselected evidence remains `nothing` outside
+        // this reducer.
+        def frte-window(calls, tokens) = list(frte-provider-window-tag(), calls, tokens);
+        def frte-window?(value) = if nothing?(value) then 0 else if not(eq(len(value), 3)) then 0 else str_eq(nth(value, 0), frte-provider-window-tag());
+        def frte-window-calls(value) = nth(value, 1);
+        def frte-window-tokens(value) = nth(value, 2);
+        def frte-window-add(value, tokens) = frte-window(add(frte-window-calls(value), 1), add(frte-window-tokens(value), tokens));
+        def frte-window-field(name, value) = str_concat("\n", str_concat(name, str_concat("=", value)));
+        // This frame holds only position and scalar provider evidence.  It is
+        // an observation of one bounded window, never a claim that a whole
+        // task has settled.
+        def frte-window-frame(cursor, bytes, tally) = str_concat("provider-window=observed", str_concat(frte-window-field("cursor", int_to_str(cursor)), str_concat(frte-window-field("bytes", int_to_str(bytes)), str_concat(frte-window-field("provider-calls", int_to_str(frte-window-calls(tally))), str_concat(frte-window-field("remote-tokens", int_to_str(frte-window-tokens(tally))), "\n")))));
+        def frte-digit?(cp) = if ge(cp, 48) then if le(cp, 57) then 1 else 0 else 0;
+        def frte-number-end(text, at, end) = if ge(at, end) then at else if eq(frte-digit?(ord(char_at(text, at))), 1) then frte-number-end(text, add(at, 1), end) else at;
+        def frte-int-in(text, mark, from, end) {
+            let at = str_find(text, mark, from);
+            let start = if lt(at, 0) then end else add(at, str_len(mark));
+            let stop = frte-number-end(text, start, end);
+            if or(lt(at, 0), ge(at, end)) then 0 else if eq(start, stop) then 0 else str_to_int(substring(text, start, stop));
+        }
+        def frte-line-end(text, from) {
+            let at = str_find(text, "\n", from);
+            if lt(at, 0) then str_len(text) else at;
+        }
+        // Walk back only inside one small provider event line.  Finding no LF
+        // inside that cap refuses the marker rather than borrowing a provider
+        // type from a preceding unrelated line.
+        def frte-line-floor(at) = if lt(at, 4096) then 0 else sub(at, 4096);
+        def frte-line-start(found, at) = list(found, at);
+        def frte-line-start-found?(value) = nth(value, 0);
+        def frte-line-start-at(value) = nth(value, 1);
+        def frte-line-start-go(text, at, floor) = if le(at, floor) then if eq(floor, 0) then frte-line-start(1, 0) else frte-line-start(0, floor) else if eq(ord(char_at(text, sub(at, 1))), 10) then frte-line-start(1, at) else frte-line-start-go(text, sub(at, 1), floor);
+        def frte-line-start-at-or-nothing(text, at) = frte-line-start-go(text, at, frte-line-floor(at));
+        def frte-provider-usage-frame?(text, at, end) {
+            let start = frte-line-start-at-or-nothing(text, at);
+            let prefix = substring(text, frte-line-start-at(start), end);
+            if eq(frte-line-start-found?(start), 0) then 0 else if eq(frte-call-local-usage-line?(prefix), 0) then 0 else if ge(str_find(prefix, "\"type\":\"token_count\"", 0), 0) then 1 else if ge(str_find(prefix, "\"type\":\"provider_usage\"", 0), 0) then 1 else 0;
+        }
+        def frte-window-scan(text, from, tally) {
+            let at = str_find(text, frte-last-usage-marker(), from);
+            let end = frte-line-end(text, if lt(at, 0) then from else at);
+            if lt(at, 0) then tally else if eq(frte-provider-usage-frame?(text, at, end), 0) then frte-window-scan(text, add(end, 1), tally) else frte-window-scan(text, add(end, 1), frte-window-add(tally, frte-int-in(text, "\"total_tokens\":", at, end)));
+        }
+        def frte-provider-call-window(text) = frte-window-scan(text, 0, frte-window(0, 0));
 
         // receipt = tag task-node settled source provider-calls remote-tokens.
         // `nothing` is absence of a comparison side, never a zero-token row.
