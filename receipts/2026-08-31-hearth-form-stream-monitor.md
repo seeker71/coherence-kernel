@@ -126,3 +126,51 @@ teaching is that the board can be alive yet name the launcher rather than the
 kernel, and that bare `nothing` and `nothing()` have different lowering
 meaning.  Both discomforts became useful when the monitor received exact PID,
 grammar-safe clauses, and a typed absence proof instead of inferred status.
+
+## Direct-answer bridge and cache floor repair
+
+The same original local-form objective was sent as task `9203` with
+`kind=direct-answer`.  Policy selected `direct-answer`, but the old turnwheel
+passed that action to the generic observer, which returned the typed refusal
+`policy action not selected: policy-action-not-admitted`.  That was a missing
+caller-owned crossing, not a Qwen or Metal failure.
+
+`bml/form-cli-peer-direct-answer-bridge.bml` now supplies that crossing: the
+policy action enters the existing `fcpdaa-run` local action before the generic
+model observer, retains the caller's session and task node, and leaves the
+single durable append to the turnwheel.  The adjacent high-grammar
+`bml/form-cli-peer-direct-answer-envelope.bml` keeps the response/control
+envelope out of the scannerless task body.  Before this repair, the appended
+`response=plain-prose-only` and control fields became part of a direct prompt;
+a sealed local matcher therefore observed `direct-prompt-not-heldout` even
+when given its exact retained prompt.  After the BML boundary, those fields
+remain transport evidence and the task text remains exact.
+
+The focused four-way turnwheel band is now `16777215` on both a fresh and a
+warm pass.  Its new bridge arm uses `fcms-none` deliberately: it proves
+`action=direct-answer`, `route=direct-answer`,
+`carrier=form-native-metal-jit`, zero callback and lookup counts, no
+`route=policy`, an unchanged non-live session, and one durable append.  The
+held-out arm no longer pretends a stale sealed corpus scored an answer: a
+current seal carries the redacted equivalent receipt; a seal mismatch carries
+the exact zero-terminal `nothing` refusal.  In neither case do prompt,
+expected, or answer bytes enter durable evidence.
+
+The fresh band emitted a `16,837,556` byte `.fkb`, larger than the old fixed
+`16,777,216` byte scratch buffer.  `runtime/fkwu-uni.c` now uses an
+allocation-bounded geometric scratch reader rather than naming a new fixed
+ceiling.  `binary-freshness-band=31`, grounding returned `42`, `55`, and
+`[1, 2.5, [3, 4]]`, and the BML cache reports `state=ready bounded=1`.
+Preflight on the changed turnwheel reports balanced parentheses, zero errors,
+zero warnings, zero unresolved calls, and a clean chain.  The warm full-band
+output is only `16777215`: it contains no stale, foreign, or artifact-size
+rebuild warning.
+
+This C change is a checkout-witness repair with an explicit shrink obligation:
+the scratch reader has no language meaning and belongs in the native artifact
+reader as the C seed contracts.  Its replacement is not a future fixed number.
+The immediate performance observation remains honest: the warm 16.8 MB image
+is accepted, but its current decode/run is still CPU-bound and far from the
+millisecond BML-cache floor.  The next kernel movement is native image adoption
+that avoids repeatedly rebuilding the full interpreted closure, measured with
+the framebuffer; it is not another cache cap.
