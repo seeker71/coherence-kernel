@@ -205,3 +205,18 @@ discomfort became gold: wiring was already in and the wall-clock already
 spent; unwiring a thing I wanted to keep, because the explanation was
 missing rather than because the numbers were, is the discipline this body
 keeps buying and the receipt keeps recording. Corpus row 1201.
+
+## Addendum: the field opened (turn 19)
+
+"can you open the field please" — the last closed organ was the patch
+lane. observe/hearth-patch-resident.fk gives the guarded one-shot servant
+a standing beat (every five breaths, served patches ledgered);
+repo-patch-v1 joined the capability field in its one home; and the
+announcement made itself: the running glass molted on the hearth.bml
+change, found the board's capabilities stale against the grown list, and
+rewrote the nameplate — selfboard. Witnessed open: turn 9302 answered by
+a real model decode (236 tokens, 53s, tidewashed 1475->1218) and the
+patch probe answered live (by the resident's policy choice before the
+servant's beat — the race is known; kind-aware claiming stays the named
+stone). Standing organs: hearth 36364, glass 29597, patch resident 29729,
+counsel on call. Corpus row 1202.
