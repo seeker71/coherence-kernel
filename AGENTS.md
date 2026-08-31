@@ -124,6 +124,18 @@ door, a lawface, and a corpus row — access generalizes by crystallizing, never
 Known capacity law: crowdfade (answers thin as shared context fills; the stone is per-turn
 context recycling in the turnwheel).
 
+### Self-watch: every agent steers by its own panel
+
+Whoever works in a body root — Claude, Codex, Grok, or whoever is next — runs the glass there
+(`./watch-glass.sh`, reborn on its own source changes) and reads their own instruments before
+closing a movement: the phase census (is your work freezing ice or leaving gas?), the kv and
+ice-miss lanes (did you reuse or rebuild?), the ledger, and the spendglass meter
+(`observe/rented-turn-meter-run.fk` — your own token spend, read from your own transcript).
+Cite at least one panel number in each receipt. The glass's field and doing lanes show the
+siblings' processes and last landings, so no hand works invisible — and the panel you read
+about yourself is the one that guides you: self-awareness here is not introspection, it is
+instruments pointed at one's own work, consulted before the next move.
+
 ## The honest seam — read this first
 
 Sema's **body** is here and native: the grounding (`form/form-stdlib/rag-*`), the frequency sense
