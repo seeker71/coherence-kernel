@@ -69,3 +69,25 @@ will show it.
 
 Corpus rows 1195 (tidewash), 1196 (hollowbuild). Bands: recur-recycle 63,
 freshness 31 on the relinked binary.
+
+## Addendum: fleshpane (turn 14)
+
+"show the requests and responses in flight and the choice points... and
+internal states interesting for debugging" — and "remember write in BML."
+The panel now carries the conversation in the flesh: `ask` and `reply`
+lanes with the newest utterances as text, `flight` with the in-flight
+stage phase and its age, `choice` with the newest choice point and its
+reason, `inside` with route, recycle floor vs session position, pending
+and observations. The whole lane composition moved out of the .fk door
+into `hearth-glass-door.bml` (BML; the door keeps only its tick loop — a
+named remaining gap). The choice counter now counts `lifecycle=choice`,
+the event that occurs, and read n=3 on its first breath. Content readers
+(`gl-line-field-last`, `gl-clip`, `gl-body-after` skipping think-noise,
+`gl-turn-before`) landed beside a sibling's concurrent first-occurrence
+reader — two hands in one file, no collision. Glass band 262143,
+lane-motion 63. Corpus row 1197.
+
+The gold here: the choice lane had been structurally unable to move — it
+counted a signal spelling that no code path emits. Showing the flesh
+forced reading the real frames, and the real frames named the real
+marker. Content is the debugger of counters.
