@@ -18,9 +18,14 @@ instruction.  The latter matters: the first live attempt emitted only the
 control token; the corrected grammar returns an ordinary terminal answer.
 
 The hearth's BML PID grammar now selects the actual `fkwu` process rather than
-its shell launcher.  `hearth-band` is `511` and `hearth-glass-band` is `8191`.
+its shell launcher.  `hearth-band` is `511` and `hearth-glass-band` is `16383`.
 The glass also rebuilds the board with the born public capabilities, including
-`hearth-telemetry-v1`, rather than retaining an older capability list.
+`hearth-telemetry-v1`, rather than retaining an older capability list.  A live
+observation exposed a second reader error: the original BML word reader cut the
+space-separated capability value at its first space, making the board appear
+stale on every tick.  The BML `gl-line-field` reader now spans to the newline,
+returns `""` when absent, and has a band arm that preserves a complete
+two-capability line.
 
 ## Live receipt
 
