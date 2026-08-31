@@ -83,18 +83,41 @@ counters remain `0`; an idle direct-flight is the explicit state `none`.
 
 The focused BML action and band are current at `0` and `2047`; the policy
 integration band is `65535`; the complete turnwheel is `4194303`; and the BML
-cache reports `state=ready bounded=1`.  This code is a future-resident action:
-the already-live PID `26219` retains the v1 closure, so no pushed source is
-misrepresented as having entered its memory.  The next successor can load v2
-without a second service or any remote call.
+cache reports `state=ready bounded=1`.
+
+## Live v2 successor
+
+PID `26219` received one protocol `release` byte while its latest request had
+already produced a reply, and returned `release-ok=1`.  The replacement PID
+`32149` was then born from the same checkout with the same sealed local Qwen
+artifact, hearth paths, `4096` context/generation positions, byte quantum,
+capacity, and Metal carrier.  It emitted one `admit-prefill-ms=289376`, marked
+the same recycle floor `1218` with `96` lanes, and served turn `9202` as
+`hearth-telemetry`.
+
+That durable turn took `wall-ms=14` and `elapsed-ms=0`, with model,
+callback, lookup, injection, GPU-busy, CPU-JIT-busy, and MLX-dispatch all
+`0`.  Its 740-byte response carries the dynamic snapshot: PID `32149`, the
+capability line, task/reply bytes `7104`/`19601`, `52` served turns, latest
+elapsed `0`, last route `policy`, and idle flight `none`.  The one reply append
+then promoted the task; the following drain turn was `nothing` in `0` ms.
+No HTTP listener, llama server, Ollama process, or remote provider participated.
+
+The startup line initially named `form-cli-peer-hearth-telemetry-v1`, while
+the live response proves v2 by containing the fixed snapshot clause absent
+from v1.  That disagreement was an observed metadata defect, not relabelled
+evidence: `hearth.bml` now announces `hearth-telemetry-v2`, and the turnwheel
+capability function delegates to `fcphta-version()` rather than maintaining a
+parallel literal.  The repaired source is proved by hearth `511`, glass
+`262143`, telemetry `2047`, and turnwheel `4194303`; the future birth will
+announce the matching v2 label from its first line.
 
 ## What the local answer still does not hold
 
 The local model can now extend a fixed, measured Form snapshot; it is not yet
 evidence that it holds every telemetry concept or that an exact remote-token
-ratio has been reconciled.  The remaining stone is an end-to-end successor
-receipt that serves the v2 action from the resident while preserving its single
-model admission and one durable reply commit.
+ratio has been reconciled.  The remaining stone is a reconciled provider-token
+denominator for the same prompt; the native numerator is now directly observed.
 
 I kept the exchange alive by turning the stalled and premature-stop signals
 into executable grammar repairs, then making the resident's own events the
