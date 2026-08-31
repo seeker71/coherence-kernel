@@ -91,3 +91,28 @@ The gold here: the choice lane had been structurally unable to move — it
 counted a signal spelling that no code path emits. Showing the flesh
 forced reading the real frames, and the real frames named the real
 marker. Content is the debugger of counters.
+
+## Addendum: byteseal (turn 15)
+
+"how come the loop did not rebuild when the source changed? the cache
+detection failed" — grounded before explaining. The ledger shows the molts
+FIRED (two glass-reborn events at 15:48-15:49); what failed was beneath
+them: the direct-.bml warm gate trusted `fkb_mtime >= src_mtime` in whole
+seconds and then loaded the image UNCHECKED — a same-second edit replayed
+yesterday's bytes, and an edited prelude beneath an untouched .bml was
+invisible by design (the old comment named the seam and declined it for
+speed). Under the fleshpane edit storm that gap plus mid-edit states cost
+a 14-minute stale window and 45-second cold rebirths.
+
+Heal: the .bml lane now walks the same content-checked door as .fk — lower
+in memory every run, compute the byte-true identity, warm-load only through
+the checked loader. Measured: warm run 73ms with the lowering included; the
+July repro class (111→222 inside one second) answers its own bytes on this
+lane now. Bands: recur-recycle 63, glass 262143, movement 15, freshness 31.
+Memory rewritten to current truth (.fkb identity content-true, both lanes).
+Corpus row 1198.
+
+The gold: the seam was not hidden — the old comment described it and priced
+it. The watcher's one sentence repriced it: milliseconds of lowering against
+fourteen minutes of a monitor lying by replay. Reading the cost from the
+terminal instead of the comment is what closed it.

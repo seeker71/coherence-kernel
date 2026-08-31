@@ -13341,12 +13341,14 @@ static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len) {
     return buf;
 #endif
 }
-/* run a .bml as itself, filelessly: warm runs load <x>.bml.fkb directly —
- * the native cache is the ONLY artifact this lane ever writes; cold runs
- * lower in memory and ride the ordinary compile+cache tail under the
- * .bml's own identity. Root-mtime gates the warm path; an edited prelude
- * beneath an untouched .bml wants its .bml.fkb removed (named seam: the
- * hash-checked lane would re-lower on every run to know). */
+/* run a .bml as itself, filelessly: warm runs load <x>.bml.fkb through the
+ * SAME content-checked door the .fk lane uses — the identity is computed
+ * from a fresh in-memory lowering every run, so a same-second edit, an
+ * edited prelude beneath an untouched .bml, or a foreign writer's bytes
+ * all refuse the warm image honestly instead of replaying it (mtime gates
+ * once cost a 14-minute stale window under a live edit storm, 2026-08-31;
+ * the lowering itself is milliseconds and buys byte-true trust). The
+ * native cache is the ONLY artifact this lane ever writes. */
 static int fk_run_bml(const char *path, long long arg) {
     char fkb_path[4300];
     char sym_path[4300];
@@ -13362,8 +13364,18 @@ static int fk_run_bml(const char *path, long long arg) {
         fk_diag_path("error", path, "bml source is missing or not stat-readable");
         return 2;
     }
-    long long fkb_m = fk_path_mtime_raw(fkb_path);
-    if (fkb_m >= src_m) {
+    long long low_len = 0;
+    char *low = fk_bml_lower_to_mem(path, &low_len);
+    if (low == 0) {
+        return 2;
+    }
+    char expected_source_hash[FK_SRC_HASH_CAP];
+    long long unit_mtime = 0;
+    if (!fk_src_load_unit_buffer(path, low, low_len, src_m,
+            expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
+        return 2;
+    }
+    if (fk_path_mtime_raw(fkb_path) > 0) {
         long long recorded = fk_src_sym_recorded_errors(sym_path);
         long long unrunnable = fk_src_sym_recorded_unrunnable(sym_path);
         if (unrunnable > 0) {
@@ -13375,26 +13387,18 @@ static int fk_run_bml(const char *path, long long arg) {
              * diagnostics instead of a cached tombstone. */
             fk_diag_path("warning", sym_path,
                     "cached image carries a refusal mark; re-lowering fresh");
-        } else if (recorded >= 0 && fk_src_load_fkb(fkb_path)) {
+        } else if (recorded >= 0 &&
+                   fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
             if (recorded > 0) {
                 fk_diag_path("warning", sym_path,
                         "cached image was compiled with errors; fix the .bml and rerun to clear");
             }
             int rc = fk_run_loaded_program_image(arg);
             return recorded > 0 && rc == 0 ? 1 : rc;
+        } else {
+            fk_diag_path("warning", fkb_path,
+                    "bml cache does not match today's bytes; re-lowering");
         }
-        fk_diag_path("warning", fkb_path, "bml cache incomplete or unusable; re-lowering");
-    }
-    long long low_len = 0;
-    char *low = fk_bml_lower_to_mem(path, &low_len);
-    if (low == 0) {
-        return 2;
-    }
-    char expected_source_hash[FK_SRC_HASH_CAP];
-    long long unit_mtime = 0;
-    if (!fk_src_load_unit_buffer(path, low, low_len, src_m,
-            expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
-        return 2;
     }
     fk_src_reset_compile_state();
     fk_src_compile_current_unit(path, fkb_path, sym_path, unit_mtime,
