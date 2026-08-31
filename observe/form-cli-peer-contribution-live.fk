@@ -109,20 +109,60 @@
     ; Drain all work already made present by this bell. A failed durable write
     ; returns to the bell boundary with its stage intact; another wake retries
     ; the exact bytes without another model turn.
-    (defn fcpctl-drain (state budget mlx-reservation turn)
+    ; Per-turn context recycling: the floor is the position right after
+    ; bootstrap admission, with the linear layers' recurrent conv/delta
+    ; bytes copied aside on the device (q38-state-mark). After every
+    ; COMPLETED turn -- staged continuations keep their ground -- the
+    ; recurrent bytes are restored and the session returns to the floor
+    ; position, so shared context stops accumulating across turns and
+    ; the crowdfade wall never approaches. Cross-turn memory lives in
+    ; the durable spools, where it always lived.
+    (defn fcpctl-sess-with-pos (sess pos)
+        (fcms-session (fcms-status sess) (fcms-reason sess) (fcms-path sess)
+            (fcms-src sess) (fcms-ctx sess) (fcms-sts sess) (fcms-maxpos sess)
+            pos (fcms-pending sess) (fcms-stopped? sess) (fcms-prompt-ids sess)
+            (fcms-generated-ids sess) (fcms-injected-ids sess)
+            (fcms-observations sess)))
+    (defn fcpctl-floor (state)
+        (do
+            (let sess (fcpct-session state))
+            (let ctx (fcms-ctx sess))
+            (let spare (q38-spare-state (nth ctx 2)))
+            (let m (q38-state-mark (nth ctx 0) (fcms-sts sess) spare (nth ctx 2)))
+            (fcpctl-int "recycle-floor-pos" (fcms-pos sess))
+            (fcpctl-int "recycle-marked-lanes" m)
+            (list spare (fcms-pos sess))))
+    (defn fcpctl-recycle (state floor)
+        (do
+            (let sess (fcpct-session state))
+            (let ctx (fcms-ctx sess))
+            (let r (q38-state-restore (nth ctx 0) (fcms-sts sess) (nth floor 0) (nth ctx 2)))
+            (fcpctl-int "recycled-to-pos" (nth floor 1))
+            (fcpct-with state (fcpct-transport state)
+                (fcpctl-sess-with-pos sess (nth floor 1))
+                (fcpct-staged state) (fcpct-completed state)
+                (fcpct-contributions state))))
+    (defn fcpctl-recycle-if-grown (state floor)
+        (if (nothing? (fcpct-staged state))
+            (if (gt (fcms-pos (fcpct-session state)) (nth floor 1))
+                (fcpctl-recycle state floor)
+                state)
+            state))
+
+    (defn fcpctl-drain (state budget mlx-reservation turn floor)
         (do
             (let result (fcpctl-observed-turn state budget mlx-reservation turn))
-            (let next (fcpct-result-state result))
+            (let next (fcpctl-recycle-if-grown (fcpct-result-state result) floor))
             (if (str_eq (fcpct-result-signal result) "failure") next
             (if (not (nothing? (fcpct-staged next)))
-                (fcpctl-drain next budget mlx-reservation (add turn 1))
+                (fcpctl-drain next budget mlx-reservation (add turn 1) floor)
             (if (gt (len (fcpat-pending (fcpct-transport next))) 0)
-                (fcpctl-drain next budget mlx-reservation (add turn 1))
+                (fcpctl-drain next budget mlx-reservation (add turn 1) floor)
             (if (not (str_eq (fcpct-result-signal result) "nothing"))
-                (fcpctl-drain next budget mlx-reservation (add turn 1))
+                (fcpctl-drain next budget mlx-reservation (add turn 1) floor)
                 next))))))
 
-    (defn fcpctl-loop (state bell budget mlx-reservation turn)
+    (defn fcpctl-loop (state bell budget mlx-reservation turn floor)
         (do
             (fcpctl-line "ready" "1")
             (let wake (sbt-bell-wait bell))
@@ -134,9 +174,9 @@
                     (fcpctl-int "release-ok" released)
                     released)
                 (do
-                    (let next (fcpctl-drain state budget mlx-reservation turn))
+                    (let next (fcpctl-drain state budget mlx-reservation turn floor))
                     (fcpctl-loop next bell budget mlx-reservation
-                        (add turn 1))))))
+                        (add turn 1) floor)))))
 
     (let model-path (read_line))
     (let task-path (read_line))
@@ -185,4 +225,5 @@
             (fcpctl-line "recipe-surface" recipe-surface)
             (fcpctl-int "recovered-task-keys"
                 (len (fcpct-recovery-keys state)))
-            (fcpctl-loop state bell budget mlx-reservation 1))))
+            (let floor (fcpctl-floor state))
+            (fcpctl-loop state bell budget mlx-reservation 1 floor))))
