@@ -6618,11 +6618,61 @@ static void fk_fn_reserve(long long needed) {
     fk_fn_capacity = next;
 }
 #define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as the former top-function-symbol cap), not a fundamental limit. 262144 STANDS (2026-07-18): a doubling probe disproved a capacity misread — the match-switch band's fill died at the SAME source position at 2x budget, exposing fk_sparse's stray-rparen zero-advance mint spin (fixed in the bare-symbol path), not honest growth; the source-compiler family's full ~514KB prelude closure parses well within 256K nodes. Measure (does the fill position move with the cap?) before raising. */
-#define FK_PARSE_BUF_CAP 16777216 /* fk_buf: scratch buffer for source artifact reads. Raised 1048576->16777216 (2026-07-16): the v4 .fkb signed lane is 9 bytes (was 5), and a measured band-chain artifact (program-image-fkb-byte-decode-band.fkb, 1,292,944 bytes) exceeded the old 1MiB cap, so fresh caches died on reload with "artifact exceeds FK_PARSE_BUF_CAP". Worst case bounded by FK_AST_NODE_CAP (262144) * 4 lanes * 9B = ~9.4MB plus strings/symbols, so 16MiB holds the format at current capacity constants. */
 static long long fk_node_count;
 static long long fk_ast_full; /* set once when the AST node table overflows; halts the parse (fk_spos:=fk_slen) so the collect-and-continue recovery cannot spin re-minting sentinels forever. Reset per run. */
 static long long fk_node[FK_AST_NODE_CAP][4];
-static char fk_buf[FK_PARSE_BUF_CAP];
+/* Artifact/source bytes are scratch, not a language limit. The old fixed 16MiB
+ * array made a valid `.fkb` turn cold again merely by crossing a historical
+ * process-size number. Keep one reusable high-water buffer, grown geometrically
+ * only when a real file needs it; allocation failure remains the honest limit. */
+static char *fk_buf;
+static long long fk_buf_capacity;
+static int fk_buf_reserve(long long needed) {
+    if (needed <= fk_buf_capacity) {
+        return 1;
+    }
+    if (needed < 0) {
+        return 0;
+    }
+    long long next = fk_buf_capacity > 0 ? fk_buf_capacity : 65536;
+    while (next < needed) {
+        if (next > 4611686018427387903LL) {
+            next = needed;
+            break;
+        }
+        next = next * 2;
+    }
+    char *grown = realloc(fk_buf, (unsigned long)next);
+    if (grown == 0) {
+        return 0;
+    }
+    fk_buf = grown;
+    fk_buf_capacity = next;
+    return 1;
+}
+static long long fk_read_all_dynamic(int fd, long long expected) {
+    if (expected < 65536) {
+        expected = 65536;
+    }
+    if (!fk_buf_reserve(expected)) {
+        return -3;
+    }
+    long long total = 0;
+    while (1) {
+        if (total == fk_buf_capacity && !fk_buf_reserve(fk_buf_capacity + 1)) {
+            return -3;
+        }
+        long long got = read(fd, fk_buf + total,
+                             (unsigned long)(fk_buf_capacity - total));
+        if (got > 0) {
+            total = total + got;
+        } else if (got == 0) {
+            return total;
+        } else if (errno != EINTR) {
+            return -1;
+        }
+    }
+}
 static long long fk_pos;
 extern int open(const char *, int, ...);
 extern long long read(int, void *, unsigned long);
@@ -11356,11 +11406,12 @@ static int fk_src_collect_file(const char *path, long long parent_idx) {
         fk_diag_path("error", path, "dependency source could not be opened");
         return 0;
     }
-    long long got = fk_read_all_bounded(fd, fk_buf, FK_PARSE_BUF_CAP - 1);
+    long long got = fk_read_all_dynamic(fd, size + 1);
     close(fd);
     if (got < 0) {
-        if (got == -2) {
-            fk_diag_path("error", path, "dependency source exceeds FK_PARSE_BUF_CAP");
+        if (got == -3) {
+            fk_diag_path("error", path,
+                    "dependency source could not grow the dynamic read buffer");
         } else {
             fk_diag_path("error", path, "dependency source could not be read");
         }
@@ -12082,7 +12133,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     if (fd < 0) {
         return 0;
     }
-    long long got = fk_read_all_bounded(fd, fk_buf, FK_PARSE_BUF_CAP);
+    long long got = fk_read_all_dynamic(fd, fk_path_size_raw(fkb_path));
     close(fd);
     if (got < 0) {
         return 0;
@@ -12278,11 +12329,12 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     if (fd < 0) {
         return 0;
     }
-    long long got = fk_read_all_bounded(fd, fk_buf, FK_PARSE_BUF_CAP);
+    long long got = fk_read_all_dynamic(fd, fk_path_size_raw(fkb_path));
     close(fd);
     if (got < 0) {
         fk_fkb_begin(0);
-        fk_fkb_mark_bad("artifact exceeds FK_PARSE_BUF_CAP or is unreadable");
+        fk_fkb_mark_bad(got == -3 ? "artifact dynamic read allocation failed"
+                                  : "artifact is unreadable");
         return 0;
     }
     fk_fkb_begin(got);
