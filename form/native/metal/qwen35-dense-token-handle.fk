@@ -1022,6 +1022,54 @@
         (kth-stream-state (nth geo 21) (nth geo 22) (nth geo 1) (nth geo 23)
                           (nth geo 3) (nth geo 5) (nth geo 4) (nth geo 20) (nth geo 18)))
 
+    ; ================= per-turn context recycling =================
+    ; The stream state holds two different truths. Full-attention layers
+    ; keep position-indexed K/V (written at pos*kvd, read to pos+1), so
+    ; they rewind by pos alone -- later turns overwrite the reused
+    ; positions. Linear layers keep conv/delta RECURRENT state, which is
+    ; cumulative and knows no position -- returning to a mark means
+    ; copying those bytes aside at the mark and copying them back at the
+    ; recycle. Both copies run device-side through the already-proven
+    ; copy kernel (pipeline 32); nothing crosses the CPU membrane.
+    (defn q38-recur-conv-n (geo) (mul (nth geo 1) (nth geo 23)))
+    (defn q38-recur-delta-n (geo) (mul (mul (nth geo 3) (nth geo 5)) (nth geo 4)))
+    (defn q38-spare-go (l n interval convn deltan acc)
+        (if (ge l n) acc
+            (q38-spare-go (add l 1) n interval convn deltan
+                (append acc (if (kth-full? l interval)
+                    (list (list 0 0))
+                    (list (list (metal_buf_alloc (mul convn 4))
+                                (metal_buf_alloc (mul deltan 4)))))))))
+    (defn q38-spare-state (geo)
+        (q38-spare-go 0 (nth geo 21) (nth geo 22)
+            (q38-recur-conv-n geo) (q38-recur-delta-n geo) (empty)))
+    (defn q38-copy-buf (ps src dst n)
+        (metal_enqueue (nth ps 32) (kth-b16 (list src dst) (list n 0)) n))
+    (defn q38-recur-pair (ps a b convn deltan)
+        (do (let c1 (q38-copy-buf ps (nth a 0) (nth b 0) convn))
+            (let c2 (q38-copy-buf ps (nth a 1) (nth b 1) deltan))
+            2))
+    (defn q38-recur-go (ps sts spare convn deltan fwd acc)
+        (if (eq (len sts) 0) acc
+            (q38-recur-go ps (tail sts) (tail spare) convn deltan fwd
+                (add acc (if (gt (nth (head spare) 0) 0)
+                    (if (eq fwd 1)
+                        (q38-recur-pair ps (head sts) (head spare) convn deltan)
+                        (q38-recur-pair ps (head spare) (head sts) convn deltan))
+                    0)))))
+    (defn q38-recur-sweep (ps sts spare geo fwd)
+        (do (let n (q38-recur-go ps sts spare (q38-recur-conv-n geo) (q38-recur-delta-n geo) fwd 0))
+            (metal_submit)
+            (metal_sync)
+            n))
+    (defn q38-state-mark (ps sts spare geo) (q38-recur-sweep ps sts spare geo 1))
+    (defn q38-state-restore (ps sts spare geo) (q38-recur-sweep ps sts spare geo 0))
+    (defn q38-free-spare-row (row)
+        (add (q38-free-handle (nth row 0)) (q38-free-handle (nth row 1))))
+    (defn q38-free-spare (spare)
+        (if (eq (len spare) 0) 0
+            (add (q38-free-spare-row (head spare)) (q38-free-spare (tail spare)))))
+
     ; A REPL can select and run more than one model in one carrier lifetime.  Every
     ; per-run allocation and no-copy tensor view therefore has an explicit Form
     ; closer; only content-addressed pipeline handles remain cached by the carrier.

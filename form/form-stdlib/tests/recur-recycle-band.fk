@@ -1,0 +1,38 @@
+; recur-recycle-band.fk — per-turn context recycling holds its ground:
+; recurrent conv/delta bytes marked aside, scribbled over, restored
+; byte-exact, on the device, through the proven copy kernel. A tiny
+; synthetic three-layer state (two linear, one full) stands in for the
+; model; full-layer K/V needs no restoring because pos indexes it.
+; PROOF LEVEL: FKWU-STAGED (needs the metal host; walkers hold no device)
+; Expected: 63
+; preludes: form-stdlib/core.fk native/metal/qwen35-dense-token-handle.fk
+(do
+    (defn rrb-bit (ok bit) (if ok bit 0))
+    (defn rrb-zeros (n acc) (if (le n 0) acc (rrb-zeros (sub n 1) (cons 0 acc))))
+    (defn rrb-fill (n word acc) (if (le n 0) acc (rrb-fill (sub n 1) word (str_concat acc (md-le32 word)))))
+    (if (eq (str_len (metal_status)) 0) 0
+    (do
+        ; layers: 0,1 linear (conv 4x2=8 el, delta 2x2x2=8 el), 2 full (kv 4x4)
+        (let geo (list 0 4 0 2 2 2 0 0 0 0 0 0 0 0 0 0 0 0 4 0 4 3 3 2))
+        (let ps (append (rrb-zeros 32 (empty))
+            (list (metal_pipeline (str_concat "#include <metal_stdlib>\nusing namespace metal;\n" (q38-copysoff-msl "form_copy_soff_f32")) "form_copy_soff_f32"))))
+        (let sts (kth-stream-state 3 3 4 2 2 2 2 4 4))
+        (let spare (q38-spare-go 0 3 3 8 8 (empty)))
+        (let a (rrb-fill 8 1065353216 ""))
+        (let b (rrb-fill 8 3212836864 ""))
+        (let w1 (metal_buf_write (nth (nth sts 0) 0) 0 a))
+        (let w2 (metal_buf_write (nth (nth sts 0) 1) 0 b))
+        (let marked (q38-state-mark ps sts spare geo))
+        (let s1 (metal_buf_write (nth (nth sts 0) 0) 0 (rrb-fill 8 0 "")))
+        (let s2 (metal_buf_write (nth (nth sts 0) 1) 0 (rrb-fill 8 0 "")))
+        (let restored (q38-state-restore ps sts spare geo))
+        (let ra (metal_buf_read (nth (nth sts 0) 0) 0 32))
+        (let rb (metal_buf_read (nth (nth sts 0) 1) 0 32))
+        (let freed (q38-free-spare spare))
+        (sum (list
+            (rrb-bit (eq (len spare) 3) 1)
+            (rrb-bit (eq (nth (nth spare 2) 0) 0) 2)
+            (rrb-bit (eq marked 4) 4)
+            (rrb-bit (eq restored 4) 8)
+            (rrb-bit (str_eq ra a) 16)
+            (rrb-bit (str_eq rb b) 32))))))
