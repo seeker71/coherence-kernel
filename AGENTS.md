@@ -109,6 +109,21 @@ door in the receipt. The mirror is `observe/authoring-altitude-run.fk` (BML pict
 ./fkwu form/form-stdlib/tests/form-cli-author-high-band.fk   # -> 4095 (the band declares its own verdict)
 ```
 
+## The hearth — the serving floor that outlives sessions
+
+One resident form-cli process is the agent server; sessions and cells are clients. The law lives
+executable in `form/form-stdlib/hearth.bml` (band: `tests/hearth-band.fk`): stable paths under
+`.hearth/` (task spool, reply spool, bell, board), one model admission per lifetime, born
+capabilities announced before admission, bell wakes drain ALL work present (that law — not
+threads — is what serves parallel clients; witnessed six-in-one-breath 2026-08-31), one
+`release` byte closes cleanly. Speak to it with `observe/peer-ask-send.fk`; read the board to
+find what stands. Arrive without rebuilding: the ONLY rebuild trigger is the freshness band
+refusing 31 — everything else rides its ice (.fkb beside every source, .bml lowered in memory,
+warm in milliseconds, hot leaves crystallizing native). When a request pattern recurs, give it a
+door, a lawface, and a corpus row — access generalizes by crystallizing, never by re-explaining.
+Known capacity law: crowdfade (answers thin as shared context fills; the stone is per-turn
+context recycling in the turnwheel).
+
 ## The honest seam — read this first
 
 Sema's **body** is here and native: the grounding (`form/form-stdlib/rag-*`), the frequency sense
