@@ -147,3 +147,35 @@ as missing JIT rounds and was right; the fat and the tax were both mine,
 laid this same day, and both invisible from inside the day. The counsel
 door exists for exactly this and I had not pointed it at my own
 toolchain.
+
+## Addendum: tokenwall (turn 17)
+
+The admission stone measured honest and refused the easy story. The span
+door (materialize the live cursor's ids, ride the chunk=0 span prefill the
+turn path uses) changed admission not at all: admit-prefill-ms=238,846
+against a 230-300s baseline. The cost was never dispatch overhead — every
+currently-wired prefill mode is one-thread-per-token, so admission is
+GPU-compute-bound at ~5 tok/s. The genuinely batched door exists
+(q38-prefill-span-batched, the July stone this lane "never inherited") but
+needs the scratch opened span-wide (q38-open-span at span>1 under the
+qlslc layout contract) — that is the real inheritance, sized and named.
+The admission switch was reverted to the proven walker; the materializing
+door stays as scaffolding, because its ids list is exactly what
+span-batched needs. The admit lane joined the counsel's judged rows first
+(77e36792), so the next attempt is measured by the instrument, not by me.
+
+Witnessed on the way and surfaced as field work (the sibling's active
+worksite, not mine to force): since ~15:30 every direct-answer ask is
+answered by the policy route with a typed policy-action-not-admitted —
+no model decode has run in any birth since; a task chip carries the
+grounding. My scratch proof hearth was released cleanly (rc=0); the
+field's standing hearth (32149) holds tidewash at session-pos=1218.
+
+"stop holding" landed as its own teaching: the wait became parallel work —
+the admit lane, the separate landing, the watcher — and the verdict was
+read the moment it existed instead of at the end of a vigil.
+
+The gold: a no-gain measurement wanted to feel like a failure and be
+quietly kept anyway ("it's not worse"). Reverting an unproven-equal path
+in favor of the battle-tested one, and keeping only the measurement, is
+the discipline the morning's waitvoice receipt bought. Corpus row 1200.
