@@ -1,0 +1,97 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-cli-peer-provider-receipt.bml -- a scalar provider boundary inside
+// the Form turnwheel.
+//
+// A remote provider is not invoked here.  When one has already crossed its
+// own boundary, it may offer only a settled call count and token total.  The
+// fixed grammar maps `goal=embodied-v1` to the BML-owned canonical node; task
+// bytes never nominate a NodeID, root, session, model, or path.
+//
+//////////////////////////////////////////////////////////////////////
+
+// preludes: form-stdlib/form-cli-peer-stream-ingress.fk form-stdlib/bml/form-cli-remote-token-evidence.bml form-stdlib/bml/form-cli-embodied-goal-grammar.bml
+
+section [form.bml] {
+    class FormCliPeerProviderReceipt {
+        field ProviderReceiptRoute = "provider-receipt";
+        field ProviderReceiptCarrier = "form-provider-receipt";
+        field ProviderReceiptVersion = "form-cli-peer-provider-receipt-v1";
+        field ProviderReceiptGoal = "embodied-v1";
+        field ProviderReceiptOpen = "<|form:provider-receipt|>\n";
+        field ProviderReceiptClose = "\n<|/form:provider-receipt|>";
+        field ProviderReceiptGoalPrefix = "goal=";
+        field ProviderReceiptSettledLine = "settled=1";
+        field ProviderReceiptCallsPrefix = "provider-calls=";
+        field ProviderReceiptTokensPrefix = "remote-tokens=";
+
+        def fcprr-route() = ProviderReceiptRoute();
+        def fcprr-carrier() = ProviderReceiptCarrier();
+        def fcprr-version() = ProviderReceiptVersion();
+        def fcprr-goal() = ProviderReceiptGoal();
+        def fcprr-open() = ProviderReceiptOpen();
+        def fcprr-close() = ProviderReceiptClose();
+        def fcprr-goal-prefix() = ProviderReceiptGoalPrefix();
+        def fcprr-settled-line() = ProviderReceiptSettledLine();
+        def fcprr-calls-prefix() = ProviderReceiptCallsPrefix();
+        def fcprr-tokens-prefix() = ProviderReceiptTokensPrefix();
+        def fcprr-canonical-positive?(text) = if not(str_eq(int_to_str(str_to_int(text)), text)) then 0 else if le(str_to_int(text), 0) then 0 else 1;
+        def fcprr-split(text) = split-on(text, "\n");
+        def fcprr-starts?(text, prefix) = eq(str_find(text, prefix, 0), 0);
+        def fcprr-after(text, prefix) = substring(text, str_len(prefix), str_len(text));
+        def fcprr-lines(rows) = if eq(len(rows), 0) then "" else if eq(len(tail(rows)), 0) then head(rows) else str_concat(head(rows), str_concat("\n", fcprr-lines(tail(rows))));
+        def fcprr-envelope(calls, tokens) = str_concat(fcprr-open(), str_concat(fcprr-lines(list(str_concat(fcprr-goal-prefix(), fcprr-goal()), fcprr-settled-line(), str_concat(fcprr-calls-prefix(), int_to_str(calls)), str_concat(fcprr-tokens-prefix(), int_to_str(tokens)))), fcprr-close()));
+
+        // `nothing` is malformed or noncanonical incoming evidence; a valid
+        // scalar zero is intentionally impossible at this provider boundary.
+        def fcprr-parse-fields(rows) {
+            let calls = fcprr-after(nth(rows, 2), fcprr-calls-prefix());
+            let tokens = fcprr-after(nth(rows, 3), fcprr-tokens-prefix());
+            if and(fcprr-canonical-positive?(calls), fcprr-canonical-positive?(tokens)) then list(str_to_int(calls), str_to_int(tokens)) else nothing();
+        }
+        def fcprr-parse(text) {
+            let open = fcprr-open();
+            let close = fcprr-close();
+            let close_at = sub(str_len(text), str_len(close));
+            let body = if lt(close_at, str_len(open)) then "" else substring(text, str_len(open), close_at);
+            let rows = fcprr-split(body);
+            if or(not(eq(str_find(text, open, 0), 0)), not(eq(str_find(text, close, str_len(open)), close_at))) then nothing() else if not(eq(len(rows), 4)) then nothing() else if not(str_eq(head(rows), str_concat(fcprr-goal-prefix(), fcprr-goal()))) then nothing() else if not(str_eq(nth(rows, 1), fcprr-settled-line())) then nothing() else if or(not(fcprr-starts?(nth(rows, 2), fcprr-calls-prefix())), not(fcprr-starts?(nth(rows, 3), fcprr-tokens-prefix()))) then nothing() else fcprr-parse-fields(rows);
+        }
+        def fcprr-calls(parsed) = nth(parsed, 0);
+        def fcprr-tokens(parsed) = nth(parsed, 1);
+        def fcprr-kind?(kind) = str_eq(kind, fcprr-route());
+        def fcprr-receipt(parsed) = frte-receipt(fcpdag-embodied-goal-node(), 1, frte-provider-source(), fcprr-calls(parsed), fcprr-tokens(parsed));
+        def fcprr-frame(receipt) = str_concat("<|form:remote-token-comparison|>\n", str_concat(fcprr-lines(list(str_concat("goal=", fcprr-goal()), str_concat("source=", frte-receipt-source(receipt)), str_concat("provider-calls=", int_to_str(frte-receipt-provider-calls(receipt))), str_concat("remote-tokens=", int_to_str(frte-receipt-remote-tokens(receipt))), "settled=1")), "\n<|/form:remote-token-comparison|>"));
+        def fcprr-result(session, receipt, response, signal, reason) = list(fcprr-version(), session, receipt, response, signal, reason);
+        def fcprr-session(result) = nth(result, 1);
+        def fcprr-receipt-of(result) = nth(result, 2);
+        def fcprr-response(result) = nth(result, 3);
+        def fcprr-signal(result) = nth(result, 4);
+        def fcprr-reason(result) = nth(result, 5);
+        def fcprr-result?(result) = if nothing?(result) then 0 else if not(eq(len(result), 6)) then 0 else str_eq(nth(result, 0), fcprr-version());
+        def fcprr-refused(session, reason) = fcprr-result(session, nothing(), "", "choice", reason);
+        def fcprr-admit(session, parsed) {
+            let receipt = fcprr-receipt(parsed);
+            fcprr-result(session, receipt, fcprr-frame(receipt), "value", "settled-provider-receipt-admitted");
+        }
+        def fcprr-run(session, kind, text) {
+            let parsed = fcprr-parse(text);
+            if not(fcprr-kind?(kind)) then fcprr-refused(session, "provider-receipt-requires-provider-receipt-task") else if nothing?(parsed) then fcprr-refused(session, "provider-receipt-shape-refused") else fcprr-admit(session, parsed);
+        }
+        def fcprr-value-present?(result) = if nothing?(fcprr-receipt-of(result)) then 0 else 1;
+        def fcprr-value(result) = if nothing?(fcprr-receipt-of(result)) then nothing() else frte-receipt-remote-tokens(fcprr-receipt-of(result));
+        def fcprr-tool-status(result) = if nothing?(fcprr-receipt-of(result)) then "choice;model=0;provider=0" else str_concat("value;model=0;provider-calls=", str_concat(int_to_str(frte-receipt-provider-calls(fcprr-receipt-of(result))), str_concat(";remote-tokens=", int_to_str(frte-receipt-remote-tokens(fcprr-receipt-of(result))))));
+        def fcprr-peer(result) = fcpa-result-full(fcprr-session(result), result, fcprr-response(result), 0, 0, fcprr-route(), 0, fcprr-tool-status(result), fcprr-carrier(), fcprr-value-present?(result), fcprr-value(result), 0, 0, if str_eq(fcprr-signal(result), "value") then "ingress,validate,release" else "choice,release", 0);
+        def fcprr-run-peer-task(stream, session, task_node, task) {
+            let result = fcprr-run(session, fcpsi-task-kind(task), fcpsi-task-text(task));
+            let peer = fcprr-peer(result);
+            let candidate = fcpsi-peer-result(stream, task_node, fcpa-response(peer), 0, nothing());
+            list(fcpsi-result-state(candidate), peer, candidate);
+        }
+        def fcprr-run-peer(stream, session, task_node) {
+            let task = fcpsi-find-task(fcpsi-tasks(stream), task_node);
+            if nothing?(task) then list(stream, nothing(), fcpsi-result(stream, "nothing", 0, nothing(), "task-node-absent", nothing())) else fcprr-run-peer-task(stream, session, task_node, task);
+        }
+    }
+    0;
+}
