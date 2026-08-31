@@ -1,0 +1,162 @@
+; form-cli-peer-grounded-weave-answer.fk -- one plural source grammar turns
+; several admission-born symbols into one verified current-source prompt for
+; the resident local model.  Task bytes are symbol coordinates and a question,
+; never paths, roots, artifacts, or an authority escalation.
+;
+; Input body grammar: <symbol> + <symbol> [+ ...] :: <question>
+; Proven by: form-stdlib/tests/form-cli-peer-grounded-weave-answer-band.fk
+;
+; preludes: form-stdlib/form-cli-peer-grounded-symbol-answer.fk
+
+(do
+    (defn fcpagw-version () "form-cli-peer-grounded-weave-answer-v1")
+    ; result = session source-evidence direct-result elapsed signal reason.
+    ; source-evidence keeps every successful prefix when a later symbol refuses.
+    (defn fcpagw-result (session source-evidence direct elapsed-ms signal reason)
+        (list (fcpagw-version) session source-evidence direct elapsed-ms signal reason))
+    (defn fcpagw-session (r) (nth r 1))
+    (defn fcpagw-source-evidence (r) (nth r 2))
+    (defn fcpagw-direct-result (r) (nth r 3))
+    (defn fcpagw-elapsed-ms (r) (nth r 4))
+    (defn fcpagw-signal (r) (nth r 5))
+    (defn fcpagw-reason (r) (nth r 6))
+    (defn fcpagw-result? (r)
+        (if (nothing? r) 0
+            (if (not (eq (len r) 7)) 0
+                (str_eq (nth r 0) (fcpagw-version)))))
+
+    ; task = status symbols question reason.  Ground remains the one-symbol
+    ; grammar; weave makes plural evidence explicit and has no symbol count cap.
+    (defn fcpagw-delimiter () " :: ")
+    (defn fcpagw-symbol-delimiter () " + ")
+    (defn fcpagw-symbols-nonempty? (symbols)
+        (if (nil? symbols) 1
+            (if (le (str_len (head symbols)) 0) 0
+                (fcpagw-symbols-nonempty? (tail symbols)))))
+    (defn fcpagw-task (text)
+        (do
+            (let at (str_find text (fcpagw-delimiter) 0))
+            (if (or (nothing? text) (lt at 1))
+                (list "choice" (list) ""
+                    "weave-requires-two-or-more-symbols-delimiter-question")
+                (do
+                    (let question-at (add at (str_len (fcpagw-delimiter))))
+                    (let symbol-text (substring text 0 at))
+                    (let question (substring text question-at (str_len text)))
+                    (let symbols (split-on symbol-text (fcpagw-symbol-delimiter)))
+                    (if (or (lt (len symbols) 2)
+                            (or (le (str_len question) 0)
+                                (eq (fcpagw-symbols-nonempty? symbols) 0)))
+                        (list "choice" symbols question
+                            "weave-requires-two-or-more-symbols-delimiter-question")
+                        (list "value" symbols question "weave-task-ready"))))))
+    (defn fcpagw-task-status (task) (nth task 0))
+    (defn fcpagw-task-symbols (task) (nth task 1))
+    (defn fcpagw-task-question (task) (nth task 2))
+    (defn fcpagw-task-reason (task) (nth task 3))
+
+    ; source-evidence = signal symbol-results observations reason.  Source
+    ; evaluation stops at the first nonvalue/nonhit; that preserves the known
+    ; prefix and guarantees a later symbol never silently reaches the model.
+    (defn fcpagw-evidence (signal symbol-results observations reason)
+        (list signal symbol-results observations reason))
+    (defn fcpagw-evidence-signal (e) (nth e 0))
+    (defn fcpagw-evidence-symbol-results (e) (nth e 1))
+    (defn fcpagw-evidence-observations (e) (nth e 2))
+    (defn fcpagw-evidence-reason (e) (nth e 3))
+    (defn fcpagw-resolve (session symbols source-ctx question)
+        (if (nil? symbols)
+            (fcpagw-evidence "value" (list) (list) "weave-current-sources-hit")
+            (do
+                (let symbol-result (fcpssa-run session "source-symbol" (head symbols)
+                    source-ctx (fcpalsa-source-epoch source-ctx)))
+                (if (not (str_eq (fcpssa-signal symbol-result) "value"))
+                    (fcpagw-evidence (fcpssa-signal symbol-result)
+                        (list symbol-result) (list) (fcpssa-reason symbol-result))
+                    (do
+                        (let observation (fcpagsa-observe-current source-ctx
+                            symbol-result question))
+                        (if (not (str_eq (fcpagsa-observation-status observation) "hit"))
+                            (fcpagw-evidence (fcpagsa-observation-status observation)
+                                (list symbol-result) (list observation)
+                                (fcpagsa-observation-reason observation))
+                            (do
+                                (let rest (fcpagw-resolve session (tail symbols)
+                                    source-ctx question))
+                                (fcpagw-evidence (fcpagw-evidence-signal rest)
+                                    (cons symbol-result
+                                        (fcpagw-evidence-symbol-results rest))
+                                    (cons observation
+                                        (fcpagw-evidence-observations rest))
+                                    (fcpagw-evidence-reason rest)))))))))
+    (defn fcpagw-observation-spans (observations)
+        (if (nil? observations) ""
+            (str_concat (fcpagsa-observation-span (head observations))
+                (if (nil? (tail observations)) ""
+                    (str_concat "\n\n" (fcpagw-observation-spans
+                        (tail observations)))))))
+    (defn fcpagw-model-task (question evidence)
+        (str_concat
+            "Use only these validated Form current-source observations. If they do not establish the requested fact, say: source observation insufficient. Do not invent paths, source text, or facts.\n"
+            (str_concat (fcpagw-observation-spans
+                (fcpagw-evidence-observations evidence))
+                (str_concat "\nQuestion: " question))))
+    (defn fcpagw-refused (session reason)
+        (fcpagw-result session (nothing) (nothing) 0 "choice" reason))
+    (defn fcpagw-run (session task-text source-ctx turn)
+        (do
+            (let task (fcpagw-task task-text))
+            (if (not (str_eq (fcpagw-task-status task) "value"))
+                (fcpagw-refused session (fcpagw-task-reason task))
+                (do
+                    (let started (now_unix_ms))
+                    (let evidence (fcpagw-resolve session
+                        (fcpagw-task-symbols task) source-ctx
+                        (fcpagw-task-question task)))
+                    (if (not (str_eq (fcpagw-evidence-signal evidence) "value"))
+                        (fcpagw-result session evidence (nothing)
+                            (sub (now_unix_ms) started)
+                            (fcpagw-evidence-signal evidence)
+                            (fcpagw-evidence-reason evidence))
+                        (do
+                            (let direct (fcpdaa-run session "direct-answer"
+                                (fcpagw-model-task (fcpagw-task-question task) evidence)
+                                (fcpdaa-remaining-capacity session)))
+                            (fcpagw-result (fcpdaa-session direct) evidence direct
+                                (sub (now_unix_ms) started) (fcpdaa-signal direct)
+                                (fcpdaa-reason direct))))))))
+    (defn fcpagw-lookup-count (result)
+        (if (nothing? (fcpagw-source-evidence result)) 0
+            (add (len (fcpagw-evidence-symbol-results
+                        (fcpagw-source-evidence result)))
+                 (len (fcpagw-evidence-observations
+                        (fcpagw-source-evidence result))))))
+    (defn fcpagw-tool-status (result)
+        (do
+            (let evidence (fcpagw-source-evidence result))
+            (let sources (if (nothing? evidence) 0
+                (len (fcpagw-evidence-symbol-results evidence))))
+            (let current (if (nothing? evidence) "not-entered"
+                (fcpagw-evidence-signal evidence)))
+            (let model (if (nothing? (fcpagw-direct-result result)) "not-entered"
+                (fcpdaa-signal (fcpagw-direct-result result))))
+            (str_concat "symbols=" (str_concat (int_to_str sources)
+                (str_concat ";current-source=" (str_concat current
+                    (str_concat ";model=" (str_concat model
+                        (str_concat ";lookups="
+                            (int_to_str (fcpagw-lookup-count result)))))))))))
+    (defn fcpagw-response (result)
+        (if (nothing? (fcpagw-direct-result result)) ""
+            (fcpdaa-response (fcpagw-direct-result result))))
+    (defn fcpagw-lifecycle (result)
+        (if (nothing? (fcpagw-direct-result result))
+            "source-symbol,current-source,release"
+            (str_concat "source-symbol,current-source,"
+                (fcpdaa-lifecycle (fcpagw-direct-result result)))))
+    (defn fcpagw-peer (result)
+        (fcpa-result-full (fcpagw-session result) result
+            (fcpagw-response result) (fcpagw-elapsed-ms result) 0
+            "grounded-weave" 0 (fcpagw-tool-status result)
+            "form-native-current-source-metal-jit" 0 (nothing) 0 0
+            (fcpagw-lifecycle result) (fcpagw-lookup-count result)))
+    0)
