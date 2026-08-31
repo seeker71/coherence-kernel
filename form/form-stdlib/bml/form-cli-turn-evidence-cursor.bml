@@ -1,0 +1,79 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-cli-turn-evidence-cursor.bml — scannerless, cursor-owned discovery
+// for a completed local evidence row.
+//
+// The rollout stays private.  This cell moves only byte coordinates, task
+// identifiers, and the existing collector's typed status; prompt and answer
+// text never leave the reader.  It replaces repeated host wakeups with one
+// Form-native tail recursion over the already-bounded slice reader.
+//
+//////////////////////////////////////////////////////////////////////
+
+// preludes: form-stdlib/form-cli-turn-evidence-live.fk
+
+section [form.bml] {
+    class FormCliTurnEvidenceCursor {
+        field Rule = "scannerless-backward-cursor-runs-to-terminal-in-one-form-call";
+        field PrivacyRule = "only-coordinates-turn-id-and-status-leave-the-reader";
+        field NoTargetRule = "empty-target-selects-the-nearest-completed-turn-without-emitting-its-content";
+
+        def fctec-rule() = Rule();
+        def fctec-privacy-rule() = PrivacyRule();
+        def fctec-no-target-rule() = NoTargetRule();
+
+        // result = found? absolute-event-offset window-end.  `found?=0` and
+        // `offset=-1` are a whole answer, distinct from the numeric offset 0.
+        def fctec-result(found, at, end) = list("form-cli-turn-evidence-cursor-v1", found, at, end);
+        def fctec-found?(result) = nth(result, 1);
+        def fctec-at(result) = nth(result, 2);
+        def fctec-end(result) = nth(result, 3);
+        def fctec-result?(result) = if nothing?(result) then 0 else if not(eq(len(result), 4)) then 0 else str_eq(nth(result, 0), "form-cli-turn-evidence-cursor-v1");
+
+        // Each recursive seat reads the same established bounded slice.  The
+        // recursion itself owns progress, so a 222 MiB inherited cursor does
+        // not require 222 process wakes or 222 external tool calls.
+        def fctec-seek(path, target, end) {
+            let start = fctel-max(0, sub(end, fctel-chunk-bytes()));
+            let body = read_file_slice(path, start, sub(end, start));
+            let found = fctel-find-last-line-event(body, "task_complete", target, 0, -1);
+            if ge(found, 0) then fctec-result(1, add(start, found), end) else if eq(start, 0) then fctec-result(0, -1, 0) else fctec-seek(path, target, start);
+        }
+
+        def fctec-turn-id-at(path, at) = if lt(at, 0) then "" else fctel-json-string-after(read_file_slice(path, at, 512), "\"turn_id\":", 0);
+        def fctec-start-cursor(size) = fctel-discovery-cursor(fctel-read-discovery(), size);
+
+        // Land the one discovered coordinate back into the existing collector
+        // before asking it to parse the selected task.  That keeps the proven
+        // 400k progress rows, validation, and durable observed-row ABI intact.
+        def fctec-refresh-no-complete() {
+            write_file_text(fctel-discovery-path(), "");
+            "turn-evidence-refresh=withheld no-complete-turn";
+        }
+        def fctec-refresh-missing-turn() = "turn-evidence-refresh=withheld missing-turn-id";
+        def fctec-refresh-selected(path, size, found, turn) {
+            write_file_text(fctel-target-turn-path(), turn);
+            write_file_text(fctel-discovery-path(), fctel-discovery-row(size, fctec-end(found)));
+            fctel-refresh-once(path);
+        }
+        def fctec-refresh-found(path, size, found) {
+            let turn = fctec-turn-id-at(path, fctec-at(found));
+            if str_eq(turn, "") then fctec-refresh-missing-turn() else fctec-refresh-selected(path, size, found, turn);
+        }
+        def fctec-refresh-nonempty(path, size, target) {
+            let found = fctec-seek(path, target, fctec-start-cursor(size));
+            if eq(fctec-found?(found), 0) then fctec-refresh-no-complete() else fctec-refresh-found(path, size, found);
+        }
+        def fctec-refresh(path) {
+            let size = file_size(path);
+            let target = if gt(file_size(fctel-target-turn-path()), 0) then fctel-trim-end(read_file(fctel-target-turn-path())) else "";
+            if le(size, 0) then "turn-evidence-refresh=withheld" else fctec-refresh-nonempty(path, size, target);
+        }
+
+        def fctec-refresh-bound() {
+            let path = fctel-bound-path();
+            if str_eq(path, "") then "turn-evidence-refresh=withheld" else fctec-refresh(path);
+        }
+    }
+    0;
+}
