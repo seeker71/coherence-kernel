@@ -12855,7 +12855,8 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     fk_srctext[0] = 0;
     i = 1;
     while (i < fk_src_dep_count) {
-        if (fk_src_dep_parent[i] == 0) {
+        if (fk_src_dep_parent[i] == 0 &&
+            !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
             char dep_fkb_path[4096];
             char dep_hash[FK_SRC_HASH_CAP];
             long long dep_end = fk_src_dep_end[i];
