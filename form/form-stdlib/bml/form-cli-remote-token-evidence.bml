@@ -27,6 +27,18 @@ section [form.bml] {
         member total: TCount;
     }
 
+    // A comparison names one task node and two settled boundary receipts.  It
+    // deliberately carries quantities and their source, never task prose,
+    // model prose, or a content hash used as bookkeeping.  A NodeID is already
+    // the body's stable, caller-born identity for this turn.
+    template ComparableRemoteTokenReceipt<TTaskNode, TCount> {
+        member taskNode: TTaskNode;
+        member settled: int;
+        member source: String;
+        member providerCalls: TCount;
+        member remoteTokens: TCount;
+    }
+
     class FormRemoteTokenEvidence {
         field EventName = "token_count";
         field LastUsageName = "last_token_usage";
@@ -36,6 +48,10 @@ section [form.bml] {
         field DiscoveryRule = "retain-native-backward-cursor-across-bound-rollout-appends";
         field ActiveRule = "last-completed-provider-call-is-pressure-not-settled-share";
         field PrivacyRule = "prompt-answer-reasoning-content-never-crosses-the-receipt";
+        field ComparisonRule = "same-task-node-settled-provider-baseline-vs-local-direct";
+        field ProviderSource = "provider-last-token-usage";
+        field LocalDirectSource = "local-direct-no-provider";
+        field ComparisonTag = "form-comparable-remote-token-receipt-v1";
 
         def frte-event-name() = EventName();
         def frte-last-usage-name() = LastUsageName();
@@ -45,8 +61,35 @@ section [form.bml] {
         def frte-discovery-rule() = DiscoveryRule();
         def frte-active-rule() = ActiveRule();
         def frte-privacy-rule() = PrivacyRule();
+        def frte-comparison-rule() = ComparisonRule();
+        def frte-provider-source() = ProviderSource();
+        def frte-local-direct-source() = LocalDirectSource();
+        def frte-comparison-tag() = ComparisonTag();
         def frte-separate-quantity-from-event?() = if str_eq(frte-boundary-rule(), "event-count-is-not-token-volume") then 1 else 0;
         def frte-last-not-cumulative?() = if str_eq(frte-last-usage-name(), "last_token_usage") then 1 else 0;
+
+        // receipt = tag task-node settled source provider-calls remote-tokens.
+        // `nothing` is absence of a comparison side, never a zero-token row.
+        def frte-receipt(taskNode, settled, source, providerCalls, remoteTokens) = list(frte-comparison-tag(), taskNode, settled, source, providerCalls, remoteTokens);
+        def frte-receipt-task-node(receipt) = nth(receipt, 1);
+        def frte-receipt-settled(receipt) = nth(receipt, 2);
+        def frte-receipt-source(receipt) = nth(receipt, 3);
+        def frte-receipt-provider-calls(receipt) = nth(receipt, 4);
+        def frte-receipt-remote-tokens(receipt) = nth(receipt, 5);
+        def frte-receipt?(receipt) = if nothing?(receipt) then 0 else if not(eq(len(receipt), 6)) then 0 else if not(str_eq(nth(receipt, 0), frte-comparison-tag())) then 0 else if not(eq(frte-receipt-settled(receipt), 1)) then 0 else if lt(frte-receipt-provider-calls(receipt), 0) then 0 else if lt(frte-receipt-remote-tokens(receipt), 0) then 0 else 1;
+        def frte-provider-baseline?(receipt) = if eq(frte-receipt?(receipt), 0) then 0 else if not(str_eq(frte-receipt-source(receipt), frte-provider-source())) then 0 else if le(frte-receipt-provider-calls(receipt), 0) then 0 else if le(frte-receipt-remote-tokens(receipt), 0) then 0 else 1;
+        def frte-local-direct?(receipt) = if eq(frte-receipt?(receipt), 0) then 0 else if not(str_eq(frte-receipt-source(receipt), frte-local-direct-source())) then 0 else if not(eq(frte-receipt-provider-calls(receipt), 0)) then 0 else if not(eq(frte-receipt-remote-tokens(receipt), 0)) then 0 else 1;
+        def frte-same-task?(baseline, candidate) = if node_eq(frte-receipt-task-node(baseline), frte-receipt-task-node(candidate)) then 1 else 0;
+        def frte-comparable?(baseline, candidate) = if eq(frte-provider-baseline?(baseline), 0) then 0 else if eq(frte-receipt?(candidate), 0) then 0 else frte-same-task?(baseline, candidate);
+        // Basis points preserve the threshold's exact 10% = 1000 bps form.
+        // Invalid or missing evidence remains nothing instead of being folded
+        // into the valid numeric zero result.
+        def frte-ratio-bps(baseline, candidate) = if eq(frte-comparable?(baseline, candidate), 0) then nothing() else floor(div(mul(frte-receipt-remote-tokens(candidate), 10000), frte-receipt-remote-tokens(baseline)));
+        def frte-under-ten-percent?(baseline, candidate) {
+            let ratio = frte-ratio-bps(baseline, candidate);
+            if nothing?(ratio) then nothing() else if le(ratio, 1000) then 1 else 0;
+        }
+        def frte-local-direct-under-ten-percent?(baseline, localDirect) = if eq(frte-local-direct?(localDirect), 0) then nothing() else frte-under-ten-percent?(baseline, localDirect);
     }
     0;
 }
