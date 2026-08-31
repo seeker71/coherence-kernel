@@ -12,6 +12,8 @@ Each canonical receipt now also has its own outer
 `<|form:token-receipt|>` BML frame before the response payload. It carries
 only goal identity, source, settled call count, and token total—the durable
 recovery substrate rather than a marker a model response can impersonate.
+On successor recovery, BML rebuilds the receipt ledger from these outer frames
+only; an identical frame after `<|form:response|>` is refused.
 
 The BML join searches only those typed receipts.  It emits a comparison frame
 only when a settled provider baseline and a settled local-direct receipt share
@@ -29,9 +31,9 @@ C-seed change happened in this movement.
 
 Witnesses:
 
-- `form-cli-peer-token-receipt-ledger-band.fk` -> `63`: matching canonical
+- `form-cli-peer-token-receipt-ledger-band.fk` -> `127`: matching canonical
   identities yield ratio `0` and under-ten-percent `1`; mismatch and absence
-  yield no comparison frame.
+  yield no comparison frame; response-embedded marker bytes do not recover.
 - `form-cli-peer-policy-route-band.fk` -> `131071`: the provider task keeps
   its non-model session, makes one durable append, and only then leaves one
   typed provider receipt in the resident ledger.
