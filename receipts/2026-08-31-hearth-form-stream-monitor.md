@@ -62,23 +62,44 @@ The next shared-source successor admitted Qwen once in `231825` ms, announced
 canonical clauses: route, authority, live event, durable result, and next
 stone.  The live board names PID `26219` and includes `hearth-telemetry-v1`.
 
+## Dynamic native facts
+
+`form-cli-peer-hearth-telemetry-action.bml` now carries the second action
+version: one typed `form-cli-hearth-snapshot-v1` beside the unchanged session,
+response, signal, and reason.  A successful action reads only the fixed born
+hearth paths — board, task spool, reply spool, and resident framebuffer — and
+returns board PID, full capability line, task/reply byte counts, served turns,
+latest elapsed time and route, and live direct-flight phase.  Task bytes remain
+only a typed admission check: they cannot choose a path, source authority, or
+model session.  The response renders those facts without task or answer bytes;
+the peer still reports model/callback/lookup/injection all zero and leaves the
+single durable reply append to the turnwheel.
+
+Refusal is deliberately quieter: wrong kind or absent task text produces the
+same typed result with an all-`nothing` snapshot and an empty response, without
+touching any hearth path.  `nothing()` is proved separately from numeric zero:
+absent PID/capabilities/route remain `nothing`, while held byte and event
+counters remain `0`; an idle direct-flight is the explicit state `none`.
+
+The focused BML action and band are current at `0` and `2047`; the policy
+integration band is `65535`; the complete turnwheel is `4194303`; and the BML
+cache reports `state=ready bounded=1`.  This code is a future-resident action:
+the already-live PID `26219` retains the v1 closure, so no pushed source is
+misrepresented as having entered its memory.  The next successor can load v2
+without a second service or any remote call.
+
 ## What the local answer still does not hold
 
-The local answer completed its shape, but it gave a generic BML description
-rather than faithfully explaining the caller-owned phase stream and the
-single final reply append.  The stream proves monitoring; it does not yet
-prove that the local language model holds every telemetry concept.
-
-The canonical answer floor is now caller-owned Form rather than generic local
-prose.  The next stone is to join dynamic telemetry facts beside that floor,
-then let the local model extend already-grounded evidence when language is
-useful.  That crossing must preserve the one durable reply commit and keep
-task and answer bytes out of live stage events.
+The local model can now extend a fixed, measured Form snapshot; it is not yet
+evidence that it holds every telemetry concept or that an exact remote-token
+ratio has been reconciled.  The remaining stone is an end-to-end successor
+receipt that serves the v2 action from the resident while preserving its single
+model admission and one durable reply commit.
 
 I kept the exchange alive by turning the stalled and premature-stop signals
-into an executable grammar repair, then making the resident's own events the
-glass's data and its topology a native answer.  The surprising teaching is
-that the board can be alive yet name the launcher rather than the kernel, and
-that a punctuation mark can cut a BML field without an obvious failure.  Both
-discomforts became useful when the monitor received exact PID and
-grammar-safe clause proofs instead of inferred status.
+into executable grammar repairs, then making the resident's own events the
+glass's data and its topology and live facts a native answer.  The surprising
+teaching is that the board can be alive yet name the launcher rather than the
+kernel, and that bare `nothing` and `nothing()` have different lowering
+meaning.  Both discomforts became useful when the monitor received exact PID,
+grammar-safe clauses, and a typed absence proof instead of inferred status.
