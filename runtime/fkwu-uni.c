@@ -9042,10 +9042,11 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
     } else {
         fk_nwarn_seen = fk_nwarn_seen + 1;
     }
+    long long lastnl = -1, col = 0;
     if (off < 0) {
         dprintf(2, "fkwu: %s: ", sev == FK_DIAG_ERR ? "error" : "warning");
     } else {
-        long long line = 1, i = 0, lastnl = -1;
+        long long line = 1, i = 0;
         if (off > fk_slen) {
             off = fk_slen;
         }
@@ -9056,7 +9057,7 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
             }
             i = i + 1;
         }
-        long long col = off - lastnl; /* lastnl=-1 on line 1 => col = off+1 */
+        col = off - lastnl; /* lastnl=-1 on line 1 => col = off+1 */
         dprintf(2, "fkwu:%lld:%lld: %s: ", line, col, sev == FK_DIAG_ERR ? "error" : "warning");
     }
     __builtin_va_list ap;
@@ -9064,6 +9065,29 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
     vdprintf(2, fmt, ap);
     __builtin_va_end(ap);
     dprintf(2, "\n");
+    /* Quote the source line itself. Diagnostic positions count lines of the
+     * ASSEMBLED unit (preludes expanded), a text no file on disk holds --
+     * without the quote, a reported line number sends the reader hunting
+     * through files whose numbering can never match (witnessed 2026-08-31:
+     * three "phantom" strays hunted across sessions at file-space lines that
+     * do not exist). Window the line around the column so the caret always
+     * lands inside what is shown. */
+    if (off >= 0 && fk_slen > 0) {
+        long long ls = lastnl + 1, le = off;
+        while (le < fk_slen && fk_srctext[le] != FK_CH_LF) {
+            le = le + 1;
+        }
+        long long ws = ls, caret = col - 1;
+        if (caret > 120) {
+            ws = off - 120;
+            caret = 120;
+        }
+        long long wn = le - ws;
+        if (wn > 160) {
+            wn = 160;
+        }
+        dprintf(2, "  | %.*s\n  | %*s^\n", (int)wn, fk_srctext + ws, (int)caret, "");
+    }
 }
 /* Called ONCE, after parse completes and before execution begins: gcc-style
  * tally. Silent when clean, so the default happy path prints nothing new.
