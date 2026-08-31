@@ -719,6 +719,32 @@
                     (fcmg-live-prefill-go ctx sts (qtlc-next-cursor first)
                         (qtlc-next-value first) 0 0 chunk)))))
 
+    ; Admission prefill, span-batched: materialize the live cursor to its
+    ; id list first (a token walk with no forwards, no dispatches), then
+    ; the whole prompt rides the SAME chunk=0 span door every incremental
+    ; turn already uses -- one concurrent batch instead of one
+    ; dispatch-set per token. Admissions on the per-token walk measured
+    ; 230-300s; the span door is the round this lane never inherited.
+    ; The final id stays pending exactly as q38-prefill's contract holds
+    ; it (the prefill returns the first GENERATED token -- seedslip law).
+    (defn fcmg-live-ids-go (cursor acc)
+        (do (let one (qtlc-next cursor))
+            (if (eq (qtlc-next-present? one) 1)
+                (fcmg-live-ids-go (qtlc-next-cursor one)
+                    (cons (qtlc-next-value one) acc))
+                (list (qtlc-next-status one) (qtlc-next-cursor one) acc))))
+    (defn fcmg-live-prefill-span (ctx sts cursor)
+        (do (let walked (fcmg-live-ids-go cursor (empty)))
+            (if (not (str_eq (nth walked 0) "done"))
+                (fcmg-live-pf (nth walked 0) (sub 0 1) 0 (nth walked 1)
+                    (qtlc-reason (nth walked 1)))
+                (do (let ids (reverse (nth walked 2)))
+                    (let pf (q38-prefill-chunked
+                        (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                        (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0 0))
+                    (fcmg-live-pf "ok" (nth pf 0) (nth pf 1)
+                        (nth walked 1) "complete")))))
+
     (defn fcmg-run-context-cursor-budgeted
         (src arch model cursor thought-lists thought-eval ctx n query reserve gap-n
              source-hint tfx)
