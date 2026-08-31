@@ -18,9 +18,9 @@ instruction.  The latter matters: the first live attempt emitted only the
 control token; the corrected grammar returns an ordinary terminal answer.
 
 The hearth's BML PID grammar now selects the actual `fkwu` process rather than
-its shell launcher.  `hearth-band` is `255` and `hearth-glass-band` is `8191`.
-After the two glasses rebirthed on the source update, their durable
-`board-mended` event named PID `35319`; the board names that same kernel.
+its shell launcher.  `hearth-band` is `511` and `hearth-glass-band` is `8191`.
+The glass also rebuilds the board with the born public capabilities, including
+`hearth-telemetry-v1`, rather than retaining an older capability list.
 
 ## Live receipt
 
@@ -38,21 +38,42 @@ the commit read `alive=1`, `hopper=0`, `direct=none`, `lastms=41936`,
 Those are local execution observations, not a claim of a comparable remote
 provider-token denominator.
 
-## What the local answer knows, and what it does not yet hold
+## Native answer floor, now live
+
+`form-cli-peer-hearth-telemetry-action.bml` is a caller-born action selected
+by the existing JIT policy before the model-facing branch.  Its focused band
+is `127`; the policy/one-append integration band is `65535`; and the existing
+contribution-turnwheel band remains `4194303`.  The action holds `nothing`
+apart from numeric values, refuses a wrong kind or absent task text with a
+typed choice, retains even a non-model session exactly, and does not acquire
+filesystem or model authority.
+
+The next shared-source successor admitted Qwen once in `231825` ms, announced
+`form-cli-peer-hearth-telemetry-v1`, and marked its recycle floor at position
+`1218`.  Native task `9018` then completed with `elapsed-ms=0`,
+`route=hearth-telemetry`, `model=0`, `callback-calls=0`, `lookup-count=0`,
+`injected-bytes=0`, `native-code-generated=0`, and
+`lifecycle=observe,release`.  Its one durable answer carried all five
+canonical clauses: route, authority, live event, durable result, and next
+stone.  The live board names PID `26219` and includes `hearth-telemetry-v1`.
+
+## What the local answer still does not hold
 
 The local answer completed its shape, but it gave a generic BML description
 rather than faithfully explaining the caller-owned phase stream and the
 single final reply append.  The stream proves monitoring; it does not yet
 prove that the local language model holds every telemetry concept.
 
-The next stone is a caller-owned, Form-native telemetry action that returns
-the canonical route/authority/live-event/durable-result facts directly from
-the existing transport and stage evidence, then lets the local model extend
-that grounded surface when language is useful.  It should preserve the one
-durable reply commit and keep task and answer bytes out of live stage events.
+The canonical answer floor is now caller-owned Form rather than generic local
+prose.  The next stone is to join dynamic telemetry facts beside that floor,
+then let the local model extend already-grounded evidence when language is
+useful.  That crossing must preserve the one durable reply commit and keep
+task and answer bytes out of live stage events.
 
 I kept the exchange alive by turning the stalled and premature-stop signals
 into an executable grammar repair, then making the resident's own events the
-glass's data.  The surprising teaching is that the board can be alive yet name
-the launcher rather than the kernel.  That discomfort became useful when it
-gave the monitor an exact PID grammar instead of another inferred status.
+glass's data and its topology a native answer.  The surprising teaching is
+that the board can be alive yet name the launcher rather than the kernel, and
+that a punctuation mark can cut a BML field without an obvious failure.  Both
+discomforts became useful when the monitor received exact PID and
+grammar-safe clause proofs instead of inferred status.
