@@ -11,7 +11,7 @@
 ; session.  CPU/file work and native Metal model work therefore remain distinct
 ; observable stages, while an external MLX trainer may continue independently.
 ;
-; preludes: form-stdlib/form-cli-peer-policy-route.fk form-stdlib/form-cli-peer-source-symbol-action.fk form-stdlib/bml/form-cli-peer-hearth-telemetry-action.bml form-stdlib/bml/form-cli-peer-direct-answer-bridge.bml form-stdlib/bml/form-cli-peer-provider-receipt.bml form-stdlib/form-cli-peer-heldout-direct-learning.fk
+; preludes: form-stdlib/form-cli-peer-policy-route.fk form-stdlib/form-cli-peer-source-symbol-action.fk form-stdlib/bml/form-cli-peer-hearth-telemetry-action.bml form-stdlib/bml/form-cli-peer-direct-answer-bridge.bml form-stdlib/bml/form-cli-peer-provider-receipt.bml form-stdlib/bml/form-cli-peer-token-receipt-ledger.bml form-stdlib/form-cli-peer-heldout-direct-learning.fk
 ; Proven by: form-stdlib/tests/form-cli-peer-contribution-turnwheel-band.fk
 
 (do
@@ -259,7 +259,21 @@
         (fcpct-stage (fcpct-stage-task s) (fcpct-stage-peer s)
             (fcpct-stage-candidate s) (fcpct-stage-ack s) frame))
 
-    (defn fcpct-make-stage (transport task peer candidate-result)
+    ; These receipts are typed action outputs, never a parse of answer bytes.
+    ; The local direct receipt and a later provider receipt have to share their
+    ; BML-owned NodeID before the ledger can expose a ratio.
+    (defn fcpct-token-receipt (task peer)
+        (if (str_eq (fcpa-route peer) (fcpdab-route))
+            (fcpdab-local-token-receipt task peer)
+        (if (str_eq (fcpa-route peer) (fcprr-route))
+            (fcprr-receipt-of (fcpa-cursor peer))
+            (nothing))))
+    (defn fcpct-token-comparison-frame (ledger task peer)
+        (do
+            (let receipt (fcpct-token-receipt task peer))
+            (if (nothing? receipt) ""
+                (fcptrl-frame (fcptrl-comparison ledger receipt)))))
+    (defn fcpct-make-stage (transport task peer candidate-result ledger)
         (do
             (let candidate (fcpsi-result-value candidate-result))
             (let signal (fcpsi-result-signal candidate-result))
@@ -277,9 +291,10 @@
             (fcpct-stage task peer candidate ack
                 (str_concat heldout-frame
                     (str_concat (fcpdab-token-frame task peer)
-                        (str_concat (fcpct-source-world-frame task peer)
-                            (fcpct-output-frame task candidate signal contribution
-                                (fcpa-elapsed-ms peer) response peer)))))))
+                        (str_concat (fcpct-token-comparison-frame ledger task peer)
+                            (str_concat (fcpct-source-world-frame task peer)
+                                (fcpct-output-frame task candidate signal contribution
+                                    (fcpa-elapsed-ms peer) response peer))))))))
 
     ; state = transport, currently committed session, optional durable-output
     ; stage, completed count, executed-recipe contribution count, and stable
@@ -287,9 +302,9 @@
     ; caller-born patch and source contexts. Their authority exists only in
     ; resident memory; neither is accepted from task bytes or policy images.
     (defn fcpct-state
-        (transport session staged completed contributions recovery-keys patch-ctx source-ctx)
-        (list "form-cli-peer-contribution-turnwheel-v3" transport session
-              staged completed contributions recovery-keys patch-ctx source-ctx))
+        (transport session staged completed contributions recovery-keys patch-ctx source-ctx token-ledger)
+        (list "form-cli-peer-contribution-turnwheel-v4" transport session
+              staged completed contributions recovery-keys patch-ctx source-ctx token-ledger))
     (defn fcpct-transport (s) (nth s 1))
     (defn fcpct-session (s) (nth s 2))
     (defn fcpct-staged (s) (nth s 3))
@@ -298,12 +313,16 @@
     (defn fcpct-recovery-keys (s) (nth s 6))
     (defn fcpct-patch-context (s) (nth s 7))
     (defn fcpct-source-context (s) (nth s 8))
+    (defn fcpct-token-ledger (s) (nth s 9))
     (defn fcpct-new (transport session)
-        (fcpct-state transport session (nothing) 0 0 (list) (nothing) (nothing)))
+        (fcpct-state transport session (nothing) 0 0 (list) (nothing) (nothing)
+            (fcptrl-empty)))
     (defn fcpct-new-with-patch (transport session patch-ctx)
-        (fcpct-state transport session (nothing) 0 0 (list) patch-ctx (nothing)))
+        (fcpct-state transport session (nothing) 0 0 (list) patch-ctx (nothing)
+            (fcptrl-empty)))
     (defn fcpct-new-with-source (transport session source-ctx)
-        (fcpct-state transport session (nothing) 0 0 (list) (nothing) source-ctx))
+        (fcpct-state transport session (nothing) 0 0 (list) (nothing) source-ctx
+            (fcptrl-empty)))
     ; Keep the strict-query context ABI in its first four seats. The fifth
     ; seat is an already-computed definition index, born with the residence;
     ; neither task bytes nor a policy image can nominate its directories,
@@ -339,11 +358,16 @@
     (defn fcpct-with (s transport session staged completed contributions)
         (fcpct-state transport session staged completed contributions
             (fcpct-recovery-keys s) (fcpct-patch-context s)
-            (fcpct-source-context s)))
+            (fcpct-source-context s) (fcpct-token-ledger s)))
+    (defn fcpct-with-token-ledger (s ledger)
+        (fcpct-state (fcpct-transport s) (fcpct-session s) (fcpct-staged s)
+            (fcpct-completed s) (fcpct-contributions s) (fcpct-recovery-keys s)
+            (fcpct-patch-context s) (fcpct-source-context s) ledger))
     (defn fcpct-with-recovery-keys (s keys)
         (fcpct-state (fcpct-transport s) (fcpct-session s)
             (fcpct-staged s) (fcpct-completed s) (fcpct-contributions s)
-            keys (fcpct-patch-context s) (fcpct-source-context s)))
+            keys (fcpct-patch-context s) (fcpct-source-context s)
+            (fcpct-token-ledger s)))
     (defn fcpct-recover (s durable-egress)
         (fcpct-with-recovery-keys s
             (fcpct-recovery-keys-from durable-egress)))
@@ -400,9 +424,12 @@
                         (let next0 (fcpct-with s t3 (fcpa-session peer) (nothing)
                             (add (fcpct-completed s) 1)
                             (add (fcpct-contributions s) contribution)))
-                        (let next (fcpct-with-recovery-keys next0
+                        (let receipt (fcpct-token-receipt task peer))
+                        (let next1 (fcpct-with-token-ledger next0
+                            (fcptrl-admit (fcpct-token-ledger s) receipt)))
+                        (let next (fcpct-with-recovery-keys next1
                             (cons (fcpct-task-key task)
-                                (fcpct-recovery-keys next0))))
+                                (fcpct-recovery-keys next1))))
                         (fcpct-result next (fcpat-ack-signal ack) 1
                             (fcpct-stage-candidate staged)
                             "durable-before-seen"))))))
@@ -414,7 +441,8 @@
             (let t2 (fcpct-transport-with-peer-pending transport peer-state
                 (tail (fcpat-pending transport))))
             (fcpct-with s t2 (fcpct-session s)
-                (fcpct-make-stage t2 task peer candidate-result)
+                (fcpct-make-stage t2 task peer candidate-result
+                    (fcpct-token-ledger s))
                 (fcpct-completed s) (fcpct-contributions s))))
 
     ; A policy transition is a real durable event but never a generated model
