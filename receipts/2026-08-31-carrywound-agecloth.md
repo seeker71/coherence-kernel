@@ -74,3 +74,15 @@ newest-reply heal, and found the orphaned hearth — four real heals from one
 uncomfortable sentence.
 
 Corpus rows 1190 (carrywound), 1191 (agecloth).
+
+## Addendum: boardghost (turn 10)
+
+"numbers are static still" — the ages were honest; the flow was blocked. An
+external birth at 11:26 stamped the board with its pid and died. The
+nameplate outlived the door: `hearth-ask-send` answered its typed
+no-standing-hearth refusal to every caller while the real hearth stood idle
+one panel line below. The glass now mends the board itself (pid-line surgery,
+announced capabilities preserved, `board-mended` ledgered), and
+`restart-needed` fires once per 1→0 transition instead of every second. The
+ghost's author is unfound — an open seam, carried, not explained. Corpus row
+1192.
