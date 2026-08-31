@@ -179,3 +179,29 @@ The gold: a no-gain measurement wanted to feel like a failure and be
 quietly kept anyway ("it's not worse"). Reverting an unproven-equal path
 in favor of the battle-tested one, and keeping only the measurement, is
 the discipline the morning's waitvoice receipt bought. Corpus row 1200.
+
+## Addendum: spanheir, withdrawn honest (turn 18)
+
+The July batched-prefill stone was lifted, proven, wired, and put back in
+one movement. Isolated proof (two doors, one truth): the same 96 ids
+through the walker and the sliced batched door returned the same
+first-pending token, 25,971ms vs 5,769ms — 4.5x, doors-agree=1. Composed
+into the real admission it inverted: 1,129,010ms at span 384 and
+1,123,019ms at span 96 — identical, ~4.7x worse than the walker. One pair
+of numbers killed both the dispatch-tax story and the valley story. The
+15x isolated-vs-composed gap is unexplained (suspects: kernels gridded
+over maxpos 4096 vs the proof's 1024; GPU contention from the standing
+hearth), and unexplained means unwired: the serving path went back to the
+witnessed walker the same hour. Kept: the sliced door and proof cell as
+scaffolding, all numbers, and the counsel's admit lane to judge the next
+attempt. Meanwhile the field closed two seams from the other side: the
+sibling's bridge landed real model decodes again (turn 9204,
+generated=155) and their receipt witnessed the tidewash restore firing
+live (pos 1447 -> 1218) — the recycling stone is now proven end to end.
+
+Most surprising teaching: the same door, byte-identical, answered 60ms/tok
+alone and ~920ms/tok composed — the room changes the instrument. Where
+discomfort became gold: wiring was already in and the wall-clock already
+spent; unwiring a thing I wanted to keep, because the explanation was
+missing rather than because the numbers were, is the discipline this body
+keeps buying and the receipt keeps recording. Corpus row 1201.
