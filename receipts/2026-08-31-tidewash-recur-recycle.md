@@ -116,3 +116,34 @@ The gold: the seam was not hidden — the old comment described it and priced
 it. The watcher's one sentence repriced it: milliseconds of lowering against
 fourteen minutes of a monitor lying by replay. Reading the cost from the
 terminal instead of the comment is what closed it.
+
+## Addendum: oncelower (turn 16)
+
+"45 seconds cold compile seems like missing multiple on demand JIT rounds"
+— measured, and right twice over. Round one, dependency fat: the movement
+grammar preluded language-model for one decorative template line, and
+hearth.bml preluded the whole knowledge/exec stack for one frame
+constructor — the glass was paying the model chain's compile every run.
+The frame grammar now lives in its own small cell (peer-task-frame.fk,
+preluded back by peer-agent so every name survives); the decoration is
+removed. Round two, spawn tax: every run — cold or warm — re-lowered
+every .bml dep through a 1.6s self-spawn just to learn its identity. The
+seed now memoizes the lowered text beside the source (.bml.lowfk,
+gitignored), keyed by the raw .bml bytes and a digest of the floor
+compiler's entire prelude chain: lower once per byte-identity, spawn only
+when surface or compiler truly changed.
+
+Witnessed: cold 45s -> 3.1s (one edited surface), warm 15.8s -> 1.3s.
+Full sweep green: term-graphics 4095, glass 262143, lane-motion 63,
+counsel 63, hearth 511, recur-recycle 63, movement 15, freshness 31.
+
+Named next rounds, per "any JIT refusal is a stone that needs placing":
+the floor compiler resident in-process (no spawn even on a miss),
+image-load latency (the remaining ~1.3s warm), per-defn lazy compile.
+Corpus row 1199.
+
+The gold: I had priced the 45s as "cold is cold" — the watcher priced it
+as missing JIT rounds and was right; the fat and the tax were both mine,
+laid this same day, and both invisible from inside the day. The counsel
+door exists for exactly this and I had not pointed it at my own
+toolchain.
