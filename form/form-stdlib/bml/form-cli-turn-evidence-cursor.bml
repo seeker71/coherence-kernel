@@ -5,8 +5,9 @@
 //
 // The rollout stays private.  This cell moves only byte coordinates, task
 // identifiers, and the existing collector's typed status; prompt and answer
-// text never leave the reader.  It replaces repeated host wakeups with one
-// Form-native tail recursion over the already-bounded slice reader.
+// text never leave the reader.  It carries its own durable cursor so a live
+// Form turnwheel can re-enter one bounded slice without a shell loop or an
+// unbounded evaluator stack.
 //
 //////////////////////////////////////////////////////////////////////
 
@@ -14,13 +15,16 @@
 
 section [form.bml] {
     class FormCliTurnEvidenceCursor {
-        field Rule = "scannerless-backward-cursor-runs-to-terminal-in-one-form-call";
+        field Rule = "scannerless-backward-cursor-yields-a-durable-next-slice";
         field PrivacyRule = "only-coordinates-turn-id-and-status-leave-the-reader";
         field NoTargetRule = "empty-target-selects-the-nearest-completed-turn-without-emitting-its-content";
+        field ProgressPrefix = "turn-evidence-refresh=progress";
 
         def fctec-rule() = Rule();
         def fctec-privacy-rule() = PrivacyRule();
         def fctec-no-target-rule() = NoTargetRule();
+        def fctec-progress-prefix() = ProgressPrefix();
+        def fctec-progress?(status) = if ge(str_find(status, fctec-progress-prefix(), 0), 0) then 1 else 0;
 
         // result = found? absolute-event-offset window-end.  `found?=0` and
         // `offset=-1` are a whole answer, distinct from the numeric offset 0.
@@ -30,13 +34,13 @@ section [form.bml] {
         def fctec-end(result) = nth(result, 3);
         def fctec-result?(result) = if nothing?(result) then 0 else if not(eq(len(result), 4)) then 0 else str_eq(nth(result, 0), "form-cli-turn-evidence-cursor-v1");
 
-        // Each recursive seat reads the same established bounded slice.  The
-        // recursion itself owns progress, so a 222 MiB inherited cursor does
-        // not require 222 process wakes or 222 external tool calls.
+        // Each recursive discovery seat reads the established bounded slice.
+        // Discovery returns a coordinate; the collector itself is never held
+        // across an unbounded whole-turn recursion.
         def fctec-seek(path, target, end) {
             let start = fctel-max(0, sub(end, fctel-chunk-bytes()));
             let body = read_file_slice(path, start, sub(end, start));
-            let found = fctel-find-last-line-event(body, "task_complete", target, 0, -1);
+            let found = fctel-find-last-terminal-line(body, target, 0, -1);
             if ge(found, 0) then fctec-result(1, add(start, found), end) else if eq(start, 0) then fctec-result(0, -1, 0) else fctec-seek(path, target, start);
         }
 
@@ -51,6 +55,9 @@ section [form.bml] {
             "turn-evidence-refresh=withheld no-complete-turn";
         }
         def fctec-refresh-missing-turn() = "turn-evidence-refresh=withheld missing-turn-id";
+        // Exactly one bounded collector slice per invocation.  `progress` is
+        // not a failure: its on-disk cursor is the continuation owned by this
+        // BML authority and can be scheduled as a later resident row.
         def fctec-refresh-selected(path, size, found, turn) {
             write_file_text(fctel-target-turn-path(), turn);
             write_file_text(fctel-discovery-path(), fctel-discovery-row(size, fctec-end(found)));
