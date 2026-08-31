@@ -109,6 +109,15 @@ door in the receipt. The mirror is `observe/authoring-altitude-run.fk` (BML pict
 ./fkwu form/form-stdlib/tests/form-cli-author-high-band.fk   # -> 4095 (the band declares its own verdict)
 ```
 
+Each literal has one home: paths and quantities in `hearth.bml`, markers and the census in
+`lane-motion.bml`, tones in `term-graphics.bml` — a repeated literal is debt already accruing.
+Panels speak through the engine: `form-stdlib/term-graphics.bml` renders from semantic tones
+(good/warn/bad/dim/plain), one duration voice (`tg-dur`), one threshold scale (`tg-scale`,
+thresholds arriving as the caller's data), a panel being a lane list folded by `tg-frame` — so
+no cell names an SGR code or spells a time twice. Bands prove logic; a band that writes living
+state stains the world it measures (`bandstain`, corpus row 1193: hearth-band's board write
+was the boardghost).
+
 ## The hearth — the serving floor that outlives sessions
 
 One resident form-cli process is the agent server; sessions and cells are clients. The law lives
