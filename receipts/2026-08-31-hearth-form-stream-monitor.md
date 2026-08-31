@@ -174,3 +174,29 @@ is accepted, but its current decode/run is still CPU-bound and far from the
 millisecond BML-cache floor.  The next kernel movement is native image adoption
 that avoids repeatedly rebuilding the full interpreted closure, measured with
 the framebuffer; it is not another cache cap.
+
+## Original prompt, successor proof
+
+After the bridge landed, the former resident PID `32149` released with
+`release-ok=1`.  The source-synchronized successor PID `36364` then performed
+one local Qwen admission (`admit-prefill-ms=294778`) and announced `ready=1`.
+Its prefill stage was observable as `fk_metal_sync_external ->
+fk_wait_observed`; it completed without a remote provider, HTTP listener,
+llama server, or second resident.
+
+The original objective crossed once through `observe/peer-ask-send.fk` as
+turn `9204` (`appended=8216`, `rung=1`).  The live framebuffer proved the new
+crossing in order: `direct-answer/observe/begin`, `observe/value`,
+`run/begin`, native decode checkpoints through `128`, and `run/value` with
+`generated=155`.  The one durable reply reports `route=direct-answer`,
+`carrier=form-native-metal-jit`, `elapsed-ms=65655`,
+`callback-calls=0`, `lookup-count=0`, `injected-bytes=0`,
+`lifecycle=generate,release`, `observations=1`, and a 683-byte response.
+After the append, the turnwheel recorded `completed=1` and recycled the held
+local session from position `1447` to `1218`.
+
+That is a real local completion of the same prompt through one Form client
+call, not an asserted token percentage.  It establishes a remote-provider
+numerator of zero for this run.  An exact "10% of normal" ratio remains
+withheld because this body still has no comparable completed remote-provider
+token denominator for the same prompt.
