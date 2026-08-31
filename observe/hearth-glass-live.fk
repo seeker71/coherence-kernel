@@ -1,0 +1,49 @@
+; hearth-glass-live.fk — the living glass: each second, diff the hearth's
+; durable sources, APPEND normalized events to the ledger (restart,
+; prefill, request, reply, checkpoint), and repaint one ANSI frame
+; through the framebuffer voice. Phases longer than a second appear as
+; shade ramps of one-second steps; latency wears its color; the organs
+; wear their symbols.
+; stdin line 1: number of ticks.
+; preludes: form-stdlib/hearth.bml form-stdlib/hearth-glass.bml form-stdlib/spool-bell-transport.fk
+(do
+    (defn hgl-count (text needle) (hgl-count-go text needle 0 0))
+    (defn hgl-count-go (text needle from acc)
+        (do (let at (str_find text needle from))
+            (if (lt at 0) acc (hgl-count-go text needle (add at (str_len needle)) (add acc 1)))))
+    (defn hgl-ledger-add (kind detail)
+        (sbt-append ".hearth/ledger" (gl-ledger-line kind (now_unix_ms) detail)))
+    (defn hgl-frame (pid alive taskb replyb pf cp lastms spark tick)
+        (str_concat (gl-home)
+        (str_concat (gl-line "HEARTH  pid=" (str_concat (int_to_str pid) (if (eq alive 1) " standing" " DOWN")))
+        (str_concat (gl-line "tick    " (int_to_str tick))
+        (str_concat (gl-line "tasks   " (str_concat (int_to_str taskb) " bytes"))
+        (str_concat (gl-line "replies " (str_concat (int_to_str replyb) " bytes"))
+        (str_concat (gl-line (str_concat (gl-sym-prefill) " prefills ") (int_to_str pf))
+        (str_concat (gl-line (str_concat (gl-sym-decode) " checkpoints ") (int_to_str cp))
+        (str_concat (gl-lat-line "last-serve " lastms)
+        (str_concat (gl-line (str_concat (gl-sym-decode) " flow ") (gl-spark spark))
+        (gl-line (str_concat (gl-sym-served) " ledger ") ".hearth/ledger")))))))))))
+    (defn hgl-take (xs n) (if (or (eq n 0) (eq (len xs) 0)) (empty) (cons (head xs) (hgl-take (tail xs) (sub n 1)))))
+    (defn hgl-tick (n tick prev-task prev-reply prev-pf prev-cp spark)
+        (if (gt tick n) 0
+            (do
+                (let out (read_file ".hearth/server.out"))
+                (let pf (hgl-count out "prefill-complete"))
+                (let cp (hgl-count out "decode-checkpoint"))
+                (let taskb (file_size ".hearth/task.spool"))
+                (let replyb (file_size ".hearth/reply.spool"))
+                (let pid (hearth-board-pid))
+                (let alive (hearth-alive pid))
+                (let lastms (fmv-field (read_file ".hearth/reply.spool") "elapsed-ms"))
+                (let e1 (if (gt pf prev-pf) (hgl-ledger-add "prefill" (str_concat "count=" (int_to_str pf))) 0))
+                (let e2 (if (gt taskb prev-task) (hgl-ledger-add "request" (str_concat "task-bytes=" (int_to_str taskb))) 0))
+                (let e3 (if (gt replyb prev-reply) (hgl-ledger-add "reply" (str_concat "elapsed-ms=" (int_to_str lastms))) 0))
+                (let e4 (if (eq alive 0) (hgl-ledger-add "restart-needed" "pid-down") 0))
+                (let spark2 (hgl-take (cons (sub cp prev-cp) spark) 12))
+                (let put (print_str (hgl-frame pid alive taskb replyb pf cp (if (lt lastms 0) 0 lastms) spark2 tick)))
+                (let z (host-exec "sleep 1"))
+                (hgl-tick n (add tick 1) taskb replyb pf cp spark2))))
+    (let n (str_to_int (read_line)))
+    (let born (hgl-ledger-add "glass-on" (str_concat "ticks=" (int_to_str n))))
+    (hgl-tick n 1 0 0 0 0 (list 0)))
