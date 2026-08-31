@@ -930,6 +930,32 @@
     (defn q38-prefill-chunked (ps bs geo lays sts embTv onormTv projTv ids pos chunk)
         (q38-prefill-chunked-span ps bs geo lays sts embTv onormTv projTv ids pos chunk 1))
 
+    ; Span-SLICED batched prefill: the whole prompt in span-sized slices,
+    ; each slice one concurrent batch through the span walkers (batched
+    ; FFN/attention matmuls read each weight once per SLICE instead of
+    ; once per token: measured 204us/tok at 385 tokens vs 698us/tok
+    ; matvec on the gate tensor -- the 3.4x door; the tiled-matmul
+    ; kernel is the deeper stone). Needs scratch opened span-wide
+    ; (q38-open-span, span >= slice). The head is read once, after the
+    ; last slice; the final id stays pending per the prefill contract.
+    (defn q38-prefill-sliced-go (ps bs geo lays sts embTv ids pos span)
+        (if (eq (len ids) 0) pos
+            (do (let n (if (lt (len ids) span) (len ids) span))
+                (metal_batch_concurrent)
+                (q38-lm-embed ps bs geo embTv (take n ids) 0)
+                (q38-lm-layers-span ps bs geo lays sts 0 (nth geo 21) n pos)
+                (metal_sync)
+                (q38-prefill-sliced-go ps bs geo lays sts embTv
+                    (drop n ids) (add pos n) span))))
+    (defn q38-prefill-span-sliced (ps bs geo lays sts embTv onormTv projTv ids pos span)
+        (do (let end (q38-prefill-sliced-go ps bs geo lays sts embTv ids pos span))
+            (q38-gather ps bs geo (sub (q38-last-slice-n (len ids) span) 1) 1)
+            (list (q38-head-only ps bs geo onormTv projTv) end)))
+    (defn q38-last-slice-n (n span)
+        (if (le n span) n
+            (do (let r (mod n span))
+                (if (eq r 0) span r))))
+
     (defn q38-key (arch suffix) (str_concat arch (str_concat "." suffix)))
 
     ; A pipeline can compile against a sparse/truncated file, and mmap can accept many early tensor
