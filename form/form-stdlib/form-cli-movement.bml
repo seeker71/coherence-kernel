@@ -11,7 +11,7 @@
 // bits of agreement + a count. One command in, one line out — the lift
 // ritual embodied, membrane crossings minimized to the walk itself.
 //
-// preludes: form-stdlib/core.fk
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
 //
 // Proven by: form-stdlib/tests/form-cli-movement-band.fk
 //
@@ -46,15 +46,65 @@ section [form.bml] {
         def pm-parse-go(s, i, n) = if ge(i, n) then 0 else if eq(pm-door-byte(str_byte_at(s, i)), 1) then sub(str_byte_at(s, i), 48) else pm-parse-go(s, add(i, 1), n);
         def pm-parse(s) = pm-parse-go(s, 0, str_len(s));
 
-        def rtm-mark() = str_concat(str_concat(byte_to_str(34), "output_tokens"), str_concat(byte_to_str(34), ":"));
-        def rtm-sum-go(text, from, acc) = rtm-sum-at(text, str_find(text, rtm-mark(), from), acc);
-        def rtm-sum-at(text, at, acc) = if lt(at, 0) then acc else rtm-sum-go(text, add(at, 16), add(acc, fmv-field-int(text, add(at, str_len(rtm-mark())), 0, 0)));
+        // Only the provider's call-local `last_token_usage` object counts.
+        // A rollout-level `total_token_usage` repeats its prior cumulative
+        // values and must never be summed as a per-call quantity.
+        def rtm-output-mark() = str_concat(str_concat(byte_to_str(34), "output_tokens"), str_concat(byte_to_str(34), ":"));
+        def rtm-last-usage-mark() = str_concat(str_concat(byte_to_str(34), "last_token_usage"), str_concat(byte_to_str(34), ":"));
+        def rtm-line-end(text, from) {
+            let at = str_find(text, "\n", from);
+            if lt(at, 0) then str_len(text) else at;
+        }
+        def rtm-last-output-at(text, usageAt, end) {
+            let at = str_find(text, rtm-output-mark(), usageAt);
+            if or(lt(at, 0), ge(at, end)) then sub(0, 1) else at;
+        }
+        // One self-recursive scanner replaces the older sum-go -> sum-at ->
+        // sum-go pair. It keeps one slice alive while it scans and advances
+        // one complete JSONL row at a time.
+        def rtm-sum-go(text, from, acc) {
+            let usageAt = str_find(text, rtm-last-usage-mark(), from);
+            let end = rtm-line-end(text, if lt(usageAt, 0) then from else usageAt);
+            let outputAt = rtm-last-output-at(text, usageAt, end);
+            if lt(usageAt, 0) then acc else rtm-sum-go(text, add(end, 1), if lt(outputAt, 0) then acc else add(acc, fmv-field-int(text, add(outputAt, str_len(rtm-output-mark())), 0, 0)));
+        }
         def rtm-chunk() = 1048576;
         def rtm-over() = 32;
         def rtm-slice-sum(text, first) = rtm-sum-go(text, if eq(first, 1) then 0 else rtm-over(), 0);
-        def rtm-file-go(path, size, off, acc, first) = if ge(off, size) then acc else rtm-file-next(path, size, off, add(acc, rtm-slice-sum(read_file_slice(path, off, rtm-chunk()), first)));
-        def rtm-file-next(path, size, off, acc) = rtm-file-go(path, size, if ge(add(off, rtm-chunk()), size) then size else sub(add(off, rtm-chunk()), rtm-over()), acc, 0);
+        // The tail call is direct.  On a large private rollout this bounds
+        // retained source text to the one current chunk instead of one chunk
+        // per caller frame.  The 32-byte overlap remains scanner correctness,
+        // not a replay: later slices start scanning after that overlap.
+        def rtm-file-go(path, size, off, acc, first) {
+            let ended = ge(off, size);
+            let text = if ended then "" else read_file_slice(path, off, rtm-chunk());
+            let next = if ge(add(off, rtm-chunk()), size) then size else sub(add(off, rtm-chunk()), rtm-over());
+            let total = add(acc, rtm-slice-sum(text, first));
+            if ended then acc else rtm-file-go(path, size, next, total, 0);
+        }
+        def rtm-sum(text) = rtm-sum-go(text, 0, 0);
         def rtm-session-total(path) = rtm-file-go(path, file_size(path), 0, 0, 1);
+
+        // A meter state is caller-bound to one private rollout path. It keeps
+        // a completed byte extent and its exact cumulative output-token sum;
+        // a changed path or a shrunk rollout deliberately begins again.
+        field RtmStateTag = "form-cli-rented-turn-meter-state-v2";
+        def rtm-state-tag() = RtmStateTag();
+        def rtm-state(path, size, total) = list(rtm-state-tag(), path, size, total);
+        def rtm-state?(value) = if nothing?(value) then 0 else if not(eq(len(value), 4)) then 0 else str_eq(nth(value, 0), rtm-state-tag());
+        def rtm-state-path(value) = nth(value, 1);
+        def rtm-state-size(value) = nth(value, 2);
+        def rtm-state-total(value) = nth(value, 3);
+        def rtm-state-text(value) = str_concat(pm-line(rtm-state-tag(), ""), str_concat(pm-line(rtm-state-path(value), ""), str_concat(pm-line(int_to_str(rtm-state-size(value)), ""), pm-line(int_to_str(rtm-state-total(value)), ""))));
+        def rtm-state-from-text(text) {
+            let rows = split-on(text, "\n");
+            if lt(len(rows), 4) then nothing() else if not(str_eq(nth(rows, 0), rtm-state-tag())) then nothing() else rtm-state(nth(rows, 1), str_to_int(nth(rows, 2)), str_to_int(nth(rows, 3)));
+        }
+        def rtm-state-current?(value, path, size) = if eq(rtm-state?(value), 0) then 0 else if not(str_eq(rtm-state-path(value), path)) then 0 else if gt(rtm-state-size(value), size) then 0 else 1;
+        def rtm-state-base-size(value, path, size) = if eq(rtm-state-current?(value, path, size), 1) then rtm-state-size(value) else 0;
+        def rtm-state-base-total(value, path, size) = if eq(rtm-state-current?(value, path, size), 1) then rtm-state-total(value) else 0;
+        def rtm-state-scan-start(value, path, size) = if le(rtm-state-base-size(value, path, size), rtm-over()) then 0 else sub(rtm-state-base-size(value, path, size), rtm-over());
+        def rtm-state-scan-first(value, path, size) = if eq(rtm-state-scan-start(value, path, size), 0) then 1 else 0;
     }
     0;
 }
