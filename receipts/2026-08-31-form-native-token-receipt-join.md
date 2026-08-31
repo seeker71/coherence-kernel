@@ -8,6 +8,11 @@ provider payloads, paths, or transcript rows.  A direct local receipt is
 admitted only after its ordinary single reply-spool append succeeds.  A later
 provider receipt is admitted at the same commit point.
 
+Each canonical receipt now also has its own outer
+`<|form:token-receipt|>` BML frame before the response payload. It carries
+only goal identity, source, settled call count, and token total—the durable
+recovery substrate rather than a marker a model response can impersonate.
+
 The BML join searches only those typed receipts.  It emits a comparison frame
 only when a settled provider baseline and a settled local-direct receipt share
 the same canonical Form task NodeID.  A different node, an absent local
@@ -24,7 +29,7 @@ C-seed change happened in this movement.
 
 Witnesses:
 
-- `form-cli-peer-token-receipt-ledger-band.fk` -> `31`: matching canonical
+- `form-cli-peer-token-receipt-ledger-band.fk` -> `63`: matching canonical
   identities yield ratio `0` and under-ten-percent `1`; mismatch and absence
   yield no comparison frame.
 - `form-cli-peer-policy-route-band.fk` -> `131071`: the provider task keeps
