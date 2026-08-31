@@ -2238,6 +2238,7 @@ static long long fk_wav_loopback(const char *inpath, const char *outpath) {
 #elif defined(__APPLE__)
 static long long fk_cons_val(long long h, long long t);
 extern void *memcpy(void *, const void *, unsigned long);
+extern int memcmp(const void *, const void *, unsigned long);
 /* ── mac CoreAudio arm (2026-07-31): the else branch below stood honest for a season — "mac
  * CoreAudio/AVFoundation carriers are named pending" — and the live voice loop is what finally
  * demanded it: the loop ran with ffmpeg at the eardrum and afplay at the cone, and the goal is
@@ -13224,7 +13225,199 @@ static const char *fk_self_path = "./fkwu";
  * // preludes: line carried) closed by a sentinel; the parent captures it
  * from the pipe. No derived source file is ever created. Returns a
  * malloc'd NUL-terminated buffer (caller frees) or 0. */
+/* LOWERED-TEXT MEMO. A lowering self-spawn pays the floor compiler's whole
+ * chain (~1.6s warm, measured 2026-08-31); six .bml deps made every glass
+ * run — cold OR warm — pay ~10s of spawns. A JIT refusal is a stone to
+ * place, not a tax to keep: the lowered text is memoized beside the source
+ * as <x>.bml.lowfk, keyed by the RAW .bml bytes AND a digest of the floor
+ * compiler's own chain (bml-floor-compile.fk plus every file on its
+ * preludes line), so an edit to either the surface or the compiler
+ * invalidates honestly. A hit is a read; a miss spawns once and writes.
+ * Named deeper stones, not placed here: the floor compiler resident
+ * in-process (no spawn even on miss), and image-load latency itself. */
+static unsigned long long fk_bml_floor_digest_memo;
+static int fk_bml_floor_digest_have;
+static char *fk_read_whole_file(const char *path, long long *out_len) {
+#if defined(_WIN32)
+    int fd = open(path, 0x8000);
+#else
+    int fd = open(path, 0);
+#endif
+    long long cap = 1 << 20;
+    long long n = 0;
+    char *buf;
+    if (fd < 0) {
+        return 0;
+    }
+    buf = malloc((unsigned long)cap);
+    if (buf == 0) {
+        close(fd);
+        return 0;
+    }
+    for (;;) {
+        long long got = (long long)read(fd, buf + n, (unsigned long)(cap - n));
+        if (got <= 0) {
+            break;
+        }
+        n = n + got;
+        if (n == cap) {
+            cap = cap * 2;
+            buf = realloc(buf, (unsigned long)cap);
+            if (buf == 0) {
+                close(fd);
+                return 0;
+            }
+        }
+    }
+    close(fd);
+    *out_len = n;
+    return buf;
+}
+static int fk_hex16_parse(const char *p, unsigned long long *out) {
+    unsigned long long h = 0;
+    long long i = 0;
+    while (i < 16) {
+        char c = p[i];
+        if (c >= '0' && c <= '9') {
+            h = (h << 4) | (unsigned long long)(c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+            h = (h << 4) | (unsigned long long)(c - 'a' + 10);
+        } else {
+            return 0;
+        }
+        i = i + 1;
+    }
+    *out = h;
+    return 1;
+}
+static unsigned long long fk_bml_floor_digest(void) {
+    const char *floor_path = "form/form-stdlib/bml-floor-compile.fk";
+    long long n = 0;
+    char *text;
+    unsigned long long h;
+    long long i;
+    if (fk_bml_floor_digest_have) {
+        return fk_bml_floor_digest_memo;
+    }
+    text = fk_read_whole_file(floor_path, &n);
+    if (text == 0) {
+        return 0;
+    }
+    h = fk_bytes_fnv1a(text, n);
+    /* fold in every file named on the floor's own preludes line */
+    for (i = 0; i + 11 < n; i = i + 1) {
+        if (text[i] == ';' && !memcmp(text + i, "; preludes:", 11)) {
+            long long p = i + 11;
+            while (p < n && text[p] != FK_CH_LF) {
+                long long start;
+                while (p < n && (text[p] == FK_CH_SPACE || text[p] == FK_CH_TAB)) {
+                    p = p + 1;
+                }
+                start = p;
+                while (p < n && text[p] != FK_CH_SPACE && text[p] != FK_CH_TAB &&
+                       text[p] != FK_CH_LF && text[p] != FK_CH_CR) {
+                    p = p + 1;
+                }
+                if (p > start) {
+                    char dep_path[4096];
+                    long long dn = 0;
+                    char *dep;
+                    if (fk_path_resolve_fk_dep(floor_path, text + start, p - start,
+                                               dep_path, 4096)) {
+                        dep = fk_read_whole_file(dep_path, &dn);
+                        if (dep != 0) {
+                            h = h * 1099511628211ULL;
+                            h = h ^ fk_bytes_fnv1a(dep, dn);
+                            free(dep);
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+    free(text);
+    fk_bml_floor_digest_memo = h;
+    fk_bml_floor_digest_have = 1;
+    return h;
+}
+static char *fk_bml_low_memo_read(const char *bml_path, unsigned long long raw_h,
+                                  unsigned long long floor_h, long long *out_len) {
+    char memo_path[4300];
+    long long n = 0;
+    char *text;
+    unsigned long long got_raw = 0, got_floor = 0;
+    long long head = 0;
+    char *body;
+    sprintf(memo_path, "%s.lowfk", bml_path);
+    text = fk_read_whole_file(memo_path, &n);
+    if (text == 0) {
+        return 0;
+    }
+    if (n < 41 || memcmp(text, "fklow1 ", 7) != 0 ||
+        !fk_hex16_parse(text + 7, &got_raw) ||
+        !fk_hex16_parse(text + 24, &got_floor)) {
+        free(text);
+        return 0;
+    }
+    while (head < n && text[head] != FK_CH_LF) {
+        head = head + 1;
+    }
+    head = head + 1;
+    if (got_raw != raw_h || got_floor != floor_h || head > n) {
+        free(text);
+        return 0;
+    }
+    body = malloc((unsigned long)(n - head + 1));
+    if (body == 0) {
+        free(text);
+        return 0;
+    }
+    memcpy(body, text + head, (unsigned long)(n - head));
+    body[n - head] = 0;
+    *out_len = n - head;
+    free(text);
+    return body;
+}
+static void fk_bml_low_memo_write(const char *bml_path, unsigned long long raw_h,
+                                  unsigned long long floor_h, const char *low,
+                                  long long low_len) {
+    char memo_path[4300];
+    int fd;
+    sprintf(memo_path, "%s.lowfk", bml_path);
+    fd = open(memo_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) {
+        return;
+    }
+    dprintf(fd, "fklow1 %016llx %016llx\n", raw_h, floor_h);
+    write(fd, low, (unsigned long)low_len);
+    close(fd);
+}
+static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len);
 static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len) {
+    long long raw_n = 0;
+    char *raw = fk_read_whole_file(bml_path, &raw_n);
+    unsigned long long raw_h, floor_h;
+    char *hit;
+    char *low;
+    if (raw == 0) {
+        fk_diag_path("error", bml_path, "bml source is not readable");
+        return 0;
+    }
+    raw_h = fk_bytes_fnv1a(raw, raw_n);
+    free(raw);
+    floor_h = fk_bml_floor_digest();
+    hit = fk_bml_low_memo_read(bml_path, raw_h, floor_h, out_len);
+    if (hit != 0) {
+        return hit;
+    }
+    low = fk_bml_lower_spawn(bml_path, out_len);
+    if (low != 0) {
+        fk_bml_low_memo_write(bml_path, raw_h, floor_h, low, *out_len);
+    }
+    return low;
+}
+static char *fk_bml_lower_spawn(const char *bml_path, long long *out_len) {
 #if defined(_WIN32)
     fk_diag_path("error", bml_path,
                  "bml lowering via self-spawn is not wired on this platform yet");
