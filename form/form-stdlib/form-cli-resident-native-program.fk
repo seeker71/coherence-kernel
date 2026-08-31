@@ -1,0 +1,91 @@
+; form-cli-resident-native-program.fk -- BML-declared, BMF-lowered Form
+; program entry into the persistent scannerless resident evaluator.
+;
+; The source is caller-held program data. `fcrnp-load` has one dynamic-source
+; crossing; `fcrnp-invoke` has none. A live resident therefore keeps the
+; evaluator environment and its NodeID alive across any number of local calls.
+; The program itself distinguishes exact nothing, zero, one, and other value.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-definition-language.fk form-stdlib/form-resident-pif-core-eval.fk form-stdlib/bml/form-cli-resident-native-program.bml
+; Proven by: form-stdlib/tests/form-cli-resident-native-program-band.fk
+
+(do
+    ; compile = status source reason. The module itself is parsed from the
+    ; scannerless BMF definition language; only a successful lowering enters
+    ; the resident evaluator. The final defn is deliberately fef-compatible
+    ; and calls the BMF-born ninc binding, proving cross-definition residence.
+    (defn fcrnp-compile (module-source)
+        (do
+            (let module (fdl-parse module-source))
+            (if (not (fdl-ok? module))
+                (list "choice" (nothing) "bmf-module-refused")
+                (list "value"
+                    (str_concat "(do "
+                        (str_concat (fdl-module-source module)
+                            "\n(defn form-native-signal (signal) (if (eq signal 0) nothing (if (eq signal 1) 1 (ninc signal))))\n0)"))
+                    "bmf-module-lowered-to-resident-source"))))
+    (defn fcrnp-compile-status (compile) (nth compile 0))
+    (defn fcrnp-compile-source (compile) (nth compile 1))
+    (defn fcrnp-compile-reason (compile) (nth compile 2))
+
+    ; loaded = schema state compile identity status reason. The state is the
+    ; persistent evaluator state itself, not a copy or a host-process handle.
+    (defn fcrnp-loaded (state compile identity status reason)
+        (list "form-cli-resident-native-program-load-v1" state compile identity
+              status reason))
+    (defn fcrnp-loaded-state (loaded) (nth loaded 1))
+    (defn fcrnp-loaded-compile (loaded) (nth loaded 2))
+    (defn fcrnp-loaded-identity (loaded) (nth loaded 3))
+    (defn fcrnp-loaded-status (loaded) (nth loaded 4))
+    (defn fcrnp-loaded-reason (loaded) (nth loaded 5))
+    (defn fcrnp-loaded? (loaded)
+        (if (nothing? loaded) 0
+            (if (not (eq (len loaded) 6)) 0
+                (str_eq (nth loaded 0)
+                    "form-cli-resident-native-program-load-v1"))))
+
+    (defn fcrnp-load (state)
+        (do
+            (let compile (fcrnp-compile (fcrnp-module-source)))
+            (if (not (str_eq (fcrnp-compile-status compile) "value"))
+                (fcrnp-loaded state compile (nothing) "choice"
+                    (fcrnp-compile-reason compile))
+                (do
+                    (let next (frpce-eval state (fcrnp-compile-source compile)))
+                    (let identity (frpce-identity next))
+                    (if (nothing? identity)
+                        (fcrnp-loaded state compile (nothing) "nothing"
+                            "resident-program-defined-no-nodeid")
+                        (fcrnp-loaded next compile identity "returned"
+                            "resident-program-nodeid-retained"))))))
+
+    ; invoke = schema loaded receipt signal reason route model-executed
+    ;          host-crossings. Zero is a valid supplied argument; it never
+    ; becomes absence merely because the program returns nothing for it.
+    (defn fcrnp-invocation (loaded receipt signal reason)
+        (list "form-cli-resident-native-program-invoke-v1" loaded receipt
+              signal reason (fcrnp-route) 0 0))
+    (defn fcrnp-invocation-loaded (invocation) (nth invocation 1))
+    (defn fcrnp-invocation-receipt (invocation) (nth invocation 2))
+    (defn fcrnp-invocation-signal (invocation) (nth invocation 3))
+    (defn fcrnp-invocation-reason (invocation) (nth invocation 4))
+    (defn fcrnp-invocation-route (invocation) (nth invocation 5))
+    (defn fcrnp-invocation-model-executed (invocation) (nth invocation 6))
+    (defn fcrnp-invocation-host-crossings (invocation) (nth invocation 7))
+    (defn fcrnp-invocation-value (invocation)
+        (if (nothing? (fcrnp-invocation-receipt invocation)) (nothing)
+            (frpce-receipt-value (fcrnp-invocation-receipt invocation))))
+
+    (defn fcrnp-invoke (loaded signal)
+        (if (not (eq (fcrnp-loaded? loaded) 1))
+            (fcrnp-invocation loaded (nothing) "choice" "malformed-loaded-program")
+            (if (not (str_eq (fcrnp-loaded-status loaded) "returned"))
+                (fcrnp-invocation loaded (nothing) "choice"
+                    "resident-program-not-loaded")
+                (do
+                    (let receipt (frpce-invoke-one (fcrnp-loaded-state loaded)
+                        (fcrnp-loaded-identity loaded) signal))
+                    (fcrnp-invocation loaded receipt
+                        (frpce-signal (frpce-receipt-value receipt))
+                        (frpce-receipt-reason receipt))))))
+    0)
