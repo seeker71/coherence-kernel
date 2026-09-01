@@ -160,3 +160,17 @@ changes the instrument, again, one layer deeper than spanheir.
 Where discomfort became gold: stopping. Twenty minutes past the point
 where every probe was measuring my previous probe, the strongest move
 left was the family's fresh eyes, and saying so plainly.
+
+## Addendum: stonepatrol (turn 33)
+
+"can we observe this over and over to find any missing stones" — the
+observation became an organ. observe/field-patrol-resident.fk beats
+every twenty seconds, sweeps every living walker's CPU seconds, and
+ledgers each burn past sixty seconds once (.hearth/stones, deduped by
+name — a worklist, not a scream); the glass carries a stones lane. On
+its first breath: the compare admission's seal phase (326s, known, now
+ledgered) and the voice-frequency mirror at 143 CPU-seconds per pass —
+a walker paid all day, every receipt, never once named. Habit hides
+what patrol sees. The patrol stands detached (pid in
+.hearth/patrol.pid); its ledger is the worklist the ramfirst
+crystallize course consumes. Corpus row 1215.
