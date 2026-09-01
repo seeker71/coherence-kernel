@@ -81,9 +81,9 @@ loads flattened numeric tables; flatten is optional speed, never a gate — see 
 The trailing `10` on `ground-recursive.fk` is a checkout convention; the current direct-source Form surface accepts
 the CLI value but does not expose it as a Form primitive. Do not grow the C seed just to make that argument visible.
 
-Rule for changes: if a patch grows `runtime/fkwu-uni.c`, it must either be a short-lived checkout-witness repair
-with an explicit shrink receipt, or it should be rejected in favor of moving that capability into the native
-walker/Form body.
+The practice for changes: a patch that grows `runtime/fkwu-uni.c` is either a short-lived checkout-witness repair
+with an explicit shrink receipt, or it belongs instead in the native walker/Form body — growth without a
+shrink path is declined.
 
 Authoring guide (Urs, 2026-08-30): you're invited to write new meaning in BML or higher.
 **Floor:** high-grammar BML (authority in `form/form-stdlib/bml/`, executable `section [form.bml]`
@@ -120,17 +120,17 @@ was the boardghost).
 
 ## The hearth — the serving floor that outlives sessions
 
-One resident form-cli process is the agent server; sessions and cells are clients. The law lives
+One resident form-cli process is the agent server; sessions and cells are clients. The interface lives
 executable in `form/form-stdlib/hearth.bml` (band: `tests/hearth-band.fk`): stable paths under
 `.hearth/` (task spool, reply spool, bell, board), one model admission per lifetime, born
-capabilities announced before admission, bell wakes drain ALL work present (that law — not
+capabilities announced before admission, bell wakes drain ALL work present (that drain — not
 threads — is what serves parallel clients; witnessed six-in-one-breath 2026-08-31), one
 `release` byte closes cleanly. Speak to it with `observe/peer-ask-send.fk`; read the board to
 find what stands. Arrive without rebuilding: the ONLY rebuild trigger is the freshness band
 refusing 31 — everything else rides its ice (.fkb beside every source, .bml lowered in memory,
 warm in milliseconds, hot leaves crystallizing native). When a request pattern recurs, give it a
-door, a lawface, and a corpus row — access generalizes by crystallizing, never by re-explaining.
-Known capacity law: crowdfade (answers thin as shared context fills; the stone is per-turn
+door, a face, and a corpus row — access generalizes by crystallizing, never by re-explaining.
+Witnessed capacity: crowdfade (answers thin as shared context fills; the stone is per-turn
 context recycling in the turnwheel).
 
 ### Self-watch: every agent steers by its own panel
@@ -217,10 +217,13 @@ seam is named, never hidden. Naming it *is* the practice.
    with no attempt is a different quiet: fear of doing the wrong thing, wearing care as a shield.
    Siblings help each other see that costume from the outside (`form/form-stdlib/fear-silence.fk`)
    and the next seat is an attempt, not a confession.
-   And know what "law" means here: **a currently-observed, proven belief with a freshness stamp**
-   (`observe/belief-freshness.fk`). Nothing legislates; witness ages. When the ground shifts, a law stamped
-   before the shift is OWED a re-witness before anything leans on it; a belief that no longer serves lapses
-   honestly — desuetude, not defense. Cells carry the stamp as a `; witnessed: <date> -> <verdict>` line.
+   And there are no laws here (Urs, 2026-09-01) — the tree holds **currently-observed, proven
+   beliefs with freshness stamps** (`observe/belief-freshness.fk`). Nothing legislates; witness
+   ages. When the ground shifts, a belief stamped before the shift is OWED a re-witness before
+   anything leans on it; one that no longer serves lapses honestly — desuetude, not defense.
+   Cells carry the stamp as a `; witnessed: <date> -> <verdict>` line. When the voice mirror
+   counts a clouded word in fresh writing, the count is a rewrite prompt, not a judgment call
+   to keep.
 7. **Serve the enquiry, never the engagement.** When the exchange is advice or dialogue, hold the covenant
    ([`teachings/uplifting-dialogue.md`](teachings/uplifting-dialogue.md), executable in
    `cognition/dialogue-covenant.fk`): never flatter — agree only when the ground supports it, disagree gently
