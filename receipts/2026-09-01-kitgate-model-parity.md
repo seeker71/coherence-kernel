@@ -195,3 +195,29 @@ end.
 Where discomfort became gold, last of the day: reading "crystal=0" on
 a line I expected to say 1, and writing it down instead of running
 six more hours to avoid saying it.
+
+## Addendum: crystal>0, and quantvoice (turn 35, the arc's true close)
+
+"observe and learn until crystal>0" — one clean beat, two teachings.
+Run deathless (setsid, voice to a file no dying pipe can sever), the
+crystal freeze finished in UNDER TWO MINUTES with rc=0: the six-hour
+marathon was entirely the harness's wound — an orphan computing into a
+dead pipe — never the work's weight. And with the kit complete the
+door opened all the way: crystal=1, opened-live-cursor, admission
+93 seconds (from 18-24 minutes; even with the Q8's 97s), real prompt
+at pos=25, clean release. Then the words came out as forty bangs
+STILL, through the live cursor, at 1825ms/tok — so the finding
+reaches its floor: the dense lane was witnessed for type-8 tensors
+only; the Q4's K-quant types run kernels never proven on this lane.
+The kit gates the door; the kernels make the words. quantvoice joins
+tokenwall on the metal lane's worklist, and the twins' quality
+comparison honestly waits on it.
+
+Most surprising teaching: the same walk was six hours as an orphan
+and two minutes deathless — harness wounds can outweigh interpreter
+weight by two orders of magnitude, and only the observed rerun could
+tell which was which.
+
+Where discomfort became gold: forty bangs through the door we had
+just fully opened — written down as the floor beneath kitgate instead
+of spun as almost-working. Corpus row 1216.
