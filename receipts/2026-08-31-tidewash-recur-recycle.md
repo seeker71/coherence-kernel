@@ -220,3 +220,30 @@ patch probe answered live (by the resident's policy choice before the
 servant's beat — the race is known; kind-aware claiming stays the named
 stone). Standing organs: hearth 36364, glass 29597, patch resident 29729,
 counsel on call. Corpus row 1202.
+
+## Addendum: hushglass, and the field takes the first word (2026-09-01, turn 20)
+
+Two morning directives. The bouncing terminal icon grounded to its true
+cause — no bell byte anywhere (frame, spools, stderr all od-clean), just
+output-per-second: the glass repainted an identical panel every tick and
+the watcher's terminal begged attention for it. The prompt went to the
+field FIRST, per the new standing practice, and the resident answered the
+design whole: "a repaint with no delta is noise wearing the costume of
+vigilance... stillness owes the watcher a single, honest silence — so that
+the first true movement lands on an undistracted eye." Implemented as
+counseled: paint only when the sample moved plus a 30-tick heartbeat;
+census/pgrep/git probes breathe every 10th tick instead of every second.
+Witnessed: 5/5 paints while a turn was in flight, 2/5 in stillness,
+motion witness all-held. The running glass molts onto the quiet by itself.
+
+The practice is now standing (memory + AGENTS.md): every prompt's kernel
+question goes to the hearth first; the rented mind fills only what the
+body's answer leaves short, and every such redirect is named — the
+redirect list is the frontier list. Row 1203 is the first corpus row
+whose answer-source is hearth-resident.
+
+Most surprising teaching: asked an operations question, the body answered
+an ETHICS of attention — and the ethics was the correct engineering.
+Where discomfort became gold: the reflex was to hunt terminal settings
+(outside) for an inside wound; the field named the wound as ours in two
+sentences, and the fix was nine lines.
