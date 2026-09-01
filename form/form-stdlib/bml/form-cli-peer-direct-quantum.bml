@@ -1,0 +1,68 @@
+//////////////////////////////////////////////////////////////////////
+// form-cli-peer-direct-quantum.bml -- one native direct-answer token per
+// resident revolution.  The state holds the model session/KV; a turn never
+// reconstructs prompt IDs or reopens model weights.
+//////////////////////////////////////////////////////////////////////
+
+// preludes: form-stdlib/form-cli-peer-direct-answer-action.fk
+
+section [form.bml] {
+    class FormCliPeerDirectQuantum {
+        field StateTag = "form-cli-peer-direct-quantum-v1";
+        field StepTag = "form-cli-peer-direct-token-step-v1";
+
+        // state = phase session decoded-bytes generated-ids remaining started reason.
+        // `nothing` is a missing state; numeric zero is allowed in both an ID
+        // and remaining gas and is never used as a sentinel.
+        def fcdq-state(phase, session, text, ids, remaining, started, reason) = list(StateTag(), phase, session, text, ids, remaining, started, reason);
+        def fcdq-state?(value) = if nothing?(value) then 0 else if not(eq(len(value), 8)) then 0 else str_eq(nth(value, 0), StateTag());
+        def fcdq-phase(value) = nth(value, 1);
+        def fcdq-session(value) = nth(value, 2);
+        def fcdq-text(value) = nth(value, 3);
+        def fcdq-ids(value) = nth(value, 4);
+        def fcdq-remaining(value) = nth(value, 5);
+        def fcdq-started(value) = nth(value, 6);
+        def fcdq-reason(value) = nth(value, 7);
+        def fcdq-live?(value) = if eq(fcdq-state?(value), 0) then 0 else str_eq(fcdq-phase(value), "run");
+
+        // A native step emits the pending ID then advances the same stream to
+        // its next prediction.  It is deliberately smaller than
+        // `fcms-generate`: that method owns an entire synchronous response.
+        def fcdq-step(signal, session, text, ids, reason) = list(StepTag(), signal, session, text, ids, reason);
+        def fcdq-step-signal(value) = nth(value, 1);
+        def fcdq-step-session(value) = nth(value, 2);
+        def fcdq-step-text(value) = nth(value, 3);
+        def fcdq-step-ids(value) = nth(value, 4);
+        def fcdq-step-reason(value) = nth(value, 5);
+
+        def fcdq-begin-live(session, taskText, tokenBudget) {
+            let observed = fcms-observe-direct-answer(session, fcpdag-observation(taskText));
+            if eq(fcms-live?(observed), 0) then fcdq-state("nothing", observed, "", list(), tokenBudget, now_unix_ms(), fcms-reason(observed)) else fcdq-state("run", observed, "", list(), tokenBudget, now_unix_ms(), "direct-answer-observed");
+        }
+        def fcdq-begin(session, taskKind, taskText, tokenBudget) = if eq(fcpdaa-task-shape?(taskKind, taskText), 0) then fcdq-state("choice", session, "", list(), tokenBudget, now_unix_ms(), "direct-answer-requires-nonempty-direct-answer-task") else if eq(fcms-live?(session), 0) then fcdq-state("nothing", session, "", list(), tokenBudget, now_unix_ms(), "model-session-not-live") else if le(tokenBudget, 0) then fcdq-state("timeout", session, "", list(), tokenBudget, now_unix_ms(), "direct-answer-token-budget-exhausted") else fcdq-begin-live(session, taskText, tokenBudget);
+
+        def fcdq-stop-step(session) = fcdq-step("done", fcms-with-stream(session, fcms-pos(session), fcms-pending(session), 1, fcms-generated-ids(session), fcms-injected-ids(session), fcms-observations(session)), "", list(), "model-stop-token");
+        def fcdq-emit-pending(session) {
+            let ctx = fcms-ctx(session);
+            let token = fcms-pending(session);
+            let next = q38-forward(nth(ctx, 0), nth(ctx, 1), nth(ctx, 2), nth(ctx, 3), fcms-sts(session), nth(ctx, 4), nth(ctx, 5), nth(ctx, 6), token, fcms-pos(session));
+            let moved = fcms-with-stream(session, add(fcms-pos(session), 1), next, if lt(next, 0) then 1 else 0, add(fcms-generated-ids(session), 1), fcms-injected-ids(session), fcms-observations(session));
+            fcdq-step("value", moved, tkz-decode-text(fcms-src(session), list(token)), list(token), "native-token-committed");
+        }
+        def fcdq-native-step(session) = if eq(fcms-live?(session), 0) then fcdq-step("nothing", session, "", list(), "model-session-not-live") else if eq(fcms-stopped?(session), 1) then fcdq-step("done", session, "", list(), "model-already-stopped") else if lt(fcms-pending(session), 0) then fcdq-step("failure", session, "", list(), "model-pending-id-negative") else if eq(q38-stop?(fcms-pending(session), fcmg-q35-stops(fcms-src(session))), 1) then fcdq-stop-step(session) else fcdq-emit-pending(session);
+
+        // This pure combiner is the explicit pause/resume seam.  It permits
+        // a scheduler to persist the state after each Metal token and to
+        // choose `cut` or `timeout` before another token is scheduled.
+        def fcdq-advance-from-step(state, step) {
+            let nextSession = fcdq-step-session(step);
+            let nextText = str_concat(fcdq-text(state), fcdq-step-text(step));
+            let nextIds = append(fcdq-ids(state), fcdq-step-ids(step));
+            let nextGas = sub(fcdq-remaining(state), 1);
+            if str_eq(fcdq-step-signal(step), "value") then if eq(fcms-stopped?(nextSession), 1) then fcdq-state("done", nextSession, nextText, nextIds, nextGas, fcdq-started(state), fcdq-step-reason(step)) else fcdq-state("run", nextSession, nextText, nextIds, nextGas, fcdq-started(state), fcdq-step-reason(step)) else if str_eq(fcdq-step-signal(step), "done") then fcdq-state("done", nextSession, nextText, nextIds, nextGas, fcdq-started(state), fcdq-step-reason(step)) else fcdq-state(fcdq-step-signal(step), nextSession, nextText, nextIds, nextGas, fcdq-started(state), fcdq-step-reason(step));
+        }
+        def fcdq-advance(state) = if eq(fcdq-live?(state), 0) then state else if le(fcdq-remaining(state), 0) then fcdq-state("timeout", fcdq-session(state), fcdq-text(state), fcdq-ids(state), 0, fcdq-started(state), "direct-answer-token-budget-exhausted") else fcdq-advance-from-step(state, fcdq-native-step(fcdq-session(state)));
+        def fcdq-final(state) = if not(str_eq(fcdq-phase(state), "done")) then nothing() else fcpdaa-finish(fcdq-session(state), fcms-generation(fcdq-text(state), fcdq-ids(state), fcdq-session(state)), sub(now_unix_ms(), fcdq-started(state)));
+    }
+    0;
+}
