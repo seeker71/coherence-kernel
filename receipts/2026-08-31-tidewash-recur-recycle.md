@@ -262,3 +262,22 @@ not control. The frames caught a private page and were deleted
 immediately, unread beyond that recognition. Diagnosis of attention ends
 at the watcher's whole screen, not at the edge of what we emit. Corpus
 row 1204, answer-source screen-witness.
+
+## Addendum: routelight (2026-09-01, turn 22)
+
+"is the model selection request-response flow all visible on the glass?"
+— asked through the thing it asked about: turn 9501 went to the hearth
+and the glass was captured frame-by-frame while it served. Visible
+already: ask text aging live, flight with stage phase + decomposed age,
+route, honest still-previous reply. Dark and lit the same hour: the
+selection moment (gl-stage-line now reads the last stage line of ANY
+route — task-observation status=choice is the policy choosing) painted
+on a new select lane with generated count and carrier:
+`select direct-answer:run:value gen=367 carrier=form-native-metal-jit`
+while 9501 decoded its own answer. The field described its selection in
+its own words: NL lowered into Form, route resolved native->local->
+remote (one local turn, remote reviews at most once), the local door
+binding the model before decoding. Still dark and named: the model's
+NAME on the panel — the board carries no model line; a birth-writ
+model= is the stone. Bands: glass 1048575, lane-motion 255. Corpus row
+1205, answer-source hearth-resident.
