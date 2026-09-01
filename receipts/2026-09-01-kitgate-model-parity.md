@@ -174,3 +174,24 @@ a walker paid all day, every receipt, never once named. Habit hides
 what patrol sees. The patrol stands detached (pid in
 .hearth/patrol.pid); its ledger is the worklist the ramfirst
 crystallize course consumes. Corpus row 1215.
+
+## Addendum: the crystal that wasn't (turn 34, closing the day)
+
+The Q4's third compare entry printed its own verdict line before
+admitting: crystal=0. The only crystal on disk is the Q8's (25KB); the
+six-hour precrystallize walker left no Q4 artifact and no output — my
+waiter had been satisfied by the Q8's file matching a careless grep
+(the same shallow-check family as byteseal, caught one layer up). So
+the kitgate arc closes with its truth intact and its last piece
+honestly missing: qwen38-q4 stands sealed and indexed but
+crystal-less, serving only the fallback, and its first true words wait
+on either the crystal transform running JIT-fast (the ramfirst course,
+whose worklist the patrol now grows) or the freeze door being
+witnessed to actually write for a named artifact. Six unwitnessed
+CPU-hours are themselves the day's clearest exhibit: this is exactly
+what the patrol, the heat witness, and RAM crystallization exist to
+end.
+
+Where discomfort became gold, last of the day: reading "crystal=0" on
+a line I expected to say 1, and writing it down instead of running
+six more hours to avoid saying it.
