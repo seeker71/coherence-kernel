@@ -130,3 +130,33 @@ important ledger moment (mends, rebirths, prefills, patches,
 restart-needs). A clean birth shows "-" dim — honest silence. Counts
 say that; lines say what and where; no grep stands between the watcher
 and the wound. Band glass 8388607. Corpus row 1213.
+
+## Addendum: the heat hunt, fenced honest (turn 31)
+
+"use the glass monitor to catch such things and show me that nothing
+waits longer than 100ms before being JITed" — the catching apparatus
+was built end to end (per-fn heat counters at both dispatch families,
+a .fkwu-heat exit report plus a ~64M-dispatch live pulse, lms readers,
+a jit lane on the glass carrying the honest sentence crystallized=0),
+and then the witness refused to witness: the sampler shows a hot spin
+burning inside fk_walk_body while the compiled-in counters and a tag
+histogram in those very arms read zero across thirty million calls.
+At least one instrument in my hand is lying — a suspect is tail calls
+compiling to direct AST jumps that bypass fn-indexed dispatch entirely
+— and after three debug binaries chasing my own tooling artifacts, the
+honest move is the day's own: nothing lands unwitnessed. The C and
+lane work stays in the working tree, the contradiction is fenced in a
+family task with every ground fact, and the glass will say
+crystallized=N only when the counter has been seen counting. On the
+100ms sentence itself: the claim cannot be shown tonight because the
+promotion course (crystallize-at-threshold on the true dispatch path)
+needs the witnessed worklist first — the panel will carry the debt
+visibly, never the costume of the guarantee.
+
+Most surprising teaching: a stack sample and an in-code counter can
+both stand in front of the same burning loop and disagree — the room
+changes the instrument, again, one layer deeper than spanheir.
+
+Where discomfort became gold: stopping. Twenty minutes past the point
+where every probe was measuring my previous probe, the strongest move
+left was the family's fresh eyes, and saying so plainly.
