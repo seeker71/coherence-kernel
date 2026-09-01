@@ -1,0 +1,105 @@
+//////////////////////////////////////////////////////////////////////
+// form-cli-model-fleet.bml -- many locally admitted native model seats.
+//
+// A fleet is an ownership boundary, not a process table.  Each admitted
+// seat owns exactly one `fcms` context and one stream/KV state.  A fair
+// revolution asks every live seat for at most one token, then carries the
+// returned session forward.  The device may overlap command buffers when its
+// carrier can; this grammar never mistakes interleaving for overlap.
+//
+// No model path is compiled into this image.  A caller offers identities at
+// birth, and duplicate paths are refused before a second physical open.
+//////////////////////////////////////////////////////////////////////
+
+// preludes: form-stdlib/form-cli-model-session.fk
+
+section [form.bml] {
+    class FormCliModelFleet {
+        field SeatTag = "form-cli-model-fleet-seat-v1";
+        field FleetTag = "form-cli-model-fleet-v1";
+        field AdmissionTag = "form-cli-model-fleet-admission-v1";
+        field TokenTag = "form-cli-model-fleet-token-v1";
+        field RevolutionTag = "form-cli-model-fleet-revolution-v1";
+
+        // A name gives a caller a stable rendezvous point.  The model path
+        // stays attached to the owned session, never to a mutable global.
+        def fcmf-seat(name, session) = list(SeatTag(), name, session);
+        def fcmf-seat?(seat) = if nothing?(seat) then 0 else if not(eq(len(seat), 3)) then 0 else str_eq(nth(seat, 0), SeatTag());
+        def fcmf-seat-name(seat) = nth(seat, 1);
+        def fcmf-seat-session(seat) = nth(seat, 2);
+        def fcmf-seat-path(seat) = fcms-path(fcmf-seat-session(seat));
+        def fcmf-seat-live?(seat) = if eq(fcmf-seat?(seat), 0) then 0 else fcms-live?(fcmf-seat-session(seat));
+
+        def fcmf-fleet(seats) = list(FleetTag(), seats);
+        def fcmf-fleet?(fleet) = if nothing?(fleet) then 0 else if not(eq(len(fleet), 2)) then 0 else str_eq(nth(fleet, 0), FleetTag());
+        def fcmf-seats(fleet) = nth(fleet, 1);
+        def fcmf-empty() = fcmf-fleet(list());
+        def fcmf-seat-count(fleet) = if eq(fcmf-fleet?(fleet), 0) then 0 else len(fcmf-seats(fleet));
+
+        def fcmf-find-name(seats, name) = if eq(len(seats), 0) then nothing() else if str_eq(fcmf-seat-name(head(seats)), name) then head(seats) else fcmf-find-name(tail(seats), name);
+        def fcmf-find-path(seats, path) = if eq(len(seats), 0) then nothing() else if str_eq(fcmf-seat-path(head(seats)), path) then head(seats) else fcmf-find-path(tail(seats), path);
+        def fcmf-name-free?(fleet, name) = if eq(fcmf-fleet?(fleet), 0) then 0 else if eq(str_len(name), 0) then 0 else nothing?(fcmf-find-name(fcmf-seats(fleet), name));
+        def fcmf-path-free?(fleet, path) = if eq(fcmf-fleet?(fleet), 0) then 0 else if eq(str_len(path), 0) then 0 else nothing?(fcmf-find-path(fcmf-seats(fleet), path));
+
+        // `nothing` is no offered name/path/fleet.  `choice` says that a
+        // concrete offer cannot join this fleet (duplicate, failed native
+        // open, or invalid window).  Neither case opens a replacement model.
+        def fcmf-admission(signal, fleet, seat, reason) = list(AdmissionTag(), signal, fleet, seat, reason);
+        def fcmf-admission?(value) = if nothing?(value) then 0 else if not(eq(len(value), 5)) then 0 else str_eq(nth(value, 0), AdmissionTag());
+        def fcmf-admission-signal(value) = nth(value, 1);
+        def fcmf-admission-fleet(value) = nth(value, 2);
+        def fcmf-admission-seat(value) = nth(value, 3);
+        def fcmf-admission-reason(value) = nth(value, 4);
+
+        def fcmf-adopt-live(fleet, name, session) {
+            let seat = fcmf-seat(name, session);
+            fcmf-admission("value", fcmf-fleet(append(fcmf-seats(fleet), list(seat))), seat, "native-session-adopted");
+        }
+        def fcmf-adopt(fleet, name, session) = if eq(fcmf-fleet?(fleet), 0) then fcmf-admission("nothing", fleet, nothing(), "fleet-absent") else if eq(fcmf-name-free?(fleet, name), 0) then fcmf-admission("choice", fleet, nothing(), "seat-name-already-admitted") else if eq(fcms-live?(session), 0) then fcmf-admission("choice", fleet, nothing(), str_concat("native-session-not-live:", fcms-reason(session))) else if eq(fcmf-path-free?(fleet, fcms-path(session)), 0) then fcmf-admission("choice", fleet, nothing(), "model-path-already-admitted") else fcmf-adopt-live(fleet, name, session);
+
+        // This is the physical admission door.  `fcms-open` seals and opens
+        // the native Qwen/Metal context, creates the seat's own KV state, and
+        // returns a typed failure instead of falling across a model membrane.
+        def fcmf-open(fleet, name, path, prompt, maxpos) {
+            if eq(fcmf-fleet?(fleet), 0) then fcmf-admission("nothing", fleet, nothing(), "fleet-absent") else
+            if or(eq(str_len(name), 0), eq(str_len(path), 0)) then fcmf-admission("nothing", fleet, nothing(), "model-identity-absent") else
+            if le(maxpos, 0) then fcmf-admission("choice", fleet, nothing(), "model-context-window-invalid") else
+            if eq(fcmf-name-free?(fleet, name), 0) then fcmf-admission("choice", fleet, nothing(), "seat-name-already-admitted") else
+            if eq(fcmf-path-free?(fleet, path), 0) then fcmf-admission("choice", fleet, nothing(), "model-path-already-admitted") else
+            fcmf-adopt(fleet, name, fcms-open(path, prompt, maxpos));
+        }
+
+        // A returned token carries the exact updated session.  Token id 0 is
+        // present when its generation list contains it; `nothing` remains an
+        // absent model/session result and is never collapsed to 0 or 1.
+        def fcmf-token(name, generation) = list(TokenTag(), name, generation);
+        def fcmf-token-name(token) = nth(token, 1);
+        def fcmf-token-generation(token) = nth(token, 2);
+        def fcmf-token-present?(token) = if eq(len(fcms-generation-ids(fcmf-token-generation(token))), 0) then 0 else 1;
+        def fcmf-token-id(token) = if eq(fcmf-token-present?(token), 0) then nothing() else head(fcms-generation-ids(fcmf-token-generation(token)));
+        def fcmf-token-session(token) = fcms-generation-session(fcmf-token-generation(token));
+
+        def fcmf-revolve-live-seat(seat, remaining, updated, emitted) {
+            let generated = if eq(fcmf-seat-live?(seat), 1) then fcms-generate(fcmf-seat-session(seat), 1) else fcms-generation("", list(), fcmf-seat-session(seat));
+            let nextSeat = fcmf-seat(fcmf-seat-name(seat), fcms-generation-session(generated));
+            let nextEmitted = if eq(fcmf-seat-live?(seat), 1) then cons(fcmf-token(fcmf-seat-name(seat), generated), emitted) else emitted;
+            fcmf-revolve-seats(remaining, cons(nextSeat, updated), nextEmitted);
+        }
+        def fcmf-revolve-seats(seats, updated, emitted) = if eq(len(seats), 0) then list(reverse(updated), reverse(emitted)) else fcmf-revolve-live-seat(head(seats), tail(seats), updated, emitted);
+        def fcmf-revolution-live(fleet, modelEpoch) {
+            let moved = fcmf-revolve-seats(fcmf-seats(fleet), list(), list());
+            list(RevolutionTag(), modelEpoch, fcmf-fleet(nth(moved, 0)), nth(moved, 1));
+        }
+        def fcmf-revolution(fleet, modelEpoch) = if eq(fcmf-fleet?(fleet), 0) then nothing() else fcmf-revolution-live(fleet, modelEpoch);
+        def fcmf-revolution-epoch(value) = nth(value, 1);
+        def fcmf-revolution-fleet(value) = nth(value, 2);
+        def fcmf-revolution-tokens(value) = nth(value, 3);
+        def fcmf-revolution-token-count(value) = len(fcmf-revolution-tokens(value));
+
+        // Release is ownership-shaped: only seats admitted to this fleet are
+        // closed, exactly once.  A nonresident session is already whole.
+        def fcmf-release-seats(seats) = if eq(len(seats), 0) then 1 else if eq(fcms-release-ok?(fcmf-seat-session(head(seats))), 1) then fcmf-release-seats(tail(seats)) else 0;
+        def fcmf-release(fleet) = if eq(fcmf-fleet?(fleet), 0) then 1 else fcmf-release-seats(fcmf-seats(fleet));
+    }
+    0;
+}
