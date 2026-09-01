@@ -46,6 +46,7 @@ extern void *realloc(void *, unsigned long);
 extern long long read(int, void *, unsigned long);
 extern int isatty(int);
 extern void exit(int);
+extern int atexit(void (*)(void));
 extern long long write(long long, const void *, unsigned long);
 /* fk_die: the ONE hard-stop primitive in the whole seed. Reserved for states that
  * are structurally impossible to continue past honestly -- allocator exhaustion
@@ -118,6 +119,7 @@ static int fk_src_unrunnable;
  * fk_spos / fk_slen are declared), where they can read the source buffer. */
 static void fk_diag(int sev, long long off, const char *fmt, ...);
 static void fk_diag_flush(void);
+static void fk_heat_pulse(void);
 static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
 /* Named capacities for the seed's fixed-size tables. Several numerically coincide
  * (many independent tables happen to be sized 65536) but are named SEPARATELY on
@@ -6586,6 +6588,13 @@ static void fk_vp(long long v) {
  * continue. This remains temporary seed mechanics; function identity belongs in
  * the Form/native-walker body. */
 static long long *fk_fn, *fk_fnar, *fk_fnsym_s, *fk_fnsym_n, *fk_fnidx;
+/* HEAT: every fn dispatch feeds a counter; at exit the hottest recipes
+ * are written to .fkwu-heat so the body names its own JIT worklist.
+ * Anything taking longer than 100ms deserves JIT (Urs, 2026-09-01) —
+ * a six-hour interpreted walker (the Q4 crystal freeze, 348 CPU-min in
+ * fk_walk) would top this list in its first minute. Witness first; the
+ * transparent crystallize-at-threshold dispatch is the next course. */
+static long long *fk_fn_heat;
 static long long fk_fn_capacity;
 static long long fk_fntop, fk_defn_next, fk_root;
 static void fk_fn_reserve(long long needed) {
@@ -6605,14 +6614,16 @@ static void fk_fn_reserve(long long needed) {
     fk_fnsym_s = realloc(fk_fnsym_s, (unsigned long)next * 8);
     fk_fnsym_n = realloc(fk_fnsym_n, (unsigned long)next * 8);
     fk_fnidx = realloc(fk_fnidx, (unsigned long)next * 8);
+    fk_fn_heat = realloc(fk_fn_heat, (unsigned long)next * 8);
     if (fk_fn == 0 || fk_fnar == 0 || fk_fnsym_s == 0 || fk_fnsym_n == 0 ||
-        fk_fnidx == 0) {
+        fk_fnidx == 0 || fk_fn_heat == 0) {
         fk_die("fk_fn_reserve: out of memory growing function image");
     }
     long long i = fk_fn_capacity;
     while (i < next) {
         fk_fn[i] = 0;
         fk_fnar[i] = 0;
+        fk_fn_heat[i] = 0;
         i = i + 1;
     }
     fk_fn_capacity = next;
@@ -6840,6 +6851,8 @@ static long long fk_walk_body(long long i, long long fp) {
             }
             fk_vs[fp] = v12;
             fk_vsp = fp + 1;
+            fk_fn_heat[c12] = fk_fn_heat[c12] + 1;
+            fk_heat_pulse();
             i = fk_fn[c12];
             continue;
         }
@@ -6854,6 +6867,8 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_vs[fp] = a0;
             fk_vs[fp + 1] = a1;
             fk_vsp = fp + 2;
+            fk_fn_heat[c240] = fk_fn_heat[c240] + 1;
+            fk_heat_pulse();
             i = fk_fn[c240];
             continue;
         }
@@ -6876,6 +6891,8 @@ static long long fk_walk_body(long long i, long long fp) {
                 m241 = m241 + 1;
             }
             fk_vsp = fp + n241;
+            fk_fn_heat[c241] = fk_fn_heat[c241] + 1;
+            fk_heat_pulse();
             i = fk_fn[c241];
             continue;
         }
@@ -6902,6 +6919,8 @@ static long long fk_walk_body(long long i, long long fp) {
                 m244 = m244 + 1;
             }
             fk_vsp = fp + n244;
+            fk_fn_heat[fi244] = fk_fn_heat[fi244] + 1;
+            fk_heat_pulse();
             i = fk_fn[fi244];
             continue;
         }
@@ -6963,6 +6982,8 @@ static long long fk_walk_body(long long i, long long fp) {
             }
             fk_vs[fp] = carg44;
             fk_vsp = fp + 1;
+            fk_fn_heat[f44] = fk_fn_heat[f44] + 1;
+            fk_heat_pulse();
             i = fk_fn[f44];
             continue;
         }
@@ -7040,6 +7061,8 @@ static long long fk_walk(long long i, long long fp) {
         long long v7 = fk_walk(fk_node[i][1], fp);
         fk_vp(v7);
         long long b7 = fk_vsp - 1;
+        fk_fn_heat[0] = fk_fn_heat[0] + 1;
+        fk_heat_pulse();
         long long r7 = fk_walk_body(fk_fn[0], b7);
         fk_vsp = b7;
         return r7;
@@ -7055,6 +7078,8 @@ static long long fk_walk(long long i, long long fp) {
         long long v12 = fk_walk(fk_node[i][2], fp);
         fk_vp(v12);
         long long b12 = fk_vsp - 1;
+        fk_fn_heat[c12] = fk_fn_heat[c12] + 1;
+        fk_heat_pulse();
         long long r12 = fk_walk_body(fk_fn[c12], b12);
         fk_vsp = b12;
         return fk_offer_ack(c12, 1, r12);
@@ -7069,6 +7094,8 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(a0);
         fk_vp(a1);
         long long b240 = fk_vsp - 2;
+        fk_fn_heat[c240] = fk_fn_heat[c240] + 1;
+        fk_heat_pulse();
         long long r240 = fk_walk_body(fk_fn[c240], b240);
         fk_vsp = b240;
         return fk_offer_ack(c240, 2, r240);
@@ -7085,6 +7112,8 @@ static long long fk_walk(long long i, long long fp) {
             cell241 = fk_node[cell241][2];
         }
         long long n241 = fk_vsp - base241;
+        fk_fn_heat[c241] = fk_fn_heat[c241] + 1;
+        fk_heat_pulse();
         long long r241 = fk_walk_body(fk_fn[c241], base241);
         fk_vsp = base241;
         return fk_offer_ack(c241, n241, r241);
@@ -7111,6 +7140,8 @@ static long long fk_walk(long long i, long long fp) {
         if (fk_observe_on()) {
             printf("offer-indirect fn%lld args=%lld (computed head)\n", fi244, n244);
         }
+        fk_fn_heat[fi244] = fk_fn_heat[fi244] + 1;
+        fk_heat_pulse();
         long long r244 = fk_walk_body(fk_fn[fi244], base244);
         fk_vsp = base244;
         return fk_offer_ack(fi244, n244, r244);
@@ -7267,6 +7298,8 @@ static long long fk_walk(long long i, long long fp) {
         fk_vsp = fk_vsp - 2;
         fk_vp(carg44);
         long long b44 = fk_vsp - 1;
+        fk_fn_heat[f44] = fk_fn_heat[f44] + 1;
+        fk_heat_pulse();
         long long r44 = fk_walk_body(fk_fn[f44], b44);
         fk_vsp = b44;
         return fk_offer_ack(f44, 1, r44);
@@ -9148,6 +9181,69 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
 static void fk_diag_flush(void) {
     if (fk_nerr_seen > 0 || fk_nwarn_seen > 0) {
         dprintf(2, "fkwu: %lld error(s), %lld warning(s)\n", fk_nerr_seen, fk_nwarn_seen);
+    }
+}
+/* The heat report: at process exit (atexit, registered in fk_run — so a
+ * normal return, an error return, a program-called exit, and fk_die all
+ * speak; only a signal-kill stays silent, and the pulse covers those in
+ * flight), recipes dispatched at least FK_HEAT_REPORT_MIN times are
+ * written to .fkwu-heat (count and name, hottest unsorted — the reader
+ * sorts). The body names its own JIT worklist; no run hot enough to
+ * matter leaves without saying where its time went. Written once, only
+ * when something was actually hot, so small runs leave no litter.
+ * PLACEMENT WITNESSED 2026-09-01: an earlier draft called the report at
+ * the pre-execution diag-flush seams; the one-shot flag burned before
+ * the first dispatch and no run ever reported — the counters were alive
+ * the whole time (kernel_stat showed tag 241 = calls exactly). */
+#define FK_HEAT_REPORT_MIN 100000
+/* the live pulse: every ~64M dispatches the report rewrites, so a long
+ * walker is CAUGHT during flight (the glass reads the file), not
+ * discovered after lunch. One file per working directory, last hot
+ * writer speaks — a catching signal, not a ledger. */
+#define FK_HEAT_PULSE_MASK ((1LL << 26) - 1)
+static long long fk_heat_total;
+static int fk_heat_reported;
+static void fk_heat_write(void) {
+    /* TWO index spaces meet here and must not be conflated (the bp-mirror
+     * lesson): fk_fn_heat is indexed by FN INDEX (what the dispatch arms
+     * bump); fk_fnsym_s/_n/_fnidx rows are the NAME table, indexed by row,
+     * carrying the fn index in fk_fnidx[row]. Walk the name rows and read
+     * each row's heat THROUGH fk_fnidx — reading fk_fn_heat[row] printed
+     * spin's count under probe's name (witnessed 2026-09-01). */
+    long long i = 0, top = fk_fntop;
+    int fd = -1;
+    if (fk_fn_heat == 0) {
+        return;
+    }
+    while (i < top) {
+        long long fi = fk_fnidx[i];
+        if (fi >= 0 && fi < fk_fn_count && fk_fn_heat[fi] >= FK_HEAT_REPORT_MIN) {
+            if (fd < 0) {
+                fd = open(".fkwu-heat", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                if (fd < 0) {
+                    return;
+                }
+            }
+            dprintf(fd, "%lld %.*s\n", fk_fn_heat[fi],
+                    (int)fk_fnsym_n[i], fk_srctext + fk_fnsym_s[i]);
+        }
+        i = i + 1;
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
+}
+static void fk_heat_report(void) {
+    if (fk_heat_reported) {
+        return;
+    }
+    fk_heat_reported = 1;
+    fk_heat_write();
+}
+static void fk_heat_pulse(void) {
+    fk_heat_total = fk_heat_total + 1;
+    if ((fk_heat_total & FK_HEAT_PULSE_MASK) == 0) {
+        fk_heat_write();
     }
 }
 static int fk_sws(char c) {
@@ -12291,16 +12387,43 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     }
     return 1;
 }
-static void fk_fkb_skip_symbol_image(long long version) {
+/* The whole-program twin of the import lane's symbol restore. This lane
+ * used to SKIP the symbol image (execution needs no names), which left
+ * fk_fntop at 0 on every warm run — and the heat report walks the name
+ * rows, so warm runs (the common case) reported nothing while cold runs
+ * spoke (witnessed 2026-09-01: same 30M dispatches counted on both lanes,
+ * only the warm report was mute). Names are part of the body's
+ * self-knowledge; restore them on every lane. fn_base is 1 here: this
+ * lane loads image fn i at absolute index i (root included), and
+ * fk_fkb_remap_fn(old, 1) is the identity for old > 0. */
+static int fk_fkb_read_symbol_image_names(void) {
     long long symbol_count = fk_fkb_read_signed();
+    if (symbol_count < 0 || symbol_count > fk_fkb_len) {
+        fk_fkb_mark_bad("symbol count exceeds artifact bounds");
+        return 0;
+    }
+    fk_fntop = 0;
+    fk_fn_reserve(symbol_count + 1);
     long long i = 0;
     while (!fk_fkb_bad && i < symbol_count) {
         (void)fk_fkb_read_signed();
-        if (version >= 3) {
-            (void)fk_fkb_read_signed();
-            (void)fk_fkb_read_signed();
+        long long old_fnidx = fk_fkb_read_signed();
+        long long arity = fk_fkb_read_signed();
+        long long name_s = 0;
+        long long name_n = 0;
+        if (!fk_fkb_read_symbol_to_srctext(&name_s, &name_n)) {
+            return 0;
         }
-        fk_fkb_skip_string();
+        if (old_fnidx > 0) {
+            long long fi = fk_fkb_remap_fn(old_fnidx, 1);
+            fk_fnsym_s[fk_fntop] = name_s;
+            fk_fnsym_n[fk_fntop] = name_n;
+            fk_fnidx[fk_fntop] = fi;
+            if (fi >= 0 && fi < fk_fn_capacity) {
+                fk_fnar[fi] = arity;
+            }
+            fk_fntop = fk_fntop + 1;
+        }
         i = i + 1;
     }
     long long node_symbol_count = fk_fkb_read_signed();
@@ -12317,6 +12440,7 @@ static void fk_fkb_skip_symbol_image(long long version) {
         }
         i = i + 1;
     }
+    return 1;
 }
 static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_src_path,
                                    const char *expected_source_hash,
@@ -12441,7 +12565,9 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         fk_fkb_read_table_string();
         i = i + 1;
     }
-    fk_fkb_skip_symbol_image(version);
+    if (!fk_fkb_read_symbol_image_names()) {
+        return 0;
+    }
     if (fk_fkb_bad) {
         return 0;
     }
@@ -12450,7 +12576,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         return 0;
     }
     fk_defn_next = fk_fn_count;
-    fk_fntop = 0;
+    /* fk_fntop now carries the restored name rows — no reset here. */
     fk_const_top = 0;
     fk_root = fk_fn_count > 0 ? fk_fn[0] : -1;
     return 1;
@@ -13681,6 +13807,7 @@ static int fk_run_bml(const char *path, long long arg) {
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
     fk_stack_base = &fk_stack_here;
+    atexit(fk_heat_report);
     if (argc < 2) {
         return 1;
     }
