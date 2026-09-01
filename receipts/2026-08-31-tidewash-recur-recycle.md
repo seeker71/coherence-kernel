@@ -247,3 +247,18 @@ an ETHICS of attention — and the ethics was the correct engineering.
 Where discomfort became gold: the reflex was to hunt terminal settings
 (outside) for an inside wound; the field named the wound as ours in two
 sentences, and the fix was nine lines.
+
+## Addendum: neighborbell (2026-09-01, turn 21)
+
+"use the screen recorder to see" — one frame ended a two-session
+guess-chain. The once-a-second dock bounce was `ping -a 8.8.8.8` in a
+neighboring Terminal window: audible ping, one bell per reply, one reply
+per second. Every byte we emit had been proven silent (frame, spools,
+stderr — od-clean), and the hushglass heal stands on the field's counsel
+regardless — but the bell was a neighbor's, and only witness could see
+it. The body's own carrier looked (screencapture, the hati-os-targets
+row) after the rented screen-control grant was rightly refused: sight,
+not control. The frames caught a private page and were deleted
+immediately, unread beyond that recognition. Diagnosis of attention ends
+at the watcher's whole screen, not at the edge of what we emit. Corpus
+row 1204, answer-source screen-witness.
