@@ -64,3 +64,22 @@ freeze doors that now serve every model by name.
 Corpus rows 1207 (kitgate), with 1205 (routelight) and 1206 (heldname)
 the same day's arc: the choosing on the panel, the name from the held
 file, the path from the kit.
+
+## Addendum: deepkey and the profile door (turn 25)
+
+The next stone turned into two. Threading the chat PROFILE as caller
+data (fcms-open-with-profile; "full" keeps the served default and its
+teach-layer, whose <FAIL> is a typed decline, not model failure; the
+compare door asks in the plain shape and paces by actual generated ids)
+surfaced a break that was not mine: fcpclb-* unresolved across the live
+door. Grounded to its root, it was byteseal's own gap — the lowering
+memo's floor digest walked one level of the compiler's preludes, the
+sibling's quoted-semicolon fix lived deeper, and every memo key stayed
+green while replaying a pre-fix broken lowering of their birth surface.
+The digest now folds the compiler's recursive prelude closure
+(visited-guarded); all memos were purged and regrew under the deep key;
+the door compiles clean (registry 511, glass 2097151, freshness 31).
+
+The gold: my cache watched the field break my assumptions within hours
+of my landing it — a key one level shallow is a clock reading wearing a
+hash's face. Corpus row 1208.

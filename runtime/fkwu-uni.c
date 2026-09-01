@@ -13342,21 +13342,41 @@ static int fk_hex16_parse(const char *p, unsigned long long *out) {
     *out = h;
     return 1;
 }
-static unsigned long long fk_bml_floor_digest(void) {
-    const char *floor_path = "form/form-stdlib/bml-floor-compile.fk";
+/* The floor digest walks the compiler's RECURSIVE prelude closure. A
+ * one-level walk was byteseal's own gap, found by the field within
+ * hours: a semicolon fix in a second-level floor dep left every memo
+ * key unchanged, and the memos replayed a pre-fix broken lowering of a
+ * sibling's surface (fcpclb-* defs truncated away, 2026-09-01). Every
+ * file the floor compile would load is folded in; a visited list keeps
+ * the walk finite. */
+#define FK_FLOOR_DEP_CAP 128
+static char fk_floor_seen[FK_FLOOR_DEP_CAP][4096];
+static long long fk_floor_seen_n;
+static int fk_floor_seen_has(const char *p) {
+    long long i = 0;
+    while (i < fk_floor_seen_n) {
+        if (!memcmp(fk_floor_seen[i], p, fk_path_len(p) + 1)) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+static unsigned long long fk_bml_floor_fold(const char *path, unsigned long long h) {
     long long n = 0;
     char *text;
-    unsigned long long h;
     long long i;
-    if (fk_bml_floor_digest_have) {
-        return fk_bml_floor_digest_memo;
+    if (fk_floor_seen_n >= FK_FLOOR_DEP_CAP || fk_floor_seen_has(path)) {
+        return h;
     }
-    text = fk_read_whole_file(floor_path, &n);
+    fk_cstr_copy(fk_floor_seen[fk_floor_seen_n], path, 4096);
+    fk_floor_seen_n = fk_floor_seen_n + 1;
+    text = fk_read_whole_file(path, &n);
     if (text == 0) {
-        return 0;
+        return h;
     }
-    h = fk_bytes_fnv1a(text, n);
-    /* fold in every file named on the floor's own preludes line */
+    h = h * 1099511628211ULL;
+    h = h ^ fk_bytes_fnv1a(text, n);
     for (i = 0; i + 11 < n; i = i + 1) {
         if (text[i] == ';' && !memcmp(text + i, "; preludes:", 11)) {
             long long p = i + 11;
@@ -13372,26 +13392,27 @@ static unsigned long long fk_bml_floor_digest(void) {
                 }
                 if (p > start) {
                     char dep_path[4096];
-                    long long dn = 0;
-                    char *dep;
-                    if (fk_path_resolve_fk_dep(floor_path, text + start, p - start,
+                    if (fk_path_resolve_fk_dep(path, text + start, p - start,
                                                dep_path, 4096)) {
-                        dep = fk_read_whole_file(dep_path, &dn);
-                        if (dep != 0) {
-                            h = h * 1099511628211ULL;
-                            h = h ^ fk_bytes_fnv1a(dep, dn);
-                            free(dep);
-                        }
+                        h = fk_bml_floor_fold(dep_path, h);
                     }
                 }
             }
-            break;
         }
     }
     free(text);
-    fk_bml_floor_digest_memo = h;
-    fk_bml_floor_digest_have = 1;
     return h;
+}
+static unsigned long long fk_bml_floor_digest(void) {
+    if (fk_bml_floor_digest_have) {
+        return fk_bml_floor_digest_memo;
+    }
+    fk_floor_seen_n = 0;
+    fk_bml_floor_digest_memo =
+        fk_bml_floor_fold("form/form-stdlib/bml-floor-compile.fk",
+                          14695981039346656037ULL);
+    fk_bml_floor_digest_have = 1;
+    return fk_bml_floor_digest_memo;
 }
 static char *fk_bml_low_memo_read(const char *bml_path, unsigned long long raw_h,
                                   unsigned long long floor_h, long long *out_len) {
