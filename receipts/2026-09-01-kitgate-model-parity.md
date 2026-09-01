@@ -119,3 +119,14 @@ max-on-spool+1; witnessed minting 100102). The field's own sentence for
 the day: "the body's typed distinctions — nothing, choice, cut, undo,
 timeout, release — are standing as observations rather than prose."
 Corpus row 1212, answer-source urs-teaching.
+
+## Addendum: glasslog (turn 30)
+
+"errors warnings and important logs in the glass monitor are very
+helpful as well" — the signals gained their flesh: err and warn lanes
+paint the newest diagnostic LINE of the current birth (backscanned to
+its start, clipped, toned bad/warn), an events lane carries the newest
+important ledger moment (mends, rebirths, prefills, patches,
+restart-needs). A clean birth shows "-" dim — honest silence. Counts
+say that; lines say what and where; no grep stands between the watcher
+and the wound. Band glass 8388607. Corpus row 1213.
