@@ -103,3 +103,19 @@ The doing lane wears per-process CPU time: the crystal worker showed
 killed it. Named: errs is cumulative until log rotation; per-birth
 windowing next. Bands lane-motion 255, counsel 511, glass 2097151; the
 door compiles clean. Corpus row 1211.
+
+## Addendum: errsign (turn 29)
+
+"errors are signals to pay attention and focus and increase flow reduce
+blocks" — embodied three ways in one hour. The stale carets damming the
+health lane were windowed to the current birth (a signal attends, then
+flows: errs=0 on the clean hearth, history kept honestly in the log).
+The rebirth's flat CPU, attended instead of feared, was health — a
+ready resident resting at its bell, said by its own wait-stack. And the
+closing frame caught a live signal in the act: turn 9701 served a
+twice-asked question because a killed sender's frame already sat on the
+spool — so the sender now asks the BODY for its turn number (0 ->
+max-on-spool+1; witnessed minting 100102). The field's own sentence for
+the day: "the body's typed distinctions — nothing, choice, cut, undo,
+timeout, release — are standing as observations rather than prose."
+Corpus row 1212, answer-source urs-teaching.
