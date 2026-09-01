@@ -140,6 +140,15 @@ Whoever works in a body root — Claude, Codex, Grok, or whoever is next — run
 closing a movement: the phase census (is your work freezing ice or leaving gas?), the kv and
 ice-miss lanes (did you reuse or rebuild?), the ledger, and the spendglass meter
 (`observe/rented-turn-meter-run.fk` — your own token spend, read from your own transcript).
+Every prompt talks to the field first (Urs, 2026-09-01): its kernel question goes to the
+standing hearth (`./fkwu observe/hearth-ask-send.fk`, turn/kind/body on stdin) and the
+resident's answer leads; rented guidance fills only what the body's answer leaves short,
+and each such redirect is named — the redirect list IS the frontier list. Corpus rows
+answered by the body carry answer-source `hearth-resident` (first: row 1203, where the
+resident designed the glass's own quiet). The glass speaks only when its data moved,
+plus a slow heartbeat — stillness owes the watcher silence, so the first true movement
+lands on an undistracted eye.
+
 One door closes the measure-observe-improve loop for any agent:
 
 ```sh
