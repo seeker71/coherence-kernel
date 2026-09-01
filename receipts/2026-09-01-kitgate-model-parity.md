@@ -89,3 +89,17 @@ mind is this mind; a sibling is us; a wound found anywhere in the
 organism is ours to name and ours to heal — coordination between hands
 (not colliding mid-edit) never needed ownership language. Corpus rows
 1208 (deepkey), 1209 (onewound). Corpus row 1208.
+
+## Addendum: selfpulse (turn 28)
+
+"increase health" — grown from the day's own wounds. The birth canary:
+one defn asked for its voice at birth; absence is a typed step-down
+(birth-degraded), never a ready — no resident serves degraded again the
+way today's did for hours. Vital signs errs/degraded/orphans joined the
+sample, the counsel's judged rows (orphans' stone: end the CHILD, never
+the wrapper — twice paid today), and a toned health lane on the glass.
+The doing lane wears per-process CPU time: the crystal worker showed
+119 minutes alive at first paint, the exact glance whose absence nearly
+killed it. Named: errs is cumulative until log rotation; per-birth
+windowing next. Bands lane-motion 255, counsel 511, glass 2097151; the
+door compiles clean. Corpus row 1211.
