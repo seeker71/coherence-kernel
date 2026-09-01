@@ -281,3 +281,20 @@ binding the model before decoding. Still dark and named: the model's
 NAME on the panel — the board carries no model line; a birth-writ
 model= is the stone. Bands: glass 1048575, lane-motion 255. Corpus row
 1205, answer-source hearth-resident.
+
+## Addendum: heldname (2026-09-01, turn 23)
+
+"eluminate what was dark" — the model's name reaches the panel, and the
+landed stone is better than the planned one. Instead of a birth-writ
+board line (a claim that can go stale or lie — boardghost taught that),
+the resident's identity is read from what the process holds open: lsof
+on the anchored resident pid, the .gguf basename off its own file table
+(hearth-resident-model, one home in hearth.bml). No restart, no board
+bureaucracy, and the head lane reads:
+HEARTH pid=36364 standing model=Qwen3.8-27B-Q8_0.gguf.
+Landed beside the sibling's live-breath rework of the same hour without
+touching their tick-state lane. Bands: hearth 2047, glass 2097151,
+lane-motion 255. Corpus row 1206, answer-source screen-witness.
+
+The gold: the first design was paperwork; asking "what cannot lie about
+this?" found the kernel's own bookkeeping already holding the answer.
