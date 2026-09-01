@@ -4,4 +4,4 @@
 # (selfmolt) or anything kills it. Run from anywhere:
 #   ./tools/watch-glass.sh
 cd "$(dirname "$0")/.."
-while :; do printf '999999\n' | ./fkwu observe/hearth-glass-live.fk; sleep 1; done
+while :; do printf '1\n' | ./fkwu observe/hearth-glass-live.fk; sleep 1; done
