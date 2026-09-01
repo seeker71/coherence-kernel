@@ -10712,6 +10712,16 @@ static unsigned long long fk_bytes_fnv1a(const char *p, long long n) {
 }
 static long long *fk_src_dep_parent;
 static long long *fk_src_dep_end;
+/* WHERE each unit's OWN text landed in fk_srctext (offset/length of the one
+ * fk_src_append_text call made for it; deps' text lies outside this range).
+ * The import lane reads these to CARRY every unit an accepted image does not
+ * cover -- a direct .bml prelude's whole floor-lane subtree used to be
+ * dropped here without a word: images in, root text in, and the .bml's
+ * lowered defns simply absent, so every later call site went numb as
+ * [unresolved-call] with nothing naming the drop (witnessed 2026-09-01,
+ * peer-contribution birth surface). */
+static long long *fk_src_dep_text_off;
+static long long *fk_src_dep_text_len;
 static long long fk_src_dep_count;
 static long long fk_src_dep_cap;
 static char fk_src_root_path[4096];
@@ -10729,6 +10739,8 @@ static int fk_src_dep_reserve(long long want) {
     unsigned long long *digests;
     long long *parents;
     long long *ends;
+    long long *text_offs;
+    long long *text_lens;
     if (want <= fk_src_dep_cap) {
         return 1;
     }
@@ -10753,10 +10765,12 @@ static int fk_src_dep_reserve(long long want) {
     digests = malloc(sizeof(*digests) * (unsigned long)cap);
     parents = malloc(sizeof(*parents) * (unsigned long)cap);
     ends = malloc(sizeof(*ends) * (unsigned long)cap);
+    text_offs = malloc(sizeof(*text_offs) * (unsigned long)cap);
+    text_lens = malloc(sizeof(*text_lens) * (unsigned long)cap);
     if (paths == 0 || mtimes == 0 || sizes == 0 || digests == 0 ||
-        parents == 0 || ends == 0) {
+        parents == 0 || ends == 0 || text_offs == 0 || text_lens == 0) {
         free(paths); free(mtimes); free(sizes); free(digests);
-        free(parents); free(ends);
+        free(parents); free(ends); free(text_offs); free(text_lens);
         return 0;
     }
     while (i < fk_src_dep_count) {
@@ -10766,16 +10780,21 @@ static int fk_src_dep_reserve(long long want) {
         digests[i] = fk_src_dep_digest[i];
         parents[i] = fk_src_dep_parent[i];
         ends[i] = fk_src_dep_end[i];
+        text_offs[i] = fk_src_dep_text_off[i];
+        text_lens[i] = fk_src_dep_text_len[i];
         i = i + 1;
     }
     free(fk_src_dep_path); free(fk_src_dep_mtime); free(fk_src_dep_size);
     free(fk_src_dep_digest); free(fk_src_dep_parent); free(fk_src_dep_end);
+    free(fk_src_dep_text_off); free(fk_src_dep_text_len);
     fk_src_dep_path = paths;
     fk_src_dep_mtime = mtimes;
     fk_src_dep_size = sizes;
     fk_src_dep_digest = digests;
     fk_src_dep_parent = parents;
     fk_src_dep_end = ends;
+    fk_src_dep_text_off = text_offs;
+    fk_src_dep_text_len = text_lens;
     fk_src_dep_cap = cap;
     return 1;
 }
@@ -10783,12 +10802,15 @@ static int fk_src_dep_reserve(long long want) {
 static void fk_src_dep_release(void) {
     free(fk_src_dep_path); free(fk_src_dep_mtime); free(fk_src_dep_size);
     free(fk_src_dep_digest); free(fk_src_dep_parent); free(fk_src_dep_end);
+    free(fk_src_dep_text_off); free(fk_src_dep_text_len);
     fk_src_dep_path = 0;
     fk_src_dep_mtime = 0;
     fk_src_dep_size = 0;
     fk_src_dep_digest = 0;
     fk_src_dep_parent = 0;
     fk_src_dep_end = 0;
+    fk_src_dep_text_off = 0;
+    fk_src_dep_text_len = 0;
     fk_src_dep_count = 0;
     fk_src_dep_cap = 0;
 }
@@ -11449,6 +11471,8 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
     fk_src_dep_digest[fk_src_dep_count] = fk_bytes_fnv1a(owned, got);
     fk_src_dep_parent[fk_src_dep_count] = parent_idx;
     fk_src_dep_end[fk_src_dep_count] = fk_src_dep_count + 1;
+    fk_src_dep_text_off[fk_src_dep_count] = 0;
+    fk_src_dep_text_len[fk_src_dep_count] = 0;
     fk_src_dep_count = fk_src_dep_count + 1;
     if (fk_cstr_eq(path, fk_src_root_path)) {
         if (got + 1 > FK_SOURCE_TEXT_CAP) {
@@ -11469,10 +11493,12 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
         return 0;
     }
     fk_src_dep_end[idx] = fk_src_dep_count;
+    fk_src_dep_text_off[idx] = fk_slen;
     if (!fk_src_append_text(path, owned, got)) {
         free(owned);
         return 0;
     }
+    fk_src_dep_text_len[idx] = fk_slen - fk_src_dep_text_off[idx];
     free(owned);
     return 1;
 }
@@ -12777,12 +12803,18 @@ static int fk_src_compile_artifact_only(const char *path) {
         malloc(sizeof(*saved_dep_parent) * (unsigned long)saved_dep_count) : 0;
     long long *saved_dep_end = saved_dep_count > 0 ?
         malloc(sizeof(*saved_dep_end) * (unsigned long)saved_dep_count) : 0;
+    long long *saved_dep_text_off = saved_dep_count > 0 ?
+        malloc(sizeof(*saved_dep_text_off) * (unsigned long)saved_dep_count) : 0;
+    long long *saved_dep_text_len = saved_dep_count > 0 ?
+        malloc(sizeof(*saved_dep_text_len) * (unsigned long)saved_dep_count) : 0;
     if (saved_root_text == 0 || saved_srctext == 0 || saved_dep_path == 0 ||
         saved_dep_mtime == 0 || saved_dep_size == 0 || saved_dep_digest == 0 ||
-        saved_dep_parent == 0 || saved_dep_end == 0) {
+        saved_dep_parent == 0 || saved_dep_end == 0 ||
+        saved_dep_text_off == 0 || saved_dep_text_len == 0) {
         if (saved_dep_count == 0 && saved_dep_path == 0 &&
             saved_dep_mtime == 0 && saved_dep_size == 0 &&
-            saved_dep_digest == 0 && saved_dep_parent == 0 && saved_dep_end == 0) {
+            saved_dep_digest == 0 && saved_dep_parent == 0 && saved_dep_end == 0 &&
+            saved_dep_text_off == 0 && saved_dep_text_len == 0) {
             /* zero dependency entries need no snapshot allocation */
         } else {
             fk_die("fk_import_compile: out of memory saving source unit");
@@ -12807,6 +12839,8 @@ static int fk_src_compile_artifact_only(const char *path) {
         saved_dep_digest[i] = fk_src_dep_digest[i];
         saved_dep_parent[i] = fk_src_dep_parent[i];
         saved_dep_end[i] = fk_src_dep_end[i];
+        saved_dep_text_off[i] = fk_src_dep_text_off[i];
+        saved_dep_text_len[i] = fk_src_dep_text_len[i];
         i = i + 1;
     }
     char source_hash[FK_SRC_HASH_CAP];
@@ -12853,6 +12887,8 @@ static int fk_src_compile_artifact_only(const char *path) {
         fk_src_dep_digest[i] = saved_dep_digest[i];
         fk_src_dep_parent[i] = saved_dep_parent[i];
         fk_src_dep_end[i] = saved_dep_end[i];
+        fk_src_dep_text_off[i] = saved_dep_text_off[i];
+        fk_src_dep_text_len[i] = saved_dep_text_len[i];
         i = i + 1;
     }
     free(saved_root_text);
@@ -12863,10 +12899,14 @@ static int fk_src_compile_artifact_only(const char *path) {
     free(saved_dep_digest);
     free(saved_dep_parent);
     free(saved_dep_end);
+    free(saved_dep_text_off);
+    free(saved_dep_text_len);
     return ok;
 }
 static int fk_src_try_import_fkb_images(const char *root_path) {
     long long direct_count = 0;
+    long long carry_count = 0;
+    long long carry_bytes = 0;
     long long i = 1;
     while (i < fk_src_dep_count) {
         /* .bml deps are floor-lane units: their meaning lives with their
@@ -12874,12 +12914,22 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
          * .bml.fkb ice. Probing one "alone" reads the RAW brace surface
          * off disk, finds hundreds of unresolved names, and poisons the
          * floor's cache with a REFUSED sym (witnessed 2026-08-30). The
-         * import lane skips them entirely. */
+         * import lane does not probe them as images -- it CARRIES their
+         * already-collected text (and the text of every other unit no
+         * image covers) beside the imports. Skipping them entirely was
+         * the seed of a silent amputation: images in, root text in, and
+         * a direct .bml prelude's lowered defns simply absent -- every
+         * later call went numb as [unresolved-call] with nothing naming
+         * the drop (peer-contribution birth surface, 2026-09-01). */
         if (fk_src_dep_parent[i] == 0 &&
             !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
             direct_count = direct_count + 1;
+            i = fk_src_dep_end[i];
+        } else {
+            carry_count = carry_count + 1;
+            carry_bytes = carry_bytes + fk_src_dep_text_len[i];
+            i = i + 1;
         }
-        i = i + 1;
     }
     if (direct_count == 0) {
         return 0;
@@ -12903,11 +12953,74 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
         }
         i = i + 1;
     }
+    /* CARRY EVERY UNIT THE IMAGES DO NOT COVER. The wipe below erases the
+     * whole-program text, and imported symbol names are then written into
+     * fk_srctext -- so the uncovered units' text (a direct .bml prelude's
+     * lowered subtree, in the witnessed wound) must be copied aside NOW and
+     * re-appended after the imports, in its original post-order (ascending
+     * text offset), or the compiled program silently loses those defns. */
+    char *carry_text = 0;
+    long long *carry_idx = 0;
+    long long *carry_pos = 0;
+    long long *carry_len = 0;
+    if (carry_count > 0) {
+        carry_text = malloc((unsigned long)(carry_bytes + 1));
+        carry_idx = malloc(sizeof(*carry_idx) * (unsigned long)carry_count);
+        carry_pos = malloc(sizeof(*carry_pos) * (unsigned long)carry_count);
+        carry_len = malloc(sizeof(*carry_len) * (unsigned long)carry_count);
+        if (carry_text == 0 || carry_idx == 0 || carry_pos == 0 || carry_len == 0) {
+            free(carry_text); free(carry_idx); free(carry_pos); free(carry_len);
+            return 0;
+        }
+        long long cn = 0;
+        i = 1;
+        while (i < fk_src_dep_count) {
+            if (fk_src_dep_parent[i] == 0 &&
+                !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
+                i = fk_src_dep_end[i];
+            } else {
+                carry_idx[cn] = i;
+                cn = cn + 1;
+                i = i + 1;
+            }
+        }
+        /* original text order is ascending text_off (post-order append);
+         * insertion sort -- the carried set is small (one floor subtree). */
+        i = 1;
+        while (i < carry_count) {
+            long long key = carry_idx[i];
+            long long j = i - 1;
+            while (j >= 0 && fk_src_dep_text_off[carry_idx[j]] > fk_src_dep_text_off[key]) {
+                carry_idx[j + 1] = carry_idx[j];
+                j = j - 1;
+            }
+            carry_idx[j + 1] = key;
+            i = i + 1;
+        }
+        long long cpos = 0;
+        cn = 0;
+        while (cn < carry_count) {
+            long long u = carry_idx[cn];
+            long long off = fk_src_dep_text_off[u];
+            long long len = fk_src_dep_text_len[u];
+            carry_pos[cn] = cpos;
+            carry_len[cn] = len;
+            long long k = 0;
+            while (k < len) {
+                carry_text[cpos + k] = fk_srctext[off + k];
+                k = k + 1;
+            }
+            cpos = cpos + len;
+            cn = cn + 1;
+        }
+        carry_text[cpos] = 0;
+    }
     fk_src_reset_compile_state();
     fk_slen = 0;
     fk_srctext[0] = 0;
+    int ok = 1;
     i = 1;
-    while (i < fk_src_dep_count) {
+    while (ok && i < fk_src_dep_count) {
         if (fk_src_dep_parent[i] == 0 &&
             !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
             char dep_fkb_path[4096];
@@ -12915,10 +13028,12 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
             long long dep_end = fk_src_dep_end[i];
             long long dep_mtime = fk_src_unit_mtime_range(i, dep_end);
             if (!fk_path_replace_ext(fk_src_dep_path[i], ".fkb", dep_fkb_path, 4096)) {
-                return 0;
+                ok = 0;
+                break;
             }
             if (!fk_src_unit_hash_range(i, dep_end, dep_hash, FK_SRC_HASH_CAP)) {
-                return 0;
+                ok = 0;
+                break;
             }
             {
                 /* a dep image compiled with recovered errors is degraded truth;
@@ -12932,7 +13047,8 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                  * counted, so the tally and stderr agree. */
                 char dep_sym_path[4096];
                 if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, 4096)) {
-                    return 0;
+                    ok = 0;
+                    break;
                 }
                 long long dep_recorded = fk_src_sym_recorded_errors(dep_sym_path);
                 if (dep_recorded != 0) {
@@ -12943,11 +13059,13 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                                 "image rejected, falling back to the whole-program compile",
                                 fk_src_dep_path[i], dep_recorded);
                     }
-                    return 0;
+                    ok = 0;
+                    break;
                 }
             }
             if (!fk_src_import_fkb_image(dep_fkb_path, fk_src_dep_path[i], dep_hash, dep_mtime)) {
-                return 0;
+                ok = 0;
+                break;
             }
             if (fk_conf("FK_IMPORT_TRACE")) {
                 fk_diag_path("trace", dep_fkb_path, "loaded import .fkb");
@@ -12955,10 +13073,30 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
         }
         i = i + 1;
     }
-    if (!fk_src_append_text(root_path, fk_src_root_text, fk_src_root_len)) {
-        return 0;
+    if (ok && carry_count > 0) {
+        long long cn = 0;
+        while (cn < carry_count) {
+            long long u = carry_idx[cn];
+            if (!fk_src_append_text(fk_src_dep_path[u], carry_text + carry_pos[cn],
+                                    carry_len[cn])) {
+                ok = 0;
+                break;
+            }
+            if (fk_conf("FK_IMPORT_TRACE")) {
+                fk_diag_path("trace", fk_src_dep_path[u],
+                             "carried as source beside the imported images");
+            }
+            cn = cn + 1;
+        }
     }
-    return 1;
+    if (ok && !fk_src_append_text(root_path, fk_src_root_text, fk_src_root_len)) {
+        ok = 0;
+    }
+    free(carry_text);
+    free(carry_idx);
+    free(carry_pos);
+    free(carry_len);
+    return ok;
 }
 static int fk_run_src(const char *path, long long arg) {
     char fkb_path[4096];
