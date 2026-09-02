@@ -3346,17 +3346,71 @@ static long long fk_inram_bytes(long long image, unsigned char *out, long long c
     return n;
 }
 
+/* The door's argument contract, extended 2026-09-02 (the multi-arg
+ * increment the per-recipe-JIT program named): an EVEN word is ONE
+ * integer argument — the standing contract, behavior unchanged — and a
+ * cons list of even words is UP TO EIGHT arguments, handed to the page
+ * in x0..x7 per AAPCS64, the convention lo-compile-fn-n banks from.
+ * Returns the arg count (1..8); 0 declines the shape (nil, a >8 list,
+ * or any non-integer element), and the door answers nothing. */
+static long long fk_inram_args(long long arg_value, long long *a) {
+    long long i;
+    for (i = 0; i < 8; i = i + 1) {
+        a[i] = 0;
+    }
+    if ((arg_value & 1) == 0) {
+        a[0] = arg_value >> 1;
+        return 1;
+    }
+    {
+        long long n = 0;
+        long long cell = arg_value;
+        long long h;
+        long long t;
+        while (fk_arm64_u32_cons(cell, &h, &t)) {
+            if (n >= 8 || (h & 1) != 0) {
+                return 0;
+            }
+            a[n] = h >> 1;
+            n = n + 1;
+            cell = t;
+        }
+        if (cell != 1 || n == 0) {
+            return 0;
+        }
+        return n;
+    }
+}
+/* ONE call seam for every executable page. Emitted code banks into
+ * callee-saved registers (x19..), and lo-compile-fn-n now saves and
+ * restores them — the asm fence below is the belt to those suspenders:
+ * it declares x19..x28 clobbered so the compiler never keeps a live
+ * value there across the page call, even against an image lowered
+ * before the prologue landed. Old single-arg images read only w0/w1;
+ * handing eight registers to a page that reads fewer is AAPCS64-clean. */
+static long long fk_inram_call(void *mem, long long *a) {
+    long long (*fn)(long long, long long, long long, long long, long long,
+                    long long, long long, long long) =
+        (long long (*)(long long, long long, long long, long long, long long,
+                       long long, long long, long long))mem;
+    long long r = fn(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+    __asm__ volatile(""
+                     : "+r"(r)
+                     :
+                     : "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
+                       "x27", "x28");
+    return r;
+}
 static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
     unsigned char code[FK_INRAM_CODE_CAP];
     long long n;
     long long i;
-    long long arg;
+    long long args[8];
     void *mem = 0;
     fk_inram_last_slot = -1;
-    if ((arg_value & 1) != 0) {
+    if (fk_inram_args(arg_value, args) == 0) {
         return fk_nothing;
     }
-    arg = arg_value >> 1;
     n = fk_inram_bytes(image, code, FK_INRAM_CODE_CAP);
     if (n <= 0 || (n % 4) != 0) {
         return fk_nothing;
@@ -3368,10 +3422,8 @@ static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
                 j = j + 1;
             }
             if (j == n) {
-                long long (*hot)(long long) =
-                    (long long (*)(long long))fk_inram_cache[i].mem;
                 fk_inram_last_slot = i;
-                return (hot(arg)) << 1;
+                return (fk_inram_call(fk_inram_cache[i].mem, args)) << 1;
             }
         }
     }
@@ -3404,10 +3456,7 @@ static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
         fk_inram_last_slot = fk_inram_cursor;
         fk_inram_cursor = (fk_inram_cursor + 1) % FK_INRAM_CACHE;
     }
-    {
-        long long (*fn)(long long) = (long long (*)(long long))mem;
-        return (fn(arg)) << 1;
-    }
+    return (fk_inram_call(mem, args)) << 1;
 }
 
 /* The existing two-argument door also accepts a Form-native resident request:
@@ -3497,19 +3546,24 @@ static long long fk_jit_leaf_inram_resident(long long action, long long identity
         }
         return 2;
     }
-    if (action != 0 || (arg_value & 1) != 0) {
+    if (action != 0) {
         return fk_nothing;
     }
-    if (fk_inram_node_released[ix]) {
-        return fk_nothing;
-    }
-    if (encoded_slot != 0) {
-        e = &fk_inram_cache[encoded_slot - 1];
-        if (e->live && fk_inram_node_generation[ix] == e->generation) {
-            long long (*hot)(long long) = (long long (*)(long long))e->mem;
-            return (hot(arg_value >> 1)) << 1;
+    {
+        long long ra[8];
+        if (fk_inram_args(arg_value, ra) == 0) {
+            return fk_nothing;
         }
-        fk_inram_node_slot[ix] = 0;
+        if (fk_inram_node_released[ix]) {
+            return fk_nothing;
+        }
+        if (encoded_slot != 0) {
+            e = &fk_inram_cache[encoded_slot - 1];
+            if (e->live && fk_inram_node_generation[ix] == e->generation) {
+                return (fk_inram_call(e->mem, ra)) << 1;
+            }
+            fk_inram_node_slot[ix] = 0;
+        }
     }
     {
         long long answer = fk_jit_leaf_inram_image(image, arg_value);
