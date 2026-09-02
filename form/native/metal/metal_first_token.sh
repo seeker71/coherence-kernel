@@ -676,6 +676,14 @@ let profile = ProcessInfo.processInfo.environment["FORM_PROFILE"] == "1"
 // are what is skipped, never the code they were agreeing about. The verdict says so out loud, and
 // metal_ask.sh stamps GATES with `-genonly` so no receipt can quote a lean run as the full suite.
 let genOnly = ProcessInfo.processInfo.environment["FORM_GEN_ONLY"] == "1"
+let modelGlass = ProcessInfo.processInfo.environment["FORM_MODEL_GLASS"] == "1"
+let modelGlassRole = ProcessInfo.processInfo.environment["FORM_MODEL_GLASS_ROLE"] ?? "general-text"
+func modelGlassLine(_ loaded: Int, _ prefilled: Int, _ active: Int,
+                    _ phase: String, _ contextTokens: Int, _ reason: String) {
+    guard modelGlass else { return }
+    print("GLASS MODEL id=base.llama32-3b-metal role=\(modelGlassRole) loaded=\(loaded) prefilled=\(prefilled) active=\(active) phase=\(phase) context_tokens=\(contextTokens) reason=\(reason) surface=fkwu+Metal")
+}
+modelGlassLine(1, 0, 0, "resident", 0, "metal-context-open-returned")
 // ---- FORM_ABLATE: the seam-free instrument ------------------------------------------------------
 // FORM_PROFILE cuts a command buffer after each op so it can attribute one, and the cut COSTS more
 // than several of the ops it is measuring — which is how this stone was briefed with a mechanism that
@@ -997,9 +1005,11 @@ struct Run { var out: [Int] = []; var prefill = 0.0; var decode = 0.0; var forwa
 func generate(_ ids: [Int], _ steps: Int) -> Run {
     zeroPool()
     var r = Run(); var pos = 0; var cur = 0
+    modelGlassLine(1, 0, 1, "prefill", 0, "prompt-evaluation-entered")
     let t0 = Date()
     for id in ids { cur = forward(id, pos); pos += 1 }     // prefill: the last logit IS token 1
     let t1 = Date()
+    modelGlassLine(1, 1, 1, "decode", ids.count, "prompt-prefill-returned")
     let d0 = nDispatch
     for _ in 0..<steps {
         r.out.append(cur)
@@ -1007,6 +1017,7 @@ func generate(_ ids: [Int], _ steps: Int) -> Run {
         cur = forward(cur, pos); pos += 1; r.forwards += 1
     }
     let t2 = Date()
+    modelGlassLine(1, 1, 0, "warm", pos, "generation-returned")
     r.disp = (nDispatch - d0) / max(1, r.forwards)
     r.prefill = t1.timeIntervalSince(t0); r.decode = t2.timeIntervalSince(t1)
     return r

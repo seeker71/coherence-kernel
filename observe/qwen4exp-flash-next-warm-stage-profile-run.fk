@@ -1,0 +1,35 @@
+; Warm layer-zero stage profile after one full resident token.
+; preludes: form/native/metal/qwen4exp-flash-next-token-handle.fk form/native/metal/model-bandwidth.fk
+
+(do
+    (defn q4wsp-drain (name before-us)
+        (do
+            (let dispatches (metal_sync))
+            (let after-us (mbw-status-int (metal_status) "gpu_busy_us_total"))
+            (list (list name (sub after-us before-us) dispatches) after-us)))
+    (let prefix "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+    (let ctx (q4t-open prefix 16))
+    (let warm (q4t-forward ctx 9419 0 248046 248046))
+    (let aps (nth ctx 0)) (let qps (nth ctx 1)) (let gps (nth ctx 2))
+    (let bs (nth ctx 3)) (let lays (nth ctx 4)) (let model (nth ctx 5))
+    (let sts (nth ctx 6)) (let lay (nth lays 0)) (let st (nth sts 0))
+    (let start (mbw-status-int (metal_status) "gpu_busy_us_total"))
+    (q4t-embed qps gps bs (nth model 0) warm)
+    (let e0 (q4wsp-drain "embed" start))
+    (q4t-hc-mix qps gps bs lay 0)
+    (let e1 (q4wsp-drain "attention-hc-mix" (nth e0 1)))
+    (q4t-linear aps qps gps bs lay st)
+    (let e2 (q4wsp-drain "gdn" (nth e1 1)))
+    (q4gj-hc-combine gps (nth bs 1) (nth bs 7) (nth bs 6))
+    (let e3 (q4wsp-drain "attention-combine" (nth e2 1)))
+    (q4t-hc-mix qps gps bs lay 4)
+    (let e4 (q4wsp-drain "ffn-hc-mix" (nth e3 1)))
+    (q4t-moe aps qps bs lay)
+    (let e5 (q4wsp-drain "moe" (nth e4 1)))
+    (q4gj-hc-combine gps (nth bs 1) (nth bs 28) (nth bs 6))
+    (let e6 (q4wsp-drain "ffn-combine" (nth e5 1)))
+    (let live (metal_status))
+    (q4t-close ctx)
+    (list "qwen4exp-warm-stage-profile" "warm-output" warm
+        (nth e0 0) (nth e1 0) (nth e2 0) (nth e3 0)
+        (nth e4 0) (nth e5 0) (nth e6 0) live))

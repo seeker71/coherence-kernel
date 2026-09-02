@@ -1,0 +1,140 @@
+//////////////////////////////////////////////////////////////////////
+//
+// qwen4exp-flash-next-state.bml — executable resident state lookup/evaluate.
+//
+// Authority: form-stdlib/bml/qwen4exp-flash-next-state.bml
+// preludes: form/native/metal/qwen4exp-flash-next-token-handle.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class Qwen4ExpFlashNextStateAuthority {
+        field Q4SAuthorityPath = "form/form-stdlib/bml/qwen4exp-flash-next-state.bml";
+        field Q4SAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class Qwen4ExpFlashNextState {
+        field Q4SSchema = "qwen4exp-resident-state-v1";
+        field Q4SEos = 248046;
+        field Q4SLayers = 48;
+
+        ref q4s-authority = Qwen4ExpFlashNextStateAuthority;
+        thought q4s-law = list("one-slot-one-prefix", "exact-reuse", "append-reuse", "divergence-reset", "explicit-substate");
+
+        // slot: tag, model prefix, token handle context, maxpos, next position,
+        // prev1, prev2, resident input tokens, last predicted token, status.
+        def q4s-slot(prefix, ctx, maxpos, pos, prev1, prev2, tokens, output, status) {
+            list("qwen4exp-resident-state", prefix, ctx, maxpos, pos, prev1, prev2, tokens, output, status);
+        }
+        def q4s-prefix(slot) = nth(slot, 1);
+        def q4s-ctx(slot) = nth(slot, 2);
+        def q4s-maxpos(slot) = nth(slot, 3);
+        def q4s-pos(slot) = nth(slot, 4);
+        def q4s-prev1(slot) = nth(slot, 5);
+        def q4s-prev2(slot) = nth(slot, 6);
+        def q4s-tokens(slot) = nth(slot, 7);
+        def q4s-output(slot) = nth(slot, 8);
+        def q4s-status(slot) = nth(slot, 9);
+
+        // The embedding tensor is an mmap-backed weight view.  Its positive
+        // Metal handle is the physical residency witness carried to glass;
+        // an artifact path or a route decision can never synthesize it.
+        def q4s-residency-handle(slot) = q4tv-h(nth(nth(q4s-ctx(slot), 5), 0));
+        def q4s-resident?(slot) {
+            let ctx = q4s-ctx(slot);
+            if not(eq(len(ctx), 8)) then 0
+            else if not(eq(len(nth(ctx, 4)), Q4SLayers())) then 0
+            else if not(eq(len(nth(ctx, 6)), Q4SLayers())) then 0
+            else if le(q4s-residency-handle(slot), 0) then 0
+            else if le(nth(nth(ctx, 3), 0), 0) then 0
+            else 1;
+        }
+
+        def q4s-open(prefix, maxpos) = q4s-slot(prefix, q4t-open(prefix, maxpos), maxpos, 0, Q4SEos(), Q4SEos(), list(), Q4SEos(), "open");
+        def q4s-close(slot) = q4t-close(q4s-ctx(slot));
+
+        def q4s-prefix-list?(resident, incoming) {
+            if eq(len(resident), 0) then 1
+            else if eq(len(incoming), 0) then 0
+            else if eq(head(resident), head(incoming)) then q4s-prefix-list?(tail(resident), tail(incoming)) else 0;
+        }
+        def q4s-drop(xs, n) = if le(n, 0) then xs else if eq(len(xs), 0) then list() else q4s-drop(tail(xs), sub(n, 1));
+        def q4s-list-eq?(a, b) = if eq(len(a), 0) then if eq(len(b), 0) then 1 else 0 else if eq(len(b), 0) then 0 else if eq(head(a), head(b)) then q4s-list-eq?(tail(a), tail(b)) else 0;
+
+        // lookup: tag, status, reused token count, delta tokens.
+        def q4s-prefix-lookup(slot, incoming) {
+            let resident = q4s-tokens(slot);
+            if q4s-list-eq?(resident, incoming) then list("qwen4exp-prefix-lookup", "exact", len(resident), list())
+            else if q4s-prefix-list?(resident, incoming) then list("qwen4exp-prefix-lookup", "append", len(resident), q4s-drop(incoming, len(resident)))
+            else list("qwen4exp-prefix-lookup", "miss", 0, incoming);
+        }
+        def q4s-lookup-status(lookup) = nth(lookup, 1);
+        def q4s-lookup-reused(lookup) = nth(lookup, 2);
+        def q4s-lookup-delta(lookup) = nth(lookup, 3);
+
+        // State lookup never reads a buffer. It returns the resident handle and
+        // exact ownership coordinates so diagnostics can inspect deliberately.
+        def q4s-substate-row(status, layer, kind, handle) = list("qwen4exp-substate", status, layer, kind, handle);
+        def q4s-layer-substate(ctx, layer, kind) {
+            let state = nth(nth(ctx, 6), layer);
+            if str_eq(kind, "conv") then q4s-substate-row(if gt(nth(state, 0), 0) then "hit" else "absent", layer, kind, nth(state, 0))
+            else if str_eq(kind, "gdn") then q4s-substate-row(if gt(nth(state, 1), 0) then "hit" else "absent", layer, kind, nth(state, 1))
+            else if str_eq(kind, "key") then q4s-substate-row(if gt(nth(state, 2), 0) then "hit" else "absent", layer, kind, nth(state, 2))
+            else if str_eq(kind, "value") then q4s-substate-row(if gt(nth(state, 3), 0) then "hit" else "absent", layer, kind, nth(state, 3))
+            else q4s-substate-row("miss", layer, kind, 0);
+        }
+        def q4s-state-lookup(slot, layer, kind) {
+            let ctx = q4s-ctx(slot);
+            if str_eq(kind, "position") then q4s-substate-row("hit", sub(0, 1), kind, q4s-pos(slot))
+            else if str_eq(kind, "tokens") then list("qwen4exp-substate", "hit", sub(0, 1), kind, q4s-tokens(slot))
+            else if str_eq(kind, "ple-history") then q4s-substate-row("hit", sub(0, 1), kind, nth(nth(ctx, 3), 48))
+            else if or(lt(layer, 0), ge(layer, Q4SLayers())) then q4s-substate-row("miss", layer, kind, 0)
+            else q4s-layer-substate(ctx, layer, kind);
+        }
+        def q4s-substate-status(row) = nth(row, 1);
+        def q4s-substate-handle(row) = nth(row, 4);
+
+        def q4s-evaluate-one(slot, token) {
+            let output = q4t-forward(q4s-ctx(slot), token, q4s-pos(slot), q4s-prev1(slot), q4s-prev2(slot));
+            q4s-slot(q4s-prefix(slot), q4s-ctx(slot), q4s-maxpos(slot), add(q4s-pos(slot), 1), token, q4s-prev1(slot), append(q4s-tokens(slot), list(token)), output, "evaluated");
+        }
+        def q4s-ingest-one(slot, token) {
+            let ingested = q4t-ingest(q4s-ctx(slot), token, q4s-pos(slot), q4s-prev1(slot), q4s-prev2(slot));
+            q4s-slot(q4s-prefix(slot), q4s-ctx(slot), q4s-maxpos(slot), add(q4s-pos(slot), ingested), token, q4s-prev1(slot), append(q4s-tokens(slot), list(token)), q4s-output(slot), "ingested");
+        }
+        def q4s-evaluate-delta(slot, tokens) = if eq(len(tokens), 0) then slot else q4s-evaluate-delta(q4s-evaluate-one(slot, head(tokens)), tail(tokens));
+        def q4s-prefill-delta(slot, tokens) {
+            if eq(len(tokens), 0) then slot
+            else if eq(len(tokens), 1) then q4s-evaluate-one(slot, head(tokens))
+            else q4s-prefill-delta(q4s-ingest-one(slot, head(tokens)), tail(tokens));
+        }
+
+        // result: tag, new slot, lookup status, reused, evaluated, output.
+        def q4s-result(slot, status, reused, evaluated) = list("qwen4exp-state-evaluate", slot, status, reused, evaluated, q4s-output(slot));
+        def q4s-result-slot(result) = nth(result, 1);
+        def q4s-result-status(result) = nth(result, 2);
+        def q4s-result-reused(result) = nth(result, 3);
+        def q4s-result-evaluated(result) = nth(result, 4);
+        def q4s-result-output(result) = nth(result, 5);
+
+        def q4s-evaluate-append(slot, lookup) {
+            let delta = q4s-lookup-delta(lookup);
+            let next = q4s-prefill-delta(slot, delta);
+            q4s-result(next, "append", q4s-lookup-reused(lookup), len(delta));
+        }
+        def q4s-evaluate-miss(slot, incoming) {
+            q4s-close(slot);
+            let fresh = q4s-open(q4s-prefix(slot), q4s-maxpos(slot));
+            let next = q4s-prefill-delta(fresh, incoming);
+            q4s-result(next, "miss", 0, len(incoming));
+        }
+        def q4s-evaluate(slot, incoming) {
+            let lookup = q4s-prefix-lookup(slot, incoming);
+            let status = q4s-lookup-status(lookup);
+            if str_eq(status, "exact") then q4s-result(slot, status, q4s-lookup-reused(lookup), 0)
+            else if str_eq(status, "append") then q4s-evaluate-append(slot, lookup)
+            else q4s-evaluate-miss(slot, incoming);
+        }
+    }
+    0;
+}
