@@ -465,6 +465,9 @@ static void fk_pv(long long v) {
     }
 }
 static long long fk_arms[FK_OPCODE_ARM_CAP];
+/* the once-hold's node tag (declared early: the walker arm reads it far
+ * above the const-table machinery that owns the rest of the mechanism). */
+#define FK_TAG_CONST_HOLD 190
 static long long *fk_mem;
 static long long fk_mem_cap;
 static void fk_mem_reserve(long long need) {
@@ -3494,17 +3497,71 @@ static long long fk_inram_bytes(long long image, unsigned char *out, long long c
     return n;
 }
 
+/* The door's argument contract, extended 2026-09-02 (the multi-arg
+ * increment the per-recipe-JIT program named): an EVEN word is ONE
+ * integer argument — the standing contract, behavior unchanged — and a
+ * cons list of even words is UP TO EIGHT arguments, handed to the page
+ * in x0..x7 per AAPCS64, the convention lo-compile-fn-n banks from.
+ * Returns the arg count (1..8); 0 declines the shape (nil, a >8 list,
+ * or any non-integer element), and the door answers nothing. */
+static long long fk_inram_args(long long arg_value, long long *a) {
+    long long i;
+    for (i = 0; i < 8; i = i + 1) {
+        a[i] = 0;
+    }
+    if ((arg_value & 1) == 0) {
+        a[0] = arg_value >> 1;
+        return 1;
+    }
+    {
+        long long n = 0;
+        long long cell = arg_value;
+        long long h;
+        long long t;
+        while (fk_arm64_u32_cons(cell, &h, &t)) {
+            if (n >= 8 || (h & 1) != 0) {
+                return 0;
+            }
+            a[n] = h >> 1;
+            n = n + 1;
+            cell = t;
+        }
+        if (cell != 1 || n == 0) {
+            return 0;
+        }
+        return n;
+    }
+}
+/* ONE call seam for every executable page. Emitted code banks into
+ * callee-saved registers (x19..), and lo-compile-fn-n now saves and
+ * restores them — the asm fence below is the belt to those suspenders:
+ * it declares x19..x28 clobbered so the compiler never keeps a live
+ * value there across the page call, even against an image lowered
+ * before the prologue landed. Old single-arg images read only w0/w1;
+ * handing eight registers to a page that reads fewer is AAPCS64-clean. */
+static long long fk_inram_call(void *mem, long long *a) {
+    long long (*fn)(long long, long long, long long, long long, long long,
+                    long long, long long, long long) =
+        (long long (*)(long long, long long, long long, long long, long long,
+                       long long, long long, long long))mem;
+    long long r = fn(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+    __asm__ volatile(""
+                     : "+r"(r)
+                     :
+                     : "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
+                       "x27", "x28");
+    return r;
+}
 static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
     unsigned char code[FK_INRAM_CODE_CAP];
     long long n;
     long long i;
-    long long arg;
+    long long args[8];
     void *mem = 0;
     fk_inram_last_slot = -1;
-    if ((arg_value & 1) != 0) {
+    if (fk_inram_args(arg_value, args) == 0) {
         return fk_nothing;
     }
-    arg = arg_value >> 1;
     n = fk_inram_bytes(image, code, FK_INRAM_CODE_CAP);
     if (n <= 0 || (n % 4) != 0) {
         return fk_nothing;
@@ -3516,10 +3573,8 @@ static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
                 j = j + 1;
             }
             if (j == n) {
-                long long (*hot)(long long) =
-                    (long long (*)(long long))fk_inram_cache[i].mem;
                 fk_inram_last_slot = i;
-                return (hot(arg)) << 1;
+                return (fk_inram_call(fk_inram_cache[i].mem, args)) << 1;
             }
         }
     }
@@ -3552,10 +3607,7 @@ static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
         fk_inram_last_slot = fk_inram_cursor;
         fk_inram_cursor = (fk_inram_cursor + 1) % FK_INRAM_CACHE;
     }
-    {
-        long long (*fn)(long long) = (long long (*)(long long))mem;
-        return (fn(arg)) << 1;
-    }
+    return (fk_inram_call(mem, args)) << 1;
 }
 
 /* The existing two-argument door also accepts a Form-native resident request:
@@ -3645,19 +3697,24 @@ static long long fk_jit_leaf_inram_resident(long long action, long long identity
         }
         return 2;
     }
-    if (action != 0 || (arg_value & 1) != 0) {
+    if (action != 0) {
         return fk_nothing;
     }
-    if (fk_inram_node_released[ix]) {
-        return fk_nothing;
-    }
-    if (encoded_slot != 0) {
-        e = &fk_inram_cache[encoded_slot - 1];
-        if (e->live && fk_inram_node_generation[ix] == e->generation) {
-            long long (*hot)(long long) = (long long (*)(long long))e->mem;
-            return (hot(arg_value >> 1)) << 1;
+    {
+        long long ra[8];
+        if (fk_inram_args(arg_value, ra) == 0) {
+            return fk_nothing;
         }
-        fk_inram_node_slot[ix] = 0;
+        if (fk_inram_node_released[ix]) {
+            return fk_nothing;
+        }
+        if (encoded_slot != 0) {
+            e = &fk_inram_cache[encoded_slot - 1];
+            if (e->live && fk_inram_node_generation[ix] == e->generation) {
+                return (fk_inram_call(e->mem, ra)) << 1;
+            }
+            fk_inram_node_slot[ix] = 0;
+        }
     }
     {
         long long answer = fk_jit_leaf_inram_image(image, arg_value);
@@ -7441,6 +7498,18 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 2) {
         return fk_vs[fp];
     }
+    if (t == FK_TAG_CONST_HOLD) {
+        /* the once-hold: first read walks the initializer and holds the
+         * value in the node's own fields; later reads return it. The gen
+         * stamp is read AFTER the walk — the build itself may melt. */
+        if (fk_node[i][3] != 0 && (fk_node[i][3] >> 1) == fk_melt_gen) {
+            return fk_node[i][2];
+        }
+        long long v190 = fk_walk(fk_node[i][1], fp);
+        fk_node[i][2] = v190;
+        fk_node[i][3] = (fk_melt_gen << 1) | 1;
+        return v190;
+    }
     if (t == 3) {
         long long a3 = fk_walk(fk_node[i][1], fp);
         long long b3 = fk_walk(fk_node[i][2], fp);
@@ -10189,7 +10258,19 @@ static void fk_parse_top(void);
  * (fn[0]). */
 /* Function symbols share the demand-grown storage declared with fk_fn. */
 #define FK_TOP_CONST_CAP_INIT 512 /* top-level constant table birth size; doubles on demand */
-static long long *fk_const_s, *fk_const_n, *fk_const_node, fk_const_top;
+/* THE ONCE-HOLD (tag FK_TAG_CONST_HOLD). Witnessed 2026-09-02: a top-level
+ * let spliced its initializer NODE into every reference site, so each read
+ * re-walked the whole build — call-by-name. The Go arm builds once; the
+ * divergence cost 31.6M dispatches in one cold .bml compile. Every
+ * reference to a top-level let now shares one hold node per const binding:
+ * the first walk computes the value and holds it in the NODE'S OWN free
+ * fields (node[2] value, node[3] the melt-gen stamp (gen<<1)|1, 0 = empty)
+ * — the arm64-hint idiom, a melt un-vouches and the next read rebuilds.
+ * fk_const_wrapp1[row] is the binding's hold node + 1 (0 = none yet), grown
+ * with the const table below so a demand-doubled table never reads garbage;
+ * a redefinition or reused row drops it. (FK_TAG_CONST_HOLD is #defined
+ * up by fk_arms, where the walker arm can reach it.) */
+static long long *fk_const_s, *fk_const_n, *fk_const_node, *fk_const_wrapp1, fk_const_top;
 static long long fk_const_cap;
 static long long fk_fn_lookup(long long s, long long n) {
     long long i = 0;
@@ -10201,12 +10282,14 @@ static long long fk_fn_lookup(long long s, long long n) {
     }
     return -1;
 }
+/* returns the const ROW (not the node): the reference site builds/reuses
+ * the row's shared hold node, so all references share one memo slot. */
 static long long fk_const_lookup(long long s, long long n) {
     long long i = fk_const_top;
     while (i > 0) {
         i = i - 1;
         if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i])) {
-            return fk_const_node[i];
+            return i;
         }
     }
     return -1;
@@ -10216,6 +10299,9 @@ static void fk_const_set(long long s, long long n, long long node) {
     while (i < fk_const_top) {
         if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i])) {
             fk_const_node[i] = node;
+            /* a redefinition drops the old hold node; old references keep
+             * their already-spliced meaning, new references bind fresh. */
+            fk_const_wrapp1[i] = 0;
             return;
         }
         i = i + 1;
@@ -10225,7 +10311,9 @@ static void fk_const_set(long long s, long long n, long long node) {
         fk_const_s = (long long *)realloc(fk_const_s, (unsigned long)(nc * 8));
         fk_const_n = (long long *)realloc(fk_const_n, (unsigned long)(nc * 8));
         fk_const_node = (long long *)realloc(fk_const_node, (unsigned long)(nc * 8));
-        if (fk_const_s == 0 || fk_const_n == 0 || fk_const_node == 0) {
+        fk_const_wrapp1 = (long long *)realloc(fk_const_wrapp1, (unsigned long)(nc * 8));
+        if (fk_const_s == 0 || fk_const_n == 0 || fk_const_node == 0 ||
+            fk_const_wrapp1 == 0) {
             fk_die("fk_const_set: out of memory growing the top-level constant table");
         }
         fk_const_cap = nc;
@@ -10233,6 +10321,9 @@ static void fk_const_set(long long s, long long n, long long node) {
     fk_const_s[fk_const_top] = s;
     fk_const_n[fk_const_top] = n;
     fk_const_node[fk_const_top] = node;
+    /* rows are reused after the loaders reset fk_const_top; a fresh binding
+     * must never inherit the previous tenant's hold node. */
+    fk_const_wrapp1[fk_const_top] = 0;
     fk_const_top = fk_const_top + 1;
 }
 static long long fk_parse_variadic(long long tag);
@@ -10780,9 +10871,16 @@ static long long fk_sparse(void) {
     if (fk_sym_eq(s, fk_spos - s, "false")) {
         return fk_smklit(0);
     }
-    long long cn = fk_const_lookup(s, fk_spos - s);
-    if (cn >= 0) {
-        return cn;
+    long long crow = fk_const_lookup(s, fk_spos - s);
+    if (crow >= 0) {
+        /* every reference shares the binding's ONE hold node, so the value
+         * memo (living in that node's own fields, born empty) is
+         * program-wide: one build serves every reference site. */
+        if (fk_const_wrapp1[crow] == 0) {
+            fk_const_wrapp1[crow] =
+                fk_smknode(FK_TAG_CONST_HOLD, fk_const_node[crow], 0, 0) + 1;
+        }
+        return fk_const_wrapp1[crow] - 1;
     }
     long long vfidx = fk_fn_lookup(s, fk_spos - s);
     if (vfidx >= 0) {
@@ -12801,6 +12899,11 @@ static long long fk_fkb_node_arity_for_tag(long long tag) {
     if (tag == 91) {
         return 1;
     }
+    if (tag == FK_TAG_CONST_HOLD) {
+        /* node[1] is the initializer NODE (remapped); node[2] is the raw
+         * memo row, deliberately NOT remapped. */
+        return 1;
+    }
     long long i = 0;
     while (i < fk_optab_n) {
         if (fk_optab[i].tag == tag) {
@@ -12833,6 +12936,12 @@ static long long fk_fkb_remap_field(long long tag, long long field, long long va
     }
     if ((tag == 240 || tag == 241) && field >= 2) {
         return value + node_base;
+    }
+    if (tag == FK_TAG_CONST_HOLD && field >= 2) {
+        /* a hold node's memo (value + gen stamp) never travels: whatever a
+         * writer's process state left in these fields, a loaded image
+         * starts with an empty hold and rebuilds on first read. */
+        return 0;
     }
     if (tag == 77) {
         return field == 2 ? value + node_base : value;
@@ -13215,6 +13324,12 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         fk_node[i][1] = fk_fkb_read_signed();
         fk_node[i][2] = fk_fkb_read_signed();
         fk_node[i][3] = fk_fkb_read_signed();
+        if (fk_node[i][0] == FK_TAG_CONST_HOLD) {
+            /* the hold's memo never travels (twin of the remap-lane scrub):
+             * a loaded image starts empty and rebuilds on first read. */
+            fk_node[i][2] = 0;
+            fk_node[i][3] = 0;
+        }
         i = i + 1;
     }
     long long ns = fk_fkb_read_signed();
