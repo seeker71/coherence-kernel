@@ -156,17 +156,19 @@ static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
 #define FK_OPCODE_ARM_CAP 256           /* fk_arms: per-tag hit counters, indexed by node tag t */
 #define FK_MEM_CELL_CAP 4096            /* fk_mem: mutable record-cell table (tags 13/14) */
 #define FK_STAGED_INPUT_CAP 262144      /* fk_src: staged auxiliary input (the input_byte primitive) */
-#define FK_VALUE_STACK_CAP 1048576      /* fk_vs: the evaluator's argument/value stack. Raised 65536->1048576 (2026-07-30): one slot per call frame, so the old cap was a ~65,500-deep recursion wall — measured, 65000 answered and 70000 died — while Go, Rust and TypeScript all answer a 100,000-deep count. A behaviour three of four kernels have and the fourth does not is a bug, not a design; the four exist to make exactly that visible. 1048576 * 8B = 8MB static, the same raisable-constant class as FK_NODE_CAP (65536->262144) and FK_BD_STACK_CAP (128->1024). Past this the walker's own 6MB host-stack wall is reached first, and THAT one speaks. */
+#define FK_VALUE_STACK_CAP 1048576      /* fk_vs: the evaluator's argument/value stack. Raised 65536->1048576 (2026-07-30): one slot per call frame, so the old cap was a ~65,500-deep recursion wall — measured, 65000 answered and 70000 died — while Go, Rust and TypeScript all answer a 100,000-deep count. A behaviour three of four kernels have and the fourth does not is a bug, not a design; the four exist to make exactly that visible. 1048576 * 8B = 8MB static, the same raisable-constant class as FK_BD_STACK_CAP (128->1024); the value-NODE table left this class on 2026-09-02 -- it doubles on demand (fk_nodes_grow). Past this the walker's own 6MB host-stack wall is reached first, and THAT one speaks. */
 #define FK_STRING_POOL_INIT_BYTES 1048576 /* fk_sb: interned-string byte pool, initial size */
 #define FK_STRING_TABLE_INIT_CAP 16384  /* fk_so/fk_sl: interned-string table, initial entry count */
-/* NOTE: FK_NODE_CAP and FK_AST_NODE_CAP are DIFFERENT tables that happen to share
- * a capacity today -- never conflate them. FK_NODE_CAP is the hash-cons'd VALUE
+/* NOTE: the value-node table (FK_NODE_CAP_INIT) and FK_AST_NODE_CAP are DIFFERENT
+ * tables -- never conflate them. The value-node table is the hash-cons'd VALUE
  * table (fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots)
  * used by fk_neq/fk_veq for structural equality on cons'd runtime values (records,
  * lists). FK_AST_NODE_CAP (defined near fk_node[][4] itself, further down) is the
  * PARSED PROGRAM's syntax tree, filled once per expression during parsing via
  * fk_smknode. */
-#define FK_NODE_CAP 262144              /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots. Raised 65536->262144 (2026-07-02): a 1,200-clip --src program filled the value-node table mid-run and every guard silently returned handle 0 -- a deterministic all-zero result with no error. Same raisable-constant class as FK_AST_NODE_CAP; overflow now dies loudly instead of returning 0. 262144*104B ~= 27MB. */
+#define FK_NODE_CAP_INIT 262144         /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots, nhash_memo, inram slot/generation/released: birth capacity only -- the table DOUBLES on demand (fk_nodes_grow), so there is no node wall. Handles are indices into column arrays; doubling the columns keeps every handle valid, and the intern index grows with them (held at 4x the node cap, rebuilt from fk_nhash_memo). History: 65536->262144 (2026-07-02) when a full table made every guard silently return handle 0; then a loud die at the wall; growth since 2026-09-02. A runaway consumer now shows as monotone kernel_stat 19/20 (live cap / doublings) instead of a refusal -- probe whether the fill POSITION moves, same discipline as ever. 262144*104B ~= 27MB at birth. */
+static long long fk_node_cap;           /* live capacity; fk_nodes_init/fk_nodes_grow own it */
+static long long fk_node_grows;         /* doublings this run -- kernel_stat 20 */
 #define FK_RECORD_CAP 256               /* fk_rkey/rval/rcnt/rbp: max live mutable records (fk_rp bound) */
 #define FK_RECORD_MAX_KEYS 128          /* fk_rkey/rval second dimension: max keys per record */
 /* Function values occupy odd words below fk_fnbase and above the string-value
@@ -178,7 +180,7 @@ static long long fk_fn_count;
  * evaluator's `if (t == N)` opcode-tag dispatch, which is a completely
  * different numbering space (generated from fkwu-optable.h) that happens to
  * share small integer values with ASCII codes in the 0-127 range. Conflating
- * the two would be the same class of mistake as merging FK_NODE_CAP and
+ * the two would be the same class of mistake as merging the value-node table and
  * FK_AST_NODE_CAP; kept strictly to genuine byte/character comparisons. */
 #define FK_CH_TAB 9
 #define FK_CH_LF 10
@@ -623,11 +625,11 @@ static void fk_put_str(long long v) {
         j = j + 1;
     }
 }
-static long long fk_nkind[FK_NODE_CAP];
-static long long fk_ncat[FK_NODE_CAP];
-static long long fk_nkids[FK_NODE_CAP];
-static long long fk_nval[FK_NODE_CAP];
-static long long fk_nid[FK_NODE_CAP][4];
+static long long *fk_nkind;
+static long long *fk_ncat;
+static long long *fk_nkids;
+static long long *fk_nval;
+static long long (*fk_nid)[4];
 static long long fk_np;
 static long long fk_nbox(long long i) {
     return 0 - (((long long)i << 1) | 1);
@@ -707,9 +709,10 @@ static long long fk_veq(long long a, long long b) {
  * minted without dedupe by design and stay outside the index — the
  * doors never searched them. The table is 4x the node cap, so load
  * stays low and probes short. */
-#define FK_INTERN_HASH_CAP 1048576
-static long long fk_intern_tab[FK_INTERN_HASH_CAP];
-static long long fk_nhash_memo[FK_NODE_CAP];
+#define FK_INTERN_HASH_CAP_INIT 1048576
+static long long fk_intern_hash_cap;    /* held at 4x the node cap; power of two */
+static long long *fk_intern_tab;
+static long long *fk_nhash_memo;
 static unsigned long long fk_mix64(unsigned long long h, unsigned long long v) {
     h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
     h *= 0xff51afd7ed558ccdULL;
@@ -774,11 +777,11 @@ static long long fk_intern_key_trivial(long long type, long long val) {
     long long out = (long long)(h >> 1);
     return out == 0 ? 1 : out;
 }
-static long long fk_nsfile[FK_NODE_CAP];
-static long long fk_nsline[FK_NODE_CAP];
-static long long fk_nscol[FK_NODE_CAP];
-static long long fk_nsattr[FK_NODE_CAP];
-static long long fk_fbroots[FK_NODE_CAP];
+static long long *fk_nsfile;
+static long long *fk_nsline;
+static long long *fk_nscol;
+static long long *fk_nsattr;
+static long long *fk_fbroots;
 static long long fk_fbn;
 #if defined(__has_include) && !defined(_WIN32)
 #if __has_include(<sys/stat.h>)
@@ -3320,9 +3323,9 @@ static long long fk_inram_cursor = 0;
  * fold, image reconstruction or table scan belongs on the hot call.  The
  * generation pair makes slot eviction O(1) too -- stale aliases simply stop
  * matching rather than requiring a sweep over the node table. */
-static unsigned char fk_inram_node_slot[FK_NODE_CAP];
-static unsigned int fk_inram_node_generation[FK_NODE_CAP];
-static unsigned char fk_inram_node_released[FK_NODE_CAP];
+static unsigned char *fk_inram_node_slot;
+static unsigned int *fk_inram_node_generation;
+static unsigned char *fk_inram_node_released;
 static long long fk_inram_last_slot = -1;
 
 static long long fk_inram_bytes(long long image, unsigned char *out, long long cap) {
@@ -3452,7 +3455,7 @@ static int fk_inram_node_index(long long identity, long long *index) {
         return 0;
     }
     ix = fk_nidx(identity);
-    if (ix < 1 || ix > fk_np || ix >= FK_NODE_CAP) {
+    if (ix < 1 || ix > fk_np || ix >= fk_node_cap) {
         return 0;
     }
     *index = ix;
@@ -3621,6 +3624,110 @@ static long long fk_native_call_arm64_u32_leaf(long long program, long long root
     return fk_nothing;
 }
 #endif
+/* ── the value-node table grows; there is no node wall ─────────────────────
+ * Handles are INDICES into the column arrays, so doubling the columns keeps
+ * every existing handle valid -- nothing relocates, the same property the
+ * intern index and the melt already stand on. The cons-pair heap (fk_melt)
+ * had growth first; the node table now matches its discipline. New column
+ * bytes are zeroed to keep the BSS-era meanings (memo 0 = unhashed, sattr 0
+ * = unattributed, inram slot 0 = unresident). The intern index is held at 4x
+ * the node cap: when it must grow it is rebuilt from fk_nhash_memo -- every
+ * indexed node's memo IS its exact probe key (the doors store it at mint),
+ * and nodes outside the index that carry deep-hash memos re-enter as dead
+ * weight the doors' predicates skip, load staying <= 25%. Callers grow
+ * BEFORE computing a probe slot, never after (a slot chosen under the old
+ * mask would land wrong in the rebuilt table). OOM here dies loudly -- the
+ * same honest door as fk_melt's arena. */
+static void *fk_nodes_grow_col(void *p, long long old_n, long long new_n, long long width) {
+    char *q = realloc(p, (unsigned long)(new_n * width));
+    long long i;
+    if (q == 0) {
+        fk_die("fk_nodes_grow: out of memory growing the value-node table");
+    }
+    i = old_n * width;
+    while (i < new_n * width) {
+        q[i] = 0;
+        i = i + 1;
+    }
+    return q;
+}
+static void fk_nodes_grow(void) {
+    long long oc = fk_node_cap;
+    long long nc = oc * 2;
+    fk_nkind = (long long *)fk_nodes_grow_col(fk_nkind, oc, nc, 8);
+    fk_ncat = (long long *)fk_nodes_grow_col(fk_ncat, oc, nc, 8);
+    fk_nkids = (long long *)fk_nodes_grow_col(fk_nkids, oc, nc, 8);
+    fk_nval = (long long *)fk_nodes_grow_col(fk_nval, oc, nc, 8);
+    fk_nid = (long long (*)[4])fk_nodes_grow_col(fk_nid, oc, nc, 32);
+    fk_nhash_memo = (long long *)fk_nodes_grow_col(fk_nhash_memo, oc, nc, 8);
+    fk_nsfile = (long long *)fk_nodes_grow_col(fk_nsfile, oc, nc, 8);
+    fk_nsline = (long long *)fk_nodes_grow_col(fk_nsline, oc, nc, 8);
+    fk_nscol = (long long *)fk_nodes_grow_col(fk_nscol, oc, nc, 8);
+    fk_nsattr = (long long *)fk_nodes_grow_col(fk_nsattr, oc, nc, 8);
+    fk_fbroots = (long long *)fk_nodes_grow_col(fk_fbroots, oc, nc, 8);
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+    fk_inram_node_slot = (unsigned char *)fk_nodes_grow_col(fk_inram_node_slot, oc, nc, 1);
+    fk_inram_node_generation = (unsigned int *)fk_nodes_grow_col(fk_inram_node_generation, oc, nc, 4);
+    fk_inram_node_released = (unsigned char *)fk_nodes_grow_col(fk_inram_node_released, oc, nc, 1);
+#endif
+    fk_node_cap = nc;
+    fk_node_grows = fk_node_grows + 1;
+    if (fk_intern_hash_cap < nc * 4) {
+        long long hc = fk_intern_hash_cap * 2;
+        long long ix;
+        free(fk_intern_tab);
+        fk_intern_tab = (long long *)calloc((unsigned long)hc, 8);
+        if (fk_intern_tab == 0) {
+            fk_die("fk_nodes_grow: out of memory growing the intern index");
+        }
+        ix = 1;
+        while (ix <= fk_np) {
+            long long h = fk_nhash_memo[ix];
+            if (h) {
+                long long slot = h & (hc - 1);
+                while (fk_intern_tab[slot]) {
+                    slot = (slot + 1) & (hc - 1);
+                }
+                fk_intern_tab[slot] = ix;
+            }
+            ix = ix + 1;
+        }
+        fk_intern_hash_cap = hc;
+    }
+}
+static void fk_nodes_init(void) {
+    if (fk_node_cap) {
+        return;
+    }
+    fk_nkind = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_ncat = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nkids = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nval = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nid = (long long (*)[4])calloc(FK_NODE_CAP_INIT, 32);
+    fk_nhash_memo = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nsfile = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nsline = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nscol = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nsattr = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_fbroots = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_intern_tab = (long long *)calloc(FK_INTERN_HASH_CAP_INIT, 8);
+    if (fk_nkind == 0 || fk_ncat == 0 || fk_nkids == 0 || fk_nval == 0 ||
+        fk_nid == 0 || fk_nhash_memo == 0 || fk_nsfile == 0 || fk_nsline == 0 ||
+        fk_nscol == 0 || fk_nsattr == 0 || fk_fbroots == 0 || fk_intern_tab == 0) {
+        fk_die("fk_nodes_init: out of memory for the value-node table");
+    }
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+    fk_inram_node_slot = (unsigned char *)calloc(FK_NODE_CAP_INIT, 1);
+    fk_inram_node_generation = (unsigned int *)calloc(FK_NODE_CAP_INIT, 4);
+    fk_inram_node_released = (unsigned char *)calloc(FK_NODE_CAP_INIT, 1);
+    if (fk_inram_node_slot == 0 || fk_inram_node_generation == 0 ||
+        fk_inram_node_released == 0) {
+        fk_die("fk_nodes_init: out of memory for the value-node table");
+    }
+#endif
+    fk_node_cap = FK_NODE_CAP_INIT;
+    fk_intern_hash_cap = FK_INTERN_HASH_CAP_INIT;
+}
 /* ── stone 3 (OBSERVE): the offer/ack observe hook ────────────────────────── Every reducer CALL is
  * an OFFER (axiom-5): a callee + its args, acknowledged by EXACTLY ONE of {nothing, 0, 1, node}.
  * This hook makes that offer/ack witnessable as a trace the observe organ reads — the live feed
@@ -6540,7 +6647,7 @@ static void fk_melt(void) {
      * conses and pays that walk each time. Guarantee headroom that scales
      * with the walk: at least np/4 free pairs after compaction, so each
      * O(np) melt is amortized over >= np/4 allocations. Worst-case extra
-     * memory is FK_NODE_CAP/4 pairs (~1MB). */
+     * memory is fk_np/4 pairs. */
     while (ncap - nlive < fk_np / 4 + FK_HASHCONS_INIT_CAP) {
         ncap = ncap * 2;
     }
@@ -6688,7 +6795,7 @@ static void fk_fn_reserve(long long needed) {
     fk_fn_heat = next_fn_heat;
     fk_fn_capacity = next;
 }
-#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as the former top-function-symbol cap), not a fundamental limit. 262144 STANDS (2026-07-18): a doubling probe disproved a capacity misread — the match-switch band's fill died at the SAME source position at 2x budget, exposing fk_sparse's stray-rparen zero-advance mint spin (fixed in the bare-symbol path), not honest growth; the source-compiler family's full ~514KB prelude closure parses well within 256K nodes. Measure (does the fill position move with the cap?) before raising. */
+#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP_INIT). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as the former top-function-symbol cap), not a fundamental limit. 262144 STANDS (2026-07-18): a doubling probe disproved a capacity misread — the match-switch band's fill died at the SAME source position at 2x budget, exposing fk_sparse's stray-rparen zero-advance mint spin (fixed in the bare-symbol path), not honest growth; the source-compiler family's full ~514KB prelude closure parses well within 256K nodes. Measure (does the fill position move with the cap?) before raising. */
 static long long fk_node_count;
 static long long fk_ast_full; /* set once when the AST node table overflows; halts the parse (fk_spos:=fk_slen) so the collect-and-continue recovery cannot spin re-minting sentinels forever. Reset per run. */
 static long long fk_node[FK_AST_NODE_CAP][4];
@@ -7801,16 +7908,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 43) {
         long long iv43 = fk_walk(fk_node[i][1], fp);
         long long h43 = fk_intern_key_trivial(1, iv43);
-        long long slot43 = h43 & (FK_INTERN_HASH_CAP - 1);
+        long long slot43 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot43 = h43 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot43]) {
             long long ix43 = fk_intern_tab[slot43];
             if (fk_nkind[ix43] == 1 && fk_nid[ix43][2] == 1 && fk_nval[ix43] == iv43) {
                 return fk_nbox(ix43);
             }
-            slot43 = (slot43 + 1) & (FK_INTERN_HASH_CAP - 1);
-        }
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
+            slot43 = (slot43 + 1) & (fk_intern_hash_cap - 1);
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -7829,19 +7937,20 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long sv46 = fk_walk(fk_node[i][1], fp);
         long long sa46 = fk_stri(sv46);
         long long h46 = fk_intern_key_trivial(2, sv46);
-        long long slot46 = h46 & (FK_INTERN_HASH_CAP - 1);
+        long long slot46 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot46 = h46 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot46]) {
             long long ix46 = fk_intern_tab[slot46];
             if (fk_nkind[ix46] == 1 && fk_nid[ix46][2] == 2 && fk_nval[ix46] == sv46) {
                 return fk_nbox(ix46);
             }
-            slot46 = (slot46 + 1) & (FK_INTERN_HASH_CAP - 1);
+            slot46 = (slot46 + 1) & (fk_intern_hash_cap - 1);
         }
         if (sa46 < 0 || sa46 >= fk_sp) {
             return 0;
-        }
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -7866,17 +7975,18 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (h47 == 0) {
             h47 = 1;
         }
-        long long slot47 = h47 & (FK_INTERN_HASH_CAP - 1);
+        long long slot47 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot47 = h47 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot47]) {
             long long ix47 = fk_intern_tab[slot47];
             if (fk_nkind[ix47] == 2 && fk_veq(fk_ncat[ix47], cat47) != 0 &&
                 fk_veq(fk_nkids[ix47], kids47) != 0) {
                 return fk_nbox(ix47);
             }
-            slot47 = (slot47 + 1) & (FK_INTERN_HASH_CAP - 1);
-        }
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
+            slot47 = (slot47 + 1) & (fk_intern_hash_cap - 1);
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 2;
@@ -7920,8 +8030,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (q91 >= 1 && q91 <= fk_hp) {
             in91 = fk_hh[q91] >> 1;
         }
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 3;
@@ -7938,16 +8048,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long bv112 = fk_walk(fk_node[i][1], fp);
         long long se112 = (bv112 != 0) ? (0 - 9223372036854775807LL) : (0 - 9223372036854775805LL);
         long long h112 = fk_intern_key_trivial(3, se112);
-        long long slot112 = h112 & (FK_INTERN_HASH_CAP - 1);
+        long long slot112 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot112 = h112 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot112]) {
             long long ix112 = fk_intern_tab[slot112];
             if (fk_nkind[ix112] == 1 && fk_nid[ix112][2] == 3 && fk_nval[ix112] == se112) {
                 return fk_nbox(ix112);
             }
-            slot112 = (slot112 + 1) & (FK_INTERN_HASH_CAP - 1);
-        }
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
+            slot112 = (slot112 + 1) & (fk_intern_hash_cap - 1);
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -7980,8 +8091,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fd113 = strtod(tb113, 0);
         }
         long long fb113 = fk_fbox(fd113);
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -8954,6 +9065,14 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 18) {
             return fk_import_refusal << 1;
         }
+        /* 19/20: the value-node table's growth pulse. There is no node wall
+         * any more; a runaway consumer shows here as monotone growth. */
+        if (ks_k == 19) {
+            return fk_node_cap << 1;
+        }
+        if (ks_k == 20) {
+            return fk_node_grows << 1;
+        }
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
         }
@@ -8969,8 +9088,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_nsline[fr_ni] = fr_pk >> 16;
             fk_nscol[fr_ni] = fr_pk & 65535;
             fk_nsattr[fr_ni] = 1;
-            if (fk_fbn >= FK_NODE_CAP) {
-                fk_die("fk fbroots table full (FK_NODE_CAP): GC root registration would be silently dropped");
+            if (fk_fbn >= fk_node_cap) {
+                fk_nodes_grow();
             }
             fk_fbroots[fk_fbn] = fr_nv;
             fk_fbn = fk_fbn + 1;
@@ -9588,7 +9707,7 @@ static long long fk_smkstr(void) {
  * slot). A bare bound name lowers to tag 110 (read fk_vs[fp+slot]); a let lowers to tag 109 (store
  * then body); a function reserves fk_maxslot slots (tag 111). Over-reserve is safe (form-flatten
  * over-reserves too). */
-#define FK_BD_STACK_CAP 1024 /* fk_bd_*: max bindings simultaneously in scope during parse. Raised 128->1024 (2026-07-02): a single scope with many sequential lets (generated classifier programs) can exceed 128, and a silently dropped binding miscompiles variable references. Same raisable-constant class as FK_NODE_CAP; overflow now dies loudly instead of dropping a binding. */
+#define FK_BD_STACK_CAP 1024 /* fk_bd_*: max bindings simultaneously in scope during parse. Raised 128->1024 (2026-07-02): a single scope with many sequential lets (generated classifier programs) can exceed 128, and a silently dropped binding miscompiles variable references. Same raisable-constant class the value-node table once shared (it grows on demand now, fk_nodes_grow); overflow here still dies loudly instead of dropping a binding. */
 static long long fk_bd_s[FK_BD_STACK_CAP], fk_bd_n[FK_BD_STACK_CAP], fk_bd_off[FK_BD_STACK_CAP], fk_bd_top, fk_maxslot;
 static long long fk_bd_lookup(long long s, long long n) {
     long long i = fk_bd_top;
@@ -14008,6 +14127,7 @@ static int fk_run_bml(const char *path, long long arg) {
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
     fk_stack_base = &fk_stack_here;
+    fk_nodes_init();
     if (argc < 2) {
         return 1;
     }
