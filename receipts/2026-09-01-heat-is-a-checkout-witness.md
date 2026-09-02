@@ -75,3 +75,19 @@ removal route and putting all interpretation in BML.
 ; witnessed: 2026-09-01 -> BML lane heat parser 1023; source turnwheel
 ; 16777215; exit heat snapshot named append-1/map/append-list; checkout-seed
 ; shrink route explicit
+
+## Addendum: warm burns burn by name (2026-09-02)
+
+The practice witness found two wounds in one line and both are closed.
+The writer indexed the symbol arrays with the fn index — spaces that
+coincide on fresh compiles and divorce under image remapping — so cold
+runs MISATTRIBUTED heat (an inner fn's 80M dispatches printed under its
+caller's name) and warm runs printed nameless counts. The writer now
+walks the symbol table and follows fk_fnidx; any hot fn no symbol names
+prints fn#N — counted work is never blank. And the whole-image loader
+restored what it had always been handed: fk_fkb_restore_symbol_image
+reads the name records the artifact already carries instead of
+skipping them (pre-v3 artifacts restore nothing and keep the honest
+fallback). Witnessed: the same 80,000,400-dispatch burn now reads
+"burn" cold AND warm. Bands: lane-motion 1023, glass 16777215,
+freshness 31. Corpus row 1217.

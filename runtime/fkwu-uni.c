@@ -9278,16 +9278,46 @@ static void fk_heat_write(void) {
     sprintf(path, ".fkwu-heat.%d", getpid());
     sprintf(tmp, ".fkwu-heat.%d.tmp", getpid());
     int fd = -1;
-    while (i < top) {
-        if (fk_fn_heat[i] >= FK_HEAT_REPORT_MIN) {
+    /* NAME BY THE MAP, NOT BY COINCIDENCE: heat is per fn-INDEX, names
+     * live in the symbol table keyed by fk_fnidx[symtop] -> fnidx. On a
+     * fresh compile the two spaces coincide and indexing symbols with
+     * the fn index happens to print names; on an image load fn_base
+     * remapping divorces them and warm runs burned NAMELESS (witnessed
+     * 2026-09-02: bare counts in .fkwu-heat.<pid> from .fkb-loaded
+     * processes). Walk the symbol table and follow the map; any hot fn
+     * no symbol names prints as fn#N — counted work is never blank. */
+    long long j = 0;
+    while (j < fk_fntop) {
+        long long fx = fk_fnidx[j];
+        if (fx >= 0 && fx < top && fk_fn_heat[fx] >= FK_HEAT_REPORT_MIN) {
             if (fd < 0) {
                 fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
                 if (fd < 0) {
                     return;
                 }
             }
-            dprintf(fd, "%lld %.*s\n", fk_fn_heat[i],
-                    (int)fk_fnsym_n[i], fk_srctext + fk_fnsym_s[i]);
+            dprintf(fd, "%lld %.*s\n", fk_fn_heat[fx],
+                    (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]);
+            fk_fn_heat[fx] = 0 - fk_fn_heat[fx] - 1;
+        }
+        j = j + 1;
+    }
+    while (i < top) {
+        if (fk_fn_heat[i] >= FK_HEAT_REPORT_MIN) {
+            if (fd < 0) {
+                fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                if (fd < 0) {
+                    break;
+                }
+            }
+            dprintf(fd, "%lld fn#%lld\n", fk_fn_heat[i], i);
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < top) {
+        if (fk_fn_heat[i] < 0) {
+            fk_fn_heat[i] = 0 - (fk_fn_heat[i] + 1);
         }
         i = i + 1;
     }
@@ -12480,6 +12510,44 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     }
     return 1;
 }
+/* the whole-image loader restores fn symbols instead of skipping them:
+ * names ride the artifact already (written at image time), and a warm
+ * process that burns must burn BY NAME — the heat witness printed
+ * nameless counts from every .fkb-loaded run until this read
+ * (witnessed 2026-09-02, fn#1 for an 80M-dispatch burn). Pre-v3
+ * artifacts carry no fnidx; they restore nothing and the fn#N
+ * fallback stays honest. */
+static int fk_fkb_restore_symbol_image(long long version) {
+    long long symbol_count = fk_fkb_read_signed();
+    long long i = 0;
+    fk_fntop = 0;
+    fk_fn_reserve(symbol_count + 1);
+    while (!fk_fkb_bad && i < symbol_count) {
+        (void)fk_fkb_read_signed();
+        long long fnidx = -1;
+        long long arity = 0;
+        if (version >= 3) {
+            fnidx = fk_fkb_read_signed();
+            arity = fk_fkb_read_signed();
+        }
+        long long name_s = 0;
+        long long name_n = 0;
+        if (!fk_fkb_read_symbol_to_srctext(&name_s, &name_n)) {
+            return 0;
+        }
+        if (version >= 3 && fnidx > 0) {
+            fk_fnsym_s[fk_fntop] = name_s;
+            fk_fnsym_n[fk_fntop] = name_n;
+            fk_fnidx[fk_fntop] = fnidx;
+            if (fnidx < fk_fn_capacity) {
+                fk_fnar[fnidx] = arity;
+            }
+            fk_fntop = fk_fntop + 1;
+        }
+        i = i + 1;
+    }
+    return !fk_fkb_bad;
+}
 static void fk_fkb_skip_symbol_image(long long version) {
     long long symbol_count = fk_fkb_read_signed();
     long long i = 0;
@@ -12630,7 +12698,9 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         fk_fkb_read_table_string();
         i = i + 1;
     }
-    fk_fkb_skip_symbol_image(version);
+    if (!fk_fkb_restore_symbol_image(version)) {
+        return 0;
+    }
     if (fk_fkb_bad) {
         return 0;
     }
@@ -12639,7 +12709,6 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         return 0;
     }
     fk_defn_next = fk_fn_count;
-    fk_fntop = 0;
     fk_const_top = 0;
     fk_root = fk_fn_count > 0 ? fk_fn[0] : -1;
     return 1;
