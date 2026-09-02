@@ -1019,8 +1019,13 @@
             (let args (fsc-sub line (add open 1) close))
             (let body (fsc-sub line (add eq-pos 1) (str_len line)))
             (let param-names (fsc-bml-name-list-strings-loop args 0 (empty)))
-            (fsc-rec-fndef name param-names
-                           (fsc-compile-form-bml-expr-recipe body))))))))))
+            ;; an empty body would bind a def that answers the empty expr
+            ;; forever with zero diagnostics -- silence must never impersonate
+            ;; a bound def, so refuse as loudly as a torn call body does.
+            (if (eq (str_len (fsc-bml-normalize-ws (fsc-strip-semi body))) 0)
+                (fsc-compiler-error-line "form.bml def body is empty" line)
+                (fsc-rec-fndef name param-names
+                               (fsc-compile-form-bml-expr-recipe body)))))))))))
 
     (defn fsc-compile-form-bml-let-recipe (line)
         (do
@@ -1390,15 +1395,24 @@
                                 (fsc-line-next body method-end) end
                                 (cons (fsc-compile-form-bml-def-block-recipe body line method-start)
                                       acc)))
+                    ;; flat def and field/ref/thought members walk to their own
+                    ;; `;` and normalize, the section walker's statement
+                    ;; discipline -- a member body that continues past its
+                    ;; first line carries whole instead of compiling empty
+                    ;; while its tail lines are re-read as members.
                     (if (fsc-prefix? line "def ")
-                        (fsc-bml-generic-class-defs-loop body
-                            (fsc-line-next body p) end
-                            (cons (fsc-compile-form-bml-def-recipe (fsc-strip-semi line))
-                                  acc))
+                        (do
+                            (let stmt-end (fsc-bml-stmt-end body p end))
+                            (let stmt (fsc-bml-normalize-ws (fsc-sub body p stmt-end)))
+                            (fsc-bml-generic-class-defs-loop body stmt-end end
+                                (cons (fsc-compile-form-bml-def-recipe (fsc-strip-semi stmt))
+                                      acc)))
                     (if (fsc-bml-class-nullary-member? line)
-                        (fsc-bml-generic-class-defs-loop body
-                            (fsc-line-next body p) end
-                            (cons (fsc-compile-form-bml-nullary-recipe line) acc))
+                        (do
+                            (let stmt-end (fsc-bml-stmt-end body p end))
+                            (let stmt (fsc-bml-normalize-ws (fsc-sub body p stmt-end)))
+                            (fsc-bml-generic-class-defs-loop body stmt-end end
+                                (cons (fsc-compile-form-bml-nullary-recipe stmt) acc)))
                         (fsc-bml-generic-class-defs-loop body
                             (fsc-line-next body p) end acc)))))))))
 
@@ -1421,13 +1435,16 @@
                             (fsc-bml-class-member-pairs-loop body
                                 (fsc-line-next body method-end) end
                                 (cons (list "method" (fsc-bml-def-line-name line)) acc)))
+                    ;; names live on the first line; the ADVANCE must still
+                    ;; walk the whole statement so a member body's tail lines
+                    ;; are never re-read as members.
                     (if (fsc-prefix? line "def ")
                         (fsc-bml-class-member-pairs-loop body
-                            (fsc-line-next body p) end
+                            (fsc-bml-stmt-end body p end) end
                             (cons (list "method" (fsc-bml-def-line-name line)) acc))
                     (if (fsc-bml-class-nullary-member? line)
                         (fsc-bml-class-member-pairs-loop body
-                            (fsc-line-next body p) end
+                            (fsc-bml-stmt-end body p end) end
                             (cons (list (fsc-bml-class-member-kind line)
                                         (fsc-bml-nullary-line-name line)) acc))
                         (fsc-bml-class-member-pairs-loop body
@@ -1505,11 +1522,23 @@
                             (fsc-line-next body body-end)
                             (cons (fsc-compile-form-bml-def-block-recipe body line body-start)
                                   acc)))
+                ;; comment lines step line-wise; every other flat statement is
+                ;; walked to its quote/paren-aware `;` (fsc-bml-stmt-end) and
+                ;; normalized, so a def/let/expr whose body continues past its
+                ;; first line carries whole -- the block walker's statement
+                ;; discipline, brought to the section top level. Before this,
+                ;; `def f(x) =` alone on a line bound a def whose body was the
+                ;; EMPTY expr (answers [] forever, zero diagnostics) while the
+                ;; real body evaluated as a stray top-level statement.
+                (if (fsc-bml-comment-line? line)
+                    (fsc-form-bml-lines-recipes-loop body
+                        (fsc-line-next body p) acc)
                     (do
-                        (let line-recipes (fsc-compile-form-bml-line-recipe line))
-                        (fsc-form-bml-lines-recipes-loop body
-                            (fsc-line-next body p)
-                            (fsc-rec-append-rev line-recipes acc))))))))))
+                        (let stmt-end (fsc-bml-stmt-end body p (str_len body)))
+                        (let stmt (fsc-bml-normalize-ws (fsc-sub body p stmt-end)))
+                        (let line-recipes (fsc-compile-form-bml-line-recipe stmt))
+                        (fsc-form-bml-lines-recipes-loop body stmt-end
+                            (fsc-rec-append-rev line-recipes acc)))))))))))
 
     ;; --- import + ref resolution (compile-time) ----------------------
     ;;
