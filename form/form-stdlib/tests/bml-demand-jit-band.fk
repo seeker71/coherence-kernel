@@ -1,0 +1,157 @@
+; bml-demand-jit-band.fk -- effectful first-answer, disk, RAM, and stale proof.
+;
+; Verdict 16777215.
+; preludes: form-stdlib/bml-demand-jit.fk form-stdlib/bml/bml-demand-jit-glass.bml
+
+(do
+    (defn bdjb-bit (ok bit) (if ok bit 0))
+    (defn bdjb-program ()
+        (list (list 1 7) (list 2) (list 1 3) (list 5 1 2) (list 3 3 0)))
+    (defn bdjb-root () "/tmp/bml-demand-jit-band")
+    (defn bdjb-source () "/tmp/bml-demand-jit-band/source.bml")
+    (defn bdjb-cache () "/tmp/bml-demand-jit-band/leaf.cache")
+    (defn bdjb-oversize-cache () "/tmp/bml-demand-jit-band/oversize.cache")
+    (defn bdjb-double (text remaining)
+        (if (le remaining 0)
+            text
+            (bdjb-double (str_concat text text) (sub remaining 1))))
+    (defn bdjb-clean ()
+        (do
+            (let a (fs-remove-file (bdjb-source)))
+            (let b (fs-remove-file (bdjb-cache)))
+            (let c (fs-remove-file (bdjb-oversize-cache)))
+            (let c2 (bdj-release-publish-lock (bdjb-cache)))
+            (let d (fs-remove-file (fgtm-snapshot-path (bdjb-root)
+                "jit.bml-demand-test")))
+            (let e (fs-remove-file (fgtm-snapshot-candidate-path (bdjb-root)
+                "jit.bml-demand-test")))
+            (fs-remove-tree (bdjb-root))))
+
+    (let old (bdjb-clean))
+    (let made (fs-mkdir (bdjb-root)))
+    (let wrote (write_file_text (bdjb-source) "section [form.bml] { 0; }"))
+    (let first (bdj-request (bdj-empty 4001) (bdjb-source) (bdjb-cache)
+        (bdjb-program) 4 5))
+    (let step (bdj-step (bdj-receipt-state first)))
+    (let second (bdj-request (bdj-step-state step) (bdjb-source) (bdjb-cache)
+        (bdjb-program) 4 10))
+
+    ; A new process-shaped state has no resident page. Its step must load the
+    ; current disk image, install it, and only then can its next request be native.
+    (let disk-first (bdj-request (bdj-empty 4001) (bdjb-source) (bdjb-cache)
+        (bdjb-program) 4 8))
+    (let disk-step (bdj-step (bdj-receipt-state disk-first)))
+    (let disk-second (bdj-request (bdj-step-state disk-step) (bdjb-source)
+        (bdjb-cache) (bdjb-program) 4 9))
+
+    ; Epoch mismatch is stale even when filesystem timestamp granularity cannot
+    ; distinguish the source write and cache publication.
+    (let stale-first (bdj-request (bdj-empty 4002) (bdjb-source) (bdjb-cache)
+        (bdjb-program) 4 2))
+    (let stale-step (bdj-step (bdj-receipt-state stale-first)))
+    (let alternate-program
+        (list (list 1 7) (list 2) (list 1 4) (list 5 1 2) (list 3 3 0)))
+    (let stale-program (bdj-request (bdj-empty 4001) (bdjb-source) (bdjb-cache)
+        alternate-program 4 2))
+    (let missing (bdj-request (bdj-empty 4001)
+        "/tmp/bml-demand-jit-band/absent.bml"
+        "/tmp/bml-demand-jit-band/absent.cache" (bdjb-program) 4 1))
+    (let missing-step (bdj-step (bdj-receipt-state missing)))
+    (let wider-program (append (bdjb-program) (list (list 14 0 1))))
+    (let wider (bdj-request (bdj-empty 4001) (bdjb-source) (bdjb-cache)
+        wider-program 5 7))
+    (let glass-samples (bdjg-samples 5001 0 first step (file_size (bdjb-cache))))
+    (let glass-published (bdjg-publish-at (bdjb-root) "jit.bml-demand-test"
+        5001 0 first step (file_size (bdjb-cache))))
+    (let glass-read (fgtm-read-current (bdjb-root) "jit.bml-demand-test"))
+
+    ; Replace current ice between request and step with a different but valid
+    ; program image. The single bounded inspection refuses it as stale-program
+    ; and compiles the pending identity instead of executing the wrong bytes.
+    (let mismatch-first (bdj-request (bdj-empty 4001) (bdjb-source)
+        (bdjb-cache) (bdjb-program) 4 6))
+    (let mismatch-write (fs-write-text (bdjb-cache)
+        (bdj-cache-wire 4001 (bdj-program-wire alternate-program 4 4001)
+            (lo-compile-fn alternate-program 4))))
+    (let mismatch-step (bdj-step (bdj-receipt-state mismatch-first)))
+
+    ; A live publisher lease refuses a second writer. A stale lease heals
+    ; once, and an oversized cache is classified before its bytes are read.
+    (let busyLock (fs-mkdir (bdj-publish-lock-path (bdjb-cache))))
+    (let busyLease (fs-write-text (bdj-publish-lease-path (bdjb-cache)) "held"))
+    (let busyPublish (bdj-publish-at (bdjb-cache) 4001
+        (bdj-program-wire (bdjb-program) 4 4001)
+        (lo-compile-fn (bdjb-program) 4) (fs-stat-mtime (bdj-publish-lock-path (bdjb-cache)))))
+    (let healedPublish (bdj-publish-at (bdjb-cache) 4001
+        (bdj-program-wire (bdjb-program) 4 4001)
+        (lo-compile-fn (bdjb-program) 4)
+        (add (fs-stat-mtime (bdj-publish-lock-path (bdjb-cache)))
+            (add (BDJPublishLeaseSeconds) 1))))
+    (let oversizeWrote (fs-write-text (bdjb-oversize-cache) (bdjb-double "x" 21)))
+    (let oversizeState (bdj-cache-content-state (bdjb-oversize-cache) 4001
+        (bdj-program-wire (bdjb-program) 4 4001)))
+    (let runtimeMismatch (bdj-cache-parse (bdj-cat (list
+        (BDJCacheSchema) "\nwrong-runtime\n4001\n"
+        (bdj-program-wire (bdjb-program) 4 4001) "\n1\n0"))))
+
+    (let verdict (sum (list
+        (bdjb-bit (and (str_eq (bdj-receipt-status first)
+                           "form-ready-specialization-pending")
+                       (and (str_eq (bdj-receipt-route first) "form")
+                            (eq (bdj-receipt-value first) 22))) 1)
+        (bdjb-bit (str_eq (bdj-receipt-cache-state first) "not-inspected") 2)
+        (bdjb-bit (str_eq (bdj-step-status step)
+                          "compiled-published-installed") 4)
+        (bdjb-bit (and (eq (bdj-step-installed step) 1)
+                       (eq (bdj-step-agreement step) 1)) 8)
+        (bdjb-bit (str_eq (bdj-step-attention step) "within") 16)
+        (bdjb-bit (and (str_eq (bdj-receipt-status second) "resident-native")
+                       (and (str_eq (bdj-receipt-route second) "native")
+                            (eq (bdj-receipt-value second) 37))) 32)
+        (bdjb-bit (eq (bdj-receipt-born second) 0) 64)
+        (bdjb-bit (and (str_eq (bdj-receipt-cache-state disk-first) "not-inspected")
+                       (str_eq (bdj-step-cache-state disk-step) "current")) 128)
+        (bdjb-bit (and (str_eq (bdj-step-status disk-step) "disk-installed")
+                       (str_eq (bdj-step-disk-action disk-step) "reused-disk")) 256)
+        (bdjb-bit (and (str_eq (bdj-receipt-route disk-second) "native")
+                       (eq (bdj-receipt-value disk-second) 34)) 512)
+        (bdjb-bit (str_eq (bdj-step-cache-state stale-step)
+                          "stale-epoch") 1024)
+        (bdjb-bit (str_eq (bdj-step-cache-state missing-step)
+                          "source-missing") 2048)
+        (bdjb-bit (and (str_eq (bdj-step-status missing-step)
+                               "ram-installed-source-missing")
+                       (eq (bdj-step-installed missing-step) 1)) 4096)
+        (bdjb-bit (and (str_eq (bdj-receipt-status wider) "wider-frontier")
+                       (str_eq (bdj-receipt-route wider) "form")) 8192)
+        (bdjb-bit (and (str_eq (BDJNodeIdPolicy) "reuse-exact-jonb-identity")
+                       (str_eq (nth (split-on (read_file (bdjb-cache)) "\n") 3)
+                               (bdj-program-wire (bdjb-program) 4 4001))) 16384)
+        (bdjb-bit (and (eq (file_size (bdjb-cache))
+                           (str_len (read_file (bdjb-cache))))
+                       (str_eq (nth (bdj-cache-parse (read_file (bdjb-cache))) 0)
+                               "parsed")) 32768)
+        (bdjb-bit (and (eq (len glass-samples) 4)
+                       (eq (fgtm-samples-valid? glass-samples) 1)) 65536)
+        (bdjb-bit (and (str_eq (bdjg-publish-status glass-published) "published")
+                       (and (str_eq (fgtm-read-state-status glass-read) "current")
+                            (eq (len (fgtm-snapshot-samples (fgtm-field-value
+                                (fgtm-read-state-value glass-read)))) 4))) 131072)
+        (bdjb-bit (and (str_eq (bdj-receipt-cache-state stale-program)
+                               "not-inspected")
+                       (str_eq (bdj-step-cache-state mismatch-step)
+                               "stale-program")) 262144)
+        (bdjb-bit (str_eq busyPublish "publish-busy") 524288)
+        (bdjb-bit (and (str_eq healedPublish "published")
+                       (eq (fs-exists? (bdj-publish-lock-path (bdjb-cache))) 0)) 1048576)
+        (bdjb-bit (and (gt oversizeWrote (BDJMaxCacheWireBytes))
+                       (str_eq oversizeState "cache-oversize")) 2097152)
+        (bdjb-bit (and (str_eq (nth (split-on (read_file (bdjb-cache)) "\n") 1)
+                                (bdj-runtime-fingerprint))
+                       (str_eq (head runtimeMismatch) "cache-runtime")) 4194304)
+        (bdjb-bit (and (gt mismatch-write 0)
+                       (and (str_eq (bdj-step-cache-state mismatch-step) "stale-program")
+                            (str_eq (bdj-step-status mismatch-step)
+                                "compiled-published-installed"))) 8388608))))
+    (let clean (bdjb-clean))
+    verdict)

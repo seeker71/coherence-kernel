@@ -3,6 +3,10 @@
 # Form owns dependency identity, selfmolt/abstain state, and restart choice. This
 # zsh membrane only keeps the terminal attached and obeys that choice.
 cd "$(dirname "$0")/.." || exit 1
+if [[ "${FORM_GLASS_NICE_APPLIED:-0}" != "1" ]]; then
+  export FORM_GLASS_NICE_APPLIED=1
+  exec /usr/bin/nice -n 10 "$0" "$@"
+fi
 trap 'exit 130' INT TERM HUP
 while :; do
   # Paint the small Form-owned truthful frame before any full-graph admission.

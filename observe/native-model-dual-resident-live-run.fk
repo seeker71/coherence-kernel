@@ -4,11 +4,12 @@
 ;
 ; Startup physically opens and prefills both models, then returns to Qwen for
 ; one append-only prefix-reuse evaluation while the 3B stays resident.  The process
-; waits for `heartbeat`, `status`, `qwen-step`, `3b-step`, or `quit`; a completed turn never
-; closes either context.  EOF and explicit quit end the owning process, so both
-; contexts are then closed deliberately; neither is an eviction policy event.
+; polls an atomic Form filesystem ingress at 4 Hz for `heartbeat`, `status`,
+; `qwen-step`, `3b-step`, or `quit`; a completed turn never
+; closes either context.  An explicitly offered quit closes both contexts;
+; ordinary idle cadence is never an eviction policy event.
 ;
-; preludes: form/form-stdlib/qwen4exp-flash-next-generate.bml form/form-stdlib/llama32-3b-resident-state.bml form/form-stdlib/native-model-glass.bml form/form-stdlib/native-model-resident-fleet.bml form/form-stdlib/native-model-memory-glass.bml form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/native-model-dual-telemetry.bml
+; preludes: form/form-stdlib/qwen4exp-flash-next-generate.bml form/form-stdlib/llama32-3b-resident-state.bml form/form-stdlib/native-model-glass.bml form/form-stdlib/native-model-resident-fleet.bml form/form-stdlib/native-model-memory-glass.bml form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/native-model-dual-telemetry.bml form/form-stdlib/native-model-owner-cadence.bml
 
 (do
     (defn nmdr-qwen-prefix ()
@@ -153,11 +154,19 @@
             (let _telemetry (nmdr-publish qslot three session fleet qhandle thandle instance ownerPid sequence qAccess tAccess))
             (let _memory-frame (nmmg-write fleet session
                 (q4s-pos qslot) (l3rs-position three)))
-            (print_str "DUAL RESIDENT READY commands=heartbeat|status|qwen-step|3b-step|quit\n")
-            (let command (read_line))
-            (if (or (nothing? command) (str_eq command "quit"))
-                (nmdr-close qslot three session qhandle thandle instance
-                    (if (nothing? command) "eof" "quit"))
+            (let _door (if (eq sequence 1)
+                (print (list "native-model-owner-command-door"
+                    (nmdoc-command-path (nmdr-publisher instance))
+                    "cadence-ms" 250)) 0))
+            (let polled (nmdoc-poll-command (nmdr-publisher instance)))
+            (if (str_eq (nmdoc-command-status polled) "waiting")
+                (do
+                    (let _wait (host-exec "/bin/sleep 0.25" ""))
+                    (nmdr-loop qslot three session fleet qhandle thandle instance ownerPid (add sequence 1) qAccess tAccess))
+                (do
+                (let command (nmdoc-command-value polled))
+                (if (str_eq command "quit")
+                (nmdr-close qslot three session qhandle thandle instance "quit")
                 (if (str_eq command "heartbeat")
                     (do
                         (print (list "native-model-owner-heartbeat" "publisher"
@@ -199,8 +208,9 @@
                                     "position" (l3rs-position next)))
                                 (nmdr-loop qslot next done nextFleet qhandle thandle instance ownerPid (add sequence 2) qAccess (now_unix_ms)))
                             (do
-                                (print (list "unknown-command" command))
-                                (nmdr-loop qslot three session fleet qhandle thandle instance ownerPid (add sequence 1) qAccess tAccess)))))))))
+                                (print (list "owner-command-ingress"
+                                    (nmdoc-command-status polled) command))
+                                (nmdr-loop qslot three session fleet qhandle thandle instance ownerPid (add sequence 1) qAccess tAccess)))))))))))
 
     (defn nmdr-after-threeb (qsrc qresult qsession qhandle three thandle instance ownerPid)
         (do

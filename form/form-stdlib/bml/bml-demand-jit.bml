@@ -1,0 +1,242 @@
+//////////////////////////////////////////////////////////////////////
+//
+// bml-demand-jit.bml -- first-answer-safe, on-demand native pages.
+//
+// A BML caller offers an ordinary lowerable scalar recipe graph.  The
+// first request is answered by the Form evaluator and leaves exactly one
+// specialization pending.  A later bounded step validates a freshness-bound
+// disk image or compiles one, checks it at the pending request argument,
+// publishes it through a short leased rename, and installs it through
+// jit_leaf_inram.  Later calls in the
+// same process reach the retained NodeID page.
+//
+// This does not invent a NodeID namespace.  It reuses jonb-identity's exact
+// length-delimited structure. Cache filenames are caller-owned lenses; they
+// are never identity.
+//
+//////////////////////////////////////////////////////////////////////
+
+// preludes: form-stdlib/line-grammar.fk form-stdlib/form-fs.fk form-stdlib/jit-heat-gate.fk
+
+section [form.bml] {
+    class BmlDemandJit [public, observable, jit] {
+        field BDJSchema = "bml-demand-jit-v1";
+        field BDJCacheSchema = "bml-demand-jit-cache-v3";
+        field BDJAttentionMs = 5000;
+        field BDJMaxRows = 256;
+        field BDJMaxCacheWireBytes = 1048576;
+        field BDJPublishLeaseSeconds = 5;
+        field BDJPublishLeaseSchema = "bml-demand-jit-publish-lease-v1";
+        field BDJEmitterABI = "form-arm64-leaf-v1";
+        field BDJRuntimePath = "./fkwu";
+        field BDJEmitterPath = "form/form-stdlib/form-lower.fk";
+        field BDJAuthorityPath = "form/form-stdlib/bml/bml-demand-jit.bml";
+        field BDJNodeIdPolicy = "reuse-exact-jonb-identity";
+        field BDJWiderFrontier = "strings-lists-cross-calls-and-whole-program-image-install";
+
+        thought bdj-pattern = list("first-answer", "pending", "inspect", "compile-or-load", "challenge", "atomic-publish", "install", "reuse", "stale");
+
+        // state = schema, epoch, retained registry, pending-or-nothing, status.
+        // pending = source, cache, program, root, argument, exact structural wire.
+        def bdj-state(epoch, registry, pending, status) = list(BDJSchema(), epoch, registry, pending, status);
+        def bdj-empty(epoch) = bdj-state(epoch, jonb-registry(epoch), nothing(), "ready");
+        def bdj-state-epoch(state) = nth(state, 1);
+        def bdj-state-registry(state) = nth(state, 2);
+        def bdj-state-pending(state) = nth(state, 3);
+        def bdj-state-status(state) = nth(state, 4);
+        def bdj-pending(source, cache, program, root, argument, epoch) = list(source, cache, program, root, argument, bdj-program-wire(program, root, epoch));
+        def bdj-pending-source(pending) = nth(pending, 0);
+        def bdj-pending-cache(pending) = nth(pending, 1);
+        def bdj-pending-program(pending) = nth(pending, 2);
+        def bdj-pending-root(pending) = nth(pending, 3);
+        def bdj-pending-argument(pending) = nth(pending, 4);
+        def bdj-pending-program-wire(pending) = nth(pending, 5);
+
+        // jonb-flat is injective for nested integer rows because every row is
+        // length-prefixed.  Its canonical decimal wire is stored and compared
+        // byte-for-byte at the disk membrane; a lossy fold is never identity.
+        def bdj-program-wire(program, root, epoch) = bdj-image-text(jonb-flat(program, root, epoch));
+
+        def bdj-digits?(text, i) = if ge(i, str_len(text)) then 1 else if and(ge(str_byte_at(text, i), 48), le(str_byte_at(text, i), 57)) then bdj-digits?(text, add(i, 1)) else 0;
+        def bdj-uint?(text) = if eq(str_len(text), 0) then 0 else if not(eq(bdj-digits?(text, 0), 1)) then 0 else str_eq(int_to_str(str_to_int(text)), text);
+        def bdj-byte-text?(text) = if not(eq(bdj-uint?(text), 1)) then 0 else if gt(str_to_int(text), 255) then 0 else 1;
+        def bdj-byte-parts?(parts) = if eq(len(parts), 0) then 0 else if not(eq(bdj-byte-text?(head(parts)), 1)) then 0 else if eq(len(parts), 1) then 1 else bdj-byte-parts?(tail(parts));
+        def bdj-parts-ints(parts) = if eq(len(parts), 0) then list() else cons(str_to_int(head(parts)), bdj-parts-ints(tail(parts)));
+        def bdj-image-text(image) = if eq(len(image), 0) then "" else if eq(len(image), 1) then int_to_str(head(image)) else str_concat(int_to_str(head(image)), str_concat(",", bdj-image-text(tail(image))));
+        def bdj-cat(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), bdj-cat(tail(parts)));
+
+        def bdj-runtime-file-part(label, path) = bdj-cat(list(label, "=", int_to_str(fs-stat-size(path)), "@", int_to_str(fs-stat-mtime(path))));
+        def bdj-runtime-fingerprint() = bdj-cat(list(BDJEmitterABI(), "|", bdj-runtime-file-part("runtime", BDJRuntimePath()), "|", bdj-runtime-file-part("emitter", BDJEmitterPath()), "|", bdj-runtime-file-part("authority", BDJAuthorityPath())));
+
+        // parsed = status, runtime fingerprint, epoch, exact-program-wire,
+        // image-id, image. Runtime/emitter/authority changes expire disk ice.
+        def bdj-cache-refused(reason) = list(reason, "", 0, "", 0, list());
+        def bdj-cache-parsed(runtime, epoch, programWire, imageId, image) = list("parsed", runtime, epoch, programWire, imageId, image);
+        def bdj-cache-parse(text) {
+            let lines = split-on(text, "\n");
+            if not(eq(len(lines), 6)) then bdj-cache-refused("cache-shape")
+            else if not(str_eq(nth(lines, 0), BDJCacheSchema())) then bdj-cache-refused("cache-schema")
+            else if not(str_eq(nth(lines, 1), bdj-runtime-fingerprint())) then bdj-cache-refused("cache-runtime")
+            else if not(eq(bdj-uint?(nth(lines, 2)), 1)) then bdj-cache-refused("cache-epoch")
+            else if eq(str_len(nth(lines, 3)), 0) then bdj-cache-refused("cache-program-wire")
+            else if not(eq(bdj-uint?(nth(lines, 4)), 1)) then bdj-cache-refused("cache-image-id")
+            else bdj-cache-parse-image(lines);
+        }
+        def bdj-cache-parse-image(lines) {
+            let parts = split-on(nth(lines, 5), ",");
+            if not(eq(bdj-byte-parts?(parts), 1)) then bdj-cache-refused("cache-image-bytes")
+            else bdj-cache-verify-image(lines, bdj-parts-ints(parts));
+        }
+        def bdj-cache-verify-image(lines, image) = if not(eq(jonb-image-id(image), str_to_int(nth(lines, 4)))) then bdj-cache-refused("cache-image-fold") else bdj-cache-parsed(nth(lines, 1), str_to_int(nth(lines, 2)), nth(lines, 3), str_to_int(nth(lines, 4)), image);
+        def bdj-cache-image(parsed) = nth(parsed, 5);
+
+        def bdj-cache-wire(epoch, programWire, image) = bdj-cat(list(BDJCacheSchema(), "\n", bdj-runtime-fingerprint(), "\n", int_to_str(epoch), "\n", programWire, "\n", int_to_str(jonb-image-id(image)), "\n", bdj-image-text(image)));
+        def bdj-publish-lock-path(cache) = str_concat(cache, ".publish-lock");
+        def bdj-publish-lease-path(cache) = fs-path-join(bdj-publish-lock-path(cache), "lease");
+        def bdj-candidate-path(cache) = fs-path-join(bdj-publish-lock-path(cache), "candidate");
+        def bdj-publish-lock-expired?(cache, nowSeconds) = if not(eq(fs-exists?(bdj-publish-lock-path(cache)), 1)) then 0 else if le(fs-stat-mtime(bdj-publish-lock-path(cache)), 0) then 1 else if ge(nowSeconds, add(fs-stat-mtime(bdj-publish-lock-path(cache)), BDJPublishLeaseSeconds())) then 1 else 0;
+        def bdj-remove-if-present(path) = if eq(fs-exists?(path), 1) then fs-remove-file(path) else 0;
+        def bdj-release-publish-lock(cache) {
+            let candidateRemoved = bdj-remove-if-present(bdj-candidate-path(cache));
+            let leaseRemoved = bdj-remove-if-present(bdj-publish-lease-path(cache));
+            let lockRemoved = fs-remove-tree(bdj-publish-lock-path(cache));
+            if and(eq(candidateRemoved, 0), and(eq(leaseRemoved, 0), eq(lockRemoved, 0))) then 1 else 0;
+        }
+        def bdj-publish-owned(cache, epoch, programWire, image, nowSeconds) {
+            let leaseWrote = fs-write-text(bdj-publish-lease-path(cache), bdj-cat(list(BDJPublishLeaseSchema(), "\n", int_to_str(nowSeconds))));
+            let wrote = if ge(leaseWrote, 0) then fs-write-text(bdj-candidate-path(cache), bdj-cache-wire(epoch, programWire, image)) else -1;
+            let moved = if ge(wrote, 1) then fs-rename(bdj-candidate-path(cache), cache) else -1;
+            let released = bdj-release-publish-lock(cache);
+            if lt(leaseWrote, 0) then "lease-write-failed" else if lt(wrote, 1) then "write-failed" else if not(eq(moved, 0)) then "rename-failed" else if not(eq(released, 1)) then "published-lock-release-failed" else "published";
+        }
+        def bdj-publish-after-heal(cache, epoch, programWire, image, nowSeconds) {
+            let released = bdj-release-publish-lock(cache);
+            let acquired = if eq(released, 1) then fs-mkdir(bdj-publish-lock-path(cache)) else -1;
+            if eq(acquired, 1) then bdj-publish-owned(cache, epoch, programWire, image, nowSeconds) else "lock-heal-failed";
+        }
+        def bdj-publish-at(cache, epoch, programWire, image, nowSeconds) {
+            let acquired = fs-mkdir(bdj-publish-lock-path(cache));
+            if eq(acquired, 1) then bdj-publish-owned(cache, epoch, programWire, image, nowSeconds) else if eq(bdj-publish-lock-expired?(cache, nowSeconds), 1) then bdj-publish-after-heal(cache, epoch, programWire, image, nowSeconds) else "publish-busy";
+        }
+        def bdj-publish(cache, epoch, programWire, image) = bdj-publish-at(cache, epoch, programWire, image, div(now_unix_ms(), 1000));
+
+        // One bounded read returns both classification and parsed bytes. A JIT
+        // step installs only that inspected object, never a second path read.
+        def bdj-cache-inspection(status, parsed) = list(status, parsed);
+        def bdj-cache-inspection-status(inspection) = nth(inspection, 0);
+        def bdj-cache-inspection-parsed(inspection) = nth(inspection, 1);
+        def bdj-cache-inspect-content(cache, epoch, programWire) {
+            let size = file_size(cache);
+            let parsed = if gt(size, BDJMaxCacheWireBytes()) then bdj-cache-refused("cache-oversize") else bdj-cache-parse(read_file(cache));
+            if gt(size, BDJMaxCacheWireBytes()) then bdj-cache-inspection("cache-oversize", parsed)
+            else if not(str_eq(nth(parsed, 0), "parsed")) then bdj-cache-inspection(nth(parsed, 0), parsed)
+            else if not(eq(nth(parsed, 2), epoch)) then bdj-cache-inspection("stale-epoch", parsed)
+            else if not(str_eq(nth(parsed, 3), programWire)) then bdj-cache-inspection("stale-program", parsed)
+            else bdj-cache-inspection("current", parsed);
+        }
+        // State names are intentionally not booleans. Missing and stale
+        // artifacts leave the Form answer available and merely select work.
+        def bdj-cache-inspect(source, cache, epoch, programWire) = if lt(file_mtime(source), 0) then bdj-cache-inspection("source-missing", bdj-cache-refused("not-read")) else if lt(file_mtime(cache), 0) then bdj-cache-inspection("missing", bdj-cache-refused("not-read")) else if lt(file_mtime(cache), file_mtime(source)) then bdj-cache-inspection("stale-mtime", bdj-cache-refused("not-read")) else bdj-cache-inspect-content(cache, epoch, programWire);
+        def bdj-cache-state(source, cache, epoch, programWire) = bdj-cache-inspection-status(bdj-cache-inspect(source, cache, epoch, programWire));
+        def bdj-cache-content-state(cache, epoch, programWire) = bdj-cache-inspection-status(bdj-cache-inspect-content(cache, epoch, programWire));
+
+        // request receipt = status, cache-state, value, route, state, born.
+        def bdj-receipt(status, cacheState, value, route, state, born) = list(status, cacheState, value, route, state, born);
+        def bdj-receipt-status(receipt) = nth(receipt, 0);
+        def bdj-receipt-cache-state(receipt) = nth(receipt, 1);
+        def bdj-receipt-value(receipt) = nth(receipt, 2);
+        def bdj-receipt-route(receipt) = nth(receipt, 3);
+        def bdj-receipt-state(receipt) = nth(receipt, 4);
+        def bdj-receipt-born(receipt) = nth(receipt, 5);
+
+        def bdj-request(state, source, cache, program, root, argument) {
+            if or(eq(len(program), 0), or(lt(root, 0), ge(root, len(program)))) then bdj-receipt("refused-program", "not-inspected", nothing(), "none", state, 0)
+            else if or(gt(len(program), BDJMaxRows()), not(eq(hg-lowerable?(program), 1))) then bdj-receipt("wider-frontier", "not-inspected", jonb-eval(program, root, argument), "form", state, 0)
+            else bdj-request-lowerable(state, source, cache, program, root, argument);
+        }
+        def bdj-request-lowerable(state, source, cache, program, root, argument) {
+            let registry = bdj-state-registry(state);
+            let image = jonb-lookup(registry, program, root);
+            if nothing?(image) then bdj-request-first(state, source, cache, program, root, argument, "not-inspected")
+            else bdj-request-retained(state, program, root, argument, "not-inspected");
+        }
+        def bdj-request-first(state, source, cache, program, root, argument, cacheState) {
+            let pending = bdj-pending(source, cache, program, root, argument, bdj-state-epoch(state));
+            let next = bdj-state(bdj-state-epoch(state), bdj-state-registry(state), pending, "specialization-pending");
+            bdj-receipt("form-ready-specialization-pending", cacheState, jonb-eval(program, root, argument), "form", next, 0);
+        }
+        def bdj-request-retained(state, program, root, argument, cacheState) {
+            let response = jonb-request(bdj-state-registry(state), program, root, argument);
+            let next = bdj-state(bdj-state-epoch(state), nth(response, 2), nothing(), "resident-native");
+            bdj-receipt("resident-native", cacheState, nth(response, 0), nth(response, 1), next, nth(response, 3));
+        }
+
+        // step receipt = status, prior-cache-state, elapsed-ms, attention,
+        // next-state, disk-action, installed, point-challenge agreement.
+        def bdj-step-receipt(status, cacheState, elapsed, state, diskAction, installed, agreement) = list(status, cacheState, elapsed, if le(elapsed, BDJAttentionMs()) then "within" else "over", state, diskAction, installed, agreement);
+        def bdj-step-status(receipt) = nth(receipt, 0);
+        def bdj-step-cache-state(receipt) = nth(receipt, 1);
+        def bdj-step-ms(receipt) = nth(receipt, 2);
+        def bdj-step-attention(receipt) = nth(receipt, 3);
+        def bdj-step-state(receipt) = nth(receipt, 4);
+        def bdj-step-disk-action(receipt) = nth(receipt, 5);
+        def bdj-step-installed(receipt) = nth(receipt, 6);
+        def bdj-step-agreement(receipt) = nth(receipt, 7);
+
+        def bdj-step(state) {
+            let started = now_unix_ms();
+            let pending = bdj-state-pending(state);
+            if nothing?(pending) then bdj-step-finish("idle", "not-requested", started, state, "none", 0, 1)
+            else bdj-step-pending(state, pending, started);
+        }
+        def bdj-step-pending(state, pending, started) {
+            let source = bdj-pending-source(pending);
+            let cache = bdj-pending-cache(pending);
+            let epoch = bdj-state-epoch(state);
+            let programWire = bdj-pending-program-wire(pending);
+            let inspection = bdj-cache-inspect(source, cache, epoch, programWire);
+            let cacheState = bdj-cache-inspection-status(inspection);
+            if str_eq(cacheState, "current") then bdj-step-current(state, pending, started, cacheState, bdj-cache-inspection-parsed(inspection))
+            else bdj-step-compile(state, pending, started, cacheState);
+        }
+        def bdj-step-current(state, pending, started, cacheState, parsed) {
+            bdj-step-install(state, pending, bdj-cache-image(parsed), started, cacheState, "loaded-current");
+        }
+        def bdj-step-compile(state, pending, started, cacheState) {
+            let image = lo-compile-fn(bdj-pending-program(pending), bdj-pending-root(pending));
+            if or(nothing?(image), eq(len(image), 0)) then bdj-step-finish("compile-refused-form-ready", cacheState, started, state, "none", 0, 0)
+            else bdj-step-install(state, pending, image, started, cacheState, "compile-candidate");
+        }
+        def bdj-step-install(state, pending, image, started, cacheState, diskAction) {
+            let program = bdj-pending-program(pending);
+            let root = bdj-pending-root(pending);
+            let argument = bdj-pending-argument(pending);
+            let identity = jonb-identity(program, root, bdj-state-epoch(state));
+            let retained = jonb-retain(bdj-state-registry(state), identity, image);
+            if nothing?(retained) then bdj-step-finish("install-refused-form-ready", cacheState, started, state, diskAction, 0, 0)
+            else bdj-step-challenge(state, pending, image, retained, started, cacheState, diskAction);
+        }
+        def bdj-step-challenge(state, pending, image, retained, started, cacheState, diskAction) {
+            let program = bdj-pending-program(pending);
+            let root = bdj-pending-root(pending);
+            let argument = bdj-pending-argument(pending);
+            let identity = jonb-identity(program, root, bdj-state-epoch(state));
+            let native = jit_leaf_inram(list(0, identity, image), argument);
+            let expected = jonb-eval(program, root, argument);
+            if or(nothing?(native), not(value_eq(native, expected))) then bdj-step-disagree(state, identity, started, cacheState, diskAction)
+            else bdj-step-agree(state, pending, image, retained, started, cacheState, diskAction);
+        }
+        def bdj-step-disagree(state, identity, started, cacheState, diskAction) {
+            let released = jit_leaf_inram(list(1, identity, list()), 0);
+            bdj-step-finish("native-disagreed-form-ready", cacheState, started, state, diskAction, 0, 0);
+        }
+        def bdj-step-agree(state, pending, image, retained, started, cacheState, diskAction) {
+            let publish = if str_eq(diskAction, "loaded-current") then "reused-disk" else if str_eq(cacheState, "source-missing") then "withheld-source-missing" else bdj-publish(bdj-pending-cache(pending), bdj-state-epoch(state), bdj-pending-program-wire(pending), image);
+            let next = bdj-state(bdj-state-epoch(state), retained, nothing(), "resident-native");
+            let status = if str_eq(publish, "published") then "compiled-published-installed" else if str_eq(publish, "reused-disk") then "disk-installed" else if str_eq(publish, "withheld-source-missing") then "ram-installed-source-missing" else "ram-installed-disk-publish-failed";
+            bdj-step-finish(status, cacheState, started, next, publish, 1, 1);
+        }
+        def bdj-step-finish(status, cacheState, started, state, diskAction, installed, agreement) = bdj-step-receipt(status, cacheState, sub(now_unix_ms(), started), state, diskAction, installed, agreement);
+    }
+    0;
+}
