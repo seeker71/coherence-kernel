@@ -27,7 +27,7 @@ it. Each recipe text now carries the command
 (`python3 form/scripts/validate_fkwu_native_surface.py`) beside the steps, so
 the walk ends by asking the gate.
 
-Corpus row 1246 ("mapmirror", 0 hits before) takes the teaching home: the map
+Corpus row 1247 ("mapmirror", 0 hits before; minted 1246, re-seated at reunion — main took 1246 the same night) takes the teaching home: the map
 is itself a mirror — it drifts like the tables it describes, and it is the only
 mirror no gate reads.
 
@@ -43,7 +43,7 @@ mirror no gate reads.
   arm_slots=256, aliases=19, 0 warnings), rc=0
 - sync_native_op_manifest: OK (152 rows aligned);
   gen_flt_ops_from_manifest: OK (152 rows aligned)
-- learn/homecoming-distillation-corpus.fk evaluates 0, rc=0, with row 1246 in
+- learn/homecoming-distillation-corpus.fk evaluates 0, rc=0, with row 1247 in
 
 Most surprising: the recipe sentence lived in FOUR places itself — three source
 comments and one line emitted into a generated C header — so healing the doc
