@@ -162,6 +162,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "host_file_mtime", 1, 107 },
   { "file_mtime", 1, 107 },
   { "scan_run", 3, 108 },
+  { "record_new", -1, 64 },
   { "record_get", 2, 65 },
   { "record_set", 3, 66 },
   { "record_has", 2, 67 },

@@ -9736,6 +9736,7 @@ static void fk_const_set(long long s, long long n, long long node) {
 }
 static long long fk_parse_variadic(long long tag);
 static long long fk_parse_fixed_list(long long n);
+static long long fk_parse_record_new(void);
 /* arity -1: parse-until-close, fold right via tag -> nil(18) */
 static long long fk_sparse(void) {
     fk_sskip();
@@ -9908,6 +9909,12 @@ static long long fk_sparse(void) {
                  * `for i, a := range args` sees. */
                 if (tag == 239) {
                     return fk_smknode(239, fk_parse_variadic(19), 0, 0);
+                }
+                /* record_new (64) folds its operands into the ENTRY-PACKET shape
+                 * flt-record-new emits — ((-1 bp) (k v) ..) under ONE tag-64 node —
+                 * not a flat chain on its own tag; see fk_parse_record_new. */
+                if (tag == 64) {
+                    return fk_parse_record_new();
                 }
                 return fk_parse_variadic(tag);
             }
@@ -10457,6 +10464,54 @@ static long long fk_parse_variadic(long long tag) {
     long long h = fk_sparse();
     long long t = fk_parse_variadic(tag);
     return fk_smknode(tag, h, t, 0);
+}
+/* record_new SPECIAL SHAPE (arity -1, tag 64 in fk_optab): (record_new bp k1 v1 k2 v2 ..)
+ * lowers to ONE tag-64 node whose single child is the cons-chain entry packet
+ * ((-1 bp) (k1 v1) (k2 v2) ..) — byte-for-byte the shape flt-record-new emits and the
+ * tag-64 walker installs. The blueprint rides an entry whose key is the -1 int literal:
+ * fk_stri of a non-string answers -1, which is the walker's blueprint sentinel. The
+ * generic arity -1 fold would chain the raw operands on tag 64 itself — record fields
+ * come in PAIRS, so the pairing is a parse-time fact and lives here. */
+static long long fk_parse_record_entry(long long k, long long v) {
+    return fk_smknode(19, k, fk_smknode(19, v, fk_smknode(18, 0, 0, 0), 0), 0);
+}
+static long long fk_parse_record_fields(void) {
+    fk_sskip();
+    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
+        if (fk_spos < fk_slen) {
+            fk_spos = fk_spos + 1;
+        }
+        return fk_smknode(18, 0, 0, 0);
+    }
+    long long ks = fk_spos;
+    long long k = fk_sparse();
+    fk_sskip();
+    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
+        /* a dangling key silently dropped would be a partial record accepted as
+         * whole — the same numb shape the tag-64 walker refuses at its caps. */
+        fk_diag(FK_DIAG_ERR, ks,
+                "record_new: field key without a value -- fields come in (key value) pairs");
+        if (fk_spos < fk_slen) {
+            fk_spos = fk_spos + 1;
+        }
+        return fk_smknode(18, 0, 0, 0);
+    }
+    long long v = fk_sparse();
+    long long e = fk_parse_record_entry(k, v);
+    return fk_smknode(19, e, fk_parse_record_fields(), 0);
+}
+static long long fk_parse_record_new(void) {
+    fk_sskip();
+    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
+        fk_diag(FK_DIAG_ERR, fk_spos, "record_new: missing blueprint operand");
+        if (fk_spos < fk_slen) {
+            fk_spos = fk_spos + 1;
+        }
+        return fk_smknode(137, 0, 0, 0);
+    }
+    long long bp = fk_sparse();
+    long long sent = fk_parse_record_entry(fk_smklit(0 - 1), bp);
+    return fk_smknode(64, fk_smknode(19, sent, fk_parse_record_fields(), 0), 0, 0);
 }
 extern int atoi(const char *);
 /* stone 4 (two-pass): PRE-SCAN. The body parse below registers each (defn ...) as it reaches it,
