@@ -12546,6 +12546,34 @@ static int fk_fkb_restore_symbol_image(long long version) {
         }
         i = i + 1;
     }
+    /* v5 writes a node-symbol section after the function-symbol section.
+     * The whole-image loader does not need those rows to invoke a program,
+     * but it must consume their exact wire shape before it can attest that
+     * the image ended. Leaving them behind made every freshly-written image
+     * look like it had trailing bytes, so BML and Form caches rebuilt on
+     * every run despite byte-identical source and artifacts. */
+    long long node_symbol_count = fk_fkb_read_signed();
+    if (node_symbol_count < 0 || node_symbol_count > fk_fkb_len) {
+        fk_fkb_mark_bad("node symbol count exceeds artifact bounds");
+        return 0;
+    }
+    i = 0;
+    while (!fk_fkb_bad && i < node_symbol_count) {
+        (void)fk_fkb_read_signed();
+        (void)fk_fkb_read_signed();
+        long long dependency_count = fk_fkb_read_signed();
+        if (dependency_count < 0 || dependency_count > fk_fkb_len) {
+            fk_fkb_mark_bad("node symbol dependency count exceeds artifact bounds");
+            return 0;
+        }
+        long long dependency = 0;
+        while (!fk_fkb_bad && dependency < dependency_count) {
+            (void)fk_fkb_read_signed();
+            (void)fk_fkb_read_signed();
+            dependency = dependency + 1;
+        }
+        i = i + 1;
+    }
     return !fk_fkb_bad;
 }
 static void fk_fkb_skip_symbol_image(long long version) {
