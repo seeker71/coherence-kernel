@@ -1,0 +1,72 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glass-flow-ui.bml — bounded quarter-second flow shard.
+//
+// Authority: form-stdlib/bml/form-glass-live-ui.bml
+// preludes: form/form-stdlib/core.fk form/form-stdlib/form-terminal-canvas.bml form/form-stdlib/form-glass-dashboard.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormGlassFlowUI {
+        field FGLFlowShardSchema = "form-glass-flow-ui-v1";
+
+        // Cumulative counters occupy indexes 2, 3, 4, and 6. Gauges occupy
+        // 5, 7, 8, and 9. V2 appends the visible-node phase census, token
+        // positions, tensor bytes, channel edges, and framebuffer accepts at
+        // 10..16. A negative value is unavailable; zero is measured.
+        def fgd-flow-point(epoch, gpuBusy, cpuJit, dispatches, queueDepth, jitCalls, cells, memoryFree, inflight) = list("glass-flow-point-v1", epoch, gpuBusy, cpuJit, dispatches, queueDepth, jitCalls, cells, memoryFree, inflight);
+        def fgd-flow-point-v2(epoch, gpuBusy, cpuJit, dispatches, queueDepth, jitCalls, cells, memoryFree, inflight, gas, water, ice, tokens, tensorBytes, channelEdges, framebufferAccepted) = list("glass-flow-point-v2", epoch, gpuBusy, cpuJit, dispatches, queueDepth, jitCalls, cells, memoryFree, inflight, gas, water, ice, tokens, tensorBytes, channelEdges, framebufferAccepted);
+        def fgd-flow-value(point, index) = if or(lt(index, 0), ge(index, len(point))) then -1 else nth(point, index);
+        def fglui-good(value) = if lt(value, 0) then 0 else value;
+        def fglui-values(history, index) = if eq(len(history), 0) then list() else cons(fgd-flow-value(head(history), index), fglui-values(tail(history), index));
+        def fglui-good-values(values) = if eq(len(values), 0) then list() else cons(fglui-good(head(values)), fglui-good-values(tail(values)));
+        def fglui-deltas-next(history, index, prior) {
+            let value = fgd-flow-value(head(history), index);
+            let delta = if or(lt(value, 0), lt(prior, 0)) then -1 else if ge(value, prior) then sub(value, prior) else 0;
+            cons(delta, fglui-deltas-go(tail(history), index, value));
+        }
+        def fglui-deltas-go(history, index, prior) = if eq(len(history), 0) then list() else fglui-deltas-next(history, index, prior);
+        def fglui-deltas(history, index) = if eq(len(history), 0) then list() else cons(if lt(fgd-flow-value(head(history), index), 0) then -1 else 0, fglui-deltas-go(tail(history), index, fgd-flow-value(head(history), index)));
+        def fglui-missing(history, index) = if eq(len(history), 0) then 0 else add(if lt(fgd-flow-value(head(history), index), 0) then 1 else 0, fglui-missing(tail(history), index));
+        def fglui-last(history, index) = if eq(len(history), 0) then -1 else fgd-flow-value(nth(history, sub(len(history), 1)), index);
+        def fglui-last-n(values, width) = if le(len(values), width) then values else fgd-drop(values, sub(len(values), width));
+        def fglui-glyphs(values, levels) = if eq(len(levels), 0) then "" else str_concat(if lt(head(values), 0) then "?" else ftc-spark-glyph(head(levels)), fglui-glyphs(tail(values), tail(levels)));
+        def fglui-spark(values, width) {
+            let visible = fglui-last-n(values, fgd-max(1, width));
+            fglui-glyphs(visible, ftc-series-normalize(fglui-good-values(visible)));
+        }
+        def fglui-value(value) = if lt(value, 0) then "unavailable(no-carrier)" else fgd-format-count(value);
+        def fglui-pad2(value) = if lt(value, 10) then str_concat("0", int_to_str(value)) else int_to_str(value);
+        def fglui-pad3(value) = if lt(value, 10) then str_concat("00", int_to_str(value)) else if lt(value, 100) then str_concat("0", int_to_str(value)) else int_to_str(value);
+        def fglui-utc-clock(epoch) {
+            let day = mod(epoch, 86400000);
+            let hour = div(day, 3600000);
+            let minute = div(mod(day, 3600000), 60000);
+            let second = div(mod(day, 60000), 1000);
+            fgd-cat(list(fglui-pad2(hour), ":", fglui-pad2(minute), ":", fglui-pad2(second), ".", fglui-pad3(mod(day, 1000)), "Z"));
+        }
+        def fglui-frame-delta(history) = if lt(len(history), 2) then 0 else if ge(fgd-flow-value(nth(history, sub(len(history), 1)), 1), fgd-flow-value(nth(history, sub(len(history), 2)), 1)) then sub(fgd-flow-value(nth(history, sub(len(history), 1)), 1), fgd-flow-value(nth(history, sub(len(history), 2)), 1)) else 0;
+        def fglui-metric-count(metrics, id) {
+            let metric = fgd-find-metric(metrics, id);
+            if or(eq(len(metric), 0), eq(fgo-present?(metric), 0)) then -1 else fgo-int-value(metric);
+        }
+        def fglui-pulse-line(epoch, hz, frame, history, metrics, width) {
+            let dispatchValues = fglui-deltas(history, 4);
+            let dispatch = if eq(len(dispatchValues), 0) then -1 else nth(dispatchValues, sub(len(dispatchValues), 1));
+            let events = fglui-metric-count(metrics, "events");
+            let nodes = fglui-metric-count(metrics, "cells");
+            let cons = fglui-metric-count(metrics, "cons");
+            fgd-segment-line(fgd-cat(list("TICK ", fglui-utc-clock(epoch), " #", int_to_str(frame), " dt=", int_to_str(fglui-frame-delta(history)), "/", int_to_str(div(1000, hz)), "ms d+", fglui-value(dispatch), " ev=", fglui-value(events), " cells=", fglui-value(nodes), " cons=", fglui-value(cons), " [glass]")), width, fgd-style-for-plane("form", 220, 0), "flow.tick", list("flow", "form", "framebuffer", "cell"), "physical-live");
+        }
+        def fglui-flow-line(label, history, index, delta, width, plane) {
+            let values = if eq(delta, 1) then fglui-deltas(history, index) else fglui-values(history, index);
+            let missing = fglui-missing(history, index);
+            let latest = if eq(delta, 1) then if eq(len(values), 0) then -1 else nth(values, sub(len(values), 1)) else fglui-last(history, index);
+            let sparkWidth = fgd-clamp(sub(width, add(str_len(label), 29)), 4, 64);
+            fgd-segment-line(fgd-cat(list(label, " ", fglui-spark(values, sparkWidth), " now=", if and(gt(len(history), 0), lt(missing, len(history))) then fglui-value(latest) else "unavailable(no-carrier)", if gt(missing, 0) then str_concat(" miss=", int_to_str(missing)) else "")), width, fgd-style-for-plane(plane, 220, 0), str_concat("flow.", label), list("flow", plane), if eq(missing, 0) then "physical-live" else "unavailable");
+        }
+        def fglui-flow-lines(history, width) = list(fglui-flow-line("GPU", history, 2, 1, width, "metal"), fglui-flow-line("CPU-JIT", history, 3, 1, width, "cpu"), fglui-flow-line("DISPATCH", history, 4, 1, width, "form"), fglui-flow-line("QUEUE", history, 5, 0, width, "membrane"));
+    }
+    0;
+}

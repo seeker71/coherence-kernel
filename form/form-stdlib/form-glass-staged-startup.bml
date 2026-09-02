@@ -1,0 +1,106 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glass-staged-startup.bml — bounded truthful Glass bootstrap.
+//
+// This stage deliberately excludes the full dashboard compiler graph.  It
+// reads a small physical snapshot, renders it immediately, and carries a
+// route for later view demand.  A disk image whose mtime and age look current
+// is only a candidate: fkwu's source-identity gate remains authoritative.
+//
+// Authority: form-stdlib/bml/form-glass-staged-startup.bml
+// preludes: form/form-stdlib/core.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormGlassStagedStartupAuthority {
+        field FGLSAuthorityPath = "form/form-stdlib/bml/form-glass-staged-startup.bml";
+        field FGLSAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class FormGlassStagedStartup {
+        field FGLSSchema = "form-glass-staged-startup-v1";
+        field FGLSAttentionMs = 5000;
+        field FGLSFirstFrameBudgetMs = 60000;
+        field FGLSDiskCandidateExpiryMs = 86400000;
+        field FGLSFullSource = "observe/form-glass-live-run.fk";
+        field FGLSFullImage = "observe/form-glass-live-run.fkb";
+        field FGLSFullDoor = "observe/form-glass-live-run.fk";
+        field FGLSProgramCallDoor = "runtime.full-program-image.call";
+        ref fgls-authority = FormGlassStagedStartupAuthority;
+
+        def fgls-max-zero(value) = if gt(value, 0) then value else 0;
+        def fgls-epoch-seconds(epochMs) = div(epochMs, 1000);
+        def fgls-file-present?(path) = if ge(file_size(path), 0) then 1 else 0;
+        def fgls-attention-state(elapsedMs) = if gt(elapsedMs, FGLSAttentionMs()) then "close-attention" else "within-attention";
+        def fgls-file-age-ms(path, epochMs) {
+            let modified = file_mtime(path);
+            if le(modified, 0) then -1 else fgls-max-zero(sub(epochMs, mul(modified, 1000)));
+        }
+        def fgls-disk-state(sourceModified, imageModified, age, expiryMs) {
+            if le(sourceModified, 0) then "source-missing" else if le(imageModified, 0) then "image-missing" else if lt(imageModified, sourceModified) then "stale-mtime" else if lt(age, 0) then "age-unavailable" else if gt(age, expiryMs) then "expired" else "mtime-age-candidate";
+        }
+        def fgls-disk-candidate-state(sourcePath, imagePath, epochMs, expiryMs) = fgls-disk-state(file_mtime(sourcePath), file_mtime(imagePath), fgls-file-age-ms(imagePath, epochMs), expiryMs);
+        def fgls-disk-candidate?(state) = if str_eq(state, "mtime-age-candidate") then 1 else 0;
+        def fgls-metal-linked?(status) = if ge(str_find(status, "metal_linked=true", 0), 0) then 1 else 0;
+        def fgls-mlx-linked?(status) = if ge(str_find(status, "mlx_linked=true", 0), 0) then 1 else 0;
+
+        // snapshot: exact bounded physical reads performed once at startup.
+        def fgls-snapshot(epochMs, kernelOps, metalLinked, mlxLinked, sourceBytes, sourceModified, imageBytes, imageModified, imageAgeMs, diskState) = list("form-glass-startup-snapshot-v1", epochMs, kernelOps, metalLinked, mlxLinked, sourceBytes, sourceModified, imageBytes, imageModified, imageAgeMs, diskState);
+        def fgls-snapshot-epoch(snapshot) = nth(snapshot, 1);
+        def fgls-snapshot-kernel-ops(snapshot) = nth(snapshot, 2);
+        def fgls-snapshot-metal?(snapshot) = nth(snapshot, 3);
+        def fgls-snapshot-mlx?(snapshot) = nth(snapshot, 4);
+        def fgls-snapshot-source-bytes(snapshot) = nth(snapshot, 5);
+        def fgls-snapshot-source-modified(snapshot) = nth(snapshot, 6);
+        def fgls-snapshot-image-bytes(snapshot) = nth(snapshot, 7);
+        def fgls-snapshot-image-modified(snapshot) = nth(snapshot, 8);
+        def fgls-snapshot-image-age(snapshot) = nth(snapshot, 9);
+        def fgls-snapshot-disk-state(snapshot) = nth(snapshot, 10);
+        def fgls-snapshot?(snapshot) = if nothing?(snapshot) then 0 else if not(eq(len(snapshot), 11)) then 0 else if not(str_eq(head(snapshot), "form-glass-startup-snapshot-v1")) then 0 else 1;
+        def fgls-observe-at(epochMs, metalStatus, mlxStatus) = fgls-snapshot(epochMs, kernel_stat(0), fgls-metal-linked?(metalStatus), fgls-mlx-linked?(mlxStatus), file_size(FGLSFullSource()), file_mtime(FGLSFullSource()), file_size(FGLSFullImage()), file_mtime(FGLSFullImage()), fgls-file-age-ms(FGLSFullImage(), epochMs), fgls-disk-candidate-state(FGLSFullSource(), FGLSFullImage(), epochMs, FGLSDiskCandidateExpiryMs()));
+        def fgls-observe() {
+            let epoch = now_unix_ms();
+            let metal = metal_status();
+            let mlx = mlx_status();
+            fgls-observe-at(epoch, metal, mlx);
+        }
+
+        // The retained RAM image is snapshot data, not a callable whole-program
+        // image.  Repeated projections increment reads without re-observation.
+        def fgls-ram-snapshot(snapshot, reads) = list("form-glass-startup-ram-snapshot-v1", snapshot, reads);
+        def fgls-ram-snapshot-data(image) = nth(image, 1);
+        def fgls-ram-snapshot-reads(image) = nth(image, 2);
+        def fgls-ram-snapshot-read(image) = list(fgls-ram-snapshot-data(image), fgls-ram-snapshot(fgls-ram-snapshot-data(image), add(fgls-ram-snapshot-reads(image), 1)));
+
+        def fgls-bootstrap-view?(view) = if str_eq(view, "startup") then 1 else 0;
+        def fgls-full-view?(view) = if str_eq(view, "atlas") then 1 else if str_eq(view, "overview") then 1 else if str_eq(view, "memory") then 1 else if str_eq(view, "flow") then 1 else if str_eq(view, "recipes") then 1 else 0;
+        def fgls-route(view, snapshot) = if not(eq(fgls-snapshot?(snapshot), 1)) then list("form-glass-startup-route-v1", "refused", view, "snapshot-invalid", "none", FGLSProgramCallDoor()) else if eq(fgls-bootstrap-view?(view), 1) then list("form-glass-startup-route-v1", "ready", view, "resident-bootstrap", "ram-snapshot", "none") else if eq(fgls-full-view?(view), 1) then if eq(fgls-disk-candidate?(fgls-snapshot-disk-state(snapshot)), 1) then list("form-glass-startup-route-v1", "offered", view, "loader-validation-required", FGLSFullImage(), FGLSProgramCallDoor()) else list("form-glass-startup-route-v1", "offered", view, "compile-on-demand", FGLSFullSource(), FGLSProgramCallDoor()) else list("form-glass-startup-route-v1", "refused", view, "view-unknown", "none", FGLSProgramCallDoor());
+        def fgls-route-status(route) = nth(route, 1);
+        def fgls-route-reason(route) = nth(route, 3);
+        def fgls-route-artifact(route) = nth(route, 4);
+        def fgls-route-door(route) = nth(route, 5);
+
+        def fgls-yes-no(value) = if eq(value, 1) then "yes" else "no";
+        def fgls-cat(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), fgls-cat(tail(parts)));
+        // Keep each variadic list on one source line.  The current high-BML
+        // lowering floor treats a newline immediately after list( as an empty
+        // call; these small rows are also the future independently staged
+        // terminal lanes.
+        def fgls-render-head(snapshot) = fgls-cat(list("FORM GLASS startup truthful-first-frame\n", "epoch-ms=", int_to_str(fgls-snapshot-epoch(snapshot)), " kernel-ops=", int_to_str(fgls-snapshot-kernel-ops(snapshot)), "\n"));
+        def fgls-render-carriers(snapshot) = fgls-cat(list("carrier metal-linked=", fgls-yes-no(fgls-snapshot-metal?(snapshot)), " mlx-linked=", fgls-yes-no(fgls-snapshot-mlx?(snapshot)), "\n"));
+        def fgls-render-source(snapshot) = fgls-cat(list("full-source bytes=", int_to_str(fgls-snapshot-source-bytes(snapshot)), " mtime=", int_to_str(fgls-snapshot-source-modified(snapshot)), "\n"));
+        def fgls-render-disk(snapshot) = fgls-cat(list("disk-image state=", fgls-snapshot-disk-state(snapshot), " candidate-only=yes bytes=", int_to_str(fgls-snapshot-image-bytes(snapshot)), " age-ms=", int_to_str(fgls-snapshot-image-age(snapshot)), "\n"));
+        def fgls-render-views(snapshot) = fgls-cat(list("views startup=ready atlas=default overview|memory|flow|recipes=full-image\n", "full-program-image-call=unavailable missing-door=runtime.full-program-image.call\n"));
+        def fgls-render(snapshot) = fgls-cat(list(fgls-render-head(snapshot), fgls-render-carriers(snapshot), fgls-render-source(snapshot), fgls-render-disk(snapshot), fgls-render-views(snapshot)));
+        def fgls-live() {
+            let started = now_unix_ms();
+            let snapshot = fgls-observe();
+            let shown = print_str(fgls-render(snapshot));
+            let elapsed = sub(now_unix_ms(), started);
+            print_str(fgls-cat(list("first-frame-observed-ms=", int_to_str(elapsed), " attention-ms=", int_to_str(FGLSAttentionMs()), " attention=", fgls-attention-state(elapsed), " budget-ms=", int_to_str(FGLSFirstFrameBudgetMs()), "\n")));
+            list("form-glass-staged-startup-live-v1", snapshot, elapsed, if le(elapsed, FGLSFirstFrameBudgetMs()) then "within-budget" else "over-budget", fgls-attention-state(elapsed));
+        }
+    }
+    0;
+}

@@ -1,0 +1,91 @@
+; form-resource-governor-live-run.fk — physical Metal/atomic-slot witness.
+;
+; metal_status is read from this process and is never mixed with the explicit
+; test identity used to exercise the filesystem singleton.  This checkout has
+; no current-process lifetime primitive, so real Metal status cannot honestly
+; acquire the slot; the policy sample stays fail-closed.  The separate fixture
+; identity drives a real host_dir_mkdir collision and exact-owner release.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bml/form-glass-observation-v2.bml form-stdlib/form-resource-governor.bml
+
+(do
+    (defn frglr-declared-provenance ()
+        (fgov2-provenance "declared" "resource-governor.live"
+            (fgov2-unavailable "current-process-lifetime-not-exposed" "process.current-lifetime")
+            (fgov2-measured (kernel_stat 0))
+            (fgov2-measured (now_unix_ms)) "metal_status"))
+    (defn frglr-fixture-provenance (sequence observed)
+        (fgov2-provenance "physical-live" "resource-governor.slot-probe-fixture"
+            (fgov2-measured (fgov2-process-lifetime 99001 1700000000 "slot-probe-fixture-99001"))
+            (fgov2-measured sequence) (fgov2-measured observed) "host_dir_mkdir-live-probe"))
+    (defn frglr-unavailable (reason door) (frg-unavailable reason door))
+    (defn frglr-resource (name capacity-door foreground-door reserve-door)
+        (frg-resource name
+            (frglr-unavailable "capacity-not-exposed" capacity-door)
+            (frglr-unavailable "foreground-demand-not-exposed" foreground-door)
+            (frglr-unavailable "reserve-not-exposed" reserve-door)))
+    (defn frglr-value-text (truth)
+        (if (eq (fgov2-measured? truth) 1) (int_to_str (fgov2-truth-value truth)) "none"))
+
+    ; Physical current-process Metal observation. Its process identity is
+    ; unavailable, so it never becomes a fabricated physical-live provenance.
+    (let status (metal_status))
+    (let in-flight-truth (fgov2-status-number-truth status "in_flight"))
+    (let sample (frg-sample
+        (frglr-unavailable "request-queue-not-correlated" "hearth.queue.current")
+        (frglr-resource "cpu" "host.cpu.capacity" "host.cpu.foreground" "host.cpu.reserve")
+        (frglr-resource "gpu" "metal.capacity" "metal.foreground" "metal.reserve")
+        (frglr-resource "memory" "host.memory.capacity" "host.memory.foreground" "host.memory.reserve")
+        (frglr-unavailable "foreground-presence-not-exposed" "host.foreground-presence")
+        (frglr-unavailable "foreground-latency-not-exposed" "host.foreground-latency")
+        (frglr-unavailable "memory-pressure-not-exposed" "host.memory-pressure")
+        (frglr-unavailable "thermal-state-not-exposed" "host.thermal-state")
+        (frglr-unavailable "low-power-state-not-exposed" "host.low-power-state")
+        (frg-signal in-flight-truth 0 (frglr-declared-provenance))))
+    (let decision (frg-tick (frg-default-policy) (frg-initial-state) sample))
+
+    ; Physical atomic singleton probe with an explicitly labelled fixture
+    ; owner. Unknown or stale ownership is observed but never removed.
+    (let fixture-now (now_unix_ms))
+    (let fixture-provenance (frglr-fixture-provenance 1 fixture-now))
+    (let open-permit (frg-metal-permit
+        (frg-permit-id-for fixture-provenance 1) 1 "open" fixture-provenance 0 (list) "" ""))
+    (let first (frg-metal-slot-acquire-live open-permit))
+    (let second (frg-metal-slot-acquire-live open-permit))
+    (let reserved (frg-metal-slot-result-permit first))
+    (let other-provenance (fgov2-provenance "physical-live" "resource-governor.other-fixture"
+        (fgov2-measured (fgov2-process-lifetime 99002 1700000001 "other-fixture-99002"))
+        (fgov2-measured 1) (fgov2-measured fixture-now) "host_dir_mkdir-live-probe"))
+    (let other-permit (frg-metal-permit (frg-permit-id-for other-provenance 1) 1 "open"
+        other-provenance 0 (list) "" ""))
+    (let unknown-observation (if (eq (frg-metal-slot-result-acquired? first) 1)
+        (frg-metal-slot-observe-live other-permit fixture-now 500) (list)))
+    (let stale-observation (if (eq (frg-metal-slot-result-acquired? first) 1)
+        (frg-metal-slot-observe-live open-permit (add fixture-now 1000) 500) (list)))
+    (let released (if (eq (frg-metal-slot-result-acquired? first) 1)
+        (frg-metal-slot-release-live reserved)
+        (frg-metal-slot-release-result "not-attempted" "slot-was-already-occupied" -1 -1)))
+    (let duplicate-release (if (eq (frg-metal-slot-result-acquired? first) 1)
+        (frg-metal-slot-release-live reserved)
+        (frg-metal-slot-release-result "not-attempted" "slot-was-already-occupied" -1 -1)))
+
+    (print_str "form-resource-governor evidence=physical-live policy-application=fail-closed\n")
+    (print_str "metal.source=physical-current-process fixture=false")
+    (print_str (str_concat " linked=" (if (eq (fgov2-metal-linked? status) 1) "true" "false")))
+    (print_str (str_concat " in-flight.kind=" (fgov2-truth-kind in-flight-truth)))
+    (print_str (str_concat " in-flight.value=" (frglr-value-text in-flight-truth)))
+    (print_str (str_concat " grant.cpu=" (int_to_str (frg-decision-cpu decision))))
+    (print_str (str_concat " grant.gpu=" (int_to_str (frg-decision-gpu decision))))
+    (print_str (str_concat " grant.memory=" (int_to_str (frg-decision-memory decision))))
+    (print_str (str_concat " reason=" (frg-decision-reason decision)))
+    (print_str " missing-door=process.current-lifetime\n")
+    (print_str "slot.source=physical-host_dir_mkdir owner-identity=explicit-fixture-not-current-process")
+    (print_str (str_concat " first=" (frg-metal-slot-result-status first)))
+    (print_str (str_concat " second=" (frg-metal-slot-result-status second)))
+    (print_str (str_concat " unknown=" (if (eq (len unknown-observation) 0) "not-observed" (frg-metal-slot-observation-status unknown-observation))))
+    (print_str (str_concat " stale=" (if (eq (len stale-observation) 0) "not-observed" (frg-metal-slot-observation-status stale-observation))))
+    (print_str (str_concat " release=" (frg-metal-slot-release-status released)))
+    (print_str (str_concat " duplicate-release=" (frg-metal-slot-release-status duplicate-release)))
+    (print_str "\n")
+    (print_str "cpu.schedule.ack=unavailable missing-door=host.cpu-scheduling-ack metal.priority=unsupported\n")
+    0)
