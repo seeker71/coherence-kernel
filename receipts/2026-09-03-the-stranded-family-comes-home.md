@@ -18,7 +18,7 @@ Two merges, in order:
 2. `claude/vigorous-bose-7859ea` itself — 6 conflicted paths, 39 conflict
    regions in `runtime/fkwu-uni.c` alone.
 
-## The shape of the 39 conflicts — twicegrown (row 1255)
+## The shape of the 39 conflicts — twicegrown (row 1257)
 
 Every single kernel conflict was the same meeting: the branch's 2026-08-27
 cap-removal mechanics (`fk_fn_need`, `fk_rec_need`, `fk_fncap`, `fk_rcap`)
@@ -55,9 +55,9 @@ Main's line had taken 1244–1245 (onemint, truename) and the branch minted
 
 - tailkeep 1244 → **1246**
 - emptymask, numbfloor, warmmask, coverfall, shortwhole, meaningfork,
-  scarwall, seatwall 1157–1164 → **1247–1254** (all eight words verified
+  scarwall, seatwall 1157–1164 → **1249–1256** (all eight words verified
   0-hit in today's corpus before re-seating)
-- this reunion's own row: **1255 twicegrown**
+- this reunion's own row: **1257 twicegrown**
 
 ## Witness (reunion kernel, this checkout, 2026-09-03)
 
