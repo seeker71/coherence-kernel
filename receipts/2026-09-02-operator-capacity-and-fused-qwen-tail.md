@@ -1,41 +1,57 @@
-# Operators are families, and one physical tail crossed in a single dispatch
+# One coordinate carries type families and operators, and one physical tail crossed in a single dispatch
 
 ## The abstraction kept from NUMS
 
 The useful inheritance from `/Users/ursmuff/source/NUMS.Go/nums/nums_nodes.go`
-is the shape, not its registry:
+is the shape and the separation of roles, not its registry:
 
 ```text
 package:u16 . level:u16 . type:u16 . instance:u32
 ```
 
-`nums_consts.go` currently names 19 trivial slots including undefined and 20
-basic slots including undefined.  Those are examples inside a much larger
-coordinate, not a closed list Form should copy.  The new canonical BML organ is
-`form/form-stdlib/operator-type-id.bml`:
+`nums_consts.go` currently lists 51 family slots across its four tables: 39
+recipe families and 12 blueprint families, including each table's undefined
+slot.  Its populated basic-recipe tables name 111 concrete operations when the
+undefined member in each family is excluded.  Those are examples, not the
+capacity.
 
-- `oti-coordinate(pkg, level, family, operation)` validates and constructs the
-  full coordinate;
-- `oti-value(pkg, family, operation)` fixes level 1;
-- `oti-operator(pkg, family, operation)` fixes level 2;
-- `oti-composite(pkg, family, operation, children)` fixes level 3 and gives the
-  assemblage content identity;
-- `oti-operator-family(node)` and `oti-operation(node)` read the coordinate's
-  type and instance through `node_category`, so they work for both a bare
-  operator coordinate and an interned composite occurrence;
+The correction that matters is visible in NUMS's own types:
+`BlueprintNodeID_t` and `RecipeNodeID_t` wrap the same `NodeID_t`.  Therefore
+the coordinate alone does not claim whether a member is a type or an operator.
+`package.level.type` selects a family.  In blueprint space, `instance` selects
+a concrete type; in recipe space, it selects an operator.  The owning space is
+the role.  The bits stay structural.
+
+The canonical BML organ `form/form-stdlib/operator-type-id.bml` now has only
+this algebra:
+
+- `oti-family(pkg, level, family)` projects the complete family prefix into a
+  reference; its zero instance is not reserved and remains a valid member;
+- `oti-type(family, instance)` and `oti-operator(family, instance)` create the
+  same structural member while leaving its blueprint/recipe role to its owner;
+- `oti-apply(operator, operands)` interns the operator category and its ordered
+  operands;
+- `oti-family-of`, `oti-same-family?`, and `oti-in-family?` project and compare
+  the structural family without inventing a role tag;
 - one package/level can hold 65,536 families and each family can hold
-  4,294,967,296 operations.
+  4,294,967,296 members.
 
-The 65535 band constructs the maximum
+There are `2^48 = 281,474,976,710,656` possible family prefixes and `2^32`
+members per family.  A blueprint or recipe namespace can therefore draw from
+the complete 80-bit coordinate capacity; the present 51/111 catalog is not a
+ceiling.
+
+The 262143 band constructs the maximum
 `65535.65535.65535.4294967295`, reads all four coordinates back, proves equal
-composites intern equally, distinguishes a changed operation, and refuses
+applications intern equally, distinguishes a changed operation, and refuses
 negative or one-past-width coordinates.  It also proves that a composite's
 occurrence ID is distinct from its operator category while its accessors still
-return the requested family and operation. It also observes 2^48 possible
-package/level/type coordinates and records the full 80-bit space exactly as
-2^80 = 1,208,925,819,614,629,174,706,176 positions. No NUMS enum, external relation
-ID, or per-tensor identifier entered the organ.  Tensors remain values owned
-by their actual Form allocation and recipe.
+return the requested family and operation, and that blueprint-type and
+recipe-operator construction are structurally identical. It observes 2^48
+possible package/level/type family coordinates and records the full 80-bit
+space exactly as 2^80 = 1,208,925,819,614,629,174,706,176 positions. No NUMS
+enum, external relation ID, or per-tensor identifier entered the organ.
+Tensors remain values owned by their actual Form allocation and recipe.
 
 The first attempt exposed a real BML edge: decimal source literals above signed
 u32 lowered to `nothing`, and multiline expression definitions lowered to
@@ -43,7 +59,8 @@ u32 lowered to `nothing`, and multiline expression definitions lowered to
 now derived as `65536 * 65536` inside Form and expression definitions remain
 whole.  Review then caught a semantic distinction: `intern_node` returns an
 occurrence while family/operation live in its category.  Category-aware
-accessors and the new occurrence/category assertions now answer 65535.
+accessors, ordered/swapped-child assertions, and cross-level family assertions
+now answer 262143.
 
 ## One physical Qwen tail
 
@@ -132,4 +149,4 @@ a sound local kernel from the still-unearned global promise.
 
 Signed: Codex
 
-; witnessed: 2026-09-02 -> operator capacity 65535; reviewed scalar-gate fused tail exact on varied data in three runs; global performance gates unchanged
+; witnessed: 2026-09-02 -> family/member/operator abstraction 262143; reviewed scalar-gate fused tail exact on varied data in three runs; global performance gates unchanged

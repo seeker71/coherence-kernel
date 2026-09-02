@@ -1,0 +1,77 @@
+; form-resource-host-pressure-band.fk — measured headroom retention proof.
+;
+; Verdict 4095: twelve independently named invariants.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bml/form-glass-observation-v2.bml form-stdlib/form-glass-observer.bml form-stdlib/form-resource-governor.bml form-stdlib/form-resource-host-pressure.bml
+
+(do
+    (defn frghpb-bit (held weight) (if (eq held 1) weight 0))
+    (defn frghpb-provenance (sequence observed)
+        (fgov2-provenance "physical-live" "resource.host-pressure.band"
+            (fgov2-measured (fgov2-process-lifetime 4401 1700000000 "host-pressure-band-4401"))
+            (fgov2-measured sequence) (fgov2-measured observed)
+            "host-exec:/usr/bin/memory_pressure-Q"))
+    (defn frghpb-m (value) (frg-measured value 0 (frghpb-provenance 1 1700000250)))
+    (defn frghpb-has (text needle) (if (ge (str_find text needle 0) 0) 1 0))
+
+    (let local (frghp-default-policy))
+    (let governor (frg-default-policy))
+    (let provenance (frghpb-provenance 1 1700000250))
+    (let healthy-output "The system has 137438953472 (33554432 pages with a page size of 4096).\nSystem-wide memory free percentage: 93%\n")
+    (let warning-output "The system has 137438953472 (33554432 pages with a page size of 4096).\nSystem-wide memory free percentage: 10%\n")
+    (let critical-output "The system has 137438953472 (33554432 pages with a page size of 4096).\nSystem-wide memory free percentage: 5%\n")
+    (let healthy (frghp-pressure-from-output local healthy-output 0 provenance))
+    (let warning (frghp-pressure-from-output local warning-output 0 provenance))
+    (let critical (frghp-pressure-from-output local critical-output 0 provenance))
+    (let malformed (frghp-pressure-from-output local "memory unavailable" 0 provenance))
+    (let total (frghp-total-bytes-from-output healthy-output 0 provenance))
+
+    (let c0 (frghpb-bit (frghp-policy-valid? local) 1))
+    (let c1 (frghpb-bit (and (eq (frg-signal-value healthy) 0)
+                              (str_eq (frghp-retention-status governor healthy) "retain-open-models")) 2))
+    (let c2 (frghpb-bit (and (eq (frg-signal-value warning) 1)
+                              (str_eq (frghp-retention-status governor warning) "reclaim-request-required")) 4))
+    (let c3 (frghpb-bit (eq (frg-signal-value critical) 2) 8))
+    (let c4 (frghpb-bit (and (str_eq (frg-signal-kind malformed) "unavailable")
+                              (str_eq (frg-signal-kind (frghp-pressure local 101 0 provenance)) "unavailable")) 16))
+    (let c5 (frghpb-bit (eq (frg-signal-value total) 137438953472) 32))
+
+    ; Current no-pressure evidence is sufficient for no action even when no
+    ; reclaim request exists.  This is the retain-until-pressure invariant.
+    (let no-request (frg-unavailable "required-bytes-not-requested" "governor.reclaim-request"))
+    (let retained (frghp-release-plan governor healthy no-request (list)))
+    (let c6 (frghpb-bit (and (str_eq (frg-release-plan-status retained) "none")
+        (and (str_eq (frg-release-plan-reason retained) "measured-no-pressure")
+             (eq (len (frg-release-plan-selected retained)) 0))) 64))
+
+    ; Once pressure exists, missing reclaim size and missing handles refuse.
+    (let warning-refused (frghp-release-plan governor warning no-request (list)))
+    (let c7 (frghpb-bit (and (str_eq (frg-release-plan-status warning-refused) "refused")
+                              (str_eq (frg-release-plan-reason warning-refused) "required-bytes-not-current")) 128))
+    (let pressure-no-units (frghp-release-plan governor warning (frghpb-m 1) (list)))
+    (let c8 (frghpb-bit (and (str_eq (frg-release-plan-status pressure-no-units) "blocked")
+                              (str_eq (frg-release-plan-reason pressure-no-units) "supported-grain-capacity-exhausted")) 256))
+
+    ; Layer, expert, and partial KV candidates never become release authority.
+    (let unsupported (list
+        (frg-release-unit "expert.1" "packed-expert" (frghpb-m 100) (frghpb-m 0) (frghpb-m 0) (frghpb-m 0) (frghpb-m 701) "no independent handle")
+        (frg-release-unit "layer.1" "transformer-layer" (frghpb-m 100) (frghpb-m 0) (frghpb-m 0) (frghpb-m 0) (frghpb-m 702) "token-required")
+        (frg-release-unit "kv.partial" "partial-kv" (frghpb-m 100) (frghpb-m 0) (frghpb-m 0) (frghpb-m 0) (frghpb-m 703) "no coherent partial handle")))
+    (let unsupported-plan (frghp-release-plan governor warning (frghpb-m 1) unsupported))
+    (let c9 (frghpb-bit (and (str_eq (frg-release-plan-status unsupported-plan) "blocked")
+                              (eq (len (frg-release-plan-selected unsupported-plan)) 0)) 512))
+    (let stale (frg-stale 0 1699990000 3 "resource.host-pressure.band"))
+    (let stale-plan (frghp-release-plan governor stale no-request (list)))
+    (let negative-plan (frghp-release-plan governor (frghpb-m -1) no-request (list)))
+    (let c10 (frghpb-bit (and (str_eq (frghp-retention-status governor stale) "fail-closed-pressure-unknown")
+        (and (str_eq (frg-release-plan-status stale-plan) "refused")
+             (and (str_eq (frg-release-plan-reason stale-plan) "pressure-not-current")
+                  (and (str_eq (frg-release-plan-status negative-plan) "refused")
+                       (str_eq (frghp-retention-status governor (frghpb-m -1)) "fail-closed-pressure-unknown"))))) 1024))
+
+    (let authority (read_file "form/form-stdlib/bml/form-resource-host-pressure.bml"))
+    (let c11 (frghpb-bit (and (eq (frghpb-has authority "not model residency") 1)
+        (and (eq (frghpb-has authority "warning or critical headroom never unloads by itself") 1)
+             (eq (frghpb-has authority "no independent physical release handle") 1))) 2048))
+
+    (sum (list c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11)))
