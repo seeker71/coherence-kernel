@@ -85,6 +85,28 @@ transition observations through two control rounds. It is intentionally slower.
 The witnessed vector is documented in
 `receipts/2026-07-22-bidirectional-framebuffer-channel.md`.
 
+## The admission pulse: which door did this run enter through
+
+The kernel records how the running program itself was admitted, and the
+program reads it back through the same `kernel_stat` door as the dispatch
+and pool counters — always on, no toggle:
+
+| Key | Reading |
+|---:|---|
+| 15 | door: `0` flat whole-program compile, `1` import lane, `2` cached image replay, `3` native `.dylib` |
+| 16 | units imported as standalone `.fkb` images (door 1) |
+| 17 | units carried as source beside the imports (door 1) |
+| 18 | why the import lane last stepped aside (`0` it did not; codes in `runtime/fkwu-uni.c` at the counter declarations) |
+
+This exists because a whole wound family (icetide, corpus 1217) reproduced by
+door decision rather than by source bytes, and the only witness was a static
+conf toggle printing to stderr — unreadable by the program and uncorrelatable
+in a diagnostic window. When a run surprises, put `(kernel_stat 15)` through
+`(kernel_stat 18)` into the outbound payload before bisecting bytes.
+`observe/tests/import-carry-band.fk` holds the fast regression: the same band
+answers a consistent pulse through the import-lane door cold and the cached
+door warm.
+
 ## Integration pattern
 
 1. Clear only at the beginning of a bounded diagnostic window.
