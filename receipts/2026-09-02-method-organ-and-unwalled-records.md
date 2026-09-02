@@ -93,3 +93,24 @@ A smaller gold: FK_METHOD_CAP went in with the organ in the morning and
 reads as a wall by evening — the receipt drafting itself refused the
 sentence "two walls down, one wall raised". The method table grows now;
 the discomfort of writing the receipt was the review that caught it.
+
+## Reunion (same evening)
+
+Mid-work, main landed its own growth wave (#561) — a sibling's hands on
+the same record tissue: fk_record_reserve for the row dimension, record
+values and keys as melt roots, kernel_stat observability. The reunion
+fused rather than chose: main's names and mechanism kept, rows became
+per-record heap arrays so the key dimension grows too (FK_RECORD_MAX_KEYS
+falls on the merged body — the one wall neither branch alone had removed
+everywhere), guards keep the tighter live-record bound, corpus rows
+renumbered 1222/1223 → 1232/1233 past main's eight new rows with every
+row kept.
+
+The reunion's own near-wound: the auto-merge STACKED both branches'
+record melt-root walks — count twice, copy twice — and fk_mcopy forwards
+by OLD arena position, so a second copy of an already-copied value can
+alias into fresh tissue. Two hands adding the same safety independently
+composed into a hazard neither wrote. Fused to one walk with the reason
+in place. When two branches heal the same wound, the merge needs a
+witness on the HEAL itself, not just the conflict markers — the stacked
+loops merged without any conflict at all.
