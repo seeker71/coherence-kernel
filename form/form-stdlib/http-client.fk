@@ -80,9 +80,13 @@ section [form.bml] {
         if http-response-complete?(next) then next else http-recv-response-into(conn, next);
     }
 
+    ; a recv that measured no byte for a REASON (dead handle, read error)
+    ; answers nothing (2026-08-27) — the response died mid-stream and must not
+    ; pass as complete; the nothing travels up to the request boundary.
+    ; "" stays the peer's orderly close: the accumulated reply is whole.
     def http-recv-response-into(conn, acc) {
         let chunk = socket_recv(conn, 65536);
-        if eq(str_len(chunk), 0) then acc else http-recv-response-next(conn, acc, chunk);
+        if nothing?(chunk) then chunk else if eq(str_len(chunk), 0) then acc else http-recv-response-next(conn, acc, chunk);
     }
 
     def http-recv-response(conn) = socket_recv(conn, 65536);
@@ -94,14 +98,18 @@ section [form.bml] {
         response;
     }
 
+    ; a peer never reached answers nothing (2026-08-27); this boundary names
+    ; the absence, then "" keeps this cell's no-body meaning downstream.
+    def http-answer-or-empty(r) = if nothing?(r) then "" else r;
+
     def http-plain-request-response-or-fallback(host, port, conn, req) {
         let response = http-plain-request-connected(conn, req);
-        if gt(str_len(response), 0) then response else sock_request(host, port, req);
+        if nothing?(response) then http-answer-or-empty(sock_request(host, port, req)) else if gt(str_len(response), 0) then response else http-answer-or-empty(sock_request(host, port, req));
     }
 
     def http-plain-request(host, port, req) {
         let conn = http-open(host, port);
-        if lt(conn, 0) then sock_request(host, port, req) else http-plain-request-response-or-fallback(host, port, conn, req);
+        if lt(conn, 0) then http-answer-or-empty(sock_request(host, port, req)) else http-plain-request-response-or-fallback(host, port, conn, req);
     }
 
     def http-fetch(method, url, body) {
@@ -114,7 +122,7 @@ section [form.bml] {
         let host = if eq(colon, -1) then hostport else substring(hostport, 0, colon);
         let port = if eq(colon, -1) then if https then "443" else "80" else substring(hostport, add(colon, 1), str_len(hostport));
         let req = kh-render-request(method, path, host, body);
-        if https then tls_request(host, port, req) else http-plain-request(host, port, req);
+        if https then http-answer-or-empty(tls_request(host, port, req)) else http-plain-request(host, port, req);
     }
 
     def kh-msg-body-framed(msg, body-start, body-len) {
