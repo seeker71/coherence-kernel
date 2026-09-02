@@ -6,6 +6,8 @@
 ; preludes: form-stdlib/form-cli-turn-evidence-live.fk
 ; preludes: form-stdlib/bml/form-cli-turn-evidence-cursor.bml
 ; preludes: form-stdlib/bml/form-cli-share-health.bml
+; preludes: form-stdlib/form-glass-telemetry-membrane.bml
+; preludes: form-stdlib/bml/form-cli-share-glass.bml
 
 (defn fctes-join (parts)
     (if (eq (len parts) 0) ""
@@ -98,6 +100,14 @@
         (write_file_text (fctel-latest-validation-path) "")
         (fcte-parse "unmeasured")))
 
+; A row that has been physically disproved as latest is expired from the
+; current-value cache. Keeping it there made every later invocation rescan the
+; same append tail before advancing the new turn's durable cursor.
+(defn fctes-unmeasured-expire-stale ()
+    (do
+        (fctec-expire-current-stale)
+        (fcte-parse "unmeasured")))
+
 (defn fctes-cached-evidence ()
     (if (le (file_size (fctel-observed-row-path)) 0)
         (fctes-unmeasured-clear-validation)
@@ -122,24 +132,39 @@
                                         evidence path))
                                     (if (eq (fctec-latest? latest) 1)
                                         evidence
-                                        (fcte-parse "unmeasured")))))))))))
+                                        (if (eq (fctec-latest-progress? latest) 1)
+                                            (fcte-parse "unmeasured")
+                                            (fctes-unmeasured-expire-stale))))))))))))
 
 (do
+    (let refresh-start-ms (now_unix_ms))
+    (let observed-row-before (gt (file_size (fctel-observed-row-path)) 0))
     (let before (fctes-cached-evidence))
+    (let stale-expired (and observed-row-before
+        (eq (file_size (fctel-observed-row-path)) 0)))
     ; A share read also advances one bounded native continuation when the
     ; previous completed turn has not settled yet.  Re-entry is durable; an
     ; observed row pays no refresh work.
     (let validating (gt (file_size (fctel-latest-validation-path)) 0))
-    (let refresh (if (eq (fcte-valid? before) 1)
-        "turn-evidence-refresh=already-observed"
-        (if validating "turn-evidence-refresh=validating-latest"
-            (fctec-refresh-bound))))
-    ; Validation advances once per invocation. A refresh may produce a new
-    ; row, in which case one source/latest check is safe.
-    (let evidence (if (or (eq (fcte-valid? before) 1) validating)
-        before (fctes-cached-evidence)))
+    (let action (fctec-invocation-action (fcte-valid? before)
+        validating stale-expired))
+    (let refresh (if (str_eq action "advance")
+        (fctec-refresh-bound) (fctec-invocation-status action)))
+    ; One invocation owns one evidence movement. A refresh that finishes a
+    ; candidate does not immediately spend a second slice validating it; the
+    ; following invocation reads and validates that durable row.
+    (let evidence before)
+    ; The attention clock closes only after the atomic Glass snapshot write,
+    ; so it covers the whole evidence movement visible to another process.
+    (let share-published (fcsg-publish-evidence (now_unix_ms) evidence))
+    (let refresh-ms (sub (now_unix_ms) refresh-start-ms))
     (print_str (fctes-join (list
         "measurement-refresh=" refresh "\n"
+        "measurement-refresh-ms=" (int_to_str refresh-ms)
+        " slice-bytes=" (int_to_str (fctec-processing-bytes))
+        " attention-ms=" (int_to_str (fctec-attention-ms))
+        " measurement-attention=" (fctec-attention-state refresh-ms) "\n"
+        "glass-share=" (fcsg-publish-status share-published) "\n"
         "form-cli share kind=" (fcte-kind-name evidence)
         " scope=" (if (eq (fcte-valid? evidence) 1)
             (if (str_eq (fcte-source evidence) (fcte-source-kind-grok))
