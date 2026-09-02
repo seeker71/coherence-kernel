@@ -92,9 +92,20 @@ if command -v py >/dev/null 2>&1 && py -3 --version >/dev/null 2>&1; then
 elif command -v python3 >/dev/null 2>&1 && python3 --version >/dev/null 2>&1; then
     BP_PY="python3"
 fi
-# Phase 0 fkwu native surface gate (spec: fkwu-only-kernel-collapse.md).
-if [[ -n "$BP_PY" && -f scripts/validate_fkwu_native_surface.py ]]; then
-    $BP_PY scripts/validate_fkwu_native_surface.py
+# Phase 0 fkwu native surface gate, Form-bodied: gate/native-surface-gate.bml
+# prints its warn/error lines and a named verdict, then answers native 1
+# (pass) / 0 (refusal) — the same explicit-result idiom as the structural
+# gate above; this carrier turns the 0 into a nonzero validation exit.
+if NATIVE_SURFACE_RESULT="$(cd .. && ./fkwu gate/native-surface-gate.bml)"; then
+    NATIVE_SURFACE_FKWU_RC=0
+else
+    NATIVE_SURFACE_FKWU_RC=$?
+fi
+printf '%s\n' "$NATIVE_SURFACE_RESULT"
+NATIVE_SURFACE_STATUS="${NATIVE_SURFACE_RESULT##*$'\n'}"
+if [[ "$NATIVE_SURFACE_FKWU_RC" -ne 0 || "$NATIVE_SURFACE_STATUS" != "1" ]]; then
+    printf '%s\n' 'validate.sh: native-surface gate refused — a flt-ops row misses its fkc-flat arm, or the table could not be read.' >&2
+    exit 1
 fi
 if [[ -n "$BP_PY" && -f scripts/gen_flt_ops_from_manifest.py ]]; then
     $BP_PY scripts/gen_flt_ops_from_manifest.py

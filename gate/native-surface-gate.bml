@@ -1,0 +1,322 @@
+//////////////////////////////////////////////////////////////////////
+//
+// gate/native-surface-gate.bml — the fkwu native-surface gate, Form-bodied.
+//
+// Every flt-ops row must land in fkc-table-serialize.fk's fkc-flat dispatch
+// at its own arity: an op without its own arm falls to the binary fallback
+// and flattens at the wrong arity (node_at 147 and method_define 197 both
+// fell there on 2026-09-02, added by two hands the same day through a recipe
+// that counted three mirrors when the ground held four). This gate is the
+// fourth mirror's witness. It replaces form/scripts/
+// validate_fkwu_native_surface.py — the same checks, spoken by the body:
+//   - flt-ops rows parse from form/form-stdlib/form-flatten.fk
+//     (variadic -1 rows serialize by their own lane and are not judged here);
+//   - every tag stays inside fkc-arm-slots;
+//   - one tag never wears two arities (same-arity aliases are counted, named);
+//   - nullary/unary need their own fkc-flat row; ternary needs fkc-tri2 or an
+//     explicit arm; binary alone rides the fallback; quad is a warning lane;
+//   - tags 55+ warn when no C walker "if (t == N)" arm carries them
+//     (or-group members and the shared 80/106 arms are exempt).
+//
+// Run from repository root:
+//   ./fkwu gate/native-surface-gate.bml
+//
+// It prints warn/error lines and a named verdict, then returns native 1
+// (pass) or 0 (refusal) — the same explicit-result idiom as
+// gate/structural-gate-run.fk; form/validate.sh phase 0 is the process
+// carrier that turns the 0 into its nonzero validation exit.
+//
+// preludes: form-stdlib/core.fk
+//
+section [form.bml] {
+    def nvs-nl() = byte_to_str(10);
+    def nvs-q() = byte_to_str(34);
+
+    // guarded byte read: -1 beyond the end, never a measurement of nothing
+    def nvs-byte(s, i) = if ge(i, str_len(s)) then sub(0, 1) else str_byte_at(s, i);
+    def nvs-digit-at?(s, i) =
+        if ge(nvs-byte(s, i), 48) then le(nvs-byte(s, i), 57) else 0;
+    def nvs-read-int(s, i, acc) =
+        if eq(nvs-digit-at?(s, i), 1)
+        then nvs-read-int(s, add(i, 1), add(mul(acc, 10), sub(nvs-byte(s, i), 48)))
+        else acc;
+    def nvs-int-end(s, i) =
+        if eq(nvs-digit-at?(s, i), 1) then nvs-int-end(s, add(i, 1)) else i;
+
+    def nvs-member?(xs, t) =
+        if eq(len(xs), 0) then 0
+        else if eq(head(xs), t) then 1
+        else nvs-member?(tail(xs), t);
+    def nvs-cat(a, b) =
+        if eq(len(a), 0) then b else cons(head(a), nvs-cat(tail(a), b));
+
+    // ── flt-ops rows: (name arity tag), file order, variadic skipped ──────
+    def nvs-ops-block(ff) {
+        let beg = str_find(ff, "(defn flt-ops ()", 0);
+        if lt(beg, 0) then ""
+        else nvs-ops-block-end(ff, beg,
+            str_find(ff, str_concat(nvs-nl(), "(defn "), add(beg, 16)));
+    }
+    def nvs-ops-block-end(ff, beg, end) =
+        substring(ff, beg, if lt(end, 0) then str_len(ff) else end);
+
+    def nvs-rowpat() = str_concat("(list ", nvs-q());
+    def nvs-rows(blk, from) {
+        let p = str_find(blk, nvs-rowpat(), from);
+        if lt(p, 0) then empty
+        else nvs-rows-name(blk, p, str_find(blk, nvs-q(), add(p, 7)));
+    }
+    def nvs-rows-name(blk, p, cq) =
+        if lt(cq, 0) then empty
+        else nvs-rows-arity(blk, p, cq, substring(blk, add(p, 7), cq));
+    def nvs-rows-arity(blk, p, cq, name) =
+        if eq(nvs-byte(blk, add(cq, 1)), 32)
+        then if eq(nvs-digit-at?(blk, add(cq, 2)), 1)
+             then nvs-rows-tag(blk, p, name,
+                 nvs-read-int(blk, add(cq, 2), 0), nvs-int-end(blk, add(cq, 2)))
+             else nvs-rows(blk, add(p, 7))
+        else nvs-rows(blk, add(p, 7));
+    def nvs-rows-tag(blk, p, name, arity, ae) =
+        if eq(nvs-byte(blk, ae), 32)
+        then if eq(nvs-digit-at?(blk, add(ae, 1)), 1)
+             then nvs-rows-close(blk, p, name, arity,
+                 nvs-read-int(blk, add(ae, 1), 0), nvs-int-end(blk, add(ae, 1)))
+             else nvs-rows(blk, add(p, 7))
+        else nvs-rows(blk, add(p, 7));
+    def nvs-rows-close(blk, p, name, arity, tag, te) =
+        if eq(nvs-byte(blk, te), 41)
+        then cons(list(name, arity, tag), nvs-rows(blk, te))
+        else nvs-rows(blk, add(p, 7));
+
+    def nvs-name(r) = nth(r, 0);
+    def nvs-arity(r) = nth(r, 1);
+    def nvs-tag(r) = nth(r, 2);
+
+    // ── the serialize mirror: arm slots + the fkc-flat dispatch block ─────
+    def nvs-slots(et) {
+        let p = str_find(et, "(defn fkc-arm-slots ()", 0);
+        if lt(p, 0) then 0
+        else nvs-read-int(et, nvs-skip-to-digit(et, add(p, 22)), 0);
+    }
+    def nvs-skip-to-digit(s, i) =
+        if ge(i, str_len(s)) then i
+        else if eq(nvs-digit-at?(s, i), 1) then i
+        else nvs-skip-to-digit(s, add(i, 1));
+
+    def nvs-flat(et) {
+        let beg = str_find(et, "(defn fkc-flat", 0);
+        let end = str_find(et, "(defn fkc-call2", 0);
+        if lt(beg, 0) then "" else if lt(end, 0) then "" else substring(et, beg, end);
+    }
+
+    def nvs-eqpat() = "(eq (fk-tag n) ";
+    def nvs-eqs(flat, from) {
+        let p = str_find(flat, nvs-eqpat(), from);
+        if lt(p, 0) then empty
+        else cons(nvs-read-int(flat, add(p, 15), 0), nvs-eqs(flat, add(p, 15)));
+    }
+    def nvs-tris(flat, from) {
+        let p = str_find(flat, nvs-eqpat(), from);
+        if lt(p, 0) then empty
+        else nvs-tris-arm(flat, p, nvs-int-end(flat, add(p, 15)));
+    }
+    def nvs-tris-arm(flat, p, e) =
+        if gt(add(e, 11), str_len(flat)) then nvs-tris(flat, e)
+        else if str_eq(substring(flat, e, add(e, 11)), ") (fkc-tri2")
+        then cons(nvs-read-int(flat, add(p, 15), 0), nvs-tris(flat, e))
+        else nvs-tris(flat, e);
+
+    // or-group members: tags between "(if (or " and its generic dispatch
+    def nvs-dyns(flat, from) {
+        let p = str_find(flat, "(if (or ", from);
+        if lt(p, 0) then empty
+        else nvs-dyns-window(flat, p, nvs-dyn-end(flat, p));
+    }
+    def nvs-dyn-end(flat, p) {
+        let u = str_find(flat, "(fkc-un2 (fk-tag n)", p);
+        let b = str_find(flat, "(fkc-bin2 (fk-tag n)", p);
+        nvs-min-pos(u, b, str_len(flat));
+    }
+    def nvs-min-pos(a, b, cap) =
+        if lt(a, 0) then nvs-or-cap(b, cap)
+        else if lt(b, 0) then a
+        else if lt(a, b) then a else b;
+    def nvs-or-cap(b, cap) = if lt(b, 0) then cap else b;
+    def nvs-dyns-window(flat, p, e) =
+        nvs-cat(nvs-eqs(substring(flat, p, e), 0), nvs-dyns(flat, e));
+
+    // ── C walker arms: every "if (t == N" across emit + fs-emit + runtime ─
+    def nvs-ctags-in(s, from) {
+        let p = str_find(s, "if (t == ", from);
+        if lt(p, 0) then empty
+        else cons(nvs-read-int(s, add(p, 9), 0), nvs-ctags-in(s, add(p, 9)));
+    }
+    def nvs-read-or-empty(path) {
+        let t = read_file(path);
+        if nothing?(t) then "" else t;
+    }
+
+    // ── judgments ─────────────────────────────────────────────────────────
+    def nvs-maxtag(rows, m) =
+        if eq(len(rows), 0) then m
+        else nvs-maxtag(tail(rows),
+            if gt(nvs-tag(head(rows)), m) then nvs-tag(head(rows)) else m);
+
+    def nvs-first-with-tag(all, t) =
+        if eq(len(all), 0) then empty
+        else if eq(nvs-tag(head(all)), t) then head(all)
+        else nvs-first-with-tag(tail(all), t);
+    def nvs-tag-count(all, t) =
+        if eq(len(all), 0) then 0
+        else add(if eq(nvs-tag(head(all)), t) then 1 else 0,
+                 nvs-tag-count(tail(all), t));
+    def nvs-tag-mixed?(all, t, a) =
+        if eq(len(all), 0) then 0
+        else if eq(nvs-tag(head(all)), t)
+             then if eq(nvs-arity(head(all)), a) then nvs-tag-mixed?(tail(all), t, a) else 1
+             else nvs-tag-mixed?(tail(all), t, a);
+    def nvs-first?(all, row) {
+        let f = nvs-first-with-tag(all, nvs-tag(row));
+        if eq(len(f), 0) then 0
+        else if str_eq(nvs-name(f), nvs-name(row)) then eq(nvs-arity(f), nvs-arity(row)) else 0;
+    }
+    def nvs-aliases(all, rest, acc) =
+        if eq(len(rest), 0) then acc
+        else nvs-aliases(all, tail(rest), add(acc, nvs-alias-one(all, head(rest))));
+    def nvs-alias-one(all, row) =
+        if eq(nvs-first?(all, row), 1)
+        then if gt(nvs-tag-count(all, nvs-tag(row)), 1)
+             then if eq(nvs-tag-mixed?(all, nvs-tag(row), nvs-arity(row)), 1) then 0 else 1
+             else 0
+        else 0;
+    def nvs-conflicts(all, rest) =
+        if eq(len(rest), 0) then empty
+        else nvs-cat(nvs-conflict-one(all, head(rest)), nvs-conflicts(all, tail(rest)));
+    def nvs-conflict-one(all, row) =
+        if eq(nvs-first?(all, row), 1)
+        then if eq(nvs-tag-mixed?(all, nvs-tag(row), nvs-arity(row)), 1)
+             then cons(nvs-msg("conflicting flt-ops tag ", ": mixed arity across ",
+                       nvs-tag(row), nvs-name(row)), empty)
+             else empty
+        else empty;
+
+    def nvs-msg(a, b, t, c) =
+        str_concat(a, str_concat(b, str_concat(int_to_str(t), str_concat(" ", c))));
+    def nvs-rowmsg(row, mid, tailtext) =
+        str_concat(nvs-name(row),
+        str_concat(mid,
+        str_concat(int_to_str(nvs-tag(row)), tailtext)));
+
+    def nvs-arity-err(row, eqs, tris) =
+        if eq(nvs-arity(row), 0)
+        then if eq(nvs-member?(eqs, nvs-tag(row)), 1) then empty
+             else cons(nvs-rowmsg(row, ": nullary tag ", " missing explicit fkc-flat row"), empty)
+        else if eq(nvs-arity(row), 1)
+        then if eq(nvs-member?(eqs, nvs-tag(row)), 1) then empty
+             else cons(nvs-rowmsg(row, ": unary tag ", " not in fkc-flat (binary fallback - wrong arity)"), empty)
+        else if eq(nvs-arity(row), 2) then empty
+        else if eq(nvs-arity(row), 3)
+        then if eq(nvs-member?(tris, nvs-tag(row)), 1) then empty
+             else if eq(nvs-member?(eqs, nvs-tag(row)), 1) then empty
+             else cons(nvs-rowmsg(row, ": ternary tag ", " missing fkc-tri2 / explicit fkc-flat arm"), empty)
+        else if eq(nvs-arity(row), 4) then empty
+        else cons(nvs-rowmsg(row, ": unsupported arity, tag ", ""), empty);
+    def nvs-row-err(row, slots, eqs, tris) =
+        nvs-cat(
+            if ge(nvs-tag(row), slots)
+            then cons(nvs-rowmsg(row, ": tag ", " outside fkc-arm-slots"), empty)
+            else empty,
+            nvs-arity-err(row, eqs, tris));
+    def nvs-errs(rows, slots, eqs, tris) =
+        if eq(len(rows), 0) then empty
+        else nvs-cat(nvs-row-err(head(rows), slots, eqs, tris),
+                     nvs-errs(tail(rows), slots, eqs, tris));
+
+    def nvs-quad-warn(row, eqs) =
+        if eq(nvs-arity(row), 4)
+        then if eq(nvs-member?(eqs, nvs-tag(row)), 1) then empty
+             else cons(nvs-rowmsg(row, ": quad tag ", " - verify quad coverage by hand"), empty)
+        else empty;
+    def nvs-cwalk-warn(row, dyns, cts) =
+        if lt(nvs-tag(row), 55) then empty
+        else if eq(nvs-tag(row), 80) then empty
+        else if eq(nvs-tag(row), 106) then empty
+        else if eq(nvs-member?(cts, nvs-tag(row)), 1) then empty
+        else if eq(nvs-member?(dyns, nvs-tag(row)), 1) then empty
+        else cons(nvs-rowmsg(row, ": tag ", " has no C walker if (t == N) arm"), empty);
+    def nvs-warns(rows, eqs, dyns, cts) =
+        if eq(len(rows), 0) then empty
+        else nvs-cat(nvs-cat(nvs-quad-warn(head(rows), eqs),
+                             nvs-cwalk-warn(head(rows), dyns, cts)),
+                     nvs-warns(tail(rows), eqs, dyns, cts));
+
+    def nvs-maxtag-errs(mt, slots) =
+        if ge(mt, slots)
+        then cons(nvs-msg("max flt-ops tag ", "over fkc-arm-slots, tag ", mt, ""), empty)
+        else empty;
+    def nvs-empty-errs(rows) =
+        if eq(len(rows), 0)
+        then cons("no flt-ops rows parsed - the gate refuses to vouch for a table it cannot read", empty)
+        else empty;
+
+    // ── render + verdict ──────────────────────────────────────────────────
+    def nvs-lines(xs, prefix) =
+        if eq(len(xs), 0) then ""
+        else str_concat(prefix,
+             str_concat(head(xs),
+             str_concat(nvs-nl(), nvs-lines(tail(xs), prefix))));
+
+    def nvs-verdict(nrows, mt, slots, na, ne, nw) =
+        if eq(ne, 0)
+        then str_concat("native-surface-gate: OK (",
+             str_concat(int_to_str(nrows),
+             str_concat(" flt-ops rows, max_tag=",
+             str_concat(int_to_str(mt),
+             str_concat(", arm_slots=",
+             str_concat(int_to_str(slots),
+             str_concat(", aliases=",
+             str_concat(int_to_str(na),
+             str_concat(", warnings=",
+             str_concat(int_to_str(nw), ")"))))))))))
+        else str_concat("native-surface-gate: FAIL (",
+             str_concat(int_to_str(ne),
+             str_concat(" error(s), ",
+             str_concat(int_to_str(nrows),
+             str_concat(" flt-ops rows, arm_slots=",
+             str_concat(int_to_str(slots), ")"))))));
+
+    def nvs-report(rows, slots, errs, warns, na, mt) =
+        str_concat(nvs-lines(warns, "warn: "),
+        str_concat(nvs-lines(errs, "error: "),
+        str_concat(nvs-verdict(len(rows), mt, slots, na, len(errs), len(warns)),
+                   nvs-nl())));
+
+    def nvs-emit(printed, code) = code;
+
+    def nvs-judge(rows, slots, eqs, tris, dyns, cts) {
+        let errs = nvs-cat(nvs-empty-errs(rows),
+                   nvs-cat(nvs-conflicts(rows, rows),
+                   nvs-cat(nvs-maxtag-errs(nvs-maxtag(rows, 0), slots),
+                           nvs-errs(rows, slots, eqs, tris))));
+        let warns = nvs-warns(rows, eqs, dyns, cts);
+        nvs-emit(print_str(nvs-report(rows, slots, errs, warns,
+                     nvs-aliases(rows, rows, 0), nvs-maxtag(rows, 0))),
+                 if eq(len(errs), 0) then 1 else 0);
+    }
+
+    def nvs-run() {
+        let et = nvs-read-or-empty("form/form-stdlib/fkc-table-serialize.fk");
+        let flat = nvs-flat(et);
+        nvs-judge(
+            nvs-rows(nvs-ops-block(nvs-read-or-empty("form/form-stdlib/form-flatten.fk")), 0),
+            nvs-slots(et),
+            nvs-eqs(flat, 0),
+            nvs-tris(flat, 0),
+            nvs-dyns(flat, 0),
+            nvs-cat(nvs-ctags-in(et, 0),
+            nvs-cat(nvs-ctags-in(nvs-read-or-empty("form/form-stdlib/host-io-fs-fkwu-emit.fk"), 0),
+                    nvs-ctags-in(nvs-read-or-empty("runtime/fkwu-uni.c"), 0))));
+    }
+
+    nvs-run();
+}

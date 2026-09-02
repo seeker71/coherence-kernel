@@ -2,7 +2,7 @@
    (form-flatten.fk, the hand-maintained single source of truth). DO NOT HAND-EDIT.
    Adding a value op = a manifest row -> a flt-ops row -> regen -> an fkc-flat arm
    in form/form-stdlib/fkc-table-serialize.fk; NEVER a C edit. An op without its arm
-   falls to the binary fallback there. Gate: validate_fkwu_native_surface.py */
+   falls to the binary fallback there. Gate: ./fkwu gate/native-surface-gate.bml */
 struct fk_optab_row { const char *name; long long arity; long long tag; };
 static const struct fk_optab_row fk_optab[] = {
   { "add", 2, 3 },
