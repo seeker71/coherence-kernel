@@ -108,9 +108,17 @@ returned PASS after the one-publisher join, independent transition clocks,
 line-boundary parser, no-idle-render authority, and artifact/catalog language
 were executable and green.
 
+The final remote-branch merge was audited in three independent subsystem
+lanes before conflict resolution. The newer stage retained every observed
+invariant; the remote lineage contributed the exact topology that 512 experts
+share three layer tensors. That audit also exposed the general Glass carrier
+status parser still accepting a key inside a longer key. It now accepts a key
+only at byte zero or immediately after newline, with collision cases in the
+observer band.
+
 - binary freshness: `31`
 - authoring altitude: `4095`
-- observer: `2097151`
+- observer: `4194303`
 - dashboard: `8388607`
 - live UI: `134217727`
 - live loop: `33554431`
@@ -125,9 +133,9 @@ were executable and green.
 - token-flow UI: `16383`
 - share health: `8191`
 - turn evidence cursor: `16777215`
-- dashboard and token-flow preflights: balanced, zero errors, warnings, or
-  unresolved calls
-- bounded framebuffer diagnostic: 48 events, every correction re-observed
+- observer, dashboard, and token-flow preflights: balanced, zero errors,
+  warnings, or unresolved calls
+- bounded framebuffer diagnostic: 52 events, every correction re-observed
 - `git diff --check`: clean
 
 ## Honest remaining doors
