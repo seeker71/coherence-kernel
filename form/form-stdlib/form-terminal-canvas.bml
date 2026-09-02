@@ -17,7 +17,7 @@ section [form.bml] {
         field FTCSchema = "form-terminal-canvas-v1";
         field FTCTerminalProjection = "ANSI-24bit-v1";
         ref ftc-authority = FormTerminalCanvasAuthority;
-        thought ftc-law = list("surface-first", "rectangular", "clip-before-project", "row-major-diff", "capability-seams-visible");
+        thought ftc-law = list("surface-first", "rectangular", "clip-before-project", "row-major-diff", "retained-history", "capability-seams-visible");
 
         // style = tag, concept, foreground RGB, background RGB (-1 means none),
         // exact alpha, bold flag, and a symbol vocabulary label.
@@ -70,6 +70,20 @@ section [form.bml] {
         def ftc-segment-channels(segment) = nth(segment, 5);
         def ftc-segment-evidence(segment) = nth(segment, 6);
         def ftc-overflow(policy, hiddenCount) = list("ftc-overflow", policy, hiddenCount);
+
+        // Retained values belong to the scene, not to the terminal adapter.
+        // This bounded ring is deliberately generic so a terminal, framebuffer,
+        // or future glass surface can project the same quarter-second history.
+        def ftc-drop(items, count) = if or(le(count, 0), eq(len(items), 0)) then items else ftc-drop(tail(items), sub(count, 1));
+        def ftc-ring-push(items, value, capacity) {
+            let appended = append(items, list(value));
+            if le(capacity, 0) then list() else if le(len(appended), capacity) then appended else ftc-drop(appended, sub(len(appended), capacity));
+        }
+        def ftc-ring-last(items, fallback) = if eq(len(items), 0) then fallback else nth(items, sub(len(items), 1));
+        def ftc-series-max(values, held) = if eq(len(values), 0) then held else ftc-series-max(tail(values), if gt(head(values), held) then head(values) else held);
+        def ftc-series-level(value, maximum) = if le(maximum, 0) then 0 else ftc-number-clamp(div(mul(value, 7), maximum), 0, 7);
+        def ftc-series-levels(values, maximum) = if eq(len(values), 0) then list() else cons(ftc-series-level(head(values), maximum), ftc-series-levels(tail(values), maximum));
+        def ftc-series-normalize(values) = ftc-series-levels(values, ftc-series-max(values, 0));
 
         // canvas = tag, width, height, rows, blank cell.  Rows are always width
         // cells and their count is always height.
@@ -203,6 +217,23 @@ section [form.bml] {
         def ftc-ansi-position(x, y) = ftc-cat(list(ftc-esc(), "[", int_to_str(add(y, 1)), ";", int_to_str(add(x, 1)), "H"));
         def ftc-ansi-diff-more(changes, change) = ftc-cat(list(ftc-ansi-position(nth(change, 1), nth(change, 2)), ftc-ansi-cell(nth(change, 4)), ftc-ansi-diff(tail(changes))));
         def ftc-ansi-diff(changes) = if eq(len(changes), 0) then "" else ftc-ansi-diff-more(changes, head(changes));
+
+        // Segment frames retain node ids, channels, evidence, and styles.  A
+        // changed-row projection compares the actual ANSI line bytes and moves
+        // only to rows whose semantic projection changed.  History remains in
+        // the persistent Form state; repaint suppression never resets it.
+        def ftc-segment-line-projection(line) = str_concat(ftc-ansi-segments(line), ftc-ansi-line-end());
+        def ftc-segment-line-at(lines, index) = if or(lt(index, 0), ge(index, len(lines))) then list() else nth(lines, index);
+        def ftc-segment-line-diff(previous, nextLines, index) {
+            let oldProjection = ftc-segment-line-projection(ftc-segment-line-at(previous, index));
+            let newProjection = ftc-segment-line-projection(ftc-segment-line-at(nextLines, index));
+            if str_eq(oldProjection, newProjection) then "" else ftc-cat(list(ftc-ansi-position(0, index), newProjection));
+        }
+        def ftc-segment-lines-diff-go(previous, nextLines, index, count) = if ge(index, count) then "" else str_concat(ftc-segment-line-diff(previous, nextLines, index), ftc-segment-lines-diff-go(previous, nextLines, add(index, 1), count));
+        def ftc-segment-lines-diff(previous, nextLines) {
+            let count = if ge(len(previous), len(nextLines)) then len(previous) else len(nextLines);
+            ftc-segment-lines-diff-go(previous, nextLines, 0, count);
+        }
     }
     0;
 }

@@ -4,6 +4,8 @@
 ; preludes: form-stdlib/form-cli-local-law.fk form-stdlib/form-cli-router.fk
 ; preludes: form-stdlib/form-cli-turn-evidence.fk
 ; preludes: form-stdlib/form-cli-turn-evidence-live.fk
+; preludes: form-stdlib/bml/form-cli-turn-evidence-cursor.bml
+; preludes: form-stdlib/bml/form-cli-share-health.bml
 
 (defn fctes-join (parts)
     (if (eq (len parts) 0) ""
@@ -37,6 +39,7 @@
                 " cache-write-input=" (int_to_str (fcte-cache-write-input-tokens e))
                 " output=" (int_to_str (fcte-output-tokens e))
                 " reasoning-output=" (int_to_str (fcte-reasoning-output-tokens e))
+                " unattributed=" (int_to_str (fcte-unattributed-tokens e))
                 " total=" (int_to_str (fcte-total-tokens e)) "\n"))
             (fctes-join (list "local tool-calls=" (int_to_str (fcte-tool-calls e))
                 " tool-outputs=" (int_to_str (fcte-tool-outputs e))
@@ -50,7 +53,11 @@
                 " form-stdout-bytes=" (int_to_str (fcte-form-stdout-bytes e))
                 " form-stderr-bytes=" (int_to_str (fcte-form-stderr-bytes e))
                 " form-shown-bytes=" (int_to_str (fcte-form-shown-bytes e)) "\n"))
-            "coverage source-bound=1 turn-complete=1 provider-usage=1 tools-reconciled=1 form-receipt-window=512-tail-bytes bytes-reconciled=1 lanes-reconciled=1\n"
+            (fctes-join (list "coverage source-bound=1 carrier-identity=1 carrier-timestamps=1 source-coordinates=1 carrier-size="
+                (int_to_str (fcte-carrier-size e)) " start-byte="
+                (int_to_str (fcte-start-at e)) " complete-byte="
+                (int_to_str (fcte-complete-at e))
+                " turn-complete=1 provider-call-usage=1 provider-token-total-reconciled=1 attribution-gap-explicit=1 tools-reconciled=1 form-receipt-window=512-tail-bytes bytes-reconciled=1 lanes-reconciled=1\n"))
             "measurement-health=observed semantic-contribution=not-measured\n"))))
 
 ; An active task has no settled share.  Its most recent provider call may still
@@ -80,9 +87,59 @@
         "form-cli walk hit=0 ready=1 -> lane=" (int_to_str (fcr-walk 0 1)) " (1 local)\n"
         "form-cli walk hit=0 ready=0 -> lane=" (int_to_str (fcr-walk 0 0)) " (2 remote)\n")))
 
+; The live collector's one-slice discovery is a continuation, so a cache read
+; must not turn "not in this slice" into "stale".  The high-BML cursor walks
+; byte coordinates only and returns the actual nearest terminal turn.
+(defn fctes-codex-source-reconciled? (e path)
+    (fctec-codex-source-reconciled? e path))
+
+(defn fctes-unmeasured-clear-validation ()
+    (do
+        (write_file_text (fctel-latest-validation-path) "")
+        (fcte-parse "unmeasured")))
+
+(defn fctes-cached-evidence ()
+    (if (le (file_size (fctel-observed-row-path)) 0)
+        (fctes-unmeasured-clear-validation)
+        (do
+            (let row (fctel-trim-end (read_file (fctel-observed-row-path))))
+            (let evidence (fcte-parse row))
+            (if (eq (fcte-valid? evidence) 0)
+                (fctes-unmeasured-clear-validation)
+                (if (not (str_eq (fcte-source evidence) (fcte-source-kind)))
+                    ; Grok receipts stay v2-compatible, but no physical
+                    ; latest-complete session validator exists for them.
+                    (fctes-unmeasured-clear-validation)
+                    (do
+                        (let path (fctel-bound-path))
+                        (if (str_eq path "")
+                            (fctes-unmeasured-clear-validation)
+                            (if (eq (fctes-codex-source-reconciled?
+                                evidence path) 0)
+                                (fctes-unmeasured-clear-validation)
+                                (do
+                                    (let latest (fctec-advance-latest
+                                        evidence path))
+                                    (if (eq (fctec-latest? latest) 1)
+                                        evidence
+                                        (fcte-parse "unmeasured")))))))))))
+
 (do
-    (let evidence (fctel-evidence))
+    (let before (fctes-cached-evidence))
+    ; A share read also advances one bounded native continuation when the
+    ; previous completed turn has not settled yet.  Re-entry is durable; an
+    ; observed row pays no refresh work.
+    (let validating (gt (file_size (fctel-latest-validation-path)) 0))
+    (let refresh (if (eq (fcte-valid? before) 1)
+        "turn-evidence-refresh=already-observed"
+        (if validating "turn-evidence-refresh=validating-latest"
+            (fctec-refresh-bound))))
+    ; Validation advances once per invocation. A refresh may produce a new
+    ; row, in which case one source/latest check is safe.
+    (let evidence (if (or (eq (fcte-valid? before) 1) validating)
+        before (fctes-cached-evidence)))
     (print_str (fctes-join (list
+        "measurement-refresh=" refresh "\n"
         "form-cli share kind=" (fcte-kind-name evidence)
         " scope=" (if (eq (fcte-valid? evidence) 1)
             (if (str_eq (fcte-source evidence) (fcte-source-kind-grok))
@@ -90,7 +147,8 @@
             "unmeasured")
         " basis=observed-boundary-event-counts-v1\n"
         (if (eq (fcte-valid? evidence) 1) (fctes-observed evidence)
-            "measurement-health=unreconciled share=withheld semantic-contribution=not-measured\n")
+            (fctes-join (list (fcsh-health)
+                "semantic-contribution=not-measured\n")))
         (fctes-active-provider-tokens)
         (fctes-route)
         (fcl-spoken-answer))))
