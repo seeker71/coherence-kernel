@@ -293,6 +293,16 @@ static double fk_num(long long v) {
     }
     return (double)(v >> 1);
 }
+/* ── boxing attribution: WHICH recipe is minting floats ─────────────────────
+ * Ints ride unboxed (tagged words); every float RESULT allocates a pool slot
+ * here. To answer "which sources could use unboxing", each mint is charged to
+ * the last-dispatched recipe (fk_cur_fn, set beside every heat bump). The
+ * dispatch is a tail-jump, so there is no restore point: attribution bleeds
+ * to the callee across returns -- a sampling truth, exact for the hot loops
+ * that matter. Written to .fkwu-boxing.<pid> beside the heat board. */
+static long long fk_cur_fn;
+static long long *fk_fn_fbox;
+static long long fk_fn_capacity;
 static long long fk_fbox(double d) {
     if (fk_fv == 0) {
         fk_fcap = FK_FLOAT_POOL_INIT_CAP;
@@ -310,6 +320,9 @@ static long long fk_fbox(double d) {
         }
     }
     fk_fv[fk_fp] = d;
+    if (fk_fn_fbox != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) {
+        fk_fn_fbox[fk_cur_fn] = fk_fn_fbox[fk_cur_fn] + 1;
+    }
     return fk_fbase - (fk_fp << 1) - 1;
 }
 static void fk_pr(long long v) {
@@ -6939,14 +6952,17 @@ static void fk_fn_reserve(long long needed) {
     long long *next_fnsym_n = malloc(bytes);
     long long *next_fnidx = malloc(bytes);
     long long *next_fn_heat = malloc(bytes);
+    long long *next_fn_fbox = malloc(bytes);
     if (next_fn == 0 || next_fnar == 0 || next_fnsym_s == 0 ||
-        next_fnsym_n == 0 || next_fnidx == 0 || next_fn_heat == 0) {
+        next_fnsym_n == 0 || next_fnidx == 0 || next_fn_heat == 0 ||
+        next_fn_fbox == 0) {
         free(next_fn);
         free(next_fnar);
         free(next_fnsym_s);
         free(next_fnsym_n);
         free(next_fnidx);
         free(next_fn_heat);
+        free(next_fn_fbox);
         fk_die("fk_fn_reserve: out of memory growing function image");
     }
     long long i = 0;
@@ -6957,6 +6973,7 @@ static void fk_fn_reserve(long long needed) {
         next_fnsym_n[i] = fk_fnsym_n[i];
         next_fnidx[i] = fk_fnidx[i];
         next_fn_heat[i] = fk_fn_heat[i];
+        next_fn_fbox[i] = fk_fn_fbox[i];
         i = i + 1;
     }
     while (i < next) {
@@ -6966,6 +6983,7 @@ static void fk_fn_reserve(long long needed) {
         next_fnsym_n[i] = 0;
         next_fnidx[i] = 0;
         next_fn_heat[i] = 0;
+        next_fn_fbox[i] = 0;
         i = i + 1;
     }
     free(fk_fn);
@@ -6974,12 +6992,14 @@ static void fk_fn_reserve(long long needed) {
     free(fk_fnsym_n);
     free(fk_fnidx);
     free(fk_fn_heat);
+    free(fk_fn_fbox);
     fk_fn = next_fn;
     fk_fnar = next_fnar;
     fk_fnsym_s = next_fnsym_s;
     fk_fnsym_n = next_fnsym_n;
     fk_fnidx = next_fnidx;
     fk_fn_heat = next_fn_heat;
+    fk_fn_fbox = next_fn_fbox;
     fk_fn_capacity = next;
 }
 #define FK_AST_NODE_CAP_INIT 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP_INIT). Birth size only -- the table DOUBLES on demand (fk_ast_reserve), so program size is not a wall; .fkb images reserve to fit before bulk-loading. History: 65536->262144 (2026-07-02, a full mel-spectrogram program); a clamp-and-halt wall stood 2026-07-18..09-02 after a doubling probe caught fk_sparse's stray-rparen zero-advance spin re-minting sentinels to the brim (677,766 diagnostics in 6s -- a treadmill, not capacity; fixed at root in the bare-symbol path). That teaching survives the wall's removal: a parse that grows without advancing fk_spos is a parser wound -- kernel_stat 23/24 (live cap / doublings) make the growth observable, and the fill-position question stays the probe. */
@@ -7242,6 +7262,7 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_vs[fp] = v12;
             fk_vsp = fp + 1;
             fk_fn_heat[c12] = fk_fn_heat[c12] + 1;
+            fk_cur_fn = c12;
             fk_heat_pulse();
             i = fk_fn[c12];
             continue;
@@ -7258,6 +7279,7 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_vs[fp + 1] = a1;
             fk_vsp = fp + 2;
             fk_fn_heat[c240] = fk_fn_heat[c240] + 1;
+            fk_cur_fn = c240;
             fk_heat_pulse();
             i = fk_fn[c240];
             continue;
@@ -7282,6 +7304,7 @@ static long long fk_walk_body(long long i, long long fp) {
             }
             fk_vsp = fp + n241;
             fk_fn_heat[c241] = fk_fn_heat[c241] + 1;
+            fk_cur_fn = c241;
             fk_heat_pulse();
             i = fk_fn[c241];
             continue;
@@ -7310,6 +7333,7 @@ static long long fk_walk_body(long long i, long long fp) {
             }
             fk_vsp = fp + n244;
             fk_fn_heat[fi244] = fk_fn_heat[fi244] + 1;
+            fk_cur_fn = fi244;
             fk_heat_pulse();
             i = fk_fn[fi244];
             continue;
@@ -7382,6 +7406,7 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_vs[fp] = carg44;
             fk_vsp = fp + 1;
             fk_fn_heat[f44] = fk_fn_heat[f44] + 1;
+            fk_cur_fn = f44;
             fk_heat_pulse();
             i = fk_fn[f44];
             continue;
@@ -7478,6 +7503,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(v12);
         long long b12 = fk_vsp - 1;
         fk_fn_heat[c12] = fk_fn_heat[c12] + 1;
+            fk_cur_fn = c12;
         fk_heat_pulse();
         long long r12 = fk_walk_body(fk_fn[c12], b12);
         fk_vsp = b12;
@@ -7494,6 +7520,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(a1);
         long long b240 = fk_vsp - 2;
         fk_fn_heat[c240] = fk_fn_heat[c240] + 1;
+            fk_cur_fn = c240;
         fk_heat_pulse();
         long long r240 = fk_walk_body(fk_fn[c240], b240);
         fk_vsp = b240;
@@ -7512,6 +7539,7 @@ static long long fk_walk(long long i, long long fp) {
         }
         long long n241 = fk_vsp - base241;
         fk_fn_heat[c241] = fk_fn_heat[c241] + 1;
+            fk_cur_fn = c241;
         fk_heat_pulse();
         long long r241 = fk_walk_body(fk_fn[c241], base241);
         fk_vsp = base241;
@@ -7540,6 +7568,7 @@ static long long fk_walk(long long i, long long fp) {
             printf("offer-indirect fn%lld args=%lld (computed head)\n", fi244, n244);
         }
         fk_fn_heat[fi244] = fk_fn_heat[fi244] + 1;
+            fk_cur_fn = fi244;
         fk_heat_pulse();
         long long r244 = fk_walk_body(fk_fn[fi244], base244);
         fk_vsp = base244;
@@ -7715,6 +7744,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(carg44);
         long long b44 = fk_vsp - 1;
         fk_fn_heat[f44] = fk_fn_heat[f44] + 1;
+            fk_cur_fn = f44;
         fk_heat_pulse();
         long long r44 = fk_walk_body(fk_fn[f44], b44);
         fk_vsp = b44;
@@ -9716,36 +9746,92 @@ static int fk_heat_reported;
 
 static void fk_heat_write(void) {
     long long r = 0, top = fk_fntop;
-    char path[96], tmp[112];
+    char path[96], tmp[112], bpath[96], btmp[112];
     sprintf(path, ".fkwu-heat.%d", getpid());
     sprintf(tmp, ".fkwu-heat.%d.tmp", getpid());
+    sprintf(bpath, ".fkwu-boxing.%d", getpid());
+    sprintf(btmp, ".fkwu-boxing.%d.tmp", getpid());
     int fd = -1;
+    int bfd = -1;
+    unsigned char *seen = fk_fn_count > 0 ? calloc((unsigned long)fk_fn_count, 1) : 0;
     /* heat is counted by FN-INDEX (fk_fn_heat[dispatch idx]) but names live
      * in SYMBOL ROWS; fk_fnidx[row] is the join. The old loop indexed the
      * symbol columns by fn-index directly, one reserved slot ahead of the
      * rows -- every heat line carried an EMPTY name and the JIT worklist
-     * could not name its own recipes. Walk the rows, join through fnidx. */
+     * could not name its own recipes. Walk the rows, join through fnidx.
+     * Beside the heat board, .fkwu-boxing carries per-recipe float MINTS
+     * (fk_fn_fbox) -- the unboxing worklist: a recipe hot here allocates a
+     * float-pool slot per result where an unboxed lane would not. */
     while (r < top) {
         long long idx = fk_fnidx[r];
-        if (idx >= 0 && idx < fk_fn_count && fk_fn_heat[idx] >= FK_HEAT_REPORT_MIN) {
-            if (fd < 0) {
-                fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (idx >= 0 && idx < fk_fn_count) {
+            if (seen != 0) {
+                seen[idx] = 1;
+            }
+            if (fk_fn_heat[idx] >= FK_HEAT_REPORT_MIN) {
                 if (fd < 0) {
-                    return;
+                    fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                }
+                if (fd >= 0) {
+                    dprintf(fd, "%lld %.*s\n", fk_fn_heat[idx],
+                            (int)fk_fnsym_n[r], fk_srctext + fk_fnsym_s[r]);
                 }
             }
-            dprintf(fd, "%lld %.*s\n", fk_fn_heat[idx],
-                    (int)fk_fnsym_n[r], fk_srctext + fk_fnsym_s[r]);
+            if (fk_fn_fbox != 0 && fk_fn_fbox[idx] >= 1024) {
+                if (bfd < 0) {
+                    bfd = open(btmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                }
+                if (bfd >= 0) {
+                    dprintf(bfd, "%lld %.*s\n", fk_fn_fbox[idx],
+                            (int)fk_fnsym_n[r], fk_srctext + fk_fnsym_s[r]);
+                }
+            }
         }
         r = r + 1;
     }
-    if (fd >= 0 && close(fd) == 0) {
-        if (rename(tmp, path) == 0) {
-            return;
+    /* fires no row names -- speak by number rather than vanish */
+    if (seen != 0) {
+        long long i2 = 1;
+        while (i2 < fk_fn_count) {
+            if (seen[i2] == 0) {
+                if (fk_fn_heat[i2] >= FK_HEAT_REPORT_MIN) {
+                    if (fd < 0) {
+                        fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                    }
+                    if (fd >= 0) {
+                        dprintf(fd, "%lld fn#%lld\n", fk_fn_heat[i2], i2);
+                    }
+                }
+                if (fk_fn_fbox != 0 && fk_fn_fbox[i2] >= 1024) {
+                    if (bfd < 0) {
+                        bfd = open(btmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                    }
+                    if (bfd >= 0) {
+                        dprintf(bfd, "%lld fn#%lld\n", fk_fn_fbox[i2], i2);
+                    }
+                }
+            }
+            i2 = i2 + 1;
         }
+        free(seen);
     }
     if (fd >= 0) {
-        unlink(tmp);
+        if (close(fd) == 0) {
+            if (rename(tmp, path) != 0) {
+                unlink(tmp);
+            }
+        } else {
+            unlink(tmp);
+        }
+    }
+    if (bfd >= 0) {
+        if (close(bfd) == 0) {
+            if (rename(btmp, bpath) != 0) {
+                unlink(btmp);
+            }
+        } else {
+            unlink(btmp);
+        }
     }
 }
 static void fk_heat_report(void) {
