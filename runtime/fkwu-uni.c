@@ -9364,6 +9364,18 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         return 0;
     }
+    if (t == 147) {
+        /* node_at: the census atom. The value-node table is the body's own
+         * tissue; this door hands Form the i-th node so Form-side lenses can
+         * walk 1..kernel_stat(4) and fold their own histograms -- blueprint
+         * occupancy, allocation sites via node_source -- without the kernel
+         * choosing what a census means. Out of range answers nothing. */
+        long long ix147 = fk_walk(fk_node[i][1], fp) >> 1;
+        if (ix147 < 1 || ix147 > fk_np) {
+            return fk_nothing;
+        }
+        return fk_nbox(ix147);
+    }
     if (t == 128) {
         long long fr_nv = fk_walk(fk_node[i][1], fp);
         long long fr_fv = fk_walk(fk_node[i][2], fp);
