@@ -9715,23 +9715,29 @@ static long long fk_heat_total;
 static int fk_heat_reported;
 
 static void fk_heat_write(void) {
-    long long i = 0, top = fk_fn_count;
+    long long r = 0, top = fk_fntop;
     char path[96], tmp[112];
     sprintf(path, ".fkwu-heat.%d", getpid());
     sprintf(tmp, ".fkwu-heat.%d.tmp", getpid());
     int fd = -1;
-    while (i < top) {
-        if (fk_fn_heat[i] >= FK_HEAT_REPORT_MIN) {
+    /* heat is counted by FN-INDEX (fk_fn_heat[dispatch idx]) but names live
+     * in SYMBOL ROWS; fk_fnidx[row] is the join. The old loop indexed the
+     * symbol columns by fn-index directly, one reserved slot ahead of the
+     * rows -- every heat line carried an EMPTY name and the JIT worklist
+     * could not name its own recipes. Walk the rows, join through fnidx. */
+    while (r < top) {
+        long long idx = fk_fnidx[r];
+        if (idx >= 0 && idx < fk_fn_count && fk_fn_heat[idx] >= FK_HEAT_REPORT_MIN) {
             if (fd < 0) {
                 fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
                 if (fd < 0) {
                     return;
                 }
             }
-            dprintf(fd, "%lld %.*s\n", fk_fn_heat[i],
-                    (int)fk_fnsym_n[i], fk_srctext + fk_fnsym_s[i]);
+            dprintf(fd, "%lld %.*s\n", fk_fn_heat[idx],
+                    (int)fk_fnsym_n[r], fk_srctext + fk_fnsym_s[r]);
         }
-        i = i + 1;
+        r = r + 1;
     }
     if (fd >= 0 && close(fd) == 0) {
         if (rename(tmp, path) == 0) {
