@@ -1,0 +1,127 @@
+//////////////////////////////////////////////////////////////////////
+//
+// native-model-resident-fleet.bml — executable retention and eviction.
+//
+// Authority: form-stdlib/bml/native-model-resident-fleet.bml
+// preludes: form/form-stdlib/core.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class NativeModelResidentFleetAuthority {
+        field NMRFAuthorityPath = "form/form-stdlib/bml/native-model-resident-fleet.bml";
+        field NMRFAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class NativeModelResidentFleet {
+        field NMRFSchema = "native-model-resident-fleet-v1";
+        field NMRFDefaultBudget = 103079215104;
+        field NMRFQwenBytes = 78869128864;
+        field NMRFThreeBBytes = 2019377376;
+
+        ref nmrf-authority = NativeModelResidentFleetAuthority;
+        thought nmrf-law = list("retain-until-pressure", "all-fitting-models-live", "least-used-expert-before-kv-before-model", "active-never-evicted", "packed-experts-indivisible");
+
+        // model: tag, id, kind, loaded, prefilled, active, physical bytes,
+        // use count, last-used clock, carrier handle, independent experts,
+        // status.
+        def nmrf-model(id, kind, loaded, prefilled, active, bytes, uses, lastUsed, handle, expertSplit, status) = list("native-model-resident-row", id, kind, loaded, prefilled, active, bytes, uses, lastUsed, handle, expertSplit, status);
+        def nmrf-id(row) = nth(row, 1);
+        def nmrf-kind(row) = nth(row, 2);
+        def nmrf-loaded?(row) = nth(row, 3);
+        def nmrf-prefilled?(row) = nth(row, 4);
+        def nmrf-active?(row) = nth(row, 5);
+        def nmrf-bytes(row) = nth(row, 6);
+        def nmrf-uses(row) = nth(row, 7);
+        def nmrf-last-used(row) = nth(row, 8);
+        def nmrf-handle(row) = nth(row, 9);
+        def nmrf-expert-split?(row) = nth(row, 10);
+        def nmrf-status(row) = nth(row, 11);
+
+        // fleet: tag, usable budget, correlated pressure reclaim request,
+        // clock, physical model rows.
+        def nmrf-fleet(budget, reclaimBytes, clock, rows) = list(NMRFSchema(), budget, reclaimBytes, clock, rows);
+        def nmrf-budget(fleet) = nth(fleet, 1);
+        def nmrf-reclaim(fleet) = nth(fleet, 2);
+        def nmrf-clock(fleet) = nth(fleet, 3);
+        def nmrf-rows(fleet) = nth(fleet, 4);
+
+        def nmrf-resident-bytes(rows) = if eq(len(rows), 0) then 0 else add(if eq(nmrf-loaded?(head(rows)), 1) then nmrf-bytes(head(rows)) else 0, nmrf-resident-bytes(tail(rows)));
+        def nmrf-loaded-count(rows) = if eq(len(rows), 0) then 0 else add(nmrf-loaded?(head(rows)), nmrf-loaded-count(tail(rows)));
+        def nmrf-prefilled-count(rows) = if eq(len(rows), 0) then 0 else add(nmrf-prefilled?(head(rows)), nmrf-prefilled-count(tail(rows)));
+        def nmrf-can-admit?(fleet, bytes) = if le(add(nmrf-resident-bytes(nmrf-rows(fleet)), bytes), nmrf-budget(fleet)) then 1 else 0;
+        def nmrf-find(id, rows) = if eq(len(rows), 0) then list() else if str_eq(id, nmrf-id(head(rows))) then head(rows) else nmrf-find(id, tail(rows));
+        def nmrf-replace(id, replacement, rows) = if eq(len(rows), 0) then list() else if str_eq(id, nmrf-id(head(rows))) then cons(replacement, tail(rows)) else cons(head(rows), nmrf-replace(id, replacement, tail(rows)));
+
+        // Only a positive physical carrier handle may add a resident model.
+        def nmrf-observe-loaded-admitted(fleet, id, kind, bytes, handle, expertSplit) {
+            let row = nmrf-model(id, kind, 1, 0, 0, bytes, 0, nmrf-clock(fleet), handle, expertSplit, "resident");
+            let rows = nmrf-rows(fleet);
+            let nextRows = if eq(len(nmrf-find(id, rows)), 0) then append(rows, list(row)) else nmrf-replace(id, row, rows);
+            list("native-model-residence-observed", id, nmrf-fleet(nmrf-budget(fleet), nmrf-reclaim(fleet), add(nmrf-clock(fleet), 1), nextRows));
+        }
+        def nmrf-observe-loaded(fleet, id, kind, bytes, handle, expertSplit) = if le(handle, 0) then list("native-model-residence-refused", id, "missing-physical-handle", fleet) else nmrf-observe-loaded-admitted(fleet, id, kind, bytes, handle, expertSplit);
+        def nmrf-observe-loaded-fleet(result) = nth(result, 2);
+        def nmrf-observe-prefilled-admitted(fleet, id, old) {
+            let row = nmrf-model(nmrf-id(old), nmrf-kind(old), 1, 1, 0, nmrf-bytes(old), add(nmrf-uses(old), 1), nmrf-clock(fleet), nmrf-handle(old), nmrf-expert-split?(old), "resident");
+            nmrf-fleet(nmrf-budget(fleet), nmrf-reclaim(fleet), add(nmrf-clock(fleet), 1), nmrf-replace(id, row, nmrf-rows(fleet)));
+        }
+        def nmrf-observe-prefilled(fleet, id) {
+            let old = nmrf-find(id, nmrf-rows(fleet));
+            if or(eq(len(old), 0), not(eq(nmrf-loaded?(old), 1))) then fleet else nmrf-observe-prefilled-admitted(fleet, id, old);
+        }
+        def nmrf-touch-admitted(fleet, id, old) {
+            let nextClock = add(nmrf-clock(fleet), 1);
+            let row = nmrf-model(nmrf-id(old), nmrf-kind(old), nmrf-loaded?(old), nmrf-prefilled?(old), 0, nmrf-bytes(old), add(nmrf-uses(old), 1), nextClock, nmrf-handle(old), nmrf-expert-split?(old), nmrf-status(old));
+            nmrf-fleet(nmrf-budget(fleet), nmrf-reclaim(fleet), nextClock, nmrf-replace(id, row, nmrf-rows(fleet)));
+        }
+        def nmrf-touch(fleet, id) {
+            let old = nmrf-find(id, nmrf-rows(fleet));
+            if or(eq(len(old), 0), not(eq(nmrf-loaded?(old), 1))) then fleet else nmrf-touch-admitted(fleet, id, old);
+        }
+
+        // eviction unit: tag, owner, grain, bytes, uses, last used, active,
+        // independently evictable.  A Qwen packed expert tensor sets the last
+        // bit to zero until its physical tensor layout is split.
+        def nmrf-unit(owner, grain, bytes, uses, lastUsed, active, evictable) = list("native-model-eviction-unit", owner, grain, bytes, uses, lastUsed, active, evictable);
+        def nmrf-unit-owner(unit) = nth(unit, 1);
+        def nmrf-unit-grain(unit) = nth(unit, 2);
+        def nmrf-unit-bytes(unit) = nth(unit, 3);
+        def nmrf-unit-uses(unit) = nth(unit, 4);
+        def nmrf-unit-last(unit) = nth(unit, 5);
+        def nmrf-unit-active?(unit) = nth(unit, 6);
+        def nmrf-unit-evictable?(unit) = nth(unit, 7);
+        def nmrf-unit-valid-eviction?(unit) = if and(eq(nmrf-unit-evictable?(unit), 1), and(eq(nmrf-unit-active?(unit), 0), gt(nmrf-unit-bytes(unit), 0))) then 1 else 0;
+        def nmrf-grain-rank(grain) = if str_eq(grain, "expert-shard") then 0 else if str_eq(grain, "kv-substate") then 1 else if str_eq(grain, "inactive-model") then 2 else 3;
+        def nmrf-earlier-eviction?(a, b) {
+            let ar = nmrf-grain-rank(nmrf-unit-grain(a));
+            let br = nmrf-grain-rank(nmrf-unit-grain(b));
+            if lt(ar, br) then 1 else if gt(ar, br) then 0 else if lt(nmrf-unit-uses(a), nmrf-unit-uses(b)) then 1 else if gt(nmrf-unit-uses(a), nmrf-unit-uses(b)) then 0 else if le(nmrf-unit-last(a), nmrf-unit-last(b)) then 1 else 0;
+        }
+        def nmrf-eviction-next-pick(candidate, best) = if not(eq(nmrf-unit-valid-eviction?(candidate), 1)) then best else if eq(len(best), 0) then candidate else if eq(nmrf-earlier-eviction?(candidate, best), 1) then candidate else best;
+        def nmrf-eviction-next-go(units, best) = if eq(len(units), 0) then best else nmrf-eviction-next-go(tail(units), nmrf-eviction-next-pick(head(units), best));
+        def nmrf-eviction-next(units) = nmrf-eviction-next-go(units, list());
+        def nmrf-same-unit?(a, b) = if and(str_eq(nmrf-unit-owner(a), nmrf-unit-owner(b)), and(str_eq(nmrf-unit-grain(a), nmrf-unit-grain(b)), eq(nmrf-unit-last(a), nmrf-unit-last(b)))) then 1 else 0;
+        def nmrf-remove-unit(target, units) = if eq(len(units), 0) then list() else if eq(nmrf-same-unit?(target, head(units)), 1) then tail(units) else cons(head(units), nmrf-remove-unit(target, tail(units)));
+        def nmrf-plan-next(units, needed, reclaimed, selected) {
+            let candidate = nmrf-eviction-next(units);
+            if eq(len(candidate), 0) then list("native-model-pressure-plan-blocked", needed, reclaimed, selected) else nmrf-plan-go(nmrf-remove-unit(candidate, units), needed, add(reclaimed, nmrf-unit-bytes(candidate)), append(selected, list(candidate)));
+        }
+        def nmrf-plan-go(units, needed, reclaimed, selected) = if ge(reclaimed, needed) then list("native-model-pressure-plan", needed, reclaimed, selected) else nmrf-plan-next(units, needed, reclaimed, selected);
+        def nmrf-max(a, b) = if ge(a, b) then a else b;
+        def nmrf-capacity-over(fleet, requestedBytes) {
+            let used = add(nmrf-resident-bytes(nmrf-rows(fleet)), requestedBytes);
+            if gt(used, nmrf-budget(fleet)) then sub(used, nmrf-budget(fleet)) else 0;
+        }
+        def nmrf-pressure-plan(fleet, requestedBytes, units) {
+            let needed = nmrf-max(nmrf-capacity-over(fleet, requestedBytes), nmrf-reclaim(fleet));
+            if le(needed, 0) then list("native-model-pressure-plan", 0, 0, list()) else nmrf-plan-go(units, needed, 0, list());
+        }
+
+        def nmrf-default() = nmrf-fleet(NMRFDefaultBudget(), 0, 0, list());
+        def nmrf-qwen-row(handle) = nmrf-model("challenger.qwen38-flash-next-q2-metal", "moe-packed-experts", 1, 1, 0, NMRFQwenBytes(), 2, 3, handle, 0, "resident-packed-experts");
+        def nmrf-threeb-row(handle) = nmrf-model("base.llama32-3b-metal", "dense", 1, 1, 0, NMRFThreeBBytes(), 1, 2, handle, 0, "resident-dense");
+        def nmrf-dual-resident(handleQwen, handleThreeB) = nmrf-fleet(NMRFDefaultBudget(), 0, 3, list(nmrf-qwen-row(handleQwen), nmrf-threeb-row(handleThreeB)));
+    }
+    0;
+}

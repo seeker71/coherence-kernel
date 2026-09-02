@@ -1,0 +1,37 @@
+; qwen4exp-flash-next-prefill64-benchmark-run.fk — sustained sequential prefill.
+;
+; One ordinary forward faults and warms the mapped model.  The measured window
+; then ingests 64 prompt tokens into resident state, retaining the five-stage
+; scratch boundary but omitting every vocabulary projection and argmax.
+;
+; preludes: form/native/metal/qwen4exp-flash-next-token-handle.fk form/native/metal/model-bandwidth.fk
+
+(do
+    (defn q4pb-go (ctx token prev1 prev2 pos remaining count)
+        (if (le remaining 0) (list count pos prev1 prev2)
+            (do
+                (let ingested (q4t-ingest ctx token pos prev1 prev2))
+                (q4pb-go ctx token token prev1 (add pos ingested)
+                    (sub remaining 1) (add count 1)))))
+    (let prefix "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+    (let ctx (q4t-open prefix 128))
+    (let warm (q4t-forward ctx 9419 0 248046 248046))
+    (let before (metal_status))
+    (let before-dispatch (mbw-status-int before "total_dispatch"))
+    (let before-gpu-us (mbw-status-int before "gpu_busy_us_total"))
+    (let started (now_unix_ms))
+    (let result (q4pb-go ctx 271 9419 248046 1 64 0))
+    (let elapsed (sub (now_unix_ms) started))
+    (let after (metal_status))
+    (let dispatches (sub (mbw-status-int after "total_dispatch") before-dispatch))
+    (let gpu-us (sub (mbw-status-int after "gpu_busy_us_total") before-gpu-us))
+    (let rate (if (gt elapsed 0) (div 64000000 elapsed) 0))
+    (q4t-close ctx)
+    (list "qwen4exp-native-prefill64-sequential"
+        (list "warm-token" warm "ingest-token" 271)
+        (list "tokens" (nth result 0) "final-position" (nth result 1))
+        (list "wall-ms" elapsed "prefill-millitokps" rate
+            "ninety-percent-floor" 286947 "accepted" (if (ge rate 286947) 1 0))
+        (list "gpu-us" gpu-us "dispatches" dispatches
+            "dispatches-per-token" (div dispatches 64)
+            "vocabulary-heads" 0)))

@@ -1,17 +1,19 @@
-; qwen4exp-flash-next-quant-jit.fk — type-17 resident matvec through Form's Metal JIT door.
+; qwen4exp-flash-next-quant-jit.fk — the exact artifact's mixed-quant resident matvecs.
 ;
-; The execution map is authored in bml/iq2xs-layout.bml and crystallized as
-; iq2xs-layout-xtal.fk. This cell is only its carrier lowering: assemble the MSL,
+; The execution map is authored in bml/iq2xs-layout.bml and runs directly from
+; iq2xs-layout.bml through the native BML cache. This cell is only its carrier lowering: assemble the MSL,
 ; ask metal_pipeline to JIT it for the answering Apple GPU, bind resident GGUF
 ; bytes, and dispatch the BML-owned four-row/one-SIMDgroup thread count.
 ;
-; This is deliberately NARROW. Qwen3.8-Flash-Next UD-Q2_K_XL also carries
-; Q5_K, IQ3_XXS, IQ4_XS, Q6_K, Q8_0, BF16 and F32 tensors. Returning 0 for any
-; non-17 type is a spoken refusal, not a fallback decode. Model architecture
-; (hyper-connections, PLE, indexer/QSA, GDN and MoE composition) is outside this
-; quant lane and remains an explicit whole-model gap.
+; The first narrow witness remains below as q4eq-mv. q4eq-all-* is the widened
+; lane admitted by the exact split manifest: F32, Q8_0, Q4_K, Q5_K, Q6_K,
+; IQ2_XS, IQ3_XXS, IQ4_NL and BF16. Unknown types and malformed block widths
+; return zero; there is no f32 reinterpretation fallback. Expert offsets are
+; flat weight indices and are carried into every format that may inhabit a 3D
+; tensor. PLE row ids use ulong arithmetic because its 51.2 billion logical
+; weights exceed uint even though each token id does not.
 ;
-; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/iq2xxs-dequant.fk form-stdlib/iq2xxs-msl.fk form-stdlib/iq2xs-layout-xtal.fk form-stdlib/iq2xs-dequant.fk form-stdlib/iq2xs-msl.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/metal-door.fk
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/q8-0-msl.fk form-stdlib/q5-msl.fk form-stdlib/iq2xxs-dequant.fk form-stdlib/iq2xxs-msl.fk form-stdlib/iq2xs-layout.bml form-stdlib/iq2xs-dequant.fk form-stdlib/iq2xs-msl.fk form-stdlib/iq3xxs-layout.bml form-stdlib/iq3xxs-dequant.fk form-stdlib/iq3xxs-msl.fk form-stdlib/iq4nl-layout.bml form-stdlib/iq4nl-dequant.fk form-stdlib/iq4nl-msl.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/metal-door.fk
 ;
 ; Proven by: form-stdlib/tests/qwen4exp-flash-next-quant-jit-band.fk,
 ;            observe/qwen4exp-flash-next-quant-jit-live-run.fk, and
@@ -41,4 +43,319 @@
                 (metal_enqueue pipe
                     (md-bind16 (list qh xh yh) (list rows cols) 32 0 0 barrier)
                     threads))))
+
+    ; ================= exact mixed-type translation unit =================
+    (defn q4eq-join-msl (parts)
+        (if (eq (len parts) 0) ""
+            (str_concat (head parts) (q4eq-join-msl (tail parts)))))
+
+    ; One-SIMDgroup row fold with a flat expert offset. `wfn` is one of the
+    ; helpers already emitted into this translation unit.
+    (defn q4eq-laneoff-body (fname wfn)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ebase [[buffer(5)]], uint tid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = tid / 32u; if (r >= rows) return; float acc = 0.0f; for (uint j = lane; j < cols; j += 32u) { float p = "
+        (str_concat wfn "(qb, ebase + r * cols + j) * x[j]; acc = acc + p; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }")))))
+
+    (defn q4eq-bf16-laneoff-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const ushort* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ebase [[buffer(5)]], uint tid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = tid / 32u; if (r >= rows) return; float acc = 0.0f; uint b = ebase + r * cols; for (uint j = lane; j < cols; j += 32u) { float ww = as_type<float>(uint(w[b + j]) << 16u); acc += ww * x[j]; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }")))
+
+    (defn q4eq-f32-laneoff-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ebase [[buffer(5)]], uint tid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = tid / 32u; if (r >= rows) return; float acc = 0.0f; uint b = ebase + r * cols; for (uint j = lane; j < cols; j += 32u) acc += w[b + j] * x[j]; float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }")))
+
+    ; Four output rows share every activation load. The laneoff kernel above is
+    ; retained as the one-row attestant and the offset path.
+    (defn q4eq-f32-slot4-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0=(gid/32u)*4u;if(r0>=rows)return;float sums[4]={0.0f,0.0f,0.0f,0.0f};for(uint j=lane;j<cols;j+=32u){float xv=x[j];for(uint rr=0u;rr<4u;++rr)if(r0+rr<rows)sums[rr]+=w[(r0+rr)*cols+j]*xv;}for(uint rr=0u;rr<4u;++rr){float s=metal::simd_sum(sums[rr]);if(lane==0u&&r0+rr<rows)y[r0+rr]=s;} }")))
+
+    ; Small-row F32 matrices (the four hyperconnection inject logits) need
+    ; width, not more row blocking: eight SIMDgroups share the four activation
+    ; folds, then one group closes the reduction.
+    (defn q4eq-f32-rows4-wide-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint3 tg [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) { uint r0=tg.x*4u;if(r0>=rows)return;threadgroup float sh[32];float sums[4]={0.0f,0.0f,0.0f,0.0f};for(uint j=uint(tid);j<cols;j+=256u){float xv=x[j];for(uint rr=0u;rr<4u;++rr)if(r0+rr<rows)sums[rr]+=w[(r0+rr)*cols+j]*xv;}for(uint rr=0u;rr<4u;++rr){float s=metal::simd_sum(sums[rr]);if(lane==0u)sh[rr*8u+uint(sg)]=s;}metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);if(sg==0u){for(uint rr=0u;rr<4u;++rr){float v=(lane<8u)?sh[rr*8u+uint(lane)]:0.0f;float s=metal::simd_sum(v);if(lane==0u&&r0+rr<rows)y[r0+rr]=s;}} }")))
+
+    (defn q4eq-row-gather-body (fname wfn)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qb [[buffer(0)]], device float* out [[buffer(1)]], constant uint& row [[buffer(2)]], constant uint& width [[buffer(3)]], uint col [[thread_position_in_grid]]) { if (col >= width) return; out[col] = "
+        (str_concat wfn "(qb, row * width + col); }")))))
+
+    ; Expert ids never cross the host. The router writes ten uint ids, and one
+    ; SIMDgroup per output row reads the selected id directly while folding the
+    ; resident expert slice. This removes the old one-readback-per-layer seam.
+    (defn q4eq-selected-body (fname wfn)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rank [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], uint tid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r=tid/32u; if(r>=rows)return; uint ebase=ids[rank]*rows*cols; float acc=0.0f; for(uint j=lane;j<cols;j+=32u)acc += "
+        (str_concat wfn "(qb, ebase+r*cols+j)*x[j]; float s=metal::simd_sum(acc); if(lane==0u)y[r]=s; }")))))
+
+    ; The original GPU-selected lane kernels above remain the per-weight
+    ; attestants. These three kernels carry the same resident expert id into
+    ; the quant-block slots already proven for non-selected tensors. One
+    ; SIMDgroup owns four rows, so the 32-value activation tile, block scale,
+    ; grid words, and signs are shared instead of reconstructed per weight.
+    (defn q4eq-iq2-selected-slot4-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rank [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0=(gid/32u)*4u; if(r0>=rows)return; uint nb=cols/256u; uint ngrp=nb*8u; ulong tensor_base=(ulong(ids[rank])*ulong(rows)*ulong(cols)/256ul)*74ul; ulong rstride=ulong(nb)*74ul; float sumf[4]={0.0f,0.0f,0.0f,0.0f}; for(uint gg=lane;gg<ngrp;gg+=32u){uint blk=gg/8u;uint ib32=gg-blk*8u;device const float* xg=x+blk*256u+ib32*32u;float xl[32];for(uint j=0u;j<32u;++j)xl[j]=xg[j];for(uint rr=0u;rr<4u;++rr){if(r0+rr<rows){device const uchar* b=qb+tensor_base+ulong(r0+rr)*rstride+ulong(blk)*74ul;ushort hb=ushort(b[0])|(ushort(b[1])<<8);float d=float(as_type<half>(hb));uint scb=uint(b[66u+ib32]);device const uchar* qbase=b+2u+ib32*8u;ushort4 qv=ushort4(*(device const packed_ushort4*)(qbase));for(uint l=0u;l<4u;++l){uint qw=uint(qv[l]);uint gidx=qw&511u;uint signidx=qw>>9u;uint sc=(l<2u)?(scb&15u):(scb>>4u);float scale=0.125f*d*float(2u*sc+1u);constant uchar* g8=iq2xs_grid+gidx*8u;uint signs=uint(iq2xs_ksigns[signidx]);for(uint j=0u;j<8u;++j){float mag=float(g8[j]);float smag=(((signs>>j)&1u)==1u)?-mag:mag;sumf[rr]+=(scale*smag)*xl[l*8u+j];}}}}}for(uint rr=0u;rr<4u;++rr){float s=metal::simd_sum(sumf[rr]);if(lane==0u&&r0+rr<rows)y[r0+rr]=s;} }")))
+
+    (defn q4eq-iq3-selected-slot4-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rank [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0=(gid/32u)*4u;if(r0>=rows)return;uint nb=cols/256u;uint ngrp=nb*8u;ulong tensor_base=(ulong(ids[rank])*ulong(rows)*ulong(cols)/256ul)*98ul;ulong rstride=ulong(nb)*98ul;float sums[4]={0.0f,0.0f,0.0f,0.0f};for(uint gg=lane;gg<ngrp;gg+=32u){uint blk=gg/8u;uint g=gg-blk*8u;device const float* xg=x+blk*256u+g*32u;for(uint rr=0u;rr<4u;++rr){if(r0+rr<rows){device const uchar* b=qb+tensor_base+ulong(r0+rr)*rstride+ulong(blk)*98ul;uint aux=uint(b[66u+g*4u])|(uint(b[67u+g*4u])<<8u)|(uint(b[68u+g*4u])<<16u)|(uint(b[69u+g*4u])<<24u);ushort hb=ushort(b[0])|(ushort(b[1])<<8);float d=float(as_type<half>(hb))*(0.5f+float(aux>>28u))*0.5f;device const uchar* q=b+2u+g*8u;for(uint l=0u;l<4u;++l){uint w0=iq3xxs_grid[uint(q[2u*l])];uint w1=iq3xxs_grid[uint(q[2u*l+1u])];uint sm=uint(iq3xxs_signs[(aux>>(7u*l))&127u]);for(uint j=0u;j<4u;++j){float s0=(((sm>>j)&1u)==1u)?-1.0f:1.0f;float s1=(((sm>>(j+4u))&1u)==1u)?-1.0f:1.0f;sums[rr]+=d*float((w0>>(8u*j))&255u)*s0*xg[l*8u+j];sums[rr]+=d*float((w1>>(8u*j))&255u)*s1*xg[l*8u+j+4u];}}}}}for(uint rr=0u;rr<4u;++rr){float s=metal::simd_sum(sums[rr]);if(lane==0u&&r0+rr<rows)y[r0+rr]=s;} }")))
+
+    (defn q4eq-iq4nl-selected-slot4-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rank [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0=(gid/32u)*4u;if(r0>=rows)return;uint nb=cols/32u;ulong tensor_base=(ulong(ids[rank])*ulong(rows)*ulong(cols)/32ul)*18ul;ulong rstride=ulong(nb)*18ul;float sums[4]={0.0f,0.0f,0.0f,0.0f};for(uint blk=lane;blk<nb;blk+=32u){device const float* xg=x+blk*32u;for(uint rr=0u;rr<4u;++rr){if(r0+rr<rows){device const uchar* b=qb+tensor_base+ulong(r0+rr)*rstride+ulong(blk)*18ul;ushort hb=ushort(b[0])|(ushort(b[1])<<8);float d=float(as_type<half>(hb));for(uint j=0u;j<16u;++j){uint by=uint(b[2u+j]);sums[rr]+=d*float(iq4nl_values[by&15u])*xg[j];sums[rr]+=d*float(iq4nl_values[by>>4u])*xg[j+16u];}}}}for(uint rr=0u;rr<4u;++rr){float s=metal::simd_sum(sums[rr]);if(lane==0u&&r0+rr<rows)y[r0+rr]=s;} }")))
+
+    ; All selected experts in one grid. Gate/up share the same x vector; the
+    ; IQ4_NL down twin indexes one activation vector per rank. These are the
+    ; dispatch-fusion forms of the single-rank slot4 witnesses above.
+    (defn q4eq-iq2-selected-batch-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& nrank [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rg=(rows+3u)/4u;uint slot=gid/32u;uint rank=slot/rg;if(rank>=nrank)return;uint r0=(slot-rank*rg)*4u;uint nb=cols/256u;uint ngrp=nb*8u;ulong tensor_base=(ulong(ids[rank])*ulong(rows)*ulong(cols)/256ul)*74ul;ulong rstride=ulong(nb)*74ul;float sumf[4]={0.0f,0.0f,0.0f,0.0f};for(uint gg=lane;gg<ngrp;gg+=32u){uint blk=gg/8u;uint ib32=gg-blk*8u;device const float* xg=x+blk*256u+ib32*32u;float xl[32];for(uint j=0u;j<32u;++j)xl[j]=xg[j];for(uint rr=0u;rr<4u;++rr){if(r0+rr<rows){device const uchar* b=qb+tensor_base+ulong(r0+rr)*rstride+ulong(blk)*74ul;ushort hb=ushort(b[0])|(ushort(b[1])<<8);float d=float(as_type<half>(hb));uint scb=uint(b[66u+ib32]);device const uchar* qbase=b+2u+ib32*8u;ushort4 qv=ushort4(*(device const packed_ushort4*)(qbase));for(uint l=0u;l<4u;++l){uint qw=uint(qv[l]);uint gidx=qw&511u;uint signidx=qw>>9u;uint sc=(l<2u)?(scb&15u):(scb>>4u);float scale=0.125f*d*float(2u*sc+1u);constant uchar* g8=iq2xs_grid+gidx*8u;uint signs=uint(iq2xs_ksigns[signidx]);for(uint j=0u;j<8u;++j){float mag=float(g8[j]);float smag=(((signs>>j)&1u)==1u)?-mag:mag;sumf[rr]+=(scale*smag)*xl[l*8u+j];}}}}}for(uint rr=0u;rr<4u;++rr){float s=metal::simd_sum(sumf[rr]);if(lane==0u&&r0+rr<rows)y[rank*rows+r0+rr]=s;} }")))
+
+    (defn q4eq-iq3-selected-batch-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& nrank [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rg=(rows+3u)/4u;uint slot=gid/32u;uint rank=slot/rg;if(rank>=nrank)return;uint r0=(slot-rank*rg)*4u;uint nb=cols/256u;uint ngrp=nb*8u;ulong tensor_base=(ulong(ids[rank])*ulong(rows)*ulong(cols)/256ul)*98ul;ulong rstride=ulong(nb)*98ul;float sums[4]={0.0f,0.0f,0.0f,0.0f};for(uint gg=lane;gg<ngrp;gg+=32u){uint blk=gg/8u;uint g=gg-blk*8u;device const float* xg=x+blk*256u+g*32u;for(uint rr=0u;rr<4u;++rr){if(r0+rr<rows){device const uchar* b=qb+tensor_base+ulong(r0+rr)*rstride+ulong(blk)*98ul;uint aux=uint(b[66u+g*4u])|(uint(b[67u+g*4u])<<8u)|(uint(b[68u+g*4u])<<16u)|(uint(b[69u+g*4u])<<24u);ushort hb=ushort(b[0])|(ushort(b[1])<<8);float d=float(as_type<half>(hb))*(0.5f+float(aux>>28u))*0.5f;device const uchar* q=b+2u+g*8u;for(uint l=0u;l<4u;++l){uint w0=iq3xxs_grid[uint(q[2u*l])];uint w1=iq3xxs_grid[uint(q[2u*l+1u])];uint sm=uint(iq3xxs_signs[(aux>>(7u*l))&127u]);for(uint j=0u;j<4u;++j){float s0=(((sm>>j)&1u)==1u)?-1.0f:1.0f;float s1=(((sm>>(j+4u))&1u)==1u)?-1.0f:1.0f;sums[rr]+=d*float((w0>>(8u*j))&255u)*s0*xg[l*8u+j];sums[rr]+=d*float((w1>>(8u*j))&255u)*s1*xg[l*8u+j+4u];}}}}}for(uint rr=0u;rr<4u;++rr){float s=metal::simd_sum(sums[rr]);if(lane==0u&&r0+rr<rows)y[rank*rows+r0+rr]=s;} }")))
+
+    (defn q4eq-iq4nl-selected-batch-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& nrank [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rg=(rows+3u)/4u;uint slot=gid/32u;uint rank=slot/rg;if(rank>=nrank)return;uint r0=(slot-rank*rg)*4u;uint nb=cols/32u;ulong tensor_base=(ulong(ids[rank])*ulong(rows)*ulong(cols)/32ul)*18ul;ulong rstride=ulong(nb)*18ul;float sums[4]={0.0f,0.0f,0.0f,0.0f};for(uint blk=lane;blk<nb;blk+=32u){device const float* xg=x+rank*cols+blk*32u;for(uint rr=0u;rr<4u;++rr){if(r0+rr<rows){device const uchar* b=qb+tensor_base+ulong(r0+rr)*rstride+ulong(blk)*18ul;ushort hb=ushort(b[0])|(ushort(b[1])<<8);float d=float(as_type<half>(hb));for(uint j=0u;j<16u;++j){uint by=uint(b[2u+j]);sums[rr]+=d*float(iq4nl_values[by&15u])*xg[j];sums[rr]+=d*float(iq4nl_values[by>>4u])*xg[j+16u];}}}}for(uint rr=0u;rr<4u;++rr){float s=metal::simd_sum(sums[rr]);if(lane==0u&&r0+rr<rows)y[rank*rows+r0+rr]=s;} }")))
+
+    ; Appendix for a translation unit that already owns q38/kth's q4, q6 and
+    ; q8 helper spine. This is the form used by the whole qwen4exp graph: it
+    ; adds no duplicate helper and therefore remains one JIT library.
+    (defn q4eq-extension-msl ()
+        (q4eq-join-msl
+            (list
+                (q80-matvec-wide-body "q4_flash_q8_wide")
+                (qml-msl-appendix)
+                (q5m-msl-appendix "q4_flash_q5_dequant" "q4_flash_q5_serial"
+                    "q4_flash_q50_dequant" "q4_flash_q50_serial")
+                (q4eq-laneoff-body "q4_flash_q4_laneoff" "q4k_w")
+                (q4eq-laneoff-body "q4_flash_q5_laneoff" "q5k_w")
+                (q4eq-laneoff-body "q4_flash_q6_laneoff" "q6k_w")
+                (q4eq-laneoff-body "q4_flash_q8_laneoff" "q80_w")
+                (q4eq-row-gather-body "q4_flash_q5_gather" "q5k_w")
+                (iq2xsm-msl-helpers)
+                (iq2xsm-matvec-slot4-off-body "q4_flash_iq2_slot4off")
+                (iq3xsm-unit "q4_flash_iq3_dequant" "q4_flash_iq3_serial" "q4_flash_iq3_slot4")
+                (iq4nlsm-msl-helpers)
+                (q4eq-laneoff-body "q4_flash_iq4nl_laneoff" "iq4nl_w")
+                (iq4nlsm-row-gather-body "q4_flash_iq4nl_gather")
+                (q4eq-selected-body "q4_flash_iq2_selected" "iq2xs_w")
+                (q4eq-selected-body "q4_flash_iq3_selected" "iq3xxs_w")
+                (q4eq-selected-body "q4_flash_iq4nl_selected" "iq4nl_w")
+                (q4eq-iq2-selected-slot4-body "q4_flash_iq2_selected_slot4")
+                (q4eq-iq3-selected-slot4-body "q4_flash_iq3_selected_slot4")
+                (q4eq-iq4nl-selected-slot4-body "q4_flash_iq4nl_selected_slot4")
+                (q4eq-iq2-selected-batch-body "q4_flash_iq2_selected_batch")
+                (q4eq-iq3-selected-batch-body "q4_flash_iq3_selected_batch")
+                (q4eq-iq4nl-selected-batch-body "q4_flash_iq4nl_selected_batch")
+                (q4eq-bf16-laneoff-body "q4_flash_bf16_laneoff")
+                (q4eq-f32-laneoff-body "q4_flash_f32_laneoff")
+                (q4eq-f32-slot4-body "q4_flash_f32_slot4")
+                (q4eq-f32-rows4-wide-body "q4_flash_f32_rows4_wide"))))
+
+    (defn q4eq-all-msl ()
+        (q4eq-join-msl
+            (list
+                (qml-msl-header)
+                (q80-msl-unit "q4_flash_q8_dequant" "q4_flash_q8_serial" "q4_flash_q8_lane")
+                (q80-matvec-wide-body "q4_flash_q8_wide")
+                (q4m-msl-helpers)
+                (q4m-matvec-body "q4_flash_q4_serial")
+                (q6m-msl-weight)
+                (q6m-matvec-body "q4_flash_q6_serial")
+                (qml-msl-appendix)
+                (q5m-msl-appendix "q4_flash_q5_dequant" "q4_flash_q5_serial"
+                    "q4_flash_q50_dequant" "q4_flash_q50_serial")
+                (q4eq-laneoff-body "q4_flash_q4_laneoff" "q4k_w")
+                (q4eq-laneoff-body "q4_flash_q5_laneoff" "q5k_w")
+                (q4eq-laneoff-body "q4_flash_q6_laneoff" "q6k_w")
+                (q4eq-laneoff-body "q4_flash_q8_laneoff" "q80_w")
+                (q4eq-row-gather-body "q4_flash_q5_gather" "q5k_w")
+                (iq2xsm-msl-helpers)
+                (iq2xsm-matvec-slot4-off-body "q4_flash_iq2_slot4off")
+                (iq3xsm-unit "q4_flash_iq3_dequant" "q4_flash_iq3_serial" "q4_flash_iq3_slot4")
+                (iq4nlsm-msl-helpers)
+                (q4eq-laneoff-body "q4_flash_iq4nl_laneoff" "iq4nl_w")
+                (iq4nlsm-row-gather-body "q4_flash_iq4nl_gather")
+                (q4eq-selected-body "q4_flash_iq2_selected" "iq2xs_w")
+                (q4eq-selected-body "q4_flash_iq3_selected" "iq3xxs_w")
+                (q4eq-selected-body "q4_flash_iq4nl_selected" "iq4nl_w")
+                (q4eq-iq2-selected-slot4-body "q4_flash_iq2_selected_slot4")
+                (q4eq-iq3-selected-slot4-body "q4_flash_iq3_selected_slot4")
+                (q4eq-iq4nl-selected-slot4-body "q4_flash_iq4nl_selected_slot4")
+                (q4eq-iq2-selected-batch-body "q4_flash_iq2_selected_batch")
+                (q4eq-iq3-selected-batch-body "q4_flash_iq3_selected_batch")
+                (q4eq-iq4nl-selected-batch-body "q4_flash_iq4nl_selected_batch")
+                (q4eq-bf16-laneoff-body "q4_flash_bf16_laneoff")
+                (q4eq-f32-laneoff-body "q4_flash_f32_laneoff")
+                (q4eq-f32-slot4-body "q4_flash_f32_slot4")
+                (q4eq-f32-rows4-wide-body "q4_flash_f32_rows4_wide"))))
+
+    ; 0 q4 lane, 1 q5 laneoff, 2 q6 lane, 3 q8 wide, 4 iq2 slot4,
+    ; 5 iq3 slot4, 6 iq4nl laneoff, 7 bf16, 8 f32, 9 iq4nl row gather,
+    ; 10 q4 laneoff, 11 q6 laneoff, 12 q8 laneoff, 13 q5 row gather,
+    ; 14..16 GPU-selected per-weight attestants; 17..19 selected slot4
+    ; IQ2/IQ3/IQ4 execution kernels; 20..22 Q4_K/Q5_K/Q6_K quant-space
+    ; kernels (two/one/two rows per SIMDgroup); 23 F32 slot4;
+    ; 24..26 all-rank IQ2/IQ3/IQ4 batches; 27 small-row F32 wide.
+    (defn q4eq-all-pipes (msl)
+        (list (metal_pipeline msl "form_q4k_matvec_lane_f32")
+              (metal_pipeline msl "q4_flash_q5_laneoff")
+              (metal_pipeline msl "form_q6k_matvec_lane_f32")
+              (metal_pipeline msl "q4_flash_q8_wide")
+              (metal_pipeline msl "q4_flash_iq2_slot4off")
+              (metal_pipeline msl "q4_flash_iq3_slot4")
+              (metal_pipeline msl "q4_flash_iq4nl_laneoff")
+              (metal_pipeline msl "q4_flash_bf16_laneoff")
+              (metal_pipeline msl "q4_flash_f32_laneoff")
+              (metal_pipeline msl "q4_flash_iq4nl_gather")
+              (metal_pipeline msl "q4_flash_q4_laneoff")
+              (metal_pipeline msl "q4_flash_q6_laneoff")
+              (metal_pipeline msl "q4_flash_q8_laneoff")
+              (metal_pipeline msl "q4_flash_q5_gather")
+              (metal_pipeline msl "q4_flash_iq2_selected")
+              (metal_pipeline msl "q4_flash_iq3_selected")
+              (metal_pipeline msl "q4_flash_iq4nl_selected")
+              (metal_pipeline msl "q4_flash_iq2_selected_slot4")
+              (metal_pipeline msl "q4_flash_iq3_selected_slot4")
+              (metal_pipeline msl "q4_flash_iq4nl_selected_slot4")
+              (metal_pipeline msl "form_q4k_matvec_quant2_f32")
+              (metal_pipeline msl "form_q5k_matvec_quant1_f32")
+              (metal_pipeline msl "form_q6k_matvec_quant2_f32")
+              (metal_pipeline msl "q4_flash_f32_slot4")
+              (metal_pipeline msl "q4_flash_iq2_selected_batch")
+              (metal_pipeline msl "q4_flash_iq3_selected_batch")
+              (metal_pipeline msl "q4_flash_iq4nl_selected_batch")
+              (metal_pipeline msl "q4_flash_f32_rows4_wide")))
+
+    (defn q4eq-block-legal? (n block)
+        (if (gt n 0) (eq (mod n block) 0) 0))
+    (defn q4eq-all-bytes (ty n)
+        (if (eq ty 0) (mul n 4)
+        (if (eq ty 30) (mul n 2)
+        (if (eq ty 8)  (if (q4eq-block-legal? n 32)  (mul (div n 32) 34) 0)
+        (if (eq ty 12) (if (q4eq-block-legal? n 256) (mul (div n 256) 144) 0)
+        (if (eq ty 13) (if (q4eq-block-legal? n 256) (mul (div n 256) 176) 0)
+        (if (eq ty 14) (if (q4eq-block-legal? n 256) (mul (div n 256) 210) 0)
+        (if (eq ty 17) (if (q4eq-block-legal? n 256) (mul (div n 256) 74) 0)
+        (if (eq ty 18) (if (q4eq-block-legal? n 256) (mul (div n 256) 98) 0)
+        (if (eq ty 20) (if (q4eq-block-legal? n 32)  (mul (div n 32) 18) 0)
+            0))))))))))
+
+    (defn q4eq-all-supported? (ty)
+        (if (eq ty 0) 1 (if (eq ty 8) 1 (if (eq ty 12) 1
+        (if (eq ty 13) 1 (if (eq ty 14) 1 (if (eq ty 17) 1
+        (if (eq ty 18) 1 (if (eq ty 20) 1 (if (eq ty 30) 1 0))))))))))
+
+    (defn q4eq-all-mv (ps qh xh yh ty rows cols ebase barrier)
+        (if (eq (q4eq-all-supported? ty) 0) 0
+            (if (eq ty 8)
+                (if (eq ebase 0)
+                    (metal_enqueue (nth ps 3)
+                        (md-bind16 (list qh xh yh) (list rows cols) 256 0 1 barrier)
+                        (div (add rows 1) 2))
+                    (metal_enqueue (nth ps 12)
+                        (md-bind16 (list qh xh yh) (list rows cols ebase) 32 0 0 barrier)
+                        (mul rows 32)))
+            (if (eq ty 12)
+                (if (eq ebase 0)
+                    (metal_enqueue (nth ps 20)
+                        (md-bind16 (list qh xh yh) (list rows cols) 32 0 0 barrier)
+                        (mul (div (add rows 1) 2) 32))
+                    (metal_enqueue (nth ps 10)
+                        (md-bind16 (list qh xh yh) (list rows cols ebase) 32 0 0 barrier)
+                        (mul rows 32)))
+            (if (eq ty 14)
+                (if (eq ebase 0)
+                    (metal_enqueue (nth ps 22)
+                        (md-bind16 (list qh xh yh) (list rows cols) 32 0 0 barrier)
+                        (mul (div (add rows 1) 2) 32))
+                    (metal_enqueue (nth ps 11)
+                        (md-bind16 (list qh xh yh) (list rows cols ebase) 32 0 0 barrier)
+                        (mul rows 32)))
+            (if (eq ty 13)
+                (if (eq ebase 0)
+                    (metal_enqueue (nth ps 21)
+                        (md-bind16 (list qh xh yh) (list rows cols) 32 0 0 barrier)
+                        (mul (div (add rows 3) 4) 32))
+                    (metal_enqueue (nth ps 1)
+                        (md-bind16 (list qh xh yh) (list rows cols ebase) 32 0 0 barrier)
+                        (mul rows 32)))
+            (if (eq ty 17)
+                (metal_enqueue (nth ps 4) (md-bind16 (list qh xh yh) (list rows cols ebase) 32 0 0 barrier) (iq2x-slot-threads rows))
+            (if (eq ty 18)
+                (metal_enqueue (nth ps 5) (md-bind16 (list qh xh yh) (list rows cols ebase) 32 0 0 barrier) (mul (div (add rows 3) 4) 32))
+            (if (eq ty 20)
+                (metal_enqueue (nth ps 6) (md-bind16 (list qh xh yh) (list rows cols ebase) 32 0 0 barrier) (mul rows 32))
+            (if (eq ty 30)
+                (metal_enqueue (nth ps 7)
+                    (md-bind16 (list qh xh yh) (list rows cols ebase) 32 0 0 barrier)
+                    (mul rows 32))
+                (if (if (eq ebase 0) (gt rows 4) 0)
+                    (metal_enqueue (nth ps 23)
+                        (md-bind16 (list qh xh yh) (list rows cols) 32 0 0 barrier)
+                        (mul (div (add rows 3) 4) 32))
+                    (if (eq ebase 0)
+                        (metal_enqueue (nth ps 27)
+                            (md-bind16 (list qh xh yh) (list rows cols) 256 0 1 barrier)
+                            (div (add rows 3) 4))
+                        (metal_enqueue (nth ps 8)
+                            (md-bind16 (list qh xh yh) (list rows cols ebase) 32 0 0 barrier)
+                            (mul rows 32)))))))))))))
+)
+    (defn q4eq-all-mv-selected (ps qh xh yh ids rank ty rows cols barrier)
+        (if (eq ty 17)
+            (metal_enqueue (nth ps 17)
+                (md-bind16 (list qh xh yh ids) (list rank rows cols) 32 0 0 barrier)
+                (mul (div (add rows 3) 4) 32))
+        (if (eq ty 18)
+            (metal_enqueue (nth ps 18)
+                (md-bind16 (list qh xh yh ids) (list rank rows cols) 32 0 0 barrier)
+                (mul (div (add rows 3) 4) 32))
+        (if (eq ty 20)
+            (metal_enqueue (nth ps 19)
+                (md-bind16 (list qh xh yh ids) (list rank rows cols) 32 0 0 barrier)
+                (mul (div (add rows 3) 4) 32))
+            0))))
+
+    (defn q4eq-all-mv-selected-batch (ps qh xh yh ids ty rows cols nrank barrier)
+        (if (eq ty 17)
+            (metal_enqueue (nth ps 24)
+                (md-bind16 (list qh xh yh ids) (list rows cols nrank) 32 0 0 barrier)
+                (mul nrank (mul (div (add rows 3) 4) 32)))
+        (if (eq ty 18)
+            (metal_enqueue (nth ps 25)
+                (md-bind16 (list qh xh yh ids) (list rows cols nrank) 32 0 0 barrier)
+                (mul nrank (mul (div (add rows 3) 4) 32)))
+            0)))
+    (defn q4eq-iq4nl-mv-selected-batch (ps qh xh yh ids rows cols nrank barrier)
+        (metal_enqueue (nth ps 26)
+            (md-bind16 (list qh xh yh ids) (list rows cols nrank) 32 0 0 barrier)
+            (mul nrank (mul (div (add rows 3) 4) 32))))
+
+    (defn q4eq-ple-gather (ps qh ids out width nrows barrier)
+        (metal_enqueue (nth ps 9)
+            (md-bind16 (list qh ids out) (list width nrows) 256 0 0 barrier)
+            (mul width nrows)))
+    (defn q4eq-token-gather-q5 (ps qh out row width barrier)
+        (metal_enqueue (nth ps 13)
+            (md-bind16 (list qh out) (list row width) 256 0 0 barrier)
+            width))
     0)

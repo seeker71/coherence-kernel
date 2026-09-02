@@ -1,0 +1,45 @@
+; Warm per-layer profile: first token establishes residency, second token is
+; split only at layer boundaries to locate device time without reading model
+; activations or recording prompt content.
+;
+; preludes: form/native/metal/qwen4exp-flash-next-token-handle.fk form/native/metal/model-bandwidth.fk
+
+(do
+    (defn q4wlp-go (aps qps gps bs model lays sts layer before-us acc)
+        (if (ge layer 48) (list (reverse acc) before-us)
+            (do
+                (let t0 (now_unix_ms))
+                (q4t-block aps qps gps bs model (nth lays layer) (nth sts layer)
+                    layer 1 16 11 9419 248046)
+                (let drained (metal_sync))
+                (let t1 (now_unix_ms))
+                (let after-us (mbw-status-int (metal_status) "gpu_busy_us_total"))
+                (let row (list layer (q4g-full layer) (q4g-ple layer)
+                    "wall-us" (mul (sub t1 t0) 1000)
+                    "gpu-us" (sub after-us before-us) "dispatches" drained))
+                (q4wlp-go aps qps gps bs model lays sts (add layer 1)
+                    after-us (cons row acc)))))
+    (let prefix "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+    (let ctx (q4t-open prefix 16))
+    (let warm (q4t-forward ctx 9419 0 248046 248046))
+    (let aps (nth ctx 0)) (let qps (nth ctx 1)) (let gps (nth ctx 2))
+    (let bs (nth ctx 3)) (let lays (nth ctx 4)) (let model (nth ctx 5))
+    (let sts (nth ctx 6))
+    (let start-us (mbw-status-int (metal_status) "gpu_busy_us_total"))
+    (q4t-embed qps gps bs (nth model 0) warm)
+    (let embed-dispatch (metal_sync))
+    (let embed-us (mbw-status-int (metal_status) "gpu_busy_us_total"))
+    (let prof (q4wlp-go aps qps gps bs model lays sts 0 embed-us (empty)))
+    (let rows (nth prof 0))
+    (let before-head (nth prof 1))
+    (metal_batch_concurrent)
+    (let out (q4t-head aps qps gps bs model))
+    (let after-head (mbw-status-int (metal_status) "gpu_busy_us_total"))
+    (let live (metal_status))
+    (q4t-close ctx)
+    (list "qwen4exp-warm-layer-profile" "warm-first-output" warm
+        "second-output" out
+        (list "embed-gpu-us" (sub embed-us start-us) "dispatches" embed-dispatch)
+        rows
+        (list "head-gpu-us" (sub after-head before-head))
+        (list "status" live)))

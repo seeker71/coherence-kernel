@@ -1,0 +1,181 @@
+; qwen4exp-flash-next-graph-jit.fk — qwen4exp-only Metal graph organs.
+;
+; The execution order and geometry are authored in qwen4exp-flash-next-graph.bml.
+; q38-msl contributes the already-proven GDN, full-attention, MoE and elementwise
+; kernels; q4eq-extension-msl adds the exact artifact's importance quants. This
+; cell adds only the architecture differences: four-stream hyper-connections and
+; PLE's gated value plus dilated depthwise recurrent convolution.
+;
+; preludes: form/native/metal/qwen35-dense-token-handle.fk form/native/metal/qwen4exp-flash-next-quant-jit.fk form/form-stdlib/qwen4exp-flash-next-graph.bml
+
+(do
+    (defn q4gj-hc-repeat-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device float* hc [[buffer(1)]], constant uint& d [[buffer(2)]], constant uint& streams [[buffer(3)]], uint gid [[thread_position_in_grid]]) { if (gid >= d * streams) return; hc[gid] = x[gid - (gid / d) * d]; }")))
+
+    ; One thread owns one stream. The reduction is over d, exactly the grouped
+    ; RMSNorm axis; gamma spans all hc*d coordinates.
+    (defn q4gj-hc-norm-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device const float* gamma [[buffer(1)]], device float* y [[buffer(2)]], constant uint& d [[buffer(3)]], constant uint& streams [[buffer(4)]], constant float& eps [[buffer(5)]], uint s [[thread_position_in_grid]]) { if (s >= streams) return; uint b = s * d; float ss = 0.0f; for (uint i = 0u; i < d; ++i) { float v = x[b+i]; ss += v*v; } float inv = 1.0f / fsqrt(ss / float(d) + eps); for (uint i = 0u; i < d; ++i) y[b+i] = x[b+i] * inv * gamma[b+i]; }")))
+
+    ; SIMDgroup execution twin. The serial kernel above remains the attestant;
+    ; one group now owns a stream instead of one thread owning 2560 values.
+    (defn q4gj-hc-norm-simd-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device const float* gamma [[buffer(1)]], device float* y [[buffer(2)]], constant uint& d [[buffer(3)]], constant uint& streams [[buffer(4)]], constant float& eps [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint s=gid/32u;if(s>=streams)return;uint b=s*d;float ss=0.0f;for(uint i=lane;i<d;i+=32u){float v=x[b+i];ss+=v*v;}float total=metal::simd_sum(ss);float inv=1.0f/fsqrt(total/float(d)+eps);for(uint i=lane;i<d;i+=32u)y[b+i]=x[b+i]*inv*gamma[b+i]; }")))
+
+    (defn q4gj-hc-norm-wide-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device const float* gamma [[buffer(1)]], device float* y [[buffer(2)]], constant uint& d [[buffer(3)]], constant uint& streams [[buffer(4)]], constant float& eps [[buffer(5)]], uint3 tg [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) { uint s=tg.x;if(s>=streams)return;uint b=s*d;threadgroup float sh[8];float ss=0.0f;for(uint i=uint(tid);i<d;i+=256u){float v=x[b+i];ss+=v*v;}ss=metal::simd_sum(ss);if(lane==0u)sh[sg]=ss;metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);if(sg==0u){float v=(lane<8u)?sh[lane]:0.0f;float total=metal::simd_sum(v);if(lane==0u)sh[0]=total;}metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);float inv=1.0f/fsqrt(sh[0]/float(d)+eps);for(uint i=uint(tid);i<d;i+=256u)y[b+i]=x[b+i]*inv*gamma[b+i]; }")))
+
+    ; The 512-way softmax work is parallel, while thread zero keeps the
+    ; original index-order sum, normalization, strict-greater top-10 scan, and
+    ; writes. That preserves the route's hidden fold/order commitment exactly.
+    (defn q4gj-route-tg-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* logits [[buffer(0)]], device uint* ids [[buffer(1)]], device float* wts [[buffer(2)]], constant uint& ne [[buffer(3)]], constant uint& nsel [[buffer(4)]], uint tid [[thread_position_in_threadgroup]], uint tsz [[threads_per_threadgroup]], ushort lane [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) { if(ne>512u||nsel>10u||nsel>ne)return;threadgroup float p[512];threadgroup uchar taken[512];threadgroup float cv[16];threadgroup uint ci[16];threadgroup uint pick[10];threadgroup float wsum;p[tid]=(tid<ne)?logits[tid]:-1.0e30f;taken[tid]=0u;metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);for(uint stride=tsz/2u;stride>0u;stride/=2u){if(tid<stride&&p[tid+stride]>p[tid])p[tid]=p[tid+stride];metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);}float mx=p[0];if(tid<ne)p[tid]=fexp(logits[tid]-mx);metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);if(tid==0u){float s=0.0f;for(uint i=0u;i<ne;++i)s+=p[i];float inv=1.0f/s;for(uint i=0u;i<ne;++i)p[i]*=inv;wsum=0.0f;}metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);for(uint k=0u;k<nsel;++k){if(lane==0u){uint base=uint(sg)*32u;uint best=ne;float bv=-1.0e30f;for(uint i=base;i<base+32u&&i<ne;++i){if(taken[i]==0u&&p[i]>bv){bv=p[i];best=i;}}cv[sg]=bv;ci[sg]=best;}metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);if(tid==0u){uint best=ne;float bv=-1.0e30f;for(uint g=0u;g<16u;++g){if(cv[g]>bv){bv=cv[g];best=ci[g];}}taken[best]=1u;pick[k]=best;wsum+=bv;}metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup);}if(tid==0u){float winv=1.0f/wsum;for(uint k=0u;k<nsel;++k){ids[k]=pick[k];wts[k]=p[pick[k]]*winv;}} }")))
+
+    (defn q4gj-moe-reduce-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* down [[buffer(0)]], device const float* wts [[buffer(1)]], device float* out [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& nrank [[buffer(4)]], uint i [[thread_position_in_grid]]) { if(i>=rows)return;float acc=down[i]*wts[0];for(uint r=1u;r<nrank;++r)acc=acc+down[r*rows+i]*wts[r];out[i]=acc; }")))
+
+    (defn q4gj-low-act-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* x [[buffer(0)]], constant uint& n [[buffer(1)]], constant float& invhc [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float v = x[i] * invhc; x[i] = v / (1.0f + fexp(-v)); }")))
+
+    ; gate is the hc-up result. Mixed is the mean of the four gated normalized
+    ; streams, one output coordinate per thread.
+    (defn q4gj-hc-mix-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* xn [[buffer(0)]], device const float* gate [[buffer(1)]], device float* mixed [[buffer(2)]], constant uint& d [[buffer(3)]], constant uint& streams [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= d) return; float acc = 0.0f; for (uint s = 0u; s < streams; ++s) { uint k = s*d+i; float g = 1.0f / (1.0f + fexp(-gate[k])); acc += xn[k] * g; } mixed[i] = acc / float(streams); }")))
+
+    (defn q4gj-hc-combine-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* residual [[buffer(0)]], device const float* block [[buffer(1)]], device const float* inject [[buffer(2)]], constant uint& d [[buffer(3)]], constant uint& streams [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid >= d*streams) return; uint s = gid / d; uint i = gid - s*d; float w = 2.0f / (1.0f + fexp(-inject[s] / float(streams))); residual[gid] += block[i] * w; }")))
+
+    ; Per-stream signed-sqrt dot gate. Value is one d-vector broadcast to all
+    ; streams, matching the reference's [d,1] -> [d,hc] repeat.
+    (defn q4gj-ple-gate-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* key [[buffer(0)]], device const float* query [[buffer(1)]], device const float* value [[buffer(2)]], device float* gated [[buffer(3)]], constant uint& d [[buffer(4)]], constant uint& streams [[buffer(5)]], constant float& scale [[buffer(6)]], uint s [[thread_position_in_grid]]) { if (s >= streams) return; uint b=s*d; float dot=0.0f; for(uint i=0u;i<d;++i) dot += key[b+i]*query[b+i]; float z=dot*scale; float az=(z<0.0f)?-z:z; if(az<1.0e-6f) az=1.0e-6f; float signedRoot=((z<0.0f)?-1.0f:1.0f)*fsqrt(az); float g=1.0f/(1.0f+fexp(-signedRoot)); for(uint i=0u;i<d;++i) gated[b+i]=value[i]*g; }")))
+
+    ; The old history is [t-9..t-1]. Taps read 0,3,6 and current, then the
+    ; state becomes [t-8..t]. This is K=4 dilation=3 without materializing a
+    ; padded sequence. The kernel also performs silu and the two residual adds.
+    (defn q4gj-ple-conv-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* history [[buffer(0)]], device const float* x [[buffer(1)]], device const float* w [[buffer(2)]], device const float* gated [[buffer(3)]], device float* residual [[buffer(4)]], constant uint& channels [[buffer(5)]], uint c [[thread_position_in_grid]]) { if(c>=channels)return; uint b=c*9u; float cur=x[c]; float v=w[c*4u+0u]*history[b+0u]+w[c*4u+1u]*history[b+3u]+w[c*4u+2u]*history[b+6u]+w[c*4u+3u]*cur; for(uint j=0u;j<8u;++j)history[b+j]=history[b+j+1u]; history[b+8u]=cur; float silu=v/(1.0f+fexp(-v)); residual[c]+=gated[c]+silu; }")))
+
+    ; Qwen4Exp's recurrent block gates normalized output with sigmoid(z), not
+    ; silu(z). The inherited qwen35 kernel remains its own attestant.
+    (defn q4gj-gdn-norm-sigmoid-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* o [[buffer(0)]], device const float* w [[buffer(1)]], device const float* z [[buffer(2)]], device float* out [[buffer(3)]], constant uint& nv [[buffer(4)]], constant uint& dv [[buffer(5)]], constant float& eps [[buffer(6)]], uint h [[thread_position_in_grid]]) { if(h>=nv)return; uint b=h*dv; float ss=0.0f; for(uint j=0u;j<dv;++j){float v=o[b+j];ss+=v*v;} float inv=1.0f/fsqrt(ss/float(dv)+eps); for(uint j=0u;j<dv;++j){float sg=1.0f/(1.0f+fexp(-z[b+j]));out[b+j]=o[b+j]*inv*w[j]*sg;} }")))
+
+    ; fp16 KV is the capacity contract. Arithmetic enters and leaves as f32.
+    (defn q4gj-cache-half-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* src [[buffer(0)]], device half* cache [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& pos [[buffer(3)]], uint i [[thread_position_in_grid]]) { if(i>=n)return;cache[pos*n+i]=half(src[i]); }")))
+
+    (defn q4gj-gqa-half-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* q [[buffer(0)]], device const half* kc [[buffer(1)]], device const half* vc [[buffer(2)]], device float* y [[buffer(3)]], device float* sc [[buffer(4)]], constant uint& npos [[buffer(5)]], constant uint& nq [[buffer(6)]], constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant float& scale [[buffer(9)]], constant uint& sstride [[buffer(10)]], uint h [[thread_position_in_grid]]) { if(h>=nq)return;uint grp=nq/nkv;uint kvh=h/grp;uint KVD=nkv*hd;uint qo=h*hd;uint ko=kvh*hd;uint S=h*sstride;uint E=(nq+h)*sstride;for(uint t=0u;t<npos;++t){float a=0.0f;for(uint c=0u;c<hd;++c)a+=q[qo+c]*float(kc[t*KVD+ko+c]);sc[S+t]=a*scale;}float mx=sc[S];for(uint t=1u;t<npos;++t)if(sc[S+t]>mx)mx=sc[S+t];float se=0.0f;for(uint t=0u;t<npos;++t){float e=fexp(sc[S+t]-mx);sc[E+t]=e;se+=e;}float inv=1.0f/se;for(uint c=0u;c<hd;++c){float a=0.0f;for(uint t=0u;t<npos;++t)a+=float(vc[t*KVD+ko+c])*sc[E+t];y[qo+c]=a*inv;} }")))
+
+    ; Form supplies the GGUF's uint64 PLE tables as resident buffers; the
+    ; multiply/xor/mod is executed by the Form-emitted Metal kernel.
+    (defn q4gj-ple-hash-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device uint* ids [[buffer(0)]], device const ulong* mult [[buffer(1)]], device const ulong* offsets [[buffer(2)]], device const ulong* sizes [[buffer(3)]], constant uint& cur [[buffer(4)]], constant uint& prev1 [[buffer(5)]], constant uint& prev2 [[buffer(6)]], uint h [[thread_position_in_grid]]) { if(h>=16u)return;ulong mixed=ulong(cur)*mult[0]^ulong(prev1)*mult[1];if(h>=8u)mixed^=ulong(prev2)*mult[2];ids[h]=uint(mixed%sizes[h]+offsets[h]); }")))
+
+    (defn q4gj-msl ()
+        (q4eq-join-msl
+            (list (q38-msl)
+                  (q4eq-extension-msl)
+                  (q4gj-hc-repeat-msl "q4_hc_repeat")
+                  (q4gj-hc-norm-msl "q4_hc_group_rms")
+                  (q4gj-low-act-msl "q4_hc_low_silu")
+                  (q4gj-hc-mix-msl "q4_hc_gated_mean")
+                  (q4gj-hc-combine-msl "q4_hc_combine")
+                  (q4gj-ple-gate-msl "q4_ple_signed_sqrt_gate")
+                  (q4gj-ple-conv-msl "q4_ple_dilated_conv_add")
+                  (q4gj-gdn-norm-sigmoid-msl "q4_gdn_norm_sigmoid")
+                  (q4gj-cache-half-msl "q4_cache_half")
+                  (q4gj-gqa-half-msl "q4_gqa_half")
+                  (q4gj-ple-hash-msl "q4_ple_hash")
+                  (q4gj-hc-norm-simd-msl "q4_hc_group_rms_simd")
+                  (q4gj-route-tg-msl "q4_moe_route_tg")
+                  (q4gj-moe-reduce-msl "q4_moe_reduce10")
+                  (q4gj-hc-norm-wide-msl "q4_hc_group_rms_wide"))))
+
+    ; 0 repeat, 1 grouped norm, 2 low activation, 3 gated mean,
+    ; 4 combine, 5 PLE gate, 6 PLE conv, 7 GDN sigmoid norm,
+    ; 8 fp16 cache write, 9 dense fp16 GQA, 10 PLE hash,
+    ; 11 SIMD HC norm, 12 exact-order threadgroup route, 13 batched-expert reduce,
+    ; 14 eight-SIMDgroup HC norm.
+    (defn q4gj-pipes (msl)
+        (list (metal_pipeline msl "q4_hc_repeat")
+              (metal_pipeline msl "q4_hc_group_rms")
+              (metal_pipeline msl "q4_hc_low_silu")
+              (metal_pipeline msl "q4_hc_gated_mean")
+              (metal_pipeline msl "q4_hc_combine")
+              (metal_pipeline msl "q4_ple_signed_sqrt_gate")
+              (metal_pipeline msl "q4_ple_dilated_conv_add")
+              (metal_pipeline msl "q4_gdn_norm_sigmoid")
+              (metal_pipeline msl "q4_cache_half")
+              (metal_pipeline msl "q4_gqa_half")
+              (metal_pipeline msl "q4_ple_hash")
+              (metal_pipeline msl "q4_hc_group_rms_simd")
+              (metal_pipeline msl "q4_moe_route_tg")
+              (metal_pipeline msl "q4_moe_reduce10")
+              (metal_pipeline msl "q4_hc_group_rms_wide")))
+
+    (defn q4gj-hc-repeat (ps x hc)
+        (metal_enqueue (nth ps 0) (md-bind16 (list x hc) (list 2560 4) 256 0 0 0) 10240))
+    (defn q4gj-hc-norm (ps x gamma y epsBits)
+        (metal_enqueue (nth ps 14) (md-bind16 (list x gamma y) (list 2560 4 epsBits) 256 0 1 0) 4))
+    (defn q4gj-low-act (ps lo)
+        (metal_enqueue (nth ps 2) (md-bind16 (list lo) (list 320 1048576000) 256 0 0 0) 320))
+    (defn q4gj-hc-mix (ps xn gate mixed)
+        (metal_enqueue (nth ps 3) (md-bind16 (list xn gate mixed) (list 2560 4) 256 0 0 0) 2560))
+    (defn q4gj-hc-combine (ps residual block inject)
+        (metal_enqueue (nth ps 4) (md-bind16 (list residual block inject) (list 2560 4) 256 0 0 0) 10240))
+    (defn q4gj-ple-gate (ps key query value gated scaleBits)
+        (metal_enqueue (nth ps 5) (md-bind16 (list key query value gated) (list 2560 4 scaleBits) 256 0 0 0) 4))
+    (defn q4gj-ple-conv (ps history x w gated residual)
+        (metal_enqueue (nth ps 6) (md-bind16 (list history x w gated residual) (list 10240) 256 0 0 0) 10240))
+    (defn q4gj-gdn-norm-sigmoid (ps o w z out epsBits)
+        (metal_enqueue (nth ps 7)
+            (md-bind16 (list o w z out) (list 48 128 epsBits) 256 0 0 0) 48))
+    (defn q4gj-cache-half (ps src cache n pos)
+        (metal_enqueue (nth ps 8)
+            (md-bind16 (list src cache) (list n pos) 256 0 0 0) n))
+    (defn q4gj-gqa-half (ps q kc vc out scratch npos scaleBits sstride)
+        (metal_enqueue (nth ps 9)
+            (md-bind16 (list q kc vc out scratch)
+                (list npos 24 2 256 scaleBits sstride) 256 0 0 0) 24))
+    (defn q4gj-ple-hash (ps ids mult offsets sizes cur prev1 prev2)
+        (metal_enqueue (nth ps 10)
+            (md-bind16 (list ids mult offsets sizes) (list cur prev1 prev2) 256 0 0 0) 16))
+    (defn q4gj-route (ps logits ids wts)
+        (metal_enqueue (nth ps 12)
+            (md-bind16 (list logits ids wts) (list 512 10) 512 0 1 0) 1))
+    (defn q4gj-moe-reduce (ps down wts out)
+        (metal_enqueue (nth ps 13)
+            (md-bind16 (list down wts out) (list 2560 10) 256 0 0 0) 2560))
+    0)

@@ -237,6 +237,28 @@
         (str_concat (qml-step pfx stride)
                     " float s = metal::simd_sum(acc); if (lane == 0) y[r] = s; }")))))))
 
+    ; Q4_K's execution kernel in quant space. The earlier lane kernel is kept
+    ; as the decomposition attestant; this one removes its per-weight index
+    ; division and f16/scale reconstruction. The 4x8 lane map and two-row
+    ; register block are derived from llama.cpp's MIT-licensed Metal shape,
+    ; while the signature, contiguous-row addressing, and dispatch contract
+    ; are native to this Form carrier. Association changes, so token parity and
+    ; a numeric carrier witness—not bit identity—are the admission gates.
+    (defn qml-q4k-quant2-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0=(gid/32u)*2u;if(r0>=rows)return;uint ix=lane/8u;uint it=lane-ix*8u;uint iq=it/4u;uint ir=it-iq*4u;uint nb=cols/256u;float yl[16];float yh[16];float sumf[2]={0.0f,0.0f};device const float* xp=x+ix*256u+64u*iq+8u*ir;for(uint ib=ix;ib<nb;ib+=4u){float4 sumy=float4(0.0f);for(uint i=0u;i<8u;++i){yl[i]=xp[i];sumy[0]+=yl[i];yl[i+8u]=xp[i+32u];sumy[1]+=yl[i+8u];yh[i]=xp[i+128u];sumy[2]+=yh[i];yh[i+8u]=xp[i+160u];sumy[3]+=yh[i+8u];}for(uint rr=0u;rr<2u;++rr){if(r0+rr<rows){ulong bo=(ulong(r0+rr)*ulong(nb)+ulong(ib))*144ul;device const uchar* b=qb+bo;device const ushort* sc=(device const ushort*)(b+4u+2u*iq);device const ushort* q1=(device const ushort*)(b+16u+32u*iq+8u*ir);device const ushort* q2=q1+32;ushort sc16[4];sc16[0]=sc[0]&ushort(0x3f3f);sc16[1]=sc[2]&ushort(0x3f3f);sc16[2]=((sc[4]>>0u)&ushort(0x0f0f))|((sc[0]&ushort(0xc0c0))>>2u);sc16[3]=((sc[4]>>4u)&ushort(0x0f0f))|((sc[2]&ushort(0xc0c0))>>2u);thread const uchar* sc8=(thread const uchar*)sc16;float4 a1=float4(0.0f);float4 a2=float4(0.0f);for(uint i=0u;i<4u;++i){a1[0]+=yl[2u*i]*(q1[i]&ushort(0x000f));a1[1]+=yl[2u*i+1u]*(q1[i]&ushort(0x0f00));a1[2]+=yl[2u*i+8u]*(q1[i]&ushort(0x00f0));a1[3]+=yl[2u*i+9u]*(q1[i]&ushort(0xf000));a2[0]+=yh[2u*i]*(q2[i]&ushort(0x000f));a2[1]+=yh[2u*i+1u]*(q2[i]&ushort(0x0f00));a2[2]+=yh[2u*i+8u]*(q2[i]&ushort(0x00f0));a2[3]+=yh[2u*i+9u]*(q2[i]&ushort(0xf000));}ushort hd=ushort(b[0])|(ushort(b[1])<<8u);ushort hm=ushort(b[2])|(ushort(b[3])<<8u);float d=float(as_type<half>(hd));float dm=float(as_type<half>(hm));sumf[rr]+=d*((a1[0]+a1[1]*(1.0f/256.0f))*float(sc8[0])+(a1[2]+a1[3]*(1.0f/256.0f))*float(sc8[1])*(1.0f/16.0f)+(a2[0]+a2[1]*(1.0f/256.0f))*float(sc8[4])+(a2[2]+a2[3]*(1.0f/256.0f))*float(sc8[5])*(1.0f/16.0f))-dm*(sumy[0]*float(sc8[2])+sumy[1]*float(sc8[3])+sumy[2]*float(sc8[6])+sumy[3]*float(sc8[7]));}}xp+=1024u;}for(uint rr=0u;rr<2u;++rr){float s=metal::simd_sum(sumf[rr]);if(lane==0u&&r0+rr<rows)y[r0+rr]=s;} }")))
+
+    (defn qml-q5k-quant1-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0=(gid/32u)*4u;if(r0>=rows)return;uint nb=cols/256u;uint ng=nb*8u;float sums[4]={0.0f,0.0f,0.0f,0.0f};for(uint g=lane;g<ng;g+=32u){uint ib=g/8u;uint j=g-ib*8u;uint c=j/2u;uint hf=j-c*2u;device const float* xg=x+g*32u;for(uint rr=0u;rr<4u;++rr){if(r0+rr<rows){ulong bo=(ulong(r0+rr)*ulong(nb)+ulong(ib))*176ul;device const uchar* b=qb+bo;uint sc=(j<4u)?(uint(b[4u+j])&63u):((uint(b[8u+j])&15u)|((uint(b[j])>>6u)<<4u));uint mn=(j<4u)?(uint(b[8u+j])&63u):((uint(b[8u+j])>>4u)|((uint(b[4u+j])>>6u)<<4u));float qdot=0.0f;float xsum=0.0f;for(uint l=0u;l<32u;++l){uint by=uint(b[48u+c*32u+l]);uint nib=(hf==0u)?(by&15u):(by>>4u);uint hi=(uint(b[16u+l])>>j)&1u;float xv=xg[l];qdot+=float(nib+16u*hi)*xv;xsum+=xv;}ushort hd=ushort(b[0])|(ushort(b[1])<<8u);ushort hm=ushort(b[2])|(ushort(b[3])<<8u);float d=float(as_type<half>(hd));float dm=float(as_type<half>(hm));sums[rr]+=d*float(sc)*qdot-dm*float(mn)*xsum;}}}for(uint rr=0u;rr<4u;++rr){float s=metal::simd_sum(sums[rr]);if(lane==0u&&r0+rr<rows)y[r0+rr]=s;} }")))
+
+    (defn qml-q6k-quant2-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0=(gid/32u)*2u;if(r0>=rows)return;uint tid=lane/2u;uint ix=lane-2u*tid;uint ip=tid/8u;uint il=tid-8u*ip;uint l0=4u*il;uint is=8u*ip+l0/16u;uint yoff=128u*ip+l0;uint qloff=64u*ip+l0;uint qhoff=32u*ip+l0;uint nb=cols/256u;float sumf[2]={0.0f,0.0f};for(uint ib=ix;ib<nb;ib+=2u){device const float* xp=x+ib*256u+yoff;float yl[16];for(uint l=0u;l<4u;++l){yl[4u*l]=xp[l];yl[4u*l+1u]=xp[l+32u];yl[4u*l+2u]=xp[l+64u];yl[4u*l+3u]=xp[l+96u];}for(uint rr=0u;rr<2u;++rr){if(r0+rr<rows){ulong bo=(ulong(r0+rr)*ulong(nb)+ulong(ib))*210ul;device const uchar* b=qb+bo;device const uchar* q1=b+qloff;device const uchar* q2=q1+32u;device const uchar* qh=b+128u+qhoff;device const char* sc=(device const char*)(b+192u+is);float4 sums=float4(0.0f);for(uint l=0u;l<4u;++l){uint h=uint(qh[l]);int v0=int((uint(q1[l])&15u)|((h&3u)<<4u))-32;int v1=int((uint(q2[l])&15u)|((h&12u)<<2u))-32;int v2=int((uint(q1[l])>>4u)|((h&48u)<<0u))-32;int v3=int((uint(q2[l])>>4u)|((h&192u)>>2u))-32;sums[0]+=yl[4u*l]*float(v0);sums[1]+=yl[4u*l+1u]*float(v1);sums[2]+=yl[4u*l+2u]*float(v2);sums[3]+=yl[4u*l+3u]*float(v3);}ushort hd=ushort(b[208u])|(ushort(b[209u])<<8u);float d=float(as_type<half>(hd));sumf[rr]+=d*(sums[0]*float(sc[0])+sums[1]*float(sc[2])+sums[2]*float(sc[4])+sums[3]*float(sc[6]));}}}for(uint rr=0u;rr<2u;++rr){float s=metal::simd_sum(sumf[rr]);if(lane==0u&&r0+rr<rows)y[r0+rr]=s;} }")))
+
     ; ---- the appendix a carrier adds to the q6k/q4k unit. No helper spine of its own: q6k_mod,
     ; q6k_f16, q4k_sc, q4k_mn and their kin are already defined there, which is exactly why this is an
     ; appendix and not a translation unit. The HEADER, though, must lead the whole file — qml-msl-header
@@ -246,6 +268,9 @@
         (str_concat (qml-hoist-msl "form_q6k_matvec_hoist_f32" "q6k" "210")
         (str_concat (qml-hoist-msl "form_q4k_matvec_hoist_f32" "q4k" "144")
         (str_concat (qml-lane-msl  "form_q6k_matvec_lane_f32"  "q6k" "210")
-                    (qml-lane-msl  "form_q4k_matvec_lane_f32"  "q4k" "144"))))))
+        (str_concat (qml-lane-msl  "form_q4k_matvec_lane_f32"  "q4k" "144")
+        (str_concat (qml-q4k-quant2-msl "form_q4k_matvec_quant2_f32")
+        (str_concat (qml-q5k-quant1-msl "form_q5k_matvec_quant1_f32")
+                    (qml-q6k-quant2-msl "form_q6k_matvec_quant2_f32")))))))))
 
     0)

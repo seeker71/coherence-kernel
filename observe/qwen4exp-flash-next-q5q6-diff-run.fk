@@ -1,0 +1,60 @@
+; Matrix-level differential witness for the quant-space Q5_K/Q6_K candidates.
+; The old per-weight kernels stay the attestants at pipe 1/2; candidates are
+; pipe 21/22. Only bounded summaries leave the resident model.
+; preludes: form/native/metal/qwen4exp-flash-next-token-handle.fk
+
+(do
+    (defn q4qd-word (s i)
+        (add (str_byte_at s (mul i 4))
+        (add (mul (str_byte_at s (add (mul i 4) 1)) 256)
+        (add (mul (str_byte_at s (add (mul i 4) 2)) 65536)
+             (mul (str_byte_at s (add (mul i 4) 3)) 16777216)))))
+    (defn q4qd-f32 (s i) (fd-value (q4qd-word s i) 8 23))
+    (defn q4qd-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn q4qd-max-go (a b i n mx sum)
+        (if (ge i n) (list mx sum)
+            (do
+                (let d (q4qd-abs (sub (q4qd-f32 a i) (q4qd-f32 b i))))
+                (q4qd-max-go a b (add i 1) n (if (gt d mx) d mx) (add sum d)))))
+    (defn q4qd-diff (ah bh n)
+        (do
+            (let a (metal_buf_read ah 0 (mul n 4)))
+            (let b (metal_buf_read bh 0 (mul n 4)))
+            (list (q4qd-f32 a 0) (q4qd-f32 b 0)
+                  (q4qd-f32 a 1) (q4qd-f32 b 1)
+                  (q4qd-max-go a b 0 n 0.0 0.0))))
+    (defn q4qd-fill (h i n)
+        (if (ge i n) 1
+            (do (metal_buf_write h (mul i 4) (md-le32 1065353216))
+                (q4qd-fill h (add i 1) n))))
+
+    (let prefix "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+    (let ctx (q4t-open prefix 16))
+    (let qps (nth ctx 1)) (let bs (nth ctx 3)) (let lay (nth (nth ctx 4) 0))
+
+    ; Q5_K attn_qkv: [10240, 2560].
+    (let q5 (nth lay 16))
+    (q4qd-fill (nth bs 0) 0 2560)
+    (metal_enqueue (nth qps 1)
+        (md-bind16 (list (q4tv-h q5) (nth bs 0) (nth bs 1))
+            (list 10240 2560 0) 32 0 0 0) (mul 10240 32))
+    (metal_enqueue (nth qps 21)
+        (md-bind16 (list (q4tv-h q5) (nth bs 0) (nth bs 2))
+            (list 10240 2560) 32 0 0 0) (mul (div (add 10240 3) 4) 32))
+    (metal_sync)
+    (let d5 (q4qd-diff (nth bs 1) (nth bs 2) 10240))
+
+    ; Q6_K ssm_out: [2560, 6144].
+    (let q6 (nth lay 24))
+    (q4qd-fill (nth bs 8) 0 6144)
+    (metal_enqueue (nth qps 2)
+        (md-bind16 (list (q4tv-h q6) (nth bs 8) (nth bs 7))
+            (list 2560 6144) 32 0 0 0) (mul 2560 32))
+    (metal_enqueue (nth qps 22)
+        (md-bind16 (list (q4tv-h q6) (nth bs 8) (nth bs 5))
+            (list 2560 6144) 32 0 0 0) (mul (div (add 2560 1) 2) 32))
+    (metal_sync)
+    (let d6 (q4qd-diff (nth bs 7) (nth bs 5) 2560))
+    (let status (metal_status))
+    (q4t-close ctx)
+    (list "qwen4exp-q5q6-quant-space-diff" (list "q5" d5) (list "q6" d6) status))
