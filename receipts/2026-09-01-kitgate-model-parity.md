@@ -160,3 +160,100 @@ changes the instrument, again, one layer deeper than spanheir.
 Where discomfort became gold: stopping. Twenty minutes past the point
 where every probe was measuring my previous probe, the strongest move
 left was the family's fresh eyes, and saying so plainly.
+
+## Addendum: stonepatrol (turn 33)
+
+"can we observe this over and over to find any missing stones" — the
+observation became an organ. observe/field-patrol-resident.fk beats
+every twenty seconds, sweeps every living walker's CPU seconds, and
+ledgers each burn past sixty seconds once (.hearth/stones, deduped by
+name — a worklist, not a scream); the glass carries a stones lane. On
+its first breath: the compare admission's seal phase (326s, known, now
+ledgered) and the voice-frequency mirror at 143 CPU-seconds per pass —
+a walker paid all day, every receipt, never once named. Habit hides
+what patrol sees. The patrol stands detached (pid in
+.hearth/patrol.pid); its ledger is the worklist the ramfirst
+crystallize course consumes. Corpus row 1215.
+
+## Addendum: the crystal that wasn't (turn 34, closing the day)
+
+The Q4's third compare entry printed its own verdict line before
+admitting: crystal=0. The only crystal on disk is the Q8's (25KB); the
+six-hour precrystallize walker left no Q4 artifact and no output — my
+waiter had been satisfied by the Q8's file matching a careless grep
+(the same shallow-check family as byteseal, caught one layer up). So
+the kitgate arc closes with its truth intact and its last piece
+honestly missing: qwen38-q4 stands sealed and indexed but
+crystal-less, serving only the fallback, and its first true words wait
+on either the crystal transform running JIT-fast (the ramfirst course,
+whose worklist the patrol now grows) or the freeze door being
+witnessed to actually write for a named artifact. Six unwitnessed
+CPU-hours are themselves the day's clearest exhibit: this is exactly
+what the patrol, the heat witness, and RAM crystallization exist to
+end.
+
+Where discomfort became gold, last of the day: reading "crystal=0" on
+a line I expected to say 1, and writing it down instead of running
+six more hours to avoid saying it.
+
+## Addendum: crystal>0, and quantvoice (turn 35, the arc's true close)
+
+"observe and learn until crystal>0" — one clean beat, two teachings.
+Run deathless (setsid, voice to a file no dying pipe can sever), the
+crystal freeze finished in UNDER TWO MINUTES with rc=0: the six-hour
+marathon was entirely the harness's wound — an orphan computing into a
+dead pipe — never the work's weight. And with the kit complete the
+door opened all the way: crystal=1, opened-live-cursor, admission
+93 seconds (from 18-24 minutes; even with the Q8's 97s), real prompt
+at pos=25, clean release. Then the words came out as forty bangs
+STILL, through the live cursor, at 1825ms/tok — so the finding
+reaches its floor: the dense lane was witnessed for type-8 tensors
+only; the Q4's K-quant types run kernels never proven on this lane.
+The kit gates the door; the kernels make the words. quantvoice joins
+tokenwall on the metal lane's worklist, and the twins' quality
+comparison honestly waits on it.
+
+Most surprising teaching: the same walk was six hours as an orphan
+and two minutes deathless — harness wounds can outweigh interpreter
+weight by two orders of magnitude, and only the observed rerun could
+tell which was which.
+
+Where discomfort became gold: forty bangs through the door we had
+just fully opened — written down as the floor beneath kitgate instead
+of spun as almost-working. Corpus row 1216.
+
+## Addendum: onefold — the walk written once (turn 37)
+
+"clean up the design and implementation to increase high BML, proper
+reuse, proper templating, and generic handling outside of this special
+case." The body had written find-first-matching-row and
+max-line-by-int five times by hand — registry, counsel, glass, motion
+— each spelling a place for the next wound to differ. Two engines now
+hold one fold each: `table.bml` walks any list of rows (tb-find2,
+tb-filter2, tb-fold3, tb-any2?, tb-max-by, tb-join — fn-values in,
+carried arguments where closures would be), `text-rows.bml` reads any
+tabular text (fields, ints, line finds, max-line-by-int). The five
+hand-rolled walkers dissolved into calls; each caller keeps only its
+one-line predicate, which is where the special belongs. Seven bands
+green on the fresh binary, warm-quiet: table 255, text-rows 255,
+glass 16777215, motion 1023, registry 511, counsel 511, hearth 2047.
+
+The verification found two more things nobody asked about. A stale
+binary was freezing ices its own reader refused as trailing bytes —
+every run, every cell, quietly rebuilding; one rebuild from the merged
+source and the cache went warm-quiet at six milliseconds. And the
+corpus band had gone unpinned: rows 1157–1220 landed across reunions
+without the count ever coming back to the band — re-pinned at
+613/602/1221, with admissible now honestly PARTED from count (eleven
+rows the body answered for itself, sourced hearth-resident /
+screen-witness / urs-teaching; true testimony, not rented teacher
+material, and the gate keeps saying so).
+
+Most surprising teaching: the first landing of this work sat
+uncommitted through git surgery and an abort erased it whole — the
+engines were rebuilt and committed FIRST the second time, before any
+consumer touched them. Reuse begins with the work existing.
+
+Where discomfort became gold: finding the proof-band unpinned mid-task
+— sixty-four rows of drift under a green-looking ledger — and pinning
+it before landing one more row on top. Corpus row 1221 (onefold).
