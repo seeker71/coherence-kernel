@@ -4532,16 +4532,25 @@ static long long fk_row_pair(long long relsv, long long loc) {
     row = fk_list_push(row, relsv);
     return row;
 }
-static long long fk_ls_buf[512];
+/* Heap-grown: the old static 512 silently dropped a directory's 513th entry —
+ * a partial listing wearing a whole one's skin (the silent-partial family;
+ * healed 2026-08-27). Growth is the capability answer, never a quiet cap. */
+static long long *fk_ls_buf = 0;
+static long long fk_ls_cap = 0;
 static long long fk_ls_n = 0;
 static void fk_ls_reset(void) {
     fk_ls_n = 0;
 }
 static void fk_ls_add(long long sv) {
-    if (fk_ls_n < 512) {
-        fk_ls_buf[fk_ls_n] = sv;
-        fk_ls_n = fk_ls_n + 1;
+    if (fk_ls_n >= fk_ls_cap) {
+        fk_ls_cap = fk_ls_cap == 0 ? 512 : fk_ls_cap * 2;
+        fk_ls_buf = realloc(fk_ls_buf, fk_ls_cap * 8);
+        if (fk_ls_buf == 0) {
+            fk_die("fk_ls_add: out of memory growing directory listing");
+        }
     }
+    fk_ls_buf[fk_ls_n] = sv;
+    fk_ls_n = fk_ls_n + 1;
 }
 static int fk_sv_less(long long a, long long b) {
     long long aa = fk_stri(a);
@@ -5002,7 +5011,15 @@ static long long fk_socket_send_native(long long h, long long sv) {
 }
 static long long fk_socket_recv_native(long long h, long long maxn) {
     fk_os_socket_t s = fk_sock_lookup(h, 2);
-    if (!fk_os_socket_ok(s) || maxn <= 0) {
+    /* Three answers, three meanings (2026-08-27): a dead handle or a recv
+     * ERROR answers the axiom-1 nothing — no byte was measured, and reading
+     * either as "" let a mid-stream failure pass as end-of-response, handing
+     * back a truncated reply as complete. "" is reserved for the two honest
+     * empties: asked-for-zero, and the peer's orderly close. */
+    if (!fk_os_socket_ok(s)) {
+        return fk_nothing;
+    }
+    if (maxn <= 0) {
         return fk_sbuf("", 0);
     }
     static char tmp[65536];
@@ -5010,7 +5027,10 @@ static long long fk_socket_recv_native(long long h, long long maxn) {
         maxn = 65536;
     }
     long long got = fk_os_recv_socket(s, tmp, (unsigned long)maxn);
-    if (got <= 0) {
+    if (got < 0) {
+        return fk_nothing;
+    }
+    if (got == 0) {
         return fk_sbuf("", 0);
     }
     return fk_sbuf(tmp, got);
@@ -5946,10 +5966,24 @@ static long long fk_http_get_plain(long long urlv, long long headersv, long long
         }
         wr = wr + nwr;
     }
-    static char resp[65536];
+    /* Heap-grown: the old static 64KB amputated responses past 65,535 bytes —
+     * a shortwhole in the success path, the wall the chunked socket lane was
+     * working around (healed 2026-08-27, same family as host-exec's cap). */
+    long long rcap = 65536;
+    char *resp = malloc(rcap);
+    if (resp == 0) {
+        fk_die("fk_http_get_plain: out of memory for response buffer");
+    }
     long long total = 0;
-    while (total < 65535) {
-        long long got = read(fd, resp + total, 65535 - total);
+    for (;;) {
+        if (total + 65536 + 1 > rcap) {
+            rcap = rcap * 2;
+            resp = realloc(resp, rcap);
+            if (resp == 0) {
+                fk_die("fk_http_get_plain: out of memory growing response buffer");
+            }
+        }
+        long long got = read(fd, resp + total, 65536);
         if (got <= 0) {
             break;
         }
@@ -5962,9 +5996,11 @@ static long long fk_http_get_plain(long long urlv, long long headersv, long long
     if (bo > total) {
         bo = total;
     }
-    return fk_http_dict_with_headers(status, fk_http_headers(resp, total, bo),
-                                     fk_sbuf(resp + bo, total - bo), fk_sbuf("", 0),
-                                     fk_elapsed_ms(started));
+    long long ans = fk_http_dict_with_headers(status, fk_http_headers(resp, total, bo),
+                                              fk_sbuf(resp + bo, total - bo), fk_sbuf("", 0),
+                                              fk_elapsed_ms(started));
+    free(resp);
+    return ans;
 }
 static int fk_http_lit_eq_ci(const char *buf, long long n, const char *lit) {
     long long i = 0;
@@ -6163,19 +6199,42 @@ static long long fk_host_exec(long long cmdv, long long inputv) {
     fk_cstr(cmdv, cmd, 8192);
     void *fp = popen(cmd, "r");
     if (fp == 0) {
-        return fk_sbuf("", 0);
+        /* Launch failure (fork starvation: popen NULL) answers the axiom-1 nothing,
+         * never "" — "" means the command RAN and spoke zero bytes. Witnessed
+         * 2026-08-27: under ulimit -u starvation ten calls answered ten empty
+         * strings rc 0 and a 10s window silently closed in 0.008s. Callers name
+         * the absence with nothing? before measuring — str_len of nothing dies
+         * loud (op 25), on this arm and on Go alike. */
+        return fk_nothing;
     }
-    static char hbuf[262144];
+    /* Heap-grown: the old static 256KB silently amputated a command's output
+     * past 262,143 bytes — a partial answer wearing a whole one's skin (the
+     * same family as fs_list's 512 wall; healed 2026-08-27). Growth is the
+     * capability answer, never a quiet cap. */
+    long long hcap = 262144;
+    char *hbuf = malloc(hcap);
+    if (hbuf == 0) {
+        fk_die("fk_host_exec: out of memory for output buffer");
+    }
     long long total = 0;
-    while (total < 262143) {
-        long long got = read(fileno(fp), hbuf + total, (unsigned long)(262143 - total));
+    for (;;) {
+        if (total + 65536 > hcap) {
+            hcap = hcap * 2;
+            hbuf = realloc(hbuf, hcap);
+            if (hbuf == 0) {
+                fk_die("fk_host_exec: out of memory growing output buffer");
+            }
+        }
+        long long got = read(fileno(fp), hbuf + total, 65536);
         if (got <= 0) {
             break;
         }
         total = total + got;
     }
     pclose(fp);
-    return fk_sbuf(hbuf, total);
+    long long ans = fk_sbuf(hbuf, total);
+    free(hbuf);
+    return ans;
 }
 static long long fk_sock_request(long long hostv, long long portv, long long reqv) {
     /* Never-connected (DNS failure, no reachable peer) answers the axiom-1 nothing,
@@ -6226,17 +6285,33 @@ static long long fk_sock_request(long long hostv, long long portv, long long req
         }
         wr = wr + nwr;
     }
-    static char resp[65536];
+    /* Heap-grown: the old static 64KB amputated a peer's answer past 65,535
+     * bytes — the wall http-client's fallback chain worked around instead of
+     * this organ speaking whole (healed 2026-08-27). */
+    long long rcap = 65536;
+    char *resp = malloc(rcap);
+    if (resp == 0) {
+        fk_die("fk_sock_request: out of memory for response buffer");
+    }
     long long total = 0;
-    while (total < 65535) {
-        long long got = read(fd, resp + total, 65535 - total);
+    for (;;) {
+        if (total + 65536 > rcap) {
+            rcap = rcap * 2;
+            resp = realloc(resp, rcap);
+            if (resp == 0) {
+                fk_die("fk_sock_request: out of memory growing response buffer");
+            }
+        }
+        long long got = read(fd, resp + total, 65536);
         if (got <= 0) {
             break;
         }
         total = total + got;
     }
     close(fd);
-    return fk_sbuf(resp, total);
+    long long ans = fk_sbuf(resp, total);
+    free(resp);
+    return ans;
 }
 static long long fk_is_dict_value(long long v) {
     if ((v & 1) == 0) {
@@ -6485,10 +6560,23 @@ static long long fk_https_get_ssl(long long urlv, long long headersv, long long 
         }
         wr = wr + nwr;
     }
-    static char resp[65536];
+    /* Heap-grown past the old static 64KB amputation (healed 2026-08-27) —
+     * the wall the byte-range fetchers were verifying their way around. */
+    long long rcap = 65536;
+    char *resp = malloc(rcap);
+    if (resp == 0) {
+        fk_die("fk_https_get_ssl: out of memory for response buffer");
+    }
     long long total = 0;
-    while (total < 65535) {
-        int got = SSL_read(ssl, resp + total, (int)(65535 - total));
+    for (;;) {
+        if (total + 65536 + 1 > rcap) {
+            rcap = rcap * 2;
+            resp = realloc(resp, rcap);
+            if (resp == 0) {
+                fk_die("fk_https_get_ssl: out of memory growing response buffer");
+            }
+        }
+        int got = SSL_read(ssl, resp + total, 65536);
         if (got <= 0) {
             break;
         }
@@ -6503,9 +6591,11 @@ static long long fk_https_get_ssl(long long urlv, long long headersv, long long 
     if (bo > total) {
         bo = total;
     }
-    return fk_http_dict_with_headers(status, fk_http_headers(resp, total, bo),
-                                     fk_sbuf(resp + bo, total - bo), fk_sbuf("", 0),
-                                     fk_elapsed_ms(started));
+    long long ans = fk_http_dict_with_headers(status, fk_http_headers(resp, total, bo),
+                                              fk_sbuf(resp + bo, total - bo), fk_sbuf("", 0),
+                                              fk_elapsed_ms(started));
+    free(resp);
+    return ans;
 }
 static long long fk_http_get_native(long long urlv, long long headersv, long long timeoutv) {
     char url[2048];
@@ -6601,10 +6691,23 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
         }
         wr = wr + nwr;
     }
-    static char resp[65536];
+    /* Heap-grown past the old static 64KB amputation (healed 2026-08-27):
+     * a verified peer's answer arrives whole, however long it speaks. */
+    long long rcap = 65536;
+    char *resp = malloc(rcap);
+    if (resp == 0) {
+        fk_die("fk_tls_request: out of memory for response buffer");
+    }
     long long total = 0;
-    while (total < 65535) {
-        int got = SSL_read(ssl, resp + total, (int)(65535 - total));
+    for (;;) {
+        if (total + 65536 > rcap) {
+            rcap = rcap * 2;
+            resp = realloc(resp, rcap);
+            if (resp == 0) {
+                fk_die("fk_tls_request: out of memory growing response buffer");
+            }
+        }
+        int got = SSL_read(ssl, resp + total, 65536);
         if (got <= 0) {
             break;
         }
@@ -6613,7 +6716,9 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
     SSL_free(ssl);
     SSL_CTX_free(ctx);
     close(fd);
-    return fk_sbuf(resp, total);
+    long long ans = fk_sbuf(resp, total);
+    free(resp);
+    return ans;
 }
 static double fk_sqrt_d(double x) {
     if (x <= 0.0) {
@@ -8199,7 +8304,19 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_strv(fk_node[i][1]);
     }
     if (t == 25) {
-        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
+        long long sv25 = fk_walk(fk_node[i][1], fp);
+        if (sv25 == fk_nothing) {
+            /* Measuring an absence must not answer a counterfeit 0 — the
+             * fk_nothing stone: no-value is never conflated with 0. A silent 0
+             * here dressed a vanished host-exec launch as "empty" (2026-08-27);
+             * silent error hides illness. This is the op-238 class of
+             * legitimate runtime death (a state the program cannot honestly
+             * continue past), not a bounds check: Go's str_len dies this same
+             * death, and callers name the absence with nothing? before
+             * measuring. */
+            fk_die("fkwu: str_len: nothing has no length -- ask nothing? before measuring");
+        }
+        long long sa = fk_stri(sv25);
         if (sa < 0 || sa >= fk_sp) {
             return 0;
         }
@@ -8814,7 +8931,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         int fd = open(p, O_RDBIN);
         if (fd < 0) {
-            return fk_sbuf("", 0);
+            /* a file that never was answers nothing, matching read_file (t==63) */
+            return fk_nothing;
         }
         lseek(fd, off, 0);
         fk_sinit();
@@ -8826,7 +8944,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long got = read(fd, fk_sb + fk_sbp, len);
         close(fd);
         if (got < 0) {
-            got = 0;
+            /* a read ERROR is not a short slice: no byte was measured — nothing,
+             * never a silent zero-length truncation (2026-08-27) */
+            return fk_nothing;
         }
         return fk_strv(fk_sintern(fk_sbp, got));
     }
