@@ -57,9 +57,12 @@ after both contexts were prefilled and the exact route assessment was ready
 was the leaking old publisher offered `quit` through
 `native-model-dual-owner-command-run.fk`.
 
-One owner remains:
+After a clean rebase changed the bootstrap source identity, freshness correctly
+fell from 31 to 15. The one Metal+MLX `fkwu` binary was rebuilt, all five
+bootstrap witnesses passed again, and the overlap/quit handoff was repeated.
+One exact rebuilt owner remains:
 
-- PID 46600, publisher `models.dual-resident.i1788370132935`;
+- PID 5748, publisher `models.dual-resident.i1788371158624`;
 - current PID/start binding `exact-snapshot-owner`, source newer = 0;
 - Qwen route ready = 1, Llama 3B route ready = 1, parallel ready = 1;
 - evidence `derived-window`, because a current liveness observation validates
@@ -68,11 +71,21 @@ One owner remains:
   103,079,215,104-byte policy budget; mapped and materialized bytes remain
   unavailable rather than being inferred.
 
-An explicit `status` preserved positions Qwen 20 and 3B 6. A Qwen step then
-produced token 198 and advanced 20 -> 21. A 3B step produced token 13 (`Paris`)
-and advanced 6 -> 7. Before/after publications showed only the chosen model
-active; both then returned to idle while parallel route readiness stayed 1.
-Idle quarter-second polls emitted no state renders between commands.
+An explicit `status` on the first corrected owner preserved positions Qwen 20
+and 3B 6. On both that owner and the final rebuilt owner, a Qwen step produced
+token 198 and advanced 20 -> 21; a 3B step produced token 13 (`Paris`) and
+advanced 6 -> 7. Before/after publications showed only the chosen model active;
+both then returned to idle while parallel route readiness stayed 1. Idle
+quarter-second polls emitted no state renders between commands. After the
+final steps, PID 5748 remained alive for 6:01:54 at 71,616 KiB RSS, 0.0% CPU,
+and nice 10; its owner-bound snapshot was about 21.5 million ms old while
+current exact PID/start liveness still supported both routes.
+
+One route read immediately after a model step crossed the five-second attention
+threshold at about 31 seconds. Repeating the identical bounded route cell
+returned the same exact-owner assessment in 15 ms, and the framebuffer records
+the branch and re-observation. This is retained as a transient IO/cache
+observation, not promoted to a persistent route cost or silently discarded.
 
 ## Physical Glass witness
 
@@ -114,7 +127,7 @@ were executable and green.
 - turn evidence cursor: `16777215`
 - dashboard and token-flow preflights: balanced, zero errors, warnings, or
   unresolved calls
-- bounded framebuffer diagnostic: 40 events, every correction re-observed
+- bounded framebuffer diagnostic: 48 events, every correction re-observed
 - `git diff --check`: clean
 
 ## Honest remaining doors
