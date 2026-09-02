@@ -1,0 +1,122 @@
+; native-model-route-readiness-band.fk — route availability is stronger than mapping.
+;
+; Verdict 65535:
+;   1    exact current owner plus retained loaded/prefilled handle is ready
+;   2    both independent routes make parallel availability measured one
+;   4    a fresh explicitly unprefilled route is measured zero
+;   8    aged owner state remains derived-ready while PID/start is current
+;   16   an unbound live process is unavailable, not ready
+;   32   a missing command heartbeat is unavailable
+;   64   mismatched state handles are unavailable
+;   128  last observed handles remain inspectable without upgrading readiness
+;   256  invalid snapshots are unavailable
+;   512  future clock skew has age zero rather than a negative age
+;   1024 missing one route makes aggregate parallel readiness unavailable
+;   2048 every returned fact satisfies the typed fact schema
+;   4096 snapshot age no longer renews or expires an exact current owner state
+;   8192 Glass's lease-current sample join correlates liveness, owner stamp,
+;        owner-scoped state, and context handle before deriving readiness
+;   16384 a last-observed liveness row makes the Glass route unavailable
+;   32768 authority and live wrapper retain snapshot age without using it as
+;         owner freshness; current PID/start and source-newer remain visible
+;
+; preludes: form-stdlib/native-model-route-readiness.bml
+; witnessed: 2026-09-03 -> 65535
+
+(do
+    (defn nmrrb-bit (held weight) (if (eq held 1) weight 0))
+    (defn nmrrb-has (text needle) (if (ge (str_find text needle 0) 0) 1 0))
+    (defn nmrrb-state (id parent owner state enabled handle epoch)
+        (nmdt-model-state-sample-owned id parent owner state enabled handle epoch))
+    (defn nmrrb-retained (sample)
+        (fgtm-sample (fgtm-sample-id sample) (fgtm-sample-parent sample)
+            (fgtm-sample-kind sample) (fgtm-sample-plane sample)
+            (fgtm-sample-owner sample) (fgtm-sample-lane sample)
+            (fgtm-sample-purpose sample) (fgtm-sample-bytes sample)
+            (fgtm-sample-capacity sample) (fgtm-sample-lifecycle sample)
+            (fgtm-sample-read-epoch sample) (fgtm-sample-write-epoch sample)
+            (fgtm-sample-heat sample) (fgtm-sample-handle sample)
+            (fgtm-sample-evictability sample) "derived-window"
+            "glass.stale-snapshot" (fgtm-sample-channels sample)))
+    (defn nmrrb-retained-all (samples)
+        (if (eq (len samples) 0) (list)
+            (cons (nmrrb-retained (head samples))
+                (nmrrb-retained-all (tail samples)))))
+    (let started 1000)
+    (let observed 2000)
+    (let now 2200)
+    (let publisher (nmdt-owner-publisher started))
+    (let owner (nmdt-owner-correlation publisher 42 started (nmdt-owner-incarnation started) 7 observed))
+    (let heartbeat (nmdt-owner-heartbeat-sample owner))
+    (let qid "model.qwen")
+    (let tid "model.threeb")
+    (let qmodel (nmdt-callable-sample qid publisher "ready" 101 1400 1400))
+    (let tmodel (nmdt-callable-sample tid publisher "ready" 202 1450 1450))
+    (let qloaded (nmrrb-state "state.q.loaded" qid publisher "loaded" 1 101 1500))
+    (let qprefilled (nmrrb-state "state.q.prefilled" qid publisher "prefilled" 1 101 1500))
+    (let tloaded (nmrrb-state "state.t.loaded" tid publisher "loaded" 1 202 1550))
+    (let tprefilled (nmrrb-state "state.t.prefilled" tid publisher "prefilled" 1 202 1550))
+    (let samples (list heartbeat qmodel tmodel qloaded qprefilled tloaded tprefilled))
+    (let snapshot (fgtm-snapshot publisher observed samples))
+    (let qready (nmrr-model-route snapshot 1 "exact-snapshot-owner" now qid))
+    (let tready (nmrr-model-route snapshot 1 "exact-snapshot-owner" now tid))
+    (let parallel (nmrr-parallel-route qready tready now))
+    (let notprefilled (fgtm-snapshot publisher observed (list heartbeat qmodel qloaded (nmrrb-state "state.q.prefilled" qid publisher "prefilled" 0 101 1500))))
+    (let notready (nmrr-model-route notprefilled 1 "exact-snapshot-owner" now qid))
+    (let stale (nmrr-model-route snapshot 1 "exact-snapshot-owner" 4001 qid))
+    (let deadOwner (nmrr-model-route snapshot 0 "exact-snapshot-owner" now qid))
+    (let unbound (nmrr-model-route snapshot 1 "unbound-last-observed" now qid))
+    (let noheartbeat (nmrr-model-route (fgtm-snapshot publisher observed (tail samples)) 1 "exact-snapshot-owner" now qid))
+    (let mismatch (nmrr-model-route (fgtm-snapshot publisher observed (list heartbeat qmodel qloaded (nmrrb-state "state.q.prefilled" qid publisher "prefilled" 1 999 1500))) 1 "exact-snapshot-owner" now qid))
+    (let invalid (nmrr-model-route (list) 1 "exact-snapshot-owner" now qid))
+    (let unavailableParallel (nmrr-parallel-route qready deadOwner now))
+    (let currentLiveness (fgtm-sample (NMRROwnerLivenessId) (fgtm-absent)
+        "owner-liveness" "cpu" "models.observer" "model-owner"
+        "os-process-lifetime-current" (fgtm-absent) (fgtm-absent)
+        "active" (fgtm-present observed) (fgtm-present started)
+        (fgtm-absent) (fgtm-present 42) "never" "physical-live"
+        "process.lifetime" (list "process" "model" "health")))
+    (let joinedSamples (cons currentLiveness (nmrrb-retained-all samples)))
+    (let joinedReady (nmrr-model-route-from-current-samples joinedSamples now qid))
+    (let staleLiveness (fgtm-sample (NMRROwnerLivenessId) (fgtm-absent)
+        "owner-liveness" "cpu" "models.observer" "model-owner"
+        "os-process-lifetime-current" (fgtm-absent) (fgtm-absent)
+        "active" (fgtm-present observed) (fgtm-present started)
+        (fgtm-absent) (fgtm-present 42) "never" "derived-window"
+        "glass.stale-snapshot" (list "process" "model" "health")))
+    (let joinedStale (nmrr-model-route-from-current-samples
+        (cons staleLiveness (nmrrb-retained-all samples)) now qid))
+    (let authority (read_file "form/form-stdlib/bml/native-model-route-readiness.bml"))
+    (let liveSource (read_file "observe/native-model-route-readiness-live-run.fk"))
+    (sum (list
+        (nmrrb-bit (and (eq (nmrr-fact-present? qready) 1) (and (eq (nmrr-fact-value qready) 1) (eq (str_len (nmrr-fact-missing-door qready)) 0))) 1)
+        (nmrrb-bit (and (eq (nmrr-fact-present? parallel) 1) (eq (nmrr-fact-value parallel) 1)) 2)
+        (nmrrb-bit (and (eq (nmrr-fact-present? notready) 1) (eq (nmrr-fact-value notready) 0)) 4)
+        (nmrrb-bit (and (eq (nmrr-fact-present? stale) 1) (and (eq (nmrr-fact-value stale) 1) (str_eq (nmrr-fact-evidence stale) "derived-window"))) 8)
+        (nmrrb-bit (and (eq (nmrr-fact-present? unbound) 0) (and (str_eq (nmrr-fact-reason unbound) "owner-snapshot-unbound") (str_eq (nmrr-fact-missing-door unbound) "native-model.owner-binding"))) 16)
+        (nmrrb-bit (and (eq (nmrr-fact-present? noheartbeat) 0) (and (str_eq (nmrr-fact-reason noheartbeat) "owner-command-heartbeat-absent-or-stale") (str_eq (nmrr-fact-missing-door noheartbeat) "native-model.owner-command-heartbeat"))) 32)
+        (nmrrb-bit (and (eq (nmrr-fact-present? mismatch) 0) (and (str_eq (nmrr-fact-reason mismatch) "model-state-handle-mismatch") (str_eq (nmrr-fact-missing-door mismatch) "native-model.state.handle-correlation.model.qwen"))) 64)
+        (nmrrb-bit (and (eq (fgtm-field-value (nmrr-last-handle snapshot qid)) 101) (str_eq (nmrr-fact-evidence stale) "derived-window")) 128)
+        (nmrrb-bit (and (eq (nmrr-fact-present? invalid) 0) (str_eq (nmrr-fact-reason invalid) "owner-snapshot-invalid-or-absent")) 256)
+        (nmrrb-bit (eq (nmrr-snapshot-age snapshot 1999) 0) 512)
+        (nmrrb-bit (and (eq (nmrr-fact-present? unavailableParallel) 0) (and (str_eq (nmrr-fact-reason unavailableParallel) "one-or-more-routes-unavailable") (str_eq (nmrr-fact-missing-door unavailableParallel) "native-model.route.qwen-and-3b"))) 1024)
+        (nmrrb-bit (and (eq (nmrr-fact-valid? qready) 1) (and (eq (nmrr-fact-valid? notready) 1) (and (eq (nmrr-fact-valid? stale) 1) (eq (nmrr-fact-valid? parallel) 1)))) 2048)
+        (nmrrb-bit (and (gt (nmrr-snapshot-age snapshot 4001) 1000)
+            (and (eq (nmrr-fact-present? stale) 1)
+                (str_eq (nmrr-fact-reason stale) "current-owner-retained-route-ready"))) 4096)
+        (nmrrb-bit (and (eq (nmrr-fact-present? joinedReady) 1)
+            (and (eq (nmrr-fact-value joinedReady) 1)
+                (str_eq (nmrr-fact-evidence joinedReady) "derived-window"))) 8192)
+        (nmrrb-bit (and (eq (nmrr-fact-present? joinedStale) 0)
+            (and (str_eq (nmrr-fact-reason joinedStale)
+                    "owner-process-liveness-absent-or-stale")
+                (str_eq (nmrr-fact-missing-door joinedStale)
+                    "host.process.owner-liveness"))) 16384)
+        (nmrrb-bit (and (eq (nmrrb-has authority "an aged owner state snapshot remains usable only while that same owner lifetime is current") 1)
+            (and (eq (nmrrb-has authority "derived-window readiness") 1)
+                (and (eq (nmrrb-has liveSource "\"snapshot-age-ms\" snapshotAgeField") 1)
+                    (and (eq (nmrrb-has liveSource "\"source-newer-than-owner\" sourceNewerField") 1)
+                        (and (eq (nmrrb-has liveSource
+                                "(nmdoc-target-publisher correlation)") 1)
+                            (eq (nmrrb-has liveSource
+                                "nmdoc-newest-model-publisher") 0)))))) 32768))))

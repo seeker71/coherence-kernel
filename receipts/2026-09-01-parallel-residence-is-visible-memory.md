@@ -1,5 +1,11 @@
 # 2026-09-01 — parallel residence is visible memory
 
+> Correction witnessed 2026-09-03: the positive carrier handles below prove
+> callable contexts, while the byte values are logical catalog artifact sizes.
+> They do not prove per-model mapped or materialized pages. The corrected
+> executable boundary and physical `vmmap` evidence live in
+> `2026-09-03-owner-state-is-an-event-not-an-idle-render.md`.
+
 Urs asked for the model fleet to stay physically present until pressure, and
 for the glass to make memory purpose, age, and the next eviction obvious.
 
@@ -21,17 +27,17 @@ reported both positive handles, both loaded, and both prefilled.
 
 ## The glass
 
-`form/form-stdlib/native-model-memory-glass.bml` now projects physical carrier
-evidence as `FORM-MODEL-MEMORY-V1` rows:
+`form/form-stdlib/native-model-memory-glass.bml` projects carrier handles,
+logical catalog extents, and policy state as `FORM-MODEL-MEMORY-V1` rows:
 
-- green `◆` — resident native Form/world validation and evaluation;
+- green `◆` — the running native Form/world validation and evaluation process;
 - blue `▰` — 3B natural-language-to-Form proposal weights;
 - purple `▰` — Qwen reasoning/fallback weights;
 - orange `◇` — the Qwen expert concept overlay;
 - cyan `▤◈` — KV and recurrent substate;
 - neutral `□` — logical admission headroom.
 
-The capacity strip is scaled by known physical model-weight bytes.  Fill alpha
+The capacity strip is scaled by logical catalog model-weight bytes. Fill alpha
 is read age; edge alpha is write age.  The text fallback uses `█▓▒░`.  `⇣`
 marks the next policy-ranked physically releasable unit, `·` another eligible whole
 model, and `⊘` a desired grain that is not independently releasable yet.
@@ -45,12 +51,13 @@ became opaque and the `⇣` returned to 3B.  Both handles remained alive.
 The 512 Qwen experts are still packed into three whole expert tensors per
 layer.  They are shown orange and pinned because no expert-level Metal handle
 exists.  Both KV/substate overlays are also pinned because their buffer bytes
-and partial-release handles are not yet exposed.  Therefore the first physical
-pressure action today is an inactive whole model, even though the policy's
+and partial-release handles are not yet exposed. Therefore the first available
+carrier release action is closing an inactive whole model context; its physical
+byte effect is not claimed. The policy's
 north star is independently mapped split experts, then KV/substate, then an
 inactive whole model, ranked within each grain by use count and last use.
 
-The capacity strip includes known model-weight bytes only.  The current Metal
+The capacity strip includes logical catalog model-weight bytes only. The current Metal
 carrier does not expose device `currentAllocatedSize` or
 `recommendedMaxWorkingSetSize`, so the glass says `pressure=unobserved` and
 does not fabricate GPU pressure or state-buffer sizes.  macOS separately

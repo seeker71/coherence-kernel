@@ -1,5 +1,5 @@
 ; form-cli-turn-evidence-cursor-band.fk — BML cursor discovery is private,
-; scannerless, and yields a durable bounded continuation. Expected: 8388607
+; scannerless, and yields a durable bounded continuation. Expected: 16777215
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
 ; preludes: form-stdlib/form-cli-turn-evidence.fk
@@ -70,14 +70,41 @@
     (let grown-path "/tmp/form-cli-turn-evidence-grown-band.jsonl")
     (let grown-write (write_file_text grown-path
         (fctel-join (list source-text turn2))))
-    (let grown-stale (fctec-validation-grown-step source-evidence grown-path
-        (file_size grown-path) (str_len source-text) (str_len source-text)))
+    (let grown-stale (fctec-latest-range-step grown-path
+        (str_len source-text) (file_size grown-path) (file_size grown-path)))
     (let grown-open-path "/tmp/form-cli-turn-evidence-grown-open-band.jsonl")
-    (let grown-open-write (write_file_text grown-open-path
-        (fctel-join (list source-text noise))))
-    (let grown-progress (fctec-validation-grown-step source-evidence
-        grown-open-path (file_size grown-open-path)
-        (str_len source-text) (str_len source-text)))
+    (let grown-open-text (fctel-join (list source-text noise)))
+    (let grown-open-write (write_file_text grown-open-path grown-open-text))
+    (let grown-open-snapshot (file_size grown-open-path))
+    (let grown-progress (fctec-latest-range-step grown-open-path
+        (str_len source-text) grown-open-snapshot grown-open-snapshot))
+    (let grown-saved-cursor (fctec-latest-next grown-progress))
+    (let grown-validation (split-on (fctec-validation-row source-evidence
+        grown-open-path grown-open-snapshot grown-saved-cursor
+        (str_len source-text)) "|"))
+    ; Growth after a slice must not move the frozen snapshot or abandon its
+    ; cursor.  Once that generation reaches its checked floor, the appended
+    ; extension becomes the next bounded generation.
+    (let extension "{\"type\":\"noise-after-snapshot\"}\n")
+    (let grown-open-extended (write_file_text grown-open-path
+        (fctel-join (list grown-open-text extension))))
+    (let grown-current-size (file_size grown-open-path))
+    (let resumed-snapshot (fctec-validation-snapshot grown-validation
+        source-evidence grown-current-size))
+    (let resumed-cursor (fctec-validation-cursor grown-validation
+        source-evidence grown-current-size))
+    (let resumed-floor (fctec-validation-floor grown-validation
+        source-evidence))
+    (let resumed-old-range (fctec-latest-range-step grown-open-path
+        resumed-floor resumed-cursor resumed-snapshot))
+    (let settled-extension (fctec-latest-range-step grown-open-path
+        grown-open-snapshot grown-current-size grown-current-size))
+    (let grown-terminal-path "/tmp/form-cli-turn-evidence-grown-terminal-band.jsonl")
+    (let grown-terminal-write (write_file_text grown-terminal-path
+        (fctel-join (list grown-open-text turn2))))
+    (let stale-extension (fctec-latest-range-step grown-terminal-path
+        grown-open-snapshot (file_size grown-terminal-path)
+        (file_size grown-terminal-path)))
     (let stale-row-path "/tmp/form-cli-turn-evidence-stale-row-band")
     (let stale-validation-path "/tmp/form-cli-turn-evidence-stale-validation-band")
     (let stale-row-write (write_file_text stale-row-path "old-observed-row"))
@@ -85,12 +112,23 @@
     (let stale-expired (fctec-expire-stale stale-row-path stale-validation-path))
     (let validation-size (file_size grown-open-path))
     (let validation-good (split-on (fctec-validation-row source-evidence
-        grown-open-path validation-size (sub validation-size 1)) "|"))
+        grown-open-path validation-size (sub validation-size 1)
+        (fcte-carrier-size source-evidence)) "|"))
+    (let validation-legacy (split-on (fctel-join (list
+        "turn-evidence-latest-validation-v1|" (fcte-thread-id source-evidence)
+        "|" (fcte-turn-id source-evidence) "|"
+        (int_to_str (fcte-carrier-size source-evidence)) "|"
+        (int_to_str (fcte-complete-at source-evidence)) "|"
+        (int_to_str validation-size) "|" (int_to_str (sub validation-size 1))
+        "|" (fcte-model-provider source-evidence) "|"
+        (fcte-model source-evidence))) "|"))
     (let validation-low (fctecb-set validation-good 6
         (int_to_str (fcte-carrier-size source-evidence))))
     (let validation-high (fctecb-set validation-good 6
         (int_to_str (add validation-size 1))))
     (let validation-old-snapshot (fctecb-set validation-good 5
+        (int_to_str (sub (fcte-carrier-size source-evidence) 1))))
+    (let validation-bad-floor (fctecb-set validation-good 9
         (int_to_str (sub (fcte-carrier-size source-evidence) 1))))
     (sum (list
         (fctecb-bit (eq (fctec-result? all) 1) 1)
@@ -160,7 +198,7 @@
                 (and (str_eq (fctec-attention-state 5000) "within")
                     (str_eq (fctec-attention-state 5001) "over")))) 2097152)
         (fctecb-bit (and (str_eq (fctec-validation-range-rule)
-            "persisted-latestness-cursor-stays-strictly-inside-the-unchecked-append-range")
+            "each-persisted-append-snapshot-resumes-to-its-checked-floor-before-growth-rolls-forward")
             (and (eq (fctec-validation-matches? validation-good
                     source-evidence validation-size) 1)
                 (and (eq (fctec-validation-matches? validation-low
@@ -169,6 +207,18 @@
                             source-evidence validation-size) 0)
                         (and (eq (fctec-validation-matches? validation-old-snapshot
                                 source-evidence validation-size) 0)
-                            (eq (fctec-validation-cursor validation-low
-                                source-evidence validation-size)
-                                validation-size)))))) 4194304))))
+                            (and (eq (fctec-validation-matches? validation-bad-floor
+                                    source-evidence validation-size) 0)
+                                (eq (fctec-validation-cursor validation-low
+                                    source-evidence validation-size)
+                                    validation-size))))))) 4194304)
+        (fctecb-bit (and (eq (fctec-validation-matches? validation-legacy
+                                source-evidence validation-size) 1)
+            (and (eq (fctec-validation-floor validation-legacy source-evidence)
+                    (fcte-carrier-size source-evidence))
+            (and (eq resumed-snapshot grown-open-snapshot)
+            (and (eq resumed-cursor grown-saved-cursor)
+            (and (eq resumed-floor (fcte-carrier-size source-evidence))
+            (and (eq (fctec-latest? resumed-old-range) 1)
+            (and (eq (fctec-latest? settled-extension) 1)
+                 (eq (fctec-latest-status stale-extension) 0)))))))) 8388608))))
