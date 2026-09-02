@@ -32,12 +32,19 @@ def parse_manifest(text: str) -> list[tuple[str, int, int]]:
             depth -= 1
         i += 1
     body = text[start : i - 1]
-    return [
+    rows = [
         (name, int(arity), int(tag))
         for name, arity, tag, _cls in re.findall(
-            r'\(nom-row "([^"]+)" (\d+) (\d+) "([^"]+)"\)', body
+            r'\(nom-row "([^"]+)" (-?\d+) (\d+) "([^"]+)"\)', body
         )
     ]
+    negative = [r for r in rows if r[1] < 0]
+    if negative:
+        # stdlib flt-op2 folds any unrecognized arity as a QUAD, so writing a
+        # variadic row into its flt-ops would mis-lower every call. Variadic
+        # ops live in flatten/'s flt-ops + the sync gate's VARIADIC_OPS set.
+        raise ValueError(f"variadic (arity<0) rows cannot ride the manifest lane: {negative}")
+    return rows
 
 
 def format_flt_ops(rows: list[tuple[str, int, int]]) -> str:
