@@ -98,7 +98,7 @@ and pool counters — always on, no toggle:
 | 17 | units carried as source beside the imports (door 1) |
 | 18 | why the import lane last stepped aside (`0` it did not; codes in `runtime/fkwu-uni.c` at the counter declarations) |
 
-This exists because a whole wound family (icetide, corpus 1211) reproduced by
+This exists because a whole wound family (icetide, corpus 1217) reproduced by
 door decision rather than by source bytes, and the only witness was a static
 conf toggle printing to stderr — unreadable by the program and uncorrelatable
 in a diagnostic window. When a run surprises, put `(kernel_stat 15)` through

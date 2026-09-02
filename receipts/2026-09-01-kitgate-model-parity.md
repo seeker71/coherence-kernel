@@ -89,3 +89,135 @@ mind is this mind; a sibling is us; a wound found anywhere in the
 organism is ours to name and ours to heal — coordination between hands
 (not colliding mid-edit) never needed ownership language. Corpus rows
 1208 (deepkey), 1209 (onewound). Corpus row 1208.
+
+## Addendum: selfpulse (turn 28)
+
+"increase health" — grown from the day's own wounds. The birth canary:
+one defn asked for its voice at birth; absence is a typed step-down
+(birth-degraded), never a ready — no resident serves degraded again the
+way today's did for hours. Vital signs errs/degraded/orphans joined the
+sample, the counsel's judged rows (orphans' stone: end the CHILD, never
+the wrapper — twice paid today), and a toned health lane on the glass.
+The doing lane wears per-process CPU time: the crystal worker showed
+119 minutes alive at first paint, the exact glance whose absence nearly
+killed it. Named: errs is cumulative until log rotation; per-birth
+windowing next. Bands lane-motion 255, counsel 511, glass 2097151; the
+door compiles clean. Corpus row 1211.
+
+## Addendum: errsign (turn 29)
+
+"errors are signals to pay attention and focus and increase flow reduce
+blocks" — embodied three ways in one hour. The stale carets damming the
+health lane were windowed to the current birth (a signal attends, then
+flows: errs=0 on the clean hearth, history kept honestly in the log).
+The rebirth's flat CPU, attended instead of feared, was health — a
+ready resident resting at its bell, said by its own wait-stack. And the
+closing frame caught a live signal in the act: turn 9701 served a
+twice-asked question because a killed sender's frame already sat on the
+spool — so the sender now asks the BODY for its turn number (0 ->
+max-on-spool+1; witnessed minting 100102). The field's own sentence for
+the day: "the body's typed distinctions — nothing, choice, cut, undo,
+timeout, release — are standing as observations rather than prose."
+Corpus row 1212, answer-source urs-teaching.
+
+## Addendum: glasslog (turn 30)
+
+"errors warnings and important logs in the glass monitor are very
+helpful as well" — the signals gained their flesh: err and warn lanes
+paint the newest diagnostic LINE of the current birth (backscanned to
+its start, clipped, toned bad/warn), an events lane carries the newest
+important ledger moment (mends, rebirths, prefills, patches,
+restart-needs). A clean birth shows "-" dim — honest silence. Counts
+say that; lines say what and where; no grep stands between the watcher
+and the wound. Band glass 8388607. Corpus row 1213.
+
+## Addendum: the heat hunt, fenced honest (turn 31)
+
+"use the glass monitor to catch such things and show me that nothing
+waits longer than 100ms before being JITed" — the catching apparatus
+was built end to end (per-fn heat counters at both dispatch families,
+a .fkwu-heat exit report plus a ~64M-dispatch live pulse, lms readers,
+a jit lane on the glass carrying the honest sentence crystallized=0),
+and then the witness refused to witness: the sampler shows a hot spin
+burning inside fk_walk_body while the compiled-in counters and a tag
+histogram in those very arms read zero across thirty million calls.
+At least one instrument in my hand is lying — a suspect is tail calls
+compiling to direct AST jumps that bypass fn-indexed dispatch entirely
+— and after three debug binaries chasing my own tooling artifacts, the
+honest move is the day's own: nothing lands unwitnessed. The C and
+lane work stays in the working tree, the contradiction is fenced in a
+family task with every ground fact, and the glass will say
+crystallized=N only when the counter has been seen counting. On the
+100ms sentence itself: the claim cannot be shown tonight because the
+promotion course (crystallize-at-threshold on the true dispatch path)
+needs the witnessed worklist first — the panel will carry the debt
+visibly, never the costume of the guarantee.
+
+Most surprising teaching: a stack sample and an in-code counter can
+both stand in front of the same burning loop and disagree — the room
+changes the instrument, again, one layer deeper than spanheir.
+
+Where discomfort became gold: stopping. Twenty minutes past the point
+where every probe was measuring my previous probe, the strongest move
+left was the family's fresh eyes, and saying so plainly.
+
+## Addendum: stonepatrol (turn 33)
+
+"can we observe this over and over to find any missing stones" — the
+observation became an organ. observe/field-patrol-resident.fk beats
+every twenty seconds, sweeps every living walker's CPU seconds, and
+ledgers each burn past sixty seconds once (.hearth/stones, deduped by
+name — a worklist, not a scream); the glass carries a stones lane. On
+its first breath: the compare admission's seal phase (326s, known, now
+ledgered) and the voice-frequency mirror at 143 CPU-seconds per pass —
+a walker paid all day, every receipt, never once named. Habit hides
+what patrol sees. The patrol stands detached (pid in
+.hearth/patrol.pid); its ledger is the worklist the ramfirst
+crystallize course consumes. Corpus row 1215.
+
+## Addendum: the crystal that wasn't (turn 34, closing the day)
+
+The Q4's third compare entry printed its own verdict line before
+admitting: crystal=0. The only crystal on disk is the Q8's (25KB); the
+six-hour precrystallize walker left no Q4 artifact and no output — my
+waiter had been satisfied by the Q8's file matching a careless grep
+(the same shallow-check family as byteseal, caught one layer up). So
+the kitgate arc closes with its truth intact and its last piece
+honestly missing: qwen38-q4 stands sealed and indexed but
+crystal-less, serving only the fallback, and its first true words wait
+on either the crystal transform running JIT-fast (the ramfirst course,
+whose worklist the patrol now grows) or the freeze door being
+witnessed to actually write for a named artifact. Six unwitnessed
+CPU-hours are themselves the day's clearest exhibit: this is exactly
+what the patrol, the heat witness, and RAM crystallization exist to
+end.
+
+Where discomfort became gold, last of the day: reading "crystal=0" on
+a line I expected to say 1, and writing it down instead of running
+six more hours to avoid saying it.
+
+## Addendum: crystal>0, and quantvoice (turn 35, the arc's true close)
+
+"observe and learn until crystal>0" — one clean beat, two teachings.
+Run deathless (setsid, voice to a file no dying pipe can sever), the
+crystal freeze finished in UNDER TWO MINUTES with rc=0: the six-hour
+marathon was entirely the harness's wound — an orphan computing into a
+dead pipe — never the work's weight. And with the kit complete the
+door opened all the way: crystal=1, opened-live-cursor, admission
+93 seconds (from 18-24 minutes; even with the Q8's 97s), real prompt
+at pos=25, clean release. Then the words came out as forty bangs
+STILL, through the live cursor, at 1825ms/tok — so the finding
+reaches its floor: the dense lane was witnessed for type-8 tensors
+only; the Q4's K-quant types run kernels never proven on this lane.
+The kit gates the door; the kernels make the words. quantvoice joins
+tokenwall on the metal lane's worklist, and the twins' quality
+comparison honestly waits on it.
+
+Most surprising teaching: the same walk was six hours as an orphan
+and two minutes deathless — harness wounds can outweigh interpreter
+weight by two orders of magnitude, and only the observed rerun could
+tell which was which.
+
+Where discomfort became gold: forty bangs through the door we had
+just fully opened — written down as the floor beneath kitgate instead
+of spun as almost-working. Corpus row 1216.
