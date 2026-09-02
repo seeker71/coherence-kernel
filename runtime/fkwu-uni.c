@@ -13160,10 +13160,6 @@ static int fk_run_src(const char *path, long long arg) {
         fk_src_reset_compile_state();
     }
     fk_src_compile_current_unit(path, fkb_path, sym_path, unit_mtime, expected_source_hash);
-    if (fk_path_mtime_raw(dylib_path) < unit_mtime) {
-        fk_diag_path("warning", dylib_path,
-                "native .dylib emission is not installed in this checkout; emitted .fkb/.sym");
-    }
     fk_vs[0] = arg << 1;
     fk_vsp = 1;
     /* ── PARSE DONE, EXECUTION BEGINS ── gcc-style tally, then the two-phase gate:
