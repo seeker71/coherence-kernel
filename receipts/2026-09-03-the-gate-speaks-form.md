@@ -25,8 +25,10 @@ The gate is now Form-bodied:
 - All four recipe texts (gen-source-walker-table.fk, gen-source-walker.fk,
   native-op-manifest.fk, and the emitted fkwu-optable.h comment — regenerated
   again through its own two-call lane) now name the Form gate.
-- Corpus rows: 1246's close healed to name the Form door; 1247 (owntongue)
-  takes the correction home.
+- Corpus rows: mapmirror's close healed to name the Form door; owntongue
+  takes the correction home. Both re-seated at reunion the same night —
+  mapmirror to 1247 (main's tailkeep took 1246), owntongue to 1248 — the
+  row-719 anastomosis pattern, twice in one night, every row kept.
 
 ## Witnesses
 
@@ -42,7 +44,7 @@ The gate is now Form-bodied:
 - no residual validate_fkwu_native_surface references in validate.sh or
   form/scripts/; the two comment mentions that remain are history explaining
   present rows
-- learn/homecoming-distillation-corpus.fk evaluates 0 with rows 1246+1247
+- learn/homecoming-distillation-corpus.fk evaluates 0 with rows 1247+1248
 
 Most surprising: the refusal I needed was already written into the file I was
 editing. validate.sh phase 0 opens by declaring the tree cannot claim a
