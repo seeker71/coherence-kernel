@@ -17,6 +17,9 @@ EMITTER = FORM / "form-stdlib" / "fkc-table-serialize.fk"
 GO_KERNEL = FORM / "form-kernel-go" / "main.go"
 RUST_KERNEL = FORM / "form-kernel-rust" / "src" / "main.rs"
 TS_KERNEL = FORM / "form-kernel-ts" / "src" / "kernel.ts"
+FLATTEN_DIR_COPY = FORM.parent / "flatten" / "form-flatten.fk"
+OPTABLE = FORM.parent / "runtime" / "fkwu-optable.h"
+RUNTIME = FORM.parent / "runtime" / "fkwu-uni.c"
 
 # These are security-bound carrier primitives, not optional convenience
 # aliases. Keep one assertion spanning manifest, lowering, emitted tags, and
@@ -25,6 +28,22 @@ BYTE_CARRIER_OPS = {
     "string_bytes": (1, 205),
     "string_byte_fold": (3, 206),
     "form_table_text": (2, 207),
+}
+
+# Variadic ops (arity -1) live OUTSIDE the manifest chain by construction: the
+# stdlib flt-op2 folds any unrecognized arity as a quad, so a -1 row must never
+# enter the manifest -> stdlib flt-ops lane. Their name rides flatten/'s
+# hand-maintained flt-ops into the generated optable; their SHAPE lives in each
+# consumer's parser. Both parse regexes here read digits only, so this family
+# was invisible to every gate — "aligned" was a claim about the rows the glance
+# could read, never about the table (corpus row 1222, gateshadow). This
+# assertion makes the family SEEN: flatten-copy row, generated optable row, and
+# walker arm, each checked by name+tag.
+VARIADIC_OPS = {
+    "list": 19,
+    "print": 239,
+    "record_new": 64,
+    "method_invoke": 199,
 }
 
 
@@ -47,7 +66,7 @@ def parse_ops_list(text: str, defn: str) -> list[tuple[str, int, int]]:
         block = text[start:i]
         return [
             (name, int(arity), int(tag))
-            for name, arity, tag in re.findall(r'\(list "([^"]+)" (\d+) (\d+)\)', block)
+            for name, arity, tag in re.findall(r'\(list "([^"]+)" (-?\d+) (\d+)\)', block)
         ]
     m = re.search(rf"\(defn {defn} \(\)\s*\n\s*\(list", text)
     if not m:
@@ -65,11 +84,11 @@ def parse_ops_list(text: str, defn: str) -> list[tuple[str, int, int]]:
         return [
             (name, int(arity), int(tag))
             for name, arity, tag, _cls in re.findall(
-                r'\(nom-row "([^"]+)" (\d+) (\d+) "([^"]+)"\)', body
+                r'\(nom-row "([^"]+)" (-?\d+) (\d+) "([^"]+)"\)', body
             )
         ]
     return [(name, int(arity), int(tag)) for name, arity, tag in re.findall(
-        r'\(list "([^"]+)" (\d+) (\d+)\)', body
+        r'\(list "([^"]+)" (-?\d+) (\d+)\)', body
     )]
 
 
@@ -109,6 +128,19 @@ def main() -> int:
     for obsolete in ("string_fold",):
         if any(name == obsolete for name, _, _ in manifest_rows + flatten_rows):
             errors.append(f"obsolete byte carrier still lowerable: {obsolete}")
+
+    flatten_dir_text = FLATTEN_DIR_COPY.read_text(encoding="utf-8")
+    optable_text = OPTABLE.read_text(encoding="utf-8")
+    runtime_text = RUNTIME.read_text(encoding="utf-8")
+    for name, tag in VARIADIC_OPS.items():
+        if f'(list "{name}" -1 {tag})' not in flatten_dir_text:
+            errors.append(f"variadic op missing from flatten/ flt-ops: {name} -1 {tag}")
+        if f'{{ "{name}", -1, {tag} }}' not in optable_text:
+            errors.append(f"variadic op missing from generated optable: {name} -1 {tag} (regen via flatten/gen-source-walker.fk)")
+        if f"t == {tag})" not in runtime_text:
+            errors.append(f"variadic op walker arm missing: {name} tag {tag}")
+    if any(a < 0 for _, a, _ in manifest_rows):
+        errors.append("variadic (arity<0) row in the manifest: stdlib flt-op2 folds unknown arity as a quad -- variadic ops belong in VARIADIC_OPS + flatten/ flt-ops only")
 
     if errors:
         for e in errors:
