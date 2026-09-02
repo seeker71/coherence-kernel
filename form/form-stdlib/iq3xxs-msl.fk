@@ -1,0 +1,30 @@
+; iq3xxs-msl.fk — Form-emitted Metal lowering for GGML type 18.
+;
+; preludes: form-stdlib/core.fk form-stdlib/iq2xxs-dequant.fk form-stdlib/iq3xxs-layout.bml form-stdlib/iq3xxs-dequant.fk
+
+(do
+    (defn iq3xsm-join (xs)
+        (if (eq (len xs) 0) ""
+            (if (eq (len xs) 1) (int_to_str (head xs))
+                (str_concat (int_to_str (head xs)) (str_concat "," (iq3xsm-join (tail xs)))))))
+    (defn iq3xsm-grid ()
+        (str_concat "constant uint iq3xxs_grid[256] = { " (str_concat (iq3xsm-join (iq3x-grid)) " }; ")))
+    (defn iq3xsm-signs ()
+        (str_concat "constant uchar iq3xxs_signs[128] = { " (str_concat (iq3xsm-join (iq2-ksigns)) " }; ")))
+    (defn iq3xsm-weight ()
+        "static inline float iq3xxs_w(device const uchar* qb, uint idx) { uint blk = idx / 256u; uint i = idx - blk * 256u; ulong b = (ulong)blk * 98ul; uint g = i / 32u; uint rem = i - g * 32u; uint l = rem / 8u; uint j = rem - l * 8u; uint gi = uint(qb[b + 2ul + ulong(g * 8u + l * 2u + j / 4u)]); uint word = iq3xxs_grid[gi]; uint mag = (word >> (8u * (j & 3u))) & 255u; ulong ao = b + 66ul + ulong(g * 4u); uint aux = uint(qb[ao]) | (uint(qb[ao+1ul]) << 8u) | (uint(qb[ao+2ul]) << 16u) | (uint(qb[ao+3ul]) << 24u); uint sm = uint(iq3xxs_signs[(aux >> (7u * l)) & 127u]); float sg = (((sm >> j) & 1u) == 1u) ? -1.0f : 1.0f; ushort hb = (ushort)qb[b] | ((ushort)qb[b+1ul] << 8); float db = float(as_type<half>(hb)) * (0.5f + float(aux >> 28u)) * 0.5f; return db * float(mag) * sg; } ")
+    (defn iq3xsm-helpers () (str_concat (iq3xsm-grid) (str_concat (iq3xsm-signs) (iq3xsm-weight))))
+    (defn iq3xsm-dequant-body (fname)
+        (str_concat "kernel void " (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = iq3xxs_w(qb, off + i); }")))
+    (defn iq3xsm-matvec-body (fname)
+        (str_concat "kernel void " (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ebase [[buffer(5)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0u) { j -= 1u; float p = iq3xxs_w(qb, ebase + i * cols + j) * x[j]; acc = p + acc; } y[i] = acc; }")))
+    (defn iq3xsm-slot4-body (fname)
+        (str_concat "kernel void " (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ebase [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0 = (gid / 32u) * 4u; if (r0 >= rows) return; uint nb = cols / 256u; uint ngrp = nb * 8u; ulong tensor_base = (ulong)(ebase / 256u) * 98ul; ulong rstride = (ulong)nb * 98ul; float sums[4] = {0.0f,0.0f,0.0f,0.0f}; for (uint gg = lane; gg < ngrp; gg += 32u) { uint blk = gg / 8u; uint g = gg - blk * 8u; device const float* xg = x + blk * 256u + g * 32u; for (uint rr = 0u; rr < 4u; ++rr) { if (r0 + rr < rows) { device const uchar* b = qb + tensor_base + (ulong)(r0 + rr) * rstride + (ulong)blk * 98ul; uint aux = uint(b[66u+g*4u]) | (uint(b[67u+g*4u]) << 8u) | (uint(b[68u+g*4u]) << 16u) | (uint(b[69u+g*4u]) << 24u); ushort hb = (ushort)b[0] | ((ushort)b[1] << 8); float d = float(as_type<half>(hb)) * (0.5f + float(aux >> 28u)) * 0.5f; device const uchar* q = b + 2u + g * 8u; for (uint l = 0u; l < 4u; ++l) { uint w0 = iq3xxs_grid[uint(q[2u*l])]; uint w1 = iq3xxs_grid[uint(q[2u*l+1u])]; uint sm = uint(iq3xxs_signs[(aux >> (7u*l)) & 127u]); for (uint j = 0u; j < 4u; ++j) { float s0 = (((sm >> j) & 1u) == 1u) ? -1.0f : 1.0f; float s1 = (((sm >> (j+4u)) & 1u) == 1u) ? -1.0f : 1.0f; sums[rr] += d * float((w0 >> (8u*j)) & 255u) * s0 * xg[l*8u+j]; sums[rr] += d * float((w1 >> (8u*j)) & 255u) * s1 * xg[l*8u+j+4u]; } } } } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sums[rr]); if (lane == 0u && r0 + rr < rows) y[r0+rr] = s; } }")))
+    (defn iq3xsm-unit (dname mname sname)
+        (str_concat (iq3xsm-helpers)
+        (str_concat (iq3xsm-dequant-body dname)
+        (str_concat (iq3xsm-matvec-body mname) (iq3xsm-slot4-body sname)))))
+    0)

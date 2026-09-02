@@ -1,0 +1,104 @@
+//////////////////////////////////////////////////////////////////////
+//
+// llama32-3b-resident-state.bml — executable reusable physical 3B state.
+//
+// Authority: form-stdlib/bml/llama32-3b-resident-state.bml
+// preludes: form/native/metal/llama-token-handle.fk form/form-stdlib/llama3-detokenize.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class Llama32ThreeBResidentStateAuthority {
+        field L3RSAuthorityPath = "form/form-stdlib/bml/llama32-3b-resident-state.bml";
+        field L3RSAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class Llama32ThreeBResidentState {
+        field L3RSSchema = "llama32-3b-resident-state-v1";
+        field L3RSModel = "base.llama32-3b-metal";
+        field L3RSWeightBytes = 2019377376;
+
+        ref l3rs-authority = Llama32ThreeBResidentStateAuthority;
+        thought l3rs-law = list("explicit-open", "retain-across-turns", "explicit-close", "mmap-handle-evidence");
+
+        // slot: tag, path, source cursor, pipelines, scratch, geometry,
+        // layer tensors, key caches, value caches, embedding, output norm,
+        // projection, rope view, next position, pending prediction, tokens,
+        // status.
+        def l3rs-slot(path, src, pipes, scratch, geometry, layers, keys, values, embedding, outputNorm, projection, rope, position, pending, tokens, status) = list(L3RSSchema(), path, src, pipes, scratch, geometry, layers, keys, values, embedding, outputNorm, projection, rope, position, pending, tokens, status);
+        def l3rs-path(slot) = nth(slot, 1);
+        def l3rs-src(slot) = nth(slot, 2);
+        def l3rs-pipes(slot) = nth(slot, 3);
+        def l3rs-scratch(slot) = nth(slot, 4);
+        def l3rs-geometry(slot) = nth(slot, 5);
+        def l3rs-layers(slot) = nth(slot, 6);
+        def l3rs-keys(slot) = nth(slot, 7);
+        def l3rs-values(slot) = nth(slot, 8);
+        def l3rs-embedding(slot) = nth(slot, 9);
+        def l3rs-output-norm(slot) = nth(slot, 10);
+        def l3rs-projection(slot) = nth(slot, 11);
+        def l3rs-rope(slot) = nth(slot, 12);
+        def l3rs-position(slot) = nth(slot, 13);
+        def l3rs-pending(slot) = nth(slot, 14);
+        def l3rs-tokens(slot) = nth(slot, 15);
+        def l3rs-status(slot) = nth(slot, 16);
+
+        def l3rs-residency-handle(slot) = lth-tv-h(l3rs-embedding(slot));
+        def l3rs-resident?(slot) = if not(eq(len(slot), 17)) then 0 else if le(l3rs-residency-handle(slot), 0) then 0 else if not(eq(lth-pipe-ok?(l3rs-pipes(slot)), 1)) then 0 else if le(head(l3rs-scratch(slot)), 0) then 0 else 1;
+
+        def l3rs-open(path, maxpos) {
+            let src = lth-src(path);
+            let base = egg-data-base(src, wtr-alignment());
+            let layers = gmt-u32(src, "llama.block_count");
+            let dmodel = gmt-u32(src, "llama.embedding_length");
+            let dff = gmt-u32(src, "llama.feed_forward_length");
+            let nhead = gmt-u32(src, "llama.attention.head_count");
+            let nkv = gmt-u32(src, "llama.attention.head_count_kv");
+            let hdim = gmt-u32(src, "llama.rope.dimension_count");
+            let vocab = gmt-u32(src, "llama.vocab_size");
+            let ropeBase = gmt-f32(src, "llama.rope.freq_base");
+            let rmsEps = gmt-f32(src, "llama.attention.layer_norm_rms_epsilon");
+            let kvd = mul(nkv, hdim);
+            let pipes = lth-pipes(lth-msl());
+            let scratch = lth-bufs(dmodel, dff, vocab, nhead, maxpos);
+            let layerViews = lth-layers(src, base, path, 0, layers, list());
+            let keys = lth-cache(layers, kvd, maxpos, list());
+            let values = lth-cache(layers, kvd, maxpos, list());
+            let embedding = lth-tv(src, base, path, "token_embd.weight");
+            let outputNorm = lth-tv(src, base, path, "output_norm.weight");
+            let projection = lth-out-tv(src, base, path);
+            let rope = lth-tv(src, base, path, "rope_freqs.weight");
+            let geometry = list(dmodel, dff, nhead, nkv, hdim, kvd, maxpos, vocab, md-f32-bits(rmsEps), md-f32-bits(ropeBase), lth-attn-scale-bits(hdim), lth-tv-h(rope), layers);
+            l3rs-slot(path, src, pipes, scratch, geometry, layerViews, keys, values, embedding, outputNorm, projection, rope, 0, 128001, list(), "resident");
+        }
+
+        def l3rs-with-stream(slot, position, pending, tokens, status) = l3rs-slot(l3rs-path(slot), l3rs-src(slot), l3rs-pipes(slot), l3rs-scratch(slot), l3rs-geometry(slot), l3rs-layers(slot), l3rs-keys(slot), l3rs-values(slot), l3rs-embedding(slot), l3rs-output-norm(slot), l3rs-projection(slot), l3rs-rope(slot), position, pending, tokens, status);
+        def l3rs-prefill(slot, ids) {
+            let result = lth-prefill(l3rs-pipes(slot), l3rs-scratch(slot), l3rs-geometry(slot), l3rs-layers(slot), l3rs-keys(slot), l3rs-values(slot), l3rs-embedding(slot), l3rs-output-norm(slot), l3rs-projection(slot), ids, l3rs-position(slot));
+            l3rs-with-stream(slot, add(nth(result, 1), 1), nth(result, 0), append(l3rs-tokens(slot), ids), "resident");
+        }
+        def l3rs-step(slot) {
+            let token = l3rs-pending(slot);
+            let next = lth-forward(l3rs-pipes(slot), l3rs-scratch(slot), l3rs-geometry(slot), l3rs-layers(slot), l3rs-keys(slot), l3rs-values(slot), l3rs-embedding(slot), l3rs-output-norm(slot), l3rs-projection(slot), token, l3rs-position(slot));
+            l3rs-with-stream(slot, add(l3rs-position(slot), 1), next, append(l3rs-tokens(slot), list(token)), "resident");
+        }
+        def l3rs-pending-text(slot) = l3d-text(l3rs-src(slot), list(l3rs-pending(slot)));
+
+        def l3rs-free-handles(handles) = if eq(len(handles), 0) then 1 else do(metal_buf_free(head(handles)), l3rs-free-handles(tail(handles)));
+        def l3rs-free-tvs(tvs) = if eq(len(tvs), 0) then 1 else do(metal_buf_free(lth-tv-h(head(tvs))), l3rs-free-tvs(tail(tvs)));
+        def l3rs-free-layers(layers) = if eq(len(layers), 0) then 1 else do(l3rs-free-tvs(head(layers)), l3rs-free-layers(tail(layers)));
+        def l3rs-close(slot) {
+            let sync = metal_sync();
+            let scratch = l3rs-free-handles(l3rs-scratch(slot));
+            let layers = l3rs-free-layers(l3rs-layers(slot));
+            let keys = l3rs-free-handles(l3rs-keys(slot));
+            let values = l3rs-free-handles(l3rs-values(slot));
+            let embedding = metal_buf_free(lth-tv-h(l3rs-embedding(slot)));
+            let outputNorm = metal_buf_free(lth-tv-h(l3rs-output-norm(slot)));
+            let projection = metal_buf_free(lth-tv-h(l3rs-projection(slot)));
+            let rope = metal_buf_free(lth-tv-h(l3rs-rope(slot)));
+            if and(eq(scratch, 1), and(eq(layers, 1), and(eq(keys, 1), and(eq(values, 1), and(eq(embedding, 1), and(eq(outputNorm, 1), and(eq(projection, 1), eq(rope, 1)))))))) then 1 else 0;
+        }
+    }
+    0;
+}

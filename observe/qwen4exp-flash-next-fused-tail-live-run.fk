@@ -1,0 +1,127 @@
+; qwen4exp-flash-next-fused-tail-live-run.fk — physical Metal differential.
+;
+; Small resident buffers exercise the exact Qwen4Exp tail arithmetic without
+; mapping the 79 GB artifact.  Reference uses three dependent dispatches;
+; fused uses one.  Exact output bytes, actual dispatch counters, wall time,
+; and Metal device busy time all leave together.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/metal-door.fk form-stdlib/operator-type-id.bml form-stdlib/qwen4exp-flash-next-fused-tail.bml form/native/metal/model-bandwidth.fk
+
+(do
+    (defn qfftl-pattern (n words index acc)
+        (if (le n 0) acc
+            (qfftl-pattern (sub n 1) words (add index 1)
+                (str_concat acc (md-le32 (nth words (mod index (len words))))))))
+
+    (defn qfftl-floats (values acc)
+        (if (eq (len values) 0) acc
+            (qfftl-floats (tail values)
+                (str_concat acc (md-le32 (md-f32-bits (head values)))))))
+
+    (defn qfftl-u32-at (raw at)
+        (add (str_byte_at raw at)
+             (add (mul (str_byte_at raw (add at 1)) 256)
+                  (add (mul (str_byte_at raw (add at 2)) 65536)
+                       (mul (str_byte_at raw (add at 3)) 16777216)))))
+
+    (defn qfftl-reference-loop (reduce-pipe shared-pipe combine-pipe reduce-bind shared-bind combine-bind rows streams rem)
+        (if (le rem 0) 0
+            (do
+                (let a (metal_enqueue reduce-pipe reduce-bind rows))
+                (let b (metal_enqueue shared-pipe shared-bind rows))
+                (let c (metal_enqueue combine-pipe combine-bind (mul rows streams)))
+                (qfftl-reference-loop reduce-pipe shared-pipe combine-pipe reduce-bind shared-bind combine-bind rows streams (sub rem 1)))))
+
+    (defn qfftl-fused-loop (pipe binding rows streams rem)
+        (if (le rem 0) 0
+            (do
+                (let a (metal_enqueue pipe binding rows))
+                (qfftl-fused-loop pipe binding rows streams (sub rem 1)))))
+
+    (defn qfftl-free (handles)
+        (if (eq (len handles) 0) 0
+            (do (let released (metal_buf_free (head handles)))
+                (qfftl-free (tail handles)))))
+
+    (let rows 2560)
+    (let streams 4)
+    (let ranks 10)
+    (let iterations 2048)
+    (let msl (qfft-msl))
+    (let reduce-pipe (metal_pipeline msl "qfft_reference_reduce"))
+    (let shared-pipe (metal_pipeline msl "qfft_reference_shared"))
+    (let combine-pipe (metal_pipeline msl "qfft_reference_combine"))
+    (let fused-pipe (metal_pipeline msl "qfft_fused_tail"))
+    (let residual-bytes (qfftl-pattern (mul rows streams)
+        (list (md-f32-bits 0.5) (md-f32-bits 1.0) (md-f32-bits 2.0) (md-f32-bits 3.0)) 0 ""))
+    (let down-bytes (qfftl-pattern (mul rows ranks)
+        (list (md-f32-bits 0.25) (md-f32-bits 0.5) (md-f32-bits 1.0) (md-f32-bits 2.0)) 0 ""))
+    (let weight-bytes (qfftl-pattern ranks
+        (list (md-f32-bits 0.25) (md-f32-bits 0.5) (md-f32-bits 1.0) (md-f32-bits 2.0)) 0 ""))
+    (let shared-bytes (qfftl-pattern rows
+        (list (md-f32-bits 3.0) (md-f32-bits 2.0) (md-f32-bits 1.0) (md-f32-bits 0.5)) 0 ""))
+    (let gate-bytes (md-le32 (md-f32-bits 0.75)))
+    (let inject-bytes (qfftl-floats (list -2.0 -0.5 0.5 2.0) ""))
+    (let reference-residual (metal_buf_alloc (str_len residual-bytes)))
+    (let fused-residual (metal_buf_alloc (str_len residual-bytes)))
+    (let down (metal_buf_alloc (str_len down-bytes)))
+    (let weights (metal_buf_alloc (str_len weight-bytes)))
+    (let routed (metal_buf_alloc (str_len shared-bytes)))
+    (let shared (metal_buf_alloc (str_len shared-bytes)))
+    (let gate (metal_buf_alloc (str_len gate-bytes)))
+    (let inject (metal_buf_alloc (str_len inject-bytes)))
+    (let w0 (metal_buf_write reference-residual 0 residual-bytes))
+    (let w1 (metal_buf_write fused-residual 0 residual-bytes))
+    (let w2 (metal_buf_write down 0 down-bytes))
+    (let w3 (metal_buf_write weights 0 weight-bytes))
+    (let w4 (metal_buf_write shared 0 shared-bytes))
+    (let w5 (metal_buf_write gate 0 gate-bytes))
+    (let w6 (metal_buf_write inject 0 inject-bytes))
+    (let reduce-bind (md-bind16 (list down weights routed) (list rows ranks) 256 0 0 0))
+    (let shared-bind (md-bind16 (list shared routed gate) (list rows) 256 0 0 0))
+    (let combine-bind (md-bind16 (list reference-residual routed inject) (list rows streams) 256 0 0 0))
+    (let fused-bind (md-bind16 (list fused-residual down weights shared gate inject) (list rows streams ranks) 256 0 0 0))
+
+    ; Warm both pipeline shapes, drain, then restore identical residuals.
+    (let warm-reference (qfftl-reference-loop reduce-pipe shared-pipe combine-pipe reduce-bind shared-bind combine-bind rows streams 1))
+    (let warm-fused (qfftl-fused-loop fused-pipe fused-bind rows streams 1))
+    (let warm-sync (metal_sync))
+    (let reset-reference (metal_buf_write reference-residual 0 residual-bytes))
+    (let reset-fused (metal_buf_write fused-residual 0 residual-bytes))
+
+    (let before (metal_status))
+    (let t0 (now_unix_ms))
+    (let reference-run (qfftl-reference-loop reduce-pipe shared-pipe combine-pipe reduce-bind shared-bind combine-bind rows streams iterations))
+    (let reference-sync (metal_sync))
+    (let t1 (now_unix_ms))
+    (let middle (metal_status))
+    (let fused-run (qfftl-fused-loop fused-pipe fused-bind rows streams iterations))
+    (let fused-sync (metal_sync))
+    (let t2 (now_unix_ms))
+    (let after (metal_status))
+    (let reference-out (metal_buf_read reference-residual 0 (str_len residual-bytes)))
+    (let fused-out (metal_buf_read fused-residual 0 (str_len residual-bytes)))
+    (let reference-dispatches (sub (mbw-status-int middle "total_dispatch") (mbw-status-int before "total_dispatch")))
+    (let fused-dispatches (sub (mbw-status-int after "total_dispatch") (mbw-status-int middle "total_dispatch")))
+    (let reference-gpu-us (sub (mbw-status-int middle "gpu_busy_us_total") (mbw-status-int before "gpu_busy_us_total")))
+    (let fused-gpu-us (sub (mbw-status-int after "gpu_busy_us_total") (mbw-status-int middle "gpu_busy_us_total")))
+    (let exact (if (str_eq reference-out fused-out) 1 0))
+    (let moved (if (not (str_eq reference-out residual-bytes)) 1 0))
+    (let accepted (if (and (eq exact 1)
+                           (and (eq moved 1)
+                                (and (eq reference-dispatches (mul iterations 3))
+                                     (eq fused-dispatches iterations)))) 1 0))
+    (let result (list "qwen4exp-fused-tail-physical"
+                      "device" (if (ge (str_find after "device=Apple" 0) 0) "Apple-Metal" "unavailable")
+                      "pipelines" (list reduce-pipe shared-pipe combine-pipe fused-pipe)
+                      "rows" rows "streams" streams "ranks" ranks "iterations" iterations
+                      "exact-bytes" exact "expected-first-value" moved "accepted" accepted
+                      "reference-dispatches" reference-dispatches "fused-dispatches" fused-dispatches
+                      "reference-wall-ms" (sub t1 t0) "fused-wall-ms" (sub t2 t1)
+                      "reference-gpu-us" reference-gpu-us "fused-gpu-us" fused-gpu-us
+                      "reference-first-bits" (qfftl-u32-at reference-out 0)
+                      "fused-first-bits" (qfftl-u32-at fused-out 0)
+                      "last-error-none" (if (ge (str_find after "last_error=none" 0) 0) 1 0)
+                      "status" after))
+    (let freed (qfftl-free (list reference-residual fused-residual down weights routed shared gate inject)))
+    result)

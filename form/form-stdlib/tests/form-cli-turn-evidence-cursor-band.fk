@@ -1,5 +1,5 @@
 ; form-cli-turn-evidence-cursor-band.fk — BML cursor discovery is private,
-; scannerless, and yields a durable bounded continuation. Expected: 255
+; scannerless, and yields a durable bounded continuation. Expected: 4194303
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
 ; preludes: form-stdlib/form-cli-turn-evidence.fk
@@ -8,6 +8,12 @@
 
 (do
     (defn fctecb-bit (ok bit) (if ok bit 0))
+    (defn fctecb-fill (s n)
+        (if (ge (str_len s) n) (substring s 0 n)
+            (fctecb-fill (str_concat s s) n)))
+    (defn fctecb-set (xs i value)
+        (if (eq i 0) (cons value (tail xs))
+            (cons (head xs) (fctecb-set (tail xs) (sub i 1) value))))
     (let path "/tmp/form-cli-turn-evidence-cursor-band.jsonl")
     (let turn1 "{\"timestamp\":\"t1\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\"}}\n")
     (let turn2 "{\"timestamp\":\"t2\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_finished\",\"turn_id\":\"turn-2\",\"last_agent_message\":\"done\"}}\n")
@@ -16,6 +22,67 @@
     (let first (fctec-seek path "turn-1" (file_size path)))
     (let absent (fctec-seek path "turn-missing" (file_size path)))
     (let src (read_file "form/form-stdlib/bml/form-cli-turn-evidence-cursor.bml"))
+    (let live-src (read_file "form/form-stdlib/form-cli-turn-evidence-live.fk"))
+    ; The tail starts inside this >1 MiB JSONL row.  The first slice must
+    ; align past its LF and find turn-2 without accepting the partial row;
+    ; the durable next cursor then reaches turn-1 in exactly one more slice.
+    (let boundary-path "/tmp/form-cli-turn-evidence-boundary-band.jsonl")
+    (let noise (fctel-join (list "{\"type\":\"noise\",\"payload\":\""
+        (fctecb-fill "x" (add (fctel-chunk-bytes) 8192)) "\"}\n")))
+    (let boundary-write (write_file_text boundary-path
+        (fctel-join (list turn1 noise turn2))))
+    (let boundary-latest (fctec-seek boundary-path ""
+        (file_size boundary-path)))
+    (let boundary-miss (fctec-seek boundary-path "turn-1"
+        (file_size boundary-path)))
+    (let boundary-older (fctec-seek boundary-path "turn-1"
+        (fctec-end boundary-miss)))
+    (let no-terminal-path "/tmp/form-cli-turn-evidence-append-band.jsonl")
+    (let no-terminal-write (write_file_text no-terminal-path
+        (fctel-join (list turn1 noise))))
+    (let latest-progress (fctec-latest-step no-terminal-path
+        (str_len turn1) 0 (file_size no-terminal-path)))
+    (let latest-settled (fctec-latest-step no-terminal-path
+        (str_len turn1) 0 (fctec-latest-next latest-progress)))
+    (let latest-stale (fctec-latest-step boundary-path
+        (str_len turn1) 0 (file_size boundary-path)))
+    ; Physical source-coordinate fixture: metadata identity, start/terminal
+    ; types, turn id, and both timestamps must still exist at the v3 offsets.
+    (let source-path "/tmp/form-cli-turn-evidence-source-band.jsonl")
+    (let meta "{\"session_id\":\"thread-c\",\"model_provider\":\"openai\"}\n")
+    (let started "{\"timestamp\":\"2026-08-17T05:42:26.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-c\"}}\n")
+    (let context "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-source\"}}\n")
+    (let usage "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"last_token_usage\":{\"input_tokens\":2,\"cached_input_tokens\":1,\"cache_write_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0,\"total_tokens\":3}}}\n")
+    (let completed "{\"timestamp\":\"2026-08-17T05:42:27.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_finished\",\"turn_id\":\"turn-c\",\"last_agent_message\":\"done\",\"time_to_first_token_ms\":100}}\n")
+    (let source-text (fctel-join (list meta started context usage completed)))
+    (let source-write (write_file_text source-path source-text))
+    (let start-at (str_len meta))
+    (let complete-at (add start-at (add (str_len started)
+        (add (str_len context) (str_len usage)))))
+    (let source-state (fctel-process-segment
+        (fctel-join (list started context usage completed)) 0 (fctel-state)))
+    (let source-row (fctel-row-from "thread-c" "openai" "turn-c"
+        started completed source-state (file_size source-path) start-at complete-at))
+    (let source-evidence (fcte-parse source-row))
+    (let bad-time (fctecb-set source-evidence 5 "1"))
+    (let bad-coordinate (fctecb-set source-evidence 38 (int_to_str start-at)))
+    (let bad-identity (fctecb-set source-evidence 1 "thread-wrong"))
+    (let grown-path "/tmp/form-cli-turn-evidence-grown-band.jsonl")
+    (let grown-write (write_file_text grown-path
+        (fctel-join (list source-text turn2))))
+    (let grown-stale (fctec-validation-grown-step source-evidence grown-path
+        (file_size grown-path) (str_len source-text) (str_len source-text)))
+    (let grown-open-path "/tmp/form-cli-turn-evidence-grown-open-band.jsonl")
+    (let grown-open-write (write_file_text grown-open-path
+        (fctel-join (list source-text noise))))
+    (let grown-progress (fctec-validation-grown-step source-evidence
+        grown-open-path (file_size grown-open-path)
+        (str_len source-text) (str_len source-text)))
+    (let stale-row-path "/tmp/form-cli-turn-evidence-stale-row-band")
+    (let stale-validation-path "/tmp/form-cli-turn-evidence-stale-validation-band")
+    (let stale-row-write (write_file_text stale-row-path "old-observed-row"))
+    (let stale-validation-write (write_file_text stale-validation-path "old-validation"))
+    (let stale-expired (fctec-expire-stale stale-row-path stale-validation-path))
     (sum (list
         (fctecb-bit (eq (fctec-result? all) 1) 1)
         (fctecb-bit (and (eq (fctec-found? all) 1)
@@ -34,5 +101,52 @@
                 (eq (str_find src "xtal" 0) -1))) 64)
         (fctecb-bit (and (eq (fctec-progress? "turn-evidence-refresh=progress cursor=1/2") 1)
             (and (eq (fctec-progress? "turn-evidence-refresh=observed") 0)
-                (and (ge (str_find src "fctel-refresh-once" 0) 0)
-                    (eq (str_find src "fctec-refresh-to-terminal" 0) -1)))) 128))))
+                (and (ge (str_find src "fctel-refresh-coordinate-once" 0) 0)
+                    (eq (str_find src "fctec-refresh-to-terminal" 0) -1)))) 128)
+        (fctecb-bit (and (str_eq (fctec-collector-rule)
+            "typed-prefix-selects-rows-output-span-stays-coordinate-owned")
+            (and (eq (fctec-processing-bytes) 2097152)
+                (and (eq (fctel-processing-bytes) 2097152)
+                    (eq (fctec-attention-ms) 5000)))) 256)
+        (fctecb-bit (and (eq (fctec-found? boundary-latest) 1)
+            (and (str_eq (fctec-turn-id-at boundary-path
+                (fctec-at boundary-latest)) "turn-2")
+                (eq (fctec-found? boundary-miss) 0))) 512)
+        (fctecb-bit (and (eq (fctec-found? boundary-older) 1)
+            (and (str_eq (fctec-turn-id-at boundary-path
+                (fctec-at boundary-older)) "turn-1")
+                (and (eq (str_find live-src "fctel-find-last-file-loop" 0) -1)
+                    (ge (str_find live-src "fctel-find-line-event-window" 0) 0)))) 1024)
+        (fctecb-bit (eq (fctec-latest-status latest-stale) 0) 2048)
+        (fctecb-bit (and (eq (fctec-latest-progress? latest-progress) 1)
+            (eq (fctec-latest? latest-settled) 1)) 4096)
+        (fctecb-bit (and (eq (fcte-valid? source-evidence) 1)
+            (eq (fctec-codex-source-reconciled?
+                source-evidence source-path) 1)) 8192)
+        (fctecb-bit (and (eq (fctec-codex-source-reconciled?
+            bad-time source-path) 0) (eq (fctec-codex-source-reconciled?
+                bad-coordinate source-path) 0)) 16384)
+        (fctecb-bit (eq (fctec-codex-source-reconciled?
+            bad-identity source-path) 0) 32768)
+        (fctecb-bit (eq (fctec-latest-status grown-stale) 0) 65536)
+        (fctecb-bit (eq (fctec-latest-progress? grown-progress) 1) 131072)
+        (fctecb-bit (and (eq (len stale-expired) 3)
+            (and (eq (file_size stale-row-path) 0)
+                (eq (file_size stale-validation-path) 0))) 262144)
+        (fctecb-bit (str_eq (fctec-stale-expiry-rule)
+            "latestness-disproved-expires-current-row-before-next-cursor-step") 524288)
+        (fctecb-bit (and (str_eq (fctec-invocation-action 1 0 0)
+            "already-observed")
+            (and (str_eq (fctec-invocation-action 0 1 0)
+                "validating-latest")
+                (and (str_eq (fctec-invocation-action 0 0 1)
+                    "expired-stale-current-row")
+                    (str_eq (fctec-invocation-action 0 0 0)
+                        "advance")))) 1048576)
+        (fctecb-bit (and (str_eq (fctec-one-movement-rule)
+            "one-invocation-owns-one-bounded-evidence-movement")
+            (and (str_eq (fctec-invocation-status
+                (fctec-invocation-action 0 0 1))
+                "turn-evidence-refresh=expired-stale-current-row")
+                (and (str_eq (fctec-attention-state 5000) "within")
+                    (str_eq (fctec-attention-state 5001) "over")))) 2097152))))

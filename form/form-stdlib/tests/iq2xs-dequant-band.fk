@@ -1,0 +1,104 @@
+; iq2xs-dequant-band.fk — GGUF type 17 against llama.cpp b10686's public type trait.
+;
+; The deterministic 74-byte block below is also built by iq2xs-ggml-oracle.c. That oracle does not
+; transcribe this recipe: it calls ggml_get_type_traits(GGML_TYPE_IQ2_XS)->to_float in the pinned
+; b10686 library. Its 18 rounded samples and whole-block rounded sum are the constants judged here.
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/iq2xxs-dequant.fk form-stdlib/iq2xs-layout.bml form-stdlib/iq2xs-dequant.fk
+;
+; Verdict 1023:
+;   1    exact block/table/sign dimensions
+;   2    independent ggml samples 0..127
+;   4    independent ggml samples 128..255
+;   8    rounded sum across all 256 weights
+;   16   every packed qword recovers its constructed grid/sign fields
+;   32   every low/high scale nibble recovers its constructed code
+;   64   flat access crosses the 74-byte block wall
+;   128  trained-grid magnitude counts are pinned
+;   256  trained-grid order is pinned by a weighted checksum
+;   512  BML boundary refuses -1 and 256
+
+(do
+    (defn iq2xsb-cat (xs ys)
+        (if (eq (len xs) 0) ys (cons (head xs) (iq2xsb-cat (tail xs) ys))))
+    (defn iq2xsb-u16 (v) (list (iq2x-mod v 256) (div v 256)))
+    (defn iq2xsb-word (k)
+        (add (iq2x-mod (mul 17 k) 512) (mul 512 (iq2x-mod (mul 13 k) 128))))
+    (defn iq2xsb-qbytes (k)
+        (if (ge k 32) (empty)
+            (iq2xsb-cat (iq2xsb-u16 (iq2xsb-word k)) (iq2xsb-qbytes (add k 1)))))
+    (defn iq2xsb-scales (ib)
+        (if (ge ib 8) (empty)
+            (cons (add ib (mul 16 (sub 15 ib))) (iq2xsb-scales (add ib 1)))))
+    (defn iq2xsb-block ()
+        (iq2xsb-cat (list 0 60) (iq2xsb-cat (iq2xsb-qbytes 0) (iq2xsb-scales 0))))
+    (defn iq2xsb-bit (ok bit) (if ok bit 0))
+    (defn iq2xsb-all (xs)
+        (if (eq (len xs) 0) 1 (if (head xs) (iq2xsb-all (tail xs)) 0)))
+    (defn iq2xsb-round (block i) (round (mul (iq2xs-at block 0 i) 1000000.0)))
+    (defn iq2xsb-round-sum (block i acc)
+        (if (ge i 256) acc
+            (iq2xsb-round-sum block (add i 1) (add acc (iq2xsb-round block i)))))
+    (defn iq2xsb-fields (block k)
+        (if (ge k 32) 1
+            (do
+                (let i (mul k 8))
+                (if (eq (iq2xs-grid-index block 0 i) (iq2x-mod (mul 17 k) 512))
+                    (if (eq (iq2xs-sign-index block 0 i) (iq2x-mod (mul 13 k) 128))
+                        (iq2xsb-fields block (add k 1)) 0) 0))))
+    (defn iq2xsb-scale-fields (block ib)
+        (if (ge ib 8) 1
+            (do
+                (let lo (mul ib 32))
+                (let hi (add lo 16))
+                (if (eq (iq2xs-scale-code block 0 lo) ib)
+                    (if (eq (iq2xs-scale-code block 0 hi) (sub 15 ib))
+                        (iq2xsb-scale-fields block (add ib 1)) 0) 0))))
+    (defn iq2xsb-count (xs v acc)
+        (if (eq (len xs) 0) acc
+            (iq2xsb-count (tail xs) v (if (eq (head xs) v) (add acc 1) acc))))
+    (defn iq2xsb-weighted (xs i acc)
+        (if (eq (len xs) 0) acc
+            (iq2xsb-weighted (tail xs) (add i 1) (add acc (mul (head xs) i)))))
+
+    (let block (iq2xsb-block))
+    (let grid (iq2xs-grid))
+    (let c0 (iq2xsb-bit (iq2xsb-all (list
+        (eq (len block) 74) (eq (len grid) 4096) (eq (len (iq2-ksigns)) 128))) 1))
+    (let c1 (iq2xsb-bit (iq2xsb-all (list
+        (eq (iq2xsb-round block 0) 1000000)
+        (eq (iq2xsb-round block 7) 1000000)
+        (eq (iq2xsb-round block 8) -1000000)
+        (eq (iq2xsb-round block 31) 31000000)
+        (eq (iq2xsb-round block 32) 16125000)
+        (eq (iq2xsb-round block 63) -29000000)
+        (eq (iq2xsb-round block 64) 15625000)
+        (eq (iq2xsb-round block 95) 27000000)
+        (eq (iq2xsb-round block 96) 21875000)
+        (eq (iq2xsb-round block 127) -78125000))) 2))
+    (let c2 (iq2xsb-bit (iq2xsb-all (list
+        (eq (iq2xsb-round block 128) 28125000)
+        (eq (iq2xsb-round block 159) 71875000)
+        (eq (iq2xsb-round block 160) 11000000)
+        (eq (iq2xsb-round block 191) 65625000)
+        (eq (iq2xsb-round block 192) 40625000)
+        (eq (iq2xsb-round block 223) 102125000)
+        (eq (iq2xsb-round block 224) 46875000)
+        (eq (iq2xsb-round block 255) -17000000))) 4))
+    (let c3 (iq2xsb-bit (eq (iq2xsb-round-sum block 0 0) 449875000) 8))
+    (let c4 (iq2xsb-bit (eq (iq2xsb-fields block 0) 1) 16))
+    (let c5 (iq2xsb-bit (eq (iq2xsb-scale-fields block 0) 1) 32))
+    (let two (iq2xsb-cat block block))
+    (let c6 (iq2xsb-bit (iq2xsb-all (list
+        (eq (iq2xs-at-flat two 0 256) (iq2xs-at block 0 0))
+        (eq (iq2xs-at-flat two 0 511) (iq2xs-at block 0 255)))) 64))
+    (let c7 (iq2xsb-bit (iq2xsb-all (list
+        (eq (iq2xsb-count grid 8 0) 2114)
+        (eq (iq2xsb-count grid 25 0) 1142)
+        (eq (iq2xsb-count grid 43 0) 840))) 128))
+    (let c8 (iq2xsb-bit (eq (iq2xsb-weighted grid 1 0) 182044374) 256))
+    (let c9 (iq2xsb-bit (iq2xsb-all (list
+        (eq (iq2x-within-block -1) 0)
+        (eq (iq2x-within-block 255) 1)
+        (eq (iq2x-within-block 256) 0))) 512))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8 c9))))))))))

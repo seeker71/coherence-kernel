@@ -35,7 +35,7 @@ if [ ! -x ./fkwu ]; then
     echo "FAIL  no ./fkwu — cc -O2 -o fkwu runtime/fkwu-uni.c"; exit 1
 fi
 
-PRE='; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/moe-msl.fk form-stdlib/moe-route-radius.fk form-stdlib/moe-route-wide-demo.fk'
+PRE='; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/moe-msl.fk form-stdlib/moe-route-radius.fk form-stdlib/qwen4exp-flash-next-router.bml form-stdlib/moe-route-wide-demo.fk'
 
 # ── 1. the fixture, emitted on fkwu (the runtime), not on a proof sibling ───────
 { echo "$PRE"; echo '(mrwd-emit-all)'; } > "$work/demo.fk"
@@ -89,6 +89,11 @@ let logits    = vecs["logitsE9"]!.map { Float($0 / 1e9) }
 let expectIds = vecs["expectIds"]!.map { Int($0) }
 let expectWts = vecs["expectWtsE9"]!.map { $0 / 1e9 }
 let closedIds = vecs["closedFormIds"]!.map { Int($0) }
+let q4Ne = Int(scalars["q4_ne"]!), q4Nsel = Int(scalars["q4_nsel"]!)
+let q4Logits = vecs["q4_logitsE9"]!.map { Float($0 / 1e9) }
+let q4ExpectIds = vecs["q4_expectIds"]!.map { Int($0) }
+let q4ExpectWts = vecs["q4_expectWtsE9"]!.map { $0 / 1e9 }
+let q4ClosedIds = vecs["q4_closedFormIds"]!.map { Int($0) }
 
 var failures = 0
 func check(_ ok: Bool, _ msg: String) {
@@ -144,20 +149,55 @@ check(worst <= envelope,
 let s = gotWts.reduce(0, +)
 check(abs(s - 1.0) < 1e-5, String(format: "GPU weights sum to 1 on the device (got %.9f)", s))
 
-// gate 8 — the radius refusal is live: ne beyond 256 must write NOTHING.
+// gates 8..12 — run the exact qwen4exp 512/top-10 radius, not merely a
+// smaller fixture through a kernel whose source text claims a larger array.
+check(q4ExpectIds == q4ClosedIds,
+      "the Form recipe's qwen4exp ids equal closed form [511..502]")
+let q4BLogits = dev.makeBuffer(bytes: q4Logits, length: q4Logits.count * 4, options: .storageModeShared)!
+let q4BIds = dev.makeBuffer(length: q4Nsel * 4, options: .storageModeShared)!
+let q4BWts = dev.makeBuffer(length: q4Nsel * 4, options: .storageModeShared)!
+var q4UNe = UInt32(q4Ne), q4UNsel = UInt32(q4Nsel)
+let q4CB = queue.makeCommandBuffer()!, q4Enc = q4CB.makeComputeCommandEncoder()!
+q4Enc.setComputePipelineState(pipe)
+q4Enc.setBuffer(q4BLogits, offset: 0, index: 0)
+q4Enc.setBuffer(q4BIds, offset: 0, index: 1)
+q4Enc.setBuffer(q4BWts, offset: 0, index: 2)
+q4Enc.setBytes(&q4UNe, length: 4, index: 3)
+q4Enc.setBytes(&q4UNsel, length: 4, index: 4)
+q4Enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
+                      threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+q4Enc.endEncoding(); q4CB.commit(); q4CB.waitUntilCompleted()
+check(q4CB.error == nil && q4CB.status == .completed,
+      "qwen4exp 512/top-10 command buffer completed")
+let q4GotIds = (0..<q4Nsel).map { Int(q4BIds.contents().bindMemory(to: UInt32.self, capacity: q4Nsel)[$0]) }
+let q4GotWts = (0..<q4Nsel).map { Double(q4BWts.contents().bindMemory(to: Float.self, capacity: q4Nsel)[$0]) }
+check(q4GotIds == q4ExpectIds,
+      "qwen4exp GPU ids match the Form recipe EXACTLY  gpu=\(q4GotIds)")
+var q4Worst = 0.0, q4WorstAt = -1
+for i in 0..<q4Nsel {
+    let d = abs(q4GotWts[i] - q4ExpectWts[i]) / max(abs(q4ExpectWts[i]), 1e-30)
+    if d > q4Worst { q4Worst = d; q4WorstAt = i }
+}
+check(q4Worst <= envelope,
+      String(format: "qwen4exp GPU weights within %.0e relative — worst %.3e at slot %d", envelope, q4Worst, q4WorstAt))
+let q4Sum = q4GotWts.reduce(0, +)
+check(abs(q4Sum - 1.0) < 1e-5,
+      String(format: "qwen4exp GPU weights sum to 1 (got %.9f)", q4Sum))
+
+// gate 13 — the widened radius refusal is live: ne beyond 512 writes NOTHING.
 let sentinel: UInt32 = 0xDEADBEEF
-bIds.contents().bindMemory(to: UInt32.self, capacity: nsel)[0] = sentinel
-var bigNe = UInt32(257)
+q4BIds.contents().bindMemory(to: UInt32.self, capacity: q4Nsel)[0] = sentinel
+var bigNe = UInt32(513)
 let cb2 = queue.makeCommandBuffer()!, e2 = cb2.makeComputeCommandEncoder()!
 e2.setComputePipelineState(pipe)
-e2.setBuffer(bLogits, offset: 0, index: 0); e2.setBuffer(bIds, offset: 0, index: 1)
-e2.setBuffer(bWts, offset: 0, index: 2)
-e2.setBytes(&bigNe, length: 4, index: 3); e2.setBytes(&uNsel, length: 4, index: 4)
+e2.setBuffer(q4BLogits, offset: 0, index: 0); e2.setBuffer(q4BIds, offset: 0, index: 1)
+e2.setBuffer(q4BWts, offset: 0, index: 2)
+e2.setBytes(&bigNe, length: 4, index: 3); e2.setBytes(&q4UNsel, length: 4, index: 4)
 e2.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1),
                    threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
 e2.endEncoding(); cb2.commit(); cb2.waitUntilCompleted()
-let after = bIds.contents().bindMemory(to: UInt32.self, capacity: nsel)[0]
-check(after == sentinel, "ne=257 is REFUSED — the sentinel survives untouched (radius is live)")
+let after = q4BIds.contents().bindMemory(to: UInt32.self, capacity: q4Nsel)[0]
+check(after == sentinel, "ne=513 is REFUSED — the sentinel survives untouched (radius is live)")
 
 print(failures == 0 ? "VERDICT PASS" : "VERDICT FAIL \(failures)")
 exit(failures == 0 ? 0 : 1)

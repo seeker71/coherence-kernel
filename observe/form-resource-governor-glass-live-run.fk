@@ -1,0 +1,105 @@
+; form-resource-governor-glass-live-run.fk — publish physical governor truth.
+;
+; Real metal_status belongs to this process and is never assigned the fixture
+; lifetime used to exercise the filesystem singleton.  Until the carrier
+; exposes current-process lifetime, the real governor projection stays closed.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bml/form-glass-observation-v2.bml form-stdlib/form-resource-governor.bml form-stdlib/form-glass-telemetry-membrane.bml form-stdlib/form-resource-governor-glass.bml
+
+(do
+    (defn frgglr-declared-provenance ()
+        (fgov2-provenance "declared" "resource.governor"
+            (fgov2-unavailable "current-process-lifetime-not-exposed" "process.current-lifetime")
+            (fgov2-measured (kernel_stat 0))
+            (fgov2-measured (now_unix_ms)) "metal_status"))
+    (defn frgglr-fixture-provenance (publisher pid started incarnation sequence observed)
+        (fgov2-provenance "physical-live" publisher
+            (fgov2-measured (fgov2-process-lifetime pid started incarnation))
+            (fgov2-measured sequence) (fgov2-measured observed) "host_dir_mkdir-live-probe"))
+    (defn frgglr-unavailable (reason door) (frg-unavailable reason door))
+    (defn frgglr-resource (name capacity-door foreground-door reserve-door)
+        (frg-resource name
+            (frgglr-unavailable "capacity-not-exposed" capacity-door)
+            (frgglr-unavailable "foreground-demand-not-exposed" foreground-door)
+            (frgglr-unavailable "reserve-not-exposed" reserve-door)))
+    (defn frgglr-publish-status (result) (if (lt (len result) 2) "invalid" (nth result 1)))
+
+    ; Physical current-process Metal status.  The typed signal holds its real
+    ; measured zero, while provenance remains declared because lifetime is not
+    ; physically observable through the current carrier.
+    (let epoch (now_unix_ms))
+    (let status (metal_status))
+    (let in-flight-truth (fgov2-status-number-truth status "in_flight"))
+    (let sample (frg-sample
+        (frgglr-unavailable "request-queue-not-correlated" "hearth.queue.current")
+        (frgglr-resource "cpu" "host.cpu.capacity" "host.cpu.foreground" "host.cpu.reserve")
+        (frgglr-resource "gpu" "metal.capacity" "metal.foreground" "metal.reserve")
+        (frgglr-resource "memory" "host.memory.capacity" "host.memory.foreground" "host.memory.reserve")
+        (frgglr-unavailable "foreground-presence-not-exposed" "host.foreground-presence")
+        (frgglr-unavailable "foreground-latency-not-exposed" "host.foreground-latency")
+        (frgglr-unavailable "memory-pressure-not-exposed" "host.memory-pressure")
+        (frgglr-unavailable "thermal-state-not-exposed" "host.thermal-state")
+        (frgglr-unavailable "low-power-state-not-exposed" "host.low-power-state")
+        (frg-signal in-flight-truth 0 (frgglr-declared-provenance))))
+    (let policy (frg-default-policy))
+    (let decision (frg-tick policy (frg-initial-state) sample))
+    (let release-plan (frg-pressure-release-plan policy (frg-pressure sample)
+        (frgglr-unavailable "required-bytes-not-requested" "governor.reclaim-request") (list)))
+
+    ; The fixture is used only for the physical atomic-slot probe.  It is
+    ; named as a fixture in output and never injected into the real sample.
+    (let fixture-provenance (frgglr-fixture-provenance
+        "resource.governor.slot-fixture" 99011 1700000000 "governor-slot-fixture-99011" 1 epoch))
+    (let open-permit (frg-metal-permit
+        (frg-permit-id-for fixture-provenance 1) 1 "open" fixture-provenance 0 (list) "" ""))
+    (let first (frg-metal-slot-acquire-live open-permit))
+    (let second (frg-metal-slot-acquire-live open-permit))
+    (let reserved (frg-metal-slot-result-permit first))
+    (let other-provenance (frgglr-fixture-provenance
+        "resource.governor.other-fixture" 99012 1700000001 "governor-other-fixture-99012" 1 epoch))
+    (let other-permit (frg-metal-permit
+        (frg-permit-id-for other-provenance 1) 1 "open" other-provenance 0 (list) "" ""))
+    (let slot-observation (if (eq (frg-metal-slot-result-acquired? first) 1)
+        (frg-metal-slot-observe-live other-permit epoch 500)
+        (frg-metal-slot-observation "occupied-unknown" "preexisting-owner-not-inspected" (frg-metal-slot-path) "")))
+    (let release (if (eq (frg-metal-slot-result-acquired? first) 1)
+        (frg-metal-slot-release-live reserved)
+        (frg-metal-slot-release-result "not-attempted" "slot-was-already-occupied" -1 -1)))
+    (let duplicate-release (if (eq (frg-metal-slot-result-acquired? first) 1)
+        (frg-metal-slot-release-live reserved)
+        (frg-metal-slot-release-result "not-attempted" "slot-was-already-occupied" -1 -1)))
+
+    (let frame (frgg-project policy sample decision (list) (list) (list) release-plan slot-observation epoch))
+    (let published (frgg-publish "/tmp/form-glass-telemetry" epoch frame))
+    (let read-back (fgtm-read-current "/tmp/form-glass-telemetry" "resource.governor"))
+    (let pressure-row (nth (frgg-frame-samples frame) 3))
+    (let admission-row (nth (frgg-frame-samples frame) 4))
+    (let release-row (nth (frgg-frame-samples frame) 7))
+    (let slot-row (nth (frgg-frame-samples frame) 9))
+
+    (print_str "form-resource-governor-glass evidence=physical-live-publish\n")
+    (print_str (str_concat "metal.source=physical-current-process fixture=false linked="
+        (if (eq (fgov2-metal-linked? status) 1) "true" "false")))
+    (print_str (str_concat " in-flight.kind=" (fgov2-truth-kind in-flight-truth)))
+    (print_str (str_concat " governor.safe=" (if (eq (frgg-frame-safe? frame) 1) "true" "false")))
+    (print_str (str_concat " reason=" (frgg-frame-reason frame)))
+    (print_str " missing-door=process.current-lifetime\n")
+    (print_str (str_concat "glass.publisher=resource.governor publish=" (frgglr-publish-status published)))
+    (print_str (str_concat " read-back=" (fgtm-read-state-status read-back)))
+    (print_str (str_concat " rows=" (int_to_str (len (frgg-frame-samples frame)))))
+    (print_str (str_concat " pressure=" (fgtm-sample-lifecycle pressure-row)))
+    (print_str (str_concat " admission=" (fgtm-sample-lifecycle admission-row)))
+    (print_str (str_concat " release=" (fgtm-sample-lifecycle release-row)))
+    (print_str (str_concat " release-selected=" (int_to_str (frgg-frame-release-selection-count frame))))
+    (print_str (str_concat " slot=" (frgg-frame-slot-status frame)))
+    (print_str "\n")
+    (print_str "slot.source=physical-host_dir_mkdir fixture=true")
+    (print_str (str_concat " first=" (frg-metal-slot-result-status first)))
+    (print_str (str_concat " second=" (frg-metal-slot-result-status second)))
+    (print_str (str_concat " observation=" (fgtm-sample-lifecycle slot-row)))
+    (print_str (str_concat " release=" (frg-metal-slot-release-status release)))
+    (print_str (str_concat " duplicate-release=" (frg-metal-slot-release-status duplicate-release)))
+    (print_str "\n")
+    (print_str "integration.prelude=form/form-stdlib/form-resource-governor-glass.bml")
+    (print_str " call=frgg-frame-samples(frgg-project(...)) publish=frgg-publish(root,epoch,frame)\n")
+    0)

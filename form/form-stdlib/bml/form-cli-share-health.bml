@@ -1,0 +1,126 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-cli-share-health.bml — typed health for a measured share.
+//
+// A withheld percentage is not one undifferentiated state.  Binding absence,
+// bounded collection in motion, and a candidate that failed reconciliation
+// have different repairs.  This authority names them without emitting rollout
+// content; zero remains a measured value inside an observed evidence row.
+//
+//////////////////////////////////////////////////////////////////////
+
+// preludes: form-stdlib/form-cli-turn-evidence-live.fk
+
+section [form.bml] {
+    class FormCliShareHealth {
+        field Rule = "absent-measuring-error-and-observed-are-distinct-share-states";
+        field MeasuringReason = "selected-turn-not-fully-traversed";
+
+        def fcsh-rule() = Rule();
+        def fcsh-measuring-reason() = MeasuringReason();
+        def fcsh-join(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), fcsh-join(tail(parts)));
+
+        def fcsh-checks(e) {
+            fcsh-join(list(
+                " identity=", int_to_str(fcte-identity?(e)),
+                " time=", int_to_str(fcte-time-valid?(e)),
+                " tokens=", int_to_str(fcte-token-valid?(e)),
+                " tools=", int_to_str(fcte-tool-valid?(e)),
+                " form=", int_to_str(fcte-form-valid?(e)),
+                " lanes=", int_to_str(fcte-lanes-valid?(e)),
+                " source=", int_to_str(fcte-source-ok?(e)),
+                " complete=", int_to_str(eq(fcte-complete(e), 1))));
+        }
+
+        def fcsh-candidate(row) {
+            let evidence = fcte-parse(row);
+            if eq(fcte-shape?(evidence), 0) then
+                "measurement-health=Error stage=reconcile shape=0 share=withheld\n"
+            else if eq(fcte-numeric-fields-loop?(evidence, 5), 0) then
+                "measurement-health=Error stage=reconcile shape=1 numeric=0 share=withheld\n"
+            else
+                fcsh-join(list("measurement-health=Error stage=reconcile shape=1 numeric=1",
+                    fcsh-checks(evidence), " share=withheld\n"));
+        }
+
+        def fcsh-progress(parts, stream_bytes) {
+            if and(eq(len(parts), 28), str_eq(nth(parts, 0), fctel-progress-tag())) then
+                fcsh-join(list(
+                    "measurement-health=Measuring phase=collecting turn=", nth(parts, 2),
+                    " cursor-byte=", nth(parts, 5),
+                    " stream-bytes=", int_to_str(stream_bytes),
+                    " share=withheld reason=", fcsh-measuring-reason(), "\n"))
+            else
+                "measurement-health=Error stage=progress-row shape=invalid share=withheld\n";
+        }
+
+        def fcsh-discovery(parts) {
+            if and(eq(len(parts), 5), str_eq(nth(parts, 0), "turn-evidence-discovery-v2")) then
+                fcsh-join(list(
+                    "measurement-health=Measuring phase=discovering cursor-byte=", nth(parts, 2),
+                    " stream-bytes=", nth(parts, 1),
+                    " share=withheld reason=no-completed-turn-coordinate-yet\n"))
+            else
+                "measurement-health=Error stage=discovery-row shape=invalid share=withheld\n";
+        }
+
+        def fcsh-start-discovery(parts) {
+            if and(eq(len(parts), 8), str_eq(nth(parts, 0), "turn-evidence-start-discovery-v1")) then
+                fcsh-join(list(
+                    "measurement-health=Measuring phase=locating-start turn=", nth(parts, 2),
+                    " cursor-byte=", nth(parts, 4),
+                    " complete-byte=", nth(parts, 3),
+                    " stream-bytes=", nth(parts, 1),
+                    " share=withheld reason=task-start-coordinate-not-yet-reached\n"))
+            else
+                "measurement-health=Error stage=start-discovery-row shape=invalid share=withheld\n";
+        }
+
+        def fcsh-validation(parts) {
+            if and(eq(len(parts), 9), str_eq(nth(parts, 0), "turn-evidence-latest-validation-v1")) then
+                fcsh-join(list(
+                    "measurement-health=Measuring phase=validating-latest turn=", nth(parts, 2),
+                    " cursor-byte=", nth(parts, 6),
+                    " observed-carrier-bytes=", nth(parts, 3),
+                    " stream-bytes=", nth(parts, 5),
+                    " share=withheld reason=append-range-not-fully-checked\n"))
+            else
+                "measurement-health=Error stage=latest-validation-row shape=invalid share=withheld\n";
+        }
+
+        // Durable movement outranks an old failed candidate.  This pure door
+        // makes that precedence directly witnessable without staining the
+        // live spool from a band.
+        def fcsh-health-state(path, progress, start, validation, discovery, candidate) {
+            if gt(str_len(progress), 0) then
+                fcsh-progress(split-on(fctel-trim-end(progress), "|"), file_size(path))
+            else if gt(str_len(start), 0) then
+                fcsh-start-discovery(split-on(fctel-trim-end(start), "|"))
+            else if gt(str_len(validation), 0) then
+                fcsh-validation(split-on(fctel-trim-end(validation), "|"))
+            else if gt(str_len(discovery), 0) then
+                fcsh-discovery(split-on(fctel-trim-end(discovery), "|"))
+            else if gt(str_len(candidate), 0) then
+                fcsh-candidate(fctel-trim-end(candidate))
+            else
+                "measurement-health=Unavailable stage=refresh reason=no-completed-evidence-row share=withheld\n";
+        }
+
+        def fcsh-health-bound(path) {
+            let progress = if gt(file_size(fctel-progress-path()), 0) then read_file(fctel-progress-path()) else "";
+            let start = if gt(file_size(fctel-start-discovery-path()), 0) then read_file(fctel-start-discovery-path()) else "";
+            let validation = if gt(file_size(fctel-latest-validation-path()), 0) then read_file(fctel-latest-validation-path()) else "";
+            let discovery = if gt(file_size(fctel-discovery-path()), 0) then read_file(fctel-discovery-path()) else "";
+            let candidate = if gt(file_size(fctel-candidate-row-path()), 0) then read_file(fctel-candidate-row-path()) else "";
+            fcsh-health-state(path, progress, start, validation, discovery, candidate);
+        }
+
+        def fcsh-health() {
+            let path = fctel-bound-path();
+            if str_eq(path, "") then
+                "measurement-health=Absent reason=no-bound-rollout share=withheld\n"
+            else fcsh-health-bound(path);
+        }
+    }
+    0;
+}

@@ -15,11 +15,18 @@
 (defn fctel-target-turn-path () ".form-cli-turn-evidence-target")
 (defn fctel-progress-path () ".form-cli-turn-evidence-progress")
 (defn fctel-discovery-path () ".form-cli-turn-evidence-discovery")
+(defn fctel-start-discovery-path () ".form-cli-turn-evidence-start-discovery")
+(defn fctel-latest-validation-path () ".form-cli-turn-evidence-latest-validation")
 (defn fctel-observed-row-path () ".form-cli-turn-evidence-row")
 (defn fctel-candidate-row-path () ".form-cli-turn-evidence-candidate")
 (defn fctel-source-kind () "codex-rollout-jsonl+explicit-form-binding")
-(defn fctel-chunk-bytes () 1048576)
-(defn fctel-overlap-bytes () 256)
+; One 4 MiB discovery slice physically took 8.2 s on this carrier while
+; locating the completed turn in a 135 MiB rollout. Keep each continuation
+; below the five-second close-attention boundary: the durable cursor, not one
+; blocking invocation, owns the whole traversal.
+(defn fctel-chunk-bytes () 2097152)
+(defn fctel-processing-bytes () 2097152)
+(defn fctel-overlap-bytes () 4096)
 
 (defn fctel-join (parts)
     (if (eq (len parts) 0) ""
@@ -124,26 +131,18 @@
             (substring s (add open 1) (sub end 1)))))
 
 (defn fctel-top-type (prefix)
-    (do
-        (let q0 (fctel-next-json-string prefix 0))
-        (let q1 (fctel-next-json-string prefix (fctel-json-string-end prefix q0)))
-        (let q2 (fctel-next-json-string prefix (fctel-json-string-end prefix q1)))
-        (let q3 (fctel-next-json-string prefix (fctel-json-string-end prefix q2)))
-        (fctel-json-string-at prefix q3)))
+    ; `ordinal` and future envelope keys may sit before `type`.  The key is
+    ; stable; its string ordinal is not.
+    (fctel-json-string-after prefix "\"type\":" 0))
 
 (defn fctel-payload-type (prefix)
     (do
         (let top-type (fctel-top-type prefix))
         (if (or (str_eq top-type "event_msg") (str_eq top-type "response_item"))
             (do
-                (let q0 (fctel-next-json-string prefix 0))
-                (let q1 (fctel-next-json-string prefix (fctel-json-string-end prefix q0)))
-                (let q2 (fctel-next-json-string prefix (fctel-json-string-end prefix q1)))
-                (let q3 (fctel-next-json-string prefix (fctel-json-string-end prefix q2)))
-                (let q4 (fctel-next-json-string prefix (fctel-json-string-end prefix q3)))
-                (let q5 (fctel-next-json-string prefix (fctel-json-string-end prefix q4)))
-                (let q6 (fctel-next-json-string prefix (fctel-json-string-end prefix q5)))
-                (fctel-json-string-at prefix q6))
+                (let payload-at (str_find prefix "\"payload\":" 0))
+                (if (lt payload-at 0) ""
+                    (fctel-json-string-after prefix "\"type\":" payload-at)))
             "")))
 
 (defn fctel-line-event? (prefix event-type turn-id)
@@ -182,19 +181,37 @@
             (if (ge end (str_len s)) last2
                 (fctel-find-last-terminal-line s turn-id (add end 1) last2)))))
 
-(defn fctel-find-last-file-loop (path event-type turn-id end)
-    (if (le end 0) -1
-        (do
-            (let start (fctel-max 0 (sub end (fctel-chunk-bytes))))
-            (let body (read_file_slice path start (sub end start)))
-            (let found (fctel-find-last-line-event body event-type turn-id 0 -1))
-            (if (ge found 0) (add start found)
-                (if (eq start 0) -1
-                    (fctel-find-last-file-loop path event-type turn-id
-                        (fctel-min end (add start (fctel-overlap-bytes)))))))))
+; A discovery window never presents a partial JSONL row as a row beginning.
+; The small prefix overlap is used only to find the preceding LF.  When a row
+; is larger than the overlap, this slice deliberately skips its partial tail;
+; a later bounded slice reaches the row's true beginning instead of accepting
+; an envelope whose identity was cut away at the byte boundary.
+(defn fctel-discovery-window (path end)
+    (do
+        (let start (fctel-max 0 (sub end (fctel-chunk-bytes))))
+        (let read-start (fctel-max 0 (sub start (fctel-overlap-bytes))))
+        (let raw (read_file_slice path read-start (sub end read-start)))
+        (if (eq read-start 0) (list 0 raw start)
+            (do
+                (let nl (scan_run raw 0 5))
+                (if (ge nl (str_len raw)) (list end "" start)
+                    (list (add read-start (add nl 1))
+                        (substring raw (add nl 1) (str_len raw)) start))))))
 
-(defn fctel-find-last-event-before (path event-type turn-id limit)
-    (fctel-find-last-file-loop path event-type turn-id limit))
+; Result: found?, absolute coordinate, next bounded cursor.  Start lookup uses
+; this one slice at a time just like terminal discovery; no share invocation
+; recursively walks an arbitrarily large rollout.
+(defn fctel-find-line-event-window (path event-type turn-id end)
+    (if (le end 0) (list 0 -1 0)
+        (do
+            (let window (fctel-discovery-window path end))
+            (let base (nth window 0))
+            (let body (nth window 1))
+            (let next (nth window 2))
+            (let found (fctel-find-last-line-event
+                body event-type turn-id 0 -1))
+            (if (ge found 0) (list 1 (add base found) next)
+                (list 0 -1 next)))))
 
 (defn fctel-line-start (path marker)
     (do
@@ -277,6 +294,26 @@
                 (list raw-bytes (nth rows 1) (nth rows 2) (nth rows 3)
                     (nth rows 4) (nth rows 5) (nth rows 6) (nth rows 7))))))
 
+; A tool output may be megabytes long.  Its lane accounting needs only the
+; byte coordinate of `output`, the call id in the typed prefix, and the public
+; @form row in the bounded tail.  Keeping the whole private line as another
+; Form string made evidence cost proportional to output size twice.
+(defn fctel-raw-output-measure-range (segment from end prefix scan-receipt)
+    (do
+        (let p (str_find prefix "\"output\":" 0))
+        (if (lt p 0) (fctel-zero-output-measure)
+            (do
+                (let output-at (add from (add p 9)))
+                (let raw-bytes (sub end output-at))
+                (let tail-start (fctel-max output-at (sub end 512)))
+                (let rows (if (eq scan-receipt 1)
+                    (fctel-raw-form-tail-loop
+                        (substring segment tail-start end) 0
+                        (fctel-zero-output-measure))
+                    (fctel-zero-output-measure)))
+                (list raw-bytes (nth rows 1) (nth rows 2) (nth rows 3)
+                    (nth rows 4) (nth rows 5) (nth rows 6) (nth rows 7))))))
+
 ; Collector state fields 0..21: provider usage, tool and Form metrics,
 ; call timestamps, then the selected model.
 (defn fctel-state ()
@@ -321,11 +358,9 @@
             (fctel-last-usage-int line "\"total_tokens\":"))))
 
 (defn fctel-add-usage (state line)
-    (do
-        (let evented (fctel-add-at state 0 1))
-        (if (eq (fctel-usage-present? line) 1)
-            (fctel-add-last-usage evented line)
-            evented)))
+    (if (eq (fctel-usage-present? line) 1)
+        (fctel-add-last-usage (fctel-add-at state 0 1) line)
+        state))
 
 ; An open task has no settled total.  Its last completed provider call is still
 ; an exact, bounded remote-token pressure signal; content never leaves here.
@@ -390,13 +425,22 @@
         (fctel-add-output-measure
             (fctel-add-at state 8 1) measure)))
 
+(defn fctel-add-output-range (state segment from end prefix)
+    (do
+        (let call-id (fctel-json-string-after prefix "\"call_id\":" 0))
+        (let measure (fctel-raw-output-measure-range segment from end prefix
+            (fctel-call-native-request? (nth state 20) call-id)))
+        (fctel-add-output-measure
+            (fctel-add-at state 8 1) measure)))
+
 (defn fctel-process-line (state line)
     (do
         (let prefix (substring line 0 (fctel-min 256 (str_len line))))
         (let top-type (fctel-top-type prefix))
         (let event-type (fctel-payload-type prefix))
-        (if (or (str_eq event-type "token_count")
-                (eq (fctel-usage-present? line) 1))
+        ; A transport token_count without a complete call-local usage object
+        ; is not a completed remote model-call boundary.
+        (if (eq (fctel-usage-present? line) 1)
             (fctel-add-usage state line)
         (if (or (str_eq event-type "custom_tool_call")
                 (str_eq event-type "function_call"))
@@ -410,12 +454,35 @@
             (fctel-set state 21 (fctel-json-string-after line "\"model\":" 0))
             state)))))))
 
+; Decide from a small typed prefix.  Only compact provider/call rows become
+; standalone strings.  Large output rows stay in the already-read segment and
+; are measured by coordinate, so unrelated payload text is never copied.
+(defn fctel-process-range (state segment from end)
+    (do
+        (let prefix-end (fctel-min end (add from 4096)))
+        (let prefix (substring segment from prefix-end))
+        (let top-type (fctel-top-type prefix))
+        (let event-type (fctel-payload-type prefix))
+        (if (eq (frte-call-local-usage-line? prefix) 1)
+            (fctel-add-usage state (substring segment from end))
+        (if (or (str_eq event-type "custom_tool_call")
+                (str_eq event-type "function_call"))
+            (fctel-add-call state prefix)
+        (if (or (str_eq event-type "custom_tool_call_output")
+                (str_eq event-type "function_call_output"))
+            (fctel-add-output-range state segment from end prefix)
+        (if (str_eq event-type "patch_apply_end")
+            (fctel-add-at state 19 1)
+        (if (str_eq top-type "turn_context")
+            (fctel-set state 21 (fctel-json-string-after prefix "\"model\":" 0))
+            state)))))))
+
 (defn fctel-process-segment (segment from state)
     (if (ge from (str_len segment)) state
         (do
             (let nl (scan_run segment from 5))
             (let end (fctel-min nl (str_len segment)))
-            (let state2 (fctel-process-line state (substring segment from end)))
+            (let state2 (fctel-process-range state segment from end))
             (if (ge nl (str_len segment)) state2
                 (fctel-process-segment segment (add nl 1) state2)))))
 
@@ -433,7 +500,7 @@
                             (str_len (json-unescape-string
                                 (substring complete-line (add q 1) (sub e 1)))))))))))
 
-(defn fctel-row-from (thread-id provider turn-id start-line complete-line state)
+(defn fctel-row-from (thread-id provider turn-id start-line complete-line state stream-size start-at complete-at)
     (do
         (let started (fctel-timestamp-ms start-line))
         (let ended (fctel-timestamp-ms complete-line))
@@ -447,7 +514,7 @@
         (let remote (nth state 0))
         (let events (add native (add local remote)))
         (fctel-join (list
-            (fcte-tag) "|" thread-id "|" turn-id "|" provider "|" (nth state 21) "|"
+            (fcte-tag-current) "|" thread-id "|" turn-id "|" provider "|" (nth state 21) "|"
             (int_to_str started) "|" (int_to_str ended) "|" (int_to_str duration) "|"
             (int_to_str (fctel-int-after complete-line "\"time_to_first_token_ms\":" 0)) "|"
             (int_to_str (fctel-final-output-bytes complete-line)) "|"
@@ -461,7 +528,11 @@
             (int_to_str (nth state 14)) "|" (int_to_str (nth state 15)) "|"
             (int_to_str native) "|" (int_to_str (nth state 17)) "|"
             (int_to_str local) "|" (int_to_str remote) "|" (int_to_str events) "|"
-            (int_to_str (nth state 19)) "|" (fctel-source-kind) "|1"))))
+            (int_to_str (nth state 19)) "|" (fctel-source-kind) "|1|"
+            (int_to_str (frte-unattributed (nth state 1)
+                (nth state 4) (nth state 6))) "|"
+            (int_to_str stream-size) "|" (int_to_str start-at) "|"
+            (int_to_str complete-at)))))
 
 (defn fctel-calls-emit (calls)
     (if (eq (len calls) 0) ""
@@ -483,8 +554,13 @@
     (if (str_eq text "") (list)
         (fctel-calls-parse-loop (split-on text ";") (list))))
 
-(defn fctel-progress-row (turn-id cursor state)
-    (fctel-join (list turn-id "|" (int_to_str cursor) "|"
+(defn fctel-progress-tag () "turn-evidence-progress-v2")
+
+(defn fctel-progress-row (carrier-size turn-id segment-start complete-at cursor state)
+    (fctel-join (list (fctel-progress-tag) "|"
+        (int_to_str carrier-size) "|" turn-id "|"
+        (int_to_str segment-start) "|" (int_to_str complete-at) "|"
+        (int_to_str cursor) "|"
         (int_to_str (nth state 0)) "|" (int_to_str (nth state 1)) "|"
         (int_to_str (nth state 2)) "|" (int_to_str (nth state 3)) "|"
         (int_to_str (nth state 4)) "|" (int_to_str (nth state 5)) "|"
@@ -499,8 +575,6 @@
 
 (defn fctel-progress-state (parts)
     (list
-        (str_to_int (nth parts 2)) (str_to_int (nth parts 3))
-        (str_to_int (nth parts 4)) (str_to_int (nth parts 5))
         (str_to_int (nth parts 6)) (str_to_int (nth parts 7))
         (str_to_int (nth parts 8)) (str_to_int (nth parts 9))
         (str_to_int (nth parts 10)) (str_to_int (nth parts 11))
@@ -509,7 +583,19 @@
         (str_to_int (nth parts 16)) (str_to_int (nth parts 17))
         (str_to_int (nth parts 18)) (str_to_int (nth parts 19))
         (str_to_int (nth parts 20)) (str_to_int (nth parts 21))
-        (fctel-calls-parse (nth parts 23)) (nth parts 22)))
+        (str_to_int (nth parts 22)) (str_to_int (nth parts 23))
+        (str_to_int (nth parts 24)) (str_to_int (nth parts 25))
+        (fctel-calls-parse (nth parts 27)) (nth parts 26)))
+
+(defn fctel-progress-matches? (parts carrier-size turn-id segment-start complete-at)
+    (if (and (eq (len parts) 28)
+        (and (str_eq (nth parts 0) (fctel-progress-tag))
+        (and (le (str_to_int (nth parts 1)) carrier-size)
+        (and (str_eq (nth parts 2) turn-id)
+        (and (eq (str_to_int (nth parts 3)) segment-start)
+        (and (eq (str_to_int (nth parts 4)) complete-at)
+        (and (ge (str_to_int (nth parts 5)) segment-start)
+             (le (str_to_int (nth parts 5)) carrier-size)))))))) 1 0))
 
 (defn fctel-read-progress ()
     (if (gt (file_size (fctel-progress-path)) 0)
@@ -526,16 +612,39 @@
         (split-on (fctel-trim-end (read_file (fctel-discovery-path))) "|")
         (list)))
 
-(defn fctel-discovery-cursor (parts size)
-    (if (and (eq (len parts) 2)
-             (ge size (str_to_int (nth parts 0))))
+(defn fctel-carrier-thread-id (path size)
+    (fctel-json-string-after
+        (fctel-first-line (read_file_slice path 0 (fctel-min size 1048576)))
+        "\"session_id\":" 0))
+
+(defn fctel-carrier-provider (path size)
+    (fctel-json-string-after
+        (fctel-first-line (read_file_slice path 0 (fctel-min size 1048576)))
+        "\"model_provider\":" 0))
+
+(defn fctel-discovery-state-valid? (parts path size)
+    (if (and (eq (len parts) 5)
+        (and (str_eq (nth parts 0) "turn-evidence-discovery-v2")
+        (and (ge size (str_to_int (nth parts 1)))
+        (and (str_eq (nth parts 3) (fctel-carrier-thread-id path size))
+             (str_eq (nth parts 4) (fctel-carrier-provider path size)))))) 1 0))
+
+(defn fctel-discovery-size (parts path size)
+    (if (eq (fctel-discovery-state-valid? parts path size) 1)
+        (str_to_int (nth parts 1)) size))
+
+(defn fctel-discovery-cursor (parts path size)
+    (if (eq (fctel-discovery-state-valid? parts path size) 1)
         (do
-            (let cursor (str_to_int (nth parts 1)))
-            (if (and (gt cursor 0) (le cursor size)) cursor size))
+            (let cursor (str_to_int (nth parts 2)))
+            (let snapshot (str_to_int (nth parts 1)))
+            (if (and (gt cursor 0) (le cursor snapshot)) cursor snapshot))
         size))
 
-(defn fctel-discovery-row (size cursor)
-    (str_concat (int_to_str size) (str_concat "|" (int_to_str cursor))))
+(defn fctel-discovery-row (path size cursor)
+    (fctel-join (list "turn-evidence-discovery-v2|" (int_to_str size) "|"
+        (int_to_str cursor) "|" (fctel-carrier-thread-id path size) "|"
+        (fctel-carrier-provider path size))))
 
 ; Result: (found complete-byte turn-id next-cursor stream-size).
 (defn fctel-discover-latest-complete (path)
@@ -543,30 +652,154 @@
         (let size (file_size path))
         (let target (if (gt (file_size (fctel-target-turn-path)) 0)
             (fctel-trim-end (read_file (fctel-target-turn-path))) ""))
+        (let discovery (fctel-read-discovery))
+        (let snapshot (fctel-discovery-size discovery path size))
         (if (le size 0) (list 0 -1 "" 0 size)
             (do
-                (let end (fctel-discovery-cursor (fctel-read-discovery) size))
-                (let start (fctel-max 0 (sub end (fctel-chunk-bytes))))
-                (let body (read_file_slice path start (sub end start)))
+                (let end (fctel-discovery-cursor
+                    discovery path size))
+                (let window (fctel-discovery-window path end))
+                (let base (nth window 0))
+                (let body (nth window 1))
+                (let start (nth window 2))
                 (let found (fctel-find-last-terminal-line body target 0 -1))
                 (if (ge found 0)
                     (do
-                        (let at (add start found))
+                        (let at (add base found))
                         (let turn-id (fctel-json-string-after
                             (read_file_slice path at 512) "\"turn_id\":" 0))
                         (write_file_text (fctel-discovery-path) "")
-                        (list 1 at turn-id end size))
+                        (list 1 at turn-id end snapshot))
                     (do
-                        (let next (if (eq start 0) 0
-                            (fctel-min end (add start (fctel-overlap-bytes)))))
+                        (let next start)
                         (write_file_text (fctel-discovery-path)
-                            (fctel-discovery-row size next))
-                        (list 0 -1 "" next size)))))))
+                            (fctel-discovery-row path snapshot next))
+                        (list 0 -1 "" next snapshot)))))))
 
 (defn fctel-latest-complete-turn (path)
     (do
         (let found (fctel-discover-latest-complete path))
         (list (nth found 1) (nth found 2))))
+
+(defn fctel-read-start-discovery ()
+    (if (gt (host_file_size (fctel-start-discovery-path)) 0)
+        (split-on (fctel-trim-end
+            (read_file (fctel-start-discovery-path))) "|")
+        (list)))
+
+(defn fctel-start-discovery-row (path size turn-id complete-at cursor start-at)
+    (fctel-join (list "turn-evidence-start-discovery-v1|"
+        (int_to_str size) "|" turn-id "|" (int_to_str complete-at) "|"
+        (int_to_str cursor) "|" (int_to_str start-at) "|"
+        (fctel-carrier-thread-id path size) "|"
+        (fctel-carrier-provider path size))))
+
+(defn fctel-start-discovery-matches? (parts path size turn-id complete-at)
+    (if (and (eq (len parts) 8)
+        (and (str_eq (nth parts 0) "turn-evidence-start-discovery-v1")
+        (and (le (str_to_int (nth parts 1)) size)
+        (and (str_eq (nth parts 2) turn-id)
+        (and (eq (str_to_int (nth parts 3)) complete-at)
+        (and (str_eq (nth parts 6) (fctel-carrier-thread-id path size))
+             (str_eq (nth parts 7) (fctel-carrier-provider path size)))))))) 1 0))
+
+; Result: found?, start coordinate, next cursor.  A resolved coordinate stays
+; durable while the selected turn is collected in later bounded invocations.
+(defn fctel-resolve-start-once (path size turn-id complete-at)
+    (do
+        (let prior (fctel-read-start-discovery))
+        (let matched (fctel-start-discovery-matches?
+            prior path size turn-id complete-at))
+        (let resolved (if (eq matched 1) (str_to_int (nth prior 5)) -1))
+        (if (ge resolved 0) (list 1 resolved resolved)
+            (do
+                (let end (if (eq matched 1)
+                    (str_to_int (nth prior 4)) complete-at))
+                (let found (fctel-find-line-event-window
+                    path "task_started" turn-id end))
+                (if (eq (nth found 0) 1)
+                    (do
+                        (write_file_text (fctel-start-discovery-path)
+                            (fctel-start-discovery-row path size turn-id
+                                complete-at (nth found 2) (nth found 1)))
+                        found)
+                    (if (le (nth found 2) 0)
+                        (do
+                            (write_file_text (fctel-start-discovery-path) "")
+                            found)
+                        (do
+                            (write_file_text (fctel-start-discovery-path)
+                                (fctel-start-discovery-row path size turn-id
+                                    complete-at (nth found 2) -1))
+                            found)))))))
+
+(defn fctel-collect-once (path size complete-at turn-id segment-start)
+    (do
+        (let segment-end (fctel-line-end path size complete-at))
+        (let progress (fctel-read-progress))
+        (let resume (fctel-progress-matches?
+            progress size turn-id segment-start complete-at))
+        (let cursor (if (eq resume 1)
+            (str_to_int (nth progress 5)) segment-start))
+        (let state (if (eq resume 1)
+            (fctel-progress-state progress) (fctel-state)))
+        (let target (fctel-min segment-end
+            (add cursor (fctel-processing-bytes))))
+        (let chunk-end (if (ge target segment-end) segment-end
+            (fctel-line-end path segment-end target)))
+        (let piece (read_file_slice path cursor (sub chunk-end cursor)))
+        (let state2 (fctel-process-segment piece 0 state))
+        (if (ge chunk-end segment-end)
+            (do
+                (let meta-line (fctel-first-line
+                    (read_file_slice path 0 (fctel-min size 1048576))))
+                (let thread-id (fctel-json-string-after meta-line "\"session_id\":" 0))
+                (let provider (fctel-json-string-after meta-line "\"model_provider\":" 0))
+                (let start-line (read_file_slice path segment-start 512))
+                (let complete-line (fctel-first-line
+                    (read_file_slice path complete-at (sub segment-end complete-at))))
+                (let row (fctel-row-from thread-id provider turn-id
+                    start-line complete-line state2 size segment-start complete-at))
+                (write_file_text (fctel-candidate-row-path) row)
+                (if (eq (fcte-valid? (fcte-parse row)) 1)
+                    (do
+                        (write_file_text (fctel-progress-path) "")
+                        (write_file_text (fctel-observed-row-path) row)
+                        (write_file_text (fctel-candidate-row-path) "")
+                        (write_file_text (fctel-discovery-path) "")
+                        (write_file_text (fctel-start-discovery-path) "")
+                        (write_file_text (fctel-latest-validation-path) "")
+                        (write_file_text (fctel-target-turn-path) "")
+                        "turn-evidence-refresh=observed\n")
+                    (do
+                        ; The failed candidate is the current health signal.
+                        ; A stale progress row must not conceal it.
+                        (write_file_text (fctel-progress-path) "")
+                        (write_file_text (fctel-start-discovery-path) "")
+                        "turn-evidence-refresh=unreconciled\n")))
+            (do
+                (write_file_text (fctel-candidate-row-path) "")
+                (write_file_text (fctel-progress-path)
+                    (fctel-progress-row size turn-id segment-start
+                        complete-at chunk-end state2))
+                (fctel-join (list "turn-evidence-refresh=progress cursor="
+                    (int_to_str (sub chunk-end segment-start)) "/"
+                    (int_to_str (sub segment-end segment-start)) "\n"))))))
+
+(defn fctel-refresh-coordinate-once (path size complete-at turn-id)
+    (do
+        (let start (fctel-resolve-start-once
+            path size turn-id complete-at))
+        (if (eq (nth start 0) 1)
+            (fctel-collect-once path size complete-at turn-id (nth start 1))
+            (do
+                (write_file_text (fctel-candidate-row-path) "")
+                (if (le (nth start 2) 0)
+                    "turn-evidence-refresh=withheld missing-task-start\n"
+                    (fctel-join (list
+                        "turn-evidence-refresh=locating-start cursor="
+                        (int_to_str (nth start 2)) "/"
+                        (int_to_str complete-at) "\n")))))))
 
 (defn fctel-refresh-once (path)
     (do
@@ -579,48 +812,8 @@
                 (fctel-join (list "turn-evidence-refresh=discovering cursor="
                     (int_to_str (nth discovery 3)) "/"
                     (int_to_str (nth discovery 4)) "\n")))
-            (do
-                (let start-at (fctel-find-last-event-before
-                    path "task_started" turn-id complete-at))
-                (let segment-start (fctel-line-start path start-at))
-                (let segment-end (fctel-line-end path size complete-at))
-                (let progress (fctel-read-progress))
-                (let resume (if (and (eq (len progress) 24)
-                    (str_eq (nth progress 0) turn-id)) 1 0))
-                (let cursor (if (eq resume 1) (str_to_int (nth progress 1)) segment-start))
-                (let state (if (eq resume 1) (fctel-progress-state progress) (fctel-state)))
-                (let target (fctel-min segment-end (add cursor 400000)))
-                (let chunk-end (if (ge target segment-end) segment-end
-                    (fctel-line-end path segment-end target)))
-                (let piece (read_file_slice path cursor (sub chunk-end cursor)))
-                (let state2 (fctel-process-segment piece 0 state))
-                (if (ge chunk-end segment-end)
-                    (do
-                        (let meta-line (fctel-first-line
-                            (read_file_slice path 0 (fctel-min size 1048576))))
-                        (let thread-id (fctel-json-string-after meta-line "\"session_id\":" 0))
-                        (let provider (fctel-json-string-after meta-line "\"model_provider\":" 0))
-                        (let start-line (read_file_slice path segment-start 512))
-                        (let complete-line (fctel-first-line
-                            (read_file_slice path complete-at (sub segment-end complete-at))))
-                        (let row (fctel-row-from thread-id provider turn-id
-                            start-line complete-line state2))
-                        (write_file_text (fctel-candidate-row-path) row)
-                        (if (eq (fcte-valid? (fcte-parse row)) 1)
-                            (do
-                                (write_file_text (fctel-progress-path) "")
-                                (write_file_text (fctel-observed-row-path) row)
-                                "turn-evidence-refresh=observed\n")
-                            (do
-                                (write_file_text (fctel-progress-path)
-                                    (fctel-progress-row turn-id chunk-end state2))
-                                "turn-evidence-refresh=unreconciled\n")))
-                    (do
-                        (write_file_text (fctel-progress-path)
-                            (fctel-progress-row turn-id chunk-end state2))
-                        (fctel-join (list "turn-evidence-refresh=progress cursor="
-                            (int_to_str (sub chunk-end segment-start)) "/"
-                            (int_to_str (sub segment-end segment-start)) "\n"))))))))
+            (fctel-refresh-coordinate-once
+                path size complete-at turn-id))))
 
 (defn fctel-bound-path ()
     ; The private explicit binding is a host-ABI capability.  `file_size` is
@@ -635,15 +828,15 @@
         (do
             (let cached (fctel-trim-end (read_file (fctel-observed-row-path))))
             (let evidence (fcte-parse cached))
-            (if (eq (fcte-valid? evidence) 1)
-                (if (str_eq (fcte-source evidence) (fcte-source-kind-grok))
-                    cached
-                    (do
-                        (let path (fctel-bound-path))
-                        (if (str_eq path "") "unmeasured"
-                            (if (str_eq (fcte-turn-id evidence)
-                                        (nth (fctel-latest-complete-turn path) 1))
-                                cached "unmeasured"))))
+            (if (and (eq (fcte-valid? evidence) 1)
+                (and (str_eq (fcte-source evidence) (fcte-source-kind))
+                     (eq (fcte-provenance-shape? evidence) 1)))
+                (do
+                    (let path (fctel-bound-path))
+                    (if (str_eq path "") "unmeasured"
+                        (if (str_eq (fcte-turn-id evidence)
+                                    (nth (fctel-latest-complete-turn path) 1))
+                            cached "unmeasured")))
                 "unmeasured"))))
 
 (defn fctel-evidence () (fcte-parse (fctel-row)))

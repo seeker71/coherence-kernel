@@ -19,11 +19,26 @@ section [form.bml] {
         field PrivacyRule = "only-coordinates-turn-id-and-status-leave-the-reader";
         field NoTargetRule = "empty-target-selects-the-nearest-completed-turn-without-emitting-its-content";
         field ProgressPrefix = "turn-evidence-refresh=progress";
+        field CollectorRule = "typed-prefix-selects-rows-output-span-stays-coordinate-owned";
+        field StaleExpiryRule = "latestness-disproved-expires-current-row-before-next-cursor-step";
+        field OneMovementRule = "one-invocation-owns-one-bounded-evidence-movement";
+        field ProcessingBytes = 2097152;
+        field AttentionMs = 5000;
+        field LatestTag = "form-cli-turn-evidence-latest-v1";
+        field ValidationTag = "turn-evidence-latest-validation-v1";
 
         def fctec-rule() = Rule();
         def fctec-privacy-rule() = PrivacyRule();
         def fctec-no-target-rule() = NoTargetRule();
         def fctec-progress-prefix() = ProgressPrefix();
+        def fctec-collector-rule() = CollectorRule();
+        def fctec-stale-expiry-rule() = StaleExpiryRule();
+        def fctec-one-movement-rule() = OneMovementRule();
+        def fctec-processing-bytes() = ProcessingBytes();
+        def fctec-attention-ms() = AttentionMs();
+        def fctec-attention-state(elapsed) = if le(elapsed, fctec-attention-ms()) then "within" else "over";
+        def fctec-invocation-action(valid, validating, staleExpired) = if eq(valid, 1) then "already-observed" else if eq(validating, 1) then "validating-latest" else if eq(staleExpired, 1) then "expired-stale-current-row" else "advance";
+        def fctec-invocation-status(action) = str_concat("turn-evidence-refresh=", action);
         def fctec-progress?(status) = if ge(str_find(status, fctec-progress-prefix(), 0), 0) then 1 else 0;
 
         // result = found? absolute-event-offset window-end.  `found?=0` and
@@ -34,42 +49,132 @@ section [form.bml] {
         def fctec-end(result) = nth(result, 3);
         def fctec-result?(result) = if nothing?(result) then 0 else if not(eq(len(result), 4)) then 0 else str_eq(nth(result, 0), "form-cli-turn-evidence-cursor-v1");
 
-        // Each recursive discovery seat reads the established bounded slice.
-        // Discovery returns a coordinate; the collector itself is never held
-        // across an unbounded whole-turn recursion.
+        // Latest-complete validation is a separate append-range cursor.  A
+        // collector cursor may be targeting an older selected turn, so it can
+        // never certify latestness for a cached percentage.
+        def fctec-latest-result(status, next, found, size) = list(LatestTag(), status, next, found, size);
+        def fctec-latest-status(result) = nth(result, 1);
+        def fctec-latest-next(result) = nth(result, 2);
+        def fctec-latest-found(result) = nth(result, 3);
+        def fctec-latest-size(result) = nth(result, 4);
+        def fctec-latest?(result) = eq(fctec-latest-status(result), 1);
+        def fctec-latest-progress?(result) = eq(fctec-latest-status(result), 2);
+
+        def fctec-expire-stale(rowPath, validationPath) {
+            let validationCleared = write_file_text(validationPath, "");
+            let rowCleared = write_file_text(rowPath, "");
+            list("turn-evidence-stale-expiry-v1", validationCleared, rowCleared);
+        }
+        def fctec-expire-current-stale() = fctec-expire-stale(fctel-observed-row-path(), fctel-latest-validation-path());
+
+        // status: 0 stale/error, 1 latest, 2 bounded validation in motion.
+        def fctec-latest-step-grown(path, carrier_size, complete_at, end, size) {
+            let found = fctec-seek(path, "", end);
+            if eq(fctec-found?(found), 1) then
+                if eq(fctec-at(found), complete_at) then fctec-latest-result(1, fctec-end(found), fctec-at(found), size)
+                else fctec-latest-result(0, fctec-end(found), fctec-at(found), size)
+            else if le(fctec-end(found), carrier_size) then fctec-latest-result(1, fctec-end(found), -1, size)
+            else fctec-latest-result(2, fctec-end(found), -1, size);
+        }
+        def fctec-latest-step(path, carrier_size, complete_at, end) {
+            let size = file_size(path);
+            if lt(size, carrier_size) then fctec-latest-result(0, 0, -1, size)
+            else if eq(size, carrier_size) then fctec-latest-result(1, size, complete_at, size)
+            else fctec-latest-step-grown(path, carrier_size, complete_at, end, size);
+        }
+
+        def fctec-read-validation() = if gt(file_size(fctel-latest-validation-path()), 0) then split-on(fctel-trim-end(read_file(fctel-latest-validation-path())), "|") else list();
+        def fctec-validation-row(e, path, snapshot, cursor) = fctel-join(list(ValidationTag(), "|", fcte-thread-id(e), "|", fcte-turn-id(e), "|", int_to_str(fcte-carrier-size(e)), "|", int_to_str(fcte-complete-at(e)), "|", int_to_str(snapshot), "|", int_to_str(cursor), "|", fcte-model-provider(e), "|", fcte-model(e)));
+        def fctec-validation-matches?(parts, e, size) = if not(eq(len(parts), 9)) then 0 else if not(str_eq(nth(parts, 0), ValidationTag())) then 0 else if not(str_eq(nth(parts, 1), fcte-thread-id(e))) then 0 else if not(str_eq(nth(parts, 2), fcte-turn-id(e))) then 0 else if not(eq(str_to_int(nth(parts, 3)), fcte-carrier-size(e))) then 0 else if not(eq(str_to_int(nth(parts, 4)), fcte-complete-at(e))) then 0 else if not(le(str_to_int(nth(parts, 5)), size)) then 0 else if not(str_eq(nth(parts, 7), fcte-model-provider(e))) then 0 else if not(str_eq(nth(parts, 8), fcte-model(e))) then 0 else 1;
+        def fctec-validation-cursor(parts, e, size) = if eq(fctec-validation-matches?(parts, e, size), 1) then str_to_int(nth(parts, 6)) else size;
+        def fctec-validation-finish(e, path, size, step) {
+            let kept = if eq(fctec-latest-progress?(step), 1) then write_file_text(fctel-latest-validation-path(), fctec-validation-row(e, path, size, fctec-latest-next(step))) else write_file_text(fctel-latest-validation-path(), "");
+            step;
+        }
+        def fctec-validation-continue(e, path, size, cursor) = fctec-validation-finish(e, path, size, fctec-latest-step(path, fcte-carrier-size(e), fcte-complete-at(e), cursor));
+        def fctec-validation-grown-step(e, path, size, prior_size, cursor) {
+            let tail = fctec-seek(path, "", size);
+            if eq(fctec-found?(tail), 1) then
+                if ge(fctec-at(tail), prior_size) then if eq(fctec-at(tail), fcte-complete-at(e)) then fctec-latest-result(1, fctec-end(tail), fctec-at(tail), size) else fctec-latest-result(0, fctec-end(tail), fctec-at(tail), size)
+                else fctec-latest-step(path, fcte-carrier-size(e), fcte-complete-at(e), cursor)
+            else if gt(fctec-end(tail), prior_size) then fctec-latest-result(2, fctec-end(tail), -1, size)
+            else fctec-latest-step(path, fcte-carrier-size(e), fcte-complete-at(e), cursor);
+        }
+        def fctec-validation-grown(e, path, size, prior_size, cursor) = fctec-validation-finish(e, path, size, fctec-validation-grown-step(e, path, size, prior_size, cursor));
+        def fctec-advance-latest(e, path) {
+            let size = file_size(path);
+            let prior = fctec-read-validation();
+            let matched = fctec-validation-matches?(prior, e, size);
+            let cursor = fctec-validation-cursor(prior, e, size);
+            let prior_size = if eq(matched, 1) then str_to_int(nth(prior, 5)) else size;
+            if and(eq(matched, 1), gt(size, prior_size)) then fctec-validation-grown(e, path, size, prior_size, cursor) else fctec-validation-continue(e, path, size, cursor);
+        }
+
+        // One invocation reads one aligned bounded 2 MiB slice. A miss returns the
+        // next durable byte cursor; it never recursively consumes the rollout.
         def fctec-seek(path, target, end) {
-            let start = fctel-max(0, sub(end, fctel-chunk-bytes()));
-            let body = read_file_slice(path, start, sub(end, start));
+            let window = fctel-discovery-window(path, end);
+            let base = nth(window, 0);
+            let body = nth(window, 1);
+            let start = nth(window, 2);
             let found = fctel-find-last-terminal-line(body, target, 0, -1);
-            if ge(found, 0) then fctec-result(1, add(start, found), end) else if eq(start, 0) then fctec-result(0, -1, 0) else fctec-seek(path, target, start);
+            if ge(found, 0) then fctec-result(1, add(base, found), end) else fctec-result(0, -1, start);
         }
 
         def fctec-turn-id-at(path, at) = if lt(at, 0) then "" else fctel-json-string-after(read_file_slice(path, at, 512), "\"turn_id\":", 0);
-        def fctec-start-cursor(size) = fctel-discovery-cursor(fctel-read-discovery(), size);
+        def fctec-codex-source-reconciled?(e, path) {
+            let size = file_size(path);
+            let meta = fctel-first-line(read_file_slice(path, 0, fctel-min(size, 1048576)));
+            let start_prefix = read_file_slice(path, fcte-start-at(e), 4096);
+            let complete_prefix = read_file_slice(path, fcte-complete-at(e), 4096);
+            let c1 = and(eq(fcte-provenance-shape?(e), 1), ge(size, fcte-carrier-size(e)));
+            let c2 = str_eq(fctec-turn-id-at(path, fcte-complete-at(e)), fcte-turn-id(e));
+            let c3 = str_eq(fctel-json-string-after(meta, "\"session_id\":", 0), fcte-thread-id(e));
+            let c4 = str_eq(fctel-json-string-after(meta, "\"model_provider\":", 0), fcte-model-provider(e));
+            let c5 = eq(fctel-line-event?(start_prefix, "task_started", fcte-turn-id(e)), 1);
+            let c6 = eq(fctel-terminal-line?(complete_prefix, fcte-turn-id(e)), 1);
+            let c7 = eq(fctel-timestamp-ms(start_prefix), fcte-started-ms(e));
+            let c8 = eq(fctel-timestamp-ms(complete_prefix), fcte-ended-ms(e));
+            if and(c1, and(c2, and(c3, and(c4, and(c5, and(c6, and(c7, c8))))))) then 1 else 0;
+        }
+        def fctec-start-cursor(path, size) = fctel-discovery-cursor(fctel-read-discovery(), path, size);
+        def fctec-start-size(path, size) = fctel-discovery-size(fctel-read-discovery(), path, size);
 
         // Land the one discovered coordinate back into the existing collector
-        // before asking it to parse the selected task.  That keeps the proven
-        // 400k progress rows, validation, and durable observed-row ABI intact.
+        // before asking it to parse the selected task.  The collector selects
+        // typed rows from a bounded 2 MiB window; output size and @form receipt
+        // are read from coordinates and a 512-byte tail. Validation and the
+        // durable observed-row ABI remain unchanged.
         def fctec-refresh-no-complete() {
             write_file_text(fctel-discovery-path(), "");
+            write_file_text(fctel-candidate-row-path(), "");
             "turn-evidence-refresh=withheld no-complete-turn";
         }
-        def fctec-refresh-missing-turn() = "turn-evidence-refresh=withheld missing-turn-id";
+        def fctec-refresh-discovering(path, size, cursor) {
+            write_file_text(fctel-candidate-row-path(), "");
+            write_file_text(fctel-discovery-path(), fctel-discovery-row(path, size, cursor));
+            str_concat("turn-evidence-refresh=discovering cursor=", str_concat(int_to_str(cursor), str_concat("/", int_to_str(size))));
+        }
+        def fctec-refresh-missing-turn() {
+            write_file_text(fctel-candidate-row-path(), "");
+            "turn-evidence-refresh=withheld missing-turn-id";
+        }
         // Exactly one bounded collector slice per invocation.  `progress` is
         // not a failure: its on-disk cursor is the continuation owned by this
         // BML authority and can be scheduled as a later resident row.
         def fctec-refresh-selected(path, size, found, turn) {
             write_file_text(fctel-target-turn-path(), turn);
-            write_file_text(fctel-discovery-path(), fctel-discovery-row(size, fctec-end(found)));
-            fctel-refresh-once(path);
+            write_file_text(fctel-discovery-path(), "");
+            fctel-refresh-coordinate-once(path, size, fctec-at(found), turn);
         }
         def fctec-refresh-found(path, size, found) {
             let turn = fctec-turn-id-at(path, fctec-at(found));
             if str_eq(turn, "") then fctec-refresh-missing-turn() else fctec-refresh-selected(path, size, found, turn);
         }
         def fctec-refresh-nonempty(path, size, target) {
-            let found = fctec-seek(path, target, fctec-start-cursor(size));
-            if eq(fctec-found?(found), 0) then fctec-refresh-no-complete() else fctec-refresh-found(path, size, found);
+            let snapshot = fctec-start-size(path, size);
+            let found = fctec-seek(path, target, fctec-start-cursor(path, size));
+            if eq(fctec-found?(found), 1) then fctec-refresh-found(path, snapshot, found) else if eq(fctec-end(found), 0) then fctec-refresh-no-complete() else fctec-refresh-discovering(path, snapshot, fctec-end(found));
         }
         def fctec-refresh(path) {
             let size = file_size(path);
