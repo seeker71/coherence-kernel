@@ -1,44 +1,71 @@
 ; field-patrol-resident.fk — observe over and over to find missing
-; stones: each beat sweeps every living fkwu walker (CPU seconds and
-; cell name), and any interpreted burn past the patrol threshold that
-; is NOT already in the stones ledger is appended ONCE — a missing
-; stone named by the field itself, deduplicated by name so the ledger
-; is a worklist, not a scream. The counsel's worst lane joins the same
-; ledger on transition to bad. The glass shows the newest stone.
+; stones: each beat sweeps every living fkwu walker (pid, CPU seconds,
+; cell name), and a walker that is BOTH past the cumulative threshold
+; AND actively burning across this beat is appended ONCE as a missing
+; stone — a worklist entry named by the field itself. Rate is the
+; witness, not lifetime total: a resident idling on an old accumulation
+; is not a stone (the glass panel was stoned at cpu-s=60 after two
+; quiet hours; a first sighting alone no longer stones either, so a
+; patrol born beside an old resident does not misread its history).
+; Standing is counted through the release door (stone-ledger.fk):
+; additions against releases, so a released stone can return the
+; moment its name re-heats. The glass shows the newest stone.
 ; stdin line 1: number of beats (one beat ~20s).
-; preludes: form-stdlib/hearth.bml form-stdlib/hearth-glass.bml form-stdlib/lane-motion.bml
+; preludes: form-stdlib/hearth.bml form-stdlib/hearth-glass.bml form-stdlib/lane-motion.bml form-stdlib/stone-ledger.fk
 (do
     (defn fpr-stones () ".hearth/stones")
     (defn fpr-threshold-s () 60)
+    ; must burn at least this many CPU seconds across one ~20s beat to
+    ; count as actively hot (half a beat)
+    (defn fpr-beat-hot-s () 10)
     (defn fpr-census-cmd ()
-        "pgrep -f 'fkwu ' | while read p; do t=$(ps -o cputime= -p $p | tr -d ' '); n=$(ps -o command= -p $p | awk '{print $2}'); [ -n \"$t\" ] && echo \"$t $n\" | awk -F'[: ]' '{if (NF>=4) print ($1*3600)+($2*60)+$3, $4; else print ($1*60)+$2, $3}'; done 2>/dev/null")
+        "pgrep -f 'fkwu ' | while read p; do t=$(ps -o cputime= -p $p | tr -d ' '); n=$(ps -o command= -p $p | awk '{print $2}'); [ -n \"$t\" ] && echo \"$p $t $n\" | awk -F'[: ]' '{if (NF>=5) print $1, ($2*3600)+($3*60)+$4, $5; else print $1, ($2*60)+$3, $4}'; done 2>/dev/null")
     (defn fpr-read (path) (do (let t (read_file path)) (if (nothing? t) "" t)))
-    (defn fpr-known? (ledger name) (if (ge (str_find ledger name 0) 0) 1 0))
     (defn fpr-add (kind name detail)
         (sbt-append (fpr-stones)
             (str_concat "t=" (str_concat (int_to_str (now_unix_ms))
                 (str_concat " stone=" (str_concat kind
                     (str_concat " name=" (str_concat name
                         (str_concat " " (str_concat detail (byte_to_str 10)))))))))))
-    (defn fpr-walk-lines (text ledger from found)
+    ; previous beat's census, searched at line starts: "<pid> <secs> ..."
+    (defn fpr-prev-secs (prev pid)
+        (do (let hay (str_concat (byte_to_str 10) prev))
+            (let key (str_concat (byte_to_str 10) (str_concat pid " ")))
+            (let at (str_find hay key 0))
+            (if (lt at 0) -1
+                (do (let s (add at (str_len key)))
+                    (let sp (str_find hay " " s))
+                    (if (lt sp 0) -1 (str_to_int (substring hay s sp)))))))
+    (defn fpr-walk-lines (text prev ledger from found)
         (do (let nl (str_find text (byte_to_str 10) from))
             (if (lt nl 0) found
-                (do (let secs (fmv-field-int text from 0 0))
-                    (let sp (str_find text " " from))
-                    (let name (if (and (ge sp 0) (lt sp nl)) (substring text (add sp 1) nl) ""))
-                    (let hit (if (and (ge secs (fpr-threshold-s)) (gt (str_len name) 0))
-                        (if (eq (fpr-known? ledger name) 0)
-                            (do (let a (fpr-add "long-walker" name (str_concat "cpu-s=" (int_to_str secs)))) 1)
+                (do (let s1 (str_find text " " from))
+                    (let s2 (if (and (ge s1 0) (lt s1 nl)) (str_find text " " (add s1 1)) -1))
+                    (let pid (if (and (ge s1 0) (lt s1 nl)) (substring text from s1) ""))
+                    (let secs (if (and (ge s2 0) (lt s2 nl))
+                        (str_to_int (substring text (add s1 1) s2)) 0))
+                    (let name (if (and (ge s2 0) (lt s2 nl)) (substring text (add s2 1) nl) ""))
+                    (let prior (fpr-prev-secs prev pid))
+                    (let hot (if (ge secs (fpr-threshold-s))
+                        (if (lt prior 0) 0
+                            (if (ge (sub secs prior) (fpr-beat-hot-s)) 1 0))
+                        0))
+                    (let hit (if (and (eq hot 1) (gt (str_len name) 0))
+                        (if (eq (sl-standing? ledger name) 0)
+                            (do (let a (fpr-add "long-walker" name
+                                (str_concat "cpu-s=" (str_concat (int_to_str secs)
+                                    (str_concat " beat-cpu-s="
+                                        (int_to_str (sub secs prior))))))) 1)
                             0) 0))
-                    (fpr-walk-lines text ledger (add nl 1) (add found hit))))))
-    (defn fpr-beat (n tick)
+                    (fpr-walk-lines text prev ledger (add nl 1) (add found hit))))))
+    (defn fpr-beat (n prev tick)
         (if (gt tick n) 0
             (do
                 (let census (host-exec (fpr-census-cmd) ""))
                 (let ledger (fpr-read (fpr-stones)))
-                (let found (fpr-walk-lines census ledger 0 0))
+                (let found (fpr-walk-lines census prev ledger 0 0))
                 (let z (host-exec "sleep 20" ""))
-                (fpr-beat n (add tick 1)))))
+                (fpr-beat n census (add tick 1)))))
     (let n (str_to_int (read_line)))
     (let born (fpr-add "patrol-on" "field-patrol" (str_concat "beats=" (int_to_str n))))
-    (fpr-beat n 1))
+    (fpr-beat n "" 1))
