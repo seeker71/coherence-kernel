@@ -105,6 +105,31 @@ static long long fk_diag_quiet;  /* nonzero: speculative compile — count into
                                   * nothing; a candidate image's diagnostics
                                   * are not the program's */
 static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_TEXT_CAP */
+/* ── the admission pulse: WHICH DOOR this program entered through, readable by
+ * the running program itself via kernel_stat 15..18. The icetide dig
+ * (2026-09-01, corpus 1211) showed the reproduction key of a whole wound family
+ * living in the door decision, not the source bytes — and the only witness was
+ * a static conf toggle printing to stderr, which the program could neither read
+ * nor correlate. These four are always recorded; observation is pulled by
+ * whoever asks, never pushed behind a switch.
+ *   fk_run_door: 0 flat whole-program compile, 1 import lane (images + carried
+ *     source), 2 cached image replay (.fkb / warm .bml.fkb / direct .fkb run),
+ *     3 native .dylib artifact.
+ *   fk_import_images / fk_import_carried: units that entered as standalone
+ *     .fkb images / as carried source beside them (door 1 only; both 0 when
+ *     the lane refused, because the flat compile then carries everything).
+ *   fk_import_refusal: why the import lane last stepped aside, 0 when it did
+ *     not: 1 no importable direct dep, 2 carry bookkeeping allocation failed,
+ *     3 standalone artifact compile failed, 4 artifact path exceeded buffer,
+ *     5 unit identity hash exceeded buffer, 6 dep image carries recorded
+ *     compile errors, 7 image load/identity refused (foreign, stale, corrupt),
+ *     8 carried or root text exceeded FK_SOURCE_TEXT_CAP. A refusal is not a
+ *     wound — the flat compile is the fully correct door — but it is a
+ *     decision, and decisions are observable. */
+static long long fk_run_door;
+static long long fk_import_images;
+static long long fk_import_carried;
+static long long fk_import_refusal;
 /* 1 if the parse met a defect that CANNOT recover into a runnable program: a read
  * of an unbound name (a read has no value to decline with) or a parameter that
  * names a primitive (the sibling kernels do not agree on its arity). fkwu's
@@ -8846,6 +8871,21 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 8) {
             return fk_fp << 1;
         }
+        /* 9..14 belong to the table-walker lane's framebuffer counters
+         * (fkc-table-serialize.fk emits them over counters this seed does not
+         * carry); left clear here so the key vocabulary stays one space. */
+        if (ks_k == 15) {
+            return fk_run_door << 1;
+        }
+        if (ks_k == 16) {
+            return fk_import_images << 1;
+        }
+        if (ks_k == 17) {
+            return fk_import_carried << 1;
+        }
+        if (ks_k == 18) {
+            return fk_import_refusal << 1;
+        }
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
         }
@@ -12908,6 +12948,9 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     long long carry_count = 0;
     long long carry_bytes = 0;
     long long i = 1;
+    fk_import_images = 0;
+    fk_import_carried = 0;
+    fk_import_refusal = 0;
     while (i < fk_src_dep_count) {
         /* .bml deps are floor-lane units: their meaning lives with their
          * carried prelude chain and their cache is the floor's own
@@ -12932,6 +12975,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
         }
     }
     if (direct_count == 0) {
+        fk_import_refusal = 1;
         return 0;
     }
     i = 1;
@@ -12942,11 +12986,13 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
             long long dep_end = fk_src_dep_end[i];
             long long dep_mtime = fk_src_unit_mtime_range(i, dep_end);
             if (!fk_path_replace_ext(fk_src_dep_path[i], ".fkb", dep_fkb_path, 4096)) {
+                fk_import_refusal = 4;
                 return 0;
             }
             if (fk_path_mtime_raw(dep_fkb_path) < dep_mtime ||
                 fk_src_fkb_version_raw(dep_fkb_path) < 5) {
                 if (!fk_src_compile_artifact_only(fk_src_dep_path[i])) {
+                    fk_import_refusal = 3;
                     return 0;
                 }
             }
@@ -12970,6 +13016,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
         carry_len = malloc(sizeof(*carry_len) * (unsigned long)carry_count);
         if (carry_text == 0 || carry_idx == 0 || carry_pos == 0 || carry_len == 0) {
             free(carry_text); free(carry_idx); free(carry_pos); free(carry_len);
+            fk_import_refusal = 2;
             return 0;
         }
         long long cn = 0;
@@ -13028,10 +13075,12 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
             long long dep_end = fk_src_dep_end[i];
             long long dep_mtime = fk_src_unit_mtime_range(i, dep_end);
             if (!fk_path_replace_ext(fk_src_dep_path[i], ".fkb", dep_fkb_path, 4096)) {
+                fk_import_refusal = 4;
                 ok = 0;
                 break;
             }
             if (!fk_src_unit_hash_range(i, dep_end, dep_hash, FK_SRC_HASH_CAP)) {
+                fk_import_refusal = 5;
                 ok = 0;
                 break;
             }
@@ -13047,6 +13096,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                  * counted, so the tally and stderr agree. */
                 char dep_sym_path[4096];
                 if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, 4096)) {
+                    fk_import_refusal = 4;
                     ok = 0;
                     break;
                 }
@@ -13059,17 +13109,17 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                                 "image rejected, falling back to the whole-program compile",
                                 fk_src_dep_path[i], dep_recorded);
                     }
+                    fk_import_refusal = 6;
                     ok = 0;
                     break;
                 }
             }
             if (!fk_src_import_fkb_image(dep_fkb_path, fk_src_dep_path[i], dep_hash, dep_mtime)) {
+                fk_import_refusal = 7;
                 ok = 0;
                 break;
             }
-            if (fk_conf("FK_IMPORT_TRACE")) {
-                fk_diag_path("trace", dep_fkb_path, "loaded import .fkb");
-            }
+            fk_import_images = fk_import_images + 1;
         }
         i = i + 1;
     }
@@ -13079,18 +13129,23 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
             long long u = carry_idx[cn];
             if (!fk_src_append_text(fk_src_dep_path[u], carry_text + carry_pos[cn],
                                     carry_len[cn])) {
+                fk_import_refusal = 8;
                 ok = 0;
                 break;
             }
-            if (fk_conf("FK_IMPORT_TRACE")) {
-                fk_diag_path("trace", fk_src_dep_path[u],
-                             "carried as source beside the imported images");
-            }
+            fk_import_carried = fk_import_carried + 1;
             cn = cn + 1;
         }
     }
     if (ok && !fk_src_append_text(root_path, fk_src_root_text, fk_src_root_len)) {
+        fk_import_refusal = 8;
         ok = 0;
+    }
+    if (!ok) {
+        /* the flat compile will carry everything; a refused lane imported and
+         * carried nothing into the program that runs. */
+        fk_import_images = 0;
+        fk_import_carried = 0;
     }
     free(carry_text);
     free(carry_idx);
@@ -13115,9 +13170,11 @@ static int fk_run_src(const char *path, long long arg) {
     long long fkb_mtime = fk_path_mtime_raw(fkb_path);
     long long dylib_mtime = fk_path_mtime_raw(dylib_path);
     if (dylib_mtime >= unit_mtime) {
+        fk_run_door = 3;
         if (fk_run_dylib_artifact(dylib_path, arg, 0)) {
             return 0;
         }
+        fk_run_door = 0;
     } else if (dylib_mtime > 0) {
         fk_diag_path("warning", dylib_path, "stale .dylib ignored");
     }
@@ -13150,6 +13207,7 @@ static int fk_run_src(const char *path, long long arg) {
                 fk_diag_path("warning", sym_path,
                         "cached image was compiled with errors; fix source and rerun to clear");
             }
+            fk_run_door = 2;
             int rc = fk_run_loaded_program_image(arg);
             return recorded > 0 && rc == 0 ? 1 : rc;
         }
@@ -13166,6 +13224,7 @@ static int fk_run_src(const char *path, long long arg) {
         fk_diag_path("warning", fkb_path, "stale .fkb ignored");
     }
     int import_images_loaded = fk_src_try_import_fkb_images(path);
+    fk_run_door = import_images_loaded ? 1 : 0;
     if (!import_images_loaded) {
         if (!fk_src_load_unit(path, expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
             return 2;
@@ -13797,6 +13856,7 @@ static int fk_run_bml(const char *path, long long arg) {
                 fk_diag_path("warning", sym_path,
                         "cached image was compiled with errors; fix the .bml and rerun to clear");
             }
+            fk_run_door = 2;
             int rc = fk_run_loaded_program_image(arg);
             return recorded > 0 && rc == 0 ? 1 : rc;
         } else {
@@ -13870,10 +13930,12 @@ static int fk_run(int argc, char **argv) {
                 recorded = 0;
             }
         }
+        fk_run_door = 2;
         int fkb_rc = fk_run_loaded_program_image(argc > 2 ? atoi(argv[2]) : 0);
         return recorded > 0 && fkb_rc == 0 ? 1 : fkb_rc;
     }
     if (fk_path_has_suffix(argv[1], ".dylib")) {
+        fk_run_door = 3;
         return fk_run_dylib_artifact(argv[1], argc > 2 ? atoi(argv[2]) : 0, 1) ? 0 : 2;
     }
     if (fk_path_has_suffix(argv[1], ".tbl")) {
