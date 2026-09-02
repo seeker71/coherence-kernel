@@ -221,3 +221,39 @@ tell which was which.
 Where discomfort became gold: forty bangs through the door we had
 just fully opened — written down as the floor beneath kitgate instead
 of spun as almost-working. Corpus row 1216.
+
+## Addendum: onefold — the walk written once (turn 37)
+
+"clean up the design and implementation to increase high BML, proper
+reuse, proper templating, and generic handling outside of this special
+case." The body had written find-first-matching-row and
+max-line-by-int five times by hand — registry, counsel, glass, motion
+— each spelling a place for the next wound to differ. Two engines now
+hold one fold each: `table.bml` walks any list of rows (tb-find2,
+tb-filter2, tb-fold3, tb-any2?, tb-max-by, tb-join — fn-values in,
+carried arguments where closures would be), `text-rows.bml` reads any
+tabular text (fields, ints, line finds, max-line-by-int). The five
+hand-rolled walkers dissolved into calls; each caller keeps only its
+one-line predicate, which is where the special belongs. Seven bands
+green on the fresh binary, warm-quiet: table 255, text-rows 255,
+glass 16777215, motion 1023, registry 511, counsel 511, hearth 2047.
+
+The verification found two more things nobody asked about. A stale
+binary was freezing ices its own reader refused as trailing bytes —
+every run, every cell, quietly rebuilding; one rebuild from the merged
+source and the cache went warm-quiet at six milliseconds. And the
+corpus band had gone unpinned: rows 1157–1220 landed across reunions
+without the count ever coming back to the band — re-pinned at
+613/602/1221, with admissible now honestly PARTED from count (eleven
+rows the body answered for itself, sourced hearth-resident /
+screen-witness / urs-teaching; true testimony, not rented teacher
+material, and the gate keeps saying so).
+
+Most surprising teaching: the first landing of this work sat
+uncommitted through git surgery and an abort erased it whole — the
+engines were rebuilt and committed FIRST the second time, before any
+consumer touched them. Reuse begins with the work existing.
+
+Where discomfort became gold: finding the proof-band unpinned mid-task
+— sixty-four rows of drift under a green-looking ledger — and pinning
+it before landing one more row on top. Corpus row 1221 (onefold).
