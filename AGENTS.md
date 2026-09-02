@@ -96,7 +96,7 @@ converging doors built the same hour:
   only in the pipe between runner and compiler — no derived source file ever exists; the sole
   artifact is the native `.bml.fkb`/`.bml.sym` cache beside the source
   (`form/form-stdlib/bml-floor-compile.fk` is the door; a `// preludes:` line in the .bml travels
-  through; cold ~5 s, warm ~6 ms);
+  through; first-execution synchronous whole-unit materialization is currently ~5 s and reusable-image dispatch ~6 ms; this blocking whole-unit seam is not the on-demand JIT north star);
 - the cache witness: `./fkwu form/form-stdlib/form-cli-bml-cache-run.fk` — the
   BML authority runs itself; its `.bml.fkb` is local cache, never tree truth.
 
@@ -266,7 +266,7 @@ seam is named, never hidden. Naming it *is* the practice.
    ./fkwu observe/preflight-run.fk
    ```
 
-   It forces a fresh compile (a warm cache replaces the error with a tally — no name, no line), checks paren
+   It forces a fresh compile (an existing image replaces the error with a tally — no name, no line), checks paren
    balance without running anything, and answers the one question the compiler cannot: `[unresolved-call] 'x'`
    is **nonspecific** (corpus row 955) — one red line with two opposite repairs. Either nobody defines `x` (a
    TYPO — fix the cell) or another kernel defines it and this one does not (a LANE SEAM — fix the preludes, or
@@ -274,7 +274,7 @@ seam is named, never hidden. Naming it *is* the practice.
    2026-07-26..31 was the second read as neither.
 
    Two rules fall out, and both were paid for:
-   - **Read the exit code, not the number.** `fkwu` exits 1 when the compile carried errors. On a warm
+   - **Read the exit code, not the number.** `fkwu` exits 1 when the compile carried errors. With an existing
      cache you get only "cached image was compiled with errors" — delete the `.fkb`/`.sym` and run again before
      reporting anything.
    - **Never declare a proof lane from inference — probe it.** A `PROOF LEVEL:` line written from "X is

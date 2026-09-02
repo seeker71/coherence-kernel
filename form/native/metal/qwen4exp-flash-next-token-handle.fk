@@ -1,0 +1,381 @@
+; qwen4exp-flash-next-token-handle.fk — one real qwen4exp token through Form/Metal.
+;
+; The high-level order is owned by qwen4exp-flash-next-graph.bml. This cell is
+; its handle scheduler: split GGUF tensors stay mmap-backed, all matvec and graph
+; arithmetic stays in the Form-emitted Metal unit, expert ids stay GPU-resident,
+; recurrent/KV state is explicit, and no llama process or external runtime is
+; present. Dense attention is exact while npos <= the file's 2048-token QSA
+; budget; the sparse selector for deeper positions is the remaining graph organ.
+;
+; preludes: form/native/metal/qwen4exp-flash-next-layout.fk form/native/metal/qwen4exp-flash-next-graph-jit.fk
+
+(do
+    ; Geometry and f32 constants pinned by this exact qwen4exp artifact.
+    (defn q4t-eps-bits () 897988541)
+    (defn q4t-gdn-scale-bits () 1035273459)
+    (defn q4t-attn-scale-bits () 1031798784)
+    (defn q4t-ple-scale-bits () 1017243803)
+    (defn q4t-rope-base-bits () 1259902592)
+    (defn q4t-dense-exact-radius () 2048)
+
+    (defn q4t-b16 (bufs consts)
+        (md-bind16 bufs consts 256 0 0 0))
+    (defn q4t-mv (ps tv x y)
+        (q4eq-all-mv ps (q4tv-h tv) x y (q4tv-ty tv)
+            (q4tv-r tv) (q4tv-c tv) 0 0))
+    (defn q4t-mv-selected (ps tv x y ids rank)
+        (q4eq-all-mv-selected ps (q4tv-h tv) x y ids rank (q4tv-ty tv)
+            (q4tv-r tv) (q4tv-c tv) 0))
+
+    ; bs indices:
+    ; 0 emb, 1 residualHC, 2 xn/keyNorm, 3 low, 4 hcGate, 5 mixed,
+    ; 6 inject, 7 block, 8 qkv, 9 alpha, 10 beta, 11 z, 12 deltaOut,
+    ; 13 gdnNorm, 14 qRaw, 15 q, 16 qGate, 17 k, 18 v, 19 attn,
+    ; 20 score, 21 router, 22 ids, 23 weights, 24..28 routed expert,
+    ; 29..33 shared expert, 34 logits, 35..38 argmax, 39 PLE ids,
+    ; 40 PLE emb, 41 PLE key, 42 PLE value, 43 PLE query/norm,
+    ; 44 PLE gated, 45..47 PLE uint64 tables, 48 PLE history.
+    (defn q4t-bufs (maxpos)
+        (list
+            (metal_buf_alloc (mul 2560 4))
+            (metal_buf_alloc (mul 10240 4))
+            (metal_buf_alloc (mul 10240 4))
+            (metal_buf_alloc (mul 320 4))
+            (metal_buf_alloc (mul 10240 4))
+            (metal_buf_alloc (mul 2560 4))
+            (metal_buf_alloc (mul 4 4))
+            (metal_buf_alloc (mul 2560 4))
+            (metal_buf_alloc (mul 10240 4))
+            (metal_buf_alloc (mul 48 4))
+            (metal_buf_alloc (mul 48 4))
+            (metal_buf_alloc (mul 6144 4))
+            (metal_buf_alloc (mul 6144 4))
+            (metal_buf_alloc (mul 6144 4))
+            (metal_buf_alloc (mul 12288 4))
+            (metal_buf_alloc (mul 6144 4))
+            (metal_buf_alloc (mul 6144 4))
+            (metal_buf_alloc (mul 512 4))
+            (metal_buf_alloc (mul 512 4))
+            (metal_buf_alloc (mul 6144 4))
+            (metal_buf_alloc (mul (mul (mul 2 24) maxpos) 4))
+            (metal_buf_alloc (mul 512 4))
+            (metal_buf_alloc (mul 10 4))
+            (metal_buf_alloc (mul 10 4))
+            (metal_buf_alloc (mul (mul 10 640) 4))
+            (metal_buf_alloc (mul (mul 10 640) 4))
+            (metal_buf_alloc (mul (mul 10 640) 4))
+            (metal_buf_alloc (mul (mul 10 2560) 4))
+            (metal_buf_alloc (mul 2560 4))
+            (metal_buf_alloc (mul 640 4))
+            (metal_buf_alloc (mul 640 4))
+            (metal_buf_alloc (mul 640 4))
+            (metal_buf_alloc (mul 2560 4))
+            (metal_buf_alloc 4)
+            (metal_buf_alloc (mul 248320 4))
+            (metal_buf_alloc 4096)
+            (metal_buf_alloc 4096)
+            (metal_buf_alloc 16)
+            (metal_buf_alloc 16)
+            (metal_buf_alloc (mul 16 4))
+            (metal_buf_alloc (mul 2560 4))
+            (metal_buf_alloc (mul 10240 4))
+            (metal_buf_alloc (mul 2560 4))
+            (metal_buf_alloc (mul 10240 4))
+            (metal_buf_alloc (mul 10240 4))
+            (metal_buf_alloc (mul 3 8))
+            (metal_buf_alloc (mul 16 8))
+            (metal_buf_alloc (mul 16 8))
+            (metal_buf_alloc (mul (mul 10240 9) 4))))
+
+    ; Linear layers own a four-position GDN conv row and 48x128x128 state.
+    ; Full layers own fp16 K/V. Zero fill is the carrier's allocation contract.
+    (defn q4t-state-go (layer maxpos acc)
+        (if (ge layer 48) (reverse acc)
+            (q4t-state-go (add layer 1) maxpos
+                (cons (if (eq (q4g-full layer) 1)
+                          (list 0 0
+                              (metal_buf_alloc (mul (mul maxpos 512) 2))
+                              (metal_buf_alloc (mul (mul maxpos 512) 2)))
+                          (list (metal_buf_alloc (mul (mul 10240 4) 4))
+                                (metal_buf_alloc (mul (mul (mul 48 128) 128) 4))
+                                0 0)) acc))))
+    (defn q4t-state (maxpos) (q4t-state-go 0 maxpos (empty)))
+
+    (defn q4t-le-bytes (n k)
+        (if (le k 0) ""
+            (str_concat (byte_to_str (mod n 256))
+                (q4t-le-bytes (div n 256) (sub k 1)))))
+    (defn q4t-u64-list (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (q4t-le-bytes (head xs) 8) (q4t-u64-list (tail xs)))))
+    (defn q4t-ple-multipliers ()
+        (list 23703573157769 20109073645365 8052911324071))
+    (defn q4t-ple-offsets ()
+        (list 0 20000003 40000026 60000059 80000106 100000165 120000228 140000297
+              160000374 180000455 200000548 220000655 240000802 260000955 280001114 300001275))
+    (defn q4t-ple-sizes ()
+        (list 20000003 20000023 20000033 20000047 20000059 20000063 20000069 20000077
+              20000081 20000093 20000107 20000147 20000153 20000159 20000161 20000171))
+    (defn q4t-write-ple-tables (bs)
+        (list (metal_buf_write (nth bs 45) 0 (q4t-u64-list (q4t-ple-multipliers)))
+              (metal_buf_write (nth bs 46) 0 (q4t-u64-list (q4t-ple-offsets)))
+              (metal_buf_write (nth bs 47) 0 (q4t-u64-list (q4t-ple-sizes)))))
+
+    (defn q4t-embed (qps gps bs emb id)
+        (do
+            (metal_enqueue (nth qps 13)
+                (q4t-b16 (list (q4tv-h emb) (nth bs 0)) (list id 2560)) 2560)
+            (q4gj-hc-repeat gps (nth bs 0) (nth bs 1))
+            1))
+
+    (defn q4t-hc-mix (qps gps bs lay base)
+        (do
+            (q4gj-hc-norm gps (nth bs 1) (q4tv-h (nth lay base))
+                (nth bs 2) (q4t-eps-bits))
+            (q4t-mv qps (nth lay (add base 1)) (nth bs 2) (nth bs 3))
+            (q4gj-low-act gps (nth bs 3))
+            (q4t-mv qps (nth lay (add base 2)) (nth bs 3) (nth bs 4))
+            (q4gj-hc-mix gps (nth bs 2) (nth bs 4) (nth bs 5))
+            (q4t-mv qps (nth lay (add base 3)) (nth bs 2) (nth bs 6))
+            1))
+
+    (defn q4t-head-mix (qps gps bs model)
+        (do
+            (q4gj-hc-norm gps (nth bs 1) (q4tv-h (nth model 1))
+                (nth bs 2) (q4t-eps-bits))
+            (q4t-mv qps (nth model 2) (nth bs 2) (nth bs 3))
+            (q4gj-low-act gps (nth bs 3))
+            (q4t-mv qps (nth model 3) (nth bs 3) (nth bs 4))
+            (q4gj-hc-mix gps (nth bs 2) (nth bs 4) (nth bs 5))
+            1))
+
+    (defn q4t-ple (qps gps bs model cur prev1 prev2)
+        (do
+            (q4gj-ple-hash gps (nth bs 39) (nth bs 45) (nth bs 46) (nth bs 47)
+                cur prev1 prev2)
+            (metal_enqueue (nth qps 9)
+                (q4t-b16 (list (q4tv-h (nth model 5)) (nth bs 39) (nth bs 40))
+                    (list 160 16)) 2560)
+            (q4t-mv qps (nth model 6) (nth bs 40) (nth bs 41))
+            (q4t-mv qps (nth model 7) (nth bs 40) (nth bs 42))
+            (q4gj-hc-norm gps (nth bs 41) (q4tv-h (nth model 8))
+                (nth bs 2) (q4t-eps-bits))
+            (q4gj-hc-norm gps (nth bs 1) (q4tv-h (nth model 9))
+                (nth bs 43) (q4t-eps-bits))
+            (q4gj-ple-gate gps (nth bs 2) (nth bs 43) (nth bs 42)
+                (nth bs 44) (q4t-ple-scale-bits))
+            (q4gj-hc-norm gps (nth bs 44) (q4tv-h (nth model 10))
+                (nth bs 43) (q4t-eps-bits))
+            (q4gj-ple-conv gps (nth bs 48) (nth bs 43) (q4tv-h (nth model 11))
+                (nth bs 44) (nth bs 1))
+            1))
+
+    (defn q4t-linear (aps qps gps bs lay st)
+        (do
+            (q4t-mv qps (nth lay 16) (nth bs 5) (nth bs 8))
+            (q4t-mv qps (nth lay 18) (nth bs 5) (nth bs 9))
+            (q4t-mv qps (nth lay 19) (nth bs 5) (nth bs 10))
+            (q4t-mv qps (nth lay 23) (nth bs 5) (nth bs 11))
+            (metal_enqueue (nth aps 7)
+                (q4t-b16 (list (nth st 0) (nth bs 8) (q4tv-h (nth lay 17)) (nth bs 8))
+                    (list 10240 4)) 10240)
+            (metal_enqueue (nth aps 8) (q4t-b16 (list (nth bs 8)) (list 10240)) 10240)
+            (metal_enqueue (nth aps 9)
+                (q4t-b16 (list (nth bs 8)) (list 32 128 (q4t-eps-bits))) 32)
+            (metal_enqueue (nth aps 10)
+                (q4t-b16 (list (nth bs 9) (nth bs 10) (q4tv-h (nth lay 20))
+                    (q4tv-h (nth lay 21)) (nth bs 9) (nth bs 10)) (list 48)) 48)
+            (metal_enqueue (nth aps 11)
+                (q4t-b16 (list (nth st 1) (nth bs 8) (nth bs 9) (nth bs 10) (nth bs 12))
+                    (list 48 128 128 16 (q4t-gdn-scale-bits))) (mul 48 128))
+            (q4gj-gdn-norm-sigmoid gps (nth bs 12) (q4tv-h (nth lay 22))
+                (nth bs 11) (nth bs 13) (q4t-eps-bits))
+            (q4t-mv qps (nth lay 24) (nth bs 13) (nth bs 7))
+            1))
+
+    (defn q4t-full (aps qps gps bs lay st pos maxpos)
+        (do
+            (q4t-mv qps (nth lay 16) (nth bs 5) (nth bs 14))
+            (q4t-mv qps (nth lay 17) (nth bs 5) (nth bs 17))
+            (q4t-mv qps (nth lay 18) (nth bs 5) (nth bs 18))
+            (metal_enqueue (nth aps 14)
+                (q4t-b16 (list (nth bs 14) (nth bs 15)) (list 6144 256 0)) 6144)
+            (metal_enqueue (nth aps 14)
+                (q4t-b16 (list (nth bs 14) (nth bs 16)) (list 6144 256 256)) 6144)
+            (metal_enqueue (nth aps 13)
+                (q4t-b16 (list (nth bs 15) (q4tv-h (nth lay 19)) (nth bs 15))
+                    (list 24 256 (q4t-eps-bits))) 24)
+            (metal_enqueue (nth aps 13)
+                (q4t-b16 (list (nth bs 17) (q4tv-h (nth lay 20)) (nth bs 17))
+                    (list 2 256 (q4t-eps-bits))) 2)
+            (metal_enqueue (nth aps 15)
+                (q4t-b16 (list (nth bs 15))
+                    (list 24 256 64 pos (q4t-rope-base-bits))) (mul 24 32))
+            (metal_enqueue (nth aps 15)
+                (q4t-b16 (list (nth bs 17))
+                    (list 2 256 64 pos (q4t-rope-base-bits))) (mul 2 32))
+            (q4gj-cache-half gps (nth bs 17) (nth st 2) 512 pos)
+            (q4gj-cache-half gps (nth bs 18) (nth st 3) 512 pos)
+            (q4gj-gqa-half gps (nth bs 15) (nth st 2) (nth st 3) (nth bs 19)
+                (nth bs 20) (add pos 1) (q4t-attn-scale-bits) maxpos)
+            (metal_enqueue (nth aps 17)
+                (q4t-b16 (list (nth bs 19) (nth bs 16)) (list 6144)) 6144)
+            (q4t-mv qps (nth lay 21) (nth bs 19) (nth bs 7))
+            1))
+
+    (defn q4t-experts-go (aps qps bs lay rank)
+        (if (ge rank 10) 1
+            (do
+                (q4t-mv-selected qps (nth lay 9) (nth bs 5) (nth bs 24) (nth bs 22) rank)
+                (q4t-mv-selected qps (nth lay 10) (nth bs 5) (nth bs 25) (nth bs 22) rank)
+                (metal_enqueue (nth aps 18)
+                    (q4t-b16 (list (nth bs 24) (nth bs 25) (nth bs 26)) (list 640)) 640)
+                (q4t-mv-selected qps (nth lay 11) (nth bs 26) (nth bs 27) (nth bs 22) rank)
+                (metal_enqueue (if (eq rank 0) (nth aps 21) (nth aps 22))
+                    (q4t-b16 (list (nth bs 27) (nth bs 28) (nth bs 23))
+                        (list rank 2560)) 2560)
+                (q4t-experts-go aps qps bs lay (add rank 1)))))
+
+    (defn q4t-batch-experts? (lay)
+        (if (if (eq (q4tv-ty (nth lay 9)) 17) 1 (eq (q4tv-ty (nth lay 9)) 18))
+            (if (if (eq (q4tv-ty (nth lay 10)) 17) 1 (eq (q4tv-ty (nth lay 10)) 18))
+                (eq (q4tv-ty (nth lay 11)) 20) 0) 0))
+    (defn q4t-experts-batch (aps qps gps bs lay)
+        (do
+            (q4eq-all-mv-selected-batch qps (q4tv-h (nth lay 9))
+                (nth bs 5) (nth bs 24) (nth bs 22) (q4tv-ty (nth lay 9)) 640 2560 10 0)
+            (q4eq-all-mv-selected-batch qps (q4tv-h (nth lay 10))
+                (nth bs 5) (nth bs 25) (nth bs 22) (q4tv-ty (nth lay 10)) 640 2560 10 0)
+            (metal_enqueue (nth aps 18)
+                (q4t-b16 (list (nth bs 24) (nth bs 25) (nth bs 26)) (list 6400)) 6400)
+            (q4eq-iq4nl-mv-selected-batch qps (q4tv-h (nth lay 11))
+                (nth bs 26) (nth bs 27) (nth bs 22) 2560 640 10 0)
+            (q4gj-moe-reduce gps (nth bs 27) (nth bs 23) (nth bs 28))
+            1))
+
+    (defn q4t-moe (aps qps gps bs lay)
+        (do
+            (q4t-mv qps (nth lay 8) (nth bs 5) (nth bs 21))
+            (q4gj-route gps (nth bs 21) (nth bs 22) (nth bs 23))
+            (if (eq (q4t-batch-experts? lay) 1)
+                (q4t-experts-batch aps qps gps bs lay)
+                (q4t-experts-go aps qps bs lay 0))
+            (q4t-mv qps (nth lay 13) (nth bs 5) (nth bs 29))
+            (q4t-mv qps (nth lay 14) (nth bs 5) (nth bs 30))
+            (metal_enqueue (nth aps 18)
+                (q4t-b16 (list (nth bs 29) (nth bs 30) (nth bs 31)) (list 640)) 640)
+            (q4t-mv qps (nth lay 15) (nth bs 31) (nth bs 32))
+            (q4t-mv qps (nth lay 12) (nth bs 5) (nth bs 33))
+            (metal_enqueue (nth aps 23)
+                (q4t-b16 (list (nth bs 32) (nth bs 28) (nth bs 33)) (list 2560)) 2560)
+            1))
+
+    (defn q4t-block (aps qps gps bs model lay st layer pos maxpos cur prev1 prev2)
+        (do
+            (if (eq (q4g-ple layer) 1) (q4t-ple qps gps bs model cur prev1 prev2) 0)
+            (q4t-hc-mix qps gps bs lay 0)
+            (if (eq (q4g-full layer) 1)
+                (q4t-full aps qps gps bs lay st pos maxpos)
+                (q4t-linear aps qps gps bs lay st))
+            (q4gj-hc-combine gps (nth bs 1) (nth bs 7) (nth bs 6))
+            (q4t-hc-mix qps gps bs lay 4)
+            (q4t-moe aps qps gps bs lay)
+            (q4gj-hc-combine gps (nth bs 1) (nth bs 28) (nth bs 6))
+            1))
+
+    (defn q4t-blocks (aps qps gps bs model lays sts layer pos maxpos cur prev1 prev2)
+        (if (ge layer 48) 1
+            (do
+                (q4t-block aps qps gps bs model (nth lays layer) (nth sts layer)
+                    layer pos maxpos cur prev1 prev2)
+                (q4t-blocks aps qps gps bs model lays sts (add layer 1)
+                    pos maxpos cur prev1 prev2))))
+
+    (defn q4t-head (aps qps gps bs model)
+        (do
+            (q4t-head-mix qps gps bs model)
+            ; The head is a dependent three-stage chain. The ordinary layer
+            ; scheduler can use implicit serial ordering, but both reductions
+            ; are cooperative threadgroups and must observe the preceding
+            ; buffer writes explicitly.
+            (q4eq-all-mv qps (q4tv-h (nth model 4)) (nth bs 5) (nth bs 34)
+                (q4tv-ty (nth model 4)) (q4tv-r (nth model 4))
+                (q4tv-c (nth model 4)) 0 1)
+            (metal_enqueue (nth aps 25)
+                (md-bind16 (list (nth bs 34) (nth bs 35) (nth bs 36))
+                    (list 248320 1024) 1024 0 1 1) 1024)
+            (metal_enqueue (nth aps 26)
+                (md-bind16 (list (nth bs 35) (nth bs 36) (nth bs 37) (nth bs 38))
+                    (list 1024) 1024 0 1 1) 1)
+            (kth-u32at (metal_buf_read (nth bs 37) 0 4) 0)))
+
+    ; ctx = [attention pipes, quant pipes, graph pipes, scratch, layers,
+    ;        model tensors, state, maxpos].
+    ; Prompt ingestion advances every resident organ but does not project the
+    ; 248320-column vocabulary.  The five-dispatch head mixer is retained: a
+    ; live differential showed that its scratch image is part of the next
+    ; token's current schedule (omitting it changed 271 to 353).  The caller
+    ; evaluates the final prompt token with q4t-forward so vocabulary logits
+    ; and argmax exist exactly once.
+    (defn q4t-ingest (ctx id pos prev1 prev2)
+        (do
+            (let aps (nth ctx 0)) (let qps (nth ctx 1)) (let gps (nth ctx 2))
+            (let bs (nth ctx 3)) (let lays (nth ctx 4)) (let model (nth ctx 5))
+            (let sts (nth ctx 6)) (let maxpos (nth ctx 7))
+            (q4t-embed qps gps bs (nth model 0) id)
+            (q4t-blocks aps qps gps bs model lays sts 0 pos maxpos id prev1 prev2)
+            (q4t-head-mix qps gps bs model)
+            (metal_sync)
+            1))
+
+    (defn q4t-forward (ctx id pos prev1 prev2)
+        (do
+            (let aps (nth ctx 0)) (let qps (nth ctx 1)) (let gps (nth ctx 2))
+            (let bs (nth ctx 3)) (let lays (nth ctx 4)) (let model (nth ctx 5))
+            (let sts (nth ctx 6)) (let maxpos (nth ctx 7))
+            (q4t-embed qps gps bs (nth model 0) id)
+            (q4t-blocks aps qps gps bs model lays sts 0 pos maxpos id prev1 prev2)
+            ; Keep the currently serial layer schedule intact. The cooperative
+            ; vocab reductions use the carrier's explicit dependency protocol,
+            ; so they begin in a bounded concurrent batch after layer state is
+            ; complete. The prefill fusion pass can join these without changing
+            ; this parity boundary.
+            (metal_sync)
+            (metal_batch_concurrent)
+            (q4t-head aps qps gps bs model)))
+
+    (defn q4t-paths (prefix)
+        (list (str_concat prefix "00001-of-00003.gguf")
+              (str_concat prefix "00002-of-00003.gguf")
+              (str_concat prefix "00003-of-00003.gguf")))
+    (defn q4t-open (prefix maxpos)
+        (do
+            (let paths (q4t-paths prefix))
+            (let src2 (eqr-of-file (nth paths 1) 0 16000000))
+            (let src3 (eqr-of-file (nth paths 2) 0 16000000))
+            (let unit (q4gj-msl))
+            (let aps (q38-pipes unit))
+            (let qps (q4eq-all-pipes unit))
+            (let gps (q4gj-pipes unit))
+            (let bs (q4t-bufs maxpos))
+            (let lays (q4gl-layers paths src2 src3))
+            (let model (q4gl-model paths src2 src3))
+            (let sts (q4t-state maxpos))
+            (q4t-write-ple-tables bs)
+            (list aps qps gps bs lays model sts maxpos)))
+
+    (defn q4t-free-handles (xs)
+        (if (eq (len xs) 0) 1
+            (do (if (gt (head xs) 0) (metal_buf_free (head xs)) 0)
+                (q4t-free-handles (tail xs)))))
+    (defn q4t-free-state (sts)
+        (if (eq (len sts) 0) 1
+            (do (q4t-free-handles (head sts)) (q4t-free-state (tail sts)))))
+    (defn q4t-close (ctx)
+        (do
+            (q4t-free-handles (nth ctx 3))
+            (q4gl-free-layers (nth ctx 4))
+            (q4gl-free-list (nth ctx 5))
+            (q4t-free-state (nth ctx 6))
+            1))
+    0)

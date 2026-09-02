@@ -1,0 +1,255 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glass-telemetry-membrane.bml — executable glass telemetry bus.
+//
+// Authority: form-stdlib/bml/form-glass-telemetry-membrane.bml
+// preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormGlassTelemetryMembraneAuthority {
+        field FGTMAuthPath = "form/form-stdlib/bml/form-glass-telemetry-membrane.bml";
+        field FGTMAuthKind = "high-bml-interface-class-const";
+    }
+
+    class FormGlassTelemetryMembrane {
+        field FGTMSchema = "glass-sample-v1";
+        field FGTMSnapshotSchema = "glass-snapshot-v1";
+        field FGTMControlSchema = "glass-control-v1";
+        field FGTMSnapshotSuffix = ".glass-snapshot";
+        field FGTMInboxSuffix = ".glass-control-inbox";
+        field FGTMAckSuffix = ".glass-control-ack";
+        field FGTMMaxSamples = 512;
+        field FGTMMaxChannels = 16;
+        field FGTMMaxIdBytes = 64;
+        field FGTMMaxSnapshotWireBytes = 1048576;
+        field FGTMMaxControlWireBytes = 4096;
+        field FGTMMaxPublishers = 128;
+        ref fgtm-authority = FormGlassTelemetryMembraneAuthority;
+        thought fgtm-law = list("absent-is-not-zero", "caller-root-only", "token-metadata-only", "atomic-current-snapshot", "bounded-control-enums");
+
+        // Presence is data.  The placeholder in an absent field is never read.
+        def fgtm-absent() = list("glass-field-v1", 0, 0);
+        def fgtm-present(value) = list("glass-field-v1", 1, value);
+        def fgtm-field-present?(field) = nth(field, 1);
+        def fgtm-field-value(field) = nth(field, 2);
+        def fgtm-field-shape?(field) = if not(eq(len(field), 3)) then 0 else if not(str_eq(head(field), "glass-field-v1")) then 0 else if or(eq(fgtm-field-present?(field), 0), eq(fgtm-field-present?(field), 1)) then 1 else 0;
+
+        def fgtm-lower-or-digit?(byte) = if and(ge(byte, 97), le(byte, 122)) then 1 else if and(ge(byte, 48), le(byte, 57)) then 1 else 0;
+        def fgtm-id-byte?(byte) = if eq(fgtm-lower-or-digit?(byte), 1) then 1 else if eq(byte, 45) then 1 else if eq(byte, 46) then 1 else if eq(byte, 95) then 1 else 0;
+        def fgtm-id-bytes?(text, index, count) = if ge(index, count) then 1 else if eq(fgtm-id-byte?(str_byte_at(text, index)), 1) then fgtm-id-bytes?(text, add(index, 1), count) else 0;
+        def fgtm-channel-id?(text) {
+            let count = str_len(text);
+            if lt(count, 1) then 0 else if gt(count, FGTMMaxIdBytes()) then 0 else if not(eq(fgtm-lower-or-digit?(str_byte_at(text, 0)), 1)) then 0 else if not(eq(fgtm-lower-or-digit?(str_byte_at(text, sub(count, 1))), 1)) then 0 else if ge(str_find(text, "..", 0), 0) then 0 else fgtm-id-bytes?(text, 0, count);
+        }
+        def fgtm-label?(text) = fgtm-channel-id?(text);
+        def fgtm-root-byte-safe?(root, index, count) = if ge(index, count) then 1 else if or(eq(str_byte_at(root, index), 0), or(eq(str_byte_at(root, index), 10), eq(str_byte_at(root, index), 13))) then 0 else fgtm-root-byte-safe?(root, add(index, 1), count);
+        def fgtm-root-valid?(root) = if lt(str_len(root), 1) then 0 else if gt(str_len(root), 512) then 0 else fgtm-root-byte-safe?(root, 0, str_len(root));
+
+        def fgtm-uint-text-bytes?(text, index, count) = if ge(index, count) then 1 else if and(ge(str_byte_at(text, index), 48), le(str_byte_at(text, index), 57)) then fgtm-uint-text-bytes?(text, add(index, 1), count) else 0;
+        def fgtm-uint-text?(text) = if lt(str_len(text), 1) then 0 else if gt(str_len(text), 19) then 0 else if not(eq(fgtm-uint-text-bytes?(text, 0, str_len(text)), 1)) then 0 else if and(gt(str_len(text), 1), eq(str_byte_at(text, 0), 48)) then 0 else str_eq(int_to_str(str_to_int(text)), text);
+        def fgtm-numeric-field-valid?(field) = if not(eq(fgtm-field-shape?(field), 1)) then 0 else if eq(fgtm-field-present?(field), 0) then 1 else if ge(fgtm-field-value(field), 0) then 1 else 0;
+        def fgtm-label-field-valid?(field) = if not(eq(fgtm-field-shape?(field), 1)) then 0 else if eq(fgtm-field-present?(field), 0) then 1 else fgtm-label?(fgtm-field-value(field));
+
+        def fgtm-plane?(plane) = if str_eq(plane, "form") then 1 else if str_eq(plane, "cpu") then 1 else if str_eq(plane, "gpu") then 1 else if str_eq(plane, "metal") then 1 else if str_eq(plane, "mlx") then 1 else if str_eq(plane, "unified") then 1 else if str_eq(plane, "disk") then 1 else if str_eq(plane, "network") then 1 else if str_eq(plane, "membrane") then 1 else if str_eq(plane, "unknown") then 1 else 0;
+        def fgtm-lifecycle?(state) = if str_eq(state, "allocated") then 1 else if str_eq(state, "mapped") then 1 else if str_eq(state, "resident") then 1 else if str_eq(state, "prefilling") then 1 else if str_eq(state, "ready") then 1 else if str_eq(state, "active") then 1 else if str_eq(state, "idle") then 1 else if str_eq(state, "cooling") then 1 else if str_eq(state, "evictable") then 1 else if str_eq(state, "pinned") then 1 else if str_eq(state, "released") then 1 else if str_eq(state, "failed") then 1 else if str_eq(state, "unknown") then 1 else 0;
+        def fgtm-evictability?(state) = if str_eq(state, "never") then 1 else if str_eq(state, "pinned") then 1 else if str_eq(state, "pressure-only") then 1 else if str_eq(state, "policy-ranked") then 1 else if str_eq(state, "inactive-only") then 1 else if str_eq(state, "eligible") then 1 else if str_eq(state, "released") then 1 else if str_eq(state, "unknown") then 1 else 0;
+        def fgtm-evidence?(kind) = if str_eq(kind, "physical-live") then 1 else if str_eq(kind, "derived-window") then 1 else if str_eq(kind, "catalog") then 1 else if str_eq(kind, "declared") then 1 else 0;
+        def fgtm-control-action?(action) = if str_eq(action, "continue") then 1 else if str_eq(action, "branch") then 1 else if str_eq(action, "revise") then 1 else if str_eq(action, "abstain") then 1 else if str_eq(action, "request-evidence") then 1 else if str_eq(action, "rehearse-ground") then 1 else if str_eq(action, "alternative-node") then 1 else if str_eq(action, "focus") then 1 else if str_eq(action, "inspect") then 1 else 0;
+        def fgtm-control-disposition?(state) = if str_eq(state, "applied") then 1 else if str_eq(state, "refused") then 1 else if str_eq(state, "stale") then 1 else if str_eq(state, "superseded") then 1 else if str_eq(state, "nothing") then 1 else 0;
+
+        def fgtm-channels-valid?(channels) = if gt(len(channels), FGTMMaxChannels()) then 0 else if eq(len(channels), 0) then 1 else if not(eq(fgtm-channel-id?(head(channels)), 1)) then 0 else fgtm-channels-valid?(tail(channels));
+
+        // GlassSample order is stable and deliberately contains no payload cell.
+        def fgtm-sample(id, parent, kind, memoryPlane, owner, lane, purpose, bytes, capacity, lifecycle, readEpoch, writeEpoch, heat, physicalHandle, evictability, evidence, source, channels) = list(FGTMSchema(), id, parent, kind, memoryPlane, owner, lane, purpose, bytes, capacity, lifecycle, readEpoch, writeEpoch, heat, physicalHandle, evictability, evidence, source, channels);
+        def fgtm-sample-id(sample) = nth(sample, 1);
+        def fgtm-sample-parent(sample) = nth(sample, 2);
+        def fgtm-sample-kind(sample) = nth(sample, 3);
+        def fgtm-sample-plane(sample) = nth(sample, 4);
+        def fgtm-sample-owner(sample) = nth(sample, 5);
+        def fgtm-sample-lane(sample) = nth(sample, 6);
+        def fgtm-sample-purpose(sample) = nth(sample, 7);
+        def fgtm-sample-bytes(sample) = nth(sample, 8);
+        def fgtm-sample-capacity(sample) = nth(sample, 9);
+        def fgtm-sample-lifecycle(sample) = nth(sample, 10);
+        def fgtm-sample-read-epoch(sample) = nth(sample, 11);
+        def fgtm-sample-write-epoch(sample) = nth(sample, 12);
+        def fgtm-sample-heat(sample) = nth(sample, 13);
+        def fgtm-sample-handle(sample) = nth(sample, 14);
+        def fgtm-sample-evictability(sample) = nth(sample, 15);
+        def fgtm-sample-evidence(sample) = nth(sample, 16);
+        def fgtm-sample-source(sample) = nth(sample, 17);
+        def fgtm-sample-channels(sample) = nth(sample, 18);
+        def fgtm-sample-valid-tail?(sample) = if not(eq(fgtm-numeric-field-valid?(fgtm-sample-bytes(sample)), 1)) then 0 else if not(eq(fgtm-numeric-field-valid?(fgtm-sample-capacity(sample)), 1)) then 0 else if not(eq(fgtm-lifecycle?(fgtm-sample-lifecycle(sample)), 1)) then 0 else if not(eq(fgtm-numeric-field-valid?(fgtm-sample-read-epoch(sample)), 1)) then 0 else if not(eq(fgtm-numeric-field-valid?(fgtm-sample-write-epoch(sample)), 1)) then 0 else if not(eq(fgtm-numeric-field-valid?(fgtm-sample-heat(sample)), 1)) then 0 else if and(eq(fgtm-field-present?(fgtm-sample-heat(sample)), 1), gt(fgtm-field-value(fgtm-sample-heat(sample)), 1000)) then 0 else if not(eq(fgtm-numeric-field-valid?(fgtm-sample-handle(sample)), 1)) then 0 else if not(eq(fgtm-evictability?(fgtm-sample-evictability(sample)), 1)) then 0 else if not(eq(fgtm-evidence?(fgtm-sample-evidence(sample)), 1)) then 0 else if not(eq(fgtm-label?(fgtm-sample-source(sample)), 1)) then 0 else fgtm-channels-valid?(fgtm-sample-channels(sample));
+        def fgtm-sample-valid?(sample) = if not(eq(len(sample), 19)) then 0 else if not(str_eq(head(sample), FGTMSchema())) then 0 else if not(eq(fgtm-label?(fgtm-sample-id(sample)), 1)) then 0 else if not(eq(fgtm-label-field-valid?(fgtm-sample-parent(sample)), 1)) then 0 else if not(eq(fgtm-label?(fgtm-sample-kind(sample)), 1)) then 0 else if not(eq(fgtm-plane?(fgtm-sample-plane(sample)), 1)) then 0 else if not(eq(fgtm-label?(fgtm-sample-owner(sample)), 1)) then 0 else if not(eq(fgtm-label?(fgtm-sample-lane(sample)), 1)) then 0 else if not(eq(fgtm-label?(fgtm-sample-purpose(sample)), 1)) then 0 else fgtm-sample-valid-tail?(sample);
+        def fgtm-samples-valid?(samples) = if gt(len(samples), FGTMMaxSamples()) then 0 else if eq(len(samples), 0) then 1 else if not(eq(fgtm-sample-valid?(head(samples)), 1)) then 0 else fgtm-samples-valid?(tail(samples));
+
+        def fgtm-field-wire(field) = if eq(fgtm-field-present?(field), 0) then "a" else str_concat("p:", int_to_str(fgtm-field-value(field)));
+        def fgtm-label-field-wire(field) = if eq(fgtm-field-present?(field), 0) then "a" else str_concat("p:", fgtm-field-value(field));
+        def fgtm-channels-wire(channels) = if eq(len(channels), 0) then "~" else if eq(len(tail(channels)), 0) then head(channels) else str_concat(head(channels), str_concat(",", fgtm-channels-wire(tail(channels))));
+        def fgtm-cat(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), fgtm-cat(tail(parts)));
+        def fgtm-sample-wire(sample) = fgtm-cat(list("sample|", fgtm-sample-id(sample), "|", fgtm-label-field-wire(fgtm-sample-parent(sample)), "|", fgtm-sample-kind(sample), "|", fgtm-sample-plane(sample), "|", fgtm-sample-owner(sample), "|", fgtm-sample-lane(sample), "|", fgtm-sample-purpose(sample), "|", fgtm-field-wire(fgtm-sample-bytes(sample)), "|", fgtm-field-wire(fgtm-sample-capacity(sample)), "|", fgtm-sample-lifecycle(sample), "|", fgtm-field-wire(fgtm-sample-read-epoch(sample)), "|", fgtm-field-wire(fgtm-sample-write-epoch(sample)), "|", fgtm-field-wire(fgtm-sample-heat(sample)), "|", fgtm-field-wire(fgtm-sample-handle(sample)), "|", fgtm-sample-evictability(sample), "|", fgtm-sample-evidence(sample), "|", fgtm-sample-source(sample), "|", fgtm-channels-wire(fgtm-sample-channels(sample))));
+        def fgtm-samples-wire(samples) = if eq(len(samples), 0) then "" else if eq(len(tail(samples)), 0) then fgtm-sample-wire(head(samples)) else str_concat(fgtm-sample-wire(head(samples)), str_concat("\n", fgtm-samples-wire(tail(samples))));
+
+        def fgtm-snapshot(publisher, epoch, samples) = list(FGTMSnapshotSchema(), publisher, epoch, samples);
+        def fgtm-snapshot-publisher(snapshot) = nth(snapshot, 1);
+        def fgtm-snapshot-epoch(snapshot) = nth(snapshot, 2);
+        def fgtm-snapshot-samples(snapshot) = nth(snapshot, 3);
+        def fgtm-snapshot-valid?(snapshot) = if not(eq(len(snapshot), 4)) then 0 else if not(str_eq(head(snapshot), FGTMSnapshotSchema())) then 0 else if not(eq(fgtm-channel-id?(fgtm-snapshot-publisher(snapshot)), 1)) then 0 else if lt(fgtm-snapshot-epoch(snapshot), 0) then 0 else fgtm-samples-valid?(fgtm-snapshot-samples(snapshot));
+        def fgtm-snapshot-wire(snapshot) {
+            let header = fgtm-cat(list(FGTMSnapshotSchema(), "|", fgtm-snapshot-publisher(snapshot), "|", int_to_str(fgtm-snapshot-epoch(snapshot)), "|", int_to_str(len(fgtm-snapshot-samples(snapshot)))));
+            let body = fgtm-samples-wire(fgtm-snapshot-samples(snapshot));
+            if eq(str_len(body), 0) then header else str_concat(header, str_concat("\n", body));
+        }
+
+        def fgtm-invalid-field() = list("glass-field-v1", -1, 0);
+        def fgtm-parse-number-field(text) = if str_eq(text, "a") then fgtm-absent() else if and(ge(str_len(text), 3), str_eq(substring(text, 0, 2), "p:")) then if eq(fgtm-uint-text?(substring(text, 2, str_len(text))), 1) then fgtm-present(str_to_int(substring(text, 2, str_len(text)))) else fgtm-invalid-field() else fgtm-invalid-field();
+        def fgtm-parse-label-field(text) = if str_eq(text, "a") then fgtm-absent() else if and(ge(str_len(text), 3), str_eq(substring(text, 0, 2), "p:")) then if eq(fgtm-label?(substring(text, 2, str_len(text))), 1) then fgtm-present(substring(text, 2, str_len(text))) else fgtm-invalid-field() else fgtm-invalid-field();
+        def fgtm-parse-channels(text) = if str_eq(text, "~") then list() else split-on(text, ",");
+        def fgtm-invalid-sample() = list("glass-sample-invalid-v1");
+        def fgtm-parse-sample-fields(fields) {
+            let sample = fgtm-sample(nth(fields, 1), fgtm-parse-label-field(nth(fields, 2)), nth(fields, 3), nth(fields, 4), nth(fields, 5), nth(fields, 6), nth(fields, 7), fgtm-parse-number-field(nth(fields, 8)), fgtm-parse-number-field(nth(fields, 9)), nth(fields, 10), fgtm-parse-number-field(nth(fields, 11)), fgtm-parse-number-field(nth(fields, 12)), fgtm-parse-number-field(nth(fields, 13)), fgtm-parse-number-field(nth(fields, 14)), nth(fields, 15), nth(fields, 16), nth(fields, 17), fgtm-parse-channels(nth(fields, 18)));
+            if eq(fgtm-sample-valid?(sample), 1) then sample else fgtm-invalid-sample();
+        }
+        def fgtm-parse-sample-wire(line) {
+            let fields = split-on(line, "|");
+            if not(eq(len(fields), 19)) then fgtm-invalid-sample() else if not(str_eq(head(fields), "sample")) then fgtm-invalid-sample() else fgtm-parse-sample-fields(fields);
+        }
+        def fgtm-parse-sample-lines(lines) = if eq(len(lines), 0) then list() else cons(fgtm-parse-sample-wire(head(lines)), fgtm-parse-sample-lines(tail(lines)));
+        def fgtm-snapshot-refused(reason) = list("glass-snapshot-refused-v1", reason);
+        def fgtm-parse-snapshot-valid-header(header, sampleLines) {
+            let samples = fgtm-parse-sample-lines(sampleLines);
+            let snapshot = fgtm-snapshot(nth(header, 1), str_to_int(nth(header, 2)), samples);
+            if not(eq(len(samples), str_to_int(nth(header, 3)))) then fgtm-snapshot-refused("count-mismatch") else if eq(fgtm-snapshot-valid?(snapshot), 1) then snapshot else fgtm-snapshot-refused("sample-invalid");
+        }
+        def fgtm-parse-snapshot-header(header, sampleLines) = if not(eq(len(header), 4)) then fgtm-snapshot-refused("header-shape") else if not(str_eq(head(header), FGTMSnapshotSchema())) then fgtm-snapshot-refused("header-schema") else if not(eq(fgtm-channel-id?(nth(header, 1)), 1)) then fgtm-snapshot-refused("publisher") else if not(eq(fgtm-uint-text?(nth(header, 2)), 1)) then fgtm-snapshot-refused("epoch") else if not(eq(fgtm-uint-text?(nth(header, 3)), 1)) then fgtm-snapshot-refused("count") else fgtm-parse-snapshot-valid-header(header, sampleLines);
+        def fgtm-parse-snapshot-lines(lines) = if eq(len(lines), 0) then fgtm-snapshot-refused("empty") else fgtm-parse-snapshot-header(split-on(head(lines), "|"), tail(lines));
+        def fgtm-parse-snapshot-wire(text) {
+            let lines = split-on(text, "\n");
+            fgtm-parse-snapshot-lines(lines);
+        }
+
+        def fgtm-snapshot-path(root, publisher) = fs-path-join(root, str_concat(publisher, FGTMSnapshotSuffix()));
+        def fgtm-snapshot-candidate-path(root, publisher) = fs-path-join(root, str_concat(publisher, ".glass-snapshot.candidate"));
+        def fgtm-publish-refused(reason) = list("glass-publish-v1", "refused", reason, fgtm-absent());
+        def fgtm-publish-valid-snapshot(root, publisher, snapshot) {
+            let made = fs-mkdir(root);
+            let candidate = fgtm-snapshot-candidate-path(root, publisher);
+            let finalPath = fgtm-snapshot-path(root, publisher);
+            let wrote = fs-write-text(candidate, fgtm-snapshot-wire(snapshot));
+            let moved = if ge(wrote, 0) then fs-rename(candidate, finalPath) else -1;
+            if and(ge(wrote, 0), eq(moved, 0)) then list("glass-publish-v1", "published", publisher, fgtm-present(finalPath), wrote, moved, snapshot) else list("glass-publish-v1", "failed", publisher, fgtm-present(candidate), wrote, moved, snapshot);
+        }
+        def fgtm-publish-snapshot(root, publisher, epoch, samples) {
+            let snapshot = fgtm-snapshot(publisher, epoch, samples);
+            if not(eq(fgtm-root-valid?(root), 1)) then fgtm-publish-refused("root") else if not(eq(fgtm-snapshot-valid?(snapshot), 1)) then fgtm-publish-refused("snapshot") else fgtm-publish-valid-snapshot(root, publisher, snapshot);
+        }
+
+        def fgtm-read-state(channel, state, value) = list("glass-read-v1", channel, state, value);
+        def fgtm-read-current-parsed(publisher, parsed) = if and(eq(len(parsed), 4), str_eq(head(parsed), FGTMSnapshotSchema())) then if str_eq(fgtm-snapshot-publisher(parsed), publisher) then fgtm-read-state(publisher, "current", fgtm-present(parsed)) else fgtm-read-state(publisher, "malformed", fgtm-present("publisher-mismatch")) else fgtm-read-state(publisher, "malformed", fgtm-present(nth(parsed, 1)));
+        def fgtm-read-current-path(publisher, path) = if eq(fs-exists?(path), 0) then fgtm-read-state(publisher, "absent", fgtm-absent()) else if gt(file_size(path), FGTMMaxSnapshotWireBytes()) then fgtm-read-state(publisher, "malformed", fgtm-present("oversize")) else fgtm-read-current-parsed(publisher, fgtm-parse-snapshot-wire(fs-read-text(path)));
+        def fgtm-read-current(root, publisher) {
+            let path = fgtm-snapshot-path(root, publisher);
+            if not(eq(fgtm-root-valid?(root), 1)) then fgtm-read-state(publisher, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(publisher), 1)) then fgtm-read-state(publisher, "refused", fgtm-present("publisher")) else fgtm-read-current-path(publisher, path);
+        }
+        def fgtm-read-state-status(reading) = nth(reading, 2);
+        def fgtm-read-state-value(reading) = nth(reading, 3);
+
+        def fgtm-publisher-from-name(name) = substring(name, 0, sub(str_len(name), str_len(FGTMSnapshotSuffix())));
+        def fgtm-publisher-row(name, modified) = list(name, modified);
+        def fgtm-publisher-row-name(row) = nth(row, 0);
+        def fgtm-publisher-row-modified(row) = nth(row, 1);
+        def fgtm-take-publisher-rows(rows, remaining) = if or(le(remaining, 0), eq(len(rows), 0)) then list() else cons(head(rows), fgtm-take-publisher-rows(tail(rows), sub(remaining, 1)));
+        def fgtm-insert-publisher-row(row, rows, remaining) = if le(remaining, 0) then list() else if eq(len(rows), 0) then list(row) else if gt(fgtm-publisher-row-modified(row), fgtm-publisher-row-modified(head(rows))) then cons(row, fgtm-take-publisher-rows(rows, sub(remaining, 1))) else cons(head(rows), fgtm-insert-publisher-row(row, tail(rows), sub(remaining, 1)));
+        def fgtm-inventory-publisher-next(root, names, held) {
+            let name = head(names);
+            let publisher = if fs-suffix?(name, FGTMSnapshotSuffix()) then fgtm-publisher-from-name(name) else "";
+            let valid = if and(fs-suffix?(name, FGTMSnapshotSuffix()), eq(fgtm-channel-id?(publisher), 1)) then 1 else 0;
+            let next = if eq(valid, 1) then fgtm-insert-publisher-row(fgtm-publisher-row(publisher, file_mtime(fs-path-join(root, name))), held, FGTMMaxPublishers()) else held;
+            fgtm-inventory-publisher-rows(root, tail(names), next);
+        }
+        def fgtm-inventory-publisher-rows(root, names, held) = if eq(len(names), 0) then held else fgtm-inventory-publisher-next(root, names, held);
+        def fgtm-publisher-row-names(rows) = if eq(len(rows), 0) then list() else cons(fgtm-publisher-row-name(head(rows)), fgtm-publisher-row-names(tail(rows)));
+        def fgtm-inventory-publishers(root, names) = fgtm-publisher-row-names(fgtm-inventory-publisher-rows(root, names, list()));
+        def fgtm-read-publishers(root, publishers) = if eq(len(publishers), 0) then list() else cons(fgtm-read-current(root, head(publishers)), fgtm-read-publishers(root, tail(publishers)));
+        def fgtm-inventory-current(root) {
+            let publishers = fgtm-inventory-publishers(root, fs-list(root));
+            list("glass-inventory-v1", root, "current", publishers, fgtm-read-publishers(root, publishers));
+        }
+        def fgtm-inventory(root) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-inventory-v1", root, "refused", list(), list()) else if eq(fs-is-dir?(root), 0) then list("glass-inventory-v1", root, "absent", list(), list()) else fgtm-inventory-current(root);
+
+        // Control offers contain an enum action and an optional bounded label.
+        def fgtm-control-offer(channel, offerId, epoch, action, argument, evidence, source) = list("glass-control-offer-v1", channel, offerId, epoch, action, argument, evidence, source);
+        def fgtm-offer-channel(offer) = nth(offer, 1);
+        def fgtm-offer-id(offer) = nth(offer, 2);
+        def fgtm-offer-epoch(offer) = nth(offer, 3);
+        def fgtm-offer-action(offer) = nth(offer, 4);
+        def fgtm-offer-argument(offer) = nth(offer, 5);
+        def fgtm-offer-evidence(offer) = nth(offer, 6);
+        def fgtm-offer-source(offer) = nth(offer, 7);
+        def fgtm-offer-valid?(offer) = if not(eq(len(offer), 8)) then 0 else if not(str_eq(head(offer), "glass-control-offer-v1")) then 0 else if not(eq(fgtm-channel-id?(fgtm-offer-channel(offer)), 1)) then 0 else if not(eq(fgtm-label?(fgtm-offer-id(offer)), 1)) then 0 else if lt(fgtm-offer-epoch(offer), 0) then 0 else if not(eq(fgtm-control-action?(fgtm-offer-action(offer)), 1)) then 0 else if not(eq(fgtm-label-field-valid?(fgtm-offer-argument(offer)), 1)) then 0 else if not(eq(fgtm-evidence?(fgtm-offer-evidence(offer)), 1)) then 0 else fgtm-label?(fgtm-offer-source(offer));
+        def fgtm-offer-wire(offer) = fgtm-cat(list("glass-control-offer-v1|", fgtm-offer-channel(offer), "|", fgtm-offer-id(offer), "|", int_to_str(fgtm-offer-epoch(offer)), "|", fgtm-offer-action(offer), "|", fgtm-label-field-wire(fgtm-offer-argument(offer)), "|", fgtm-offer-evidence(offer), "|", fgtm-offer-source(offer)));
+        def fgtm-parse-offer-fields(fields) {
+            let offer = fgtm-control-offer(nth(fields, 1), nth(fields, 2), str_to_int(nth(fields, 3)), nth(fields, 4), fgtm-parse-label-field(nth(fields, 5)), nth(fields, 6), nth(fields, 7));
+            if and(str_eq(head(fields), "glass-control-offer-v1"), eq(fgtm-offer-valid?(offer), 1)) then offer else list("glass-control-offer-invalid-v1");
+        }
+        def fgtm-parse-offer-wire(text) {
+            let fields = split-on(text, "|");
+            if not(eq(len(fields), 8)) then list("glass-control-offer-invalid-v1") else if not(eq(fgtm-uint-text?(nth(fields, 3)), 1)) then list("glass-control-offer-invalid-v1") else fgtm-parse-offer-fields(fields);
+        }
+        def fgtm-control-inbox-path(root, channel) = fs-path-join(root, str_concat(channel, FGTMInboxSuffix()));
+        def fgtm-control-inbox-candidate-path(root, channel) = fs-path-join(root, str_concat(channel, ".glass-control-inbox.candidate"));
+        def fgtm-control-ack-path(root, channel) = fs-path-join(root, str_concat(channel, FGTMAckSuffix()));
+        def fgtm-control-ack-candidate-path(root, channel) = fs-path-join(root, str_concat(channel, ".glass-control-ack.candidate"));
+        def fgtm-offer-control-valid(root, offer) {
+            let made = fs-mkdir(root);
+            let path = fgtm-control-inbox-path(root, fgtm-offer-channel(offer));
+            let candidate = fgtm-control-inbox-candidate-path(root, fgtm-offer-channel(offer));
+            let wrote = fs-write-text(candidate, fgtm-offer-wire(offer));
+            let moved = if ge(wrote, 0) then fs-rename(candidate, path) else wrote;
+            if eq(moved, 0) then list("glass-control-write-v1", "offered", path, wrote, moved, offer) else list("glass-control-write-v1", "failed", candidate, wrote, moved, offer);
+        }
+        def fgtm-offer-control(root, offer) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-write-v1", "refused", "root") else if not(eq(fgtm-offer-valid?(offer), 1)) then list("glass-control-write-v1", "refused", "offer") else fgtm-offer-control-valid(root, offer);
+        def fgtm-poll-parsed(channel, offer) = if and(eq(len(offer), 8), str_eq(head(offer), "glass-control-offer-v1")) then if str_eq(fgtm-offer-channel(offer), channel) then list("glass-control-poll-v1", channel, "offer", fgtm-present(offer)) else list("glass-control-poll-v1", channel, "malformed", fgtm-present("channel-mismatch")) else list("glass-control-poll-v1", channel, "malformed", fgtm-present("wire"));
+        def fgtm-poll-path(channel, path) = if eq(fs-exists?(path), 0) then list("glass-control-poll-v1", channel, "absent", fgtm-absent()) else if gt(file_size(path), FGTMMaxControlWireBytes()) then list("glass-control-poll-v1", channel, "malformed", fgtm-present("oversize")) else fgtm-poll-parsed(channel, fgtm-parse-offer-wire(fs-read-text(path)));
+        def fgtm-poll-control(root, channel) {
+            let path = fgtm-control-inbox-path(root, channel);
+            if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-poll-v1", channel, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(channel), 1)) then list("glass-control-poll-v1", channel, "refused", fgtm-present("channel")) else fgtm-poll-path(channel, path);
+        }
+
+        def fgtm-control-ack(channel, offerId, epoch, disposition, evidence, source) = list("glass-control-ack-v1", channel, offerId, epoch, disposition, evidence, source);
+        def fgtm-ack-channel(ack) = nth(ack, 1);
+        def fgtm-ack-offer-id(ack) = nth(ack, 2);
+        def fgtm-ack-epoch(ack) = nth(ack, 3);
+        def fgtm-ack-disposition(ack) = nth(ack, 4);
+        def fgtm-ack-evidence(ack) = nth(ack, 5);
+        def fgtm-ack-source(ack) = nth(ack, 6);
+        def fgtm-ack-valid?(ack) = if not(eq(len(ack), 7)) then 0 else if not(str_eq(head(ack), "glass-control-ack-v1")) then 0 else if not(eq(fgtm-channel-id?(fgtm-ack-channel(ack)), 1)) then 0 else if not(eq(fgtm-label?(fgtm-ack-offer-id(ack)), 1)) then 0 else if lt(fgtm-ack-epoch(ack), 0) then 0 else if not(eq(fgtm-control-disposition?(fgtm-ack-disposition(ack)), 1)) then 0 else if not(eq(fgtm-evidence?(fgtm-ack-evidence(ack)), 1)) then 0 else fgtm-label?(fgtm-ack-source(ack));
+        def fgtm-ack-wire(ack) = fgtm-cat(list("glass-control-ack-v1|", fgtm-ack-channel(ack), "|", fgtm-ack-offer-id(ack), "|", int_to_str(fgtm-ack-epoch(ack)), "|", fgtm-ack-disposition(ack), "|", fgtm-ack-evidence(ack), "|", fgtm-ack-source(ack)));
+        def fgtm-parse-ack-fields(fields) {
+            let ack = fgtm-control-ack(nth(fields, 1), nth(fields, 2), str_to_int(nth(fields, 3)), nth(fields, 4), nth(fields, 5), nth(fields, 6));
+            if and(str_eq(head(fields), "glass-control-ack-v1"), eq(fgtm-ack-valid?(ack), 1)) then ack else list("glass-control-ack-invalid-v1");
+        }
+        def fgtm-parse-ack-wire(text) {
+            let fields = split-on(text, "|");
+            if not(eq(len(fields), 7)) then list("glass-control-ack-invalid-v1") else if not(eq(fgtm-uint-text?(nth(fields, 3)), 1)) then list("glass-control-ack-invalid-v1") else fgtm-parse-ack-fields(fields);
+        }
+        def fgtm-acknowledge-valid(root, ack) {
+            let made = fs-mkdir(root);
+            let path = fgtm-control-ack-path(root, fgtm-ack-channel(ack));
+            let candidate = fgtm-control-ack-candidate-path(root, fgtm-ack-channel(ack));
+            let wrote = fs-write-text(candidate, fgtm-ack-wire(ack));
+            let moved = if ge(wrote, 0) then fs-rename(candidate, path) else wrote;
+            if eq(moved, 0) then list("glass-control-write-v1", "acknowledged", path, wrote, moved, ack) else list("glass-control-write-v1", "failed", candidate, wrote, moved, ack);
+        }
+        def fgtm-acknowledge-control(root, ack) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-write-v1", "refused", "root") else if not(eq(fgtm-ack-valid?(ack), 1)) then list("glass-control-write-v1", "refused", "ack") else fgtm-acknowledge-valid(root, ack);
+        def fgtm-read-ack-parsed(channel, ack) = if and(eq(len(ack), 7), str_eq(head(ack), "glass-control-ack-v1")) then if str_eq(fgtm-ack-channel(ack), channel) then list("glass-control-ack-read-v1", channel, "ack", fgtm-present(ack)) else list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("channel-mismatch")) else list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("wire"));
+        def fgtm-read-ack-path(channel, path) = if eq(fs-exists?(path), 0) then list("glass-control-ack-read-v1", channel, "absent", fgtm-absent()) else if gt(file_size(path), FGTMMaxControlWireBytes()) then list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("oversize")) else fgtm-read-ack-parsed(channel, fgtm-parse-ack-wire(fs-read-text(path)));
+        def fgtm-read-control-ack(root, channel) {
+            let path = fgtm-control-ack-path(root, channel);
+            if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-ack-read-v1", channel, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(channel), 1)) then list("glass-control-ack-read-v1", channel, "refused", fgtm-present("channel")) else fgtm-read-ack-path(channel, path);
+        }
+    }
+    0;
+}

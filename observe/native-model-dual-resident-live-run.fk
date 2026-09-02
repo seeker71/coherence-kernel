@@ -1,0 +1,248 @@
+; native-model-dual-resident-live-run.fk — one long-lived Form process with
+; physical Qwen3.8 Flash Next and Llama 3.2 3B contexts simultaneously open.
+; preflight-exec: forbidden
+;
+; Startup physically opens and prefills both models, then returns to Qwen for
+; one append-only prefix-reuse evaluation while the 3B stays resident.  The process
+; waits for `status`, `qwen-step`, `3b-step`, or `quit`; a completed turn never
+; closes either context.  EOF and explicit quit end the owning process, so both
+; contexts are then closed deliberately; neither is an eviction policy event.
+;
+; preludes: form/form-stdlib/qwen4exp-flash-next-generate.bml form/form-stdlib/llama32-3b-resident-state.bml form/form-stdlib/native-model-glass.bml form/form-stdlib/native-model-resident-fleet.bml form/form-stdlib/native-model-memory-glass.bml form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/native-model-dual-telemetry.bml
+
+(do
+    (defn nmdr-qwen-prefix ()
+        "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+    (defn nmdr-threeb-path ()
+        "/Users/ursmuff/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff")
+    (defn nmdr-threeb-prompt () (list 128000 791 6864 315 9822 374))
+    (defn nmdr-telemetry-root () "/tmp/form-glass-telemetry")
+    (defn nmdr-publisher (instance)
+        (str_concat "models.dual-resident.i" (int_to_str instance)))
+
+    (defn nmdr-lifecycle (session id)
+        (do
+            (let model (nmg-find id (nmg-models session)))
+            (if (eq (len model) 0) "unknown"
+                (if (eq (nmg-active? model) 1) "active"
+                    (if (str_eq (nmg-phase model) "prefill") "prefilling"
+                        (if (eq (nmg-prefilled? model) 1) "ready"
+                            (if (eq (nmg-loaded? model) 1) "resident" "released")))))))
+
+    (defn nmdr-residency-sample (id source session handle epoch)
+        (nmdt-resident-sample id (nmdr-lifecycle session source) handle))
+
+    (defn nmdr-weight-sample (id parent bytes budget epoch)
+        (nmdt-weight-catalog id parent bytes))
+
+    (defn nmdr-budget-sample (budget)
+        (nmdt-budget-sample budget))
+
+    (defn nmdr-substate-sample (id parent kind purpose session source handle epoch channels)
+        (nmdt-derived-substate id parent kind purpose
+            (nmdr-lifecycle session source) handle channels))
+
+    (defn nmdr-publish (qslot three session fleet qhandle thandle instance)
+        (do
+            (let epoch (now_unix_ms))
+            (let samples (list
+                (nmdr-residency-sample "model.qwen" (NMGQwen) session qhandle epoch)
+                (nmdr-weight-sample "weights.qwen" "model.qwen" (NMRFQwenBytes) (nmrf-budget fleet) epoch)
+                (nmdr-substate-sample "experts.qwen.packed" "model.qwen" "expert-pack" "moe-route" session (NMGQwen) qhandle epoch (list "memory" "model" "metal" "gpu" "expert" "query-lane"))
+                (nmdr-substate-sample "state.qwen.kv-substate" "model.qwen" "kv-substate" "attention-state" session (NMGQwen) qhandle epoch (list "memory" "model" "metal" "gpu" "substate" "query-lane"))
+                (nmdr-residency-sample "model.threeb" (NMGThreeB) session thandle epoch)
+                (nmdr-weight-sample "weights.threeb" "model.threeb" (NMRFThreeBBytes) (nmrf-budget fleet) epoch)
+                (nmdr-substate-sample "state.threeb.kv" "model.threeb" "kv-substate" "attention-state" session (NMGThreeB) thandle epoch (list "memory" "model" "metal" "gpu" "substate" "query-lane"))))
+            (let publishedSamples (append samples (list (nmdr-budget-sample (nmrf-budget fleet)))))
+            (fgtm-publish-snapshot (nmdr-telemetry-root)
+                (nmdr-publisher instance) epoch publishedSamples)))
+
+    (defn nmdr-release-sample (id closed)
+        (nmdt-release-tombstone id closed))
+
+    (defn nmdr-publish-release (instance qclosed tclosed)
+        (fgtm-publish-snapshot (nmdr-telemetry-root)
+            (nmdr-publisher instance)
+            (now_unix_ms) (list
+                (nmdr-release-sample "model.qwen" qclosed)
+                (nmdr-release-sample "model.threeb" tclosed))))
+
+    (defn nmdr-status (qslot three session fleet qhandle thandle)
+        (do
+            (let _qframe (nmg-glass-write-physical session (NMGQwen) qhandle
+                "resident-turnwheel-status"))
+            (let _tframe (nmg-glass-write-physical session (NMGThreeB) thandle
+                "resident-turnwheel-status"))
+            (let pressure (nmrf-pressure-plan fleet 0 (list)))
+            (print (list "native-model-dual-resident-status"
+                "loaded" (nmrf-loaded-count (nmrf-rows fleet))
+                "prefilled" (nmrf-prefilled-count (nmrf-rows fleet))
+                "logical-weight-bytes" (nmrf-resident-bytes (nmrf-rows fleet))
+                "budget-bytes" (nmrf-budget fleet)
+                "pressure-needed" (nth pressure 1)
+                "pressure-evictions" (len (nth pressure 3))
+                "qwen-position" (q4s-pos qslot)
+                "threeb-position" (l3rs-position three)
+                "qwen-handle" qhandle "threeb-handle" thandle))
+            1))
+
+    (defn nmdr-close (qslot three session qhandle thandle instance reason)
+        (do
+            (let qclosed (q4s-close qslot))
+            (let tclosed (l3rs-close three))
+            (let qreleased (if (eq qclosed 1)
+                (nmg-release session (NMGQwen)) session))
+            (let _qframe (if (eq qclosed 1)
+                (nmg-glass-write-physical-release qreleased (NMGQwen)
+                    qhandle qclosed) 0))
+            (let treleased (if (eq tclosed 1)
+                (nmg-release qreleased (NMGThreeB)) qreleased))
+            (let _tframe (if (eq tclosed 1)
+                (nmg-glass-write-physical-release treleased (NMGThreeB)
+                    thandle tclosed) 0))
+            (let _tombstone (nmdr-publish-release instance qclosed tclosed))
+            (list "native-model-dual-resident-closed" reason
+                "qwen-close" qclosed "threeb-close" tclosed)))
+
+    (defn nmdr-loop (qslot three session fleet qhandle thandle instance)
+        (do
+            (let _telemetry (nmdr-publish qslot three session fleet qhandle thandle instance))
+            (let _memory-frame (nmmg-write fleet session
+                (q4s-pos qslot) (l3rs-position three)))
+            (print_str "DUAL RESIDENT READY commands=status|qwen-step|3b-step|quit\n")
+            (let command (read_line))
+            (if (or (nothing? command) (str_eq command "quit"))
+                (nmdr-close qslot three session qhandle thandle instance
+                    (if (nothing? command) "eof" "quit"))
+                (if (str_eq command "status")
+                    (do
+                        (nmdr-status qslot three session fleet qhandle thandle)
+                        (nmdr-loop qslot three session fleet qhandle thandle instance))
+                    (if (str_eq command "qwen-step")
+                        (do
+                            (let active (nmg-qwen-reasoning session (q4s-pos qslot)))
+                            (let _active-frame (nmg-glass-write-physical active
+                                (NMGQwen) qhandle "resident-decode-entered"))
+                            (let _active-telemetry (nmdr-publish qslot three active fleet qhandle thandle instance))
+                            (let next (q4s-evaluate-one qslot (q4s-output qslot)))
+                            (let done (nmg-qwen-finished active (q4s-pos next)))
+                            (let _done-frame (nmg-glass-write-physical done
+                                (NMGQwen) qhandle "resident-decode-returned"))
+                            (let nextFleet (nmrf-touch fleet (NMGQwen)))
+                            (print (list "qwen-step" "input" (q4s-prev1 next)
+                                "output" (q4s-output next) "position" (q4s-pos next)))
+                            (nmdr-loop next three done nextFleet qhandle thandle instance))
+                        (if (str_eq command "3b-step")
+                            (do
+                                (let active (nmg-threeb-prefilling session
+                                    (l3rs-position three)))
+                                (let _active-frame (nmg-glass-write-physical active
+                                    (NMGThreeB) thandle "resident-decode-entered"))
+                                (let _active-telemetry (nmdr-publish qslot three active fleet qhandle thandle instance))
+                                (let next (l3rs-step three))
+                                (let done (nmg-threeb-finished active
+                                    (l3rs-position next)))
+                                (let _done-frame (nmg-glass-write-physical done
+                                    (NMGThreeB) thandle "resident-decode-returned"))
+                                (let nextFleet (nmrf-touch fleet (NMGThreeB)))
+                                (print (list "3b-step" "text" (l3rs-pending-text three)
+                                    "next" (l3rs-pending next)
+                                    "position" (l3rs-position next)))
+                                (nmdr-loop qslot next done nextFleet qhandle thandle instance))
+                            (do
+                                (print (list "unknown-command" command))
+                                (nmdr-loop qslot three session fleet qhandle thandle instance))))))))
+
+    (defn nmdr-after-threeb (qsrc qresult qsession qhandle three thandle instance)
+        (do
+            (let tloaded (nmg-threeb-loaded qsession))
+            (let _tloaded-frame (nmg-glass-write-physical tloaded
+                (NMGThreeB) thandle "weight-open-returned"))
+            (let tprefilling (nmg-threeb-prefilling tloaded 0))
+            (let _tprefill-frame (nmg-glass-write-physical tprefilling
+                (NMGThreeB) thandle "prefix-evaluate-entered"))
+            (let tprefilled (l3rs-prefill three (nmdr-threeb-prompt)))
+            (let tdone (nmg-threeb-finished tprefilling (l3rs-position tprefilled)))
+            (let _tdone-frame (nmg-glass-write-physical tdone
+                (NMGThreeB) thandle "prefill-returned"))
+            (let qslot (q4x-result-slot qresult))
+            (let incoming (append (q4s-tokens qslot) (list 11)))
+            (let qactive (nmg-qwen-reasoning tdone (q4s-pos qslot)))
+            (let _qactive-frame (nmg-glass-write-physical qactive
+                (NMGQwen) qhandle "retained-prefix-append-entered"))
+            (let appended (q4s-evaluate qslot incoming))
+            (let qnext (q4s-result-slot appended))
+            (let qdone (nmg-qwen-finished qactive (q4s-pos qnext)))
+            (let _qdone-frame (nmg-glass-write-physical qdone
+                (NMGQwen) qhandle "retained-prefix-append-returned"))
+            (let fleet (nmrf-dual-resident qhandle thandle))
+            (let noPressure (nmrf-pressure-plan fleet 0 (list)))
+            (print (list "native-model-dual-resident-started"
+                "qwen-handle" qhandle "threeb-handle" thandle
+                "loaded" (nmrf-loaded-count (nmrf-rows fleet))
+                "prefilled" (nmrf-prefilled-count (nmrf-rows fleet))
+                "logical-weight-bytes" (nmrf-resident-bytes (nmrf-rows fleet))
+                "budget-bytes" (nmrf-budget fleet)
+                "qwen-prefix-status" (q4s-result-status appended)
+                "qwen-reused" (q4s-result-reused appended)
+                "qwen-evaluated" (q4s-result-evaluated appended)
+                "threeb-first" (l3rs-pending tprefilled)
+                "threeb-text" (l3rs-pending-text tprefilled)
+                "pressure-evictions" (len (nth noPressure 3))))
+            (nmdr-loop qnext tprefilled qdone fleet qhandle thandle instance)))
+
+    (defn nmdr-open-threeb (qsrc qresult qsession qhandle instance)
+        (do
+            (let tloading (nmg-threeb-loading qsession))
+            (let _tloading-frame (nmg-glass-write tloading))
+            (let three (l3rs-open (nmdr-threeb-path) 128))
+            (let thandle (l3rs-residency-handle three))
+            (if (eq (l3rs-resident? three) 1)
+                (nmdr-after-threeb qsrc qresult tloading qhandle three thandle instance)
+                (do
+                    (let tclosed (l3rs-close three))
+                    (let qclosed (q4x-close qresult))
+                    (list "native-model-dual-resident-refused"
+                        "threeb-handle" thandle "threeb-close" tclosed
+                        "qwen-close" qclosed)))))
+
+    (defn nmdr-after-qwen (src slot loading qhandle instance)
+        (do
+            (let qloaded (nmg-qwen-loaded loading))
+            (let _qloaded-frame (nmg-glass-write-physical qloaded
+                (NMGQwen) qhandle "weight-open-returned"))
+            (let ids (q4tk-chat-ids src "Return only the word Form."))
+            (let qprefilling (nmg-qwen-prefilling qloaded 0))
+            (let _qprefill-frame (nmg-glass-write-physical qprefilling
+                (NMGQwen) qhandle "prefix-evaluate-entered"))
+            (let prefill (q4s-evaluate slot ids))
+            (let resident (q4s-result-slot prefill))
+            (let qreason (nmg-qwen-reasoning qprefilling (q4s-pos resident)))
+            (let _qreason-frame (nmg-glass-write-physical qreason
+                (NMGQwen) qhandle "prefill-returned"))
+            (let result (q4x-from-prefill src prefill 1 (len ids)))
+            (let qdone (nmg-qwen-finished qreason
+                (q4s-pos (q4x-result-slot result))))
+            (let _qdone-frame (nmg-glass-write-physical qdone
+                (NMGQwen) qhandle "generation-returned-retained"))
+            (print (list "qwen-seed-answer" (q4x-result-text result)
+                "tokens" (len ids) "position"
+                (q4s-pos (q4x-result-slot result))))
+            (nmdr-open-threeb src result qdone qhandle instance)))
+
+    (framebuffer-clear)
+    (let instance (now_unix_ms))
+    (let native (nmg-begin-native (nmg-initial)))
+    (let selected (nmg-finish-native native "request-evidence"))
+    (let loading (nmg-qwen-loading selected))
+    (let _loading-frame (nmg-glass-write loading))
+    (let prefix (nmdr-qwen-prefix))
+    (let src (eqr-of-file (str_concat prefix "00001-of-00003.gguf") 0 12000000))
+    (let slot (q4s-open prefix 128))
+    (let qhandle (q4s-residency-handle slot))
+    (if (eq (q4s-resident? slot) 1)
+        (nmdr-after-qwen src slot loading qhandle instance)
+        (do
+            (let closed (q4s-close slot))
+            (list "native-model-dual-resident-refused" "qwen-handle"
+                qhandle "qwen-close" closed))))

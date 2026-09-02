@@ -1,0 +1,28 @@
+; iq4xs-msl.fk — Form-emitted Metal lowering for GGML type 20.
+;
+; preludes: form-stdlib/core.fk form-stdlib/iq4xs-layout.bml form-stdlib/iq4xs-dequant.fk
+
+(do
+    (defn iq4xsm-values ()
+        "constant char iq4xs_values[16] = { -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113 }; ")
+    (defn iq4xsm-weight ()
+        "static inline float iq4xs_w(device const uchar* qb, ulong idx) { ulong blk = idx / 256ul; uint i = uint(idx - blk * 256ul); ulong b = blk * 136ul; uint g = i / 32u; uint j = i - g * 32u; uint sh = uint(qb[b + 2ul]) + 256u * uint(qb[b + 3ul]); uint lo = (uint(qb[b + 4ul + ulong(g / 2u)]) >> (4u * (g & 1u))) & 15u; uint hi = (sh >> (2u * g)) & 3u; int sc = int(lo | (hi << 4u)) - 32; uint by = uint(qb[b + 8ul + ulong(g * 16u + (j & 15u))]); uint q = (j < 16u) ? (by & 15u) : (by >> 4u); ushort hb = (ushort)qb[b] | ((ushort)qb[b + 1ul] << 8); return float(as_type<half>(hb)) * float(sc) * float(iq4xs_values[q]); } ")
+    (defn iq4xsm-helpers () (str_concat (iq4xsm-values) (iq4xsm-weight)))
+    (defn iq4xsm-dequant-body (fname)
+        (str_concat "kernel void " (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = iq4xs_w(qb, off + i); }")))
+    (defn iq4xsm-matvec-body (fname)
+        (str_concat "kernel void " (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ebase [[buffer(5)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0u) { j -= 1u; float p = iq4xs_w(qb, ebase + i * cols + j) * x[j]; acc = p + acc; } y[i] = acc; }")))
+    (defn iq4xsm-slot4-body (fname)
+        (str_concat "kernel void " (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ebase [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0 = (gid / 32u) * 4u; if (r0 >= rows) return; uint nb = cols / 256u; uint ngrp = nb * 8u; ulong tensor_base = (ulong)(ebase / 256u) * 136ul; ulong rstride = (ulong)nb * 136ul; float sums[4] = {0.0f,0.0f,0.0f,0.0f}; for (uint gg = lane; gg < ngrp; gg += 32u) { uint blk = gg / 8u; uint g = gg - blk * 8u; device const float* xg = x + blk * 256u + g * 32u; for (uint rr = 0u; rr < 4u; ++rr) { if (r0 + rr < rows) { device const uchar* b = qb + tensor_base + (ulong)(r0 + rr) * rstride + (ulong)blk * 136ul; uint sh = uint(b[2]) + 256u * uint(b[3]); uint lo = (uint(b[4u + g / 2u]) >> (4u * (g & 1u))) & 15u; int sc = int(lo | (((sh >> (2u * g)) & 3u) << 4u)) - 32; ushort hb = (ushort)b[0] | ((ushort)b[1] << 8); float d = float(as_type<half>(hb)) * float(sc); device const uchar* q = b + 8u + g * 16u; for (uint j = 0u; j < 16u; ++j) { uint by = uint(q[j]); sums[rr] += d * float(iq4xs_values[by & 15u]) * xg[j]; sums[rr] += d * float(iq4xs_values[by >> 4u]) * xg[j + 16u]; } } } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sums[rr]); if (lane == 0u && r0 + rr < rows) y[r0 + rr] = s; } }")))
+    (defn iq4xsm-row-gather-body (fname)
+        (str_concat "kernel void " (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const uint* ids [[buffer(1)]], device float* out [[buffer(2)]], constant uint& width [[buffer(3)]], constant uint& nrows [[buffer(4)]], uint gid [[thread_position_in_grid]]) { uint row = gid / width; if (row >= nrows) return; uint col = gid - row * width; uint id = ids[row]; out[row * width + col] = iq4xs_w(qb, ulong(id) * ulong(width) + ulong(col)); }")))
+    (defn iq4xsm-unit (dname mname sname gname)
+        (str_concat (iq4xsm-helpers)
+        (str_concat (iq4xsm-dequant-body dname)
+        (str_concat (iq4xsm-matvec-body mname)
+        (str_concat (iq4xsm-slot4-body sname) (iq4xsm-row-gather-body gname))))))
+    0)

@@ -35,7 +35,7 @@ if [ ! -x ./fkwu ]; then
     echo "FAIL  no ./fkwu — cc -O2 -o fkwu runtime/fkwu-uni.c"; exit 1
 fi
 
-PRE='; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/moe-msl.fk form-stdlib/moe-route-radius.fk form-stdlib/qwen4exp-flash-next-router-xtal.fk form-stdlib/moe-route-wide-demo.fk'
+PRE='; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/moe-msl.fk form-stdlib/moe-route-radius.fk form-stdlib/qwen4exp-flash-next-router.bml form-stdlib/moe-route-wide-demo.fk'
 
 # ── 1. the fixture, emitted on fkwu (the runtime), not on a proof sibling ───────
 { echo "$PRE"; echo '(mrwd-emit-all)'; } > "$work/demo.fk"

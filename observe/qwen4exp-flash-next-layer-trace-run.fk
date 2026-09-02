@@ -1,0 +1,39 @@
+; Bounded first-token layer trace. Each row is the first three and final value
+; of the 4x2560 hyper-connection state after one complete block.
+;
+; preludes: form/native/metal/qwen4exp-flash-next-token-handle.fk
+
+(do
+    (defn q4lt-word (s i)
+        (add (str_byte_at s (mul i 4))
+        (add (mul (str_byte_at s (add (mul i 4) 1)) 256)
+        (add (mul (str_byte_at s (add (mul i 4) 2)) 65536)
+             (mul (str_byte_at s (add (mul i 4) 3)) 16777216)))))
+    (defn q4lt-f32 (s i) (fd-value (q4lt-word s i) 8 23))
+    (defn q4lt-summary (h)
+        (do
+            (let first (metal_buf_read h 0 12))
+            (let last (metal_buf_read h (mul 10239 4) 4))
+            (list (q4lt-f32 first 0) (q4lt-f32 first 1)
+                  (q4lt-f32 first 2) (q4lt-f32 last 0))))
+    (defn q4lt-go (aps qps gps bs model lays sts layer acc)
+        (if (ge layer 48) (reverse acc)
+            (do
+                (q4t-block aps qps gps bs model (nth lays layer) (nth sts layer)
+                    layer 0 16 9419 248046 248046)
+                (let row (list layer (q4g-full layer) (q4g-ple layer)
+                    (q4lt-summary (nth bs 1))))
+                (q4lt-go aps qps gps bs model lays sts (add layer 1)
+                    (cons row acc)))))
+
+    (let prefix "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+    (let ctx (q4t-open prefix 16))
+    (let aps (nth ctx 0)) (let qps (nth ctx 1)) (let gps (nth ctx 2))
+    (let bs (nth ctx 3)) (let lays (nth ctx 4)) (let model (nth ctx 5))
+    (let sts (nth ctx 6))
+    (q4t-embed qps gps bs (nth model 0) 9419)
+    (let rows (q4lt-go aps qps gps bs model lays sts 0 (empty)))
+    (let live (metal_status))
+    (q4t-close ctx)
+    (list "qwen4exp-flash-next-layer-trace" rows
+        (list "metal-status" live) (list "after-close" (metal_status))))
