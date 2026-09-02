@@ -950,9 +950,26 @@ static long long fk_read_all_bounded(int fd, char *buf, long long cap) {
  * Absent file -> empty config -> every toggle at its default (recover, never die). Standard OS env
  * vars we do not own (TMPDIR) stay on getenv. Line form: "KEY value" or "KEY=value"; bare "KEY"
  * means on ("1"); "KEY 0" means off; '#' begins a comment. */
-#define FK_CONF_MAX 64
-static char fk_conf_k[FK_CONF_MAX][64];
-static char fk_conf_v[FK_CONF_MAX][256];
+#define FK_CONF_MAX_INIT 64 /* conf entries birth size; grows -- an entry past the old fixed 64 was SILENTLY inert, the same family as the silently-inert env probe */
+static char (*fk_conf_k)[64];
+static char (*fk_conf_v)[4096];
+static long long fk_conf_cap;
+static void fk_conf_reserve(long long need) {
+    long long nc;
+    if (need <= fk_conf_cap) {
+        return;
+    }
+    nc = fk_conf_cap == 0 ? FK_CONF_MAX_INIT : fk_conf_cap;
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    fk_conf_k = (char (*)[64])realloc(fk_conf_k, (unsigned long)(nc * 64));
+    fk_conf_v = (char (*)[4096])realloc(fk_conf_v, (unsigned long)(nc * 4096));
+    if (fk_conf_k == 0 || fk_conf_v == 0) {
+        fk_die("fk_conf_reserve: out of memory growing the conf table");
+    }
+    fk_conf_cap = nc;
+}
 static int fk_conf_n = 0;
 static int fk_conf_loaded = 0;
 static void fk_conf_load(void) {
@@ -960,13 +977,31 @@ static void fk_conf_load(void) {
     fk_conf_loaded = 1;
     int fd = open("fkwu.conf", 0);
     if (fd < 0) { return; }
-    static char cb[8192];
-    long long n = read(fd, cb, 8191);
+    /* read the WHOLE file: the old single bounded read parsed whatever one
+     * read() happened to return and silently dropped the rest. */
+    long long cb_cap = 8192;
+    char *cb = malloc((unsigned long)cb_cap);
+    long long n = 0;
+    if (cb == 0) { close(fd); return; }
+    for (;;) {
+        long long got;
+        if (n + 4096 >= cb_cap) {
+            char *q;
+            cb_cap = cb_cap * 2;
+            q = realloc(cb, (unsigned long)cb_cap);
+            if (q == 0) { free(cb); close(fd); return; }
+            cb = q;
+        }
+        got = read(fd, cb + n, 4096);
+        if (got <= 0) { break; }
+        n = n + got;
+    }
     close(fd);
-    if (n <= 0) { return; }
+    if (n <= 0) { free(cb); return; }
     cb[n] = 0;
     long long i = 0;
-    while (i < n && fk_conf_n < FK_CONF_MAX) {
+    while (i < n) {
+        fk_conf_reserve(fk_conf_n + 1);
         while (i < n && (cb[i] == ' ' || cb[i] == '\t' || cb[i] == '\n' || cb[i] == '\r')) { i = i + 1; }
         if (i >= n) { break; }
         if (cb[i] == '#') { while (i < n && cb[i] != '\n') { i = i + 1; } continue; }
@@ -977,7 +1012,7 @@ static void fk_conf_load(void) {
         fk_conf_k[fk_conf_n][kj] = 0;
         while (i < n && (cb[i] == ' ' || cb[i] == '\t' || cb[i] == '=')) { i = i + 1; }
         int vj = 0;
-        while (i < n && cb[i] != '\n' && cb[i] != '\r' && vj < 255) {
+        while (i < n && cb[i] != '\n' && cb[i] != '\r' && vj < 4095) {
             fk_conf_v[fk_conf_n][vj] = cb[i]; vj = vj + 1; i = i + 1;
         }
         while (vj > 0 && (fk_conf_v[fk_conf_n][vj - 1] == ' ' || fk_conf_v[fk_conf_n][vj - 1] == '\t')) { vj = vj - 1; }
@@ -10041,9 +10076,9 @@ static void fk_parse_top(void);
  * a registered name lowers to tag 12 (call-by-index, single-arg). A non-defn top form is the root
  * (fn[0]). */
 /* Function symbols share the demand-grown storage declared with fk_fn. */
-#define FK_TOP_CONST_CAP 512
-static long long fk_const_s[FK_TOP_CONST_CAP], fk_const_n[FK_TOP_CONST_CAP],
-    fk_const_node[FK_TOP_CONST_CAP], fk_const_top;
+#define FK_TOP_CONST_CAP_INIT 512 /* top-level constant table birth size; doubles on demand */
+static long long *fk_const_s, *fk_const_n, *fk_const_node, fk_const_top;
+static long long fk_const_cap;
 static long long fk_fn_lookup(long long s, long long n) {
     long long i = 0;
     while (i < fk_fntop) {
@@ -10073,14 +10108,20 @@ static void fk_const_set(long long s, long long n, long long node) {
         }
         i = i + 1;
     }
-    if (fk_const_top < FK_TOP_CONST_CAP) {
-        fk_const_s[fk_const_top] = s;
-        fk_const_n[fk_const_top] = n;
-        fk_const_node[fk_const_top] = node;
-        fk_const_top = fk_const_top + 1;
-        return;
+    if (fk_const_top >= fk_const_cap) {
+        long long nc = fk_const_cap == 0 ? FK_TOP_CONST_CAP_INIT : fk_const_cap * 2;
+        fk_const_s = (long long *)realloc(fk_const_s, (unsigned long)(nc * 8));
+        fk_const_n = (long long *)realloc(fk_const_n, (unsigned long)(nc * 8));
+        fk_const_node = (long long *)realloc(fk_const_node, (unsigned long)(nc * 8));
+        if (fk_const_s == 0 || fk_const_n == 0 || fk_const_node == 0) {
+            fk_die("fk_const_set: out of memory growing the top-level constant table");
+        }
+        fk_const_cap = nc;
     }
-    fk_die("fk_const_set: top-level constant table full");
+    fk_const_s[fk_const_top] = s;
+    fk_const_n[fk_const_top] = n;
+    fk_const_node[fk_const_top] = node;
+    fk_const_top = fk_const_top + 1;
 }
 static long long fk_parse_variadic(long long tag);
 static long long fk_parse_fixed_list(long long n);
@@ -11637,25 +11678,35 @@ static int fk_src_unit_hash_range(long long start, long long end, char *out, lon
     long long pos = 0;
     long long i = start;
     char canon[4096];
-    /* v1 -> v2: the identity now carries a content digest. Every v1 artifact is
-     * invalidated by the tag change rather than trusted, because a v1 artifact
-     * cannot testify about the content it was written from. */
-    if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v2")) {
-        return 0;
-    }
+    unsigned long long fold = 14695981039346656037ULL;
+    long long count = 0;
+    /* v2 -> v3: the identity was the full dependency text, and a unit past
+     * ~120 deps could not state its own identity -- the buffer walled and the
+     * load refused, a program-size wall in the dep dimension. The identity is
+     * compare-only (written to .sym/.fkb, read back for equality), so a
+     * streamed FNV-1a fold over the SAME fields carries the same testimony at
+     * constant size: any dep's canonical path, mtime, size, or content digest
+     * change changes the fold. The format bump invalidates v2 artifacts once,
+     * the same door v1 -> v2 walked (a v2 artifact cannot testify in v3's
+     * voice); the dep COUNT stays readable beside the fold. */
     while (i < end && i < fk_src_dep_count) {
-        if (!fk_source_hash_append(out, cap, &pos, "|") ||
-            !fk_source_hash_append(out, cap, &pos, fk_path_canon_id(fk_src_dep_path[i], canon)) ||
-            !fk_source_hash_append(out, cap, &pos, "@") ||
-            !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_mtime[i]) ||
-            !fk_source_hash_append(out, cap, &pos, ":") ||
-            !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_size[i]) ||
-            !fk_source_hash_append(out, cap, &pos, "#") ||
-            !fk_source_hash_append_ll(out, cap, &pos,
-                                      (long long)(fk_src_dep_digest[i] >> 1))) {
-            return 0;
-        }
+        const char *cid = fk_path_canon_id(fk_src_dep_path[i], canon);
+        fold = fold ^ fk_bytes_fnv1a(cid, fk_path_len(cid));
+        fold = fold * 1099511628211ULL;
+        fold = fold ^ (unsigned long long)fk_src_dep_mtime[i];
+        fold = fold * 1099511628211ULL;
+        fold = fold ^ (unsigned long long)fk_src_dep_size[i];
+        fold = fold * 1099511628211ULL;
+        fold = fold ^ fk_src_dep_digest[i];
+        fold = fold * 1099511628211ULL;
+        count = count + 1;
         i = i + 1;
+    }
+    if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v3|n=") ||
+        !fk_source_hash_append_ll(out, cap, &pos, count) ||
+        !fk_source_hash_append(out, cap, &pos, "|") ||
+        !fk_source_hash_append_ll(out, cap, &pos, (long long)(fold >> 1))) {
+        return 0;
     }
     return 1;
 }
@@ -14088,8 +14139,9 @@ static int fk_hex16_parse(const char *p, unsigned long long *out) {
  * sibling's surface (fcpclb-* defs truncated away, 2026-09-01). Every
  * file the floor compile would load is folded in; a visited list keeps
  * the walk finite. */
-#define FK_FLOOR_DEP_CAP 128
-static char fk_floor_seen[FK_FLOOR_DEP_CAP][4096];
+#define FK_FLOOR_DEP_CAP_INIT 128 /* floor-chain dep rows birth size; grows -- a dep past the old fixed 128 was SILENTLY skipped by the digest fold, so a stale .lowfk memo could ride as fresh when that dep changed */
+static char (*fk_floor_seen)[4096];
+static long long fk_floor_cap;
 static long long fk_floor_seen_n;
 static int fk_floor_seen_has(const char *p) {
     long long i = 0;
@@ -14105,8 +14157,16 @@ static unsigned long long fk_bml_floor_fold(const char *path, unsigned long long
     long long n = 0;
     char *text;
     long long i;
-    if (fk_floor_seen_n >= FK_FLOOR_DEP_CAP || fk_floor_seen_has(path)) {
+    if (fk_floor_seen_has(path)) {
         return h;
+    }
+    if (fk_floor_seen_n >= fk_floor_cap) {
+        long long nc = fk_floor_cap == 0 ? FK_FLOOR_DEP_CAP_INIT : fk_floor_cap * 2;
+        fk_floor_seen = (char (*)[4096])realloc(fk_floor_seen, (unsigned long)(nc * 4096));
+        if (fk_floor_seen == 0) {
+            fk_die("fk_bml_floor_fold: out of memory growing the floor dep table");
+        }
+        fk_floor_cap = nc;
     }
     fk_cstr_copy(fk_floor_seen[fk_floor_seen_n], path, 4096);
     fk_floor_seen_n = fk_floor_seen_n + 1;
