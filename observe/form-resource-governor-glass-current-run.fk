@@ -1,0 +1,45 @@
+; form-resource-governor-glass-current-run.fk — refresh honest governor telemetry.
+;
+; This is the bounded production publisher used by Glass.  It does not run
+; the atomic-slot fixture from the governor proof runner.  Inputs the carrier
+; cannot currently expose stay typed unavailable and therefore fail closed.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bml/form-glass-observation-v2.bml form-stdlib/form-resource-governor.bml form-stdlib/form-glass-telemetry-membrane.bml form-stdlib/form-resource-governor-glass.bml
+
+(do
+    (defn frggcr-declared-provenance ()
+        (fgov2-provenance "declared" "resource.governor"
+            (fgov2-unavailable "current-process-lifetime-not-exposed" "process.current-lifetime")
+            (fgov2-measured (kernel_stat 0))
+            (fgov2-measured (now_unix_ms)) "metal_status"))
+    (defn frggcr-unavailable (reason door) (frg-unavailable reason door))
+    (defn frggcr-resource (name capacity-door foreground-door reserve-door)
+        (frg-resource name
+            (frggcr-unavailable "capacity-not-exposed" capacity-door)
+            (frggcr-unavailable "foreground-demand-not-exposed" foreground-door)
+            (frggcr-unavailable "reserve-not-exposed" reserve-door)))
+
+    (let epoch (now_unix_ms))
+    (let status (metal_status))
+    (let sample (frg-sample
+        (frggcr-unavailable "request-queue-not-correlated" "hearth.queue.current")
+        (frggcr-resource "cpu" "host.cpu.capacity" "host.cpu.foreground" "host.cpu.reserve")
+        (frggcr-resource "gpu" "metal.capacity" "metal.foreground" "metal.reserve")
+        (frggcr-resource "memory" "host.memory.capacity" "host.memory.foreground" "host.memory.reserve")
+        (frggcr-unavailable "foreground-presence-not-exposed" "host.foreground-presence")
+        (frggcr-unavailable "foreground-latency-not-exposed" "host.foreground-latency")
+        (frggcr-unavailable "memory-pressure-not-exposed" "host.memory-pressure")
+        (frggcr-unavailable "thermal-state-not-exposed" "host.thermal-state")
+        (frggcr-unavailable "low-power-state-not-exposed" "host.low-power-state")
+        (frg-signal (fgov2-status-number-truth status "in_flight") 0 (frggcr-declared-provenance))))
+    (let policy (frg-default-policy))
+    (let decision (frg-tick policy (frg-initial-state) sample))
+    (let release-plan (frg-pressure-release-plan policy (frg-pressure sample)
+        (frggcr-unavailable "required-bytes-not-requested" "governor.reclaim-request") (list)))
+    (let slot-observation (frg-metal-slot-observation
+        "unobserved" "production-publisher-does-not-probe-fixture-slot"
+        (frg-metal-slot-path) ""))
+    (let frame (frgg-project policy sample decision (list) (list) (list)
+        release-plan slot-observation epoch))
+    (let published (frgg-publish "/tmp/form-glass-telemetry" epoch frame))
+    (if (and (gt (len published) 1) (str_eq (nth published 1) "published")) 0 1))

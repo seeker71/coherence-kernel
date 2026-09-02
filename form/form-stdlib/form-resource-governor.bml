@@ -1,0 +1,397 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-resource-governor.bml — executable cooperative governor.
+//
+// This cell computes bounded grants and release plans from typed carrier
+// observations.  It applies no host nice/QoS setting and submits no Metal
+// work itself: those are explicit offers whose carrier acknowledgement is
+// separate evidence.
+//
+// Authority: form-stdlib/bml/form-resource-governor.bml
+// preludes: form/form-stdlib/core.fk form/form-stdlib/bml/form-glass-observation-v2.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormResourceGovernor {
+        field FRGSchema = "form-resource-governor-v2";
+
+        // All thresholds live in this row.  Callers may provide another row;
+        // the state machine contains no hidden policy quantities.
+        // tag, active-ms, quiet-ms, scale, target, additive step,
+        // recovery clean frames, fresh age frames, latency half/stop,
+        // memory warning/critical, thermal half/stop, CPU nice, CPU QoS,
+        // max background Metal in flight.
+        def frg-policy(activeMs, quietMs, scale, target, additiveStep, cleanFrames, freshFrames, latencyHalfMs, latencyStopMs, memoryWarning, memoryCritical, thermalHalf, thermalStop, cpuNice, cpuQos, maxMetalInFlight) = list("form-resource-policy-v1", activeMs, quietMs, scale, target, additiveStep, cleanFrames, freshFrames, latencyHalfMs, latencyStopMs, memoryWarning, memoryCritical, thermalHalf, thermalStop, cpuNice, cpuQos, maxMetalInFlight);
+        def frg-active-ms(policy) = nth(policy, 1);
+        def frg-quiet-ms(policy) = nth(policy, 2);
+        def frg-scale(policy) = nth(policy, 3);
+        def frg-target-ratio(policy) = nth(policy, 4);
+        def frg-recovery-step(policy) = nth(policy, 5);
+        def frg-clean-needed(policy) = nth(policy, 6);
+        def frg-fresh-frames(policy) = nth(policy, 7);
+        def frg-latency-half(policy) = nth(policy, 8);
+        def frg-latency-stop(policy) = nth(policy, 9);
+        def frg-memory-warning(policy) = nth(policy, 10);
+        def frg-memory-critical(policy) = nth(policy, 11);
+        def frg-thermal-half(policy) = nth(policy, 12);
+        def frg-thermal-stop(policy) = nth(policy, 13);
+        def frg-cpu-nice(policy) = nth(policy, 14);
+        def frg-cpu-qos(policy) = nth(policy, 15);
+        def frg-max-metal-inflight(policy) = nth(policy, 16);
+        def frg-default-policy() = frg-policy(250, 500, 1000, 900, 50, 2, 1, 250, 500, 1, 2, 1, 2, 10, "utility", 1);
+        def frg-policy-valid?(policy) = if not(eq(len(policy), 17)) then 0 else if not(str_eq(head(policy), "form-resource-policy-v1")) then 0 else if le(frg-active-ms(policy), 0) then 0 else if lt(frg-quiet-ms(policy), frg-active-ms(policy)) then 0 else if le(frg-scale(policy), 0) then 0 else if lt(frg-target-ratio(policy), 0) then 0 else if gt(frg-target-ratio(policy), frg-scale(policy)) then 0 else if le(frg-recovery-step(policy), 0) then 0 else if gt(frg-recovery-step(policy), frg-scale(policy)) then 0 else if lt(frg-clean-needed(policy), 1) then 0 else if lt(frg-fresh-frames(policy), 0) then 0 else if lt(frg-latency-half(policy), 0) then 0 else if lt(frg-latency-stop(policy), frg-latency-half(policy)) then 0 else if lt(frg-memory-warning(policy), 1) then 0 else if le(frg-memory-critical(policy), frg-memory-warning(policy)) then 0 else if lt(frg-thermal-half(policy), 0) then 0 else if le(frg-thermal-stop(policy), frg-thermal-half(policy)) then 0 else if lt(frg-cpu-nice(policy), 0) then 0 else if gt(frg-cpu-nice(policy), 19) then 0 else if eq(str_len(frg-cpu-qos(policy)), 0) then 0 else if not(eq(frg-max-metal-inflight(policy), 1)) then 0 else 1;
+
+        // The Glass v2 truth spine owns truth variants and process provenance.
+        // This envelope adds governor-frame age; it does not invent a second
+        // absent/stale/error vocabulary.
+        def frg-declared-provenance(publisher) = fgov2-provenance("declared", publisher, fgov2-unavailable("process-not-observed", "process.lifetime"), fgov2-measured(0), fgov2-measured(0), "form.resource-governor");
+        def frg-signal(truth, ageFrames, provenance) = list("form-resource-signal-v1", truth, ageFrames, provenance);
+        def frg-measured(value, ageFrames, provenance) = frg-signal(fgov2-measured(value), ageFrames, provenance);
+        def frg-absent(reason) = frg-signal(fgov2-absent(reason), 0, frg-declared-provenance("resource.absent"));
+        def frg-unavailable(reason, missingDoor) = frg-signal(fgov2-unavailable(reason, missingDoor), 0, frg-declared-provenance("resource.unavailable"));
+        def frg-stale(lastValue, lastObservedEpoch, ageFrames, publisher) = frg-signal(fgov2-stale(lastValue, lastObservedEpoch, "publisher-lease-expired"), ageFrames, frg-declared-provenance(publisher));
+        def frg-error(stage, code, retryable) = frg-signal(fgov2-error(stage, code, retryable), 0, frg-declared-provenance("resource.error"));
+        def frg-signal-truth(signal) = nth(signal, 1);
+        def frg-signal-kind(signal) = fgov2-truth-kind(frg-signal-truth(signal));
+        def frg-signal-value(signal) = fgov2-truth-value(frg-signal-truth(signal));
+        def frg-signal-age(signal) = nth(signal, 2);
+        def frg-signal-provenance(signal) = nth(signal, 3);
+        def frg-provenance-current?(provenance) = if not(eq(fgov2-provenance?(provenance), 1)) then 0 else if not(str_eq(fgov2-provenance-evidence(provenance), "physical-live")) then 0 else if not(eq(fgov2-measured?(fgov2-provenance-lifetime(provenance)), 1)) then 0 else if not(eq(fgov2-measured?(fgov2-provenance-sequence(provenance)), 1)) then 0 else if not(eq(fgov2-measured?(fgov2-provenance-observed(provenance)), 1)) then 0 else 1;
+        def frg-signal-shape?(signal) = if nothing?(signal) then 0 else if not(eq(len(signal), 4)) then 0 else if not(str_eq(head(signal), "form-resource-signal-v1")) then 0 else 1;
+        def frg-signal-fresh?(policy, signal) = if not(eq(frg-signal-shape?(signal), 1)) then 0 else if not(eq(fgov2-truth?(frg-signal-truth(signal)), 1)) then 0 else if not(eq(fgov2-measured?(frg-signal-truth(signal)), 1)) then 0 else if not(eq(frg-provenance-current?(frg-signal-provenance(signal)), 1)) then 0 else if lt(frg-signal-age(signal), 0) then 0 else if le(frg-signal-age(signal), frg-fresh-frames(policy)) then 1 else 0;
+        def frg-signal-nonnegative?(policy, signal) = if not(eq(frg-signal-fresh?(policy, signal), 1)) then 0 else if ge(frg-signal-value(signal), 0) then 1 else 0;
+
+        // Resource observations: capacity, current foreground demand, and
+        // hard reserve are all carrier measurements, independently typed.
+        def frg-resource(name, capacity, foreground, reserve) = list("form-resource-observation-v1", name, capacity, foreground, reserve);
+        def frg-resource-name(resource) = nth(resource, 1);
+        def frg-resource-capacity(resource) = nth(resource, 2);
+        def frg-resource-foreground(resource) = nth(resource, 3);
+        def frg-resource-reserve(resource) = nth(resource, 4);
+        def frg-resource-shape?(resource) = if nothing?(resource) then 0 else if not(eq(len(resource), 5)) then 0 else if not(str_eq(head(resource), "form-resource-observation-v1")) then 0 else 1;
+        def frg-resource-fresh?(policy, resource) = if not(eq(frg-resource-shape?(resource), 1)) then 0 else if and(eq(frg-signal-nonnegative?(policy, frg-resource-capacity(resource)), 1), and(eq(frg-signal-nonnegative?(policy, frg-resource-foreground(resource)), 1), eq(frg-signal-nonnegative?(policy, frg-resource-reserve(resource)), 1))) then 1 else 0;
+        def frg-max-zero(value) = if gt(value, 0) then value else 0;
+        def frg-min(a, b) = if le(a, b) then a else b;
+        def frg-resource-available(resource) = frg-max-zero(sub(sub(frg-signal-value(frg-resource-capacity(resource)), frg-signal-value(frg-resource-foreground(resource))), frg-signal-value(frg-resource-reserve(resource))));
+        def frg-resource-target(policy, resource) = div(mul(frg-resource-available(resource), frg-target-ratio(policy)), frg-scale(policy));
+        def frg-resource-step-size(policy, resource) = frg-max-zero(div(mul(frg-signal-value(frg-resource-capacity(resource)), frg-recovery-step(policy)), frg-scale(policy)));
+
+        // Sample: active request count, CPU/GPU/memory resource observations,
+        // foreground-presence, latency, memory pressure, thermal level,
+        // low-power state, background Metal in-flight count.
+        def frg-sample(activeRequests, cpu, gpu, memory, foreground, latencyMs, memoryPressure, thermal, lowPower, metalInFlight) = list("form-resource-sample-v1", activeRequests, cpu, gpu, memory, foreground, latencyMs, memoryPressure, thermal, lowPower, metalInFlight);
+        def frg-active-requests(sample) = nth(sample, 1);
+        def frg-cpu(sample) = nth(sample, 2);
+        def frg-gpu(sample) = nth(sample, 3);
+        def frg-memory(sample) = nth(sample, 4);
+        def frg-foreground(sample) = nth(sample, 5);
+        def frg-latency(sample) = nth(sample, 6);
+        def frg-pressure(sample) = nth(sample, 7);
+        def frg-thermal(sample) = nth(sample, 8);
+        def frg-low-power(sample) = nth(sample, 9);
+        def frg-metal-inflight(sample) = nth(sample, 10);
+        def frg-sample-shape?(sample) = if nothing?(sample) then 0 else if not(eq(len(sample), 11)) then 0 else if not(str_eq(head(sample), "form-resource-sample-v1")) then 0 else 1;
+        def frg-sample-fresh?(policy, sample) = if not(eq(frg-sample-shape?(sample), 1)) then 0 else if and(eq(frg-signal-nonnegative?(policy, frg-active-requests(sample)), 1), and(eq(frg-resource-fresh?(policy, frg-cpu(sample)), 1), and(eq(frg-resource-fresh?(policy, frg-gpu(sample)), 1), and(eq(frg-resource-fresh?(policy, frg-memory(sample)), 1), and(eq(frg-signal-nonnegative?(policy, frg-foreground(sample)), 1), and(eq(frg-signal-nonnegative?(policy, frg-latency(sample)), 1), and(eq(frg-signal-nonnegative?(policy, frg-pressure(sample)), 1), and(eq(frg-signal-nonnegative?(policy, frg-thermal(sample)), 1), and(eq(frg-signal-nonnegative?(policy, frg-low-power(sample)), 1), eq(frg-signal-nonnegative?(policy, frg-metal-inflight(sample)), 1)))))))))) then 1 else 0;
+        def frg-sample-active?(policy, sample) = if not(eq(frg-sample-fresh?(policy, sample), 1)) then 1 else if eq(frg-critical?(policy, sample), 1) then 1 else if eq(frg-half?(policy, sample), 1) then 1 else if gt(frg-signal-value(frg-active-requests(sample)), 0) then 1 else if gt(frg-signal-value(frg-foreground(sample)), 0) then 1 else if gt(frg-signal-value(frg-metal-inflight(sample)), 0) then 1 else 0;
+        def frg-frame-ms(policy, sample) = if eq(frg-sample-active?(policy, sample), 1) then frg-active-ms(policy) else frg-quiet-ms(policy);
+
+        // One resident governor owns this state.  Workers receive a permit,
+        // never a copy of the state; the owner serializes permit consumption.
+        def frg-state(cpuGrant, gpuGrant, memoryGrant, cleanFrames, tick) = frg-state-with-permit(cpuGrant, gpuGrant, memoryGrant, cleanFrames, tick, list());
+        def frg-state-with-permit(cpuGrant, gpuGrant, memoryGrant, cleanFrames, tick, permit) = list("form-resource-governor-state-v1", cpuGrant, gpuGrant, memoryGrant, cleanFrames, tick, permit);
+        def frg-state-cpu(state) = nth(state, 1);
+        def frg-state-gpu(state) = nth(state, 2);
+        def frg-state-memory(state) = nth(state, 3);
+        def frg-state-clean(state) = nth(state, 4);
+        def frg-state-tick(state) = nth(state, 5);
+        def frg-state-permit(state) = nth(state, 6);
+        def frg-initial-state() = frg-state(0, 0, 0, 0, 0);
+        def frg-state-shape?(state) = if nothing?(state) then 0 else if not(eq(len(state), 7)) then 0 else if not(str_eq(head(state), "form-resource-governor-state-v1")) then 0 else 1;
+        def frg-state-valid?(state) = if not(eq(frg-state-shape?(state), 1)) then 0 else if lt(frg-state-cpu(state), 0) then 0 else if lt(frg-state-gpu(state), 0) then 0 else if lt(frg-state-memory(state), 0) then 0 else if lt(frg-state-clean(state), 0) then 0 else if lt(frg-state-tick(state), 0) then 0 else if eq(len(frg-state-permit(state)), 0) then 1 else frg-permit-valid?(frg-state-permit(state));
+        def frg-safe-state(state) = if eq(frg-state-valid?(state), 1) then state else frg-initial-state();
+
+        // Permit identity is bound to the Metal publisher's complete process
+        // lifetime plus its exact sequence and observation epoch.
+        def frg-provenance-lifetime-value(provenance) = fgov2-truth-value(fgov2-provenance-lifetime(provenance));
+        def frg-provenance-sequence-value(provenance) = fgov2-truth-value(fgov2-provenance-sequence(provenance));
+        def frg-provenance-observed-value(provenance) = fgov2-truth-value(fgov2-provenance-observed(provenance));
+        def frg-provenance-pid(provenance) = fgov2-lifetime-pid(frg-provenance-lifetime-value(provenance));
+        def frg-provenance-started(provenance) = fgov2-lifetime-started(frg-provenance-lifetime-value(provenance));
+        def frg-provenance-incarnation(provenance) = fgov2-lifetime-incarnation(frg-provenance-lifetime-value(provenance));
+        def frg-provenance-same-lifetime?(a, b) = if not(and(eq(frg-provenance-current?(a), 1), eq(frg-provenance-current?(b), 1))) then 0 else if not(str_eq(fgov2-provenance-publisher(a), fgov2-provenance-publisher(b))) then 0 else if not(eq(frg-provenance-pid(a), frg-provenance-pid(b))) then 0 else if not(eq(frg-provenance-started(a), frg-provenance-started(b))) then 0 else if not(str_eq(frg-provenance-incarnation(a), frg-provenance-incarnation(b))) then 0 else 1;
+        def frg-provenance-exact?(a, b) = if not(eq(frg-provenance-same-lifetime?(a, b), 1)) then 0 else if not(eq(frg-provenance-sequence-value(a), frg-provenance-sequence-value(b))) then 0 else if not(eq(frg-provenance-observed-value(a), frg-provenance-observed-value(b))) then 0 else if not(str_eq(fgov2-provenance-source(a), fgov2-provenance-source(b))) then 0 else 1;
+        def frg-provenance-advances?(prior, next) = if not(eq(frg-provenance-same-lifetime?(prior, next), 1)) then 0 else if le(frg-provenance-sequence-value(next), frg-provenance-sequence-value(prior)) then 0 else if le(frg-provenance-observed-value(next), frg-provenance-observed-value(prior)) then 0 else 1;
+        def frg-permit-id-for(provenance, tick) = str_concat(fgov2-provenance-publisher(provenance), str_concat(":", str_concat(frg-provenance-incarnation(provenance), str_concat(":", str_concat(int_to_str(frg-provenance-sequence-value(provenance)), str_concat(":", int_to_str(tick)))))));
+
+        // Open is a policy offer. Reserved is possible only after the fixed
+        // filesystem slot has been created and its exact owner bytes written.
+        // Submitted additionally retains the exact command-buffer handle and
+        // the exact submit observation that produced it.
+        def frg-metal-permit(id, tick, status, provenance, commandHandle, submitProvenance, slotPath, ownerText) = list("form-resource-metal-permit-v2", id, tick, status, provenance, commandHandle, submitProvenance, slotPath, ownerText);
+        def frg-permit-id(permit) = nth(permit, 1);
+        def frg-permit-tick(permit) = nth(permit, 2);
+        def frg-permit-status(permit) = nth(permit, 3);
+        def frg-permit-provenance(permit) = nth(permit, 4);
+        def frg-permit-command-handle(permit) = nth(permit, 5);
+        def frg-permit-submit-provenance(permit) = nth(permit, 6);
+        def frg-permit-slot-path(permit) = nth(permit, 7);
+        def frg-permit-owner-text(permit) = nth(permit, 8);
+        def frg-permit-publisher(permit) = fgov2-provenance-publisher(frg-permit-provenance(permit));
+        def frg-permit-incarnation(permit) = frg-provenance-incarnation(frg-permit-provenance(permit));
+        def frg-permit-sequence(permit) = frg-provenance-sequence-value(frg-permit-provenance(permit));
+        def frg-permit-observed(permit) = frg-provenance-observed-value(frg-permit-provenance(permit));
+        def frg-permit-shape?(permit) = if nothing?(permit) then 0 else if not(eq(len(permit), 9)) then 0 else if not(str_eq(head(permit), "form-resource-metal-permit-v2")) then 0 else 1;
+        def frg-permit-open?(permit) = if not(eq(frg-permit-shape?(permit), 1)) then 0 else str_eq(frg-permit-status(permit), "open");
+        def frg-permit-reserved?(permit) = if not(eq(frg-permit-shape?(permit), 1)) then 0 else str_eq(frg-permit-status(permit), "reserved");
+        def frg-permit-submitted?(permit) = if not(eq(frg-permit-shape?(permit), 1)) then 0 else str_eq(frg-permit-status(permit), "submitted");
+        def frg-permit-active?(permit) = if eq(frg-permit-reserved?(permit), 1) then 1 else frg-permit-submitted?(permit);
+        def frg-permit-slot-bound?(permit) = if not(str_eq(frg-permit-slot-path(permit), frg-metal-slot-path())) then 0 else str_eq(frg-permit-owner-text(permit), frg-metal-owner-text(permit));
+        def frg-permit-valid?(permit) = if not(eq(frg-permit-shape?(permit), 1)) then 0 else if not(eq(frg-provenance-current?(frg-permit-provenance(permit)), 1)) then 0 else if eq(frg-permit-open?(permit), 1) then if and(eq(frg-permit-command-handle(permit), 0), and(eq(str_len(frg-permit-slot-path(permit)), 0), eq(str_len(frg-permit-owner-text(permit)), 0))) then 1 else 0 else if eq(frg-permit-reserved?(permit), 1) then if and(eq(frg-permit-command-handle(permit), 0), eq(frg-permit-slot-bound?(permit), 1)) then 1 else 0 else if eq(frg-permit-submitted?(permit), 1) then if and(gt(frg-permit-command-handle(permit), 0), and(eq(frg-permit-slot-bound?(permit), 1), eq(frg-provenance-advances?(frg-permit-provenance(permit), frg-permit-submit-provenance(permit)), 1))) then 1 else 0 else 0;
+        def frg-permit-same?(a, b) = if not(and(eq(frg-permit-valid?(a), 1), eq(frg-permit-valid?(b), 1))) then 0 else if not(str_eq(frg-permit-id(a), frg-permit-id(b))) then 0 else frg-provenance-exact?(frg-permit-provenance(a), frg-permit-provenance(b));
+        def frg-open-permit(sample, tick) {
+            let provenance = frg-signal-provenance(frg-metal-inflight(sample));
+            frg-metal-permit(frg-permit-id-for(provenance, tick), tick, "open", provenance, 0, list(), "", "");
+        }
+        def frg-state-clear-permit(state) = frg-state-with-permit(frg-state-cpu(state), frg-state-gpu(state), frg-state-memory(state), frg-state-clean(state), frg-state-tick(state), list());
+
+        def frg-critical?(policy, sample) = if ge(frg-signal-value(frg-low-power(sample)), 1) then 1 else if ge(frg-signal-value(frg-latency(sample)), frg-latency-stop(policy)) then 1 else if ge(frg-signal-value(frg-pressure(sample)), frg-memory-critical(policy)) then 1 else if ge(frg-signal-value(frg-thermal(sample)), frg-thermal-stop(policy)) then 1 else 0;
+        def frg-half?(policy, sample) = if ge(frg-signal-value(frg-foreground(sample)), 1) then 1 else if ge(frg-signal-value(frg-latency(sample)), frg-latency-half(policy)) then 1 else if ge(frg-signal-value(frg-pressure(sample)), frg-memory-warning(policy)) then 1 else if ge(frg-signal-value(frg-thermal(sample)), frg-thermal-half(policy)) then 1 else 0;
+        def frg-next-clean(policy, state, sample) = if not(eq(frg-sample-fresh?(policy, sample), 1)) then 0 else if eq(frg-critical?(policy, sample), 1) then 0 else if eq(frg-half?(policy, sample), 1) then 0 else add(frg-state-clean(state), 1);
+        def frg-additive-grant(policy, current, target, stepSize, nextClean) = if gt(current, target) then target else if lt(nextClean, frg-clean-needed(policy)) then current else frg-min(target, add(current, frg-max-zero(stepSize)));
+        def frg-next-grant(policy, current, target, stepSize, nextClean, sample) = if not(eq(frg-sample-fresh?(policy, sample), 1)) then 0 else if eq(frg-critical?(policy, sample), 1) then 0 else if eq(frg-half?(policy, sample), 1) then frg-min(target, div(current, 2)) else frg-additive-grant(policy, current, target, stepSize, nextClean);
+        def frg-reason(policy, sample) = if not(eq(frg-sample-fresh?(policy, sample), 1)) then "typed-signal-not-current" else if eq(frg-critical?(policy, sample), 1) then "stop-backoff" else if eq(frg-half?(policy, sample), 1) then "half-backoff" else "additive-recovery";
+        def frg-memory-pressure?(policy, sample) = if not(eq(frg-signal-fresh?(policy, frg-pressure(sample)), 1)) then 0 else if gt(frg-signal-value(frg-pressure(sample)), 0) then 1 else 0;
+
+        // Decision: reason, frame, resource targets, current grants, new Metal
+        // submission permission, measured memory pressure, permit, next state.
+        def frg-decision(reason, frameMs, cpuTarget, gpuTarget, memoryTarget, cpuGrant, gpuGrant, memoryGrant, metalSubmit, memoryPressure, permit, nextState) = list("form-resource-decision-v1", reason, frameMs, cpuTarget, gpuTarget, memoryTarget, cpuGrant, gpuGrant, memoryGrant, metalSubmit, memoryPressure, permit, nextState);
+        def frg-decision-reason(decision) = nth(decision, 1);
+        def frg-decision-frame(decision) = nth(decision, 2);
+        def frg-decision-cpu-target(decision) = nth(decision, 3);
+        def frg-decision-gpu-target(decision) = nth(decision, 4);
+        def frg-decision-memory-target(decision) = nth(decision, 5);
+        def frg-decision-cpu(decision) = nth(decision, 6);
+        def frg-decision-gpu(decision) = nth(decision, 7);
+        def frg-decision-memory(decision) = nth(decision, 8);
+        def frg-decision-metal-submit?(decision) = nth(decision, 9);
+        def frg-decision-pressure?(decision) = nth(decision, 10);
+        def frg-decision-permit(decision) = nth(decision, 11);
+        def frg-decision-next-state(decision) = nth(decision, 12);
+        def frg-decision-shape?(decision) = if nothing?(decision) then 0 else if not(eq(len(decision), 13)) then 0 else if not(str_eq(head(decision), "form-resource-decision-v1")) then 0 else 1;
+        def frg-decision-valid?(decision) = if not(eq(frg-decision-shape?(decision), 1)) then 0 else if le(frg-decision-frame(decision), 0) then 0 else if lt(frg-decision-cpu-target(decision), 0) then 0 else if lt(frg-decision-gpu-target(decision), 0) then 0 else if lt(frg-decision-memory-target(decision), 0) then 0 else if lt(frg-decision-cpu(decision), 0) then 0 else if lt(frg-decision-gpu(decision), 0) then 0 else if lt(frg-decision-memory(decision), 0) then 0 else if not(eq(frg-state-valid?(frg-decision-next-state(decision)), 1)) then 0 else 1;
+        def frg-metal-submit-allowed?(policy, state, sample, gpuGrant) = if not(eq(frg-sample-fresh?(policy, sample), 1)) then 0 else if le(gpuGrant, 0) then 0 else if eq(frg-critical?(policy, sample), 1) then 0 else if eq(frg-permit-active?(frg-state-permit(state)), 1) then 0 else if ge(frg-signal-value(frg-metal-inflight(sample)), frg-max-metal-inflight(policy)) then 0 else 1;
+        // Critical pressure closes every NEW admission.  An already atomic-
+        // reserved slot remains visible so its owner may either publish one
+        // exactly-correlated submit receipt or release it; submitted work also
+        // remains visible because the governor cannot cancel Metal work.
+        def frg-next-permit(policy, state, sample, gpuGrant, nextTick) = if eq(frg-permit-active?(frg-state-permit(state)), 1) then frg-state-permit(state) else if eq(frg-metal-submit-allowed?(policy, state, sample, gpuGrant), 1) then frg-open-permit(sample, nextTick) else list();
+
+        def frg-tick-current(policy, state, sample) {
+            let cpuTarget = frg-resource-target(policy, frg-cpu(sample));
+            let gpuTarget = frg-resource-target(policy, frg-gpu(sample));
+            let memoryTarget = frg-resource-target(policy, frg-memory(sample));
+            let nextClean = frg-next-clean(policy, state, sample);
+            let cpuGrant = frg-next-grant(policy, frg-state-cpu(state), cpuTarget, frg-resource-step-size(policy, frg-cpu(sample)), nextClean, sample);
+            let gpuGrant = frg-next-grant(policy, frg-state-gpu(state), gpuTarget, frg-resource-step-size(policy, frg-gpu(sample)), nextClean, sample);
+            let memoryGrant = frg-next-grant(policy, frg-state-memory(state), memoryTarget, frg-resource-step-size(policy, frg-memory(sample)), nextClean, sample);
+            let nextTick = add(frg-state-tick(state), 1);
+            let permit = frg-next-permit(policy, state, sample, gpuGrant, nextTick);
+            let submit = if eq(frg-critical?(policy, sample), 1) then 0 else frg-permit-open?(permit);
+            let nextState = frg-state-with-permit(cpuGrant, gpuGrant, memoryGrant, nextClean, nextTick, permit);
+            frg-decision(frg-reason(policy, sample), frg-frame-ms(policy, sample), cpuTarget, gpuTarget, memoryTarget, cpuGrant, gpuGrant, memoryGrant, submit, frg-memory-pressure?(policy, sample), permit, nextState);
+        }
+        def frg-tick-missing(policy, state, sample) {
+            let permit = if eq(frg-permit-active?(frg-state-permit(state)), 1) then frg-state-permit(state) else list();
+            let nextState = frg-state-with-permit(0, 0, 0, 0, add(frg-state-tick(state), 1), permit);
+            frg-decision("typed-signal-not-current", frg-active-ms(policy), 0, 0, 0, 0, 0, 0, 0, 0, permit, nextState);
+        }
+        def frg-tick-invalid(policy, state, sample) {
+            let safeState = frg-safe-state(state);
+            let permit = if eq(frg-permit-active?(frg-state-permit(safeState)), 1) then frg-state-permit(safeState) else list();
+            let nextState = frg-state-with-permit(0, 0, 0, 0, add(frg-state-tick(safeState), 1), permit);
+            frg-decision("policy-invalid", frg-active-ms(frg-default-policy()), 0, 0, 0, 0, 0, 0, 0, 0, permit, nextState);
+        }
+        def frg-tick-state-invalid(policy, state, sample) = frg-decision("state-invalid", frg-active-ms(policy), 0, 0, 0, 0, 0, 0, 0, 0, list(), frg-state-with-permit(0, 0, 0, 0, 1, list()));
+        def frg-tick(policy, state, sample) = if not(eq(frg-policy-valid?(policy), 1)) then frg-tick-invalid(policy, state, sample) else if not(eq(frg-state-valid?(state), 1)) then frg-tick-state-invalid(policy, state, sample) else if eq(frg-sample-fresh?(policy, sample), 1) then frg-tick-current(policy, state, sample) else frg-tick-missing(policy, state, sample);
+
+        // A CPU scheduling offer is honest about its scope and carries no
+        // claim that the host accepted it or that Metal priority changed.
+        def frg-cpu-schedule-offer(policy) = list("cpu-schedule-offer-v1", frg-cpu-nice(policy), frg-cpu-qos(policy), "cpu-workers-only", "host-ack-required", "metal-priority-unsupported");
+
+        // Predicted-cost work quantum and measured current background use.
+        def frg-quantum(id, cpuCost, gpuCost, memoryCost, needsMetal) = list("form-resource-quantum-v1", id, cpuCost, gpuCost, memoryCost, needsMetal);
+        def frg-quantum-id(quantum) = nth(quantum, 1);
+        def frg-quantum-cpu(quantum) = nth(quantum, 2);
+        def frg-quantum-gpu(quantum) = nth(quantum, 3);
+        def frg-quantum-memory(quantum) = nth(quantum, 4);
+        def frg-quantum-metal(quantum) = nth(quantum, 5);
+        def frg-usage(cpu, gpu, memory) = list("form-resource-usage-v1", cpu, gpu, memory);
+        def frg-usage-cpu(usage) = nth(usage, 1);
+        def frg-usage-gpu(usage) = nth(usage, 2);
+        def frg-usage-memory(usage) = nth(usage, 3);
+        def frg-quantum-shape?(quantum) = if nothing?(quantum) then 0 else if not(eq(len(quantum), 6)) then 0 else if not(str_eq(head(quantum), "form-resource-quantum-v1")) then 0 else 1;
+        def frg-usage-shape?(usage) = if nothing?(usage) then 0 else if not(eq(len(usage), 4)) then 0 else if not(str_eq(head(usage), "form-resource-usage-v1")) then 0 else 1;
+        def frg-quantum-current?(policy, quantum) = if not(eq(frg-quantum-shape?(quantum), 1)) then 0 else if and(eq(frg-signal-nonnegative?(policy, frg-quantum-cpu(quantum)), 1), and(eq(frg-signal-nonnegative?(policy, frg-quantum-gpu(quantum)), 1), and(eq(frg-signal-nonnegative?(policy, frg-quantum-memory(quantum)), 1), eq(frg-signal-nonnegative?(policy, frg-quantum-metal(quantum)), 1)))) then 1 else 0;
+        def frg-usage-current?(policy, usage) = if not(eq(frg-usage-shape?(usage), 1)) then 0 else if and(eq(frg-signal-nonnegative?(policy, frg-usage-cpu(usage)), 1), and(eq(frg-signal-nonnegative?(policy, frg-usage-gpu(usage)), 1), eq(frg-signal-nonnegative?(policy, frg-usage-memory(usage)), 1))) then 1 else 0;
+        def frg-quantum-exceeds-target?(decision, quantum) = if gt(frg-signal-value(frg-quantum-cpu(quantum)), frg-decision-cpu-target(decision)) then 1 else if gt(frg-signal-value(frg-quantum-gpu(quantum)), frg-decision-gpu-target(decision)) then 1 else if gt(frg-signal-value(frg-quantum-memory(quantum)), frg-decision-memory-target(decision)) then 1 else 0;
+        def frg-quantum-fits-grant?(decision, quantum, usage) = if le(add(frg-signal-value(frg-usage-cpu(usage)), frg-signal-value(frg-quantum-cpu(quantum))), frg-decision-cpu(decision)) then if le(add(frg-signal-value(frg-usage-gpu(usage)), frg-signal-value(frg-quantum-gpu(quantum))), frg-decision-gpu(decision)) then if le(add(frg-signal-value(frg-usage-memory(usage)), frg-signal-value(frg-quantum-memory(quantum))), frg-decision-memory(decision)) then 1 else 0 else 0 else 0;
+        // One fixed path is the cross-process Metal singleton.  On fkwu the
+        // host_dir_mkdir door is one atomic mkdir: 1 means this caller created
+        // the directory and 0 means collision/failure.  It is intentionally
+        // not the mkdir-p compatibility interpretation used by proof siblings.
+        def frg-metal-slot-path() = "/tmp/form-resource-governor-metal-slot.v2";
+        def frg-metal-slot-owner-path() = str_concat(frg-metal-slot-path(), "/owner");
+        def frg-metal-owner-text(permit) = str_concat("schema=form-resource-metal-owner-v2\npermit=", str_concat(frg-permit-id(permit), str_concat("\npublisher=", str_concat(frg-permit-publisher(permit), str_concat("\npid=", str_concat(int_to_str(frg-provenance-pid(frg-permit-provenance(permit))), str_concat("\nstarted=", str_concat(int_to_str(frg-provenance-started(frg-permit-provenance(permit))), str_concat("\nincarnation=", str_concat(frg-permit-incarnation(permit), str_concat("\nsequence=", str_concat(int_to_str(frg-permit-sequence(permit)), str_concat("\nobserved=", str_concat(int_to_str(frg-permit-observed(permit)), str_concat("\nsource=", str_concat(fgov2-provenance-source(frg-permit-provenance(permit)), "\n"))))))))))))))));
+        def frg-metal-slot-observation(status, reason, path, ownerText) = list("form-resource-metal-slot-observation-v2", status, reason, path, ownerText);
+        def frg-metal-slot-observation-status(observation) = nth(observation, 1);
+        def frg-metal-slot-observation-reason(observation) = nth(observation, 2);
+        def frg-metal-slot-observe-live(permit, nowEpoch, maxAge) = if not(eq(frg-permit-open?(permit), 1)) then frg-metal-slot-observation("refused", "permit-not-open", frg-metal-slot-path(), "") else if eq(host_path_exists(frg-metal-slot-path()), 0) then frg-metal-slot-observation("absent", "slot-unclaimed", frg-metal-slot-path(), "") else frg-metal-slot-observe-owner-live(permit, nowEpoch, maxAge, read_file(frg-metal-slot-owner-path()));
+        def frg-metal-slot-observe-owner-live(permit, nowEpoch, maxAge, ownerText) = if eq(str_len(ownerText), 0) then frg-metal-slot-observation("occupied-unknown", "owner-record-absent-or-unreadable", frg-metal-slot-path(), ownerText) else if not(str_eq(ownerText, frg-metal-owner-text(permit))) then frg-metal-slot-observation("occupied-unknown", "owner-record-does-not-match-requester", frg-metal-slot-path(), ownerText) else if gt(sub(nowEpoch, frg-permit-observed(permit)), maxAge) then frg-metal-slot-observation("occupied-stale", "matching-owner-observation-expired", frg-metal-slot-path(), ownerText) else frg-metal-slot-observation("occupied-current", "matching-owner-current", frg-metal-slot-path(), ownerText);
+
+        def frg-metal-slot-result(status, reason, permit, made, wrote) = list("form-resource-metal-slot-result-v2", status, reason, permit, made, wrote);
+        def frg-metal-slot-result-status(result) = nth(result, 1);
+        def frg-metal-slot-result-reason(result) = nth(result, 2);
+        def frg-metal-slot-result-permit(result) = nth(result, 3);
+        def frg-metal-slot-result-made(result) = nth(result, 4);
+        def frg-metal-slot-result-wrote(result) = nth(result, 5);
+        def frg-metal-reserved-permit(openPermit, ownerText) = frg-metal-permit(frg-permit-id(openPermit), frg-permit-tick(openPermit), "reserved", frg-permit-provenance(openPermit), 0, list(), frg-metal-slot-path(), ownerText);
+        def frg-metal-slot-result-acquired?(result) = if nothing?(result) then 0 else if not(eq(len(result), 6)) then 0 else if not(str_eq(head(result), "form-resource-metal-slot-result-v2")) then 0 else if not(str_eq(frg-metal-slot-result-status(result), "acquired")) then 0 else if not(eq(frg-metal-slot-result-made(result), 1)) then 0 else if not(eq(frg-permit-valid?(frg-metal-slot-result-permit(result)), 1)) then 0 else if not(eq(frg-permit-reserved?(frg-metal-slot-result-permit(result)), 1)) then 0 else eq(frg-metal-slot-result-wrote(result), str_len(frg-permit-owner-text(frg-metal-slot-result-permit(result))));
+        def frg-metal-slot-acquire-live(openPermit) = if not(eq(frg-permit-valid?(openPermit), 1)) then frg-metal-slot-result("refused", "permit-invalid", list(), 0, 0) else if not(eq(frg-permit-open?(openPermit), 1)) then frg-metal-slot-result("refused", "permit-not-open", openPermit, 0, 0) else frg-metal-slot-acquire-created-live(openPermit, frg-metal-owner-text(openPermit), host_dir_mkdir(frg-metal-slot-path()));
+        def frg-metal-slot-acquire-created-live(openPermit, ownerText, made) = if not(eq(made, 1)) then frg-metal-slot-result("occupied", "atomic-fixed-path-collision-fail-closed", openPermit, made, 0) else frg-metal-slot-acquire-write-live(openPermit, ownerText, write_file(frg-metal-slot-owner-path(), ownerText));
+        def frg-metal-slot-acquire-write-live(openPermit, ownerText, wrote) = if not(eq(wrote, str_len(ownerText))) then frg-metal-slot-result("error", "owner-write-incomplete-slot-left-closed", openPermit, 1, wrote) else frg-metal-slot-result("acquired", "atomic-fixed-path-created-and-owned", frg-metal-reserved-permit(openPermit, ownerText), 1, wrote);
+
+        // A slot result is admitted once. Replaying the same result against
+        // the reserved state is refused; copied booleans cannot reserve Metal.
+        def frg-permit-consume-result(status, reason, permit, nextState, slotResult) = list("form-resource-permit-consume-v2", status, reason, permit, nextState, slotResult);
+        def frg-permit-consume-status(result) = nth(result, 1);
+        def frg-permit-consume-reason(result) = nth(result, 2);
+        def frg-permit-consume-permit(result) = nth(result, 3);
+        def frg-permit-consume-next-state(result) = nth(result, 4);
+        def frg-permit-consume-slot-result(result) = nth(result, 5);
+        def frg-consume-metal-permit(policy, state, decision, quantum, slotResult) = if not(eq(frg-quantum-current?(policy, quantum), 1)) then frg-permit-consume-result("refused", "quantum-not-current", list(), state, slotResult) else if le(frg-signal-value(frg-quantum-metal(quantum)), 0) then frg-permit-consume-result("refused", "quantum-does-not-need-metal", list(), state, slotResult) else if not(eq(frg-permit-open?(frg-decision-permit(decision)), 1)) then frg-permit-consume-result("refused", "no-open-permit", list(), state, slotResult) else if not(eq(frg-permit-open?(frg-state-permit(state)), 1)) then frg-permit-consume-result("refused", "permit-replayed-or-already-reserved", frg-decision-permit(decision), state, slotResult) else if not(eq(frg-permit-same?(frg-state-permit(state), frg-decision-permit(decision)), 1)) then frg-permit-consume-result("refused", "permit-state-mismatch", frg-decision-permit(decision), state, slotResult) else if not(eq(frg-metal-slot-result-acquired?(slotResult), 1)) then frg-permit-consume-result("refused", "atomic-slot-not-acquired", frg-decision-permit(decision), state, slotResult) else if not(eq(frg-permit-same?(frg-metal-slot-result-permit(slotResult), frg-decision-permit(decision)), 1)) then frg-permit-consume-result("refused", "slot-owner-permit-mismatch", frg-decision-permit(decision), state, slotResult) else frg-consume-metal-permit-admit(state, frg-metal-slot-result-permit(slotResult), slotResult);
+        def frg-consume-metal-permit-admit(state, reserved, slotResult) {
+            let nextState = frg-state-with-permit(frg-state-cpu(state), frg-state-gpu(state), frg-state-memory(state), frg-state-clean(state), frg-state-tick(state), reserved);
+            frg-permit-consume-result("admitted", "atomic-singleton-reserved", reserved, nextState, slotResult);
+        }
+        def frg-consume-metal-permit-live(policy, state, decision, quantum) = frg-consume-metal-permit(policy, state, decision, quantum, frg-metal-slot-acquire-live(frg-decision-permit(decision)));
+
+        // A submit receipt names the exact Metal command-buffer handle.  Its
+        // publisher, complete process lifetime, sequence, observation epoch,
+        // permit and quantum are retained rather than projected to a boolean.
+        def frg-submit-receipt(status, handle, quantumId, permitId, provenance) = list("form-resource-metal-submit-receipt-v2", status, handle, quantumId, permitId, provenance);
+        def frg-submit-status(receipt) = nth(receipt, 1);
+        def frg-submit-handle(receipt) = nth(receipt, 2);
+        def frg-submit-quantum-id(receipt) = nth(receipt, 3);
+        def frg-submit-permit-id(receipt) = nth(receipt, 4);
+        def frg-submit-provenance(receipt) = nth(receipt, 5);
+        def frg-submit-receipt?(receipt) = if nothing?(receipt) then 0 else if not(eq(len(receipt), 6)) then 0 else if not(str_eq(head(receipt), "form-resource-metal-submit-receipt-v2")) then 0 else if not(str_eq(frg-submit-status(receipt), "submitted")) then 0 else if le(frg-submit-handle(receipt), 0) then 0 else if eq(str_len(frg-submit-quantum-id(receipt)), 0) then 0 else if eq(str_len(frg-submit-permit-id(receipt)), 0) then 0 else frg-provenance-current?(frg-submit-provenance(receipt));
+        def frg-submit-correlated?(reserved, quantum, receipt) = if not(eq(frg-permit-reserved?(reserved), 1)) then 0 else if not(eq(frg-submit-receipt?(receipt), 1)) then 0 else if not(str_eq(frg-submit-quantum-id(receipt), frg-quantum-id(quantum))) then 0 else if not(str_eq(frg-submit-permit-id(receipt), frg-permit-id(reserved))) then 0 else frg-provenance-advances?(frg-permit-provenance(reserved), frg-submit-provenance(receipt));
+        def frg-submitted-permit(reserved, receipt) = frg-metal-permit(frg-permit-id(reserved), frg-permit-tick(reserved), "submitted", frg-permit-provenance(reserved), frg-submit-handle(receipt), frg-submit-provenance(receipt), frg-permit-slot-path(reserved), frg-permit-owner-text(reserved));
+        def frg-submit-bind-result(status, reason, permit, nextState, receipt) = list("form-resource-metal-submit-bind-v2", status, reason, permit, nextState, receipt);
+        def frg-submit-bind-status(result) = nth(result, 1);
+        def frg-submit-bind-reason(result) = nth(result, 2);
+        def frg-submit-bind-permit(result) = nth(result, 3);
+        def frg-submit-bind-next-state(result) = nth(result, 4);
+        def frg-submit-bind-receipt(result) = nth(result, 5);
+        def frg-submit-bind-admitted?(result) = if nothing?(result) then 0 else if not(eq(len(result), 6)) then 0 else if not(str_eq(head(result), "form-resource-metal-submit-bind-v2")) then 0 else if not(str_eq(frg-submit-bind-status(result), "admitted")) then 0 else frg-permit-submitted?(frg-submit-bind-permit(result));
+        def frg-submit-decision-current?(decision) = if not(eq(frg-decision-valid?(decision), 1)) then 0 else if str_eq(frg-decision-reason(decision), "additive-recovery") then 1 else if str_eq(frg-decision-reason(decision), "half-backoff") then 1 else if str_eq(frg-decision-reason(decision), "stop-backoff") then 1 else 0;
+        def frg-reserved-state-matches-decision?(decision, state) = if not(eq(frg-state-valid?(state), 1)) then 0 else if not(eq(frg-permit-reserved?(frg-state-permit(state)), 1)) then 0 else if not(eq(frg-permit-reserved?(frg-decision-permit(decision)), 1)) then 0 else if value_eq(state, frg-decision-next-state(decision)) then 1 else 0;
+        def frg-bind-metal-submit(decision, state, consumeResult, quantum, receipt) = if not(eq(frg-submit-decision-current?(decision), 1)) then frg-submit-bind-result("refused", "latest-decision-not-current", list(), state, receipt) else if not(eq(frg-reserved-state-matches-decision?(decision, state), 1)) then frg-submit-bind-result("refused", "state-does-not-match-current-decision", list(), state, receipt) else if not(str_eq(frg-permit-consume-status(consumeResult), "admitted")) then frg-submit-bind-result("refused", "reservation-not-admitted", list(), state, receipt) else if not(eq(frg-permit-same?(frg-state-permit(state), frg-permit-consume-permit(consumeResult)), 1)) then frg-submit-bind-result("refused", "reservation-state-mismatch", list(), state, receipt) else if not(eq(frg-submit-correlated?(frg-state-permit(state), quantum, receipt), 1)) then frg-submit-bind-result("refused", "submit-receipt-uncorrelated", list(), state, receipt) else frg-bind-metal-submit-admit(state, receipt);
+        def frg-bind-metal-submit-admit(state, receipt) {
+            let submitted = frg-submitted-permit(frg-state-permit(state), receipt);
+            let nextState = frg-state-with-permit(frg-state-cpu(state), frg-state-gpu(state), frg-state-memory(state), frg-state-clean(state), frg-state-tick(state), submitted);
+            frg-submit-bind-result("admitted", "exact-command-buffer-submitted", submitted, nextState, receipt);
+        }
+
+        // Release is exact-owner only. Unknown, mismatched, or stale records
+        // remain in place and block all contenders. A second release cannot
+        // select the same slot because the owner record is already absent.
+        def frg-metal-slot-release-result(status, reason, ownerRemoved, dirRemoved) = list("form-resource-metal-slot-release-v2", status, reason, ownerRemoved, dirRemoved);
+        def frg-metal-slot-release-status(result) = nth(result, 1);
+        def frg-metal-slot-release-live(permit) = if not(eq(frg-permit-active?(permit), 1)) then frg-metal-slot-release-result("refused", "permit-not-owner-state", -1, -1) else if not(str_eq(read_file(frg-metal-slot-owner-path()), frg-permit-owner-text(permit))) then frg-metal-slot-release-result("refused", "owner-absent-stale-or-mismatched", -1, -1) else frg-metal-slot-release-owner-live(host_path_remove(frg-metal-slot-owner-path()));
+        def frg-metal-slot-release-owner-live(ownerRemoved) = if not(eq(ownerRemoved, 0)) then frg-metal-slot-release-result("error", "owner-remove-failed-slot-left-closed", ownerRemoved, -1) else frg-metal-slot-release-dir-live(ownerRemoved, host_dir_rmdir(frg-metal-slot-path()));
+        def frg-metal-slot-release-dir-live(ownerRemoved, dirRemoved) = if eq(dirRemoved, 0) then frg-metal-slot-release-result("released", "exact-owner-released", ownerRemoved, dirRemoved) else frg-metal-slot-release-result("error", "directory-remove-failed-slot-left-closed", ownerRemoved, dirRemoved);
+
+        // Completion binds back to the exact submitted handle and to the
+        // submit sequence+epoch retained in the submitted permit.
+        def frg-worker-outcome(status, reason, source, provenance, handle, quantumId, permitId, submitSequence, submitObservedEpoch, completionSequence) = list("form-resource-worker-outcome-v2", status, reason, source, provenance, handle, quantumId, permitId, submitSequence, submitObservedEpoch, completionSequence);
+        def frg-worker-status(outcome) = nth(outcome, 1);
+        def frg-worker-reason(outcome) = nth(outcome, 2);
+        def frg-worker-source(outcome) = nth(outcome, 3);
+        def frg-worker-provenance(outcome) = nth(outcome, 4);
+        def frg-worker-handle(outcome) = nth(outcome, 5);
+        def frg-worker-quantum-id(outcome) = nth(outcome, 6);
+        def frg-worker-permit-id(outcome) = nth(outcome, 7);
+        def frg-worker-submit-sequence(outcome) = nth(outcome, 8);
+        def frg-worker-submit-observed(outcome) = nth(outcome, 9);
+        def frg-worker-completion-sequence(outcome) = nth(outcome, 10);
+        def frg-worker-status-known?(outcome) = if str_eq(frg-worker-status(outcome), "done") then 1 else if str_eq(frg-worker-status(outcome), "yield") then 1 else if str_eq(frg-worker-status(outcome), "refuse") then 1 else 0;
+        def frg-worker-outcome?(outcome) = if nothing?(outcome) then 0 else if not(eq(len(outcome), 11)) then 0 else if not(str_eq(head(outcome), "form-resource-worker-outcome-v2")) then 0 else if not(eq(frg-worker-status-known?(outcome), 1)) then 0 else if eq(str_len(frg-worker-reason(outcome)), 0) then 0 else if eq(str_len(frg-worker-source(outcome)), 0) then 0 else if not(eq(frg-provenance-current?(frg-worker-provenance(outcome)), 1)) then 0 else if lt(frg-worker-submit-sequence(outcome), 0) then 0 else if lt(frg-worker-submit-observed(outcome), 0) then 0 else if lt(frg-worker-completion-sequence(outcome), 0) then 0 else if str_eq(frg-worker-status(outcome), "done") then if gt(frg-worker-handle(outcome), 0) then 1 else 0 else if ge(frg-worker-handle(outcome), 0) then 1 else 0;
+        def frg-worker-metal-correlated?(submitBind, quantum, outcome) = if not(eq(frg-submit-bind-admitted?(submitBind), 1)) then 0 else frg-worker-metal-correlated-current?(submitBind, quantum, outcome);
+        def frg-worker-metal-correlated-current?(submitBind, quantum, outcome) {
+            let submitted = frg-submit-bind-permit(submitBind);
+            let submitProvenance = frg-permit-submit-provenance(submitted);
+            if not(str_eq(frg-worker-quantum-id(outcome), frg-quantum-id(quantum))) then 0 else if not(str_eq(frg-worker-permit-id(outcome), frg-permit-id(submitted))) then 0 else if not(eq(frg-worker-handle(outcome), frg-permit-command-handle(submitted))) then 0 else if not(eq(frg-worker-submit-sequence(outcome), frg-provenance-sequence-value(submitProvenance))) then 0 else if not(eq(frg-worker-submit-observed(outcome), frg-provenance-observed-value(submitProvenance))) then 0 else if not(eq(frg-provenance-advances?(submitProvenance, frg-worker-provenance(outcome)), 1)) then 0 else eq(frg-provenance-sequence-value(frg-worker-provenance(outcome)), frg-worker-completion-sequence(outcome));
+        }
+        def frg-worker-correlated?(submitBind, quantum, outcome) = if not(eq(frg-worker-outcome?(outcome), 1)) then 0 else if not(str_eq(frg-worker-quantum-id(outcome), frg-quantum-id(quantum))) then 0 else if gt(frg-signal-value(frg-quantum-metal(quantum)), 0) then frg-worker-metal-correlated?(submitBind, quantum, outcome) else str_eq(frg-worker-permit-id(outcome), "");
+        def frg-step-result(status, id, reason, frameMs, nextState) = list("form-resource-step-v2", status, id, reason, frameMs, nextState);
+        def frg-step-status(result) = nth(result, 1);
+        def frg-step-reason(result) = nth(result, 3);
+        def frg-step-next-state(result) = nth(result, 5);
+        def frg-step-transition-state(decision, submitBind, quantum, workerOutcome) = if le(frg-signal-value(frg-quantum-metal(quantum)), 0) then frg-decision-next-state(decision) else if str_eq(frg-worker-status(workerOutcome), "done") then frg-state-clear-permit(frg-submit-bind-next-state(submitBind)) else frg-submit-bind-next-state(submitBind);
+        def frg-step-current(policy, decision, submitBind, quantum, usage, workerOutcome) = if str_eq(frg-decision-reason(decision), "typed-signal-not-current") then frg-step-result("yield", frg-quantum-id(quantum), "typed-signal-not-current", frg-decision-frame(decision), frg-decision-next-state(decision)) else if eq(frg-quantum-exceeds-target?(decision, quantum), 1) then frg-step-result("refuse", frg-quantum-id(quantum), "quantum-exceeds-bounded-target", frg-decision-frame(decision), frg-decision-next-state(decision)) else if not(eq(frg-quantum-fits-grant?(decision, quantum, usage), 1)) then frg-step-result("yield", frg-quantum-id(quantum), "current-grant-insufficient", frg-decision-frame(decision), frg-decision-next-state(decision)) else if and(gt(frg-signal-value(frg-quantum-metal(quantum)), 0), not(eq(frg-submit-bind-admitted?(submitBind), 1))) then frg-step-result("refuse", frg-quantum-id(quantum), "metal-submit-not-correlated", frg-decision-frame(decision), frg-decision-next-state(decision)) else if not(eq(frg-worker-correlated?(submitBind, quantum, workerOutcome), 1)) then frg-step-result("refuse", frg-quantum-id(quantum), "worker-outcome-uncorrelated", frg-decision-frame(decision), frg-decision-next-state(decision)) else frg-step-result(frg-worker-status(workerOutcome), frg-quantum-id(quantum), if str_eq(frg-worker-status(workerOutcome), "done") then "observed-worker-completion" else "worker-bounded-outcome", frg-decision-frame(decision), frg-step-transition-state(decision, submitBind, quantum, workerOutcome));
+        def frg-safe-quantum-id(quantum) = if eq(frg-quantum-shape?(quantum), 1) then frg-quantum-id(quantum) else "unidentified";
+        def frg-step-invalid-decision() = frg-step-result("refuse", "unidentified", "decision-invalid", frg-active-ms(frg-default-policy()), frg-initial-state());
+        def frg-step(policy, decision, submitBind, quantum, usage, workerOutcome) = if not(eq(frg-policy-valid?(policy), 1)) then frg-step-invalid-decision() else if not(eq(frg-decision-valid?(decision), 1)) then frg-step-invalid-decision() else if not(eq(frg-quantum-current?(policy, quantum), 1)) then frg-step-result("refuse", frg-safe-quantum-id(quantum), "predicted-cost-not-current", frg-decision-frame(decision), frg-decision-next-state(decision)) else if not(eq(frg-usage-current?(policy, usage), 1)) then frg-step-result("refuse", frg-safe-quantum-id(quantum), "usage-not-current", frg-decision-frame(decision), frg-decision-next-state(decision)) else frg-step-current(policy, decision, submitBind, quantum, usage, workerOutcome);
+
+        // Every physical release quantity is a current typed observation.
+        // Grain support is derived below and cannot be granted by a caller.
+        def frg-release-unit(id, grain, bytes, uses, lastUse, active, handle, note) = list("form-resource-release-unit-v1", id, grain, bytes, uses, lastUse, active, handle, note);
+        def frg-release-id(unit) = nth(unit, 1);
+        def frg-release-grain(unit) = nth(unit, 2);
+        def frg-release-bytes(unit) = nth(unit, 3);
+        def frg-release-uses(unit) = nth(unit, 4);
+        def frg-release-last(unit) = nth(unit, 5);
+        def frg-release-active?(unit) = nth(unit, 6);
+        def frg-release-handle(unit) = nth(unit, 7);
+        def frg-release-note(unit) = nth(unit, 8);
+        def frg-release-byte-value(unit) = frg-signal-value(frg-release-bytes(unit));
+        def frg-release-uses-value(unit) = frg-signal-value(frg-release-uses(unit));
+        def frg-release-last-value(unit) = frg-signal-value(frg-release-last(unit));
+        def frg-release-active-value(unit) = frg-signal-value(frg-release-active?(unit));
+        def frg-release-handle-value(unit) = frg-signal-value(frg-release-handle(unit));
+        def frg-release-rank(grain) = if str_eq(grain, "jit-native-page") then 0 else if str_eq(grain, "whole-kv-substate") then 1 else if str_eq(grain, "inactive-whole-model") then 2 else 3;
+        def frg-release-grain-supported?(grain) = if lt(frg-release-rank(grain), 3) then 1 else 0;
+        def frg-release-shape?(unit) = if nothing?(unit) then 0 else if not(eq(len(unit), 9)) then 0 else if not(str_eq(head(unit), "form-resource-release-unit-v1")) then 0 else 1;
+        def frg-release-current?(policy, unit) = if not(eq(frg-release-shape?(unit), 1)) then 0 else if not(eq(frg-signal-nonnegative?(policy, frg-release-bytes(unit)), 1)) then 0 else if not(eq(frg-signal-nonnegative?(policy, frg-release-uses(unit)), 1)) then 0 else if not(eq(frg-signal-nonnegative?(policy, frg-release-last(unit)), 1)) then 0 else if not(eq(frg-signal-nonnegative?(policy, frg-release-active?(unit)), 1)) then 0 else if not(eq(frg-signal-nonnegative?(policy, frg-release-handle(unit)), 1)) then 0 else 1;
+        def frg-release-valid?(policy, unit) = if not(eq(frg-release-current?(policy, unit), 1)) then 0 else if not(eq(frg-release-grain-supported?(frg-release-grain(unit)), 1)) then 0 else if not(eq(frg-release-active-value(unit), 0)) then 0 else if le(frg-release-byte-value(unit), 0) then 0 else if le(frg-release-handle-value(unit), 0) then 0 else 1;
+        def frg-release-earlier?(a, b) = if lt(frg-release-rank(frg-release-grain(a)), frg-release-rank(frg-release-grain(b))) then 1 else if gt(frg-release-rank(frg-release-grain(a)), frg-release-rank(frg-release-grain(b))) then 0 else if lt(frg-release-uses-value(a), frg-release-uses-value(b)) then 1 else if gt(frg-release-uses-value(a), frg-release-uses-value(b)) then 0 else if le(frg-release-last-value(a), frg-release-last-value(b)) then 1 else 0;
+        def frg-release-pick(policy, candidate, best) = if not(eq(frg-release-valid?(policy, candidate), 1)) then best else if eq(len(best), 0) then candidate else if eq(frg-release-earlier?(candidate, best), 1) then candidate else best;
+        def frg-release-next-go(policy, units, best) = if eq(len(units), 0) then best else frg-release-next-go(policy, tail(units), frg-release-pick(policy, head(units), best));
+        def frg-release-next(policy, units) = frg-release-next-go(policy, units, list());
+        def frg-release-exact?(a, b) = if and(str_eq(frg-release-id(a), frg-release-id(b)), eq(frg-release-handle-value(a), frg-release-handle-value(b))) then 1 else 0;
+        def frg-release-remove(target, units) = if eq(len(units), 0) then list() else if eq(frg-release-exact?(target, head(units)), 1) then tail(units) else cons(head(units), frg-release-remove(target, tail(units)));
+        def frg-release-identity-row?(policy, unit) = if not(eq(frg-release-current?(policy, unit), 1)) then 0 else if le(frg-release-handle-value(unit), 0) then 0 else 1;
+        def frg-release-identity-collides?(policy, candidate, units) = if eq(len(units), 0) then 0 else if not(eq(frg-release-identity-row?(policy, head(units)), 1)) then frg-release-identity-collides?(policy, candidate, tail(units)) else if str_eq(frg-release-id(candidate), frg-release-id(head(units))) then 1 else if eq(frg-release-handle-value(candidate), frg-release-handle-value(head(units))) then 1 else frg-release-identity-collides?(policy, candidate, tail(units));
+        def frg-release-unique?(policy, units) = if eq(len(units), 0) then 1 else if not(eq(frg-release-identity-row?(policy, head(units)), 1)) then frg-release-unique?(policy, tail(units)) else if eq(frg-release-identity-collides?(policy, head(units), tail(units)), 1) then 0 else frg-release-unique?(policy, tail(units));
+        def frg-release-plan-next(policy, units, required, reclaimed, selected) {
+            let next = frg-release-next(policy, units);
+            if eq(len(next), 0) then list("form-resource-release-plan-v1", "blocked", required, reclaimed, selected, "supported-grain-capacity-exhausted") else frg-release-plan-go(policy, frg-release-remove(next, units), required, add(reclaimed, frg-release-byte-value(next)), append(selected, list(next)));
+        }
+        def frg-release-plan-go(policy, units, required, reclaimed, selected) = if ge(reclaimed, required) then list("form-resource-release-plan-v1", "planned", required, reclaimed, selected, "measured-pressure") else frg-release-plan-next(policy, units, required, reclaimed, selected);
+        def frg-pressure-release-plan(policy, pressure, required, units) = if not(eq(frg-signal-fresh?(policy, pressure), 1)) then list("form-resource-release-plan-v1", "refused", 0, 0, list(), "pressure-not-current") else if not(eq(frg-signal-nonnegative?(policy, required), 1)) then list("form-resource-release-plan-v1", "refused", 0, 0, list(), "required-bytes-not-current") else if le(frg-signal-value(pressure), 0) then list("form-resource-release-plan-v1", "none", frg-signal-value(required), 0, list(), "measured-no-pressure") else if le(frg-signal-value(required), 0) then list("form-resource-release-plan-v1", "none", frg-signal-value(required), 0, list(), "no-reclaim-requested") else if not(eq(frg-release-unique?(policy, units), 1)) then list("form-resource-release-plan-v1", "refused", frg-signal-value(required), 0, list(), "duplicate-id-or-handle") else frg-release-plan-go(policy, units, frg-signal-value(required), 0, list());
+        def frg-release-plan-status(plan) = nth(plan, 1);
+        def frg-release-plan-selected(plan) = nth(plan, 4);
+        def frg-release-plan-reason(plan) = nth(plan, 5);
+        // Capability rows describe support; they are not physical candidates
+        // and carry no invented byte count or carrier handle.
+        def frg-release-capability(grain, rank, supported, requirement) = list("form-resource-release-capability-v1", grain, rank, supported, requirement);
+        def frg-release-capability-grain(capability) = nth(capability, 1);
+        def frg-release-capability-rank(capability) = nth(capability, 2);
+        def frg-release-capability-supported?(capability) = nth(capability, 3);
+        def frg-release-capability-requirement(capability) = nth(capability, 4);
+        def frg-release-capabilities() = list(frg-release-capability("jit-native-page", 0, 1, "whole specialization page handle"), frg-release-capability("whole-kv-substate", 1, 1, "inactive whole-state handle"), frg-release-capability("inactive-whole-model", 2, 1, "inactive model handle"), frg-release-capability("packed-expert", 3, 0, "independently mapped expert handle not present"), frg-release-capability("transformer-layer", 3, 0, "token-required layer release unsupported"), frg-release-capability("partial-kv", 3, 0, "partial-state handle and coherence proof not present"));
+    }
+    0;
+}
