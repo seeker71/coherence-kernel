@@ -2087,13 +2087,27 @@ func (k *Kernel) registerNatives() {
 		if len(args) > 1 {
 			cmd.Stdin = strings.NewReader(argStr(args, 1))
 		}
-		out, _ := cmd.CombinedOutput()
+		out, err := cmd.CombinedOutput()
+		// Launch failure (fork starvation — sh never ran) answers the axiom-1
+		// nothing (the same null head-of-empty carries), never "": "" means the
+		// command RAN and spoke zero bytes. An *exec.ExitError is a process that
+		// DID run and exited nonzero — its output still crosses. Mirrors
+		// fk_host_exec in runtime/fkwu-uni.c (witnessed 2026-08-27, PR #542).
+		if err != nil {
+			if _, ran := err.(*exec.ExitError); !ran {
+				return Value{Kind: VNull}
+			}
+		}
 		return Value{Kind: VStr, Str: string(out)}
 	})
 	k.registerNative("host-read", catMethod(), func(_ *Kernel, args []Value) Value {
 		b, err := os.ReadFile(argStr(args, 0))
+		// A file that never was answers nothing, never "" — "" means the file
+		// EXISTS and holds zero bytes. This kernel's own read_file already
+		// answered VNull here; host-read was the lone masked read organ left
+		// (2026-08-27). Callers name the absence with nothing? before measuring.
 		if err != nil {
-			return Value{Kind: VStr, Str: ""}
+			return Value{Kind: VNull}
 		}
 		return Value{Kind: VStr, Str: string(b)}
 	})
@@ -2263,8 +2277,12 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("str_line_at", catAccess(), func(_ *Kernel, args []Value) Value {
 		s := argStr(args, 0)
 		idx := int(args[1].AsInt())
+		// Out of range answers nothing (2026-08-27): a line that ISN'T is not
+		// an empty line — "" had made a past-end read indistinguishable from a
+		// blank line, so scans stopped early and dropped rows. Siblings
+		// str_byte_at/char_at die loud here; the null carries the absence.
 		if idx < 0 || idx > len(s) {
-			return Value{Kind: VStr, Str: ""}
+			return Value{Kind: VNull}
 		}
 		start := idx
 		for start > 0 && s[start-1] != '\n' {
@@ -3417,11 +3435,18 @@ func (k *Kernel) registerNatives() {
 		}
 		f, err := os.Open(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil {
-			return Value{Kind: VStr, Str: ""}
+			// a file that never was answers nothing, matching read_file
+			return Value{Kind: VNull}
 		}
 		defer f.Close()
 		buf := make([]byte, length)
-		n, _ := f.ReadAt(buf, offset)
+		n, rerr := f.ReadAt(buf, offset)
+		// io.EOF with a short count is an honest slice past the end; any other
+		// error measured no trustworthy byte — nothing, never a silent
+		// truncation handed back as the slice (2026-08-27).
+		if rerr != nil && rerr != io.EOF {
+			return Value{Kind: VNull}
+		}
 		return Value{Kind: VStr, Str: string(buf[:n])}
 	}
 	k.registerNative("host_file_read_slice", catCall(), readFileSliceNative)
@@ -3580,8 +3605,14 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("socket_recv", catCall(), func(_ *Kernel, args []Value) Value {
 		v := socketLookup(args[0].AsInt())
 		c, ok := v.(net.Conn)
+		// A dead handle or a read ERROR answers nothing — reading either as ""
+		// let a mid-stream failure pass as end-of-response, handing back a
+		// truncated reply as complete. "" is reserved for asked-for-zero and
+		// the peer's orderly close; bytes that arrived WITH io.EOF still cross
+		// (the old code dropped them). Mirrors fk_socket_recv_native
+		// (2026-08-27).
 		if !ok {
-			return Value{Kind: VStr, Str: ""}
+			return Value{Kind: VNull}
 		}
 		max := args[1].AsInt()
 		if max <= 0 {
@@ -3589,10 +3620,13 @@ func (k *Kernel) registerNatives() {
 		}
 		buf := make([]byte, max)
 		n, err := c.Read(buf)
-		if err != nil || n <= 0 {
+		if n > 0 {
+			return Value{Kind: VStr, Str: string(buf[:n])}
+		}
+		if err == io.EOF {
 			return Value{Kind: VStr, Str: ""}
 		}
-		return Value{Kind: VStr, Str: string(buf[:n])}
+		return Value{Kind: VNull}
 	})
 	k.registerNative("socket_close", catCall(), func(_ *Kernel, args []Value) Value {
 		h := args[0].AsInt()

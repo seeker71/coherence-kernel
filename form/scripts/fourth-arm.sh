@@ -109,6 +109,9 @@ FOURTH_SOURCE_COMPILER_CHAIN=(
     form-stdlib/engine-constants.fk
     form-stdlib/compiler-objects.fk
     form-stdlib/form-ontology-bp.fk
+    # source-categories joined 2026-08-27: form-ontology-loader's top-level
+    # fol-cat calls resolve here (mirror of the regen script's chain heal).
+    form-stdlib/form-ontology-source-categories.fk
     form-stdlib/form-ontology-loader.fk
     form-stdlib/line-grammar.fk
     form-stdlib/bmf-core.fk
@@ -337,7 +340,7 @@ fourth_recover_fresh_index() {
 # explicit source-text lens.  Content + compiler + proof-sibling bytes key the
 # cache, so a compiler or kernel change cannot reuse an older lowering.
 fourth_prepare_source_text() {
-    local src="$1" key cached out driver
+    local src="$1" key cached out driver lens_fkwu lens_rc lens_log
     mkdir -p "$FOURTH_SOURCE_TEXT_DIR"
     # fkwu FIRST, and the lens closure comes from the body's own `; preludes:`
     # graph -- the generated driver names ONE cell and fkwu's resolver walks the
@@ -346,21 +349,34 @@ fourth_prepare_source_text() {
     # was born in Form and this file's hand-held chain was never told). The
     # sibling lane keeps the explicit chain because the walkers do not read
     # preludes lines; it is the fallback, no longer the door.
-    if [[ -n "${FKWU:-}" && -x "${FKWU:-}" ]]; then
-        key="$(fourth_hash16 "$src" "${FOURTH_SOURCE_COMPILER_CHAIN[@]}")-$(fourth_raw_hash16 "$FKWU")"
+    # The lens driver needs a SOURCE-capable fkwu: FOURTH_SOURCE_FKWU is that
+    # named door. The fourth-cache FKWU is a table walker that cannot run
+    # source drivers — witnessed 2026-08-27: "malformed form table node count",
+    # exit 4, spoken to a stdout this branch used to discard, so the fkwu-first
+    # lane had never once run and the go chain silently carried everything.
+    # A fall-through must speak; the fallback stays, the silence does not.
+    lens_fkwu="${FOURTH_SOURCE_FKWU:-${FKWU:-}}"
+    if [[ -n "$lens_fkwu" && -x "$lens_fkwu" ]]; then
+        key="$(fourth_hash16 "$src" "${FOURTH_SOURCE_COMPILER_CHAIN[@]}")-$(fourth_raw_hash16 "$lens_fkwu")"
         cached="$FOURTH_SOURCE_TEXT_DIR/$key.fk"
         if [[ ! -s "$cached" ]]; then
             out="$(mktemp "$FOURTH_SOURCE_TEXT_DIR/.${key}.out.XXXXXX")"
             driver="$(mktemp "$FOURTH_SOURCE_TEXT_DIR/.${key}.driver.XXXXXX.fk")"
+            lens_log="$(mktemp "$FOURTH_SOURCE_TEXT_DIR/.${key}.log.XXXXXX")"
             {
                 printf '; generated lens driver -- the closure is the preludes graph.\n'
                 printf '; preludes: form-stdlib/source-compiler-text-lens.fk\n'
                 printf '(do (form-source-compile-file "%s" "%s") 0)\n' "$src" "$out"
             } > "$driver"
-            if "$FKWU" "$driver" >/dev/null 2>&1 && [[ -s "$out" ]]; then
+            lens_rc=0
+            "$lens_fkwu" "$driver" > "$lens_log" 2>&1 || lens_rc=$?
+            if [[ $lens_rc -eq 0 && -s "$out" ]]; then
                 mv -f "$out" "$cached"
+            else
+                printf '  source lens: fkwu fell through for %s (rc=%s): %s -- go chain carries\n' \
+                    "$src" "$lens_rc" "$(grep -v 'warning:' "$lens_log" | head -1)" >&2
             fi
-            rm -f "$out" "$driver" "${driver%.fk}.fkb" "${driver%.fk}.sym" "$driver.fkb" "$driver.sym" 2>/dev/null
+            rm -f "$out" "$driver" "$lens_log" "${driver%.fk}.fkb" "${driver%.fk}.sym" "$driver.fkb" "$driver.sym" 2>/dev/null
         fi
         if [[ -s "$cached" ]]; then
             printf '%s\n' "$cached"
@@ -378,6 +394,7 @@ fourth_prepare_source_text() {
             && [[ -s "$out" ]]; then
             mv -f "$out" "$cached"
         else
+            printf '  source lens: go chain also fell through for %s -- caller receives no lowered text\n' "$src" >&2
             rm -f "$out" "$driver"
             return 0
         fi
