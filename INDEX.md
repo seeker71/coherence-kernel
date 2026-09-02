@@ -4,7 +4,7 @@
 > wrote this by observing the body with the body's own organs; every number is
 > recomputed from the tissue it names, so this portrait cannot flatter — only go
 > stale, and re-running is what detects stale. Do not hand-edit: the next pulse
-> overwrites. Stamp (the body reading the host clock): 2026-07-17
+> overwrites. Stamp (the body reading the host clock): 2026-09-02
 
 This is the `index.md` of Karpathy's llm-wiki pattern, in the body's own terms —
 see [`SECOND-BRAIN.md`](SECOND-BRAIN.md) for the mapping and
@@ -20,7 +20,7 @@ that named this gap (unit U4).
 
 - door-ring coherence verdict (2 portrayed+coherent / 1 unportrayed / 0 drifted): 2
 - doors standing: 12
-- path-claims (links) in the door ring: 48
+- path-claims (links) in the door ring: 65
 - broken path-claims IN THE DOOR RING: 0
 
 ## Vital signs — the whole link fabric
@@ -36,27 +36,39 @@ that named this gap (unit U4).
 > brokenness is its own law. This banner is prose and can go stale; the
 > numbers below are recomputed and cannot.
 
-- pages that can point (every .md): 808
-- resolved path-claims body-wide: 390
-- BROKEN path-claims body-wide: 4
-- concept pages that can be orphaned: 33
-- ORPHANS (concept pages nothing points at): 0
+- pages that can point (every .md): 1724
+- resolved path-claims body-wide: 608
+- BROKEN path-claims body-wide: 28
+- concept pages that can be orphaned: 50
+- ORPHANS (concept pages nothing points at): 13
 
 ## Tissues (counted, not listed)
 
 - axioms: 3
-- teachings: 23
-- observe organs: 248
-- learn organs: 359
-- ingest organs: 27
-- form-stdlib cells: 2368
+- teachings: 35
+- observe organs: 570
+- learn organs: 413
+- ingest organs: 58
+- form-stdlib cells: 3565
+
+## Altitude (the authoring lens, folded into the portrait 2026-09-02)
+
+- BML pictures (high-grammar surfaces): 65
+- s-expression cells (each one a lowering the walk still owes): 1430
+- cells carrying a binding mark: 1
+
+The lens was born at 32 pictures over 1455 cells; the walk shows
+in this portrait now so the elevation is a witnessed trend, not a
+hope. Fast-moving self-reads (heat, holds, flight) live in the
+glass jit lane, not here — this portrait holds only what moves
+when files land, so its fixed point stays honest.
 
 ## Memory
 
-- receipts (episodic, append-only): 634
-- of those, PENDING (honest state, never a fault): 1
-- distillation corpus rows: 178
-- deepest corpus meaning-id: 782
+- receipts (episodic, append-only): 1531
+- of those, PENDING (honest state, never a fault): 10
+- distillation corpus rows: 631
+- deepest corpus meaning-id: 1239
 
 ## The rung this portrait stands on
 
