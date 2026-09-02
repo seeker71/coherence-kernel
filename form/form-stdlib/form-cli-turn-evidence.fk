@@ -13,13 +13,17 @@
 ;   local  = other completed tool outputs and non-fkwu rows in those tails
 ;   remote = provider-usage events
 
-(defn fcte-tag () "turn-evidence-v1")
+(defn fcte-tag-v1 () "turn-evidence-v1")
+(defn fcte-tag () "turn-evidence-v2")
+(defn fcte-tag-current () "turn-evidence-v3")
 (defn fcte-source-kind () "codex-rollout-jsonl+explicit-form-binding")
 (defn fcte-source-kind-grok () "grok-form-run-logs+explicit-form-binding")
 (defn fcte-source-ok? (e)
     (if (str_eq (fcte-source e) (fcte-source-kind)) 1
         (if (str_eq (fcte-source e) (fcte-source-kind-grok)) 1 0)))
-(defn fcte-field-count () 35)
+(defn fcte-field-count-v1 () 35)
+(defn fcte-field-count-v2 () 36)
+(defn fcte-field-count () 39)
 
 (defn fcte-parse (row) (split-on row "|"))
 
@@ -57,6 +61,14 @@
 (defn fcte-patch-events (e) (str_to_int (nth e 32)))
 (defn fcte-source (e) (nth e 33))
 (defn fcte-complete (e) (str_to_int (nth e 34)))
+(defn fcte-unattributed-tokens (e)
+    (if (ge (len e) (fcte-field-count-v2)) (str_to_int (nth e 35)) 0))
+(defn fcte-carrier-size (e)
+    (if (eq (len e) (fcte-field-count)) (str_to_int (nth e 36)) 0))
+(defn fcte-start-at (e)
+    (if (eq (len e) (fcte-field-count)) (str_to_int (nth e 37)) 0))
+(defn fcte-complete-at (e)
+    (if (eq (len e) (fcte-field-count)) (str_to_int (nth e 38)) 0))
 
 (defn fcte-digits-loop? (s i)
     (if (eq i (str_len s)) 1
@@ -68,13 +80,31 @@
 
 (defn fcte-numeric-fields-loop? (e i)
     (if (eq i 33)
-        (fcte-digits? (nth e 34))
+        (if (eq (fcte-digits? (nth e 34)) 0) 0
+            (if (eq (len e) (fcte-field-count-v1)) 1
+                (if (eq (fcte-digits? (nth e 35)) 0) 0
+                    (if (eq (len e) (fcte-field-count-v2)) 1
+                        (if (eq (fcte-digits? (nth e 36)) 0) 0
+                            (if (eq (fcte-digits? (nth e 37)) 0) 0
+                                (fcte-digits? (nth e 38))))))))
         (if (fcte-digits? (nth e i))
             (fcte-numeric-fields-loop? e (add i 1)) 0)))
 
 (defn fcte-shape? (e)
     (if (eq (len e) (fcte-field-count))
-        (if (str_eq (nth e 0) (fcte-tag)) 1 0) 0))
+        (if (str_eq (nth e 0) (fcte-tag-current)) 1 0)
+        (if (eq (len e) (fcte-field-count-v2))
+            (if (str_eq (nth e 0) (fcte-tag)) 1 0)
+            (if (eq (len e) (fcte-field-count-v1))
+                (if (str_eq (nth e 0) (fcte-tag-v1)) 1 0) 0))))
+
+(defn fcte-provenance-shape? (e)
+    (if (and (eq (len e) (fcte-field-count))
+        (and (str_eq (nth e 0) (fcte-tag-current))
+        (and (ge (fcte-carrier-size e) 1)
+        (and (ge (fcte-start-at e) 0)
+        (and (ge (fcte-complete-at e) (fcte-start-at e))
+             (lt (fcte-complete-at e) (fcte-carrier-size e))))))) 1 0))
 
 (defn fcte-identity? (e)
     (if (and (gt (str_len (fcte-thread-id e)) 0)
@@ -95,7 +125,9 @@
                  (sub (fcte-input-tokens e) (fcte-cached-input-tokens e)))
         (and (le (fcte-reasoning-output-tokens e) (fcte-output-tokens e))
         (and (eq (fcte-total-tokens e)
-                 (add (fcte-input-tokens e) (fcte-output-tokens e)))
+                 (add (fcte-input-tokens e)
+                    (add (fcte-output-tokens e)
+                         (fcte-unattributed-tokens e))))
              (eq (fcte-model-calls e) (fcte-remote-events e)))))) 1 0))
 
 (defn fcte-tool-valid? (e)
@@ -128,7 +160,13 @@
             (and (fcte-form-valid? e)
             (and (fcte-lanes-valid? e)
             (and (eq (fcte-source-ok? e) 1)
-                 (eq (fcte-complete e) 1))))))) 1 0)
+            (and (eq (fcte-complete e) 1)
+                 ; v1/v2 remain readable receipts.  v3 earns its newer tag
+                 ; only when its source-coordinate tuple is structurally
+                 ; present; the live Codex validator then recontacts those
+                 ; coordinates before exposing a percentage.
+                 (if (eq (len e) (fcte-field-count))
+                     (fcte-provenance-shape? e) 1)))))))) 1 0)
         0))
 
 ; Declared means there is no usable carrier row. Embodied means a carrier row
