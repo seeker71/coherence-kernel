@@ -8392,10 +8392,42 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             tb113[n113] = 0;
             fd113 = strtod(tb113, 0);
         }
-        long long fb113 = fk_fbox(fd113);
+        /* INTERN, as the name says: the Go proof arm (internTrivialFloat64)
+         * dedups by canonical bits -- one quiet NaN, -0.0 folds to +0.0,
+         * equal doubles share one row. This arm minted a fresh node AND a
+         * fresh pool slot per call, the one intern op whose behavior did not
+         * keep its name; the fkwu seed was the diverging arm. Compare by
+         * BITS, not ==, so NaN interns to itself. nid[3] carries the pool
+         * index, mirroring the Go arm's Inst. */
+        unsigned long long fbits113;
+        if (fd113 != fd113) {
+            fbits113 = 0x7ff8000000000000ULL;
+        } else {
+            if (fd113 == 0.0) {
+                fd113 = 0.0;
+            }
+            memcpy(&fbits113, &fd113, 8);
+        }
+        double fcanon113;
+        memcpy(&fcanon113, &fbits113, 8);
+        long long h113 = fk_intern_key_trivial(7, (long long)fbits113);
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
         }
+        long long slot113 = h113 & (fk_intern_hash_cap - 1);
+        while (fk_intern_tab[slot113]) {
+            long long ix113 = fk_intern_tab[slot113];
+            if (fk_nkind[ix113] == 1 && fk_nid[ix113][2] == 7) {
+                double dv113 = fk_num(fk_nval[ix113]);
+                unsigned long long db113;
+                memcpy(&db113, &dv113, 8);
+                if (db113 == fbits113) {
+                    return fk_nbox(ix113);
+                }
+            }
+            slot113 = (slot113 + 1) & (fk_intern_hash_cap - 1);
+        }
+        long long fb113 = fk_fbox(fcanon113);
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
         fk_nval[fk_np] = fb113;
@@ -8404,7 +8436,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_nid[fk_np][0] = 1;
         fk_nid[fk_np][1] = 1;
         fk_nid[fk_np][2] = 7;
-        fk_nid[fk_np][3] = 0;
+        fk_nid[fk_np][3] = fk_fidx(fb113);
+        fk_intern_tab[slot113] = fk_np;
+        fk_nhash_memo[fk_np] = h113;
         return fk_nbox(fk_np);
     }
     if (t == 50) {
