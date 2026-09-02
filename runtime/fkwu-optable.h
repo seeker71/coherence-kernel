@@ -26,6 +26,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "fb_record", 3, 128 },
   { "framebuffer-events", 0, 129 },
   { "node_source", 1, 130 },
+  { "node_at", 1, 147 },
   { "framebuffer-clear", 0, 131 },
   { "intern_trivial_int", 1, 43 },
   { "intern_trivial_bool", 1, 112 },
