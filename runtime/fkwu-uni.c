@@ -104,7 +104,9 @@ static long long fk_diag_quiet;  /* nonzero: speculative compile — count into
                                   * import gate need the truth) but print
                                   * nothing; a candidate image's diagnostics
                                   * are not the program's */
-static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_TEXT_CAP */
+static int fk_src_truncated;     /* 1 if the source was amputated at the source-text cap (dissolved 2026-09-02: the buffer grows) */
+static long long fk_srctext_cap;   /* live source-text capacity (kernel_stat 25); owned by fk_srctext_reserve below */
+static long long fk_srctext_grows; /* source-text doublings this run (kernel_stat 26) */
 /* ── the admission pulse: WHICH DOOR this program entered through, readable by
  * the running program itself via kernel_stat 15..18. The icetide dig
  * (2026-09-01, corpus 1217) showed the reproduction key of a whole wound family
@@ -123,7 +125,8 @@ static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_T
  *     3 standalone artifact compile failed, 4 artifact path exceeded buffer,
  *     5 unit identity hash exceeded buffer, 6 dep image carries recorded
  *     compile errors, 7 image load/identity refused (foreign, stale, corrupt),
- *     8 carried or root text exceeded FK_SOURCE_TEXT_CAP. A refusal is not a
+ *     8 carried or root text exceeded the source-text cap (dissolved
+ *       2026-09-02: the buffer grows, so 8 no longer fires). A refusal is not a
  *     wound — the flat compile is the fully correct door — but it is a
  *     decision, and decisions are observable. */
 static long long fk_run_door;
@@ -154,21 +157,23 @@ static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
  * rewritten in terms of the same named constant so the two can never drift apart. */
 #define FK_FLOAT_POOL_INIT_CAP 65536    /* fk_fv: boxed-float pool, initial size (doubles on demand) */
 #define FK_OPCODE_ARM_CAP 256           /* fk_arms: per-tag hit counters, indexed by node tag t */
-#define FK_MEM_CELL_CAP 4096            /* fk_mem: mutable record-cell table (tags 13/14) */
-#define FK_STAGED_INPUT_CAP 262144      /* fk_src: staged auxiliary input (the input_byte primitive) */
-#define FK_VALUE_STACK_CAP 1048576      /* fk_vs: the evaluator's argument/value stack. Raised 65536->1048576 (2026-07-30): one slot per call frame, so the old cap was a ~65,500-deep recursion wall — measured, 65000 answered and 70000 died — while Go, Rust and TypeScript all answer a 100,000-deep count. A behaviour three of four kernels have and the fourth does not is a bug, not a design; the four exist to make exactly that visible. 1048576 * 8B = 8MB static, the same raisable-constant class as FK_NODE_CAP (65536->262144) and FK_BD_STACK_CAP (128->1024). Past this the walker's own 6MB host-stack wall is reached first, and THAT one speaks. */
+#define FK_MEM_CELL_CAP_INIT 4096      /* fk_mem: mutable record-cell table (tags 13/14). Birth size only -- the table grows to hold any written cell id (fk_mem_reserve). The old fixed table MASKED the id (mi & 4095): two cells 4096 apart silently ALIASED, one state quietly swapped for another. */
+#define FK_STAGED_INPUT_CAP_INIT 262144 /* fk_src: staged auxiliary input (the input_byte primitive); birth size only -- grows to carry any staged text (the old fixed buffer truncated it SILENTLY at the brim). */
+#define FK_VALUE_STACK_CAP_INIT 1048576  /* fk_vs: the evaluator's argument/value stack. Birth size only -- the stack DOUBLES on demand (fk_vs_grow, kernel_stat 27/28 = live cap / doublings), so stack slots are not a wall; runaway recursion is spoken for by the walker's own host-stack diagnostic. History: 65536->1048576 (2026-07-30) when the fourth kernel alone refused a 100,000-deep count the other three answered; a loud wall after that; growth since 2026-09-02. New slots are zeroed so a melt walking raised-but-unwritten slots sees the same inert 0 the BSS era gave it. */
 #define FK_STRING_POOL_INIT_BYTES 1048576 /* fk_sb: interned-string byte pool, initial size */
 #define FK_STRING_TABLE_INIT_CAP 16384  /* fk_so/fk_sl: interned-string table, initial entry count */
-/* NOTE: FK_NODE_CAP and FK_AST_NODE_CAP are DIFFERENT tables that happen to share
- * a capacity today -- never conflate them. FK_NODE_CAP is the hash-cons'd VALUE
+/* NOTE: the value-node table (FK_NODE_CAP_INIT) and FK_AST_NODE_CAP are DIFFERENT
+ * tables -- never conflate them. The value-node table is the hash-cons'd VALUE
  * table (fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots)
  * used by fk_neq/fk_veq for structural equality on cons'd runtime values (records,
- * lists). FK_AST_NODE_CAP (defined near fk_node[][4] itself, further down) is the
+ * lists). FK_AST_NODE_CAP_INIT (defined near fk_node[][4] itself, further down) is the
  * PARSED PROGRAM's syntax tree, filled once per expression during parsing via
  * fk_smknode. */
-#define FK_NODE_CAP 262144              /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots. Raised 65536->262144 (2026-07-02): a 1,200-clip --src program filled the value-node table mid-run and every guard silently returned handle 0 -- a deterministic all-zero result with no error. Same raisable-constant class as FK_AST_NODE_CAP; overflow now dies loudly instead of returning 0. 262144*104B ~= 27MB. */
-#define FK_RECORD_INIT_CAP 256          /* fk_rkey/rval/rcnt/rbp: record table INITIAL capacity — grows by doubling, no wall */
-#define FK_RECORD_KEYS_INIT 8           /* per-record key row INITIAL capacity — grows by doubling, no wall */
+#define FK_NODE_CAP_INIT 262144         /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots, nhash_memo, inram slot/generation/released: birth capacity only -- the table DOUBLES on demand (fk_nodes_grow), so there is no node wall. Handles are indices into column arrays; doubling the columns keeps every handle valid, and the intern index grows with them (held at 4x the node cap, rebuilt from fk_nhash_memo). History: 65536->262144 (2026-07-02) when a full table made every guard silently return handle 0; then a loud die at the wall; growth since 2026-09-02. A runaway consumer now shows as monotone kernel_stat 19/20 (live cap / doublings) instead of a refusal -- probe whether the fill POSITION moves, same discipline as ever. 262144*104B ~= 27MB at birth. */
+static long long fk_node_cap;           /* live capacity; fk_nodes_init/fk_nodes_grow own it */
+static long long fk_node_grows;         /* doublings this run -- kernel_stat 20 */
+#define FK_RECORD_CAP_INIT 256          /* fk_rkey/rval/rcnt/rbp: record-table birth size; rows grow on demand (fk_record_reserve). Record VALUES and blueprints are melt roots since 2026-09-02 -- a record holding a heap list used to dangle across a compaction. */
+#define FK_RECORD_KEYS_INIT 8           /* per-record key/value row birth size; rows grow on demand (fk_record_keys_reserve) -- the old 128 wall died loud on construction and silently DROPPED keys on record_set. */
 /* Function values occupy odd words below fk_fnbase and above the string-value
  * region. Validity follows the functions actually present in the current image;
  * it is not a second fixed function-table ceiling. */
@@ -178,8 +183,8 @@ static long long fk_fn_count;
  * evaluator's `if (t == N)` opcode-tag dispatch, which is a completely
  * different numbering space (generated from fkwu-optable.h) that happens to
  * share small integer values with ASCII codes in the 0-127 range. Conflating
- * the two would be the same class of mistake as merging FK_NODE_CAP and
- * FK_AST_NODE_CAP; kept strictly to genuine byte/character comparisons. */
+ * the two would be the same class of mistake as merging the value-node table and
+ * the AST table; kept strictly to genuine byte/character comparisons. */
 #define FK_CH_TAB 9
 #define FK_CH_LF 10
 #define FK_CH_CR 13
@@ -288,6 +293,16 @@ static double fk_num(long long v) {
     }
     return (double)(v >> 1);
 }
+/* ── boxing attribution: WHICH recipe is minting floats ─────────────────────
+ * Ints ride unboxed (tagged words); every float RESULT allocates a pool slot
+ * here. To answer "which sources could use unboxing", each mint is charged to
+ * the last-dispatched recipe (fk_cur_fn, set beside every heat bump). The
+ * dispatch is a tail-jump, so there is no restore point: attribution bleeds
+ * to the callee across returns -- a sampling truth, exact for the hot loops
+ * that matter. Written to .fkwu-boxing.<pid> beside the heat board. */
+static long long fk_cur_fn;
+static long long *fk_fn_fbox;
+static long long fk_fn_capacity;
 static long long fk_fbox(double d) {
     if (fk_fv == 0) {
         fk_fcap = FK_FLOAT_POOL_INIT_CAP;
@@ -305,6 +320,9 @@ static long long fk_fbox(double d) {
         }
     }
     fk_fv[fk_fp] = d;
+    if (fk_fn_fbox != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) {
+        fk_fn_fbox[fk_cur_fn] = fk_fn_fbox[fk_cur_fn] + 1;
+    }
     return fk_fbase - (fk_fp << 1) - 1;
 }
 static void fk_pr(long long v) {
@@ -447,14 +465,65 @@ static void fk_pv(long long v) {
     }
 }
 static long long fk_arms[FK_OPCODE_ARM_CAP];
-static long long fk_mem[FK_MEM_CELL_CAP];
-static char fk_src[FK_STAGED_INPUT_CAP];
+static long long *fk_mem;
+static long long fk_mem_cap;
+static void fk_mem_reserve(long long need) {
+    long long nc;
+    long long i;
+    long long *q;
+    if (need <= fk_mem_cap) {
+        return;
+    }
+    nc = fk_mem_cap == 0 ? FK_MEM_CELL_CAP_INIT : fk_mem_cap;
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    q = realloc(fk_mem, (unsigned long)(nc * 8));
+    if (q == 0) {
+        fk_die("fk_mem_reserve: out of memory growing the cell table");
+    }
+    fk_mem = q;
+    i = fk_mem_cap;
+    while (i < nc) {
+        fk_mem[i] = 0;
+        i = i + 1;
+    }
+    fk_mem_cap = nc;
+}
+static char *fk_src;
+static long long fk_src_cap;
 static long long fk_src_len = 0;
 static long long *fk_hh;
 static long long *fk_ht;
 static long long fk_hp;
 static long long fk_cap;
-static long long fk_vs[FK_VALUE_STACK_CAP];
+static long long *fk_vs;
+static long long fk_vs_cap;    /* live capacity; fk_vs_grow owns it */
+static long long fk_vs_grows;  /* doublings this run -- kernel_stat 28 */
+static long long fk_bd_cap;    /* binding-stack live capacity (kernel_stat 29); owned by fk_bd_push */
+static long long fk_bd_grows;  /* binding-stack doublings (kernel_stat 30) */
+static void fk_vs_grow(long long need) {
+    long long nc = fk_vs_cap == 0 ? FK_VALUE_STACK_CAP_INIT : fk_vs_cap;
+    long long i;
+    long long *q;
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    q = realloc(fk_vs, (unsigned long)(nc * 8));
+    if (q == 0) {
+        fk_die("fk_vs_grow: out of memory growing the value stack");
+    }
+    fk_vs = q;
+    i = fk_vs_cap;
+    while (i < nc) {
+        fk_vs[i] = 0;
+        i = i + 1;
+    }
+    if (fk_vs_cap != 0) {
+        fk_vs_grows = fk_vs_grows + 1;
+    }
+    fk_vs_cap = nc;
+}
 static long long fk_vsp;
 extern unsigned int arc4random(void);
 extern void *calloc(unsigned long, unsigned long);
@@ -623,11 +692,11 @@ static void fk_put_str(long long v) {
         j = j + 1;
     }
 }
-static long long fk_nkind[FK_NODE_CAP];
-static long long fk_ncat[FK_NODE_CAP];
-static long long fk_nkids[FK_NODE_CAP];
-static long long fk_nval[FK_NODE_CAP];
-static long long fk_nid[FK_NODE_CAP][4];
+static long long *fk_nkind;
+static long long *fk_ncat;
+static long long *fk_nkids;
+static long long *fk_nval;
+static long long (*fk_nid)[4];
 static long long fk_np;
 static long long fk_nbox(long long i) {
     return 0 - (((long long)i << 1) | 1);
@@ -707,9 +776,10 @@ static long long fk_veq(long long a, long long b) {
  * minted without dedupe by design and stay outside the index — the
  * doors never searched them. The table is 4x the node cap, so load
  * stays low and probes short. */
-#define FK_INTERN_HASH_CAP 1048576
-static long long fk_intern_tab[FK_INTERN_HASH_CAP];
-static long long fk_nhash_memo[FK_NODE_CAP];
+#define FK_INTERN_HASH_CAP_INIT 1048576
+static long long fk_intern_hash_cap;    /* held at 4x the node cap; power of two */
+static long long *fk_intern_tab;
+static long long *fk_nhash_memo;
 static unsigned long long fk_mix64(unsigned long long h, unsigned long long v) {
     h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
     h *= 0xff51afd7ed558ccdULL;
@@ -774,11 +844,11 @@ static long long fk_intern_key_trivial(long long type, long long val) {
     long long out = (long long)(h >> 1);
     return out == 0 ? 1 : out;
 }
-static long long fk_nsfile[FK_NODE_CAP];
-static long long fk_nsline[FK_NODE_CAP];
-static long long fk_nscol[FK_NODE_CAP];
-static long long fk_nsattr[FK_NODE_CAP];
-static long long fk_fbroots[FK_NODE_CAP];
+static long long *fk_nsfile;
+static long long *fk_nsline;
+static long long *fk_nscol;
+static long long *fk_nsattr;
+static long long *fk_fbroots;
 static long long fk_fbn;
 #if defined(__has_include) && !defined(_WIN32)
 #if __has_include(<sys/stat.h>)
@@ -893,9 +963,26 @@ static long long fk_read_all_bounded(int fd, char *buf, long long cap) {
  * Absent file -> empty config -> every toggle at its default (recover, never die). Standard OS env
  * vars we do not own (TMPDIR) stay on getenv. Line form: "KEY value" or "KEY=value"; bare "KEY"
  * means on ("1"); "KEY 0" means off; '#' begins a comment. */
-#define FK_CONF_MAX 64
-static char fk_conf_k[FK_CONF_MAX][64];
-static char fk_conf_v[FK_CONF_MAX][256];
+#define FK_CONF_MAX_INIT 64 /* conf entries birth size; grows -- an entry past the old fixed 64 was SILENTLY inert, the same family as the silently-inert env probe */
+static char (*fk_conf_k)[64];
+static char (*fk_conf_v)[4096];
+static long long fk_conf_cap;
+static void fk_conf_reserve(long long need) {
+    long long nc;
+    if (need <= fk_conf_cap) {
+        return;
+    }
+    nc = fk_conf_cap == 0 ? FK_CONF_MAX_INIT : fk_conf_cap;
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    fk_conf_k = (char (*)[64])realloc(fk_conf_k, (unsigned long)(nc * 64));
+    fk_conf_v = (char (*)[4096])realloc(fk_conf_v, (unsigned long)(nc * 4096));
+    if (fk_conf_k == 0 || fk_conf_v == 0) {
+        fk_die("fk_conf_reserve: out of memory growing the conf table");
+    }
+    fk_conf_cap = nc;
+}
 static int fk_conf_n = 0;
 static int fk_conf_loaded = 0;
 static void fk_conf_load(void) {
@@ -903,13 +990,31 @@ static void fk_conf_load(void) {
     fk_conf_loaded = 1;
     int fd = open("fkwu.conf", 0);
     if (fd < 0) { return; }
-    static char cb[8192];
-    long long n = read(fd, cb, 8191);
+    /* read the WHOLE file: the old single bounded read parsed whatever one
+     * read() happened to return and silently dropped the rest. */
+    long long cb_cap = 8192;
+    char *cb = malloc((unsigned long)cb_cap);
+    long long n = 0;
+    if (cb == 0) { close(fd); return; }
+    for (;;) {
+        long long got;
+        if (n + 4096 >= cb_cap) {
+            char *q;
+            cb_cap = cb_cap * 2;
+            q = realloc(cb, (unsigned long)cb_cap);
+            if (q == 0) { free(cb); close(fd); return; }
+            cb = q;
+        }
+        got = read(fd, cb + n, 4096);
+        if (got <= 0) { break; }
+        n = n + got;
+    }
     close(fd);
-    if (n <= 0) { return; }
+    if (n <= 0) { free(cb); return; }
     cb[n] = 0;
     long long i = 0;
-    while (i < n && fk_conf_n < FK_CONF_MAX) {
+    while (i < n) {
+        fk_conf_reserve(fk_conf_n + 1);
         while (i < n && (cb[i] == ' ' || cb[i] == '\t' || cb[i] == '\n' || cb[i] == '\r')) { i = i + 1; }
         if (i >= n) { break; }
         if (cb[i] == '#') { while (i < n && cb[i] != '\n') { i = i + 1; } continue; }
@@ -920,7 +1025,7 @@ static void fk_conf_load(void) {
         fk_conf_k[fk_conf_n][kj] = 0;
         while (i < n && (cb[i] == ' ' || cb[i] == '\t' || cb[i] == '=')) { i = i + 1; }
         int vj = 0;
-        while (i < n && cb[i] != '\n' && cb[i] != '\r' && vj < 255) {
+        while (i < n && cb[i] != '\n' && cb[i] != '\r' && vj < 4095) {
             fk_conf_v[fk_conf_n][vj] = cb[i]; vj = vj + 1; i = i + 1;
         }
         while (vj > 0 && (fk_conf_v[fk_conf_n][vj - 1] == ' ' || fk_conf_v[fk_conf_n][vj - 1] == '\t')) { vj = vj - 1; }
@@ -947,22 +1052,79 @@ static char *fk_conf(const char *key) {
     }
     return 0;
 }
-/* The record table GROWS (2026-09-02, the stackbreath family): the old
- * FK_RECORD_CAP wall died loud at 256 live records, and the per-record key cap
- * died loud at 128 on construction while record_set silently DROPPED the 129th
- * key — a partial record accepted as whole. Rows are per-record heap arrays
- * behind stable indices (nothing relocates, handles stay true), both
- * dimensions double on demand, and record values/blueprints are melt roots
- * (fk_melt walks them like fk_nval), so a field holding a cons value survives
- * compaction. */
+/* The record table grows in BOTH dimensions (2026-09-02, the stackbreath
+ * family + this reunion): rows are per-record heap arrays behind stable
+ * indices — nothing a handle points through relocates — the row count doubles
+ * via fk_record_reserve and each record's key/value row doubles via
+ * fk_record_keys_reserve. The old walls: 256 records died loud, 128 keys died
+ * loud on construction and record_set silently DROPPED the 129th key — a
+ * partial record accepted as whole. */
 static long long **fk_rkey;
 static long long **fk_rval;
 static long long *fk_rkcap;
 static long long *fk_rcnt;
 static long long *fk_rbp;
-static long long fk_rcap;
-static long long fk_rgrown;
+static long long fk_record_cap;  /* live row capacity; fk_record_reserve owns it */
 static long long fk_rp;
+static void fk_record_reserve(long long need) {
+    long long nc;
+    long long i;
+    if (fk_record_cap == 0) {
+        fk_rkey = (long long **)calloc(FK_RECORD_CAP_INIT, sizeof(long long *));
+        fk_rval = (long long **)calloc(FK_RECORD_CAP_INIT, sizeof(long long *));
+        fk_rkcap = (long long *)calloc(FK_RECORD_CAP_INIT, 8);
+        fk_rcnt = (long long *)calloc(FK_RECORD_CAP_INIT, 8);
+        fk_rbp = (long long *)calloc(FK_RECORD_CAP_INIT, 8);
+        if (fk_rkey == 0 || fk_rval == 0 || fk_rkcap == 0 || fk_rcnt == 0 || fk_rbp == 0) {
+            fk_die("fk_record_reserve: out of memory for the record table");
+        }
+        fk_record_cap = FK_RECORD_CAP_INIT;
+    }
+    if (need <= fk_record_cap) {
+        return;
+    }
+    nc = fk_record_cap;
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    fk_rkey = (long long **)realloc(fk_rkey, (unsigned long)(nc * sizeof(long long *)));
+    fk_rval = (long long **)realloc(fk_rval, (unsigned long)(nc * sizeof(long long *)));
+    fk_rkcap = (long long *)realloc(fk_rkcap, (unsigned long)(nc * 8));
+    fk_rcnt = (long long *)realloc(fk_rcnt, (unsigned long)(nc * 8));
+    fk_rbp = (long long *)realloc(fk_rbp, (unsigned long)(nc * 8));
+    if (fk_rkey == 0 || fk_rval == 0 || fk_rkcap == 0 || fk_rcnt == 0 || fk_rbp == 0) {
+        fk_die("fk_record_reserve: out of memory growing the record table");
+    }
+    i = fk_record_cap;
+    while (i < nc) {
+        fk_rkey[i] = 0;
+        fk_rval[i] = 0;
+        fk_rkcap[i] = 0;
+        fk_rcnt[i] = 0;
+        fk_rbp[i] = 0;
+        i = i + 1;
+    }
+    fk_record_cap = nc;
+}
+/* grow record r's KEY/VALUE row to hold at least `need` entries. Row arrays
+ * are reached only through fk_rkey[r]/fk_rval[r], so a realloc that moves a
+ * row breaks nothing — no handle points into it. */
+static void fk_record_keys_reserve(long long r, long long need) {
+    long long nc;
+    if (need <= fk_rkcap[r]) {
+        return;
+    }
+    nc = fk_rkcap[r] == 0 ? FK_RECORD_KEYS_INIT : fk_rkcap[r];
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    fk_rkey[r] = (long long *)realloc(fk_rkey[r], (unsigned long)(nc * 8));
+    fk_rval[r] = (long long *)realloc(fk_rval[r], (unsigned long)(nc * 8));
+    if (fk_rkey[r] == 0 || fk_rval[r] == 0) {
+        fk_die("fk_record_keys_reserve: out of memory growing a record's key row");
+    }
+    fk_rkcap[r] = nc;
+}
 static long long fk_rbox(long long r) {
     return 0 - (r << 1);
 }
@@ -975,63 +1137,6 @@ static long long fk_ridx(long long v) {
 static long long fk_isrec(long long v) {
     long long r = fk_ridx(v);
     return r >= 1 && r <= fk_rp;
-}
-/* grow the record TABLE so slot fk_rp+1 exists. Realloc keeps old rows in
- * place (row pointers are copied, their arrays never move), so live record
- * indices stay true across growth — the same relocation-free law fk_heap_grow
- * follows. Allocation failure dies loud: out of memory is out of memory. */
-static void fk_rec_table_ensure(void) {
-    if (fk_rcap == 0) {
-        fk_rcap = FK_RECORD_INIT_CAP;
-        fk_rkey = calloc(fk_rcap, sizeof(long long *));
-        fk_rval = calloc(fk_rcap, sizeof(long long *));
-        fk_rkcap = calloc(fk_rcap, 8);
-        fk_rcnt = calloc(fk_rcap, 8);
-        fk_rbp = calloc(fk_rcap, 8);
-        if (fk_rkey == 0 || fk_rval == 0 || fk_rkcap == 0 || fk_rcnt == 0 || fk_rbp == 0) {
-            fk_die("fk_rec_table_ensure: record table calloc failed");
-        }
-        return;
-    }
-    if (fk_rp + 1 < fk_rcap) {
-        return;
-    }
-    long long ncap = fk_rcap * 2;
-    fk_rkey = realloc(fk_rkey, ncap * sizeof(long long *));
-    fk_rval = realloc(fk_rval, ncap * sizeof(long long *));
-    fk_rkcap = realloc(fk_rkcap, ncap * 8);
-    fk_rcnt = realloc(fk_rcnt, ncap * 8);
-    fk_rbp = realloc(fk_rbp, ncap * 8);
-    if (fk_rkey == 0 || fk_rval == 0 || fk_rkcap == 0 || fk_rcnt == 0 || fk_rbp == 0) {
-        fk_die("fk_rec_table_ensure: record table realloc failed");
-    }
-    long long k = fk_rcap;
-    while (k < ncap) {
-        fk_rkey[k] = 0;
-        fk_rval[k] = 0;
-        fk_rkcap[k] = 0;
-        fk_rcnt[k] = 0;
-        fk_rbp[k] = 0;
-        k = k + 1;
-    }
-    fk_rcap = ncap;
-    fk_rgrown = fk_rgrown + 1;
-}
-/* grow record r's KEY/VALUE row to hold at least `need` entries. */
-static void fk_rec_keys_ensure(long long r, long long need) {
-    if (need <= fk_rkcap[r]) {
-        return;
-    }
-    long long ncap = fk_rkcap[r] == 0 ? FK_RECORD_KEYS_INIT : fk_rkcap[r];
-    while (ncap < need) {
-        ncap = ncap * 2;
-    }
-    fk_rkey[r] = realloc(fk_rkey[r], ncap * 8);
-    fk_rval[r] = realloc(fk_rval[r], ncap * 8);
-    if (fk_rkey[r] == 0 || fk_rval[r] == 0) {
-        fk_die("fk_rec_keys_ensure: record key row realloc failed");
-    }
-    fk_rkcap[r] = ncap;
 }
 /* ── methods on the blueprint (BML/NUMS rung 2b) ── shared by every record of a
  * type, name-dispatched; the keystone that turns a Record into a real object.
@@ -3435,9 +3540,9 @@ static long long fk_inram_cursor = 0;
  * fold, image reconstruction or table scan belongs on the hot call.  The
  * generation pair makes slot eviction O(1) too -- stale aliases simply stop
  * matching rather than requiring a sweep over the node table. */
-static unsigned char fk_inram_node_slot[FK_NODE_CAP];
-static unsigned int fk_inram_node_generation[FK_NODE_CAP];
-static unsigned char fk_inram_node_released[FK_NODE_CAP];
+static unsigned char *fk_inram_node_slot;
+static unsigned int *fk_inram_node_generation;
+static unsigned char *fk_inram_node_released;
 static long long fk_inram_last_slot = -1;
 
 static long long fk_inram_bytes(long long image, unsigned char *out, long long cap) {
@@ -3567,7 +3672,7 @@ static int fk_inram_node_index(long long identity, long long *index) {
         return 0;
     }
     ix = fk_nidx(identity);
-    if (ix < 1 || ix > fk_np || ix >= FK_NODE_CAP) {
+    if (ix < 1 || ix > fk_np || ix >= fk_node_cap) {
         return 0;
     }
     *index = ix;
@@ -3736,6 +3841,118 @@ static long long fk_native_call_arm64_u32_leaf(long long program, long long root
     return fk_nothing;
 }
 #endif
+/* ── the value-node table grows; there is no node wall ─────────────────────
+ * Handles are INDICES into the column arrays, so doubling the columns keeps
+ * every existing handle valid -- nothing relocates, the same property the
+ * intern index and the melt already stand on. The cons-pair heap (fk_melt)
+ * had growth first; the node table now matches its discipline. New column
+ * bytes are zeroed to keep the BSS-era meanings (memo 0 = unhashed, sattr 0
+ * = unattributed, inram slot 0 = unresident). The intern index is held at 4x
+ * the node cap: when it must grow it is rebuilt from fk_nhash_memo -- every
+ * indexed node's memo IS its exact probe key (the doors store it at mint),
+ * and nodes outside the index that carry deep-hash memos re-enter as dead
+ * weight the doors' predicates skip, load staying <= 25%. Callers grow
+ * BEFORE computing a probe slot, never after (a slot chosen under the old
+ * mask would land wrong in the rebuilt table). OOM here dies loudly -- the
+ * same honest door as fk_melt's arena. */
+static void *fk_nodes_grow_col(void *p, long long old_n, long long new_n, long long width) {
+    char *q = realloc(p, (unsigned long)(new_n * width));
+    long long i;
+    if (q == 0) {
+        fk_die("fk_nodes_grow: out of memory growing the value-node table");
+    }
+    i = old_n * width;
+    while (i < new_n * width) {
+        q[i] = 0;
+        i = i + 1;
+    }
+    return q;
+}
+static void fk_nodes_grow(void) {
+    long long oc = fk_node_cap;
+    long long nc = oc * 2;
+    fk_nkind = (long long *)fk_nodes_grow_col(fk_nkind, oc, nc, 8);
+    fk_ncat = (long long *)fk_nodes_grow_col(fk_ncat, oc, nc, 8);
+    fk_nkids = (long long *)fk_nodes_grow_col(fk_nkids, oc, nc, 8);
+    fk_nval = (long long *)fk_nodes_grow_col(fk_nval, oc, nc, 8);
+    fk_nid = (long long (*)[4])fk_nodes_grow_col(fk_nid, oc, nc, 32);
+    fk_nhash_memo = (long long *)fk_nodes_grow_col(fk_nhash_memo, oc, nc, 8);
+    fk_nsfile = (long long *)fk_nodes_grow_col(fk_nsfile, oc, nc, 8);
+    fk_nsline = (long long *)fk_nodes_grow_col(fk_nsline, oc, nc, 8);
+    fk_nscol = (long long *)fk_nodes_grow_col(fk_nscol, oc, nc, 8);
+    fk_nsattr = (long long *)fk_nodes_grow_col(fk_nsattr, oc, nc, 8);
+    fk_fbroots = (long long *)fk_nodes_grow_col(fk_fbroots, oc, nc, 8);
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+    fk_inram_node_slot = (unsigned char *)fk_nodes_grow_col(fk_inram_node_slot, oc, nc, 1);
+    fk_inram_node_generation = (unsigned int *)fk_nodes_grow_col(fk_inram_node_generation, oc, nc, 4);
+    fk_inram_node_released = (unsigned char *)fk_nodes_grow_col(fk_inram_node_released, oc, nc, 1);
+#endif
+    fk_node_cap = nc;
+    fk_node_grows = fk_node_grows + 1;
+    if (fk_intern_hash_cap < nc * 4) {
+        long long hc = fk_intern_hash_cap * 2;
+        long long ix;
+        free(fk_intern_tab);
+        fk_intern_tab = (long long *)calloc((unsigned long)hc, 8);
+        if (fk_intern_tab == 0) {
+            fk_die("fk_nodes_grow: out of memory growing the intern index");
+        }
+        ix = 1;
+        while (ix <= fk_np) {
+            long long h = fk_nhash_memo[ix];
+            if (h) {
+                long long slot = h & (hc - 1);
+                while (fk_intern_tab[slot]) {
+                    slot = (slot + 1) & (hc - 1);
+                }
+                fk_intern_tab[slot] = ix;
+            }
+            ix = ix + 1;
+        }
+        fk_intern_hash_cap = hc;
+    }
+}
+static void fk_ast_reserve(long long need);
+static void fk_srctext_reserve(long long need);
+static void fk_src_root_reserve(long long need);
+static void fk_nodes_init(void) {
+    if (fk_node_cap) {
+        return;
+    }
+    fk_ast_reserve(1);
+    fk_srctext_reserve(1);
+    fk_src_root_reserve(1);
+    fk_vs_grow(FK_VALUE_STACK_CAP_INIT);
+    fk_mem_reserve(FK_MEM_CELL_CAP_INIT);
+    fk_nkind = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_ncat = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nkids = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nval = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nid = (long long (*)[4])calloc(FK_NODE_CAP_INIT, 32);
+    fk_nhash_memo = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nsfile = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nsline = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nscol = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_nsattr = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_fbroots = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    fk_intern_tab = (long long *)calloc(FK_INTERN_HASH_CAP_INIT, 8);
+    if (fk_nkind == 0 || fk_ncat == 0 || fk_nkids == 0 || fk_nval == 0 ||
+        fk_nid == 0 || fk_nhash_memo == 0 || fk_nsfile == 0 || fk_nsline == 0 ||
+        fk_nscol == 0 || fk_nsattr == 0 || fk_fbroots == 0 || fk_intern_tab == 0) {
+        fk_die("fk_nodes_init: out of memory for the value-node table");
+    }
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+    fk_inram_node_slot = (unsigned char *)calloc(FK_NODE_CAP_INIT, 1);
+    fk_inram_node_generation = (unsigned int *)calloc(FK_NODE_CAP_INIT, 4);
+    fk_inram_node_released = (unsigned char *)calloc(FK_NODE_CAP_INIT, 1);
+    if (fk_inram_node_slot == 0 || fk_inram_node_generation == 0 ||
+        fk_inram_node_released == 0) {
+        fk_die("fk_nodes_init: out of memory for the value-node table");
+    }
+#endif
+    fk_node_cap = FK_NODE_CAP_INIT;
+    fk_intern_hash_cap = FK_INTERN_HASH_CAP_INIT;
+}
 /* ── stone 3 (OBSERVE): the offer/ack observe hook ────────────────────────── Every reducer CALL is
  * an OFFER (axiom-5): a callee + its args, acknowledged by EXACTLY ONE of {nothing, 0, 1, node}.
  * This hook makes that offer/ack witnessable as a trace the observe organ reads — the live feed
@@ -4189,9 +4406,40 @@ static int fk_suffix_match(const char *name, const char *suf) {
     }
     return 1;
 }
+/* ── the cons heap grows where the melt cannot reach ────────────────────────
+ * Pair handles are INDICES into fk_hh/fk_ht, so a realloc doubling relocates
+ * NOTHING — safe exactly where fk_melt is not (mid-loop with live C-local
+ * intermediates the collector cannot trace). Melt stays the comptroller on
+ * the main cons path (compaction at 90%); growth is the escape valve at
+ * every site that used to answer the wall with a die, a silent partial
+ * list, or — the closure-capture copy loops — an unguarded write past the
+ * arrays. kernel_stat 21 carries the live cap, 22 the doublings. OOM here
+ * dies loudly, the same honest door as fk_melt's arena. */
+static long long fk_heap_grows;
+static void fk_arena(void);
+static void fk_heap_grow(void) {
+    long long nc;
+    if (fk_cap == 0) {
+        fk_arena();
+        return;
+    }
+    nc = fk_cap * 2;
+    long long *nh = realloc(fk_hh, (unsigned long)(nc * 8));
+    long long *nt;
+    if (nh != 0) {
+        fk_hh = nh;
+    }
+    nt = realloc(fk_ht, (unsigned long)(nc * 8));
+    if (nh == 0 || nt == 0) {
+        fk_die("fk_heap_grow: out of memory growing the cons heap");
+    }
+    fk_ht = nt;
+    fk_cap = nc;
+    fk_heap_grows = fk_heap_grows + 1;
+}
 static long long fk_list_push(long long acc, long long sv) {
     if (fk_hp + 1 >= fk_cap) {
-        fk_die("fk_list_push: heap exhausted building list -- returning the accumulator unchanged would silently drop this element, a partial list accepted as whole.");
+        fk_heap_grow();
     }
     fk_hp = fk_hp + 1;
     fk_hh[fk_hp] = sv;
@@ -5476,7 +5724,9 @@ static long long fk_cons_val(long long h, long long t) {
         fk_arena();
     }
     if (fk_hp + 1 >= fk_cap) {
-        fk_die("fk_cons_val: heap exhausted -- cannot melt here (live C-local intermediates are not on the value stack for the collector to trace). Returning nil would be a partial structure accepted as whole.");
+        /* cannot melt here (live C-local intermediates are not on the value
+         * stack for the collector to trace) -- but growth relocates nothing. */
+        fk_heap_grow();
     }
     fk_hp = fk_hp + 1;
     fk_hh[fk_hp] = h;
@@ -6629,8 +6879,23 @@ static void fk_melt(void) {
         k = k + 1;
     }
     k = 0;
-    while (k < FK_MEM_CELL_CAP) {
+    while (k < fk_mem_cap) {
         nlive = nlive + fk_mlive(fk_mem[k]);
+        k = k + 1;
+    }
+    /* record keys, values, and blueprints are ROOTS: a field holding a cons
+     * value must survive compaction. One walk covers all three — the reunion
+     * had briefly stacked two, and fk_mcopy is not idempotent (forwarding is
+     * indexed by OLD arena positions, so re-copying a copied value can alias). */
+    k = 1;
+    while (k <= fk_rp) {
+        nlive = nlive + fk_mlive(fk_rbp[k]);
+        long long rj = 0;
+        while (rj < fk_rcnt[k]) {
+            nlive = nlive + fk_mlive(fk_rkey[k][rj]);
+            nlive = nlive + fk_mlive(fk_rval[k][rj]);
+            rj = rj + 1;
+        }
         k = k + 1;
     }
     k = 1;
@@ -6638,18 +6903,6 @@ static void fk_melt(void) {
         nlive = nlive + fk_mlive(fk_ncat[k]);
         nlive = nlive + fk_mlive(fk_nkids[k]);
         nlive = nlive + fk_mlive(fk_nval[k]);
-        k = k + 1;
-    }
-    /* record values and blueprints are ROOTS: a field holding a cons value
-     * must survive compaction (keys are string-pool indices, not values). */
-    k = 1;
-    while (k <= fk_rp) {
-        nlive = nlive + fk_mlive(fk_rbp[k]);
-        long long rj = 0;
-        while (rj < fk_rcnt[k]) {
-            nlive = nlive + fk_mlive(fk_rval[k][rj]);
-            rj = rj + 1;
-        }
         k = k + 1;
     }
     long long ncap = fk_cap;
@@ -6667,7 +6920,7 @@ static void fk_melt(void) {
      * conses and pays that walk each time. Guarantee headroom that scales
      * with the walk: at least np/4 free pairs after compaction, so each
      * O(np) melt is amortized over >= np/4 allocations. Worst-case extra
-     * memory is FK_NODE_CAP/4 pairs (~1MB). */
+     * memory is fk_np/4 pairs. */
     while (ncap - nlive < fk_np / 4 + FK_HASHCONS_INIT_CAP) {
         ncap = ncap * 2;
     }
@@ -6688,15 +6941,8 @@ static void fk_melt(void) {
         k = k + 1;
     }
     k = 0;
-    while (k < FK_MEM_CELL_CAP) {
+    while (k < fk_mem_cap) {
         fk_mem[k] = fk_mcopy(fk_mem[k]);
-        k = k + 1;
-    }
-    k = 1;
-    while (k <= fk_np) {
-        fk_ncat[k] = fk_mcopy(fk_ncat[k]);
-        fk_nkids[k] = fk_mcopy(fk_nkids[k]);
-        fk_nval[k] = fk_mcopy(fk_nval[k]);
         k = k + 1;
     }
     k = 1;
@@ -6704,9 +6950,17 @@ static void fk_melt(void) {
         fk_rbp[k] = fk_mcopy(fk_rbp[k]);
         long long rj = 0;
         while (rj < fk_rcnt[k]) {
+            fk_rkey[k][rj] = fk_mcopy(fk_rkey[k][rj]);
             fk_rval[k][rj] = fk_mcopy(fk_rval[k][rj]);
             rj = rj + 1;
         }
+        k = k + 1;
+    }
+    k = 1;
+    while (k <= fk_np) {
+        fk_ncat[k] = fk_mcopy(fk_ncat[k]);
+        fk_nkids[k] = fk_mcopy(fk_nkids[k]);
+        fk_nval[k] = fk_mcopy(fk_nval[k]);
         k = k + 1;
     }
     free(fk_hh);
@@ -6731,13 +6985,8 @@ static void fk_melt(void) {
  * the chance to speak. Two walls, one voice between them, and the mute one in
  * front. */
 static void fk_vp(long long v) {
-    if (fk_vsp >= FK_VALUE_STACK_CAP) {
-        printf("fkwu: value stack full — %lld of %lld slots, one per live call frame. "
-               "Either the recursion does not terminate, or it is deeper than this "
-               "kernel carries; the recipe-side home for deep recursion is the same "
-               "as for the walker wall — make it tail or balanced.\n",
-               (long long)fk_vsp, (long long)FK_VALUE_STACK_CAP);
-        fk_die("value-stack wall");
+    if (fk_vsp >= fk_vs_cap) {
+        fk_vs_grow(fk_vsp + 1);
     }
     fk_vs[fk_vsp] = v;
     fk_vsp = fk_vsp + 1;
@@ -6782,14 +7031,17 @@ static void fk_fn_reserve(long long needed) {
     long long *next_fnsym_n = malloc(bytes);
     long long *next_fnidx = malloc(bytes);
     long long *next_fn_heat = malloc(bytes);
+    long long *next_fn_fbox = malloc(bytes);
     if (next_fn == 0 || next_fnar == 0 || next_fnsym_s == 0 ||
-        next_fnsym_n == 0 || next_fnidx == 0 || next_fn_heat == 0) {
+        next_fnsym_n == 0 || next_fnidx == 0 || next_fn_heat == 0 ||
+        next_fn_fbox == 0) {
         free(next_fn);
         free(next_fnar);
         free(next_fnsym_s);
         free(next_fnsym_n);
         free(next_fnidx);
         free(next_fn_heat);
+        free(next_fn_fbox);
         fk_die("fk_fn_reserve: out of memory growing function image");
     }
     long long i = 0;
@@ -6800,6 +7052,7 @@ static void fk_fn_reserve(long long needed) {
         next_fnsym_n[i] = fk_fnsym_n[i];
         next_fnidx[i] = fk_fnidx[i];
         next_fn_heat[i] = fk_fn_heat[i];
+        next_fn_fbox[i] = fk_fn_fbox[i];
         i = i + 1;
     }
     while (i < next) {
@@ -6809,6 +7062,7 @@ static void fk_fn_reserve(long long needed) {
         next_fnsym_n[i] = 0;
         next_fnidx[i] = 0;
         next_fn_heat[i] = 0;
+        next_fn_fbox[i] = 0;
         i = i + 1;
     }
     free(fk_fn);
@@ -6817,18 +7071,50 @@ static void fk_fn_reserve(long long needed) {
     free(fk_fnsym_n);
     free(fk_fnidx);
     free(fk_fn_heat);
+    free(fk_fn_fbox);
     fk_fn = next_fn;
     fk_fnar = next_fnar;
     fk_fnsym_s = next_fnsym_s;
     fk_fnsym_n = next_fnsym_n;
     fk_fnidx = next_fnidx;
     fk_fn_heat = next_fn_heat;
+    fk_fn_fbox = next_fn_fbox;
     fk_fn_capacity = next;
 }
-#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as the former top-function-symbol cap), not a fundamental limit. 262144 STANDS (2026-07-18): a doubling probe disproved a capacity misread — the match-switch band's fill died at the SAME source position at 2x budget, exposing fk_sparse's stray-rparen zero-advance mint spin (fixed in the bare-symbol path), not honest growth; the source-compiler family's full ~514KB prelude closure parses well within 256K nodes. Measure (does the fill position move with the cap?) before raising. */
+#define FK_AST_NODE_CAP_INIT 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP_INIT). Birth size only -- the table DOUBLES on demand (fk_ast_reserve), so program size is not a wall; .fkb images reserve to fit before bulk-loading. History: 65536->262144 (2026-07-02, a full mel-spectrogram program); a clamp-and-halt wall stood 2026-07-18..09-02 after a doubling probe caught fk_sparse's stray-rparen zero-advance spin re-minting sentinels to the brim (677,766 diagnostics in 6s -- a treadmill, not capacity; fixed at root in the bare-symbol path). That teaching survives the wall's removal: a parse that grows without advancing fk_spos is a parser wound -- kernel_stat 23/24 (live cap / doublings) make the growth observable, and the fill-position question stays the probe. */
 static long long fk_node_count;
-static long long fk_ast_full; /* set once when the AST node table overflows; halts the parse (fk_spos:=fk_slen) so the collect-and-continue recovery cannot spin re-minting sentinels forever. Reset per run. */
-static long long fk_node[FK_AST_NODE_CAP][4];
+static long long (*fk_node)[4];
+static long long fk_ast_cap;    /* live capacity; fk_ast_reserve owns it */
+static long long fk_ast_grows;  /* doublings this run -- kernel_stat 24 */
+static void fk_ast_reserve(long long need) {
+    long long nc;
+    long long i;
+    if (fk_ast_cap == 0) {
+        fk_node = (long long (*)[4])calloc(FK_AST_NODE_CAP_INIT, 32);
+        if (fk_node == 0) {
+            fk_die("fk_ast_reserve: out of memory for the AST node table");
+        }
+        fk_ast_cap = FK_AST_NODE_CAP_INIT;
+    }
+    if (need <= fk_ast_cap) {
+        return;
+    }
+    nc = fk_ast_cap;
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    fk_node = (long long (*)[4])realloc(fk_node, (unsigned long)(nc * 32));
+    if (fk_node == 0) {
+        fk_die("fk_ast_reserve: out of memory growing the AST node table");
+    }
+    i = fk_ast_cap * 4;
+    while (i < nc * 4) {
+        fk_node[i >> 2][i & 3] = 0;
+        i = i + 1;
+    }
+    fk_ast_cap = nc;
+    fk_ast_grows = fk_ast_grows + 1;
+}
 /* Artifact/source bytes are scratch, not a language limit. The old fixed 16MiB
  * array made a valid `.fkb` turn cold again merely by crossing a historical
  * process-size number. Keep one reusable high-water buffer, grown geometrically
@@ -7013,10 +7299,16 @@ static long long fk_walk_body(long long i, long long fp) {
         }
         if (t == 109) {
             long long slot109 = fk_walk(fk_node[i][1], fp) >> 1;
-            fk_vs[fp + slot109] = fk_walk(fk_node[i][2], fp);
+            /* the RHS walk can GROW fk_vs (realloc moves it), so the walked
+             * value lands in a local first -- never an unsequenced write. */
+            long long v109 = fk_walk(fk_node[i][2], fp);
+            if (fp + slot109 >= fk_vs_cap) {
+                fk_vs_grow(fp + slot109 + 1);
+            }
+            fk_vs[fp + slot109] = v109;
             /* ROOT the let-local (see the fk_walk tag-109 note): raise fk_vsp over the
              * slot so the next form's temporaries cannot clobber it and a melt relocates it. */
-            if (fp + slot109 + 1 > fk_vsp && fp + slot109 + 1 < FK_VALUE_STACK_CAP) {
+            if (fp + slot109 + 1 > fk_vsp) {
                 fk_vsp = fp + slot109 + 1;
             }
             i = fk_node[i][3];
@@ -7049,6 +7341,7 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_vs[fp] = v12;
             fk_vsp = fp + 1;
             fk_fn_heat[c12] = fk_fn_heat[c12] + 1;
+            fk_cur_fn = c12;
             fk_heat_pulse();
             i = fk_fn[c12];
             continue;
@@ -7065,6 +7358,7 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_vs[fp + 1] = a1;
             fk_vsp = fp + 2;
             fk_fn_heat[c240] = fk_fn_heat[c240] + 1;
+            fk_cur_fn = c240;
             fk_heat_pulse();
             i = fk_fn[c240];
             continue;
@@ -7089,6 +7383,7 @@ static long long fk_walk_body(long long i, long long fp) {
             }
             fk_vsp = fp + n241;
             fk_fn_heat[c241] = fk_fn_heat[c241] + 1;
+            fk_cur_fn = c241;
             fk_heat_pulse();
             i = fk_fn[c241];
             continue;
@@ -7117,6 +7412,7 @@ static long long fk_walk_body(long long i, long long fp) {
             }
             fk_vsp = fp + n244;
             fk_fn_heat[fi244] = fk_fn_heat[fi244] + 1;
+            fk_cur_fn = fi244;
             fk_heat_pulse();
             i = fk_fn[fi244];
             continue;
@@ -7143,6 +7439,12 @@ static long long fk_walk_body(long long i, long long fp) {
             long long rev44 = 1;
             long long cc44 = caps44 >> 1;
             while (cc44 >= 1 && cc44 <= fk_hp) {
+                /* melt is unsafe mid-copy (cc44/rev44 are untraced C locals);
+                 * growth relocates nothing. Before this guard the bump wrote
+                 * PAST the arrays at the brim -- corruption, not refusal. */
+                if (fk_hp + 1 >= fk_cap) {
+                    fk_heap_grow();
+                }
                 fk_hp = fk_hp + 1;
                 fk_hh[fk_hp] = fk_hh[cc44];
                 fk_ht[fk_hp] = rev44;
@@ -7152,6 +7454,9 @@ static long long fk_walk_body(long long i, long long fp) {
             long long comb44 = args44;
             long long rr44 = rev44 >> 1;
             while (rr44 >= 1 && rr44 <= fk_hp) {
+                if (fk_hp + 1 >= fk_cap) {
+                    fk_heap_grow();
+                }
                 fk_hp = fk_hp + 1;
                 fk_hh[fk_hp] = fk_hh[rr44];
                 fk_ht[fk_hp] = comb44;
@@ -7180,6 +7485,7 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_vs[fp] = carg44;
             fk_vsp = fp + 1;
             fk_fn_heat[f44] = fk_fn_heat[f44] + 1;
+            fk_cur_fn = f44;
             fk_heat_pulse();
             i = fk_fn[f44];
             continue;
@@ -7276,6 +7582,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(v12);
         long long b12 = fk_vsp - 1;
         fk_fn_heat[c12] = fk_fn_heat[c12] + 1;
+            fk_cur_fn = c12;
         fk_heat_pulse();
         long long r12 = fk_walk_body(fk_fn[c12], b12);
         fk_vsp = b12;
@@ -7292,6 +7599,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(a1);
         long long b240 = fk_vsp - 2;
         fk_fn_heat[c240] = fk_fn_heat[c240] + 1;
+            fk_cur_fn = c240;
         fk_heat_pulse();
         long long r240 = fk_walk_body(fk_fn[c240], b240);
         fk_vsp = b240;
@@ -7310,6 +7618,7 @@ static long long fk_walk(long long i, long long fp) {
         }
         long long n241 = fk_vsp - base241;
         fk_fn_heat[c241] = fk_fn_heat[c241] + 1;
+            fk_cur_fn = c241;
         fk_heat_pulse();
         long long r241 = fk_walk_body(fk_fn[c241], base241);
         fk_vsp = base241;
@@ -7338,6 +7647,7 @@ static long long fk_walk(long long i, long long fp) {
             printf("offer-indirect fn%lld args=%lld (computed head)\n", fi244, n244);
         }
         fk_fn_heat[fi244] = fk_fn_heat[fi244] + 1;
+            fk_cur_fn = fi244;
         fk_heat_pulse();
         long long r244 = fk_walk_body(fk_fn[fi244], base244);
         fk_vsp = base244;
@@ -7346,11 +7656,19 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 13) {
         long long mi = fk_walk(fk_node[i][1], fp) >> 1;
         long long mv = fk_walk(fk_node[i][2], fp);
-        fk_mem[mi & (FK_MEM_CELL_CAP - 1)] = mv;
+        if (mi < 0) {
+            return mv;
+        }
+        fk_mem_reserve(mi + 1);
+        fk_mem[mi] = mv;
         return mv;
     }
     if (t == 14) {
-        return fk_mem[(fk_walk(fk_node[i][1], fp) >> 1) & (FK_MEM_CELL_CAP - 1)];
+        long long mi14 = fk_walk(fk_node[i][1], fp) >> 1;
+        if (mi14 < 0 || mi14 >= fk_mem_cap) {
+            return 0;
+        }
+        return fk_mem[mi14];
     }
     if (t == 18) {
         return 1;
@@ -7373,9 +7691,10 @@ static long long fk_walk(long long i, long long fp) {
             fk_melt();
         }
         if (fk_hp + 1 >= fk_cap) {
-            dprintf(2, "[cons] heap full after melt (hp=%lld cap=%lld) -- returning nil, list is CORRUPT\n", fk_hp, fk_cap);
-            fk_vsp = fk_vsp - 2;
-            return 1;
+            /* full even after the melt grew its arena: grow again rather
+             * than hand back nil as if it were the cons -- a corrupt list
+             * with a stderr note was still a corrupt list. */
+            fk_heap_grow();
         }
         fk_hp = fk_hp + 1;
         fk_hh[fk_hp] = fk_vs[fk_vsp - 2];
@@ -7458,6 +7777,11 @@ static long long fk_walk(long long i, long long fp) {
         long long rev44 = 1;
         long long cc44 = caps44 >> 1;
         while (cc44 >= 1 && cc44 <= fk_hp) {
+            /* same shape as the walker's capture copy above: growth, never
+             * an unguarded bump past the arrays. */
+            if (fk_hp + 1 >= fk_cap) {
+                fk_heap_grow();
+            }
             fk_hp = fk_hp + 1;
             fk_hh[fk_hp] = fk_hh[cc44];
             fk_ht[fk_hp] = rev44;
@@ -7467,6 +7791,9 @@ static long long fk_walk(long long i, long long fp) {
         long long comb44 = args44;
         long long rr44 = rev44 >> 1;
         while (rr44 >= 1 && rr44 <= fk_hp) {
+            if (fk_hp + 1 >= fk_cap) {
+                fk_heap_grow();
+            }
             fk_hp = fk_hp + 1;
             fk_hh[fk_hp] = fk_hh[rr44];
             fk_ht[fk_hp] = comb44;
@@ -7496,6 +7823,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(carg44);
         long long b44 = fk_vsp - 1;
         fk_fn_heat[f44] = fk_fn_heat[f44] + 1;
+            fk_cur_fn = f44;
         fk_heat_pulse();
         long long r44 = fk_walk_body(fk_fn[f44], b44);
         fk_vsp = b44;
@@ -7699,14 +8027,19 @@ static long long fk_walk(long long i, long long fp) {
     }
     if (t == 109) {
         long long slot109 = fk_walk(fk_node[i][1], fp) >> 1;
-        fk_vs[fp + slot109] = fk_walk(fk_node[i][2], fp);
+        /* the RHS walk can GROW fk_vs (realloc moves it): local first. */
+        long long v109 = fk_walk(fk_node[i][2], fp);
+        if (fp + slot109 >= fk_vs_cap) {
+            fk_vs_grow(fp + slot109 + 1);
+        }
+        fk_vs[fp + slot109] = v109;
         /* ROOT the let-local: raise fk_vsp over the slot so the body's temporaries
          * (pushed at fk_vsp) cannot overwrite it, and a compacting melt relocates it.
          * Without this a do-let chain outside a tag-111 frame reservation (e.g. a
          * top-level (do (let a ..) (let b ..) ..)) silently clobbers a while
          * evaluating b -- string-bearing list values push enough temps to reach the
          * slot. The enclosing frame/call boundary restores fk_vsp. */
-        if (fp + slot109 + 1 > fk_vsp && fp + slot109 + 1 < FK_VALUE_STACK_CAP) {
+        if (fp + slot109 + 1 > fk_vsp) {
             fk_vsp = fp + slot109 + 1;
         }
         return fk_walk(fk_node[i][3], fp);
@@ -7760,7 +8093,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 17) {
         long long ix17 = fk_walk(fk_node[i][1], fp) >> 1;
-        if (ix17 < 0 || ix17 >= fk_src_len || ix17 >= 262144) {
+        if (ix17 < 0 || ix17 >= fk_src_len) {
             return 0;
         }
         return ((long long)(unsigned char)fk_src[ix17]) << 1;
@@ -7938,16 +8271,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 43) {
         long long iv43 = fk_walk(fk_node[i][1], fp);
         long long h43 = fk_intern_key_trivial(1, iv43);
-        long long slot43 = h43 & (FK_INTERN_HASH_CAP - 1);
+        long long slot43 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot43 = h43 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot43]) {
             long long ix43 = fk_intern_tab[slot43];
             if (fk_nkind[ix43] == 1 && fk_nid[ix43][2] == 1 && fk_nval[ix43] == iv43) {
                 return fk_nbox(ix43);
             }
-            slot43 = (slot43 + 1) & (FK_INTERN_HASH_CAP - 1);
-        }
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
+            slot43 = (slot43 + 1) & (fk_intern_hash_cap - 1);
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -7966,19 +8300,20 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long sv46 = fk_walk(fk_node[i][1], fp);
         long long sa46 = fk_stri(sv46);
         long long h46 = fk_intern_key_trivial(2, sv46);
-        long long slot46 = h46 & (FK_INTERN_HASH_CAP - 1);
+        long long slot46 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot46 = h46 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot46]) {
             long long ix46 = fk_intern_tab[slot46];
             if (fk_nkind[ix46] == 1 && fk_nid[ix46][2] == 2 && fk_nval[ix46] == sv46) {
                 return fk_nbox(ix46);
             }
-            slot46 = (slot46 + 1) & (FK_INTERN_HASH_CAP - 1);
+            slot46 = (slot46 + 1) & (fk_intern_hash_cap - 1);
         }
         if (sa46 < 0 || sa46 >= fk_sp) {
             return 0;
-        }
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -8003,17 +8338,18 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (h47 == 0) {
             h47 = 1;
         }
-        long long slot47 = h47 & (FK_INTERN_HASH_CAP - 1);
+        long long slot47 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot47 = h47 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot47]) {
             long long ix47 = fk_intern_tab[slot47];
             if (fk_nkind[ix47] == 2 && fk_veq(fk_ncat[ix47], cat47) != 0 &&
                 fk_veq(fk_nkids[ix47], kids47) != 0) {
                 return fk_nbox(ix47);
             }
-            slot47 = (slot47 + 1) & (FK_INTERN_HASH_CAP - 1);
-        }
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
+            slot47 = (slot47 + 1) & (fk_intern_hash_cap - 1);
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 2;
@@ -8057,8 +8393,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (q91 >= 1 && q91 <= fk_hp) {
             in91 = fk_hh[q91] >> 1;
         }
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 3;
@@ -8075,16 +8411,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long bv112 = fk_walk(fk_node[i][1], fp);
         long long se112 = (bv112 != 0) ? (0 - 9223372036854775807LL) : (0 - 9223372036854775805LL);
         long long h112 = fk_intern_key_trivial(3, se112);
-        long long slot112 = h112 & (FK_INTERN_HASH_CAP - 1);
+        long long slot112 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot112 = h112 & (fk_intern_hash_cap - 1);
         while (fk_intern_tab[slot112]) {
             long long ix112 = fk_intern_tab[slot112];
             if (fk_nkind[ix112] == 1 && fk_nid[ix112][2] == 3 && fk_nval[ix112] == se112) {
                 return fk_nbox(ix112);
             }
-            slot112 = (slot112 + 1) & (FK_INTERN_HASH_CAP - 1);
-        }
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
+            slot112 = (slot112 + 1) & (fk_intern_hash_cap - 1);
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -8117,8 +8454,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fd113 = strtod(tb113, 0);
         }
         long long fb113 = fk_fbox(fd113);
-        if (fk_np + 1 >= FK_NODE_CAP) {
-            fk_die("fk value-node table full (FK_NODE_CAP)");
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -8387,8 +8724,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 64) {
         long long xs64 = fk_walk(fk_node[i][1], fp);
-        fk_rec_table_ensure();
         fk_rp = fk_rp + 1;
+        fk_record_reserve(fk_rp + 1);
         fk_rcnt[fk_rp] = 0;
         fk_rbp[fk_rp] = 0;
         long long q64 = xs64 >> 1;
@@ -8405,7 +8742,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 if (k64 == -1) {
                     fk_rbp[fk_rp] = v64;
                 } else {
-                    fk_rec_keys_ensure(fk_rp, fk_rcnt[fk_rp] + 1);
+                    fk_record_keys_reserve(fk_rp, fk_rcnt[fk_rp] + 1);
                     fk_rkey[fk_rp][fk_rcnt[fk_rp]] = k64;
                     fk_rval[fk_rp][fk_rcnt[fk_rp]] = v64;
                     fk_rcnt[fk_rp] = fk_rcnt[fk_rp] + 1;
@@ -8446,7 +8783,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
             j = j + 1;
         }
-        fk_rec_keys_ensure(r, fk_rcnt[r] + 1);
+        fk_record_keys_reserve(r, fk_rcnt[r] + 1);
         fk_rkey[r][fk_rcnt[r]] = key;
         fk_rval[r][fk_rcnt[r]] = val;
         fk_rcnt[r] = fk_rcnt[r] + 1;
@@ -8483,7 +8820,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         while (j > 0) {
             j = j - 1;
             if (fk_hp + 1 >= fk_cap) {
-                return out;
+                /* was a silent partial return -- the keys list simply ended
+                 * where the heap did. Growth keeps the list whole. */
+                fk_heap_grow();
             }
             fk_hp = fk_hp + 1;
             fk_hh[fk_hp] = fk_strv(fk_rkey[r][j]);
@@ -8996,7 +9335,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
             j = j + 1;
         }
-        fk_rec_keys_ensure(r, fk_rcnt[r] + 1);
+        fk_record_keys_reserve(r, fk_rcnt[r] + 1);
         fk_rkey[r][fk_rcnt[r]] = key;
         fk_rval[r][fk_rcnt[r]] = val;
         fk_rcnt[r] = fk_rcnt[r] + 1;
@@ -9151,10 +9490,62 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 18) {
             return fk_import_refusal << 1;
         }
+        /* 19..30: the growth pulses -- value-node table, cons heap, AST
+         * table, source text, value stack, binding stack (live cap /
+         * doublings each). There are no walls any more; a runaway
+         * consumer shows as monotone growth. */
+        if (ks_k == 19) {
+            return fk_node_cap << 1;
+        }
+        if (ks_k == 20) {
+            return fk_node_grows << 1;
+        }
+        if (ks_k == 21) {
+            return fk_cap << 1;
+        }
+        if (ks_k == 22) {
+            return fk_heap_grows << 1;
+        }
+        if (ks_k == 23) {
+            return fk_ast_cap << 1;
+        }
+        if (ks_k == 24) {
+            return fk_ast_grows << 1;
+        }
+        if (ks_k == 25) {
+            return fk_srctext_cap << 1;
+        }
+        if (ks_k == 26) {
+            return fk_srctext_grows << 1;
+        }
+        if (ks_k == 27) {
+            return fk_vs_cap << 1;
+        }
+        if (ks_k == 28) {
+            return fk_vs_grows << 1;
+        }
+        if (ks_k == 29) {
+            return fk_bd_cap << 1;
+        }
+        if (ks_k == 30) {
+            return fk_bd_grows << 1;
+        }
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
         }
         return 0;
+    }
+    if (t == 147) {
+        /* node_at: the census atom. The value-node table is the body's own
+         * tissue; this door hands Form the i-th node so Form-side lenses can
+         * walk 1..kernel_stat(4) and fold their own histograms -- blueprint
+         * occupancy, allocation sites via node_source -- without the kernel
+         * choosing what a census means. Out of range answers nothing. */
+        long long ix147 = fk_walk(fk_node[i][1], fp) >> 1;
+        if (ix147 < 1 || ix147 > fk_np) {
+            return fk_nothing;
+        }
+        return fk_nbox(ix147);
     }
     if (t == 128) {
         long long fr_nv = fk_walk(fk_node[i][1], fp);
@@ -9166,8 +9557,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_nsline[fr_ni] = fr_pk >> 16;
             fk_nscol[fr_ni] = fr_pk & 65535;
             fk_nsattr[fr_ni] = 1;
-            if (fk_fbn >= FK_NODE_CAP) {
-                fk_die("fk fbroots table full (FK_NODE_CAP): GC root registration would be silently dropped");
+            if (fk_fbn >= fk_node_cap) {
+                fk_nodes_grow();
             }
             fk_fbroots[fk_fbn] = fr_nv;
             fk_fbn = fk_fbn + 1;
@@ -9186,7 +9577,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         while (fe_i > 0) {
             fe_i = fe_i - 1;
             if (fk_hp + 1 >= fk_cap) {
-                fk_die("fk_walk tag 129: heap exhausted draining fbroots after melt -- silently skipping a root would return a truncated root list, live roots dropped without witness.");
+                fk_heap_grow();
             }
             fk_hp = fk_hp + 1;
             fk_hh[fk_hp] = fk_fbroots[fe_i];
@@ -9376,8 +9767,33 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
  * control forms defn/do/let/if keep hand-written shape here — their eval semantics are special.
  * Every VALUE form is data: arity-0 ((empty)->18), arity-1/2/3 primitives, and the arity -1
  * VARIADIC sentinel ((list ..)->cons/19). */
-#define FK_SOURCE_TEXT_CAP 8388608 /* fk_srctext: the parsed program's own source text (distinct from fk_src, the staged input buffer). Raised 262144->8388608 (2026-07-02): a 267KB generated --src program (1,200 audio-clip paths) was SILENTLY truncated at 262,143 bytes by fk_run_src's single bounded read; the permissive reader auto-closed the amputated program and ran it, yielding a deterministic wrong answer with no error -- the "N=100 cliff". fk_run_src now reads to EOF and dies loudly if the program exceeds this cap. */
-static char fk_srctext[FK_SOURCE_TEXT_CAP];
+#define FK_SOURCE_TEXT_CAP_INIT 8388608 /* fk_srctext: the parsed program's own source text (distinct from fk_src, the staged input buffer). Birth size only -- the buffer DOUBLES on demand (fk_srctext_reserve), so program text is not a wall. History: 262144->8388608 (2026-07-02) after a 267KB generated program was SILENTLY truncated at the old cap and the permissive reader auto-closed the amputated program -- the "N=100 cliff"; then a loud refusal at 8MB; growth since 2026-09-02 (kernel_stat 25/26 = live cap / doublings). */
+static char *fk_srctext;
+static void fk_srctext_reserve(long long need) {
+    long long nc;
+    char *q;
+    if (fk_srctext_cap == 0) {
+        fk_srctext = malloc(FK_SOURCE_TEXT_CAP_INIT);
+        if (fk_srctext == 0) {
+            fk_die("fk_srctext_reserve: out of memory for the source-text buffer");
+        }
+        fk_srctext_cap = FK_SOURCE_TEXT_CAP_INIT;
+    }
+    if (need <= fk_srctext_cap) {
+        return;
+    }
+    nc = fk_srctext_cap;
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    q = realloc(fk_srctext, (unsigned long)nc);
+    if (q == 0) {
+        fk_die("fk_srctext_reserve: out of memory growing the source-text buffer");
+    }
+    fk_srctext = q;
+    fk_srctext_cap = nc;
+    fk_srctext_grows = fk_srctext_grows + 1;
+}
 static long long fk_spos;
 static long long fk_slen;
 /* clang-style "fkwu:line:col: sev: msg". `off` is a byte offset into fk_srctext;
@@ -9470,44 +9886,71 @@ static long long fk_heat_total;
 static int fk_heat_reported;
 
 static void fk_heat_write(void) {
-    long long i = 0, top = fk_fn_count;
-    char path[96], tmp[112];
+    long long top = fk_fn_count;
+    char path[96], tmp[112], bpath[96], btmp[112];
     sprintf(path, ".fkwu-heat.%d", getpid());
     sprintf(tmp, ".fkwu-heat.%d.tmp", getpid());
+    sprintf(bpath, ".fkwu-boxing.%d", getpid());
+    sprintf(btmp, ".fkwu-boxing.%d.tmp", getpid());
     int fd = -1;
+    int bfd = -1;
     /* NAME BY THE MAP, NOT BY COINCIDENCE: heat is per fn-INDEX, names
      * live in the symbol table keyed by fk_fnidx[symtop] -> fnidx. On a
      * fresh compile the two spaces coincide and indexing symbols with
      * the fn index happens to print names; on an image load fn_base
      * remapping divorces them and warm runs burned NAMELESS (witnessed
-     * 2026-09-02: bare counts in .fkwu-heat.<pid> from .fkb-loaded
-     * processes). Walk the symbol table and follow the map; any hot fn
-     * no symbol names prints as fn#N — counted work is never blank. */
+     * 2026-09-02, twice, by two hands -- warmname and mirrorburn healed
+     * the same wound the same day). Walk the symbol table and follow
+     * the map; any hot fn no symbol names prints as fn#N -- counted
+     * work is never blank. Beside the heat board, .fkwu-boxing carries
+     * per-recipe float MINTS (fk_fn_fbox): the unboxing worklist -- a
+     * recipe hot there allocates a float-pool slot per result where an
+     * unboxed lane would not. Printed entries are negate-marked so the
+     * numbered sweep never repeats them, then restored. */
     long long j = 0;
     while (j < fk_fntop) {
         long long fx = fk_fnidx[j];
-        if (fx >= 0 && fx < top && fk_fn_heat[fx] >= FK_HEAT_REPORT_MIN) {
-            if (fd < 0) {
-                fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fx >= 0 && fx < top) {
+            if (fk_fn_heat[fx] >= FK_HEAT_REPORT_MIN) {
                 if (fd < 0) {
-                    return;
+                    fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
                 }
+                if (fd >= 0) {
+                    dprintf(fd, "%lld %.*s\n", fk_fn_heat[fx],
+                            (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]);
+                }
+                fk_fn_heat[fx] = 0 - fk_fn_heat[fx] - 1;
             }
-            dprintf(fd, "%lld %.*s\n", fk_fn_heat[fx],
-                    (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]);
-            fk_fn_heat[fx] = 0 - fk_fn_heat[fx] - 1;
+            if (fk_fn_fbox != 0 && fk_fn_fbox[fx] >= 1024) {
+                if (bfd < 0) {
+                    bfd = open(btmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+                }
+                if (bfd >= 0) {
+                    dprintf(bfd, "%lld %.*s\n", fk_fn_fbox[fx],
+                            (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]);
+                }
+                fk_fn_fbox[fx] = 0 - fk_fn_fbox[fx] - 1;
+            }
         }
         j = j + 1;
     }
+    long long i = 0;
     while (i < top) {
         if (fk_fn_heat[i] >= FK_HEAT_REPORT_MIN) {
             if (fd < 0) {
                 fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-                if (fd < 0) {
-                    break;
-                }
             }
-            dprintf(fd, "%lld fn#%lld\n", fk_fn_heat[i], i);
+            if (fd >= 0) {
+                dprintf(fd, "%lld fn#%lld\n", fk_fn_heat[i], i);
+            }
+        }
+        if (fk_fn_fbox != 0 && fk_fn_fbox[i] >= 1024) {
+            if (bfd < 0) {
+                bfd = open(btmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            }
+            if (bfd >= 0) {
+                dprintf(bfd, "%lld fn#%lld\n", fk_fn_fbox[i], i);
+            }
         }
         i = i + 1;
     }
@@ -9516,15 +9959,28 @@ static void fk_heat_write(void) {
         if (fk_fn_heat[i] < 0) {
             fk_fn_heat[i] = 0 - (fk_fn_heat[i] + 1);
         }
+        if (fk_fn_fbox != 0 && fk_fn_fbox[i] < 0) {
+            fk_fn_fbox[i] = 0 - (fk_fn_fbox[i] + 1);
+        }
         i = i + 1;
     }
-    if (fd >= 0 && close(fd) == 0) {
-        if (rename(tmp, path) == 0) {
-            return;
+    if (fd >= 0) {
+        if (close(fd) == 0) {
+            if (rename(tmp, path) != 0) {
+                unlink(tmp);
+            }
+        } else {
+            unlink(tmp);
         }
     }
-    if (fd >= 0) {
-        unlink(tmp);
+    if (bfd >= 0) {
+        if (close(bfd) == 0) {
+            if (rename(btmp, bpath) != 0) {
+                unlink(btmp);
+            }
+        } else {
+            unlink(btmp);
+        }
     }
 }
 static void fk_heat_report(void) {
@@ -9689,25 +10145,8 @@ static int fk_divergent_param_name(long long s, long long n) {
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3) {
     long long k = fk_node_count;
     fk_node_count = fk_node_count + 1;
-    if (fk_node_count > FK_AST_NODE_CAP) {
-        /* COMPILE-PHASE (parser allocator): program too large, not corruption.
-         * DON'T mint a new node; clamp the count back and reuse the last valid slot
-         * (a valid index, never OOB, so this is safe at runtime too). Diagnose ONCE
-         * and HALT the parse by forcing EOF. Without the halt, a program whose parser
-         * mints unbounded nodes re-hits this forever now that collect-and-continue
-         * replaced the old fk_die -- MEASURED at 677,766 diagnostics in 6s on
-         * resource-port.fk, a CPU-spin, not an OOM. Forcing fk_spos=fk_slen terminates
-         * every parse loop (they all gate on fk_spos<fk_slen); the accumulated error
-         * then refuses the run. This restores the old fk_die's BOUND as a clean stop. */
-        fk_node_count = FK_AST_NODE_CAP;
-        if (fk_ast_full == 0) {
-            fk_diag(FK_DIAG_ERR, fk_spos,
-                    "AST node table full at node %lld; program too large (raise FK_AST_NODE_CAP) -- halting parse",
-                    (long long)FK_AST_NODE_CAP);
-            fk_ast_full = 1;
-        }
-        fk_spos = fk_slen;
-        return FK_AST_NODE_CAP - 1;
+    if (fk_node_count > fk_ast_cap) {
+        fk_ast_reserve(fk_node_count);
     }
     fk_node[k][0] = t0;
     fk_node[k][1] = c1;
@@ -9815,8 +10254,8 @@ static long long fk_smkstr(void) {
  * slot). A bare bound name lowers to tag 110 (read fk_vs[fp+slot]); a let lowers to tag 109 (store
  * then body); a function reserves fk_maxslot slots (tag 111). Over-reserve is safe (form-flatten
  * over-reserves too). */
-#define FK_BD_STACK_CAP 1024 /* fk_bd_*: max bindings simultaneously in scope during parse. Raised 128->1024 (2026-07-02): a single scope with many sequential lets (generated classifier programs) can exceed 128, and a silently dropped binding miscompiles variable references. Same raisable-constant class as FK_NODE_CAP; overflow now dies loudly instead of dropping a binding. */
-static long long fk_bd_s[FK_BD_STACK_CAP], fk_bd_n[FK_BD_STACK_CAP], fk_bd_off[FK_BD_STACK_CAP], fk_bd_top, fk_maxslot;
+#define FK_BD_STACK_CAP_INIT 1024 /* fk_bd_*: bindings simultaneously in scope during parse; birth size only -- the stack doubles on demand (kernel_stat 29/30). History: 128->1024 (2026-07-02) when a silent drop miscompiled references; then a loud decline; growth since 2026-09-02. */
+static long long *fk_bd_s, *fk_bd_n, *fk_bd_off, fk_bd_top, fk_maxslot;
 static long long fk_bd_lookup(long long s, long long n) {
     long long i = fk_bd_top;
     while (i > 0) {
@@ -9828,18 +10267,18 @@ static long long fk_bd_lookup(long long s, long long n) {
     return -1;
 }
 static void fk_bd_push(long long s, long long n, long long off) {
-    if (fk_bd_top >= FK_BD_STACK_CAP) {
-        /* COMPILE-PHASE: too many bindings live in one scope. The old fear was a
-         * SILENT drop miscompiling references; answer it by dropping LOUDLY, not
-         * by halting. DECLINE the push (leave fk_bd_top at cap); this name then
-         * misses fk_bd_lookup and lowers to the unbound default 0 / unresolved-
-         * call witness -- axiom-5's existing recovery. The rest of the source is
-         * still fully checked. */
-        fk_diag(FK_DIAG_ERR, fk_spos,
-                "[scope-overflow] binding '%.*s' dropped: more than %d bindings in scope "
-                "(raise FK_BD_STACK_CAP); this name resolves to the unbound default",
-                (int)n, fk_srctext + s, (int)FK_BD_STACK_CAP);
-        return;
+    if (fk_bd_top >= fk_bd_cap) {
+        long long nc = fk_bd_cap == 0 ? FK_BD_STACK_CAP_INIT : fk_bd_cap * 2;
+        fk_bd_s = (long long *)realloc(fk_bd_s, (unsigned long)(nc * 8));
+        fk_bd_n = (long long *)realloc(fk_bd_n, (unsigned long)(nc * 8));
+        fk_bd_off = (long long *)realloc(fk_bd_off, (unsigned long)(nc * 8));
+        if (fk_bd_s == 0 || fk_bd_n == 0 || fk_bd_off == 0) {
+            fk_die("fk_bd_push: out of memory growing the binding stack");
+        }
+        if (fk_bd_cap != 0) {
+            fk_bd_grows = fk_bd_grows + 1;
+        }
+        fk_bd_cap = nc;
     }
     fk_bd_s[fk_bd_top] = s;
     fk_bd_n[fk_bd_top] = n;
@@ -9890,9 +10329,9 @@ static void fk_parse_top(void);
  * a registered name lowers to tag 12 (call-by-index, single-arg). A non-defn top form is the root
  * (fn[0]). */
 /* Function symbols share the demand-grown storage declared with fk_fn. */
-#define FK_TOP_CONST_CAP 512
-static long long fk_const_s[FK_TOP_CONST_CAP], fk_const_n[FK_TOP_CONST_CAP],
-    fk_const_node[FK_TOP_CONST_CAP], fk_const_top;
+#define FK_TOP_CONST_CAP_INIT 512 /* top-level constant table birth size; doubles on demand */
+static long long *fk_const_s, *fk_const_n, *fk_const_node, fk_const_top;
+static long long fk_const_cap;
 static long long fk_fn_lookup(long long s, long long n) {
     long long i = 0;
     while (i < fk_fntop) {
@@ -9922,14 +10361,20 @@ static void fk_const_set(long long s, long long n, long long node) {
         }
         i = i + 1;
     }
-    if (fk_const_top < FK_TOP_CONST_CAP) {
-        fk_const_s[fk_const_top] = s;
-        fk_const_n[fk_const_top] = n;
-        fk_const_node[fk_const_top] = node;
-        fk_const_top = fk_const_top + 1;
-        return;
+    if (fk_const_top >= fk_const_cap) {
+        long long nc = fk_const_cap == 0 ? FK_TOP_CONST_CAP_INIT : fk_const_cap * 2;
+        fk_const_s = (long long *)realloc(fk_const_s, (unsigned long)(nc * 8));
+        fk_const_n = (long long *)realloc(fk_const_n, (unsigned long)(nc * 8));
+        fk_const_node = (long long *)realloc(fk_const_node, (unsigned long)(nc * 8));
+        if (fk_const_s == 0 || fk_const_n == 0 || fk_const_node == 0) {
+            fk_die("fk_const_set: out of memory growing the top-level constant table");
+        }
+        fk_const_cap = nc;
     }
-    fk_die("fk_const_set: top-level constant table full");
+    fk_const_s[fk_const_top] = s;
+    fk_const_n[fk_const_top] = n;
+    fk_const_node[fk_const_top] = node;
+    fk_const_top = fk_const_top + 1;
 }
 static long long fk_parse_variadic(long long tag);
 static long long fk_parse_fixed_list(long long n);
@@ -11195,8 +11640,33 @@ static long long *fk_src_dep_text_len;
 static long long fk_src_dep_count;
 static long long fk_src_dep_cap;
 static char fk_src_root_path[4096];
-static char fk_src_root_text[FK_SOURCE_TEXT_CAP];
+static char *fk_src_root_text;
+static long long fk_src_root_cap;
 static long long fk_src_root_len;
+static void fk_src_root_reserve(long long need) {
+    long long nc;
+    char *q;
+    if (fk_src_root_cap == 0) {
+        fk_src_root_text = malloc(FK_SOURCE_TEXT_CAP_INIT);
+        if (fk_src_root_text == 0) {
+            fk_die("fk_src_root_reserve: out of memory for the root source buffer");
+        }
+        fk_src_root_cap = FK_SOURCE_TEXT_CAP_INIT;
+    }
+    if (need <= fk_src_root_cap) {
+        return;
+    }
+    nc = fk_src_root_cap;
+    while (nc < need) {
+        nc = nc * 2;
+    }
+    q = realloc(fk_src_root_text, (unsigned long)nc);
+    if (q == 0) {
+        fk_die("fk_src_root_reserve: out of memory growing the root source buffer");
+    }
+    fk_src_root_text = q;
+    fk_src_root_cap = nc;
+}
 
 static void fk_cstr_copy(char *dst, const char *src, long long cap);
 
@@ -11541,25 +12011,35 @@ static int fk_src_unit_hash_range(long long start, long long end, char *out, lon
     long long pos = 0;
     long long i = start;
     char canon[4096];
-    /* v1 -> v2: the identity now carries a content digest. Every v1 artifact is
-     * invalidated by the tag change rather than trusted, because a v1 artifact
-     * cannot testify about the content it was written from. */
-    if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v2")) {
-        return 0;
-    }
+    unsigned long long fold = 14695981039346656037ULL;
+    long long count = 0;
+    /* v2 -> v3: the identity was the full dependency text, and a unit past
+     * ~120 deps could not state its own identity -- the buffer walled and the
+     * load refused, a program-size wall in the dep dimension. The identity is
+     * compare-only (written to .sym/.fkb, read back for equality), so a
+     * streamed FNV-1a fold over the SAME fields carries the same testimony at
+     * constant size: any dep's canonical path, mtime, size, or content digest
+     * change changes the fold. The format bump invalidates v2 artifacts once,
+     * the same door v1 -> v2 walked (a v2 artifact cannot testify in v3's
+     * voice); the dep COUNT stays readable beside the fold. */
     while (i < end && i < fk_src_dep_count) {
-        if (!fk_source_hash_append(out, cap, &pos, "|") ||
-            !fk_source_hash_append(out, cap, &pos, fk_path_canon_id(fk_src_dep_path[i], canon)) ||
-            !fk_source_hash_append(out, cap, &pos, "@") ||
-            !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_mtime[i]) ||
-            !fk_source_hash_append(out, cap, &pos, ":") ||
-            !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_size[i]) ||
-            !fk_source_hash_append(out, cap, &pos, "#") ||
-            !fk_source_hash_append_ll(out, cap, &pos,
-                                      (long long)(fk_src_dep_digest[i] >> 1))) {
-            return 0;
-        }
+        const char *cid = fk_path_canon_id(fk_src_dep_path[i], canon);
+        fold = fold ^ fk_bytes_fnv1a(cid, fk_path_len(cid));
+        fold = fold * 1099511628211ULL;
+        fold = fold ^ (unsigned long long)fk_src_dep_mtime[i];
+        fold = fold * 1099511628211ULL;
+        fold = fold ^ (unsigned long long)fk_src_dep_size[i];
+        fold = fold * 1099511628211ULL;
+        fold = fold ^ fk_src_dep_digest[i];
+        fold = fold * 1099511628211ULL;
+        count = count + 1;
         i = i + 1;
+    }
+    if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v3|n=") ||
+        !fk_source_hash_append_ll(out, cap, &pos, count) ||
+        !fk_source_hash_append(out, cap, &pos, "|") ||
+        !fk_source_hash_append_ll(out, cap, &pos, (long long)(fold >> 1))) {
+        return 0;
     }
     return 1;
 }
@@ -11569,10 +12049,7 @@ static int fk_src_unit_hash(char *out, long long cap) {
 static int fk_src_line_is_bare_import_fk(const char *text, long long line_start, long long line_end);
 static int fk_src_append_text(const char *path, const char *text, long long n) {
     long long line_start = 0;
-    if (fk_slen + n + 2 >= FK_SOURCE_TEXT_CAP) {
-        fk_diag_path("error", path, "combined .fk dependency unit exceeds FK_SOURCE_TEXT_CAP");
-        return 0;
-    }
+    fk_srctext_reserve(fk_slen + n + 2);
     while (line_start < n) {
         long long line_end = line_start;
         while (line_end < n && text[line_end] != FK_CH_LF && text[line_end] != FK_CH_CR) {
@@ -11945,11 +12422,7 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
     fk_src_dep_text_len[fk_src_dep_count] = 0;
     fk_src_dep_count = fk_src_dep_count + 1;
     if (fk_cstr_eq(path, fk_src_root_path)) {
-        if (got + 1 > FK_SOURCE_TEXT_CAP) {
-            free(owned);
-            fk_diag_path("error", path, "root source exceeds FK_SOURCE_TEXT_CAP");
-            return 0;
-        }
+        fk_src_root_reserve(got + 1);
         i = 0;
         while (i < got) {
             fk_src_root_text[i] = owned[i];
@@ -12601,9 +13074,7 @@ static int fk_fkb_read_symbol_to_srctext(long long *start, long long *len) {
         fk_fkb_mark_bad("truncated symbol string");
         return 0;
     }
-    if (fk_slen + n + 4 >= FK_SOURCE_TEXT_CAP) {
-        return 0;
-    }
+    fk_srctext_reserve(fk_slen + n + 4);
     fk_srctext[fk_slen] = FK_CH_SEMI;
     fk_slen = fk_slen + 1;
     fk_srctext[fk_slen] = FK_CH_SPACE;
@@ -12704,10 +13175,11 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         i = i + 1;
     }
     long long nr = fk_fkb_read_signed();
-    if (nr < 0 || fk_node_count + nr > FK_AST_NODE_CAP) {
+    if (nr < 0 || nr > fk_fkb_len) {
         free(fn_roots);
         return 0;
     }
+    fk_ast_reserve(fk_node_count + nr);
     i = 0;
     while (!fk_fkb_bad && i < nr) {
         long long tag = fk_fkb_read_signed();
@@ -12857,33 +13329,6 @@ static int fk_fkb_restore_symbol_image(long long version) {
     }
     return !fk_fkb_bad;
 }
-static void fk_fkb_skip_symbol_image(long long version) {
-    long long symbol_count = fk_fkb_read_signed();
-    long long i = 0;
-    while (!fk_fkb_bad && i < symbol_count) {
-        (void)fk_fkb_read_signed();
-        if (version >= 3) {
-            (void)fk_fkb_read_signed();
-            (void)fk_fkb_read_signed();
-        }
-        fk_fkb_skip_string();
-        i = i + 1;
-    }
-    long long node_symbol_count = fk_fkb_read_signed();
-    i = 0;
-    while (!fk_fkb_bad && i < node_symbol_count) {
-        (void)fk_fkb_read_signed();
-        (void)fk_fkb_read_signed();
-        long long dep_count = fk_fkb_read_signed();
-        long long d = 0;
-        while (!fk_fkb_bad && d < dep_count) {
-            (void)fk_fkb_read_signed();
-            (void)fk_fkb_read_signed();
-            d = d + 1;
-        }
-        i = i + 1;
-    }
-}
 static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_src_path,
                                    const char *expected_source_hash,
                                    long long expected_source_mtime) {
@@ -12983,10 +13428,11 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         i = i + 1;
     }
     long long nr = fk_fkb_read_signed();
-    if (nr < 0 || nr > FK_AST_NODE_CAP) {
-        fk_fkb_mark_bad("node count exceeds capacity");
+    if (nr < 0 || nr > fk_fkb_len) {
+        fk_fkb_mark_bad("node count exceeds image size");
         return 0;
     }
+    fk_ast_reserve(nr);
     fk_node_count = nr;
     i = 0;
     while (!fk_fkb_bad && i < nr) {
@@ -13170,7 +13616,6 @@ static void fk_src_reset_compile_state(void) {
     fk_fname_n = 0;
     fk_fn_count = 1;
     fk_node_count = 0;
-    fk_ast_full = 0;
     fk_bd_top = 0;
     fk_maxslot = 0;
     fk_nerr = 0;
@@ -13192,7 +13637,7 @@ static void fk_src_reset_compile_state(void) {
  * answer to the WRONG text, which is exactly why nothing downstream can catch it. Every band
  * in this body is one `(do ...)` form, so a single missing character anywhere in a band file
  * yields a plausible verdict that reads green (Stone 41 watched one return 1023 that way, and
- * the FK_SOURCE_TEXT_CAP comment above records the same family biting once before as the
+ * the FK_SOURCE_TEXT_CAP_INIT comment above records the same family biting once before as the
  * "N=100 cliff"). It needs no unusual naming -- unlike [unbound-name] or [shadowed-primitive]
  * it is reachable by a typo.
  *
@@ -13330,8 +13775,8 @@ static int fk_src_compile_artifact_only(const char *path) {
     long long saved_dep_count = fk_src_dep_count;
     char saved_root_path[4096];
     long long saved_root_len = fk_src_root_len;
-    char *saved_root_text = malloc(FK_SOURCE_TEXT_CAP);
-    char *saved_srctext = malloc(FK_SOURCE_TEXT_CAP);
+    char *saved_root_text = malloc((unsigned long)(saved_root_len + 2));
+    char *saved_srctext = malloc((unsigned long)(fk_slen + 1));
     char (*saved_dep_path)[4096] = saved_dep_count > 0 ?
         malloc(sizeof(*saved_dep_path) * (unsigned long)saved_dep_count) : 0;
     long long *saved_dep_mtime = saved_dep_count > 0 ?
@@ -13367,8 +13812,12 @@ static int fk_src_compile_artifact_only(const char *path) {
     fk_cstr_copy(saved_root_path, fk_src_root_path, 4096);
     long long saved_slen = fk_slen;
     long long i = 0;
-    while (i < FK_SOURCE_TEXT_CAP) {
+    while (i < saved_root_len + 1) {
         saved_root_text[i] = fk_src_root_text[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < saved_slen) {
         saved_srctext[i] = fk_srctext[i];
         i = i + 1;
     }
@@ -13414,9 +13863,15 @@ static int fk_src_compile_artifact_only(const char *path) {
     fk_cstr_copy(fk_src_root_path, saved_root_path, 4096);
     fk_src_root_len = saved_root_len;
     fk_slen = saved_slen;
+    fk_src_root_reserve(saved_root_len + 2);
+    fk_srctext_reserve(saved_slen + 1);
     i = 0;
-    while (i < FK_SOURCE_TEXT_CAP) {
+    while (i < saved_root_len + 1) {
         fk_src_root_text[i] = saved_root_text[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < saved_slen) {
         fk_srctext[i] = saved_srctext[i];
         i = i + 1;
     }
@@ -13785,6 +14240,7 @@ static int fk_run_feval(const char *path) {
      * copy). */
     long long w = 0;
     long long cap = 262143;
+    fk_srctext_reserve(cap + 1);
     const char *helpers =
         "(defn char_at (s i) (substring s i (add i 1)))\n(defn ord (c) (str_byte_at c 0))\n";
     long long hi = 0;
@@ -13809,7 +14265,7 @@ static int fk_run_feval(const char *path) {
     close(efd);
     if (eg < 0) {
         if (eg == -2) {
-            fk_die("fk_run_feval: form-eval source exceeds FK_SOURCE_TEXT_CAP");
+            fk_die("fk_run_feval: form-eval source exceeds the form-eval build buffer");
         }
         return 5;
     }
@@ -13872,7 +14328,6 @@ static int fk_run_feval(const char *path) {
     fk_arg_n = 0;
     fk_fname_n = 0;
     fk_node_count = 0;
-    fk_ast_full = 0;
     fk_bd_top = 0;
     fk_maxslot = 0;
     fk_nerr = 0;
@@ -13957,8 +14412,19 @@ static int fk_run_feval(const char *path) {
  * anyway). Shrink note: this leaves when Form owns its own argv port. */
 static void fk_stage_input(const char *s) {
     long long i = 0;
+    long long n = 0;
     if (!s) { fk_src_len = 0; return; }
-    while (s[i] != 0 && i < FK_STAGED_INPUT_CAP - 1) { fk_src[i] = s[i]; i++; }
+    while (s[n] != 0) { n = n + 1; }
+    if (n + 1 > fk_src_cap) {
+        long long nc = fk_src_cap == 0 ? FK_STAGED_INPUT_CAP_INIT : fk_src_cap;
+        char *q;
+        while (nc < n + 1) { nc = nc * 2; }
+        q = realloc(fk_src, (unsigned long)nc);
+        if (q == 0) { fk_die("fk_stage_input: out of memory growing the staged-input buffer"); }
+        fk_src = q;
+        fk_src_cap = nc;
+    }
+    while (i < n) { fk_src[i] = s[i]; i = i + 1; }
     fk_src[i] = 0;
     fk_src_len = i;
 }
@@ -14050,8 +14516,9 @@ static int fk_hex16_parse(const char *p, unsigned long long *out) {
  * sibling's surface (fcpclb-* defs truncated away, 2026-09-01). Every
  * file the floor compile would load is folded in; a visited list keeps
  * the walk finite. */
-#define FK_FLOOR_DEP_CAP 128
-static char fk_floor_seen[FK_FLOOR_DEP_CAP][4096];
+#define FK_FLOOR_DEP_CAP_INIT 128 /* floor-chain dep rows birth size; grows -- a dep past the old fixed 128 was SILENTLY skipped by the digest fold, so a stale .lowfk memo could ride as fresh when that dep changed */
+static char (*fk_floor_seen)[4096];
+static long long fk_floor_cap;
 static long long fk_floor_seen_n;
 static int fk_floor_seen_has(const char *p) {
     long long i = 0;
@@ -14067,8 +14534,16 @@ static unsigned long long fk_bml_floor_fold(const char *path, unsigned long long
     long long n = 0;
     char *text;
     long long i;
-    if (fk_floor_seen_n >= FK_FLOOR_DEP_CAP || fk_floor_seen_has(path)) {
+    if (fk_floor_seen_has(path)) {
         return h;
+    }
+    if (fk_floor_seen_n >= fk_floor_cap) {
+        long long nc = fk_floor_cap == 0 ? FK_FLOOR_DEP_CAP_INIT : fk_floor_cap * 2;
+        fk_floor_seen = (char (*)[4096])realloc(fk_floor_seen, (unsigned long)(nc * 4096));
+        if (fk_floor_seen == 0) {
+            fk_die("fk_bml_floor_fold: out of memory growing the floor dep table");
+        }
+        fk_floor_cap = nc;
     }
     fk_cstr_copy(fk_floor_seen[fk_floor_seen_n], path, 4096);
     fk_floor_seen_n = fk_floor_seen_n + 1;
@@ -14386,6 +14861,7 @@ static int fk_run_bml(const char *path, long long arg) {
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
     fk_stack_base = &fk_stack_here;
+    fk_nodes_init();
     if (argc < 2) {
         return 1;
     }
