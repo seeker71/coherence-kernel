@@ -20,7 +20,10 @@ section [form.bml] {
         field NoTargetRule = "empty-target-selects-the-nearest-completed-turn-without-emitting-its-content";
         field ProgressPrefix = "turn-evidence-refresh=progress";
         field CollectorRule = "typed-prefix-selects-rows-output-span-stays-coordinate-owned";
-        field ProcessingBytes = 4194304;
+        field StaleExpiryRule = "latestness-disproved-expires-current-row-before-next-cursor-step";
+        field OneMovementRule = "one-invocation-owns-one-bounded-evidence-movement";
+        field ProcessingBytes = 2097152;
+        field AttentionMs = 5000;
         field LatestTag = "form-cli-turn-evidence-latest-v1";
         field ValidationTag = "turn-evidence-latest-validation-v1";
 
@@ -29,7 +32,13 @@ section [form.bml] {
         def fctec-no-target-rule() = NoTargetRule();
         def fctec-progress-prefix() = ProgressPrefix();
         def fctec-collector-rule() = CollectorRule();
+        def fctec-stale-expiry-rule() = StaleExpiryRule();
+        def fctec-one-movement-rule() = OneMovementRule();
         def fctec-processing-bytes() = ProcessingBytes();
+        def fctec-attention-ms() = AttentionMs();
+        def fctec-attention-state(elapsed) = if le(elapsed, fctec-attention-ms()) then "within" else "over";
+        def fctec-invocation-action(valid, validating, staleExpired) = if eq(valid, 1) then "already-observed" else if eq(validating, 1) then "validating-latest" else if eq(staleExpired, 1) then "expired-stale-current-row" else "advance";
+        def fctec-invocation-status(action) = str_concat("turn-evidence-refresh=", action);
         def fctec-progress?(status) = if ge(str_find(status, fctec-progress-prefix(), 0), 0) then 1 else 0;
 
         // result = found? absolute-event-offset window-end.  `found?=0` and
@@ -50,6 +59,13 @@ section [form.bml] {
         def fctec-latest-size(result) = nth(result, 4);
         def fctec-latest?(result) = eq(fctec-latest-status(result), 1);
         def fctec-latest-progress?(result) = eq(fctec-latest-status(result), 2);
+
+        def fctec-expire-stale(rowPath, validationPath) {
+            let validationCleared = write_file_text(validationPath, "");
+            let rowCleared = write_file_text(rowPath, "");
+            list("turn-evidence-stale-expiry-v1", validationCleared, rowCleared);
+        }
+        def fctec-expire-current-stale() = fctec-expire-stale(fctel-observed-row-path(), fctel-latest-validation-path());
 
         // status: 0 stale/error, 1 latest, 2 bounded validation in motion.
         def fctec-latest-step-grown(path, carrier_size, complete_at, end, size) {
@@ -94,7 +110,7 @@ section [form.bml] {
             if and(eq(matched, 1), gt(size, prior_size)) then fctec-validation-grown(e, path, size, prior_size, cursor) else fctec-validation-continue(e, path, size, cursor);
         }
 
-        // One invocation reads one aligned bounded 4 MiB slice. A miss returns the
+        // One invocation reads one aligned bounded 2 MiB slice. A miss returns the
         // next durable byte cursor; it never recursively consumes the rollout.
         def fctec-seek(path, target, end) {
             let window = fctel-discovery-window(path, end);
@@ -126,7 +142,7 @@ section [form.bml] {
 
         // Land the one discovered coordinate back into the existing collector
         // before asking it to parse the selected task.  The collector selects
-        // typed rows from a bounded 4 MiB window; output size and @form receipt
+        // typed rows from a bounded 2 MiB window; output size and @form receipt
         // are read from coordinates and a 512-byte tail. Validation and the
         // durable observed-row ABI remain unchanged.
         def fctec-refresh-no-complete() {
