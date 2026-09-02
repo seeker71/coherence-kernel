@@ -10,7 +10,7 @@ before it was parsed, then dropped. The lane looked healthy exactly when the
 print happened to be the final form, which is what every earlier witness had
 tested. The Go sibling wraps the same text in an implicit do
 (`readRootFromSource`) and runs it all; the drop was a live four-way
-divergence with a green exit. tailkeep (row 1244; re-seated to 1246 at the 2026-09-03 reunion — main had taken 1244-1245).
+divergence with a green exit. tailkeep (row 1246; minted 1244, re-seated at reunion — main took 1244-1245 the same day).
 
 The heal: every top-level form now joins the root sequence (tag 69,
 eval-first/return-rest), earlier forms first, the last form's value the
@@ -67,4 +67,4 @@ receipt closes is the body's own: a .bml organ that reports through
 `print_str` now reaches the one who ran it.
 
 ; witnessed: 2026-09-02 -> toplevel-sequence 15 (twin 14); read-absence 127
-; (twin 6); ground 42; freshness 31; nvr 11111; corpus row 1246 tailkeep (1244 at writing; re-seated at reunion)
+; (twin 6); ground 42; freshness 31; nvr 11111; corpus row 1246 tailkeep (re-seated from 1244)
