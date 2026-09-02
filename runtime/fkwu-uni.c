@@ -423,6 +423,29 @@ static void fk_pv(long long v) {
     }
 }
 static long long fk_arms[FK_OPCODE_ARM_CAP];
+/* THE ONCE-HOLD (tag FK_TAG_CONST_HOLD). Witnessed 2026-09-02: a top-level
+ * let spliced its initializer NODE into every reference site, so each read
+ * re-walked the whole build — call-by-name. The Go arm builds once and
+ * holds; divergence is a wound, and this one cost 31.6M dispatches per
+ * cold .bml compile (the bp table rebuilt per lookup). Every reference to
+ * a top-level let now shares one hold node per const binding: the first
+ * walk computes the value and holds it IN THE NODE'S OWN FREE FIELDS —
+ * node[2] the value, node[3] the melt-generation stamp packed with a
+ * held bit ((gen << 1) | 1, 0 = empty) — the same gen-invalidation the
+ * arm64 hint uses: a melt clears nothing but un-vouches everything, and
+ * the next read rebuilds fresh. The node is its own memo key, so no
+ * table row can alias another binding's value (the first draft keyed by
+ * const row and fk_const_top resets in the .fkb loaders made two names
+ * share one slot — the parity band caught the stale table same-day).
+ * Effects in a top-level initializer run at most once per melt
+ * generation, matching the sibling's build-once meaning for the pure
+ * constants this pattern exists to name.
+ * fk_const_wrapp1[row] is the binding's hold node + 1 (0 = none yet);
+ * a redefinition or row reuse drops it so old references keep their old
+ * meaning and new references get the new initializer. */
+#define FK_TOP_CONST_CAP 512
+#define FK_TAG_CONST_HOLD 190
+static long long fk_const_wrapp1[FK_TOP_CONST_CAP];
 static long long fk_mem[FK_MEM_CELL_CAP];
 static char fk_src[FK_STAGED_INPUT_CAP];
 static long long fk_src_len = 0;
@@ -7017,6 +7040,18 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 2) {
         return fk_vs[fp];
     }
+    if (t == FK_TAG_CONST_HOLD) {
+        /* the once-hold: first read walks the initializer and holds the
+         * value in the node's own fields; later reads return it. The gen
+         * stamp is read AFTER the walk — the build itself may melt. */
+        if (fk_node[i][3] != 0 && (fk_node[i][3] >> 1) == fk_melt_gen) {
+            return fk_node[i][2];
+        }
+        long long v190 = fk_walk(fk_node[i][1], fp);
+        fk_node[i][2] = v190;
+        fk_node[i][3] = (fk_melt_gen << 1) | 1;
+        return v190;
+    }
     if (t == 3) {
         long long a3 = fk_walk(fk_node[i][1], fp);
         long long b3 = fk_walk(fk_node[i][2], fp);
@@ -9596,7 +9631,7 @@ static void fk_parse_top(void);
  * a registered name lowers to tag 12 (call-by-index, single-arg). A non-defn top form is the root
  * (fn[0]). */
 /* Function symbols share the demand-grown storage declared with fk_fn. */
-#define FK_TOP_CONST_CAP 512
+/* FK_TOP_CONST_CAP is defined beside the once-hold block near fk_arms. */
 static long long fk_const_s[FK_TOP_CONST_CAP], fk_const_n[FK_TOP_CONST_CAP],
     fk_const_node[FK_TOP_CONST_CAP], fk_const_top;
 static long long fk_fn_lookup(long long s, long long n) {
@@ -9609,12 +9644,14 @@ static long long fk_fn_lookup(long long s, long long n) {
     }
     return -1;
 }
+/* returns the const ROW (not the node): the reference site builds/reuses
+ * the row's shared hold node, so all references share one memo slot. */
 static long long fk_const_lookup(long long s, long long n) {
     long long i = fk_const_top;
     while (i > 0) {
         i = i - 1;
         if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i])) {
-            return fk_const_node[i];
+            return i;
         }
     }
     return -1;
@@ -9624,6 +9661,9 @@ static void fk_const_set(long long s, long long n, long long node) {
     while (i < fk_const_top) {
         if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i])) {
             fk_const_node[i] = node;
+            /* a redefinition drops the old hold node; old references keep
+             * their already-spliced meaning, new references bind fresh. */
+            fk_const_wrapp1[i] = 0;
             return;
         }
         i = i + 1;
@@ -9632,6 +9672,9 @@ static void fk_const_set(long long s, long long n, long long node) {
         fk_const_s[fk_const_top] = s;
         fk_const_n[fk_const_top] = n;
         fk_const_node[fk_const_top] = node;
+        /* rows are reused after the loaders reset fk_const_top; a fresh
+         * binding must never inherit the previous tenant's hold node. */
+        fk_const_wrapp1[fk_const_top] = 0;
         fk_const_top = fk_const_top + 1;
         return;
     }
@@ -10182,9 +10225,16 @@ static long long fk_sparse(void) {
     if (fk_sym_eq(s, fk_spos - s, "false")) {
         return fk_smklit(0);
     }
-    long long cn = fk_const_lookup(s, fk_spos - s);
-    if (cn >= 0) {
-        return cn;
+    long long crow = fk_const_lookup(s, fk_spos - s);
+    if (crow >= 0) {
+        /* every reference shares the binding's ONE hold node, so the value
+         * memo (living in that node's own fields, born empty) is
+         * program-wide: one build serves every reference site. */
+        if (fk_const_wrapp1[crow] == 0) {
+            fk_const_wrapp1[crow] =
+                fk_smknode(FK_TAG_CONST_HOLD, fk_const_node[crow], 0, 0) + 1;
+        }
+        return fk_const_wrapp1[crow] - 1;
     }
     long long vfidx = fk_fn_lookup(s, fk_spos - s);
     if (vfidx >= 0) {
@@ -12149,6 +12199,11 @@ static long long fk_fkb_node_arity_for_tag(long long tag) {
     if (tag == 91) {
         return 1;
     }
+    if (tag == FK_TAG_CONST_HOLD) {
+        /* node[1] is the initializer NODE (remapped); node[2] is the raw
+         * memo row, deliberately NOT remapped. */
+        return 1;
+    }
     long long i = 0;
     while (i < fk_optab_n) {
         if (fk_optab[i].tag == tag) {
@@ -12181,6 +12236,12 @@ static long long fk_fkb_remap_field(long long tag, long long field, long long va
     }
     if ((tag == 240 || tag == 241) && field >= 2) {
         return value + node_base;
+    }
+    if (tag == FK_TAG_CONST_HOLD && field >= 2) {
+        /* a hold node's memo (value + gen stamp) never travels: whatever a
+         * writer's process state left in these fields, a loaded image
+         * starts with an empty hold and rebuilds on first read. */
+        return 0;
     }
     if (tag == 77) {
         return field == 2 ? value + node_base : value;
@@ -12552,6 +12613,12 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         fk_node[i][1] = fk_fkb_read_signed();
         fk_node[i][2] = fk_fkb_read_signed();
         fk_node[i][3] = fk_fkb_read_signed();
+        if (fk_node[i][0] == FK_TAG_CONST_HOLD) {
+            /* the hold's memo never travels (twin of the remap-lane scrub):
+             * a loaded image starts empty and rebuilds on first read. */
+            fk_node[i][2] = 0;
+            fk_node[i][3] = 0;
+        }
         i = i + 1;
     }
     long long ns = fk_fkb_read_signed();
