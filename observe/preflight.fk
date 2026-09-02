@@ -63,6 +63,17 @@
 ;   (pf-arm-mask "walk_recipe")     ; 4-bit: go 1, rust 2, ts 4, fkwu 8
 ;   (pf-fresh "path")               ; a compile whose detail no cache can hide
 ;
+; EFFECTFUL TOP-LEVEL CELLS
+;   fkwu currently has no compile-only door. `pf-fresh` therefore has to run a
+;   .fk to obtain fresh whole-chain diagnostics. A top-level cell that owns a
+;   model, network listener, mutation, or other external effect must carry:
+;
+;       ; preflight-exec: forbidden
+;
+;   Preflight then preserves the source and refuses the run visibly. This is a
+;   smaller honest boundary than calling execution "preflight" and changing
+;   the world while claiming to inspect it.
+;
 ; preludes: form-stdlib/core.fk
 
 (do
@@ -105,6 +116,12 @@
     (defn pf-unsupported-mark () "[preflight-unsupported-source-kind]")
     (defn pf-unsupported? (out)
         (if (ge (str_find out (pf-unsupported-mark) 0) 0) 1 0))
+    (defn pf-effect-refused-mark () "[preflight-effect-refused]")
+    (defn pf-effect-refused? (out)
+        (if (ge (str_find out (pf-effect-refused-mark) 0) 0) 1 0))
+    (defn pf-effect-forbidden? (path)
+        (if (eq (fs_exists path) 0) 0
+            (if (ge (str_find (read_file path) "; preflight-exec: forbidden" 0) 0) 1 0)))
 
     (defn pf-dir () (do (fs_mkdir (str_concat (temp_dir) "/preflight"))
                         (str_concat (temp_dir) "/preflight")))
@@ -127,13 +144,21 @@
         (if (ge (str_find out "unresolved-call" 0) 0) 1
             (if (ge (str_find out "unbound" 0) 0) 1
                 (if (ge (str_find out "no such" 0) 0) 1 0))))
+    ;; An absent carrier is not evidence that a name is absent on that arm.
+    ;; Keep this state separate so a clean checkout without built proof siblings
+    ;; cannot turn command-loader errors into invented capability.
+    (defn pf-arm-unavailable? (out)
+        (if (ge (str_find out "No such file or directory" 0) 0) 1
+            (if (ge (str_find out "MODULE_NOT_FOUND" 0) 0) 1
+                (if (ge (str_find out "command not found" 0) 0) 1 0))))
     (defn pf-has? (arm name)
         (do (let p (pf-probe-path (pf-arm-name arm)))
             (write_file p (pf-probe-text (pf-arm-name arm) name))
             (fs_remove (pf-sub p ".fk" ".fkb"))
             (fs_remove (pf-sub p ".fk" ".sym"))
             (let out (pf-run (pf-sub (pf-arm-cmd arm) "%f" p)))
-            (if (eq (pf-absent? out) 1) 0 1)))
+            (if (eq (pf-arm-unavailable? out) 1) 0
+                (if (eq (pf-absent? out) 1) 0 1))))
 
     (defn pf-mask-loop (as name m)
         (if (eq (len as) 0) m
@@ -141,6 +166,18 @@
                 (add m (if (eq (pf-has? (head as) name) 1) (pf-arm-bit (head as)) 0)))))
     ;; go 1, rust 2, ts 4, fkwu 8 — 15 is portable, 0 is a typo
     (defn pf-arm-mask (name) (pf-mask-loop (pf-arms) name 0))
+    ;; `nothing` is the universal known probe. A missing bit here means the arm
+    ;; was not observable; callers must not turn that absence into a name fact.
+    (defn pf-arm-availability-mask () (pf-arm-mask "nothing"))
+    (defn pf-mask-has-bit? (m bit) (eq (mod (div m bit) 2) 1))
+    (defn pf-mask-intersection-loop (as a b acc)
+        (if (eq (len as) 0) acc
+            (do (let bit (pf-arm-bit (head as)))
+                (pf-mask-intersection-loop (tail as) a b
+                    (add acc (if (and (pf-mask-has-bit? a bit)
+                                      (pf-mask-has-bit? b bit)) bit 0))))))
+    (defn pf-mask-intersection (a b)
+        (pf-mask-intersection-loop (pf-arms) a b 0))
 
     (defn pf-mask-names-loop (as m acc)
         (if (eq (len as) 0) acc
@@ -149,14 +186,28 @@
                     (pf-cat (list acc (if (eq (str_len acc) 0) "" " ") (pf-arm-name (head as))))
                     acc))))
     (defn pf-mask-names (m) (pf-mask-names-loop (pf-arms) m ""))
+    (defn pf-unavailable-names-loop (as ready acc)
+        (if (eq (len as) 0) acc
+            (pf-unavailable-names-loop (tail as) ready
+                (if (eq (pf-mask-has-bit? ready (pf-arm-bit (head as))) 0)
+                    (pf-cat (list acc (if (eq (str_len acc) 0) "" " ")
+                        (pf-arm-name (head as))))
+                    acc))))
+    (defn pf-unavailable-names (ready)
+        (pf-unavailable-names-loop (pf-arms) ready ""))
 
     ;; THE ANSWER THE DIAGNOSTIC CANNOT GIVE
     (defn pf-classify (name)
-        (do (let m (pf-arm-mask name))
-            (if (eq m 0) "TYPO — no kernel resolves this name"
-                (if (eq m 15) "portable — every kernel has it; a missing prelude, not a lane"
-                    (pf-cat (list "LANE SEAM — resolves on: " (pf-mask-names m)
-                                  "  (this chain cannot run on the others)"))))))
+        (do (let ready (pf-arm-availability-mask))
+            (let m (pf-arm-mask name))
+            (if (not (eq ready 15))
+                (pf-cat (list "UNOBSERVED — unavailable arms: "
+                    (pf-unavailable-names ready)
+                    "; observed resolves on: " (pf-mask-names m)))
+                (if (eq m 0) "TYPO — no kernel resolves this name"
+                    (if (eq m 15) "portable — every kernel has it; a missing prelude, not a lane"
+                        (pf-cat (list "LANE SEAM — resolves on: " (pf-mask-names m)
+                                      "  (this chain cannot run on the others)")))))))
 
     ;; ── a compile whose detail no cache can replace ─────────────────
     ;; The artifacts are removed first ON PURPOSE. A warm run reports a tally
@@ -164,9 +215,12 @@
     (defn pf-fresh (path)
         (if (eq (pf-fresh-supported? path) 0)
             (pf-cat (list (pf-unsupported-mark) " source-preserved path=" path))
-            (do (fs_remove (pf-sub path ".fk" ".fkb"))
-                (fs_remove (pf-sub path ".fk" ".sym"))
-                (pf-run (str_concat "./fkwu " path)))))
+            (if (eq (pf-effect-forbidden? path) 1)
+                (pf-cat (list (pf-effect-refused-mark)
+                    " effectful-execution-refused source-preserved path=" path))
+                (do (fs_remove (pf-sub path ".fk" ".fkb"))
+                    (fs_remove (pf-sub path ".fk" ".sym"))
+                    (pf-run (str_concat "./fkwu " path))))))
 
     ;; ── the unresolved names in that output ─────────────────────────
     (defn pf-mark () "[unresolved-call] '")
@@ -259,7 +313,8 @@
     ;; should this page.
     (defn pf-errors (out)
         (if (eq (pf-unsupported? out) 1) 1
-            (pf-num-before out " error(s)" 0)))
+            (if (eq (pf-effect-refused? out) 1) 1
+                (pf-num-before out " error(s)" 0))))
     (defn pf-warnings (out) (pf-num-before out " warning(s)" 0))
     (defn pf-clean? (out) (if (eq (pf-errors out) 0) 1 0))
 
@@ -280,6 +335,9 @@
                 "  unresolved    " (int_to_str (len ns)) (pf-nl)
                 (if (eq (pf-unsupported? out) 1)
                     "  source-kind   unsupported — source preserved; fresh compile currently accepts .fk only\n"
+                    "")
+                (if (eq (pf-effect-refused? out) 1)
+                    "  execution     effectful — source preserved; fkwu has no compile-only carrier\n"
                     "")
                 ;; SAY WHAT THE NUMBERS MEAN, and no more than that.
                 ;; The same reviewer: "pf-report prints counts but no pass/fail
@@ -303,11 +361,13 @@
                 "  chain         "
                 (if (eq (pf-unsupported? out) 1)
                     "UNSUPPORTED SOURCE KIND — no compile verdict; source preserved"
-                (if (eq (pf-errors out) 0)
-                    (if (eq (len (pf-unresolved out)) 0)
-                        "clean — no errors, no unresolved calls; a verdict from it can be read"
-                        "UNRESOLVED CALLS — the chain compiles, but each unresolved name answers `nothing`; every bit that touches one reads 0, so a verdict from it is partial, not a pass")
-                    "CARRIED ERRORS — any verdict from this chain is a fold over `nothing`, not a pass"))
+                (if (eq (pf-effect-refused? out) 1)
+                    "EFFECTFUL EXECUTION REFUSED — no compile verdict until fkwu exposes a compile-only carrier"
+                    (if (eq (pf-errors out) 0)
+                        (if (eq (len (pf-unresolved out)) 0)
+                            "clean — no errors, no unresolved calls; a verdict from it can be read"
+                            "UNRESOLVED CALLS — the chain compiles, but each unresolved name answers `nothing`; every bit that touches one reads 0, so a verdict from it is partial, not a pass")
+                        "CARRIED ERRORS — any verdict from this chain is a fold over `nothing`, not a pass")))
                 (pf-nl)
                 (if (eq (len ns) 0) "" (pf-lines-loop ns))))))
 

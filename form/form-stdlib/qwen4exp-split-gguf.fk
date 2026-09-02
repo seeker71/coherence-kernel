@@ -1,0 +1,85 @@
+; qwen4exp-split-gguf.fk — live GGUF shard lookup and direct Metal mapping.
+;
+; Meaning and record shape are authoritative in the two BML files. This cell
+; applies that meaning to equireach GGUF sources. The first shard contributes
+; metadata only; tensor lookup searches shard 2 and shard 3 and refuses a name
+; found in both. Every successful result carries the concrete file path and
+; absolute offset used by metal_buf_from_file.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/mxfp4-plane-dequant.fk form-stdlib/mxfp8-plane-dequant.fk form-stdlib/gguf-manifest.fk form-stdlib/gguf-tensor-index.fk form-stdlib/qwen4exp-split-gguf.bml
+
+(do
+    (defn q4sg-path (paths shard) (nth paths (sub shard 1)))
+    (defn q4sg-source (src2 src3 shard) (if (eq shard 2) src2 src3))
+
+    (defn q4sg-locate (paths src2 src3 name)
+        (do
+            (let selected (q4s-select (egg-find-tensor src2 name) (egg-find-tensor src3 name)))
+            (if (eq (q4s-selected selected) 1)
+                (do
+                    (let shard (q4s-shard selected))
+                    (let src (q4sg-source src2 src3 shard))
+                    (let off (q4s-selected-off selected))
+                    (let base (egg-data-base src 32))
+                    (let dataoff (egg-ti-dataoff src off))
+                    (q4s-record 1 shard (q4sg-path paths shard) off
+                        (egg-ti-type src off) base dataoff (add base dataoff)
+                        (gm-bytes src off)))
+                (q4s-record (q4s-selected selected) 0 "" -1 -1 0 0 0 0))))
+
+    ; Effectful final door: one mmap-backed Metal buffer over exactly the
+    ; selected tensor bytes. A malformed or absent record never maps anything.
+    (defn q4sg-map-record (record)
+        (if (eq (q4s-record-complete record) 1)
+            (metal_buf_from_file (q4s-record-path record)
+                (q4s-record-absolute record) (q4s-record-bytes record))
+            0))
+
+    ; ================= one-pass suffix tables for the whole stack =================
+    ; [block, shard, local-record-offset]. Each shard is walked once per leaf;
+    ; binding forty-eight layers never restarts a name search per tensor.
+    (defn q4sg-tag-pairs (pairs shard acc)
+        (if (eq (len pairs) 0) (reverse acc)
+            (q4sg-tag-pairs (tail pairs) shard
+                (cons (list (head (head pairs)) shard (nth (head pairs) 1)) acc))))
+    (defn q4sg-tab (src2 src3 suffix)
+        (append (q4sg-tag-pairs (gti-offs-with src2 suffix) 2 (empty))
+                (q4sg-tag-pairs (gti-offs-with src3 suffix) 3 (empty))))
+    (defn q4sg-tab-for (tab block)
+        (if (eq (len tab) 0) (empty)
+            (if (eq (head (head tab)) block) (head tab)
+                (q4sg-tab-for (tail tab) block))))
+
+    ; Tensor view: [Metal handle, per-slice rows, columns, type, slices,
+    ; concrete shard]. For expert tensors slices=512; ordinary matrices carry 1.
+    (defn q4sg-tv-at (paths src2 src3 entry)
+        (if (eq (len entry) 0) (list 0 0 0 -1 0 0)
+            (do
+                (let shard (nth entry 1))
+                (let off (nth entry 2))
+                (let src (q4sg-source src2 src3 shard))
+                (let nd (egg-ti-ndims src off))
+                (let base (egg-data-base src 32))
+                (list
+                    (metal_buf_from_file (q4sg-path paths shard)
+                        (add base (egg-ti-dataoff src off)) (gm-bytes src off))
+                    (if (gt nd 1) (egg-ti-dim src off 1) 1)
+                    (egg-ti-dim src off 0)
+                    (egg-ti-type src off)
+                    (mul (if (gt nd 2) (egg-ti-dim src off 2) 1)
+                         (if (gt nd 3) (egg-ti-dim src off 3) 1))
+                    shard))))
+    (defn q4sg-tv-named (paths src2 src3 name)
+        (do
+            (let rec (q4sg-locate paths src2 src3 name))
+            (if (eq (q4s-record-status rec) 1)
+                (q4sg-tv-at paths src2 src3
+                    (list -1 (q4s-record-shard rec) (q4s-record-off rec)))
+                (list 0 0 0 -1 0 0))))
+    (defn q4tv-h (tv) (nth tv 0))
+    (defn q4tv-r (tv) (nth tv 1))
+    (defn q4tv-c (tv) (nth tv 2))
+    (defn q4tv-ty (tv) (nth tv 3))
+    (defn q4tv-slices (tv) (nth tv 4))
+    (defn q4tv-shard (tv) (nth tv 5))
+    0)

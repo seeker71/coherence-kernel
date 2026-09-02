@@ -4,6 +4,10 @@
 ; preludes: form-stdlib/form-cli-local-law.fk form-stdlib/form-cli-router.fk
 ; preludes: form-stdlib/form-cli-turn-evidence.fk
 ; preludes: form-stdlib/form-cli-turn-evidence-live.fk
+; preludes: form-stdlib/bml/form-cli-turn-evidence-cursor.bml
+; preludes: form-stdlib/bml/form-cli-share-health.bml
+; preludes: form-stdlib/form-glass-telemetry-membrane.bml
+; preludes: form-stdlib/bml/form-cli-share-glass.bml
 
 (defn fctes-join (parts)
     (if (eq (len parts) 0) ""
@@ -37,6 +41,7 @@
                 " cache-write-input=" (int_to_str (fcte-cache-write-input-tokens e))
                 " output=" (int_to_str (fcte-output-tokens e))
                 " reasoning-output=" (int_to_str (fcte-reasoning-output-tokens e))
+                " unattributed=" (int_to_str (fcte-unattributed-tokens e))
                 " total=" (int_to_str (fcte-total-tokens e)) "\n"))
             (fctes-join (list "local tool-calls=" (int_to_str (fcte-tool-calls e))
                 " tool-outputs=" (int_to_str (fcte-tool-outputs e))
@@ -50,7 +55,11 @@
                 " form-stdout-bytes=" (int_to_str (fcte-form-stdout-bytes e))
                 " form-stderr-bytes=" (int_to_str (fcte-form-stderr-bytes e))
                 " form-shown-bytes=" (int_to_str (fcte-form-shown-bytes e)) "\n"))
-            "coverage source-bound=1 turn-complete=1 provider-usage=1 tools-reconciled=1 form-receipt-window=512-tail-bytes bytes-reconciled=1 lanes-reconciled=1\n"
+            (fctes-join (list "coverage source-bound=1 carrier-identity=1 carrier-timestamps=1 source-coordinates=1 carrier-size="
+                (int_to_str (fcte-carrier-size e)) " start-byte="
+                (int_to_str (fcte-start-at e)) " complete-byte="
+                (int_to_str (fcte-complete-at e))
+                " turn-complete=1 provider-call-usage=1 provider-token-total-reconciled=1 attribution-gap-explicit=1 tools-reconciled=1 form-receipt-window=512-tail-bytes bytes-reconciled=1 lanes-reconciled=1\n"))
             "measurement-health=observed semantic-contribution=not-measured\n"))))
 
 ; An active task has no settled share.  Its most recent provider call may still
@@ -80,9 +89,82 @@
         "form-cli walk hit=0 ready=1 -> lane=" (int_to_str (fcr-walk 0 1)) " (1 local)\n"
         "form-cli walk hit=0 ready=0 -> lane=" (int_to_str (fcr-walk 0 0)) " (2 remote)\n")))
 
+; The live collector's one-slice discovery is a continuation, so a cache read
+; must not turn "not in this slice" into "stale".  The high-BML cursor walks
+; byte coordinates only and returns the actual nearest terminal turn.
+(defn fctes-codex-source-reconciled? (e path)
+    (fctec-codex-source-reconciled? e path))
+
+(defn fctes-unmeasured-clear-validation ()
+    (do
+        (write_file_text (fctel-latest-validation-path) "")
+        (fcte-parse "unmeasured")))
+
+; A row that has been physically disproved as latest is expired from the
+; current-value cache. Keeping it there made every later invocation rescan the
+; same append tail before advancing the new turn's durable cursor.
+(defn fctes-unmeasured-expire-stale ()
+    (do
+        (fctec-expire-current-stale)
+        (fcte-parse "unmeasured")))
+
+(defn fctes-cached-evidence ()
+    (if (le (file_size (fctel-observed-row-path)) 0)
+        (fctes-unmeasured-clear-validation)
+        (do
+            (let row (fctel-trim-end (read_file (fctel-observed-row-path))))
+            (let evidence (fcte-parse row))
+            (if (eq (fcte-valid? evidence) 0)
+                (fctes-unmeasured-clear-validation)
+                (if (not (str_eq (fcte-source evidence) (fcte-source-kind)))
+                    ; Grok receipts stay v2-compatible, but no physical
+                    ; latest-complete session validator exists for them.
+                    (fctes-unmeasured-clear-validation)
+                    (do
+                        (let path (fctel-bound-path))
+                        (if (str_eq path "")
+                            (fctes-unmeasured-clear-validation)
+                            (if (eq (fctes-codex-source-reconciled?
+                                evidence path) 0)
+                                (fctes-unmeasured-clear-validation)
+                                (do
+                                    (let latest (fctec-advance-latest
+                                        evidence path))
+                                    (if (eq (fctec-latest? latest) 1)
+                                        evidence
+                                        (if (eq (fctec-latest-progress? latest) 1)
+                                            (fcte-parse "unmeasured")
+                                            (fctes-unmeasured-expire-stale))))))))))))
+
 (do
-    (let evidence (fctel-evidence))
+    (let refresh-start-ms (now_unix_ms))
+    (let observed-row-before (gt (file_size (fctel-observed-row-path)) 0))
+    (let before (fctes-cached-evidence))
+    (let stale-expired (and observed-row-before
+        (eq (file_size (fctel-observed-row-path)) 0)))
+    ; A share read also advances one bounded native continuation when the
+    ; previous completed turn has not settled yet.  Re-entry is durable; an
+    ; observed row pays no refresh work.
+    (let validating (gt (file_size (fctel-latest-validation-path)) 0))
+    (let action (fctec-invocation-action (fcte-valid? before)
+        validating stale-expired))
+    (let refresh (if (str_eq action "advance")
+        (fctec-refresh-bound) (fctec-invocation-status action)))
+    ; One invocation owns one evidence movement. A refresh that finishes a
+    ; candidate does not immediately spend a second slice validating it; the
+    ; following invocation reads and validates that durable row.
+    (let evidence before)
+    ; The attention clock closes only after the atomic Glass snapshot write,
+    ; so it covers the whole evidence movement visible to another process.
+    (let share-published (fcsg-publish-evidence (now_unix_ms) evidence))
+    (let refresh-ms (sub (now_unix_ms) refresh-start-ms))
     (print_str (fctes-join (list
+        "measurement-refresh=" refresh "\n"
+        "measurement-refresh-ms=" (int_to_str refresh-ms)
+        " slice-bytes=" (int_to_str (fctec-processing-bytes))
+        " attention-ms=" (int_to_str (fctec-attention-ms))
+        " measurement-attention=" (fctec-attention-state refresh-ms) "\n"
+        "glass-share=" (fcsg-publish-status share-published) "\n"
         "form-cli share kind=" (fcte-kind-name evidence)
         " scope=" (if (eq (fcte-valid? evidence) 1)
             (if (str_eq (fcte-source evidence) (fcte-source-kind-grok))
@@ -90,7 +172,8 @@
             "unmeasured")
         " basis=observed-boundary-event-counts-v1\n"
         (if (eq (fcte-valid? evidence) 1) (fctes-observed evidence)
-            "measurement-health=unreconciled share=withheld semantic-contribution=not-measured\n")
+            (fctes-join (list (fcsh-health)
+                "semantic-contribution=not-measured\n")))
         (fctes-active-provider-tokens)
         (fctes-route)
         (fcl-spoken-answer))))

@@ -1,6 +1,10 @@
 # onemint — the float literal mints once
 
-2026-09-02, branch `claude/lucid-lehmann-db15b8`. Corpus row 1232.
+2026-09-02, branch `claude/lucid-lehmann-db15b8`. Corpus row 1232 as
+minted; re-seated to 1244 at the same evening's reunion with main, which
+had renumbered the same two lineages the opposite way and taken 1232-1243
+for namemute..keymelt (note in the row itself, per the anastomosis
+pattern).
 Continues the boxvoice ledger
 (`receipts/2026-09-02-boxvoice-unboxing-ledger.md`), whose first reading
 named this work: fspin boxed 600,000 floats in 300,000 iterations — the

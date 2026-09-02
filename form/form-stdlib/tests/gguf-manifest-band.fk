@@ -2,7 +2,7 @@
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/gguf-manifest.fk
 ;
-; run: ./fkwu form/form-stdlib/tests/gguf-manifest-band.fk   ; -> 127
+; run: ./fkwu form/form-stdlib/tests/gguf-manifest-band.fk   ; -> 255
 ;
 ; WHY THIS BAND EXISTS NOW AND NOT BEFORE. gguf-manifest.fk's own header has claimed
 ; "Proven by: form-stdlib/tests/gguf-manifest-band.fk" since it was written. The file did not exist.
@@ -16,9 +16,10 @@
 ; this type" — HAD NO CALLERS anywhere in the body. A guard nobody calls is not a guard. So bit 64
 ; below is not decoration: it is the invariant the carrier now asks before it divides.
 ;
-;   bit  1  the scalar types: F32 and I32 are 4 bytes an element, F16 is 2
+;   bit  1  the scalar types: F32 and I32 are 4 bytes an element, F16 and BF16 are 2
 ;   bit  2  the block types carry their published block sizes, checked at one block and at a real
-;           tensor width: Q8_0 32/34, Q2_K 256/84, Q4_K 256/144, Q6_K 256/210, IQ2_XXS 256/66
+;           tensor width. This includes all five low-bit types actually present in Qwen3.8-Flash-Next
+;           UD-Q2_K_XL: Q5_K, Q6_K, IQ2_XS, IQ3_XXS, and IQ4_NL
 ;   bit  4  Q2_K AT THE SHAPE THAT BROKE: one DeepSeek expert's ffn_down is 2048*4096 elements, which
 ;           must price to 2 752 512 B, and the 256-expert tensor to 704 643 072 B
 ;   bit  8  the plane-split types answer through their own cells and are nonzero
@@ -28,6 +29,9 @@
 ;   bit 64  THE INVARIANT, swept over ggml type ids 0..45: gm-priced? is 1 exactly when
 ;           gm-slice-bytes is nonzero. Either half drifting from the other is the 2026-07-30 bug
 ;           returning under another type id.
+;   bit 128 the bounded header window reaches the 10,946,624-byte metadata-only
+;           first shard of Qwen3.8-Flash-Next UD-Q2_K_XL without mapping either
+;           of its 49.98/28.88 GB tensor shards.
 
 (do
     (defn gmb-score (ok bit) (if ok bit 0))
@@ -45,21 +49,35 @@
     (defn gmb-nonzero-loop (ts)
         (if (eq (len ts) 0) 1
             (if (gt (gm-slice-bytes (head ts) 256) 0) (gmb-nonzero-loop (tail ts)) 0)))
+    (defn gmb-all (xs)
+        (if (eq (len xs) 0) 1
+            (if (head xs) (gmb-all (tail xs)) 0)))
 
     (defn gguf-manifest-band ()
         (do
             (let c0 (gmb-score (if (eq (gm-slice-bytes 0 1000) 4000)
                                 (if (eq (gm-slice-bytes 26 1000) 4000)
-                                    (eq (gm-slice-bytes 1 1000) 2000) 0) 0) 1))
+                                (if (eq (gm-slice-bytes 1 1000) 2000)
+                                    (eq (gm-slice-bytes 30 1000) 2000) 0) 0) 0) 1))
 
-            (let c1 (gmb-score (if (eq (gm-slice-bytes 8 32) 34)
-                                (if (eq (gm-slice-bytes 10 256) 84)
-                                (if (eq (gm-slice-bytes 12 256) 144)
-                                (if (eq (gm-slice-bytes 14 256) 210)
-                                (if (eq (gm-slice-bytes 16 256) 66)
-                                (if (eq (gm-slice-bytes 8 4096) 4352)
-                                (if (eq (gm-slice-bytes 10 4096) 1344)
-                                    (eq (gm-slice-bytes 16 4096) 1056) 0) 0) 0) 0) 0) 0) 0) 2))
+            (let c1 (gmb-score (gmb-all (list
+                (eq (gm-slice-bytes 8 32) 34)
+                (eq (gm-slice-bytes 10 256) 84)
+                (eq (gm-slice-bytes 12 256) 144)
+                (eq (gm-slice-bytes 13 256) 176)
+                (eq (gm-slice-bytes 14 256) 210)
+                (eq (gm-slice-bytes 16 256) 66)
+                (eq (gm-slice-bytes 17 256) 74)
+                (eq (gm-slice-bytes 18 256) 98)
+                (eq (gm-slice-bytes 20 256) 144)
+                (eq (gm-slice-bytes 23 256) 136)
+                (eq (gm-slice-bytes 8 4096) 4352)
+                (eq (gm-slice-bytes 10 4096) 1344)
+                (eq (gm-slice-bytes 16 4096) 1056)
+                (eq (gm-slice-bytes 17 4096) 1184)
+                (eq (gm-slice-bytes 18 4096) 1568)
+                (eq (gm-slice-bytes 20 4096) 2304)
+                (eq (gm-slice-bytes 23 4096) 2176))) 2))
 
             ; 2048*4096 = 8388608 elements = 32768 blocks * 84 B = 2752512 B per expert
             (let c2 (gmb-score (if (eq (gm-slice-bytes 10 8388608) 2752512)
@@ -68,15 +86,18 @@
             (let c3 (gmb-score (if (gt (gm-slice-bytes 40 8388608) 0)
                                    (if (gt (gm-slice-bytes 41 8388608) 0) 1 0) 0) 8))
 
-            ; 13, 15, 30 are ggml ids this body does not price; the refusal must read as a refusal
-            (let c4 (gmb-score (if (eq (gm-slice-bytes 13 256) 0)
-                                (if (eq (gm-priced? 13) 0)
-                                (if (eq (gm-slice-bytes 30 256) 0)
-                                    (eq (gm-priced? 30) 0) 0) 0) 0) 16))
+            ; 15, 19, 29 are ggml ids this body does not price; the refusal must read as a refusal
+            (let c4 (gmb-score (if (eq (gm-slice-bytes 15 256) 0)
+                                (if (eq (gm-priced? 15) 0)
+                                (if (eq (gm-slice-bytes 19 256) 0)
+                                (if (eq (gm-priced? 19) 0)
+                                (if (eq (gm-slice-bytes 29 256) 0)
+                                    (eq (gm-priced? 29) 0) 0) 0) 0) 0) 0) 16))
 
-            (let c5 (gmb-score (eq (gmb-nonzero-loop (list 0 1 8 10 12 14 16 26 40 41)) 1) 32))
+            (let c5 (gmb-score (eq (gmb-nonzero-loop (list 0 1 8 10 12 13 14 16 17 18 20 23 26 30 40 41)) 1) 32))
 
             (let c6 (gmb-score (eq (gmb-agree? 0 45) 1) 64))
+            (let c7 (gmb-score (ge (gm-window) 10946624) 128))
 
-            (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 c6))))))))
+            (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7)))))))))
     (gguf-manifest-band))

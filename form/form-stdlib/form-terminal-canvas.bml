@@ -1,0 +1,239 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-terminal-canvas.bml — reusable Form canvas and ANSI projector.
+//
+// Authority: form-stdlib/bml/form-terminal-canvas.bml
+// preludes: form/form-stdlib/core.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormTerminalCanvasAuthority {
+        field FTCAuthorityPath = "form/form-stdlib/bml/form-terminal-canvas.bml";
+        field FTCAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class FormTerminalCanvas {
+        field FTCSchema = "form-terminal-canvas-v1";
+        field FTCTerminalProjection = "ANSI-24bit-v1";
+        ref ftc-authority = FormTerminalCanvasAuthority;
+        thought ftc-law = list("surface-first", "rectangular", "clip-before-project", "row-major-diff", "retained-history", "capability-seams-visible");
+
+        // style = tag, concept, foreground RGB, background RGB (-1 means none),
+        // exact alpha, bold flag, and a symbol vocabulary label.
+        def ftc-style(concept, red, green, blue, backRed, backGreen, backBlue, alpha, bold, symbol) {
+            list("ftc-style", concept, red, green, blue, backRed, backGreen, backBlue, alpha, bold, symbol);
+        }
+        def ftc-style-concept(style) = nth(style, 1);
+        def ftc-style-red(style) = nth(style, 2);
+        def ftc-style-green(style) = nth(style, 3);
+        def ftc-style-blue(style) = nth(style, 4);
+        def ftc-style-back-red(style) = nth(style, 5);
+        def ftc-style-back-green(style) = nth(style, 6);
+        def ftc-style-back-blue(style) = nth(style, 7);
+        def ftc-style-alpha(style) = nth(style, 8);
+        def ftc-style-bold?(style) = nth(style, 9);
+        def ftc-style-symbol(style) = nth(style, 10);
+        def ftc-style-with-alpha(style, alpha) = ftc-style(ftc-style-concept(style), ftc-style-red(style), ftc-style-green(style), ftc-style-blue(style), ftc-style-back-red(style), ftc-style-back-green(style), ftc-style-back-blue(style), alpha, ftc-style-bold?(style), ftc-style-symbol(style));
+
+        def ftc-cell(glyph, style) = list("ftc-cell", glyph, style);
+        def ftc-cell-glyph(cell) = nth(cell, 1);
+        def ftc-cell-style(cell) = nth(cell, 2);
+        def ftc-repeat-cell(cell, count) = if le(count, 0) then list() else cons(cell, ftc-repeat-cell(cell, sub(count, 1)));
+        def ftc-repeat-row(row, count) = if le(count, 0) then list() else cons(row, ftc-repeat-row(row, sub(count, 1)));
+
+        // Rich-inspired render contracts, expressed as Form data. Measurement
+        // precedes allocation; segments retain semantic identity and channels.
+        def ftc-measure(minimum, maximum) = list("ftc-measure", minimum, maximum);
+        def ftc-measure-minimum(measurement) = nth(measurement, 1);
+        def ftc-measure-maximum(measurement) = nth(measurement, 2);
+        def ftc-region(x, y, width, height) = list("ftc-region", x, y, width, height);
+        def ftc-region-x(region) = nth(region, 1);
+        def ftc-region-y(region) = nth(region, 2);
+        def ftc-region-width(region) = nth(region, 3);
+        def ftc-region-height(region) = nth(region, 4);
+        def ftc-number-clamp(value, low, high) = if lt(value, low) then low else if gt(value, high) then high else value;
+        def ftc-measured-split(totalWidth, height, gap, leftMeasure, rightMeasure) {
+            let usable = if gt(totalWidth, gap) then sub(totalWidth, gap) else 0;
+            let rightMinimum = ftc-number-clamp(ftc-measure-minimum(rightMeasure), 0, usable);
+            let leftMinimum = ftc-number-clamp(ftc-measure-minimum(leftMeasure), 0, sub(usable, rightMinimum));
+            let leftHigh = if ge(usable, rightMinimum) then sub(usable, rightMinimum) else 0;
+            let leftWidth = ftc-number-clamp(div(usable, 2), leftMinimum, leftHigh);
+            let rightWidth = sub(usable, leftWidth);
+            list(ftc-region(0, 0, leftWidth, height), ftc-region(add(leftWidth, gap), 0, rightWidth, height));
+        }
+        def ftc-segment(text, style, control, nodeId, channels, evidence) = list("ftc-segment", text, style, control, nodeId, channels, evidence);
+        def ftc-segment-text(segment) = nth(segment, 1);
+        def ftc-segment-style(segment) = nth(segment, 2);
+        def ftc-segment-control(segment) = nth(segment, 3);
+        def ftc-segment-node-id(segment) = nth(segment, 4);
+        def ftc-segment-channels(segment) = nth(segment, 5);
+        def ftc-segment-evidence(segment) = nth(segment, 6);
+        def ftc-overflow(policy, hiddenCount) = list("ftc-overflow", policy, hiddenCount);
+
+        // Retained values belong to the scene, not to the terminal adapter.
+        // This bounded ring is deliberately generic so a terminal, framebuffer,
+        // or future glass surface can project the same quarter-second history.
+        def ftc-drop(items, count) = if or(le(count, 0), eq(len(items), 0)) then items else ftc-drop(tail(items), sub(count, 1));
+        def ftc-ring-push(items, value, capacity) {
+            let appended = append(items, list(value));
+            if le(capacity, 0) then list() else if le(len(appended), capacity) then appended else ftc-drop(appended, sub(len(appended), capacity));
+        }
+        def ftc-ring-last(items, fallback) = if eq(len(items), 0) then fallback else nth(items, sub(len(items), 1));
+        def ftc-series-max(values, held) = if eq(len(values), 0) then held else ftc-series-max(tail(values), if gt(head(values), held) then head(values) else held);
+        def ftc-series-level(value, maximum) = if le(maximum, 0) then 0 else ftc-number-clamp(div(mul(value, 7), maximum), 0, 7);
+        def ftc-series-levels(values, maximum) = if eq(len(values), 0) then list() else cons(ftc-series-level(head(values), maximum), ftc-series-levels(tail(values), maximum));
+        def ftc-series-normalize(values) = ftc-series-levels(values, ftc-series-max(values, 0));
+
+        // canvas = tag, width, height, rows, blank cell.  Rows are always width
+        // cells and their count is always height.
+        def ftc-canvas(width, height, blankStyle) {
+            let safeWidth = if lt(width, 0) then 0 else width;
+            let safeHeight = if lt(height, 0) then 0 else height;
+            let blank = ftc-cell(" ", blankStyle);
+            let row = ftc-repeat-cell(blank, safeWidth);
+            list("ftc-canvas", safeWidth, safeHeight, ftc-repeat-row(row, safeHeight), blank);
+        }
+        def ftc-width(canvas) = nth(canvas, 1);
+        def ftc-height(canvas) = nth(canvas, 2);
+        def ftc-rows(canvas) = nth(canvas, 3);
+        def ftc-blank(canvas) = nth(canvas, 4);
+        def ftc-in-bounds?(canvas, x, y) = if lt(x, 0) then 0 else if lt(y, 0) then 0 else if ge(x, ftc-width(canvas)) then 0 else if ge(y, ftc-height(canvas)) then 0 else 1;
+        def ftc-cell-at(canvas, x, y) = if eq(ftc-in-bounds?(canvas, x, y), 1) then nth(nth(ftc-rows(canvas), y), x) else ftc-blank(canvas);
+
+        def ftc-replace(items, index, value) = if eq(index, 0) then cons(value, tail(items)) else cons(head(items), ftc-replace(tail(items), sub(index, 1), value));
+        def ftc-put-cell-in-bounds(canvas, x, y, cell) {
+            let row = nth(ftc-rows(canvas), y);
+            let nextRow = ftc-replace(row, x, cell);
+            list("ftc-canvas", ftc-width(canvas), ftc-height(canvas), ftc-replace(ftc-rows(canvas), y, nextRow), ftc-blank(canvas));
+        }
+        def ftc-put-cell(canvas, x, y, cell) {
+            if eq(ftc-in-bounds?(canvas, x, y), 0) then
+                canvas
+            else
+                ftc-put-cell-in-bounds(canvas, x, y, cell);
+        }
+        def ftc-put-glyph(canvas, x, y, glyph, style) = ftc-put-cell(canvas, x, y, ftc-cell(glyph, style));
+        def ftc-put-text-loop(canvas, x, y, text, index, style) = if ge(index, str_len(text)) then canvas else ftc-put-text-loop(ftc-put-glyph(canvas, add(x, index), y, char_at(text, index), style), x, y, text, add(index, 1), style);
+        def ftc-put-text(canvas, x, y, text, style) = ftc-put-text-loop(canvas, x, y, text, 0, style);
+
+        def ftc-blit-row(destination, source, dx, dy, sx, sy) = if ge(sx, ftc-width(source)) then destination else ftc-blit-row(ftc-put-cell(destination, add(dx, sx), add(dy, sy), ftc-cell-at(source, sx, sy)), source, dx, dy, add(sx, 1), sy);
+        def ftc-blit-rows(destination, source, dx, dy, sy) = if ge(sy, ftc-height(source)) then destination else ftc-blit-rows(ftc-blit-row(destination, source, dx, dy, 0, sy), source, dx, dy, add(sy, 1));
+        def ftc-blit(destination, source, dx, dy) = ftc-blit-rows(destination, source, dx, dy, 0);
+
+        def ftc-clip-copy-row(destination, source, sourceX, sourceY, width, x, y) = if ge(x, width) then destination else ftc-clip-copy-row(ftc-put-cell(destination, x, y, ftc-cell-at(source, add(sourceX, x), add(sourceY, y))), source, sourceX, sourceY, width, add(x, 1), y);
+        def ftc-clip-copy-rows(destination, source, sourceX, sourceY, width, height, y) = if ge(y, height) then destination else ftc-clip-copy-rows(ftc-clip-copy-row(destination, source, sourceX, sourceY, width, 0, y), source, sourceX, sourceY, width, height, add(y, 1));
+        def ftc-clip(canvas, x, y, width, height) {
+            let out = ftc-canvas(width, height, ftc-cell-style(ftc-blank(canvas)));
+            ftc-clip-copy-rows(out, canvas, x, y, ftc-width(out), ftc-height(out), 0);
+        }
+
+        def ftc-hcompose(left, right) {
+            let height = if ge(ftc-height(left), ftc-height(right)) then ftc-height(left) else ftc-height(right);
+            let out = ftc-canvas(add(ftc-width(left), ftc-width(right)), height, ftc-cell-style(ftc-blank(left)));
+            ftc-blit(ftc-blit(out, left, 0, 0), right, ftc-width(left), 0);
+        }
+        def ftc-vcompose(top, bottom) {
+            let width = if ge(ftc-width(top), ftc-width(bottom)) then ftc-width(top) else ftc-width(bottom);
+            let out = ftc-canvas(width, add(ftc-height(top), ftc-height(bottom)), ftc-cell-style(ftc-blank(top)));
+            ftc-blit(ftc-blit(out, top, 0, 0), bottom, 0, ftc-height(top));
+        }
+
+        def ftc-bar-next(canvas, width, value, maximum, x, fillStyle, emptyStyle) {
+            let filled = if le(maximum, 0) then 0 else if lt(mul(x, maximum), mul(width, value)) then 1 else 0;
+            let glyph = if eq(filled, 1) then "█" else "░";
+            let style = if eq(filled, 1) then fillStyle else emptyStyle;
+            ftc-bar-loop(ftc-put-glyph(canvas, x, 0, glyph, style), width, value, maximum, add(x, 1), fillStyle, emptyStyle);
+        }
+        def ftc-bar-loop(canvas, width, value, maximum, x, fillStyle, emptyStyle) {
+            if ge(x, width) then
+                canvas
+            else
+                ftc-bar-next(canvas, width, value, maximum, x, fillStyle, emptyStyle);
+        }
+        def ftc-bar(width, value, maximum, fillStyle, emptyStyle) = ftc-bar-loop(ftc-canvas(width, 1, emptyStyle), width, value, maximum, 0, fillStyle, emptyStyle);
+
+        def ftc-spark-glyph(value) = if le(value, 0) then "▁" else if eq(value, 1) then "▂" else if eq(value, 2) then "▃" else if eq(value, 3) then "▄" else if eq(value, 4) then "▅" else if eq(value, 5) then "▆" else if eq(value, 6) then "▇" else "█";
+        def ftc-spark-loop(canvas, values, x, style) = if eq(len(values), 0) then canvas else ftc-spark-loop(ftc-put-glyph(canvas, x, 0, ftc-spark-glyph(head(values)), ftc-style-with-alpha(style, add(80, mul(25, head(values))))), tail(values), add(x, 1), style);
+        def ftc-spark(values, style) = ftc-spark-loop(ftc-canvas(len(values), 1, style), values, 0, style);
+        def ftc-heat-loop(canvas, values, x, style) = if eq(len(values), 0) then canvas else ftc-heat-loop(ftc-put-glyph(canvas, x, 0, "◆", ftc-style-with-alpha(style, head(values))), tail(values), add(x, 1), style);
+        def ftc-heat(values, style) = ftc-heat-loop(ftc-canvas(len(values), 1, style), values, 0, style);
+
+        // A surface is a backend-neutral render tree root.  Its canvas and
+        // capabilities remain inspectable without invoking a terminal.
+        def ftc-capabilities(width, height, source) = list("ftc-capabilities", width, height, source, "ansi-24bit", "alpha-dim-projection", "line-input-only", "ascii-diff-columns");
+        def ftc-surface(canvas, capabilities, channels) = list("ftc-surface", FTCSchema(), canvas, capabilities, channels);
+        def ftc-surface-canvas(surface) = nth(surface, 2);
+        def ftc-surface-capabilities(surface) = nth(surface, 3);
+        def ftc-surface-channels(surface) = nth(surface, 4);
+        def ftc-terminal-fallback(width, height) = ftc-capabilities(width, height, "caller-fallback-unobserved");
+
+        def ftc-style-equal?(left, right) = if not(str_eq(ftc-style-concept(left), ftc-style-concept(right))) then 0 else if not(eq(ftc-style-red(left), ftc-style-red(right))) then 0 else if not(eq(ftc-style-green(left), ftc-style-green(right))) then 0 else if not(eq(ftc-style-blue(left), ftc-style-blue(right))) then 0 else if not(eq(ftc-style-back-red(left), ftc-style-back-red(right))) then 0 else if not(eq(ftc-style-back-green(left), ftc-style-back-green(right))) then 0 else if not(eq(ftc-style-back-blue(left), ftc-style-back-blue(right))) then 0 else if not(eq(ftc-style-alpha(left), ftc-style-alpha(right))) then 0 else if not(eq(ftc-style-bold?(left), ftc-style-bold?(right))) then 0 else str_eq(ftc-style-symbol(left), ftc-style-symbol(right));
+        def ftc-cell-equal?(left, right) = if str_eq(ftc-cell-glyph(left), ftc-cell-glyph(right)) then ftc-style-equal?(ftc-cell-style(left), ftc-cell-style(right)) else 0;
+        def ftc-diff-entry(x, y, oldCell, newCell) = list("ftc-change", x, y, oldCell, newCell);
+        def ftc-diff-row-cells(previous, nextCanvas, width, x, y, changes, oldCell, newCell) {
+            if eq(ftc-cell-equal?(oldCell, newCell), 1) then
+                ftc-diff-row(previous, nextCanvas, width, add(x, 1), y, changes)
+            else
+                ftc-diff-row(previous, nextCanvas, width, add(x, 1), y, cons(ftc-diff-entry(x, y, oldCell, newCell), changes));
+        }
+        def ftc-diff-row(previous, nextCanvas, width, x, y, changes) {
+            if ge(x, width) then
+                changes
+            else
+                ftc-diff-row-cells(previous, nextCanvas, width, x, y, changes, ftc-cell-at(previous, x, y), ftc-cell-at(nextCanvas, x, y));
+        }
+        def ftc-diff-rows(previous, nextCanvas, width, height, y, changes) = if ge(y, height) then reverse(changes) else ftc-diff-rows(previous, nextCanvas, width, height, add(y, 1), ftc-diff-row(previous, nextCanvas, width, 0, y, changes));
+        def ftc-diff(previous, nextCanvas) {
+            let width = if ge(ftc-width(previous), ftc-width(nextCanvas)) then ftc-width(previous) else ftc-width(nextCanvas);
+            let height = if ge(ftc-height(previous), ftc-height(nextCanvas)) then ftc-height(previous) else ftc-height(nextCanvas);
+            ftc-diff-rows(previous, nextCanvas, width, height, 0, list());
+        }
+
+        def ftc-cat(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), ftc-cat(tail(parts)));
+        def ftc-esc() = byte_to_str(27);
+        def ftc-ansi-fg(style) = ftc-cat(list("38;2;", int_to_str(ftc-style-red(style)), ";", int_to_str(ftc-style-green(style)), ";", int_to_str(ftc-style-blue(style))));
+        def ftc-ansi-bg(style) = if lt(ftc-style-back-red(style), 0) then "" else ftc-cat(list(";48;2;", int_to_str(ftc-style-back-red(style)), ";", int_to_str(ftc-style-back-green(style)), ";", int_to_str(ftc-style-back-blue(style))));
+        def ftc-ansi-weight(style) = if eq(ftc-style-bold?(style), 1) then "1;" else if lt(ftc-style-alpha(style), 160) then "2;" else "";
+        def ftc-ansi-cell(cell) {
+            let style = ftc-cell-style(cell);
+            ftc-cat(list(ftc-esc(), "[", ftc-ansi-weight(style), ftc-ansi-fg(style), ftc-ansi-bg(style), "m", ftc-cell-glyph(cell), ftc-esc(), "[0m"));
+        }
+        def ftc-ansi-style(style) = ftc-cat(list(ftc-esc(), "[", ftc-ansi-weight(style), ftc-ansi-fg(style), ftc-ansi-bg(style), "m"));
+        def ftc-ansi-segment(segment) = ftc-cat(list(ftc-ansi-style(ftc-segment-style(segment)), ftc-segment-text(segment)));
+        def ftc-ansi-segments(segments) = if eq(len(segments), 0) then ftc-cat(list(ftc-esc(), "[0m")) else str_concat(ftc-ansi-segment(head(segments)), ftc-ansi-segments(tail(segments)));
+        def ftc-ansi-line-end() = ftc-cat(list(ftc-esc(), "[0m", ftc-esc(), "[K"));
+        def ftc-ansi-segment-lines(lines) = if eq(len(lines), 0) then "" else if eq(len(tail(lines)), 0) then str_concat(ftc-ansi-segments(head(lines)), ftc-ansi-line-end()) else ftc-cat(list(ftc-ansi-segments(head(lines)), ftc-ansi-line-end(), "\n", ftc-ansi-segment-lines(tail(lines))));
+        def ftc-ansi-row-rest(cells, heldStyle) = if eq(len(cells), 0) then ftc-cat(list(ftc-esc(), "[0m")) else if eq(ftc-style-equal?(heldStyle, ftc-cell-style(head(cells))), 1) then str_concat(ftc-cell-glyph(head(cells)), ftc-ansi-row-rest(tail(cells), heldStyle)) else ftc-cat(list(ftc-ansi-style(ftc-cell-style(head(cells))), ftc-cell-glyph(head(cells)), ftc-ansi-row-rest(tail(cells), ftc-cell-style(head(cells)))));
+        def ftc-ansi-row(cells) = if eq(len(cells), 0) then "" else ftc-cat(list(ftc-ansi-style(ftc-cell-style(head(cells))), ftc-cell-glyph(head(cells)), ftc-ansi-row-rest(tail(cells), ftc-cell-style(head(cells)))));
+        def ftc-ansi-rows(rows) = if eq(len(rows), 0) then "" else if eq(len(tail(rows)), 0) then ftc-ansi-row(head(rows)) else ftc-cat(list(ftc-ansi-row(head(rows)), "\n", ftc-ansi-rows(tail(rows))));
+        def ftc-ansi-project(surface) = ftc-ansi-rows(ftc-rows(ftc-surface-canvas(surface)));
+        def ftc-terminal-open() = ftc-cat(list(ftc-esc(), "[?1049h", ftc-esc(), "[?25l", ftc-esc(), "[2J", ftc-esc(), "[H"));
+        def ftc-terminal-safe-open() = ftc-cat(list(ftc-esc(), "[0m", ftc-esc(), "[2J", ftc-esc(), "[H"));
+        def ftc-terminal-home() = ftc-cat(list(ftc-esc(), "[H"));
+        def ftc-terminal-erase-rest() = ftc-cat(list(ftc-esc(), "[J"));
+        def ftc-terminal-close() = ftc-cat(list(ftc-esc(), "[0m", ftc-esc(), "[?25h", ftc-esc(), "[?1049l"));
+        def ftc-terminal-frame(surface) = ftc-cat(list(ftc-terminal-home(), ftc-ansi-project(surface)));
+        def ftc-ansi-position(x, y) = ftc-cat(list(ftc-esc(), "[", int_to_str(add(y, 1)), ";", int_to_str(add(x, 1)), "H"));
+        def ftc-ansi-diff-more(changes, change) = ftc-cat(list(ftc-ansi-position(nth(change, 1), nth(change, 2)), ftc-ansi-cell(nth(change, 4)), ftc-ansi-diff(tail(changes))));
+        def ftc-ansi-diff(changes) = if eq(len(changes), 0) then "" else ftc-ansi-diff-more(changes, head(changes));
+
+        // Segment frames retain node ids, channels, evidence, and styles.  A
+        // changed-row projection compares the actual ANSI line bytes and moves
+        // only to rows whose semantic projection changed.  History remains in
+        // the persistent Form state; repaint suppression never resets it.
+        def ftc-segment-line-projection(line) = str_concat(ftc-ansi-segments(line), ftc-ansi-line-end());
+        def ftc-segment-line-at(lines, index) = if or(lt(index, 0), ge(index, len(lines))) then list() else nth(lines, index);
+        def ftc-segment-line-diff(previous, nextLines, index) {
+            let oldProjection = ftc-segment-line-projection(ftc-segment-line-at(previous, index));
+            let newProjection = ftc-segment-line-projection(ftc-segment-line-at(nextLines, index));
+            if str_eq(oldProjection, newProjection) then "" else ftc-cat(list(ftc-ansi-position(0, index), newProjection));
+        }
+        def ftc-segment-lines-diff-go(previous, nextLines, index, count) = if ge(index, count) then "" else str_concat(ftc-segment-line-diff(previous, nextLines, index), ftc-segment-lines-diff-go(previous, nextLines, add(index, 1), count));
+        def ftc-segment-lines-diff(previous, nextLines) {
+            let count = if ge(len(previous), len(nextLines)) then len(previous) else len(nextLines);
+            ftc-segment-lines-diff-go(previous, nextLines, 0, count);
+        }
+    }
+    0;
+}

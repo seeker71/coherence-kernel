@@ -1,0 +1,65 @@
+; qwen4exp-flash-next-prefill-live-run.fk — prompt ingestion without a head.
+;
+; The first token advances every resident state but skips vocabulary
+; projection.  Evaluating the final prompt token must still produce the
+; independently established second-token oracle id 271.
+;
+; preludes: form/native/metal/qwen4exp-flash-next-token-handle.fk form/native/metal/model-bandwidth.fk form/form-stdlib/qwen4exp-flash-next-state.bml form/form-stdlib/native-model-glass.bml
+
+(do
+    (defn q4pl-run-resident (ctx handle loading)
+        (do
+            ; Only the validated q4t-open context earns loaded=1.
+            (let loaded (nmg-qwen-loaded loading))
+            (let _glass-loaded (nmg-glass-write-physical loaded (NMGQwen) handle "weight-open-returned"))
+            (let before (metal_status))
+            (let d0 (mbw-status-int before "total_dispatch"))
+            (let prefilling (nmg-qwen-prefilling loaded 0))
+            (let _glass-prefill (nmg-glass-write-physical prefilling (NMGQwen) handle "prefix-evaluate-entered"))
+            (let t0 (now_unix_ms))
+            (let ingested (q4t-ingest ctx 9419 0 248046 248046))
+            (let t1 (now_unix_ms))
+            (let after-ingest (metal_status))
+            (let d1 (mbw-status-int after-ingest "total_dispatch"))
+            (let output (q4t-forward ctx 11 1 9419 248046))
+            (let t2 (now_unix_ms))
+            (let after (metal_status))
+            (let d2 (mbw-status-int after "total_dispatch"))
+            ; The final prompt evaluation returned a next-token prediction.
+            (let finished (nmg-qwen-finished prefilling 2))
+            (let _glass-finished (nmg-glass-write-physical finished (NMGQwen) handle "generation-returned"))
+            (let closed (q4t-close ctx))
+            (if (not (eq closed 1))
+                (list "qwen4exp-native-prefill" "failed" "close-not-confirmed"
+                    "residency-handle" handle "closed" closed)
+                (do
+                    (let released (nmg-release finished (NMGQwen)))
+                    (let _glass-released (nmg-glass-write-physical-release released (NMGQwen) handle closed))
+                    (list "qwen4exp-native-prefill"
+                        (list "ingested" ingested "token" 9419 "ms" (sub t1 t0)
+                            "dispatches" (sub d1 d0) "vocabulary-heads" 0)
+                        (list "evaluated-final" 11 "output" output "ms" (sub t2 t1)
+                            "dispatches" (sub d2 d1) "vocabulary-heads" 1)
+                        (list "expected-output" 271 "accepted" (if (eq output 271) 1 0))
+                        (list "glass-events" (len (framebuffer-events))
+                            "evidence" "physical" "residency-handle" handle "closed" closed
+                            "released-loaded" (nmg-loaded? (nmg-find (NMGQwen)
+                                (nmg-models released)))))))))
+
+    (framebuffer-clear)
+    (let prefix "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+    ; Selection is not residence. The first frame therefore says active=1,
+    ; loaded=0 while q4t-open is actually running.
+    (let native (nmg-begin-native (nmg-initial)))
+    (let selected (nmg-finish-native native "request-evidence"))
+    (let loading (nmg-qwen-loading selected))
+    (let _glass-loading (nmg-glass-write loading))
+    (let ctx (q4t-open prefix 128))
+    (let slot (q4s-slot prefix ctx 128 0 248046 248046 (empty) 248046 "open"))
+    (let handle (q4s-residency-handle slot))
+    (if (eq (q4s-resident? slot) 1)
+        (q4pl-run-resident ctx handle loading)
+        (do
+            (let closed (q4t-close ctx))
+            (list "qwen4exp-native-prefill" "refused" "no-live-weight-handle"
+                "residency-handle" handle "closed" closed))))
