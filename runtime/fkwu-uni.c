@@ -13031,15 +13031,37 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     return 1;
 }
 static void fk_fkb_skip_symbol_image(long long version) {
+    /* the replay lane used to SKIP the very names every image carries --
+     * a warm .fkb run had zero symbol rows, so its heat board could only
+     * speak in fn#N numbers (and before boxvoice, in empty strings: the
+     * hearth-era anonymous worklist). Restore the join instead: v3+ rows
+     * carry (row, fnidx, arity, name), the same shape the import lane
+     * already restores; indices are verbatim in a full replay (no remap). */
     long long symbol_count = fk_fkb_read_signed();
     long long i = 0;
     while (!fk_fkb_bad && i < symbol_count) {
         (void)fk_fkb_read_signed();
         if (version >= 3) {
-            (void)fk_fkb_read_signed();
-            (void)fk_fkb_read_signed();
+            long long old_fnidx = fk_fkb_read_signed();
+            long long arity = fk_fkb_read_signed();
+            long long name_s = 0;
+            long long name_n = 0;
+            if (!fk_fkb_read_symbol_to_srctext(&name_s, &name_n)) {
+                return;
+            }
+            if (old_fnidx > 0) {
+                fk_fn_reserve(fk_fntop + 2);
+                fk_fnsym_s[fk_fntop] = name_s;
+                fk_fnsym_n[fk_fntop] = name_n;
+                fk_fnidx[fk_fntop] = old_fnidx;
+                if (old_fnidx < fk_fn_capacity) {
+                    fk_fnar[old_fnidx] = arity;
+                }
+                fk_fntop = fk_fntop + 1;
+            }
+        } else {
+            fk_fkb_skip_string();
         }
-        fk_fkb_skip_string();
         i = i + 1;
     }
     long long node_symbol_count = fk_fkb_read_signed();
