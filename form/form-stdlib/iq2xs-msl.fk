@@ -18,7 +18,7 @@
 ; never bit equality. It requires the unit assembler to prepend qml-msl-header once; the helper and
 ; serial kernels themselves use only arithmetic and carry no duplicate header.
 ;
-; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/iq2xxs-dequant.fk form-stdlib/iq2xxs-msl.fk form-stdlib/iq2xs-layout-xtal.fk form-stdlib/iq2xs-dequant.fk
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/iq2xxs-dequant.fk form-stdlib/iq2xxs-msl.fk form-stdlib/iq2xs-layout.bml form-stdlib/iq2xs-dequant.fk
 ;
 ; Proven by: form-stdlib/tests/iq2xs-msl-band.fk and
 ;            form/native/metal/metal_iq2xs_gpu.sh (Mac-only GPU execution + timing).
@@ -110,6 +110,14 @@
         (str_concat "kernel void "
         (str_concat fname
             " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0 = (gid / 32u) * 4u; if (r0 >= rows) return; uint nb = cols / 256u; uint ngrp = nb * 8u; ulong rstride = (ulong)nb * 74ul; float sumf[4]; for (uint rr = 0u; rr < 4u; ++rr) sumf[rr] = 0.0f; for (uint gg = lane; gg < ngrp; gg += 32u) { uint blk = gg / 8u; uint ib32 = gg - blk * 8u; device const float* xg = x + blk * 256u + ib32 * 32u; float xl[32]; for (uint j = 0u; j < 32u; ++j) xl[j] = xg[j]; for (uint rr = 0u; rr < 4u; ++rr) { if (r0 + rr < rows) { device const uchar* b = qb + (ulong)(r0 + rr) * rstride + (ulong)blk * 74ul; ushort hb = (ushort)b[0] | ((ushort)b[1] << 8); float d = float(as_type<half>(hb)); uint scb = uint(b[66u + ib32]); device const uchar* qbase = b + 2u + ib32 * 8u; ushort4 qv = ushort4(*(device const packed_ushort4*)(qbase)); for (uint l = 0u; l < 4u; ++l) { uint qw = uint(qv[l]); uint gidx = qw & 511u; uint signidx = qw >> 9u; uint sc = (l < 2u) ? (scb & 15u) : (scb >> 4u); float scale = 0.125f * d * float(2u * sc + 1u); constant uchar* g8 = iq2xs_grid + gidx * 8u; uint signs = uint(iq2xs_ksigns[signidx]); for (uint j = 0u; j < 8u; ++j) { float mag = float(g8[j]); float smag = (((signs >> j) & 1u) == 1u) ? -mag : mag; sumf[rr] += (scale * smag) * xl[l * 8u + j]; } } } } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sumf[rr]); if (lane == 0u && r0 + rr < rows) y[r0 + rr] = s; } }")))
+
+    ; Expert-offset twin. `ebase` is a flat weight index and must begin on a
+    ; 256-weight block boundary; the model's 640x2560 expert slices do. Keeping
+    ; this separate preserves the established no-offset kernel and its witness.
+    (defn iq2xsm-matvec-slot4-off-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ebase [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r0 = (gid / 32u) * 4u; if (r0 >= rows) return; uint nb = cols / 256u; uint ngrp = nb * 8u; ulong tensor_base = (ulong)(ebase / 256u) * 74ul; ulong rstride = (ulong)nb * 74ul; float sumf[4]; for (uint rr = 0u; rr < 4u; ++rr) sumf[rr] = 0.0f; for (uint gg = lane; gg < ngrp; gg += 32u) { uint blk = gg / 8u; uint ib32 = gg - blk * 8u; device const float* xg = x + blk * 256u + ib32 * 32u; float xl[32]; for (uint j = 0u; j < 32u; ++j) xl[j] = xg[j]; for (uint rr = 0u; rr < 4u; ++rr) { if (r0 + rr < rows) { device const uchar* b = qb + tensor_base + (ulong)(r0 + rr) * rstride + (ulong)blk * 74ul; ushort hb = (ushort)b[0] | ((ushort)b[1] << 8); float d = float(as_type<half>(hb)); uint scb = uint(b[66u + ib32]); device const uchar* qbase = b + 2u + ib32 * 8u; ushort4 qv = ushort4(*(device const packed_ushort4*)(qbase)); for (uint l = 0u; l < 4u; ++l) { uint qw = uint(qv[l]); uint gidx = qw & 511u; uint signidx = qw >> 9u; uint sc = (l < 2u) ? (scb & 15u) : (scb >> 4u); float scale = 0.125f * d * float(2u * sc + 1u); constant uchar* g8 = iq2xs_grid + gidx * 8u; uint signs = uint(iq2xs_ksigns[signidx]); for (uint j = 0u; j < 8u; ++j) { float mag = float(g8[j]); float smag = (((signs >> j) & 1u) == 1u) ? -mag : mag; sumf[rr] += (scale * smag) * xl[l * 8u + j]; } } } } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sumf[rr]); if (lane == 0u && r0 + rr < rows) y[r0 + rr] = s; } }")))
 
     (defn iq2xsm-dequant-msl (fname)
         (str_concat (iq2xsm-msl-helpers) (iq2xsm-dequant-body fname)))

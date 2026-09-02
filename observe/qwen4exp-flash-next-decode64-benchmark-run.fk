@@ -1,0 +1,39 @@
+; qwen4exp-flash-next-decode64-benchmark-run.fk — sustained native decode.
+;
+; One unmeasured token faults the resident pages and establishes the first
+; prediction.  The timed window then self-feeds 64 greedy tokens through the
+; same Form/Metal context.  This is wall throughput, not a parity claim.
+;
+; preludes: form/native/metal/qwen4exp-flash-next-token-handle.fk form/native/metal/model-bandwidth.fk
+
+(do
+    (defn q4db-go (ctx cur prev1 prev2 pos remaining count checksum first last)
+        (if (le remaining 0)
+            (list count checksum first last cur prev1 prev2 pos)
+            (do
+                (let output (q4t-forward ctx cur pos prev1 prev2))
+                (q4db-go ctx output cur prev1 (add pos 1) (sub remaining 1)
+                    (add count 1) (add checksum output)
+                    (if (eq count 0) output first) output))))
+    (let prefix "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+    (let ctx (q4t-open prefix 128))
+    (let warm (q4t-forward ctx 9419 0 248046 248046))
+    (let before (metal_status))
+    (let before-dispatch (mbw-status-int before "total_dispatch"))
+    (let before-gpu-us (mbw-status-int before "gpu_busy_us_total"))
+    (let started (now_unix_ms))
+    (let result (q4db-go ctx warm 9419 248046 1 64 0 0 -1 -1))
+    (let elapsed (sub (now_unix_ms) started))
+    (let after (metal_status))
+    (let dispatches (sub (mbw-status-int after "total_dispatch") before-dispatch))
+    (let gpu-us (sub (mbw-status-int after "gpu_busy_us_total") before-gpu-us))
+    (let rate (if (gt elapsed 0) (div 64000000 elapsed) 0))
+    (q4t-close ctx)
+    (list "qwen4exp-native-decode64"
+        (list "warm-token" warm)
+        (list "tokens" (nth result 0) "first" (nth result 2) "last" (nth result 3)
+            "checksum" (nth result 1))
+        (list "wall-ms" elapsed "decode-millitokps" rate
+            "ninety-percent-floor" 23922 "accepted" (if (ge rate 23922) 1 0))
+        (list "gpu-us" gpu-us "dispatches" dispatches
+            "dispatches-per-token" (div dispatches 64))))

@@ -1,0 +1,47 @@
+; First real qwen4exp token: mmap weights -> Form schedule -> Metal -> uint id.
+; No tokenizer carrier, llama process, server, MLX, or Python participates.
+;
+; preludes: form/native/metal/qwen4exp-flash-next-token-handle.fk
+
+(do
+    (defn q4tl-word (s)
+        (add (str_byte_at s 0)
+        (add (mul (str_byte_at s 1) 256)
+        (add (mul (str_byte_at s 2) 65536)
+             (mul (str_byte_at s 3) 16777216)))))
+    (defn q4tl-f32at (h i)
+        (fd-value (q4tl-word (metal_buf_read h (mul i 4) 4)) 8 23))
+    (defn q4tl-u32at (h i)
+        (q4tl-word (metal_buf_read h (mul i 4) 4)))
+    (let prefix "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+    (let t0 (now_unix_ms))
+    (let ctx (q4t-open prefix 16))
+    (let t1 (now_unix_ms))
+    ; "Hello" is token 9419 under the artifact's own GPT-2 tokenizer.
+    ; Before sequence start both PLE predecessors are the file's EOS 248046.
+    (let out (q4t-forward ctx 9419 0 248046 248046))
+    (let t2 (now_unix_ms))
+    (let bs (nth ctx 3))
+    (let head-mixed (list (q4tl-f32at (nth bs 5) 0)
+        (q4tl-f32at (nth bs 5) 1) (q4tl-f32at (nth bs 5) 2)
+        (q4tl-f32at (nth bs 5) 2559)))
+    (let logit-probe (list (q4tl-f32at (nth bs 34) 0)
+        (q4tl-f32at (nth bs 34) 11) (q4tl-f32at (nth bs 34) 9419)
+        (q4tl-f32at (nth bs 34) 248319)))
+    (let reduction-probe (list (q4tl-u32at (nth bs 35) 0)
+        (q4tl-f32at (nth bs 36) 0) (q4tl-u32at (nth bs 37) 0)
+        (q4tl-f32at (nth bs 38) 0)))
+    (let live (metal_status))
+    (let ok (if (eq out 11)
+        (if (lt (str_find live "last_error=none" 0) 0) 0 1) 0))
+    (q4t-close ctx)
+    (list "qwen4exp-flash-next-token-live"
+        (list "input" 9419 "output" out)
+        (list "expected-output" 11 "parity" (eq out 11))
+        (list "head-mixed" head-mixed)
+        (list "logits-0-11-9419-last" logit-probe)
+        (list "argmax-stage0-value-final-value" reduction-probe)
+        (list "open-ms" (sub t1 t0) "token-ms" (sub t2 t1))
+        (list "metal-status" live)
+        (list "after-close" (metal_status))
+        (list "verdict" (if (eq ok 1) 127 0))))
