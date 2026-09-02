@@ -114,3 +114,34 @@ composed into a hazard neither wrote. Fused to one walk with the reason
 in place. When two branches heal the same wound, the merge needs a
 witness on the HEAL itself, not just the conflict markers — the stacked
 loops merged without any conflict at all.
+
+## keymelt (the observation kept its word)
+
+The final twinlane sweep: 891 of 907 declared bands byte-equal across
+main's build and the reunion's; every one of the 16 differences moved
+toward its declared verdict — and five graph-node organs, running on
+this lane for the FIRST time through the record_new door, answered
+partial digit-verdicts. Chasing the missing digits inward, probe by
+probe: memory carrier true, cls layer true, every re-typed replica true,
+params true in flight, the nullary key true in flight — and the keydir
+ROW ITSELF mutating after write, "graph/count/total" re-reading as "E".
+
+The wound: the growth wave declared record KEYS melt roots alongside
+values, but fk_rkey holds raw string-pool INDEXES — and an odd index
+read by the compactor's copier decodes as a cons cell, so fk_mcopy
+"relocates" it into whatever entry the forwarding table names. An index
+walked as a value. Type is not carried by the bits; it is carried by the
+walk. My pre-reunion loop had it right — values and blueprints only,
+"keys are string-pool indices, not values" — and I deleted that clause
+during the fusion out of deference to the merged canon. The heal restores
+it, with the witness in the comment; it closes main's own latent
+corruption too, since the wave shipped the same walk. After the heal,
+all 16 bands sit EXACTLY on their declared verdicts — the whole
+graph-node organ family whole on the fourth arm for the first time.
+Corpus row 1234: keymelt.
+
+The teaching under the teaching: deference is not witness. The merged
+canon was newer, bigger, and four receipts deep — and wrong about one
+column; the clause I had written hours earlier from direct observation
+was the truth. Twinlane caught what no gate could have: the manifest
+gates were green through the whole corruption.

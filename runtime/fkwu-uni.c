@@ -6883,16 +6883,20 @@ static void fk_melt(void) {
         nlive = nlive + fk_mlive(fk_mem[k]);
         k = k + 1;
     }
-    /* record keys, values, and blueprints are ROOTS: a field holding a cons
-     * value must survive compaction. One walk covers all three — the reunion
-     * had briefly stacked two, and fk_mcopy is not idempotent (forwarding is
-     * indexed by OLD arena positions, so re-copying a copied value can alias). */
+    /* record VALUES and BLUEPRINTS are ROOTS: a field holding a cons value
+     * must survive compaction. Record KEYS are NOT values — fk_rkey holds raw
+     * fk_stri string-pool INDEXES, and an odd index read as a value decodes as
+     * a cons cell, so mcopy "relocates" it into an unrelated pool entry
+     * (witnessed 2026-09-02: a keydir's "graph/count/total" row re-reading as
+     * "E" after file-lane churn melts — the graph-node aggregate wound). One
+     * walk, values+bp only; and only one — fk_mcopy is not idempotent
+     * (forwarding is indexed by OLD arena positions, so a second copy of an
+     * already-copied value can alias). */
     k = 1;
     while (k <= fk_rp) {
         nlive = nlive + fk_mlive(fk_rbp[k]);
         long long rj = 0;
         while (rj < fk_rcnt[k]) {
-            nlive = nlive + fk_mlive(fk_rkey[k][rj]);
             nlive = nlive + fk_mlive(fk_rval[k][rj]);
             rj = rj + 1;
         }
@@ -6950,7 +6954,6 @@ static void fk_melt(void) {
         fk_rbp[k] = fk_mcopy(fk_rbp[k]);
         long long rj = 0;
         while (rj < fk_rcnt[k]) {
-            fk_rkey[k][rj] = fk_mcopy(fk_rkey[k][rj]);
             fk_rval[k][rj] = fk_mcopy(fk_rval[k][rj]);
             rj = rj + 1;
         }
