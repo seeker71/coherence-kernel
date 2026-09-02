@@ -81,6 +81,10 @@ SOURCE_COMPILE_CHAIN=(
     form-stdlib/engine-constants.fk
     form-stdlib/compiler-objects.fk
     form-stdlib/form-ontology-bp.fk
+    # source-categories joined 2026-08-27: the loader's top-level fol-cat calls
+    # resolve here; the drift hid behind a warm compile cache until a bin-go
+    # rebuild cold-started it (same family as the 2026-08-19 fol-core-row note).
+    form-stdlib/form-ontology-source-categories.fk
     form-stdlib/form-ontology-loader.fk
     form-stdlib/line-grammar.fk
     form-stdlib/bmf-core.fk
@@ -94,7 +98,7 @@ SOURCE_COMPILE_CHAIN=(
 )
 
 compile_bml() {
-    local src="$1" key cached out driver
+    local src="$1" key cached out driver lens_fkwu lens_rc
     if ! grep -Eq '^[[:space:]]*section \[' "$src"; then
         printf '%s\n' "$src"
         return 0
@@ -104,7 +108,12 @@ compile_bml() {
     cached="$source_cache/$key.fk"
     # fkwu first: the thin driver's closure is the body's `; preludes:` graph,
     # so no list here can drift for this lane. go stays as the fallback below.
-    if [[ ! -s "$cached" && -n "${FKWU:-}" && -x "${FKWU:-}" ]]; then
+    # The lens driver needs a SOURCE-capable fkwu: FOURTH_SOURCE_FKWU is that
+    # named door — the fourth-cache FKWU is a table walker that cannot run
+    # source drivers (witnessed 2026-08-27: exit 4 to a discarded stdout; this
+    # lane had never once run). A fall-through must speak.
+    lens_fkwu="${FOURTH_SOURCE_FKWU:-${FKWU:-}}"
+    if [[ ! -s "$cached" && -n "$lens_fkwu" && -x "$lens_fkwu" ]]; then
         out="$(mktemp "$source_cache/.tmp.XXXXXX")"
         driver="$work_dir/compile-fkwu.fk"
         {
@@ -112,8 +121,13 @@ compile_bml() {
             printf '; preludes: form-stdlib/source-compiler-text-lens.fk\n'
             printf '(do (form-source-compile-file "%s" "%s") 0)\n' "$src" "$out"
         } > "$driver"
-        if "$FKWU" "$driver" >/dev/null 2>&1 && [[ -s "$out" ]]; then
+        lens_rc=0
+        "$lens_fkwu" "$driver" > "$work_dir/compile-fkwu.log" 2>&1 || lens_rc=$?
+        if [[ $lens_rc -eq 0 && -s "$out" ]]; then
             mv -f "$out" "$cached"
+        else
+            printf 'regen: fkwu lens fell through for %s (rc=%s): %s -- go chain carries\n' \
+                "$src" "$lens_rc" "$(grep -v 'warning:' "$work_dir/compile-fkwu.log" | head -1)" >&2
         fi
         rm -f "$out" "$driver" "${driver%.fk}.fkb" "${driver%.fk}.sym" 2>/dev/null
     fi
