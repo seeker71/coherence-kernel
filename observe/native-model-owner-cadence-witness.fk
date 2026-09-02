@@ -1,0 +1,133 @@
+; native-model-owner-cadence-witness.fk — bounded physical 4 Hz witness.
+; preflight-exec: forbidden
+;
+; Reads twelve sidecar snapshots over eleven quarter-second intervals.  It
+; also reads the old owner's model snapshot through Glass's freshness window
+; and checks one physically absent PID without touching the live owner.
+;
+; preludes: form/form-stdlib/native-model-owner-cadence.bml form/form-stdlib/form-glass-live.bml
+
+(do
+    (defn nmdocw-snapshot (publisher)
+        (do
+            (let reading (fgtm-read-current (NMDOCGlassRoot) publisher))
+            (if (and (str_eq (fgtm-read-state-status reading) "current")
+                (eq (fgtm-field-present? (fgtm-read-state-value reading)) 1))
+                (fgtm-field-value (fgtm-read-state-value reading)) (list))))
+    (defn nmdocw-frames (publisher remaining held)
+        (if (le remaining 0) held
+            (do
+                (let snapshot (nmdocw-snapshot publisher))
+                (let next (append held (list snapshot)))
+                (let _wait (if (gt remaining 1)
+                    (host-exec "/bin/sleep 0.25" "") ""))
+                (nmdocw-frames publisher (sub remaining 1) next))))
+    (defn nmdocw-epochs (frames)
+        (if (eq (len frames) 0) (list)
+            (cons (if (eq (len (head frames)) 4)
+                (fgtm-snapshot-epoch (head frames)) -1)
+                (nmdocw-epochs (tail frames)))))
+    (defn nmdocw-gaps (epochs)
+        (if (lt (len epochs) 2) (list)
+            (cons (sub (nth epochs 1) (head epochs))
+                (nmdocw-gaps (tail epochs)))))
+    (defn nmdocw-unique-go (values held last)
+        (if (eq (len values) 0) held
+            (if (eq (head values) last)
+                (nmdocw-unique-go (tail values) held last)
+                (nmdocw-unique-go (tail values)
+                    (append held (list (head values))) (head values)))))
+    (defn nmdocw-unique (values) (nmdocw-unique-go values (list) -1))
+    (defn nmdocw-strictly-rising? (values)
+        (if (lt (len values) 2) 1
+            (if (gt (nth values 1) (head values))
+                (nmdocw-strictly-rising? (tail values)) 0)))
+    (defn nmdocw-min (values held)
+        (if (eq (len values) 0) held
+            (nmdocw-min (tail values)
+                (if (lt (head values) held) (head values) held))))
+    (defn nmdocw-max (values held)
+        (if (eq (len values) 0) held
+            (nmdocw-max (tail values)
+                (if (gt (head values) held) (head values) held))))
+
+    (let inventory (fgtm-inventory (NMDOCGlassRoot)))
+    (let publisher (if (str_eq (nth inventory 2) "current")
+        (nmdoc-newest-liveness-publisher (nth inventory 3)) ""))
+    (let frames (if (gt (str_len publisher) 0)
+        (nmdocw-frames publisher 12 (list)) (list)))
+    (let epochs (nmdocw-epochs frames))
+    (let uniqueEpochs (nmdocw-unique epochs))
+    (let gaps (nmdocw-gaps uniqueEpochs))
+    (let spanMs (if (gt (len uniqueEpochs) 1)
+        (sub (nth uniqueEpochs (sub (len uniqueEpochs) 1))
+            (head uniqueEpochs)) 0))
+    (let hzMilli (if (gt spanMs 0)
+        (div (mul (sub (len uniqueEpochs) 1) 1000000) spanMs) 0))
+    (let firstSnapshot (if (gt (len frames) 0) (head frames) (list)))
+    (let firstSamples (if (eq (len firstSnapshot) 4)
+        (fgtm-snapshot-samples firstSnapshot) (list)))
+    (let observerSample (nmdoc-sample-kind firstSamples "owner-observer"))
+    (let livenessSample (nmdoc-sample-kind firstSamples "owner-liveness"))
+    (let observerPid (if (eq (len observerSample) 19)
+        (nmdoc-present-number-or (fgtm-sample-handle observerSample) 0) 0))
+    (let processRows (if (gt observerPid 0)
+        (fgo-ps-processes (host-exec
+            (fgo-pid-ps-command (int_to_str observerPid)) "")) (list)))
+    (let process (if (eq (len processRows) 1) (head processRows) (list)))
+    (let now (now_unix_ms))
+    (let correlation (nmdoc-discover (nmdoc-self-pid) now 1))
+    (let ownerReading (if (eq (nmdoc-correlation? correlation) 1)
+        (fgtm-read-current (NMDOCGlassRoot)
+            (nmdoc-target-publisher correlation)) (list)))
+    (let ownerSamples (if (gt (len ownerReading) 0)
+        (fgl-current-reading-samples-at ownerReading now) (list)))
+    (let staleModel (nmdoc-sample-kind ownerSamples "model"))
+    (let absentPid 99998)
+    (let deadCorrelation (if (eq (nmdoc-correlation? correlation) 1)
+        (nmdoc-correlation
+            (nmdoc-observer-publisher-of correlation)
+            (nmdoc-observer-pid correlation)
+            (nmdoc-observer-started correlation)
+            (nmdoc-observer-incarnation-of correlation)
+            (nmdoc-sequence correlation)
+            (nmdoc-observed correlation)
+            (nmdoc-target-publisher correlation) absentPid
+            (nmdoc-target-publisher-started correlation)
+            (nmdoc-target-snapshot-epoch correlation)
+            (nmdoc-target-process-start-floor correlation)
+            "absent-pid-must-not-match"
+            "" -1 -1 "" "unbound-last-observed")
+        (list)))
+    (let deadAlive (nmdoc-target-alive? deadCorrelation))
+    (let deadSample (if (eq (nmdoc-correlation? deadCorrelation) 1)
+        (nmdoc-target-liveness-sample deadCorrelation deadAlive) (list)))
+    (list "native-model-owner-cadence-physical"
+        "publisher" publisher
+        "frames" (len frames)
+        "updates" (len uniqueEpochs)
+        "strictly-rising" (nmdocw-strictly-rising? uniqueEpochs)
+        "hz-milli" hzMilli
+        "min-gap-ms" (if (gt (len gaps) 0) (nmdocw-min gaps (head gaps)) -1)
+        "max-gap-ms" (if (gt (len gaps) 0) (nmdocw-max gaps (head gaps)) -1)
+        "observer-pid" observerPid
+        "observer-rss-bytes" (if (eq (len process) 5)
+            (fgo-ps-rss-bytes process) -1)
+        "observer-cpu-tenths-percent" (if (eq (len process) 5)
+            (fgo-ps-cpu process) -1)
+        "target-pid" (if (eq (nmdoc-correlation? correlation) 1)
+            (nmdoc-target-pid correlation) 0)
+        "target-binding" (if (eq (nmdoc-correlation? correlation) 1)
+            (nmdoc-target-binding correlation) "absent")
+        "target-alive" (nmdoc-target-alive? correlation)
+        "liveness-kind" (if (eq (len livenessSample) 19)
+            (fgtm-sample-kind livenessSample) "absent")
+        "model-source" (if (eq (len staleModel) 19)
+            (fgtm-sample-source staleModel) "absent")
+        "model-read-epoch" (if (eq (len staleModel) 19)
+            (nmdoc-present-number-or (fgtm-sample-read-epoch staleModel) -1) -1)
+        "dead-pid" absentPid
+        "dead-alive" deadAlive
+        "dead-state" (if (eq (len deadSample) 19)
+            (fgtm-sample-lifecycle deadSample) "absent")
+        "model-readiness-renewed" 0))

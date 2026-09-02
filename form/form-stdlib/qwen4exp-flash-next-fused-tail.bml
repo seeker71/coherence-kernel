@@ -1,0 +1,43 @@
+//////////////////////////////////////////////////////////////////////
+//
+// qwen4exp-flash-next-fused-tail.bml — one measured MoE tail candidate.
+//
+// The live graph currently dispatches three dependent elementwise kernels:
+// routed-expert reduction, shared-expert gated add, then four-stream HC add.
+// This organ emits both that reference chain and a one-dispatch fusion.  It
+// does not silently replace the serving graph: the physical witness must be
+// exact, then full two-token parity still owns adoption.
+//
+// preludes: form-stdlib/core.fk form-stdlib/operator-type-id.bml
+//
+// Proven by: form-stdlib/tests/qwen4exp-flash-next-fused-tail-band.fk
+// Physical: observe/qwen4exp-flash-next-fused-tail-live-run.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class QwenFlashFusedTail {
+        field Rows = 2560;
+        field Streams = 4;
+        field Ranks = 10;
+        field ReferenceDispatches = 3;
+        field FusedDispatches = 1;
+
+        field Header = "#include <metal_stdlib>\nusing namespace metal;\n#pragma clang fp contract(off)\ninline float fexp(float x) { return metal::exp(x); }\n";
+        field ReferenceReduce = "kernel void qfft_reference_reduce(device const float* down [[buffer(0)]], device const float* wts [[buffer(1)]], device float* routed [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& nrank [[buffer(4)]], uint i [[thread_position_in_grid]]) { if(i>=rows)return;float acc=down[i]*wts[0];for(uint r=1u;r<nrank;++r)acc=acc+down[r*rows+i]*wts[r];routed[i]=acc; }\n";
+        field ReferenceShared = "kernel void qfft_reference_shared(device const float* shared [[buffer(0)]], device float* routed [[buffer(1)]], device const float* gate [[buffer(2)]], constant uint& rows [[buffer(3)]], uint i [[thread_position_in_grid]]) { if(i>=rows)return;float sg=1.0f/(1.0f+fexp(-gate[0]));routed[i]=routed[i]+shared[i]*sg; }\n";
+        field ReferenceCombine = "kernel void qfft_reference_combine(device float* residual [[buffer(0)]], device const float* routed [[buffer(1)]], device const float* inject [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& streams [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if(gid>=rows*streams)return;uint s=gid/rows;uint i=gid-s*rows;float w=2.0f/(1.0f+fexp(-inject[s]/float(streams)));residual[gid]=residual[gid]+routed[i]*w; }\n";
+        field Fused = "kernel void qfft_fused_tail(device float* residual [[buffer(0)]], device const float* down [[buffer(1)]], device const float* wts [[buffer(2)]], device const float* shared [[buffer(3)]], device const float* gate [[buffer(4)]], device const float* inject [[buffer(5)]], constant uint& rows [[buffer(6)]], constant uint& streams [[buffer(7)]], constant uint& nrank [[buffer(8)]], uint i [[thread_position_in_grid]]) { if(i>=rows)return;float acc=down[i]*wts[0];for(uint r=1u;r<nrank;++r)acc=acc+down[r*rows+i]*wts[r];float sg=1.0f/(1.0f+fexp(-gate[0]));float block=acc+shared[i]*sg;for(uint s=0u;s<streams;++s){float w=2.0f/(1.0f+fexp(-inject[s]/float(streams)));uint gid=s*rows+i;residual[gid]=residual[gid]+block*w;} }\n";
+
+        def qfft-msl() = str_concat(Header(), str_concat(ReferenceReduce(), str_concat(ReferenceShared(), str_concat(ReferenceCombine(), Fused()))));
+        def qfft-reference-dispatches() = ReferenceDispatches();
+        def qfft-fused-dispatches() = FusedDispatches();
+        def qfft-saved-dispatches() = sub(ReferenceDispatches(), FusedDispatches());
+        def qfft-project-dispatches(base, layers) = sub(base, mul(qfft-saved-dispatches(), layers));
+
+        // Allocation belongs to the caller's package and family.  Instances
+        // 1..3 name the operators; the caller chooses the composite operation.
+        def qfft-recipe(pkg, family, operation) = oti-composite(pkg, family, operation, list(oti-operator(pkg, family, 1), oti-operator(pkg, family, 2), oti-operator(pkg, family, 3)));
+    }
+    0;
+}
