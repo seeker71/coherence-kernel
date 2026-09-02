@@ -167,8 +167,8 @@ static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
  * PARSED PROGRAM's syntax tree, filled once per expression during parsing via
  * fk_smknode. */
 #define FK_NODE_CAP 262144              /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots. Raised 65536->262144 (2026-07-02): a 1,200-clip --src program filled the value-node table mid-run and every guard silently returned handle 0 -- a deterministic all-zero result with no error. Same raisable-constant class as FK_AST_NODE_CAP; overflow now dies loudly instead of returning 0. 262144*104B ~= 27MB. */
-#define FK_RECORD_CAP 256               /* fk_rkey/rval/rcnt/rbp: max live mutable records (fk_rp bound) */
-#define FK_RECORD_MAX_KEYS 128          /* fk_rkey/rval second dimension: max keys per record */
+#define FK_RECORD_INIT_CAP 256          /* fk_rkey/rval/rcnt/rbp: record table INITIAL capacity — grows by doubling, no wall */
+#define FK_RECORD_KEYS_INIT 8           /* per-record key row INITIAL capacity — grows by doubling, no wall */
 /* Function values occupy odd words below fk_fnbase and above the string-value
  * region. Validity follows the functions actually present in the current image;
  * it is not a second fixed function-table ceiling. */
@@ -947,10 +947,21 @@ static char *fk_conf(const char *key) {
     }
     return 0;
 }
-static long long fk_rkey[FK_RECORD_CAP][FK_RECORD_MAX_KEYS];
-static long long fk_rval[FK_RECORD_CAP][FK_RECORD_MAX_KEYS];
-static long long fk_rcnt[FK_RECORD_CAP];
-static long long fk_rbp[FK_RECORD_CAP];
+/* The record table GROWS (2026-09-02, the stackbreath family): the old
+ * FK_RECORD_CAP wall died loud at 256 live records, and the per-record key cap
+ * died loud at 128 on construction while record_set silently DROPPED the 129th
+ * key — a partial record accepted as whole. Rows are per-record heap arrays
+ * behind stable indices (nothing relocates, handles stay true), both
+ * dimensions double on demand, and record values/blueprints are melt roots
+ * (fk_melt walks them like fk_nval), so a field holding a cons value survives
+ * compaction. */
+static long long **fk_rkey;
+static long long **fk_rval;
+static long long *fk_rkcap;
+static long long *fk_rcnt;
+static long long *fk_rbp;
+static long long fk_rcap;
+static long long fk_rgrown;
 static long long fk_rp;
 static long long fk_rbox(long long r) {
     return 0 - (r << 1);
@@ -964,6 +975,110 @@ static long long fk_ridx(long long v) {
 static long long fk_isrec(long long v) {
     long long r = fk_ridx(v);
     return r >= 1 && r <= fk_rp;
+}
+/* grow the record TABLE so slot fk_rp+1 exists. Realloc keeps old rows in
+ * place (row pointers are copied, their arrays never move), so live record
+ * indices stay true across growth — the same relocation-free law fk_heap_grow
+ * follows. Allocation failure dies loud: out of memory is out of memory. */
+static void fk_rec_table_ensure(void) {
+    if (fk_rcap == 0) {
+        fk_rcap = FK_RECORD_INIT_CAP;
+        fk_rkey = calloc(fk_rcap, sizeof(long long *));
+        fk_rval = calloc(fk_rcap, sizeof(long long *));
+        fk_rkcap = calloc(fk_rcap, 8);
+        fk_rcnt = calloc(fk_rcap, 8);
+        fk_rbp = calloc(fk_rcap, 8);
+        if (fk_rkey == 0 || fk_rval == 0 || fk_rkcap == 0 || fk_rcnt == 0 || fk_rbp == 0) {
+            fk_die("fk_rec_table_ensure: record table calloc failed");
+        }
+        return;
+    }
+    if (fk_rp + 1 < fk_rcap) {
+        return;
+    }
+    long long ncap = fk_rcap * 2;
+    fk_rkey = realloc(fk_rkey, ncap * sizeof(long long *));
+    fk_rval = realloc(fk_rval, ncap * sizeof(long long *));
+    fk_rkcap = realloc(fk_rkcap, ncap * 8);
+    fk_rcnt = realloc(fk_rcnt, ncap * 8);
+    fk_rbp = realloc(fk_rbp, ncap * 8);
+    if (fk_rkey == 0 || fk_rval == 0 || fk_rkcap == 0 || fk_rcnt == 0 || fk_rbp == 0) {
+        fk_die("fk_rec_table_ensure: record table realloc failed");
+    }
+    long long k = fk_rcap;
+    while (k < ncap) {
+        fk_rkey[k] = 0;
+        fk_rval[k] = 0;
+        fk_rkcap[k] = 0;
+        fk_rcnt[k] = 0;
+        fk_rbp[k] = 0;
+        k = k + 1;
+    }
+    fk_rcap = ncap;
+    fk_rgrown = fk_rgrown + 1;
+}
+/* grow record r's KEY/VALUE row to hold at least `need` entries. */
+static void fk_rec_keys_ensure(long long r, long long need) {
+    if (need <= fk_rkcap[r]) {
+        return;
+    }
+    long long ncap = fk_rkcap[r] == 0 ? FK_RECORD_KEYS_INIT : fk_rkcap[r];
+    while (ncap < need) {
+        ncap = ncap * 2;
+    }
+    fk_rkey[r] = realloc(fk_rkey[r], ncap * 8);
+    fk_rval[r] = realloc(fk_rval[r], ncap * 8);
+    if (fk_rkey[r] == 0 || fk_rval[r] == 0) {
+        fk_die("fk_rec_keys_ensure: record key row realloc failed");
+    }
+    fk_rkcap[r] = ncap;
+}
+/* ── methods on the blueprint (BML/NUMS rung 2b) ── shared by every record of a
+ * type, name-dispatched; the keystone that turns a Record into a real object.
+ * Key = (blueprint identity, method name). Blueprint identity follows the
+ * tag-102 law: kind-3 nodeids are identity-by-content (equal coordinates ARE
+ * the same identity regardless of which mint built the value node), everything
+ * else compares by handle. */
+#define FK_METHOD_INIT_CAP 256          /* fk_mth_*: method table INITIAL capacity — grows by doubling, no wall */
+static long long *fk_mth_bp;
+static long long *fk_mth_name;
+static long long *fk_mth_fn;
+static long long fk_mth_cap;
+static long long fk_mth_n;
+static void fk_mth_ensure(void) {
+    if (fk_mth_n + 1 < fk_mth_cap) {
+        return;
+    }
+    long long ncap = fk_mth_cap == 0 ? FK_METHOD_INIT_CAP : fk_mth_cap * 2;
+    fk_mth_bp = realloc(fk_mth_bp, ncap * 8);
+    fk_mth_name = realloc(fk_mth_name, ncap * 8);
+    fk_mth_fn = realloc(fk_mth_fn, ncap * 8);
+    if (fk_mth_bp == 0 || fk_mth_name == 0 || fk_mth_fn == 0) {
+        fk_die("fk_mth_ensure: method table realloc failed");
+    }
+    fk_mth_cap = ncap;
+}
+static long long fk_bp_ideq(long long a, long long b) {
+    if (a < 0 && b < 0) {
+        long long ia = fk_nidx(a);
+        long long ib = fk_nidx(b);
+        if (ia >= 1 && ia <= fk_np && ib >= 1 && ib <= fk_np &&
+            fk_nkind[ia] == 3 && fk_nkind[ib] == 3) {
+            return (fk_nid[ia][0] == fk_nid[ib][0] && fk_nid[ia][1] == fk_nid[ib][1] &&
+                    fk_nid[ia][2] == fk_nid[ib][2] && fk_nid[ia][3] == fk_nid[ib][3]) ? 1 : 0;
+        }
+    }
+    return a == b ? 1 : 0;
+}
+static long long fk_mth_find(long long bp, long long name) {
+    long long m = 0;
+    while (m < fk_mth_n) {
+        if (fk_mth_name[m] == name && fk_bp_ideq(fk_mth_bp[m], bp)) {
+            return m;
+        }
+        m = m + 1;
+    }
+    return 0 - 1;
 }
 static long long fk_cstrlen(const char *s) {
     long long n = 0;
@@ -6525,6 +6640,18 @@ static void fk_melt(void) {
         nlive = nlive + fk_mlive(fk_nval[k]);
         k = k + 1;
     }
+    /* record values and blueprints are ROOTS: a field holding a cons value
+     * must survive compaction (keys are string-pool indices, not values). */
+    k = 1;
+    while (k <= fk_rp) {
+        nlive = nlive + fk_mlive(fk_rbp[k]);
+        long long rj = 0;
+        while (rj < fk_rcnt[k]) {
+            nlive = nlive + fk_mlive(fk_rval[k][rj]);
+            rj = rj + 1;
+        }
+        k = k + 1;
+    }
     long long ncap = fk_cap;
     if (nlive * 2 > fk_cap) {
         ncap = fk_cap * 2;
@@ -6570,6 +6697,16 @@ static void fk_melt(void) {
         fk_ncat[k] = fk_mcopy(fk_ncat[k]);
         fk_nkids[k] = fk_mcopy(fk_nkids[k]);
         fk_nval[k] = fk_mcopy(fk_nval[k]);
+        k = k + 1;
+    }
+    k = 1;
+    while (k <= fk_rp) {
+        fk_rbp[k] = fk_mcopy(fk_rbp[k]);
+        long long rj = 0;
+        while (rj < fk_rcnt[k]) {
+            fk_rval[k][rj] = fk_mcopy(fk_rval[k][rj]);
+            rj = rj + 1;
+        }
         k = k + 1;
     }
     free(fk_hh);
@@ -8250,10 +8387,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 64) {
         long long xs64 = fk_walk(fk_node[i][1], fp);
+        fk_rec_table_ensure();
         fk_rp = fk_rp + 1;
-        if (fk_rp >= FK_RECORD_CAP) {
-            fk_die("fk_walk tag 64: FK_RECORD_CAP live records exceeded -- clamping fk_rp to the last slot would silently ALIAS two distinct records onto one, a whole quietly swapped for another. Raise FK_RECORD_CAP if a real program needs this many live records.");
-        }
         fk_rcnt[fk_rp] = 0;
         fk_rbp[fk_rp] = 0;
         long long q64 = xs64 >> 1;
@@ -8269,12 +8404,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 }
                 if (k64 == -1) {
                     fk_rbp[fk_rp] = v64;
-                } else if (fk_rcnt[fk_rp] < FK_RECORD_MAX_KEYS) {
+                } else {
+                    fk_rec_keys_ensure(fk_rp, fk_rcnt[fk_rp] + 1);
                     fk_rkey[fk_rp][fk_rcnt[fk_rp]] = k64;
                     fk_rval[fk_rp][fk_rcnt[fk_rp]] = v64;
                     fk_rcnt[fk_rp] = fk_rcnt[fk_rp] + 1;
-                } else {
-                    fk_die("fk_walk tag 64: FK_RECORD_MAX_KEYS exceeded -- silently dropping a key past the cap would be a partial record accepted as whole. Raise FK_RECORD_MAX_KEYS if a real record needs this many keys.");
                 }
             }
             q64 = fk_ht[q64] >> 1;
@@ -8284,7 +8418,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 65) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
         long long key = fk_stri(fk_walk(fk_node[i][2], fp));
-        if (r < 1 || r >= FK_RECORD_CAP) {
+        if (r < 1 || r > fk_rp) {
             return 0;
         }
         long long j = 0;
@@ -8301,7 +8435,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long r = fk_ridx(rec);
         long long key = fk_stri(fk_walk(fk_node[i][2], fp));
         long long val = fk_walk(fk_node[i][3], fp);
-        if (r < 1 || r >= FK_RECORD_CAP) {
+        if (r < 1 || r > fk_rp) {
             return 0;
         }
         long long j = 0;
@@ -8312,17 +8446,16 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
             j = j + 1;
         }
-        if (fk_rcnt[r] < FK_RECORD_MAX_KEYS) {
-            fk_rkey[r][fk_rcnt[r]] = key;
-            fk_rval[r][fk_rcnt[r]] = val;
-            fk_rcnt[r] = fk_rcnt[r] + 1;
-        }
+        fk_rec_keys_ensure(r, fk_rcnt[r] + 1);
+        fk_rkey[r][fk_rcnt[r]] = key;
+        fk_rval[r][fk_rcnt[r]] = val;
+        fk_rcnt[r] = fk_rcnt[r] + 1;
         return rec;
     }
     if (t == 67) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
         long long key = fk_stri(fk_walk(fk_node[i][2], fp));
-        if (r < 1 || r >= FK_RECORD_CAP) {
+        if (r < 1 || r > fk_rp) {
             return 0;
         }
         long long j = 0;
@@ -8343,7 +8476,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 99) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
         long long out = 1;
-        if (r < 1 || r >= FK_RECORD_CAP) {
+        if (r < 1 || r > fk_rp) {
             return out;
         }
         long long j = fk_rcnt[r];
@@ -8835,7 +8968,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 97) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
         long long key = fk_stri(fk_walk(fk_node[i][2], fp));
-        if (r < 1 || r >= FK_RECORD_CAP) {
+        if (r < 1 || r > fk_rp) {
             return 0;
         }
         long long j = 0;
@@ -8852,7 +8985,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long r = fk_ridx(rec);
         long long key = fk_stri(fk_walk(fk_node[i][2], fp));
         long long val = fk_walk(fk_node[i][3], fp);
-        if (r < 1 || r >= FK_RECORD_CAP) {
+        if (r < 1 || r > fk_rp) {
             return 0;
         }
         long long j = 0;
@@ -8863,19 +8996,83 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
             j = j + 1;
         }
-        if (fk_rcnt[r] < FK_RECORD_MAX_KEYS) {
-            fk_rkey[r][fk_rcnt[r]] = key;
-            fk_rval[r][fk_rcnt[r]] = val;
-            fk_rcnt[r] = fk_rcnt[r] + 1;
-        }
+        fk_rec_keys_ensure(r, fk_rcnt[r] + 1);
+        fk_rkey[r][fk_rcnt[r]] = key;
+        fk_rval[r][fk_rcnt[r]] = val;
+        fk_rcnt[r] = fk_rcnt[r] + 1;
         return 0;
     }
     if (t == 100) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
-        if (r < 1 || r >= FK_RECORD_CAP) {
+        if (r < 1 || r > fk_rp) {
             return 0;
         }
         return fk_rbp[r];
+    }
+    if (t == 197) {
+        /* method_define bp "name" fn -> bp. The third arg must be a FUNCTION
+         * VALUE (a bare defn name in value position rides tag 243); anything
+         * else dies loud, matching the sibling walkers' refusal — a method
+         * table holding a non-function would dispatch to nonsense later,
+         * far from the wound. Re-defining a (blueprint, name) replaces. */
+        long long bp197 = fk_walk(fk_node[i][1], fp);
+        long long nm197 = fk_stri(fk_walk(fk_node[i][2], fp));
+        long long fv197 = fk_walk(fk_node[i][3], fp);
+        if (nm197 < 0) {
+            fk_die("fk_walk tag 197: method_define second arg must be a string name -- a non-string interns to the -1 sentinel and every such method would collide on it");
+        }
+        if (fk_is_fnval(fv197) == 0) {
+            fk_die("fk_walk tag 197: method_define third arg must be a function value (a defn name in value position)");
+        }
+        long long m197 = fk_mth_find(bp197, nm197);
+        if (m197 < 0) {
+            fk_mth_ensure();
+            m197 = fk_mth_n;
+            fk_mth_n = fk_mth_n + 1;
+            fk_mth_bp[m197] = bp197;
+            fk_mth_name[m197] = nm197;
+        }
+        fk_mth_fn[m197] = fk_fnval_idx(fv197);
+        return bp197;
+    }
+    if (t == 198) {
+        /* method_has record-or-blueprint "name" -> bool. A record answers for
+         * its blueprint; a blueprint answers for itself; anything else is 0. */
+        long long v198 = fk_walk(fk_node[i][1], fp);
+        long long nm198 = fk_stri(fk_walk(fk_node[i][2], fp));
+        long long bp198 = fk_isrec(v198) ? fk_rbp[fk_ridx(v198)] : v198;
+        return fk_mth_find(bp198, nm198) >= 0 ? 2 : 0;
+    }
+    if (t == 199) {
+        /* method_invoke rec "name" a1 .. -> value. Dispatch by the record's
+         * blueprint; the method's FIRST param binds the receiver (self), the
+         * remaining args ride the tag-242 cell chain exactly like tag-241
+         * direct calls. A non-record receiver or a missing method dies loud —
+         * the sibling kernels panic here, and a nothing'd dispatch would be a
+         * numb answer wearing a verdict. */
+        long long rv199 = fk_walk(fk_node[i][1], fp);
+        if (fk_isrec(rv199) == 0) {
+            fk_die("fk_walk tag 199: method_invoke first arg must be a record");
+        }
+        long long nm199 = fk_stri(fk_walk(fk_node[i][2], fp));
+        long long m199 = fk_mth_find(fk_rbp[fk_ridx(rv199)], nm199);
+        if (m199 < 0) {
+            fk_die("fk_walk tag 199: no method under that name on the record's blueprint (method_define it first)");
+        }
+        long long fi199 = fk_mth_fn[m199];
+        long long base199 = fk_vsp;
+        fk_vp(rv199);
+        long long cell199 = fk_node[i][3];
+        while (cell199 >= 0 && fk_node[cell199][0] == 242) {
+            fk_vp(fk_walk(fk_node[cell199][1], fp));
+            cell199 = fk_node[cell199][2];
+        }
+        long long n199 = fk_vsp - base199;
+        fk_fn_heat[fi199] = fk_fn_heat[fi199] + 1;
+        fk_heat_pulse();
+        long long r199 = fk_walk_body(fk_fn[fi199], base199);
+        fk_vsp = base199;
+        return fk_offer_ack(fi199, n199, r199);
     }
     if (t == 127) {
         long long ks_k = fk_walk(fk_node[i][1], fp) >> 1;
@@ -9915,6 +10112,31 @@ static long long fk_sparse(void) {
                  * not a flat chain on its own tag; see fk_parse_record_new. */
                 if (tag == 64) {
                     return fk_parse_record_new();
+                }
+                /* method_invoke (199): receiver and name are fixed operands;
+                 * the remaining args ride the same forward-linked tag-242 arg
+                 * cells the direct-call path builds, so fk_walk threads them
+                 * left-to-right like any other call. */
+                if (tag == 199) {
+                    long long recv199 = fk_sparse();
+                    long long name199 = fk_sparse();
+                    long long margn[256];
+                    long long mai = 0;
+                    fk_sskip();
+                    while (fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_RPAREN && mai < 256) {
+                        margn[mai] = fk_sparse();
+                        mai = mai + 1;
+                        fk_sskip();
+                    }
+                    if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                        fk_spos = fk_spos + 1;
+                    }
+                    long long mchain = -1;
+                    while (mai > 0) {
+                        mai = mai - 1;
+                        mchain = fk_smknode(242, margn[mai], mchain, 0);
+                    }
+                    return fk_smknode(199, recv199, name199, mchain);
                 }
                 return fk_parse_variadic(tag);
             }
@@ -12309,7 +12531,11 @@ static long long fk_fkb_node_arity_for_tag(long long tag) {
         tag == 243) {
         return 0;
     }
-    if (tag == 6 || tag == 79 || tag == 109) {
+    if (tag == 6 || tag == 79 || tag == 109 || tag == 199) {
+        /* 199 (method_invoke) rides the variadic (-1) optab row but its node
+         * carries THREE children (receiver, name, 242 arg chain) — without
+         * this line the optab loop would answer 2 and child [3] would never
+         * remap on .fkb import. */
         return 3;
     }
     if (tag == 7 || tag == 14 || tag == 45 || tag == 72 || tag == 74 || tag == 75 ||
