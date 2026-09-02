@@ -9745,7 +9745,7 @@ static long long fk_heat_total;
 static int fk_heat_reported;
 
 static void fk_heat_write(void) {
-    long long r = 0, top = fk_fntop;
+    long long top = fk_fn_count;
     char path[96], tmp[112], bpath[96], btmp[112];
     sprintf(path, ".fkwu-heat.%d", getpid());
     sprintf(tmp, ".fkwu-heat.%d.tmp", getpid());
@@ -9753,67 +9753,75 @@ static void fk_heat_write(void) {
     sprintf(btmp, ".fkwu-boxing.%d.tmp", getpid());
     int fd = -1;
     int bfd = -1;
-    unsigned char *seen = fk_fn_count > 0 ? calloc((unsigned long)fk_fn_count, 1) : 0;
-    /* heat is counted by FN-INDEX (fk_fn_heat[dispatch idx]) but names live
-     * in SYMBOL ROWS; fk_fnidx[row] is the join. The old loop indexed the
-     * symbol columns by fn-index directly, one reserved slot ahead of the
-     * rows -- every heat line carried an EMPTY name and the JIT worklist
-     * could not name its own recipes. Walk the rows, join through fnidx.
-     * Beside the heat board, .fkwu-boxing carries per-recipe float MINTS
-     * (fk_fn_fbox) -- the unboxing worklist: a recipe hot here allocates a
-     * float-pool slot per result where an unboxed lane would not. */
-    while (r < top) {
-        long long idx = fk_fnidx[r];
-        if (idx >= 0 && idx < fk_fn_count) {
-            if (seen != 0) {
-                seen[idx] = 1;
-            }
-            if (fk_fn_heat[idx] >= FK_HEAT_REPORT_MIN) {
+    /* NAME BY THE MAP, NOT BY COINCIDENCE: heat is per fn-INDEX, names
+     * live in the symbol table keyed by fk_fnidx[symtop] -> fnidx. On a
+     * fresh compile the two spaces coincide and indexing symbols with
+     * the fn index happens to print names; on an image load fn_base
+     * remapping divorces them and warm runs burned NAMELESS (witnessed
+     * 2026-09-02, twice, by two hands -- warmname and mirrorburn healed
+     * the same wound the same day). Walk the symbol table and follow
+     * the map; any hot fn no symbol names prints as fn#N -- counted
+     * work is never blank. Beside the heat board, .fkwu-boxing carries
+     * per-recipe float MINTS (fk_fn_fbox): the unboxing worklist -- a
+     * recipe hot there allocates a float-pool slot per result where an
+     * unboxed lane would not. Printed entries are negate-marked so the
+     * numbered sweep never repeats them, then restored. */
+    long long j = 0;
+    while (j < fk_fntop) {
+        long long fx = fk_fnidx[j];
+        if (fx >= 0 && fx < top) {
+            if (fk_fn_heat[fx] >= FK_HEAT_REPORT_MIN) {
                 if (fd < 0) {
                     fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
                 }
                 if (fd >= 0) {
-                    dprintf(fd, "%lld %.*s\n", fk_fn_heat[idx],
-                            (int)fk_fnsym_n[r], fk_srctext + fk_fnsym_s[r]);
+                    dprintf(fd, "%lld %.*s\n", fk_fn_heat[fx],
+                            (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]);
                 }
+                fk_fn_heat[fx] = 0 - fk_fn_heat[fx] - 1;
             }
-            if (fk_fn_fbox != 0 && fk_fn_fbox[idx] >= 1024) {
+            if (fk_fn_fbox != 0 && fk_fn_fbox[fx] >= 1024) {
                 if (bfd < 0) {
                     bfd = open(btmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
                 }
                 if (bfd >= 0) {
-                    dprintf(bfd, "%lld %.*s\n", fk_fn_fbox[idx],
-                            (int)fk_fnsym_n[r], fk_srctext + fk_fnsym_s[r]);
+                    dprintf(bfd, "%lld %.*s\n", fk_fn_fbox[fx],
+                            (int)fk_fnsym_n[j], fk_srctext + fk_fnsym_s[j]);
                 }
+                fk_fn_fbox[fx] = 0 - fk_fn_fbox[fx] - 1;
             }
         }
-        r = r + 1;
+        j = j + 1;
     }
-    /* fires no row names -- speak by number rather than vanish */
-    if (seen != 0) {
-        long long i2 = 1;
-        while (i2 < fk_fn_count) {
-            if (seen[i2] == 0) {
-                if (fk_fn_heat[i2] >= FK_HEAT_REPORT_MIN) {
-                    if (fd < 0) {
-                        fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-                    }
-                    if (fd >= 0) {
-                        dprintf(fd, "%lld fn#%lld\n", fk_fn_heat[i2], i2);
-                    }
-                }
-                if (fk_fn_fbox != 0 && fk_fn_fbox[i2] >= 1024) {
-                    if (bfd < 0) {
-                        bfd = open(btmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-                    }
-                    if (bfd >= 0) {
-                        dprintf(bfd, "%lld fn#%lld\n", fk_fn_fbox[i2], i2);
-                    }
-                }
+    long long i = 0;
+    while (i < top) {
+        if (fk_fn_heat[i] >= FK_HEAT_REPORT_MIN) {
+            if (fd < 0) {
+                fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
             }
-            i2 = i2 + 1;
+            if (fd >= 0) {
+                dprintf(fd, "%lld fn#%lld\n", fk_fn_heat[i], i);
+            }
         }
-        free(seen);
+        if (fk_fn_fbox != 0 && fk_fn_fbox[i] >= 1024) {
+            if (bfd < 0) {
+                bfd = open(btmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            }
+            if (bfd >= 0) {
+                dprintf(bfd, "%lld fn#%lld\n", fk_fn_fbox[i], i);
+            }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < top) {
+        if (fk_fn_heat[i] < 0) {
+            fk_fn_heat[i] = 0 - (fk_fn_heat[i] + 1);
+        }
+        if (fk_fn_fbox != 0 && fk_fn_fbox[i] < 0) {
+            fk_fn_fbox[i] = 0 - (fk_fn_fbox[i] + 1);
+        }
+        i = i + 1;
     }
     if (fd >= 0) {
         if (close(fd) == 0) {
@@ -13030,54 +13038,71 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     }
     return 1;
 }
-static void fk_fkb_skip_symbol_image(long long version) {
-    /* the replay lane used to SKIP the very names every image carries --
-     * a warm .fkb run had zero symbol rows, so its heat board could only
-     * speak in fn#N numbers (and before boxvoice, in empty strings: the
-     * hearth-era anonymous worklist). Restore the join instead: v3+ rows
-     * carry (row, fnidx, arity, name), the same shape the import lane
-     * already restores; indices are verbatim in a full replay (no remap). */
+/* the whole-image loader restores fn symbols instead of skipping them:
+ * names ride the artifact already (written at image time), and a warm
+ * process that burns must burn BY NAME — the heat witness printed
+ * nameless counts from every .fkb-loaded run until this read
+ * (witnessed 2026-09-02, fn#1 for an 80M-dispatch burn). Pre-v3
+ * artifacts carry no fnidx; they restore nothing and the fn#N
+ * fallback stays honest. */
+static int fk_fkb_restore_symbol_image(long long version) {
     long long symbol_count = fk_fkb_read_signed();
     long long i = 0;
+    fk_fntop = 0;
+    fk_fn_reserve(symbol_count + 1);
     while (!fk_fkb_bad && i < symbol_count) {
         (void)fk_fkb_read_signed();
+        long long fnidx = -1;
+        long long arity = 0;
         if (version >= 3) {
-            long long old_fnidx = fk_fkb_read_signed();
-            long long arity = fk_fkb_read_signed();
-            long long name_s = 0;
-            long long name_n = 0;
-            if (!fk_fkb_read_symbol_to_srctext(&name_s, &name_n)) {
-                return;
+            fnidx = fk_fkb_read_signed();
+            arity = fk_fkb_read_signed();
+        }
+        long long name_s = 0;
+        long long name_n = 0;
+        if (!fk_fkb_read_symbol_to_srctext(&name_s, &name_n)) {
+            return 0;
+        }
+        if (version >= 3 && fnidx > 0) {
+            fk_fnsym_s[fk_fntop] = name_s;
+            fk_fnsym_n[fk_fntop] = name_n;
+            fk_fnidx[fk_fntop] = fnidx;
+            if (fnidx < fk_fn_capacity) {
+                fk_fnar[fnidx] = arity;
             }
-            if (old_fnidx > 0) {
-                fk_fn_reserve(fk_fntop + 2);
-                fk_fnsym_s[fk_fntop] = name_s;
-                fk_fnsym_n[fk_fntop] = name_n;
-                fk_fnidx[fk_fntop] = old_fnidx;
-                if (old_fnidx < fk_fn_capacity) {
-                    fk_fnar[old_fnidx] = arity;
-                }
-                fk_fntop = fk_fntop + 1;
-            }
-        } else {
-            fk_fkb_skip_string();
+            fk_fntop = fk_fntop + 1;
         }
         i = i + 1;
     }
+    /* v5 writes a node-symbol section after the function-symbol section.
+     * The whole-image loader does not need those rows to invoke a program,
+     * but it must consume their exact wire shape before it can attest that
+     * the image ended. Leaving them behind made every freshly-written image
+     * look like it had trailing bytes, so BML and Form caches rebuilt on
+     * every run despite byte-identical source and artifacts. */
     long long node_symbol_count = fk_fkb_read_signed();
+    if (node_symbol_count < 0 || node_symbol_count > fk_fkb_len) {
+        fk_fkb_mark_bad("node symbol count exceeds artifact bounds");
+        return 0;
+    }
     i = 0;
     while (!fk_fkb_bad && i < node_symbol_count) {
         (void)fk_fkb_read_signed();
         (void)fk_fkb_read_signed();
-        long long dep_count = fk_fkb_read_signed();
-        long long d = 0;
-        while (!fk_fkb_bad && d < dep_count) {
+        long long dependency_count = fk_fkb_read_signed();
+        if (dependency_count < 0 || dependency_count > fk_fkb_len) {
+            fk_fkb_mark_bad("node symbol dependency count exceeds artifact bounds");
+            return 0;
+        }
+        long long dependency = 0;
+        while (!fk_fkb_bad && dependency < dependency_count) {
             (void)fk_fkb_read_signed();
             (void)fk_fkb_read_signed();
-            d = d + 1;
+            dependency = dependency + 1;
         }
         i = i + 1;
     }
+    return !fk_fkb_bad;
 }
 static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_src_path,
                                    const char *expected_source_hash,
@@ -13203,7 +13228,9 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         fk_fkb_read_table_string();
         i = i + 1;
     }
-    fk_fkb_skip_symbol_image(version);
+    if (!fk_fkb_restore_symbol_image(version)) {
+        return 0;
+    }
     if (fk_fkb_bad) {
         return 0;
     }
@@ -13212,7 +13239,6 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         return 0;
     }
     fk_defn_next = fk_fn_count;
-    fk_fntop = 0;
     fk_const_top = 0;
     fk_root = fk_fn_count > 0 ? fk_fn[0] : -1;
     return 1;
