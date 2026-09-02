@@ -1,0 +1,51 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-resource-host-pressure.bml — measured host headroom adapter.
+//
+// This cell translates a parseable Darwin memory_pressure free percentage
+// through an explicit local policy.  It never calls an unload door.  A
+// healthy measurement is only authority for no release; pressure still needs
+// a current reclaim request and current independently releasable handles.
+//
+// Authority: form-stdlib/bml/form-resource-host-pressure.bml
+// preludes: form/form-stdlib/core.fk form/form-stdlib/bml/form-glass-observation-v2.bml form/form-stdlib/form-glass-observer.bml form/form-stdlib/form-resource-governor.bml
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormResourceHostPressureAuthority {
+        field FRGHPAuthorityPath = "form/form-stdlib/bml/form-resource-host-pressure.bml";
+        field FRGHPAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class FormResourceHostPressure {
+        field FRGHPSchema = "form-resource-host-headroom-policy-v1";
+        field FRGHPWarningFreePercent = 10;
+        field FRGHPCriticalFreePercent = 5;
+        ref frghp-authority = FormResourceHostPressureAuthority;
+        thought frghp-law = list("system-headroom-is-not-model-residency", "no-pressure-needs-no-reclaim-request", "pressure-needs-current-request-and-handles", "unsupported-grains-stay-ineligible");
+
+        def frghp-policy(warningFreePercent, criticalFreePercent) = list(FRGHPSchema(), warningFreePercent, criticalFreePercent);
+        def frghp-warning(policy) = nth(policy, 1);
+        def frghp-critical(policy) = nth(policy, 2);
+        def frghp-default-policy() = frghp-policy(FRGHPWarningFreePercent(), FRGHPCriticalFreePercent());
+        def frghp-policy-valid?(policy) = if nothing?(policy) then 0 else if not(eq(len(policy), 3)) then 0 else if not(str_eq(head(policy), FRGHPSchema())) then 0 else if lt(frghp-critical(policy), 0) then 0 else if ge(frghp-critical(policy), frghp-warning(policy)) then 0 else if gt(frghp-warning(policy), 100) then 0 else 1;
+        def frghp-free-valid?(freePercent) = if lt(freePercent, 0) then 0 else if gt(freePercent, 100) then 0 else 1;
+        def frghp-level(policy, freePercent) = if not(and(eq(frghp-policy-valid?(policy), 1), eq(frghp-free-valid?(freePercent), 1))) then -1 else if le(freePercent, frghp-critical(policy)) then 2 else if le(freePercent, frghp-warning(policy)) then 1 else 0;
+        def frghp-pressure(policy, freePercent, ageFrames, provenance) {
+            let level = frghp-level(policy, freePercent);
+            if lt(level, 0) then frg-unavailable("memory-free-percent-invalid", "host.memory-pressure") else frg-measured(level, ageFrames, provenance);
+        }
+        def frghp-pressure-from-output(policy, output, ageFrames, provenance) {
+            let freePercent = fgo-host-free-percent(output);
+            if lt(freePercent, 0) then frg-unavailable("memory-pressure-output-unparseable", "host-exec:/usr/bin/memory_pressure-Q") else frghp-pressure(policy, freePercent, ageFrames, provenance);
+        }
+        def frghp-total-bytes-from-output(output, ageFrames, provenance) {
+            let total = fgo-host-total-bytes(output);
+            if lt(total, 0) then frg-unavailable("physical-memory-output-unparseable", "host-exec:/usr/bin/memory_pressure-Q") else frg-measured(total, ageFrames, provenance);
+        }
+        def frghp-retention-status(governorPolicy, pressure) = if not(eq(frg-signal-nonnegative?(governorPolicy, pressure), 1)) then "fail-closed-pressure-unknown" else if le(frg-signal-value(pressure), 0) then "retain-open-models" else "reclaim-request-required";
+        def frghp-release-plan(governorPolicy, pressure, requiredBytes, units) = frg-pressure-release-plan(governorPolicy, pressure, requiredBytes, units);
+    }
+    0;
+}

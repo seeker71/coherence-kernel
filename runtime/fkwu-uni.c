@@ -7153,12 +7153,24 @@ static long long fk_node_count;
 static long long (*fk_node)[4];
 static long long fk_ast_cap;    /* live capacity; fk_ast_reserve owns it */
 static long long fk_ast_grows;  /* doublings this run -- kernel_stat 24 */
+/* Per-AST-node memo of a source float LITERAL's boxed value (tag 53 over a
+ * tag-24 constant child), so the constant mints ONE float-pool slot per
+ * process instead of one per evaluation (boxvoice witnessed 1.5 re-boxing
+ * 300,000 times in one loop). A SIDE table, deliberately not a fifth fk_node
+ * column: the .fkb writer serializes fk_node rows verbatim, and a pool
+ * handle riding into an image would dangle in the loading process. This
+ * table is process-local, zeroed at birth and growth, so a warm .fkb replay
+ * re-mints each literal exactly once in its own pool. 0 = no memo (a real
+ * box is always at/below fk_fbase-3, never 0). Safe to cache because
+ * fk_node rows are never rewritten after parse/load. */
+static long long *fk_flit_memo;
 static void fk_ast_reserve(long long need) {
     long long nc;
     long long i;
     if (fk_ast_cap == 0) {
         fk_node = (long long (*)[4])calloc(FK_AST_NODE_CAP_INIT, 32);
-        if (fk_node == 0) {
+        fk_flit_memo = (long long *)calloc(FK_AST_NODE_CAP_INIT, 8);
+        if (fk_node == 0 || fk_flit_memo == 0) {
             fk_die("fk_ast_reserve: out of memory for the AST node table");
         }
         fk_ast_cap = FK_AST_NODE_CAP_INIT;
@@ -7171,12 +7183,18 @@ static void fk_ast_reserve(long long need) {
         nc = nc * 2;
     }
     fk_node = (long long (*)[4])realloc(fk_node, (unsigned long)(nc * 32));
-    if (fk_node == 0) {
+    fk_flit_memo = (long long *)realloc(fk_flit_memo, (unsigned long)(nc * 8));
+    if (fk_node == 0 || fk_flit_memo == 0) {
         fk_die("fk_ast_reserve: out of memory growing the AST node table");
     }
     i = fk_ast_cap * 4;
     while (i < nc * 4) {
         fk_node[i >> 2][i & 3] = 0;
+        i = i + 1;
+    }
+    i = fk_ast_cap;
+    while (i < nc) {
+        fk_flit_memo[i] = 0;
         i = i + 1;
     }
     fk_ast_cap = nc;
@@ -8532,10 +8550,42 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             tb113[n113] = 0;
             fd113 = strtod(tb113, 0);
         }
-        long long fb113 = fk_fbox(fd113);
+        /* INTERN, as the name says: the Go proof arm (internTrivialFloat64)
+         * dedups by canonical bits -- one quiet NaN, -0.0 folds to +0.0,
+         * equal doubles share one row. This arm minted a fresh node AND a
+         * fresh pool slot per call, the one intern op whose behavior did not
+         * keep its name; the fkwu seed was the diverging arm. Compare by
+         * BITS, not ==, so NaN interns to itself. nid[3] carries the pool
+         * index, mirroring the Go arm's Inst. */
+        unsigned long long fbits113;
+        if (fd113 != fd113) {
+            fbits113 = 0x7ff8000000000000ULL;
+        } else {
+            if (fd113 == 0.0) {
+                fd113 = 0.0;
+            }
+            memcpy(&fbits113, &fd113, 8);
+        }
+        double fcanon113;
+        memcpy(&fcanon113, &fbits113, 8);
+        long long h113 = fk_intern_key_trivial(7, (long long)fbits113);
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
         }
+        long long slot113 = h113 & (fk_intern_hash_cap - 1);
+        while (fk_intern_tab[slot113]) {
+            long long ix113 = fk_intern_tab[slot113];
+            if (fk_nkind[ix113] == 1 && fk_nid[ix113][2] == 7) {
+                double dv113 = fk_num(fk_nval[ix113]);
+                unsigned long long db113;
+                memcpy(&db113, &dv113, 8);
+                if (db113 == fbits113) {
+                    return fk_nbox(ix113);
+                }
+            }
+            slot113 = (slot113 + 1) & (fk_intern_hash_cap - 1);
+        }
+        long long fb113 = fk_fbox(fcanon113);
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
         fk_nval[fk_np] = fb113;
@@ -8544,7 +8594,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_nid[fk_np][0] = 1;
         fk_nid[fk_np][1] = 1;
         fk_nid[fk_np][2] = 7;
-        fk_nid[fk_np][3] = 0;
+        fk_nid[fk_np][3] = fk_fidx(fb113);
+        fk_intern_tab[slot113] = fk_np;
+        fk_nhash_memo[fk_np] = h113;
         return fk_nbox(fk_np);
     }
     if (t == 50) {
@@ -8579,22 +8631,37 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_fbox(fk_round_ndigits_decimal(x, nd));
     }
     if (t == 53) {
+        /* a source float literal parses as (53 (24 idx)): constant child,
+         * constant value. Memo the boxed result per AST node so the literal
+         * mints one pool slot per process, not one per evaluation. A
+         * computed str_to_float (non-24 child) never memoizes. */
+        long long lc53 = fk_node[i][1];
+        int lit53 = lc53 >= 0 && lc53 < fk_node_count && fk_node[lc53][0] == 24;
+        if (lit53 && fk_flit_memo != 0 && fk_flit_memo[i] != 0) {
+            return fk_flit_memo[i];
+        }
         long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
+        long long fbv53;
         if (sa < 0 || sa >= fk_sp) {
-            return fk_fbox(0.0);
+            fbv53 = fk_fbox(0.0);
+        } else {
+            char tmp[128];
+            long long n = fk_sl[sa];
+            if (n > 126) {
+                n = 126;
+            }
+            long long j = 0;
+            while (j < n) {
+                tmp[j] = fk_sb[fk_so[sa] + j];
+                j = j + 1;
+            }
+            tmp[n] = 0;
+            fbv53 = fk_fbox(strtod(tmp, 0));
         }
-        char tmp[128];
-        long long n = fk_sl[sa];
-        if (n > 126) {
-            n = 126;
+        if (lit53 && fk_flit_memo != 0) {
+            fk_flit_memo[i] = fbv53;
         }
-        long long j = 0;
-        while (j < n) {
-            tmp[j] = fk_sb[fk_so[sa] + j];
-            j = j + 1;
-        }
-        tmp[n] = 0;
-        return fk_fbox(strtod(tmp, 0));
+        return fbv53;
     }
     if (t == 54) {
         return ((long long)fk_num(fk_walk(fk_node[i][1], fp))) << 1;
