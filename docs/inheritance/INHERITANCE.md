@@ -1,85 +1,78 @@
-# Inheritance — the new repo's map of everything held in the old repo
+# Inheritance — what came home from the origin, and what has not
 
-This is the reference spine for the homecoming: `coherence-kernel` (this repo, the
-clean self-trusting kernel) inheriting the full body that grew in `Coherence-Network`
-(the old origin repo, bash-proven). Nothing is lost — everything is either **home**
-(a Form body, brought into a faculty here) or **referenced** (a carrier or knowledge
-source that stays where it is, mapped here so the kernel knows its full inheritance).
+This repo (the clean, self-trusting kernel) inherited its body from
+`Coherence-Network` (the origin repo, bash-proven). Everything there is either
+**home** (a Form body living in a faculty here) or **referenced** (a carrier or
+knowledge source that stays where it is, mapped here so the kernel knows its
+full inheritance). Re-observed 2026-09-03.
 
 ## The foundation — self-trusting from the core
 
-- `fkwu` builds from **one `cc` seed** (`runtime/fkwu-uni.c`) → native arm64. No bash, no origin.
-- The repo is genuinely clean: **0 `.sh`, 0 `.py`**.
-- The core is home: `axioms/core-axioms.form`, `surface/core.fk`, the three walkers
-  (`walkers/{go,rust,ts}`), and the kernel's own four-way proof (`proof/four-way-run.fk`,
-  `proof/four-way-verdict.fk`) — fkwu orchestrates its own four-way, no `validate.sh`.
+- `fkwu` builds from **one `cc` seed** (`runtime/fkwu-uni.c`) → native. No bash, no origin.
+- The structural gate answers `[207, 0, 49, 3, 20, 57, 74, 4]`: every `.sh` / `.py`
+  in the tree has a declared auxiliary boundary, none is semantic authority
+  (`./fkwu gate/structural-gate-run.fk`).
+- The core is home: `axioms/core-axioms.form`, `form/form-stdlib/core.fk`, the
+  three minimal walkers (`walkers/{go,rust,ts}`), and the kernel's own four-way
+  proof (`form/form-stdlib/four-way-run.fk`, `four-way-verdict.fk`;
+  `./fkwu proof/four-way-run-recipe42.fk` → 0) — fkwu orchestrates its own
+  four-way, no `validate.sh`, no origin.
 
-## The body — Form recipes, brought HOME into faculties
+## The body — Form recipes, home in faculties
 
-- **Inherited proven ledger:** `proven-bodies-from-old-repo.txt` — the 1198 four-way-proven
-  recipes from the old `fourth-arm-bands.txt`. This is the authority on what is proven.
-- **Worklist:** `worklist-bodies-to-bring-home.txt` — the **660** proven bodies not yet here
-  (171 already home). Each migrates into its faculty (`observe/ learn/ presence/ cognition/
-  model/ gate/ runtime/ substrate/ grammars/ …`) and re-proves on this repo's own four-way.
-- Source of the bodies: `Coherence-Network/form/form-stdlib/*.fk` (2286 total; 1198 proven).
-- **Wave manifests** (bodies brought home, faculty, what they compose, re-prove status):
-  - [`wave-1-perception-learning.md`](wave-1-perception-learning.md) — 14 bodies + 14 bands
-    (observe 5 · learn 3 · presence 1 · substrate 3 · model 2); resolved 2 band-only worklist
-    entries (`sk-msl`, `trust-climb`). All HOME, re-prove PENDING the self-prove keystone.
-  - [`wave-2-presence-learn-observe.md`](wave-2-presence-learn-observe.md) — 17 bodies + 17 bands
-    (presence 7 · learn 5 · observe 3 · cognition 1 · gate 1). Each RE-PROVES on `fkwu`
-    native (no Go, no flatten): **15 reach their full origin witness on current-main `fkwu`**;
-    `learning-readout` + `beings-channel` are HOME and reach full witness only on the stone-S2c
-    general-arity runtime (multi-arg packed-call gap, named, closing as that stone lands).
-  - [`wave-3-observe-gate-cognition.md`](wave-3-observe-gate-cognition.md) — 11 bodies + 11 bands
-    (observe 4 · gate 3 · learn 2 · cognition 2). **8 RE-PROVE to full origin witness on
-    `fkwu`** standalone; 3 (`nearest-shape`, `tool-channel`, `choice-receipt`) come home as
-    deps that re-prove **transitively** inside a let-free consumer band, their own standalone
-    band the source door-pending on the `do/let`-block floor (named gap, closing in the cursor-seed pivot).
+- **The origin's proven ledger:** `proven-bodies-from-old-repo.txt` — the
+  four-way-proven recipes of the origin's `fourth-arm-bands.txt`, one row per
+  band with its origin verdict. This is the authority on what the origin proved;
+  cells here cite it for their origin witness.
+- **The worklist:** `worklist-bodies-to-bring-home.txt` — the names on that
+  ledger with no `.fk` stem anywhere in this tree. Of the 660 names the origin
+  listed, 451 are present here and 209 are not. A body comes home when a live
+  organ here needs it: byte-exact from `Coherence-Network/form/form-stdlib/<name>.fk`
+  with its `tests/<name>-band.fk`, then re-proven on this kernel's own arms.
+- **Re-proof is the body's own:** a band's witness on `fkwu` must equal its origin
+  four-way witness to read as re-proven; a body that floors is never claimed
+  proven. `observe/preflight.fk` names the arm a band binds on.
 
-## Core lifts — raising the abstraction share once bodies are home
+## Core lifts — raising the abstraction share
 
-Not homecoming waves (the bodies were already here); these collapse repeated *structure* into one
-high-grammar base, re-proven on `fkwu`.
+Bodies already home collapse repeated *structure* into one high-grammar base,
+re-proven on `fkwu`. The sensing family's `port + plane + reading + fusion` spine
+lives once in `observe/sensor-organ-template.fk` over `world-sensor-floor`; thin
+organs (`observe/scene-features-organ.fk`, `motion-sense-organ.fk`,
+`same-room-organ.fk`) declare their attributes and delegate the feature math to the
+proven original. The named wall that keeps the fuller data-row form
+(`(so-organ NAME PLANE CARRIER FEATURE-FN FUSION-FN)`) from landing: a function
+value pulled out of a composed list is not a callable head on `fkwu` —
+`((nth o 4) x)` answers `[unresolved-call] ''`, rc 1 (re-observed 2026-09-03).
+That is closure-on-a-cell, the stone after function-values-as-args
+(`docs/re-architecture-stones.form` S2c); when it lands, the recipes move into the
+organ row with no change to the call shape. The goal cell and its measure are
+`docs/uplift-high-grammar-goal.form`.
 
-- [`uplift-1-sensor-organ-template.md`](uplift-1-sensor-organ-template.md) — the observe/ sensing
-  family's repeated `port + plane + reading + fusion` spine becomes ONE 19-line base template
-  ([`observe/sensor-organ-template.fk`](../../observe/sensor-organ-template.fk)) over
-  `world-sensor-floor`. Three sensors re-expressed as thin subclasses (scene-features, motion-sense,
-  same-room) — each **6–8 code lines vs 51–67**, each the source door witness equal to its original
-  (`111`/`1111`/`11111`). Names the stored-fn-value/closure gap that blocks the cleaner data-row form,
-  and the rest-of-family plan.
+## Referenced — carriers and knowledge that stay in the origin
 
-## Referenced — carriers & knowledge (stay in old repo, mapped here)
+| Origin path | Nature | Disposition |
+|---|---|---|
+| `form/form-stdlib` | the Form body | **bring home** (worklist above) |
+| `docs/coherence-substrate` | `.form` teachings / axioms | the load-bearing ones are home in `axioms/`, `teachings/`, `docs/coherence-substrate/`; the rest referenced |
+| `docs/vision-kb` | living concepts | referenced; brought home as the kernel needs |
+| `specs` | spec frontmatter | referenced (provenance) |
+| `api/app` | Python fan-out carrier | **reference only** — legacy bootstrap, never the body |
+| `web/app` | Next.js carrier | **reference only** — a surface, not the kernel |
+| `experiments` | sensing apps (mac/android/relay) | referenced; the recipes they call come home, the carriers stay |
 
-These are NOT the body; the kernel references them, does not absorb them:
+## "Fully ready to work on just the new repo" — the criterion
 
-| Old-repo path | Files | Nature | Disposition |
-|---|---|---|---|
-| `form/form-stdlib` | 2286 | the Form body | **bring home** (worklist above) |
-| `docs/coherence-substrate` | 351 | `.form` teachings / axioms | bring the load-bearing ones home to `axioms/ teachings/`; reference rest |
-| `docs/vision-kb` | 263 | living concepts | reference (knowledge), bring home as the kernel needs |
-| `specs` | 183 | spec frontmatter | reference (provenance) |
-| `api/app` | 1634 | Python fan-out carrier | **reference only** — legacy bootstrap, never the body |
-| `web/app` | 317 | Next.js carrier | **reference only** — a surface, not the kernel |
-| `experiments` | 893 | sensing apps (mac/android/relay) | reference; the recipes they call come home, the carriers stay |
-
-## "Fully ready to work on just the new repo" — the verifiable criterion
-
-The homecoming is complete when ALL hold, checkable from this repo with no old-repo path:
+The homecoming is complete when all hold, checkable from this repo with no
+origin path:
 
 1. `cc runtime/fkwu-uni.c` → `fkwu` runs Form source. ✅
-2. The three walkers build here, and the kernel host-execs them to prove a recipe four-way
-   (Go=Rust=TS=fkwu) with **no bash, no validate.sh, no origin**. ✅ (host-exec = optag 136,
-   `fwv-verdict` computes the verdict; perturbation-verified: agree→0, walker-odd→2, fkwu-odd→1;
-   `fkwu proof/four-way-run.tbl` → 0. Receipt: `receipts/2026-06-29-kernel-self-proves-four-way.md`.
-   The remaining gap toward self-hosting the flattener's source→table step is named exactly: **stone 5** —
-   multiple named functions (a function table, CALL=tag 12) + multi-arg `defn`/call (packed args) + multi-file
-   prelude loading — which `four-way-verdict.fk` (7 fns, 4 args) and `form-flatten.fk` (231 fns, 199 multi-arg)
-   require. Per `flatten/SEED-DROP.md`, the full grammar lands as the flattened **cursor seed**, retiring the
-   the source door C grammar rather than growing it to stone 5.)
-3. The worklist bodies are home in their faculties and re-prove here. ⏳ (in waves)
-4. This file + the ledger reference every old-repo content category. ✅ (this map)
-5. New work can be authored, proven, and run entirely in this repo. ⏳ (follows 2+3)
+2. The walkers build here, and the kernel host-execs them to prove a recipe
+   four-way with no bash, no validate.sh, no origin. ✅
+3. Every body a live organ needs is home in its faculty and re-proves here. ⏳
+   (451 of 660 origin names present; the rest come as needed)
+4. This map references every origin content category. ✅
+5. New work is authored, proven, and run entirely in this repo. ✅ (the daily practice)
 
-When 2 and 3 cross, the body is home and the old repo is legacy bootstrap.
+The origin is legacy bootstrap; the parent consumes this kernel through the
+consumer submodule (`form/README.md`).

@@ -1,15 +1,18 @@
-# flatten/ — the flatten body, and an honest note on T_flat
+# flatten/ — the op manifest, and what flatten is not
 
-`form-parse.fk`, `form-flatten.fk`, `fourth-flatten-driver.fk` are the real flatten **body** — Form recipes,
-no bash, no python, no Go. They are the architecture.
+`form-flatten.fk` owns `flt-ops` — the hand-maintained single source of truth for
+the native op rows. `gen-source-walker-table.fk` and `gen-source-walker.fk`
+generate `runtime/fkwu-optable.h` from it (194 rows on 2026-09-03). Adding a value
+op is a `flt-ops` row, then a regen, then its serialize arm in
+`form/form-stdlib/fkc-table-serialize.fk` — never a C edit. `host-effect-grammar.fk`
+names the host-effect families the same rows carry.
 
-`fourth-flatten-table.txt` (`T_flat`) is **not** the architecture. It is a ~580 KB pre-flattened blob whose
-*existence currently depends on bin-go* (the origin's `regen_t_flat.sh` builds it with the Go bootstrap). That
-contradicts the no-Go sovereignty gate, and it is exactly the opaque, marker-fragile artifact that tangled the
-flatten path in the origin repo. It sits here ONLY as a temporary bootstrap cache.
+Flatten is not a run lane. The body runs source (`fkwu file.fk`), lowers BML in
+memory (`fkwu file.bml`), and caches program images (`.fkb`) beside their sources;
+`.tbl` execution does not exist. `fourth-flatten-table.txt` and
+`form-eval-cli-loop.tbl` are regenerable caches left from the flatten era, not
+foundations — a regen of the emitted artifacts still passes through this body, and
+that regen owes a source-native path (`MANIFEST.md`, `release-ledger.bml`).
 
-**The clean architecture (the decision):** the flatten must be **fkwu-self-derivable** — fkwu flattens
-`form-flatten.fk` from its own C-bootstrap primitives (or a minimal flatten baked into `runtime/fkwu-uni.c`),
-with no pre-made bin-go table in the seam. Then any flatten table is a *regenerable cache fkwu makes itself*,
-never a committed Go artifact. Until that self-derivation is proven, `T_flat` is a flagged crutch, scheduled
-for replacement — not a foundation to build on.
+The op families the seed carries with no caller outside `flt-ops` are enumerated
+in `docs/penumbra-map.md`: each row wants a caller or a release.
