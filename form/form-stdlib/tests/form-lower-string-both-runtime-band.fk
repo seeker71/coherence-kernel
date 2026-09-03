@@ -1,0 +1,122 @@
+; form-lower-string-both-runtime-band — R34: the NEEDLE crosses the JIT door
+; at runtime too, closing the gap R28's own closing named precisely
+; (release-ledger.bml row 47, receipts/2026-09-03-runtime-string-argument.md):
+; "the needle is still a lowering-time constant ... it needs only a
+; form-lower.fk lowering that embeds neither string and reads two pointer/
+; length pairs instead of one." This band is that lowering, proven on REAL
+; executed arm64 bytes against TWO live Form strings neither of which the
+; compiled image ever saw at lowering time.
+;
+; GROUNDING: fk_inram_args (runtime/fkwu-uni.c) needed NO further change to
+; reach this — probed and read before writing anything here. It already maps
+; each element of a Form argument LIST through the same int-or-string test in
+; sequence (an even word is one slot, a string is fk_srange's pointer+length
+; as two slots), so a list of TWO strings already yields FOUR argument slots
+; (x0=h_ptr, x1=h_len, x2=n_ptr, x3=n_len) under the existing `n + 2 > 8`
+; overflow guard. The arity math R34's own ledger row asked to be checked:
+; two runtime strings cost 4 of AAPCS64's 8 slots, an optional runtime `from`
+; costs a 5th — well inside budget with three slots to spare.
+;
+; form-lower.fk's lo-strfind-runtime-both-core reuses lo-strfind-loop-body —
+; the SAME 27-instruction scan core R10 and R28 both proved, generalized one
+; parameter further (the inner loop's own bound, `innercheck`, now a register
+; compare too, since `nlen` no longer exists at lowering time) plus a third
+; parameter (`initw0`, the loop's own starting `i`) that costs nothing extra
+; for the plain both-runtime lowering (still `movz w0,#0`) and buys
+; lo-strfind-runtime-both-from a runtime `from` for the price of choosing one
+; already-general instruction differently (`mov w0,w4`). Neither string is
+; embedded, so the compiled image is a FIXED length regardless of what is
+; searched for or in — checked structurally below (c7), not merely claimed.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY — jit_leaf_inram is a runtime-fkwu door. Under
+; the three sibling kernels the name folds to `nothing` and every claim below
+; would read green while proving nothing.
+;
+; Verdict 511 when both a runtime haystack AND a runtime needle reach the
+; crystallized scan and answer correctly, native == interpreted core.fk
+; str_find at every step:
+;    1  a real scan: needle at an interior, non-final offset
+;    2  an empty needle, both sides runtime (nlen=0, the register-form inner
+;       check answers immediately, no lowering-time special case)
+;    4  needle equals haystack: full-length match, bound == 1
+;    8  needle longer than haystack: negative bound, decided at RUNTIME by
+;       the register-form outer compare
+;   16  needle found at offset 0
+;   32  needle found at the final valid offset (hlen - nlen)
+;   64  not found
+;  128  compositional: the image's byte length is the SAME fixed constant
+;       (128 bytes = 32 instructions) for both lo-strfind-runtime-both and
+;       lo-strfind-runtime-both-from, across every case above — structural
+;       proof neither string is ever embedded, not an inference from behavior
+;  256  from-offset: the SECOND occurrence of a repeating needle, found by
+;       passing a nonzero RUNTIME `from` (lo-strfind-runtime-both-from),
+;       checked against interpreted str_find's own third argument
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-asm.fk form-stdlib/form-lower.fk
+
+(do
+    ; compiled ONCE, reused for every case below — unlike R28's band (which
+    ; compiled one image per needle, since the needle was still embedded),
+    ; neither lowering here reads ANY string at lowering time, so one image
+    ; each is the whole proof surface.
+    (let img (lo-strfind-runtime-both))
+    (let imgf (lo-strfind-runtime-both-from))
+
+    ; every test value is built by splitting a literal across a str_concat,
+    ; so no haystack or needle below is a single compile-time constant the
+    ; image could have seen under another name — the same discipline R28's
+    ; band held for its one runtime string, now held for both.
+    (defn rt (a b) (str_concat a b))
+    (defn check (img h n) (eq (jit_leaf_inram img (list h n)) (str_find h n 0)))
+    (defn checkf (imgf h n from) (eq (jit_leaf_inram imgf (list h n from)) (str_find h n from)))
+
+    ; c0: a real scan, needle at an interior, non-final offset
+    (let h0 (rt "the quick brown " "fox jumps"))
+    (let n0 (rt "fo" "x"))
+    (let c0 (if (check img h0 n0) 1 0))
+
+    ; c1: empty needle, both sides runtime
+    (let h1 (rt "abc" ""))
+    (let n1 (rt "" ""))
+    (let c1 (if (check img h1 n1) 2 0))
+
+    ; c2: needle equals haystack (bound == 1)
+    (let h2 (rt "matc" "hed"))
+    (let n2 (rt "matc" "hed"))
+    (let c2 (if (check img h2 n2) 4 0))
+
+    ; c3: needle longer than haystack (negative bound, at RUNTIME)
+    (let h3 (rt "a" "b"))
+    (let n3 (rt "abcde" "f"))
+    (let c3 (if (check img h3 n3) 8 0))
+
+    ; c4: needle at offset 0
+    (let h4 (rt "abc" "abc"))
+    (let n4 (rt "ab" "c"))
+    (let c4 (if (check img h4 n4) 16 0))
+
+    ; c5: needle at the final valid offset (hlen - nlen)
+    (let h5 (rt "aaa" "bc"))
+    (let n5 (rt "ab" "c"))
+    (let c5 (if (check img h5 n5) 32 0))
+
+    ; c6: not found
+    (let h6 (rt "hello " "world"))
+    (let n6 (rt "xy" "z"))
+    (let c6 (if (check img h6 n6) 64 0))
+
+    ; c7: compositional — both images are 32 instructions (128 bytes), fixed,
+    ; regardless of any string above; both end in ret (byte 214)
+    (let rlen (len img))
+    (let rlenf (len imgf))
+    (let c7 (if (eq rlen 128)
+            (if (eq rlenf 128)
+            (if (eq (nth img (sub rlen 1)) 214)
+            (if (eq (nth imgf (sub rlenf 1)) 214) 128 0) 0) 0) 0))
+
+    ; c8: the SECOND occurrence, found via a nonzero RUNTIME `from`
+    (let h8 (rt "abcabc" "abc"))
+    (let n8 (rt "ab" "c"))
+    (let c8 (if (checkf imgf h8 n8 1) 256 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 c8)))))))))
