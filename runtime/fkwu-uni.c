@@ -3618,14 +3618,44 @@ static long long fk_inram_bytes(long long image, unsigned char *out, long long c
 }
 
 /* The door's argument contract, extended 2026-09-02 (the multi-arg
- * increment the per-recipe-JIT program named): an EVEN word is ONE
- * integer argument — the standing contract, behavior unchanged — and a
- * cons list of even words is UP TO EIGHT arguments, handed to the page
- * in x0..x7 per AAPCS64, the convention lo-compile-fn-n banks from.
- * Returns the arg count (1..8); 0 declines the shape (nil, a >8 list,
- * or any non-integer element), and the door answers nothing. */
+ * increment the per-recipe-JIT program named) and again 2026-09-03 (R28,
+ * the runtime-string increment receipts/2026-09-03-string-family-lowering.md
+ * named as its next stone): an EVEN word is ONE integer argument — the
+ * standing contract, behavior unchanged; a STRING value is TWO argument
+ * SLOTS — base pointer then byte length, fk_srange's own (pointer, length)
+ * shape, the same accessor str_byte_at/str_eq/str_find already read
+ * through — handed to the page as two AAPCS64 registers, the convention
+ * lo-strfind-runtime (form-lower.fk) banks from; a cons list of up to
+ * EIGHT SLOTS (an int spending one, a string spending two) is handed to
+ * the page in x0..x7, generalizing the existing multi-arg contract rather
+ * than replacing it. Returns the slot count (1..8); 0 declines the shape
+ * (nil, more than eight slots, or an element that is neither an integer
+ * nor a string), and the door answers nothing.
+ *
+ * POINTER SAFETY, GROUNDED NOT ASSUMED: the pointer handed out is fk_sb's
+ * own live base plus offset (fk_srange never copies), so it is only as
+ * durable as fk_sb's address. fk_sb moves on realloc, and every realloc
+ * site is a string being INTERNED (fk_sintern growing fk_sbp past
+ * fk_scap_b) — grep confirms every fk_sb assignment in this file is one of
+ * exactly two shapes: the one-time fk_sinit malloc, or a growth realloc
+ * beside an intern. Between this call returning and fk_inram_call using
+ * the pointer, the only code that runs is image-byte decode (integer/cons
+ * walking, no strings), the resident-cache scan (byte compare over
+ * fk_inram_cache, not fk_sb), and — on a cold image — mmap plus a raw byte
+ * copy into the new executable page: none of that interns a string. Then
+ * the crystallized leaf itself runs, and it cannot call back into this
+ * interpreter at all (form-lower.fk emits pure ALU/load/branch bytes for
+ * every leaf it builds today, no `bl` to a C native), so it cannot trigger
+ * fk_sintern either. The pointer is therefore live for the one call it is
+ * handed to. NAMED, NOT PAPERED OVER: this holds only while every
+ * crystallized leaf stays call-out-free. A future leaf shape that DOES
+ * call out mid-body must not carry a raw string pointer across that call
+ * — it would need to re-derive the pointer afterward, since fk_sb can have
+ * moved underneath it by then. */
 static long long fk_inram_args(long long arg_value, long long *a) {
     long long i;
+    const char *sptr;
+    long long slen;
     for (i = 0; i < 8; i = i + 1) {
         a[i] = 0;
     }
@@ -3633,17 +3663,33 @@ static long long fk_inram_args(long long arg_value, long long *a) {
         a[0] = arg_value >> 1;
         return 1;
     }
+    if (fk_srange(arg_value, &sptr, &slen)) {
+        a[0] = (long long)sptr;
+        a[1] = slen;
+        return 2;
+    }
     {
         long long n = 0;
         long long cell = arg_value;
         long long h;
         long long t;
         while (fk_arm64_u32_cons(cell, &h, &t)) {
-            if (n >= 8 || (h & 1) != 0) {
+            if ((h & 1) == 0) {
+                if (n >= 8) {
+                    return 0;
+                }
+                a[n] = h >> 1;
+                n = n + 1;
+            } else if (fk_srange(h, &sptr, &slen)) {
+                if (n + 2 > 8) {
+                    return 0;
+                }
+                a[n] = (long long)sptr;
+                a[n + 1] = slen;
+                n = n + 2;
+            } else {
                 return 0;
             }
-            a[n] = h >> 1;
-            n = n + 1;
             cell = t;
         }
         if (cell != 1 || n == 0) {
