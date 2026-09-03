@@ -14,18 +14,25 @@ section [form.bml] {
     }
 
     class FormGlassObserver {
-        field FGOSchema = "form-glass-observer-v1";
+        field FGOSchema = "form-glass-observer-v2";
         field FGOEvent = "FORM-GLASS-OBSERVATION-V1";
+        field FGOProjectionEvent = "FORM-GLASS-METRIC-FIELD-V2";
+        field FGOValueEvent = "form-glass-value-event-v2";
 
         ref fgo-authority = FormGlassObserverAuthority;
         thought fgo-law = list("presence-before-value", "planes-never-collapse", "process-local-is-named", "bounded-process-no-argv", "storage-is-not-residence", "observer-tax-is-visible");
 
         // metric: tag, domain, id, label, value kind, int value, text value,
         // present, unit, capacity, capacity present, heat, age, memory plane,
-        // evidence, source, lifecycle, channel, note.
+        // evidence, source, lifecycle, channel, note, stable field NodeID,
+        // observed epoch, and observation sequence.  The NodeID identifies the
+        // field, never a reading of the field: values and time live in the
+        // melt-managed row/event record so a changing counter cannot grow the
+        // permanent NodeID arena.
         def fgo-metric(domain, id, label, valueKind, intValue, textValue, present, unit, capacity, capacityPresent, heat, age, plane, evidence, source, lifecycle, channel, note) {
             let truthClass = if str_eq(evidence, "observed") then if str_eq(lifecycle, "stored") then "catalog" else "physical-live" else evidence;
-            list("form-glass-metric", domain, id, label, valueKind, intValue, textValue, present, unit, capacity, capacityPresent, heat, age, plane, truthClass, source, lifecycle, channel, note);
+            let projection = intern_node_at(bp(FGOProjectionEvent()), list(intern_trivial_string("glass.monitor"), intern_trivial_string(domain), intern_trivial_string(id), intern_trivial_string(valueKind), intern_trivial_string(unit), intern_trivial_string(plane), intern_trivial_string(channel)), "form/form-stdlib/form-glass-observer.bml", 1, 1);
+            list("form-glass-metric-v2", domain, id, label, valueKind, intValue, textValue, present, unit, capacity, capacityPresent, heat, age, plane, truthClass, source, lifecycle, channel, note, projection, -1, -1);
         }
         def fgo-domain(row) = nth(row, 1);
         def fgo-id(row) = nth(row, 2);
@@ -58,14 +65,49 @@ section [form.bml] {
         def fgo-whitespace-byte?(byte) = if eq(byte, 32) then 1 else if eq(byte, 9) then 1 else if eq(byte, 10) then 1 else if eq(byte, 13) then 1 else 0;
         def fgo-blank-text-at?(value, index) = if ge(index, str_len(value)) then 1 else if eq(fgo-whitespace-byte?(str_byte_at(value, index)), 1) then fgo-blank-text-at?(value, add(index, 1)) else 0;
         def fgo-text-or-unavailable(domain, id, label, value, plane, evidence, source, lifecycle, channel, note) = if eq(fgo-blank-text-at?(value, 0), 1) then fgo-unavailable(domain, id, label, "text", plane, source, channel, note) else fgo-text(domain, id, label, value, plane, evidence, source, lifecycle, channel, note);
-        def fgo-unavailable(domain, id, label, unit, plane, source, channel, note) {
-            fgo-metric(domain, id, label, "absent", 0, "", 0, unit, 0, 0, 0, -1, plane, "unavailable", source, "unknown", channel, note);
+        // On an unavailable row `source` is the exact missing observation
+        // door, never a generic "missing carrier" bucket.  This keeps the v1
+        // metric stream compatible while giving every question mark a place
+        // that can actually be built or instrumented.
+        def fgo-unavailable(domain, id, label, unit, plane, missingDoor, channel, reason) {
+            fgo-metric(domain, id, label, "absent", 0, "", 0, unit, 0, 0, 0, -1, plane, "unavailable", missingDoor, "unknown", channel, reason);
         }
+        // Every local metric value has a real Glass-owned observation node.
+        // That projection identity is deliberately separate from the external
+        // producer NodeID, which remains unbound unless the framebuffer row
+        // carries the actual source node object.
+        def fgo-projection-node(row) = if lt(len(row), 20) then nothing() else nth(row, 19);
+        def fgo-nodeid-bound?(row) = if nothing?(fgo-projection-node(row)) then 0 else 1;
+        def fgo-nodeid-state(row) = if eq(fgo-nodeid-bound?(row), 1) then "bound-glass-projection" else "unbound";
+        def fgo-nodeid-value(row) = if eq(fgo-nodeid-bound?(row), 1) then fgo-node-id(fgo-projection-node(row)) else "";
+        def fgo-nodeid-door(row) = if eq(fgo-nodeid-bound?(row), 1) then "glass.metric-projection" else "telemetry.nodeid-owner-binding";
+        def fgo-observed-epoch(row) = if lt(len(row), 21) then -1 else nth(row, 20);
+        def fgo-observation-sequence(row) = if lt(len(row), 22) then -1 else nth(row, 21);
+        def fgo-source-node(row) = if lt(len(row), 23) then nothing() else nth(row, 22);
+        def fgo-source-nodeid-bound?(row) = if nothing?(fgo-source-node(row)) then 0 else 1;
+        def fgo-source-nodeid-value(row) = if eq(fgo-source-nodeid-bound?(row), 1) then fgo-node-id(fgo-source-node(row)) else "";
+        def fgo-source-nodeid-door(row) = if eq(fgo-source-nodeid-bound?(row), 1) then "framebuffer.interned-node" else "telemetry.nodeid-owner-binding";
+
+        // Re-materialize the value record while retaining the stable field
+        // NodeID and any real source node.  These are ordinary Form lists and
+        // therefore travel through the existing melt-managed arena.
+        def fgo-row-at(row, age, observedEpoch, sequence) {
+            let base = list("form-glass-metric-v2", fgo-domain(row), fgo-id(row), fgo-label(row), fgo-value-kind(row), fgo-int-value(row), fgo-text-value(row), fgo-present?(row), fgo-unit(row), fgo-capacity(row), fgo-capacity-present?(row), fgo-heat(row), age, fgo-plane(row), fgo-evidence(row), fgo-source(row), fgo-lifecycle(row), fgo-channel(row), fgo-note(row), fgo-projection-node(row), observedEpoch, sequence);
+            if eq(fgo-source-nodeid-bound?(row), 1) then append(base, list(fgo-source-node(row))) else base;
+        }
+        def fgo-observe-row(row, observedEpoch, sequence) = if eq(fgo-present?(row), 0) then fgo-row-at(row, -1, -1, sequence) else fgo-row-at(row, 0, observedEpoch, sequence);
+        def fgo-observe-rows(rows, observedEpoch, sequence) = if eq(len(rows), 0) then list() else cons(fgo-observe-row(head(rows), observedEpoch, sequence), fgo-observe-rows(tail(rows), observedEpoch, sequence));
+        def fgo-age-at(row, epoch) = if or(eq(fgo-present?(row), 0), lt(fgo-observed-epoch(row), 0)) then -1 else if ge(epoch, fgo-observed-epoch(row)) then sub(epoch, fgo-observed-epoch(row)) else -2;
+        def fgo-age-row-at(row, epoch) = fgo-row-at(row, fgo-age-at(row, epoch), fgo-observed-epoch(row), fgo-observation-sequence(row));
+        def fgo-age-rows-at(rows, epoch) = if eq(len(rows), 0) then list() else cons(fgo-age-row-at(head(rows), epoch), fgo-age-rows-at(tail(rows), epoch));
+        def fgo-value-event(row) = list(FGOValueEvent(), fgo-projection-node(row), fgo-observed-epoch(row), fgo-observation-sequence(row), fgo-value-kind(row), fgo-int-value(row), fgo-text-value(row), fgo-present?(row), fgo-capacity(row), fgo-capacity-present?(row), fgo-heat(row), fgo-evidence(row), fgo-lifecycle(row), fgo-source(row), fgo-note(row), fgo-source-node(row));
 
         def fgo-status-start(status, name) {
             let key = str_concat(name, "=");
-            let at = str_find(status, key, 0);
-            if lt(at, 0) then -1 else add(at, str_len(key));
+            let laterKey = str_concat("\n", key);
+            let atFirst = str_find(status, key, 0);
+            let atLater = str_find(status, laterKey, 0);
+            if eq(atFirst, 0) then str_len(key) else if lt(atLater, 0) then -1 else add(atLater, str_len(laterKey));
         }
         def fgo-status-text(status, name) {
             let start = fgo-status-start(status, name);
@@ -81,34 +123,42 @@ section [form.bml] {
         }
         def fgo-status-int-row(domain, id, label, status, field, unit, plane, source, channel, note) {
             let value = fgo-status-int(status, field);
-            if lt(value, 0) then fgo-unavailable(domain, id, label, unit, plane, source, channel, note) else fgo-int(domain, id, label, value, unit, value, plane, "observed", source, "live", channel, note);
+            if lt(value, 0) then fgo-unavailable(domain, id, label, unit, plane, str_concat(source, str_concat(".", field)), channel, note) else fgo-int(domain, id, label, value, unit, value, plane, "observed", source, "live", channel, note);
+        }
+        def fgo-status-semantic-row(domain, id, label, status, field, unit, plane, source, channel, zeroState, zeroNote, activeNote) {
+            let value = fgo-status-int(status, field);
+            if lt(value, 0) then fgo-unavailable(domain, id, label, unit, plane, str_concat(source, str_concat(".", field)), channel, activeNote) else if eq(value, 0) then fgo-int(domain, id, label, value, unit, 0, plane, "observed", source, zeroState, channel, zeroNote) else fgo-int(domain, id, label, value, unit, value, plane, "observed", source, "live", channel, activeNote);
         }
 
         def fgo-kernel-rows() {
+            let cells = kernel_stat(4);
+            let strings = kernel_stat(5);
+            let floats = kernel_stat(8);
             list(
                 fgo-int("kernel", "dispatch-total", "primitive dispatches", kernel_stat(0), "calls", kernel_stat(0), "cpu-arena", "observed", "kernel_stat:0", "live", "kernel", "current fkwu process"),
                 fgo-int("kernel", "dispatch-distinct", "distinct primitives", kernel_stat(1), "tags", kernel_stat(1), "cpu-arena", "observed", "kernel_stat:1", "live", "kernel", "current fkwu process"),
                 fgo-int("kernel", "hottest-tag", "hottest primitive tag", kernel_stat(2), "tag", kernel_stat(3), "cpu-arena", "observed", "kernel_stat:2", "live", "primitive", "observer may become hot"),
                 fgo-int("kernel", "hottest-count", "hottest primitive calls", kernel_stat(3), "calls", kernel_stat(3), "cpu-arena", "observed", "kernel_stat:3", "live", "primitive", "current fkwu process"),
-                fgo-int("memory", "cells", "runtime NodeIDs (this Glass)", kernel_stat(4), "nodes", kernel_stat(4), "cpu-arena", "observed", "kernel_stat:4", "resident", "cell", "current Glass process interned NodeID count; measured zero is not BML, AST, catalog, or model-process absence; bytes unavailable"),
-                fgo-int("memory", "strings", "interned strings", kernel_stat(5), "strings", kernel_stat(5), "cpu-arena", "observed", "kernel_stat:5", "resident", "string", "string count; bytes unavailable"),
+                fgo-int("memory", "cells", "runtime NodeIDs (this Glass)", cells, "nodes", cells, "cpu-arena", "observed", "kernel_stat:4", if eq(cells, 0) then "empty" else "resident", "cell", if eq(cells, 0) then "semantic-zero=empty; current Glass process has minted no NodeIDs; not BML, AST, catalog, or model-process absence; bytes unavailable" else "current Glass process interned NodeID count; bytes unavailable"),
+                fgo-int("memory", "strings", "interned strings", strings, "strings", strings, "cpu-arena", "observed", "kernel_stat:5", "resident", "string", "current Glass process string count; bytes unavailable; temporal growth and selfmolt threshold are separate live rows; missing door=kernel.ephemeral-render-string"),
                 fgo-int("memory", "cons", "arena cons cells", kernel_stat(6), "cons", kernel_stat(6), "cpu-arena", "observed", "kernel_stat:6", "resident", "list", "arena pointer; not bytes"),
                 fgo-int("memory", "value-stack", "value stack depth", kernel_stat(7), "values", kernel_stat(7), "cpu-stack", "observed", "kernel_stat:7", "live", "stack", "current depth; high-water unavailable"),
-                fgo-int("memory", "floats", "float values", kernel_stat(8), "values", kernel_stat(8), "cpu-arena", "observed", "kernel_stat:8", "resident", "float", "float count; bytes unavailable"),
-                fgo-unavailable("memory", "blueprint-bytes", "blueprint allocation bytes", "bytes", "unknown", "missing-carrier", "blueprint", "kernel exposes NodeID structure but no per-blueprint allocation byte ledger"),
-                fgo-unavailable("memory", "recipe-bytes", "recipe allocation bytes", "bytes", "unknown", "missing-carrier", "recipe", "recipe count and byte ownership are not separately exposed"),
-                fgo-unavailable("memory", "cell-bytes", "per-cell allocation bytes", "bytes", "unknown", "missing-carrier", "cell", "cell shape is inspectable for framebuffer roots; allocation bytes are not"));
+                fgo-int("memory", "floats", "float values", floats, "values", floats, "cpu-arena", "observed", "kernel_stat:8", if eq(floats, 0) then "empty" else "resident", "float", if eq(floats, 0) then "semantic-zero=empty; current Glass process boxed-float pool has no values; bytes unavailable" else "current Glass process boxed-float count; bytes unavailable"),
+                fgo-unavailable("memory", "blueprint-bytes", "blueprint allocation bytes", "bytes", "unknown", "kernel.blueprint-byte-ledger", "blueprint", "kernel exposes NodeID structure but no per-blueprint allocation byte ledger"),
+                fgo-unavailable("memory", "recipe-bytes", "recipe allocation bytes", "bytes", "unknown", "kernel.recipe-byte-ledger", "recipe", "recipe count and byte ownership are not separately exposed"),
+                fgo-unavailable("memory", "cell-bytes", "per-cell allocation bytes", "bytes", "unknown", "kernel.cell-byte-ledger", "cell", "cell shape is inspectable for framebuffer roots; allocation bytes are not"));
         }
 
         def fgo-framebuffer-rows(events) {
+            let count = len(events);
             list(
-                fgo-int("framebuffer", "events", "event roots", len(events), "roots", len(events), "cpu-arena", "observed", "framebuffer-events", "live", "framebuffer", "bounded current-process roots"),
-                fgo-int("framebuffer", "roots", "registered roots", kernel_stat(9), "roots", kernel_stat(9), "cpu-arena", "observed", "kernel_stat:9", "live", "framebuffer", "current process"),
-                fgo-int("framebuffer", "attributed", "source-attributed roots", kernel_stat(10), "roots", kernel_stat(10), "cpu-arena", "observed", "kernel_stat:10", "live", "framebuffer", "current process"),
-                fgo-int("framebuffer", "rejected", "rejected roots", kernel_stat(11), "roots", kernel_stat(11), "cpu-arena", "observed", "kernel_stat:11", "live", "framebuffer", "current process"),
-                fgo-int("framebuffer", "entered", "entered roots", kernel_stat(12), "roots", kernel_stat(12), "cpu-arena", "observed", "kernel_stat:12", "live", "framebuffer", "current process"),
-                fgo-int("framebuffer", "accepted", "accepted roots", kernel_stat(13), "roots", kernel_stat(13), "cpu-arena", "observed", "kernel_stat:13", "live", "framebuffer", "current process"),
-                fgo-int("framebuffer", "last-index", "last root index", kernel_stat(14), "index", kernel_stat(14), "cpu-arena", "observed", "kernel_stat:14", "live", "framebuffer", "current process"));
+                fgo-int("framebuffer", "events", "event roots", count, "roots", count, "cpu-arena", "observed", "framebuffer-events", if eq(count, 0) then "empty" else "live", "framebuffer", if eq(count, 0) then "semantic-zero=empty; bounded current-process framebuffer event list contains no roots" else "bounded current-process framebuffer roots"),
+                fgo-unavailable("framebuffer", "roots", "registered roots", "roots", "cpu-arena", "fkc-table-serialize.kernel_stat:9", "framebuffer", "table-walker publishes this counter; current fkwu seed deliberately leaves 9 clear"),
+                fgo-unavailable("framebuffer", "attributed", "source-attributed roots", "roots", "cpu-arena", "fkc-table-serialize.kernel_stat:10", "framebuffer", "table-walker publishes this counter; current fkwu seed deliberately leaves 10 clear"),
+                fgo-unavailable("framebuffer", "rejected", "rejected roots", "roots", "cpu-arena", "fkc-table-serialize.kernel_stat:11", "framebuffer", "table-walker publishes this counter; current fkwu seed deliberately leaves 11 clear"),
+                fgo-unavailable("framebuffer", "entered", "entered roots", "roots", "cpu-arena", "fkc-table-serialize.kernel_stat:12", "framebuffer", "table-walker publishes this counter; current fkwu seed deliberately leaves 12 clear"),
+                fgo-unavailable("framebuffer", "accepted", "accepted roots", "roots", "cpu-arena", "fkc-table-serialize.kernel_stat:13", "framebuffer", "table-walker publishes this counter; current fkwu seed deliberately leaves 13 clear"),
+                fgo-unavailable("framebuffer", "last-index", "last root index", "index", "cpu-arena", "fkc-table-serialize.kernel_stat:14", "framebuffer", "table-walker publishes this counter; current fkwu seed deliberately leaves 14 clear"));
         }
 
         def fgo-node-id(node) {
@@ -117,7 +167,7 @@ section [form.bml] {
         def fgo-event-row(node) {
             let source = node_source(node);
             let sourceText = if eq(len(source), 0) then "unattributed" else nth(source, 0);
-            fgo-sized("cell", fgo-node-id(node), "framebuffer cell shape", len(node_children(node)), "children", node_level(node), len(node_children(node)), "cpu-arena", "observed", sourceText, "live", "cell", str_concat("type=", int_to_str(node_type(node))));
+            append(fgo-sized("cell", fgo-node-id(node), "framebuffer cell shape", len(node_children(node)), "children", node_level(node), len(node_children(node)), "cpu-arena", "observed", sourceText, "live", "cell", str_concat("type=", int_to_str(node_type(node)))), list(node));
         }
         def fgo-event-rows-go(events, remaining) {
             if or(eq(len(events), 0), le(remaining, 0)) then list() else cons(fgo-event-row(head(events)), fgo-event-rows-go(tail(events), sub(remaining, 1)));
@@ -126,27 +176,27 @@ section [form.bml] {
 
         def fgo-metal-rows(status) {
             list(
-                fgo-text-or-unavailable("metal", "device", "Metal device", fgo-status-text(status, "device"), "unified-gpu", "observed", "metal_status", "live", "metal", "current fkwu process"),
-                fgo-status-int-row("metal", "buffers", "Metal buffers", status, "buffers", "handles", "unified-gpu", "metal_status", "metal", "current process only"),
-                fgo-status-int-row("metal", "mapped", "mmap no-copy buffers", status, "mmap_nocopy_buffers", "handles", "mapped-file", "metal_status", "metal", "current process only"),
-                fgo-status-int-row("metal", "pipelines", "Metal pipelines", status, "pipelines", "handles", "unified-gpu", "metal_status", "metal", "current process only"),
-                fgo-status-int-row("metal", "dispatch", "Metal dispatches", status, "total_dispatch", "dispatches", "unified-gpu", "metal_status", "metal", "current process only"),
-                fgo-status-int-row("metal", "sync", "Metal synchronizations", status, "total_sync", "syncs", "unified-gpu", "metal_status", "metal", "current process only"),
-                fgo-status-int-row("metal", "gpu-busy", "GPU busy time", status, "gpu_busy_us_total", "microseconds", "unified-gpu", "metal_status", "metal", "device command-buffer time"),
-                fgo-status-int-row("metal", "cpu-jit-busy", "CPU JIT dispatch time", status, "cpu_jit_busy_us_total", "microseconds", "cpu-arena", "metal_status", "jit", "current process only"),
-                fgo-text-or-unavailable("health", "metal-error", "Metal last error", fgo-status-text(status, "last_error"), "unified-gpu", "observed", "metal_status", "live", "health", "none means carrier reported none"),
-                fgo-unavailable("metal", "allocated-bytes", "Metal allocated bytes", "bytes", "unified-gpu", "missing-carrier", "metal", "current carrier exposes handle counts, not per-buffer bytes"),
-                fgo-unavailable("metal", "working-set", "Metal recommended working set", "bytes", "unified-gpu", "missing-carrier", "metal", "recommendedMaxWorkingSetSize is not exposed"));
+                fgo-text-or-unavailable("metal", "device", "Metal device", fgo-status-text(status, "device"), "unified-gpu", "observed", "metal_status.device", "live", "metal", "current fkwu process"),
+                fgo-status-semantic-row("metal", "buffers", "Glass Metal buffers", status, "buffers", "handles", "unified-gpu", "metal_status", "metal", "empty", "semantic-zero=empty; this Glass process owns no Metal buffer handles", "scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "mapped", "Glass mmap buffers", status, "mmap_nocopy_buffers", "handles", "mapped-file", "metal_status", "metal", "empty", "semantic-zero=empty; this Glass process owns no mmap no-copy buffers", "scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "pipelines", "Glass Metal pipelines", status, "pipelines", "handles", "unified-gpu", "metal_status", "metal", "empty", "semantic-zero=empty; this Glass process owns no Metal pipelines", "scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "dispatch", "Glass Metal dispatches", status, "total_dispatch", "dispatches", "unified-gpu", "metal_status", "metal", "idle", "semantic-zero=idle; this Glass process has submitted no Metal dispatch", "scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "sync", "Glass Metal syncs", status, "total_sync", "syncs", "unified-gpu", "metal_status", "metal", "idle", "semantic-zero=idle; this Glass process has performed no Metal synchronization", "scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "gpu-busy", "Glass GPU busy", status, "gpu_busy_us_total", "microseconds", "unified-gpu", "metal_status", "metal", "idle", "semantic-zero=idle; this Glass process recorded no command-buffer GPU time", "device command-buffer time; scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "cpu-jit-busy", "Glass CPU JIT time", status, "cpu_jit_busy_us_total", "microseconds", "cpu-arena", "metal_status", "jit", "idle", "semantic-zero=idle; this Glass process recorded no CPU JIT dispatch time", "scope=glass.monitor process"),
+                fgo-text-or-unavailable("health", "metal-error", "Metal last error", fgo-status-text(status, "last_error"), "unified-gpu", "observed", "metal_status.last_error", "live", "health", "none means carrier reported none"),
+                fgo-unavailable("metal", "allocated-bytes", "Metal allocated bytes", "bytes", "unified-gpu", "metal_status.allocated_bytes", "metal", "current carrier exposes handle counts, not per-buffer bytes"),
+                fgo-unavailable("metal", "working-set", "Metal recommended working set", "bytes", "unified-gpu", "metal_status.recommended_max_working_set_bytes", "metal", "recommendedMaxWorkingSetSize is not exposed"));
         }
 
         def fgo-mlx-rows(status) {
             list(
-                fgo-text-or-unavailable("mlx", "device", "MLX device", fgo-status-text(status, "mlx_device"), "unified-gpu", "observed", "mlx_status", "live", "mlx", "current process"),
-                fgo-text-or-unavailable("mlx", "version", "MLX version", fgo-status-text(status, "mlx_version"), "disk-cache", "observed", "mlx_status", "loaded", "mlx", "linked library version"),
-                fgo-status-int-row("mlx", "ops", "MLX operation surface", status, "mlx_ops", "ops", "unified-gpu", "mlx_status", "mlx", "available carrier operations"),
-                fgo-status-int-row("mlx", "dispatch", "MLX dispatches", status, "mlx_dispatch", "dispatches", "unified-gpu", "mlx_status", "mlx", "current process only"),
-                fgo-text-or-unavailable("health", "mlx-error", "MLX last error", fgo-status-text(status, "last_error"), "unified-gpu", "observed", "mlx_status", "live", "health", "none means carrier reported none"),
-                fgo-unavailable("mlx", "allocated-bytes", "MLX allocated bytes", "bytes", "unified-gpu", "missing-carrier", "mlx", "MLX carrier does not expose allocator bytes"));
+                fgo-text-or-unavailable("mlx", "device", "MLX device", fgo-status-text(status, "mlx_device"), "unified-gpu", "observed", "mlx_status.mlx_device", "live", "mlx", "current process"),
+                fgo-text-or-unavailable("mlx", "version", "MLX version", fgo-status-text(status, "mlx_version"), "disk-cache", "observed", "mlx_status.mlx_version", "loaded", "mlx", "linked library version"),
+                fgo-status-semantic-row("mlx", "ops", "Glass MLX ops", status, "mlx_ops", "ops", "unified-gpu", "mlx_status", "mlx", "empty", "semantic-zero=empty; this Glass process exposes no MLX operations", "available carrier operations; scope=glass.monitor process"),
+                fgo-status-semantic-row("mlx", "dispatch", "Glass MLX dispatches", status, "mlx_dispatch", "dispatches", "unified-gpu", "mlx_status", "mlx", "idle", "semantic-zero=idle; this Glass process has issued no MLX dispatch", "scope=glass.monitor process"),
+                fgo-text-or-unavailable("health", "mlx-error", "MLX last error", fgo-status-text(status, "last_error"), "unified-gpu", "observed", "mlx_status.last_error", "live", "health", "none means carrier reported none"),
+                fgo-unavailable("mlx", "allocated-bytes", "MLX allocated bytes", "bytes", "unified-gpu", "mlx_status.allocated_bytes", "mlx", "MLX carrier does not expose allocator bytes"));
         }
 
         def fgo-host-free-percent(status) {
@@ -171,9 +221,9 @@ section [form.bml] {
             let free = fgo-host-free-percent(status);
             let total = fgo-host-total-bytes(status);
             list(
-                if lt(free, 0) then fgo-unavailable("host", "memory-free", "system memory free", "percent", "os-memory", "memory_pressure", "health", "host port did not return a parseable percentage") else fgo-sized("host", "memory-free", "system memory free", free, "percent", 100, sub(100, free), "os-memory", "observed", "host-exec:/usr/bin/memory_pressure", "live", "health", "system-wide; not Metal working set"),
-                if lt(total, 0) then fgo-unavailable("host", "memory-total", "physical memory", "bytes", "os-memory", "memory_pressure", "health", "host port did not return total bytes") else fgo-int("host", "memory-total", "physical memory", total, "bytes", 0, "os-memory", "observed", "host-exec:/usr/bin/memory_pressure", "live", "health", "system-wide physical bytes"),
-                fgo-text-or-unavailable("host", "cpu-load", "CPU load averages", host-exec("/usr/sbin/sysctl -n vm.loadavg", ""), "cpu-scheduler", "observed", "host-exec:/usr/sbin/sysctl", "live", "cpu", "host-port text; per-fkwu CPU is emitted by the fixed ps observer"));
+                if lt(free, 0) then fgo-unavailable("host", "memory-free", "system memory free", "percent", "os-memory", "host-exec:/usr/bin/memory_pressure.system-free-percent", "health", "host port did not return a parseable percentage") else fgo-sized("host", "memory-free", "system memory free", free, "percent", 100, sub(100, free), "os-memory", "observed", "host-exec:/usr/bin/memory_pressure", "live", "health", "system-wide; not Metal working set"),
+                if lt(total, 0) then fgo-unavailable("host", "memory-total", "physical memory", "bytes", "os-memory", "host-exec:/usr/bin/memory_pressure.physical-bytes", "health", "host port did not return total bytes") else fgo-int("host", "memory-total", "physical memory", total, "bytes", 0, "os-memory", "observed", "host-exec:/usr/bin/memory_pressure", "live", "health", "system-wide physical bytes"),
+                fgo-text-or-unavailable("host", "cpu-load", "CPU load averages", host-exec("/usr/sbin/sysctl -n vm.loadavg", ""), "cpu-scheduler", "observed", "host-exec:/usr/sbin/sysctl.vm.loadavg", "live", "cpu", "host-port text; per-fkwu CPU is emitted by the fixed ps observer"));
         }
 
         // Fixed-column process observation.  `/bin/ps ... comm=` exposes the
@@ -243,7 +293,7 @@ section [form.bml] {
         def fgo-process-metrics(process) {
             let processLabel = str_concat("fkwu ", int_to_str(fgo-ps-pid(process)));
             let rss = fgo-int("process", fgo-process-id(process, "rss"), str_concat(processLabel, " RSS"), fgo-ps-rss-bytes(process), "bytes", fgo-ps-rss-bytes(process), "os-memory", "observed", "host-exec:/bin/ps-fixed-columns", "live", "process", "comm used only for exact fkwu filter; argv never requested");
-            let cpu = fgo-int("process", fgo-process-id(process, "cpu"), str_concat(processLabel, " CPU"), fgo-ps-cpu(process), "tenths-percent", fgo-ps-cpu(process), "cpu-scheduler", "observed", "host-exec:/bin/ps-fixed-columns", "live", "process", "bounded per-process sample");
+            let cpu = fgo-int("process", fgo-process-id(process, "cpu"), str_concat(processLabel, " CPU"), fgo-ps-cpu(process), "tenths-percent", fgo-ps-cpu(process), "cpu-scheduler", "observed", "host-exec:/bin/ps-fixed-columns", if eq(fgo-ps-cpu(process), 0) then "quiet" else "live", "process", if eq(fgo-ps-cpu(process), 0) then "semantic-zero=quiet; fixed ps sample rounded below 0.1 percent and does not prove no CPU work" else "bounded per-process sample");
             let elapsed = fgo-int("process", fgo-process-id(process, "elapsed"), str_concat(processLabel, " elapsed"), fgo-ps-elapsed(process), "seconds", 0, "process-time", "observed", "host-exec:/bin/ps-fixed-columns", "live", "process", "elapsed since process start");
             list(rss, cpu, elapsed);
         }
@@ -304,10 +354,12 @@ section [form.bml] {
         }
         def fgo-storage-kind(root, suffix, id, label, plane) {
             let paths = source_inventory(root, suffix, list());
+            let count = len(paths);
+            let bytes = fgo-file-bytes(paths);
             list(
-                fgo-int("storage", str_concat(id, "-count"), str_concat(label, " count"), len(paths), "files", len(paths), plane, "observed", "source_inventory", "stored", "cache", suffix),
-                fgo-int("storage", str_concat(id, "-bytes"), str_concat(label, " bytes"), fgo-file-bytes(paths), "bytes", fgo-file-bytes(paths), plane, "observed", "file_size", "stored", "cache", "storage bytes; not residence"),
-                fgo-int("storage", str_concat(id, "-newest"), str_concat(label, " newest"), fgo-file-newest(paths), "unix-seconds", 0, plane, "observed", "file_mtime", "stored", "cache", "freshness coordinate"));
+                fgo-int("storage", str_concat(id, "-count"), str_concat(label, " count"), count, "files", count, plane, "observed", "source_inventory", if eq(count, 0) then "empty" else "stored", "cache", if eq(count, 0) then "semantic-zero=empty; catalog contains no matching files" else suffix),
+                fgo-int("storage", str_concat(id, "-bytes"), str_concat(label, " bytes"), bytes, "bytes", bytes, plane, "observed", "file_size", if eq(count, 0) then "empty" else "stored", "cache", if eq(count, 0) then "semantic-zero=empty; no matching files, therefore storage bytes are exactly zero; not residence" else "storage bytes; not residence"),
+                if eq(count, 0) then fgo-text("storage", str_concat(id, "-newest"), str_concat(label, " newest"), "none(empty catalog)", plane, "observed", "file_mtime", "empty", "cache", "no timestamp exists because the measured catalog is empty") else fgo-int("storage", str_concat(id, "-newest"), str_concat(label, " newest"), fgo-file-newest(paths), "unix-seconds", 0, plane, "observed", "file_mtime", "stored", "cache", "freshness coordinate"));
         }
         def fgo-storage(root) {
             if not(eq(fs_is_dir(root), 1)) then list(fgo-unavailable("storage", "root", "storage root", "path", "disk-cache", "fs_is_dir", "cache", root)) else append(fgo-storage-kind(root, ".fkb", "fkb", "Form specialization image", "disk-cache"), append(fgo-storage-kind(root, ".sym", "sym", "specialization symbols", "disk-cache"), append(fgo-storage-kind(root, ".dylib", "dylib", "native specialization library", "disk-cache"), append(fgo-storage-kind(root, ".bml", "bml", "BML authority/source", "mapped-file"), fgo-storage-kind(root, ".fk", "form", "Form organ/source", "mapped-file")))));
@@ -338,12 +390,14 @@ section [form.bml] {
         def fgo-flat-stats-roots(roots, suffix, held) = if eq(len(roots), 0) then held else fgo-flat-stats-roots(tail(roots), suffix, fgo-add-stats(held, fgo-flat-stats-root(head(roots), suffix)));
         def fgo-flat-kind(roots, suffix, id, label, plane) {
             let stats = fgo-flat-stats-roots(roots, suffix, list(0, 0, 0));
-            list(fgo-int("storage", str_concat(id, "-count"), str_concat(label, " count"), nth(stats, 0), "files", nth(stats, 0), plane, "catalog", "fs_list+file_size", "stored", "cache", "explicit immediate roots"), fgo-int("storage", str_concat(id, "-bytes"), str_concat(label, " bytes"), nth(stats, 1), "bytes", nth(stats, 1), plane, "catalog", "fs_list+file_size", "stored", "cache", "storage bytes; not residence"), fgo-int("storage", str_concat(id, "-newest"), str_concat(label, " newest"), nth(stats, 2), "unix-seconds", 0, plane, "catalog", "fs_list+file_mtime", "stored", "cache", "explicit immediate roots"));
+            let count = nth(stats, 0);
+            list(fgo-int("storage", str_concat(id, "-count"), str_concat(label, " count"), count, "files", count, plane, "catalog", "fs_list+file_size", if eq(count, 0) then "empty" else "stored", "cache", if eq(count, 0) then "semantic-zero=empty; explicit immediate-root catalog has no matching files" else "explicit immediate roots"), fgo-int("storage", str_concat(id, "-bytes"), str_concat(label, " bytes"), nth(stats, 1), "bytes", nth(stats, 1), plane, "catalog", "fs_list+file_size", if eq(count, 0) then "empty" else "stored", "cache", if eq(count, 0) then "semantic-zero=empty; no matching files, therefore catalog bytes are exactly zero; not residence" else "storage bytes; not residence"), if eq(count, 0) then fgo-text("storage", str_concat(id, "-newest"), str_concat(label, " newest"), "none(empty catalog)", plane, "catalog", "fs_list+file_mtime", "empty", "cache", "no timestamp exists because the measured catalog is empty") else fgo-int("storage", str_concat(id, "-newest"), str_concat(label, " newest"), nth(stats, 2), "unix-seconds", 0, plane, "catalog", "fs_list+file_mtime", "stored", "cache", "explicit immediate roots"));
         }
         def fgo-flat-cache-storage(roots) = append(fgo-flat-kind(roots, ".fkb", "fkb", "Form specialization image", "disk-cache"), append(fgo-flat-kind(roots, ".sym", "sym", "specialization symbols", "disk-cache"), fgo-flat-kind(roots, ".dylib", "dylib", "native specialization library", "disk-cache")));
         def fgo-flat-source-storage(roots) = append(fgo-flat-kind(roots, ".bml", "bml", "BML authority/source", "mapped-file"), fgo-flat-kind(roots, ".fk", "form", "Form organ/source", "mapped-file"));
 
         def fgo-snapshot(root) {
+            let epoch = now_unix_ms();
             let events = framebuffer-events();
             let metal = metal_status();
             let mlx = mlx_status();
@@ -357,7 +411,8 @@ section [form.bml] {
             let heatRows = fgo-primitive-heat();
             let eventRows = fgo-event-rows(events);
             let storageRows = fgo-storage(root);
-            list(FGOSchema(), now_unix_ms(), append(kernelRows, append(framebufferRows, append(metalRows, append(mlxRows, append(hostRows, append(processRows, append(heatRows, append(eventRows, storageRows)))))))), "current-process-plus-host-ports", "cross-process-metrics-bounded-no-argv");
+            let rows = append(kernelRows, append(framebufferRows, append(metalRows, append(mlxRows, append(hostRows, append(processRows, append(heatRows, append(eventRows, storageRows))))))));
+            list(FGOSchema(), epoch, fgo-observe-rows(rows, epoch, 0), "current-process-plus-host-ports", "cross-process-metrics-bounded-no-argv");
         }
         def fgo-snapshot-rows(snapshot) = nth(snapshot, 2);
 

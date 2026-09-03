@@ -5,9 +5,11 @@
 ; Startup physically opens and prefills both models, then returns to Qwen for
 ; one append-only prefix-reuse evaluation while the 3B stays resident.  The process
 ; polls an atomic Form filesystem ingress at 4 Hz for `heartbeat`, `status`,
-; `qwen-step`, `3b-step`, or `quit`; a completed turn never
-; closes either context.  An explicitly offered quit closes both contexts;
-; ordinary idle cadence is never an eviction policy event.
+; `qwen-step`, `3b-step`, or `quit`.  Idle polls do not render, intern, or
+; serialize a snapshot; state publishes at start, explicit inspection, and
+; before/after real model work while a separate observer owns PID liveness.
+; A completed turn never closes either context.  An explicitly offered quit
+; closes both contexts; ordinary idle cadence is never an eviction event.
 ;
 ; preludes: form/form-stdlib/qwen4exp-flash-next-generate.bml form/form-stdlib/llama32-3b-resident-state.bml form/form-stdlib/native-model-glass.bml form/form-stdlib/native-model-resident-fleet.bml form/form-stdlib/native-model-memory-glass.bml form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/native-model-dual-telemetry.bml form/form-stdlib/native-model-owner-cadence.bml
 
@@ -21,10 +23,20 @@
     (defn nmdr-qwen-experts-id () "experts.qwen3.8-flash-next.ud-q2_k_xl.unsloth")
     (defn nmdr-qwen-kv-id () "state.qwen3.8-flash-next.ud-q2_k_xl.unsloth.kv")
     (defn nmdr-qwen-token-id () "tokens.qwen3.8-flash-next.ud-q2_k_xl.unsloth.position")
+    (defn nmdr-qwen-loaded-id () "state.model.qwen3.8-flash-next.ud-q2_k_xl.unsloth.loaded")
+    (defn nmdr-qwen-prefilled-id () "state.model.qwen3.8-flash-next.ud-q2_k_xl.unsloth.prefilled")
+    (defn nmdr-qwen-active-id () "state.model.qwen3.8-flash-next.ud-q2_k_xl.unsloth.active")
+    (defn nmdr-qwen-mapped-id () "mapped.qwen3.8-flash-next")
+    (defn nmdr-qwen-materialized-id () "materialized.qwen3.8-flash-next")
     (defn nmdr-threeb-id () "model.llama-3.2-3b-instruct")
     (defn nmdr-threeb-weights-id () "weights.llama-3.2-3b-instruct")
     (defn nmdr-threeb-kv-id () "state.llama-3.2-3b-instruct.kv")
     (defn nmdr-threeb-token-id () "tokens.llama-3.2-3b-instruct.position")
+    (defn nmdr-threeb-loaded-id () "state.model.llama-3.2-3b-instruct.loaded")
+    (defn nmdr-threeb-prefilled-id () "state.model.llama-3.2-3b-instruct.prefilled")
+    (defn nmdr-threeb-active-id () "state.model.llama-3.2-3b-instruct.active")
+    (defn nmdr-threeb-mapped-id () "mapped.llama-3.2-3b")
+    (defn nmdr-threeb-materialized-id () "materialized.llama-3.2-3b")
     (defn nmdr-threeb-prompt () (list 128000 791 6864 315 9822 374))
     (defn nmdr-telemetry-root () "/tmp/form-glass-telemetry")
     (defn nmdr-publisher (instance) (nmdt-owner-publisher instance))
@@ -42,15 +54,24 @@
                 (if (eq (nmg-active? model) 1) "active"
                     (if (str_eq (nmg-phase model) "prefill") "prefilling"
                         (if (eq (nmg-prefilled? model) 1) "ready"
-                            (if (eq (nmg-loaded? model) 1) "resident" "released")))))))
+                            (if (eq (nmg-loaded? model) 1) "allocated" "released")))))))
 
     (defn nmdr-threeb-reasoning (session contextTokens)
         (nmg-observed session (NMGThreeB) 1 1 1 "decode" contextTokens
             "3b-resident-token-evaluate-entered" "none" "3b-reasoning"))
 
-    (defn nmdr-residency-sample (id source session handle readEpoch writeEpoch)
-        (nmdt-resident-sample id (nmdr-lifecycle session source) handle
+    (defn nmdr-callable-sample (id source session handle readEpoch writeEpoch owner)
+        (nmdt-callable-sample id owner (nmdr-lifecycle session source) handle
             readEpoch writeEpoch))
+
+    (defn nmdr-model-extent-samples (mappedId materializedId parent owner epoch)
+        (list
+            (nmdt-missing-extent-sample mappedId parent owner "mapped-bytes"
+                "per-model-mapped-bytes" epoch
+                "model.carrier-per-model-mapped-bytes")
+            (nmdt-missing-extent-sample materializedId parent owner
+                "materialized-bytes" "per-model-materialized-bytes" epoch
+                "model.carrier-per-model-materialized-bytes")))
 
     (defn nmdr-weight-sample (id parent bytes readEpoch)
         (nmdt-weight-catalog id parent bytes readEpoch))
@@ -66,49 +87,186 @@
         (nmdt-token-position id parent position (nmdr-lifecycle session source)
             handle accessEpoch))
 
-    (defn nmdr-state-samples (model-id source session handle epoch)
+    ; State clocks retain the last transition of each independent bit.  A
+    ; decode changes active, but does not pretend loaded/prefilled changed too.
+    (defn nmdr-state-samples (model-id loadedId prefilledId activeId source session handle clock owner)
         (do
             (let model (nmg-find source (nmg-models session)))
             (if (eq (len model) 0) (list)
                 (list
-                    (nmdt-model-state-sample (str_concat "state." (str_concat model-id ".loaded")) model-id "loaded" (nmg-loaded? model) handle epoch)
-                    (nmdt-model-state-sample (str_concat "state." (str_concat model-id ".prefilled")) model-id "prefilled" (nmg-prefilled? model) handle epoch)
-                    (nmdt-model-state-sample (str_concat "state." (str_concat model-id ".active")) model-id "active" (nmg-active? model) handle epoch)))))
+                    (nmdt-model-state-sample-owned loadedId model-id owner
+                        "loaded" (nmg-loaded? model) handle
+                        (nmdt-state-loaded-epoch clock))
+                    (nmdt-model-state-sample-owned prefilledId model-id owner
+                        "prefilled" (nmg-prefilled? model) handle
+                        (nmdt-state-prefilled-epoch clock))
+                    (nmdt-model-state-sample-owned activeId model-id owner
+                        "active" (nmg-active? model) handle
+                        (nmdt-state-active-epoch clock))))))
 
-    (defn nmdr-publish (qslot three session fleet qhandle thandle instance ownerPid sequence qAccess tAccess)
+    (defn nmdr-status-counter (status key id kind plane owner lane purpose epoch source channels)
+        (do
+            (let value (nmdt-status-int status key))
+            (if (lt value 0)
+                (nmdt-owner-missing-sample id kind plane owner lane purpose epoch source channels)
+                (nmdt-owner-counter-sample id kind plane owner lane purpose value epoch source channels))))
+
+    (defn nmdr-owner-runtime-samples (owner epoch)
+        (do
+            (let status (metal_status))
+            (let mlx (mlx_status))
+            (list
+                (nmdt-owner-counter-sample "primitive.owner.dispatch-total"
+                    "primitive-counter" "form" owner "primitive"
+                    "runtime-work-including-observer-cost" (kernel_stat 0) epoch
+                    "fkwu.kernel-stat-0" (list "process" "model" "primitive" "cpu" "health"))
+                (nmdt-owner-counter-sample "primitive.owner.dispatch-distinct"
+                    "primitive-counter" "form" owner "primitive"
+                    "runtime-surface-in-use" (kernel_stat 1) epoch
+                    "fkwu.kernel-stat-1" (list "process" "model" "primitive" "cpu" "health"))
+                (nmdt-owner-counter-sample "primitive.owner.hottest-tag"
+                    "primitive-counter" "form" owner "primitive"
+                    "current-owner-hotspot-tag" (kernel_stat 2) epoch
+                    "fkwu.kernel-stat-2" (list "process" "model" "primitive" "cpu" "health"))
+                (nmdt-owner-counter-sample "primitive.owner.hottest-count"
+                    "primitive-counter" "form" owner "primitive"
+                    "current-owner-hotspot-calls" (kernel_stat 3) epoch
+                    "fkwu.kernel-stat-3" (list "process" "model" "primitive" "cpu" "health"))
+                (nmdt-owner-counter-sample "jit.owner.compile-dispatch"
+                    "jit-counter" "form" owner "jit" "compile-call-impact"
+                    (kernel_stat 183) epoch "fkwu.kernel-stat-183"
+                    (list "process" "model" "jit" "cpu" "health"))
+                (nmdt-owner-counter-sample "jit.owner.leaf-inram-dispatch"
+                    "jit-counter" "form" owner "jit" "inram-leaf-call-impact"
+                    (kernel_stat 246) epoch "fkwu.kernel-stat-246"
+                    (list "process" "model" "jit" "cpu" "health"))
+                (nmdt-owner-counter-sample "jit.owner.arm64-dispatch"
+                    "jit-counter" "form" owner "jit" "arm64-call-impact"
+                    (kernel_stat 315) epoch "fkwu.kernel-stat-315"
+                    (list "process" "model" "jit" "cpu" "health"))
+                (nmdt-metal-counter status "jit.owner.metal-dispatch"
+                    "jit-counter" "jit" "cpu-jit-fallback-calls"
+                    "cpu_jit_dispatch" "metal_status.cpu_jit_dispatch" owner epoch
+                    (list "process" "model" "jit" "cpu" "health"))
+                (nmdt-metal-counter status "jit.owner.metal-busy-us"
+                    "jit-counter" "jit" "cpu-jit-fallback-cost-us"
+                    "cpu_jit_busy_us_total" "metal_status.cpu_jit_busy_us_total"
+                    owner epoch (list "process" "model" "jit" "cpu" "health"))
+                (nmdt-metal-counter status "metal.owner.in-flight"
+                    "metal-gauge" "metal" "submitted-command-batches"
+                    "in_flight" "metal_status.in_flight" owner epoch
+                    (list "process" "model" "metal" "gpu" "health"))
+                (nmdt-metal-counter status "metal.owner.buffers"
+                    "metal-gauge" "memory" "allocated-metal-buffer-handles"
+                    "buffers" "metal_status.buffers" owner epoch
+                    (list "process" "model" "memory" "metal" "gpu" "tensor" "health"))
+                (nmdt-metal-counter status "cache.owner.metal-pipelines"
+                    "pipeline-cache" "cache" "compiled-metal-pipeline-handles"
+                    "pipelines" "metal_status.pipelines" owner epoch
+                    (list "process" "model" "cache" "metal" "health"))
+                (nmdt-metal-counter status "mapping.owner.mmap-buffer-handles"
+                    "mapping-counter" "memory" "mmap-no-copy-buffer-handles"
+                    "mmap_nocopy_buffers" "metal_status.mmap_nocopy_buffers"
+                    owner epoch (list "process" "model" "memory" "metal" "health"))
+                (nmdt-metal-counter status "metal.owner.dispatch-total"
+                    "metal-counter" "metal" "submitted-metal-dispatches"
+                    "total_dispatch" "metal_status.total_dispatch" owner epoch
+                    (list "process" "model" "metal" "gpu" "health"))
+                (nmdt-metal-counter status "metal.owner.sync-total"
+                    "metal-counter" "metal" "completed-metal-synchronizations"
+                    "total_sync" "metal_status.total_sync" owner epoch
+                    (list "process" "model" "metal" "gpu" "health"))
+                (nmdt-metal-counter status "gpu.owner.busy-us-total"
+                    "gpu-counter" "gpu" "command-buffer-device-time-us"
+                    "gpu_busy_us_total" "metal_status.gpu_busy_us_total" owner epoch
+                    (list "process" "model" "metal" "gpu" "health"))
+                (nmdr-status-counter mlx "mlx_ops" "mlx.owner.ops"
+                    "mlx-capability" "mlx" owner "mlx" "available-mlx-operation-surface"
+                    epoch "mlx_status.mlx_ops"
+                    (list "process" "model" "mlx" "gpu" "health"))
+                (nmdr-status-counter mlx "mlx_dispatch" "mlx.owner.dispatch-total"
+                    "mlx-counter" "mlx" owner "mlx" "owner-process-mlx-dispatches"
+                    epoch "mlx_status.mlx_dispatch"
+                    (list "process" "model" "mlx" "gpu" "health"))
+                (nmdt-owner-missing-sample "cache.owner.walk-stats"
+                    "walk-cache" "form" owner "cache" "hit-miss-and-age"
+                    epoch "fkwu.walk-cache-stats"
+                    (list "process" "model" "cache" "health"))
+                (nmdt-owner-missing-sample "jit.owner.stage-duration"
+                    "jit-duration" "form" owner "jit" "per-stage-duration"
+                    epoch "fkwu.jit-stats"
+                    (list "process" "model" "jit" "cpu" "health"))
+                (nmdt-owner-missing-sample "memory.owner.ephemeral-render-string"
+                    "runtime-memory" "form" owner "memory"
+                    "per-publication-temporary-string-reclaim" epoch
+                    "kernel.ephemeral-render-string"
+                    (list "process" "model" "memory" "health"))
+                (nmdt-owner-nodeid-seam owner epoch))))
+
+    (defn nmdr-publish (qslot three session fleet qhandle thandle publisher started incarnation heartbeatId ownerPid sequence qAccess tAccess qStateClock tStateClock)
         (do
             (let epoch (now_unix_ms))
-            (let correlation (nmdt-owner-correlation (nmdr-publisher instance)
-                ownerPid instance (nmdt-owner-incarnation instance) sequence epoch))
-            (let modelSamples (list
-                (nmdr-residency-sample (nmdr-qwen-id) (NMGQwen) session qhandle qAccess qAccess)
+            (let correlation (nmdt-owner-correlation publisher
+                ownerPid started incarnation sequence epoch))
+            (let modelSamples (append (list
+                (nmdr-callable-sample (nmdr-qwen-id) (NMGQwen) session qhandle qAccess qAccess publisher)
                 (nmdr-weight-sample (nmdr-qwen-weights-id) (nmdr-qwen-id) (NMRFQwenBytes) qAccess)
                 (nmdr-substate-sample (nmdr-qwen-experts-id) (nmdr-qwen-id) "expert-pack" "moe-route" session (NMGQwen) qhandle qAccess qAccess (list "memory" "model" "metal" "gpu" "expert" "query-lane"))
                 (nmdr-substate-sample (nmdr-qwen-kv-id) (nmdr-qwen-id) "kv-substate" "attention-state" session (NMGQwen) qhandle qAccess qAccess (list "memory" "model" "metal" "gpu" "substate" "query-lane"))
                 (nmdr-token-sample (nmdr-qwen-token-id) (nmdr-qwen-id) (q4s-pos qslot) session (NMGQwen) qhandle qAccess)
-                (nmdr-residency-sample (nmdr-threeb-id) (NMGThreeB) session thandle tAccess tAccess)
+                (nmdr-callable-sample (nmdr-threeb-id) (NMGThreeB) session thandle tAccess tAccess publisher)
                 (nmdr-weight-sample (nmdr-threeb-weights-id) (nmdr-threeb-id) (NMRFThreeBBytes) tAccess)
                 (nmdr-substate-sample (nmdr-threeb-kv-id) (nmdr-threeb-id) "kv-substate" "attention-state" session (NMGThreeB) thandle tAccess tAccess (list "memory" "model" "metal" "gpu" "substate" "query-lane"))
-                (nmdr-token-sample (nmdr-threeb-token-id) (nmdr-threeb-id) (l3rs-position three) session (NMGThreeB) thandle tAccess)))
+                (nmdr-token-sample (nmdr-threeb-token-id) (nmdr-threeb-id) (l3rs-position three) session (NMGThreeB) thandle tAccess))
+                (append
+                    (nmdr-model-extent-samples (nmdr-qwen-mapped-id)
+                        (nmdr-qwen-materialized-id) (nmdr-qwen-id) publisher epoch)
+                    (nmdr-model-extent-samples (nmdr-threeb-mapped-id)
+                        (nmdr-threeb-materialized-id) (nmdr-threeb-id) publisher epoch))))
             (let stateSamples (append
-                (nmdr-state-samples (nmdr-qwen-id) (NMGQwen) session qhandle epoch)
-                (nmdr-state-samples (nmdr-threeb-id) (NMGThreeB) session thandle epoch)))
-            (if not(eq(nmdt-owner-correlation?(correlation), 1))
+                    (nmdr-state-samples (nmdr-qwen-id) (nmdr-qwen-loaded-id)
+                        (nmdr-qwen-prefilled-id) (nmdr-qwen-active-id)
+                    (NMGQwen) session qhandle qStateClock publisher)
+                (nmdr-state-samples (nmdr-threeb-id) (nmdr-threeb-loaded-id)
+                    (nmdr-threeb-prefilled-id) (nmdr-threeb-active-id)
+                    (NMGThreeB) session thandle tStateClock publisher)))
+            (if (not (eq (nmdt-owner-correlation? correlation) 1))
                 (list "glass-publish-v1" "refused" "owner-correlation")
                 (do
-                    (let publishedSamples (append (list (nmdt-owner-heartbeat-sample correlation))
-                        (append modelSamples (append stateSamples (list (nmdr-budget-sample (nmrf-budget fleet)))))))
+                    (let runtimeSamples (nmdr-owner-runtime-samples publisher epoch))
+                    (let tensorGroups (append
+                            (q4t-ledger-groups (q4s-ctx qslot) (nmdr-qwen-id)
+                                publisher epoch)
+                            (l3rs-ledger-groups three (nmdr-threeb-id)
+                                publisher epoch)))
+                    (let tensorSamples (append
+                        (nmdt-tensor-group-samples tensorGroups)
+                        (nmdt-tensor-reconcile-samples tensorGroups
+                            (metal_status) publisher epoch)))
+                    (let publishedSamples (append (list (nmdt-owner-heartbeat-sample-at correlation heartbeatId))
+                        (append modelSamples (append stateSamples
+                            (append runtimeSamples (append tensorSamples
+                                (list (nmdr-budget-sample (nmrf-budget fleet)))))))))
                     (fgtm-publish-snapshot (nmdr-telemetry-root)
-                        (nmdr-publisher instance) epoch publishedSamples)))))
+                        publisher epoch publishedSamples)))))
+
+    (defn nmdr-publish-state (qslot three session fleet qhandle thandle publisher started incarnation heartbeatId ownerPid sequence qAccess tAccess qStateClock tStateClock)
+        (do
+            (let published (nmdr-publish qslot three session fleet qhandle thandle
+                publisher started incarnation heartbeatId ownerPid sequence
+                qAccess tAccess qStateClock tStateClock))
+            (let _memory-frame (nmmg-write-quiet fleet session
+                (q4s-pos qslot) (l3rs-position three)))
+            published))
 
     (defn nmdr-release-sample (id closed epoch)
         (nmdt-release-tombstone id closed epoch))
 
-    (defn nmdr-publish-release (instance qclosed tclosed)
+    (defn nmdr-publish-release (publisher qclosed tclosed)
         (do
             (let epoch (now_unix_ms))
             (fgtm-publish-snapshot (nmdr-telemetry-root)
-                (nmdr-publisher instance) epoch (list
+                publisher epoch (list
                     (nmdr-release-sample (nmdr-qwen-id) qclosed epoch)
                     (nmdr-release-sample (nmdr-threeb-id) tclosed epoch)))))
 
@@ -118,6 +276,8 @@
                 "resident-turnwheel-status"))
             (let _tframe (nmg-glass-write-physical session (NMGThreeB) thandle
                 "resident-turnwheel-status"))
+            (let _memory-map (nmmg-write fleet session
+                (q4s-pos qslot) (l3rs-position three)))
             (let pressure (nmrf-pressure-plan fleet 0 (list)))
             (print (list "native-model-dual-resident-status"
                 "loaded" (nmrf-loaded-count (nmrf-rows fleet))
@@ -131,7 +291,7 @@
                 "qwen-handle" qhandle "threeb-handle" thandle))
             1))
 
-    (defn nmdr-close (qslot three session qhandle thandle instance reason)
+    (defn nmdr-close (qslot three session qhandle thandle publisher reason)
         (do
             (let qclosed (q4s-close qslot))
             (let tclosed (l3rs-close three))
@@ -145,76 +305,118 @@
             (let _tframe (if (eq tclosed 1)
                 (nmg-glass-write-physical-release treleased (NMGThreeB)
                     thandle tclosed) 0))
-            (let _tombstone (nmdr-publish-release instance qclosed tclosed))
+            (let _tombstone (nmdr-publish-release publisher qclosed tclosed))
             (list "native-model-dual-resident-closed" reason
                 "qwen-close" qclosed "threeb-close" tclosed)))
 
-    (defn nmdr-loop (qslot three session fleet qhandle thandle instance ownerPid sequence qAccess tAccess)
+    (defn nmdr-loop (qslot three session fleet qhandle thandle publisher started incarnation heartbeatId ownerPid sequence qAccess tAccess qStateClock tStateClock)
         (do
-            (let _telemetry (nmdr-publish qslot three session fleet qhandle thandle instance ownerPid sequence qAccess tAccess))
-            (let _memory-frame (nmmg-write fleet session
-                (q4s-pos qslot) (l3rs-position three)))
             (let _door (if (eq sequence 1)
                 (print (list "native-model-owner-command-door"
-                    (nmdoc-command-path (nmdr-publisher instance))
+                    (nmdoc-command-path publisher)
                     "cadence-ms" 250)) 0))
-            (let polled (nmdoc-poll-command (nmdr-publisher instance)))
+            (let polled (nmdoc-poll-command publisher))
             (if (str_eq (nmdoc-command-status polled) "waiting")
                 (do
                     (let _wait (host-exec "/bin/sleep 0.25" ""))
-                    (nmdr-loop qslot three session fleet qhandle thandle instance ownerPid (add sequence 1) qAccess tAccess))
+                    (nmdr-loop qslot three session fleet qhandle thandle publisher
+                        started incarnation heartbeatId ownerPid (add sequence 1)
+                        qAccess tAccess qStateClock tStateClock))
                 (do
                 (let command (nmdoc-command-value polled))
                 (if (str_eq command "quit")
-                (nmdr-close qslot three session qhandle thandle instance "quit")
+                (nmdr-close qslot three session qhandle thandle publisher "quit")
                 (if (str_eq command "heartbeat")
                     (do
+                        (let _heartbeat-state (nmdr-publish-state qslot three session fleet
+                            qhandle thandle publisher started incarnation heartbeatId ownerPid
+                            sequence qAccess tAccess qStateClock tStateClock))
                         (print (list "native-model-owner-heartbeat" "publisher"
-                            (nmdr-publisher instance) "pid" ownerPid "sequence" sequence))
-                        (nmdr-loop qslot three session fleet qhandle thandle instance ownerPid (add sequence 1) qAccess tAccess))
+                            publisher "pid" ownerPid "sequence" sequence))
+                        (nmdr-loop qslot three session fleet qhandle thandle publisher
+                            started incarnation heartbeatId ownerPid (add sequence 1)
+                            qAccess tAccess qStateClock tStateClock))
                 (if (str_eq command "status")
                     (do
+                        (let _status-state (nmdr-publish-state qslot three session fleet
+                            qhandle thandle publisher started incarnation heartbeatId ownerPid
+                            sequence qAccess tAccess qStateClock tStateClock))
                         (nmdr-status qslot three session fleet qhandle thandle)
-                        (nmdr-loop qslot three session fleet qhandle thandle instance ownerPid (add sequence 1) qAccess tAccess))
+                        (nmdr-loop qslot three session fleet qhandle thandle publisher
+                            started incarnation heartbeatId ownerPid (add sequence 1)
+                            qAccess tAccess qStateClock tStateClock))
                     (if (str_eq command "qwen-step")
                         (do
+                            (let activeEpoch (now_unix_ms))
                             (let active (nmg-qwen-reasoning session (q4s-pos qslot)))
+                            (let qActiveStateClock
+                                (nmdt-state-active-at qStateClock activeEpoch))
                             (let _active-frame (nmg-glass-write-physical active
                                 (NMGQwen) qhandle "resident-decode-entered"))
-                            (let _active-telemetry (nmdr-publish qslot three active fleet qhandle thandle instance ownerPid (add sequence 1) qAccess tAccess))
+                            (let _active-telemetry (nmdr-publish-state qslot three active fleet
+                                qhandle thandle publisher started incarnation heartbeatId ownerPid
+                                (add sequence 1) activeEpoch tAccess
+                                qActiveStateClock tStateClock))
                             (let next (q4s-evaluate-one qslot (q4s-output qslot)))
                             (let done (nmg-qwen-finished active (q4s-pos next)))
                             (let _done-frame (nmg-glass-write-physical done
                                 (NMGQwen) qhandle "resident-decode-returned"))
                             (let nextFleet (nmrf-touch fleet (NMGQwen)))
+                            (let doneEpoch (now_unix_ms))
+                            (let qDoneStateClock
+                                (nmdt-state-active-at qActiveStateClock doneEpoch))
+                            (let _done-telemetry (nmdr-publish-state next three done nextFleet
+                                qhandle thandle publisher started incarnation heartbeatId ownerPid
+                                (add sequence 2) doneEpoch tAccess
+                                qDoneStateClock tStateClock))
                             (print (list "qwen-step" "input" (q4s-prev1 next)
                                 "output" (q4s-output next) "position" (q4s-pos next)))
-                            (nmdr-loop next three done nextFleet qhandle thandle instance ownerPid (add sequence 2) (now_unix_ms) tAccess))
+                            (nmdr-loop next three done nextFleet qhandle thandle publisher
+                                started incarnation heartbeatId ownerPid (add sequence 2)
+                                doneEpoch tAccess qDoneStateClock tStateClock))
                         (if (str_eq command "3b-step")
                             (do
+                                (let activeEpoch (now_unix_ms))
                                 (let active (nmdr-threeb-reasoning session
                                     (l3rs-position three)))
+                                (let tActiveStateClock
+                                    (nmdt-state-active-at tStateClock activeEpoch))
                                 (let _active-frame (nmg-glass-write-physical active
                                     (NMGThreeB) thandle "resident-decode-entered"))
-                                (let _active-telemetry (nmdr-publish qslot three active fleet qhandle thandle instance ownerPid (add sequence 1) qAccess tAccess))
+                                (let _active-telemetry (nmdr-publish-state qslot three active fleet
+                                    qhandle thandle publisher started incarnation heartbeatId ownerPid
+                                    (add sequence 1) qAccess activeEpoch
+                                    qStateClock tActiveStateClock))
                                 (let next (l3rs-step three))
                                 (let done (nmg-threeb-finished active
                                     (l3rs-position next)))
                                 (let _done-frame (nmg-glass-write-physical done
                                     (NMGThreeB) thandle "resident-decode-returned"))
                                 (let nextFleet (nmrf-touch fleet (NMGThreeB)))
+                                (let doneEpoch (now_unix_ms))
+                                (let tDoneStateClock
+                                    (nmdt-state-active-at tActiveStateClock doneEpoch))
+                                (let _done-telemetry (nmdr-publish-state qslot next done nextFleet
+                                    qhandle thandle publisher started incarnation heartbeatId ownerPid
+                                    (add sequence 2) qAccess doneEpoch
+                                    qStateClock tDoneStateClock))
                                 (print (list "3b-step" "text" (l3rs-pending-text three)
                                     "next" (l3rs-pending next)
                                     "position" (l3rs-position next)))
-                                (nmdr-loop qslot next done nextFleet qhandle thandle instance ownerPid (add sequence 2) qAccess (now_unix_ms)))
+                                (nmdr-loop qslot next done nextFleet qhandle thandle publisher
+                                    started incarnation heartbeatId ownerPid (add sequence 2)
+                                    qAccess doneEpoch qStateClock tDoneStateClock))
                             (do
                                 (print (list "owner-command-ingress"
                                     (nmdoc-command-status polled) command))
-                                (nmdr-loop qslot three session fleet qhandle thandle instance ownerPid (add sequence 1) qAccess tAccess)))))))))))
+                                (nmdr-loop qslot three session fleet qhandle thandle publisher
+                                    started incarnation heartbeatId ownerPid (add sequence 1)
+                                    qAccess tAccess qStateClock tStateClock)))))))))))
 
-    (defn nmdr-after-threeb (qsrc qresult qsession qhandle three thandle instance ownerPid)
+    (defn nmdr-after-threeb (qsrc qresult qsession qhandle qStateClock three thandle started publisher incarnation heartbeatId ownerPid)
         (do
             (let tloaded (nmg-threeb-loaded qsession))
+            (let tLoadedEpoch (now_unix_ms))
             (let _tloaded-frame (nmg-glass-write-physical tloaded
                 (NMGThreeB) thandle "weight-open-returned"))
             (let tprefilling (nmg-threeb-prefilling tloaded 0))
@@ -222,6 +424,9 @@
                 (NMGThreeB) thandle "prefix-evaluate-entered"))
             (let tprefilled (l3rs-prefill three (nmdr-threeb-prompt)))
             (let tdone (nmg-threeb-finished tprefilling (l3rs-position tprefilled)))
+            (let tDoneEpoch (now_unix_ms))
+            (let tStateClock
+                (nmdt-state-clock tLoadedEpoch tDoneEpoch tDoneEpoch))
             (let _tdone-frame (nmg-glass-write-physical tdone
                 (NMGThreeB) thandle "prefill-returned"))
             (let qslot (q4x-result-slot qresult))
@@ -232,6 +437,9 @@
             (let appended (q4s-evaluate qslot incoming))
             (let qnext (q4s-result-slot appended))
             (let qdone (nmg-qwen-finished qactive (q4s-pos qnext)))
+            (let qDoneEpoch (now_unix_ms))
+            (let qCurrentStateClock
+                (nmdt-state-active-at qStateClock qDoneEpoch))
             (let _qdone-frame (nmg-glass-write-physical qdone
                 (NMGQwen) qhandle "retained-prefix-append-returned"))
             (let fleet (nmrf-dual-resident qhandle thandle))
@@ -250,16 +458,23 @@
                 "pressure-evictions" (len (nth noPressure 3))))
             (let qAccess (now_unix_ms))
             (let tAccess (now_unix_ms))
-            (nmdr-loop qnext tprefilled qdone fleet qhandle thandle instance ownerPid 1 qAccess tAccess)))
+            (let _initial-state (nmdr-publish-state qnext tprefilled qdone fleet
+                qhandle thandle publisher started incarnation heartbeatId ownerPid
+                1 qAccess tAccess qCurrentStateClock tStateClock))
+            (nmdr-loop qnext tprefilled qdone fleet qhandle thandle publisher
+                started incarnation heartbeatId ownerPid 1 qAccess tAccess
+                qCurrentStateClock tStateClock)))
 
-    (defn nmdr-open-threeb (qsrc qresult qsession qhandle instance ownerPid)
+    (defn nmdr-open-threeb (qsrc qresult qsession qhandle qStateClock started publisher incarnation heartbeatId ownerPid)
         (do
             (let tloading (nmg-threeb-loading qsession))
             (let _tloading-frame (nmg-glass-write tloading))
             (let three (l3rs-open (nmdr-threeb-path) 128))
             (let thandle (l3rs-residency-handle three))
             (if (eq (l3rs-resident? three) 1)
-                (nmdr-after-threeb qsrc qresult tloading qhandle three thandle instance ownerPid)
+                (nmdr-after-threeb qsrc qresult tloading qhandle qStateClock
+                    three thandle started publisher incarnation heartbeatId
+                    ownerPid)
                 (do
                     (let tclosed (l3rs-close three))
                     (let qclosed (q4x-close qresult))
@@ -267,9 +482,10 @@
                         "threeb-handle" thandle "threeb-close" tclosed
                         "qwen-close" qclosed)))))
 
-    (defn nmdr-after-qwen (src slot loading qhandle instance ownerPid)
+    (defn nmdr-after-qwen (src slot loading qhandle started publisher incarnation heartbeatId ownerPid)
         (do
             (let qloaded (nmg-qwen-loaded loading))
+            (let qLoadedEpoch (now_unix_ms))
             (let _qloaded-frame (nmg-glass-write-physical qloaded
                 (NMGQwen) qhandle "weight-open-returned"))
             (let ids (q4tk-chat-ids src "Return only the word Form."))
@@ -279,20 +495,28 @@
             (let prefill (q4s-evaluate slot ids))
             (let resident (q4s-result-slot prefill))
             (let qreason (nmg-qwen-reasoning qprefilling (q4s-pos resident)))
+            (let qPrefilledEpoch (now_unix_ms))
             (let _qreason-frame (nmg-glass-write-physical qreason
                 (NMGQwen) qhandle "prefill-returned"))
             (let result (q4x-from-prefill src prefill 1 (len ids)))
             (let qdone (nmg-qwen-finished qreason
                 (q4s-pos (q4x-result-slot result))))
+            (let qActiveEpoch (now_unix_ms))
+            (let qStateClock
+                (nmdt-state-clock qLoadedEpoch qPrefilledEpoch qActiveEpoch))
             (let _qdone-frame (nmg-glass-write-physical qdone
                 (NMGQwen) qhandle "generation-returned-retained"))
             (print (list "qwen-seed-answer" (q4x-result-text result)
                 "tokens" (len ids) "position"
                 (q4s-pos (q4x-result-slot result))))
-            (nmdr-open-threeb src result qdone qhandle instance ownerPid)))
+            (nmdr-open-threeb src result qdone qhandle qStateClock started
+                publisher incarnation heartbeatId ownerPid)))
 
     (framebuffer-clear)
     (let instance (now_unix_ms))
+    (let publisher (nmdr-publisher instance))
+    (let incarnation (nmdt-owner-incarnation instance))
+    (let heartbeatId (nmdt-owner-heartbeat-id-from-incarnation incarnation))
     (let ownerPid (nmdr-self-pid))
     (if (le ownerPid 0)
         (list "native-model-dual-resident-refused"
@@ -307,7 +531,8 @@
             (let slot (q4s-open prefix 128))
             (let qhandle (q4s-residency-handle slot))
             (if (eq (q4s-resident? slot) 1)
-                (nmdr-after-qwen src slot loading qhandle instance ownerPid)
+                (nmdr-after-qwen src slot loading qhandle instance publisher
+                    incarnation heartbeatId ownerPid)
                 (do
                     (let closed (q4s-close slot))
                     (list "native-model-dual-resident-refused" "qwen-handle"
