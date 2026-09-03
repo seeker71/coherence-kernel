@@ -1,0 +1,298 @@
+//////////////////////////////////////////////////////////////////////
+//
+// zvec-grep.bml — a Form-native vertical slice of zg workspace search.
+//
+// Upstream inspiration and compatible route vocabulary:
+//   https://github.com/zvec-ai/zvec-grep
+//   observed commit 81a80f478f2d3ec76556cd3c993d0d064cc9580a
+//   Apache-2.0
+//
+// The upstream tool unifies exhaustive grep, BM25, vector recall, and
+// reciprocal-rank fusion. This cell brings that same retrieval shape into
+// Form without loading the Node implementation: source_inventory and the
+// filesystem membrane discover/read the workspace; BM25 is computed here;
+// rag-embed/rag-retrieve supply the local semantic vector; RRF uses upstream's
+// k=60. Results retain path, line, column, bounded evidence, route ranks, and
+// whether lexical, vector, or both paths found them.
+//
+// Honest floor: query-time in-memory indexing, one result per eligible text
+// file, fixed-string case-insensitive rg mode, 64 KiB/file. There is no zvec
+// persistent index, tree-sitter entity extraction, regex engine, watcher, or
+// daemon yet. No host-exec, model download, remote embedding, or network call.
+//
+// preludes: form-stdlib/core.fk form-stdlib/form-fs.fk form-stdlib/rag-embed.fk form-stdlib/rag-retrieve.fk form-stdlib/form-knowledge-source-search.fk
+//
+// Proven by: form-stdlib/tests/zvec-grep-band.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormNativeZvecGrep {
+        field ZgSchema = "form-native-zvec-grep-v1";
+        field ZgUpstream = "https://github.com/zvec-ai/zvec-grep";
+        field ZgUpstreamCommit = "81a80f478f2d3ec76556cd3c993d0d064cc9580a";
+        field ZgLicense = "Apache-2.0";
+
+        field ZgRouteRg = "rg";
+        field ZgRouteFts = "fts";
+        field ZgRouteVector = "vector";
+        field ZgRouteHybrid = "hybrid";
+        field ZgMatchedBoth = "fts+vector";
+
+        field ZgStatusHit = "hit";
+        field ZgStatusMiss = "miss";
+        field ZgStatusNothing = "nothing";
+        field ZgFresh = "fresh";
+
+        field ZgDefaultLimit = 7;
+        field ZgMaxLimit = 50;
+        field ZgMaxQueryBytes = 512;
+        field ZgMaxFileBytes = 65536;
+        field ZgExcerptBefore = 128;
+        field ZgExcerptLimit = 768;
+        field ZgRrfK = 60;
+        field ZgRecallFloor = 50;
+        field ZgRecallCeiling = 200;
+
+        thought zg-pattern = list("local-first", "rg+bm25+vector", "rrf-k60", "source-linked-evidence", "query-time-index-floor");
+
+        def zg-min(a, b) = if lt(a, b) then a else b;
+        def zg-max(a, b) = if gt(a, b) then a else b;
+        def zg-float(n) = str_to_float(int_to_str(n));
+        def zg-half() = str_to_float("0.5");
+        def zg-bm25-k1() = str_to_float("1.2");
+        def zg-bm25-b() = str_to_float("0.75");
+        def zg-reverse-go(xs, out) = if nil?(xs) then out else zg-reverse-go(tail(xs), cons(head(xs), out));
+        def zg-reverse(xs) = zg-reverse-go(xs, list());
+
+        def zg-string-in?(value, rows) = if nil?(rows) then 0 else if str_eq(value, head(rows)) then 1 else zg-string-in?(value, tail(rows));
+        def zg-unique-go(words, seen) = if nil?(words) then zg-reverse(seen) else if eq(zg-string-in?(head(words), seen), 1) then zg-unique-go(tail(words), seen) else zg-unique-go(tail(words), cons(head(words), seen));
+        def zg-unique-words(text) = zg-unique-go(re-words(text), list());
+        def zg-count-word(word, words) = if nil?(words) then 0 else add(if str_eq(word, head(words)) then 1 else 0, zg-count-word(word, tail(words)));
+        def zg-term-frequencies(terms, words) = if nil?(terms) then list() else cons(zg-count-word(head(terms), words), zg-term-frequencies(tail(terms), words));
+        def zg-df-add(dfs, tfs) = if nil?(dfs) then list() else cons(add(head(dfs), if gt(head(tfs), 0) then 1 else 0), zg-df-add(tail(dfs), tail(tfs)));
+        def zg-zeros(n) = if le(n, 0) then list() else cons(0, zg-zeros(sub(n, 1)));
+
+        def zg-skip-dirs() = list(".git", ".zvec-grep", ".coherence-network", ".cache", "node_modules", "target", "dist", "build", "models", ".venv", "__pycache__");
+        def zg-extensions() = list(".fk", ".bml", ".bmf", ".form", ".grammar", ".md", ".txt", ".c", ".h", ".m", ".rs", ".go", ".ts", ".tsx", ".js", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".sh", ".py");
+        def zg-path-eligible?(path) = zg-string-in?(fs-path-extension(path), zg-extensions());
+        def zg-mode-valid?(mode) = if str_eq(mode, ZgRouteRg()) then 1 else if str_eq(mode, ZgRouteFts()) then 1 else if str_eq(mode, ZgRouteVector()) then 1 else if str_eq(mode, ZgRouteHybrid()) then 1 else 0;
+        def zg-needs-fts?(mode) = if str_eq(mode, ZgRouteFts()) then 1 else if str_eq(mode, ZgRouteHybrid()) then 1 else 0;
+        def zg-needs-vector?(mode) = if str_eq(mode, ZgRouteVector()) then 1 else if str_eq(mode, ZgRouteHybrid()) then 1 else 0;
+        def zg-query-valid?(query) = if eq(str_len(query), 0) then 0 else if gt(str_len(query), ZgMaxQueryBytes()) then 0 else 1;
+        def zg-limit(limit) = if le(limit, 0) then ZgDefaultLimit() else zg-min(limit, ZgMaxLimit());
+
+        // document = path, size, word-count, query-term frequencies,
+        // exact-phrase offset, first lexical evidence offset, semantic overlap.
+        def zg-doc(path, size, wordCount, termFreqs, exactOffset, evidenceOffset, vectorScore) = list(path, size, wordCount, termFreqs, exactOffset, evidenceOffset, vectorScore);
+        def zg-doc-path(doc) = nth(doc, 0);
+        def zg-doc-size(doc) = nth(doc, 1);
+        def zg-doc-word-count(doc) = nth(doc, 2);
+        def zg-doc-term-freqs(doc) = nth(doc, 3);
+        def zg-doc-exact-offset(doc) = nth(doc, 4);
+        def zg-doc-evidence-offset(doc) = nth(doc, 5);
+        def zg-doc-vector-score(doc) = nth(doc, 6);
+
+        def zg-first-offset-step(text, terms, best) {
+            let found = fkss-find-ci(text, head(terms));
+            let next = if lt(found, 0) then best else if lt(best, 0) then found else zg-min(best, found);
+            zg-first-offset-go(text, tail(terms), next);
+        }
+        def zg-first-offset-go(text, terms, best) = if nil?(terms) then best else zg-first-offset-step(text, terms, best);
+        def zg-first-offset(text, query, terms) {
+            let exact = fkss-find-ci(text, query);
+            if ge(exact, 0) then exact else zg-first-offset-go(text, terms, -1);
+        }
+
+        // scan = docs, per-query-term document frequencies, total words,
+        // inventory, eligible text files, accessible bounded files, skipped.
+        def zg-scan(docs, dfs, totalWords, inventory, eligible, accessible, skipped) = list(docs, dfs, totalWords, inventory, eligible, accessible, skipped);
+        def zg-scan-docs(scan) = nth(scan, 0);
+        def zg-scan-dfs(scan) = nth(scan, 1);
+        def zg-scan-total-words(scan) = nth(scan, 2);
+        def zg-scan-inventory(scan) = nth(scan, 3);
+        def zg-scan-eligible(scan) = nth(scan, 4);
+        def zg-scan-accessible(scan) = nth(scan, 5);
+        def zg-scan-skipped(scan) = nth(scan, 6);
+
+        def zg-scan-readable(root, route, restRows, relative, full, size, query, terms, queryVec, docs, dfs, totalWords, inventory, eligible, accessible, skipped) {
+            let text = fs-read-text(full);
+            let words = if eq(zg-needs-fts?(route), 1) then re-words(text) else list();
+            let tfs = if eq(zg-needs-fts?(route), 1) then zg-term-frequencies(terms, words) else zg-zeros(len(terms));
+            let exact = fkss-find-ci(text, query);
+            let evidence = zg-first-offset(text, query, terms);
+            let vectorScore = if eq(zg-needs-vector?(route), 1) then rag-overlap-score(queryVec, rag-entry(relative, re-semantic-vec(text))) else 0;
+            let doc = zg-doc(relative, size, len(words), tfs, exact, evidence, vectorScore);
+            zg-scan-rows(root, route, restRows, query, terms, queryVec, cons(doc, docs), zg-df-add(dfs, tfs), add(totalWords, len(words)), add(inventory, 1), add(eligible, 1), add(accessible, 1), skipped);
+        }
+        def zg-scan-eligible-row(root, route, restRows, relative, full, query, terms, queryVec, docs, dfs, totalWords, inventory, eligible, accessible, skipped) {
+            let size = fs-stat-size(full);
+            let bounded = if and(ge(size, 0), le(size, ZgMaxFileBytes())) then 1 else 0;
+            if eq(bounded, 0) then zg-scan-rows(root, route, restRows, query, terms, queryVec, docs, dfs, totalWords, add(inventory, 1), add(eligible, 1), accessible, add(skipped, 1)) else zg-scan-readable(root, route, restRows, relative, full, size, query, terms, queryVec, docs, dfs, totalWords, inventory, eligible, accessible, skipped);
+        }
+        def zg-scan-row(root, route, rows, query, terms, queryVec, docs, dfs, totalWords, inventory, eligible, accessible, skipped) {
+            let relative = nth(head(rows), 0);
+            let full = fs-path-join(root, relative);
+            if eq(zg-path-eligible?(relative), 0) then zg-scan-rows(root, route, tail(rows), query, terms, queryVec, docs, dfs, totalWords, add(inventory, 1), eligible, accessible, skipped) else zg-scan-eligible-row(root, route, tail(rows), relative, full, query, terms, queryVec, docs, dfs, totalWords, inventory, eligible, accessible, skipped);
+        }
+        def zg-scan-rows(root, route, rows, query, terms, queryVec, docs, dfs, totalWords, inventory, eligible, accessible, skipped) = if nil?(rows) then zg-scan(zg-reverse(docs), dfs, totalWords, inventory, eligible, accessible, skipped) else zg-scan-row(root, route, rows, query, terms, queryVec, docs, dfs, totalWords, inventory, eligible, accessible, skipped);
+
+        def zg-scan-at(root, route, query, terms) {
+            let queryVec = if eq(zg-needs-vector?(route), 1) then re-semantic-vec(query) else list();
+            let rows = source_inventory(root, "", zg-skip-dirs());
+            zg-scan-rows(root, route, rows, query, terms, queryVec, list(), zg-zeros(len(terms)), 0, 0, 0, 0, 0);
+        }
+
+        def zg-bm25-idf(docCount, df) = math_log(add(zg-float(1), div(add(sub(zg-float(docCount), zg-float(df)), zg-half()), add(zg-float(df), zg-half()))));
+        def zg-bm25-positive(tf, df, docCount, docLength, averageLength) {
+            let k1 = zg-bm25-k1();
+            let b = zg-bm25-b();
+            let tfFloat = zg-float(tf);
+            let lengthNorm = add(sub(zg-float(1), b), mul(b, div(zg-float(docLength), averageLength)));
+            let numerator = mul(tfFloat, add(k1, zg-float(1)));
+            let denominator = add(tfFloat, mul(k1, lengthNorm));
+            mul(zg-bm25-idf(docCount, df), div(numerator, denominator));
+        }
+        def zg-bm25-term(tf, df, docCount, docLength, averageLength) = if le(tf, 0) then zg-float(0) else zg-bm25-positive(tf, df, docCount, docLength, averageLength);
+        def zg-bm25-sum(tfs, dfs, docCount, docLength, averageLength, score) = if nil?(tfs) then score else zg-bm25-sum(tail(tfs), tail(dfs), docCount, docLength, averageLength, add(score, zg-bm25-term(head(tfs), head(dfs), docCount, docLength, averageLength)));
+        def zg-bm25-ready(doc, scan, docCount) {
+            let averageLength = div(zg-float(zg-scan-total-words(scan)), zg-float(docCount));
+            zg-bm25-sum(zg-doc-term-freqs(doc), zg-scan-dfs(scan), docCount, zg-doc-word-count(doc), averageLength, zg-float(0));
+        }
+        def zg-bm25(doc, scan) {
+            let docCount = len(zg-scan-docs(scan));
+            if le(docCount, 0) then zg-float(0) else zg-bm25-ready(doc, scan, docCount);
+        }
+
+        // candidate = document, score, matched-by, fts-rank, vector-rank.
+        def zg-candidate(doc, score, matchedBy, ftsRank, vectorRank) = list(doc, score, matchedBy, ftsRank, vectorRank);
+        def zg-candidate-doc(candidate) = nth(candidate, 0);
+        def zg-candidate-score(candidate) = nth(candidate, 1);
+        def zg-candidate-matched-by(candidate) = nth(candidate, 2);
+        def zg-candidate-fts-rank(candidate) = nth(candidate, 3);
+        def zg-candidate-vector-rank(candidate) = nth(candidate, 4);
+        def zg-candidate-path(candidate) = zg-doc-path(zg-candidate-doc(candidate));
+
+        def zg-route-score(doc, route, scan) = if str_eq(route, ZgRouteRg()) then if ge(zg-doc-exact-offset(doc), 0) then zg-float(1) else zg-float(0) else if str_eq(route, ZgRouteFts()) then zg-bm25(doc, scan) else if str_eq(route, ZgRouteVector()) then zg-float(zg-doc-vector-score(doc)) else zg-float(0);
+        def zg-candidates-row(rows, route, scan) {
+            let score = zg-route-score(head(rows), route, scan);
+            let rest = zg-candidates(tail(rows), route, scan);
+            if gt(score, zg-float(0)) then cons(zg-candidate(head(rows), score, route, 0, 0), rest) else rest;
+        }
+        def zg-candidates(rows, route, scan) = if nil?(rows) then list() else zg-candidates-row(rows, route, scan);
+        def zg-candidate-better?(candidate, best) = if gt(zg-candidate-score(candidate), zg-candidate-score(best)) then 1 else if lt(zg-candidate-score(candidate), zg-candidate-score(best)) then 0 else fkss-str-less?(zg-candidate-path(candidate), zg-candidate-path(best));
+        def zg-best-candidate(rows, best) = if nil?(rows) then best else if eq(len(best), 0) then zg-best-candidate(tail(rows), head(rows)) else if eq(zg-candidate-better?(head(rows), best), 1) then zg-best-candidate(tail(rows), head(rows)) else zg-best-candidate(tail(rows), best);
+        def zg-remove-candidate(path, rows) = if nil?(rows) then list() else if str_eq(path, zg-candidate-path(head(rows))) then tail(rows) else cons(head(rows), zg-remove-candidate(path, tail(rows)));
+        def zg-top-step(rows, limit, out) {
+            let best = zg-best-candidate(rows, list());
+            zg-top-go(zg-remove-candidate(zg-candidate-path(best), rows), sub(limit, 1), cons(best, out));
+        }
+        def zg-top-go(rows, limit, out) = if or(le(limit, 0), nil?(rows)) then zg-reverse(out) else zg-top-step(rows, limit, out);
+        def zg-top(rows, limit) = zg-top-go(rows, limit, list());
+
+        def zg-rank-of(path, rows, rank) = if nil?(rows) then 0 else if str_eq(path, zg-candidate-path(head(rows))) then rank else zg-rank-of(path, tail(rows), add(rank, 1));
+        def zg-doc-in?(path, docs) = if nil?(docs) then 0 else if str_eq(path, zg-doc-path(head(docs))) then 1 else zg-doc-in?(path, tail(docs));
+        def zg-union-docs(rows, docs) = if nil?(rows) then docs else if eq(zg-doc-in?(zg-candidate-path(head(rows)), docs), 1) then zg-union-docs(tail(rows), docs) else zg-union-docs(tail(rows), cons(zg-candidate-doc(head(rows)), docs));
+        def zg-rrf-part(rank) = if le(rank, 0) then zg-float(0) else div(zg-float(1000000), zg-float(add(ZgRrfK(), rank)));
+        def zg-hybrid-candidate-row(docs, ftsRows, vectorRows) {
+            let path = zg-doc-path(head(docs));
+            let ftsRank = zg-rank-of(path, ftsRows, 1);
+            let vectorRank = zg-rank-of(path, vectorRows, 1);
+            let score = add(zg-rrf-part(ftsRank), zg-rrf-part(vectorRank));
+            let matched = if and(gt(ftsRank, 0), gt(vectorRank, 0)) then ZgMatchedBoth() else if gt(ftsRank, 0) then ZgRouteFts() else ZgRouteVector();
+            cons(zg-candidate(head(docs), score, matched, ftsRank, vectorRank), zg-hybrid-candidates(tail(docs), ftsRows, vectorRows));
+        }
+        def zg-hybrid-candidates(docs, ftsRows, vectorRows) = if nil?(docs) then list() else zg-hybrid-candidate-row(docs, ftsRows, vectorRows);
+        def zg-recall-depth(limit) = zg-min(ZgRecallCeiling(), zg-max(ZgRecallFloor(), mul(limit, 5)));
+        def zg-ranked-hybrid(scan, limit) {
+            let docs = zg-scan-docs(scan);
+            let depth = zg-recall-depth(limit);
+            let ftsRows = zg-top(zg-candidates(docs, ZgRouteFts(), scan), depth);
+            let vectorRows = zg-top(zg-candidates(docs, ZgRouteVector(), scan), depth);
+            let union = zg-union-docs(vectorRows, zg-union-docs(ftsRows, list()));
+            zg-top(zg-hybrid-candidates(union, ftsRows, vectorRows), limit);
+        }
+        def zg-ranked(scan, route, limit) = if not(str_eq(route, ZgRouteHybrid())) then zg-top(zg-candidates(zg-scan-docs(scan), route, scan), limit) else zg-ranked-hybrid(scan, limit);
+
+        def zg-line-column-go(prefix, i, line, column) = if ge(i, str_len(prefix)) then list(line, column) else if eq(str_byte_at(prefix, i), 10) then zg-line-column-go(prefix, add(i, 1), add(line, 1), 1) else zg-line-column-go(prefix, add(i, 1), line, add(column, 1));
+        def zg-line-column(fullPath, offset) = if lt(offset, 0) then list(1, 1) else zg-line-column-go(fs-read-slice(fullPath, 0, offset), 0, 1, 1);
+        def zg-evidence-start(offset) = if lt(offset, 0) then 0 else zg-max(0, sub(offset, ZgExcerptBefore()));
+        def zg-hit(path, line, column, excerpt, score, matchedBy, rank, ftsRank, vectorRank, offset) = list(path, line, column, excerpt, score, matchedBy, rank, ftsRank, vectorRank, ZgFresh(), offset);
+        def zg-hit-path(hit) = nth(hit, 0);
+        def zg-hit-line(hit) = nth(hit, 1);
+        def zg-hit-column(hit) = nth(hit, 2);
+        def zg-hit-excerpt(hit) = nth(hit, 3);
+        def zg-hit-score(hit) = nth(hit, 4);
+        def zg-hit-matched-by(hit) = nth(hit, 5);
+        def zg-hit-rank(hit) = nth(hit, 6);
+        def zg-hit-fts-rank(hit) = nth(hit, 7);
+        def zg-hit-vector-rank(hit) = nth(hit, 8);
+        def zg-hit-status(hit) = nth(hit, 9);
+        def zg-hit-offset(hit) = nth(hit, 10);
+
+        def zg-materialize-hit(root, route, candidate, rank) {
+            let doc = zg-candidate-doc(candidate);
+            let relative = zg-doc-path(doc);
+            let full = fs-path-join(root, relative);
+            let offset = if str_eq(route, ZgRouteRg()) then zg-doc-exact-offset(doc) else zg-doc-evidence-offset(doc);
+            let lc = zg-line-column(full, offset);
+            let start = zg-evidence-start(offset);
+            let excerpt = fs-read-slice(full, start, zg-min(ZgExcerptLimit(), sub(zg-doc-size(doc), start)));
+            let ftsRank = if str_eq(route, ZgRouteFts()) then rank else zg-candidate-fts-rank(candidate);
+            let vectorRank = if str_eq(route, ZgRouteVector()) then rank else zg-candidate-vector-rank(candidate);
+            zg-hit(relative, nth(lc, 0), nth(lc, 1), excerpt, round_ndigits(zg-candidate-score(candidate), 8), zg-candidate-matched-by(candidate), rank, ftsRank, vectorRank, offset);
+        }
+        def zg-materialize(root, route, candidates, rank) = if nil?(candidates) then list() else cons(zg-materialize-hit(root, route, head(candidates), rank), zg-materialize(root, route, tail(candidates), add(rank, 1)));
+
+        // result = schema, status, reason, route, root, query, hits,
+        // inventory, eligible, accessible, skipped, local-model-runs, network.
+        def zg-result(status, reason, route, root, query, hits, inventory, eligible, accessible, skipped) = list(ZgSchema(), status, reason, route, root, query, hits, inventory, eligible, accessible, skipped, 0, 0);
+        def zg-result-schema(result) = nth(result, 0);
+        def zg-status(result) = nth(result, 1);
+        def zg-reason(result) = nth(result, 2);
+        def zg-route(result) = nth(result, 3);
+        def zg-root(result) = nth(result, 4);
+        def zg-query(result) = nth(result, 5);
+        def zg-hits(result) = nth(result, 6);
+        def zg-inventory-count(result) = nth(result, 7);
+        def zg-eligible-count(result) = nth(result, 8);
+        def zg-accessible-count(result) = nth(result, 9);
+        def zg-skipped-count(result) = nth(result, 10);
+        def zg-local-model-runs(result) = nth(result, 11);
+        def zg-network-crossings(result) = nth(result, 12);
+
+        def zg-query-scanned(root, route, query, limit, terms) {
+            let scan = zg-scan-at(root, route, query, terms);
+            let ranked = zg-ranked(scan, route, limit);
+            let hits = zg-materialize(root, route, ranked, 1);
+            let status = if nil?(hits) then ZgStatusMiss() else ZgStatusHit();
+            let reason = if nil?(hits) then "no-current-workspace-match" else "current-workspace-match";
+            zg-result(status, reason, route, root, query, hits, zg-scan-inventory(scan), zg-scan-eligible(scan), zg-scan-accessible(scan), zg-scan-skipped(scan));
+        }
+        def zg-query-ready(root, route, query, limit) {
+            let terms = zg-unique-words(query);
+            if and(not(str_eq(route, ZgRouteRg())), eq(len(terms), 0)) then zg-result(ZgStatusNothing(), "query-has-no-search-terms", route, root, query, list(), 0, 0, 0, 0) else zg-query-scanned(root, route, query, limit, terms);
+        }
+        def zg-query-at(root, route, query, requestedLimit) {
+            let limit = zg-limit(requestedLimit);
+            if eq(zg-mode-valid?(route), 0) then zg-result(ZgStatusNothing(), "invalid-route", route, root, query, list(), 0, 0, 0, 0) else if eq(zg-query-valid?(query), 0) then zg-result(ZgStatusNothing(), "invalid-query", route, root, query, list(), 0, 0, 0, 0) else if eq(fs-is-dir?(root), 0) then zg-result(ZgStatusNothing(), "invalid-root", route, root, query, list(), 0, 0, 0, 0) else zg-query-ready(root, route, query, limit);
+        }
+
+        def zg-render-hit(hit) {
+            let location = str_concat(zg-hit-path(hit), str_concat(":", str_concat(int_to_str(zg-hit-line(hit)), str_concat(":", int_to_str(zg-hit-column(hit))))));
+            let label = str_concat(" [", str_concat(zg-hit-matched-by(hit), str_concat(" rank=", str_concat(int_to_str(zg-hit-rank(hit)), "]\n"))));
+            str_concat(location, str_concat(label, str_concat(zg-hit-excerpt(hit), "\n")));
+        }
+        def zg-render-hits(hits) = if nil?(hits) then "" else str_concat(zg-render-hit(head(hits)), zg-render-hits(tail(hits)));
+        def zg-render(result) {
+            let head0 = str_concat("zg-native status=", str_concat(zg-status(result), str_concat(" route=", zg-route(result))));
+            let head1 = str_concat(head0, str_concat(" hits=", int_to_str(len(zg-hits(result)))));
+            let head2 = str_concat(head1, str_concat(" inventory=", int_to_str(zg-inventory-count(result))));
+            let head3 = str_concat(head2, str_concat(" eligible=", int_to_str(zg-eligible-count(result))));
+            let head4 = str_concat(head3, str_concat(" accessible=", int_to_str(zg-accessible-count(result))));
+            let head5 = str_concat(head4, str_concat(" skipped=", int_to_str(zg-skipped-count(result))));
+            str_concat(head5, str_concat("\n", zg-render-hits(zg-hits(result))));
+        }
+    }
+    0;
+}
