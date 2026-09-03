@@ -91,11 +91,16 @@ regardless). The distances that remain are named, not numbered:
    promoting it into the plain door is the stone.
 2. **Decode parity**: the width-independent cooperative RMS (simd tree, no
    `sq[n]`) is the named kernel; the small GDN kernels follow.
-3. **Residency visibility**: cold admission is paid once per residence, and it
-   is invisible to a client while the terminal pipe stays open; the repair is a
-   caller-controlled, Form-visible readiness/sync deadline with typed admission
-   and command-buffer status frames — completed, error, timeout, release kept
-   distinct (`release-ledger.bml` R16).
+3. **Residency visibility**: cold admission is paid once per residence. Since
+   2026-09-03 the deadline is the caller's: the resident hands
+   `hearth-metal-deadline-ms` (one Form row, `hearth.bml`) to the carrier
+   through `metal_deadline` before admission and prints
+   `admission-deadline-ms`; every command-buffer wait blocks on the kernel (no
+   poll, no backoff) and ends in a typed frame `metal_status` speaks —
+   `wait_frame=completed|error|timeout|released` — with a timed-out buffer
+   shelved and released by the next wait, never lost
+   (`form/form-stdlib/tests/metal-deadline-band.fk` 127 on the real GPU). What
+   remains is the client-side reading of that frame across the pipe.
 4. **The emitted walker's zero-token seam**: form-cli's REPL lane arms no
    glossary and can return zero generated tokens on a composed prompt; the
    T_flat frame-slot convention is the named repair behind it.
@@ -150,7 +155,6 @@ What answered red or nothing on 2026-09-03, so no one leans on it:
 - The JIT ladder (`docs/form-native-jit-track.form`): of the bands it names, 45
   are absent from the tree and most of the rest answer nothing; nine answer
   green (listed there).
-
 ## Honest seams carried forward
 
 - The C seed is 15,365 lines; the shrink direction stands and this number is on

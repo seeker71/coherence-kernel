@@ -155,6 +155,8 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <objc/runtime.h>
+#include <dispatch/dispatch.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -419,35 +421,117 @@ long long fk_metal_sync_external(void);
 
 static void fk_err(NSString *s) { fk_last_err = s; }
 
-// A committed buffer's completion is observed, not presumed. waitUntilCompleted
-// carries no deadline, and a buffer lost to a residency collision (witnessed
-// 2026-08-25: two residents of one 27 GB artifact on this host — the second
-// walker hung 17+ min on an idle GPU) holds the walker forever. This door polls
-// status with adaptive backoff and, after a patience far above any witnessed
-// legitimate wait (residency-cold open ~16 s), reports the buffer's status as a
-// typed error instead of waiting eternally. Completion still means completion;
-// nothing is fabricated on the timeout path — the caller sees a red line.
-// Patience: the longest witnessed legitimate wait on this host is a model open
-// at 41-56 s (sibling measurement, 2026-08-25), and identical runs vary ~20%;
-// 300 s stands a factor of ~4 above that spread so a healthy triple-contended
-// open cannot fire it, while a lost buffer answers in five minutes, not never.
-static int fk_wait_observed(id<MTLCommandBuffer> cb) {
-    const double patience_s = 300.0;
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:patience_s];
-    double backoff = 0.00005;   // 50 us, doubling to a 4 ms ceiling
-    for (;;) {
-        MTLCommandBufferStatus st = [cb status];
-        if (st == MTLCommandBufferStatusCompleted ||
-            st == MTLCommandBufferStatusError) { return 0; }
-        if ([deadline timeIntervalSinceNow] < 0.0) {
-            fk_err([NSString stringWithFormat:
-                @"sync: command buffer status=%lu after %.0f s — abandoned, not awaited",
-                (unsigned long)st, patience_s]);
-            return -1;
-        }
-        [NSThread sleepForTimeInterval:backoff];
-        if (backoff < 0.004) { backoff *= 2.0; }
+// ── the caller's patience ──────────────────────────────────────────────────
+// A committed buffer's completion is observed, not presumed, and the wait is the
+// kernel's own: at commit every buffer is armed with a completed handler that
+// signals a semaphore the buffer carries, and a wait blocks on that semaphore —
+// no status poll, no backoff, no sleep. The deadline is the CALLER's: Form hands
+// it in as data through metal_deadline (ms), and the one place the default
+// number lives is a Form row — form-stdlib/hearth.bml, hearth-metal-deadline-ms —
+// where the argument for that number lives beside it. Nothing here argues a
+// number. -1 means no caller handed one, and the wait is then unbounded exactly
+// as the hearth's bell is (spool-bell-transport: block on the kernel's read,
+// never sleep in a poll). What a deadline abandons is SHELVED, not lost: the
+// buffer stays owed to the device, the next wait settles it first, and says so.
+// Every wait ends in ONE typed frame, readable as data through metal_status:
+//   completed  the buffer finished within the deadline
+//   error      the buffer finished and Metal reported an error (last_error says)
+//   timeout    the deadline passed with the buffer still on the device; shelved
+//   released   this wait also settled work an earlier deadline had abandoned
+// Witnessed 2026-08-25: two residents of one 27 GB artifact on this host — the
+// second walker hung 17+ min on an idle GPU. A fixed five-minute watchdog with a
+// 50 us -> 4 ms backoff poll answered that; the fixed number and the poll were
+// the workaround this replaces (Urs, 2026-09-03: remove limits and workarounds).
+enum { FK_WAIT_NONE = 0, FK_WAIT_COMPLETED = 1, FK_WAIT_ERROR = 2,
+       FK_WAIT_TIMEOUT = 3, FK_WAIT_RELEASED = 4 };
+static long long fk_deadline_ms = -1;      // handed by the caller; -1 = kernel's own wait
+static int fk_wait_frame = FK_WAIT_NONE;   // the last wait's typed frame
+static double fk_wait_last_s = 0.0;        // host seconds the last wait took
+static NSMutableArray *fk_shelf = nil;     // buffers a deadline abandoned, still owed
+static NSString *fk_timeout_line = nil;    // the red line a timeout wrote; cleared on release
+static const void *fk_sem_key = &fk_sem_key;
+
+static const char *fk_wait_frame_name(void) {
+    switch (fk_wait_frame) {
+        case FK_WAIT_COMPLETED: return "completed";
+        case FK_WAIT_ERROR:     return "error";
+        case FK_WAIT_TIMEOUT:   return "timeout";
+        case FK_WAIT_RELEASED:  return "released";
+        default:                return "none";
     }
+}
+
+// Arm BEFORE commit. The handler runs on Metal's completion thread and only
+// signals; the waiter reads the buffer's own status afterwards. A timed-out wait
+// leaves the signal unconsumed, so a later wait on the same buffer still wakes.
+static void fk_arm(id<MTLCommandBuffer> cb) {
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    objc_setAssociatedObject(cb, fk_sem_key, sem, OBJC_ASSOCIATION_RETAIN);
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+        (void)done;
+        dispatch_semaphore_signal(sem);
+    }];
+}
+
+// 0 when the buffer settled (completed, or error — the caller reads [cb error]);
+// -1 when the caller's deadline passed first. Sets the frame and the measured wait.
+static int fk_wait_observed(id<MTLCommandBuffer> cb) {
+    NSDate *t0 = [NSDate date];
+    MTLCommandBufferStatus st = [cb status];
+    if (st != MTLCommandBufferStatusCompleted && st != MTLCommandBufferStatusError) {
+        dispatch_semaphore_t sem = objc_getAssociatedObject(cb, fk_sem_key);
+        if (sem == nil) {
+            [cb waitUntilCompleted];   // an unarmed buffer: the kernel's own wait
+        } else {
+            dispatch_time_t until = fk_deadline_ms < 0 ? DISPATCH_TIME_FOREVER
+                : dispatch_time(DISPATCH_TIME_NOW, fk_deadline_ms * (long long)NSEC_PER_MSEC);
+            (void)dispatch_semaphore_wait(sem, until);
+        }
+        st = [cb status];
+    }
+    fk_wait_last_s = -[t0 timeIntervalSinceNow];
+    if (st == MTLCommandBufferStatusCompleted) { fk_wait_frame = FK_WAIT_COMPLETED; return 0; }
+    if (st == MTLCommandBufferStatusError) { fk_wait_frame = FK_WAIT_ERROR; return 0; }
+    fk_wait_frame = FK_WAIT_TIMEOUT;
+    fk_timeout_line = [NSString stringWithFormat:
+        @"sync: command buffer status=%lu after the caller's %lld ms — timeout, shelved, still owed",
+        (unsigned long)st, fk_deadline_ms];
+    fk_err(fk_timeout_line);
+    return -1;
+}
+
+static void fk_shelve(id<MTLCommandBuffer> cb) {
+    if (fk_shelf == nil) { fk_shelf = [NSMutableArray array]; }
+    [fk_shelf addObject:cb];
+}
+
+// Settle what earlier deadlines abandoned, oldest first, within the caller's
+// current deadline. Answers how many were released, or -1 while one is still
+// owed (frame = timeout; it and everything behind it stay shelved).
+static long long fk_shelf_settle(void) {
+    long long released = 0;
+    while (fk_shelf != nil && [fk_shelf count] > 0) {
+        id<MTLCommandBuffer> cb = fk_shelf[0];
+        if (fk_wait_observed(cb) < 0) { return -1; }
+        fk_total_gpu_busy_s += ([cb GPUEndTime] - [cb GPUStartTime]);
+        if ([cb error] != nil) {
+            fk_err([NSString stringWithFormat:@"dispatch (released from shelf): %@",
+                    [[cb error] localizedDescription]]);
+        }
+        [fk_shelf removeObjectAtIndex:0];
+        released++;
+    }
+    // Nothing is owed any more: the red line a timeout wrote no longer stands.
+    if (fk_last_err != nil && fk_last_err == fk_timeout_line) { fk_last_err = nil; }
+    return released;
+}
+
+// The door the caller hands its patience through. Answers the deadline that
+// stood before, so the hand-over reads back as data (-1: none stood).
+long long fk_metal_deadline_external(long long ms) {
+    long long before = fk_deadline_ms;
+    fk_deadline_ms = ms < 0 ? -1 : ms;
+    return before;
 }
 
 static unsigned int fk_le32(const unsigned char *p) {
@@ -883,6 +967,10 @@ long long fk_metal_sync_external(void) {
     @autoreleasepool {
         long long n = 0;
         int had_work = 0;
+        // What an earlier deadline abandoned is settled first: sync remains the
+        // one word that means "the GPU holds nothing of ours".
+        long long released = fk_shelf_settle();
+        if (released < 0) { return -1; }
         // Everything in flight drains first — a fence the caller stopped tracking
         // still completes here, so sync remains the one word that means "the GPU
         // holds nothing of ours".
@@ -908,10 +996,14 @@ long long fk_metal_sync_external(void) {
         if (fk_cb != nil) {
             n += fk_pending;
             [fk_enc endEncoding];
+            fk_arm(fk_cb);
             [fk_cb commit];
             if (fk_wait_observed(fk_cb) < 0) {
-                // The batch is abandoned, not awaited: clear the walker's side
-                // so the next admission starts clean, and answer the red line.
+                // The batch is shelved, not awaited: it stays owed to the device
+                // and the next wait settles it first; the walker's side is
+                // cleared so the next admission starts clean, and the red line
+                // is answered with its typed frame (timeout).
+                fk_shelve(fk_cb);
                 fk_enc = nil;
                 fk_cb = nil;
                 fk_pending = 0;
@@ -935,6 +1027,7 @@ long long fk_metal_sync_external(void) {
             had_work = 1;
         }
         if (had_work) { fk_total_sync++; }
+        if (released > 0 && fk_wait_frame == FK_WAIT_COMPLETED) { fk_wait_frame = FK_WAIT_RELEASED; }
         return n;
     }
 }
@@ -1023,8 +1116,9 @@ long long fk_metal_submit_external(void) {
             // An empty batch earns no fence — a caller waiting on it would learn
             // nothing, and a fence id for nothing is a number wearing a meaning.
             [fk_enc endEncoding];
+            fk_arm(fk_cb);
             [fk_cb commit];
-            (void)fk_wait_observed(fk_cb);
+            if (fk_wait_observed(fk_cb) < 0) { fk_shelve(fk_cb); }
             fk_enc = nil;
             fk_cb = nil;
             fk_batch_concurrent = 0;
@@ -1036,6 +1130,7 @@ long long fk_metal_submit_external(void) {
             fk_inflight_n = [NSMutableDictionary dictionary];
         }
         [fk_enc endEncoding];
+        fk_arm(fk_cb);
         [fk_cb commit];   // committed, NOT waited — that is the whole point
         long long fence = fk_fence_next;
         fk_fence_next++;
@@ -1060,7 +1155,11 @@ long long fk_metal_fence_wait_external(long long fence) {
         }
         id<MTLCommandBuffer> cb = fk_inflight[@(fence)];
         long long n = [fk_inflight_n[@(fence)] longLongValue];
+        long long released = fk_shelf_settle();
+        if (released < 0) { return -1; }
         if (fk_wait_observed(cb) < 0) {
+            // Shelved, not dropped: the fence is spent, the buffer is still owed.
+            fk_shelve(cb);
             [fk_inflight removeObjectForKey:@(fence)];
             [fk_inflight_n removeObjectForKey:@(fence)];
             return -1;
@@ -1072,6 +1171,7 @@ long long fk_metal_fence_wait_external(long long fence) {
             return -1;
         }
         fk_total_sync++;
+        if (released > 0 && fk_wait_frame == FK_WAIT_COMPLETED) { fk_wait_frame = FK_WAIT_RELEASED; }
         return n;   // how many dispatches this fence held — proof they were outstanding
     }
 }
@@ -1109,6 +1209,11 @@ long long fk_metal_status_external(char *out, long long cap) {
         // measurement of waitUntilCompleted itself — see the field's own comment
         // at fk_total_gpu_busy_s for what it does and does not mean.
         [r appendFormat:@"gpu_busy_us_total=%lld\n", (long long)(fk_total_gpu_busy_s * 1000000.0)];
+        // The last wait's typed frame, the host ms it took, the deadline in force
+        // (-1: none handed, the kernel's own wait), and what a deadline shelved.
+        [r appendFormat:@"wait_frame=%s\nwait_ms=%lld\nwait_deadline_ms=%lld\nshelf=%lu\n",
+            fk_wait_frame_name(), (long long)(fk_wait_last_s * 1000.0), fk_deadline_ms,
+            (unsigned long)(fk_shelf == nil ? 0 : [fk_shelf count])];
         [r appendFormat:@"last_error=%@\n", fk_last_err == nil ? @"none" : fk_last_err];
         return fk_emit(out, cap, r);
     }

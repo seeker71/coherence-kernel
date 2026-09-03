@@ -105,6 +105,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "metal_buf_free", 1, 254 },
   { "metal_submit", 0, 255 },
   { "metal_fence_wait", 1, 142 },
+  { "metal_deadline", 1, 148 },
   { "mlx_status", 0, 143 },
   { "mlx_add", 2, 144 },
   { "mlx_run", 1, 145 },
