@@ -65,7 +65,7 @@
 ;      form-stdlib/q6k-msl.fk / q4k-msl.fk / llama-decode-msl.fk (every kernel but the copy),
 ;      native/metal/metal_first_token.sh (the attestant this cell must agree with).
 ;
-; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/gguf-meta.fk form-stdlib/trig.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matvec-slot.fk form-stdlib/qk-matmul-batch.fk native/metal/whole-tensor-residency.fk form-stdlib/gguf-tensor-index.fk form-stdlib/metal-door.fk
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/gguf-meta.fk form-stdlib/trig.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matvec-slot.fk form-stdlib/qk-matmul-batch.fk native/metal/whole-tensor-residency.fk form-stdlib/gguf-tensor-index.fk form-stdlib/metal-door.fk form-stdlib/native-model-tensor-ledger.bml
 ;
 ; Proven by: form/native/metal/tests/llama-token-handle-band.fk
 
@@ -94,7 +94,7 @@
     ; ================= the file's own numbers =================
     (defn lth-src (path) (eqr-of-file path 0 (wtr-header-window)))
 
-    ; A tensor VIEW: (handle, rows, cols, ggml-type). rows is dim1 and cols is dim0, because GGUF's
+    ; A tensor VIEW: (handle, rows, cols, ggml-type, exact mapped bytes). rows is dim1 and cols is dim0, because GGUF's
     ; dim0 is the fastest-varying axis — the matrix is dim1 rows of dim0 columns.
     (defn lth-tv (src base path name)
         (do (let off (egg-find-tensor src name))
@@ -103,12 +103,14 @@
                       (wtr-bytes src off))
                   (wtr-dim1 src off)
                   (egg-ti-dim0 src off)
-                  (egg-ti-type src off))))
+                  (egg-ti-type src off)
+                  (wtr-bytes src off))))
 
     (defn lth-tv-h  (t) (nth t 0))
     (defn lth-tv-r  (t) (nth t 1))
     (defn lth-tv-c  (t) (nth t 2))
     (defn lth-tv-ty (t) (nth t 3))
+    (defn lth-tv-bytes (t) (nth t 4))
 
     (defn lth-blk (l suffix) (str_concat "blk." (str_concat (int_to_str l) (str_concat "." suffix))))
 
@@ -120,7 +122,8 @@
                   (wtr-bytes src off))
               (wtr-dim1 src off)
               (egg-ti-dim0 src off)
-              (egg-ti-type src off)))
+              (egg-ti-type src off)
+              (wtr-bytes src off)))
 
     ; The nine tensors one llama block reaches: the two norms and the seven projections.
     ;
@@ -184,29 +187,33 @@
     ; ALLOCATED ONCE, before any token, and never reallocated — the pool the seam measurement said
     ; a decode loop must have. bScratch is 2*nHead*maxpos: the attention kernel keeps scores at
     ; h*sstride and their exponentials at (nq+h)*sstride, with sstride = maxpos.
+    (defn lth-alloc-sizes (sizes)
+        (if (eq (len sizes) 0) (list)
+            (cons (metal_buf_alloc (head sizes))
+                  (lth-alloc-sizes (tail sizes)))))
     (defn lth-bufs (dModel dFF vocabN nHead maxpos)
-        (list (metal_buf_alloc (mul dModel 4))
-              (metal_buf_alloc (mul dModel 4))
-              (metal_buf_alloc (mul dModel 4))
-              (metal_buf_alloc (mul dModel 4))
-              (metal_buf_alloc (mul dModel 4))
-              (metal_buf_alloc (mul dModel 4))
-              (metal_buf_alloc (mul dModel 4))
-              (metal_buf_alloc (mul dModel 4))
-              (metal_buf_alloc (mul dFF 4))
-              (metal_buf_alloc (mul dFF 4))
-              (metal_buf_alloc (mul dFF 4))
-              (metal_buf_alloc (mul vocabN 4))
-              (metal_buf_alloc (mul (mul (mul 2 nHead) maxpos) 4))
-              (metal_buf_alloc 16)
-              (metal_buf_alloc 16)
-              (metal_buf_alloc 4096)
-              (metal_buf_alloc 4096)))
+        (lth-alloc-sizes
+            (nmtl-llama-scratch-sizes dModel dFF vocabN nHead maxpos)))
 
     ; One K and one V buffer PER LAYER. Per-layer rather than one big cache because the door binds
     ; at a handle's own offset: the layer stride can be a handle, the position stride cannot.
     (defn lth-cache (n kvd maxpos acc)
-        (if (le n 0) acc (lth-cache (sub n 1) kvd maxpos (append acc (list (metal_buf_alloc (mul (mul kvd maxpos) 4)))))))
+        (if (le n 0) acc (lth-cache (sub n 1) kvd maxpos (append acc (list (metal_buf_alloc (nmtl-llama-cache-bytes kvd maxpos)))))))
+
+    (defn lth-list-handles (tvs)
+        (if (eq (len tvs) 0) (list)
+            (cons (lth-tv-h (head tvs)) (lth-list-handles (tail tvs)))))
+    (defn lth-list-sizes (tvs)
+        (if (eq (len tvs) 0) (list)
+            (cons (lth-tv-bytes (head tvs)) (lth-list-sizes (tail tvs)))))
+    (defn lth-layer-handles (layers)
+        (if (eq (len layers) 0) (list)
+            (append (lth-list-handles (head layers))
+                    (lth-layer-handles (tail layers)))))
+    (defn lth-layer-sizes (layers)
+        (if (eq (len layers) 0) (list)
+            (append (lth-list-sizes (head layers))
+                    (lth-layer-sizes (tail layers)))))
 
     ; ================= the dispatches =================
     ; EVERY MODE-0 DISPATCH CAPS ITS GROUP AT 256 — the proven lane's own FORM_METAL_TG default,

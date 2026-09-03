@@ -7,7 +7,7 @@
 ; present. Dense attention is exact while npos <= the file's 2048-token QSA
 ; budget; the sparse selector for deeper positions is the remaining graph organ.
 ;
-; preludes: form/native/metal/qwen4exp-flash-next-layout.fk form/native/metal/qwen4exp-flash-next-graph-jit.fk
+; preludes: form/native/metal/qwen4exp-flash-next-layout.fk form/native/metal/qwen4exp-flash-next-graph-jit.fk form/form-stdlib/native-model-tensor-ledger.bml
 
 (do
     ; Geometry and f32 constants pinned by this exact qwen4exp artifact.
@@ -35,70 +35,21 @@
     ; 29..33 shared expert, 34 logits, 35..38 argmax, 39 PLE ids,
     ; 40 PLE emb, 41 PLE key, 42 PLE value, 43 PLE query/norm,
     ; 44 PLE gated, 45..47 PLE uint64 tables, 48 PLE history.
+    (defn q4t-alloc-sizes (sizes)
+        (if (eq (len sizes) 0) (list)
+            (cons (if (gt (head sizes) 0) (metal_buf_alloc (head sizes)) 0)
+                  (q4t-alloc-sizes (tail sizes)))))
     (defn q4t-bufs (maxpos)
-        (list
-            (metal_buf_alloc (mul 2560 4))
-            (metal_buf_alloc (mul 10240 4))
-            (metal_buf_alloc (mul 10240 4))
-            (metal_buf_alloc (mul 320 4))
-            (metal_buf_alloc (mul 10240 4))
-            (metal_buf_alloc (mul 2560 4))
-            (metal_buf_alloc (mul 4 4))
-            (metal_buf_alloc (mul 2560 4))
-            (metal_buf_alloc (mul 10240 4))
-            (metal_buf_alloc (mul 48 4))
-            (metal_buf_alloc (mul 48 4))
-            (metal_buf_alloc (mul 6144 4))
-            (metal_buf_alloc (mul 6144 4))
-            (metal_buf_alloc (mul 6144 4))
-            (metal_buf_alloc (mul 12288 4))
-            (metal_buf_alloc (mul 6144 4))
-            (metal_buf_alloc (mul 6144 4))
-            (metal_buf_alloc (mul 512 4))
-            (metal_buf_alloc (mul 512 4))
-            (metal_buf_alloc (mul 6144 4))
-            (metal_buf_alloc (mul (mul (mul 2 24) maxpos) 4))
-            (metal_buf_alloc (mul 512 4))
-            (metal_buf_alloc (mul 10 4))
-            (metal_buf_alloc (mul 10 4))
-            (metal_buf_alloc (mul (mul 10 640) 4))
-            (metal_buf_alloc (mul (mul 10 640) 4))
-            (metal_buf_alloc (mul (mul 10 640) 4))
-            (metal_buf_alloc (mul (mul 10 2560) 4))
-            (metal_buf_alloc (mul 2560 4))
-            (metal_buf_alloc (mul 640 4))
-            (metal_buf_alloc (mul 640 4))
-            (metal_buf_alloc (mul 640 4))
-            (metal_buf_alloc (mul 2560 4))
-            (metal_buf_alloc 4)
-            (metal_buf_alloc (mul 248320 4))
-            (metal_buf_alloc 4096)
-            (metal_buf_alloc 4096)
-            (metal_buf_alloc 16)
-            (metal_buf_alloc 16)
-            (metal_buf_alloc (mul 16 4))
-            (metal_buf_alloc (mul 2560 4))
-            (metal_buf_alloc (mul 10240 4))
-            (metal_buf_alloc (mul 2560 4))
-            (metal_buf_alloc (mul 10240 4))
-            (metal_buf_alloc (mul 10240 4))
-            (metal_buf_alloc (mul 3 8))
-            (metal_buf_alloc (mul 16 8))
-            (metal_buf_alloc (mul 16 8))
-            (metal_buf_alloc (mul (mul 10240 9) 4))))
+        (q4t-alloc-sizes (nmtl-qwen-scratch-sizes maxpos)))
 
     ; Linear layers own a four-position GDN conv row and 48x128x128 state.
     ; Full layers own fp16 K/V. Zero fill is the carrier's allocation contract.
     (defn q4t-state-go (layer maxpos acc)
         (if (ge layer 48) (reverse acc)
             (q4t-state-go (add layer 1) maxpos
-                (cons (if (eq (q4g-full layer) 1)
-                          (list 0 0
-                              (metal_buf_alloc (mul (mul maxpos 512) 2))
-                              (metal_buf_alloc (mul (mul maxpos 512) 2)))
-                          (list (metal_buf_alloc (mul (mul 10240 4) 4))
-                                (metal_buf_alloc (mul (mul (mul 48 128) 128) 4))
-                                0 0)) acc))))
+                (cons (q4t-alloc-sizes
+                          (nmtl-qwen-state-sizes layer maxpos (q4g-full layer)))
+                      acc))))
     (defn q4t-state (maxpos) (q4t-state-go 0 maxpos (empty)))
 
     (defn q4t-le-bytes (n k)
@@ -371,6 +322,36 @@
     (defn q4t-free-state (sts)
         (if (eq (len sts) 0) 1
             (do (q4t-free-handles (head sts)) (q4t-free-state (tail sts)))))
+    (defn q4t-state-handles (sts)
+        (if (eq (len sts) 0) (list)
+            (append (nmtl-positive-values (head sts))
+                    (q4t-state-handles (tail sts)))))
+    (defn q4t-state-sizes-go (layer maxpos)
+        (if (ge layer 48) (list)
+            (append (nmtl-positive-values
+                        (nmtl-qwen-state-sizes layer maxpos (q4g-full layer)))
+                    (q4t-state-sizes-go (add layer 1) maxpos))))
+    (defn q4t-ledger-groups (ctx parent owner epoch)
+        (do
+            (let mappedHandles (append (q4gl-layer-handles (nth ctx 4))
+                                       (q4gl-list-handles (nth ctx 5))))
+            (let mappedSizes (append (q4gl-layer-sizes (nth ctx 4))
+                                     (q4gl-list-sizes (nth ctx 5))))
+            (list
+                (nmtl-group "tensor.qwen38.mapped" parent owner
+                    "mapped-tensors" mappedHandles mappedSizes epoch
+                    "gguf.record-bytes+metal_buf_from_file"
+                    (list "model" "memory" "tensor" "metal" "gpu" "layer"))
+                (nmtl-group "tensor.qwen38.scratch" parent owner
+                    "allocated-tensors" (nth ctx 3)
+                    (nmtl-qwen-scratch-sizes (nth ctx 7)) epoch
+                    "q4t-bufs+native-model-tensor-ledger"
+                    (list "model" "memory" "tensor" "metal" "gpu" "scratch"))
+                (nmtl-group "tensor.qwen38.state" parent owner
+                    "allocated-state" (q4t-state-handles (nth ctx 6))
+                    (q4t-state-sizes-go 0 (nth ctx 7)) epoch
+                    "q4t-state+native-model-tensor-ledger"
+                    (list "model" "memory" "tensor" "metal" "gpu" "substate" "layer")))))
     (defn q4t-close (ctx)
         (do
             (q4t-free-handles (nth ctx 3))
