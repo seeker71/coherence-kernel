@@ -423,6 +423,9 @@ var gpuErrors = 0
 var gpuFirstError: String? = nil
 final class Step {
     let cb: MTLCommandBuffer, enc: MTLComputeCommandEncoder
+    // 256 is the evidenced default — receipts/2026-08-04-block0-door-and-the-256.md:
+    // 388 ms/token here at 256 vs 1083 ms/token at the 1024 ceiling. Mirrors
+    // llama-token-handle.fk:219's own citation of the same measurement.
     let requestedTG = Int(ProcessInfo.processInfo.environment["FORM_METAL_TG"] ?? "256") ?? 256
     init() { cb = queue.makeCommandBuffer()!; enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent)! }
     func go(_ p: MTLComputePipelineState, _ width: Int, barrier: Bool = true, tgMul32: Bool = false,
