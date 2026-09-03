@@ -104,9 +104,17 @@
                         "active" (nmg-active? model) handle
                         (nmdt-state-active-epoch clock))))))
 
+    (defn nmdr-status-counter (status key id kind plane owner lane purpose epoch source channels)
+        (do
+            (let value (nmdt-status-int status key))
+            (if (lt value 0)
+                (nmdt-owner-missing-sample id kind plane owner lane purpose epoch source channels)
+                (nmdt-owner-counter-sample id kind plane owner lane purpose value epoch source channels))))
+
     (defn nmdr-owner-runtime-samples (owner epoch)
         (do
             (let status (metal_status))
+            (let mlx (mlx_status))
             (list
                 (nmdt-owner-counter-sample "primitive.owner.dispatch-total"
                     "primitive-counter" "form" owner "primitive"
@@ -144,6 +152,14 @@
                     "jit-counter" "jit" "cpu-jit-fallback-cost-us"
                     "cpu_jit_busy_us_total" "metal_status.cpu_jit_busy_us_total"
                     owner epoch (list "process" "model" "jit" "cpu" "health"))
+                (nmdt-metal-counter status "metal.owner.in-flight"
+                    "metal-gauge" "metal" "submitted-command-batches"
+                    "in_flight" "metal_status.in_flight" owner epoch
+                    (list "process" "model" "metal" "gpu" "health"))
+                (nmdt-metal-counter status "metal.owner.buffers"
+                    "metal-gauge" "memory" "allocated-metal-buffer-handles"
+                    "buffers" "metal_status.buffers" owner epoch
+                    (list "process" "model" "memory" "metal" "gpu" "tensor" "health"))
                 (nmdt-metal-counter status "cache.owner.metal-pipelines"
                     "pipeline-cache" "cache" "compiled-metal-pipeline-handles"
                     "pipelines" "metal_status.pipelines" owner epoch
@@ -152,6 +168,26 @@
                     "mapping-counter" "memory" "mmap-no-copy-buffer-handles"
                     "mmap_nocopy_buffers" "metal_status.mmap_nocopy_buffers"
                     owner epoch (list "process" "model" "memory" "metal" "health"))
+                (nmdt-metal-counter status "metal.owner.dispatch-total"
+                    "metal-counter" "metal" "submitted-metal-dispatches"
+                    "total_dispatch" "metal_status.total_dispatch" owner epoch
+                    (list "process" "model" "metal" "gpu" "health"))
+                (nmdt-metal-counter status "metal.owner.sync-total"
+                    "metal-counter" "metal" "completed-metal-synchronizations"
+                    "total_sync" "metal_status.total_sync" owner epoch
+                    (list "process" "model" "metal" "gpu" "health"))
+                (nmdt-metal-counter status "gpu.owner.busy-us-total"
+                    "gpu-counter" "gpu" "command-buffer-device-time-us"
+                    "gpu_busy_us_total" "metal_status.gpu_busy_us_total" owner epoch
+                    (list "process" "model" "metal" "gpu" "health"))
+                (nmdr-status-counter mlx "mlx_ops" "mlx.owner.ops"
+                    "mlx-capability" "mlx" owner "mlx" "available-mlx-operation-surface"
+                    epoch "mlx_status.mlx_ops"
+                    (list "process" "model" "mlx" "gpu" "health"))
+                (nmdr-status-counter mlx "mlx_dispatch" "mlx.owner.dispatch-total"
+                    "mlx-counter" "mlx" owner "mlx" "owner-process-mlx-dispatches"
+                    epoch "mlx_status.mlx_dispatch"
+                    (list "process" "model" "mlx" "gpu" "health"))
                 (nmdt-owner-missing-sample "cache.owner.walk-stats"
                     "walk-cache" "form" owner "cache" "hit-miss-and-age"
                     epoch "fkwu.walk-cache-stats"
@@ -198,9 +234,19 @@
                 (list "glass-publish-v1" "refused" "owner-correlation")
                 (do
                     (let runtimeSamples (nmdr-owner-runtime-samples publisher epoch))
+                    (let tensorGroups (append
+                            (q4t-ledger-groups (q4s-ctx qslot) (nmdr-qwen-id)
+                                publisher epoch)
+                            (l3rs-ledger-groups three (nmdr-threeb-id)
+                                publisher epoch)))
+                    (let tensorSamples (append
+                        (nmdt-tensor-group-samples tensorGroups)
+                        (nmdt-tensor-reconcile-samples tensorGroups
+                            (metal_status) publisher epoch)))
                     (let publishedSamples (append (list (nmdt-owner-heartbeat-sample-at correlation heartbeatId))
                         (append modelSamples (append stateSamples
-                            (append runtimeSamples (list (nmdr-budget-sample (nmrf-budget fleet))))))))
+                            (append runtimeSamples (append tensorSamples
+                                (list (nmdr-budget-sample (nmrf-budget fleet)))))))))
                     (fgtm-publish-snapshot (nmdr-telemetry-root)
                         publisher epoch publishedSamples)))))
 
