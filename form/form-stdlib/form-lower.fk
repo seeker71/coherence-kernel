@@ -644,10 +644,21 @@
     ;   19 notfound: movz w0,#0  · 20 sub w0,w0,#1
     ;   21 sxtw x0,w0  · 22 add sp,sp,#stackn  · 23 ret
     ;   24 found: sxtw x0,w0  · 25 add sp,sp,#stackn  · 26 ret
-    (defn lo-strfind-core (bound nlen stackn)
+    ; lo-strfind-loop-body — the scan ITSELF, factored out of lo-strfind-core so
+    ; R28's runtime-haystack door (below) can run the identical bytes rather
+    ; than duplicate them. The only line that ever named `bound` is instruction
+    ; position 1 (`cmp w0,#bound`); every other line, and every branch offset
+    ; in the comment table above, is indifferent to HOW that one compare is
+    ; encoded — an immediate cmp (`fa-cmp`, this file's original caller) and a
+    ; register cmp (`fa-cmp-r`, R28's caller) are both exactly one 4-byte
+    ; instruction, so passing the whole instruction in as `boundcheck` changes
+    ; nothing about instruction count or any offset. lo-strfind-core below is
+    ; now a one-line wrapper and emits byte-identical output to before this
+    ; factoring (form-lower-string-band.fk, unchanged, is the witness).
+    (defn lo-strfind-loop-body (boundcheck nlen stackn)
         (lo-cat (list
             (fa-movz 0 0)
-            (fa-cmp 0 bound)
+            boundcheck
             (fa-bcond 10 17)
             (fa-add-x-imm 3 1 0)
             (fa-add-x-imm 4 2 0)
@@ -673,6 +684,8 @@
             (fa-sxtw 0 0)
             (fa-add-x-imm 31 31 stackn)
             (fa-ret))))
+    (defn lo-strfind-core (bound nlen stackn)
+        (lo-strfind-loop-body (fa-cmp 0 bound) nlen stackn))
 
     ; lo-strfind-embed — the whole callable image: two Form byte lists (already
     ; extracted by lo-str-bytes) in, one arm64 leaf out. `bound <= 0` (the needle
@@ -700,5 +713,60 @@
                     (lo-strfind-core bound nlen stackn))))))
     ; the ergonomic door: two real Form strings in, straight to the image.
     (defn lo-strfind-embed-str (h n) (lo-strfind-embed (lo-str-bytes h) (lo-str-bytes n)))
+
+    ; ── R28: the runtime haystack door ──────────────────────────────────────
+    ; lo-strfind-embed above needs BOTH strings at LOWERING time — the real
+    ; 398k-hot family (fol-bp-row's string children, GGUF/HTTP parsing) never
+    ; has that, it has bytes that exist only once the recipe RUNS. Reaching it
+    ; needed one runtime/fkwu-uni.c change, named and scoped in the R28 ledger
+    ; row and receipts/2026-09-03-runtime-string-argument.md: fk_inram_args now
+    ; recognizes a Form STRING value (fk_srange's own domain) as TWO argument
+    ; slots — base pointer then byte length — instead of declining it. Nothing
+    ; else about the door changed: an int is still one slot, a list is still up
+    ; to eight slots, and the crystallized page still just reads registers.
+    ;
+    ; The needle stays a lowering-time constant (embedded exactly like
+    ; lo-strfind-embed's), because R28's gap was the HAYSTACK — `from` and a
+    ; runtime needle are further widening of the same door, not built here.
+    ; The haystack arrives as x0=pointer, x1=byte-length (fk_inram_args' new
+    ; two-slot shape, AAPCS64). `bound = hlen - nlen + 1` can no longer be
+    ; folded to an immediate (hlen is not known until the call happens), so
+    ; it is computed into w9 at RUNTIME from the incoming length — one
+    ; instruction, chosen at LOWERING time between add/sub only because nlen=0
+    ; would need immediate -1 (unsigned imm12 cannot hold it, the same wall
+    ; lo-strfind-embed's `bound<=0` shortcut already named for the immediate
+    ; cmp). w9 is never written again after, so lo-strfind-loop-body's SAME
+    ; `cmp w0,w9` (register form) reads a live, correct bound on every outer
+    ; iteration — and unlike the immediate form, a register compare naturally
+    ; carries a NEGATIVE bound (needle longer than haystack) as a true signed
+    ; value, so the "trivial not-found" lowering-time special case is not
+    ; needed here at all: the general loop already answers it correctly.
+    ;
+    ;   0 sub sp,sp,#stackn         open the frame (needle bytes only now)
+    ;   .. lo-embed-bytes nbytes 0  needle -> [sp,#0..nlen)      (uses w8)
+    ;   N  sub/add w9,w1,#..        bound = hlen-nlen+1, from the ARG length
+    ;   N+1 add x1,x0,#0            h_cur = the ARG pointer (mov x1,x0)
+    ;   N+2 add x2,sp,#0            n_base = the embedded needle
+    ;      lo-strfind-loop-body (cmp-r w0,w9) nlen stackn
+    ;
+    ; x1 holds the incoming LENGTH until the bound is read from it (register 1
+    ; in the sub/add above), then is overwritten to become h_cur — the two
+    ; uses never overlap because the read happens first, in program order.
+    (defn lo-strfind-bound-from-len (lenreg nlen)
+        (if (eq nlen 0) (fa-add 9 lenreg 1) (fa-sub 9 lenreg (sub nlen 1))))
+    (defn lo-strfind-runtime (nbytes)
+        (do
+            (let nlen (len nbytes))
+            (let stackn (lo-strfind-stackn 0 nlen))
+            (lo-cat (list
+                (fa-sub-x-imm 31 31 stackn)
+                (lo-embed-bytes nbytes 0)
+                (lo-strfind-bound-from-len 1 nlen)
+                (fa-add-x-imm 1 0 0)
+                (fa-add-x-imm 2 31 0)
+                (lo-strfind-loop-body (fa-cmp-r 0 9) nlen stackn)))))
+    ; the ergonomic door: a real Form string needle in (embedded), the
+    ; haystack left as the runtime ARG the compiled page expects.
+    (defn lo-strfind-runtime-str (n) (lo-strfind-runtime (lo-str-bytes n)))
 
     0)
