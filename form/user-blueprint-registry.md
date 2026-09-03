@@ -108,7 +108,7 @@ the offered interface and consensus has passed. Band: `form-stdlib/tests/circle-
   attentions, next chosen movement.
 
 Route selection is a content-addressed choice over measured cells, weighted by each
-route's user flow and north-star fit. Band: `form-stdlib/tests/native-route-goal-cells-band.fk`.
+route's user flow and north-star fit. Band: `form-stdlib/tests/native-route-goal-cells-band.bml`.
 
 ### Choice Receipt Protocol — trustworthy branch feedback
 

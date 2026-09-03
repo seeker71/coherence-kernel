@@ -145,9 +145,14 @@ What answered red or nothing on 2026-09-03, so no one leans on it:
   (preflight clean): the second-`<CHOICE>` bit and the `<TIMEOUT>` bit are open.
 - `form/form-stdlib/tests/blueprint-authority-band.fk` answers 51199 of 65535;
   `persistence-band` 2 of 7; `channel-breath-band` 200 (declares 500).
-- `channel-flow-band` and `native-route-goal-cells-band` answer nothing (compile
-  refused: unbound name in value position); `observe/tests/import-carry-band.fk`
-  answers 0 of 63.
+- `channel-flow-band` answers nothing (compile refused: unbound name in value
+  position); `observe/tests/import-carry-band.fk` answers 0 of 63.
+- `native-route-goal-cells-band` (R31, healed to `.bml`, its true grammar)
+  now compiles and answers 643070 of 1048575 on fkwu: the five open bits
+  (goal-valid?, observations-valid?, attentions-valid?, and the two
+  manifest-status bits) all trace to one root cause — a bare `true`/`false`
+  BML literal lowers to 0 in the `section [form.bml] { def ... }` dialect,
+  so every branch that returns the literal `true` reads as false.
 - Bands whose preludes name a released `-xtal` twin die at load (rc 2):
   `form-cli-mlx-band`, `form-cli-live-band`, `bml-bmf-stream-curriculum-band`,
   `bml-bmf-control-curriculum-band` — the twins release
