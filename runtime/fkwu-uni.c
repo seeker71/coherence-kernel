@@ -1381,6 +1381,10 @@ FK_METAL_WEAK long long fk_metal_fence_wait_external(long long fence) {
     (void)fence;
     return FK_METAL_HANDLE_UNLINKED;
 }
+FK_METAL_WEAK long long fk_metal_deadline_external(long long ms) {
+    (void)ms;
+    return FK_METAL_HANDLE_UNLINKED;
+}
 /* MLX organ. Same weak-stub shape as Metal: a build without the mlx carrier
  * still compiles and still speaks mlx_linked=false. Tags 143/144 are free in
  * the evaluator (holes after metal_fence_wait's 142). Checkout-witness; the
@@ -1581,6 +1585,16 @@ static long long fk_metal_fence_wait_native(long long fence) {
     long long r = fk_metal_fence_wait_external(fence);
     if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
         return 0;
+    }
+    return r;
+}
+/* The caller's patience for every wait in this process, handed in as data (ms;
+ * -1 = the kernel's own wait). Answers the deadline that stood before so the
+ * hand-over reads back as data; -2 when no carrier is linked to hand it to. */
+static long long fk_metal_deadline_native(long long ms) {
+    long long r = fk_metal_deadline_external(ms);
+    if (r == FK_METAL_HANDLE_UNLINKED) {
+        return -2;
     }
     return r;
 }
@@ -9497,6 +9511,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
      * call. The op table lists ops; FK_OPCODE_ARM_CAP bounds them. */
     if (t == 142) {
         return fk_metal_fence_wait_native(fk_walk(fk_node[i][1], fp) >> 1) << 1;
+    }
+    if (t == 148) {
+        return fk_metal_deadline_native(fk_walk(fk_node[i][1], fp) >> 1) << 1;
     }
     if (t == 143) {
         return fk_mlx_status_native();
