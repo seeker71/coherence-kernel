@@ -32,7 +32,7 @@ ground=$($NM_FKWU bootstrap/ground.fk)
 recursive=$($NM_FKWU bootstrap/ground-recursive.fk 10)
 freshness=$($NM_FKWU form/form-stdlib/tests/binary-freshness-band.fk)
 {
-    cat observe/native-vs-rented.fk
+    cat form/form-stdlib/native-vs-rented.fk
     printf '%s\n' '(native-vs-rented-check)'
 } > "$native_way"
 native=$($NM_FKWU "$native_way")
