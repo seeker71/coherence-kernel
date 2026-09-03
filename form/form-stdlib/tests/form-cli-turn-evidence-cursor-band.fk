@@ -1,5 +1,5 @@
 ; form-cli-turn-evidence-cursor-band.fk — BML cursor discovery is private,
-; scannerless, and yields a durable bounded continuation. Expected: 16777215
+; scannerless, and yields a durable bounded continuation. Expected: 33554431
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
 ; preludes: form-stdlib/form-cli-turn-evidence.fk
@@ -23,6 +23,8 @@
     (let absent (fctec-seek path "turn-missing" (file_size path)))
     (let src (read_file "form/form-stdlib/bml/form-cli-turn-evidence-cursor.bml"))
     (let live-src (read_file "form/form-stdlib/form-cli-turn-evidence-live.fk"))
+    (let target-src (read_file
+        "form/form-stdlib/form-cli-turn-evidence-target-bind.fk"))
     ; The tail starts inside this >1 MiB JSONL row.  The first slice must
     ; align past its LF and find turn-2 without accepting the partial row;
     ; the durable next cursor then reaches turn-1 in exactly one more slice.
@@ -49,7 +51,9 @@
     ; Physical source-coordinate fixture: metadata identity, start/terminal
     ; types, turn id, and both timestamps must still exist at the v3 offsets.
     (let source-path "/tmp/form-cli-turn-evidence-source-band.jsonl")
-    (let meta "{\"session_id\":\"thread-c\",\"model_provider\":\"openai\"}\n")
+    ; Real Codex session identity lives in session_meta.payload. Root decoys
+    ; prove the cursor cannot bind a coincidentally named envelope field.
+    (let meta "{\"session_id\":\"root-decoy\",\"model_provider\":\"root-decoy\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"thread-c\",\"model_provider\":\"openai\"}}\n")
     (let started "{\"timestamp\":\"2026-08-17T05:42:26.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-c\"}}\n")
     (let context "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-source\"}}\n")
     (let usage "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"last_token_usage\":{\"input_tokens\":2,\"cached_input_tokens\":1,\"cache_write_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0,\"total_tokens\":3}}}\n")
@@ -64,6 +68,26 @@
     (let source-row (fctel-row-from "thread-c" "openai" "turn-c"
         started completed source-state (file_size source-path) start-at complete-at))
     (let source-evidence (fcte-parse source-row))
+    (let start-phase-row (fctel-start-discovery-row source-path
+        (file_size source-path) "turn-c" complete-at complete-at start-at))
+    (let start-phase (split-on start-phase-row "|"))
+    (let progress-phase-row (fctel-progress-row (file_size source-path)
+        "turn-c" start-at complete-at complete-at source-state))
+    (let progress-phase (split-on progress-phase-row "|"))
+    (let stale-start-phase (fctecb-set start-phase 2 "turn-stale"))
+    (let phase-actions-ok (and
+        (str_eq (fctec-phase-action source-path (file_size source-path)
+            progress-phase start-phase) "resume-progress")
+        (and (str_eq (fctec-phase-action source-path (file_size source-path)
+                (list) start-phase) "resume-start")
+            (str_eq (fctec-phase-action source-path (file_size source-path)
+                (list) stale-start-phase) "discover"))))
+    (let target-reset-ok (and (ge (str_find target-src
+            "(write_file_text (fctel-start-discovery-path) \"\")" 0) 0)
+        (and (ge (str_find target-src
+                "(write_file_text (fctel-candidate-row-path) \"\")" 0) 0)
+            (ge (str_find target-src
+                "(write_file_text (fctel-latest-validation-path) \"\")" 0) 0))))
     (let bad-time (fctecb-set source-evidence 5 "1"))
     (let bad-coordinate (fctecb-set source-evidence 38 (int_to_str start-at)))
     (let bad-identity (fctecb-set source-evidence 1 "thread-wrong"))
@@ -221,4 +245,8 @@
             (and (eq resumed-floor (fcte-carrier-size source-evidence))
             (and (eq (fctec-latest? resumed-old-range) 1)
             (and (eq (fctec-latest? settled-extension) 1)
-                 (eq (fctec-latest-status stale-extension) 0)))))))) 8388608))))
+                 (eq (fctec-latest-status stale-extension) 0)))))))) 8388608)
+        (fctecb-bit (and (str_eq (fctec-phase-resume-rule)
+                "physically-valid-progress-or-start-resumes-before-any-terminal-rediscovery")
+            (and phase-actions-ok target-reset-ok))
+            16777216))))

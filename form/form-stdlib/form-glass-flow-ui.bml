@@ -27,8 +27,18 @@ section [form.bml] {
         // Older points remain readable but can only be called derived windows:
         // their integer payload did not retain the source truth class.
         def fgd-flow-point-v3(epoch, gpuBusy, cpuJit, dispatches, queueDepth, jitCalls, cells, memoryFree, inflight, gas, water, ice, tokens, tensorBytes, channelEdges, framebufferAccepted, evidences) = append(fgd-flow-point-v2(epoch, gpuBusy, cpuJit, dispatches, queueDepth, jitCalls, cells, memoryFree, inflight, gas, water, ice, tokens, tensorBytes, channelEdges, framebufferAccepted), list(evidences));
+        // V4 carries the exact physical source, or the exact missing
+        // publication door, beside every value at indexes 2..16.
+        def fgd-flow-point-v4(epoch, gpuBusy, cpuJit, dispatches, queueDepth, jitCalls, cells, memoryFree, inflight, gas, water, ice, tokens, tensorBytes, channelEdges, framebufferAccepted, evidences, sources) = append(cons("glass-flow-point-v4", tail(fgd-flow-point-v3(epoch, gpuBusy, cpuJit, dispatches, queueDepth, jitCalls, cells, memoryFree, inflight, gas, water, ice, tokens, tensorBytes, channelEdges, framebufferAccepted, evidences))), list(-1, sources));
         def fgd-flow-value(point, index) = if or(lt(index, 0), ge(index, len(point))) then -1 else nth(point, index);
         def fgd-flow-evidences(point) = if ge(len(point), 18) then nth(point, 17) else list();
+        def fgd-flow-sources(point) = if and(ge(len(point), 20), str_eq(head(point), "glass-flow-point-v4")) then nth(point, 19) else list();
+        def fgd-flow-source(point, index) {
+            let sources = fgd-flow-sources(point);
+            let offset = sub(index, 2);
+            if or(lt(offset, 0), ge(offset, len(sources))) then "flow-point.source-not-retained" else nth(sources, offset);
+        }
+        def fgd-flow-jit-fault(point) = if and(str_eq(head(point), "glass-flow-point-v4"), ge(len(point), 21)) then nth(point, 20) else list();
         def fgd-flow-evidence(point, index) {
             let value = fgd-flow-value(point, index);
             let evidences = fgd-flow-evidences(point);
@@ -80,6 +90,12 @@ section [form.bml] {
             let metric = fgd-find-metric(metrics, id);
             if or(eq(len(metric), 0), eq(fgo-present?(metric), 0)) then -1 else fgo-int-value(metric);
         }
+        // These four lanes retain owner/Hearth request-window truth. Counter
+        // deltas are anchored to adjacent owner publications; queue is a
+        // physical Hearth gauge. Missing publishers stay named doors.
+        def fglui-flow-zero-state(label) = if str_eq(label, "QUEUE") then "drained" else "idle";
+        def fglui-flow-unit(label) = if str_eq(label, "GPU") then "us" else if str_eq(label, "CPU-JIT") then "us" else if str_eq(label, "DISPATCH") then "dsp" else if str_eq(label, "QUEUE") then "req" else "";
+        def fglui-flow-value-text(label, value) = if lt(value, 0) then "unavailable(no-carrier)" else fgd-cat(list(fgd-format-count(value), fglui-flow-unit(label), if eq(value, 0) then fgd-cat(list("(", fglui-flow-zero-state(label), ")")) else ""));
         def fglui-pulse-line(epoch, hz, frame, history, metrics, width) {
             let dispatchValues = fglui-deltas(history, 4);
             let dispatch = if eq(len(dispatchValues), 0) then -1 else nth(dispatchValues, sub(len(dispatchValues), 1));
@@ -88,14 +104,39 @@ section [form.bml] {
             let cons = fglui-metric-count(metrics, "cons");
             fgd-byte-segment-line(fgdb-cat(list(fgdb-text("TICK "), fglui-utc-clock-bytes(epoch), fgdb-text(" #"), fgdb-int(frame), fgdb-text(" dt="), fgdb-int(fglui-frame-delta(history)), fgdb-text("/"), fgdb-int(div(1000, hz)), fgdb-text("ms d+"), fglui-value-bytes(dispatch), fgdb-text(" ev="), fglui-value-bytes(events), fgdb-text(" nodes="), fglui-value-bytes(nodes), fgdb-text(" cons="), fglui-value-bytes(cons), fgdb-text(" [glass]"))), width, fgd-style-for-plane("form", 220, 0), "flow.tick", list("flow", "form", "framebuffer", "cell"), "physical-live");
         }
+        def fglui-counter-window-go(history, index, prior, held) = if eq(len(history), 0) then held else fglui-counter-window-next(history, index, prior, held);
+        def fglui-counter-window-next(history, index, prior, held) {
+            let point = head(history);
+            let value = fgd-flow-value(point, index);
+            let next = if and(and(ge(prior, 0), ge(value, prior)), gt(value, prior)) then list(sub(value, prior), point) else held;
+            fglui-counter-window-go(tail(history), index, value, next);
+        }
+        def fglui-counter-window(history, index) = if lt(len(history), 2) then list() else fglui-counter-window-go(tail(history), index, fgd-flow-value(head(history), index), list());
+        def fglui-gauge-window(history, index, held) = if eq(len(history), 0) then held else if gt(fgd-flow-value(head(history), index), 0) then fglui-gauge-window(tail(history), index, list(fgd-flow-value(head(history), index), head(history))) else fglui-gauge-window(tail(history), index, held);
+        def fglui-flow-window(history, index, delta) = if eq(delta, 1) then fglui-counter-window(history, index) else fglui-gauge-window(history, index, list());
+        def fglui-flow-window-text(label, window, epoch) = if eq(len(window), 0) then "window-missing=glass.history.owner-event-after-baseline" else fgd-cat(list("window=", fglui-flow-value-text(label, nth(window, 0)), " age=", fgd-format-age-ms(if ge(epoch, fgd-flow-value(nth(window, 1), 1)) then sub(epoch, fgd-flow-value(nth(window, 1), 1)) else 0)));
         def fglui-flow-line(label, history, index, delta, width, plane) {
             let values = if eq(delta, 1) then fglui-deltas(history, index) else fglui-values(history, index);
             let missing = fglui-missing(history, index);
             let latest = if eq(delta, 1) then if eq(len(values), 0) then -1 else nth(values, sub(len(values), 1)) else fglui-last(history, index);
-            let sparkWidth = fgd-clamp(sub(width, add(str_len(label), 29)), 4, 64);
-            fgd-segment-line(fgd-cat(list(label, " ", fglui-spark(values, sparkWidth), " now=", if and(gt(len(history), 0), lt(missing, len(history))) then fglui-value(latest) else "unavailable(no-carrier)", if gt(missing, 0) then str_concat(" miss=", int_to_str(missing)) else "")), width, fgd-style-for-plane(plane, if and(gt(len(history), 0), lt(missing, len(history))) then 176 else 72, 0), str_concat("flow.", label), list("flow", plane), if and(gt(len(history), 0), lt(missing, len(history))) then "derived-window" else "unavailable");
+            let current = if eq(len(history), 0) then list() else nth(history, sub(len(history), 1));
+            let window = fglui-flow-window(history, index, delta);
+            let sourcePoint = if gt(len(window), 0) then nth(window, 1) else current;
+            let source = if eq(len(sourcePoint), 0) then "glass.flow-point.publisher" else fgd-flow-source(sourcePoint, index);
+            let epoch = if eq(len(current), 0) then 0 else fgd-flow-value(current, 1);
+            let sparkWidth = fgd-clamp(sub(width, add(str_len(label), 76)), 4, 48);
+            let known = if and(and(gt(len(history), 0), lt(missing, len(history))), not(str_eq(source, "flow-point.source-not-retained"))) then 1 else 0;
+            let total = if and(eq(delta, 1), eq(known, 1)) then fgd-cat(list(" total=", fglui-flow-value-text(label, fglui-last(history, index)))) else "";
+            let text = if eq(known, 0) then fgd-cat(list(label, " ", fglui-spark(values, sparkWidth), " missing=", source)) else fgd-cat(list(label, " ", fglui-spark(values, sparkWidth), " scope=", if str_eq(label, "QUEUE") then "hearth.queue" else "model.owner", " now=", fglui-flow-value-text(label, latest), total, " ", fglui-flow-window-text(label, window, epoch), " src=", source));
+            fgd-segment-line(text, width, fgd-style-for-plane(plane, if eq(known, 1) then 220 else 72, 0), str_concat("flow.request-window.", label), list("flow", plane, "scope.request-window"), if eq(known, 1) then fgd-flow-evidence(current, index) else "unavailable");
         }
-        def fglui-flow-lines(history, width) = list(fglui-flow-line("GPU", history, 2, 1, width, "metal"), fglui-flow-line("CPU-JIT", history, 3, 1, width, "cpu"), fglui-flow-line("DISPATCH", history, 4, 1, width, "form"), fglui-flow-line("QUEUE", history, 5, 0, width, "membrane"));
+        def fglui-jit-fault-line(fault, epoch, width) = fgd-segment-line(fgd-cat(list("! JIT HEALING P", int_to_str(if ge(len(fault), 8) then nth(fault, 7) else 0), " stage=", nth(fault, 1), " last-failure=", nth(fault, 2), " age=", fgd-format-age-ms(if ge(epoch, nth(fault, 3)) then sub(epoch, nth(fault, 3)) else 0), " evidence=", nth(fault, 4), " preemption=", nth(fault, 5), " src=", nth(fault, 6))), width, fgd-style-for-plane("cpu", 255, 1), nth(fault, 0), list("flow", "jit", "fault", "healing", "priority"), nth(fault, 4));
+        def fglui-flow-lines(history, width) {
+            let current = if eq(len(history), 0) then list() else nth(history, sub(len(history), 1));
+            let fault = if eq(len(current), 0) then list() else fgd-flow-jit-fault(current);
+            let rows = list(fglui-flow-line("GPU", history, 2, 1, width, "metal"), fglui-flow-line("CPU-JIT", history, 3, 1, width, "cpu"), fglui-flow-line("DISPATCH", history, 4, 1, width, "form"), fglui-flow-line("QUEUE", history, 5, 0, width, "membrane"));
+            if eq(len(fault), 0) then rows else cons(fglui-jit-fault-line(fault, fgd-flow-value(current, 1), width), rows);
+        }
 
         // Exact token-flow publications are separate from aggregate counters.
         // A projected sample retains producer publisher in owner and flow id in
@@ -124,6 +165,11 @@ section [form.bml] {
         def fglui-token-flow-letter(kind) = if str_eq(kind, "request") then "Q" else if str_eq(kind, "token-position") then "T" else if str_eq(kind, "layer") then "L" else if str_eq(kind, "tensor") then "X" else if str_eq(kind, "expert-route") then "E" else if str_eq(kind, "metal") then "M" else if str_eq(kind, "framebuffer") then "F" else "G";
         def fglui-channel-with-prefix(channels, prefix) = if eq(len(channels), 0) then "absent" else if eq(str_find(head(channels), prefix, 0), 0) then substring(head(channels), str_len(prefix), str_len(head(channels))) else fglui-channel-with-prefix(tail(channels), prefix);
         def fglui-token-flow-model(sample) = fglui-channel-with-prefix(fgtm-sample-channels(sample), "model.");
+        def fglui-token-flow-category(sample) = fglui-channel-with-prefix(fgtm-sample-channels(sample), "category.");
+        def fglui-token-flow-family(sample) = fglui-channel-with-prefix(fgtm-sample-channels(sample), "family.");
+        def fglui-token-flow-role(sample) = fglui-channel-with-prefix(fgtm-sample-channels(sample), "role.");
+        def fglui-token-flow-type(sample) = fglui-channel-with-prefix(fgtm-sample-channels(sample), "type.");
+        def fglui-token-flow-category-text(sample) = fgd-cat(list("CELL=", fgtm-sample-id(sample), " CAT=", fglui-token-flow-category(sample), " FAM=", fglui-token-flow-family(sample), " ROLE=", fglui-token-flow-role(sample), " TYPE=", fglui-token-flow-type(sample)));
         def fglui-token-flow-display-model(sample) {
             let modelId = str_concat("model.", fglui-token-flow-model(sample));
             if str_eq(modelId, FGLUIQwenOwnerParent()) then fglui-owner-token-model-name(FGLUIQwenOwnerParent()) else if str_eq(modelId, FGLUIThreeBOwnerParent()) then fglui-owner-token-model-name(FGLUIThreeBOwnerParent()) else fglui-token-flow-model(sample);
@@ -152,7 +198,7 @@ section [form.bml] {
         }
         def fglui-token-flow-header-line(width) {
             let purposeWidth = fgd-max(8, sub(width, 66));
-            let bytes = fgdb-cat(list(fgdb-pad-right(fgdb-text("KT"), 3), fgdb-text(" "), fgdb-pad-right(fgdb-text("NODEID"), 12), fgdb-text(" "), fgdb-pad-right(fgdb-text("PLANE"), 8), fgdb-text(" "), fgdb-pad-right(fgdb-text("VALUE"), 16), fgdb-text(" "), fgdb-pad-right(fgdb-text("PURPOSE"), purposeWidth), fgdb-text(" "), fgdb-pad-left(fgdb-text("AGE"), 7), fgdb-text(" "), fgdb-text("EVIDENCE")));
+            let bytes = fgdb-cat(list(fgdb-pad-right(fgdb-text("KT"), 3), fgdb-text(" "), fgdb-pad-right(fgdb-text("CELL"), 12), fgdb-text(" "), fgdb-pad-right(fgdb-text("PLANE"), 8), fgdb-text(" "), fgdb-pad-right(fgdb-text("VALUE"), 16), fgdb-text(" "), fgdb-pad-right(fgdb-text("PURPOSE"), purposeWidth), fgdb-text(" "), fgdb-pad-left(fgdb-text("AGE"), 7), fgdb-text(" "), fgdb-text("EVIDENCE")));
             fgd-byte-segment-line(bytes, width, fgd-neutral(176), "flow.columns", list("flow", "token-flow"), "declared");
         }
         def fglui-token-flow-line(sample, epoch, width) {
@@ -161,6 +207,7 @@ section [form.bml] {
             let bytes = fgdb-cat(list(fgdb-pad-right(kt, 3), fgdb-text(" "), fgdb-pad-right(fgdb-text(fgtm-sample-id(sample)), 12), fgdb-text(" "), fgdb-pad-right(fgdb-text(fgtm-sample-plane(sample)), 8), fgdb-text(" "), fgdb-pad-right(fglui-token-flow-value-bytes(sample), 16), fgdb-text(" "), fgdb-pad-right(fgdb-text(fgtm-sample-purpose(sample)), purposeWidth), fgdb-text(" "), fgdb-pad-left(fglui-token-flow-age-bytes(sample, epoch), 7), fgdb-text(" "), fgdb-text(fgtm-sample-evidence(sample))));
             fgd-byte-segment-line(bytes, width, fgd-sample-style(sample, epoch), fgtm-sample-selection-id(sample), fgtm-sample-channels(sample), fgtm-sample-evidence(sample));
         }
+        def fglui-token-flow-category-line(sample, epoch, width) = fgd-segment-line(fglui-token-flow-category-text(sample), width, fgd-sample-style(sample, epoch), fgtm-sample-selection-id(sample), fgtm-sample-channels(sample), fgtm-sample-evidence(sample));
         def fglui-token-flow-lines-go(rows, epoch, width, remaining) = if or(le(remaining, 0), eq(len(rows), 0)) then list() else cons(fglui-token-flow-line(head(rows), epoch, width), fglui-token-flow-lines-go(tail(rows), epoch, width, sub(remaining, 1)));
         def fglui-owner-token-parent(sample) = if eq(fgtm-field-present?(fgtm-sample-parent(sample)), 1) then fgtm-field-value(fgtm-sample-parent(sample)) else "absent";
         def fglui-owner-token-parent?(parent) = if str_eq(parent, FGLUIQwenOwnerParent()) then 1 else if str_eq(parent, FGLUIThreeBOwnerParent()) then 1 else 0;
@@ -193,7 +240,7 @@ section [form.bml] {
         }
         def fglui-token-flow-lines(rows, epoch, width) {
             let explicit = fglui-token-flow-samples(rows);
-            if gt(len(explicit), 0) then append(list(fglui-token-flow-identity-line(explicit, epoch, width), fglui-token-flow-pipeline-line(explicit, epoch, width), fglui-token-flow-header-line(width)), fglui-token-flow-lines-go(explicit, epoch, width, 8)) else fglui-owner-token-fallback-lines(rows, epoch, width);
+            if gt(len(explicit), 0) then append(list(fglui-token-flow-identity-line(explicit, epoch, width), fglui-token-flow-pipeline-line(explicit, epoch, width), fglui-token-flow-category-line(head(explicit), epoch, width), fglui-token-flow-header-line(width)), fglui-token-flow-lines-go(explicit, epoch, width, 8)) else fglui-owner-token-fallback-lines(rows, epoch, width);
         }
     }
     0;

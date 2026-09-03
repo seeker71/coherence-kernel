@@ -22,6 +22,7 @@ section [form.bml] {
         field CollectorRule = "typed-prefix-selects-rows-output-span-stays-coordinate-owned";
         field StaleExpiryRule = "latestness-disproved-expires-current-row-before-next-cursor-step";
         field OneMovementRule = "one-invocation-owns-one-bounded-evidence-movement";
+        field PhaseResumeRule = "physically-valid-progress-or-start-resumes-before-any-terminal-rediscovery";
         field ValidationRangeRule = "each-persisted-append-snapshot-resumes-to-its-checked-floor-before-growth-rolls-forward";
         field ProcessingBytes = 2097152;
         field AttentionMs = 5000;
@@ -36,6 +37,7 @@ section [form.bml] {
         def fctec-collector-rule() = CollectorRule();
         def fctec-stale-expiry-rule() = StaleExpiryRule();
         def fctec-one-movement-rule() = OneMovementRule();
+        def fctec-phase-resume-rule() = PhaseResumeRule();
         def fctec-validation-range-rule() = ValidationRangeRule();
         def fctec-processing-bytes() = ProcessingBytes();
         def fctec-attention-ms() = AttentionMs();
@@ -152,7 +154,7 @@ section [form.bml] {
             if ge(found, 0) then fctec-result(1, add(base, found), end) else fctec-result(0, -1, start);
         }
 
-        def fctec-turn-id-at(path, at) = if lt(at, 0) then "" else fctel-json-string-after(read_file_slice(path, at, 512), "\"turn_id\":", 0);
+        def fctec-turn-id-at(path, at) = if lt(at, 0) then "" else fctel-json-payload-string(read_file_slice(path, at, 512), "turn_id");
         def fctec-codex-source-reconciled?(e, path) {
             let size = file_size(path);
             let meta = fctel-first-line(read_file_slice(path, 0, fctel-min(size, 1048576)));
@@ -160,8 +162,8 @@ section [form.bml] {
             let complete_prefix = read_file_slice(path, fcte-complete-at(e), 4096);
             let c1 = and(eq(fcte-provenance-shape?(e), 1), ge(size, fcte-carrier-size(e)));
             let c2 = str_eq(fctec-turn-id-at(path, fcte-complete-at(e)), fcte-turn-id(e));
-            let c3 = str_eq(fctel-json-string-after(meta, "\"session_id\":", 0), fcte-thread-id(e));
-            let c4 = str_eq(fctel-json-string-after(meta, "\"model_provider\":", 0), fcte-model-provider(e));
+            let c3 = str_eq(fctel-session-meta-thread-id(meta), fcte-thread-id(e));
+            let c4 = str_eq(fctel-session-meta-provider(meta), fcte-model-provider(e));
             let c5 = eq(fctel-line-event?(start_prefix, "task_started", fcte-turn-id(e)), 1);
             let c6 = eq(fctel-terminal-line?(complete_prefix, fcte-turn-id(e)), 1);
             let c7 = eq(fctel-timestamp-ms(start_prefix), fcte-started-ms(e));
@@ -182,6 +184,8 @@ section [form.bml] {
             "turn-evidence-refresh=withheld no-complete-turn";
         }
         def fctec-refresh-discovering(path, size, cursor) {
+            let progressCleared = write_file_text(fctel-progress-path(), "");
+            let startCleared = write_file_text(fctel-start-discovery-path(), "");
             write_file_text(fctel-candidate-row-path(), "");
             write_file_text(fctel-discovery-path(), fctel-discovery-row(path, size, cursor));
             str_concat("turn-evidence-refresh=discovering cursor=", str_concat(int_to_str(cursor), str_concat("/", int_to_str(size))));
@@ -194,7 +198,6 @@ section [form.bml] {
         // not a failure: its on-disk cursor is the continuation owned by this
         // BML authority and can be scheduled as a later resident row.
         def fctec-refresh-selected(path, size, found, turn) {
-            write_file_text(fctel-target-turn-path(), turn);
             write_file_text(fctel-discovery-path(), "");
             fctel-refresh-coordinate-once(path, size, fctec-at(found), turn);
         }
@@ -207,10 +210,63 @@ section [form.bml] {
             let found = fctec-seek(path, target, fctec-start-cursor(path, size));
             if eq(fctec-found?(found), 1) then fctec-refresh-found(path, snapshot, found) else if eq(fctec-end(found), 0) then fctec-refresh-no-complete() else fctec-refresh-discovering(path, snapshot, fctec-end(found));
         }
+
+        // A selected turn already owns its terminal coordinate in the start
+        // row, and a collecting turn owns all three coordinates in progress.
+        // Re-searching the append tail for that same terminal made two phases
+        // coexist and paid the same backward slices again.  These pure
+        // predicates keep phase choice testable without touching the live
+        // spool; their effectful doors clear the superseded discovery row
+        // before continuing exactly one bounded movement.
+        def fctec-phase-action(path, size, progress, start) =
+            if eq(fctel-progress-active?(progress, start, path, size), 1) then "resume-progress"
+            else if eq(fctel-start-discovery-active?(start, path, size), 1) then "resume-start"
+            else "discover";
+        def fctec-clear-discovery-candidate() {
+            let discoveryCleared = write_file_text(fctel-discovery-path(), "");
+            let candidateCleared = write_file_text(fctel-candidate-row-path(), "");
+            1;
+        }
+        def fctec-resume-progress(path, progress) {
+            let cleared = fctec-clear-discovery-candidate();
+            fctel-collect-once(path, str_to_int(nth(progress, 1)),
+                str_to_int(nth(progress, 4)), nth(progress, 2),
+                str_to_int(nth(progress, 3)));
+        }
+        def fctec-resume-start(path, start) {
+            let cleared = fctec-clear-discovery-candidate();
+            fctel-refresh-coordinate-once(path, str_to_int(nth(start, 1)),
+                str_to_int(nth(start, 3)), nth(start, 2));
+        }
+        def fctec-stale-selected-turn(progress, start) =
+            if eq(len(start), 8) then nth(start, 2)
+            else if eq(len(progress), 28) then nth(progress, 2)
+            else "";
+        def fctec-clear-stale-target(progress, start) {
+            let staleTurn = fctec-stale-selected-turn(progress, start);
+            let target = if gt(file_size(fctel-target-turn-path()), 0) then fctel-trim-end(read_file(fctel-target-turn-path())) else "";
+            if and(not(str_eq(staleTurn, "")), str_eq(staleTurn, target)) then write_file_text(fctel-target-turn-path(), "") else 1;
+        }
+        def fctec-reset-stale-phase(progress, start) {
+            let targetCleared = fctec-clear-stale-target(progress, start);
+            let progressCleared = write_file_text(fctel-progress-path(), "");
+            let startCleared = write_file_text(fctel-start-discovery-path(), "");
+            1;
+        }
+        def fctec-refresh-discover(path, size, progress, start) {
+            let reset = fctec-reset-stale-phase(progress, start);
+            let target = if gt(file_size(fctel-target-turn-path()), 0) then fctel-trim-end(read_file(fctel-target-turn-path())) else "";
+            fctec-refresh-nonempty(path, size, target);
+        }
         def fctec-refresh(path) {
             let size = file_size(path);
-            let target = if gt(file_size(fctel-target-turn-path()), 0) then fctel-trim-end(read_file(fctel-target-turn-path())) else "";
-            if le(size, 0) then "turn-evidence-refresh=withheld" else fctec-refresh-nonempty(path, size, target);
+            let progress = fctel-read-progress();
+            let start = fctel-read-start-discovery();
+            let action = fctec-phase-action(path, size, progress, start);
+            if le(size, 0) then "turn-evidence-refresh=withheld"
+            else if str_eq(action, "resume-progress") then fctec-resume-progress(path, progress)
+            else if str_eq(action, "resume-start") then fctec-resume-start(path, start)
+            else fctec-refresh-discover(path, size, progress, start);
         }
 
         def fctec-refresh-bound() {

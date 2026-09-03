@@ -1,0 +1,126 @@
+; native-model-mapped-layout-run.fk — read-only mapped-weight extent witness.
+;
+; The resident model owns the Metal handles.  This witness does not open a
+; model or map a buffer: it walks the same GGUF records selected by the live
+; Qwen and Llama layout cells and sums the exact record byte lengths passed to
+; metal_buf_from_file.  Repeated mappings (the Llama tied output projection)
+; remain repeated because the carrier owns two handles over that extent.
+;
+; preflight-exec: forbidden
+; preludes: form/native/metal/qwen4exp-flash-next-layout.fk form/native/metal/llama-token-handle.fk
+
+(do
+    (defn nmml-qwen-prefix ()
+        "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+    (defn nmml-threeb-path ()
+        "/Users/ursmuff/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff")
+    (defn nmml-qwen-paths ()
+        (list
+            (str_concat (nmml-qwen-prefix) "00001-of-00003.gguf")
+            (str_concat (nmml-qwen-prefix) "00002-of-00003.gguf")
+            (str_concat (nmml-qwen-prefix) "00003-of-00003.gguf")))
+
+    (defn nmml-sum (values)
+        (if (eq (len values) 0) 0
+            (add (head values) (nmml-sum (tail values)))))
+
+    (defn nmml-qwen-entry-bytes (src2 src3 entry)
+        (if (eq (len entry) 0) 0
+            (do
+                (let src (q4sg-source src2 src3 (nth entry 1)))
+                (gm-bytes src (nth entry 2)))))
+
+    ; Common suffixes 0..15 are mapped by every layer.  Suffixes 16..24
+    ; belong only to linear layers and 25..34 only to full-attention layers.
+    ; This is the same selection made by q4gl-layer, expressed without the
+    ; final effectful q4sg-tv-at mapping door.
+    (defn nmml-qwen-tab-entry-selected? (suffix entry)
+        (if (lt suffix 16) 1
+            (if (lt suffix 25)
+                (if (eq (q4g-full (head entry)) 0) 1 0)
+                (if (eq (q4g-full (head entry)) 1) 1 0))))
+    (defn nmml-qwen-tab-bytes (src2 src3 suffix entries)
+        (if (eq (len entries) 0) 0
+            (add
+                (if (eq (nmml-qwen-tab-entry-selected? suffix (head entries)) 1)
+                    (nmml-qwen-entry-bytes src2 src3 (head entries)) 0)
+                (nmml-qwen-tab-bytes src2 src3 suffix (tail entries)))))
+    (defn nmml-qwen-tabs-bytes (src2 src3 tabs suffix)
+        (if (eq (len tabs) 0) 0
+            (add (nmml-qwen-tab-bytes src2 src3 suffix (head tabs))
+                (nmml-qwen-tabs-bytes src2 src3 (tail tabs) (add suffix 1)))))
+    (defn nmml-qwen-tab-handles (tabs suffix)
+        (if (eq (len tabs) 0) 0
+            (add (nmml-qwen-selected-entry-count suffix (head tabs))
+                (nmml-qwen-tab-handles (tail tabs) (add suffix 1)))))
+    (defn nmml-qwen-selected-entry-count (suffix entries)
+        (if (eq (len entries) 0) 0
+            (add (nmml-qwen-tab-entry-selected? suffix (head entries))
+                (nmml-qwen-selected-entry-count suffix (tail entries)))))
+
+    (defn nmml-qwen-model-names ()
+        (list "token_embd.weight" "output_hc_norm.weight"
+            "output_hc_down.weight" "output_hc_up.weight" "output.weight"
+            "per_layer_token_embd.weight" "blk.1.ple_key.weight"
+            "blk.1.ple_value.weight" "blk.1.ple_norm_key.weight"
+            "blk.1.ple_norm_query.weight" "blk.1.ple_norm_conv.weight"
+            "blk.1.ple_conv1d.weight"))
+    (defn nmml-qwen-named-bytes (paths src2 src3 names)
+        (if (eq (len names) 0) 0
+            (do
+                (let record (q4sg-locate paths src2 src3 (head names)))
+                (add (if (eq (q4s-record-status record) 1)
+                        (q4s-record-bytes record) 0)
+                    (nmml-qwen-named-bytes paths src2 src3 (tail names))))))
+
+    (defn nmml-qwen-summary ()
+        (do
+            (let paths (nmml-qwen-paths))
+            (let src2 (eqr-of-file (nth paths 1) 0 16000000))
+            (let src3 (eqr-of-file (nth paths 2) 0 16000000))
+            (let tabs (q4gl-tabs src2 src3))
+            (let tableBytes (nmml-qwen-tabs-bytes src2 src3 tabs 0))
+            (let namedBytes (nmml-qwen-named-bytes paths src2 src3
+                (nmml-qwen-model-names)))
+            (list "model.qwen3.8-flash-next.ud-q2_k_xl.unsloth"
+                (add tableBytes namedBytes)
+                (add (nmml-qwen-tab-handles tabs 0)
+                    (len (nmml-qwen-model-names))))))
+
+    (defn nmml-threeb-tab-bytes (src entries)
+        (if (eq (len entries) 0) 0
+            (add (wtr-bytes src (nth (head entries) 1))
+                (nmml-threeb-tab-bytes src (tail entries)))))
+    (defn nmml-threeb-tabs-bytes (src tabs)
+        (if (eq (len tabs) 0) 0
+            (add (nmml-threeb-tab-bytes src (head tabs))
+                (nmml-threeb-tabs-bytes src (tail tabs)))))
+    (defn nmml-threeb-tabs-count (tabs)
+        (if (eq (len tabs) 0) 0
+            (add (len (head tabs)) (nmml-threeb-tabs-count (tail tabs)))))
+    (defn nmml-threeb-name-bytes (src name)
+        (do
+            (let off (egg-find-tensor src name))
+            (if (lt off 0) 0 (wtr-bytes src off))))
+    (defn nmml-threeb-output-bytes (src)
+        (do
+            (let output (egg-find-tensor src "output.weight"))
+            (if (lt output 0)
+                (nmml-threeb-name-bytes src "token_embd.weight")
+                (wtr-bytes src output))))
+    (defn nmml-threeb-summary ()
+        (do
+            (let src (lth-src (nmml-threeb-path)))
+            (let tabs (lth-tabs src))
+            (let modelBytes (sum (list
+                (nmml-threeb-name-bytes src "token_embd.weight")
+                (nmml-threeb-name-bytes src "output_norm.weight")
+                (nmml-threeb-output-bytes src)
+                (nmml-threeb-name-bytes src "rope_freqs.weight"))))
+            (list "model.llama-3.2-3b-instruct"
+                (add (nmml-threeb-tabs-bytes src tabs) modelBytes)
+                (add (nmml-threeb-tabs-count tabs) 4))))
+
+    (print (list "native-model-mapped-layout-v1" "observed-epoch"
+        (now_unix_ms) (nmml-qwen-summary) (nmml-threeb-summary)))
+    0)

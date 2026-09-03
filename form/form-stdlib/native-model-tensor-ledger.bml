@@ -15,6 +15,9 @@ section [form.bml] {
 
     class NativeModelTensorLedger {
         field NMTLSchema = "native-model-tensor-ledger-v1";
+        field NMTLProfileSchema = "native-model-layout-profile-v1";
+        field NMTLArtifactIdentitySchema = "native-model-open-artifact-identity-v1";
+        field NMTLProfileWitnessEpoch = 1788403802848;
         ref nmtl-authority = NativeModelTensorLedgerAuthority;
         thought nmtl-law = list("same-size-list-drives-allocation-and-ledger", "positive-handles-reconcile-positive-extents", "mapped-is-not-materialized", "stable-group-identity");
 
@@ -45,7 +48,10 @@ section [form.bml] {
         def nmtl-groups-valid?(groups) = if eq(len(groups), 0) then 1 else if not(eq(nmtl-group-valid?(head(groups)), 1)) then 0 else nmtl-groups-valid?(tail(groups));
         def nmtl-groups-bytes(groups) = if eq(len(groups), 0) then 0 else add(nmtl-group-bytes(head(groups)), nmtl-groups-bytes(tail(groups)));
         def nmtl-groups-handles(groups) = if eq(len(groups), 0) then 0 else add(nmtl-group-handles(head(groups)), nmtl-groups-handles(tail(groups)));
+        def nmtl-groups-kind-bytes(groups, kind) = if eq(len(groups), 0) then 0 else add(if str_eq(nmtl-group-kind(head(groups)), kind) then nmtl-group-bytes(head(groups)) else 0, nmtl-groups-kind-bytes(tail(groups), kind));
         def nmtl-groups-kind-handles(groups, kind) = if eq(len(groups), 0) then 0 else add(if str_eq(nmtl-group-kind(head(groups)), kind) then nmtl-group-handles(head(groups)) else 0, nmtl-groups-kind-handles(tail(groups), kind));
+        def nmtl-groups-allocated-bytes(groups) = sub(nmtl-groups-bytes(groups), nmtl-groups-kind-bytes(groups, "mapped-tensors"));
+        def nmtl-groups-allocated-handles(groups) = sub(nmtl-groups-handles(groups), nmtl-groups-kind-handles(groups, "mapped-tensors"));
 
         // One literal home for the Qwen scratch pool.  q4t-bufs allocates this
         // exact list, while Glass sums the same list without re-describing it.
@@ -81,6 +87,62 @@ section [form.bml] {
         def nmtl-llama-allocated-sizes(dModel, dFF, vocabN, nHead, kvd, layers, maxpos) = append(nmtl-positive-values(nmtl-llama-scratch-sizes(dModel, dFF, vocabN, nHead, maxpos)), nmtl-repeat(nmtl-llama-cache-bytes(kvd, maxpos), mul(layers, 2)));
         def nmtl-llama-allocated-bytes(dModel, dFF, vocabN, nHead, kvd, layers, maxpos) = nmtl-sum(nmtl-llama-allocated-sizes(dModel, dFF, vocabN, nHead, kvd, layers, maxpos));
         def nmtl-llama-allocated-handles(dModel, dFF, vocabN, nHead, kvd, layers, maxpos) = len(nmtl-llama-allocated-sizes(dModel, dFF, vocabN, nHead, kvd, layers, maxpos));
+
+        // Artifact-bound reusable summaries.  The mapped byte values were
+        // folded from the same GGUF records selected by q4gl/l3rs and passed
+        // to metal_buf_from_file by observe/native-model-mapped-layout-run.fk.
+        // Glass admits them only beside matching open-time artifact identity
+        // samples physically published by the same owner and model handle.
+        // A matching aggregate catalog size is not an artifact identity.
+        // profile: schema, model id, catalog bytes, mapped bytes/handles,
+        // allocated bytes/handles, open artifact identities, witness epoch.
+        def nmtl-artifact-identity(id, bytes, modified, locator, strength) = list(NMTLArtifactIdentitySchema(), id, bytes, modified, locator, strength);
+        def nmtl-artifact-identity-id(identity) = nth(identity, 1);
+        def nmtl-artifact-identity-bytes(identity) = nth(identity, 2);
+        def nmtl-artifact-identity-modified(identity) = nth(identity, 3);
+        def nmtl-artifact-identity-locator(identity) = nth(identity, 4);
+        def nmtl-artifact-identity-strength(identity) = nth(identity, 5);
+        def nmtl-artifact-identity-strength-valid?(strength) = if str_eq(strength, "stat") then 1 else if str_eq(strength, "inode") then 1 else if str_eq(strength, "content-digest") then 1 else 0;
+        def nmtl-artifact-identity-valid?(identity) = if not(eq(len(identity), 6)) then 0 else if not(str_eq(head(identity), NMTLArtifactIdentitySchema())) then 0 else if le(str_len(nmtl-artifact-identity-id(identity)), 0) then 0 else if le(nmtl-artifact-identity-bytes(identity), 0) then 0 else if le(nmtl-artifact-identity-modified(identity), 0) then 0 else if le(str_len(nmtl-artifact-identity-locator(identity)), 0) then 0 else nmtl-artifact-identity-strength-valid?(nmtl-artifact-identity-strength(identity));
+        def nmtl-artifact-identities-valid?(identities) = if eq(len(identities), 0) then 0 else nmtl-artifact-identities-valid-go?(identities);
+        def nmtl-artifact-identities-valid-go?(identities) = if eq(len(identities), 0) then 1 else if not(eq(nmtl-artifact-identity-valid?(head(identities)), 1)) then 0 else nmtl-artifact-identities-valid-go?(tail(identities));
+        def nmtl-artifact-identities-content-bound?(identities) = if eq(len(identities), 0) then 0 else nmtl-artifact-identities-content-bound-go?(identities);
+        def nmtl-artifact-identities-content-bound-go?(identities) = if eq(len(identities), 0) then 1 else if not(str_eq(nmtl-artifact-identity-strength(head(identities)), "content-digest")) then 0 else nmtl-artifact-identities-content-bound-go?(tail(identities));
+        def nmtl-layout-profile(id, catalogBytes, mappedBytes, mappedHandles, allocatedBytes, allocatedHandles, artifacts, witnessedEpoch) = list(NMTLProfileSchema(), id, catalogBytes, mappedBytes, mappedHandles, allocatedBytes, allocatedHandles, artifacts, witnessedEpoch);
+        def nmtl-layout-profile-id(profile) = nth(profile, 1);
+        def nmtl-layout-profile-catalog-bytes(profile) = nth(profile, 2);
+        def nmtl-layout-profile-mapped-bytes(profile) = nth(profile, 3);
+        def nmtl-layout-profile-mapped-handles(profile) = nth(profile, 4);
+        def nmtl-layout-profile-allocated-bytes(profile) = nth(profile, 5);
+        def nmtl-layout-profile-allocated-handles(profile) = nth(profile, 6);
+        def nmtl-layout-profile-artifact(profile) = nth(profile, 7);
+        def nmtl-layout-profile-witnessed(profile) = nth(profile, 8);
+        def nmtl-layout-profile-valid?(profile) = if not(eq(len(profile), 9)) then 0 else if not(str_eq(head(profile), NMTLProfileSchema())) then 0 else if le(str_len(nmtl-layout-profile-id(profile)), 0) then 0 else if le(nmtl-layout-profile-catalog-bytes(profile), 0) then 0 else if le(nmtl-layout-profile-mapped-bytes(profile), 0) then 0 else if le(nmtl-layout-profile-mapped-handles(profile), 0) then 0 else if le(nmtl-layout-profile-allocated-bytes(profile), 0) then 0 else if le(nmtl-layout-profile-allocated-handles(profile), 0) then 0 else if not(eq(nmtl-artifact-identities-valid?(nmtl-layout-profile-artifact(profile)), 1)) then 0 else if le(nmtl-layout-profile-witnessed(profile), 0) then 0 else 1;
+        def nmtl-layout-profile-matches-catalog?(profile, catalogBytes) = if not(eq(nmtl-layout-profile-valid?(profile), 1)) then 0 else eq(nmtl-layout-profile-catalog-bytes(profile), catalogBytes);
+
+        def nmtl-qwen-layout-profile() = nmtl-layout-profile(
+            "model.qwen3.8-flash-next.ud-q2_k_xl.unsloth",
+            78869128864, 78858104320, 1224,
+            nmtl-qwen-allocated-bytes(128, 48, 4),
+            nmtl-qwen-allocated-handles(128, 48, 4),
+            list(
+                nmtl-artifact-identity("artifact.qwen38.shard1.open", 10946624, 1788069212, "qwen38-ud-q2-k-xl-shard1", "stat"),
+                nmtl-artifact-identity("artifact.qwen38.shard2.open", 49979779296, 1788078737, "qwen38-ud-q2-k-xl-shard2", "stat"),
+                nmtl-artifact-identity("artifact.qwen38.shard3.open", 28878402944, 1788076428, "qwen38-ud-q2-k-xl-shard3", "stat")),
+            NMTLProfileWitnessEpoch());
+        def nmtl-llama-layout-profile() = nmtl-layout-profile(
+            "model.llama-3.2-3b-instruct",
+            2019377376, 2334744832, 256,
+            nmtl-llama-allocated-bytes(3072, 8192, 128256, 24, 1024, 28, 128),
+            nmtl-llama-allocated-handles(3072, 8192, 128256, 24, 1024, 28, 128),
+            list(nmtl-artifact-identity("artifact.llama32-3b.open", 2019377376,
+                1781029047, "dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff", "stat")),
+            NMTLProfileWitnessEpoch());
+        def nmtl-owner-layout-profiles() = list(nmtl-qwen-layout-profile(), nmtl-llama-layout-profile());
+        def nmtl-profiles-mapped-bytes(profiles) = if eq(len(profiles), 0) then 0 else add(nmtl-layout-profile-mapped-bytes(head(profiles)), nmtl-profiles-mapped-bytes(tail(profiles)));
+        def nmtl-profiles-mapped-handles(profiles) = if eq(len(profiles), 0) then 0 else add(nmtl-layout-profile-mapped-handles(head(profiles)), nmtl-profiles-mapped-handles(tail(profiles)));
+        def nmtl-profiles-allocated-bytes(profiles) = if eq(len(profiles), 0) then 0 else add(nmtl-layout-profile-allocated-bytes(head(profiles)), nmtl-profiles-allocated-bytes(tail(profiles)));
+        def nmtl-profiles-allocated-handles(profiles) = if eq(len(profiles), 0) then 0 else add(nmtl-layout-profile-allocated-handles(head(profiles)), nmtl-profiles-allocated-handles(tail(profiles)));
     }
     0;
 }
