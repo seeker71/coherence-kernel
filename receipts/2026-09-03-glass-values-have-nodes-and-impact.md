@@ -60,9 +60,12 @@ was the leaking old publisher offered `quit` through
 After a clean rebase changed the bootstrap source identity, freshness correctly
 fell from 31 to 15. The one Metal+MLX `fkwu` binary was rebuilt, all five
 bootstrap witnesses passed again, and the overlap/quit handoff was repeated.
-One exact rebuilt owner remains:
+The audited remote-lineage merge then changed the owner source mtime without
+changing its meaning. Rather than waive that evidence boundary, a third
+overlap/quit handoff materialized both contexts from the merged source before
+retiring the six-hour predecessor. One exact post-merge owner remains:
 
-- PID 5748, publisher `models.dual-resident.i1788371158624`;
+- PID 18249, publisher `models.dual-resident.i1788393488594`;
 - current PID/start binding `exact-snapshot-owner`, source newer = 0;
 - Qwen route ready = 1, Llama 3B route ready = 1, parallel ready = 1;
 - evidence `derived-window`, because a current liveness observation validates
@@ -72,14 +75,17 @@ One exact rebuilt owner remains:
   unavailable rather than being inferred.
 
 An explicit `status` on the first corrected owner preserved positions Qwen 20
-and 3B 6. On both that owner and the final rebuilt owner, a Qwen step produced
-token 198 and advanced 20 -> 21; a 3B step produced token 13 (`Paris`) and
-advanced 6 -> 7. Before/after publications showed only the chosen model active;
-both then returned to idle while parallel route readiness stayed 1. Idle
-quarter-second polls emitted no state renders between commands. After the
-final steps, PID 5748 remained alive for 6:01:54 at 71,616 KiB RSS, 0.0% CPU,
-and nice 10; its owner-bound snapshot was about 21.5 million ms old while
-current exact PID/start liveness still supported both routes.
+and 3B 6. On that owner, the six-hour predecessor, and the final post-merge
+owner, a Qwen step produced token 198 and advanced 20 -> 21; a 3B step produced
+token 13 (`Paris`) and advanced 6 -> 7. Before/after publications showed only
+the chosen model active; both then returned to idle while parallel route
+readiness stayed 1. Idle quarter-second polls emitted no state renders between
+commands. Predecessor PID 5748 remained alive for 6:01:54 at 71,616 KiB RSS,
+0.0% CPU, and nice 10; its owner-bound snapshot was about 21.5 million ms old
+while current exact PID/start liveness still supported both routes. It was then
+offered `quit` only after PID 18249 reached exact post-merge readiness. The
+final owner measured 38,688 KiB RSS, 0.1% CPU, and nice 10 nine minutes after
+start, after both physical steps.
 
 One route read immediately after a model step crossed the five-second attention
 threshold at about 31 seconds. Repeating the identical bounded route cell
@@ -89,12 +95,12 @@ observation, not promoted to a persistent route cost or silently discarded.
 
 ## Physical Glass witness
 
-Glass panel **#0** at display timestamp 17:39:16 showed 100 metrics, 72
-samples, 25 typed observations, 84 framebuffer events, and 337 current-process
+Glass panel **#0** at display timestamp 00:07:35.898 showed 100 metrics, 76
+samples, 25 typed observations, 85 framebuffer events, and 343 current-process
 nodes. The live pipeline showed `T+28` from the two retained context positions,
 two model/layer samples, drained queue, idle Metal, and honest holes for tensor
 and framebuffer stages. The inspected health row carried the actual local
-projection NodeID `@0.0.0.342`. The earlier physical deadline witness measured
+projection NodeID `@0.0.0.348`. The earlier physical deadline witness measured
 4 Hz work at 82 ms with a 263 ms cycle and 2 Hz quiet work at 37 ms with a
 504 ms cycle; both met their deadlines.
 
@@ -135,7 +141,7 @@ observer band.
 - turn evidence cursor: `16777215`
 - observer, dashboard, and token-flow preflights: balanced, zero errors,
   warnings, or unresolved calls
-- bounded framebuffer diagnostic: 52 events, every correction re-observed
+- bounded framebuffer diagnostic: 56 events, every correction re-observed
 - `git diff --check`: clean
 
 ## Honest remaining doors
