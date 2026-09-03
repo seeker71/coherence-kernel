@@ -90,9 +90,17 @@ telemetry membrane.
 - `form-glass-live-ui-band.fk`: `268435455`, exit 0
 - `form-cli-author-high-band.fk`: `4095`, exit 0
 - form-cli help physically names `model-flow` and its Q>T>L>X>E>M>F>G path
-- bounded framebuffer diagnostic: 72 events; all four new corrections applied
-  and re-observed as 1
+- bounded framebuffer diagnostic: 80 events; all six integration corrections
+  applied and re-observed as 1
 - `git diff --check`: clean
+
+After the linear integration landed, the stable-checkout alias exposed one
+more real absence seam under the freshly rebuilt carrier: that checkout had a
+`.hearth/` directory but no task or reply spool, so `file_size`/`read_file`
+returned typed `nothing`; the queue collector called `str_len` before asking
+whether a value existed and the supervisor rebirthed. The queue collector now
+classifies file presence first and preserves the distinction between no durable
+spools and an empty live queue. Its extended band verdict is `536870911`.
 
 ## Closing
 
