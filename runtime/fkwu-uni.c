@@ -247,10 +247,26 @@ static long long fk_is_nothing(long long v) {
  * not 0/1, not a float (fk_isf needs v<=fk_fbase-3 ~ -9e18; these are ~-8e18, ABOVE it), not a node
  * (fk_nidx maps ~8e18 far past fk_np), not a record ((0-v) is odd here, records even), not nothing
  * (distinct constant). A bare fn-name in value position evaluates to this (tag 243); an indirect
- * call offers the fn it names (tag 244). CLOSURE is the NAMED next gap: the fn-value carries only
- * the fn-index, no captured env-cell yet. */
+ * call offers the fn it names (tag 244).
+ *
+ * CLOSURE, the gap this comment used to name: a fn-value carrying a captured env, not just the
+ * fn-index. Closed by widening the SAME band rather than opening a new one — the index space below
+ * fk_fn_count (ordinary functions) was always tiny relative to the room fk_fnval_floor leaves (up
+ * to ~2.5e17), so indices at-or-above FK_CLOSURE_IDX_BASE (a billion, far past any real fk_fn_count)
+ * now name a row in a SEPARATE runtime table (fk_clo_target/capbase/capcount/capvals) instead of a
+ * plain fk_fn[] entry: which function to run, and the values it captured at the moment its value
+ * was built (form-stdlib/http-layer.fk's `layer-stamp` closing over its own `hn`/`hv` is the
+ * standing example). fk_fnval_idx(v) still just extracts the raw encoded number; fk_fnval_target(v)
+ * is the new door that tells a plain function apart from a closure instance and answers "which
+ * fk_fn[] row do I actually jump to". */
 static const long long fk_fnbase = -8000000000000000000LL;
 static const long long fk_fnval_floor = -8500000000000000000LL;
+#define FK_CLOSURE_IDX_BASE 1000000000LL
+#define FK_CLOSURE_CAP_MAX 8
+static long long *fk_clo_target, *fk_clo_capbase, *fk_clo_capcount;
+static long long fk_clo_top, fk_clo_cap;
+static long long *fk_clo_capvals;
+static long long fk_clo_capvals_top, fk_clo_capvals_cap;
 static long long fk_fnval(long long f) {
     return fk_fnbase - (f << 1) - 1;
 }
@@ -268,7 +284,86 @@ static long long fk_is_fnval(long long v) {
         return 0;
     }
     long long fi = fk_fnval_idx(v);
-    return (fi >= 0 && fi < fk_fn_count) ? 1 : 0;
+    if (fi >= 0 && fi < fk_fn_count) {
+        return 1;
+    }
+    if (fi >= FK_CLOSURE_IDX_BASE && fi < FK_CLOSURE_IDX_BASE + fk_clo_top) {
+        return 1;
+    }
+    return 0;
+}
+/* Given an fn-value already known valid (fk_is_fnval), answer the fk_fn[] row to actually run.
+ * A plain function's own index IS that row; a closure instance's raw index only names ITS OWN
+ * row in the (separate) closure-instance table, which points at the real target. */
+static long long fk_fnval_target(long long v) {
+    long long fi = fk_fnval_idx(v);
+    if (fi < FK_CLOSURE_IDX_BASE) {
+        return fi;
+    }
+    return fk_clo_target[fi - FK_CLOSURE_IDX_BASE];
+}
+static long long fk_fnval_is_closure(long long v) {
+    return fk_fnval_idx(v) >= FK_CLOSURE_IDX_BASE ? 1 : 0;
+}
+/* The call mechanism's hidden extra channel: whichever call is about to jump into a capturing
+ * function's body populates this with that instance's captured values (fresh off the caller's own
+ * live frame for a same-scope call, or off a closure instance's frozen snapshot for one reached
+ * through an escaped value) immediately before the jump; the callee's own compiled prologue (tag
+ * 245, see fk_walk) reads it right back out into its own frame slots before any of its own
+ * statements run. Nothing else executes between the write and that read (this is a single-threaded
+ * tree-walker: one call's args are written, then control passes straight to the callee), so there
+ * is no window for a nested or recursive call to clobber it first. */
+static long long fk_call_cap_vals[FK_CLOSURE_CAP_MAX];
+static void fk_clo_reserve(long long needed) {
+    if (needed <= fk_clo_cap) {
+        return;
+    }
+    long long nc = fk_clo_cap == 0 ? 64 : fk_clo_cap * 2;
+    while (nc < needed) {
+        nc = nc * 2;
+    }
+    fk_clo_target = (long long *)realloc(fk_clo_target, (unsigned long)(nc * 8));
+    fk_clo_capbase = (long long *)realloc(fk_clo_capbase, (unsigned long)(nc * 8));
+    fk_clo_capcount = (long long *)realloc(fk_clo_capcount, (unsigned long)(nc * 8));
+    if (fk_clo_target == 0 || fk_clo_capbase == 0 || fk_clo_capcount == 0) {
+        fk_die("fk_clo_reserve: out of memory growing the closure-instance table");
+    }
+    fk_clo_cap = nc;
+}
+static long long fk_clo_capvals_reserve(long long needed) {
+    if (needed <= fk_clo_capvals_cap) {
+        return fk_clo_capvals_cap;
+    }
+    long long nc = fk_clo_capvals_cap == 0 ? 256 : fk_clo_capvals_cap * 2;
+    while (nc < needed) {
+        nc = nc * 2;
+    }
+    fk_clo_capvals = (long long *)realloc(fk_clo_capvals, (unsigned long)(nc * 8));
+    if (fk_clo_capvals == 0) {
+        fk_die("fk_clo_capvals_reserve: out of memory growing the closure capture-values pool");
+    }
+    fk_clo_capvals_cap = nc;
+    return fk_clo_capvals_cap;
+}
+/* Build one closure instance: target's declared captures are read fresh (native reads against
+ * whatever frame the caller supplies -- see the tag-243 walk arm, its only caller) into the shared
+ * capvals pool, and a new row records where they landed. Returns the closure's own fn-VALUE. */
+static long long fk_clo_make(long long target, long long *vals, long long n) {
+    fk_clo_reserve(fk_clo_top + 1);
+    long long base = fk_clo_capvals_top;
+    fk_clo_capvals_reserve(base + n);
+    long long j = 0;
+    while (j < n) {
+        fk_clo_capvals[base + j] = vals[j];
+        j = j + 1;
+    }
+    fk_clo_capvals_top = base + n;
+    long long inst = fk_clo_top;
+    fk_clo_target[inst] = target;
+    fk_clo_capbase[inst] = base;
+    fk_clo_capcount[inst] = n;
+    fk_clo_top = fk_clo_top + 1;
+    return fk_fnval(FK_CLOSURE_IDX_BASE + inst);
 }
 /* Float boxes are ODD words at/below fk_fbase-3: fk_fbase - (fp<<1) - 1. They were
  * even (fk_fbase - (fp<<1)) until 2026-07-17, which let a deep-negative INT word
@@ -7391,6 +7486,58 @@ static void fk_fn_reserve(long long needed) {
     fk_fn_fbox = next_fn_fbox;
     fk_fn_capacity = next;
 }
+/* Closure bookkeeping, PER FUNCTION (not per call, not per instance -- see fk_clo_make for that).
+ * Kept as its own growable table, separate from fk_fn_reserve's own seven parallel arrays, so this
+ * addition can never disturb that function's existing malloc/copy/free sequence: 0 for every plain
+ * function (top-level or a nested defn that never reads an enclosing name), so the ordinary case
+ * pays nothing beyond the growth itself.
+ *   fk_fn_parent_idx[idx]   -- the fn-idx whose body directly contains idx's own (defn ...)
+ *                              statement (-1 for a top-level defn, which has no enclosing frame to
+ *                              capture from at all).
+ *   fk_fn_cap_count[idx]    -- how many free variables idx's body actually captured.
+ *   fk_fn_cap_encoff[idx*8+j] -- for captured var j, the slot offset in the PARENT's own frame its
+ *                              live value reads from (valid only when the parent's own frame is the
+ *                              current one -- a same-scope call).
+ *   fk_fn_cap_slot[idx*8+j] -- for captured var j, the slot in idx's OWN frame its value is
+ *                              delivered to (both by idx's own compiled body's ordinary reads, and
+ *                              by the prologue that populates it from fk_call_cap_vals). */
+static long long *fk_fn_parent_idx, *fk_fn_cap_count, *fk_fn_cap_encoff, *fk_fn_cap_slot;
+static long long fk_fn_cap_capacity;
+static void fk_fn_cap_reserve(long long needed) {
+    if (needed <= fk_fn_cap_capacity) {
+        return;
+    }
+    long long next = fk_fn_cap_capacity > 0 ? fk_fn_cap_capacity : 256;
+    while (next < needed) {
+        next = next << 1;
+    }
+    unsigned long bytes1 = (unsigned long)next * sizeof(long long);
+    unsigned long bytes8 = (unsigned long)next * FK_CLOSURE_CAP_MAX * sizeof(long long);
+    long long *np = realloc(fk_fn_parent_idx, bytes1);
+    long long *nc = realloc(fk_fn_cap_count, bytes1);
+    long long *ne = realloc(fk_fn_cap_encoff, bytes8);
+    long long *ns = realloc(fk_fn_cap_slot, bytes8);
+    if (np == 0 || nc == 0 || ne == 0 || ns == 0) {
+        fk_die("fk_fn_cap_reserve: out of memory growing closure-capture tables");
+    }
+    fk_fn_parent_idx = np;
+    fk_fn_cap_count = nc;
+    fk_fn_cap_encoff = ne;
+    fk_fn_cap_slot = ns;
+    long long i = fk_fn_cap_capacity;
+    while (i < next) {
+        fk_fn_parent_idx[i] = -1;
+        fk_fn_cap_count[i] = 0;
+        long long j = 0;
+        while (j < FK_CLOSURE_CAP_MAX) {
+            fk_fn_cap_encoff[i * FK_CLOSURE_CAP_MAX + j] = 0;
+            fk_fn_cap_slot[i * FK_CLOSURE_CAP_MAX + j] = 0;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    fk_fn_cap_capacity = next;
+}
 #define FK_AST_NODE_CAP_INIT 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP_INIT). Birth size only -- the table DOUBLES on demand (fk_ast_reserve), so program size is not a wall; .fkb images reserve to fit before bulk-loading. History: 65536->262144 (2026-07-02, a full mel-spectrogram program); a clamp-and-halt wall stood 2026-07-18..09-02 after a doubling probe caught fk_sparse's stray-rparen zero-advance spin re-minting sentinels to the brim (677,766 diagnostics in 6s -- a treadmill, not capacity; fixed at root in the bare-symbol path). That teaching survives the wall's removal: a parse that grows without advancing fk_spos is a parser wound -- kernel_stat 23/24 (live cap / doublings) make the growth observable, and the fill-position question stays the probe. */
 static long long fk_node_count;
 static long long (*fk_node)[4];
@@ -7753,7 +7900,7 @@ static long long fk_walk_body(long long i, long long fp) {
                 fk_vsp = fp;
                 return fk_nothing;
             }
-            long long fi244 = fk_fnval_idx(hv244);
+            long long fi244 = fk_fnval_target(hv244);
             long long base244 = fk_vsp;
             long long cell244 = fk_node[i][2];
             while (cell244 >= 0 && fk_node[cell244][0] == 242) {
@@ -7770,6 +7917,24 @@ static long long fk_walk_body(long long i, long long fp) {
                 m244 = m244 + 1;
             }
             fk_vsp = fp + n244;
+            /* Populate fk_call_cap_vals LAST, immediately before the jump -- an adversarial
+             * review caught this written any earlier (right after resolving hv244, before the
+             * args above were walked): an argument expression can itself be an indirect call
+             * into ANOTHER capturing closure, which would populate this SAME shared scratch
+             * buffer for ITS OWN callee and leave it clobbered by the time control finally
+             * reached here. Nothing after this point can make another call before the jump, so
+             * this is the one place in the arm where the "nothing runs between write and read"
+             * invariant fk_call_cap_vals depends on is actually true. */
+            if (fk_fnval_is_closure(hv244)) {
+                long long inst244 = fk_fnval_idx(hv244) - FK_CLOSURE_IDX_BASE;
+                long long cb244 = fk_clo_capbase[inst244];
+                long long cn244 = fk_clo_capcount[inst244];
+                long long ci244 = 0;
+                while (ci244 < cn244) {
+                    fk_call_cap_vals[ci244] = fk_clo_capvals[cb244 + ci244];
+                    ci244 = ci244 + 1;
+                }
+            }
             fk_fn_heat[fi244] = fk_fn_heat[fi244] + 1;
             fk_cur_fn = fi244;
             fk_heat_pulse();
@@ -7999,14 +8164,32 @@ static long long fk_walk(long long i, long long fp) {
         return 0;
     }
     if (t == 243) {
-        return fk_fnval(fk_node[i][1]);
+        long long chain243 = fk_node[i][2];
+        if (chain243 < 0) {
+            return fk_fnval(fk_node[i][1]);
+        }
+        /* A capturing function's own value: read each captured expression NOW, against the
+         * CURRENT frame (fp) -- correct because the parser only ever built this chain either
+         * (a) at the exact point the defn statement itself runs, reading its OWN parent's live
+         * frame, or (b) at a direct-call site already verified to be in that same frame -- and
+         * freeze them into a new closure-instance row (fk_clo_make) so they survive after this
+         * frame is gone (form-stdlib/model-service.fk's ms-predict-handler returning ms-handle,
+         * to be called much later on some future request, is the standing example). */
+        long long vals243[FK_CLOSURE_CAP_MAX];
+        long long n243 = 0;
+        while (chain243 >= 0 && fk_node[chain243][0] == 242 && n243 < FK_CLOSURE_CAP_MAX) {
+            vals243[n243] = fk_walk(fk_node[chain243][1], fp);
+            n243 = n243 + 1;
+            chain243 = fk_node[chain243][2];
+        }
+        return fk_clo_make(fk_node[i][1], vals243, n243);
     }
     if (t == 244) {
         long long hv244 = fk_walk(fk_node[i][1], fp);
         if (fk_is_fnval(hv244) == 0) {
             return fk_nothing;
         }
-        long long fi244 = fk_fnval_idx(hv244);
+        long long fi244 = fk_fnval_target(hv244);
         long long base244 = fk_vsp;
         long long cell244 = fk_node[i][2];
         while (cell244 >= 0 && fk_node[cell244][0] == 242) {
@@ -8016,6 +8199,19 @@ static long long fk_walk(long long i, long long fp) {
         long long n244 = fk_vsp - base244;
         if (fk_observe_on()) {
             printf("offer-indirect fn%lld args=%lld (computed head)\n", fi244, n244);
+        }
+        /* Populate fk_call_cap_vals LAST, immediately before the jump -- see the fk_walk_body
+         * copy of this arm for why an argument expression that itself calls another capturing
+         * closure would otherwise clobber this shared scratch buffer first. */
+        if (fk_fnval_is_closure(hv244)) {
+            long long inst244 = fk_fnval_idx(hv244) - FK_CLOSURE_IDX_BASE;
+            long long cb244 = fk_clo_capbase[inst244];
+            long long cn244 = fk_clo_capcount[inst244];
+            long long ci244 = 0;
+            while (ci244 < cn244) {
+                fk_call_cap_vals[ci244] = fk_clo_capvals[cb244 + ci244];
+                ci244 = ci244 + 1;
+            }
         }
         fk_fn_heat[fi244] = fk_fn_heat[fi244] + 1;
             fk_cur_fn = fi244;
@@ -8429,6 +8625,17 @@ static long long fk_walk(long long i, long long fp) {
         long long r111 = fk_walk(fk_node[i][2], fp);
         fk_vsp = sv111;
         return r111;
+    }
+    if (t == 148) {
+        /* A capturing function's own prologue read (see fk_wrap_cap_prologue): the value the
+         * call mechanism just placed in fk_call_cap_vals[j], for its own tag-109 wrapper to bind
+         * into this frame's slot -- a bare field read, node[1] is a raw C int (which of the
+         * FK_CLOSURE_CAP_MAX scratch slots), never a walkable sub-node or a .fkb-remappable one.
+         * Tag 148 (not 245): 245 already names the real "metal_pipeline" op in
+         * runtime/fkwu-optable.h (arity 2) -- reusing it silently hijacked every metal_pipeline
+         * call into this arm instead, an adversarial review caught before this ever shipped.
+         * 148 is genuinely free (no optable row, no other tag==/smknode( site names it). */
+        return fk_call_cap_vals[fk_node[i][1]];
     }
     return fk_walk_cold(t, i, fp);
 }
@@ -9817,6 +10024,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (fk_is_fnval(fv197) == 0) {
             fk_die("fk_walk tag 197: method_define third arg must be a function value (a defn name in value position)");
         }
+        if (fk_fnval_is_closure(fv197)) {
+            /* method_invoke's own dispatch (tag 199, fi199 = fk_mth_fn[m199]; i = fk_fn[fi199])
+             * jumps straight into fk_fn[] by raw index -- it does not go through
+             * fk_fnval_target, so a closure instance's captures would never be delivered and
+             * a raw closure-instance number would misread as an ordinary (and almost certainly
+             * out-of-range) fn-idx. Not yet wired; die loudly rather than silently dispatch
+             * wrong, same as this op already does for a non-function third arg. */
+            fk_die("fk_walk tag 197: method_define third arg is a capturing closure, which method "
+                   "dispatch does not yet support -- define the method from a non-capturing "
+                   "function instead");
+        }
         long long m197 = fk_mth_find(bp197, nm197);
         if (m197 < 0) {
             fk_mth_ensure();
@@ -10775,60 +10993,107 @@ static void fk_bd_pop(void) {
         fk_bd_top = fk_bd_top - 1;
     }
 }
-/* A nested (defn ...) resets fk_bd_top to 0 so its own body can't resolve a
- * caller-frame slot (a function has no access to its caller's locals). That
- * reset is a WRITE-CURSOR reset into shared arrays, not a stack push -- the
- * nested defn's own fk_bd_push calls overwrite fk_bd_s/n/off at indices 0..
- * with its bindings, so restoring the COUNT alone would leave the enclosing
- * do's names clobbered (each silently unlookupable, degrading to the
- * unbound-name default). fk_bd_save copies the live slice onto a save STACK
- * and fk_bd_restore pops it back. A stack, because defns nest: with one
- * shared save buffer the inner save overwrote the outer's slice, and the
- * outer do got the inner frame back (x and p lost, witnessed 2026-09-03).
- * FK_BD_SAVE_CAP_INIT is a birth size only; the stack doubles on demand
- * (kernel_stat 33/34). The old fixed 128 overran silently: a 130-binding
- * scope holding a nested defn lost v129 with no word. */
-#define FK_BD_SAVE_CAP_INIT 1024
-static long long *fk_bd_save_s, *fk_bd_save_n, *fk_bd_save_off;
-static long long fk_bd_save_top;
+/* A nested (defn ...) resets fk_bd_top to 0 so its own body can't accidentally
+ * resolve a caller-frame slot (a function has no access to its caller's locals).
+ * That reset is a WRITE-CURSOR reset into shared fixed arrays, not a true stack
+ * push/pop -- so the nested defn's own fk_bd_push calls physically overwrite
+ * fk_bd_s/fk_bd_n/fk_bd_off at indices 0.. with its own bindings. Restoring just
+ * fk_bd_top afterward brought the COUNT back but not the DATA already clobbered
+ * at those indices -- every name the enclosing do had bound became silently
+ * unlookupable (degrading to the unbound-name default, 0) for the rest of that
+ * do's own parsing.
+ *
+ * GROWABLE ARENA, not a single reused 128-slot buffer: a fixed shared buffer
+ * looked correct for one level (save at entry, restore at exit) but a DOUBLY
+ * nested defn breaks it -- the inner defn's OWN fk_bd_save() call, entered
+ * while the OUTER nested defn's body is still being parsed, physically
+ * overwrites the SAME buffer indices the outer defn's own save wrote, so by
+ * the time the outer defn's own fk_bd_restore() finally runs, the data at
+ * those indices is the INNER defn's snapshot, not the outer's true enclosing
+ * one -- a silent misread (x and p lost). Two independent sessions hit this
+ * the same day (one wiring closure-capture support, which reads an enclosing
+ * snapshot from arbitrarily deep inside a body-parse and made the collision
+ * far easier to hit; witnessed 2026-09-03 both times) and converged on the
+ * same fix: fk_bd_save()/restore() calls are always properly LIFO-nested
+ * (they mirror the recursive-descent parser itself: a restore always fires
+ * before the save that contains it returns), so a plain bump-and-shrink
+ * arena is correct. This is the arena shape (save returns the arena's
+ * absolute start offset, restore computes the count as "how far the arena
+ * grew since that offset" -- valid only because nothing else could have
+ * pushed without also having popped by now, and pops the arena back down so
+ * nested calls can never alias each other's data); this arena IS what
+ * kernel_stat 33/34 (fk_bd_save_cap/fk_bd_save_grows, declared once, shared
+ * with the other capacity/doubling pairs nearby) report -- the arena's own
+ * live capacity and doubling count, not a second, differently-shaped
+ * stack's. */
+static long long *fk_bd_arena_s, *fk_bd_arena_n, *fk_bd_arena_off;
+static long long fk_bd_arena_top;
 static long long fk_bd_save(void) {
-    long long top = fk_bd_top;
-    long long need = fk_bd_save_top + top;
-    long long i = 0;
-    if (need > fk_bd_save_cap) {
-        long long nc = fk_bd_save_cap == 0 ? FK_BD_SAVE_CAP_INIT : fk_bd_save_cap;
-        while (nc < need) {
+    long long n = fk_bd_top;
+    if (fk_bd_arena_top + n > fk_bd_save_cap) {
+        long long nc = fk_bd_save_cap == 0 ? 1024 : fk_bd_save_cap * 2;
+        while (nc < fk_bd_arena_top + n) {
             nc = nc * 2;
-            fk_bd_save_grows = fk_bd_save_grows + 1;
         }
-        fk_bd_save_s = (long long *)realloc(fk_bd_save_s, (unsigned long)(nc * 8));
-        fk_bd_save_n = (long long *)realloc(fk_bd_save_n, (unsigned long)(nc * 8));
-        fk_bd_save_off = (long long *)realloc(fk_bd_save_off, (unsigned long)(nc * 8));
-        if (fk_bd_save_s == 0 || fk_bd_save_n == 0 || fk_bd_save_off == 0) {
-            fk_die("fk_bd_save: out of memory growing the binding save stack");
+        fk_bd_save_grows = fk_bd_save_grows + 1;
+        fk_bd_arena_s = (long long *)realloc(fk_bd_arena_s, (unsigned long)(nc * 8));
+        fk_bd_arena_n = (long long *)realloc(fk_bd_arena_n, (unsigned long)(nc * 8));
+        fk_bd_arena_off = (long long *)realloc(fk_bd_arena_off, (unsigned long)(nc * 8));
+        if (fk_bd_arena_s == 0 || fk_bd_arena_n == 0 || fk_bd_arena_off == 0) {
+            fk_die("fk_bd_save: out of memory growing the binding-snapshot arena");
         }
         fk_bd_save_cap = nc;
     }
-    while (i < top) {
-        fk_bd_save_s[fk_bd_save_top + i] = fk_bd_s[i];
-        fk_bd_save_n[fk_bd_save_top + i] = fk_bd_n[i];
-        fk_bd_save_off[fk_bd_save_top + i] = fk_bd_off[i];
-        i = i + 1;
-    }
-    fk_bd_save_top = need;
-    return top;
-}
-static void fk_bd_restore(long long top) {
+    long long start = fk_bd_arena_top;
     long long i = 0;
-    fk_bd_save_top = fk_bd_save_top - top;
-    while (i < top) {
-        fk_bd_s[i] = fk_bd_save_s[fk_bd_save_top + i];
-        fk_bd_n[i] = fk_bd_save_n[fk_bd_save_top + i];
-        fk_bd_off[i] = fk_bd_save_off[fk_bd_save_top + i];
+    while (i < n) {
+        fk_bd_arena_s[start + i] = fk_bd_s[i];
+        fk_bd_arena_n[start + i] = fk_bd_n[i];
+        fk_bd_arena_off[start + i] = fk_bd_off[i];
         i = i + 1;
     }
-    fk_bd_top = top;
+    fk_bd_arena_top = start + n;
+    return start;
 }
+static void fk_bd_restore(long long start) {
+    long long n = fk_bd_arena_top - start;
+    long long i = 0;
+    while (i < n) {
+        fk_bd_s[i] = fk_bd_arena_s[start + i];
+        fk_bd_n[i] = fk_bd_arena_n[start + i];
+        fk_bd_off[i] = fk_bd_arena_off[start + i];
+        i = i + 1;
+    }
+    fk_bd_arena_top = start;
+    fk_bd_top = n;
+}
+/* The IMMEDIATELY enclosing defn's own bd snapshot, for closure-capture detection: a slice of the
+ * fk_bd_save() arena (fk_enc_mark..fk_enc_mark+fk_enc_count), set only while parsing a NESTED
+ * defn's own body (fk_enc_count is 0 at every top-level defn -- there is no enclosing frame to
+ * capture from at file scope, and this must never be left over from an unrelated earlier parse).
+ * Saved/restored around each nested-defn parse exactly like fk_bd_top/fk_maxslot already are, so
+ * it always names the frame ONE level up from wherever body-parsing currently is, however deep the
+ * nesting -- never a grandparent, and never a sibling's own frame (see fk_cur_defn_idx for why a
+ * capturing function's OWN body can't just read this same snapshot to forward its captures on). */
+static long long fk_enc_mark, fk_enc_count;
+static long long fk_enc_lookup(long long s, long long n) {
+    long long i = fk_enc_count;
+    while (i > 0) {
+        i = i - 1;
+        if (fk_sym_eq2(s, n, fk_bd_arena_s[fk_enc_mark + i], fk_bd_arena_n[fk_enc_mark + i])) {
+            return fk_bd_arena_off[fk_enc_mark + i];
+        }
+    }
+    return -1;
+}
+/* The fn-idx whose body is CURRENTLY being parsed (-1 outside every defn). Set around every defn
+ * body-parse, top-level and nested alike, so a nested defn can record its own TRUE parent
+ * (fk_fn_parent_idx) and a call site can tell "am I still directly inside the frame this callee's
+ * captures were read from" (fk_cur_defn_idx == that callee's own parent) from "this is a
+ * self-recursive or cross-sibling call, where re-reading the same enclosing offsets against the
+ * wrong frame would silently return someone else's value" -- the latter is diagnosed, never
+ * silently miscomputed (see the call-resolution arm in fk_sparse). */
+static long long fk_cur_defn_idx = -1;
 static long long fk_parse_do(void);
 static long long fk_parse_top_do_value(void);
 static void fk_parse_top(void);
@@ -10851,13 +11116,18 @@ static void fk_parse_top(void);
  * up by fk_arms, where the walker arm can reach it.) */
 static long long *fk_const_s, *fk_const_n, *fk_const_node, *fk_const_wrapp1, fk_const_top;
 static long long fk_const_cap;
+/* Most-recent-first, mirroring fk_bd_lookup: a nested defn now shares this table
+ * with every top-level one (fk_parse_do's own "defn" branch), so the same name at
+ * two scopes must resolve to the INNER, currently-live registration while both are
+ * in scope -- a forward scan would always find the outer/lower-indexed one first
+ * and the inner one could never actually shadow it. */
 static long long fk_fn_lookup(long long s, long long n) {
-    long long i = 0;
-    while (i < fk_fntop) {
+    long long i = fk_fntop;
+    while (i > 0) {
+        i = i - 1;
         if (fk_sym_eq2(s, n, fk_fnsym_s[i], fk_fnsym_n[i])) {
             return fk_fnidx[i];
         }
-        i = i + 1;
     }
     return -1;
 }
@@ -10908,6 +11178,22 @@ static void fk_const_set(long long s, long long n, long long node) {
 static long long fk_parse_variadic(long long tag);
 static long long fk_parse_fixed_list(long long n);
 static long long fk_parse_record_new(void);
+/* Wrap a nested defn's compiled body with its own capture-prologue: one tag-109 "let" per
+ * captured free variable, binding its own frame slot from fk_call_cap_vals[j] (tag 245, a bare
+ * leaf read of that scratch slot) before any of the body's own statements run -- see
+ * fk_call_cap_vals's own comment for why this ordering is always race-free. A no-op (returns
+ * body unchanged) for any idx with zero captures, which is every ordinary function. */
+static long long fk_wrap_cap_prologue(long long idx, long long body) {
+    long long n = (idx >= 0 && idx < fk_fn_cap_capacity) ? fk_fn_cap_count[idx] : 0;
+    long long j = n;
+    while (j > 0) {
+        j = j - 1;
+        long long slot = fk_fn_cap_slot[idx * FK_CLOSURE_CAP_MAX + j];
+        long long capread = fk_smknode(148, j, 0, 0);
+        body = fk_smknode(109, fk_smklit(slot), capread, body);
+    }
+    return body;
+}
 /* arity -1: parse-until-close, fold right via tag -> nil(18) */
 static long long fk_sparse(void) {
     fk_sskip();
@@ -10934,41 +11220,86 @@ static long long fk_sparse(void) {
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_LPAREN) {
                 fk_spos = fk_spos + 1;
             }
-            fk_sskip();
-            long long as2 = fk_spos;
-            fk_spos = fk_sym_end(fk_spos);
-            long long alen = fk_spos - as2;
-            fk_sskip();
+            /* This is the RESIDUAL path: a nested defn reached somewhere other than
+             * an ordinary do-statement position (fk_parse_do's own "defn" branch
+             * handles that common case, with the full rationale for what a nested
+             * defn IS). Getting here means a defn sits directly in a value
+             * position -- e.g. `(let clo (defn f (a) a))`. Same decision, same
+             * mechanism: register (own fk_fn[] slot, own frame, self-recursion
+             * resolves), but since there is no enclosing do "rest" for the name
+             * to stay visible through, un-register it the moment this expression
+             * is done -- only the returned fn-VALUE (tag 243) can reach it after
+             * that, exactly like any other first-class function value. */
+            long long fk_bd_saved_top = fk_bd_save();
+            long long fk_bd_saved_maxslot = fk_maxslot;
+            long long enc_count_here = fk_bd_top;
+            fk_bd_top = 0;
+            fk_maxslot = 0;
+            long long saved_fntop = fk_fntop;
+            long long idx = fk_defn_next;
+            fk_defn_next = fk_defn_next + 1;
+            fk_fn_reserve(fk_defn_next);
+            fk_fnsym_s[fk_fntop] = ns2;
+            fk_fnsym_n[fk_fntop] = fk_fname_n;
+            fk_fnidx[fk_fntop] = idx;
+            fk_fntop = fk_fntop + 1;
+            fk_fn_cap_reserve(idx + 1);
+            fk_fn_parent_idx[idx] = fk_cur_defn_idx;
+            long long saved_enc_mark = fk_enc_mark;
+            long long saved_enc_count = fk_enc_count;
+            fk_enc_mark = fk_bd_saved_top;
+            fk_enc_count = enc_count_here;
+            long long saved_cur_defn_idx = fk_cur_defn_idx;
+            fk_cur_defn_idx = idx;
+            long long na = 0;
+            while (1) {
+                fk_sskip();
+                if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                    break;
+                }
+                long long as2 = fk_spos;
+                fk_spos = fk_sym_end(fk_spos);
+                if (na == 0 && fk_spos > as2 && fk_divergent_param_name(as2, fk_spos - as2)) {
+                    fk_diag(FK_DIAG_ERR, as2,
+                            "[shadowed-primitive] parameter '%.*s' names a primitive/control form -- "
+                            "in call position the primitive still wins, so the parameter is reachable "
+                            "in value position only, and form-kernel-go drops it from the parameter "
+                            "list entirely (arity divergence). Rename the parameter",
+                            (int)(fk_spos - as2), fk_srctext + as2);
+                    fk_src_unrunnable = 1;
+                }
+                fk_bd_push(as2, fk_spos - as2, na);
+                if (na > fk_maxslot) {
+                    fk_maxslot = na;
+                }
+                na = na + 1;
+            }
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
-            /* SCOPE FIX: save/restore the enclosing do's live let-bindings around
-             * this nested defn's own frame (see fk_bd_save above; sibling f99d3232). */
-            long long fk_bd_saved_top = fk_bd_save();
-            long long fk_bd_saved_maxslot = fk_maxslot;
-            fk_bd_top = 0;
-            fk_maxslot = 0;
-            if (alen > 0 && fk_divergent_param_name(as2, alen)) {
-                fk_diag(FK_DIAG_ERR, as2,
-                        "[shadowed-primitive] parameter '%.*s' names a primitive/control form -- "
-                        "in call position the primitive still wins, so the parameter is reachable "
-                        "in value position only, and form-kernel-go drops it from the parameter "
-                        "list entirely (arity divergence). Rename the parameter",
-                        (int)alen, fk_srctext + as2);
-                fk_src_unrunnable = 1;
-            }
-            fk_bd_push(as2, alen, 0);
+            fk_fnar[idx] = na;
             long long body = fk_sparse();
             fk_sskip();
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
+            body = fk_wrap_cap_prologue(idx, body);
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
+            fk_fn[idx] = body;
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
-            return body;
+            fk_fntop = saved_fntop;
+            fk_enc_mark = saved_enc_mark;
+            fk_enc_count = saved_enc_count;
+            fk_cur_defn_idx = saved_cur_defn_idx;
+            /* -1, not 0: field 2 is the closure env-chain-or-absent, and 0 is a REAL node
+             * index (the very first node of the whole program) -- fk_walk's tag-243 arm tells
+             * "plain fn-value" from "has captures" by field2<0, so a bare non-capturing
+             * fn-value must use the same -1 sentinel every other chain-or-absent field in this
+             * file already uses (tag 241/244's own arg-chain fields), not 0. */
+            return fk_smknode(243, idx, -1, 0);
         }
         if (fk_sym_eq(s, hn, "do")) {
             return fk_parse_do();
@@ -11185,6 +11516,34 @@ static long long fk_sparse(void) {
          * param (map's f, filter's pred) was one same-named prelude defn away from silent
          * capture. A shadowed head lowers through the indirect-call arm below (tag 244). */
         long long hshadow = fk_bd_lookup(s, hn);
+        if (hshadow < 0 && fk_cur_defn_idx >= 0 && fk_enc_count > 0) {
+            /* The call HEAD itself may be a captured free variable -- a parameter of the
+             * enclosing defn that HOLDS a fn (http-layer.fk's layer-wrap taking a `layer-fn`
+             * argument and its nested lw-handler later calling it is the standing example).
+             * Capture it exactly like any other free var (fresh local slot, recorded per
+             * function) and let it fall straight into the ordinary "head is a bound name"
+             * indirect-call path just below -- its value is only known at call time either
+             * way, capture or not. */
+            long long hencoff = fk_enc_lookup(s, hn);
+            if (hencoff >= 0) {
+                long long hfcc = (fk_cur_defn_idx < fk_fn_cap_capacity) ? fk_fn_cap_count[fk_cur_defn_idx] : 0;
+                if (hfcc < FK_CLOSURE_CAP_MAX) {
+                    fk_fn_cap_reserve(fk_cur_defn_idx + 1);
+                    long long hcapslot = fk_maxslot + 1;
+                    fk_maxslot = hcapslot;
+                    fk_bd_push(s, hn, hcapslot);
+                    fk_fn_cap_encoff[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + hfcc] = hencoff;
+                    fk_fn_cap_slot[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + hfcc] = hcapslot;
+                    fk_fn_cap_count[fk_cur_defn_idx] = hfcc + 1;
+                    hshadow = hcapslot;
+                } else {
+                    fk_diag(FK_DIAG_ERR, s,
+                            "[closure-scope] '%.*s' would be this function's %dth captured name "
+                            "(max %d) -- not captured",
+                            (int)hn, fk_srctext + s, (int)hfcc + 1, FK_CLOSURE_CAP_MAX);
+                }
+            }
+        }
         long long fidx = (hshadow >= 0) ? -1 : fk_fn_lookup(s, hn);
         if (fidx >= 0) {
             /* GENERAL ARITY (no per-arity case): parse the callee's `ar` declared arg expressions
@@ -11250,7 +11609,41 @@ static long long fk_sparse(void) {
                 k = k - 1;
                 chain = fk_smknode(242, argn[k], chain, 0);
             }
-            return fk_smknode(241, fidx, chain, 0);
+            /* A capturing callee (fk_fn_cap_count[fidx] > 0 -- see fk_parse_do's own "defn"
+             * branch) cannot run through the ordinary direct-call node: its body expects its
+             * captures delivered through the prologue+fk_call_cap_vals channel, not baked into
+             * fk_fn[fidx] alone. Route it through the SAME value+indirect-call mechanism an
+             * escaped closure already uses (tag 243 building the closure value, tag 244 calling
+             * it) -- correct here ONLY when this call site is still directly inside the frame
+             * fidx's captures read from (fk_cur_defn_idx == fidx's own recorded parent); a
+             * self-recursive or cross-sibling call is a DIFFERENT frame, where re-reading those
+             * same enclosing offsets would silently return someone else's value, so it is
+             * diagnosed instead (the general N-level/self-recursive capture case is real future
+             * work, not yet built -- see the parent-mismatch branch below). */
+            long long fcc = (fidx >= 0 && fidx < fk_fn_cap_capacity) ? fk_fn_cap_count[fidx] : 0;
+            if (fcc == 0) {
+                return fk_smknode(241, fidx, chain, 0);
+            }
+            long long fparent = fk_fn_parent_idx[fidx];
+            if (fk_cur_defn_idx != fparent) {
+                fk_diag(FK_DIAG_ERR, s,
+                        "[closure-scope] '%.*s' captures a name from its own enclosing scope, "
+                        "and this call is not directly inside that scope (self-recursion or a "
+                        "call from a sibling's own body) -- reading its captures here would read "
+                        "the wrong frame, so this call is declined rather than silently wrong. "
+                        "Recovered to nothing (axiom-5); parse continues",
+                        (int)hn, fk_srctext + s);
+                return fk_smknode(137, 0, 0, 0);
+            }
+            long long envchain = -1;
+            long long ce = fcc;
+            while (ce > 0) {
+                ce = ce - 1;
+                long long encoff = fk_fn_cap_encoff[fidx * FK_CLOSURE_CAP_MAX + ce];
+                envchain = fk_smknode(242, fk_smknode(110, fk_smklit(encoff), 0, 0), envchain, 0);
+            }
+            long long closurenode = fk_smknode(243, fidx, envchain, 0);
+            return fk_smknode(244, closurenode, chain, 0);
         }
 
         /* INDIRECT CALL (stone 2c): a call (h args..) whose head h is a BOUND NAME — a parameter,
@@ -11493,7 +11886,63 @@ static long long fk_sparse(void) {
     }
     long long vfidx = fk_fn_lookup(s, fk_spos - s);
     if (vfidx >= 0) {
-        return fk_smknode(243, vfidx, 0, 0);
+        long long vcc = (vfidx < fk_fn_cap_capacity) ? fk_fn_cap_count[vfidx] : 0;
+        if (vcc == 0) {
+            /* -1, not 0 -- see the residual defn arm's own version of this same node just
+             * above for why (0 is a real node index, not an absent-chain sentinel). */
+            return fk_smknode(243, vfidx, -1, 0);
+        }
+        /* A capturing function's bare name, in value position (returned/stored/passed): build
+         * its closure value NOW, reading each captured name fresh off the CURRENT frame -- valid
+         * only while that frame is the one its captures were recorded against (see the direct-
+         * call arm's own version of this same check, just above the call-resolution table). */
+        if (fk_cur_defn_idx != fk_fn_parent_idx[vfidx]) {
+            fk_diag(FK_DIAG_ERR, s,
+                    "[closure-scope] '%.*s' captures a name from its own enclosing scope, and "
+                    "this reference is not directly inside that scope -- reading its captures "
+                    "here would read the wrong frame. Read recovered to 0; parse continues",
+                    (int)(fk_spos - s), fk_srctext + s);
+            return fk_smklit(0);
+        }
+        long long venvchain = -1;
+        long long vce = vcc;
+        while (vce > 0) {
+            vce = vce - 1;
+            long long vencoff = fk_fn_cap_encoff[vfidx * FK_CLOSURE_CAP_MAX + vce];
+            venvchain = fk_smknode(242, fk_smknode(110, fk_smklit(vencoff), 0, 0), venvchain, 0);
+        }
+        return fk_smknode(243, vfidx, venvchain, 0);
+    }
+    /* A bare name unresolved by every ordinary lookup above may still be a FREE VARIABLE: a name
+     * bound in the IMMEDIATELY enclosing defn's own frame (fk_enc_lookup, populated only while
+     * parsing a nested defn's body -- see fk_parse_do's "defn" branch). The first reference
+     * captures it: a fresh local slot is allocated (ordinary let-style bump, exactly like any
+     * other new binding), pushed into THIS defn's own bd so every later reference resolves through
+     * the ordinary fk_bd_lookup above instead of back through here, and recorded per-function so
+     * (a) this defn's own compiled prologue can populate that slot from fk_call_cap_vals on entry,
+     * and (b) every call site that creates or invokes this function knows what to supply. Capped
+     * at FK_CLOSURE_CAP_MAX free variables per function -- generous for the real shape (a handful
+     * of an enclosing handler-factory's own parameters), and a cap that's HIT diagnoses rather
+     * than silently drops the (fcc+1)-th capture. */
+    if (fk_cur_defn_idx >= 0 && fk_enc_count > 0) {
+        long long encoff = fk_enc_lookup(s, fk_spos - s);
+        if (encoff >= 0) {
+            long long fcc2 = (fk_cur_defn_idx < fk_fn_cap_capacity) ? fk_fn_cap_count[fk_cur_defn_idx] : 0;
+            if (fcc2 < FK_CLOSURE_CAP_MAX) {
+                fk_fn_cap_reserve(fk_cur_defn_idx + 1);
+                long long capslot = fk_maxslot + 1;
+                fk_maxslot = capslot;
+                fk_bd_push(s, fk_spos - s, capslot);
+                fk_fn_cap_encoff[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + fcc2] = encoff;
+                fk_fn_cap_slot[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + fcc2] = capslot;
+                fk_fn_cap_count[fk_cur_defn_idx] = fcc2 + 1;
+                return fk_smknode(110, fk_smklit(capslot), 0, 0);
+            }
+            fk_diag(FK_DIAG_ERR, s,
+                    "[closure-scope] '%.*s' would be this function's %dth captured name (max "
+                    "%d) -- not captured",
+                    (int)(fk_spos - s), fk_srctext + s, (int)fcc2 + 1, FK_CLOSURE_CAP_MAX);
+        }
     }
     /* UNBOUND NAME IN VALUE POSITION. This used to be "an honest 0" — and it was the
      * deepest silent-green in this body. A name that resolves to nothing is not a
@@ -11554,6 +12003,123 @@ static long long fk_parse_do(void) {
             long long rest = fk_parse_do();
             fk_bd_pop();
             return fk_smknode(109, fk_smklit(slot), val, rest);
+        }
+        /* A (defn ...) reached HERE is nested: a statement inside another
+         * defn's own (do ...), not a top-level form (that case is
+         * fk_parse_top_do_value's own "defn" branch, which stays global on
+         * purpose). WHAT A NESTED DEFN IS: a registered, independently
+         * callable function -- its own fresh fk_fn[] slot and its own
+         * frame (params + its own lets, PLUS one slot per name it captures
+         * from its immediately-enclosing defn's own frame, delivered by its
+         * own compiled prologue -- see fk_wrap_cap_prologue and
+         * fk_call_cap_vals) -- NOT an inline statement (the pre-heal bug: it
+         * spliced the body into the enclosing do and its own lets clobbered
+         * the enclosing frame's live slots, e.g. outer's `x`). Capture is
+         * SINGLE-LEVEL and same-scope only: a reference to a name bound
+         * further out than the immediate parent, or a direct/self-recursive
+         * call to a capturing function from outside the exact scope its
+         * captures were read from, still can't be honored -- and still says
+         * so loudly (the [unbound-name] / [closure-scope] diagnostics)
+         * rather than silently reading whatever slot happened to be live
+         * there. model-service.fk's ms-handle reading ms-predict-handler's
+         * `model` is the shape this now closes; a self-recursive capturing
+         * closure is the shape it still declines.
+         *
+         * The NAME is registered before its own body is parsed (self- and
+         * mutual-recursion among sibling nested defns resolve, same as
+         * top-level), visible for the rest of THIS do -- mirrors let's
+         * "binds for the rest of its do" just above -- and un-registered
+         * once that rest is parsed, so it cannot shadow a same-named
+         * outer/top-level function beyond its own scope (the exact shape
+         * source-runner-do-defn-band.fk's `hidden`-inside-`local-probe`
+         * "defn-body trap" pins). fk_fn_lookup searches its table
+         * most-recent-first, so a live inner registration wins over an
+         * outer one of the same name while both are in scope. The form's
+         * own value is the fn-VALUE (tag 243) -- first-class, storable,
+         * returnable -- the same value a bare defn-name already carries in
+         * value position; never the body inlined into the caller's frame. */
+        if (fk_sym_eq(p, he - p, "defn")) {
+            fk_spos = he;
+            fk_sskip();
+            long long dns = fk_spos;
+            fk_spos = fk_sym_end(fk_spos);
+            long long dnlen = fk_spos - dns;
+            fk_sskip();
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_LPAREN) {
+                fk_spos = fk_spos + 1;
+            }
+            long long fk_bd_saved_top = fk_bd_save();
+            long long fk_bd_saved_maxslot = fk_maxslot;
+            long long denc_count_here = fk_bd_top;
+            fk_bd_top = 0;
+            fk_maxslot = 0;
+            long long saved_fntop = fk_fntop;
+            long long didx = fk_defn_next;
+            fk_defn_next = fk_defn_next + 1;
+            fk_fn_reserve(fk_defn_next);
+            fk_fnsym_s[fk_fntop] = dns;
+            fk_fnsym_n[fk_fntop] = dnlen;
+            fk_fnidx[fk_fntop] = didx;
+            fk_fntop = fk_fntop + 1;
+            fk_fn_cap_reserve(didx + 1);
+            fk_fn_parent_idx[didx] = fk_cur_defn_idx;
+            long long dsaved_enc_mark = fk_enc_mark;
+            long long dsaved_enc_count = fk_enc_count;
+            fk_enc_mark = fk_bd_saved_top;
+            fk_enc_count = denc_count_here;
+            long long dsaved_cur_defn_idx = fk_cur_defn_idx;
+            fk_cur_defn_idx = didx;
+            long long dna = 0;
+            while (1) {
+                fk_sskip();
+                if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                    break;
+                }
+                long long das = fk_spos;
+                fk_spos = fk_sym_end(fk_spos);
+                if (dna == 0 && fk_spos > das && fk_divergent_param_name(das, fk_spos - das)) {
+                    fk_diag(FK_DIAG_ERR, das,
+                            "[shadowed-primitive] parameter '%.*s' names a primitive/control "
+                            "form -- in call position the primitive still wins, so the "
+                            "parameter is reachable in value position only, and "
+                            "form-kernel-go drops it from the parameter list entirely "
+                            "(arity divergence). Rename the parameter",
+                            (int)(fk_spos - das), fk_srctext + das);
+                    fk_src_unrunnable = 1;
+                }
+                fk_bd_push(das, fk_spos - das, dna);
+                if (dna > fk_maxslot) {
+                    fk_maxslot = dna;
+                }
+                dna = dna + 1;
+            }
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                fk_spos = fk_spos + 1;
+            }
+            fk_fnar[didx] = dna;
+            long long dbody = fk_sparse();
+            fk_sskip();
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                fk_spos = fk_spos + 1;
+            }
+            dbody = fk_wrap_cap_prologue(didx, dbody);
+            if (fk_maxslot > 0) {
+                dbody = fk_smknode(111, fk_smklit(fk_maxslot), dbody, 0);
+            }
+            fk_fn[didx] = dbody;
+            fk_bd_restore(fk_bd_saved_top);
+            fk_maxslot = fk_bd_saved_maxslot;
+            fk_enc_mark = dsaved_enc_mark;
+            fk_enc_count = dsaved_enc_count;
+            fk_cur_defn_idx = dsaved_cur_defn_idx;
+            long long rest2 = fk_parse_do();
+            fk_fntop = saved_fntop;
+            /* -1, not 0 -- this value is always discarded by the tag-69 sequence (something
+             * always follows a defn statement in a do), but it is still WALKED for its side
+             * effect of nothing, so a stray 0 here would still needlessly fk_clo_make an
+             * unused closure instance every time -- see the residual defn arm for the full
+             * reasoning on why 0 is unsafe as an absent-chain sentinel here. */
+            return fk_smknode(69, fk_smknode(243, didx, -1, 0), rest2, 0);
         }
     }
     long long node = fk_sparse();
@@ -11964,6 +12530,18 @@ static void fk_parse_top(void) {
             long long fk_bd_saved_maxslot = fk_maxslot;
             fk_bd_top = 0;
             fk_maxslot = 0;
+            /* A top-level defn has no enclosing frame at all -- fk_enc_count MUST be 0 here
+             * (never a leftover from wherever the top-level parse loop last left it) so a free
+             * name inside this body is never mistaken for a capture; fk_fn_parent_idx[idx]=-1
+             * marks it as having no parent to match against either. */
+            fk_fn_cap_reserve(idx + 1);
+            fk_fn_parent_idx[idx] = -1;
+            long long tsaved_enc_mark = fk_enc_mark;
+            long long tsaved_enc_count = fk_enc_count;
+            fk_enc_mark = 0;
+            fk_enc_count = 0;
+            long long tsaved_cur_defn_idx = fk_cur_defn_idx;
+            fk_cur_defn_idx = idx;
             long long na = 0;
             while (1) {
                 fk_sskip();
@@ -11997,6 +12575,9 @@ static void fk_parse_top(void) {
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
+            fk_enc_mark = tsaved_enc_mark;
+            fk_enc_count = tsaved_enc_count;
+            fk_cur_defn_idx = tsaved_cur_defn_idx;
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
@@ -13617,6 +14198,11 @@ static long long fk_fkb_remap_field(long long tag, long long field, long long va
     if (tag == 12 && field == 2) {
         return value + node_base;
     }
+    if (tag == 243 && field == 2) {
+        /* the closure-capture env chain (a 242-cell list, or -1 for a plain non-capturing
+         * fn-value -- already returned unchanged above by the value<0 guard). */
+        return value + node_base;
+    }
     if ((tag == 240 || tag == 241) && field >= 2) {
         return value + node_base;
     }
@@ -14200,6 +14786,22 @@ static void fk_src_reset_compile_state(void) {
     fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;
+    /* fk_defn_next resets to 1: the NEXT compile pass renumbers fn-indices from scratch, so any
+     * low index it assigns could be a completely different (and very possibly non-capturing)
+     * function than whatever previously lived there. fk_fn_cap_reserve only zeroes newly-grown
+     * table rows, not already-allocated ones, so without this an unrelated function landing on a
+     * reused index would silently inherit a stale nonzero fk_fn_cap_count and get wrapped with a
+     * phantom capture prologue reading a meaningless leftover slot -- caught by adversarial
+     * review before ever being exercised by a real multi-pass compile (the import lane's
+     * speculative per-dependency passes are exactly this shape). fk_fn_cap_encoff/fk_fn_cap_slot
+     * need no clearing of their own: every read of them is already gated by an index below the
+     * (now zeroed) count, so stale bytes past that point are simply never reached. */
+    long long capreset_i = 0;
+    while (capreset_i < fk_fn_cap_capacity) {
+        fk_fn_cap_count[capreset_i] = 0;
+        fk_fn_parent_idx[capreset_i] = -1;
+        capreset_i = capreset_i + 1;
+    }
 }
 /* WHOLE-SOURCE PAREN BALANCE, decided ONCE over the assembled unit.
  *

@@ -1,0 +1,119 @@
+; nested-defn-closure-capture-band.fk -- the gap nested-defn-scope-band.fk's own
+; header named as still open: a nested defn whose body reads a name from its
+; immediately-enclosing defn's own parameter or let (not just its own params/lets).
+;
+; preludes: NONE — deliberately, same reasoning as the sibling bands: this must
+; not be confoundable by a missing or drifted prelude.
+;
+; Witnessed 2026-09-03: form-stdlib/http-layer.fk's `layer-stamp` (closing over
+; its own `hn`/`hv` inside its nested `ls-fn`) and `layer-gate` (closing over
+; `required-header` inside `lg-fn`), and model-service.fk's `ms-predict-handler`
+; (closing over `model` inside `ms-handle`) — a "return a configured handler,
+; called much later on some future request" pattern used throughout the HTTP
+; layer — used to fail with [unbound-name] the moment the nested-defn-scope fix
+; landed (that fix made the name resolve and register, but explicitly declined
+; to read anything outside a nested defn's own frame, naming capture as the
+; next gap rather than reading a wrong slot silently).
+;
+; THE DECISION: a nested defn CAN now capture -- read a name bound in its
+; immediately-enclosing defn's own frame, one level, by value, at the moment
+; its OWN value is built (returned, stored, passed) or at a same-scope call.
+; What it still cannot do, and says so loudly rather than reading the wrong
+; frame (a [closure-scope] diagnostic, not a silent wrong answer): reach a
+; grandparent's frame, or supply its own captures to a self-recursive call or
+; a call from a DIFFERENT nested defn's own body. Witnessed directly (not
+; foldable into this band's own verdict, since triggering either would make
+; the band itself fail to parse):
+;
+;   (do (defn outer (n) (do (defn f (k) (if (eq k 0) n (f (sub k 1)))) (f 3))) (outer 42))
+;
+; -- form-kernel-go/rust/ts all answer 42 (their closures capture the live
+; env on every call, including a recursive one); fkwu answers a diagnosed,
+; recovered `nothing` and a nonzero exit, honestly declining rather than
+; reading `f`'s own frame as if it were `outer`'s.
+;
+; Verdict 63 when every capturing check below holds.
+
+(do
+    ; ---- bit 1: the reported repro itself -- an escaping closure (returned as
+    ; the last statement of its own defining do) reads its parent's own param.
+    (defn ncb-make-adder (n)
+        (do
+            (defn ncb-add (x) (add x n))
+            ncb-add))
+    (defn ncb-escaping-capture ()
+        (do
+            (let a5 (ncb-make-adder 5))
+            (a5 3)))
+
+    ; ---- bit 2: TWO captured names in one nested defn (http-layer.fk's
+    ; layer-stamp closes over both hn and hv).
+    (defn ncb-make-scaler (m b)
+        (do
+            (defn ncb-scale (x) (add (mul x m) b))
+            ncb-scale))
+    (defn ncb-two-captures ()
+        (do
+            (let g (ncb-make-scaler 2 100))
+            (g 7)))
+
+    ; ---- bit 4: capture read at a DIRECT same-scope call (not just an
+    ; escaping value) -- the call-position half of the mechanism.
+    (defn ncb-direct-samescope (p)
+        (do
+            (let x 7)
+            (defn ncb-f (a) (add a x))
+            (add (ncb-f 1) p)))
+
+    ; ---- bit 8: the captured name is itself a fn-VALUE -- a parameter holding
+    ; a function, called from inside the nested defn (http-layer.fk's
+    ; layer-wrap capturing its own `layer-fn` argument and calling it from
+    ; lw-handler is the standing example; this pins the call-HEAD capture
+    ; path, not just captured values used as ordinary arguments).
+    (defn ncb-twice (f)
+        (do
+            (defn ncb-apply-twice (x) (f (f x)))
+            ncb-apply-twice))
+    (defn ncb-inc (n) (add n 1))
+    (defn ncb-higher-order-capture ()
+        (do
+            (let tw (ncb-twice ncb-inc))
+            (tw 10)))
+
+    ; ---- bit 16: two INDEPENDENT instances of the same static closure body,
+    ; each with its own captured value -- proves capture is per-instance
+    ; (frozen at the moment the closure's value is built), not a single
+    ; shared slot two calls would corrupt for each other.
+    (defn ncb-counter-seed (start)
+        (do
+            (defn ncb-get () start)
+            ncb-get))
+    (defn ncb-independent-instances ()
+        (do
+            (let c1 (ncb-counter-seed 1))
+            (let c2 (ncb-counter-seed 99))
+            (add (c1) (c2))))
+
+    ; ---- bit 32: a captured STRING value, read through str_concat -- proves
+    ; capture carries the value's own kind through (not just ints), the same
+    ; concern the string-value band raised for ordinary slot reads. `eq`
+    ; itself is int-only across all four kernels (a bare (eq str str)
+    ; misreads on the TS arm), so the check rides str_len over the built
+    ; string instead of a direct string compare.
+    (defn ncb-make-greeter (prefix)
+        (do
+            (defn ncb-greet (who) (str_concat prefix who))
+            ncb-greet))
+    (defn ncb-string-capture ()
+        (do
+            (let g (ncb-make-greeter "hello-"))
+            (eq (str_len (g "world")) 11)))
+
+    (defn nested-defn-closure-capture-band ()
+        (add (if (eq (ncb-escaping-capture) 8) 1 0)
+        (add (if (eq (ncb-two-captures) 114) 2 0)
+        (add (if (eq (ncb-direct-samescope 100) 108) 4 0)
+        (add (if (eq (ncb-higher-order-capture) 12) 8 0)
+        (add (if (eq (ncb-independent-instances) 100) 16 0)
+             (if (ncb-string-capture) 32 0)))))))
+    (nested-defn-closure-capture-band))
