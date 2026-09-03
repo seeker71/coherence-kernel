@@ -104,6 +104,14 @@ and the queue collector classifies file presence first while preserving the
 distinction between no durable spools and an empty live queue. The hearth band
 remains `4031`; the extended Glass band verdict is `536870911`.
 
+The stable alias was then launched from a fresh zsh. Its truth-first frame
+arrived in 41 ms. Cached JIT map checks were 9–17 ms for most Glass organs,
+117 ms for the changed hearth organ, and the complete 14-unit admission took
+314 ms. The live panel entered `4Hz` and continued from frame `#0`
+(`ev=95 nodes=221 cons=10K`) through frame `#63` without rebirth; the last
+captured cycle was 263 ms against a 250 ms active target. Ctrl-C stopped only
+this bounded alias witness after the continuing frames were observed.
+
 ## Closing
 
 Alive: the request itself now leaves an inspectable, privacy-bounded path from
