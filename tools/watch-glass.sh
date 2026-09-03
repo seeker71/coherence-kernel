@@ -5,7 +5,7 @@
 cd "$(dirname "$0")/.." || exit 1
 if [[ "${FORM_GLASS_NICE_APPLIED:-0}" != "1" ]]; then
   export FORM_GLASS_NICE_APPLIED=1
-  exec /usr/bin/nice -n 10 "$0" "$@"
+  exec /usr/bin/nice -n 19 "$0" "$@"
 fi
 trap 'exit 130' INT TERM HUP
 while :; do

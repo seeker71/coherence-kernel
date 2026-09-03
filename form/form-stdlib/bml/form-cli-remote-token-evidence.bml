@@ -15,7 +15,7 @@
 //
 //////////////////////////////////////////////////////////////////////
 
-// preludes: form-stdlib/core.fk form-stdlib/language-template.fk
+// preludes: form-stdlib/core.fk form-stdlib/language-template.fk form-stdlib/json.fk
 
 section [form.bml] {
     template RemoteTokenTotals<TCount> {
@@ -41,6 +41,10 @@ section [form.bml] {
 
     class FormRemoteTokenEvidence {
         field EventName = "token_count";
+        field AlternateEventName = "provider_usage";
+        field EventEnvelopeName = "event_msg";
+        field TerminalEventName = "turn_finished";
+        field LegacyTerminalEventName = "task_complete";
         field LastUsageName = "last_token_usage";
         field CumulativeUsageName = "total_token_usage";
         field QuantityRule = "sum-last-call-quantity-per-completed-call";
@@ -56,6 +60,10 @@ section [form.bml] {
         field AttributionRule = "reported-total-minus-input-output-is-explicit-unattributed";
 
         def frte-event-name() = EventName();
+        def frte-alternate-event-name() = AlternateEventName();
+        def frte-event-envelope-name() = EventEnvelopeName();
+        def frte-terminal-event-name() = TerminalEventName();
+        def frte-legacy-terminal-event-name() = LegacyTerminalEventName();
         def frte-last-usage-name() = LastUsageName();
         def frte-cumulative-usage-name() = CumulativeUsageName();
         def frte-quantity-rule() = QuantityRule();
@@ -73,28 +81,104 @@ section [form.bml] {
         def frte-separate-quantity-from-event?() = if str_eq(frte-boundary-rule(), "event-count-is-not-token-volume") then 1 else 0;
         def frte-last-not-cumulative?() = if str_eq(frte-last-usage-name(), "last_token_usage") then 1 else 0;
         def frte-last-usage-marker() = str_concat(byte_to_str(34), str_concat(frte-last-usage-name(), str_concat(byte_to_str(34), ":")));
-        // Transport labels can evolve. The call-local usage object is the
-        // semantic provider boundary; a historical `token_count` label is
-        // retained as an event-count detail, never as the sole admission door.
-        def frte-json-space?(cp) = if eq(cp, 32) then 1 else if eq(cp, 9) then 1 else if eq(cp, 10) then 1 else if eq(cp, 13) then 1 else 0;
-        def frte-json-value-start(line, at) = if ge(at, str_len(line)) then at else if eq(frte-json-space?(ord(char_at(line, at))), 1) then frte-json-value-start(line, add(at, 1)) else at;
-        def frte-marker-inside?(line, marker, start, end) {
-            let at = str_find(line, marker, start);
-            if lt(at, 0) then 0 else if lt(at, end) then 1 else 0;
+        // A shaped usage object is evidence only inside the Codex event
+        // envelope and one of its provider-usage payloads.  This keeps a
+        // fully-shaped object nested in a tool result from becoming a remote
+        // model call.  The alternate provider_usage label is explicit data,
+        // rather than permission for any transport payload to self-identify.
+        // Parse exactly one bounded JSONL row into typed Form cells.  The
+        // collector owns the outer 2 MiB row/slice ceiling; this door also
+        // requires the parser to consume the complete row.  Object access is
+        // therefore independent of key order, nesting, and escaped strings.
+        def frte-json-object?(node) = if nothing?(node) then 0 else if node_eq(node_category(node), JSON-OBJECT()) then 1 else 0;
+        def frte-json-document(line) {
+            let parsed = json-parse-value(line, 0, "form-cli-remote-token-evidence.jsonl");
+            let root = json-pair-r(parsed);
+            let end = json-skip-ws(line, json-pair-pos(parsed));
+            if not(eq(end, str_len(line))) then list(0, root)
+            else if not(eq(frte-json-object?(root), 1)) then list(0, root)
+            else list(1, root);
+        }
+        def frte-json-document-valid?(document) = nth(document, 0);
+        def frte-json-document-root(document) = nth(document, 1);
+        def frte-json-string-field(object, key) = if not(eq(frte-json-object?(object), 1)) then "" else if not(json-object-has?(object, key)) then "" else json-string-value(json-object-get(object, key));
+        def frte-json-object-field(object, key) = if not(eq(frte-json-object?(object), 1)) then nothing() else if not(json-object-has?(object, key)) then nothing() else if eq(frte-json-object?(json-object-get(object, key)), 1) then json-object-get(object, key) else nothing();
+        // Direct JSON integers are type 1 on the current substrate; promoted
+        // integer cells retain the historical type 6.  Strings and floats do
+        // not enter token arithmetic through either door.
+        def frte-json-int-node?(node) = if eq(node_type(node), 1) then 1 else if eq(node_type(node), 6) then 1 else 0;
+        def frte-json-nonnegative-int-field?(object, key) = if not(eq(frte-json-object?(object), 1)) then 0 else if not(json-object-has?(object, key)) then 0 else if not(eq(frte-json-int-node?(json-object-get(object, key)), 1)) then 0 else if lt(json-int-value(json-object-get(object, key)), 0) then 0 else 1;
+        def frte-envelope(line) {
+            let document = frte-json-document(line);
+            let root = frte-json-document-root(document);
+            let payload = if eq(frte-json-document-valid?(document), 1) then frte-json-object-field(root, "payload") else nothing();
+            if not(eq(frte-json-document-valid?(document), 1)) then list(0, root, payload)
+            else if not(str_eq(frte-json-string-field(root, "type"), frte-event-envelope-name())) then list(0, root, payload)
+            else if not(eq(frte-json-object?(payload), 1)) then list(0, root, payload)
+            else list(1, root, payload);
+        }
+        def frte-envelope-valid?(envelope) = nth(envelope, 0);
+        def frte-envelope-root(envelope) = nth(envelope, 1);
+        def frte-envelope-payload(envelope) = nth(envelope, 2);
+        def frte-top-type(line) {
+            let document = frte-json-document(line);
+            if eq(frte-json-document-valid?(document), 0) then "" else frte-json-string-field(frte-json-document-root(document), "type");
+        }
+        def frte-payload-type(line) {
+            let envelope = frte-envelope(line);
+            if eq(frte-envelope-valid?(envelope), 0) then "" else frte-json-string-field(frte-envelope-payload(envelope), "type");
+        }
+        def frte-event-envelope?(line) = frte-envelope-valid?(frte-envelope(line));
+        def frte-provider-payload-object?(payload) {
+            let kind = frte-json-string-field(payload, "type");
+            if str_eq(kind, frte-event-name()) then 1 else if str_eq(kind, frte-alternate-event-name()) then 1 else 0;
+        }
+        def frte-provider-payload?(line) {
+            let envelope = frte-envelope(line);
+            if eq(frte-envelope-valid?(envelope), 0) then 0 else frte-provider-payload-object?(frte-envelope-payload(envelope));
+        }
+        // Current Codex rows carry usage below payload.info; the historical
+        // provider envelope carried it directly.  Both are explicit typed
+        // schema positions.  No recursive descendant search is permitted.
+        def frte-provider-usage-object(payload) {
+            let direct = frte-json-object-field(payload, frte-last-usage-name());
+            let info = frte-json-object-field(payload, "info");
+            if eq(frte-json-object?(direct), 1) then direct
+            else if eq(frte-json-object?(info), 1) then frte-json-object-field(info, frte-last-usage-name())
+            else nothing();
         }
         def frte-call-local-usage-line?(line) {
-            let marker = frte-last-usage-marker();
-            let at = str_find(line, marker, 0);
-            let value = if lt(at, 0) then str_len(line) else frte-json-value-start(line, add(at, str_len(marker)));
-            let end = if ge(value, str_len(line)) then value else str_find(line, "}", value);
-            if ge(value, str_len(line)) then 0 else if not(eq(ord(char_at(line, value)), 123)) then 0 else if lt(end, 0) then 0 else if eq(frte-marker-inside?(line, "\"input_tokens\":", value, end), 0) then 0 else if eq(frte-marker-inside?(line, "\"output_tokens\":", value, end), 0) then 0 else if eq(frte-marker-inside?(line, "\"total_tokens\":", value, end), 0) then 0 else 1;
+            let envelope = frte-envelope(line);
+            let payload = frte-envelope-payload(envelope);
+            let usage = if eq(frte-envelope-valid?(envelope), 1) then frte-provider-usage-object(payload) else nothing();
+            if eq(frte-envelope-valid?(envelope), 0) then 0 else if eq(frte-provider-payload-object?(payload), 0) then 0 else if not(eq(frte-json-object?(usage), 1)) then 0 else if eq(frte-json-nonnegative-int-field?(usage, "input_tokens"), 0) then 0 else if eq(frte-json-nonnegative-int-field?(usage, "output_tokens"), 0) then 0 else frte-json-nonnegative-int-field?(usage, "total_tokens");
+        }
+        def frte-call-local-usage-object(line) {
+            let envelope = frte-envelope(line);
+            let payload = frte-envelope-payload(envelope);
+            if eq(frte-envelope-valid?(envelope), 0) then nothing() else if eq(frte-provider-payload-object?(payload), 0) then nothing() else frte-provider-usage-object(payload);
+        }
+        // Extraction stays on the same typed object that admitted the row.
+        // Optional provider counters use the caller's explicit fallback;
+        // strings, floats, negatives, nested decoys, and same-named fields in
+        // cumulative usage never enter arithmetic.
+        def frte-call-local-usage-int-or(line, key, fallback) {
+            let usage = frte-call-local-usage-object(line);
+            if eq(frte-call-local-usage-line?(line), 0) then fallback else if eq(frte-json-nonnegative-int-field?(usage, key), 0) then fallback else json-int-value(json-object-get(usage, key));
+        }
+        def frte-call-local-total(line) {
+            frte-call-local-usage-int-or(line, "total_tokens", -1);
         }
         def frte-terminal-message-marker() = "\"last_agent_message\":";
         def frte-turn-id-marker() = "\"turn_id\":";
-        // A completed turn is identified by its relationship: a turn identity
-        // joined to its terminal agent message. The legacy task_complete label
-        // remains an additional witness, not the only way a rollout may end.
-        def frte-terminal-completion-line?(line) = if eq(str_find(line, frte-turn-id-marker(), 0), sub(0, 1)) then 0 else if ge(str_find(line, "\"task_complete\"", 0), 0) then 1 else if ge(str_find(line, frte-terminal-message-marker(), 0), 0) then 1 else 0;
+        // A completed turn must be the typed Codex terminal payload. Markers
+        // nested in a tool result are content, not carrier boundaries.
+        def frte-terminal-completion-line?(line) {
+            let envelope = frte-envelope(line);
+            let payload = frte-envelope-payload(envelope);
+            let kind = frte-json-string-field(payload, "type");
+            if eq(frte-envelope-valid?(envelope), 0) then 0 else if not(json-object-has?(payload, "turn_id")) then 0 else if str_eq(kind, frte-legacy-terminal-event-name()) then 1 else if and(str_eq(kind, frte-terminal-event-name()), json-object-has?(payload, "last_agent_message")) then 1 else 0;
+        }
 
         // Provider usage is sparse in a rollout.  This grammar walks only
         // `last_token_usage` frames; it does not allocate one Form frame for
@@ -132,15 +216,17 @@ section [form.bml] {
         def frte-line-start-at(value) = nth(value, 1);
         def frte-line-start-go(text, at, floor) = if le(at, floor) then if eq(floor, 0) then frte-line-start(1, 0) else frte-line-start(0, floor) else if eq(ord(char_at(text, sub(at, 1))), 10) then frte-line-start(1, at) else frte-line-start-go(text, sub(at, 1), floor);
         def frte-line-start-at-or-nothing(text, at) = frte-line-start-go(text, at, frte-line-floor(at));
-        def frte-provider-usage-frame?(text, at, end) {
+        def frte-provider-usage-total(text, at, end) {
             let start = frte-line-start-at-or-nothing(text, at);
             let prefix = substring(text, frte-line-start-at(start), end);
-            if eq(frte-line-start-found?(start), 0) then 0 else if eq(frte-call-local-usage-line?(prefix), 0) then 0 else if ge(str_find(prefix, "\"type\":\"token_count\"", 0), 0) then 1 else if ge(str_find(prefix, "\"type\":\"provider_usage\"", 0), 0) then 1 else 0;
+            if eq(frte-line-start-found?(start), 0) then -1 else frte-call-local-total(prefix);
         }
+        def frte-provider-usage-frame?(text, at, end) = if ge(frte-provider-usage-total(text, at, end), 0) then 1 else 0;
         def frte-window-scan(text, from, tally) {
-            let at = str_find(text, frte-last-usage-marker(), from);
+            let at = str_find(text, str_concat(byte_to_str(34), str_concat(frte-last-usage-name(), byte_to_str(34))), from);
             let end = frte-line-end(text, if lt(at, 0) then from else at);
-            if lt(at, 0) then tally else if eq(frte-provider-usage-frame?(text, at, end), 0) then frte-window-scan(text, add(end, 1), tally) else frte-window-scan(text, add(end, 1), frte-window-add(tally, frte-int-in(text, "\"total_tokens\":", at, end)));
+            let tokens = if lt(at, 0) then -1 else frte-provider-usage-total(text, at, end);
+            if lt(at, 0) then tally else if lt(tokens, 0) then frte-window-scan(text, add(end, 1), tally) else frte-window-scan(text, add(end, 1), frte-window-add(tally, tokens));
         }
         def frte-provider-call-window(text) = frte-window-scan(text, 0, frte-window(0, 0));
 

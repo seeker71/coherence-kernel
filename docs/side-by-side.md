@@ -85,8 +85,9 @@ padding the reply with scoring words — that would be serving the metric, not t
 ## What this does and doesn't show — honestly
 
 - The "with Sema" voices here were **simulations run under Sema's written guidance** — the
-  same guidance text the live ChatGPT door is given — not the live ChatGPT itself. The first
-  witnessed live conversation is still pending, and the record says so.
+  same guidance text the live ChatGPT door is given — not the live ChatGPT itself. The live
+  door's own witnessed conversation is
+  [`receipts/2026-07-16-live-voice-witness.md`](../receipts/2026-07-16-live-voice-witness.md).
 - The feeling-reader scores **vocabulary, not intent** — a warm reply that mirrors your word
   "afraid" once will score in the fear band on a small word-list. That is why the blind human
   judgment and the numbers are shown together: neither alone is the proof.

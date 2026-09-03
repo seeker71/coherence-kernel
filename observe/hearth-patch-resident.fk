@@ -1,23 +1,42 @@
-; hearth-patch-resident.fk — the patch servant, standing: each beat runs
-; the guarded one-shot servant over the shared task spool (intent
-; journal, readback, apply, readback-verify, typed refusal on any
-; mismatch), ledgers any patches served, and rests a breath. With this
-; door open, the field serves tree changes as well as answers: any
-; agent appends a kind=repo-patch frame (task = path|find|replace,
-; find unique) and rings the bell.
-; stdin line 1: number of beats.
+; hearth-patch-resident.fk — the patch servant, standing: each WAKE of the
+; hearth bell runs the guarded one-shot servant over the shared task spool
+; (intent journal, readback, apply, readback-verify, typed refusal on any
+; mismatch), ledgers any patches served, and blocks on the bell again —
+; the kernel's read is the rest, never a sleep in a poll
+; (spool-bell-transport). With this door open, the field serves tree
+; changes as well as answers: any agent appends a kind=repo-patch frame
+; (task = path|find|replace, find unique) and rings the bell.
+; The bell is SHARED with the model resident: a ring wakes every reader
+; blocked in open(); whichever read takes the bytes, the other reads ""
+; and both drain. A `release` this servant happens to take is handed back
+; to the bell for a standing model resident, and ends this servant too. A
+; bell that is not a fifo would answer every read at once and turn the
+; block into a spin, so the servant refuses to stand on one and says so.
+; stdin line 1: number of wakes to serve.
 ; preludes: form-stdlib/hearth.bml form-stdlib/hearth-glass.bml form-stdlib/spool-bell-transport.fk
 (do
     (defn hpr-ledger (kind detail)
         (sbt-append (hearth-ledger) (gl-ledger-line kind (now_unix_ms) detail)))
+    (defn hpr-serve ()
+        (do (let out (host-exec "printf '99\\n' | ./fkwu observe/hearth-patch-servant.fk" ""))
+            (let served (fmv-field out "patches-served"))
+            (if (gt served 0)
+                (hpr-ledger "patch" (str_concat "served=" (int_to_str served))) 0)))
     (defn hpr-beat (n tick)
         (if (gt tick n) 0
-            (do (let out (host-exec "printf '99\\n' | ./fkwu observe/hearth-patch-servant.fk" ""))
-                (let served (fmv-field out "patches-served"))
-                (let e (if (gt served 0)
-                    (hpr-ledger "patch" (str_concat "served=" (int_to_str served))) 0))
-                (let z (host-exec "sleep 5" ""))
-                (hpr-beat n (add tick 1)))))
+            (do (let wake (sbt-bell-wait (hearth-bell)))
+                (if (or (nothing? wake) (str_eq wake "release"))
+                    (do (let handed (if (and (not (nothing? wake)) (eq (hearth-standing) 1))
+                            (write_file (hearth-bell) wake) 0))
+                        (hpr-ledger "patch-resident-off"
+                            (if (nothing? wake) "bell-gone" "release"))
+                        0)
+                    (do (let e (hpr-serve))
+                        (hpr-beat n (add tick 1)))))))
     (let n (str_to_int (read_line)))
-    (let born (hpr-ledger "patch-resident-on" (str_concat "beats=" (int_to_str n))))
-    (hpr-beat n 1))
+    (if (eq (hearth-bell-fifo?) 1)
+        (do (let born (hpr-ledger "patch-resident-on" (str_concat "wakes=" (int_to_str n))))
+            (hpr-beat n 1))
+        (do (let off (hpr-ledger "patch-resident-off"
+                "bell-not-fifo: a regular file answers every read at once and would spin"))
+            0)))

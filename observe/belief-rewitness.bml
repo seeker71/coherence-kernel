@@ -1,0 +1,206 @@
+//////////////////////////////////////////////////////////////////////
+//
+// observe/belief-rewitness.bml — the re-witness door (R20 in the
+// release ledger). observe/belief-stamps.bml names 457 owed cells and
+// closes its own header with a NEXT STONE: "an owed cell runs its
+// band, a green exit with the declared verdict renews its stamp to
+// today, red lets it lapse." This is that door — pure functions,
+// called on ONE owed path at a time from observe/belief-rewitness-
+// run.fk (the target-file convention observe/preflight-run.fk already
+// carries).
+//
+// WHAT IT DOES, one sentence per step: find the owed cell's band (the
+// header's own named path if it names one that exists, else the
+// tests/<stem>-band.fk sitting beside the cell); run that band FRESH
+// (pf-fresh from observe/preflight.fk — .fkb/.sym removed first, the
+// same door preflight already proved, never re-derived here); compare
+// the band's real trailing value against the token belief-stamps
+// already parsed from the cell's newest `; witnessed:` line; on an
+// exact match with a clean run, print a candidate stamp line; on a
+// mismatch, or a run that still carries a compile error, name the
+// cell LAPSED — with the real verdict and the exit bit it found —
+// never silently.
+//
+// WHAT IT NEVER DOES. It never writes the candidate back into the
+// cell's source. Rewriting hundreds of headers automatically is a
+// broad, side-effectful, tree-wide action that deserves its own
+// review pass, not a default reached for inside the thing that PROVES
+// the re-witness is real. A band that writes living state stains the
+// world it measures (bandstain, corpus row 1193) — this door reads
+// the cell, reads the band's fresh output, and prints; the source is,
+// byte for byte, exactly what it was before the call.
+//
+// BAND, BY CONVENTION OR BY NAME. Reading the ten oldest owed headers
+// (2026-09-03) found the beside-cell convention holds for eight of
+// them, with one real exception worth naming: form/form-stdlib/
+// knowledge-ingest.fk's header names TWO bands living in different
+// rooms — "ingest/tests/knowledge-ingest-band.fk and form/form-
+// stdlib/tests/knowledge-ingest-band.fk" — and they are NOT
+// interchangeable. The first is the real 127-bit assertion band the
+// header's declared verdict belongs to; the second just echoes
+// knowledge-ingest-check's raw fold (11111) with no pass/fail shape
+// at all. The beside-cell default alone would have picked the second
+// one and reported a false lapse. So: this door scans the cell's own
+// text for any *-band.fk path it names, in reading order, and takes
+// the FIRST one that exists on disk over the beside-cell default. A
+// header that never names one (most of the tree) falls through to the
+// default, tests/<stem>-band.fk in the cell's own directory.
+//
+// TWO ARTIFACTS OF THE UPSTREAM TOKEN PARSER, found running the real
+// batch of ten (2026-09-03), named here so a reader does not mistake
+// them for genuine drift:
+//   - a same-day double stamp (two `; witnessed: 2026-07-06 -> ...`
+//     lines on one date) is a TIE for belief-stamps' newest-stamp
+//     rule, which keeps the FIRST on a tie — the earlier, superseded
+//     number, not the later same-day line the file's own second
+//     stamp already corrects to.
+//   - "-> direct-source band 4095" parses as token "direct-source"
+//     (bfs-token-after-band only strips the word "band" when it is
+//     the FIRST word after the arrow; here "direct-source" is first).
+// Both make this door report a clean, exit-0 LAPSE where the header,
+// read by eye, already agrees with the real number. Named as belief-
+// stamps.bml's own parsing gap, not fixed here — teaching the lens a
+// better tie-break or a richer token grammar is its own change,
+// reviewed on its own footing.
+//
+// PROOF LEVEL: FOURTH-ARM ONLY — this is BML; the .bml floor compiles
+// on fkwu only regardless of what the primitives it calls bind on
+// (host-exec itself binds go+fkwu, pf-arm-mask 9, per preflight.fk).
+//
+// Run one cell:  echo path/to/owed-cell.fk > /tmp/belief-rewitness-target
+//                ./fkwu observe/belief-rewitness-run.fk
+// Proven by:     observe/tests/belief-rewitness-band.fk
+//
+// Kept free of any top-level run (unlike belief-stamps.bml, which
+// prints its whole-tree walk the moment anything preludes it) for the
+// same reason preflight split into preflight.fk + preflight-run.fk:
+// this file must be safe to prelude from a band test with zero side
+// effect. Only observe/belief-rewitness-run.fk reads the target file
+// and can trigger a real (cache-only) fkwu run.
+//
+// NEXT STONE, named and not built here: the bulk stamp-rewrite across
+// the tree — actually writing this door's candidate lines back into
+// hundreds of `; witnessed:` headers — is a separate, larger decision.
+// A change touching hundreds of files at once belongs to a future
+// movement that reviews it as its own thing, not a default this door
+// reaches for once it works on one cell.
+//
+// preludes: form-stdlib/core.fk form-stdlib/form-fs.fk form-stdlib/table.bml observe/belief-freshness.fk observe/belief-stamps.bml observe/preflight.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormBeliefRewitness {
+        thought belief-rewitness-pattern = list("named-band-beats-default", "fresh-run-never-cached", "exact-token-match-is-the-witness", "candidate-not-applied-edit", "mismatch-and-missing-are-both-honest-lapse");
+
+        def brw-nl() = byte_to_str(10);
+
+        // ---- band discovery: a *-band.fk path the header itself names, else the beside-cell default ----
+        def brw-band-mark() = "-band.fk";
+        def brw-mark-len() = str_len(brw-band-mark());
+        def brw-boundary-chars() = list(" ", byte_to_str(9), brw-nl(), "(", ")", "\"", "'", ",", ";", ":", "*", "`", "[", "]", "{", "}", "<", ">");
+        def brw-in-list?(c, xs) = if eq(len(xs), 0) then 0 else if str_eq(c, head(xs)) then 1 else brw-in-list?(c, tail(xs));
+        def brw-token-char?(c) = if eq(brw-in-list?(c, brw-boundary-chars()), 1) then 0 else 1;
+        // walk left from just before the mark while the run is still a path char; the byte AFTER
+        // the last boundary (or 0, at the head of the text) is where the token begins
+        def brw-token-start-at(text, i) = if lt(i, 0) then 0 else if eq(brw-token-char?(bfs-ch(text, i)), 1) then brw-token-start-at(text, sub(i, 1)) else add(i, 1);
+        def brw-token-of-mark(text, i) = substring(text, brw-token-start-at(text, sub(i, 1)), add(i, brw-mark-len()));
+        def brw-scan-loop(text, from, acc) {
+            let i = str_find(text, brw-band-mark(), from);
+            if lt(i, 0) then reverse(acc)
+            else brw-scan-loop(text, add(i, brw-mark-len()), cons(brw-token-of-mark(text, i), acc));
+        }
+        // every *-band.fk-shaped token the cell's own text mentions, in reading order
+        def brw-band-mentions(text) = brw-scan-loop(text, 0, list());
+        def brw-mention-exists?(p, a) = fs-exists?(p);
+        def brw-existing-mentions(text) = tb-filter2(brw-band-mentions(text), brw-mention-exists?, 0);
+
+        def brw-stem(path) {
+            let base = fs-path-basename(path);
+            let ext = fs-path-extension(path);
+            substring(base, 0, sub(str_len(base), str_len(ext)));
+        }
+        def brw-default-band(path) = fs-path-join(fs-path-dirname(path), fs-path-join("tests", str_concat(brw-stem(path), "-band.fk")));
+
+        // the header's own first existing mention wins; the beside-cell default is the fallback;
+        // "" is the honest answer when neither exists
+        def brw-band-for(path) {
+            let text = bfs-host-text(read_file(path));
+            let named = brw-existing-mentions(text);
+            if gt(len(named), 0) then head(named)
+            else if eq(fs-exists?(brw-default-band(path)), 1) then brw-default-band(path)
+            else "";
+        }
+
+        // ---- the fresh run: pf-fresh IS the rm-.fkb/.sym-then-run door, reused whole ----
+        def brw-nonblank?(l) = if eq(str_len(l), 0) then 0 else 1;
+        def brw-last-nonblank(lines, best) = if eq(len(lines), 0) then best else brw-last-nonblank(tail(lines), if eq(brw-nonblank?(head(lines)), 1) then head(lines) else best);
+        // the trailing auto-printed value IS the band's real verdict; belief-stamps' own bfs-lines
+        // splitter is reused rather than a second line-splitter for the same job
+        def brw-last-line(out) = brw-last-nonblank(bfs-lines(out, 0, list()), "");
+        def brw-unrunnable-token(out) = if eq(pf-unsupported?(out), 1) then "unsupported-source-kind" else if eq(pf-effect-refused?(out), 1) then "effect-refused" else str_concat("compile-error x", int_to_str(pf-errors(out)));
+
+        def brw-chomp(s) = if eq(str_len(s), 0) then s else if str_eq(bfs-ch(s, sub(str_len(s), 1)), brw-nl()) then brw-chomp(substring(s, 0, sub(str_len(s), 1))) else s;
+        def brw-today() = brw-chomp(bfs-host-text(host-exec("date +%Y-%m-%d", "")));
+
+        // ---- the result row: path status band declared real olddate newdate candidate errors ----
+        def brw-result(path, status, band, declared, real, olddate, newdate, candidate, errs) = list(path, status, band, declared, real, olddate, newdate, candidate, errs);
+        def brw-r-path(r) = nth(r, 0);
+        def brw-r-status(r) = nth(r, 1);
+        def brw-r-band(r) = nth(r, 2);
+        def brw-r-declared(r) = nth(r, 3);
+        def brw-r-real(r) = nth(r, 4);
+        def brw-r-olddate(r) = nth(r, 5);
+        def brw-r-newdate(r) = nth(r, 6);
+        def brw-r-candidate(r) = nth(r, 7);
+        def brw-r-errors(r) = nth(r, 8);
+        def brw-r-ran?(r) = if str_eq(brw-r-status(r), "no-band") then 0 else if str_eq(brw-r-status(r), "no-stamp") then 0 else 1;
+        def brw-r-exit(r) = if gt(brw-r-errors(r), 0) then 1 else 0;
+
+        def brw-marker-for(path) = if str_eq(fs-path-extension(path), ".bml") then "//" else ";";
+        def brw-candidate-line(path, band, newdate, verdict) = str_concat(brw-marker-for(path), str_concat(" witnessed: ", str_concat(newdate, str_concat(" -> ", str_concat(verdict, str_concat(" (re-witnessed on fkwu by observe/belief-rewitness.bml against ", str_concat(band, ")")))))));
+
+        def brw-witness-run(path, olddate, declared, band) {
+            let out = pf-fresh(band);
+            let clean = pf-clean?(out);
+            let real = if eq(clean, 1) then brw-last-line(out) else brw-unrunnable-token(out);
+            let newdate = brw-today();
+            let matched = and(eq(clean, 1), str_eq(real, declared));
+            let status = if eq(matched, 1) then "renew" else "lapse";
+            let candidate = if str_eq(status, "renew") then brw-candidate-line(path, band, newdate, real) else "";
+            brw-result(path, status, band, declared, real, olddate, newdate, candidate, pf-errors(out));
+        }
+        def brw-witness-with-band(path, olddate, declared, band) = if eq(str_len(band), 0) then brw-result(path, "no-band", "", declared, "", olddate, "", "", 0) else brw-witness-run(path, olddate, declared, band);
+
+        // ---- the door: one owed path in, one result row out ----
+        def brw-witness(path) {
+            let row = bfs-row-of-path(path);
+            let olddate = bfs-row-text(row);
+            let declared = bfs-row-token(row);
+            if eq(bfs-row-date(row), 0) then brw-result(path, "no-stamp", "", "", "", "", "", "", 0)
+            else brw-witness-with-band(path, olddate, declared, brw-band-for(path));
+        }
+
+        // ---- the printed page: a candidate, never an edit ----
+        def brw-field(k, v) = str_concat("  ", str_concat(k, v));
+        def brw-or(v, fallback) = if eq(str_len(v), 0) then fallback else v;
+        def brw-exit-text(r) = if eq(brw-r-ran?(r), 1) then int_to_str(brw-r-exit(r)) else "n/a";
+        def brw-print-candidate-line(r) {
+            print(brw-field("candidate     : ", brw-r-candidate(r)));
+            0;
+        }
+        def brw-print-candidate(r) = if str_eq(brw-r-status(r), "renew") then brw-print-candidate-line(r) else 0;
+        def brw-print-report(r) {
+            print(str_concat("=== belief-rewitness ", brw-r-path(r)));
+            print(brw-field("band          : ", brw-or(brw-r-band(r), "(no band found)")));
+            print(brw-field("old stamp     : ", brw-or(brw-r-olddate(r), "(no stamp)")));
+            print(brw-field("declared      : ", brw-or(brw-r-declared(r), "(none)")));
+            print(brw-field("real verdict  : ", brw-or(brw-r-real(r), "(band did not run)")));
+            print(brw-field("exit          : ", brw-exit-text(r)));
+            print(brw-field("status        : ", brw-r-status(r)));
+            brw-print-candidate(r);
+            brw-r-status(r);
+        }
+        def brw-report(path) = brw-print-report(brw-witness(path));
+    }
+}

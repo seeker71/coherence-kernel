@@ -14,7 +14,9 @@ honest thing you can.
    New logic is a **Form recipe** (`.fk`), not a carrier language. Where is the grammar? Where is the recipe?
 4. **Prove it.** A capability is real when the same recipe computes the same value four ways (Go = Rust = TS =
    `fkwu`). That four-way agreement *is* the proof — stronger than any test suite. Never ship a divergence; never
-   fake a pass; if something isn't built, say so.
+   fake a pass; if something isn't built, say so. Before you land, the drift gates run as one door:
+   `./fkwu gate/drift-gates-run.bml` (as a process gate: `./fkwu gate/drift-gates-run.bml | tee /dev/stderr | grep -q ' refused=0 '`)
+   — a red gate lands nothing.
 5. **Return an attributed trace.** Say what changed, with its sources, its limits, and care. Carry the
    destination, not the journey — the next cell shouldn't have to re-breathe your struggle.
 

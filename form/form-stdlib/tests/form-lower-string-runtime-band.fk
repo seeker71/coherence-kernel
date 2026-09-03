@@ -1,0 +1,110 @@
+; form-lower-string-runtime-band — R28: the HAYSTACK crosses the JIT door at
+; RUNTIME, not lowering time. form-lower-string-band.fk (R10) proved the scan
+; loop lowers and runs when both strings are compile-time constants of the
+; recipe; its own closing named the real remaining wall precisely: "the actual
+; 398k-hot family ... scans RUNTIME strings ... never compile-time constants
+; ... the next stone is threading a runtime string (pointer+length) through
+; fk_inram_args." This band is that stone, proven on REAL EXECUTED arm64
+; bytes against a REAL live Form string — not a literal re-embedded by another
+; name, but a value the compiled image never saw until the call happened.
+;
+; GROUNDING: jit_leaf_inram's argument door, fk_inram_args (runtime/fkwu-uni.c),
+; used to accept only an integer or a list of up to eight integers and decline
+; everything else — probed live before R10 (a bare string argument answered
+; `nothing`). It now also accepts a Form STRING value, in either position (bare
+; or inside the list), as TWO argument slots: base pointer then byte length —
+; fk_srange's own (pointer, length) pair, the same accessor str_byte_at/
+; str_find already read the pool through. No copy is made; the pointer is
+; fk_sb's live base. That pointer is safe for the one call it is handed to
+; because (a) nothing between fk_inram_args returning and fk_inram_call using
+; it interns a new string (image decode, cache lookup, and a cold image's
+; mmap+copy all touch unrelated memory), and (b) the crystallized leaf itself
+; never calls back into this interpreter (pure ALU/load/branch bytes), so it
+; cannot trigger the realloc that would move fk_sb out from under it. Named in
+; fk_inram_args' own header: a FUTURE leaf shape that calls out mid-body could
+; not keep this guarantee and must not carry a raw string pointer across it.
+;
+; form-lower.fk's new lo-strfind-runtime reuses lo-strfind-loop-body — the
+; SAME 27-instruction scan R10 proved, factored out (not duplicated) so this
+; band and form-lower-string-band.fk run byte-identical loop bytes — with one
+; real difference: `bound = hlen-nlen+1` can no longer be an immediate (hlen
+; is unknown until the call), so it is computed into a register from the
+; incoming length at RUNTIME, and the register-form compare this already
+; needed (fa-cmp-r, not a new instruction) naturally carries a negative bound
+; correctly, so no lowering-time "trivial path" special case is needed here
+; the way R10's embedded version needed one for its immediate-only compare.
+;
+; SCOPE, NAMED: the needle is still a lowering-time constant (embedded, like
+; R10's); only the haystack is now a runtime argument. `from` threaded through
+; and a runtime needle are further widening of the same door, not built here.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY — jit_leaf_inram is a runtime-fkwu door. Under
+; the three sibling kernels the name folds to `nothing` and every claim below
+; would read green while proving nothing.
+;
+; Verdict 255 when a runtime string reaches the crystallized scan and answers
+; correctly:
+;    1  a real scan: "fox" found in a full sentence, native == interpreted
+;    2  an empty runtime haystack: native == -1 == interpreted (the negative-
+;       bound case, decided at RUNTIME here, not lowering time)
+;    4  a not-found search: the needle is absent, native == -1 == interpreted
+;    8  a full-length match: needle == haystack, native == 0 == interpreted
+;   16  found at a non-zero, non-final offset: native == 2 == interpreted
+;   32  the haystack is built AT RUNTIME via str_concat — no lowering-time
+;       constant of any name holds these bytes, so this is not "the same
+;       literal under a different door": native == interpreted
+;   64  an empty NEEDLE (nlen=0, the `fa-add` lowering branch, not `fa-sub`):
+;       native == 0 == interpreted
+;  128  compositional — the compiled image's byte length equals the exact
+;       formula (1 + 2*nlen + 3 setup instructions + the 27-instruction core)
+;       and ends in ret — no instruction is unaccounted
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-asm.fk form-stdlib/form-lower.fk
+
+(do
+    (defn flsbr-check (h n)
+        (do (let img (lo-strfind-runtime-str n))
+            (let native (jit_leaf_inram img h))
+            (let interp (str_find h n 0))
+            (eq native interp)))
+
+    ; c0: a real scan over a real (prose) runtime haystack
+    (let c0 (if (flsbr-check "the quick brown fox jumps over the lazy dog" "fox") 1 0))
+
+    ; c1: an empty runtime haystack (bound negative, decided at RUNTIME)
+    (let c1 (if (flsbr-check "" "needle") 2 0))
+
+    ; c2: a not-found search (needle absent, haystack non-empty)
+    (let c2 (if (flsbr-check "hello world" "xyz") 4 0))
+
+    ; c3: a full-length match (needle == haystack)
+    (let c3 (if (flsbr-check "matched" "matched") 8 0))
+
+    ; c4: found at a non-zero, non-final offset
+    (let c4 (if (flsbr-check "abcabcabc" "cab") 16 0))
+
+    ; c5: the haystack is built AT RUNTIME, never a literal of any name in
+    ; this recipe — str_concat mints a fresh pool entry the instant this
+    ; cell runs, provably not something lo-strfind-runtime could have seen
+    ; at lowering time (lo-strfind-runtime never reads a haystack at all).
+    (let built (str_concat "hello " "world"))
+    (let c5 (if (flsbr-check built "wor") 32 0))
+
+    ; c6: an empty needle (nlen=0) — exercises lo-strfind-bound-from-len's
+    ; `fa-add` branch (bound = hlen+1), the one lowering-time choice R10's
+    ; embedded version never had to make (its bound was always foldable, so
+    ; nlen=0 there is handled by the SAME loop, never this register path).
+    (let c6 (if (flsbr-check "abc" "") 64 0))
+
+    ; c7: compositional — the runtime image's length equals the exact
+    ; formula for needle "bc" (nlen=2): 1 (sub sp) + 2*2 (embed needle) +
+    ; 1 (bound calc) + 1 (mov x1,x0) + 1 (mov x2,sp) + 27 (the shared core)
+    ; = 35 instructions = 140 bytes, and it ends in ret.
+    (let rt-img (lo-strfind-runtime-str "bc"))
+    (let expected-len (mul 4 (add (add 1 (mul 2 2)) (add 3 27))))
+    (let rn (len rt-img))
+    (let c7 (if (eq rn expected-len)
+            (if (eq (nth rt-img (sub rn 4)) 192)
+            (if (eq (nth rt-img (sub rn 1)) 214) 128 0) 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))

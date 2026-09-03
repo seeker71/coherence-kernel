@@ -13216,7 +13216,7 @@ mod route_spec_tests {
         let paths = vec![
             "../form-stdlib/core.fk".to_string(),
             "../form-stdlib/kernel-http.fk".to_string(),
-            "../form-stdlib/native-route-goal-cells.fk".to_string(),
+            "../form-stdlib/native-route-goal-cells.bml".to_string(),
             "../form-stdlib/queries/native-route-goal-tending.fk".to_string(),
         ];
         let mut compiled = source_compile_file_workload_recipe_object(&paths, "../form-stdlib")

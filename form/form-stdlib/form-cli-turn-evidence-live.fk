@@ -1,5 +1,6 @@
 ; form-cli-turn-evidence-live.fk — Form reads one explicitly bound Codex
 ; rollout and measures the most recent completed turn.
+; preflight-exec: forbidden
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
 ; preludes: form-stdlib/json.fk form-stdlib/form-fs.fk
@@ -27,6 +28,9 @@
 (defn fctel-chunk-bytes () 2097152)
 (defn fctel-processing-bytes () 2097152)
 (defn fctel-overlap-bytes () 4096)
+(defn fctel-progress-max-bytes () 1048576)
+(defn fctel-max-pending-calls () 256)
+(defn fctel-max-call-id-bytes () 256)
 
 (defn fctel-join (parts)
     (if (eq (len parts) 0) ""
@@ -45,39 +49,153 @@
 
 (defn fctel-trim-end (s) (fctel-trim-end-loop s (str_len s)))
 
-(defn fctel-json-string-after (s marker from)
-    (do
-        (let p (str_find s marker from))
-        (if (lt p 0) ""
-            (do
-                (let q (str_find s "\"" (add p (str_len marker))))
-                (if (lt q 0) ""
-                    (do
-                        (let e (json-scan-string-end-pos s q))
-                        (if (le e (add q 1)) ""
-                            (json-unescape-string
-                                (substring s (add q 1) (sub e 1))))))))))
+; Direct-field cursor for bounded JSONL rows.  It walks object structure and
+; skips quoted strings with JSON escape semantics; a same-named field nested
+; in metadata or carried as tool content is never a direct root/payload key.
+; Unlike the full typed parser this cursor can read the compact header of a
+; multi-megabyte tool-output row without interning its private output string.
+(defn fctel-json-string-closed? (s end)
+    (and (gt end 0)
+         (and (le end (str_len s))
+              (eq (ord (char_at s (sub end 1))) 34))))
 
-(defn fctel-number-cp? (cp)
-    (or (and (ge cp 48) (le cp 57))
-        (or (eq cp 45) (eq cp 46))))
+(defn fctel-json-composite-end-loop (s i depth)
+    (if (ge i (str_len s)) -1
+        (do
+            (let cp (ord (char_at s i)))
+            (if (eq cp 34)
+                (do
+                    (let end (json-scan-string-end-pos s i))
+                    (if (eq (fctel-json-string-closed? s end) 0) -1
+                        (fctel-json-composite-end-loop s end depth)))
+            (if (or (eq cp 123) (eq cp 91))
+                (fctel-json-composite-end-loop s (add i 1) (add depth 1))
+            (if (or (eq cp 125) (eq cp 93))
+                (if (eq depth 1) (add i 1)
+                    (fctel-json-composite-end-loop s (add i 1) (sub depth 1)))
+                (fctel-json-composite-end-loop s (add i 1) depth)))))))
 
-(defn fctel-number-end (s i)
+(defn fctel-json-primitive-end (s i)
     (if (ge i (str_len s)) i
-        (if (fctel-number-cp? (ord (char_at s i)))
-            (fctel-number-end s (add i 1)) i)))
+        (do
+            (let cp (ord (char_at s i)))
+            (if (or (eq cp 44) (or (eq cp 125) (eq cp 93))) i
+                (if (json-is-ws-cp cp) i
+                    (fctel-json-primitive-end s (add i 1)))))))
 
-(defn fctel-int-after (s marker from)
+(defn fctel-json-value-end (s at)
+    (if (or (lt at 0) (ge at (str_len s))) -1
+        (do
+            (let cp (ord (char_at s at)))
+            (if (eq cp 34)
+                (do
+                    (let end (json-scan-string-end-pos s at))
+                    (if (eq (fctel-json-string-closed? s end) 1) end -1))
+            (if (or (eq cp 123) (eq cp 91))
+                (fctel-json-composite-end-loop s (add at 1) 1)
+                (fctel-json-primitive-end s at))))))
+
+(defn fctel-json-object-field-next (s after-value key)
+    (if (lt after-value 0) -1
+        (do
+            (let next (json-next-token s after-value))
+            (if (str_eq (json-tok-kind next) "COMMA")
+                (fctel-json-object-field-start-loop s
+                    (json-token-end s next) key)
+                -1))))
+
+(defn fctel-json-object-field-value (s key-token colon key)
+    (if (not (str_eq (json-tok-kind colon) "COLON")) -1
+        (do
+            (let value-at (json-skip-ws s (json-token-end s colon)))
+            (if (str_eq (json-tok-val key-token) key) value-at
+                (fctel-json-object-field-next s
+                    (fctel-json-value-end s value-at) key)))))
+
+(defn fctel-json-object-field-start-loop (s i key)
     (do
-        (let p (str_find s marker from))
-        (if (lt p 0) 0
+        (let at (json-skip-ws s i))
+        (if (or (ge at (str_len s))
+                (eq (ord (char_at s at)) 125)) -1
             (do
-                (let a (add p (str_len marker)))
-                (let b (fctel-number-end s a))
-                (if (eq a b) 0
-                    (if (ge (str_find (substring s a b) "." 0) 0)
-                        (round (str_to_float (substring s a b)))
-                        (str_to_int (substring s a b))))))))
+                (let key-token (json-next-token s at))
+                (if (not (str_eq (json-tok-kind key-token) "STRING")) -1
+                    (fctel-json-object-field-value s key-token
+                        (json-next-token s (json-token-end s key-token))
+                        key))))))
+
+(defn fctel-json-object-field-start (s object-at key)
+    (if (or (lt object-at 0) (ge object-at (str_len s))) -1
+        (if (not (eq (ord (char_at s object-at)) 123)) -1
+            (fctel-json-object-field-start-loop s (add object-at 1) key))))
+
+(defn fctel-json-root-at (s)
+    (do
+        (let at (json-skip-ws s 0))
+        (if (ge at (str_len s)) -1
+            (if (eq (ord (char_at s at)) 123) at -1))))
+
+; Range forms walk the already-loaded bounded segment from a row coordinate.
+; They do not copy a multi-megabyte private row merely because a direct field
+; follows a large output/metadata value.
+(defn fctel-json-root-at-from (s from)
+    (do
+        (let at (json-skip-ws s from))
+        (if (ge at (str_len s)) -1
+            (if (eq (ord (char_at s at)) 123) at -1))))
+
+(defn fctel-json-root-field-start (s key)
+    (fctel-json-object-field-start s (fctel-json-root-at s) key))
+(defn fctel-json-root-field-start-from (s from key)
+    (fctel-json-object-field-start s (fctel-json-root-at-from s from) key))
+
+(defn fctel-json-payload-at (s)
+    (do
+        (let at (fctel-json-root-field-start s "payload"))
+        (if (lt at 0) -1
+            (if (ge at (str_len s)) -1
+                (if (eq (ord (char_at s at)) 123) at -1)))))
+(defn fctel-json-payload-at-from (s from)
+    (do
+        (let at (fctel-json-root-field-start-from s from "payload"))
+        (if (lt at 0) -1
+            (if (ge at (str_len s)) -1
+                (if (eq (ord (char_at s at)) 123) at -1)))))
+
+(defn fctel-json-payload-field-start (s key)
+    (fctel-json-object-field-start s (fctel-json-payload-at s) key))
+(defn fctel-json-payload-field-start-from (s from key)
+    (fctel-json-object-field-start s (fctel-json-payload-at-from s from) key))
+
+(defn fctel-json-string-at-field (s at)
+    (if (or (lt at 0) (ge at (str_len s))) ""
+        (do
+            (let token (json-next-token s at))
+            (if (and (str_eq (json-tok-kind token) "STRING")
+                     (eq (json-tok-start token) at))
+                (json-tok-val token) ""))))
+
+(defn fctel-json-int-at-field (s at fallback)
+    (if (or (lt at 0) (ge at (str_len s))) fallback
+        (do
+            (let token (json-next-token s at))
+            (if (and (str_eq (json-tok-kind token) "NUMBER")
+                     (and (eq (json-tok-start token) at)
+                          (eq (json-number-float? (json-tok-val token)) 0)))
+                (str_to_int (json-tok-val token)) fallback))))
+
+(defn fctel-json-root-string (s key)
+    (fctel-json-string-at-field s (fctel-json-root-field-start s key)))
+(defn fctel-json-payload-string (s key)
+    (fctel-json-string-at-field s (fctel-json-payload-field-start s key)))
+(defn fctel-json-root-string-from (s from key)
+    (fctel-json-string-at-field s
+        (fctel-json-root-field-start-from s from key)))
+(defn fctel-json-payload-string-from (s from key)
+    (fctel-json-string-at-field s
+        (fctel-json-payload-field-start-from s from key)))
+(defn fctel-json-payload-int (s key fallback)
+    (fctel-json-int-at-field s (fctel-json-payload-field-start s key) fallback))
 
 ; ISO-8601 UTC timestamps in Codex rollouts have millisecond precision.
 (defn fctel-slice-int (s a b) (str_to_int (substring s a b)))
@@ -110,7 +228,7 @@
                  (add (mul second 1000) millis)))))
 
 (defn fctel-timestamp-ms (line)
-    (fctel-iso-ms (fctel-json-string-after line "\"timestamp\":" 0)))
+    (fctel-iso-ms (fctel-json-root-string line "timestamp")))
 
 (defn fctel-find-last-text (s needle from last)
     (do
@@ -133,22 +251,41 @@
 (defn fctel-top-type (prefix)
     ; `ordinal` and future envelope keys may sit before `type`.  The key is
     ; stable; its string ordinal is not.
-    (fctel-json-string-after prefix "\"type\":" 0))
+    (fctel-json-root-string prefix "type"))
 
 (defn fctel-payload-type (prefix)
     (do
         (let top-type (fctel-top-type prefix))
         (if (or (str_eq top-type "event_msg") (str_eq top-type "response_item"))
             (do
-                (let payload-at (str_find prefix "\"payload\":" 0))
-                (if (lt payload-at 0) ""
-                    (fctel-json-string-after prefix "\"type\":" payload-at)))
+                (fctel-json-payload-string prefix "type"))
             "")))
+
+; Codex binds carrier identity inside the session_meta payload.  Root-level
+; fields with the same names are unrelated envelope data and cannot identify
+; the rollout consumed by a turn-evidence row.
+(defn fctel-session-meta-string (prefix key)
+    (if (str_eq (fctel-top-type prefix) "session_meta")
+        (fctel-json-payload-string prefix key) ""))
+(defn fctel-session-meta-thread-id (prefix)
+    (fctel-session-meta-string prefix "session_id"))
+(defn fctel-session-meta-provider (prefix)
+    (fctel-session-meta-string prefix "model_provider"))
+
+(defn fctel-top-type-from (segment from)
+    (fctel-json-root-string-from segment from "type"))
+
+(defn fctel-payload-type-from (segment from)
+    (do
+        (let top-type (fctel-top-type-from segment from))
+        (if (or (str_eq top-type "event_msg")
+                (str_eq top-type "response_item"))
+            (fctel-json-payload-string-from segment from "type") "")))
 
 (defn fctel-line-event? (prefix event-type turn-id)
     (if (str_eq (fctel-payload-type prefix) event-type)
         (if (str_eq turn-id "") 1
-            (if (str_eq (fctel-json-string-after prefix "\"turn_id\":" 0) turn-id) 1 0))
+            (if (str_eq (fctel-json-payload-string prefix "turn_id") turn-id) 1 0))
         0))
 
 (defn fctel-find-last-line-event (s event-type turn-id from last)
@@ -167,7 +304,7 @@
 (defn fctel-terminal-line? (prefix turn-id)
     (if (eq (frte-terminal-completion-line? prefix) 0) 0
         (if (str_eq turn-id "") 1
-            (if (str_eq (fctel-json-string-after prefix "\"turn_id\":" 0)
+            (if (str_eq (fctel-json-payload-string prefix "turn_id")
                         turn-id) 1 0))))
 
 (defn fctel-find-last-terminal-line (s turn-id from last)
@@ -220,18 +357,39 @@
         (let nl (fctel-find-last-text before "\n" 0 -1))
         (if (lt nl 0) a (add a (add nl 1)))))
 
-(defn fctel-line-end-loop (path size offset)
-    (if (ge offset size) size
-        (do
-            (let body (read_file_slice path offset
-                (fctel-min 65536 (sub size offset))))
-            (let nl (scan_run body 0 5))
-            (if (lt nl (str_len body)) (add offset (add nl 1))
-                (if (eq (str_len body) 0) size
-                    (fctel-line-end-loop path size (add offset (str_len body))))))))
-
+; A row boundary is found in one finite read.  A row wider than the collector
+; slice is a visible refusal, never a recursive walk that silently expands one
+; invocation beyond its attention and memory bound.
+(defn fctel-line-end-from-body (body size offset)
+    (do
+        (let nl (scan_run body 0 5))
+        (if (lt nl (str_len body)) (add offset (add nl 1))
+            (if (ge (add offset (str_len body)) size) size -1))))
 (defn fctel-line-end (path size marker)
-    (fctel-line-end-loop path size marker))
+    (if (ge marker size) size
+        (do
+            (let width (fctel-min (fctel-processing-bytes)
+                (sub size marker)))
+            (fctel-line-end-from-body
+                (read_file_slice path marker width) size marker))))
+
+; Result: exact end coordinate and its already-read complete-row body.  A
+; non-final slice retreats to its last LF, keeping both I/O and parsing at or
+; below ProcessingBytes.  No LF means one physical row exceeded the ABI.
+(defn fctel-chunk (end body) (list end body))
+(defn fctel-chunk-end (chunk) (nth chunk 0))
+(defn fctel-chunk-body (chunk) (nth chunk 1))
+(defn fctel-bounded-chunk (path cursor segment-end)
+    (do
+        (let target (fctel-min segment-end
+            (add cursor (fctel-processing-bytes))))
+        (let body (read_file_slice path cursor (sub target cursor)))
+        (if (ge target segment-end) (fctel-chunk target body)
+            (do
+                (let nl (fctel-find-last-text body "\n" 0 -1))
+                (if (lt nl 0) (fctel-chunk -1 "")
+                    (fctel-chunk (add cursor (add nl 1))
+                        (substring body 0 (add nl 1))))))))
 
 (defn fctel-first-line (text)
     (do
@@ -281,18 +439,26 @@
 
 (defn fctel-raw-output-measure (line scan-receipt)
     (do
-        (let p (str_find (substring line 0 (fctel-min 512 (str_len line))) "\"output\":" 0))
-        (if (lt p 0) (fctel-zero-output-measure)
+        (let at (fctel-json-payload-field-start line "output"))
+        (if (or (lt at 0) (not (eq (ord (char_at line at)) 34)))
+            (fctel-zero-output-measure)
             (do
-                (let raw-bytes (sub (str_len line) (add p 9)))
-                (let tail-start (fctel-max (add p 9) (sub (str_len line) 512)))
-                (let rows (if (eq scan-receipt 1)
-                    (fctel-raw-form-tail-loop
-                        (substring line tail-start (str_len line)) 0
-                        (fctel-zero-output-measure))
-                    (fctel-zero-output-measure)))
-                (list raw-bytes (nth rows 1) (nth rows 2) (nth rows 3)
-                    (nth rows 4) (nth rows 5) (nth rows 6) (nth rows 7))))))
+                (let close (json-scan-string-end-pos line at))
+                (if (eq (fctel-json-string-closed? line close) 0)
+                    (fctel-zero-output-measure)
+                    (do
+                        (let content-at (add at 1))
+                        (let content-end (sub close 1))
+                        (let raw-bytes (sub content-end content-at))
+                        (let tail-start (fctel-max content-at
+                            (sub content-end 512)))
+                        (let rows (if (eq scan-receipt 1)
+                            (fctel-raw-form-tail-loop
+                                (substring line tail-start content-end) 0
+                                (fctel-zero-output-measure))
+                            (fctel-zero-output-measure)))
+                        (list raw-bytes (nth rows 1) (nth rows 2) (nth rows 3)
+                            (nth rows 4) (nth rows 5) (nth rows 6) (nth rows 7))))))))
 
 ; A tool output may be megabytes long.  Its lane accounting needs only the
 ; byte coordinate of `output`, the call id in the typed prefix, and the public
@@ -300,19 +466,30 @@
 ; Form string made evidence cost proportional to output size twice.
 (defn fctel-raw-output-measure-range (segment from end prefix scan-receipt)
     (do
-        (let p (str_find prefix "\"output\":" 0))
-        (if (lt p 0) (fctel-zero-output-measure)
+        (let at (fctel-json-payload-field-start-from segment from "output"))
+        (if (lt at 0) (fctel-zero-output-measure)
             (do
-                (let output-at (add from (add p 9)))
-                (let raw-bytes (sub end output-at))
-                (let tail-start (fctel-max output-at (sub end 512)))
-                (let rows (if (eq scan-receipt 1)
-                    (fctel-raw-form-tail-loop
-                        (substring segment tail-start end) 0
-                        (fctel-zero-output-measure))
-                    (fctel-zero-output-measure)))
-                (list raw-bytes (nth rows 1) (nth rows 2) (nth rows 3)
-                    (nth rows 4) (nth rows 5) (nth rows 6) (nth rows 7))))))
+                (if (or (ge at end) (not (eq (ord (char_at segment at)) 34)))
+                    (fctel-zero-output-measure)
+                    (do
+                        (let close (json-scan-string-end-pos segment at))
+                        (if (or (gt close end)
+                                (eq (fctel-json-string-closed? segment close) 0))
+                            (fctel-zero-output-measure)
+                            (do
+                                (let content-at (add at 1))
+                                (let content-end (sub close 1))
+                                (let raw-bytes (sub content-end content-at))
+                                (let tail-start (fctel-max content-at
+                                    (sub content-end 512)))
+                                (let rows (if (eq scan-receipt 1)
+                                    (fctel-raw-form-tail-loop
+                                        (substring segment tail-start content-end) 0
+                                        (fctel-zero-output-measure))
+                                    (fctel-zero-output-measure)))
+                                (list raw-bytes (nth rows 1) (nth rows 2)
+                                    (nth rows 3) (nth rows 4) (nth rows 5)
+                                    (nth rows 6) (nth rows 7))))))))))
 
 ; Collector state fields 0..21: provider usage, tool and Form metrics,
 ; call timestamps, then the selected model.
@@ -329,6 +506,43 @@
         (if (str_eq (nth (head calls) 0) call-id) (nth (head calls) 1)
             (fctel-call-native-request? (tail calls) call-id))))
 
+; Native attribution is tied to the executable spelling, not any occurrence
+; of the letters `fkwu` in an argument, filename, grep pattern, or payload.
+(defn fctel-native-command? (command)
+    (do
+        (let value (trim command))
+        (if (str_eq value "fkwu") 1
+            (if (eq (str_find value "./fkwu" 0) 0) 1
+                (if (ge (str_find value "form-run ./fkwu" 0) 0) 1
+                    (if (ge (str_find value "form-run sh -c" 0) 0)
+                        (if (ge (str_find value " ./fkwu" 0) 0) 1 0)
+                        0))))))
+
+; Only unmatched call identities are needed.  Completed calls retire on their
+; output boundary.  A burst wider than the explicit cap leaves one sentinel;
+; the final row is then withheld instead of losing native/local attribution.
+(defn fctel-call-overflow-entry () (list "" -1))
+(defn fctel-call-overflow-entry? (entry)
+    (if (not (eq (len entry) 2)) 0
+        (if (not (str_eq (nth entry 0) "")) 0
+            (eq (nth entry 1) -1))))
+(defn fctel-calls-overflow? (calls)
+    (if (eq (len calls) 0) 0
+        (if (eq (fctel-call-overflow-entry? (head calls)) 1) 1
+            (fctel-calls-overflow? (tail calls)))))
+(defn fctel-calls-remove (calls call-id)
+    (if (eq (len calls) 0) (list)
+        (if (and (not (str_eq call-id ""))
+                 (str_eq (nth (head calls) 0) call-id))
+            (fctel-calls-remove (tail calls) call-id)
+            (cons (head calls) (fctel-calls-remove (tail calls) call-id)))))
+(defn fctel-calls-add (calls call-id native-request)
+    (if (eq (fctel-calls-overflow? calls) 1) calls
+        (if (or (gt (str_len call-id) (fctel-max-call-id-bytes))
+                (ge (len calls) (fctel-max-pending-calls)))
+            (cons (fctel-call-overflow-entry) calls)
+            (cons (list call-id native-request) calls))))
+
 ; A provider emits one token_count event before a call with info=null, then
 ; another after it with the per-call `last_token_usage` object.  Event presence
 ; and token volume are distinct facts: retain both.  `last` is deliberately
@@ -337,25 +551,23 @@
 (defn fctel-usage-present? (line)
     (frte-call-local-usage-line? line))
 
-(defn fctel-last-usage-int (line marker)
-    (do
-        (let at (str_find line "\"last_token_usage\":" 0))
-        (if (lt at 0) 0 (fctel-int-after line marker at))))
+(defn fctel-last-usage-int (line key)
+    (frte-call-local-usage-int-or line key 0))
 
 (defn fctel-add-last-usage (state line)
     (do
         (let s1 (fctel-add-at state 1
-            (fctel-last-usage-int line "\"input_tokens\":")))
+            (fctel-last-usage-int line "input_tokens")))
         (let s2 (fctel-add-at s1 2
-            (fctel-last-usage-int line "\"cached_input_tokens\":")))
+            (fctel-last-usage-int line "cached_input_tokens")))
         (let s3 (fctel-add-at s2 3
-            (fctel-last-usage-int line "\"cache_write_input_tokens\":")))
+            (fctel-last-usage-int line "cache_write_input_tokens")))
         (let s4 (fctel-add-at s3 4
-            (fctel-last-usage-int line "\"output_tokens\":")))
+            (fctel-last-usage-int line "output_tokens")))
         (let s5 (fctel-add-at s4 5
-            (fctel-last-usage-int line "\"reasoning_output_tokens\":")))
+            (fctel-last-usage-int line "reasoning_output_tokens")))
         (fctel-add-at s5 6
-            (fctel-last-usage-int line "\"total_tokens\":"))))
+            (fctel-last-usage-int line "total_tokens"))))
 
 (defn fctel-add-usage (state line)
     (if (eq (fctel-usage-present? line) 1)
@@ -393,14 +605,25 @@
 
 (defn fctel-add-call (state line)
     (do
-        (let call-id (fctel-json-string-after line "\"call_id\":" 0))
+        (let call-id (fctel-json-payload-string line "call_id"))
         (if (str_eq call-id "") state
             (do
-                (let native-request (if (ge (str_find
-                    (substring line 0 (fctel-min 4096 (str_len line))) "fkwu" 0) 0) 1 0))
-                (let calls (cons
-                    (list call-id native-request)
-                    (nth state 20)))
+                (let command (fctel-json-payload-string line "arguments"))
+                (let native-request (fctel-native-command? command))
+                (let calls (fctel-calls-add
+                    (nth state 20) call-id native-request))
+                (fctel-set (fctel-add-at state 7 1) 20 calls)))))
+
+(defn fctel-add-call-range (state segment from)
+    (do
+        (let call-id (fctel-json-payload-string-from segment from "call_id"))
+        (if (str_eq call-id "") state
+            (do
+                (let command
+                    (fctel-json-payload-string-from segment from "arguments"))
+                (let native-request (fctel-native-command? command))
+                (let calls (fctel-calls-add
+                    (nth state 20) call-id native-request))
                 (fctel-set (fctel-add-at state 7 1) 20 calls)))))
 
 (defn fctel-add-output-measure (state measure)
@@ -419,19 +642,24 @@
 
 (defn fctel-add-output (state line)
     (do
-        (let call-id (fctel-json-string-after line "\"call_id\":" 0))
+        (let call-id (fctel-json-payload-string line "call_id"))
         (let measure (fctel-raw-output-measure line
             (fctel-call-native-request? (nth state 20) call-id)))
-        (fctel-add-output-measure
-            (fctel-add-at state 8 1) measure)))
+        (let measured (fctel-add-output-measure
+            (fctel-add-at state 8 1) measure))
+        (fctel-set measured 20
+            (fctel-calls-remove (nth state 20) call-id))))
 
 (defn fctel-add-output-range (state segment from end prefix)
     (do
-        (let call-id (fctel-json-string-after prefix "\"call_id\":" 0))
+        (let call-id
+            (fctel-json-payload-string-from segment from "call_id"))
         (let measure (fctel-raw-output-measure-range segment from end prefix
             (fctel-call-native-request? (nth state 20) call-id)))
-        (fctel-add-output-measure
-            (fctel-add-at state 8 1) measure)))
+        (let measured (fctel-add-output-measure
+            (fctel-add-at state 8 1) measure))
+        (fctel-set measured 20
+            (fctel-calls-remove (nth state 20) call-id))))
 
 (defn fctel-process-line (state line)
     (do
@@ -451,30 +679,31 @@
         (if (str_eq event-type "patch_apply_end")
             (fctel-add-at state 19 1)
         (if (str_eq top-type "turn_context")
-            (fctel-set state 21 (fctel-json-string-after line "\"model\":" 0))
+            (fctel-set state 21 (fctel-json-payload-string line "model"))
             state)))))))
 
-; Decide from a small typed prefix.  Only compact provider/call rows become
-; standalone strings.  Large output rows stay in the already-read segment and
-; are measured by coordinate, so unrelated payload text is never copied.
+; Classify directly in the bounded segment. Large values are skipped by JSON
+; structure and never copied into a second whole-row string; direct keys may
+; appear anywhere in their object without a 4 KiB ordering assumption.
 (defn fctel-process-range (state segment from end)
     (do
         (let prefix-end (fctel-min end (add from 4096)))
         (let prefix (substring segment from prefix-end))
-        (let top-type (fctel-top-type prefix))
-        (let event-type (fctel-payload-type prefix))
+        (let top-type (fctel-top-type-from segment from))
+        (let event-type (fctel-payload-type-from segment from))
         (if (eq (frte-call-local-usage-line? prefix) 1)
             (fctel-add-usage state (substring segment from end))
         (if (or (str_eq event-type "custom_tool_call")
                 (str_eq event-type "function_call"))
-            (fctel-add-call state prefix)
+            (fctel-add-call-range state segment from)
         (if (or (str_eq event-type "custom_tool_call_output")
                 (str_eq event-type "function_call_output"))
             (fctel-add-output-range state segment from end prefix)
         (if (str_eq event-type "patch_apply_end")
             (fctel-add-at state 19 1)
         (if (str_eq top-type "turn_context")
-            (fctel-set state 21 (fctel-json-string-after prefix "\"model\":" 0))
+            (fctel-set state 21
+                (fctel-json-payload-string-from segment from "model"))
             state)))))))
 
 (defn fctel-process-segment (segment from state)
@@ -487,18 +716,7 @@
                 (fctel-process-segment segment (add nl 1) state2)))))
 
 (defn fctel-final-output-bytes (complete-line)
-    (do
-        (let p (str_find complete-line "\"last_agent_message\":" 0))
-        (if (lt p 0) 0
-            (do
-                (let q (str_find complete-line "\""
-                    (add p (str_len "\"last_agent_message\":"))))
-                (if (lt q 0) 0
-                    (do
-                        (let e (json-scan-string-end-pos complete-line q))
-                        (if (le e (add q 1)) 0
-                            (str_len (json-unescape-string
-                                (substring complete-line (add q 1) (sub e 1)))))))))))
+    (str_len (fctel-json-payload-string complete-line "last_agent_message")))
 
 (defn fctel-row-from (thread-id provider turn-id start-line complete-line state stream-size start-at complete-at)
     (do
@@ -516,7 +734,8 @@
         (fctel-join (list
             (fcte-tag-current) "|" thread-id "|" turn-id "|" provider "|" (nth state 21) "|"
             (int_to_str started) "|" (int_to_str ended) "|" (int_to_str duration) "|"
-            (int_to_str (fctel-int-after complete-line "\"time_to_first_token_ms\":" 0)) "|"
+            (int_to_str (fctel-json-payload-int complete-line
+                "time_to_first_token_ms" 0)) "|"
             (int_to_str (fctel-final-output-bytes complete-line)) "|"
             (int_to_str remote) "|" (int_to_str input) "|" (int_to_str cached) "|"
             (int_to_str uncached) "|" (int_to_str (nth state 3)) "|"
@@ -541,18 +760,23 @@
             (if (eq (len (tail calls)) 0) "" ";")
             (fctel-calls-emit (tail calls))))))
 
-(defn fctel-calls-parse-loop (rows acc)
+(defn fctel-calls-parse-loop (rows acc remaining)
     (if (eq (len rows) 0) acc
+        (if (le remaining 0)
+            (cons (fctel-call-overflow-entry) acc)
         (do
             (let fields (split-on (head rows) ","))
             (if (eq (len fields) 2)
                 (fctel-calls-parse-loop (tail rows)
-                    (cons (list (nth fields 0) (str_to_int (nth fields 1))) acc))
-                (fctel-calls-parse-loop (tail rows) acc)))))
+                    (cons (list (nth fields 0) (str_to_int (nth fields 1))) acc)
+                    (sub remaining 1))
+                (fctel-calls-parse-loop (tail rows) acc
+                    (sub remaining 1)))))))
 
 (defn fctel-calls-parse (text)
     (if (str_eq text "") (list)
-        (fctel-calls-parse-loop (split-on text ";") (list))))
+        (fctel-calls-parse-loop (split-on text ";") (list)
+            (add (fctel-max-pending-calls) 1))))
 
 (defn fctel-progress-tag () "turn-evidence-progress-v2")
 
@@ -598,9 +822,11 @@
              (le (str_to_int (nth parts 5)) carrier-size)))))))) 1 0))
 
 (defn fctel-read-progress ()
-    (if (gt (file_size (fctel-progress-path)) 0)
-        (split-on (fctel-trim-end (read_file (fctel-progress-path))) "|")
-        (list)))
+    (do
+        (let size (file_size (fctel-progress-path)))
+        (if (or (le size 0) (gt size (fctel-progress-max-bytes))) (list)
+            (split-on (fctel-trim-end (read_file_slice
+                (fctel-progress-path) 0 size)) "|"))))
 
 ; The rollout is append-only and can be much larger than a single turn. A
 ; backward search retains its next byte cursor: each refresh scans one native
@@ -613,14 +839,14 @@
         (list)))
 
 (defn fctel-carrier-thread-id (path size)
-    (fctel-json-string-after
+    (fctel-session-meta-thread-id
         (fctel-first-line (read_file_slice path 0 (fctel-min size 1048576)))
-        "\"session_id\":" 0))
+        ))
 
 (defn fctel-carrier-provider (path size)
-    (fctel-json-string-after
+    (fctel-session-meta-provider
         (fctel-first-line (read_file_slice path 0 (fctel-min size 1048576)))
-        "\"model_provider\":" 0))
+        ))
 
 (defn fctel-discovery-state-valid? (parts path size)
     (if (and (eq (len parts) 5)
@@ -666,8 +892,8 @@
                 (if (ge found 0)
                     (do
                         (let at (add base found))
-                        (let turn-id (fctel-json-string-after
-                            (read_file_slice path at 512) "\"turn_id\":" 0))
+                        (let turn-id (fctel-json-payload-string
+                            (read_file_slice path at 512) "turn_id"))
                         (write_file_text (fctel-discovery-path) "")
                         (list 1 at turn-id end snapshot))
                     (do
@@ -695,13 +921,62 @@
         (fctel-carrier-provider path size))))
 
 (defn fctel-start-discovery-matches? (parts path size turn-id complete-at)
-    (if (and (eq (len parts) 8)
-        (and (str_eq (nth parts 0) "turn-evidence-start-discovery-v1")
-        (and (le (str_to_int (nth parts 1)) size)
-        (and (str_eq (nth parts 2) turn-id)
-        (and (eq (str_to_int (nth parts 3)) complete-at)
-        (and (str_eq (nth parts 6) (fctel-carrier-thread-id path size))
-             (str_eq (nth parts 7) (fctel-carrier-provider path size)))))))) 1 0))
+    (if (not (eq (len parts) 8)) 0
+        (do
+            (let snapshot (str_to_int (nth parts 1)))
+            (let cursor (str_to_int (nth parts 4)))
+            (let start-at (str_to_int (nth parts 5)))
+            (let shape-ok (and
+                (str_eq (nth parts 0) "turn-evidence-start-discovery-v1")
+                (and (le snapshot size)
+                (and (str_eq (nth parts 2) turn-id)
+                (and (eq (str_to_int (nth parts 3)) complete-at)
+                (and (ge complete-at 0)
+                (and (lt complete-at snapshot)
+                (and (ge cursor 0)
+                     (le cursor complete-at)))))))))
+            (let start-ok (or (eq start-at -1)
+                (and (ge start-at 0) (lt start-at complete-at))))
+            (let identity-ok (and
+                (str_eq (nth parts 6) (fctel-carrier-thread-id path size))
+                (str_eq (nth parts 7) (fctel-carrier-provider path size))))
+            (let terminal-ok (eq (fctel-terminal-line?
+                (read_file_slice path complete-at 4096) turn-id) 1))
+            (if (and shape-ok (and start-ok (and identity-ok terminal-ok)))
+                1 0))))
+
+; Durable phase rows are resumable only while their carrier identity and
+; selected task coordinates still exist physically.  Progress deliberately
+; keeps the matching start row as its identity anchor; accumulated counts can
+; therefore never cross a rebind into another rollout of a coincidental size.
+(defn fctel-start-discovery-active? (parts path size)
+    (if (not (eq (len parts) 8)) 0
+        (do
+            (let turn-id (nth parts 2))
+            (let complete-at (str_to_int (nth parts 3)))
+            (if (eq (fctel-start-discovery-matches?
+                    parts path size turn-id complete-at) 0) 0
+                (do
+                    (let start-at (str_to_int (nth parts 5)))
+                    (if (lt start-at 0) 1
+                        (fctel-line-event?
+                            (read_file_slice path start-at 4096)
+                            "task_started" turn-id)))))))
+
+(defn fctel-progress-active? (progress start path size)
+    (if (or (not (eq (len progress) 28))
+            (not (eq (len start) 8))) 0
+        (do
+            (let snapshot (str_to_int (nth progress 1)))
+            (let turn-id (nth progress 2))
+            (let segment-start (str_to_int (nth progress 3)))
+            (let complete-at (str_to_int (nth progress 4)))
+            (if (and (eq snapshot (str_to_int (nth start 1)))
+                (and (eq segment-start (str_to_int (nth start 5)))
+                (and (eq (fctel-progress-matches? progress snapshot turn-id
+                        segment-start complete-at) 1)
+                    (eq (fctel-start-discovery-active? start path size) 1))))
+                1 0))))
 
 ; Result: found?, start coordinate, next cursor.  A resolved coordinate stays
 ; durable while the selected turn is collected in later bounded invocations.
@@ -733,58 +1008,85 @@
                                     complete-at (nth found 2) -1))
                             found)))))))
 
+(defn fctel-collector-refuse (reason)
+    (do
+        (write_file_text (fctel-candidate-row-path)
+            (fctel-join (list "turn-evidence-collector-refused-v1|" reason)))
+        (write_file_text (fctel-progress-path) "")
+        (write_file_text (fctel-start-discovery-path) "")
+        (fctel-join (list "turn-evidence-refresh=withheld reason=" reason "\n"))))
+
+(defn fctel-collect-finish (path size complete-at turn-id segment-start segment-end state)
+    (if (eq (fctel-calls-overflow? (nth state 20)) 1)
+        (fctel-collector-refuse "pending-call-cap-exceeded")
+        (do
+            (let meta-line (fctel-first-line
+                (read_file_slice path 0 (fctel-min size 1048576))))
+            (let thread-id (fctel-session-meta-thread-id meta-line))
+            (let provider (fctel-session-meta-provider meta-line))
+            (let start-line (read_file_slice path segment-start 512))
+            (let complete-line (fctel-first-line
+                (read_file_slice path complete-at (sub segment-end complete-at))))
+            (let row (fctel-row-from thread-id provider turn-id
+                start-line complete-line state size segment-start complete-at))
+            (write_file_text (fctel-candidate-row-path) row)
+            (if (eq (fcte-valid? (fcte-parse row)) 1)
+                (do
+                    (write_file_text (fctel-progress-path) "")
+                    (write_file_text (fctel-observed-row-path) row)
+                    (write_file_text (fctel-candidate-row-path) "")
+                    (write_file_text (fctel-discovery-path) "")
+                    (write_file_text (fctel-start-discovery-path) "")
+                    (write_file_text (fctel-latest-validation-path) "")
+                    (write_file_text (fctel-target-turn-path) "")
+                    "turn-evidence-refresh=observed\n")
+                (do
+                    ; The failed candidate is the current health signal.
+                    ; A stale progress row must not conceal it.
+                    (write_file_text (fctel-progress-path) "")
+                    (write_file_text (fctel-start-discovery-path) "")
+                    "turn-evidence-refresh=unreconciled\n")))))
+
+(defn fctel-collect-continue (size complete-at turn-id segment-start segment-end chunk-end state)
+    (do
+        (write_file_text (fctel-candidate-row-path) "")
+        (write_file_text (fctel-progress-path)
+            (fctel-progress-row size turn-id segment-start
+                complete-at chunk-end state))
+        (fctel-join (list "turn-evidence-refresh=progress cursor="
+            (int_to_str (sub chunk-end segment-start)) "/"
+            (int_to_str (sub segment-end segment-start)) "\n"))))
+
+(defn fctel-collect-bounded (path size complete-at turn-id segment-start segment-end cursor state)
+    (do
+        (let chunk (fctel-bounded-chunk path cursor segment-end))
+        (let chunk-end (fctel-chunk-end chunk))
+        (if (lt chunk-end 0)
+            (fctel-collector-refuse "jsonl-row-exceeds-slice")
+            (do
+                (let state2 (fctel-process-segment
+                    (fctel-chunk-body chunk) 0 state))
+                (if (ge chunk-end segment-end)
+                    (fctel-collect-finish path size complete-at turn-id
+                        segment-start segment-end state2)
+                    (fctel-collect-continue size complete-at turn-id
+                        segment-start segment-end chunk-end state2))))))
+
 (defn fctel-collect-once (path size complete-at turn-id segment-start)
     (do
         (let segment-end (fctel-line-end path size complete-at))
-        (let progress (fctel-read-progress))
-        (let resume (fctel-progress-matches?
-            progress size turn-id segment-start complete-at))
-        (let cursor (if (eq resume 1)
-            (str_to_int (nth progress 5)) segment-start))
-        (let state (if (eq resume 1)
-            (fctel-progress-state progress) (fctel-state)))
-        (let target (fctel-min segment-end
-            (add cursor (fctel-processing-bytes))))
-        (let chunk-end (if (ge target segment-end) segment-end
-            (fctel-line-end path segment-end target)))
-        (let piece (read_file_slice path cursor (sub chunk-end cursor)))
-        (let state2 (fctel-process-segment piece 0 state))
-        (if (ge chunk-end segment-end)
+        (if (lt segment-end 0)
+            (fctel-collector-refuse "terminal-jsonl-row-exceeds-slice")
             (do
-                (let meta-line (fctel-first-line
-                    (read_file_slice path 0 (fctel-min size 1048576))))
-                (let thread-id (fctel-json-string-after meta-line "\"session_id\":" 0))
-                (let provider (fctel-json-string-after meta-line "\"model_provider\":" 0))
-                (let start-line (read_file_slice path segment-start 512))
-                (let complete-line (fctel-first-line
-                    (read_file_slice path complete-at (sub segment-end complete-at))))
-                (let row (fctel-row-from thread-id provider turn-id
-                    start-line complete-line state2 size segment-start complete-at))
-                (write_file_text (fctel-candidate-row-path) row)
-                (if (eq (fcte-valid? (fcte-parse row)) 1)
-                    (do
-                        (write_file_text (fctel-progress-path) "")
-                        (write_file_text (fctel-observed-row-path) row)
-                        (write_file_text (fctel-candidate-row-path) "")
-                        (write_file_text (fctel-discovery-path) "")
-                        (write_file_text (fctel-start-discovery-path) "")
-                        (write_file_text (fctel-latest-validation-path) "")
-                        (write_file_text (fctel-target-turn-path) "")
-                        "turn-evidence-refresh=observed\n")
-                    (do
-                        ; The failed candidate is the current health signal.
-                        ; A stale progress row must not conceal it.
-                        (write_file_text (fctel-progress-path) "")
-                        (write_file_text (fctel-start-discovery-path) "")
-                        "turn-evidence-refresh=unreconciled\n")))
-            (do
-                (write_file_text (fctel-candidate-row-path) "")
-                (write_file_text (fctel-progress-path)
-                    (fctel-progress-row size turn-id segment-start
-                        complete-at chunk-end state2))
-                (fctel-join (list "turn-evidence-refresh=progress cursor="
-                    (int_to_str (sub chunk-end segment-start)) "/"
-                    (int_to_str (sub segment-end segment-start)) "\n"))))))
+                (let progress (fctel-read-progress))
+                (let resume (fctel-progress-matches?
+                    progress size turn-id segment-start complete-at))
+                (let cursor (if (eq resume 1)
+                    (str_to_int (nth progress 5)) segment-start))
+                (let state (if (eq resume 1)
+                    (fctel-progress-state progress) (fctel-state)))
+                (fctel-collect-bounded path size complete-at turn-id
+                    segment-start segment-end cursor state)))))
 
 (defn fctel-refresh-coordinate-once (path size complete-at turn-id)
     (do

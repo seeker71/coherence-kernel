@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """sync_native_op_manifest.py — Phase 1 drift gate: manifest must match flt-ops.
 
-Compares form/form-stdlib/native-op-manifest.fk rows to form-flatten.fk flt-ops.
-Spec: specs/fkwu-only-kernel-collapse.md (Phase 1)
-"""
+Compares form/form-stdlib/native-op-manifest.fk rows to form-flatten.fk flt-ops."""
 from __future__ import annotations
 
 import re

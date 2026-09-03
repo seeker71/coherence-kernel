@@ -7,9 +7,19 @@
 ; parser/progress witness remains whole.  The added 255 proves that the remote
 ; provider's per-call quantities are retained separately from event count, and
 ; that cumulative rollout totals cannot be counted again. The added 4096
-; proves a changed transport label still admits call-local usage by BML shape.
+; proves an explicitly admitted provider label. Adversarial payloads, call-ID
+; retirement/caps, bounded row-end scanning, and the real nested session_meta
+; carrier identity lift the verdict to 33555454.
 
 (defn fctelb-bit (truth bit) (if truth bit 0))
+(defn fctelb-fill-calls (calls remaining)
+    (if (le remaining 0) calls
+        (fctelb-fill-calls
+            (fctel-calls-add calls (int_to_str remaining) 0)
+            (sub remaining 1))))
+(defn fctelb-repeat (text remaining)
+    (if (le remaining 0) ""
+        (str_concat text (fctelb-repeat text (sub remaining 1)))))
 
 (do
     (let event
@@ -53,6 +63,33 @@
         "{\"timestamp\":\"2026-08-17T05:42:26.655Z\",\"ordinal\":13,\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-range\"}}")
     (let ignored
         "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"content\":\"private-unselected-payload\"}}")
+    (let nested-provider-shape
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"nested\",\"last_token_usage\":{\"input_tokens\":8,\"output_tokens\":2,\"total_tokens\":10}}}")
+    (let nested-terminal-shape
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"function_call_output\",\"turn_id\":\"turn-false\",\"last_agent_message\":\"not-terminal\"}}")
+    (let direct-fields-after-decoys
+        "{\"metadata\":{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"poison\"}},\"payload\":{\"metadata\":{\"turn_id\":\"poison\",\"last_agent_message\":\"poison\",\"time_to_first_token_ms\":999},\"last_agent_message\":\"d\\\"one\",\"time_to_first_token_ms\":17,\"turn_id\":\"turn-direct\",\"type\":\"turn_finished\"},\"type\":\"event_msg\",\"timestamp\":\"2026-08-17T05:42:26.655Z\"}")
+    (let direct-call-after-decoys
+        "{\"type\":\"response_item\",\"payload\":{\"metadata\":{\"call_id\":\"poison\",\"arguments\":\"fkwu\"},\"arguments\":\"other\",\"call_id\":\"call-direct\",\"type\":\"custom_tool_call\"}}")
+    (let direct-output-after-decoys
+        "{\"type\":\"response_item\",\"payload\":{\"metadata\":{\"call_id\":\"poison\",\"output\":\"poison\"},\"output\":\"ok\\n@form fkwu 0 4 0 4\\n\",\"call_id\":\"call-direct\",\"type\":\"custom_tool_call_output\"}}")
+    (let usage-after-decoys
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"nested\":{\"total_tokens\":990},\"total_tokens\":10,\"output_tokens\":2,\"input_tokens\":8}}}}")
+    (let session-meta
+        "{\"session_id\":\"root-decoy\",\"model_provider\":\"root-decoy\",\"type\":\"session_meta\",\"payload\":{\"session_id\":\"thread-real\",\"model_provider\":\"openai\"}}")
+    (let wrong-session-meta
+        "{\"type\":\"response_item\",\"payload\":{\"session_id\":\"thread-false\",\"model_provider\":\"openai\"}}")
+    (let wide-call (fctel-join (list
+        "{\"payload\":{\"metadata\":\"" (fctelb-repeat "x" 5000)
+        "fkwu\",\"arguments\":\"other\",\"call_id\":\"call-wide\",\"type\":\"custom_tool_call\"},\"type\":\"response_item\"}")))
+    (let wide-state
+        (fctel-process-range (fctel-state) wide-call 0 (str_len wide-call)))
+    (let session-meta-ok (and
+        (str_eq (fctel-session-meta-thread-id session-meta) "thread-real")
+        (and (str_eq (fctel-session-meta-provider session-meta) "openai")
+            (and (str_eq (fctel-json-root-string session-meta "session_id")
+                    "root-decoy")
+                (str_eq (fctel-session-meta-thread-id wrong-session-meta) "")))))
     (let ranged-segment (fctel-join (list ignored "\n" call-line "\n"
         output "\n" alternate "\n" turn-context "\n")))
     (let ranged-state (fctel-process-segment ranged-segment 0 (fctel-state)))
@@ -65,7 +102,9 @@
         (fctelb-bit (str_eq (fctel-top-type event) "event_msg") 4)
         (fctelb-bit (str_eq (fctel-payload-type event) "task_complete") 8)
         (fctelb-bit (eq (fctel-line-event? event "task_complete" "turn-1") 1) 16)
-        (fctelb-bit (eq (nth output-measured 1) 1) 32)
+        (fctelb-bit (and (eq (nth output-measured 1) 1)
+            (eq (nth output-measured 0)
+                (str_len "ok\\n@form fkwu 0 4 0 4\\n"))) 32)
         (fctelb-bit (eq (nth output-measured 6) 1) 64)
         (fctelb-bit (eq (nth output-measured 5) 4) 128)
         (fctelb-bit (eq (nth output-measured 2) 0) 256)
@@ -121,4 +160,59 @@
                 (eq (nth (fctel-process-line (fctel-state) cumulative-only) 6) 0))) 524288)
         (fctelb-bit (and (eq (fctel-usage-present? partial-only) 0)
             (and (eq (nth (fctel-process-line (fctel-state) partial-only) 0) 0)
-                (eq (nth (fctel-process-line (fctel-state) partial-only) 6) 0))) 1048576))))
+                (eq (nth (fctel-process-line (fctel-state) partial-only) 6) 0))) 1048576)
+        (fctelb-bit (and (eq (fctel-usage-present? nested-provider-shape) 0)
+            (and (eq (nth (fctel-process-line (fctel-state)
+                    nested-provider-shape) 0) 0)
+                (and (eq (fctel-terminal-line? nested-terminal-shape
+                    "turn-false") 0)
+                    (and (eq (frte-call-local-usage-int-or usage-after-decoys
+                        "input_tokens" -1) 8)
+                        (eq (frte-call-local-usage-int-or usage-after-decoys
+                            "total_tokens" -1) 10))))) 2097152)
+        (fctelb-bit (do
+            (let pending (fctel-process-line
+                (fctel-state) direct-call-after-decoys))
+            (let retired (fctel-process-line
+                pending direct-output-after-decoys))
+            (and (eq (len (nth pending 20)) 1)
+                (and (str_eq (nth (head (nth pending 20)) 0) "call-direct")
+                    (and (eq (nth (head (nth pending 20)) 1) 0)
+                        (and (eq (len (nth retired 20)) 0)
+                            (and (eq (nth retired 7) 1)
+                                (and (eq (nth retired 8) 1)
+                                    (eq (nth retired 16) 0)))))))) 4194304)
+        (fctelb-bit (do
+            (let bounded (fctelb-fill-calls (list)
+                (add (fctel-max-pending-calls) 1)))
+            (let replayed (fctel-calls-parse
+                (fctel-calls-emit bounded)))
+            (and (eq (fctel-calls-overflow? bounded) 1)
+                (and (eq (len bounded)
+                        (add (fctel-max-pending-calls) 1))
+                    (and (eq (fctel-calls-overflow? replayed) 1)
+                        (and (eq (fctel-line-end-from-body "row\nnext" 8 0) 4)
+                            (and (eq (fctel-line-end-from-body "row" 8 0) -1)
+                                (and (str_eq (fctel-top-type
+                                    direct-fields-after-decoys) "event_msg")
+                                    (and (str_eq (fctel-payload-type
+                                        direct-fields-after-decoys) "turn_finished")
+                                        (and (str_eq (fctel-json-payload-string
+                                            direct-fields-after-decoys "turn_id")
+                                            "turn-direct")
+                                            (and (eq (fctel-json-payload-int
+                                                direct-fields-after-decoys
+                                                "time_to_first_token_ms" 0) 17)
+                                                (and (eq (fctel-final-output-bytes
+                                                    direct-fields-after-decoys) 5)
+                                                    (eq (fctel-terminal-line?
+                                                        direct-fields-after-decoys
+                                                        "turn-direct") 1))))))))))))
+            8388608)
+        (fctelb-bit (and (eq (len (nth wide-state 20)) 1)
+            (and (str_eq (nth (head (nth wide-state 20)) 0) "call-wide")
+                (and (eq (nth (head (nth wide-state 20)) 1) 0)
+                    (and (eq (fctel-native-command? "prefix-fkwu-suffix") 0)
+                        (and (eq (fctel-native-command? "form-run ./fkwu x.fk") 1)
+                            session-meta-ok)))))
+            16777216))))

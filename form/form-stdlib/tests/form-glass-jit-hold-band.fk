@@ -1,0 +1,80 @@
+; form-glass-jit-hold-band.fk — exact refusal selection and causal hold gate.
+; Verdict 4095.
+; preludes: form-stdlib/form-glass-live.bml
+
+(do
+    (defn fgjhb-bit (truth weight) (if (eq truth 1) weight 0))
+    (defn fgjhb-fault ()
+        (fgtm-sample "jit.f.n64.1.2"
+            (fgtm-present "jit.bml-demand.total") "diagnostic-control"
+            "form" "jit.bml-demand" "cpu-jit" "install-challenge"
+            (fgtm-absent) (fgtm-present 1000) "failed"
+            (fgtm-present 1000) (fgtm-present 1000)
+            (fgtm-present 1000) (fgtm-absent) "never"
+            "physical-live" "bml-demand-jit"
+            (list "jit" "health" "control")))
+    (defn fgjhb-healed (parent cause owner read-at write-at)
+        (fgtm-sample "jit.bml-demand.healed" (fgtm-present parent)
+            "jit-healed" "form" owner "cpu-jit" cause
+            (fgtm-absent) (fgtm-present 1000) "ready"
+            (fgtm-present read-at) (fgtm-present write-at)
+            (fgtm-present 1000) (fgtm-absent) "released"
+            "physical-live" "source-unit-hash-reobserved"
+            (list "jit" "health" "control")))
+    (let fault (fgjhb-fault))
+    (let generic (fgtm-sample "jit.bml-demand.page"
+        (fgtm-absent) "cell" "cpu" "jit.bml-demand" "cpu-jit"
+        "install-challenge-ms" (fgtm-absent) (fgtm-present 5) "failed"
+        (fgtm-present 1000) (fgtm-present 1000) (fgtm-absent)
+        (fgtm-absent) "never" "physical-live" "bml-demand-jit"
+        (list "jit" "health")))
+    (let healed (fgjhb-healed (fgtm-sample-id fault)
+        (fgtm-sample-purpose fault) "jit.bml-demand" 1000 1100))
+    (let wrong-cause (fgjhb-healed (fgtm-sample-id fault)
+        "other" "jit.bml-demand" 1000 1100))
+    (let wrong-key (fgjhb-healed "jit.f.n64.1.3"
+        (fgtm-sample-purpose fault) "jit.bml-demand" 1000 1100))
+    (let stale-heal (fgjhb-healed (fgtm-sample-id fault)
+        (fgtm-sample-purpose fault) "jit.bml-demand" 1000 1000))
+    (let wrong-owner (fgjhb-healed (fgtm-sample-id fault)
+        (fgtm-sample-purpose fault) "other.publisher" 1000 1100))
+    (let selected (fgl-jit-fault-sample (list generic fault) (list)))
+    (let schedule (fgel-schedule-start 900 250))
+    (let empty (fgel-buffer-empty))
+    (let plan (fgel-plan-wakes schedule empty
+        (list (fgel-wake "telemetry" 950 "models" "snapshot")
+              (fgl-jit-fault-wake fault))
+        (list "fault-frame")))
+    (let resumed (fgel-resume-held plan (fgl-jit-healed-wake healed)))
+    (let denied (fgel-resume-held plan
+        (fgel-wake "control" 1100 "glass-monitor" "jit-healed")))
+    (let overflow (fgel-plan-wakes schedule empty
+        (list (fgel-wake "telemetry" 901 "a" "a")
+              (fgel-wake "deadline" 1150 "b" "b")
+              (fgel-wake "control" 902 "c" "c")
+              (fgel-wake "telemetry" 903 "d" "d")
+              (fgl-jit-fault-wake fault))
+        (list "fault-frame")))
+    (sum (list
+        (fgjhb-bit (str_eq (fgtm-sample-id selected)
+            (fgtm-sample-id fault)) 1)
+        (fgjhb-bit (str_eq (nth (fgl-jit-fault (list generic fault)) 2)
+            "install-challenge") 2)
+        (fgjhb-bit (fgl-jit-healed-matches? fault healed) 4)
+        (fgjhb-bit (and (not (eq (fgl-jit-healed-matches? fault wrong-cause) 1))
+                         (not (eq (fgl-jit-healed-matches? fault wrong-key) 1))) 8)
+        (fgjhb-bit (not (eq (fgl-jit-healed-matches? fault stale-heal) 1)) 16)
+        (fgjhb-bit (not (eq (fgl-jit-healed-matches? fault wrong-owner) 1)) 32)
+        (fgjhb-bit (str_eq (fgel-plan-disposition plan) "heal-hold") 64)
+        (fgjhb-bit (and (eq (fgel-buffer-pending? (fgel-plan-buffer plan)) 0)
+            (str_eq (head (fgel-buffer-front (fgel-plan-buffer plan)))
+                "fault-frame")) 128)
+        (fgjhb-bit (str_eq (fgel-plan-disposition resumed) "present") 256)
+        (fgjhb-bit (str_eq (fgel-plan-disposition denied)
+            "refused-resume-kind") 512)
+        (fgjhb-bit (str_eq (fgel-wake-kind (fgel-plan-cause overflow))
+            "jit-refusal") 1024)
+        (fgjhb-bit (and (eq (fgel-buffer-presented
+                (fgl-render-commit -1 empty (fgel-plan-buffer plan))) 0)
+            (eq (fgel-buffer-presented
+                (fgl-render-commit 0 empty (fgel-plan-buffer plan))) 1)) 2048))))

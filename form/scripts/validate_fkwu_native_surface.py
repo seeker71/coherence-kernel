@@ -3,8 +3,6 @@
 
 Ensures flt-ops tags are unique, within fkc-arm-slots, and covered by fkc-flat
 handlers (unary/tri/nullary cannot fall through to the binary fallback).
-
-Spec: specs/fkwu-only-kernel-collapse.md (Phase 0)
 """
 from __future__ import annotations
 

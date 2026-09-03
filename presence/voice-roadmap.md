@@ -1,15 +1,12 @@
-# Voice Current Roadmap
+# Voice Roadmap
 
-Date: 2026-07-05
-
-This roadmap names the current voice floor only. Historical exploration remains
-in receipts and `RELEASE_HISTORY.md`.
+This roadmap names the current voice floor and the next target only. How the
+floor was reached lives in receipts.
 
 ## Present Architecture
 
-The current direction is local progress, not enterprise shipping and not a
-public product release. It is also not "train a base audio model here." The
-current direction is:
+The direction is local progress, not enterprise shipping and not a public
+product release. It is also not "train a base audio model here." The direction is:
 
 ```text
 Form/BML control plane
@@ -20,147 +17,68 @@ audio.cpp acoustic runtime
 
 The route is materialized by `presence/fkwu-production-audio-end-to-end.fk`:
 Form writes the command plan and reads back real audio.cpp TTS, ASR,
-forced-alignment, translation, return-code, and resource artifacts.
+forced-alignment, translation, return-code, and resource artifacts. The
+public-demo voice reference is accepted as borrowed real data for progress; the
+source-voice replacement stays visible and does not block the lane.
 
-## Functional Local Loop
+`presence/fkwu-local-audio-loop.fk` is the practical talk/listen/translate loop
+over host stand-ins (macOS `say`, `ffmpeg` 16 kHz mono PCM16 normalization, local
+`whisper-cli`, bounded local Ollama translation); `presence/fkwu-audio-task-surface.fk`
+lowers it into typed task slots (`source_tts, source_asr, translation, reply_tts,
+reply_asr`) and reads back the audio.cpp adapter evidence. Each writes its summary
+under `audio-training-runs/current/<lane>/summary` when run; those runs are local
+artifacts, never tree truth. The cells and their bands declare their own verdicts.
 
-`presence/fkwu-local-audio-loop.fk` now gives the practical end-to-end loop:
+## The duplex frame grid
 
-```text
-Form task surface
-  -> macOS say stand-in TTS
-  -> ffmpeg 16 kHz mono PCM16 wav normalization
-  -> local whisper-cli ASR
-  -> bounded local Ollama translation
-  -> macOS say reply TTS
-  -> local whisper-cli reply ASR
-```
+One shared ~80 ms frame axis replaces the ASR → LLM → TTS cascade: every channel
+holds a value at every frame, agent silence is an explicit pad, user silence is
+encoded actual silence, speech boundaries are emitted tokens, and interruption has
+no mechanism at all — overlap is representable on the shared axis and yielding is
+learned. The teaching lives in `presence/duplex-frame-grid.fk`; its band
+`presence/tests/duplex-frame-grid-band.fk` answers 511 (re-run 2026-09-03): over
+the same twenty frames, a turn-gated ear loses one of five user words; the grid
+loses none.
 
-Current observed run:
+Consequence for the interactive wiring: seat the microphone → ASR → reply → TTS
+loop on the frame grid — both channels always valued, silence a value
+end-to-end — rather than as request/response turns. A barge-in then needs no new
+machinery, only the yield policy.
 
-```text
-summary: audio-training-runs/current/fkwu-local-audio-loop/summary
-status: functional_local_talk_listen_translate_loop
-source_text: Open speech flows.
-source_wer_pct: 0
-translation_oracle: ollama:llama3.2:1b
-translation_text: Offene Rede fließt.
-reply_wer_pct: 0
-promotion_authority: 0
-base_model_training_authority: 0
-```
+## Many voices, one neutral feed
 
-This closes the immediate talk/listen/transcribe/translate loop with local
-oracles and host stand-ins. The no-stand-in audio.cpp lane below closes the
-fixed-utterance borrowed-source path. The remaining work is to wire audio.cpp
-behind the interactive task slots, add real microphone capture, generate replies,
-and keep realtime/native-rate diagnostics.
-
-`presence/fkwu-audio-task-surface.fk` now lowers that loop into typed task
-slots and reads back the current audio.cpp adapter evidence:
-
-```text
-task_slots: source_tts,source_asr,translation,reply_tts,reply_asr
-status: local_loop_functional_audio_cpp_adapters_observed_not_swapped
-score: 65534/65535
-audio_cpp_asr_observed: 1
-audio_cpp_tts_observed: 1
-next_gap: rerun audio.cpp ASR/TTS support packets or inspect their command/resource artifacts
-```
-
-The no-stand-in lane now exists beside that task surface:
-
-```text
-presence/fkwu-production-audio-end-to-end.fk
-summary: audio-training-runs/current/fkwu-production-audio-end-to-end/summary
-use_case: local_progress_not_enterprise_shipping
-status: local_progress_audio_end_to_end_complete
-score: 131071/131071
-executed_audio_cpp: 1
-source_mode: borrowed_public_demo
-target_text: Sema audio path is alive.
-tts_text: Seyma. Audio. Path. is alive.
-transcript: Sema, audio, path is alive.
-wer_pct: 0
-translation_model: llama3.2:3b
-translation_text: Sema, Audio, Pfad ist lebendig.
-package_borrowed_demo_authorized: 1
-package_progress_authorized: 1
-package_personal_use_authorized: 0
-package_scope: public-demo
-```
-
-It writes and runs the audio.cpp TTS, ASR, forced-alignment, and translation
-commands. The public-demo source is accepted as borrowed real data for progress;
-the later source-voice replacement remains visible but does not block the lane.
-
-## Current Live Voice Rows
-
-| lane | WER | status |
-|---|---:|---|
-| `macos_sema_teacher_acoustic_live` | 0 | Teacher/acoustic support only, confidence 96. |
-| `macos_sema_voice_teacher_live` | 100 | Failing row, intelligibility 0. |
-| `sema_formant_oracle_live` | 100 | Investigated miss, heard tokens 0/3. |
-| `macos_roundtrip_live` | 100 | Failing roundtrip, native rate 0. |
-| `audio_cpp_current_tts_live` | 0 | Intelligible support over public-demo voice. |
-
-WER `0` and WER `100` are both suspicious until explained by other fields. The
-current explanations are below.
-
-## Formant Oracle WER 100
-
-This is not close in the way that matters for speech recognition:
-
-```text
-target_text: Open speech flows.
-heard_text:
-target_token_count: 3
-heard_token_count: 0
-target_overlap_count: 0
-diagnostic_kind: empty_oracle_transcript
-primary_improvement: token_bearing_acoustic_carrier
-promotion_authority: 0
-```
-
-The next probe is explicit: render a phoneme-sequenced dynamic formant carrier
-for `open,speech,flows`, add consonant onsets, syllable timing, and moving
-formants, then rerun local Whisper. Promotion cannot even begin until
-`heard_token_count >= 1`, and the real target is overlap `3/3` with WER within
-gate.
-
-## audio.cpp TTS WER 0
-
-This row is useful because it is listenable and helped close the borrowed-source
-path:
-
-```text
-target_text: Sema audio path is alive.
-heard_text: Sema, audio, path is alive.
-wer: 0
-voice_ref_source: public_demo_fallback
-native_rate_pct: 6
-forced_aligner_words_present_zero_confidence: present
-listener_review_ready: 0
-promotion_authority: 0
-```
-
-The next real-lane step is not more base-model training. It is interactive
-wiring: microphone -> audio.cpp ASR -> text/reply -> audio.cpp TTS -> ASR/align
-readback. Source-voice replacement can happen later.
+`presence/fkwu-many-voices-live.fk` (door `presence/fkwu-many-voices-live-run.fk`)
+runs the grid at room scale: several speakers voice different languages at the
+same time on one timeline; each speaker is a channel; whisper `-l auto` witnesses
+each language itself; the detected language grounds the local translator's prompt;
+the merged feed interleaves the voices in spoken order in the neutral tongue
+(English today, one defn to change); one neutral voice speaks the feed back out.
+The same voices mixed into ONE channel lose words and languages — so the
+architecture is settled: one ear per speaker (the listening fleet's shape), never
+one ear on the room.
 
 ## Current Gaps
 
-- Wire audio.cpp ASR/TTS behind the interactive task slots.
-- Add real microphone capture.
+- Seat the ears on the live microphone fleet (one device per speaker); chunked
+  streaming so the feed grows while the room still speaks.
+- Wire audio.cpp ASR/TTS behind the interactive task slots, on the frame grid.
 - Add conversational reply generation between listen and speak.
-- Keep the public-demo source visible as borrowed data until it is replaced.
-- Provision independent speaker verification later if source-voice comparison
-  matters.
-- Improve native rate toward realtime; current gap is `94`.
-- Treat forced-aligner confidence zero as a calibrated sidecar, not a pass.
-- Add listener review before voice promotion.
-- Keep the bounded current gate; do not put the monolithic audio contract back
-  into the arena scoring loop.
+- Keep the public-demo source visible as borrowed data until it is replaced;
+  provision independent speaker verification later if source-voice comparison matters.
+- Improve native rate toward realtime.
+- Treat forced-aligner confidence zero as a calibrated sidecar, not a pass; add
+  listener review before voice promotion.
+- The formant oracle (`sema_formant_oracle_live`) hears zero tokens: render a
+  phoneme-sequenced dynamic formant carrier with consonant onsets, syllable timing,
+  and moving formants, then rerun local Whisper. Promotion cannot begin until
+  `heard_token_count >= 1`.
+- Fine-tune the hati-translator on witnessed false friends (Air/air is the first
+  row of that corpus).
+- Keep the bounded current gate; the monolithic audio contract does not return to
+  the arena scoring loop.
+
+WER `0` and WER `100` are both suspicious until explained by other fields; a
+lane's summary carries those fields.
 
 ## Runtime Rule
 
@@ -169,56 +87,8 @@ compiler or source-runner, the runtime is wrong. The voice pipeline must keep
 lane, command, source context, resource use, and frame-buffer state available
 for every failure.
 
-## 2026-08-25: The Duplex Frame Grid (VoiceChat-11B teaching)
+## Next Target
 
-NVIDIA's NemotronLabs VoiceChat-11B (released 2026-08-09) replaces the
-ASR -> LLM -> TTS cascade with one network on one shared ~80 ms frame axis:
-every channel holds a value at every frame, agent silence is an explicit pad
-token, user silence is encoded actual silence, speech boundaries are emitted
-tokens, and interruption has no mechanism at all — overlap is representable
-on the shared axis and yielding is learned (~448 ms turn-taking, ~480 ms
-yield on interruption). Tool calls ride a separate channel while a spoken
-on-hold message keeps the conversation present during work.
-
-The teaching lives in this body as `presence/duplex-frame-grid.fk` (band
-`presence/tests/duplex-frame-grid-band.fk`, verdict 511): the
-frame-synchronous seat, measured — over the same twenty frames, a
-turn-gated ear loses one of five user words; the grid loses none. The full
-story: `receipts/2026-08-25-voicechat-11b-duplex-teaching.md`.
-
-Consequence for the interactive wiring named in the gaps above: seat the
-microphone -> ASR -> reply -> TTS loop on the frame grid — both channels
-always valued, silence a value end-to-end — rather than as request/response
-turns. The listen side keeps hearing while the speak side is voicing; a
-barge-in then needs no new machinery, only the yield policy.
-
-## 2026-08-25: Many voices, one neutral feed (live, local)
-
-The grid teaching now runs at room scale:
-`presence/fkwu-many-voices-live.fk` (door
-`presence/fkwu-many-voices-live-run.fk`, band 4095). Three speakers voice
-German, Indonesian and Italian at the same time on one timeline; each
-speaker is a channel; whisper `-l auto` witnesses each language itself
-(`de id it`); the detected language grounds the local translator's prompt
-(llama3.2:3b via Ollama); the merged feed interleaves the voices in spoken
-order in the neutral tongue (English today, one defn to change); one
-neutral voice speaks the feed back out and whisper hears it word-perfect.
-Whole lane local, 26 s, score 4095/4095. Full story:
-`receipts/2026-08-25-many-voices-one-neutral-feed.md`.
-
-The measured honesty row in the same run: the same three voices mixed into
-ONE channel — the mixture ear heard 20 of 40 words, detected one language
-of three, and the German voice vanished without leaving a gap. At home the
-architecture is settled by this number: one ear per speaker (the listening
-fleet's shape), never one ear on the room.
-
-Remaining gaps for this lane: seat the ears on the live microphone fleet
-(one device per speaker); chunked streaming so the feed grows while the
-room still speaks; fine-tune the hati-translator on witnessed false
-friends (Air/air is the first row of that corpus).
-
-## Next Release Target
-
-The next release target is an interactive local audio loop backed by audio.cpp
-for ASR/TTS, using the borrowed public-demo source until a better source voice
-is chosen — seated on the duplex frame grid above.
+An interactive local audio loop backed by audio.cpp for ASR/TTS, using the
+borrowed public-demo source until a better source voice is chosen — seated on the
+duplex frame grid, one ear per speaker.

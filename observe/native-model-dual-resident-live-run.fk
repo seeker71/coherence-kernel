@@ -11,13 +11,13 @@
 ; A completed turn never closes either context.  An explicitly offered quit
 ; closes both contexts; ordinary idle cadence is never an eviction event.
 ;
-; preludes: form/form-stdlib/qwen4exp-flash-next-generate.bml form/form-stdlib/llama32-3b-resident-state.bml form/form-stdlib/native-model-glass.bml form/form-stdlib/native-model-resident-fleet.bml form/form-stdlib/native-model-memory-glass.bml form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/native-model-dual-telemetry.bml form/form-stdlib/native-model-owner-cadence.bml
+; preludes: form/form-stdlib/qwen4exp-flash-next-generate.bml form/form-stdlib/llama32-3b-resident-state.bml form/form-stdlib/native-model-glass.bml form/form-stdlib/native-model-resident-fleet.bml form/form-stdlib/native-model-memory-glass.bml form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/native-model-dual-telemetry.bml form/form-stdlib/native-model-owner-cadence.bml form/form-stdlib/hearth.bml form/form-stdlib/model-registry.bml
 
 (do
     (defn nmdr-qwen-prefix ()
-        "/Users/ursmuff/models/qwen38-flash-next/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-")
+        (mr-flash-next-prefix))
     (defn nmdr-threeb-path ()
-        "/Users/ursmuff/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff")
+        (mr-path (mr-find "llama32-3b")))
     (defn nmdr-qwen-id () "model.qwen3.8-flash-next.ud-q2_k_xl.unsloth")
     (defn nmdr-qwen-weights-id () "weights.qwen3.8-flash-next.ud-q2_k_xl.unsloth")
     (defn nmdr-qwen-experts-id () "experts.qwen3.8-flash-next.ud-q2_k_xl.unsloth")
@@ -38,7 +38,7 @@
     (defn nmdr-threeb-mapped-id () "mapped.llama-3.2-3b")
     (defn nmdr-threeb-materialized-id () "materialized.llama-3.2-3b")
     (defn nmdr-threeb-prompt () (list 128000 791 6864 315 9822 374))
-    (defn nmdr-telemetry-root () "/tmp/form-glass-telemetry")
+    (defn nmdr-telemetry-root () (hearth-telemetry-root))
     (defn nmdr-publisher (instance) (nmdt-owner-publisher instance))
     (defn nmdr-self-pid ()
         (do
@@ -75,6 +75,16 @@
 
     (defn nmdr-weight-sample (id parent bytes readEpoch)
         (nmdt-weight-catalog id parent bytes readEpoch))
+
+    (defn nmdr-open-artifact-samples (identities paths parent owner handle openEpoch source)
+        (if (or (eq (len identities) 0) (eq (len paths) 0)) (list)
+            (cons
+                (nmdt-open-artifact-sample
+                    (nmtl-artifact-identity-id (head identities)) parent owner
+                    (head paths) handle openEpoch source
+                    (list "process" "model" "memory" "tensor" "metal" "gpu" "health"))
+                (nmdr-open-artifact-samples (tail identities) (tail paths)
+                    parent owner handle openEpoch source))))
 
     (defn nmdr-budget-sample (budget)
         (nmdt-budget-sample budget))
@@ -203,7 +213,7 @@
                     (list "process" "model" "memory" "health"))
                 (nmdt-owner-nodeid-seam owner epoch))))
 
-    (defn nmdr-publish (qslot three session fleet qhandle thandle publisher started incarnation heartbeatId ownerPid sequence qAccess tAccess qStateClock tStateClock)
+    (defn nmdr-publish (qslot three session fleet qhandle thandle publisher started incarnation heartbeatId ownerPid sequence qAccess tAccess qStateClock tStateClock artifactSamples)
         (do
             (let epoch (now_unix_ms))
             (let correlation (nmdt-owner-correlation publisher
@@ -244,17 +254,17 @@
                         (nmdt-tensor-reconcile-samples tensorGroups
                             (metal_status) publisher epoch)))
                     (let publishedSamples (append (list (nmdt-owner-heartbeat-sample-at correlation heartbeatId))
-                        (append modelSamples (append stateSamples
-                            (append runtimeSamples (append tensorSamples
-                                (list (nmdr-budget-sample (nmrf-budget fleet)))))))))
+                        (append modelSamples (append artifactSamples
+                            (append stateSamples (append runtimeSamples (append tensorSamples
+                                (list (nmdr-budget-sample (nmrf-budget fleet))))))))))
                     (fgtm-publish-snapshot (nmdr-telemetry-root)
                         publisher epoch publishedSamples)))))
 
-    (defn nmdr-publish-state (qslot three session fleet qhandle thandle publisher started incarnation heartbeatId ownerPid sequence qAccess tAccess qStateClock tStateClock)
+    (defn nmdr-publish-state (qslot three session fleet qhandle thandle publisher started incarnation heartbeatId ownerPid sequence qAccess tAccess qStateClock tStateClock artifactSamples)
         (do
             (let published (nmdr-publish qslot three session fleet qhandle thandle
                 publisher started incarnation heartbeatId ownerPid sequence
-                qAccess tAccess qStateClock tStateClock))
+                qAccess tAccess qStateClock tStateClock artifactSamples))
             (let _memory-frame (nmmg-write-quiet fleet session
                 (q4s-pos qslot) (l3rs-position three)))
             published))
@@ -309,7 +319,7 @@
             (list "native-model-dual-resident-closed" reason
                 "qwen-close" qclosed "threeb-close" tclosed)))
 
-    (defn nmdr-loop (qslot three session fleet qhandle thandle publisher started incarnation heartbeatId ownerPid sequence qAccess tAccess qStateClock tStateClock)
+    (defn nmdr-loop (qslot three session fleet qhandle thandle publisher started incarnation heartbeatId ownerPid sequence qAccess tAccess qStateClock tStateClock artifactSamples)
         (do
             (let _door (if (eq sequence 1)
                 (print (list "native-model-owner-command-door"
@@ -321,7 +331,7 @@
                     (let _wait (host-exec "/bin/sleep 0.25" ""))
                     (nmdr-loop qslot three session fleet qhandle thandle publisher
                         started incarnation heartbeatId ownerPid (add sequence 1)
-                        qAccess tAccess qStateClock tStateClock))
+                        qAccess tAccess qStateClock tStateClock artifactSamples))
                 (do
                 (let command (nmdoc-command-value polled))
                 (if (str_eq command "quit")
@@ -330,21 +340,21 @@
                     (do
                         (let _heartbeat-state (nmdr-publish-state qslot three session fleet
                             qhandle thandle publisher started incarnation heartbeatId ownerPid
-                            sequence qAccess tAccess qStateClock tStateClock))
+                            sequence qAccess tAccess qStateClock tStateClock artifactSamples))
                         (print (list "native-model-owner-heartbeat" "publisher"
                             publisher "pid" ownerPid "sequence" sequence))
                         (nmdr-loop qslot three session fleet qhandle thandle publisher
                             started incarnation heartbeatId ownerPid (add sequence 1)
-                            qAccess tAccess qStateClock tStateClock))
+                            qAccess tAccess qStateClock tStateClock artifactSamples))
                 (if (str_eq command "status")
                     (do
                         (let _status-state (nmdr-publish-state qslot three session fleet
                             qhandle thandle publisher started incarnation heartbeatId ownerPid
-                            sequence qAccess tAccess qStateClock tStateClock))
+                            sequence qAccess tAccess qStateClock tStateClock artifactSamples))
                         (nmdr-status qslot three session fleet qhandle thandle)
                         (nmdr-loop qslot three session fleet qhandle thandle publisher
                             started incarnation heartbeatId ownerPid (add sequence 1)
-                            qAccess tAccess qStateClock tStateClock))
+                            qAccess tAccess qStateClock tStateClock artifactSamples))
                     (if (str_eq command "qwen-step")
                         (do
                             (let activeEpoch (now_unix_ms))
@@ -356,7 +366,7 @@
                             (let _active-telemetry (nmdr-publish-state qslot three active fleet
                                 qhandle thandle publisher started incarnation heartbeatId ownerPid
                                 (add sequence 1) activeEpoch tAccess
-                                qActiveStateClock tStateClock))
+                                qActiveStateClock tStateClock artifactSamples))
                             (let next (q4s-evaluate-one qslot (q4s-output qslot)))
                             (let done (nmg-qwen-finished active (q4s-pos next)))
                             (let _done-frame (nmg-glass-write-physical done
@@ -368,12 +378,12 @@
                             (let _done-telemetry (nmdr-publish-state next three done nextFleet
                                 qhandle thandle publisher started incarnation heartbeatId ownerPid
                                 (add sequence 2) doneEpoch tAccess
-                                qDoneStateClock tStateClock))
+                                qDoneStateClock tStateClock artifactSamples))
                             (print (list "qwen-step" "input" (q4s-prev1 next)
                                 "output" (q4s-output next) "position" (q4s-pos next)))
                             (nmdr-loop next three done nextFleet qhandle thandle publisher
                                 started incarnation heartbeatId ownerPid (add sequence 2)
-                                doneEpoch tAccess qDoneStateClock tStateClock))
+                                doneEpoch tAccess qDoneStateClock tStateClock artifactSamples))
                         (if (str_eq command "3b-step")
                             (do
                                 (let activeEpoch (now_unix_ms))
@@ -386,7 +396,7 @@
                                 (let _active-telemetry (nmdr-publish-state qslot three active fleet
                                     qhandle thandle publisher started incarnation heartbeatId ownerPid
                                     (add sequence 1) qAccess activeEpoch
-                                    qStateClock tActiveStateClock))
+                                    qStateClock tActiveStateClock artifactSamples))
                                 (let next (l3rs-step three))
                                 (let done (nmg-threeb-finished active
                                     (l3rs-position next)))
@@ -399,24 +409,29 @@
                                 (let _done-telemetry (nmdr-publish-state qslot next done nextFleet
                                     qhandle thandle publisher started incarnation heartbeatId ownerPid
                                     (add sequence 2) qAccess doneEpoch
-                                    qStateClock tDoneStateClock))
+                                    qStateClock tDoneStateClock artifactSamples))
                                 (print (list "3b-step" "text" (l3rs-pending-text three)
                                     "next" (l3rs-pending next)
                                     "position" (l3rs-position next)))
                                 (nmdr-loop qslot next done nextFleet qhandle thandle publisher
                                     started incarnation heartbeatId ownerPid (add sequence 2)
-                                    qAccess doneEpoch qStateClock tDoneStateClock))
+                                    qAccess doneEpoch qStateClock tDoneStateClock artifactSamples))
                             (do
                                 (print (list "owner-command-ingress"
                                     (nmdoc-command-status polled) command))
                                 (nmdr-loop qslot three session fleet qhandle thandle publisher
                                     started incarnation heartbeatId ownerPid (add sequence 1)
-                                    qAccess tAccess qStateClock tStateClock)))))))))))
+                                    qAccess tAccess qStateClock tStateClock artifactSamples)))))))))))
 
-    (defn nmdr-after-threeb (qsrc qresult qsession qhandle qStateClock three thandle started publisher incarnation heartbeatId ownerPid)
+    (defn nmdr-after-threeb (qsrc qresult qsession qhandle qStateClock qArtifactSamples three thandle started publisher incarnation heartbeatId ownerPid)
         (do
             (let tloaded (nmg-threeb-loaded qsession))
             (let tLoadedEpoch (now_unix_ms))
+            (let tArtifactSamples (nmdr-open-artifact-samples
+                (nmtl-layout-profile-artifact (nmtl-llama-layout-profile))
+                (list (l3rs-path three)) (nmdr-threeb-id) publisher
+                thandle tLoadedEpoch "l3rs.open-path-file-stat"))
+            (let artifactSamples (append qArtifactSamples tArtifactSamples))
             (let _tloaded-frame (nmg-glass-write-physical tloaded
                 (NMGThreeB) thandle "weight-open-returned"))
             (let tprefilling (nmg-threeb-prefilling tloaded 0))
@@ -460,12 +475,12 @@
             (let tAccess (now_unix_ms))
             (let _initial-state (nmdr-publish-state qnext tprefilled qdone fleet
                 qhandle thandle publisher started incarnation heartbeatId ownerPid
-                1 qAccess tAccess qCurrentStateClock tStateClock))
+                1 qAccess tAccess qCurrentStateClock tStateClock artifactSamples))
             (nmdr-loop qnext tprefilled qdone fleet qhandle thandle publisher
                 started incarnation heartbeatId ownerPid 1 qAccess tAccess
-                qCurrentStateClock tStateClock)))
+                qCurrentStateClock tStateClock artifactSamples)))
 
-    (defn nmdr-open-threeb (qsrc qresult qsession qhandle qStateClock started publisher incarnation heartbeatId ownerPid)
+    (defn nmdr-open-threeb (qsrc qresult qsession qhandle qStateClock qArtifactSamples started publisher incarnation heartbeatId ownerPid)
         (do
             (let tloading (nmg-threeb-loading qsession))
             (let _tloading-frame (nmg-glass-write tloading))
@@ -473,7 +488,7 @@
             (let thandle (l3rs-residency-handle three))
             (if (eq (l3rs-resident? three) 1)
                 (nmdr-after-threeb qsrc qresult tloading qhandle qStateClock
-                    three thandle started publisher incarnation heartbeatId
+                    qArtifactSamples three thandle started publisher incarnation heartbeatId
                     ownerPid)
                 (do
                     (let tclosed (l3rs-close three))
@@ -486,6 +501,10 @@
         (do
             (let qloaded (nmg-qwen-loaded loading))
             (let qLoadedEpoch (now_unix_ms))
+            (let qArtifactSamples (nmdr-open-artifact-samples
+                (nmtl-layout-profile-artifact (nmtl-qwen-layout-profile))
+                (q4t-paths (q4s-prefix slot)) (nmdr-qwen-id) publisher
+                qhandle qLoadedEpoch "q4s.open-path-file-stat"))
             (let _qloaded-frame (nmg-glass-write-physical qloaded
                 (NMGQwen) qhandle "weight-open-returned"))
             (let ids (q4tk-chat-ids src "Return only the word Form."))
@@ -509,7 +528,7 @@
             (print (list "qwen-seed-answer" (q4x-result-text result)
                 "tokens" (len ids) "position"
                 (q4s-pos (q4x-result-slot result))))
-            (nmdr-open-threeb src result qdone qhandle qStateClock started
+            (nmdr-open-threeb src result qdone qhandle qStateClock qArtifactSamples started
                 publisher incarnation heartbeatId ownerPid)))
 
     (framebuffer-clear)
