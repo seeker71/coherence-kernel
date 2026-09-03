@@ -3,7 +3,7 @@
 // No source text or computed answer crosses the telemetry membrane.
 //////////////////////////////////////////////////////////////////////
 
-// preludes: form/form-stdlib/form-glass-telemetry-membrane.bml
+// preludes: form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/term-graphics.bml
 
 section [form.bml] {
     class BmlDemandJitGlass [public, observable] {
@@ -12,21 +12,114 @@ section [form.bml] {
         field BDJGOwner = "jit.bml-demand";
         field BDJGSource = "bml-demand-jit";
 
-        def bdjg-channels() = list("jit", "core", "framebuffer", "glass");
+        def bdjg-channels() = list("jit", "core", "framebuffer", "glass", "health", "control");
         def bdjg-sample(id, parent, kind, plane, purpose, bytes, capacity, lifecycle, epoch, evictability) = fgtm-sample(id, parent, kind, plane, BDJGOwner(), "cpu-jit", purpose, bytes, capacity, lifecycle, fgtm-present(epoch), fgtm-present(epoch), fgtm-absent(), fgtm-absent(), evictability, "physical-live", BDJGSource(), bdjg-channels());
+        def bdjg-stage(step) = bdj-step-stage(step);
+        def bdjg-step-faulted?(step) = bdj-state-faulted?(bdj-step-state(step));
+        def bdjg-stage-field(field) = if eq(bdj-field-present?(field), 1) then fgtm-present(bdj-field-value(field)) else fgtm-absent();
+        def bdjg-stage-epoch-field(field) = if eq(bdj-field-present?(field), 1) then fgtm-present(mul(bdj-field-value(field), 1000)) else fgtm-absent();
         def bdjg-request-sample(epoch, firstMs) = bdjg-sample("jit.bml-demand.request", fgtm-absent(), "event", "form", "first-answer-gas", fgtm-absent(), fgtm-present(firstMs), "released", epoch, "released");
         def bdjg-specialization-requested?(first) = str_eq(bdj-receipt-status(first), "form-ready-specialization-pending");
-        def bdjg-pending-lifecycle(step) = if eq(bdj-step-installed(step), 1) then "released" else "ready";
+        def bdjg-pending-lifecycle(step) = if eq(bdjg-step-faulted?(step), 1) then "failed" else if eq(bdj-step-installed(step), 1) then "released" else "ready";
         def bdjg-pending-sample(epoch, step) = bdjg-sample("jit.bml-demand.pending", fgtm-present("jit.bml-demand.request"), "recipe", "form", bdj-step-status(step), fgtm-absent(), fgtm-present(BDJMaxRows()), bdjg-pending-lifecycle(step), epoch, if eq(bdj-step-installed(step), 1) then "released" else "pressure-only");
+        def bdjg-inspect-sample(epoch, step) = bdjg-sample("jit.bml-demand.inspect", fgtm-present("jit.bml-demand.pending"), "jit-stage", "disk", bdj-stage-cache-disposition(bdjg-stage(step)), fgtm-absent(), fgtm-present(bdj-stage-inspect-ms(bdjg-stage(step))), if eq(bdjg-step-faulted?(step), 1) then "failed" else "ready", epoch, "released");
+        def bdjg-cache-age-purpose(step) = if eq(bdj-field-present?(bdj-stage-cache-age(bdjg-stage(step))), 1) then "cache-age-ms" else bdj-field-reason(bdj-stage-cache-age(bdjg-stage(step)));
+        def bdjg-cache-age-lifecycle(step) = if eq(bdjg-step-faulted?(step), 1) then "failed" else if eq(bdj-field-present?(bdj-stage-cache-age(bdjg-stage(step))), 1) then "ready" else "released";
+        // Reading happens at the snapshot epoch; the artifact's filesystem
+        // mtime is its write epoch.  Keeping those directions exact lets the
+        // common Glass r=/w= age columns distinguish recent inspection from
+        // old disk ice without making either one an invented zero.
+        def bdjg-cache-age-sample(epoch, step) = fgtm-sample("jit.bml-demand.cache-age", fgtm-present("jit.bml-demand.inspect"), "cache-age", "disk", BDJGOwner(), "cpu-jit", bdjg-cache-age-purpose(step), fgtm-absent(), bdjg-stage-field(bdj-stage-cache-age(bdjg-stage(step))), bdjg-cache-age-lifecycle(step), fgtm-present(epoch), bdjg-stage-epoch-field(bdj-stage-cache-mtime(bdjg-stage(step))), fgtm-absent(), fgtm-absent(), if eq(bdj-field-present?(bdj-stage-cache-age(bdjg-stage(step))), 1) then "policy-ranked" else "released", "physical-live", BDJGSource(), bdjg-channels());
+        def bdjg-materialize-sample(epoch, step) = bdjg-sample("jit.bml-demand.materialize", fgtm-present("jit.bml-demand.inspect"), "jit-stage", "cpu", bdj-stage-materialize-action(bdjg-stage(step)), fgtm-absent(), fgtm-present(bdj-stage-materialize-ms(bdjg-stage(step))), if eq(bdjg-step-faulted?(step), 1) then "failed" else "ready", epoch, "pressure-only");
         def bdjg-disk-ready?(step) = if str_eq(bdj-step-disk-action(step), "published") then 1 else if str_eq(bdj-step-disk-action(step), "reused-disk") then 1 else 0;
-        def bdjg-disk-lifecycle(step) = if eq(bdjg-disk-ready?(step), 1) then "ready" else if str_eq(bdj-step-disk-action(step), "withheld-source-missing") then "unknown" else "failed";
-        def bdjg-disk-sample(epoch, step, cacheBytes) = bdjg-sample("jit.bml-demand.disk", fgtm-present("jit.bml-demand.pending"), "cache", "disk", bdj-step-disk-action(step), if eq(bdjg-disk-ready?(step), 1) then fgtm-present(cacheBytes) else fgtm-absent(), fgtm-absent(), bdjg-disk-lifecycle(step), epoch, "policy-ranked");
+        def bdjg-disk-lifecycle(step) = if eq(bdjg-disk-ready?(step), 1) then "ready" else if str_eq(bdj-step-disk-action(step), "withheld-source-missing") then "released" else "failed";
+        def bdjg-disk-sample(epoch, step, cacheBytes) = bdjg-sample("jit.bml-demand.disk", fgtm-present("jit.bml-demand.page"), "cache", "disk", bdj-step-disk-action(step), if eq(bdjg-disk-ready?(step), 1) then fgtm-present(cacheBytes) else fgtm-absent(), fgtm-present(bdj-stage-publish-ms(bdjg-stage(step))), bdjg-disk-lifecycle(step), epoch, "policy-ranked");
         def bdjg-page-lifecycle(step) = if eq(bdj-step-installed(step), 1) then "resident" else "failed";
-        def bdjg-page-sample(epoch, step) = bdjg-sample("jit.bml-demand.page", fgtm-present("jit.bml-demand.disk"), "cell", "cpu", "resident-page-water", fgtm-absent(), fgtm-present(bdj-step-ms(step)), bdjg-page-lifecycle(step), epoch, "pressure-only");
-        def bdjg-samples(epoch, firstMs, first, step, cacheBytes) = if eq(bdjg-specialization-requested?(first), 1) then list(bdjg-request-sample(epoch, firstMs), bdjg-pending-sample(epoch, step), bdjg-disk-sample(epoch, step, cacheBytes), bdjg-page-sample(epoch, step)) else list(bdjg-request-sample(epoch, firstMs));
+        def bdjg-page-sample(epoch, step) = bdjg-sample("jit.bml-demand.page", fgtm-present("jit.bml-demand.materialize"), "cell", "cpu", "install-challenge-ms", fgtm-absent(), fgtm-present(bdj-stage-install-challenge-ms(bdjg-stage(step))), bdjg-page-lifecycle(step), epoch, "pressure-only");
+        def bdjg-total-sample(epoch, step) = bdjg-sample("jit.bml-demand.total", fgtm-present("jit.bml-demand.disk"), "jit-stage", "form", bdj-step-status(step), fgtm-absent(), fgtm-present(bdj-stage-total-ms(bdjg-stage(step))), if eq(bdjg-step-faulted?(step), 1) then "failed" else "ready", epoch, "released");
+        def bdjg-attention-purpose(step) = if str_eq(bdj-step-attention(step), "immediate") then "immediate-fault-attention" else if str_eq(bdj-step-attention(step), "over") then "over-5s-close-attention" else "within-5s";
+        def bdjg-attention-sample(epoch, step) = bdjg-sample("jit.bml-demand.unattributed", fgtm-present("jit.bml-demand.total"), "jit-stage", "form", bdjg-attention-purpose(step), fgtm-absent(), fgtm-present(bdj-stage-unattributed-ms(bdjg-stage(step))), if eq(bdjg-step-faulted?(step), 1) then "failed" else "ready", epoch, "released");
+        def bdjg-frontier-sample(epoch, step) = fgtm-sample("jit.bml-demand.frontier.full-program-call", fgtm-present("jit.bml-demand.unattributed"), bdj-stage-full-call-state(bdjg-stage(step)), "membrane", BDJGOwner(), "cpu-jit", bdj-stage-full-call-door(bdjg-stage(step)), fgtm-absent(), fgtm-absent(), "released", fgtm-present(epoch), fgtm-present(epoch), fgtm-absent(), fgtm-absent(), "released", "declared", BDJGSource(), bdjg-channels());
+        def bdjg-fault-sample(step) {
+            let fault = bdj-state-fault(bdj-step-state(step));
+            fgtm-sample(bdj-fault-key(fault), fgtm-present("jit.bml-demand.total"), "diagnostic-control", "form", bdj-fault-publisher(fault), "cpu-jit", bdj-fault-cause(fault), fgtm-absent(), fgtm-present(bdj-fault-priority(fault)), "failed", fgtm-present(bdj-fault-observed(fault)), fgtm-present(bdj-fault-observed(fault)), fgtm-present(bdj-fault-priority(fault)), fgtm-absent(), "never", "physical-live", BDJGSource(), bdjg-channels());
+        }
+        def bdjg-healed?(step) {
+            bdj-healed?(bdj-state-last-control(bdj-step-state(step)));
+        }
+        def bdjg-healed-sample(step) {
+            let healed = bdj-state-last-control(bdj-step-state(step));
+            fgtm-sample("jit.bml-demand.healed", fgtm-present(bdj-healed-fault-key(healed)), "jit-healed", "form", bdj-healed-publisher(healed), "cpu-jit", bdj-healed-cause(healed), fgtm-absent(), fgtm-present(bdj-healed-priority(healed)), "ready", fgtm-present(bdj-healed-snapshot-epoch(healed)), fgtm-present(bdj-healed-observed(healed)), fgtm-present(bdj-healed-priority(healed)), fgtm-absent(), "released", "physical-live", bdj-healed-evidence(healed), bdjg-channels());
+        }
+        def bdjg-base-samples(epoch, firstMs, step, cacheBytes) = list(bdjg-request-sample(epoch, firstMs), bdjg-pending-sample(epoch, step), bdjg-inspect-sample(epoch, step), bdjg-cache-age-sample(epoch, step), bdjg-materialize-sample(epoch, step), bdjg-page-sample(epoch, step), bdjg-disk-sample(epoch, step, cacheBytes), bdjg-total-sample(epoch, step), bdjg-attention-sample(epoch, step), bdjg-frontier-sample(epoch, step));
+        def bdjg-control-samples(step) = append(if eq(bdj-state-faulted?(bdj-step-state(step)), 1) then list(bdjg-fault-sample(step)) else list(), if eq(bdjg-healed?(step), 1) then list(bdjg-healed-sample(step)) else list());
+        def bdjg-request-faulted?(first) = bdj-state-faulted?(bdj-receipt-state(first));
+        def bdjg-samples(epoch, firstMs, first, step, cacheBytes) = if eq(bdjg-specialization-requested?(first), 1) then append(bdjg-base-samples(epoch, firstMs, step, cacheBytes), bdjg-control-samples(step)) else if eq(bdjg-request-faulted?(first), 1) then append(list(bdjg-request-sample(epoch, firstMs)), bdjg-control-samples(step)) else list(bdjg-request-sample(epoch, firstMs));
         def bdjg-publish-at(root, publisher, epoch, firstMs, first, step, cacheBytes) = fgtm-publish-snapshot(root, publisher, epoch, bdjg-samples(epoch, firstMs, first, step, cacheBytes));
         def bdjg-publish(epoch, firstMs, first, step, cacheBytes) = bdjg-publish-at(BDJGRoot(), BDJGPublisher(), epoch, firstMs, first, step, cacheBytes);
+        def bdjg-scoped-id(scope, id) = str_concat(scope, substring(id, 14, str_len(id)));
+        def bdjg-scoped-parent(scope, parent) = if eq(fgtm-field-present?(parent), 0) then fgtm-absent() else fgtm-present(bdjg-scoped-id(scope, fgtm-field-value(parent)));
+        def bdjg-scoped-sample(scope, sample) = fgtm-sample(bdjg-scoped-id(scope, fgtm-sample-id(sample)), bdjg-scoped-parent(scope, fgtm-sample-parent(sample)), fgtm-sample-kind(sample), fgtm-sample-plane(sample), fgtm-sample-owner(sample), fgtm-sample-lane(sample), fgtm-sample-purpose(sample), fgtm-sample-bytes(sample), fgtm-sample-capacity(sample), fgtm-sample-lifecycle(sample), fgtm-sample-read-epoch(sample), fgtm-sample-write-epoch(sample), fgtm-sample-heat(sample), fgtm-sample-handle(sample), fgtm-sample-evictability(sample), fgtm-sample-evidence(sample), fgtm-sample-source(sample), fgtm-sample-channels(sample));
+        def bdjg-scoped-samples(scope, samples) = if eq(len(samples), 0) then list() else cons(bdjg-scoped-sample(scope, head(samples)), bdjg-scoped-samples(scope, tail(samples)));
+        // Comparison prefixes are display scope, never control identity. The
+        // newest control-bearing step contributes its exact unmodified fault or
+        // heal row so Glass's stop-the-line consumer and producer share one key.
+        def bdjg-comparison-controls(step, reuseStep) {
+            let reuseControls = bdjg-control-samples(reuseStep);
+            if gt(len(reuseControls), 0) then reuseControls else bdjg-control-samples(step);
+        }
+        def bdjg-comparison-samples(epoch, firstMs, first, step, buildBytes, reuseFirstMs, reuseFirst, reuseStep, reuseBytes) = append(bdjg-scoped-samples("jit.bml-demand.first", bdjg-base-samples(epoch, firstMs, step, buildBytes)), append(bdjg-scoped-samples("jit.bml-demand.reuse", bdjg-base-samples(epoch, reuseFirstMs, reuseStep, reuseBytes)), bdjg-comparison-controls(step, reuseStep)));
+        def bdjg-publish-comparison-at(root, publisher, epoch, firstMs, first, step, buildBytes, reuseFirstMs, reuseFirst, reuseStep, reuseBytes) = fgtm-publish-snapshot(root, publisher, epoch, bdjg-comparison-samples(epoch, firstMs, first, step, buildBytes, reuseFirstMs, reuseFirst, reuseStep, reuseBytes));
+        def bdjg-publish-comparison(epoch, firstMs, first, step, buildBytes, reuseFirstMs, reuseFirst, reuseStep, reuseBytes) = bdjg-publish-comparison-at(BDJGRoot(), BDJGPublisher(), epoch, firstMs, first, step, buildBytes, reuseFirstMs, reuseFirst, reuseStep, reuseBytes);
         def bdjg-publish-status(result) = if lt(len(result), 2) then "malformed" else nth(result, 1);
+
+        // A bounded Glass projection of the same snapshot.  It is deliberately
+        // separate from the global Atlas layout so this organ does not invent
+        // renderer state or compete for its row budget.
+        def bdjg-find-sample(samples, id) = if eq(len(samples), 0) then nothing() else if str_eq(fgtm-sample-id(head(samples)), id) then head(samples) else bdjg-find-sample(tail(samples), id);
+        def bdjg-find-kind(samples, kind) = if eq(len(samples), 0) then nothing() else if str_eq(fgtm-sample-kind(head(samples)), kind) then head(samples) else bdjg-find-kind(tail(samples), kind);
+        def bdjg-find-kind-prefix(samples, kind, prefix) = if eq(len(samples), 0) then nothing() else if and(str_eq(fgtm-sample-kind(head(samples)), kind), eq(str_find(fgtm-sample-id(head(samples)), prefix, 0), 0)) then head(samples) else bdjg-find-kind-prefix(tail(samples), kind, prefix);
+        def bdjg-duration-field(field) = if eq(fgtm-field-present?(field), 0) then "absent" else if eq(fgtm-field-value(field), 0) then "<1ms" else tg-dur(fgtm-field-value(field));
+        def bdjg-bytes-field(field) = if eq(fgtm-field-present?(field), 1) then str_concat(int_to_str(fgtm-field-value(field)), "B") else "absent";
+        def bdjg-snapshot-age(nowMs, snapshot) = if lt(nowMs, fgtm-snapshot-epoch(snapshot)) then 0 else sub(nowMs, fgtm-snapshot-epoch(snapshot));
+        def bdjg-stage-value(sample) = if nothing?(sample) then "sample-absent" else str_concat(fgtm-sample-purpose(sample), str_concat("  dt=", bdjg-duration-field(fgtm-sample-capacity(sample))));
+        def bdjg-stage-lane(label, sample, age) = if nothing?(sample) then tg-lane(label, "sample-absent", "warn", age) else tg-lane(label, bdjg-stage-value(sample), if str_eq(fgtm-sample-lifecycle(sample), "failed") then "bad" else "good", age);
+        def bdjg-cache-lane(label, sample, age) = if nothing?(sample) then tg-lane(label, "sample-absent", "warn", age) else tg-lane(label, str_concat(fgtm-sample-purpose(sample), str_concat("  age=", bdjg-duration-field(fgtm-sample-capacity(sample)))), if str_eq(fgtm-sample-lifecycle(sample), "failed") then "bad" else if eq(fgtm-field-present?(fgtm-sample-capacity(sample)), 1) then "good" else "warn", age);
+        def bdjg-disk-lane(label, sample, age) = if nothing?(sample) then tg-lane(label, "sample-absent", "warn", age) else tg-lane(label, str_concat(fgtm-sample-purpose(sample), str_concat("  bytes=", str_concat(bdjg-bytes-field(fgtm-sample-bytes(sample)), str_concat(" dt=", bdjg-duration-field(fgtm-sample-capacity(sample)))))), if str_eq(fgtm-sample-lifecycle(sample), "ready") then "good" else "bad", age);
+        def bdjg-door-lane(label, sample, age) = if nothing?(sample) then tg-lane(label, "sample-absent", "warn", age) else tg-lane(label, str_concat(fgtm-sample-purpose(sample), str_concat("  ", fgtm-sample-kind(sample))), "warn", age);
+        def bdjg-control-sample?(sample, kind) = if not(str_eq(fgtm-sample-kind(sample), kind)) then 0 else if not(str_eq(fgtm-sample-owner(sample), BDJGPublisher())) then 0 else if not(str_eq(fgtm-sample-source(sample), BDJGSource())) then 0 else if not(str_eq(fgtm-sample-evidence(sample), "physical-live")) then 0 else 1;
+        def bdjg-find-control(samples, kind) = if eq(len(samples), 0) then nothing() else if eq(bdjg-control-sample?(head(samples), kind), 1) then head(samples) else bdjg-find-control(tail(samples), kind);
+        def bdjg-control-lanes(samples, age) {
+            let fault = bdjg-find-control(samples, "diagnostic-control");
+            let healed = bdjg-find-control(samples, "jit-healed");
+            append(if nothing?(fault) then list() else list(tg-lane("live  !! FAULT     ", str_concat("HEALING   ", str_concat(fgtm-sample-purpose(fault), str_concat(" priority=", int_to_str(fgtm-field-value(fgtm-sample-heat(fault)))))), "bad", age)), if nothing?(healed) then list() else list(tg-lane("live  + HEALED    ", str_concat(fgtm-sample-purpose(healed), str_concat(" priority=", int_to_str(fgtm-field-value(fgtm-sample-heat(healed))))), "good", age)));
+        }
+        def bdjg-scope-lanes(scope, samples, age) = list(
+            bdjg-stage-lane(str_concat(scope, " I inspect      "), bdjg-find-sample(samples, str_concat("jit.bml-demand.", str_concat(scope, ".inspect"))), age),
+            bdjg-cache-lane(str_concat(scope, " A artifact     "), bdjg-find-sample(samples, str_concat("jit.bml-demand.", str_concat(scope, ".cache-age"))), age),
+            bdjg-stage-lane(str_concat(scope, " C materialize  "), bdjg-find-sample(samples, str_concat("jit.bml-demand.", str_concat(scope, ".materialize"))), age),
+            bdjg-stage-lane(str_concat(scope, " R install/test "), bdjg-find-sample(samples, str_concat("jit.bml-demand.", str_concat(scope, ".page"))), age),
+            bdjg-disk-lane(str_concat(scope, " P disk         "), bdjg-find-sample(samples, str_concat("jit.bml-demand.", str_concat(scope, ".disk"))), age),
+            bdjg-stage-lane(str_concat(scope, " T total        "), bdjg-find-sample(samples, str_concat("jit.bml-demand.", str_concat(scope, ".total"))), age),
+            bdjg-stage-lane(str_concat(scope, " U unattributed "), bdjg-find-sample(samples, str_concat("jit.bml-demand.", str_concat(scope, ".unattributed"))), age),
+            bdjg-door-lane(str_concat(scope, " ! frontier     "), bdjg-find-sample(samples, str_concat("jit.bml-demand.", str_concat(scope, ".frontier.full-program-call"))), age));
+        def bdjg-live-lanes(samples, age) = list(
+            bdjg-stage-lane("live  I inspect      ", bdjg-find-sample(samples, "jit.bml-demand.inspect"), age),
+            bdjg-cache-lane("live  A artifact     ", bdjg-find-sample(samples, "jit.bml-demand.cache-age"), age),
+            bdjg-stage-lane("live  C materialize  ", bdjg-find-sample(samples, "jit.bml-demand.materialize"), age),
+            bdjg-stage-lane("live  R install/test ", bdjg-find-sample(samples, "jit.bml-demand.page"), age),
+            bdjg-disk-lane("live  P disk         ", bdjg-find-sample(samples, "jit.bml-demand.disk"), age),
+            bdjg-stage-lane("live  T total        ", bdjg-find-sample(samples, "jit.bml-demand.total"), age),
+            bdjg-stage-lane("live  U unattributed ", bdjg-find-sample(samples, "jit.bml-demand.unattributed"), age),
+            bdjg-door-lane("live  ! frontier     ", bdjg-find-sample(samples, "jit.bml-demand.frontier.full-program-call"), age));
+        def bdjg-stage-lanes(samples, age) = if nothing?(bdjg-find-sample(samples, "jit.bml-demand.first.request")) then bdjg-live-lanes(samples, age) else append(bdjg-scope-lanes("first", samples, age), bdjg-scope-lanes("reuse", samples, age));
+        def bdjg-render-snapshot(nowMs, snapshot) {
+            let samples = fgtm-snapshot-samples(snapshot);
+            let age = bdjg-snapshot-age(nowMs, snapshot);
+            tg-frame(append(list(tg-lane("FORM GLASS JIT  ", str_concat("publisher=", str_concat(fgtm-snapshot-publisher(snapshot), str_concat(" nodes=", int_to_str(len(samples))))), "plain", age)), append(bdjg-control-lanes(samples, age), bdjg-stage-lanes(samples, age))));
+        }
+        def bdjg-render-reading(nowMs, reading) = if str_eq(fgtm-read-state-status(reading), "current") then bdjg-render-snapshot(nowMs, fgtm-field-value(fgtm-read-state-value(reading))) else tg-frame(list(tg-lane("FORM GLASS JIT  ", str_concat("snapshot=", fgtm-read-state-status(reading)), "warn", -1)));
+        def bdjg-render-current() = bdjg-render-reading(now_unix_ms(), fgtm-read-current(BDJGRoot(), BDJGPublisher()));
     }
     0;
 }

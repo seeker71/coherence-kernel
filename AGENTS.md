@@ -266,6 +266,11 @@ seam is named, never hidden. Naming it *is* the practice.
    ./fkwu observe/preflight-run.fk
    ```
 
+   The fixed `/tmp/preflight-target` door is single-agent compatibility. In a
+   parallel workspace, use `./fkwu observe/preflight-stdin-run.fk` and send the
+   target as one line on that process's stdin. The target is then process-local;
+   siblings cannot replace it between write and read.
+
    It forces a fresh compile (an existing image replaces the error with a tally — no name, no line), checks paren
    balance without running anything, and answers the one question the compiler cannot: `[unresolved-call] 'x'`
    is **nonspecific** (corpus row 955) — one red line with two opposite repairs. Either nobody defines `x` (a

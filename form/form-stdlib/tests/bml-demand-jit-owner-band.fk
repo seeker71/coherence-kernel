@@ -1,0 +1,271 @@
+; bml-demand-jit-owner-band.fk -- production request/progress ownership.
+;
+; Verdict 32767.
+; preludes: form-stdlib/bml-demand-jit-owner.fk
+
+(do
+    (defn bdjob-bit (truth weight) (if (eq truth 1) weight 0))
+    (defn bdjob-root () "/tmp/bml-demand-jit-owner-band")
+    (defn bdjob-source () "/tmp/bml-demand-jit-owner-band/source.bml")
+    (defn bdjob-cache () "/tmp/bml-demand-jit-owner-band/leaf.cache")
+    (defn bdjob-alternate-cache ()
+        "/tmp/bml-demand-jit-owner-band/alternate.cache")
+    (defn bdjob-lost-cache ()
+        "/tmp/bml-demand-jit-owner-band/lost.cache")
+    (defn bdjob-source-missing-path ()
+        "/tmp/bml-demand-jit-owner-band/missing-source.bml")
+    (defn bdjob-source-missing-cache ()
+        "/tmp/bml-demand-jit-owner-band/source-missing.cache")
+    (defn bdjob-program ()
+        (list (list 1 7) (list 2) (list 1 3) (list 5 1 2) (list 3 3 0)))
+    (defn bdjob-runtime ()
+        (bdj-runtime-fingerprint-from-identities
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333"))
+    ; host remove-tree is an empty-directory rmdir. Remove every bounded file
+    ; and publish-lock member this band owns before removing the root.
+    (defn bdjob-remove-file (path)
+        (if (eq (fs-exists? path) 1) (fs-remove-file path) 0))
+    (defn bdjob-clean-cache (cache) (do
+        (bdj-release-publish-lock cache)
+        (bdjob-remove-file cache)))
+    (defn bdjob-clean () (do
+        (bdjob-clean-cache (bdjob-cache))
+        (bdjob-clean-cache (bdjob-alternate-cache))
+        (bdjob-clean-cache (bdjob-lost-cache))
+        (bdjob-clean-cache (bdjob-source-missing-cache))
+        (bdjob-remove-file (bdjob-source))
+        (bdjob-remove-file (bdjob-source-missing-path))
+        (bdjob-remove-file
+            (fgtm-snapshot-candidate-path (bdjob-root) (BDJGPublisher)))
+        (bdjob-remove-file
+            (fgtm-snapshot-path (bdjob-root) (BDJGPublisher)))
+        (fs-remove-tree (bdjob-root))))
+    (defn bdjob-prepare () (do
+        (bdjob-clean)
+        (fs-mkdir (bdjob-root))))
+    (defn bdjob-snapshot (progress)
+        (fgtm-field-value (fgtm-read-state-value
+            (bdjo-progress-reading progress))))
+    (defn bdjob-find-kind (rows kind)
+        (if (eq (len rows) 0) (nothing)
+            (if (str_eq (fgtm-sample-kind (head rows)) kind) (head rows)
+                (bdjob-find-kind (tail rows) kind))))
+
+    ; Form lets are demand-driven: the source write depends on preparation,
+    ; whose do sequence removes stale disk ice before recreating the root.
+    (let made (bdjob-prepare))
+    (let sourceWrote (if (ge made 0)
+        (fs-write-text (bdjob-source) "owner-source-v1") -1))
+    (let request (bdjo-request (bdjo-owner 8101) (bdjob-source)
+        (bdjob-cache) (bdjob-program) 4 5))
+    (let first (bdjo-request-first request))
+    (let requestedOwner (bdjo-request-owner request))
+    (let originalPendingWire (bdj-pending-program-wire
+        (bdj-state-pending (bdjo-state requestedOwner))))
+    (let alternateProgram (list (list 1 9) (list 2) (list 3 1 0)))
+    (let overlapping (bdjo-request requestedOwner (bdjob-source)
+        (bdjob-alternate-cache)
+        alternateProgram 2 5))
+    (let overlappedOwner (bdjo-request-owner overlapping))
+
+    ; Make the JIT cache publication fail after a real native challenge. Also
+    ; withhold the first telemetry publication. The next progress must publish
+    ; the exact retained step rather than running a heal before Glass sees it.
+    (let lockMade (fs-mkdir (bdj-publish-lock-path (bdjob-cache))))
+    (let leaseWrote (fs-write-text (bdj-publish-lease-path (bdjob-cache)) "held"))
+    (let unconfirmed (bdjo-progress-with-runtime-at overlappedOwner ""
+        (bdjob-runtime)))
+    (let unconfirmedOwner (bdjo-progress-owner unconfirmed))
+    (let unconfirmedStep (bdjo-progress-step unconfirmed))
+    (let faultKey (bdj-fault-key
+        (bdj-state-fault (bdj-step-state unconfirmedStep))))
+    (let published (bdjo-progress-with-runtime-at unconfirmedOwner
+        (bdjob-root) (bdjob-runtime)))
+    (let publishedOwner (bdjo-progress-owner published))
+    (let faultSnapshot (bdjob-snapshot published))
+    (let faultSample (bdjob-find-kind
+        (fgtm-snapshot-samples faultSnapshot) "diagnostic-control"))
+
+    ; A request remains available while the exact fault is held. Releasing the
+    ; named cache lease lets the next progress perform the automatic, real
+    ; compile/install/challenge/publish probe and emit the cause-bound heal.
+    (let during (bdjo-request publishedOwner (bdjob-source) (bdjob-cache)
+        (bdjob-program) 4 1))
+    (let duringFirst (bdjo-request-first during))
+    (let released (bdj-release-publish-lock (bdjob-cache)))
+    (let healed (bdjo-progress-with-runtime-at (bdjo-request-owner during)
+        (bdjob-root) (bdjob-runtime)))
+    (let healedOwner (bdjo-progress-owner healed))
+    (let healedSnapshot (bdjob-snapshot healed))
+    (let healedSample (bdjob-find-kind
+        (fgtm-snapshot-samples healedSnapshot) "jit-healed"))
+
+    ; A request-time resident carrier loss must also enter the owner's exact
+    ; publication lane before any automatic retry is permitted.
+    (let lostIdentity (jonb-identity (bdjob-program) 4 8102))
+    (let lostImage (lo-compile-fn (bdjob-program) 4))
+    (let lostEntry (list lostIdentity lostImage (jonb-image-id lostImage)
+        (list 0 lostIdentity (list))))
+    (let lostState (bdj-state 8102 (list 8102 (list lostEntry))
+        (nothing) "resident-native"))
+    (let lostRequest (bdjo-request (bdjo-owner-from-state lostState)
+        (bdjob-source) (bdjob-lost-cache)
+        (bdjob-program) 4 13))
+    (let lostOwner (bdjo-request-owner lostRequest))
+    (let lostPublished (bdjo-progress-with-runtime-at lostOwner
+        (bdjob-root) (bdjob-runtime)))
+    (let lostFault (bdjob-find-kind
+        (fgtm-snapshot-samples (bdjob-snapshot lostPublished))
+        "diagnostic-control"))
+
+    ; Source absence cannot be a quiet RAM-only success. It is published as
+    ; P1000, and only a physically created source plus verified disk read-back
+    ; permits the automatic heal.
+    (let sourceMissingPath (bdjob-source-missing-path))
+    (let sourceMissingCache (bdjob-source-missing-cache))
+    (let sourceMissingRequest (bdjo-request (bdjo-owner 8103)
+        sourceMissingPath sourceMissingCache (bdjob-program) 4 5))
+    (let sourceMissingProgress (bdjo-progress-with-runtime-at
+        (bdjo-request-owner sourceMissingRequest) (bdjob-root)
+        (bdjob-runtime)))
+    (let sourceMissingFault (bdjob-find-kind
+        (fgtm-snapshot-samples (bdjob-snapshot sourceMissingProgress))
+        "diagnostic-control"))
+    ; The write depends on the exact published fault receipt. Form evaluation
+    ; is demand-driven, so textual let order alone is not a lifecycle barrier.
+    (let sourceMissingFaultObserved
+        (and (eq (bdjo-progress-confirmed? sourceMissingProgress) 1)
+             (and (str_eq (bdjo-lifecycle
+                            (bdjo-progress-owner sourceMissingProgress))
+                            "fault-published")
+                  (str_eq (fgtm-sample-purpose sourceMissingFault)
+                            "disk-publish-withheld-source-missing"))))
+    (let sourceArrived (if (eq sourceMissingFaultObserved 1)
+        (fs-write-text sourceMissingPath "arrived-v1") -1))
+    (let sourceMissingHeal (bdjo-progress-with-runtime-at
+        (bdjo-progress-owner sourceMissingProgress) (bdjob-root)
+        (bdjob-runtime)))
+    (let sourceMissingHealSample (bdjob-find-kind
+        (fgtm-snapshot-samples (bdjob-snapshot sourceMissingHeal))
+        "jit-healed"))
+
+    ; The fault channel key is a bounded, stable 64-bit fingerprint of the
+    ; complete structural fault wire. Same cause and millisecond must still
+    ; name two distinct pending programs without allocation-order handles or
+    ; prose in IDs; the full digest remains in the owner-held fault record.
+    (let collisionStage (bdj-stage-empty 8200 8200 "missing"))
+    (let collisionPendingA (bdj-pending (bdjob-source) (bdjob-cache)
+        (bdjob-program) 4 5 8104))
+    (let collisionPendingB (bdj-pending (bdjob-source) (bdjob-cache)
+        alternateProgram 2 5 8104))
+    (let collisionFaultA (bdj-state-fault (bdj-fault-state
+        (bdj-empty 8104) collisionPendingA "same-cause" collisionStage)))
+    (let collisionFaultB (bdj-state-fault (bdj-fault-state
+        (bdj-empty 8104) collisionPendingB "same-cause" collisionStage)))
+
+    (let verdict (sum (list
+        (bdjob-bit (and (ge made 0) (gt sourceWrote 0)) 1)
+        (bdjob-bit (and (str_eq (bdj-receipt-status first)
+                            "form-ready-specialization-pending")
+                       (and (str_eq (bdj-receipt-route first) "form")
+                            (eq (bdj-receipt-value first) 22))) 2)
+        (bdjob-bit (and (eq (bdjo-progress-confirmed? unconfirmed) 0)
+                       (and (str_eq (bdjo-lifecycle unconfirmedOwner)
+                                "telemetry-publication-unconfirmed")
+                            (eq (value_eq (bdjo-awaiting unconfirmedOwner)
+                                    unconfirmedStep) 1))) 4)
+        (bdjob-bit (and (str_eq (bdj-step-status unconfirmedStep)
+                            "jit-fault-attention")
+                       (and (str_eq (bdj-fault-cause
+                                (bdj-state-fault
+                                    (bdj-step-state unconfirmedStep)))
+                                "disk-publish-publish-busy")
+                            (str_eq (bdj-fault-key
+                                (bdj-state-fault
+                                    (bdj-step-state unconfirmedStep)))
+                                faultKey))) 8)
+        (bdjob-bit (and (eq (bdjo-progress-confirmed? published) 1)
+                       (and (eq (value_eq (bdjo-progress-step published)
+                                    unconfirmedStep) 1)
+                       (and (str_eq (fgtm-snapshot-publisher faultSnapshot)
+                                    (BDJGPublisher))
+                       (and (str_eq (fgtm-sample-id faultSample) faultKey)
+                            (eq (fgtm-field-value
+                                (fgtm-sample-heat faultSample)) 1000))))) 16)
+        (bdjob-bit (and (str_eq (bdjo-lifecycle publishedOwner)
+                            "fault-published")
+                       (and (nothing? (bdjo-awaiting publishedOwner))
+                            (str_eq (bdj-fault-key
+                                (bdj-state-fault (bdjo-state publishedOwner)))
+                                faultKey))) 32)
+        (bdjob-bit (and (str_eq (bdj-receipt-status duringFirst)
+                            "jit-healing-form-answer")
+                       (and (str_eq (bdj-receipt-route duringFirst)
+                                "form-attention")
+                            (eq (bdj-receipt-value duringFirst) 10))) 64)
+        (bdjob-bit (and (eq released 1)
+                       (and (eq (bdjo-progress-confirmed? healed) 1)
+                       (and (str_eq (bdj-step-status
+                                    (bdjo-progress-step healed)) "jit-healed")
+                            (str_eq (bdjo-lifecycle healedOwner)
+                                "healed-published")))) 128)
+        (bdjob-bit (and (str_eq (fgtm-sample-id healedSample)
+                            "jit.bml-demand.healed")
+                       (and (str_eq (fgtm-field-value
+                                    (fgtm-sample-parent healedSample)) faultKey)
+                            (str_eq (fgtm-sample-purpose healedSample)
+                                "disk-publish-publish-busy"))) 256)
+        (bdjob-bit (and (str_eq (bdj-receipt-status
+                                (bdjo-request-first lostRequest))
+                                "jit-fault-attention")
+                       (and (eq (bdj-receipt-value
+                                (bdjo-request-first lostRequest)) 46)
+                       (and (str_eq (bdjo-lifecycle lostOwner)
+                                "fault-publication-pending")
+                            (str_eq (bdj-fault-cause
+                                (bdj-state-fault (bdjo-state lostOwner)))
+                                "retained-native-carrier-unavailable")))) 512)
+        (bdjob-bit (and (eq (bdjo-progress-confirmed? lostPublished) 1)
+                       (and (str_eq (fgtm-sample-purpose lostFault)
+                                "retained-native-carrier-unavailable")
+                            (eq (fgtm-field-value
+                                (fgtm-sample-capacity lostFault)) 1000))) 1024)
+        (bdjob-bit (and (eq (bdj-receipt-value
+                                (bdjo-request-first overlapping)) 14)
+                       (and (eq (value_eq (bdjo-first overlappedOwner)
+                                    first) 1)
+                            (str_eq (bdj-pending-program-wire
+                                (bdj-state-pending
+                                    (bdjo-state overlappedOwner)))
+                                originalPendingWire))) 2048)
+        (bdjob-bit sourceMissingFaultObserved 4096)
+        (bdjob-bit (and (gt sourceArrived 0)
+                       (and (eq (bdjo-progress-confirmed?
+                                sourceMissingHeal) 1)
+                       (and (str_eq (bdj-step-status
+                                (bdjo-progress-step sourceMissingHeal))
+                                "jit-healed")
+                       (and (str_eq (fgtm-sample-purpose
+                                sourceMissingHealSample)
+                                "disk-publish-withheld-source-missing")
+                            (str_eq (bdjo-lifecycle
+                                (bdjo-progress-owner sourceMissingHeal))
+                                "healed-published"))))) 8192)
+        (bdjob-bit (and (not(str_eq (bdj-fault-key collisionFaultA)
+                                (bdj-fault-key collisionFaultB)))
+                       (and (not(eq (value_eq (bdj-fault-digest collisionFaultA)
+                                                (bdj-fault-digest collisionFaultB)) 1))
+                       (and (eq (fgtm-channel-id?
+                                    (bdj-fault-key collisionFaultA)) 1)
+                       (and (eq (fgtm-channel-id?
+                                    (bdj-fault-key collisionFaultB)) 1)
+                       (and (le (str_len (bdj-fault-key collisionFaultA))
+                                (FGTMMaxIdBytes))
+                            (le (str_len (bdj-fault-key collisionFaultB))
+                                (FGTMMaxIdBytes))))))) 16384))))
+    ; Cleanup depends on the fully evaluated verdict, and the return depends
+    ; on cleanup, so the band neither reads after teardown nor leaves state.
+    (let clean (if (ge verdict 0) (bdjob-clean) (bdjob-clean)))
+    (if (nothing? clean) verdict verdict))
