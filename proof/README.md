@@ -1,41 +1,36 @@
 # proof/ — the kernel proves its own four-way
 
-The clean kernel no longer borrows the origin's `validate.sh`. It crosses its own bands:
+The kernel borrows no `validate.sh` for its floor. It crosses its own bands:
 
-- `four-way-run.fk` — fkwu `host-exec`s the three minimal walkers (`../walkers/{go,rust,ts}`) on a recipe,
-  parses their values, and diagnoses with `four-way-verdict`. No bash, no origin.
-- `four-way-verdict.fk` — the diagnosis: FOUR-WAY (all agree) / FKWU-SUSPECT (walkers agree, fkwu odd — rare,
-  investigate the native) / WALKER-SUSPECT (one walker odd — common, a proof-note). Encodes that the native
-  walker is rarely the wrong one.
+- `form/form-stdlib/four-way-run.fk` — fkwu `host-exec`s the three minimal walkers
+  (`walkers/{go,rust,ts}`) on a recipe, parses their values, and diagnoses with
+  `four-way-verdict`. No bash, no origin.
+- `form/form-stdlib/four-way-verdict.fk` — the diagnosis: FOUR-WAY (all agree) /
+  FKWU-SUSPECT (walkers agree, fkwu odd — rare, investigate the native) /
+  WALKER-SUSPECT (one walker odd — common, a proof-note). It encodes that the
+  native walker is rarely the wrong one.
+- `proof/four-way-run-recipe42.fk` + `proof/recipe42.fk` — the runnable entry.
 
 Run it, from the repository root:
 
 ```
-./fkwu proof/four-way-run-recipe42.fk      ->  0   (FOUR-WAY)
+./fkwu proof/four-way-run-recipe42.fk      ->  0   (FOUR-WAY; re-run 2026-09-03)
 ```
 
-This line used to read `fkwu proof/four-way-run.tbl`. That stopped working when `.tbl` execution
-was retired — the seed now answers *".tbl execution has been retired; use .fk, .fkb, or .dylib"* —
-so the proof had no runnable entry until `four-way-run-recipe42.fk` was written on 2026-07-25.
+The verdict is COMPUTED, not parse-to-zero: point one walker at a recipe answering
+99 and the verdict reads 2 (WALKER-SUSPECT); tell the runner fkwu=99 while the
+walkers agree and it reads 1 (FKWU-SUSPECT). `host-exec` is a host PORT (the
+VIA-HOST family in `runtime/fkwu-uni.c`); `fwv-verdict` computes 0 / 1 / 2.
 
-`host-exec` is a host PORT (`runtime/fkwu-uni.c` optag 136, the VIA-HOST family) and `str_to_int`
-is optag 31; `fwv-verdict` computes 0=FOUR-WAY / 1=FKWU-SUSPECT / 2=WALKER-SUSPECT.
-
-The three walkers build from source in one command each — see `walkers/README.md`; the TS one runs
-under `node --experimental-strip-types`, no tsx needed. Nothing prebuilt is required.
-
-Perturbation-verified 2026-06-29 and again live on 2026-07-25 (the verdict is COMPUTED, not
-parse-to-zero): the three walkers each return 42 on `recipe42.fk` → verdict **0** (FOUR-WAY); point
-ts at a recipe answering 99 → **2** (WALKER-SUSPECT); tell the runner fkwu=99 while the walkers agree
-→ **1** (FKWU-SUSPECT). The verdict tracks actual agreement among the host-exec'd values, not the
-literal. Full evidence: `receipts/2026-06-29-kernel-self-proves-four-way.md` and
-`receipts/2026-07-25-all-four-arms-are-here.md`.
+The three walkers build from source in one command each — see
+`walkers/README.md`; the TS one runs under `node --experimental-strip-types`.
 
 ## Running an ordinary band on the other three arms
 
-The walkers do not read legacy `; preludes:` declarations. fkwu walks that
-legacy closure itself; a walker takes the
-closure explicitly, in dependency order, on the command line.
+The walkers do not read `; preludes:` declarations. fkwu walks that closure
+itself; a walker takes the closure explicitly, in dependency order, on the command
+line — or through bare `import "path.fk"` declarations, which resolve recursively
+in all three walker CLIs.
 
 ```
 $ walker form-stdlib/tests/hex-band.fk                                  walk: unbound function "hex-encode"
@@ -43,13 +38,6 @@ $ walker core.fk form-ontology-loader.fk str-byte-at.fk hex.fk \
          form-stdlib/tests/hex-band.fk                                  14
 ```
 
-Worked twice on 2026-07-26, against two bands that had just landed on main claiming a four-way
-witness:
-
-```
-cognition/tests/identity-space-structure-four-way-band.fk        127  on fkwu, go, rust, ts
-cognition/tests/family-constellation-findings-four-way-band.fk  4095  on fkwu, go, rust, ts
-```
-
-Bare `import "path.fk"` declarations now resolve recursively in the three
-minimal walker CLIs, so imported bands run through their ordinary file entry.
+A band's `; PROOF LEVEL:` line names the arms it claims; `observe/preflight.fk`'s
+`pf-arm-mask` probes which arms actually bind a name — declare from the probe,
+never from inference.

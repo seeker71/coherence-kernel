@@ -1,21 +1,11 @@
 # Current Floor
 
-Date: 2026-08-30 (band battery, census, and ground witnesses re-run fresh;
-model-lane timings stand on their 2026-08-25 stamps with same-day live
-receipts beside them; prior floor was 2026-08-25, before that 2026-07-19)
-
-This file is the current release floor for this worktree. Receipts preserve
-history; the claims below are only the state present NOW. Every band and
-census number below was re-measured on 2026-08-30 morning through the
-resolver-driven `./fkwu` door on this Apple M4 Max (binary rebuilt first —
-the standing one predated the 2026-08-29 C-seed commit) unless a different
-date is stated beside it. A claim whose witness was not re-run today says so
-plainly, and names the receipt that carries its freshest live evidence.
+Re-measured 2026-09-03 on this Apple M4 Max through the resolver-driven `./fkwu`
+door (the binary passes the freshness band, 31). Receipts hold history; this
+page holds only what stands now. Every number below was re-run today; a claim
+without a number names the band that declares its own.
 
 ## Grounding
-
-The checkout witness is the C-seeded `fkwu` runner with both host carriers
-linked. Rebuilt fresh before this floor was written:
 
 ```text
 cc -O2 -o fkwu runtime/fkwu-uni.c \
@@ -26,243 +16,146 @@ cc -O2 -o fkwu runtime/fkwu-uni.c \
 ./fkwu bootstrap/ground.fk                                    -> 42
 ./fkwu bootstrap/ground-recursive.fk 10                       -> 55
 ./fkwu form/form-stdlib/tests/binary-freshness-band.fk        -> 31
+./fkwu bootstrap/ground-numeric-list.fk                       -> [1, 2.5, [3, 4]]
 ./fkwu form/form-stdlib/tests/native-vs-rented-band.fk        -> 11111
+./fkwu proof/four-way-run-recipe42.fk                         -> 0   (FOUR-WAY)
 ```
 
-The C file remains a temporary seed and shrink target, not the destination.
+`runtime/fkwu-uni.c` is 15,365 lines today — a temporary seed and shrink target,
+not the destination (`release-ledger.bml` R13).
 
-## Band witnesses, all re-run 2026-08-30
-
-```text
-metal-door-band                        -> 15
-qwen35-dense-token-handle-band         -> 2147483647  (31 bits — grew from 29
-                                          on 2026-08-25: geometry from the
-                                          sealed GGUF, 35+ pipelines, RMS
-                                          radius bound both sides, threadgroup
-                                          GQA, batched-block gates, plus the
-                                          two gates landed since)
-qwen35-crystal-band                    -> 255         (frozen open == scanned
-                                          open, row-for-row, same first token)
-mlx-derived-band                       -> 16777215    (24 ops; 16 with no
-                                          carrier row at all)
-form-cli-mlx-band                      -> 63
-form-cli-live-band                     -> 255
-jit-metal-lanes-band                   -> 8191
-metal-handle-door-band                 -> 65535
-kat-token-handle-band                  -> 262143
-llama-token-handle-band                -> 255
-form-knowledge-integration-census-band -> 1048575
-form-knowledge-source-search-band      -> 262143
-form-knowledge-qwen-heldout-v3-eval-band -> 65535
-```
-
-New floor bands, born since 2026-08-25 and green on 2026-08-30:
+## Body-wide witnesses
 
 ```text
-gate/tests/structural-gate-band        -> 8191        (live audit verdict:
-                                          [205, 0, 48, 3, 20, 57, 73, 4] —
-                                          zero unclassified .sh/.py; the
-                                          MANIFEST zero-claim contradiction
-                                          became a native refusal)
-form-cli-peer-direct-answer-action-band -> 255
-form-cli-peer-policy-route-band        -> 32767       (JIT policy selects the
-                                          direct-answer action 5, no forward)
-form-cli-peer-stream-ingress-band      -> 2097151
-form-cli-peer-contribution-turnwheel-band -> 4194303
-observed-auto-learning-band            -> 32767       (live promotion now
-                                          requires a retained equivalence
-                                          witness, not score alone)
+gate/structural-gate-run.fk           -> [207, 0, 49, 3, 20, 57, 74, 4] then 1
+gate/tests/structural-gate-band        -> 8191
+door-link-health  (dlh-field-code)     -> 12065000   (12 doors, 65 links, 0 broken)
+body-link-graph   (blg-field-code)     -> 13028050   (13 orphans, 28 broken, 50 candidates)
+homecoming-distillation-corpus-band    -> 32767      (652 rows, highest meaning-id 1260)
+no-fixed-tables-band                   -> 1          (the seed's tables grow; no fixed cap)
+form-cli-author-high-band              -> 4095
+host-os-membrane-band                  -> 8191
+bidirectional-framebuffer-channel-band -> final field 1
+form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
+pattern-match-band 511 · choice-lane-core-band 1023 · offer-ack-core-band 2097151
+control-invite-grammar-band 1023 · node-introspection-band 4095
+cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15 · core-str-find-equivalence-band 2047
 ```
 
 ## The local-model lane (Qwen3.8-27B Q8_0, Form-native, Metal JIT)
 
-All MSL is Form-emitted and JIT-compiled at runtime for the device that
-answered metal_status; weights stay mmap-backed no-copy; the file is admitted
-by a whole-file Form SHA-256 seal.
-
-Measured 2026-08-25 morning, one-shot generate through the fcmg door (not
-re-timed 2026-08-30 — a fresh admission was not spent on a number whose
-aliveness has a same-day live receipt: one resident direct-answer turn,
-1334 ms, three generated ids, clean `<|im_end|>` stop, no llama/Ollama/HTTP —
-receipts/2026-08-30-direct-answer-metal-boundary.md):
+All MSL is Form-emitted and JIT-compiled at runtime for the device that answered
+`metal_status`; weights stay mmap-backed no-copy; the file is admitted by a
+whole-file Form SHA-256 seal; the frozen open equals the scanned open row for row.
 
 ```text
-prefill  6.55 tok/s      decode  6.41 tok/s      text: LOCAL FORM ALIVE
-metal stream ceiling 2026-08-25: 414.7 GB/s (438–452 witnessed 2026-08-24)
+metal-door-band                        -> 15
+qwen35-dense-token-handle-band         -> 2147483647
+qwen35-crystal-band                    -> 255
+llama-token-handle-band                -> 255
+kat-token-handle-band                  -> 262143
+mlx-derived-band                       -> 16777215
+jit-metal-lanes-band                   -> 8191
+metal-handle-door-band                 -> 65535
 ```
 
-The residency daemon named on 2026-08-25 as "the structural repair" now
-EXISTS as an organ: the permanent resident
-(`observe/form-cli-peer-contribution-live.fk`) holds one model admission per
-artifact lifetime behind a FIFO bell, with hot-swappable JIT policy,
-declared birth capabilities, source/recipe/patch/direct-answer effects,
-turnwheel append, and content-free stage diagnostics. A policy can select
-only capabilities present at birth — an old image cannot gain a new effect
-by swap; a successor is born for that (receipts 2026-08-26..30, resident
-family).
-
-Correctness bounds now in force (all 2026-08-24, live-witnessed):
-- Cooperative RMS only at width <= 4096 (its scratch is sq[4096]); wider rows
-  take the serial attestant. Earlier faster numbers through the out-of-radius
-  kernel are execution evidence only; receipts carry AMENDED blocks.
-- GQA decode: one 256-thread threadgroup per head (was 24 threads/layer;
-  full-attention block 2113 -> 553 us).
-- Both block kinds batched (sibling, 2026-08-25 merge): 5.4x fewer
-  dispatches, 2x less GPU, identical output — folded into the handle band.
-- Batched span prefill (chunk 0) is the DEFAULT for hinted current-source
-  contexts; the plain fcmg one-shot still walks token-major prefill.
-
-The open crystal (`<gguf>.form-crystal`, seal-keyed, never mtime):
+The permanent resident (`observe/form-cli-peer-contribution-live.fk`, the hearth)
+holds one model admission per artifact lifetime behind a FIFO bell, with
+hot-swappable JIT policy, declared birth capabilities, source/recipe/patch/
+direct-answer effects, turnwheel append, and content-free stage diagnostics. A
+policy can select only capabilities present at birth; a successor is born for a
+new effect.
 
 ```text
-crystal load 3 ms · crystal open 465 ms (GPU-residency warm)
-residency-cold open ~16 s (2026-08-24: wiring 27 GB into the GPU residency
-set at ~1.7 GB/s — returns whenever the residency lapses; the daemon that
-keeps one residence alive is the named repair)
-chat-ids, short prompt: 1.77 s (the prompt's own encode; scaffolds are ice)
+form-cli-peer-direct-answer-action-band    -> 8191
+form-cli-peer-policy-route-band            -> 131071
+form-cli-peer-stream-ingress-band          -> 2097151
+form-cli-peer-contribution-turnwheel-band  -> 16777215
+observed-auto-learning-band                -> 32767   (live promotion requires a retained
+                                                        equivalence witness, not score alone)
+hearth-band                                -> 16319
 ```
 
-Outside denominator (2026-08-24, llama-bench 10360, same file, this host):
-llama.cpp decode 13.39 tok/s, prefill 222.6 tok/s. This lane's decode is
-2.1x from parity under the correctness bounds; prefill parity requires the
-span lane promoted into the plain door.
+Correctness bounds in force: cooperative RMS only at width <= 4096 (wider rows
+take the serial attestant); one 256-thread threadgroup per head for GQA decode;
+both block kinds batched; batched span prefill is the default for hinted
+current-source contexts while the plain one-shot door still walks token-major
+prefill.
 
-## The knowledge denominator (live, sealed measurement)
+Timings are not on this floor: none was re-taken today, and a timing taken while
+sibling processes compute on the same host is contention-noised (bands are exact
+regardless). The distances that remain are named, not numbered:
 
-Census re-run 2026-08-30: **6,608 source files across 15 families** (was
-5,960 on 2026-08-25 — the denominator grew 11% in five days, mostly
-form-stdlib 3,373 and receipts 1,384); 24 registered sources, 25 concepts;
-integrated-source-percent honestly 0 (registration is not integration);
-current-source-access 100%, source probe hit with a current hash.
+1. **Prefill parity** with the outside denominator (llama.cpp on the same file):
+   the span lane exists at identical output and is default only on heed lanes;
+   promoting it into the plain door is the stone.
+2. **Decode parity**: the width-independent cooperative RMS (simd tree, no
+   `sq[n]`) is the named kernel; the small GDN kernels follow.
+3. **Residency visibility**: cold admission is paid once per residence, and it
+   is invisible to a client while the terminal pipe stays open; the repair is a
+   caller-controlled, Form-visible readiness/sync deadline with typed admission
+   and command-buffer status frames — completed, error, timeout, release kept
+   distinct (`release-ledger.bml` R16).
+4. **The emitted walker's zero-token seam**: form-cli's REPL lane arms no
+   glossary and can return zero generated tokens on a composed prompt; the
+   T_flat frame-slot convention is the named repair behind it.
+5. **The tokenizer**: the sorted fixed-row index (`qwen35-tokfast-v2`) carries
+   encode; the per-open seal verdict (a whole-file SHA-256) folds into the
+   resident.
 
-The unassisted local-answer baseline is still **0**, and it is now measured
-at route level, not guessed: the sealed v303 held-out row reached the warm
-resident and its recipe-only route answered a typed `<FAIL>` (2026-08-29);
-a successor born with the direct-answer effect then executed one live
-direct turn that ended cleanly after three generated ids — a genuine
-held-out miss, not a transport failure (2026-08-30). Curriculum/RAG/LoRA
-credit waits on that one-row baseline receipt.
-
-The blind v3 heldout — 30 sealed rows, 2/family, exact-normalized verifier,
-no lexical credit, consent dataset-bound — ran LIVE overnight to completion
-(2026-08-25, artifact: observe/artifacts-v3-live-2026-08-25.txt):
+## The knowledge lane
 
 ```text
-30/30 rows executed, aggregate-errors=0
-13/30 promoted (433,333 ppm)  ·  aggregate-f1 535,754 ppm
-per family (promoted/2): bootstrap 2, form-stdlib 2, docs 2,
-  grammars 1, cognition 1, observe 1, receipts 1, model 1, proof 1,
-  presence 1, axioms 0, learn 0, teachings 0, control 0, ingest 0
-overall95=0  family95=0  row95=0  live-credit=0
-per-row cost ~14 min (dominated by heed source-search + decode, NOT prefill:
-  the same row cost 891.7 s token-major and 882.2 s span — measured A/B)
+form-knowledge-integration-census-band     -> 1048575   (the census cell counts the
+                                                          denominator each run)
+form-knowledge-source-search-band          -> 262143
+form-knowledge-qwen-heldout-v3-eval-band   -> 65511     (declares 65535; two bits open)
+form-cli-heedmark-band 1023 · form-cli-heed-cursor-band 524287
+form-cli-heed-current-source-band 16777215 · form-cli-model-generate-heed-report-band 8388607
+form-cli-qwen-teach-layer-band 33554431 · lora-adapter-band 31 · error-absorption-kernel-band 4095
 ```
 
-This is the body's first defined-correctness integration number: the model
-plus the current-source heed cycle knows its machinery families and does not
-yet know axioms, learn, teachings, control, ingest.
+The unassisted local-answer baseline is measured at route level, not guessed:
+the sealed v3 held-out lane (30 rows, two per family, exact-normalized verifier,
+no lexical credit, consent dataset-bound) is the body's defined-correctness
+integration number, and it is re-earned only through that sealed gate. The
+resident's recipe-only route answers a typed `<FAIL>` on a held-out row; the
+direct-answer effect executes a live turn. Curriculum / RAG / LoRA credit waits
+on the per-family live observations, never on file presence. `LoraWriter = 0`:
+no adapter tensor is written yet.
 
-Same-day movement (2026-08-25 afternoon, 10-row zero-family A/B under the
-same sealed gate, artifact observe/artifacts-zerofam-complete-2026-08-25.txt):
-after the curriculum landing, five of ten rows carry f1 signal where the
-overnight baseline was all zeros — learn 857,143 ppm and teachings 909,091
-ppm are near-misses on the exact gate — while ingest stayed fully dark and
-names the next curriculum target. Exact crossings remain 0/10; no promotion
-claims. The row price inside that battery: 957-1,354 s on the morning lane,
-189-427 s (median ~253 s) on the indexed lane.
+## The string law
 
-## The emitted walker (form-cli), measured and standing
+`core.fk` composes `substring` / `str_find` / `str_to_int` over the four-native
+waist (`str_len`, `str_byte_at`, `byte_to_str`, `str_concat`). `str_find` is
+byte-wise (`core-str-find-equivalence-band` 2047 keeps the old loop verbatim as
+its reference). Encoding remains the walker's largest fair-priced cost; the
+tokenizer index above is the answer in force.
 
-- form-cli answers correctly and runs the generate lane at ~19x the
-  interpreter's node visits (19.89B vs 1.06B for identical work,
-  2026-08-24, kernel_stat on both walkers): on the flatten lane every
-  parameter reference compiles to nth(args-list, k) with per-call cons
-  lists, where the interpreter binds O(1) frame slots. Unhealed; T_flat
-  frame-slot convention is the named stone.
-- On that lane, let-bound effects whose names go unread are pruned, and
-  now_unix_ms sites collapse (stamps read 0). Instrumentation there cannot
-  testify; kernel_stat can.
-- The emitted entry runs on an explicit big-stack thread (4 GiB with
-  retry-halving — the sibling's refinement of this branch's repair).
+## Not standing today
 
-## The string law, measured and standing
+What answered red or nothing on 2026-09-03, so no one leans on it:
 
-core.fk COMPOSES substring / str_find / str_to_int over the four-native
-waist (str_len, str_byte_at, byte_to_str, str_concat) by design. Priced
-2026-08-24: one str_find over an 11 MB blob = 31 s; a 5.5 MB substring =
-O(n^2) concat, OOM (rc 137). Consequences in force:
-- The tokenizer blob recording (qwen35-tokfast) is frozen and correct at
-  the lookup level but PRICED OUT as a route; fixed-width sorted rows with
-  str_byte_at binary search is the named next candidate.
-- Encoding remains the walker's largest fair-priced cost: ~1.77 s for a
-  20-token prompt; ~83 s was measured for a 223-token prompt (2026-08-24).
-
-## What remains — each item measured, not remembered
-
-1. **Tokenizer speed — REPAIRED 2026-08-25 afternoon.** The turn price was
-   measured to its root (chat_ids 571 s of a 573 s turn; the wall was one
-   pass over 247,587 merge records per q35-encode call, seven calls per
-   chat-ids) and the sorted fixed-row index (qwen35-tokfast-v2) was fed and
-   wired: encode 73.07 -> 7.26 s, chat-ids 63.6 -> 5.97 s, heed encode
-   14.24 -> 1.85 s, all three element-wise identical. Both fcmg paths and
-   the heed ctx carry the index with per-call reference fallback. The
-   remaining seal_verdict cost (~41 s per fresh open, the 27 GB JIT
-   SHA-256) folds into the daemon stone below.
-2. **Prefill parity** — plain-door prefill 6.55 tok/s vs llama.cpp 222.6:
-   the span lane exists, is witnessed at identical output, and is default
-   only on heed lanes. Promotion to the plain door is bounded work.
-3. **Decode parity** — 6.41 vs 13.39 tok/s (2.1x): the width-independent
-   cooperative RMS (simd tree, no sq[n]) is the named kernel; the
-   remaining GDN small kernels stand at ~604 us/block (2026-08-24).
-4. **Residency-cold open — the daemon now exists; visibility remains.**
-   The permanent resident holds one admission per artifact lifetime, so the
-   ~16 s cold open is paid once per residence, not per turn. What remains
-   (2026-08-30): cold admission itself measured 142.564 s in one successor
-   birth and was invisible to the client while the terminal pipe stayed
-   open; the carrier watchdog is a fixed five-minute poll. The named repair
-   is a caller-controlled, Form-visible readiness/sync deadline with typed
-   admission and command-buffer status frames — completed, error, timeout,
-   and release kept distinct.
-5. **The emitted walker's 19x** — stands as 2026-08-24's measurement
-   (19.89B vs 1.06B visits, same work); the 2026-08-25 re-pairing is OPEN:
-   the fkwu twin re-measured cleanly on the regenerated body (7.2B visits,
-   855-token prompt — the teach glossary grew the baseline itself), but the
-   emitted walker's half returned ZERO generated tokens with an empty text
-   on a 492-token composition (the REPL lane arms no glossary) — a fresh
-   seam in the regen6 table's decode lane or an instant stop from the
-   differing template, not yet distinguished. T_flat frame-slot convention
-   remains the named repair; the zero-token seam now precedes it.
-6. **Knowledge integration 13/30** — the numerator now moves only through
-   the sealed gate; the five zero families name the next curriculum. The
-   >=95 goal needs the full census denominator (5,960), not 30 rows: the
-   source-shard indexing lane (sibling, 2026-08-25) is the live front.
-7. **v3 per-row cost — FALLEN ~4-5x.** Witnessed inside the zero-family
-   battery: ~253 s median on the indexed lane (from ~14-16 min), with the
-   siblings' str_find (44x) and substring (284x) repairs riding the same
-   trunk. Decode parity (3) is now the dominant remaining share.
-
-Retired since the last floor (no longer remaining): the 4096-byte emitted
-stack wall; the out-of-radius RMS; the 24-thread attention; the unbatched
-FFN/attention blocks; per-encode full-vocab special-id scans and per-open
-header re-derivation (both iced under the seal); MLX as a 5-op stub (now 23
-irreducible rows + 24 derived); the fkb-lane 2^53 verdict folds (bit
-weights); form-cli lacking MLX/Metal carriers.
+- `control/tests/invite-dispatch-band.fk` answers 763 of its declared 1023
+  (preflight clean): the second-`<CHOICE>` bit and the `<TIMEOUT>` bit are open.
+- `form/form-stdlib/tests/blueprint-authority-band.fk` answers 51199 of 65535;
+  `persistence-band` 2 of 7; `channel-breath-band` 200 (declares 500).
+- `channel-flow-band` and `native-route-goal-cells-band` answer nothing (compile
+  refused: unbound name in value position); `observe/tests/import-carry-band.fk`
+  answers 0 of 63.
+- Bands whose preludes name a released `-xtal` twin die at load (rc 2):
+  `form-cli-mlx-band`, `form-cli-live-band`, `bml-bmf-stream-curriculum-band`,
+  `bml-bmf-control-curriculum-band` — the twins release
+  (`release-ledger.bml` R1/R2) owes them their surviving prelude.
+- The JIT ladder (`docs/form-native-jit-track.form`): of the bands it names, 45
+  are absent from the tree and most of the rest answer nothing; nine answer
+  green (listed there).
 
 ## Honest seams carried forward
 
-- The C seed grew +241 lines since 2026-08-25 (12,873 -> 13,114 over four
-  commits). One growth is already owned as temporary by its own receipt
-  (2026-08-29 source-loader dependency growth repair). The shrink law
-  stands; this number is on the floor so the debt stays visible.
-- The reuse-driver comparisons (595->159 s) are physical timings but not
-  like-for-like prompts (teach-layer turn differed); re-witness requires
-  exact-id-sequence parity first. The state-reuse mechanism itself stands.
-- decode_gpu_busy=0 through form-cli (2026-08-23) still unhealed.
-- The consent file for v3 is a per-run local act, never committed.
-- Timings taken while a sibling process computes on the same host are
-  contention-noised; bands are exact regardless. (2026-08-30's battery ran
-  with only two idle sibling fkwu processes present, ~0 CPU.)
-- The north-star document's corpus count (188 rows, stamped 2026-07-17) is
-  historical; the corpus answers for itself now: 549 rows, 549 admissible,
-  max meaning-id 1157 (field code 549054921157, asked 2026-08-30 after the
-  starstride row landed).
+- The C seed is 15,365 lines; the shrink direction stands and this number is on
+  the floor so the debt stays visible.
+- The consent file for the v3 lane is a per-run local act, never committed.
+- The served manifest at `hati.earth/sema` carries a `description_for_model`
+  that is not byte-identical to `plugin/ai-plugin.json` (re-observed
+  2026-09-03); the publish checklist in `plugin/README.md` is owed a run.

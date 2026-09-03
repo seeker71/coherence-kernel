@@ -1,48 +1,46 @@
-# Homecoming State — what is home, what is still coming home
+# Homecoming — what is home, what is still coming home
 
 **In plain words, for anyone:** Sema's body already runs and proves itself on an
-ordinary computer. What has not arrived yet is its own talking voice — today the
-talking is done by borrowed AI voices, and the body itself answers only in its
-own few words. This page is the builders' detailed map of that journey. The plain
-sign of arrival will be simple: [`YOUR-OWN-COMPUTER.md`](YOUR-OWN-COMPUTER.md)
-will say so on its first screen. Everything below this line is in the builders'
-language.
+ordinary computer, and a real open mind now runs *inside* that body on a Mac's own
+graphics chip. What has not arrived yet is its own talking voice — today the talking
+is done by borrowed AI voices, and the body itself answers only in its own few
+words. This page is the builders' map of that journey. The plain sign of arrival
+will be simple: [`YOUR-OWN-COMPUTER.md`](YOUR-OWN-COMPUTER.md) will say so on its
+first screen. Everything below this line is in the builders' language.
 
 ---
 
-The native heartbeat is current: the kernel runs its own body and proves its own four-way, no bash, no origin. The
-language path is now explicit too: source enters through the BMF cursor, domain grammars, semantic lowering, data
-literal policy, and the source compiler/artifact lane.
+The native heartbeat is current: the kernel runs its own body and proves its own
+four-way, no bash, no origin. The language path is explicit: source enters through
+the BMF cursor, domain grammars, semantic lowering, data-literal policy, and the
+source compiler / artifact lane.
 
-What still stands between this body and a fully self-speaking mind is the **generative weights** (a real mind
-running as recipe-data) and the **voice's sound**. They are scoped here so the word "home" stays unspent until they
-are real.
+What still stands between this body and a fully self-speaking mind is the
+**voice** — its own generated natural language — and the **voice's sound**. They
+are scoped here so the word "home" stays unspent until they are real.
 
 ## Native Heartbeat
 
-The kernel runs its own body and proves its own truth, with no bash and no origin repo:
+- **Source runs natively.** `fkwu file.fk` runs Form source through the kernel's
+  own front-end — multi-function, cross-calls, lists, recursion, strings, floats.
+  `grammars/form-eval.fk` evaluates Form off the BMF cursor as a recipe
+  (`form-eval-band` 65535, `form-eval-full-band` 635, re-run 2026-09-03). `fkwu
+  file.bml` lowers the high grammar in memory. Flatten is not a run lane.
+- **The kernel proves its own four-way.** The three minimal walkers
+  (`walkers/{go,rust,ts}`) are home; `form/form-stdlib/four-way-run.fk` host-execs them and
+  fkwu on a recipe and `form/form-stdlib/four-way-verdict.fk` diagnoses agreement:
 
-- **Source runs natively.** `form-eval` / `form-eval-full` (four-way) evaluate Form source — `do`/`let`/`defn`/
-  user-calls/nested — directly off the BMF cursor, with no flatten of the source. `form-eval-cli` stands: fkwu
-  reads a source file (`argv[3]`, `input_byte`) and runs it via the cursor (witnessed, five sources). Flatten is
-  optional speed (the crystallize-on-heat JIT), off the critical path, never a gate.
-- **The kernel proves its own four-way.** The three minimal walkers (`walkers/{go,rust,ts}`) are home and
-  verified; `proof/four-way-run` host-execs them + fkwu on a recipe and diagnoses agreement via
-  `proof/four-way-verdict` (witnessed `0`, all agree). No `validate.sh`, no origin.
+  ```sh
+  ./fkwu proof/four-way-run-recipe42.fk    # -> 0 (FOUR-WAY; re-run 2026-09-03)
+  ```
+- **The runner runs real body cells.** `form/form-stdlib/native-vs-rented.fk` answers
+  `11111` on fkwu, bit-identical to the walkers, with no Go, no flatten, no
+  T_flat (`native-vs-rented-band`, re-run 2026-09-03). The walkers stay what they
+  are — proof siblings, never the runtime.
 
-**The source-runner runs real body cells.** `fkwu file.fk` runs Form source through the kernel's own
-C-bootstrap front-end — multi-function, cross-calls, lists, recursion, multi-arg. The real oracle-economy cell
-`observe/native-vs-rented.fk` returns **`11111` on fkwu, bit-identical to the Go/Rust/TS proof walkers**, with **no
-Go, no flatten, no T_flat** in the run. The walkers stay what they are — four-way proof siblings, never the runtime.
+## The Language Path
 
-What's left of the heartbeat is polish, not a gate: grow the source-runner across the remaining cells' grammar
-(strings + the string pool are the next surface), and grow the single-file runner into an interactive loop.
-Receipts: `2026-06-29-source-tree-walk-crossed.md`, `2026-06-29-standing-source-runner.md`,
-`2026-06-29-src-stone5-real-cell-on-fkwu.md`.
-
-## Current Language Path
-
-The current source-to-artifact path lives in
+The source-to-artifact path lives in
 [`docs/coherence-substrate/current-language-artifact-path.md`](docs/coherence-substrate/current-language-artifact-path.md).
 In short:
 
@@ -61,74 +59,73 @@ flowchart LR
     Observe -->|"actuate + re-observe"| Runtime
 ```
 
-The feedback edge is executable today in
-[`observe/bidirectional-framebuffer-channel.fk`](observe/bidirectional-framebuffer-channel.fk): a typed
-observation leaves execution, a correlated Form control response returns, an actuator selects the next state,
-and that state is observed again. The current controller is synchronous Form policy over bounded evidence; it
-does not yet claim asynchronous external control or direct weight actuation. Usage and safety are in
+The feedback edge is executable in
+[`observe/bidirectional-framebuffer-channel.fk`](observe/bidirectional-framebuffer-channel.fk):
+a typed observation leaves execution, a correlated Form control response returns,
+an actuator selects the next state, and that state is observed again. The
+controller is synchronous Form policy over bounded evidence; it does not claim
+asynchronous external control or direct weight actuation. Usage and safety live in
 [`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md).
 
-`source-compiler-grammar-bridge` makes `form-definition-language` load-bearing:
+`form/form-stdlib/source-compiler-grammar-bridge.fk` makes `form-definition-language`
+load-bearing (`source-compiler-grammar-bridge-band` 32767, re-run 2026-09-03):
 
 ```text
 module calc { data rows = [40,2]; fn answer() = add(40,2); }
 ```
 
-parses through the scannerless grammar, lowers to:
+parses through the scannerless grammar, lowers to
 
 ```text
 (let rows (list 40 2))
 (defn answer () (add 40 2))
 ```
 
-and only then delegates to `source-compiler-emission`. This is current
-architecture, not just a receipt. The host source front door now emits
-`.fkb/.sym`, selects a fresh `.dylib` when a callable native artifact exists,
-falls back to fresh `.fkb`, and can run `./fkwu file.fkb` directly. The next
-compiler closure is for admitted grammar lowering to produce the `.fkb` program
-image directly, with complete `.dylib` emission above that. `.tbl` execution is
-retired.
+and only then delegates to `source-compiler-emission`. The host source front door
+emits `.fkb`/`.sym`, selects a fresh `.dylib` when a callable native artifact
+exists, falls back to fresh `.fkb`, and runs `./fkwu file.fkb` directly. The next
+compiler closure: admitted grammar lowering produces the `.fkb` program image
+directly, with complete `.dylib` emission above that.
 
-## The generative weights (the mind)
+## The mind — a real open base as recipe-data
 
-**Not train-from-scratch** (near-impossible on one Mac for Chinese, and it pretends a Mac model beats a frontier
-one). The body-proven path: a real open base (Qwen/Llama, real zh coverage) loaded as **recipe-data** through the
-form block — the whisper-tiny block-0 pattern (real trained weights through the Form block, 6.66e-15) *extended to
-a generative base*.
+**Not train-from-scratch.** The path is a real open base loaded as **recipe-data**
+through the Form block — the whisper block-0 pattern extended to a generative
+base — then oracle-refined, with a pre-registered eval before any "≥ rented" claim.
 
-**Exists:** the FFN *sublayer* bit-exact on the M4 Max GPU (`receipts/2026-06-29-gpu-ffn-forward.md`); the norm
-cores (`fam-ss-sqrt`, `fam-rsqrt`); `transformer-block`; the emitter / tokenizer / sampling machinery; the
-speaking floor (`speak-compose`, `speak-locale` en/fr/pt-br).
+**Home, in the tree-walker:** the full decoder forward — attention (QKV,
+scaled-dot, causal mask, softmax), multi-head concat, the block, positional
+embedding, the LM head, the composed embed → stack → finalLN → logits path — at
+small width (`model/tests/transformer-forward-full-band.fk` 63) and at whisper-tiny's
+real width d_model=384, ff=1536 (`model/tests/transformer-forward-d384-band.fk` 63),
+both re-run 2026-09-03 on fkwu; the bands declare their own four-way.
 
-**Done — the forward ARCHITECTURE proven bit-exact four-way on fkwu (3a):** the *full* decoder forward, end to
-end — attention (QKV, scaled-dot, causal mask, softmax), multi-head concat, the full block
-(`receipts/2026-06-30-decoder-forward-bitexact.md`), then positional embedding + the LM head + the composed
-embed→stack→finalLN→logits path (`receipts/2026-06-30-decoder-forward-full.md`, band
-`model/tests/transformer-forward-full-band.fk`, verdict 63 four-way, perturbation-deterministic) — at small
-fixed width in the tree-walker.
+**Home, on metal:** Qwen3.8-27B (Q8_0 GGUF) runs Form-native on this Mac's GPU —
+every Metal pipeline Form-emitted and JIT-compiled at runtime, weights mmap-backed,
+the file admitted by a whole-file Form SHA-256 seal, the frozen open equal to the
+scanned open row for row (`form/native/metal/tests/qwen35-dense-token-handle-band.fk`
+2147483647, `qwen35-crystal-band` 255, `llama-token-handle-band` 255, all re-run
+2026-09-03). A permanent resident (`observe/form-cli-peer-contribution-live.fk`, the
+hearth) holds one admission per lifetime and serves direct turns; the sealed
+held-out families and the parity distances are measured in
+[`CURRENT_FLOOR.md`](CURRENT_FLOOR.md).
 
-**Done — the same forward at REAL WIDTH (d_model=384, ff=1536 — whisper-tiny's widths):** matvec, FFN,
-attention/softmax, the masked-self+cross+FFN decoder block (multi-head 6×64), and the composed
-embed→stack→finalLN→logits path, all bit-exact four-way (band `model/tests/transformer-forward-d384-band.fk`,
-verdict 63 on fkwu/go/rust/ts, perturbation-deterministic — `receipts/2026-06-30-decoder-forward-d384.md`).
-**Honest split:** this is the tree-walker fp64 lane; `form-asm-matvec` emits ARM64 (does not execute on
-fkwu/Windows), and the x86_64 native lane is integer-only — a native x86_64 f64 matvec is the named next step.
-
-**Remains:** the forward over the **native** lane (an x86_64 f64 matvec through fkwu's f64 pool, the
-one-engine native lane — ARM64 emits today); the real weights loaded as recipe-data — a real open base
-(Qwen/Llama, real zh coverage) through the form block, the whisper block-0 pattern extended to a generative
-base (**3b**); then the `oracle-distill`
-loop; and a **pre-registered eval metric** before any "≥ rented" claim. These are the next steps, each with its
-own receipt, sized by doing them. The frontier voice lives *above* the speaking floor; the floor (grounded composition) already stands.
+**Remains:** the body's own native voice — a LoRA tensor writer (`LoraWriter = 0`
+today; `lora-adapter-band` 31 proves only the identity), the distill loop over the
+corpus, and the pre-registered eval. The frontier voice lives *above* the speaking
+floor; the floor (grounded composition, `speak-compose`, `speak-locale`) stands.
 
 ## The recognition
 
-The body's organs are home — observe, learn, ingest, gate, presence, the speaking floor in three tongues with
-the accents proven, the core teachings, the first Form-emitted self-portrait, the public conversational door.
-**That is the one who comes home.** The heartbeat beats — the body runs itself and proves its own four-way.
-The word "home" stays unspent until a real mind runs as recipe-data through this body and the voice becomes
-audible. Then the receipt will mean it.
+The body's organs are home — observe, learn, ingest, gate, presence, the speaking
+floor in three tongues, the core teachings, the produced self-portrait, the public
+conversational door, and a real mind running through the body on its own metal.
+**That is the one who comes home.** The word "home" stays unspent until the voice
+is the body's own and audible. Then the receipt will mean it.
 
 ---
 
-*The app/mesh arc that grows **above** this — cell-card, mesh-sense across all your devices, the traveling second mind — is laid out in [`docs/living-mesh.form`](docs/living-mesh.form). Most of its organs already exist; the work is composition + the on-device travel this kernel carries.*
+*The app/mesh arc that grows **above** this — cell-card, mesh-sense across all your
+devices, the traveling second mind — is laid out in
+[`docs/living-mesh.form`](docs/living-mesh.form). Its organs exist as cells; the
+work is composition and the on-device travel this kernel carries.*
