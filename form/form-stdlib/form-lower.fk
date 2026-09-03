@@ -542,4 +542,156 @@
     (defn lo-bl-off (nb n1 extra)
         (sub 0 (add (add (div n1 4) (add (div nb 4) 6)) extra)))
 
+    ; ── the STRING SCAN family — str_find's per-byte hot loop, compiled ──────
+    ; receipts/2026-09-02-directive-ledger-walked.md named the frontier: "fkwu has
+    ; NO native substring/char_at/str_find — the per-byte recipes are the only
+    ; door, and 0 of the current hot worklist is coverable (the door speaks tags
+    ; 1..5; the worklist is strings)." This is the first string-family coverage:
+    ; STR_FIND's exact shape (core.fk's fstr-find-loop/fstr-find-eq-at — scan i
+    ; forward, compare the needle byte-for-byte from i, first-byte-first).
+    ;
+    ; GROUNDING (do not re-derive, read receipts/2026-09-03-string-family-
+    ; lowering.md): probed live, `jit_leaf_inram` — the ONLY door from Form into
+    ; crystallized bytes — declines every non-integer argument (fk_inram_args
+    ; accepts an EVEN tagged word or a list of up to 8; a string is neither), and
+    ; there is no relocation/trampoline table for compiled bytes to `bl` back into
+    ; a C native by address. lo-streq already answered the design question for
+    ; the string family: it does not call the native `str_eq`, it INLINES the
+    ; byte-compare loop directly over raw pointers (ldrb/cmp/branch). This
+    ; extends the SAME choice — pure arithmetic + the loop shape, no new native
+    ; call-out tag, no runtime/fkwu-uni.c change — for the reason lo-streq could
+    ; not yet be executed on a real pair of strings: the argument door.
+    ;
+    ; THE ANSWER: embed the string BYTES in the image itself, the same idiom
+    ; fa-mov-imm64 already uses for float constants (a function carries its own
+    ; data, no relocation). lo-str-bytes reads a Form string once, at LOWERING
+    ; time, through the SAME str_len/str_byte_at native waist core.fk's substring
+    ; and str_find compose over (Form data extraction, not a call inside the
+    ; compiled image). lo-embed-bytes writes each byte to a stack slot the
+    ; prologue opens (movz + strb, one pair per byte — the byte-granular twin of
+    ; fa-mov-imm64's movz+movk chain). The scan loop that follows is untouched
+    ; Form-lower discipline: two pointers advance by #1 (lo-streq's own idiom),
+    ; branch offsets computed from block position (the lo-cond-frame/lo-rec2
+    ; discipline), single accumulator (w0 carries the answer throughout — the
+    ; found index, or -1 for not-found, never a second result register).
+    ;
+    ; SCOPE, NAMED HONESTLY: the compiled function takes ONE integer argument
+    ; and ignores it — both strings are compile-time constants of the recipe, so
+    ; `from` (str_find's third argument) is not yet threaded through; every scan
+    ; starts at 0. The walked-direction next step is a runtime `from` and
+    ; runtime (non-embedded) pointers once a native call-out door exists to
+    ; supply them — named, not built, because it needs new C-side argument
+    ; marshalling this pass did not need and should not invent unread.
+    ;
+    ; lo-str-bytes: a Form string -> a Form list of its raw bytes (0..255), read
+    ; through str_byte_at/str_len — the same two natives core.fk's substring
+    ; walks. Order preserved by recursing before consing (lo-marshal's shape).
+    (defn lo-str-bytes-loop (s i n)
+        (if (ge i n) (list)
+            (cons (str_byte_at s i) (lo-str-bytes-loop s (add i 1) n))))
+    (defn lo-str-bytes (s) (lo-str-bytes-loop s 0 (str_len s)))
+
+    ; lo-embed-bytes: one (movz w8,#b)(strb w8,[sp,#off]) pair per byte, off
+    ; advancing by 1 — the prologue that gives the scan loop below real memory
+    ; to read, with no runtime string argument at all. w8 is scratch, dead by
+    ; the time the scan loop (which never reads it) begins.
+    (defn lo-embed-bytes (bytes off)
+        (if (eq (len bytes) 0) (list)
+            (lo-app (lo-cat (list (fa-movz 8 (head bytes)) (fa-strb 8 31 off)))
+                    (lo-embed-bytes (tail bytes) (add off 1)))))
+
+    ; the stack frame: haystack then needle, byte-contiguous, rounded up to a
+    ; 16-byte AAPCS64-clean allocation (this leaf makes no further call, so
+    ; hardware does not require it, but every existing frame in this file
+    ; keeps it and a JIT leaf should not be the one exception).
+    (defn lo-strfind-align16 (n) (mul (div (add n 15) 16) 16))
+    (defn lo-strfind-stackn (hlen nlen)
+        (do (let total (add hlen nlen))
+            (if (eq total 0) 16 (lo-strfind-align16 total))))
+
+    ; lo-strfind-core — the scan itself, PARAMETERIZED BY VALUE (bound, nlen,
+    ; stackn are compile-time integers folded into immediate operands), so the
+    ; instruction COUNT is fixed regardless of string length or content — only
+    ; the byte-materializing prologue (lo-embed-bytes) varies with length. This
+    ; is fstr-find-loop + fstr-find-eq-at fused into one block, the way lo-streq
+    ; fuses str_eq's loop: an outer scan (x1 = h_cur, w0 = i, advancing by
+    ; #1 together) over an inner byte-for-byte match check (x3/x4 = working
+    ; copies of h_cur/n_base, w5 = j) — first-byte-mismatch falls through fast,
+    ; a full inner match (j reaches nlen) returns i in w0, the outer bound
+    ; exhausting first returns -1. Register convention: x1 = h_cur (mutates),
+    ; x2 = n_base (constant, the needle never moves at the outer level), x3/x4 =
+    ; the inner loop's own copies (so a mismatch never disturbs x1/x2), w0 = i /
+    ; the return value (the single accumulator, true to every lowering above),
+    ; w5 = j, w6/w7 = the two loaded bytes being compared.
+    ;   0  movz w0,#0                    i = 0
+    ;   1  scan:  cmp w0,#bound
+    ;   2         b.ge notfound                    (+17 -> 19)
+    ;   3  add x3,x1,#0                  h_cur copy
+    ;   4  add x4,x2,#0                  n_base copy
+    ;   5  movz w5,#0                    j = 0
+    ;   6  inner: cmp w5,#nlen
+    ;   7         b.ge found                        (+16 -> 23)
+    ;   8  ldrb w6,[x3]  ·  9  ldrb w7,[x4]  ·  10  cmp w6,w7
+    ;   11         b.ne mismatch                     (+5 -> 16)
+    ;   12 add x3,x3,#1  · 13 add x4,x4,#1  · 14 add w5,w5,#1
+    ;   15 b inner                                   (-9 -> 6)
+    ;   16 mismatch: add x1,x1,#1  · 17 add w0,w0,#1
+    ;   18 b scan                                    (-17 -> 1)
+    ;   19 notfound: movz w0,#0  · 20 sub w0,w0,#1
+    ;   21 add sp,sp,#stackn  · 22 ret
+    ;   23 found: add sp,sp,#stackn  · 24 ret
+    (defn lo-strfind-core (bound nlen stackn)
+        (lo-cat (list
+            (fa-movz 0 0)
+            (fa-cmp 0 bound)
+            (fa-bcond 10 17)
+            (fa-add-x-imm 3 1 0)
+            (fa-add-x-imm 4 2 0)
+            (fa-movz 5 0)
+            (fa-cmp 5 nlen)
+            (fa-bcond 10 16)
+            (fa-ldrb 6 3 0)
+            (fa-ldrb 7 4 0)
+            (fa-cmp-r 6 7)
+            (fa-bcond 1 5)
+            (fa-add-x-imm 3 3 1)
+            (fa-add-x-imm 4 4 1)
+            (fa-add 5 5 1)
+            (fa-b-off -9)
+            (fa-add-x-imm 1 1 1)
+            (fa-add 0 0 1)
+            (fa-b-off -17)
+            (fa-movz 0 0)
+            (fa-sub 0 0 1)
+            (fa-add-x-imm 31 31 stackn)
+            (fa-ret)
+            (fa-add-x-imm 31 31 stackn)
+            (fa-ret))))
+
+    ; lo-strfind-embed — the whole callable image: two Form byte lists (already
+    ; extracted by lo-str-bytes) in, one arm64 leaf out. `bound <= 0` (the needle
+    ; cannot fit — e.g. an empty haystack against any non-empty needle) is
+    ; decided HERE, at lowering time, the same operand-aware discipline lo-add/
+    ; lo-mul already practice: fa-cmp's immediate is unsigned imm12, so a
+    ; negative bound cannot be emitted as a runtime compare at all, and it does
+    ; not need to be — the answer is already known, so the trivial 3-instruction
+    ; "return -1" is the honest lowering, not a special case bolted on.
+    (defn lo-strfind-embed (hbytes nbytes)
+        (do
+            (let hlen (len hbytes))
+            (let nlen (len nbytes))
+            (let bound (add (sub hlen nlen) 1))
+            (let stackn (lo-strfind-stackn hlen nlen))
+            (if (le bound 0)
+                (lo-cat (list (fa-movz 0 0) (fa-sub 0 0 1) (fa-ret)))
+                (lo-cat (list
+                    (fa-sub-x-imm 31 31 stackn)
+                    (lo-embed-bytes hbytes 0)
+                    (lo-embed-bytes nbytes hlen)
+                    (fa-add-x-imm 1 31 0)
+                    (fa-add-x-imm 2 31 hlen)
+                    (lo-strfind-core bound nlen stackn))))))
+    ; the ergonomic door: two real Form strings in, straight to the image.
+    (defn lo-strfind-embed-str (h n) (lo-strfind-embed (lo-str-bytes h) (lo-str-bytes n)))
+
     0)
