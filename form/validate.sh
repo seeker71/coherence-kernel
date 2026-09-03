@@ -92,7 +92,7 @@ if command -v py >/dev/null 2>&1 && py -3 --version >/dev/null 2>&1; then
 elif command -v python3 >/dev/null 2>&1 && python3 --version >/dev/null 2>&1; then
     BP_PY="python3"
 fi
-# Phase 0 fkwu native surface gate (spec: fkwu-only-kernel-collapse.md).
+# Phase 0 fkwu native surface gate.
 if [[ -n "$BP_PY" && -f scripts/validate_fkwu_native_surface.py ]]; then
     $BP_PY scripts/validate_fkwu_native_surface.py
 fi
