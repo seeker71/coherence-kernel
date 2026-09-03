@@ -599,7 +599,21 @@ run_siblings() {
         fi
         (
             set +e
-            TMPDIR="$legs/tmp-fk" "$FOURTH_SOURCE_FKWU" "$fourth_src" > "$legs/fk" 2> "$legs/fk.err"
+            # fkwu's in-memory BML lowering door is rooted at the body root
+            # (`form/form-stdlib/bml-floor-compile.fk`). validate.sh itself
+            # lives one level below that root. Run only the existing fourth
+            # carrier from the body root so a nested BML prelude resolves the
+            # same way as direct source execution; the workload path is already
+            # absolute and each leg keeps its invocation-owned TMPDIR.
+            (
+                fourth_source_fkwu="$FOURTH_SOURCE_FKWU"
+                case "$fourth_source_fkwu" in
+                    /*|[A-Za-z]:*) ;;
+                    *) fourth_source_fkwu="$PWD/$fourth_source_fkwu" ;;
+                esac
+                cd ..
+                TMPDIR="$legs/tmp-fk" "$fourth_source_fkwu" "$fourth_src"
+            ) > "$legs/fk" 2> "$legs/fk.err"
             printf '%s\n' "$?" > "$legs/fk.rc"
         ) &
     fi
