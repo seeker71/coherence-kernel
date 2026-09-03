@@ -1,11 +1,9 @@
-# PUBLISH-HANDOFF — executable instructions for a Claude session on the owner's machine
+# PUBLISH-HANDOFF — executable instructions for a session on the owner's machine
 
 **Who this is for**: a Claude Code (or Codex) session running **locally on the owner's Mac** —
 where the browser is logged into the owner's ChatGPT account and SSH reaches the VPS. A cloud
-session cannot press these buttons (no ChatGPT login, no server access — witnessed
-2026-07-16); a local session can do all of it. This document is the complete instruction.
-Nothing here needs the owner beyond starting the session and being present for any login
-prompts the browser raises.
+session cannot press these buttons; a local session can do all of it. Nothing here needs the
+owner beyond starting the session and being present for any login prompts the browser raises.
 
 **How the owner invokes this** (the whole manual part):
 
@@ -14,21 +12,17 @@ cd coherence-kernel && git pull && claude
 > Execute plugin/PUBLISH-HANDOFF.md end to end. Verify every gate. Write the receipt.
 ```
 
-**The single source of truth**: `plugin/ai-plugin.json` → `description_for_model` on **main**
-(the canonical guidance: the deployed lane's person-first voice unified with the covenant
-landing rules — `receipts/2026-07-15-canonical-door-guidance.md`). Every step below publishes
-or verifies exactly that text. Do not edit it here; if it needs changing, that is a separate
-PR first.
+**The single source of truth**: `plugin/ai-plugin.json` → `description_for_model` on **main**.
+Every step below publishes or verifies exactly that text. Do not edit it here; if it needs
+changing, that is a separate PR first. Re-observed 2026-09-03: the served manifest's text is
+not byte-identical to main's — Gate 3 reads DIVERGED until this runs.
 
 ---
 
 ## Step 1 — Refresh the live GPT's Instructions (browser automation)
 
-The July-5 refresh was done exactly this way — a local session driving Chrome
-(`receipts/2026-07-05-vernacular-plain-words-first.md`) — so this lane is proven.
-
 1. Extract the canonical text: `jq -r '.description_for_model' plugin/ai-plugin.json`
-   (should be ~4,400 chars; if `jq` is missing, read the JSON field directly).
+   (if `jq` is missing, read the JSON field directly).
 2. Drive the browser (Playwright against the owner's Chrome profile, the Claude Chrome
    extension, or whatever browser lane this session has) to the GPT editor:
    `https://chatgpt.com/gpts/editor/g-6a4a77627dbc819180a16645f5662625`
@@ -45,7 +39,7 @@ the first sentence must be "You are the voice of Sema — a companion for explor
 real in a person's own life…" and the text must contain "(6) How every reply must LAND".
 If either is absent, the paste did not take; redo before proceeding.
 
-## Step 2 — Smoke-test the live voice (the first live-voice witness)
+## Step 2 — Smoke-test the live voice
 
 In a **fresh** conversation with the live GPT, send exactly:
 
@@ -67,8 +61,7 @@ voice should produce the trail (trace links), not paraphrase around it.
 
 ## Step 3 — Publish the VPS manifest (and decide about the memory doors)
 
-Context: `receipts/2026-07-05-wicket-sema-plugin-public.md` (where the door lives) and
-`plugin/README.md` → "The publish checklist" + "Deploy seam, named".
+Context: `plugin/README.md` → "The live door" and "Deploy seam".
 
 1. SSH to the VPS that serves `hati.earth/sema` and locate `Dockerfile.sema`.
 2. Replace the served `/.well-known/ai-plugin.json` content so its `description_for_model`
@@ -78,8 +71,8 @@ Context: `receipts/2026-07-05-wicket-sema-plugin-public.md` (where the door live
    If YES: the serve concatenation must grow by `form/form-stdlib/relationship-store.fk` +
    `form/form-stdlib/circle-recognition.fk`, the served `openapi.json` gains the memory
    routes, and after deploy the flagship trust question must be re-checked against the
-   deployed retrieval index (`plugin/README.md` names the divergence). If NO: deploy the
-   manifest only; the guidance's operations guard already handles the absent doors.
+   deployed retrieval index. If NO: deploy the manifest only; the guidance's operations guard
+   already handles the absent doors.
 4. Rebuild/restart the container as the Dockerfile lane does.
 
 **Gate 3** (from any machine):
@@ -100,12 +93,3 @@ verdicts, any rule the live voice broke (a broken rule is a finding, never a thi
 name it and open the fix), and the closing the practice asks for. Commit on a branch, PR,
 and merge per the repo's flow. If any gate FAILED and could not be fixed in-session, the
 receipt says so plainly — pending is honest.
-
----
-
-*Why this document exists: the cloud session that unified the canonical guidance
-(2026-07-16) could verify everything but press nothing — the buttons live behind the owner's
-logins. This handoff moves the pressing to a session that has them, with gates so "published"
-is witnessed, never assumed. The pattern is the repo's own: receipts
-`2026-07-09-mac-session-handoff-deploy-and-verify.md` and
-`2026-07-05-vernacular-plain-words-first.md`.*

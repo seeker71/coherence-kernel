@@ -3,8 +3,6 @@
 
 Manifest is authoritative; flt-ops in form-flatten.fk is generated output.
 Default --check fails when drifted; --write refreshes the slice.
-
-Spec: specs/fkwu-only-kernel-collapse.md (Phase 1)
 """
 from __future__ import annotations
 

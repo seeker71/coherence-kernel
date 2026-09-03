@@ -542,4 +542,340 @@
     (defn lo-bl-off (nb n1 extra)
         (sub 0 (add (add (div n1 4) (add (div nb 4) 6)) extra)))
 
+    ; ── the STRING SCAN family — str_find's per-byte hot loop, compiled ──────
+    ; receipts/2026-09-02-directive-ledger-walked.md named the frontier: "fkwu has
+    ; NO native substring/char_at/str_find — the per-byte recipes are the only
+    ; door, and 0 of the current hot worklist is coverable (the door speaks tags
+    ; 1..5; the worklist is strings)." This is the first string-family coverage:
+    ; STR_FIND's exact shape (core.fk's fstr-find-loop/fstr-find-eq-at — scan i
+    ; forward, compare the needle byte-for-byte from i, first-byte-first).
+    ;
+    ; GROUNDING (do not re-derive, read receipts/2026-09-03-string-family-
+    ; lowering.md): probed live, `jit_leaf_inram` — the ONLY door from Form into
+    ; crystallized bytes — declines every non-integer argument (fk_inram_args
+    ; accepts an EVEN tagged word or a list of up to 8; a string is neither), and
+    ; there is no relocation/trampoline table for compiled bytes to `bl` back into
+    ; a C native by address. lo-streq already answered the design question for
+    ; the string family: it does not call the native `str_eq`, it INLINES the
+    ; byte-compare loop directly over raw pointers (ldrb/cmp/branch). This
+    ; extends the SAME choice — pure arithmetic + the loop shape, no new native
+    ; call-out tag, no runtime/fkwu-uni.c change — for the reason lo-streq could
+    ; not yet be executed on a real pair of strings: the argument door.
+    ;
+    ; THE ANSWER: embed the string BYTES in the image itself, the same idiom
+    ; fa-mov-imm64 already uses for float constants (a function carries its own
+    ; data, no relocation). lo-str-bytes reads a Form string once, at LOWERING
+    ; time, through the SAME str_len/str_byte_at native waist core.fk's substring
+    ; and str_find compose over (Form data extraction, not a call inside the
+    ; compiled image). lo-embed-bytes writes each byte to a stack slot the
+    ; prologue opens (movz + strb, one pair per byte — the byte-granular twin of
+    ; fa-mov-imm64's movz+movk chain). The scan loop that follows is untouched
+    ; Form-lower discipline: two pointers advance by #1 (lo-streq's own idiom),
+    ; branch offsets computed from block position (the lo-cond-frame/lo-rec2
+    ; discipline), single accumulator (w0 carries the answer throughout — the
+    ; found index, or -1 for not-found, never a second result register).
+    ;
+    ; SCOPE, NAMED HONESTLY: the compiled function takes ONE integer argument
+    ; and ignores it — both strings are compile-time constants of the recipe, so
+    ; `from` (str_find's third argument) is not yet threaded through; every scan
+    ; starts at 0. The walked-direction next step is a runtime `from` and
+    ; runtime (non-embedded) pointers once a native call-out door exists to
+    ; supply them — named, not built, because it needs new C-side argument
+    ; marshalling this pass did not need and should not invent unread.
+    ;
+    ; lo-str-bytes: a Form string -> a Form list of its raw bytes (0..255), read
+    ; through str_byte_at/str_len — the same two natives core.fk's substring
+    ; walks. Order preserved by recursing before consing (lo-marshal's shape).
+    (defn lo-str-bytes-loop (s i n)
+        (if (ge i n) (list)
+            (cons (str_byte_at s i) (lo-str-bytes-loop s (add i 1) n))))
+    (defn lo-str-bytes (s) (lo-str-bytes-loop s 0 (str_len s)))
+
+    ; lo-embed-bytes: one (movz w8,#b)(strb w8,[sp,#off]) pair per byte, off
+    ; advancing by 1 — the prologue that gives the scan loop below real memory
+    ; to read, with no runtime string argument at all. w8 is scratch, dead by
+    ; the time the scan loop (which never reads it) begins.
+    (defn lo-embed-bytes (bytes off)
+        (if (eq (len bytes) 0) (list)
+            (lo-app (lo-cat (list (fa-movz 8 (head bytes)) (fa-strb 8 31 off)))
+                    (lo-embed-bytes (tail bytes) (add off 1)))))
+
+    ; the stack frame: haystack then needle, byte-contiguous, rounded up to a
+    ; 16-byte AAPCS64-clean allocation (this leaf makes no further call, so
+    ; hardware does not require it, but every existing frame in this file
+    ; keeps it and a JIT leaf should not be the one exception).
+    (defn lo-strfind-align16 (n) (mul (div (add n 15) 16) 16))
+    (defn lo-strfind-stackn (hlen nlen)
+        (do (let total (add hlen nlen))
+            (if (eq total 0) 16 (lo-strfind-align16 total))))
+
+    ; lo-strfind-core — the scan itself, PARAMETERIZED BY VALUE (bound, nlen,
+    ; stackn are compile-time integers folded into immediate operands), so the
+    ; instruction COUNT is fixed regardless of string length or content — only
+    ; the byte-materializing prologue (lo-embed-bytes) varies with length. This
+    ; is fstr-find-loop + fstr-find-eq-at fused into one block, the way lo-streq
+    ; fuses str_eq's loop: an outer scan (x1 = h_cur, w0 = i, advancing by
+    ; #1 together) over an inner byte-for-byte match check (x3/x4 = working
+    ; copies of h_cur/n_base, w5 = j) — first-byte-mismatch falls through fast,
+    ; a full inner match (j reaches nlen) returns i in w0, the outer bound
+    ; exhausting first returns -1. Register convention: x1 = h_cur (mutates),
+    ; x2 = n_base (constant, the needle never moves at the outer level), x3/x4 =
+    ; the inner loop's own copies (so a mismatch never disturbs x1/x2), w0 = i /
+    ; the return value (the single accumulator, true to every lowering above),
+    ; w5 = j, w6/w7 = the two loaded bytes being compared.
+    ; Both exits pass through fa-sxtw before the epilogue: fk_inram_call reads
+    ; the full 64-bit x0, and a bare w0 only zero-extends there (the documented
+    ; jit-leaf-inram-band.fk wall) — sxtw makes a negative w0 (the -1 sentinel)
+    ; arrive as a true 64-bit -1, and is a no-op on a valid (non-negative) index.
+    ;   0  movz w0,#0                    i = 0
+    ;   1  scan:  cmp w0,#bound
+    ;   2         b.ge notfound                    (+17 -> 19)
+    ;   3  add x3,x1,#0                  h_cur copy
+    ;   4  add x4,x2,#0                  n_base copy
+    ;   5  movz w5,#0                    j = 0
+    ;   6  inner: cmp w5,#nlen
+    ;   7         b.ge found                        (+17 -> 24)
+    ;   8  ldrb w6,[x3]  ·  9  ldrb w7,[x4]  ·  10  cmp w6,w7
+    ;   11         b.ne mismatch                     (+5 -> 16)
+    ;   12 add x3,x3,#1  · 13 add x4,x4,#1  · 14 add w5,w5,#1
+    ;   15 b inner                                   (-9 -> 6)
+    ;   16 mismatch: add x1,x1,#1  · 17 add w0,w0,#1
+    ;   18 b scan                                    (-17 -> 1)
+    ;   19 notfound: movz w0,#0  · 20 sub w0,w0,#1
+    ;   21 sxtw x0,w0  · 22 add sp,sp,#stackn  · 23 ret
+    ;   24 found: sxtw x0,w0  · 25 add sp,sp,#stackn  · 26 ret
+    ; lo-strfind-loop-body — the scan ITSELF, factored out of lo-strfind-core so
+    ; R28's runtime-haystack door (below) can run the identical bytes rather
+    ; than duplicate them. TWO lines are parameterized, each for the same
+    ; reason: an immediate encoding and a register encoding of the SAME
+    ; comparison are both exactly one 4-byte instruction, so passing the whole
+    ; instruction in changes nothing about instruction count or any branch
+    ; offset in the comment table above. `boundcheck` (R28) is instruction
+    ; position 1 (`cmp w0,#bound` or, runtime, `cmp w0,w9`). `innercheck` (R34)
+    ; is instruction position 6 (`cmp w5,#nlen` or, runtime, `cmp w5,w10`) —
+    ; the inner loop's own bound, needed as a register once the NEEDLE is a
+    ; runtime value too and `nlen` no longer exists at lowering time.
+    ; `initw0` (R34) is instruction position 0 (`movz w0,#0`, i.e. i=0) or,
+    ; for a runtime `from`, `mov w0,w4` — the loop's own accumulator (i, then
+    ; the return value) simply starts wherever the caller seeds it; nothing
+    ; downstream reads position 0 by name. lo-strfind-core below is a
+    ; one-line wrapper and emits byte-identical output to before any of this
+    ; factoring (form-lower-string-band.fk, unchanged, is the witness).
+    (defn lo-strfind-loop-body (initw0 boundcheck innercheck stackn)
+        (lo-cat (list
+            initw0
+            boundcheck
+            (fa-bcond 10 17)
+            (fa-add-x-imm 3 1 0)
+            (fa-add-x-imm 4 2 0)
+            (fa-movz 5 0)
+            innercheck
+            (fa-bcond 10 17)
+            (fa-ldrb 6 3 0)
+            (fa-ldrb 7 4 0)
+            (fa-cmp-r 6 7)
+            (fa-bcond 1 5)
+            (fa-add-x-imm 3 3 1)
+            (fa-add-x-imm 4 4 1)
+            (fa-add 5 5 1)
+            (fa-b-off -9)
+            (fa-add-x-imm 1 1 1)
+            (fa-add 0 0 1)
+            (fa-b-off -17)
+            (fa-movz 0 0)
+            (fa-sub 0 0 1)
+            (fa-sxtw 0 0)
+            (fa-add-x-imm 31 31 stackn)
+            (fa-ret)
+            (fa-sxtw 0 0)
+            (fa-add-x-imm 31 31 stackn)
+            (fa-ret))))
+    (defn lo-strfind-core (bound nlen stackn)
+        (lo-strfind-loop-body (fa-movz 0 0) (fa-cmp 0 bound) (fa-cmp 5 nlen) stackn))
+
+    ; lo-strfind-embed — the whole callable image: two Form byte lists (already
+    ; extracted by lo-str-bytes) in, one arm64 leaf out. `bound <= 0` (the needle
+    ; cannot fit — e.g. an empty haystack against any non-empty needle) is
+    ; decided HERE, at lowering time, the same operand-aware discipline lo-add/
+    ; lo-mul already practice: fa-cmp's immediate is unsigned imm12, so a
+    ; negative bound cannot be emitted as a runtime compare at all, and it does
+    ; not need to be — the answer is already known, so the trivial 4-instruction
+    ; "return -1" is the honest lowering, not a special case bolted on (sxtw
+    ; here too — the same 64-bit-return honesty as the loop's own two exits).
+    (defn lo-strfind-embed (hbytes nbytes)
+        (do
+            (let hlen (len hbytes))
+            (let nlen (len nbytes))
+            (let bound (add (sub hlen nlen) 1))
+            (let stackn (lo-strfind-stackn hlen nlen))
+            (if (le bound 0)
+                (lo-cat (list (fa-movz 0 0) (fa-sub 0 0 1) (fa-sxtw 0 0) (fa-ret)))
+                (lo-cat (list
+                    (fa-sub-x-imm 31 31 stackn)
+                    (lo-embed-bytes hbytes 0)
+                    (lo-embed-bytes nbytes hlen)
+                    (fa-add-x-imm 1 31 0)
+                    (fa-add-x-imm 2 31 hlen)
+                    (lo-strfind-core bound nlen stackn))))))
+    ; the ergonomic door: two real Form strings in, straight to the image.
+    (defn lo-strfind-embed-str (h n) (lo-strfind-embed (lo-str-bytes h) (lo-str-bytes n)))
+
+    ; ── R28: the runtime haystack door ──────────────────────────────────────
+    ; lo-strfind-embed above needs BOTH strings at LOWERING time — the real
+    ; 398k-hot family (fol-bp-row's string children, GGUF/HTTP parsing) never
+    ; has that, it has bytes that exist only once the recipe RUNS. Reaching it
+    ; needed one runtime/fkwu-uni.c change, named and scoped in the R28 ledger
+    ; row and receipts/2026-09-03-runtime-string-argument.md: fk_inram_args now
+    ; recognizes a Form STRING value (fk_srange's own domain) as TWO argument
+    ; slots — base pointer then byte length — instead of declining it. Nothing
+    ; else about the door changed: an int is still one slot, a list is still up
+    ; to eight slots, and the crystallized page still just reads registers.
+    ;
+    ; The needle stays a lowering-time constant (embedded exactly like
+    ; lo-strfind-embed's), because R28's gap was the HAYSTACK — `from` and a
+    ; runtime needle are further widening of the same door, not built here.
+    ; The haystack arrives as x0=pointer, x1=byte-length (fk_inram_args' new
+    ; two-slot shape, AAPCS64). `bound = hlen - nlen + 1` can no longer be
+    ; folded to an immediate (hlen is not known until the call happens), so
+    ; it is computed into w9 at RUNTIME from the incoming length — one
+    ; instruction, chosen at LOWERING time between add/sub only because nlen=0
+    ; would need immediate -1 (unsigned imm12 cannot hold it, the same wall
+    ; lo-strfind-embed's `bound<=0` shortcut already named for the immediate
+    ; cmp). w9 is never written again after, so lo-strfind-loop-body's SAME
+    ; `cmp w0,w9` (register form) reads a live, correct bound on every outer
+    ; iteration — and unlike the immediate form, a register compare naturally
+    ; carries a NEGATIVE bound (needle longer than haystack) as a true signed
+    ; value, so the "trivial not-found" lowering-time special case is not
+    ; needed here at all: the general loop already answers it correctly.
+    ;
+    ;   0 sub sp,sp,#stackn         open the frame (needle bytes only now)
+    ;   .. lo-embed-bytes nbytes 0  needle -> [sp,#0..nlen)      (uses w8)
+    ;   N  sub/add w9,w1,#..        bound = hlen-nlen+1, from the ARG length
+    ;   N+1 add x1,x0,#0            h_cur = the ARG pointer (mov x1,x0)
+    ;   N+2 add x2,sp,#0            n_base = the embedded needle
+    ;      lo-strfind-loop-body (cmp-r w0,w9) nlen stackn
+    ;
+    ; x1 holds the incoming LENGTH until the bound is read from it (register 1
+    ; in the sub/add above), then is overwritten to become h_cur — the two
+    ; uses never overlap because the read happens first, in program order.
+    (defn lo-strfind-bound-from-len (lenreg nlen)
+        (if (eq nlen 0) (fa-add 9 lenreg 1) (fa-sub 9 lenreg (sub nlen 1))))
+    (defn lo-strfind-runtime (nbytes)
+        (do
+            (let nlen (len nbytes))
+            (let stackn (lo-strfind-stackn 0 nlen))
+            (lo-cat (list
+                (fa-sub-x-imm 31 31 stackn)
+                (lo-embed-bytes nbytes 0)
+                (lo-strfind-bound-from-len 1 nlen)
+                (fa-add-x-imm 1 0 0)
+                (fa-add-x-imm 2 31 0)
+                (lo-strfind-loop-body (fa-movz 0 0) (fa-cmp-r 0 9) (fa-cmp 5 nlen) stackn)))))
+    ; the ergonomic door: a real Form string needle in (embedded), the
+    ; haystack left as the runtime ARG the compiled page expects.
+    (defn lo-strfind-runtime-str (n) (lo-strfind-runtime (lo-str-bytes n)))
+
+    ; ── R34: the runtime needle door ────────────────────────────────────────
+    ; R28 threaded the HAYSTACK through as a runtime pointer+length pair and
+    ; named the exact remaining gap in its own closing (release-ledger.bml
+    ; row 47, receipts/2026-09-03-runtime-string-argument.md): "the needle
+    ; stays a lowering-time constant ... it needs only a form-lower.fk
+    ; lowering that embeds neither string and reads two pointer/length pairs
+    ; instead of one." fk_inram_args itself needed NO change to reach this —
+    ; it already maps each element of the argument list through the same
+    ; int-or-string test in sequence (runtime/fkwu-uni.c:3655), so a Form
+    ; list of TWO strings already yields FOUR argument slots (x0=h_ptr,
+    ; x1=h_len, x2=n_ptr, x3=n_len) with the door's existing `n + 2 > 8`
+    ; overflow guard, unchanged. This is the same door R28 opened, walked
+    ; one string further — not a new door.
+    ;
+    ; lo-strfind-runtime-both-core compiles a leaf that embeds NEITHER
+    ; string — no lo-embed-bytes call at all, so the image is a FIXED
+    ; length regardless of what is searched for or in (proven structurally
+    ; by form-lower-string-both-runtime-band.fk's compositional case: the
+    ; byte length never varies). Both pointers arrive as-is from
+    ; fk_inram_args in the register positions lo-strfind-loop-body already
+    ; wants: x1 becomes h_cur (a mov from x0, since x0 is where the ARG
+    ; door places the first slot and x1 is where the loop body reads it —
+    ; the same x0->x1 move R28's lowering already makes) and x2 IS n_base
+    ; already (the door's third slot lands exactly where the loop body
+    ; reads the needle pointer, so no move is needed for it at all).
+    ;
+    ; Both lengths are runtime now, so BOTH lo-strfind-loop-body checks that
+    ; used to fold a lowering-time constant into an immediate now read a
+    ; register instead: `bound = hlen-nlen+1` can no longer choose add-vs-sub
+    ; at lowering time the way lo-strfind-bound-from-len does (that decision
+    ; itself depended on knowing nlen), so it is computed the general way —
+    ; `sub w9,w1,w3` then `add w9,w9,#1`, two instructions, correct for every
+    ; relationship between the two lengths including nlen=0 and hlen<nlen,
+    ; with no special case. `nlen` for the INNER loop's own bound (`innercheck`)
+    ; is copied out of w3 into w10 (`mov w10,w3`) before w3 is reused as the
+    ; inner scan's own h_cur copy — the same "read before clobber" ordering
+    ; R28's lowering already relies on for w1 (h_len is read into the bound
+    ; calculation before x1 is overwritten to become h_cur).
+    ;
+    ;   0 sub sp,sp,#stackn        open the frame (nothing embedded — the
+    ;                              floor allocation only, R28's own note on
+    ;                              why a leaf still opens one)
+    ;   1 sub w9,w1,w3             w9 = hlen - nlen
+    ;   2 add w9,w9,#1             w9 = bound = hlen - nlen + 1
+    ;   3 mov w10,w3               w10 = nlen (saved before x3 is clobbered)
+    ;   4 <hcur-setup>             h_cur = the ARG haystack pointer, OFFSET
+    ;                              BY `from` (see the note below — a match
+    ;                              at index i reads bytes starting at h[i],
+    ;                              so h_cur and i begin in lockstep)
+    ;     (x2 already holds the ARG needle pointer — n_base needs no move)
+    ;     lo-strfind-loop-body initw0 (cmp-r w0,w9) (cmp-r w5,w10) stackn
+    ;
+    ; initw0 is `movz w0,#0` (i=0, lo-strfind-runtime-both) for a scan that
+    ; always starts at the beginning, exactly like every lowering above it.
+    ;
+    ; hcur-setup moves in lockstep with initw0 — a bug caught by this
+    ; pass's own proof, not avoided by design: h_cur is the pointer i
+    ; indexes, so if i starts at a nonzero `from` while h_cur still starts
+    ; at h_ptr+0 (the plain `mov x1,x0`), every byte the loop reads is
+    ; offset from the position its own index claims, and the scan answers
+    ; confidently wrong (silently — it still returns *a* number) instead of
+    ; naming the mismatch. lo-strfind-runtime-both never needs the offset (from is
+    ; always 0, so `mov x1,x0` is already `h_ptr+0`); lo-strfind-runtime-both-from
+    ; needs `x1 = x0 + x4` — a RUNTIME offset, which fa-add-x-imm cannot
+    ; encode (its offset is a lowering-time immediate), so this pass added
+    ; fa-add-x-r (form-asm.fk) for exactly this: a genuine 64-bit
+    ; register-register add, chosen over a 32-bit fa-add-r because the
+    ; 32-bit form would zero x1's upper bits and corrupt the pointer.
+    (defn lo-strfind-runtime-both-core (initw0 hcur-setup)
+        (do
+            (let stackn (lo-strfind-stackn 0 0))
+            (lo-cat (list
+                (fa-sub-x-imm 31 31 stackn)
+                (fa-sub-r 9 1 3)
+                (fa-add 9 9 1)
+                (fa-mov 10 3)
+                hcur-setup
+                (lo-strfind-loop-body initw0 (fa-cmp-r 0 9) (fa-cmp-r 5 10) stackn)))))
+    ; the ergonomic door: BOTH strings left as runtime ARGs — call with
+    ; (list haystack needle). Every scan starts at 0, so h_cur starts at
+    ; h_ptr+0 exactly (a plain register mov is already the right offset).
+    (defn lo-strfind-runtime-both ()
+        (lo-strfind-runtime-both-core (fa-movz 0 0) (fa-add-x-imm 1 0 0)))
+
+    ; lo-strfind-runtime-both-from — the same fixed image, widened by TWO
+    ; instructions' worth of choice, not one: `initw0` becomes `mov w0,w4`
+    ; instead of `movz w0,#0` (reading `from` out of the door's fifth
+    ; argument slot — a plain int costs one slot, same as every other
+    ; integer argument this door has always accepted, so R28's two-slot
+    ; string convention and the door's original int slot compose without
+    ; touching fk_inram_args again), AND `hcur-setup` becomes the new
+    ; `fa-add-x-r 1 0 4` (x1 = x0 + x4, i.e. h_ptr + from) instead of
+    ; `fa-add-x-imm 1 0 0` — the two travel together (see the note on
+    ; lo-strfind-runtime-both-core above: this is the bug this pass's own
+    ; proof caught before it shipped, not a hypothetical). `from` becomes
+    ; the loop's own starting `i` AND the byte offset h_cur reads from, in
+    ; lockstep; the shared bound and inner checks (both already
+    ; register-form here) carry a `from` past the valid range exactly the
+    ; way they already carry a negative bound — the general loop, not a new
+    ; special case. Call with (list haystack needle from).
+    (defn lo-strfind-runtime-both-from ()
+        (lo-strfind-runtime-both-core (fa-mov 0 4) (fa-add-x-r 1 0 4)))
+
     0)

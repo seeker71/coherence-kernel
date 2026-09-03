@@ -1,0 +1,100 @@
+; metal-deadline-band.fk — a shorter deadline yields a TYPED timeout frame, not a hang
+; and not a silent zero; and what the deadline abandoned is released, not lost.
+;
+; WHAT IS PROVEN, on the real GPU, with a tiny kernel and no model. One thread walks a
+; loop-carried chain of eight million dependent loads (a += x[a & 3] over four ones), which
+; no compiler folds and which takes the device far longer than one millisecond. The cell
+; hands the carrier a 1 ms patience through metal_deadline, enqueues, and syncs:
+;   - metal_sync answers within the second (bit 4 is dark on a hang — the band would
+;     not finish at all, which is the point);
+;   - metal_status speaks wait_frame=timeout and shelf=1 — the zero is typed, and the
+;     buffer is owed, not dropped.
+; Then the cell hands the Form row (hearth-metal-deadline-ms, the one home of the
+; default) and syncs again: the shelf settles, wait_frame=released, shelf=0, the
+; status no longer claims a timeout, and the buffer's answer reads back as exactly
+; 8000000 — nothing was fabricated on the timeout path; the work was real and it
+; finished. The hand-over itself reads back as data: the door answers the deadline
+; that stood before (-1 when none did, then the 1 it replaced).
+;
+; RUN:  ./fkwu form/form-stdlib/tests/metal-deadline-band.fk
+; A ./fkwu built without the carrier answers metal_linked=false and this band reports 0:
+; every other bit is evidence only once the door is real (bit 1).
+;
+; Verdict 127 = 1 door-linked | 2 none-stood-before | 4 short-deadline-typed-timeout
+;             | 8 hand-over-reads-back | 16 shelf-released | 32 answer-exact
+;             | 64 status-carries-the-row.
+; Bits are powers of two so a dark bit is readable on sight.
+;
+; preludes: form-stdlib/hearth.bml
+
+(do
+    (defn mdl-nl () (byte_to_str 10))
+    (defn mdl-has (s sub) (if (ge (str_find s sub 0) 0) 1 0))
+    (defn mdl-le32 (v)
+        (str_concat (byte_to_str (mod v 256))
+        (str_concat (byte_to_str (mod (floor (div v 256)) 256))
+        (str_concat (byte_to_str (mod (floor (div v 65536)) 256))
+                    (byte_to_str (mod (floor (div v 16777216)) 256))))))
+    ; binding: 2 buffers (x, y), 1 constant (n), no tail
+    (defn mdl-bind (hx hy n)
+        (str_concat (mdl-le32 2)
+        (str_concat (mdl-le32 hx)
+        (str_concat (mdl-le32 hy)
+        (str_concat (mdl-le32 1) (mdl-le32 n))))))
+    (defn mdl-n () 8000000)
+    (defn mdl-msl ()
+        (str_concat "#include <metal_stdlib>" (str_concat (mdl-nl)
+        (str_concat "using namespace metal;" (str_concat (mdl-nl)
+        (str_concat "kernel void form_fkwu_spin_u32(" (str_concat (mdl-nl)
+        (str_concat "  device const uint *x [[buffer(0)]]," (str_concat (mdl-nl)
+        (str_concat "  device uint *y [[buffer(1)]]," (str_concat (mdl-nl)
+        (str_concat "  constant uint &n [[buffer(2)]]," (str_concat (mdl-nl)
+        (str_concat "  uint gid [[thread_position_in_grid]]) {" (str_concat (mdl-nl)
+        (str_concat "  uint a = 0;" (str_concat (mdl-nl)
+        (str_concat "  for (uint i = 0; i < n; i++) a += x[a & 3u];" (str_concat (mdl-nl)
+        (str_concat "  y[gid] = a;" (str_concat (mdl-nl)
+                    "}" )))))))))))))))))))))
+
+    (let st0 (metal_status))
+    (let linked (mdl-has st0 "metal_linked=true"))
+    (if (eq linked 0)
+        (do (print_str st0) 0)
+        (do
+            (let before (metal_deadline 1))
+            (let hx (metal_buf_alloc 16))
+            (let hy (metal_buf_alloc 4))
+            (let ones (str_concat (mdl-le32 1) (str_concat (mdl-le32 1)
+                      (str_concat (mdl-le32 1) (mdl-le32 1)))))
+            (let wrote (metal_buf_write hx 0 ones))
+            (let pipe (metal_pipeline (mdl-msl) "form_fkwu_spin_u32"))
+            (let enq (metal_enqueue pipe (mdl-bind hx hy (mdl-n)) 1))
+            (let t0 (now_unix_ms))
+            (let s1 (metal_sync))
+            (let waited-ms (sub (now_unix_ms) t0))
+            (let st1 (metal_status))
+            (print_str (str_concat "short: sync=" (str_concat (int_to_str s1)
+                (str_concat " waited-ms=" (str_concat (int_to_str waited-ms) (mdl-nl))))))
+            (print_str st1)
+            (let prev (metal_deadline (hearth-metal-deadline-ms)))
+            (let t1 (now_unix_ms))
+            (let s2 (metal_sync))
+            (let settled-ms (sub (now_unix_ms) t1))
+            (let st2 (metal_status))
+            (let ybytes (metal_buf_read hy 0 4))
+            (print_str (str_concat "row: before=" (str_concat (int_to_str before)
+                (str_concat " prev=" (str_concat (int_to_str prev)
+                (str_concat " settled-ms=" (str_concat (int_to_str settled-ms) (mdl-nl))))))))
+            (print_str st2)
+            (add (mul linked 1)
+            (add (mul (if (eq before -1) 1 0) 2)
+            (add (mul (if (and (eq s1 0)
+                          (and (lt waited-ms 1000)
+                          (and (eq (mdl-has st1 "wait_frame=timeout") 1)
+                               (eq (mdl-has st1 "shelf=1") 1)))) 1 0) 4)
+            (add (mul (if (eq prev 1) 1 0) 8)
+            (add (mul (if (and (eq (mdl-has st2 "wait_frame=released") 1)
+                          (and (eq (mdl-has st2 "shelf=0") 1)
+                               (eq (mdl-has st2 "timeout") 0))) 1 0) 16)
+            (add (mul (if (str_eq ybytes (mdl-le32 (mdl-n))) 1 0) 32)
+                 (mul (mdl-has st2 (str_concat "wait_deadline_ms="
+                        (int_to_str (hearth-metal-deadline-ms)))) 64))))))))))

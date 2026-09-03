@@ -1,0 +1,99 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glass-event-loop.bml — executable event/deadline state and
+// front/back frame buffers.  No wait effect lives here until the kernel can
+// join a monotonic deadline with telemetry/control path changes.
+//
+// Authority: form-stdlib/bml/form-glass-event-loop.bml
+// preludes: form/form-stdlib/core.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormGlassEventLoop {
+        field FGELSchema = "form-glass-event-loop-v1";
+        field FGELScheduleSchema = "form-glass-schedule-v1";
+        field FGELWakeSchema = "form-glass-wake-v1";
+        field FGELBufferSchema = "form-glass-frame-buffer-v1";
+        field FGELPlanSchema = "form-glass-event-plan-v1";
+        field FGELWaitDoor = "kernel.monotonic-wait-until-path-change";
+        field FGELClockDoor = "kernel.monotonic-ms";
+        def fgel-wake-kind?(kind) = if str_eq(kind, "jit-refusal") then 1 else if str_eq(kind, "jit-healed") then 1 else if str_eq(kind, "telemetry") then 1 else if str_eq(kind, "control") then 1 else if str_eq(kind, "deadline") then 1 else 0;
+        def fgel-wake-priority(kind) = if str_eq(kind, "jit-refusal") then 5 else if str_eq(kind, "jit-healed") then 4 else if str_eq(kind, "control") then 3 else if str_eq(kind, "deadline") then 2 else if str_eq(kind, "telemetry") then 1 else 0;
+
+        // Schedule fields: schema, next deadline, budget, skipped slots,
+        // last monotonic observation.  Time is supplied by the future
+        // monotonic carrier; wall timestamps never enter these functions.
+        def fgel-schedule(deadline, budget, skipped, observed) = list(FGELScheduleSchema(), deadline, budget, skipped, observed);
+        def fgel-schedule-deadline(schedule) = nth(schedule, 1);
+        def fgel-schedule-budget(schedule) = nth(schedule, 2);
+        def fgel-schedule-skipped(schedule) = nth(schedule, 3);
+        def fgel-schedule-observed(schedule) = nth(schedule, 4);
+        def fgel-schedule-valid?(schedule) = if not(eq(len(schedule), 5)) then 0 else if not(str_eq(head(schedule), FGELScheduleSchema())) then 0 else if le(fgel-schedule-budget(schedule), 0) then 0 else if lt(fgel-schedule-skipped(schedule), 0) then 0 else if lt(fgel-schedule-observed(schedule), 0) then 0 else ge(fgel-schedule-deadline(schedule), fgel-schedule-observed(schedule));
+        def fgel-schedule-start(monotonicNow, budget) = if or(lt(monotonicNow, 0), le(budget, 0)) then list(FGELScheduleSchema(), 0, 0, 0, 0) else fgel-schedule(add(monotonicNow, budget), budget, 0, monotonicNow);
+        def fgel-due?(schedule, monotonicNow) = if not(eq(fgel-schedule-valid?(schedule), 1)) then 0 else ge(monotonicNow, fgel-schedule-deadline(schedule));
+        def fgel-elapsed-slots(schedule, monotonicNow) = if not(eq(fgel-schedule-valid?(schedule), 1)) then 0 else if lt(monotonicNow, fgel-schedule-deadline(schedule)) then 0 else add(div(sub(monotonicNow, fgel-schedule-deadline(schedule)), fgel-schedule-budget(schedule)), 1);
+        def fgel-missed-slots(schedule, monotonicNow) {
+            let elapsed = fgel-elapsed-slots(schedule, monotonicNow);
+            if le(elapsed, 1) then 0 else sub(elapsed, 1);
+        }
+        def fgel-schedule-advance(schedule, monotonicNow) {
+            let elapsed = fgel-elapsed-slots(schedule, monotonicNow);
+            let steps = if le(elapsed, 0) then 1 else elapsed;
+            let nextDeadline = add(fgel-schedule-deadline(schedule), mul(steps, fgel-schedule-budget(schedule)));
+            let missed = if le(elapsed, 1) then 0 else sub(elapsed, 1);
+            fgel-schedule(nextDeadline, fgel-schedule-budget(schedule), add(fgel-schedule-skipped(schedule), missed), monotonicNow);
+        }
+
+        // Wake fields: schema, kind, monotonic observation, source identity,
+        // evidence identity.  Source and evidence are bounded identifiers;
+        // prompt, answer and payload bytes are outside this membrane.
+        def fgel-wake(kind, monotonicAt, source, evidence) = list(FGELWakeSchema(), kind, monotonicAt, source, evidence);
+        def fgel-wake-kind(wake) = nth(wake, 1);
+        def fgel-wake-at(wake) = nth(wake, 2);
+        def fgel-wake-source(wake) = nth(wake, 3);
+        def fgel-wake-evidence(wake) = nth(wake, 4);
+        def fgel-wake-valid?(wake) = if not(eq(len(wake), 5)) then 0 else if not(str_eq(head(wake), FGELWakeSchema())) then 0 else if not(eq(fgel-wake-kind?(fgel-wake-kind(wake)), 1)) then 0 else if lt(fgel-wake-at(wake), 0) then 0 else if le(str_len(fgel-wake-source(wake)), 0) then 0 else gt(str_len(fgel-wake-evidence(wake)), 0);
+        // Every supplied wake is examined. A count cap here could hide a JIT
+        // refusal behind ordinary telemetry; the membrane already bounds each
+        // producer snapshot.
+        def fgel-select-wake-next(best, wakes) = if eq(len(wakes), 0) then best else if not(eq(fgel-wake-valid?(head(wakes)), 1)) then fgel-select-wake-next(best, tail(wakes)) else if not(eq(fgel-wake-valid?(best), 1)) then fgel-select-wake-next(head(wakes), tail(wakes)) else if gt(fgel-wake-priority(fgel-wake-kind(head(wakes))), fgel-wake-priority(fgel-wake-kind(best))) then fgel-select-wake-next(head(wakes), tail(wakes)) else fgel-select-wake-next(best, tail(wakes));
+        def fgel-select-wake(wakes) = fgel-select-wake-next(list(), wakes);
+
+        // Buffer fields: schema, front, back, presented generation, staged
+        // generation.  Collection mutates neither frame; a new value is
+        // returned for stage and commit.
+        def fgel-buffer(front, back, presented, staged) = list(FGELBufferSchema(), front, back, presented, staged);
+        def fgel-buffer-front(buffer) = nth(buffer, 1);
+        def fgel-buffer-back(buffer) = nth(buffer, 2);
+        def fgel-buffer-presented(buffer) = nth(buffer, 3);
+        def fgel-buffer-staged(buffer) = nth(buffer, 4);
+        def fgel-buffer-empty() = fgel-buffer(list(), list(), 0, 0);
+        def fgel-buffer-valid?(buffer) = if not(eq(len(buffer), 5)) then 0 else if not(str_eq(head(buffer), FGELBufferSchema())) then 0 else if lt(fgel-buffer-presented(buffer), 0) then 0 else ge(fgel-buffer-staged(buffer), fgel-buffer-presented(buffer));
+        def fgel-buffer-stage(buffer, frame) = if not(eq(fgel-buffer-valid?(buffer), 1)) then fgel-buffer-empty() else fgel-buffer(fgel-buffer-front(buffer), frame, fgel-buffer-presented(buffer), add(fgel-buffer-staged(buffer), 1));
+        def fgel-buffer-pending?(buffer) = if not(eq(fgel-buffer-valid?(buffer), 1)) then 0 else gt(fgel-buffer-staged(buffer), fgel-buffer-presented(buffer));
+        def fgel-buffer-commit(buffer) = if not(eq(fgel-buffer-pending?(buffer), 1)) then buffer else fgel-buffer(fgel-buffer-back(buffer), fgel-buffer-front(buffer), fgel-buffer-staged(buffer), fgel-buffer-staged(buffer));
+
+        // A control wake presents immediately.  Telemetry may stage early and
+        // coalesce until the anchored deadline; a deadline presents whatever
+        // is staged.  Advancing is arithmetic, so a late wake cannot recurse
+        // once per missed frame.
+        def fgel-plan(disposition, schedule, buffer, wake) = list(FGELPlanSchema(), disposition, schedule, buffer, wake);
+        def fgel-plan-disposition(plan) = nth(plan, 1);
+        def fgel-plan-schedule(plan) = nth(plan, 2);
+        def fgel-plan-buffer(plan) = nth(plan, 3);
+        def fgel-plan-cause(plan) = nth(plan, 4);
+        def fgel-plan-after-stage(schedule, staged, wake) = if str_eq(fgel-wake-kind(wake), "jit-refusal") then fgel-plan("heal-hold", schedule, fgel-buffer-commit(staged), wake) else if str_eq(fgel-wake-kind(wake), "control") then fgel-plan("present", fgel-schedule-advance(schedule, fgel-wake-at(wake)), fgel-buffer-commit(staged), wake) else if or(str_eq(fgel-wake-kind(wake), "deadline"), eq(fgel-due?(schedule, fgel-wake-at(wake)), 1)) then fgel-plan("present", fgel-schedule-advance(schedule, fgel-wake-at(wake)), fgel-buffer-commit(staged), wake) else fgel-plan("staged", schedule, staged, wake);
+        def fgel-plan-wake(schedule, buffer, wake, nextFrame) = if not(eq(fgel-schedule-valid?(schedule), 1)) then fgel-plan("refused-schedule", schedule, buffer, wake) else if not(eq(fgel-buffer-valid?(buffer), 1)) then fgel-plan("refused-buffer", schedule, buffer, wake) else if not(eq(fgel-wake-valid?(wake), 1)) then fgel-plan("refused-wake", schedule, buffer, wake) else fgel-plan-after-stage(schedule, fgel-buffer-stage(buffer, nextFrame), wake);
+        def fgel-plan-wakes(schedule, buffer, wakes, nextFrame) = fgel-plan-wake(schedule, buffer, fgel-select-wake(wakes), nextFrame);
+        def fgel-resume-matches-fault?(plan, resumeWake) = if not(str_eq(fgel-wake-kind(resumeWake), "jit-healed")) then 0 else if not(str_eq(fgel-wake-source(resumeWake), fgel-wake-source(fgel-plan-cause(plan)))) then 0 else if not(str_eq(fgel-wake-evidence(resumeWake), fgel-wake-evidence(fgel-plan-cause(plan)))) then 0 else gt(fgel-wake-at(resumeWake), fgel-wake-at(fgel-plan-cause(plan)));
+        def fgel-resume-held(plan, resumeWake) = if not(str_eq(fgel-plan-disposition(plan), "heal-hold")) then fgel-plan("refused-resume-not-held", fgel-plan-schedule(plan), fgel-plan-buffer(plan), resumeWake) else if not(eq(fgel-wake-valid?(resumeWake), 1)) then fgel-plan("refused-resume-wake", fgel-plan-schedule(plan), fgel-plan-buffer(plan), resumeWake) else if not(str_eq(fgel-wake-kind(resumeWake), "jit-healed")) then fgel-plan("refused-resume-kind", fgel-plan-schedule(plan), fgel-plan-buffer(plan), resumeWake) else if not(eq(fgel-resume-matches-fault?(plan, resumeWake), 1)) then fgel-plan("refused-resume-fault-identity", fgel-plan-schedule(plan), fgel-plan-buffer(plan), resumeWake) else fgel-plan("present", fgel-schedule-advance(fgel-plan-schedule(plan), fgel-wake-at(resumeWake)), fgel-plan-buffer(plan), resumeWake);
+
+        // Existing regular-file publication is already producer-safe when
+        // Glass is absent.  The missing wait carrier observes those paths; it
+        // must not require a producer to ring a FIFO or connect a socket.
+        def fgel-event-sources() = list("jit-refusal", "jit-healed-after-rechallenge", "telemetry-root-directory-change", "control-inbox-atomic-rename", "monotonic-deadline");
+        def fgel-carrier-gap() = list("form-glass-event-wait-v1", "unavailable", "clock-door", FGELClockDoor(), "wait-door", FGELWaitDoor(), "idle-polling-remains-unreplaced", "no-safe-bounded-native-wait");
+    }
+    0;
+}

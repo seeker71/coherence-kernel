@@ -5,7 +5,7 @@
 // `selfmolt` to the foreground carrier instead of leaving an old display alive.
 //
 // Authority: form-stdlib/bml/form-glass-live.bml
-// preludes: observe/say.fk form/form-stdlib/form-terminal-canvas.bml form/form-stdlib/form-glass-observer.bml form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/native-model-route-readiness.bml form/form-stdlib/native-model-tensor-ledger.bml form/form-stdlib/form-glass-dashboard.bml form/form-stdlib/form-glass-live-ui.bml form/form-stdlib/hearth.bml form/form-stdlib/form-glass-launch.bml
+// preludes: observe/say.fk form/form-stdlib/form-terminal-canvas.bml form/form-stdlib/form-glass-observer.bml form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/form-glass-event-loop.bml form/form-stdlib/native-model-route-readiness.bml form/form-stdlib/native-model-tensor-ledger.bml form/form-stdlib/native-model-dual-telemetry.bml form/form-stdlib/form-glass-dashboard.bml form/form-stdlib/form-glass-live-ui.bml form/form-stdlib/hearth.bml form/form-stdlib/form-glass-launch.bml
 //
 //////////////////////////////////////////////////////////////////////
 
@@ -17,7 +17,7 @@ section [form.bml] {
 
     class FormGlassLive {
         field FGLSchema = "form-glass-live-v2";
-        field FGLRoot = "/tmp/form-glass-telemetry";
+        def FGLRoot() = hearth-telemetry-root();
         field FGLPublisher = "glass.monitor";
         field FGLControlChannel = "glass-monitor";
         field FGLFreshLeaseMs = 5000;
@@ -29,8 +29,12 @@ section [form.bml] {
         field FGLNodeMoltGrowth = 262144;
         field FGLQwenRouteId = "model.qwen3.8-flash-next.ud-q2_k_xl.unsloth";
         field FGLThreeBRouteId = "model.llama-3.2-3b-instruct";
+        field FGLQwenWeightId = "weights.qwen3.8-flash-next.ud-q2_k_xl.unsloth";
+        field FGLThreeBWeightId = "weights.llama-3.2-3b-instruct";
+        field FGLJitPublisher = "jit.bml-demand";
+        field FGLJitHealedId = "jit.bml-demand.healed";
         ref fgl-authority = FormGlassLiveAuthority;
-        thought fgl-law = list("owner-publishes", "one-persistent-process", "poll-dimensions", "observed-frame-ring", "four-active-two-quiet", "row-diff", "cursor-visible", "correlate-controls", "input-seam-visible", "observer-tax-visible");
+        thought fgl-law = list("owner-publishes", "one-persistent-process", "poll-dimensions", "observed-frame-ring", "four-transient-attention-two-quiet", "front-back-frame-buffer", "event-wait-door-named", "row-diff", "cursor-visible", "correlate-controls", "input-seam-visible", "observer-tax-visible");
 
         def fgl-dependency-changed?(held, frame) = if not(eq(fgl-cycle?(frame, 4), 1)) then 0 else if str_eq(held, fglu-dependency-manifest()) then 0 else 1;
 
@@ -38,6 +42,8 @@ section [form.bml] {
             let field = fgtm-read-state-value(reading);
             if not(str_eq(fgtm-read-state-status(reading), "current")) then list() else if not(eq(fgtm-field-present?(field), 1)) then list() else fgtm-snapshot-samples(fgtm-field-value(field));
         }
+        def fgl-jit-current-samples-at(root) = fgl-current-reading-samples(fgtm-read-current(root, FGLJitPublisher()));
+        def fgl-jit-current-samples() = fgl-jit-current-samples-at(FGLRoot());
         def fgl-sample-stale?(sample) = if str_eq(fgtm-sample-source(sample), "glass.stale-snapshot") then 1 else if str_eq(fgtm-sample-source(sample), "glass.projection-stale") then 1 else fgd-has-channel(fgtm-sample-channels(sample), "snapshot-stale");
         def fgl-honest-sample(sample) = sample;
         def fgl-honest-samples(samples) = if eq(len(samples), 0) then list() else cons(fgl-honest-sample(head(samples)), fgl-honest-samples(tail(samples)));
@@ -100,6 +106,17 @@ section [form.bml] {
                 fgo-int("process", "model-owner-elapsed", "Model owner elapsed", fgo-ps-elapsed(process), "seconds", fgo-ps-elapsed(process), "process-time", "physical-live", "owner-liveness exact pid/start + /bin/ps", "live", "model", str_concat("owner pid=", int_to_str(pid))),
                 if ge(nice, 0) then fgo-int("process", "model-owner-nice", "Model owner nice", nice, "nice", nice, "cpu-scheduler", "physical-live", "owner-liveness exact pid/start + /bin/ps -o ni", "live", "cpu", str_concat("cooperative scheduling priority; owner pid=", int_to_str(pid))) else fgo-unavailable("process", "model-owner-nice", "Model owner nice", "nice", "cpu-scheduler", "host.ps.owner-nice", "cpu", str_concat("exact owner pid=", int_to_str(pid))));
         }
+        def fgl-owner-metric?(row) = if str_eq(fgo-id(row), "model-owner-rss") then 1 else if str_eq(fgo-id(row), "model-owner-cpu") then 1 else if str_eq(fgo-id(row), "model-owner-elapsed") then 1 else str_eq(fgo-id(row), "model-owner-nice");
+        def fgl-held-owner-rows(rows) = if eq(len(rows), 0) then list() else if eq(fgl-owner-metric?(head(rows)), 1) then cons(head(rows), fgl-held-owner-rows(tail(rows))) else fgl-held-owner-rows(tail(rows));
+        // Exact owner process observation is useful at least once per second;
+        // spawning two ps children at every 250 ms frame displaced the model
+        // work Glass exists to reveal. A two-frame cadence is 500 ms at 4 Hz
+        // and one second at 2 Hz. Retained rows keep their original observation
+        // epoch so their visible age grows between observations.
+        def fgl-owner-rows-at(frame, heldFast, samples, epoch) {
+            let held = fgl-held-owner-rows(heldFast);
+            if or(eq(len(held), 0), eq(fgl-cycle?(frame, 2), 1)) then fgo-observe-rows(fgl-owner-process-rows(samples), epoch, frame) else held;
+        }
 
         def fgl-terminal-number(command, fallback, low, high) {
             let raw = trim(host-exec(command, ""));
@@ -108,6 +125,10 @@ section [form.bml] {
         }
         def fgl-terminal-width() = fgl-terminal-number("/usr/bin/tput cols", 100, 1, 1000);
         def fgl-terminal-height() = fgl-terminal-number("/usr/bin/tput lines", 30, 1, 300);
+        def fgl-surface(epoch) = list(fgl-terminal-width(), fgl-terminal-height(), epoch);
+        // Resize awareness is a one-second observation, independent of frame
+        // rate. The terminal probes never sit on the 250 ms render path.
+        def fgl-surface-at(surface, epoch) = if or(lt(len(surface), 3), ge(sub(epoch, nth(surface, 2)), 1000)) then fgl-surface(epoch) else surface;
 
         def fgl-cycle?(frame, cadence) = eq(mul(div(frame, cadence), cadence), frame);
         def fgl-observe-fast-rows(heatRows) {
@@ -158,8 +179,8 @@ section [form.bml] {
         def fgl-queue-file-value(text) = if nothing?(text) then "" else text;
         def fgl-queue-file-text(path, size) = if eq(fgl-queue-file-present?(size), 0) then "" else fgl-queue-file-value(read_file(path));
         def fgl-hearth-queue-observe() {
-            let taskPath = ".hearth/task.spool";
-            let replyPath = ".hearth/reply.spool";
+            let taskPath = hearth-task();
+            let replyPath = hearth-reply();
             let taskBytes = file_size(taskPath);
             let replyBytes = file_size(replyPath);
             fgl-hearth-queue-present(taskPath, replyPath, taskBytes, replyBytes);
@@ -183,6 +204,10 @@ section [form.bml] {
         def fgl-number-for(metrics, ids) = fgl-metric-number(fgl-first-metric(metrics, ids));
         def fgl-metric-evidence(metric) = if or(eq(len(metric), 0), eq(fgo-present?(metric), 0)) then "unavailable" else fgo-evidence(metric);
         def fgl-evidence-for(metrics, ids) = fgl-metric-evidence(fgl-first-metric(metrics, ids));
+        def fgl-source-for(metrics, ids, door) {
+            let metric = fgl-first-metric(metrics, ids);
+            if or(eq(len(metric), 0), eq(fgo-present?(metric), 0)) then door else fgo-source(metric);
+        }
         def fgl-flow-point(epoch, metrics) = fgd-flow-point(epoch, fgl-number-for(metrics, list("gpu-busy")), fgl-number-for(metrics, list("cpu-jit-busy")), fgl-number-for(metrics, list("dispatch-total")), fgl-number-for(metrics, list("queue-depth", "hopper", "pending", "metal-pending")), fgl-number-for(metrics, list("jit-compile", "jit-leaf-inram", "jit-arm64")), fgl-number-for(metrics, list("cells")), fgl-number-for(metrics, list("memory-free")), fgl-number-for(metrics, list("inflight", "metal-inflight", "pending-command-buffers")));
         def fgl-history-step(history, epoch, metrics) = ftc-ring-push(history, fgl-flow-point(epoch, metrics), FGLHistoryCapacity());
         def fgl-history-last(history) = if eq(len(history), 0) then list() else nth(history, sub(len(history), 1));
@@ -207,7 +232,7 @@ section [form.bml] {
             fgo-sized("memory", "node-growth", "interned node growth since Glass start", growth, "nodes", FGLNodeMoltGrowth(), growth, "cpu-arena", "physical-live", "kernel_stat:4-start-baseline", if eq(growth, 0) then "quiet" else "growing", "cell", "scope=current Glass process; impact=projection-node arena; selfmolt releases process-local nodes at threshold; source NodeIDs remain producer-scoped");
         }
         def fgl-refresh-governor(frame) = if eq(fgl-cycle?(frame, 4), 1) then host-exec("./fkwu observe/form-resource-governor-glass-current-run.fk", "") else "held";
-        def fgl-carrier-seam() = "controls=form-glassctl focus|inspect|request-evidence|abstain; input=line-commit sidecar";
+        def fgl-carrier-seam() = str_concat("controls=form-glassctl focus|inspect|request-evidence|abstain; input=line-commit sidecar; event-wait=", str_concat(FGELWaitDoor(), ":unavailable"));
         def fgl-v2-provenance(epoch, sequence) = fgov2-provenance("physical-live", "glass.monitor", fgov2-unavailable("process-lifetime-not-carried", "glass.monitor.process-lifetime"), fgov2-measured(sequence), fgov2-measured(epoch), "glass.live.current-process");
         def fgl-prefix?(text, prefix) = eq(str_find(text, prefix, 0), 0);
         def fgl-owner-heartbeat-for(samples, owner) = if eq(len(samples), 0) then list() else if and(str_eq(fgtm-sample-kind(head(samples)), "owner-heartbeat"), and(str_eq(fgtm-sample-owner(head(samples)), owner), and(eq(fgtm-field-present?(fgtm-sample-handle(head(samples))), 1), and(eq(fgtm-field-present?(fgtm-sample-write-epoch(head(samples))), 1), eq(fgtm-field-present?(fgtm-sample-read-epoch(head(samples))), 1))))) then head(samples) else fgl-owner-heartbeat-for(tail(samples), owner);
@@ -247,7 +272,10 @@ section [form.bml] {
         def fgl-v2-find(rows, id) = if eq(len(rows), 0) then list() else if str_eq(fgov2-observation-id(head(rows)), id) then head(rows) else fgl-v2-find(tail(rows), id);
         def fgl-v2-number-present(row) {
             let truth = fgov2-observation-measurement(row);
-            if eq(fgov2-measured?(truth), 1) then fgov2-truth-value(truth) else if eq(fgov2-stale?(truth), 1) then fgov2-truth-value(truth) else -1;
+            // A flow point is a current resource slice. Last-observed owner
+            // counters remain visible with their age in the observation view,
+            // but must not be renewed as a current idle/drained zero here.
+            if eq(fgov2-measured?(truth), 1) then fgov2-truth-value(truth) else -1;
         }
         def fgl-v2-number(rows, id) {
             let row = fgl-v2-find(rows, id);
@@ -257,9 +285,13 @@ section [form.bml] {
             let row = fgl-v2-find(rows, id);
             if eq(len(row), 0) then "unavailable" else if lt(fgl-v2-number-present(row), 0) then "unavailable" else fgov2-provenance-evidence(fgov2-observation-provenance(row));
         }
+        def fgl-v2-source(rows, id, door) {
+            let row = fgl-v2-find(rows, id);
+            if eq(len(row), 0) then door else if lt(fgl-v2-number-present(row), 0) then door else fgov2-provenance-source(fgov2-observation-provenance(row));
+        }
         def fgl-prefer-evidence(primaryValue, primaryEvidence, fallbackEvidence) = if ge(primaryValue, 0) then primaryEvidence else fallbackEvidence;
         def fgl-prefer-number(primary, fallback) = if ge(primary, 0) then primary else fallback;
-        def fgl-flow-point-current(epoch, metrics, observations) = fgd-flow-point(epoch, fgl-prefer-number(fgl-v2-number(observations, "metal.gpu.busy"), fgl-number-for(metrics, list("gpu-busy"))), fgl-prefer-number(fgl-v2-number(observations, "metal.cpu-jit.busy"), fgl-number-for(metrics, list("cpu-jit-busy"))), fgl-prefer-number(fgl-v2-number(observations, "metal.dispatch.total"), fgl-number-for(metrics, list("dispatch-total"))), fgl-prefer-number(fgl-v2-number(observations, "metal.pending"), fgl-number-for(metrics, list("queue-depth", "hopper", "pending"))), fgl-prefer-number(fgl-v2-number(observations, "jit.compile.dispatch"), fgl-number-for(metrics, list("jit-compile"))), fgl-prefer-number(fgl-v2-number(observations, "cells.interned.count"), fgl-number-for(metrics, list("cells"))), fgl-number-for(metrics, list("memory-free")), fgl-v2-number(observations, "metal.in-flight"));
+        def fgl-flow-point-current(epoch, metrics, observations) = fgd-flow-point(epoch, fgl-v2-number(observations, "gpu.owner.busy-us-total"), fgl-v2-number(observations, "jit.owner.metal-busy-us"), fgl-v2-number(observations, "metal.owner.dispatch-total"), fgl-number-for(metrics, list("queue-depth")), fgl-prefer-number(fgl-v2-number(observations, "jit.owner.compile-dispatch"), fgl-v2-number(observations, "jit.compile.dispatch")), fgl-v2-number(observations, "cells.interned.count"), fgl-number-for(metrics, list("memory-free")), fgl-v2-number(observations, "metal.owner.in-flight"));
 
         // Census only records visible to this Glass process. Aggregate count
         // movement is shown per phase; it is never promoted to per-node cause.
@@ -274,34 +306,81 @@ section [form.bml] {
         def fgl-phase-count(metrics, samples, observations, phase) = add(fgl-phase-metric-count(metrics, phase), add(fgl-phase-sample-count(samples, phase), fgl-phase-observation-count(observations, phase)));
         def fgl-sample-kind-capacity(rows, kind, found, total) = if eq(len(rows), 0) then if eq(found, 1) then total else -1 else if and(str_eq(fgtm-sample-kind(head(rows)), kind), eq(fgtm-field-present?(fgtm-sample-capacity(head(rows))), 1)) then fgl-sample-kind-capacity(tail(rows), kind, 1, add(total, fgtm-field-value(fgtm-sample-capacity(head(rows))))) else fgl-sample-kind-capacity(tail(rows), kind, found, total);
         def fgl-sample-channel-tag-memberships(rows) = if eq(len(rows), 0) then 0 else add(len(fgtm-sample-channels(head(rows))), fgl-sample-channel-tag-memberships(tail(rows)));
+        // A fault key is an opaque, bounded Form NodeID projection. Select the
+        // typed producer contract rather than coupling Glass control to one
+        // textual packing, so a representation improvement cannot hide P1000.
+        def fgl-jit-fault-candidate?(sample) = if not(str_eq(fgtm-sample-kind(sample), "diagnostic-control")) then 0 else if not(str_eq(fgtm-sample-owner(sample), FGLJitPublisher())) then 0 else if not(str_eq(fgtm-sample-source(sample), "bml-demand-jit")) then 0 else if not(str_eq(fgtm-sample-evidence(sample), "physical-live")) then 0 else if not(str_eq(fgtm-sample-lifecycle(sample), "failed")) then 0 else if not(eq(fgtm-field-present?(fgtm-sample-capacity(sample)), 1)) then 0 else if not(eq(fgtm-field-present?(fgtm-sample-read-epoch(sample)), 1)) then 0 else if not(eq(fgtm-field-present?(fgtm-sample-write-epoch(sample)), 1)) then 0 else fgd-has-channel(fgtm-sample-channels(sample), "jit");
+        def fgl-jit-fault-newer(a, b) = if eq(len(a), 0) then b else if gt(fgd-sample-latest(b), fgd-sample-latest(a)) then b else a;
+        def fgl-jit-fault-sample(rows, held) = if eq(len(rows), 0) then held else if eq(fgl-jit-fault-candidate?(head(rows)), 1) then fgl-jit-fault-sample(tail(rows), fgl-jit-fault-newer(held, head(rows))) else fgl-jit-fault-sample(tail(rows), held);
+        def fgl-jit-fault(rows) {
+            let sample = fgl-jit-fault-sample(rows, list());
+            if eq(len(sample), 0) then list() else list(fgtm-sample-id(sample), fgtm-sample-kind(sample), fgtm-sample-purpose(sample), fgd-sample-latest(sample), fgtm-sample-evidence(sample), fgtm-sample-evictability(sample), fgtm-sample-source(sample), fgtm-field-value(fgtm-sample-capacity(sample)));
+        }
+        def fgl-jit-healed-candidate?(sample) = if not(str_eq(fgtm-sample-id(sample), FGLJitHealedId())) then 0 else if not(str_eq(fgtm-sample-kind(sample), "jit-healed")) then 0 else if not(str_eq(fgtm-sample-owner(sample), FGLJitPublisher())) then 0 else if not(str_eq(fgtm-sample-evidence(sample), "physical-live")) then 0 else if not(str_eq(fgtm-sample-lifecycle(sample), "ready")) then 0 else if not(eq(fgtm-field-present?(fgtm-sample-parent(sample)), 1)) then 0 else if not(eq(fgtm-field-present?(fgtm-sample-capacity(sample)), 1)) then 0 else if not(eq(fgtm-field-present?(fgtm-sample-read-epoch(sample)), 1)) then 0 else eq(fgtm-field-present?(fgtm-sample-write-epoch(sample)), 1);
+        def fgl-jit-healed-matches?(fault, healed) = if not(eq(fgl-jit-fault-candidate?(fault), 1)) then 0 else if not(eq(fgl-jit-healed-candidate?(healed), 1)) then 0 else if not(str_eq(fgtm-field-value(fgtm-sample-parent(healed)), fgtm-sample-id(fault))) then 0 else if not(str_eq(fgtm-sample-purpose(healed), fgtm-sample-purpose(fault))) then 0 else if not(eq(fgtm-field-value(fgtm-sample-capacity(healed)), fgtm-field-value(fgtm-sample-capacity(fault)))) then 0 else if not(eq(fgtm-field-value(fgtm-sample-read-epoch(healed)), fgtm-field-value(fgtm-sample-read-epoch(fault)))) then 0 else gt(fgtm-field-value(fgtm-sample-write-epoch(healed)), fgtm-field-value(fgtm-sample-write-epoch(fault)));
+        def fgl-jit-healed-for(rows, fault) = if eq(len(rows), 0) then list() else if eq(fgl-jit-healed-matches?(fault, head(rows)), 1) then head(rows) else fgl-jit-healed-for(tail(rows), fault);
+        def fgl-jit-hold-assess(rows, fault) = if gt(len(fgl-jit-healed-for(rows, fault)), 0) then "healed-cause-bound" else "held-awaiting-successful-rechallenge";
+        def fgl-jit-fault-wake(fault) = fgel-wake("jit-refusal", fgtm-field-value(fgtm-sample-read-epoch(fault)), FGLJitPublisher(), fgtm-sample-id(fault));
+        def fgl-jit-healed-wake(healed) = fgel-wake("jit-healed", fgtm-field-value(fgtm-sample-write-epoch(healed)), FGLJitPublisher(), fgtm-field-value(fgtm-sample-parent(healed)));
         def fgl-flow-point-current-full(epoch, metrics, observations, samples) {
             let base = fgl-flow-point-current(epoch, metrics, observations);
-            let gpuObservation = fgl-v2-number(observations, "metal.gpu.busy");
-            let cpuObservation = fgl-v2-number(observations, "metal.cpu-jit.busy");
-            let dispatchObservation = fgl-v2-number(observations, "metal.dispatch.total");
-            let queueObservation = fgl-v2-number(observations, "metal.pending");
-            let jitObservation = fgl-v2-number(observations, "jit.compile.dispatch");
+            let gpuObservation = fgl-v2-number(observations, "gpu.owner.busy-us-total");
+            let cpuObservation = fgl-v2-number(observations, "jit.owner.metal-busy-us");
+            let dispatchObservation = fgl-v2-number(observations, "metal.owner.dispatch-total");
+            let queueObservation = fgl-number-for(metrics, list("queue-depth"));
+            let jitObservation = fgl-prefer-number(fgl-v2-number(observations, "jit.owner.compile-dispatch"), fgl-v2-number(observations, "jit.compile.dispatch"));
             let nodeObservation = fgl-v2-number(observations, "cells.interned.count");
             let tensorObservation = fgl-v2-number(observations, "tensor.owner.allocated");
             let evidences = list(
-                fgl-prefer-evidence(gpuObservation, fgl-v2-evidence(observations, "metal.gpu.busy"), fgl-evidence-for(metrics, list("gpu-busy"))),
-                fgl-prefer-evidence(cpuObservation, fgl-v2-evidence(observations, "metal.cpu-jit.busy"), fgl-evidence-for(metrics, list("cpu-jit-busy"))),
-                fgl-prefer-evidence(dispatchObservation, fgl-v2-evidence(observations, "metal.dispatch.total"), fgl-evidence-for(metrics, list("dispatch-total"))),
-                fgl-prefer-evidence(queueObservation, fgl-v2-evidence(observations, "metal.pending"), fgl-evidence-for(metrics, list("queue-depth", "hopper", "pending"))),
-                fgl-prefer-evidence(jitObservation, fgl-v2-evidence(observations, "jit.compile.dispatch"), fgl-evidence-for(metrics, list("jit-compile"))),
+                fgl-v2-evidence(observations, "gpu.owner.busy-us-total"),
+                fgl-v2-evidence(observations, "jit.owner.metal-busy-us"),
+                fgl-v2-evidence(observations, "metal.owner.dispatch-total"),
+                fgl-evidence-for(metrics, list("queue-depth")),
+                if ge(fgl-v2-number(observations, "jit.owner.compile-dispatch"), 0) then fgl-v2-evidence(observations, "jit.owner.compile-dispatch") else fgl-v2-evidence(observations, "jit.compile.dispatch"),
                 fgl-prefer-evidence(nodeObservation, fgl-v2-evidence(observations, "cells.interned.count"), fgl-evidence-for(metrics, list("cells"))),
                 fgl-evidence-for(metrics, list("memory-free")),
                 fgl-v2-evidence(observations, "metal.in-flight"),
                 "derived-window", "derived-window", "derived-window", "derived-window",
                 fgl-v2-evidence(observations, "tensor.owner.allocated"),
                 "derived-window", fgl-evidence-for(metrics, list("accepted")));
-            append(fgd-flow-point-v3(epoch, fgd-flow-value(base, 2), fgd-flow-value(base, 3), fgd-flow-value(base, 4), fgd-flow-value(base, 5), fgd-flow-value(base, 6), fgd-flow-value(base, 7), fgd-flow-value(base, 8), fgd-flow-value(base, 9), fgl-phase-count(metrics, samples, observations, "gas"), fgl-phase-count(metrics, samples, observations, "water"), fgl-phase-count(metrics, samples, observations, "ice"), fgl-sample-kind-capacity(samples, "token-position", 0, 0), tensorObservation, fgl-sample-channel-tag-memberships(samples), fgl-number-for(metrics, list("accepted")), evidences), list(fgl-number-for(metrics, list("strings"))));
+            let sources = list(
+                fgl-v2-source(observations, "gpu.owner.busy-us-total", "model.owner.metal_status.gpu_busy_us_total"),
+                fgl-v2-source(observations, "jit.owner.metal-busy-us", "model.owner.metal_status.cpu_jit_busy_us_total"),
+                fgl-v2-source(observations, "metal.owner.dispatch-total", "model.owner.metal_status.total_dispatch"),
+                fgl-source-for(metrics, list("queue-depth"), "hearth.request-queue-depth"),
+                if ge(fgl-v2-number(observations, "jit.owner.compile-dispatch"), 0) then fgl-v2-source(observations, "jit.owner.compile-dispatch", "model.owner.jit.compile_dispatch") else fgl-v2-source(observations, "jit.compile.dispatch", "glass.monitor.jit.compile_dispatch"),
+                fgl-v2-source(observations, "cells.interned.count", "glass.monitor.kernel_stat.cells"),
+                fgl-source-for(metrics, list("memory-free"), "host.memory.available"),
+                fgl-v2-source(observations, "metal.owner.in-flight", "model.owner.metal_status.in_flight"),
+                "glass.visible.phase-census", "glass.visible.phase-census", "glass.visible.phase-census", "telemetry.token-position.capacity", "model.owner.tensor.allocated", "telemetry.channel-memberships", "framebuffer.accepted-total");
+            let point = fgd-flow-point-v4(epoch, fgd-flow-value(base, 2), fgd-flow-value(base, 3), fgd-flow-value(base, 4), fgd-flow-value(base, 5), fgd-flow-value(base, 6), fgd-flow-value(base, 7), fgd-flow-value(base, 8), fgd-flow-value(base, 9), fgl-phase-count(metrics, samples, observations, "gas"), fgl-phase-count(metrics, samples, observations, "water"), fgl-phase-count(metrics, samples, observations, "ice"), fgl-sample-kind-capacity(samples, "token-position", 0, 0), tensorObservation, fgl-sample-channel-tag-memberships(samples), fgl-number-for(metrics, list("accepted")), evidences, sources);
+            append(take(18, point), list(fgl-number-for(metrics, list("strings")), sources, fgl-jit-fault(samples)));
         }
 
         def fgl-monitor-sample(epoch) = fgtm-sample("process.form-glass" , fgtm-absent(), "organ", "form", "glass.monitor", "observation", "render-and-control", fgtm-absent(), fgtm-absent(), "active", fgtm-present(epoch), fgtm-present(epoch), fgtm-present(1000), fgtm-absent(), "unknown", "physical-live", "glass.monitor", list("all", "health", "primitive", "membrane"));
         def fgl-find-sample(samples, id) = if eq(len(samples), 0) then list() else if str_eq(fgtm-sample-id(head(samples)), id) then head(samples) else fgl-find-sample(tail(samples), id);
         def fgl-route-ready?(fact) = if not(eq(nmrr-fact-valid?(fact), 1)) then 0 else if not(eq(nmrr-fact-present?(fact), 1)) then 0 else eq(nmrr-fact-value(fact), 1);
-        def fgl-derived-ledger-sample(id, parent, owner, kind, purpose, bytes, handles, epoch, source, channels) = fgtm-sample(id, fgtm-present(parent), kind, "unified", owner, "memory", purpose, if ge(bytes, 0) then fgtm-present(bytes) else fgtm-absent(), fgtm-present(handles), "resident", fgtm-present(epoch), fgtm-absent(), fgtm-absent(), fgtm-absent(), "pressure-only", "derived-window", source, append(channels, list("node-id-unbound")));
+        def fgl-ledger-sample(id, parent, owner, kind, plane, purpose, bytes, handles, lifecycle, epoch, evidence, source, channels) = fgtm-sample(id, fgtm-present(parent), kind, plane, owner, "memory", purpose, if ge(bytes, 0) then fgtm-present(bytes) else fgtm-absent(), if ge(handles, 0) then fgtm-present(handles) else fgtm-absent(), lifecycle, fgtm-present(epoch), fgtm-absent(), fgtm-absent(), fgtm-absent(), "pressure-only", evidence, source, append(channels, list("node-id-unbound")));
+        def fgl-sample-bytes-number(sample) = if eq(len(sample), 0) then -1 else if eq(fgtm-field-present?(fgtm-sample-bytes(sample)), 1) then fgtm-field-value(fgtm-sample-bytes(sample)) else -1;
+        def fgl-sample-capacity-number(sample) = if eq(len(sample), 0) then -1 else if eq(fgtm-field-present?(fgtm-sample-capacity(sample)), 1) then fgtm-field-value(fgtm-sample-capacity(sample)) else -1;
+        def fgl-owner-counter-number(samples, id) = fgl-sample-capacity-number(fgl-find-sample(samples, id));
+        def fgl-sample-handle-number(sample) = if eq(len(sample), 0) then -1 else if eq(fgtm-field-present?(fgtm-sample-handle(sample)), 1) then fgtm-field-value(fgtm-sample-handle(sample)) else -1;
+        def fgl-find-owner-kind-sample(samples, owner, kind) = if eq(len(samples), 0) then list() else if and(str_eq(fgtm-sample-owner(head(samples)), owner), str_eq(fgtm-sample-kind(head(samples)), kind)) then head(samples) else fgl-find-owner-kind-sample(tail(samples), owner, kind);
+        def fgl-owner-observed-epoch(samples, owner, fallback) {
+            let heartbeat = fgl-find-owner-kind-sample(samples, owner, "owner-heartbeat");
+            if eq(len(heartbeat), 0) then fallback else if eq(fgtm-field-present?(fgtm-sample-read-epoch(heartbeat)), 1) then fgtm-field-value(fgtm-sample-read-epoch(heartbeat)) else fallback;
+        }
+        def fgl-artifact-identities-present?(samples, identities) = if eq(len(identities), 0) then 1 else if eq(len(fgl-find-sample(samples, nmtl-artifact-identity-id(head(identities)))), 0) then 0 else fgl-artifact-identities-present?(samples, tail(identities));
+        def fgl-artifact-sample-matches?(sample, identity, parent, owner, handle) = if eq(len(sample), 0) then 0 else if not(eq(fgtm-sample-valid?(sample), 1)) then 0 else if not(str_eq(fgtm-sample-id(sample), nmtl-artifact-identity-id(identity))) then 0 else if not(eq(fgtm-field-present?(fgtm-sample-parent(sample)), 1)) then 0 else if not(str_eq(fgtm-field-value(fgtm-sample-parent(sample)), parent)) then 0 else if not(str_eq(fgtm-sample-owner(sample), owner)) then 0 else if not(str_eq(fgtm-sample-kind(sample), "artifact-open-stat")) then 0 else if not(str_eq(fgtm-sample-plane(sample), "disk")) then 0 else if not(str_eq(fgtm-sample-purpose(sample), "open-time-file-stat")) then 0 else if not(str_eq(fgtm-sample-lifecycle(sample), "mapped")) then 0 else if not(str_eq(fgtm-sample-evidence(sample), "physical-live")) then 0 else if not(eq(fgl-sample-bytes-number(sample), nmtl-artifact-identity-bytes(identity))) then 0 else if not(eq(fgl-sample-capacity-number(sample), nmtl-artifact-identity-modified(identity))) then 0 else eq(fgl-sample-handle-number(sample), handle);
+        def fgl-artifact-identities-match?(samples, identities, parent, owner, handle) = if eq(len(identities), 0) then 1 else if not(eq(fgl-artifact-sample-matches?(fgl-find-sample(samples, nmtl-artifact-identity-id(head(identities))), head(identities), parent, owner, handle), 1)) then 0 else fgl-artifact-identities-match?(samples, tail(identities), parent, owner, handle);
+        def fgl-profile-open-artifacts-match?(samples, profile, owner, handle) = if le(handle, 0) then 0 else fgl-artifact-identities-match?(samples, nmtl-layout-profile-artifact(profile), nmtl-layout-profile-id(profile), owner, handle);
+        def fgl-artifact-strong-identities-present?(samples, identities) = if eq(len(identities), 0) then 1 else if eq(len(fgl-find-sample(samples, nmdt-open-artifact-identity-id(nmtl-artifact-identity-id(head(identities))))), 0) then 0 else fgl-artifact-strong-identities-present?(samples, tail(identities));
+        def fgl-artifact-strong-sample-matches?(statSample, identitySample, identity, owner, handle) = if eq(len(identitySample), 0) then 0 else if not(eq(fgtm-sample-valid?(identitySample), 1)) then 0 else if not(eq(fgtm-sample-valid?(statSample), 1)) then 0 else if not(str_eq(fgtm-sample-id(identitySample), nmdt-open-artifact-identity-id(nmtl-artifact-identity-id(identity)))) then 0 else if not(eq(fgtm-field-present?(fgtm-sample-parent(identitySample)), 1)) then 0 else if not(str_eq(fgtm-field-value(fgtm-sample-parent(identitySample)), nmtl-artifact-identity-id(identity))) then 0 else if not(str_eq(fgtm-sample-owner(identitySample), owner)) then 0 else if not(str_eq(nmdt-open-artifact-identity-strength(identitySample), nmtl-artifact-identity-strength(identity))) then 0 else if not(str_eq(nmdt-open-artifact-identity-value(identitySample), nmtl-artifact-identity-locator(identity))) then 0 else if not(str_eq(fgtm-sample-plane(identitySample), "disk")) then 0 else if not(str_eq(fgtm-sample-lifecycle(identitySample), "mapped")) then 0 else if not(str_eq(fgtm-sample-evidence(identitySample), "physical-live")) then 0 else if not(eq(fgl-sample-handle-number(identitySample), handle)) then 0 else if not(eq(fgtm-field-present?(fgtm-sample-read-epoch(identitySample)), 1)) then 0 else if not(eq(fgtm-field-present?(fgtm-sample-read-epoch(statSample)), 1)) then 0 else eq(fgtm-field-value(fgtm-sample-read-epoch(identitySample)), fgtm-field-value(fgtm-sample-read-epoch(statSample)));
+        def fgl-artifact-strong-identities-match?(samples, identities, owner, handle) = if eq(len(identities), 0) then 1 else if not(eq(fgl-artifact-strong-sample-matches?(fgl-find-sample(samples, nmtl-artifact-identity-id(head(identities))), fgl-find-sample(samples, nmdt-open-artifact-identity-id(nmtl-artifact-identity-id(head(identities)))), head(identities), owner, handle), 1)) then 0 else fgl-artifact-strong-identities-match?(samples, tail(identities), owner, handle);
+        def fgl-profile-open-artifacts-strong-match?(samples, profile, owner, handle) = if le(handle, 0) then 0 else fgl-artifact-strong-identities-match?(samples, nmtl-layout-profile-artifact(profile), owner, handle);
+        def fgl-ledger-gap-sample(id, parent, owner, purpose, epoch, door, channels) = fgtm-sample(id, fgtm-present(parent), "tensor-reconciliation", "unified", owner, "memory", purpose, fgtm-absent(), fgtm-absent(), "failed", fgtm-present(epoch), fgtm-absent(), fgtm-absent(), fgtm-absent(), "never", "declared", door, append(channels, list("node-id-unbound")));
+        def fgl-ledger-reconciliation-sample(id, parent, owner, plane, expected, observed, epoch, source, channels) = if lt(observed, 0) then fgl-ledger-gap-sample(id, parent, owner, "carrier-count-not-published", epoch, source, channels) else fgtm-sample(id, fgtm-present(parent), "tensor-reconciliation", plane, owner, "memory", if eq(expected, observed) then "reconciled" else "count-mismatch", fgtm-absent(), fgtm-present(observed), if eq(expected, observed) then "ready" else "failed", fgtm-present(epoch), fgtm-absent(), fgtm-absent(), fgtm-absent(), "never", "derived-window", source, append(channels, list("node-id-unbound")));
+        def fgl-owner-mlx-model-path-sample(owner, epoch) = fgtm-sample("mlx.owner.model-path", fgtm-absent(), "execution-path", "mlx", owner, "reasoning", "not-on-owner-model-path", fgtm-absent(), fgtm-absent(), "idle", fgtm-present(epoch), fgtm-absent(), fgtm-absent(), fgtm-absent(), "never", "derived-window", "native-model-owner-metal-path", list("process", "model", "mlx", "metal", "gpu", "health", "node-id-unbound"));
         // This observer does not reopen either model.  It joins the exact live
         // owner PID/start/handles with the one allocation-size authority used
         // by the model constructors.  The result is a current derived extent,
@@ -310,26 +389,77 @@ section [form.bml] {
             let qfact = nmrr-model-route-from-current-samples(externalSamples, epoch, FGLQwenRouteId());
             let tfact = nmrr-model-route-from-current-samples(externalSamples, epoch, FGLThreeBRouteId());
             let qmodel = fgl-find-sample(externalSamples, FGLQwenRouteId());
-            if not(and(eq(fgl-route-ready?(qfact), 1), eq(fgl-route-ready?(tfact), 1))) then list() else if eq(len(qmodel), 0) then list() else fgl-owner-derived-ledger-present(fgtm-sample-owner(qmodel), epoch);
+            let owner = if eq(len(qmodel), 0) then "models" else fgtm-sample-owner(qmodel);
+            let physicalLedger = fgl-find-sample(externalSamples, "tensor.owner.ledger");
+            if not(and(eq(fgl-route-ready?(qfact), 1), eq(fgl-route-ready?(tfact), 1))) then list() else if eq(len(qmodel), 0) then list() else if gt(len(physicalLedger), 0) then list(fgl-owner-mlx-model-path-sample(owner, fgl-owner-observed-epoch(externalSamples, owner, epoch))) else fgl-owner-derived-ledger-present(externalSamples, owner, epoch);
         }
-        def fgl-owner-derived-ledger-present(owner, epoch) {
+        def fgl-owner-derived-ledger-present(externalSamples, owner, epoch) {
+            let qprofile = nmtl-qwen-layout-profile();
+            let tprofile = nmtl-llama-layout-profile();
+            fgl-owner-derived-ledger-profiles(externalSamples, owner, epoch, qprofile, tprofile);
+        }
+        def fgl-owner-derived-ledger-profiles(externalSamples, owner, epoch, qprofile, tprofile) {
+            let qmodel = fgl-find-sample(externalSamples, FGLQwenRouteId());
+            let tmodel = fgl-find-sample(externalSamples, FGLThreeBRouteId());
+            let qcatalog = fgl-sample-bytes-number(fgl-find-sample(externalSamples, FGLQwenWeightId()));
+            let tcatalog = fgl-sample-bytes-number(fgl-find-sample(externalSamples, FGLThreeBWeightId()));
+            let ownerEpoch = fgl-owner-observed-epoch(externalSamples, owner, epoch);
+            let qidentities = nmtl-layout-profile-artifact(qprofile);
+            let tidentities = nmtl-layout-profile-artifact(tprofile);
+            let identitiesPresent = and(fgl-artifact-identities-present?(externalSamples, qidentities), fgl-artifact-identities-present?(externalSamples, tidentities));
+            let identitiesMatch = and(fgl-profile-open-artifacts-match?(externalSamples, qprofile, owner, fgl-sample-handle-number(qmodel)), fgl-profile-open-artifacts-match?(externalSamples, tprofile, owner, fgl-sample-handle-number(tmodel)));
+            let strongProfiles = and(eq(nmtl-artifact-identities-content-bound?(qidentities), 1), eq(nmtl-artifact-identities-content-bound?(tidentities), 1));
+            let strongIdentitiesPresent = and(fgl-artifact-strong-identities-present?(externalSamples, qidentities), fgl-artifact-strong-identities-present?(externalSamples, tidentities));
+            let strongIdentitiesMatch = and(fgl-profile-open-artifacts-strong-match?(externalSamples, qprofile, owner, fgl-sample-handle-number(qmodel)), fgl-profile-open-artifacts-strong-match?(externalSamples, tprofile, owner, fgl-sample-handle-number(tmodel)));
+            if not(and(eq(nmtl-layout-profile-matches-catalog?(qprofile, qcatalog), 1), eq(nmtl-layout-profile-matches-catalog?(tprofile, tcatalog), 1))) then list(
+                fgl-ledger-gap-sample("tensor.owner.profile-refresh", "models", owner, "artifact-catalog-profile-mismatch", ownerEpoch, "model.tensor-layout-profile-refresh", list("process", "model", "memory", "tensor", "health")),
+                fgl-owner-mlx-model-path-sample(owner, ownerEpoch)) else if not(eq(identitiesPresent, 1)) then list(
+                    fgl-ledger-gap-sample("tensor.owner.artifact-join", "models", owner, "open-time-artifact-identity-not-published", ownerEpoch, "model.owner.open-artifact-identity", list("process", "model", "memory", "tensor", "health")),
+                    fgl-owner-mlx-model-path-sample(owner, ownerEpoch)) else if not(eq(identitiesMatch, 1)) then list(
+                        fgl-ledger-gap-sample("tensor.owner.artifact-join", "models", owner, "open-time-artifact-identity-mismatch", ownerEpoch, "model.owner.open-artifact-identity-match", list("process", "model", "memory", "tensor", "health")),
+                        fgl-owner-mlx-model-path-sample(owner, ownerEpoch)) else if not(eq(strongProfiles, 1)) then list(
+                            fgl-ledger-gap-sample("tensor.owner.artifact-join", "models", owner, "open-time-content-identity-not-published", ownerEpoch, "model.owner.open-artifact-content-identity", list("process", "model", "memory", "tensor", "health")),
+                            fgl-owner-mlx-model-path-sample(owner, ownerEpoch)) else if not(eq(strongIdentitiesPresent, 1)) then list(
+                                fgl-ledger-gap-sample("tensor.owner.artifact-join", "models", owner, "open-time-content-identity-not-published", ownerEpoch, "model.owner.open-artifact-content-identity", list("process", "model", "memory", "tensor", "health")),
+                                fgl-owner-mlx-model-path-sample(owner, ownerEpoch)) else if not(eq(strongIdentitiesMatch, 1)) then list(
+                                    fgl-ledger-gap-sample("tensor.owner.artifact-join", "models", owner, "open-time-content-identity-mismatch", ownerEpoch, "model.owner.open-artifact-content-identity-match", list("process", "model", "memory", "tensor", "health")),
+                                    fgl-owner-mlx-model-path-sample(owner, ownerEpoch)) else fgl-owner-derived-ledger-profile(externalSamples, owner, ownerEpoch, qprofile, tprofile);
+        }
+        def fgl-owner-derived-ledger-profile(externalSamples, owner, epoch, qprofile, tprofile) {
             let qscratch = nmtl-sum(nmtl-qwen-scratch-sizes(128));
             let qstateSizes = nmtl-qwen-all-state-sizes(0, 48, 4, 128);
             let qstate = nmtl-sum(qstateSizes);
             let tscratch = nmtl-sum(nmtl-llama-scratch-sizes(3072, 8192, 128256, 24, 128));
-            let tcacheOne = nmtl-llama-cache-bytes(1024, 128);
-            let tcache = mul(tcacheOne, 56);
-            let qallocated = add(qscratch, qstate);
-            let tallocated = add(tscratch, tcache);
+            let tcache = mul(nmtl-llama-cache-bytes(1024, 128), 56);
+            let profiles = list(qprofile, tprofile);
+            let qm = nmtl-layout-profile-mapped-bytes(qprofile);
+            let qmh = nmtl-layout-profile-mapped-handles(qprofile);
+            let qa = nmtl-layout-profile-allocated-bytes(qprofile);
+            let qah = nmtl-layout-profile-allocated-handles(qprofile);
+            let tm = nmtl-layout-profile-mapped-bytes(tprofile);
+            let tmh = nmtl-layout-profile-mapped-handles(tprofile);
+            let ta = nmtl-layout-profile-allocated-bytes(tprofile);
+            let tah = nmtl-layout-profile-allocated-handles(tprofile);
+            let mappedHandles = nmtl-profiles-mapped-handles(profiles);
+            let allocatedHandles = nmtl-profiles-allocated-handles(profiles);
+            let observedMapped = fgl-owner-counter-number(externalSamples, "mapping.owner.mmap-buffer-handles");
+            let observedBuffers = fgl-owner-counter-number(externalSamples, "metal.owner.buffers");
+            let mappedEpoch = if le(nmtl-layout-profile-witnessed(qprofile), nmtl-layout-profile-witnessed(tprofile)) then nmtl-layout-profile-witnessed(qprofile) else nmtl-layout-profile-witnessed(tprofile);
             list(
-                fgl-derived-ledger-sample("tensor.qwen38.mapped", FGLQwenRouteId(), owner, "mapped-tensors", "mmap-no-copy-tensor-handles", -1, 1224, epoch, "owner-live-layout-ledger", list("model", "memory", "tensor", "metal", "gpu", "layer")),
-                fgl-derived-ledger-sample("tensor.qwen38.scratch", FGLQwenRouteId(), owner, "allocated-tensors", "scratch-buffer-byte-extents", qscratch, 49, epoch, "native-model-tensor-ledger", list("model", "memory", "tensor", "metal", "gpu", "scratch")),
-                fgl-derived-ledger-sample("tensor.qwen38.state", FGLQwenRouteId(), owner, "allocated-state", "recurrent-and-kv-byte-extents", qstate, len(qstateSizes), epoch, "native-model-tensor-ledger", list("model", "memory", "tensor", "metal", "gpu", "substate", "layer")),
-                fgl-derived-ledger-sample("tensor.llama32-3b.mapped", FGLThreeBRouteId(), owner, "mapped-tensors", "mmap-no-copy-tensor-handles", -1, 256, epoch, "owner-live-layout-ledger", list("model", "memory", "tensor", "metal", "gpu", "layer")),
-                fgl-derived-ledger-sample("tensor.llama32-3b.scratch", FGLThreeBRouteId(), owner, "allocated-tensors", "scratch-buffer-byte-extents", tscratch, 17, epoch, "native-model-tensor-ledger", list("model", "memory", "tensor", "metal", "gpu", "scratch")),
-                fgl-derived-ledger-sample("tensor.llama32-3b.kv", FGLThreeBRouteId(), owner, "allocated-state", "kv-cache-byte-extents", tcache, 56, epoch, "native-model-tensor-ledger", list("model", "memory", "tensor", "metal", "gpu", "substate", "layer")),
-                fgl-derived-ledger-sample("tensor.owner.allocated", "models", owner, "tensor-ledger", "allocated-scratch-state-kv-byte-extents", add(qallocated, tallocated), 218, epoch, "native-model-tensor-ledger", list("model", "memory", "tensor", "metal", "gpu", "health")),
-                fgl-derived-ledger-sample("tensor.owner.buffers-expected", "models", owner, "tensor-reconciliation", "mapped-plus-allocated-handle-count", -1, 1698, epoch, "owner-live-layout-ledger", list("model", "memory", "tensor", "metal", "gpu", "health")));
+                fgl-ledger-sample("tensor.qwen38.mapped", FGLQwenRouteId(), owner, "mapped-tensors", "disk", "gguf-record-mapped-extents", qm, qmh, "mapped", nmtl-layout-profile-witnessed(qprofile), "derived-window", "native-model-mapped-layout-run", list("model", "memory", "tensor", "metal", "gpu", "layer")),
+                fgl-ledger-sample("tensor.qwen38.scratch", FGLQwenRouteId(), owner, "allocated-tensors", "unified", "reusable-scratch-buffer-extents", qscratch, 49, "resident", epoch, "derived-window", "native-model-tensor-ledger", list("model", "memory", "tensor", "metal", "gpu", "scratch")),
+                fgl-ledger-sample("tensor.qwen38.state", FGLQwenRouteId(), owner, "allocated-state", "unified", "recurrent-and-kv-buffer-extents", qstate, len(qstateSizes), "resident", epoch, "derived-window", "native-model-tensor-ledger", list("model", "memory", "tensor", "metal", "gpu", "substate", "layer")),
+                fgl-ledger-sample("tensor.qwen38.allocated", FGLQwenRouteId(), owner, "model-allocation", "unified", "reusable-scratch-and-state", qa, qah, "resident", epoch, "derived-window", "native-model-tensor-ledger", list("model", "memory", "tensor", "metal", "gpu", "health")),
+                fgl-ledger-sample("tensor.llama32-3b.mapped", FGLThreeBRouteId(), owner, "mapped-tensors", "disk", "gguf-record-mapped-extents", tm, tmh, "mapped", nmtl-layout-profile-witnessed(tprofile), "derived-window", "native-model-mapped-layout-run", list("model", "memory", "tensor", "metal", "gpu", "layer")),
+                fgl-ledger-sample("tensor.llama32-3b.scratch", FGLThreeBRouteId(), owner, "allocated-tensors", "unified", "reusable-scratch-buffer-extents", tscratch, 17, "resident", epoch, "derived-window", "native-model-tensor-ledger", list("model", "memory", "tensor", "metal", "gpu", "scratch")),
+                fgl-ledger-sample("tensor.llama32-3b.kv", FGLThreeBRouteId(), owner, "allocated-state", "unified", "kv-cache-buffer-extents", tcache, 56, "resident", epoch, "derived-window", "native-model-tensor-ledger", list("model", "memory", "tensor", "metal", "gpu", "substate", "layer")),
+                fgl-ledger-sample("tensor.llama32-3b.allocated", FGLThreeBRouteId(), owner, "model-allocation", "unified", "reusable-scratch-and-kv", ta, tah, "resident", epoch, "derived-window", "native-model-tensor-ledger", list("model", "memory", "tensor", "metal", "gpu", "health")),
+                fgl-ledger-sample("tensor.owner.mapped", "models", owner, "tensor-ledger", "disk", "gguf-record-mapped-extents", nmtl-profiles-mapped-bytes(profiles), mappedHandles, "mapped", mappedEpoch, "derived-window", "native-model-mapped-layout-run", list("process", "model", "memory", "tensor", "metal", "gpu", "health")),
+                fgl-ledger-sample("tensor.owner.allocated", "models", owner, "tensor-ledger", "unified", "reusable-scratch-state-kv-extents", nmtl-profiles-allocated-bytes(profiles), allocatedHandles, "resident", epoch, "derived-window", "native-model-tensor-ledger", list("process", "model", "memory", "tensor", "metal", "gpu", "health")),
+                fgl-ledger-sample("tensor.owner.ledger", "models", owner, "tensor-ledger", "unified", "all-buffer-handle-count", -1, add(mappedHandles, allocatedHandles), "resident", epoch, "derived-window", "native-model-tensor-ledger", list("process", "model", "memory", "tensor", "metal", "gpu", "health")),
+                fgl-ledger-reconciliation-sample("tensor.owner.mapped-reconciliation", "tensor.owner.mapped", owner, "disk", mappedHandles, observedMapped, epoch, "metal_status.mmap_nocopy_buffers", list("process", "model", "memory", "tensor", "metal", "gpu", "health")),
+                fgl-ledger-reconciliation-sample("tensor.owner.buffer-reconciliation", "tensor.owner.ledger", owner, "unified", add(mappedHandles, allocatedHandles), observedBuffers, epoch, "owner.snapshot.metal_status.buffers", list("process", "model", "memory", "tensor", "metal", "gpu", "health")),
+                fgl-owner-mlx-model-path-sample(owner, epoch));
         }
         def fgl-projection-sample?(sample) = if str_eq(fgtm-sample-source(sample), "glass.projection") then 1 else if str_eq(fgtm-sample-source(sample), "glass.projection-stale") then 1 else 0;
         def fgl-external-sample?(sample) = if str_eq(fgtm-sample-id(sample), "process.form-glass") then 0 else if str_eq(fgtm-sample-owner(sample), FGLPublisher()) then 0 else if eq(fgl-projection-sample?(sample), 1) then 0 else 1;
@@ -337,12 +467,13 @@ section [form.bml] {
         def fgl-external-publishers(publishers) = if eq(len(publishers), 0) then list() else if str_eq(head(publishers), FGLPublisher()) then fgl-external-publishers(tail(publishers)) else cons(head(publishers), fgl-external-publishers(tail(publishers)));
         def fgl-local-samples(externalSamples, epoch) = cons(fgl-monitor-sample(epoch), append(fgl-owner-derived-ledger-samples(externalSamples, epoch), externalSamples));
         def fgl-route-metric-id(fact) = str_concat("route.", nmrr-fact-id(fact));
-        def fgl-route-row(fact, label) = if eq(nmrr-fact-present?(fact), 1) then fgo-sized("model", fgl-route-metric-id(fact), label, nmrr-fact-value(fact), "ready", 1, mul(nmrr-fact-value(fact), 1000), "metal", "physical-live", "native-model.route-readiness", if eq(nmrr-fact-value(fact), 1) then "ready" else "idle", "query-lane", nmrr-fact-reason(fact)) else fgo-unavailable("model", fgl-route-metric-id(fact), label, "ready", "metal", nmrr-fact-missing-door(fact), "query-lane", nmrr-fact-reason(fact));
-        def fgl-model-route-rows(samples, epoch) {
+        def fgl-route-row(fact, label) = if eq(nmrr-fact-present?(fact), 1) then fgo-sized("model", fgl-route-metric-id(fact), label, nmrr-fact-value(fact), "ready", 1, mul(nmrr-fact-value(fact), 1000), "metal", nmrr-fact-evidence(fact), "native-model.route-readiness", if eq(nmrr-fact-value(fact), 1) then "ready" else "idle", "query-lane", nmrr-fact-reason(fact)) else fgo-unavailable("model", fgl-route-metric-id(fact), label, "ready", "metal", nmrr-fact-missing-door(fact), "query-lane", nmrr-fact-reason(fact));
+        def fgl-route-row-at(fact, label, sequence) = if eq(nmrr-fact-present?(fact), 1) then fgo-observe-row(fgl-route-row(fact, label), nmrr-fact-observed(fact), sequence) else fgo-observe-row(fgl-route-row(fact, label), -1, sequence);
+        def fgl-model-route-rows(samples, epoch, sequence) {
             let qwen = nmrr-model-route-from-current-samples(samples, epoch, FGLQwenRouteId());
             let threeb = nmrr-model-route-from-current-samples(samples, epoch, FGLThreeBRouteId());
             let parallel = nmrr-parallel-route(qwen, threeb, epoch);
-            list(fgl-route-row(qwen, "Qwen3.8-Flash-Next UD-Q2_K_XL (Unsloth) route"), fgl-route-row(threeb, "Llama-3.2-3B-Instruct route"), fgl-route-row(parallel, "Qwen + 3B parallel availability"));
+            list(fgl-route-row-at(qwen, "Qwen3.8-Flash-Next UD-Q2_K_XL (Unsloth) route", sequence), fgl-route-row-at(threeb, "Llama-3.2-3B-Instruct route", sequence), fgl-route-row-at(parallel, "Qwen + 3B parallel availability", sequence));
         }
         def fgl-retire-self-publisher() {
             let finalRemoved = fs-remove-file(fgtm-snapshot-path(FGLRoot(), FGLPublisher()));
@@ -441,7 +572,13 @@ section [form.bml] {
         }
         def fgl-control-start-state(ackRead) = fgl-control-state("all", fgl-control-start-last-offer(ackRead), 0, "absent");
 
-        def fgl-any-active?(samples) = if eq(len(samples), 0) then 0 else if str_eq(fgtm-sample-id(head(samples)), "process.form-glass") then fgl-any-active?(tail(samples)) else if and(str_eq(fgtm-sample-lifecycle(head(samples)), "active"), str_eq(fgtm-sample-evidence(head(samples)), "physical-live")) then 1 else fgl-any-active?(tail(samples));
+        // Loaded/prefilled model state, owner heartbeats, caches, mappings and
+        // monotonic counters describe readiness, not attention.  Only a live
+        // request or the owner's transient `model-state/active` row raises the
+        // monitor from 2 Hz to 4 Hz; the completed flow then remains visible
+        // without making observation compete permanently with inference.
+        def fgl-attention-active-sample?(sample) = if not(str_eq(fgtm-sample-lifecycle(sample), "active")) then 0 else if not(str_eq(fgtm-sample-evidence(sample), "physical-live")) then 0 else if str_eq(fgtm-sample-kind(sample), "request") then 1 else if str_eq(fgtm-sample-kind(sample), "model-state") then str_eq(fgtm-sample-purpose(sample), "active") else 0;
+        def fgl-any-active?(samples) = if eq(len(samples), 0) then 0 else if eq(fgl-attention-active-sample?(head(samples)), 1) then 1 else fgl-any-active?(tail(samples));
         def fgl-frame-budget-ms(hz) = if le(hz, 0) then div(1000, FGLQuietHz()) else div(1000, hz);
         def fgl-frame-elapsed-ms(started, finished) = if ge(finished, started) then sub(finished, started) else 0;
         def fgl-frame-wait-ms(hz, started, finished) = fgd-max(0, sub(fgl-frame-budget-ms(hz), fgl-frame-elapsed-ms(started, finished)));
@@ -468,9 +605,24 @@ section [form.bml] {
         def fgl-frame-patch(previous, nextFrame) = if eq(fgl-frame-same-size?(previous, nextFrame), 0) then ftc-cat(list(ftc-terminal-home(), fgd-segment-project(nextFrame), ftc-terminal-erase-rest())) else ftc-segment-lines-diff(fgd-segment-frame-lines(previous), fgd-segment-frame-lines(nextFrame));
         def fgl-render-frame(previous, nextFrame) {
             let patch = if eq(fgl-frame-same-size?(previous, nextFrame), 0) then ftcb-full-frame(fgd-segment-frame-lines(nextFrame)) else ftcb-segment-lines-diff(fgd-segment-frame-lines(previous), fgd-segment-frame-lines(nextFrame));
-            let shown = ftcb-write-stdout(patch);
-            nextFrame;
+            ftcb-write-stdout(patch);
         }
+        def fgl-render-buffer(buffer, nextFrame) {
+            let staged = fgel-buffer-stage(buffer, nextFrame);
+            let shown = fgl-render-frame(fgel-buffer-front(staged), fgel-buffer-back(staged));
+            if lt(shown, 0) then buffer else fgel-buffer-commit(staged);
+        }
+        def fgl-present-plan(buffer, plan) {
+            let planned = fgel-plan-buffer(plan);
+            let shown = fgl-render-frame(fgel-buffer-front(buffer), fgel-buffer-front(planned));
+            fgl-render-commit(shown, buffer, planned);
+        }
+        def fgl-render-commit(writeResult, prior, planned) = if lt(writeResult, 0) then prior else planned;
+        def fgl-schedule-for-hz(schedule, epoch, hz) {
+            let budget = fgl-frame-budget-ms(hz);
+            if not(eq(fgel-schedule-valid?(schedule), 1)) then fgel-schedule-start(epoch, budget) else if not(eq(fgel-schedule-budget(schedule), budget)) then fgel-schedule-start(epoch, budget) else schedule;
+        }
+        def fgl-schedule-wait-ms(schedule, epoch) = if ge(epoch, fgel-schedule-deadline(schedule)) then 0 else sub(fgel-schedule-deadline(schedule), epoch);
         def fgl-dashboard-frame(width, height, epoch, hz, frame, control, metrics, samples, publishers, history, observations) = fgd-live-segment-frame(width, height, epoch, hz, frame, fgl-control-view(control), fgl-control-focus(control), fgl-control-filter(control), fgl-control-selected(control), fgl-control-evidence-open?(control), metrics, samples, publishers, fgl-control-status(control), history, observations, fgl-carrier-seam());
 
         // One bounded physical frame is the inspection door for agents and
@@ -481,7 +633,8 @@ section [form.bml] {
             let epoch = now_unix_ms();
             let frameNumber = 0;
             let inventory = fgtm-inventory(FGLRoot());
-            let externalSamples = fgl-external-samples(fgl-inventory-samples-at(inventory, epoch));
+            let inventorySamples = fgl-external-samples(fgl-inventory-samples-at(inventory, epoch));
+            let externalSamples = fgl-dedupe-samples(append(fgl-jit-current-samples(), inventorySamples));
             let samples = fgl-local-samples(externalSamples, epoch);
             let hostRows = fgl-host-rows-at(frameNumber, list(), epoch);
             let ownerRows = fgo-observe-rows(fgl-owner-process-rows(samples), epoch, frameNumber);
@@ -489,7 +642,7 @@ section [form.bml] {
             let storageRows = fgl-storage-rows-at(frameNumber, list(), epoch);
             let heatRows = fgl-heat-rows-at(frameNumber, list(), epoch);
             let fastRows = append(fgo-observe-rows(fgl-frame-fast-rows(frameNumber, -1, -1, -1, fgl-fast-rows(frameNumber, list(), list())), epoch, frameNumber), heatRows);
-            let metricsObserved = append(append(fastRows, append(ownerRows, append(hostRows, append(queueRows, storageRows)))), fgo-observe-rows(fgl-model-route-rows(samples, epoch), epoch, frameNumber));
+            let metricsObserved = append(append(fastRows, append(ownerRows, append(hostRows, append(queueRows, storageRows)))), fgl-model-route-rows(samples, epoch, frameNumber));
             let metrics = fgo-age-rows-at(metricsObserved, epoch);
             let governorRefresh = fgl-refresh-governor(frameNumber);
             let publishers = fgl-external-publishers(fgl-inventory-publishers(inventory));
@@ -499,20 +652,22 @@ section [form.bml] {
             fgl-dashboard-frame(width, height, epoch, FGLQuietHz(), frameNumber, control, metrics, samples, publishers, list(point), observations);
         }
 
-        def fgl-loop(controlState, frame, heldFast, heldHost, heldQueue, heldStorage, heldHeat, history, priorFrame, dependencyIdentity, stringBaseline, nodeBaseline, priorWorkMs, priorWaitMs, priorBudgetMs) {
+        def fgl-loop(controlState, frame, heldFast, heldHost, heldQueue, heldStorage, heldHeat, history, frameBuffer, schedule, surface, dependencyIdentity, stringBaseline, nodeBaseline, priorWorkMs, priorWaitMs, priorBudgetMs) {
             let epoch = now_unix_ms();
+            let liveSurface = fgl-surface-at(surface, epoch);
             let inventory = fgtm-inventory(FGLRoot());
-            let externalSamples = fgl-external-samples(fgl-inventory-samples-at(inventory, epoch));
+            let inventorySamples = fgl-external-samples(fgl-inventory-samples-at(inventory, epoch));
+            let externalSamples = fgl-dedupe-samples(append(fgl-jit-current-samples(), inventorySamples));
             let samples = fgl-local-samples(externalSamples, epoch);
             let hostRows = fgl-host-rows-at(frame, heldHost, epoch);
-            let ownerRows = fgo-observe-rows(fgl-owner-process-rows(samples), epoch, frame);
+            let ownerRows = fgl-owner-rows-at(frame, heldFast, samples, epoch);
             let queueRows = fgl-queue-rows-at(frame, heldQueue, epoch);
             let storageRows = fgl-storage-rows-at(frame, heldStorage, epoch);
             let heatRows = fgl-heat-rows-at(frame, heldHeat, epoch);
-            let fastRows = append(fgo-observe-rows(fgl-frame-fast-rows(frame, priorWorkMs, priorWaitMs, priorBudgetMs, fgl-fast-rows(frame, heldFast, list())), epoch, frame), heatRows);
-            let baseMetricsObserved = append(fgo-observe-rows(list(fgl-string-growth-row(stringBaseline), fgl-node-growth-row(nodeBaseline)), epoch, frame), append(fastRows, append(ownerRows, append(hostRows, append(queueRows, storageRows)))));
+            let fastRows = append(fgo-observe-rows(fgl-frame-fast-rows(frame, priorWorkMs, priorWaitMs, priorBudgetMs, fgl-fast-rows(frame, heldFast, list())), epoch, frame), append(heatRows, ownerRows));
+            let baseMetricsObserved = append(fgo-observe-rows(list(fgl-string-growth-row(stringBaseline), fgl-node-growth-row(nodeBaseline)), epoch, frame), append(fastRows, append(hostRows, append(queueRows, storageRows))));
             let governorRefresh = fgl-refresh-governor(frame);
-            let metricsObserved = append(baseMetricsObserved, fgo-observe-rows(fgl-model-route-rows(samples, epoch), epoch, frame));
+            let metricsObserved = append(baseMetricsObserved, fgl-model-route-rows(samples, epoch, frame));
             let metrics = fgo-age-rows-at(metricsObserved, epoch);
             let publishers = fgl-external-publishers(fgl-inventory-publishers(inventory));
             let observations = fgl-v2-observations(epoch, frame, samples);
@@ -520,19 +675,47 @@ section [form.bml] {
             let hz = fgl-refresh-hz(samples, history, point);
             let nextHistory = ftc-ring-push(history, point, FGLHistoryCapacity());
             let control = fgl-poll-control-full(controlState, samples, epoch);
-            let nextFrame = fgl-dashboard-frame(fgl-terminal-width(), fgl-terminal-height(), epoch, hz, frame, control, metrics, samples, publishers, nextHistory, observations);
-            let rendered = fgl-render-frame(priorFrame, nextFrame);
-            if eq(fgl-control-quit?(control), 1) then list("form-glass-live-stopped", frame, fglu-supervisor-mark("abstain"), len(nextHistory)) else if eq(fgl-dependency-changed?(dependencyIdentity, frame), 1) then list("form-glass-live-stopped", frame, fglu-supervisor-mark("selfmolt"), len(nextHistory)) else if eq(fgl-pool-selfmolt?(stringBaseline, nodeBaseline, frame), 1) then list("form-glass-live-stopped", frame, fglu-supervisor-mark("selfmolt"), len(nextHistory)) else fgl-loop-after(control, add(frame, 1), fastRows, hostRows, queueRows, storageRows, heatRows, nextHistory, nextFrame, hz, dependencyIdentity, stringBaseline, nodeBaseline, epoch);
+            let nextFrame = fgl-dashboard-frame(nth(liveSurface, 0), nth(liveSurface, 1), epoch, hz, frame, control, metrics, samples, publishers, nextHistory, observations);
+            let jitFault = fgl-jit-fault-sample(fgl-jit-current-samples(), list());
+            if eq(fgl-control-quit?(control), 1) then list("form-glass-live-stopped", frame, fglu-supervisor-mark("abstain"), len(nextHistory)) else if eq(fgl-dependency-changed?(dependencyIdentity, frame), 1) then list("form-glass-live-stopped", frame, fglu-supervisor-mark("selfmolt"), len(nextHistory)) else if eq(fgl-pool-selfmolt?(stringBaseline, nodeBaseline, frame), 1) then list("form-glass-live-stopped", frame, fglu-supervisor-mark("selfmolt"), len(nextHistory)) else if gt(len(jitFault), 0) then fgl-jit-hold-enter(control, add(frame, 1), fastRows, hostRows, queueRows, storageRows, heatRows, nextHistory, frameBuffer, fgl-schedule-for-hz(schedule, epoch, hz), liveSurface, dependencyIdentity, stringBaseline, nodeBaseline, nextFrame, jitFault) else fgl-loop-after(control, add(frame, 1), fastRows, hostRows, queueRows, storageRows, heatRows, nextHistory, frameBuffer, schedule, liveSurface, nextFrame, hz, dependencyIdentity, stringBaseline, nodeBaseline, epoch);
         }
-        def fgl-loop-after(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, priorFrame, hz, dependencyIdentity, stringBaseline, nodeBaseline, frameStarted) {
+        def fgl-loop-after(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, schedule, surface, nextFrame, hz, dependencyIdentity, stringBaseline, nodeBaseline, frameStarted) {
             let workEnded = now_unix_ms();
             let workMs = fgl-frame-elapsed-ms(frameStarted, workEnded);
-            let budgetMs = fgl-frame-budget-ms(hz);
-            let waitTargetMs = fgl-frame-wait-ms(hz, frameStarted, workEnded);
+            let activeSchedule = fgl-schedule-for-hz(schedule, frameStarted, hz);
+            let budgetMs = fgel-schedule-budget(activeSchedule);
+            let waitTargetMs = fgl-schedule-wait-ms(activeSchedule, workEnded);
             let slept = fgl-sleep-ms(waitTargetMs);
             let waitEnded = now_unix_ms();
             let waitMs = fgl-frame-elapsed-ms(workEnded, waitEnded);
-            fgl-loop(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, priorFrame, dependencyIdentity, stringBaseline, nodeBaseline, workMs, waitMs, budgetMs);
+            let wake = fgel-wake("deadline", waitEnded, "wall-clock-compatibility", str_concat("deadline.", int_to_str(fgel-schedule-deadline(activeSchedule))));
+            let plan = fgel-plan-wake(activeSchedule, frameBuffer, wake, nextFrame);
+            let nextBuffer = fgl-present-plan(frameBuffer, plan);
+            fgl-loop(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, nextBuffer, fgel-plan-schedule(plan), surface, dependencyIdentity, stringBaseline, nodeBaseline, workMs, waitMs, budgetMs);
+        }
+        def fgl-jit-hold-enter(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, schedule, surface, dependencyIdentity, stringBaseline, nodeBaseline, faultFrame, fault) {
+            let plan = fgel-plan-wake(schedule, frameBuffer, fgl-jit-fault-wake(fault), faultFrame);
+            let shownBuffer = fgl-present-plan(frameBuffer, plan);
+            fgl-jit-hold(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, shownBuffer, plan, surface, dependencyIdentity, stringBaseline, nodeBaseline, fault);
+        }
+        // During a refusal Glass reads only the exact JIT publisher and its
+        // control inbox. It does not collect host, storage, model inventory,
+        // or render ordinary frames. The 250 ms wait remains explicitly the
+        // wall-clock compatibility seam until the monotonic event door exists.
+        def fgl-jit-hold(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, heldPlan, surface, dependencyIdentity, stringBaseline, nodeBaseline, fault) {
+            let epoch = now_unix_ms();
+            let jitSamples = fgl-jit-current-samples();
+            let healed = fgl-jit-healed-for(jitSamples, fault);
+            let control = fgl-poll-control-full(controlState, jitSamples, epoch);
+            if eq(fgl-control-quit?(control), 1) then list("form-glass-live-stopped", frame, fglu-supervisor-mark("abstain"), len(history)) else if gt(len(healed), 0) then fgl-jit-hold-resume(control, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, heldPlan, surface, dependencyIdentity, stringBaseline, nodeBaseline, fault, healed) else fgl-jit-hold-wait(control, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, heldPlan, surface, dependencyIdentity, stringBaseline, nodeBaseline, fault);
+        }
+        def fgl-jit-hold-wait(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, heldPlan, surface, dependencyIdentity, stringBaseline, nodeBaseline, fault) {
+            let waited = fgl-sleep-ms(250);
+            fgl-jit-hold(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, heldPlan, surface, dependencyIdentity, stringBaseline, nodeBaseline, fault);
+        }
+        def fgl-jit-hold-resume(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, heldPlan, surface, dependencyIdentity, stringBaseline, nodeBaseline, fault, healed) {
+            let resumed = fgel-resume-held(heldPlan, fgl-jit-healed-wake(healed));
+            if not(str_eq(fgel-plan-disposition(resumed), "present")) then fgl-jit-hold(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, heldPlan, surface, dependencyIdentity, stringBaseline, nodeBaseline, fault) else fgl-loop(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, fgel-plan-schedule(resumed), surface, dependencyIdentity, stringBaseline, nodeBaseline, 0, 0, fgel-schedule-budget(fgel-plan-schedule(resumed)));
         }
         def fgl-live() {
             let opened = ftcb-write-stdout(ftcb-terminal-safe-open());
@@ -540,7 +723,9 @@ section [form.bml] {
             let state = fglu-supervisor-mark("running");
             let stringBaseline = kernel_stat(5);
             let nodeBaseline = kernel_stat(4);
-            fgl-loop(fgl-control-start-state(fgtm-read-control-ack(FGLRoot(), FGLControlChannel())), 0, list(), list(), list(), list(), list(), list(), list(), fglu-dependency-manifest(), stringBaseline, nodeBaseline, -1, -1, -1);
+            let epoch = now_unix_ms();
+            let surface = fgl-surface(epoch);
+            fgl-loop(fgl-control-start-state(fgtm-read-control-ack(FGLRoot(), FGLControlChannel())), 0, list(), list(), list(), list(), list(), list(), fgel-buffer-empty(), fgel-schedule-start(epoch, fgl-frame-budget-ms(FGLQuietHz())), surface, fglu-dependency-manifest(), stringBaseline, nodeBaseline, -1, -1, -1);
         }
 
         def fgl-control-argument(text) = if is-blank?(text) then fgtm-absent() else fgtm-present(trim(text));

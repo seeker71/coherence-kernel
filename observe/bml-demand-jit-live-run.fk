@@ -1,10 +1,29 @@
 ; bml-demand-jit-live-run.fk -- physical bounded specialization and reuse.
 ; No model is opened and no resident owner is disturbed.
+; preflight-exec: forbidden
 ; preludes: form-stdlib/bml-demand-jit.fk form-stdlib/bml/bml-demand-jit-glass.bml
 
 (do
     (defn bdjl-program ()
         (list (list 1 7) (list 2) (list 1 3) (list 5 1 2) (list 3 3 0)))
+    (defn bdjl-field (field)
+        (if (eq (bdj-field-present? field) 1)
+            (list "present" (bdj-field-value field) "reason"
+                (bdj-field-reason field))
+            (list "absent" "reason" (bdj-field-reason field))))
+    (defn bdjl-stage (step)
+        (do (let stage (bdj-step-stage step))
+            (list "cache" (bdj-stage-cache-disposition stage)
+                "cache-age-ms" (bdjl-field (bdj-stage-cache-age stage))
+                "inspect-ms" (bdj-stage-inspect-ms stage)
+                "materialize" (bdj-stage-materialize-action stage)
+                "materialize-ms" (bdj-stage-materialize-ms stage)
+                "install-challenge-ms"
+                    (bdj-stage-install-challenge-ms stage)
+                "publish-ms" (bdj-stage-publish-ms stage)
+                "total-ms" (bdj-stage-total-ms stage)
+                "accounted-ms" (bdj-stage-accounted-ms stage)
+                "unattributed-ms" (bdj-stage-unattributed-ms stage))))
     (let root "/tmp/bml-demand-jit-live")
     (let source "/tmp/bml-demand-jit-live/source.bml")
     (let cache "/tmp/bml-demand-jit-live/leaf.cache")
@@ -20,17 +39,39 @@
     (let step (bdj-step (bdj-receipt-state first)))
     (let second (bdj-request (bdj-step-state step) source cache
         (bdjl-program) 4 10))
-    (let published (bdjg-publish (now_unix_ms) first-ms first step
-        (if (lt (file_size cache) 0) 0 (file_size cache))))
+    ; A fresh process-shaped registry has no RAM receipt.  It physically
+    ; inspects the just-published disk image, installs/challenges it, then its
+    ; next request reaches the retained page.
+    (let reuse-first-start (now_unix_ms))
+    (let reuse-first (bdj-request (bdj-empty 9001) source cache
+        (bdjl-program) 4 11))
+    (let reuse-first-ms (sub (now_unix_ms) reuse-first-start))
+    (let reuse-step (bdj-step (bdj-receipt-state reuse-first)))
+    (let reuse-second (bdj-request (bdj-step-state reuse-step) source cache
+        (bdjl-program) 4 12))
+    (let cache-bytes (if (lt (file_size cache) 0) 0 (file_size cache)))
+    (let published (bdjg-publish-comparison (now_unix_ms) first-ms first step
+        cache-bytes reuse-first-ms reuse-first reuse-step cache-bytes))
     (list "bml-demand-jit-live"
         (list "first-frame-ms" first-ms "value" (bdj-receipt-value first)
               "route" (bdj-receipt-route first) "cache"
               (bdj-receipt-cache-state first))
-        (list "specialization-ms" (bdj-step-ms step) "attention"
+        (list "first-later-step" (bdjl-stage step) "attention"
               (bdj-step-attention step) "status" (bdj-step-status step))
         (list "same-process-value" (bdj-receipt-value second) "route"
               (bdj-receipt-route second) "born" (bdj-receipt-born second))
+        (list "new-registry-first-frame-ms" reuse-first-ms "route"
+              (bdj-receipt-route reuse-first) "later-step"
+              (bdjl-stage reuse-step) "status" (bdj-step-status reuse-step))
+        (list "new-registry-retained-value" (bdj-receipt-value reuse-second)
+              "route" (bdj-receipt-route reuse-second) "born"
+              (bdj-receipt-born reuse-second))
         (list "glass" (bdjg-publish-status published) "publisher"
-              (BDJGPublisher))
+              (BDJGPublisher) "nodes"
+              (len (bdjg-comparison-samples (now_unix_ms) first-ms first step
+                  cache-bytes reuse-first-ms reuse-first reuse-step cache-bytes)))
         (list "nodeid-policy" (BDJNodeIdPolicy) "wider-frontier"
-              (BDJWiderFrontier))))
+              (BDJWiderFrontier) "full-program-call-state"
+              (bdj-stage-full-call-state (bdj-step-stage reuse-step))
+              "missing-door"
+              (bdj-stage-full-call-door (bdj-step-stage reuse-step)))))

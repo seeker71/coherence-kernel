@@ -1,67 +1,66 @@
-# The penumbra map — where the proof's light actually falls (2026-07-02, night watch)
+# The penumbra map — where the proof's light falls
 
-The bool bug (`receipts/2026-07-02-bool-node-value-round-trip.md`) lived for the life of the
-wire lane in the proof's *penumbra* — the region lit enough to run, dark enough to miss. This
-map answers the night-watch question that followed: **what else lives there?** Method: every
-native op in `runtime/fkwu-optable.h` (146 total), classified by whether (a) a minimal walker
-carries it — the four-way *umbra*; (b) a band test anywhere names it directly; (c) only the
-living body uses it, so it is witnessed at best *indirectly* through callers that have bands.
+Every native op in `runtime/fkwu-optable.h` lives in one of four regions,
+classified by whether (a) a minimal walker carries it — the four-way *umbra*;
+(b) a band names it directly — the *lit penumbra*; (c) only the living body calls
+it, so it is witnessed at best *indirectly* through callers that have bands — the
+*dim penumbra*; or (d) nothing calls it outside the op manifest itself.
 
-## The four regions
+## The four regions (recomputed 2026-09-03 over 194 ops)
 
 | Region | Count | Meaning |
 |---|---|---|
-| **Umbra** — walker-carried | 32 | four-way provable; nothing hides |
-| **Lit penumbra** — fkwu-only, band-named | 30 | witnessed directly, single-kernel |
-| **Dim penumbra** — body-used, no band names them | **84 (58%)** | run daily, witnessed only through callers |
-| **Unreferenced** — in the seed, used by nothing | **0** | the seed carries no dead ops |
+| **Umbra** — walker-carried | 34 | four-way provable; nothing hides |
+| **Lit penumbra** — fkwu-only, band-named | 99 | witnessed directly, single-kernel |
+| **Dim penumbra** — body-called, no band names them | 35 | run daily, witnessed only through callers |
+| **Manifest-only** — named by `flt-ops` / the host-effect grammar, no caller | 26 | carried by the seed, exercised by nothing |
 
-## The dim 84 (as of this map — regenerate before trusting)
+## The dim 35
 
 ```
-_get _plus add_u32 api_health bnot_u32 bor bxor ceil cuda_matvec dot_product
-fb_record file_close file_mtime file_open file_read file_size float_to_int
-framebuffer-clear framebuffer-events fs_is_dir fs_list fs_remove fs_rename
-host-exec input_byte isatty jit_compile_value kernel_stat math_ceil math_floor
-math_log math_sqrt mesh_announce mesh_detect mesh_discover mesh_register
-mesh_registry mesh_roster mesh_serve metal_matvec_f32 metal_matvec_fixture
-native_call_test node_inst node_level node_pkg node_source node_type print_str
-read_file_slice read_line record? record_blueprint record_get record_has
-record_keys record_set rotr_u32 round_ndigits scan_run self_source
-sense_bt_count sense_bt_present sense_cam_count sense_cam_grab sense_cam_health
-sense_cam_name sense_frame_read sense_mem sense_mic_count sense_mic_health
-sense_mic_name sense_power sense_publish sense_report sense_sensors
-sense_stream sense_wifi_signal sense_wifi_ssid shl_u32 shr_u32
-source_inventory str_to_float tls_request vector_cosine
+_get bor cuda_matvec cuda_matvec_f32 form_error host_dir_list host_dir_mkdir
+host_dir_rmdir host_file_append_bytes host_file_mtime host_file_read_slice
+host_file_read_text host_file_size host_file_write_text host_path_exists
+host_path_is_dir host_path_remove host_path_rename host_temp_dir http_get
+metal_matvec_fixture self_source sense_audio_loopback sense_cam_count
+sense_cam_health sense_cam_name sense_mic_count sense_mic_health sense_mic_name
+sense_mic_stream_read sense_mic_stream_start sense_mic_stream_stop sense_report
+sense_wav_loopback source_inventory
+```
+
+## The manifest-only 26
+
+```
+api_health file_close file_open file_read host_source_inventory mesh_announce
+mesh_detect mesh_discover mesh_register mesh_registry mesh_roster mesh_serve
+node_at sense_bt_count sense_bt_present sense_cam_grab sense_cam_luma
+sense_frame_read sense_mem sense_mic_capture sense_power sense_publish
+sense_sensors sense_stream sense_wifi_signal sense_wifi_ssid
 ```
 
 ## The reading
 
-- **The bool bug's home confirmed the pattern.** Before tonight, `node_value` was dim; the bug
-  sat under it unlit. `wire-bool-band` moved `node_value` and `intern_trivial_bool` into the lit
-  penumbra — which is exactly how the map shrinks: one witness band at a time.
-- **`node_type` and `node_level` are still dim** — and this session tripped over `node_type`
-  semantics twice (the phantom "null/6" types; the bool sentinel). The next bug of the bool
-  bug's kind most plausibly lives under one of these two. A `node-introspection-band` is the
-  highest-value single lamp this map names. *(Lit 2026-07-02:
-  `observe/tests/node-introspection-band.fk`, verdict 4095 — node_type/node_level/node_value/
-  node_category/node_children moved from dim to lit, raw-literal trap pinned.)*
-- **`scan_run` is dim but load-bearing** — `json.fk`'s tokenizer rides it everywhere (witnessed
-  only through `json-band`). `float_to_int` similarly rides under `float_to_str`. Indirect
-  witness is real witness, but it localizes failures poorly: when the caller's band breaks, the
-  op is only one suspect among many (this session's json.fk bisections demonstrated the cost).
-- **The zero is the map's best news**: every one of the 146 natives is used by the living body.
-  The C seed carries no dead weight — the shrink roadmap's targets are all *migrations to Form*,
-  never deletions of the unused.
-- **A green four-way run is a claim about 32 ops** — 22% of the seed. The other 78% rests on
-  fkwu-witnessed bands or on indirection. That is not a scandal; it is the honest shape of the
-  proof today, and now it is *enumerated* instead of latent — the same move the spurious-edge
-  walker made for the meaning graph the same night.
+- A green four-way run is a claim about 34 ops — 18% of the seed. The rest rests
+  on fkwu-witnessed bands (99) or on indirection (35). That is the honest shape of
+  the proof, enumerated instead of latent.
+- The map shrinks one witness band at a time: a band that names a dim op moves it
+  into the lit penumbra, and localizes the next failure of its kind to one suspect
+  instead of a caller's whole chain.
+- The 26 manifest-only ops are seed weight nothing exercises: each is either a
+  carrier row a live organ will call (the mesh and sense families wait on the
+  fleet's present word) or a shrink candidate for `runtime/fkwu-uni.c`. Either
+  way, the row is the decision, and it wants a caller or a release.
 
-## Regenerating this map
+## The method (rerun it before trusting the numbers)
 
-The classifier is ~40 lines against `fkwu-optable.h`, `walkers/*/`, `**/tests/*.fk`, and the
-non-test `.fk`/`.fsh` body (see the receipt for the exact method). It should be rerun after any
-optable or band change; the numbers above are a dated witness, not a living invariant. A
-Form-native auditor (the optable already lives in Form as `flt-ops`) is the honest next stone —
-this map is its specification.
+```sh
+# ops: every row of runtime/fkwu-optable.h
+# umbra: the op's quoted name appears in walkers/{go,rust,ts} sources
+# lit:   "(op " or "(op)" appears in any tracked */tests/*.fk
+# dim:   "(op " or "(op)" appears in any tracked non-test .fk/.fsh/.bml outside walkers/
+# else:  manifest-only
+```
+
+The optable already lives in Form as `flt-ops` (`flatten/form-flatten.fk`); a
+Form-native auditor that computes this map is the honest next stone — this page is
+its specification and its first fresh reading.

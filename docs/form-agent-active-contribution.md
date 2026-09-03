@@ -13,9 +13,9 @@ not a wrapper around llama-server or Ollama. Its working path is:
    and make complete tasks present with an exact byte watermark.
 5. Inject only the new task bytes into the resident model context.
    Task-to-KV observation itself emits matching content-free begin/end stages,
-   including turn, kind and byte count. This boundary matters: a measured
-   231-byte research frame spent 37,841 ms there before generation began.
-   Meaning already taught in this residence may instead be interned once and
+   including turn, kind and byte count. This boundary matters: a small research
+   frame can spend tens of seconds there before generation begins. Meaning
+   already taught in this residence may instead be interned once and
    addressed as `(agent-task verb @task @action)`: NodeIDs replace repeated
    nouns while the current model retains the smallest explicit action verb. If
    the verb supplies the relation, the action coordinate is omitted as redundant
@@ -94,14 +94,13 @@ The live doors are:
 `metal_status` and `mlx_status` do not see another process's MLX queues or GPU
 occupancy. A zero delta is therefore never interpreted as “the whole GPU is
 idle.” The live runner accepts external MLX reservation as observed input, and
-future host-utilization sensing can replace that supplied fact. A 2026-08-27
-crossing proved why: external MLX training was active while a supplied `0`
-made the resident admission wait 290,811 ms. Route and quantum choice remain
-data. The C seed's former five parallel 4,096-seat function arrays now grow
-geometrically together; a 5,001-function image executed a higher-order function
-above the old boundary both fresh and from `.fkb`. Source-symbol discovery in
-that temporary seed is still linear; dynamic capacity removes the ceiling but
-does not claim the Form/native NodeID mapping movement is complete.
+future host-utilization sensing can replace that supplied fact: an external MLX
+training can be active while a supplied `0` says idle, and the resident then
+waits on that word. Route and quantum choice remain data. The C seed's function
+arrays grow geometrically together (`form/form-stdlib/tests/no-fixed-tables-band.fk`);
+source-symbol discovery in that temporary seed is still linear, and dynamic
+capacity removes a ceiling without claiming the Form/native NodeID mapping
+movement is complete.
 
 ## What remains northward
 

@@ -157,6 +157,8 @@ static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
  * rewritten in terms of the same named constant so the two can never drift apart. */
 #define FK_FLOAT_POOL_INIT_CAP 65536    /* fk_fv: boxed-float pool, initial size (doubles on demand) */
 #define FK_OPCODE_ARM_CAP 256           /* fk_arms: per-tag hit counters, indexed by node tag t */
+#define FK_PATH_CAP 4096               /* one host path, or a path-shaped name (a .fkb/.sym/.dylib sibling, a temp spelling). Not a table: a path longer than this names nothing the host can open. Every fk_cstr into a path buffer refuses loudly past it and every join dies loudly rather than truncate -- a cut path names the wrong file. */
+#define FK_MESH_MSG_CAP 4096           /* one mesh/sense JSON line, built by sprintf from bounded fields (an ssid under 64 bytes and integers) */
 #define FK_MEM_CELL_CAP_INIT 4096      /* fk_mem: mutable record-cell table (tags 13/14). Birth size only -- the table grows to hold any written cell id (fk_mem_reserve). The old fixed table MASKED the id (mi & 4095): two cells 4096 apart silently ALIASED, one state quietly swapped for another. */
 #define FK_STAGED_INPUT_CAP_INIT 262144 /* fk_src: staged auxiliary input (the input_byte primitive); birth size only -- grows to carry any staged text (the old fixed buffer truncated it SILENTLY at the brim). */
 #define FK_VALUE_STACK_CAP_INIT 1048576  /* fk_vs: the evaluator's argument/value stack. Birth size only -- the stack DOUBLES on demand (fk_vs_grow, kernel_stat 27/28 = live cap / doublings), so stack slots are not a wall; runaway recursion is spoken for by the walker's own host-stack diagnostic. History: 65536->1048576 (2026-07-30) when the fourth kernel alone refused a 100,000-deep count the other three answered; a loud wall after that; growth since 2026-09-02. New slots are zeroed so a melt walking raised-but-unwritten slots sees the same inert 0 the BSS era gave it. */
@@ -600,6 +602,7 @@ static long long fk_vs_cap;    /* live capacity; fk_vs_grow owns it */
 static long long fk_vs_grows;  /* doublings this run -- kernel_stat 28 */
 static long long fk_bd_cap;    /* binding-stack live capacity (kernel_stat 29); owned by fk_bd_push */
 static long long fk_bd_grows;  /* binding-stack doublings (kernel_stat 30) */
+static long long fk_bd_save_cap, fk_bd_save_grows; /* binding save stack live cap / doublings (kernel_stat 33/34); owned by fk_bd_save */
 static void fk_vs_grow(long long need) {
     long long nc = fk_vs_cap == 0 ? FK_VALUE_STACK_CAP_INIT : fk_vs_cap;
     long long i;
@@ -1061,10 +1064,12 @@ static long long fk_read_all_bounded(int fd, char *buf, long long cap) {
  * Absent file -> empty config -> every toggle at its default (recover, never die). Standard OS env
  * vars we do not own (TMPDIR) stay on getenv. Line form: "KEY value" or "KEY=value"; bare "KEY"
  * means on ("1"); "KEY 0" means off; '#' begins a comment. */
-#define FK_CONF_MAX_INIT 64 /* conf entries birth size; grows -- an entry past the old fixed 64 was SILENTLY inert, the same family as the silently-inert env probe */
-static char (*fk_conf_k)[64];
-static char (*fk_conf_v)[4096];
-static long long fk_conf_cap;
+#define FK_CONF_MAX_INIT 64 /* conf entries birth size; grows (kernel_stat 37/38) -- an entry past the old fixed 64 was SILENTLY inert, the same family as the silently-inert env probe */
+#define FK_CONF_POOL_INIT 4096 /* conf key/value bytes birth size; grows (kernel_stat 39/40) -- every key and value is held at its exact length. The old per-entry widths (64, 4096) cut a longer key or value silently, and a cut key matches nothing. */
+static long long *fk_conf_k, *fk_conf_v; /* offsets into fk_conf_pool */
+static long long fk_conf_cap, fk_conf_grows;
+static char *fk_conf_pool;
+static long long fk_conf_pool_n, fk_conf_pool_cap, fk_conf_pool_grows;
 static void fk_conf_reserve(long long need) {
     long long nc;
     if (need <= fk_conf_cap) {
@@ -1073,13 +1078,39 @@ static void fk_conf_reserve(long long need) {
     nc = fk_conf_cap == 0 ? FK_CONF_MAX_INIT : fk_conf_cap;
     while (nc < need) {
         nc = nc * 2;
+        fk_conf_grows = fk_conf_grows + 1;
     }
-    fk_conf_k = (char (*)[64])realloc(fk_conf_k, (unsigned long)(nc * 64));
-    fk_conf_v = (char (*)[4096])realloc(fk_conf_v, (unsigned long)(nc * 4096));
+    fk_conf_k = (long long *)realloc(fk_conf_k, (unsigned long)(nc * 8));
+    fk_conf_v = (long long *)realloc(fk_conf_v, (unsigned long)(nc * 8));
     if (fk_conf_k == 0 || fk_conf_v == 0) {
         fk_die("fk_conf_reserve: out of memory growing the conf table");
     }
     fk_conf_cap = nc;
+}
+/* append s[0..n) and a terminator to the conf byte pool; answers the offset */
+static long long fk_conf_pool_put(const char *s, long long n) {
+    long long off = fk_conf_pool_n;
+    long long need = off + n + 1;
+    long long i = 0;
+    if (need > fk_conf_pool_cap) {
+        long long nc = fk_conf_pool_cap == 0 ? FK_CONF_POOL_INIT : fk_conf_pool_cap;
+        while (nc < need) {
+            nc = nc * 2;
+            fk_conf_pool_grows = fk_conf_pool_grows + 1;
+        }
+        fk_conf_pool = (char *)realloc(fk_conf_pool, (unsigned long)nc);
+        if (fk_conf_pool == 0) {
+            fk_die("fk_conf_pool_put: out of memory growing the conf byte pool");
+        }
+        fk_conf_pool_cap = nc;
+    }
+    while (i < n) {
+        fk_conf_pool[off + i] = s[i];
+        i = i + 1;
+    }
+    fk_conf_pool[off + n] = 0;
+    fk_conf_pool_n = need;
+    return off;
 }
 static int fk_conf_n = 0;
 static int fk_conf_loaded = 0;
@@ -1112,25 +1143,26 @@ static void fk_conf_load(void) {
     cb[n] = 0;
     long long i = 0;
     while (i < n) {
-        fk_conf_reserve(fk_conf_n + 1);
+        long long ks, ke, vs, ve;
         while (i < n && (cb[i] == ' ' || cb[i] == '\t' || cb[i] == '\n' || cb[i] == '\r')) { i = i + 1; }
         if (i >= n) { break; }
         if (cb[i] == '#') { while (i < n && cb[i] != '\n') { i = i + 1; } continue; }
-        int kj = 0;
-        while (i < n && cb[i] != ' ' && cb[i] != '\t' && cb[i] != '=' && cb[i] != '\n' && cb[i] != '\r' && kj < 63) {
-            fk_conf_k[fk_conf_n][kj] = cb[i]; kj = kj + 1; i = i + 1;
-        }
-        fk_conf_k[fk_conf_n][kj] = 0;
+        ks = i;
+        while (i < n && cb[i] != ' ' && cb[i] != '\t' && cb[i] != '=' && cb[i] != '\n' && cb[i] != '\r') { i = i + 1; }
+        ke = i;
         while (i < n && (cb[i] == ' ' || cb[i] == '\t' || cb[i] == '=')) { i = i + 1; }
-        int vj = 0;
-        while (i < n && cb[i] != '\n' && cb[i] != '\r' && vj < 4095) {
-            fk_conf_v[fk_conf_n][vj] = cb[i]; vj = vj + 1; i = i + 1;
+        vs = i;
+        while (i < n && cb[i] != '\n' && cb[i] != '\r') { i = i + 1; }
+        ve = i;
+        while (ve > vs && (cb[ve - 1] == ' ' || cb[ve - 1] == '\t')) { ve = ve - 1; }
+        if (ke > ks) {
+            fk_conf_reserve(fk_conf_n + 1);
+            fk_conf_k[fk_conf_n] = fk_conf_pool_put(cb + ks, ke - ks);
+            fk_conf_v[fk_conf_n] = ve > vs ? fk_conf_pool_put(cb + vs, ve - vs) : fk_conf_pool_put("1", 1);
+            fk_conf_n = fk_conf_n + 1;
         }
-        while (vj > 0 && (fk_conf_v[fk_conf_n][vj - 1] == ' ' || fk_conf_v[fk_conf_n][vj - 1] == '\t')) { vj = vj - 1; }
-        fk_conf_v[fk_conf_n][vj] = 0;
-        if (vj == 0) { fk_conf_v[fk_conf_n][0] = '1'; fk_conf_v[fk_conf_n][1] = 0; }
-        if (kj > 0) { fk_conf_n = fk_conf_n + 1; }
     }
+    free(cb);
 }
 /* fk_conf: config-file replacement for getenv on OUR toggles. Returns the value string, or 0 when
  * the key is absent OR set to "0"/"" -- so `if (fk_conf("X"))` is on iff X is present and non-zero,
@@ -1139,10 +1171,11 @@ static char *fk_conf(const char *key) {
     fk_conf_load();
     int i = 0;
     while (i < fk_conf_n) {
+        const char *k = fk_conf_pool + fk_conf_k[i];
         int j = 0;
-        while (key[j] != 0 && fk_conf_k[i][j] != 0 && key[j] == fk_conf_k[i][j]) { j = j + 1; }
-        if (key[j] == 0 && fk_conf_k[i][j] == 0) {
-            char *v = fk_conf_v[i];
+        while (key[j] != 0 && k[j] != 0 && key[j] == k[j]) { j = j + 1; }
+        if (key[j] == 0 && k[j] == 0) {
+            char *v = fk_conf_pool + fk_conf_v[i];
             if (v[0] == 0 || (v[0] == '0' && v[1] == 0)) { return 0; }
             return v;
         }
@@ -1443,6 +1476,10 @@ FK_METAL_WEAK long long fk_metal_fence_wait_external(long long fence) {
     (void)fence;
     return FK_METAL_HANDLE_UNLINKED;
 }
+FK_METAL_WEAK long long fk_metal_deadline_external(long long ms) {
+    (void)ms;
+    return FK_METAL_HANDLE_UNLINKED;
+}
 /* MLX organ. Same weak-stub shape as Metal: a build without the mlx carrier
  * still compiles and still speaks mlx_linked=false. Tags 143/144 are free in
  * the evaluator (holes after metal_fence_wait's 142). Checkout-witness; the
@@ -1643,6 +1680,16 @@ static long long fk_metal_fence_wait_native(long long fence) {
     long long r = fk_metal_fence_wait_external(fence);
     if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
         return 0;
+    }
+    return r;
+}
+/* The caller's patience for every wait in this process, handed in as data (ms;
+ * -1 = the kernel's own wait). Answers the deadline that stood before so the
+ * hand-over reads back as data; -2 when no carrier is linked to hand it to. */
+static long long fk_metal_deadline_native(long long ms) {
+    long long r = fk_metal_deadline_external(ms);
+    if (r == FK_METAL_HANDLE_UNLINKED) {
+        return -2;
     }
     return r;
 }
@@ -3666,14 +3713,44 @@ static long long fk_inram_bytes(long long image, unsigned char *out, long long c
 }
 
 /* The door's argument contract, extended 2026-09-02 (the multi-arg
- * increment the per-recipe-JIT program named): an EVEN word is ONE
- * integer argument — the standing contract, behavior unchanged — and a
- * cons list of even words is UP TO EIGHT arguments, handed to the page
- * in x0..x7 per AAPCS64, the convention lo-compile-fn-n banks from.
- * Returns the arg count (1..8); 0 declines the shape (nil, a >8 list,
- * or any non-integer element), and the door answers nothing. */
+ * increment the per-recipe-JIT program named) and again 2026-09-03 (R28,
+ * the runtime-string increment receipts/2026-09-03-string-family-lowering.md
+ * named as its next stone): an EVEN word is ONE integer argument — the
+ * standing contract, behavior unchanged; a STRING value is TWO argument
+ * SLOTS — base pointer then byte length, fk_srange's own (pointer, length)
+ * shape, the same accessor str_byte_at/str_eq/str_find already read
+ * through — handed to the page as two AAPCS64 registers, the convention
+ * lo-strfind-runtime (form-lower.fk) banks from; a cons list of up to
+ * EIGHT SLOTS (an int spending one, a string spending two) is handed to
+ * the page in x0..x7, generalizing the existing multi-arg contract rather
+ * than replacing it. Returns the slot count (1..8); 0 declines the shape
+ * (nil, more than eight slots, or an element that is neither an integer
+ * nor a string), and the door answers nothing.
+ *
+ * POINTER SAFETY, GROUNDED NOT ASSUMED: the pointer handed out is fk_sb's
+ * own live base plus offset (fk_srange never copies), so it is only as
+ * durable as fk_sb's address. fk_sb moves on realloc, and every realloc
+ * site is a string being INTERNED (fk_sintern growing fk_sbp past
+ * fk_scap_b) — grep confirms every fk_sb assignment in this file is one of
+ * exactly two shapes: the one-time fk_sinit malloc, or a growth realloc
+ * beside an intern. Between this call returning and fk_inram_call using
+ * the pointer, the only code that runs is image-byte decode (integer/cons
+ * walking, no strings), the resident-cache scan (byte compare over
+ * fk_inram_cache, not fk_sb), and — on a cold image — mmap plus a raw byte
+ * copy into the new executable page: none of that interns a string. Then
+ * the crystallized leaf itself runs, and it cannot call back into this
+ * interpreter at all (form-lower.fk emits pure ALU/load/branch bytes for
+ * every leaf it builds today, no `bl` to a C native), so it cannot trigger
+ * fk_sintern either. The pointer is therefore live for the one call it is
+ * handed to. NAMED, NOT PAPERED OVER: this holds only while every
+ * crystallized leaf stays call-out-free. A future leaf shape that DOES
+ * call out mid-body must not carry a raw string pointer across that call
+ * — it would need to re-derive the pointer afterward, since fk_sb can have
+ * moved underneath it by then. */
 static long long fk_inram_args(long long arg_value, long long *a) {
     long long i;
+    const char *sptr;
+    long long slen;
     for (i = 0; i < 8; i = i + 1) {
         a[i] = 0;
     }
@@ -3681,17 +3758,33 @@ static long long fk_inram_args(long long arg_value, long long *a) {
         a[0] = arg_value >> 1;
         return 1;
     }
+    if (fk_srange(arg_value, &sptr, &slen)) {
+        a[0] = (long long)sptr;
+        a[1] = slen;
+        return 2;
+    }
     {
         long long n = 0;
         long long cell = arg_value;
         long long h;
         long long t;
         while (fk_arm64_u32_cons(cell, &h, &t)) {
-            if (n >= 8 || (h & 1) != 0) {
+            if ((h & 1) == 0) {
+                if (n >= 8) {
+                    return 0;
+                }
+                a[n] = h >> 1;
+                n = n + 1;
+            } else if (fk_srange(h, &sptr, &slen)) {
+                if (n + 2 > 8) {
+                    return 0;
+                }
+                a[n] = (long long)sptr;
+                a[n + 1] = slen;
+                n = n + 2;
+            } else {
                 return 0;
             }
-            a[n] = h >> 1;
-            n = n + 1;
             cell = t;
         }
         if (cell != 1 || n == 0) {
@@ -4384,7 +4477,7 @@ static long long fk_sensors_report(void) {
 }
 static long long fk_tempdir() {
     char *e = getenv("TMPDIR");
-    static char d[4096];
+    static char d[FK_PATH_CAP];
     long long n = 0;
     if (e != 0) {
         while (e[n] != 0 && n < 4095) {
@@ -4423,8 +4516,8 @@ static long long fk_keyeq(long long a, long long b) {
     return 1;
 }
 static long long fk_file_mtime(long long pv) {
-    static char p[4096];
-    fk_cstr(pv, p, 4096);
+    static char p[FK_PATH_CAP];
+    fk_cstr(pv, p, FK_PATH_CAP);
 #ifdef FK_HAVE_STAT_HEADER
     struct stat st;
     if (stat(p, &st) != 0) {
@@ -4484,7 +4577,7 @@ static long long fk_scan_run(long long sv, long long fromv, long long clsv) {
     return end << 1;
 }
 static void fk_unlink_segments(char *p) {
-    char q[4096];
+    char q[FK_PATH_CAP];
     long long pl = 0;
     while (p[pl] != 0) {
         pl = pl + 1;
@@ -4492,7 +4585,7 @@ static void fk_unlink_segments(char *p) {
     /* same danger class as fk_path_join above: this path feeds unlink(), so a
      * silently truncated "safe" sprintf could delete the wrong file. p's own
      * bound isn't otherwise enforced by every caller, so check it here too. */
-    if (pl + 20 > 4096) {
+    if (pl + 20 > FK_PATH_CAP) {
         fk_die("fk_unlink_segments: path exceeds buffer capacity");
     }
     long long s = 0;
@@ -4710,13 +4803,11 @@ static long long fk_fs_list_path(const char *p) {
     }
     return out;
 }
-/* fk_rmtree and fk_inv_walk both built a child path via sprintf(buf, "%s/%s", dir,
- * e->d_name) into a fixed 4096-byte stack buffer, with no check that dir + '/' +
- * d_name actually fits -- both are RECURSIVE (the built path becomes the next
- * call's `dir`), so a deep enough tree, or one long entry name, overflows the
- * stack buffer. A truncating "safe" sprintf would be worse here, not better:
- * fk_rmtree DELETES whatever path it's given, so silently operating on a
- * truncated path risks deleting the wrong thing. Hard-stop instead. */
+/* fk_rmtree and fk_inv_walk build child paths RECURSIVELY (the built path
+ * becomes the next call's `dir`) into FK_PATH_CAP buffers, so the join checks
+ * that dir + '/' + d_name fits and hard-stops when it does not. A truncating
+ * "safe" sprintf would be worse here, not better: fk_rmtree DELETES whatever
+ * path it is given, and a cut path names the wrong thing. */
 static void fk_path_join(char *out, long long outcap, const char *a, const char *b) {
     long long la = 0;
     while (a[la] != 0) {
@@ -4748,13 +4839,13 @@ static void fk_rmtree(char *p) {
         DIR *d = opendir(p);
         if (d) {
             struct dirent *e;
-            char child[4096];
+            char child[FK_PATH_CAP];
             while ((e = readdir(d)) != 0) {
                 if (e->d_name[0] == FK_CH_DOT &&
                     (e->d_name[1] == 0 || (e->d_name[1] == FK_CH_DOT && e->d_name[2] == 0))) {
                     continue;
                 }
-                fk_path_join(child, 4096, p, e->d_name);
+                fk_path_join(child, FK_PATH_CAP, p, e->d_name);
                 fk_rmtree(child);
             }
             closedir(d);
@@ -4778,7 +4869,7 @@ static void fk_inv_walk(const char *root, const char *dir, const char *suf, long
         return;
     }
     struct dirent *e;
-    char path[4096];
+    char path[FK_PATH_CAP];
     while ((e = readdir(d)) != 0) {
         if (e->d_name[0] == FK_CH_DOT &&
             (e->d_name[1] == 0 || (e->d_name[1] == FK_CH_DOT && e->d_name[2] == 0))) {
@@ -4787,7 +4878,7 @@ static void fk_inv_walk(const char *root, const char *dir, const char *suf, long
         if (fk_skip_entry(skipv, e->d_name)) {
             continue;
         }
-        fk_path_join(path, 4096, dir, e->d_name);
+        fk_path_join(path, FK_PATH_CAP, dir, e->d_name);
         if (fk_path_is_dir(path)) {
             fk_inv_walk(root, path, suf, skipv);
         } else {
@@ -4990,23 +5081,44 @@ static void fk_sockaddr4_set(struct fk_sockaddr4 *a, long long port, unsigned in
         z = z + 1;
     }
 }
-static fk_os_socket_t fk_sock_raw[1024];
-static int fk_sock_kind[1024];
+#define FK_SOCK_CAP_INIT 1024 /* fk_sock_raw/kind: live socket handles (listeners kind 1, streams kind 2). Birth size only -- the table doubles on demand (fk_sock_grow, kernel_stat 31/32 = live cap / doublings). The old fixed 1024 closed the 1025th socket and handed back -1 with no word; only the allocator can refuse now. */
+static fk_os_socket_t *fk_sock_raw;
+static int *fk_sock_kind;
+static long long fk_sock_cap, fk_sock_grows;
+static void fk_sock_grow(void) {
+    long long nc = fk_sock_cap == 0 ? FK_SOCK_CAP_INIT : fk_sock_cap * 2;
+    long long i = fk_sock_cap;
+    fk_sock_raw = (fk_os_socket_t *)realloc(fk_sock_raw, (unsigned long)nc * sizeof(fk_os_socket_t));
+    fk_sock_kind = (int *)realloc(fk_sock_kind, (unsigned long)nc * sizeof(int));
+    if (fk_sock_raw == 0 || fk_sock_kind == 0) {
+        fk_die("fk_sock_grow: out of memory growing the socket handle table");
+    }
+    while (i < nc) {
+        fk_sock_kind[i] = 0;
+        i = i + 1;
+    }
+    if (fk_sock_cap != 0) {
+        fk_sock_grows = fk_sock_grows + 1;
+    }
+    fk_sock_cap = nc;
+}
 static long long fk_sock_alloc(fk_os_socket_t s, int kind) {
     long long h = 1;
-    while (h < 1024) {
-        if (fk_sock_kind[h] == 0) {
-            fk_sock_raw[h] = s;
-            fk_sock_kind[h] = kind;
-            return h;
-        }
+    if (fk_sock_cap == 0) {
+        fk_sock_grow();
+    }
+    while (h < fk_sock_cap && fk_sock_kind[h] != 0) {
         h = h + 1;
     }
-    fk_os_close_socket(s);
-    return -1;
+    if (h >= fk_sock_cap) {
+        fk_sock_grow();
+    }
+    fk_sock_raw[h] = s;
+    fk_sock_kind[h] = kind;
+    return h;
 }
 static fk_os_socket_t fk_sock_lookup(long long h, int kind) {
-    if (h < 1 || h >= 1024 || fk_sock_kind[h] == 0) {
+    if (h < 1 || h >= fk_sock_cap || fk_sock_kind[h] == 0) {
         return FK_INVALID_SOCKET;
     }
     if (kind != 0 && fk_sock_kind[h] != kind) {
@@ -5149,7 +5261,7 @@ static long long fk_socket_close_native(long long h) {
  * cross-device; loopback witnesses it. */
 #if defined(_WIN32)
 static long long fk_sense_publish(long long port) {
-    static char buf[4096];
+    static char buf[FK_MESH_MSG_CAP];
     int n = 0;
     long long mic = fk_mic_count();
     long long cam = fk_cam_count();
@@ -5248,7 +5360,7 @@ static long long fk_mesh_serve(long long port) {
 extern int sendto(fk_os_socket_t, const char *, int, int, const void *, int);
 extern int recvfrom(fk_os_socket_t, char *, int, int, void *, int *);
 static long long fk_mesh_announce(long long port) {
-    static char buf[4096];
+    static char buf[FK_MESH_MSG_CAP];
     int n = 0;
     long long mic = fk_mic_count();
     long long cam = fk_cam_count();
@@ -5498,7 +5610,7 @@ static long long fk_api_health(void) {
     return n;
 }
 static long long fk_mesh_register(void) {
-    static char body[4096];
+    static char body[FK_MESH_MSG_CAP];
     int n;
     long long mic = fk_mic_count();
     long long cam = fk_cam_count();
@@ -5966,6 +6078,29 @@ static long long fk_http_body_offset(const char *buf, long long n) {
 static long long fk_http_headers(const char *, long long, long long);
 static long long fk_http_dict_with_headers(long long, long long, long long, long long, long long);
 static long long fk_http_append_request_headers(char *, long long, long long, long long);
+/* The whole GET request -- request line, Host, Connection, every well-formed
+ * caller header, the blank line -- in one heap buffer sized by a measuring
+ * pass, so a header of any length and any count reaches the wire. The caller
+ * frees it; *out_n is the byte count. */
+static long long fk_path_len(const char *p);
+static char *fk_http_build_request(const char *path, const char *host, long long headersv,
+                                   long long *out_n) {
+    long long base = 42 + fk_path_len(path) + fk_path_len(host);
+    long long cap = fk_http_append_request_headers(0, base, 0, headersv) + 3;
+    char *req = (char *)malloc((unsigned long)cap);
+    long long rn;
+    if (req == 0) {
+        fk_die("fk_http_build_request: out of memory for the request");
+    }
+    rn = sprintf(req, "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n", path, host);
+    rn = fk_http_append_request_headers(req, rn, cap, headersv);
+    req[rn] = 13;
+    req[rn + 1] = 10;
+    rn = rn + 2;
+    req[rn] = 0;
+    *out_n = rn;
+    return req;
+}
 static long long fk_http_get_plain(long long urlv, long long headersv, long long timeoutv) {
     (void)timeoutv;
     long long started = fk_now_ms();
@@ -6044,23 +6179,19 @@ static long long fk_http_get_plain(long long urlv, long long headersv, long long
     if (fd < 0) {
         return fk_http_dict(0, fk_sbuf("", 0), fk_sbuf("http_get: connect failed", 24));
     }
-    char req[4096];
-    long long rn = sprintf(req, "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n", path, host);
-    rn = fk_http_append_request_headers(req, rn, 4096, headersv);
-    if (rn + 2 < 4096) {
-        req[rn] = 13;
-        req[rn + 1] = 10;
-        rn = rn + 2;
-    }
+    long long rn = 0;
+    char *req = fk_http_build_request(path, host, headersv, &rn);
     long long wr = 0;
     while (wr < rn) {
         long long nwr = write(fd, req + wr, rn - wr);
         if (nwr <= 0) {
+            free(req);
             close(fd);
             return fk_http_dict(0, fk_sbuf("", 0), fk_sbuf("http_get: write failed", 22));
         }
         wr = wr + nwr;
     }
+    free(req);
     /* Heap-grown: the old static 64KB amputated responses past 65,535 bytes —
      * a shortwhole in the success path, the wall the chunked socket lane was
      * working around (healed 2026-08-27, same family as host-exec's cap). */
@@ -6115,8 +6246,12 @@ static int fk_http_lit_eq_ci(const char *buf, long long n, const char *lit) {
     }
     return i == n && lit[i] == 0;
 }
+/* A header is refused for its SHAPE (token bytes only in the name; no CR, LF,
+ * NUL or control bytes in the value -- the injection guard) or for naming a
+ * hop-by-hop field the kernel owns. Never for its length: the request buffer
+ * is sized to fit whatever the caller hands over. */
 static int fk_http_header_name_ok(const char *buf, long long n) {
-    if (n <= 0 || n > 128) {
+    if (n <= 0) {
         return 0;
     }
     long long i = 0;
@@ -6140,7 +6275,7 @@ static int fk_http_header_name_ok(const char *buf, long long n) {
     return 1;
 }
 static int fk_http_header_value_ok(const char *buf, long long n) {
-    if (n < 0 || n > 1024) {
+    if (n < 0) {
         return 0;
     }
     long long i = 0;
@@ -6166,11 +6301,15 @@ static long long fk_http_append_bytes(char *out, long long pos, long long cap, c
     }
     return pos;
 }
+/* Appends every well-formed caller header (a (43001 name value) row) to req.
+ * With req == 0 it MEASURES instead: it answers the byte position the same
+ * headers would reach, so fk_http_build_request can size the request exactly
+ * and no header is dropped for not fitting (the old fixed buffer skipped any
+ * header past its brim, and any header past the 64th, without a word). */
 static long long fk_http_append_request_headers(char *req, long long rn, long long cap,
                                                 long long headersv) {
     long long q = headersv >> 1;
-    long long count = 0;
-    while (q >= 1 && q <= fk_hp && count < 64) {
+    while (q >= 1 && q <= fk_hp) {
         long long row = fk_hh[q];
         if ((row & 1) != 0) {
             long long rp = row >> 1;
@@ -6190,12 +6329,15 @@ static long long fk_http_append_request_headers(char *req, long long rn, long lo
                             long long nl = fk_sl[ns];
                             long long vl = fk_sl[vs];
                             if (fk_http_header_name_ok(name, nl) &&
-                                fk_http_header_value_ok(value, vl) && rn + nl + vl + 4 < cap) {
-                                rn = fk_http_append_bytes(req, rn, cap, name, nl);
-                                rn = fk_http_append_bytes(req, rn, cap, ": ", 2);
-                                rn = fk_http_append_bytes(req, rn, cap, value, vl);
-                                rn = fk_http_append_bytes(req, rn, cap, "\r\n", 2);
-                                count = count + 1;
+                                fk_http_header_value_ok(value, vl)) {
+                                if (req == 0) {
+                                    rn = rn + nl + vl + 4;
+                                } else {
+                                    rn = fk_http_append_bytes(req, rn, cap, name, nl);
+                                    rn = fk_http_append_bytes(req, rn, cap, ": ", 2);
+                                    rn = fk_http_append_bytes(req, rn, cap, value, vl);
+                                    rn = fk_http_append_bytes(req, rn, cap, "\r\n", 2);
+                                }
                             }
                         }
                     }
@@ -6636,18 +6778,13 @@ static long long fk_https_get_ssl(long long urlv, long long headersv, long long 
         close(fd);
         return fk_http_dict(0, fk_sbuf("", 0), fk_sbuf("http_get: tls verify failed", 27));
     }
-    char req[4096];
-    long long rn = sprintf(req, "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n", path, host);
-    rn = fk_http_append_request_headers(req, rn, 4096, headersv);
-    if (rn + 2 < 4096) {
-        req[rn] = 13;
-        req[rn + 1] = 10;
-        rn = rn + 2;
-    }
+    long long rn = 0;
+    char *req = fk_http_build_request(path, host, headersv, &rn);
     long long wr = 0;
     while (wr < rn) {
         int nwr = SSL_write(ssl, req + wr, (int)(rn - wr));
         if (nwr <= 0) {
+            free(req);
             SSL_free(ssl);
             SSL_CTX_free(ctx);
             close(fd);
@@ -6655,6 +6792,7 @@ static long long fk_https_get_ssl(long long urlv, long long headersv, long long 
         }
         wr = wr + nwr;
     }
+    free(req);
     /* Heap-grown past the old static 64KB amputation (healed 2026-08-27) —
      * the wall the byte-range fetchers were verifying their way around. */
     long long rcap = 65536;
@@ -7572,28 +7710,59 @@ static void fk_pv_inline_number(long long v) {
         printf("%lld", v);
     }
 }
-static void fk_pv_list(long long v, long long depth) {
-    if (depth > 1024) {
-        fk_die("fk_pv_list: nested output exceeds 1024 levels");
-    }
-    putchar(FK_CH_LBRACKET);
+/* The list printer walks nesting on its own stack of open brackets (the cons
+ * position to resume after a nested list closes), so output depth is bounded
+ * by memory alone. FK_PV_NEST_CAP_INIT is a birth size only; the stack doubles
+ * on demand (kernel_stat 35/36). The old recursion died at a chosen 1024
+ * levels; cons cells never mutate, so nesting is finite by construction and
+ * needs no depth wall. */
+#define FK_PV_NEST_CAP_INIT 1024
+static long long *fk_pv_nest, fk_pv_nest_cap, fk_pv_nest_grows;
+static void fk_pv_list(long long v) {
+    long long sp = 0;
     long long p = v >> 1;
     int first = 1;
-    while (p >= 1 && p <= fk_hp) {
-        if (!first) {
-            putchar(FK_CH_COMMA);
-            putchar(FK_CH_SPACE);
-        }
-        long long item = fk_hh[p];
-        if (fk_is_output_list(item)) {
-            fk_pv_list(item, depth + 1);
-        } else {
+    putchar(FK_CH_LBRACKET);
+    for (;;) {
+        if (p >= 1 && p <= fk_hp) {
+            long long item = fk_hh[p];
+            long long next = fk_ht[p] >> 1;
+            if (!first) {
+                putchar(FK_CH_COMMA);
+                putchar(FK_CH_SPACE);
+            }
+            if (fk_is_output_list(item)) {
+                if (sp >= fk_pv_nest_cap) {
+                    long long nc = fk_pv_nest_cap == 0 ? FK_PV_NEST_CAP_INIT : fk_pv_nest_cap * 2;
+                    fk_pv_nest = (long long *)realloc(fk_pv_nest, (unsigned long)(nc * 8));
+                    if (fk_pv_nest == 0) {
+                        fk_die("fk_pv_list: out of memory growing the nesting stack");
+                    }
+                    if (fk_pv_nest_cap != 0) {
+                        fk_pv_nest_grows = fk_pv_nest_grows + 1;
+                    }
+                    fk_pv_nest_cap = nc;
+                }
+                fk_pv_nest[sp] = next;
+                sp = sp + 1;
+                putchar(FK_CH_LBRACKET);
+                p = item >> 1;
+                first = 1;
+                continue;
+            }
             fk_pv_inline_number(item);
+            first = 0;
+            p = next;
+            continue;
         }
+        putchar(FK_CH_RBRACKET);
+        if (sp == 0) {
+            return;
+        }
+        sp = sp - 1;
+        p = fk_pv_nest[sp];
         first = 0;
-        p = fk_ht[p] >> 1;
     }
-    putchar(FK_CH_RBRACKET);
 }
 /* The result boundary. Until the string band existed (2026-07-31) this asked the
  * NODE whether the result was a string (fk_str_root_depth), because the WORD could
@@ -7607,7 +7776,7 @@ static void fk_pv_root(long long v) {
     if (fk_is_str(v)) {
         fk_psv(v);
     } else if (fk_is_output_list(v)) {
-        fk_pv_list(v, 0);
+        fk_pv_list(v);
         putchar(FK_CH_LF);
     } else {
         fk_pv(v);
@@ -7618,7 +7787,7 @@ static long long fk_walk_body(long long i, long long fp) {
     for (;;) {
         long long t = fk_node[i][0];
         if (t < 0 || t >= FK_OPCODE_ARM_CAP) {
-            fk_die("fk_walk_body: corrupt node tag");
+            fk_die("fk_walk_body: node tag outside FK_OPCODE_ARM_CAP (0..255) -- the walker's tag space is the contract the op table is generated against; this is a corrupt node or a tag minted past the last arm");
         }
         fk_arms[t] = fk_arms[t] + 1;
         if (t == 6) {
@@ -7866,7 +8035,7 @@ static long long fk_walk(long long i, long long fp) {
     }
     long long t = fk_node[i][0];
     if (t < 0 || t >= FK_OPCODE_ARM_CAP) {
-        fk_die("fk_walk: corrupt node tag");
+        fk_die("fk_walk: node tag outside FK_OPCODE_ARM_CAP (0..255) -- the walker's tag space is the contract the op table is generated against; this is a corrupt node or a tag minted past the last arm");
     }
     fk_arms[t] = fk_arms[t] + 1;
     if (t == 1) {
@@ -9046,20 +9215,20 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_fbox(fk_log_d(fk_num(fk_walk(fk_node[i][1], fp))));
     }
     if (t == 55) {
-        static char p[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
+        static char p[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         fk_unlink_segments(p);
         return rmdir(p) << 1;
     }
     if (t == 56) {
-        static char p[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
+        static char p[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         int rc = mkdir(p, 0777);
         return (rc < 0 ? 0 : 1) << 1;
     }
     if (t == 57) {
-        static char p[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
+        static char p[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         int fd = open(p, 0);
         if (fd < 0) {
             return 0;
@@ -9068,20 +9237,20 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return 2;
     }
     if (t == 58) {
-        static char p[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
+        static char p[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         return unlink(p) << 1;
     }
     if (t == 59) {
-        static char a[4096];
-        static char b[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), a, 4096);
-        fk_cstr(fk_walk(fk_node[i][2], fp), b, 4096);
+        static char a[FK_PATH_CAP];
+        static char b[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), a, FK_PATH_CAP);
+        fk_cstr(fk_walk(fk_node[i][2], fp), b, FK_PATH_CAP);
         return rename(a, b) << 1;
     }
     if (t == 60) {
-        static char p[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
+        static char p[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         int fd = open(p, 0);
         if (fd < 0) {
             return -2;
@@ -9091,8 +9260,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return ((long long)n) << 1;
     }
     if (t == 61) {
-        static char p[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
+        static char p[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         long long xs = fk_walk(fk_node[i][2], fp);
         int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0666);
         if (fd < 0) {
@@ -9129,8 +9298,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return total << 1;
     }
     if (t == 62) {
-        static char p[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
+        static char p[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         long long off = fk_walk(fk_node[i][2], fp) >> 1;
         long long len = fk_walk(fk_node[i][3], fp) >> 1;
         if (len <= 0) {
@@ -9158,10 +9327,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_strv(fk_sintern(fk_sbp, got));
     }
     if (t == 63) {
-        static char p[4096];
+        static char p[FK_PATH_CAP];
         static long long fk_nreads;
         long long pv63 = fk_walk(fk_node[i][1], fp);
-        fk_cstr(pv63, p, 4096);
+        fk_cstr(pv63, p, FK_PATH_CAP);
         fk_nreads = fk_nreads + 1;
         int fd = open(p, O_RDBIN);
         if (fd < 0) {
@@ -9324,8 +9493,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_tempdir();
     }
     if (t == 104) {
-        static char p[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
+        static char p[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         long long sv104 = fk_walk(fk_node[i][2], fp);
         long long sa104 = fk_stri(sv104);
         if (sa104 < 0 || sa104 >= fk_sp) {
@@ -9390,8 +9559,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (fk_cap == 0) {
             fk_arena();
         }
-        static char fkl_p[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), fkl_p, 4096);
+        static char fkl_p[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), fkl_p, FK_PATH_CAP);
         void *fkl_d = opendir(fkl_p);
         if (fkl_d == 0) {
             return 1;
@@ -9491,8 +9660,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
 #endif
     }
     if (t == 133) {
-        static char p70[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096);
+        static char p70[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), p70, FK_PATH_CAP);
         int fd70 = open(p70, 0);
         return ((long long)fd70) << 1;
     }
@@ -9595,6 +9764,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
      * call. The op table lists ops; FK_OPCODE_ARM_CAP bounds them. */
     if (t == 142) {
         return fk_metal_fence_wait_native(fk_walk(fk_node[i][1], fp) >> 1) << 1;
+    }
+    if (t == 148) {
+        return fk_metal_deadline_native(fk_walk(fk_node[i][1], fp) >> 1) << 1;
     }
     if (t == 143) {
         return fk_mlx_status_native();
@@ -9734,25 +9906,25 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_mic_stream_stop() << 1;
     }
     if (t == 237) {
-        static char p237a[4096];
-        static char p237b[4096];
+        static char p237a[FK_PATH_CAP];
+        static char p237b[FK_PATH_CAP];
         long long a237 = fk_walk(fk_node[i][1], fp);
         fk_vp(a237);
         long long b237 = fk_walk(fk_node[i][2], fp);
         fk_vsp = fk_vsp - 1;
-        fk_cstr(fk_vs[fk_vsp], p237a, 4096);
-        fk_cstr(b237, p237b, 4096);
+        fk_cstr(fk_vs[fk_vsp], p237a, FK_PATH_CAP);
+        fk_cstr(b237, p237b, FK_PATH_CAP);
         return fk_wav_loopback(p237a, p237b);
     }
     if (t == 200) {
-        static char p200[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p200, 4096);
+        static char p200[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), p200, FK_PATH_CAP);
         return fk_path_is_dir(p200) ? 2 : 0;
     }
     if (t == 202) {
-        static char r202[4096];
+        static char r202[FK_PATH_CAP];
         static char s202[256];
-        fk_cstr(fk_walk(fk_node[i][1], fp), r202, 4096);
+        fk_cstr(fk_walk(fk_node[i][1], fp), r202, FK_PATH_CAP);
         fk_cstr(fk_walk(fk_node[i][2], fp), s202, 256);
         fk_inv_reset();
         fk_inv_walk(r202, r202, s202, fk_walk(fk_node[i][3], fp));
@@ -9990,10 +10162,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 18) {
             return fk_import_refusal << 1;
         }
-        /* 19..30: the growth pulses -- value-node table, cons heap, AST
-         * table, source text, value stack, binding stack (live cap /
-         * doublings each). There are no walls any more; a runaway
-         * consumer shows as monotone growth. */
+        /* 19..40: the growth pulses -- value-node table, cons heap, AST
+         * table, source text, value stack, binding stack, socket handles,
+         * binding save stack, list-print nesting stack, conf entries,
+         * conf byte pool (live cap / doublings each). There are no walls
+         * any more; a runaway consumer shows as monotone growth. */
         if (ks_k == 19) {
             return fk_node_cap << 1;
         }
@@ -10029,6 +10202,36 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 30) {
             return fk_bd_grows << 1;
+        }
+        if (ks_k == 31) {
+            return fk_sock_cap << 1;
+        }
+        if (ks_k == 32) {
+            return fk_sock_grows << 1;
+        }
+        if (ks_k == 33) {
+            return fk_bd_save_cap << 1;
+        }
+        if (ks_k == 34) {
+            return fk_bd_save_grows << 1;
+        }
+        if (ks_k == 35) {
+            return fk_pv_nest_cap << 1;
+        }
+        if (ks_k == 36) {
+            return fk_pv_nest_grows << 1;
+        }
+        if (ks_k == 37) {
+            return fk_conf_cap << 1;
+        }
+        if (ks_k == 38) {
+            return fk_conf_grows << 1;
+        }
+        if (ks_k == 39) {
+            return fk_conf_pool_cap << 1;
+        }
+        if (ks_k == 40) {
+            return fk_conf_pool_grows << 1;
         }
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
@@ -10212,7 +10415,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             pfirst = 0;
             long long pel = fk_hh[pp];
             if (fk_is_output_list(pel)) {
-                fk_pv_list(pel, 0);
+                fk_pv_list(pel);
             } else {
                 fk_pv_inline_number(pel);
             }
@@ -10798,42 +11001,48 @@ static void fk_bd_pop(void) {
  * fk_bd_top afterward brought the COUNT back but not the DATA already clobbered
  * at those indices -- every name the enclosing do had bound became silently
  * unlookupable (degrading to the unbound-name default, 0) for the rest of that
- * do's own parsing. These two helpers save/restore the actual slice, not just
- * the pointer. (Ported from sibling branch commit f99d3232.) */
-/* GROWABLE ARENA, not a single reused 128-slot buffer: a fixed shared buffer
+ * do's own parsing.
+ *
+ * GROWABLE ARENA, not a single reused 128-slot buffer: a fixed shared buffer
  * looked correct for one level (save at entry, restore at exit) but a DOUBLY
  * nested defn breaks it -- the inner defn's OWN fk_bd_save() call, entered
  * while the OUTER nested defn's body is still being parsed, physically
  * overwrites the SAME buffer indices the outer defn's own save wrote, so by
  * the time the outer defn's own fk_bd_restore() finally runs, the data at
  * those indices is the INNER defn's snapshot, not the outer's true enclosing
- * one -- a silent misread, discovered while wiring closure-capture support
- * (which needs to read an enclosing snapshot from arbitrarily deep inside a
- * body-parse, making the collision far easier to hit). fk_bd_save()/restore()
- * calls are always properly LIFO-nested (they mirror the recursive-descent
- * parser itself: a restore always fires before the save that contains it
- * returns), so a plain bump-and-shrink arena is correct: save APPENDS the
- * live slice to the arena's current top and returns that start offset;
- * restore computes the count as "how far the arena grew since that offset"
- * (valid only because nothing else could have pushed without also having
- * popped by now) and pops the arena back down, so nested calls can never
- * alias each other's data. */
+ * one -- a silent misread (x and p lost). Two independent sessions hit this
+ * the same day (one wiring closure-capture support, which reads an enclosing
+ * snapshot from arbitrarily deep inside a body-parse and made the collision
+ * far easier to hit; witnessed 2026-09-03 both times) and converged on the
+ * same fix: fk_bd_save()/restore() calls are always properly LIFO-nested
+ * (they mirror the recursive-descent parser itself: a restore always fires
+ * before the save that contains it returns), so a plain bump-and-shrink
+ * arena is correct. This is the arena shape (save returns the arena's
+ * absolute start offset, restore computes the count as "how far the arena
+ * grew since that offset" -- valid only because nothing else could have
+ * pushed without also having popped by now, and pops the arena back down so
+ * nested calls can never alias each other's data); this arena IS what
+ * kernel_stat 33/34 (fk_bd_save_cap/fk_bd_save_grows, declared once, shared
+ * with the other capacity/doubling pairs nearby) report -- the arena's own
+ * live capacity and doubling count, not a second, differently-shaped
+ * stack's. */
 static long long *fk_bd_arena_s, *fk_bd_arena_n, *fk_bd_arena_off;
-static long long fk_bd_arena_top, fk_bd_arena_cap;
+static long long fk_bd_arena_top;
 static long long fk_bd_save(void) {
     long long n = fk_bd_top;
-    if (fk_bd_arena_top + n > fk_bd_arena_cap) {
-        long long nc = fk_bd_arena_cap == 0 ? 1024 : fk_bd_arena_cap * 2;
+    if (fk_bd_arena_top + n > fk_bd_save_cap) {
+        long long nc = fk_bd_save_cap == 0 ? 1024 : fk_bd_save_cap * 2;
         while (nc < fk_bd_arena_top + n) {
             nc = nc * 2;
         }
+        fk_bd_save_grows = fk_bd_save_grows + 1;
         fk_bd_arena_s = (long long *)realloc(fk_bd_arena_s, (unsigned long)(nc * 8));
         fk_bd_arena_n = (long long *)realloc(fk_bd_arena_n, (unsigned long)(nc * 8));
         fk_bd_arena_off = (long long *)realloc(fk_bd_arena_off, (unsigned long)(nc * 8));
         if (fk_bd_arena_s == 0 || fk_bd_arena_n == 0 || fk_bd_arena_off == 0) {
             fk_die("fk_bd_save: out of memory growing the binding-snapshot arena");
         }
-        fk_bd_arena_cap = nc;
+        fk_bd_save_cap = nc;
     }
     long long start = fk_bd_arena_top;
     long long i = 0;
@@ -11245,16 +11454,14 @@ static long long fk_sparse(void) {
                 return fk_smknode(tag, xs, 0, 0);
             }
             if (ar > 3) {
-                /* arity-4+ ops (today only make_nodeid, tag 91) build a LIST-shaped node
-                 * (child [1] = a cons list of the args, per flt-nodeid4 + the tag-91
-                 * evaluator) that the generic 3-child parse path below CANNOT form -- the
-                 * --src parser has no lowering for them; they are flatten-only. Without
-                 * this case the 4th arg blocks the ')' check, fk_spos never advances, and
-                 * the parse spins to the AST cap (MEASURED: 677k diagnostics/6s on
-                 * resource-port.fk / shell-lower.fk). Diagnose PRECISELY, drain the balanced
-                 * form so the parser stays synced, and decline to nothing. */
+                /* A 4+-arg op has no source lowering yet. The one arity-4 row in the
+                 * manifest, make_nodeid (tag 91, the content-address constructor), lowers
+                 * above through its cons-list carrier; any other 4+-arity row is a manifest
+                 * entry whose parser lowering is unfinished work. The generic 3-child path
+                 * below cannot hold a 4th arg, so drain the balanced form here (fk_spos
+                 * must advance past it or the ')' check stalls) and decline to nothing. */
                 fk_diag(FK_DIAG_ERR, s,
-                        "op '%.*s' (arity %lld) is flatten-only; the --src parser cannot lower a 4+-arg op -- flatten this source to a .tbl instead",
+                        "op '%.*s' (arity %lld) has no source lowering yet -- only make_nodeid (arity 4) lowers here; a 4+-arg op needs its own parser lowering (unfinished work, not a limit)",
                         (int)hn, fk_srctext + s, ar);
                 long long depth = 1;
                 while (fk_spos < fk_slen && depth > 0) {
@@ -12531,7 +12738,7 @@ static void fk_diag_path(const char *level, const char *path, const char *msg) {
  * source/JIT door even parsed it.  Keep the metadata heap-backed and grow it
  * with the observed graph; runtime meaning remains in Form, this is only the
  * temporary seed's source-loader bookkeeping. */
-static char (*fk_src_dep_path)[4096];
+static char (*fk_src_dep_path)[FK_PATH_CAP];
 static long long *fk_src_dep_mtime;
 static long long *fk_src_dep_size;
 /* CONTENT DIGEST per dependency. The artifact identity used to be
@@ -12569,7 +12776,7 @@ static long long *fk_src_dep_text_off;
 static long long *fk_src_dep_text_len;
 static long long fk_src_dep_count;
 static long long fk_src_dep_cap;
-static char fk_src_root_path[4096];
+static char fk_src_root_path[FK_PATH_CAP];
 static char *fk_src_root_text;
 static long long fk_src_root_cap;
 static long long fk_src_root_len;
@@ -12603,7 +12810,7 @@ static void fk_cstr_copy(char *dst, const char *src, long long cap);
 static int fk_src_dep_reserve(long long want) {
     long long cap = fk_src_dep_cap;
     long long i = 0;
-    char (*paths)[4096];
+    char (*paths)[FK_PATH_CAP];
     long long *mtimes;
     long long *sizes;
     unsigned long long *digests;
@@ -12644,7 +12851,7 @@ static int fk_src_dep_reserve(long long want) {
         return 0;
     }
     while (i < fk_src_dep_count) {
-        fk_cstr_copy(paths[i], fk_src_dep_path[i], 4096);
+        fk_cstr_copy(paths[i], fk_src_dep_path[i], FK_PATH_CAP);
         mtimes[i] = fk_src_dep_mtime[i];
         sizes[i] = fk_src_dep_size[i];
         digests[i] = fk_src_dep_digest[i];
@@ -12762,12 +12969,12 @@ extern char *realpath(const char *, char *);
 #endif
 /* the .fkb identity spelling of a path: one absolute spelling regardless of
  * invocation CWD, then anchored at the lexical repo root so the same file
- * keeps one name across CWD flips and checkout moves. out must hold 4096
+ * keeps one name across CWD flips and checkout moves. out must hold FK_PATH_CAP
  * bytes. Verbatim on resolve failure -- degrade to the old spelling (an
  * honest rebuild), never fabricate an identity. */
 static const char *fk_path_canon_id(const char *path, char *out) {
 #if defined(_WIN32)
-    if (_fullpath(out, path, 4096) == 0) {
+    if (_fullpath(out, path, FK_PATH_CAP) == 0) {
         return path;
     }
 #else
@@ -12940,7 +13147,7 @@ static long long fk_src_unit_mtime(void) {
 static int fk_src_unit_hash_range(long long start, long long end, char *out, long long cap) {
     long long pos = 0;
     long long i = start;
-    char canon[4096];
+    char canon[FK_PATH_CAP];
     unsigned long long fold = 14695981039346656037ULL;
     long long count = 0;
     /* v2 -> v3: the identity was the full dependency text, and a unit past
@@ -13074,8 +13281,8 @@ static int fk_src_collect_import_token(const char *owner_path, long long owner_i
     if (!fk_src_prelude_fk_token(text, start, n)) {
         return 1;
     }
-    char dep_path[4096];
-    if (!fk_path_resolve_fk_dep(owner_path, text + start, n, dep_path, 4096)) {
+    char dep_path[FK_PATH_CAP];
+    if (!fk_path_resolve_fk_dep(owner_path, text + start, n, dep_path, FK_PATH_CAP)) {
         fk_diag_path("error", owner_path, "import path exceeds buffer");
         return 0;
     }
@@ -13239,8 +13446,8 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
                             !fk_src_prelude_bml_token(text, start, tn)) {
                             break;
                         }
-                        char dep_path[4096];
-                        if (!fk_path_resolve_fk_dep(owner_path, text + start, tn, dep_path, 4096)) {
+                        char dep_path[FK_PATH_CAP];
+                        if (!fk_path_resolve_fk_dep(owner_path, text + start, tn, dep_path, FK_PATH_CAP)) {
                             fk_diag_path("error", owner_path, "prelude path exceeds buffer");
                             return 0;
                         }
@@ -13342,7 +13549,7 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
         return 0;
     }
     long long idx = fk_src_dep_count;
-    fk_cstr_copy(fk_src_dep_path[fk_src_dep_count], path, 4096);
+    fk_cstr_copy(fk_src_dep_path[fk_src_dep_count], path, FK_PATH_CAP);
     fk_src_dep_mtime[fk_src_dep_count] = mtime;
     fk_src_dep_size[fk_src_dep_count] = size;
     fk_src_dep_digest[fk_src_dep_count] = fk_bytes_fnv1a(owned, got);
@@ -13382,7 +13589,7 @@ static int fk_src_load_unit(const char *root_path, char *source_hash, long long 
     fk_src_dep_count = 0;
     fk_src_root_len = 0;
     fk_src_root_text[0] = 0;
-    fk_cstr_copy(fk_src_root_path, root_path, 4096);
+    fk_cstr_copy(fk_src_root_path, root_path, FK_PATH_CAP);
     if (!fk_src_collect_file(root_path, -1)) {
         return 0;
     }
@@ -13406,7 +13613,7 @@ static int fk_src_load_unit_buffer(const char *root_path, char *owned, long long
     fk_src_dep_count = 0;
     fk_src_root_len = 0;
     fk_src_root_text[0] = 0;
-    fk_cstr_copy(fk_src_root_path, root_path, 4096);
+    fk_cstr_copy(fk_src_root_path, root_path, FK_PATH_CAP);
     if (!fk_src_collect_bytes(root_path, owned, got, mtime, got, -1)) {
         return 0;
     }
@@ -13598,9 +13805,9 @@ extern int kill(int, int);
  * compile in that directory. Windows keeps the leak: no kill() there, and
  * that lane is the port shim, not the sweep path. */
 static void fk_src_sweep_dead_temps(const char *fkb_path) {
-    char dir[4160];
+    char dir[FK_PATH_CAP + 64];
     long long n = fk_path_len(fkb_path);
-    if (n > 4096) {
+    if (n > FK_PATH_CAP) {
         return;
     }
     long long cut = n;
@@ -13704,9 +13911,9 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
      * the previous one, never a TRUNC-in-progress partial (the "truncated
      * artifact" die class). The sym lens lands before the image so a fresh
      * .fkb is never visible without its compile-error record. */
-    char fkb_tmp[4160];
-    char sym_tmp[4160];
-    if (fk_path_len(fkb_path) > 4096 || fk_path_len(sym_path) > 4096) {
+    char fkb_tmp[FK_PATH_CAP + 64];
+    char sym_tmp[FK_PATH_CAP + 64];
+    if (fk_path_len(fkb_path) > FK_PATH_CAP || fk_path_len(sym_path) > FK_PATH_CAP) {
         return 0;
     }
 #if !defined(_WIN32)
@@ -13724,7 +13931,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     }
     fk_fkb_write_overflow = 0;
     int ok = 1;
-    char canon[4096];
+    char canon[FK_PATH_CAP];
     ok = ok && fk_write_all_raw(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
     ok = ok && fk_fkb_write_u32(fd, 5);
@@ -14075,7 +14282,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
      * skipped the hash read after a src-path mismatch and desynced every
      * later read into "truncated string" -- the wrong-CWD reproduction. */
     int builder_matches = fk_fkb_read_string_matches_cstr(FK_FKB_BUILDER_ID);
-    char canon[4096];
+    char canon[FK_PATH_CAP];
     int src_path_matches =
         fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon));
     int source_hash_matches = fk_fkb_read_string_matches_cstr(expected_source_hash);
@@ -14330,7 +14537,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
                         "meaning -- the binary that compiled them does");
         return 0;
     }
-    char canon[4096];
+    char canon[FK_PATH_CAP];
     if (expected_src_path != 0) {
         if (!fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon))) {
             source_identity_ok = 0;
@@ -14738,14 +14945,14 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
     }
 }
 static int fk_src_compile_artifact_only(const char *path) {
-    char compile_path[4096];
-    fk_cstr_copy(compile_path, path, 4096);
+    char compile_path[FK_PATH_CAP];
+    fk_cstr_copy(compile_path, path, FK_PATH_CAP);
     long long saved_dep_count = fk_src_dep_count;
-    char saved_root_path[4096];
+    char saved_root_path[FK_PATH_CAP];
     long long saved_root_len = fk_src_root_len;
     char *saved_root_text = malloc((unsigned long)(saved_root_len + 2));
     char *saved_srctext = malloc((unsigned long)(fk_slen + 1));
-    char (*saved_dep_path)[4096] = saved_dep_count > 0 ?
+    char (*saved_dep_path)[FK_PATH_CAP] = saved_dep_count > 0 ?
         malloc(sizeof(*saved_dep_path) * (unsigned long)saved_dep_count) : 0;
     long long *saved_dep_mtime = saved_dep_count > 0 ?
         malloc(sizeof(*saved_dep_mtime) * (unsigned long)saved_dep_count) : 0;
@@ -14777,7 +14984,7 @@ static int fk_src_compile_artifact_only(const char *path) {
     if (saved_root_text == 0 || saved_srctext == 0) {
         fk_die("fk_import_compile: out of memory saving source unit");
     }
-    fk_cstr_copy(saved_root_path, fk_src_root_path, 4096);
+    fk_cstr_copy(saved_root_path, fk_src_root_path, FK_PATH_CAP);
     long long saved_slen = fk_slen;
     long long i = 0;
     while (i < saved_root_len + 1) {
@@ -14791,7 +14998,7 @@ static int fk_src_compile_artifact_only(const char *path) {
     }
     i = 0;
     while (i < saved_dep_count) {
-        fk_cstr_copy(saved_dep_path[i], fk_src_dep_path[i], 4096);
+        fk_cstr_copy(saved_dep_path[i], fk_src_dep_path[i], FK_PATH_CAP);
         saved_dep_mtime[i] = fk_src_dep_mtime[i];
         saved_dep_size[i] = fk_src_dep_size[i];
         saved_dep_digest[i] = fk_src_dep_digest[i];
@@ -14802,12 +15009,12 @@ static int fk_src_compile_artifact_only(const char *path) {
         i = i + 1;
     }
     char source_hash[FK_SRC_HASH_CAP];
-    char fkb_path[4096];
-    char sym_path[4096];
+    char fkb_path[FK_PATH_CAP];
+    char sym_path[FK_PATH_CAP];
     long long unit_mtime = 0;
     int ok = 0;
-    if (fk_path_replace_ext(compile_path, ".fkb", fkb_path, 4096) &&
-        fk_path_replace_ext(compile_path, ".sym", sym_path, 4096) &&
+    if (fk_path_replace_ext(compile_path, ".fkb", fkb_path, FK_PATH_CAP) &&
+        fk_path_replace_ext(compile_path, ".sym", sym_path, FK_PATH_CAP) &&
         fk_src_load_unit(compile_path, source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
         /* This compile is SPECULATIVE: it builds a candidate per-unit image
          * for the import path. A unit that only resolves inside the root's
@@ -14828,7 +15035,7 @@ static int fk_src_compile_artifact_only(const char *path) {
     if (!fk_src_dep_reserve(saved_dep_count)) {
         fk_die("fk_import_compile: out of memory restoring source unit");
     }
-    fk_cstr_copy(fk_src_root_path, saved_root_path, 4096);
+    fk_cstr_copy(fk_src_root_path, saved_root_path, FK_PATH_CAP);
     fk_src_root_len = saved_root_len;
     fk_slen = saved_slen;
     fk_src_root_reserve(saved_root_len + 2);
@@ -14845,7 +15052,7 @@ static int fk_src_compile_artifact_only(const char *path) {
     }
     i = 0;
     while (i < saved_dep_count) {
-        fk_cstr_copy(fk_src_dep_path[i], saved_dep_path[i], 4096);
+        fk_cstr_copy(fk_src_dep_path[i], saved_dep_path[i], FK_PATH_CAP);
         fk_src_dep_mtime[i] = saved_dep_mtime[i];
         fk_src_dep_size[i] = saved_dep_size[i];
         fk_src_dep_digest[i] = saved_dep_digest[i];
@@ -14906,10 +15113,10 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     while (i < fk_src_dep_count) {
         if (fk_src_dep_parent[i] == 0 &&
             !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
-            char dep_fkb_path[4096];
+            char dep_fkb_path[FK_PATH_CAP];
             long long dep_end = fk_src_dep_end[i];
             long long dep_mtime = fk_src_unit_mtime_range(i, dep_end);
-            if (!fk_path_replace_ext(fk_src_dep_path[i], ".fkb", dep_fkb_path, 4096)) {
+            if (!fk_path_replace_ext(fk_src_dep_path[i], ".fkb", dep_fkb_path, FK_PATH_CAP)) {
                 fk_import_refusal = 4;
                 return 0;
             }
@@ -14994,11 +15201,11 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     while (ok && i < fk_src_dep_count) {
         if (fk_src_dep_parent[i] == 0 &&
             !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
-            char dep_fkb_path[4096];
+            char dep_fkb_path[FK_PATH_CAP];
             char dep_hash[FK_SRC_HASH_CAP];
             long long dep_end = fk_src_dep_end[i];
             long long dep_mtime = fk_src_unit_mtime_range(i, dep_end);
-            if (!fk_path_replace_ext(fk_src_dep_path[i], ".fkb", dep_fkb_path, 4096)) {
+            if (!fk_path_replace_ext(fk_src_dep_path[i], ".fkb", dep_fkb_path, FK_PATH_CAP)) {
                 fk_import_refusal = 4;
                 ok = 0;
                 break;
@@ -15018,8 +15225,8 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                  * imported-image path, on THIS run and every future one until
                  * the unit's own prelude chain is healed — say so, once,
                  * counted, so the tally and stderr agree. */
-                char dep_sym_path[4096];
-                if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, 4096)) {
+                char dep_sym_path[FK_PATH_CAP];
+                if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, FK_PATH_CAP)) {
                     fk_import_refusal = 4;
                     ok = 0;
                     break;
@@ -15078,14 +15285,14 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     return ok;
 }
 static int fk_run_src(const char *path, long long arg) {
-    char fkb_path[4096];
-    char sym_path[4096];
-    char dylib_path[4096];
+    char fkb_path[FK_PATH_CAP];
+    char sym_path[FK_PATH_CAP];
+    char dylib_path[FK_PATH_CAP];
     char expected_source_hash[FK_SRC_HASH_CAP];
     long long unit_mtime = 0;
-    if (!fk_path_replace_ext(path, ".fkb", fkb_path, 4096) ||
-        !fk_path_replace_ext(path, ".sym", sym_path, 4096) ||
-        !fk_path_replace_ext(path, ".dylib", dylib_path, 4096)) {
+    if (!fk_path_replace_ext(path, ".fkb", fkb_path, FK_PATH_CAP) ||
+        !fk_path_replace_ext(path, ".sym", sym_path, FK_PATH_CAP) ||
+        !fk_path_replace_ext(path, ".dylib", dylib_path, FK_PATH_CAP)) {
         fk_die("fk_run_src: artifact path exceeds buffer");
     }
     if (!fk_src_load_unit(path, expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
@@ -15485,7 +15692,7 @@ static int fk_hex16_parse(const char *p, unsigned long long *out) {
  * file the floor compile would load is folded in; a visited list keeps
  * the walk finite. */
 #define FK_FLOOR_DEP_CAP_INIT 128 /* floor-chain dep rows birth size; grows -- a dep past the old fixed 128 was SILENTLY skipped by the digest fold, so a stale .lowfk memo could ride as fresh when that dep changed */
-static char (*fk_floor_seen)[4096];
+static char (*fk_floor_seen)[FK_PATH_CAP];
 static long long fk_floor_cap;
 static long long fk_floor_seen_n;
 static int fk_floor_seen_has(const char *p) {
@@ -15507,13 +15714,13 @@ static unsigned long long fk_bml_floor_fold(const char *path, unsigned long long
     }
     if (fk_floor_seen_n >= fk_floor_cap) {
         long long nc = fk_floor_cap == 0 ? FK_FLOOR_DEP_CAP_INIT : fk_floor_cap * 2;
-        fk_floor_seen = (char (*)[4096])realloc(fk_floor_seen, (unsigned long)(nc * 4096));
+        fk_floor_seen = (char (*)[FK_PATH_CAP])realloc(fk_floor_seen, (unsigned long)(nc * FK_PATH_CAP));
         if (fk_floor_seen == 0) {
             fk_die("fk_bml_floor_fold: out of memory growing the floor dep table");
         }
         fk_floor_cap = nc;
     }
-    fk_cstr_copy(fk_floor_seen[fk_floor_seen_n], path, 4096);
+    fk_cstr_copy(fk_floor_seen[fk_floor_seen_n], path, FK_PATH_CAP);
     fk_floor_seen_n = fk_floor_seen_n + 1;
     text = fk_read_whole_file(path, &n);
     if (text == 0) {
@@ -15535,9 +15742,9 @@ static unsigned long long fk_bml_floor_fold(const char *path, unsigned long long
                     p = p + 1;
                 }
                 if (p > start) {
-                    char dep_path[4096];
+                    char dep_path[FK_PATH_CAP];
                     if (fk_path_resolve_fk_dep(path, text + start, p - start,
-                                               dep_path, 4096)) {
+                                               dep_path, FK_PATH_CAP)) {
                         h = fk_bml_floor_fold(dep_path, h);
                     }
                 }
@@ -15863,7 +16070,7 @@ static int fk_run(int argc, char **argv) {
             return 2;
         }
         long long recorded = 0;
-        char direct_sym_path[4096];
+        char direct_sym_path[FK_PATH_CAP];
         long long fkb_arg_len = fk_path_len(argv[1]);
         /* fk_path_replace_ext only strips a trailing ".fk"; this argument ends
          * in ".fkb" (checked above), so swap the suffix explicitly */

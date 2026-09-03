@@ -1,6 +1,6 @@
 # Live dynamic diagnostics through the bidirectional framebuffer
 
-The framebuffer is no longer only an append/read log. The kernel still supplies
+The framebuffer is a bidirectional channel, not only an append/read log. The kernel supplies
 the small carrier—`fb_record`, `framebuffer-events`, `node_source`, and
 `framebuffer-clear`—while Form supplies a bidirectional protocol that can change
 the next selected execution state and then observe that state again.
@@ -103,9 +103,8 @@ door decision rather than by source bytes, and the only witness was a static
 conf toggle printing to stderr — unreadable by the program and uncorrelatable
 in a diagnostic window. When a run surprises, put `(kernel_stat 15)` through
 `(kernel_stat 18)` into the outbound payload before bisecting bytes.
-`observe/tests/import-carry-band.fk` holds the fast regression: the same band
-answers a consistent pulse through the import-lane door cold and the cached
-door warm.
+`observe/tests/import-carry-band.fk` is the regression band for this pulse (it
+declares 63 through the import-lane door cold and the cached door warm).
 
 ## Integration pattern
 

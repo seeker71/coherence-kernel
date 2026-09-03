@@ -1,6 +1,6 @@
 ; bml-demand-jit-band.fk -- effectful first-answer, disk, RAM, and stale proof.
 ;
-; Verdict 16777215.
+; Verdict 137438953471.
 ; preludes: form-stdlib/bml-demand-jit.fk form-stdlib/bml/bml-demand-jit-glass.bml
 
 (do
@@ -11,6 +11,11 @@
     (defn bdjb-source () "/tmp/bml-demand-jit-band/source.bml")
     (defn bdjb-cache () "/tmp/bml-demand-jit-band/leaf.cache")
     (defn bdjb-oversize-cache () "/tmp/bml-demand-jit-band/oversize.cache")
+    (defn bdjb-collision-path () "/tmp/bml-demand-jit-band/collision.bin")
+    (defn bdjb-runtime-identity () (bdj-runtime-fingerprint-from-identities
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        "sha256:3333333333333333333333333333333333333333333333333333333333333333"))
     (defn bdjb-double (text remaining)
         (if (le remaining 0)
             text
@@ -20,19 +25,40 @@
             (let a (fs-remove-file (bdjb-source)))
             (let b (fs-remove-file (bdjb-cache)))
             (let c (fs-remove-file (bdjb-oversize-cache)))
+            (let collision (fs-remove-file (bdjb-collision-path)))
+            (let heal (fs-remove-file "/tmp/bml-demand-jit-band/heal.cache"))
+            (let faultCache (fs-remove-file "/tmp/bml-demand-jit-band/fault.cache"))
+            (let lostCache (fs-remove-file "/tmp/bml-demand-jit-band/lost.cache"))
+            (let publishFaultCache (fs-remove-file "/tmp/bml-demand-jit-band/publish-fault.cache"))
+            (let faultLock (bdj-release-publish-lock "/tmp/bml-demand-jit-band/fault.cache"))
+            (let healLock (bdj-release-publish-lock "/tmp/bml-demand-jit-band/heal.cache"))
+            (let lostLock (bdj-release-publish-lock "/tmp/bml-demand-jit-band/lost.cache"))
+            (let publishFaultLock (bdj-release-publish-lock "/tmp/bml-demand-jit-band/publish-fault.cache"))
             (let c2 (bdj-release-publish-lock (bdjb-cache)))
             (let d (fs-remove-file (fgtm-snapshot-path (bdjb-root)
                 "jit.bml-demand-test")))
             (let e (fs-remove-file (fgtm-snapshot-candidate-path (bdjb-root)
                 "jit.bml-demand-test")))
+            (let f (fs-remove-file (fgtm-snapshot-path (bdjb-root)
+                "jit.bml-demand-fault-test")))
+            (let g (fs-remove-file (fgtm-snapshot-candidate-path (bdjb-root)
+                "jit.bml-demand-fault-test")))
             (fs-remove-tree (bdjb-root))))
 
     (let old (bdjb-clean))
-    (let made (fs-mkdir (bdjb-root)))
-    (let wrote (write_file_text (bdjb-source) "section [form.bml] { 0; }"))
-    (let first (bdj-request (bdj-empty 4001) (bdjb-source) (bdjb-cache)
-        (bdjb-program) 4 5))
-    (let step (bdj-step (bdj-receipt-state first)))
+    ; Form lets are demand-driven: force preparation into the source write,
+    ; then force that write into the first request.  Otherwise a fresh compile
+    ; can inherit the prior run's disk state while still printing most bits.
+    (let made (if (nothing? old) (fs-mkdir (bdjb-root))
+        (fs-mkdir (bdjb-root))))
+    (let wrote (if (ge made 0)
+        (write_file_text (bdjb-source) "section [form.bml] { 0; }") -1))
+    (let first (if (gt wrote 0)
+        (bdj-request (bdj-empty 4001) (bdjb-source) (bdjb-cache)
+            (bdjb-program) 4 5)
+        (bdj-request (bdj-empty 4001) (bdjb-source) (bdjb-cache)
+            (bdjb-program) 4 5)))
+    (let step (bdj-step-with-runtime (bdj-receipt-state first) (bdjb-runtime-identity)))
     (let second (bdj-request (bdj-step-state step) (bdjb-source) (bdjb-cache)
         (bdjb-program) 4 10))
 
@@ -40,7 +66,7 @@
     ; current disk image, install it, and only then can its next request be native.
     (let disk-first (bdj-request (bdj-empty 4001) (bdjb-source) (bdjb-cache)
         (bdjb-program) 4 8))
-    (let disk-step (bdj-step (bdj-receipt-state disk-first)))
+    (let disk-step (bdj-step-with-runtime (bdj-receipt-state disk-first) (bdjb-runtime-identity)))
     (let disk-second (bdj-request (bdj-step-state disk-step) (bdjb-source)
         (bdjb-cache) (bdjb-program) 4 9))
 
@@ -48,7 +74,7 @@
     ; distinguish the source write and cache publication.
     (let stale-first (bdj-request (bdj-empty 4002) (bdjb-source) (bdjb-cache)
         (bdjb-program) 4 2))
-    (let stale-step (bdj-step (bdj-receipt-state stale-first)))
+    (let stale-step (bdj-step-with-runtime (bdj-receipt-state stale-first) (bdjb-runtime-identity)))
     (let alternate-program
         (list (list 1 7) (list 2) (list 1 4) (list 5 1 2) (list 3 3 0)))
     (let stale-program (bdj-request (bdj-empty 4001) (bdjb-source) (bdjb-cache)
@@ -56,7 +82,7 @@
     (let missing (bdj-request (bdj-empty 4001)
         "/tmp/bml-demand-jit-band/absent.bml"
         "/tmp/bml-demand-jit-band/absent.cache" (bdjb-program) 4 1))
-    (let missing-step (bdj-step (bdj-receipt-state missing)))
+    (let missing-step (bdj-step-with-runtime (bdj-receipt-state missing) (bdjb-runtime-identity)))
     (let wider-program (append (bdjb-program) (list (list 14 0 1))))
     (let wider (bdj-request (bdj-empty 4001) (bdjb-source) (bdjb-cache)
         wider-program 5 7))
@@ -64,6 +90,9 @@
     (let glass-published (bdjg-publish-at (bdjb-root) "jit.bml-demand-test"
         5001 0 first step (file_size (bdjb-cache))))
     (let glass-read (fgtm-read-current (bdjb-root) "jit.bml-demand-test"))
+    (let comparison-samples (bdjg-comparison-samples 5002 0 first step
+        (file_size (bdjb-cache)) 0 disk-first disk-step
+        (file_size (bdjb-cache))))
 
     ; Replace current ice between request and step with a different but valid
     ; program image. The single bounded inspection refuses it as stale-program
@@ -71,28 +100,153 @@
     (let mismatch-first (bdj-request (bdj-empty 4001) (bdjb-source)
         (bdjb-cache) (bdjb-program) 4 6))
     (let mismatch-write (fs-write-text (bdjb-cache)
-        (bdj-cache-wire 4001 (bdj-program-wire alternate-program 4 4001)
+        (bdj-cache-wire-with-runtime (bdjb-runtime-identity) 4001 (bdj-program-wire alternate-program 4 4001)
             (lo-compile-fn alternate-program 4))))
-    (let mismatch-step (bdj-step (bdj-receipt-state mismatch-first)))
+    (let mismatch-step (bdj-step-with-runtime (bdj-receipt-state mismatch-first) (bdjb-runtime-identity)))
 
     ; A live publisher lease refuses a second writer. A stale lease heals
     ; once, and an oversized cache is classified before its bytes are read.
     (let busyLock (fs-mkdir (bdj-publish-lock-path (bdjb-cache))))
     (let busyLease (fs-write-text (bdj-publish-lease-path (bdjb-cache)) "held"))
-    (let busyPublish (bdj-publish-at (bdjb-cache) 4001
+    (let busyPublish (bdj-publish-at-with-runtime (bdjb-cache) 4001
         (bdj-program-wire (bdjb-program) 4 4001)
-        (lo-compile-fn (bdjb-program) 4) (fs-stat-mtime (bdj-publish-lock-path (bdjb-cache)))))
-    (let healedPublish (bdj-publish-at (bdjb-cache) 4001
+        (lo-compile-fn (bdjb-program) 4) (fs-stat-mtime (bdj-publish-lock-path (bdjb-cache))) (bdjb-runtime-identity)))
+    (let healedPublish (bdj-publish-at-with-runtime (bdjb-cache) 4001
         (bdj-program-wire (bdjb-program) 4 4001)
         (lo-compile-fn (bdjb-program) 4)
         (add (fs-stat-mtime (bdj-publish-lock-path (bdjb-cache)))
-            (add (BDJPublishLeaseSeconds) 1))))
+            (add (BDJPublishLeaseSeconds) 1)) (bdjb-runtime-identity)))
     (let oversizeWrote (fs-write-text (bdjb-oversize-cache) (bdjb-double "x" 21)))
-    (let oversizeState (bdj-cache-content-state (bdjb-oversize-cache) 4001
-        (bdj-program-wire (bdjb-program) 4 4001)))
-    (let runtimeMismatch (bdj-cache-parse (bdj-cat (list
+    (let oversizeState (bdj-cache-inspection-status (bdj-cache-inspect-content-with-runtime (bdjb-oversize-cache) 4001
+        (bdj-program-wire (bdjb-program) 4 4001) (bdjb-runtime-identity))))
+    (let runtimeMismatch (bdj-cache-parse-with-runtime (bdj-cat (list
         (BDJCacheSchema) "\nwrong-runtime\n4001\n"
-        (bdj-program-wire (bdjb-program) 4 4001) "\n1\n0"))))
+        (bdj-program-wire (bdjb-program) 4 4001) "\n1\n0")) (bdjb-runtime-identity)))
+
+    ; Adversarial metadata collision: overwrite the same path with different
+    ; equal-length bytes inside one whole-second mtime bucket. Content identity
+    ; must change and the old image must be refused as cache-runtime.
+    (let collisionAWrite (fs-write-text (bdjb-collision-path) "AAAA"))
+    (let collisionASize (fs-stat-size (bdjb-collision-path)))
+    (let collisionAMtime (fs-stat-mtime (bdjb-collision-path)))
+    (let collisionAIdentity "sha256:63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f46e715114ee184f8de9201")
+    (let collisionBWrite (fs-write-text (bdjb-collision-path) "BBBB"))
+    (let collisionBSize (fs-stat-size (bdjb-collision-path)))
+    (let collisionBMtime (fs-stat-mtime (bdjb-collision-path)))
+    (let collisionBIdentity "sha256:4a8d8134f29b0b7b60c126f5532bc9f5d9bb73037373cf6fb872d81f1dcefdfd")
+    (let collisionWire (bdj-cache-wire-with-runtime (bdj-runtime-fingerprint-from-identities collisionAIdentity collisionAIdentity collisionAIdentity) 4001
+        (bdj-program-wire (bdjb-program) 4 4001)
+        (lo-compile-fn (bdjb-program) 4)))
+    (let collisionRefused (bdj-cache-parse-with-runtime collisionWire
+        (bdj-runtime-fingerprint-from-identities collisionBIdentity collisionAIdentity collisionAIdentity)))
+    (let identityUnavailable (bdj-cache-parse-with-runtime collisionWire ""))
+
+    ; Invalid input is a request refusal, not a JIT fault. A real optimization
+    ; fault is latched and cause-specific, but never denies a valid Form answer.
+    ; The exact faulting pending specialization survives that later answer and
+    ; receives one automatic priority-1000 rechallenge. A second failure holds;
+    ; later probes still require evidence-bearing exact controls.
+    (let invalid (bdj-request (bdj-empty 4001) (bdjb-source) (bdjb-cache)
+        (list) 0 1))
+    (let faultFirst (bdj-request (bdj-empty 4003) (bdjb-source)
+        "/tmp/bml-demand-jit-band/fault.cache" (bdjb-program) 4 3))
+    (let faultInitialStep (bdj-step-with-runtime
+        (bdj-receipt-state faultFirst) ""))
+    (let faultState (bdj-step-state faultInitialStep))
+    (let blockedRequest (bdj-request faultState (bdjb-source) (bdjb-cache)
+        (bdjb-program) 4 1))
+    (let automaticHeal (bdj-step-with-runtime (bdj-receipt-state blockedRequest)
+        (bdjb-runtime-identity)))
+    (let faultStep (bdj-step-fault-held faultState))
+    (let wrongControl (bdj-fault-apply faultState
+        (bdj-fault-control "different-cause" "healed" "wrong-cause-probe" 7001)))
+    (let heldControl (bdj-fault-apply faultState
+        (bdj-fault-control "runtime-identity-unavailable" "held"
+            "runtime-identity-evidence-pending" 7002)))
+    (let heldState (bdj-fault-control-state heldControl))
+    (let heldStep (bdj-step heldState))
+    (let faultSamples (bdjg-samples 7004 0 first faultStep 0))
+    (let faultSample (nth faultSamples 10))
+    (let faultPublished (bdjg-publish-at (bdjb-root)
+        "jit.bml-demand-fault-test" 7004 0 first faultStep 0))
+    (let faultReading (fgtm-read-current (bdjb-root)
+        "jit.bml-demand-fault-test"))
+    (let healFirst (bdj-request (bdj-empty 4010) (bdjb-source)
+        "/tmp/bml-demand-jit-band/heal.cache" (bdjb-program) 4 3))
+    (let healFaultStep (bdj-step-with-runtime (bdj-receipt-state healFirst) ""))
+    (let healFaultState (bdj-step-state healFaultStep))
+    (let healArmed (bdj-fault-apply healFaultState
+        (bdj-fault-control "runtime-identity-unavailable" "healed"
+            "source-unit-hash-reobserved" 7010)))
+    (let healArmedState (bdj-fault-control-state healArmed))
+    (let healStep (bdj-step-with-runtime healArmedState (bdjb-runtime-identity)))
+    (let healedState (bdj-step-state healStep))
+    (let healedSamples (bdjg-samples 7011 0 healFirst healStep 0))
+    (let healedSample (nth healedSamples 10))
+
+    ; A valid-looking but unrelated digest cannot arm or publish a heal. The
+    ; owner recomputes from its retained pending structure before any retry.
+    (let originalFault (bdj-state-fault faultState))
+    (let alienPending (bdj-pending (bdj-pending-source
+        (bdj-state-pending faultState)) (bdj-pending-cache
+        (bdj-state-pending faultState)) alternate-program 4 5
+        (bdj-state-epoch faultState)))
+    (let corruptDigest (bdj-fault-digest-for alienPending
+        (bdj-state-epoch faultState) (bdj-fault-cause originalFault)
+        (bdj-fault-observed originalFault)))
+    (let corruptFault (bdj-fault-with-digest
+        (bdj-fault-cause originalFault) (bdj-fault-stage originalFault)
+        "attention" "constructed-corruption" (bdj-fault-observed originalFault)
+        corruptDigest))
+    (let corruptState (bdj-state-with-fault-and-control
+        (bdj-state-epoch faultState) (bdj-state-registry faultState)
+        (bdj-state-pending faultState) "jit-fault-attention" corruptFault
+        (nothing)))
+    (let corruptStep (bdj-step-with-runtime corruptState
+        (bdjb-runtime-identity)))
+    (let integrityBlocked (and
+        (str_eq (bdj-step-status corruptStep) "jit-fault-attention")
+        (and (eq (bdj-step-installed corruptStep) 0)
+        (and (eq (bdj-step-agreement corruptStep) 0)
+        (and (eq (bdj-state-faulted? (bdj-step-state corruptStep)) 1)
+             (str_eq (bdj-fault-evidence
+                (bdj-state-fault (bdj-step-state corruptStep)))
+                "fault-identity-structure-mismatch"))))))
+
+    ; Losing a once-proven resident carrier can never be relabeled native.
+    ; The exact Form value remains available while the lost page becomes a
+    ; request-time P1000 fault, projected by Glass and automatically healed.
+    (let lostIdentity (jonb-identity (bdjb-program) 4 4009))
+    (let lostImage (lo-compile-fn (bdjb-program) 4))
+    (let lostEntry (list lostIdentity lostImage (jonb-image-id lostImage)
+        (list 0 lostIdentity (list))))
+    (let lostState (bdj-state 4009 (list 4009 (list lostEntry))
+        (nothing) "resident-native"))
+    (let lostCache "/tmp/bml-demand-jit-band/lost.cache")
+    (let lostRequest (bdj-request lostState (bdjb-source)
+        lostCache (bdjb-program) 4 13))
+    (let lostHeldStep (bdj-step-fault-held
+        (bdj-receipt-state lostRequest)))
+    (let lostSamples (bdjg-samples 7020 0 lostRequest lostHeldStep 0))
+    (let lostHeal (bdj-step-with-runtime (bdj-receipt-state lostRequest)
+        (bdjb-runtime-identity)))
+
+    ; A challenged RAM page does not hide a busy durability lease. Publication
+    ; failure is immediate attention; releasing the lease lets the automatic
+    ; cause-bound rechallenge publish and heal.
+    (let publishFaultCache "/tmp/bml-demand-jit-band/publish-fault.cache")
+    (let publishBusyFirst (bdj-request (bdj-empty 4020) (bdjb-source)
+        publishFaultCache (bdjb-program) 4 3))
+    (let publishBusyLock (fs-mkdir (bdj-publish-lock-path publishFaultCache)))
+    (let publishBusyLease (fs-write-text
+        (bdj-publish-lease-path publishFaultCache) "held"))
+    (let publishBusyStep (bdj-step-with-runtime
+        (bdj-receipt-state publishBusyFirst) (bdjb-runtime-identity)))
+    (let publishBusyDuring (bdj-request (bdj-step-state publishBusyStep)
+        (bdjb-source) publishFaultCache (bdjb-program) 4 2))
+    (let publishBusyReleased (bdj-release-publish-lock publishFaultCache))
+    (let publishBusyHeal (bdj-step-with-runtime
+        (bdj-receipt-state publishBusyDuring) (bdjb-runtime-identity)))
 
     (let verdict (sum (list
         (bdjb-bit (and (str_eq (bdj-receipt-status first)
@@ -120,23 +274,28 @@
         (bdjb-bit (str_eq (bdj-step-cache-state missing-step)
                           "source-missing") 2048)
         (bdjb-bit (and (str_eq (bdj-step-status missing-step)
-                               "ram-installed-source-missing")
-                       (eq (bdj-step-installed missing-step) 1)) 4096)
+                               "jit-fault-attention")
+                       (and (eq (bdj-step-installed missing-step) 1)
+                       (and (eq (bdj-step-agreement missing-step) 1)
+                            (str_eq (bdj-fault-cause
+                                (bdj-state-fault
+                                    (bdj-step-state missing-step)))
+                                "disk-publish-withheld-source-missing")))) 4096)
         (bdjb-bit (and (str_eq (bdj-receipt-status wider) "wider-frontier")
                        (str_eq (bdj-receipt-route wider) "form")) 8192)
-        (bdjb-bit (and (str_eq (BDJNodeIdPolicy) "reuse-exact-jonb-identity")
+        (bdjb-bit (and (str_eq (BDJNodeIdPolicy) "canonical-nodeid-remains-u16.u16.u16.u32;glass-fault-locator-is-sha256-prefix64-with-full-digest-owner-check")
                        (str_eq (nth (split-on (read_file (bdjb-cache)) "\n") 3)
                                (bdj-program-wire (bdjb-program) 4 4001))) 16384)
         (bdjb-bit (and (eq (file_size (bdjb-cache))
                            (str_len (read_file (bdjb-cache))))
-                       (str_eq (nth (bdj-cache-parse (read_file (bdjb-cache))) 0)
+                       (str_eq (nth (bdj-cache-parse-with-runtime (read_file (bdjb-cache)) (bdjb-runtime-identity)) 0)
                                "parsed")) 32768)
-        (bdjb-bit (and (eq (len glass-samples) 4)
+        (bdjb-bit (and (eq (len glass-samples) 10)
                        (eq (fgtm-samples-valid? glass-samples) 1)) 65536)
         (bdjb-bit (and (str_eq (bdjg-publish-status glass-published) "published")
                        (and (str_eq (fgtm-read-state-status glass-read) "current")
                             (eq (len (fgtm-snapshot-samples (fgtm-field-value
-                                (fgtm-read-state-value glass-read)))) 4))) 131072)
+                                (fgtm-read-state-value glass-read)))) 10))) 131072)
         (bdjb-bit (and (str_eq (bdj-receipt-cache-state stale-program)
                                "not-inspected")
                        (str_eq (bdj-step-cache-state mismatch-step)
@@ -147,11 +306,172 @@
         (bdjb-bit (and (gt oversizeWrote (BDJMaxCacheWireBytes))
                        (str_eq oversizeState "cache-oversize")) 2097152)
         (bdjb-bit (and (str_eq (nth (split-on (read_file (bdjb-cache)) "\n") 1)
-                                (bdj-runtime-fingerprint))
+                                (bdjb-runtime-identity))
                        (str_eq (head runtimeMismatch) "cache-runtime")) 4194304)
         (bdjb-bit (and (gt mismatch-write 0)
                        (and (str_eq (bdj-step-cache-state mismatch-step) "stale-program")
                             (str_eq (bdj-step-status mismatch-step)
-                                "compiled-published-installed"))) 8388608))))
-    (let clean (bdjb-clean))
-    verdict)
+                                "compiled-published-installed"))) 8388608)
+        (bdjb-bit (and (str_eq (bdj-stage-cache-disposition
+                                (bdj-step-stage step)) "miss-absent")
+                       (and (eq (bdj-field-present? (bdj-stage-cache-age
+                                (bdj-step-stage step))) 0)
+                            (str_eq (bdj-field-reason (bdj-stage-cache-age
+                                (bdj-step-stage step))) "path-absent"))) 16777216)
+        (bdjb-bit (and (ge (bdj-stage-inspect-ms (bdj-step-stage step)) 0)
+                       (and (ge (bdj-stage-materialize-ms
+                                    (bdj-step-stage step)) 0)
+                       (and (ge (bdj-stage-install-challenge-ms
+                                    (bdj-step-stage step)) 0)
+                       (and (ge (bdj-stage-publish-ms
+                                    (bdj-step-stage step)) 0)
+                            (eq (bdj-stage-total-ms (bdj-step-stage step))
+                                (sub (bdj-stage-finished (bdj-step-stage step))
+                                     (bdj-stage-started
+                                        (bdj-step-stage step)))))))) 33554432)
+        (bdjb-bit (and (str_eq (bdj-stage-cache-disposition
+                                (bdj-step-stage disk-step)) "hit-current")
+                       (eq (bdj-field-present? (bdj-stage-cache-age
+                                (bdj-step-stage disk-step))) 1)) 67108864)
+        (bdjb-bit (and (str_eq (bdj-stage-materialize-action
+                                (bdj-step-stage step)) "compile")
+                       (and (str_eq (bdj-stage-materialize-action
+                                (bdj-step-stage disk-step)) "disk-image")
+                            (eq (bdj-stage-materialize-ms
+                                (bdj-step-stage disk-step)) 0))) 134217728)
+        (bdjb-bit (and (str_eq (bdj-stage-full-call-state
+                                (bdj-step-stage step)) "carrier-door-absent")
+                       (str_eq (bdj-stage-full-call-door
+                                (bdj-step-stage step))
+                            "runtime.full-program-image.call")) 268435456)
+        (bdjb-bit (and (eq (len glass-samples) 10)
+                       (and (str_eq (fgtm-sample-purpose
+                                (nth glass-samples 2)) "miss-absent")
+                            (str_eq (fgtm-sample-purpose
+                                (nth glass-samples 9))
+                                "runtime.full-program-image.call"))) 536870912)
+        (bdjb-bit (and (eq (len comparison-samples) 20)
+                       (eq (fgtm-samples-valid? comparison-samples) 1))
+                    1073741824)
+        (bdjb-bit (and (str_eq (fgtm-sample-id (head comparison-samples))
+                                "jit.bml-demand.first.request")
+                       (str_eq (fgtm-sample-id (nth comparison-samples 10))
+                                "jit.bml-demand.reuse.request"))
+                    2147483648)
+        (bdjb-bit (and (eq collisionAWrite collisionBWrite)
+                       (and (eq collisionASize collisionBSize)
+                       (and (eq collisionAMtime collisionBMtime)
+                       (and (not (str_eq collisionAIdentity collisionBIdentity))
+                       (and (str_eq (head collisionRefused) "cache-runtime")
+                       (and (str_eq (head identityUnavailable)
+                                "runtime-identity-unavailable")
+                       (and (gt (str_len (bdj-runtime-fingerprint)) 0)
+                            (str_eq (BDJRuntimeIdentityDoor)
+                                "program-image-sym.source-hash"))))))))
+                    (mul 2147483648 2))
+        (bdjb-bit (and (str_eq (bdj-receipt-status invalid) "request-refused-invalid-program-shape")
+                       (and (eq (bdj-state-faulted? (bdj-receipt-state invalid)) 0)
+                       (and (str_eq (bdj-step-status faultInitialStep) "jit-fault-attention")
+                       (and (eq (bdj-state-faulted? faultState) 1)
+                       (and (str_eq (bdj-receipt-status blockedRequest) "jit-healing-form-answer")
+                       (and (eq (bdj-receipt-value blockedRequest) 10)
+                       (and (str_eq (bdj-receipt-route blockedRequest) "form-attention")
+                       (and (str_eq (bdj-pending-program-wire (bdj-state-pending (bdj-receipt-state blockedRequest)))
+                                      (bdj-pending-program-wire (bdj-state-pending faultState)))
+                       (and (str_eq (bdj-step-status automaticHeal) "jit-healed")
+                       (and (str_eq (bdj-step-attention faultStep) "immediate")
+                       (and (str_eq (bdj-fault-control-status wrongControl) "refused-cause-mismatch")
+                       (and (str_eq (bdj-fault-control-status heldControl) "held-with-evidence")
+                       (and (str_eq (bdj-fault-evidence (bdj-state-fault heldState)) "runtime-identity-evidence-pending")
+                       (and (str_eq (bdj-step-attention heldStep) "immediate")
+                       (and (str_eq (bdj-fault-control-status healArmed) "heal-probe-armed")
+                       (and (eq (bdj-state-faulted? healArmedState) 1)
+                       (and (str_eq (bdj-step-status healStep) "jit-healed")
+                       (and (eq (bdj-state-faulted? healedState) 0)
+                       (and (str_eq
+                                (bdj-healed-fault-key
+                                    (bdj-state-last-control
+                                        (bdj-step-state automaticHeal)))
+                                (bdj-fault-key
+                                    (bdj-state-fault faultState)))
+                       (and (str_eq
+                                (bdj-fault-key (bdj-state-fault heldState))
+                                (bdj-fault-key (bdj-state-fault faultState)))
+                       (and (str_eq
+                                (bdj-fault-key
+                                    (bdj-state-fault healArmedState))
+                                (bdj-fault-key
+                                    (bdj-state-fault healFaultState)))
+                       (and (eq (bdj-digest-valid?
+                                    (bdj-fault-digest
+                                        (bdj-state-fault faultState))) 1)
+                            (eq (value_eq
+                                    (bdj-healed-digest
+                                        (bdj-state-last-control healedState))
+                                    (bdj-fault-digest
+                                        (bdj-state-fault healFaultState))) 1)))))))))))))))))))))))
+                    (mul 2147483648 4))
+        (bdjb-bit (and (and (eq integrityBlocked 1) (eq (len faultSamples) 11))
+                       (and (str_eq (fgtm-sample-kind faultSample) "diagnostic-control")
+                       (and (str_eq (bdjg-publish-status faultPublished) "published")
+                       (and (str_eq (fgtm-read-state-status faultReading) "current")
+                       (and (eq (fgtm-field-value (fgtm-sample-heat faultSample)) (BDJFaultPriority))
+                       (and (str_eq (bdjg-attention-purpose faultStep) "immediate-fault-attention")
+                       (and (eq (bdj-step-ms faultStep) (bdj-stage-total-ms (bdj-step-stage faultStep)))
+                       (and (eq (bdj-stage-total-ms (bdj-step-stage faultStep))
+                                (add (bdj-stage-accounted-ms (bdj-step-stage faultStep))
+                                     (bdj-stage-unattributed-ms (bdj-step-stage faultStep))))
+                       (and (eq (len healedSamples) 11)
+                       (and (str_eq (fgtm-sample-kind healedSample) "jit-healed")
+                       (and (str_eq (fgtm-field-value (fgtm-sample-parent healedSample))
+                                (bdj-healed-fault-key (bdj-state-last-control healedState)))
+                            (str_eq (fgtm-sample-source healedSample) "source-unit-hash-reobserved"))))))))))))
+                    (mul 2147483648 8))
+        (bdjb-bit (and (str_eq (bdj-receipt-status lostRequest)
+                                "jit-fault-attention")
+                       (and (str_eq (bdj-receipt-route lostRequest)
+                                "form-attention")
+                       (and (eq (bdj-receipt-value lostRequest) 46)
+                       (and (str_eq (bdj-fault-cause
+                                (bdj-state-fault
+                                    (bdj-receipt-state lostRequest)))
+                                "retained-native-carrier-unavailable")
+                       (and (eq (len lostSamples) 2)
+                       (and (str_eq (fgtm-sample-kind (nth lostSamples 1))
+                                "diagnostic-control")
+                       (and (str_eq (bdj-step-status lostHeal) "jit-healed")
+                            (str_eq
+                                (bdj-healed-fault-key
+                                    (bdj-state-last-control
+                                        (bdj-step-state lostHeal)))
+                                (bdj-fault-key
+                                    (bdj-state-fault
+                                        (bdj-receipt-state lostRequest)))))))))))
+                    (mul 2147483648 16))
+        (bdjb-bit (and (eq publishBusyLock 1)
+                       (and (gt publishBusyLease 0)
+                       (and (str_eq (bdj-step-status publishBusyStep)
+                                "jit-fault-attention")
+                       (and (eq (bdj-step-installed publishBusyStep) 1)
+                       (and (eq (bdj-step-agreement publishBusyStep) 1)
+                       (and (str_eq (bdj-fault-cause
+                                (bdj-state-fault
+                                    (bdj-step-state publishBusyStep)))
+                                "disk-publish-publish-busy")
+                       (and (str_eq (bdj-receipt-status publishBusyDuring)
+                                "jit-healing-form-answer")
+                       (and (str_eq (bdj-receipt-route publishBusyDuring)
+                                "form-attention")
+                       (and (eq publishBusyReleased 1)
+                       (and (str_eq (bdj-step-status publishBusyHeal)
+                                "jit-healed")
+                            (str_eq
+                                (bdj-healed-fault-key
+                                    (bdj-state-last-control
+                                        (bdj-step-state publishBusyHeal)))
+                                (bdj-fault-key
+                                    (bdj-state-fault
+                                        (bdj-step-state publishBusyStep))))))))))))))
+                    (mul 2147483648 32)))))
+    (let clean (if (ge verdict 0) (bdjb-clean) (bdjb-clean)))
+    (if (nothing? clean) verdict verdict))

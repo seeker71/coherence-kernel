@@ -22,7 +22,11 @@ if [[ -n "${ZSH_VERSION:-}" ]]; then
     setopt KSH_ARRAYS
 fi
 
-FOURTH_DIR="form-stdlib/.cache/fourth"
+# Anchored to this script's own form/ so a caller whose cwd is the repo root
+# never grows a phantom form-stdlib/.cache/ there; the hash walk below stays
+# relative because its file: lines are cache-key input.
+FOURTH_HOME="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+FOURTH_DIR="$FOURTH_HOME/form-stdlib/.cache/fourth"
 FOURTH_MANIFEST="fourth-arm-bands.txt"
 FOURTH_INDEX="$FOURTH_DIR/table-index-v2.tsv"
 # The emitter chain: every file whose content shapes either the fkwu binary
@@ -228,7 +232,7 @@ fourth_validation_generation() {
             printf 'file:%s\n' "$f"
             cat "$f"
         done
-        find form-stdlib -path "$FOURTH_DIR" -prune -o -type f \
+        find form-stdlib -path form-stdlib/.cache/fourth -prune -o -type f \
             \( -name '*.fk' -o -name '*.bml' -o -name '*.form' -o -name '*.grammar' \) -print \
             | LC_ALL=C sort \
             | while IFS= read -r f; do printf 'file:%s\n' "$f"; cat "$f"; done

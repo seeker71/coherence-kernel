@@ -1,0 +1,89 @@
+; form-lower-string-band — STRING SCAN LOWERING in the Form -> assembly compiler:
+; the fstr-find-loop rung, receipts/2026-09-02-directive-ledger-walked.md's named
+; frontier ("the fstr per-byte family (398k hot): fkwu has NO native
+; substring/char_at/str_find — the per-byte recipes are the only door, and 0 of
+; the current hot worklist is coverable... the walked-direction fix is form-lower
+; coverage growth (strings)"). This band is that growth, proven on REAL EXECUTED
+; arm64 bytes (not byte-image equality alone, the way form-lower-streq-band.fk
+; proves STR_EQ): lo-strfind-embed-str compiles two Form strings + core.fk's
+; fstr-find-loop/fstr-find-eq-at shape into one native leaf, mmap'd and CALLED
+; through the body's own JIT door (jit_leaf_inram), and its answer is checked
+; against core.fk's own str_find on the SAME strings.
+;
+; GROUNDING, so the design does not need re-deriving (form-lower.fk's own header
+; over lo-str-bytes/lo-strfind-core carries the same note): jit_leaf_inram — the
+; only door from Form into crystallized bytes — declines any non-integer
+; argument (probed live: a string argument, or a string inside the arg list,
+; both answer `nothing`), and there is no relocation table for compiled bytes to
+; call back into a C native by address. lo-streq already answered this design
+; question for the string family by INLINING str_eq's loop over raw pointers,
+; never calling the native; this recipe makes that same choice EXECUTABLE by
+; embedding both strings' bytes in the image itself (fa-movz+fa-strb into a
+; stack buffer the prologue opens) — the same self-contained-constant idiom
+; fa-mov-imm64 already uses for float literals, extended byte-wise. No new
+; native, no new call-out tag, no runtime/fkwu-uni.c change. The one real
+; addition is a new arm64 instruction encoding, fa-sxtw (form-asm.fk) — closing
+; the SAME 32-bit ABI-return wall jit-leaf-inram-band.fk's own header already
+; names (a negative w0 zero-extends across fk_inram_call's 64-bit return);
+; without it every not-found case here would read 4294967295, not -1.
+;
+; SCOPE, NAMED: both strings are compile-time constants of the recipe (embedded
+; at lowering time); `from` is not threaded through — every scan starts at 0.
+; Runtime (non-embedded) string arguments are the named next stone, gated on a
+; native call-out door this pass did not need and should not invent unread.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY — jit_leaf_inram is a runtime-fkwu door (the same
+; footing as jit-leaf-inram-band.fk). Under the three sibling kernels the name
+; folds to `nothing` and every claim below would read green while proving
+; nothing.
+;
+; Verdict 63 when the string family lowers and executes correctly:
+;   1   a real scan: "fox" found in a full sentence, native == interpreted
+;   2   an empty haystack: bound<=0 decided at lowering time, native == -1 ==
+;       interpreted (the trivial 4-instruction path, not the loop)
+;   4   a not-found search: the needle is absent, native == -1 == interpreted
+;   8   a full-length match: needle == haystack, native == 0 == interpreted
+;   16  the trivial (bound<=0) image is byte-identical to the clang/otool
+;       oracle for movz/sub/sxtw/ret — CONVICTION FULL on the new instruction
+;   32  COMPOSITIONAL — the full-loop image's byte length equals the exact
+;       formula (prologue + 2*(hlen+nlen) embed bytes + 2 pointer setup + the
+;       27-instruction core), and ends in ret — no instruction is unaccounted
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-asm.fk form-stdlib/form-lower.fk
+
+(do
+    (defn flsb-check (h n)
+        (do (let img (lo-strfind-embed-str h n))
+            (let native (jit_leaf_inram img 0))
+            (let interp (str_find h n 0))
+            (eq native interp)))
+
+    ; c0: a real scan over a real (prose) string
+    (let c0 (if (flsb-check "the quick brown fox jumps over the lazy dog" "fox") 1 0))
+
+    ; c1: an empty haystack (the bound<=0 lowering-time path)
+    (let c1 (if (flsb-check "" "needle") 2 0))
+
+    ; c2: a not-found search (needle absent, haystack non-empty)
+    (let c2 (if (flsb-check "hello world" "xyz") 4 0))
+
+    ; c3: a full-length match (needle == haystack)
+    (let c3 (if (flsb-check "matched" "matched") 8 0))
+
+    ; c4: byte-conviction on the trivial (bound<=0) image — the assembler's own
+    ; reference (clang/otool oracle: movz w0,#0 ; sub w0,w0,#1 ; sxtw x0,w0 ; ret)
+    (let trivial-img (lo-strfind-embed "" (lo-str-bytes "x")))
+    (let trivial-ref (list 0 0 128 82   0 4 0 81   0 124 64 147   192 3 95 214))
+    (let c4 (if (eq (fa-conviction trivial-img trivial-ref) 1) 16 0))
+
+    ; c5: compositional — the full-loop image length equals the exact formula,
+    ; and it ends in ret. "abc"/"bc": 1 (sub sp) + 2*3 (embed h) + 2*2 (embed n)
+    ; + 2 (pointer setup) + 27 (the fixed core) = 40 instructions = 160 bytes.
+    (let loop-img (lo-strfind-embed-str "abc" "bc"))
+    (let expected-len (mul 4 (add (add 1 (mul 2 (add 3 2))) (add 2 27))))
+    (let n (len loop-img))
+    (let c5 (if (eq n expected-len)
+            (if (eq (nth loop-img (sub n 4)) 192)
+            (if (eq (nth loop-img (sub n 1)) 214) 32 0) 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))
