@@ -1,0 +1,112 @@
+; nested-defn-scope-band.fk -- a (defn ...) reached as a statement inside another
+; defn's own (do ...) is a REGISTERED, independently callable function, not an
+; inline statement and not a capturing closure.
+;
+; preludes: NONE — deliberately, same reasoning as binary-freshness-band.fk: this
+; band must not be confoundable by a missing or drifted prelude, so every check
+; below uses only native ops and plain defns.
+;
+; Witnessed 2026-09-03 on the pre-heal seed: fk_sparse's "defn" arm (the branch
+; commented "SCOPE FIX: save/restore the enclosing do's live let-bindings around
+; this nested defn's own frame") returned the nested defn's BODY node instead of
+; registering it, so
+;
+;   (do
+;       (defn outer (p) (do (let x 7) (defn f (a) (do (let y 1) (add a y))) (add x p)))
+;       (outer 2))
+;
+; answered 3 (f's own `(let y 1)` stores into slot 1, which is x's slot in
+; outer's frame — a silent corruption, not merely a missing feature) where the
+; honest answer, agreed by form-kernel-go/rust/ts and reproduced here, is 9. And
+; `(defn f (a) (do (defn g (b) (add b 1)) (g a)))` reported 'g' as
+; [unresolved-call] — the name was never registered anywhere a caller could find.
+;
+; THE DECISION (of the three the callsite offered: a registered function, a
+; closure value, or a declined form diagnosed by name): a nested defn is a
+; REGISTERED FUNCTION — its own fresh fk_fn[] slot, its own frame (params + its
+; own lets only, exactly like a top-level defn) — NOT a capturing closure. This
+; fp/slot frame has no upvalues to capture into, so a nested defn whose body
+; reads an ENCLOSING defn's own parameter or let (form-stdlib/model-service.fk's
+; ms-handle reading ms-predict-handler's `model` is the standing example) still
+; can't see it, and still says so through the pre-existing [unbound-name]
+; diagnostic ("a name from an enclosing scope a defn frame cannot see") — the
+; third option, DECLINED AND DIAGNOSED BY NAME, for exactly the one shape a
+; slot-frame interpreter genuinely cannot honor, rather than silently reading
+; whatever the enclosing frame's slot happened to hold. This band checks only
+; what a registered-function nested defn owes: correct scope isolation, correct
+; visibility (registered before its own body, live for the rest of its do, gone
+; once that do ends), and first-class value behavior — not closure capture,
+; which remains an honest, named gap (form/form-stdlib/http-layer.fk and
+; model-service.fk still carry it, now as the ONLY diagnostics they raise).
+;
+; Verdict 63 when every check holds.
+
+(do
+    ; ---- bit 1: the reported repro itself, healed. A nested defn's own lets
+    ; must build their OWN frame, never splicing into (and overwriting) the
+    ; enclosing defn's live slots.
+    (defn nb-scope-safe (p)
+        (do
+            (let x 7)
+            (defn nbss-f (a) (do (let y 1) (add a y)))
+            (add x p)))
+
+    ; ---- bit 2: the nested name must actually be CALLABLE (the other half of
+    ; the reported repro — 'g' unresolved).
+    (defn nb-sibling-visible (p)
+        (do
+            (defn nbsv-g (b) (add b 1))
+            (nbsv-g p)))
+
+    ; ---- bit 4: a later nested defn in the same do can call an EARLIER
+    ; sibling nested defn (registered-before-parsed, sequential visibility —
+    ; the same shape let already has; not a general forward reference).
+    (defn nb-two-nested (p)
+        (do
+            (defn nbtn-inc (x) (add x 1))
+            (defn nbtn-inc2 (x) (nbtn-inc (nbtn-inc x)))
+            (nbtn-inc2 p)))
+
+    ; ---- bit 8: lexical shadowing, both directions. An inner defn sharing an
+    ; outer/top-level defn's name must WIN while its own scope is live (the
+    ; call inside nb-shadow-probe), and the outer name must be UNCORRUPTED once
+    ; that scope ends (the call from nb-shadow-survives, a sibling top-level
+    ; defn). source-runner-do-defn-band.fk's `hidden`-inside-`local-probe`
+    ; pins the non-corruption half; this pins the shadow actually taking effect
+    ; when called, which that band's own `hidden` is never called to prove.
+    (defn nb-outer-name (x) (add x 100))
+    (defn nb-shadow-probe ()
+        (do
+            (defn nb-outer-name (x) (add x 9))
+            (nb-outer-name 1)))
+    (defn nb-shadow-survives () (nb-outer-name 1))
+
+    ; ---- bit 16: first-class value. A nested defn's own value (returned as
+    ; the last statement of its enclosing do) is a callable fn-value — storable
+    ; in a let, callable through the ordinary indirect-call path — same as a
+    ; bare defn-name already is in value position (tag 243).
+    (defn nb-make-adder ()
+        (do
+            (defn nbma-add1 (x) (add x 1))
+            nbma-add1))
+    (defn nb-value-position ()
+        (do
+            (let clo (nb-make-adder))
+            (clo 5)))
+
+    ; ---- bit 32: self-recursion. The nested name must be registered BEFORE
+    ; its own body is parsed, so a self-call inside that body resolves —
+    ; exactly like a top-level defn's "arity known before body" guarantee.
+    (defn nb-self-rec ()
+        (do
+            (defn nbsr-fact (n) (if (eq n 0) 1 (mul n (nbsr-fact (sub n 1)))))
+            (nbsr-fact 5)))
+
+    (defn nested-defn-scope-band ()
+        (add (if (eq (nb-scope-safe 2) 9) 1 0)
+        (add (if (eq (nb-sibling-visible 4) 5) 2 0)
+        (add (if (eq (nb-two-nested 5) 7) 4 0)
+        (add (if (and (eq (nb-shadow-probe) 10) (eq (nb-shadow-survives) 101)) 8 0)
+        (add (if (eq (nb-value-position) 6) 16 0)
+             (if (eq (nb-self-rec) 120) 32 0)))))))
+    (nested-defn-scope-band))
