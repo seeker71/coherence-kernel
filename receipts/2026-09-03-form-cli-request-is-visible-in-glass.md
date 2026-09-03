@@ -96,11 +96,13 @@ telemetry membrane.
 
 After the linear integration landed, the stable-checkout alias exposed one
 more real absence seam under the freshly rebuilt carrier: that checkout had a
-`.hearth/` directory but no task or reply spool, so `file_size`/`read_file`
-returned typed `nothing`; the queue collector called `str_len` before asking
-whether a value existed and the supervisor rebirthed. The queue collector now
-classifies file presence first and preserves the distinction between no durable
-spools and an empty live queue. Its extended band verdict is `536870911`.
+`.hearth/` directory but no board, task spool, or reply spool, so
+`file_size`/`read_file` returned typed `nothing`; the hearth/queue text
+grammars called `str_len` before asking whether a value existed and the
+supervisor rebirthed. The board normalizes absence only at its grammar edge,
+and the queue collector classifies file presence first while preserving the
+distinction between no durable spools and an empty live queue. The hearth band
+remains `4031`; the extended Glass band verdict is `536870911`.
 
 ## Closing
 
