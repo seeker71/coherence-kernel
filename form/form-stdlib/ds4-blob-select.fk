@@ -1,0 +1,87 @@
+; ds4-blob-select.fk — which GGUF is the current DS4 model, asked, not baked in.
+;
+; WHAT THIS REPLACES. metal_dsv4_stack.sh used to hardcode two absolute paths
+; ($HOME/models/ds4-engine/ds4flash.gguf, $HOME/models/ds4/ds4flash-v5mx-reap25-…) and pick between
+; them with a shell `[[ -f ]]` test — a real, evidenced preference (see the shell script's own WHICH
+; WEIGHTS ANSWER comment, receipts/2026-08-04) wearing the shape model-discovery.fk already named as
+; the wrong one: two frozen literal paths baked in before the body runs, never looking at what is
+; actually there. THE HOST KNOWS which files exist and what architecture each one's own header
+; declares; this cell asks it, using model-discovery.fk's walk and header reader, and keeps only the
+; two-tier PREFERENCE (engine home first, specimen home second) that the regression actually earned.
+;
+; WHY THIS IS NARROWER THAN `models`/`use <n>`. form-cli-repl.fk's `models <dir>` walks a root and
+; ALL its kin (ollama's blobs/manifests, the huggingface hub cache) — the right shape for a person
+; looking at everything a host holds. This cell answers one question only ("which file here is the
+; current DS4 model") and is asked on every stack run, so it walks exactly the two directories the
+; question is about and nothing wider — no kin expansion, no host-wide cache scan.
+;
+; WHY ARCHITECTURE, NOT FILENAME. The old shell test asked only "does a file exist at this exact
+; path?" — a file renamed, or a wrong file dropped at the canonical name, would have been handed to
+; the pipeline unread. This cell opens each candidate's own GGUF header and keeps only the ones whose
+; general.architecture reads "deepseek4" (md-arch, model-discovery.fk), the same header field
+; `models` already surfaces. A same-named impostor is filtered out here, not discovered mid-run.
+;
+; WHY THE ENGINE'S CANONICAL NAME STILL WINS AMONG WHAT ds4-engine/ HOLDS. Two real DeepSeek-V4-Flash
+; GGUFs can sit in ds4-engine/ at once (the symlink's own target, listed by its own path, plus the
+; symlink path itself) and model-discovery.fk's header window cannot tell a mainline build from a
+; reaped one apart — both report the same architecture, block_count and general.name (witnessed
+; 2026-09-03: both ds4-engine/ds4flash.gguf and the reap25 specimen answer identically through
+; md-describe). Picking blind between look-alikes is exactly the guess model-discovery.fk's own
+; "never a plausible number" rule refuses, so this keeps the one real, non-architectural signal this
+; host already carries: ds4flash.gguf is the engine's own name for "whichever build it considers
+; current" (form/native/metal/metal_dsv4_stack.sh's own comment, kept there, names why). Present among
+; the discovered deepseek4 files, it wins; absent, the first deepseek4 file ds4-engine/ carries wins,
+; order-stable and never invented.
+;
+; WHY ds4/ IS ONLY EVER A FALLBACK. Nothing in ds4-engine/ answering "deepseek4" is the honest trigger
+; for looking at ds4/ at all — a host that has retired the specimen entirely still resolves cleanly.
+;
+; WHY EMPTY IS A REAL ANSWER. A root with neither directory, or with directories holding no
+; deepseek4-architecture file, returns "" — the caller (ds4-blob-select-cli.fk, then
+; metal_dsv4_stack.sh) already knows what an absent blob means: SKIP, exit 2, name the missing path.
+;
+; preludes: form-stdlib/core.fk form-stdlib/model-discovery.fk
+
+(do
+    (defn dbs-canonical-name () "ds4flash.gguf")
+    (defn dbs-engine-subdir () "/ds4-engine")
+    (defn dbs-specimen-subdir () "/ds4")
+
+    ; a candidate is DS4 only if its own header says so — never its name, never its directory.
+    (defn dbs-ds4? (path)
+        (if (eq (md-gguf? path) 1)
+            (str_eq (md-arch (read_file_slice path 0 (md-header-bytes))) "deepseek4")
+            0))
+
+    (defn dbs-filter-ds4 (paths)
+        (if (eq (len paths) 0) (list)
+            (if (eq (dbs-ds4? (head paths)) 1)
+                (cons (head paths) (dbs-filter-ds4 (tail paths)))
+                (dbs-filter-ds4 (tail paths)))))
+
+    ; every deepseek4-architecture file md-find-in sees under one directory — absent directory is an
+    ; honest empty list, never an error, the same discipline md-kin-try already keeps.
+    (defn dbs-ds4-under (dir)
+        (if (eq (fs_is_dir dir) 1) (dbs-filter-ds4 (md-find-in (list dir))) (list)))
+
+    (defn dbs-find-canonical (paths)
+        (if (eq (len paths) 0) ""
+            (if (str_eq (md-base (head paths)) (dbs-canonical-name)) (head paths)
+                (dbs-find-canonical (tail paths)))))
+
+    ; the engine's own canonical name wins when it is among what was found; otherwise the first
+    ; deepseek4 file found wins, order-stable — never a guess between two look-alikes.
+    (defn dbs-pick (paths)
+        (if (eq (len paths) 0) ""
+            (do
+                (let canon (dbs-find-canonical paths))
+                (if (str_eq canon "") (head paths) canon))))
+
+    ; the two-tier preference itself: ds4-engine/ first, ds4/ only when ds4-engine/ names nothing.
+    (defn dbs-resolve (root)
+        (do
+            (let engine-hits (dbs-ds4-under (str_concat root (dbs-engine-subdir))))
+            (if (gt (len engine-hits) 0)
+                (dbs-pick engine-hits)
+                (dbs-pick (dbs-ds4-under (str_concat root (dbs-specimen-subdir)))))))
+    0)

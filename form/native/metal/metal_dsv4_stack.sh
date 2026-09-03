@@ -40,7 +40,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form
 GO_BIN="$ROOT/form-kernel-go/bin-go"
-# WHICH WEIGHTS ANSWER, and why this is a list rather than a path.
+DS4_FKWU="$ROOT/../fkwu"
+# WHICH WEIGHTS ANSWER, and why this asks the body instead of hand-walking two literal paths.
 #
 # This defaulted to `ds4/ds4flash-v5mx-reap25-…` from the day the lane was born. On 2026-08-04 the ask
 # door answered "The largest planet in our solar system is" with " the name, the<|place_holder_mm_span
@@ -56,25 +57,30 @@ GO_BIN="$ROOT/form-kernel-go/bin-go"
 # had already written that down twice — receipts/2026-07-30-head-to-head-and-a-logit-oracle.md records
 # it emitting " to the detection Specialists Protocol detection protocol setName", and ds4-paris-probe
 # .fk records ~/models/ds4-engine/ds4 REFUSING to read it, so it has no oracle either. The mainline
-# chat-v2-imatrix file arrived 2026-07-30, every fluent DS4 receipt since rests on it, and this line
-# was never moved. Three days later the door was read as a regression in the kernels.
+# chat-v2-imatrix file arrived 2026-07-30, every fluent DS4 receipt since rests on it.
 #
-# So: prefer the engine's own canonical name (a symlink, so it follows whatever the engine considers
-# current), fall back to the reaped specimen only when it is the only file here, and NAME the choice
-# out loud either way. A default that silently picks a specimen is a body that cannot tell you which
-# of its own answers you are reading.
-DS4_BLOB_PREFERRED="$HOME/models/ds4-engine/ds4flash.gguf"
-DS4_BLOB_SPECIMEN="$HOME/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf"
-if [[ -n "${FORM_DS4_BLOB:-}" ]]; then BLOB="$FORM_DS4_BLOB"
-elif [[ -f "$DS4_BLOB_PREFERRED" ]]; then BLOB="$DS4_BLOB_PREFERRED"
-else BLOB="$DS4_BLOB_SPECIMEN"
+# form-stdlib/model-discovery.fk later named the shape of this very fix as the wrong one: two paths
+# hardcoded in shell is a switch wearing a preference's clothes, invisible to any host laid out
+# differently and blind to a wrong file sitting at the right name. So the preference now lives where
+# model-discovery.fk already argued it belongs — asked, not baked in. form-stdlib/ds4-blob-select.fk
+# walks $HOME/models/ds4-engine and, only if that names no deepseek4-architecture file, $HOME/models
+# /ds4 — verifying architecture off each candidate's own GGUF header (the old two-path test never
+# opened either file), preferring the engine's own canonical name among what it finds there,
+# first-found otherwise. Read through ds4-blob-select-cli.fk, the same stdin-membrane discipline
+# native-model-route-table-cli.fk already keeps for $LOCAL_MODEL_ROUTE.
+if [[ -n "${FORM_DS4_BLOB:-}" ]]; then
+    BLOB="$FORM_DS4_BLOB"
+else
+    [ -x "$DS4_FKWU" ] || { echo "FAIL native fkwu carrier missing: $DS4_FKWU"; exit 1; }
+    _ds4sel="$(printf '%s\n' "$HOME/models" | "$DS4_FKWU" "$ROOT/form-stdlib/ds4-blob-select-cli.fk" 2>/dev/null)"
+    BLOB="$(printf '%s\n' "$_ds4sel" | awk -F= '$1=="ds4_blob_path"{print $2; exit}')"
 fi
 # FOLLOW THE LINK, AND SAY THE REAL NAME. `ds4flash.gguf` is a symlink, and the first draft of this
 # block reported it as such: `stat -f%z` handed back 110 — the LINK's own bytes — the residency plan
 # was built over a 110-byte file, and the runner took SIGTRAP. Two costs in one line: a plan over a
 # nonsense size, and a printed name that would have hidden which specimen answered, which is the very
 # thing this block exists to stop. Resolving here fixes both, and every later `stat` sees a real file.
-[[ -L "$BLOB" ]] && BLOB="$(readlink -f "$BLOB")"
+[[ -n "$BLOB" && -L "$BLOB" ]] && BLOB="$(readlink -f "$BLOB")"
 CACHE="$ROOT/native/metal/.metallib-cache"
 TOKEN="${FORM_DS4_PROMPT_TOKEN:-671}"
 KV_CAP="${FORM_DS4_KV_CAP:-4}"
