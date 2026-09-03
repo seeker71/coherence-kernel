@@ -16,50 +16,60 @@ fi
 
 route=${LOCAL_MODEL_ROUTE:-form-metal}
 
-case "$route" in
-    form-metal|llama32.form-metal)
-        prompt=$(cat)
-        if [ -z "$prompt" ]; then
-            printf 'refusing an empty prompt\n' >&2
-            exit 2
-        fi
-        # Direct model execution: no socket, HTTP, JSON, Ollama, or llama.cpp.
-        # metal_ask stages the question-bound answer plus its 13-gate receipt.
-        exec "$NM_REPO_ROOT/form/native/metal/metal_ask.sh" \
-            "${FORM_METAL_STEPS:-12}" "$prompt"
-        ;;
-esac
+# The routing DECISION -- which route names exist, which door each carries
+# the ask through, and each door's threshold -- lives in Form, as data:
+# form/form-stdlib/native-model-route-table.bml, read through its CLI
+# membrane. This shell carrier keeps only the host boundary a shell
+# invocation is actually for: reading $LOCAL_MODEL_ROUTE (and, below,
+# $FORM_METAL_STEPS) from the environment, and calling into the table to
+# resolve the name. See form/form-stdlib/tests/native-model-route-table-band.fk.
+if [ ! -x "$NM_FKWU" ]; then
+    printf 'missing executable kernel: %s\n' "$NM_FKWU" >&2
+    exit 1
+fi
+route_result=$(printf '%s\n' "$route" |
+    "$NM_FKWU" form/form-stdlib/native-model-route-table-cli.fk)
+route_kind=$(printf '%s\n' "$route_result" | awk -F= '$1 == "route_kind" { print $2; exit }')
+route_door=$(printf '%s\n' "$route_result" | awk -F= '$1 == "route_door" { print $2; exit }')
+route_steps=$(printf '%s\n' "$route_result" | awk -F= '$1 == "route_steps" { print $2; exit }')
+route_model=$(printf '%s\n' "$route_result" | awk -F= '$1 == "route_model" { print $2; exit }')
+route_registered_model=$(printf '%s\n' "$route_result" |
+    awk -F= '$1 == "route_registered_model" { print $2; exit }')
+route_known_names=$(printf '%s\n' "$route_result" |
+    awk -F= '$1 == "route_known_names" { print $2; exit }')
+
+if [ "$route_kind" = "direct-metal" ]; then
+    prompt=$(cat)
+    if [ -z "$prompt" ]; then
+        printf 'refusing an empty prompt\n' >&2
+        exit 2
+    fi
+    # Direct model execution: no socket, HTTP, JSON, Ollama, or llama.cpp.
+    # metal_ask stages the question-bound answer plus its 13-gate receipt.
+    exec "$NM_REPO_ROOT/$route_door" \
+        "${FORM_METAL_STEPS:-$route_steps}" "$prompt"
+fi
 
 nm_require_command curl
 nm_require_command jq
 nm_require_command shasum
 
-if [ ! -x "$NM_FKWU" ]; then
-    printf 'missing executable kernel: %s\n' "$NM_FKWU" >&2
-    exit 1
+if [ "$route_kind" = "unknown" ]; then
+    printf 'unknown LOCAL_MODEL_ROUTE: %s\n' "$route" >&2
+    printf 'known routes: %s\n' "$route_known_names" >&2
+    exit 2
 fi
 
 ollama_url=${OLLAMA_URL:-http://127.0.0.1:11434}
-case "$route" in
-    ollama-llama32)
-        ollama_model=llama3.2:3b
-        registered_model=base.llama32-3b-local
-        ;;
-    nanbeige42)
-        package_result=$("$NM_REPO_ROOT/form/scripts/nanbeige_gguf_verify.sh")
-        if ! printf '%s\n' "$package_result" | grep -q '^execution_admitted=1$'; then
-            printf 'Form refused the Nanbeige package\n%s\n' "$package_result" >&2
-            exit 1
-        fi
-        ollama_model=nanbeige42-local:Q4_K_M
-        registered_model=challenger.nanbeige42-3b-local
-        ;;
-    *)
-        printf 'unknown LOCAL_MODEL_ROUTE: %s\n' "$route" >&2
-        printf 'known routes: form-metal, llama32.form-metal, ollama-llama32, nanbeige42\n' >&2
-        exit 2
-        ;;
-esac
+ollama_model=$route_model
+registered_model=$route_registered_model
+if [ "$route_kind" = "challenger-carrier" ]; then
+    package_result=$("$NM_REPO_ROOT/$route_door")
+    if ! printf '%s\n' "$package_result" | grep -q '^execution_admitted=1$'; then
+        printf 'Form refused the Nanbeige package\n%s\n' "$package_result" >&2
+        exit 1
+    fi
+fi
 ledger="$NM_STATE_DIR/events.jsonl"
 
 temp_dir=$(nm_new_temp_dir)
