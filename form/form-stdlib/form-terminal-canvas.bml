@@ -69,6 +69,13 @@ section [form.bml] {
         def ftc-segment-node-id(segment) = nth(segment, 4);
         def ftc-segment-channels(segment) = nth(segment, 5);
         def ftc-segment-evidence(segment) = nth(segment, 6);
+        def ftc-byte-text(bytes) = list("ftc-byte-text-v1", bytes);
+        def ftc-byte-text?(text) = if lt(len(text), 2) then 0 else if str_eq(head(text), "ftc-byte-text-v1") then 1 else 0;
+        def ftc-byte-list-equal?(left, right) = if not(eq(len(left), len(right))) then 0 else if eq(len(left), 0) then 1 else if not(eq(head(left), head(right))) then 0 else ftc-byte-list-equal?(tail(left), tail(right));
+        def ftc-bytes-string(bytes) = if eq(len(bytes), 0) then "" else str_concat(byte_to_str(head(bytes)), ftc-bytes-string(tail(bytes)));
+        def ftc-text-as-string(text) = if eq(ftc-byte-text?(text), 1) then ftc-bytes-string(nth(text, 1)) else text;
+        def ftc-text-width(text) = if eq(ftc-byte-text?(text), 1) then len(nth(text, 1)) else str_len(text);
+        def ftc-text-equal?(left, right) = if and(eq(ftc-byte-text?(left), 1), eq(ftc-byte-text?(right), 1)) then ftc-byte-list-equal?(nth(left, 1), nth(right, 1)) else if and(eq(ftc-byte-text?(left), 0), eq(ftc-byte-text?(right), 0)) then str_eq(left, right) else ftc-byte-list-equal?(if eq(ftc-byte-text?(left), 1) then nth(left, 1) else ftcb-text(left), if eq(ftc-byte-text?(right), 1) then nth(right, 1) else ftcb-text(right));
         def ftc-overflow(policy, hiddenCount) = list("ftc-overflow", policy, hiddenCount);
 
         // Retained values belong to the scene, not to the terminal adapter.
@@ -200,7 +207,7 @@ section [form.bml] {
             ftc-cat(list(ftc-esc(), "[", ftc-ansi-weight(style), ftc-ansi-fg(style), ftc-ansi-bg(style), "m", ftc-cell-glyph(cell), ftc-esc(), "[0m"));
         }
         def ftc-ansi-style(style) = ftc-cat(list(ftc-esc(), "[", ftc-ansi-weight(style), ftc-ansi-fg(style), ftc-ansi-bg(style), "m"));
-        def ftc-ansi-segment(segment) = ftc-cat(list(ftc-ansi-style(ftc-segment-style(segment)), ftc-segment-text(segment)));
+        def ftc-ansi-segment(segment) = ftc-cat(list(ftc-ansi-style(ftc-segment-style(segment)), ftc-text-as-string(ftc-segment-text(segment))));
         def ftc-ansi-segments(segments) = if eq(len(segments), 0) then ftc-cat(list(ftc-esc(), "[0m")) else str_concat(ftc-ansi-segment(head(segments)), ftc-ansi-segments(tail(segments)));
         def ftc-ansi-line-end() = ftc-cat(list(ftc-esc(), "[0m", ftc-esc(), "[K"));
         def ftc-ansi-segment-lines(lines) = if eq(len(lines), 0) then "" else if eq(len(tail(lines)), 0) then str_concat(ftc-ansi-segments(head(lines)), ftc-ansi-line-end()) else ftc-cat(list(ftc-ansi-segments(head(lines)), ftc-ansi-line-end(), "\n", ftc-ansi-segment-lines(tail(lines))));
@@ -234,6 +241,47 @@ section [form.bml] {
             let count = if ge(len(previous), len(nextLines)) then len(previous) else len(nextLines);
             ftc-segment-lines-diff-go(previous, nextLines, 0, count);
         }
+
+        // Persistent projection uses byte lists, not dynamically interned
+        // strings.  The retained scene still carries semantic strings for
+        // selection and inspection; ANSI framing, RGB numbers, positions and
+        // the whole-frame concatenation never enter the permanent string pool.
+        def ftcb-cat(parts) = if eq(len(parts), 0) then list() else append(head(parts), ftcb-cat(tail(parts)));
+        def ftcb-text-go(text, index, count) = if ge(index, count) then list() else cons(str_byte_at(text, index), ftcb-text-go(text, add(index, 1), count));
+        def ftcb-text(text) = ftcb-text-go(text, 0, str_len(text));
+        def ftcb-uint-reversed(value, held) = if lt(value, 10) then cons(add(48, value), held) else ftcb-uint-reversed(div(value, 10), cons(add(48, mod(value, 10)), held));
+        def ftcb-uint(value) = if le(value, 0) then list(48) else ftcb-uint-reversed(value, list());
+        def ftcb-int(value) = if lt(value, 0) then cons(45, ftcb-uint(sub(0, value))) else ftcb-uint(value);
+        def ftcb-sgr-open() = list(27, 91);
+        def ftcb-reset() = list(27, 91, 48, 109);
+        def ftcb-line-end() = list(27, 91, 48, 109, 27, 91, 75);
+        def ftcb-terminal-home() = list(27, 91, 72);
+        def ftcb-terminal-erase-rest() = list(27, 91, 74);
+        def ftcb-terminal-safe-open() = list(27, 91, 48, 109, 27, 91, 50, 74, 27, 91, 72);
+        def ftcb-weight(style) = if eq(ftc-style-bold?(style), 1) then list(49, 59) else if lt(ftc-style-alpha(style), 160) then list(50, 59) else list();
+        def ftcb-fg(style) = ftcb-cat(list(list(51, 56, 59, 50, 59), ftcb-int(ftc-style-red(style)), list(59), ftcb-int(ftc-style-green(style)), list(59), ftcb-int(ftc-style-blue(style))));
+        def ftcb-bg(style) = if lt(ftc-style-back-red(style), 0) then list() else ftcb-cat(list(list(59, 52, 56, 59, 50, 59), ftcb-int(ftc-style-back-red(style)), list(59), ftcb-int(ftc-style-back-green(style)), list(59), ftcb-int(ftc-style-back-blue(style))));
+        def ftcb-style(style) = ftcb-cat(list(ftcb-sgr-open(), ftcb-weight(style), ftcb-fg(style), ftcb-bg(style), list(109)));
+        def ftcb-text-value(text) = if eq(ftc-byte-text?(text), 1) then nth(text, 1) else ftcb-text(text);
+        def ftcb-segment(segment) = append(ftcb-style(ftc-segment-style(segment)), ftcb-text-value(ftc-segment-text(segment)));
+        def ftcb-segments(segments) = if eq(len(segments), 0) then ftcb-reset() else append(ftcb-segment(head(segments)), ftcb-segments(tail(segments)));
+        def ftcb-segment-line(line) = append(ftcb-segments(line), ftcb-line-end());
+        def ftcb-segment-lines(lines) = if eq(len(lines), 0) then list() else if eq(len(tail(lines)), 0) then ftcb-segment-line(head(lines)) else ftcb-cat(list(ftcb-segment-line(head(lines)), list(10), ftcb-segment-lines(tail(lines))));
+        def ftcb-position(x, y) = ftcb-cat(list(ftcb-sgr-open(), ftcb-int(add(y, 1)), list(59), ftcb-int(add(x, 1)), list(72)));
+        def ftcb-segment-visible-equal?(left, right) = if not(eq(ftc-text-equal?(ftc-segment-text(left), ftc-segment-text(right)), 1)) then 0 else ftc-style-equal?(ftc-segment-style(left), ftc-segment-style(right));
+        def ftcb-segment-list-equal?(left, right) = if not(eq(len(left), len(right))) then 0 else if eq(len(left), 0) then 1 else if not(eq(ftcb-segment-visible-equal?(head(left), head(right)), 1)) then 0 else ftcb-segment-list-equal?(tail(left), tail(right));
+        def ftcb-segment-line-diff(previous, nextLines, index) {
+            let oldLine = ftc-segment-line-at(previous, index);
+            let nextLine = ftc-segment-line-at(nextLines, index);
+            if eq(ftcb-segment-list-equal?(oldLine, nextLine), 1) then list() else append(ftcb-position(0, index), ftcb-segment-line(nextLine));
+        }
+        def ftcb-segment-lines-diff-go(previous, nextLines, index, count) = if ge(index, count) then list() else append(ftcb-segment-line-diff(previous, nextLines, index), ftcb-segment-lines-diff-go(previous, nextLines, add(index, 1), count));
+        def ftcb-segment-lines-diff(previous, nextLines) {
+            let count = if ge(len(previous), len(nextLines)) then len(previous) else len(nextLines);
+            ftcb-segment-lines-diff-go(previous, nextLines, 0, count);
+        }
+        def ftcb-full-frame(lines) = ftcb-cat(list(ftcb-terminal-home(), ftcb-segment-lines(lines), ftcb-terminal-erase-rest()));
+        def ftcb-write-stdout(bytes) = if eq(len(bytes), 0) then 0 else file_append_bytes("/dev/stdout", bytes);
     }
     0;
 }

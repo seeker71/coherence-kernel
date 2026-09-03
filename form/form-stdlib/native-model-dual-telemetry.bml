@@ -3,7 +3,7 @@
 // native-model-dual-telemetry.bml — executable truth-separated rows.
 //
 // Authority: form-stdlib/bml/native-model-dual-telemetry.bml
-// preludes: form/form-stdlib/form-glass-telemetry-membrane.bml
+// preludes: form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/native-model-tensor-ledger.bml
 //
 //////////////////////////////////////////////////////////////////////
 
@@ -32,6 +32,25 @@ section [form.bml] {
         def nmdt-owner-counter-sample(id, kind, plane, owner, lane, purpose, value, observedEpoch, source, channels) = fgtm-sample(id, fgtm-absent(), kind, plane, owner, lane, purpose, fgtm-absent(), fgtm-present(value), "active", nmdt-access-epoch(observedEpoch), fgtm-absent(), fgtm-absent(), fgtm-absent(), "never", "physical-live", source, append(channels, list("node-id-unbound")));
         def nmdt-owner-missing-sample(id, kind, plane, owner, lane, purpose, observedEpoch, door, channels) = fgtm-sample(id, fgtm-absent(), kind, plane, owner, lane, purpose, fgtm-absent(), fgtm-absent(), "unknown", nmdt-access-epoch(observedEpoch), fgtm-absent(), fgtm-absent(), fgtm-absent(), "never", "declared", door, append(channels, list("node-id-unbound")));
         def nmdt-owner-nodeid-seam(owner, observedEpoch) = nmdt-owner-missing-sample("nodeid.owner.telemetry", "node-id-binding", "form", owner, "model-owner", "snapshot-row-nodeid-binding", observedEpoch, "model.owner.telemetry-nodeid-mint", list("process", "model", "health"));
+        // The telemetry membrane's plane vocabulary is deliberately small.
+        // A file-backed no-copy tensor view is a disk extent; an allocated
+        // Metal buffer is unified memory.  More descriptive phrases belong in
+        // kind/purpose, never in an invalid plane that makes publication fail.
+        def nmdt-tensor-group-plane(group) = if str_eq(nmtl-group-kind(group), "mapped-tensors") then "disk" else "unified";
+        def nmdt-tensor-group-sample(group) = if eq(nmtl-group-valid?(group), 1) then fgtm-sample(nmtl-group-id(group), fgtm-present(nmtl-group-parent(group)), nmtl-group-kind(group), nmdt-tensor-group-plane(group), nmtl-group-owner(group), "memory", nmtl-group-kind(group), fgtm-present(nmtl-group-bytes(group)), fgtm-present(nmtl-group-handles(group)), "resident", fgtm-present(nmtl-group-observed(group)), fgtm-absent(), fgtm-absent(), fgtm-absent(), "pressure-only", "physical-live", nmtl-group-source(group), append(nmtl-group-channels(group), list("node-id-unbound"))) else nmdt-owner-missing-sample(nmtl-group-id(group), nmtl-group-kind(group), nmdt-tensor-group-plane(group), nmtl-group-owner(group), "memory", "handle-byte-reconciliation-failed", nmtl-group-observed(group), "model.tensor-allocation-reconciliation", nmtl-group-channels(group));
+        def nmdt-tensor-group-samples(groups) = if eq(len(groups), 0) then list() else cons(nmdt-tensor-group-sample(head(groups)), nmdt-tensor-group-samples(tail(groups)));
+        def nmdt-tensor-reconcile-sample(id, owner, expected, observed, epoch, source, channels) = fgtm-sample(id, fgtm-absent(), "tensor-reconciliation", "unified", owner, "memory", if eq(expected, observed) then "reconciled" else "count-mismatch", fgtm-absent(), fgtm-present(sub(observed, expected)), if eq(expected, observed) then "ready" else "failed", fgtm-present(epoch), fgtm-absent(), fgtm-absent(), fgtm-absent(), "never", "physical-live", source, append(channels, list("node-id-unbound")));
+        def nmdt-tensor-ledger-total-sample(groups, owner, epoch) = fgtm-sample("tensor.owner.ledger", fgtm-absent(), "tensor-ledger", "unified", owner, "memory", "mapped-view-plus-allocated-byte-extents", fgtm-present(nmtl-groups-bytes(groups)), fgtm-present(nmtl-groups-handles(groups)), "resident", fgtm-present(epoch), fgtm-absent(), fgtm-absent(), fgtm-absent(), "pressure-only", "physical-live", "native-model-tensor-ledger", list("process", "model", "memory", "tensor", "metal", "gpu", "health", "node-id-unbound"));
+        def nmdt-tensor-reconcile-samples(groups, status, owner, epoch) {
+            let expectedAll = nmtl-groups-handles(groups);
+            let expectedMapped = nmtl-groups-kind-handles(groups, "mapped-tensors");
+            let observedAll = nmdt-status-int(status, "buffers");
+            let observedMapped = nmdt-status-int(status, "mmap_nocopy_buffers");
+            list(
+                nmdt-tensor-ledger-total-sample(groups, owner, epoch),
+                nmdt-tensor-reconcile-sample("tensor.owner.buffer-count-delta", owner, expectedAll, observedAll, epoch, "native-model-tensor-ledger+metal_status.buffers", list("process", "model", "memory", "tensor", "metal", "gpu", "health")),
+                nmdt-tensor-reconcile-sample("tensor.owner.mapped-count-delta", owner, expectedMapped, observedMapped, epoch, "native-model-tensor-ledger+metal_status.mmap_nocopy_buffers", list("process", "model", "memory", "tensor", "metal", "gpu", "health")));
+        }
         def nmdt-status-start(status, key) {
             let first = str_concat(key, "=");
             let later = str_concat("\n", first);
@@ -76,7 +95,10 @@ section [form.bml] {
         // and interned string on every quarter-second snapshot.
         def nmdt-owner-heartbeat-id-from-incarnation(incarnation) = str_concat("heartbeat.", incarnation);
         def nmdt-owner-heartbeat-id(correlation) = nmdt-owner-heartbeat-id-from-incarnation(nmdt-owner-incarnation-of(correlation));
-        def nmdt-owner-heartbeat-sample-at(correlation, heartbeatId) = if not(eq(nmdt-owner-correlation?(correlation), 1)) then list("native-model-owner-heartbeat-invalid-v1") else if not(eq(fgtm-label?(heartbeatId), 1)) then list("native-model-owner-heartbeat-invalid-v1") else fgtm-sample(heartbeatId, fgtm-absent(), "owner-heartbeat", "form", nmdt-owner-publisher-of(correlation), "model-owner", "dual-model-owner", fgtm-absent(), fgtm-absent(), "active", fgtm-present(nmdt-owner-observed(correlation)), fgtm-present(nmdt-owner-started(correlation)), fgtm-absent(), fgtm-present(nmdt-owner-pid(correlation)), "never", "physical-live", "model.owner", list("process", "model", "health", "membrane"));
+        // Capacity carries the owner's monotonic publication sequence.  It was
+        // previously thrown away, which prevented a consumer from rebuilding
+        // exact publisher provenance from the wire snapshot alone.
+        def nmdt-owner-heartbeat-sample-at(correlation, heartbeatId) = if not(eq(nmdt-owner-correlation?(correlation), 1)) then list("native-model-owner-heartbeat-invalid-v1") else if not(eq(fgtm-label?(heartbeatId), 1)) then list("native-model-owner-heartbeat-invalid-v1") else fgtm-sample(heartbeatId, fgtm-absent(), "owner-heartbeat", "form", nmdt-owner-publisher-of(correlation), "model-owner", "dual-model-owner", fgtm-absent(), fgtm-present(nmdt-owner-sequence(correlation)), "active", fgtm-present(nmdt-owner-observed(correlation)), fgtm-present(nmdt-owner-started(correlation)), fgtm-absent(), fgtm-present(nmdt-owner-pid(correlation)), "never", "physical-live", "model.owner", list("process", "model", "health", "membrane"));
         def nmdt-owner-heartbeat-sample(correlation) = nmdt-owner-heartbeat-sample-at(correlation, nmdt-owner-heartbeat-id(correlation));
 
         // Each state-bit row retains the epoch when that bit last changed.

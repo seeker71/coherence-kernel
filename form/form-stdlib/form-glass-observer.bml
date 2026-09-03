@@ -14,20 +14,25 @@ section [form.bml] {
     }
 
     class FormGlassObserver {
-        field FGOSchema = "form-glass-observer-v1";
+        field FGOSchema = "form-glass-observer-v2";
         field FGOEvent = "FORM-GLASS-OBSERVATION-V1";
-        field FGOProjectionEvent = "FORM-GLASS-METRIC-PROJECTION-V1";
+        field FGOProjectionEvent = "FORM-GLASS-METRIC-FIELD-V2";
+        field FGOValueEvent = "form-glass-value-event-v2";
 
         ref fgo-authority = FormGlassObserverAuthority;
         thought fgo-law = list("presence-before-value", "planes-never-collapse", "process-local-is-named", "bounded-process-no-argv", "storage-is-not-residence", "observer-tax-is-visible");
 
         // metric: tag, domain, id, label, value kind, int value, text value,
         // present, unit, capacity, capacity present, heat, age, memory plane,
-        // evidence, source, lifecycle, channel, note.
+        // evidence, source, lifecycle, channel, note, stable field NodeID,
+        // observed epoch, and observation sequence.  The NodeID identifies the
+        // field, never a reading of the field: values and time live in the
+        // melt-managed row/event record so a changing counter cannot grow the
+        // permanent NodeID arena.
         def fgo-metric(domain, id, label, valueKind, intValue, textValue, present, unit, capacity, capacityPresent, heat, age, plane, evidence, source, lifecycle, channel, note) {
             let truthClass = if str_eq(evidence, "observed") then if str_eq(lifecycle, "stored") then "catalog" else "physical-live" else evidence;
-            let projection = intern_node_at(bp(FGOProjectionEvent()), list(intern_trivial_string(domain), intern_trivial_string(id), intern_trivial_string(valueKind), if str_eq(valueKind, "text") then intern_trivial_string(textValue) else intern_trivial_int(intValue), intern_trivial_int(present), intern_trivial_string(unit), intern_trivial_string(truthClass), intern_trivial_int(age), intern_trivial_string(source), intern_trivial_string(lifecycle), intern_trivial_string(channel), intern_trivial_string(note)), "form/form-stdlib/form-glass-observer.bml", 1, 1);
-            list("form-glass-metric", domain, id, label, valueKind, intValue, textValue, present, unit, capacity, capacityPresent, heat, age, plane, truthClass, source, lifecycle, channel, note, projection);
+            let projection = intern_node_at(bp(FGOProjectionEvent()), list(intern_trivial_string("glass.monitor"), intern_trivial_string(domain), intern_trivial_string(id), intern_trivial_string(valueKind), intern_trivial_string(unit), intern_trivial_string(plane), intern_trivial_string(channel)), "form/form-stdlib/form-glass-observer.bml", 1, 1);
+            list("form-glass-metric-v2", domain, id, label, valueKind, intValue, textValue, present, unit, capacity, capacityPresent, heat, age, plane, truthClass, source, lifecycle, channel, note, projection, -1, -1);
         }
         def fgo-domain(row) = nth(row, 1);
         def fgo-id(row) = nth(row, 2);
@@ -76,10 +81,26 @@ section [form.bml] {
         def fgo-nodeid-state(row) = if eq(fgo-nodeid-bound?(row), 1) then "bound-glass-projection" else "unbound";
         def fgo-nodeid-value(row) = if eq(fgo-nodeid-bound?(row), 1) then fgo-node-id(fgo-projection-node(row)) else "";
         def fgo-nodeid-door(row) = if eq(fgo-nodeid-bound?(row), 1) then "glass.metric-projection" else "telemetry.nodeid-owner-binding";
-        def fgo-source-node(row) = if lt(len(row), 21) then nothing() else nth(row, 20);
+        def fgo-observed-epoch(row) = if lt(len(row), 21) then -1 else nth(row, 20);
+        def fgo-observation-sequence(row) = if lt(len(row), 22) then -1 else nth(row, 21);
+        def fgo-source-node(row) = if lt(len(row), 23) then nothing() else nth(row, 22);
         def fgo-source-nodeid-bound?(row) = if nothing?(fgo-source-node(row)) then 0 else 1;
         def fgo-source-nodeid-value(row) = if eq(fgo-source-nodeid-bound?(row), 1) then fgo-node-id(fgo-source-node(row)) else "";
         def fgo-source-nodeid-door(row) = if eq(fgo-source-nodeid-bound?(row), 1) then "framebuffer.interned-node" else "telemetry.nodeid-owner-binding";
+
+        // Re-materialize the value record while retaining the stable field
+        // NodeID and any real source node.  These are ordinary Form lists and
+        // therefore travel through the existing melt-managed arena.
+        def fgo-row-at(row, age, observedEpoch, sequence) {
+            let base = list("form-glass-metric-v2", fgo-domain(row), fgo-id(row), fgo-label(row), fgo-value-kind(row), fgo-int-value(row), fgo-text-value(row), fgo-present?(row), fgo-unit(row), fgo-capacity(row), fgo-capacity-present?(row), fgo-heat(row), age, fgo-plane(row), fgo-evidence(row), fgo-source(row), fgo-lifecycle(row), fgo-channel(row), fgo-note(row), fgo-projection-node(row), observedEpoch, sequence);
+            if eq(fgo-source-nodeid-bound?(row), 1) then append(base, list(fgo-source-node(row))) else base;
+        }
+        def fgo-observe-row(row, observedEpoch, sequence) = if eq(fgo-present?(row), 0) then fgo-row-at(row, -1, -1, sequence) else fgo-row-at(row, 0, observedEpoch, sequence);
+        def fgo-observe-rows(rows, observedEpoch, sequence) = if eq(len(rows), 0) then list() else cons(fgo-observe-row(head(rows), observedEpoch, sequence), fgo-observe-rows(tail(rows), observedEpoch, sequence));
+        def fgo-age-at(row, epoch) = if or(eq(fgo-present?(row), 0), lt(fgo-observed-epoch(row), 0)) then -1 else if ge(epoch, fgo-observed-epoch(row)) then sub(epoch, fgo-observed-epoch(row)) else -2;
+        def fgo-age-row-at(row, epoch) = fgo-row-at(row, fgo-age-at(row, epoch), fgo-observed-epoch(row), fgo-observation-sequence(row));
+        def fgo-age-rows-at(rows, epoch) = if eq(len(rows), 0) then list() else cons(fgo-age-row-at(head(rows), epoch), fgo-age-rows-at(tail(rows), epoch));
+        def fgo-value-event(row) = list(FGOValueEvent(), fgo-projection-node(row), fgo-observed-epoch(row), fgo-observation-sequence(row), fgo-value-kind(row), fgo-int-value(row), fgo-text-value(row), fgo-present?(row), fgo-capacity(row), fgo-capacity-present?(row), fgo-heat(row), fgo-evidence(row), fgo-lifecycle(row), fgo-source(row), fgo-note(row), fgo-source-node(row));
 
         def fgo-status-start(status, name) {
             let key = str_concat(name, "=");
@@ -156,13 +177,13 @@ section [form.bml] {
         def fgo-metal-rows(status) {
             list(
                 fgo-text-or-unavailable("metal", "device", "Metal device", fgo-status-text(status, "device"), "unified-gpu", "observed", "metal_status.device", "live", "metal", "current fkwu process"),
-                fgo-status-semantic-row("metal", "buffers", "Metal buffers", status, "buffers", "handles", "unified-gpu", "metal_status", "metal", "empty", "semantic-zero=empty; this Glass process owns no Metal buffer handles", "current Glass process only"),
-                fgo-status-semantic-row("metal", "mapped", "mmap no-copy buffers", status, "mmap_nocopy_buffers", "handles", "mapped-file", "metal_status", "metal", "empty", "semantic-zero=empty; this Glass process owns no mmap no-copy buffers", "current Glass process only"),
-                fgo-status-semantic-row("metal", "pipelines", "Metal pipelines", status, "pipelines", "handles", "unified-gpu", "metal_status", "metal", "empty", "semantic-zero=empty; this Glass process owns no Metal pipelines", "current Glass process only"),
-                fgo-status-semantic-row("metal", "dispatch", "Metal dispatches", status, "total_dispatch", "dispatches", "unified-gpu", "metal_status", "metal", "idle", "semantic-zero=idle; this Glass process has submitted no Metal dispatch", "current Glass process only"),
-                fgo-status-semantic-row("metal", "sync", "Metal synchronizations", status, "total_sync", "syncs", "unified-gpu", "metal_status", "metal", "idle", "semantic-zero=idle; this Glass process has performed no Metal synchronization", "current Glass process only"),
-                fgo-status-semantic-row("metal", "gpu-busy", "GPU busy time", status, "gpu_busy_us_total", "microseconds", "unified-gpu", "metal_status", "metal", "idle", "semantic-zero=idle; this Glass process recorded no command-buffer GPU time", "device command-buffer time; current Glass process only"),
-                fgo-status-semantic-row("metal", "cpu-jit-busy", "CPU JIT dispatch time", status, "cpu_jit_busy_us_total", "microseconds", "cpu-arena", "metal_status", "jit", "idle", "semantic-zero=idle; this Glass process recorded no CPU JIT dispatch time", "current Glass process only"),
+                fgo-status-semantic-row("metal", "buffers", "Glass Metal buffers", status, "buffers", "handles", "unified-gpu", "metal_status", "metal", "empty", "semantic-zero=empty; this Glass process owns no Metal buffer handles", "scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "mapped", "Glass mmap buffers", status, "mmap_nocopy_buffers", "handles", "mapped-file", "metal_status", "metal", "empty", "semantic-zero=empty; this Glass process owns no mmap no-copy buffers", "scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "pipelines", "Glass Metal pipelines", status, "pipelines", "handles", "unified-gpu", "metal_status", "metal", "empty", "semantic-zero=empty; this Glass process owns no Metal pipelines", "scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "dispatch", "Glass Metal dispatches", status, "total_dispatch", "dispatches", "unified-gpu", "metal_status", "metal", "idle", "semantic-zero=idle; this Glass process has submitted no Metal dispatch", "scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "sync", "Glass Metal syncs", status, "total_sync", "syncs", "unified-gpu", "metal_status", "metal", "idle", "semantic-zero=idle; this Glass process has performed no Metal synchronization", "scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "gpu-busy", "Glass GPU busy", status, "gpu_busy_us_total", "microseconds", "unified-gpu", "metal_status", "metal", "idle", "semantic-zero=idle; this Glass process recorded no command-buffer GPU time", "device command-buffer time; scope=glass.monitor process"),
+                fgo-status-semantic-row("metal", "cpu-jit-busy", "Glass CPU JIT time", status, "cpu_jit_busy_us_total", "microseconds", "cpu-arena", "metal_status", "jit", "idle", "semantic-zero=idle; this Glass process recorded no CPU JIT dispatch time", "scope=glass.monitor process"),
                 fgo-text-or-unavailable("health", "metal-error", "Metal last error", fgo-status-text(status, "last_error"), "unified-gpu", "observed", "metal_status.last_error", "live", "health", "none means carrier reported none"),
                 fgo-unavailable("metal", "allocated-bytes", "Metal allocated bytes", "bytes", "unified-gpu", "metal_status.allocated_bytes", "metal", "current carrier exposes handle counts, not per-buffer bytes"),
                 fgo-unavailable("metal", "working-set", "Metal recommended working set", "bytes", "unified-gpu", "metal_status.recommended_max_working_set_bytes", "metal", "recommendedMaxWorkingSetSize is not exposed"));
@@ -172,8 +193,8 @@ section [form.bml] {
             list(
                 fgo-text-or-unavailable("mlx", "device", "MLX device", fgo-status-text(status, "mlx_device"), "unified-gpu", "observed", "mlx_status.mlx_device", "live", "mlx", "current process"),
                 fgo-text-or-unavailable("mlx", "version", "MLX version", fgo-status-text(status, "mlx_version"), "disk-cache", "observed", "mlx_status.mlx_version", "loaded", "mlx", "linked library version"),
-                fgo-status-semantic-row("mlx", "ops", "MLX operation surface", status, "mlx_ops", "ops", "unified-gpu", "mlx_status", "mlx", "empty", "semantic-zero=empty; this Glass process exposes no MLX operations", "available carrier operations"),
-                fgo-status-semantic-row("mlx", "dispatch", "MLX dispatches", status, "mlx_dispatch", "dispatches", "unified-gpu", "mlx_status", "mlx", "idle", "semantic-zero=idle; this Glass process has issued no MLX dispatch", "current Glass process only"),
+                fgo-status-semantic-row("mlx", "ops", "Glass MLX ops", status, "mlx_ops", "ops", "unified-gpu", "mlx_status", "mlx", "empty", "semantic-zero=empty; this Glass process exposes no MLX operations", "available carrier operations; scope=glass.monitor process"),
+                fgo-status-semantic-row("mlx", "dispatch", "Glass MLX dispatches", status, "mlx_dispatch", "dispatches", "unified-gpu", "mlx_status", "mlx", "idle", "semantic-zero=idle; this Glass process has issued no MLX dispatch", "scope=glass.monitor process"),
                 fgo-text-or-unavailable("health", "mlx-error", "MLX last error", fgo-status-text(status, "last_error"), "unified-gpu", "observed", "mlx_status.last_error", "live", "health", "none means carrier reported none"),
                 fgo-unavailable("mlx", "allocated-bytes", "MLX allocated bytes", "bytes", "unified-gpu", "mlx_status.allocated_bytes", "mlx", "MLX carrier does not expose allocator bytes"));
         }
@@ -376,6 +397,7 @@ section [form.bml] {
         def fgo-flat-source-storage(roots) = append(fgo-flat-kind(roots, ".bml", "bml", "BML authority/source", "mapped-file"), fgo-flat-kind(roots, ".fk", "form", "Form organ/source", "mapped-file"));
 
         def fgo-snapshot(root) {
+            let epoch = now_unix_ms();
             let events = framebuffer-events();
             let metal = metal_status();
             let mlx = mlx_status();
@@ -389,7 +411,8 @@ section [form.bml] {
             let heatRows = fgo-primitive-heat();
             let eventRows = fgo-event-rows(events);
             let storageRows = fgo-storage(root);
-            list(FGOSchema(), now_unix_ms(), append(kernelRows, append(framebufferRows, append(metalRows, append(mlxRows, append(hostRows, append(processRows, append(heatRows, append(eventRows, storageRows)))))))), "current-process-plus-host-ports", "cross-process-metrics-bounded-no-argv");
+            let rows = append(kernelRows, append(framebufferRows, append(metalRows, append(mlxRows, append(hostRows, append(processRows, append(heatRows, append(eventRows, storageRows))))))));
+            list(FGOSchema(), epoch, fgo-observe-rows(rows, epoch, 0), "current-process-plus-host-ports", "cross-process-metrics-bounded-no-argv");
         }
         def fgo-snapshot-rows(snapshot) = nth(snapshot, 2);
 
