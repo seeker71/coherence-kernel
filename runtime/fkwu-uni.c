@@ -8626,15 +8626,17 @@ static long long fk_walk(long long i, long long fp) {
         fk_vsp = sv111;
         return r111;
     }
-    if (t == 148) {
+    if (t == 149) {
         /* A capturing function's own prologue read (see fk_wrap_cap_prologue): the value the
          * call mechanism just placed in fk_call_cap_vals[j], for its own tag-109 wrapper to bind
          * into this frame's slot -- a bare field read, node[1] is a raw C int (which of the
          * FK_CLOSURE_CAP_MAX scratch slots), never a walkable sub-node or a .fkb-remappable one.
-         * Tag 148 (not 245): 245 already names the real "metal_pipeline" op in
-         * runtime/fkwu-optable.h (arity 2) -- reusing it silently hijacked every metal_pipeline
-         * call into this arm instead, an adversarial review caught before this ever shipped.
-         * 148 is genuinely free (no optable row, no other tag==/smknode( site names it). */
+         * Tag 149, and only after checking runtime/fkwu-optable.h: 245 names the real
+         * "metal_pipeline" op and 148 names "metal_deadline" (arity 1) -- each was once taken
+         * for this arm as "free", and because this arm is tested before fk_walk_cold, every
+         * metal_pipeline / metal_deadline call was silently answered from a scratch slot instead
+         * (metal-deadline-band 33 of 127 with the caller's patience never reaching the carrier).
+         * 149 has no optable row and no other tag==/smknode( site names it. */
         return fk_call_cap_vals[fk_node[i][1]];
     }
     return fk_walk_cold(t, i, fp);
@@ -11179,7 +11181,7 @@ static long long fk_parse_variadic(long long tag);
 static long long fk_parse_fixed_list(long long n);
 static long long fk_parse_record_new(void);
 /* Wrap a nested defn's compiled body with its own capture-prologue: one tag-109 "let" per
- * captured free variable, binding its own frame slot from fk_call_cap_vals[j] (tag 245, a bare
+ * captured free variable, binding its own frame slot from fk_call_cap_vals[j] (tag 149, a bare
  * leaf read of that scratch slot) before any of the body's own statements run -- see
  * fk_call_cap_vals's own comment for why this ordering is always race-free. A no-op (returns
  * body unchanged) for any idx with zero captures, which is every ordinary function. */
@@ -11189,7 +11191,7 @@ static long long fk_wrap_cap_prologue(long long idx, long long body) {
     while (j > 0) {
         j = j - 1;
         long long slot = fk_fn_cap_slot[idx * FK_CLOSURE_CAP_MAX + j];
-        long long capread = fk_smknode(148, j, 0, 0);
+        long long capread = fk_smknode(149, j, 0, 0);
         body = fk_smknode(109, fk_smklit(slot), capread, body);
     }
     return body;
