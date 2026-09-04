@@ -3,6 +3,9 @@
 
 Ensures flt-ops tags are unique, within fkc-arm-slots, and covered by fkc-flat
 handlers (unary/tri/nullary cannot fall through to the binary fallback).
+Its Form twin stands: gate/native-surface.bml is the drift-gates row now; this
+script is a witness of that lens (gate/tests/native-surface-band.fk holds the
+two against each other), not the gate.
 """
 from __future__ import annotations
 
