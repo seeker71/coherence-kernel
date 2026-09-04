@@ -2,7 +2,7 @@
 //
 // FMF generalizes BMF from a linear character stream to typed fields of
 // cells. This TypeScript module is a host adapter for the canonical BML
-// runtime in form/form-stdlib/field-model-form-runtime.fk.
+// runtime in form/form-stdlib/field-model-form-runtime.bml.
 
 import {
   Kernel,
