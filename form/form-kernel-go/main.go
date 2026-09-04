@@ -19,6 +19,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"form-kernel-go/core"
@@ -5687,6 +5689,72 @@ type formSourcePart struct {
 	source string
 }
 
+// formPreludeDeps scans one source line for a "; preludes: a.fk b.fk ..."
+// directive the way fkwu's own fk_src_collect_preludes does: find the
+// literal "preludes:" token after a comment marker, then walk
+// whitespace/comma-separated tokens until one doesn't look like a real
+// dependency. A token counts only when it is the "none" sentinel (declares
+// an explicit empty prelude list, e.g. tests/now-unix-ms-band.fk) or ends in
+// ".fk"/".bml" — anything else silently STOPS the scan instead of erroring,
+// so a doc comment that merely mentions the word "preludes:" (this tree has
+// several, e.g. prelude-block-resolve.fk's own header) is never misread as a
+// directive. Sibling parity with the fkwu C kernel; unlike fkwu, a ".bml"
+// dependency can't be lowered here yet, so the caller reports and skips it
+// rather than silently dropping the symbols it would have defined.
+func formPreludeDeps(line string) (deps []string, bmlDeps []string) {
+	// ".fk" comments are ";"-led; ".bml" comments are "//"-led (confirmed:
+	// bml-demand-jit-glass.bml declares "// preludes: ..."), and
+	// form-source-compile-file's lowering preserves a .bml's original
+	// comment lines verbatim, so the lowered text this scanner sees still
+	// carries "//", not ";". Recognize whichever marker starts first.
+	semi := strings.IndexByte(line, ';')
+	slashes := strings.Index(line, "//")
+	var start int
+	switch {
+	case semi < 0 && slashes < 0:
+		return nil, nil
+	case semi < 0:
+		start = slashes + 2
+	case slashes < 0:
+		start = semi + 1
+	case semi < slashes:
+		start = semi + 1
+	default:
+		start = slashes + 2
+	}
+	comment := line[start:]
+	const needle = "preludes:"
+	idx := strings.Index(comment, needle)
+	if idx < 0 {
+		return nil, nil
+	}
+	rest := comment[idx+len(needle):]
+	for {
+		rest = strings.TrimLeft(rest, " \t,")
+		if rest == "" {
+			return deps, bmlDeps
+		}
+		end := strings.IndexAny(rest, " \t,")
+		var tok string
+		if end < 0 {
+			tok, rest = rest, ""
+		} else {
+			tok, rest = rest[:end], rest[end:]
+		}
+		if strings.EqualFold(tok, "none") || strings.EqualFold(tok, "(none)") {
+			return deps, bmlDeps
+		}
+		switch {
+		case strings.HasSuffix(tok, ".fk"):
+			deps = append(deps, tok)
+		case strings.HasSuffix(tok, ".bml"):
+			bmlDeps = append(bmlDeps, tok)
+		default:
+			return deps, bmlDeps
+		}
+	}
+}
+
 func formImportPath(line string) (string, bool) {
 	source := strings.TrimSpace(line)
 	if strings.HasSuffix(source, ";") {
@@ -5732,6 +5800,97 @@ func resolveFormImport(ownerPath, imported string) (string, error) {
 	return "", fmt.Errorf("import %q from %s: file not found", imported, ownerPath)
 }
 
+// formBmlSourceCompileChain is the fixed set of Form units that implement
+// source-compiler.fk's "section [form.bml]" -> plain Form lowering pass
+// (validate.sh's own compiler_chain, kept in the same order). fkwu cannot
+// run this chain itself -- source-compiler.fk needs host-I/O natives fkwu
+// lacks -- which is why bare fkwu can never parse a raw BML section and
+// validate.sh's prepare_sources instead shells out to a Go kernel to run
+// this chain externally. This kernel doesn't need to shell out to anything:
+// it already implements every native the chain needs, so it runs the
+// lowering on itself, in a throwaway Kernel instance, the moment it meets a
+// ".bml" prelude dependency it can't otherwise read.
+var formBmlSourceCompileChain = []string{
+	"form-stdlib/engine-constants.fk",
+	"form-stdlib/compiler-objects.fk",
+	"form-stdlib/form-ontology-bp.fk",
+	"form-stdlib/form-ontology-source-categories.fk",
+	"form-stdlib/form-ontology-loader.fk",
+	"form-stdlib/line-grammar.fk",
+	"form-stdlib/bmf-core.fk",
+	"form-stdlib/bmf-grammar.fk",
+	"form-stdlib/bml.fk",
+	"form-stdlib/bml-source.fk",
+	"form-stdlib/source-compiler.fk",
+	"form-stdlib/grammars/form-bml.fk",
+	"form-stdlib/grammars/form-lift.fk",
+	"form-stdlib/form-bml-lower.fk",
+	"form-stdlib/source-compiler-text-lens.fk",
+}
+
+// lowerBmlSource lowers one whole ".bml" prelude file into plain Form text
+// by running form-source-compile-file (source-compiler.fk) in a fresh,
+// throwaway Kernel -- entirely separate from the kernel the CLI eventually
+// builds to run the caller's own program. Cached by content hash under
+// form-stdlib/.cache/kernel-bml-lowered/ (a namespace of its own: the key
+// here is a plain content hash, not validate.sh's compiler_stamp-qualified
+// one, so the two caches don't collide but also don't need to agree bit for
+// bit) so a repeated run doesn't re-pay the several-second compile.
+func lowerBmlSource(bmlAbsPath string) (string, error) {
+	body, err := os.ReadFile(bmlAbsPath)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", bmlAbsPath, err)
+	}
+	sum := sha256.Sum256(body)
+	key := hex.EncodeToString(sum[:])[:24]
+
+	chainPaths := make([]string, len(formBmlSourceCompileChain))
+	for i, rel := range formBmlSourceCompileChain {
+		resolved, err := resolveFormImport(bmlAbsPath, rel)
+		if err != nil {
+			return "", fmt.Errorf("resolve BML compiler chain %s (needed to lower %s): %w", rel, bmlAbsPath, err)
+		}
+		chainPaths[i] = resolved
+	}
+	cacheDir := filepath.Join(filepath.Dir(chainPaths[0]), ".cache", "kernel-bml-lowered")
+	cachePath := filepath.Join(cacheDir, key+".fk")
+	if cached, err := os.ReadFile(cachePath); err == nil && len(cached) > 0 {
+		return string(cached), nil
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", fmt.Errorf("create BML lowering cache dir: %w", err)
+	}
+
+	outPath := filepath.Join(cacheDir, fmt.Sprintf(".out-%s-%d.fk", key, os.Getpid()))
+	driverPath := outPath + ".driver.fk"
+	driverSrc := fmt.Sprintf("(do (form-source-compile-file %q %q))\n", bmlAbsPath, outPath)
+	if err := os.WriteFile(driverPath, []byte(driverSrc), 0644); err != nil {
+		return "", fmt.Errorf("write BML lowering driver: %w", err)
+	}
+	defer os.Remove(driverPath)
+	defer os.Remove(outPath)
+
+	loaded, err := loadFormSourceClosure(append(append([]string{}, chainPaths...), driverPath))
+	if err != nil {
+		return "", fmt.Errorf("load BML source-compiler chain for %s: %w", bmlAbsPath, err)
+	}
+	compilerParts := make([]string, 0, len(loaded))
+	for _, part := range loaded {
+		compilerParts = append(compilerParts, part.source)
+	}
+	lowerKernel := NewKernel()
+	root := readRootFromSource(lowerKernel, strings.Join(compilerParts, "\n"))
+	lowerKernel.activeRoots = []NodeID{root}
+	lowerKernel.walk(root, NewFrame(nil))
+
+	lowered, err := os.ReadFile(outPath)
+	if err != nil || len(lowered) == 0 {
+		return "", fmt.Errorf("form-source-compile-file produced no output for %s", bmlAbsPath)
+	}
+	_ = os.WriteFile(cachePath, lowered, 0644) // best-effort cache; a miss just re-lowers next time
+	return string(lowered), nil
+}
+
 func loadFormSourceFile(path string, seen map[string]bool, parts *[]formSourcePart) error {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
@@ -5746,8 +5905,93 @@ func loadFormSourceFile(path string, seen map[string]bool, parts *[]formSourcePa
 		return fmt.Errorf("read %s: %w", path, err)
 	}
 	seen[absolute] = true
+	return loadFormSourceText(path, absolute, string(body), seen, parts)
+}
 
-	lines := strings.Split(string(body), "\n")
+// loadFormSourceBmlPrelude mirrors loadFormSourceFile for a ".bml"
+// dependency: same dedup-by-absolute-path, same recursive directive
+// handling on the result -- just sourced from lowerBmlSource's in-memory
+// text instead of a byte-identical read of the path on disk.
+func loadFormSourceBmlPrelude(path string, seen map[string]bool, parts *[]formSourcePart) error {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", path, err)
+	}
+	absolute = filepath.Clean(absolute)
+	if seen[absolute] {
+		return nil
+	}
+	seen[absolute] = true
+
+	// form-source-compile-file's lowering does NOT preserve a .bml file's
+	// own "// preludes:"/import header the way ";"-comment .fk lowering
+	// preserves its header (verified: the lowered text opens straight on
+	// defns, no comment survives) -- so THIS source's own directives have
+	// to be found and recursed on the RAW file, before lowering discards
+	// them, rather than by scanning the lowered output the way every other
+	// dependency kind is scanned.
+	rawBody, err := os.ReadFile(absolute)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", absolute, err)
+	}
+	for _, line := range strings.Split(string(rawBody), "\n") {
+		if imported, ok := formImportPath(line); ok {
+			dependency, err := resolveFormImport(absolute, imported)
+			if err != nil {
+				return err
+			}
+			if err := loadFormSourceFile(dependency, seen, parts); err != nil {
+				return err
+			}
+			continue
+		}
+		fkDeps, bmlDeps := formPreludeDeps(line)
+		for _, tok := range fkDeps {
+			dependency, err := resolveFormImport(absolute, tok)
+			if err != nil {
+				return err
+			}
+			if err := loadFormSourceFile(dependency, seen, parts); err != nil {
+				return err
+			}
+		}
+		for _, tok := range bmlDeps {
+			dependency, err := resolveFormImport(absolute, tok)
+			if err != nil {
+				return err
+			}
+			if err := loadFormSourceBmlPrelude(dependency, seen, parts); err != nil {
+				return err
+			}
+		}
+	}
+
+	lowered, err := lowerBmlSource(absolute)
+	if err != nil {
+		return err
+	}
+	// The lowered text carries no directives of its own to (re-)scan, but
+	// running it through loadFormSourceText anyway keeps this path exactly
+	// as defensive as every other loader -- a directive that DID somehow
+	// survive lowering would still be honored, not silently ignored.
+	return loadFormSourceText(path, absolute, lowered, seen, parts)
+}
+
+// loadFormSourceText walks one source's lines for import/prelude directives
+// (recursing into each dependency) and appends the remaining body as one
+// formSourcePart. Shared by the on-disk (.fk) and lowered-in-memory (.bml)
+// loading paths so both get identical directive handling.
+func loadFormSourceText(displayPath, absolute, text string, seen map[string]bool, parts *[]formSourcePart) error {
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "section [") {
+			return fmt.Errorf(
+				"%s: carries a raw \"section [form.bml]\" block -- this kernel runs plain Form, "+
+					"not BML, so it can't parse that block directly. It must be lowered through "+
+					"form-stdlib/source-compiler.fk first (validate.sh's prepare_sources does this "+
+					"automatically; see form-stdlib/AUTHORING.md's \"two-layer trap\")", displayPath)
+		}
+	}
 	source := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if imported, ok := formImportPath(line); ok {
@@ -5760,9 +6004,29 @@ func loadFormSourceFile(path string, seen map[string]bool, parts *[]formSourcePa
 			}
 			continue
 		}
+		if fkDeps, bmlDeps := formPreludeDeps(line); len(fkDeps) > 0 || len(bmlDeps) > 0 {
+			for _, tok := range fkDeps {
+				dependency, err := resolveFormImport(absolute, tok)
+				if err != nil {
+					return err
+				}
+				if err := loadFormSourceFile(dependency, seen, parts); err != nil {
+					return err
+				}
+			}
+			for _, tok := range bmlDeps {
+				dependency, err := resolveFormImport(absolute, tok)
+				if err != nil {
+					return err
+				}
+				if err := loadFormSourceBmlPrelude(dependency, seen, parts); err != nil {
+					return err
+				}
+			}
+		}
 		source = append(source, line)
 	}
-	*parts = append(*parts, formSourcePart{path: path, source: strings.Join(source, "\n")})
+	*parts = append(*parts, formSourcePart{path: displayPath, source: strings.Join(source, "\n")})
 	return nil
 }
 
