@@ -7,8 +7,9 @@
 //   tsx src/main.ts --bench
 //   tsx src/main.ts path/to/file.fk
 
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
 import { isMainThread, Worker, workerData } from "node:worker_threads";
 import {
@@ -47,6 +48,59 @@ type FormSourcePart = {
   source: string;
 };
 
+// Scans one source line for a "; preludes: a.fk b.fk ..." directive the way
+// fkwu's own fk_src_collect_preludes does: find the literal "preludes:"
+// token after a comment marker, then walk whitespace/comma-separated
+// tokens until one doesn't look like a real dependency. A token counts
+// only when it is the "none" sentinel (declares an explicit empty prelude
+// list, e.g. tests/now-unix-ms-band.fk) or ends in ".fk"/".bml" -- anything
+// else silently STOPS the scan instead of erroring, so a doc comment that
+// merely mentions the word "preludes:" (this tree has several) is never
+// misread as a directive. Sibling parity with the fkwu C kernel; unlike
+// fkwu, a ".bml" dependency can't be lowered here yet, so the caller
+// reports and skips it rather than silently dropping the symbols it would
+// have defined.
+function formPreludeDeps(line: string): { fkDeps: string[]; bmlDeps: string[] } {
+  const fkDeps: string[] = [];
+  const bmlDeps: string[] = [];
+  // ".fk" comments are ";"-led; ".bml" comments are "//"-led (confirmed:
+  // bml-demand-jit-glass.bml declares "// preludes: ..."), and
+  // form-source-compile-file's lowering preserves a .bml's original
+  // comment lines verbatim, so the lowered text this scanner sees still
+  // carries "//", not ";". Recognize whichever marker starts first.
+  const semi = line.indexOf(";");
+  const slashes = line.indexOf("//");
+  let start: number;
+  if (semi < 0 && slashes < 0) return { fkDeps, bmlDeps };
+  else if (semi < 0) start = slashes + 2;
+  else if (slashes < 0) start = semi + 1;
+  else if (semi < slashes) start = semi + 1;
+  else start = slashes + 2;
+  const comment = line.slice(start);
+  const needle = "preludes:";
+  const idx = comment.indexOf(needle);
+  if (idx < 0) return { fkDeps, bmlDeps };
+  let rest = comment.slice(idx + needle.length);
+  for (;;) {
+    rest = rest.replace(/^[ \t,]+/, "");
+    if (rest.length === 0) return { fkDeps, bmlDeps };
+    const m = rest.match(/[ \t,]/);
+    const end = m ? m.index! : rest.length;
+    const tok = rest.slice(0, end);
+    rest = rest.slice(end);
+    if (tok.toLowerCase() === "none" || tok.toLowerCase() === "(none)") {
+      return { fkDeps, bmlDeps };
+    }
+    if (tok.endsWith(".fk")) {
+      fkDeps.push(tok);
+    } else if (tok.endsWith(".bml")) {
+      bmlDeps.push(tok);
+    } else {
+      return { fkDeps, bmlDeps };
+    }
+  }
+}
+
 function formImportPath(line: string): string | null {
   let source = line.trim();
   if (source.endsWith(";")) source = source.slice(0, -1).trim();
@@ -81,6 +135,89 @@ function resolveFormImport(owner: string, imported: string): string {
   );
 }
 
+// The fixed set of Form units that implement source-compiler.fk's
+// "section [form.bml]" -> plain Form lowering pass (validate.sh's own
+// compiler_chain, same order). fkwu cannot run this chain itself --
+// source-compiler.fk needs host-I/O natives fkwu lacks -- which is why bare
+// fkwu can never parse a raw BML section and validate.sh's prepare_sources
+// instead shells out to a Go kernel to run this chain externally. This
+// kernel doesn't need to shell out to anything: it already implements
+// every native the chain needs, so it runs the lowering on itself, in a
+// throwaway Kernel, the moment it meets a ".bml" prelude it can't
+// otherwise read.
+const FORM_BML_SOURCE_COMPILE_CHAIN = [
+  "form-stdlib/engine-constants.fk",
+  "form-stdlib/compiler-objects.fk",
+  "form-stdlib/form-ontology-bp.fk",
+  "form-stdlib/form-ontology-source-categories.fk",
+  "form-stdlib/form-ontology-loader.fk",
+  "form-stdlib/line-grammar.fk",
+  "form-stdlib/bmf-core.fk",
+  "form-stdlib/bmf-grammar.fk",
+  "form-stdlib/bml.fk",
+  "form-stdlib/bml-source.fk",
+  "form-stdlib/source-compiler.fk",
+  "form-stdlib/grammars/form-bml.fk",
+  "form-stdlib/grammars/form-lift.fk",
+  "form-stdlib/form-bml-lower.fk",
+  "form-stdlib/source-compiler-text-lens.fk",
+];
+
+// Lowers one whole ".bml" prelude file into plain Form text by running
+// form-source-compile-file (source-compiler.fk) in a fresh, throwaway
+// Kernel -- entirely separate from the kernel the CLI eventually builds to
+// run the caller's own program. Cached by content hash under
+// form-stdlib/.cache/kernel-bml-lowered/ (its own namespace: the key here
+// is a plain content hash, not validate.sh's compiler_stamp-qualified one,
+// so the two caches don't collide but also don't need to agree bit for
+// bit) so a repeated run doesn't re-pay the several-second compile.
+async function lowerBmlSource(bmlAbsPath: string): Promise<string> {
+  const body = await readFile(bmlAbsPath, "utf8");
+  const key = createHash("sha256").update(body).digest("hex").slice(0, 24);
+
+  const chainPaths = FORM_BML_SOURCE_COMPILE_CHAIN.map((rel) => {
+    try {
+      return resolveFormImport(bmlAbsPath, rel);
+    } catch (error) {
+      throw new Error(
+        `resolve BML compiler chain ${rel} (needed to lower ${bmlAbsPath}): ${(error as Error).message}`,
+      );
+    }
+  });
+  const cacheDir = join(dirname(chainPaths[0]), ".cache", "kernel-bml-lowered");
+  const cachePath = join(cacheDir, `${key}.fk`);
+  try {
+    const cached = await readFile(cachePath, "utf8");
+    if (cached.length > 0) return cached;
+  } catch {
+    // not cached yet
+  }
+  await mkdir(cacheDir, { recursive: true });
+
+  const outPath = join(cacheDir, `.out-${key}-${process.pid}.fk`);
+  const driverPath = `${outPath}.driver.fk`;
+  const driverSrc = `(do (form-source-compile-file ${JSON.stringify(bmlAbsPath)} ${JSON.stringify(outPath)}))\n`;
+  await writeFile(driverPath, driverSrc);
+  try {
+    const loaded = await loadFormSourceClosure([...chainPaths, driverPath]);
+    const compilerSrc = loaded.map((part) => part.source).join("\n");
+    const lowerKernel = new Kernel(createNodeKernelHost());
+    const lowerFrame = new Frame(null);
+    const root = readAll(lowerKernel, compilerSrc);
+    walk(lowerKernel, root, lowerFrame);
+
+    const lowered = await readFile(outPath, "utf8").catch(() => "");
+    if (lowered.length === 0) {
+      throw new Error(`form-source-compile-file produced no output for ${bmlAbsPath}`);
+    }
+    await writeFile(cachePath, lowered).catch(() => {}); // best-effort cache
+    return lowered;
+  } finally {
+    await rm(driverPath, { force: true });
+    await rm(outPath, { force: true });
+  }
+}
+
 async function loadFormSourceFile(
   path: string,
   displayPath: string,
@@ -91,15 +228,98 @@ async function loadFormSourceFile(
   if (seen.has(canonical)) return;
   seen.add(canonical);
   const source = await readFile(canonical, "utf8");
+  await loadFormSourceText(displayPath, canonical, source, seen, parts);
+}
+
+// Mirrors loadFormSourceFile for a ".bml" dependency: same
+// dedup-by-canonical-path, same recursive directive handling on the result
+// -- just sourced from lowerBmlSource's in-memory text instead of a
+// byte-identical read of the path on disk.
+async function loadFormSourceBmlPrelude(
+  path: string,
+  displayPath: string,
+  seen: Set<string>,
+  parts: FormSourcePart[],
+): Promise<void> {
+  const canonical = await realpath(path);
+  if (seen.has(canonical)) return;
+  seen.add(canonical);
+
+  // form-source-compile-file's lowering does NOT preserve a .bml file's own
+  // "// preludes:"/import header the way ";"-comment .fk lowering preserves
+  // its header (verified: the lowered text opens straight on defns, no
+  // comment survives) -- so THIS source's own directives have to be found
+  // and recursed on the RAW file, before lowering discards them, rather
+  // than by scanning the lowered output the way every other dependency
+  // kind is scanned.
+  const rawBody = await readFile(canonical, "utf8");
+  for (const line of rawBody.split("\n")) {
+    const imported = formImportPath(line);
+    if (imported !== null) {
+      const dependency = resolveFormImport(canonical, imported);
+      await loadFormSourceFile(dependency, dependency, seen, parts);
+      continue;
+    }
+    const { fkDeps, bmlDeps } = formPreludeDeps(line);
+    for (const tok of fkDeps) {
+      const dependency = resolveFormImport(canonical, tok);
+      await loadFormSourceFile(dependency, dependency, seen, parts);
+    }
+    for (const tok of bmlDeps) {
+      const dependency = resolveFormImport(canonical, tok);
+      await loadFormSourceBmlPrelude(dependency, dependency, seen, parts);
+    }
+  }
+
+  const lowered = await lowerBmlSource(canonical);
+  // The lowered text carries no directives of its own to (re-)scan, but
+  // running it through loadFormSourceText anyway keeps this path exactly
+  // as defensive as every other loader -- a directive that DID somehow
+  // survive lowering would still be honored, not silently ignored.
+  await loadFormSourceText(displayPath, canonical, lowered, seen, parts);
+}
+
+// Walks one source's lines for import/prelude directives (recursing into
+// each dependency) and appends the remaining body as one part. Shared by
+// the on-disk (.fk) and lowered-in-memory (.bml) loading paths so both get
+// identical directive handling.
+async function loadFormSourceText(
+  displayPath: string,
+  canonical: string,
+  source: string,
+  seen: Set<string>,
+  parts: FormSourcePart[],
+): Promise<void> {
+  for (const line of source.split("\n")) {
+    if (line.trimStart().startsWith("section [")) {
+      throw new Error(
+        `${displayPath}: carries a raw "section [form.bml]" block -- this kernel runs plain Form, ` +
+          "not BML, so it can't parse that block directly. It must be lowered through " +
+          "form-stdlib/source-compiler.fk first (validate.sh's prepare_sources does this " +
+          'automatically; see form-stdlib/AUTHORING.md\'s "two-layer trap")',
+      );
+    }
+  }
   const body: string[] = [];
   for (const line of source.split("\n")) {
     const imported = formImportPath(line);
-    if (imported === null) {
-      body.push(line);
-    } else {
+    if (imported !== null) {
       const dependency = resolveFormImport(canonical, imported);
       await loadFormSourceFile(dependency, dependency, seen, parts);
+      continue;
     }
+    const { fkDeps, bmlDeps } = formPreludeDeps(line);
+    if (fkDeps.length > 0 || bmlDeps.length > 0) {
+      for (const tok of fkDeps) {
+        const dependency = resolveFormImport(canonical, tok);
+        await loadFormSourceFile(dependency, dependency, seen, parts);
+      }
+      for (const tok of bmlDeps) {
+        const dependency = resolveFormImport(canonical, tok);
+        await loadFormSourceBmlPrelude(dependency, dependency, seen, parts);
+      }
+    }
+    body.push(line);
   }
   parts.push({ path: displayPath, source: body.join("\n") });
 }

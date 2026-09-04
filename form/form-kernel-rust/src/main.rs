@@ -14980,6 +14980,62 @@ mod crash_diagnostics_tests {
     }
 }
 
+/// Scans one source line for a "; preludes: a.fk b.fk ..." directive the
+/// way fkwu's own fk_src_collect_preludes does: find the literal
+/// "preludes:" token after a comment marker, then walk
+/// whitespace/comma-separated tokens until one doesn't look like a real
+/// dependency. A token counts only when it is the "none" sentinel (declares
+/// an explicit empty prelude list, e.g. tests/now-unix-ms-band.fk) or ends
+/// in ".fk"/".bml" -- anything else silently STOPS the scan instead of
+/// erroring, so a doc comment that merely mentions the word "preludes:"
+/// (this tree has several) is never misread as a directive. Sibling parity
+/// with the fkwu C kernel; unlike fkwu, a ".bml" dependency can't be
+/// lowered here yet, so the caller reports and skips it rather than
+/// silently dropping the symbols it would have defined.
+fn form_prelude_deps(line: &str) -> (Vec<&str>, Vec<&str>) {
+    let mut deps = Vec::new();
+    let mut bml_deps = Vec::new();
+    // ".fk" comments are ";"-led; ".bml" comments are "//"-led (confirmed:
+    // bml-demand-jit-glass.bml declares "// preludes: ..."), and
+    // form-source-compile-file's lowering preserves a .bml's original
+    // comment lines verbatim, so the lowered text this scanner sees still
+    // carries "//", not ";". Recognize whichever marker starts first.
+    let semi = line.find(';');
+    let slashes = line.find("//");
+    let start = match (semi, slashes) {
+        (None, None) => return (deps, bml_deps),
+        (Some(s), None) => s + 1,
+        (None, Some(sl)) => sl + 2,
+        (Some(s), Some(sl)) if s < sl => s + 1,
+        (_, Some(sl)) => sl + 2,
+    };
+    let comment = &line[start..];
+    let needle = "preludes:";
+    let Some(idx) = comment.find(needle) else {
+        return (deps, bml_deps);
+    };
+    let mut rest = &comment[idx + needle.len()..];
+    loop {
+        rest = rest.trim_start_matches([' ', '\t', ',']);
+        if rest.is_empty() {
+            return (deps, bml_deps);
+        }
+        let end = rest.find([' ', '\t', ',']).unwrap_or(rest.len());
+        let (tok, remainder) = rest.split_at(end);
+        rest = remainder;
+        if tok.eq_ignore_ascii_case("none") || tok.eq_ignore_ascii_case("(none)") {
+            return (deps, bml_deps);
+        }
+        if tok.ends_with(".fk") {
+            deps.push(tok);
+        } else if tok.ends_with(".bml") {
+            bml_deps.push(tok);
+        } else {
+            return (deps, bml_deps);
+        }
+    }
+}
+
 fn form_import_path(line: &str) -> Option<&str> {
     let mut source = line.trim();
     if let Some(without_semicolon) = source.strip_suffix(';') {
@@ -15032,6 +15088,144 @@ fn resolve_form_import(owner: &Path, imported: &str) -> Result<PathBuf, String> 
     ))
 }
 
+// The fixed set of Form units that implement source-compiler.fk's
+// "section [form.bml]" -> plain Form lowering pass (validate.sh's own
+// compiler_chain, same order). fkwu cannot run this chain itself --
+// source-compiler.fk needs host-I/O natives fkwu lacks -- which is why bare
+// fkwu can never parse a raw BML section and validate.sh's prepare_sources
+// instead shells out to a Go kernel to run this chain externally. This
+// kernel doesn't need to shell out to anything: it already implements every
+// native the chain needs, so it runs the lowering on itself, in a
+// throwaway Kernel, the moment it meets a ".bml" prelude it can't otherwise
+// read.
+const FORM_BML_SOURCE_COMPILE_CHAIN: &[&str] = &[
+    "form-stdlib/engine-constants.fk",
+    "form-stdlib/compiler-objects.fk",
+    "form-stdlib/form-ontology-bp.fk",
+    "form-stdlib/form-ontology-source-categories.fk",
+    "form-stdlib/form-ontology-loader.fk",
+    "form-stdlib/line-grammar.fk",
+    "form-stdlib/bmf-core.fk",
+    "form-stdlib/bmf-grammar.fk",
+    "form-stdlib/bml.fk",
+    "form-stdlib/bml-source.fk",
+    "form-stdlib/source-compiler.fk",
+    "form-stdlib/grammars/form-bml.fk",
+    "form-stdlib/grammars/form-lift.fk",
+    "form-stdlib/form-bml-lower.fk",
+    "form-stdlib/source-compiler-text-lens.fk",
+];
+
+fn content_hash_hex(bytes: &[u8]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    // A cache-key hash, not a security digest: two DefaultHasher passes over
+    // disjoint halves of the content widen it past a bare 64-bit collision
+    // risk without pulling in a crypto crate (this repo keeps SHA-256 itself
+    // in form-stdlib/sha256.fk as Form, not a kernel dependency).
+    let mut h1 = DefaultHasher::new();
+    bytes.hash(&mut h1);
+    let mid = bytes.len() / 2;
+    let mut h2 = DefaultHasher::new();
+    bytes[mid..].hash(&mut h2);
+    bytes.len().hash(&mut h2);
+    format!("{:016x}{:016x}", h1.finish(), h2.finish())
+}
+
+// Lowers one whole ".bml" prelude file into plain Form text by running
+// form-source-compile-file (source-compiler.fk) in a fresh, throwaway
+// Kernel -- entirely separate from the kernel the CLI eventually builds to
+// run the caller's own program. Cached by content hash under
+// form-stdlib/.cache/kernel-bml-lowered/ (its own namespace: the key here
+// is a plain content hash, not validate.sh's compiler_stamp-qualified one,
+// so the two caches don't collide but also don't need to agree bit for bit)
+// so a repeated run doesn't re-pay the several-second compile.
+fn lower_bml_source(bml_abs_path: &Path) -> Result<String, String> {
+    let body = fs::read(bml_abs_path)
+        .map_err(|error| format!("read {}: {}", bml_abs_path.display(), error))?;
+    let key = content_hash_hex(&body);
+
+    let mut chain_paths = Vec::with_capacity(FORM_BML_SOURCE_COMPILE_CHAIN.len());
+    for rel in FORM_BML_SOURCE_COMPILE_CHAIN {
+        let resolved = resolve_form_import(bml_abs_path, rel).map_err(|error| {
+            format!(
+                "resolve BML compiler chain {} (needed to lower {}): {}",
+                rel,
+                bml_abs_path.display(),
+                error
+            )
+        })?;
+        chain_paths.push(resolved);
+    }
+    let cache_dir = chain_paths[0]
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".cache")
+        .join("kernel-bml-lowered");
+    let cache_path = cache_dir.join(format!("{}.fk", key));
+    if let Ok(cached) = fs::read_to_string(&cache_path) {
+        if !cached.is_empty() {
+            return Ok(cached);
+        }
+    }
+    fs::create_dir_all(&cache_dir)
+        .map_err(|error| format!("create BML lowering cache dir: {}", error))?;
+
+    let out_path = cache_dir.join(format!(".out-{}-{}.fk", key, std::process::id()));
+    let driver_path = cache_dir.join(format!(".out-{}-{}.fk.driver.fk", key, std::process::id()));
+    let driver_src = format!(
+        "(do (form-source-compile-file {:?} {:?}))\n",
+        bml_abs_path.display().to_string(),
+        out_path.display().to_string()
+    );
+    fs::write(&driver_path, driver_src)
+        .map_err(|error| format!("write BML lowering driver: {}", error))?;
+    let _cleanup = scopeguard(&driver_path, &out_path);
+
+    let mut lower_args: Vec<String> = chain_paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    lower_args.push(driver_path.display().to_string());
+    let loaded = load_form_source_closure(&lower_args)
+        .map_err(|error| format!("load BML source-compiler chain for {}: {}", bml_abs_path.display(), error))?;
+    let compiler_src: String = loaded
+        .into_iter()
+        .map(|(_, source)| source)
+        .collect::<Vec<_>>()
+        .join("\n");
+    run_source(&compiler_src);
+
+    let lowered = fs::read_to_string(&out_path).unwrap_or_default();
+    if lowered.is_empty() {
+        return Err(format!(
+            "form-source-compile-file produced no output for {}",
+            bml_abs_path.display()
+        ));
+    }
+    let _ = fs::write(&cache_path, &lowered); // best-effort cache; a miss just re-lowers next time
+    Ok(lowered)
+}
+
+// Removes the two throwaway driver/output files when dropped, on every
+// return path (success or the `?` early-outs above).
+struct ScopeCleanup {
+    driver_path: PathBuf,
+    out_path: PathBuf,
+}
+impl Drop for ScopeCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.driver_path);
+        let _ = fs::remove_file(&self.out_path);
+    }
+}
+fn scopeguard(driver_path: &Path, out_path: &Path) -> ScopeCleanup {
+    ScopeCleanup {
+        driver_path: driver_path.to_path_buf(),
+        out_path: out_path.to_path_buf(),
+    }
+}
+
 fn load_form_source_file(
     path: &Path,
     display_path: &str,
@@ -15045,15 +15239,107 @@ fn load_form_source_file(
     }
     let source = fs::read_to_string(&canonical)
         .map_err(|error| format!("read {}: {}", path.display(), error))?;
-    let mut body = Vec::new();
-    for line in source.split('\n') {
+    load_form_source_text(display_path, &canonical, &source, seen, parts)
+}
+
+// Mirrors load_form_source_file for a ".bml" dependency: same
+// dedup-by-canonical-path, same recursive directive handling on the result
+// -- just sourced from lower_bml_source's in-memory text instead of a
+// byte-identical read of the path on disk.
+fn load_form_source_bml_prelude(
+    path: &Path,
+    display_path: &str,
+    seen: &mut HashSet<PathBuf>,
+    parts: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    let canonical =
+        fs::canonicalize(path).map_err(|error| format!("read {}: {}", path.display(), error))?;
+    if !seen.insert(canonical.clone()) {
+        return Ok(());
+    }
+
+    // form-source-compile-file's lowering does NOT preserve a .bml file's
+    // own "// preludes:"/import header the way ";"-comment .fk lowering
+    // preserves its header (verified: the lowered text opens straight on
+    // defns, no comment survives) -- so THIS source's own directives have
+    // to be found and recursed on the RAW file, before lowering discards
+    // them, rather than by scanning the lowered output the way every other
+    // dependency kind is scanned.
+    let raw_body = fs::read_to_string(&canonical)
+        .map_err(|error| format!("read {}: {}", canonical.display(), error))?;
+    for line in raw_body.split('\n') {
         if let Some(imported) = form_import_path(line) {
             let dependency = resolve_form_import(&canonical, imported)?;
             let dependency_display = dependency.display().to_string();
             load_form_source_file(&dependency, &dependency_display, seen, parts)?;
-        } else {
-            body.push(line);
+            continue;
         }
+        let (fk_deps, bml_deps) = form_prelude_deps(line);
+        for tok in fk_deps {
+            let dependency = resolve_form_import(&canonical, tok)?;
+            let dependency_display = dependency.display().to_string();
+            load_form_source_file(&dependency, &dependency_display, seen, parts)?;
+        }
+        for tok in bml_deps {
+            let dependency = resolve_form_import(&canonical, tok)?;
+            let dependency_display = dependency.display().to_string();
+            load_form_source_bml_prelude(&dependency, &dependency_display, seen, parts)?;
+        }
+    }
+
+    let lowered = lower_bml_source(&canonical)?;
+    // The lowered text carries no directives of its own to (re-)scan, but
+    // running it through load_form_source_text anyway keeps this path
+    // exactly as defensive as every other loader -- a directive that DID
+    // somehow survive lowering would still be honored, not silently
+    // ignored.
+    load_form_source_text(display_path, &canonical, &lowered, seen, parts)
+}
+
+// Walks one source's lines for import/prelude directives (recursing into
+// each dependency) and appends the remaining body as one part. Shared by
+// the on-disk (.fk) and lowered-in-memory (.bml) loading paths so both get
+// identical directive handling.
+fn load_form_source_text(
+    display_path: &str,
+    canonical: &Path,
+    source: &str,
+    seen: &mut HashSet<PathBuf>,
+    parts: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    for line in source.split('\n') {
+        if line.trim_start().starts_with("section [") {
+            return Err(format!(
+                "{}: carries a raw \"section [form.bml]\" block -- this kernel runs plain Form, \
+                 not BML, so it can't parse that block directly. It must be lowered through \
+                 form-stdlib/source-compiler.fk first (validate.sh's prepare_sources does this \
+                 automatically; see form-stdlib/AUTHORING.md's \"two-layer trap\")",
+                display_path
+            ));
+        }
+    }
+    let mut body = Vec::new();
+    for line in source.split('\n') {
+        if let Some(imported) = form_import_path(line) {
+            let dependency = resolve_form_import(canonical, imported)?;
+            let dependency_display = dependency.display().to_string();
+            load_form_source_file(&dependency, &dependency_display, seen, parts)?;
+            continue;
+        }
+        let (fk_deps, bml_deps) = form_prelude_deps(line);
+        if !fk_deps.is_empty() || !bml_deps.is_empty() {
+            for tok in fk_deps {
+                let dependency = resolve_form_import(canonical, tok)?;
+                let dependency_display = dependency.display().to_string();
+                load_form_source_file(&dependency, &dependency_display, seen, parts)?;
+            }
+            for tok in bml_deps {
+                let dependency = resolve_form_import(canonical, tok)?;
+                let dependency_display = dependency.display().to_string();
+                load_form_source_bml_prelude(&dependency, &dependency_display, seen, parts)?;
+            }
+        }
+        body.push(line);
     }
     parts.push((display_path.to_string(), body.join("\n")));
     Ok(())
