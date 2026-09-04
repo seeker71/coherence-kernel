@@ -71,10 +71,10 @@ AST node in a grammar — legibility debt, not a runtime collision.
 Not every channel exchange is query/answer or extraction. `offer` gives freely;
 `attune` records relation evidence without turning relation into ownership. A valid
 receipt preserves freedom, creates no debt, keeps disturbance none/minimal, and
-names next contact. Band: `form-stdlib/tests/channel-breath-band.fk` — divergent on
-2026-09-04: Go and Rust refuse `(bp "CHANNEL-V0")` as an unreviewed bootstrap name,
-TypeScript answers 500, fkwu 200 with `write_form_binary` unbound. The name is
-exactly the registration work this page's rule names; the band is owed that heal.
+names next contact. Band: `form-stdlib/tests/channel-breath-band.fk` — 500 three-way
+via `validate.sh` (2026-09-04, the CHANNEL family admitted to the reviewed bootstrap
+set in `form-stdlib/form-ontology-bp.fk`); fkwu answers 200 with `write_form_binary`/
+`read_form_binary` unbound on that arm — a lane gap, not a coordinate.
 
 ### Channel Flow Protocol — OSI-shaped native channel cells
 
