@@ -98,9 +98,9 @@ where the lane carries you) **with the optimal cached native speed compiler** (f
 - the cache witness: `./fkwu form/form-stdlib/form-cli-bml-cache-run.fk` — the
   BML authority runs itself; its `.bml.fkb` is local cache, never tree truth.
 
-`*-xtal.fk` committed to the tree is the **wrong shape** — a twin is a second truth. Existing Form
-organs stay welcome; bands witness. When a lowering still helps, name the next BML+native-cache
-door in the receipt. The mirror is `observe/authoring-altitude-run.fk` (BML picture:
+A unit lowers by what it carries: any file with a `section [` block on a line of its own travels
+through that lane whatever its extension, so a lowered twin committed beside its source would be a
+second truth, and none is. Existing Form organs stay welcome; bands witness. The mirror is `observe/authoring-altitude-run.fk` (BML picture:
 `form/form-stdlib/bml/form-cli-author-altitude.bml`).
 
 ```sh

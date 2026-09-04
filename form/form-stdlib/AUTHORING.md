@@ -58,7 +58,7 @@ High-grammar authority and executable surface live together at
 `form/form-stdlib/bml/<name>.bml` as `section [form.bml] { class Foo<T> { … } }`.
 Run it for its **native cache**, not as a destination in generated Form source.
 For infix, unless/when, and ice/liquid/compost, use `section [form.lift]`
-(`form-cli-lift-ice-compile.fk`). Edit `form/form-stdlib/grammars/form-lift.fk`
+(a `.bml` carrying it lowers in memory). Edit `form/form-stdlib/grammars/form-lift.fk`
 to grow that dialect, then write in the new rules. No remote oracle.
 
 A **recipe** `form/form-stdlib/<name>.fk` is a welcome organ when the native

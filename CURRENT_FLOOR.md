@@ -28,10 +28,11 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is 16,353 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is 16,406 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
-preludes, the host-exec stdin door, `metal_deadline` off its scratch slot).
+preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the
+content-keyed lowering lane).
 
 ## Body-wide witnesses
 
@@ -58,12 +59,15 @@ cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15 · core-str-find-
 
 ## The BML floor
 
-A `.bml` runs directly (`./fkwu file.bml`); a `.fk` names its `.bml` preludes
-and fkwu lowers them in memory, owning the `.bml.fkb` cache itself. `true` and
-`false` are literals in the `section [form.bml] { def ... }` dialect; a nested
-`defn` is a registered function with one-level capture. Every file carrying
-`section [form.bml]` wears `.bml` (75 renamed 2026-09-04); `section [form.lift]`,
-`[form.action]` and `[form.route]` files keep `.fk`.
+A unit lowers by what it carries: any file with a `section [` block on a line
+of its own — `form.bml`, `form.lift`, `form.action`, `form.route`, the `*.bmf`
+grammar dialects — travels through `bml-floor-compile` whatever its extension,
+as a prelude or as the main file, and fkwu owns the `.lowfk`/`.fkb` cache
+beside it. 75 `[form.bml]` files and the twelve `[form.lift]` sources wear
+`.bml`; `compiler.fk` and the ten `grammars/*-bmf.fk` carry their blocks
+mid-file and lower in place. `true` and `false` are literals in the dialect; a
+nested `defn` is a registered function with one-level capture; a `let` inside a
+`(do …)` never reaches a `defn` frame (top-level lets do).
 
 ```text
 bml-band                               -> 268435455
@@ -78,6 +82,14 @@ json-codec-bml-band 8191 · kernel-http-band 536965066 · channel-flow-band 8388
 circle-band 1048575 · static-to-dynamic-cells-band 262143 · bml-capability-ledger-band 255
 form-pe-coff-band 16383 · learn/tests/choice-receipt-band 4294967295
                                                   (each compiled for the first time under its own name)
+bmf-compiler-runtime 2097279 · bmf-source-scanner-rule-band 4500 · python-bmf-grammar-band 219
+python-bmf-from-import-band 54 · python-bmf-class-band 34 · python-bmf-reversible-band 102
+language-bmf-program-core 64 · ts-reversible-band 105 · bmf-section-syntax 218
+language-packs-fourth-band 31          (every chain through compiler.fk or a grammar died rc 1 on
+                                          `::=` until the lane keyed on content, 2026-09-04)
+form-cli-allowance-band 2047 · form-cli-live-band 255 · form-cli-mlx-band 63 · form-cli-lens-mint-band 1023
+bml-bmf-control-curriculum-band 1048575 · bml-bmf-stream-curriculum-band 16777215
+                                          (their `[form.lift]` sources lower in memory)
 ```
 
 ## The local-model lane (Qwen3.8-27B Q8_0, Form-native, Metal JIT)
@@ -187,9 +199,9 @@ jit-source-runtime-orchestrator 1048575.
 ## Beliefs, ledger, drift
 
 ```text
-./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 489459005
+./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=30 moving=0 released=53 -> 30000053
+./fkwu form/form-stdlib/release-ledger.bml -> open=36 moving=0 released=55 -> 36000055
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 ```
 
@@ -218,20 +230,24 @@ What answered red or nothing in this pass, so no one leans on it:
 - BML `match` is not lowered on fkwu (`source-language-match-switch-band` 0;
   R77) and `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111
   with `Num` unresolved; R78).
-- Thirty-two `form-stdlib/*-xtal.fk` prelude targets are absent from the tree
-  and about sixty cells — bands and run doors, `form-cli-live-band` and
-  `form-cli-mlx-band` among them — die at load on them (rc 2): the flatten
-  lane that emitted the mirrors is gone, and each cell owes a repoint to its
-  `section [form.lift]` source (`release-ledger.bml` R82).
-- The ten `form-stdlib/grammars/*-bmf.fk` files carry the BMF rule dialect
-  (`::=`, `=>`, `$name:name`; `python-bmf.fk` alone holds 176 rules) and fkwu
-  reads them raw as Form: every band whose preludes reach `python-bmf.fk` —
-  35 under `form-stdlib/tests`, none fourth-arm registered — dies with 1,700
-  or more `[unbound-name]` errors, rc 1 (`python-bmf-grammar-band`,
-  `python-bmf-from-import-band` 1766, `python-bmf-scanner-real-syntax-band`
-  1699). The dialect has no lowering lane in the seed the way `.bml` has
-  (`release-ledger.bml` R84). Preflight reports these chains clean: it counts
-  unresolved calls, and a rule line is not a call.
+- `form-source-sections` answers 64 errors: `fk-lit` is defined only in
+  `hati-os-kernel.fk` and the `bml-source-*-rule-index` names resolve nowhere in
+  its chain (`release-ledger.bml` R87). Of the `[form.action]` bands now
+  reaching the lane as main files, `form-action-dialect-band` 20 and
+  `zero-arg-functions` 19 answer; `higher.fk` and `lists.fk` leave `sum`,
+  `any?`, `all?` unresolved after lowering, and `json-meaning-ingestion-band`
+  and `runtime-grammar-selector-registry-band` die measuring an absent input
+  (R86). Preflight vouches such chains clean — it counts unresolved calls, and
+  a rule line is not a call.
+- `form-knowledge-exec-grammar-transport-band` dies rc 1 on `str_len` of
+  nothing; the domain/organ/unique/universe-mint bands answer 2015 of 2047
+  (bit 32, held-out lineage, stamped pending 2026-08-26); `form-cli-gpu-band`
+  1009 of 1023 (bits 2/4/8, live `mlx_run` attention numerics) (R88).
+- The BML lowerer's walker recursion grows with the size of one form: a single
+  `list()` of 500-byte strings answers at 26 KB and dies at the 254 MB
+  eval-depth wall at 31 KB. The release ledger's rows list crossed it at 90
+  rows and is split three ways until the walker is iterative (R91). The same
+  lowering reads a `; preludes:` substring inside a string as a directive (R92).
 - `observe/tests/jit-register-lowering-band.fk`,
   `jit-representation-specialization-band.fk` and `jit-stack-frame-band.fk`
   answer nothing: each file ends with one paren open
