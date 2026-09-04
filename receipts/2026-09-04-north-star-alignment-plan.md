@@ -24,7 +24,7 @@ reading of those rows, not a second copy of them.
 | `.bml` pictures | 232 | — | 4.2% of the authored surface |
 
 Altitude lens today: 114 pictures, 1,448 cells, 2 bound (`1140020001448`).
-`host-exec` reaches out from 183 cells; the top borrowed verbs are `printf`
+`host-exec` is named in 183 cells — and the carrier-mass lens built the same morning (R67) counts 130 that actually call it; 54 carry the word in comments, strings or census rows, so 130 is the reach and 183 was the vocabulary — the top borrowed verbs are `printf`
 (17), `command -v` (8), `mkdir` (7), `date` (5), `sleep` (6), `seq` (3) —
 glue the body already has natives for — and the real borrowed senses
 (`ffmpeg`, `ollama`, `swiftc`, `whisper-cli`, `say`, `python3`) are the
