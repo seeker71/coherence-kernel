@@ -186,7 +186,7 @@ jit-source-runtime-orchestrator 1048575.
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 489459005
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=30 moving=0 released=52 -> 30000052
+./fkwu form/form-stdlib/release-ledger.bml -> open=31 moving=0 released=52 -> 31000052
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 ```
 
@@ -225,6 +225,15 @@ What answered red or nothing in this pass, so no one leans on it:
   `form-cli-mlx-band` among them — die at load on them (rc 2): the flatten
   lane that emitted the mirrors is gone, and each cell owes a repoint to its
   `section [form.lift]` source (`release-ledger.bml` R82).
+- The ten `form-stdlib/grammars/*-bmf.fk` files carry the BMF rule dialect
+  (`::=`, `=>`, `$name:name`; `python-bmf.fk` alone holds 176 rules) and fkwu
+  reads them raw as Form: every band whose preludes reach `python-bmf.fk` —
+  35 under `form-stdlib/tests`, none fourth-arm registered — dies with 1,700
+  or more `[unbound-name]` errors, rc 1 (`python-bmf-grammar-band`,
+  `python-bmf-from-import-band` 1766, `python-bmf-scanner-real-syntax-band`
+  1699). The dialect has no lowering lane in the seed the way `.bml` has
+  (`release-ledger.bml` R84). Preflight reports these chains clean: it counts
+  unresolved calls, and a rule line is not a call.
 - `observe/tests/jit-register-lowering-band.fk`,
   `jit-representation-specialization-band.fk` and `jit-stack-frame-band.fk`
   answer nothing: each file ends with one paren open
