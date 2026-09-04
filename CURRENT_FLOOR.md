@@ -42,7 +42,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 654 rows, 643 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 658 rows, 647 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -186,7 +186,7 @@ jit-source-runtime-orchestrator 1048575.
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 489459005
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=28 moving=0 released=50 -> 28000050
+./fkwu form/form-stdlib/release-ledger.bml -> open=30 moving=0 released=51 -> 30000051
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 ```
 
@@ -220,11 +220,11 @@ What answered red or nothing in this pass, so no one leans on it:
 - BML `match` is not lowered on fkwu (`source-language-match-switch-band` 0;
   R77) and `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111
   with `Num` unresolved; R78).
-- `form-cli-mlx-band`, `form-cli-live-band`, `bml-bmf-stream-curriculum-band`
-  and `bml-bmf-control-curriculum-band` die at load (rc 2): each prelude names a
-  `*-xtal.fk` mirror absent from the tree — the BML prelude lowers in memory
-  and fkwu owns the cache — so the four owe a repoint to their `.bml` or
-  `-compile.fk` source.
+- Thirty-two `form-stdlib/*-xtal.fk` prelude targets are absent from the tree
+  and about sixty cells — bands and run doors, `form-cli-live-band` and
+  `form-cli-mlx-band` among them — die at load on them (rc 2): the flatten
+  lane that emitted the mirrors is gone, and each cell owes a repoint to its
+  `section [form.lift]` source (`release-ledger.bml` R82).
 - `observe/tests/jit-register-lowering-band.fk`,
   `jit-representation-specialization-band.fk` and `jit-stack-frame-band.fk`
   answer nothing: each file ends with one paren open
