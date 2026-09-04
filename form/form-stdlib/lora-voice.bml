@@ -1,0 +1,65 @@
+//////////////////////////////////////////////////////////////////////
+// lora-voice.bml — the body's teacher material as chat rows, written by
+// the body itself: every corpus row (the question it could not answer,
+// the fresh word that answered it) and every receipt section (Sema's own
+// voice), one JSON line each, split ten-to-one into train and valid. One
+// membrane crossing remains — the trainer (mlx_lm on this Mac) — until the
+// LoRA writer HOMECOMING names is native. The adapter is local; the rented
+// voice only steers.
+// preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/spool-bell-transport.fk learn/homecoming-distillation-corpus.fk
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraVoice {
+        field LVData = ".form-lora-voice-native";
+        field LVVenv = "/Users/ursmuff/.mlx-venv";
+        field LVModelDir = "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--Llama-3.2-3B-Instruct-4bit/snapshots";
+        field LVIters = 600;
+        def lv-cat(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), lv-cat(tail(parts)));
+        def lv-q() = byte_to_str(34);
+        def lv-esc-byte(c) = if eq(c, 34) then str_concat(byte_to_str(92), lv-q()) else if eq(c, 92) then str_concat(byte_to_str(92), byte_to_str(92)) else if eq(c, 10) then str_concat(byte_to_str(92), "n") else if eq(c, 9) then str_concat(byte_to_str(92), "t") else if lt(c, 32) then " " else byte_to_str(c);
+        def lv-esc-go(s, i, acc) = if ge(i, str_len(s)) then acc else lv-esc-go(s, add(i, 1), str_concat(acc, lv-esc-byte(str_byte_at(s, i))));
+        def lv-esc(s) = lv-esc-go(s, 0, "");
+        def lv-row(user, assistant) = lv-cat(list("{", lv-q(), "messages", lv-q(), ":[{", lv-q(), "role", lv-q(), ":", lv-q(), "user", lv-q(), ",", lv-q(), "content", lv-q(), ":", lv-q(), lv-esc(user), lv-q(), "},{", lv-q(), "role", lv-q(), ":", lv-q(), "assistant", lv-q(), ",", lv-q(), "content", lv-q(), ":", lv-q(), lv-esc(assistant), lv-q(), "}]}", byte_to_str(10)));
+        def lv-join(ws) = if eq(len(ws), 0) then "" else if eq(len(tail(ws)), 0) then head(ws) else str_concat(head(ws), str_concat(" ", lv-join(tail(ws))));
+        def lv-corpus-row(r) = lv-row(lv-cat(list("The body asks the smallest question it cannot yet answer natively: ", lv-join(nth(r, 2)), "?")), lv-cat(list(nth(r, 4), ". The word the body did not have for ", lv-join(nth(r, 2)), "; offered ", int_to_str(nth(r, 1)), " by ", nth(r, 5), ".")));
+        def lv-split-path(data, i) = str_concat(data, if eq(mod(i, 10), 0) then "/valid.jsonl" else "/train.jsonl");
+        def lv-put(data, i, line) = sbt-append(lv-split-path(data, i), line);
+        def lv-corpus-emit(data, rows, i) = if eq(len(rows), 0) then i else lv-corpus-emit-next(data, tail(rows), add(i, 1), lv-put(data, i, lv-corpus-row(head(rows))));
+        def lv-corpus-emit-next(data, rows, i, wrote) = lv-corpus-emit(data, rows, i);
+        def lv-title(text) = trim(substring(text, 0, if lt(str_find(text, byte_to_str(10), 0), 0) then str_len(text) else str_find(text, byte_to_str(10), 0)));
+        def lv-strip-hash(t) = if and(gt(str_len(t), 0), eq(str_byte_at(t, 0), 35)) then lv-strip-hash(substring(t, 1, str_len(t))) else trim(t);
+        def lv-section-row(title, sec) {
+            let nl = str_find(sec, byte_to_str(10), 0);
+            let head = if lt(nl, 0) then trim(sec) else trim(substring(sec, 0, nl));
+            let body = if lt(nl, 0) then "" else trim(substring(sec, add(nl, 1), str_len(sec)));
+            if or(lt(str_len(body), 80), gt(str_len(body), 1800)) then "" else lv-row(lv-cat(list("From the receipt ", lv-q(), title, lv-q(), ", speak the section ", lv-q(), head, lv-q(), " in Sema", byte_to_str(39), "s voice.")), body);
+        }
+        def lv-sections-emit(data, title, secs, i) = if eq(len(secs), 0) then i else lv-sections-emit-one(data, title, secs, i, lv-section-row(title, head(secs)));
+        def lv-sections-emit-one(data, title, secs, i, line) = if eq(str_len(line), 0) then lv-sections-emit(data, title, tail(secs), i) else lv-sections-emit-next(data, title, tail(secs), add(i, 1), lv-put(data, i, line));
+        def lv-sections-emit-next(data, title, secs, i, wrote) = lv-sections-emit(data, title, secs, i);
+        def lv-receipt-emit(data, path, i) {
+            let text = read_file(path);
+            if nothing?(text) then i else lv-sections-emit(data, lv-strip-hash(lv-title(text)), tail(split-on(text, str_concat(byte_to_str(10), "## "))), i);
+        }
+        def lv-receipts-emit(data, dir, names, i) = if eq(len(names), 0) then i else lv-receipts-emit(data, dir, tail(names), lv-receipt-emit(data, fs-path-join(dir, head(names)), i));
+        def lv-emit(data) {
+            let made = fs-mkdir(data);
+            let c1 = fs-remove-file(str_concat(data, "/train.jsonl"));
+            let c2 = fs-remove-file(str_concat(data, "/valid.jsonl"));
+            let ncorpus = lv-corpus-emit(data, hdc-rows(), 1);
+            let n = lv-receipts-emit(data, "receipts", fs-list("receipts"), ncorpus);
+            list(sub(ncorpus, 1), sub(n, ncorpus), sub(n, 1));
+        }
+        def lv-model() {
+            let snaps = fs-list(LVModelDir());
+            if eq(len(snaps), 0) then "" else fs-path-join(LVModelDir(), head(snaps));
+        }
+        def lv-train-cmd(data, model, iters) = lv-cat(list("( ", LVVenv(), "/bin/python -m mlx_lm lora --model ", model, " --train --data ", data, " --iters ", int_to_str(iters), " --batch-size 4 --num-layers 8 --learning-rate 1e-4 --max-seq-length 1024 --adapter-path ", data, "/adapter --save-every 100 --steps-per-eval 100 > ", data, "/train.log 2>&1; echo $? > ", data, "/train.rc ) >/dev/null 2>&1 &"));
+        def lv-training?(data) = if eq(fs-exists?(str_concat(data, "/train.log")), 0) then 0 else if eq(fs-exists?(str_concat(data, "/train.rc")), 1) then 0 else 1;
+        // one held-out question, answered by the base and by the adapter (one crossing each)
+        def lv-ask-cmd(model, adapter, prompt) = lv-cat(list(LVVenv(), "/bin/python -m mlx_lm generate --model ", model, if eq(str_len(adapter), 0) then "" else str_concat(" --adapter-path ", adapter), " --max-tokens 60 --prompt '", prompt, "' 2>/dev/null | tail -n +1"));
+        def lv-ask(data, prompt, withAdapter) = host-exec(lv-ask-cmd(lv-model(), if eq(withAdapter, 1) then str_concat(data, "/adapter") else "", prompt), "");
+        def lv-launch(data, iters) = if eq(lv-training?(data), 1) then "already-training" else if eq(str_len(lv-model()), 0) then "no-model" else if nothing?(host-exec(lv-train-cmd(data, lv-model(), iters), "")) then "launch-vanished" else "launched";
+    }
+    0;
+}
