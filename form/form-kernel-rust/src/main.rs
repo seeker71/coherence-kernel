@@ -10066,7 +10066,7 @@ fn worker_loop(
     // every connection runs the Form serve pipeline directly — Form does parse,
     // route, dispatch, render; the kernel only opens the socket and walks it.
     let form_serve: Option<(Arc<Closure>, Value, Value)> = if form_mode {
-        // kh-serve-conn (http-socket.fk) is the STREAMING entry: it takes the
+        // kh-serve-conn (http-socket.bml) is the STREAMING entry: it takes the
         // socket handle and owns the I/O. (kh-serve, the pure string-in/string-out
         // core, is what kh-serve-conn calls between the recv and send loops.)
         let kh_id = k.intern_string("kh-serve-conn").inst;
@@ -10085,7 +10085,7 @@ fn worker_loop(
             _ => {
                 eprintln!(
                     "serve --form: worker {} could not resolve kh-serve-conn as a closure \
-                     (the manifest must prelude http-socket.fk)",
+                     (the manifest must prelude http-socket.bml)",
                     id
                 );
                 return;
@@ -10934,7 +10934,7 @@ fn serve_connection_form(
     );
     // STREAMING: the kernel does NOT pre-read a buffer. It registers the accepted
     // connection as a Form socket handle and hands that handle to the recipe;
-    // kh-serve-conn (http-socket.fk) owns ALL the I/O — loop-recv the request
+    // kh-serve-conn (http-socket.bml) owns ALL the I/O — loop-recv the request
     // (socket_recv until framed), run kh-serve, loop-send the response
     // (socket_send until drained), close. The bytes flow through Form, not a Rust
     // buffer. kh-serve-conn(conn, routes, registry).
@@ -10987,7 +10987,7 @@ fn cli_serve(args: &[String]) -> i32 {
     // binding, not from the in-container bind address.
     let mut host: String = "127.0.0.1".to_string();
     // --form routes EVERY request through the Form HTTP stack (kh-serve in
-    // http-server.fk) instead of the Rust parse/route/render path: the manifest
+    // http-server.bml) instead of the Rust parse/route/render path: the manifest
     // defines `routes` + `registry` + handlers and preludes kernel-http.fk /
     // http-*.fk. The kernel only opens the socket and walks the recipe — the
     // 11.5K-line Rust HTTP and its fear-caps are out of this path entirely.

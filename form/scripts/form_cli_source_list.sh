@@ -55,7 +55,7 @@ form-stdlib/storage-port.fk
 form-stdlib/host-kernel-carrier.fk
 form-stdlib/fnri-standin.fk
 form-stdlib/fnri-receipt.fk
-form-stdlib/http-client.fk
+form-stdlib/http-client.bml
 form-stdlib/format-arith.fk
 form-stdlib/f16-decode.fk
 form-stdlib/q6k-dequant.fk

@@ -225,13 +225,13 @@ fi
 # The self-host fallback list is the executable no-Go program order, with the
 # shim dropped because fourth_band_request prepends it.  It is deliberately
 # separate from the source-identity list: shell carrier files are stamped but
-# never parsed as Form.  BML-dialect sources (http-client.fk) ride raw here;
+# never parsed as Form.  BML-dialect sources (http-client.bml) ride raw here;
 # the compiled lowering lives in scripts/regen_form_cli_bootstrap.sh.
 FORM_CLI_SELFHOST_SRCS=(
     "$S/core.fk" "$S/grammars/sanskrit-roots.fk" "$S/resource-port.fk" "$S/bml-native-interface-package-import.fk"
     "$S/hati-os-targets.fk" "$S/form-native-resource-interfaces.fk" "$S/form-fs.fk"
     "$S/storage-port.fk" "$S/host-kernel-carrier.fk" "$S/fnri-standin.fk" "$S/fnri-receipt.fk"
-    "$S/http-client.fk" "$S/line-grammar.fk" "$S/str-byte-at.fk" "$S/sha256.fk"
+    "$S/http-client.bml" "$S/line-grammar.fk" "$S/str-byte-at.fk" "$S/sha256.fk"
     "$S/hmac-sha256.fk" "$S/hex.fk" "$S/format-arith.fk" "$S/f16-decode.fk"
     "$S/q6k-dequant.fk" "$S/equireach.fk" "$S/equireach-gguf.fk" "$S/gguf-meta.fk" "$S/model-discovery.fk" "$S/q4k-dequant.fk" "$S/weight-load.fk" "$S/voice-traits.fk"
     "$S/nearest-shape.fk" "$S/co-learning.fk" "$S/co-learning-stream.fk" "$S/mesh-dispatch.fk"
