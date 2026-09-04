@@ -1,0 +1,47 @@
+; hearth-distill-run.fk — the standing resident teaches the small voice:
+; for n corpus rows of the TRAIN set (the held-out set stays the judge), the
+; resident speaks one sentence for the row's word in the body's voice;
+; each becomes a stored teacher row in <data>/distill.jsonl, which the
+; emitter folds into the next training. All local; no rented token.
+; stdin line 1: n (blank -> 10); line 2: data folder (blank -> the native one).
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/hearth.bml form/form-stdlib/lane-motion.bml form/form-stdlib/voice-school.bml
+(do
+    (defn hd-say (k v) (print_str (str_concat "hearth-distill " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn hd-trim (s) (if (nothing? s) "" (trim s)))
+    (defn hd-or (s d) (if (eq (str_len s) 0) d s))
+    (defn hd-text (t) (if (nothing? t) "" t))
+    (defn hd-strip (s tag) (do (let at (str_find s tag 0)) (if (lt at 0) s (hd-strip (str_concat (substring s 0 at) (substring s (add at (str_len tag)) (str_len s))) tag))))
+    (defn hd-body (rsp turn)
+        (do (let at (str_find rsp (str_concat "turn=" (str_concat (int_to_str turn) "\n")) 0))
+            (let m (if (lt at 0) (sub 0 1) (str_find rsp (lms-mark-response) at)))
+            (let body (if (lt m 0) "" (substring rsp (add m (str_len (lms-mark-response))) (str_len rsp))))
+            (let t (str_find body "</think>" 0))
+            (let said (hd-strip (hd-strip body "<think>") "</think>"))
+            (let e (str_find said "<|" 0))
+            (trim (if (lt e 0) said (substring said 0 e)))))
+    (defn hd-word (line) (vs-lower (vs-first-word (vs-answer line)) 0 ""))
+    (defn hd-send-all (lines turn acc)
+        (if (eq (len lines) 0) (reverse acc)
+            (do (let sent (hearth-send turn (hearth-kind-answer) (vs-cat (list "/no_think In one sentence, in Sema's own plain voice, say what the word " (hd-word (head lines)) " names. The question it answered: " (vs-question (head lines))))))
+                (hd-send-all (tail lines) (add turn 1) (cons (list turn (head lines)) acc)))))
+    (defn hd-all-in? (rsp asks) (if (eq (len asks) 0) 1 (if (eq (str_len (hd-body rsp (head (head asks)))) 0) 0 (hd-all-in? rsp (tail asks)))))
+    (defn hd-wait (asks waited) (if (or (eq (hd-all-in? (hd-text (read_file (hearth-reply))) asks) 1) (ge waited (hearth-review-wait-s))) waited (do (let r (hearth-rest-s (hearth-review-tick-s))) (hd-wait asks (add waited (hearth-review-tick-s))))))
+    (defn hd-rows (data rsp asks n)
+        (if (eq (len asks) 0) n
+            (do (let said (hd-body rsp (head (head asks))))
+                (let line (nth (head asks) 1))
+                (let wrote (if (lt (str_len said) 12) 0 (sbt-append (str_concat data "/distill.jsonl") (lv-row (vs-question line) (vs-cat (list (hd-word line) ". " said))))))
+                (hd-rows data rsp (tail asks) (add n (if (lt (str_len said) 12) 0 1))))))
+    (let n (str_to_int (hd-or (hd-trim (read_line)) "10")))
+    (let data (hd-or (hd-trim (read_line)) ".form-lora-voice-native"))
+    (if (eq (hearth-standing) 0) (hd-say "signal" "nothing reason=no-standing-hearth")
+        (do (let lines (vs-corpus-lines (split-on (hd-text (read_file (str_concat data "/train.jsonl"))) (byte_to_str 10)) n))
+            (let asks (hd-send-all lines (add (lms-max-turn (read_file (hearth-task))) 1) (list)))
+            (let waited (hd-wait asks 0))
+            (let rsp (hd-text (read_file (hearth-reply))))
+            (let made (hd-rows data rsp asks 0))
+            (let epoch (now_unix_ms))
+            (let published (fgtm-publish-snapshot (hearth-telemetry-root) "voice.distill" epoch (list (fgtm-sample "voice.distill.rows" (fgtm-absent) "distill" "form" "voice.distill" "voice" "resident-taught-rows" (fgtm-absent) (fgtm-present made) "stored" (fgtm-absent) (fgtm-present epoch) (fgtm-absent) (fgtm-present (hearth-board-pid)) "never" "physical-live" "hearth-distill" (vs-tags)))))
+            (hd-say "distill" (vs-cat (list "asked=" (int_to_str (len asks)) " rows=" (int_to_str made) " waited=" (int_to_str waited) "s glass=" (nth published 1) " first=" (substring (hd-body rsp (head (head asks))) 0 120))))
+            0)))
