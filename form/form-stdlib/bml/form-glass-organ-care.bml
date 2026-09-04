@@ -1,0 +1,74 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glass-organ-care.bml — a coverage-bound care reading for Glass.
+//
+// Glass may say "all held" only when every member of an explicit census
+// has one valid current reading.  An unobserved organ is not healthy by
+// silence.  A gap becomes attended only through a matching receipt for the
+// organ, the evidence it named, and the move it asked for; the receipt is
+// not a claim that the move healed the organ.  A fresh positive reading is
+// the only route back to healthy.
+//
+// preludes: form-stdlib/core.fk form-stdlib/form-glass-event-loop.bml
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormGlassOrganCare {
+        field FgocOrganSchema = "form-glass-organ-reading-v1";
+        field FgocAttentionSchema = "form-glass-organ-attention-v1";
+        field FgocCensusSchema = "form-glass-organ-census-v1";
+
+        // organ = schema, identity, health (nothing/0/1), source, evidence,
+        //         requested move, impact x leverage priority.
+        def fgoc-organ(identity, health, source, evidence, ask, priority) = list(FgocOrganSchema(), identity, health, source, evidence, ask, priority);
+        def fgoc-organ-id(organ) = nth(organ, 1);
+        def fgoc-organ-health(organ) = nth(organ, 2);
+        def fgoc-organ-source(organ) = nth(organ, 3);
+        def fgoc-organ-evidence(organ) = nth(organ, 4);
+        def fgoc-organ-ask(organ) = nth(organ, 5);
+        def fgoc-organ-priority(organ) = nth(organ, 6);
+        def fgoc-health-valid?(health) = if nothing?(health) then 1 else if eq(health, 0) then 1 else eq(health, 1);
+        def fgoc-organ-valid?(organ) = if not(eq(len(organ), 7)) then 0 else if not(str_eq(head(organ), FgocOrganSchema())) then 0 else if le(str_len(fgoc-organ-id(organ)), 0) then 0 else if not(fgoc-health-valid?(fgoc-organ-health(organ))) then 0 else if le(str_len(fgoc-organ-source(organ)), 0) then 0 else if le(str_len(fgoc-organ-evidence(organ)), 0) then 0 else if lt(fgoc-organ-priority(organ), 0) then 0 else 1;
+
+        // attention = schema, organ identity, evidence, requested move,
+        //             receipt stage, receipt identity.  "received" means
+        // a responder accepted the named request; "applied" means it was
+        // applied to the named organ.  Neither substitutes for re-observed
+        // health.
+        def fgoc-attention(identity, evidence, ask, stage, receipt) = list(FgocAttentionSchema(), identity, evidence, ask, stage, receipt);
+        def fgoc-attention-id(attention) = nth(attention, 1);
+        def fgoc-attention-evidence(attention) = nth(attention, 2);
+        def fgoc-attention-ask(attention) = nth(attention, 3);
+        def fgoc-attention-stage(attention) = nth(attention, 4);
+        def fgoc-attention-receipt(attention) = nth(attention, 5);
+        def fgoc-attention-stage-valid?(stage) = if str_eq(stage, "received") then 1 else str_eq(stage, "applied");
+        def fgoc-attention-valid?(attention) = if not(eq(len(attention), 6)) then 0 else if not(str_eq(head(attention), FgocAttentionSchema())) then 0 else if le(str_len(fgoc-attention-id(attention)), 0) then 0 else if le(str_len(fgoc-attention-evidence(attention)), 0) then 0 else if le(str_len(fgoc-attention-ask(attention)), 0) then 0 else if not(fgoc-attention-stage-valid?(fgoc-attention-stage(attention))) then 0 else gt(str_len(fgoc-attention-receipt(attention)), 0);
+        def fgoc-attention-for?(organ, attention) = if not(fgoc-organ-valid?(organ)) then 0 else if not(fgoc-attention-valid?(attention)) then 0 else if not(str_eq(fgoc-organ-id(organ), fgoc-attention-id(attention))) then 0 else if not(str_eq(fgoc-organ-evidence(organ), fgoc-attention-evidence(attention))) then 0 else str_eq(fgoc-organ-ask(organ), fgoc-attention-ask(attention));
+        def fgoc-attention-for(organ, attentions) = if eq(len(attentions), 0) then list() else if eq(fgoc-attention-for?(organ, head(attentions)), 1) then head(attentions) else fgoc-attention-for(organ, tail(attentions));
+
+        // These are care states, not a numeric score.  The distinction makes
+        // Glass useful to both a cell (exact move) and a human (what awaits).
+        def fgoc-status(organ, attentions) = if not(fgoc-organ-valid?(organ)) then "refused" else if nothing?(fgoc-organ-health(organ)) then "unobserved" else if eq(fgoc-organ-health(organ), 1) then "healthy" else if eq(str_len(fgoc-organ-ask(organ)), 0) then "gap-unasked" else fgoc-status-attention(fgoc-attention-for(organ, attentions));
+        def fgoc-status-attention(attention) = if eq(len(attention), 0) then "asking" else if str_eq(fgoc-attention-stage(attention), "received") then "attention-received" else "attention-applied";
+        def fgoc-held?(organ, attentions) = if str_eq(fgoc-status(organ, attentions), "healthy") then 1 else if str_eq(fgoc-status(organ, attentions), "attention-received") then 1 else str_eq(fgoc-status(organ, attentions), "attention-applied");
+
+        // An "all" claim is relative to this explicit census only.  Each
+        // member must appear exactly once: duplicates, absent readings, and
+        // extra readings all leave coverage partial.
+        def fgoc-census(ids) = list(FgocCensusSchema(), ids);
+        def fgoc-census-ids(census) = nth(census, 1);
+        def fgoc-str-count(needle, rows) = if eq(len(rows), 0) then 0 else add(if str_eq(needle, head(rows)) then 1 else 0, fgoc-str-count(needle, tail(rows)));
+        def fgoc-ids-valid?(ids) = if eq(len(ids), 0) then 0 else fgoc-ids-valid-rest(ids, ids);
+        def fgoc-ids-valid-rest(ids, whole) = if eq(len(ids), 0) then 1 else if le(str_len(head(ids)), 0) then 0 else if not(eq(fgoc-str-count(head(ids), whole), 1)) then 0 else fgoc-ids-valid-rest(tail(ids), whole);
+        def fgoc-census-valid?(census) = if not(eq(len(census), 2)) then 0 else if not(str_eq(head(census), FgocCensusSchema())) then 0 else fgoc-ids-valid?(fgoc-census-ids(census));
+        def fgoc-reading-ids(rows) = if eq(len(rows), 0) then list() else cons(fgoc-organ-id(head(rows)), fgoc-reading-ids(tail(rows)));
+        def fgoc-rows-valid?(rows) = if eq(len(rows), 0) then 1 else if not(fgoc-organ-valid?(head(rows))) then 0 else fgoc-rows-valid?(tail(rows));
+        def fgoc-coverage-complete?(census, rows) = if not(fgoc-census-valid?(census)) then 0 else if not(fgoc-rows-valid?(rows)) then 0 else if not(eq(len(fgoc-census-ids(census)), len(rows))) then 0 else fgoc-ids-valid?(fgoc-reading-ids(rows));
+        def fgoc-coverage(census, rows) = if eq(fgoc-coverage-complete?(census, rows), 1) then "complete" else "partial";
+        def fgoc-held-count(rows, attentions) = if eq(len(rows), 0) then 0 else add(fgoc-held?(head(rows), attentions), fgoc-held-count(tail(rows), attentions));
+        def fgoc-all-held?(census, rows, attentions) = if not(eq(fgoc-coverage-complete?(census, rows), 1)) then 0 else eq(fgoc-held-count(rows, attentions), len(rows));
+        def fgoc-status-count(rows, attentions, wanted) = if eq(len(rows), 0) then 0 else add(if str_eq(fgoc-status(head(rows), attentions), wanted) then 1 else 0, fgoc-status-count(tail(rows), attentions, wanted));
+        def fgoc-first-status(rows, attentions, wanted) = if eq(len(rows), 0) then list() else if str_eq(fgoc-status(head(rows), attentions), wanted) then head(rows) else fgoc-first-status(tail(rows), attentions, wanted);
+    }
+    0;
+}
