@@ -21,7 +21,57 @@ empty inputs, no matches, missing versus null JSON values, malformed queries,
 ambiguous edits, and immutable state across successive native calls. Tests
 call the actual form-cli entry, not only catalog descriptions or helper functions.
 
-## Calling the native interface
+## Agent wire — the normal calling boundary
+
+Agents should send one JSON request, not construct a Form expression.  A raw
+JSON object entered at the form-cli text face is dispatched to the native wire:
+
+```json
+{
+  "command": "rg -nF 'alpha 1'",
+  "input": "",
+  "documents": [
+    {
+      "id": "source:alpha",
+      "path": "alpha.txt",
+      "text": "alpha 1\nbeta 2\n"
+    }
+  ]
+}
+```
+
+It returns JSON only:
+
+```json
+{
+  "schema": "form-agent-tool-wire-v1",
+  "exit": 0,
+  "stdout": "alpha.txt:1:alpha 1\n",
+  "stderr": "",
+  "documents": [{"id":"source:alpha","path":"alpha.txt","text":"alpha 1\nbeta 2\n"}],
+  "crossings": 0
+}
+```
+
+`command` is a familiar bounded argv-style string; it is parsed by Form, not
+by a shell. `input` and `documents` are optional (both default to empty).
+Each supplied document needs `id`, `path`, and `text` strings. Pass the
+returned `documents` array into the next JSON request after `edit` or `write`:
+
+```json
+{"command":"edit alpha.txt 'beta 2' 'gamma 3'","documents":[...]}
+```
+
+Then send the response's `documents` to `{"command":"read alpha.txt",...}`.
+There is no hidden session state, host workspace read, subprocess, or fallback.
+Malformed JSON, missing fields, unsupported command syntax and tool failures
+are ordinary structured results with `stderr`; inspect them and repair the next
+request rather than switching to a host command.
+
+## In-process Form API
+
+`fc-tool-call` remains the embedding API for a Form organ. It is not the
+recommended boundary for an agent or external tool caller:
 
 ```lisp
 (let docs (list (list "source:app" "src/app.py" "def hello():\n    return 1\n")))
@@ -54,88 +104,118 @@ catalog already resident in form-cli. It does not load a workspace. It refuses
 `edit` and `write` because this stateless face cannot retain returned state.
 In-process clients use `fc-tool-call` with their own resident source documents.
 
-## Copyable examples for every resident tool
+## Copyable commands for every resident tool
 
-Start every call with a document corpus the caller already holds. The corpus in
-this example is deliberately small so an agent can paste a call into a Form
-cell and see the same result as the executable example band.
+Start every JSON request with a document corpus the caller already holds. The
+corpus in this example is deliberately small so an agent can paste it into the
+wire and see the same result as the executable example band.
 
-```lisp
-(let docs (list
-    (list "source:alpha" "alpha.txt" "alpha 1\nbeta 2\n")
-    (list "source:table" "table.txt" "left:right\nup:down\n")
-    (list "source:package" "package.json" "{\"name\":\"demo\",\"version\":1}")))
+```json
+[
+  {"id":"source:alpha","path":"alpha.txt","text":"alpha 1\nbeta 2\n"},
+  {"id":"source:table","path":"table.txt","text":"left:right\nup:down\n"},
+  {"id":"source:package","path":"package.json","text":"{\"name\":\"demo\",\"version\":1}"}
+]
 ```
 
-Each row is an argv call: a Form list is already the command boundary, so no
-shell parser, quoting mode, pipe, redirection, expansion, or executable lookup
-is involved. `input` is the final string argument to `fc-tool-call`; omit
-paths to operate on that held string, or supply resident paths to select
-documents.
+Each row is the value of JSON `command`. Add the displayed held text as JSON
+`input`; omit paths to operate on it, or supply resident paths to select
+documents. The parser supports quoted argv values but rejects pipes,
+redirection, semicolons, expansions and executable lookup.
 
-| Tool | Direct Form call | Expected `fat-out` |
+| Tool | JSON `command` | Expected `stdout` |
 | --- | --- | --- |
-| `rg` | `(fc-tool-call docs "rg" (list "-nF" "alpha 1") "")` | `alpha.txt:1:alpha 1\n` |
-| `jq` | `(fc-tool-call docs "jq" (list "-r" ".name" "package.json") "")` | `demo\n` |
-| `read` | `(fc-tool-call docs "read" (list "alpha.txt") "")` | `alpha 1\nbeta 2\n` |
-| `cat` | `(fc-tool-call docs "cat" (list "alpha.txt" "table.txt") "")` | concatenated document text |
-| `head` | `(fc-tool-call docs "head" (list "-n" "1" "alpha.txt") "")` | `alpha 1\n` |
-| `tail` | `(fc-tool-call docs "tail" (list "-n" "1" "alpha.txt") "")` | `beta 2\n` |
-| `wc` | `(fc-tool-call docs "wc" (list "-lwc") "one two\n")` | `1 2 8\n` |
-| `sort` | `(fc-tool-call docs "sort" (list "-nu") "10\n2\n2\n")` | `2\n10\n` |
-| `uniq` | `(fc-tool-call docs "uniq" (list "-c") "a\na\nb\n")` | `2 a\n1 b\n` |
-| `tr` | `(fc-tool-call docs "tr" (list "-d" "\\n") "one\ntwo\n")` | `onetwo` |
-| `cut` | `(fc-tool-call docs "cut" (list "-d" ":" "-f" "2") "left:right\nup:down\n")` | `right\ndown\n` |
-| `awk` | `(fc-tool-call docs "awk" (list "{print $2}") "one two\nthree four\n")` | `two\nfour\n` |
-| `sed` | `(fc-tool-call docs "sed" (list "-n" "2p" "alpha.txt") "")` | `beta 2\n` |
-| `edit` | `(fc-tool-call docs "edit" (list "alpha.txt" "beta 2" "gamma 3") "")` | `edited\n`; retain `fat-documents` |
-| `write` | `(fc-tool-call docs "write" (list "notes.md") "held note\n")` | `created\n`; retain `fat-documents` |
+| `rg` | `rg -nF 'alpha 1'` | `alpha.txt:1:alpha 1\n` |
+| `jq` | `jq -r .name package.json` | `demo\n` |
+| `read` | `read alpha.txt` | `alpha 1\nbeta 2\n` |
+| `cat` | `cat alpha.txt table.txt` | concatenated document text |
+| `head` | `head -n 1 alpha.txt` | `alpha 1\n` |
+| `tail` | `tail -n 1 alpha.txt` | `beta 2\n` |
+| `wc` | `wc -lwc` | `1 2 8\n` |
+| `sort` | `sort -nu` | `2\n10\n` |
+| `uniq` | `uniq -c` | `2 a\n1 b\n` |
+| `tr` | `tr -d '\n'` | `onetwo` |
+| `cut` | `cut -d : -f 2` | `right\ndown\n` |
+| `awk` | `awk '{print $2}'` | `two\nfour\n` |
+| `sed` | `sed -n 2p alpha.txt` | `beta 2\n` |
+| `edit` | `edit alpha.txt 'beta 2' 'gamma 3'` | `edited\n`; retain response `documents` |
+| `write` | `write notes.md` | `created\n`; retain response `documents` |
 
-`edit` and `write` return a new resident corpus; they do not mutate `docs`.
-Keep that returned value explicitly before the next call:
+`edit` and `write` return a new resident corpus; they do not mutate a hidden
+session. Keep the response `documents` explicitly before the next call:
 
-```lisp
-(let changed (fc-tool-call docs "edit" (list "alpha.txt" "beta 2" "gamma 3") ""))
-(let next-docs (fat-documents changed))
-(fat-out (fc-tool-call next-docs "read" (list "alpha.txt") ""))
-; alpha 1
-; gamma 3
+```text
+{"command":"edit alpha.txt 'beta 2' 'gamma 3'","documents":[...the corpus above...]}
+response.stdout: "edited\n"
+response.documents[0].text: "alpha 1\ngamma 3\n"
 
-(let created (fc-tool-call next-docs "write" (list "notes.md") "held note\n"))
-(fat-out (fc-tool-call (fat-documents created) "read" (list "notes.md") ""))
-; held note
+{"command":"write notes.md","input":"held note\n","documents":[...the edit response documents...]}
+response.stdout: "created\n"
+
+{"command":"read notes.md","documents":[...the write response documents...]}
+response.stdout: "held note\n"
 ```
 
-A native pipeline passes an output string as the next call's `input`, rather
-than spelling `|`. For example, to take the first matched line:
+A native pipeline passes a response's `stdout` as the next request's `input`,
+rather than spelling `|`. For example, to take the first matched line:
 
-```lisp
-(let found (fc-tool-call docs "rg" (list "-nF" "alpha 1") ""))
-(fat-out (fc-tool-call (fat-documents found) "head" (list "-n" "1") (fat-out found)))
-; alpha.txt:1:alpha 1
+```text
+{"command":"rg -nF 'alpha 1'","documents":[...the corpus above...]}
+response.stdout: "alpha.txt:1:alpha 1\n"
+
+{"command":"head -n 1","input":"alpha.txt:1:alpha 1\n","documents":[...the search response documents...]}
+response.stdout: "alpha.txt:1:alpha 1\n"
 ```
 
 `zg` is the separate native catalog-discovery route, rather than one of the
 fifteen resident-document operations. It has no document or state argument:
 
-```lisp
-(fc-respond "zg hybrid kernel call")
-; zg-native status=hit route=hybrid ... crossings=0
+```text
+zg hybrid kernel call
+zg-native status=hit route=hybrid ... crossings=0
 ```
 
-Use `fc-tool-command` only when an agent already holds a single human-shaped
-command string and needs its bounded argv reader:
+## Native cell mesh
 
-```lisp
-(fat-out (fc-tool-command docs "jq -nr --arg x 'a b' '$x'" ""))
-; a b
+`mesh-demo` is the compact form-cli door for the bundled two-cell example:
+
+```text
+mesh-demo
+; mesh-demo events=3
 ```
 
-Its deliberate errors (`shell-syntax-not-supported`, an unsupported option,
+The reusable no-crossing organ is `form-cli-cell-mesh-sovereign.bml`. A channel is a Form data
+value, not a resident authority: both endpoint cells explicitly name the same
+observer and shared field; the observer's grounding is accepted only when it
+satisfies `core-grounding.fk`; and every open, send, adaptation, or refusal is an event
+row carried with the returned channel value. Cells keep their own state and may
+decline a proposal without losing the prior channel.
+
+The initial grammar streams admitted symbol strings and can select only the
+fixed native primitives `identity`, `head`, `count`, and `join`. A grammar and
+protocol revision is accepted only when it comes from the jointly named
+observer, names that exact shared field, is valid, and advances both revisions
+by one. It cannot stream arbitrary source or evaluator code. This keeps
+adaptation inspectable and local while leaving room to add a new, separately
+tested primitive deliberately.
+
+`observe/form-cli-cell-mesh-sovereign-glass-run.fk` projects the demo's `open`, `send`,
+and `adapted` rows into source-attributed framebuffer roots, the input Form
+Glass already uses for its framebuffer panel. The projection is current-process
+observation: it does not claim cross-process persistence. A durable mesh owner
+needs to carry the returned channel data through its own native residence.
+
+`form-cli-cell-mesh.fk` is a separate physical `CHANNEL-V0` carrier lane. It
+is preserved for durable, file-backed mesh work, but `mesh-demo` and the JSON
+agent wire use only the in-memory sovereign organ above.
+
+The wire's command reader also handles a single human-shaped command such as
+`jq -nr --arg x 'a b' '$x'`; its stdout is `a b\n`. Its deliberate errors
+(`shell-syntax-not-supported`, an unsupported option,
 malformed JSON, an ambiguous edit, or an absent resident path) are structured
-results. Read `fat-exit` and `fat-error`, repair the value or request the
-needed resident document, then make the next native call. Do not silently
-fall back to a host command.
+results. Read `exit` and `stderr`, repair the value or request the needed
+resident document, then make the next native call. Do not silently fall back to
+a host command.
 
 ## Supported workload profile
 
@@ -196,8 +276,13 @@ not itself the measurement.
 `form-cli-agent-tools-portable-band.fk` registers 127 in the four-way manifest
 and calls the same entry for search, JSON, text slicing and immutable edits.
 `form-cli-agent-tools-examples-band.fk` registers 32767 there: one direct
-public call for each of the fifteen resident tools. `form-cli-zg-band.fk`
-separately observes the native catalog-discovery route and its zero crossings.
+public call for each of the fifteen resident tools.
+`form-cli-agent-tool-wire-band.fk` registers 131071: JSON request/response
+shape, every tool, state handoff, malformed request refusal, and direct
+form-cli JSON dispatch. `form-cli-cell-mesh-sovereign-band.fk` registers 262143: shared
+observer admission, send/eval, refusal immutability, observer-only adaptation,
+and the `mesh-demo` dispatch. `form-cli-zg-band.fk` separately observes the
+native catalog-discovery route and its zero crossings.
 The existing auxiliary validator follows `.bml` as well as `.fk` dependencies,
 including BML `// preludes:` headers. Its proof-only text lowering does not add
 an external execution path to these resident tools.
