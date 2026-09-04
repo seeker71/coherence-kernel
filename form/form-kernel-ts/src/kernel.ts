@@ -1600,8 +1600,19 @@ export class Kernel {
       }
       return { kind: "str", str: fields.join(" ") };
     });
+    // str_eq OBSERVES the axiom-1 absence instead of refusing it, mirroring the fkwu
+    // arm exactly (probed 2026-09-04: nothing equals nothing, and equals neither ""
+    // nor any other string, so the emptymask distinction between never-was and empty
+    // survives the comparison). A comparison asks a question ABOUT two values; a
+    // length MEASURES one, which is why str_len and str_byte_at still refuse an
+    // absence out loud. Before this, a walk that met a file which had left between
+    // the listing and the read died here while fkwu answered "not a model" — one
+    // witness out of step with the primary kernel, found by model-discovery's own
+    // absence lane (form-stdlib/tests/model-discovery-band.fk, bit 256).
     this.registerNative("str_eq", catCompareEq(), (_k, args) =>
-      boolInt(argStr(args, 0) === argStr(args, 1)),
+      args[0]?.kind === "null" || args[1]?.kind === "null"
+        ? boolInt(args[0]?.kind === "null" && args[1]?.kind === "null")
+        : boolInt(argStr(args, 0) === argStr(args, 1)),
     );
     // int_to_str — value-to-string for trivial leaves. Historical name
     // (first use: line numbers in cell-trace.fk); semantics is "render
