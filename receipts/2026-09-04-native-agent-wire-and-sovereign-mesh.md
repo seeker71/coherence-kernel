@@ -44,6 +44,10 @@ Evidence:
 - `form-cli-cell-mesh-sovereign-band.fk` returned **262143** after the same clean
   preflight. Its four-way validator returned **262143**, also `1 ok,
   0 divergent`.
+- The preserved physical `form-cli-cell-mesh-band.fk` returned **4095** on a
+  fresh per-run test root. Its earlier repeated-run miss was **4089** because
+  an append-only witness was being re-read; giving only the test a new root
+  healed the observation while retaining the carrier's history semantics.
 - The direct form-cli regression remained **2097151**; the pre-existing portable
   and exact-tool bands remained **127** and **32767**.
 - `observe/form-cli-cell-mesh-sovereign-glass-run.fk` returned **15**: the `open`,
