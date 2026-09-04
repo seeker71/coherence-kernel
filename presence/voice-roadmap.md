@@ -36,7 +36,7 @@ holds a value at every frame, agent silence is an explicit pad, user silence is
 encoded actual silence, speech boundaries are emitted tokens, and interruption has
 no mechanism at all — overlap is representable on the shared axis and yielding is
 learned. The teaching lives in `presence/duplex-frame-grid.fk`; its band
-`presence/tests/duplex-frame-grid-band.fk` answers 511 (re-run 2026-09-03): over
+`presence/tests/duplex-frame-grid-band.fk` answers 511 (re-run 2026-09-04): over
 the same twenty frames, a turn-gated ear loses one of five user words; the grid
 loses none.
 

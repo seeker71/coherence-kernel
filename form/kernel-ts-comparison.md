@@ -73,6 +73,8 @@ are checked by that run, not by this page.
 
 ```sh
 cd form/form-kernel-ts
-npm install
-npx tsx src/main.ts --bench     # walker and compiled beside the native TS reference
+node --experimental-strip-types src/main.ts --bench     # walker and compiled beside the native TS reference
 ```
+
+No install step: the kernel imports only its own sources, and Node's strip-types
+runs them directly (`validate.sh` uses the same door).

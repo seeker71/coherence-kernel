@@ -14,7 +14,7 @@ The kernel borrows no `validate.sh` for its floor. It crosses its own bands:
 Run it, from the repository root:
 
 ```
-./fkwu proof/four-way-run-recipe42.fk      ->  0   (FOUR-WAY; re-run 2026-09-03)
+./fkwu proof/four-way-run-recipe42.fk      ->  0   (FOUR-WAY; re-run 2026-09-04)
 ```
 
 The verdict is COMPUTED, not parse-to-zero: point one walker at a recipe answering
@@ -23,7 +23,9 @@ walkers agree and it reads 1 (FKWU-SUSPECT). `host-exec` is a host PORT (the
 VIA-HOST family in `runtime/fkwu-uni.c`); `fwv-verdict` computes 0 / 1 / 2.
 
 The three walkers build from source in one command each — see
-`walkers/README.md`; the TS one runs under `node --experimental-strip-types`.
+`walkers/README.md`; the TS one runs under `node --experimental-strip-types`. The
+Go and Rust walker binaries are not tree content: on a fresh checkout the runner
+reads their absence as WALKER-SUSPECT (2) until they are built.
 
 ## Running an ordinary band on the other three arms
 

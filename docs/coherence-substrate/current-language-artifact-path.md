@@ -9,7 +9,7 @@ fit today.
 ```mermaid
 flowchart TD
     Author["domain/source authoring<br/>Form, BML, NL, DNA, math, science, etc."]
-    Imports["source dependency closure<br/>.fk import declarations"]
+    Imports["source dependency closure<br/>; preludes: and import declarations"]
     Cursor["BMF cursor<br/>streaming scannerless source motion"]
     GrammarWaist["BMF grammar waist<br/>rules, refs, captures, templates"]
     DomainGrammar["layer-specific grammar<br/>not one universal record grammar"]
@@ -43,22 +43,24 @@ flowchart TD
 
 ## What Is Current
 
-- The source floor enters through `fkwu file.fk` or `fkwu file.fk`,
-  directly off the supported Form surface. A fresh callable `.dylib` wins; a
-  fresh `.fkb` with matching embedded source-unit identity runs next; stale or
-  missing artifacts compile source and emit `.fkb/.sym`. A program image can
-  also run directly as `./fkwu file.fkb`.
+- The source floor enters through `fkwu file.fk` (and `fkwu file.bml`, lowered
+  in memory), directly off the supported Form surface. A fresh callable `.dylib`
+  wins; a fresh `.fkb` with matching embedded source-unit identity runs next;
+  stale or missing artifacts compile source and emit `.fkb/.sym`. A program
+  image can also run directly as `./fkwu file.fkb`.
 - `.fk` dependency management is installed in the source runtime door. The
-  current declaration is `import "path.fk"` for the direct source runner and
-  `; import "path.fk"` where a file must still pass through comment-only
-  sibling proof lanes. Legacy `; preludes:` declarations remain compatibility
-  input during migration. Imports load recursively, suppress duplicate/cyclic
-  paths, resolve relative paths from the importing file with Form-root fallbacks
-  for stdlib paths, and prefer fresh versioned `.fkb` images when available.
-  When an import image is missing, the runtime compiles that import into
-  `.fkb/.sym` and then imports the image. Source composition is the fallback
-  when an import image cannot be made or trusted. The root `.fkb` freshness
-  identity includes every dependency's path, mtime, and size.
+  declaration every kernel reads is `; preludes: a.fk b.bml …` — fkwu's parser
+  walks it recursively, and the Go/Rust/TS siblings walk it the same way
+  (deduplicated, `none` honored, a `.bml` prelude lowered in-process).
+  `import "path.fk"` is also installed in fkwu and in the three minimal walkers;
+  `validate.sh` expands `; import` headers for the siblings. Dependencies load
+  recursively, suppress duplicate/cyclic paths, resolve relative paths from the
+  importing file with Form-root fallbacks for stdlib paths, and prefer fresh
+  versioned `.fkb` images when available. When an import image is missing, the
+  runtime compiles that import into `.fkb/.sym` and then imports the image.
+  Source composition is the fallback when an import image cannot be made or
+  trusted. The root `.fkb` freshness identity includes every dependency's path,
+  mtime, and size.
 - The grammar waist is load-bearing. `bmf-core` and `bmf-grammar` own the
   scannerless cursor and reusable grammar mechanics; domain layers own their
   own vocabulary and lowering.
@@ -153,32 +155,31 @@ The current path is:
            -> runtime selector -> running body
 ```
 
-the source door remains an explicit compiler/admission spelling. Plain `fkwu file.fk`
-uses the same selector. `.tbl` is not a supported runtime artifact.
+`fkwu file.fk` is the one source invocation and runs through that selector.
+`.tbl` is not a supported runtime artifact (`fkwu x.tbl` refuses by name).
 
-## Import Declaration Shape
+## Dependency Declaration Shape
 
-Runtime-native source can use the direct declaration:
+Two spellings are installed, and both are dependency declarations to the same
+door. The body's declaration, read natively by all four kernels:
+
+```text
+; preludes: form-stdlib/core.fk form-stdlib/table.bml
+```
+
+The direct declaration, read by fkwu and by the three minimal walkers, and
+expanded by `validate.sh` (also in its comment-safe form `; import "…"`) for the
+siblings:
 
 ```text
 import "form-stdlib/core.fk"
 ```
 
-Files that still need to run through the older sibling proof walkers use the
-comment-safe declaration:
-
-```text
-; import "form-stdlib/core.fk"
-```
-
-Both forms are source dependency declarations to `fkwu`. The validator expands
-the comment-safe form recursively so repo files can migrate away from
-`preludes:` without losing four-way observation. `preludes:` is now only a
-legacy compatibility spelling.
+Neither is legacy. A `.bml` dependency travels only through `; preludes:`.
 
 ## Current Witnesses
 
-The current grammar path is carried by these focused bands:
+The current grammar path is carried by these focused bands (re-run 2026-09-04):
 
 ```text
 form-stdlib/tests/defdata-language-band.fk -> 8191

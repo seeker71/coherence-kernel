@@ -1,8 +1,8 @@
 # Reciprocal choice microkernel — repaired two-observation candidate
 
-Status: second-round review candidate, witnessed on native `fkwu` on
-2026-08-13. It is a fixture walk, not yet a live human or biological-intuition
-organ.
+Status: second-round review candidate, witnessed on native `fkwu` (band
+`4194303`, re-run 2026-09-04). It is a fixture walk, not yet a live human or
+biological-intuition organ.
 
 ## What round one required
 

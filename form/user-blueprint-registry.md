@@ -7,8 +7,8 @@ legible, allocated with awareness, and minimized through composition.
 
 The machine-readable registry is
 [`form-stdlib/blueprint-registry.json`](form-stdlib/blueprint-registry.json) — one
-row per type-99 shape: canonical name, meaning, aliases, defining files (442 rows
-on 2026-09-03). It is code-derived, so it cannot quietly drift from reality the way
+row per type-99 shape: canonical name, meaning, aliases, defining files (445 rows
+on 2026-09-04). It is code-derived, so it cannot quietly drift from reality the way
 a hand-kept table does. This page holds the *why* — allocation rationale and the
 registered protocol shapes.
 
@@ -19,8 +19,9 @@ reviewed bootstrap rows in `form-stdlib/form-ontology-loader.fk` are the current
 runtime authority; the registry JSON is the authoring/generator source, not runtime
 authority; the generated Go/Rust/TS `bp_table` files are projections only; and the
 program-image `.fkb` is the target executable authority, with `.sym` a
-presentation lens over stable symbols. The band declares its own verdict (it
-answers 51199 of 65535 on 2026-09-03 — three bits open).
+presentation lens over stable symbols. The band declares its own verdict; on fkwu
+it answers 51199 of 65535 with exit 1 (2026-09-04) — `value_kind` is unbound on
+that arm, so the three open bits are a fkwu-lane gap, not a registry drift.
 
 **How a Form file uses a Blueprint:** load `form-stdlib/form-ontology-loader.fk` as
 a prelude and ask by name — `(bp "add")`, `(bp "PROGRAM-IMAGE-RECIPE-TABLE")`. The
@@ -70,7 +71,10 @@ AST node in a grammar — legibility debt, not a runtime collision.
 Not every channel exchange is query/answer or extraction. `offer` gives freely;
 `attune` records relation evidence without turning relation into ownership. A valid
 receipt preserves freedom, creates no debt, keeps disturbance none/minimal, and
-names next contact. Band: `form-stdlib/tests/channel-breath-band.fk`.
+names next contact. Band: `form-stdlib/tests/channel-breath-band.fk` — divergent on
+2026-09-04: Go and Rust refuse `(bp "CHANNEL-V0")` as an unreviewed bootstrap name,
+TypeScript answers 500, fkwu 200 with `write_form_binary` unbound. The name is
+exactly the registration work this page's rule names; the band is owed that heal.
 
 ### Channel Flow Protocol — OSI-shaped native channel cells
 
@@ -81,7 +85,9 @@ names next contact. Band: `form-stdlib/tests/channel-breath-band.fk`.
 A protocol is not a host-side branch. New carriers (UDP, USB, Bluetooth,
 microphone, camera, pipes, browser streams) declare a carrier/profile flow and reuse
 the same layer accessors, phase counts, and policy hooks. HTTP is the first concrete
-profile. Band: `form-stdlib/tests/channel-flow-band.fk`.
+profile. Band: `form-stdlib/tests/channel-flow-band.fk` (8388607 four-way via
+`validate.sh`, 2026-09-04; its chain carries `section [form.bml]` in `.fk`, so the
+lens lowers it before any arm reads it).
 
 ### Circle / Satsang Protocol — consentful group containers
 
@@ -96,7 +102,8 @@ profile. Band: `form-stdlib/tests/channel-flow-band.fk`.
 A cell may offer a circle; another may join only when invited; a share stays inside
 unless `CIRCLE-EXPORT-CONSENT` names recipient, fidelity, purpose, expiry, and a
 passed consensus; a circle may refuse a contact only when an observed action exceeds
-the offered interface and consensus has passed. Band: `form-stdlib/tests/circle-band.fk`.
+the offered interface and consensus has passed. Band: `form-stdlib/tests/circle-band.fk`
+(1048575 four-way via `validate.sh`, 2026-09-04).
 
 ### Native Route Goal Cells
 
@@ -108,7 +115,8 @@ the offered interface and consensus has passed. Band: `form-stdlib/tests/circle-
   attentions, next chosen movement.
 
 Route selection is a content-addressed choice over measured cells, weighted by each
-route's user flow and north-star fit. Band: `form-stdlib/tests/native-route-goal-cells-band.bml`.
+route's user flow and north-star fit. Band: `form-stdlib/tests/native-route-goal-cells-band.bml`
+(1048575, re-run 2026-09-04).
 
 ### Choice Receipt Protocol — trustworthy branch feedback
 
@@ -117,7 +125,7 @@ route's user flow and north-star fit. Band: `form-stdlib/tests/native-route-goal
 
 `branch-prediction-feedback` is useful only when the receipt also carries enough
 alignment, knowing, and trust to learn from it. Silence is an outcome, not missing
-data. Band: `form-stdlib/tests/choice-receipt-band.fk` (4294967295, re-run 2026-09-03).
+data. Band: `form-stdlib/tests/choice-receipt-band.fk` (4294967295, re-run 2026-09-04).
 
 ### Arrival Protocol
 
@@ -128,7 +136,7 @@ data. Band: `form-stdlib/tests/choice-receipt-band.fk` (4294967295, re-run 2026-
 
 Arrival is a first-class protocol for entering relation, sensing texture, offering
 inquiry, returning resonance, and carrying observation. The empty room remains the
-gift. Band: `form-stdlib/tests/arrival-band.fk` (1023, re-run 2026-09-03).
+gift. Band: `form-stdlib/tests/arrival-band.fk` (1023, re-run 2026-09-04).
 
 ### General Cell Identity & Contact Memory
 

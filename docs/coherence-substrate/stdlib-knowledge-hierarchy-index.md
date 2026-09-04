@@ -6,25 +6,29 @@ section classes, and missing grammar surfaces.
 
 ## Inventory
 
-Current `form/form-stdlib` inventory:
+`form/form-stdlib` inventory, counted 2026-09-04:
 
 | Area | `.fk` files |
 | --- | ---: |
-| total | 2283 |
-| root | 850 |
-| tests | 1262 |
-| seedbank | 73 |
-| grammars | 59 |
+| total | 3492 |
+| root | 1446 |
+| tests | 1872 |
+| seedbank | 117 |
+| grammars | 31 |
 | queries | 9 |
 | integration | 8 |
-| emits | 19 |
-| skills | 1 |
+| emits | 4 |
+| skills | 2 |
 | lenses | 1 |
 | drafts | 1 |
 
+Beside the `.fk` files, 222 `.bml` files carry the high-grammar authority.
+
 The root files have a first-pass filename cluster index in
-`form/form-stdlib/stdlib-knowledge-hierarchy.fk`. The counts are heuristic
-review buckets, not final ontology.
+`form/form-stdlib/stdlib-knowledge-hierarchy.fk` (band
+`tests/stdlib-knowledge-hierarchy-band.fk` 16383). That cell's own
+`skh-inventory` row is its snapshot, not the tree's count, and lags the table
+above. The cluster counts are heuristic review buckets, not final ontology.
 
 ## Tree Shape
 
@@ -108,15 +112,15 @@ which binds each authored grammar family to an actual reversible BMF object rule
 and proves source -> object -> source -> object roundtrips in
 [`form/form-stdlib/tests/stdlib-uplift-bmf-use-band.fk`](../../form/form-stdlib/tests/stdlib-uplift-bmf-use-band.fk).
 
-The source file now uses the repo's executable BMF section shape:
-`section [name.bmf] { rule ::= ... => emit <= reverse; }`. The remaining gap is
-the generic `.bmf` text-to-runtime-rule compiler/sidecar path. A direct attempt
-to depend on `source-compiler.fk` exposed a prelude error and long-running
-validation path, recorded in
-[`receipts/2026-07-05-source-compiler-bmf-stall.md`](../../receipts/2026-07-05-source-compiler-bmf-stall.md).
-Until that is repaired, the honest status is BMF-authored section source plus
-observed bidirectional runtime rules. Uplift should happen by cluster after the
-relevant BMF grammar is loaded and used in at least one file.
+The source file uses the repo's executable BMF section shape:
+`section [name.bmf] { rule ::= ... => emit <= reverse; }`. The open gap is the
+generic `.bmf` text-to-runtime-rule path: a `grammars/*.bmf` file is source
+authority that a `.fk` cell mirrors by hand (`host-effect-grammar.fk` names
+`grammars/host-effect-vocabulary.bmf` and carries its rows as Form data; no cell
+reads a `.bmf` file into runtime rules). The honest status is BMF-authored
+section source plus observed bidirectional runtime rules
+(`stdlib-uplift-bmf-use-band` 131071, re-run 2026-09-04). Uplift should happen by
+cluster after the relevant BMF grammar is loaded and used in at least one file.
 
 Low-level `defn` / `let` pressure is tracked separately by
 [`grammars/stdlib-section-pressure.bmf`](../../grammars/stdlib-section-pressure.bmf)
@@ -125,23 +129,10 @@ and
 This is a guide metric: capped file-window counts make the pressure visible
 without recreating the recursive whole-file scan stall.
 
-The current whole-family pressure baseline is recorded in
-[`source-runtime-release-map.md`](source-runtime-release-map.md). As of
-2026-07-05, non-test stdlib contains 21,889 `(defn`, 6,413 `(let`, and 28,302
-total low-level forms across 967 files. The first-pass feature-family pressure
-is:
-
-| Family | Files | `(defn` | `(let` | Total |
-| --- | ---: | ---: | ---: | ---: |
-| other-stdlib | 605 | 8,843 | 2,137 | 10,980 |
-| grammar-language | 99 | 3,969 | 1,992 | 5,961 |
-| artifact-runtime | 43 | 2,776 | 572 | 3,348 |
-| learning-cognition | 76 | 2,368 | 297 | 2,665 |
-| host-mesh-world | 69 | 1,497 | 101 | 1,598 |
-| core-engine | 11 | 1,229 | 175 | 1,404 |
-| registry-ontology | 10 | 333 | 770 | 1,103 |
-| file-codec-cursor | 28 | 497 | 279 | 776 |
-| language-lift-eval | 26 | 377 | 90 | 467 |
+The whole-body pressure measures live in
+[`source-runtime-release-map.md`](source-runtime-release-map.md): on 2026-09-04
+the stdlib outside `tests/` carries 37,209 `(defn` and 14,158 `(let` across
+1,620 `.fk` files.
 
 | Grammar | Status | First Use |
 | --- | --- | --- |

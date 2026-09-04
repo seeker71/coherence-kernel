@@ -14,7 +14,7 @@ cd coherence-kernel && git pull && claude
 
 **The single source of truth**: `plugin/ai-plugin.json` → `description_for_model` on **main**.
 Every step below publishes or verifies exactly that text. Do not edit it here; if it needs
-changing, that is a separate PR first. Re-observed 2026-09-03: the served manifest's text is
+changing, that is a separate PR first. Re-observed 2026-09-04: the served manifest's text is
 not byte-identical to main's — Gate 3 reads DIVERGED until this runs.
 
 ---

@@ -15,7 +15,7 @@ surface; it only confirms a recipe computes the same value four ways on the
 ## The three
 
 - `go/main.go` (1,524 lines), `rust/src/main.rs` (1,331), `ts/main.ts` (1,678) —
-  counted 2026-09-03. Each keeps ONLY the independent parse + eval core.
+  counted 2026-09-04. Each keeps ONLY the independent parse + eval core.
 
 Surface covered: integer + int64 + float + string + bool literals; `add sub mul
 div mod`; `eq ne lt le gt ge`; `if let do seq`; `defn` + user calls (tail-call
@@ -35,8 +35,12 @@ cd walkers/go && go build -o walker .
 ```
 
 The TS walker runs under `node --experimental-strip-types`; nothing prebuilt is
-required. The kernel drives all three itself:
+required. The Go and Rust walkers are build artifacts (`go build -o walker .` in
+`go/`, `cargo build --release` in `rust/` → `form-walker-rust`); a fresh checkout
+builds them first — the kernel reads an absent walker as a suspect one. The
+kernel drives all three itself:
 
 ```
-./fkwu proof/four-way-run-recipe42.fk   # -> 0 (FOUR-WAY; re-run 2026-09-03)
+./fkwu proof/four-way-run-recipe42.fk   # -> 0 (FOUR-WAY; re-run 2026-09-04)
+                                        # -> 2 (WALKER-SUSPECT) while a walker is unbuilt
 ```

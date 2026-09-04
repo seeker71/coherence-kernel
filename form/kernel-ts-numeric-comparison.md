@@ -1,9 +1,8 @@
 # Format-recipes as substrate cells
 
 Companion to [`kernel-ts-comparison.md`](./kernel-ts-comparison.md) (the
-i32/walker/compiled arc) and `docs/coherence-substrate/numeric-types-plan.md`
-(the architecture). This page names the format-recipe path and the bench that
-measures it.
+i32/walker/compiled arc). This page names the format-recipe path and the bench
+that measures it.
 
 ## The architecture, named once
 
@@ -66,10 +65,12 @@ of the substrate's identity grammar. The NodeIDs stay invariant; the storage is 
 
 ```sh
 cd form/form-kernel-ts
-npm install
-npx tsx src/main.ts --numeric-bench    # format-recipe arc
-npx tsx src/main.ts --bench            # i32/walker/compiled arc
+node --experimental-strip-types src/main.ts --numeric-bench    # format-recipe arc
+node --experimental-strip-types src/main.ts --bench            # i32/walker/compiled arc
 ```
+
+No install step: the kernel imports only its own sources, and Node's strip-types
+runs them directly (`validate.sh` uses the same door).
 
 ## Open breaths
 
@@ -77,5 +78,4 @@ npx tsx src/main.ts --bench            # i32/walker/compiled arc
   tables (the current path uses generic Number storage).
 - Wire Pass 1 / Pass 2 into the kernel's walker and compiler — they live in
   `numeric.ts` / `numeric-bench.ts` as a parallel demonstration.
-- A canonical `docs/coherence-substrate/numeric-formats.fk` bootstrap validated by
-  the conformance harness.
+- A canonical format-recipe bootstrap cell, validated by the sibling run.

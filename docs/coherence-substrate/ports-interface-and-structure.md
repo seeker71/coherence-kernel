@@ -132,10 +132,12 @@ interface+carrier pair plugged into a port the body needs to name first.
 The fork was "Form-level registry vs new kernel host-binding natives." A direct
 probe of the kernel's dispatch settles it:
 
-- `(f 3 4)` where `f` is a let-bound **function value** → works (returns 7). Form
+- `(f 3 4)` where `f` is a let-bound **function value** → works (returns 7), and
+  the value may arrive from a list: `(let f (nth ops 1) (f 3 4))` answers. Form
   passes functions as first-class values through variables.
-- `((nth ops 1) 3 4)` — a *computed* head position — **does not parse**. Native
-  dispatch requires a static symbol in head position; there is no `apply`.
+- `((nth ops 1) 3 4)` — a *computed* head position — **resolves to nothing**: fkwu
+  answers `[unresolved-call] ''`, rc 1 (re-observed 2026-09-04). Native dispatch
+  requires a static symbol in head position; there is no `apply`.
 
 So a carrier **cannot** be selected by a data-driven head (`(carrier-op args)`
 where `carrier-op` is looked up at runtime). But it **can** be a function value
@@ -197,7 +199,7 @@ host-carrier harness:
 | **file** | the **segmented log store** (`cell-log-store.fk`) — real, scalable | `storage-port-file.fk` | four-way band, verdict 1111 |
 | **db** | **Postgres** via the `pg_*` natives | `storage-port-db.fk` | live-PG harness, verdict 1111 |
 
-`tests/storage-port-band.fk` (four-way, 11111) proves memory and the segmented
+`tests/storage-port-band.fk` (four-way, 11111; re-run on fkwu 2026-09-04) proves memory and the segmented
 file log return the identical verdict and the file store survives reopen
 (durability via replay). The Postgres proof is intentionally separate:
 `integration/storage-port-all-carriers.fk` +

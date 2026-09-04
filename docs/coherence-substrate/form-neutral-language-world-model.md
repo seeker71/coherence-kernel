@@ -1,11 +1,9 @@
 # Form-neutral language world model
 
-Date: 2026-08-14
+## What stands
 
-## What moved
-
-The observed language crossing now enters the repository's existing native
-world model rather than remaining a dictionary beside it.
+The observed language crossing enters the repository's existing native world
+model rather than remaining a dictionary beside it.
 
 The integration is deliberately layered:
 
@@ -175,16 +173,17 @@ tight sharding, local-only offer validation, local selection, sovereign meaning
 composition, candidate overlay, evidence-led growth, and the directed successor
 as `67108863` on fkwu, Go, Rust, and TypeScript.
 
-The last step is intentionally not claimed yet. The rebased repository now has
+The last step is intentionally not claimed yet. The body has
 `dsv4-token-recipe-swap.fk`, which can let a bounded Form recipe challenge one
 LLM token. A future language-world recipe can use this graph only after a
 tokenizer relation maps an offered surface to actual model token IDs and a
 meaning-preservation witness observes the choice. Inventing those IDs would
 turn a real integration seam into theatre.
 
-## Relation to the rebased core lexicon
+## Relation to the core lexicon
 
-The rebased base at `4f926da4d` contains the 64-word core lexicon vitality overlay. That
+The body carries the 64-word core lexicon vitality overlay
+(`form/form-stdlib/core-lexicon.fk`). That
 lexicon remains a closed bootstrap/query tongue with reversible, witnessed
 surface successors. It is not installed as the universal meaning ontology.
 The world model instead carries numeric dictionary anchors and recipes; core
@@ -210,4 +209,4 @@ Still open:
 - actual tokenizer IDs and graph-guided token generation;
 - corpus-scale activation scheduling, active-shard release, and performance.
 
-; witnessed: 2026-08-14 -> native integration band 65535; four-arm activation band 67108863; active envelope 87362 / 16777216 bytes
+; witnessed: 2026-09-04 (re-run on fkwu) -> native integration band 65535; activation band 67108863 (declared four-arm); active envelope 87362 / 16777216 bytes

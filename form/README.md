@@ -31,10 +31,18 @@ The full present map is
 
 ```sh
 cd form
-./validate.sh form-stdlib/core.fk form-stdlib/engine.fk form-stdlib/source-compiler.fk form-stdlib/tests/form-action-bmf-rulebook.fk
-./validate.sh --binary form-stdlib/core.fk form-stdlib/engine.fk form-stdlib/source-compiler.fk form-stdlib/tests/form-action-bmf-rulebook.fk
-./validate.sh form-stdlib/tests/source-compiler-grammar-bridge-band.fk
+./validate.sh form-stdlib/tests/form-action-bmf-rulebook.fk            # three-way agreed, 2026-09-04
+./validate.sh form-stdlib/tests/source-compiler-grammar-bridge-band.fk  # three-way agreed, 2026-09-04
 ```
+
+A band is named alone: every kernel walks its `; preludes:` closure itself, so a
+hand-typed file list is not only unnecessary but wrong when it omits a prelude
+(the rulebook band's closure includes `json.fk`, `cache.fk`, and
+`form-ontology-bp.fk`; without them every arm dies on `FORM-CATEGORY-TABLE`).
+Neither band is registered in `fourth-arm-bands.txt`, so these runs speak for
+three kernels. The `--binary` lane refuses the rulebook workload today — all three
+kernels answer `form binary: maximum node depth exceeded` — so that artifact
+proof is owed, not claimed.
 
 The kernel stays small: source sections, BMF rules, dialect migration,
 reverse emission, module bundling, locale/context lenses, and language/media

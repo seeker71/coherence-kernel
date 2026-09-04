@@ -85,7 +85,7 @@ underlying ack remains present for evidence. No C seed was changed.
 ## Current witness
 
 - Fresh preflight: balanced; errors 0; warnings 0; unresolved 0; clean chain.
-- Native direct band: `4194303`.
+- Native direct band: `4194303` (re-run 2026-09-04).
 - Declared fkwu-only source-lane validation: `4194303`, one OK, zero divergent;
   the proof siblings were not run for this declared lane.
 - Twenty-two distinct power-of-two predicates land in one summed walk.
