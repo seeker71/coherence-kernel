@@ -1672,13 +1672,54 @@
     (defn fsc-source-emit-params (param-items)
         (fsc-source-emit-join (fsc-source-emit-params-loop param-items (empty))))
 
+    ;; A trivial float leaf (node_type 7) carries an f64, not its source text.
+    ;; int_to_str over that value answered "" (its digit walk hands a float to
+    ;; byte_to_str), so every decimal literal in a .bml lowered to an EMPTY
+    ;; argument: `list("x", 1.0, 0.5)` became `(list "x"  )` and answered 1
+    ;; (ledger R76, witnessed 2026-09-04). The float's executable text is the
+    ;; shortest decimal that READS BACK to the same f64 through str_to_float
+    ;; (the reader the lowered text meets), always with a digit after the dot
+    ;; so it stays a float literal: 1.0 -> "1.0", never "1". A value no width
+    ;; up to 17 fractional digits reads back is refused by name.
+    (defn fsc-float-text-at (af digits)
+        (do
+            (let scale (fstr-pow10 digits))
+            (let scaled (float_to_int (add 0.5 (mul af scale))))
+            (str_concat (int_to_str (div scaled scale))
+                (str_concat "." (fstr-pad-left (int_to_str (mod scaled scale)) digits)))))
+
+    (defn fsc-float-text-loop (value af neg digits)
+        (if (gt digits 17)
+            (fsc-compiler-error "float literal has no decimal text that reads back to its own value within 17 fractional digits")
+            (do
+                (let body (fsc-float-text-at af digits))
+                (let text (if neg (str_concat "-" body) body))
+                (if (eq (str_to_float text) value) text
+                    (fsc-float-text-loop value af neg (add digits 1))))))
+
+    (defn fsc-source-emit-float (value)
+        (do
+            (let neg (lt value 0))
+            (fsc-float-text-loop value (if neg (sub 0 value) value) neg 1)))
+
+    ;; Leaf text by node_type: 1 int, 2 string, 3 bool, 7 float. Any other
+    ;; leaf refuses by name -- an unknown leaf rendered through int_to_str is
+    ;; how the float vanished silently; never again an empty token.
+    (defn fsc-source-emit-leaf (recipe)
+        (do
+            (let kind (node_type recipe))
+            (if (eq kind 2) (fsc-q (node_value recipe))
+            (if (eq kind 7) (fsc-source-emit-float (node_value recipe))
+            (if (or (eq kind 1) (eq kind 3)) (int_to_str (node_value recipe))
+                (fsc-compiler-error
+                    (str_concat "source-emit: leaf of unknown node_type "
+                        (int_to_str kind))))))))
+
     (defn fsc-source-emit-recipe (recipe)
         (do
             (let kids (node_children recipe))
             (if (and (fsc-empty? kids) (eq (node_level recipe) 1))
-                (if (eq (node_type recipe) 2)
-                    (fsc-q (node_value recipe))
-                    (int_to_str (node_value recipe)))
+                (fsc-source-emit-leaf recipe)
                 (do
                     (let cat (node_category recipe))
                     (if (node_eq cat fsc-rec-DO-CAT)
