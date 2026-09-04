@@ -43,7 +43,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 658 rows, 647 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 659 rows, 648 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -201,8 +201,16 @@ jit-source-runtime-orchestrator 1048575.
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=36 moving=0 released=55 -> 36000055
+./fkwu form/form-stdlib/release-ledger.bml -> open=37 moving=0 released=56 -> 37000056
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
+
+Every row of that door is a Form lens now — `gate/op-manifest.bml`,
+`native-surface`, `category-contract`, `primitive-registry`, `flt-ops-gen`,
+`ontology`, `kernel-conformance` — each byte-agreeing with the Python twin it
+replaced on the live tree and on a planted-drift tree, each with a band
+(1023 · 511 · 255 · 511 · 63 · 255 · 511) and none of them calling `python3`
+(R58). The writer half of `flt-ops-gen` and the FORMBIN2 interop witness are
+the Python that remains (R59, R60).
 ```
 
 Every tracked cell's `witnessed:` stamp is read into the belief lens; a stamp
@@ -243,6 +251,9 @@ What answered red or nothing in this pass, so no one leans on it:
   nothing; the domain/organ/unique/universe-mint bands answer 2015 of 2047
   (bit 32, held-out lineage, stamped pending 2026-08-26); `form-cli-gpu-band`
   1009 of 1023 (bits 2/4/8, live `mlx_run` attention numerics) (R88).
+- The BML section scanner is line-based: a comment line ending in `{` counts
+  as a block opener, and the section then reports "not closed before end of
+  source" pointing nowhere near the prose that opened it (R93).
 - The BML lowerer's walker recursion grows with the size of one form: a single
   `list()` of 500-byte strings answers at 26 KB and dies at the 254 MB
   eval-depth wall at 31 KB. The release ledger's rows list crossed it at 90
