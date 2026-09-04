@@ -71,6 +71,9 @@ bml-generics-band                      -> 16777215
 native-route-goal-cells-band.bml       -> 1048575  (full)
 nested-defn-scope-band                 -> 63
 nested-defn-closure-capture-band       -> 63
+bml-float-literal-band                 -> 2047     (a decimal float reads back as the same float
+                                                     from eleven positions; the emitter refuses an
+                                                     unknown leaf by name instead of writing "")
 json-codec-bml-band 8191 · kernel-http-band 536965066 · channel-flow-band 8388607
 circle-band 1048575 · static-to-dynamic-cells-band 262143 · bml-capability-ledger-band 255
 form-pe-coff-band 16383 · learn/tests/choice-receipt-band 4294967295
@@ -186,7 +189,7 @@ jit-source-runtime-orchestrator 1048575.
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 489459005
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=31 moving=0 released=52 -> 31000052
+./fkwu form/form-stdlib/release-ledger.bml -> open=30 moving=0 released=53 -> 30000053
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 ```
 
@@ -212,11 +215,6 @@ What answered red or nothing in this pass, so no one leans on it:
   each reach their declared verdict yet exit 1: a Go/Rust-only native
   (`write_form_binary`, `recipe_to_bytes`, `pg_exec`) sits unresolved in a
   prelude the run never reaches — lane seams, not defects.
-- The BML lowering drops a decimal float literal silently: `def t() = list("x",
-  1.0, 0.5); len(t());` lowers to `(list "x")` and answers 1, rc 0, where
-  `list("x", 1, 5)` answers 3 (`release-ledger.bml` R76). `speakable-band` and
-  `speakable-german-band` answer 0, `energy-center-glands`, `research-corpus`,
-  `reference-packs` and `word-roots` die, four `ml-flow-band` rows fail on it.
 - BML `match` is not lowered on fkwu (`source-language-match-switch-band` 0;
   R77) and `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111
   with `Num` unresolved; R78).
