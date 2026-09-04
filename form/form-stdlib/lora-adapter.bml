@@ -97,3 +97,62 @@ section [form.bml] {
     }
     0;
 }
+//////////////////////////////////////////////////////////////////////
+// THE NUMBERS, AND THE WRITER. Below the header census: the body decodes
+// the adapter's float32 tensors natively (sign, exponent, mantissa by
+// integer arithmetic; powers of two by exact doubling), computes a
+// low-rank delta B(A x) itself, and writes an adapter file in the same
+// format — header JSON plus little-endian floats — that it reads back
+// whole. That round trip is the LoRA writer HOMECOMING names.
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraNumbers {
+        def ln-pow2(n) = if eq(n, 0) then 1.0 else if gt(n, 0) then mul(2.0, ln-pow2(sub(n, 1))) else div(ln-pow2(add(n, 1)), 2.0);
+        def ln-u32-le(bytes, i) = add(str_byte_at(bytes, i), add(mul(str_byte_at(bytes, add(i, 1)), 256), add(mul(str_byte_at(bytes, add(i, 2)), 65536), mul(str_byte_at(bytes, add(i, 3)), 16777216))));
+        def ln-f32-decode(u) {
+            let sign = if ge(u, 2147483648) then 0.0 else 1.0;
+            let body = if ge(u, 2147483648) then sub(u, 2147483648) else u;
+            let e = div(body, 8388608);
+            let m = mod(body, 8388608);
+            let mag = if eq(e, 0) then 0.0 else mul(add(1.0, div(str_to_float(int_to_str(m)), 8388608.0)), ln-pow2(sub(e, 127)));
+            if eq(sign, 1.0) then mag else sub(0.0, mag);
+        }
+        def ln-exp-of(a, e) = if lt(a, 1.0) then ln-exp-of(mul(a, 2.0), sub(e, 1)) else if ge(a, 2.0) then ln-exp-of(div(a, 2.0), add(e, 1)) else e;
+        def ln-f32-encode(x) {
+            let neg = if lt(x, 0.0) then 1 else 0;
+            let a = if eq(neg, 1) then sub(0.0, x) else x;
+            let e = if eq(a, 0.0) then 0 else ln-exp-of(a, 0);
+            let m = if eq(a, 0.0) then 0 else float_to_int(round(mul(sub(div(a, ln-pow2(e)), 1.0), 8388608.0)));
+            add(mul(neg, 2147483648), add(mul(if eq(a, 0.0) then 0 else add(e, 127), 8388608), m));
+        }
+        def ln-u32-bytes(u) = list(mod(u, 256), mod(div(u, 256), 256), mod(div(u, 65536), 256), mod(div(u, 16777216), 256));
+        def ln-floats-bytes(xs) = if eq(len(xs), 0) then list() else append(ln-u32-bytes(ln-f32-encode(head(xs))), ln-floats-bytes(tail(xs)));
+        // read n floats of a tensor at byte offset `begin` past the header
+        def ln-floats-go(bytes, i, n, acc) = if ge(i, mul(n, 4)) then reverse(acc) else ln-floats-go(bytes, add(i, 4), n, cons(ln-f32-decode(ln-u32-le(bytes, i)), acc));
+        def ln-floats(path, hlen, begin, n) {
+            let bytes = read_file_slice(path, add(8, add(hlen, begin)), mul(n, 4));
+            if nothing?(bytes) then list() else if lt(str_len(bytes), mul(n, 4)) then list() else ln-floats-go(bytes, 0, n, list());
+        }
+        def ln-tensor-begin(h, name) {
+            let at = str_find(h, str_concat(la-q(), name), 0);
+            if lt(at, 0) then sub(0, 1) else la-int-after(h, la-cat(list(la-q(), "data_offsets", la-q(), ":[")), at);
+        }
+        def ln-dot(xs, ys) = if or(eq(len(xs), 0), eq(len(ys), 0)) then 0.0 else add(mul(head(xs), head(ys)), ln-dot(tail(xs), tail(ys)));
+        def ln-norm2(xs) = ln-dot(xs, xs);
+        // an adapter file: tensors as (name shape floats); header JSON then bytes
+        def ln-shape-text(shape) = if eq(len(shape), 0) then "" else if eq(len(tail(shape)), 0) then int_to_str(head(shape)) else str_concat(int_to_str(head(shape)), str_concat(",", ln-shape-text(tail(shape))));
+        def ln-entry(t, begin) = la-cat(list(la-q(), head(t), la-q(), ":{", la-q(), "dtype", la-q(), ":", la-q(), "F32", la-q(), ",", la-q(), "shape", la-q(), ":[", ln-shape-text(nth(t, 1)), "],", la-q(), "data_offsets", la-q(), ":[", int_to_str(begin), ",", int_to_str(add(begin, mul(4, len(nth(t, 2))))), "]}"));
+        def ln-entries(ts, begin) = if eq(len(ts), 0) then "" else str_concat(ln-entry(head(ts), begin), if eq(len(tail(ts)), 0) then "" else str_concat(",", ln-entries(tail(ts), add(begin, mul(4, len(nth(head(ts), 2)))))));
+        def ln-header(ts) = la-cat(list("{", ln-entries(ts, 0), "}"));
+        def ln-pad(s) = if eq(mod(str_len(s), 8), 0) then s else ln-pad(str_concat(s, " "));
+        def ln-text-bytes(s, i, acc) = if ge(i, str_len(s)) then reverse(acc) else ln-text-bytes(s, add(i, 1), cons(str_byte_at(s, i), acc));
+        def ln-body-bytes(ts) = if eq(len(ts), 0) then list() else append(ln-floats-bytes(nth(head(ts), 2)), ln-body-bytes(tail(ts)));
+        def ln-write(path, ts) {
+            let h = ln-pad(ln-header(ts));
+            let cleared = fs-remove-file(path);
+            let wrote = host_file_append_bytes(path, append(ln-u32-bytes(str_len(h)), append(list(0, 0, 0, 0), append(ln-text-bytes(h, 0, list()), ln-body-bytes(ts)))));
+            file_size(path);
+        }
+    }
+    0;
+}
