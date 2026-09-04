@@ -57,6 +57,12 @@ directory, passes them to Form over stdin, and deletes them with the directory.
 The route carrier defaults to direct Metal execution with no socket, HTTP, JSON,
 Ollama, or llama.cpp membrane; a borrowed comparator or a named challenger carrier
 is selected explicitly, and availability grants neither admission nor authority.
+The routing decision itself is Form data: which route names exist, which door each
+carries the ask through, and each door's step default are rows of
+`form/form-stdlib/native-model-route-table.bml`, read through
+`native-model-route-table-cli.fk` (band `native-model-route-table-band.fk` 255,
+re-run 2026-09-04); the shell keeps only the host boundary — it reads
+`LOCAL_MODEL_ROUTE` and `FORM_METAL_STEPS` from the environment and asks the table.
 
 ## Classes do not blur
 

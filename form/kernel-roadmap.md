@@ -14,6 +14,14 @@ feedback loop, the safety net. It runs the structural gate first, walks
 `form-stdlib/tests/*.fk` with `form-stdlib/core.fk` as prelude, and honors a band's
 `; PROOF LEVEL:` line (a fourth-arm-only band runs on its home arm or reports pending).
 
+Each sibling resolves a band's `; preludes:` directives itself — recursive,
+deduplicated, honoring the `none` sentinel — and lowers a `.bml` prelude in-process
+through `source-compiler.fk`'s compiler chain, cached by content hash. So
+`./validate.sh band.fk` is the whole invocation; no hand-typed closure. A
+section-bearing `.fk` is lowered by `validate.sh`'s source lens before any arm
+reads it; that lowering is the seam a `.fk` carrying `section [form.bml]` still
+needs on the sibling lane, and fkwu reads such a file raw.
+
 ```bash
 ./validate.sh             # all samples
 ./validate.sh path.fk     # one
@@ -104,10 +112,14 @@ kernel. A kernel grows only when something genuinely cannot be expressed in Form
 ./validate.sh form-samples/fact.fk
 ./validate.sh --bench
 
-./form-kernel-go/bin-go      form-samples/fact.fk
-./form-kernel-rust/target/release/form-kernel-rust  form-samples/fact.fk
-npx tsx form-kernel-ts/src/main.ts form-samples/fact.fk
+form-kernel-go/bin-go      form-samples/fact.fk                              # → 3628800
+form-kernel-rust/target/release/form-kernel-rust  form-samples/fact.fk      # → 3628800
+node --experimental-strip-types form-kernel-ts/src/main.ts form-samples/fact.fk   # → 3628800
 ```
+
+The Go and Rust binaries are build artifacts (`validate.sh` builds them when
+stale); the TS kernel runs from source under Node's strip-types
+([`kernel-comparison.md`](kernel-comparison.md), re-run 2026-09-04).
 
 When in doubt about whether to grow a kernel, the test is *"can this be expressed
 using kernel primitives Form already has?"* If yes, it is a Form breath. If no, the

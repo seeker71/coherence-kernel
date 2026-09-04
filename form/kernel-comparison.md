@@ -49,21 +49,26 @@ body — `fkwu` is (`../MANIFEST.md`); they are the arms that witness it.
 Bench numbers are re-taken, never quoted from a page:
 
 ```bash
-./form-kernel-go   --bench
-./form-kernel-rust --bench
-npx tsx form-kernel-ts/src/main.ts --bench
+form-kernel-go/bin-go --bench
+form-kernel-rust/target/release/form-kernel-rust --bench
+node --experimental-strip-types form-kernel-ts/src/main.ts --bench
 ./validate.sh --bench            # side by side
 ```
 
 ## Run
 
-```bash
-./form-kernel-go      form-samples/fact.fk        # → 3628800
-./form-kernel-rust    form-samples/fact.fk        # → 3628800
-npx tsx form-kernel-ts/src/main.ts form-samples/fact.fk # → 3628800
+The binaries are build artifacts, not tree content: `go build -o bin-go .` in
+`form-kernel-go/`, `cargo build --release` in `form-kernel-rust/`; the TS kernel
+runs from source under Node's strip-types (`validate.sh` builds all three when
+they are stale). Re-run 2026-09-04:
 
-./form-kernel-go   --expr "(add 2 (mul 3 4))"                 # → 14
-./form-kernel-rust --expr "(add 2 (mul 3 4))"                 # → 14
+```bash
+form-kernel-go/bin-go                              form-samples/fact.fk   # → 3628800
+form-kernel-rust/target/release/form-kernel-rust   form-samples/fact.fk   # → 3628800
+node --experimental-strip-types form-kernel-ts/src/main.ts form-samples/fact.fk   # → 3628800
+
+form-kernel-go/bin-go                            --expr "(add 2 (mul 3 4))"   # → 14
+form-kernel-rust/target/release/form-kernel-rust --expr "(add 2 (mul 3 4))"   # → 14
 ```
 
 The path forward lives in [`kernel-roadmap.md`](kernel-roadmap.md).

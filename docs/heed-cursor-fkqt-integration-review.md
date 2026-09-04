@@ -5,7 +5,7 @@ model's decoded output) and `form/form-stdlib/form-cli-heed-current-source.fk` (
 attributed lookup against the current Form source body, ABI in
 `form-knowledge-query-token.fk`) fit without a shim: `fhcs-lookup (ctx surface
 local-ready)` matches the cursor's `lookupf` arity and order and returns
-`(list status span reason)`. Bands re-run 2026-09-03: `form-cli-heed-cursor-band`
+`(list status span reason)`. Bands re-run 2026-09-04: `form-cli-heed-cursor-band`
 524287, `form-cli-heed-current-source-band` 16777215,
 `form-cli-model-generate-heed-report-band` 8388607.
 
@@ -24,7 +24,7 @@ What is sound, and stays so:
   not a registered NamedCell); anything wired to test `source-ref` refuses every
   current-source hit.
 
-## Open, re-observed 2026-09-03
+## Open, re-observed 2026-09-04
 
 1. **cuckoomark** — the retrieved answer can forge the observation boundary.
    `fhcs-render` interpolates the answer slice raw at `\nanswer:`. If that slice
@@ -50,16 +50,17 @@ What is sound, and stays so:
    no status naming it. `fhcs-grammar-agrees-at (open close)` exists; the caller
    should hand it the cursor's own marks, as `form-cli-heed-fkqt.fk`'s
    `fhq-grammar-agrees` does.
-4. **`fkqt-max-render-bytes()` is declared; whether `fhcs-render` clips to it is the
-   band's to say.** For the cursor the rendered length *is* prefill positions.
-5. **An over-budget query dies silent through the cursor.** `fkqt-parse` has a named
-   `query-budget-exceeded` nothing that is unreachable through the cursor: the window
-   is capped at `fhm-frame-cap()` and clipped from the left, so an over-long query
-   clips its own open mark and scans as `none` forever. The repair: remember that an
-   open mark was dropped while held and return the ABI's named nothing without IO.
 
-Healed and standing: `answer-truncated=` is computed from the actual cut, not
-hardcoded.
+Healed and standing:
+
+- `answer-truncated=` is computed from the actual cut, not hardcoded.
+- `fhcs-render` clips to `fkqt-max-render-bytes()`: the answer slice is taken with
+  the remaining fuel after the prefix and close mark, and `answer-render-truncated=`
+  names the cut. For the cursor the rendered length *is* prefill positions, and it
+  is bounded.
+- An over-budget query is a named observation, not silence. Once an open mark is
+  seen the cursor holds from it (never clipped from the left); outgrowing
+  `fhm-hold-cap()` answers `nothing` with reason `query-budget-exceeded`, no IO.
 
 ## Minimal safe wiring for the resident loop
 
@@ -68,7 +69,7 @@ hardcoded.
 3. Use `fhcs-lookup-at` with a narrow root for a live run, and time one lookup (2).
 4. Keep the cursor budget at `MaxHeeds = 2` while the cost is unmeasured.
 5. Read `source-path`, not `source-ref`, for this schema.
-6. Then (3)–(5), which are honesty and ceiling repairs, not blockers.
+6. Then (3), an honesty repair, not a blocker.
 
 Compatibility is not safety: the pieces fit better than the pair is safe, and the
 clean fit is exactly what would carry a boundary forgery into the model's context

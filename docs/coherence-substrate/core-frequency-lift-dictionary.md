@@ -312,4 +312,4 @@ frequency, live contextual selection, round-trip generation, and token-space
 integration remain open work. The body's native generative voice is also open;
 a rented mind presently speaks from this ground.
 
-; witnessed: 2026-08-14 -> dictionary 134217727; form-neutral projection/mapping crossing 67108863; semantic alignments remain candidate
+; witnessed: 2026-09-04 (re-run on fkwu) -> dictionary 134217727; form-neutral projection/mapping crossing 67108863; semantic alignments remain candidate

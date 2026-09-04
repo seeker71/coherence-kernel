@@ -71,8 +71,8 @@ After the normal ground and freshness checks:
 ./fkwu observe/tests/bidirectional-framebuffer-channel-band.fk
 ```
 
-Expected final field: `1`. This is a fast protocol regression, not learning
-evidence.
+Expected final field: `1` (re-run 2026-09-04). This is a fast protocol regression,
+not learning evidence.
 
 ## Real learning integration
 
@@ -103,8 +103,10 @@ door decision rather than by source bytes, and the only witness was a static
 conf toggle printing to stderr — unreadable by the program and uncorrelatable
 in a diagnostic window. When a run surprises, put `(kernel_stat 15)` through
 `(kernel_stat 18)` into the outbound payload before bisecting bytes.
-`observe/tests/import-carry-band.fk` is the regression band for this pulse (it
-declares 63 through the import-lane door cold and the cached door warm).
+`observe/tests/import-carry-band.fk` is the regression band for this pulse: 63
+through the import-lane door cold and the cached door warm (re-run 2026-09-04; it
+prints its verdict and then the `.bml` floor's trailing `0`, so read the first
+line, not the last).
 
 ## Integration pattern
 

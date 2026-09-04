@@ -31,7 +31,7 @@ not a wrapper around llama-server or Ollama. Its working path is:
    observation-injection stages while execution is moving and records the same
    typed rows in the framebuffer. The generic session remains silent by
    default.
-   Direct reasoning/recipe turns now accept the same dynamic observer, with
+   Direct reasoning/recipe turns accept the same dynamic observer, with
    sampled model-stream/model-forward and observation-injection stages.
 7. Stage model response and cursor evidence as one length-carried output frame.
    Append it durably before promoting the returned session or marking the task
@@ -97,9 +97,10 @@ idle.” The live runner accepts external MLX reservation as observed input, and
 future host-utilization sensing can replace that supplied fact: an external MLX
 training can be active while a supplied `0` says idle, and the resident then
 waits on that word. Route and quantum choice remain data. The C seed's function
-arrays grow geometrically together (`form/form-stdlib/tests/no-fixed-tables-band.fk`);
-source-symbol discovery in that temporary seed is still linear, and dynamic
-capacity removes a ceiling without claiming the Form/native NodeID mapping
+arrays grow geometrically together (`form/form-stdlib/tests/no-fixed-tables-band.fk`
+63, re-run 2026-09-04); string interning there rides a hash index while
+function-name lookup is still a most-recent-first linear scan (`fk_fn_lookup`), and
+dynamic capacity removes a ceiling without claiming the Form/native NodeID mapping
 movement is complete.
 
 ## What remains northward
@@ -108,9 +109,10 @@ movement is complete.
   turnwheel.  The pure join now admits only execution-verified attempts,
   projects wrong values, silence, syntax failures and green endpoints through
   the ordinary world model, and returns an existing-protocol tool-result
-  message (`8191` on runtime fkwu).  The source companion independently admits
-  only a current-answer-contract hit, preserves knowledge contribution versus
-  mutation contribution, and also returns a tool-result message (`8191`).
+  message (`8191` on runtime fkwu, re-run 2026-09-04).  The source companion
+  independently admits only a current-answer-contract hit, preserves knowledge
+  contribution versus mutation contribution, and also returns a tool-result
+  message (`8191`, same run).
   This pulse did not claim that a live residence has consumed either message
   yet.
 - Join client acknowledgement to compaction consent. Until durable client ack,
@@ -130,12 +132,11 @@ movement is complete.
   relying on process-local counters plus an explicit external reservation.
 - Move the demand-grown function identity mechanism out of the temporary C seed
   and into the Form/native walker so the bootstrap repair can shrink away.
-- Re-run the composed resident source turn when the current MLX training
-  residence releases Metal. Its new live stages distinguish model emission,
-  source lookup, observation injection, and continued decode. The CPU-only
-  strict probe currently reaches `hit` with one lookup and two framebuffer
-  events in 2,103 ms; the earlier composed turn stayed in recursive `fk_walk`
-  for about ten minutes without producing egress.
+- Re-run the composed resident source turn when Metal is free. Its live stages
+  distinguish model emission, source lookup, observation injection, and continued
+  decode. The CPU-only strict probe reaches `hit` with one lookup and two
+  framebuffer events in 2,103 ms; the composed turn's own egress time is the
+  measurement still owed.
 - Build a true multi-token local prefill schedule. Compact BML/NodeID return
   reduced the guarded patch observation from 236 to 91 bytes and its same-KV
   injection from 44,129 to 21,493 ms, but the remaining time still scales with

@@ -54,8 +54,8 @@ content-addressed:
 
 They are physically nothing alike — one is an LED, one is an electromagnet — but
 both are `(efferent, Bool)`, so they intern to one number. This is the whole
-model in one fact. The proof (`resource-port-band.fk`, 1111111 three-way)
-asserts it directly: `(node_eq (efferent-bool) (efferent-bool)) → 1` across a
+model in one fact. The proof (`resource-port-band.fk`, 1111111 four-way — manifest
+row `resource-port fks 1111111`, re-run on fkwu 2026-09-04) asserts it directly: `(node_eq (efferent-bool) (efferent-bool)) → 1` across a
 Light cell and a Relay cell, and one generic `act` driver moves both.
 
 The value-shapes are a small, open vocabulary — the universal types at the
@@ -130,7 +130,7 @@ ports are the same:
 | `printf` / `console.log` | (efferent, Text) | stdout |
 
 A language frontend emits Form recipes for the *logic* (already done —
-`grammars/python.fk`, universal-shapes). Its *runtime* becomes a set of resource
+`grammars/python-bmf.fk`, universal-shapes). Its *runtime* becomes a set of resource
 cells whose ports map its stdlib calls to the universal vocabulary, bound to the
 kernel's host natives as carriers. Two languages reading a file produce the same
 `(afferent, Bytes)` port over the same filesystem carrier — so their host
@@ -168,8 +168,10 @@ resource terminal so callers never change):
 - **Pixel** (efferent) — a framebuffer-write native. `seedbank/memory-as-
   framebuffer-v0` observes runtime memory as pixels post-hoc; a true
   `(efferent, Pixel)` carrier would write a display surface.
-- **Process** — exec/spawn (a child process is a resource with Bytes terminals,
-  stdin/stdout/exit-code, exactly `lc-tools-as-form-cells`).
+- **Process** — fkwu carries `host-exec` (a child process as a Bytes terminal:
+  command in, output out; the four-way runner drives the walkers through it —
+  exactly `lc-tools-as-form-cells`); the sibling kernels do not, and no resource
+  terminal wraps it yet.
 - **Env** — environment variables (an `(afferent, Text)` keyed store).
 - **Device lines** — GPIO / serial / I²C for real hardware (Bool/Scalar/Bytes
   over a device handle); the filesystem carrier in the prototype is the honest
@@ -216,12 +218,12 @@ above, no new primitive.
 
 ## Status and next breath
 
-Proven (`resource-port.fk` + `resource-port-band.fk`, **1111111 three-way**): the
+Proven (`resource-port.fk` + `resource-port-band.fk`, **1111111 four-way**): the
 port vocabulary, the resource cell, the generic `act`/`sense` drivers, port
 identity across kinds, round-trip, and honest shape-refusal — over a filesystem
 carrier standing in for device lines. Open: the **carrier gaps** above (Key,
-Pixel, Process, Env, device lines) — each a small per-kernel `catCall` native
-behind a resource terminal — and the **control-loop example** (a Room cell
+Pixel, Env, device lines, and a resource terminal over `host-exec`) — each a
+small `catCall` native behind a resource terminal — and the **control-loop example** (a Room cell
 closing thermostat→heater over a channel) as the first multi-resource recipe.
 SQL/storage from the sibling doc is one resource kind among these: a Store cell
 with Bytes terminals over a DB carrier.

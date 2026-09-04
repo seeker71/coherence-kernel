@@ -4,7 +4,7 @@ The local reasoning lane: a real open model (Qwen3.8-27B) runs Form-native on th
 Mac's metal, the body feeds it typed observations from its own source, and every
 crossing is measured at route level. This page names the pieces that stand, the
 mechanism they compose, and what is still owed. Bands cited with a number were
-re-run 2026-09-03; the others declare their own.
+re-run 2026-09-04; the others declare their own.
 
 ## What is home
 
@@ -12,14 +12,14 @@ re-run 2026-09-03; the others declare their own.
 |---|---|---|
 | byte-BPE tokenizer, GGUF vocab/merges, byte-exact decode, chat template | `form/form-stdlib/qwen35-tokenizer.fk` | the sorted fixed-row index (`qwen35-tokfast-v2`) carries encode |
 | decode loop transcribed from ds4-engine C | `form/form-stdlib/dsv4-decode-loop.fk` | exists |
-| per-token hook: an arbitrary Form recipe answers between argmax and the next embedding | `dsv4-decode-hook-door.fk`, `dsv4-decode-token-hook.fk` | band declares 1023 |
+| per-token hook: an arbitrary Form recipe answers between argmax and the next embedding | `dsv4-decode-hook-door.fk`, `dsv4-decode-token-hook.fk` | 1023 |
 | single forward step: one id + position → next id; incremental prefill at a position, same state (the KV-preserving seam) | `form/native/metal/qwen35-dense-token-handle.fk` `q38-forward`, `q38-prefill` | `qwen35-dense-token-handle-band` 2147483647 |
 | span injection into a live stream | `form-cli-model-generate.fk` `fcmg-offer-stream` | exists |
 | RAG: embed, index codec, ask, adaptive-k, freshness, nearest-shape | `form/form-stdlib/rag-*.fk`, `nearest-shape.fk` | exists |
 | bounded raw-byte heed cursor: decoded output → query → typed prefill | `form-cli-heed-cursor.fk` | 524287 |
 | attributed lookup against the current Form source body | `form-cli-heed-current-source.fk` | 16777215 |
 | generation-path wiring, two ledgers, sealed-path context hint, bounded counters | `form-cli-model-generate.fk` | `form-cli-model-generate-heed-report-band` 8388607 |
-| teach overlay, local-ready marks, one-turn budget | `form-cli-local-ready.bml`, `form-cli-one-turn.bml` | bands declare 1023 each |
+| teach overlay, local-ready marks, one-turn budget | `form-cli-local-ready.bml`, `form-cli-one-turn.bml` | 1023 and 2047 |
 | the mints — knowledge, universe, unique, domain, organ, lane, lens, planner, LoRA corpus, embodiment census, speaker home | `form-cli-*-mint.bml`, `form-cli-lora-corpus.bml`, `form-cli-embody-census.bml`, `form-cli-speaker-home.bml` | each band declares its own; row counts are census evidence, never a target |
 | BML/BMF live-byte curriculum and control curriculum | `bml-bmf-stream-curriculum.*`, `bml-bmf-control-curriculum.*` | their bands prelude a released `-xtal` twin and die at load today; the twins release owes them their surviving prelude |
 | Qwen teach overlay | `form-cli-qwen-teach-layer.fk` | 33554431 |
@@ -76,8 +76,9 @@ The NodeID loop crosses live on the same lane: the model emits a strict
 `form:recipe-exec` request for a recipe by NodeID, the raw-byte cursor calls its
 carrier once, Form generates the Metal kernel from the recipe children, the value
 returns as a typed observation into the same original-ID/KV session, and the
-session continues (`form-recipe-exec-token-live-band` and
-`form-cli-recipe-exec-cursor-band` declare their verdicts). That is one live
+session continues (`form-recipe-exec-token-band` 1048575 and
+`form-cli-recipe-exec-cursor-band` 33554431; `form-recipe-exec-token-live-band`
+needs the resident model and declares its own). That is one live
 affine Metal thought, not yet CPU/MLX parity or a recursive model-authored
 recipe-birth run.
 

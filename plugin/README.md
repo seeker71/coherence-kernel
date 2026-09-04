@@ -40,11 +40,11 @@ Then:
 The second `plugin-serve` argument is the number of connections to serve before the listener
 closes — the bound is named, never silent. Pass what you mean.
 
-Bands (re-run 2026-09-03): `plugin/tests/chatgpt-plugin-band.fk` 111111111,
+Bands (re-run 2026-09-04): `plugin/tests/chatgpt-plugin-band.fk` 111111111,
 `introduction-band.fk` 111111111, `visitor-ledger-band.fk` 1111111111; the socket
 witnesses and the public-dialogue bands in `plugin/tests/` declare their own.
 
-## The live door (re-observed 2026-09-03)
+## The live door (re-observed 2026-09-04)
 
 `https://hati.earth/sema` answers `/ask` and `/trace` and serves `/privacy`; its
 `openapi.json` exposes exactly those two operations. The **memory doors**
@@ -127,5 +127,9 @@ operations guard. Publishing means bringing the two live surfaces up to this tex
   response names this seam in-band (`honest_seam`).
 - Retrieval is a **lexical seed index**, deliberately not `rag-embed`: a keyword index that
   can say "miss" is more honest than an embedding that always answers.
-- The HTTP framing helpers mirror `http-serve.fk`'s `hs-` cells because the BML-authored HTTP
-  stack does not parse on the current `fkwu` lane — a named seam to close, not a hidden copy.
+- The HTTP framing helpers mirror `http-serve.fk`'s `hs-` cells because that stack's prelude
+  chain carries `section [form.bml]` inside `.fk` files (`http-parse.fk`, `http-render.fk`,
+  `http-request.fk`, `http-server.fk`), which `fkwu` reads raw — `./fkwu http-serve-band.fk`
+  dies with `[unbound-name] 'section'`, while `validate.sh`'s source lens lowers the same
+  chain for all four arms (`http-serve-band` 1023 four-way, 2026-09-04). A named seam to
+  close, not a hidden copy.
