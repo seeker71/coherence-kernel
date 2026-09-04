@@ -342,30 +342,57 @@
         (if (fsc-skip-rule-line? line) true
             (fsc-prefix? line "//")))
 
-    (defn fsc-bml-normalize-ws-loop (s i quoted saw-space)
-        (if (ge i (str_len s)) ""
+    ;; Whitespace normalization walks the WHOLE statement -- every byte of
+    ;; every string literal inside it. The earlier walker built its answer
+    ;; as (str_concat ch (recurse ...)): the recursion sat inside an argument,
+    ;; so each character of one statement held a walker frame until the end,
+    ;; and a single `def rows() = list(...)` of ~30 000 normalized characters
+    ;; met the eval-depth wall (ledger R91, witnessed 2026-09-04 -- the release
+    ;; ledger's one list() of 90 rows). Now the walk is a tail loop over SPANS:
+    ;; a quoted literal is one substring (its closing quote found by a tail
+    ;; scan that honours backslash escapes), a run of non-space characters is
+    ;; one substring, and a run of spaces collapses to one " ". Same bytes out,
+    ;; fixed depth, one concat per token instead of one per character.
+
+    ;; index of the closing quote of a literal opened before i, or (str_len s)
+    ;; when the literal never closes; a backslash skips the byte after it.
+    (defn fsc-bml-nw-quoted-end (s i)
+        (if (ge i (str_len s)) i
             (do
                 (let ch (char_at s i))
-                (if quoted
-                    (if (and (str_eq ch "\\") (lt (add i 1) (str_len s)))
-                        (str_concat ch
-                            (str_concat
-                                (char_at s (add i 1))
-                                (fsc-bml-normalize-ws-loop s (add i 2) quoted false)))
-                        (str_concat ch
-                            (fsc-bml-normalize-ws-loop s (add i 1) (if (str_eq ch "\"") false true) false)))
-                    (if (str_eq ch "\"")
-                        (str_concat ch
-                            (fsc-bml-normalize-ws-loop s (add i 1) true false))
-                        (if (fsc-space? ch)
-                            (if saw-space
-                                (fsc-bml-normalize-ws-loop s (add i 1) quoted saw-space)
-                                (str_concat " " (fsc-bml-normalize-ws-loop s (add i 1) quoted true)))
-                            (str_concat ch
-                                (fsc-bml-normalize-ws-loop s (add i 1) quoted false))))))))
+                (if (and (str_eq ch "\\") (lt (add i 1) (str_len s)))
+                    (fsc-bml-nw-quoted-end s (add i 2))
+                    (if (str_eq ch "\"") i
+                        (fsc-bml-nw-quoted-end s (add i 1)))))))
+
+    ;; first index at or after i that is a space or an opening quote (or the end)
+    (defn fsc-bml-nw-plain-end (s i)
+        (if (ge i (str_len s)) i
+            (do
+                (let ch (char_at s i))
+                (if (or (str_eq ch "\"") (fsc-space? ch)) i
+                    (fsc-bml-nw-plain-end s (add i 1))))))
+
+    (defn fsc-bml-normalize-ws-loop (s i saw-space acc)
+        (if (ge i (str_len s)) acc
+            (do
+                (let ch (char_at s i))
+                (if (str_eq ch "\"")
+                    (do
+                        (let close (fsc-bml-nw-quoted-end s (add i 1)))
+                        (let stop (if (lt close (str_len s)) (add close 1) close))
+                        (fsc-bml-normalize-ws-loop s stop false
+                            (str_concat acc (fsc-sub s i stop))))
+                    (if (fsc-space? ch)
+                        (fsc-bml-normalize-ws-loop s (add i 1) true
+                            (if saw-space acc (str_concat acc " ")))
+                        (do
+                            (let stop (fsc-bml-nw-plain-end s (add i 1)))
+                            (fsc-bml-normalize-ws-loop s stop false
+                                (str_concat acc (fsc-sub s i stop)))))))))
 
     (defn fsc-bml-normalize-ws (s)
-        (fsc-trim (fsc-bml-normalize-ws-loop s 0 false false)))
+        (fsc-trim (fsc-bml-normalize-ws-loop s 0 false "")))
 
     (defn fsc-bml-stmt-end-loop (body i end depth quoted)
         (if (ge i end) end
