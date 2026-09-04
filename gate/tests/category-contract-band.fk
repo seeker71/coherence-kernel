@@ -1,0 +1,114 @@
+; tests/category-contract-band.fk — the category-contract lens judges as its
+; Python twin judges, on the live tree and over one planted scratch tree that
+; both read.
+;
+; preludes: form-stdlib/core.fk form-stdlib/table.bml form-stdlib/term-graphics.bml gate/drift-gates.bml gate/lens-text.bml form-stdlib/json.fk gate/category-contract.bml
+;
+; run: ./fkwu gate/tests/category-contract-band.fk   ; -> 255
+;
+; The lens's top-level statement runs the live judgment when preluded, so a
+; run of this band prints the body's own category-contract line first; the
+; verdict is the last line and the exit code.
+;
+; The planted tree is built once by host-exec (mktemp -d; the live inputs
+; copied; four drifts planted: a Go constant moved, a duplicate slot in the
+; contract, a conflicting Rust constant, two TypeScript aliases with a wrong
+; name and a target the contract lacks) and read by BOTH the lens (its root
+; re-pointed) and the twin. It is removed at the end of the band.
+;
+; Bits 2 and 8 run the Python twin through host-exec. They are the agreement
+; proof R58 asks for and they stand only while the script stands: when
+; form/scripts/verify_category_contract.py leaves the tree (R59/R60), these
+; two bits go red on purpose and the hand that removes the script re-declares
+; this band without them.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY — the .bml floor confines it (host-exec itself
+; is go + fkwu, pf-arm-mask 9); the lens is BML on fkwu's own lane.
+;
+; Verdict 255:
+;   1      the live tree: zero errors
+;   2      the live twin agrees byte for byte: its PASS line after the prefix
+;          equals the lens's OK line, and it exits 0
+;   4      the planted tree, read by the lens: the five findings, in the
+;          script's order and words
+;   8      the planted tree, read by the twin: its FAIL lines after the prefix
+;          are those same five lines, exit 1
+;   16     a contract without r_basic, with an empty one, or with a value that
+;          is not an integer refuses in the script's words
+;   32     names travel as the script spells them: ChoiceMatch -> CHOICE_MATCH,
+;          FnDef -> FNDEF, Resolve -> FIELD_RESOLVE, ListLocal -> LIST, X1Y -> X1_Y
+;   64     the three scanners read exactly what the regular expressions read:
+;          a word boundary before RBasic, one or more blanks before uint32,
+;          `constant` is not `const`, RB_ and RBASIC_ both name a Rust constant,
+;          and `export const RBasic = Object.freeze(...)` is no alias
+;   128    a root that holds no tree: one named missing input, no traceback
+
+(do
+    (defn ccb-k (ok bit) (if ok bit 0))
+    (defn ccb-twin (command)
+        (do (let out (host-exec (dg-wrap command) ""))
+            (if (nothing? out) (list (sub 0 1) (list))
+                (list (dg-rc out) (lx-lines (lx-strip-nl (dg-body out)))))))
+    (defn ccb-last (lines) (if (eq (len lines) 0) "" (nth lines (sub (len lines) 1))))
+    (defn ccb-lines-eq? (xs ys)
+        (if (eq (len xs) (len ys))
+            (if (eq (len xs) 0) 1
+                (if (str_eq (head xs) (head ys)) (ccb-lines-eq? (tail xs) (tail ys)) 0))
+            0))
+    (defn ccb-strip-fail (line) (lx-replace-prefix line "FAIL " ""))
+    (defn ccb-row-eq? (r name value) (and (str_eq (nth r 0) name) (eq (nth r 1) value)))
+    ; the planted tree: built once, its path answered
+    (defn ccb-plant-command ()
+        (str_concat "D=$(mktemp -d) && mkdir -p $D/form/scripts $D/form/form-kernel-ts $D/form/form-kernel-rust && cp form/category-contract.json $D/form/ && cp form/scripts/verify_category_contract.py $D/form/scripts/"
+        (str_concat " && cp -R form/form-kernel-go $D/form/form-kernel-go && cp -R form/form-kernel-rust/src $D/form/form-kernel-rust/src && cp -R form/form-kernel-ts/src $D/form/form-kernel-ts/src"
+        (str_concat " && sed -i '' 's/RBasicQuotient\\( *\\)uint32 = 70/RBasicQuotient\\1uint32 = 71/' $D/form/form-kernel-go/quotient.go"
+        (str_concat " && sed -i '' 's/\"RESOLVE\": 5,/\"RESOLVE\": 5, \"ZZ_DUP\": 5,/' $D/form/category-contract.json"
+        (str_concat " && printf 'pub const RBASIC_QUOTIENT: u32 = 99;\\n' >> $D/form/form-kernel-rust/src/formats.rs"
+                    " && printf 'export const RBasicZz = RBasic.ZZ;\\nexport const RBasicFooBar = RBasic.FORMAT;\\n' > $D/form/form-kernel-ts/src/zz.ts && echo $D"))))))
+    (defn ccb-planted-lines ()
+        (list "category-contract.json: RBasic slot 5 aliases RESOLVE, ZZ_DUP"
+              "form-kernel-rust/src/quotient.rs: QUOTIENT=70 conflicts with 99"
+              "Go: QUOTIENT=71, category-contract.json requires 70"
+              "TypeScript: alias target ZZ is absent from category contract"
+              "form-kernel-ts/src/zz.ts: RBasicFooBar aliases FORMAT, expected FOO_BAR"))
+    (defn ccb-remove (d) (if (and (gt (str_len d) 8) (str_eq (substring d 0 1) "/")) (host-exec (str_concat "rm -rf " d) "") 0))
+    (defn category-contract-band ()
+        (do
+            (let live-a (ccg-analysis ""))
+            (let live (ccb-twin "python3 form/scripts/verify_category_contract.py"))
+            (let d (lx-strip-nl (lx-host-text (host-exec (ccb-plant-command) ""))))
+            (let root (str_concat d "/"))
+            (let planted-a (ccg-analysis root))
+            (let planted (ccb-twin (str_concat "python3 " (str_concat root "form/scripts/verify_category_contract.py"))))
+            (let no-map (ccg-contract-read "{\"x\": 1}"))
+            (let empty-map (ccg-contract-read "{\"r_basic\": {}}"))
+            (let not-int (ccg-contract-read "{\"r_basic\": {\"A\": \"x\"}}"))
+            (let go-rows (ccg-go-consts "\tRBasicFoo uint32 = 7\n xRBasicBar uint32 = 8\n RBasicBaz_x uint32 = 9\n RBasicQux\tuint32=10"))
+            (let rust-rows (ccg-rust-consts "pub const RBASIC_A_B: u32 = 3; const RB_C:u32=4; constant RB_D: u32 = 5; const RBX_E: u32 = 6;"))
+            (let ts-rows (ccg-ts-aliases "export const RBasicFooBar = RBasic.FORMAT;\nexport const RBasic = Object.freeze(x);\nexport const RBasicA = RBasic.B_C ;"))
+            (let absent (ccg-analysis "/nonexistent-root/"))
+            (let verdict (sum (list
+                (ccb-k (eq (len (ccg-a-errors live-a)) 0) 1)
+                (ccb-k (and (eq (head live) 0)
+                            (str_eq (ccb-last (nth live 1)) (str_concat "PASS category contract: " (ccg-ok-line live-a)))) 2)
+                (ccb-k (ccb-lines-eq? (ccg-a-errors planted-a) (ccb-planted-lines)) 4)
+                (ccb-k (and (eq (head planted) 1)
+                            (ccb-lines-eq? (map ccb-strip-fail (nth planted 1)) (ccb-planted-lines))) 8)
+                (ccb-k (and (str_eq (nth no-map 1) "category-contract.json has no non-empty r_basic map")
+                            (and (str_eq (nth empty-map 1) "category-contract.json has no non-empty r_basic map")
+                                 (str_eq (nth not-int 1) "category-contract.json r_basic must map names to integers"))) 16)
+                (ccb-k (and (str_eq (ccg-alias-of (lx-camel-upper "ChoiceMatch")) "CHOICE_MATCH")
+                            (and (str_eq (ccg-alias-of (lx-camel-upper "FnDef")) "FNDEF")
+                                 (and (str_eq (ccg-alias-of (lx-camel-upper "Resolve")) "FIELD_RESOLVE")
+                                      (and (str_eq (ccg-alias-of (lx-camel-upper "ListLocal")) "LIST")
+                                           (str_eq (lx-camel-upper "X1Y") "X1_Y"))))) 32)
+                (ccb-k (and (and (eq (len go-rows) 2) (and (ccb-row-eq? (head go-rows) "FOO" 7) (ccb-row-eq? (nth go-rows 1) "QUX" 10)))
+                            (and (and (eq (len rust-rows) 2) (and (ccb-row-eq? (head rust-rows) "A_B" 3) (ccb-row-eq? (nth rust-rows 1) "C" 4)))
+                                 (and (eq (len ts-rows) 2)
+                                      (and (str_eq (nth (head ts-rows) 0) "FooBar")
+                                           (and (str_eq (nth (head ts-rows) 1) "FORMAT")
+                                                (str_eq (nth (nth ts-rows 1) 1) "B_C")))))) 64)
+                (ccb-k (ccb-lines-eq? (ccg-a-errors absent) (list "missing input: /nonexistent-root/form/category-contract.json")) 128))))
+            (ccb-remove d)
+            verdict))
+    (category-contract-band))
