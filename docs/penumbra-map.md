@@ -6,12 +6,12 @@ classified by whether (a) a minimal walker carries it — the four-way *umbra*;
 it, so it is witnessed at best *indirectly* through callers that have bands — the
 *dim penumbra*; or (d) nothing calls it outside the op manifest itself.
 
-## The four regions (recomputed 2026-09-03 over 194 ops)
+## The four regions (recomputed 2026-09-03 over 195 ops)
 
 | Region | Count | Meaning |
 |---|---|---|
 | **Umbra** — walker-carried | 34 | four-way provable; nothing hides |
-| **Lit penumbra** — fkwu-only, band-named | 99 | witnessed directly, single-kernel |
+| **Lit penumbra** — fkwu-only, band-named | 100 | witnessed directly, single-kernel |
 | **Dim penumbra** — body-called, no band names them | 35 | run daily, witnessed only through callers |
 | **Manifest-only** — named by `flt-ops` / the host-effect grammar, no caller | 26 | carried by the seed, exercised by nothing |
 
@@ -40,7 +40,7 @@ sense_sensors sense_stream sense_wifi_signal sense_wifi_ssid
 
 ## The reading
 
-- A green four-way run is a claim about 34 ops — 18% of the seed. The rest rests
+- A green four-way run is a claim about 34 ops — 17% of the seed. The rest rests
   on fkwu-witnessed bands (99) or on indirection (35). That is the honest shape of
   the proof, enumerated instead of latent.
 - The map shrinks one witness band at a time: a band that names a dim op moves it
