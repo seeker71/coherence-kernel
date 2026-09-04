@@ -36,25 +36,25 @@ that named this gap (unit U4).
 > brokenness is its own law. This banner is prose and can go stale; the
 > numbers below are recomputed and cannot.
 
-- pages that can point (every .md): 1784
+- pages that can point (every .md): 1790
 - resolved path-claims body-wide: 578
 - BROKEN path-claims body-wide: 29
-- concept pages that can be orphaned: 46
-- ORPHANS (concept pages nothing points at): 5
+- concept pages that can be orphaned: 47
+- ORPHANS (concept pages nothing points at): 6
 
 ## Tissues (counted, not listed)
 
 - axioms: 3
 - teachings: 35
-- observe organs: 609
-- learn organs: 358
+- observe organs: 610
+- learn organs: 359
 - ingest organs: 56
-- form-stdlib cells: 3848
+- form-stdlib cells: 3811
 
 ## Altitude (the authoring lens, folded into the portrait 2026-09-02)
 
-- BML pictures (high-grammar surfaces): 114
-- s-expression cells (each one a lowering the walk still owes): 1448
+- BML pictures (high-grammar surfaces): 119
+- s-expression cells (each one a lowering the walk still owes): 1369
 - cells carrying a binding mark: 2
 
 The lens was born at 32 pictures over 1455 cells; the walk shows
@@ -65,10 +65,10 @@ when files land, so its fixed point stays honest.
 
 ## Memory
 
-- receipts (episodic, append-only): 1597
+- receipts (episodic, append-only): 1602
 - of those, PENDING (honest state, never a fault): 10
-- distillation corpus rows: 656
-- deepest corpus meaning-id: 1264
+- distillation corpus rows: 658
+- deepest corpus meaning-id: 1266
 
 ## The rung this portrait stands on
 

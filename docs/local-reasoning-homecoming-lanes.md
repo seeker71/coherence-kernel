@@ -21,7 +21,7 @@ re-run 2026-09-04; the others declare their own.
 | generation-path wiring, two ledgers, sealed-path context hint, bounded counters | `form-cli-model-generate.fk` | `form-cli-model-generate-heed-report-band` 8388607 |
 | teach overlay, local-ready marks, one-turn budget | `form-cli-local-ready.bml`, `form-cli-one-turn.bml` | 1023 and 2047 |
 | the mints — knowledge, universe, unique, domain, organ, lane, lens, planner, LoRA corpus, embodiment census, speaker home | `form-cli-*-mint.bml`, `form-cli-lora-corpus.bml`, `form-cli-embody-census.bml`, `form-cli-speaker-home.bml` | each band declares its own; row counts are census evidence, never a target |
-| BML/BMF live-byte curriculum and control curriculum | `bml-bmf-stream-curriculum.*`, `bml-bmf-control-curriculum.*` | their bands prelude a released `-xtal` twin and die at load today; the twins release owes them their surviving prelude |
+| BML/BMF live-byte curriculum and control curriculum | `bml-bmf-stream-curriculum.bml`, `bml-bmf-control-curriculum.bml` | 16777215 and 1048575 (each band preludes its `.bml` authority) |
 | Qwen teach overlay | `form-cli-qwen-teach-layer.fk` | 33554431 |
 | LoRA identity `(W+B·A)·x == W·x + B·(A·x)` | `lora-adapter.fk` | 31 |
 | error absorption: rank-1 `B·(A·x)` from one withheld error, sealed-surface transfer in the local Form classifier | `cognition/error-absorption-kernel.fk` | 4095 |
