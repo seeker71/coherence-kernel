@@ -59,8 +59,8 @@ allowance_out="$("$FORM_FOURTH_SOURCE_FKWU" "$allowance_src" 2>"$tmp/allowance.e
 # then the lowered module (including top-level constants) executes on fkwu.
 # The fourth result therefore witnesses BML meaning, not a raw section parse,
 # binary-loader native, flattened table, or copied expected scalar.
-bml_ledger="$(fourth_prepare_source_text form-stdlib/bml-capability-ledger.fk)"
-bml_band="$(fourth_prepare_source_text form-stdlib/tests/bml-capability-ledger-band.fk)"
+bml_ledger="$(fourth_prepare_source_text form-stdlib/bml-capability-ledger.bml)"
+bml_band="$(fourth_prepare_source_text form-stdlib/tests/bml-capability-ledger-band.bml)"
 [[ -s "$bml_ledger" && -s "$bml_band" ]]
 bml_src="$(fourth_prepare_source_workload "$FOURTH_SOURCE_RUN_DIR" \
     form-stdlib/core.fk form-stdlib/core.fk "$bml_ledger" "$bml_band")"
