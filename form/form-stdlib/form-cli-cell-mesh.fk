@@ -1,0 +1,288 @@
+; form-cli-cell-mesh.fk — native cell-to-cell channel mesh on the fkwu arm.
+; Two cells stream interned Form nodes. A shared observer cell is the
+; field both trust for protocol and grammar. Glass sees the mesh.
+;
+; CHANNEL-V0 .fkb persistence uses write_form_binary, native on go/rust/ts
+; and absent here. This organ writes append-only text and re-interns, so
+; axiom-3 still holds: the same composition is the same NodeID.
+;
+; Authority: form-stdlib/bml/form-cli-cell-mesh.bml
+; preludes: form-stdlib/core.fk form-stdlib/form-fs.fk form-stdlib/line-grammar.fk form-stdlib/channel-interface.fk
+
+(do
+    (defn FCCMSchema () "form-cli-cell-mesh-v1")
+    (defn FCCMPublisher () "form-cli.cell-mesh")
+    (defn FCCMGrammarV1 () "form-symbols")
+    (defn FCCMEvalDoorV1 () "intern-node")
+    (defn FCCMMsgPrefix () "mesh-msg-v1")
+
+    (defn fccm-mesh (root observer cells protocolVersion honors invasions)
+        (list (FCCMSchema) root observer cells protocolVersion honors invasions))
+    (defn fccm-root (mesh) (nth mesh 1))
+    (defn fccm-observer (mesh) (nth mesh 2))
+    (defn fccm-cells (mesh) (nth mesh 3))
+    (defn fccm-protocol-version (mesh) (nth mesh 4))
+    (defn fccm-honors (mesh) (nth mesh 5))
+    (defn fccm-invasions (mesh) (nth mesh 6))
+    (defn fccm-mesh? (mesh)
+        (if (not (eq (len mesh) 7)) 0
+            (if (not (str_eq (head mesh) (FCCMSchema))) 0 1)))
+
+    (defn fccm-default-offer ()
+        (list (m-silence) (m-witness) (m-offer) (m-invite) (m-ask-how)))
+    (defn fccm-member? (id cells)
+        (if (eq (len cells) 0) 0
+            (if (str_eq (head cells) id) 1 (fccm-member? id (tail cells)))))
+    (defn fccm-known? (mesh id)
+        (if (str_eq id (fccm-observer mesh)) 1 (fccm-member? id (fccm-cells mesh))))
+    (defn fccm-edge-path (root from to)
+        (fs-path-join root (str_concat from (str_concat "-to-" (str_concat to ".mesh")))))
+    (defn fccm-field-path (root) (fs-path-join root "observer-field.mesh"))
+
+    (defn fccm-protocol-node (version grammar evalDoor)
+        (intern_node (bp "CELL-MESH-PROTOCOL-V0")
+            (list (intern_trivial_int version)
+                  (intern_trivial_string grammar)
+                  (intern_trivial_string evalDoor))))
+    (defn fccm-int-symbol (value) (intern_trivial_int value))
+    (defn fccm-string-symbol (value) (intern_trivial_string value))
+
+    (defn fccm-create-log (path)
+        (if (eq (fs-exists? path) 1) 1
+            (if (ge (fs-write-text path "") 0) 1 0)))
+    (defn fccm-create-edge (root from to)
+        (fccm-create-log (fccm-edge-path root from to)))
+    (defn fccm-create-peer-edges (root cell others)
+        (if (eq (len others) 0) 0
+            (fccm-create-peer-edges-one root cell (head others) (tail others))))
+    (defn fccm-create-peer-edges-one (root cell other rest)
+        (do
+            (let a (fccm-create-edge root cell other))
+            (let b (fccm-create-edge root other cell))
+            (add (add a b) (fccm-create-peer-edges root cell rest))))
+
+    (defn fccm-append-line (path line)
+        (do
+            (let existing (if (eq (fs-exists? path) 1) (fs-read-text path) ""))
+            (fs-write-text path (str_concat existing (str_concat line "\n")))))
+    (defn fccm-read-lines (path)
+        (if (eq (fs-exists? path) 0) (list)
+            (fccm-keep-lines (split-on (fs-read-text path) "\n"))))
+    (defn fccm-keep-lines (lines)
+        (if (eq (len lines) 0) (list)
+            (if (eq (str_len (head lines)) 0)
+                (fccm-keep-lines (tail lines))
+                (cons (head lines) (fccm-keep-lines (tail lines))))))
+
+    (defn fccm-msg-int (value)
+        (str_concat (FCCMMsgPrefix) (str_concat "|int|" (int_to_str value))))
+    (defn fccm-msg-string (value)
+        (str_concat (FCCMMsgPrefix) (str_concat "|string|" value)))
+    (defn fccm-msg-protocol (version grammar evalDoor)
+        (str_concat (FCCMMsgPrefix)
+            (str_concat "|protocol|"
+                (str_concat (int_to_str version)
+                    (str_concat "|" (str_concat grammar (str_concat "|" evalDoor)))))))
+
+    (defn fccm-parse-msg (line)
+        (do
+            (let fields (split-on line "|"))
+            (if (lt (len fields) 3) (list)
+                (if (not (str_eq (head fields) (FCCMMsgPrefix))) (list)
+                    (fccm-parse-msg-kind fields)))))
+    (defn fccm-parse-msg-kind (fields)
+        (if (str_eq (nth fields 1) "int")
+            (list "int" (intern_trivial_int (str_to_int (nth fields 2))))
+            (if (str_eq (nth fields 1) "string")
+                (list "string" (intern_trivial_string (nth fields 2)))
+                (if (and (str_eq (nth fields 1) "protocol") (ge (len fields) 5))
+                    (list "protocol" (fccm-protocol-node (str_to_int (nth fields 2)) (nth fields 3) (nth fields 4)))
+                    (list)))))
+    (defn fccm-msg-payload (msg) (nth msg 1))
+    (defn fccm-msg-kind (msg) (nth msg 0))
+    (defn fccm-parse-lines (lines)
+        (if (eq (len lines) 0) (list)
+            (fccm-parse-lines-one (fccm-parse-msg (head lines)) (tail lines))))
+    (defn fccm-parse-lines-one (parsed rest)
+        (if (eq (len parsed) 0)
+            (fccm-parse-lines rest)
+            (cons parsed (fccm-parse-lines rest))))
+    (defn fccm-read-msgs (path) (fccm-parse-lines (fccm-read-lines path)))
+    (defn fccm-read-since (path n)
+        (fccm-drop-msgs (fccm-read-msgs path) n))
+    (defn fccm-drop-msgs (msgs n)
+        (if (le n 0) msgs
+            (if (eq (len msgs) 0) msgs
+                (fccm-drop-msgs (tail msgs) (sub n 1)))))
+
+    (defn fccm-publish-protocol-write (mesh version grammar evalDoor)
+        (do
+            (let wrote (fccm-append-line (fccm-field-path (fccm-root mesh))
+                (fccm-msg-protocol version grammar evalDoor)))
+            (if (ge wrote 0)
+                (fccm-mesh (fccm-root mesh) (fccm-observer mesh) (fccm-cells mesh)
+                    version (fccm-honors mesh) (fccm-invasions mesh))
+                mesh)))
+    (defn fccm-publish-protocol (mesh observer version grammar evalDoor)
+        (if (not (str_eq observer (fccm-observer mesh))) mesh
+            (fccm-publish-protocol-write mesh version grammar evalDoor)))
+
+    (defn fccm-open (root cellA cellB observer)
+        (do
+            (let made (fs-mkdir root))
+            (let ab (fccm-create-edge root cellA cellB))
+            (let ba (fccm-create-edge root cellB cellA))
+            (let ao (fccm-create-edge root cellA observer))
+            (let bo (fccm-create-edge root cellB observer))
+            (let field (fccm-create-log (fccm-field-path root)))
+            (let mesh (fccm-mesh root observer (list cellA cellB) 1 0 0))
+            (let published (fccm-publish-protocol mesh observer 1 (FCCMGrammarV1) (FCCMEvalDoorV1)))
+            (if (and (eq ab 1) (and (eq ba 1) (and (eq ao 1) (and (eq bo 1) (eq field 1)))))
+                published
+                (fccm-mesh root observer (list) 0 0 0))))
+
+    (defn fccm-join-new (mesh cell)
+        (do
+            (let peers (fccm-cells mesh))
+            (let opened (fccm-create-peer-edges (fccm-root mesh) cell peers))
+            (let toObs (fccm-create-edge (fccm-root mesh) cell (fccm-observer mesh)))
+            (if (and (gt opened 0) (eq toObs 1))
+                (fccm-mesh (fccm-root mesh) (fccm-observer mesh) (append peers (list cell))
+                    (fccm-protocol-version mesh) (fccm-honors mesh) (fccm-invasions mesh))
+                mesh)))
+    (defn fccm-join (mesh cell)
+        (if (eq (fccm-member? cell (fccm-cells mesh)) 1) mesh (fccm-join-new mesh cell)))
+
+    (defn fccm-send-write (mesh from to line)
+        (do
+            (let count (fccm-append-line (fccm-edge-path (fccm-root mesh) from to) line))
+            (let witnessed (if (str_eq to (fccm-observer mesh)) count
+                (fccm-append-line (fccm-edge-path (fccm-root mesh) from (fccm-observer mesh)) line)))
+            (if (and (ge count 0) (ge witnessed 0))
+                (fccm-mesh (fccm-root mesh) (fccm-observer mesh) (fccm-cells mesh)
+                    (fccm-protocol-version mesh) (add (fccm-honors mesh) 1) (fccm-invasions mesh))
+                mesh)))
+    (defn fccm-send-honored (mesh from to line mode)
+        (if (ci-honors? mode (fccm-default-offer))
+            (fccm-send-write mesh from to line)
+            (fccm-mesh (fccm-root mesh) (fccm-observer mesh) (fccm-cells mesh)
+                (fccm-protocol-version mesh) (fccm-honors mesh) (add (fccm-invasions mesh) 1))))
+    (defn fccm-send (mesh from to line mode)
+        (if (not (eq (fccm-mesh? mesh) 1)) mesh
+            (if (not (eq (fccm-known? mesh from) 1)) mesh
+                (if (not (eq (fccm-known? mesh to) 1)) mesh
+                    (if (str_eq from to) mesh
+                        (fccm-send-honored mesh from to line mode))))))
+    (defn fccm-send-int (mesh from to value mode)
+        (fccm-send mesh from to (fccm-msg-int value) mode))
+    (defn fccm-send-string (mesh from to value mode)
+        (fccm-send mesh from to (fccm-msg-string value) mode))
+
+    (defn fccm-recv (mesh from to since)
+        (fccm-read-since (fccm-edge-path (fccm-root mesh) from to) since))
+    (defn fccm-field-messages (mesh)
+        (fccm-read-msgs (fccm-field-path (fccm-root mesh))))
+    (defn fccm-payload-held? (msgs node)
+        (if (eq (len msgs) 0) 0
+            (if (node_eq (fccm-msg-payload (head msgs)) node) 1
+                (fccm-payload-held? (tail msgs) node))))
+
+    (defn fccm-adopt-protocol (mesh cell version grammar evalDoor)
+        (if (not (eq (fccm-known? mesh cell) 1)) mesh
+            (if (eq (fccm-payload-held? (fccm-field-messages mesh)
+                    (fccm-protocol-node version grammar evalDoor)) 1)
+                (fccm-mesh (fccm-root mesh) (fccm-observer mesh) (fccm-cells mesh)
+                    version (fccm-honors mesh) (fccm-invasions mesh))
+                mesh)))
+
+    (defn fccm-field-count (mesh) (len (fccm-field-messages mesh)))
+    (defn fccm-channel-count (root from to)
+        (len (fccm-read-lines (fccm-edge-path root from to))))
+
+    (defn fccm-sample-line (id parent kind owner purpose capacity lifecycle epoch channels)
+        (str_concat "sample|"
+            (str_concat id
+                (str_concat (if (str_eq parent "") "|a|" (str_concat "|p:" (str_concat parent "|")))
+                    (str_concat kind
+                        (str_concat "|form|"
+                            (str_concat owner
+                                (str_concat "|cell-mesh|"
+                                    (str_concat purpose
+                                        (str_concat "|a|p:"
+                                            (str_concat (int_to_str capacity)
+                                                (str_concat (str_concat "|" lifecycle)
+                                                    (str_concat "|p:"
+                                                        (str_concat (int_to_str epoch)
+                                                            (str_concat "|p:"
+                                                                (str_concat (int_to_str epoch)
+                                                                    (str_concat "|p:1|a|never|physical-live|form-cli.cell-mesh|"
+                                                                        channels)))))))))))))))))
+
+    (defn fccm-cell-line (id epoch)
+        (fccm-sample-line id "" "cell" "observer" "peer-cell" 1 "active" epoch "cell-mesh,form,health"))
+    (defn fccm-channel-line (id parent count epoch)
+        (fccm-sample-line id parent "channel" parent "symbol-stream" count
+            (if (eq count 0) "idle" "active") epoch "cell-mesh,channel,membrane"))
+    (defn fccm-observer-line (count epoch)
+        (fccm-sample-line "observer.field" "" "organ" "observer" "shared-field" count "active" epoch "cell-mesh,observer,health"))
+    (defn fccm-protocol-line (version epoch)
+        (fccm-sample-line "protocol.current" "observer" "recipe" "observer" "shared-field" version "ready" epoch "cell-mesh,protocol,health"))
+
+    (defn fccm-join-lines (lines)
+        (if (eq (len lines) 0) ""
+            (if (eq (len (tail lines)) 0) (head lines)
+                (str_concat (head lines) (str_concat "\n" (fccm-join-lines (tail lines)))))))
+
+    (defn fccm-peer-lines (root from cells epoch)
+        (if (eq (len cells) 0) (list)
+            (if (str_eq from (head cells))
+                (fccm-peer-lines root from (tail cells) epoch)
+                (cons (fccm-channel-line
+                    (str_concat from (str_concat "-to-" (head cells)))
+                    from
+                    (fccm-channel-count root from (head cells))
+                    epoch)
+                    (fccm-peer-lines root from (tail cells) epoch)))))
+    (defn fccm-all-peer-lines (root cells all epoch)
+        (if (eq (len cells) 0) (list)
+            (append (fccm-peer-lines root (head cells) all epoch)
+                    (fccm-all-peer-lines root (tail cells) all epoch))))
+    (defn fccm-obs-edge-lines (root cells observer epoch)
+        (if (eq (len cells) 0) (list)
+            (cons (fccm-channel-line
+                (str_concat (head cells) (str_concat "-to-" observer))
+                (head cells)
+                (fccm-channel-count root (head cells) observer)
+                epoch)
+                (fccm-obs-edge-lines root (tail cells) observer epoch))))
+    (defn fccm-cell-lines (cells epoch)
+        (if (eq (len cells) 0) (list)
+            (cons (fccm-cell-line (head cells) epoch)
+                  (fccm-cell-lines (tail cells) epoch))))
+
+    (defn fccm-glass-body (mesh epoch)
+        (do
+            (let cells (fccm-cells mesh))
+            (let root (fccm-root mesh))
+            (let observer (fccm-observer mesh))
+            (append (fccm-cell-lines cells epoch)
+                (append (fccm-all-peer-lines root cells cells epoch)
+                    (append (fccm-obs-edge-lines root cells observer epoch)
+                        (list (fccm-observer-line (fccm-field-count mesh) epoch)
+                              (fccm-protocol-line (fccm-protocol-version mesh) epoch)))))))
+
+    (defn fccm-publish-glass (mesh glassRoot epoch)
+        (do
+            (let body-lines (fccm-glass-body mesh epoch))
+            (let header (str_concat "glass-snapshot-v1|form-cli.cell-mesh|"
+                (str_concat (int_to_str epoch) (str_concat "|" (int_to_str (len body-lines))))))
+            (let wire (str_concat header (str_concat "\n" (fccm-join-lines body-lines))))
+            (let made (fs-mkdir glassRoot))
+            (let candidate (fs-path-join glassRoot "form-cli.cell-mesh.glass-snapshot.candidate"))
+            (let finalPath (fs-path-join glassRoot "form-cli.cell-mesh.glass-snapshot"))
+            (let wrote (fs-write-text candidate wire))
+            (let moved (if (ge wrote 0) (fs-rename candidate finalPath) -1))
+            (if (and (ge wrote 0) (eq moved 0))
+                (list "glass-publish-v1" "published" "form-cli.cell-mesh" (len body-lines) wrote)
+                (list "glass-publish-v1" "failed" "form-cli.cell-mesh" 0 wrote))))
+    0)
