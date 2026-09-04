@@ -232,7 +232,7 @@ section [form.bml] {
             fgo-sized("memory", "node-growth", "interned node growth since Glass start", growth, "nodes", FGLNodeMoltGrowth(), growth, "cpu-arena", "physical-live", "kernel_stat:4-start-baseline", if eq(growth, 0) then "quiet" else "growing", "cell", "scope=current Glass process; impact=projection-node arena; selfmolt releases process-local nodes at threshold; source NodeIDs remain producer-scoped");
         }
         def fgl-refresh-governor(frame) = if eq(fgl-cycle?(frame, 4), 1) then host-exec("./fkwu observe/form-resource-governor-glass-current-run.fk", "") else "held";
-        def fgl-carrier-seam() = str_concat("controls=form-glassctl focus|inspect|request-evidence|abstain; input=line-commit sidecar; event-wait=", str_concat(FGELWaitDoor(), ":unavailable"));
+        def fgl-carrier-seam() = str_concat("keys=h|a|t|o|m|f|j|i|e|c|q; input=line-commit sidecar; event-wait=", str_concat(FGELWaitDoor(), ":unavailable"));
         def fgl-v2-provenance(epoch, sequence) = fgov2-provenance("physical-live", "glass.monitor", fgov2-unavailable("process-lifetime-not-carried", "glass.monitor.process-lifetime"), fgov2-measured(sequence), fgov2-measured(epoch), "glass.live.current-process");
         def fgl-prefix?(text, prefix) = eq(str_find(text, prefix, 0), 0);
         def fgl-owner-heartbeat-for(samples, owner) = if eq(len(samples), 0) then list() else if and(str_eq(fgtm-sample-kind(head(samples)), "owner-heartbeat"), and(str_eq(fgtm-sample-owner(head(samples)), owner), and(eq(fgtm-field-present?(fgtm-sample-handle(head(samples))), 1), and(eq(fgtm-field-present?(fgtm-sample-write-epoch(head(samples))), 1), eq(fgtm-field-present?(fgtm-sample-read-epoch(head(samples))), 1))))) then head(samples) else fgl-owner-heartbeat-for(tail(samples), owner);
@@ -291,7 +291,20 @@ section [form.bml] {
         }
         def fgl-prefer-evidence(primaryValue, primaryEvidence, fallbackEvidence) = if ge(primaryValue, 0) then primaryEvidence else fallbackEvidence;
         def fgl-prefer-number(primary, fallback) = if ge(primary, 0) then primary else fallback;
-        def fgl-flow-point-current(epoch, metrics, observations) = fgd-flow-point(epoch, fgl-v2-number(observations, "gpu.owner.busy-us-total"), fgl-v2-number(observations, "jit.owner.metal-busy-us"), fgl-v2-number(observations, "metal.owner.dispatch-total"), fgl-number-for(metrics, list("queue-depth")), fgl-prefer-number(fgl-v2-number(observations, "jit.owner.compile-dispatch"), fgl-v2-number(observations, "jit.compile.dispatch")), fgl-v2-number(observations, "cells.interned.count"), fgl-number-for(metrics, list("memory-free")), fgl-v2-number(observations, "metal.owner.in-flight"));
+        def fgl-first-live-observation-id(observations, ids) = if eq(len(ids), 0) then "" else if ge(fgl-v2-number(observations, head(ids)), 0) then head(ids) else fgl-first-live-observation-id(observations, tail(ids));
+        def fgl-lane-number(observations, metrics, observationIds, metricIds) {
+            let fromObs = if eq(len(observationIds), 0) then -1 else fgl-prefer-number(fgl-v2-number(observations, head(observationIds)), fgl-lane-number(observations, metrics, tail(observationIds), list()));
+            if ge(fromObs, 0) then fromObs else fgl-number-for(metrics, metricIds);
+        }
+        def fgl-lane-evidence(observations, metrics, observationIds, metricIds) {
+            let id = fgl-first-live-observation-id(observations, observationIds);
+            if gt(str_len(id), 0) then fgl-v2-evidence(observations, id) else fgl-evidence-for(metrics, metricIds);
+        }
+        def fgl-lane-source(observations, metrics, observationIds, metricIds, door) {
+            let id = fgl-first-live-observation-id(observations, observationIds);
+            if gt(str_len(id), 0) then fgl-v2-source(observations, id, door) else fgl-source-for(metrics, metricIds, door);
+        }
+        def fgl-flow-point-current(epoch, metrics, observations) = fgd-flow-point(epoch, fgl-lane-number(observations, metrics, list("gpu.owner.busy-us-total", "metal.gpu.busy"), list("gpu-busy")), fgl-lane-number(observations, metrics, list("jit.owner.metal-busy-us", "metal.cpu-jit.busy"), list("cpu-jit-busy")), fgl-lane-number(observations, metrics, list("metal.owner.dispatch-total", "metal.dispatch.total"), list("dispatch-total")), fgl-number-for(metrics, list("queue-depth")), fgl-lane-number(observations, metrics, list("jit.owner.compile-dispatch", "jit.compile.dispatch"), list("jit-compile")), fgl-lane-number(observations, metrics, list("cells.interned.count"), list("cells")), fgl-number-for(metrics, list("memory-free")), fgl-lane-number(observations, metrics, list("metal.owner.in-flight", "metal.in-flight"), list("inflight", "metal-inflight")));
 
         // Census only records visible to this Glass process. Aggregate count
         // movement is shown per phase; it is never promoted to per-node cause.
@@ -324,36 +337,31 @@ section [form.bml] {
         def fgl-jit-healed-wake(healed) = fgel-wake("jit-healed", fgtm-field-value(fgtm-sample-write-epoch(healed)), FGLJitPublisher(), fgtm-field-value(fgtm-sample-parent(healed)));
         def fgl-flow-point-current-full(epoch, metrics, observations, samples) {
             let base = fgl-flow-point-current(epoch, metrics, observations);
-            let gpuObservation = fgl-v2-number(observations, "gpu.owner.busy-us-total");
-            let cpuObservation = fgl-v2-number(observations, "jit.owner.metal-busy-us");
-            let dispatchObservation = fgl-v2-number(observations, "metal.owner.dispatch-total");
-            let queueObservation = fgl-number-for(metrics, list("queue-depth"));
-            let jitObservation = fgl-prefer-number(fgl-v2-number(observations, "jit.owner.compile-dispatch"), fgl-v2-number(observations, "jit.compile.dispatch"));
-            let nodeObservation = fgl-v2-number(observations, "cells.interned.count");
             let tensorObservation = fgl-v2-number(observations, "tensor.owner.allocated");
+            let accepted = fgl-prefer-number(fgl-number-for(metrics, list("accepted")), fgl-number-for(metrics, list("events")));
             let evidences = list(
-                fgl-v2-evidence(observations, "gpu.owner.busy-us-total"),
-                fgl-v2-evidence(observations, "jit.owner.metal-busy-us"),
-                fgl-v2-evidence(observations, "metal.owner.dispatch-total"),
+                fgl-lane-evidence(observations, metrics, list("gpu.owner.busy-us-total", "metal.gpu.busy"), list("gpu-busy")),
+                fgl-lane-evidence(observations, metrics, list("jit.owner.metal-busy-us", "metal.cpu-jit.busy"), list("cpu-jit-busy")),
+                fgl-lane-evidence(observations, metrics, list("metal.owner.dispatch-total", "metal.dispatch.total"), list("dispatch-total")),
                 fgl-evidence-for(metrics, list("queue-depth")),
-                if ge(fgl-v2-number(observations, "jit.owner.compile-dispatch"), 0) then fgl-v2-evidence(observations, "jit.owner.compile-dispatch") else fgl-v2-evidence(observations, "jit.compile.dispatch"),
-                fgl-prefer-evidence(nodeObservation, fgl-v2-evidence(observations, "cells.interned.count"), fgl-evidence-for(metrics, list("cells"))),
+                fgl-lane-evidence(observations, metrics, list("jit.owner.compile-dispatch", "jit.compile.dispatch"), list("jit-compile")),
+                fgl-lane-evidence(observations, metrics, list("cells.interned.count"), list("cells")),
                 fgl-evidence-for(metrics, list("memory-free")),
-                fgl-v2-evidence(observations, "metal.in-flight"),
+                fgl-lane-evidence(observations, metrics, list("metal.owner.in-flight", "metal.in-flight"), list("inflight", "metal-inflight")),
                 "derived-window", "derived-window", "derived-window", "derived-window",
                 fgl-v2-evidence(observations, "tensor.owner.allocated"),
-                "derived-window", fgl-evidence-for(metrics, list("accepted")));
+                "derived-window", fgl-prefer-evidence(accepted, fgl-evidence-for(metrics, list("accepted")), fgl-evidence-for(metrics, list("events"))));
             let sources = list(
-                fgl-v2-source(observations, "gpu.owner.busy-us-total", "model.owner.metal_status.gpu_busy_us_total"),
-                fgl-v2-source(observations, "jit.owner.metal-busy-us", "model.owner.metal_status.cpu_jit_busy_us_total"),
-                fgl-v2-source(observations, "metal.owner.dispatch-total", "model.owner.metal_status.total_dispatch"),
+                fgl-lane-source(observations, metrics, list("gpu.owner.busy-us-total", "metal.gpu.busy"), list("gpu-busy"), "glass.monitor.metal_status.gpu_busy_us_total"),
+                fgl-lane-source(observations, metrics, list("jit.owner.metal-busy-us", "metal.cpu-jit.busy"), list("cpu-jit-busy"), "glass.monitor.metal_status.cpu_jit_busy_us_total"),
+                fgl-lane-source(observations, metrics, list("metal.owner.dispatch-total", "metal.dispatch.total"), list("dispatch-total"), "glass.monitor.metal_status.total_dispatch"),
                 fgl-source-for(metrics, list("queue-depth"), "hearth.request-queue-depth"),
-                if ge(fgl-v2-number(observations, "jit.owner.compile-dispatch"), 0) then fgl-v2-source(observations, "jit.owner.compile-dispatch", "model.owner.jit.compile_dispatch") else fgl-v2-source(observations, "jit.compile.dispatch", "glass.monitor.jit.compile_dispatch"),
-                fgl-v2-source(observations, "cells.interned.count", "glass.monitor.kernel_stat.cells"),
+                fgl-lane-source(observations, metrics, list("jit.owner.compile-dispatch", "jit.compile.dispatch"), list("jit-compile"), "glass.monitor.jit.compile_dispatch"),
+                fgl-lane-source(observations, metrics, list("cells.interned.count"), list("cells"), "glass.monitor.kernel_stat.cells"),
                 fgl-source-for(metrics, list("memory-free"), "host.memory.available"),
-                fgl-v2-source(observations, "metal.owner.in-flight", "model.owner.metal_status.in_flight"),
-                "glass.visible.phase-census", "glass.visible.phase-census", "glass.visible.phase-census", "telemetry.token-position.capacity", "model.owner.tensor.allocated", "telemetry.channel-memberships", "framebuffer.accepted-total");
-            let point = fgd-flow-point-v4(epoch, fgd-flow-value(base, 2), fgd-flow-value(base, 3), fgd-flow-value(base, 4), fgd-flow-value(base, 5), fgd-flow-value(base, 6), fgd-flow-value(base, 7), fgd-flow-value(base, 8), fgd-flow-value(base, 9), fgl-phase-count(metrics, samples, observations, "gas"), fgl-phase-count(metrics, samples, observations, "water"), fgl-phase-count(metrics, samples, observations, "ice"), fgl-sample-kind-capacity(samples, "token-position", 0, 0), tensorObservation, fgl-sample-channel-tag-memberships(samples), fgl-number-for(metrics, list("accepted")), evidences, sources);
+                fgl-lane-source(observations, metrics, list("metal.owner.in-flight", "metal.in-flight"), list("inflight", "metal-inflight"), "glass.monitor.metal_status.in_flight"),
+                "glass.visible.phase-census", "glass.visible.phase-census", "glass.visible.phase-census", "telemetry.token-position.capacity", "model.owner.tensor.allocated", "telemetry.channel-memberships", if ge(accepted, 0) then fgl-source-for(metrics, list("accepted"), "framebuffer-events") else fgl-source-for(metrics, list("events"), "framebuffer-events"));
+            let point = fgd-flow-point-v4(epoch, fgd-flow-value(base, 2), fgd-flow-value(base, 3), fgd-flow-value(base, 4), fgd-flow-value(base, 5), fgd-flow-value(base, 6), fgd-flow-value(base, 7), fgd-flow-value(base, 8), fgd-flow-value(base, 9), fgl-phase-count(metrics, samples, observations, "gas"), fgl-phase-count(metrics, samples, observations, "water"), fgl-phase-count(metrics, samples, observations, "ice"), fgl-sample-kind-capacity(samples, "token-position", 0, 0), tensorObservation, fgl-sample-channel-tag-memberships(samples), accepted, evidences, sources);
             append(take(18, point), list(fgl-number-for(metrics, list("strings")), sources, fgl-jit-fault(samples)));
         }
 
