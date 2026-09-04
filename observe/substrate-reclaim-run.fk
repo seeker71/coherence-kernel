@@ -1,0 +1,49 @@
+; substrate-reclaim-run.fk — one path per content address. Files under the
+; given roots are addressed by sha256 (one host listing; a Form digest over
+; megabytes would take hours), grouped natively by address, the newest
+; update time keeps the unique path, and every duplicate is hard-linked to
+; it so both paths still resolve while the bytes are stored once. The
+; registry .hearth/substrate-index.rows carries address|mtime|bytes|path.
+; stdin line 1: "reclaim" to link, anything else to only list; line 2:
+; roots separated by spaces (blank -> adapters, training adapters, and the
+; .fkb ice of this checkout and the main one).
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/spool-bell-transport.fk form/form-stdlib/hearth.bml
+(do
+    (defn sr-say (k v) (print_str (str_concat "substrate " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn sr-trim (s) (if (nothing? s) "" (trim s)))
+    (defn sr-text (t) (if (nothing? t) "" t))
+    (defn sr-cat (parts) (if (eq (len parts) 0) "" (str_concat (head parts) (sr-cat (tail parts)))))
+    (defn sr-default-roots () "form/form-stdlib/adapters .form-lora-voice/adapter .form-lora-voice-native/adapter /Users/ursmuff/source/coherence-kernel/form/form-stdlib /Users/ursmuff/source/coherence-kernel/observe form/form-stdlib observe")
+    ; one host listing: "hash  path" per file over 64 KiB (adapters, ice)
+    (defn sr-listing (roots) (sr-text (host-exec (sr-cat (list "find " roots " -type f \\( -name '*.safetensors' -o -name '*.fkb' -o -name '*.gguf' \\) -size +64k -exec shasum -a 256 {} + 2>/dev/null")) "")))
+    (defn sr-hash (line) (substring line 0 64))
+    (defn sr-path (line) (trim (substring line 64 (str_len line))))
+    ; entries: (hash path mtime bytes)
+    (defn sr-entry (line) (do (let p (sr-path line)) (list (sr-hash line) p (file_mtime p) (file_size p))))
+    (defn sr-entries (lines) (if (eq (len lines) 0) (list) (if (lt (str_len (head lines)) 66) (sr-entries (tail lines)) (cons (sr-entry (head lines)) (sr-entries (tail lines))))))
+    ; the unique path of a hash: the entry with the newest mtime (a tie keeps the first seen)
+    (defn sr-unique (entries h best) (if (eq (len entries) 0) best (sr-unique (tail entries) h (if (str_eq (head (head entries)) h) (if (or (eq (len best) 0) (gt (nth (head entries) 2) (nth best 2))) (head entries) best) best))))
+    (defn sr-same-inode? (a b) (ge (str_find (sr-text (host-exec (sr-cat (list "[ '" a "' -ef '" b "' ] && echo same")) "")) "same" 0) 0))
+    (defn sr-link (dup uniq) (sr-text (host-exec (sr-cat (list "ln -f '" uniq "' '" dup "' && echo linked")) "")))
+    ; walk: every entry whose unique path is another file is a duplicate
+    (defn sr-walk (all entries act n bytes seen)
+        (if (eq (len entries) 0) (list n bytes)
+            (do (let e (head entries))
+                (let u (sr-unique all (head e) (list)))
+                (if (or (str_eq (nth u 1) (nth e 1)) (sr-same-inode? (nth e 1) (nth u 1)))
+                    (sr-walk all (tail entries) act n bytes seen)
+                    (do (let r (if act (sr-link (nth e 1) (nth u 1)) "would-link"))
+                        (sr-say (if act "linked" "duplicate") (sr-cat (list (nth e 1) " -> " (nth u 1) " bytes=" (int_to_str (nth e 3)))))
+                        (sr-walk all (tail entries) act (add n 1) (add bytes (nth e 3)) seen))))))
+    (defn sr-registry (entries) (if (eq (len entries) 0) 0 (do (let e (head entries)) (let u (sr-unique entries (head e) (list))) (let w (if (str_eq (nth u 1) (nth e 1)) (sbt-append ".hearth/substrate-index.rows" (sr-cat (list (head e) "|" (int_to_str (nth e 2)) "|" (int_to_str (nth e 3)) "|" (nth e 1) (byte_to_str 10)))) 0)) (add (if (str_eq (nth u 1) (nth e 1)) 1 0) (sr-registry (tail entries))))))
+    (let act (str_eq (sr-trim (read_line)) "reclaim"))
+    (let roots0 (sr-trim (read_line)))
+    (let roots (if (eq (str_len roots0) 0) (sr-default-roots) roots0))
+    (let entries (sr-entries (split-on (sr-listing roots) (byte_to_str 10))))
+    (let mk (fs-mkdir ".hearth"))
+    (let cleared (fs-remove-file ".hearth/substrate-index.rows"))
+    (let uniq (sr-registry entries))
+    (let walked (sr-walk entries entries act 0 0 (list)))
+    (sr-say "summary" (sr-cat (list (if act "reclaimed" "would-reclaim") " files=" (int_to_str (len entries)) " unique=" (int_to_str uniq) " duplicates=" (int_to_str (head walked)) " bytes=" (int_to_str (nth walked 1)) " registry=.hearth/substrate-index.rows")))
+    0)
