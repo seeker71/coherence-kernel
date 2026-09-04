@@ -51,6 +51,18 @@
         (if (fs_is_dir path) 0
             (if (str_eq (read_file_slice path 0 4) (md-magic)) 1 0)))
 
+    ; ---- WHAT A READ ANSWERS WHEN THE FILE IS NOT THERE, said once for every reader below. ----
+    ; read_file_slice answers `nothing` for a file that never was, and "" for a file that IS there
+    ; and holds no bytes — two different facts, kept apart on purpose (runtime/fkwu-uni.c, t==62:
+    ; "a file that never was answers nothing"). str_eq OBSERVES nothing without measuring it —
+    ; nothing equals neither "GGUF" nor "" (both probed 2026-09-04) — so the magic test above
+    ; stands as written and answers "not a model" for a path that is not there, which is true.
+    ; The doors that MEASURE — str_len, str_byte_at, egg-u64 — ask nothing? first, because
+    ; measuring nothing is refused out loud rather than quietly called zero. The describe cells
+    ; further down do not re-ask: each stands on the predicate that just read the same file's
+    ; bytes, and a file deleted between those two reads earns that loud refusal, which is the
+    ; honest report of a file that left mid-answer.
+
     ; architecture names its own block-count key, so the second read depends on the first
     (defn md-arch (src) (gmt-str src "general.architecture"))
     ; …and not every architecture puts its depth under `<arch>.block_count`. `clip` (the moondream and
@@ -76,15 +88,27 @@
         (do (let n (gmt-str src "general.name"))
             (if (str_eq n "") "(header names no model)" n)))
 
+    ; WHEN A FILE LEAVES BETWEEN THE LOOK AND THE READ. Every describe cell below is reached
+    ; through a predicate that read the same file a moment earlier, so its window on `nothing`
+    ; is narrow: only a file deleted between those two reads. Narrow is not closed, and a body
+    ; that answers a walk over a live directory will meet it. Each describe asks, and says the
+    ; true thing — the file was there when the walk looked and gone when the reader arrived —
+    ; instead of refusing with a message about lengths. One walk over a moving directory then
+    ; returns a listing with one honest line in it, rather than no listing at all.
+    (defn md-gone (path)
+        (str_concat path "   (the file left between the look and the read — nothing to describe)"))
+
     (defn md-gguf-describe (path)
         (do
             (let src (read_file_slice path 0 (md-header-bytes)))
+            (if (nothing? src) (md-gone path)
+            (do
             (let arch (md-arch src))
             (if (str_eq arch "")
                 (str_concat path "   (not a GGUF header this body can read — unfinished, not unsupported)")
                 (str_concat path (str_concat "   arch=" (str_concat arch
                     (str_concat "  layers=" (str_concat (md-layers-str src arch)
-                        (str_concat "  name=" (md-name src))))))))))
+                        (str_concat "  name=" (md-name src))))))))))))
 
     ; ---- SAFETENSORS: the file declares its own shape, same as GGUF, different spelling. ----
     ; A safetensors file's first 8 bytes are a little-endian u64 naming its own JSON header's
@@ -99,16 +123,18 @@
     (defn md-safetensors? (path)
         (if (fs_is_dir path) 0
             (do (let w (read_file_slice path 0 10))
-                (if (lt (str_len w) 10) 0
-                    (if (and (eq (str_byte_at w 8) 123) (eq (str_byte_at w 9) 34))
-                        (do (let hlen (egg-u64 w 0))
-                            (if (lt hlen 2) 0
-                                (do (let lastb (read_file_slice path (add 7 hlen) 1))
-                                    (if (eq (str_len lastb) 1)
-                                        (if (or (eq (str_byte_at lastb 0) 125)
-                                                (eq (str_byte_at lastb 0) 32)) 1 0)
-                                        0))))
-                        0)))))
+                (if (nothing? w) 0
+                    (if (lt (str_len w) 10) 0
+                        (if (and (eq (str_byte_at w 8) 123) (eq (str_byte_at w 9) 34))
+                            (do (let hlen (egg-u64 w 0))
+                                (if (lt hlen 2) 0
+                                    (do (let lastb (read_file_slice path (add 7 hlen) 1))
+                                        (if (nothing? lastb) 0
+                                            (if (eq (str_len lastb) 1)
+                                                (if (or (eq (str_byte_at lastb 0) 125)
+                                                        (eq (str_byte_at lastb 0) 32)) 1 0)
+                                                0)))))
+                            0))))))
 
     ; THE FIND THAT DOES NOT ALLOCATE. core.fk's str_find warns about itself — "naive substring
     ; search … nothing in this codebase calls it in a hot loop over long strings" — because its
@@ -162,9 +188,19 @@
     ; wherever it FIRST occurs, not only at the top level: parakeet's config names no top-level
     ; model_type but carries decoding.model_type=tdt, and the scanner reports that — witnessed
     ; 2026-08-04, and more informative than the absence a top-level-only read would report.
+    ;
+    ; THE ABSENCE IS ASKED FOR, NOT MEASURED. This is the one read in the cell whose path is BUILT
+    ; rather than walked: every other read stands on a name fs_list just handed back, but
+    ; config.json is a guess about a sibling that most often is not there. Such a read answers
+    ; `nothing`, and taking its length was a crash on every safetensors file with no config.json
+    ; beside it — witnessed 2026-09-04 on the band's own fx.safetensors fixture, which carries no
+    ; sibling config by design. Presence is asked before length is taken. The two absences stay
+    ; themselves: a config.json that never was reads "(no config.json beside it)", and one that IS
+    ; there holding no bytes falls through to name no model_type — which is what an empty file
+    ; honestly does, and truer than calling a file that exists missing.
     (defn md-st-config-hint (path)
         (do (let cfg (read_file_slice (md-join (md-parent path) "config.json") 0 262144))
-            (if (eq (str_len cfg) 0) "(no config.json beside it)"
+            (if (nothing? cfg) "(no config.json beside it)"
                 (do (let k (md-find-bytes cfg (str_concat (md-q) (str_concat "model_type" (md-q))) 0))
                     (if (lt k 0) "(config.json names no model_type)"
                         (do (let v1 (md-find-bytes cfg (md-q) (add k 12)))
@@ -173,16 +209,19 @@
                                 (str_concat "config=" (substring cfg (add v1 1) v2)))))))))
 
     (defn md-st-describe (path)
-        (do (let hlen (egg-u64 (read_file_slice path 0 8) 0))
+        (do (let head8 (read_file_slice path 0 8))
+            (if (nothing? head8) (md-gone path)
+            (do (let hlen (egg-u64 head8 0))
             (let hdr (read_file_slice path 8
                          (if (gt hlen (md-header-bytes)) (md-header-bytes) hlen)))
+            (if (nothing? hdr) (md-gone path)
             (if (lt (str_len hdr) hlen)
                 (str_concat path "   (safetensors header wider than this body's read window — unfinished, not unsupported)")
                 (do (let facts (md-st-scan hdr 0 0 0))
                     (str_concat path (str_concat "   safetensors  tensors="
                         (str_concat (int_to_str (nth facts 0))
                         (str_concat "  bytes=" (str_concat (int_to_str (add 8 (add hlen (nth facts 1))))
-                        (str_concat "  " (md-st-config-hint path)))))))))))
+                        (str_concat "  " (md-st-config-hint path))))))))))))))
 
     ; ---- PER-TENSOR OLLAMA MODELS: the ledger is the only place the model is one thing. ----
     ; Six models on this host are stored by ollama as ~254 separate tensor blobs each, one file
@@ -200,9 +239,10 @@
             (do (let first (read_file_slice path 0 1))
                 (if (str_eq first "{")
                     (do (let src (read_file_slice path 0 (md-header-bytes)))
-                        (if (ge (md-find-bytes src (str_concat (md-q) (str_concat "schemaVersion" (md-q))) 0) 0)
-                            (if (ge (md-find-bytes src (md-manifest-needle) 0) 0) 1 0)
-                            0))
+                        (if (nothing? src) 0
+                            (if (ge (md-find-bytes src (str_concat (md-q) (str_concat "schemaVersion" (md-q))) 0) 0)
+                                (if (ge (md-find-bytes src (md-manifest-needle) 0) 0) 1 0)
+                                0)))
                     0))))
     (defn md-mani-scan (src from count total)
         (do (let k (md-find-bytes src (md-manifest-needle) from))
@@ -214,10 +254,11 @@
         (str_concat (md-base (md-parent path)) (str_concat ":" (md-base path))))
     (defn md-manifest-describe (path)
         (do (let src (read_file_slice path 0 (md-header-bytes)))
-            (let facts (md-mani-scan src 0 0 0))
+            (if (nothing? src) (md-gone path)
+            (do (let facts (md-mani-scan src 0 0 0))
             (str_concat path (str_concat "   tensor-manifest  model=" (str_concat (md-mani-name path)
                 (str_concat "  tensors=" (str_concat (int_to_str (nth facts 0))
-                (str_concat "  bytes=" (int_to_str (nth facts 1))))))))))
+                (str_concat "  bytes=" (int_to_str (nth facts 1))))))))))))
 
     ; ---- ONE FILE, ONE DOOR. huggingface_hub stores every real file in models--*/blobs and
     ; reaches it through a snapshot symlink one directory over. Listing both is two doors on one

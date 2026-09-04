@@ -3753,7 +3753,19 @@ impl Kernel {
             }
             Value::Str(fields.join(" ").into())
         });
+        // str_eq OBSERVES the axiom-1 absence instead of refusing it, mirroring the fkwu
+        // arm exactly (probed 2026-09-04: nothing equals nothing, and equals neither ""
+        // nor any other string, so the emptymask distinction between never-was and empty
+        // survives the comparison). A comparison asks a question ABOUT two values; a
+        // length MEASURES one, which is why str_len and str_byte_at still refuse an
+        // absence out loud. Before this, a walk that met a file which had left between
+        // the listing and the read died here while fkwu answered "not a model" — one
+        // witness out of step with the primary kernel, found by model-discovery's own
+        // absence lane (form-stdlib/tests/model-discovery-band.fk, bit 256).
         self.register_native("str_eq", cat_compare(RCMP_EQ), |_, _, args| {
+            if matches!(args[0], Value::Null) || matches!(args[1], Value::Null) {
+                return bool_int(matches!(args[0], Value::Null) && matches!(args[1], Value::Null));
+            }
             bool_int(args[0].as_str() == args[1].as_str())
         });
         // int_to_str — value-to-string for trivial leaves. Historical name
