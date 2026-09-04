@@ -988,6 +988,10 @@ extern int waitpid(int, int *, int);
 extern int pipe(int *);
 extern int dup2(int, int);
 extern void _exit(int);
+/* host-exec's stdin door interleaves its write with its read under poll and
+ * holds SIGPIPE off while writing to a child that may already have closed */
+#include <poll.h>
+#include <signal.h>
 #endif
 #if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
 #define FK_HAVE_DARWIN_ARM64_JIT_WITNESS 1
@@ -1329,7 +1333,7 @@ static void fk_cstr(long long sv, char *out, long long cap) {
     if (sa >= 0 && sa < fk_sp) {
         n = fk_sl[sa];
         if (n > cap - 1) {
-            fk_die("fk_cstr: string longer than the destination buffer -- silently truncating would corrupt the path / hostname / port / URL / command / device-name the caller is about to use (every fk_cstr caller is one of these). Raise the caller's buffer if this length is legitimate.");
+            fk_die("fk_cstr: string longer than the destination buffer -- silently truncating would corrupt the path / hostname / port / URL / device-name the caller is about to use (every fk_cstr caller is one of these). Raise the caller's buffer if this length is legitimate.");
         }
         long long j = 0;
         while (j < n) {
@@ -1338,6 +1342,26 @@ static void fk_cstr(long long sv, char *out, long long cap) {
         }
     }
     out[n] = 0;
+}
+/* fk_cstr_heap: a string value's bytes as a fresh C string of EXACTLY its
+ * length (caller frees). fk_cstr's fixed buffers stay for what the host itself
+ * bounds -- a path, a hostname, a port; a command line is not one of those, so
+ * it is heap-built: reserve, die only on allocator refusal (the R21 idiom).
+ * A non-string answers the empty C string. */
+static char *fk_cstr_heap(long long sv) {
+    long long sa = fk_stri(sv);
+    long long n = (sa >= 0 && sa < fk_sp) ? fk_sl[sa] : 0;
+    char *out = malloc((unsigned long)(n + 1));
+    if (out == 0) {
+        fk_die("fk_cstr_heap: out of memory");
+    }
+    long long j = 0;
+    while (j < n) {
+        out[j] = fk_sb[fk_so[sa] + j];
+        j = j + 1;
+    }
+    out[n] = 0;
+    return out;
 }
 /* Every fk_sb growth site (fk_sbuf below, plus ~14 more inline copies of the same
  * `while (... > fk_scap_b) { fk_scap_b *= 2; fk_sb = realloc(...); }` idiom
@@ -6430,45 +6454,180 @@ static long long fk_http_dict_with_headers(long long status, long long headers, 
     d = fk_cons_val(fk_sbuf("__dict__", 8), d);
     return d;
 }
-static long long fk_host_exec(long long cmdv, long long inputv) {
-    (void)inputv;
-    char cmd[8192];
-    fk_cstr(cmdv, cmd, 8192);
-    void *fp = popen(cmd, "r");
-    if (fp == 0) {
-        /* Launch failure (fork starvation: popen NULL) answers the axiom-1 nothing,
-         * never "" — "" means the command RAN and spoke zero bytes. Witnessed
-         * 2026-08-27: under ulimit -u starvation ten calls answered ten empty
-         * strings rc 0 and a 10s window silently closed in 0.008s. Callers name
-         * the absence with nothing? before measuring — str_len of nothing dies
-         * loud (op 25), on this arm and on Go alike. */
-        return fk_nothing;
+/* one 64KB read into host-exec's heap-grown output buffer; answers read's own
+ * count. Heap-grown because the old static 256KB silently amputated a
+ * command's output past 262,143 bytes — a partial answer wearing a whole one's
+ * skin (healed 2026-08-27). Growth is the capability answer, never a cap. */
+static long long fk_host_exec_read(int fd, char **hbuf, long long *hcap, long long *total) {
+    if (*total + 65536 > *hcap) {
+        *hcap = *hcap * 2;
+        *hbuf = realloc(*hbuf, (unsigned long)*hcap);
+        if (*hbuf == 0) {
+            fk_die("fk_host_exec: out of memory growing output buffer");
+        }
     }
-    /* Heap-grown: the old static 256KB silently amputated a command's output
-     * past 262,143 bytes — a partial answer wearing a whole one's skin (the
-     * same family as fs_list's 512 wall; healed 2026-08-27). Growth is the
-     * capability answer, never a quiet cap. */
+    long long got = read(fd, *hbuf + *total, 65536);
+    if (got > 0) {
+        *total = *total + got;
+    }
+    return got;
+}
+/* (host-exec cmd input): cmd runs under `sh -c`, input is the child's stdin,
+ * the answer is the child's stdout. A launch that never happened (pipe or fork
+ * refused: starvation) answers the axiom-1 nothing, never "" — "" means the
+ * command RAN and spoke zero bytes (2026-08-27: ten starved calls once
+ * answered ten empty strings rc 0 and a 10s window closed in 0.008s). A
+ * nonzero exit still answers whatever the command spoke. Callers name the
+ * absence with nothing? before measuring — str_len of nothing dies loud.
+ *
+ * The command is heap-built (fk_cstr_heap): the old char cmd[8192] refused a
+ * 368-path list at the membrane, so pipelines composed in the shell instead
+ * of crossing. And input used to be `(void)inputv` — discarded — so
+ * (host-exec "cat" "hello") answered "" (R69). */
+static long long fk_host_exec(long long cmdv, long long inputv) {
+    char *cmd = fk_cstr_heap(cmdv);
+    long long in_sa = fk_stri(inputv);
+    long long in_n = (in_sa >= 0 && in_sa < fk_sp) ? fk_sl[in_sa] : 0;
     long long hcap = 262144;
     char *hbuf = malloc(hcap);
     if (hbuf == 0) {
         fk_die("fk_host_exec: out of memory for output buffer");
     }
     long long total = 0;
-    for (;;) {
-        if (total + 65536 > hcap) {
-            hcap = hcap * 2;
-            hbuf = realloc(hbuf, hcap);
-            if (hbuf == 0) {
-                fk_die("fk_host_exec: out of memory growing output buffer");
-            }
-        }
-        long long got = read(fileno(fp), hbuf + total, 65536);
-        if (got <= 0) {
-            break;
-        }
-        total = total + got;
+#if defined(_WIN32)
+    if (in_n > 0) {
+        fk_die("fkwu: host-exec: stdin input is not wired on this platform yet -- the command would run without the bytes it was handed");
+    }
+    void *fp = popen(cmd, "r");
+    free(cmd);
+    if (fp == 0) {
+        free(hbuf);
+        return fk_nothing;
+    }
+    while (fk_host_exec_read(fileno(fp), &hbuf, &hcap, &total) > 0) {
     }
     pclose(fp);
+#else
+    /* popen is one-directional; a pipe pair + fork/exec of `sh -c` keeps its
+     * shell semantics and opens the stdin door. An empty input leaves the
+     * child's stdin inherited, exactly as popen did. */
+    int out_fds[2];
+    int in_fds[2];
+    in_fds[0] = -1;
+    in_fds[1] = -1;
+    if (pipe(out_fds) != 0) {
+        free(cmd);
+        free(hbuf);
+        return fk_nothing;
+    }
+    if (in_n > 0 && pipe(in_fds) != 0) {
+        close(out_fds[0]);
+        close(out_fds[1]);
+        free(cmd);
+        free(hbuf);
+        return fk_nothing;
+    }
+    long long pid = fork();
+    if (pid < 0) {
+        close(out_fds[0]);
+        close(out_fds[1]);
+        if (in_n > 0) {
+            close(in_fds[0]);
+            close(in_fds[1]);
+        }
+        free(cmd);
+        free(hbuf);
+        return fk_nothing;
+    }
+    if (pid == 0) {
+        close(out_fds[0]);
+        dup2(out_fds[1], 1);
+        close(out_fds[1]);
+        if (in_n > 0) {
+            close(in_fds[1]);
+            dup2(in_fds[0], 0);
+            close(in_fds[0]);
+        }
+        char *child_argv[4];
+        child_argv[0] = (char *)"sh";
+        child_argv[1] = (char *)"-c";
+        child_argv[2] = cmd;
+        child_argv[3] = 0;
+        execvp("/bin/sh", child_argv);
+        _exit(127);
+    }
+    free(cmd);
+    close(out_fds[1]);
+    if (in_n > 0) {
+        close(in_fds[0]);
+    }
+    /* Feed stdin and read stdout INTERLEAVED under poll: a child that speaks
+     * before it has finished listening fills its stdout pipe and stops, and a
+     * parent that wrote all its input first would then wait forever — the
+     * deadlock every write-everything-first shape carries. A child that closes
+     * its stdin early (it never wanted the bytes) shows as POLLERR/POLLHUP on
+     * the write end and that door simply closes; SIGPIPE is held off around the
+     * write so the race between that poll and the write cannot kill fkwu. */
+    int out_fd = out_fds[0];
+    int in_fd = (in_n > 0) ? in_fds[1] : -1;
+    long long sent = 0;
+    while (out_fd >= 0) {
+        struct pollfd pfd[2];
+        pfd[0].fd = out_fd;
+        pfd[0].events = POLLIN;
+        pfd[0].revents = 0;
+        pfd[1].fd = in_fd;
+        pfd[1].events = POLLOUT;
+        pfd[1].revents = 0;
+        if (poll(pfd, (in_fd >= 0) ? 2 : 1, -1) < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        if (in_fd >= 0 && pfd[1].revents != 0) {
+            if ((pfd[1].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                close(in_fd);
+                in_fd = -1;
+            } else {
+                long long chunk = in_n - sent;
+                if (chunk > 65536) {
+                    chunk = 65536;
+                }
+                void (*old_pipe)(int) = signal(SIGPIPE, SIG_IGN);
+                long long put = write(in_fd, fk_sb + fk_so[in_sa] + sent, (unsigned long)chunk);
+                signal(SIGPIPE, old_pipe);
+                if (put > 0) {
+                    sent = sent + put;
+                } else if (put < 0 && errno != EINTR) {
+                    close(in_fd);
+                    in_fd = -1;
+                }
+                if (in_fd >= 0 && sent >= in_n) {
+                    close(in_fd);
+                    in_fd = -1;
+                }
+            }
+        }
+        if (pfd[0].revents != 0) {
+            long long got = fk_host_exec_read(out_fd, &hbuf, &hcap, &total);
+            if (got < 0 && errno == EINTR) {
+                continue;
+            }
+            if (got <= 0) {
+                close(out_fd);
+                out_fd = -1;
+            }
+        }
+    }
+    if (in_fd >= 0) {
+        close(in_fd);
+    }
+    {
+        int st = 0;
+        waitpid((int)pid, &st, 0);
+    }
+#endif
     long long ans = fk_sbuf(hbuf, total);
     free(hbuf);
     return ans;
@@ -8284,18 +8443,20 @@ static long long fk_walk(long long i, long long fp) {
         return fk_ht[p];
     }
     if (t == 22) {
-        /* len — a LIST cell. Only the low bit tells a cons cell (odd) from an
-         * int or a string handle (both even, both `idx << 1`), so an unguarded
-         * walk shifted whatever it was handed and followed fk_ht from there:
-         * with 40 live cons cells on the heap, (len 8) answered 2 and
-         * (len "hello") answered 4 while go/rust/ts answered 0/0/5. Not merely
-         * divergent — heap-state-dependent, which is why the same expression on
-         * an empty heap looked four-way-agreed. Non-lists now answer 0, as they
-         * do on the sibling arms; the one gap that stays is a STRING, whose byte
-         * length the siblings return and fkwu cannot see. Mirrored in the
-         * emitted walker's fk_list_len (fkc-table-serialize.fk) and in
-         * fk_jlist1 below — one law, three carriers. */
+        /* len — a LIST cell's length; a STRING's byte length, as go, rust and
+         * ts answer and as the primitive registry declares ("string bytes").
+         * Until 2026-07-31 a string was `poolidx << 1`, the same even word as
+         * an int, so the low-bit guard below was all this door could read and
+         * (len "abc") answered 0 — a plausible zero over the wrong kind that
+         * left tb-any2? silently false over string rows (R70). Strings have
+         * carried their own odd-negative band since (fk_sbase); the door reads
+         * it now. Other non-lists answer 0 as the siblings do. The emitted
+         * walker's fk_list_len (fkc-table-serialize.fk) still answers 0 for a
+         * string: its words carry no string band to read. */
         long long lv22 = fk_walk(fk_node[i][1], fp);
+        if (fk_is_str(lv22)) {
+            return fk_sl[fk_stri(lv22)] << 1;
+        }
         if ((lv22 & 1) == 0) {
             return 0;
         }
