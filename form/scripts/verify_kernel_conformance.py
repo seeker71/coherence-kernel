@@ -4,6 +4,13 @@
 This is intentionally only an orchestrator.  It parses no Form and owns no
 language semantics: each vector is handed unchanged to the Go, Rust, and
 TypeScript kernels through their public ``--expr`` entry point.
+
+Its Form twin stands: gate/kernel-conformance.bml is the drift-gates row now;
+this script is a witness of that lens (gate/tests/kernel-conformance-band.fk
+holds the two to one verdict), not the gate. The three witnesses that run the
+Python FORMBIN2 codec (a Python artifact into the kernels, kernel artifacts
+byte-roundtripped here, this decoder on the malformed vectors) stay with this
+script until a Form FORMBIN2 codec stands.
 """
 
 from __future__ import annotations
