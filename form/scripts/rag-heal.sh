@@ -45,8 +45,8 @@ if ! fourth_selfhost; then
 fi
 
 RAG_MODS=(
-    form-stdlib/adler32.fk
-    form-stdlib/rag-key.fk
+    form-stdlib/adler32.bml
+    form-stdlib/rag-key.bml
     form-stdlib/rag-freshness.fk
     form-stdlib/text-tokenize.fk
     form-stdlib/rag-embed.fk
