@@ -186,7 +186,7 @@ jit-source-runtime-orchestrator 1048575.
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 489459005
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=30 moving=0 released=51 -> 30000051
+./fkwu form/form-stdlib/release-ledger.bml -> open=30 moving=0 released=52 -> 30000052
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 ```
 
