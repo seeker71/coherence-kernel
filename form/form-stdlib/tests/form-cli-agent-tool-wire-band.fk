@@ -1,0 +1,60 @@
+; Agent-facing JSON requests are direct command-shaped native calls.
+; Verdict 131071: fifteen resident tool commands, state returned through JSON,
+; malformed/request-shape rejection, and direct form-cli JSON dispatch.
+; witnessed: 2026-09-04 -> 131071
+; preludes: form-stdlib/core.fk form-stdlib/form-cli.fk
+(do
+    (defn fatw-docs ()
+        (list
+            (list "source:alpha" "alpha.txt" "alpha 1\nbeta 2\n")
+            (list "source:table" "table.txt" "left:right\nup:down\n")
+            (list "source:package" "package.json" "{\"name\":\"demo\",\"version\":1}")))
+    (defn fatw-request (command input docs)
+        (str_concat "{\"command\":"
+        (str_concat (json-emit (intern_trivial_string command))
+        (str_concat ",\"input\":"
+        (str_concat (json-emit (intern_trivial_string input))
+        (str_concat ",\"documents\":"
+        (str_concat (json-emit (fat-wire-documents-node docs)) "}")))))))
+    (defn fatw-node (raw) (faj-json "agent-tool-wire-band" raw))
+    (defn fatw-field (raw key) (json-object-get (fatw-node raw) key))
+    (defn fatw-exit (raw) (node_value (fatw-field raw "exit")))
+    (defn fatw-out (raw) (node_value (fatw-field raw "stdout")))
+    (defn fatw-error (raw) (node_value (fatw-field raw "stderr")))
+    (defn fatw-documents (raw) (fat-wire-documents-loop (node_children (fatw-field raw "documents")) (list)))
+    (defn fatw-call (command input) (fat-wire-call (fatw-request command input (fatw-docs))))
+    (defn fatw-good (command input expected)
+        (do (let response (fatw-call command input))
+            (and (eq (fatw-exit response) 0)
+                (and (str_eq (fatw-error response) "") (str_eq (fatw-out response) expected)))))
+    (defn fatw-next-good (response command expected)
+        (do
+            (let docs (fatw-documents response))
+            (if (not (str_eq (fat-wire-error docs) ""))
+                0
+                (do
+                    (let read-back (fat-wire-call
+                        (fatw-request command "" (fat-wire-value docs))))
+                    (and (eq (fatw-exit read-back) 0)
+                        (str_eq (fatw-out read-back) expected))))))
+    (defn fatw-bit (ok bit) (if ok bit 0))
+    (sum (list
+        (fatw-bit (fatw-good "rg -nF 'alpha 1'" "" "alpha.txt:1:alpha 1\n") 1)
+        (fatw-bit (fatw-good "jq -r .name package.json" "" "demo\n") 2)
+        (fatw-bit (fatw-good "read alpha.txt" "" "alpha 1\nbeta 2\n") 4)
+        (fatw-bit (fatw-good "cat alpha.txt table.txt" "" "alpha 1\nbeta 2\nleft:right\nup:down\n") 8)
+        (fatw-bit (fatw-good "head -n 1 alpha.txt" "" "alpha 1\n") 16)
+        (fatw-bit (fatw-good "tail -n 1 alpha.txt" "" "beta 2\n") 32)
+        (fatw-bit (fatw-good "wc -lwc" "one two\n" "1 2 8\n") 64)
+        (fatw-bit (fatw-good "sort -nu" "10\n2\n2\n" "2\n10\n") 128)
+        (fatw-bit (fatw-good "uniq -c" "a\na\nb\n" "2 a\n1 b\n") 256)
+        (fatw-bit (fatw-good "tr -d '\\n'" "one\ntwo\n" "onetwo") 512)
+        (fatw-bit (fatw-good "cut -d : -f 2" "left:right\nup:down\n" "right\ndown\n") 1024)
+        (fatw-bit (fatw-good "awk '{print $2}'" "one two\nthree four\n" "two\nfour\n") 2048)
+        (fatw-bit (fatw-good "sed -n 2p alpha.txt" "" "beta 2\n") 4096)
+        (fatw-bit (fatw-next-good (fatw-call "edit alpha.txt 'beta 2' 'gamma 3'" "") "read alpha.txt" "alpha 1\ngamma 3\n") 8192)
+        (fatw-bit (fatw-next-good (fatw-call "write notes.md" "held note\n") "read notes.md" "held note\n") 16384)
+        (fatw-bit (and (str_eq (fatw-error (fat-wire-call "{bad}")) "invalid-wire-json")
+            (and (str_eq (fatw-error (fat-wire-call "{\"input\":\"x\"}")) "wire-field-required:command")
+                (str_eq (fatw-error (fat-wire-call "{\"command\":\"cat | wc\"}")) "shell-syntax-not-supported"))) 32768)
+        (fatw-bit (str_eq (fc-respond (fatw-request "read alpha.txt" "" (fatw-docs))) (fatw-call "read alpha.txt" "")) 65536))))
