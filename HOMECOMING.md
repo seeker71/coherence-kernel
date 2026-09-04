@@ -24,18 +24,18 @@ are scoped here so the word "home" stays unspent until they are real.
 - **Source runs natively.** `fkwu file.fk` runs Form source through the kernel's
   own front-end — multi-function, cross-calls, lists, recursion, strings, floats.
   `grammars/form-eval.fk` evaluates Form off the BMF cursor as a recipe
-  (`form-eval-band` 65535, `form-eval-full-band` 635, re-run 2026-09-03). `fkwu
+  (`form-eval-band` 65535, `form-eval-full-band` 635, re-run 2026-09-04). `fkwu
   file.bml` lowers the high grammar in memory. Flatten is not a run lane.
 - **The kernel proves its own four-way.** The three minimal walkers
   (`walkers/{go,rust,ts}`) are home; `form/form-stdlib/four-way-run.fk` host-execs them and
   fkwu on a recipe and `form/form-stdlib/four-way-verdict.fk` diagnoses agreement:
 
   ```sh
-  ./fkwu proof/four-way-run-recipe42.fk    # -> 0 (FOUR-WAY; re-run 2026-09-03)
+  ./fkwu proof/four-way-run-recipe42.fk    # -> 0 (FOUR-WAY; re-run 2026-09-04)
   ```
 - **The runner runs real body cells.** `form/form-stdlib/native-vs-rented.fk` answers
   `11111` on fkwu, bit-identical to the walkers, with no Go, no flatten, no
-  T_flat (`native-vs-rented-band`, re-run 2026-09-03). The walkers stay what they
+  T_flat (`native-vs-rented-band`, re-run 2026-09-04). The walkers stay what they
   are — proof siblings, never the runtime.
 
 ## The Language Path
@@ -68,7 +68,7 @@ asynchronous external control or direct weight actuation. Usage and safety live 
 [`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md).
 
 `form/form-stdlib/source-compiler-grammar-bridge.fk` makes `form-definition-language`
-load-bearing (`source-compiler-grammar-bridge-band` 32767, re-run 2026-09-03):
+load-bearing (`source-compiler-grammar-bridge-band` 32767, re-run 2026-09-04):
 
 ```text
 module calc { data rows = [40,2]; fn answer() = add(40,2); }
@@ -98,17 +98,17 @@ scaled-dot, causal mask, softmax), multi-head concat, the block, positional
 embedding, the LM head, the composed embed → stack → finalLN → logits path — at
 small width (`model/tests/transformer-forward-full-band.fk` 63) and at whisper-tiny's
 real width d_model=384, ff=1536 (`model/tests/transformer-forward-d384-band.fk` 63),
-both re-run 2026-09-03 on fkwu; the bands declare their own four-way.
+both re-run 2026-09-04 on fkwu; the bands declare their own four-way.
 
 **Home, on metal:** Qwen3.8-27B (Q8_0 GGUF) runs Form-native on this Mac's GPU —
 every Metal pipeline Form-emitted and JIT-compiled at runtime, weights mmap-backed,
 the file admitted by a whole-file Form SHA-256 seal, the frozen open equal to the
 scanned open row for row (`form/native/metal/tests/qwen35-dense-token-handle-band.fk`
 2147483647, `qwen35-crystal-band` 255, `llama-token-handle-band` 255, all re-run
-2026-09-03). A permanent resident (`observe/form-cli-peer-contribution-live.fk`, the
-hearth) holds one admission per lifetime and serves direct turns; the sealed
-held-out families and the parity distances are measured in
-[`CURRENT_FLOOR.md`](CURRENT_FLOOR.md).
+2026-09-04). The resident cell (`observe/form-cli-peer-contribution-live.fk`, the
+hearth) holds one admission per lifetime and serves direct turns while it stands;
+`.hearth/board` says whether one does. The sealed held-out families and the parity
+distances are measured in [`CURRENT_FLOOR.md`](CURRENT_FLOOR.md).
 
 **Remains:** the body's own native voice — a LoRA tensor writer (`LoraWriter = 0`
 today; `lora-adapter-band` 31 proves only the identity), the distill loop over the

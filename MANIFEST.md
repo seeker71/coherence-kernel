@@ -13,9 +13,9 @@ from line one**. Its floor: *fkwu on metal, no go/rust/clang/bash/python in the 
   `axioms/kernel-self-composition.form`).
 - The **minimal host-OS / resource surface** — the INTERN / OBSERVE / OFFER / PORT families
   (`form/form-stdlib/minimal-surface.fk`) and the host resource ports (RAM, CPU, GPU, I/O, time, random, disk).
-- The **c-seeded `fkwu`** runtime: one committed C file (`runtime/fkwu-uni.c`, 15,365 lines on
-  2026-09-03 — a shrink target, never the destination) and the generated op table
-  (`runtime/fkwu-optable.h`, 194 rows).
+- The **c-seeded `fkwu`** runtime: one committed C file (`runtime/fkwu-uni.c`, 16,190 lines on
+  2026-09-04 — a shrink target, never the destination) and the generated op table
+  (`runtime/fkwu-optable.h`, 187 op rows).
 - `form-cli` and the **form shell** (`fsh`) — the native agent surfaces, recipes this same `fkwu` loads.
 - The **Form-native recipes** (`.fk`) and the **BML high grammar** (`.bml`) — the body. New meaning is
   authored in BML or higher; `.fk` is a lowering.
@@ -58,9 +58,10 @@ Form→asm lowering, Metal and MLX. Build out fkwu; keep the walkers thin.
 
 **One home per organ.** Recipes are content-addressed: the same `.fk` interns to the same NodeID on
 every kernel, so the body is shareable — but only if there is no second *copy* to diverge. This repo is
-the canonical home for the kernel, the minimal surface, and the recipe body; the origin repo consumes it
-(`form/README.md`, consumer submodule). Inside this repo the same rule holds: a byte-identical or stale
-twin is released the moment it is proven so (`form/form-stdlib/release-ledger.bml` holds the rows).
+the canonical home for the kernel, the minimal surface, and the recipe body; the parent consumes it through
+the consumer-submodule door in `form/README.md` (the `form-submodule` branch stands on origin; the parent
+still carries its own `form/` copy). Inside this repo the same rule holds: `form/form-stdlib/release-ledger.bml`
+holds the twin rows (R1, R2, R23), and six byte-identical `.fk` groups stand in the tree on 2026-09-04.
 
 ## The validation plan
 
@@ -68,7 +69,7 @@ Every recipe on the pure-recipe surface is proven **four-way** (`Go=Rust=TS=fkwu
 c-seeded `fkwu` native, with no Go and no clang in the run path. The kernel proves this *itself*:
 
 ```sh
-./fkwu proof/four-way-run-recipe42.fk    # -> 0 (FOUR-WAY; re-run 2026-09-03)
+./fkwu proof/four-way-run-recipe42.fk    # -> 0 (FOUR-WAY; re-run 2026-09-04)
 ```
 
 `form/form-stdlib/four-way-run.fk` host-execs the three walkers + fkwu on a recipe and `form/form-stdlib/four-way-verdict.fk`
@@ -86,7 +87,7 @@ gate's live census and never semantic authority.
 ```sh
 ./fkwu gate/structural-gate-run.fk
 # total/unclassified/carrier/oracle/fixture/proof-sibling/tooling/foreign-grammar
-# [207, 0, 49, 3, 20, 57, 74, 4]   then 1   (re-observed 2026-09-03)
+# [206, 0, 48, 3, 20, 57, 74, 4]   then 1   (re-observed 2026-09-04)
 ```
 
 `form/validate.sh` runs the same gate before its sibling sweep and turns a `0` into a nonzero exit, so
@@ -109,8 +110,8 @@ silently lacking newer evaluator capabilities. Run it before believing anything 
 
 ### Foundation & kernel
 - **`axioms/`** — the five axioms and their derivations (`.form`). The reasoning ground for everything.
-- **`surface/`** — the minimal host surface (`minimal-surface.fk`), the BML class surface of core (`core-class-surface.fk`),
-  sense channels.
+- **`surface/`** — the BML class surface of core (`core-class-surface.fk`) and the sense channels
+  (`sense-channels.fk`); the minimal host surface itself is `form/form-stdlib/minimal-surface.fk`.
 - **`runtime/`** — the one C seed and its generated op table. Growth without a shrink path is declined.
 - **`bootstrap/`** — the grounding cells (`ground.fk` → 42, `ground-recursive.fk` → 55,
   `ground-numeric-list.fk` → `[1, 2.5, [3, 4]]`).
@@ -120,7 +121,7 @@ silently lacking newer evaluator capabilities. Run it before believing anything 
 - **`flatten/`** — the op manifest (`form-flatten.fk` owns `flt-ops`) and its generators.
 
 ### Standard library & agent surface
-- **`form/form-stdlib/`** — the living stdlib and sole agent dispatch surface (1,445 `.fk`, 1,850 bands,
+- **`form/form-stdlib/`** — the living stdlib and sole agent dispatch surface (1,446 `.fk`, 1,745 bands,
   the BML authority in `bml/`). Core vocabulary in `core.fk` (the narrow-waist string ops and what
   composes over them — `substring` / `str_find` / `str_to_int` are Form, not natives); the wire lane
   (`wire-registry.fk`, `cell-serialize.fk`, `wire-xml.fk`, `wire-corba-cdr.fk`, `wire-path.fk`,
@@ -132,42 +133,41 @@ silently lacking newer evaluator capabilities. Run it before believing anything 
 
 ### Control & grammars
 - **`control/`** — the offer/ack core (fail / stop / choice / exceptions / async over ONE mechanism,
-  axiom-5), pattern-match (`pattern-match-band` 511 four-way, re-run 2026-09-03), choice lanes
+  axiom-5), pattern-match (`pattern-match-band` 511 four-way, re-run 2026-09-04), choice lanes
   (cut / lanes / store / restore / undo / timeout), invite-dispatch. `control/tests/invite-dispatch-band.fk`
   declares 1023 and answers **763** today (preflight clean, rc 0): the second-`<CHOICE>` bit (4) and the
   `<TIMEOUT>` bit (256) are open work, no ceiling in the way.
 - **`grammars/`** — `form-eval.fk` (the meta-circular evaluator off the BMF cursor), BMF core + grammar
-  + loader, shell grammar, control-invite grammar (band 1023, re-run 2026-09-03), field-domain grammars.
+  + loader, shell grammar, control-invite grammar (band 1023, re-run 2026-09-04), field-domain grammars.
 
 ### Mind & trust organs
 - **`cognition/`** — text-frequency (the fear↔love read), the transformer stack, the dialogue covenant,
-  the native cognition cycle (89 `.fk`).
+  the native cognition cycle (88 `.fk`).
 - **`model/`** — numerics and codecs, the form→asm lowering, transformer-backprop, the concept corpora,
   the JIT family (86 `.fk`; the ladder is `docs/form-native-jit-track.form`).
 - **`form/native/metal`** — the Form-native Metal lane: the Qwen3.8-27B dense token handle, the
-  crystal, the KAT and llama handles. Bands re-run 2026-09-03: `kat-token-handle-band` 262143,
+  crystal, the KAT and llama handles. Bands re-run 2026-09-04: `kat-token-handle-band` 262143,
   `metal-handle-door-band` 65535, `jit-metal-lanes-band` 8191, `mlx-derived-band` 16777215,
   `metal-door-band` 15. The Qwen handle and crystal bands declare their own verdicts.
-- **`observe/`** — the trust stack (437 `.fk`, 132 bands): thought-framebuffer, the bidirectional
+- **`observe/`** — the trust stack (444 `.fk`, 128 bands): thought-framebuffer, the bidirectional
   framebuffer channel (observe → control → actuate → re-observe), jacobian-lens, heal-titration,
   calibration, `native-vs-rented.fk` (11111), preflight, door-link-health, body-link-graph,
   belief-freshness, voice-frequency, the autopoietic pulse, the resident (`form-cli-peer-contribution-live.fk`),
   the glass. Usage lives in `docs/live-dynamic-diagnostics.md`.
-- **`learn/`** — the learning ledger (212 `.fk`): dated trials each with its own band, summary ledgers,
+- **`learn/`** — the learning ledger (182 `.fk`): dated trials each with its own band, summary ledgers,
   learning-theory recipes, the Sema teaching set, and the **homecoming distillation corpus**
-  (`homecoming-distillation-corpus.fk`: 652 rows, highest meaning-id 1260 on 2026-09-03).
+  (`homecoming-distillation-corpus.fk`: 654 rows, highest meaning-id 1262 on 2026-09-04).
 - **`presence/`** — embodied voice and the concept live-lanes (100 `.fk`): the duplex frame grid, the
   many-voices lane, speech loopback carriers as local oracles. `presence/voice-roadmap.md`.
 
 ### Supporting organs
 - **`substrate/`** — the local-file substrate (form-fs, storage/resource ports, native structures, cell types).
-- **`routers/`** — request dispatch (`mesh-sensings-route.fk` consumes `json.fk`'s parser live).
 - **`gate/`, `io/`, `ingest/`** — thresholds and the structural gate; the formats roadmap; the
   knowledge-ingest law and the frontier ingests (27 `.fk`).
 - **`plugin/`** — the rented-mind door: the body offered to ChatGPT over fkwu-native HTTP — `/ask`
-  grounded and attuned, `/trace` handing over any cell's change graph. Bands re-run 2026-09-03:
+  grounded and attuned, `/trace` handing over any cell's change graph. Bands re-run 2026-09-04:
   `chatgpt-plugin-band` 111111111, `introduction-band` 111111111, `visitor-ledger-band` 1111111111. The
-  live door at `hati.earth/sema` answers `/ask` and `/trace` (re-observed 2026-09-03).
+  live door at `hati.earth/sema` answers `/ask?q=` and `/trace?path=` (re-observed 2026-09-04).
 - **`teachings/`** — the scoped core teachings ([one-engine](teachings/lc-one-engine.md),
   [name-resolution-as-recipe](teachings/name-resolution-as-recipe.form),
   [form-first-reasoning](teachings/form-first-reasoning.form), [prose-as-recipe](teachings/prose-as-recipe.form),
@@ -181,7 +181,7 @@ silently lacking newer evaluator capabilities. Run it before believing anything 
   docs and 17 prose specs — how Form reaches its environment), the strategic maps
   ([the penumbra map](docs/penumbra-map.md) — where the proof's light falls today),
   [`docs/inheritance/`](docs/inheritance/INHERITANCE.md) (what came home from the origin, and what has not).
-- **`receipts/`** — the dated witness ledger (1,566 receipts). Every claim of "proven / observed" traces
+- **`receipts/`** — the dated witness ledger (1,584 receipts). Every claim of "proven / observed" traces
   to one. Receipts are immutable; a correction is a new receipt that names the one it corrects.
 
 ## Where we are going
@@ -194,7 +194,7 @@ silently lacking newer evaluator capabilities. Run it before believing anything 
    streaming, and the native acoustic model / vocoder remain the named carriers (`presence/voice-roadmap.md`).
 3. **Cognition at native speed.** The JIT ladder's last rung — hot source recipes lowering through the
    Form-owned IR into the host membrane in the live path — is pending (`docs/form-native-jit-track.form`).
-4. **The seed shrinks.** `runtime/fkwu-uni.c` is 15,365 lines; each of `fk_walk_cold`, the source runner,
+4. **The seed shrinks.** `runtime/fkwu-uni.c` is 16,190 lines; each of `fk_walk_cold`, the source runner,
    the `.fkb` loader, and the parser lowers into its Form organ (`release-ledger.bml` R13). The emitted
    artifacts' regen owes a source-native path.
 
