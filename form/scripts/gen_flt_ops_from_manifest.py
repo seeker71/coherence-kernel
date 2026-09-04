@@ -3,6 +3,10 @@
 
 Manifest is authoritative; flt-ops in form-flatten.fk is generated output.
 Default --check fails when drifted; --write refreshes the slice.
+The check half's Form twin stands: gate/flt-ops-gen.bml (proven by
+gate/tests/flt-ops-gen-band.fk); this script is its witness there. The --write
+half is a writer, owed a Form emitter (R59/R62) — until it stands, --write is
+the one remedy for a drifted slice.
 """
 from __future__ import annotations
 
