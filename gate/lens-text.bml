@@ -1,0 +1,194 @@
+//////////////////////////////////////////////////////////////////////
+//
+// gate/lens-text.bml — the text-reading floor the drift lenses share.
+//
+// Executable BML, an organ with no door of its own. R58 in the release
+// ledger turns the Python drift gates in form/scripts into Form lenses
+// the drift-gates door runs natively. Every one of those scripts is a
+// text reader: it opens a handful of source files, finds a needle,
+// reads the digits after it, walks a paren-balanced block, sorts a set
+// difference and prints it in Python's own voice. This unit holds those
+// motions once so each lens is only its invariant.
+//
+// WHAT IS HERE.
+//   lx-has? / lx-count      a needle is present / how many times
+//   lx-at?                  a needle stands exactly at an offset
+//   lx-lines                text as rows of lines, order kept
+//   lx-ints-after           every integer that follows `needle` and is
+//                           closed by `close` — the (eq (fk-tag n) 12)
+//                           and if (t == 63) families
+//   lx-block                the paren-balanced block that begins at
+//                           the first `needle` — the (defn flt-ops ()
+//                           walk the scripts do, depth counted from the
+//                           opening paren, strings and comments unseen
+//                           (the scripts are equally blind; a lens that
+//                           saw more would judge a different text)
+//   lx-triple-*             rows (name arity tag): equality, Python's
+//                           tuple order (name bytewise, arity, tag),
+//                           insertion sort, first-occurrence dedupe,
+//                           set difference
+//   lx-py-*                 Python's repr voice: 'name', (a, b, c),
+//                           [x, y] — so a lens's offender line can be
+//                           compared byte for byte with the script it
+//                           replaces while that script still stands
+//   lx-replace-prefix       one renaming, for that same comparison
+//
+// Every scan reads bytes through str_byte_at (no interning per step);
+// only the pieces that are answered are cut. Absence stays absence:
+// nothing is handed through, never turned into "".
+//
+// preludes: form-stdlib/core.fk form-stdlib/table.bml
+//
+// Proven by: gate/tests/op-manifest-band.fk (the first lens on this floor)
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormLensText {
+        thought lens-text-pattern = list("text-is-rows", "digits-after-a-needle", "block-from-the-paren", "python-voice-on-demand", "absence-stays-absence");
+
+        def lx-nl() = byte_to_str(10);
+        def lx-host-text(v) = if nothing?(v) then "" else v;
+
+        // ---- presence ----
+        def lx-has?(text, needle) = if ge(str_find(text, needle, 0), 0) then 1 else 0;
+        def lx-count-go(text, needle, from, acc) {
+            let i = str_find(text, needle, from);
+            if lt(i, 0) then acc else lx-count-go(text, needle, add(i, str_len(needle)), add(acc, 1));
+        }
+        def lx-count(text, needle) = if eq(str_len(needle), 0) then 0 else lx-count-go(text, needle, 0, 0);
+        def lx-at?(text, i, needle) = if gt(add(i, str_len(needle)), str_len(text)) then 0 else if str_eq(substring(text, i, add(i, str_len(needle))), needle) then 1 else 0;
+
+        // ---- lines, order kept; a last line without its newline still counts ----
+        def lx-lines(text) = lx-lines-go(text, 0, list());
+        def lx-lines-go(text, from, acc) {
+            let nl = str_find(text, lx-nl(), from);
+            if lt(nl, 0) then reverse(lx-lines-last(text, from, acc))
+            else lx-lines-go(text, add(nl, 1), cons(substring(text, from, nl), acc));
+        }
+        def lx-lines-last(text, from, acc) = if lt(from, str_len(text)) then cons(substring(text, from, str_len(text)), acc) else acc;
+        def lx-strip-nl(s) = if eq(str_len(s), 0) then s else if eq(str_byte_at(s, sub(str_len(s), 1)), 10) then lx-strip-nl(substring(s, 0, sub(str_len(s), 1))) else s;
+
+        // ---- digits ----
+        def lx-digit-at?(s, i) = if ge(i, str_len(s)) then 0 else if and(ge(str_byte_at(s, i), 48), le(str_byte_at(s, i), 57)) then 1 else 0;
+        def lx-digits-end(s, i) = if eq(lx-digit-at?(s, i), 1) then lx-digits-end(s, add(i, 1)) else i;
+        // the end of an integer with an optional leading minus; a lone minus is no integer (answers i)
+        def lx-int-end(s, i) = if and(lt(i, str_len(s)), eq(str_byte_at(s, i), 45)) then lx-int-end-signed(s, i, lx-digits-end(s, add(i, 1))) else lx-digits-end(s, i);
+        def lx-int-end-signed(s, i, e) = if eq(e, add(i, 1)) then i else e;
+        def lx-int-span(s, a, b) = str_to_int(substring(s, a, b));
+
+        // ---- every integer that follows `needle` and is closed by `close` ----
+        def lx-ints-after(text, needle, close) = lx-ints-after-go(text, needle, close, 0, list());
+        def lx-ints-after-go(text, needle, close, from, acc) {
+            let i = str_find(text, needle, from);
+            if lt(i, 0) then reverse(acc) else lx-ints-after-at(text, needle, close, add(i, str_len(needle)), acc);
+        }
+        def lx-ints-after-at(text, needle, close, a, acc) {
+            let b = lx-digits-end(text, a);
+            if eq(b, a) then lx-ints-after-go(text, needle, close, a, acc)
+            else if eq(lx-at?(text, b, close), 1) then lx-ints-after-go(text, needle, close, b, cons(lx-int-span(text, a, b), acc))
+            else lx-ints-after-go(text, needle, close, b, acc);
+        }
+
+        // ---- the paren-balanced block that begins at the first `needle` ----
+        def lx-block-end(text, i, depth) {
+            if ge(i, str_len(text)) then i
+            else if eq(str_byte_at(text, i), 40) then lx-block-end(text, add(i, 1), add(depth, 1))
+            else if eq(str_byte_at(text, i), 41) then lx-block-close(text, i, depth)
+            else lx-block-end(text, add(i, 1), depth);
+        }
+        def lx-block-close(text, i, depth) = if le(depth, 1) then add(i, 1) else lx-block-end(text, add(i, 1), sub(depth, 1));
+        def lx-block(text, needle) {
+            let s = str_find(text, needle, 0);
+            if lt(s, 0) then "" else substring(text, s, lx-block-end(text, s, 0));
+        }
+        def lx-block-from(text, s) = substring(text, s, lx-block-end(text, s, 0));
+
+        // ---- ints as a set ----
+        def lx-int-in?(xs, n) = if eq(len(xs), 0) then 0 else if eq(head(xs), n) then 1 else lx-int-in?(tail(xs), n);
+        def lx-int-uniq-go(xs, acc) = if eq(len(xs), 0) then reverse(acc) else lx-int-uniq-go(tail(xs), if eq(lx-int-in?(acc, head(xs)), 1) then acc else cons(head(xs), acc));
+        def lx-int-uniq(xs) = lx-int-uniq-go(xs, list());
+        def lx-int-max(xs, best) = if eq(len(xs), 0) then best else lx-int-max(tail(xs), if gt(head(xs), best) then head(xs) else best);
+        def lx-int-insert(n, sorted) = if eq(len(sorted), 0) then list(n) else if lt(n, head(sorted)) then cons(n, sorted) else cons(head(sorted), lx-int-insert(n, tail(sorted)));
+        def lx-int-sort-go(xs, acc) = if eq(len(xs), 0) then acc else lx-int-sort-go(tail(xs), lx-int-insert(head(xs), acc));
+        def lx-int-sort(xs) = lx-int-sort-go(xs, list());
+
+        // ---- strings bytewise, Python's order for ASCII names ----
+        def lx-str-lt-go(a, b, i) {
+            if ge(i, str_len(a)) then lx-str-lt-ended(i, b)
+            else if ge(i, str_len(b)) then 0
+            else if lt(str_byte_at(a, i), str_byte_at(b, i)) then 1
+            else if gt(str_byte_at(a, i), str_byte_at(b, i)) then 0
+            else lx-str-lt-go(a, b, add(i, 1));
+        }
+        // a ran out first: a is less exactly when b still has bytes
+        def lx-str-lt-ended(i, b) = if lt(i, str_len(b)) then 1 else 0;
+        def lx-str-lt?(a, b) = lx-str-lt-go(a, b, 0);
+        def lx-str-in?(xs, s) = if eq(len(xs), 0) then 0 else if str_eq(head(xs), s) then 1 else lx-str-in?(tail(xs), s);
+        def lx-str-insert(s, sorted) = if eq(len(sorted), 0) then list(s) else if eq(lx-str-lt?(s, head(sorted)), 1) then cons(s, sorted) else cons(head(sorted), lx-str-insert(s, tail(sorted)));
+        def lx-str-sort-go(xs, acc) = if eq(len(xs), 0) then acc else lx-str-sort-go(tail(xs), lx-str-insert(head(xs), acc));
+        def lx-str-sort(xs) = lx-str-sort-go(xs, list());
+        def lx-str-uniq-go(xs, acc) = if eq(len(xs), 0) then reverse(acc) else lx-str-uniq-go(tail(xs), if eq(lx-str-in?(acc, head(xs)), 1) then acc else cons(head(xs), acc));
+        def lx-str-uniq(xs) = lx-str-uniq-go(xs, list());
+        def lx-str-minus(xs, ys) = tb-filter2(xs, lx-str-absent?, ys);
+        def lx-str-absent?(s, ys) = if eq(lx-str-in?(ys, s), 1) then 0 else 1;
+        def lx-str-common(xs, ys) = tb-filter2(xs, lx-str-present?, ys);
+        def lx-str-present?(s, ys) = lx-str-in?(ys, s);
+
+        // ---- rows (name arity tag ...): the first three fields are the triple ----
+        def lx-triple-name(r) = nth(r, 0);
+        def lx-triple-arity(r) = nth(r, 1);
+        def lx-triple-tag(r) = nth(r, 2);
+        def lx-triple-eq?(r, s) = if and(and(str_eq(nth(r, 0), nth(s, 0)), eq(nth(r, 1), nth(s, 1))), eq(nth(r, 2), nth(s, 2))) then 1 else 0;
+        def lx-triple-lt?(r, s) {
+            if eq(lx-str-lt?(nth(r, 0), nth(s, 0)), 1) then 1
+            else if eq(lx-str-lt?(nth(s, 0), nth(r, 0)), 1) then 0
+            else if lt(nth(r, 1), nth(s, 1)) then 1
+            else if gt(nth(r, 1), nth(s, 1)) then 0
+            else if lt(nth(r, 2), nth(s, 2)) then 1 else 0;
+        }
+        def lx-triple-in?(rows, r) = if eq(len(rows), 0) then 0 else if eq(lx-triple-eq?(head(rows), r), 1) then 1 else lx-triple-in?(tail(rows), r);
+        def lx-triple-absent?(r, rows) = if eq(lx-triple-in?(rows, r), 1) then 0 else 1;
+        def lx-triple-minus(xs, ys) = tb-filter2(xs, lx-triple-absent?, ys);
+        def lx-triple-uniq-go(xs, acc) = if eq(len(xs), 0) then reverse(acc) else lx-triple-uniq-go(tail(xs), if eq(lx-triple-in?(acc, head(xs)), 1) then acc else cons(head(xs), acc));
+        def lx-triple-uniq(xs) = lx-triple-uniq-go(xs, list());
+        def lx-triple-insert(r, sorted) = if eq(len(sorted), 0) then list(r) else if eq(lx-triple-lt?(r, head(sorted)), 1) then cons(r, sorted) else cons(head(sorted), lx-triple-insert(r, tail(sorted)));
+        def lx-triple-sort-go(xs, acc) = if eq(len(xs), 0) then acc else lx-triple-sort-go(tail(xs), lx-triple-insert(head(xs), acc));
+        def lx-triple-sort(xs) = lx-triple-sort-go(xs, list());
+        // Python's sorted(set(a) - set(b))
+        def lx-triple-diff(xs, ys) = lx-triple-sort(lx-triple-uniq(lx-triple-minus(xs, ys)));
+        def lx-triple-name-in?(rows, name) = if eq(len(rows), 0) then 0 else if str_eq(nth(head(rows), 0), name) then 1 else lx-triple-name-in?(tail(rows), name);
+        def lx-triple-any-negative?(rows) = if eq(len(rows), 0) then 0 else if lt(nth(head(rows), 1), 0) then 1 else lx-triple-any-negative?(tail(rows));
+
+        // ---- Python's repr voice ----
+        def lx-py-str(s) = str_concat("'", str_concat(s, "'"));
+        def lx-py-triple(r) = str_concat("(", str_concat(lx-py-str(nth(r, 0)), str_concat(", ", str_concat(int_to_str(nth(r, 1)), str_concat(", ", str_concat(int_to_str(nth(r, 2)), ")"))))));
+        def lx-py-list(rows, f) = str_concat("[", str_concat(tb-join(rows, f, ", "), "]"));
+        def lx-py-str-list(xs) = lx-py-list(xs, lx-py-str);
+        // {sorted_list[:5]}...  — the scripts' way of naming the first five offenders
+        def lx-py-head5(rows, f) = str_concat(lx-py-list(take(5, rows), f), "...");
+
+        // ---- one renaming, for comparing a lens's voice with its twin's ----
+        def lx-replace-prefix(s, old, new) = if eq(lx-at?(s, 0, old), 1) then str_concat(new, substring(s, str_len(old), str_len(s))) else s;
+
+        // ---- the error voice every lens speaks: one "error: ..." line per row, then NAME: FAIL; or NAME: OK ... ----
+        def lx-print-errors(errors) = if eq(len(errors), 0) then 0 else lx-print-errors-one(head(errors), tail(errors));
+        def lx-print-errors-one(e, rest) {
+            print(str_concat("error: ", e));
+            lx-print-errors(rest);
+        }
+        def lx-verdict(name, errors, okline) {
+            if eq(len(errors), 0) then lx-verdict-ok(name, okline) else lx-verdict-fail(name, errors);
+        }
+        def lx-verdict-ok(name, okline) {
+            print(str_concat(name, str_concat(": OK ", okline)));
+            1;
+        }
+        def lx-verdict-fail(name, errors) {
+            lx-print-errors(errors);
+            print(str_concat(name, ": FAIL"));
+            0;
+        }
+    }
+    0;
+}
