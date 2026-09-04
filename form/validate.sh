@@ -479,9 +479,49 @@ compiler_chain=("form-stdlib/engine-constants.fk" "form-stdlib/compiler-objects.
 compiler_stamp="$(form_hash16 "${compiler_chain[@]}" "${FKWU_SRC:-}" "$GO_BIN")"
 
 prepared_args=()
+# Strips a source's own "; preludes:"/"import" header lines. prepare_sources
+# feeds every arm an EXPLICIT, already-ordered file list (typed by the caller,
+# or auto-expanded by fk_expand_declared_deps for the single-file case below)
+# -- so by the time a file reaches prepared_args, every dependency it would
+# name is already present as its own separate, independently prepared entry.
+# The header is therefore pure redundancy for this pipeline, and since
+# 2026-09-03 Go/Rust/TS/fkwu all walk "; preludes:" directives themselves, a
+# LIVE header is actively dangerous: it re-names a dependency by its RAW path
+# even when that dependency was separately lowered+cached here under a
+# DIFFERENT path (SOURCE_CACHE_DIR/<hash>.fk) — reintroducing the exact raw,
+# un-lowered "section [form.bml]" text the lens below exists to strip, now
+# through a side door the kernels' new prelude walk opens right back up.
+# Stripping is a pure no-op for every reader in this tree: the header is
+# already just a comment line, inert to any Form parser; only the kernels'
+# new directive SCAN treats its text as meaningful, and only that scan is
+# what this suppresses.
+fk_strip_prelude_header() {
+    local src_file="$1" dest_file="$2"
+    awk '
+        /^;[[:space:]]*preludes:/ { next }
+        /^[[:space:]]*import([[:space:]:]|")/ { next }
+        /^;[[:space:]]*import([[:space:]:]|")/ { next }
+        { print }
+    ' "$src_file" > "$dest_file"
+}
+
+# True when $1's own "preludes:" directive (";"-led for .fk, "//"-led for
+# .bml -- form-source-compile-file's lowering keeps a .bml's original
+# comment lines, so a LOWERED file can carry either marker too) names a
+# ".bml" dependency. fk_declared_deps below (the walk fk_expand_declared_deps
+# uses for single-file auto-expand) only ever emits ".fk" tokens, so a
+# ".bml" dependency named ONLY in a header stripping would erase is
+# invisible to bash on every other path -- fk_strip_prelude_header must
+# leave that specific file's header alone so the kernels' own "; preludes:"/
+# "// preludes:" walk (which DOES handle ".bml", including recursively
+# lowering it) is the thing that finds it instead.
+fk_prelude_has_bml_dep() {
+    grep -Eq '^(;|//)[[:space:]]*preludes:.*\.bml([[:space:]]|,|$)' "$1"
+}
+
 prepare_sources() {
     prepared_args=()
-    local src out safe driver key cached
+    local src out safe driver key cached plain stripped
     for src in "$@"; do
         if grep -Eq '^[[:space:]]*section \[' "$src"; then
             key="$(form_hash16 "$src")-$compiler_stamp"
@@ -499,7 +539,13 @@ prepare_sources() {
                 driver="$(mktemp "$source_compile_dir/compile-${safe}.XXXXXX")"
                 printf '(do (form-source-compile-file "%s" "%s"))\n' "$src" "$out" > "$driver"
                 if "$GO_BIN" "${compiler_chain[@]}" "$driver" >/dev/null && [[ -s "$out" ]]; then
-                    mv -f "$out" "$cached"
+                    if fk_prelude_has_bml_dep "$out"; then
+                        mv -f "$out" "$cached"
+                    else
+                        stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.stripped.XXXXXX")"
+                        fk_strip_prelude_header "$out" "$stripped"
+                        mv -f "$stripped" "$cached"
+                    fi
                 fi
                 rm -f "$out" "$driver"
             fi
@@ -513,8 +559,20 @@ prepare_sources() {
                 echo "  a section-bearing source cannot run raw; fix the lens, not the band" >&2
                 exit 1
             fi
-        else
+        elif fk_prelude_has_bml_dep "$src"; then
+            # Leave this file exactly as it is on disk: its header names a
+            # ".bml" dependency fk_declared_deps can't see, so it must stay
+            # live for the kernels' own directive walk to find and lower.
             prepared_args+=("$src")
+        else
+            key="$(form_hash16 "$src")-plain"
+            plain="$SOURCE_CACHE_DIR/$key.fk"
+            if [[ ! -s "$plain" ]]; then
+                stripped="$(mktemp "$SOURCE_CACHE_DIR/.${key}.stripped.XXXXXX")"
+                fk_strip_prelude_header "$src" "$stripped"
+                mv -f "$stripped" "$plain"
+            fi
+            prepared_args+=("$plain")
         fi
     done
 }
