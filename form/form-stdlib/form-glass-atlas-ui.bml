@@ -74,6 +74,10 @@ section [form.bml] {
         def fglat-sample-segments(rows, epoch, count) = if or(le(count, 0), eq(len(rows), 0)) then list() else cons(fglat-sample-segment(head(rows), epoch), fglat-sample-segments(tail(rows), epoch, sub(count, 1)));
         def fglat-sample-row(rows, epoch, width) = cons(fglat-prefix("s"), fglat-sample-segments(rows, epoch, fglat-capacity(width)));
         def fglat-sample-lines(rows, epoch, width, count) = if or(le(count, 0), eq(len(rows), 0)) then list() else cons(fglat-sample-row(rows, epoch, width), fglat-sample-lines(fgd-drop(rows, fglat-capacity(width)), epoch, width, sub(count, 1)));
+        def fglat-valued-sample?(sample) = if eq(fgtm-field-present?(fgtm-sample-bytes(sample)), 1) then 1 else if eq(fgtm-field-present?(fgtm-sample-capacity(sample)), 1) then 1 else if and(eq(fgtm-field-present?(fgtm-sample-heat(sample)), 1), gt(fgtm-field-value(fgtm-sample-heat(sample)), 0)) then 1 else eq(fgtm-field-present?(fgtm-sample-handle(sample)), 1);
+        def fglat-valued-samples(rows) = if eq(len(rows), 0) then list() else if eq(fglat-valued-sample?(head(rows)), 1) then cons(head(rows), fglat-valued-samples(tail(rows))) else fglat-valued-samples(tail(rows));
+        def fglat-ev-count-metrics(rows, ev) = if eq(len(rows), 0) then 0 else add(if str_eq(fgo-evidence(head(rows)), ev) then 1 else 0, fglat-ev-count-metrics(tail(rows), ev));
+        def fglat-ev-count-samples(rows, ev) = if eq(len(rows), 0) then 0 else add(if str_eq(fgtm-sample-evidence(head(rows)), ev) then 1 else 0, fglat-ev-count-samples(tail(rows), ev));
 
         def fglat-observation-prefix(truth) = if eq(fgov2-measured?(truth), 1) then "*" else if eq(fgov2-stale?(truth), 1) then "+" else if eq(fgov2-error?(truth), 1) then "!" else if eq(fgov2-absent?(truth), 1) then "-" else "?";
         def fglat-truth-text(truth, unit) = if str_eq(unit, "state") then fgov2-truth-value(truth) else if str_eq(unit, "bytes") then fgd-format-bytes(fgov2-truth-value(truth)) else fgd-format-count(fgov2-truth-value(truth));
@@ -224,7 +228,9 @@ section [form.bml] {
         def fglat-metric-stage-value(metric) = if and(eq(fgo-int-value(metric), 0), eq(fgd-semantic-zero-state?(fgo-lifecycle(metric)), 1)) then fglat-compact-zero(fgo-lifecycle(metric)) else fgd-format-count(fgo-int-value(metric));
         def fglat-pick-live-metric(primary, fallback) = if eq(fglat-metric-live?(primary), 1) then primary else fallback;
         def fglat-aggregate-pipeline-line(metrics, samples, observations) {
-            let queue = fgd-find-metric(metrics, "queue-depth");
+            let queueDepth = fgd-find-metric(metrics, "queue-depth");
+            let queueFrames = fgd-find-metric(metrics, "queue-task-frames");
+            let queue = if eq(fglat-metric-live?(queueDepth), 1) then queueDepth else queueFrames;
             let queueState = fgd-find-metric(metrics, "queue-state");
             let token = fglat-find-sample-kind(samples, "token-position");
             let ownerTokens = fglui-owner-token-fallback-samples(samples);
@@ -270,11 +276,15 @@ section [form.bml] {
             let maxCpu = fglat-metric-max(cpus, 0);
             let sumRss = fglat-metric-sum(rsses, 0);
             let pageins = fgd-find-metric(metrics, "pageins");
+            let pinDelta = fgd-find-metric(metrics, "pageins-delta");
             let disk = fgd-find-metric(metrics, "disk-mbps");
             let tps = fgd-find-metric(metrics, "disk-tps");
+            let load = fgd-find-metric(metrics, "load-1");
             let metal = fglat-find-sample-id(samples, "memory.owner.metal-current-allocated");
             let mapped = fglat-find-sample-id(samples, "mapped.qwen3.8-flash-next");
-            fgd-segment-line(fgd-cat(list("DOING n=", int_to_str(len(rsses)), " cpu=", fgd-format-count(div(maxCpu, 10)), "% rss=", if eq(sumRss, 0) then "?" else fgd-format-bytes(sumRss), " ", fglat-owner-doing-text(metrics), " ", fglat-token-stall-text(samples, epoch), " pin=", if eq(fglat-metric-live?(pageins), 1) then fgd-format-count(fgo-int-value(pageins)) else "?", " dsk=", if eq(fglat-metric-live?(disk), 1) then str_concat(int_to_str(fgo-int-value(disk)), "MB/s") else if eq(fglat-metric-live?(tps), 1) then str_concat(int_to_str(fgo-int-value(tps)), "tps") else "?", " ", fglat-sample-bytes-text(metal))), width, fgd-style-for-plane("cpu", 255, if gt(maxCpu, 200) then 1 else 0), "atlas.doing", list("atlas", "process", "health", "flow"), "physical-live");
+            let pinText = if eq(fglat-metric-live?(pinDelta), 1) then if eq(fgo-int-value(pinDelta), 0) then "0" else str_concat("+", fgd-format-count(fgo-int-value(pinDelta))) else if eq(fglat-metric-live?(pageins), 1) then fgd-format-count(fgo-int-value(pageins)) else "?";
+            let loadText = if eq(fglat-metric-live?(load), 1) then fgd-cat(list(" load=", int_to_str(div(fgo-int-value(load), 10)), ".", int_to_str(mod(fgo-int-value(load), 10)))) else "";
+            fgd-segment-line(fgd-cat(list("DOING n=", int_to_str(len(rsses)), " cpu=", fgd-format-count(div(maxCpu, 10)), "% rss=", if eq(sumRss, 0) then "?" else fgd-format-bytes(sumRss), loadText, " ", fglat-owner-doing-text(metrics), " ", fglat-token-stall-text(samples, epoch), " pin=", pinText, " dsk=", if eq(fglat-metric-live?(disk), 1) then str_concat(int_to_str(fgo-int-value(disk)), "MB/s") else if eq(fglat-metric-live?(tps), 1) then str_concat(int_to_str(fgo-int-value(tps)), "tps") else "?", " ", fglat-sample-bytes-text(metal))), width, fgd-style-for-plane("cpu", 255, if gt(maxCpu, 200) then 1 else 0), "atlas.doing", list("atlas", "process", "health", "flow"), "physical-live");
         }
         def fglat-pressure-line(metrics, samples, history, width) {
             let freeM = fgd-find-metric(metrics, "memory-free");
@@ -299,22 +309,25 @@ section [form.bml] {
             let cap = fglat-capacity(width);
             let knownMetrics = fglat-moving-metrics(metrics);
             let missingMetrics = fglat-missing-metrics(metrics);
+            let valuedSamples = fglat-valued-samples(samples);
             let knownObservations = fglui-available-observations(observations);
             let seamObservations = fglui-seam-observations(observations);
             let tileRows = fgd-max(0, sub(rowBudget, 12));
-            let knownMetricRows = fglat-rows-granted(fglat-rows-needed(len(knownMetrics), cap, tileRows), tileRows);
+            let sampleFloor = 3;
+            let metricBudget = fgd-max(0, sub(tileRows, sampleFloor));
+            let knownMetricRows = fglat-rows-granted(fglat-rows-needed(len(knownMetrics), cap, tileRows), metricBudget);
             let afterKnownMetrics = sub(tileRows, knownMetricRows);
             let missingMetricRows = 0;
             let afterMetrics = afterKnownMetrics;
-            let sampleRows = fglat-rows-granted(fglat-rows-needed(len(samples), cap, tileRows), afterMetrics);
+            let sampleRows = fglat-rows-granted(fglat-rows-needed(len(valuedSamples), cap, tileRows), afterMetrics);
             let afterSamples = sub(afterMetrics, sampleRows);
             let knownObservationRows = fglat-rows-granted(fglat-rows-needed(len(knownObservations), cap, tileRows), afterSamples);
             let afterKnownObservations = sub(afterSamples, knownObservationRows);
             let seamObservationRows = fglat-rows-granted(fglat-rows-needed(len(seamObservations), cap, tileRows), afterKnownObservations);
             let shownMetrics = fglat-shown(len(knownMetrics), mul(cap, knownMetricRows));
-            let shownSamples = fglat-shown(len(samples), mul(cap, sampleRows));
+            let shownSamples = fglat-shown(len(valuedSamples), mul(cap, sampleRows));
             let shownObservations = add(fglat-shown(len(knownObservations), mul(cap, knownObservationRows)), fglat-shown(len(seamObservations), mul(cap, seamObservationRows)));
-            fgd-max(0, add(sub(len(knownMetrics), shownMetrics), add(sub(len(samples), shownSamples), sub(len(observations), shownObservations))));
+            fgd-max(0, add(sub(len(knownMetrics), shownMetrics), add(sub(len(valuedSamples), shownSamples), sub(len(knownObservations), shownObservations))));
         }
         def fglat-omitted-count(metrics, samples, observations, width) = fglat-omitted-count-for-rows(metrics, samples, observations, width, 999);
 
@@ -322,14 +335,17 @@ section [form.bml] {
             let cap = fglat-capacity(width);
             let knownMetrics = fglat-moving-metrics(metrics);
             let missingMetrics = fglat-missing-metrics(metrics);
+            let valuedSamples = fglat-valued-samples(samples);
             let knownObservations = fglui-available-observations(observations);
             let seamObservations = fglui-seam-observations(observations);
             let tileRows = fgd-max(0, sub(rowBudget, 12));
-            let knownMetricRows = fglat-rows-granted(fglat-rows-needed(len(knownMetrics), cap, tileRows), tileRows);
+            let sampleFloor = 3;
+            let metricBudget = fgd-max(0, sub(tileRows, sampleFloor));
+            let knownMetricRows = fglat-rows-granted(fglat-rows-needed(len(knownMetrics), cap, tileRows), metricBudget);
             let afterKnownMetrics = sub(tileRows, knownMetricRows);
             let missingMetricRows = 0;
             let afterMetrics = afterKnownMetrics;
-            let sampleRows = fglat-rows-granted(fglat-rows-needed(len(samples), cap, tileRows), afterMetrics);
+            let sampleRows = fglat-rows-granted(fglat-rows-needed(len(valuedSamples), cap, tileRows), afterMetrics);
             let afterSamples = sub(afterMetrics, sampleRows);
             let knownObservationRows = fglat-rows-granted(fglat-rows-needed(len(knownObservations), cap, tileRows), afterSamples);
             let afterKnownObservations = sub(afterSamples, knownObservationRows);
@@ -337,9 +353,9 @@ section [form.bml] {
             let omitted = fglat-omitted-count-for-rows(metrics, samples, observations, width, rowBudget);
             let title = fgd-title-segment-line(fgd-cat(list("LIVE VALUE ATLAS 5c-KTVVV m", int_to_str(len(metrics)), " s", int_to_str(len(samples)), " o", int_to_str(len(observations)), " drop=", int_to_str(omitted), " cap=", int_to_str(fglat-capacity(width)), "/row")), width, "section.atlas");
             let metricLines = fglat-metric-lines(knownMetrics, width, knownMetricRows);
-            let sampleLines = fglat-sample-lines(samples, epoch, width, sampleRows);
+            let sampleLines = fglat-sample-lines(valuedSamples, epoch, width, sampleRows);
             let observationLines = append(fglat-observation-lines(knownObservations, epoch, width, knownObservationRows), fglat-observation-lines(seamObservations, epoch, width, seamObservationRows));
-            let legend = fgd-segment-line("KTVVV | *=live +=drv #=cat ?=gap 0i idle 0e empty 0d drain --=absent", width, fgd-neutral(176), "atlas.legend", list("atlas", "evidence", "age", "state", "control"), "declared");
+            let legend = fgd-segment-line(fgd-cat(list("now *", int_to_str(add(fglat-ev-count-metrics(metrics, "physical-live"), fglat-ev-count-samples(samples, "physical-live"))), " +", int_to_str(add(fglat-ev-count-metrics(metrics, "derived-window"), fglat-ev-count-samples(samples, "derived-window"))), " #", int_to_str(add(fglat-ev-count-metrics(metrics, "catalog"), fglat-ev-count-samples(samples, "catalog"))), " ?", int_to_str(len(missingMetrics)), " valued-s=", int_to_str(len(valuedSamples)))), width, fgd-neutral(176), "atlas.legend", list("atlas", "evidence", "age", "state", "control"), "physical-live");
             let populated = append(list(title, fglat-phase-line(history, width), fglat-pipeline-line(metrics, samples, observations), fglat-string-line(metrics, history, width), fglat-doing-line(metrics, samples, epoch, width), fglat-pressure-line(metrics, samples, history, width), fglat-seam-line(missingMetrics, width)), append(fglat-flow-lines(history, width), append(metricLines, append(sampleLines, observationLines))));
             fgd-take(append(populated, list(legend)), rowBudget);
         }
