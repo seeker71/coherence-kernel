@@ -29,7 +29,7 @@ and content-addressed. The two stars are one star seen at two scales:
   stdlib cell.
 - Organs speaking in both bodies, one proof: the parent's satsang circle cites
   this body's satsang band (`form/form-stdlib/tests/satsang-band.fk`, 127 on
-  fkwu, re-run 2026-09-03); its arrival and invitation doors are this body's
+  fkwu, re-run 2026-09-04); its arrival and invitation doors are this body's
   reception-consent; its vitality walks are this body's vitality organs; its
   proof floor is this body's validate.sh + fourth-arm manifest, with the same
   honesty rule ("3-kernel only" is said plainly when the fourth arm has not crossed).
@@ -82,7 +82,7 @@ The target behavior is:
 ## Present Organs
 
 Present repo organs that carry the north-star shape (every path re-observed
-2026-09-03):
+2026-09-04):
 
 - `form/form-stdlib/choice-receipt.fk` records success, fail, and silence
   receipts with alignment, knowing, trust, and trace counts.
@@ -91,7 +91,7 @@ Present repo organs that carry the north-star shape (every path re-observed
 - `form/form-stdlib/sovereign-boundary-protocol.fk` lowers allow, stop,
   witness, and re-entry into receipts.
 - `form/form-stdlib/host-os-membrane.fk` keeps platform support, host doors, and
-  C-seed shrink direction inspectable as Form data (band 8191, re-run 2026-09-03).
+  C-seed shrink direction inspectable as Form data (band 8191, re-run 2026-09-04).
 - `form/form-stdlib/satsang.fk` models a witnessing circle where affirmation,
   dissent, and silence are preserved.
 - `form/form-stdlib/reception-consent.fk` keeps first-encounter consent in Form
@@ -137,7 +137,7 @@ priors.
 
 The guide for all of it is the **free energy principle**, and it is an organ,
 not an aspiration: `form/form-stdlib/active-inference.fk` (band 127, re-run
-2026-09-03) names the loop — predict, observe, count the surprise honestly,
+2026-09-04) names the loop — predict, observe, count the surprise honestly,
 update where the model bent. Surprise is the one learning signal; a landed
 prediction carries no new information; "the body has learned the field" means
 residual surprise fell within tolerance, never that misses were rounded away.
@@ -149,13 +149,13 @@ discipline is this principle wearing working clothes.
 
 **The two repos are the corpus; the pivot is the tongue with no favorite.**
 This body and its parent together hold the training ground for native NL→NL:
-this body alone carries ~147,000 comment lines in its `.fk` cells, 191 `.form`
-teachings, 1,566 receipts, and a homecoming corpus of 652 question/answer rows
-(counted 2026-09-03) — meaning already paired with its surfaces, provenance
+this body alone carries ~142,000 comment lines in its `.fk` cells, 191 `.form`
+teachings, 1,584 receipts, and a homecoming corpus of 654 question/answer rows
+(counted 2026-09-04) — meaning already paired with its surfaces, provenance
 already carried. The lane that trains on it stands in miniature: surface →
 language-neutral pivot → surface (`nl-translate-band` 32767,
 `natural-language-band` 262143, `nl-reason-band` 255 — all re-run on fkwu
-2026-09-03), with the lexicon as DATA (a word is a row, a tongue is a column)
+2026-09-04), with the lexicon as DATA (a word is a row, a tongue is a column)
 and cross-tongue equality by content-address — "the source is native" and
 "sumber adalah asli" intern to the same node. What this floor carries upward:
 **no favored default language** — the pivot symbol is the meaning's one name;
@@ -183,7 +183,7 @@ translation pipeline. The shelf exists and grows by rows
 (`form/form-stdlib/nl-tongues.fk`): a tongue is a grammar (word order +
 function words as data), a lexicon (tongue-keyed triples), and a decoder
 template — never an engine change. Its band, `nl-many-band`, answers 67108863
-on fkwu (re-run 2026-09-03); the band declares its own four-way. No tongue is
+on fkwu (re-run 2026-09-04); the band declares its own four-way. No tongue is
 favored; the copula moves, the node does not. Unsegmented zh/ja is the named
 next breath.
 
