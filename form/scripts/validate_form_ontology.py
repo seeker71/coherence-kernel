@@ -19,6 +19,10 @@ This script catches that drift.
 Runs read-only; standard library only.
 
 Exits 0 on a clean match, 1 on drift.
+
+Its Form twin stands: gate/ontology.bml is the drift-gates row now; this
+script is a witness of that lens (gate/tests/ontology-band.fk holds the two
+against each other), not the gate.
 """
 
 from __future__ import annotations
