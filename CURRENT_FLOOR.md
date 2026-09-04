@@ -88,6 +88,10 @@ cell-channel-band                      -> 4095     (two cells as processes on sp
                                                      observe/cell-channel-witness-run.fk walks the
                                                      protocol and publishes cell-channel.<name> and
                                                      cell-mesh to the glass under the `mesh` tag)
+lora-adapter-band                      -> 31       (the body reads its adapter's safetensors header;
+                                                     symbol-voice-band 63 expands symbol lines locally;
+                                                     adapters/ carries the Qwen teach overlay and the
+                                                     first voice adapter as tree ice)
 we-glass-band                          -> 1023     (DO/BE/SEE at five altitudes with a source on
                                                      every row; observe/we-glass-run.fk publishes
                                                      we.glass to the shared bus; we-glass-ask.fk
