@@ -85,9 +85,7 @@ exactly the registration work this page's rule names; the band is owed that heal
 A protocol is not a host-side branch. New carriers (UDP, USB, Bluetooth,
 microphone, camera, pipes, browser streams) declare a carrier/profile flow and reuse
 the same layer accessors, phase counts, and policy hooks. HTTP is the first concrete
-profile. Band: `form-stdlib/tests/channel-flow-band.fk` (8388607 four-way via
-`validate.sh`, 2026-09-04; its chain carries `section [form.bml]` in `.fk`, so the
-lens lowers it before any arm reads it).
+profile. Band: `form-stdlib/tests/channel-flow-band.bml` (8388607 on fkwu, 2026-09-04).
 
 ### Circle / Satsang Protocol — consentful group containers
 
@@ -102,8 +100,8 @@ lens lowers it before any arm reads it).
 A cell may offer a circle; another may join only when invited; a share stays inside
 unless `CIRCLE-EXPORT-CONSENT` names recipient, fidelity, purpose, expiry, and a
 passed consensus; a circle may refuse a contact only when an observed action exceeds
-the offered interface and consensus has passed. Band: `form-stdlib/tests/circle-band.fk`
-(1048575 four-way via `validate.sh`, 2026-09-04).
+the offered interface and consensus has passed. Band: `form-stdlib/tests/circle-band.bml`
+(1048575 on fkwu, 2026-09-04).
 
 ### Native Route Goal Cells
 

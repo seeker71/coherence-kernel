@@ -28,10 +28,10 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is 16,192 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is 16,353 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
-preludes).
+preludes, the host-exec stdin door, `metal_deadline` off its scratch slot).
 
 ## Body-wide witnesses
 
@@ -61,7 +61,9 @@ cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15 · core-str-find-
 A `.bml` runs directly (`./fkwu file.bml`); a `.fk` names its `.bml` preludes
 and fkwu lowers them in memory, owning the `.bml.fkb` cache itself. `true` and
 `false` are literals in the `section [form.bml] { def ... }` dialect; a nested
-`defn` is a registered function with one-level capture.
+`defn` is a registered function with one-level capture. Every file carrying
+`section [form.bml]` wears `.bml` (75 renamed 2026-09-04); `section [form.lift]`,
+`[form.action]` and `[form.route]` files keep `.fk`.
 
 ```text
 bml-band                               -> 268435455
@@ -69,6 +71,10 @@ bml-generics-band                      -> 16777215
 native-route-goal-cells-band.bml       -> 1048575  (full)
 nested-defn-scope-band                 -> 63
 nested-defn-closure-capture-band       -> 63
+json-codec-bml-band 8191 · kernel-http-band 536965066 · channel-flow-band 8388607
+circle-band 1048575 · static-to-dynamic-cells-band 262143 · bml-capability-ledger-band 255
+form-pe-coff-band 16383 · learn/tests/choice-receipt-band 4294967295
+                                                  (each compiled for the first time under its own name)
 ```
 
 ## The local-model lane (Qwen3.8-27B Q8_0, Form-native, Metal JIT)
@@ -178,9 +184,9 @@ jit-source-runtime-orchestrator 1048575.
 ## Beliefs, ledger, drift
 
 ```text
-./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 486457004
+./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 489459005
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=6 moving=0 released=43 -> 6000043
+./fkwu form/form-stdlib/release-ledger.bml -> open=28 moving=0 released=50 -> 28000050
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 ```
 
@@ -199,18 +205,21 @@ What answered red or nothing in this pass, so no one leans on it:
 - `blueprint-authority-band` 51199 of 65535, exit 1: `value_kind` is a native
   the Go/Rust/TS kernels carry and fkwu does not — a lane seam.
   `persistence-band` 2 of 7 and `channel-breath-band` 200 of 500 stop on
-  `write_form_binary` the same way.
+  `write_form_binary` the same way; `concept-i18n-band` answers its input-absent
+  word with `read_form_binary`/`write_form_binary` unresolved beneath it.
 - `mesh-sensings-route-band` 63, `sense-loop-band` 8191,
   `native-mutation-route-side-effects-band` 11111 and `verb-router-band` 3
   each reach their declared verdict yet exit 1: a Go/Rust-only native
   (`write_form_binary`, `recipe_to_bytes`, `pg_exec`) sits unresolved in a
   prelude the run never reaches — lane seams, not defects.
-- `channel-flow-band`, `json-codec-bml-band` and `concept-i18n-band` answer
-  nothing: raw `section [form.bml]` grammar inside a `.fk` file
-  (`channel-flow-band.fk` itself, `codec.fk`, `json-codec.fk`); the kernel reads
-  `section` as an unbound name. This is `release-ledger.bml` R42, the rename
-  sweep — 77 `.fk` files in the tree carry that grammar, 36 under
-  `form/form-stdlib`.
+- The BML lowering drops a decimal float literal silently: `def t() = list("x",
+  1.0, 0.5); len(t());` lowers to `(list "x")` and answers 1, rc 0, where
+  `list("x", 1, 5)` answers 3 (`release-ledger.bml` R76). `speakable-band` and
+  `speakable-german-band` answer 0, `energy-center-glands`, `research-corpus`,
+  `reference-packs` and `word-roots` die, four `ml-flow-band` rows fail on it.
+- BML `match` is not lowered on fkwu (`source-language-match-switch-band` 0;
+  R77) and `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111
+  with `Num` unresolved; R78).
 - `form-cli-mlx-band`, `form-cli-live-band`, `bml-bmf-stream-curriculum-band`
   and `bml-bmf-control-curriculum-band` die at load (rc 2): each prelude names a
   `*-xtal.fk` mirror absent from the tree — the BML prelude lowers in memory

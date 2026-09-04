@@ -127,9 +127,5 @@ operations guard. Publishing means bringing the two live surfaces up to this tex
   response names this seam in-band (`honest_seam`).
 - Retrieval is a **lexical seed index**, deliberately not `rag-embed`: a keyword index that
   can say "miss" is more honest than an embedding that always answers.
-- The HTTP framing helpers mirror `http-serve.fk`'s `hs-` cells because that stack's prelude
-  chain carries `section [form.bml]` inside `.fk` files (`http-parse.fk`, `http-render.fk`,
-  `http-request.fk`, `http-server.fk`), which `fkwu` reads raw — `./fkwu http-serve-band.fk`
-  dies with `[unbound-name] 'section'`, while `validate.sh`'s source lens lowers the same
-  chain for all four arms (`http-serve-band` 1023 four-way, 2026-09-04). A named seam to
-  close, not a hidden copy.
+- The HTTP framing helpers mirror `http-serve.fk`'s `hs-` cells (`http-serve-band` 1023 on
+  fkwu, 2026-09-04) — a named twin to fold into the stack, not a hidden copy.
