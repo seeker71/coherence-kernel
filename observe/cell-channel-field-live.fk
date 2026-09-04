@@ -1,0 +1,84 @@
+; cell-channel-field-live.fk — the SHARED FIELD of a channel: the one
+; observer both cells share, and the only writer of field.spool.
+;
+; It drains both cells' spools, observes every OFFER it finds (balance,
+; the symbol gate, a real evaluation to 0 inside the current grammar,
+; no redefinition — cc-observe), answers `admit` carrying the whole
+; amendment with its content address or `refuse` carrying the reason,
+; folds what it admitted into its own grammar, publishes the channel to
+; the glass whenever something moved, then blocks on the field bell.
+; A `release` frame from either cell, or a `release` byte on the bell,
+; ends it; its pid file leaves with it. It never evaluates a say — that
+; is the cells' own act; the field observes offers and counts the rest.
+;
+; stdin lines: channel root, channel name.
+; Effectful (appends to field.spool, publishes glass snapshots, pid file).
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/cell-channel-glass.bml
+(do
+    (defn ccf-line (k v) (print_str (str_concat "field-live " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn ccf-trim (s) (if (nothing? s) "" (if (eq (str_len s) 0) "" (if (eq (str_byte_at s (sub (str_len s) 1)) 10) (substring s 0 (sub (str_len s) 1)) s))))
+    (defn ccf-root-of (s) (if (eq (str_len s) 0) (cc-root-default) s))
+
+    ; state = (reader-a reader-b grammar gid admitted refused released)
+    (defn ccf-state (ra rb grammar gid admitted refused released) (list ra rb grammar gid admitted refused released))
+    (defn ccf-ra (st) (nth st 0))
+    (defn ccf-rb (st) (nth st 1))
+    (defn ccf-grammar (st) (nth st 2))
+    (defn ccf-gid (st) (nth st 3))
+    (defn ccf-admitted (st) (nth st 4))
+    (defn ccf-refused (st) (nth st 5))
+    (defn ccf-released (st) (nth st 6))
+
+    (defn ccf-has-release? (frames) (gt (len (cc-frames-of-kind frames "release")) 0))
+
+    ; observe one offer: admit folds the grammar; refuse names the reason
+    (defn ccf-observe-one (root name st frame)
+        (do (let answer (cc-observe (ccf-grammar st) (cc-frame-body frame)))
+            (let sent (cc-send root name (cc-field-name) (cc-answer-kind answer) (cc-field-answer-body frame answer)))
+            (let admitted (if (str_eq (cc-answer-kind answer) "admit") 1 0))
+            (let grammar (if (eq admitted 1) (cc-grammar-fold (ccf-grammar st) (list (cc-frame-body frame))) (ccf-grammar st)))
+            (let gid (if (eq admitted 1) (cc-grammar-id grammar) (ccf-gid st)))
+            (let said (ccf-line (cc-answer-kind answer) (str_concat "offer-turn=" (str_concat (int_to_str (cc-frame-turn frame)) (str_concat " from=" (str_concat (cc-frame-from frame) (str_concat " id=" (str_concat (cc-sent-id sent) (str_concat " grammar=" gid)))))))))
+            (ccf-state (ccf-ra st) (ccf-rb st) grammar gid (add (ccf-admitted st) admitted) (add (ccf-refused st) (if (eq admitted 1) 0 1)) (ccf-released st))))
+    (defn ccf-observe-all (root name st frames)
+        (if (eq (len frames) 0) st
+            (ccf-observe-all root name (ccf-observe-one root name st (head frames)) (tail frames))))
+
+    ; one pass over both cells; answers (state, moved?)
+    (defn ccf-pass (root name st)
+        (do (let da (cc-drain (ccf-ra st)))
+            (let db (cc-drain (ccf-rb st)))
+            (let frames (append (cc-drained-frames da) (cc-drained-frames db)))
+            (let st1 (ccf-state (cc-drained-reader da) (cc-drained-reader db) (ccf-grammar st) (ccf-gid st) (ccf-admitted st) (ccf-refused st)
+                         (if (ccf-has-release? frames) 1 (ccf-released st))))
+            (let st2 (ccf-observe-all root name st1 (cc-frames-of-kind frames "offer")))
+            (let published (if (gt (len frames) 0) (ccg-published? (ccg-publish root name (now_unix_ms))) 0))
+            (let said (if (gt (len frames) 0) (ccf-line "witness" (str_concat "frames=" (str_concat (int_to_str (len frames)) (str_concat " glass=" (int_to_str published))))) 0))
+            (list st2 (if (gt (len frames) 0) 1 0))))
+
+    (defn ccf-loop (root name bell st)
+        (do (let passed (ccf-pass root name st))
+            (let st1 (nth passed 0))
+            (if (eq (ccf-released st1) 1) st1
+            (if (eq (nth passed 1) 1) (ccf-loop root name bell st1)
+                (do (let wake (cc-bell-wait bell))
+                    (if (eq (cc-released? wake) 1) st1
+                        (ccf-loop root name bell st1)))))))
+
+    (let root (ccf-root-of (ccf-trim (read_line))))
+    (let name (ccf-trim (read_line)))
+    (if (eq (cc-open? root name) 0)
+        (do (ccf-line "signal" "nothing") (ccf-line "reason" "channel-not-open") 0)
+        (do
+            (let pid (cc-self-pid))
+            (let wrote (cc-pid-write root name (cc-field-name) pid))
+            (let grammar (cc-grammar-current root name))
+            (let born (ccf-line "born" (str_concat "field pid=" (str_concat (int_to_str pid) (str_concat " grammar=" (cc-grammar-id grammar))))))
+            (let first (ccg-published? (ccg-publish root name (now_unix_ms))))
+            (let final (ccf-loop root name (cc-bell root name (cc-field-name))
+                (ccf-state (cc-reader root name (cc-a root name)) (cc-reader root name (cc-b root name)) grammar (cc-grammar-id grammar) 0 0 0)))
+            (let last (ccg-published? (ccg-publish root name (now_unix_ms))))
+            (let cleared (cc-pid-clear root name (cc-field-name)))
+            (ccf-line "released" (str_concat "field admitted=" (str_concat (int_to_str (ccf-admitted final)) (str_concat " refused=" (str_concat (int_to_str (ccf-refused final)) (str_concat " grammar=" (ccf-gid final)))))))
+            0)))

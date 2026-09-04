@@ -81,6 +81,13 @@ bml-float-literal-band                 -> 2047     (a decimal float reads back a
 bml-form-size-band                     -> 127      (one 40 KB `def` in a single form lowers and
                                                      answers; the normalizer walks spans as a tail
                                                      loop, so one statement's size sets no wall)
+cell-channel-band                      -> 4095     (two cells as processes on spool+bell, a shared
+                                                     field admitting grammar offers by whole sha256,
+                                                     evaluation through a child membrane under
+                                                     hearth-channel-eval-s; the witness door
+                                                     observe/cell-channel-witness-run.fk walks the
+                                                     protocol and publishes cell-channel.<name> and
+                                                     cell-mesh to the glass under the `mesh` tag)
 json-codec-bml-band 8191 · kernel-http-band 536965066 · channel-flow-band 8388607
 circle-band 1048575 · static-to-dynamic-cells-band 262143 · bml-capability-ledger-band 255
 form-pe-coff-band 16383 · learn/tests/choice-receipt-band 4294967295
