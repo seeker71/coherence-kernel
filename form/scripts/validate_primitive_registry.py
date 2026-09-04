@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Drift gate between the kernel native surface and primitive-registry.fk.
 
+Its Form twin stands: gate/primitive-registry.bml is the drift-gates row now;
+this script is a witness of that lens (gate/tests/primitive-registry-band.fk
+holds the two against each other), not the gate.
+
 The registry (form/form-stdlib/primitive-registry.fk) is the body: every
 kernel native declares (name, category, spec, verification recipe, expected
 outside, lane) in the kernel-satsang ksat-part discipline, proven three-way
