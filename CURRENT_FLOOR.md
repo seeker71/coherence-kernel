@@ -43,7 +43,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 659 rows, 648 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 660 rows, 649 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -78,6 +78,9 @@ nested-defn-closure-capture-band       -> 63
 bml-float-literal-band                 -> 2047     (a decimal float reads back as the same float
                                                      from eleven positions; the emitter refuses an
                                                      unknown leaf by name instead of writing "")
+bml-form-size-band                     -> 127      (one 40 KB `def` in a single form lowers and
+                                                     answers; the normalizer walks spans as a tail
+                                                     loop, so one statement's size sets no wall)
 json-codec-bml-band 8191 · kernel-http-band 536965066 · channel-flow-band 8388607
 circle-band 1048575 · static-to-dynamic-cells-band 262143 · bml-capability-ledger-band 255
 form-pe-coff-band 16383 · learn/tests/choice-receipt-band 4294967295
@@ -201,7 +204,7 @@ jit-source-runtime-orchestrator 1048575.
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=37 moving=0 released=56 -> 37000056
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=57 -> 38000057
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
@@ -254,11 +257,12 @@ What answered red or nothing in this pass, so no one leans on it:
 - The BML section scanner is line-based: a comment line ending in `{` counts
   as a block opener, and the section then reports "not closed before end of
   source" pointing nowhere near the prose that opened it (R93).
-- The BML lowerer's walker recursion grows with the size of one form: a single
-  `list()` of 500-byte strings answers at 26 KB and dies at the 254 MB
-  eval-depth wall at 31 KB. The release ledger's rows list crossed it at 90
-  rows and is split three ways until the walker is iterative (R91). The same
-  lowering reads a `; preludes:` substring inside a string as a directive (R92).
+- The BML lowering's depth is bounded but its time is not: one form of 500
+  arguments lowers in 0.2s, 1,000 in 0.6s, 2,000 in 2.8s — `append`
+  (`line-grammar.fk:88`) is non-tail over its left list and the grammar's arg
+  loops call it per item (R96). The same lowering reads a `; preludes:`
+  substring inside a string as a directive (R92), and its child's stdin door
+  answers 1 when the two lines arrive as two writes instead of one (R95).
 - `observe/tests/jit-register-lowering-band.fk`,
   `jit-representation-specialization-band.fk` and `jit-stack-frame-band.fk`
   answer nothing: each file ends with one paren open
