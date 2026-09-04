@@ -1,0 +1,26 @@
+; release-stale-run.fk — let go of what is no longer current: bus snapshots
+; of owner incarnations that ended (only the newest incarnation is current),
+; witness snapshots older than six hours, and adapter checkpoints whose final
+; adapter already stands. Room is not scarce; what is current is what we keep.
+; stdin line 1: "release" to act, anything else to only list.
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/hearth.bml
+(do
+    (defn rs-say (k v) (print_str (str_concat "release " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn rs-trim (s) (if (nothing? s) "" (trim s)))
+    (defn rs-age-h (path) (div (sub (now_unix_ms) (mul (file_mtime path) 1000)) 3600000))
+    (defn rs-prefix? (s p) (eq (str_find s p 0) 0))
+    (defn rs-suffix? (s x) (and (ge (str_len s) (str_len x)) (str_eq (substring s (sub (str_len s) (str_len x)) (str_len s)) x)))
+    (defn rs-newest-owner (names best) (if (eq (len names) 0) best (rs-newest-owner (tail names) (if (and (rs-prefix? (head names) "models.dual-resident.i") (rs-suffix? (head names) ".glass-snapshot")) (if (or (eq (str_len best) 0) (gt (file_mtime (fs-path-join (hearth-telemetry-root) (head names))) (file_mtime (fs-path-join (hearth-telemetry-root) best)))) (head names) best) best))))
+    (defn rs-stale? (name newest) (if (and (rs-prefix? name "models.dual-resident.i") (rs-suffix? name ".glass-snapshot")) (if (str_eq name newest) 0 1) (if (and (or (rs-prefix? name "jit.metal.witness") (rs-prefix? name "jit.operator.witness")) (gt (rs-age-h (fs-path-join (hearth-telemetry-root) name)) 6)) 1 0)))
+    (defn rs-bus (names newest act n bytes) (if (eq (len names) 0) (list n bytes) (if (eq (rs-stale? (head names) newest) 1) (do (let p (fs-path-join (hearth-telemetry-root) (head names))) (let b (file_size p)) (let r (if act (fs-remove-file p) 0)) (rs-say (if act "released" "stale") (str_concat (head names) (str_concat " bytes=" (int_to_str b)))) (rs-bus (tail names) newest act (add n 1) (add bytes b))) (rs-bus (tail names) newest act n bytes))))
+    (defn rs-checkpoint? (name) (and (rs-prefix? name "0") (rs-suffix? name "_adapters.safetensors")))
+    (defn rs-ckpts (dir names act n bytes) (if (eq (len names) 0) (list n bytes) (if (and (rs-checkpoint? (head names)) (eq (fs-exists? (fs-path-join dir "adapters.safetensors")) 1)) (do (let p (fs-path-join dir (head names))) (let b (file_size p)) (let r (if act (fs-remove-file p) 0)) (rs-ckpts dir (tail names) act (add n 1) (add bytes b))) (rs-ckpts dir (tail names) act n bytes))))
+    (defn rs-adapter-dirs (dirs act n bytes) (if (eq (len dirs) 0) (list n bytes) (do (let d (head dirs)) (let r (if (eq (fs-is-dir? d) 1) (rs-ckpts d (fs-list d) act 0 0) (list 0 0))) (rs-adapter-dirs (tail dirs) act (add n (head r)) (add bytes (nth r 1))))))
+    (let act (str_eq (rs-trim (read_line)) "release"))
+    (let names (fs-list (hearth-telemetry-root)))
+    (let newest (rs-newest-owner names ""))
+    (let bus (rs-bus names newest act 0 0))
+    (let ck (rs-adapter-dirs (list ".form-lora-voice/adapter" ".form-lora-voice-native/adapter") act 0 0))
+    (rs-say "summary" (str_concat (if act "released" "would-release") (str_concat " bus-snapshots=" (str_concat (int_to_str (head bus)) (str_concat " checkpoints=" (str_concat (int_to_str (head ck)) (str_concat " bytes=" (int_to_str (add (nth bus 1) (nth ck 1))))))))))
+    0)
