@@ -1,0 +1,328 @@
+//////////////////////////////////////////////////////////////////////
+//
+// gate/kernel-conformance.bml — the kernel-conformance gate as a Form lens.
+//
+// Executable BML. R58 in the release ledger: the Form twin of
+// form/scripts/verify_kernel_conformance.py, read as the spec. That
+// script is, in its own words, "intentionally only an orchestrator": it
+// parses no Form and owns no semantics; it hands each canonical vector
+// to the real Go, Rust and TypeScript kernels through their --expr
+// door and compares their answers. This lens is the same orchestrator
+// in Form: every kernel runs as a child through host-exec (the
+// membrane, as in the script), and Form reads the vectors, judges the
+// answers and speaks. The script stays in place as a witness while
+// this lens stands its first landings; the drift-gates row
+// (gate/drift-gates.bml, "kernel-conformance") runs this door.
+//
+// THE INVARIANT. form/conformance/canonical-s-expression-vectors.json
+// (schema form-kernel-conformance-v1; cases of name, form, expected)
+// answers the same on every real kernel: each kernel's `--expr <form>`
+// prints exactly `expected`. Then FORMBIN2 interop between the
+// kernels: each kernel emits `(list "fkb-interop" 42 2147483648 3.5)`
+// as an artifact (--emit-binary), every kernel reads every artifact
+// (--binary) to `[fkb-interop, 42, 2147483648, 3.5]`, and the sibling
+// artifacts are byte-identical. Then the malformed vectors
+// (form/conformance/formbin2-malformed-vectors.json): each built
+// artifact (a hex literal, a composite nested `depth` deep, or an
+// artifact one byte over the 64 MB ceiling) is REFUSED by every kernel
+// with a nonzero exit and the expected words in its output.
+//
+// THE KERNELS. Go is built with `go build` into .cache/kernel-conformance
+// (the per-checkout cache the tree already ignores); Rust with `cargo
+// build --release` into its crate's own target/ (ignored there) — the
+// script builds both into a fresh temp dir every run, which is why its
+// row took minutes; a cached build that cargo and go keep fresh is the
+// same proof faster. TypeScript runs through node_modules/.bin/tsx when
+// `npm ci` has been run in form/form-kernel-ts; when it has not, the
+// lens does not die — it reads TYPESCRIPT KERNEL ABSENT as a typed
+// finding, still proves the Go and Rust halves in full, prints them,
+// and refuses (the answer 0), because a conformance the third kernel
+// never witnessed is not conformance. The script refuses there too,
+// in a traceback before any vector runs; the verdicts agree and the
+// lens's reading is the fuller one.
+//
+// NOT CARRIED, NAMED. Three of the script's witnesses run the Python
+// FORMBIN2 codec (form/python_bmf/sdk): a Python-made artifact read by
+// the kernels, the kernels' artifacts byte-roundtripped through Python,
+// and Python's own decoder refusing each malformed vector. A Form lens
+// has no Python codec to lean on and this body has no Form FORMBIN2
+// codec yet; those three stay with the script until a Form codec
+// stands (R60 territory), and this lens says so on one line every run.
+//
+// EXIT. Every vector on every kernel, the interop and every malformed
+// refusal green, TypeScript present: one line `kernel-conformance: OK
+// <n> canonical expressions × <k> real kernels` and the answer 1 — the
+// script's final line after its PASS. Otherwise the per-vector lines
+// (`PASS name: go='42', rust='42', typescript='42'` — the script's own
+// shape) stand above, every failure is one `error: ...` line, then
+// `kernel-conformance: FAIL <summary>` and the answer 0. A vectors file
+// the tree lacks, a schema or case it cannot read, or a kernel that
+// will not build, is one named error and a refusal, where the script
+// dies with the same words.
+//
+// Run directly:  ./fkwu gate/kernel-conformance.bml    ; last line 1 / 0
+// Twin:          python3 form/scripts/verify_kernel_conformance.py
+// Proven by:     gate/tests/kernel-conformance-band.fk
+//
+// preludes: form-stdlib/core.fk form-stdlib/table.bml gate/lens-text.bml form-stdlib/json.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormKernelConformanceGate {
+        thought kernel-conformance-pattern = list("orchestrate-never-interpret", "every-kernel-every-vector", "absent-is-a-typed-reading", "cached-build-same-proof", "python-codec-witnesses-named-not-carried");
+
+        def kcg-name() = "kernel-conformance";
+        def kcg-vectors() = "form/conformance/canonical-s-expression-vectors.json";
+        def kcg-malformed() = "form/conformance/formbin2-malformed-vectors.json";
+        def kcg-schema() = "form-kernel-conformance-v1";
+        def kcg-malformed-schema() = "formbin2-malformed-conformance-v1";
+        def kcg-build() = ".cache/kernel-conformance";
+        def kcg-go-dir() = "form/form-kernel-go";
+        def kcg-rust-dir() = "form/form-kernel-rust";
+        def kcg-ts-dir() = "form/form-kernel-ts";
+        def kcg-tsx() = "form/form-kernel-ts/node_modules/.bin/tsx";
+        def kcg-interop-source() = "(list \"fkb-interop\" 42 2147483648 3.5)";
+        def kcg-interop-expected() = "[fkb-interop, 42, 2147483648, 3.5]";
+        def kcg-max-bytes() = 67108864;
+        def kcg-when(cond, msg) = if cond then list(msg) else list();
+        def kcg-py(s) = lx-py-str(s);
+
+        // ---- the repository root as an absolute path (children run from a kernel's own directory) ----
+        def kcg-root() = lx-sh-text(lx-sh-out("pwd"));
+        def kcg-abs(root, rel) = str_concat(root, str_concat("/", rel));
+
+        // ---- the vectors: list("ok", cases) or list("refused", message); a case is (name form expected) ----
+        def kcg-cases(path, text) {
+            let root = parse-json(path, text);
+            if not(json-object-has?(root, "schema")) then list("refused", str_concat(path, ": unsupported conformance schema"))
+            else if not(str_eq(node_value(json-object-get(root, "schema")), kcg-schema())) then list("refused", str_concat(path, ": unsupported conformance schema"))
+            else if not(json-object-has?(root, "cases")) then list("refused", str_concat(path, ": cases must be a non-empty list"))
+            else kcg-cases-list(path, node_children(json-object-get(root, "cases")));
+        }
+        def kcg-cases-list(path, nodes) = if eq(len(nodes), 0) then list("refused", str_concat(path, ": cases must be a non-empty list")) else kcg-cases-go(path, nodes, 0, list());
+        def kcg-cases-go(path, nodes, i, acc) {
+            if eq(len(nodes), 0) then list("ok", reverse(acc))
+            else kcg-case-one(path, head(nodes), tail(nodes), i, acc);
+        }
+        def kcg-case-one(path, node, rest, i, acc) {
+            if eq(kcg-field-ok?(node, "name"), 0) then list("refused", str_concat(path, str_concat(": case ", str_concat(int_to_str(i), " has invalid name"))))
+            else if eq(kcg-field-ok?(node, "form"), 0) then list("refused", str_concat(path, str_concat(": case ", str_concat(int_to_str(i), " has invalid form"))))
+            else if eq(kcg-field-ok?(node, "expected"), 0) then list("refused", str_concat(path, str_concat(": case ", str_concat(int_to_str(i), " has invalid expected"))))
+            else kcg-cases-go(path, rest, add(i, 1), cons(list(node_value(json-object-get(node, "name")), node_value(json-object-get(node, "form")), node_value(json-object-get(node, "expected"))), acc));
+        }
+        // a present string field with at least one byte (node_type 2 is a trivial string)
+        def kcg-field-ok?(node, key) = if not(json-object-has?(node, key)) then 0 else if not(eq(node_type(json-object-get(node, key)), 2)) then 0 else if eq(str_len(node_value(json-object-get(node, key))), 0) then 0 else 1;
+        def kcg-c-name(c) = nth(c, 0);
+        def kcg-c-form(c) = nth(c, 1);
+        def kcg-c-expected(c) = nth(c, 2);
+
+        // ---- the kernels: rows (name, dir, command prefix as run inside dir) ----
+        def kcg-kernel(name, dir, argv) = list(name, dir, argv);
+        def kcg-k-name(k) = nth(k, 0);
+        def kcg-k-dir(k) = nth(k, 1);
+        def kcg-k-argv(k) = nth(k, 2);
+        def kcg-child(k, args) = str_concat("cd ", str_concat(kcg-k-dir(k), str_concat(" && ", str_concat(kcg-k-argv(k), str_concat(" ", args)))));
+        // builds: list("ok", kernels, ts-present?) or list("refused", message)
+        def kcg-build-kernels(root) {
+            let made = lx-sh(str_concat("mkdir -p ", kcg-build()));
+            let go = lx-sh(str_concat("go build -C ", str_concat(kcg-go-dir(), str_concat(" -o ", str_concat(kcg-abs(root, str_concat(kcg-build(), "/form-kernel-go")), " .")))));
+            if not(eq(lx-sh-rc(go), 0)) then list("refused", str_concat("Go kernel build failed (", str_concat(int_to_str(lx-sh-rc(go)), str_concat("):", kcg-detail(lx-sh-text(go))))))
+            else kcg-build-rust(root);
+        }
+        def kcg-detail(s) = if eq(str_len(s), 0) then "no output" else str_concat(lx-nl(), s);
+        def kcg-build-rust(root) {
+            let rust = lx-sh(str_concat("cargo build --quiet --release --manifest-path ", str_concat(kcg-rust-dir(), str_concat("/Cargo.toml --target-dir ", str_concat(kcg-rust-dir(), "/target")))));
+            if not(eq(lx-sh-rc(rust), 0)) then list("refused", str_concat("Rust kernel build failed (", str_concat(int_to_str(lx-sh-rc(rust)), str_concat("):", kcg-detail(lx-sh-text(rust))))))
+            else kcg-kernels-with-ts(root, fs_exists(kcg-tsx()));
+        }
+        def kcg-kernels-with-ts(root, ts) {
+            let go = kcg-kernel("go", kcg-go-dir(), kcg-abs(root, str_concat(kcg-build(), "/form-kernel-go")));
+            let rust = kcg-kernel("rust", kcg-rust-dir(), kcg-abs(root, str_concat(kcg-rust-dir(), "/target/release/form-kernel-rust")));
+            if eq(ts, 1) then list("ok", list(go, rust, kcg-kernel("typescript", kcg-ts-dir(), "node_modules/.bin/tsx src/main.ts")), 1) else list("ok", list(go, rust), 0);
+        }
+
+        // ---- one vector on every kernel: list(passed?, line) ----
+        def kcg-run-expr(k, form) {
+            let r = lx-sh-out(kcg-child(k, str_concat("--expr '", str_concat(form, "'"))));
+            if eq(lx-sh-rc(r), 0) then lx-sh-text(r) else str_concat("<", str_concat(kcg-k-name(k), str_concat(" kernel exit ", str_concat(int_to_str(lx-sh-rc(r)), ">"))));
+        }
+        def kcg-outputs(kernels, form) = if eq(len(kernels), 0) then list() else cons(list(kcg-k-name(head(kernels)), kcg-run-expr(head(kernels), form)), kcg-outputs(tail(kernels), form));
+        def kcg-all-expected?(outputs, expected) = if eq(len(outputs), 0) then 1 else if str_eq(nth(head(outputs), 1), expected) then kcg-all-expected?(tail(outputs), expected) else 0;
+        def kcg-rendered(o) = str_concat(nth(o, 0), str_concat("=", kcg-py(nth(o, 1))));
+        def kcg-case-line(kernels, c) {
+            let outputs = if ge(str_find(kcg-c-form(c), "'", 0), 0) then list() else kcg-outputs(kernels, kcg-c-form(c));
+            let passed = if eq(len(outputs), 0) then 0 else kcg-all-expected?(outputs, kcg-c-expected(c));
+            list(passed, str_concat(if eq(passed, 1) then "PASS " else "FAIL ", str_concat(kcg-c-name(c), str_concat(": ", if eq(len(outputs), 0) then "the form carries a single quote the membrane cannot hand across" else tb-join(outputs, kcg-rendered, ", ")))));
+        }
+        def kcg-case-lines(kernels, cases) = if eq(len(cases), 0) then list() else cons(kcg-case-line(kernels, head(cases)), kcg-case-lines(kernels, tail(cases)));
+        def kcg-passed-count(results) = len(tb-filter2(results, kcg-passed?, 0));
+        def kcg-passed?(r, a) = nth(r, 0);
+        def kcg-line-of(r) = nth(r, 1);
+
+        // ---- FORMBIN2 interop between the kernels: list(passed?, line, errors) ----
+        def kcg-artifact(root, k) = kcg-abs(root, str_concat(kcg-build(), str_concat("/", str_concat(kcg-k-name(k), ".fkb"))));
+        def kcg-emit-all(root, kernels, src) = if eq(len(kernels), 0) then list() else append(kcg-emit-one(root, head(kernels), src), kcg-emit-all(root, tail(kernels), src));
+        def kcg-emit-one(root, k, src) {
+            let r = lx-sh(kcg-child(k, str_concat("--emit-binary ", str_concat(kcg-artifact(root, k), str_concat(" ", src)))));
+            kcg-when(not(eq(lx-sh-rc(r), 0)), str_concat(kcg-k-name(k), str_concat(" kernel binary emit failed (", str_concat(int_to_str(lx-sh-rc(r)), str_concat("): ", lx-sh-text(r))))));
+        }
+        def kcg-read-artifact(k, artifact) {
+            let r = lx-sh-out(kcg-child(k, str_concat("--binary ", artifact)));
+            if eq(lx-sh-rc(r), 0) then lx-sh-text(r) else str_concat("<exit ", str_concat(int_to_str(lx-sh-rc(r)), ">"));
+        }
+        def kcg-consume-all(root, producers, kernels) = if eq(len(producers), 0) then list() else append(kcg-consume-one(root, head(producers), kernels), kcg-consume-all(root, tail(producers), kernels));
+        def kcg-consume-one(root, producer, kernels) {
+            let outputs = tb-map(kernels, kcg-consumer-of(root, producer));
+            kcg-when(eq(kcg-all-expected?(outputs, kcg-interop-expected()), 0), str_concat(kcg-k-name(producer), str_concat(" FORMBIN2 artifact diverged across kernels: ", tb-join(outputs, kcg-rendered, ", "))));
+        }
+        // a consumer row (name, output) for one producer's artifact
+        def kcg-consumer-of(root, producer) = list(root, producer);
+        def kcg-bytes-identical?(root, kernels, first) {
+            if eq(len(kernels), 0) then 1
+            else if str_eq(lx-host-text(read_file(kcg-artifact(root, head(kernels)))), first) then kcg-bytes-identical?(root, tail(kernels), first) else 0;
+        }
+        def kcg-interop(root, kernels) {
+            let src = kcg-abs(root, str_concat(kcg-build(), "/kernel-fkb-interop.fk"));
+            let wrote = write_file(src, str_concat(kcg-interop-source(), lx-nl()));
+            let emitted = kcg-emit-all(root, kernels, src);
+            if gt(len(emitted), 0) then list(0, "FAIL FORMBIN2: a kernel could not emit its artifact", emitted) else kcg-interop-read(root, kernels);
+        }
+        def kcg-interop-read(root, kernels) {
+            let diverged = kcg-consume-all-plain(root, kernels, kernels);
+            let identical = kcg-bytes-identical?(root, kernels, lx-host-text(read_file(kcg-artifact(root, head(kernels)))));
+            let errors = append(diverged, kcg-when(eq(identical, 0), "sibling kernels emitted different FORMBIN2 bytes for one source"));
+            list(if eq(len(errors), 0) then 1 else 0,
+                 if eq(len(errors), 0) then str_concat("PASS FORMBIN2: ", str_concat(int_to_str(len(kernels)), str_concat(" kernel artifacts read by ", str_concat(int_to_str(len(kernels)), " kernels; sibling bytes identical")))) else "FAIL FORMBIN2: see the errors below",
+                 errors);
+        }
+        // every consumer reads every producer's artifact
+        def kcg-consume-all-plain(root, producers, kernels) = if eq(len(producers), 0) then list() else append(kcg-consume-plain(root, head(producers), kernels, kernels), kcg-consume-all-plain(root, tail(producers), kernels));
+        def kcg-consume-plain(root, producer, consumers, kernels) {
+            let outputs = kcg-consumer-outputs(root, producer, consumers);
+            kcg-when(eq(kcg-all-expected?(outputs, kcg-interop-expected()), 0), str_concat(kcg-k-name(producer), str_concat(" FORMBIN2 artifact diverged across kernels: ", tb-join(outputs, kcg-rendered, ", "))));
+        }
+        def kcg-consumer-outputs(root, producer, consumers) = if eq(len(consumers), 0) then list() else cons(list(kcg-k-name(head(consumers)), kcg-read-artifact(head(consumers), kcg-artifact(root, producer))), kcg-consumer-outputs(root, producer, tail(consumers)));
+
+        // ---- the malformed vectors: rows (name builder value-or-depth expected) ----
+        def kcg-malformed-cases(path, text) {
+            let root = parse-json(path, text);
+            if not(json-object-has?(root, "schema")) then list("refused", str_concat(path, ": unsupported malformed-vector schema"))
+            else if not(str_eq(node_value(json-object-get(root, "schema")), kcg-malformed-schema())) then list("refused", str_concat(path, ": unsupported malformed-vector schema"))
+            else if not(json-object-has?(root, "cases")) then list("refused", str_concat(path, ": cases must be a non-empty list"))
+            else kcg-malformed-list(path, node_children(json-object-get(root, "cases")), 0, list());
+        }
+        def kcg-malformed-list(path, nodes, i, acc) {
+            if eq(len(nodes), 0) then kcg-malformed-done(path, acc)
+            else kcg-malformed-one(path, head(nodes), tail(nodes), i, acc);
+        }
+        def kcg-malformed-done(path, acc) = if eq(len(acc), 0) then list("refused", str_concat(path, ": cases must be a non-empty list")) else list("ok", reverse(acc));
+        def kcg-malformed-one(path, node, rest, i, acc) {
+            if or(eq(kcg-field-ok?(node, "name"), 0), eq(kcg-field-ok?(node, "expected_error"), 0)) then list("refused", str_concat(path, str_concat(": case ", str_concat(int_to_str(i), " has invalid metadata"))))
+            else kcg-malformed-list(path, rest, add(i, 1), cons(list(node_value(json-object-get(node, "name")), kcg-str-field(node, "builder"), kcg-builder-arg(node), node_value(json-object-get(node, "expected_error"))), acc));
+        }
+        def kcg-str-field(node, key) = if json-object-has?(node, key) then node_value(json-object-get(node, key)) else "";
+        // hex keeps its text; nested-composite keeps its depth as text; oversized carries nothing
+        def kcg-builder-arg(node) = if json-object-has?(node, "value") then node_value(json-object-get(node, "value")) else if json-object-has?(node, "depth") then int_to_str(node_value(json-object-get(node, "depth"))) else "";
+        def kcg-m-name(m) = nth(m, 0);
+        def kcg-m-builder(m) = nth(m, 1);
+        def kcg-m-arg(m) = nth(m, 2);
+        def kcg-m-expected(m) = nth(m, 3);
+        // the nested composite as hex: leaf = five u32 words; node = u32(1) leaf u32(1) node, depth times; FORMBIN2 u32(0) node
+        def kcg-u32(n) = kcg-hex8(n, 8, "");
+        def kcg-hex8(n, k, acc) = if eq(k, 0) then acc else kcg-hex8(div(n, 16), sub(k, 1), str_concat(kcg-hex-digit(mod(n, 16)), acc));
+        def kcg-hex-digit(d) = substring("0123456789abcdef", d, add(d, 1));
+        def kcg-leaf-hex() = str_concat(kcg-u32(0), str_concat(kcg-u32(1), str_concat(kcg-u32(1), str_concat(kcg-u32(1), kcg-u32(0)))));
+        def kcg-nested-hex(depth, node) = if le(depth, 0) then node else kcg-nested-hex(sub(depth, 1), str_concat(kcg-u32(1), str_concat(kcg-leaf-hex(), str_concat(kcg-u32(1), node))));
+        def kcg-magic-hex() = "464f524d42494e32";
+        def kcg-composite-hex(depth) = str_concat(kcg-magic-hex(), str_concat(kcg-u32(0), kcg-nested-hex(depth, kcg-leaf-hex())));
+        // build the artifact file; answers list() or one error
+        def kcg-build-malformed(root, m, i) {
+            let base = kcg-abs(root, str_concat(kcg-build(), str_concat("/malformed-", int_to_str(i))));
+            if str_eq(kcg-m-builder(m), "hex") then kcg-hex-file(base, kcg-m-arg(m))
+            else if str_eq(kcg-m-builder(m), "nested-composite") then kcg-hex-file(base, kcg-composite-hex(str_to_int(kcg-m-arg(m))))
+            else if str_eq(kcg-m-builder(m), "oversized-artifact") then kcg-oversized-file(base)
+            else list(str_concat("malformed case ", str_concat(kcg-m-name(m), str_concat(": unknown builder ", kcg-py(kcg-m-builder(m))))));
+        }
+        def kcg-hex-file(base, hex) {
+            let wrote = write_file(str_concat(base, ".hex"), hex);
+            let r = lx-sh(str_concat("xxd -r -p ", str_concat(base, str_concat(".hex > ", str_concat(base, ".fkb")))));
+            kcg-when(not(eq(lx-sh-rc(r), 0)), str_concat("could not build a malformed artifact from hex: ", lx-sh-text(r)));
+        }
+        def kcg-oversized-file(base) {
+            let r = lx-sh(str_concat("{ printf 'FORMBIN2'; head -c ", str_concat(int_to_str(sub(add(kcg-max-bytes(), 1), 8)), str_concat(" /dev/zero; } > ", str_concat(base, ".fkb")))));
+            kcg-when(not(eq(lx-sh-rc(r), 0)), str_concat("could not build the oversized artifact: ", lx-sh-text(r)));
+        }
+        // one malformed vector on every kernel: list(passed?, line, errors)
+        def kcg-malformed-line(root, kernels, m, i) {
+            let built = kcg-build-malformed(root, m, i);
+            if gt(len(built), 0) then list(0, str_concat("FAIL malformed FORMBIN2 ", kcg-m-name(m)), built) else kcg-malformed-judge(root, kernels, m, i);
+        }
+        def kcg-malformed-judge(root, kernels, m, i) {
+            let errors = kcg-reject-all(kernels, m, kcg-abs(root, str_concat(kcg-build(), str_concat("/malformed-", str_concat(int_to_str(i), ".fkb")))));
+            list(if eq(len(errors), 0) then 1 else 0,
+                 str_concat(if eq(len(errors), 0) then "PASS malformed FORMBIN2 " else "FAIL malformed FORMBIN2 ", str_concat(kcg-m-name(m), str_concat(": ", str_concat(int_to_str(len(kernels)), " kernels rejected")))),
+                 errors);
+        }
+        def kcg-reject-all(kernels, m, artifact) = if eq(len(kernels), 0) then list() else append(kcg-reject-one(head(kernels), m, artifact), kcg-reject-all(tail(kernels), m, artifact));
+        def kcg-reject-one(k, m, artifact) {
+            let r = lx-sh(kcg-child(k, str_concat("--binary ", artifact)));
+            kcg-when(or(eq(lx-sh-rc(r), 0), eq(lx-has?(lx-sh-text(r), kcg-m-expected(m)), 0)), str_concat(kcg-k-name(k), str_concat(" accepted or misclassified malformed FORMBIN2 ", str_concat(kcg-m-name(m), str_concat(": exit=", str_concat(int_to_str(lx-sh-rc(r)), str_concat(", expected ", str_concat(kcg-py(kcg-m-expected(m)), str_concat(", output=", kcg-py(lx-sh-text(r)))))))))));
+        }
+        def kcg-malformed-lines(root, kernels, ms, i) = if eq(len(ms), 0) then list() else cons(kcg-malformed-line(root, kernels, head(ms), i), kcg-malformed-lines(root, kernels, tail(ms), add(i, 1)));
+        def kcg-errors-of(results) = if eq(len(results), 0) then list() else append(nth(head(results), 2), kcg-errors-of(tail(results)));
+
+        // ---- the analysis: list(status, case-results, interop-result, malformed-results, errors, ts-present?, kernel-count, case-count) ----
+        def kcg-refusal(msg) = list("refused", list(), list(0, "", list()), list(), list(msg), 0, 0, 0);
+        def kcg-analysis() {
+            let text = read_file(kcg-vectors());
+            let mtext = read_file(kcg-malformed());
+            if nothing?(text) then kcg-refusal(str_concat("missing input: ", kcg-vectors()))
+            else if nothing?(mtext) then kcg-refusal(str_concat("missing input: ", kcg-malformed()))
+            else kcg-analysis-cases(kcg-cases(kcg-vectors(), text), kcg-malformed-cases(kcg-malformed(), mtext));
+        }
+        def kcg-analysis-cases(cases, ms) {
+            if str_eq(nth(cases, 0), "refused") then kcg-refusal(nth(cases, 1))
+            else if str_eq(nth(ms, 0), "refused") then kcg-refusal(nth(ms, 1))
+            else kcg-analysis-build(nth(cases, 1), nth(ms, 1), kcg-root());
+        }
+        def kcg-analysis-build(cases, ms, root) {
+            let built = kcg-build-kernels(root);
+            if str_eq(nth(built, 0), "refused") then kcg-refusal(nth(built, 1)) else kcg-analysis-run(cases, ms, root, nth(built, 1), nth(built, 2));
+        }
+        def kcg-ts-absent-line() = "TypeScript kernel absent (run `npm ci` in form/form-kernel-ts); the Go and Rust halves are proved above, the third witness is not";
+        def kcg-analysis-run(cases, ms, root, kernels, ts) {
+            let results = kcg-case-lines(kernels, cases);
+            let interop = kcg-interop(root, kernels);
+            let malformed = kcg-malformed-lines(root, kernels, ms, 0);
+            let failed = tb-filter2(results, kcg-failed?, 0);
+            let errors = append(tb-map(failed, kcg-fail-error), append(nth(interop, 2), append(kcg-errors-of(malformed), kcg-when(eq(ts, 0), kcg-ts-absent-line()))));
+            list(if eq(len(errors), 0) then "pass" else "fail", results, interop, malformed, errors, ts, len(kernels), len(cases));
+        }
+        def kcg-failed?(r, a) = if eq(nth(r, 0), 1) then 0 else 1;
+        def kcg-fail-error(r) = str_concat("canonical expression diverged: ", substring(nth(r, 1), 5, str_len(nth(r, 1))));
+        def kcg-a-status(a) = nth(a, 0);
+        def kcg-a-results(a) = nth(a, 1);
+        def kcg-a-interop(a) = nth(a, 2);
+        def kcg-a-malformed(a) = nth(a, 3);
+        def kcg-a-errors(a) = nth(a, 4);
+        def kcg-a-ts(a) = nth(a, 5);
+        def kcg-a-kernels(a) = nth(a, 6);
+        def kcg-a-cases(a) = nth(a, 7);
+
+        // ---- the voice ----
+        def kcg-summary(a) = str_concat(int_to_str(kcg-a-cases(a)), str_concat(" canonical expressions × ", str_concat(int_to_str(kcg-a-kernels(a)), " real kernels")));
+        def kcg-fail-summary(a) = str_concat(int_to_str(kcg-passed-count(kcg-a-results(a))), str_concat("/", str_concat(int_to_str(kcg-a-cases(a)), str_concat(" canonical expressions on ", str_concat(int_to_str(kcg-a-kernels(a)), str_concat(" real kernels; FORMBIN2 interop ", str_concat(if eq(nth(kcg-a-interop(a), 0), 1) then "green" else "red", str_concat("; ", str_concat(int_to_str(kcg-passed-count(kcg-a-malformed(a))), str_concat("/", str_concat(int_to_str(len(kcg-a-malformed(a))), " malformed artifacts refused")))))))))));
+        def kcg-print-lines(lines) = lx-print-prefixed("", lines);
+        def kcg-judge() {
+            let a = kcg-analysis();
+            kcg-print-lines(tb-map(kcg-a-results(a), kcg-line-of));
+            kcg-print-lines(kcg-when(gt(len(kcg-a-results(a)), 0), nth(kcg-a-interop(a), 1)));
+            kcg-print-lines(tb-map(kcg-a-malformed(a), kcg-line-of));
+            kcg-print-lines(kcg-when(gt(len(kcg-a-results(a)), 0), "FORMBIN2 Python-codec witnesses (a Python-made artifact into the kernels; kernel artifacts byte-roundtripped in Python; Python's decoder on each malformed vector): not carried by this lens — a Form FORMBIN2 codec is owed (R60)"));
+            lx-verdict-full(kcg-name(), list(), kcg-a-errors(a), kcg-summary(a), if str_eq(kcg-a-status(a), "refused") then "" else kcg-fail-summary(a));
+        }
+        def kcg-run() = kcg-judge();
+    }
+    kcg-run();
+}
