@@ -73,7 +73,7 @@ files as you use it — local drift there is tide, not signal; commit only delib
 changes.
 
 **`alwaysUpdateLinks` is committed as `false`, and that is load-bearing — do not
-flip it** (re-observed 2026-09-03). The vault is the repo root, so it contains
+flip it** (re-observed 2026-09-04). The vault is the repo root, so it contains
 `receipts/`. With auto-update on, renaming or moving one note in Obsidian silently
 rewrites internal links *across the whole vault* — including inside receipts, which
 are **immutable witness records** (the body's ontogeny, corpus row 740). A receipt
@@ -108,7 +108,7 @@ path-claim a door makes, with the body's own string engine on its own kernel:
 ./fkwu /tmp/dlhf.fk     # -> doors*10^6 + links*10^3 + broken
 ```
 
-Re-observed 2026-09-03: self-check `31`; door ring `12065000` — 12 doors, 65 links,
+Re-observed 2026-09-04: self-check `31`; door ring `12063000` — 12 doors, 63 links,
 0 broken. The body-wide graph:
 
 ```sh
@@ -117,8 +117,8 @@ Re-observed 2026-09-03: self-check `31`; door ring `12065000` — 12 doors, 65 l
 ./fkwu /tmp/blgf.fk     # -> orphans*10^6 + broken*10^3 + candidates
 ```
 
-Re-observed 2026-09-03: `13028050` — 13 orphan pages, 28 broken path-claims, 50
-candidates. Naming an orphan is what ends its orphanhood; those 28 are healable
+Re-observed 2026-09-04: `13029046` — 13 orphan pages, 29 broken path-claims, 46
+candidates. Naming an orphan is what ends its orphanhood; those 29 are healable
 work (`observe/heal-curation-seam.fk` composes the graph's own `blg-lands?` as its
 decision and refuses `receipts/` by construction).
 
@@ -148,8 +148,8 @@ a fixed point — see [`observe/autopoietic-pulse.fk`](observe/autopoietic-pulse
 - **No capture surface.** The pattern's `Inbox/` and daily digest have no organ
   here. A real gap.
 - **Frontmatter breadth.** This body's frontmatter is richer than the pattern's
-  (`hz`, geometry, spectral band) but lives on 16 of 1,770 `.md` files (counted
-  2026-09-03) — Obsidian's Dataview/Bases can barely query the body. A cheap, real win.
+  (`hz`, geometry, spectral band) but lives on 16 of 1,783 `.md` files (counted
+  2026-09-04) — Obsidian's Dataview/Bases can barely query the body. A cheap, real win.
 - **Entity pages.** The body has concepts, not entities (people, orgs, products).
 - **Obsidian is a rented window.** The graph-sight it gives is not yet the body's
   own rendering — the same seam-shape as the rented voice: native tissue, rented

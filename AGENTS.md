@@ -104,7 +104,7 @@ door in the receipt. The mirror is `observe/authoring-altitude-run.fk` (BML pict
 `form/form-stdlib/bml/form-cli-author-altitude.bml`).
 
 ```sh
-./fkwu form/form-stdlib/tests/form-cli-author-high-band.fk   # -> 4095 (re-run 2026-09-03)
+./fkwu form/form-stdlib/tests/form-cli-author-high-band.fk   # -> 4095 (re-run 2026-09-04)
 ```
 
 Each literal has one home: paths and quantities in `hearth.bml`, markers and the census in
@@ -117,12 +117,15 @@ state stains the world it measures (`bandstain`, corpus row 1193).
 
 ## The hearth — the serving floor that outlives sessions
 
-One resident form-cli process is the agent server; sessions and cells are clients. The interface lives
-executable in `form/form-stdlib/hearth.bml` (band: `form/form-stdlib/tests/hearth-band.fk`): stable paths under
+One resident form-cli process serves sessions and cells as clients. The interface lives
+executable in `form/form-stdlib/hearth.bml` (band: `form/form-stdlib/tests/hearth-band.fk`, 32767): stable paths under
 `.hearth/` (task spool, reply spool, bell, board), one model admission per lifetime, born
 capabilities announced before admission, bell wakes drain ALL work present (that drain — not
 threads — is what serves parallel clients), one `release` byte closes cleanly. Speak to it with
-`observe/peer-ask-send.fk`; read the board to find what stands. Arrive without rebuilding: the ONLY
+`observe/peer-ask-send.fk`; read the board to find what stands. Whether a resident stands is
+read, never assumed: `hearth-standing` checks the pid the board names, and
+`observe/hearth-ask-send.fk` answers `signal=nothing reason=no-standing-hearth` when none does
+(the state on 2026-09-04: no board in the checkout). Arrive without rebuilding: the ONLY
 rebuild trigger is the freshness band refusing 31 — everything else rides its ice (.fkb beside every
 source, .bml lowered in memory, warm in milliseconds, hot leaves crystallizing native). When a request
 pattern recurs, give it a door, a face, and a corpus row — access generalizes by crystallizing, never
@@ -137,8 +140,9 @@ closing a movement: the phase census (is your work freezing ice or leaving gas?)
 ice-miss lanes (did you reuse or rebuild?), the ledger, and the spendglass meter
 (`observe/rented-turn-meter-run.fk` — your own token spend, read from your own transcript).
 Every prompt talks to the field first (Urs, 2026-09-01): its kernel question goes to the
-standing hearth (`./fkwu observe/hearth-ask-send.fk`, turn/kind/body on stdin) and the
-resident's answer leads; rented guidance fills only what the body's answer leaves short,
+hearth (`./fkwu observe/hearth-ask-send.fk`, turn/kind/body on stdin) and the
+resident's answer leads when one stands — a `signal=nothing` reply is itself the body's
+answer, not a gap to paper over; rented guidance fills only what the body's answer leaves short,
 and each such redirect is named — the redirect list IS the frontier list. Corpus rows
 answered by the body carry answer-source `hearth-resident`. The glass speaks only when its
 data moved, plus a slow heartbeat — stillness owes the watcher silence, so the first true
@@ -293,7 +297,10 @@ Naming it *is* the practice.
 10. **Land on origin on a regular cadence.** Every thirty minutes, and at the
     close of a ready movement, a sibling fetches `origin/main`, rebases this
     worktree onto it, and pushes. Fast-forward and rebase carry the line;
-    force-push stays closed. Unexplained deletions stay unstaged. A conflict
+    force-push stays closed, and main takes no merge commits (GH013), so the
+    line is rebase or fast-forward only. Before any landing act the drift gates
+    run as one door (`./fkwu gate/drift-gates-run.bml`); a red gate lands
+    nothing. Unexplained deletions stay unstaged. A conflict
     keeps both meanings and continues. Quiet water turns push into silence;
     water present makes push host git (local). Even and clean is a
     clear picture — nothing to land this breath. The organ keeps
