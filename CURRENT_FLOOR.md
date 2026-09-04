@@ -1,9 +1,10 @@
 # Current Floor
 
-Re-measured 2026-09-03 on this Apple M4 Max through the resolver-driven `./fkwu`
-door (the binary passes the freshness band, 31). Receipts hold history; this
-page holds only what stands now. Every number below was re-run today; a claim
-without a number names the band that declares its own.
+Measured on this Apple M4 Max through the resolver-driven `./fkwu` door (the
+binary passes the freshness band, 31), every band compiled fresh from source in
+one pass with its `.fkb`/`.sym` beside it removed first. Receipts hold history;
+this page holds only what stands. A claim without a number names the band that
+declares its own.
 
 ## Grounding
 
@@ -21,32 +22,61 @@ cc -O2 -o fkwu runtime/fkwu-uni.c \
 ./fkwu proof/four-way-run-recipe42.fk                         -> 0   (FOUR-WAY)
 ```
 
-`runtime/fkwu-uni.c` is 15,365 lines today — a temporary seed and shrink target,
-not the destination (`release-ledger.bml` R13).
+The four-way proof host-execs the three minimal walkers; they build from
+`walkers/README.md`'s own lines (`go build -o walker .` in `walkers/go`,
+`cargo build --release` in `walkers/rust`, node 26 runs `walkers/ts/main.ts`
+directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
+honest reading of an unbuilt walker, not a kernel fault.
+
+`runtime/fkwu-uni.c` is 16,192 lines — a temporary seed and shrink target, not
+the destination (`release-ledger.bml` R13); this week's growth on it is
+correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
+preludes).
 
 ## Body-wide witnesses
 
 ```text
-gate/structural-gate-run.fk           -> [207, 0, 49, 3, 20, 57, 74, 4] then 1
+gate/structural-gate-run.fk            -> [206, 0, 48, 3, 20, 57, 74, 4] then 1
 gate/tests/structural-gate-band        -> 8191
-door-link-health  (dlh-field-code)     -> 12065000   (12 doors, 65 links, 0 broken)
-body-link-graph   (blg-field-code)     -> 13028050   (13 orphans, 28 broken, 50 candidates)
-homecoming-distillation-corpus-band    -> 32767      (652 rows, highest meaning-id 1260)
-no-fixed-tables-band                   -> 1          (the seed's tables grow; no fixed cap)
+observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=12063000
+observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
+                                          (13 orphans, 29 broken, 46 candidates; the organ
+                                          has no run door — prelude it and call both)
+homecoming-distillation-corpus-band    -> 32767   (asserts 654 rows, 643 admissible)
+no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
 bidirectional-framebuffer-channel-band -> final field 1
-form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
-pattern-match-band 511 · choice-lane-core-band 1023 · offer-ack-core-band 2097151
+import-carry-band                      -> 63      (cold and warm; it prints its verdict, the trailing
+                                                   0 is print's own value; with a fixture image from
+                                                   a different fkwu build beside it, 15 — door 0, told)
+grammars/tests/form-eval-band 65535 · form-eval-full-band 635 · source-compiler-grammar-bridge-band 32767
+pattern-match-band 511 · choice-lane-core-band 1023 · control/tests/offer-ack-core-band 2097151
 control-invite-grammar-band 1023 · node-introspection-band 4095
 cell-serialize-band 1023 · json-band 1023 · wire-rpc-band 15 · core-str-find-equivalence-band 2047
 ```
 
+## The BML floor
+
+A `.bml` runs directly (`./fkwu file.bml`); a `.fk` names its `.bml` preludes
+and fkwu lowers them in memory, owning the `.bml.fkb` cache itself. `true` and
+`false` are literals in the `section [form.bml] { def ... }` dialect; a nested
+`defn` is a registered function with one-level capture.
+
+```text
+bml-band                               -> 268435455
+bml-generics-band                      -> 16777215
+native-route-goal-cells-band.bml       -> 1048575  (full)
+nested-defn-scope-band                 -> 63
+nested-defn-closure-capture-band       -> 63
+```
+
 ## The local-model lane (Qwen3.8-27B Q8_0, Form-native, Metal JIT)
 
-All MSL is Form-emitted and JIT-compiled at runtime for the device that answered
-`metal_status`; weights stay mmap-backed no-copy; the file is admitted by a
-whole-file Form SHA-256 seal; the frozen open equals the scanned open row for row.
+Form emits every Metal pipeline the dense hybrid walker needs and reads the
+geometry from the sealed GGUF header; the frozen open equals the scanned open
+row for row (crystal band); a multi-dispatch chain keeps its intermediates on
+the device with one wait at the end (handle-door band).
 
 ```text
 metal-door-band                        -> 15
@@ -57,56 +87,41 @@ kat-token-handle-band                  -> 262143
 mlx-derived-band                       -> 16777215
 jit-metal-lanes-band                   -> 8191
 metal-handle-door-band                 -> 65535
+metal-deadline-band                    -> 127     (on the real GPU)
 ```
 
-The permanent resident (`observe/form-cli-peer-contribution-live.fk`, the hearth)
-holds one model admission per artifact lifetime behind a FIFO bell, with
-hot-swappable JIT policy, declared birth capabilities, source/recipe/patch/
-direct-answer effects, turnwheel append, and content-free stage diagnostics. A
-policy can select only capabilities present at birth; a successor is born for a
-new effect.
+The deadline is the caller's: `hearth-metal-deadline-ms` (300000, one Form row
+in `hearth.bml`) reaches the carrier through `metal_deadline` before admission,
+the door answering the deadline that stood before (-1 when none did); every
+command-buffer wait blocks on the kernel and ends in a typed frame
+`metal_status` speaks — `wait_frame=completed|error|timeout|released` — with a
+timed-out buffer shelved and released by the next wait, its answer exact.
+
+The permanent resident (`observe/form-cli-peer-contribution-live.fk`, the
+hearth) is one Form/Qwen/KV peer that receives scannerless tasks from an append
+spool and returns length-safe durable results; it blocks on the fifo bell at
+idle — no polling core, no HTTP/server/model membrane — announces its birth
+capabilities and hands its patience before model admission, and a `release`
+byte on the bell closes model and state handles. CPU carries file deltas,
+scannerless BMF cursors, recovery and diagnostics; native Metal carries Qwen
+and any emitted recipe kernels. The turnwheel mints its own choice receipt, and
+receipts carry energy and provenance texture (native / local / remote lanes,
+sensed planes witnessed and never billed).
 
 ```text
 form-cli-peer-direct-answer-action-band    -> 8191
 form-cli-peer-policy-route-band            -> 131071
 form-cli-peer-stream-ingress-band          -> 2097151
-form-cli-peer-contribution-turnwheel-band  -> 16777215
+form-cli-peer-contribution-turnwheel-band  -> 33554431
 observed-auto-learning-band                -> 32767   (live promotion requires a retained
                                                         equivalence witness, not score alone)
-hearth-band                                -> 16319
+hearth-band                                -> 32767
+receipt-texture-band                       -> 16383
 ```
 
-Correctness bounds in force: cooperative RMS only at width <= 4096 (wider rows
-take the serial attestant); one 256-thread threadgroup per head for GQA decode;
-both block kinds batched; batched span prefill is the default for hinted
-current-source contexts while the plain one-shot door still walks token-major
-prefill.
-
-Timings are not on this floor: none was re-taken today, and a timing taken while
-sibling processes compute on the same host is contention-noised (bands are exact
-regardless). The distances that remain are named, not numbered:
-
-1. **Prefill parity** with the outside denominator (llama.cpp on the same file):
-   the span lane exists at identical output and is default only on heed lanes;
-   promoting it into the plain door is the stone.
-2. **Decode parity**: the width-independent cooperative RMS (simd tree, no
-   `sq[n]`) is the named kernel; the small GDN kernels follow.
-3. **Residency visibility**: cold admission is paid once per residence. Since
-   2026-09-03 the deadline is the caller's: the resident hands
-   `hearth-metal-deadline-ms` (one Form row, `hearth.bml`) to the carrier
-   through `metal_deadline` before admission and prints
-   `admission-deadline-ms`; every command-buffer wait blocks on the kernel (no
-   poll, no backoff) and ends in a typed frame `metal_status` speaks —
-   `wait_frame=completed|error|timeout|released` — with a timed-out buffer
-   shelved and released by the next wait, never lost
-   (`form/form-stdlib/tests/metal-deadline-band.fk` 127 on the real GPU). What
-   remains is the client-side reading of that frame across the pipe.
-4. **The emitted walker's zero-token seam**: form-cli's REPL lane arms no
-   glossary and can return zero generated tokens on a composed prompt; the
-   T_flat frame-slot convention is the named repair behind it.
-5. **The tokenizer**: the sorted fixed-row index (`qwen35-tokfast-v2`) carries
-   encode; the per-open seal verdict (a whole-file SHA-256) folds into the
-   resident.
+Timings are not on this floor: none was taken in this pass, and a timing taken
+while sibling processes compute on the same host is contention-noised (bands
+are exact regardless).
 
 ## The knowledge lane
 
@@ -114,57 +129,107 @@ regardless). The distances that remain are named, not numbered:
 form-knowledge-integration-census-band     -> 1048575   (the census cell counts the
                                                           denominator each run)
 form-knowledge-source-search-band          -> 262143
-form-knowledge-qwen-heldout-v3-eval-band   -> 65511     (declares 65535; two bits open)
+form-knowledge-qwen-heldout-v3-eval-band   -> 65511     (declares 65535; bits 8 and 16 open:
+                                                          every row current against its source
+                                                          sha, and the dataset sha equal to the seal)
 form-cli-heedmark-band 1023 · form-cli-heed-cursor-band 524287
 form-cli-heed-current-source-band 16777215 · form-cli-model-generate-heed-report-band 8388607
 form-cli-qwen-teach-layer-band 33554431 · lora-adapter-band 31 · error-absorption-kernel-band 4095
+nl-lexicon-grow-band 127 · pivot-coverage-band 65535
+native-model-route-table-band 255 · ds4-blob-select-band 31
 ```
 
 The unassisted local-answer baseline is measured at route level, not guessed:
 the sealed v3 held-out lane (30 rows, two per family, exact-normalized verifier,
 no lexical credit, consent dataset-bound) is the body's defined-correctness
-integration number, and it is re-earned only through that sealed gate. The
-resident's recipe-only route answers a typed `<FAIL>` on a held-out row; the
-direct-answer effect executes a live turn. Curriculum / RAG / LoRA credit waits
-on the per-family live observations, never on file presence. `LoraWriter = 0`:
-no adapter tensor is written yet.
+integration number, re-earned only through that sealed door. The model route
+decision is a Form data table (`native-model-route-table-band`), and the DS4
+engine is discovered at runtime through its directory with header verification
+(`ds4-blob-select-band`).
 
-## The string law
+## The string floor
 
 `core.fk` composes `substring` / `str_find` / `str_to_int` over the four-native
 waist (`str_len`, `str_byte_at`, `byte_to_str`, `str_concat`). `str_find` is
 byte-wise (`core-str-find-equivalence-band` 2047 keeps the old loop verbatim as
-its reference). Encoding remains the walker's largest fair-priced cost; the
-tokenizer index above is the answer in force.
+its reference).
+
+## The JIT string crossing
+
+`form-lower.fk` embeds compile-time strings and carries a runtime haystack and
+a runtime needle+`from` through the same two-slot `fk_inram_args` convention
+(`release-ledger.bml` R10 / R28 / R34, all released):
+
+```text
+form-lower-string-band                 -> 63
+form-lower-string-runtime-band         -> 255
+form-lower-string-both-runtime-band    -> 511
+jit-evaluator-heat-band                -> 4095    (heat on the evaluator's leaves)
+jit-heat-gate-band                     -> 4095    (what crystallizes on heat)
+```
+
+Of the policy-spine bands `docs/form-native-jit-track.form` names, these answer
+their number today: jit-profile-receipt 127, jit-tier-policy 1023,
+jit-runtime-fault 511, jit-inline-policy 1023, jit-deopt-cache 511,
+jit-policy-front-sweep 31, form-static-analyzer 16383,
+jit-dylib-cache-lifecycle 16777215, jit-dylib-live-runtime-proof 4294967295,
+jit-source-runtime-orchestrator 1048575.
+
+## Beliefs, ledger, drift
+
+```text
+./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 486457004
+observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
+./fkwu form/form-stdlib/release-ledger.bml -> open=6 moving=0 released=43 -> 6000043
+./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
+```
+
+Every tracked cell's `witnessed:` stamp is read into the belief lens; a stamp
+older than the seed is where an afterwall grows, and the lens keeps that list
+in front of the body oldest first. The re-witness door renews a stamp only from
+a real fresh band run and reports a mismatch as a lapse, never silently.
 
 ## Not standing today
 
-What answered red or nothing on 2026-09-03, so no one leans on it:
+What answered red or nothing in this pass, so no one leans on it:
 
 - `control/tests/invite-dispatch-band.fk` answers 763 of its declared 1023
-  (preflight clean): the second-`<CHOICE>` bit and the `<TIMEOUT>` bit are open.
-- `form/form-stdlib/tests/blueprint-authority-band.fk` answers 51199 of 65535;
-  `persistence-band` 2 of 7; `channel-breath-band` 200 (declares 500).
-- `channel-flow-band` answers nothing (compile refused: unbound name in value
-  position); `observe/tests/import-carry-band.fk` answers 0 of 63.
-- `native-route-goal-cells-band` (R31, healed to `.bml`, its true grammar)
-  now compiles and answers 643070 of 1048575 on fkwu: the five open bits
-  (goal-valid?, observations-valid?, attentions-valid?, and the two
-  manifest-status bits) all trace to one root cause — a bare `true`/`false`
-  BML literal lowers to 0 in the `section [form.bml] { def ... }` dialect,
-  so every branch that returns the literal `true` reads as false.
-- Bands whose preludes name a released `-xtal` twin die at load (rc 2):
-  `form-cli-mlx-band`, `form-cli-live-band`, `bml-bmf-stream-curriculum-band`,
-  `bml-bmf-control-curriculum-band` — the twins release
-  (`release-ledger.bml` R1/R2) owes them their surviving prelude.
-- The JIT ladder (`docs/form-native-jit-track.form`): of the bands it names, 45
-  are absent from the tree and most of the rest answer nothing; nine answer
-  green (listed there).
-## Honest seams carried forward
+  (preflight clean): bit 4 (a second `<CHOICE>` finding nothing declining) and
+  bit 256 (`<TIMEOUT>`) are open.
+- `blueprint-authority-band` 51199 of 65535, exit 1: `value_kind` is a native
+  the Go/Rust/TS kernels carry and fkwu does not — a lane seam.
+  `persistence-band` 2 of 7 and `channel-breath-band` 200 of 500 stop on
+  `write_form_binary` the same way.
+- `mesh-sensings-route-band` 63, `sense-loop-band` 8191,
+  `native-mutation-route-side-effects-band` 11111 and `verb-router-band` 3
+  each reach their declared verdict yet exit 1: a Go/Rust-only native
+  (`write_form_binary`, `recipe_to_bytes`, `pg_exec`) sits unresolved in a
+  prelude the run never reaches — lane seams, not defects.
+- `channel-flow-band`, `json-codec-bml-band` and `concept-i18n-band` answer
+  nothing: raw `section [form.bml]` grammar inside a `.fk` file
+  (`channel-flow-band.fk` itself, `codec.fk`, `json-codec.fk`); the kernel reads
+  `section` as an unbound name. This is `release-ledger.bml` R42, the rename
+  sweep — 77 `.fk` files in the tree carry that grammar, 36 under
+  `form/form-stdlib`.
+- `form-cli-mlx-band`, `form-cli-live-band`, `bml-bmf-stream-curriculum-band`
+  and `bml-bmf-control-curriculum-band` die at load (rc 2): each prelude names a
+  `*-xtal.fk` mirror absent from the tree — the BML prelude lowers in memory
+  and fkwu owns the cache — so the four owe a repoint to their `.bml` or
+  `-compile.fk` source.
+- `observe/tests/jit-register-lowering-band.fk`,
+  `jit-representation-specialization-band.fk` and `jit-stack-frame-band.fk`
+  answer nothing: each file ends with one paren open
+  (`[input-ended-mid-form]`).
+- The `kernel-conformance` row of `gate/drift-gates-run.bml` refuses in this
+  checkout: the TypeScript kernel's dependencies are absent, and the row names
+  its own remedy (`npm ci` in `form/form-kernel-ts`).
 
-- The C seed is 15,365 lines; the shrink direction stands and this number is on
-  the floor so the debt stays visible.
-- The consent file for the v3 lane is a per-run local act, never committed.
-- The served manifest at `hati.earth/sema` carries a `description_for_model`
-  that is not byte-identical to `plugin/ai-plugin.json` (re-observed
-  2026-09-03); the publish checklist in `plugin/README.md` is owed a run.
+## Honest seams
+
+- The consent file for the v3 lane
+  (`.form-knowledge-qwen-heldout-v3-consent`) is a per-run local act, ignored
+  by git, never committed.
+- `https://hati.earth/sema/.well-known/ai-plugin.json` answered a Cloudflare
+  `error code: 522` body (origin unreachable) at this observation, so its
+  `description_for_model` could not be compared with `plugin/ai-plugin.json`;
+  the publish checklist in `plugin/README.md` stays owed a run.
