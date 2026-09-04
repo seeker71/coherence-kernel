@@ -1,0 +1,111 @@
+; Resident coding-agent workload through the actual form-cli entry.
+; Verdict 65535; named failed rows are printed before the verdict.
+; witnessed: 2026-09-04 -> 65535
+; PROOF LEVEL: FOURTH-ARM ONLY — kernel_stat mask 8, probed 2026-09-04.
+; preludes: form-stdlib/core.fk form-stdlib/form-cli.fk
+(do
+    (defn fatb-docs ()
+        (list
+            (list "source:app" "src/app.py" "# demo\ndef hello(name):\n    return name\n")
+            (list "source:util" "src/util.py" "def helper():\n    return 7\n")
+            (list "config:package" "package.json" "{\"name\":\"demo\",\"scripts\":{\"test\":\"run tests\"}}")))
+    (defn fatb-json () "{\"items\":[{\"name\":\"alpha\",\"ok\":true},{\"name\":\"beta\",\"ok\":false}],\"off\":false}")
+    (defn fatb-call (tool args input) (fc-tool-call (fatb-docs) tool args input))
+    (defn fatb-good-result (r expected)
+        (and (eq (fat-exit r) 0) (and (str_eq (fat-error r) "") (str_eq (fat-out r) expected))))
+    (defn fatb-good (tool args input expected) (fatb-good-result (fatb-call tool args input) expected))
+    (defn fatb-error (tool args input expected)
+        (str_eq (fat-error (fatb-call tool args input)) expected))
+    (defn fatb-edit-check (r)
+        (and (eq (fat-exit r) 0)
+            (and (str_eq (nth (fat-find-doc (fatb-docs) "src/app.py") 2)
+                    "# demo\ndef hello(name):\n    return name\n")
+                (fatb-good-result (fc-tool-call (fat-documents r) "rg" (list "-nF" "return value") "")
+                    "src/app.py:3:    return value\n"))))
+    (defn fatb-created (r)
+        (and (eq (fat-exit r) 0)
+            (fatb-good-result (fc-tool-call (fat-documents r) "read" (list "notes.md") "") "held note")))
+    ; Native-op manifest tags + 100 select live evaluator counters. This
+    ; observes process, file, source-inventory and network doors during the calls,
+    ; after source/BML admission. It is not a measurement of program loading.
+    (defn fatb-counter-keys ()
+        (list 155 156 157 158 159 160 161 162 163 201 204 205 207 214
+              218 219 220 221 222 223 224 225 226 232 233 234 235 236 300 302))
+    (defn fatb-counts (keys)
+        (if (nil? keys) (list) (cons (kernel_stat (head keys)) (fatb-counts (tail keys)))))
+    (defn fatb-same (a b)
+        (if (nil? a) (nil? b)
+            (and (eq (head a) (head b)) (fatb-same (tail a) (tail b)))))
+    (defn fatb-cases ()
+        (list
+            (list "catalog-and-live-dispatch"
+                (and (eq (len (fat-tools)) 15)
+                    (and (str_eq (tc-plan-protocol (tc-plan-tool "jq" "cap.kernel.call")) "kernel:call")
+                        (and (ge (str_find (fc-respond "rg -nF cap.kernel.call") "form-cli/tool/call" 0) 0)
+                             (str_eq (fc-respond "jq -nc '{\"n\":3}'") "{\"n\":3}\n")))))
+            (list "regex-and-line-numbers"
+                (fatb-good "rg" (list "-n" "^def\\s+\\w+" "-g" "*.py") ""
+                    "src/app.py:2:def hello(name):\nsrc/util.py:1:def helper():\n"))
+            (list "glob-and-fixed-string"
+                (and (fatb-good "rg" (list "--files" "-g" "**/*.py" "-g" "!util.py") "" "src/app.py\n")
+                     (fatb-good "rg" (list "-nF" "hello(name)") "" "src/app.py:2:def hello(name):\n")))
+            (list "context-and-word-matching"
+                (and (fatb-good "rg" (list "-n" "-C" "1" "^def hello") ""
+                         "src/app.py-1-# demo\nsrc/app.py:2:def hello(name):\nsrc/app.py-3-    return name\n")
+                     (fatb-good "rg" (list "-nw" "a|ab") "ab\n" "<stdin>:1:ab\n")))
+            (list "search-errors-and-no-match"
+                (and (fatb-error "rg" (list "(") "" "unsupported-pattern-syntax")
+                    (and (fatb-error "rg" (list "--pcre2" "x") "" "unsupported-rg-option")
+                         (eq (fat-exit (fatb-call "rg" (list "never-present") "")) 1))))
+            (list "jq-projection-missing-null-fallback"
+                (and (fatb-good "jq" (list "-r" ".scripts.test" "package.json") "" "run tests\n")
+                    (and (fatb-good "jq" (list ".missing") (fatb-json) "null\n")
+                         (fatb-good "jq" (list "-r" ".missing // \"fallback\"") (fatb-json) "fallback\n"))))
+            (list "jq-stream-filter-and-binding"
+                (and (fatb-good "jq" (list "-r" ".items[] | select(.ok == true) | .name") (fatb-json) "alpha\n")
+                     (fatb-good "jq" (list "--arg" "wanted" "beta" "-r" ".items[] | select(.name == $wanted) | .name") (fatb-json) "beta\n")))
+            (list "jq-map-object-collect"
+                (and (fatb-good "jq" (list ".items | map(.name)") (fatb-json) "[\"alpha\",\"beta\"]\n")
+                    (and (fatb-good "jq" (list "{first:.items[0].name}") (fatb-json) "{\"first\":\"alpha\"}\n")
+                         (fatb-good "jq" (list "[.items[].name]") (fatb-json) "[\"alpha\",\"beta\"]\n"))))
+            (list "jq-errors-before-empty-evaluation"
+                (and (fatb-error "jq" (list ".") "{bad}" "invalid-json-input")
+                    (and (fatb-error "jq" (list "$undefined") "" "unbound-variable")
+                        (and (eq (fat-exit (fatb-call "jq" (list "-e" ".off") (fatb-json))) 1)
+                             (eq (fat-exit (fatb-call "jq" (list "-e" "empty") (fatb-json))) 4)))))
+            (list "line-windows-and-sed-range"
+                (and (fatb-good "head" (list "-n" "1") "one\ntwo" "one\n")
+                    (and (fatb-good "tail" (list "-n" "1") "one\ntwo" "two")
+                         (fatb-good "sed" (list "-n" "2,3p") "one\ntwo\nthree\nfour\n" "two\nthree\n"))))
+            (list "count-sort-unique"
+                (and (fatb-good "wc" (list "-l") "one\ntwo" "1\n")
+                    (and (fatb-good "sort" (list "-nu") "10\n2\n2\n" "2\n10\n")
+                         (fatb-good "uniq" (list "-c") "a\na\nb\n" "2 a\n1 b\n"))))
+            (list "fields-and-character-translation"
+                (and (fatb-good "awk" (list "{print $2}") "one two\nthree four\n" "two\nfour\n")
+                    (and (fatb-good "cut" (list "-d" ":" "-f" "2") "a:b:c\nx:y:z\n" "b\ny\n")
+                         (fatb-good "tr" (list "-d" "\\n") "one\ntwo\n" "onetwo"))))
+            (list "guarded-immutable-edit"
+                (and (fatb-edit-check (fatb-call "edit" (list "src/app.py" "return name" "return value") ""))
+                    (and (fatb-error "edit" (list "src/app.py" "name" "value") "" "edit-ambiguous")
+                         (fatb-error "edit" (list "src/app.py" "" "value") "" "empty-edit-pattern"))))
+            (list "create-and-no-overwrite"
+                (and (fatb-created (fatb-call "write" (list "notes.md" "held note") ""))
+                     (fatb-error "write" (list "src/app.py" "overwrite") "" "document-exists-use-guarded-edit")))
+            (list "no-shell-fallback-or-discarded-edit"
+                (and (str_eq (fat-error (fc-tool-command (fatb-docs) "cat src/app.py; echo bad" "")) "shell-syntax-not-supported")
+                    (and (fatb-error "exec" (list "echo" "bad") "" "unsupported-tool")
+                         (str_eq (fc-respond "edit anything old new") "form-tool error=stateful-tool-requires-fc-tool-call"))))))
+    (defn fatb-score (cases bit score)
+        (if (nil? cases) score
+            (do
+                (let observed (nth (head cases) 1))
+                (let notice (if observed 0 (print_str (str_concat "FAIL " (head (head cases))))))
+                (fatb-score (tail cases) (mul bit 2) (if observed (add score bit) score)))))
+    (defn fatb-finish (before score)
+        (do
+            (let unchanged (fatb-same before (fatb-counts (fatb-counter-keys))))
+            (let notice (if unchanged 0 (print_str "FAIL process-file-or-network-membrane-crossed")))
+            (add score (if unchanged 32768 0))))
+    (defn fatb-run (before) (fatb-finish before (fatb-score (fatb-cases) 1 0)))
+    (fatb-run (fatb-counts (fatb-counter-keys))))

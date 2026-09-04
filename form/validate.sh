@@ -342,7 +342,7 @@ fk_declared_deps() {
     awk '
         function emit(tok) {
             gsub(/^[ \t,;"]+|[ \t,;"]+$/, "", tok)
-            if (tok ~ /\.fk$/) print tok
+            if (tok ~ /\.(fk|bml)$/) print tok
         }
         /^;[ \t]*import([ \t:]|")/ {
             s = $0
@@ -364,9 +364,9 @@ fk_declared_deps() {
                 if (n >= 1) emit(a[1])
             }
         }
-        /^;[ \t]*preludes:/ {
+        /^(;|\/\/)[ \t]*preludes:/ {
             s = $0
-            sub(/^;[ \t]*preludes:[ \t]*/, "", s)
+            sub(/^(;|\/\/)[ \t]*preludes:[ \t]*/, "", s)
             gsub(/,/, " ", s)
             n = split(s, a, /[ \t]+/)
             for (i = 1; i <= n; i++) {
@@ -508,13 +508,10 @@ fk_strip_prelude_header() {
 # True when $1's own "preludes:" directive (";"-led for .fk, "//"-led for
 # .bml -- form-source-compile-file's lowering keeps a .bml's original
 # comment lines, so a LOWERED file can carry either marker too) names a
-# ".bml" dependency. fk_declared_deps below (the walk fk_expand_declared_deps
-# uses for single-file auto-expand) only ever emits ".fk" tokens, so a
-# ".bml" dependency named ONLY in a header stripping would erase is
-# invisible to bash on every other path -- fk_strip_prelude_header must
-# leave that specific file's header alone so the kernels' own "; preludes:"/
-# "// preludes:" walk (which DOES handle ".bml", including recursively
-# lowering it) is the thing that finds it instead.
+# ".bml" dependency. Single-file auto-expansion follows both .fk and .bml
+# now. Explicit multi-file callers can still rely on the kernels' directive
+# walk for BML dependencies, so those source headers remain available to the
+# kernels' own recursive BML lowering as well as the prepared source list.
 fk_prelude_has_bml_dep() {
     grep -Eq '^(;|//)[[:space:]]*preludes:.*\.bml([[:space:]]|,|$)' "$1"
 }
@@ -561,8 +558,8 @@ prepare_sources() {
             fi
         elif fk_prelude_has_bml_dep "$src"; then
             # Leave this file exactly as it is on disk: its header names a
-            # ".bml" dependency fk_declared_deps can't see, so it must stay
-            # live for the kernels' own directive walk to find and lower.
+            # ".bml" dependency; explicit multi-file callers can leave that
+            # dependency to the kernels' own directive walk to find and lower.
             prepared_args+=("$src")
         else
             key="$(form_hash16 "$src")-plain"

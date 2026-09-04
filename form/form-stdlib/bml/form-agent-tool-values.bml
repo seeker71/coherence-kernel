@@ -1,0 +1,79 @@
+// Resident coding-tool values. No acquisition or persistence occurs here.
+// preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
+section [form.bml] {
+    class FormAgentToolValues {
+        field FatSchema = "form-agent-tool-result-v1";
+        field FatMaxBytes = 1048576;
+        field FatMaxDocuments = 512;
+        field FatMaxArguments = 128;
+        field FatMaxSortItems = 1024;
+        field FatMaxPattern = 256;
+        field FatMatchFuel = 50000;
+
+        // Result: schema, exit, stdout, stderr, next resident documents, crossings.
+        // Documents use zg's (identity, source lens, held text) value contract.
+        def fat-result(code, out, err, docs) = list(FatSchema(), code, out, err, docs, 0);
+        def fat-exit(r) = nth(r, 1);
+        def fat-out(r) = nth(r, 2);
+        def fat-error(r) = nth(r, 3);
+        def fat-documents(r) = nth(r, 4);
+        def fat-crossings(r) = nth(r, 5);
+        def fat-ok(out, docs) = fat-result(0, out, "", docs);
+        def fat-fail(reason, docs) = fat-result(2, "", reason, docs);
+        def fat-reverse-go(xs, out) = if nil?(xs) then out else fat-reverse-go(tail(xs), cons(head(xs), out));
+        def fat-reverse(xs) = fat-reverse-go(xs, list());
+        def fat-join(xs, sep) = if nil?(xs) then "" else if nil?(tail(xs)) then head(xs) else str_concat(head(xs), str_concat(sep, fat-join(tail(xs), sep)));
+        def fat-has(xs, s) = if nil?(xs) then 0 else if str_eq(head(xs), s) then 1 else fat-has(tail(xs), s);
+        def fat-drop(xs, n) = if or(le(n, 0), nil?(xs)) then xs else fat-drop(tail(xs), sub(n, 1));
+        def fat-take(xs, n) = if or(le(n, 0), nil?(xs)) then list() else cons(head(xs), fat-take(tail(xs), sub(n, 1)));
+        def fat-min(a, b) = if lt(a, b) then a else b;
+        def fat-max(a, b) = if gt(a, b) then a else b;
+        def fat-char(s, i) = if or(lt(i, 0), ge(i, str_len(s))) then 0 else str_byte_at(s, i);
+        def fat-ws(c) = or(eq(c, 32), or(eq(c, 9), or(eq(c, 10), eq(c, 13))));
+        def fat-skip(s, i) = if and(lt(i, str_len(s)), fat-ws(fat-char(s, i))) then fat-skip(s, add(i, 1)) else i;
+        def fat-rtrim(s, n) = if and(gt(n, 0), fat-ws(fat-char(s, sub(n, 1)))) then fat-rtrim(s, sub(n, 1)) else n;
+        def fat-trim(s) = substring(s, fat-skip(s, 0), fat-rtrim(s, str_len(s)));
+        def fat-digit(c) = and(ge(c, 48), le(c, 57));
+        def fat-natural-go(s, i) = if ge(i, str_len(s)) then 1 else if fat-digit(fat-char(s, i)) then fat-natural-go(s, add(i, 1)) else 0;
+        def fat-natural(s) = and(gt(str_len(s), 0), fat-natural-go(s, 0));
+        def fat-starts(s, prefix) = if lt(str_len(s), str_len(prefix)) then 0 else str_eq(substring(s, 0, str_len(prefix)), prefix);
+        def fat-ends(s, suffix) = if lt(str_len(s), str_len(suffix)) then 0 else str_eq(substring(s, sub(str_len(s), str_len(suffix)), str_len(s)), suffix);
+        def fat-strip(s, n) = substring(s, n, sub(str_len(s), n));
+        def fat-find-doc(docs, path) = if nil?(docs) then list() else if or(str_eq(nth(head(docs), 0), path), str_eq(nth(head(docs), 1), path)) then head(docs) else fat-find-doc(tail(docs), path);
+        def fat-put-doc(docs, doc) = if nil?(docs) then list(doc) else if str_eq(nth(head(docs), 1), nth(doc, 1)) then cons(doc, tail(docs)) else cons(head(docs), fat-put-doc(tail(docs), doc));
+        // Empty concatenation preserves a string value, not a number/list.
+        def fat-text?(s) = value_eq(s, str_concat("", s));
+        def fat-text-bytes(xs, total) = if nil?(xs) then total else if not(fat-text?(head(xs))) then add(FatMaxBytes(), 1) else fat-text-bytes(tail(xs), add(total, str_len(head(xs))));
+        def fat-doc-bytes(docs, total) = if nil?(docs) then total else if not(eq(len(head(docs)), 3)) then add(FatMaxBytes(), 1) else fat-doc-bytes(tail(docs), fat-text-bytes(head(docs), total));
+        def fat-docs-valid(docs, seen) = if nil?(docs) then 1 else if not(eq(len(head(docs)), 3)) then 0 else fat-doc-valid(head(docs), tail(docs), seen);
+        def fat-doc-valid(doc, rest, seen) = if not(and(fat-text?(nth(doc, 0)), and(fat-text?(nth(doc, 1)), fat-text?(nth(doc, 2))))) then 0 else if or(eq(str_len(nth(doc, 0)), 0), eq(str_len(nth(doc, 1)), 0)) then 0 else if or(fat-has(seen, nth(doc, 0)), fat-has(seen, nth(doc, 1))) then 0 else fat-docs-valid(rest, cons(nth(doc, 0), cons(nth(doc, 1), seen)));
+
+        // Quoted argv only: no shell expansion, redirection, pipelines or execution.
+        // Typed in-process callers skip this convenience spelling entirely.
+        def fat-argv(s) = fat-argv-go(s, 0, 0, "", 0, list());
+        def fat-argv-go(s, i, quote, word, active, out) = if ge(i, str_len(s)) then if not(eq(quote, 0)) then list(list(), "unterminated-quote") else list(fat-reverse(if active then cons(word, out) else out), "") else fat-argv-step(s, i, quote, word, active, out);
+        def fat-argv-step(s, i, quote, word, active, out) {
+            let c = fat-char(s, i);
+            if and(not(eq(quote, 0)), eq(c, quote)) then fat-argv-go(s, add(i, 1), 0, word, 1, out)
+            else if and(eq(quote, 0), or(eq(c, 34), eq(c, 39))) then fat-argv-go(s, add(i, 1), c, word, 1, out)
+            else if and(eq(quote, 0), fat-ws(c)) then fat-argv-go(s, add(i, 1), 0, "", 0, if active then cons(word, out) else out)
+            else if and(eq(quote, 0), or(eq(c, 124), or(eq(c, 59), or(eq(c, 60), eq(c, 62))))) then list(list(), "shell-syntax-not-supported")
+            else if and(not(eq(quote, 39)), eq(c, 92)) then fat-argv-escape(s, i, quote, word, out)
+            else fat-argv-go(s, add(i, 1), quote, str_concat(word, byte_to_str(c)), 1, out);
+        }
+        def fat-argv-escape(s, i, quote, word, out) = if ge(add(i, 1), str_len(s)) then list(list(), "trailing-escape") else if or(eq(quote, 0), or(eq(fat-char(s, add(i, 1)), 34), eq(fat-char(s, add(i, 1)), 92))) then fat-argv-go(s, add(i, 2), quote, str_concat(word, byte_to_str(fat-char(s, add(i, 1)))), 1, out) else fat-argv-go(s, add(i, 1), quote, str_concat(word, byte_to_str(92)), 1, out);
+
+        // Split a query only outside strings and nested brackets/parentheses.
+        def fat-split-top(s, sep) = fat-split-go(s, sep, 0, 0, 0, 0, 0, list());
+        def fat-split-go(s, sep, i, start, depth, quote, escape, out) = if ge(i, str_len(s)) then if or(not(eq(depth, 0)), quote) then list(list(), "unbalanced-query") else list(fat-reverse(cons(fat-trim(substring(s, start, i)), out)), "") else fat-split-step(s, sep, i, start, depth, quote, escape, out);
+        def fat-split-step(s, sep, i, start, depth, quote, escape, out) {
+            let c = fat-char(s, i);
+            if quote then fat-split-go(s, sep, add(i, 1), start, depth, if and(eq(c, 34), not(escape)) then 0 else 1, if and(eq(c, 92), not(escape)) then 1 else 0, out)
+            else if eq(c, 34) then fat-split-go(s, sep, add(i, 1), start, depth, 1, 0, out)
+            else if or(eq(c, 40), or(eq(c, 91), eq(c, 123))) then fat-split-go(s, sep, add(i, 1), start, add(depth, 1), 0, 0, out)
+            else if or(eq(c, 41), or(eq(c, 93), eq(c, 125))) then if le(depth, 0) then list(list(), "unbalanced-query") else fat-split-go(s, sep, add(i, 1), start, sub(depth, 1), 0, 0, out)
+            else if and(eq(depth, 0), str_eq(substring(s, i, fat-min(str_len(s), add(i, str_len(sep)))), sep)) then fat-split-go(s, sep, add(i, str_len(sep)), add(i, str_len(sep)), 0, 0, 0, cons(fat-trim(substring(s, start, i)), out))
+            else fat-split-go(s, sep, add(i, 1), start, depth, 0, 0, out);
+        }
+    }
+}

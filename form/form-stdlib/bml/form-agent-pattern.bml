@@ -1,0 +1,87 @@
+// Bounded line-pattern matching for resident coding tools.
+// Literals, . ^ $ |, classes/ranges, ASCII \d \w \s \b and ? * +.
+// Groups, counted repetition, lookaround, backreferences and Unicode classes
+// are explicitly outside this profile. The evaluator carries a work budget.
+// preludes: form-stdlib/core.fk form-stdlib/bml/form-agent-tool-values.bml form-stdlib/bml/zvec-grep.bml
+section [form.bml] {
+    class FormAgentPattern {
+        // Token: kind, payload, minimum, maximum (-1 means unbounded).
+        def fap-token(kind, text) = list(kind, text, 1, 1);
+        def fap-compile(s) = if gt(str_len(s), FatMaxPattern()) then list(list(), "pattern-limit") else fap-parse(s, 0, list(), list());
+        def fap-parse(s, i, tokens, branches) = if ge(i, str_len(s)) then list(fat-reverse(cons(fat-reverse(tokens), branches)), "") else fap-parse-at(s, i, tokens, branches);
+        def fap-parse-at(s, i, tokens, branches) {
+            let c = fat-char(s, i);
+            if eq(c, 124) then fap-parse(s, add(i, 1), list(), cons(fat-reverse(tokens), branches))
+            else if or(eq(c, 40), or(eq(c, 41), or(eq(c, 123), or(eq(c, 125), or(eq(c, 42), or(eq(c, 43), eq(c, 63))))))) then list(list(), "unsupported-pattern-syntax")
+            else if eq(c, 91) then fap-class(s, i, tokens, branches)
+            else if eq(c, 92) then fap-escape(s, i, tokens, branches)
+            else fap-add(s, add(i, 1), fap-token(if eq(c, 46) then 1 else if eq(c, 94) then 6 else if eq(c, 36) then 7 else 0, byte_to_str(c)), tokens, branches);
+        }
+        def fap-class(s, i, tokens, branches) {
+            let end = str_find(s, "]", add(i, 1));
+            if lt(end, 0) then list(list(), "unclosed-character-class")
+            else if or(eq(end, add(i, 1)), and(eq(fat-char(s, add(i, 1)), 94), eq(end, add(i, 2)))) then list(list(), "empty-character-class")
+            else if ge(str_find(substring(s, add(i, 1), end), "\\", 0), 0) then list(list(), "class-escape-not-supported")
+            else if not(fap-class-valid(s, if eq(fat-char(s, add(i, 1)), 94) then add(i, 2) else add(i, 1), end)) then list(list(), "invalid-character-range")
+            else fap-add(s, add(end, 1), fap-token(2, substring(s, add(i, 1), end)), tokens, branches);
+        }
+        def fap-class-valid(s, i, end) = if ge(i, end) then 1 else if and(lt(add(i, 2), end), eq(fat-char(s, add(i, 1)), 45)) then and(le(fat-char(s, i), fat-char(s, add(i, 2))), fap-class-valid(s, add(i, 3), end)) else fap-class-valid(s, add(i, 1), end);
+        def fap-escape(s, i, tokens, branches) {
+            let c = fat-char(s, add(i, 1));
+            if eq(c, 0) then list(list(), "trailing-pattern-escape")
+            else if or(fat-digit(c), or(and(ge(c, 65), le(c, 90)), and(and(ge(c, 97), le(c, 122)), not(or(eq(c, 100), or(eq(c, 119), or(eq(c, 115), or(eq(c, 98), or(eq(c, 110), eq(c, 116)))))))))) then list(list(), "unsupported-pattern-escape")
+            else fap-add(s, add(i, 2), fap-token(if eq(c, 100) then 3 else if eq(c, 119) then 4 else if eq(c, 115) then 5 else if eq(c, 98) then 8 else 0, byte_to_str(if eq(c, 110) then 10 else if eq(c, 116) then 9 else c)), tokens, branches);
+        }
+        def fap-add(s, next, token, tokens, branches) {
+            let q = fat-char(s, next);
+            let quantified = or(eq(q, 42), or(eq(q, 43), eq(q, 63)));
+            if and(quantified, ge(nth(token, 0), 6)) then list(list(), "quantified-anchor")
+            else fap-parse(s, if quantified then add(next, 1) else next,
+                cons(if quantified then list(nth(token, 0), nth(token, 1), if eq(q, 43) then 1 else 0, if eq(q, 63) then 1 else -1) else token, tokens), branches);
+        }
+        def fap-word(c) = or(fat-digit(c), or(and(ge(c, 65), le(c, 90)), or(and(ge(c, 97), le(c, 122)), eq(c, 95))));
+        def fap-fold(c, ic) = if ic then zg-lower-byte(c) else c;
+        def fap-class-has(s, i, c, ic) = if ge(i, str_len(s)) then 0 else if and(lt(add(i, 2), str_len(s)), eq(fat-char(s, add(i, 1)), 45)) then if and(ge(fap-fold(c, ic), fap-fold(fat-char(s, i), ic)), le(fap-fold(c, ic), fap-fold(fat-char(s, add(i, 2)), ic))) then 1 else fap-class-has(s, add(i, 3), c, ic) else if eq(fap-fold(c, ic), fap-fold(fat-char(s, i), ic)) then 1 else fap-class-has(s, add(i, 1), c, ic);
+        def fap-class-match(s, c, ic) = if eq(fat-char(s, 0), 94) then not(fap-class-has(s, 1, c, ic)) else fap-class-has(s, 0, c, ic);
+        def fap-atom(token, s, pos, ic) {
+            let kind = nth(token, 0);
+            let c = fat-char(s, pos);
+            if ge(pos, str_len(s)) then 0
+            else if eq(kind, 0) then eq(fap-fold(c, ic), fap-fold(fat-char(nth(token, 1), 0), ic))
+            else if eq(kind, 1) then 1
+            else if eq(kind, 2) then fap-class-match(nth(token, 1), c, ic)
+            else if eq(kind, 3) then fat-digit(c)
+            else if eq(kind, 4) then fap-word(c)
+            else if eq(kind, 5) then fat-ws(c)
+            else if eq(kind, 9) then not(eq(c, 47)) else 0;
+        }
+        def fap-anchor(kind, s, pos) = if eq(kind, 6) then eq(pos, 0) else if eq(kind, 7) then eq(pos, str_len(s)) else not(eq(fap-word(fat-char(s, sub(pos, 1))), fap-word(fat-char(s, pos))));
+        // Match result is (end-position or -1, fuel-left).
+        def fap-seq(tokens, s, pos, ic, fuel) = if le(fuel, 0) then list(-1, 0) else if nil?(tokens) then list(pos, sub(fuel, 1)) else fap-seq-at(tokens, s, pos, ic, sub(fuel, 1));
+        def fap-seq-at(tokens, s, pos, ic, fuel) {
+            let token = head(tokens);
+            let kind = nth(token, 0);
+            if and(ge(kind, 6), le(kind, 8)) then if fap-anchor(kind, s, pos) then fap-seq(tail(tokens), s, pos, ic, fuel) else list(-1, fuel)
+            else fap-consumed(tokens, s, pos, ic, fap-consume(token, s, pos, ic, nth(token, 3), fuel));
+        }
+        def fap-consume(token, s, pos, ic, remaining, fuel) = if le(fuel, 0) then list(pos, 0) else if or(eq(remaining, 0), not(fap-atom(token, s, pos, ic))) then list(pos, sub(fuel, 1)) else fap-consume(token, s, add(pos, 1), ic, if lt(remaining, 0) then -1 else sub(remaining, 1), sub(fuel, 1));
+        def fap-consumed(tokens, s, pos, ic, span) = if lt(sub(head(span), pos), nth(head(tokens), 2)) then list(-1, nth(span, 1)) else fap-rest(tail(tokens), s, add(pos, nth(head(tokens), 2)), head(span), ic, nth(span, 1));
+        def fap-rest(tokens, s, minimum, pos, ic, fuel) = if or(lt(pos, minimum), le(fuel, 0)) then list(-1, fat-max(0, fuel)) else fap-rest-result(tokens, s, minimum, pos, ic, fap-seq(tokens, s, pos, ic, fuel));
+        def fap-rest-result(tokens, s, minimum, pos, ic, result) = if ge(head(result), 0) then result else fap-rest(tokens, s, minimum, sub(pos, 1), ic, nth(result, 1));
+        def fap-branches(branches, s, pos, ic, fuel) = if or(nil?(branches), le(fuel, 0)) then list(-1, fat-max(0, fuel)) else fap-branch-result(branches, s, pos, ic, fap-seq(head(branches), s, pos, ic, fuel));
+        def fap-branch-result(branches, s, pos, ic, result) = if ge(head(result), 0) then result else fap-branches(tail(branches), s, pos, ic, nth(result, 1));
+        def fap-word-branches(branches) = if nil?(branches) then list() else cons(cons(fap-token(8, ""), append(head(branches), list(fap-token(8, "")))), fap-word-branches(tail(branches)));
+        def fap-search(branches, s, ic, whole) = fap-search-at(if whole then fap-word-branches(branches) else branches, s, 0, ic, 0, FatMatchFuel());
+        def fap-search-at(branches, s, pos, ic, whole, fuel) = if or(gt(pos, str_len(s)), le(fuel, 0)) then list(-1, -1, fat-max(0, fuel)) else fap-search-result(branches, s, pos, ic, whole, fap-branches(branches, s, pos, ic, fuel));
+        def fap-search-result(branches, s, pos, ic, whole, r) = if and(ge(head(r), 0), if whole then and(not(fap-word(fat-char(s, sub(pos, 1)))), not(fap-word(fat-char(s, head(r))))) else 1) then list(pos, head(r), nth(r, 1)) else fap-search-at(branches, s, add(pos, 1), ic, whole, nth(r, 1));
+
+        // Glob matching is anchored; * does not consume '/', ** does.
+        def fap-glob-tokens(s, i, out) = if ge(i, str_len(s)) then append(fat-reverse(out), list(fap-token(7, ""))) else if eq(fat-char(s, i), 42) then fap-glob-tokens(s, if eq(fat-char(s, add(i, 1)), 42) then add(i, 2) else add(i, 1), cons(list(if eq(fat-char(s, add(i, 1)), 42) then 1 else 9, "", 0, -1), out)) else if eq(fat-char(s, i), 63) then fap-glob-tokens(s, add(i, 1), cons(fap-token(9, ""), out)) else fap-glob-tokens(s, add(i, 1), cons(fap-token(0, byte_to_str(fat-char(s, i))), out));
+        def fap-basename(s) = head(fat-reverse(split-on(s, "/")));
+        // -1 is exhaustion, distinct from a completed non-match (0).
+        def fap-glob(pattern, path) = if fat-starts(pattern, "**/") then fap-glob-prefix(pattern, path, fap-glob(substring(pattern, 3, str_len(pattern)), path)) else fap-glob-full(pattern, path);
+        def fap-glob-prefix(pattern, path, short) = if not(eq(short, 0)) then short else fap-glob-full(pattern, path);
+        def fap-glob-full(pattern, path) = fap-glob-result(fap-seq(fap-glob-tokens(pattern, 0, list(fap-token(6, ""))), if lt(str_find(pattern, "/", 0), 0) then fap-basename(path) else path, 0, 0, FatMatchFuel()));
+        def fap-glob-result(r) = if le(nth(r, 1), 0) then -1 else if ge(head(r), 0) then 1 else 0;
+    }
+}
