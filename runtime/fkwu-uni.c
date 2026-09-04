@@ -12937,6 +12937,11 @@ static long long *fk_src_dep_end;
  * peer-contribution birth surface). */
 static long long *fk_src_dep_text_off;
 static long long *fk_src_dep_text_len;
+/* 1 when the unit's text reached fk_srctext through the lowering lane: its own
+ * file wears .bml or carries a `section [` block. The image and carry loops read
+ * this fact instead of re-testing a suffix, so a lowered unit is carried whole
+ * whatever its extension. */
+static char *fk_src_dep_lowered;
 static long long fk_src_dep_count;
 static long long fk_src_dep_cap;
 static char fk_src_root_path[FK_PATH_CAP];
@@ -12981,6 +12986,7 @@ static int fk_src_dep_reserve(long long want) {
     long long *ends;
     long long *text_offs;
     long long *text_lens;
+    char *lowered;
     if (want <= fk_src_dep_cap) {
         return 1;
     }
@@ -13007,10 +13013,11 @@ static int fk_src_dep_reserve(long long want) {
     ends = malloc(sizeof(*ends) * (unsigned long)cap);
     text_offs = malloc(sizeof(*text_offs) * (unsigned long)cap);
     text_lens = malloc(sizeof(*text_lens) * (unsigned long)cap);
+    lowered = malloc(sizeof(*lowered) * (unsigned long)cap);
     if (paths == 0 || mtimes == 0 || sizes == 0 || digests == 0 ||
-        parents == 0 || ends == 0 || text_offs == 0 || text_lens == 0) {
+        parents == 0 || ends == 0 || text_offs == 0 || text_lens == 0 || lowered == 0) {
         free(paths); free(mtimes); free(sizes); free(digests);
-        free(parents); free(ends); free(text_offs); free(text_lens);
+        free(parents); free(ends); free(text_offs); free(text_lens); free(lowered);
         return 0;
     }
     while (i < fk_src_dep_count) {
@@ -13022,11 +13029,12 @@ static int fk_src_dep_reserve(long long want) {
         ends[i] = fk_src_dep_end[i];
         text_offs[i] = fk_src_dep_text_off[i];
         text_lens[i] = fk_src_dep_text_len[i];
+        lowered[i] = fk_src_dep_lowered[i];
         i = i + 1;
     }
     free(fk_src_dep_path); free(fk_src_dep_mtime); free(fk_src_dep_size);
     free(fk_src_dep_digest); free(fk_src_dep_parent); free(fk_src_dep_end);
-    free(fk_src_dep_text_off); free(fk_src_dep_text_len);
+    free(fk_src_dep_text_off); free(fk_src_dep_text_len); free(fk_src_dep_lowered);
     fk_src_dep_path = paths;
     fk_src_dep_mtime = mtimes;
     fk_src_dep_size = sizes;
@@ -13035,6 +13043,7 @@ static int fk_src_dep_reserve(long long want) {
     fk_src_dep_end = ends;
     fk_src_dep_text_off = text_offs;
     fk_src_dep_text_len = text_lens;
+    fk_src_dep_lowered = lowered;
     fk_src_dep_cap = cap;
     return 1;
 }
@@ -13042,7 +13051,7 @@ static int fk_src_dep_reserve(long long want) {
 static void fk_src_dep_release(void) {
     free(fk_src_dep_path); free(fk_src_dep_mtime); free(fk_src_dep_size);
     free(fk_src_dep_digest); free(fk_src_dep_parent); free(fk_src_dep_end);
-    free(fk_src_dep_text_off); free(fk_src_dep_text_len);
+    free(fk_src_dep_text_off); free(fk_src_dep_text_len); free(fk_src_dep_lowered);
     fk_src_dep_path = 0;
     fk_src_dep_mtime = 0;
     fk_src_dep_size = 0;
@@ -13051,6 +13060,7 @@ static void fk_src_dep_release(void) {
     fk_src_dep_end = 0;
     fk_src_dep_text_off = 0;
     fk_src_dep_text_len = 0;
+    fk_src_dep_lowered = 0;
     fk_src_dep_count = 0;
     fk_src_dep_cap = 0;
 }
@@ -13421,6 +13431,7 @@ static int fk_src_prelude_bml_token(const char *text, long long start, long long
            text[start + n - 2] == 'm' && text[start + n - 1] == 'l';
 }
 static char *fk_bml_lower_to_mem(const char *bml_path, long long *out_len);
+static int fk_unit_lowers(const char *path);
 static long long fk_src_trim_import_token(const char *text, long long start, long long *n) {
     long long s = start;
     long long e = start + *n;
@@ -13614,12 +13625,12 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
                             fk_diag_path("error", owner_path, "prelude path exceeds buffer");
                             return 0;
                         }
-                        if (fk_path_has_suffix(dep_path, ".bml")) {
+                        if (fk_unit_lowers(dep_path)) {
                             if (fk_src_dep_index(dep_path) < 0) {
                                 long long bml_mtime = fk_path_mtime_raw(dep_path);
                                 if (bml_mtime <= 0) {
                                     fk_diag_path("error", dep_path,
-                                            "bml prelude is missing or not stat-readable");
+                                            "prelude is missing or not stat-readable");
                                     return 0;
                                 }
                                 long long low_len = 0;
@@ -13631,6 +13642,7 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
                                         bml_mtime, low_len, owner_idx)) {
                                     return 0;
                                 }
+                                fk_src_dep_lowered[fk_src_dep_count - 1] = 1;
                             }
                         } else if (!fk_src_collect_file(dep_path, owner_idx)) {
                             return 0;
@@ -13720,6 +13732,7 @@ static int fk_src_collect_bytes(const char *path, char *owned, long long got,
     fk_src_dep_end[fk_src_dep_count] = fk_src_dep_count + 1;
     fk_src_dep_text_off[fk_src_dep_count] = 0;
     fk_src_dep_text_len[fk_src_dep_count] = 0;
+    fk_src_dep_lowered[fk_src_dep_count] = 0;
     fk_src_dep_count = fk_src_dep_count + 1;
     if (fk_cstr_eq(path, fk_src_root_path)) {
         fk_src_root_reserve(got + 1);
@@ -15259,7 +15272,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
          * later call went numb as [unresolved-call] with nothing naming
          * the drop (peer-contribution birth surface, 2026-09-01). */
         if (fk_src_dep_parent[i] == 0 &&
-            !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
+            !fk_src_dep_lowered[i]) {
             direct_count = direct_count + 1;
             i = fk_src_dep_end[i];
         } else {
@@ -15275,7 +15288,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     i = 1;
     while (i < fk_src_dep_count) {
         if (fk_src_dep_parent[i] == 0 &&
-            !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
+            !fk_src_dep_lowered[i]) {
             char dep_fkb_path[FK_PATH_CAP];
             long long dep_end = fk_src_dep_end[i];
             long long dep_mtime = fk_src_unit_mtime_range(i, dep_end);
@@ -15317,7 +15330,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
         i = 1;
         while (i < fk_src_dep_count) {
             if (fk_src_dep_parent[i] == 0 &&
-                !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
+                !fk_src_dep_lowered[i]) {
                 i = fk_src_dep_end[i];
             } else {
                 carry_idx[cn] = i;
@@ -15363,7 +15376,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
     i = 1;
     while (ok && i < fk_src_dep_count) {
         if (fk_src_dep_parent[i] == 0 &&
-            !fk_path_has_suffix(fk_src_dep_path[i], ".bml")) {
+            !fk_src_dep_lowered[i]) {
             char dep_fkb_path[FK_PATH_CAP];
             char dep_hash[FK_SRC_HASH_CAP];
             long long dep_end = fk_src_dep_end[i];
@@ -15830,6 +15843,43 @@ static char *fk_read_whole_file(const char *path, long long *out_len) {
     *out_len = n;
     return buf;
 }
+
+/* A unit travels through the lowering lane when its file wears .bml or when
+ * its text carries a `section [` block on a line of its own -- the dialect
+ * blocks (form.bml, form.lift, form.action, form.route, *.bmf) that only the
+ * source compiler reads. Keyed on content, not extension: compiler.fk and the
+ * ten -bmf.fk grammars carry such blocks mid-file, and every chain that
+ * preluded them raw died on `::=` as an unbound name (2026-09-04, 131 chains
+ * on compiler.fk alone). */
+static int fk_unit_lowers(const char *path) {
+    long long n = 0;
+    char *text;
+    long long i = 0;
+    int found = 0;
+    if (fk_path_has_suffix(path, ".bml")) {
+        return 1;
+    }
+    text = fk_read_whole_file(path, &n);
+    if (text == 0) {
+        return 0;
+    }
+    while (i < n && !found) {
+        while (i < n && (text[i] == FK_CH_SPACE || text[i] == FK_CH_TAB)) {
+            i = i + 1;
+        }
+        if (i + 9 <= n && text[i] == 's' && text[i + 1] == 'e' && text[i + 2] == 'c' &&
+            text[i + 3] == 't' && text[i + 4] == 'i' && text[i + 5] == 'o' &&
+            text[i + 6] == 'n' && text[i + 7] == FK_CH_SPACE && text[i + 8] == '[') {
+            found = 1;
+        }
+        while (i < n && text[i] != FK_CH_LF) {
+            i = i + 1;
+        }
+        i = i + 1;
+    }
+    free(text);
+    return found;
+}
 static int fk_hex16_parse(const char *p, unsigned long long *out) {
     unsigned long long h = 0;
     long long i = 0;
@@ -16219,6 +16269,9 @@ static int fk_run(int argc, char **argv) {
         return fk_run_src(argv[2], argc > 3 ? atoi(argv[3]) : 0);
     }
     if (fk_path_has_suffix(argv[1], ".fk")) {
+        if (fk_unit_lowers(argv[1])) {
+            return fk_run_bml(argv[1], argc > 2 ? atoi(argv[2]) : 0);
+        }
         return fk_run_src(argv[1], argc > 2 ? atoi(argv[2]) : 0);
     }
     if (fk_path_has_suffix(argv[1], ".bml")) {
