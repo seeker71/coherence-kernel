@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Reject category-number drift and collisions across the sibling kernels."""
+"""Reject category-number drift and collisions across the sibling kernels.
+
+Its Form twin stands: gate/category-contract.bml is the drift-gates row now;
+this script is a witness of that lens (gate/tests/category-contract-band.fk
+holds the two against each other), not the gate."""
 
 from __future__ import annotations
 
