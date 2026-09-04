@@ -88,6 +88,10 @@ cell-channel-band                      -> 4095     (two cells as processes on sp
                                                      observe/cell-channel-witness-run.fk walks the
                                                      protocol and publishes cell-channel.<name> and
                                                      cell-mesh to the glass under the `mesh` tag)
+we-glass-band                          -> 1023     (DO/BE/SEE at five altitudes with a source on
+                                                     every row; observe/we-glass-run.fk publishes
+                                                     we.glass to the shared bus; we-glass-ask.fk
+                                                     answers where any word or node stands)
 json-codec-bml-band 8191 · kernel-http-band 536965066 · channel-flow-band 8388607
 circle-band 1048575 · static-to-dynamic-cells-band 262143 · bml-capability-ledger-band 255
 form-pe-coff-band 16383 · learn/tests/choice-receipt-band 4294967295

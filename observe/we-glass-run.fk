@@ -1,0 +1,61 @@
+; we-glass-run.fk — one frame of WE on glass: read every source once,
+; paint the panel, publish `we.glass` to the shared bus, and print the
+; census as name=value lines a reader can check against the sources.
+;
+; stdin line 1: the sitting's transcript path (blank -> the newest
+; transcript of this checkout's project); line 2: the channel root
+; (blank -> the hearth's channel seat).
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/we-glass.bml
+(do
+    (defn wgr-say (k v) (print_str (str_concat "we " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn wgr-trim (s) (if (nothing? s) "" (trim s)))
+    (defn wgr-or (s d) (if (eq (str_len s) 0) d s))
+    (defn wgr-row-line (r) (wg-cat (list (wg-level r) "." (wg-mode r) "=" (if (eq (wg-present? r) 1) (int_to_str (wg-value r)) "absent") " unit=" (wg-unit r) " source=" (wg-source r) " evidence=" (wg-evidence r))))
+    (defn wgr-say-rows (rows) (if (eq (len rows) 0) 0 (do (wgr-say "row" (wgr-row-line (head rows))) (wgr-say-rows (tail rows)))))
+    (defn wgr-prim-lines (ps) (if (eq (len ps) 0) 0 (do (wgr-say "primitive" (wg-cat (list (wg-prim-name (head ps)) "=" (int_to_str (wg-prim-count (head ps))) " source=" (nth (head ps) 3)))) (wgr-prim-lines (tail ps)))))
+    (defn wgr-choice-lines (cs) (if (eq (len cs) 0) 0 (do (wgr-say "choice" (wg-cat (list (wg-choice-family (head cs)) "." (wg-choice-name (head cs)) "=" (if (ge (wg-choice-count (head cs)) 0) (int_to_str (wg-choice-count (head cs))) "offered") " evidence=" (wg-choice-evidence (head cs))))) (wgr-choice-lines (tail cs)))))
+    (defn wgr-positions (samples) (if (eq (len samples) 0) "nothing" (if (str_eq (fgtm-sample-kind (head samples)) "token-position") (wg-cat (list (fgtm-sample-id (head samples)) "=" (if (eq (fgtm-field-present? (fgtm-sample-capacity (head samples))) 1) (int_to_str (fgtm-field-value (fgtm-sample-capacity (head samples)))) "absent") " " (wgr-positions (tail samples)))) (wgr-positions (tail samples)))))
+    (defn wgr-unknown-count (root names n) (if (eq (len names) 0) n (wgr-unknown-count root (tail names) (add n (cc-count (cc-spool-text root (head names) (cc-b root (head names))) "unknown-symbol=" 0 0)))))
+    (let transcript (wgr-or (wgr-trim (read_line)) (wg-transcript-default)))
+    (let root (wgr-or (wgr-trim (read_line)) (cc-root-default)))
+    (let epoch (now_unix_ms))
+    (let troot (hearth-telemetry-root))
+    ; the reads, once each
+    (let procRows (wg-process-rows (wg-ps-text)))
+    (let tx (wg-transcript-text transcript))
+    (let prompts (if (eq (str_len tx) 0) (sub 0 1) (wg-int tx "prompts")))
+    (let edits (if (eq (str_len tx) 0) (sub 0 1) (wg-int tx "edits")))
+    (let probes (if (eq (str_len tx) 0) (sub 0 1) (wg-int tx "probes")))
+    (let tokens (if (eq (str_len tx) 0) (sub 0 1) (wg-int tx "tokens")))
+    (let sittingAge (if (eq (str_len tx) 0) (sub 0 1) (sub epoch (mul (file_mtime transcript) 1000))))
+    (let today (wg-today))
+    (let receiptNames (wg-receipts-today (fs-list "receipts") today))
+    (let witnesses (wg-receipt-witnesses "receipts" receiptNames))
+    (let witnessLine (wg-witness-line witnesses (wg-distinct witnesses (list))))
+    (let landings (wg-landings-today))
+    (let prims (wg-primitives troot))
+    (let ownerTotal (if (eq (len prims) 0) (sub 0 1) (wg-prim-count (head prims))))
+    (let residents (wg-count-of-mode procRows "be"))
+    (let rows (wg-census-of procRows ownerTotal prompts edits probes sittingAge landings (len receiptNames) residents (wg-ledger "released") (wg-ledger "open") (wg-corpus-rows)))
+    (let cpuShares (wg-cpu-shares procRows))
+    (let toolShares (wg-tool-shares (if (lt edits 0) 0 edits) (if (lt probes 0) 0 probes)))
+    (let choices (wg-choices root))
+    ; the panel, then the bus, then the receipt lines
+    (print_str (wg-frame rows cpuShares toolShares prims choices witnessLine))
+    (let published (fgtm-publish-snapshot troot (WGPublisher) epoch (wg-samples rows cpuShares toolShares prims choices epoch)))
+    (wgr-say "transcript" (wg-cat (list transcript " prompts=" (int_to_str prompts) " edits=" (int_to_str edits) " probes=" (int_to_str probes) " output-tokens=" (int_to_str tokens))))
+    (wgr-say-rows rows)
+    (wgr-say "spend-host-cpu" (wg-cat (list "do=" (int_to_str (nth cpuShares 0)) "% be=" (int_to_str (nth cpuShares 1)) "% see=" (int_to_str (nth cpuShares 2)) "% of-cpu=" (int_to_str (nth cpuShares 3)))))
+    (wgr-say "spend-sitting-tools" (wg-cat (list "do=" (int_to_str (nth toolShares 0)) "% see=" (int_to_str (nth toolShares 2)) "% of-events=" (int_to_str (nth toolShares 3)))))
+    (wgr-say "witnesses-today" witnessLine)
+    ; ice, tokens, surprises: the flow Urs asked to see beside the census
+    (wgr-say "ice-new-hour" (wg-cat (list "fkb=" (trim (wg-text (host-exec "find . -name '*.fkb' -mmin -60 -not -path './walkers/*' -not -path './.git/*' | wc -l | tr -d ' '" ""))) " newest=" (trim (wg-text (host-exec "find . -name '*.fkb' -mmin -60 -not -path './walkers/*' -not -path './.git/*' -exec ls -t {} + 2>/dev/null | head -1" ""))))))
+    (let ownerPub (wg-owner-publisher troot))
+    (let ownerSamples (if (eq (str_len ownerPub) 0) (list) (wg-owner-samples troot ownerPub)))
+    (wgr-say "tokens" (wg-cat (list "sitting-output=" (int_to_str tokens) " owner=" ownerPub " positions=" (wgr-positions ownerSamples))))
+    (wgr-say "surprises" (wg-cat (list "channel-refuse=" (int_to_str (wg-choice-count (head (wg-choices-of-family choices "channel")))) " divergent-witness=" (int_to_str (wg-choice-count (nth (wg-choices-of-family choices "channel") 3))) " unknown-symbol-frames=" (int_to_str (wgr-unknown-count root (cc-mesh-names root) 0)))))
+    (wgr-prim-lines prims)
+    (wgr-choice-lines choices)
+    (wgr-say "glass" (wg-cat (list "publisher=" (WGPublisher) " status=" (nth published 1) " samples=" (int_to_str (len (wg-samples rows cpuShares toolShares prims choices epoch))) " root=" troot)))
+    0)
