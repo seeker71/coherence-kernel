@@ -54,6 +54,89 @@ catalog already resident in form-cli. It does not load a workspace. It refuses
 `edit` and `write` because this stateless face cannot retain returned state.
 In-process clients use `fc-tool-call` with their own resident source documents.
 
+## Copyable examples for every resident tool
+
+Start every call with a document corpus the caller already holds. The corpus in
+this example is deliberately small so an agent can paste a call into a Form
+cell and see the same result as the executable example band.
+
+```lisp
+(let docs (list
+    (list "source:alpha" "alpha.txt" "alpha 1\nbeta 2\n")
+    (list "source:table" "table.txt" "left:right\nup:down\n")
+    (list "source:package" "package.json" "{\"name\":\"demo\",\"version\":1}")))
+```
+
+Each row is an argv call: a Form list is already the command boundary, so no
+shell parser, quoting mode, pipe, redirection, expansion, or executable lookup
+is involved. `input` is the final string argument to `fc-tool-call`; omit
+paths to operate on that held string, or supply resident paths to select
+documents.
+
+| Tool | Direct Form call | Expected `fat-out` |
+| --- | --- | --- |
+| `rg` | `(fc-tool-call docs "rg" (list "-nF" "alpha 1") "")` | `alpha.txt:1:alpha 1\n` |
+| `jq` | `(fc-tool-call docs "jq" (list "-r" ".name" "package.json") "")` | `demo\n` |
+| `read` | `(fc-tool-call docs "read" (list "alpha.txt") "")` | `alpha 1\nbeta 2\n` |
+| `cat` | `(fc-tool-call docs "cat" (list "alpha.txt" "table.txt") "")` | concatenated document text |
+| `head` | `(fc-tool-call docs "head" (list "-n" "1" "alpha.txt") "")` | `alpha 1\n` |
+| `tail` | `(fc-tool-call docs "tail" (list "-n" "1" "alpha.txt") "")` | `beta 2\n` |
+| `wc` | `(fc-tool-call docs "wc" (list "-lwc") "one two\n")` | `1 2 8\n` |
+| `sort` | `(fc-tool-call docs "sort" (list "-nu") "10\n2\n2\n")` | `2\n10\n` |
+| `uniq` | `(fc-tool-call docs "uniq" (list "-c") "a\na\nb\n")` | `2 a\n1 b\n` |
+| `tr` | `(fc-tool-call docs "tr" (list "-d" "\\n") "one\ntwo\n")` | `onetwo` |
+| `cut` | `(fc-tool-call docs "cut" (list "-d" ":" "-f" "2") "left:right\nup:down\n")` | `right\ndown\n` |
+| `awk` | `(fc-tool-call docs "awk" (list "{print $2}") "one two\nthree four\n")` | `two\nfour\n` |
+| `sed` | `(fc-tool-call docs "sed" (list "-n" "2p" "alpha.txt") "")` | `beta 2\n` |
+| `edit` | `(fc-tool-call docs "edit" (list "alpha.txt" "beta 2" "gamma 3") "")` | `edited\n`; retain `fat-documents` |
+| `write` | `(fc-tool-call docs "write" (list "notes.md") "held note\n")` | `created\n`; retain `fat-documents` |
+
+`edit` and `write` return a new resident corpus; they do not mutate `docs`.
+Keep that returned value explicitly before the next call:
+
+```lisp
+(let changed (fc-tool-call docs "edit" (list "alpha.txt" "beta 2" "gamma 3") ""))
+(let next-docs (fat-documents changed))
+(fat-out (fc-tool-call next-docs "read" (list "alpha.txt") ""))
+; alpha 1
+; gamma 3
+
+(let created (fc-tool-call next-docs "write" (list "notes.md") "held note\n"))
+(fat-out (fc-tool-call (fat-documents created) "read" (list "notes.md") ""))
+; held note
+```
+
+A native pipeline passes an output string as the next call's `input`, rather
+than spelling `|`. For example, to take the first matched line:
+
+```lisp
+(let found (fc-tool-call docs "rg" (list "-nF" "alpha 1") ""))
+(fat-out (fc-tool-call (fat-documents found) "head" (list "-n" "1") (fat-out found)))
+; alpha.txt:1:alpha 1
+```
+
+`zg` is the separate native catalog-discovery route, rather than one of the
+fifteen resident-document operations. It has no document or state argument:
+
+```lisp
+(fc-respond "zg hybrid kernel call")
+; zg-native status=hit route=hybrid ... crossings=0
+```
+
+Use `fc-tool-command` only when an agent already holds a single human-shaped
+command string and needs its bounded argv reader:
+
+```lisp
+(fat-out (fc-tool-command docs "jq -nr --arg x 'a b' '$x'" ""))
+; a b
+```
+
+Its deliberate errors (`shell-syntax-not-supported`, an unsupported option,
+malformed JSON, an ambiguous edit, or an absent resident path) are structured
+results. Read `fat-exit` and `fat-error`, repair the value or request the
+needed resident document, then make the next native call. Do not silently
+fall back to a host command.
+
 ## Supported workload profile
 
 | Tool | Native profile |
@@ -112,6 +195,9 @@ not itself the measurement.
 
 `form-cli-agent-tools-portable-band.fk` registers 127 in the four-way manifest
 and calls the same entry for search, JSON, text slicing and immutable edits.
+`form-cli-agent-tools-examples-band.fk` registers 32767 there: one direct
+public call for each of the fifteen resident tools. `form-cli-zg-band.fk`
+separately observes the native catalog-discovery route and its zero crossings.
 The existing auxiliary validator follows `.bml` as well as `.fk` dependencies,
 including BML `// preludes:` headers. Its proof-only text lowering does not add
 an external execution path to these resident tools.
