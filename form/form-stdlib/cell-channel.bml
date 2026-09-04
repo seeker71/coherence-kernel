@@ -1,0 +1,427 @@
+//////////////////////////////////////////////////////////////////////
+//
+// cell-channel.bml
+//
+// Executable BML. A CELL CHANNEL: two cells speak form-native symbols
+// to each other through one SHARED FIELD, and the field's log is the
+// only place a grammar change can come from.
+//
+// THE SHAPE. A channel is a directory the caller names (the root is the
+// caller's data; the hearth's `.hearth/channels` is the default seat):
+//
+//   <root>/<name>/a.spool  b.spool  field.spool   one writer per spool
+//   <root>/<name>/a.bell   b.bell   field.bell    one fifo per cell
+//   <root>/<name>/board  grammar.seed  <cell>.pid
+//
+// Every frame is ONE atomic append (spool-bell-transport: O_APPEND,
+// witnessed under concurrent writers); readers drain by watermark and
+// consume only WHOLE frames — a partial tail is nothing-yet, never a
+// delivery. A cell drains everything present, then blocks on its own
+// bell in the kernel's read (no polling core). Rings are DEFERRED: the
+// ringer hands the byte to a background writer and returns in
+// milliseconds, so no cell ever blocks on another cell's readiness —
+// witnessed 2026-09-04: a ring with no reader blocked the ringer, and
+// two cells ringing each other mid-drain would have deadlocked; a
+// deferred ring still wakes a reader that arrives a second later, and
+// two deferred rings wake one reader once with nothing left behind.
+//
+// THE PROTOCOL, AS DATA. Kinds are one row (cc-kinds): say tell offer
+// admit refuse heard witness release. `say` carries a Form expression
+// whose value is an integer; `tell` one whose value is a string; both
+// are evaluated by the receiver through grammars/form-eval.fk — the
+// body's own meta-circular evaluator — inside the channel's current
+// GRAMMAR, a Form source of defns. The seed grammar is written at open;
+// every amendment after that is an OFFER (axiom-5): a cell appends the
+// amendment to its own spool as a gift, and NOBODY applies it from
+// there. The shared field reads the offer, observes it (balance, the
+// symbol gate, a real evaluation to 0 inside the current grammar, no
+// redefinition), and answers on ITS spool: `admit` carrying the whole
+// amendment with its content address, or `refuse` carrying the reason
+// (axiom-4: observation through the offered interface is what makes it
+// real; ack values nothing/0/1 per axiom-1). Each cell folds ONLY the
+// admits it reads from field.spool, in field order, verifying that the
+// digest it computes equals the id the field wrote — so both cells hold
+// the same grammar text and therefore the same grammar id (axiom-3:
+// same composition, same cell). That is the trust: one shared log, one
+// content address, no belief about the other side needed. This is the
+// crown theorem of axioms/core-axioms.form (safe-self-update) running
+// on a channel: a change is a cell, offered across the boundary,
+// sovereignly acked, minting a new node-id.
+//
+// THE GATE BEFORE EVAL. form-eval dies silently on an unbound symbol
+// (witnessed 2026-09-04: `(twice 21)` with no twice kills the process
+// with no output). So no frame reaches the evaluator until every symbol
+// in program+grammar is a special form, a builtin, a prim, a name the
+// program binds (defn name, defn param, let name), or an admitted
+// grammar name. An unknown symbol answers `refuse` with its name — the
+// exact word the collective has not yet received — never a dead cell.
+//
+// preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/spool-bell-transport.fk form/form-stdlib/hearth.bml form/form-stdlib/str-byte-at.fk form/form-stdlib/sha256.fk form/form-stdlib/hex.fk form/form-stdlib/form-glass-telemetry-membrane.bml grammars/form-eval.fk
+//
+// Proven by: form-stdlib/tests/cell-channel-band.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormCellChannel {
+        thought cc-pattern = list("one-writer-per-spool", "drain-before-wait", "deferred-ring", "field-is-the-only-grammar-source", "gate-before-eval", "content-addressed-admission", "an-offer-is-a-gift");
+
+        field CCFieldName = "field";
+        field CCOpenMark = "<|cc:frame|>";
+        field CCCloseMark = "<|/cc:frame|>";
+        field CCKinds = "say tell offer admit refuse heard folded witness release";
+        field CCEvalDoor = "form-eval";
+        field CCEvalRunner = "observe/cell-channel-eval-run.fk";
+        field CCSpecials = "if let defn do";
+        field CCBuiltins = "add sub mul div mod le lt gt ge eq";
+        field CCPrims = "str_concat str_eq substring str_len str_byte_at str_to_float list cons head tail empty nth len";
+
+        // ── small text tools (no hearth-glass chain: a sender loads only this) ──
+        def cc-cat(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), cc-cat(tail(parts)));
+        def cc-q() = byte_to_str(34);
+        def cc-lp() = byte_to_str(40);
+        // the marks enter as bytes so no paren counter reads a literal as an open form
+        def cc-defn-mark() = str_concat(cc-lp(), "defn ");
+        def cc-let-mark() = str_concat(cc-lp(), "let ");
+        def cc-nl() = byte_to_str(10);
+        def cc-host-text(t) = if nothing?(t) then "" else t;
+        def cc-line-end(s, i) = if ge(i, str_len(s)) then i else if eq(str_byte_at(s, i), 10) then i else cc-line-end(s, add(i, 1));
+        def cc-field-find(s, marker) {
+            let inner = str_find(s, str_concat(cc-nl(), marker), 0);
+            if ge(inner, 0) then add(inner, 1) else if eq(str_find(s, marker, 0), 0) then 0 else sub(0, 1);
+        }
+        def cc-field-at(s, marker, at) = if lt(at, 0) then "" else substring(s, add(at, str_len(marker)), cc-line-end(s, add(at, str_len(marker))));
+        def cc-field(s, key) = cc-field-at(s, str_concat(key, "="), cc-field-find(s, str_concat(key, "=")));
+        def cc-field-int(s, key) = if eq(str_len(cc-field(s, key)), 0) then 0 else str_to_int(cc-field(s, key));
+        def cc-count(text, needle, from, acc) {
+            let at = str_find(text, needle, from);
+            if lt(at, 0) then acc else cc-count(text, needle, add(at, str_len(needle)), add(acc, 1));
+        }
+        def cc-word-in?(words, word) = if ge(str_find(str_concat(" ", str_concat(words, " ")), str_concat(" ", str_concat(word, " ")), 0), 0) then 1 else 0;
+        def cc-member?(xs, x) = if eq(len(xs), 0) then 0 else if str_eq(head(xs), x) then 1 else cc-member?(tail(xs), x);
+        // the whole address, not a prefix: a peer cannot present two bodies under one id
+        def cc-digest(text) = hex-encode(sha256(sbt-bytes-of(text, 0, str_len(text), list())));
+        def cc-short(id) = if gt(str_len(id), 8) then substring(id, 0, 8) else id;
+
+        // ── paths: the caller hands the root; every path has one home here ──
+        def cc-root-default() = str_concat(HearthDir(), "/channels");
+        def cc-field-name() = CCFieldName();
+        def cc-dir(root, name) = str_concat(root, str_concat("/", name));
+        def cc-spool(root, name, cell) = cc-cat(list(cc-dir(root, name), "/", cell, ".spool"));
+        def cc-bell(root, name, cell) = cc-cat(list(cc-dir(root, name), "/", cell, ".bell"));
+        def cc-pid-path(root, name, cell) = cc-cat(list(cc-dir(root, name), "/", cell, ".pid"));
+        def cc-board(root, name) = str_concat(cc-dir(root, name), "/board");
+        def cc-seed-path(root, name) = str_concat(cc-dir(root, name), "/grammar.seed");
+        def cc-label?(s) = fgtm-channel-id?(s);
+
+        // ── the board: what stands, as name=value lines ──
+        def cc-eval-door() = CCEvalDoor();
+        def cc-board-text(name, a, b, born, seedid) = cc-cat(list("name=", name, "\na=", a, "\nb=", b, "\nfield=", cc-field-name(), "\nborn-ms=", int_to_str(born), "\nseed=", seedid, "\neval-door=", cc-eval-door(), "\n"));
+        def cc-board-read(root, name) = cc-host-text(read_file(cc-board(root, name)));
+        def cc-board-value(root, name, key) = cc-field(cc-board-read(root, name), key);
+        def cc-a(root, name) = cc-board-value(root, name, "a");
+        def cc-b(root, name) = cc-board-value(root, name, "b");
+        def cc-cells(root, name) = list(cc-a(root, name), cc-b(root, name));
+        def cc-members(root, name) = list(cc-a(root, name), cc-b(root, name), cc-field-name());
+        def cc-peers(root, name, from) = if str_eq(from, cc-field-name()) then cc-cells(root, name) else if str_eq(from, cc-a(root, name)) then list(cc-b(root, name), cc-field-name()) else list(cc-a(root, name), cc-field-name());
+        def cc-peer-cell(root, name, from) = if str_eq(from, cc-a(root, name)) then cc-b(root, name) else cc-a(root, name);
+
+        // ── the bell: a fifo; ring deferred; wait in the kernel ──
+        def cc-bell-stands?(bell) = if ge(str_find(cc-host-text(host-exec(cc-cat(list("[ -p ", bell, " ] && echo fifo")), "")), "fifo", 0), 0) then 1 else 0;
+        def cc-bell-make(bell) = if eq(cc-bell-stands?(bell), 1) then 1 else cc-bell-made(bell, host-exec(cc-cat(list("rm -f ", bell, " && mkfifo ", bell)), ""));
+        def cc-bell-made(bell, out) = cc-bell-stands?(bell);
+        // A ring is an offer with bounded patience (held-offer: spent patience
+        // acks nothing): the background writer waits the hearth's crossing
+        // window for a reader and then leaves, so a ring toward a cell that
+        // released never lingers as a blocked process (three did, 2026-09-04).
+        def cc-ring-cmd(bell) = cc-cat(list("( tools/ftimeout ", int_to_str(hearth-crossing-window-s()), " sh -c 'printf x > ", bell, "' ) >/dev/null 2>&1 &"));
+        def cc-ring(bell) = if nothing?(host-exec(cc-ring-cmd(bell), "")) then 0 else 1;
+        def cc-release-cmd(bell) = cc-cat(list("( tools/ftimeout ", int_to_str(hearth-crossing-window-s()), " sh -c 'printf release > ", bell, "' ) >/dev/null 2>&1 &"));
+        def cc-release(bell) = if nothing?(host-exec(cc-release-cmd(bell), "")) then 0 else 1;
+        def cc-bell-wait(bell) = sbt-bell-wait(bell);
+        // PATIENCE AS DATA: a bounded wait is the caller's deadline handed to a
+        // background sleeper that rings `timeout` only while the cell's pid file
+        // still stands — a cell that already released is never rung by a stale
+        // patience, so nothing lingers on a bell nobody reads.
+        def cc-patience-cmd(root, name, cell, secs) = cc-cat(list("( sleep ", int_to_str(secs), "; [ -e ", cc-pid-path(root, name, cell), " ] && printf timeout > ", cc-bell(root, name, cell), " ) >/dev/null 2>&1 &"));
+        def cc-patience(root, name, cell, secs) = if nothing?(host-exec(cc-patience-cmd(root, name, cell, secs), "")) then 0 else 1;
+        def cc-timed-out?(wake) = if nothing?(wake) then 0 else if ge(str_find(wake, "timeout", 0), 0) then 1 else 0;
+        def cc-released?(wake) = if nothing?(wake) then 1 else if ge(str_find(wake, "release", 0), 0) then 1 else 0;
+        def cc-bells(root, name, cells) = if eq(len(cells), 0) then list() else cons(cc-bell(root, name, head(cells)), cc-bells(root, name, tail(cells)));
+        def cc-ring-all(bells) = if eq(len(bells), 0) then 0 else add(cc-ring(head(bells)), cc-ring-all(tail(bells)));
+
+        // ── pids: a process names itself through the shell it is the parent of ──
+        def cc-self-pid() = str_to_int(cc-host-text(host-exec("echo $PPID", "")));
+        def cc-pid-write(root, name, cell, pid) = write_file_text(cc-pid-path(root, name, cell), str_concat(int_to_str(pid), cc-nl()));
+        def cc-pid-clear(root, name, cell) = fs-remove-file(cc-pid-path(root, name, cell));
+        def cc-pid-read(root, name, cell) {
+            let text = cc-host-text(read_file(cc-pid-path(root, name, cell)));
+            if eq(str_len(text), 0) then 0 else str_to_int(text);
+        }
+        def cc-standing?(root, name, cell) = hearth-alive(cc-pid-read(root, name, cell));
+
+        // ── frames: one text, length-safe by marks; a row when read ──
+        def cc-open-mark() = CCOpenMark();
+        def cc-close-mark() = CCCloseMark();
+        def cc-kinds() = CCKinds();
+        def cc-kind?(kind) = cc-word-in?(cc-kinds(), kind);
+        def cc-body-safe?(body) = if ge(str_find(body, cc-open-mark(), 0), 0) then 0 else if ge(str_find(body, cc-close-mark(), 0), 0) then 0 else 1;
+        def cc-frame-text(turn, from, kind, ms, id, body) = cc-cat(list(cc-open-mark(), "\nturn=", int_to_str(turn), "\nfrom=", from, "\nkind=", kind, "\nms=", int_to_str(ms), "\nid=", id, "\nbody=", body, "\n", cc-close-mark(), "\n"));
+        def cc-body-of(text) {
+            let at = str_find(text, "\nbody=", 0);
+            let close = str_find(text, cc-close-mark(), 0);
+            if or(lt(at, 0), lt(close, 0)) then "" else substring(text, add(at, 6), sub(close, 1));
+        }
+        def cc-frame(turn, from, kind, ms, id, body) = list("cc-frame-v1", turn, from, kind, ms, id, body);
+        def cc-frame-of(text) = cc-frame(cc-field-int(text, "turn"), cc-field(text, "from"), cc-field(text, "kind"), cc-field-int(text, "ms"), cc-field(text, "id"), cc-body-of(text));
+        def cc-frame-turn(f) = nth(f, 1);
+        def cc-frame-from(f) = nth(f, 2);
+        def cc-frame-kind(f) = nth(f, 3);
+        def cc-frame-ms(f) = nth(f, 4);
+        def cc-frame-id(f) = nth(f, 5);
+        def cc-frame-body(f) = nth(f, 6);
+        def cc-frame-whole?(f) = if str_eq(cc-digest(cc-frame-body(f)), cc-frame-id(f)) then 1 else 0;
+        def cc-parse-frames-at(text, open, acc) {
+            let close = str_find(text, cc-close-mark(), open);
+            if lt(close, 0) then reverse(acc) else cc-parse-frames-go(text, add(close, str_len(cc-close-mark())), cons(cc-frame-of(substring(text, open, add(close, str_len(cc-close-mark())))), acc));
+        }
+        def cc-parse-frames-go(text, from, acc) {
+            let open = str_find(text, cc-open-mark(), from);
+            if lt(open, 0) then reverse(acc) else cc-parse-frames-at(text, open, acc);
+        }
+        def cc-parse-frames(text) = cc-parse-frames-go(text, 0, list());
+        def cc-complete-through-go(text, from, last) {
+            let close = str_find(text, cc-close-mark(), from);
+            if lt(close, 0) then last else cc-complete-through-go(text, add(close, str_len(cc-close-mark())), add(close, str_len(cc-close-mark())));
+        }
+        def cc-complete-through(text) {
+            let end = cc-complete-through-go(text, 0, 0);
+            if eq(end, 0) then 0 else if and(lt(end, str_len(text)), eq(str_byte_at(text, end), 10)) then add(end, 1) else end;
+        }
+        def cc-frames-of-kind(frames, kind) = if eq(len(frames), 0) then list() else if str_eq(cc-frame-kind(head(frames)), kind) then cons(head(frames), cc-frames-of-kind(tail(frames), kind)) else cc-frames-of-kind(tail(frames), kind);
+        def cc-last-frame(frames) = if eq(len(frames), 0) then list() else if eq(len(tail(frames)), 0) then head(frames) else cc-last-frame(tail(frames));
+
+        // ── readers: (path mark) threaded as data; whole frames only ──
+        def cc-reader(root, name, cell) = sbt-reader(cc-spool(root, name, cell));
+        def cc-drained(frames, reader) = list(frames, reader);
+        def cc-drained-frames(d) = nth(d, 0);
+        def cc-drained-reader(d) = nth(d, 1);
+        def cc-drain-text(reader, text) {
+            let through = if nothing?(text) then 0 else cc-complete-through(text);
+            if eq(through, 0) then cc-drained(list(), reader) else cc-drained(cc-parse-frames(substring(text, 0, through)), list(sbt-path(reader), add(sbt-mark(reader), through)));
+        }
+        def cc-drain(reader) {
+            let sz = file_size(sbt-path(reader));
+            if le(sz, sbt-mark(reader)) then cc-drained(list(), reader) else cc-drain-text(reader, read_file_slice(sbt-path(reader), sbt-mark(reader), sub(sz, sbt-mark(reader))));
+        }
+        def cc-spool-text(root, name, cell) = cc-host-text(read_file(cc-spool(root, name, cell)));
+        def cc-spool-frames(root, name, cell) = cc-parse-frames(cc-spool-text(root, name, cell));
+        def cc-next-turn(root, name, from) = add(cc-count(cc-spool-text(root, name, from), cc-close-mark(), 0, 0), 1);
+
+        // ── send: one append, then deferred rings to every peer ──
+        def cc-sent(turn, appended, rung, id) = list("cc-sent-v1", turn, appended, rung, id);
+        def cc-sent-refused(reason) = list("cc-sent-v1", 0, 0, 0, reason);
+        def cc-sent-turn(s) = nth(s, 1);
+        def cc-sent-appended(s) = nth(s, 2);
+        def cc-sent-rung(s) = nth(s, 3);
+        def cc-sent-id(s) = nth(s, 4);
+        def cc-sent-ok?(s) = if gt(cc-sent-turn(s), 0) then 1 else 0;
+        // cc-append is the whole durable act (one atomic append, no ring);
+        // cc-send is that append followed by a deferred ring of every peer.
+        // A band proves the append on scratch spools without waking anyone.
+        def cc-append-go(root, name, from, kind, body, turn, id) {
+            let text = cc-frame-text(turn, from, kind, now_unix_ms(), id, body);
+            let appended = sbt-append(cc-spool(root, name, from), text);
+            cc-sent(turn, appended, 0, id);
+        }
+        def cc-append(root, name, from, kind, body) = if not(eq(cc-kind?(kind), 1)) then cc-sent-refused("unknown-kind") else if not(eq(cc-body-safe?(body), 1)) then cc-sent-refused("body-carries-a-frame-mark") else if not(eq(cc-member?(cc-members(root, name), from), 1)) then cc-sent-refused("not-a-member") else cc-append-go(root, name, from, kind, body, cc-next-turn(root, name, from), cc-digest(body));
+        def cc-send-rung(sent, rung) = cc-sent(cc-sent-turn(sent), cc-sent-appended(sent), rung, cc-sent-id(sent));
+        def cc-send-go(root, name, from, sent) = if eq(cc-sent-ok?(sent), 1) then cc-send-rung(sent, cc-ring-all(cc-bells(root, name, cc-peers(root, name, from)))) else sent;
+        def cc-send(root, name, from, kind, body) = cc-send-go(root, name, from, cc-append(root, name, from, kind, body));
+
+        // ── open: the directory, three bells, the seed grammar, the board ──
+        def cc-opened(ok, name, a, b, seedid) = list("cc-open-v1", ok, name, a, b, seedid);
+        def cc-open-ok(o) = nth(o, 1);
+        def cc-open-seed-id(o) = nth(o, 5);
+        // the host makes one directory per call; the seat's ancestors are made
+        // in order, so a fresh checkout with no .hearth still opens a channel
+        def cc-mkdir-deep-next(path, sp) {
+            let made = if gt(sp, 0) then fs-mkdir(substring(path, 0, sp)) else 0;
+            cc-mkdir-deep-go(path, add(sp, 1));
+        }
+        def cc-mkdir-deep-go(path, i) {
+            let sp = str_find(path, "/", i);
+            if lt(sp, 0) then fs-mkdir(path) else cc-mkdir-deep-next(path, sp);
+        }
+        def cc-mkdir-deep(path) = cc-mkdir-deep-go(path, 0);
+        def cc-open-go(root, name, a, b) {
+            let made = cc-mkdir-deep(cc-dir(root, name));
+            let bells = add(cc-bell-make(cc-bell(root, name, a)), add(cc-bell-make(cc-bell(root, name, b)), cc-bell-make(cc-bell(root, name, cc-field-name()))));
+            let seed = cc-seed-grammar();
+            let wroteSeed = write_file_text(cc-seed-path(root, name), seed);
+            let wroteBoard = write_file_text(cc-board(root, name), cc-board-text(name, a, b, now_unix_ms(), cc-digest(seed)));
+            cc-opened(if eq(bells, 3) then 1 else 0, name, a, b, cc-digest(seed));
+        }
+        def cc-open(root, name, a, b) = if not(eq(cc-label?(name), 1)) then cc-opened(0, name, a, b, "name-not-a-label") else if not(eq(cc-label?(a), 1)) then cc-opened(0, name, a, b, "a-not-a-label") else if not(eq(cc-label?(b), 1)) then cc-opened(0, name, a, b, "b-not-a-label") else if str_eq(a, b) then cc-opened(0, name, a, b, "a-is-b") else if or(str_eq(a, cc-field-name()), str_eq(b, cc-field-name())) then cc-opened(0, name, a, b, "cell-named-field") else cc-open-go(root, name, a, b);
+        // a channel directory holds fifos, which the body's own remove-tree
+        // leaves standing (witnessed 2026-09-04: nine frames stacked across three
+        // band runs); the host removes it whole. Only a labelled name under the
+        // given root is ever cleared.
+        def cc-clear(root, name) = if not(eq(cc-label?(name), 1)) then 0 else if nothing?(host-exec(cc-cat(list("rm -rf ", cc-dir(root, name))), "")) then 0 else if eq(fs-exists?(cc-dir(root, name)), 0) then 1 else 0;
+        def cc-open?(root, name) = if eq(str_len(cc-board-value(root, name, "name")), 0) then 0 else if not(eq(cc-bell-stands?(cc-bell(root, name, cc-a(root, name))), 1)) then 0 else if not(eq(cc-bell-stands?(cc-bell(root, name, cc-b(root, name))), 1)) then 0 else cc-bell-stands?(cc-bell(root, name, cc-field-name()));
+
+        // ── grammar: the seed plus the field's admits, in field order ──
+        def cc-seed-grammar() = cc-cat(list("(defn cc-ack (n) (add n 1))\n(defn cc-greet (x) (str_concat ", cc-q(), "hello ", cc-q(), " x))"));
+        def cc-seed-read(root, name) = cc-host-text(read_file(cc-seed-path(root, name)));
+        def cc-admitted-bodies(frames) = if eq(len(frames), 0) then list() else if and(str_eq(cc-frame-kind(head(frames)), "admit"), eq(cc-frame-whole?(head(frames)), 1)) then cons(cc-frame-body(head(frames)), cc-admitted-bodies(tail(frames))) else cc-admitted-bodies(tail(frames));
+        def cc-grammar-fold(seed, bodies) = if eq(len(bodies), 0) then seed else cc-grammar-fold(str_concat(seed, str_concat(cc-nl(), head(bodies))), tail(bodies));
+        def cc-grammar-id(text) = cc-digest(text);
+        def cc-grammar-current(root, name) = cc-grammar-fold(cc-seed-read(root, name), cc-admitted-bodies(cc-spool-frames(root, name, cc-field-name())));
+        def cc-program(grammar, body) = cc-cat(list("(do ", grammar, "\n", body, ")"));
+
+        // ── the symbol gate: every symbol known before form-eval sees it ──
+        def cc-delim?(c) = if eq(c, 40) then 1 else if eq(c, 41) then 1 else if eq(c, 32) then 1 else if eq(c, 10) then 1 else if eq(c, 13) then 1 else if eq(c, 9) then 1 else if eq(c, 34) then 1 else 0;
+        def cc-digit?(c) = if and(ge(c, 48), le(c, 57)) then 1 else 0;
+        def cc-sym-end(s, i) = if ge(i, str_len(s)) then i else if eq(cc-delim?(str_byte_at(s, i)), 1) then i else cc-sym-end(s, add(i, 1));
+        def cc-str-end(s, i) = if ge(i, str_len(s)) then i else if eq(str_byte_at(s, i), 92) then cc-str-end(s, add(i, 2)) else if eq(str_byte_at(s, i), 34) then i else cc-str-end(s, add(i, 1));
+        def cc-symbols-go(s, i, acc) {
+            if ge(i, str_len(s)) then reverse(acc)
+            else if eq(str_byte_at(s, i), 34) then cc-symbols-go(s, add(cc-str-end(s, add(i, 1)), 1), acc)
+            else if eq(cc-delim?(str_byte_at(s, i)), 1) then cc-symbols-go(s, add(i, 1), acc)
+            else if eq(cc-digit?(str_byte_at(s, i)), 1) then cc-symbols-go(s, cc-sym-end(s, i), acc)
+            else if and(eq(str_byte_at(s, i), 45), and(lt(add(i, 1), str_len(s)), eq(cc-digit?(str_byte_at(s, add(i, 1))), 1))) then cc-symbols-go(s, cc-sym-end(s, i), acc)
+            else cc-symbols-go(s, cc-sym-end(s, i), cons(substring(s, i, cc-sym-end(s, i)), acc));
+        }
+        def cc-symbols(s) = cc-symbols-go(s, 0, list());
+        def cc-skip-ws(s, i) = if ge(i, str_len(s)) then i else if or(eq(str_byte_at(s, i), 32), or(eq(str_byte_at(s, i), 10), or(eq(str_byte_at(s, i), 13), eq(str_byte_at(s, i), 9)))) then cc-skip-ws(s, add(i, 1)) else i;
+        def cc-sym-at(s, i) = substring(s, cc-skip-ws(s, i), cc-sym-end(s, cc-skip-ws(s, i)));
+        def cc-names-after-go(s, marker, from, acc) {
+            let at = str_find(s, marker, from);
+            if lt(at, 0) then reverse(acc) else cc-names-after-go(s, marker, add(at, str_len(marker)), cons(cc-sym-at(s, add(at, str_len(marker))), acc));
+        }
+        def cc-names-after(s, marker) = cc-names-after-go(s, marker, 0, list());
+        def cc-params-until-close(s, i, acc) {
+            let j = cc-skip-ws(s, i);
+            if ge(j, str_len(s)) then reverse(acc) else if eq(str_byte_at(s, j), 41) then reverse(acc) else cc-params-until-close(s, cc-sym-end(s, j), cons(substring(s, j, cc-sym-end(s, j)), acc));
+        }
+        def cc-params-of-go(s, from, acc) {
+            let at = str_find(s, cc-defn-mark(), from);
+            if lt(at, 0) then acc else cc-params-of-at(s, at, acc);
+        }
+        def cc-params-of-at(s, at, acc) {
+            let nameEnd = cc-sym-end(s, cc-skip-ws(s, add(at, 6)));
+            let open = cc-skip-ws(s, nameEnd);
+            if and(lt(open, str_len(s)), eq(str_byte_at(s, open), 40)) then cc-params-of-go(s, add(open, 1), append(acc, cc-params-until-close(s, add(open, 1), list()))) else cc-params-of-go(s, nameEnd, acc);
+        }
+        def cc-bound-names(s) = append(cc-names-after(s, cc-defn-mark()), append(cc-names-after(s, cc-let-mark()), cc-params-of-go(s, 0, list())));
+        def cc-known-word?(word) = if eq(cc-word-in?(CCSpecials(), word), 1) then 1 else if eq(cc-word-in?(CCBuiltins(), word), 1) then 1 else cc-word-in?(CCPrims(), word);
+        def cc-first-unknown(symbols, bound) = if eq(len(symbols), 0) then "" else if eq(cc-known-word?(head(symbols)), 1) then cc-first-unknown(tail(symbols), bound) else if eq(cc-member?(bound, head(symbols)), 1) then cc-first-unknown(tail(symbols), bound) else head(symbols);
+        def cc-balance-go(s, i, depth) {
+            if lt(depth, 0) then sub(0, 1)
+            else if ge(i, str_len(s)) then depth
+            else if eq(str_byte_at(s, i), 34) then cc-balance-go(s, add(cc-str-end(s, add(i, 1)), 1), depth)
+            else if eq(str_byte_at(s, i), 40) then cc-balance-go(s, add(i, 1), add(depth, 1))
+            else if eq(str_byte_at(s, i), 41) then cc-balance-go(s, add(i, 1), sub(depth, 1))
+            else cc-balance-go(s, add(i, 1), depth);
+        }
+        def cc-balanced?(s) = if eq(cc-balance-go(s, 0, 0), 0) then 1 else 0;
+        def cc-gate-program(program) {
+            let unknown = cc-first-unknown(cc-symbols(program), cc-bound-names(program));
+            if eq(str_len(unknown), 0) then "" else str_concat("unknown-symbol=", unknown);
+        }
+        def cc-gate(grammar, body) = if eq(str_len(body), 0) then "empty-body" else if not(eq(cc-balanced?(body), 1)) then "unbalanced" else cc-gate-program(cc-program(grammar, body));
+
+        // ── hearing: gate, then the body's own evaluator, then an answer frame ──
+        def cc-eval(grammar, body) = fe-eval(cc-program(grammar, body));
+        def cc-answer(kind, body) = list(kind, body);
+        def cc-answer-kind(a) = nth(a, 0);
+        def cc-answer-body(a) = nth(a, 1);
+        def cc-value-text(kind, v) = if nothing?(v) then "nothing" else if str_eq(kind, "tell") then v else int_to_str(v);
+        def cc-hear-go(grammar, gid, frame, gate) = if gt(str_len(gate), 0) then cc-answer("refuse", cc-cat(list("to=", int_to_str(cc-frame-turn(frame)), " reason=", gate, " grammar=", gid))) else cc-answer("heard", cc-cat(list("to=", int_to_str(cc-frame-turn(frame)), " value=", cc-value-text(cc-frame-kind(frame), cc-eval(grammar, cc-frame-body(frame))), " grammar=", gid)));
+        def cc-hear(grammar, gid, frame) = if not(eq(cc-frame-whole?(frame), 1)) then cc-answer("refuse", cc-cat(list("to=", int_to_str(cc-frame-turn(frame)), " reason=digest-mismatch grammar=", gid))) else cc-hear-go(grammar, gid, frame, cc-gate(grammar, cc-frame-body(frame)));
+        def cc-hearable?(frame) = if str_eq(cc-frame-kind(frame), "say") then 1 else if str_eq(cc-frame-kind(frame), "tell") then 1 else 0;
+
+        // ── THE MEMBRANE: a live cell evaluates in a child process under the
+        // caller's patience. The gate refuses by name what it can see; what it
+        // cannot see (a symbol that never returns, a death the evaluator does
+        // not report) crosses the membrane and comes back as `nothing` — the
+        // cell answers `refuse reason=spent` and stays alive. Timeout is
+        // nothing (axiom-1); the offer stands unconsumed (held-offer).
+        def cc-eval-runner() = CCEvalRunner();
+        // the program crosses as a FILE the shell hands to the child's stdin: the
+        // host-exec input door wedges in this build (witnessed 2026-09-04: a plain
+        // `cat` with input never returned), and an empty input is the door every
+        // other organ already trusts. One writer per file: the cell that hears.
+        def cc-eval-path(root, name, cell) = cc-cat(list(cc-dir(root, name), "/", cell, ".eval"));
+        def cc-eval-cmd(evalpath, secs) = cc-cat(list("tools/ftimeout ", int_to_str(secs), " ./fkwu ", cc-eval-runner(), " < ", evalpath, " 2>/dev/null"));
+        def cc-eval-membrane-read(out) {
+            let text = cc-host-text(out);
+            let at = cc-field-find(text, "value=");
+            if lt(at, 0) then nothing() else cc-field-at(text, "value=", at);
+        }
+        def cc-eval-membrane-go(evalpath, secs, wrote) = cc-eval-membrane-read(host-exec(cc-eval-cmd(evalpath, secs), ""));
+        def cc-eval-membrane(evalpath, grammar, kind, body, secs) = cc-eval-membrane-go(evalpath, secs, write_file_text(evalpath, cc-cat(list(kind, "\n", cc-program(grammar, body), "\n"))));
+        def cc-hear-value(gid, frame, v) = if nothing?(v) then cc-answer("refuse", cc-cat(list("to=", int_to_str(cc-frame-turn(frame)), " reason=spent grammar=", gid))) else cc-answer("heard", cc-cat(list("to=", int_to_str(cc-frame-turn(frame)), " value=", v, " grammar=", gid)));
+        def cc-hear-membrane(evalpath, grammar, gid, frame, gate, secs) = if gt(str_len(gate), 0) then cc-answer("refuse", cc-cat(list("to=", int_to_str(cc-frame-turn(frame)), " reason=", gate, " grammar=", gid))) else cc-hear-value(gid, frame, cc-eval-membrane(evalpath, grammar, cc-frame-kind(frame), cc-frame-body(frame), secs));
+        def cc-hear-through(evalpath, grammar, gid, frame, secs) = if not(eq(cc-frame-whole?(frame), 1)) then cc-answer("refuse", cc-cat(list("to=", int_to_str(cc-frame-turn(frame)), " reason=digest-mismatch grammar=", gid))) else cc-hear-membrane(evalpath, grammar, gid, frame, cc-gate(grammar, cc-frame-body(frame)), secs);
+
+        // ── a cell is a second witness: it re-runs the field's observation on
+        // every admit before folding (mesh-quorum: consensus-observed folds,
+        // divergent is named, never silently applied)
+        def cc-admit-agrees?(grammar, frame) = if not(eq(cc-frame-whole?(frame), 1)) then 0 else if str_eq(cc-answer-kind(cc-observe(grammar, cc-frame-body(frame))), "admit") then 1 else 0;
+        def cc-admit-divergence(grammar, frame) = if not(eq(cc-frame-whole?(frame), 1)) then "digest-mismatch" else cc-answer-body(cc-observe(grammar, cc-frame-body(frame)));
+        def cc-protocol(root, name) {
+            let s = cc-stat(root, name);
+            list("cc-protocol-v1", add(1, cc-stat-amendments(s)), cc-stat-grammar-id(s), cc-eval-door());
+        }
+        def cc-protocol-version(p) = nth(p, 1);
+        def cc-protocol-grammar-id(p) = nth(p, 2);
+        def cc-protocol-eval-door(p) = nth(p, 3);
+
+        // ── the field's observation of an offer (the only grammar door) ──
+        def cc-redefines-go(names, grammarNames) = if eq(len(names), 0) then "" else if eq(cc-member?(grammarNames, head(names)), 1) then head(names) else if eq(cc-known-word?(head(names)), 1) then head(names) else cc-redefines-go(tail(names), grammarNames);
+        def cc-redefines(grammar, body) = cc-redefines-go(cc-names-after(body, cc-defn-mark()), cc-names-after(grammar, cc-defn-mark()));
+        def cc-observe-go(grammar, body, gate) {
+            if gt(str_len(gate), 0) then cc-answer("refuse", gate)
+            else if gt(str_len(cc-redefines(grammar, body)), 0) then cc-answer("refuse", str_concat("redefines=", cc-redefines(grammar, body)))
+            else if eq(len(cc-names-after(body, cc-defn-mark())), 0) then cc-answer("refuse", "no-defn")
+            else cc-observe-eval(body, cc-eval(grammar, str_concat(body, "\n0")));
+        }
+        def cc-observe-eval(body, v) = if nothing?(v) then cc-answer("refuse", "eval-nothing") else if eq(v, 0) then cc-answer("admit", body) else cc-answer("refuse", "eval-not-zero");
+        def cc-observe(grammar, body) = cc-observe-go(grammar, body, cc-gate(grammar, body));
+        def cc-ack-of(kind) = if str_eq(kind, "admit") then 1 else if str_eq(kind, "refuse") then 0 else nothing();
+        def cc-field-answer-body(frame, answer) = if str_eq(cc-answer-kind(answer), "admit") then cc-answer-body(answer) else cc-cat(list("to=", int_to_str(cc-frame-turn(frame)), " from=", cc-frame-from(frame), " reason=", cc-answer-body(answer)));
+
+        // ── the census a glass or a receipt reads: counts from the spools ──
+        def cc-stat(root, name) {
+            let fa = cc-spool-frames(root, name, cc-a(root, name));
+            let fb = cc-spool-frames(root, name, cc-b(root, name));
+            let ff = cc-spool-frames(root, name, cc-field-name());
+            let grammar = cc-grammar-fold(cc-seed-read(root, name), cc-admitted-bodies(ff));
+            list("cc-stat-v1", name, len(fa), len(fb), len(ff), len(cc-frames-of-kind(ff, "admit")), len(cc-frames-of-kind(ff, "refuse")), add(len(cc-frames-of-kind(fa, "heard")), len(cc-frames-of-kind(fb, "heard"))), add(len(cc-frames-of-kind(fa, "say")), add(len(cc-frames-of-kind(fb, "say")), add(len(cc-frames-of-kind(fa, "tell")), len(cc-frames-of-kind(fb, "tell"))))), cc-grammar-id(grammar), cc-pid-read(root, name, cc-a(root, name)), cc-pid-read(root, name, cc-b(root, name)), cc-pid-read(root, name, cc-field-name()), cc-last-ms(append(fa, append(fb, ff))), len(cc-admitted-bodies(ff)));
+        }
+        def cc-last-ms(frames) = if eq(len(frames), 0) then 0 else cc-last-ms-go(tail(frames), cc-frame-ms(head(frames)));
+        def cc-last-ms-go(frames, m) = if eq(len(frames), 0) then m else cc-last-ms-go(tail(frames), if gt(cc-frame-ms(head(frames)), m) then cc-frame-ms(head(frames)) else m);
+        def cc-stat-name(s) = nth(s, 1);
+        def cc-stat-a-frames(s) = nth(s, 2);
+        def cc-stat-b-frames(s) = nth(s, 3);
+        def cc-stat-field-frames(s) = nth(s, 4);
+        def cc-stat-admitted(s) = nth(s, 5);
+        def cc-stat-refused(s) = nth(s, 6);
+        def cc-stat-heard(s) = nth(s, 7);
+        def cc-stat-said(s) = nth(s, 8);
+        def cc-stat-grammar-id(s) = nth(s, 9);
+        def cc-stat-pid-a(s) = nth(s, 10);
+        def cc-stat-pid-b(s) = nth(s, 11);
+        def cc-stat-pid-field(s) = nth(s, 12);
+        def cc-stat-last-ms(s) = nth(s, 13);
+        def cc-stat-amendments(s) = nth(s, 14);
+
+        // ── the mesh: every directory under the root that carries a board ──
+        def cc-mesh-names-go(root, names, acc) = if eq(len(names), 0) then reverse(acc) else if gt(str_len(cc-board-value(root, head(names), "name")), 0) then cc-mesh-names-go(root, tail(names), cons(head(names), acc)) else cc-mesh-names-go(root, tail(names), acc);
+        def cc-mesh-names(root) = if eq(fs-is-dir?(root), 1) then cc-mesh-names-go(root, fs-list(root), list()) else list();
+        def cc-mesh-stats(root, names) = if eq(len(names), 0) then list() else cons(cc-stat(root, head(names)), cc-mesh-stats(root, tail(names)));
+        def cc-mesh(root) = cc-mesh-stats(root, cc-mesh-names(root));
+    }
+    0;
+}

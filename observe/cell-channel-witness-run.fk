@@ -1,0 +1,122 @@
+; cell-channel-witness-run.fk — the bounded two-cell witness: open a
+; channel, birth cell b and the shared field as their own processes, be
+; cell a here, and walk the whole protocol once:
+;
+;   say  (cc-ack 41)                 -> heard value=42       (seed word)
+;   tell (cc-greet "b")              -> heard value=hello b  (seed word, string)
+;   say  (twice 21)                  -> refuse unknown-symbol=twice (the word not yet received)
+;   offer (defn twice (n) (mul n 2)) -> the field admits; b folds and acks `folded`;
+;                                       a re-observes and folds too
+;   say  (twice 21)                  -> heard value=42 under the new grammar id
+;   say  a symbol that never returns -> refuse reason=spent (the membrane, not a dead cell)
+;   release                          -> b and the field end; pid files leave
+;
+; Every wait is a bell wait under the hearth's patience rows, never a
+; sleep. The channel and the mesh are published to the glass at the end,
+; and the whole receipt prints as name=value lines a reader can check
+; against the spools that stay behind.
+;
+; stdin lines: channel root (blank -> the hearth default), channel name
+; (blank -> witness). Effectful: the channel directory is cleared and
+; rebuilt; two background processes are born and released.
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/cell-channel-glass.bml
+(do
+    (defn ccw-say (k v) (print_str (str_concat "witness " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn ccw-trim (s) (if (nothing? s) "" (if (eq (str_len s) 0) "" (if (eq (str_byte_at s (sub (str_len s) 1)) 10) (substring s 0 (sub (str_len s) 1)) s))))
+    (defn ccw-or (s d) (if (eq (str_len s) 0) d s))
+    (defn ccw-q () (byte_to_str 34))
+
+    ; birth a resident in the background; its stdout lands beside the spools
+    (defn ccw-birth (root name cell door)
+        (host-exec (cc-cat (list "( printf '%s\\n%s\\n%s\\n' '" root "' '" name "' '" cell "' | ./fkwu " door " > " (cc-dir root name) "/" cell ".out 2>&1 ) >/dev/null 2>&1 &")) ""))
+
+    ; does a frame answer turn `to`? (heard/refuse carry to=<turn>; admit carries the offer's id)
+    (defn ccw-answers? (f to)
+        (ge (str_find (cc-frame-body f) (str_concat "to=" (str_concat (int_to_str to) " ")) 0) 0))
+    (defn ccw-find-answer (frames to)
+        (if (eq (len frames) 0) (list)
+            (if (and (or (str_eq (cc-frame-kind (head frames)) "heard") (str_eq (cc-frame-kind (head frames)) "refuse")) (ccw-answers? (head frames) to))
+                (head frames)
+                (ccw-find-answer (tail frames) to))))
+    (defn ccw-find-kind (frames kind id)
+        (if (eq (len frames) 0) (list)
+            (if (and (str_eq (cc-frame-kind (head frames)) kind) (or (eq (str_len id) 0) (str_eq (cc-frame-id (head frames)) id)))
+                (head frames)
+                (ccw-find-kind (tail frames) kind id))))
+
+    ; what we are waiting for, as data: mode answer -> heard/refuse to turn `key`;
+    ; mode admit -> the field's admit carrying id `key`; mode folded -> any folded
+    (defn ccw-pick (mode key frames)
+        (if (str_eq mode "answer") (ccw-find-answer frames key)
+            (if (str_eq mode "admit") (ccw-find-kind frames "admit" key)
+                (ccw-find-kind frames "folded" ""))))
+    ; await: drain, look, else wait on our bell under patience, again; answers (frame reader)
+    (defn ccw-await (root name me reader mode key secs)
+        (do (let d (cc-drain reader))
+            (let found (ccw-pick mode key (cc-drained-frames d)))
+            (if (gt (len found) 0) (list found (cc-drained-reader d))
+                (do (let p (cc-patience root name me secs))
+                    (let wake (cc-bell-wait (cc-bell root name me)))
+                    (if (eq (cc-timed-out? wake) 1)
+                        (list (list) (cc-drained-reader d))
+                        (ccw-await root name me (cc-drained-reader d) mode key secs))))))
+
+    (defn ccw-report (step sent frame t0)
+        (if (eq (len frame) 0)
+            (ccw-say step (str_concat "turn=" (str_concat (int_to_str (cc-sent-turn sent)) " answer=nothing")))
+            (ccw-say step (cc-cat (list "turn=" (int_to_str (cc-sent-turn sent)) " " (cc-frame-kind frame) " from=" (cc-frame-from frame) " " (cc-frame-body frame) " ms=" (int_to_str (sub (now_unix_ms) t0)))))))
+
+    ; one exchange: send from a, await the peer's answer to that turn
+    (defn ccw-exchange (root name me step kind body rb secs)
+        (do (let t0 (now_unix_ms))
+            (let sent (cc-send root name me kind body))
+            (let got (ccw-await root name me rb "answer" (cc-sent-turn sent) secs))
+            (let said (ccw-report step sent (nth got 0) t0))
+            (nth got 1)))
+
+    (let root (ccw-or (ccw-trim (read_line)) (cc-root-default)))
+    (let name (ccw-or (ccw-trim (read_line)) "witness"))
+    (let cleared (cc-clear root name))
+    (let opened (cc-open root name "a" "b"))
+    (ccw-say "open" (cc-cat (list "root=" root " name=" name " ok=" (int_to_str (cc-open-ok opened)) " seed=" (cc-short (cc-open-seed-id opened)))))
+    (if (eq (cc-open-ok opened) 0) 0
+        (do
+            (let pid (cc-self-pid))
+            (let wrote (cc-pid-write root name "a" pid))
+            (let bornB (ccw-birth root name "b" "observe/cell-channel-cell-live.fk"))
+            (let bornF (ccw-birth root name "field" "observe/cell-channel-field-live.fk"))
+            (let secs (hearth-crossing-window-s))
+            (let rb0 (cc-reader root name "b"))
+            (let rf0 (cc-reader root name "field"))
+            (let g0 (cc-grammar-current root name))
+            (ccw-say "grammar" (str_concat "seed id=" (cc-short (cc-grammar-id g0))))
+            (let rb1 (ccw-exchange root name "a" "say-seed" "say" "(cc-ack 41)" rb0 secs))
+            (let rb2 (ccw-exchange root name "a" "tell-seed" "tell" (cc-cat (list "(cc-greet " (ccw-q) "b" (ccw-q) ")")) rb1 secs))
+            (let rb3 (ccw-exchange root name "a" "say-unknown" "say" "(twice 21)" rb2 secs))
+            ; the offer: a gift to the collective; the field observes it
+            (let t0 (now_unix_ms))
+            (let offer (cc-send root name "a" "offer" "(defn twice (n) (mul n 2))"))
+            (let adm (ccw-await root name "a" rf0 "admit" (cc-sent-id offer) secs))
+            (let admit (nth adm 0))
+            (ccw-say "offer" (cc-cat (list "turn=" (int_to_str (cc-sent-turn offer)) " id=" (cc-short (cc-sent-id offer)) (if (eq (len admit) 0) " admit=nothing" (cc-cat (list " admit-turn=" (int_to_str (cc-frame-turn admit)) " whole=" (int_to_str (cc-frame-whole? admit))))) " ms=" (int_to_str (sub (now_unix_ms) t0)))))
+            ; a is a second witness: re-observe, then fold
+            (let agrees (if (eq (len admit) 0) 0 (cc-admit-agrees? g0 admit)))
+            (let g1 (if (eq agrees 1) (cc-grammar-fold g0 (list (cc-frame-body admit))) g0))
+            (let foldedA (if (eq agrees 1) (cc-send root name "a" "folded" (str_concat "grammar=" (str_concat (cc-grammar-id g1) (str_concat " admit=" (cc-frame-id admit))))) (cc-sent-refused "no-admit")))
+            (ccw-say "fold-a" (cc-cat (list "agrees=" (int_to_str agrees) " grammar=" (cc-short (cc-grammar-id g1)))))
+            ; b's own acceptance ack
+            (let fb (ccw-await root name "a" rb3 "folded" "" secs))
+            (ccw-say "fold-b" (if (eq (len (nth fb 0)) 0) "folded=nothing" (cc-cat (list "folded " (cc-frame-body (nth fb 0)) " same-grammar=" (int_to_str (if (ge (str_find (cc-frame-body (nth fb 0)) (str_concat "grammar=" (cc-grammar-id g1)) 0) 0) 1 0))))))
+            (let rb4 (ccw-exchange root name "a" "say-new-word" "say" "(twice 21)" (nth fb 1) secs))
+            (let rb5 (ccw-exchange root name "a" "say-never-returns" "say" "(do (defn f (x) (f x)) (f 1))" rb4 (add secs (hearth-channel-eval-s))))
+            (let rel (cc-send root name "a" "release" "witness-complete"))
+            (let cleared2 (cc-pid-clear root name "a"))
+            (let s (cc-stat root name))
+            (ccw-say "stat" (cc-cat (list "a-frames=" (int_to_str (cc-stat-a-frames s)) " b-frames=" (int_to_str (cc-stat-b-frames s)) " field-frames=" (int_to_str (cc-stat-field-frames s)) " admitted=" (int_to_str (cc-stat-admitted s)) " refused=" (int_to_str (cc-stat-refused s)) " heard=" (int_to_str (cc-stat-heard s)) " said=" (int_to_str (cc-stat-said s)) " grammar=" (cc-short (cc-stat-grammar-id s)))))
+            (let p (cc-protocol root name))
+            (ccw-say "protocol" (cc-cat (list "version=" (int_to_str (cc-protocol-version p)) " grammar=" (cc-short (cc-protocol-grammar-id p)) " eval-door=" (cc-protocol-eval-door p))))
+            (let glass (ccg-publish root name (now_unix_ms)))
+            (let mesh (ccg-publish-mesh root (now_unix_ms)))
+            (ccw-say "glass" (cc-cat (list "channel=" (int_to_str (ccg-published? glass)) " mesh=" (int_to_str (nth mesh 2)) " publisher=" (ccg-publisher name) " root=" (hearth-telemetry-root))))
+            0)))
