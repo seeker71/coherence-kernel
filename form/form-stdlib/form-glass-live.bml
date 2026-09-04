@@ -80,7 +80,8 @@ section [form.bml] {
         def fgl-inventory-samples-at(inventory, epoch) = if not(str_eq(nth(inventory, 2), "current")) then list() else fgl-newest-samples-by-snapshot(fgl-reading-sample-entries-at(fgl-current-readings(nth(inventory, 4), fgl-has-incarnated-dual-publisher?(nth(inventory, 3))), epoch));
         def fgl-inventory-publishers(inventory) = if not(str_eq(nth(inventory, 2), "current")) then list() else nth(inventory, 3);
 
-        def fgl-owner-liveness(samples) = if eq(len(samples), 0) then list() else if and(str_eq(fgtm-sample-kind(head(samples)), "owner-liveness"), and(str_eq(fgtm-sample-lifecycle(head(samples)), "active"), and(str_eq(fgtm-sample-purpose(head(samples)), "os-process-lifetime-current"), str_eq(fgtm-sample-evidence(head(samples)), "physical-live")))) then head(samples) else fgl-owner-liveness(tail(samples));
+        def fgl-owner-liveness-row?(sample) = if and(str_eq(fgtm-sample-kind(sample), "owner-liveness"), and(str_eq(fgtm-sample-lifecycle(sample), "active"), and(str_eq(fgtm-sample-purpose(sample), "os-process-lifetime-current"), str_eq(fgtm-sample-evidence(sample), "physical-live")))) then 1 else if and(str_eq(fgtm-sample-kind(sample), "owner-heartbeat"), eq(fgtm-field-present?(fgtm-sample-handle(sample)), 1)) then 1 else 0;
+        def fgl-owner-liveness(samples) = if eq(len(samples), 0) then list() else if eq(fgl-owner-liveness-row?(head(samples)), 1) then head(samples) else fgl-owner-liveness(tail(samples));
         def fgl-owner-process(samples) {
             let owner = fgl-owner-liveness(samples);
             if eq(len(owner), 0) then list() else if not(eq(fgtm-field-present?(fgtm-sample-handle(owner)), 1)) then list() else fgl-owner-process-read(fgtm-field-value(fgtm-sample-handle(owner)));
@@ -96,17 +97,22 @@ section [form.bml] {
         }
         def fgl-owner-process-rows(samples) {
             let process = fgl-owner-process(samples);
-            if eq(len(process), 0) then list() else fgl-owner-process-rows-present(process, fgl-owner-nice(fgo-ps-pid(process)));
+            if eq(len(process), 0) then fgl-owner-absent-rows(samples) else fgl-owner-process-rows-present(process, fgl-owner-nice(fgo-ps-pid(process)));
+        }
+        def fgl-owner-absent-rows(samples) {
+            let owner = fgl-owner-liveness(samples);
+            if eq(len(owner), 0) then list(fgo-int("process", "model-owner-present", "Model owner present", 0, "ready", 0, "process-time", "physical-live", "owner-liveness sample", "empty", "model", "semantic-zero=empty; no owner-liveness publication in the current inventory")) else if not(eq(fgtm-field-present?(fgtm-sample-handle(owner)), 1)) then list(fgo-int("process", "model-owner-present", "Model owner present", 0, "ready", 0, "process-time", "physical-live", "owner-liveness handle", "empty", "model", "semantic-zero=empty; owner-liveness row has no pid handle")) else list(fgo-int("process", "model-owner-present", "Model owner present", 0, "ready", 0, "process-time", "physical-live", "owner-liveness exact pid/start + /bin/ps", "released", "model", str_concat("owner pid=", str_concat(int_to_str(fgtm-field-value(fgtm-sample-handle(owner))), " is not a live process; last snapshot remains inspectable with age"))));
         }
         def fgl-owner-process-rows-present(process, nice) {
             let pid = fgo-ps-pid(process);
             list(
+                fgo-int("process", "model-owner-present", "Model owner present", 1, "ready", 1, "process-time", "physical-live", "owner-liveness exact pid/start + /bin/ps", "live", "model", str_concat("owner pid=", int_to_str(pid))),
                 fgo-int("process", "model-owner-rss", "Model owner RSS", fgo-ps-rss-bytes(process), "bytes", fgo-ps-rss-bytes(process), "os-memory", "physical-live", "owner-liveness exact pid/start + /bin/ps", "live", "model", str_concat("Qwen3.8-Flash-Next + Llama-3.2-3B owner pid=", int_to_str(pid))),
                 fgo-int("process", "model-owner-cpu", "Model owner CPU", fgo-ps-cpu(process), "tenths-percent", fgo-ps-cpu(process), "cpu-scheduler", "physical-live", "owner-liveness exact pid/start + /bin/ps", if eq(fgo-ps-cpu(process), 0) then "quiet" else "live", "cpu", str_concat("semantic-zero=quiet at 0.1% precision; owner pid=", int_to_str(pid))),
                 fgo-int("process", "model-owner-elapsed", "Model owner elapsed", fgo-ps-elapsed(process), "seconds", fgo-ps-elapsed(process), "process-time", "physical-live", "owner-liveness exact pid/start + /bin/ps", "live", "model", str_concat("owner pid=", int_to_str(pid))),
                 if ge(nice, 0) then fgo-int("process", "model-owner-nice", "Model owner nice", nice, "nice", nice, "cpu-scheduler", "physical-live", "owner-liveness exact pid/start + /bin/ps -o ni", "live", "cpu", str_concat("cooperative scheduling priority; owner pid=", int_to_str(pid))) else fgo-unavailable("process", "model-owner-nice", "Model owner nice", "nice", "cpu-scheduler", "host.ps.owner-nice", "cpu", str_concat("exact owner pid=", int_to_str(pid))));
         }
-        def fgl-owner-metric?(row) = if str_eq(fgo-id(row), "model-owner-rss") then 1 else if str_eq(fgo-id(row), "model-owner-cpu") then 1 else if str_eq(fgo-id(row), "model-owner-elapsed") then 1 else str_eq(fgo-id(row), "model-owner-nice");
+        def fgl-owner-metric?(row) = if str_eq(fgo-id(row), "model-owner-present") then 1 else if str_eq(fgo-id(row), "model-owner-rss") then 1 else if str_eq(fgo-id(row), "model-owner-cpu") then 1 else if str_eq(fgo-id(row), "model-owner-elapsed") then 1 else str_eq(fgo-id(row), "model-owner-nice");
         def fgl-held-owner-rows(rows) = if eq(len(rows), 0) then list() else if eq(fgl-owner-metric?(head(rows)), 1) then cons(head(rows), fgl-held-owner-rows(tail(rows))) else fgl-held-owner-rows(tail(rows));
         // Exact owner process observation is useful at least once per second;
         // spawning two ps children at every 250 ms frame displaced the model
@@ -141,7 +147,7 @@ section [form.bml] {
             let processRows = fgo-live-process-rows();
             append(memoryRows, processRows);
         }
-        def fgl-host-rows-at(frame, held, epoch) = if or(eq(len(held), 0), eq(fgl-cycle?(frame, 16), 1)) then fgo-observe-rows(fgl-observe-host-rows(), epoch, frame) else held;
+        def fgl-host-rows-at(frame, held, epoch) = if or(eq(len(held), 0), eq(fgl-cycle?(frame, 4), 1)) then fgo-observe-rows(fgl-observe-host-rows(), epoch, frame) else held;
         def fgl-host-rows(frame, held) = fgl-host-rows-at(frame, held, 0);
         def fgl-cache-roots() = list("form/form-stdlib", "form/form-stdlib/tests", "form/form-stdlib/bml", "form/native/metal", "form/native/metal/tests", "observe");
         def fgl-source-roots() = list("form/form-stdlib", "form/form-stdlib/bml", "form/native/metal", "observe");

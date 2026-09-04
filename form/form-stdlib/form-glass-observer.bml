@@ -221,13 +221,58 @@ section [form.bml] {
             let stop = str_find(status, " ", start);
             if lt(stop, 0) then -1 else str_to_int(substring(status, start, stop));
         }
+        def fgo-colon-skip-space(text, index) = if ge(index, str_len(text)) then index else if eq(fgo-ps-space?(str_byte_at(text, index)), 1) then fgo-colon-skip-space(text, add(index, 1)) else index;
+        def fgo-colon-digits-end(text, index) = if ge(index, str_len(text)) then index else if and(ge(str_byte_at(text, index), 48), le(str_byte_at(text, index), 57)) then fgo-colon-digits-end(text, add(index, 1)) else index;
+        def fgo-colon-int(status, key) {
+            let at = str_find(status, key, 0);
+            if lt(at, 0) then -1 else fgo-colon-int-at(status, fgo-colon-skip-space(status, add(at, str_len(key))));
+        }
+        def fgo-colon-int-at(status, start) {
+            let stop = fgo-colon-digits-end(status, start);
+            if le(stop, start) then -1 else str_to_int(substring(status, start, stop));
+        }
+        def fgo-vmstat-rows(status) {
+            let pageins = fgo-colon-int(status, "Pageins:");
+            let compressions = fgo-colon-int(status, "Compressions:");
+            let decompressions = fgo-colon-int(status, "Decompressions:");
+            let fileBacked = fgo-colon-int(status, "File-backed pages:");
+            let compressor = fgo-colon-int(status, "Pages occupied by compressor:");
+            list(
+                if lt(pageins, 0) then fgo-unavailable("host", "pageins", "Mach pageins", "pages", "os-memory", "host-exec:/usr/bin/vm_stat.Pageins", "health", "vm_stat did not expose Pageins") else fgo-int("host", "pageins", "Mach pageins", pageins, "pages", pageins, "os-memory", "observed", "host-exec:/usr/bin/vm_stat", "live", "health", "cumulative pageins; a rising counter during a token stall is disk-backed page-in, not idle"),
+                if lt(compressions, 0) then fgo-unavailable("host", "compressions", "compressor puts", "pages", "os-memory", "host-exec:/usr/bin/vm_stat.Compressions", "health", "vm_stat did not expose Compressions") else fgo-int("host", "compressions", "compressor puts", compressions, "pages", compressions, "os-memory", "observed", "host-exec:/usr/bin/vm_stat", "live", "health", "cumulative compressor stores"),
+                if lt(decompressions, 0) then fgo-unavailable("host", "decompressions", "compressor gets", "pages", "os-memory", "host-exec:/usr/bin/vm_stat.Decompressions", "health", "vm_stat did not expose Decompressions") else fgo-int("host", "decompressions", "compressor gets", decompressions, "pages", decompressions, "os-memory", "observed", "host-exec:/usr/bin/vm_stat", "live", "health", "cumulative compressor restores"),
+                if lt(fileBacked, 0) then fgo-unavailable("host", "file-backed-pages", "file-backed pages", "pages", "os-memory", "host-exec:/usr/bin/vm_stat.File-backed", "health", "vm_stat did not expose File-backed pages") else fgo-int("host", "file-backed-pages", "file-backed pages", fileBacked, "pages", fileBacked, "os-memory", "observed", "host-exec:/usr/bin/vm_stat", "live", "health", "current file-backed residency"),
+                if lt(compressor, 0) then fgo-unavailable("host", "compressor-pages", "compressor occupancy", "pages", "os-memory", "host-exec:/usr/bin/vm_stat.compressor", "health", "vm_stat did not expose compressor occupancy") else fgo-int("host", "compressor-pages", "compressor occupancy", compressor, "pages", compressor, "os-memory", "observed", "host-exec:/usr/bin/vm_stat", "live", "health", "pages currently held compressed"));
+        }
+        def fgo-last-nonempty-line(lines) = if eq(len(lines), 0) then "" else if eq(str_len(head(lines)), 0) then fgo-last-nonempty-line(tail(lines)) else fgo-last-nonempty-held(tail(lines), head(lines));
+        def fgo-last-nonempty-held(lines, held) = if eq(len(lines), 0) then held else if eq(str_len(head(lines)), 0) then fgo-last-nonempty-held(tail(lines), held) else fgo-last-nonempty-held(tail(lines), head(lines));
+        def fgo-iostat-int-token(text) {
+            let start = fgo-colon-skip-space(text, 0);
+            let stop = fgo-colon-digits-end(text, start);
+            if le(stop, start) then -1 else str_to_int(substring(text, start, stop));
+        }
+        def fgo-iostat-skip-token(text) {
+            let start = fgo-colon-skip-space(text, 0);
+            let stop = fgo-colon-digits-end(text, start);
+            let afterDot = if and(lt(stop, str_len(text)), eq(str_byte_at(text, stop), 46)) then fgo-colon-digits-end(text, add(stop, 1)) else stop;
+            substring(text, afterDot, str_len(text));
+        }
+        def fgo-disk-rows(status) {
+            let line = fgo-last-nonempty-line(split-on(status, "\n"));
+            let kbtRest = fgo-iostat-skip-token(line);
+            let tps = fgo-iostat-int-token(kbtRest);
+            let mbps = fgo-iostat-int-token(fgo-iostat-skip-token(kbtRest));
+            list(
+                if lt(tps, 0) then fgo-unavailable("host", "disk-tps", "disk transactions", "tps", "disk", "host-exec:/usr/sbin/iostat.tps", "health", "iostat did not expose tps") else fgo-int("host", "disk-tps", "disk transactions", tps, "tps", tps, "disk", "observed", "host-exec:/usr/sbin/iostat", if eq(tps, 0) then "quiet" else "live", "health", "last iostat sample; rising tps during a token stall is device IO"),
+                if lt(mbps, 0) then fgo-unavailable("host", "disk-mbps", "disk throughput", "MB/s", "disk", "host-exec:/usr/sbin/iostat.MB/s", "health", "iostat did not expose MB/s") else fgo-int("host", "disk-mbps", "disk throughput", mbps, "MB/s", mbps, "disk", "observed", "host-exec:/usr/sbin/iostat", if eq(mbps, 0) then "quiet" else "live", "health", "integer MB/s from iostat; page-in of model shards shows here"));
+        }
         def fgo-host-rows(status) {
             let free = fgo-host-free-percent(status);
             let total = fgo-host-total-bytes(status);
-            list(
+            append(list(
                 if lt(free, 0) then fgo-unavailable("host", "memory-free", "system memory free", "percent", "os-memory", "host-exec:/usr/bin/memory_pressure.system-free-percent", "health", "host port did not return a parseable percentage") else fgo-sized("host", "memory-free", "system memory free", free, "percent", 100, sub(100, free), "os-memory", "observed", "host-exec:/usr/bin/memory_pressure", "live", "health", "system-wide; not Metal working set"),
                 if lt(total, 0) then fgo-unavailable("host", "memory-total", "physical memory", "bytes", "os-memory", "host-exec:/usr/bin/memory_pressure.physical-bytes", "health", "host port did not return total bytes") else fgo-int("host", "memory-total", "physical memory", total, "bytes", 0, "os-memory", "observed", "host-exec:/usr/bin/memory_pressure", "live", "health", "system-wide physical bytes"),
-                fgo-text-or-unavailable("host", "cpu-load", "CPU load averages", host-exec("/usr/sbin/sysctl -n vm.loadavg", ""), "cpu-scheduler", "observed", "host-exec:/usr/sbin/sysctl.vm.loadavg", "live", "cpu", "host-port text; per-fkwu CPU is emitted by the fixed ps observer"));
+                fgo-text-or-unavailable("host", "cpu-load", "CPU load averages", host-exec("/usr/sbin/sysctl -n vm.loadavg", ""), "cpu-scheduler", "observed", "host-exec:/usr/sbin/sysctl.vm.loadavg", "live", "cpu", "host-port text; per-fkwu CPU is emitted by the fixed ps observer")), append(fgo-vmstat-rows(host-exec("/usr/bin/vm_stat", "")), fgo-disk-rows(host-exec("/usr/sbin/iostat -d 1 1", ""))));
         }
 
         // Fixed-column process observation.  `/bin/ps ... comm=` exposes the
