@@ -1,0 +1,150 @@
+// Query pipelines over resident JSON cells; json.fk remains the codec.
+// preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/shell-exec.fk form-stdlib/bml/form-agent-tool-values.bml
+section [form.bml] {
+    class FormAgentJsonQuery {
+        // Syntax admission protects the permissive legacy parser. Only the
+        // existing parser constructs JSON cells; this pass returns a position.
+        def faj-hex(c) = or(fat-digit(c), or(and(ge(c, 65), le(c, 70)), and(ge(c, 97), le(c, 102))));
+        def faj-hex4(s, i, n) = if eq(n, 0) then i else if faj-hex(fat-char(s, i)) then faj-hex4(s, add(i, 1), sub(n, 1)) else -1;
+        def faj-string(s, i) = if ge(i, str_len(s)) then -1 else if eq(fat-char(s, i), 34) then add(i, 1) else if lt(fat-char(s, i), 32) then -1 else if eq(fat-char(s, i), 92) then faj-string-escape(s, add(i, 1)) else faj-string(s, add(i, 1));
+        def faj-string-escape(s, i) = if eq(fat-char(s, i), 117) then faj-string-hex(s, faj-hex4(s, add(i, 1), 4)) else if ge(str_find("\"\\/bfnrt", byte_to_str(fat-char(s, i)), 0), 0) then faj-string(s, add(i, 1)) else -1;
+        def faj-string-hex(s, end) = if lt(end, 0) then -1 else faj-string(s, end);
+        def faj-digits(s, i) = if fat-digit(fat-char(s, i)) then faj-digits(s, add(i, 1)) else i;
+        def faj-number(s, i) = faj-number-int(s, if eq(fat-char(s, i), 45) then add(i, 1) else i);
+        def faj-number-int(s, i) = if eq(fat-char(s, i), 48) then faj-number-frac(s, add(i, 1)) else if and(ge(fat-char(s, i), 49), le(fat-char(s, i), 57)) then faj-number-frac(s, faj-digits(s, i)) else -1;
+        def faj-number-frac(s, i) = if eq(fat-char(s, i), 46) then if fat-digit(fat-char(s, add(i, 1))) then faj-number-exp(s, faj-digits(s, add(i, 1))) else -1 else faj-number-exp(s, i);
+        def faj-number-exp(s, i) = if or(eq(fat-char(s, i), 101), eq(fat-char(s, i), 69)) then faj-number-exp-digits(s, if or(eq(fat-char(s, add(i, 1)), 43), eq(fat-char(s, add(i, 1)), 45)) then add(i, 2) else add(i, 1)) else i;
+        def faj-number-exp-digits(s, i) = if fat-digit(fat-char(s, i)) then faj-digits(s, i) else -1;
+        def faj-end(s, i, depth) = if gt(depth, 64) then -1 else faj-value(s, fat-skip(s, i), depth);
+        def faj-value(s, i, depth) {
+            let c = fat-char(s, i);
+            if eq(c, 34) then faj-string(s, add(i, 1))
+            else if eq(c, 91) then faj-container(s, fat-skip(s, add(i, 1)), add(depth, 1), 93, 1)
+            else if eq(c, 123) then faj-container(s, fat-skip(s, add(i, 1)), add(depth, 1), 125, 1)
+            else if or(eq(c, 45), fat-digit(c)) then faj-number(s, i)
+            else if fat-starts(substring(s, i, str_len(s)), "true") then add(i, 4)
+            else if fat-starts(substring(s, i, str_len(s)), "false") then add(i, 5)
+            else if fat-starts(substring(s, i, str_len(s)), "null") then add(i, 4) else -1;
+        }
+        def faj-container(s, i, depth, close, emptyAllowed) = if and(emptyAllowed, eq(fat-char(s, i), close)) then add(i, 1) else if eq(close, 125) then if eq(fat-char(s, i), 34) then faj-object-value(s, faj-string(s, add(i, 1)), depth) else -1 else faj-container-after(s, faj-end(s, i, depth), depth, close);
+        def faj-object-value(s, keyEnd, depth) = if lt(keyEnd, 0) then -1 else if eq(fat-char(s, fat-skip(s, keyEnd)), 58) then faj-container-after(s, faj-end(s, add(fat-skip(s, keyEnd), 1), depth), depth, 125) else -1;
+        def faj-container-after(s, end, depth, close) = if lt(end, 0) then -1 else faj-container-delim(s, fat-skip(s, end), depth, close);
+        def faj-container-delim(s, i, depth, close) = if eq(fat-char(s, i), close) then add(i, 1) else if eq(fat-char(s, i), 44) then faj-container(s, fat-skip(s, add(i, 1)), depth, close, 0) else -1;
+        def faj-valid(s) = if eq(str_len(fat-trim(s)), 0) then 0 else faj-valid-end(s, faj-end(s, 0, 0));
+        def faj-valid-end(s, end) = if lt(end, 0) then 0 else eq(fat-skip(s, end), str_len(s));
+        def faj-null() = intern_node(JSON-NULL(), list());
+        def faj-array(xs) = intern_node(JSON-ARRAY(), xs);
+        def faj-is(node, kind) = node_eq(node_category(node), kind);
+        def faj-truth(node) = not(or(faj-is(node, JSON-NULL()), node_eq(node, intern_trivial_bool(false))));
+        def faj-type(node) = if faj-is(node, JSON-OBJECT()) then "object" else if faj-is(node, JSON-ARRAY()) then "array" else if faj-is(node, JSON-NULL()) then "null" else if eq(node_type(node), 2) then "string" else if eq(node_type(node), 3) then "boolean" else "number";
+        // The shared codec constructs cells; the query object model keeps the
+        // last value for a repeated key, preserving its first insertion order.
+        def faj-json(source, text) = faj-normalize(parse-json(source, text));
+        def faj-normalize(node) = if faj-is(node, JSON-OBJECT()) then json-node-object(faj-normal-pairs(node_children(node), list())) else if faj-is(node, JSON-ARRAY()) then faj-array(faj-normal-items(node_children(node))) else node;
+        def faj-normal-items(nodes) = if nil?(nodes) then list() else cons(faj-normalize(head(nodes)), faj-normal-items(tail(nodes)));
+        def faj-normal-pairs(pairs, out) = if nil?(pairs) then out else faj-normal-pairs(tail(pairs), faj-put-pair(out, json-node-pair(json-pair-key(head(pairs)), faj-normalize(json-pair-value(head(pairs))))));
+        def faj-put-pair(pairs, pair) = if nil?(pairs) then list(pair) else if str_eq(json-pair-key(head(pairs)), json-pair-key(pair)) then cons(pair, tail(pairs)) else cons(head(pairs), faj-put-pair(tail(pairs), pair));
+
+        // Compiler result: AST, error. Compilation precedes input evaluation.
+        def faj-bad(error) = list(list(), error);
+        def faj-built(ast) = list(ast, "");
+        def faj-compile(s) = if gt(str_len(s), 512) then faj-bad("query-limit") else faj-pipe(fat-trim(s), fat-split-top(fat-trim(s), "|"));
+        def faj-pipe(s, split) = if not(str_eq(nth(split, 1), "")) then faj-bad(nth(split, 1)) else if gt(len(head(split)), 1) then faj-compile-many("pipe", head(split), list()) else faj-fallback(s, fat-split-top(s, "//"));
+        def faj-fallback(s, split) = if gt(len(head(split)), 1) then faj-compile-many("fallback", head(split), list()) else faj-simple(s);
+        def faj-compile-many(kind, parts, out) = if nil?(parts) then faj-built(list(kind, fat-reverse(out))) else faj-compiled-one(kind, parts, out, faj-compile(head(parts)));
+        def faj-compiled-one(kind, parts, out, r) = if not(str_eq(nth(r, 1), "")) then r else faj-compile-many(kind, tail(parts), cons(head(r), out));
+        def faj-wrap(kind, compiled) = if not(str_eq(nth(compiled, 1), "")) then compiled else faj-built(list(kind, head(compiled)));
+        def faj-simple(s) = if str_eq(s, ".") then faj-built(list("id"))
+            else if fat-has(list("keys", "length", "type", "empty", "sort", "unique", "to_entries"), s) then faj-built(list(s))
+            else if and(fat-starts(s, "map("), fat-ends(s, ")")) then faj-wrap("map", faj-compile(substring(s, 4, sub(str_len(s), 1))))
+            else if and(fat-starts(s, "select("), fat-ends(s, ")")) then faj-wrap("select", faj-predicate(substring(s, 7, sub(str_len(s), 1)), list("==", "!=", ">=", "<=", ">", "<")))
+            else if faj-valid(s) then faj-built(list("literal", faj-json("resident-query-literal", s)))
+            else if and(fat-starts(s, "["), fat-ends(s, "]")) then faj-wrap("collect", faj-compile(fat-strip(s, 1)))
+            else if and(fat-starts(s, "{"), fat-ends(s, "}")) then faj-object-compile(head(fat-split-top(fat-strip(s, 1), ",")), list())
+            else if eq(fat-char(s, 0), 46) then faj-path(s, 1, list())
+            else if eq(fat-char(s, 0), 36) then if faj-name(substring(s, 1, str_len(s))) then faj-built(list("variable", substring(s, 1, str_len(s)))) else faj-bad("invalid-variable")
+            else faj-bad("unsupported-jq-expression");
+        def faj-predicate(s, ops) = if nil?(ops) then faj-compile(s) else faj-predicate-split(s, ops, head(fat-split-top(s, head(ops))));
+        def faj-predicate-split(s, ops, parts) = if eq(len(parts), 2) then faj-predicate-pair(head(ops), faj-compile(head(parts)), faj-compile(nth(parts, 1))) else if gt(len(parts), 2) then faj-bad("chained-comparison-not-supported") else faj-predicate(s, tail(ops));
+        def faj-predicate-pair(op, a, b) = if not(str_eq(nth(a, 1), "")) then a else if not(str_eq(nth(b, 1), "")) then b else faj-built(list("compare", op, head(a), head(b)));
+        def faj-name-byte(c) = or(fat-digit(c), or(and(ge(c, 65), le(c, 90)), or(and(ge(c, 97), le(c, 122)), eq(c, 95))));
+        def faj-name-end(s, i) = if faj-name-byte(fat-char(s, i)) then faj-name-end(s, add(i, 1)) else i;
+        def faj-name(s) = and(gt(str_len(s), 0), and(not(fat-digit(fat-char(s, 0))), eq(faj-name-end(s, 0), str_len(s))));
+        def faj-path(s, i, parts) = if ge(i, str_len(s)) then faj-built(list("path", fat-reverse(parts))) else if eq(fat-char(s, i), 46) then if or(eq(fat-char(s, sub(i, 1)), 46), eq(fat-char(s, add(i, 1)), 0)) then faj-bad("empty-path-segment") else faj-path(s, add(i, 1), parts) else if eq(fat-char(s, i), 91) then faj-path-bracket(s, i, parts) else if eq(fat-char(s, sub(i, 1)), 93) then faj-bad("missing-path-separator") else faj-path-key(s, i, faj-name-end(s, i), parts);
+        def faj-path-key(s, i, end, parts) = if eq(i, end) then faj-bad("unsupported-path-syntax") else if or(ge(end, str_len(s)), or(eq(fat-char(s, end), 46), eq(fat-char(s, end), 91))) then faj-path(s, end, cons(list("key", substring(s, i, end)), parts)) else faj-bad("unsupported-path-syntax");
+        def faj-path-bracket(s, i, parts) = faj-path-bracket-end(s, i, faj-bracket-end(s, fat-skip(s, add(i, 1))), parts);
+        def faj-bracket-end(s, i) = if eq(fat-char(s, i), 34) then faj-quoted-bracket-end(s, faj-string(s, add(i, 1))) else str_find(s, "]", i);
+        def faj-quoted-bracket-end(s, end) = if lt(end, 0) then -1 else if eq(fat-char(s, fat-skip(s, end)), 93) then fat-skip(s, end) else -1;
+        def faj-path-bracket-end(s, i, end, parts) = if lt(end, 0) then faj-bad("unclosed-path-bracket") else faj-path-index(s, end, fat-trim(substring(s, add(i, 1), end)), parts);
+        def faj-path-index(s, end, index, parts) = if str_eq(index, "") then faj-path(s, add(end, 1), cons(list("each"), parts)) else if fat-natural(index) then faj-path(s, add(end, 1), cons(list("index", str_to_int(index)), parts)) else if and(eq(fat-char(index, 0), 34), faj-valid(index)) then faj-path(s, add(end, 1), cons(list("key", node_value(parse-json("resident-query-key", index))), parts)) else faj-bad("unsupported-array-index");
+        def faj-object-compile(parts, out) = if nil?(parts) then faj-built(list("object", fat-reverse(out))) else faj-object-pair(parts, out, head(fat-split-top(head(parts), ":")));
+        def faj-object-pair(parts, out, pair) = if not(eq(len(pair), 2)) then faj-bad("object-needs-key-and-expression") else faj-object-key(parts, out, head(pair), faj-compile(nth(pair, 1)));
+        def faj-object-key(parts, out, key, r) = if not(str_eq(nth(r, 1), "")) then r else if faj-name(key) then faj-object-compile(tail(parts), cons(list(key, head(r)), out)) else if and(eq(fat-char(key, 0), 34), faj-valid(key)) then faj-object-compile(tail(parts), cons(list(node_value(parse-json("resident-query-key", key)), head(r)), out)) else faj-bad("invalid-object-key");
+
+        // Evaluation result: stream of JSON nodes, error. No error is a value.
+        def faj-values(xs) = list(xs, "");
+        def faj-one(node) = faj-values(list(node));
+        def faj-eval(ast, node, vars) {
+            let kind = head(ast);
+            if str_eq(kind, "id") then faj-one(node)
+            else if str_eq(kind, "literal") then faj-one(nth(ast, 1))
+            else if str_eq(kind, "variable") then faj-var(vars, nth(ast, 1))
+            else if str_eq(kind, "empty") then faj-values(list())
+            else if str_eq(kind, "pipe") then faj-pipeline(nth(ast, 1), list(node), vars)
+            else if str_eq(kind, "fallback") then faj-fallback-eval(nth(ast, 1), node, vars)
+            else if str_eq(kind, "path") then faj-path-eval(nth(ast, 1), list(node))
+            else if str_eq(kind, "map") then if faj-is(node, JSON-ARRAY()) then faj-collected(faj-each(nth(ast, 1), node_children(node), vars)) else faj-bad("map-needs-array")
+            else if str_eq(kind, "collect") then faj-collected(faj-eval(nth(ast, 1), node, vars))
+            else if str_eq(kind, "select") then faj-selected(node, faj-eval(nth(ast, 1), node, vars))
+            else if str_eq(kind, "compare") then faj-compared(nth(ast, 1), faj-eval(nth(ast, 2), node, vars), faj-eval(nth(ast, 3), node, vars))
+            else if str_eq(kind, "object") then faj-object-eval(nth(ast, 1), node, vars, list())
+            else if fat-has(list("sort", "unique"), kind) then faj-sorted(kind, node)
+            else faj-builtin(kind, node);
+        }
+        def faj-var(vars, name) = if nil?(vars) then faj-bad("unbound-variable") else if str_eq(head(head(vars)), name) then faj-one(nth(head(vars), 1)) else faj-var(tail(vars), name);
+        def faj-bound(ast, vars) = if str_eq(head(ast), "variable") then str_eq(nth(faj-var(vars, nth(ast, 1)), 1), "") else if fat-has(list("pipe", "fallback"), head(ast)) then faj-bound-many(nth(ast, 1), vars) else if fat-has(list("map", "collect", "select"), head(ast)) then faj-bound(nth(ast, 1), vars) else if str_eq(head(ast), "compare") then and(faj-bound(nth(ast, 2), vars), faj-bound(nth(ast, 3), vars)) else if str_eq(head(ast), "object") then faj-bound-pairs(nth(ast, 1), vars) else 1;
+        def faj-bound-many(asts, vars) = if nil?(asts) then 1 else and(faj-bound(head(asts), vars), faj-bound-many(tail(asts), vars));
+        def faj-bound-pairs(pairs, vars) = if nil?(pairs) then 1 else and(faj-bound(nth(head(pairs), 1), vars), faj-bound-pairs(tail(pairs), vars));
+        def faj-each(ast, nodes, vars) = if nil?(nodes) then faj-values(list()) else faj-append(faj-eval(ast, head(nodes), vars), ast, tail(nodes), vars);
+        def faj-append(r, ast, rest, vars) = if not(str_eq(nth(r, 1), "")) then r else faj-joined(r, faj-each(ast, rest, vars));
+        def faj-joined(a, b) = if not(str_eq(nth(b, 1), "")) then b else faj-values(append(head(a), head(b)));
+        def faj-pipeline(stages, nodes, vars) = if nil?(stages) then faj-values(nodes) else faj-pipeline-next(stages, vars, faj-each(head(stages), nodes, vars));
+        def faj-pipeline-next(stages, vars, r) = if not(str_eq(nth(r, 1), "")) then r else faj-pipeline(tail(stages), head(r), vars);
+        def faj-truths(nodes) = if nil?(nodes) then list() else if faj-truth(head(nodes)) then cons(head(nodes), faj-truths(tail(nodes))) else faj-truths(tail(nodes));
+        def faj-fallback-eval(stages, node, vars) = if nil?(stages) then faj-values(list()) else faj-fallback-next(stages, node, vars, faj-eval(head(stages), node, vars));
+        def faj-fallback-next(stages, node, vars, r) = if not(str_eq(nth(r, 1), "")) then r else if gt(len(faj-truths(head(r))), 0) then faj-values(faj-truths(head(r))) else if nil?(tail(stages)) then r else faj-fallback-eval(tail(stages), node, vars);
+        def faj-collected(r) = if not(str_eq(nth(r, 1), "")) then r else faj-one(faj-array(head(r)));
+        def faj-selected(node, r) = if not(str_eq(nth(r, 1), "")) then r else if gt(len(faj-truths(head(r))), 0) then faj-one(node) else faj-values(list());
+        def faj-path-eval(parts, nodes) = if nil?(parts) then faj-values(nodes) else faj-path-next(parts, faj-path-many(head(parts), nodes));
+        def faj-path-next(parts, r) = if not(str_eq(nth(r, 1), "")) then r else faj-path-eval(tail(parts), head(r));
+        def faj-path-many(part, nodes) = if nil?(nodes) then faj-values(list()) else faj-path-combine(part, tail(nodes), faj-path-one(part, head(nodes)));
+        def faj-path-combine(part, rest, r) = if not(str_eq(nth(r, 1), "")) then r else faj-joined(r, faj-path-many(part, rest));
+        def faj-path-one(part, node) = if str_eq(head(part), "key") then if faj-is(node, JSON-NULL()) then faj-one(faj-null()) else if faj-is(node, JSON-OBJECT()) then faj-one(json-object-get-loop(node_children(node), nth(part, 1), faj-null())) else faj-bad("key-needs-object") else if str_eq(head(part), "index") then if faj-is(node, JSON-NULL()) then faj-one(faj-null()) else if faj-is(node, JSON-ARRAY()) then faj-one(if lt(nth(part, 1), len(node_children(node))) then nth(node_children(node), nth(part, 1)) else faj-null()) else faj-bad("index-needs-array") else if faj-is(node, JSON-ARRAY()) then faj-values(node_children(node)) else if faj-is(node, JSON-OBJECT()) then faj-values(faj-object-values(node_children(node))) else faj-bad("iteration-needs-array-or-object");
+        def faj-object-values(pairs) = if nil?(pairs) then list() else cons(json-pair-value(head(pairs)), faj-object-values(tail(pairs)));
+        def faj-object-eval(pairs, node, vars, out) = if nil?(pairs) then faj-one(json-node-object(out)) else faj-object-evaluated(pairs, node, vars, out, faj-eval(nth(head(pairs), 1), node, vars));
+        def faj-object-evaluated(pairs, node, vars, out, r) = if not(str_eq(nth(r, 1), "")) then r else if not(eq(len(head(r)), 1)) then faj-bad("object-field-needs-one-value") else faj-object-eval(tail(pairs), node, vars, faj-put-pair(out, json-node-pair(head(head(pairs)), head(head(r)))));
+        def faj-compared(op, a, b) = if not(str_eq(nth(a, 1), "")) then a else if not(str_eq(nth(b, 1), "")) then b else if not(and(eq(len(head(a)), 1), eq(len(head(b)), 1))) then faj-bad("comparison-needs-one-value") else faj-compare(op, head(head(a)), head(head(b)));
+        def faj-compare(op, a, b) = if str_eq(op, "==") then faj-one(intern_trivial_bool(faj-equal(a, b))) else if str_eq(op, "!=") then faj-one(intern_trivial_bool(not(faj-equal(a, b)))) else if and(str_eq(faj-type(a), "number"), str_eq(faj-type(b), "number")) then faj-one(intern_trivial_bool(if str_eq(op, ">") then gt(node_value(a), node_value(b)) else if str_eq(op, "<") then lt(node_value(a), node_value(b)) else if str_eq(op, ">=") then ge(node_value(a), node_value(b)) else le(node_value(a), node_value(b)))) else faj-bad("ordered-comparison-needs-numbers");
+        def faj-equal(a, b) = if not(str_eq(faj-type(a), faj-type(b))) then 0 else if faj-is(a, JSON-ARRAY()) then faj-equal-array(node_children(a), node_children(b)) else if faj-is(a, JSON-OBJECT()) then and(eq(len(node_children(a)), len(node_children(b))), faj-equal-object(node_children(a), b)) else if str_eq(faj-type(a), "number") then eq(node_value(a), node_value(b)) else str_eq(json-emit(a), json-emit(b));
+        def faj-equal-array(a, b) = if nil?(a) then nil?(b) else if nil?(b) then 0 else and(faj-equal(head(a), head(b)), faj-equal-array(tail(a), tail(b)));
+        def faj-equal-object(pairs, b) = if nil?(pairs) then 1 else and(fat-has(json-object-keys(b), json-pair-key(head(pairs))), and(faj-equal(json-pair-value(head(pairs)), json-object-get-loop(node_children(b), json-pair-key(head(pairs)), faj-null())), faj-equal-object(tail(pairs), b)));
+        def faj-strings(xs) = if nil?(xs) then list() else cons(intern_trivial_string(head(xs)), faj-strings(tail(xs)));
+        def faj-indices(i, n) = if ge(i, n) then list() else cons(intern_trivial_int(i), faj-indices(add(i, 1), n));
+        def faj-codepoints(s, i, n) = if ge(i, str_len(s)) then n else faj-codepoints(s, add(i, 1), if or(lt(fat-char(s, i), 128), ge(fat-char(s, i), 192)) then add(n, 1) else n);
+        def faj-builtin(kind, node) = if str_eq(kind, "type") then faj-one(intern_trivial_string(faj-type(node))) else if str_eq(kind, "length") then if or(faj-is(node, JSON-OBJECT()), faj-is(node, JSON-ARRAY())) then faj-one(intern_trivial_int(len(node_children(node)))) else if faj-is(node, JSON-NULL()) then faj-one(intern_trivial_int(0)) else if eq(node_type(node), 2) then faj-one(intern_trivial_int(faj-codepoints(node_value(node), 0, 0))) else faj-bad("length-needs-container") else if str_eq(kind, "keys") then if faj-is(node, JSON-OBJECT()) then faj-one(faj-array(faj-strings(faj-string-sort(json-object-keys(node))))) else if faj-is(node, JSON-ARRAY()) then faj-one(faj-array(faj-indices(0, len(node_children(node))))) else faj-bad("keys-needs-container") else if str_eq(kind, "to_entries") then if faj-is(node, JSON-OBJECT()) then faj-one(faj-array(faj-entries(node_children(node)))) else faj-bad("to_entries-needs-object") else faj-bad("unsupported-jq-operation");
+        def faj-string-sort(xs) = sh-sort(xs);
+        def faj-scalar-rank(node) = if faj-is(node, JSON-NULL()) then 0 else if eq(node_type(node), 3) then if node_eq(node, intern_trivial_bool(false)) then 1 else 2 else if str_eq(faj-type(node), "number") then 3 else if eq(node_type(node), 2) then 4 else 5;
+        def faj-scalar-less(a, b) = if not(eq(faj-scalar-rank(a), faj-scalar-rank(b))) then lt(faj-scalar-rank(a), faj-scalar-rank(b)) else if eq(faj-scalar-rank(a), 3) then lt(node_value(a), node_value(b)) else if eq(faj-scalar-rank(a), 4) then sh-str-lt(node_value(a), node_value(b)) else 0;
+        def faj-scalar-insert(x, xs) = if nil?(xs) then list(x) else if faj-scalar-less(x, head(xs)) then cons(x, xs) else cons(head(xs), faj-scalar-insert(x, tail(xs)));
+        def faj-scalar-sort(xs) = if nil?(xs) then list() else faj-scalar-insert(head(xs), faj-scalar-sort(tail(xs)));
+        def faj-scalars(xs) = if nil?(xs) then 1 else if ge(faj-scalar-rank(head(xs)), 5) then 0 else faj-scalars(tail(xs));
+        def faj-unique(xs) = if nil?(xs) then list() else if nil?(tail(xs)) then xs else if faj-equal(head(xs), nth(xs, 1)) then faj-unique(tail(xs)) else cons(head(xs), faj-unique(tail(xs)));
+        def faj-sorted(kind, node) =
+            if not(faj-is(node, JSON-ARRAY())) then faj-bad("sort-needs-array")
+            else if gt(len(node_children(node)), FatMaxSortItems()) then faj-bad("sort-item-limit")
+            else if not(faj-scalars(node_children(node))) then faj-bad("sort-supports-scalars-only")
+            else faj-one(faj-array(if str_eq(kind, "unique") then faj-unique(faj-scalar-sort(node_children(node))) else faj-scalar-sort(node_children(node))));
+        def faj-entries(pairs) = if nil?(pairs) then list() else cons(json-node-object(list(json-node-pair("key", intern_trivial_string(json-pair-key(head(pairs)))), json-node-pair("value", json-pair-value(head(pairs))))), faj-entries(tail(pairs)));
+        def faj-render(nodes, raw) = if nil?(nodes) then "" else str_concat(if and(raw, eq(node_type(head(nodes)), 2)) then node_value(head(nodes)) else json-emit(head(nodes)), str_concat("\n", faj-render(tail(nodes), raw)));
+    }
+}

@@ -1,0 +1,91 @@
+; Resident tool edge cases, including explicit failures and unchanged state.
+; witnessed: 2026-09-04 -> 65535
+; Verdict 65535. All cases call the public typed/command entry.
+; PROOF LEVEL: FOURTH-ARM ONLY — form-cli uses kernel_stat (probed mask 8).
+; preludes: form-stdlib/core.fk form-stdlib/form-cli.fk
+(do
+    (defn fate-docs () (list (list "source:one" "one.txt" "resident hit\n")))
+    (defn fate-call (tool args input) (fc-tool-call (fate-docs) tool args input))
+    (defn fate-good (tool args input expected)
+        (do (let r (fate-call tool args input))
+            (and (eq (fat-exit r) 0) (and (str_eq (fat-error r) "") (str_eq (fat-out r) expected)))))
+    (defn fate-error (tool args input expected)
+        (do (let r (fate-call tool args input))
+            (and (eq (fat-exit r) 2)
+                (and (str_eq (fat-error r) expected) (str_eq (fat-out r) "")))))
+    (defn fate-invalid-json (xs)
+        (if (nil? xs) 1
+            (and (fate-error "jq" (list ".") (head xs) "invalid-json-input")
+                 (fate-invalid-json (tail xs)))))
+    (defn fate-repeat (s n) (if (le n 0) "" (str_concat s (fate-repeat s (sub n 1)))))
+    (defn fate-doc-repeat (n)
+        (if (le n 0) (list) (cons (list (int_to_str n) (int_to_str n) "x") (fate-doc-repeat (sub n 1)))))
+    (defn fate-shape (docs)
+        (str_eq (fat-error (fc-tool-call docs "read" (list) "")) "invalid-resident-values"))
+    (defn fate-cases () (list
+        (list "strict-json-tokens"
+            (fate-invalid-json (list "truefalse" "01" "1e" "[1,]" "{\"a\":1,}" "{\"a\" 1}" "\"bad\\q\"" "\"unfinished")))
+        (list "json-stream-slurp-and-empty"
+            (and (fate-good "jq" (list "-sc" ".") "1\n2\nfalse" "[1,2,false]\n")
+                (and (fate-good "jq" (list ".") "" "")
+                     (fate-good "jq" (list "-s" ".") "" "[]\n"))))
+        (list "object-order-independent-equality"
+            (and (fate-good "jq" (list "select(. == {b:2,a:1})") "{\"a\":1,\"b\":2}" "{\"a\":1,\"b\":2}\n")
+                (and (fate-good "jq" (list "select(. != {b:null})") "{\"a\":null}" "{\"a\":null}\n")
+                     (fate-good "jq" (list ".a") "{\"a\":1,\"a\":2}" "2\n"))))
+        (list "quoted-path-and-type-errors"
+            (and (fate-good "jq" (list "-r" ".[\"a]b\"]") "{\"a]b\":\"ok\"}" "ok\n")
+                (and (fate-error "jq" (list ".x") "7" "key-needs-object")
+                     (fate-error "jq" (list ".[]") "null" "iteration-needs-array-or-object"))))
+        (list "reject-unsupported-query-without-input"
+            (and (fate-error "jq" (list "{x:.a,}") "" "object-needs-key-and-expression")
+                (and (fate-error "jq" (list "..") "" "empty-path-segment")
+                     (fate-error "jq" (list "--rawfile" "x" "secret" ".") "" "unsupported-jq-option"))))
+        (list "json-native-scalars-and-keys"
+            (and (fate-good "jq" (list "keys") "{\"z\":1,\"a\":2}" "[\"a\",\"z\"]\n")
+                (and (fate-good "jq" (list "unique") "[3,1,1,2]" "[1,2,3]\n")
+                     (fate-good "jq" (list "length") "\"café\"" "4\n"))))
+        (list "regex-flags-classes-and-positions"
+            (and (fate-good "rg" (list "-ni" "--column" "[a-z]+[0-9]?") "..Ab7\n" "<stdin>:1:3:..Ab7\n")
+                (and (fate-good "rg" (list "-nv" "skip") "skip\nkeep\n" "<stdin>:2:keep\n")
+                     (fate-good "rg" (list "-n" "-m" "1" "x") "x\nx\n" "<stdin>:1:x\n"))))
+        (list "glob-precedence-and-empty-stdin"
+            (and (fate-good "rg" (list "--files" "-g" "!*.txt" "-g" "one.txt") "" "one.txt\n")
+                (and (eq (fat-exit (fate-call "rg" (list "hit" "-") "")) 1)
+                     (eq (len (fat-documents (fate-call "rg" (list "x") "x\n"))) 1))))
+        (list "pattern-validation-and-work-limits"
+            (and (fate-error "rg" (list "[z-a]") "z" "invalid-character-range")
+                (and (fate-error "rg" (list (fate-repeat "x" 257)) "" "pattern-limit")
+                     (fate-error "rg" (list "a*a*a*a*a*a*a*a*a*a*b") (fate-repeat "a" 30) "pattern-work-limit"))))
+        (list "glob-work-is-not-no-match"
+            (str_eq (fat-error (fc-tool-call
+                (list (list "long" (fate-repeat "a" 30) ""))
+                "rg" (list "--files" "-g" "*a*a*a*a*a*a*a*a*a*b") "")) "glob-work-limit"))
+        (list "resident-document-admission"
+            (and (fate-shape (list (list "same" "a" "") (list "same" "b" "")))
+                (and (fate-shape (list (list "one" "same" "") (list "two" "same" "")))
+                     (fate-shape (list (list "" "path" ""))))))
+        (list "bounded-corpus-and-sort"
+            (and (str_eq (fat-error (fc-tool-call (fate-doc-repeat 513) "read" (list) "")) "resident-input-limit")
+                 (fate-error "sort" (list) (fate-repeat "a\n" 1025) "sort-item-limit")))
+        (list "numeric-sort-equality-and-invalid-lines"
+            (and (fate-good "sort" (list "-nu") "1\n1.0\n2\n" "1\n2\n")
+                 (fate-error "sort" (list "-n") "not-a-number\n" "numeric-sort-needs-number-lines")))
+        (list "argv-quoting-no-shell"
+            (and (str_eq (fat-out (fc-tool-command (fate-docs) "jq -nr --arg x 'a b' '$x'" "")) "a b\n")
+                (and (str_eq (fat-error (fc-tool-command (fate-docs) "cat | wc" "")) "shell-syntax-not-supported")
+                     (str_eq (fat-error (fc-tool-command (fate-docs) "cat 'open" "")) "unterminated-quote"))))
+        (list "text-option-rejections"
+            (and (fate-error "sed" (list "-n" "1,watp") "" "invalid-print-range")
+                (and (fate-error "awk" (list "BEGIN {system(\"id\")}") "" "awk-supports-single-field-print")
+                     (fate-error "tr" (list "a-z" "A-Z") "" "tr-ranges-not-supported"))))
+        (list "atomic-edit-state"
+            (do (let r (fate-call "edit" (list "one.txt" "absent" "new") ""))
+                (and (eq (fat-exit r) 2)
+                    (str_eq (nth (fat-find-doc (fat-documents r) "one.txt") 2) "resident hit\n"))))))
+    (defn fate-score (cases bit score)
+        (if (nil? cases) score
+            (do (let ok (nth (head cases) 1))
+                (let notice (if ok 0 (print_str (str_concat "FAIL " (head (head cases))))))
+                (fate-score (tail cases) (mul bit 2) (if ok (add score bit) score)))))
+    (fate-score (fate-cases) 1 0))

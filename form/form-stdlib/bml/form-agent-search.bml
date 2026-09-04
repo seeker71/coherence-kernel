@@ -1,0 +1,66 @@
+// rg-shaped resident source search. No path is opened or inventoried.
+// preludes: form-stdlib/core.fk form-stdlib/shell-exec.fk form-stdlib/bml/form-agent-pattern.bml
+section [form.bml] {
+    class FormAgentSearch {
+        def far-get(options, key, fallback) = if nil?(options) then fallback else if str_eq(head(head(options)), key) then nth(head(options), 1) else far-get(tail(options), key, fallback);
+        def far-set(options, key, value) = cons(list(key, value), options);
+        def far-push(options, key, value) = far-set(options, key, cons(value, far-get(options, key, list())));
+        def far-parse(args, options, positional) = if nil?(args) then list(options, "") else far-parse-at(args, options, positional);
+        def far-parse-at(args, options, positional) {
+            let arg = head(args);
+            if and(not(positional), str_eq(arg, "--")) then far-parse(tail(args), options, 1)
+            else if and(str_eq(arg, "-"), not(nil?(far-get(options, "patterns", list())))) then far-parse(tail(args), far-push(options, "paths", arg), positional)
+            else if and(not(positional), fat-has(list("-e", "--regexp", "-g", "--glob", "-m", "--max-count", "-A", "-B", "-C"), arg)) then far-option-value(args, options)
+            else if and(not(positional), str_eq(arg, "--files")) then far-parse(tail(args), far-set(options, "mode", "files"), 0)
+            else if and(not(positional), fat-has(list("--no-heading", "--line-buffered", "--color=never"), arg)) then far-parse(tail(args), options, 0)
+            else if and(not(positional), fat-has(list("--ignore-case", "--fixed-strings", "--line-number", "--files-with-matches", "--count", "--quiet", "--word-regexp", "--invert-match", "--column"), arg)) then far-long(args, options)
+            else if and(not(positional), fat-starts(arg, "-")) then far-short(args, options, arg, 1)
+            else if and(nil?(far-get(options, "patterns", list())), not(str_eq(far-get(options, "mode", "lines"), "files"))) then far-parse(tail(args), far-push(options, "patterns", arg), positional)
+            else far-parse(tail(args), far-push(options, "paths", arg), positional);
+        }
+        def far-long(args, options) {
+            let arg = head(args);
+            if str_eq(arg, "--column") then far-parse(tail(args), far-set(far-set(options, "column", 1), "number", 1), 0)
+            else far-parse(cons(if str_eq(arg, "--ignore-case") then "-i" else if str_eq(arg, "--fixed-strings") then "-F" else if str_eq(arg, "--line-number") then "-n" else if str_eq(arg, "--files-with-matches") then "-l" else if str_eq(arg, "--count") then "-c" else if str_eq(arg, "--quiet") then "-q" else if str_eq(arg, "--word-regexp") then "-w" else "-v", tail(args)), options, 0);
+        }
+        def far-short(args, options, flags, i) = if ge(i, str_len(flags)) then if eq(i, 1) then list(options, "unsupported-rg-option") else far-parse(tail(args), options, 0) else far-short-at(args, options, flags, i, byte_to_str(fat-char(flags, i)));
+        def far-short-at(args, options, flags, i, flag) = if fat-has(list("i", "F", "n", "w", "v", "S"), flag) then far-short(args, far-set(options, if str_eq(flag, "i") then "ic" else if str_eq(flag, "F") then "fixed" else if str_eq(flag, "n") then "number" else if str_eq(flag, "w") then "word" else if str_eq(flag, "S") then "smart" else "invert", 1), flags, add(i, 1)) else if fat-has(list("l", "c", "q"), flag) then far-short(args, far-set(options, "mode", if str_eq(flag, "l") then "names" else if str_eq(flag, "c") then "count" else "quiet"), flags, add(i, 1)) else list(options, "unsupported-rg-option");
+        def far-option-value(args, options) = if nil?(tail(args)) then list(options, "missing-rg-option-value") else far-option-ready(head(args), nth(args, 1), fat-drop(args, 2), options);
+        def far-option-ready(key, value, rest, options) = if or(str_eq(key, "-e"), str_eq(key, "--regexp")) then far-parse(rest, far-push(options, "patterns", value), 0) else if or(str_eq(key, "-g"), str_eq(key, "--glob")) then if gt(str_len(value), FatMaxPattern()) then list(options, "glob-limit") else if or(str_eq(value, ""), or(str_eq(value, "!"), far-unsupported-glob(value, 0))) then list(options, "unsupported-glob-syntax") else far-parse(rest, far-push(options, "globs", value), 0) else if not(fat-natural(value)) then list(options, "invalid-rg-number") else far-option-number(key, str_to_int(value), rest, options);
+        def far-unsupported-glob(s, i) = if ge(i, str_len(s)) then 0 else if ge(str_find("[]{}\\", byte_to_str(fat-char(s, i)), 0), 0) then 1 else far-unsupported-glob(s, add(i, 1));
+        def far-option-number(key, value, rest, options) = if str_eq(key, "-C") then far-parse(rest, far-set(far-set(options, "before", value), "after", value), 0) else far-parse(rest, far-set(options, if str_eq(key, "-A") then "after" else if str_eq(key, "-B") then "before" else "max", value), 0);
+        def far-literal-tokens(s, i) = if ge(i, str_len(s)) then list() else cons(fap-token(0, byte_to_str(fat-char(s, i))), far-literal-tokens(s, add(i, 1)));
+        def far-patterns(patterns, fixed, out) = if nil?(patterns) then list(out, "") else if gt(str_len(head(patterns)), FatMaxPattern()) then list(list(), "pattern-limit") else far-pattern-next(patterns, fixed, out, if fixed then list(list(far-literal-tokens(head(patterns), 0)), "") else fap-compile(head(patterns)));
+        def far-pattern-next(patterns, fixed, out, r) = if not(str_eq(nth(r, 1), "")) then r else far-patterns(tail(patterns), fixed, append(out, head(r)));
+        def far-uppercase(s, i) = if ge(i, str_len(s)) then 0 else if and(ge(fat-char(s, i), 65), le(fat-char(s, i), 90)) then 1 else far-uppercase(s, add(i, 1));
+        def far-ic(options) = if far-get(options, "ic", 0) then 1 else if far-get(options, "smart", 0) then not(far-uppercase(fat-join(far-get(options, "patterns", list()), ""), 0)) else 0;
+        def far-paths(paths, path) = if nil?(paths) then 1 else far-path-any(paths, path);
+        def far-path-any(paths, path) = if nil?(paths) then 0 else if or(str_eq(head(paths), "."), or(and(str_eq(head(paths), "-"), str_eq(path, "<stdin>")), or(str_eq(head(paths), path), fat-starts(path, str_concat(head(paths), "/"))))) then 1 else far-path-any(tail(paths), path);
+        def far-positive(globs) = if nil?(globs) then 0 else if not(fat-starts(head(globs), "!")) then 1 else far-positive(tail(globs));
+        // Options are newest first; the last matching glob wins.
+        def far-globs(globs, path, fallback) = if nil?(globs) then fallback else far-glob-next(globs, path, fallback, fap-glob(if fat-starts(head(globs), "!") then substring(head(globs), 1, str_len(head(globs))) else head(globs), path));
+        def far-glob-next(globs, path, fallback, match) = if lt(match, 0) then -1 else if match then not(fat-starts(head(globs), "!")) else far-globs(tail(globs), path, fallback);
+        def far-admit(options, path) = if not(far-paths(far-get(options, "paths", list()), path)) then 0 else far-globs(far-get(options, "globs", list()), path, not(far-positive(far-get(options, "globs", list()))));
+        // Scan rows: line number, text, match start, selected. It retains context
+        // once, so overlapping -A/-B/-C windows never duplicate output lines.
+        def far-lines(lines, patterns, options, number, count, rows) = if nil?(lines) then list(fat-reverse(rows), count, "") else if ge(count, far-get(options, "max", FatMaxBytes())) then far-lines(tail(lines), patterns, options, add(number, 1), count, cons(list(number, head(lines), -1, 0), rows)) else far-line-result(lines, patterns, options, number, count, rows, fap-search(patterns, head(lines), far-ic(options), far-get(options, "word", 0)));
+        def far-line-result(lines, patterns, options, number, count, rows, match) = if le(nth(match, 2), 0) then list(list(), 0, "pattern-work-limit") else far-line-picked(lines, patterns, options, number, count, rows, head(match), if far-get(options, "invert", 0) then lt(head(match), 0) else ge(head(match), 0));
+        def far-line-picked(lines, patterns, options, number, count, rows, pos, hit) = far-lines(tail(lines), patterns, options, add(number, 1), if hit then add(count, 1) else count, cons(list(number, head(lines), pos, hit), rows));
+        def far-hit-numbers(rows) = if nil?(rows) then list() else if nth(head(rows), 3) then cons(head(head(rows)), far-hit-numbers(tail(rows))) else far-hit-numbers(tail(rows));
+        def far-near(hits, number, before, after) = if nil?(hits) then 0 else if and(ge(number, sub(head(hits), before)), le(number, add(head(hits), after))) then 1 else far-near(tail(hits), number, before, after);
+        def far-format(row, path, options) {
+            let sep = if nth(row, 3) then ":" else "-";
+            str_concat(path, str_concat(sep, str_concat(if far-get(options, "number", 0) then str_concat(int_to_str(head(row)), sep) else "", str_concat(if and(far-get(options, "column", 0), nth(row, 3)) then str_concat(int_to_str(add(fat-max(0, nth(row, 2)), 1)), sep) else "", str_concat(nth(row, 1), "\n")))));
+        }
+        def far-render(rows, hits, path, options, previous) = if nil?(rows) then "" else if far-near(hits, head(head(rows)), far-get(options, "before", 0), far-get(options, "after", 0)) then str_concat(if and(gt(previous, 0), and(gt(head(head(rows)), add(previous, 1)), gt(add(far-get(options, "before", 0), far-get(options, "after", 0)), 0))) then "--\n" else "", str_concat(far-format(head(rows), path, options), far-render(tail(rows), hits, path, options, head(head(rows))))) else far-render(tail(rows), hits, path, options, previous);
+        def far-run(docs, args) = far-parsed(docs, far-parse(args, list(), 0));
+        def far-run-input(docs, args, input) = far-parsed-input(docs, input, far-parse(args, list(), 0));
+        def far-parsed-input(docs, input, parsed) = far-parsed(if or(gt(str_len(input), 0), fat-has(far-get(head(parsed), "paths", list()), "-")) then list(list("stdin", "<stdin>", input)) else docs, parsed);
+        def far-parsed(docs, parsed) = if not(str_eq(nth(parsed, 1), "")) then fat-fail(nth(parsed, 1), docs) else if and(nil?(far-get(head(parsed), "patterns", list())), not(str_eq(far-get(head(parsed), "mode", "lines"), "files"))) then fat-fail("rg-needs-pattern", docs) else far-compiled(docs, head(parsed), far-patterns(far-get(head(parsed), "patterns", list()), far-get(head(parsed), "fixed", 0), list()));
+        def far-compiled(docs, options, compiled) = if not(str_eq(nth(compiled, 1), "")) then fat-fail(nth(compiled, 1), docs) else far-docs(docs, docs, options, head(compiled), "", 0);
+        def far-docs(rest, docs, options, patterns, out, hits) = if nil?(rest) then fat-result(if gt(hits, 0) then 0 else 1, out, "", docs) else far-doc-admitted(rest, docs, options, patterns, out, hits, far-admit(options, nth(head(rest), 1)));
+        def far-doc-admitted(rest, docs, options, patterns, out, hits, admitted) = if lt(admitted, 0) then fat-fail("glob-work-limit", docs) else if not(admitted) then far-docs(tail(rest), docs, options, patterns, out, hits) else if str_eq(far-get(options, "mode", "lines"), "files") then far-docs(tail(rest), docs, options, patterns, str_concat(out, str_concat(nth(head(rest), 1), "\n")), add(hits, 1)) else far-doc-scan(rest, docs, options, patterns, out, hits, far-lines(sh-lines(nth(head(rest), 2)), patterns, options, 1, 0, list()));
+        def far-doc-scan(rest, docs, options, patterns, out, hits, scan) = if not(str_eq(nth(scan, 2), "")) then fat-fail(nth(scan, 2), docs) else far-docs(tail(rest), docs, options, patterns, str_concat(out, if eq(nth(scan, 1), 0) then "" else far-doc-output(nth(head(rest), 1), options, scan)), add(hits, nth(scan, 1)));
+        def far-doc-output(path, options, scan) = if str_eq(far-get(options, "mode", "lines"), "quiet") then "" else if str_eq(far-get(options, "mode", "lines"), "names") then str_concat(path, "\n") else if str_eq(far-get(options, "mode", "lines"), "count") then str_concat(path, str_concat(":", str_concat(int_to_str(nth(scan, 1)), "\n"))) else far-render(head(scan), far-hit-numbers(head(scan)), path, options, 0);
+    }
+}
