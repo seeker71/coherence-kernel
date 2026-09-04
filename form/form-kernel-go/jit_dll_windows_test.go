@@ -74,7 +74,7 @@ func compileFormSourceFileForTest(t *testing.T, stdlib, sourcePath string) strin
 func emitWindowsRecipeObject(t *testing.T, classCodeMethod string) []byte {
 	t.Helper()
 	stdlib := filepath.Join("..", "form-stdlib")
-	compiledEmitter := compileFormSourceFileForTest(t, stdlib, filepath.Join(stdlib, "form-pe-coff.fk"))
+	compiledEmitter := compileFormSourceFileForTest(t, stdlib, filepath.Join(stdlib, "form-pe-coff.bml"))
 	k := NewKernel()
 	src := fmt.Sprintf(`%s
 %s
