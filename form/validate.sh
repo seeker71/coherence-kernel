@@ -465,11 +465,10 @@ fk_expand_declared_deps() {
 SOURCE_CACHE_DIR="form-stdlib/.cache/source-compiled"
 mkdir -p "$SOURCE_CACHE_DIR"
 compiler_stamp=""
-# The Go lane's explicit source-lens closure. The sibling walkers do not read
-# `; preludes:` lines, so this list is the local host-I/O carrier for lowering;
-# fkwu receives only the resulting dependency-complete Form source below.
-# engine-constants / compiler-objects / form-ontology-bp joined 2026-08-18 when
-# their births in Form broke this hand-held mirror silently for a day.
+# The source-lens closure: this list is the local host-I/O carrier for lowering,
+# and fkwu receives only the resulting dependency-complete Form source below.
+# The kernels resolve `; preludes:` themselves; this mirror is hand-held, so a
+# unit born in Form joins it by name.
 # Validation needs executable Form source on every arm. Keep the runtime-image
 # compiler as the primary body, then select its explicit text lens at the edge;
 # this is the same Recipe lowering, expressed as source rather than hidden

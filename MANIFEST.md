@@ -110,7 +110,7 @@ silently lacking newer evaluator capabilities. Run it before believing anything 
 
 ### Foundation & kernel
 - **`axioms/`** — the five axioms and their derivations (`.form`). The reasoning ground for everything.
-- **`surface/`** — the BML class surface of core (`core-class-surface.fk`) and the sense channels
+- **`surface/`** — the BML class surface of core (`core-class-surface.bml`) and the sense channels
   (`sense-channels.fk`); the minimal host surface itself is `form/form-stdlib/minimal-surface.fk`.
 - **`runtime/`** — the one C seed and its generated op table. Growth without a shrink path is declined.
 - **`bootstrap/`** — the grounding cells (`ground.fk` → 42, `ground-recursive.fk` → 55,

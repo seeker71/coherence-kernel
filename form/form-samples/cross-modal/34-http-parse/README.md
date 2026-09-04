@@ -3,7 +3,7 @@
 > *"What if every wire protocol is just a Recipe waiting to be named?"*
 
 This sample walks an HTTP/1.1 request — request-line, headers, body —
-through a pure Form recipe (`form-stdlib/http-parse.fk`) that produces
+through a pure Form recipe (`form-stdlib/http-parse.bml`) that produces
 a structured tree built from substrate-resident NodeIDs. Three sibling
 kernels (Go, Rust, TypeScript) agree on every byte of output.
 
@@ -34,9 +34,9 @@ No host HTTP library. No regex. The recipe IS the parser.
 ## What walked
 
 ```
-$ ./validate.sh form-stdlib/http-parse.fk \
+$ ./validate.sh form-stdlib/http-parse.bml \
                 form-samples/cross-modal/34-http-parse/http-parse.fk
-  ✓  http-parse.fk+http-parse.fk → req1-method: GET
+  ✓  http-parse.bml+http-parse.fk → req1-method: GET
                                    req1-path: /
                                    req1-version: HTTP/1.1
                                    req1-header-count: 0
@@ -101,7 +101,7 @@ can speak HTTP without ever leaving recipe space.
 
 ## Cross-refs
 
-- [`form-stdlib/http-parse.fk`](../../../form-stdlib/http-parse.fk) — the parser recipe
+- [`form-stdlib/http-parse.bml`](../../../form-stdlib/http-parse.bml) — the parser recipe
 - [`form-stdlib/tests/http-parse-band.fk`](../../../form-stdlib/tests/http-parse-band.fk) — sibling-witness band
 - 25-end-to-end-channel — the channel layer this slots into
 - 21-cell-query-protocol — substrate-addressable cell queries

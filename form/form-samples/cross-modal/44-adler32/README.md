@@ -7,8 +7,8 @@
 ## What walked
 
 ```
-$ ./validate.sh form-stdlib/adler32.fk form-samples/cross-modal/44-adler32/adler32.fk
-  ✓  adler32.fk+adler32.fk           → adler32-empty: 1
+$ ./validate.sh form-stdlib/adler32.bml form-samples/cross-modal/44-adler32/adler32.fk
+  ✓  adler32.bml+adler32.fk          → adler32-empty: 1
                                        adler32-a: 6422626
                                        adler32-abc: 38600999
                                        adler32-Wikipedia: 300286872
@@ -19,7 +19,7 @@ $ ./validate.sh form-stdlib/adler32.fk form-samples/cross-modal/44-adler32/adler
 
 Three sibling kernels (Go, Rust, TypeScript) each ran Adler-32 from
 the Form recipe **only** — no Adler-32 native exists in any kernel.
-The recipe in [`form-stdlib/adler32.fk`](../../../form-stdlib/adler32.fk)
+The recipe in [`form-stdlib/adler32.bml`](../../../form-stdlib/adler32.bml)
 composes the head/tail byte loop with `(a + byte) mod 65521`,
 `(b + a) mod 65521`, and a final `(b << 16) | a` from the kernel's
 small-int primitives plus the u32 pair (`shl_u32`, `add_u32`) — and
@@ -62,7 +62,7 @@ itself against it.
 
 ```
                   ┌─ FORM RECIPE (canonical) ───────┐
-                  │  form-stdlib/adler32.fk          │
+                  │  form-stdlib/adler32.bml         │
                   │                                  │
                   │  uses kernel primitives:         │
    (adler32 bs)   │   band, mod, add, head, tail     │
@@ -99,7 +99,7 @@ canonical source the compiler reads.
 
 ## The Form recipe shape
 
-`form-stdlib/adler32.fk` carries:
+`form-stdlib/adler32.bml` carries:
 
 ```
 (defn adler32-loop (a b bs)
@@ -143,7 +143,7 @@ sovereign across sibling kernels.
 
 ## Cross-refs
 
-- [`form-stdlib/adler32.fk`](../../../form-stdlib/adler32.fk) — the canonical recipe
+- [`form-stdlib/adler32.bml`](../../../form-stdlib/adler32.bml) — the canonical recipe
 - [`form-stdlib/tests/adler32-band.fk`](../../../form-stdlib/tests/adler32-band.fk) — sibling-witness band
 - 32-crc32 — the stronger checksum cousin, same primitive discipline
 - 20-sha256-as-recipe — the cryptographic hash this body also carries
