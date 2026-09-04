@@ -4,7 +4,7 @@
 > wrote this by observing the body with the body's own organs; every number is
 > recomputed from the tissue it names, so this portrait cannot flatter — only go
 > stale, and re-running is what detects stale. Do not hand-edit: the next pulse
-> overwrites. Stamp (the body reading the host clock): 2026-09-03
+> overwrites. Stamp (the body reading the host clock): 2026-09-04
 
 This is the `index.md` of Karpathy's llm-wiki pattern, in the body's own terms —
 see [`SECOND-BRAIN.md`](SECOND-BRAIN.md) for the mapping and
@@ -36,25 +36,25 @@ that named this gap (unit U4).
 > brokenness is its own law. This banner is prose and can go stale; the
 > numbers below are recomputed and cannot.
 
-- pages that can point (every .md): 1765
-- resolved path-claims body-wide: 571
+- pages that can point (every .md): 1784
+- resolved path-claims body-wide: 578
 - BROKEN path-claims body-wide: 29
 - concept pages that can be orphaned: 46
-- ORPHANS (concept pages nothing points at): 13
+- ORPHANS (concept pages nothing points at): 5
 
 ## Tissues (counted, not listed)
 
 - axioms: 3
 - teachings: 35
-- observe organs: 596
+- observe organs: 609
 - learn organs: 358
 - ingest organs: 56
-- form-stdlib cells: 3796
+- form-stdlib cells: 3848
 
 ## Altitude (the authoring lens, folded into the portrait 2026-09-02)
 
-- BML pictures (high-grammar surfaces): 110
-- s-expression cells (each one a lowering the walk still owes): 1443
+- BML pictures (high-grammar surfaces): 114
+- s-expression cells (each one a lowering the walk still owes): 1448
 - cells carrying a binding mark: 2
 
 The lens was born at 32 pictures over 1455 cells; the walk shows
@@ -65,10 +65,10 @@ when files land, so its fixed point stays honest.
 
 ## Memory
 
-- receipts (episodic, append-only): 1577
+- receipts (episodic, append-only): 1597
 - of those, PENDING (honest state, never a fault): 10
-- distillation corpus rows: 653
-- deepest corpus meaning-id: 1261
+- distillation corpus rows: 656
+- deepest corpus meaning-id: 1264
 
 ## The rung this portrait stands on
 
