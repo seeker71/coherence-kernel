@@ -89,6 +89,8 @@ static const struct fk_optab_row fk_optab[] = {
   { "host_monotonic_ms", 0, 182 },
   { "host_sleep_ms", 1, 183 },
   { "kernel_hot", 1, 179 },
+  { "node_gift_read", 1, 177 },
+  { "node_gift_write", 2, 178 },
   { "host_file_read_text", 1, 63 },
   { "read_file", 1, 63 },
   { "host_temp_dir", 0, 101 },

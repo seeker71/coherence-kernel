@@ -8933,6 +8933,322 @@ static void fk_sappend(const char *bytes, long long n) {
     while (k < n) { fk_sb[fk_sbp + k] = bytes[k]; k = k + 1; }
     fk_sbp = fk_sbp + n;
 }
+static long long fk_intern_int_node(long long iv43) {
+        long long h43 = fk_intern_key_trivial(1, iv43);
+        long long slot43 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot43 = h43 & (fk_intern_hash_cap - 1);
+        while (fk_intern_tab[slot43]) {
+            long long ix43 = fk_intern_tab[slot43];
+            if (fk_nkind[ix43] == 1 && fk_nid[ix43][2] == 1 && fk_nval[ix43] == iv43) {
+                return fk_nbox(ix43);
+            }
+            slot43 = (slot43 + 1) & (fk_intern_hash_cap - 1);
+        }
+        fk_np = fk_np + 1;
+        fk_nkind[fk_np] = 1;
+        fk_nval[fk_np] = iv43;
+        fk_nkids[fk_np] = 1;
+        fk_ncat[fk_np] = 0;
+        fk_nid[fk_np][0] = 1;
+        fk_nid[fk_np][1] = 1;
+        fk_nid[fk_np][2] = 1;
+        fk_nid[fk_np][3] = iv43 >> 1;
+        fk_intern_tab[slot43] = fk_np;
+        fk_nhash_memo[fk_np] = h43;
+        return fk_nbox(fk_np);
+}
+static long long fk_intern_str_node(long long sv46) {
+        long long sa46 = fk_stri(sv46);
+        long long h46 = fk_intern_key_trivial(2, sv46);
+        long long slot46 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot46 = h46 & (fk_intern_hash_cap - 1);
+        while (fk_intern_tab[slot46]) {
+            long long ix46 = fk_intern_tab[slot46];
+            if (fk_nkind[ix46] == 1 && fk_nid[ix46][2] == 2 && fk_nval[ix46] == sv46) {
+                return fk_nbox(ix46);
+            }
+            slot46 = (slot46 + 1) & (fk_intern_hash_cap - 1);
+        }
+        if (sa46 < 0 || sa46 >= fk_sp) {
+            return 0;
+        }
+        fk_np = fk_np + 1;
+        fk_nkind[fk_np] = 1;
+        fk_nval[fk_np] = sv46;
+        fk_nkids[fk_np] = 1;
+        fk_ncat[fk_np] = 0;
+        fk_nid[fk_np][0] = 1;
+        fk_nid[fk_np][1] = 1;
+        fk_nid[fk_np][2] = 2;
+        fk_nid[fk_np][3] = sa46;
+        fk_intern_tab[slot46] = fk_np;
+        fk_nhash_memo[fk_np] = h46;
+        return fk_nbox(fk_np);
+}
+static long long fk_intern_bool_node(long long bv112) {
+        long long se112 = (bv112 != 0) ? (0 - 9223372036854775807LL) : (0 - 9223372036854775805LL);
+        long long h112 = fk_intern_key_trivial(3, se112);
+        long long slot112 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot112 = h112 & (fk_intern_hash_cap - 1);
+        while (fk_intern_tab[slot112]) {
+            long long ix112 = fk_intern_tab[slot112];
+            if (fk_nkind[ix112] == 1 && fk_nid[ix112][2] == 3 && fk_nval[ix112] == se112) {
+                return fk_nbox(ix112);
+            }
+            slot112 = (slot112 + 1) & (fk_intern_hash_cap - 1);
+        }
+        fk_np = fk_np + 1;
+        fk_nkind[fk_np] = 1;
+        fk_nval[fk_np] = se112;
+        fk_nkids[fk_np] = 1;
+        fk_ncat[fk_np] = 0;
+        fk_nid[fk_np][0] = 1;
+        fk_nid[fk_np][1] = 1;
+        fk_nid[fk_np][2] = 3;
+        fk_intern_tab[slot112] = fk_np;
+        fk_nhash_memo[fk_np] = h112;
+        fk_nid[fk_np][3] = (bv112 != 0) ? 1 : 0;
+        return fk_nbox(fk_np);
+}
+static long long fk_intern_float_node(double fd113) {
+    unsigned long long fbits113;
+        if (fd113 != fd113) {
+            fbits113 = 0x7ff8000000000000ULL;
+        } else {
+            if (fd113 == 0.0) {
+                fd113 = 0.0;
+            }
+            memcpy(&fbits113, &fd113, 8);
+        }
+        double fcanon113;
+        memcpy(&fcanon113, &fbits113, 8);
+        long long h113 = fk_intern_key_trivial(7, (long long)fbits113);
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        long long slot113 = h113 & (fk_intern_hash_cap - 1);
+        while (fk_intern_tab[slot113]) {
+            long long ix113 = fk_intern_tab[slot113];
+            if (fk_nkind[ix113] == 1 && fk_nid[ix113][2] == 7) {
+                double dv113 = fk_num(fk_nval[ix113]);
+                unsigned long long db113;
+                memcpy(&db113, &dv113, 8);
+                if (db113 == fbits113) {
+                    return fk_nbox(ix113);
+                }
+            }
+            slot113 = (slot113 + 1) & (fk_intern_hash_cap - 1);
+        }
+        long long fb113 = fk_fbox(fcanon113);
+        fk_np = fk_np + 1;
+        fk_nkind[fk_np] = 1;
+        fk_nval[fk_np] = fb113;
+        fk_nkids[fk_np] = 1;
+        fk_ncat[fk_np] = 0;
+        fk_nid[fk_np][0] = 1;
+        fk_nid[fk_np][1] = 1;
+        fk_nid[fk_np][2] = 7;
+        fk_nid[fk_np][3] = fk_fidx(fb113);
+        fk_intern_tab[slot113] = fk_np;
+        fk_nhash_memo[fk_np] = h113;
+        return fk_nbox(fk_np);
+}
+static long long fk_intern_composite(long long cat47, long long kids47) {
+        unsigned long long hm47 = fk_mix64(7, 2);
+        hm47 = fk_mix64(hm47, (unsigned long long)fk_deep_hash(cat47));
+        hm47 = fk_mix64(hm47, (unsigned long long)fk_deep_hash(kids47));
+        long long h47 = (long long)(hm47 >> 1);
+        if (h47 == 0) {
+            h47 = 1;
+        }
+        long long slot47 = 0;
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        slot47 = h47 & (fk_intern_hash_cap - 1);
+        while (fk_intern_tab[slot47]) {
+            long long ix47 = fk_intern_tab[slot47];
+            if (fk_nkind[ix47] == 2 && fk_veq(fk_ncat[ix47], cat47) != 0 &&
+                fk_veq(fk_nkids[ix47], kids47) != 0) {
+                return fk_nbox(ix47);
+            }
+            slot47 = (slot47 + 1) & (fk_intern_hash_cap - 1);
+        }
+        fk_np = fk_np + 1;
+        fk_nkind[fk_np] = 2;
+        fk_ncat[fk_np] = cat47;
+        fk_nkids[fk_np] = kids47;
+        fk_nval[fk_np] = 0;
+        fk_intern_tab[slot47] = fk_np;
+        fk_nhash_memo[fk_np] = h47;
+        fk_nid[fk_np][0] = 0;
+        fk_nid[fk_np][1] = 0;
+        fk_nid[fk_np][2] = 0;
+        fk_nid[fk_np][3] = fk_np;
+        if (cat47 < 0) {
+            long long ci47 = fk_nidx(cat47);
+            if (ci47 >= 1 && ci47 <= fk_np) {
+                fk_nid[fk_np][1] = fk_nid[ci47][1];
+                fk_nid[fk_np][2] = fk_nid[ci47][2];
+            }
+        }
+        return fk_nbox(fk_np);
+}
+static long long fk_make_nodeid(long long p91, long long l91, long long ty91, long long in91) {
+        if (fk_np + 1 >= fk_node_cap) {
+            fk_nodes_grow();
+        }
+        fk_np = fk_np + 1;
+        fk_nkind[fk_np] = 3;
+        fk_ncat[fk_np] = 0;
+        fk_nkids[fk_np] = 1;
+        fk_nval[fk_np] = 0;
+        fk_nid[fk_np][0] = p91;
+        fk_nid[fk_np][1] = l91;
+        fk_nid[fk_np][2] = ty91;
+        fk_nid[fk_np][3] = in91;
+        return fk_nbox(fk_np);
+}
+/* give n bytes into gift frame gh under the seqlock; answers the even sequence
+ * after the give, or nothing when the handle is dead or the frame does not fit */
+static long long fk_gift_give(long long gh, const char *bytes, long long n) {
+    if (!fk_gift_live(gh)) {
+        return fk_nothing;
+    }
+    volatile long long *gseq = (volatile long long *)fk_gift_base[gh];
+    volatile long long *glen = gseq + 1;
+    char *gpay = (char *)fk_gift_base[gh] + 16;
+    if (n > fk_gift_size[gh] - 16) {
+        return fk_nothing;
+    }
+    long long s0 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
+    __atomic_store_n(gseq, s0 + 1, __ATOMIC_RELEASE);
+    { long long k = 0; while (k < n) { gpay[k] = bytes[k]; k = k + 1; } }
+    __atomic_store_n(glen, n, __ATOMIC_RELEASE);
+    __atomic_store_n(gseq, s0 + 2, __ATOMIC_RELEASE);
+    return (s0 + 2) << 1;
+}
+/* take the stable frame of gh as a string value (nothing when dead, never
+ * written, or a give that never settles) -- the seqlock read */
+static long long fk_gift_take_str(long long gh) {
+    if (!fk_gift_live(gh)) {
+        return fk_nothing;
+    }
+    volatile long long *gseq = (volatile long long *)fk_gift_base[gh];
+    volatile long long *glen = gseq + 1;
+    char *gpay = (char *)fk_gift_base[gh] + 16;
+    int tries = 0;
+    for (;;) {
+        long long s1 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
+        if (s1 == 0) {
+            return fk_nothing;
+        }
+        if ((s1 & 1) == 0) {
+            long long n = __atomic_load_n(glen, __ATOMIC_ACQUIRE);
+            if (n < 0 || n > fk_gift_size[gh] - 16) {
+                return fk_nothing;
+            }
+            fk_sinit();
+            while (fk_sbp + n > fk_scap_b) {
+                fk_scap_b = fk_scap_b * 2;
+                fk_sb = realloc(fk_sb, fk_scap_b);
+                fk_sb_check();
+            }
+            { long long k = 0; while (k < n) { fk_sb[fk_sbp + k] = gpay[k]; k = k + 1; } }
+            long long s2 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
+            if (s1 == s2) {
+                return fk_strv(fk_sintern(fk_sbp, n));
+            }
+        }
+        tries = tries + 1;
+        if (tries > 4096) {
+            return fk_nothing;
+        }
+    }
+}
+/* THE CELL CROSSING: a value crosses a gift frame as itself. Words, one tag
+ * byte each: N nothing, I int, F float, S string, L list (count, elements,
+ * then Z for nil or the dotted tail), and the cells -- i/s/b/f the trivial
+ * nodes, C a composite (category then children, re-interned on read so the
+ * same category over the same children is the same cell, axiom 3), D a
+ * NodeID coordinate. A function value cannot cross and refuses the give. */
+static long long fk_cross_refused;
+static void fk_cross_put_i64(long long v) { fk_sappend((const char *)&v, 8); }
+static void fk_cross_put_u32(long long v) { unsigned int u = (unsigned int)v; fk_sappend((const char *)&u, 4); }
+static void fk_cross_emit(long long v, long long depth) {
+    if (depth > 100000) { fk_cross_refused = 1; return; }
+    if (v == fk_nothing) { fk_sappend("N", 1); return; }
+    if (fk_isf(v)) { double d = fk_num(v); fk_sappend("F", 1); fk_sappend((const char *)&d, 8); return; }
+    if (fk_is_str(v)) { long long si = fk_stri(v); fk_sappend("S", 1); fk_cross_put_u32(fk_sl[si]); fk_sappend(fk_sb + fk_so[si], fk_sl[si]); return; }
+    if (v >= fk_fnbase && v < fk_fnbase + 8192) { fk_cross_refused = 1; fk_sappend("N", 1); return; }
+    if ((v & 1) == 0) { fk_sappend("I", 1); fk_cross_put_i64(v >> 1); return; }
+    if (v >= 0) {
+        /* a list: count the proper elements, then emit them and the tail */
+        long long p = v, count = 0;
+        while ((p & 1) && p != 1 && (p >> 1) >= 1 && (p >> 1) <= fk_hp && count < 100000000) { count = count + 1; p = fk_ht[p >> 1]; }
+        fk_sappend("L", 1); fk_cross_put_u32(count);
+        p = v;
+        long long k = 0;
+        while (k < count) { fk_cross_emit(fk_hh[p >> 1], depth + 1); p = fk_ht[p >> 1]; k = k + 1; }
+        if (p == 1) { fk_sappend("Z", 1); } else { fk_cross_emit(p, depth + 1); }
+        return;
+    }
+    if (v >= fk_fnbase && v < fk_fnbase + 8192) { fk_cross_refused = 1; fk_sappend("N", 1); return; }
+    long long ix = fk_nidx(v);
+    if (ix < 1 || ix > fk_np) { fk_cross_refused = 1; fk_sappend("N", 1); return; }
+    if (fk_nkind[ix] == 1) {
+        long long sub = fk_nid[ix][2];
+        if (sub == 1) { fk_sappend("i", 1); fk_cross_put_i64(fk_nval[ix] >> 1); return; }
+        if (sub == 2) { long long si = fk_stri(fk_nval[ix]); fk_sappend("s", 1); if (si < 0) { fk_cross_put_u32(0); return; } fk_cross_put_u32(fk_sl[si]); fk_sappend(fk_sb + fk_so[si], fk_sl[si]); return; }
+        if (sub == 3) { fk_sappend("b", 1); fk_sappend(fk_nval[ix] == (0 - 9223372036854775807LL) ? "\1" : "\0", 1); return; }
+        if (sub == 7) { double d = fk_num(fk_nval[ix]); fk_sappend("f", 1); fk_sappend((const char *)&d, 8); return; }
+        fk_cross_refused = 1; fk_sappend("N", 1); return;
+    }
+    if (fk_nkind[ix] == 3) { fk_sappend("D", 1); fk_cross_put_i64(fk_nid[ix][0]); fk_cross_put_i64(fk_nid[ix][1]); fk_cross_put_i64(fk_nid[ix][2]); fk_cross_put_i64(fk_nid[ix][3]); return; }
+    fk_sappend("C", 1);
+    fk_cross_emit(fk_ncat[ix], depth + 1);
+    fk_cross_emit(fk_nkids[ix], depth + 1);
+}
+static long long fk_cross_get_i64(const char *b, long long n, long long *pos) { long long v = 0; if (*pos + 8 <= n) { long long k = 0; while (k < 8) { ((char *)&v)[k] = b[*pos + k]; k = k + 1; } } *pos = *pos + 8; return v; }
+static long long fk_cross_get_u32(const char *b, long long n, long long *pos) { unsigned int u = 0; if (*pos + 4 <= n) { long long k = 0; while (k < 4) { ((char *)&u)[k] = b[*pos + k]; k = k + 1; } } *pos = *pos + 4; return (long long)u; }
+static long long fk_cross_decode(const char *b, long long n, long long *pos, long long depth) {
+    if (depth > 100000 || *pos >= n) { fk_cross_refused = 1; return fk_nothing; }
+    char tg = b[*pos]; *pos = *pos + 1;
+    if (tg == 'N') { return fk_nothing; }
+    if (tg == 'I') { return fk_cross_get_i64(b, n, pos) << 1; }
+    if (tg == 'F') { long long w = fk_cross_get_i64(b, n, pos); double d; { long long k = 0; while (k < 8) { ((char *)&d)[k] = ((char *)&w)[k]; k = k + 1; } } return fk_fbox(d); }
+    if (tg == 'S' || tg == 's') { long long len = fk_cross_get_u32(b, n, pos); if (*pos + len > n) { fk_cross_refused = 1; return fk_nothing; } long long sv = fk_sbuf(b + *pos, len); *pos = *pos + len; return tg == 'S' ? sv : fk_intern_str_node(sv); }
+    if (tg == 'i') { return fk_intern_int_node(fk_cross_get_i64(b, n, pos) << 1); }
+    if (tg == 'b') { char bv = b[*pos]; *pos = *pos + 1; return fk_intern_bool_node(bv ? 2 : 0); }
+    if (tg == 'f') { long long w = fk_cross_get_i64(b, n, pos); double d; { long long k = 0; while (k < 8) { ((char *)&d)[k] = ((char *)&w)[k]; k = k + 1; } } return fk_intern_float_node(d); }
+    if (tg == 'D') { long long p = fk_cross_get_i64(b, n, pos), l = fk_cross_get_i64(b, n, pos), ty = fk_cross_get_i64(b, n, pos), in = fk_cross_get_i64(b, n, pos); return fk_make_nodeid(p, l, ty, in); }
+    if (tg == 'C') { long long cat = fk_cross_decode(b, n, pos, depth + 1); long long kids = fk_cross_decode(b, n, pos, depth + 1); return fk_intern_composite(cat, kids); }
+    if (tg == 'L') {
+        long long count = fk_cross_get_u32(b, n, pos);
+        if (count < 0 || count > 100000000) { fk_cross_refused = 1; return fk_nothing; }
+        long long *elems = malloc(sizeof(long long) * (unsigned long)(count + 1));
+        if (elems == 0) { fk_die("fk_cross_decode: out of memory for a list"); }
+        long long k = 0;
+        while (k < count) { elems[k] = fk_cross_decode(b, n, pos, depth + 1); k = k + 1; }
+        long long tail = 1;
+        if (*pos < n && b[*pos] == 'Z') { *pos = *pos + 1; } else { tail = fk_cross_decode(b, n, pos, depth + 1); }
+        k = count;
+        while (k > 0) { k = k - 1; tail = fk_cons_val(elems[k], tail); }
+        free(elems);
+        return tail;
+    }
+    fk_cross_refused = 1;
+    return fk_nothing;
+}
 static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 9) {
         putchar((int)(fk_walk(fk_node[i][1], fp) >> 1));
@@ -9154,106 +9470,16 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 43) {
         long long iv43 = fk_walk(fk_node[i][1], fp);
-        long long h43 = fk_intern_key_trivial(1, iv43);
-        long long slot43 = 0;
-        if (fk_np + 1 >= fk_node_cap) {
-            fk_nodes_grow();
-        }
-        slot43 = h43 & (fk_intern_hash_cap - 1);
-        while (fk_intern_tab[slot43]) {
-            long long ix43 = fk_intern_tab[slot43];
-            if (fk_nkind[ix43] == 1 && fk_nid[ix43][2] == 1 && fk_nval[ix43] == iv43) {
-                return fk_nbox(ix43);
-            }
-            slot43 = (slot43 + 1) & (fk_intern_hash_cap - 1);
-        }
-        fk_np = fk_np + 1;
-        fk_nkind[fk_np] = 1;
-        fk_nval[fk_np] = iv43;
-        fk_nkids[fk_np] = 1;
-        fk_ncat[fk_np] = 0;
-        fk_nid[fk_np][0] = 1;
-        fk_nid[fk_np][1] = 1;
-        fk_nid[fk_np][2] = 1;
-        fk_nid[fk_np][3] = iv43 >> 1;
-        fk_intern_tab[slot43] = fk_np;
-        fk_nhash_memo[fk_np] = h43;
-        return fk_nbox(fk_np);
+        return fk_intern_int_node(iv43);
     }
     if (t == 46) {
         long long sv46 = fk_walk(fk_node[i][1], fp);
-        long long sa46 = fk_stri(sv46);
-        long long h46 = fk_intern_key_trivial(2, sv46);
-        long long slot46 = 0;
-        if (fk_np + 1 >= fk_node_cap) {
-            fk_nodes_grow();
-        }
-        slot46 = h46 & (fk_intern_hash_cap - 1);
-        while (fk_intern_tab[slot46]) {
-            long long ix46 = fk_intern_tab[slot46];
-            if (fk_nkind[ix46] == 1 && fk_nid[ix46][2] == 2 && fk_nval[ix46] == sv46) {
-                return fk_nbox(ix46);
-            }
-            slot46 = (slot46 + 1) & (fk_intern_hash_cap - 1);
-        }
-        if (sa46 < 0 || sa46 >= fk_sp) {
-            return 0;
-        }
-        fk_np = fk_np + 1;
-        fk_nkind[fk_np] = 1;
-        fk_nval[fk_np] = sv46;
-        fk_nkids[fk_np] = 1;
-        fk_ncat[fk_np] = 0;
-        fk_nid[fk_np][0] = 1;
-        fk_nid[fk_np][1] = 1;
-        fk_nid[fk_np][2] = 2;
-        fk_nid[fk_np][3] = sa46;
-        fk_intern_tab[slot46] = fk_np;
-        fk_nhash_memo[fk_np] = h46;
-        return fk_nbox(fk_np);
+        return fk_intern_str_node(sv46);
     }
     if (t == 47) {
         long long cat47 = fk_walk(fk_node[i][1], fp);
         long long kids47 = fk_walk(fk_node[i][2], fp);
-        unsigned long long hm47 = fk_mix64(7, 2);
-        hm47 = fk_mix64(hm47, (unsigned long long)fk_deep_hash(cat47));
-        hm47 = fk_mix64(hm47, (unsigned long long)fk_deep_hash(kids47));
-        long long h47 = (long long)(hm47 >> 1);
-        if (h47 == 0) {
-            h47 = 1;
-        }
-        long long slot47 = 0;
-        if (fk_np + 1 >= fk_node_cap) {
-            fk_nodes_grow();
-        }
-        slot47 = h47 & (fk_intern_hash_cap - 1);
-        while (fk_intern_tab[slot47]) {
-            long long ix47 = fk_intern_tab[slot47];
-            if (fk_nkind[ix47] == 2 && fk_veq(fk_ncat[ix47], cat47) != 0 &&
-                fk_veq(fk_nkids[ix47], kids47) != 0) {
-                return fk_nbox(ix47);
-            }
-            slot47 = (slot47 + 1) & (fk_intern_hash_cap - 1);
-        }
-        fk_np = fk_np + 1;
-        fk_nkind[fk_np] = 2;
-        fk_ncat[fk_np] = cat47;
-        fk_nkids[fk_np] = kids47;
-        fk_nval[fk_np] = 0;
-        fk_intern_tab[slot47] = fk_np;
-        fk_nhash_memo[fk_np] = h47;
-        fk_nid[fk_np][0] = 0;
-        fk_nid[fk_np][1] = 0;
-        fk_nid[fk_np][2] = 0;
-        fk_nid[fk_np][3] = fk_np;
-        if (cat47 < 0) {
-            long long ci47 = fk_nidx(cat47);
-            if (ci47 >= 1 && ci47 <= fk_np) {
-                fk_nid[fk_np][1] = fk_nid[ci47][1];
-                fk_nid[fk_np][2] = fk_nid[ci47][2];
-            }
-        }
-        return fk_nbox(fk_np);
+        return fk_intern_composite(cat47, kids47);
     }
     if (t == 91) {
         long long xs91 = fk_walk(fk_node[i][1], fp);
@@ -9277,48 +9503,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (q91 >= 1 && q91 <= fk_hp) {
             in91 = fk_hh[q91] >> 1;
         }
-        if (fk_np + 1 >= fk_node_cap) {
-            fk_nodes_grow();
-        }
-        fk_np = fk_np + 1;
-        fk_nkind[fk_np] = 3;
-        fk_ncat[fk_np] = 0;
-        fk_nkids[fk_np] = 1;
-        fk_nval[fk_np] = 0;
-        fk_nid[fk_np][0] = p91;
-        fk_nid[fk_np][1] = l91;
-        fk_nid[fk_np][2] = ty91;
-        fk_nid[fk_np][3] = in91;
-        return fk_nbox(fk_np);
+        return fk_make_nodeid(p91, l91, ty91, in91);
     }
     if (t == 112) {
         long long bv112 = fk_walk(fk_node[i][1], fp);
-        long long se112 = (bv112 != 0) ? (0 - 9223372036854775807LL) : (0 - 9223372036854775805LL);
-        long long h112 = fk_intern_key_trivial(3, se112);
-        long long slot112 = 0;
-        if (fk_np + 1 >= fk_node_cap) {
-            fk_nodes_grow();
-        }
-        slot112 = h112 & (fk_intern_hash_cap - 1);
-        while (fk_intern_tab[slot112]) {
-            long long ix112 = fk_intern_tab[slot112];
-            if (fk_nkind[ix112] == 1 && fk_nid[ix112][2] == 3 && fk_nval[ix112] == se112) {
-                return fk_nbox(ix112);
-            }
-            slot112 = (slot112 + 1) & (fk_intern_hash_cap - 1);
-        }
-        fk_np = fk_np + 1;
-        fk_nkind[fk_np] = 1;
-        fk_nval[fk_np] = se112;
-        fk_nkids[fk_np] = 1;
-        fk_ncat[fk_np] = 0;
-        fk_nid[fk_np][0] = 1;
-        fk_nid[fk_np][1] = 1;
-        fk_nid[fk_np][2] = 3;
-        fk_intern_tab[slot112] = fk_np;
-        fk_nhash_memo[fk_np] = h112;
-        fk_nid[fk_np][3] = (bv112 != 0) ? 1 : 0;
-        return fk_nbox(fk_np);
+        return fk_intern_bool_node(bv112);
     }
     if (t == 113) {
         long long sa113 = fk_stri(fk_walk(fk_node[i][1], fp));
@@ -9345,46 +9534,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * BITS, not ==, so NaN interns to itself. nid[3] carries the pool
          * index, mirroring the Go arm's Inst. */
         unsigned long long fbits113;
-        if (fd113 != fd113) {
-            fbits113 = 0x7ff8000000000000ULL;
-        } else {
-            if (fd113 == 0.0) {
-                fd113 = 0.0;
-            }
-            memcpy(&fbits113, &fd113, 8);
-        }
-        double fcanon113;
-        memcpy(&fcanon113, &fbits113, 8);
-        long long h113 = fk_intern_key_trivial(7, (long long)fbits113);
-        if (fk_np + 1 >= fk_node_cap) {
-            fk_nodes_grow();
-        }
-        long long slot113 = h113 & (fk_intern_hash_cap - 1);
-        while (fk_intern_tab[slot113]) {
-            long long ix113 = fk_intern_tab[slot113];
-            if (fk_nkind[ix113] == 1 && fk_nid[ix113][2] == 7) {
-                double dv113 = fk_num(fk_nval[ix113]);
-                unsigned long long db113;
-                memcpy(&db113, &dv113, 8);
-                if (db113 == fbits113) {
-                    return fk_nbox(ix113);
-                }
-            }
-            slot113 = (slot113 + 1) & (fk_intern_hash_cap - 1);
-        }
-        long long fb113 = fk_fbox(fcanon113);
-        fk_np = fk_np + 1;
-        fk_nkind[fk_np] = 1;
-        fk_nval[fk_np] = fb113;
-        fk_nkids[fk_np] = 1;
-        fk_ncat[fk_np] = 0;
-        fk_nid[fk_np][0] = 1;
-        fk_nid[fk_np][1] = 1;
-        fk_nid[fk_np][2] = 7;
-        fk_nid[fk_np][3] = fk_fidx(fb113);
-        fk_intern_tab[slot113] = fk_np;
-        fk_nhash_memo[fk_np] = h113;
-        return fk_nbox(fk_np);
+        return fk_intern_float_node(fd113);
     }
     if (t == 50) {
         long long sa = fk_node[i][1];
@@ -9661,6 +9811,36 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             q = q + 1;
         }
         return fk_strv(fk_sintern(start179, fk_sbp - start179));
+    }
+    if (t == 177) {
+        long long gh177 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long sv177 = fk_gift_take_str(gh177);
+        if (sv177 == fk_nothing) {
+            return fk_nothing;
+        }
+        long long si177 = fk_stri(sv177);
+        long long pos177 = 0;
+        fk_cross_refused = 0;
+        long long out177 = fk_cross_decode(fk_sb + fk_so[si177], fk_sl[si177], &pos177, 0);
+        return fk_cross_refused ? fk_nothing : out177;
+    }
+    if (t == 178) {
+        long long gh178 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long v178 = fk_walk(fk_node[i][2], fp);
+        if (!fk_gift_live(gh178)) {
+            return fk_nothing;
+        }
+        fk_sinit();
+        long long start178 = fk_sbp;
+        fk_cross_refused = 0;
+        fk_cross_emit(v178, 0);
+        long long n178 = fk_sbp - start178;
+        fk_sbp = start178;
+        if (fk_cross_refused) {
+            /* a value that cannot cross (a function, an unknown node) refuses the give by name */
+            return fk_nothing;
+        }
+        return fk_gift_give(gh178, fk_sb + start178, n178);
     }
     /* THE FRAME PACER AND THE TERMINAL (tags 180-183): terminal_cols /
      * terminal_lines read the controlling terminal's window (ioctl, no tput

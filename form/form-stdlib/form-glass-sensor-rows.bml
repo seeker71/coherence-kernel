@@ -1,17 +1,17 @@
 //////////////////////////////////////////////////////////////////////
 //
-// form-glass-sensor-rows.bml — metric rows cross a gift frame as text.
+// form-glass-sensor-rows.bml — metric rows cross a gift frame as cells.
 //
 // Authority: form-stdlib/bml/form-glass-sensor-rows.bml
 // preludes: form/form-stdlib/core.fk form/form-stdlib/form-glass-dashboard.bml form/form-stdlib/form-glass-gift-frame.bml
 //
-// A sensor process gathers the rows that fork or scan -- host, process,
+// A sensor process gathers the rows that fork or scan -- host, process, owner,
 // storage, queue -- at its own cadence and GIVES them into a gift frame per
 // sensor. The glass, on its frame path, only asks each frame's sequence
-// (microseconds) and re-reads a frame when the sequence moved. Rows are the
-// observer's own fgo-metric shape rebuilt through fgo-metric on arrival, so a
-// received row is indistinguishable from a locally observed one except for
-// the source it names. A sensor that is not standing is named absent.
+// (microseconds) and re-reads a frame when the sequence moved. The frame holds
+// list(schema, sensor, epoch, rows) as the seed own node words -- node_gift_write
+// gives it, node_gift_read takes it, no wire and no parser between; a received
+// row is the same cell the sensor built. A sensor not standing is named absent.
 //
 //////////////////////////////////////////////////////////////////////
 
@@ -27,7 +27,7 @@ section [form.bml] {
         field FGSRFrameBytes = 262144;
         field FGSRFieldCount = 18;
         ref fgsr-authority = FormGlassSensorRowsAuthority;
-        thought fgsr-law = list("rows-are-the-observer-shape", "seq-before-read", "absent-says-absent", "wire-fields-never-carry-a-bar", "rebuilt-through-fgo-metric");
+        thought fgsr-law = list("rows-are-the-observer-shape", "seq-before-read", "absent-says-absent", "cells-cross-as-cells", "no-parser-on-the-frame-path");
 
         def fgsr-publisher(sensor) = str_concat(FGSRPublisherPrefix(), sensor);
 
@@ -57,23 +57,29 @@ section [form.bml] {
         def fgsr-parsed-epoch(p) = nth(p, 2);
         def fgsr-parsed-rows(p) = nth(p, 3);
 
-        // --- give (the sensor side) ---------------------------------------------
-        def fgsr-give(sensor, epoch, rows) = ggf-offer-and-give(fgsr-publisher(sensor), FGSRFrameBytes(), fgsr-wire(sensor, epoch, rows));
+        // --- give (the sensor side): the frame carries list(schema, sensor, epoch, rows) as cells ---
+        def fgsr-frame(sensor, epoch, rows) = list(FGSRSchema(), sensor, epoch, rows);
+        def fgsr-give(sensor, epoch, rows) {
+            let handle = ggf-offer(fgsr-publisher(sensor), FGSRFrameBytes());
+            let seq = if nothing?(handle) then nothing() else node_gift_write(handle, fgsr-frame(sensor, epoch, rows));
+            let released = ggf-release(handle);
+            if nothing?(seq) then list(GGFSchema(), "refused", fgsr-publisher(sensor), "", -1) else list(GGFSchema(), "given", fgsr-publisher(sensor), "", seq);
+        }
 
-        // --- take (the glass side): seq first, read only when it moved ---------
+        // --- take (the glass side): seq first, read the cells only when it moved ---
         // held = list(seq, epoch, rows); answers a new held or the same one.
         def fgsr-held(seq, epoch, rows) = list(seq, epoch, rows);
         def fgsr-held-seq(h) = if eq(len(h), 0) then -1 else nth(h, 0);
         def fgsr-held-epoch(h) = if eq(len(h), 0) then -1 else nth(h, 1);
         def fgsr-held-rows(h) = if eq(len(h), 0) then list() else nth(h, 2);
+        def fgsr-frame-valid?(f) = if nothing?(f) then 0 else if not(eq(len(f), 4)) then 0 else if not(str_eq(nth(f, 0), FGSRSchema())) then 0 else 1;
         def fgsr-take(sensor, held) {
             let handle = ggf-receive(fgsr-publisher(sensor));
             let seq = ggf-seq(handle);
             let moved = if nothing?(handle) then 0 else if eq(seq, fgsr-held-seq(held)) then 0 else 1;
-            let text = if eq(moved, 1) then ggf-taken(handle) else nothing();
+            let frame = if eq(moved, 1) then node_gift_read(handle) else nothing();
             let released = ggf-release(handle);
-            let parsed = if nothing?(text) then list() else fgsr-parse(text);
-            if eq(moved, 0) then held else if eq(len(parsed), 0) then held else fgsr-held(seq, fgsr-parsed-epoch(parsed), fgsr-parsed-rows(parsed));
+            if eq(moved, 0) then held else if not(eq(fgsr-frame-valid?(frame), 1)) then held else fgsr-held(seq, nth(frame, 2), nth(frame, 3));
         }
         def fgsr-standing?(sensor) = if nothing?(ggf-receive(fgsr-publisher(sensor))) then 0 else 1;
         // when no sensor stands, one row says so by name instead of silence
