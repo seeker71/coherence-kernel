@@ -1,0 +1,45 @@
+; ear-tongue-native.fk — the ear's tongue lane, the body's own: woken by the segment bell, it
+; takes each committed line (t_end, tongue, text) and offers the tongues not heard through the
+; native llama lane (ear-tongue), writing one said frame per line into the ear spool and
+; ringing the door's bell. Off the live path by being its own process. stdin line 1: run seconds.
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/ear-tongue.fk form/form-stdlib/spool-bell-transport.fk form/form-stdlib/hearth.bml form/form-stdlib/line-grammar.fk
+(do
+    (defn tl-spool () ".hearth/ear.spool")
+    (defn tl-bell () ".hearth/ear.spool.bell")
+    (defn tl-segs () ".hearth/ear.spool.segments")
+    (defn tl-segbell () ".hearth/ear.spool.seg.bell")
+    (defn tl-text (t) (if (nothing? t) "" t))
+    (defn tl-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (tl-cat (tail xs)))))
+    (defn tl-nl () (byte_to_str 10))
+    (defn tl-ring (bell) (host-exec (tl-cat (list "( tools/ftimeout 5 sh -c 'printf x > " bell "' ) >/dev/null 2>&1 &")) ""))
+    (defn tl-kv (k v) (tl-cat (list k "=" v (tl-nl))))
+    (defn tl-emit (heard lang heardms en fa pt saidms)
+        (do (let w (sbt-append (tl-spool) (tl-cat (list "<|ear:frame|>" (tl-nl) (tl-kv "t" (int_to_str (now_unix_ms))) (tl-kv "kind" "said") (tl-kv "heard" heard) (tl-kv "lang" lang) (tl-kv "nsp" "0") (tl-kv "heardms" (int_to_str heardms)) (tl-kv "en" en) (tl-kv "fa" fa) (tl-kv "pt" pt) (tl-kv "saidms" (int_to_str saidms)) "<|/ear:frame|>" (tl-nl)))))
+            (tl-ring (tl-bell))))
+    (defn tl-known? (l) (or (str_eq l "en") (or (str_eq l "fa") (str_eq l "pt"))))
+    (defn tl-say (st text from to) (if (str_eq from to) text (et-translate st text (if (tl-known? from) from "en") to 20)))
+    (defn tl-line (st line)
+        (do (let a (str_find line (byte_to_str 9) 0))
+            (let b (str_find line (byte_to_str 9) (add a 1)))
+            (let tend (str_to_int (substring line 0 a)))
+            (let lang (substring line (add a 1) b))
+            (let text (substring line (add b 1) (str_len line)))
+            (let en (tl-say st text lang "en"))
+            (let fa (tl-say st text lang "fa"))
+            (let pt (tl-say st text lang "pt"))
+            (tl-emit text lang 0 en fa pt (sub (now_unix_ms) tend))))
+    (defn tl-lines (st lines) (if (eq (len lines) 0) 0 (if (eq (str_len (head lines)) 0) (tl-lines st (tail lines)) (if (str_eq (head lines) "done") 1 (do (let x (tl-line st (head lines))) (tl-lines st (tail lines)))))))
+    (defn tl-loop (st mark deadline)
+        (if (gt (now_unix_ms) deadline) 0
+            (do (let sz (file_size (tl-segs)))
+                (if (le sz mark)
+                    (do (let woke (sbt-bell-wait (tl-segbell))) (tl-loop st mark deadline))
+                    (do (let text (tl-text (read_file_slice (tl-segs) mark (sub sz mark))))
+                        (let done (tl-lines st (split-on text (tl-nl))))
+                        (if (eq done 1) 0 (tl-loop st sz deadline)))))))
+    (let secs (str_to_int (trim (read_line))))
+    (let st (et-open))
+    (let mark (if (lt (file_size (tl-segs)) 0) 0 (file_size (tl-segs))))
+    (let patience (host-exec (tl-cat (list "( sleep " (int_to_str (add secs 60)) "; printf x > " (tl-segbell) " ) >/dev/null 2>&1 &")) ""))
+    (tl-loop st mark (add (now_unix_ms) (mul 1000 (add secs 60)))))

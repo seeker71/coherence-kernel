@@ -1,0 +1,96 @@
+; ear-msl.fk — the kernels a whisper-tiny pass needs, emitted by the body for its own metal:
+; log-mel from raw s16 microphone frames (a direct 400-point DFT per bin, Hann-windowed, reflect
+; padded, the reference's own filter bank), conv1d+GELU, layernorm, a half-weight gemm with the
+; residual add or the GELU folded in and a row offset so k/v land straight in their caches,
+; attention (one thread per query and head, softmax in registers), sinusoid positions, token +
+; position embedding, and a bounded argmax (the language window is a bound). f32 activations,
+; half weights read straight off the model file. Nothing here leaves the device between calls.
+; preludes: form/form-stdlib/core.fk
+(do
+    (defn em-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (em-cat (tail xs)))))
+    (defn em-nl () (byte_to_str 10))
+    (defn em-lines (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (str_concat (em-nl) (em-lines (tail xs))))))
+    (defn em-head () (em-lines (list "#include <metal_stdlib>" "using namespace metal;" "inline float ear_erf(float x) { float s = x < 0.0f ? -1.0f : 1.0f; float ax = fabs(x); float t = 1.0f / (1.0f + 0.3275911f * ax); float y = 1.0f - (((((1.061405429f * t - 1.453152027f) * t) + 1.421413741f) * t - 0.284496736f) * t + 0.254829592f) * t * exp(-ax * ax); return s * y; }" "inline float ear_gelu(float a) { return 0.5f * a * (1.0f + ear_erf(a * 0.70710678118f)); }")))
+    ; y[(yoff+t)*N+n] = (hasb ? b[n] : 0) + sum_k x[t*K+k] * w[n*K+k]; mode 1 = gelu, mode 2 = add r[t*N+n]
+    (defn em-gemm () (em-lines (list
+        "kernel void ear_gemm(device const float* x [[buffer(0)]], device const half* w [[buffer(1)]], device const half* b [[buffer(2)]], device float* y [[buffer(3)]], device const float* r [[buffer(4)]], constant uint& T [[buffer(5)]], constant uint& N [[buffer(6)]], constant uint& K [[buffer(7)]], constant uint& hasb [[buffer(8)]], constant uint& mode [[buffer(9)]], constant uint& yoff [[buffer(10)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= T * N) return; uint t = gid / N; uint n = gid - t * N;"
+        "  float acc = hasb ? (float)b[n] : 0.0f; device const float* xr = x + t * K; device const half* wr = w + n * K;"
+        "  for (uint k = 0; k < K; k++) acc += xr[k] * (float)wr[k];"
+        "  if (mode == 1) acc = ear_gelu(acc); if (mode == 2) acc += r[gid];"
+        "  y[(yoff + t) * N + n] = acc; }")))
+    ; conv1d kernel 3, pad 1: y[t*Cout+o] = gelu(b[o] + sum_k sum_i x[(t*stride+k-1)*Cin+i] * w[(o*3+k)*Cin+i])
+    (defn em-conv () (em-lines (list
+        "kernel void ear_conv(device const float* x [[buffer(0)]], device const half* w [[buffer(1)]], device const half* b [[buffer(2)]], device float* y [[buffer(3)]], constant uint& Tin [[buffer(4)]], constant uint& Tout [[buffer(5)]], constant uint& Cin [[buffer(6)]], constant uint& Cout [[buffer(7)]], constant uint& stride [[buffer(8)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= Tout * Cout) return; uint t = gid / Cout; uint o = gid - t * Cout; float acc = (float)b[o];"
+        "  for (uint k = 0; k < 3; k++) { int ti = (int)(t * stride + k) - 1; if (ti < 0 || ti >= (int)Tin) continue;"
+        "    device const float* xr = x + ti * Cin; device const half* wr = w + (o * 3 + k) * Cin; for (uint i = 0; i < Cin; i++) acc += xr[i] * (float)wr[i]; }"
+        "  y[gid] = ear_gelu(acc); }")))
+    ; layernorm, one thread per row, eps 1e-5
+    (defn em-ln () (em-lines (list
+        "kernel void ear_ln(device const float* x [[buffer(0)]], device const half* g [[buffer(1)]], device const half* b [[buffer(2)]], device float* y [[buffer(3)]], constant uint& T [[buffer(4)]], constant uint& D [[buffer(5)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= T) return; device const float* xr = x + gid * D; float m = 0.0f; for (uint i = 0; i < D; i++) m += xr[i]; m /= (float)D;"
+        "  float v = 0.0f; for (uint i = 0; i < D; i++) { float d = xr[i] - m; v += d * d; } v /= (float)D; float s = rsqrt(v + 1e-5f);"
+        "  for (uint i = 0; i < D; i++) y[gid * D + i] = (xr[i] - m) * s * (float)g[i] + (float)b[i]; }")))
+    ; attention: one thread per (head, query); keys 0..Tk-1, or 0..qoff+t when causal; scale hd^-0.5
+    (defn em-attn () (em-lines (list
+        "kernel void ear_attn(device const float* q [[buffer(0)]], device const float* k [[buffer(1)]], device const float* v [[buffer(2)]], device float* y [[buffer(3)]], constant uint& Tq [[buffer(4)]], constant uint& Tk [[buffer(5)]], constant uint& H [[buffer(6)]], constant uint& hd [[buffer(7)]], constant uint& causal [[buffer(8)]], constant uint& qoff [[buffer(9)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= H * Tq) return; uint h = gid / Tq; uint t = gid - h * Tq; uint D = H * hd; uint nk = causal ? (qoff + t + 1) : Tk; if (nk > Tk) nk = Tk;"
+        "  float sc[1536]; float scale = rsqrt((float)hd); float mx = -1e30f; device const float* qr = q + t * D + h * hd;"
+        "  for (uint j = 0; j < nk; j++) { device const float* kr = k + j * D + h * hd; float s = 0.0f; for (uint i = 0; i < hd; i++) s += qr[i] * kr[i]; s *= scale; sc[j] = s; if (s > mx) mx = s; }"
+        "  float sum = 0.0f; for (uint j = 0; j < nk; j++) { sc[j] = exp(sc[j] - mx); sum += sc[j]; }"
+        "  for (uint i = 0; i < hd; i++) { float acc = 0.0f; for (uint j = 0; j < nk; j++) acc += sc[j] * v[j * D + h * hd + i]; y[t * D + h * hd + i] = acc / sum; } }")))
+    ; whisper's sinusoid positions added in place: sin for the first half of channels, cos for the second
+    (defn em-addpos () (em-lines (list
+        "kernel void ear_addpos(device float* y [[buffer(0)]], constant uint& T [[buffer(1)]], constant uint& D [[buffer(2)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= T * D) return; uint t = gid / D; uint i = gid - t * D; uint half_ = D / 2; float inc = log(10000.0f) / (float)(half_ - 1);"
+        "  uint c = i < half_ ? i : i - half_; float ts = (float)t * exp(-inc * (float)c); y[gid] += (i < half_) ? sin(ts) : cos(ts); }")))
+    ; token + learned position embedding for one token
+    (defn em-embed () (em-lines (list
+        "kernel void ear_embed(device const half* tok [[buffer(0)]], device const half* pos [[buffer(1)]], device float* y [[buffer(2)]], constant uint& id [[buffer(3)]], constant uint& p [[buffer(4)]], constant uint& D [[buffer(5)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= D) return; y[gid] = (float)tok[id * D + gid] + (float)pos[p * D + gid]; }")))
+    ; argmax over [lo, hi), one thread, ties to the lowest index
+    (defn em-argmax () (em-lines (list
+        "kernel void ear_argmax(device const float* x [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& lo [[buffer(2)]], constant uint& hi [[buffer(3)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid != 0) return; uint best = lo; float bv = x[lo]; for (uint i = lo + 1; i < hi; i++) { if (x[i] > bv) { bv = x[i]; best = i; } } out[0] = best; }")))
+    ; STFT power: one thread per (frame, bin); frame t centered at t*160 with reflect padding of 200; periodic Hann; N=400
+    (defn em-stft () (em-lines (list
+        "kernel void ear_stft(device const short* pcm [[buffer(0)]], device float* power [[buffer(1)]], constant uint& L [[buffer(2)]], constant uint& Tf [[buffer(3)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= Tf * 201) return; uint t = gid / 201; uint bin = gid - t * 201; float re = 0.0f; float im = 0.0f; float w2 = 6.283185307f / 400.0f;"
+        "  for (uint n = 0; n < 400; n++) { int idx = (int)(t * 160 + n) - 200; if (idx < 0) idx = -idx; if (idx >= (int)L) idx = 2 * (int)L - 2 - idx; if (idx < 0) idx = 0;"
+        "    float s = (float)pcm[idx] / 32768.0f; float win = 0.5f - 0.5f * cos(w2 * (float)n); float a = w2 * (float)(bin * n % 400); s *= win; re += s * cos(a); im -= s * sin(a); }"
+        "  power[gid] = re * re + im * im; }")))
+    ; mel: one thread per (frame, mel) over the 80x201 filter bank, log10 clamped at 1e-10
+    (defn em-mel () (em-lines (list
+        "kernel void ear_mel(device const float* power [[buffer(0)]], device const float* filt [[buffer(1)]], device float* mel [[buffer(2)]], constant uint& Tf [[buffer(3)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= Tf * 80) return; uint t = gid / 80; uint m = gid - t * 80; float acc = 0.0f; for (uint k = 0; k < 201; k++) acc += filt[m * 201 + k] * power[t * 201 + k];"
+        "  mel[gid] = log10(max(acc, 1e-10f)); }")))
+    ; whisper's normalisation: clamp at (max - 8), then (v + 4) / 4; one thread over the whole spectrogram
+    (defn em-melnorm () (em-lines (list
+        "kernel void ear_melnorm(device float* mel [[buffer(0)]], constant uint& n [[buffer(1)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid != 0) return; float mx = -1e30f; for (uint i = 0; i < n; i++) if (mel[i] > mx) mx = mel[i]; float floor_ = mx - 8.0f;"
+        "  for (uint i = 0; i < n; i++) { float v = mel[i] < floor_ ? floor_ : mel[i]; mel[i] = (v + 4.0f) / 4.0f; } }")))
+    ; the reference filter bank (librosa slaney mel, sr 16000, n_fft 400, 80 mels, fmax 8000) computed on the device once: one thread per (mel, bin)
+    (defn em-melbank () (em-lines (list
+        "inline float ear_hz2mel(float f) { float fsp = 200.0f / 3.0f; float lstep = log(6.4f) / 27.0f; return f >= 1000.0f ? (1000.0f / fsp) + log(f / 1000.0f) / lstep : f / fsp; }"
+        "inline float ear_mel2hz(float m) { float fsp = 200.0f / 3.0f; float lstep = log(6.4f) / 27.0f; float mlm = 1000.0f / fsp; return m >= mlm ? 1000.0f * exp(lstep * (m - mlm)) : fsp * m; }"
+        "kernel void ear_melbank(device float* filt [[buffer(0)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= 80 * 201) return; uint m = gid / 201; uint k = gid - m * 201; float hz = (float)k * 16000.0f / 400.0f; float mmax = ear_hz2mel(8000.0f);"
+        "  float flo = ear_mel2hz(mmax * (float)m / 81.0f); float fmid = ear_mel2hz(mmax * (float)(m + 1) / 81.0f); float fhi = ear_mel2hz(mmax * (float)(m + 2) / 81.0f);"
+        "  float lower = (hz - flo) / (fmid - flo); float upper = (fhi - hz) / (fhi - fmid); float w = max(0.0f, min(lower, upper)); filt[gid] = w * 2.0f / (fhi - flo); }")))
+    ; a byte copy off the whole-file map into an aligned buffer: the npz places tensors at odd offsets, and a bound view must be aligned to be read true
+    (defn em-copy () (em-lines (list
+        "kernel void ear_copy8(device const uchar* src [[buffer(0)]], device uchar* dst [[buffer(1)]], constant uint& srcoff [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= n) return; dst[gid] = src[srcoff + gid]; }")))
+    ; decode attention: one threadgroup per head, threads across the keys; scores in threadgroup memory, then 64 threads each own one output channel
+    (defn em-attn-dec () (em-lines (list
+        "kernel void ear_attn_dec(device const float* q [[buffer(0)]], device const float* k [[buffer(1)]], device const float* v [[buffer(2)]], device float* y [[buffer(3)]], constant uint& Tk [[buffer(4)]], constant uint& H [[buffer(5)]], constant uint& hd [[buffer(6)]], threadgroup float* sc [[threadgroup(0)]], uint h [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {"
+        "  uint D = H * hd; float scale = rsqrt((float)hd); device const float* qr = q + h * hd;"
+        "  for (uint j = tid; j < Tk; j += nt) { device const float* kr = k + j * D + h * hd; float s = 0.0f; for (uint i = 0; i < hd; i++) s += qr[i] * kr[i]; sc[j] = s * scale; }"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  if (tid == 0) { float mx = -1e30f; for (uint j = 0; j < Tk; j++) if (sc[j] > mx) mx = sc[j]; float sum = 0.0f; for (uint j = 0; j < Tk; j++) { sc[j] = exp(sc[j] - mx); sum += sc[j]; } sc[Tk] = sum; }"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  if (tid < hd) { float acc = 0.0f; for (uint j = 0; j < Tk; j++) acc += sc[j] * v[j * D + h * hd + tid]; y[h * hd + tid] = acc / sc[Tk]; } }")))
+    (defn em-unit () (em-lines (list (em-head) (em-gemm) (em-conv) (em-ln) (em-attn) (em-addpos) (em-embed) (em-argmax) (em-stft) (em-mel) (em-melnorm) (em-melbank) (em-copy) (em-attn-dec))))
+    (defn em-names () (list "ear_gemm" "ear_conv" "ear_ln" "ear_attn" "ear_addpos" "ear_embed" "ear_argmax" "ear_stft" "ear_mel" "ear_melnorm" "ear_melbank" "ear_copy8" "ear_attn_dec"))
+    0)

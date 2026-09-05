@@ -1,0 +1,57 @@
+; ear-npz.fk — a model file read, natively: the tensor table of a numpy .npz (a stored zip of
+; .npy members) so that each tensor becomes a metal buffer mapped straight off the file
+; (metal_buf_from_file at the member's data offset) — no copy, no host tool, no python.
+; A row is (name offset bytes dtype shape): dtype is the npy descr ("<f2" half, "<f4" float),
+; shape a list of ints. Only stored (uncompressed) members are honest here; a deflated member
+; answers with bytes -1 so nothing reads garbage as weights.
+; preludes: form/form-stdlib/core.fk form/form-stdlib/line-grammar.fk
+(do
+    (defn en-text (t) (if (nothing? t) "" t))
+    (defn en-u16 (s i) (add (str_byte_at s i) (mul 256 (str_byte_at s (add i 1)))))
+    (defn en-u32 (s i) (add (en-u16 s i) (mul 65536 (en-u16 s (add i 2)))))
+    (defn en-slice (path off n) (en-text (read_file_slice path off n)))
+    ; the end-of-central-directory record is the last 22 bytes when the archive has no comment (numpy writes none)
+    (defn en-eocd (path) (en-slice path (sub (file_size path) 22) 22))
+    (defn en-cd-count (e) (en-u16 e 10))
+    (defn en-cd-size (e) (en-u32 e 12))
+    (defn en-cd-off (e) (en-u32 e 16))
+    ; a central-directory entry: sizes and the local header it points at
+    (defn en-ce-method (cd e) (en-u16 cd (add e 10)))
+    (defn en-ce-csize (cd e) (en-u32 cd (add e 20)))
+    (defn en-ce-nlen (cd e) (en-u16 cd (add e 28)))
+    (defn en-ce-xlen (cd e) (en-u16 cd (add e 30)))
+    (defn en-ce-clen (cd e) (en-u16 cd (add e 32)))
+    (defn en-ce-lho (cd e) (en-u32 cd (add e 42)))
+    (defn en-ce-name (cd e) (substring cd (add e 46) (add (add e 46) (en-ce-nlen cd e))))
+    (defn en-ce-next (cd e) (add (add e 46) (add (en-ce-nlen cd e) (add (en-ce-xlen cd e) (en-ce-clen cd e)))))
+    ; the member's bytes start after its local header (30 + name + extra); the npy header after that
+    (defn en-member-data (path lho) (do (let lh (en-slice path lho 30)) (add lho (add 30 (add (en-u16 lh 26) (en-u16 lh 28))))))
+    (defn en-npy-hlen (h) (if (eq (str_byte_at h 6) 1) (add 10 (en-u16 h 8)) (add 12 (en-u32 h 8))))
+    (defn en-after (h key) (do (let at (str_find h key 0)) (if (lt at 0) "" (substring h (add at (str_len key)) (str_len h)))))
+    (defn en-upto (s stop) (do (let at (str_find s stop 0)) (if (lt at 0) s (substring s 0 at))))
+    (defn en-descr (h) (en-upto (en-after h "'descr': '") "'"))
+    (defn en-shape-ints (s) (if (eq (str_len (trim s)) 0) (list) (do (let at (str_find s "," 0)) (if (lt at 0) (list (str_to_int (trim s))) (cons (str_to_int (trim (substring s 0 at))) (en-shape-ints (substring s (add at 1) (str_len s))))))))
+    (defn en-shape (h) (en-shape-ints (en-upto (en-after h "'shape': (") ")")))
+    (defn en-row (path cd e)
+        (do (let data (en-member-data path (en-ce-lho cd e)))
+            (let h (en-slice path data 256))
+            (let hl (en-npy-hlen h))
+            (list (substring (en-ce-name cd e) 0 (sub (str_len (en-ce-name cd e)) 4))
+                  (add data hl)
+                  (if (eq (en-ce-method cd e) 0) (sub (en-ce-csize cd e) hl) (sub 0 1))
+                  (en-descr h)
+                  (en-shape h))))
+    (defn en-rows-go (path cd e n acc) (if (le n 0) (reverse acc) (en-rows-go path cd (en-ce-next cd e) (sub n 1) (cons (en-row path cd e) acc))))
+    ; the table: one row per member, in archive order
+    (defn en-table (path) (do (let e (en-eocd path)) (let cd (en-slice path (en-cd-off e) (en-cd-size e))) (en-rows-go path cd 0 (en-cd-count e) (list))))
+    (defn en-find (rows name) (if (eq (len rows) 0) (list) (if (str_eq (head (head rows)) name) (head rows) (en-find (tail rows) name))))
+    (defn en-off (row) (nth row 1))
+    (defn en-bytes (row) (nth row 2))
+    (defn en-dtype (row) (nth row 3))
+    (defn en-shape-of (row) (nth row 4))
+    (defn en-dim (row i) (nth (en-shape-of row) i))
+    ; the tensor as a resident metal buffer, mapped off the file at its data offset
+    (defn en-buf (path row) (metal_buf_from_file path (en-off row) (en-bytes row)))
+    (defn en-shape-text (xs) (if (eq (len xs) 0) "" (str_concat (int_to_str (head xs)) (str_concat (if (eq (len (tail xs)) 0) "" "x") (en-shape-text (tail xs))))))
+    (defn en-row-text (r) (str_concat (head r) (str_concat " @" (str_concat (int_to_str (en-off r)) (str_concat " +" (str_concat (int_to_str (en-bytes r)) (str_concat " " (str_concat (en-dtype r) (str_concat " " (en-shape-text (en-shape-of r)))))))))))
+    0)
