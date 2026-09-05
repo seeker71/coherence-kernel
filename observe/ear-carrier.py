@@ -1,46 +1,73 @@
-# ear-carrier.py — the ear organ's one local carrier: a long-lived recorder that hears the room in
-# short chunks (sox `rec`, 16 kHz mono), transcribes each with the open reference (mlx-whisper
-# large-v3-turbo, language auto), translates the two other tongues among en/fa/pt-br with the
-# local 3B (mlx_lm, model kept loaded), measures dBFS, and appends one frame per chunk to the
-# ear spool the Form door drains. Nothing leaves this Mac. argv: spool chunk_seconds max_chunks
-import sys, os, time, glob, math, subprocess, wave, struct
-spool, secs, maxn = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
-wrepo = glob.glob(os.path.expanduser('~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo/snapshots/*'))[0]
-lrepo = glob.glob(os.path.expanduser('~/.cache/huggingface/hub/models--mlx-community--Llama-3.2-3B-Instruct-4bit/snapshots/*'))[0]
+# ear-carrier.py — the ear organ's live lane, a stream. A continuous recorder (sox `rec`, 16 kHz
+# mono, raw on a pipe) delivers 20 ms blocks; each arrival wakes the live decoder (whisper-tiny,
+# ~20 ms warm) which offers the current line — audio since the last commit, at most 4 s — and
+# writes a frame, ringing the door's bell. No hop, no sleep: the lane paces at the decoder's own
+# speed. When the speaker pauses (600 ms under the level line) or the line reaches 4 s, the
+# segment's audio is handed to the commit lane (observe/ear-commit-carrier.py, its own process, so the
+# reference and the 3B never stand on this path). argv: spool run_seconds. Nothing leaves this Mac.
+import sys, os, time, glob, math, subprocess, threading, collections, wave
+import numpy as np
+spool, run_s = sys.argv[1], float(sys.argv[2])
+bell, stopf, segdir, seglist, segbell = spool + ".bell", spool + ".stop", spool + ".seg", spool + ".segments", spool + ".seg.bell"
+snap = lambda name: glob.glob(os.path.expanduser('~/.cache/huggingface/hub/models--mlx-community--' + name + '/snapshots/*'))[0]
+tiny = snap('whisper-tiny')
 import mlx_whisper
-from mlx_lm import load, generate
-model, tok = load(lrepo)
-NAMES = {"en": "English", "fa": "Persian", "pt": "Brazilian Portuguese"}
-def tr(text, target):
-    if not text: return ""
-    msgs = [{"role": "user", "content": f"Translate to {NAMES[target]}. Answer with the translation only, one line.\n\n{text}"}]
-    p = tok.apply_chat_template(msgs, add_generation_prompt=True)
-    return generate(model, tok, prompt=p, max_tokens=80, verbose=False).strip().split("\n")[0]
-def dbfs(path):
-    with wave.open(path) as w:
-        n = w.getnframes(); raw = w.readframes(n)
-    if n == 0: return -120
-    s = struct.unpack("<%dh" % n, raw); rms = math.sqrt(sum(x * x for x in s) / n)
-    return int(round(20 * math.log10(rms / 32768))) if rms >= 1 else -120
-os.makedirs(os.path.dirname(spool) or ".", exist_ok=True)
-with open(spool, "a") as f:
-    f.write("<|ear:frame|>\nt=%d\nkind=born\nms=0\ndb=-120\nnsp=100\nlang=\nen=\nfa=\npt=\n<|/ear:frame|>\n" % int(time.time() * 1000)); f.flush()
-n = 0
-while n < maxn and not os.path.exists(spool + ".stop"):
-    wav = spool + ".chunk.wav"; t0 = time.time()
-    subprocess.run(["rec", "-q", "-r", "16000", "-c", "1", "-b", "16", wav, "trim", "0", str(secs)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    db = dbfs(wav)
-    r = mlx_whisper.transcribe(wav, path_or_hf_repo=wrepo, fp16=True, condition_on_previous_text=False, no_speech_threshold=0.5)
-    lang = r.get("language", ""); text = r.get("text", "").strip().replace("\n", " ")
-    segs = r.get("segments", [])
-    nsp = (sum(s.get("no_speech_prob", 0.0) for s in segs) / len(segs)) if segs else 1.0
-    if db < -55 or nsp > 0.6: text = ""; lang = ""  # near-silence, or the reference itself unsure: say nothing
-    out = {"en": "", "fa": "", "pt": ""}
-    src = lang if lang in out else ""  # a fourth tongue is heard as itself and offered in all three
-    if src: out[src] = text
-    for t in ("en", "fa", "pt"):
-        if t != src: out[t] = tr(text, t)
-    ms = int((time.time() - t0) * 1000)
+LEVEL, PAUSE, SEGMAX, RATE = -55, 0.5, 4.0, 16000
+def ring(path):
+    for _ in range(12):  # the door may be painting; catch it at the bell within ~60 ms
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK); os.write(fd, b"x"); os.close(fd); return
+        except OSError:
+            time.sleep(0.005)
+def emit(**fields):
+    body = "".join("%s=%s\n" % (k, str(v).replace("\n", " ")) for k, v in fields.items())
     with open(spool, "a") as f:
-        f.write("<|ear:frame|>\nt=%d\nkind=heard\nms=%d\ndb=%d\nnsp=%d\nlang=%s\nsrc=%s\nen=%s\nfa=%s\npt=%s\n<|/ear:frame|>\n" % (int(time.time() * 1000), ms, db, int(round(nsp * 100)), lang, text, out["en"], out["fa"], out["pt"])); f.flush()
-    n += 1
+        f.write("<|ear:frame|>\nt=%d\n%s<|/ear:frame|>\n" % (int(time.time() * 1000), body)); f.flush()
+    ring(bell)
+def unloop(text):
+    # the tiny model loops on faint room sound ("a little bit of a little bit of ..."): keep the line up to its first repeated four words
+    w = text.split()
+    for i in range(len(w) - 3):
+        if w[i:i + 4] == w[i + 4:i + 8]: return " ".join(w[:i + 4]) + " …"
+    return text
+def dbfs(a):
+    rms = float(np.sqrt(np.mean(a * a))) if a.size else 0.0
+    return int(round(20 * math.log10(rms))) if rms > 1e-6 else -120
+warm = (np.random.randn(RATE) * 0.001).astype(np.float32); mlx_whisper.transcribe(warm, path_or_hf_repo=tiny, fp16=True)
+os.makedirs(segdir, exist_ok=True)
+blocks, lock, arrived = collections.deque(), threading.Lock(), threading.Event()
+rec = subprocess.Popen(["rec", "-q", "-r", str(RATE), "-c", "1", "-b", "16", "-e", "signed-integer", "-t", "raw", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+def reader():
+    while True:
+        raw = rec.stdout.read(640)  # 20 ms
+        if not raw: break
+        with lock: blocks.append((np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0, time.time()))
+        arrived.set()
+threading.Thread(target=reader, daemon=True).start()
+emit(kind="born", db=-120, live="", livelang="", livems=0)
+seg, seg_speech, last_voice, t_start, last_quiet, nseg = [], False, 0.0, time.time(), 0.0, 0
+while time.time() - t_start < run_s and not os.path.exists(stopf):
+    arrived.wait(1.0); arrived.clear()
+    with lock:
+        fresh = list(blocks); blocks.clear()
+    if not fresh: continue
+    seg.extend(fresh); t_end = fresh[-1][1]; now = time.time()
+    db = dbfs(np.concatenate([b for b, _ in seg[-15:]]))
+    if db > LEVEL: seg_speech, last_voice = True, now
+    seg_len = len(seg) * 0.02
+    if seg_speech and seg_len >= 0.3:
+        audio = np.concatenate([b for b, _ in seg[-200:]])
+        r = mlx_whisper.transcribe(audio, path_or_hf_repo=tiny, fp16=True, condition_on_previous_text=False, temperature=0.0, compression_ratio_threshold=None, logprob_threshold=None, no_speech_threshold=None)
+        emit(kind="live", db=db, live=unloop(r.get("text", "").strip()), livelang=r.get("language", ""), livems=int((time.time() - t_end) * 1000))
+        if (now - last_voice > PAUSE) or seg_len >= SEGMAX:
+            nseg += 1; path = "%s/%d-%d.wav" % (segdir, int(t_end * 1000), nseg)
+            with wave.open(path, "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(RATE); w.writeframes((audio * 32767).astype(np.int16).tobytes())
+            with open(seglist, "a") as f: f.write("%s %d\n" % (path, int(t_end * 1000)))
+            ring(segbell)
+            seg, seg_speech = [], False
+    elif not seg_speech:
+        seg = seg[-50:]  # keep one second of room before speech starts
+        if now - last_quiet > 1.0:
+            last_quiet = now; emit(kind="quiet", db=db, live="", livelang="", livems=0)
+emit(kind="done", db=-120, live="", livelang="", livems=0); rec.terminate()
