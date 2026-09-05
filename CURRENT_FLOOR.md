@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 670 rows, 658 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 671 rows, 659 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -304,7 +304,7 @@ in-process kernel rows, the flow point and the render (~9 ms). Every row that
 forks or scans the filesystem — memory_pressure, sysctl, vm_stat, iostat,
 pgrep and ps, the storage catalog, the hearth spools, the governor refresh —
 is gathered by `observe/form-glass-sensors-live.fk` at its own cadence and given
-into shared memory; `tools/watch-glass.sh` stands it beside the glass, and an
+into shared memory; `tools/watch-glass.sh` stands it and the machine frame process beside the glass, and an
 absent sensor is one row that names its door. The pacer is `host_sleep_ms` on
 the monotonic clock, never a forked `/bin/sleep`; the terminal is read through
 `terminal_cols`/`terminal_lines`, never `tput`. `FGLActiveHz` 25, `FGLQuietHz` 20.
@@ -324,25 +324,33 @@ sample of a kind is published the view names the organ absent by its door
 channel protocols and the grammars have no live publisher yet; each owes one
 give into the glass (R112).
 
-**The gauges read the machine.** Each atlas flow lane takes the model owner's
-counter while the owner is measured within the lease and otherwise the host or
-this process, never the glass's own idle Metal queue: `G` is the host GPU level
-the accelerator publishes (`host_gpu_utilization`, tag 174, IOKit loaded by name
-inside the Metal carrier) integrated in-process into busy microseconds
-(`host_gpu_busy_us`, 175 — one read per 50 ms window, because the accelerator
-answers the mean since the previous query by any process and a second read
-microseconds later reads 0); `C` is this process's CPU clock (`host_cpu_us`,
-176); `D` its primitive dispatches (`kernel_stat 0`); `J` its heat-lane calls
-(`kernel_stat 44`); `I` its Metal batches in flight. Witnessed 2026-09-05 on
-twenty live frames: C 17K µs, D 2M dispatches, J 143K calls per frame, G
-stepping every third frame, every lane wearing its own evidence symbol.
+**The frame buffer is the read surface.** Every number on the atlas came out of
+a shared-memory gift frame, and every row set the glass reads carries the
+frame's own witness row — `frame.<sensor>`: the shm name and the sequence it
+was taken at — so a lane can say where it read: `G 0 shm:/fg-5f223d19#1024`,
+`D 7286422933 shm:/fg-3db9b282#80 + shm:/fg-5f223d19#1024 + shm:/fg-ea12eba1#6878`.
+There is no fallback: one id per lane, and `D` `J` `I` sum the counter over
+every process that gives a frame. The frames: `machine` (its own fork-free
+process, `observe/form-glass-machine-live.fk`, every 50 ms — the host GPU
+level and its integral, `host_gpu_utilization` 174 / `host_gpu_busy_us` 175,
+host CPU busy over every core from the Mach load info, `host_cpu_busy_us` 173,
+and its own kernel counters), `glass` (the glass gives its own kernel, metal,
+framebuffer and heat rows into a frame each frame and reads them back like
+any other), `host` `process` `storage` `queue` `owner` (the slow sensors,
+`observe/form-glass-sensors-live.fk`). The one-shot doors read the same
+frames; nothing on any glass path forks or scans. The `k` view lists the
+frames read with their sequences. `observe/form-glass-frame-budget-run.fk`
+prints the read surface after its twentieth frame. One seam: the
+accelerator's `Device Utilization %` is consumed on read and produced about
+once a second, so with Activity Monitor open the glass's `G` reads what is
+left — 0 (R116).
 
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=46 moving=0 released=67 -> 46000067
+./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=68 -> 47000068
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,

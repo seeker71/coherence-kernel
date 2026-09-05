@@ -112,6 +112,20 @@ static long long fk_gpu_busy_total_us; /* host GPU busy microseconds integrated 
 static long long fk_gpu_busy_last_us;  /* monotonic clock at the last fresh level read (the integration step) */
 static long long fk_gpu_level_cache = -1; /* the last level read; the utilization the accelerator answers is the mean since the previous query by ANY process, so a second read within the window would read 0 */
 long long fk_host_gpu_utilization(void); /* the Metal carrier answers; the weak stub below answers -1 */
+#ifdef __APPLE__
+extern unsigned int mach_host_self(void);
+extern int host_statistics(unsigned int host, int flavor, int *info, unsigned int *count);
+#endif
+static long long fk_host_cpu_busy_us(void) {
+#ifdef __APPLE__
+    int ticks[4] = { 0, 0, 0, 0 };
+    unsigned int count = 4;
+    if (host_statistics(mach_host_self(), 3, ticks, &count) != 0) { return -1; }
+    return ((long long)(unsigned int)ticks[0] + (long long)(unsigned int)ticks[1] + (long long)(unsigned int)ticks[3]) * 10000;
+#else
+    return -1;
+#endif
+}
 static long long fk_gpu_step(long long now_us) {
     if (fk_gpu_busy_last_us > 0 && now_us - fk_gpu_busy_last_us < 50000) { return fk_gpu_level_cache; }
     long long level = fk_host_gpu_utilization();
@@ -9868,6 +9882,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 181) {
         return fk_terminal_dim(0);
+    }
+    if (t == 173) {
+        return fk_host_cpu_busy_us() << 1;
     }
     if (t == 174) {
         struct timespec fk_tl;
