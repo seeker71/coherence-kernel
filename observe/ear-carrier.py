@@ -1,4 +1,4 @@
-# ear-chunk.py — the ear organ's one crossing: a long-lived recorder that hears the room in
+# ear-carrier.py — the ear organ's one local carrier: a long-lived recorder that hears the room in
 # short chunks (sox `rec`, 16 kHz mono), transcribes each with the open reference (mlx-whisper
 # large-v3-turbo, language auto), translates the two other tongues among en/fa/pt-br with the
 # local 3B (mlx_lm, model kept loaded), measures dBFS, and appends one frame per chunk to the
