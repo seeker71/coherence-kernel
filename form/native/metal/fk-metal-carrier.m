@@ -161,6 +161,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <dlfcn.h>
 #include <pthread.h>
 #include <unistd.h>
 
@@ -1217,4 +1218,43 @@ long long fk_metal_status_external(char *out, long long cap) {
         [r appendFormat:@"last_error=%@\n", fk_last_err == nil ? @"none" : fk_last_err];
         return fk_emit(out, cap, r);
     }
+}
+
+// HOST GPU LEVEL. The accelerator publishes its own PerformanceStatistics through the I/O registry;
+// "Device Utilization %" is the whole host's GPU level, every process, no privilege asked. IOKit is
+// loaded by name so the build line stays what it is; a host without the door answers -1 and the
+// glass names it absent. The kernel integrates this level over its own clock gaps (host_gpu_busy_us).
+typedef unsigned int fk_io_object_t;
+long long fk_host_gpu_utilization(void) {
+    static void *iokit = 0;
+    static CFMutableDictionaryRef (*matching)(const char *) = 0;
+    static int (*getServices)(unsigned int, CFDictionaryRef, fk_io_object_t *) = 0;
+    static fk_io_object_t (*next)(fk_io_object_t) = 0;
+    static CFTypeRef (*createProperty)(fk_io_object_t, CFStringRef, CFAllocatorRef, unsigned int) = 0;
+    static int (*release)(fk_io_object_t) = 0;
+    if (!iokit) {
+        iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+        if (!iokit) return -1;
+        matching = (CFMutableDictionaryRef (*)(const char *))dlsym(iokit, "IOServiceMatching");
+        getServices = (int (*)(unsigned int, CFDictionaryRef, fk_io_object_t *))dlsym(iokit, "IOServiceGetMatchingServices");
+        next = (fk_io_object_t (*)(fk_io_object_t))dlsym(iokit, "IOIteratorNext");
+        createProperty = (CFTypeRef (*)(fk_io_object_t, CFStringRef, CFAllocatorRef, unsigned int))dlsym(iokit, "IORegistryEntryCreateCFProperty");
+        release = (int (*)(fk_io_object_t))dlsym(iokit, "IOObjectRelease");
+    }
+    if (!matching || !getServices || !next || !createProperty || !release) return -1;
+    fk_io_object_t iter = 0;
+    if (getServices(0, matching("IOAccelerator"), &iter) != 0) return -1;
+    long long answer = -1;
+    fk_io_object_t entry = 0;
+    while ((entry = next(iter)) != 0) {
+        CFTypeRef stats = createProperty(entry, CFSTR("PerformanceStatistics"), kCFAllocatorDefault, 0);
+        if (stats && CFGetTypeID(stats) == CFDictionaryGetTypeID()) {
+            CFTypeRef v = CFDictionaryGetValue((CFDictionaryRef)stats, CFSTR("Device Utilization %"));
+            if (v && CFGetTypeID(v) == CFNumberGetTypeID()) { long long n = 0; CFNumberGetValue((CFNumberRef)v, kCFNumberSInt64Type, &n); if (n > answer) { answer = n; } }
+        }
+        if (stats) CFRelease(stats);
+        release(entry);
+    }
+    release(iter);
+    return answer;
 }

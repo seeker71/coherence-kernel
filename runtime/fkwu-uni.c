@@ -107,6 +107,19 @@ static long long fk_diag_quiet;  /* nonzero: speculative compile — count into
 static int fk_src_truncated;     /* 1 if the source was amputated at the source-text cap (dissolved 2026-09-02: the buffer grows) */
 static long long fk_srctext_cap;   /* live source-text capacity (kernel_stat 25); owned by fk_srctext_reserve below */
 static long long fk_srctext_grows; /* source-text doublings this run (kernel_stat 26) */
+static long long fk_heat_total;    /* heat-lane calls this run (kernel_stat 44); defined with the heat lane below */
+static long long fk_gpu_busy_total_us; /* host GPU busy microseconds integrated in this process (host_gpu_busy_us) */
+static long long fk_gpu_busy_last_us;  /* monotonic clock at the last fresh level read (the integration step) */
+static long long fk_gpu_level_cache = -1; /* the last level read; the utilization the accelerator answers is the mean since the previous query by ANY process, so a second read within the window would read 0 */
+long long fk_host_gpu_utilization(void); /* the Metal carrier answers; the weak stub below answers -1 */
+static long long fk_gpu_step(long long now_us) {
+    if (fk_gpu_busy_last_us > 0 && now_us - fk_gpu_busy_last_us < 50000) { return fk_gpu_level_cache; }
+    long long level = fk_host_gpu_utilization();
+    if (fk_gpu_busy_last_us > 0 && level >= 0 && now_us > fk_gpu_busy_last_us) { fk_gpu_busy_total_us = fk_gpu_busy_total_us + (now_us - fk_gpu_busy_last_us) * level / 100; }
+    fk_gpu_busy_last_us = now_us;
+    fk_gpu_level_cache = level;
+    return level;
+}
 /* ── the admission pulse: WHICH DOOR this program entered through, readable by
  * the running program itself via kernel_stat 15..18. The icetide dig
  * (2026-09-01, corpus 1217) showed the reproduction key of a whole wound family
@@ -1477,6 +1490,7 @@ static long long fk_metal_matvec_f32_external(const char *msl, long long msl_len
  * into 0 for handles and into a spoken metal_linked=false for metal_status. */
 #if defined(__GNUC__) || defined(__clang__)
 #define FK_METAL_WEAK __attribute__((weak))
+FK_METAL_WEAK long long fk_host_gpu_utilization(void) { return -1; } /* strong symbol lives in the Metal carrier; a build without it answers absent */
 #else
 #define FK_METAL_WEAK static
 #endif
@@ -9855,6 +9869,22 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 181) {
         return fk_terminal_dim(0);
     }
+    if (t == 174) {
+        struct timespec fk_tl;
+        clock_gettime(CLOCK_MONOTONIC, &fk_tl);
+        return fk_gpu_step((long long)fk_tl.tv_sec * 1000000 + (long long)fk_tl.tv_nsec / 1000) << 1;
+    }
+    if (t == 175) {
+        struct timespec fk_tg;
+        clock_gettime(CLOCK_MONOTONIC, &fk_tg);
+        fk_gpu_step((long long)fk_tg.tv_sec * 1000000 + (long long)fk_tg.tv_nsec / 1000);
+        return fk_gpu_busy_total_us << 1;
+    }
+    if (t == 176) {
+        struct timespec fk_tc;
+        clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &fk_tc);
+        return ((long long)fk_tc.tv_sec * 1000000 + (long long)fk_tc.tv_nsec / 1000) << 1;
+    }
     if (t == 182) {
         struct timespec fk_ts;
         clock_gettime(CLOCK_MONOTONIC, &fk_ts);
@@ -10922,6 +10952,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 43) {
             return fk_fntop << 1;
+        }
+        if (ks_k == 44) {
+            return fk_heat_total << 1;
         }
         if (ks_k == 40) {
             return fk_conf_pool_grows << 1;
