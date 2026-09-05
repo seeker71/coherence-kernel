@@ -88,15 +88,8 @@ section [form.bml] {
             let owner = fgl-owner-liveness(samples);
             if eq(len(owner), 0) then list() else if not(eq(fgtm-field-present?(fgtm-sample-handle(owner)), 1)) then list() else fgl-owner-process-read(fgtm-field-value(fgtm-sample-handle(owner)));
         }
-        def fgl-owner-process-read(pid) {
-            let command = fgo-pid-ps-command(int_to_str(pid));
-            let processes = if is-blank?(command) then list() else fgo-ps-processes(host-exec(command, ""));
-            if eq(len(processes), 1) then head(processes) else list();
-        }
-        def fgl-owner-nice(pid) {
-            let value = trim(host-exec(str_concat("/bin/ps -p ", str_concat(int_to_str(pid), " -o ni=")), ""));
-            if eq(fgo-ps-uint?(value), 1) then str_to_int(value) else -1;
-        }
+        def fgl-owner-process-read(pid) = fgo-process-read(pid);
+        def fgl-owner-nice(pid) = fgo-ps-nice(fgo-process-read(pid));
         def fgl-owner-process-rows(samples) {
             let process = fgl-owner-process(samples);
             if eq(len(process), 0) then fgl-owner-absent-rows(samples) else fgl-owner-process-rows-present(process, fgl-owner-nice(fgo-ps-pid(process)));
@@ -126,11 +119,6 @@ section [form.bml] {
             if or(eq(len(held), 0), eq(fgl-cycle?(frame, 2), 1)) then fgo-observe-rows(fgl-owner-process-rows(samples), epoch, frame) else held;
         }
 
-        def fgl-terminal-number(command, fallback, low, high) {
-            let raw = trim(host-exec(command, ""));
-            let value = if is-blank?(raw) then fallback else str_to_int(raw);
-            if or(lt(value, low), gt(value, high)) then fallback else value;
-        }
         def fgl-terminal-width() = fgl-terminal-native(terminal_cols(), 100, 1, 1000);
         def fgl-terminal-height() = fgl-terminal-native(terminal_lines(), 30, 1, 300);
         def fgl-terminal-native(value, fallback, low, high) = if nothing?(value) then fallback else if or(lt(value, low), gt(value, high)) then fallback else value;
@@ -146,7 +134,7 @@ section [form.bml] {
         }
         def fgl-fast-rows(frame, held, heatRows) = fgl-observe-fast-rows(heatRows);
         def fgl-observe-host-rows() {
-            let memoryRows = fgo-host-rows(host-exec("/usr/bin/memory_pressure -Q", ""));
+            let memoryRows = fgo-host-rows(host_vm_stat());
             let processRows = fgo-live-process-rows();
             append(memoryRows, processRows);
         }
@@ -168,9 +156,23 @@ section [form.bml] {
             let saved = if ge(cur, 0) then fgl-host-last-save(cur) else 0;
             if lt(delta, 0) then fgo-unavailable("host", "pageins-delta", "Mach pageins since last host sample", "pages", "os-memory", "glass.monitor.host-last.pageins", "health", "no prior pageins sample to subtract") else fgo-int("host", "pageins-delta", "Mach pageins since last host sample", delta, "pages", delta, "os-memory", "physical-live", "vm_stat.Pageins-delta", if eq(delta, 0) then "quiet" else "live", "health", "rising during a token stall is disk-backed page-in, not idle");
         }
+        // disk rates: the reader's own deltas over the cumulative driver statistics, between two host samples
+        def fgl-host-clock-row(nowMs) = fgo-int("host", "host-sample-ms", "host sample clock", nowMs, "milliseconds", 0, "unified", "physical-live", "host_monotonic_ms", "live", "health", "monotonic clock at this host sample; the rate rows divide by its gap");
+        def fgl-disk-rate-row(id, label, value, unit, note) = if lt(value, 0) then fgo-unavailable("host", id, label, unit, "disk", "IOBlockStorageDriver.Statistics.delta", "health", "no prior host sample to subtract") else fgo-int("host", id, label, value, unit, value, "disk", "derived-window", "IOBlockStorageDriver.Statistics.delta", if eq(value, 0) then "quiet" else "live", "health", note);
+        def fgl-disk-rate-rows(held, current, nowMs) {
+            let prevMs = fgl-number-for(held, list("host-sample-ms"));
+            let elapsed = if or(lt(prevMs, 0), le(nowMs, prevMs)) then -1 else sub(nowMs, prevMs);
+            let prevBytes = add(fgl-number-for(held, list("disk-bytes-read")), fgl-number-for(held, list("disk-bytes-written")));
+            let curBytes = add(fgl-number-for(current, list("disk-bytes-read")), fgl-number-for(current, list("disk-bytes-written")));
+            let prevOps = fgl-number-for(held, list("disk-ops"));
+            let curOps = fgl-number-for(current, list("disk-ops"));
+            let mbps = if or(lt(elapsed, 0), or(lt(prevBytes, 0), lt(curBytes, prevBytes))) then -1 else div(mul(sub(curBytes, prevBytes), 100000), mul(1048576, elapsed));
+            let tps = if or(lt(elapsed, 0), or(lt(prevOps, 0), lt(curOps, prevOps))) then -1 else div(mul(sub(curOps, prevOps), 1000), elapsed);
+            list(fgl-disk-rate-row("disk-mbps", "disk throughput", mbps, "centi-MB/s", "bytes read + written per second over the last host gap"), fgl-disk-rate-row("disk-tps", "disk transactions", tps, "tps", "operations per second over the last host gap"), fgl-host-clock-row(nowMs));
+        }
         def fgl-observe-host-rows-with-delta(held) {
             let current = fgl-observe-host-rows();
-            cons(fgl-pageins-delta-row(held, current), current);
+            append(fgl-disk-rate-rows(held, current, host_monotonic_ms()), cons(fgl-pageins-delta-row(held, current), current));
         }
         def fgl-host-rows-at(frame, held, epoch) = if or(eq(len(held), 0), eq(fgl-cycle?(frame, 4), 1)) then fgo-observe-rows(fgl-observe-host-rows-with-delta(held), epoch, frame) else held;
         def fgl-host-rows(frame, held) = fgl-host-rows-at(frame, held, 0);

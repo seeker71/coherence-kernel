@@ -28,7 +28,7 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is 16,969 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is 17153 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
 preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 671 rows, 659 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 675 rows, 663 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -221,7 +221,7 @@ jit-source-runtime-orchestrator 1048575.
 One persistent process paints a retained terminal frame from the body's own
 observation: ten data views plus help, a front/back frame buffer, row-diff
 repaint, and a correlated line-commit control sidecar
-(`observe/form-glass-control-run.fk`; `tools/watch-glass.sh` is the foreground
+(`observe/form-glass-control-run.fk`; `./fkwu observe/form-glass-run.fk` is the foreground
 carrier). Keys `h a t o m f j s k v n` choose a view, `1 2 3 4` and `0` select
 dialects, `i e c q` inspect, ask evidence, continue, abstain.
 
@@ -305,7 +305,7 @@ in-process kernel rows, the flow point and the render (~9 ms). Every row that
 forks or scans the filesystem — memory_pressure, sysctl, vm_stat, iostat,
 pgrep and ps, the storage catalog, the hearth spools, the governor refresh —
 is gathered by `observe/form-glass-sensors-live.fk` at its own cadence and given
-into shared memory; `tools/watch-glass.sh` stands it and the machine frame process beside the glass, and an
+into shared memory; `observe/form-glass-run.fk` stands it and the machine frame process beside the glass, and an
 absent sensor is one row that names its door. The pacer is `host_sleep_ms` on
 the monotonic clock, never a forked `/bin/sleep`; the terminal is read through
 `terminal_cols`/`terminal_lines`, never `tput`. `FGLActiveHz` 25, `FGLQuietHz` 20.
@@ -346,12 +346,28 @@ accelerator's `Device Utilization %` is consumed on read and produced about
 once a second, so with Activity Monitor open the glass's `G` reads what is
 left — 0 (R116).
 
+**No shell on any glass path.** The carrier is a Form cell,
+`./fkwu observe/form-glass-run.fk`: it lowers its own priority (`host_nice`),
+spawns the two frame processes as argv lists the kernel executes itself
+(`host_spawn_quiet` — stdout and stderr to /dev/null so the terminal stays the
+glass's), admits and runs the live loop the same way (`host_spawn`,
+`host_wait`), asks the supervisor in-process, and ends its children with
+`host_kill`. Every host row is a door the kernel opens itself: memory from the
+Mach VM statistics (`host_vm_stat`, `sysctl.hw.memsize`), load from
+`getloadavg` (`host_load_avg`), disk from every block storage driver's
+cumulative statistics (`host_disk_stat`, IOKit by name; rates are the reader's
+deltas), processes from libproc (`host_processes name` → pid, resident bytes,
+CPU microseconds, elapsed seconds; no `ps`, no `pgrep`), the governor and
+launch refresh by argv (`host_capture` where an answer is needed). `tools/`
+carries no glass script; the observer carries no text parser for a tool's
+output. Tags 151–161.
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=68 -> 47000068
+./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=69 -> 47000069
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
