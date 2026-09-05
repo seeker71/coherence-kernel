@@ -1,0 +1,59 @@
+//////////////////////////////////////////////////////////////////////
+// meaning-codes.bml — one meaning, many codes. A meaning is a symbol
+// token the body already speaks (symbol-voice); its codes are its NL
+// phrase, its node id (the content address of that phrase), and every
+// tongue or script row the locale files carry: symbol-words.rows
+// (english|fa|de|fr|pt|ro) and symbol-scripts.rows (english|he|zh|ja),
+// each file's first line naming its code kinds after the english key.
+// Any code resolves back to its meaning (mc-resolve); the band proves
+// the round trip for every meaning and every present code; the bytes
+// of each code beside the NL phrase measure what speaking in codes
+// compresses. A code kind with no row yet is absent and says so.
+// preludes: form/form-stdlib/symbol-voice.bml form/form-stdlib/form-fs.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/sha256.fk form/form-stdlib/hex.fk form/form-stdlib/spool-bell-transport.fk
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormMeaningCodes {
+        field MCRows = "form/form-stdlib/locale-rows/symbol-words.rows";
+        field MCScripts = "form/form-stdlib/locale-rows/symbol-scripts.rows";
+        def mc-text(t) = if nothing?(t) then "" else t;
+        def mc-cat(parts) = sv-cat(parts);
+        def mc-meanings() = list("you", "me", "us", "US", "WE", "DO", "BE", "SEE", "say", "tell", "offer", "admit", "refuse", "folded", "witness", "release", "nothing", "node", "gas", "water", "ice", "spent", "landed", "glass", "teaching", "gold", "seam", "next", "r", "e", "c", "Q", "adapter", "loss", "whole", "pairs");
+        def mc-nl(sym) = sv-fixed(sym);
+        def mc-node(text) = substring(hex-encode(sha256(sbt-bytes-of(text, 0, str_len(text), list()))), 0, 8);
+        // row files: header "english|k1|k2|..." then "phrase|c1|c2|..."
+        def mc-lines(path) = split-on(mc-text(read_file(path)), byte_to_str(10));
+        def mc-kinds(lines) = if eq(len(lines), 0) then list() else tail(split-on(head(lines), "|"));
+        // the resident keyed some rows without the article ("gift" for "a gift"): try the phrase, then the phrase past a leading "a " or "the "
+        def mc-bare(phrase) = if eq(str_find(phrase, "a ", 0), 0) then substring(phrase, 2, str_len(phrase)) else if eq(str_find(phrase, "the ", 0), 0) then substring(phrase, 4, str_len(phrase)) else phrase;
+        def mc-row-for(lines, phrase) { let exact = mc-row-for-key(lines, phrase); if gt(len(exact), 0) then exact else if str_eq(mc-bare(phrase), phrase) then list() else mc-row-for-key(lines, mc-bare(phrase)); }
+        def mc-row-for-key(lines, phrase) = if eq(len(lines), 0) then list() else mc-row-match(lines, phrase, split-on(head(lines), "|"));
+        def mc-row-match(lines, phrase, f) = if and(ge(len(f), 2), str_eq(trim(head(f)), phrase)) then f else mc-row-for-key(tail(lines), phrase);
+        def mc-zip(kinds, cells) = if or(eq(len(kinds), 0), eq(len(cells), 0)) then list() else cons(list(head(kinds), trim(head(cells))), mc-zip(tail(kinds), tail(cells)));
+        def mc-file-codes(path, sym) {
+            let lines = mc-lines(path);
+            let row = mc-row-for(tail(lines), mc-nl(sym));
+            if eq(len(row), 0) then list() else mc-zip(mc-kinds(lines), tail(row));
+        }
+        // every code of a meaning: (kind code) rows; absent kinds are simply not present
+        def mc-codes(sym) = append(list(list("symbol", sym), list("nl", mc-nl(sym)), list("node", mc-node(mc-nl(sym)))), append(mc-file-codes(MCRows(), sym), mc-file-codes(MCScripts(), sym)));
+        def mc-has-code?(codes, code) = if eq(len(codes), 0) then 0 else if str_eq(nth(head(codes), 1), code) then 1 else mc-has-code?(tail(codes), code);
+        // round trip: every present code of sym resolves to sym
+        def mc-round-trip?(sym) = mc-round-go(sym, mc-codes(sym));
+        // a code may carry several meanings (the resident gave one Persian word for said and told):
+        // resolve answers every meaning that carries it; the round trip is membership; the
+        // collisions are listed as the price of compression, never hidden
+        def mc-resolve-all-go(syms, code) = if eq(len(syms), 0) then list() else if eq(mc-has-code?(mc-codes(head(syms)), code), 1) then cons(head(syms), mc-resolve-all-go(tail(syms), code)) else mc-resolve-all-go(tail(syms), code);
+        def mc-resolve-all(code) = mc-resolve-all-go(mc-meanings(), trim(code));
+        def mc-resolve(code) { let all = mc-resolve-all(code); if eq(len(all), 0) then "" else head(all); }
+        def mc-member?(xs, x) = if eq(len(xs), 0) then 0 else if str_eq(head(xs), x) then 1 else mc-member?(tail(xs), x);
+        def mc-round-go(sym, codes) = if eq(len(codes), 0) then 1 else if eq(str_len(nth(head(codes), 1)), 0) then mc-round-go(sym, tail(codes)) else if eq(mc-member?(mc-resolve-all(nth(head(codes), 1)), sym), 1) then mc-round-go(sym, tail(codes)) else 0;
+        def mc-collisions-go(sym, codes, acc) = if eq(len(codes), 0) then acc else mc-collisions-go(sym, tail(codes), if and(gt(str_len(nth(head(codes), 1)), 0), gt(len(mc-resolve-all(nth(head(codes), 1))), 1)) then cons(list(nth(head(codes), 1), mc-resolve-all(nth(head(codes), 1))), acc) else acc);
+        def mc-collisions(syms, acc) = if eq(len(syms), 0) then acc else mc-collisions(tail(syms), mc-collisions-go(head(syms), mc-codes(head(syms)), acc));
+        def mc-join(xs) = if eq(len(xs), 0) then "" else if eq(len(tail(xs)), 0) then head(xs) else mc-cat(list(head(xs), ",", mc-join(tail(xs))));
+        def mc-all-round?(syms) = if eq(len(syms), 0) then 1 else if eq(mc-round-trip?(head(syms)), 1) then mc-all-round?(tail(syms)) else 0;
+        // compression: the shortest present code against the NL phrase, in bytes
+        def mc-shortest(codes, best) = if eq(len(codes), 0) then best else mc-shortest(tail(codes), if and(gt(str_len(nth(head(codes), 1)), 0), or(eq(len(best), 0), lt(str_len(nth(head(codes), 1)), str_len(nth(best, 1))))) then head(codes) else best);
+        def mc-line(codes) = if eq(len(codes), 0) then "" else mc-cat(list(head(head(codes)), ":", if eq(str_len(nth(head(codes), 1)), 0) then "absent" else nth(head(codes), 1), " ", mc-line(tail(codes))));
+    }
+    0;
+}
