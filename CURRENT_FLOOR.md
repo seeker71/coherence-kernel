@@ -43,7 +43,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 660 rows, 649 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 666 rows, 654 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -214,12 +214,57 @@ jit-policy-front-sweep 31, form-static-analyzer 16383,
 jit-dylib-cache-lifecycle 16777215, jit-dylib-live-runtime-proof 4294967295,
 jit-source-runtime-orchestrator 1048575.
 
+## The Glass
+
+One persistent process paints a retained terminal frame from the body's own
+observation: seven data views plus help, a front/back frame buffer, row-diff
+repaint, and a correlated line-commit control sidecar
+(`observe/form-glass-control-run.fk`; `tools/watch-glass.sh` is the foreground
+carrier). Keys `h a t o m f j s` choose a view, `1 2 3 4` and `0` select
+dialects, `i e c q` inspect, ask evidence, continue, abstain.
+
+```text
+form-glass-live-band                   -> 1073741823
+form-glass-live-ui-band                -> 1073741823
+form-glass-dashboard-band              -> 16777215
+form-glass-observer-band               -> 8388607
+form-glass-event-loop-band             -> 16777215
+form-glass-staged-startup-band         -> 65535
+form-glass-launch-band                 -> 32767
+form-glass-deadline-cadence-band       -> 4095
+form-glass-jit-hold-band               -> 4095
+form-glass-meaning-ui-band             -> 8191
+```
+
+`s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
+the four that carry BMF categories in the reviewed table) it samples a bounded
+window of that language's real grammar and a bounded window of that language's
+real source in this tree, and names the category each construct's own emitter
+interns together with its NodeID read from the dialect table:
+
+```text
+py ::= import-as ::= "import" $module:name "as" $alias:name => pybmf-emit-import
+py -> PY-BMF-IMPORT @1.2.99.501 dialect-categories | verify_category_contract.py: NAME_ALIASES = {
+```
+
+Nothing in that view is a fixture, and a sample that is not found says
+UNAVAILABLE with its door and reason. The band checks one NodeID against
+`form-ontology-bp.fk` so a drifted mirror cannot pass.
+
+Each atlas flow gauge carries the evidence symbol of its own lane, its named
+source door, and the standing total beside the per-frame rate — so `G*?.=0u/3M`
+(idle now, three million microseconds of GPU work behind it) reads differently
+from `C*?.=0u/0` (never ran). Telemetry crosses between processes as files
+under a five-second freshness lease, so a lane whose publisher has gone silent
+shows a frozen number; the gauge's evidence symbol is what says so
+(`release-ledger.bml` R97, R98).
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=57 -> 38000057
+./fkwu form/form-stdlib/release-ledger.bml -> open=41 moving=0 released=59 -> 41000059
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
