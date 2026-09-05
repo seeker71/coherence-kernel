@@ -1,0 +1,35 @@
+; hearth-tongues-run.fk — any tongues, same level: the resident fills the
+; symbol voice's phrases in the tongues named on stdin, one pipe row per
+; phrase under a header naming them, stored as symbol-<tongues>.rows in
+; locale-rows, which meaning-codes reads like every other tongue file.
+; stdin line 1: tongues, pipe-separated, as the resident should name them
+; (e.g. arabic|hindi|swahili); line 2: words per ask (blank -> 8).
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/hearth.bml form/form-stdlib/lane-motion.bml form/form-stdlib/voice-school.bml form/form-stdlib/meaning-codes.bml
+(do
+    (defn ht-say (k v) (print_str (str_concat "hearth-tongues " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn ht-trim (s) (if (nothing? s) "" (trim s)))
+    (defn ht-text (t) (if (nothing? t) "" t))
+    (defn ht-after-last (s tag) (do (let at (str_find s tag 0)) (if (lt at 0) s (ht-after-last (substring s (add at (str_len tag)) (str_len s)) tag))))
+    (defn ht-strip (s tag) (do (let at (str_find s tag 0)) (if (lt at 0) s (ht-strip (str_concat (substring s 0 at) (substring s (add at (str_len tag)) (str_len s))) tag))))
+    (defn ht-body (rsp turn) (do (let at (str_find rsp (str_concat "turn=" (str_concat (int_to_str turn) "\n")) 0)) (let m (if (lt at 0) (sub 0 1) (str_find rsp (lms-mark-response) at))) (let body (if (lt m 0) "" (substring rsp (add m (str_len (lms-mark-response))) (str_len rsp)))) (let said (ht-strip (ht-after-last body "</think>") "<think>")) (let e (str_find said "<|" 0)) (trim (if (lt e 0) said (substring said 0 e)))))
+    (defn ht-phrases (syms) (if (eq (len syms) 0) (list) (do (let p (mc-nl (head syms))) (if (eq (str_len p) 0) (ht-phrases (tail syms)) (cons p (ht-phrases (tail syms)))))))
+    (defn ht-take (xs n) (if (or (eq n 0) (eq (len xs) 0)) (list) (cons (head xs) (ht-take (tail xs) (sub n 1)))))
+    (defn ht-drop (xs n) (if (or (eq n 0) (eq (len xs) 0)) xs (ht-drop (tail xs) (sub n 1))))
+    (defn ht-join (xs sep) (if (eq (len xs) 0) "" (if (eq (len (tail xs)) 0) (head xs) (str_concat (head xs) (str_concat sep (ht-join (tail xs) sep))))))
+    (defn ht-dash (s i acc) (if (ge i (str_len s)) acc (ht-dash s (add i 1) (str_concat acc (if (eq (str_byte_at s i) 124) "-" (byte_to_str (str_byte_at s i)))))))
+    (defn ht-task (tongues words) (mc-cat (list "/no_think Translate each English phrase into " (ht-join (split-on tongues "|") ", ") ". Answer ONLY one line per phrase, exactly this shape, no numbering, no notes, the english phrase copied verbatim first: english|" tongues ". Phrases: " (ht-join words "; "))))
+    (defn ht-send (tongues words per turn acc) (if (eq (len words) 0) (reverse acc) (do (let sent (hearth-send turn (hearth-kind-answer) (ht-task tongues (ht-take words per)))) (ht-send tongues (ht-drop words per) per (add turn 1) (cons turn acc)))))
+    (defn ht-all-in? (rsp asks) (if (eq (len asks) 0) 1 (if (eq (str_len (ht-body rsp (head asks))) 0) 0 (ht-all-in? rsp (tail asks)))))
+    (defn ht-wait (asks waited) (if (or (eq (ht-all-in? (ht-text (read_file (hearth-reply))) asks) 1) (ge waited (mul 2 (hearth-review-wait-s)))) waited (do (let r (hearth-rest-s (hearth-review-tick-s))) (ht-wait asks (add waited (hearth-review-tick-s))))))
+    (defn ht-store (path rsp asks n) (if (eq (len asks) 0) n (do (let body (ht-body rsp (head asks))) (let wrote (if (lt (str_len body) 8) 0 (sbt-append path (str_concat body (byte_to_str 10))))) (ht-store path rsp (tail asks) (add n (if (lt (str_len body) 8) 0 1))))))
+    (let tongues (ht-trim (read_line)))
+    (let per (str_to_int (do (let l (ht-trim (read_line))) (if (eq (str_len l) 0) "8" l))))
+    (let path (mc-cat (list "form/form-stdlib/locale-rows/symbol-" (ht-dash tongues 0 "") ".rows")))
+    (if (or (eq (str_len tongues) 0) (eq (hearth-standing) 0)) (ht-say "signal" "nothing reason=no-tongues-or-no-standing-hearth")
+        (do (let started (if (eq (fs-exists? path) 1) 0 (write_file_text path (mc-cat (list "english|" tongues (byte_to_str 10))))))
+            (let asks (ht-send tongues (ht-phrases (mc-meanings)) per (add (lms-max-turn (read_file (hearth-task))) 1) (list)))
+            (let waited (ht-wait asks 0))
+            (let stored (ht-store path (ht-text (read_file (hearth-reply))) asks 0))
+            (ht-say "stored" (mc-cat (list "asks=" (int_to_str stored) "/" (int_to_str (len asks)) " waited=" (int_to_str waited) "s rows=" path)))
+            0)))
