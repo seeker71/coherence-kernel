@@ -951,6 +951,10 @@ static long long *fk_nscol;
 static long long *fk_nsattr;
 static long long *fk_fbroots;
 static long long fk_fbn;
+static void **fk_gift_base;      /* gift frames: mapped bases (0 = released) */
+static long long *fk_gift_size;  /* gift frames: mapped sizes */
+static long long fk_gift_count;
+static long long fk_gift_cap;
 #if defined(__has_include) && !defined(_WIN32)
 #if __has_include(<sys/stat.h>)
 #include <sys/stat.h>
@@ -965,6 +969,12 @@ extern int stat(const char *, void *);
 #if __has_include(<fcntl.h>)
 #include <fcntl.h>
 #define FK_HAVE_FCNTL_HEADER 1
+#endif
+#if defined(__has_include) && !defined(_WIN32)
+#if __has_include(<sys/mman.h>)
+#include <sys/mman.h>
+#define FK_HAVE_MMAN_HEADER 1
+#endif
 #endif
 #endif
 #if defined(__has_include) && !defined(_WIN32)
@@ -1029,6 +1039,7 @@ extern int open(const char *, int, ...);
 extern long long read(int, void *, unsigned long);
 extern int close(int);
 extern long lseek(int, long, int);
+extern int ftruncate(int, long long);
 extern int rmdir(const char *);
 extern int unlink(const char *);
 extern int rename(const char *, const char *);
@@ -3361,9 +3372,13 @@ static long long fk_sense_stream(long long n) {
  * branch is intentionally gone; a future Form-native carrier deletes this seed
  * bridge too.
  */
+#ifndef FK_HAVE_MMAN_HEADER
 extern void *mmap(void *, unsigned long, int, int, int, long);
+#endif
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+#ifndef FK_HAVE_MMAN_HEADER
 extern int munmap(void *, unsigned long);
+#endif
 extern void pthread_jit_write_protect_np(int);
 #endif
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
@@ -8802,6 +8817,71 @@ static long long fk_walk(long long i, long long fp) {
     }
     return fk_walk_cold(t, i, fp);
 }
+static int fk_gift_live(long long gh) {
+    return gh >= 0 && gh < fk_gift_count && fk_gift_base[gh] != 0;
+}
+/* offer (writable = 1: create, size to want+16 bytes, map read-write) or
+ * receive (writable = 0: attach read-only; absent answers nothing). */
+static long long fk_gift_open(const char *gname, long long want, int writable) {
+#if defined(_WIN32) || !defined(FK_HAVE_MMAN_HEADER)
+    (void)gname; (void)want; (void)writable;
+    fk_die("fkwu: the gift frame (shm_offer/receive/write/read/seq/release) is not wired on this platform yet -- no shared-memory carrier stands here");
+    return fk_nothing;
+#else
+    if (gname[0] != '/' || fk_path_len(gname) > 31) {
+        fk_die("fkwu: shm gift name must begin with '/' and hold at most 31 bytes (the POSIX shm bound on this host)");
+    }
+    int gfd = shm_open(gname, writable ? (O_CREAT | O_RDWR) : O_RDONLY, 0600);
+    if (gfd < 0) {
+        return fk_nothing;
+    }
+    struct stat gst;
+    if (fstat(gfd, &gst) != 0) {
+        close(gfd);
+        return fk_nothing;
+    }
+    long long cap = (long long)gst.st_size;
+    if (writable) {
+        long long need = want + 16;
+        if (need < 4096) {
+            need = 4096;
+        }
+        if (cap < need) {
+            if (ftruncate(gfd, need) != 0 && cap == 0) {
+                close(gfd);
+                return fk_nothing;
+            }
+            if (fstat(gfd, &gst) == 0) {
+                cap = (long long)gst.st_size;
+            }
+        }
+    }
+    if (cap < 16) {
+        close(gfd);
+        return fk_nothing;
+    }
+    void *base = mmap(0, (size_t)cap, writable ? (PROT_READ | PROT_WRITE) : PROT_READ, MAP_SHARED, gfd, 0);
+    close(gfd);
+    if (base == MAP_FAILED) {
+        return fk_nothing;
+    }
+    if (fk_gift_count == fk_gift_cap) {
+        long long nc = fk_gift_cap == 0 ? 8 : fk_gift_cap * 2;
+        void **nb = realloc(fk_gift_base, sizeof(void *) * (unsigned long)nc);
+        long long *ncap = realloc(fk_gift_size, sizeof(long long) * (unsigned long)nc);
+        if (nb == 0 || ncap == 0) {
+            fk_die("fkwu: gift table: out of memory growing");
+        }
+        fk_gift_base = nb;
+        fk_gift_size = ncap;
+        fk_gift_cap = nc;
+    }
+    fk_gift_base[fk_gift_count] = base;
+    fk_gift_size[fk_gift_count] = cap;
+    fk_gift_count = fk_gift_count + 1;
+    return (fk_gift_count - 1) << 1;
+#endif
+}
 static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 9) {
         putchar((int)(fk_walk(fk_node[i][1], fp) >> 1));
@@ -9459,6 +9539,109 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return -2;
         }
         return total << 1;
+    }
+    /* THE GIFT FRAME (tags 184-189): a frame in process shared memory that one
+     * process offers and any other receives with no latency and no polling of a
+     * filesystem. Layout: 16-byte header -- seq (8, atomic; even = stable, odd =
+     * a give in flight) and len (8) -- then the payload. A give writes seq odd,
+     * copies, writes len, writes seq even; a read takes seq, copies, re-reads seq
+     * and retries while the two differ or seq is odd, bounded, so a reader never
+     * carries a torn frame. Offered is not demanded: the gift stands whether or
+     * not anyone reads it, and release unmaps without unlinking, so the frame
+     * stays for the next receiver. Names are POSIX shm names ("/..."); macOS
+     * bounds them at 31 bytes, and a name past the bound refuses by name.
+     * Handles live in a table that grows (birth 8), never a wall. One arm per
+     * tag, as every host door here is written, so the native-surface lens that
+     * reads `if (t == N)` sees each of the six. 190 was the first pick and is
+     * FK_TAG_CONST_HOLD, the once-hold for a top-level let -- a #define no
+     * optable row and no `t == N` site names; the collision walked the first
+     * child and answered it (2026-09-05, the third such collision in a week). */
+    if (t == 184) {
+        static char gname184[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), gname184, FK_PATH_CAP);
+        return fk_gift_open(gname184, fk_walk(fk_node[i][2], fp) >> 1, 1);
+    }
+    if (t == 185) {
+        static char gname185[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), gname185, FK_PATH_CAP);
+        return fk_gift_open(gname185, 0, 0);
+    }
+    if (t == 186) {
+        long long gh = fk_walk(fk_node[i][1], fp) >> 1;
+        long long sv = fk_walk(fk_node[i][2], fp);
+        if (!fk_gift_live(gh) || !fk_is_str(sv)) {
+            return fk_nothing;
+        }
+        volatile long long *gseq = (volatile long long *)fk_gift_base[gh];
+        volatile long long *glen = gseq + 1;
+        char *gpay = (char *)fk_gift_base[gh] + 16;
+        long long si = fk_stri(sv);
+        long long n = fk_sl[si];
+        if (n > fk_gift_size[gh] - 16) {
+            /* a frame that does not fit is refused, never truncated silently */
+            return fk_nothing;
+        }
+        long long s0 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
+        __atomic_store_n(gseq, s0 + 1, __ATOMIC_RELEASE);
+        { long long k = 0; while (k < n) { gpay[k] = fk_sb[fk_so[si] + k]; k = k + 1; } }
+        __atomic_store_n(glen, n, __ATOMIC_RELEASE);
+        __atomic_store_n(gseq, s0 + 2, __ATOMIC_RELEASE);
+        return (s0 + 2) << 1;
+    }
+    if (t == 187) {
+        long long gh = fk_walk(fk_node[i][1], fp) >> 1;
+        if (!fk_gift_live(gh)) {
+            return fk_nothing;
+        }
+        volatile long long *gseq = (volatile long long *)fk_gift_base[gh];
+        volatile long long *glen = gseq + 1;
+        char *gpay = (char *)fk_gift_base[gh] + 16;
+        int tries = 0;
+        for (;;) {
+            long long s1 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
+            if (s1 == 0) {
+                return fk_nothing;
+            }
+            if ((s1 & 1) == 0) {
+                long long n = __atomic_load_n(glen, __ATOMIC_ACQUIRE);
+                if (n < 0 || n > fk_gift_size[gh] - 16) {
+                    return fk_nothing;
+                }
+                fk_sinit();
+                while (fk_sbp + n > fk_scap_b) {
+                    fk_scap_b = fk_scap_b * 2;
+                    fk_sb = realloc(fk_sb, fk_scap_b);
+                    fk_sb_check();
+                }
+                { long long k = 0; while (k < n) { fk_sb[fk_sbp + k] = gpay[k]; k = k + 1; } }
+                long long s2 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
+                if (s1 == s2) {
+                    return fk_strv(fk_sintern(fk_sbp, n));
+                }
+            }
+            tries = tries + 1;
+            if (tries > 4096) {
+                /* a give that never settles is reported, never read torn */
+                return fk_nothing;
+            }
+        }
+    }
+    if (t == 188) {
+        long long gh = fk_walk(fk_node[i][1], fp) >> 1;
+        if (!fk_gift_live(gh)) {
+            return fk_nothing;
+        }
+        long long s = __atomic_load_n((volatile long long *)fk_gift_base[gh], __ATOMIC_ACQUIRE);
+        return (s & 1) ? ((s - 1) << 1) : (s << 1);
+    }
+    if (t == 189) {
+        long long gh = fk_walk(fk_node[i][1], fp) >> 1;
+        if (!fk_gift_live(gh)) {
+            return fk_nothing;
+        }
+        munmap(fk_gift_base[gh], (size_t)fk_gift_size[gh]);
+        fk_gift_base[gh] = 0;
+        return 1 << 1;
     }
     if (t == 62) {
         static char p[FK_PATH_CAP];

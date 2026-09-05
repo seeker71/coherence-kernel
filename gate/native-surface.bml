@@ -118,6 +118,22 @@ section [form.bml] {
         def nsf-dyn-binary(flat) = nsf-or-tags(flat, "(fkc-bin2 (fk-tag n)");
         def nsf-c-tags(texts) = lx-int-uniq(nsf-c-tags-go(texts, list()));
         def nsf-c-tags-go(texts, acc) = if eq(len(texts), 0) then acc else nsf-c-tags-go(tail(texts), append(acc, lx-ints-after(head(texts), "if (t == ", ")")));
+        // Internal walker tags that exist only as a name: `#define FK_TAG_<NAME> <int>`.
+        // No optable row and no `if (t == N)` site names them, so every scan above is
+        // blind to them -- FK_TAG_CONST_HOLD (190) swallowed a manifest row on 2026-09-05,
+        // walking the call as a once-hold and answering its first child.
+        def nsf-define-tags(texts) = lx-int-uniq(nsf-define-tags-go(texts, list()));
+        def nsf-define-tags-go(texts, acc) = if eq(len(texts), 0) then acc else nsf-define-tags-go(tail(texts), append(acc, nsf-define-tags-in(head(texts), 0, list())));
+        def nsf-define-tags-in(text, from, acc) {
+            let i = str_find(text, "#define FK_TAG_", from);
+            if lt(i, 0) then reverse(acc) else nsf-define-tags-at(text, add(i, str_len("#define FK_TAG_")), acc);
+        }
+        def nsf-define-tags-at(text, nameStart, acc) {
+            let sp = str_find(text, " ", nameStart);
+            let a = add(sp, 1);
+            let b = if lt(sp, 0) then a else lx-digits-end(text, a);
+            if or(lt(sp, 0), eq(b, a)) then nsf-define-tags-in(text, nameStart, acc) else nsf-define-tags-in(text, b, cons(lx-int-span(text, a, b), acc));
+        }
 
         // ---- a reading: list("ok", slots, explicit, dyn-unary, dyn-binary, tri, c-tags) or list("refused", message) ----
         def nsf-read(root) {
@@ -129,12 +145,16 @@ section [form.bml] {
             let flat = nsf-flat-block(emit);
             if lt(slots, 0) then list("refused", "fkc-arm-slots not found")
             else if eq(str_len(flat), 0) then list("refused", "fkc-flat not found")
-            else list("ok", slots, nsf-explicit(flat), nsf-dyn-unary(flat), nsf-dyn-binary(flat), nsf-tri(flat), nsf-c-tags(list(emit, lx-host-text(read_file(str_concat(root, nsf-fs-emit()))), lx-host-text(read_file(str_concat(root, nsf-runtime()))))));
+            else nsf-read-texts(slots, flat, list(emit, lx-host-text(read_file(str_concat(root, nsf-fs-emit()))), lx-host-text(read_file(str_concat(root, nsf-runtime())))));
+        }
+        def nsf-read-texts(slots, flat, texts) {
+            list("ok", slots, nsf-explicit(flat), nsf-dyn-unary(flat), nsf-dyn-binary(flat), nsf-tri(flat), nsf-c-tags(texts), nsf-define-tags(texts));
         }
         def nsf-r-slots(r) = nth(r, 1);
         def nsf-r-explicit(r) = nth(r, 2);
         def nsf-r-dyn-unary(r) = nth(r, 3);
         def nsf-r-dyn-binary(r) = nth(r, 4);
+        def nsf-r-define-tags(r) = if ge(len(r), 8) then nth(r, 7) else list();
         def nsf-r-tri(r) = nth(r, 5);
         def nsf-r-c-tags(r) = nth(r, 6);
 
@@ -172,7 +192,8 @@ section [form.bml] {
             let arity = nsf-op-arity(op);
             let explicit = lx-int-in?(nsf-r-explicit(r), tag);
             append(nsf-when(ge(tag, nsf-r-slots(r)), nsf-voice(op, str_concat("tag ", str_concat(int_to_str(tag), str_concat(" out of arm slots range 0..", int_to_str(sub(nsf-r-slots(r), 1))))))),
-                   nsf-arity-errors(op, r, arity, tag, explicit));
+                   append(nsf-when(lx-int-in?(nsf-r-define-tags(r), tag), nsf-voice(op, str_concat("tag ", str_concat(int_to_str(tag), " is an internal walker tag (#define FK_TAG_*): a call here is walked as that form and answers its first child, never this op")))),
+                          nsf-arity-errors(op, r, arity, tag, explicit)));
         }
         def nsf-arity-errors(op, r, arity, tag, explicit) {
             if eq(arity, 0) then nsf-when(eq(explicit, 0), nsf-tag-voice(op, "nullary", " missing explicit fkc-flat row"))

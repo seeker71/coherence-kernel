@@ -28,11 +28,11 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is 16,406 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is 16,589 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
-preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the
-content-keyed lowering lane).
+preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
+frame in shared memory, the content-keyed lowering lane).
 
 ## Body-wide witnesses
 
@@ -43,7 +43,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 666 rows, 654 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 667 rows, 655 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -234,6 +234,7 @@ form-glass-launch-band                 -> 32767
 form-glass-deadline-cadence-band       -> 4095
 form-glass-jit-hold-band               -> 4095
 form-glass-meaning-ui-band             -> 8191
+form-glass-gift-frame-band             -> 4095
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -257,22 +258,35 @@ source door, and the standing total beside the per-frame rate — so `G*?.=0u/3M
 from `C*?.=0u/0` (never ran). Telemetry crosses between processes as files
 under a five-second freshness lease, so a lane whose publisher has gone silent
 shows a frozen number; the gauge's evidence symbol is what says so
-(`release-ledger.bml` R97, R98).
+(`release-ledger.bml` R98).
+
+Telemetry also crosses as a **gift frame**: six seed doors (`shm_offer`,
+`shm_receive`, `shm_write`, `shm_read`, `shm_seq`, `shm_release`; tags 184-189) map
+a POSIX shared-memory frame with a sixteen-byte seqlock header — seq even is
+stable, odd is a give in flight, and a read retries until the sequence it took
+equals the one it re-reads, so no reader carries a torn frame. The membrane
+gives every published wire into the frame beside the file and reads the frame
+first; a child process receives what its parent gave, with no file between them
+(`form-glass-gift-frame-band` 4095). Offered, never demanded: release unmaps and
+never unlinks, and an absent gift is named absent. Publishers are still indexed
+by their files, and a publisher born before this build gives nothing until it
+is reborn on it.
 
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=41 moving=0 released=59 -> 41000059
+./fkwu form/form-stdlib/release-ledger.bml -> open=41 moving=0 released=61 -> 41000061
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
 `native-surface`, `category-contract`, `primitive-registry`, `flt-ops-gen`,
 `ontology`, `kernel-conformance` — each byte-agreeing with the Python twin it
 replaced on the live tree and on a planted-drift tree, each with a band
-(1023 · 511 · 255 · 511 · 63 · 255 · 511) and none of them calling `python3`
-(R58). The writer half of `flt-ops-gen` and the FORMBIN2 interop witness are
+(1023 · 1023 · 255 · 511 · 63 · 255 · 511) and none of them calling `python3`
+(R58); `native-surface` also reads `#define FK_TAG_*` sites and refuses a manifest
+row that lands on an internal walker tag. The writer half of `flt-ops-gen` and the FORMBIN2 interop witness are
 the Python that remains (R59, R60).
 ```
 
@@ -323,6 +337,10 @@ What answered red or nothing in this pass, so no one leans on it:
   loops call it per item (R96). The same lowering reads a `; preludes:`
   substring inside a string as a directive (R92), and its child's stdin door
   answers 1 when the two lines arrive as two writes instead of one (R95).
+- A bare `nothing` in a `.bml` def (`if nothing?(h) then nothing else …`) lowers
+  to a raw word that prints as -8000000000000000009 and is not `nothing?`; the
+  body writes the call, `nothing()`, and the lowering owes the bare name a
+  refusal or the axiom-1 value (R103).
 - `observe/tests/jit-register-lowering-band.fk`,
   `jit-representation-specialization-band.fk` and `jit-stack-frame-band.fk`
   answer nothing: each file ends with one paren open

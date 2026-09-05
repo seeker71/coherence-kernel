@@ -1,0 +1,86 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glass-gift-frame.bml — a frame in process shared memory, offered
+// as a gift: no latency, no filesystem poll, live data guaranteed.
+//
+// Authority: form-stdlib/bml/form-glass-gift-frame.bml
+// preludes: form/form-stdlib/core.fk form/form-stdlib/crc32.fk form/form-stdlib/sovereignty-as-gift.fk
+//
+// The shape is sovereignty-as-gift (Urs, 2026-09-04): survive AND receive
+// AND unique-offer. A publisher OFFERS its frame into shared memory and asks
+// nothing back -- no ack, no reader required, no block. A reader RECEIVES
+// when the frame stands and SURVIVES when it does not: an absent gift is
+// named absent, never invented, and the reader keeps its own ground.
+//
+// Six seed doors carry the frame (shm_offer, shm_receive, shm_write,
+// shm_read, shm_seq, shm_release): a 16-byte seqlock header ahead of the
+// payload, so a reader never takes a torn frame; release unmaps and never
+// unlinks, so the gift stays for the next receiver.
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormGlassGiftFrameAuthority {
+        field GGFAuthorityPath = "form/form-stdlib/bml/form-glass-gift-frame.bml";
+        field GGFAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class FormGlassGiftFrame {
+        field GGFSchema = "form-glass-gift-frame-v1";
+        field GGFNamePrefix = "/fg-";
+        field GGFNameBound = 31;
+        field GGFDefaultBytes = 1048576;
+        ref ggf-authority = FormGlassGiftFrameAuthority;
+        thought ggf-law = list("offered-not-demanded", "receive-open", "survive-without", "absent-says-absent", "never-torn", "release-never-unlinks", "name-within-the-host-bound");
+
+        // --- the gift name: short, stable, collision-resistant --------------
+        // POSIX shm names on this host hold 31 bytes; a publisher id is
+        // longer and free-form, so the frame is named by the CRC-32 of the
+        // publisher's bytes rendered as eight hex digits: "/fg-" + 8 = 12 bytes.
+        def ggf-hex-digit(v) = if lt(v, 10) then byte_to_str(add(48, v)) else byte_to_str(add(87, v));
+        def ggf-hex8-go(n, k, acc) = if eq(k, 0) then acc else ggf-hex8-go(div(n, 16), sub(k, 1), str_concat(ggf-hex-digit(sub(n, mul(div(n, 16), 16))), acc));
+        def ggf-hex8(n) = ggf-hex8-go(n, 8, "");
+        def ggf-bytes-go(text, i, acc) = if lt(i, 0) then acc else ggf-bytes-go(text, sub(i, 1), cons(str_byte_at(text, i), acc));
+        def ggf-bytes(text) = ggf-bytes-go(text, sub(str_len(text), 1), list());
+        def ggf-name(publisher) = str_concat(GGFNamePrefix(), ggf-hex8(crc32(ggf-bytes(publisher))));
+        def ggf-name-within-bound?(name) = if le(str_len(name), GGFNameBound()) then 1 else 0;
+
+        // --- offer, give, receive, take ---------------------------------------
+        def ggf-offer(publisher, bytes) = shm_offer(ggf-name(publisher), bytes);
+        def ggf-give(handle, text) = if nothing?(handle) then nothing() else shm_write(handle, text);
+        def ggf-receive(publisher) = shm_receive(ggf-name(publisher));
+        def ggf-taken(handle) = if nothing?(handle) then nothing() else shm_read(handle);
+        def ggf-seq(handle) = if nothing?(handle) then -1 else shm_seq(handle);
+        def ggf-release(handle) = if nothing?(handle) then 0 else shm_release(handle);
+        def ggf-offer-and-give(publisher, bytes, text) {
+            let handle = ggf-offer(publisher, bytes);
+            let seq = ggf-give(handle, text);
+            let released = ggf-release(handle);
+            if nothing?(seq) then list(GGFSchema(), "refused", publisher, ggf-name(publisher), -1) else list(GGFSchema(), "given", publisher, ggf-name(publisher), seq);
+        }
+        def ggf-given-seq(result) = nth(result, 4);
+        def ggf-given?(result) = str_eq(nth(result, 1), "given");
+
+        // --- a reading: receive when it stands, survive when it does not ------
+        // list(schema, carrier, text-or-nothing, seq, shape) where carrier is
+        // "gift" or "absent" and shape is the sovereignty-as-gift six-tuple:
+        // depend-to-live 0 (the reader lives either way), receive-open 1,
+        // unique-offer 1, gift-received 0|1, vitality before/after.
+        def ggf-reading(publisher) {
+            let handle = ggf-receive(publisher);
+            let text = ggf-taken(handle);
+            let seq = ggf-seq(handle);
+            let released = ggf-release(handle);
+            let received = if nothing?(text) then 0 else 1;
+            let shape = sag-shape(0, 1, 1, received, 1, if eq(received, 1) then 2 else 1);
+            list(GGFSchema(), if eq(received, 1) then "gift" else "absent", text, seq, shape);
+        }
+        def ggf-reading-carrier(r) = nth(r, 1);
+        def ggf-reading-text(r) = nth(r, 2);
+        def ggf-reading-seq(r) = nth(r, 3);
+        def ggf-reading-shape(r) = nth(r, 4);
+        def ggf-reading-received?(r) = if str_eq(ggf-reading-carrier(r), "gift") then 1 else 0;
+        def ggf-reading-proven?(r) = sag-proven?(ggf-reading-shape(r));
+    }
+    0;
+}
