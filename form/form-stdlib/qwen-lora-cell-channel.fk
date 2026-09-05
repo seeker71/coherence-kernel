@@ -13,7 +13,8 @@
 
 (do
     (defn qch-sep () "|")
-    (defn qch-glass-path () ".form-qwen-lora-resident.glass")
+    (defn qch-gift-name () "/form-qwen-lora-resident-event")
+    (defn qch-gift-bytes () 65536)
     (defn qch-decode (line)
         (do
             (let a (str_find line (qch-sep) 0))
@@ -48,16 +49,18 @@
     (defn qch-token-text (ids) (qch-token-text-go ids ""))
     ; The event's native Form symbols and token ids become a real inspectable
     ; NodeID, without depending on a label supplied from outside the body.
+    (defn qch-node (cell turn tokens)
+        (intern_trivial_string
+            (str_concat "qwen-lora-cell:" (str_concat cell
+                (str_concat ":" (str_concat (int_to_str turn)
+                    (str_concat ":" tokens)))))))
+    (defn qch-node-text-from (n)
+        (str_concat (int_to_str (node_pkg n))
+            (str_concat "." (str_concat (int_to_str (node_level n))
+                (str_concat "." (str_concat (int_to_str (node_type n))
+                    (str_concat "." (int_to_str (node_inst n)))))))))
     (defn qch-node-text (cell turn tokens)
-        (do
-            (let n (intern_trivial_string
-                (str_concat "qwen-lora-cell:" (str_concat cell
-                    (str_concat ":" (str_concat (int_to_str turn)
-                        (str_concat ":" tokens)))))))
-            (str_concat (int_to_str (node_pkg n))
-                (str_concat "." (str_concat (int_to_str (node_level n))
-                    (str_concat "." (str_concat (int_to_str (node_type n))
-                        (str_concat "." (int_to_str (node_inst n))))))))))
+        (qch-node-text-from (qch-node cell turn tokens)))
     (defn qch-symbols (cell turn input output)
         (str_concat "cell=" (str_concat cell
             (str_concat ";turn=" (str_concat (int_to_str turn)
@@ -69,8 +72,8 @@
             (str_concat "|" (str_concat (int_to_str turn)
                 (str_concat "|" (qch-clean text)))))))
     ; A native event is a dynamic list of named Form pairs.  Its decoder looks
-    ; up a symbol, never a field position.  The file boundary presently carries
-    ; its tagged rendering because fkwu has no read_form_binary primitive yet.
+    ; up a symbol, never a field position.  node_gift carries the cell itself
+    ; across the process boundary; the tagged rendering is Glass's reflection.
     (defn qch-field (name value) (list name value))
     (defn qch-field-name (field) (nth field 0))
     (defn qch-field-value (field) (nth field 1))
@@ -87,41 +90,64 @@
                 (str_concat acc (str_concat (if (eq (str_len acc) 0) "" "|")
                     (qch-render-field (head event)))))))
     (defn qch-render-event (event) (qch-render-event-go event ""))
-    (defn qch-render-public-go (event acc)
-        (if (eq (len event) 0) acc
-            (if (str_eq (qch-field-name (head event)) "nl")
-                (qch-render-public-go (tail event) acc)
-                (qch-render-public-go (tail event)
-                    (str_concat acc (str_concat (if (eq (str_len acc) 0) "" "|")
-                        (qch-render-field (head event))))))))
-    (defn qch-render-public (event) (qch-render-public-go event ""))
+    (defn qch-glass-fields (phase cell turn pos in out symbols node-text home)
+        (list (qch-field "event" "qwen-lora-resident")
+              (qch-field "phase" phase)
+              (qch-field "cell" cell)
+              (qch-field "turn" (int_to_str turn))
+              (qch-field "position" (int_to_str pos))
+              (qch-field "tokens.in" in)
+              (qch-field "tokens.out" out)
+              (qch-field "symbols" symbols)
+              (qch-field "node-id" node-text)
+              (qch-field "recipe" (qch-recipe))
+              (qch-field "resolved" "1")
+              (qch-field "voice-home" (int_to_str home))))
     (defn qch-event (phase cell turn pos input output home nl)
         (do
             (let in (qch-token-text input))
             (let out (qch-token-text output))
             (let tokens (str_concat "in:" (str_concat in (str_concat ";out:" out))))
+            (let symbol (qch-node cell turn tokens))
+            (let symbols (qch-symbols cell turn input output))
+            (let glass (qch-glass-fields phase cell turn pos in out symbols
+                (qch-node-text-from symbol) home))
             (list (qch-field "event" "qwen-lora-resident")
                   (qch-field "phase" phase)
                   (qch-field "cell" cell)
-                  (qch-field "turn" (int_to_str turn))
-                  (qch-field "position" (int_to_str pos))
-                  (qch-field "tokens.in" in)
-                  (qch-field "tokens.out" out)
-                  (qch-field "symbols" (qch-symbols cell turn input output))
-                  (qch-field "node-id" (qch-node-text cell turn tokens))
+                  (qch-field "turn" turn)
+                  (qch-field "position" pos)
+                  (qch-field "tokens.in" input)
+                  (qch-field "tokens.out" output)
+                  (qch-field "symbols" (list symbol))
+                  (qch-field "node-id" symbol)
                   (qch-field "recipe" (qch-recipe))
-                  (qch-field "resolved" "1")
-                  (qch-field "voice-home" (int_to_str home))
-                  (qch-field "nl" nl))))
+                  (qch-field "resolved" 1)
+                  (qch-field "voice-home" home)
+                  (qch-field "nl" nl)
+                  (qch-field "glass" glass))))
     (defn qch-state (phase cell turn pos input output home nl)
         (do
             (let event (qch-event phase cell turn pos input output home nl))
-            (str_concat (qch-render-public event)
-                (str_concat "\nnl=" (qch-clean (qch-field-value
-                    (qch-event-get event "nl")))))))
+            (str_concat (qch-render-event (qch-field-value (qch-event-get event "glass")))
+                (str_concat "\nnl=" (qch-clean nl)))))
     (defn qch-publish-event (phase cell turn pos input output home nl)
-        (write_file (qch-glass-path)
-            (qch-state phase cell turn pos input output home nl)))
+        (do
+            (let event (qch-event phase cell turn pos input output home nl))
+            (let handle (shm_offer (qch-gift-name) (qch-gift-bytes)))
+            (if (nothing? handle) 0
+                (do
+                    (let given (node_gift_write handle event))
+                    (let released (shm_release handle))
+                    given))))
+    (defn qch-receive-event ()
+        (do
+            (let handle (shm_receive (qch-gift-name)))
+            (if (nothing? handle) (nothing)
+                (do
+                    (let event (node_gift_read handle))
+                    (let released (shm_release handle))
+                    event))))
     (defn qch-publish (phase cell turn pos tokens home)
         (qch-publish-event phase cell turn pos (empty) (empty) home ""))
     0)
