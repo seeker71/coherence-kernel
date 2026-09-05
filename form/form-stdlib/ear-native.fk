@@ -152,6 +152,32 @@
             (let am (enw-run st 6 (list (enw-b st 18) (enw-b st 19)) (list lo hi) 1))
             (let s (metal_sync))
             (en-u32 (en-text (metal_buf_read (enw-b st 19) 0 4)) 0)))
+    (defn enw-ts0 () 50364)
+    (defn enw-ts? (id) (ge id (enw-ts0)))
+    ; a step whose argmax may answer text, end, or a timestamp: the decoder keeps its own clock
+    (defn enw-step2 (st id pos Te)
+        (do (let hs (enw-hs st))
+            (let e (enw-run st 5 (list (enw-h hs "decoder.token_embedding.weight") (enw-h hs "decoder.positional_embedding") (enw-b st 13)) (list id pos (enw-D)) (enw-D)))
+            (let ls (enw-dec-layers st 0 pos Te 0))
+            (let fl (enw-ln st (enw-b st 13) (enw-h hs "decoder.ln.weight") (enw-h hs "decoder.ln.bias") (enw-b st 14) 1))
+            (let lg (enw-gemm st (enw-b st 14) (enw-h hs "decoder.token_embedding.weight") 0 (enw-b st 18) (enw-b st 18) 1 (enw-V) (enw-D) 0 0 0))
+            (let am (enw-run st 13 (list (enw-b st 18) (enw-b st 19)) (list 0 (add (enw-eot) 1) (enw-ts0) (enw-V)) 1))
+            (let s (metal_sync))
+            (en-u32 (en-text (metal_buf_read (enw-b st 19) 0 4)) 0)))
+    ; a loop of period one, two or three repeated three times is the model going round: stop paying for it
+    (defn enw-looping? (id acc) (if (lt (len acc) 5) 0 (if (and (eq id (nth acc 0)) (eq id (nth acc 1))) 1 (if (and (eq id (nth acc 1)) (and (eq (nth acc 0) (nth acc 2)) (eq (nth acc 1) (nth acc 3)))) 1 (if (and (eq id (nth acc 2)) (and (eq (nth acc 0) (nth acc 3)) (eq (nth acc 1) (nth acc 4)))) 1 0)))))
+    (defn enw-greedy2 (st id pos Te cap acc)
+        (do (let nid (enw-step2 st id pos Te))
+            (if (or (eq nid (enw-eot)) (or (ge (len acc) cap) (eq (enw-looping? nid acc) 1))) (reverse acc) (enw-greedy2 st nid (add pos 1) Te cap (cons nid acc)))))
+    ; transcribe from a tick (20 ms units) into the window: the cut point is handed to the decoder as its first timestamp,
+    ; so only what came after it is spoken; returns (lang-token ids) with timestamps kept in ids
+    (defn enw-transcribe-from (st Te tick cap)
+        (do (let lang (enw-step st (enw-sot) 0 Te (enw-lang-lo) (enw-lang-hi)))
+            (let t1 (enw-step st lang 1 Te 0 1))
+            (let t2 (enw-step st (enw-tok-transcribe) 2 Te 0 1))
+            (list lang (enw-greedy2 st (add (enw-ts0) tick) 3 Te cap (list)))))
+    ; the decoder's last word on time: the final timestamp if the line closed with one, else -1
+    (defn enw-last-ts (ids) (if (eq (len ids) 0) (sub 0 1) (do (let last (nth ids (sub (len ids) 1))) (if (enw-ts? last) (sub last (enw-ts0)) (sub 0 1)))))
     ; ---- greedy line: prompt sot, lang, transcribe, notimestamps; then text until eot or cap ----
     (defn enw-greedy (st pos Te cap acc)
         (do (let id (enw-step st (if (eq (len acc) 0) (enw-notimestamps) (head acc)) pos Te 0 (add (enw-eot) 1)))
