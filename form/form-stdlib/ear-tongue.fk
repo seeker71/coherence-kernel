@@ -2,11 +2,11 @@
 ; (the registry's llama32-1b blob) through dense-token-handle, form-native on this metal. A
 ; completion-shaped prompt, greedy, cut at the first line break. Slower than a rented model and
 ; weaker in Persian; named, not hidden. Nothing leaves this Mac.
-; preludes: native/metal/dense-token-handle.fk form-stdlib/model-registry.bml
+; preludes: native/metal/dense-token-handle.fk form-stdlib/model-registry.bml form-stdlib/spool-bell-transport.fk form-stdlib/form-fs.fk form-stdlib/line-grammar.fk
 (do
     (defn et-names (code) (if (str_eq code "fa") "Persian" (if (str_eq code "pt") "Brazilian Portuguese" "English")))
     (defn et-open () (dth-open (mr-path (mr-find "llama32-1b")) 256 (sub 0 1)))
-    (defn et-prompt (text from to) (str_concat "Translate " (str_concat (et-names from) (str_concat " to " (str_concat (et-names to) (str_concat ". Answer with the translation only." (str_concat (byte_to_str 10) (str_concat (et-names from) (str_concat ": " (str_concat text (str_concat (byte_to_str 10) (str_concat (et-names to) ": "))))))))))))
+    (defn et-prompt (text from to) (str_concat (et-names from) (str_concat ": " (str_concat text (str_concat (byte_to_str 10) (str_concat (et-names to) ": "))))))
     (defn et-cut1 (s stop) (do (let at (str_find s stop 0)) (if (lt at 0) s (substring s 0 at))))
     (defn et-cut (s) (trim (et-cut1 (et-cut1 s (byte_to_str 10)) "<|")))
     (defn et-translate (st text from to maxnew)
@@ -17,4 +17,56 @@
             (let first (nth pf 0))
             (let rest (dth-generate ps bs geo lays cks cvs embTv onormTv projTv first (len ids) maxnew (empty)))
             (et-cut (l3d-text src (append (list first) rest)))))
+    0)
+; ---- the vocabulary rendered once to a file, so a token is a native substring search ----
+; line = "<piece>\t<id>\n" in id order; the first match of "\n<piece>\t" is the lowest id (dtk-best's tie)
+(do
+    (defn et-vocab-path (src) (str_concat ".hearth/vocab-" (str_concat (int_to_str (gmt-vocab-n src)) ".txt")))
+    (defn et-piece (src at L k acc) (if (ge k L) acc (et-piece src at L (add k 1) (str_concat acc (byte_to_str (gmt-token-byte src at k))))))
+    (defn et-render (src at id n acc) (if (ge id n) acc (do (let L (gmt-token-len src at)) (et-render src (gmt-token-next src at) (add id 1) n (str_concat acc (str_concat (byte_to_str 10) (str_concat (et-piece src at L 0 "") (str_concat (byte_to_str 9) (int_to_str id)))))))))
+    (defn et-render-chunks (src at id n acc) (if (ge id n) acc (do (let stop (if (gt (add id 4096) n) n (add id 4096))) (let chunk (et-render src at id stop "")) (let w (sbt-append (et-vocab-path src) chunk)) (et-render-chunks src (et-skip src at (sub stop id)) stop n (add acc 1)))))
+    (defn et-skip (src at n) (if (eq n 0) at (et-skip src (gmt-token-next src at) (sub n 1))))
+    (defn et-vocab (src) (do (let p (et-vocab-path src)) (if (gt (file_size p) 0) (et-text (read_file p)) (do (let n (et-render-chunks src (gmt-tokens-first src) 0 (gmt-vocab-n src) 0)) (let tail (sbt-append p (byte_to_str 10))) (et-text (read_file p))))))
+    (defn et-text (t) (if (nothing? t) "" t))
+    (defn et-id-at (vocab at) (do (let e (str_find vocab (byte_to_str 10) at)) (str_to_int (substring vocab at e))))
+    ; longest piece at i, up to 24 bytes: the first found line carries the lowest id
+    (defn et-match (vocab text i L) (if (le L 0) (list (sub 0 1) 0) (do (let piece (substring text i (add i L))) (let at (str_find vocab (str_concat (byte_to_str 10) (str_concat piece (byte_to_str 9))) 0)) (if (lt at 0) (et-match vocab text i (sub L 1)) (list (et-id-at vocab (add at (add L 2))) L)))))
+    (defn et-ids (vocab text i n acc) (if (ge i n) (reverse acc) (do (let m (et-match vocab text i (if (gt (sub n i) 24) 24 (sub n i)))) (if (lt (head m) 0) (reverse acc) (et-ids vocab text (add i (nth m 1)) n (cons (head m) acc))))))
+    (defn et-encode (src vocab text) (append (list (gmt-u32 src "tokenizer.ggml.bos_token_id")) (et-ids vocab (dtk-gpt2-map text) 0 (str_len (dtk-gpt2-map text)) (list))))
+    ; generation that stops at the model's own end of turn
+    (defn et-ends? (src id) (or (eq id (gmt-u32 src "tokenizer.ggml.eos_token_id")) (or (eq id 128009) (eq id 128001))))
+    (defn et-gen (st src id pos n acc) (if (or (le n 0) (et-ends? src id)) (reverse acc) (do (let nid (dth-forward (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) id pos)) (et-gen st src nid (add pos 1) (sub n 1) (cons id acc)))))
+    (defn et-translate2 (st vocab text from to maxnew)
+        (do (let src (nth st 10))
+            (let ids (et-encode src vocab (et-prompt text from to)))
+            (let pf (dth-prefill (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) ids 0))
+            (et-cut (l3d-text src (et-gen st src (nth pf 0) (len ids) maxnew (list))))))
+    0)
+; ---- buckets: the vocabulary split by the first four bytes of each piece into files, each loaded once as a
+; list of (piece id) and searched with the native str_eq, so a probe compares tens of pieces, never scans ----
+(do
+    (defn et-bdir (src) (str_concat ".hearth/vocab-" (str_concat (int_to_str (gmt-vocab-n src)) "-b4")))
+    (defn et-bkey-go (s i n acc) (if (or (ge i n) (ge i 4)) acc (et-bkey-go s (add i 1) n (add (mul acc 256) (add 1 (str_byte_at s i))))))
+    (defn et-bkey (piece) (et-bkey-go piece 0 (str_len piece) 0))
+    (defn et-bpath (src key) (str_concat (et-bdir src) (str_concat "/" (str_concat (int_to_str key) ".txt"))))
+    (defn et-tab-at (l) (str_find l (byte_to_str 9) 0))
+    (defn et-bucket-lines (src lines n) (if (eq (len lines) 0) n (do (let l (head lines)) (let tab (if (lt (str_len l) 2) (sub 0 1) (et-tab-at l))) (let w (if (lt tab 1) 0 (sbt-append (et-bpath src (et-bkey (substring l 0 tab))) (str_concat l (byte_to_str 10))))) (et-bucket-lines src (tail lines) (add n 1)))))
+    (defn et-buckets-ready? (src) (ge (file_size (str_concat (et-bdir src) "/ready")) 0))
+    (defn et-build-buckets (src) (if (et-buckets-ready? src) 1 (do (let mk (fs-mkdir (et-bdir src))) (let vocab (et-vocab src)) (let n (et-bucket-lines src (split-on vocab (byte_to_str 10)) 0)) (let r (write_file_text (str_concat (et-bdir src) "/ready") "ready")) 1)))
+    (defn et-entries (lines acc) (if (eq (len lines) 0) acc (do (let l (head lines)) (let tab (if (lt (str_len l) 2) (sub 0 1) (et-tab-at l))) (et-entries (tail lines) (if (lt tab 1) acc (cons (list (substring l 0 tab) (str_to_int (substring l (add tab 1) (str_len l)))) acc))))))
+    (defn et-bget (cache key) (if (eq (len cache) 0) (list) (if (eq (head (head cache)) key) (head cache) (et-bget (tail cache) key))))
+    ; a bucket cache is a list of (key entries); returns (entries cache)
+    (defn et-bucket (src cache key) (do (let hit (et-bget cache key)) (if (gt (len hit) 0) (list (nth hit 1) cache) (do (let t (et-text (read_file (et-bpath src key)))) (let es (if (eq (str_len t) 0) (list) (et-entries (split-on t (byte_to_str 10)) (list)))) (list es (cons (list key es) cache))))))
+    ; the lowest id wins a tie: entries were consed in file order, so walk to the end and keep the last equal
+    (defn et-bfind (es piece best) (if (eq (len es) 0) best (et-bfind (tail es) piece (if (str_eq (head (head es)) piece) (nth (head es) 1) best))))
+    (defn et-bmatch (src cache text i L) (if (le L 0) (list (sub 0 1) 0 cache) (do (let piece (substring text i (add i L))) (let b (et-bucket src cache (et-bkey piece))) (let id (et-bfind (head b) piece (sub 0 1))) (if (lt id 0) (et-bmatch src (nth b 1) text i (sub L 1)) (list id L (nth b 1))))))
+    (defn et-bids (src cache text i n acc) (if (ge i n) (list (reverse acc) cache) (do (let m (et-bmatch src cache text i (if (gt (sub n i) 24) 24 (sub n i)))) (if (lt (head m) 0) (list (reverse acc) (nth m 2)) (et-bids src (nth m 2) text (add i (nth m 1)) n (cons (head m) acc))))))
+    (defn et-encode-b (src cache text) (do (let surface (dtk-gpt2-map text)) (let r (et-bids src cache surface 0 (str_len surface) (list))) (list (append (list (gmt-u32 src "tokenizer.ggml.bos_token_id")) (head r)) (nth r 1))))
+    ; the tongue lane's translate: bucket tokenizer, stop at the model's end of turn; returns (text cache)
+    (defn et-translate3 (st cache text from to maxnew)
+        (do (let src (nth st 10))
+            (let enc (et-encode-b src cache (et-prompt text from to)))
+            (let ids (head enc))
+            (let pf (dth-prefill (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) ids 0))
+            (list (et-cut (l3d-text src (et-gen st src (nth pf 0) (len ids) maxnew (list)))) (nth enc 1))))
     0)
