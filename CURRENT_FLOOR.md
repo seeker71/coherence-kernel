@@ -28,11 +28,12 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is 16,589 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is 16,756 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
 preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
-frame in shared memory, the content-keyed lowering lane).
+frame in shared memory, the content-keyed lowering lane, the frame pacer and
+terminal doors, `kernel_hot`).
 
 ## Body-wide witnesses
 
@@ -43,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 667 rows, 655 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 668 rows, 656 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -235,6 +236,8 @@ form-glass-deadline-cadence-band       -> 4095
 form-glass-jit-hold-band               -> 4095
 form-glass-meaning-ui-band             -> 8191
 form-glass-gift-frame-band             -> 4095
+form-glass-sensor-rows-band            -> 255
+form-glass-kernel-view-band            -> 511
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -271,6 +274,30 @@ first; a child process receives what its parent gave, with no file between them
 never unlinks, and an absent gift is named absent. Publishers are still indexed
 by their files, and a publisher born before this build gives nothing until it
 is reborn on it.
+
+**The frame path is sub-50 ms.** Measured 2026-09-05 on this M4 Max through
+`observe/form-glass-frame-budget-run.fk` — twenty consecutive frames with the
+sensor process standing: total mean 30–31 ms including the cold first frame,
+warm maximum 19–35 ms, 19 of 20 under 50 ms (the one over is the cold frame
+building its caches, ~300 ms). It was 763–792 ms this morning. The path now
+holds only gift reads (`shm_seq` first, a re-read only when a frame moved), a
+cached inventory re-parsed per publisher only when its key moved (gift seq or
+file mtime), the deduped sample set held while nothing moved, the publisher
+roster re-listed every tenth frame, observations held every fourth frame,
+in-process kernel rows, the flow point and the render (~9 ms). Every row that
+forks or scans the filesystem — memory_pressure, sysctl, vm_stat, iostat,
+pgrep and ps, the storage catalog, the hearth spools, the governor refresh —
+is gathered by `observe/form-glass-sensors-live.fk` at its own cadence and given
+into shared memory; `tools/watch-glass.sh` stands it beside the glass, and an
+absent sensor is one row that names its door. The pacer is `host_sleep_ms` on
+the monotonic clock, never a forked `/bin/sleep`; the terminal is read through
+`terminal_cols`/`terminal_lines`, never `tput`. `FGLActiveHz` 25, `FGLQuietHz` 20.
+
+**`k` is the kernel view**: gift frames mapped and their bytes, functions
+defined, and the hottest defns of this process with their source pointers —
+`kernel_hot n` answers `heat|name|unit|line|col` from the same per-function
+heat the exit report prints, named by the symbol map, in one pass over the
+program text (`form-glass-kernel-view-band` 511).
 
 ## Beliefs, ledger, drift
 
@@ -341,6 +368,11 @@ What answered red or nothing in this pass, so no one leans on it:
   to a raw word that prints as -8000000000000000009 and is not `nothing?`; the
   body writes the call, `nothing()`, and the lowering owes the bare name a
   refusal or the axiom-1 value (R103).
+- The gift frames carry text wires the reader parses; the cells should cross as
+  the seed's own node words — blueprint id and children — read by intern, not
+  parse (R108). The wait that wakes on a telemetry or control path change is
+  still owed; a bounded native rest paces the frame (R107). `host_sleep_ms`
+  rests 2–5 ms past the ask on this host (R109).
 - `observe/tests/jit-register-lowering-band.fk`,
   `jit-representation-specialization-band.fk` and `jit-stack-frame-band.fk`
   answer nothing: each file ends with one paren open

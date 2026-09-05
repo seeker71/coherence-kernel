@@ -975,6 +975,23 @@ extern int stat(const char *, void *);
 #include <sys/mman.h>
 #define FK_HAVE_MMAN_HEADER 1
 #endif
+/* the controlling terminal's window, by hand as every host door here is declared:
+ * no <sys/ioctl.h> (it drags the socket headers against the hand-declared
+ * socket externs below). TIOCGWINSZ is the platform's own number. */
+struct fk_winsize { unsigned short ws_row; unsigned short ws_col; unsigned short ws_xpixel; unsigned short ws_ypixel; };
+#if !defined(_WIN32)
+extern int ioctl(int, unsigned long, ...);
+#if defined(__APPLE__)
+#define FK_TIOCGWINSZ 0x40087468UL
+#else
+#define FK_TIOCGWINSZ 0x5413UL
+#endif
+#endif
+#if defined(__has_include) && !defined(_WIN32)
+#if __has_include(<time.h>)
+#include <time.h>
+#endif
+#endif
 #endif
 #endif
 #if defined(__has_include) && !defined(_WIN32)
@@ -8882,6 +8899,40 @@ static long long fk_gift_open(const char *gname, long long want, int writable) {
     return (fk_gift_count - 1) << 1;
 #endif
 }
+/* the controlling terminal's window: cols when wantCols, else lines; a
+ * non-terminal answers nothing */
+static long long fk_terminal_dim(int wantCols) {
+#if defined(_WIN32)
+    (void)wantCols;
+    return fk_nothing;
+#else
+    struct fk_winsize fk_ws;
+    if (ioctl(1, FK_TIOCGWINSZ, &fk_ws) != 0 && ioctl(0, FK_TIOCGWINSZ, &fk_ws) != 0) {
+        return fk_nothing;
+    }
+    return ((long long)(wantCols ? fk_ws.ws_col : fk_ws.ws_row)) << 1;
+#endif
+}
+/* tentative declarations: the program text and its unit table are defined
+ * later in this file; kernel_hot reads them from the cold ladder */
+static char *fk_srctext;
+static long long fk_slen;
+static long long fk_src_dep_count;
+static char fk_src_root_path[FK_PATH_CAP];
+static char (*fk_src_dep_path)[FK_PATH_CAP];
+static long long *fk_src_dep_text_off;
+static long long *fk_src_dep_text_len;
+/* append n bytes to the string builder at fk_sbp, growing it as every arm does */
+static void fk_sappend(const char *bytes, long long n) {
+    while (fk_sbp + n > fk_scap_b) {
+        fk_scap_b = fk_scap_b * 2;
+        fk_sb = realloc(fk_sb, fk_scap_b);
+        fk_sb_check();
+    }
+    long long k = 0;
+    while (k < n) { fk_sb[fk_sbp + k] = bytes[k]; k = k + 1; }
+    fk_sbp = fk_sbp + n;
+}
 static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 9) {
         putchar((int)(fk_walk(fk_node[i][1], fp) >> 1));
@@ -9539,6 +9590,108 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return -2;
         }
         return total << 1;
+    }
+    /* kernel_hot n (tag 179): the n hottest functions of THIS process as text,
+     * one per line -- heat|name|unit|line|col -- read from the same fn heat the
+     * exit report prints, named by the symbol map (never by index coincidence),
+     * with the defn's own source pointer: the unit whose text holds the name,
+     * and the line and column inside it, found in one pass over the program
+     * text. Read-only: no heat is marked or reset. */
+    if (t == 179) {
+        long long want179 = fk_walk(fk_node[i][1], fp) >> 1;
+        if (want179 <= 0) {
+            return fk_sbuf("", 0);
+        }
+        if (want179 > 64) {
+            want179 = 64;
+        }
+        long long picked_j[64];
+        long long picked_h[64];
+        long long np = 0;
+        long long j = 0;
+        while (j < fk_fntop) {
+            long long fx = fk_fnidx[j];
+            if (fx >= 0 && fx < fk_fn_count && fk_fn_heat[fx] > 0) {
+                long long h = fk_fn_heat[fx];
+                /* insertion into the top-n, largest first */
+                long long k = np < want179 ? np : want179 - 1;
+                if (np < want179 || h > picked_h[k]) {
+                    if (np < want179) { np = np + 1; }
+                    while (k > 0 && picked_h[k - 1] < h) { picked_j[k] = picked_j[k - 1]; picked_h[k] = picked_h[k - 1]; k = k - 1; }
+                    picked_j[k] = j;
+                    picked_h[k] = h;
+                }
+            }
+            j = j + 1;
+        }
+        /* one pass over the program text: line and column for every picked name */
+        long long line_of[64], col_of[64];
+        long long q = 0;
+        while (q < np) { line_of[q] = 0; col_of[q] = 0; q = q + 1; }
+        long long pos = 0, line = 1, lastnl = -1;
+        while (pos <= fk_slen) {
+            q = 0;
+            while (q < np) {
+                if (fk_fnsym_s[picked_j[q]] == pos) { line_of[q] = line; col_of[q] = pos - lastnl; }
+                q = q + 1;
+            }
+            if (pos < fk_slen && fk_srctext[pos] == FK_CH_LF) { line = line + 1; lastnl = pos; }
+            pos = pos + 1;
+        }
+        fk_sinit();
+        long long start179 = fk_sbp;
+        q = 0;
+        while (q < np) {
+            long long sj = picked_j[q];
+            long long so = fk_fnsym_s[sj];
+            /* the unit whose text holds the name; the root text has no dep row */
+            const char *unit = fk_src_root_path;
+            long long d = 0;
+            while (d < fk_src_dep_count) {
+                if (so >= fk_src_dep_text_off[d] && so < fk_src_dep_text_off[d] + fk_src_dep_text_len[d] && fk_src_dep_text_len[d] > 0) { unit = fk_src_dep_path[d]; }
+                d = d + 1;
+            }
+            char num[32];
+            long long nl;
+            nl = sprintf(num, "%lld|", picked_h[q]); fk_sappend(num, nl);
+            fk_sappend(fk_srctext + so, fk_fnsym_n[sj]);
+            fk_sappend("|", 1);
+            fk_sappend(unit, fk_cstrlen(unit));
+            nl = sprintf(num, "|%lld|%lld\n", line_of[q], col_of[q]); fk_sappend(num, nl);
+            q = q + 1;
+        }
+        return fk_strv(fk_sintern(start179, fk_sbp - start179));
+    }
+    /* THE FRAME PACER AND THE TERMINAL (tags 180-183): terminal_cols /
+     * terminal_lines read the controlling terminal's window (ioctl, no tput
+     * fork; a non-terminal answers nothing); host_monotonic_ms is the
+     * kernel.monotonic-ms door the glass event loop names -- a clock that never
+     * steps; host_sleep_ms n rests the process n milliseconds (nanosleep) and
+     * answers the milliseconds actually rested, so no frame is paced by forking
+     * /bin/sleep. */
+    if (t == 180) {
+        return fk_terminal_dim(1);
+    }
+    if (t == 181) {
+        return fk_terminal_dim(0);
+    }
+    if (t == 182) {
+        struct timespec fk_ts;
+        clock_gettime(CLOCK_MONOTONIC, &fk_ts);
+        return ((long long)fk_ts.tv_sec * 1000 + (long long)fk_ts.tv_nsec / 1000000) << 1;
+    }
+    if (t == 183) {
+        long long ms183 = fk_walk(fk_node[i][1], fp) >> 1;
+        if (ms183 <= 0) {
+            return 0;
+        }
+        struct timespec fk_t0, fk_t1, fk_req;
+        clock_gettime(CLOCK_MONOTONIC, &fk_t0);
+        fk_req.tv_sec = ms183 / 1000;
+        fk_req.tv_nsec = (ms183 % 1000) * 1000000;
+        nanosleep(&fk_req, 0);
+        clock_gettime(CLOCK_MONOTONIC, &fk_t1);
+        return (((long long)fk_t1.tv_sec - fk_t0.tv_sec) * 1000 + ((long long)fk_t1.tv_nsec - fk_t0.tv_nsec) / 1000000) << 1;
     }
     /* THE GIFT FRAME (tags 184-189): a frame in process shared memory that one
      * process offers and any other receives with no latency and no polling of a
@@ -10575,6 +10728,20 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 39) {
             return fk_conf_pool_cap << 1;
+        }
+        if (ks_k == 41) {
+            /* gift frames mapped in this process (shm_offer/shm_receive handles still standing) */
+            long long ks_g = 0, ks_i = 0;
+            while (ks_i < fk_gift_count) { if (fk_gift_base[ks_i] != 0) { ks_g = ks_g + 1; } ks_i = ks_i + 1; }
+            return ks_g << 1;
+        }
+        if (ks_k == 42) {
+            long long ks_b = 0, ks_i = 0;
+            while (ks_i < fk_gift_count) { if (fk_gift_base[ks_i] != 0) { ks_b = ks_b + fk_gift_size[ks_i]; } ks_i = ks_i + 1; }
+            return ks_b << 1;
+        }
+        if (ks_k == 43) {
+            return fk_fntop << 1;
         }
         if (ks_k == 40) {
             return fk_conf_pool_grows << 1;

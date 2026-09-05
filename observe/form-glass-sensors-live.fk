@@ -1,0 +1,39 @@
+; form-glass-sensors-live.fk — the glass's sensor process: the rows that fork
+; or scan the filesystem are gathered here, at each sensor's own cadence, and
+; GIVEN into a gift frame per sensor. The glass frame path then only asks each
+; frame's sequence (microseconds) and re-reads a frame that moved.
+;
+;   host     every 500 ms   memory_pressure, sysctl loadavg, vm_stat, iostat
+;   process  every 1000 ms  pgrep + ps per fkwu
+;   storage  every 5000 ms  the catalog: fs_list over the cache roots + file_size
+;   queue    every 250 ms   the hearth spools
+;   owner    every 1000 ms  the model owner process rows (ps on the owner pid from its live sample)
+;   governor every 1000 ms  the resource governor refreshes its own publication
+;
+; Offered, never demanded: a glass that is not running costs this process
+; nothing, and a sensor that is not running leaves the glass one row that says
+; so by name. Runs until the process is ended; each loop step is one
+; host_sleep_ms, never a forked /bin/sleep.
+;
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/form-glass-live.bml form/form-stdlib/form-glass-sensor-rows.bml
+
+(do
+    (defn fgsl-due? (now last every) (if (lt last 0) 1 (if (ge (sub now last) every) 1 0)))
+    (defn fgsl-give-rows (sensor now rows) (do (fgsr-give sensor now rows) now))
+    (defn fgsl-owner-rows (now frame)
+        (do (let inventory (fgtm-inventory (FGLRoot)))
+            (let samples (fgl-local-samples (fgl-dedupe-samples (append (fgl-jit-current-samples) (fgl-external-samples (fgl-inventory-samples-at inventory now)))) now))
+            (fgl-owner-rows-at 0 (list) samples now)))
+    (defn fgsl-step (now lastHost lastProcess lastStorage lastQueue lastGovernor lastOwner frame)
+        (do
+            (let host (if (eq (fgsl-due? now lastHost 500) 1) (fgsl-give-rows "host" now (fgo-observe-rows (fgl-observe-host-rows-with-delta (list)) now frame)) lastHost))
+            (let process (if (eq (fgsl-due? now lastProcess 1000) 1) (fgsl-give-rows "process" now (fgo-observe-rows (fgo-live-process-rows) now frame)) lastProcess))
+            (let storage (if (eq (fgsl-due? now lastStorage 5000) 1) (fgsl-give-rows "storage" now (fgl-storage-rows-at 0 (list) now)) lastStorage))
+            (let queue (if (eq (fgsl-due? now lastQueue 250) 1) (fgsl-give-rows "queue" now (fgo-observe-rows (fgl-hearth-queue-observe) now frame)) lastQueue))
+            (let governor (if (eq (fgsl-due? now lastGovernor 1000) 1) (do (host-exec "./fkwu observe/form-resource-governor-glass-current-run.fk" "") now) lastGovernor))
+            (let owner (if (eq (fgsl-due? now lastOwner 1000) 1) (fgsl-give-rows "owner" now (fgsl-owner-rows now frame)) lastOwner))
+            (let rested (host_sleep_ms 50))
+            (fgsl-step (now_unix_ms) host process storage queue governor owner (add frame 1))))
+    (print "form-glass-sensors: giving host/process/storage/queue frames; governor refreshed each second")
+    (fgsl-step (now_unix_ms) -1 -1 -1 -1 -1 -1 0))

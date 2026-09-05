@@ -1,0 +1,74 @@
+; form-glass-frame-budget-run.fk — the glass frame path, measured as it runs.
+;
+; Twenty consecutive frames through the SAME per-frame work the live loop does
+; -- sensor gift reads with their held triples, the cached inventory with its
+; cache carried frame to frame, observations held every fourth frame, kernel
+; rows, the flow point, the dashboard frame -- with per-stage milliseconds
+; and the count of frames whose total work stayed under 50 ms. No synthetic
+; samples enter; a sensor that is not giving shows as its one absent row and
+; the frame is measured with it. Run with observe/form-glass-sensors-live.fk
+; standing to see the path as the live glass sees it.
+;
+; preludes: form/form-stdlib/form-glass-live.bml
+
+(do
+    (defn fbr-ms (a b) (sub b a))
+    (defn fbr-frame (frame heldFast heldHost heldQueue heldStorage heldHeat cache history acc)
+        (do
+            (let t0 (now_unix_ms))
+            (let epoch t0)
+            (let roster (if (or (eq (len (fgl-cache-roster cache)) 0) (eq (fgl-cycle? frame 10) 1)) (fgtm-inventory-roster (FGLRoot)) (fgl-cache-roster cache)))
+            (let ta (now_unix_ms))
+            (let inventoryPair (fgtm-inventory-cached-with (FGLRoot) roster (fgl-cache-snapshots cache)))
+            (let tb (now_unix_ms))
+            (let inventory (nth inventoryPair 0))
+            (let inventoryMoved (fgtm-inventory-moved inventoryPair (fgl-cache-snapshots cache)))
+            (let inventorySamples (if (and (eq inventoryMoved 0) (gt (len (fgl-cache-samples cache)) 0)) (list) (fgl-external-samples (fgl-inventory-samples-at inventory epoch))))
+            (let tc (now_unix_ms))
+            (let jitSamples (fgl-jit-current-samples))
+            (let td (now_unix_ms))
+            (let externalSamples (if (and (eq inventoryMoved 0) (gt (len (fgl-cache-samples cache)) 0)) (fgl-cache-samples cache) (fgl-dedupe-samples (append jitSamples inventorySamples))))
+            (let te (now_unix_ms))
+            (let samples (fgl-local-samples externalSamples epoch))
+            (let t1 (now_unix_ms))
+            (let hostHeld (fgsr-take "host" heldHost))
+            (let ownerHeld (fgsr-take "owner" heldFast))
+            (let queueHeld (fgsr-take "queue" heldQueue))
+            (let storageHeld (fgsr-take "storage" heldStorage))
+            (let hostRows (fgsr-rows-or-absent "host" hostHeld))
+            (let ownerRows (fgsr-rows-or-absent "owner" ownerHeld))
+            (let queueRows (fgsr-rows-or-absent "queue" queueHeld))
+            (let storageRows (fgsr-rows-or-absent "storage" storageHeld))
+            (let t2 (now_unix_ms))
+            (let heatRows (fgl-heat-rows-at frame heldHeat epoch))
+            (let fastRows (append (fgo-observe-rows (fgl-frame-fast-rows frame 0 0 40 (fgl-fast-rows frame heldFast (list))) epoch frame) (append heatRows ownerRows)))
+            (let kernelRows (fgo-observe-rows (fgl-kernel-rows) epoch frame))
+            (let t3 (now_unix_ms))
+            (let metricsObserved (append (fgo-observe-rows (list (fgl-string-growth-row (kernel_stat 5)) (fgl-node-growth-row (kernel_stat 4))) epoch frame) (append fastRows (append hostRows (append queueRows (append storageRows (append kernelRows (fgl-model-route-rows samples epoch frame))))))))
+            (let metrics (fgo-age-rows-at metricsObserved epoch))
+            (let publishers (fgl-external-publishers (fgl-inventory-publishers inventory)))
+            (let observations (if (or (eq (len (fgl-cache-observations cache)) 0) (eq (fgl-cycle? frame 4) 1)) (fgl-v2-observations epoch frame samples) (fgl-cache-observations cache)))
+            (let nextCache (fgl-cache-full (nth inventoryPair 1) observations externalSamples roster))
+            (let t4 (now_unix_ms))
+            (let point (fgl-flow-point-current-full epoch metrics observations samples))
+            (let nextHistory (ftc-ring-push history point (FGLHistoryCapacity)))
+            (let control (fgl-control-state-full "all" "budget" 0 "held" "overview" "all" "all" 0))
+            (let nextFrame (fgl-dashboard-frame 110 34 epoch (FGLActiveHz) frame control metrics samples publishers nextHistory observations))
+            (let t5 (now_unix_ms))
+            (let total (fbr-ms t0 t5))
+            (let row (list frame (fbr-ms t0 t1) (fbr-ms t1 t2) (fbr-ms t2 t3) (fbr-ms t3 t4) (fbr-ms t4 t5) total (len samples) (len metrics) inventoryMoved (list "roster" (fbr-ms t0 ta) "inventory" (fbr-ms ta tb) "derive" (fbr-ms tb tc) "jit" (fbr-ms tc td) "dedupe" (fbr-ms td te) "local" (fbr-ms te t1))))
+            (if (ge frame 19) (cons row acc)
+                (fbr-frame (add frame 1) ownerHeld hostHeld queueHeld storageHeld heatRows nextCache nextHistory (cons row acc)))))
+    (defn fbr-warm (rows) (if (le (len rows) 1) (list) (reverse (tail (reverse rows)))))
+    (defn fbr-col (rows k) (if (eq (len rows) 0) (list) (cons (nth (head rows) k) (fbr-col (tail rows) k))))
+    (defn fbr-under (rows n) (if (eq (len rows) 0) n (fbr-under (tail rows) (if (lt (nth (head rows) 6) 50) (add n 1) n))))
+    (defn fbr-col-max (rows k m) (if (eq (len rows) 0) m (fbr-col-max (tail rows) k (if (gt (nth (head rows) k) m) (nth (head rows) k) m))))
+    (defn fbr-col-sum (rows k s) (if (eq (len rows) 0) s (fbr-col-sum (tail rows) k (add s (nth (head rows) k)))))
+    (let rows (fbr-frame 0 (list) (list) (list) (list) (list) (fgl-cache-empty) (list) (list)))
+    (let n (len rows))
+    (print (list "form-glass-frame-budget-v1" "frames" n "under-50ms" (fbr-under rows 0)
+        "first-frame-total" (nth (nth rows (sub n 1)) 6)
+        "mean-ms" (list "inventory+samples" (div (fbr-col-sum rows 1 0) n) "sensors" (div (fbr-col-sum rows 2 0) n) "heat+fast+kernel" (div (fbr-col-sum rows 3 0) n) "metrics+observations" (div (fbr-col-sum rows 4 0) n) "flow+render" (div (fbr-col-sum rows 5 0) n) "total" (div (fbr-col-sum rows 6 0) n))
+        "max-total-ms" (fbr-col-max rows 6 0) "max-warm-ms" (fbr-col-max (fbr-warm rows) 6 0)
+        "moved-per-frame" (fbr-col rows 9) "stage-1-split-frame-10" (nth (nth rows 9) 10) "sensors-standing" (list (fgsr-standing? "host") (fgsr-standing? "owner") (fgsr-standing? "queue") (fgsr-standing? "storage"))))
+    (fbr-under rows 0))
