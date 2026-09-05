@@ -200,6 +200,45 @@ section [form.bml] {
             let publishers = fgtm-inventory-publishers(root, fs-list(root));
             list("glass-inventory-v1", root, "current", publishers, fgtm-read-publishers(root, publishers));
         }
+        // ---- the cached inventory: parse a publisher only when its frame moved ----
+        // A publisher's key is its gift sequence when the frame stands (offset so
+        // gift keys and file keys never meet), else its snapshot file's mtime.
+        // cache = list of (publisher key reading); an unmoved key answers the held
+        // reading with no read and no parse, so a steady field costs the glass
+        // one stat or one shm_seq per publisher per frame.
+        def fgtm-read-key(root, publisher) {
+            let handle = ggf-receive(publisher);
+            let seq = ggf-seq(handle);
+            let released = ggf-release(handle);
+            if nothing?(handle) then file_mtime(fgtm-snapshot-path(root, publisher)) else add(1000000000000, seq);
+        }
+        def fgtm-cache-find(cache, publisher) = if eq(len(cache), 0) then list() else if str_eq(nth(head(cache), 0), publisher) then head(cache) else fgtm-cache-find(tail(cache), publisher);
+        def fgtm-cache-entry(publisher, key, reading) = list(publisher, key, reading);
+        def fgtm-read-cached-one(root, publisher, cache) {
+            let key = fgtm-read-key(root, publisher);
+            let held = fgtm-cache-find(cache, publisher);
+            if and(gt(len(held), 0), eq(nth(held, 1), key)) then held else fgtm-cache-entry(publisher, key, fgtm-read-current(root, publisher));
+        }
+        def fgtm-read-publishers-cached(root, publishers, cache, readings, nextCache) {
+            if eq(len(publishers), 0) then list(reverse(readings), reverse(nextCache)) else fgtm-read-publishers-cached-next(root, publishers, cache, readings, nextCache, fgtm-read-cached-one(root, head(publishers), cache));
+        }
+        def fgtm-read-publishers-cached-next(root, publishers, cache, readings, nextCache, entry) = fgtm-read-publishers-cached(root, tail(publishers), cache, cons(nth(entry, 2), readings), cons(entry, nextCache));
+        // how many entries of the new cache are not the very entries of the old one (re-read this frame)
+        def fgtm-cache-moved(newCache, oldCache, n) = if eq(len(newCache), 0) then n else fgtm-cache-moved(tail(newCache), oldCache, if eq(fgtm-cache-same?(head(newCache), fgtm-cache-find(oldCache, nth(head(newCache), 0))), 1) then n else add(n, 1));
+        def fgtm-cache-same?(entry, held) = if eq(len(held), 0) then 0 else if eq(nth(entry, 1), nth(held, 1)) then 1 else 0;
+        def fgtm-inventory-moved(pair, oldCache) = fgtm-cache-moved(nth(pair, 1), oldCache, 0);
+        // the same, over a roster the caller already holds (no directory listing)
+        def fgtm-inventory-cached-with(root, publishers, cache) {
+            let pair = fgtm-read-publishers-cached(root, publishers, cache, list(), list());
+            if not(eq(fgtm-root-valid?(root), 1)) then list(list("glass-inventory-v1", root, "refused", list(), list()), cache) else if eq(fs-is-dir?(root), 0) then list(list("glass-inventory-v1", root, "absent", list(), list()), cache) else list(list("glass-inventory-v1", root, "current", publishers, nth(pair, 0)), nth(pair, 1));
+        }
+        def fgtm-inventory-roster(root) = if or(not(eq(fgtm-root-valid?(root), 1)), eq(fs-is-dir?(root), 0)) then list() else fgtm-inventory-publishers(root, fs-list(root));
+        // answers list(inventory, cache)
+        def fgtm-inventory-cached(root, cache) {
+            let publishers = if or(not(eq(fgtm-root-valid?(root), 1)), eq(fs-is-dir?(root), 0)) then list() else fgtm-inventory-publishers(root, fs-list(root));
+            let pair = fgtm-read-publishers-cached(root, publishers, cache, list(), list());
+            if not(eq(fgtm-root-valid?(root), 1)) then list(list("glass-inventory-v1", root, "refused", list(), list()), cache) else if eq(fs-is-dir?(root), 0) then list(list("glass-inventory-v1", root, "absent", list(), list()), cache) else list(list("glass-inventory-v1", root, "current", publishers, nth(pair, 0)), nth(pair, 1));
+        }
         def fgtm-inventory(root) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-inventory-v1", root, "refused", list(), list()) else if eq(fs-is-dir?(root), 0) then list("glass-inventory-v1", root, "absent", list(), list()) else fgtm-inventory-current(root);
 
         // Control offers contain an enum action and an optional bounded label.

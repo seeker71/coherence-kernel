@@ -1,0 +1,84 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glass-sensor-rows.bml — metric rows cross a gift frame as text.
+//
+// Authority: form-stdlib/bml/form-glass-sensor-rows.bml
+// preludes: form/form-stdlib/core.fk form/form-stdlib/form-glass-dashboard.bml form/form-stdlib/form-glass-gift-frame.bml
+//
+// A sensor process gathers the rows that fork or scan -- host, process,
+// storage, queue -- at its own cadence and GIVES them into a gift frame per
+// sensor. The glass, on its frame path, only asks each frame's sequence
+// (microseconds) and re-reads a frame when the sequence moved. Rows are the
+// observer's own fgo-metric shape rebuilt through fgo-metric on arrival, so a
+// received row is indistinguishable from a locally observed one except for
+// the source it names. A sensor that is not standing is named absent.
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormGlassSensorRowsAuthority {
+        field FGSRAuthorityPath = "form/form-stdlib/bml/form-glass-sensor-rows.bml";
+        field FGSRAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class FormGlassSensorRows {
+        field FGSRSchema = "form-glass-sensor-rows-v1";
+        field FGSRPublisherPrefix = "glass.sensor.";
+        field FGSRFrameBytes = 262144;
+        field FGSRFieldCount = 18;
+        ref fgsr-authority = FormGlassSensorRowsAuthority;
+        thought fgsr-law = list("rows-are-the-observer-shape", "seq-before-read", "absent-says-absent", "wire-fields-never-carry-a-bar", "rebuilt-through-fgo-metric");
+
+        def fgsr-publisher(sensor) = str_concat(FGSRPublisherPrefix(), sensor);
+
+        // --- wire: one row per line, eighteen constructor fields joined by | -----
+        def fgsr-row-wire(row) = fgd-cat(list(
+            nth(row, 1), "|", nth(row, 2), "|", nth(row, 3), "|", nth(row, 4), "|", int_to_str(nth(row, 5)), "|", nth(row, 6), "|", int_to_str(nth(row, 7)), "|", nth(row, 8), "|", int_to_str(nth(row, 9)), "|", int_to_str(nth(row, 10)), "|", int_to_str(nth(row, 11)), "|", int_to_str(nth(row, 12)), "|", nth(row, 13), "|", nth(row, 14), "|", nth(row, 15), "|", nth(row, 16), "|", nth(row, 17), "|", nth(row, 18)));
+        def fgsr-rows-wire(rows) = if eq(len(rows), 0) then "" else if eq(len(rows), 1) then fgsr-row-wire(head(rows)) else str_concat(fgsr-row-wire(head(rows)), str_concat(byte_to_str(10), fgsr-rows-wire(tail(rows))));
+        def fgsr-wire(sensor, epoch, rows) = fgd-cat(list(FGSRSchema(), "|", sensor, "|", int_to_str(epoch), "|", int_to_str(len(rows)), byte_to_str(10), fgsr-rows-wire(rows)));
+
+        // --- parse -------------------------------------------------------------
+        def fgsr-split-go(text, sep, from, acc) {
+            let at = str_find(text, sep, from);
+            if lt(at, 0) then reverse(cons(substring(text, from, str_len(text)), acc)) else fgsr-split-go(text, sep, add(at, str_len(sep)), cons(substring(text, from, at), acc));
+        }
+        def fgsr-split(text, sep) = if eq(str_len(text), 0) then list() else fgsr-split-go(text, sep, 0, list());
+        def fgsr-int-of(text) = if eq(str_len(text), 0) then 0 else str_to_int(text);
+        def fgsr-row-of(fields) = if not(eq(len(fields), FGSRFieldCount())) then list() else fgo-metric(nth(fields, 0), nth(fields, 1), nth(fields, 2), nth(fields, 3), fgsr-int-of(nth(fields, 4)), nth(fields, 5), fgsr-int-of(nth(fields, 6)), nth(fields, 7), fgsr-int-of(nth(fields, 8)), fgsr-int-of(nth(fields, 9)), fgsr-int-of(nth(fields, 10)), fgsr-int-of(nth(fields, 11)), nth(fields, 12), nth(fields, 13), nth(fields, 14), nth(fields, 15), nth(fields, 16), nth(fields, 17));
+        def fgsr-rows-of(lines) = if eq(len(lines), 0) then list() else fgsr-rows-of-next(fgsr-row-of(fgsr-split(head(lines), "|")), tail(lines));
+        def fgsr-rows-of-next(row, rest) = if eq(len(row), 0) then fgsr-rows-of(rest) else cons(row, fgsr-rows-of(rest));
+        // list(schema, sensor, epoch, rows) or list() when the text is not this wire
+        def fgsr-parse(text) {
+            let lines = fgsr-split(text, byte_to_str(10));
+            let header = if eq(len(lines), 0) then list() else fgsr-split(head(lines), "|");
+            if or(lt(len(header), 4), not(str_eq(nth(header, 0), FGSRSchema()))) then list() else list(FGSRSchema(), nth(header, 1), fgsr-int-of(nth(header, 2)), fgsr-rows-of(tail(lines)));
+        }
+        def fgsr-parsed-sensor(p) = nth(p, 1);
+        def fgsr-parsed-epoch(p) = nth(p, 2);
+        def fgsr-parsed-rows(p) = nth(p, 3);
+
+        // --- give (the sensor side) ---------------------------------------------
+        def fgsr-give(sensor, epoch, rows) = ggf-offer-and-give(fgsr-publisher(sensor), FGSRFrameBytes(), fgsr-wire(sensor, epoch, rows));
+
+        // --- take (the glass side): seq first, read only when it moved ---------
+        // held = list(seq, epoch, rows); answers a new held or the same one.
+        def fgsr-held(seq, epoch, rows) = list(seq, epoch, rows);
+        def fgsr-held-seq(h) = if eq(len(h), 0) then -1 else nth(h, 0);
+        def fgsr-held-epoch(h) = if eq(len(h), 0) then -1 else nth(h, 1);
+        def fgsr-held-rows(h) = if eq(len(h), 0) then list() else nth(h, 2);
+        def fgsr-take(sensor, held) {
+            let handle = ggf-receive(fgsr-publisher(sensor));
+            let seq = ggf-seq(handle);
+            let moved = if nothing?(handle) then 0 else if eq(seq, fgsr-held-seq(held)) then 0 else 1;
+            let text = if eq(moved, 1) then ggf-taken(handle) else nothing();
+            let released = ggf-release(handle);
+            let parsed = if nothing?(text) then list() else fgsr-parse(text);
+            if eq(moved, 0) then held else if eq(len(parsed), 0) then held else fgsr-held(seq, fgsr-parsed-epoch(parsed), fgsr-parsed-rows(parsed));
+        }
+        def fgsr-standing?(sensor) = if nothing?(ggf-receive(fgsr-publisher(sensor))) then 0 else 1;
+        // when no sensor stands, one row says so by name instead of silence
+        def fgsr-absent-row(sensor) = fgo-unavailable("sensor", str_concat("sensor-", sensor), str_concat("sensor ", sensor), "rows", "membrane", str_concat("gift:", fgsr-publisher(sensor)), "health", "no sensor process is giving this frame; run observe/form-glass-sensors-live.fk");
+        def fgsr-rows-or-absent(sensor, held) = if eq(len(fgsr-held-rows(held)), 0) then list(fgsr-absent-row(sensor)) else fgsr-held-rows(held);
+    }
+    0;
+}
