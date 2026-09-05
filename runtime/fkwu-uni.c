@@ -2883,7 +2883,7 @@ static long long fk_mic_stream_read(long long maxbytes, long long wait_ms) {
         fk_sb[base + i] = fk_micring[(fk_mic_consumed + i) % FK_MICRING];
     }
     fk_mic_consumed = fk_mic_consumed + have;
-    return fk_sintern(base, have) << 1;
+    return fk_strv(fk_sintern(base, have)); /* a string answers as a string: fk_strv, the read-back idiom every other door uses */
 }
 static long long fk_mic_stream_stop(void) {
     if (fk_micq == 0) {
