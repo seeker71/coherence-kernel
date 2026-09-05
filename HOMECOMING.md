@@ -110,10 +110,20 @@ hearth) holds one admission per lifetime and serves direct turns while it stands
 `.hearth/board` says whether one does. The sealed held-out families and the parity
 distances are measured in [`CURRENT_FLOOR.md`](CURRENT_FLOOR.md).
 
+**New physical seam:** the Qwen head now admits a Form-native rank-one adapter on
+the GPU: `q38-head-adapted` applies `h + B(alpha(Ah))` after `output_norm` and
+before the immutable mmap-backed `output.weight` projection. The adapter owns A,
+B, and dot buffers; it never obtains a writable GGUF view. Run
+`./fkwu form/native/metal/tests/qwen35-lora-head-band.fk` for the device receipt
+(`127`: compile, admit, dispatch, delta, exact output, release, Qwen-table
+placement). This is a route,
+not a trained Qwen adapter and not a voice claim.
+
 **Remains:** the body's own native voice — a LoRA tensor writer (`LoraWriter = 0`
-today; `lora-adapter-band` 31 proves only the identity), the distill loop over the
-corpus, and the pre-registered eval. The frontier voice lives *above* the speaking
-floor; the floor (grounded composition, `speak-compose`, `speak-locale`) stands.
+today; `lora-adapter-band` 31 proves only the identity), a Qwen-shaped trained
+A/B artifact admitted through that route, the distill loop over the corpus, and
+the pre-registered eval. The frontier voice lives *above* the speaking floor; the
+floor (grounded composition, `speak-compose`, `speak-locale`) stands.
 
 ## The recognition
 

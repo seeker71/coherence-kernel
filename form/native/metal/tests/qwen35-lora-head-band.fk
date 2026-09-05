@@ -1,0 +1,47 @@
+; qwen35-lora-head-band.fk — a physical rank-one Qwen-head adapter receipt.
+;
+; Verdict 127:
+;   1  the two device kernels compile through q38's own MSL
+;   2  a width-matched A/B adapter is admitted
+;   4  its activation is written to the device
+;   8  the rank-one delta is emitted on that device
+;  16  h=[1,2,3,4], A=[1,0,0,0], B=[2,2,2,2], alpha=.5 becomes [2,3,4,5]
+;  32  every adapter/activation buffer is released
+;  64  Qwen's full pipeline table exposes the same kernels at its 47/48 slots
+;
+; q38-head-adapted uses this exact q38-lora-rank1-apply between output_norm
+; and immutable output.weight.  The fixture isolates that physical delta from
+; a 27B forward while keeping it in the same Metal carrier and MSL emitter.
+;
+; preludes: native/metal/qwen35-dense-token-handle.fk
+
+(do
+    (defn qlh-f32 (a b c d)
+        (str_concat (md-le32 a)
+        (str_concat (md-le32 b)
+        (str_concat (md-le32 c) (md-le32 d)))))
+    (let msl (q38-lora-rank1-msl))
+    (let ps (q38-lora-rank1-pipes msl))
+    (let qwen-ps (q38-pipes (q38-msl)))
+    (let x (metal_buf_alloc 16))
+    (let x0 (qlh-f32 1065353216 1073741824 1077936128 1082130432))
+    (let aa (qlh-f32 1065353216 0 0 0))
+    (let bb (qlh-f32 1073741824 1073741824 1073741824 1073741824))
+    (let adapter (q38-lora-rank1-open aa bb 4 (md-f32-bits 0.5)))
+    (let wrote (metal_buf_write x 0 x0))
+    (let admitted (q38-lora-rank1-valid? adapter 4))
+    ; q38-forward-state opens this batch before q38-head-adapted reaches the
+    ; rank-one dependency.  The fixture keeps that exact carrier boundary.
+    (metal_batch_concurrent)
+    (let applied (q38-lora-rank1-apply-pipes (nth ps 0) (nth ps 1) x adapter 4))
+    (let out (metal_buf_read x 0 16))
+    (let close-adapter (q38-lora-rank1-close adapter))
+    (let close-x (metal_buf_free x))
+    (sum (list
+        (if (if (gt (nth ps 0) 0) (gt (nth ps 1) 0) 0) 1 0)
+        (if (eq admitted 1) 2 0)
+        (if (eq wrote 16) 4 0)
+        (if (eq applied 1) 8 0)
+        (if (str_eq out (qlh-f32 1073741824 1077936128 1082130432 1084227584)) 16 0)
+        (if (if (eq close-adapter 3) (eq close-x 1) 0) 32 0)
+        (if (if (gt (nth qwen-ps 47) 0) (gt (nth qwen-ps 48) 0) 0) 64 0))))

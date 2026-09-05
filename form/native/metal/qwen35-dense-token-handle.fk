@@ -54,6 +54,27 @@
         (str_concat fname
             " (device const float* x [[buffer(0)]], device const float* w [[buffer(1)]], device float* out [[buffer(2)]], constant uint& nh [[buffer(3)]], constant uint& hd [[buffer(4)]], constant float& eps [[buffer(5)]], constant uint& ntok [[buffer(6)]], uint gid [[thread_position_in_grid]]) { uint t = gid / nh; if (t >= ntok) return; uint h = gid - t * nh; uint b = t * nh * hd + h * hd; float ss = 0.0f; for (uint j = 0u; j < hd; ++j) { float v = x[b + j]; ss = ss + v * v; } float meansq = ss / float(hd); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } float inv = 1.0f / gg; for (uint j = 0u; j < hd; ++j) { out[b + j] = (x[b + j] * inv) * w[j]; }}")))
 
+    ; A rank-one LoRA is an additive output-head delta without a writable base
+    ; tensor: h' = h + B * (alpha * (A dot h)).  The dot is deliberately one
+    ; deterministic device thread: the adapter is tiny beside Qwen's Q8 head,
+    ; and a fixed reduction order makes the fixture a precise receipt.  The
+    ; second kernel is data-parallel and writes only Qwen's scratch activation.
+    ; `output.weight` remains a read-only GGUF view throughout.
+    (defn q38-lora-rank1-dot-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device const float* a [[buffer(1)]], device float* dot [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& alpha [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; float acc = 0.0f; uint i = n; while (i > 0u) { i -= 1u; acc = a[i] * x[i] + acc; } dot[0] = alpha * acc; }")))
+    (defn q38-lora-rank1-add-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* x [[buffer(0)]], device const float* b [[buffer(1)]], device const float* dot [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; x[i] = x[i] + b[i] * dot[0]; }")))
+    (defn q38-lora-rank1-msl ()
+        (str_concat (q38-lora-rank1-dot-msl "form_qwen_lora_rank1_dot_f32")
+                    (q38-lora-rank1-add-msl "form_qwen_lora_rank1_add_f32")))
+    (defn q38-lora-rank1-pipes (msl)
+        (list (metal_pipeline msl "form_qwen_lora_rank1_dot_f32")
+              (metal_pipeline msl "form_qwen_lora_rank1_add_f32")))
+
     (defn q38-rope-span-msl (fname)
         (str_concat "kernel void "
         (str_concat fname
@@ -178,7 +199,8 @@
         (str_concat (q38-copysoff-msl "form_copy_soff_f32")
         (str_concat (q38-rmsspan-msl "form_rmsnorm_span_f32")
         (str_concat (q38-joined-attention-msl)
-                    (q38-linear-span-msl))))))))
+        (str_concat (q38-linear-span-msl)
+                    (q38-lora-rank1-msl)))))))))
 
     ; Order here IS the pipeline order for indices 40..46, and the layout
     ; contract names each one. Appending is safe; inserting renumbers a
@@ -198,7 +220,7 @@
     (defn q38-pipes (msl)
         (do
         (let linear (q38-linear-span-pipeline-names))
-        (append (kth-pipes msl)
+        (let base (append (kth-pipes msl)
             (list (metal_pipeline msl "form_q8_0_matvec_wide_f32")
                   (metal_pipeline msl "form_q8_0_dequant_f32")
                   (metal_pipeline msl "form_q8_0_matmul_batch_f32")
@@ -216,7 +238,10 @@
                   (metal_pipeline msl (nth linear 3))
                   (metal_pipeline msl (nth linear 4))
                   (metal_pipeline msl (nth linear 5))
-                  (metal_pipeline msl (nth linear 6))))))
+                  (metal_pipeline msl (nth linear 6)))))
+        ; 47/48 follow the existing 40..46 span lane; appending preserves all
+        ; established pipeline identities.
+        (append base (q38-lora-rank1-pipes msl))))
 
     ; One exact 256-thread group per output-row pair for Q8_0.  All other declared types retain the
     ; already-proven KAT dispatches.  Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
@@ -250,6 +275,52 @@
                 (q38-b16 (list (kth-tv-h tv) xh yh)
                     (list (kth-tv-r tv) (kth-tv-c tv)) 0 barrier)
                 (kth-tv-r tv))))
+
+    ; Adapter = [A-handle B-handle dot-handle width alpha-f32-bits].  Its
+    ; buffers are independent allocations owned by the adapter, so this is an
+    ; overlay on an activation, never an in-place patch of the immutable GGUF.
+    (defn q38-lora-rank1-valid? (adapter width)
+        (if (eq (len adapter) 5)
+            (if (eq (nth adapter 3) width)
+                (if (gt (nth adapter 0) 0)
+                    (if (gt (nth adapter 1) 0) (if (gt (nth adapter 2) 0) 1 0) 0) 0) 0) 0))
+    (defn q38-lora-rank1-open (a-bytes b-bytes width alpha-bits)
+        (if (if (gt width 0)
+                (if (eq (str_len a-bytes) (mul width 4))
+                    (eq (str_len b-bytes) (mul width 4)) 0)
+                0)
+            (do
+                (let ah (metal_buf_alloc (mul width 4)))
+                (let bh (metal_buf_alloc (mul width 4)))
+                (let dh (metal_buf_alloc 4))
+                (if (if (eq (metal_buf_write ah 0 a-bytes) (mul width 4))
+                        (if (eq (metal_buf_write bh 0 b-bytes) (mul width 4)) 1 0) 0)
+                    (list ah bh dh width alpha-bits)
+                    (do (metal_buf_free ah) (metal_buf_free bh) (metal_buf_free dh) (empty))))
+            (empty)))
+    (defn q38-lora-rank1-close (adapter)
+        (if (eq (len adapter) 5)
+            (sum (list (metal_buf_free (nth adapter 0))
+                       (metal_buf_free (nth adapter 1))
+                       (metal_buf_free (nth adapter 2))))
+            0))
+    (defn q38-lora-rank1-apply-pipes (dot-pipe add-pipe xh adapter width)
+        (if (eq (q38-lora-rank1-valid? adapter width) 1)
+            (do
+                (metal_enqueue dot-pipe
+                    (q38-b16 (list xh (nth adapter 0) (nth adapter 2))
+                             (list width (nth adapter 4)) 0 1)
+                    1)
+                (metal_enqueue add-pipe
+                    (q38-b16 (list xh (nth adapter 1) (nth adapter 2))
+                             (list width) 0 1)
+                    width)
+                1)
+            0))
+    ; q38-pipes appends these after its pre-existing 0..46 slots.  Keep that
+    ; identity here; fixtures may pass their two compiled handles directly.
+    (defn q38-lora-rank1-apply (ps xh adapter width)
+        (q38-lora-rank1-apply-pipes (nth ps 47) (nth ps 48) xh adapter width))
 
     ; Dense layer table.  Common indices 0..4 are attn norm, post-attn norm, gate/up/down.  The tail
     ; is 5..13 for linear attention or 5..10 for full attention; its shape is selected from the
@@ -788,6 +859,25 @@
                 1)
             0))
 
+    ; This is the only adapted Qwen head.  It preserves the base path above
+    ; for unadapted turns and gives an admitted rank-one adapter one exact
+    ; point of effect: after output_norm, before the existing output.weight
+    ; matvec.  Nothing ever obtains a writable view of projTv.
+    (defn q38-head-adapted (ps bs geo onormTv projTv adapter)
+        (do
+            (q38-rms ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 6) 1)
+            (q38-lora-rank1-apply ps (nth bs 1) adapter (nth geo 0))
+            (q38-mv ps projTv (nth bs 1) (nth bs 28) 1)
+            (metal_enqueue (nth ps 25)
+                (q38-b16 (list (nth bs 28) (nth bs 29) (nth bs 30))
+                    (list (nth geo 19) 1024) 0 1)
+                1024)
+            (metal_enqueue (nth ps 26)
+                (md-bind16 (list (nth bs 29) (nth bs 30) (nth bs 31) (nth bs 32))
+                           (list 1024) 1024 0 1 1)
+                1)
+            0))
+
     ; The state half of a forward: embed the token and run every block, which is
     ; what advances this position's stream state and KV rows.  It stops before the
     ; head, because the head answers a QUESTION (which token is next) and a
@@ -807,6 +897,17 @@
             (q38-forward-state ps bs geo lays sts embTv id pos)
             (q38-head ps bs geo onormTv projTv)
             (kth-u32at (metal_buf_read (nth bs 31) 0 4) 0)))
+
+    ; The adapted entry refuses a mismatched adapter before any model state is
+    ; advanced.  A successful token therefore crossed the device rank-one head,
+    ; never a merely named projection.
+    (defn q38-forward-adapted (ps bs geo lays sts embTv onormTv projTv adapter id pos)
+        (if (eq (q38-lora-rank1-valid? adapter (nth geo 0)) 1)
+            (do
+                (q38-forward-state ps bs geo lays sts embTv id pos)
+                (q38-head-adapted ps bs geo onormTv projTv adapter)
+                (kth-u32at (metal_buf_read (nth bs 31) 0 4) 0))
+            (sub 0 1)))
 
     ; Advance one position without asking the head.  metal_sync stands exactly
     ; where the argmax read-back stood in a full forward: the batch is submitted
