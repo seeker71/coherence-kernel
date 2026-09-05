@@ -28,7 +28,7 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is 16,756 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is 16,936 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
 preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 668 rows, 656 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 669 rows, 657 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -218,10 +218,10 @@ jit-source-runtime-orchestrator 1048575.
 ## The Glass
 
 One persistent process paints a retained terminal frame from the body's own
-observation: seven data views plus help, a front/back frame buffer, row-diff
+observation: ten data views plus help, a front/back frame buffer, row-diff
 repaint, and a correlated line-commit control sidecar
 (`observe/form-glass-control-run.fk`; `tools/watch-glass.sh` is the foreground
-carrier). Keys `h a t o m f j s` choose a view, `1 2 3 4` and `0` select
+carrier). Keys `h a t o m f j s k v n` choose a view, `1 2 3 4` and `0` select
 dialects, `i e c q` inspect, ask evidence, continue, abstain.
 
 ```text
@@ -238,6 +238,8 @@ form-glass-meaning-ui-band             -> 8191
 form-glass-gift-frame-band             -> 4095
 form-glass-sensor-rows-band            -> 255
 form-glass-kernel-view-band            -> 511
+form-glass-events-channels-band        -> 255
+node-gift-band                         -> 4095
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -275,6 +277,20 @@ never unlinks, and an absent gift is named absent. Publishers are still indexed
 by their files, and a publisher born before this build gives nothing until it
 is reborn on it.
 
+A value crosses a gift frame **as itself**: `node_gift_write handle value`
+(tag 178) and `node_gift_read handle` (177) carry ints, floats, strings,
+`nothing`, lists, trivial nodes, composite cells — category then children,
+re-interned on read so the same category over the same children is the same
+cell in the reader (axiom 3) — and NodeID coordinates; a function value
+refuses the give by name. No wire is written and no parser stands on the
+frame path: the reader knows the format because the format is the seed's own
+node words (`node-gift-band` 4095, a child process witnessing the same
+category). The sensor lane gives `list(schema, sensor, epoch, rows)` this way
+and the projection node the glass holds is the same cell the sensor built
+(`form-glass-sensor-rows-band` 255). The snapshot publishers in other
+processes — owner, hearth, voice, share, governor, jit — still give the text
+wire the membrane parses (`release-ledger.bml` R111).
+
 **The frame path is sub-50 ms.** Measured 2026-09-05 on this M4 Max through
 `observe/form-glass-frame-budget-run.fk` — twenty consecutive frames with the
 sensor process standing: total mean 30–31 ms including the cold first frame,
@@ -299,12 +315,21 @@ defined, and the hottest defns of this process with their source pointers —
 heat the exit report prints, named by the symbol map, in one pass over the
 program text (`form-glass-kernel-view-band` 511).
 
+**`v` is the events view and `n` the channels view**: the live samples
+selected by the sample's own kind — events, choice points, expert routes,
+resolvers, requests, glass flow; channels, channel edges, grammars, mesh, ear
+streams, shares, field observers, meaning code — newest first, and when no
+sample of a kind is published the view names the organ absent by its door
+(`form-glass-events-channels-band` 255). Surprise receipts, choice points,
+channel protocols and the grammars have no live publisher yet; each owes one
+give into the glass (R112).
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=41 moving=0 released=61 -> 41000061
+./fkwu form/form-stdlib/release-ledger.bml -> open=45 moving=0 released=66 -> 45000066
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
@@ -368,11 +393,13 @@ What answered red or nothing in this pass, so no one leans on it:
   to a raw word that prints as -8000000000000000009 and is not `nothing?`; the
   body writes the call, `nothing()`, and the lowering owes the bare name a
   refusal or the axiom-1 value (R103).
-- The gift frames carry text wires the reader parses; the cells should cross as
-  the seed's own node words — blueprint id and children — read by intern, not
-  parse (R108). The wait that wakes on a telemetry or control path change is
-  still owed; a bounded native rest paces the frame (R107). `host_sleep_ms`
-  rests 2–5 ms past the ask on this host (R109).
+- The snapshot publishers in other processes still give the text wire
+  `fgtm-snapshot-wire` the membrane parses; each owes a move to
+  `node_gift_write` (R111). Surprise receipts, choice points, channel protocols
+  and the grammars have no live publisher; the `v` and `n` views name them
+  absent by door (R112). The wait that wakes on a telemetry or control path
+  change is still owed; a bounded native rest paces the frame (R107).
+  `host_sleep_ms` rests 2–5 ms past the ask on this host (R109).
 - `observe/tests/jit-register-lowering-band.fk`,
   `jit-representation-specialization-band.fk` and `jit-stack-frame-band.fk`
   answer nothing: each file ends with one paren open
