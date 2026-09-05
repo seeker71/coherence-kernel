@@ -1,0 +1,61 @@
+; stt-oracle-run.fk — the STT lane's first stone. The body's own ear
+; (sense_mic_capture, s16le 16 kHz mono) records the room; the level is
+; measured natively in dBFS so very quiet speech is seen, not lost; the
+; WAV is written by the body; the open reference (mlx-whisper large-v3-turbo,
+; observe/stt-oracle.py — the one crossing) transcribes it and names the
+; language; a standing resident translates the other way (fa<->en) through
+; the hearth; the pair becomes training material (wav + transcript + row);
+; voice.stt rows publish to the shared glass. Overlapping speakers and the
+; Android ear are the next stones, named in the receipt.
+; stdin line 1: seconds (blank -> 5); line 2: language hint fa|en (blank -> auto).
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/hearth.bml form/form-stdlib/lane-motion.bml form/form-stdlib/voice-school.bml form/form-stdlib/lora-adapter.bml
+(do
+    (defn so-say (k v) (print_str (str_concat "stt " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn so-trim (s) (if (nothing? s) "" (trim s)))
+    (defn so-text (t) (if (nothing? t) "" t))
+    (defn so-line-end (s i) (if (ge i (str_len s)) i (if (eq (str_byte_at s i) 10) i (so-line-end s (add i 1)))))
+    (defn so-field (s key) (do (let at (str_find s (str_concat key "=") 0)) (if (lt at 0) "" (substring s (add at (add (str_len key) 1)) (so-line-end s at)))))
+    ; level: s16le samples -> rms -> dBFS (a negative number; printed as -N)
+    (defn so-sample (pcm i) (do (let v (add (str_byte_at pcm i) (mul (str_byte_at pcm (add i 1)) 256))) (if (ge v 32768) (sub v 65536) v)))
+    (defn so-sumsq (pcm i n acc) (if (ge i n) acc (so-sumsq pcm (add i 2) n (add acc (mul (so-sample pcm i) (so-sample pcm i))))))
+    (defn so-dbfs (pcm) (do (let n (str_len pcm)) (if (lt n 4) (sub 0 120) (do (let rms (math_sqrt (div (str_to_float (int_to_str (so-sumsq pcm 0 n 0))) (str_to_float (int_to_str (div n 2)))))) (if (lt rms 1.0) (sub 0 120) (float_to_int (round (mul 20.0 (div (math_log (div rms 32768.0)) (math_log 10.0))))))))))
+    ; WAV: 44-byte header the body writes, then the samples
+    (defn so-header (nbytes) (append (list 82 73 70 70) (append (ln-u32-bytes (add 36 nbytes)) (append (list 87 65 86 69 102 109 116 32) (append (ln-u32-bytes 16) (append (list 1 0 1 0) (append (ln-u32-bytes 16000) (append (ln-u32-bytes 32000) (append (list 2 0 16 0 100 97 116 97) (ln-u32-bytes nbytes))))))))))
+    (defn so-write-wav (path pcm) (do (let c (fs-remove-file path)) (let w (host_file_append_bytes path (append (so-header (str_len pcm)) (sbt-bytes-of pcm 0 (str_len pcm) (list))))) (file_size path)))
+    (defn so-reply (rsp turn) (do (let at (str_find rsp (str_concat "turn=" (str_concat (int_to_str turn) "\n")) 0)) (let m (if (lt at 0) (sub 0 1) (str_find rsp (lms-mark-response) at))) (let body (if (lt m 0) "" (substring rsp (add m (str_len (lms-mark-response))) (str_len rsp)))) (let t (str_find body "</think>" 0)) (let said (if (lt t 0) body (substring body (add t 8) (str_len body)))) (let e (str_find said "<|" 0)) (trim (if (lt e 0) said (substring said 0 e)))))
+    (defn so-wait (turn waited) (if (or (gt (str_len (so-reply (so-text (read_file (hearth-reply))) turn)) 0) (ge waited (hearth-review-wait-s))) waited (do (let r (hearth-rest-s (hearth-review-tick-s))) (so-wait turn (add waited (hearth-review-tick-s))))))
+    (defn so-translate (lang text) (if (or (eq (hearth-standing) 0) (eq (str_len text) 0)) "" (do (let turn (add (lms-max-turn (read_file (hearth-task))) 1)) (let sent (hearth-send turn (hearth-kind-answer) (vs-cat (list "/no_think Translate to " (if (str_eq lang "fa") "English" "Persian") ", one line only, no notes: " text)))) (let w (so-wait turn 0)) (so-reply (so-text (read_file (hearth-reply))) turn))))
+    (defn so-words (s i n inword) (if (ge i (str_len s)) (add n inword) (if (eq (str_byte_at s i) 32) (so-words s (add i 1) (add n inword) 0) (so-words s (add i 1) n 1))))
+    (let seconds (str_to_int (do (let l (so-trim (read_line))) (if (eq (str_len l) 0) "5" l))))
+    (let hint (so-trim (read_line)))
+    (let epoch (now_unix_ms))
+    (let t0 (now_unix_ms))
+    (let pcm (so-text (sense_mic_capture (mul seconds 1000))))
+    (let captured (sub (now_unix_ms) t0))
+    (let db (so-dbfs pcm))
+    (let dir ".form-lora-voice-native/stt")
+    (let mk (fs-mkdir dir))
+    (let wav (vs-cat (list dir "/" (int_to_str epoch) ".wav")))
+    (let bytes (so-write-wav wav pcm))
+    (let t1 (now_unix_ms))
+    (let out (so-text (host-exec (vs-cat (list "/Users/ursmuff/.mlx-venv/bin/python observe/stt-oracle.py " wav " " hint " 2>/dev/null")) "")))
+    (let oracle-ms (sub (now_unix_ms) t1))
+    (let lang (so-field out "language"))
+    (let text (so-field out "text"))
+    (let t2 (now_unix_ms))
+    (let other (so-translate lang text))
+    (let translate-ms (sub (now_unix_ms) t2))
+    (let sidecar (write_file_text (vs-cat (list dir "/" (int_to_str epoch) ".txt")) (vs-cat (list "language=" lang "\ntext=" text "\ntranslation=" other "\ndbfs=" (int_to_str db) "\n"))))
+    (let row (if (or (eq (str_len text) 0) (eq (str_len other) 0)) 0 (sbt-append ".form-lora-voice-native/stt.jsonl" (lv-row (vs-cat (list "Translate this " (if (str_eq lang "fa") "Persian" "English") " speech to " (if (str_eq lang "fa") "English" "Persian") ": " text)) other))))
+    (so-say "capture" (vs-cat (list "seconds=" (int_to_str seconds) " bytes=" (int_to_str (str_len pcm)) " ms=" (int_to_str captured) " dbfs=" (int_to_str db))))
+    (so-say "oracle" (vs-cat (list "language=" lang " latency-ms=" (int_to_str oracle-ms) " words=" (int_to_str (so-words text 0 0 0)) " segments=" (so-field out "segments"))))
+    (so-say "text" text)
+    (so-say "translation" (if (eq (str_len other) 0) "nothing (no standing resident or empty text)" (vs-cat (list other " ms=" (int_to_str translate-ms)))))
+    (so-say "material" (vs-cat (list wav " + sidecar" (if (eq row 0) "" " + training row"))))
+    (let published (fgtm-publish-snapshot (hearth-telemetry-root) "voice.stt" epoch (list
+        (vs-sample "stt.latency" (vs-cat (list "oracle-" (if (eq (str_len lang) 0) "none" lang))) oracle-ms "completed" epoch)
+        (vs-sample "stt.level" "dbfs-below-zero" (sub 0 db) (if (lt db (sub 0 50)) "idle" "active") epoch)
+        (vs-sample "stt.words" (if (eq (str_len other) 0) "untranslated" "translated") (so-words text 0 0 0) "completed" epoch))))
+    (so-say "glass" (nth published 1))
+    0)
