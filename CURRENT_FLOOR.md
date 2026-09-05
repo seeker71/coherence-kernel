@@ -83,7 +83,7 @@ bml-form-size-band                     -> 127      (one 40 KB `def` in a single 
                                                      answers; the normalizer walks spans as a tail
                                                      loop, so one statement's size sets no wall)
 cell-channel-band                      -> 4095     (two cells as processes on spool+bell, a shared
-- `form/form-stdlib/tests/ear-native-band.fk` = 255 — whisper-tiny as the body's own pass on this metal (native mic stream, weights off the npz, fourteen emitted kernels, base64 words); log-mel equal to the reference to six digits; 8 s window encodes in 94 ms, 14 ms a token; the live window is the last 8 s of real room audio and the cut is handed to the decoder as its first timestamp, no silence put in.
+- `form/form-stdlib/tests/ear-native-band.fk` = 255 — whisper-tiny as the body's own pass on this metal (native mic stream, weights off the npz, fifteen emitted kernels, base64 words); log-mel equal to the reference to six digits; an 8 s window encodes in 41 ms, a token costs 8 ms; the live window is the last 8 s of real room audio, the cut is the decoder's first timestamp, and a line ends where the world ends it.
                                                      field admitting grammar offers by whole sha256,
                                                      evaluation through a child membrane under
                                                      hearth-channel-eval-s; the witness door
