@@ -119,11 +119,20 @@ B, and dot buffers; it never obtains a writable GGUF view. Run
 placement). This is a route,
 not a trained Qwen adapter and not a voice claim.
 
-**Remains:** the body's own native voice — a LoRA tensor writer (`LoraWriter = 0`
-today; `lora-adapter-band` 31 proves only the identity), a Qwen-shaped trained
-A/B artifact admitted through that route, the distill loop over the corpus, and
-the pre-registered eval. The frontier voice lives *above* the speaking floor; the
-floor (grounded composition, `speak-compose`, `speak-locale`) stands.
+**New local artifact:** Form now writes a Qwen-width (5120) float32 rank-one A/B
+safetensors seed from its local corpus and admits those exact bytes into the
+device head. `./fkwu form/form-stdlib/tests/qwen-lora-head-band.fk` returns 63;
+`./fkwu observe/qwen-lora-head-mint-run.fk` mints it, and
+`./fkwu observe/qwen-lora-head-live-run.fk` witnesses one actual adapted local
+Qwen forward. `qwen-lora-head-sample-run.fk` carries the adapter across prefill
+and decode and stores its local text receipt. The seed is deliberately marked
+untrained: a route and a sample do not substitute for held-out quality.
+
+**Remains:** the body's own native voice — a trainer that learns a Qwen-shaped
+A/B artifact rather than merely minting the current seed, the distill loop over
+the corpus, and the pre-registered held-out evaluation. The frontier voice lives
+*above* the speaking floor; the floor (grounded composition, `speak-compose`,
+`speak-locale`) stands.
 
 ## The recognition
 
