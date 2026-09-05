@@ -5,7 +5,8 @@
 # stands the sensor process beside the glass: the rows that fork or scan the
 # filesystem are gathered there at their own cadence and given into shared
 # memory, so the glass frame path holds only gift reads, render, and a native
-# wait (observe/form-glass-sensors-live.fk). Ending the carrier ends the sensors.
+# wait (observe/form-glass-sensors-live.fk); the machine frame -- GPU level, CPU busy --
+# is its own 50 ms process (observe/form-glass-machine-live.fk). Ending the carrier ends both.
 cd "$(dirname "$0")/.." || exit 1
 if [[ "${FORM_GLASS_NICE_APPLIED:-0}" != "1" ]]; then
   export FORM_GLASS_NICE_APPLIED=1
@@ -13,7 +14,9 @@ if [[ "${FORM_GLASS_NICE_APPLIED:-0}" != "1" ]]; then
 fi
 ./fkwu observe/form-glass-sensors-live.fk >/dev/null 2>&1 &
 sensors=$!
-trap 'kill "$sensors" 2>/dev/null; exit 130' INT TERM HUP
+./fkwu observe/form-glass-machine-live.fk >/dev/null 2>&1 &
+machine=$!
+trap 'kill "$sensors" "$machine" 2>/dev/null; exit 130' INT TERM HUP
 while :; do
   # Paint the small Form-owned truthful frame before any full-graph admission.
   ./fkwu observe/form-glass-staged-startup-run.fk || { sleep 1; continue; }
@@ -22,7 +25,7 @@ while :; do
   ./fkwu observe/form-resource-governor-glass-current-run.fk || { sleep 1; continue; }
   ./fkwu observe/form-glass-live-run.fk
   restart=$(./fkwu observe/form-glass-supervisor-restart-run.fk)
-  if [[ "$restart" == "0" ]]; then kill "$sensors" 2>/dev/null; exit 0; fi
+  if [[ "$restart" == "0" ]]; then kill "$sensors" "$machine" 2>/dev/null; exit 0; fi
   print -r -- "Form Glass supervisor: ${restart:-unavailable}; rebirthing after 250ms"
   sleep 0.25
 done

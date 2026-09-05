@@ -90,6 +90,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "host_cpu_us", 0, 176 },
   { "host_gpu_utilization", 0, 174 },
   { "host_gpu_busy_us", 0, 175 },
+  { "host_cpu_busy_us", 0, 173 },
   { "host_sleep_ms", 1, 183 },
   { "kernel_hot", 1, 179 },
   { "node_gift_read", 1, 177 },
