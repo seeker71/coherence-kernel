@@ -1,0 +1,66 @@
+; qwen-lora-train.fk — one local activation-space rank-one fitting step.
+;
+; The trainer reads a normalized hidden state from the locally mapped Qwen
+; model, derives a corpus target already held by the body, and solves the
+; one-example rank-one least-squares update entirely in Form.  It is a real
+; weight artifact update, but deliberately not a language-quality claim: a
+; held-out generation evaluation still decides that question.
+;
+; Proven by: form-stdlib/tests/qwen-lora-train-band.fk
+; preludes: form-stdlib/qwen-lora-head.fk form-stdlib/model-registry.bml
+
+(do
+    (defn qlt-dot-go (xs ys acc)
+        (if (eq (len xs) 0) acc
+            (qlt-dot-go (tail xs) (tail ys) (add acc (mul (head xs) (head ys))))))
+    (defn qlt-dot (xs ys) (qlt-dot-go xs ys 0.0))
+    (defn qlt-scale-go (xs k acc)
+        (if (eq (len xs) 0) (reverse acc)
+            (qlt-scale-go (tail xs) k (cons (mul (head xs) k) acc))))
+    (defn qlt-scale (xs k) (qlt-scale-go xs k (empty)))
+    (defn qlt-sqerr-go (target b s acc)
+        (if (eq (len target) 0) acc
+            (do
+                (let d (sub (mul (head b) s) (head target)))
+                (qlt-sqerr-go (tail target) (tail b) s (add acc (mul d d))))))
+    (defn qlt-loss (target b s) (qlt-sqerr-go target b s 0.0))
+    ; With A=h/n, s=A·h.  For nonzero s, B=target/s is the exact least-squares
+    ; minimizer over B for this observed state: B*(A·h)=target.
+    (defn qlt-fit (h target)
+        (do
+            (let a (qlt-scale h (div 1.0 (add (len h) 0.0))))
+            (let s (qlt-dot a h))
+            (let b (if (eq s 0.0) (qlt-scale target 0.0)
+                       (qlt-scale target (div 1.0 s))))
+            (list a b s)))
+    (defn qlt-f32s-go (raw i n acc)
+        (if (ge i n) (reverse acc)
+            (qlt-f32s-go raw (add i 1) n
+                (cons (ln-f32-decode (ln-u32-le raw (mul i 4))) acc))))
+    (defn qlt-f32s (raw n)
+        (if (eq (str_len raw) (mul n 4)) (qlt-f32s-go raw 0 n (empty)) (empty)))
+    ; This is the one device-to-Form observation: a local Metal buffer becomes
+    ; a Form value so the new adapter remains auditable and writable by Form.
+    (defn qlt-local-hidden (path token)
+        (do
+            (let ctx (q38-open path 2))
+            (if (lt (len ctx) 10) (empty)
+                (do
+                    (let ps (nth ctx 0))
+                    (let bs (nth ctx 1))
+                    (let geo (nth ctx 2))
+                    (let sts (q38-new-state geo))
+                    (let ran (q38-forward-state ps bs geo (nth ctx 3) sts (nth ctx 4) token 0))
+                    (let normed (q38-rms ps (nth bs 0) (nth ctx 5) (nth bs 1)
+                        (nth geo 0) (nth geo 5) 1))
+                    (let raw (metal_buf_read (nth bs 1) 0 (mul (nth geo 0) 4)))
+                    (let closed (q38-close ctx sts))
+                    (if (and (eq ran 1) (and (eq normed 1) (gt closed 0)))
+                        (qlt-f32s raw (nth geo 0)) (empty))))))
+    (defn qlt-target () (qlh-values (qlh-source) 1))
+    (defn qlt-write-fit (path hidden)
+        (do
+            (let fit (qlt-fit hidden (qlt-target)))
+            (qlh-write-vectors path (nth fit 0) (nth fit 1))
+            fit))
+    0)
