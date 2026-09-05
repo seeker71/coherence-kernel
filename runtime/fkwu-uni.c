@@ -112,6 +112,33 @@ static long long fk_gpu_busy_total_us; /* host GPU busy microseconds integrated 
 static long long fk_gpu_busy_last_us;  /* monotonic clock at the last fresh level read (the integration step) */
 static long long fk_gpu_level_cache = -1; /* the last level read; the utilization the accelerator answers is the mean since the previous query by ANY process, so a second read within the window would read 0 */
 long long fk_host_gpu_utilization(void); /* the Metal carrier answers; the weak stub below answers -1 */
+/* the host's own statistics and processes, no shell between: Mach VM/CPU/load, libproc, IOKit (carrier), fork+execvp on an argv */
+long long fk_host_disk_stat(long long *out);
+#ifdef __APPLE__
+extern int host_statistics64(unsigned int host, int flavor, int *info, unsigned int *count);
+extern int sysctlbyname(const char *name, void *oldp, unsigned long *oldlenp, void *newp, unsigned long newlen);
+extern int getloadavg(double *loads, int n);
+extern int proc_listpids(unsigned int type, unsigned int typeinfo, void *buffer, int buffersize);
+extern int proc_pidinfo(int pid, int flavor, unsigned long long arg, void *buffer, int buffersize);
+extern int proc_name(int pid, void *buffer, unsigned int buffersize);
+struct fk_mach_timebase { unsigned int numer; unsigned int denom; };
+extern int mach_timebase_info(struct fk_mach_timebase *info);
+#endif
+extern int setpriority(int which, unsigned int who, int prio);
+extern int kill(int pid, int sig);
+static long long fk_sysctl_ll(const char *name) {
+#ifdef __APPLE__
+    long long v = 0;
+    unsigned long sz = sizeof v;
+    if (sysctlbyname(name, &v, &sz, 0, 0) != 0) { return -1; }
+    return v;
+#else
+    return -1;
+#endif
+}
+static long long fk_u64_words(unsigned int lo, unsigned int hi) { return (long long)(((unsigned long long)hi << 32) | (unsigned long long)lo); }
+static int fk_cstr_eq(const char *a, const char *b);
+static long long fk_host_spawn_arm(long long argv155, long long t);
 #ifdef __APPLE__
 extern unsigned int mach_host_self(void);
 extern int host_statistics(unsigned int host, int flavor, int *info, unsigned int *count);
@@ -1505,6 +1532,7 @@ static long long fk_metal_matvec_f32_external(const char *msl, long long msl_len
 #if defined(__GNUC__) || defined(__clang__)
 #define FK_METAL_WEAK __attribute__((weak))
 FK_METAL_WEAK long long fk_host_gpu_utilization(void) { return -1; } /* strong symbol lives in the Metal carrier; a build without it answers absent */
+FK_METAL_WEAK long long fk_host_disk_stat(long long *out) { out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0; return -1; }
 #else
 #define FK_METAL_WEAK static
 #endif
@@ -8236,6 +8264,48 @@ static long long fk_walk_body(long long i, long long fp) {
         return fk_walk(i, fp);
     }
 }
+/* host_spawn (155) / host_capture (159) / host_spawn_quiet (161): fork and execvp the argument list itself -- no shell reads it.
+ * spawn answers the pid at once; capture answers the child stdout after it ends; quiet sends the child stdout and stderr to /dev/null. */
+static long long fk_host_spawn_arm(long long argv155, long long t) {
+        /* host_spawn argv / host_capture argv: fork and execvp the argument list itself -- no shell reads it. spawn answers the pid at once; capture answers the child's stdout after it ends */
+
+        static char ab155[32][1024];
+        char *av155[33];
+        long long n155 = 0;
+        long long p155 = argv155 >> 1;
+        while (p155 >= 1 && p155 <= fk_hp && n155 < 32) {
+            fk_cstr(fk_hh[p155], ab155[n155], 1024);
+            av155[n155] = ab155[n155];
+            n155 = n155 + 1;
+            p155 = fk_ht[p155] >> 1;
+        }
+        av155[n155] = 0;
+        if (n155 == 0) { return fk_nothing; }
+        int fds155[2];
+        fds155[0] = -1; fds155[1] = -1;
+        if (t == 159 && pipe(fds155) != 0) { return fk_nothing; }
+        long long pid155 = fork();
+        if (pid155 < 0) { return fk_nothing; }
+        if (pid155 == 0) {
+            if (t == 159) { dup2(fds155[1], 1); close(fds155[0]); close(fds155[1]); }
+            if (t == 161) { int nul161 = open("/dev/null", 1); if (nul161 >= 0) { dup2(nul161, 1); dup2(nul161, 2); close(nul161); } }
+            execvp(av155[0], av155);
+            _exit(127);
+        }
+        if (t == 155 || t == 161) { return pid155 << 1; }
+        close(fds155[1]);
+        static char ob155[1048576];
+        long long tot155 = 0;
+        while (tot155 < 1048575) {
+            long long got155 = read(fds155[0], ob155 + tot155, (unsigned long)(1048575 - tot155));
+            if (got155 <= 0) { break; }
+            tot155 = tot155 + got155;
+        }
+        close(fds155[0]);
+        int st155 = 0;
+        waitpid((int)pid155, &st155, 0);
+        return fk_sbuf(ob155, tot155);
+}
 static long long fk_walk_cold(long long t, long long i, long long fp);
 /* the honest eval-depth wall: measure REAL stack use and die SAYING SO before the host
  * stack dies silently (witnessed 2026-07-01: exit 127, no output, three recipes in one
@@ -9882,6 +9952,116 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 181) {
         return fk_terminal_dim(0);
+    }
+    if (t == 151) {
+        /* host_vm_stat: list(page_size, memsize, free, active, inactive, wired, speculative, purgeable, compressor_pages, pageins, pageouts, compressions, decompressions, swapins, swapouts, external, internal) -- Mach vm_statistics64, pages */
+#ifdef __APPLE__
+        unsigned int w151[40];
+        unsigned int c151 = 38;
+        long long k151;
+        for (k151 = 0; k151 < 40; k151 = k151 + 1) { w151[k151] = 0; }
+        if (host_statistics64(mach_host_self(), 4, (int *)w151, &c151) != 0) { return 1; }
+        long long vals151[17];
+        vals151[0] = fk_sysctl_ll("hw.pagesize");
+        vals151[1] = fk_sysctl_ll("hw.memsize");
+        vals151[2] = (long long)w151[0]; vals151[3] = (long long)w151[1]; vals151[4] = (long long)w151[2]; vals151[5] = (long long)w151[3];
+        vals151[6] = (long long)w151[23]; vals151[7] = (long long)w151[22]; vals151[8] = (long long)w151[32];
+        vals151[9] = fk_u64_words(w151[8], w151[9]); vals151[10] = fk_u64_words(w151[10], w151[11]);
+        vals151[11] = fk_u64_words(w151[26], w151[27]); vals151[12] = fk_u64_words(w151[24], w151[25]);
+        vals151[13] = fk_u64_words(w151[28], w151[29]); vals151[14] = fk_u64_words(w151[30], w151[31]);
+        vals151[15] = (long long)w151[34]; vals151[16] = (long long)w151[35];
+        long long l151 = 1;
+        for (k151 = 16; k151 >= 0; k151 = k151 - 1) { l151 = fk_cons_val(vals151[k151] << 1, l151); }
+        return l151;
+#else
+        return 1;
+#endif
+    }
+    if (t == 152) {
+        /* host_load_avg: list(load1, load5, load15) in thousandths */
+#ifdef __APPLE__
+        double la152[3] = { 0.0, 0.0, 0.0 };
+        if (getloadavg(la152, 3) != 3) { return 1; }
+        return fk_cons_val(((long long)(la152[0] * 1000.0)) << 1, fk_cons_val(((long long)(la152[1] * 1000.0)) << 1, fk_cons_val(((long long)(la152[2] * 1000.0)) << 1, 1)));
+#else
+        return 1;
+#endif
+    }
+    if (t == 153) {
+        /* host_disk_stat: list(bytes_read, bytes_written, ops_read, ops_write) cumulative over every block storage driver; empty when the door is absent */
+        long long d153[4];
+        if (fk_host_disk_stat(d153) < 0) { return 1; }
+        return fk_cons_val(d153[0] << 1, fk_cons_val(d153[1] << 1, fk_cons_val(d153[2] << 1, fk_cons_val(d153[3] << 1, 1))));
+    }
+    if (t == 154) {
+        /* host_processes name: list of list(pid, rss_bytes, cpu_us, elapsed_seconds, nice) for every process whose name is the argument -- libproc, no ps, no pgrep */
+#ifdef __APPLE__
+        static char nm154[256];
+        fk_cstr(fk_walk(fk_node[i][1], fp), nm154, 256);
+        static int pids154[8192];
+        int got154 = proc_listpids(1, 0, pids154, (int)sizeof pids154);
+        if (got154 <= 0) { return 1; }
+        long long count154 = got154 / (long long)sizeof(int);
+        struct fk_mach_timebase tb154; tb154.numer = 1; tb154.denom = 1;
+        mach_timebase_info(&tb154);
+        long long now154 = (long long)time(0);
+        long long l154 = 1;
+        long long k154;
+        for (k154 = count154 - 1; k154 >= 0; k154 = k154 - 1) {
+            int pid154 = pids154[k154];
+            if (pid154 <= 0) { continue; }
+            char pn154[256];
+            pn154[0] = 0;
+            if (proc_name(pid154, pn154, 256) <= 0) { continue; }
+            if (!fk_cstr_eq(pn154, nm154)) { continue; }
+            unsigned char ti154[128];
+            unsigned char bi154[160];
+            if (proc_pidinfo(pid154, 4, 0, ti154, 128) < 96) { continue; }
+            long long rss154 = *(long long *)(ti154 + 8);
+            unsigned long long user154 = *(unsigned long long *)(ti154 + 16);
+            unsigned long long sys154 = *(unsigned long long *)(ti154 + 24);
+            long long cpu154 = (long long)(((user154 + sys154) * (unsigned long long)tb154.numer / (unsigned long long)tb154.denom) / 1000ULL);
+            long long start154 = 0;
+            long long nice154 = 0;
+            if (proc_pidinfo(pid154, 3, 0, bi154, 160) >= 136) { start154 = *(long long *)(bi154 + 120); nice154 = (long long)(*(int *)(bi154 + 116)); }
+            long long elapsed154 = (start154 > 0 && now154 >= start154) ? now154 - start154 : -1;
+            l154 = fk_cons_val(fk_cons_val((long long)pid154 << 1, fk_cons_val(rss154 << 1, fk_cons_val(cpu154 << 1, fk_cons_val(elapsed154 << 1, fk_cons_val(nice154 << 1, 1))))), l154);
+        }
+        return l154;
+#else
+        return 1;
+#endif
+    }
+    if (t == 155) {
+        return fk_host_spawn_arm(fk_walk(fk_node[i][1], fp), 155);
+    }
+    if (t == 159) {
+        return fk_host_spawn_arm(fk_walk(fk_node[i][1], fp), 159);
+    }
+    if (t == 161) {
+        return fk_host_spawn_arm(fk_walk(fk_node[i][1], fp), 161);
+    }
+    if (t == 156) {
+        /* host_wait pid: the child's exit status (signal death answers 128+signal), -1 when there is no such child */
+        long long pid156 = fk_walk(fk_node[i][1], fp) >> 1;
+        int st156 = 0;
+        if (waitpid((int)pid156, &st156, 0) < 0) { return -2; }
+        if ((st156 & 0x7f) == 0) { return ((long long)((st156 >> 8) & 0xff)) << 1; }
+        return ((long long)(128 + (st156 & 0x7f))) << 1;
+    }
+    if (t == 157) {
+        /* host_kill pid: SIGTERM to the child; 0 sent, -1 refused */
+        long long pid157 = fk_walk(fk_node[i][1], fp) >> 1;
+        if (pid157 <= 0) { return -2; }
+        return ((long long)kill((int)pid157, 15)) << 1;
+    }
+    if (t == 158) {
+        /* host_nice n: this process's scheduling priority, inherited by what it spawns */
+        long long n158 = fk_walk(fk_node[i][1], fp) >> 1;
+        return ((long long)setpriority(0, 0, (int)n158)) << 1;
+    }
+    if (t == 160) {
+        return ((long long)getpid()) << 1;
     }
     if (t == 173) {
         return fk_host_cpu_busy_us() << 1;

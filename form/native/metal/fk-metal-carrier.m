@@ -1258,3 +1258,45 @@ long long fk_host_gpu_utilization(void) {
     release(iter);
     return answer;
 }
+
+// HOST DISK. Every IOBlockStorageDriver publishes cumulative "Statistics": bytes and operations read
+// and written since boot. Summed over the drivers; the kernel derives rates from its own deltas. The
+// same IOKit-by-name door as the GPU level; a host without it answers -1.
+long long fk_host_disk_stat(long long *out) {
+    static void *iokit = 0;
+    static CFMutableDictionaryRef (*matching)(const char *) = 0;
+    static int (*getServices)(unsigned int, CFDictionaryRef, fk_io_object_t *) = 0;
+    static fk_io_object_t (*next)(fk_io_object_t) = 0;
+    static CFTypeRef (*createProperty)(fk_io_object_t, CFStringRef, CFAllocatorRef, unsigned int) = 0;
+    static int (*release)(fk_io_object_t) = 0;
+    if (!iokit) {
+        iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
+        if (!iokit) return -1;
+        matching = (CFMutableDictionaryRef (*)(const char *))dlsym(iokit, "IOServiceMatching");
+        getServices = (int (*)(unsigned int, CFDictionaryRef, fk_io_object_t *))dlsym(iokit, "IOServiceGetMatchingServices");
+        next = (fk_io_object_t (*)(fk_io_object_t))dlsym(iokit, "IOIteratorNext");
+        createProperty = (CFTypeRef (*)(fk_io_object_t, CFStringRef, CFAllocatorRef, unsigned int))dlsym(iokit, "IORegistryEntryCreateCFProperty");
+        release = (int (*)(fk_io_object_t))dlsym(iokit, "IOObjectRelease");
+    }
+    if (!matching || !getServices || !next || !createProperty || !release) return -1;
+    fk_io_object_t iter = 0;
+    if (getServices(0, matching("IOBlockStorageDriver"), &iter) != 0) return -1;
+    out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
+    long long drivers = 0;
+    fk_io_object_t entry = 0;
+    while ((entry = next(iter)) != 0) {
+        CFTypeRef stats = createProperty(entry, CFSTR("Statistics"), kCFAllocatorDefault, 0);
+        if (stats && CFGetTypeID(stats) == CFDictionaryGetTypeID()) {
+            CFStringRef keys[4] = { CFSTR("Bytes (Read)"), CFSTR("Bytes (Write)"), CFSTR("Operations (Read)"), CFSTR("Operations (Write)") };
+            for (int k = 0; k < 4; k++) {
+                CFTypeRef v = CFDictionaryGetValue((CFDictionaryRef)stats, keys[k]);
+                if (v && CFGetTypeID(v) == CFNumberGetTypeID()) { long long n = 0; CFNumberGetValue((CFNumberRef)v, kCFNumberSInt64Type, &n); out[k] += n; }
+            }
+            drivers++;
+        }
+        if (stats) CFRelease(stats);
+        release(entry);
+    }
+    release(iter);
+    return drivers;
+}

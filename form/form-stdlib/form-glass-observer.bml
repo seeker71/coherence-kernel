@@ -204,24 +204,6 @@ section [form.bml] {
                 fgo-unavailable("mlx", "allocated-bytes", "MLX allocated bytes", "bytes", "unified-gpu", "mlx_status.allocated_bytes", "mlx", "MLX carrier does not expose allocator bytes"));
         }
 
-        def fgo-host-free-percent(status) {
-            let key = "System-wide memory free percentage: ";
-            let at = str_find(status, key, 0);
-            if lt(at, 0) then -1 else fgo-host-free-found(status, add(at, str_len(key)));
-        }
-        def fgo-host-free-found(status, start) {
-            let stop = str_find(status, "%", start);
-            if lt(stop, 0) then -1 else str_to_int(substring(status, start, stop));
-        }
-        def fgo-host-total-bytes(status) {
-            let key = "The system has ";
-            let at = str_find(status, key, 0);
-            if lt(at, 0) then -1 else fgo-host-total-found(status, add(at, str_len(key)));
-        }
-        def fgo-host-total-found(status, start) {
-            let stop = str_find(status, " ", start);
-            if lt(stop, 0) then -1 else str_to_int(substring(status, start, stop));
-        }
         def fgo-colon-skip-space(text, index) = if ge(index, str_len(text)) then index else if eq(fgo-ps-space?(str_byte_at(text, index)), 1) then fgo-colon-skip-space(text, add(index, 1)) else index;
         def fgo-colon-digits-end(text, index) = if ge(index, str_len(text)) then index else if and(ge(str_byte_at(text, index), 48), le(str_byte_at(text, index), 57)) then fgo-colon-digits-end(text, add(index, 1)) else index;
         def fgo-colon-int(status, key) {
@@ -232,96 +214,42 @@ section [form.bml] {
             let stop = fgo-colon-digits-end(status, start);
             if le(stop, start) then -1 else str_to_int(substring(status, start, stop));
         }
-        def fgo-vmstat-rows(status) {
-            let pageins = fgo-colon-int(status, "Pageins:");
-            let compressions = fgo-colon-int(status, "Compressions:");
-            let decompressions = fgo-colon-int(status, "Decompressions:");
-            let fileBacked = fgo-colon-int(status, "File-backed pages:");
-            let compressor = fgo-colon-int(status, "Pages occupied by compressor:");
-            list(
-                if lt(pageins, 0) then fgo-unavailable("host", "pageins", "Mach pageins", "pages", "os-memory", "host-exec:/usr/bin/vm_stat.Pageins", "health", "vm_stat did not expose Pageins") else fgo-int("host", "pageins", "Mach pageins", pageins, "pages", pageins, "os-memory", "physical-live", "host-exec:/usr/bin/vm_stat", "live", "health", "cumulative pageins; a rising counter during a token stall is disk-backed page-in, not idle"),
-                if lt(compressions, 0) then fgo-unavailable("host", "compressions", "compressor puts", "pages", "os-memory", "host-exec:/usr/bin/vm_stat.Compressions", "health", "vm_stat did not expose Compressions") else fgo-int("host", "compressions", "compressor puts", compressions, "pages", compressions, "os-memory", "physical-live", "host-exec:/usr/bin/vm_stat", "live", "health", "cumulative compressor stores"),
-                if lt(decompressions, 0) then fgo-unavailable("host", "decompressions", "compressor gets", "pages", "os-memory", "host-exec:/usr/bin/vm_stat.Decompressions", "health", "vm_stat did not expose Decompressions") else fgo-int("host", "decompressions", "compressor gets", decompressions, "pages", decompressions, "os-memory", "physical-live", "host-exec:/usr/bin/vm_stat", "live", "health", "cumulative compressor restores"),
-                if lt(fileBacked, 0) then fgo-unavailable("host", "file-backed-pages", "file-backed pages", "pages", "os-memory", "host-exec:/usr/bin/vm_stat.File-backed", "health", "vm_stat did not expose File-backed pages") else fgo-int("host", "file-backed-pages", "file-backed pages", fileBacked, "pages", fileBacked, "os-memory", "physical-live", "host-exec:/usr/bin/vm_stat", "live", "health", "current file-backed residency"),
-                if lt(compressor, 0) then fgo-unavailable("host", "compressor-pages", "compressor occupancy", "pages", "os-memory", "host-exec:/usr/bin/vm_stat.compressor", "health", "vm_stat did not expose compressor occupancy") else fgo-int("host", "compressor-pages", "compressor occupancy", compressor, "pages", compressor, "os-memory", "physical-live", "host-exec:/usr/bin/vm_stat", "live", "health", "pages currently held compressed"));
+        // ---- host memory: Mach vm_statistics64 read in-process (host_vm_stat) -- no memory_pressure, no vm_stat ----
+        // list(page, memsize, free, active, inactive, wired, speculative, purgeable, compressor, pageins, pageouts, compressions, decompressions, swapins, swapouts, external, internal)
+        def fgo-vm-valid?(vm) = if lt(len(vm), 17) then 0 else if le(nth(vm, 0), 0) then 0 else if le(nth(vm, 1), 0) then 0 else 1;
+        def fgo-vm-used-bytes(vm) = mul(add(nth(vm, 5), add(nth(vm, 3), nth(vm, 8))), nth(vm, 0));
+        def fgo-host-free-percent(vm) = if eq(fgo-vm-valid?(vm), 0) then -1 else sub(100, div(mul(fgo-vm-used-bytes(vm), 100), nth(vm, 1)));
+        def fgo-host-total-bytes(vm) = if eq(fgo-vm-valid?(vm), 0) then -1 else nth(vm, 1);
+        def fgo-vm-count-row(id, label, value, source, note) = if lt(value, 0) then fgo-unavailable("host", id, label, "pages", "os-memory", source, "health", "the Mach VM statistics door did not answer") else fgo-int("host", id, label, value, "pages", value, "os-memory", "physical-live", source, "live", "health", note);
+        def fgo-vmstat-rows(vm) = if eq(fgo-vm-valid?(vm), 0) then list(fgo-vm-count-row("pageins", "Mach pageins", -1, "mach.vm_statistics64.pageins", "")) else list(fgo-vm-count-row("pageins", "Mach pageins", nth(vm, 9), "mach.vm_statistics64.pageins", "cumulative since boot; the delta row is what moves"), fgo-vm-count-row("compressions", "compressor puts", nth(vm, 11), "mach.vm_statistics64.compressions", "cumulative since boot"), fgo-vm-count-row("decompressions", "compressor gets", nth(vm, 12), "mach.vm_statistics64.decompressions", "cumulative since boot"), fgo-vm-count-row("file-backed-pages", "file-backed pages", nth(vm, 15), "mach.vm_statistics64.external_page_count", "resident pages backed by files"), fgo-vm-count-row("compressor-pages", "compressor occupancy", nth(vm, 8), "mach.vm_statistics64.compressor_page_count", "pages held by the compressor"));
+        // ---- host load: getloadavg, thousandths kept as tenths ----
+        def fgo-loadavg-row(id, label, thousandths) = if lt(thousandths, 0) then fgo-unavailable("host", id, label, "tenths", "cpu-scheduler", "getloadavg", "cpu", "the load average door did not answer") else fgo-int("host", id, label, div(thousandths, 100), "tenths", div(thousandths, 100), "cpu-scheduler", "physical-live", "getloadavg", "live", "cpu", "run-queue length averaged by the kernel, in tenths");
+        def fgo-loadavg-rows(load) = if lt(len(load), 3) then list(fgo-loadavg-row("load-1", "load average 1m", -1)) else list(fgo-loadavg-row("load-1", "load average 1m", nth(load, 0)), fgo-loadavg-row("load-5", "load average 5m", nth(load, 1)), fgo-loadavg-row("load-15", "load average 15m", nth(load, 2)));
+        // ---- host disk: every IOBlockStorageDriver's cumulative statistics; a rate is the reader's own delta ----
+        def fgo-disk-count-row(id, label, value, unit, note) = fgo-int("host", id, label, value, unit, 0, "disk", "physical-live", "IOBlockStorageDriver.Statistics", "live", "health", note);
+        def fgo-disk-rows(disk) = if lt(len(disk), 4) then list(fgo-unavailable("host", "disk-bytes-read", "disk bytes read", "bytes", "disk", "IOBlockStorageDriver.Statistics", "health", "no block storage driver answered")) else list(fgo-disk-count-row("disk-bytes-read", "disk bytes read", nth(disk, 0), "bytes", "cumulative since boot over every block storage driver"), fgo-disk-count-row("disk-bytes-written", "disk bytes written", nth(disk, 1), "bytes", "cumulative since boot over every block storage driver"), fgo-disk-count-row("disk-ops", "disk operations", add(nth(disk, 2), nth(disk, 3)), "ops", "reads + writes, cumulative since boot"));
+        def fgo-host-rows(vm) {
+            let free = fgo-host-free-percent(vm);
+            let total = fgo-host-total-bytes(vm);
+            append(list(if lt(free, 0) then fgo-unavailable("host", "memory-free", "system memory free", "percent", "os-memory", "mach.host_statistics64.vm_statistics64", "health", "the Mach VM statistics door did not answer") else fgo-sized("host", "memory-free", "system memory free", free, "percent", 100, sub(100, free), "os-memory", "physical-live", "mach.host_statistics64: 100 - (wired+active+compressor)/memsize", "live", "health", "free = memory the host can hand out without reclaim; wired, active and compressed pages count as used"), if lt(total, 0) then fgo-unavailable("host", "memory-total", "physical memory", "bytes", "os-memory", "sysctl.hw.memsize", "health", "the memsize door did not answer") else fgo-int("host", "memory-total", "physical memory", total, "bytes", 0, "os-memory", "physical-live", "sysctl.hw.memsize", "live", "health", "system-wide physical bytes")), append(fgo-loadavg-rows(host_load_avg()), append(fgo-vmstat-rows(vm), fgo-disk-rows(host_disk_stat()))));
         }
-        def fgo-last-nonempty-line(lines) = if eq(len(lines), 0) then "" else if eq(str_len(head(lines)), 0) then fgo-last-nonempty-line(tail(lines)) else fgo-last-nonempty-held(tail(lines), head(lines));
-        def fgo-last-nonempty-held(lines, held) = if eq(len(lines), 0) then held else if eq(str_len(head(lines)), 0) then fgo-last-nonempty-held(tail(lines), held) else fgo-last-nonempty-held(tail(lines), head(lines));
-        def fgo-iostat-int-token(text) {
-            let start = fgo-colon-skip-space(text, 0);
-            let stop = fgo-colon-digits-end(text, start);
-            if le(stop, start) then -1 else str_to_int(substring(text, start, stop));
+        // ---- processes: libproc, no ps, no pgrep -- tuples (pid, rss bytes, cpu microseconds, elapsed seconds) ----
+        def fgo-processes-from(tuples, remaining) = if or(eq(len(tuples), 0), le(remaining, 0)) then list() else if lt(len(head(tuples)), 4) then fgo-processes-from(tail(tuples), remaining) else cons(append(fgo-ps-process(nth(head(tuples), 0), nth(head(tuples), 1), nth(head(tuples), 2), nth(head(tuples), 3)), list(if ge(len(head(tuples)), 5) then nth(head(tuples), 4) else 0)), fgo-processes-from(tail(tuples), sub(remaining, 1)));
+        def fgo-fkwu-processes() = fgo-processes-from(host_processes("fkwu"), fgo-ps-max-processes());
+        def fgo-process-by-pid(processes, pid) = if eq(len(processes), 0) then list() else if eq(fgo-ps-pid(head(processes)), pid) then head(processes) else fgo-process-by-pid(tail(processes), pid);
+        def fgo-process-read(pid) = fgo-process-by-pid(fgo-fkwu-processes(), pid);
+        def fgo-process-metrics(process) {
+            let processLabel = str_concat("fkwu ", int_to_str(fgo-ps-pid(process)));
+            let rss = fgo-int("process", fgo-process-id(process, "rss"), str_concat(processLabel, " RSS"), fgo-ps-rss-bytes(process), "bytes", fgo-ps-rss-bytes(process), "os-memory", "physical-live", "libproc.proc_pidinfo.task.resident_size", "live", "process", "resident bytes of one fkwu process");
+            let cpu = fgo-int("process", fgo-process-id(process, "cpu"), str_concat(processLabel, " CPU"), fgo-ps-cpu(process), "microseconds", fgo-ps-cpu(process), "cpu-scheduler", "physical-live", "libproc.proc_pidinfo.task.total_user+system", if eq(fgo-ps-cpu(process), 0) then "quiet" else "live", "process", "user + system time since start; a rate is the reader's delta");
+            let elapsed = fgo-int("process", fgo-process-id(process, "elapsed"), str_concat(processLabel, " elapsed"), fgo-ps-elapsed(process), "seconds", 0, "process-time", "physical-live", "libproc.proc_pidinfo.bsd.start", "live", "process", "elapsed since process start");
+            list(rss, cpu, elapsed);
         }
-        def fgo-iostat-skip-token(text) {
-            let start = fgo-colon-skip-space(text, 0);
-            let stop = fgo-colon-digits-end(text, start);
-            let afterDot = if and(lt(stop, str_len(text)), eq(str_byte_at(text, stop), 46)) then fgo-colon-digits-end(text, add(stop, 1)) else stop;
-            substring(text, afterDot, str_len(text));
-        }
-        def fgo-iostat-centi-value(text, start, wholeEnd) {
-            let whole = str_to_int(substring(text, start, wholeEnd));
-            let hasDot = and(lt(wholeEnd, str_len(text)), eq(str_byte_at(text, wholeEnd), 46));
-            let tenthAt = add(wholeEnd, 1);
-            let hundredthAt = add(wholeEnd, 2);
-            let tenth = if and(hasDot, and(lt(tenthAt, str_len(text)), and(ge(str_byte_at(text, tenthAt), 48), le(str_byte_at(text, tenthAt), 57)))) then sub(str_byte_at(text, tenthAt), 48) else 0;
-            let hundredth = if and(hasDot, and(lt(hundredthAt, str_len(text)), and(ge(str_byte_at(text, hundredthAt), 48), le(str_byte_at(text, hundredthAt), 57)))) then sub(str_byte_at(text, hundredthAt), 48) else 0;
-            add(mul(whole, 100), add(mul(tenth, 10), hundredth));
-        }
-        def fgo-iostat-centi-token(text) {
-            let start = fgo-colon-skip-space(text, 0);
-            let wholeEnd = fgo-colon-digits-end(text, start);
-            if le(wholeEnd, start) then -1 else fgo-iostat-centi-value(text, start, wholeEnd);
-        }
-        def fgo-disk-rows(status) {
-            let line = fgo-last-nonempty-line(split-on(status, "\n"));
-            let kbtRest = fgo-iostat-skip-token(line);
-            let tps = fgo-iostat-int-token(kbtRest);
-            let mbps = fgo-iostat-centi-token(fgo-iostat-skip-token(kbtRest));
-            list(
-                if lt(tps, 0) then fgo-unavailable("host", "disk-tps", "disk transactions", "tps", "disk", "host-exec:/usr/sbin/iostat.tps", "health", "iostat did not expose tps") else fgo-int("host", "disk-tps", "disk transactions", tps, "tps", tps, "disk", "physical-live", "host-exec:/usr/sbin/iostat", if eq(tps, 0) then "quiet" else "live", "health", "last iostat sample; rising tps during a token stall is device IO"),
-                if lt(mbps, 0) then fgo-unavailable("host", "disk-mbps", "disk throughput", "centi-MB/s", "disk", "host-exec:/usr/sbin/iostat.MB/s", "health", "iostat did not expose MB/s") else fgo-int("host", "disk-mbps", "disk throughput", mbps, "centi-MB/s", mbps, "disk", "physical-live", "host-exec:/usr/sbin/iostat", if eq(mbps, 0) then "quiet" else "live", "health", "hundredths of interval MB/s from iostat; page-in of model shards shows here"));
-        }
-        def fgo-skip-to-digit(text, index) = if ge(index, str_len(text)) then index else if and(ge(str_byte_at(text, index), 48), le(str_byte_at(text, index), 57)) then index else fgo-skip-to-digit(text, add(index, 1));
-        def fgo-loadavg-parse-one(text, index) {
-            let digitStart = fgo-skip-to-digit(text, index);
-            if ge(digitStart, str_len(text)) then list(-1, digitStart) else fgo-loadavg-parse-at(text, digitStart);
-        }
-        def fgo-loadavg-parse-at(text, digitStart) {
-            let intEnd = fgo-colon-digits-end(text, digitStart);
-            let intPart = str_to_int(substring(text, digitStart, intEnd));
-            if and(lt(intEnd, str_len(text)), eq(str_byte_at(text, intEnd), 46)) then fgo-loadavg-parse-frac(text, intPart, add(intEnd, 1)) else list(mul(intPart, 10), intEnd);
-        }
-        def fgo-loadavg-parse-frac(text, intPart, fracStart) {
-            let tenths = if and(lt(fracStart, str_len(text)), and(ge(str_byte_at(text, fracStart), 48), le(str_byte_at(text, fracStart), 57))) then sub(str_byte_at(text, fracStart), 48) else 0;
-            let fracEnd = fgo-colon-digits-end(text, fracStart);
-            list(add(mul(intPart, 10), tenths), fracEnd);
-        }
-        def fgo-loadavg-row(id, label, parsed) {
-            let value = nth(parsed, 0);
-            if lt(value, 0) then fgo-unavailable("host", id, label, "tenths", "cpu-scheduler", "host-exec:/usr/sbin/sysctl.vm.loadavg", "cpu", "sysctl vm.loadavg did not expose a parseable load average") else fgo-int("host", id, label, value, "tenths", value, "cpu-scheduler", "physical-live", "host-exec:/usr/sbin/sysctl.vm.loadavg", if eq(value, 0) then "quiet" else "live", "cpu", "host load average in tenths; per-fkwu CPU is the fixed ps observer");
-        }
-        def fgo-loadavg-rows(text) {
-            let one = fgo-loadavg-parse-one(text, 0);
-            let five = fgo-loadavg-parse-one(text, nth(one, 1));
-            let fifteen = fgo-loadavg-parse-one(text, nth(five, 1));
-            list(fgo-loadavg-row("load-1", "load average 1m", one), fgo-loadavg-row("load-5", "load average 5m", five), fgo-loadavg-row("load-15", "load average 15m", fifteen));
-        }
-        def fgo-host-rows(status) {
-            let free = fgo-host-free-percent(status);
-            let total = fgo-host-total-bytes(status);
-            append(list(
-                if lt(free, 0) then fgo-unavailable("host", "memory-free", "system memory free", "percent", "os-memory", "host-exec:/usr/bin/memory_pressure.system-free-percent", "health", "host port did not return a parseable percentage") else fgo-sized("host", "memory-free", "system memory free", free, "percent", 100, sub(100, free), "os-memory", "physical-live", "host-exec:/usr/bin/memory_pressure", "live", "health", "system-wide; not Metal working set"),
-                if lt(total, 0) then fgo-unavailable("host", "memory-total", "physical memory", "bytes", "os-memory", "host-exec:/usr/bin/memory_pressure.physical-bytes", "health", "host port did not return total bytes") else fgo-int("host", "memory-total", "physical memory", total, "bytes", 0, "os-memory", "physical-live", "host-exec:/usr/bin/memory_pressure", "live", "health", "system-wide physical bytes")), append(fgo-loadavg-rows(host-exec("/usr/sbin/sysctl -n vm.loadavg", "")), append(fgo-vmstat-rows(host-exec("/usr/bin/vm_stat", "")), fgo-disk-rows(host-exec("/usr/sbin/iostat -d -c 2 -w 1", "")))));
-        }
+        def fgo-process-rows(tuples) = fgo-process-rows-from(fgo-processes-from(tuples, fgo-ps-max-processes()));
+        def fgo-live-process-rows() = fgo-process-rows-from(fgo-fkwu-processes());
 
-        // Fixed-column process observation.  `/bin/ps ... comm=` exposes the
         // executable name, not argv.  The local command token is consumed only
-        // by the exact fkwu basename filter and never enters a returned row.
         def fgo-ps-max-processes() = 32;
-        def fgo-ps-max-line-bytes() = 256;
-        def fgo-pid-list-max-bytes() = 2048;
-        def fgo-pid-max-digits() = 10;
-        def fgo-pid-max-value() = 2147483647;
         def fgo-ps-space?(byte) = if eq(byte, 32) then 1 else if eq(byte, 9) then 1 else 0;
         def fgo-ps-skip-space(text, index) = if ge(index, str_len(text)) then index else if eq(fgo-ps-space?(str_byte_at(text, index)), 1) then fgo-ps-skip-space(text, add(index, 1)) else index;
         def fgo-ps-token-end(text, index) = if ge(index, str_len(text)) then index else if eq(fgo-ps-space?(str_byte_at(text, index)), 1) then index else fgo-ps-token-end(text, add(index, 1));
@@ -335,73 +263,15 @@ section [form.bml] {
         def fgo-ps-uint?(text) = if lt(str_len(text), 1) then 0 else if gt(str_len(text), 19) then 0 else if not(eq(fgo-ps-digits?(text, 0), 1)) then 0 else if and(gt(str_len(text), 1), eq(str_byte_at(text, 0), 48)) then 0 else str_eq(int_to_str(str_to_int(text)), text);
         def fgo-ps-decimal?(text) = if lt(str_len(text), 1) then 0 else if gt(str_len(text), 10) then 0 else fgo-ps-digits?(text, 0);
         def fgo-ps-command-fkwu?(command) = if str_eq(command, "fkwu") then 1 else if lt(str_len(command), 5) then 0 else str_eq(substring(command, sub(str_len(command), 5), str_len(command)), "/fkwu");
-        def fgo-ps-cpu-fraction(text, dot) = if not(eq(dot, sub(str_len(text), 2))) then -1 else if not(eq(fgo-ps-uint?(substring(text, 0, dot)), 1)) then -1 else if not(and(ge(str_byte_at(text, add(dot, 1)), 48), le(str_byte_at(text, add(dot, 1)), 57))) then -1 else add(mul(str_to_int(substring(text, 0, dot)), 10), sub(str_byte_at(text, add(dot, 1)), 48));
-        def fgo-ps-cpu-tenths(text) {
-            let dot = str_find(text, ".", 0);
-            if lt(dot, 0) then if eq(fgo-ps-uint?(text), 1) then mul(str_to_int(text), 10) else -1 else fgo-ps-cpu-fraction(text, dot);
-        }
-        def fgo-ps-clock-two(parts, days) = if not(eq(fgo-ps-decimal?(nth(parts, 0)), 1)) then -1 else if not(eq(fgo-ps-decimal?(nth(parts, 1)), 1)) then -1 else if gt(str_to_int(nth(parts, 1)), 59) then -1 else add(mul(days, 86400), add(mul(str_to_int(nth(parts, 0)), 60), str_to_int(nth(parts, 1))));
-        def fgo-ps-clock-three(parts, days) = if not(eq(fgo-ps-decimal?(nth(parts, 0)), 1)) then -1 else if not(eq(fgo-ps-decimal?(nth(parts, 1)), 1)) then -1 else if not(eq(fgo-ps-decimal?(nth(parts, 2)), 1)) then -1 else if gt(str_to_int(nth(parts, 0)), 23) then -1 else if gt(str_to_int(nth(parts, 1)), 59) then -1 else if gt(str_to_int(nth(parts, 2)), 59) then -1 else add(mul(days, 86400), add(mul(str_to_int(nth(parts, 0)), 3600), add(mul(str_to_int(nth(parts, 1)), 60), str_to_int(nth(parts, 2)))));
-        def fgo-ps-clock-seconds(clock, days) {
-            let parts = split-on(clock, ":");
-            if eq(len(parts), 2) then fgo-ps-clock-two(parts, days) else if eq(len(parts), 3) then fgo-ps-clock-three(parts, days) else -1;
-        }
-        def fgo-ps-etime-with-days(text, dash) = if le(dash, 0) then -1 else if not(eq(fgo-ps-decimal?(substring(text, 0, dash)), 1)) then -1 else fgo-ps-clock-seconds(substring(text, add(dash, 1), str_len(text)), str_to_int(substring(text, 0, dash)));
-        def fgo-ps-etime-seconds(text) {
-            let dash = str_find(text, "-", 0);
-            if lt(dash, 0) then fgo-ps-clock-seconds(text, 0) else fgo-ps-etime-with-days(text, dash);
-        }
         // process: tag, pid, RSS bytes, CPU tenths-percent, elapsed seconds.
         def fgo-ps-process(pid, rssBytes, cpuTenths, elapsedSeconds) = list("fgo-ps-process-v1", pid, rssBytes, cpuTenths, elapsedSeconds);
         def fgo-ps-pid(process) = nth(process, 1);
         def fgo-ps-rss-bytes(process) = nth(process, 2);
         def fgo-ps-cpu(process) = nth(process, 3);
         def fgo-ps-elapsed(process) = nth(process, 4);
-        def fgo-ps-process-values(pidText, rssText, cpuText, elapsedText, command) {
-            let pid = if eq(fgo-ps-uint?(pidText), 1) then str_to_int(pidText) else -1;
-            let rssKib = if eq(fgo-ps-uint?(rssText), 1) then str_to_int(rssText) else -1;
-            let cpu = fgo-ps-cpu-tenths(cpuText);
-            let elapsed = fgo-ps-etime-seconds(elapsedText);
-            if not(eq(fgo-ps-command-fkwu?(command), 1)) then list() else if le(pid, 0) then list() else if or(lt(rssKib, 0), gt(rssKib, 1099511627776)) then list() else if or(lt(cpu, 0), gt(cpu, 1000000)) then list() else if or(lt(elapsed, 0), gt(elapsed, 3155760000)) then list() else fgo-ps-process(pid, mul(rssKib, 1024), cpu, elapsed);
-        }
-        def fgo-ps-parse-line(line) {
-            let pidToken = fgo-ps-token(line, 0);
-            let rssToken = fgo-ps-token(line, nth(pidToken, 1));
-            let cpuToken = fgo-ps-token(line, nth(rssToken, 1));
-            let elapsedToken = fgo-ps-token(line, nth(cpuToken, 1));
-            let commandStart = fgo-ps-skip-space(line, nth(elapsedToken, 1));
-            let commandEnd = fgo-ps-rtrim(line, str_len(line));
-            let command = if ge(commandStart, commandEnd) then "" else substring(line, commandStart, commandEnd);
-            if gt(str_len(line), fgo-ps-max-line-bytes()) then list() else fgo-ps-process-values(nth(pidToken, 0), nth(rssToken, 0), nth(cpuToken, 0), nth(elapsedToken, 0), command);
-        }
-        def fgo-ps-processes-lines(lines, remaining) = if or(eq(len(lines), 0), le(remaining, 0)) then list() else fgo-ps-processes-next(lines, remaining, fgo-ps-parse-line(head(lines)));
-        def fgo-ps-processes-next(lines, remaining, process) = if eq(len(process), 0) then fgo-ps-processes-lines(tail(lines), remaining) else cons(process, fgo-ps-processes-lines(tail(lines), sub(remaining, 1)));
-        def fgo-ps-processes(table) = fgo-ps-processes-lines(split-on(table, "\n"), fgo-ps-max-processes());
+        def fgo-ps-nice(process) = if lt(len(process), 6) then -1 else nth(process, 5);
         def fgo-process-id(process, suffix) = str_concat("fkwu-", str_concat(int_to_str(fgo-ps-pid(process)), str_concat("-", suffix)));
-        def fgo-process-metrics(process) {
-            let processLabel = str_concat("fkwu ", int_to_str(fgo-ps-pid(process)));
-            let rss = fgo-int("process", fgo-process-id(process, "rss"), str_concat(processLabel, " RSS"), fgo-ps-rss-bytes(process), "bytes", fgo-ps-rss-bytes(process), "os-memory", "physical-live", "host-exec:/bin/ps-fixed-columns", "live", "process", "comm used only for exact fkwu filter; argv never requested");
-            let cpu = fgo-int("process", fgo-process-id(process, "cpu"), str_concat(processLabel, " CPU"), fgo-ps-cpu(process), "tenths-percent", fgo-ps-cpu(process), "cpu-scheduler", "physical-live", "host-exec:/bin/ps-fixed-columns", if eq(fgo-ps-cpu(process), 0) then "quiet" else "live", "process", if eq(fgo-ps-cpu(process), 0) then "semantic-zero=quiet; fixed ps sample rounded below 0.1 percent and does not prove no CPU work" else "bounded per-process sample");
-            let elapsed = fgo-int("process", fgo-process-id(process, "elapsed"), str_concat(processLabel, " elapsed"), fgo-ps-elapsed(process), "seconds", 0, "process-time", "physical-live", "host-exec:/bin/ps-fixed-columns", "live", "process", "elapsed since process start");
-            list(rss, cpu, elapsed);
-        }
         def fgo-process-rows-from(processes) = if eq(len(processes), 0) then list() else append(fgo-process-metrics(head(processes)), fgo-process-rows-from(tail(processes)));
-        def fgo-process-rows(table) = fgo-process-rows-from(fgo-ps-processes(table));
-        // Live acquisition never asks ps for a whole process table.  pgrep's
-        // exact-name result contains PID lines only.  A PID must pass every
-        // bound before it can become part of the fixed ps command.
-        def fgo-pid-valid?(pidText) = if not(eq(fgo-ps-uint?(pidText), 1)) then 0 else if gt(str_len(pidText), fgo-pid-max-digits()) then 0 else if le(str_to_int(pidText), 0) then 0 else if gt(str_to_int(pidText), fgo-pid-max-value()) then 0 else 1;
-        def fgo-pid-candidates-lines(lines, remaining) = if or(eq(len(lines), 0), le(remaining, 0)) then list() else fgo-pid-candidates-next(lines, remaining, head(lines));
-        def fgo-pid-candidates-next(lines, remaining, pidText) = if eq(str_len(pidText), 0) then fgo-pid-candidates-lines(tail(lines), remaining) else if not(eq(fgo-pid-valid?(pidText), 1)) then fgo-pid-candidates-lines(tail(lines), remaining) else cons(pidText, fgo-pid-candidates-lines(tail(lines), sub(remaining, 1)));
-        def fgo-pid-candidates(text) = if gt(str_len(text), fgo-pid-list-max-bytes()) then list() else fgo-pid-candidates-lines(split-on(text, "\n"), fgo-ps-max-processes());
-        def fgo-pid-ps-command(pidText) = if not(eq(fgo-pid-valid?(pidText), 1)) then "" else str_concat("/bin/ps -p ", str_concat(pidText, " -o pid=,rss=,pcpu=,etime=,comm="));
-        def fgo-live-process-rows-pids(pids) = if eq(len(pids), 0) then list() else fgo-live-process-rows-next(pids, fgo-pid-ps-command(head(pids)));
-        def fgo-live-process-rows-next(pids, command) = if eq(str_len(command), 0) then fgo-live-process-rows-pids(tail(pids)) else append(fgo-process-rows(host-exec(command, "")), fgo-live-process-rows-pids(tail(pids)));
-        def fgo-live-process-rows() {
-            let pidText = host-exec("/usr/bin/pgrep -x fkwu", "");
-            let pids = fgo-pid-candidates(pidText);
-            fgo-live-process-rows-pids(pids);
-        }
 
         def fgo-tag-name(tag) {
             if eq(tag, 1) then "int-literal" else if eq(tag, 3) then "add" else if eq(tag, 5) then "le" else if eq(tag, 6) then "choice-if" else if eq(tag, 15) then "now_unix_ms" else if eq(tag, 43) then "intern-int" else if eq(tag, 45) then "blueprint" else if eq(tag, 46) then "intern-string" else if eq(tag, 47) then "intern-node" else if eq(tag, 83) then "jit-compile" else if eq(tag, 102) then "eq" else if eq(tag, 105) then "http-get" else if eq(tag, 110) then "frame-slot-read" else if eq(tag, 111) then "frame-reserve" else if eq(tag, 118) then "socket-request" else if eq(tag, 127) then "kernel-stat-observer" else if eq(tag, 128) then "framebuffer-record" else if eq(tag, 129) then "framebuffer-read" else if eq(tag, 136) then "host-exec" else if eq(tag, 143) then "mlx-status" else if eq(tag, 145) then "mlx-run" else if eq(tag, 146) then "jit-leaf-inram" else if eq(tag, 215) then "jit-arm64" else if eq(tag, 241) then "variadic-call" else if eq(tag, 245) then "metal-pipeline" else if eq(tag, 246) then "metal-alloc" else if eq(tag, 247) then "metal-map" else if eq(tag, 249) then "metal-enqueue" else if eq(tag, 252) then "metal-status" else str_concat("tag-", int_to_str(tag));
@@ -489,12 +359,12 @@ section [form.bml] {
             let events = framebuffer-events();
             let metal = metal_status();
             let mlx = mlx_status();
-            let pressure = host-exec("/usr/bin/memory_pressure -Q", "");
+            let vm = host_vm_stat();
             let kernelRows = fgo-kernel-rows();
             let framebufferRows = fgo-framebuffer-rows(events);
             let metalRows = fgo-metal-rows(metal);
             let mlxRows = fgo-mlx-rows(mlx);
-            let hostRows = fgo-host-rows(pressure);
+            let hostRows = fgo-host-rows(vm);
             let processRows = fgo-live-process-rows();
             let heatRows = fgo-primitive-heat();
             let eventRows = fgo-event-rows(events);

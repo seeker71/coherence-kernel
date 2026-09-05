@@ -135,7 +135,7 @@ recycling in the turnwheel.
 ### Self-watch: every agent steers by its own panel
 
 Whoever works in a body root — Claude, Codex, Grok, or whoever is next — runs the glass there
-(`./tools/watch-glass.sh`, reborn on its own source changes) and reads their own instruments before
+(`./fkwu observe/form-glass-run.fk`, reborn on its own source changes) and reads their own instruments before
 closing a movement: the phase census (is your work freezing ice or leaving gas?), the kv and
 ice-miss lanes (did you reuse or rebuild?), the ledger, and the spendglass meter
 (`observe/rented-turn-meter-run.fk` — your own token spend, read from your own transcript).
