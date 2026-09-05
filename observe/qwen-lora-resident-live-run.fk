@@ -1,0 +1,68 @@
+; qwen-lora-resident-live-run.fk — one standing local Qwen/adapter admission.
+;
+; Each stdin line is one cell's direct local text.  The resident prints its
+; answer, keeps the Qwen state and adapter alive, and closes only on `release`
+; or EOF.  This is a Form-native stream channel; an outer terminal merely keeps
+; the one Form process standing.  Do not preflight this effectful runner.
+; preludes: form/form-stdlib/qwen-lora-resident.fk
+
+(do
+    (defn qlrr-close (ctx sts adapter turns)
+        (do
+            (let closed (q38-close ctx sts))
+            (let released (qlh-close adapter))
+            (print (list "qwen-lora-resident" "released" (if (and (gt closed 0) (gt released 0)) 1 0)
+                         "turns" turns "voice-home" (vhome-now)))
+            (if (and (gt closed 0) (gt released 0)) 1 0)))
+    (defn qlrr-loop (ctx sts src adapter pos turns)
+        (do
+            (let line (read_line))
+            (if (eq (qlr-release? line) 1)
+                (qlrr-close ctx sts adapter turns)
+                (do
+                    (let ids (q35-encode src line))
+                    (let geo (nth ctx 2))
+                    (if (eq (qlr-room? pos ids (qlr-cap) (nth geo 17)) 0)
+                        (do
+                            (print (list "qwen-lora-resident" "context-full" 1
+                                         "position" pos "voice-home" (vhome-now)))
+                            (qlrr-loop ctx sts src adapter pos turns))
+                        (do
+                            (let prefill (q38-prefill-adapted
+                                (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
+                                (nth ctx 4) (nth ctx 5) (nth ctx 6) adapter ids pos))
+                            (let first (nth prefill 0))
+                            (let stops (list (gmt-u32 src "tokenizer.ggml.eos_token_id")))
+                            (let rest (if (if (lt first 0) 1 (q38-stop? first stops)) (empty)
+                                (q38-generate-adapted
+                                    (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
+                                    (nth ctx 4) (nth ctx 5) (nth ctx 6) adapter first (nth prefill 1)
+                                    (sub (qlr-cap) 1) stops (empty))))
+                            (let out (if (if (lt first 0) 1 (q38-stop? first stops)) (empty) (cons first rest)))
+                            (let text (tkz-decode-text src out))
+                            (let saved (write_file (qlr-last-path) text))
+                            (let next-pos (qlr-next-pos pos ids out))
+                            (framebuffer-clear)
+                            (fb_record (intern_trivial_string "qwen-lora-resident-turn")
+                                "observe/qwen-lora-resident-live-run.fk" (if (gt (len out) 0) 1 0))
+                            (print (list "qwen-lora-resident" "turn" (add turns 1)
+                                         "adapted-tokens" (len out) "position" next-pos
+                                         "voice-home" (vhome-now) "events" (len (framebuffer-events))))
+                            (print_str text)
+                            (print_str "\n")
+                            (qlrr-loop ctx sts src adapter next-pos (add turns 1))))))))
+    (let path (mr-path (mr-find "qwen38-q8")))
+    (let artifact (qlh-path))
+    (let artifact-bytes (qlh-ensure artifact))
+    (let adapter (qlh-admit artifact))
+    (let ctx (q38-open path 256))
+    (if (if (eq (qlh-admitted? adapter) 0) 1 (lt (len ctx) 10))
+        (do
+            (print (list "qwen-lora-resident" "refused" 1 "voice-home" (vhome-now)))
+            (qlh-close adapter)
+            0)
+        (do
+            (let sts (q38-new-state (nth ctx 2)))
+            (print (list "qwen-lora-resident" "standing" 1 "adapter-bytes" artifact-bytes
+                         "voice-home" (vhome-now)))
+            (qlrr-loop ctx sts (fcmg-src path) adapter 0 0))))
