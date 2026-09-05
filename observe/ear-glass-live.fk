@@ -1,0 +1,46 @@
+; ear-glass-live.fk — the room transcribed live on glass, three tongues at
+; once. The ear organ (observe/ear-chunk.py, the one crossing: rec + the open
+; reference + the local 3B) appends one frame per chunk to the ear spool;
+; this door drains the spool by watermark (the body's own transport), paints
+; the panel every frame — level bar, tongue heard, English, Persian,
+; Brazilian Portuguese, latency — and publishes voice.ear to the shared glass.
+; Full screen is the terminal that runs it: "Sema Ear Glass.command" opens
+; one; bind a Shortcut to that file for a hot key.
+; stdin line 1: chunk seconds (blank -> 2); line 2: how many chunks (blank -> 15).
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/hearth.bml form/form-stdlib/spool-bell-transport.fk form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/term-graphics.bml
+(do
+    (defn eg-trim (s) (if (nothing? s) "" (trim s)))
+    (defn eg-text (t) (if (nothing? t) "" t))
+    (defn eg-cat (parts) (if (eq (len parts) 0) "" (str_concat (head parts) (eg-cat (tail parts)))))
+    (defn eg-spool () ".hearth/ear.spool")
+    (defn eg-line-end (s i) (if (ge i (str_len s)) i (if (eq (str_byte_at s i) 10) i (eg-line-end s (add i 1)))))
+    (defn eg-field (s key) (do (let at (str_find s (str_concat (byte_to_str 10) (str_concat key "=")) 0)) (if (lt at 0) "" (substring s (add at (add (str_len key) 2)) (eg-line-end s (add at (add (str_len key) 2)))))))
+    (defn eg-int (s key) (do (let v (eg-field s key)) (if (eq (str_len v) 0) 0 (str_to_int v))))
+    ; frames: whole ones only, as the cell channel reads
+    (defn eg-frames (text from acc) (do (let o (str_find text "<|ear:frame|>" from)) (if (lt o 0) (reverse acc) (do (let c (str_find text "<|/ear:frame|>" o)) (if (lt c 0) (reverse acc) (eg-frames text (add c 14) (cons (substring text o (add c 14)) acc)))))))
+    (defn eg-through (text from last) (do (let c (str_find text "<|/ear:frame|>" from)) (if (lt c 0) last (eg-through text (add c 14) (add c 14)))))
+    (defn eg-drain (r) (do (let sz (file_size (sbt-path r))) (if (le sz (sbt-mark r)) (list (list) r) (do (let text (eg-text (read_file_slice (sbt-path r) (sbt-mark r) (sub sz (sbt-mark r))))) (let th (eg-through text 0 0)) (if (eq th 0) (list (list) r) (list (eg-frames (substring text 0 th) 0 (list)) (list (sbt-path r) (add (sbt-mark r) th))))))))
+    (defn eg-bar (db) (tg-bar (div (add db 60) 6) 10))
+    (defn eg-lanes (f nowms n)
+        (list (tg-lane "EAR     " (eg-cat (list "live transcript of the room, three tongues; chunk #" (int_to_str n) " " (eg-field f "kind"))) "dim" (sub 0 1))
+              (tg-lane "level   " (eg-cat (list (eg-bar (eg-int f "db")) " " (int_to_str (eg-int f "db")) " dBFS")) (if (lt (eg-int f "db") (sub 0 55)) "dim" "good") (sub 0 1))
+              (tg-lane "heard   " (do (let l (eg-field f "lang")) (if (eq (str_len l) 0) "silence" (eg-cat (list l "  " (eg-field f "src"))))) "plain" (sub 0 1))
+              (tg-lane "phantom?" (eg-cat (list (eg-bar (sub (eg-int f "nsp") 60)) " " (int_to_str (eg-int f "nsp")) "% the reference doubts speech was here")) (tg-scale (eg-int f "nsp") 30 60) (sub 0 1))
+              (tg-lane "en      " (eg-field f "en") "plain" (sub 0 1))
+              (tg-lane "fa      " (eg-field f "fa") "plain" (sub 0 1))
+              (tg-lane "pt-br   " (eg-field f "pt") "plain" (sub 0 1))
+              (tg-lane "latency " (str_concat (tg-dur (eg-int f "ms")) " chunk→panel") (tg-scale (eg-int f "ms") 2500 5000) (sub nowms (eg-int f "t")))))
+    (defn eg-publish (f epoch) (fgtm-publish-snapshot (hearth-telemetry-root) "voice.ear" epoch (list (fgtm-sample "ear.level" (fgtm-absent) "ear" "form" "voice.ear" "voice" "dbfs-below-zero" (fgtm-absent) (fgtm-present (sub 0 (eg-int f "db"))) (if (lt (eg-int f "db") (sub 0 55)) "idle" "active") (fgtm-absent) (fgtm-present epoch) (fgtm-absent) (fgtm-absent) "never" "physical-live" "ear-chunk" (list "all" "we" "mesh" "voice")) (fgtm-sample "ear.latency" (fgtm-absent) "ear" "form" "voice.ear" "voice" (if (eq (str_len (eg-field f "lang")) 0) "silence" (eg-field f "lang")) (fgtm-absent) (fgtm-present (eg-int f "ms")) "completed" (fgtm-absent) (fgtm-present epoch) (fgtm-absent) (fgtm-absent) "never" "physical-live" "ear-chunk" (list "all" "we" "mesh" "voice")))))
+    (defn eg-show (frames n) (if (eq (len frames) 0) n (do (let f (head frames)) (let now (now_unix_ms)) (let put (print_str (tg-frame (eg-lanes f now n)))) (let pub (eg-publish f now)) (eg-show (tail frames) (add n 1)))))
+    (defn eg-loop (r n want waited) (if (or (ge n want) (ge waited (hearth-review-wait-s))) n (do (let d (eg-drain r)) (let shown (eg-show (head d) n)) (let rest (if (eq shown n) (hearth-rest-s 1) 0)) (eg-loop (nth d 1) shown want (add waited 1)))))
+    (let secs (do (let l (eg-trim (read_line))) (if (eq (str_len l) 0) "2" l)))
+    (let want (str_to_int (do (let l (eg-trim (read_line))) (if (eq (str_len l) 0) "15" l))))
+    (let mk (fs-mkdir ".hearth"))
+    (let cleared (fs-remove-file (str_concat (eg-spool) ".stop")))
+    (let r0 (list (eg-spool) (if (lt (file_size (eg-spool)) 0) 0 (file_size (eg-spool)))))
+    (let launched (host-exec (eg-cat (list "( /Users/ursmuff/.mlx-venv/bin/python observe/ear-chunk.py " (eg-spool) " " secs " " (int_to_str want) " > .hearth/ear-chunk.log 2>&1 ) >/dev/null 2>&1 & echo launched")) ""))
+    (let shown (eg-loop r0 0 (add want 1) 0))
+    (let stop (write_file_text (str_concat (eg-spool) ".stop") "stop"))
+    (print_str (str_concat "ear frames shown=" (str_concat (int_to_str shown) "\n")))
+    0)
