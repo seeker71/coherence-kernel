@@ -28,7 +28,7 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is 16,936 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is 16,969 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
 preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 669 rows, 657 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 670 rows, 658 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -261,9 +261,9 @@ Each atlas flow gauge carries the evidence symbol of its own lane, its named
 source door, and the standing total beside the per-frame rate — so `G*?.=0u/3M`
 (idle now, three million microseconds of GPU work behind it) reads differently
 from `C*?.=0u/0` (never ran). Telemetry crosses between processes as files
-under a five-second freshness lease, so a lane whose publisher has gone silent
-shows a frozen number; the gauge's evidence symbol is what says so
-(`release-ledger.bml` R98).
+under a five-second freshness lease; a publisher gone silent is stale for every
+lane, the incarnated model owner included, and its last counters stay in the
+observation view with their age (`release-ledger.bml` R98, R113).
 
 Telemetry also crosses as a **gift frame**: six seed doors (`shm_offer`,
 `shm_receive`, `shm_write`, `shm_read`, `shm_seq`, `shm_release`; tags 184-189) map
@@ -324,12 +324,25 @@ sample of a kind is published the view names the organ absent by its door
 channel protocols and the grammars have no live publisher yet; each owes one
 give into the glass (R112).
 
+**The gauges read the machine.** Each atlas flow lane takes the model owner's
+counter while the owner is measured within the lease and otherwise the host or
+this process, never the glass's own idle Metal queue: `G` is the host GPU level
+the accelerator publishes (`host_gpu_utilization`, tag 174, IOKit loaded by name
+inside the Metal carrier) integrated in-process into busy microseconds
+(`host_gpu_busy_us`, 175 — one read per 50 ms window, because the accelerator
+answers the mean since the previous query by any process and a second read
+microseconds later reads 0); `C` is this process's CPU clock (`host_cpu_us`,
+176); `D` its primitive dispatches (`kernel_stat 0`); `J` its heat-lane calls
+(`kernel_stat 44`); `I` its Metal batches in flight. Witnessed 2026-09-05 on
+twenty live frames: C 17K µs, D 2M dispatches, J 143K calls per frame, G
+stepping every third frame, every lane wearing its own evidence symbol.
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=45 moving=0 released=66 -> 45000066
+./fkwu form/form-stdlib/release-ledger.bml -> open=46 moving=0 released=67 -> 46000067
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
