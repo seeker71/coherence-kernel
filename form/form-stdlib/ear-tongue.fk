@@ -8,7 +8,7 @@
 ; substring), the decoded pieces behind an id index (a word is two slices), and the KV cache of
 ; the last prompt — a new line prefills only past the tokens it shares with what the cache holds,
 ; and the head runs once, on the last prompt token.
-; preludes: native/metal/dense-token-handle.fk form-stdlib/model-registry.bml form-stdlib/spool-bell-transport.fk form-stdlib/form-fs.fk form-stdlib/line-grammar.fk
+; preludes: native/metal/dense-token-handle.fk native/metal/dense-multi.fk form-stdlib/model-registry.bml form-stdlib/spool-bell-transport.fk form-stdlib/form-fs.fk form-stdlib/line-grammar.fk
 (do
     ; the tongues a line can be offered in: whisper's codes, the names the prompt speaks
     (defn et-name-rows () (list (list "en" "English") (list "pt" "Brazilian Portuguese") (list "fa" "Persian") (list "id" "Indonesian") (list "de" "German") (list "fr" "French") (list "zh" "Chinese") (list "es" "Spanish") (list "ru" "Russian") (list "it" "Italian") (list "ja" "Japanese") (list "ko" "Korean") (list "ar" "Arabic") (list "hi" "Hindi") (list "tr" "Turkish") (list "nl" "Dutch") (list "pl" "Polish") (list "ro" "Romanian") (list "sv" "Swedish") (list "uk" "Ukrainian") (list "vi" "Vietnamese") (list "th" "Thai") (list "he" "Hebrew") (list "el" "Greek") (list "cs" "Czech") (list "hu" "Hungarian") (list "ms" "Malay") (list "tl" "Tagalog") (list "bn" "Bengali") (list "ta" "Tamil") (list "ur" "Urdu") (list "sw" "Swahili")))
@@ -173,4 +173,56 @@
         (do (let r (et-say-ids lane text from to committed maxnew))
             (list (head r) (et-take (head r) (et-common (head r) prev 0)) (nth r 1))))
     (defn et-ids-text (lane ids) (et-cut (et-detok (nth lane 5) (nth lane 6) (nth lane 7) ids "")))
+    0)
+; ---- the batched lane: the tongues as M sequences in one decode step (dense-multi), each its own KV bank ----
+; A round feeds every sequence its prompt (only past what its bank holds) and then its own answers, in
+; lock-step, until each has ended or generated maxnew; the round is resumable in chunks of k steps so a
+; caller can show the renderings while they grow. Refused at open outside dense-multi's radius
+; (et-mlane-ok? false) — the caller then offers the tongues one after another through et-say-step.
+(do
+    (defn et-nils (m) (if (le m 0) (list) (cons (list) (et-nils (sub m 1)))))
+    ; (st bos eos loadeds dir ppath ipath n M): loadeds is what each bank holds, position by position
+    (defn et-mlane-open (m)
+        (do (let st (dm-open (mr-path (mr-find "llama32-1b")) 256 m))
+            (let src (nth st 10))
+            (let built (et-build-index src))
+            (list st (gmt-u32 src "tokenizer.ggml.bos_token_id") (gmt-u32 src "tokenizer.ggml.eos_token_id") (et-nils m) (et-rdir src) (et-ppath src) (et-ipath src) (gmt-vocab-n src) m)))
+    (defn et-mlane-ok? (ml) (dm-ok? (nth ml 0)))
+    (defn et-mlane-with-loaded (ml loadeds) (list (nth ml 0) (nth ml 1) (nth ml 2) loadeds (nth ml 4) (nth ml 5) (nth ml 6) (nth ml 7) (nth ml 8)))
+    ; a sequence in a round: (ids c rem gen ended last) — ids the prompt then the forced prefix, c the first
+    ; position its bank does not hold, rem the ids it feeds from c on, gen what it generated (no end id),
+    ; ended whether an end id came, last the id it feeds next. Empty ids, or more than the bank's room: it sits
+    ; out (feeds bos at 0, its bank forgotten).
+    (defn et-mseq (ids loaded bos)
+        (if (or (eq (len ids) 0) (gt (len ids) 250)) (list (list) 0 0 (list) 1 bos)
+            (do (let c0 (et-common ids loaded 0)) (let c (if (ge c0 (len ids)) (sub (len ids) 1) c0)) (list ids c (sub (len ids) c) (list) 0 bos))))
+    (defn et-mseqs (idss loadeds bos) (if (eq (len idss) 0) (list) (cons (et-mseq (head idss) (head loadeds) bos) (et-mseqs (tail idss) (tail loadeds) bos))))
+    (defn et-mfeed (seqs s) (if (eq (len seqs) 0) (list) (cons (do (let q (head seqs)) (if (lt s (nth q 2)) (nth (nth q 0) (add (nth q 1) s)) (nth q 5))) (et-mfeed (tail seqs) s))))
+    (defn et-mposs (seqs s) (if (eq (len seqs) 0) (list) (cons (do (let q (head seqs)) (if (eq (len (nth q 0)) 0) 0 (add (nth q 1) s))) (et-mposs (tail seqs) s))))
+    ; the answers of step s: from the step that fed a sequence's last prompt id on, its answer is generated
+    (defn et-mtake (seqs outs s eos maxnew)
+        (if (eq (len seqs) 0) (list)
+            (cons (do (let q (head seqs)) (let o (head outs))
+                      (if (and (ge s (sub (nth q 2) 1)) (and (eq (nth q 4) 0) (and (gt (len (nth q 0)) 0) (lt (len (nth q 3)) maxnew))))
+                          (if (et-ends? eos o) (list (nth q 0) (nth q 1) (nth q 2) (nth q 3) 1 o) (list (nth q 0) (nth q 1) (nth q 2) (append (nth q 3) (list o)) 0 o))
+                          (list (nth q 0) (nth q 1) (nth q 2) (nth q 3) (nth q 4) o)))
+                  (et-mtake (tail seqs) (tail outs) s eos maxnew))))
+    ; after s steps a sequence is done when its prompt is fed and it ended or has maxnew
+    (defn et-mdone? (seqs s maxnew) (if (eq (len seqs) 0) 1 (do (let q (head seqs)) (if (and (ge s (nth q 2)) (or (eq (nth q 4) 1) (ge (len (nth q 3)) maxnew))) (et-mdone? (tail seqs) s maxnew) 0))))
+    ; up to k more steps of a round: (seqs s done)
+    (defn et-mround-go (ml seqs s k maxnew)
+        (if (eq (et-mdone? seqs s maxnew) 1) (list seqs s 1)
+            (if (le k 0) (list seqs s 0)
+                (do (let outs (dm-step (nth ml 0) (et-mfeed seqs s) (et-mposs seqs s)))
+                    (et-mround-go ml (et-mtake seqs outs s (nth ml 2) maxnew) (add s 1) (sub k 1) maxnew)))))
+    (defn et-mround-open (ml idss) (et-mseqs idss (nth ml 3) (nth ml 1)))
+    (defn et-mgens (seqs) (if (eq (len seqs) 0) (list) (cons (nth (head seqs) 3) (et-mgens (tail seqs)))))
+    ; what each bank holds after S steps: the ids, then the generated ids that were fed (S - rem of them at
+    ; most); a sequence that sat out keeps what it held (bos at position 0 is what every bank holds there)
+    (defn et-mloaded (seqs S olds) (if (eq (len seqs) 0) (list) (cons (do (let q (head seqs)) (if (eq (len (nth q 0)) 0) (head olds) (append (nth q 0) (et-take (nth q 3) (sub S (nth q 2)))))) (et-mloaded (tail seqs) S (tail olds)))))
+    (defn et-mround-close (ml seqs S) (et-mlane-with-loaded ml (et-mloaded seqs S (nth ml 3))))
+    ; a whole round at once: (gens ml) — gens[m] the forced prefix is NOT included; the caller keeps it
+    (defn et-mround (ml idss maxnew)
+        (do (let r (et-mround-go ml (et-mround-open ml idss) 0 100000 maxnew))
+            (list (et-mgens (head r)) (et-mround-close ml (head r) (nth r 1)))))
     0)
