@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 688 rows, 676 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 691 rows, 679 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -251,6 +251,7 @@ eq-shape-band                          -> 524287
 primitive-registry-band                -> 45      (fkwu; one pending row per absent native, 79; 63 three-way)
 form-glass-telemetry-membrane-band     -> 2097151
 form-glass-observation-v2-band         -> 2097151
+form-glass-wait-band                   -> 255
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -508,12 +509,28 @@ The two glass bands that printed 0 had ended in `(print (main))` -- the
 reader took the print's own 0 for the verdict; each now ends on its verdict.
 (receipts/2026-09-06-three-bands-declared.md)
 
+**The glass wakes on the word.** `host_sleep_ms` is the rest and the wait
+door: an int ask lands within half a millisecond (10/20/40 ms asks answer
+10/20/40 at nice 0 and 19; before: 10-16, 21-31, 40-50), a list ask rests at
+most its budget and wakes the moment a watched gift frame's seq word moves.
+The live loop rests on the control inbox and every roster frame
+(`event-wait=kernel.monotonic-wait-until-frame-change:host_sleep_ms`); a
+control wake presents at once; a child's give 200 ms after hello wakes a
+1000 ms rest at 199-201 ms; forty watched waits cost 12 ms of CPU. Every
+kernel's program is on the surface -- AST rows `/fg-c<pid>-A`, source
+`/fg-c<pid>-S`, header and defn table `/fg-c<pid>-D` with the ice it runs
+(`fk_node` IS that mapping) -- read by `kernel_ast pid spec` (32);
+`mlx_live` (29) answers MLX as twelve words the observer reads without
+parsing; the owner-command lease is one cell in one frame, no lock directory
+or lease file. `form-glass-wait-band` 255.
+(receipts/2026-09-06-the-glass-wakes-on-the-word.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=45 moving=0 released=79 -> 45000079
+./fkwu form/form-stdlib/release-ledger.bml -> open=42 moving=0 released=82 -> 42000082
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
