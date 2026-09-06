@@ -1300,3 +1300,34 @@ long long fk_host_disk_stat(long long *out) {
     release(iter);
     return drivers;
 }
+
+// METAL LIVE, AS NUMBERS. The same counters the text status carries, handed as words so no reader parses:
+// [0] linked [1] unified [2] buffers [3] pipelines [4] nocopy buffers [5] pending [6] in flight
+// [7] total dispatch [8] total sync [9] cpu-jit dispatch [10] cpu-jit busy us [11] gpu busy us
+// [12] last wait ms [13] deadline ms [14] shelf [15] batch mode (0 none, 1 serial, 2 concurrent) [16] buffer slots [17] free slots. Answers 18, or 0 when Metal is not up.
+long long fk_metal_live_external(long long *out) {
+    @autoreleasepool {
+        for (int k = 0; k < 18; k++) out[k] = 0;
+        NSString *err = nil;
+        if (!fk_metal_up(&err)) return 0;
+        out[0] = 1;
+        out[1] = (long long)[fk_dev hasUnifiedMemory];
+        out[2] = (long long)[fk_buf_objs count] - fk_free_top;
+        out[3] = (long long)[fk_pipe_objs count];
+        out[4] = fk_nocopy_bufs;
+        out[5] = fk_pending;
+        out[6] = (long long)(fk_inflight == nil ? 0 : [fk_inflight count]);
+        out[7] = fk_total_dispatch;
+        out[8] = fk_total_sync;
+        out[9] = fk_total_cpu_jit_dispatch;
+        out[10] = (long long)(fk_total_cpu_jit_busy_s * 1000000.0);
+        out[11] = (long long)(fk_total_gpu_busy_s * 1000000.0);
+        out[12] = (long long)(fk_wait_last_s * 1000.0);
+        out[13] = fk_deadline_ms;
+        out[14] = (long long)(fk_shelf == nil ? 0 : [fk_shelf count]);
+        out[15] = fk_cb == nil ? 0 : (fk_batch_concurrent ? 2 : 1);
+        out[16] = (long long)[fk_buf_objs count];
+        out[17] = fk_free_top;
+        return 18;
+    }
+}

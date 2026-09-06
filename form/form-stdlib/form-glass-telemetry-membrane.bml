@@ -141,20 +141,29 @@ section [form.bml] {
             fgtm-parse-snapshot-lines(lines);
         }
 
-        def fgtm-snapshot-path(root, publisher) = fs-path-join(root, str_concat(publisher, FGTMSnapshotSuffix()));
-        def fgtm-snapshot-candidate-path(root, publisher) = fs-path-join(root, str_concat(publisher, ".glass-snapshot.candidate"));
         def fgtm-publish-refused(reason) = list("glass-publish-v1", "refused", reason, fgtm-absent());
+        // ---- the shared-memory lane: a snapshot is a cell given into the publisher's frame; the roster page names every publisher; no file, no wire, no parser ----
+        // the root names the space: a frame and its roster entry are keyed root|publisher, so a band's /tmp/test never meets the live telemetry
+        def fgtm-space(root, publisher) = str_concat(root, str_concat("|", publisher));
+        def fgtm-space-prefix?(name, root) = if lt(str_len(name), add(str_len(root), 2)) then 0 else if not(str_eq(substring(name, 0, add(str_len(root), 1)), str_concat(root, "|"))) then 0 else 1;
+        def fgtm-space-publisher(name, root) = substring(name, add(str_len(root), 1), str_len(name));
+        def fgtm-roster-in-space(names, root) = if eq(len(names), 0) then list() else if eq(fgtm-space-prefix?(head(names), root), 1) then cons(fgtm-space-publisher(head(names), root), fgtm-roster-in-space(tail(names), root)) else fgtm-roster-in-space(tail(names), root);
+        def fgtm-gift-take(root, publisher) {
+            let handle = ggf-receive(fgtm-space(root, publisher));
+            let frame = if nothing?(handle) then nothing() else node_gift_read(handle);
+            let released = ggf-release(handle);
+            if nothing?(handle) then list("absent") else if nothing?(frame) then list("unreadable") else list("read", frame);
+        }
+        def fgtm-gift-give(root, publisher, bytes, cell) {
+            let slot = gift_roster_register(fgtm-space(root, publisher));
+            let handle = ggf-offer(fgtm-space(root, publisher), bytes);
+            let seq = if nothing?(handle) then nothing() else node_gift_write(handle, cell);
+            let released = ggf-release(handle);
+            if nothing?(seq) then -1 else seq;
+        }
         def fgtm-publish-valid-snapshot(root, publisher, snapshot) {
-            let made = fs-mkdir(root);
-            let candidate = fgtm-snapshot-candidate-path(root, publisher);
-            let finalPath = fgtm-snapshot-path(root, publisher);
-            let wrote = fs-write-text(candidate, fgtm-snapshot-wire(snapshot));
-            let moved = if ge(wrote, 0) then fs-rename(candidate, finalPath) else -1;
-            // The gift: the same wire is offered into process shared memory beside the
-            // file. Offered, never demanded -- a refused or absent frame changes nothing
-            // about the file publication, and no reader is required for the give.
-            let gift = if and(ge(wrote, 0), eq(moved, 0)) then ggf-offer-and-give(publisher, FGTMMaxSnapshotWireBytes(), fgtm-snapshot-wire(snapshot)) else list(GGFSchema(), "not-offered", publisher, "", -1);
-            if and(ge(wrote, 0), eq(moved, 0)) then list("glass-publish-v1", "published", publisher, fgtm-present(finalPath), wrote, moved, snapshot) else list("glass-publish-v1", "failed", publisher, fgtm-present(candidate), wrote, moved, snapshot);
+            let seq = fgtm-gift-give(root, publisher, FGTMMaxSnapshotWireBytes(), snapshot);
+            if lt(seq, 0) then list("glass-publish-v1", "failed", publisher, fgtm-present(ggf-name(fgtm-space(root, publisher))), -1, -1, snapshot) else list("glass-publish-v1", "published", publisher, fgtm-present(ggf-name(fgtm-space(root, publisher))), seq, 0, snapshot);
         }
         def fgtm-publish-snapshot(root, publisher, epoch, samples) {
             let snapshot = fgtm-snapshot(publisher, epoch, samples);
@@ -163,54 +172,34 @@ section [form.bml] {
 
         def fgtm-read-state(channel, state, value) = list("glass-read-v1", channel, state, value);
         def fgtm-read-current-parsed(publisher, parsed) = if and(eq(len(parsed), 4), str_eq(head(parsed), FGTMSnapshotSchema())) then if str_eq(fgtm-snapshot-publisher(parsed), publisher) then fgtm-read-state(publisher, "current", fgtm-present(parsed)) else fgtm-read-state(publisher, "malformed", fgtm-present("publisher-mismatch")) else fgtm-read-state(publisher, "malformed", fgtm-present(nth(parsed, 1)));
-        def fgtm-read-current-path(publisher, path) = if eq(fs-exists?(path), 0) then fgtm-read-state(publisher, "absent", fgtm-absent()) else if gt(file_size(path), FGTMMaxSnapshotWireBytes()) then fgtm-read-state(publisher, "malformed", fgtm-present("oversize")) else fgtm-read-current-parsed(publisher, fgtm-parse-snapshot-wire(fs-read-text(path)));
         def fgtm-read-current(root, publisher) {
-            let path = fgtm-snapshot-path(root, publisher);
-            let gift = ggf-reading(publisher);
-            let fromGift = if eq(ggf-reading-received?(gift), 1) then fgtm-read-current-parsed(publisher, fgtm-parse-snapshot-wire(ggf-reading-text(gift))) else list();
-            if not(eq(fgtm-root-valid?(root), 1)) then fgtm-read-state(publisher, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(publisher), 1)) then fgtm-read-state(publisher, "refused", fgtm-present("publisher")) else if and(gt(len(fromGift), 0), str_eq(fgtm-read-state-status(fromGift), "current")) then fromGift else fgtm-read-current-path(publisher, path);
+            let taken = if and(eq(fgtm-root-valid?(root), 1), eq(fgtm-channel-id?(publisher), 1)) then fgtm-gift-take(root, publisher) else list("refused");
+            if not(eq(fgtm-root-valid?(root), 1)) then fgtm-read-state(publisher, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(publisher), 1)) then fgtm-read-state(publisher, "refused", fgtm-present("publisher")) else if str_eq(head(taken), "absent") then fgtm-read-state(publisher, "absent", fgtm-absent()) else if str_eq(head(taken), "unreadable") then fgtm-read-state(publisher, "malformed", fgtm-present("frame-unreadable")) else fgtm-read-current-parsed(publisher, nth(taken, 1));
         }
         def fgtm-read-state-status(reading) = nth(reading, 2);
-        // which carrier answered: "gift" when the shared-memory frame stood and parsed current, "file" when the snapshot file did, "absent" when neither
-        def fgtm-read-current-carrier(root, publisher) {
-            let gift = ggf-reading(publisher);
-            let giftCurrent = if eq(ggf-reading-received?(gift), 1) then str_eq(fgtm-read-state-status(fgtm-read-current-parsed(publisher, fgtm-parse-snapshot-wire(ggf-reading-text(gift)))), "current") else 0;
-            if eq(giftCurrent, 1) then "gift" else if eq(fs-exists?(fgtm-snapshot-path(root, publisher)), 1) then "file" else "absent";
-        }
+        // which carrier answered: "gift" when the shared-memory frame stood and read current, "absent" otherwise -- there is no other carrier
+        def fgtm-read-current-carrier(root, publisher) = if str_eq(fgtm-read-state-status(fgtm-read-current(root, publisher)), "current") then "gift" else "absent";
+        // which carrier answered: "gift" when the shared-memory frame stood and read current, "absent" otherwise -- there is no other carrier
         def fgtm-read-state-value(reading) = nth(reading, 3);
 
-        def fgtm-publisher-from-name(name) = substring(name, 0, sub(str_len(name), str_len(FGTMSnapshotSuffix())));
-        def fgtm-publisher-row(name, modified) = list(name, modified);
-        def fgtm-publisher-row-name(row) = nth(row, 0);
-        def fgtm-publisher-row-modified(row) = nth(row, 1);
-        def fgtm-take-publisher-rows(rows, remaining) = if or(le(remaining, 0), eq(len(rows), 0)) then list() else cons(head(rows), fgtm-take-publisher-rows(tail(rows), sub(remaining, 1)));
-        def fgtm-insert-publisher-row(row, rows, remaining) = if le(remaining, 0) then list() else if eq(len(rows), 0) then list(row) else if gt(fgtm-publisher-row-modified(row), fgtm-publisher-row-modified(head(rows))) then cons(row, fgtm-take-publisher-rows(rows, sub(remaining, 1))) else cons(head(rows), fgtm-insert-publisher-row(row, tail(rows), sub(remaining, 1)));
-        def fgtm-inventory-publisher-next(root, names, held) {
-            let name = head(names);
-            let publisher = if fs-suffix?(name, FGTMSnapshotSuffix()) then fgtm-publisher-from-name(name) else "";
-            let valid = if and(fs-suffix?(name, FGTMSnapshotSuffix()), eq(fgtm-channel-id?(publisher), 1)) then 1 else 0;
-            let next = if eq(valid, 1) then fgtm-insert-publisher-row(fgtm-publisher-row(publisher, file_mtime(fs-path-join(root, name))), held, FGTMMaxPublishers()) else held;
-            fgtm-inventory-publisher-rows(root, tail(names), next);
-        }
-        def fgtm-inventory-publisher-rows(root, names, held) = if eq(len(names), 0) then held else fgtm-inventory-publisher-next(root, names, held);
-        def fgtm-publisher-row-names(rows) = if eq(len(rows), 0) then list() else cons(fgtm-publisher-row-name(head(rows)), fgtm-publisher-row-names(tail(rows)));
-        def fgtm-inventory-publishers(root, names) = fgtm-publisher-row-names(fgtm-inventory-publisher-rows(root, names, list()));
+        def fgtm-roster-publishers(names, remaining) = if or(eq(len(names), 0), le(remaining, 0)) then list() else if eq(fgtm-channel-id?(head(names)), 1) then cons(head(names), fgtm-roster-publishers(tail(names), sub(remaining, 1))) else fgtm-roster-publishers(tail(names), remaining);
+        def fgtm-inventory-publishers(root, names) = fgtm-roster-publishers(names, FGTMMaxPublishers());
         def fgtm-read-publishers(root, publishers) = if eq(len(publishers), 0) then list() else cons(fgtm-read-current(root, head(publishers)), fgtm-read-publishers(root, tail(publishers)));
         def fgtm-inventory-current(root) {
-            let publishers = fgtm-inventory-publishers(root, fs-list(root));
+            let publishers = fgtm-inventory-publishers(root, fgtm-roster-in-space(gift_roster_names(), root));
             list("glass-inventory-v1", root, "current", publishers, fgtm-read-publishers(root, publishers));
         }
         // ---- the cached inventory: parse a publisher only when its frame moved ----
         // A publisher's key is its gift sequence when the frame stands (offset so
-        // gift keys and file keys never meet), else its snapshot file's mtime.
+        // the frame sequence is the key; -1 when no frame stands
         // cache = list of (publisher key reading); an unmoved key answers the held
         // reading with no read and no parse, so a steady field costs the glass
         // one stat or one shm_seq per publisher per frame.
         def fgtm-read-key(root, publisher) {
-            let handle = ggf-receive(publisher);
+            let handle = ggf-receive(fgtm-space(root, publisher));
             let seq = ggf-seq(handle);
             let released = ggf-release(handle);
-            if nothing?(handle) then file_mtime(fgtm-snapshot-path(root, publisher)) else add(1000000000000, seq);
+            if nothing?(handle) then -1 else seq;
         }
         def fgtm-cache-find(cache, publisher) = if eq(len(cache), 0) then list() else if str_eq(nth(head(cache), 0), publisher) then head(cache) else fgtm-cache-find(tail(cache), publisher);
         def fgtm-cache-entry(publisher, key, reading) = list(publisher, key, reading);
@@ -230,16 +219,12 @@ section [form.bml] {
         // the same, over a roster the caller already holds (no directory listing)
         def fgtm-inventory-cached-with(root, publishers, cache) {
             let pair = fgtm-read-publishers-cached(root, publishers, cache, list(), list());
-            if not(eq(fgtm-root-valid?(root), 1)) then list(list("glass-inventory-v1", root, "refused", list(), list()), cache) else if eq(fs-is-dir?(root), 0) then list(list("glass-inventory-v1", root, "absent", list(), list()), cache) else list(list("glass-inventory-v1", root, "current", publishers, nth(pair, 0)), nth(pair, 1));
+            if not(eq(fgtm-root-valid?(root), 1)) then list(list("glass-inventory-v1", root, "refused", list(), list()), cache) else list(list("glass-inventory-v1", root, "current", publishers, nth(pair, 0)), nth(pair, 1));
         }
-        def fgtm-inventory-roster(root) = if or(not(eq(fgtm-root-valid?(root), 1)), eq(fs-is-dir?(root), 0)) then list() else fgtm-inventory-publishers(root, fs-list(root));
+        def fgtm-inventory-roster(root) = if not(eq(fgtm-root-valid?(root), 1)) then list() else fgtm-inventory-publishers(root, fgtm-roster-in-space(gift_roster_names(), root));
+        def fgtm-inventory-cached(root, cache) = fgtm-inventory-cached-with(root, fgtm-inventory-roster(root), cache);
+        def fgtm-inventory(root) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-inventory-v1", root, "refused", list(), list()) else fgtm-inventory-current(root);
         // answers list(inventory, cache)
-        def fgtm-inventory-cached(root, cache) {
-            let publishers = if or(not(eq(fgtm-root-valid?(root), 1)), eq(fs-is-dir?(root), 0)) then list() else fgtm-inventory-publishers(root, fs-list(root));
-            let pair = fgtm-read-publishers-cached(root, publishers, cache, list(), list());
-            if not(eq(fgtm-root-valid?(root), 1)) then list(list("glass-inventory-v1", root, "refused", list(), list()), cache) else if eq(fs-is-dir?(root), 0) then list(list("glass-inventory-v1", root, "absent", list(), list()), cache) else list(list("glass-inventory-v1", root, "current", publishers, nth(pair, 0)), nth(pair, 1));
-        }
-        def fgtm-inventory(root) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-inventory-v1", root, "refused", list(), list()) else if eq(fs-is-dir?(root), 0) then list("glass-inventory-v1", root, "absent", list(), list()) else fgtm-inventory-current(root);
 
         // Control offers contain an enum action and an optional bounded label.
         def fgtm-control-offer(channel, offerId, epoch, action, argument, evidence, source) = list("glass-control-offer-v1", channel, offerId, epoch, action, argument, evidence, source);
@@ -260,25 +245,16 @@ section [form.bml] {
             let fields = split-on(text, "|");
             if not(eq(len(fields), 8)) then list("glass-control-offer-invalid-v1") else if not(eq(fgtm-uint-text?(nth(fields, 3)), 1)) then list("glass-control-offer-invalid-v1") else fgtm-parse-offer-fields(fields);
         }
-        def fgtm-control-inbox-path(root, channel) = fs-path-join(root, str_concat(channel, FGTMInboxSuffix()));
-        def fgtm-control-inbox-candidate-path(root, channel) = fs-path-join(root, str_concat(channel, ".glass-control-inbox.candidate"));
-        def fgtm-control-ack-path(root, channel) = fs-path-join(root, str_concat(channel, FGTMAckSuffix()));
-        def fgtm-control-ack-candidate-path(root, channel) = fs-path-join(root, str_concat(channel, ".glass-control-ack.candidate"));
+        // ---- control offers and acks: cells in two small frames per channel, <channel>.inbox and <channel>.ack ----
+        def fgtm-control-frame(channel, suffix) = str_concat(channel, suffix);
         def fgtm-offer-control-valid(root, offer) {
-            let made = fs-mkdir(root);
-            let path = fgtm-control-inbox-path(root, fgtm-offer-channel(offer));
-            let candidate = fgtm-control-inbox-candidate-path(root, fgtm-offer-channel(offer));
-            let wrote = fs-write-text(candidate, fgtm-offer-wire(offer));
-            let moved = if ge(wrote, 0) then fs-rename(candidate, path) else wrote;
-            if eq(moved, 0) then list("glass-control-write-v1", "offered", path, wrote, moved, offer) else list("glass-control-write-v1", "failed", candidate, wrote, moved, offer);
+            let seq = fgtm-gift-give(root, fgtm-control-frame(fgtm-offer-channel(offer), FGTMInboxSuffix()), FGTMMaxControlWireBytes(), offer);
+            if ge(seq, 0) then list("glass-control-write-v1", "offered", ggf-name(fgtm-space(root, fgtm-control-frame(fgtm-offer-channel(offer), FGTMInboxSuffix()))), seq, 0, offer) else list("glass-control-write-v1", "failed", fgtm-offer-channel(offer), -1, -1, offer);
         }
         def fgtm-offer-control(root, offer) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-write-v1", "refused", "root") else if not(eq(fgtm-offer-valid?(offer), 1)) then list("glass-control-write-v1", "refused", "offer") else fgtm-offer-control-valid(root, offer);
-        def fgtm-poll-parsed(channel, offer) = if and(eq(len(offer), 8), str_eq(head(offer), "glass-control-offer-v1")) then if str_eq(fgtm-offer-channel(offer), channel) then list("glass-control-poll-v1", channel, "offer", fgtm-present(offer)) else list("glass-control-poll-v1", channel, "malformed", fgtm-present("channel-mismatch")) else list("glass-control-poll-v1", channel, "malformed", fgtm-present("wire"));
-        def fgtm-poll-path(channel, path) = if eq(fs-exists?(path), 0) then list("glass-control-poll-v1", channel, "absent", fgtm-absent()) else if gt(file_size(path), FGTMMaxControlWireBytes()) then list("glass-control-poll-v1", channel, "malformed", fgtm-present("oversize")) else fgtm-poll-parsed(channel, fgtm-parse-offer-wire(fs-read-text(path)));
-        def fgtm-poll-control(root, channel) {
-            let path = fgtm-control-inbox-path(root, channel);
-            if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-poll-v1", channel, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(channel), 1)) then list("glass-control-poll-v1", channel, "refused", fgtm-present("channel")) else fgtm-poll-path(channel, path);
-        }
+        def fgtm-poll-parsed(channel, offer) = if and(eq(len(offer), 8), str_eq(head(offer), "glass-control-offer-v1")) then if str_eq(fgtm-offer-channel(offer), channel) then list("glass-control-poll-v1", channel, "offer", fgtm-present(offer)) else list("glass-control-poll-v1", channel, "malformed", fgtm-present("channel-mismatch")) else list("glass-control-poll-v1", channel, "malformed", fgtm-present("offer-shape"));
+        def fgtm-poll-taken(channel, taken) = if str_eq(head(taken), "absent") then list("glass-control-poll-v1", channel, "absent", fgtm-absent()) else if str_eq(head(taken), "unreadable") then list("glass-control-poll-v1", channel, "malformed", fgtm-present("frame-unreadable")) else fgtm-poll-parsed(channel, nth(taken, 1));
+        def fgtm-poll-control(root, channel) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-poll-v1", channel, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(channel), 1)) then list("glass-control-poll-v1", channel, "refused", fgtm-present("channel")) else fgtm-poll-taken(channel, fgtm-gift-take(root, fgtm-control-frame(channel, FGTMInboxSuffix())));
 
         def fgtm-control-ack(channel, offerId, epoch, disposition, evidence, source) = list("glass-control-ack-v1", channel, offerId, epoch, disposition, evidence, source);
         def fgtm-ack-channel(ack) = nth(ack, 1);
@@ -298,20 +274,13 @@ section [form.bml] {
             if not(eq(len(fields), 7)) then list("glass-control-ack-invalid-v1") else if not(eq(fgtm-uint-text?(nth(fields, 3)), 1)) then list("glass-control-ack-invalid-v1") else fgtm-parse-ack-fields(fields);
         }
         def fgtm-acknowledge-valid(root, ack) {
-            let made = fs-mkdir(root);
-            let path = fgtm-control-ack-path(root, fgtm-ack-channel(ack));
-            let candidate = fgtm-control-ack-candidate-path(root, fgtm-ack-channel(ack));
-            let wrote = fs-write-text(candidate, fgtm-ack-wire(ack));
-            let moved = if ge(wrote, 0) then fs-rename(candidate, path) else wrote;
-            if eq(moved, 0) then list("glass-control-write-v1", "acknowledged", path, wrote, moved, ack) else list("glass-control-write-v1", "failed", candidate, wrote, moved, ack);
+            let seq = fgtm-gift-give(root, fgtm-control-frame(fgtm-ack-channel(ack), FGTMAckSuffix()), FGTMMaxControlWireBytes(), ack);
+            if ge(seq, 0) then list("glass-control-write-v1", "acknowledged", ggf-name(fgtm-space(root, fgtm-control-frame(fgtm-ack-channel(ack), FGTMAckSuffix()))), seq, 0, ack) else list("glass-control-write-v1", "failed", fgtm-ack-channel(ack), -1, -1, ack);
         }
         def fgtm-acknowledge-control(root, ack) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-write-v1", "refused", "root") else if not(eq(fgtm-ack-valid?(ack), 1)) then list("glass-control-write-v1", "refused", "ack") else fgtm-acknowledge-valid(root, ack);
-        def fgtm-read-ack-parsed(channel, ack) = if and(eq(len(ack), 7), str_eq(head(ack), "glass-control-ack-v1")) then if str_eq(fgtm-ack-channel(ack), channel) then list("glass-control-ack-read-v1", channel, "ack", fgtm-present(ack)) else list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("channel-mismatch")) else list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("wire"));
-        def fgtm-read-ack-path(channel, path) = if eq(fs-exists?(path), 0) then list("glass-control-ack-read-v1", channel, "absent", fgtm-absent()) else if gt(file_size(path), FGTMMaxControlWireBytes()) then list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("oversize")) else fgtm-read-ack-parsed(channel, fgtm-parse-ack-wire(fs-read-text(path)));
-        def fgtm-read-control-ack(root, channel) {
-            let path = fgtm-control-ack-path(root, channel);
-            if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-ack-read-v1", channel, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(channel), 1)) then list("glass-control-ack-read-v1", channel, "refused", fgtm-present("channel")) else fgtm-read-ack-path(channel, path);
-        }
+        def fgtm-read-ack-parsed(channel, ack) = if and(eq(len(ack), 7), str_eq(head(ack), "glass-control-ack-v1")) then if str_eq(fgtm-ack-channel(ack), channel) then list("glass-control-ack-read-v1", channel, "ack", fgtm-present(ack)) else list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("channel-mismatch")) else list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("ack-shape"));
+        def fgtm-read-ack-taken(channel, taken) = if str_eq(head(taken), "absent") then list("glass-control-ack-read-v1", channel, "absent", fgtm-absent()) else if str_eq(head(taken), "unreadable") then list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("frame-unreadable")) else fgtm-read-ack-parsed(channel, nth(taken, 1));
+        def fgtm-read-control-ack(root, channel) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-ack-read-v1", channel, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(channel), 1)) then list("glass-control-ack-read-v1", channel, "refused", fgtm-present("channel")) else fgtm-read-ack-taken(channel, fgtm-gift-take(root, fgtm-control-frame(channel, FGTMAckSuffix())));
     }
     0;
 }
