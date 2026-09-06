@@ -1,0 +1,215 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-cli-transcript-discovery.bml — where this body's own agent
+// transcript is, found by the body, with no human step.
+//
+// The turn-evidence lane reads token counts from an agent transcript. Until
+// now it could read only a transcript a person had named by hand in a private
+// binding file, so on a host where nobody had written that file the reading
+// was absent — not hidden, genuinely absent. This door makes the reading
+// exist: it locates the working tree it is standing in, builds the session
+// directory name the agent host writes under, and answers with the newest
+// transcript there.
+//
+// The explicit binding still wins wherever it stands. Discovery is the second
+// position, never an override.
+//
+// Coordinates only. This door reads directory names, file names, sizes and
+// modification times, and two git pointer files. It opens no transcript: the
+// usage objects and boundary markers are read downstream by the collector,
+// under the same rule it has always kept — prompt, answer, reasoning and
+// tool-output text never cross the receipt.
+//
+// Proven by: form-stdlib/tests/form-cli-token-discovery-band.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+// preludes: form-stdlib/core.fk form-stdlib/language-template.fk
+// preludes: form-stdlib/form-fs.fk
+
+section [form.bml] {
+    class FormCliTranscriptDiscovery {
+        field ProjectsSegment = ".claude/projects";
+        field TranscriptSuffix = ".jsonl";
+        field GitPointerName = ".git";
+        field GitPointerPrefix = "gitdir: ";
+        field GitLinkName = "gitdir";
+        field WorktreesSegment = ".git/worktrees";
+        field SlugReplacement = "-";
+        field AnchorRule = "working-tree-path-from-git-pointer-never-guessed";
+        field HomeRule = "nearest-ancestor-holding-a-projects-directory";
+        field SelectionRule = "newest-transcript-by-modification-time";
+        field FallbackRule = "sessions-of-any-working-tree-named-for-this-repository";
+        field PrivacyRule = "coordinates-only-no-transcript-text-read-here";
+
+        def fctd-projects-segment() = ProjectsSegment();
+        def fctd-transcript-suffix() = TranscriptSuffix();
+        def fctd-git-pointer-name() = GitPointerName();
+        def fctd-git-pointer-prefix() = GitPointerPrefix();
+        def fctd-git-link-name() = GitLinkName();
+        def fctd-worktrees-segment() = WorktreesSegment();
+        def fctd-slug-replacement() = SlugReplacement();
+        def fctd-anchor-rule() = AnchorRule();
+        def fctd-home-rule() = HomeRule();
+        def fctd-selection-rule() = SelectionRule();
+        def fctd-fallback-rule() = FallbackRule();
+        def fctd-privacy-rule() = PrivacyRule();
+
+        // ── small shared shapes ──
+        def fctd-min(a, b) = if lt(a, b) then a else b;
+        def fctd-max(a, b) = if gt(a, b) then a else b;
+        def fctd-starts-with?(text, prefix) = if lt(str_len(text), str_len(prefix)) then 0 else if str_eq(substring(text, 0, str_len(prefix)), prefix) then 1 else 0;
+        def fctd-ends-with?(text, suffix) = if lt(str_len(text), str_len(suffix)) then 0 else if str_eq(substring(text, sub(str_len(text), str_len(suffix)), str_len(text)), suffix) then 1 else 0;
+        def fctd-contains?(text, needle) = if ge(str_find(text, needle, 0), 0) then 1 else 0;
+        def fctd-trim-end-go(text, n) = if le(n, 0) then "" else if or(eq(str_byte_at(text, sub(n, 1)), 10), or(eq(str_byte_at(text, sub(n, 1)), 13), eq(str_byte_at(text, sub(n, 1)), 32))) then fctd-trim-end-go(text, sub(n, 1)) else substring(text, 0, n);
+        def fctd-trim-end(text) = fctd-trim-end-go(text, str_len(text));
+        def fctd-read-text(path) = if le(host_file_size(path), 0) then "" else fctd-trim-end(host_file_read_text(path));
+
+        // ── the working tree this body is standing in ──
+        //
+        // A linked worktree's `.git` is a file naming its git directory, and
+        // that directory holds a `gitdir` file naming the worktree's own `.git`
+        // back. Two reads give the absolute path exactly, with nothing assumed
+        // about where the checkout lives. In a main checkout `.git` is a
+        // directory instead; there the working tree is the repository prefix,
+        // and one of its registered worktree links carries the absolute path
+        // that names it.
+        def fctd-git-pointer-text() = if eq(host_path_is_dir(fctd-git-pointer-name()), 1) then "" else fctd-read-text(fctd-git-pointer-name());
+        def fctd-linked-git-dir() {
+            let text = fctd-git-pointer-text();
+            if eq(fctd-starts-with?(text, fctd-git-pointer-prefix()), 0) then "" else fctd-trim-end(substring(text, str_len(fctd-git-pointer-prefix()), str_len(text)));
+        }
+        def fctd-first-entry(names) = if eq(len(names), 0) then "" else head(names);
+        def fctd-registered-link() {
+            let dir = fctd-worktrees-segment();
+            let names = if eq(host_path_is_dir(dir), 1) then host_dir_list(dir) else list();
+            let first = fctd-first-entry(names);
+            if str_eq(first, "") then "" else fctd-read-text(fs-path-join(fs-path-join(dir, first), fctd-git-link-name()));
+        }
+        // One absolute path that names this repository, from whichever pointer
+        // stands. Kind 1 is a linked worktree, kind 2 a main checkout.
+        def fctd-anchor() {
+            let linked = fctd-linked-git-dir();
+            if str_eq(linked, "") then list(2, fctd-registered-link()) else list(1, linked);
+        }
+        def fctd-anchor-kind(anchor) = if str_eq(nth(anchor, 1), "") then 0 else nth(anchor, 0);
+        def fctd-anchor-path(anchor) = nth(anchor, 1);
+        // Everything before the first `/.git` or `/.claude` segment is the
+        // repository's own path; both pointer shapes carry one of them.
+        def fctd-marker-at(path, marker) {
+            let at = str_find(path, marker, 0);
+            if lt(at, 0) then str_len(path) else at;
+        }
+        def fctd-repo-prefix(anchor) {
+            let path = fctd-anchor-path(anchor);
+            let cut = fctd-min(fctd-marker-at(path, "/.git"), fctd-marker-at(path, "/.claude"));
+            if str_eq(path, "") then "" else substring(path, 0, cut);
+        }
+        def fctd-here-from(anchor) {
+            let prefix = fctd-repo-prefix(anchor);
+            let back = if eq(fctd-anchor-kind(anchor), 1) then fctd-read-text(fs-path-join(fctd-anchor-path(anchor), fctd-git-link-name())) else "";
+            if eq(fctd-anchor-kind(anchor), 0) then ""
+            else if eq(fctd-anchor-kind(anchor), 2) then prefix
+            else if str_eq(back, "") then ""
+            else fs-path-dirname(back);
+        }
+        def fctd-here() = fctd-here-from(fctd-anchor());
+        def fctd-repo-name() = fs-path-basename(fctd-repo-prefix(fctd-anchor()));
+
+        // ── the agent host's session store ──
+        //
+        // The store sits under a home directory. Rather than assume how many
+        // path segments a home has, walk up from the repository until an
+        // ancestor actually holds the projects directory. An ancestor that
+        // holds it is the home; no ancestor holding it is an honest absence.
+        def fctd-projects-under(dir) = fs-path-join(dir, fctd-projects-segment());
+        def fctd-home-go(dir, fuel) {
+            let up = fs-path-dirname(dir);
+            if le(fuel, 0) then ""
+            else if str_eq(dir, "") then ""
+            else if eq(host_path_is_dir(fctd-projects-under(dir)), 1) then dir
+            else if str_eq(up, dir) then ""
+            else if str_eq(up, ".") then ""
+            else fctd-home-go(up, sub(fuel, 1));
+        }
+        def fctd-home() = fctd-home-go(fctd-repo-prefix(fctd-anchor()), 64);
+        def fctd-projects-dir() {
+            let home = fctd-home();
+            if str_eq(home, "") then "" else fctd-projects-under(home);
+        }
+
+        // ── the session directory name for one working tree ──
+        //
+        // The agent host names a session directory after the working directory
+        // it was started in, with every `/` and every `.` written as `-`.
+        def fctd-slug-byte(cp) = if eq(cp, 47) then fctd-slug-replacement() else if eq(cp, 46) then fctd-slug-replacement() else byte_to_str(cp);
+        def fctd-slug-go(path, at, acc) = if ge(at, str_len(path)) then acc else fctd-slug-go(path, add(at, 1), str_concat(acc, fctd-slug-byte(str_byte_at(path, at))));
+        def fctd-slug(path) = fctd-slug-go(path, 0, "");
+
+        // ── newest transcript by modification time ──
+        //
+        // A transcript is a `.jsonl` file directly in a session directory. The
+        // reading takes the newest, so a body that has just spoken reads its
+        // own latest turn rather than an older sitting's.
+        def fctd-newest(path, mtime) = list(path, mtime);
+        def fctd-newest-path(newest) = nth(newest, 0);
+        def fctd-newest-mtime(newest) = nth(newest, 1);
+        def fctd-newest-none() = fctd-newest("", -1);
+        def fctd-newest-some?(newest) = if str_eq(fctd-newest-path(newest), "") then 0 else 1;
+        def fctd-better(current, path, mtime) = if gt(mtime, fctd-newest-mtime(current)) then fctd-newest(path, mtime) else current;
+        def fctd-scan-dir-go(dir, names, current) {
+            let name = if eq(len(names), 0) then "" else head(names);
+            let path = fs-path-join(dir, name);
+            let keep = if eq(fctd-ends-with?(name, fctd-transcript-suffix()), 0) then 0 else if le(host_file_size(path), 0) then 0 else 1;
+            let next = if eq(keep, 1) then fctd-better(current, path, host_file_mtime(path)) else current;
+            if eq(len(names), 0) then current else fctd-scan-dir-go(dir, tail(names), next);
+        }
+        def fctd-newest-in(dir) = if eq(host_path_is_dir(dir), 0) then fctd-newest-none() else fctd-scan-dir-go(dir, host_dir_list(dir), fctd-newest-none());
+        def fctd-scan-dirs-go(projects, names, repo, current) {
+            let name = if eq(len(names), 0) then "" else head(names);
+            let dir = fs-path-join(projects, name);
+            let match = if eq(fctd-contains?(name, repo), 0) then 0 else host_path_is_dir(dir);
+            let found = if eq(match, 1) then fctd-newest-in(dir) else fctd-newest-none();
+            let next = if eq(fctd-newest-some?(found), 1) then fctd-better(current, fctd-newest-path(found), fctd-newest-mtime(found)) else current;
+            if eq(len(names), 0) then current else fctd-scan-dirs-go(projects, tail(names), repo, next);
+        }
+        def fctd-newest-for-repo(projects, repo) = if str_eq(repo, "") then fctd-newest-none() else if eq(host_path_is_dir(projects), 0) then fctd-newest-none() else fctd-scan-dirs-go(projects, host_dir_list(projects), repo, fctd-newest-none());
+
+        // ── the discovered transcript ──
+        //
+        // First position: the session directory named for this exact working
+        // tree. Second position: the newest session of any working tree named
+        // for this repository, which is what a fresh worktree reads before it
+        // has spoken a session of its own. No position invents a path: each
+        // one either names a file that exists on this host, or answers "".
+        def fctd-slug-dir() {
+            let projects = fctd-projects-dir();
+            let here = fctd-here();
+            if str_eq(projects, "") then "" else if str_eq(here, "") then "" else fs-path-join(projects, fctd-slug(here));
+        }
+        def fctd-discover() {
+            let projects = fctd-projects-dir();
+            let exact = fctd-newest-in(fctd-slug-dir());
+            if eq(fctd-newest-some?(exact), 1) then exact else fctd-newest-for-repo(projects, fctd-repo-name());
+        }
+        def fctd-discovered-path() = fctd-newest-path(fctd-discover());
+        // Why nothing was found — answered only when nothing was found, so the
+        // door can never hand a reader a reason for a reading that stands.
+        def fctd-discovered-reason() {
+            let anchor = fctd-anchor();
+            if eq(str_eq(fctd-discovered-path(), ""), 0) then "found"
+            else if eq(fctd-anchor-kind(anchor), 0) then "no-working-tree-pointer"
+            else if str_eq(fctd-here(), "") then "no-working-tree-path"
+            else if str_eq(fctd-projects-dir(), "") then "no-session-store-above-this-tree"
+            else "no-session-for-this-tree-or-repository";
+        }
+        // The reading's own provenance, so a reader can tell an explicitly
+        // bound source from a discovered one without opening either.
+        def fctd-source-kind(bound, discovered) = if eq(str_eq(bound, ""), 0) then "explicit-binding" else if eq(str_eq(discovered, ""), 0) then "discovered-agent-transcript" else "unavailable";
+        def fctd-resolve(bound) {
+            let discovered = if str_eq(bound, "") then fctd-discovered-path() else "";
+            if str_eq(bound, "") then discovered else bound;
+        }
+    }
+    0;
+}

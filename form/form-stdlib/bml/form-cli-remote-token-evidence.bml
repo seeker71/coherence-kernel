@@ -1,14 +1,19 @@
 //////////////////////////////////////////////////////////////////////
 //
 // form-cli-remote-token-evidence.bml — high-grammar authority for
-// remote-token evidence carried by Codex rollouts.
+// remote-token evidence carried by an agent's own transcript.
+//
+// Two providers write the same six quantities, each at its own explicit typed
+// position: a Codex rollout at `payload.last_token_usage` (or
+// `payload.info.last_token_usage`), and a Claude Code session at
+// `message.usage`. Both are read exactly; neither is searched for by descent.
 //
 // The remote model's own reported quantities are the denominator for a
 // remote-token reduction claim. Provider-event count stays a separate boundary
 // trace; it is never substituted for token volume. The executable collector
-// selects `last_token_usage` for each completed call and sums those call-local
-// quantities. Cumulative rollout totals are never summed. Prompt, answer, and
-// reasoning content do not enter the receipt.
+// selects the per-call usage object for each completed call and sums those
+// call-local quantities. Cumulative rollout totals are never summed. Prompt,
+// answer, and reasoning content do not enter the receipt.
 //
 // Executable collector: form-stdlib/form-cli-turn-evidence-live.fk
 // Proven by: form-stdlib/tests/form-cli-turn-evidence-live-band.fk
@@ -58,6 +63,16 @@ section [form.bml] {
         field ComparisonTag = "form-comparable-remote-token-receipt-v1";
         field ProviderWindowTag = "form-provider-call-window-v1";
         field AttributionRule = "reported-total-minus-input-output-is-explicit-unattributed";
+        // A second provider writes the same six quantities at its own typed
+        // position, under its own names, and reports no total.
+        field AssistantEnvelopeName = "assistant";
+        field AssistantMessageName = "message";
+        field AssistantUsageName = "usage";
+        field AssistantCachedInputName = "cache_read_input_tokens";
+        field AssistantCacheWriteName = "cache_creation_input_tokens";
+        field AssistantOutputDetailsName = "output_tokens_details";
+        field AssistantReasoningName = "thinking_tokens";
+        field AssistantTotalRule = "sum-input-cache-write-cache-read-output-when-provider-reports-no-total";
 
         def frte-event-name() = EventName();
         def frte-alternate-event-name() = AlternateEventName();
@@ -147,24 +162,116 @@ section [form.bml] {
             else if eq(frte-json-object?(info), 1) then frte-json-object-field(info, frte-last-usage-name())
             else nothing();
         }
-        def frte-call-local-usage-line?(line) {
+        def frte-codex-usage-line?(line) {
             let envelope = frte-envelope(line);
             let payload = frte-envelope-payload(envelope);
             let usage = if eq(frte-envelope-valid?(envelope), 1) then frte-provider-usage-object(payload) else nothing();
             if eq(frte-envelope-valid?(envelope), 0) then 0 else if eq(frte-provider-payload-object?(payload), 0) then 0 else if not(eq(frte-json-object?(usage), 1)) then 0 else if eq(frte-json-nonnegative-int-field?(usage, "input_tokens"), 0) then 0 else if eq(frte-json-nonnegative-int-field?(usage, "output_tokens"), 0) then 0 else frte-json-nonnegative-int-field?(usage, "total_tokens");
         }
-        def frte-call-local-usage-object(line) {
+        def frte-codex-usage-object(line) {
             let envelope = frte-envelope(line);
             let payload = frte-envelope-payload(envelope);
             if eq(frte-envelope-valid?(envelope), 0) then nothing() else if eq(frte-provider-payload-object?(payload), 0) then nothing() else frte-provider-usage-object(payload);
         }
+
+        // ── second typed schema position: an agent transcript's assistant row ──
+        //
+        // A Claude Code session writes JSONL whose assistant rows carry the
+        // provider's own per-call usage at `message.usage`.  That is one
+        // explicit typed position, exactly like `payload.info.last_token_usage`
+        // above, and the same discipline holds: no recursive descendant search,
+        // so a fully-shaped usage object nested in a tool result is content and
+        // never a remote model call.  This provider names four of the six
+        // counters differently and reports no total, so the total is computed
+        // from the four input/output counters it does report.  Only the usage
+        // object's integers are read; prompt, answer, reasoning and tool-output
+        // text never cross this door.
+        def frte-assistant-envelope-name() = AssistantEnvelopeName();
+        def frte-assistant-message-name() = AssistantMessageName();
+        def frte-assistant-usage-name() = AssistantUsageName();
+        def frte-assistant-cached-input-name() = AssistantCachedInputName();
+        def frte-assistant-cache-write-name() = AssistantCacheWriteName();
+        def frte-assistant-output-details-name() = AssistantOutputDetailsName();
+        def frte-assistant-reasoning-name() = AssistantReasoningName();
+        def frte-assistant-total-rule() = AssistantTotalRule();
+        def frte-assistant-type-marker() = str_concat(byte_to_str(34), str_concat("type", str_concat(byte_to_str(34), str_concat(":", str_concat(byte_to_str(34), str_concat(frte-assistant-envelope-name(), byte_to_str(34)))))));
+        def frte-assistant-usage-marker() = str_concat(byte_to_str(34), str_concat(frte-assistant-usage-name(), str_concat(byte_to_str(34), ":")));
+        // A byte prefilter, so one unrelated transcript row does not cost a
+        // Form frame.  It decides whether the typed parse is worth running and
+        // never admits a row on its own; the typed envelope stays the authority.
+        def frte-assistant-shaped?(line) {
+            let typeAt = str_find(line, frte-assistant-type-marker(), 0);
+            let usageAt = str_find(line, frte-assistant-usage-marker(), 0);
+            if lt(typeAt, 0) then 0 else if lt(usageAt, 0) then 0 else 1;
+        }
+        def frte-assistant-envelope(line) {
+            let document = frte-json-document(line);
+            let root = frte-json-document-root(document);
+            let message = if eq(frte-json-document-valid?(document), 1) then frte-json-object-field(root, frte-assistant-message-name()) else nothing();
+            if not(eq(frte-json-document-valid?(document), 1)) then list(0, root, message)
+            else if not(str_eq(frte-json-string-field(root, "type"), frte-assistant-envelope-name())) then list(0, root, message)
+            else if not(eq(frte-json-object?(message), 1)) then list(0, root, message)
+            else list(1, root, message);
+        }
+        def frte-assistant-envelope-valid?(envelope) = nth(envelope, 0);
+        def frte-assistant-envelope-message(envelope) = nth(envelope, 2);
+        def frte-assistant-usage-object(line) {
+            let envelope = if eq(frte-assistant-shaped?(line), 1) then frte-assistant-envelope(line) else list(0, nothing(), nothing());
+            if eq(frte-assistant-envelope-valid?(envelope), 0) then nothing() else frte-json-object-field(frte-assistant-envelope-message(envelope), frte-assistant-usage-name());
+        }
+        def frte-assistant-usage-line?(line) {
+            let usage = frte-assistant-usage-object(line);
+            if not(eq(frte-json-object?(usage), 1)) then 0
+            else if eq(frte-json-nonnegative-int-field?(usage, "input_tokens"), 0) then 0
+            else frte-json-nonnegative-int-field?(usage, "output_tokens");
+        }
+        def frte-assistant-field-or(usage, key, fallback) = if eq(frte-json-nonnegative-int-field?(usage, key), 0) then fallback else json-int-value(json-object-get(usage, key));
+        def frte-assistant-reasoning-or(usage, fallback) {
+            let details = frte-json-object-field(usage, frte-assistant-output-details-name());
+            if not(eq(frte-json-object?(details), 1)) then fallback else frte-assistant-field-or(details, frte-assistant-reasoning-name(), fallback);
+        }
+        // The two providers mean different things by `input_tokens`.  A Codex
+        // rollout reports the whole input and names the cached part of it, so
+        // uncached is a subtraction.  This provider reports the three parts
+        // side by side — fresh input, tokens read from cache, tokens written to
+        // cache — and never their sum.  The canonical counter is the whole
+        // input, so it is composed here; reading the raw field as if it were
+        // the whole would make uncached-input negative, which is how this seam
+        // announced itself.
+        def frte-assistant-total-input(usage) = add(add(frte-assistant-field-or(usage, "input_tokens", 0), frte-assistant-field-or(usage, frte-assistant-cache-write-name(), 0)), frte-assistant-field-or(usage, frte-assistant-cached-input-name(), 0));
+        // A missing counter contributes nothing rather than refusing the row,
+        // and the sum is the provider's own arithmetic made explicit, never an
+        // estimate.
+        def frte-assistant-computed-total(usage) = add(frte-assistant-total-input(usage), frte-assistant-field-or(usage, "output_tokens", 0));
+        def frte-assistant-total-or(usage, fallback) = if eq(frte-json-nonnegative-int-field?(usage, "total_tokens"), 1) then json-int-value(json-object-get(usage, "total_tokens")) else if eq(frte-json-object?(usage), 1) then frte-assistant-computed-total(usage) else fallback;
+        // The caller asks in the canonical six-counter vocabulary; this door
+        // answers from the position and name this provider actually writes.
+        def frte-assistant-usage-int-or(line, key, fallback) {
+            let usage = frte-assistant-usage-object(line);
+            if eq(frte-assistant-usage-line?(line), 0) then fallback
+            else if str_eq(key, "input_tokens") then frte-assistant-total-input(usage)
+            else if str_eq(key, "cached_input_tokens") then frte-assistant-field-or(usage, frte-assistant-cached-input-name(), fallback)
+            else if str_eq(key, "cache_write_input_tokens") then frte-assistant-field-or(usage, frte-assistant-cache-write-name(), fallback)
+            else if str_eq(key, "reasoning_output_tokens") then frte-assistant-reasoning-or(usage, fallback)
+            else if str_eq(key, "total_tokens") then frte-assistant-total-or(usage, fallback)
+            else frte-assistant-field-or(usage, key, fallback);
+        }
+
+        // Both schema positions are exact and independent.  A Codex rollout row
+        // reads through the envelope grammar it always read through; an agent
+        // transcript row reads through its own.  Neither shape can borrow the
+        // other's admission.
+        def frte-call-local-usage-line?(line) = if eq(frte-codex-usage-line?(line), 1) then 1 else frte-assistant-usage-line?(line);
+        def frte-call-local-usage-object(line) = if eq(frte-codex-usage-line?(line), 1) then frte-codex-usage-object(line) else if eq(frte-assistant-usage-line?(line), 1) then frte-assistant-usage-object(line) else frte-codex-usage-object(line);
         // Extraction stays on the same typed object that admitted the row.
         // Optional provider counters use the caller's explicit fallback;
         // strings, floats, negatives, nested decoys, and same-named fields in
         // cumulative usage never enter arithmetic.
         def frte-call-local-usage-int-or(line, key, fallback) {
-            let usage = frte-call-local-usage-object(line);
-            if eq(frte-call-local-usage-line?(line), 0) then fallback else if eq(frte-json-nonnegative-int-field?(usage, key), 0) then fallback else json-int-value(json-object-get(usage, key));
+            let usage = frte-codex-usage-object(line);
+            if eq(frte-codex-usage-line?(line), 0) then frte-assistant-usage-int-or(line, key, fallback)
+            else if eq(frte-json-nonnegative-int-field?(usage, key), 0) then fallback
+            else json-int-value(json-object-get(usage, key));
         }
         def frte-call-local-total(line) {
             frte-call-local-usage-int-or(line, "total_tokens", -1);
