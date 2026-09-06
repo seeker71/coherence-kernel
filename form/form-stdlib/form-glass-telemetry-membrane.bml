@@ -178,8 +178,16 @@ section [form.bml] {
         def fgtm-read-current-parsed(publisher, parsed) = if and(eq(len(parsed), 4), str_eq(head(parsed), FGTMSnapshotSchema())) then if str_eq(fgtm-snapshot-publisher(parsed), publisher) then fgtm-read-state(publisher, "current", fgtm-present(parsed)) else fgtm-read-state(publisher, "malformed", fgtm-present("publisher-mismatch")) else fgtm-read-state(publisher, "malformed", fgtm-present(nth(parsed, 1)));
         def fgtm-read-current(root, publisher) {
             let taken = if and(eq(fgtm-root-valid?(root), 1), eq(fgtm-channel-id?(publisher), 1)) then fgtm-gift-take(root, publisher) else list("refused");
-            if not(eq(fgtm-root-valid?(root), 1)) then fgtm-read-state(publisher, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(publisher), 1)) then fgtm-read-state(publisher, "refused", fgtm-present("publisher")) else if str_eq(head(taken), "absent") then fgtm-read-state(publisher, "absent", fgtm-absent()) else if str_eq(head(taken), "unreadable") then fgtm-read-state(publisher, "malformed", fgtm-present("frame-unreadable")) else fgtm-read-current-parsed(publisher, nth(taken, 1));
+            fgtm-read-current-taken(root, publisher, taken);
         }
+        def fgtm-read-current-taken(root, publisher, taken) = if not(eq(fgtm-root-valid?(root), 1)) then fgtm-read-state(publisher, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(publisher), 1)) then fgtm-read-state(publisher, "refused", fgtm-present("publisher")) else if str_eq(head(taken), "absent") then fgtm-read-state(publisher, "absent", fgtm-absent()) else if str_eq(head(taken), "unreadable") then fgtm-read-state(publisher, "malformed", fgtm-present("frame-unreadable")) else fgtm-read-current-parsed(publisher, nth(taken, 1));
+        // ---- the kept lane: the same take over a handle the reader keeps open for its life (ggf-kept-*): no name, no open, no release per read ----
+        def fgtm-gift-take-held(handle) {
+            let frame = if nothing?(handle) then nothing() else node_gift_read(handle);
+            if nothing?(handle) then list("absent") else if nothing?(frame) then list("unreadable") else list("read", frame);
+        }
+        def fgtm-read-current-held(root, publisher, handle) = fgtm-read-current-taken(root, publisher, if and(eq(fgtm-root-valid?(root), 1), eq(fgtm-channel-id?(publisher), 1)) then fgtm-gift-take-held(handle) else list("refused"));
+        def fgtm-control-inbox-space(root, channel) = fgtm-space(root, fgtm-control-frame(channel, FGTMInboxSuffix()));
         def fgtm-read-state-status(reading) = nth(reading, 2);
         // which carrier answered: "gift" when the shared-memory frame stood and read current, "absent" otherwise -- there is no other carrier
         def fgtm-read-current-carrier(root, publisher) = if str_eq(fgtm-read-state-status(fgtm-read-current(root, publisher)), "current") then "gift" else "absent";
@@ -227,6 +235,22 @@ section [form.bml] {
         }
         def fgtm-inventory-roster(root) = if not(eq(fgtm-root-valid?(root), 1)) then list() else fgtm-inventory-publishers(root, fgtm-roster-in-space(gift_roster_names(), root));
         def fgtm-inventory-cached(root, cache) = fgtm-inventory-cached-with(root, fgtm-inventory-roster(root), cache);
+        // the same cached inventory over kept handles: the key is the kept handle's seq (-1 when no frame stands), the read the kept take
+        def fgtm-read-cached-one-held(root, publisher, cache, handle) {
+            let key = ggf-seq(handle);
+            let held = fgtm-cache-find(cache, publisher);
+            if and(gt(len(held), 0), eq(nth(held, 1), key)) then held else fgtm-cache-entry(publisher, key, fgtm-read-current-held(root, publisher, handle));
+        }
+        def fgtm-read-publishers-cached-held(root, publishers, cache, readings, nextCache, kept) {
+            if eq(len(publishers), 0) then list(reverse(readings), reverse(nextCache)) else fgtm-read-publishers-cached-held-next(root, publishers, cache, readings, nextCache, kept, fgtm-read-cached-one-held(root, head(publishers), cache, ggf-kept-handle(kept, fgtm-space(root, head(publishers)), "take")));
+        }
+        def fgtm-read-publishers-cached-held-next(root, publishers, cache, readings, nextCache, kept, entry) = fgtm-read-publishers-cached-held(root, tail(publishers), cache, cons(nth(entry, 2), readings), cons(entry, nextCache), kept);
+        def fgtm-inventory-cached-held(root, publishers, cache, kept) {
+            let pair = fgtm-read-publishers-cached-held(root, publishers, cache, list(), list(), kept);
+            if not(eq(fgtm-root-valid?(root), 1)) then list(list("glass-inventory-v1", root, "refused", list(), list()), cache) else list(list("glass-inventory-v1", root, "current", publishers, nth(pair, 0)), nth(pair, 1));
+        }
+        // the frames a roster names, as kept wants: list(space, "take", 0) per publisher
+        def fgtm-roster-wants(root, publishers) = if eq(len(publishers), 0) then list() else cons(list(fgtm-space(root, head(publishers)), "take", 0), fgtm-roster-wants(root, tail(publishers)));
         def fgtm-inventory(root) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-inventory-v1", root, "refused", list(), list()) else fgtm-inventory-current(root);
         // answers list(inventory, cache)
 
@@ -259,6 +283,8 @@ section [form.bml] {
         def fgtm-poll-parsed(channel, offer) = if and(eq(len(offer), 8), str_eq(head(offer), "glass-control-offer-v1")) then if str_eq(fgtm-offer-channel(offer), channel) then list("glass-control-poll-v1", channel, "offer", fgtm-present(offer)) else list("glass-control-poll-v1", channel, "malformed", fgtm-present("channel-mismatch")) else list("glass-control-poll-v1", channel, "malformed", fgtm-present("offer-shape"));
         def fgtm-poll-taken(channel, taken) = if str_eq(head(taken), "absent") then list("glass-control-poll-v1", channel, "absent", fgtm-absent()) else if str_eq(head(taken), "unreadable") then list("glass-control-poll-v1", channel, "malformed", fgtm-present("frame-unreadable")) else fgtm-poll-parsed(channel, nth(taken, 1));
         def fgtm-poll-control(root, channel) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-poll-v1", channel, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(channel), 1)) then list("glass-control-poll-v1", channel, "refused", fgtm-present("channel")) else fgtm-poll-taken(channel, fgtm-gift-take(root, fgtm-control-frame(channel, FGTMInboxSuffix())));
+        // the same poll over the inbox handle the reader keeps open (ggf-kept-*)
+        def fgtm-poll-control-held(root, channel, handle) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-poll-v1", channel, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(channel), 1)) then list("glass-control-poll-v1", channel, "refused", fgtm-present("channel")) else fgtm-poll-taken(channel, fgtm-gift-take-held(handle));
 
         def fgtm-control-ack(channel, offerId, epoch, disposition, evidence, source) = list("glass-control-ack-v1", channel, offerId, epoch, disposition, evidence, source);
         def fgtm-ack-channel(ack) = nth(ack, 1);

@@ -11,9 +11,16 @@
 ;
 ; preludes: form/form-stdlib/form-glass-sensor-rows.bml
 ;
-; Verdict 255: child spawned; the glass frame moved with rows; at least 20 ticks; frame work under
+; The frames stay open: the loop keeps one handle per gift frame it meets (ggf-kept-*), so the
+; child's own gift-frames row (kernel_stat 41) stands in the tens and neither crc32-fold8 (the
+; name hash) nor fgd-find-metric (the row scan; the loop reads through one keyed index a frame)
+; appears among its sixteen hottest defns; the keyed index answers what the scan answers.
+;
+; Verdict 8191: child spawned; the glass frame moved with rows; at least 20 ticks; frame work under
 ; 30 ms; a nonzero rest; framebuffer roots bounded under 2000; fgd-cat under a quarter of the
-; hottest defn's heat; the child ended on its pid.
+; hottest defn's heat; the child ended on its pid; the keyed index agrees with the scan on every
+; row and on a miss; crc32-fold8 off the top sixteen; fgd-find-metric off the top sixteen; the
+; child holds at least ten gift frames open; under 3,000,000 dispatches a tick over the rest.
 
 (do
     (defn fgfw-bit (ok weight) (if ok weight 0))
@@ -33,11 +40,22 @@
             (let held (fgsr-take "glass" (list)))
             (if (and (not (eq (fgsr-held-seq held) seq0)) (ge (fgfw-sequence (fgsr-held-rows held) "glass" "frame-work-ms") 20)) held
                 (if (le patience 0) held (fgfw-await seq0 (sub patience 1))))))
+    (defn fgfw-word (live k) (if (lt (len live) (add k 1)) -1 (nth live k)))
+    (defn fgfw-take (page n) (if (or (le n 0) (eq (len page) 0)) (list) (cons (head page) (fgfw-take (tail page) (sub n 1)))))
+    ; the keyed index answers what the scan answers: the same row (by id and value) for every id the rows carry
+    (defn fgfw-index-agrees (index rows all)
+        (if (eq (len rows) 0) 1
+            (if (and (str_eq (fgo-id (fgd-index-find index (fgo-id (head rows)))) (fgo-id (fgd-find-metric all (fgo-id (head rows)))))
+                     (eq (fgo-int-value (fgd-index-find index (fgo-id (head rows)))) (fgo-int-value (fgd-find-metric all (fgo-id (head rows))))))
+                (fgfw-index-agrees index (tail rows) all)
+                0)))
     (defn main ()
         (do
             (let seq0 (fgsr-held-seq (fgsr-take "glass" (list))))
             (let child (host_spawn_quiet (list "./fkwu" "observe/form-glass-live-run.fk")))
             (let settled (fgfw-await seq0 150))
+            (let ticks0 (fgfw-sequence (fgsr-held-rows settled) "glass" "frame-work-ms"))
+            (let dispatches0 (fgfw-word (kernel_live child) 4))
             (let rested (host_sleep_ms 4000))
             (let held (fgsr-take "glass" (list)))
             (let rows (fgsr-held-rows held))
@@ -46,14 +64,22 @@
             (let wait (fgfw-value rows "glass" "frame-wait-ms"))
             (let budget (fgfw-value rows "glass" "frame-budget-ms"))
             (let events (fgfw-value rows "framebuffer" "events"))
-            (let page (kernel_page_hot child 8))
+            (let giftFrames (fgfw-value rows "kernel" "gift-frames"))
+            (let page16 (kernel_page_hot child 16))
+            (let page (fgfw-take page16 8))
             (let live (kernel_live child))
-            (let dispatches (if (lt (len live) 5) -1 (nth live 4)))
+            (let dispatches (fgfw-word live 4))
+            (let restTicks (sub ticks ticks0))
+            (let perTick (if (and (gt restTicks 0) (and (ge dispatches0 0) (ge dispatches dispatches0))) (div (sub dispatches dispatches0) restTicks) -1))
             (let hottest (fgfw-hottest page (list 0 "none")))
             (let catHeat (fgfw-heat-of page "fgd-cat" 0))
+            (let crcHeat (fgfw-heat-of page16 "crc32-fold8" 0))
+            (let findHeat (fgfw-heat-of page16 "fgd-find-metric" 0))
+            (let index (fgd-metric-index rows))
+            (let agrees (if (eq (len rows) 0) 0 (if (eq (fgfw-index-agrees index rows rows) 1) (if (eq (len (fgd-index-find index "fgfw.no-such-metric")) 0) 1 0) 0)))
             (let ended (if (gt child 0) (host_kill child) -1))
             (let waited (if (gt child 0) (host_wait child) 0))
-            (let shown (print (list "frame-work-ms" work "frame-wait-ms" wait "budget" budget "ticks" ticks "framebuffer-events" events "hottest" (nth hottest 1) (nth hottest 0) "fgd-cat" catHeat "dispatches-per-tick" (if (gt ticks 0) (div dispatches ticks) -1))))
+            (let shown (print (list "frame-work-ms" work "frame-wait-ms" wait "budget" budget "ticks" ticks "framebuffer-events" events "hottest" (nth hottest 1) (nth hottest 0) "fgd-cat" catHeat "crc32-fold8" crcHeat "fgd-find-metric" findHeat "gift-frames" giftFrames "dispatches-per-tick" perTick "rest-ticks" restTicks "index-agrees" agrees)))
             (add (fgfw-bit (gt child 0) 1)
             (add (fgfw-bit (and (not (eq (fgsr-held-seq held) seq0)) (gt (len rows) 0)) 2)
             (add (fgfw-bit (ge ticks 20) 4)
@@ -61,5 +87,10 @@
             (add (fgfw-bit (gt wait 0) 16)
             (add (fgfw-bit (and (ge events 0) (lt events 2000)) 32)
             (add (fgfw-bit (and (gt (nth hottest 0) 0) (lt (mul catHeat 4) (nth hottest 0))) 64)
-                 (fgfw-bit (ge ended 0) 128))))))))))
+            (add (fgfw-bit (ge ended 0) 128)
+            (add (fgfw-bit (eq agrees 1) 256)
+            (add (fgfw-bit (eq crcHeat 0) 512)
+            (add (fgfw-bit (eq findHeat 0) 1024)
+            (add (fgfw-bit (ge giftFrames 10) 2048)
+                 (fgfw-bit (and (gt perTick 0) (lt perTick 3000000)) 4096)))))))))))))))
     (print (main)))

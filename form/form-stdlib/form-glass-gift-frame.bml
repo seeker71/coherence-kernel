@@ -81,6 +81,49 @@ section [form.bml] {
         def ggf-reading-shape(r) = nth(r, 4);
         def ggf-reading-received?(r) = if str_eq(ggf-reading-carrier(r), "gift") then 1 else 0;
         def ggf-reading-proven?(r) = sag-proven?(ggf-reading-shape(r));
+
+        // --- kept handles: the name computed once, the frame opened once, held for a loop's life ---
+        // A loop that meets the same frames every tick keeps one handle per (publisher, mode): mode
+        // "take" is a receive (read-only), mode "give" an offer (read-write, sized by bytes). An absent
+        // frame is held as a nothing handle and asked for again only when the caller says retry (the
+        // loop's roster cadence); a standing handle is never reopened -- no door here unlinks a gift
+        // frame, so a mapping cannot go stale while the loop lives. entry = list(publisher, name, handle, mode, bytes).
+        def ggf-kept-empty() = list();
+        def ggf-kept-publisher(e) = nth(e, 0);
+        def ggf-kept-name(e) = nth(e, 1);
+        def ggf-kept-handle-of(e) = nth(e, 2);
+        def ggf-kept-mode(e) = nth(e, 3);
+        def ggf-kept-bytes(e) = nth(e, 4);
+        def ggf-kept-open(publisher, mode, bytes) {
+            let name = ggf-name(publisher);
+            let handle = if str_eq(mode, "give") then shm_offer(name, bytes) else shm_receive(name);
+            list(publisher, name, handle, mode, bytes);
+        }
+        def ggf-kept-entry?(e, publisher, mode) = if not(str_eq(ggf-kept-publisher(e), publisher)) then 0 else if str_eq(ggf-kept-mode(e), mode) then 1 else 0;
+        def ggf-kept-find(kept, publisher, mode) = if eq(len(kept), 0) then list() else if eq(ggf-kept-entry?(head(kept), publisher, mode), 1) then head(kept) else ggf-kept-find(tail(kept), publisher, mode);
+        def ggf-kept-without(kept, publisher, mode) = if eq(len(kept), 0) then list() else if eq(ggf-kept-entry?(head(kept), publisher, mode), 1) then ggf-kept-without(tail(kept), publisher, mode) else cons(head(kept), ggf-kept-without(tail(kept), publisher, mode));
+        def ggf-kept-handle(kept, publisher, mode) {
+            let entry = ggf-kept-find(kept, publisher, mode);
+            if eq(len(entry), 0) then nothing() else ggf-kept-handle-of(entry);
+        }
+        def ggf-kept-name-for(kept, publisher, mode) {
+            let entry = ggf-kept-find(kept, publisher, mode);
+            if eq(len(entry), 0) then ggf-name(publisher) else ggf-kept-name(entry);
+        }
+        // ensure: an entry for (publisher, mode) stands after this; a missing one is opened now, an absent one is asked for again when retry is 1
+        def ggf-kept-ensure(kept, publisher, mode, bytes, retry) {
+            let entry = ggf-kept-find(kept, publisher, mode);
+            if eq(len(entry), 0) then cons(ggf-kept-open(publisher, mode, bytes), kept) else if and(eq(retry, 1), nothing?(ggf-kept-handle-of(entry))) then cons(ggf-kept-open(publisher, mode, bytes), ggf-kept-without(kept, publisher, mode)) else kept;
+        }
+        // wants = list of list(publisher, mode, bytes)
+        def ggf-kept-ensure-all(kept, wants, retry) = if eq(len(wants), 0) then kept else ggf-kept-ensure-all(ggf-kept-ensure(kept, nth(head(wants), 0), nth(head(wants), 1), nth(head(wants), 2), retry), tail(wants), retry);
+        def ggf-kept-wanted?(wants, publisher, mode) = if eq(len(wants), 0) then 0 else if and(str_eq(nth(head(wants), 0), publisher), str_eq(nth(head(wants), 1), mode)) then 1 else ggf-kept-wanted?(tail(wants), publisher, mode);
+        // prune: entries no want names any more are released and dropped
+        def ggf-kept-prune(kept, wants) = if eq(len(kept), 0) then list() else if eq(ggf-kept-wanted?(wants, ggf-kept-publisher(head(kept)), ggf-kept-mode(head(kept))), 1) then cons(head(kept), ggf-kept-prune(tail(kept), wants)) else ggf-kept-prune-released(ggf-release(ggf-kept-handle-of(head(kept))), tail(kept), wants);
+        def ggf-kept-prune-released(released, rest, wants) = ggf-kept-prune(rest, wants);
+        def ggf-kept-handles(kept, publishers, mode) = if eq(len(publishers), 0) then list() else cons(ggf-kept-handle(kept, head(publishers), mode), ggf-kept-handles(kept, tail(publishers), mode));
+        def ggf-kept-standing(kept) = if eq(len(kept), 0) then 0 else add(if nothing?(ggf-kept-handle-of(head(kept))) then 0 else 1, ggf-kept-standing(tail(kept)));
+        def ggf-kept-release-all(kept) = if eq(len(kept), 0) then 0 else add(ggf-release(ggf-kept-handle-of(head(kept))), ggf-kept-release-all(tail(kept)));
     }
     0;
 }

@@ -46,6 +46,7 @@ section [form.bml] {
         }
         def fgl-jit-current-samples-at(root) = fgl-current-reading-samples(fgtm-read-current(root, FGLJitPublisher()));
         def fgl-jit-current-samples() = fgl-jit-current-samples-at(FGLRoot());
+        def fgl-jit-current-samples-held(handle) = fgl-current-reading-samples(fgtm-read-current-held(FGLRoot(), FGLJitPublisher(), handle));
         def fgl-sample-stale?(sample) = if str_eq(fgtm-sample-source(sample), "glass.stale-snapshot") then 1 else if str_eq(fgtm-sample-source(sample), "glass.projection-stale") then 1 else fgd-has-channel(fgtm-sample-channels(sample), "snapshot-stale");
         def fgl-honest-sample(sample) = sample;
         def fgl-honest-samples(samples) = if eq(len(samples), 0) then list() else cons(fgl-honest-sample(head(samples)), fgl-honest-samples(tail(samples)));
@@ -151,6 +152,13 @@ section [form.bml] {
             let released = ggf-release(handle);
             cell;
         }
+        // the same two doors over handles the loop keeps open for its life (ggf-kept-*): no name, no open, no release per tick
+        def fgl-last-name(name) = str_concat("glass.last.", name);
+        def fgl-last-give-held(handle, cell) {
+            let seq = if nothing?(handle) then nothing() else node_gift_write(handle, cell);
+            if nothing?(seq) then -1 else seq;
+        }
+        def fgl-last-take-held(handle) = if nothing?(handle) then nothing() else node_gift_read(handle);
         def fgl-host-last-save(pageins) = fgl-last-give("host-pageins", pageins);
         def fgl-host-last-load() {
             let cell = fgl-last-take("host-pageins");
@@ -249,6 +257,20 @@ section [form.bml] {
             let metric = fgl-first-metric(metrics, ids);
             if or(eq(len(metric), 0), eq(fgo-present?(metric), 0)) then door else fgo-source(metric);
         }
+        // the same lookups through one keyed index (fgd-metric-index) built once per frame: a miss costs one record probe, not a scan of every row
+        def fgl-first-metric-in(index, ids) = if eq(len(ids), 0) then list() else fgl-first-metric-in-found(index, ids, fgd-index-find(index, head(ids)));
+        def fgl-first-metric-in-found(index, ids, found) = if gt(len(found), 0) then found else fgl-first-metric-in(index, tail(ids));
+        def fgl-number-for-in(index, ids) = fgl-metric-number(fgl-first-metric-in(index, ids));
+        def fgl-evidence-for-in(index, ids) = fgl-metric-evidence(fgl-first-metric-in(index, ids));
+        def fgl-source-for-in(index, ids, door) {
+            let metric = fgl-first-metric-in(index, ids);
+            if or(eq(len(metric), 0), eq(fgo-present?(metric), 0)) then door else fgo-source(metric);
+        }
+        def fgl-gift-source-in(index, sensor) {
+            let row = fgd-index-find(index, str_concat("frame.", sensor));
+            if eq(len(row), 0) then str_concat("gift:", str_concat(sensor, ":absent")) else str_concat(fgo-source(row), str_concat("#", int_to_str(fgo-int-value(row))));
+        }
+        def fgl-flow-point-in(epoch, index) = fgd-flow-point(epoch, fgl-number-for-in(index, list("gpu-busy-us")), fgl-number-for-in(index, list("cpu-busy-us")), fgl-number-for-in(index, list("kernels-dispatches")), fgl-number-for-in(index, list("queue-depth", "queue-task-frames")), fgl-number-for-in(index, list("kernels-heat-calls")), fgl-number-for-in(index, list("cells")), fgl-number-for-in(index, list("memory-free")), fgl-number-for-in(index, list("inflight")));
         // ---- the flow lanes read the frame buffer and nothing else: one id per lane; D J I sum the counter over every process that gives a frame ----
         def fgl-lane-sum-end(acc, found) = if eq(found, 1) then acc else -1;
         def fgl-lane-sum-go(rows, id, acc, found) = if eq(len(rows), 0) then fgl-lane-sum-end(acc, found) else if and(str_eq(fgo-id(head(rows)), id), ge(fgl-metric-number(head(rows)), 0)) then fgl-lane-sum-go(tail(rows), id, add(acc, fgl-metric-number(head(rows))), 1) else fgl-lane-sum-go(tail(rows), id, acc, found);
@@ -395,34 +417,36 @@ section [form.bml] {
         def fgl-jit-hold-assess(rows, fault) = if gt(len(fgl-jit-healed-for(rows, fault)), 0) then "healed-cause-bound" else "held-awaiting-successful-rechallenge";
         def fgl-jit-fault-wake(fault) = fgel-wake("jit-refusal", fgtm-field-value(fgtm-sample-read-epoch(fault)), FGLJitPublisher(), fgtm-sample-id(fault));
         def fgl-jit-healed-wake(healed) = fgel-wake("jit-healed", fgtm-field-value(fgtm-sample-write-epoch(healed)), FGLJitPublisher(), fgtm-field-value(fgtm-sample-parent(healed)));
-        def fgl-flow-point-current-full(epoch, metrics, observations, samples) {
-            let base = fgl-flow-point-current(epoch, metrics, observations);
+        def fgl-flow-point-current-full(epoch, metrics, observations, samples) = fgl-flow-point-current-full-in(epoch, metrics, observations, samples, fgd-metric-index(metrics));
+        // the flow point over one keyed index: every lane, evidence and source lookup is a record probe; the phase census still walks the rows once per phase
+        def fgl-flow-point-current-full-in(epoch, metrics, observations, samples, index) {
+            let base = fgl-flow-point-in(epoch, index);
             let tensorObservation = fgl-v2-number(observations, "tensor.owner.allocated");
-            let accepted = fgl-prefer-number(fgl-number-for(metrics, list("accepted")), fgl-number-for(metrics, list("events")));
+            let accepted = fgl-prefer-number(fgl-number-for-in(index, list("accepted")), fgl-number-for-in(index, list("events")));
             let evidences = list(
-                fgl-evidence-for(metrics, list("gpu-busy-us")),
-                fgl-evidence-for(metrics, list("cpu-busy-us")),
-                fgl-evidence-for(metrics, list("kernels-dispatches")),
-                fgl-evidence-for(metrics, list("queue-depth", "queue-task-frames")),
-                fgl-evidence-for(metrics, list("kernels-heat-calls")),
-                fgl-evidence-for(metrics, list("cells")),
-                fgl-evidence-for(metrics, list("memory-free")),
-                fgl-evidence-for(metrics, list("inflight")),
+                fgl-evidence-for-in(index, list("gpu-busy-us")),
+                fgl-evidence-for-in(index, list("cpu-busy-us")),
+                fgl-evidence-for-in(index, list("kernels-dispatches")),
+                fgl-evidence-for-in(index, list("queue-depth", "queue-task-frames")),
+                fgl-evidence-for-in(index, list("kernels-heat-calls")),
+                fgl-evidence-for-in(index, list("cells")),
+                fgl-evidence-for-in(index, list("memory-free")),
+                fgl-evidence-for-in(index, list("inflight")),
                 "derived-window", "derived-window", "derived-window", "derived-window",
                 fgl-v2-evidence(observations, "tensor.owner.allocated"),
-                "derived-window", fgl-prefer-evidence(accepted, fgl-evidence-for(metrics, list("accepted")), fgl-evidence-for(metrics, list("events"))));
+                "derived-window", fgl-prefer-evidence(accepted, fgl-evidence-for-in(index, list("accepted")), fgl-evidence-for-in(index, list("events"))));
             let sources = list(
-                fgl-gift-source(metrics, "machine"),
-                fgl-gift-source(metrics, "machine"),
-                fgl-source-for(metrics, list("kernels-dispatches"), "shm:/fg-kernels"),
-                fgl-gift-source(metrics, "queue"),
-                fgl-source-for(metrics, list("kernels-heat-calls"), "shm:/fg-kernels"),
-                fgl-gift-source(metrics, "glass"),
-                fgl-gift-source(metrics, "host"),
-                fgl-gift-source(metrics, "glass"),
-                "glass.visible.phase-census", "glass.visible.phase-census", "glass.visible.phase-census", "telemetry.token-position.capacity", "model.owner.tensor.allocated", "telemetry.channel-memberships", if ge(accepted, 0) then fgl-source-for(metrics, list("accepted"), "framebuffer-events") else fgl-source-for(metrics, list("events"), "framebuffer-events"));
+                fgl-gift-source-in(index, "machine"),
+                fgl-gift-source-in(index, "machine"),
+                fgl-source-for-in(index, list("kernels-dispatches"), "shm:/fg-kernels"),
+                fgl-gift-source-in(index, "queue"),
+                fgl-source-for-in(index, list("kernels-heat-calls"), "shm:/fg-kernels"),
+                fgl-gift-source-in(index, "glass"),
+                fgl-gift-source-in(index, "host"),
+                fgl-gift-source-in(index, "glass"),
+                "glass.visible.phase-census", "glass.visible.phase-census", "glass.visible.phase-census", "telemetry.token-position.capacity", "model.owner.tensor.allocated", "telemetry.channel-memberships", if ge(accepted, 0) then fgl-source-for-in(index, list("accepted"), "framebuffer-events") else fgl-source-for-in(index, list("events"), "framebuffer-events"));
             let point = fgd-flow-point-v4(epoch, fgd-flow-value(base, 2), fgd-flow-value(base, 3), fgd-flow-value(base, 4), fgd-flow-value(base, 5), fgd-flow-value(base, 6), fgd-flow-value(base, 7), fgd-flow-value(base, 8), fgd-flow-value(base, 9), fgl-phase-count(metrics, samples, observations, "gas"), fgl-phase-count(metrics, samples, observations, "water"), fgl-phase-count(metrics, samples, observations, "ice"), fgl-sample-kind-capacity(samples, "token-position", 0, 0), tensorObservation, fgl-sample-channel-tag-memberships(samples), accepted, evidences, sources);
-            append(take(18, point), list(fgl-number-for(metrics, list("strings")), sources, fgl-jit-fault(samples)));
+            append(take(18, point), list(fgl-number-for-in(index, list("strings")), sources, fgl-jit-fault(samples)));
         }
 
         def fgl-monitor-sample(epoch) = fgtm-sample("process.form-glass" , fgtm-absent(), "organ", "form", "glass.monitor", "observation", "render-and-control", fgtm-absent(), fgtm-absent(), "active", fgtm-present(epoch), fgtm-present(epoch), fgtm-present(1000), fgtm-absent(), "unknown", "physical-live", "glass.monitor", list("all", "health", "primitive", "membrane"));
@@ -608,6 +632,7 @@ section [form.bml] {
             if not(str_eq(nth(poll, 2), "offer")) then fgl-control-state-full(fgl-control-focus(previous), fgl-control-last-offer(previous), 0, nth(poll, 2), fgl-control-view(previous), fgl-control-filter(previous), fgl-control-selected(previous), fgl-control-evidence-open?(previous)) else if not(eq(fgtm-field-present?(field), 1)) then fgl-control-state-full(fgl-control-focus(previous), fgl-control-last-offer(previous), 0, "absent", fgl-control-view(previous), fgl-control-filter(previous), fgl-control-selected(previous), fgl-control-evidence-open?(previous)) else fgl-control-from-offer(previous, fgtm-field-value(field), samples, epoch);
         }
         def fgl-poll-control-full(previous, samples, epoch) = fgl-control-polled-full(previous, fgtm-poll-control(FGLRoot(), FGLControlChannel()), samples, epoch);
+        def fgl-poll-control-full-held(previous, samples, epoch, handle) = fgl-control-polled-full(previous, fgtm-poll-control-held(FGLRoot(), FGLControlChannel(), handle), samples, epoch);
         def fgl-control-applied(focus, lastOffer, offer, samples) {
             let previous = fgl-control-state(focus, lastOffer, 0, "held");
             let proposed = fgl-control-applied-state(focus, offer, samples);
@@ -662,6 +687,28 @@ section [form.bml] {
         def fgl-wait-live-names(names, handles) = if eq(len(handles), 0) then list() else if nothing?(head(handles)) then fgl-wait-live-names(tail(names), tail(handles)) else cons(head(names), fgl-wait-live-names(tail(names), tail(handles)));
         def fgl-wait-rest(ms, handles) = if le(ms, 0) then list(0, -1, 0, list()) else host_sleep_ms(cons(ms, fgl-wait-live-handles(handles)));
         def fgl-wait-release(handles) = if eq(len(handles), 0) then 0 else add(ggf-release(head(handles)), fgl-wait-release(tail(handles)));
+        // ---- the kept frames: every frame the loop takes or gives each tick, opened once and held for the loop's life (ggf-kept-*) ----
+        // The wants are the control inbox, the jit publisher, every roster publisher, the six sensor frames and the glass's own
+        // give frames. They are ensured on the first tick and at the roster cadence (every tenth tick), when an absent frame is
+        // asked for again and a frame no want names any more is released; between those ticks a handle is only looked up.
+        def fgl-kept-sensor-wants(sensors) = if eq(len(sensors), 0) then list() else cons(list(fgsr-publisher(head(sensors)), "take", 0), fgl-kept-sensor-wants(tail(sensors)));
+        def fgl-kept-wants(roster) = append(list(list(fgl-wait-inbox-name(), "take", 0), list(fgtm-space(FGLRoot(), FGLJitPublisher()), "take", 0), list(fgsr-publisher("glass"), "give", FGSRFrameBytes()), list(fgl-last-name("cadence"), "give", 65536), list(fgl-last-name("flow-point"), "give", 65536)), append(fgl-kept-sensor-wants(list("host", "machine", "owner", "queue", "storage", "glass")), fgtm-roster-wants(FGLRoot(), roster)));
+        def fgl-kept-refresh(kept, roster) {
+            let wants = fgl-kept-wants(roster);
+            ggf-kept-ensure-all(ggf-kept-prune(kept, wants), wants, 1);
+        }
+        def fgl-kept-for(kept, roster, frame) = if or(eq(len(kept), 0), eq(fgl-cycle?(frame, 10), 1)) then fgl-kept-refresh(kept, roster) else kept;
+        def fgl-kept-take(kept, publisher) = ggf-kept-handle(kept, publisher, "take");
+        def fgl-kept-give(kept, publisher) = ggf-kept-handle(kept, publisher, "give");
+        def fgl-sensor-take-held(kept, sensor, held) {
+            let entry = ggf-kept-find(kept, fgsr-publisher(sensor), "take");
+            if eq(len(entry), 0) then fgsr-take(sensor, held) else fgsr-take-held(ggf-kept-handle-of(entry), ggf-kept-name(entry), held);
+        }
+        def fgl-cadence-last-save-held(kept, workMs, waitMs, budgetMs) = fgl-last-give-held(fgl-kept-give(kept, fgl-last-name("cadence")), list(workMs, waitMs, budgetMs));
+        def fgl-loop-stopped(kept, frame, mark, count) {
+            let released = ggf-kept-release-all(kept);
+            list("form-glass-live-stopped", frame, mark, count);
+        }
         def fgl-wait-woke(rested) = if lt(len(rested), 2) then -1 else nth(rested, 1);
         def fgl-wait-woke-seq(rested, woke) = if lt(len(rested), 4) then -1 else if ge(woke, len(nth(rested, 3))) then -1 else nth(nth(rested, 3), woke);
         def fgl-wait-wake(rested, names, handles, waitEnded, schedule) {
@@ -825,29 +872,35 @@ section [form.bml] {
         // words: 0 magic 1 pid 2 start-ms 3 seq 4 dispatches 5 heat calls 6 nodes 7 strings 8 cons 9 fns 10 gift frames 11 gift bytes 12 node cap 13 heap cap 14 stack 15 floats 16 hottest tag 17 hottest count 18 cpu us 19 alive 20 distinct arms
         def fgl-kernel-page-source(pid) = str_concat("shm:/fg-k", str_concat(int_to_str(pid), "#"));
         def fgl-kernel-page-row(pid, w, id, label, k, unit, channel) = fgo-int("kernel", fgd-cat(list("k.", int_to_str(pid), ".", id)), fgd-cat(list("kernel ", int_to_str(pid), " ", label)), nth(w, k), unit, 0, "cpu-arena", "physical-live", str_concat(fgl-kernel-page-source(pid), int_to_str(nth(w, 3))), "live", channel, "read from the kernel's own live page, no wire");
-        def fgl-kernel-page-rows(pid) {
-            let w = kernel_live(pid);
+        def fgl-kernel-page-rows(pid) = fgl-kernel-page-rows-with(pid, kernel_live(pid));
+        def fgl-kernel-page-rows-with(pid, w) {
             if lt(len(w), 24) then list() else list(fgl-kernel-page-row(pid, w, "dispatches", "dispatches", 4, "calls", "kernel"), fgl-kernel-page-row(pid, w, "heat", "heat-lane calls", 5, "calls", "jit"), fgl-kernel-page-row(pid, w, "nodes", "nodes", 6, "nodes", "cell"), fgl-kernel-page-row(pid, w, "fns", "fns", 9, "fns", "kernel"), fgl-kernel-page-row(pid, w, "cpu-us", "cpu time", 18, "microseconds", "kernel"), fgl-kernel-page-row(pid, w, "gifts", "gift frames", 10, "frames", "gift"), fgl-kernel-page-row(pid, w, "store-shared", "store in shared memory", 22, "flag", "cell"), fgl-kernel-page-row(pid, w, "melts", "heap melts", 21, "melts", "cell"));
         }
         // every live kernel's hottest defns, read from its own page ledgers and names -- no scan, no wire
         def fgl-kernel-page-hot-row(pid, cell) = if lt(len(cell), 7) then list() else fgo-int("kernel", fgd-cat(list("k.", int_to_str(pid), ".hot.", nth(cell, 1))), fgd-cat(list("k", int_to_str(pid), " ", nth(cell, 1), " ", fgl-unit-leaf(nth(cell, 2)), ":", int_to_str(nth(cell, 3)), " box ", int_to_str(nth(cell, 5)), " unbox ", int_to_str(nth(cell, 6)), fgl-hot-cell-native(cell))), nth(cell, 0), "calls", nth(cell, 0), "cpu-arena", "physical-live", fgl-kernel-page-source(pid), "live", "jit", "read from that kernel live page: heat, float boxes minted, float boxes read");
         def fgl-kernel-page-hot-rows(pid, cells) = if eq(len(cells), 0) then list() else fgl-kernel-page-hot-next(pid, fgl-kernel-page-hot-row(pid, head(cells)), tail(cells));
         def fgl-kernel-page-hot-next(pid, row, rest) = if eq(len(row), 0) then fgl-kernel-page-hot-rows(pid, rest) else cons(row, fgl-kernel-page-hot-rows(pid, rest));
-        def fgl-kernels-rows(pids) = if eq(len(pids), 0) then list() else append(fgl-kernel-page-rows(head(pids)), append(fgl-kernel-page-hot-rows(head(pids), kernel_page_hot(head(pids), 3)), fgl-kernels-rows(tail(pids))));
-        def fgl-kernels-sum(pids, k, acc) = if eq(len(pids), 0) then acc else fgl-kernels-sum(tail(pids), k, add(acc, fgl-kernel-word(kernel_live(head(pids)), k)));
+        def fgl-kernels-rows(pids) = fgl-kernels-rows-with(pids, fgl-kernel-lives(pids));
+        // every live kernel's page is read once a frame (fgl-kernel-lives) and the four sums and the per-kernel rows share that reading
+        def fgl-kernel-lives(pids) = if eq(len(pids), 0) then list() else cons(kernel_live(head(pids)), fgl-kernel-lives(tail(pids)));
+        def fgl-kernels-rows-with(pids, lives) = if eq(len(pids), 0) then list() else append(fgl-kernel-page-rows-with(head(pids), head(lives)), append(fgl-kernel-page-hot-rows(head(pids), kernel_page_hot(head(pids), 3)), fgl-kernels-rows-with(tail(pids), tail(lives))));
+        def fgl-kernels-sum(pids, k, acc) = fgl-lives-sum(fgl-kernel-lives(pids), k, acc);
+        def fgl-lives-sum(lives, k, acc) = if eq(len(lives), 0) then acc else fgl-lives-sum(tail(lives), k, add(acc, fgl-kernel-word(head(lives), k)));
         def fgl-kernel-word(w, k) = if lt(len(w), 24) then 0 else nth(w, k);
-        def fgl-kernels-sum-row(pids, id, label, k, unit, channel, note) = fgo-int("kernel", id, label, fgl-kernels-sum(pids, k, 0), unit, 0, "cpu-arena", "physical-live", str_concat("shm:/fg-kernels#", int_to_str(len(pids))), if eq(len(pids), 0) then "empty" else "live", channel, note);
+        def fgl-kernels-sum-row(pids, id, label, k, unit, channel, note) = fgl-lives-sum-row(pids, fgl-kernel-lives(pids), id, label, k, unit, channel, note);
+        def fgl-lives-sum-row(pids, lives, id, label, k, unit, channel, note) = fgo-int("kernel", id, label, fgl-lives-sum(lives, k, 0), unit, 0, "cpu-arena", "physical-live", str_concat("shm:/fg-kernels#", int_to_str(len(pids))), if eq(len(pids), 0) then "empty" else "live", channel, note);
         def fgl-kernel-rows() {
             let pids = kernel_live_pids();
+            let lives = fgl-kernel-lives(pids);
             append(list(
-                fgl-kernels-sum-row(pids, "kernels-count", "live kernels", 19, "kernels", "kernel", "fkwu processes whose live page says alive"),
-                fgl-kernels-sum-row(pids, "kernels-dispatches", "dispatches, every live kernel", 4, "calls", "kernel", "the D gauge is its per-frame delta"),
-                fgl-kernels-sum-row(pids, "kernels-heat-calls", "heat-lane calls, every live kernel", 5, "calls", "jit", "the J gauge is its per-frame delta"),
-                fgl-kernels-sum-row(pids, "kernels-cpu-us", "cpu time, every live kernel", 18, "microseconds", "kernel", "process clocks summed"),
+                fgl-lives-sum-row(pids, lives, "kernels-count", "live kernels", 19, "kernels", "kernel", "fkwu processes whose live page says alive"),
+                fgl-lives-sum-row(pids, lives, "kernels-dispatches", "dispatches, every live kernel", 4, "calls", "kernel", "the D gauge is its per-frame delta"),
+                fgl-lives-sum-row(pids, lives, "kernels-heat-calls", "heat-lane calls, every live kernel", 5, "calls", "jit", "the J gauge is its per-frame delta"),
+                fgl-lives-sum-row(pids, lives, "kernels-cpu-us", "cpu time, every live kernel", 18, "microseconds", "kernel", "process clocks summed"),
                 fgo-int("kernel", "gift-frames", "gift frames mapped", kernel_stat(41), "frames", 0, "unified", "physical-live", "kernel_stat.41", if eq(kernel_stat(41), 0) then "empty" else "live", "kernel", "shared-memory frames this process holds open"),
                 fgo-int("kernel", "gift-bytes", "gift bytes mapped", kernel_stat(42), "bytes", 0, "unified", "physical-live", "kernel_stat.42", if eq(kernel_stat(42), 0) then "empty" else "live", "kernel", "bytes of shared memory mapped by this process"),
                 fgo-int("kernel", "fns", "functions defined", kernel_stat(43), "fns", 0, "cpu-arena", "physical-live", "kernel_stat.43", "live", "kernel", "defns in this process symbol map")),
-                append(fgl-kernels-rows(pids), append(fgl-jit-rows(), append(fgl-kernel-box-rows(kernel_box_rows(4)), fgl-kernel-hot-rows(kernel_hot_rows(8))))));
+                append(fgl-kernels-rows-with(pids, lives), append(fgl-jit-rows(), append(fgl-kernel-box-rows(kernel_box_rows(4)), fgl-kernel-hot-rows(kernel_hot_rows(8))))));
         }
         // the accelerator's PerformanceStatistics dictionary, read once on this host (2026-09-06): Device / Renderer / Tiler
         // Utilization %, Alloc system memory, In use system memory (driver), Allocated PB Size, TiledSceneBytes, SplitSceneCount,
@@ -881,6 +934,9 @@ section [form.bml] {
         def fgl-cache(snapshots, observations) = list(snapshots, observations, list(), list());
         def fgl-cache-with-samples(snapshots, observations, samples) = list(snapshots, observations, samples, list());
         def fgl-cache-full(snapshots, observations, samples, roster) = list(snapshots, observations, samples, roster);
+        // the loop's cache also carries the kept frame handles (ggf-kept-*), one per (publisher, mode) for the loop's life
+        def fgl-cache-full-kept(snapshots, observations, samples, roster, kept) = list(snapshots, observations, samples, roster, kept);
+        def fgl-cache-kept(c) = if ge(len(c), 5) then nth(c, 4) else list();
         def fgl-cache-roster(c) = if ge(len(c), 4) then nth(c, 3) else list();
         def fgl-cache-samples(c) = if ge(len(c), 3) then nth(c, 2) else list();
         def fgl-cache-empty() = fgl-cache(list(), list());
@@ -890,40 +946,43 @@ section [form.bml] {
             let epoch = now_unix_ms();
             let liveSurface = fgl-surface-at(surface, epoch);
             let roster = if or(eq(len(fgl-cache-roster(cache)), 0), eq(fgl-cycle?(frame, 10), 1)) then fgtm-inventory-roster(FGLRoot()) else fgl-cache-roster(cache);
-            let inventoryPair = fgtm-inventory-cached-with(FGLRoot(), roster, fgl-cache-snapshots(cache));
+            let kept = fgl-kept-for(fgl-cache-kept(cache), roster, frame);
+            let inventoryPair = fgtm-inventory-cached-held(FGLRoot(), roster, fgl-cache-snapshots(cache), kept);
             let inventory = nth(inventoryPair, 0);
             let inventoryMoved = if ge(len(inventoryPair), 2) then fgtm-inventory-moved(inventoryPair, fgl-cache-snapshots(cache)) else 1;
             let inventorySamples = if and(eq(inventoryMoved, 0), gt(len(fgl-cache-samples(fgl-cache-empty())), 0)) then list() else fgl-external-samples(fgl-inventory-samples-at(inventory, epoch));
-            let externalSamples = if and(eq(inventoryMoved, 0), gt(len(fgl-cache-samples(cache)), 0)) then fgl-cache-samples(cache) else fgl-dedupe-samples(append(fgl-jit-current-samples(), inventorySamples));
+            let jitSamples = fgl-jit-current-samples-held(fgl-kept-take(kept, fgtm-space(FGLRoot(), FGLJitPublisher())));
+            let externalSamples = if and(eq(inventoryMoved, 0), gt(len(fgl-cache-samples(cache)), 0)) then fgl-cache-samples(cache) else fgl-dedupe-samples(append(jitSamples, inventorySamples));
             let samples = fgl-local-samples(externalSamples, epoch);
-            let hostHeld = fgsr-take("host", heldHost);
-            let hostRows = append(fgsr-rows-or-absent("machine", fgsr-take("machine", list())), fgsr-rows-or-absent("host", hostHeld));
-            let ownerHeld = fgsr-take("owner", heldFast);
+            let hostHeld = fgl-sensor-take-held(kept, "host", heldHost);
+            let hostRows = append(fgsr-rows-or-absent("machine", fgl-sensor-take-held(kept, "machine", list())), fgsr-rows-or-absent("host", hostHeld));
+            let ownerHeld = fgl-sensor-take-held(kept, "owner", heldFast);
             let ownerRows = fgsr-rows-or-absent("owner", ownerHeld);
-            let queueHeld = fgsr-take("queue", heldQueue);
+            let queueHeld = fgl-sensor-take-held(kept, "queue", heldQueue);
             let queueRows = fgsr-rows-or-absent("queue", queueHeld);
-            let storageHeld = fgsr-take("storage", heldStorage);
+            let storageHeld = fgl-sensor-take-held(kept, "storage", heldStorage);
             let storageRows = fgsr-rows-or-absent("storage", storageHeld);
             let heatRows = fgl-heat-rows-at(frame, heldHeat, epoch);
             let localRows = append(fgo-observe-rows(fgl-frame-fast-rows(frame, priorWorkMs, priorWaitMs, priorBudgetMs, fgl-fast-rows(frame, heldFast, list())), epoch, frame), append(heatRows, fgo-observe-rows(cons(fgl-gpu-estimate-row(append(ownerRows, hostRows), fgo-metal-word(metal_live(), 11)), fgl-kernel-rows()), epoch, frame)));
-            let gaveGlass = fgsr-give("glass", epoch, localRows);
-            let fastRows = append(fgsr-rows-or-absent("glass", fgsr-take("glass", list())), ownerRows);
+            let gaveGlass = fgsr-give-held(fgl-kept-give(kept, fgsr-publisher("glass")), "glass", epoch, localRows);
+            let fastRows = append(fgsr-rows-or-absent("glass", fgl-sensor-take-held(kept, "glass", list())), ownerRows);
             let baseMetricsObserved = append(fgo-observe-rows(list(fgl-string-growth-row(stringBaseline), fgl-node-growth-row(nodeBaseline)), epoch, frame), append(fastRows, append(hostRows, append(queueRows, storageRows))));
             let governorRefresh = fgl-refresh-governor(frame);
             let metricsObserved = append(baseMetricsObserved, fgl-model-route-rows(samples, epoch, frame));
             let metrics = fgo-age-rows-at(metricsObserved, epoch);
+            let index = fgd-metric-index(metrics);
             let publishers = fgl-external-publishers(fgl-inventory-publishers(inventory));
             let observations = if or(eq(len(fgl-cache-observations(cache)), 0), eq(fgl-cycle?(frame, 4), 1)) then fgl-v2-observations(epoch, frame, samples) else fgl-cache-observations(cache);
-            let nextCache = fgl-cache-full(nth(inventoryPair, 1), observations, externalSamples, roster);
-            let point = fgl-flow-point-current-full(epoch, metrics, observations, samples);
+            let nextCache = fgl-cache-full-kept(nth(inventoryPair, 1), observations, externalSamples, roster, kept);
+            let point = fgl-flow-point-current-full-in(epoch, metrics, observations, samples, index);
             let poke = fgl-poke-owner-status(samples, epoch);
-            let saved = fgl-flow-last-save(point);
+            let saved = fgl-last-give-held(fgl-kept-give(kept, fgl-last-name("flow-point")), point);
             let hz = fgl-refresh-hz(samples, history, point);
             let nextHistory = ftc-ring-push(history, point, FGLHistoryCapacity());
-            let control = fgl-poll-control-full(controlState, samples, epoch);
+            let control = fgl-poll-control-full-held(controlState, samples, epoch, fgl-kept-take(kept, fgl-wait-inbox-name()));
             let nextFrame = fgl-dashboard-frame(nth(liveSurface, 0), nth(liveSurface, 1), epoch, hz, frame, control, metrics, samples, publishers, nextHistory, observations);
-            let jitFault = fgl-jit-fault-sample(fgl-jit-current-samples(), list());
-            if eq(fgl-control-quit?(control), 1) then list("form-glass-live-stopped", frame, fglu-supervisor-mark("abstain"), len(nextHistory)) else if eq(fgl-dependency-changed?(dependencyIdentity, frame), 1) then list("form-glass-live-stopped", frame, fglu-supervisor-mark("selfmolt"), len(nextHistory)) else if eq(fgl-pool-selfmolt?(stringBaseline, nodeBaseline, frame), 1) then list("form-glass-live-stopped", frame, fglu-supervisor-mark("selfmolt"), len(nextHistory)) else if gt(len(jitFault), 0) then fgl-jit-hold-enter(control, add(frame, 1), fastRows, hostRows, queueRows, storageRows, heatRows, nextHistory, frameBuffer, fgl-schedule-for-hz(schedule, epoch, hz), liveSurface, dependencyIdentity, stringBaseline, nodeBaseline, nextFrame, jitFault, nextCache) else fgl-loop-after(control, add(frame, 1), fastRows, hostRows, queueRows, storageRows, heatRows, nextHistory, frameBuffer, schedule, liveSurface, nextFrame, hz, dependencyIdentity, stringBaseline, nodeBaseline, epoch, nextCache);
+            let jitFault = fgl-jit-fault-sample(jitSamples, list());
+            if eq(fgl-control-quit?(control), 1) then fgl-loop-stopped(kept, frame, fglu-supervisor-mark("abstain"), len(nextHistory)) else if eq(fgl-dependency-changed?(dependencyIdentity, frame), 1) then fgl-loop-stopped(kept, frame, fglu-supervisor-mark("selfmolt"), len(nextHistory)) else if eq(fgl-pool-selfmolt?(stringBaseline, nodeBaseline, frame), 1) then fgl-loop-stopped(kept, frame, fglu-supervisor-mark("selfmolt"), len(nextHistory)) else if gt(len(jitFault), 0) then fgl-jit-hold-enter(control, add(frame, 1), fastRows, hostRows, queueRows, storageRows, heatRows, nextHistory, frameBuffer, fgl-schedule-for-hz(schedule, epoch, hz), liveSurface, dependencyIdentity, stringBaseline, nodeBaseline, nextFrame, jitFault, nextCache) else fgl-loop-after(control, add(frame, 1), fastRows, hostRows, queueRows, storageRows, heatRows, nextHistory, frameBuffer, schedule, liveSurface, nextFrame, hz, dependencyIdentity, stringBaseline, nodeBaseline, epoch, nextCache);
         }
         def fgl-loop-after(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, schedule, surface, nextFrame, hz, dependencyIdentity, stringBaseline, nodeBaseline, frameStarted, cache) {
             let workEnded = now_unix_ms();
@@ -932,12 +991,11 @@ section [form.bml] {
             let budgetMs = fgel-schedule-budget(activeSchedule);
             let waitTargetMs = fgl-schedule-wait-ms(activeSchedule, workEnded);
             let watchNames = fgl-wait-frame-names(fgl-cache-roster(cache));
-            let handles = fgl-wait-open(watchNames);
+            let handles = ggf-kept-handles(fgl-cache-kept(cache), watchNames, "take");
             let rested = fgl-wait-rest(waitTargetMs, handles);
-            let releasedAll = fgl-wait-release(handles);
             let waitEnded = now_unix_ms();
             let waitMs = fgl-frame-elapsed-ms(workEnded, waitEnded);
-            let cadenceSaved = fgl-cadence-last-save(workMs, waitMs, budgetMs);
+            let cadenceSaved = fgl-cadence-last-save-held(fgl-cache-kept(cache), workMs, waitMs, budgetMs);
             let wake = fgl-wait-wake(rested, watchNames, handles, waitEnded, activeSchedule);
             let plan = fgel-plan-wake(activeSchedule, frameBuffer, wake, nextFrame);
             let nextBuffer = fgl-present-plan(frameBuffer, plan);
