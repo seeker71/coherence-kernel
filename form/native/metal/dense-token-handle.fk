@@ -103,12 +103,13 @@
         (str_concat fname
             " (device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device float* y [[buffer(3)]], device float* sc [[buffer(4)]], constant uint& npos [[buffer(5)]], constant uint& nq [[buffer(6)]], constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant float& scale [[buffer(9)]], constant uint& sstride [[buffer(10)]], uint h [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { threadgroup float ss[1024]; threadgroup float ee[1024]; threadgroup float red[2]; if (h >= nq) return; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint qoff = h * hd; uint koff = kvh * hd; { uint p = t; while (p < npos) { float acc = 0.0f; uint c = hd; while (c > 0) { c -= 1; float pr = q[qoff + c] * kc[p * KVD + koff + c]; acc = pr + acc; } ss[p] = acc * scale; p += nt; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { float mx = ss[0]; uint p = 1; while (p < npos) { if (ss[p] > mx) { mx = ss[p]; } p += 1; } red[0] = mx; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float mx = red[0]; { uint p = t; while (p < npos) { ee[p] = fexp(ss[p] - mx); p += nt; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { float sumes = 0.0f; uint p = 0; while (p < npos) { sumes = sumes + ee[p]; p += 1; } red[1] = sumes; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float sumes = red[1]; float invs = 1.0f / sumes; { uint p = t; while (p < npos) { ss[p] = ee[p] * invs; p += nt; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); { uint i = t; while (i < hd) { float yi = 0.0f; uint p = 0; while (p < npos) { float pv = vc[p * KVD + koff + i] * ss[p]; yi = yi + pv; p += 1; } y[qoff + i] = yi; i += nt; } } }")))
 
-    ; form_rope_pair_f32 with the head vector at a row offset — so k is rotated where the qkv dispatch
-    ; landed it, in the cache, and no copy stands between. The expression per pair is the pair kernel's.
-    (defn dth-rope-pair-off-msl (fname)
+    ; form_rope_pair_f32 over q AND k in one dispatch: the first nq*np threads rotate q's pairs, the rest
+    ; rotate k's where the qkv dispatch landed it — in the cache, at row offset voff — so no copy stands
+    ; between. The expression per pair is the pair kernel's.
+    (defn dth-rope-pair2-msl (fname)
         (str_concat "kernel void "
         (str_concat fname
-            " (device float* v [[buffer(0)]], device const float* fr [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& pos [[buffer(4)]], constant float& base [[buffer(5)]], constant uint& voff [[buffer(6)]], uint gid [[thread_position_in_grid]]) { uint np = hd / 2u; if (gid >= nh * np) return; uint h = gid / np; uint pr = gid - h * np; uint i = pr * 2u; uint o = voff + h * hd; float ex = (-1.0f * float(i)) / float(hd); float fq = fpow(base, ex) / fr[i / 2u]; float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + i]; float q1 = v[o + i + 1u]; float t0 = q0 * ca; float t1 = q1 * sa; v[o + i] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; v[o + i + 1u] = t2 + t3; }")))
+            " (device float* q [[buffer(0)]], device float* k [[buffer(1)]], device const float* fr [[buffer(2)]], constant uint& nq [[buffer(3)]], constant uint& nkv [[buffer(4)]], constant uint& hd [[buffer(5)]], constant uint& pos [[buffer(6)]], constant float& base [[buffer(7)]], constant uint& voff [[buffer(8)]], uint gid [[thread_position_in_grid]]) { uint np = hd / 2u; if (gid >= (nq + nkv) * np) return; bool isq = gid < nq * np; uint g = isq ? gid : (gid - nq * np); device float* v = isq ? q : k; uint h = g / np; uint pr = g - h * np; uint i = pr * 2u; uint o = (isq ? 0u : voff) + h * hd; float ex = (-1.0f * float(i)) / float(hd); float fq = fpow(base, ex) / fr[i / 2u]; float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + i]; float q1 = v[o + i + 1u]; float t0 = q0 * ca; float t1 = q1 * sa; v[o + i] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; v[o + i + 1u] = t2 + t3; }")))
 
     ; d[i] = s[soff + i] — the read-side twin of the cache move, for slicing a fused qkv.
     (defn dth-copyfrom-msl (fname)
@@ -138,7 +139,7 @@
         (str_concat (str_concat (q80-msl-appendix "form_q80_dequant_f32" "form_q80_matvec_f32" "form_q80_matvec_lane_f32") (str_concat (q80-matvec-tg-body "form_q80_matvec_tg_f32") (str_concat (q80-matvec-tg2-body "form_q80_matvec_tg2_f32") (str_concat (q80-matvec-tg3-body "form_q80_matvec_tg3_f32") (str_concat (q80-matvec-tg4-body "form_q80_matvec_tg4_f32") (str_concat (q80-matvec-tg4-add-body "form_q80_matvec_tg4_add_f32") (str_concat (q80-matvec-tg4x3-body "form_q80_matvec_tg4x3_f32") (dth-rmsnorm-tw-msl))))))))
         (str_concat (q5m-msl-appendix "form_q5k_dequant_f32" "form_q5k_matvec_f32"
                                       "form_q50_dequant_f32" "form_q50_matvec_f32")
-        (str_concat (str_concat (ldm-msl-unit) (str_concat (dth-attn-tw-msl "form_gqa_decode_tg_f32") (str_concat (q80-matvec-glu-body "form_q80_matvec_glu_f32") (dth-rope-pair-off-msl "form_rope_pair_off_f32"))))
+        (str_concat (str_concat (ldm-msl-unit) (str_concat (dth-attn-tw-msl "form_gqa_decode_tg_f32") (str_concat (q80-matvec-glu-body "form_q80_matvec_glu_f32") (dth-rope-pair2-msl "form_rope_pair2_f32"))))
         (str_concat (dth-copy-msl "form_copy_off_f32")
         (str_concat (dth-neox-msl "form_rope_neox_f32")
         (str_concat (dth-ln-msl "form_layernorm_f32")
@@ -246,7 +247,7 @@
     ;        20 layernorm 21 gelu 22 copyfrom 23 q80mv-tg (bit-exact twin) 24 rms-tg (llama-decode-msl's, not exact here)
     ;        25 q80mv-tg2 26 rmsnorm-tw (the exact cooperative rmsnorm, dispatched) 27 q80mv-tg3 28 q80mv-tg4 (dispatched)
     ;        29 argmax-part 30 argmax-comb (the two-stage greedy selection, dispatched) 31 rope-pair 32 attention-tw
-    ;        33 q80mv-tg4-add 34 q80mv-tg4x3 35 q80mv-glu 36 rope-pair-off (the fused block's, dispatched)
+    ;        33 q80mv-tg4-add 34 q80mv-tg4x3 35 q80mv-glu 36 rope-pair2 (the fused block's, dispatched)
     ; THE COOPERATIVE RMSNORM, byte for byte the one-thread attestant. Thread 0 folds the attestant's own
     ; statements — `sq = xv * xv; ss = ss + sq` ascending, then the Newton-50 sqrt — from device memory, eight
     ; loads issued ahead of eight dependent adds (the chain is one chain: the order is the attestant's). The
@@ -295,7 +296,7 @@
               (metal_pipeline msl "form_q80_matvec_tg4_add_f32") ; 33 tg4 with the residual add in its epilogue (dispatched: o, down)
               (metal_pipeline msl "form_q80_matvec_tg4x3_f32")   ; 34 q, k, v in one dispatch, k and v into their caches (dispatched)
               (metal_pipeline msl "form_q80_matvec_glu_f32")     ; 35 gate, up and the SwiGLU in one dispatch (dispatched)
-              (metal_pipeline msl "form_rope_pair_off_f32")))    ; 36 the pair rope at a cache row offset (dispatched: k)
+              (metal_pipeline msl "form_rope_pair2_f32")))       ; 36 the pair rope over q and k (in its cache) in one dispatch (dispatched)
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
@@ -420,9 +421,9 @@
     ; gate, up and the SwiGLU in one dispatch
     (defn dth-glu (ps gtv utv xh yh)
         (metal_enqueue (nth ps 35) (md-bind16 (list (dth-tv-h gtv) (dth-tv-h utv) xh yh) (list (dth-tv-r gtv) (dth-tv-c gtv)) 96 0 1 0) (div (add (dth-tv-r gtv) 15) 16)))
-    ; the pair rope on a head vector that lives at a row offset (k in its cache)
-    (defn dth-rope-off (ps vh ropeH nh hd pos baseBits voff)
-        (metal_enqueue (nth ps 36) (md-bind (list vh ropeH) (list nh hd pos baseBits voff)) (mul nh (div hd 2))))
+    ; the pair rope over q and over k where it lives (its cache, at row offset voff), one dispatch
+    (defn dth-rope2 (ps qh kh ropeH nq nkv hd pos baseBits voff)
+        (metal_enqueue (nth ps 36) (md-bind (list qh kh ropeH) (list nq nkv hd pos baseBits voff)) (mul (add nq nkv) (div hd 2))))
 
     ; the fused block speaks for: every projection Q8_0 with cols a multiple of 128 (gate/up 64), k and v as
     ; wide as q, no qkv biases, adjacent-pair rope with an even head, a pool the staged attention holds.
@@ -451,15 +452,14 @@
     ; ================= one block =================
     ; geo: 0 dModel 1 dFF 2 nHead 3 nKV 4 headDim 5 kvd 6 maxpos 7 vocabN 8 epsBits 9 baseBits
     ;      10 scaleBits 11 ropeH 12 nLayer 13 qOut 14 ropeStyle 15 ropeDim 16 nLoop
-    ; NINE dispatches where the serial block has seventeen: the cache copies, the two residual adds, the
-    ; separate k, v, up and swiglu are gone into epilogues and multi-tensor groups. The band proves a fused
-    ; token's logits byte for byte the serial token's.
+    ; EIGHT dispatches where the serial block has seventeen: the cache copies, the two residual adds, the
+    ; separate k, v, up and swiglu, the second rope are gone into epilogues and multi-tensor groups. The band
+    ; proves a fused token's logits byte for byte the serial token's.
     (defn dth-block-fused (ps bs geo lay ck cv pos)
         (do
             (dth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8))
             (dth-mv-qkv ps (nth lay 1) (nth lay 2) (nth lay 3) (nth bs 1) (nth bs 2) ck cv (mul pos (nth geo 5)))
-            (dth-rope ps (nth geo 14) (nth bs 2) (nth geo 11) (nth geo 2) (nth geo 4) (nth geo 15) pos (nth geo 9))
-            (dth-rope-off ps ck (nth geo 11) (nth geo 3) (nth geo 4) pos (nth geo 9) (mul pos (nth geo 5)))
+            (dth-rope2 ps (nth bs 2) ck (nth geo 11) (nth geo 2) (nth geo 3) (nth geo 4) pos (nth geo 9) (mul pos (nth geo 5)))
             (dth-attn ps (nth bs 2) ck cv (nth bs 5) (nth bs 12)
                       (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6))
             (dth-mv-add ps (nth lay 4) (nth bs 5) (nth bs 0))
