@@ -110,7 +110,7 @@
         (str_concat "#include <metal_stdlib>\n#pragma clang fp contract(off)\n"
         (str_concat (q6m-msl-unit "form_q6k_dequant_f32" "form_q6k_matvec_f32")
         (str_concat (q4m-msl-unit "form_q4k_dequant_f32" "form_q4k_matvec_f32")
-        (str_concat (q80-msl-appendix "form_q80_dequant_f32" "form_q80_matvec_f32" "form_q80_matvec_lane_f32")
+        (str_concat (str_concat (q80-msl-appendix "form_q80_dequant_f32" "form_q80_matvec_f32" "form_q80_matvec_lane_f32") (q80-matvec-tg-body "form_q80_matvec_tg_f32"))
         (str_concat (q5m-msl-appendix "form_q5k_dequant_f32" "form_q5k_matvec_f32"
                                       "form_q50_dequant_f32" "form_q50_matvec_f32")
         (str_concat (ldm-msl-unit)
@@ -218,7 +218,7 @@
     ; ================= the pool =================
     ; pipes: 0 q6mv 1 q4mv 2 q80mv 3 q6dq 4 q4dq 5 q80dq 6 rms 7 rope 8 neox 9 attn 10 swiglu
     ;        11 add 12 argmax 13 copy 14 q5kmv 15 q5kdq 16 q50mv 17 q50dq 18 q40mv 19 q40dq
-    ;        20 layernorm 21 gelu 22 copyfrom
+    ;        20 layernorm 21 gelu 22 copyfrom 23 q80mv-tg (bit-exact twin, the default for Q8_0) 24 rms-tg
     (defn dth-pipes (msl)
         (list (metal_pipeline msl "form_q6k_matvec_f32")
               (metal_pipeline msl "form_q4k_matvec_f32")
@@ -242,7 +242,9 @@
               (metal_pipeline msl "form_q40_dequant_f32")
               (metal_pipeline msl "form_layernorm_f32")
               (metal_pipeline msl "form_gelu_f32")
-              (metal_pipeline msl "form_copy_from_f32")))
+              (metal_pipeline msl "form_copy_from_f32")
+              (metal_pipeline msl "form_q80_matvec_tg_f32")      ; 23 the bit-exact cooperative q8 twin
+              (metal_pipeline msl "form_rmsnorm_tg_f32")))       ; 24 stone 16's cooperative rmsnorm: compiled, NOT dispatched — it differs from the attestant at element 4 (q8-0-matvec-tg-band.fk)
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
@@ -284,14 +286,17 @@
                 (dth-tv-h (dth-tv tab base path "rope_freqs.weight")))))
 
     ; ================= dispatches =================
+    ; Q8_0 rows go through the cooperative twin (bit for bit the attestant, q8-0-matvec-tg-band.fk): 32 threads a row
     (defn dth-mv (ps tv xh yh)
+        (if (eq (dth-tv-ty tv) 8)
+            (metal_enqueue (nth ps 23) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 32 0 1 0) (dth-tv-r tv))
         (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 0)
                        (if (eq (dth-tv-ty tv) 12) (nth ps 1)
                        (if (eq (dth-tv-ty tv) 13) (nth ps 14)
                        (if (eq (dth-tv-ty tv) 6) (nth ps 16)
                        (if (eq (dth-tv-ty tv) 2) (nth ps 18) (nth ps 2))))))
                        (md-bind (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)))
-                       (dth-tv-r tv)))
+                       (dth-tv-r tv))))
 
     (defn dth-dq (ps tv yh off n)
         (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 3)
