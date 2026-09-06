@@ -28,7 +28,7 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is    18,225 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is    18,451 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
 preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 683 rows, 671 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 684 rows, 672 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -244,7 +244,7 @@ form-glass-events-channels-band        -> 255
 node-gift-band                         -> 4095
 cell-store-band                        -> 255
 field-band                             -> 255
-jit-lens-band                          -> 255
+jit-lens-band                          -> 2047
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -436,7 +436,7 @@ ones an unboxed float lane would take first. The `j` view shows `jit-boxes`,
 both ledgers; `jit-unroll` is a row named absent by its door — the arm64 u32
 leaf does not claim the loop (`runtime/fkwu-uni.c:3349`), so no lane in this
 seed unrolls one, and the glass says so instead of inventing it.
-`jit-lens-band` 255: a defn adding floats twenty thousand times shows 20001
+`jit-lens-band` 2047: a defn adding floats twenty thousand times shows 20001
 boxes and 40000 reads on its own row; the int twin shows 0 and 0.
 
 **The kernel counts into the page.** No counter on the live page is copied
@@ -454,14 +454,31 @@ defns with source from the page alone: `kernel_page_hot pid n` (192) and
 strings, cpu, alive, store, melt generation -- are written where the moment
 happens (open, field open, melt, exit, self-read). The `k` view lists every live
 kernel's three hottest defns as `k<pid> <defn> <unit>:<line> box n unbox n`.
-`jit-lens-band` 255 and `cell-store-band` 255 stand on the page words.
+`jit-lens-band` 2047 and `cell-store-band` 255 stand on the page words.
+
+**The box ledger fires the leaf.** The per-defn box count is not only shown,
+it acts: when a cold defn's count crosses a 1024 boundary, `fk_fbox` -- the
+increment that was already there -- asks `fk_f64_pulse` once whether the
+defn's body is a pure float expression (float and int literals, parameters,
+add/sub/mul/div with a float on at least one side). If it is, the body is
+emitted as an arm64 f64 leaf: parameters in d0..d7, intermediates in
+d16..d31, one FMOV and RET on a MAP_JIT page. The defn's body entry becomes a
+tag-194 node carrying the fn index and the original body, so dispatch pays
+nothing new: an all-float frame unboxes once and boxes once; any other frame
+walks the original body and answers what the walker always answered. Declined
+bodies are marked -1 and never asked again; a reload clears every leaf. Native
+state is the page's fourth ledger (+96 MiB, layout 3), word 30 and
+`kernel_stat 48` count the crystallized defns, hot rows carry native as their
+eighth field, the `j` view has `jit-crystallized` and every crystallized hot
+defn wears ` native`. A five-op polynomial called two million times: 0.25 s
+-> 0.12 s, four boxes per call -> one.
 
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=75 -> 47000075
+./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=76 -> 47000076
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
