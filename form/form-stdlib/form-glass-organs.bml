@@ -1,0 +1,188 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glass-organs.bml — every organ gives into the glass.
+//
+// One kernel process (observe/form-glass-organs-live.fk) runs the surprise
+// organ, the routing choice point and the channel/grammar witness over the
+// frames that stand in shared memory, and gives ONE snapshot per tick into the
+// `organs` frame of the live telemetry space. Nothing here forks, scans a
+// directory or reads a file: the readings are the frames' own sequences, taken
+// by seqlock; the grammar of a frame is the cell schema it carries.
+//
+//   channel.<name>         each frame that stands: its protocol, and whether it
+//                          moved this tick (active), stood still (idle), or was
+//                          first seen (ready); the amount is its sequence
+//   grammar.<name>         the cell schema that frame carries
+//   surprise.routing       ambient-surprise over every channel's give rate:
+//                          attempts, surprises carried (s) and not carried (f)
+//   surprise.last          the newest surprise: channel, predicted rate, read rate
+//   choice.surprise-route  the attuned-inquiry movement chosen for the newest
+//                          surprise, its seven options, and whether the choice
+//                          receipt validates (heat 1)
+//   choice.protocol-floor  the channel/protocol choice floor: proven sources of all
+//
+// Every sample's source is the organs frame itself (fg-xxxxxxxx) and its handle
+// the sequence that give lands at, so a reader renders shm:/fg-xxxxxxxx#seq and
+// can check it against the frame it took. An idle organ gives idle rows under
+// that same sequence; nothing is sampled or invented.
+//
+// preludes: form/form-stdlib/core.fk form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/form-glass-sensor-rows.bml form/form-stdlib/ambient-surprise.fk form/form-stdlib/attuned-surprise-inquiry.fk form/form-stdlib/choice-receipt.fk form/form-stdlib/channel-protocol-choice-floor.fk
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormGlassOrgans {
+        field FGORPublisher = "organs";
+        field FGORCadenceMs = 500;
+        field FGORSensorRowsGrammar = "form-glass-sensor-rows-v1";
+
+        def fgor-sensors() = list("machine", "glass", "queue", "process", "owner", "host", "storage");
+
+        // ---- channels: every frame that stands, named by the door it was given through ----
+        // channel = list(id, frameName, seq, protocol)
+        def fgor-channel(id, frameName, seq, protocol) = list(id, frameName, seq, protocol);
+        def fgor-channel-id(c) = nth(c, 0);
+        def fgor-channel-frame(c) = nth(c, 1);
+        def fgor-channel-seq(c) = nth(c, 2);
+        def fgor-channel-protocol(c) = nth(c, 3);
+        def fgor-frame-label(frameName) = substring(frameName, 1, str_len(frameName));
+        def fgor-cons-channel(c, rest) = if eq(len(c), 0) then rest else cons(c, rest);
+        def fgor-sensor-channel(sensor) {
+            let handle = ggf-receive(fgsr-publisher(sensor));
+            let seq = ggf-seq(handle);
+            let released = ggf-release(handle);
+            if nothing?(handle) then list() else fgor-channel(str_concat("sensor.", sensor), ggf-name(fgsr-publisher(sensor)), seq, "sensor-rows-over-seqlock");
+        }
+        def fgor-sensor-channels(sensors) = if eq(len(sensors), 0) then list() else fgor-cons-channel(fgor-sensor-channel(head(sensors)), fgor-sensor-channels(tail(sensors)));
+        def fgor-publisher-channel(root, publisher) {
+            let key = fgtm-read-key(root, publisher);
+            if lt(key, 0) then list() else fgor-channel(str_concat("publisher.", publisher), ggf-name(fgtm-space(root, publisher)), key, "glass-snapshot-over-seqlock");
+        }
+        def fgor-publisher-channels(root, names) = if eq(len(names), 0) then list() else if str_eq(head(names), FGORPublisher()) then fgor-publisher-channels(root, tail(names)) else fgor-cons-channel(fgor-publisher-channel(root, head(names)), fgor-publisher-channels(root, tail(names)));
+        def fgor-channels(root) = append(fgor-sensor-channels(fgor-sensors()), fgor-publisher-channels(root, fgtm-roster-in-space(gift_roster_names(), root)));
+        def fgor-channel-publisher?(c) = eq(str_find(fgor-channel-id(c), "publisher.", 0), 0);
+        def fgor-channel-publisher-name(c) = substring(fgor-channel-id(c), 10, str_len(fgor-channel-id(c)));
+        // the grammar a frame carries: sensor frames carry the sensor-rows schema by construction (the take validates it); a
+        // publisher's frame is read once, on first sight, and names the snapshot schema or the read state it failed with
+        def fgor-snapshot-grammar(status) = if str_eq(status, "current") then FGTMSnapshotSchema() else str_concat("snapshot-", status);
+        def fgor-channel-grammar(root, c) = if eq(fgor-channel-publisher?(c), 1) then fgor-snapshot-grammar(fgtm-read-state-status(fgtm-read-current(root, fgor-channel-publisher-name(c)))) else FGORSensorRowsGrammar();
+
+        // ---- what the organ remembers between ticks: per channel its last sequence, the learned give rate, its grammar ----
+        def fgor-held(id, lastSeq, baseline, grammar) = list(id, lastSeq, baseline, grammar);
+        def fgor-held-id(h) = nth(h, 0);
+        def fgor-held-seq(h) = nth(h, 1);
+        def fgor-held-baseline(h) = nth(h, 2);
+        def fgor-held-grammar(h) = nth(h, 3);
+        def fgor-held-find(helds, id) = if eq(len(helds), 0) then list() else if str_eq(fgor-held-id(head(helds)), id) then head(helds) else fgor-held-find(tail(helds), id);
+
+        // ---- the surprise organ over one channel: the reading is gives since the last tick (the seqlock moves by two per give) ----
+        // -1 on first sight, when nothing is predicted yet; the baseline is the learned rate, -1 until a first reading seeds it
+        def fgor-reading(c, prior) = if eq(len(prior), 0) then -1 else div(sub(fgor-channel-seq(c), fgor-held-seq(prior)), 2);
+        def fgor-baseline(prior) = if eq(len(prior), 0) then -1 else fgor-held-baseline(prior);
+        def fgor-tolerance(baseline) = add(1, div(baseline, 2));
+        // ambient-surprise decides: salience beyond the tolerance band around the learned rate
+        def fgor-surprised?(reading, baseline) = if lt(reading, 0) then 0 else if lt(baseline, 0) then 0 else as-surprise?(reading, baseline, fgor-tolerance(baseline));
+        def fgor-next-baseline(reading, baseline) = if lt(reading, 0) then -1 else if lt(baseline, 0) then reading else as-refine(baseline, reading);
+        // attuned-surprise-inquiry shapes the event: predicted and read rates both stay inspectable; the edge is the frame, open and
+        // witnessed; the breath carries what the learned rate plus its tolerance can hold against this tick's reading
+        def fgor-event(c, reading, baseline) = asi-event(fgor-channel-id(c), fgor-frame-label(fgor-channel-frame(c)), reading, "move", int_to_str(baseline), int_to_str(reading), ati-edge("open", fgor-frame-label(fgor-channel-frame(c)), 1), ati-breath(add(baseline, fgor-tolerance(baseline)), reading, 1));
+        def fgor-taken(c, reading, baseline) = ati-movement-state-read(ati-movement(asi-event-inquiry(fgor-event(c, reading, baseline))));
+        // a surprise is carried when the inquiry moves with it (move, wander, play, tend); hold, rest and compost leave it uncarried
+        def fgor-carried?(taken) = if str_eq(taken, "hold") then 0 else if str_eq(taken, "rest") then 0 else if str_eq(taken, "compost") then 0 else 1;
+
+        // ---- the choice point: the movement chosen among its seven options, as a choice receipt the recipe validates ----
+        def fgor-options() = list("compost", "hold", "rest", "tend", "play", "wander", "move");
+        def fgor-candidates(options, taken) = if eq(len(options), 0) then list() else cons(cr-choice-candidate(head(options), "movement", 1, 0, if str_eq(head(options), taken) then 100 else 0, "ati-movement-state"), fgor-candidates(tail(options), taken));
+        def fgor-outcome(taken) = if eq(fgor-carried?(taken), 1) then cr-outcome-success() else cr-outcome-fail();
+        def fgor-receipt(c, reading, baseline, taken, tick, trace) = cr-choice-receipt(str_concat("route surprise on ", fgor-channel-id(c)), "attuned-inquiry", "surprise-routing", fgor-candidates(fgor-options(), taken), taken, fgor-outcome(taken), 100, cr-choice-value(cr-kind-branch-feedback(), if eq(fgor-carried?(taken), 1) then 100 else 0, 100, 100, 100), fgd-cat(list("salience ", int_to_str(as-salience(reading, baseline)), " over tolerance ", int_to_str(fgor-tolerance(baseline)))), "form-glass-organs", fgor-frame-label(fgor-channel-frame(c)), tick, 0, trace);
+        def fgor-receipt-valid(c, reading, baseline, taken, tick, trace) = if eq(cr-choice-receipt-valid?(fgor-receipt(c, reading, baseline, taken, tick, trace)), 1) then 1 else 0;
+
+        // ---- samples: every one names the organs frame and the sequence this give lands at ----
+        def fgor-sample(id, kind, lane, purpose, capacity, lifecycle, now, seq, frameLabel, channels) = fgtm-sample(id, fgtm-absent(), kind, "membrane", FGORPublisher(), lane, purpose, fgtm-absent(), capacity, lifecycle, fgtm-present(now), fgtm-present(now), fgtm-present(0), fgtm-present(seq), "never", "physical-live", frameLabel, channels);
+        def fgor-sample-heat(id, kind, lane, purpose, capacity, lifecycle, heat, now, seq, frameLabel, channels) = fgtm-sample(id, fgtm-absent(), kind, "membrane", FGORPublisher(), lane, purpose, fgtm-absent(), capacity, lifecycle, fgtm-present(now), fgtm-present(now), fgtm-present(heat), fgtm-present(seq), "never", "physical-live", frameLabel, channels);
+        def fgor-channel-lifecycle(reading) = if lt(reading, 0) then "ready" else if eq(reading, 0) then "idle" else "active";
+        def fgor-channel-samples(c, reading, grammar, now, seq, frameLabel) = list(
+            fgor-sample(str_concat("channel.", fgor-channel-id(c)), "channel", "channel", fgor-channel-protocol(c), fgtm-present(fgor-channel-seq(c)), fgor-channel-lifecycle(reading), now, seq, frameLabel, list("channel", "gift", fgor-frame-label(fgor-channel-frame(c)))),
+            fgor-sample(str_concat("grammar.", fgor-channel-id(c)), "grammar", "grammar", grammar, fgtm-absent(), fgor-channel-lifecycle(reading), now, seq, frameLabel, list("grammar", "gift", fgor-frame-label(fgor-channel-frame(c)))));
+
+        // ---- the fold over the channels ----
+        // acc = list(helds, attempts, successes, failures, last, taken, receiptValid, surprisesThisTick, rows)
+        //   last = list() before any surprise, else list(channelId, predicted, actual)
+        def fgor-acc(helds, attempts, successes, failures, last, taken, receiptValid, active, rows) = list(helds, attempts, successes, failures, last, taken, receiptValid, active, rows);
+        def fgor-acc-start(state) = fgor-acc(list(), fgor-state-attempts(state), fgor-state-successes(state), fgor-state-failures(state), fgor-state-last(state), fgor-state-taken(state), fgor-state-receipt-valid(state), 0, list());
+        def fgor-fold(root, channels, oldHelds, tick, now, seq, frameLabel, acc) = if eq(len(channels), 0) then acc else fgor-fold(root, tail(channels), oldHelds, tick, now, seq, frameLabel, fgor-fold-one(root, head(channels), oldHelds, tick, now, seq, frameLabel, acc));
+        def fgor-fold-one(root, c, oldHelds, tick, now, seq, frameLabel, acc) {
+            let prior = fgor-held-find(oldHelds, fgor-channel-id(c));
+            let reading = fgor-reading(c, prior);
+            let baseline = fgor-baseline(prior);
+            let surprised = fgor-surprised?(reading, baseline);
+            let grammar = if eq(len(prior), 0) then fgor-channel-grammar(root, c) else fgor-held-grammar(prior);
+            let taken = if eq(surprised, 1) then fgor-taken(c, reading, baseline) else nth(acc, 5);
+            let carried = if eq(surprised, 1) then fgor-carried?(taken) else 0;
+            let attempts = add(nth(acc, 1), surprised);
+            let successes = add(nth(acc, 2), if eq(surprised, 1) then carried else 0);
+            let failures = add(nth(acc, 3), if eq(surprised, 1) then sub(1, carried) else 0);
+            let receiptValid = if eq(surprised, 1) then fgor-receipt-valid(c, reading, baseline, taken, tick, cr-choice-trace(attempts, successes, failures, 0)) else nth(acc, 6);
+            let last = if eq(surprised, 1) then list(fgor-channel-id(c), baseline, reading) else nth(acc, 4);
+            let held = fgor-held(fgor-channel-id(c), fgor-channel-seq(c), fgor-next-baseline(reading, baseline), grammar);
+            fgor-acc(cons(held, nth(acc, 0)), attempts, successes, failures, last, taken, receiptValid, add(nth(acc, 7), surprised), append(nth(acc, 8), fgor-channel-samples(c, reading, grammar, now, seq, frameLabel)));
+        }
+
+        // ---- the organ rows: routing counts, the newest surprise, the route chosen, the protocol floor ----
+        def fgor-last-purpose(last) = if eq(len(last), 0) then "none" else fgd-cat(list(nth(last, 0), "-p", int_to_str(nth(last, 1)), "-a", int_to_str(nth(last, 2))));
+        def fgor-organ-lifecycle(active, attempts) = if gt(active, 0) then "active" else if gt(attempts, 0) then "idle" else "ready";
+        def fgor-organ-samples(acc, now, seq, frameLabel) {
+            let attempts = nth(acc, 1);
+            let successes = nth(acc, 2);
+            let failures = nth(acc, 3);
+            let active = nth(acc, 7);
+            let taken = nth(acc, 5);
+            let proven = cpcf-proven-source-count(cpcf-related-sources());
+            list(
+                fgor-sample("surprise.routing", "event", "surprise", fgd-cat(list("s", int_to_str(successes), "-f", int_to_str(failures))), fgtm-present(attempts), fgor-organ-lifecycle(active, attempts), now, seq, frameLabel, list("events", "surprise")),
+                fgor-sample("surprise.last", "event", "surprise", fgor-last-purpose(nth(acc, 4)), fgtm-absent(), fgor-organ-lifecycle(active, attempts), now, seq, frameLabel, list("events", "surprise")),
+                fgor-sample-heat("choice.surprise-route", "choice", "route", str_concat("taken-", taken), fgtm-present(attempts), fgor-organ-lifecycle(active, attempts), nth(acc, 6), now, seq, frameLabel, append(list("choice", "options"), fgor-options())),
+                fgor-sample("choice.protocol-floor", "choice", "protocol", fgd-cat(list("proven-", int_to_str(proven), "-of-", int_to_str(len(cpcf-related-sources())))), fgtm-present(proven), "ready", now, seq, frameLabel, list("choice", "protocol")));
+        }
+
+        // ---- the organ's state between ticks and the tick itself ----
+        // state = list(tick, helds, attempts, successes, failures, last, taken, receiptValid, published)
+        def fgor-state(tick, helds, attempts, successes, failures, last, taken, receiptValid, published) = list(tick, helds, attempts, successes, failures, last, taken, receiptValid, published);
+        def fgor-state-empty() = fgor-state(0, list(), 0, 0, 0, list(), "none", 0, list());
+        def fgor-state-tick(s) = nth(s, 0);
+        def fgor-state-helds(s) = nth(s, 1);
+        def fgor-state-attempts(s) = nth(s, 2);
+        def fgor-state-successes(s) = nth(s, 3);
+        def fgor-state-failures(s) = nth(s, 4);
+        def fgor-state-last(s) = nth(s, 5);
+        def fgor-state-taken(s) = nth(s, 6);
+        def fgor-state-receipt-valid(s) = nth(s, 7);
+        def fgor-state-published(s) = nth(s, 8);
+        def fgor-frame-name(root) = ggf-name(fgtm-space(root, FGORPublisher()));
+        // the sequence this give lands at: this process is the frame's writer, so the seqlock moves from what it reads by two
+        def fgor-next-seq(root) {
+            let key = fgtm-read-key(root, FGORPublisher());
+            if lt(key, 0) then 2 else add(key, 2);
+        }
+        def fgor-tick(root, now, state) {
+            let tick = add(fgor-state-tick(state), 1);
+            let seq = fgor-next-seq(root);
+            let frameLabel = fgor-frame-label(fgor-frame-name(root));
+            let acc = fgor-fold(root, fgor-channels(root), fgor-state-helds(state), tick, now, seq, frameLabel, fgor-acc-start(state));
+            let samples = append(fgor-organ-samples(acc, now, seq, frameLabel), nth(acc, 8));
+            let published = fgtm-publish-snapshot(root, FGORPublisher(), now, samples);
+            fgor-state(tick, nth(acc, 0), nth(acc, 1), nth(acc, 2), nth(acc, 3), nth(acc, 4), nth(acc, 5), nth(acc, 6), published);
+        }
+        def fgor-loop(root, state) {
+            let next = fgor-tick(root, now_unix_ms(), state);
+            let rested = host_sleep_ms(FGORCadenceMs());
+            fgor-loop(root, next);
+        }
+        def fgor-run-ticks(root, ticks, state) = if le(ticks, 0) then state else fgor-run-ticks-rest(root, sub(ticks, 1), fgor-tick(root, now_unix_ms(), state));
+        def fgor-run-ticks-rest(root, ticks, state) {
+            let rested = if gt(ticks, 0) then host_sleep_ms(FGORCadenceMs()) else 0;
+            fgor-run-ticks(root, ticks, state);
+        }
+    }
+    0;
+}

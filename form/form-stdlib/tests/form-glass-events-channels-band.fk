@@ -1,11 +1,15 @@
 ; form-glass-events-channels-band.fk — the events and channels views over live samples by kind.
 ;
-; PURE: fixture samples only. Expected: 255
+; Bits 1-128 are PURE over fixture samples. Bits 256-4096 spawn the organs process (form-glass-organs-child.fk) into the band's own
+; telemetry space and read its frame back: the rows the events and channels views render come from a frame another process wrote.
+; Expected: 8191
 ; preludes: form-stdlib/form-glass-live.bml
 
 (do
     (defn ecb-bit (ok bit) (if ok bit 0))
     (defn ecb-sample (id kind channels) (fgtm-sample id (fgtm-absent) kind "membrane" "band" "lane" "witness" (fgtm-absent) (fgtm-absent) "active" (fgtm-present 1) (fgtm-present 1) (fgtm-present 0) (fgtm-absent) "never" "physical-live" "band" channels))
+    (defn ecb-wait (root want tries) (if (le tries 0) (list "absent") (if (ge (fgtm-read-key root "organs") want) (fgtm-gift-take root "organs") (do (let rested (host_sleep_ms 200)) (ecb-wait root want (sub tries 1))))))
+    (defn ecb-line-text (line) (ftc-segment-text (head line)))
     (let e1 (ecb-sample "event.one" "event" (list "events")))
     (let c1 (ecb-sample "choice.one" "choice" (list "choice")))
     (let r1 (ecb-sample "route.one" "expert-route" (list "route")))
@@ -42,4 +46,34 @@
     (let g (fgl-bounded-current-frame "channels" 100 14))
     (let b8 (ecb-bit (and (str_eq (head g) "form-glass-segment-frame-v2") (gt (len (nth g 3)) 4)) 128))
 
-    (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 b8))))))))
+    ; ---- rows from a frame another process writes: the organs process, spawned here into the band's own space ----
+    (let root "/tmp/form-glass-organs-band")
+    (let seeded (fgtm-publish-snapshot root "band-witness-organ" epoch (list)))
+    (let before (fgtm-read-key root "organs"))
+    (let child (host_spawn_quiet (list "./fkwu" "form/form-stdlib/tests/form-glass-organs-child.fk")))
+    (let organsFrame (ecb-wait root (add (if (lt before 0) 0 before) 6) 150))
+    (let osamples (if (str_eq (head organsFrame) "read") (fgtm-snapshot-samples (nth organsFrame 1)) (list)))
+    (let oseq (fgtm-read-key root "organs"))
+    (let killed (host_kill child))
+    (let witnessChannel (fgl-find-sample osamples "channel.publisher.band-witness-organ"))
+    (let witnessGrammar (fgl-find-sample osamples "grammar.publisher.band-witness-organ"))
+    (let routing (fgl-find-sample osamples "surprise.routing"))
+    (let route (fgl-find-sample osamples "choice.surprise-route"))
+    (let floor (fgl-find-sample osamples "choice.protocol-floor"))
+    ; the frame is a glass snapshot from the organs publisher, read by seqlock from another process
+    (let b9 (ecb-bit (and (str_eq (head organsFrame) "read") (and (gt (len osamples) 5) (str_eq (fgtm-snapshot-publisher (nth organsFrame 1)) "organs"))) 256))
+    ; the band's own publisher is a channel: its protocol and the grammar its frame carries; three ticks without a give is idle
+    (let b10 (ecb-bit (and (gt (len witnessChannel) 0) (and (str_eq (fgtm-sample-purpose witnessChannel) "glass-snapshot-over-seqlock") (and (str_eq (fgtm-sample-lifecycle witnessChannel) "idle") (and (gt (len witnessGrammar) 0) (str_eq (fgtm-sample-purpose witnessGrammar) "glass-snapshot-v1"))))) 512))
+    ; surprise routing, the route choice point and the protocol floor stand as rows
+    (let b11 (ecb-bit (and (gt (len routing) 0) (and (gt (len route) 0) (and (gt (len floor) 0) (and (eq (fgtm-field-present? (fgtm-sample-capacity floor)) 1) (eq (str_find (fgtm-sample-purpose floor) "proven-" 0) 0))))) 1024))
+    ; every row names the surface it was read from: the organs frame and the sequence the band took it at
+    (let frameName (ggf-name (fgtm-space root "organs")))
+    (let frameLabel (substring frameName 1 (str_len frameName)))
+    (let b12 (ecb-bit (and (str_eq (fgtm-sample-source routing) frameLabel) (and (eq (fgtm-field-value (fgtm-sample-handle routing)) oseq) (eq (fgtm-field-value (fgtm-sample-handle witnessChannel)) oseq))) 2048))
+    ; the views render the organ rows with shm:/<frame>#<seq>
+    (let oevLines (fglui-events-lines osamples epoch 120 20))
+    (let ochLines (fglui-channels-lines osamples epoch 120 20))
+    (let sourceText (str_concat "shm:/" (str_concat frameLabel (str_concat "#" (int_to_str oseq)))))
+    (let b13 (ecb-bit (and (ge (len oevLines) 5) (and (ge (len ochLines) 3) (and (ge (str_find (ecb-line-text (nth oevLines 1)) sourceText 0) 0) (ge (str_find (ecb-line-text (nth ochLines 1)) sourceText 0) 0)))) 4096))
+
+    (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 (add b8 (add b9 (add b10 (add b11 (add b12 b13)))))))))))))

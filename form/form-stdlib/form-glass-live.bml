@@ -747,7 +747,7 @@ section [form.bml] {
             let heatRows = fgl-heat-rows-at(frameNumber, list(), epoch);
             let lastCadence = fgl-cadence-last-load();
             let cadenceRows = if eq(len(lastCadence), 0) then list() else fgl-cadence-measured-rows(nth(lastCadence, 0), nth(lastCadence, 1), nth(lastCadence, 2));
-            let localRows = append(fgo-observe-rows(append(cadenceRows, fgl-fast-rows(frameNumber, list(), list())), epoch, frameNumber), append(heatRows, fgo-observe-rows(fgl-kernel-rows(), epoch, frameNumber)));
+            let localRows = append(fgo-observe-rows(append(cadenceRows, fgl-fast-rows(frameNumber, list(), list())), epoch, frameNumber), append(heatRows, fgo-observe-rows(cons(fgl-gpu-estimate-row(append(ownerRows, hostRows), fgo-metal-word(metal_live(), 11)), fgl-kernel-rows()), epoch, frameNumber)));
             let gaveGlass = fgsr-give("glass", epoch, localRows);
             let fastRows = fgsr-rows-or-absent("glass", fgsr-take("glass", list()));
             let growthRows = fgo-observe-rows(list(fgl-string-growth-row(kernel_stat(5)), fgl-node-growth-row(kernel_stat(4))), epoch, frameNumber);
@@ -782,7 +782,7 @@ section [form.bml] {
             let heatRows = fgl-heat-rows-at(frameNumber, list(), epoch);
             let lastCadence = fgl-cadence-last-load();
             let cadenceRows = if eq(len(lastCadence), 0) then list() else fgl-cadence-measured-rows(nth(lastCadence, 0), nth(lastCadence, 1), nth(lastCadence, 2));
-            let localRows = append(fgo-observe-rows(append(cadenceRows, fgl-fast-rows(frameNumber, list(), list())), epoch, frameNumber), append(heatRows, fgo-observe-rows(fgl-kernel-rows(), epoch, frameNumber)));
+            let localRows = append(fgo-observe-rows(append(cadenceRows, fgl-fast-rows(frameNumber, list(), list())), epoch, frameNumber), append(heatRows, fgo-observe-rows(cons(fgl-gpu-estimate-row(append(ownerRows, hostRows), fgo-metal-word(metal_live(), 11)), fgl-kernel-rows()), epoch, frameNumber)));
             let gaveGlass = fgsr-give("glass", epoch, localRows);
             let fastRows = fgsr-rows-or-absent("glass", fgsr-take("glass", list()));
             let growthRows = fgo-observe-rows(list(fgl-string-growth-row(kernel_stat(5)), fgl-node-growth-row(kernel_stat(4))), epoch, frameNumber);
@@ -849,13 +849,34 @@ section [form.bml] {
                 fgo-int("kernel", "fns", "functions defined", kernel_stat(43), "fns", 0, "cpu-arena", "physical-live", "kernel_stat.43", "live", "kernel", "defns in this process symbol map")),
                 append(fgl-kernels-rows(pids), append(fgl-jit-rows(), append(fgl-kernel-box-rows(kernel_box_rows(4)), fgl-kernel-hot-rows(kernel_hot_rows(8))))));
         }
-        def fgl-gpu-level-live-row(level) = if lt(level, 0) then fgo-unavailable("machine", "gpu-utilization", "host GPU device utilization", "percent", "unified-gpu", "IOAccelerator.PerformanceStatistics", "metal", "the accelerator door is absent in this build or on this host") else fgo-sized("machine", "gpu-utilization", "host GPU device utilization", level, "percent", 100, level, "unified-gpu", "physical-live", "IOAccelerator.PerformanceStatistics.Device Utilization %", if eq(level, 0) then "idle" else "live", "metal", "whole-host GPU level read by the sensor process, the host one accelerator reader");
-        // the machine frame: given by the sensor process every 50 ms -- the host GPU level and its integral (the sensor is the host's one accelerator reader), host CPU busy time over every core, and the sensor's own kernel counters
-        def fgl-machine-rows() = list(
-            fgl-gpu-level-live-row(host_gpu_utilization()),
-            fgo-int("machine", "gpu-busy-us", "host GPU busy time", host_gpu_busy_us(), "microseconds", 0, "unified-gpu", "derived-window", "IOAccelerator.Device Utilization %.integrated", if eq(host_gpu_busy_us(), 0) then "idle" else "live", "metal", "the accelerator level integrated by the sensor process over its own clock gaps, every process on the host; the G gauge is its per-frame delta"),
-            fgo-int("machine", "cpu-busy-us", "host CPU busy time, all cores", host_cpu_busy_us(), "microseconds", 0, "cpu", "physical-live", "mach.host_statistics.HOST_CPU_LOAD_INFO", "live", "kernel", "user+system+nice ticks of every core since boot; the C gauge is its per-frame delta"));
-            fgo-int("kernel", "jit-heat-calls", "heat-lane calls (sensor process)", kernel_stat(44), "calls", 0, "cpu-arena", "physical-live", "kernel_stat.44 sensor", "live", "jit", "the sensor process own heat-lane calls; the J gauge sums every process that gives a frame"));
+        // the accelerator's PerformanceStatistics dictionary, read once on this host (2026-09-06): Device / Renderer / Tiler
+        // Utilization %, Alloc system memory, In use system memory (driver), Allocated PB Size, TiledSceneBytes, SplitSceneCount,
+        // recoveryCount, lastRecoveryTime -- three gauges consumed on read and memory sizes; no cumulative busy time stands there.
+        // So when the gauge answers 0 while another reader of it stands (Activity Monitor), the level is contended, not idle.
+        def fgl-gpu-gauge-contended?(level, readers) = if not(eq(level, 0)) then 0 else if eq(len(readers), 0) then 0 else 1;
+        def fgl-gpu-reader-pid(readers) = if eq(len(readers), 0) then 0 else nth(head(readers), 0);
+        def fgl-gpu-contended-note(readers) = fgd-cat(list("another reader consumes the gauge: Activity Monitor pid ", int_to_str(fgl-gpu-reader-pid(readers)), "; the accelerator hands Device Utilization % to whoever asks first, about once a second, and PerformanceStatistics carries no cumulative busy counter to read instead"));
+        def fgl-gpu-level-live-row-at(level, readers) = if lt(level, 0) then fgo-unavailable("machine", "gpu-utilization", "host GPU device utilization", "percent", "unified-gpu", "IOAccelerator.PerformanceStatistics", "metal", "the accelerator door is absent in this build or on this host") else if eq(fgl-gpu-gauge-contended?(level, readers), 1) then fgo-sized("machine", "gpu-utilization", "host GPU device utilization", 0, "percent", 100, 0, "unified-gpu", "contended", "IOAccelerator.PerformanceStatistics.Device Utilization %", "contended", "metal", fgl-gpu-contended-note(readers)) else fgo-sized("machine", "gpu-utilization", "host GPU device utilization", level, "percent", 100, level, "unified-gpu", "physical-live", "IOAccelerator.PerformanceStatistics.Device Utilization %", if eq(level, 0) then "idle" else "live", "metal", "whole-host GPU level read by the sensor process, the host one accelerator reader");
+        def fgl-gpu-level-live-row(level) = fgl-gpu-level-live-row-at(level, list());
+        def fgl-gpu-busy-live-row-at(busy, contended) = fgo-int("machine", "gpu-busy-us", "host GPU busy time", busy, "microseconds", 0, "unified-gpu", if eq(contended, 1) then "contended" else "derived-window", "IOAccelerator.Device Utilization %.integrated", if eq(contended, 1) then "contended" else if eq(busy, 0) then "idle" else "live", "metal", if eq(contended, 1) then "the integral stands still while another reader consumes the gauge; the G lane renders contended, not 0" else "the accelerator level integrated by the sensor process over its own clock gaps, every process on the host; the G gauge is its per-frame delta");
+        def fgl-gpu-reader-row(readers) = if eq(len(readers), 0) then fgo-int("machine", "gpu-gauge-reader", "other accelerator gauge reader", 0, "pid", 0, "unified-gpu", "physical-live", "libproc.host_processes.Activity Monitor", "none", "metal", "no Activity Monitor process stands; the sensor is the host's one reader of Device Utilization %") else fgo-int("machine", "gpu-gauge-reader", "other accelerator gauge reader", fgl-gpu-reader-pid(readers), "pid", 0, "unified-gpu", "physical-live", "libproc.host_processes.Activity Monitor", "contended", "metal", "Activity Monitor reads the same PerformanceStatistics dictionary; each of its reads consumes the level the sensor would have read");
+        // the machine frame: given by the sensor process every 50 ms -- the host GPU level and its integral (the sensor is the host's one accelerator reader), host CPU busy time over every core, and the sensor's own kernel counters; readers = host_processes "Activity Monitor", refreshed by the sensor every 2 s
+        def fgl-machine-rows-at(readers) {
+            let level = host_gpu_utilization();
+            let contended = fgl-gpu-gauge-contended?(level, readers);
+            list(
+                fgl-gpu-level-live-row-at(level, readers),
+                fgl-gpu-busy-live-row-at(host_gpu_busy_us(), contended),
+                fgl-gpu-reader-row(readers),
+                fgo-int("machine", "cpu-busy-us", "host CPU busy time, all cores", host_cpu_busy_us(), "microseconds", 0, "cpu", "physical-live", "mach.host_statistics.HOST_CPU_LOAD_INFO", "live", "kernel", "user+system+nice ticks of every core since boot; the C gauge is its per-frame delta"),
+                fgo-int("kernel", "jit-heat-calls", "heat-lane calls (sensor process)", kernel_stat(44), "calls", 0, "cpu-arena", "physical-live", "kernel_stat.44 sensor", "live", "jit", "the sensor process own heat-lane calls; the J gauge sums every process that gives a frame"));
+        }
+        def fgl-machine-rows() = fgl-machine-rows-at(list());
+        // the glass's own GPU busy estimate: Metal command-buffer time recorded by every process that gives a frame (this glass, the owner's
+        // Metal queue) -- no accelerator gauge, nobody else consumes it; the second lane beside a gauge another reader may hold
+        def fgl-gpu-busy-row-id?(id) = if str_eq(id, "gpu-busy") then 1 else if str_eq(id, "gpu.owner.busy-us-total") then 1 else if str_eq(id, "jit.owner.metal-busy-us-total") then 1 else 0;
+        def fgl-gpu-estimate-sum(rows, sum) = if eq(len(rows), 0) then sum else fgl-gpu-estimate-sum(tail(rows), if and(eq(fgl-gpu-busy-row-id?(fgo-id(head(rows))), 1), and(eq(fgo-present?(head(rows)), 1), str_eq(fgo-value-kind(head(rows)), "int"))) then add(sum, fgo-int-value(head(rows))) else sum);
+        def fgl-gpu-estimate-row(rows, ownBusyUs) = fgo-int("machine", "gpu-busy-estimate-us", "GPU busy estimate, Metal timing of every frame-giving process", add(ownBusyUs, fgl-gpu-estimate-sum(rows, 0)), "microseconds", 0, "unified-gpu", "derived-window", "metal_live.gpu-busy-us summed over frames", if eq(add(ownBusyUs, fgl-gpu-estimate-sum(rows, 0)), 0) then "idle" else "live", "metal", "command-buffer GPU time measured by the processes themselves; uncontended, but only the processes that give frames are counted");
         // the frame cache: the inventory read-state per publisher keyed by gift seq or file mtime, and the observations held between their every-fourth-frame refresh
         def fgl-cache(snapshots, observations) = list(snapshots, observations, list(), list());
         def fgl-cache-with-samples(snapshots, observations, samples) = list(snapshots, observations, samples, list());
@@ -884,7 +905,7 @@ section [form.bml] {
             let storageHeld = fgsr-take("storage", heldStorage);
             let storageRows = fgsr-rows-or-absent("storage", storageHeld);
             let heatRows = fgl-heat-rows-at(frame, heldHeat, epoch);
-            let localRows = append(fgo-observe-rows(fgl-frame-fast-rows(frame, priorWorkMs, priorWaitMs, priorBudgetMs, fgl-fast-rows(frame, heldFast, list())), epoch, frame), append(heatRows, fgo-observe-rows(fgl-kernel-rows(), epoch, frame)));
+            let localRows = append(fgo-observe-rows(fgl-frame-fast-rows(frame, priorWorkMs, priorWaitMs, priorBudgetMs, fgl-fast-rows(frame, heldFast, list())), epoch, frame), append(heatRows, fgo-observe-rows(cons(fgl-gpu-estimate-row(append(ownerRows, hostRows), fgo-metal-word(metal_live(), 11)), fgl-kernel-rows()), epoch, frame)));
             let gaveGlass = fgsr-give("glass", epoch, localRows);
             let fastRows = append(fgsr-rows-or-absent("glass", fgsr-take("glass", list())), ownerRows);
             let baseMetricsObserved = append(fgo-observe-rows(list(fgl-string-growth-row(stringBaseline), fgl-node-growth-row(nodeBaseline)), epoch, frame), append(fastRows, append(hostRows, append(queueRows, storageRows))));
