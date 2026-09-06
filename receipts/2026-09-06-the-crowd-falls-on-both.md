@@ -78,7 +78,7 @@ number.** The batched prefill lane answers `[Spanish]` on this fixture at tick 0
 that on the kernels from before my first edit too (checked by putting HEAD~1's two files back and
 running the same probe), so it is a standing condition of that lane and not something I introduced.
 
-## The lanes, against their floors
+## The lanes, against their floors — and what I could not close
 
 At the baseline reading, before any edit, with the machine at **388.52 GB/s**:
 
@@ -86,6 +86,22 @@ At the baseline reading, before any edit, with the machine at **388.52 GB/s**:
 |---|---|---|---|
 | encode | 4.05 ms | 0.21 ms | 18.96x |
 | wtoken | 1.00 ms | 0.15 ms | 6.57x |
+
+**No comparable after-reading exists, and I will not invent one.** By the time the work stood, the
+lens read 178 to 188 GB/s and the lanes I never touched had moved with it — `1btoken` 12.6 ms to
+86 ms, `4in1` 3.9 ms to 23 ms. Under that I ran the whole lane both ways, interleaved, putting
+HEAD~2's two files back between runs: three rounds gave encode ratios of 0.95, 0.81 and 1.54 and
+token ratios of 1.04, 0.85 and 0.95. The spread is ±50 percent and the effect I am looking for is
+smaller than the spread. **At the lane level, today, the answer is: not measurable.** What is measured
+is each kernel, adjacent, in one process — the table above — and that every reading the pass produces
+is unchanged.
+
+There is a real edge in this that the lane numbers hide. Five of the changes cost a launch (the
+encode went 29 dispatches to 38, a token 35 to 40) to save far more work per launch. On a quiet
+machine a launch is about 3 µs and the trade is free. On a machine where three other agents are
+queueing, a launch is hundreds of microseconds and the trade is close. **Dispatch count is the
+currency of a crowded GPU; bytes are the currency of a quiet one**, and this pass now spends more of
+the first to spend much less of the second.
 
 And one honest thing the lens cannot say for the encode: **its floor is not the memory floor.** An
 8 s window is about 8.1 GFLOP. This M4 Max's forty cores give on the order of 16 TFLOPS of f32, so
@@ -113,6 +129,9 @@ I came to make a pass faster on a machine that was quietly changing speed by a f
 underneath me, and my first three readings were all honest and all useless. The fix was not a quieter
 machine — I do not get one, three siblings were working — but a comparison that carries its own
 control: emit both shapes, dispatch them alternately in one process, and let the crowd fall on both.
+The limit of that fix is exact and worth naming: it works for anything I can emit twice, and it does
+not reach a whole lane, because a lane is not a kernel I can hold two of at once. That is why the
+kernel table below has numbers and the lane table above has an honest blank.
 
 Where discomfort became gold: I had a clean theory that the gemm was barrier-bound and I wrote the
 twin to prove it. The race said no, twice, on five shapes of six. Sitting with that rather than
