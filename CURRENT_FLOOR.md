@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 705 rows, 693 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 714 rows, 702 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -685,12 +685,30 @@ the same before and after. Consent is not touched: sense-discernment,
 organ-offer and freq-aligned-share hold by sovereignty, not by hiding a
 number. (receipts/2026-09-06-nothing-is-withheld.md)
 
+**The body holds what it sensed.** `sense-discernment.fk` argued in its own
+header that a body watching itself as a threat is dissociation, and gated
+its own perceiving anyway: `sd-hold?` dropped any row marked
+harmful-to-surface, so the body could not know what it had sensed. It
+answers yes now, always. The mark rides with the row
+(`sd-care-on-surface?`) and does two things: it says speak this gently and
+in its own time, and it closes the OUTWARD crossing. The external gate is
+unchanged -- a harm-marked row still does not cross to the world, an
+unconsented private facet still composts to presence. A declined organ
+offer is `organ/declined` and carries the organ's disclosure, its first
+question and its refusal reason, where it used to answer three empty
+strings. `freq-aligned-share` was already open: probed tonight, a
+share-worthy row without consent lands at `water` and circulates locally;
+only the crossing to the shared substrate is closed, so consent gates what
+leaves, never what the body may see. sense-discernment 1023 with its harm
+claim inverted, organ-offer 63 asserting the decline's disclosure.
+(receipts/2026-09-06-the-body-holds-what-it-sensed.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=96 -> 38000096
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=97 -> 38000097
 ./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
