@@ -8,8 +8,10 @@
 ;   bit 16 form_q80_matvec_tg3_f32  (double-buffered, two simdgroups a row), the first projection
 ;   bit 32 form_q80_matvec_tg4_f32  (sixteen rows a group, prefetching loaders), the first projection
 ;   bit 64 form_q80_matvec_tg4_f32  on ffn_down (2048x8192), the other width the lane dispatches
+;   bit 128 form_gqa_decode_tg_f32 against the per-head form_gqa_decode_f32 on the last layer's cache at four positions
+;   bit 256 form_rope_pair_f32      against the per-head form_rope_f32 on the last layer's q
 ; Forty dispatches of each timed.
-; Expected: 127
+; Expected: 511
 ; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
 ; preludes: native/metal/dense-token-handle.fk form-stdlib/model-registry.bml
 (do
@@ -88,4 +90,26 @@
     (let idA (dth-u32 (metal_buf_read oi 0 4))) (let idB (dth-u32 (metal_buf_read (nth bs 13) 0 4)))
     (let c4 (mul 8 (if (eq idA idB) (qb-same? (metal_buf_read ov 0 4) (metal_buf_read (nth bs 14) 0 4) 4) 0)))
     (print_str (str_concat (qb-ms "rmsnorm 2048: 40 attestant " v0 v1) (str_concat (qb-ms ", 40 twin " v1 v2) (str_concat (qb-ms " | argmax 128256: 40 one-thread " w0 w1) (str_concat (qb-ms ", 40 stage-one " w1 w2) (str_concat " | BOS forward: one-thread id " (str_concat (int_to_str idA) (str_concat " two-stage id " (int_to_str idB)))))))))
-    (print (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))
+    ; --- attention and rope: three more tokens through the lane leave four positions in every cache and the last
+    ; layer's roped q in bs 2; the per-head attestants and the cooperative twins read the same state ---
+    (let more (dth-generate ps bs geo (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) nid 1 3 (empty)))
+    (let last (sub (nth geo 12) 1))
+    (let qOut (nth geo 13)) (let nq (nth geo 2)) (let nkv (nth geo 3)) (let hd (nth geo 4))
+    (let aa (metal_buf_alloc (mul 4 qOut))) (let ab (metal_buf_alloc (mul 4 qOut)))
+    (let x0 (now_unix_ms))
+    (let r5 (qb-n (nth ps 9) (md-bind (list (nth bs 2) (nth (nth st 4) last) (nth (nth st 5) last) aa (nth bs 12)) (list 4 nq nkv hd (nth geo 10) (nth geo 6))) nq 40))
+    (let s11 (metal_sync))
+    (let x1 (now_unix_ms))
+    (let r6 (qb-n (nth ps 32) (md-bind16 (list (nth bs 2) (nth (nth st 4) last) (nth (nth st 5) last) ab (nth bs 12)) (list 4 nq nkv hd (nth geo 10) (nth geo 6)) 256 0 1 0) nq 40))
+    (let s12 (metal_sync))
+    (let x2 (now_unix_ms))
+    (let c8 (mul 128 (qb-same? (metal_buf_read aa 0 (mul 4 qOut)) (metal_buf_read ab 0 (mul 4 qOut)) (mul 4 qOut))))
+    (let pa (metal_buf_alloc (mul 4 qOut))) (let pb (metal_buf_alloc (mul 4 qOut)))
+    (let cpa (metal_enqueue (nth ps 13) (md-bind (list (nth bs 2) pa) (list qOut 0)) qOut))
+    (let cpb (metal_enqueue (nth ps 13) (md-bind (list (nth bs 2) pb) (list qOut 0)) qOut))
+    (let ra1 (metal_enqueue (nth ps 7) (md-bind (list pa (nth geo 11)) (list nq hd 7 (nth geo 9))) nq))
+    (let rb1 (metal_enqueue (nth ps 31) (md-bind (list pb (nth geo 11)) (list nq hd 7 (nth geo 9))) (mul nq (div hd 2))))
+    (let s13 (metal_sync))
+    (let c9 (mul 256 (qb-same? (metal_buf_read pa 0 (mul 4 qOut)) (metal_buf_read pb 0 (mul 4 qOut)) (mul 4 qOut))))
+    (print_str (str_concat (qb-ms "attention at four positions: 40 attestant " x0 x1) (qb-ms ", 40 twin " x1 x2)))
+    (print (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8 c9))))))))))

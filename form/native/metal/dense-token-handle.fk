@@ -89,6 +89,20 @@
         (str_concat fname
             " (device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float xv = x[i]; float t = 0.7978845608028654f * (xv + 0.044715f * xv * xv * xv); float at = (t < 0.0f) ? -t : t; float e = fexp(-2.0f * at); float s = (1.0f - e) / (1.0f + e); float th = (t < 0.0f) ? -s : s; y[i] = 0.5f * xv * (1.0f + th); }")))
 
+    ; THE COOPERATIVE ATTENTION, byte for byte form_gqa_decode_f32 (one thread per query head, serial over the
+    ; cache prefix, every score and value partial round-tripping device memory — 0.175 ms a layer at eleven
+    ; positions, 2.8 ms of a token). One threadgroup per query head. The three folds keep their order and
+    ; change hands: lane p folds position p's dot (c descending, `p + acc`), thread 0 takes the max and the
+    ; ascending sum of exponentials, lane i folds y_i over positions ascending (`pv = vc * sc; y = y + pv`,
+    ; from `0.0f` exactly as the attestant zeroes first). What crosses the barrier is `sumes`, never `invs`:
+    ; each lane computes `1.0f / sumes` itself so `e * invs` is the same expression the attestant's compiler
+    ; sees (the rmsnorm bisect's teaching). Radius: npos <= 1024 (the staged scores); the lane routes a larger
+    ; pool to the attestant. Dispatch: mode 1, groups = nq, 256 threads.
+    (defn dth-attn-tw-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device float* y [[buffer(3)]], device float* sc [[buffer(4)]], constant uint& npos [[buffer(5)]], constant uint& nq [[buffer(6)]], constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant float& scale [[buffer(9)]], constant uint& sstride [[buffer(10)]], uint h [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { threadgroup float ss[1024]; threadgroup float ee[1024]; threadgroup float red[2]; if (h >= nq) return; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint qoff = h * hd; uint koff = kvh * hd; { uint p = t; while (p < npos) { float acc = 0.0f; uint c = hd; while (c > 0) { c -= 1; float pr = q[qoff + c] * kc[p * KVD + koff + c]; acc = pr + acc; } ss[p] = acc * scale; p += nt; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { float mx = ss[0]; uint p = 1; while (p < npos) { if (ss[p] > mx) { mx = ss[p]; } p += 1; } red[0] = mx; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float mx = red[0]; { uint p = t; while (p < npos) { ee[p] = fexp(ss[p] - mx); p += nt; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { float sumes = 0.0f; uint p = 0; while (p < npos) { sumes = sumes + ee[p]; p += 1; } red[1] = sumes; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float sumes = red[1]; float invs = 1.0f / sumes; { uint p = t; while (p < npos) { ss[p] = ee[p] * invs; p += nt; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); { uint i = t; while (i < hd) { float yi = 0.0f; uint p = 0; while (p < npos) { float pv = vc[p * KVD + koff + i] * ss[p]; yi = yi + pv; p += 1; } y[qoff + i] = yi; i += nt; } } }")))
+
     ; d[i] = s[soff + i] — the read-side twin of the cache move, for slicing a fused qkv.
     (defn dth-copyfrom-msl (fname)
         (str_concat "kernel void "
@@ -117,7 +131,7 @@
         (str_concat (str_concat (q80-msl-appendix "form_q80_dequant_f32" "form_q80_matvec_f32" "form_q80_matvec_lane_f32") (str_concat (q80-matvec-tg-body "form_q80_matvec_tg_f32") (str_concat (q80-matvec-tg2-body "form_q80_matvec_tg2_f32") (str_concat (q80-matvec-tg3-body "form_q80_matvec_tg3_f32") (str_concat (q80-matvec-tg4-body "form_q80_matvec_tg4_f32") (dth-rmsnorm-tw-msl))))))
         (str_concat (q5m-msl-appendix "form_q5k_dequant_f32" "form_q5k_matvec_f32"
                                       "form_q50_dequant_f32" "form_q50_matvec_f32")
-        (str_concat (ldm-msl-unit)
+        (str_concat (str_concat (ldm-msl-unit) (dth-attn-tw-msl "form_gqa_decode_tg_f32"))
         (str_concat (dth-copy-msl "form_copy_off_f32")
         (str_concat (dth-neox-msl "form_rope_neox_f32")
         (str_concat (dth-ln-msl "form_layernorm_f32")
@@ -267,7 +281,9 @@
               (metal_pipeline msl "form_q80_matvec_tg3_f32")     ; 27 the double-buffered twin (two simdgroups a row)
               (metal_pipeline msl "form_q80_matvec_tg4_f32")     ; 28 sixteen rows a group, prefetching loaders (dispatched)
               (metal_pipeline msl "form_argmax_part_f32")        ; 29 greedy selection, stage one (per-part lowest max)
-              (metal_pipeline msl "form_argmax_comb_f32")))      ; 30 greedy selection, stage two (ascending fold of the parts)
+              (metal_pipeline msl "form_argmax_comb_f32")        ; 30 greedy selection, stage two (ascending fold of the parts)
+              (metal_pipeline msl "form_rope_pair_f32")          ; 31 rope at pair grain (llama-decode-msl's, exact by construction; dispatched)
+              (metal_pipeline msl "form_gqa_decode_tg_f32")))    ; 32 the cooperative attention (dispatched)
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
@@ -350,16 +366,25 @@
         (do (metal_enqueue (nth ps 29) (md-bind (list lh pih pvh) (list n (dth-argmax-parts))) (dth-argmax-parts))
             (metal_enqueue (nth ps 30) (md-bind16 (list pih pvh oih ovh) (list (dth-argmax-parts)) 256 0 1 0) 1)))
 
-    ; style 0: adjacent pairs over the whole head. style 1: half-split over the first rd dims.
+    ; style 0: adjacent pairs over the whole head, one thread per PAIR (form_rope_pair_f32, the per-head
+    ; kernel's own expression per pair; hd even, else the per-head kernel). style 1: half-split over the
+    ; first rd dims, per head.
     (defn dth-rope (ps style vh ropeH nh hd rd pos baseBits)
         (if (eq style 1)
             (metal_enqueue (nth ps 8) (md-bind (list vh ropeH) (list nh hd rd pos baseBits)) nh)
-            (metal_enqueue (nth ps 7) (md-bind (list vh ropeH) (list nh hd pos baseBits)) nh)))
+        (if (eq (mod hd 2) 0)
+            (metal_enqueue (nth ps 31) (md-bind (list vh ropeH) (list nh hd pos baseBits)) (mul nh (div hd 2)))
+            (metal_enqueue (nth ps 7) (md-bind (list vh ropeH) (list nh hd pos baseBits)) nh))))
 
+    ; the cooperative attention twin while the pool fits its staged scores; the per-head attestant past it
     (defn dth-attn (ps qh kh vh yh sh npos nq nkv hd scaleBits sstride)
-        (metal_enqueue (nth ps 9)
-                       (md-bind (list qh kh vh yh sh) (list npos nq nkv hd scaleBits sstride))
-                       nq))
+        (if (le sstride 1024)
+            (metal_enqueue (nth ps 32)
+                           (md-bind16 (list qh kh vh yh sh) (list npos nq nkv hd scaleBits sstride) 256 0 1 0)
+                           nq)
+            (metal_enqueue (nth ps 9)
+                           (md-bind (list qh kh vh yh sh) (list npos nq nkv hd scaleBits sstride))
+                           nq)))
 
     (defn dth-elem (ps p ah bh yh n) (metal_enqueue p (md-bind (list ah bh yh) (list n)) n))
 
