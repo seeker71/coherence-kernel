@@ -1,0 +1,71 @@
+; q6k-q4k-matvec-tg-band.fk — the Q6_K and Q4_K sixteen-rows-a-group twins answer to their one-thread
+; attestants bit for bit, on real weights (llama3.2:3b, a fixed input, byte equality of the read-back),
+; on every shape the dense lane dispatches for that file:
+;   bit 1   form_q4k_matvec_tg4_f32 on the first Q4_K view of layer 0 (attn_q, 3072x3072)
+;   bit 2   form_q6k_matvec_tg4_f32 on the first Q6_K view of the file (attn_v of layer 0, 1024x3072)
+;   bit 4   form_q4k_matvec_tg4_f32 on the first Q4_K ffn_down (3072x8192)
+;   bit 8   form_q6k_matvec_tg4_f32 on the first Q6_K ffn_down (3072x8192; half the file's ffn_down rows are Q6_K)
+;   bit 16  form_q4k_matvec_tg4_f32 on the gate width (ffn_gate, 8192x3072)
+;   bit 32  form_q4k_matvec_tg4_f32 on the k width (attn_k, 1024x3072)
+;   bit 64  form_q6k_matvec_tg4_f32 on the head (output, 128256x3072): the widest Q6_K, eight dispatches
+;   bit 128 one token through the lane with the twins dispatched (dth-mv chooses them by type): the prompt
+;           "The capital of France is" (ids 128000 791 6864 315 9822 374) answers 12366 and then 13 578 6864,
+;           the ids the one-thread lane answered on 2026-09-06 (receipts/2026-09-06-sixteen-rows-on-the-superblock.md)
+; Forty dispatches of each timed (eight for the head).
+; Expected: 255
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+; preludes: native/metal/dense-token-handle.fk form-stdlib/model-registry.bml
+(do
+    (defn qk-f32s (n i acc) (if (ge i n) acc (qk-f32s n (add i 1) (str_concat acc (md-le32 (md-f32-bits (div (str_to_float (int_to_str (sub (mod (mul i 7919) 2000) 1000))) 1000.0)))))))
+    ; the first view of type `ty` (and, when `slot` >= 0, only at that slot of a layer) across the layers
+    (defn qk-find-views (views ty) (if (eq (len views) 0) (list) (if (eq (dth-tv-ty (head views)) ty) (head views) (qk-find-views (tail views) ty))))
+    (defn qk-find (lays ty slot)
+        (if (eq (len lays) 0) (list)
+            (do (let hit (if (ge slot 0)
+                             (if (eq (dth-tv-ty (nth (head lays) slot)) ty) (nth (head lays) slot) (list))
+                             (qk-find-views (head lays) ty)))
+                (if (eq (len hit) 0) (qk-find (tail lays) ty slot) hit))))
+    (defn qk-n (pipe bind threads n) (if (le n 0) 0 (do (let e (metal_enqueue pipe bind threads)) (qk-n pipe bind threads (sub n 1)))))
+    (defn qk-same? (a b n) (if (and (eq (str_len a) n) (str_eq a b)) 1 0))
+    ; one shape: the attestant (one thread a row) n times, the twin n times, the read-backs compared byte for byte;
+    ; prints the shape and both timings, answers `bit` or 0
+    (defn qk-shape (ps tv xh label n bit)
+        (do (let rows (dth-tv-r tv)) (let cols (dth-tv-c tv))
+            (let attest (if (eq (dth-tv-ty tv) 14) (nth ps 0) (nth ps 1)))
+            (let twin (if (eq (dth-tv-ty tv) 14) (nth ps 37) (nth ps 38)))
+            (let ya (metal_buf_alloc (mul 4 rows))) (let yb (metal_buf_alloc (mul 4 rows)))
+            (let t0 (now_unix_ms))
+            (let a (qk-n attest (md-bind (list (dth-tv-h tv) xh ya) (list rows cols)) rows n))
+            (let s0 (metal_sync))
+            (let t1 (now_unix_ms))
+            (let b (qk-n twin (md-bind16 (list (dth-tv-h tv) xh yb) (list rows cols) 96 0 1 0) (div (add rows 15) 16) n))
+            (let s1 (metal_sync))
+            (let t2 (now_unix_ms))
+            (let same (qk-same? (metal_buf_read ya 0 (mul 4 rows)) (metal_buf_read yb 0 (mul 4 rows)) (mul 4 rows)))
+            (print_str (str_concat label (str_concat (if (eq (dth-tv-ty tv) 14) " q6k " " q4k ") (str_concat (int_to_str rows) (str_concat "x" (str_concat (int_to_str cols) (str_concat ": " (str_concat (int_to_str n) (str_concat " attestant " (str_concat (int_to_str (sub t1 t0)) (str_concat " ms, " (str_concat (int_to_str n) (str_concat " tg4 " (str_concat (int_to_str (sub t2 t1)) (str_concat " ms, bytes " (if (eq same 1) "same" "DIFFER"))))))))))))))))
+            (if (eq same 1) bit 0)))
+    (defn qk-join (xs acc) (if (eq (len xs) 0) acc (qk-join (tail xs) (str_concat acc (str_concat " " (int_to_str (head xs)))))))
+    (let st (dth-open (mr-path (mr-find "llama32-3b")) 256 (sub 0 1)))
+    (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2)) (let lays (nth st 3))
+    (let xh (metal_buf_alloc (mul 4 8192)))
+    (let w (metal_buf_write xh 0 (qk-f32s 8192 0 "")))
+    (let c1 (qk-shape ps (qk-find lays 12 1) xh "attn_q" 40 1))
+    (let c2 (qk-shape ps (qk-find lays 14 (sub 0 1)) xh "first q6k" 40 2))
+    (let c3 (qk-shape ps (qk-find lays 12 8) xh "ffn_down" 40 4))
+    (let c3b (qk-shape ps (qk-find lays 14 8) xh "ffn_down" 40 8))
+    (let c4 (qk-shape ps (qk-find lays 12 6) xh "ffn_gate" 40 16))
+    (let c5 (qk-shape ps (qk-find lays 12 2) xh "attn_k" 40 32))
+    (let c6 (qk-shape ps (nth st 8) xh "head" 8 64))
+    ; --- one token through the lane, the twins dispatched: the same ids the one-thread lane answered ---
+    (let t0 (now_unix_ms))
+    (let pf (dth-prefill ps bs geo lays (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) (list 128000 791 6864 315 9822 374) 0))
+    (let first (nth pf 0))
+    (let t1 (now_unix_ms))
+    (let rest (dth-generate ps bs geo lays (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) first 6 3 (empty)))
+    (let t2 (now_unix_ms))
+    (let got (append (list first) rest))
+    (print_str (str_concat "prefill 6 " (str_concat (int_to_str (sub t1 t0)) (str_concat " ms, decode 3 " (str_concat (int_to_str (sub t2 t1)) (str_concat " ms, ids" (qk-join got "")))))))
+    (let c7 (if (eq (len got) 4)
+                (if (and (eq (nth got 0) 12366) (and (eq (nth got 1) 13) (and (eq (nth got 2) 578) (eq (nth got 3) 6864)))) 128 0)
+                0))
+    (print (add c1 (add c2 (add c3 (add c3b (add c4 (add c5 (add c6 c7)))))))))

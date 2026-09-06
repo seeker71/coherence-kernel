@@ -143,4 +143,52 @@
         (str_concat (q6m-msl-helpers)
         (str_concat (q6m-dequant-body dname) (q6m-matvec-body mname))))
 
+    ; --- kernel 3: THE COOPERATIVE TWIN of the matvec, sixteen rows a group — q8-0-msl.fk's tg4 shape
+    ; (the double-buffered pv[2][16][129], sixteen folding lanes, 64 prefetching loaders) carried to the
+    ; 256-weight superblock. A step is 128 columns, one HALF (h) of a superblock, and loader (row, g) — the
+    ; 64 loaders are sixteen rows x the four sub-groups — holds that half's bytes for its sub-group in
+    ; registers a whole step before the products are needed: the 32 ql bytes at h*64 + (g mod 2)*32, the
+    ; 32 qh bytes at 128 + h*32, the two scales at 192 + h*8 + 2g and the super-scale, 34 ushorts. The
+    ; stage computes every product exactly as q6k_w does — the same nib / hi / q / sc integers, d by
+    ; q6k_f16 (the attestant's own decode, not as_type<half>), ((d * sc) * q) * x — and the sixteen lanes
+    ; of simdgroup 0 fold j counting down, `p + acc`: the same association, the same rounding, bit for bit
+    ; the attestant. Dispatch: mode 1, groups = ceil(rows / 16), 96 threads; cols a multiple of 256.
+    ; Emitted AFTER the unit (needs <metal_stdlib> for the barrier; the unit is header-free by design). ---
+    (defn q6m-tg4-fold (k acc)
+        (if (lt k 0) acc
+            (q6m-tg4-fold (sub k 1) (str_concat acc (str_concat "acc = pv[ci & 1u][lane][" (str_concat (int_to_str k) "u] + acc; "))))))
+    ; the register load of step `ls` for loader (row, sub): ushort reads, every offset even (210 is)
+    (defn q6m-tg4-load (step)
+        (str_concat "{ uint ls = "
+        (str_concat step
+                    "; uint lh = ls & 1u; device const ushort* hp = (device const ushort*)(qb + (row * nbk + ls / 2u) * 210u); for (uint q = 0u; q < 16u; q += 1u) { hb[q] = hp[lh * 32u + (sub & 1u) * 16u + q]; hb[16u + q] = hp[64u + lh * 16u + q]; } hb[32] = hp[96u + lh * 4u + sub]; hb[33] = hp[104u]; } ")))
+    ; the stage of step `cs` from the registers: q6k_w's integers and products, two weights a ushort
+    (defn q6m-tg4-stage ()
+        "float d = q6k_f16(int(hb[33])); int sc0 = q6k_s8(int(hb[32] & 0xFFu)); int sc1 = q6k_s8(int(hb[32] >> 8)); int p4 = q6k_pow4(int(sub)); bool lo = (sub / 2u == 0u); for (uint e = 0u; e < 32u; e += 2u) { ushort two = hb[e / 2u]; ushort twh = hb[16u + e / 2u]; int la = int(two & 0xFFu); int lb = int(two >> 8); int ua = int(twh & 0xFFu); int ub = int(twh >> 8); int n0 = lo ? q6k_mod(la, 16) : la / 16; int n1 = lo ? q6k_mod(lb, 16) : lb / 16; int q0 = n0 + q6k_mod(ua / p4, 4) * 16 - 32; int q1 = n1 + q6k_mod(ub / p4, 4) * 16 - 32; int sc = (e < 16u) ? sc0 : sc1; uint j = cs * 128u + sub * 32u + e; pv[cs & 1u][lane][sub * 32u + e] = ((d * float(sc)) * float(q0)) * float(x[j]); pv[cs & 1u][lane][sub * 32u + e + 1u] = ((d * float(sc)) * float(q1)) * float(x[j + 1u]); } ")
+    (defn q6m-tg4-kernel (fname sig prefix epilogue)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat sig
+        (str_concat " { threadgroup float pv[2][16][129]; uint nbk = cols / 256u; uint ns = cols / 128u; uint u = (t >= 32u) ? (t - 32u) : 0u; uint lane = (t < 32u) ? t : (u & 15u); uint sub = u / 16u; "
+        (str_concat prefix
+        (str_concat " bool fold = (t < 32u) && (lane < 16u) && (row < rows); bool load = (t >= 32u) && (row < rows); ushort hb[34]; if (load) "
+        (str_concat (q6m-tg4-load "ns - 1u")
+        (str_concat "if (load) { uint cs = ns - 1u; "
+        (str_concat (q6m-tg4-stage)
+        (str_concat "if (ns > 1u) "
+        (str_concat (q6m-tg4-load "ns - 2u")
+        (str_concat "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float acc = 0.0f; uint ci = ns; while (ci > 0u) { ci -= 1u; if (load && ci > 0u) { uint cs = ci - 1u; "
+        (str_concat (q6m-tg4-stage)
+        (str_concat "if (cs > 0u) "
+        (str_concat (q6m-tg4-load "cs - 1u")
+        (str_concat "} if (fold) { "
+        (str_concat (q6m-tg4-fold 127 "")
+        (str_concat "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (fold) { "
+        (str_concat epilogue " } }"))))))))))))))))))))
+    (defn q6m-matvec-tg4-body (fname)
+        (q6m-tg4-kernel fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
+            "uint row = gi * 16u + lane;"
+            "y[row] = acc;"))
+
     0)

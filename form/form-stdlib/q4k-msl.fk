@@ -119,4 +119,50 @@
         (str_concat (q4m-msl-helpers)
         (str_concat (q4m-dequant-body dname) (q4m-matvec-body mname))))
 
+    ; --- kernel 3: THE COOPERATIVE TWIN of the matvec, sixteen rows a group — the same shape q6k-msl.fk's
+    ; q6m-matvec-tg4-body carries (q8-0-msl.fk's tg4: pv[2][16][129], sixteen folding lanes, 64 prefetching
+    ; loaders), on the 144-byte superblock. A step is 128 columns, one half (h) of a superblock; loader
+    ; (row, sub) owns sub-block j = 4h + sub: its 32 qs bytes at 16 + c*32 (c = 2h + sub/2, the nibble by
+    ; hf = sub mod 2), the twelve scale bytes, d and dmin — 24 ushorts in registers a step ahead. The stage
+    ; computes every weight exactly as q4k_w does — the same get_scale_min_k4 integers, d and dmin by
+    ; q4k_f16, (d * sc) * nib - dmin * mn — then times x, and the sixteen lanes fold j counting down,
+    ; `p + acc`. Bit for bit the attestant (the attestant's own one rounding is kept: the same f32 text,
+    ; the same order). Dispatch: mode 1, groups = ceil(rows / 16), 96 threads; cols a multiple of 256. ---
+    (defn q4m-tg4-fold (k acc)
+        (if (lt k 0) acc
+            (q4m-tg4-fold (sub k 1) (str_concat acc (str_concat "acc = pv[ci & 1u][lane][" (str_concat (int_to_str k) "u] + acc; "))))))
+    ; the register load of step `ls` for loader (row, sub): ushort reads, every offset even (144 is)
+    (defn q4m-tg4-load (step)
+        (str_concat "{ uint ls = "
+        (str_concat step
+                    "; uint lh = ls & 1u; uint lc = lh * 2u + sub / 2u; device const ushort* hp = (device const ushort*)(qb + (row * nbk + ls / 2u) * 144u); for (uint q = 0u; q < 16u; q += 1u) { hb[q] = hp[8u + lc * 16u + q]; } for (uint q = 0u; q < 6u; q += 1u) { hb[16u + q] = hp[2u + q]; } hb[22] = hp[0]; hb[23] = hp[1]; } ")))
+    ; the stage of step `cs` from the registers: q4k_w's integers and products, two weights a ushort
+    (defn q4m-tg4-stage ()
+        "float d = q4k_f16(int(hb[22])); float dmin = q4k_f16(int(hb[23])); int sb[12]; for (uint k = 0u; k < 6u; k += 1u) { sb[2u * k] = int(hb[16u + k] & 0xFFu); sb[2u * k + 1u] = int(hb[16u + k] >> 8); } int j4 = int((cs & 1u) * 4u + sub); int sc = (j4 < 4) ? q4k_mod(sb[j4], 64) : q4k_mod(sb[j4 + 4], 16) + (sb[j4 - 4] / 64) * 16; int mn = (j4 < 4) ? q4k_mod(sb[j4 + 4], 64) : (sb[j4 + 4] / 16) + (sb[j4] / 64) * 16; bool lo = ((sub & 1u) == 0u); for (uint e = 0u; e < 32u; e += 2u) { ushort two = hb[e / 2u]; int qa = int(two & 0xFFu); int qc = int(two >> 8); int n0 = lo ? q4k_mod(qa, 16) : qa / 16; int n1 = lo ? q4k_mod(qc, 16) : qc / 16; uint j = cs * 128u + sub * 32u + e; float w0 = (d * float(sc)) * float(n0) - dmin * float(mn); float w1 = (d * float(sc)) * float(n1) - dmin * float(mn); pv[cs & 1u][lane][sub * 32u + e] = w0 * float(x[j]); pv[cs & 1u][lane][sub * 32u + e + 1u] = w1 * float(x[j + 1u]); } ")
+    (defn q4m-tg4-kernel (fname sig prefix epilogue)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat sig
+        (str_concat " { threadgroup float pv[2][16][129]; uint nbk = cols / 256u; uint ns = cols / 128u; uint u = (t >= 32u) ? (t - 32u) : 0u; uint lane = (t < 32u) ? t : (u & 15u); uint sub = u / 16u; "
+        (str_concat prefix
+        (str_concat " bool fold = (t < 32u) && (lane < 16u) && (row < rows); bool load = (t >= 32u) && (row < rows); ushort hb[24]; if (load) "
+        (str_concat (q4m-tg4-load "ns - 1u")
+        (str_concat "if (load) { uint cs = ns - 1u; "
+        (str_concat (q4m-tg4-stage)
+        (str_concat "if (ns > 1u) "
+        (str_concat (q4m-tg4-load "ns - 2u")
+        (str_concat "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float acc = 0.0f; uint ci = ns; while (ci > 0u) { ci -= 1u; if (load && ci > 0u) { uint cs = ci - 1u; "
+        (str_concat (q4m-tg4-stage)
+        (str_concat "if (cs > 0u) "
+        (str_concat (q4m-tg4-load "cs - 1u")
+        (str_concat "} if (fold) { "
+        (str_concat (q4m-tg4-fold 127 "")
+        (str_concat "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (fold) { "
+        (str_concat epilogue " } }"))))))))))))))))))))
+    (defn q4m-matvec-tg4-body (fname)
+        (q4m-tg4-kernel fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
+            "uint row = gi * 16u + lane;"
+            "y[row] = acc;"))
+
     0)
