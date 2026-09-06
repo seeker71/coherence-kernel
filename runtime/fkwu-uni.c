@@ -187,11 +187,15 @@ static void *fk_heap_alt_h;
 static void *fk_heap_alt_t;
 static void fk_live_publish(int final);
 static void fk_f64_pulse(long long fx);
+static void fk_f64_loop_pulse(long long fx, long long fp, long long n);
 static void fk_f64_reset(void);
 static void **fk_f64_mem; /* per-defn f64 leaf pages (this process) */
+static long long *fk_f64_sig; /* per-defn leaf signature: -1 the all-float expression leaf; else bit k = param k float, bit 8 = float result, bit 9 = loop */
 static long long fk_f64_cap;
+static long long *fk_f64_loop_iters_p; /* iterations that ran inside a native loop (kernel_stat 50, live word 32); page-backed once the live page opens */
+#define fk_f64_loop_iters (*fk_f64_loop_iters_p)
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3);
-static long long *fk_fn_native; /* per-defn crystallization state: 0 cold, 1 f64 leaf standing, -1 declined */
+static long long *fk_fn_native; /* per-defn crystallization state: 0 cold, 1 f64 leaf standing, 2 native loop standing, -1 declined */
 static const char *fk_hot_unit_of(long long so);
 static void fk_live_open(void);
 static void fk_live_note_defn(long long j);
@@ -518,10 +522,12 @@ static double fk_num(long long v) {
 /* ── boxing attribution: WHICH recipe is minting floats ─────────────────────
  * Ints ride unboxed (tagged words); every float RESULT allocates a pool slot
  * here. To answer "which sources could use unboxing", each mint is charged to
- * the last-dispatched recipe (fk_cur_fn, set beside every heat bump). The
- * dispatch is a tail-jump, so there is no restore point: attribution bleeds
- * to the callee across returns -- a sampling truth, exact for the hot loops
- * that matter. Written to .fkwu-boxing.<pid> beside the heat board. */
+ * the last-dispatched recipe (fk_cur_fn, set beside every heat bump). A call
+ * with a return point (fk_walk's arms 12/240/241/244) saves the caller and
+ * restores it when the callee returns, so a box minted after the return is the
+ * caller's; a tail-jump arm in fk_walk_body has no return point and hands the
+ * frame to the callee for good -- exact for the hot loops that matter.
+ * Written to .fkwu-boxing.<pid> beside the heat board. */
 static long long fk_cur_fn;
 static long long *fk_fn_fbox;
 #define FK_F64_HEAT 1024
@@ -8262,9 +8268,11 @@ static long long fk_walk_body(long long i, long long fp) {
             }
             fk_vs[fp] = v12;
             fk_vsp = fp + 1;
-            fk_fn_heat[c12] = fk_fn_heat[c12] + 1;
+            long long h12 = fk_fn_heat[c12] + 1;
+            fk_fn_heat[c12] = h12;
             fk_cur_fn = c12;
             fk_heat_pulse();
+            if ((h12 & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c12, fp, 1); } /* the heat ledger is the loop lane's trigger: the frame is whole here */
             i = fk_fn[c12];
             continue;
         }
@@ -8279,9 +8287,11 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_vs[fp] = a0;
             fk_vs[fp + 1] = a1;
             fk_vsp = fp + 2;
-            fk_fn_heat[c240] = fk_fn_heat[c240] + 1;
+            long long h240 = fk_fn_heat[c240] + 1;
+            fk_fn_heat[c240] = h240;
             fk_cur_fn = c240;
             fk_heat_pulse();
+            if ((h240 & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c240, fp, 2); }
             i = fk_fn[c240];
             continue;
         }
@@ -8290,6 +8300,46 @@ static long long fk_walk_body(long long i, long long fp) {
             long long c194 = fk_node[i][1];
             void *m194 = (c194 >= 0 && c194 < fk_f64_cap) ? fk_f64_mem[c194] : 0;
             long long n194 = fk_fnar[c194];
+            long long sig194 = m194 != 0 ? fk_f64_sig[c194] : -1;
+            if (m194 != 0 && sig194 >= 0 && n194 >= 1 && n194 <= 8) {
+                /* the loop leaf: each frame arg must wear the type the loop was emitted for (int = even word, float = pool box);
+                 * ints untag once at the door (v >> 1), floats unbox once, the result tags or boxes once on the way out */
+                long long f194[9];
+                long long k194 = 0, nf194 = 0;
+                int ok194 = 1;
+                while (k194 < n194) {
+                    long long v194 = fk_vs[fp + k194];
+                    if ((sig194 >> k194) & 1) {
+                        if (!fk_isf(v194)) { ok194 = 0; break; }
+                        double d194 = FK_FV(fk_fidx(v194));
+                        memcpy(&f194[k194], &d194, 8);
+                        nf194 = nf194 + 1;
+                    } else {
+                        if ((v194 & 1) != 0) { ok194 = 0; break; }
+                        f194[k194] = v194 >> 1;
+                    }
+                    k194 = k194 + 1;
+                }
+                if (ok194) {
+                    f194[8] = 0;
+                    long long out194;
+                    if ((sig194 >> 8) & 1) {
+                        double (*loopf194)(long long *) = (double (*)(long long *))m194;
+                        double r194 = loopf194(f194);
+                        out194 = fk_fbox(r194);
+                    } else {
+                        long long (*loopi194)(long long *) = (long long (*)(long long *))m194;
+                        out194 = loopi194(f194) << 1;
+                    }
+                    fk_inram_call_total = fk_inram_call_total + 1;
+                    fk_f64_loop_iters = fk_f64_loop_iters + f194[8];
+                    fk_unbox_total = fk_unbox_total + nf194;
+                    if (fk_fn_unbox != 0 && c194 < fk_fn_capacity) { fk_fn_unbox[c194] = fk_fn_unbox[c194] + nf194; }
+                    return out194;
+                }
+                i = fk_node[i][2];
+                continue;
+            }
             if (m194 != 0 && n194 >= 1 && n194 <= 8) {
                 double a194[8];
                 long long k194 = 0;
@@ -8333,9 +8383,11 @@ static long long fk_walk_body(long long i, long long fp) {
                 m241 = m241 + 1;
             }
             fk_vsp = fp + n241;
-            fk_fn_heat[c241] = fk_fn_heat[c241] + 1;
+            long long h241 = fk_fn_heat[c241] + 1;
+            fk_fn_heat[c241] = h241;
             fk_cur_fn = c241;
             fk_heat_pulse();
+            if ((h241 & (FK_F64_HEAT - 1)) == 0) { fk_f64_loop_pulse(c241, fp, n241); }
             i = fk_fn[c241];
             continue;
         }
@@ -8522,43 +8574,96 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
 #define FK_F64_HEAT 1024
 #define FK_F64_NODE_CAP 128
 #define FK_F64_WORD_CAP 1000
-typedef struct { int kind; int a; int b; double lit; } fk_f64_node; /* kind: 1 lit, 2 arg, 3 add, 4 sub, 5 mul, 6 div */
+/* ── the loop lane ────────────────────────────────────────────────────────────
+ * A defn whose body is `(if <compare> <exit> <self tail call>)` (either branch
+ * order) is a loop: every iteration is one heat-lane dispatch. The heat ledger
+ * is its trigger -- each time a defn's heat crosses a FK_F64_HEAT boundary on a
+ * tail-jump arm, fk_f64_loop_pulse reads the TYPE SIGNATURE off the live frame
+ * (int = even tagged word, float = pool box) and emits the loop for exactly
+ * that signature: parameters live in registers (ints UNTAGGED in x10..x17,
+ * floats in d0..d7), the compare is CMP/FCMP + B.cond, the tail call is a
+ * parallel move into the parameter registers and a branch to the loop head,
+ * the exit expression lands in x0/d0, RET. Int arithmetic has its own lane --
+ * ADD/SUB/MADD/SDIV on 64-bit registers, exact like the walker's word math
+ * (the walker's tagged `a + b` IS untagged a + b re-tagged; mul and div untag
+ * first, as here); a float on either side promotes the int through SCVTF, the
+ * walker's fk_num rule. The body is emitted TWICE per pass (unrolled by two,
+ * each copy keeping its own exit test, so no trip-count parity is assumed).
+ * The frame arrives as nine words -- eight raw args, one slot the loop fills
+ * with its iteration count -- and the door untags/unboxes once, tags/boxes
+ * once. A frame whose types differ from the emitted signature walks the
+ * original body: only the first-seen signature crystallizes.
+ * fk_fn_native 2 = loop standing; kernel_stat 49 counts standing loops, 50 the
+ * iterations that ran native; live page words 31/32 the same.
+ */
+typedef struct { int kind; int a; int b; double lit; long long ilit; } fk_f64_node; /* kind: 1 flit 2 farg 3 fadd 4 fsub 5 fmul 6 fdiv 7 ilit 8 iarg 9 iadd 10 isub 11 imul 12 idiv 13 cvt int->float */
 static void **fk_f64_mem;
+static long long *fk_f64_sig;
 static long long fk_f64_cap;
 static long long fk_f64_count_private;
 static long long *fk_f64_count_p = &fk_f64_count_private;
 #define fk_f64_count (*fk_f64_count_p)
+static long long fk_f64_loop_count_private;
+static long long *fk_f64_loop_count_p = &fk_f64_loop_count_private;
+#define fk_f64_loop_count (*fk_f64_loop_count_p)
+static long long fk_f64_loop_iters_private;
+static long long *fk_f64_loop_iters_p = &fk_f64_loop_iters_private;
+#define fk_f64_loop_iters (*fk_f64_loop_iters_p)
 static fk_f64_node fk_f64_prog[FK_F64_NODE_CAP];
 static long long fk_f64_prog_n;
 static void fk_f64_reset(void) {
     long long k = 0;
     while (k < fk_f64_cap) {
         if (fk_f64_mem[k] != 0) { munmap(fk_f64_mem[k], 4096); fk_f64_mem[k] = 0; }
+        fk_f64_sig[k] = -1;
         k = k + 1;
     }
     k = 0;
     while (fk_fn_native != 0 && k < fk_fn_capacity) { fk_fn_native[k] = 0; k = k + 1; }
     fk_f64_count = 0;
+    fk_f64_loop_count = 0;
 }
-/* admit a body node: returns 0 declined, 1 int-typed, 2 float-typed; appends to fk_f64_prog, *out = its index */
-static int fk_f64_admit(long long i, long long arity, int *out) {
+/* room in the leaf tables for defn fx; 0 on allocation failure */
+static int fk_f64_reserve(long long fx) {
+    if (fx < fk_f64_cap) { return 1; }
+    long long next = fk_f64_cap > 0 ? fk_f64_cap : 256;
+    while (next <= fx) { next = next << 1; }
+    void **grown = (void **)malloc((size_t)next * sizeof(void *));
+    long long *gsig = (long long *)malloc((size_t)next * sizeof(long long));
+    if (grown == 0 || gsig == 0) { free(grown); free(gsig); return 0; }
+    long long k = 0;
+    while (k < next) { grown[k] = k < fk_f64_cap ? fk_f64_mem[k] : 0; gsig[k] = k < fk_f64_cap ? fk_f64_sig[k] : -1; k = k + 1; }
+    free(fk_f64_mem); free(fk_f64_sig);
+    fk_f64_mem = grown; fk_f64_sig = gsig;
+    fk_f64_cap = next;
+    return 1;
+}
+static int fk_f64_push(int kind, int a, int b, double lit, long long ilit) {
+    if (fk_f64_prog_n >= FK_F64_NODE_CAP) { return -1; }
+    fk_f64_prog[fk_f64_prog_n].kind = kind; fk_f64_prog[fk_f64_prog_n].a = a; fk_f64_prog[fk_f64_prog_n].b = b;
+    fk_f64_prog[fk_f64_prog_n].lit = lit; fk_f64_prog[fk_f64_prog_n].ilit = ilit;
+    fk_f64_prog_n = fk_f64_prog_n + 1;
+    return (int)(fk_f64_prog_n - 1);
+}
+static int fk_f64_type_of(int n) { int k = fk_f64_prog[n].kind; return (k >= 7 && k <= 12) ? 1 : 2; }
+/* an int-typed node promoted to float (SCVTF) -- the walker's fk_num on the int side of a mixed op */
+static int fk_f64_cvt(int n) { return fk_f64_type_of(n) == 2 ? n : fk_f64_push(13, n, 0, 0.0, 0); }
+/* admit a body node under a per-parameter type signature (types[k]: 1 int, 2 float): returns 0 declined, 1 int-typed,
+ * 2 float-typed; appends to fk_f64_prog, *out = its index */
+static int fk_f64_admit(long long i, long long arity, const int *types, int *out) {
     if (i < 0 || i >= fk_node_count || fk_f64_prog_n >= FK_F64_NODE_CAP) { return 0; }
     long long t = fk_node[i][0];
     if (t == 1) {
-        long long v = fk_node[i][1];
-        if (v > 9007199254740992LL || v < -9007199254740992LL) { return 0; }
-        fk_f64_prog[fk_f64_prog_n].kind = 1; fk_f64_prog[fk_f64_prog_n].lit = (double)v; fk_f64_prog[fk_f64_prog_n].a = 0; fk_f64_prog[fk_f64_prog_n].b = 0;
-        *out = (int)fk_f64_prog_n; fk_f64_prog_n = fk_f64_prog_n + 1;
-        return 1;
+        *out = fk_f64_push(7, 0, 0, 0.0, fk_node[i][1]); /* exact 64-bit; SCVTF rounds it the way (double)v does when a float meets it */
+        return *out < 0 ? 0 : 1;
     }
     if (t == 53) {
         long long lc = fk_node[i][1];
         if (lc < 0 || lc >= fk_node_count || fk_node[lc][0] != 24) { return 0; }
         long long w = fk_walk(i, fk_vsp); /* the literal's own memo: one box per process, minted here if not yet */
         if (!fk_isf(w)) { return 0; }
-        fk_f64_prog[fk_f64_prog_n].kind = 1; fk_f64_prog[fk_f64_prog_n].lit = FK_FV(fk_fidx(w)); fk_f64_prog[fk_f64_prog_n].a = 0; fk_f64_prog[fk_f64_prog_n].b = 0;
-        *out = (int)fk_f64_prog_n; fk_f64_prog_n = fk_f64_prog_n + 1;
-        return 2;
+        *out = fk_f64_push(1, 0, 0, FK_FV(fk_fidx(w)), 0);
+        return *out < 0 ? 0 : 2;
     }
     if (t == 2 || t == 110) {
         long long k = 0;
@@ -8568,22 +8673,24 @@ static int fk_f64_admit(long long i, long long arity, int *out) {
             k = fk_node[li][1];
         }
         if (k < 0 || k >= arity) { return 0; }
-        fk_f64_prog[fk_f64_prog_n].kind = 2; fk_f64_prog[fk_f64_prog_n].a = (int)k; fk_f64_prog[fk_f64_prog_n].b = 0; fk_f64_prog[fk_f64_prog_n].lit = 0.0;
-        *out = (int)fk_f64_prog_n; fk_f64_prog_n = fk_f64_prog_n + 1;
-        return 2;
+        *out = fk_f64_push(types[k] == 2 ? 2 : 8, (int)k, 0, 0.0, 0);
+        return *out < 0 ? 0 : types[k];
     }
     if (t == 3 || t == 4 || t == 42 || t == 10) {
         int a = 0, b = 0;
-        int ta = fk_f64_admit(fk_node[i][1], arity, &a);
+        int ta = fk_f64_admit(fk_node[i][1], arity, types, &a);
         if (ta == 0) { return 0; }
-        int tb = fk_f64_admit(fk_node[i][2], arity, &b);
+        int tb = fk_f64_admit(fk_node[i][2], arity, types, &b);
         if (tb == 0) { return 0; }
-        if (ta != 2 && tb != 2) { return 0; } /* int/int arithmetic is the walker's exact word math; the leaf does not claim it */
-        if (fk_f64_prog_n >= FK_F64_NODE_CAP) { return 0; }
-        fk_f64_prog[fk_f64_prog_n].kind = t == 3 ? 3 : (t == 4 ? 4 : (t == 42 ? 5 : 6));
-        fk_f64_prog[fk_f64_prog_n].a = a; fk_f64_prog[fk_f64_prog_n].b = b; fk_f64_prog[fk_f64_prog_n].lit = 0.0;
-        *out = (int)fk_f64_prog_n; fk_f64_prog_n = fk_f64_prog_n + 1;
-        return 2;
+        int op = t == 3 ? 0 : (t == 4 ? 1 : (t == 42 ? 2 : 3));
+        if (ta == 2 || tb == 2) {
+            a = fk_f64_cvt(a); b = fk_f64_cvt(b);
+            if (a < 0 || b < 0) { return 0; }
+            *out = fk_f64_push(3 + op, a, b, 0.0, 0);
+            return *out < 0 ? 0 : 2;
+        }
+        *out = fk_f64_push(9 + op, a, b, 0.0, 0); /* the int lane: exact 64-bit word math, the walker's own */
+        return *out < 0 ? 0 : 1;
     }
     return 0;
 }
@@ -8592,88 +8699,276 @@ static int fk_f64_put(unsigned int *words, long long *n, unsigned int w) {
     words[*n] = w; *n = *n + 1;
     return 1;
 }
-/* postorder emit; returns the d-register holding the node's value (0..7 an argument, 16..31 a temp), -1 on overflow */
-static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp) {
+/* register codes the emitter hands back: 0..7 d-register argument, 16..31 d-register temp; 100+x an x-register:
+ * x10..x17 int arguments, x1..x7 int temps. x0 is the frame pointer, x8 the iteration counter, x9 literal scratch. */
+static void fk_f64_release(int r, int *ntemp, int *nitemp) {
+    if (r >= 101 && r <= 107) { *nitemp = *nitemp - 1; }
+    else if (r >= 16 && r <= 31) { *ntemp = *ntemp - 1; }
+}
+static int fk_f64_is_temp(int r) { return (r >= 101 && r <= 107) || (r >= 16 && r <= 31); }
+/* MOVZ + 3 MOVK of a 64-bit pattern into x-register xd */
+static int fk_f64_mov64(unsigned int *words, long long *wn, unsigned int xd, unsigned long long bits) {
+    unsigned int hw = 0;
+    while (hw < 4) {
+        unsigned int imm = (unsigned int)((bits >> (16 * hw)) & 0xFFFFULL);
+        unsigned int op = hw == 0 ? 0xD2800000U : 0xF2800000U;
+        if (!fk_f64_put(words, wn, op | (hw << 21) | (imm << 5) | xd)) { return 0; }
+        hw = hw + 1;
+    }
+    return 1;
+}
+/* postorder emit; returns the register code holding the node's value, -1 on overflow */
+static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp, int *nitemp) {
     fk_f64_node *p = &fk_f64_prog[n];
     if (p->kind == 2) { return p->a; }
+    if (p->kind == 8) { return 110 + p->a; }
     if (p->kind == 1) {
         if (*ntemp >= 16) { return -1; }
         int rd = 16 + *ntemp; *ntemp = *ntemp + 1;
         unsigned long long bits; memcpy(&bits, &p->lit, 8);
-        unsigned int hw = 0;
-        while (hw < 4) {
-            unsigned int imm = (unsigned int)((bits >> (16 * hw)) & 0xFFFFULL);
-            unsigned int op = hw == 0 ? 0xD2800000U : 0xF2800000U; /* MOVZ x9 then MOVK x9 */
-            if (!fk_f64_put(words, wn, op | (hw << 21) | (imm << 5) | 9U)) { return -1; }
-            hw = hw + 1;
-        }
+        if (!fk_f64_mov64(words, wn, 9U, bits)) { return -1; }
         if (!fk_f64_put(words, wn, 0x9E670000U | (9U << 5) | (unsigned int)rd)) { return -1; } /* FMOV Dd, X9 */
         return rd;
     }
-    int ra = fk_f64_emit(p->a, words, wn, ntemp);
+    if (p->kind == 7) {
+        if (*nitemp >= 7) { return -1; }
+        int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
+        if (!fk_f64_mov64(words, wn, (unsigned int)rd, (unsigned long long)p->ilit)) { return -1; }
+        return 100 + rd;
+    }
+    if (p->kind == 13) {
+        int ra = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
+        if (ra < 100) { return -1; }
+        fk_f64_release(ra, ntemp, nitemp);
+        if (*ntemp >= 16) { return -1; }
+        int rd = 16 + *ntemp; *ntemp = *ntemp + 1;
+        if (!fk_f64_put(words, wn, 0x9E620000U | ((unsigned int)(ra - 100) << 5) | (unsigned int)rd)) { return -1; } /* SCVTF Dd, Xn */
+        return rd;
+    }
+    int ra = fk_f64_emit(p->a, words, wn, ntemp, nitemp);
     if (ra < 0) { return -1; }
-    int rb = fk_f64_emit(p->b, words, wn, ntemp);
+    int rb = fk_f64_emit(p->b, words, wn, ntemp, nitemp);
     if (rb < 0) { return -1; }
-    if (rb >= 16) { *ntemp = *ntemp - 1; }
-    if (ra >= 16) { *ntemp = *ntemp - 1; }
-    if (*ntemp >= 16) { return -1; }
+    fk_f64_release(rb, ntemp, nitemp);
+    fk_f64_release(ra, ntemp, nitemp);
+    if (p->kind >= 9 && p->kind <= 12) {
+        if (ra < 100 || rb < 100 || *nitemp >= 7) { return -1; }
+        unsigned int xa = (unsigned int)(ra - 100), xb = (unsigned int)(rb - 100);
+        int rd = 1 + *nitemp; *nitemp = *nitemp + 1;
+        unsigned int op = p->kind == 9 ? 0x8B000000U : (p->kind == 10 ? 0xCB000000U : (p->kind == 11 ? 0x9B007C00U : 0x9AC00C00U)); /* ADD SUB MADD(xzr) SDIV */
+        if (!fk_f64_put(words, wn, op | (xb << 16) | (xa << 5) | (unsigned int)rd)) { return -1; }
+        return 100 + rd;
+    }
+    if (ra >= 100 || rb >= 100 || *ntemp >= 16) { return -1; }
     int rd = 16 + *ntemp; *ntemp = *ntemp + 1;
     unsigned int op = p->kind == 3 ? 0x1E602800U : (p->kind == 4 ? 0x1E603800U : (p->kind == 5 ? 0x1E600800U : 0x1E601800U));
     if (!fk_f64_put(words, wn, op | ((unsigned int)rb << 16) | ((unsigned int)ra << 5) | (unsigned int)rd)) { return -1; }
     return rd;
 }
-static void fk_f64_pulse(long long fx) {
-    if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
-    if (fk_fn_native[fx] != 0) { return; }
-    fk_fn_native[fx] = -1;
+/* the defn's body with the 194 wrapper and a parameter-only let frame peeled: 0 when the shape is not a leaf's */
+static int fk_f64_body_of(long long fx, long long *root_out, long long *orig_out, long long *body_out) {
     long long arity = fk_fnar[fx];
-    if (arity < 1 || arity > 8) { return; }
+    if (arity < 1 || arity > 8) { return 0; }
     long long root = fk_fn[fx];
-    if (root < 0 || root >= fk_node_count) { return; }
+    if (root < 0 || root >= fk_node_count) { return 0; }
     long long body = root;
     if (fk_node[body][0] == 194) { body = fk_node[body][2]; }
     long long orig = body;
     if (body >= 0 && body < fk_node_count && fk_node[body][0] == 111) {
         long long li = fk_node[body][1];
         long long slots = (li >= 0 && li < fk_node_count && fk_node[li][0] == 1) ? fk_node[li][1] : -1;
-        if (slots < 0 || slots + 1 > arity) { return; } /* a let slot beyond the parameters: not this leaf's shape */
+        if (slots < 0 || slots + 1 > arity) { return 0; } /* a let slot beyond the parameters: not this leaf's shape */
         body = fk_node[body][2];
     }
-    fk_f64_prog_n = 0;
-    int top = 0;
-    if (fk_f64_admit(body, arity, &top) != 2) { return; }
+    if (body < 0 || body >= fk_node_count) { return 0; }
+    *root_out = root; *orig_out = orig; *body_out = body;
+    return 1;
+}
+/* the words land on a MAP_JIT page and the defn's entry becomes the tag-194 door */
+static int fk_f64_install(long long fx, long long root, long long orig, unsigned int *words, long long wn, long long sig, long long state) {
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
-    unsigned int words[FK_F64_WORD_CAP];
-    long long wn = 0;
-    int ntemp = 0;
-    int rr = fk_f64_emit(top, words, &wn, &ntemp);
-    if (rr < 0) { return; }
-    if (rr != 0 && !fk_f64_put(words, &wn, 0x1E604000U | ((unsigned int)rr << 5))) { return; } /* FMOV D0, Dr */
-    if (!fk_f64_put(words, &wn, 0xD65F03C0U)) { return; }
     void *mem = mmap(0, 4096, 0x7, 0x1802, -1, 0);
-    if (mem == (void *)-1) { return; }
+    if (mem == (void *)-1) { return 0; }
     pthread_jit_write_protect_np(0);
     memcpy(mem, words, (size_t)(wn * 4));
     pthread_jit_write_protect_np(1);
     __builtin___clear_cache((char *)mem, (char *)mem + wn * 4);
-    if (fx >= fk_f64_cap) {
-        long long next = fk_f64_cap > 0 ? fk_f64_cap : 256;
-        while (next <= fx) { next = next << 1; }
-        void **grown = (void **)malloc((size_t)next * sizeof(void *));
-        if (grown == 0) { munmap(mem, 4096); return; }
-        long long k = 0;
-        while (k < next) { grown[k] = k < fk_f64_cap ? fk_f64_mem[k] : 0; k = k + 1; }
-        free(fk_f64_mem);
-        fk_f64_mem = grown;
-        fk_f64_cap = next;
-    }
+    if (!fk_f64_reserve(fx)) { munmap(mem, 4096); return 0; }
     fk_f64_mem[fx] = mem;
+    fk_f64_sig[fx] = sig;
     if (fk_node[root][0] != 194) { fk_fn[fx] = fk_smknode(194, fx, orig, 0); }
-    fk_fn_native[fx] = 1;
-    fk_f64_count = fk_f64_count + 1;
+    fk_fn_native[fx] = state;
+    return 1;
 #else
-    (void)orig; (void)top;
+    (void)fx; (void)root; (void)orig; (void)words; (void)wn; (void)sig; (void)state;
+    return 0;
 #endif
+}
+static void fk_f64_pulse(long long fx) {
+    if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
+    if (fk_fn_native[fx] != 0) { return; }
+    long long root = 0, orig = 0, body = 0;
+    if (!fk_f64_body_of(fx, &root, &orig, &body)) { fk_fn_native[fx] = -1; return; }
+    if (fk_node[body][0] == 6) { return; } /* loop-shaped: the heat pulse reads the signature off a whole frame; stay cold until then */
+    fk_fn_native[fx] = -1;
+    long long arity = fk_fnar[fx];
+    int types[8] = {2, 2, 2, 2, 2, 2, 2, 2}; /* the expression leaf: every parameter a float, the door holds the rest to the walker */
+    fk_f64_prog_n = 0;
+    int top = 0;
+    if (fk_f64_admit(body, arity, types, &top) != 2) { return; }
+    unsigned int words[FK_F64_WORD_CAP];
+    long long wn = 0;
+    int ntemp = 0, nitemp = 0;
+    int rr = fk_f64_emit(top, words, &wn, &ntemp, &nitemp);
+    if (rr < 0 || rr >= 100) { return; }
+    if (rr != 0 && !fk_f64_put(words, &wn, 0x1E604000U | ((unsigned int)rr << 5))) { return; } /* FMOV D0, Dr */
+    if (!fk_f64_put(words, &wn, 0xD65F03C0U)) { return; }
+    if (!fk_f64_install(fx, root, orig, words, wn, -1, 1)) { return; }
+    fk_f64_count = fk_f64_count + 1;
+}
+/* one pass of the loop body: compare, exit branch (recorded for patching), the tail call as a parallel move into the
+ * parameter registers, the iteration count. 0 on overflow. */
+static int fk_f64_loop_pass(unsigned int *words, long long *wn, int ca, int cb, unsigned int exitcc, long long *patch, long long *npatch,
+                            const int *argn, const int *types, long long arity) {
+    int ntemp = 0, nitemp = 0;
+    int ra = fk_f64_emit(ca, words, wn, &ntemp, &nitemp);
+    if (ra < 0) { return 0; }
+    int rb = fk_f64_emit(cb, words, wn, &ntemp, &nitemp);
+    if (rb < 0) { return 0; }
+    if (ra >= 100) {
+        if (!fk_f64_put(words, wn, 0xEB00001FU | ((unsigned int)(rb - 100) << 16) | ((unsigned int)(ra - 100) << 5))) { return 0; } /* CMP Xa, Xb */
+    } else {
+        if (!fk_f64_put(words, wn, 0x1E602000U | ((unsigned int)rb << 16) | ((unsigned int)ra << 5))) { return 0; } /* FCMP Da, Db */
+    }
+    if (*npatch >= 8) { return 0; }
+    patch[*npatch] = *wn; *npatch = *npatch + 1;
+    if (!fk_f64_put(words, wn, 0x54000000U | exitcc)) { return 0; } /* B.cond exit -- offset patched below */
+    ntemp = 0; nitemp = 0;
+    int held[8];
+    long long k = 0;
+    while (k < arity) {
+        int r = fk_f64_emit(argn[k], words, wn, &ntemp, &nitemp);
+        if (r < 0) { return 0; }
+        if (!fk_f64_is_temp(r)) { /* a bare parameter or argument register: copy it so the parallel move cannot read a slot already written */
+            if (r >= 100) {
+                if (nitemp >= 7) { return 0; }
+                int rd = 1 + nitemp; nitemp = nitemp + 1;
+                if (!fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(r - 100) << 16) | (unsigned int)rd)) { return 0; } /* MOV Xd, Xr */
+                r = 100 + rd;
+            } else {
+                if (ntemp >= 16) { return 0; }
+                int rd = 16 + ntemp; ntemp = ntemp + 1;
+                if (!fk_f64_put(words, wn, 0x1E604000U | ((unsigned int)r << 5) | (unsigned int)rd)) { return 0; } /* FMOV Dd, Dr */
+                r = rd;
+            }
+        }
+        held[k] = r;
+        k = k + 1;
+    }
+    k = 0;
+    while (k < arity) {
+        if (types[k] == 2) {
+            if (!fk_f64_put(words, wn, 0x1E604000U | ((unsigned int)held[k] << 5) | (unsigned int)k)) { return 0; } /* FMOV Dk, Dheld */
+        } else {
+            if (!fk_f64_put(words, wn, 0xAA0003E0U | ((unsigned int)(held[k] - 100) << 16) | (unsigned int)(10 + k))) { return 0; } /* MOV X(10+k), Xheld */
+        }
+        k = k + 1;
+    }
+    return fk_f64_put(words, wn, 0x91000508U); /* ADD X8, X8, #1 */
+}
+static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
+    if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
+    if (fk_fn_native[fx] != 0) { return; }
+    long long root = 0, orig = 0, body = 0;
+    if (!fk_f64_body_of(fx, &root, &orig, &body)) { fk_fn_native[fx] = -1; return; }
+    if (fk_node[body][0] != 6) { fk_f64_pulse(fx); return; } /* not a loop: the expression leaf is asked instead */
+    long long arity = fk_fnar[fx];
+    if (n != arity) { return; } /* a partial frame carries stale slots: no signature to read this time */
+    fk_fn_native[fx] = -1;
+    long long cond = fk_node[body][1], thn = fk_node[body][2], els = fk_node[body][3];
+    if (cond < 0 || cond >= fk_node_count || thn < 0 || thn >= fk_node_count || els < 0 || els >= fk_node_count) { return; }
+    long long ct = fk_node[cond][0];
+    if (ct != 5 && ct != 102 && ct != 103) { return; }
+    /* which branch is the self tail call: tag 241 on this fn index, or tag 12 (one arg) on it */
+    int self_then = (fk_node[thn][0] == 241 || fk_node[thn][0] == 12) && fk_node[thn][1] == fx;
+    int self_else = (fk_node[els][0] == 241 || fk_node[els][0] == 12) && fk_node[els][1] == fx;
+    if (self_then == self_else) { return; }
+    long long call = self_then ? thn : els;
+    long long exitn = self_then ? els : thn;
+    /* the signature, read off the live frame */
+    int types[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    long long sig = 1LL << 9;
+    long long k = 0;
+    while (k < arity) {
+        long long v = fk_vs[fp + k];
+        if (fk_isf(v)) { types[k] = 2; sig = sig | (1LL << k); }
+        else if ((v & 1) != 0) { return; } /* not a number: not this lane's frame */
+        k = k + 1;
+    }
+    /* the tail call's arguments, one per parameter, each the type of the parameter it feeds */
+    int argn[8];
+    fk_f64_prog_n = 0;
+    if (fk_node[call][0] == 12) {
+        if (arity != 1) { return; }
+        if (fk_f64_admit(fk_node[call][2], arity, types, &argn[0]) != types[0]) { return; }
+    } else {
+        long long cell = fk_node[call][2];
+        k = 0;
+        while (cell >= 0 && fk_node[cell][0] == 242 && k < arity) {
+            if (fk_f64_admit(fk_node[cell][1], arity, types, &argn[k]) != types[k]) { return; }
+            cell = fk_node[cell][2];
+            k = k + 1;
+        }
+        if (k != arity || cell >= 0) { return; }
+    }
+    int ca = 0, cb = 0;
+    int ta = fk_f64_admit(fk_node[cond][1], arity, types, &ca);
+    if (ta == 0) { return; }
+    int tb = fk_f64_admit(fk_node[cond][2], arity, types, &cb);
+    if (tb == 0) { return; }
+    int fcmp = (ta == 2 || tb == 2);
+    if (fcmp) { ca = fk_f64_cvt(ca); cb = fk_f64_cvt(cb); if (ca < 0 || cb < 0) { return; } }
+    int ex = 0;
+    int tex = fk_f64_admit(exitn, arity, types, &ex);
+    if (tex == 0) { return; }
+    if (tex == 2) { sig = sig | (1LL << 8); }
+    /* the condition code that means "the compare is TRUE": eq EQ; lt LT / MI; le LE / LS. Exit is taken when the compare
+     * selects the exit branch: true -> then-exit is cc itself, else-exit is its inverse (cc ^ 1). */
+    unsigned int cc = ct == 102 ? 0U : (ct == 103 ? (fcmp ? 4U : 11U) : (fcmp ? 9U : 13U));
+    unsigned int exitcc = self_then ? (cc ^ 1U) : cc;
+    unsigned int words[FK_F64_WORD_CAP];
+    long long wn = 0;
+    k = 0;
+    while (k < arity) { /* prologue: the frame words into the parameter registers */
+        unsigned int ld = types[k] == 2 ? (0xFD400000U | ((unsigned int)k << 10) | (unsigned int)k) : (0xF9400000U | ((unsigned int)k << 10) | (10U + (unsigned int)k));
+        if (!fk_f64_put(words, &wn, ld)) { return; }
+        k = k + 1;
+    }
+    if (!fk_f64_put(words, &wn, 0xAA1F03E8U)) { return; } /* MOV X8, XZR */
+    long long head = wn;
+    long long patch[8];
+    long long npatch = 0;
+    if (!fk_f64_loop_pass(words, &wn, ca, cb, exitcc, patch, &npatch, argn, types, arity)) { return; }
+    if (!fk_f64_loop_pass(words, &wn, ca, cb, exitcc, patch, &npatch, argn, types, arity)) { return; } /* unrolled by two */
+    if (!fk_f64_put(words, &wn, 0x14000000U | ((unsigned int)((head - wn) & 0x3FFFFFFLL)))) { return; } /* B head */
+    long long exit_at = wn;
+    k = 0;
+    while (k < npatch) { words[patch[k]] = words[patch[k]] | ((unsigned int)((exit_at - patch[k]) & 0x7FFFFLL) << 5); k = k + 1; }
+    int ntemp = 0, nitemp = 0;
+    int rr = fk_f64_emit(ex, words, &wn, &ntemp, &nitemp);
+    if (rr < 0) { return; }
+    if (!fk_f64_put(words, &wn, 0xF9002008U)) { return; } /* STR X8, [X0, #64]: the iteration count into the ninth frame word */
+    if (tex == 2) {
+        if (rr >= 100) { return; }
+        if (rr != 0 && !fk_f64_put(words, &wn, 0x1E604000U | ((unsigned int)rr << 5))) { return; } /* FMOV D0, Dr */
+    } else {
+        if (rr < 100) { return; }
+        if (!fk_f64_put(words, &wn, 0xAA0003E0U | ((unsigned int)(rr - 100) << 16))) { return; } /* MOV X0, Xr */
+    }
+    if (!fk_f64_put(words, &wn, 0xD65F03C0U)) { return; }
+    if (!fk_f64_install(fx, root, orig, words, wn, sig, 2)) { return; }
+    fk_f64_count = fk_f64_count + 1;
+    fk_f64_loop_count = fk_f64_loop_count + 1;
 }
 static long long fk_walk_cold(long long t, long long i, long long fp);
 /* the honest eval-depth wall: measure REAL stack use and die SAYING SO before the host
@@ -8776,9 +9071,11 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(v12);
         long long b12 = fk_vsp - 1;
         fk_fn_heat[c12] = fk_fn_heat[c12] + 1;
-            fk_cur_fn = c12;
+        long long caller12 = fk_cur_fn; /* the non-tail call has a return point: boxes minted after it are the caller's again */
+        fk_cur_fn = c12;
         fk_heat_pulse();
         long long r12 = fk_walk_body(fk_fn[c12], b12);
+        fk_cur_fn = caller12;
         fk_vsp = b12;
         return fk_offer_ack(c12, 1, r12);
     }
@@ -8793,9 +9090,11 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(a1);
         long long b240 = fk_vsp - 2;
         fk_fn_heat[c240] = fk_fn_heat[c240] + 1;
-            fk_cur_fn = c240;
+        long long caller240 = fk_cur_fn;
+        fk_cur_fn = c240;
         fk_heat_pulse();
         long long r240 = fk_walk_body(fk_fn[c240], b240);
+        fk_cur_fn = caller240;
         fk_vsp = b240;
         return fk_offer_ack(c240, 2, r240);
     }
@@ -8812,9 +9111,11 @@ static long long fk_walk(long long i, long long fp) {
         }
         long long n241 = fk_vsp - base241;
         fk_fn_heat[c241] = fk_fn_heat[c241] + 1;
-            fk_cur_fn = c241;
+        long long caller241 = fk_cur_fn;
+        fk_cur_fn = c241;
         fk_heat_pulse();
         long long r241 = fk_walk_body(fk_fn[c241], base241);
+        fk_cur_fn = caller241;
         fk_vsp = base241;
         return fk_offer_ack(c241, n241, r241);
     }
@@ -8872,9 +9173,11 @@ static long long fk_walk(long long i, long long fp) {
             }
         }
         fk_fn_heat[fi244] = fk_fn_heat[fi244] + 1;
-            fk_cur_fn = fi244;
+        long long caller244 = fk_cur_fn;
+        fk_cur_fn = fi244;
         fk_heat_pulse();
         long long r244 = fk_walk_body(fk_fn[fi244], base244);
+        fk_cur_fn = caller244;
         fk_vsp = base244;
         return fk_offer_ack(fi244, n244, r244);
     }
@@ -10057,7 +10360,7 @@ static long long fk_cross_decode(const char *b, long long n, long long *pos, lon
  * 21 melt generation 22 store shared (1: per-kernel columns, 2: the field) 23 heap generation (0: h/t, 1: H/T)
  * 24 float boxes minted 25 float boxes read 26 native leaf calls */
 #define FK_LIVE_MAGIC 0x464B4C4956LL
-#define FK_LIVE_WORDS 31
+#define FK_LIVE_WORDS 33
 static volatile long long *fk_live_page;
 static long long fk_live_ticks;
 static void fk_live_pid_name(long long pid, char *out) {
@@ -10085,7 +10388,7 @@ static long long fk_live_cpu_us(void) {
  * bytes 0..15 gift header; words at +16: 0 magic 1 pid 2 start-ms 3 seq 4 (reader sums the arms) 5 heat total
  * 6 nodes 7 strings 8 cons 9 fns 10 gift frames 11 gift bytes 12 node cap 13 heap cap 14 stack 15 floats
  * 16 (reader) 17 (reader) 18 cpu us 19 alive 20 (reader) 21 melt gen 22 store 23 heap gen 24 boxes 25 unboxes
- * 26 native leaf calls 27 fn count 28 layout version (2) 29 meta count.
+ * 26 native leaf calls 27 fn count 28 layout version (3) 29 meta count 30 defns crystallized 31 native loops standing 32 native loop iterations.
  * byte 4096: the 256 arm counters. 8192: heat per fn (2^20 words). +8 MiB: boxes per fn. +16 MiB: unboxes per fn.
  * +24 MiB: meta per fn, 5 words (name offset, name length, unit length, line, col). +64 MiB: the name blob (name then
  * unit path, 32 MiB). Every hot-path increment the kernel already made now lands in these words; nothing is copied,
@@ -10193,6 +10496,8 @@ static void fk_live_open(void) {
     while (k < cap) { native[k] = fk_fn_native ? fk_fn_native[k] : 0; k = k + 1; }
     free(fk_fn_native); fk_fn_native = native;
     w[30] = fk_f64_count; fk_f64_count_p = (long long *)&w[30];
+    w[31] = fk_f64_loop_count; fk_f64_loop_count_p = (long long *)&w[31];
+    w[32] = fk_f64_loop_iters; fk_f64_loop_iters_p = (long long *)&w[32];
     fk_live_ledgers_paged = 1;
     k = 0;
     while (k < fk_fntop) { fk_live_note_defn(k); k = k + 1; }
@@ -12424,6 +12729,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 48) {
             return fk_f64_count << 1;
+        }
+        if (ks_k == 49) {
+            return fk_f64_loop_count << 1;
+        }
+        if (ks_k == 50) {
+            return fk_f64_loop_iters << 1;
         }
         if (ks_k == 44) {
             return fk_heat_total << 1;
