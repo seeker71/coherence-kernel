@@ -33,3 +33,21 @@ session-start readings and I will not present the end-of-session ones as an afte
 A gauge built at noon paid for itself by night. Discomfort turned gold: a whole afternoon's
 distances now read as taxed, and rather than quietly keeping the flattering ones, every claim in
 this receipt carries the hour it was measured in.
+
+## Addendum, 22:20, after the machine had been quiet a while
+
+The reading sharpened and my own sentence above ("both floors fell together") is only true of the
+hour it was written. With every agent finished and the machine idle, the arithmetic rate came back
+to 12.88 TFLOPS — its full morning value — while the door still reads 55 GB/s. Compute recovered;
+bandwidth did not. So it is the memory side after all, not a whole-device clock.
+
+A size sweep puts the wall nowhere in particular: 16 MB reads 27 GB/s (launch-bound at that size),
+128 MB 75, 512 MB 69, 1024 MB 64. A uniform fifth of the morning, independent of the buffer, with
+the cores at full speed. The seventeen live glass processes are a Codex session's, not orphans,
+and pausing them moved nothing.
+
+Cause still unknown, and named rather than guessed. What is ruled out by measurement: the file
+lane (device memory alone reads the same), paging (38 pages across a reading), the fleet (paused),
+thermal (nothing recorded), low power mode, GPU contention (utilization 0 immediately before a
+55 GB/s reading), and now a device-wide clock throttle (compute is at peak). What would settle it
+is a restart, and that is the user's to give.
