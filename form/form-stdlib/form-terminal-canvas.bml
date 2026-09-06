@@ -245,41 +245,53 @@ section [form.bml] {
         // strings.  The retained scene still carries semantic strings for
         // selection and inspection; ANSI framing, RGB numbers, positions and
         // the whole-frame concatenation never enter the permanent string pool.
-        def ftcb-cat(parts) = if eq(len(parts), 0) then list() else append(head(parts), ftcb-cat(tail(parts)));
+        // Every byte is consed once, onto the bytes that follow it (rest): a
+        // style, a segment, a line, a patch and a whole frame are built in one
+        // pass from the end -- no append, no reverse, one cons a byte.
         def ftcb-text-go(text, index, count) = if ge(index, count) then list() else cons(str_byte_at(text, index), ftcb-text-go(text, add(index, 1), count));
         def ftcb-text(text) = ftcb-text-go(text, 0, str_len(text));
         def ftcb-uint-reversed(value, held) = if lt(value, 10) then cons(add(48, value), held) else ftcb-uint-reversed(div(value, 10), cons(add(48, mod(value, 10)), held));
         def ftcb-uint(value) = if le(value, 0) then list(48) else ftcb-uint-reversed(value, list());
         def ftcb-int(value) = if lt(value, 0) then cons(45, ftcb-uint(sub(0, value))) else ftcb-uint(value);
-        def ftcb-sgr-open() = list(27, 91);
-        def ftcb-reset() = list(27, 91, 48, 109);
-        def ftcb-line-end() = list(27, 91, 48, 109, 27, 91, 75);
-        def ftcb-terminal-home() = list(27, 91, 72);
-        def ftcb-terminal-erase-rest() = list(27, 91, 74);
         def ftcb-terminal-safe-open() = list(27, 91, 48, 109, 27, 91, 50, 74, 27, 91, 72);
-        def ftcb-weight(style) = if eq(ftc-style-bold?(style), 1) then list(49, 59) else if lt(ftc-style-alpha(style), 160) then list(50, 59) else list();
-        def ftcb-fg(style) = ftcb-cat(list(list(51, 56, 59, 50, 59), ftcb-int(ftc-style-red(style)), list(59), ftcb-int(ftc-style-green(style)), list(59), ftcb-int(ftc-style-blue(style))));
-        def ftcb-bg(style) = if lt(ftc-style-back-red(style), 0) then list() else ftcb-cat(list(list(59, 52, 56, 59, 50, 59), ftcb-int(ftc-style-back-red(style)), list(59), ftcb-int(ftc-style-back-green(style)), list(59), ftcb-int(ftc-style-back-blue(style))));
-        def ftcb-style(style) = ftcb-cat(list(ftcb-sgr-open(), ftcb-weight(style), ftcb-fg(style), ftcb-bg(style), list(109)));
-        def ftcb-text-value(text) = if eq(ftc-byte-text?(text), 1) then nth(text, 1) else ftcb-text(text);
-        def ftcb-segment(segment) = append(ftcb-style(ftc-segment-style(segment)), ftcb-text-value(ftc-segment-text(segment)));
-        def ftcb-segments(segments) = if eq(len(segments), 0) then ftcb-reset() else append(ftcb-segment(head(segments)), ftcb-segments(tail(segments)));
-        def ftcb-segment-line(line) = append(ftcb-segments(line), ftcb-line-end());
-        def ftcb-segment-lines(lines) = if eq(len(lines), 0) then list() else if eq(len(tail(lines)), 0) then ftcb-segment-line(head(lines)) else ftcb-cat(list(ftcb-segment-line(head(lines)), list(10), ftcb-segment-lines(tail(lines))));
-        def ftcb-position(x, y) = ftcb-cat(list(ftcb-sgr-open(), ftcb-int(add(y, 1)), list(59), ftcb-int(add(x, 1)), list(72)));
-        def ftcb-segment-visible-equal?(left, right) = if not(eq(ftc-text-equal?(ftc-segment-text(left), ftc-segment-text(right)), 1)) then 0 else ftc-style-equal?(ftc-segment-style(left), ftc-segment-style(right));
-        def ftcb-segment-list-equal?(left, right) = if not(eq(len(left), len(right))) then 0 else if eq(len(left), 0) then 1 else if not(eq(ftcb-segment-visible-equal?(head(left), head(right)), 1)) then 0 else ftcb-segment-list-equal?(tail(left), tail(right));
-        def ftcb-segment-line-diff(previous, nextLines, index) {
+        def ftcb-onto-list(bytes, rest) = if eq(len(bytes), 0) then rest else cons(head(bytes), ftcb-onto-list(tail(bytes), rest));
+        def ftcb-onto-text-go(text, index, rest) = if lt(index, 0) then rest else ftcb-onto-text-go(text, sub(index, 1), cons(str_byte_at(text, index), rest));
+        def ftcb-onto-text(text, rest) = ftcb-onto-text-go(text, sub(str_len(text), 1), rest);
+        def ftcb-onto-uint(value, rest) = if lt(value, 10) then cons(add(48, value), rest) else ftcb-onto-uint(div(value, 10), cons(add(48, mod(value, 10)), rest));
+        def ftcb-onto-int(value, rest) = if lt(value, 0) then cons(45, ftcb-onto-uint(sub(0, value), rest)) else if le(value, 0) then cons(48, rest) else ftcb-onto-uint(value, rest);
+        def ftcb-onto-weight(style, rest) = if eq(ftc-style-bold?(style), 1) then cons(49, cons(59, rest)) else if lt(ftc-style-alpha(style), 160) then cons(50, cons(59, rest)) else rest;
+        def ftcb-onto-fg(style, rest) = cons(51, cons(56, cons(59, cons(50, cons(59, ftcb-onto-int(ftc-style-red(style), cons(59, ftcb-onto-int(ftc-style-green(style), cons(59, ftcb-onto-int(ftc-style-blue(style), rest))))))))));
+        def ftcb-onto-bg(style, rest) = if lt(ftc-style-back-red(style), 0) then rest else cons(59, cons(52, cons(56, cons(59, cons(50, cons(59, ftcb-onto-int(ftc-style-back-red(style), cons(59, ftcb-onto-int(ftc-style-back-green(style), cons(59, ftcb-onto-int(ftc-style-back-blue(style), rest)))))))))));
+        def ftcb-onto-style(style, rest) = cons(27, cons(91, ftcb-onto-weight(style, ftcb-onto-fg(style, ftcb-onto-bg(style, cons(109, rest))))));
+        def ftcb-onto-text-value(text, rest) = if eq(ftc-byte-text?(text), 1) then ftcb-onto-list(nth(text, 1), rest) else ftcb-onto-text(text, rest);
+        def ftcb-onto-segment(segment, rest) = ftcb-onto-style(ftc-segment-style(segment), ftcb-onto-text-value(ftc-segment-text(segment), rest));
+        def ftcb-onto-segments(segments, rest) = if eq(len(segments), 0) then rest else ftcb-onto-segment(head(segments), ftcb-onto-segments(tail(segments), rest));
+        def ftcb-onto-reset(rest) = cons(27, cons(91, cons(48, cons(109, rest))));
+        def ftcb-onto-line-end(rest) = cons(27, cons(91, cons(48, cons(109, cons(27, cons(91, cons(75, rest)))))));
+        def ftcb-onto-segment-line(line, rest) = ftcb-onto-segments(line, ftcb-onto-reset(ftcb-onto-line-end(rest)));
+        def ftcb-onto-segment-lines(lines, rest) = if eq(len(lines), 0) then rest else if eq(len(tail(lines)), 0) then ftcb-onto-segment-line(head(lines), rest) else ftcb-onto-segment-line(head(lines), cons(10, ftcb-onto-segment-lines(tail(lines), rest)));
+        def ftcb-onto-position(x, y, rest) = cons(27, cons(91, ftcb-onto-int(add(y, 1), cons(59, ftcb-onto-int(add(x, 1), cons(72, rest))))));
+        // The changed-line compare reads each field once and stops at the first
+        // difference: alpha and the background move most, so they go first;
+        // a byte text is compared by length once and then byte by byte.
+        def ftcb-style-same?(left, right) = if not(eq(nth(left, 8), nth(right, 8))) then 0 else if not(eq(nth(left, 9), nth(right, 9))) then 0 else if not(eq(nth(left, 5), nth(right, 5))) then 0 else if not(eq(nth(left, 6), nth(right, 6))) then 0 else if not(eq(nth(left, 7), nth(right, 7))) then 0 else if not(eq(nth(left, 2), nth(right, 2))) then 0 else if not(eq(nth(left, 3), nth(right, 3))) then 0 else if not(eq(nth(left, 4), nth(right, 4))) then 0 else if not(str_eq(nth(left, 1), nth(right, 1))) then 0 else str_eq(nth(left, 10), nth(right, 10));
+        def ftcb-bytes-same-go(left, right) = if eq(len(left), 0) then 1 else if eq(head(left), head(right)) then ftcb-bytes-same-go(tail(left), tail(right)) else 0;
+        def ftcb-bytes-same?(left, right) = if eq(len(left), len(right)) then ftcb-bytes-same-go(left, right) else 0;
+        def ftcb-text-same?(left, right) = if and(eq(ftc-byte-text?(left), 1), eq(ftc-byte-text?(right), 1)) then ftcb-bytes-same?(nth(left, 1), nth(right, 1)) else if and(eq(ftc-byte-text?(left), 0), eq(ftc-byte-text?(right), 0)) then str_eq(left, right) else ftc-text-equal?(left, right);
+        def ftcb-segment-visible-equal?(left, right) = if not(eq(ftcb-text-same?(ftc-segment-text(left), ftc-segment-text(right)), 1)) then 0 else ftcb-style-same?(ftc-segment-style(left), ftc-segment-style(right));
+        def ftcb-segment-list-same-go(left, right) = if eq(len(left), 0) then 1 else if eq(ftcb-segment-visible-equal?(head(left), head(right)), 1) then ftcb-segment-list-same-go(tail(left), tail(right)) else 0;
+        def ftcb-segment-list-equal?(left, right) = if eq(len(left), len(right)) then ftcb-segment-list-same-go(left, right) else 0;
+        def ftcb-onto-line-diff(previous, nextLines, index, rest) {
             let oldLine = ftc-segment-line-at(previous, index);
             let nextLine = ftc-segment-line-at(nextLines, index);
-            if eq(ftcb-segment-list-equal?(oldLine, nextLine), 1) then list() else append(ftcb-position(0, index), ftcb-segment-line(nextLine));
+            if eq(ftcb-segment-list-equal?(oldLine, nextLine), 1) then rest else ftcb-onto-position(0, index, ftcb-onto-segment-line(nextLine, rest));
         }
-        def ftcb-segment-lines-diff-go(previous, nextLines, index, count) = if ge(index, count) then list() else append(ftcb-segment-line-diff(previous, nextLines, index), ftcb-segment-lines-diff-go(previous, nextLines, add(index, 1), count));
+        def ftcb-onto-lines-diff(previous, nextLines, index, rest) = if lt(index, 0) then rest else ftcb-onto-lines-diff(previous, nextLines, sub(index, 1), ftcb-onto-line-diff(previous, nextLines, index, rest));
         def ftcb-segment-lines-diff(previous, nextLines) {
             let count = if ge(len(previous), len(nextLines)) then len(previous) else len(nextLines);
-            ftcb-segment-lines-diff-go(previous, nextLines, 0, count);
+            ftcb-onto-lines-diff(previous, nextLines, sub(count, 1), list());
         }
-        def ftcb-full-frame(lines) = ftcb-cat(list(ftcb-terminal-home(), ftcb-segment-lines(lines), ftcb-terminal-erase-rest()));
+        def ftcb-full-frame(lines) = cons(27, cons(91, cons(72, ftcb-onto-segment-lines(lines, list(27, 91, 74)))));
         def ftcb-write-stdout(bytes) = if eq(len(bytes), 0) then 0 else file_append_bytes("/dev/stdout", bytes);
     }
     0;
