@@ -209,6 +209,8 @@ static void fk_live_publish(int final);
 static void fk_f64_pulse(long long fx);
 static void fk_f64_loop_pulse(long long fx, long long fp, long long n);
 static void fk_f64_reset(void);
+static long long (*fk_node)[4];
+static long long fk_node_count;
 static void **fk_f64_mem; /* per-defn f64 leaf pages (this process) */
 static long long *fk_f64_sig; /* per-defn leaf signature: -1 the all-float expression leaf; else bit k = param k float, bit 8 = float result, bit 9 = loop */
 static long long fk_f64_cap;
@@ -820,6 +822,9 @@ static long long fk_sbp;
 #define FK_STRING_HASH_BUCKETS 131072 /* power of two, so `& (N-1)` is a valid mask */
 static long long *fk_shash;
 static long long *fk_snext;
+static unsigned char *fk_sdead;  /* 1 = the slot was freed by the string melt and waits on fk_sfree */
+static long long *fk_sfree;
+static long long fk_sfree_n;
 static void fk_sinit(void) {
     if (fk_sb == 0) {
         fk_scap_b = FK_STRING_POOL_INIT_BYTES;
@@ -834,6 +839,9 @@ static void fk_sinit(void) {
             fk_sl = malloc(fk_scap_s * 8);
         }
         fk_snext = malloc(fk_scap_s * 8);
+        fk_sdead = calloc((unsigned long)fk_scap_s, 1);
+        fk_sfree = malloc(fk_scap_s * 8);
+        fk_sfree_n = 0;
         fk_shash = malloc(FK_STRING_HASH_BUCKETS * 8);
         if (fk_sb == 0 || fk_so == 0 || fk_sl == 0 || fk_snext == 0 || fk_shash == 0) {
             fk_die("fk_sinit: out of memory");
@@ -875,12 +883,33 @@ static long long fk_sintern(long long off, long long len) {
         }
         c = fk_snext[c];
     }
+    if (fk_sfree_n > 0) {
+        /* a slot the string melt freed: reuse its index; its old bytes too when the new string fits (the scratch just written at off is then discarded) */
+        long long r = fk_sfree[fk_sfree_n - 1];
+        fk_sfree_n = fk_sfree_n - 1;
+        if (len <= fk_sl[r] && off + len == fk_sbp) {
+            long long j = 0;
+            while (j < len) { fk_sb[fk_so[r] + j] = fk_sb[off + j]; j = j + 1; }
+            fk_sbp = off;
+        } else {
+            fk_so[r] = off;
+            fk_sbp = off + len;
+        }
+        fk_sl[r] = len;
+        fk_sdead[r] = 0;
+        fk_snext[r] = fk_shash[bucket];
+        fk_shash[bucket] = r;
+        return r;
+    }
     long long i = fk_sp;
     if (i >= fk_scap_s) {
         fk_so = (long long *)fk_store_grow('O', fk_so, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
         fk_sl = (long long *)fk_store_grow('L', fk_sl, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
         fk_scap_s = fk_scap_s * 2;
         fk_snext = realloc(fk_snext, fk_scap_s * 8);
+        fk_sdead = realloc(fk_sdead, (unsigned long)fk_scap_s);
+        fk_sfree = realloc(fk_sfree, fk_scap_s * 8);
+        { long long z = fk_scap_s / 2; while (z < fk_scap_s) { fk_sdead[z] = 0; z = z + 1; } }
         if (fk_so == 0 || fk_sl == 0 || fk_snext == 0) {
             fk_die("fk_sintern: out of memory growing string table");
         }
@@ -7697,6 +7726,87 @@ static long long fk_nmelt;
  * request is met. Zero keeps the original policy (double iff live*2 > cap).
  * Always reset to 0 after the call. */
 static long long fk_melt_want = 0;
+/* ── the string melt: the pool's top rolls back over the dead ───────────────
+ * Every str_concat, int_to_str and byte_to_str result is interned for the life
+ * of the process, and a loop that renders a screen mints hundreds of new
+ * strings a tick (the glass self-molted every ~100 s on that count alone).
+ * After the pair melt has copied the live heap, this pass marks every LOCAL
+ * string reachable from the same roots (the value stack, the memory cells,
+ * record values and blueprints, value nodes) plus the holders that keep a raw
+ * index rather than a word (record keys, the AST's string-literal nodes), then
+ * pops entries off the TOP of the table while they are unmarked. Live strings
+ * never move -- their indices, offsets and bytes stay where another process
+ * may be reading them through the shared store -- so this reclaims the tick's
+ * temporaries (born last, dead first) and leaves anything older untouched.
+ * Field strings (indices >= FK_STR_BASE) are shared by content and are never
+ * touched here. */
+static unsigned char *fk_smk;
+static unsigned char *fk_smv;
+static void fk_smark(long long v) {
+    if (fk_is_str(v)) {
+        long long si = fk_stri(v);
+        if (si >= 0 && si < FK_STR_BASE && si < fk_sp) { fk_smk[si] = 1; }
+        return;
+    }
+    while ((v & 1) != 0 && v > 1) {
+        long long p = v >> 1;
+        if (p >= FK_PAIR_BASE || p < 1 || !FK_POK(p)) { return; }
+        if (fk_smv[p]) { return; }
+        fk_smv[p] = 1;
+        fk_smark(FK_HH(p));
+        v = FK_HT(p);
+    }
+}
+static long long fk_smelt_reclaimed;
+static void fk_smelt(void) {
+    if (fk_sp <= 0 || fk_sb == 0) { return; }
+    fk_smk = (unsigned char *)calloc((unsigned long)fk_sp, 1);
+    fk_smv = (unsigned char *)calloc((unsigned long)(fk_hp + 1), 1);
+    if (fk_smk == 0 || fk_smv == 0) { free(fk_smk); free(fk_smv); fk_smk = 0; fk_smv = 0; return; }
+    long long k = 0;
+    while (k < fk_vsp) { fk_smark(fk_vs[k]); k = k + 1; }
+    k = 0;
+    while (k < fk_mem_cap) { fk_smark(fk_mem[k]); k = k + 1; }
+    k = 1;
+    while (k <= fk_rp) {
+        fk_smark(fk_rbp[k]);
+        long long rj = 0;
+        while (rj < fk_rcnt[k]) {
+            long long key = fk_rkey[k][rj];
+            if (key >= 0 && key < FK_STR_BASE && key < fk_sp) { fk_smk[key] = 1; }
+            fk_smark(fk_rval[k][rj]);
+            rj = rj + 1;
+        }
+        k = k + 1;
+    }
+    k = 1;
+    while (!fk_field_on && k <= fk_np) { fk_smark(fk_ncat[k]); fk_smark(fk_nkids[k]); fk_smark(fk_nval[k]); k = k + 1; }
+    k = 0;
+    while (k < fk_node_count) {
+        if (fk_node[k][0] == 24) { long long si = fk_node[k][1]; if (si >= 0 && si < fk_sp) { fk_smk[si] = 1; } }
+        k = k + 1;
+    }
+    long long freed = 0;
+    long long i = 0;
+    while (i < fk_sp) {
+        if (!fk_smk[i] && !fk_sdead[i]) {
+            long long b = fk_str_hash(fk_so[i], fk_sl[i]);
+            if (fk_shash[b] == i) { fk_shash[b] = fk_snext[i]; }
+            else {
+                long long c = fk_shash[b];
+                while (c >= 0 && fk_snext[c] != i) { c = fk_snext[c]; }
+                if (c >= 0) { fk_snext[c] = fk_snext[i]; }
+            }
+            fk_sdead[i] = 1;
+            fk_sfree[fk_sfree_n] = i;
+            fk_sfree_n = fk_sfree_n + 1;
+            freed = freed + 1;
+        }
+        i = i + 1;
+    }
+    fk_smelt_reclaimed = fk_smelt_reclaimed + freed;
+    free(fk_smk); free(fk_smv); fk_smk = 0; fk_smv = 0;
+}
 static void fk_melt(void) {
     fk_melt_gen = fk_melt_gen + 1;
     long long hp0 = fk_hp;
@@ -7806,6 +7916,7 @@ static void fk_melt(void) {
     fk_hp = fk_nhp;
     fk_cap = ncap;
     fk_nmelt = fk_nmelt + 1;
+    fk_smelt();
     fk_live_publish(0);
     if (fk_conf("FK_MELT_WITNESS")) {
         dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, fp=%lld, sp=%lld\n",
@@ -11740,16 +11851,16 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         exit(1);
     }
     if (t == 26) {
-        long long sa26 = fk_stri(fk_walk(fk_node[i][1], fp));
-        long long sb26 = fk_stri(fk_walk(fk_node[i][2], fp));
+        long long wa26 = fk_walk(fk_node[i][1], fp); fk_vp(wa26); long long sa26 = fk_stri(wa26);
+        long long sb26 = fk_stri(fk_walk(fk_node[i][2], fp)); fk_vsp = fk_vsp - 1;
         if (fk_keyeq(sa26, sb26)) {
             return 2;
         }
         return 0;
     }
     if (t == 27) {
-        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
-        long long sb = fk_stri(fk_walk(fk_node[i][2], fp));
+        long long wa27 = fk_walk(fk_node[i][1], fp); fk_vp(wa27); long long sa = fk_stri(wa27);
+        long long sb = fk_stri(fk_walk(fk_node[i][2], fp)); fk_vsp = fk_vsp - 1;
         if (sa < 0 || !FK_SOK(sa) || sb < 0 || !FK_SOK(sb)) {
             return 0 - 2;
         }
@@ -11772,17 +11883,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_strv(fk_sintern(fk_sbp, ln));
     }
     if (t == 28) {
-        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
-        long long k = fk_walk(fk_node[i][2], fp) >> 1;
+        long long wa28 = fk_walk(fk_node[i][1], fp); fk_vp(wa28); long long sa = fk_stri(wa28);
+        long long k = fk_walk(fk_node[i][2], fp) >> 1; fk_vsp = fk_vsp - 1;
         if (sa < 0 || !FK_SOK(sa) || k < 0 || k >= FK_SLEN(sa)) {
             return 0 - 2;
         }
         return ((long long)(unsigned char)FK_SBYTES(sa)[k]) << 1;
     }
     if (t == 30) {
-        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
-        long long sb = fk_stri(fk_walk(fk_node[i][2], fp));
-        long long from = fk_walk(fk_node[i][3], fp) >> 1;
+        long long wa30 = fk_walk(fk_node[i][1], fp); fk_vp(wa30); long long sa = fk_stri(wa30);
+        long long wb30 = fk_walk(fk_node[i][2], fp); fk_vp(wb30); long long sb = fk_stri(wb30);
+        long long from = fk_walk(fk_node[i][3], fp) >> 1; fk_vsp = fk_vsp - 2;
         if (sa < 0 || !FK_SOK(sa) || sb < 0 || !FK_SOK(sb)) {
             return 0 - 2;
         }
@@ -12743,10 +12854,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return 0;
     }
     if (t == 66) {
-        long long rec = fk_walk(fk_node[i][1], fp);
+        long long rec = fk_walk(fk_node[i][1], fp); fk_vp(rec);
         long long r = fk_ridx(rec);
-        long long key = fk_stri(fk_walk(fk_node[i][2], fp));
-        long long val = fk_walk(fk_node[i][3], fp);
+        long long wk66 = fk_walk(fk_node[i][2], fp); fk_vp(wk66); long long key = fk_stri(wk66);
+        long long val = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2;
         if (r < 1 || r > fk_rp) {
             return 0;
         }
@@ -13301,10 +13412,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return 0;
     }
     if (t == 98) {
-        long long rec = fk_walk(fk_node[i][1], fp);
+        long long rec = fk_walk(fk_node[i][1], fp); fk_vp(rec);
         long long r = fk_ridx(rec);
-        long long key = fk_stri(fk_walk(fk_node[i][2], fp));
-        long long val = fk_walk(fk_node[i][3], fp);
+        long long wk98 = fk_walk(fk_node[i][2], fp); fk_vp(wk98); long long key = fk_stri(wk98);
+        long long val = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2;
         if (r < 1 || r > fk_rp) {
             return 0;
         }
@@ -13335,9 +13446,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * else dies loud, matching the sibling walkers' refusal — a method
          * table holding a non-function would dispatch to nonsense later,
          * far from the wound. Re-defining a (blueprint, name) replaces. */
-        long long bp197 = fk_walk(fk_node[i][1], fp);
-        long long nm197 = fk_stri(fk_walk(fk_node[i][2], fp));
-        long long fv197 = fk_walk(fk_node[i][3], fp);
+        long long bp197 = fk_walk(fk_node[i][1], fp); fk_vp(bp197);
+        long long wn197 = fk_walk(fk_node[i][2], fp); fk_vp(wn197); long long nm197 = fk_stri(wn197);
+        long long fv197 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2;
         if (nm197 < 0) {
             fk_die("fk_walk tag 197: method_define second arg must be a string name -- a non-string interns to the -1 sentinel and every such method would collide on it");
         }
@@ -13369,8 +13480,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 198) {
         /* method_has record-or-blueprint "name" -> bool. A record answers for
          * its blueprint; a blueprint answers for itself; anything else is 0. */
-        long long v198 = fk_walk(fk_node[i][1], fp);
-        long long nm198 = fk_stri(fk_walk(fk_node[i][2], fp));
+        long long v198 = fk_walk(fk_node[i][1], fp); fk_vp(v198);
+        long long nm198 = fk_stri(fk_walk(fk_node[i][2], fp)); fk_vsp = fk_vsp - 1;
         long long bp198 = fk_isrec(v198) ? fk_rbp[fk_ridx(v198)] : v198;
         return fk_mth_find(bp198, nm198) >= 0 ? 2 : 0;
     }
@@ -13458,6 +13569,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 5) {
             return fk_sp << 1;
+        }
+        if (ks_k == 51) {
+            return fk_smelt_reclaimed << 1;
         }
         if (ks_k == 6) {
             return fk_hp << 1;
@@ -17495,6 +17609,9 @@ static void fk_fkb_read_table_string(void) {
         fk_sl = (long long *)fk_store_grow('L', fk_sl, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
         fk_scap_s = fk_scap_s * 2;
         fk_snext = realloc(fk_snext, fk_scap_s * 8);
+        fk_sdead = realloc(fk_sdead, (unsigned long)fk_scap_s);
+        fk_sfree = realloc(fk_sfree, fk_scap_s * 8);
+        { long long z = fk_scap_s / 2; while (z < fk_scap_s) { fk_sdead[z] = 0; z = z + 1; } }
         if (fk_so == 0 || fk_sl == 0 || fk_snext == 0) {
             fk_die("fk_fkb: out of memory growing string table");
         }
