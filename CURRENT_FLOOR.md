@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 686 rows, 674 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 688 rows, 676 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -246,6 +246,11 @@ node-gift-band                         -> 4095
 cell-store-band                        -> 255
 field-band                             -> 255
 jit-lens-band                          -> 16383
+float-natives-band                     -> 28      (four-way: go/rust/ts agree)
+eq-shape-band                          -> 524287
+primitive-registry-band                -> 45      (fkwu; one pending row per absent native, 79; 63 three-way)
+form-glass-telemetry-membrane-band     -> 2097151
+form-glass-observation-v2-band         -> 2097151
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -489,12 +494,26 @@ real glass row. Non-tail calls restore `fk_cur_fn` on return, so boxing
 attribution no longer bleeds to the callee. `jit-lens-band` 16383; a
 20M-iteration int loop 0.63 -> 0.01 s, float 0.80 -> 0.03 s.
 
+**Three bands declared by the body.** The float-NodeID surface stands on the
+fourth arm from its own kernel lane: `ne` is a rewrite row beside gt/ge,
+`math_pow` is walker tag 195, and `float_value`, `make_float32`,
+`make_float64`, `math_pi` are rewrite rows over one arm, `float_leaf` (tag
+201, mode then operand) -- four sibling natives for one tag and no prelude;
+float-natives-band 28 four-way. A type-6 leaf carries its IEEE bits in
+`nid[3]`; the shared field reads a bool's inst off the sentinel (it stamped 1
+for every bool). The registry band prints one `pending` row per probe an arm
+does not hold (79 on fkwu: 73 natives the seed does not carry, 6 present
+natives answering otherwise, 0 prelude misses, 0 wrong declared outsides).
+The two glass bands that printed 0 had ended in `(print (main))` -- the
+reader took the print's own 0 for the verdict; each now ends on its verdict.
+(receipts/2026-09-06-three-bands-declared.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=77 -> 47000077
+./fkwu form/form-stdlib/release-ledger.bml -> open=45 moving=0 released=79 -> 45000079
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
