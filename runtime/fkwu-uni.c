@@ -8766,6 +8766,9 @@ static long long *fk_f64_loop_count_p = &fk_f64_loop_count_private;
 #define fk_f64_loop_count (*fk_f64_loop_count_p)
 static long long fk_f64_loop_iters_private;
 static long long *fk_f64_loop_iters_p = &fk_f64_loop_iters_private;
+static long long fk_mint_total_private; /* value nodes this kernel minted (interned fresh): the site that grows the permanent arena, counted where it happens */
+static long long *fk_mint_total_p = &fk_mint_total_private;
+#define fk_mint_total (*fk_mint_total_p)
 #define fk_f64_loop_iters (*fk_f64_loop_iters_p)
 static fk_f64_node fk_f64_prog[FK_F64_NODE_CAP];
 static long long fk_f64_prog_n;
@@ -10108,6 +10111,7 @@ static long long fk_field_node_matches(long long ix, long long kind, long long s
 }
 static long long fk_field_fill(long long kind, long long sub, long long a, long long b, long long *nid4, long long h) {
     long long idx = fk_field_claim(2, 1) + 1;
+    fk_mint_total = fk_mint_total + 1; /* a fresh field cell: this kernel grew the permanent arena by one */
     if (idx >= FK_FIELD_NODES) { fk_die("fkwu: the field's node columns are full (2^26 cells): run observe/field-reset-run.fk with no kernel alive"); }
     while (idx >= fk_node_cap) { fk_nodes_grow(); }
     fk_nkind[idx] = kind;
@@ -10416,7 +10420,7 @@ static long long fk_intern_int_node(long long iv43) {
             }
             slot43 = (slot43 + 1) & (fk_intern_hash_cap - 1);
         }
-        fk_np = fk_np + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
         fk_nkind[fk_np] = 1;
         fk_nval[fk_np] = iv43;
         fk_nkids[fk_np] = 1;
@@ -10448,7 +10452,7 @@ static long long fk_intern_str_node(long long sv46) {
         if (sa46 < 0 || !FK_SOK(sa46)) {
             return 0;
         }
-        fk_np = fk_np + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
         fk_nkind[fk_np] = 1;
         fk_nval[fk_np] = sv46;
         fk_nkids[fk_np] = 1;
@@ -10477,7 +10481,7 @@ static long long fk_intern_bool_node(long long bv112) {
             }
             slot112 = (slot112 + 1) & (fk_intern_hash_cap - 1);
         }
-        fk_np = fk_np + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
         fk_nkind[fk_np] = 1;
         fk_nval[fk_np] = se112;
         fk_nkids[fk_np] = 1;
@@ -10521,7 +10525,7 @@ static long long fk_intern_float_node(double fd113) {
             slot113 = (slot113 + 1) & (fk_intern_hash_cap - 1);
         }
         long long fb113 = fk_fbox(fcanon113);
-        fk_np = fk_np + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
         fk_nkind[fk_np] = 1;
         fk_nval[fk_np] = fb113;
         fk_nkids[fk_np] = 1;
@@ -10556,7 +10560,7 @@ static long long fk_intern_composite(long long cat47, long long kids47) {
             }
             slot47 = (slot47 + 1) & (fk_intern_hash_cap - 1);
         }
-        fk_np = fk_np + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
         fk_nkind[fk_np] = 2;
         fk_ncat[fk_np] = cat47;
         fk_nkids[fk_np] = kids47;
@@ -10581,7 +10585,7 @@ static long long fk_make_nodeid(long long p91, long long l91, long long ty91, lo
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
         }
-        fk_np = fk_np + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
         fk_nkind[fk_np] = 3;
         fk_ncat[fk_np] = 0;
         fk_nkids[fk_np] = 1;
@@ -10733,7 +10737,7 @@ static long long fk_cross_decode(const char *b, long long n, long long *pos, lon
  * 21 melt generation 22 store shared (1: per-kernel columns, 2: the field) 23 heap generation (0: h/t, 1: H/T)
  * 24 float boxes minted 25 float boxes read 26 native leaf calls */
 #define FK_LIVE_MAGIC 0x464B4C4956LL
-#define FK_LIVE_WORDS 33
+#define FK_LIVE_WORDS 34
 static volatile long long *fk_live_page;
 static long long fk_live_ticks;
 static void fk_live_pid_name(long long pid, char *out) {
@@ -10872,6 +10876,7 @@ static void fk_live_open(void) {
     w[30] = fk_f64_count; fk_f64_count_p = (long long *)&w[30];
     w[31] = fk_f64_loop_count; fk_f64_loop_count_p = (long long *)&w[31];
     w[32] = fk_f64_loop_iters; fk_f64_loop_iters_p = (long long *)&w[32];
+    w[33] = fk_mint_total; fk_mint_total_p = (long long *)&w[33];
     fk_live_ledgers_paged = 1;
     k = 0;
     while (k < fk_fntop) { fk_live_note_defn(k); k = k + 1; }
@@ -11268,7 +11273,7 @@ static long long fk_intern_float32_node(double d) {
         slot = (slot + 1) & (fk_intern_hash_cap - 1);
     }
     long long fb = fk_fbox((double)f);
-    fk_np = fk_np + 1;
+    fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
     fk_nkind[fk_np] = 1;
     fk_nval[fk_np] = fb;
     fk_nkids[fk_np] = 1;
@@ -13695,6 +13700,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 52) {
             return fk_twin_calls << 1;
+        }
+        if (ks_k == 53) {
+            return fk_mint_total << 1;
         }
         if (ks_k == 6) {
             return fk_hp << 1;
