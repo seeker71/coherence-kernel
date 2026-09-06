@@ -139,6 +139,20 @@ static long long fk_sysctl_ll(const char *name) {
 static long long fk_u64_words(unsigned int lo, unsigned int hi) { return (long long)(((unsigned long long)hi << 32) | (unsigned long long)lo); }
 static int fk_cstr_eq(const char *a, const char *b);
 static long long fk_host_spawn_arm(long long argv155, long long t);
+/* the store: every value table in shared memory; defined beside fk_gift_open, born long before it */
+#define FK_STORE_NODE_CELLS (1LL << 26)   /* sparse reservations: virtual ceilings, committed page by page */
+#define FK_STORE_HEAP_PAIRS (1LL << 27)
+#define FK_STORE_STR_BYTES (1LL << 31)
+#define FK_STORE_STR_CELLS (1LL << 25)
+#define FK_STORE_FLOATS (1LL << 26)
+static void *fk_store_take(char letter, long long bytes);
+static void *fk_store_grow(char letter, void *p, long long old_bytes, long long new_bytes, long long reserved, int zero);
+static void fk_store_go_private(void);
+static void fk_store_unlink_pid(long long pid);
+static int fk_store_shared;
+static int fk_heap_gen;
+static void *fk_heap_alt_h;
+static void *fk_heap_alt_t;
 static void fk_live_publish(int final);
 static long long fk_live_ticks;
 #ifdef __APPLE__
@@ -459,15 +473,16 @@ static long long fk_fn_capacity;
 static long long fk_fbox(double d) {
     if (fk_fv == 0) {
         fk_fcap = FK_FLOAT_POOL_INIT_CAP;
-        fk_fv = malloc(fk_fcap * 8);
+        fk_fv = (double *)fk_store_take('F', FK_STORE_FLOATS * 8);
+        if (fk_fv == 0) { fk_store_go_private(); fk_fv = malloc(fk_fcap * 8); }
         if (fk_fv == 0) {
             fk_die("fk_fbox: out of memory");
         }
     }
     fk_fp = fk_fp + 1;
     if (fk_fp >= fk_fcap) {
+        fk_fv = (double *)fk_store_grow('F', fk_fv, fk_fcap * 8, fk_fcap * 16, FK_STORE_FLOATS * 8, 0);
         fk_fcap = fk_fcap * 2;
-        fk_fv = realloc(fk_fv, fk_fcap * 8);
         if (fk_fv == 0) {
             fk_die("fk_fbox: out of memory growing float pool");
         }
@@ -722,9 +737,15 @@ static void fk_sinit(void) {
     if (fk_sb == 0) {
         fk_scap_b = FK_STRING_POOL_INIT_BYTES;
         fk_scap_s = FK_STRING_TABLE_INIT_CAP;
-        fk_sb = malloc(fk_scap_b);
-        fk_so = malloc(fk_scap_s * 8);
-        fk_sl = malloc(fk_scap_s * 8);
+        fk_sb = (char *)fk_store_take('s', FK_STORE_STR_BYTES);
+        fk_so = fk_sb == 0 ? 0 : (long long *)fk_store_take('O', FK_STORE_STR_CELLS * 8);
+        fk_sl = fk_so == 0 ? 0 : (long long *)fk_store_take('L', FK_STORE_STR_CELLS * 8);
+        if (fk_sl == 0) {
+            fk_store_go_private();
+            fk_sb = malloc(fk_scap_b);
+            fk_so = malloc(fk_scap_s * 8);
+            fk_sl = malloc(fk_scap_s * 8);
+        }
         fk_snext = malloc(fk_scap_s * 8);
         fk_shash = malloc(FK_STRING_HASH_BUCKETS * 8);
         if (fk_sb == 0 || fk_so == 0 || fk_sl == 0 || fk_snext == 0 || fk_shash == 0) {
@@ -769,9 +790,9 @@ static long long fk_sintern(long long off, long long len) {
     }
     long long i = fk_sp;
     if (i >= fk_scap_s) {
+        fk_so = (long long *)fk_store_grow('O', fk_so, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
+        fk_sl = (long long *)fk_store_grow('L', fk_sl, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
         fk_scap_s = fk_scap_s * 2;
-        fk_so = realloc(fk_so, fk_scap_s * 8);
-        fk_sl = realloc(fk_sl, fk_scap_s * 8);
         fk_snext = realloc(fk_snext, fk_scap_s * 8);
         if (fk_so == 0 || fk_sl == 0 || fk_snext == 0) {
             fk_die("fk_sintern: out of memory growing string table");
@@ -1464,8 +1485,8 @@ static long long fk_sbuf(const char *buf, long long n) {
     }
     fk_sinit();
     while (fk_sbp + n > fk_scap_b) {
+        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
-        fk_sb = realloc(fk_sb, fk_scap_b);
         fk_sb_check();
     }
     long long j = 0;
@@ -1748,8 +1769,8 @@ static long long fk_metal_buf_read_native(long long h, long long off, long long 
     }
     fk_sinit();
     while (fk_sbp + len > fk_scap_b) {
+        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
-        fk_sb = realloc(fk_sb, fk_scap_b);
         fk_sb_check();
     }
     long long n = fk_metal_buf_read_external(h, off, len, fk_sb + fk_sbp, len);
@@ -2905,8 +2926,8 @@ static long long fk_mic_stream_read(long long maxbytes, long long wait_ms) {
     fk_sinit();
     long long base = fk_sbp;
     while (base + have > fk_scap_b) {
+        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
-        fk_sb = realloc(fk_sb, fk_scap_b);
         fk_sb_check();
     }
     long long i;
@@ -4231,16 +4252,17 @@ static void *fk_nodes_grow_col(void *p, long long old_n, long long new_n, long l
 static void fk_nodes_grow(void) {
     long long oc = fk_node_cap;
     long long nc = oc * 2;
-    fk_nkind = (long long *)fk_nodes_grow_col(fk_nkind, oc, nc, 8);
-    fk_ncat = (long long *)fk_nodes_grow_col(fk_ncat, oc, nc, 8);
-    fk_nkids = (long long *)fk_nodes_grow_col(fk_nkids, oc, nc, 8);
-    fk_nval = (long long *)fk_nodes_grow_col(fk_nval, oc, nc, 8);
-    fk_nid = (long long (*)[4])fk_nodes_grow_col(fk_nid, oc, nc, 32);
+    if (fk_store_shared && nc > FK_STORE_NODE_CELLS) { fk_store_go_private(); }
+    fk_nkind = (long long *)fk_store_grow('k', fk_nkind, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_ncat = (long long *)fk_store_grow('c', fk_ncat, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nkids = (long long *)fk_store_grow('i', fk_nkids, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nval = (long long *)fk_store_grow('v', fk_nval, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nid = (long long (*)[4])fk_store_grow('n', fk_nid, oc * 32, nc * 32, FK_STORE_NODE_CELLS * 32, 1);
     fk_nhash_memo = (long long *)fk_nodes_grow_col(fk_nhash_memo, oc, nc, 8);
-    fk_nsfile = (long long *)fk_nodes_grow_col(fk_nsfile, oc, nc, 8);
-    fk_nsline = (long long *)fk_nodes_grow_col(fk_nsline, oc, nc, 8);
-    fk_nscol = (long long *)fk_nodes_grow_col(fk_nscol, oc, nc, 8);
-    fk_nsattr = (long long *)fk_nodes_grow_col(fk_nsattr, oc, nc, 8);
+    fk_nsfile = (long long *)fk_store_grow('f', fk_nsfile, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nsline = (long long *)fk_store_grow('l', fk_nsline, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nscol = (long long *)fk_store_grow('o', fk_nscol, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
+    fk_nsattr = (long long *)fk_store_grow('a', fk_nsattr, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
     fk_fbroots = (long long *)fk_nodes_grow_col(fk_fbroots, oc, nc, 8);
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
     fk_inram_node_slot = (unsigned char *)fk_nodes_grow_col(fk_inram_node_slot, oc, nc, 1);
@@ -4284,16 +4306,30 @@ static void fk_nodes_init(void) {
     fk_src_root_reserve(1);
     fk_vs_grow(FK_VALUE_STACK_CAP_INIT);
     fk_mem_reserve(FK_MEM_CELL_CAP_INIT);
-    fk_nkind = (long long *)calloc(FK_NODE_CAP_INIT, 8);
-    fk_ncat = (long long *)calloc(FK_NODE_CAP_INIT, 8);
-    fk_nkids = (long long *)calloc(FK_NODE_CAP_INIT, 8);
-    fk_nval = (long long *)calloc(FK_NODE_CAP_INIT, 8);
-    fk_nid = (long long (*)[4])calloc(FK_NODE_CAP_INIT, 32);
+    fk_nkind = (long long *)fk_store_take('k', FK_STORE_NODE_CELLS * 8);
+    fk_ncat = fk_nkind == 0 ? 0 : (long long *)fk_store_take('c', FK_STORE_NODE_CELLS * 8);
+    fk_nkids = fk_ncat == 0 ? 0 : (long long *)fk_store_take('i', FK_STORE_NODE_CELLS * 8);
+    fk_nval = fk_nkids == 0 ? 0 : (long long *)fk_store_take('v', FK_STORE_NODE_CELLS * 8);
+    fk_nid = fk_nval == 0 ? 0 : (long long (*)[4])fk_store_take('n', FK_STORE_NODE_CELLS * 32);
+    fk_nsfile = fk_nid == 0 ? 0 : (long long *)fk_store_take('f', FK_STORE_NODE_CELLS * 8);
+    fk_nsline = fk_nsfile == 0 ? 0 : (long long *)fk_store_take('l', FK_STORE_NODE_CELLS * 8);
+    fk_nscol = fk_nsline == 0 ? 0 : (long long *)fk_store_take('o', FK_STORE_NODE_CELLS * 8);
+    fk_nsattr = fk_nscol == 0 ? 0 : (long long *)fk_store_take('a', FK_STORE_NODE_CELLS * 8);
+    if (fk_nsattr == 0) {
+        /* no shared memory here: the tables are private, as they always were */
+        fk_store_shared = 0;
+        fk_store_unlink_pid((long long)getpid());
+        fk_nkind = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+        fk_ncat = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+        fk_nkids = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+        fk_nval = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+        fk_nid = (long long (*)[4])calloc(FK_NODE_CAP_INIT, 32);
+        fk_nsfile = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+        fk_nsline = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+        fk_nscol = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+        fk_nsattr = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+    }
     fk_nhash_memo = (long long *)calloc(FK_NODE_CAP_INIT, 8);
-    fk_nsfile = (long long *)calloc(FK_NODE_CAP_INIT, 8);
-    fk_nsline = (long long *)calloc(FK_NODE_CAP_INIT, 8);
-    fk_nscol = (long long *)calloc(FK_NODE_CAP_INIT, 8);
-    fk_nsattr = (long long *)calloc(FK_NODE_CAP_INIT, 8);
     fk_fbroots = (long long *)calloc(FK_NODE_CAP_INIT, 8);
     fk_intern_tab = (long long *)calloc(FK_INTERN_HASH_CAP_INIT, 8);
     if (fk_nkind == 0 || fk_ncat == 0 || fk_nkids == 0 || fk_nval == 0 ||
@@ -4784,6 +4820,12 @@ static void fk_heap_grow(void) {
         return;
     }
     nc = fk_cap * 2;
+    if (fk_store_shared && nc <= FK_STORE_HEAP_PAIRS) {
+        fk_cap = nc;
+        fk_heap_grows = fk_heap_grows + 1;
+        return;
+    }
+    if (fk_store_shared) { fk_store_go_private(); }
     long long *nh = realloc(fk_hh, (unsigned long)(nc * 8));
     long long *nt;
     if (nh != 0) {
@@ -7444,8 +7486,15 @@ static double fk_mag_list(long long av) {
 #define FK_HASHCONS_INIT_CAP 4096 /* fk_hh/fk_ht: the hash-cons cell-pair store, initial size (fk_melt grows it) */
 static void fk_arena(void) {
     fk_cap = FK_HASHCONS_INIT_CAP;
-    fk_hh = malloc(fk_cap * 8);
-    fk_ht = malloc(fk_cap * 8);
+    fk_hh = (long long *)fk_store_take('h', FK_STORE_HEAP_PAIRS * 8);
+    fk_ht = fk_hh == 0 ? 0 : (long long *)fk_store_take('t', FK_STORE_HEAP_PAIRS * 8);
+    fk_heap_alt_h = fk_ht == 0 ? 0 : fk_store_take('H', FK_STORE_HEAP_PAIRS * 8);
+    fk_heap_alt_t = fk_heap_alt_h == 0 ? 0 : fk_store_take('T', FK_STORE_HEAP_PAIRS * 8);
+    if (fk_heap_alt_t == 0) {
+        fk_store_go_private();
+        fk_hh = malloc(fk_cap * 8);
+        fk_ht = malloc(fk_cap * 8);
+    }
     if (fk_hh == 0 || fk_ht == 0) {
         fk_die("fk_arena: out of memory");
     }
@@ -7580,8 +7629,9 @@ static void fk_melt(void) {
     while (ncap - nlive < fk_np / 4 + FK_HASHCONS_INIT_CAP) {
         ncap = ncap * 2;
     }
-    fk_nh = malloc(ncap * 8);
-    fk_nt = malloc(ncap * 8);
+    if (fk_store_shared && ncap > FK_STORE_HEAP_PAIRS) { fk_store_go_private(); }
+    fk_nh = fk_store_shared ? (long long *)fk_heap_alt_h : malloc(ncap * 8);
+    fk_nt = fk_store_shared ? (long long *)fk_heap_alt_t : malloc(ncap * 8);
     if (fk_nh == 0 || fk_nt == 0) {
         free(fk_nh);
         free(fk_nt);
@@ -7618,14 +7668,14 @@ static void fk_melt(void) {
         fk_nval[k] = fk_mcopy(fk_nval[k]);
         k = k + 1;
     }
-    free(fk_hh);
-    free(fk_ht);
+    if (fk_store_shared) { fk_heap_alt_h = fk_hh; fk_heap_alt_t = fk_ht; fk_heap_gen = 1 - fk_heap_gen; } else { free(fk_hh); free(fk_ht); }
     free(fk_fw);
     fk_hh = fk_nh;
     fk_ht = fk_nt;
     fk_hp = fk_nhp;
     fk_cap = ncap;
     fk_nmelt = fk_nmelt + 1;
+    fk_live_publish(0);
     if (fk_conf("FK_MELT_WITNESS")) {
         dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, fp=%lld, sp=%lld\n",
                 fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_fp, fk_sp);
@@ -8942,6 +8992,88 @@ static long long fk_walk(long long i, long long fp) {
 static int fk_gift_live(long long gh) {
     return gh >= 0 && gh < fk_gift_count && fk_gift_base[gh] != 0;
 }
+/* ---- the store: every value table of this kernel lives in shared memory ----
+ * One sparse reservation per column, /fg-c<pid>-<letter>, sized once (macOS lets a shm object be
+ * truncated once) and committed page by page as the table grows: a 4 GiB reservation touched at three
+ * pages costs three pages. A shared table never moves, so another process maps the same columns and
+ * reads any cell, cons, string or float by its word -- blueprint word (fk_ncat), kids, value, NodeID
+ * and source pointer (fk_nsfile/fk_nsline/fk_nscol) on one surface, no copy, no wire. Past a
+ * reservation the process copies its tables to private memory once and goes on (never a wall); the
+ * live page says which. Letters: k kind, c cat, i kids, v val, n nid, f sfile, l sline, o scol,
+ * a sattr, h/t heap generation 0, H/T heap generation 1, s string bytes, O string offsets,
+ * L string lengths, F floats. */
+static int fk_store_tried;
+static const char fk_store_letters[] = "kcivnfloahtHTsOLF";
+static void fk_store_name(char letter, long long pid, char *out) {
+    char digits[24];
+    long long n = 0, p = pid < 0 ? 0 : pid, o = 0;
+    if (p == 0) { digits[n] = '0'; n = n + 1; }
+    while (p > 0) { digits[n] = (char)('0' + (p % 10)); n = n + 1; p = p / 10; }
+    out[0] = '/'; out[1] = 'f'; out[2] = 'g'; out[3] = '-'; out[4] = 'c'; o = 5;
+    while (n > 0) { n = n - 1; out[o] = digits[n]; o = o + 1; }
+    out[o] = '-'; out[o + 1] = letter; out[o + 2] = 0;
+}
+static void fk_store_unlink_pid(long long pid) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    long long k = 0;
+    while (fk_store_letters[k]) { char nm[32]; fk_store_name(fk_store_letters[k], pid, nm); shm_unlink(nm); k = k + 1; }
+#else
+    (void)pid;
+#endif
+}
+static void *fk_store_take(char letter, long long bytes) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    if (!fk_store_tried) { fk_store_tried = 1; fk_store_shared = 1; }
+    if (!fk_store_shared) { return 0; }
+    char nm[32];
+    fk_store_name(letter, (long long)getpid(), nm);
+    shm_unlink(nm);
+    int fd = shm_open(nm, O_CREAT | O_RDWR, 0600);
+    if (fd < 0) { fk_store_shared = 0; return 0; }
+    if (ftruncate(fd, bytes) != 0) { close(fd); shm_unlink(nm); fk_store_shared = 0; return 0; }
+    void *p = mmap(0, (size_t)bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) { shm_unlink(nm); fk_store_shared = 0; return 0; }
+    return p;
+#else
+    (void)letter; (void)bytes;
+    return 0;
+#endif
+}
+static void *fk_store_copy_out(void *p, long long bytes) {
+    char *q = malloc((unsigned long)bytes);
+    if (q == 0) { fk_die("fk_store: out of memory leaving shared memory"); }
+    long long k = 0;
+    while (k < bytes) { q[k] = ((char *)p)[k]; k = k + 1; }
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    munmap(p, (size_t)bytes);
+#endif
+    return q;
+}
+/* the process leaves shared memory: every table copied to private memory once, names unlinked */
+static void fk_store_go_private(void) {
+    if (!fk_store_shared) { return; }
+    fk_store_shared = 0;
+    long long c = fk_node_cap;
+    if (c > 0) {
+        fk_nkind = fk_store_copy_out(fk_nkind, c * 8); fk_ncat = fk_store_copy_out(fk_ncat, c * 8); fk_nkids = fk_store_copy_out(fk_nkids, c * 8); fk_nval = fk_store_copy_out(fk_nval, c * 8);
+        fk_nid = (long long (*)[4])fk_store_copy_out(fk_nid, c * 32); fk_nsfile = fk_store_copy_out(fk_nsfile, c * 8); fk_nsline = fk_store_copy_out(fk_nsline, c * 8); fk_nscol = fk_store_copy_out(fk_nscol, c * 8); fk_nsattr = fk_store_copy_out(fk_nsattr, c * 8);
+    }
+    if (fk_cap > 0) { fk_hh = fk_store_copy_out(fk_hh, fk_cap * 8); fk_ht = fk_store_copy_out(fk_ht, fk_cap * 8); fk_heap_alt_h = 0; fk_heap_alt_t = 0; }
+    if (fk_scap_b > 0) { fk_sb = fk_store_copy_out(fk_sb, fk_scap_b); fk_so = fk_store_copy_out(fk_so, fk_scap_s * 8); fk_sl = fk_store_copy_out(fk_sl, fk_scap_s * 8); }
+    if (fk_fcap > 0 && fk_fv != 0) { fk_fv = fk_store_copy_out(fk_fv, fk_fcap * 8); }
+    fk_store_unlink_pid((long long)getpid());
+}
+/* growth of one table: inside its reservation nothing moves; past it the whole store goes private, then realloc as before */
+static void *fk_store_grow(char letter, void *p, long long old_bytes, long long new_bytes, long long reserved, int zero) {
+    (void)letter;
+    if (fk_store_shared && p != 0 && new_bytes <= reserved) { return p; }
+    if (fk_store_shared) { fk_store_go_private(); }
+    char *q = realloc(p, (unsigned long)new_bytes);
+    if (q == 0) { fk_die("fk_store_grow: out of memory growing a value table"); }
+    if (zero) { long long k = old_bytes; while (k < new_bytes) { q[k] = 0; k = k + 1; } }
+    return q;
+}
 /* offer (writable = 1: create, size to want+16 bytes, map read-write) or
  * receive (writable = 0: attach read-only; absent answers nothing). */
 static long long fk_gift_open(const char *gname, long long want, int writable) {
@@ -9030,8 +9162,8 @@ static long long *fk_src_dep_text_len;
 /* append n bytes to the string builder at fk_sbp, growing it as every arm does */
 static void fk_sappend(const char *bytes, long long n) {
     while (fk_sbp + n > fk_scap_b) {
+        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
-        fk_sb = realloc(fk_sb, fk_scap_b);
         fk_sb_check();
     }
     long long k = 0;
@@ -9264,8 +9396,8 @@ static long long fk_gift_take_str(long long gh) {
             }
             fk_sinit();
             while (fk_sbp + n > fk_scap_b) {
+                fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
                 fk_scap_b = fk_scap_b * 2;
-                fk_sb = realloc(fk_sb, fk_scap_b);
                 fk_sb_check();
             }
             { long long k = 0; while (k < n) { fk_sb[fk_sbp + k] = gpay[k]; k = k + 1; } }
@@ -9360,9 +9492,10 @@ static long long fk_cross_decode(const char *b, long long n, long long *pos, lon
  * the words by offset. /fg-kernels is the roster: a slot per registered pid. Word layout
  * (after the 16-byte gift header): 0 magic 1 pid 2 start-ms 3 seq 4 dispatches 5 heat calls
  * 6 nodes 7 strings 8 cons 9 fns 10 gift frames 11 gift bytes 12 node cap 13 heap cap
- * 14 value-stack depth 15 floats 16 hottest tag 17 hottest count 18 cpu us 19 alive 20 distinct arms */
+ * 14 value-stack depth 15 floats 16 hottest tag 17 hottest count 18 cpu us 19 alive 20 distinct arms
+ * 21 melt generation 22 store shared (1: the value tables are in /fg-c<pid>-<letter>) 23 heap generation (0: h/t, 1: H/T) */
 #define FK_LIVE_MAGIC 0x464B4C4956LL
-#define FK_LIVE_WORDS 21
+#define FK_LIVE_WORDS 24
 static volatile long long *fk_live_page;
 static long long fk_live_ticks;
 static void fk_live_pid_name(long long pid, char *out) {
@@ -9394,7 +9527,8 @@ static void fk_live_roster_register(long long pid) {
     while (k < 256) {
         long long v = slots[k];
         if (v == pid) { free_slot = -1; break; }
-        if (free_slot < 0 && (v == 0 || (v > 0 && kill((int)v, 0) != 0))) { free_slot = k; }
+        if (v > 0 && v != pid && kill((int)v, 0) != 0) { char dn[32]; fk_live_pid_name(v, dn); shm_unlink(dn); fk_store_unlink_pid(v); slots[k] = 0; v = 0; }
+        if (free_slot < 0 && v == 0) { free_slot = k; }
         k = k + 1;
     }
     if (free_slot >= 0) { slots[free_slot] = pid; }
@@ -9426,6 +9560,7 @@ static void fk_live_publish(int final) {
     w[4] = sum; w[5] = fk_heat_total; w[6] = fk_np; w[7] = fk_sp; w[8] = fk_hp; w[9] = fk_fntop;
     w[10] = fk_gift_count; w[11] = gb; w[12] = fk_node_cap; w[13] = fk_cap; w[14] = fk_vsp; w[15] = fk_fp;
     w[16] = hot; w[17] = hotc; w[18] = fk_live_cpu_us(); w[19] = final ? 0 : 1; w[20] = distinct;
+    w[21] = fk_melt_gen; w[22] = fk_store_shared; w[23] = fk_heap_gen;
     __atomic_store_n(&w[3], w[3] + 1, __ATOMIC_RELEASE);
 }
 /* read-only mapping of another kernel's page or the roster: the words, then unmap */
@@ -9520,6 +9655,162 @@ static const char *fk_hot_unit_of(long long so) {
     }
     return unit;
 }
+/* ---- reading another kernel's store: its columns mapped read-only, every word read where it lives ----
+ * A foreign word travels in this process as a plain int (cell_ref / cell_field answer it, cell_value
+ * resolves it): small words as themselves, the far negatives (strings, floats, nothing, functions)
+ * folded below -2^61 so no foreign word is ever mistaken for one of this process's own. */
+#define FK_CELL_MAPS 16
+#define FK_CELL_BIG (1LL << 61)
+#define FK_CELL_BASE 9000000000000000000LL
+struct fk_cell_map_s { long long pid; void *base[17]; long long size[17]; volatile long long *live; long long live_size; };
+static struct fk_cell_map_s fk_cell_maps[FK_CELL_MAPS];
+static int fk_cell_letter(char c) { int k = 0; while (fk_store_letters[k]) { if (fk_store_letters[k] == c) { return k; } k = k + 1; } return -1; }
+static long long fk_cell_enc(long long raw) { if (raw <= -7000000000000000000LL) { return ((0 - (raw + FK_CELL_BASE)) - FK_CELL_BIG) << 1; } return raw << 1; }
+static long long fk_cell_dec(long long v) { long long x = v >> 1; if (x <= 0 - (1LL << 60)) { return (0 - (x + FK_CELL_BIG)) - FK_CELL_BASE; } return x; }
+static long long fk_cell_map_open(long long pid) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    long long s = 0;
+    while (s < FK_CELL_MAPS && fk_cell_maps[s].pid != 0) { s = s + 1; }
+    if (s == FK_CELL_MAPS) { return -1; }
+    struct fk_cell_map_s *m = &fk_cell_maps[s];
+    m->pid = pid;
+    long long k = 0, mapped = 0;
+    while (fk_store_letters[k]) {
+        char nm[32];
+        fk_store_name(fk_store_letters[k], pid, nm);
+        m->base[k] = 0; m->size[k] = 0;
+        int fd = shm_open(nm, O_RDONLY, 0600);
+        if (fd >= 0) {
+            struct stat st;
+            if (fstat(fd, &st) == 0 && st.st_size > 0) {
+                void *p = mmap(0, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+                if (p != MAP_FAILED) { m->base[k] = p; m->size[k] = (long long)st.st_size; mapped = mapped + 1; }
+            }
+            close(fd);
+        }
+        k = k + 1;
+    }
+    char ln[32];
+    fk_live_pid_name(pid, ln);
+    m->live = 0; m->live_size = 0;
+    int lfd = shm_open(ln, O_RDONLY, 0600);
+    if (lfd >= 0) {
+        struct stat lst;
+        if (fstat(lfd, &lst) == 0 && lst.st_size >= 4096) {
+            void *lp = mmap(0, (size_t)lst.st_size, PROT_READ, MAP_SHARED, lfd, 0);
+            if (lp != MAP_FAILED) { m->live = (volatile long long *)lp; m->live_size = (long long)lst.st_size; }
+        }
+        close(lfd);
+    }
+    if (mapped == 0) { m->pid = 0; return -1; }
+    return s;
+#else
+    (void)pid;
+    return -1;
+#endif
+}
+static void fk_cell_map_close(long long s) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    if (s < 0 || s >= FK_CELL_MAPS || fk_cell_maps[s].pid == 0) { return; }
+    struct fk_cell_map_s *m = &fk_cell_maps[s];
+    long long k = 0;
+    while (k < 17) { if (m->base[k] != 0) { munmap(m->base[k], (size_t)m->size[k]); m->base[k] = 0; } k = k + 1; }
+    if (m->live != 0) { munmap((void *)m->live, (size_t)m->live_size); m->live = 0; }
+    m->pid = 0;
+#else
+    (void)s;
+#endif
+}
+/* a column born after the map (the float pool at its first box, the strings at their first intern) opens on first touch */
+static void fk_cell_col_open(struct fk_cell_map_s *m, int k) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    char nm[32];
+    fk_store_name(fk_store_letters[k], m->pid, nm);
+    int fd = shm_open(nm, O_RDONLY, 0600);
+    if (fd < 0) { return; }
+    struct stat st;
+    if (fstat(fd, &st) == 0 && st.st_size > 0) {
+        void *p = mmap(0, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+        if (p != MAP_FAILED) { m->base[k] = p; m->size[k] = (long long)st.st_size; }
+    }
+    close(fd);
+#else
+    (void)m; (void)k;
+#endif
+}
+static long long fk_cell_col(struct fk_cell_map_s *m, char c, long long idx, long long width, long long *out) {
+    int k = fk_cell_letter(c);
+    if (k < 0) { return 0; }
+    if (m->base[k] == 0) { fk_cell_col_open(m, k); }
+    if (m->base[k] == 0 || idx < 0 || (idx + 1) * width > m->size[k]) { return 0; }
+    *out = *(long long *)((char *)m->base[k] + idx * width);
+    return 1;
+}
+/* what a foreign raw word is: 0 int 1 list 2 node 3 string 4 float 5 nothing 6 function */
+static long long fk_cell_kind_of(long long raw) {
+    if (raw == fk_nothing) { return 5; }
+    if ((raw & 1) == 0) { return 0; }
+    if (raw <= fk_fbase - 3) { return 4; }
+    if (raw <= fk_sbase - 1) { return 3; }
+    if (raw >= fk_fnbase && raw < fk_fnbase + 8192) { return 6; }
+    if (raw >= 1) { return 1; }
+    return 2;
+}
+static long long fk_cell_field(long long s, long long raw, long long k) {
+    if (s < 0 || s >= FK_CELL_MAPS || fk_cell_maps[s].pid == 0) { return fk_nothing; }
+    struct fk_cell_map_s *m = &fk_cell_maps[s];
+    long long kind = fk_cell_kind_of(raw);
+    long long w = 0;
+    if (kind == 2) {
+        long long idx = fk_nidx(raw);
+        if (k == 0) { return fk_cell_col(m, 'k', idx, 8, &w) ? (w << 1) : fk_nothing; }
+        if (k == 1) { return fk_cell_col(m, 'c', idx, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
+        if (k == 2) { return fk_cell_col(m, 'i', idx, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
+        if (k == 3) { return fk_cell_col(m, 'v', idx, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
+        if (k >= 4 && k <= 7) { int c = fk_cell_letter('n'); if (c >= 0 && m->base[c] == 0) { fk_cell_col_open(m, c); } if (c < 0 || m->base[c] == 0 || (idx + 1) * 32 > m->size[c]) { return fk_nothing; } return (*(long long *)((char *)m->base[c] + idx * 32 + (k - 4) * 8)) << 1; }
+        if (k == 8) { return fk_cell_col(m, 'f', idx, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
+        if (k == 9) { return fk_cell_col(m, 'l', idx, 8, &w) ? (w << 1) : fk_nothing; }
+        if (k == 10) { return fk_cell_col(m, 'o', idx, 8, &w) ? (w << 1) : fk_nothing; }
+        if (k == 11) { return fk_cell_col(m, 'a', idx, 8, &w) ? (w << 1) : fk_nothing; }
+        return fk_nothing;
+    }
+    if (kind == 1) {
+        long long p = raw >> 1;
+        long long gen = (m->live != 0 && m->live_size >= 4096) ? m->live[2 + 23] : 0;
+        char hc = gen == 1 ? 'H' : 'h';
+        char tc = gen == 1 ? 'T' : 't';
+        if (k == 0) { return fk_cell_col(m, hc, p, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
+        if (k == 1) { return fk_cell_col(m, tc, p, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
+        return fk_nothing;
+    }
+    if (k == 0) { return kind << 1; }   /* any word answers its kind at field 0 when it has no fields */
+    return fk_nothing;
+}
+static long long fk_cell_value(long long s, long long raw) {
+    long long kind = fk_cell_kind_of(raw);
+    if (kind == 0) { return raw; }
+    if (kind == 5) { return fk_nothing; }
+    if (s < 0 || s >= FK_CELL_MAPS || fk_cell_maps[s].pid == 0) { return fk_nothing; }
+    struct fk_cell_map_s *m = &fk_cell_maps[s];
+    if (kind == 3) {
+        long long si = (fk_sbase - raw - 1) >> 1;
+        long long off = 0, len = 0;
+        if (!fk_cell_col(m, 'O', si, 8, &off) || !fk_cell_col(m, 'L', si, 8, &len)) { return fk_nothing; }
+        int sb = fk_cell_letter('s');
+        if (m->base[sb] == 0) { fk_cell_col_open(m, sb); }
+        if (m->base[sb] == 0 || off < 0 || len < 0 || off + len > m->size[sb]) { return fk_nothing; }
+        return fk_sbuf((const char *)m->base[sb] + off, len);
+    }
+    if (kind == 4) {
+        long long fi = (fk_fbase - raw - 1) >> 1;
+        long long bits = 0;
+        if (!fk_cell_col(m, 'F', fi, 8, &bits)) { return fk_nothing; }
+        double d;
+        char *pd = (char *)&d; char *pb = (char *)&bits; int b = 0; while (b < 8) { pd[b] = pb[b]; b = b + 1; }
+        return fk_fbox(d);
+    }
+    return fk_nothing;
+}
 static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 9) {
         putchar((int)(fk_walk(fk_node[i][1], fp) >> 1));
@@ -9611,7 +9902,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long ln = fk_sl[sa] + fk_sl[sb];
         while (fk_sbp + ln > fk_scap_b) {
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = realloc(fk_sb, fk_scap_b);
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         long long j = 0;
@@ -9700,7 +9991,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         while (fk_sbp + 1 > fk_scap_b) {
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = realloc(fk_sb, fk_scap_b);
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         fk_sb[fk_sbp] = (char)b;
@@ -10273,6 +10564,31 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 167) {
         return fk_roster_names();
     }
+    if (t == 168) {
+        /* cell_map pid: map that kernel's store read-only; a handle, or nothing */
+        long long s168 = fk_cell_map_open(fk_walk(fk_node[i][1], fp) >> 1);
+        return s168 < 0 ? fk_nothing : (s168 << 1);
+    }
+    if (t == 169) {
+        /* cell_field handle ref k: a field of a foreign node (0 kind 1 cat 2 kids 3 val 4-7 nid 8 sfile 9 line 10 col 11 attr) or list (0 head 1 tail), read where it lives */
+        long long s169 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long r169 = fk_cell_dec(fk_walk(fk_node[i][2], fp));
+        long long k169 = fk_walk(fk_node[i][3], fp) >> 1;
+        return fk_cell_field(s169, r169, k169);
+    }
+    if (t == 170) {
+        /* cell_value handle ref: a foreign scalar as this process's own value -- int, string, float, nothing */
+        long long s170 = fk_walk(fk_node[i][1], fp) >> 1;
+        return fk_cell_value(s170, fk_cell_dec(fk_walk(fk_node[i][2], fp)));
+    }
+    if (t == 171) {
+        /* cell_ref value: this process's own value as its raw store word, the reference another process reads by */
+        return fk_cell_enc(fk_walk(fk_node[i][1], fp));
+    }
+    if (t == 172) {
+        fk_cell_map_close(fk_walk(fk_node[i][1], fp) >> 1);
+        return 1 << 1;
+    }
     if (t == 173) {
         return fk_host_cpu_busy_us() << 1;
     }
@@ -10380,7 +10696,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 fk_sinit();
                 while (fk_sbp + n > fk_scap_b) {
                     fk_scap_b = fk_scap_b * 2;
-                    fk_sb = realloc(fk_sb, fk_scap_b);
+                    fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
                     fk_sb_check();
                 }
                 { long long k = 0; while (k < n) { fk_sb[fk_sbp + k] = gpay[k]; k = k + 1; } }
@@ -10430,7 +10746,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_sinit();
         while (fk_sbp + len > fk_scap_b) {
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = realloc(fk_sb, fk_scap_b);
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         long long got = read(fd, fk_sb + fk_sbp, len);
@@ -10470,7 +10786,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             while (base + total + 65536 > fk_scap_b) {
                 fk_scap_b = fk_scap_b * 2;
                 void *sb0 = fk_sb;
-                fk_sb = realloc(fk_sb, fk_scap_b);
+                fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
                 fk_sb_check();
                 if (fk_conf("FK_READ_WITNESS")) {
                     dprintf(2, "[read_file] pool grow -> %lld bytes, %p -> %p (sbp=%lld sp=%lld)\n", fk_scap_b, sb0, (void *)fk_sb, fk_sbp, fk_sp);
@@ -10790,7 +11106,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_sinit();
         while (fk_sbp + max71 > fk_scap_b) {
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = realloc(fk_sb, fk_scap_b);
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         long long got71 = read((int)fd71, fk_sb + fk_sbp, max71);
@@ -11490,7 +11806,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         while (fk_sbp + rn > fk_scap_b) {
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = realloc(fk_sb, fk_scap_b);
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         long long rj = 0;
@@ -11572,7 +11888,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         while (fk_sbp + fk_gen_len > fk_scap_b) {
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = realloc(fk_sb, fk_scap_b);
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         long long gj = 0;
@@ -11825,6 +12141,7 @@ static void fk_heat_report(void) {
     }
     fk_heat_reported = 1;
     fk_live_publish(1);
+    if (fk_store_shared) { fk_store_unlink_pid((long long)getpid()); }
     fk_heat_write();
 }
 static void fk_heat_pulse(void) {
@@ -12073,7 +12390,7 @@ static long long fk_smkstr(void) {
         }
         while (fk_sbp + 1 > fk_scap_b) {
             fk_scap_b = fk_scap_b * 2;
-            fk_sb = realloc(fk_sb, fk_scap_b);
+            fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         fk_sb[fk_sbp] = ch;
@@ -12946,7 +13263,7 @@ static long long fk_sparse(void) {
             while (k < fk_spos) {
                 while (fk_sbp + 1 > fk_scap_b) {
                     fk_scap_b = fk_scap_b * 2;
-                    fk_sb = realloc(fk_sb, fk_scap_b);
+                    fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
                     fk_sb_check();
                 }
                 fk_sb[fk_sbp] = fk_srctext[k];
@@ -15251,17 +15568,17 @@ static void fk_fkb_read_table_string(void) {
         return;
     }
     if (fk_sp >= fk_scap_s) {
+        fk_so = (long long *)fk_store_grow('O', fk_so, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
+        fk_sl = (long long *)fk_store_grow('L', fk_sl, fk_scap_s * 8, fk_scap_s * 16, FK_STORE_STR_CELLS * 8, 0);
         fk_scap_s = fk_scap_s * 2;
-        fk_so = realloc(fk_so, fk_scap_s * 8);
-        fk_sl = realloc(fk_sl, fk_scap_s * 8);
         fk_snext = realloc(fk_snext, fk_scap_s * 8);
         if (fk_so == 0 || fk_sl == 0 || fk_snext == 0) {
             fk_die("fk_fkb: out of memory growing string table");
         }
     }
     while (fk_sbp + n > fk_scap_b) {
+        fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b, fk_scap_b * 2, FK_STORE_STR_BYTES, 0);
         fk_scap_b = fk_scap_b * 2;
-        fk_sb = realloc(fk_sb, fk_scap_b);
         fk_sb_check();
     }
     long long start = fk_sbp;
