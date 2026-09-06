@@ -668,12 +668,29 @@ carrier 0, host sensors 48, the live loop 1038 in 20 s -- about two a tick,
 inside the render, since all 215 published row ids are stable second to
 second. (receipts/2026-09-06-the-arena-counts-its-own-growth.md)
 
+**Nothing is withheld.** The completed-turn share published one node named
+`share.previous.withheld` whenever a reading had not reconciled, so a stale
+percentage could not stand as current -- a real protection whose means was
+hiding counts the receipt already held. The unreconciled path now gives the
+same four samples as the reconciled one, the total and the three lane
+percentages, wearing a lifecycle from the membrane's own words (`active`
+while a turn settles, `unknown` when the carrier never arrived) and the
+failing check as its own channel word (`carrier-absent`, `turn-open`,
+`tokens-unreconciled`, and six more). The stale-reading guard is the silence
+lane: a frame not given for three cadences reads silent, so age tells what
+hiding used to. Ten lines that named an absence a withholding now read
+`unavailable reason=<why>`. `form-cli-share-glass-band` 65535 with its
+claims rewritten to assert the given reading; the turn-evidence bands answer
+the same before and after. Consent is not touched: sense-discernment,
+organ-offer and freq-aligned-share hold by sovereignty, not by hiding a
+number. (receipts/2026-09-06-nothing-is-withheld.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=95 -> 38000095
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=96 -> 38000096
 ./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
