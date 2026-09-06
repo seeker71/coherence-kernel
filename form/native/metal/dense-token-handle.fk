@@ -140,6 +140,7 @@
         (str_concat (q5m-msl-appendix "form_q5k_dequant_f32" "form_q5k_matvec_f32"
                                       "form_q50_dequant_f32" "form_q50_matvec_f32")
         (str_concat (str_concat (ldm-msl-unit) (str_concat (dth-attn-tw-msl "form_gqa_decode_tg_f32") (str_concat (q80-matvec-glu-body "form_q80_matvec_glu_f32") (dth-rope-pair2-msl "form_rope_pair2_f32"))))
+        (str_concat (str_concat (q6m-matvec-tg4-body "form_q6k_matvec_tg4_f32") (q4m-matvec-tg4-body "form_q4k_matvec_tg4_f32"))
         (str_concat (dth-copy-msl "form_copy_off_f32")
         (str_concat (dth-neox-msl "form_rope_neox_f32")
         (str_concat (dth-ln-msl "form_layernorm_f32")
@@ -147,7 +148,7 @@
         (str_concat (dth-copyfrom-msl "form_copy_from_f32")
         (str_concat (dth-q40-weight-msl)
         (str_concat (dth-q40-dequant-msl "form_q40_dequant_f32")
-                    (dth-q40-matvec-msl "form_q40_matvec_f32")))))))))))))))
+                    (dth-q40-matvec-msl "form_q40_matvec_f32"))))))))))))))))
 
     ; ================= the file's numbers, in ONE walk =================
     (defn dth-header-window () 40000000)
@@ -296,7 +297,9 @@
               (metal_pipeline msl "form_q80_matvec_tg4_add_f32") ; 33 tg4 with the residual add in its epilogue (dispatched: o, down)
               (metal_pipeline msl "form_q80_matvec_tg4x3_f32")   ; 34 q, k, v in one dispatch, k and v into their caches (dispatched)
               (metal_pipeline msl "form_q80_matvec_glu_f32")     ; 35 gate, up and the SwiGLU in one dispatch (dispatched)
-              (metal_pipeline msl "form_rope_pair2_f32")))       ; 36 the pair rope over q and k (in its cache) in one dispatch (dispatched)
+              (metal_pipeline msl "form_rope_pair2_f32")         ; 36 the pair rope over q and k (in its cache) in one dispatch (dispatched)
+              (metal_pipeline msl "form_q6k_matvec_tg4_f32")     ; 37 the Q6_K sixteen-rows-a-group twin (dispatched; q6k-q4k-matvec-tg-band.fk)
+              (metal_pipeline msl "form_q4k_matvec_tg4_f32")))   ; 38 the Q4_K sixteen-rows-a-group twin (dispatched; the same band)
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
@@ -344,20 +347,28 @@
     ; Q8_0 rows go through the sixteen-rows-a-group twin (bit for bit the attestant, q8-0-matvec-tg-band.fk):
     ; sixteen lanes folding sixteen rows while 64 loaders stage the next 128-column step and hold the one after in
     ; registers; cols a multiple of 128. Else the double-buffered twin (cols a multiple of 512), else the block-once twin.
+    ; Q6_K and Q4_K rows (llama3.2:3b's) go through the same sixteen-rows-a-group shape on their own superblocks
+    ; (q6k-msl.fk / q4k-msl.fk kernel 3, bit for bit their attestants: q6k-q4k-matvec-tg-band.fk); cols a multiple of 256.
+    (defn dth-mv-tg16 (pipe tv xh yh)
+        (metal_enqueue pipe (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 96 0 1 0) (div (add (dth-tv-r tv) 15) 16)))
     (defn dth-mv (ps tv xh yh)
         (if (eq (dth-tv-ty tv) 8)
             (if (eq (mod (dth-tv-c tv) 128) 0)
-                (metal_enqueue (nth ps 28) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 96 0 1 0) (div (add (dth-tv-r tv) 15) 16))
+                (dth-mv-tg16 (nth ps 28) tv xh yh)
             (if (eq (mod (dth-tv-c tv) 512) 0)
                 (metal_enqueue (nth ps 27) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 64 0 1 0) (dth-tv-r tv))
                 (metal_enqueue (nth ps 25) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 32 0 1 0) (dth-tv-r tv))))
+        (if (and (eq (dth-tv-ty tv) 14) (eq (mod (dth-tv-c tv) 256) 0))
+            (dth-mv-tg16 (nth ps 37) tv xh yh)
+        (if (and (eq (dth-tv-ty tv) 12) (eq (mod (dth-tv-c tv) 256) 0))
+            (dth-mv-tg16 (nth ps 38) tv xh yh)
         (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 0)
                        (if (eq (dth-tv-ty tv) 12) (nth ps 1)
                        (if (eq (dth-tv-ty tv) 13) (nth ps 14)
                        (if (eq (dth-tv-ty tv) 6) (nth ps 16)
                        (if (eq (dth-tv-ty tv) 2) (nth ps 18) (nth ps 2))))))
                        (md-bind (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)))
-                       (dth-tv-r tv))))
+                       (dth-tv-r tv))))))
 
     (defn dth-dq (ps tv yh off n)
         (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 3)
