@@ -1162,6 +1162,7 @@ static long long *fk_nscol;
 static long long *fk_nsattr;
 static long long *fk_fbroots;
 static long long fk_fbn;
+#define FK_FB_RING 2048 /* the framebuffer keeps the newest roots: a buffer, not a ledger -- framebuffer-events answers at most this many, oldest first */
 static void **fk_gift_base;      /* gift frames: mapped bases (0 = released) */
 static long long *fk_gift_size;  /* gift frames: mapped sizes */
 static long long fk_gift_count;
@@ -13852,10 +13853,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_nsline[fr_ni] = fr_pk >> 16;
             fk_nscol[fr_ni] = fr_pk & 65535;
             fk_nsattr[fr_ni] = 1;
-            if (fk_fbn >= fk_node_cap) {
-                fk_nodes_grow();
-            }
-            fk_fbroots[fk_fbn] = fr_nv;
+            fk_fbroots[fk_fbn % FK_FB_RING] = fr_nv;
             fk_fbn = fk_fbn + 1;
         }
         return fr_nv;
@@ -13864,18 +13862,19 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (fk_cap == 0) {
             fk_arena();
         }
-        if ((fk_hp + fk_fbn + 4) * 100 >= fk_cap * 90) {
+        if ((fk_hp + (fk_fbn < FK_FB_RING ? fk_fbn : FK_FB_RING) + 4) * 100 >= fk_cap * 90) {
             fk_melt();
         }
         long long fe_r = 1;
+        long long fe_n = fk_fbn < FK_FB_RING ? fk_fbn : FK_FB_RING;
         long long fe_i = fk_fbn;
-        while (fe_i > 0) {
+        while (fe_i > fk_fbn - fe_n) {
             fe_i = fe_i - 1;
             if (fk_hp + 1 >= fk_cap) {
                 fk_heap_grow();
             }
             fk_hp = fk_hp + 1;
-            fk_hh[fk_hp] = fk_fbroots[fe_i];
+            fk_hh[fk_hp] = fk_fbroots[fe_i % FK_FB_RING];
             fk_ht[fk_hp] = fe_r;
             fe_r = (fk_hp << 1) | 1;
         }

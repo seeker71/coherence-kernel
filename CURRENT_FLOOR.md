@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 700 rows, 688 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 701 rows, 689 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -638,12 +638,25 @@ frame-work 6-8 ms, CPU about 30%, the drawn frame identical digit-masked;
 about 2.7 a tick from a site no door shows when called alone -- named with
 its rate. (receipts/2026-09-06-one-pass-a-line.md)
 
+**The framebuffer is a buffer.** `intern_node_at` appended every root to a
+history that only grew, and `framebuffer-events` consed the whole history
+on every call; the live loop paid it every tick and its selfmolt rule at
+262,144 was the only thing that noticed. The roots are a ring of the newest
+2048 now: the same order for any run shorter than the ring, `node_source`
+untouched for a root that has left it, the melt's headroom counting the ring.
+Sixty seconds of the live loop: roots 676 -> 1526 -> 2048 and flat, work 6-11
+ms, CPU 36%; the twelve bands that name the framebuffer answer the same on
+this seed and the one before it. The site still mints about three roots a
+tick and with them nodes into the shared field, which never melts -- its
+node ceiling is about ninety hours away at that rate, named with its rate.
+(receipts/2026-09-06-the-framebuffer-is-a-buffer.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=93 -> 38000093
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=94 -> 38000094
 ./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
