@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 714 rows, 702 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 717 rows, 705 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -235,7 +235,7 @@ dialects, `i e c q` inspect, ask evidence, continue, abstain.
 form-glass-live-band                   -> 1073741823
 form-glass-live-ui-band                -> 1073741823
 form-glass-dashboard-band              -> 16777215
-form-glass-observer-band               -> 8388607
+form-glass-observer-band               -> 67108863
 form-glass-event-loop-band             -> 16777215
 form-glass-staged-startup-band         -> 65535
 form-glass-launch-band                 -> 65535
@@ -256,7 +256,8 @@ primitive-registry-band                -> 45      (fkwu; one pending row per abs
 form-glass-telemetry-membrane-band     -> 2097151
 form-glass-observation-v2-band         -> 2097151
 form-glass-wait-band                   -> 255
-form-glass-machine-band                -> 255
+form-glass-machine-band                -> 511
+form-cli-token-discovery-band          -> 1048575
 form-glass-frame-work-band             -> 32767
 persistence-band                       -> 7       (four-way)
 channel-breath-band                    -> 500     (four-way)
@@ -703,12 +704,47 @@ leaves, never what the body may see. sense-discernment 1023 with its harm
 claim inverted, organ-offer 63 asserting the decline's disclosure.
 (receipts/2026-09-06-the-body-holds-what-it-sensed.md)
 
+**Nothing is hidden.** Consent alone gates the outward crossing, which is
+axiom 4: a cell meets the world through the interface it offers, and what
+crosses is the OBSERVED cell's choice -- never the observer's judgment of
+what a receiver can bear. The harmful-to-surface mark travels with its row
+wherever the row goes and asks for care; it decides nothing. A row whose
+cell consented crosses, marked; a row whose cell did not consent composts to
+presence by that cell's own sovereignty, not by our harm call.
+`sense-discernment-band` 1023 with both polarities pinned.
+
+**The token reading is available without a human step.** The remote-token
+lane knew one provider's schema and waited on a hand-written binding file,
+so on this host every reading was absent. It reads a second explicit typed
+position now (an assistant row's `message.usage`, that provider's names
+mapped onto the canonical six counters and the total it never reports
+computed from the parts it does), and it finds its own transcript by working
+tree and modification time. Coordinates only; the explicit binding still
+wins where it stands. Seven samples publish on `share.token-pressure`.
+Witnessed with no binding file: total 684,295, input 684,086 of which
+683,076 read from cache. `form-cli-token-discovery-band` 1048575.
+(receipts/2026-09-06-the-token-reading-is-available.md)
+
+**Every gauge has a source, and the byte gauges ride the words.** Ten glass
+rows said unavailable; nine were answerable by a door that already existed
+and the tenth carries the probe that witnessed its absence. Metal allocated
+bytes and recommended working set are two lines of the Metal API; MLX's
+active, peak, cache and limit are four functions in its memory header. Both
+carriers speak them, and `metal_live` carries 20 words with `mlx_live` at 16
+-- carrier, seed array and loop bound moved together -- so no glass row
+parses status text (that parsing cost `fstr-find-loop` 559K calls a tick).
+The three arena byte rows are arithmetic over the seed's own counts at the
+column widths each row names. Live: 475,136 bytes of Metal under a
+115,448,725,504 byte working set, 1,160,599 cells, 291 recipes. observer
+67108863, machine 511, frame-work 32767.
+(receipts/2026-09-06-every-gauge-has-a-source.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=97 -> 38000097
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=99 -> 38000099
 ./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
