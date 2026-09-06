@@ -9794,7 +9794,7 @@ static long long fk_field_node_matches(long long ix, long long kind, long long s
     if (kind == 1) {
         if (fk_nid[ix][2] != sub) { return 0; }
         if (sub == 2) { return fk_str_bytes_eq(fk_nval[ix], a); }
-        if (sub == 7) { double x = fk_num(fk_nval[ix]), y = fk_num(a); return (x == y || (x != x && y != y)) ? 1 : 0; }
+        if (sub == 6 || sub == 7) { double x = fk_num(fk_nval[ix]), y = fk_num(a); return (x == y || (x != x && y != y)) ? 1 : 0; }
         return fk_nval[ix] == a;
     }
     if (kind == 2) { return fk_veq(fk_ncat[ix], a) != 0 && fk_veq(fk_nkids[ix], b) != 0; }
@@ -9810,7 +9810,10 @@ static long long fk_field_fill(long long kind, long long sub, long long a, long 
     if (kind == 1) {
         fk_nval[idx] = fk_field_share_value(a); fk_nkids[idx] = 1; fk_ncat[idx] = 0;
         fk_nid[idx][0] = 1; fk_nid[idx][1] = 1; fk_nid[idx][2] = sub;
-        fk_nid[idx][3] = sub == 1 ? (a >> 1) : (sub == 3 ? ((a != 0) ? 1 : 0) : idx);
+        /* a bool's inst is its truth (1/0), read off the interning sentinel -- the sentinel itself is
+         * never zero, so `a != 0` named every bool true (measured: node_inst of false answered 1);
+         * a float32's inst is its IEEE bits (b), so a hand-built type-6 leaf and an interned one agree */
+        fk_nid[idx][3] = sub == 1 ? (a >> 1) : (sub == 3 ? ((a == (0 - 9223372036854775807LL)) ? 1 : 0) : (sub == 6 ? b : idx));
     } else if (kind == 2) {
         fk_ncat[idx] = fk_field_share_value(a); fk_nkids[idx] = fk_field_share_value(b); fk_nval[idx] = 0;
         fk_nid[idx][0] = 0; fk_nid[idx][1] = 0; fk_nid[idx][2] = 0; fk_nid[idx][3] = idx;
@@ -10848,6 +10851,90 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     fk_gift_base[gh >> 1] = 0;
     return l;
 }
+/* ---- the float-NodeID surface (tags 195 / 201) ---- */
+/* x^y with the integer part of y squared out exactly and the fractional part
+ * through exp(yf*log(x)): pow(2,10) is 1024.0 to the bit, pow(2,0.5) is sqrt 2
+ * within the same ULP honesty the other transcendentals carry. */
+static double fk_pow_d(double x, double y) {
+    if (y == 0.0 || x == 1.0) { return 1.0; }
+    if (x != x || y != y) { return 0.0 / 0.0; }
+    if (x == 0.0) { return (y < 0.0) ? (1.0 / 0.0) : 0.0; }
+    double ay = (y < 0.0) ? 0.0 - y : y;
+    double yi = (double)(long long)ay;
+    double yf = ay - yi;
+    if (x < 0.0 && yf != 0.0) { return 0.0 / 0.0; }
+    double ax = (x < 0.0) ? 0.0 - x : x;
+    double frac = (yf == 0.0) ? 1.0 : fk_exp_d(yf * fk_log_d(ax));
+    double acc = 1.0;
+    double base = x;
+    long long n = (long long)yi;
+    while (n > 0) {
+        if (n & 1) { acc = acc * base; }
+        base = base * base;
+        n = n >> 1;
+    }
+    double r = acc * frac;
+    return (y < 0.0) ? 1.0 / r : r;
+}
+/* intern a float32 trivial (type 6): the value rounds through float, NaN folds
+ * to one quiet NaN and -0.0 to +0.0 as the type-7 door does; nid[3] carries the
+ * IEEE bits so a hand-built (make_nodeid 1 1 6 bits) leaf and an interned one
+ * read the same float_value. */
+static long long fk_intern_float32_node(double d) {
+    float f = (float)d;
+    unsigned int bits;
+    if (f != f) { bits = 0x7fc00000u; memcpy(&f, &bits, 4); }
+    else if (f == 0.0f) { f = 0.0f; }
+    memcpy(&bits, &f, 4);
+    long long h = fk_intern_key_trivial(6, (long long)bits);
+    if (fk_field_on) { return fk_field_intern_node(1, 6, fk_fbox((double)f), (long long)bits, 0, h); }
+    if (fk_np + 1 >= fk_node_cap) { fk_nodes_grow(); }
+    long long slot = h & (fk_intern_hash_cap - 1);
+    while (fk_intern_tab[slot]) {
+        long long ix = fk_intern_tab[slot];
+        if (fk_nkind[ix] == 1 && fk_nid[ix][2] == 6 && fk_nid[ix][3] == (long long)bits) { return fk_nbox(ix); }
+        slot = (slot + 1) & (fk_intern_hash_cap - 1);
+    }
+    long long fb = fk_fbox((double)f);
+    fk_np = fk_np + 1;
+    fk_nkind[fk_np] = 1;
+    fk_nval[fk_np] = fb;
+    fk_nkids[fk_np] = 1;
+    fk_ncat[fk_np] = 0;
+    fk_nid[fk_np][0] = 1;
+    fk_nid[fk_np][1] = 1;
+    fk_nid[fk_np][2] = 6;
+    fk_nid[fk_np][3] = (long long)bits;
+    fk_intern_tab[slot] = fk_np;
+    fk_nhash_memo[fk_np] = h;
+    return fk_nbox(fk_np);
+}
+/* mode 0 float_value: a type-6/7 leaf's IEEE value as a boxed double (an interned
+ * leaf holds it in fk_nval; a hand-built type-6 leaf holds the bits in nid[3]; a
+ * hand-built type-7 leaf names a pool slot) -- nothing for any other value, the
+ * way the witnesses refuse a non-float NodeID. mode 1 make_float32, mode 2
+ * make_float64, mode 3 math_pi. */
+static long long fk_float_leaf(long long mode, long long x) {
+    if (mode == 1) { return fk_intern_float32_node(fk_num(x)); }
+    if (mode == 2) { return fk_intern_float_node(fk_num(x)); }
+    if (mode == 3) { return fk_fbox(3.141592653589793); }
+    if (mode != 0 || x >= 0) { return fk_nothing; }
+    long long ni = fk_nidx(x);
+    if (ni < 1 || ni > fk_np) { return fk_nothing; }
+    long long ty = fk_nid[ni][2];
+    if (ty != 6 && ty != 7) { return fk_nothing; }
+    if (fk_nkind[ni] == 1) { return fk_isf(fk_nval[ni]) ? fk_nval[ni] : fk_fbox(fk_num(fk_nval[ni])); }
+    if (fk_nkind[ni] != 3) { return fk_nothing; }
+    if (ty == 6) {
+        unsigned int bits = (unsigned int)fk_nid[ni][3];
+        float f;
+        memcpy(&f, &bits, 4);
+        return fk_fbox((double)f);
+    }
+    long long fi = fk_nid[ni][3];
+    if (fi < 0 || fi > fk_fp) { return fk_nothing; }
+    return fk_fbox(FK_FV(fi));
+}
 static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 194) { return fk_walk(fk_node[i][2], fp); }
     if (t == 9) {
@@ -11257,6 +11344,23 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 90) {
         return fk_fbox(fk_log_d(fk_num(fk_walk(fk_node[i][1], fp))));
+    }
+    if (t == 195) {
+        /* math_pow: the three witnesses answer math.Pow; the integer part of the
+         * exponent is squared out exactly (2^10 is 1024.0 to the bit), the
+         * fractional part rides exp(y*log(x)) like the other transcendentals. */
+        double pb195 = fk_num(fk_walk(fk_node[i][1], fp));
+        double pe195 = fk_num(fk_walk(fk_node[i][2], fp));
+        return fk_fbox(fk_pow_d(pb195, pe195));
+    }
+    if (t == 201) {
+        /* float_leaf mode x -- one door for the float-NodeID surface the siblings
+         * carry as four natives: 0 float_value (read a type-6/7 leaf's IEEE value),
+         * 1 make_float32 (intern a type-6 leaf), 2 make_float64 (a type-7 leaf),
+         * 3 math_pi. The four names are rewrite rows over this tag (fk_rwtab). */
+        long long fm201 = fk_walk(fk_node[i][1], fp);
+        long long fx201 = fk_walk(fk_node[i][2], fp);
+        return fk_float_leaf(fm201 >> 1, fx201);
     }
     if (t == 55) {
         static char p[FK_PATH_CAP];
