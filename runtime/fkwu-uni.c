@@ -9012,6 +9012,43 @@ static long long fk_walk_cold(long long t, long long i, long long fp);
  * home for deep recursion stays the same: make it tail or balanced. */
 static char *fk_stack_base = 0;
 static long long fk_stack_wall = 6 * 1024 * 1024;
+/* ── a compare against len walks only as far as it must ─────────────────────
+ * (eq (len xs) 0), (gt (len rows) 0), (le (len xs) 3): the body asks these on
+ * every step of every list recursion (nil? is (eq (len xs) 0)), and len walks
+ * the whole list to answer a question whose answer is settled after K+1 cells.
+ * When one side of eq/lt/le is a len node and the other an int literal K, the
+ * arm walks at most K+1 cells. The child is still evaluated exactly once; the
+ * answer is the same word len would have given, compared the same way. */
+static long long fk_len_upto(long long v, long long cap) {
+    if (fk_is_str(v)) { return FK_SLEN(fk_stri(v)); }
+    if ((v & 1) == 0) { return 0; }
+    long long p = v >> 1;
+    long long n = 0;
+    while (p >= 1 && FK_POK(p) && n < cap) {
+        n = n + 1;
+        p = FK_HT(p) >> 1;
+    }
+    return n;
+}
+/* op: 0 eq, 1 lt, 2 le. Returns 1 and sets *out when the node has the shape (op (len X) K) or (op K (len X)). */
+static int fk_len_cmp(long long i, long long fp, int op, long long *out) {
+    long long c1 = fk_node[i][1], c2 = fk_node[i][2];
+    if (c1 < 0 || c2 < 0 || c1 >= fk_node_count || c2 >= fk_node_count) { return 0; }
+    long long t1 = fk_node[c1][0], t2 = fk_node[c2][0];
+    if (t1 == 22 && t2 == 1 && fk_node[c2][1] >= 0) {
+        long long k = fk_node[c2][1];
+        long long n = fk_len_upto(fk_walk(fk_node[c1][1], fp), k + 1);
+        *out = (op == 0 ? (n == k) : (op == 1 ? (n < k) : (n <= k))) ? 2 : 0;
+        return 1;
+    }
+    if (t2 == 22 && t1 == 1 && fk_node[c1][1] >= 0) {
+        long long k = fk_node[c1][1];
+        long long n = fk_len_upto(fk_walk(fk_node[c2][1], fp), k + 1);
+        *out = (op == 0 ? (k == n) : (op == 1 ? (k < n) : (k <= n))) ? 2 : 0;
+        return 1;
+    }
+    return 0;
+}
 static long long fk_walk(long long i, long long fp) {
     char fk_sp_probe;
     if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
@@ -9060,6 +9097,7 @@ static long long fk_walk(long long i, long long fp) {
         return a4 - b4;
     }
     if (t == 5) {
+        { long long r5; if (fk_len_cmp(i, fp, 2, &r5)) { return r5; } }
         long long a5 = fk_walk(fk_node[i][1], fp);
         long long b5 = fk_walk(fk_node[i][2], fp);
         /* Same width-promotion rule as math (tags 3/4/42): float on either side
@@ -9555,6 +9593,7 @@ static long long fk_walk(long long i, long long fp) {
         return fk_walk(fk_node[i][2], fp);
     }
     if (t == 102) {
+        { long long r102; if (fk_len_cmp(i, fp, 0, &r102)) { return r102; } }
         /* int/int exact, float promotes — the tag-5 compare law. */
         long long ae = fk_walk(fk_node[i][1], fp);
         long long be = fk_walk(fk_node[i][2], fp);
@@ -9581,6 +9620,7 @@ static long long fk_walk(long long i, long long fp) {
         return (ae == be) ? 2 : 0;
     }
     if (t == 103) {
+        { long long r103; if (fk_len_cmp(i, fp, 1, &r103)) { return r103; } }
         /* int/int exact, float promotes — the tag-5 compare law. */
         long long al = fk_walk(fk_node[i][1], fp);
         long long bl = fk_walk(fk_node[i][2], fp);

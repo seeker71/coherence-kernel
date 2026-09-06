@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 694 rows, 682 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 696 rows, 684 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -571,12 +571,25 @@ arena now. `gate/kernel-conformance.bml` answers 1 with all three witnesses
 the drift gates stand at 2047 of 2047. persistence 7 and channel-breath 500
 four-way. (receipts/2026-09-06-the-binary-form-on-the-fourth-arm.md)
 
+**A compare against `len` walks only so far.** `nil?` is `(eq (len xs) 0)`
+and `len` walks the list, so every list recursion in the body was quadratic
+in the list it walked -- the hottest defn on the live glass's own page was
+`nil?`, ahead of every glass recipe. When one side of `eq`, `lt` or `le` is a
+`len` node and the other an int literal K (either order; `gt`/`ge` lower onto
+`le`), the arm walks at most K+1 cells (`fk_len_cmp`): the child is evaluated
+once and the answer is the word `len` would have given, over lists, strings,
+ints and floats alike. No new tag, no recipe changed. `nil?` x100K on a 10K
+list 300 -> 6 ms; `append` x200 onto it 4.7 s -> 0.16 s; the corpus band's
+cold run 2.30 -> 1.87 s; the live glass loop 31M -> 98M dispatches per CPU
+second at 64% -> 49% of a core.
+(receipts/2026-09-06-a-compare-against-len-walks-only-so-far.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=88 -> 38000088
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=89 -> 38000089
 ./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
