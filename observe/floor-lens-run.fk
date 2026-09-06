@@ -1,8 +1,9 @@
 ; floor-lens-run.fk — every lane beside the floor its hardware gives it, measured here and now:
-; the bandwidth by reading a real blob through the handle door, then each lane run warm, then the
-; bytes that lane's pass must touch summed from the model's own table — the encoder's tensors for
-; an encode, the decoder's for a token, the blob for a dense token. The distance is measured over
-; floor: a lane at 1.0 has nothing left to give without touching fewer bytes.
+; this Mac's bandwidth by reading a real blob through the handle door, its arithmetic rate by six
+; independent chains of fused multiply-adds, then each lane run warm. A lane's floor is whichever
+; is higher — the bytes one pass must move over the bandwidth, or the arithmetic it must do over
+; the rate — and the frame names which one holds it. The bytes and the flops are the models' own:
+; tensor bytes summed from their tables, activation traffic and arithmetic named term by term.
 ; preflight-exec: forbidden
 ; preludes: form/form-stdlib/floor-lens.bml form/form-stdlib/ear-native.fk native/metal/dense-token-handle.fk native/metal/dense-multi.fk
 (do
@@ -10,16 +11,15 @@
     (defn flr-snap () (str_concat "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/snapshots/" (trim (en-text (read_file "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/refs/main")))))
     (defn flr-encodes (st pcm n) (if (le n 0) 0 (do (let Te (enw-encode st pcm)) (flr-encodes st pcm (sub n 1)))))
     (defn flr-steps (st pos Te n) (if (le n 0) 0 (do (let id (enw-step2 st 1033 pos Te)) (flr-steps st (add pos 1) Te (sub n 1)))))
-    ; M sequences in lock-step: the weights are read once for all of them, so the bytes a pass must
-    ; move PER ANSWER are the blob over M — the floor each tongue is judged by when four ride one pass
-    (defn flr-msteps (st ids poss n) (if (le n 0) 0 (do (let nids (dm-step st ids poss)) (flr-msteps st nids (flr-bump poss) (sub n 1)))))
-    (defn flr-bump (poss) (if (eq (len poss) 0) (list) (cons (add (head poss) 1) (flr-bump (tail poss)))))
     (defn flr-tokens (st id pos n) (if (le n 0) 0 (do (let nid (dth-forward (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) id pos)) (flr-tokens st nid (add pos 1) (sub n 1)))))
-    ; the bytes of every tensor whose name begins with a side, from the npz's own table
+    (defn flr-bump (poss) (if (eq (len poss) 0) (list) (cons (add (head poss) 1) (flr-bump (tail poss)))))
+    (defn flr-msteps (st ids poss n) (if (le n 0) 0 (do (let nids (dm-step st ids poss)) (flr-msteps st nids (flr-bump poss) (sub n 1)))))
     (defn flr-side (rows side acc) (if (eq (len rows) 0) acc (flr-side (tail rows) side (if (eq (str_find (head (head rows)) side 0) 0) (add acc (en-bytes (head rows))) acc))))
     (let blob (mr-path (mr-find "llama32-1b")))
+    (let blob3 (mr-path (mr-find "llama32-3b")))
     (let bw (fl-measure-bw blob))
     (let gbs (fl-gbs bw))
+    (let tfl (fl-tflops (fl-measure-flops)))
     (let npz (str_concat (flr-snap) "/weights.npz"))
     (let st (enw-open npz "/Users/ursmuff/.mlx-venv/lib/python3.14/site-packages/mlx_whisper/assets/multilingual.tiktoken"))
     (let table (en-table npz))
@@ -36,23 +36,11 @@
     (let d0 (now_unix_ms))
     (let steps (flr-steps st 4 Te 200))
     (let d1 (now_unix_ms))
-    (let blob3 (mr-path (mr-find "llama32-3b")))
     (let dst (dth-open blob 256 (sub 0 1)))
     (let warm2 (flr-tokens dst 128000 0 2))
     (let t0 (now_unix_ms))
     (let toks (flr-tokens dst 791 2 40))
     (let t1 (now_unix_ms))
-    ; the encoder moves more activation than it holds weight, and a floor that counted only weights would
-    ; flatter the lane: each term below is what one 8 s pass must read or write, named as it is dispatched.
-    (let Tf 800)
-    (let Te 400)
-    (let D 384)
-    (let act (add (mul 256000 1)                                  ; the pcm read once
-             (add (mul (mul Tf 201) 8)                             ; the power written and read
-             (add (mul (mul Tf 80) 16)                             ; the mel written, normalised, read
-             (add (mul (mul Tf D) 8)                               ; conv1 out written and read
-             (add (mul (mul Te D) 8)                               ; conv2 out written and read, positions added
-                  (mul 4 (mul (mul Te D) 100))))))))               ; four layers: ~25 reads and writes of a Te x D activation each
     (let dst3 (dth-open blob3 256 (sub 0 1)))
     (let warm3 (flr-tokens dst3 128000 0 2))
     (let u0 (now_unix_ms))
@@ -63,10 +51,33 @@
     (let m0 (now_unix_ms))
     (let msteps (flr-msteps mst (list 791 791 791 791) (list 4 4 4 4) 20))
     (let m1 (now_unix_ms))
-    (let rows (list (fl-row "encode" (add encbytes act) (sub e1 e0) 20 gbs)
-                    (fl-row "wtoken" decbytes (sub d1 d0) 200 gbs)
-                    (fl-row "1btoken" (file_size blob) (sub t1 t0) 40 gbs)
-                    (fl-row "3btoken" (file_size blob3) (sub u1 u0) 20 gbs)
-                    (fl-row "4in1" (div (file_size blob) 4) (sub m1 m0) 80 gbs)))
-    (print_str (fl-frame gbs rows))
+    ; the shapes an 8 s window runs through, and what each pass must move and compute
+    (let Tf 800)
+    (let Tw 400)
+    (let D 384)
+    (let F 1536)
+    (let a1 256000)
+    (let a2 (mul (mul Tf 201) 8))
+    (let a3 (mul (mul Tf 80) 16))
+    (let a4 (mul (mul Tf D) 8))
+    (let a5 (mul (mul Tw D) 8))
+    (let a6 (mul 4 (mul (mul Tw D) 100)))
+    (let act (add a1 (add a2 (add a3 (add a4 (add a5 a6))))))
+    (let c1 (mul (mul (mul (mul 2 Tf) 201) 400) 4))
+    (let c2 (mul (mul (mul (mul 2 Tf) D) 80) 3))
+    (let c3 (mul (mul (mul (mul 2 Tw) D) D) 3))
+    (let c4 (mul 4 (mul (mul (mul (mul 2 Tw) D) D) 4)))
+    (let c5 (mul 4 (mul (mul (mul (mul 2 Tw) D) F) 2)))
+    (let c6 (mul 4 (mul (mul (mul (mul 4 6) Tw) Tw) 64)))
+    (let encflops (add c1 (add c2 (add c3 (add c4 (add c5 c6))))))
+    (let decflops (mul (mul 2 51865) D))
+    (let flops1b (mul 2 1200000000))
+    (let flops3b (mul 2 3200000000))
+    (let r1 (fl-row2 "encode" (add encbytes act) encflops (sub e1 e0) 20 gbs tfl))
+    (let r2 (fl-row2 "wtoken" decbytes decflops (sub d1 d0) 200 gbs tfl))
+    (let r3 (fl-row2 "1btoken" (file_size blob) flops1b (sub t1 t0) 40 gbs tfl))
+    (let r4 (fl-row2 "3btoken" (file_size blob3) flops3b (sub u1 u0) 20 gbs tfl))
+    (let r5 (fl-row2 "4in1" (div (file_size blob) 4) flops1b (sub m1 m0) 80 gbs tfl))
+    (print_str (fl-frame gbs (list r1 r2 r3 r4 r5)))
+    (print_str (str_concat "arithmetic rate measured: " (str_concat (float_to_str tfl) " TFLOPS")))
     0)
