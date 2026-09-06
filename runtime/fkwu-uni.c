@@ -186,6 +186,12 @@ static int fk_heap_gen;
 static void *fk_heap_alt_h;
 static void *fk_heap_alt_t;
 static void fk_live_publish(int final);
+static void fk_f64_pulse(long long fx);
+static void fk_f64_reset(void);
+static void **fk_f64_mem; /* per-defn f64 leaf pages (this process) */
+static long long fk_f64_cap;
+static long long fk_smknode(long long t0, long long c1, long long c2, long long c3);
+static long long *fk_fn_native; /* per-defn crystallization state: 0 cold, 1 f64 leaf standing, -1 declined */
 static const char *fk_hot_unit_of(long long so);
 static void fk_live_open(void);
 static void fk_live_note_defn(long long j);
@@ -518,6 +524,7 @@ static double fk_num(long long v) {
  * that matter. Written to .fkwu-boxing.<pid> beside the heat board. */
 static long long fk_cur_fn;
 static long long *fk_fn_fbox;
+#define FK_F64_HEAT 1024
 static long long *fk_fn_unbox;      /* per-recipe float READS (a pool slot dereferenced per operand); beside fk_fn_fbox, the mints */
 static long long fk_fn_capacity;
 static long long fk_fbox(double d) {
@@ -540,7 +547,9 @@ static long long fk_fbox(double d) {
     fk_fv[fk_fp] = d;
     fk_box_total = fk_box_total + 1;
     if (fk_fn_fbox != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) {
-        fk_fn_fbox[fk_cur_fn] = fk_fn_fbox[fk_cur_fn] + 1;
+        long long nb = fk_fn_fbox[fk_cur_fn] + 1;
+        fk_fn_fbox[fk_cur_fn] = nb;
+        if ((nb & (FK_F64_HEAT - 1)) == 0) { fk_f64_pulse(fk_cur_fn); } /* the box ledger is the JIT trigger: every FK_F64_HEAT boxes a cold defn is asked once more */
     }
     return fk_fbase - (fk_fp << 1) - 1;
 }
@@ -7833,9 +7842,10 @@ static void fk_fn_reserve(long long needed) {
     long long *next_fn_heat = fk_live_ledgers_paged ? fk_fn_heat : malloc(bytes);
     long long *next_fn_fbox = fk_live_ledgers_paged ? fk_fn_fbox : malloc(bytes);
     long long *next_fn_unbox = fk_live_ledgers_paged ? fk_fn_unbox : malloc(bytes);
+    long long *next_fn_native = fk_live_ledgers_paged ? fk_fn_native : malloc(bytes);
     if (next_fn == 0 || next_fnar == 0 || next_fnsym_s == 0 ||
         next_fnsym_n == 0 || next_fnidx == 0 || next_fn_heat == 0 ||
-        next_fn_fbox == 0 || next_fn_unbox == 0) {
+        next_fn_fbox == 0 || next_fn_unbox == 0 || next_fn_native == 0) {
         free(next_fn);
         free(next_fnar);
         free(next_fnsym_s);
@@ -7844,6 +7854,7 @@ static void fk_fn_reserve(long long needed) {
         free(next_fn_heat);
         free(next_fn_fbox);
         free(next_fn_unbox);
+        free(next_fn_native);
         fk_die("fk_fn_reserve: out of memory growing function image");
     }
     long long i = 0;
@@ -7856,6 +7867,7 @@ static void fk_fn_reserve(long long needed) {
         if (!fk_live_ledgers_paged) { next_fn_heat[i] = fk_fn_heat[i]; }
         if (!fk_live_ledgers_paged) { next_fn_fbox[i] = fk_fn_fbox[i]; }
         if (!fk_live_ledgers_paged) { next_fn_unbox[i] = fk_fn_unbox[i]; }
+        if (!fk_live_ledgers_paged) { next_fn_native[i] = fk_fn_native[i]; }
         i = i + 1;
     }
     while (i < next) {
@@ -7867,6 +7879,7 @@ static void fk_fn_reserve(long long needed) {
         if (!fk_live_ledgers_paged) { next_fn_heat[i] = 0; }
         if (!fk_live_ledgers_paged) { next_fn_fbox[i] = 0; }
         if (!fk_live_ledgers_paged) { next_fn_unbox[i] = 0; }
+        if (!fk_live_ledgers_paged) { next_fn_native[i] = 0; }
         i = i + 1;
     }
     free(fk_fn);
@@ -7877,6 +7890,7 @@ static void fk_fn_reserve(long long needed) {
     if (!fk_live_ledgers_paged) { free(fk_fn_heat); }
     if (!fk_live_ledgers_paged) { free(fk_fn_fbox); }
     if (!fk_live_ledgers_paged) { free(fk_fn_unbox); }
+    if (!fk_live_ledgers_paged) { free(fk_fn_native); }
     fk_fn = next_fn;
     fk_fnar = next_fnar;
     fk_fnsym_s = next_fnsym_s;
@@ -7885,6 +7899,7 @@ static void fk_fn_reserve(long long needed) {
     fk_fn_heat = next_fn_heat;
     fk_fn_fbox = next_fn_fbox;
     fk_fn_unbox = next_fn_unbox;
+    fk_fn_native = next_fn_native;
     fk_fn_capacity = next;
 }
 /* Closure bookkeeping, PER FUNCTION (not per call, not per instance -- see fk_clo_make for that).
@@ -8270,6 +8285,35 @@ static long long fk_walk_body(long long i, long long fp) {
             i = fk_fn[c240];
             continue;
         }
+        if (t == 194) {
+            /* a crystallized defn: the frame's floats go to d0..d7, the f64 leaf runs, one box comes back; any other shape walks the original body */
+            long long c194 = fk_node[i][1];
+            void *m194 = (c194 >= 0 && c194 < fk_f64_cap) ? fk_f64_mem[c194] : 0;
+            long long n194 = fk_fnar[c194];
+            if (m194 != 0 && n194 >= 1 && n194 <= 8) {
+                double a194[8];
+                long long k194 = 0;
+                int ok194 = 1;
+                while (k194 < 8) { a194[k194] = 0.0; k194 = k194 + 1; }
+                k194 = 0;
+                while (k194 < n194) {
+                    long long v194 = fk_vs[fp + k194];
+                    if (!fk_isf(v194)) { ok194 = 0; break; }
+                    a194[k194] = FK_FV(fk_fidx(v194));
+                    k194 = k194 + 1;
+                }
+                if (ok194) {
+                    double (*leaf194)(double, double, double, double, double, double, double, double) = (double (*)(double, double, double, double, double, double, double, double))m194;
+                    double r194 = leaf194(a194[0], a194[1], a194[2], a194[3], a194[4], a194[5], a194[6], a194[7]);
+                    fk_inram_call_total = fk_inram_call_total + 1;
+                    fk_unbox_total = fk_unbox_total + n194;
+                    if (fk_fn_unbox != 0 && c194 < fk_fn_capacity) { fk_fn_unbox[c194] = fk_fn_unbox[c194] + n194; }
+                    return fk_fbox(r194);
+                }
+            }
+            i = fk_node[i][2];
+            continue;
+        }
         if (t == 241) {
             long long base241 = fk_vsp;
             long long cell241 = fk_node[i][2];
@@ -8459,6 +8503,177 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
         int st155 = 0;
         waitpid((int)pid155, &st155, 0);
         return fk_sbuf(ob155, tot155);
+}
+/* ── crystallize-on-boxing: the f64 leaf ─────────────────────────────────────
+ * The box ledger is the trigger. fk_fbox charges every float box to the defn
+ * running; each time a defn's count crosses a FK_F64_HEAT boundary while it is
+ * still cold, fk_f64_pulse asks whether its body is a pure float expression --
+ * float/int literals, parameters, add/sub/mul/div, nothing else -- and if so
+ * emits it as arm64 over the d-registers: parameters arrive in d0..d7,
+ * intermediates live in d16..d31, one FMOV and RET. The frame's floats unbox
+ * once at the door and the result boxes once on the way out; the boxes the
+ * walker minted for every intermediate are folded into registers. The defn's
+ * body entry becomes a tag-194 node (fn index, original body) so dispatch pays
+ * nothing new: the walker meets the tag where it already reads one. A call
+ * whose arguments are not all floats walks the original body -- the walker's
+ * int/int arithmetic stays exact and the leaf never guesses. A declined body
+ * is marked -1 in the native ledger and never asked again; a reload clears all.
+ */
+#define FK_F64_HEAT 1024
+#define FK_F64_NODE_CAP 128
+#define FK_F64_WORD_CAP 1000
+typedef struct { int kind; int a; int b; double lit; } fk_f64_node; /* kind: 1 lit, 2 arg, 3 add, 4 sub, 5 mul, 6 div */
+static void **fk_f64_mem;
+static long long fk_f64_cap;
+static long long fk_f64_count_private;
+static long long *fk_f64_count_p = &fk_f64_count_private;
+#define fk_f64_count (*fk_f64_count_p)
+static fk_f64_node fk_f64_prog[FK_F64_NODE_CAP];
+static long long fk_f64_prog_n;
+static void fk_f64_reset(void) {
+    long long k = 0;
+    while (k < fk_f64_cap) {
+        if (fk_f64_mem[k] != 0) { munmap(fk_f64_mem[k], 4096); fk_f64_mem[k] = 0; }
+        k = k + 1;
+    }
+    k = 0;
+    while (fk_fn_native != 0 && k < fk_fn_capacity) { fk_fn_native[k] = 0; k = k + 1; }
+    fk_f64_count = 0;
+}
+/* admit a body node: returns 0 declined, 1 int-typed, 2 float-typed; appends to fk_f64_prog, *out = its index */
+static int fk_f64_admit(long long i, long long arity, int *out) {
+    if (i < 0 || i >= fk_node_count || fk_f64_prog_n >= FK_F64_NODE_CAP) { return 0; }
+    long long t = fk_node[i][0];
+    if (t == 1) {
+        long long v = fk_node[i][1];
+        if (v > 9007199254740992LL || v < -9007199254740992LL) { return 0; }
+        fk_f64_prog[fk_f64_prog_n].kind = 1; fk_f64_prog[fk_f64_prog_n].lit = (double)v; fk_f64_prog[fk_f64_prog_n].a = 0; fk_f64_prog[fk_f64_prog_n].b = 0;
+        *out = (int)fk_f64_prog_n; fk_f64_prog_n = fk_f64_prog_n + 1;
+        return 1;
+    }
+    if (t == 53) {
+        long long lc = fk_node[i][1];
+        if (lc < 0 || lc >= fk_node_count || fk_node[lc][0] != 24) { return 0; }
+        long long w = fk_walk(i, fk_vsp); /* the literal's own memo: one box per process, minted here if not yet */
+        if (!fk_isf(w)) { return 0; }
+        fk_f64_prog[fk_f64_prog_n].kind = 1; fk_f64_prog[fk_f64_prog_n].lit = FK_FV(fk_fidx(w)); fk_f64_prog[fk_f64_prog_n].a = 0; fk_f64_prog[fk_f64_prog_n].b = 0;
+        *out = (int)fk_f64_prog_n; fk_f64_prog_n = fk_f64_prog_n + 1;
+        return 2;
+    }
+    if (t == 2 || t == 110) {
+        long long k = 0;
+        if (t == 110) {
+            long long li = fk_node[i][1];
+            if (li < 0 || li >= fk_node_count || fk_node[li][0] != 1) { return 0; }
+            k = fk_node[li][1];
+        }
+        if (k < 0 || k >= arity) { return 0; }
+        fk_f64_prog[fk_f64_prog_n].kind = 2; fk_f64_prog[fk_f64_prog_n].a = (int)k; fk_f64_prog[fk_f64_prog_n].b = 0; fk_f64_prog[fk_f64_prog_n].lit = 0.0;
+        *out = (int)fk_f64_prog_n; fk_f64_prog_n = fk_f64_prog_n + 1;
+        return 2;
+    }
+    if (t == 3 || t == 4 || t == 42 || t == 10) {
+        int a = 0, b = 0;
+        int ta = fk_f64_admit(fk_node[i][1], arity, &a);
+        if (ta == 0) { return 0; }
+        int tb = fk_f64_admit(fk_node[i][2], arity, &b);
+        if (tb == 0) { return 0; }
+        if (ta != 2 && tb != 2) { return 0; } /* int/int arithmetic is the walker's exact word math; the leaf does not claim it */
+        if (fk_f64_prog_n >= FK_F64_NODE_CAP) { return 0; }
+        fk_f64_prog[fk_f64_prog_n].kind = t == 3 ? 3 : (t == 4 ? 4 : (t == 42 ? 5 : 6));
+        fk_f64_prog[fk_f64_prog_n].a = a; fk_f64_prog[fk_f64_prog_n].b = b; fk_f64_prog[fk_f64_prog_n].lit = 0.0;
+        *out = (int)fk_f64_prog_n; fk_f64_prog_n = fk_f64_prog_n + 1;
+        return 2;
+    }
+    return 0;
+}
+static int fk_f64_put(unsigned int *words, long long *n, unsigned int w) {
+    if (*n >= FK_F64_WORD_CAP) { return 0; }
+    words[*n] = w; *n = *n + 1;
+    return 1;
+}
+/* postorder emit; returns the d-register holding the node's value (0..7 an argument, 16..31 a temp), -1 on overflow */
+static int fk_f64_emit(int n, unsigned int *words, long long *wn, int *ntemp) {
+    fk_f64_node *p = &fk_f64_prog[n];
+    if (p->kind == 2) { return p->a; }
+    if (p->kind == 1) {
+        if (*ntemp >= 16) { return -1; }
+        int rd = 16 + *ntemp; *ntemp = *ntemp + 1;
+        unsigned long long bits; memcpy(&bits, &p->lit, 8);
+        unsigned int hw = 0;
+        while (hw < 4) {
+            unsigned int imm = (unsigned int)((bits >> (16 * hw)) & 0xFFFFULL);
+            unsigned int op = hw == 0 ? 0xD2800000U : 0xF2800000U; /* MOVZ x9 then MOVK x9 */
+            if (!fk_f64_put(words, wn, op | (hw << 21) | (imm << 5) | 9U)) { return -1; }
+            hw = hw + 1;
+        }
+        if (!fk_f64_put(words, wn, 0x9E670000U | (9U << 5) | (unsigned int)rd)) { return -1; } /* FMOV Dd, X9 */
+        return rd;
+    }
+    int ra = fk_f64_emit(p->a, words, wn, ntemp);
+    if (ra < 0) { return -1; }
+    int rb = fk_f64_emit(p->b, words, wn, ntemp);
+    if (rb < 0) { return -1; }
+    if (rb >= 16) { *ntemp = *ntemp - 1; }
+    if (ra >= 16) { *ntemp = *ntemp - 1; }
+    if (*ntemp >= 16) { return -1; }
+    int rd = 16 + *ntemp; *ntemp = *ntemp + 1;
+    unsigned int op = p->kind == 3 ? 0x1E602800U : (p->kind == 4 ? 0x1E603800U : (p->kind == 5 ? 0x1E600800U : 0x1E601800U));
+    if (!fk_f64_put(words, wn, op | ((unsigned int)rb << 16) | ((unsigned int)ra << 5) | (unsigned int)rd)) { return -1; }
+    return rd;
+}
+static void fk_f64_pulse(long long fx) {
+    if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
+    if (fk_fn_native[fx] != 0) { return; }
+    fk_fn_native[fx] = -1;
+    long long arity = fk_fnar[fx];
+    if (arity < 1 || arity > 8) { return; }
+    long long root = fk_fn[fx];
+    if (root < 0 || root >= fk_node_count) { return; }
+    long long body = root;
+    if (fk_node[body][0] == 194) { body = fk_node[body][2]; }
+    long long orig = body;
+    if (body >= 0 && body < fk_node_count && fk_node[body][0] == 111) {
+        long long li = fk_node[body][1];
+        long long slots = (li >= 0 && li < fk_node_count && fk_node[li][0] == 1) ? fk_node[li][1] : -1;
+        if (slots < 0 || slots + 1 > arity) { return; } /* a let slot beyond the parameters: not this leaf's shape */
+        body = fk_node[body][2];
+    }
+    fk_f64_prog_n = 0;
+    int top = 0;
+    if (fk_f64_admit(body, arity, &top) != 2) { return; }
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+    unsigned int words[FK_F64_WORD_CAP];
+    long long wn = 0;
+    int ntemp = 0;
+    int rr = fk_f64_emit(top, words, &wn, &ntemp);
+    if (rr < 0) { return; }
+    if (rr != 0 && !fk_f64_put(words, &wn, 0x1E604000U | ((unsigned int)rr << 5))) { return; } /* FMOV D0, Dr */
+    if (!fk_f64_put(words, &wn, 0xD65F03C0U)) { return; }
+    void *mem = mmap(0, 4096, 0x7, 0x1802, -1, 0);
+    if (mem == (void *)-1) { return; }
+    pthread_jit_write_protect_np(0);
+    memcpy(mem, words, (size_t)(wn * 4));
+    pthread_jit_write_protect_np(1);
+    __builtin___clear_cache((char *)mem, (char *)mem + wn * 4);
+    if (fx >= fk_f64_cap) {
+        long long next = fk_f64_cap > 0 ? fk_f64_cap : 256;
+        while (next <= fx) { next = next << 1; }
+        void **grown = (void **)malloc((size_t)next * sizeof(void *));
+        if (grown == 0) { munmap(mem, 4096); return; }
+        long long k = 0;
+        while (k < next) { grown[k] = k < fk_f64_cap ? fk_f64_mem[k] : 0; k = k + 1; }
+        free(fk_f64_mem);
+        fk_f64_mem = grown;
+        fk_f64_cap = next;
+    }
+    fk_f64_mem[fx] = mem;
+    if (fk_node[root][0] != 194) { fk_fn[fx] = fk_smknode(194, fx, orig, 0); }
+    fk_fn_native[fx] = 1;
+    fk_f64_count = fk_f64_count + 1;
+#else
+    (void)orig; (void)top;
+#endif
 }
 static long long fk_walk_cold(long long t, long long i, long long fp);
 /* the honest eval-depth wall: measure REAL stack use and die SAYING SO before the host
@@ -9842,7 +10057,7 @@ static long long fk_cross_decode(const char *b, long long n, long long *pos, lon
  * 21 melt generation 22 store shared (1: per-kernel columns, 2: the field) 23 heap generation (0: h/t, 1: H/T)
  * 24 float boxes minted 25 float boxes read 26 native leaf calls */
 #define FK_LIVE_MAGIC 0x464B4C4956LL
-#define FK_LIVE_WORDS 30
+#define FK_LIVE_WORDS 31
 static volatile long long *fk_live_page;
 static long long fk_live_ticks;
 static void fk_live_pid_name(long long pid, char *out) {
@@ -9876,8 +10091,8 @@ static long long fk_live_cpu_us(void) {
  * unit path, 32 MiB). Every hot-path increment the kernel already made now lands in these words; nothing is copied,
  * nothing is scheduled, no tick is counted. The words the kernel does not increment (6-15, 18, 21-23, 27) are noted
  * at melt, at exit and when the kernel reads its own page. */
-#define FK_LIVE_VERSION 2
-#define FK_LIVE_PAGE_BYTES ((100LL << 20))
+#define FK_LIVE_VERSION 3
+#define FK_LIVE_PAGE_BYTES ((112LL << 20))
 #define FK_LIVE_ARMS_OFF 4096
 #define FK_LIVE_FNS (1LL << 20)
 #define FK_LIVE_HEAT_OFF 8192
@@ -9886,6 +10101,7 @@ static long long fk_live_cpu_us(void) {
 #define FK_LIVE_META_OFF (8192 + (24LL << 20))
 #define FK_LIVE_BLOB_OFF (8192 + (64LL << 20))
 #define FK_LIVE_BLOB_BYTES (32LL << 20)
+#define FK_LIVE_NATIVE_OFF (8192 + (96LL << 20))
 static long long fk_live_blob_used;
 static long long *fk_nl_offs;        /* newline offsets of the program text, scanned once and extended as the text grows */
 static long long fk_nl_count, fk_nl_cap, fk_nl_scanned;
@@ -9972,6 +10188,11 @@ static void fk_live_open(void) {
     while (k < cap) { heat[k] = fk_fn_heat ? fk_fn_heat[k] : 0; fbox[k] = fk_fn_fbox ? fk_fn_fbox[k] : 0; unbox[k] = fk_fn_unbox ? fk_fn_unbox[k] : 0; k = k + 1; }
     free(fk_fn_heat); free(fk_fn_fbox); free(fk_fn_unbox);
     fk_fn_heat = heat; fk_fn_fbox = fbox; fk_fn_unbox = unbox;
+    long long *native = (long long *)((char *)fk_live_page + FK_LIVE_NATIVE_OFF);
+    k = 0;
+    while (k < cap) { native[k] = fk_fn_native ? fk_fn_native[k] : 0; k = k + 1; }
+    free(fk_fn_native); fk_fn_native = native;
+    w[30] = fk_f64_count; fk_f64_count_p = (long long *)&w[30];
     fk_live_ledgers_paged = 1;
     k = 0;
     while (k < fk_fntop) { fk_live_note_defn(k); k = k + 1; }
@@ -10250,7 +10471,8 @@ static long long fk_hot_row_cell(long long sj, long long heat, long long line, l
     const char *unit = fk_hot_unit_of(so);
     long long boxes = (fk_fn_fbox != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_fbox[fx] : 0;
     long long unboxes = (fk_fn_unbox != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_unbox[fx] : 0;
-    return fk_cons_val(heat << 1, fk_cons_val(fk_sbuf(fk_srctext + so, fk_fnsym_n[sj]), fk_cons_val(fk_sbuf(unit, fk_cstrlen(unit)), fk_cons_val(line << 1, fk_cons_val(col << 1, fk_cons_val(boxes << 1, fk_cons_val(unboxes << 1, 1)))))));
+    long long native = (fk_fn_native != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_native[fx] : 0;
+    return fk_cons_val(heat << 1, fk_cons_val(fk_sbuf(fk_srctext + so, fk_fnsym_n[sj]), fk_cons_val(fk_sbuf(unit, fk_cstrlen(unit)), fk_cons_val(line << 1, fk_cons_val(col << 1, fk_cons_val(boxes << 1, fk_cons_val(unboxes << 1, fk_cons_val(native << 1, 1))))))));
 }
 static long long fk_hot_rows_by(long long *ledger, long long want) {
     if (want <= 0) { return 1; }
@@ -10269,7 +10491,7 @@ static long long fk_live_read_page(const char *name, long long *out) {
     long long sz = fk_gift_size[gh >> 1];
     volatile long long *w = (volatile long long *)fk_gift_base[gh >> 1] + 2;
     long long k = 0;
-    while (k < FK_LIVE_WORDS) { out[k] = k < 30 ? w[k] : 0; k = k + 1; }
+    while (k < FK_LIVE_WORDS) { out[k] = w[k]; k = k + 1; }
     if (sz >= FK_LIVE_ARMS_OFF + FK_OPCODE_ARM_CAP * 8 && out[28] == FK_LIVE_VERSION) {
         long long *arms = (long long *)((char *)fk_gift_base[gh >> 1] + FK_LIVE_ARMS_OFF);
         long long sum = 0, distinct = 0, hot = 0, hotc = 0, u = 1;
@@ -10291,8 +10513,8 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     char *base = (char *)fk_gift_base[gh >> 1];
     long long sz = fk_gift_size[gh >> 1];
     volatile long long *w = (volatile long long *)base + 2;
-    if (sz < FK_LIVE_BLOB_OFF + FK_LIVE_BLOB_BYTES || w[28] != FK_LIVE_VERSION) { munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
-    long long *heat = (long long *)(base + FK_LIVE_HEAT_OFF), *fbox = (long long *)(base + FK_LIVE_FBOX_OFF), *unbox = (long long *)(base + FK_LIVE_UNBOX_OFF), *meta = (long long *)(base + FK_LIVE_META_OFF);
+    if (sz < FK_LIVE_NATIVE_OFF + FK_LIVE_FNS * 8 || w[28] != FK_LIVE_VERSION) { munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
+    long long *heat = (long long *)(base + FK_LIVE_HEAT_OFF), *fbox = (long long *)(base + FK_LIVE_FBOX_OFF), *unbox = (long long *)(base + FK_LIVE_UNBOX_OFF), *meta = (long long *)(base + FK_LIVE_META_OFF), *native = (long long *)(base + FK_LIVE_NATIVE_OFF);
     char *blob = base + FK_LIVE_BLOB_OFF;
     long long *led = ledger == 1 ? fbox : heat;
     long long count = w[29] < FK_LIVE_FNS ? w[29] : FK_LIVE_FNS;
@@ -10313,7 +10535,7 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     while (q >= 0) {
         long long f = pj[q];
         long long *m = meta + f * 5;
-        long long row = fk_cons_val(heat[f] << 1, fk_cons_val(fk_sbuf(blob + m[0], m[1]), fk_cons_val(fk_sbuf(blob + m[0] + m[1], m[2]), fk_cons_val(m[3] << 1, fk_cons_val(m[4] << 1, fk_cons_val(fbox[f] << 1, fk_cons_val(unbox[f] << 1, 1)))))));
+        long long row = fk_cons_val(heat[f] << 1, fk_cons_val(fk_sbuf(blob + m[0], m[1]), fk_cons_val(fk_sbuf(blob + m[0] + m[1], m[2]), fk_cons_val(m[3] << 1, fk_cons_val(m[4] << 1, fk_cons_val(fbox[f] << 1, fk_cons_val(unbox[f] << 1, fk_cons_val(native[f] << 1, 1))))))));
         l = fk_cons_val(row, l);
         q = q - 1;
     }
@@ -10322,6 +10544,7 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     return l;
 }
 static long long fk_walk_cold(long long t, long long i, long long fp) {
+    if (t == 194) { return fk_walk(fk_node[i][2], fp); }
     if (t == 9) {
         putchar((int)(fk_walk(fk_node[i][1], fp) >> 1));
         return 0;
@@ -12198,6 +12421,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 47) {
             return fk_inram_call_total << 1;
+        }
+        if (ks_k == 48) {
+            return fk_f64_count << 1;
         }
         if (ks_k == 44) {
             return fk_heat_total << 1;
@@ -16418,7 +16644,7 @@ static int fk_fkb_restore_symbol_image(long long version) {
     long long symbol_count = fk_fkb_read_signed();
     long long i = 0;
     fk_fntop = 0;
-    if (fk_live_page != 0) { (fk_live_page + 2)[29] = 0; fk_live_blob_used = 0; }
+    if (fk_live_page != 0) { (fk_live_page + 2)[29] = 0; fk_live_blob_used = 0; } fk_f64_reset();
     fk_fn_reserve(symbol_count + 1);
     while (!fk_fkb_bad && i < symbol_count) {
         (void)fk_fkb_read_signed();
@@ -16776,7 +17002,7 @@ static void fk_src_reset_compile_state(void) {
     fk_src_unrunnable = 0;
     fk_string_table_reset();
     fk_fntop = 0;
-    if (fk_live_page != 0) { (fk_live_page + 2)[29] = 0; fk_live_blob_used = 0; }
+    if (fk_live_page != 0) { (fk_live_page + 2)[29] = 0; fk_live_blob_used = 0; } fk_f64_reset();
     fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;
@@ -17507,7 +17733,7 @@ static int fk_run_feval(const char *path) {
     fk_fn_reserve(1);
     fk_fn_count = 1;
     fk_fntop = 0;
-    if (fk_live_page != 0) { (fk_live_page + 2)[29] = 0; fk_live_blob_used = 0; }
+    if (fk_live_page != 0) { (fk_live_page + 2)[29] = 0; fk_live_blob_used = 0; } fk_f64_reset();
     fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;
