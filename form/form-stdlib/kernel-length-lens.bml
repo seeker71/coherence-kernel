@@ -1,0 +1,58 @@
+//////////////////////////////////////////////////////////////////////
+// kernel-length-lens.bml — the body writes its own kernels; this reads
+// their length back. A shape can be exactly neutral in arithmetic, in
+// threads and in memory and still decide a dispatch, and what is left
+// is the straight-line body the emitter will hand the compiler: the
+// statements it carries and the loops it carries them inside. The
+// emitter knows both at emit time and nothing ever asked. So: for each
+// `kernel void` in an emitted unit, its name, its bytes, its statements
+// and its deepest loop nest, held beside each other before a GPU runs.
+// preludes: form/form-stdlib/core.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/term-graphics.bml
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormKernelLengthLens {
+        def kl-text(t) = if nothing?(t) then "" else t;
+        def kl-cat(xs) = if eq(len(xs), 0) then "" else str_concat(head(xs), kl-cat(tail(xs)));
+        def kl-mark() = "kernel void ";
+        // the name that follows a mark, up to its open paren
+        def kl-name-end(s, i) = if ge(i, str_len(s)) then i else if eq(str_byte_at(s, i), 40) then i else if eq(str_byte_at(s, i), 32) then i else kl-name-end(s, add(i, 1));
+        def kl-name-at(s, at) {
+            let from = add(at, str_len(kl-mark()));
+            substring(s, from, kl-name-end(s, from));
+        }
+        // one kernel's text runs to the next mark, or to the end
+        def kl-end-at(s, at) {
+            let nxt = str_find(s, kl-mark(), add(at, 1));
+            if lt(nxt, 0) then str_len(s) else nxt;
+        }
+        // statements: semicolons outside no string, which is what an emitted kernel is
+        def kl-count(s, byte, i, acc) = if ge(i, str_len(s)) then acc else kl-count(s, byte, add(i, 1), if eq(str_byte_at(s, i), byte) then add(acc, 1) else acc);
+        // a `for` header carries two semicolons of its own; they are the loop, not the body it repeats
+        def kl-statements(body) = sub(kl-count(body, 59, 0, 0), mul(2, kl-count-word(body, "for (", 0, 0)));
+        // the deepest brace nest a `for` or `while` opens: the loops the statements sit inside
+        def kl-loops(body) = add(kl-count-word(body, "for (", 0, 0), kl-count-word(body, "while (", 0, 0));
+        def kl-count-word(s, w, i, acc) {
+            let at = str_find(s, w, i);
+            if lt(at, 0) then acc else kl-count-word(s, w, add(at, 1), add(acc, 1));
+        }
+        // a row: (name bytes statements loops)
+        def kl-row(unit, at) {
+            let body = substring(unit, at, kl-end-at(unit, at));
+            list(kl-name-at(unit, at), str_len(body), kl-statements(body), kl-loops(body));
+        }
+        def kl-rows-go(unit, at, acc) = if lt(at, 0) then reverse(acc) else kl-rows-go(unit, str_find(unit, kl-mark(), add(at, 1)), cons(kl-row(unit, at), acc));
+        def kl-rows(unit) = kl-rows-go(unit, str_find(unit, kl-mark(), 0), list());
+        def kl-name(r) = head(r);
+        def kl-bytes(r) = nth(r, 1);
+        def kl-statements-of(r) = nth(r, 2);
+        def kl-loops-of(r) = nth(r, 3);
+        def kl-find(rows, name) = if eq(len(rows), 0) then list() else if str_eq(kl-name(head(rows)), name) then head(rows) else kl-find(tail(rows), name);
+        def kl-total(rows, acc) = if eq(len(rows), 0) then acc else kl-total(tail(rows), add(acc, kl-statements-of(head(rows))));
+        def kl-pad(s) = if ge(str_len(s), 26) then s else kl-pad(str_concat(s, " "));
+        def kl-tone(r) = if gt(kl-statements-of(r), 120) then "bad" else if gt(kl-statements-of(r), 60) then "warn" else "good";
+        def kl-line(r) = kl-cat(list(int_to_str(kl-statements-of(r)), " statements inside ", int_to_str(kl-loops-of(r)), " loops, ", int_to_str(kl-bytes(r)), " bytes of source"));
+        def kl-lanes(rows) = if eq(len(rows), 0) then list() else cons(tg-lane(kl-pad(kl-name(head(rows))), kl-line(head(rows)), kl-tone(head(rows)), sub(0, 1)), kl-lanes(tail(rows)));
+        def kl-frame(title, rows) = tg-frame(cons(tg-lane("KERNELS ", kl-cat(list(title, ": ", int_to_str(len(rows)), " kernels carrying ", int_to_str(kl-total(rows, 0)), " statements")), "dim", sub(0, 1)), kl-lanes(rows)));
+    }
+    0;
+}
