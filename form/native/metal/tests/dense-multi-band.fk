@@ -1,0 +1,122 @@
+; tests/dense-multi-band.fk — M sequences in one decode step answer, per sequence, what the single
+; lane answers: the same ids, the same logits bytes. llama3.2:1b, four prompts of four lengths.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY (metal_* pf-arm-mask 8). Every bit needs a live Metal device behind
+; the handle door; without bit 1 the fold answers 0, a REFUSAL, not a verdict.
+;
+; Verdict 255 = 1+2+4+8+16+32+64+128, POWER-OF-TWO WEIGHTS so a reader can subtract.
+;
+;   bit   1  THE DOOR IS REAL: metal_linked=true AND metal_door=handle.
+;   bit   2  THE M-LANE OPENS: every one of the ten M-kernels compiled (a zero is an MSL diagnostic
+;            in metal_status) and the file sits inside the lane's radius (dm-ok?).
+;   bit   4  THE MATMAT IS THE MATVEC, COLUMN FOR COLUMN: form_q80_matmat_f32 over four synthetic
+;            columns against form_q80_matvec_tg4_f32 over each column, on the first projection
+;            (2048x2048) and ffn_down (2048x8192) — eight byte-equal read-backs of eight.
+;   bit   8  THE PINNED PROMPT INSIDE THE BATCH: sequence 0 of the M=4 run answers the sixteen ids
+;            dense-family-band.fk pins (12366 13 578 469 3168 301 22703 374 7559 304 12366 13 578
+;            9928 49606 16730), witnessed 2026-08-04 through the single lane.
+;   bit  16  FOUR SEQUENCES, FOUR SINGLE RUNS: each of the four prompts through dth-prefill and
+;            dth-generate alone; the batch's sixteen ids per sequence equal the single lane's.
+;   bit  32  THE LOGITS ARE THE SAME BYTES: for each sequence, the 513 KB of logits at the step of
+;            its sixteenth answer, batch against single lane — four equal of four.
+;   bit  64  M=1 IS THE SINGLE LANE: the M-lane opened at M=1 answers the pinned sixteen.
+;   bit 128  COLUMNS DO NOT CROSS: M=8 with the four prompts twice answers, per sequence, the M=4
+;            run's ids — the second copy equal to the first.
+;
+; WHAT THIS BAND CANNOT SEE: speed (the run driver prints it); files outside the fused radius;
+; M above 8.
+;
+; Expected: 255
+; preludes: native/metal/dense-multi.fk form-stdlib/model-registry.bml
+;
+; witnessed: 2026-09-06, fkwu (fourth arm), Apple M4 Max
+
+(do
+    (defn dmb-blob () (mr-path (mr-find "llama32-1b")))
+    (defn dmb-texts () (list "The capital of France is"
+                             "Water boils at"
+                             "The largest planet in the solar system is"
+                             "Once upon a time, in a small village"))
+    (defn dmb-want () (list 12366 13 578 469 3168 301 22703 374 7559 304 12366 13 578 9928 49606 16730))
+
+    (defn dmb-eqlist (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) true
+                (if (eq (head a) (head b)) (dmb-eqlist (tail a) (tail b)) false))
+            false))
+    (defn dmb-eqlists (as bs)
+        (if (eq (len as) 0) true
+            (if (dmb-eqlist (head as) (head bs)) (dmb-eqlists (tail as) (tail bs)) false)))
+    (defn dmb-same? (a b n) (if (and (eq (str_len a) n) (str_eq a b)) 1 0))
+    (defn dmb-encode (src texts acc)
+        (if (eq (len texts) 0) acc
+            (dmb-encode src (tail texts) (append acc (list (dtk-encode src (head texts)))))))
+    (defn dmb-f32s (n i seed acc) (if (ge i n) acc (dmb-f32s n (add i 1) seed (str_concat acc (md-le32 (md-f32-bits (div (str_to_float (int_to_str (sub (mod (mul (add i seed) 7919) 2000) 1000))) 1000.0)))))))
+    (defn dmb-cols (m i n acc) (if (ge i m) acc (dmb-cols m (add i 1) n (str_concat acc (dmb-f32s n 0 (mul i 131) "")))))
+
+    ; ---- bit 4: column m of the matmat against tg4 over x_m ----
+    (defn dmb-cmp (ps tv xm ym yref m rows cols i acc)
+        (if (ge i m) acc
+            (do (let w (metal_buf_write xm 0 (dmb-f32s cols 0 (mul i 131) "")))
+                (let e (metal_enqueue (nth ps 28) (md-bind16 (list (dth-tv-h tv) xm yref) (list rows cols) 96 0 1 0) (div (add rows 15) 16)))
+                (let s (metal_sync))
+                (let ok (dmb-same? (metal_buf_read yref 0 (mul 4 rows)) (metal_buf_read ym (mul (mul 4 rows) i) (mul 4 rows)) (mul 4 rows)))
+                (dmb-cmp ps tv xm ym yref m rows cols (add i 1) (add acc ok)))))
+    (defn dmb-matmat-eq (ps mps tv m)
+        (do (let rows (dth-tv-r tv)) (let cols (dth-tv-c tv))
+            (let xh (metal_buf_alloc (mul 4 (mul m cols))))
+            (let w (metal_buf_write xh 0 (dmb-cols m 0 cols "")))
+            (let ym (metal_buf_alloc (mul 4 (mul m rows))))
+            (let xm (metal_buf_alloc (mul 4 cols))) (let yref (metal_buf_alloc (mul 4 rows)))
+            (let e (dm-mm mps tv xh ym m))
+            (let s (metal_sync))
+            (dmb-cmp ps tv xm ym yref m rows cols 0 0)))
+
+    ; ---- bit 16 / 32: each prompt alone through the single lane; its ids and its last logits ----
+    (defn dmb-single (stS prompts acc)
+        (if (eq (len prompts) 0) acc
+            (do (let ps (nth stS 0)) (let bs (nth stS 1)) (let geo (nth stS 2))
+                (let ids (head prompts))
+                (let pf (dth-prefill ps bs geo (nth stS 3) (nth stS 4) (nth stS 5) (nth stS 6) (nth stS 7) (nth stS 8) ids 0))
+                (let first (nth pf 0))
+                (let rest (dth-generate ps bs geo (nth stS 3) (nth stS 4) (nth stS 5) (nth stS 6) (nth stS 7) (nth stS 8) first (len ids) 15 (empty)))
+                (let logits (metal_buf_read (nth bs 11) 0 (mul 4 (nth geo 7))))
+                (dmb-single stS (tail prompts) (append acc (list (list (append (list first) rest) logits)))))))
+    (defn dmb-firsts (rs acc) (if (eq (len rs) 0) acc (dmb-firsts (tail rs) (append acc (list (nth (head rs) 0))))))
+    (defn dmb-logits-eq (rs logs n acc)
+        (if (eq (len rs) 0) acc
+            (dmb-logits-eq (tail rs) (tail logs) n (add acc (dmb-same? (nth (head rs) 1) (head logs) n)))))
+
+    (let live (md-door-live?))
+    (let st (dm-open (dmb-blob) 256 4))
+    (let ok (dm-ok? st))
+    (let ps (nth st 0)) (let mps (nth st 1)) (let geo (nth st 3)) (let lay0 (head (nth st 4)))
+    (let src (nth st 10))
+    (let mm-eq (add (dmb-matmat-eq ps mps (nth lay0 1) 4) (dmb-matmat-eq ps mps (nth lay0 8) 4)))
+
+    (let prompts (dmb-encode src (dmb-texts) (empty)))
+    (let run4 (dm-run st prompts 16 true))
+    (let gens4 (nth run4 0)) (let logs4 (nth run4 1))
+
+    (let stS (dth-open (dmb-blob) 256 (sub 0 1)))
+    (let singles (dmb-single stS prompts (empty)))
+    (let ids-eq (dmb-eqlists gens4 (dmb-firsts singles (empty))))
+    (let log-eq (dmb-logits-eq singles logs4 (mul 4 (nth geo 7)) 0))
+
+    (let st1 (dm-open (dmb-blob) 256 1))
+    (let run1 (dm-run st1 (list (head prompts)) 16 false))
+    (let one-eq (dmb-eqlist (head (nth run1 0)) (dmb-want)))
+
+    (let st8 (dm-open (dmb-blob) 256 8))
+    (let run8 (dm-run st8 (append prompts prompts) 16 false))
+    (let eight-eq (dmb-eqlists (nth run8 0) (append gens4 gens4)))
+
+    (print_str (str_concat "matmat columns equal " (str_concat (int_to_str mm-eq) (str_concat "/8 | logits equal " (str_concat (int_to_str log-eq) "/4")))))
+    (add (if live 1 0)
+    (add (if live (if ok 2 0) 0)
+    (add (if live (if (eq mm-eq 8) 4 0) 0)
+    (add (if live (if (dmb-eqlist (head gens4) (dmb-want)) 8 0) 0)
+    (add (if live (if ids-eq 16 0) 0)
+    (add (if live (if (eq log-eq 4) 32 0) 0)
+    (add (if live (if one-eq 64 0) 0)
+         (if live (if eight-eq 128 0) 0)))))))))

@@ -1,0 +1,182 @@
+; q8-0-matmat-msl.fk — the dense lane's kernels over M sequences at once: every weight read once,
+; M input columns folded beside it.
+;
+; WHY. A decode step reads every weight of the model once; at the measured 330 GB/s that pass is
+; the 4 ms floor of a llama3.2:1b token, and the single-sequence lane pays it for ONE column of
+; input. Four tongues offered one after another are four passes. This unit is the same pass with
+; M columns riding on it: the Q8_0 matvec becomes a matmat over M input columns, and every other
+; kernel of the block (rmsnorm, rope, attention, argmax, the embedding read) runs its single-
+; sequence text once per sequence, on that sequence's own rows and its own KV bank.
+;
+; THE FOLD CONTRACT IS q8-0-msl.fk's, column for column. form_q80_matvec_tg4_f32 stages the products
+; (d * q) * x[j] of a 128-column step into threadgroup memory and sixteen lanes fold sixteen rows,
+; k from 127 down to 0, `acc = p + acc`, steps descending — j descending over the whole row, the
+; attestant's own order. Here the loaders stage the WEIGHT (d * q, exact in f32: an f16 significand
+; times an int8 needs 19 bits) and the step's slice of every column of x beside it; a folding lane
+; (row, m) computes `p = w * x_m[j]` itself and folds `acc = p + acc` in the same order. The
+; product is the same two roundings — (d * q) rounded, then times x rounded; the unit's fp contract
+; is off — so column m of the matmat is byte for byte the tg4 matvec over x_m. Staging weights
+; rather than products is what lets M columns fit: pv[2][16][129] plus xs[2][8][129] is 24.8 KB of
+; the 32 KB a threadgroup holds, where products for four columns would not.
+;
+; THREADS. F = 32 * ceil(M / 2) folding lanes (lane t: row t & 15, column t >> 4), then 64 loaders
+; (row u & 15, block u >> 4 of the step), the loaders a step ahead in registers as in tg4. Dispatch:
+; mode 1, groups = ceil(rows / 16), F + 64 threads a group. M in 1..8; cols a multiple of 128 (the
+; GLU: 64). x is [M][cols] row-major, y [M][rows]; the cache-landing and attention kernels take a
+; per-sequence position buffer and a bank stride, so sequences of different lengths share a step.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form/native/metal/tests/dense-multi-band.fk (byte equality per column against the
+;            single-sequence lane on real weights and real state, four prompts of different lengths)
+
+(do
+    ; ---- the head every matmat kernel shares: who folds, who loads, which column ----
+    (defn q8mm-head ()
+        " { threadgroup float pv[2][16][129]; threadgroup float xs[2][8][129]; uint nb = cols / 32u; uint ns = cols / 128u; uint F = ((16u * nm + 31u) / 32u) * 32u; bool isf = (t < F); uint u = isf ? 0u : (t - F); uint lane = isf ? (t & 15u) : (u & 15u); uint m = isf ? (t >> 4) : 0u; uint sub = isf ? 0u : (u >> 4); ")
+
+    ; the weight stage: one block of row `lane` for step cs, d * q, exact
+    (defn q8mm-stage ()
+        "float d = float(as_type<half>(hb[0])); for (uint e = 0u; e < 32u; e += 2u) { ushort two = hb[1u + e / 2u]; pv[cs & 1u][lane][sub * 32u + e] = d * float(q6k_s8(int(two & 0xFFu))); pv[cs & 1u][lane][sub * 32u + e + 1u] = d * float(q6k_s8(int(two >> 8))); } ")
+
+    ; the x stage: loader (lane < M, sub) copies column `lane`'s 32 values of block sub of step cs
+    (defn q8mm-xstage ()
+        "if (xload) { uint cb = cs * 4u + sub; for (uint e = 0u; e < 32u; e += 1u) { xs[cs & 1u][lane][sub * 32u + e] = x[lane * cols + cb * 32u + e]; } } ")
+
+    ; the fold, unrolled k = 127 .. 0: p = w * x_m[j]; acc = p + acc
+    (defn q8mm-fold (k acc)
+        (if (lt k 0) acc
+            (q8mm-fold (sub k 1)
+                (str_concat acc
+                (str_concat "{ float p = pv[ci & 1u][lane]["
+                (str_concat (int_to_str k)
+                (str_concat "u] * xs[ci & 1u][m]["
+                (str_concat (int_to_str k) "u]; acc = p + acc; } "))))))))
+
+    ; the kernel, generic over its signature, the prefix that names `qb`, `rows`, `row` and the output,
+    ; and the epilogue that stores lane (row, m)'s fold
+    (defn q8mm-kernel (fname sig prefix epilogue)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat sig
+        (str_concat (q8mm-head)
+        (str_concat prefix
+        (str_concat " bool fold = isf && (m < nm) && (row < rows); bool load = (!isf) && (u < 64u) && (row < rows); bool xload = (!isf) && (u < 64u) && (lane < nm); ushort hb[17]; if (load) { uint cb = (ns - 1u) * 4u + sub; device const ushort* hp = (device const ushort*)(qb + (row * nb + cb) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp[q]; } if (load) { uint cs = ns - 1u; "
+        (str_concat (q8mm-stage)
+        (str_concat "if (ns > 1u) { uint cb2 = (ns - 2u) * 4u + sub; device const ushort* hp2 = (device const ushort*)(qb + (row * nb + cb2) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp2[q]; } } { uint cs = ns - 1u; "
+        (str_concat (q8mm-xstage)
+        (str_concat "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float acc = 0.0f; uint ci = ns; while (ci > 0u) { ci -= 1u; if (load && ci > 0u) { uint cs = ci - 1u; "
+        (str_concat (q8mm-stage)
+        (str_concat "if (cs > 0u) { uint cb2 = (cs - 1u) * 4u + sub; device const ushort* hp2 = (device const ushort*)(qb + (row * nb + cb2) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp2[q]; } } if (ci > 0u) { uint cs = ci - 1u; "
+        (str_concat (q8mm-xstage)
+        (str_concat "} if (fold) { "
+        (str_concat (q8mm-fold 127 "")
+        (str_concat "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (fold) { "
+        (str_concat epilogue " } }"))))))))))))))))))
+
+    ; --- kernel 1: y[m][row] = W x_m ---
+    (defn q8mm-matmat-body (fname)
+        (q8mm-kernel fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nm [[buffer(5)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
+            "uint row = gi * 16u + lane;"
+            "y[m * rows + row] = acc;"))
+
+    ; --- kernel 2: the residual add in the epilogue, y[m][row] = r[m][row] + acc (in place on r) ---
+    (defn q8mm-matmat-add-body (fname)
+        (q8mm-kernel fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const float* r [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& nm [[buffer(6)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
+            "uint row = gi * 16u + lane;"
+            "y[m * rows + row] = r[m * rows + row] + acc;"))
+
+    ; --- kernel 3: q, k, v over one input in one dispatch; k and v land in sequence m's bank of the cache
+    ; at that sequence's own position row: y[m * bank + pos[m] * rows + row] ---
+    (defn q8mm-matmat-x3-body (fname)
+        (q8mm-kernel fname
+            " (device const uchar* qb0 [[buffer(0)]], device const uchar* qb1 [[buffer(1)]], device const uchar* qb2 [[buffer(2)]], device const float* x [[buffer(3)]], device float* y0 [[buffer(4)]], device float* y1 [[buffer(5)]], device float* y2 [[buffer(6)]], device const uint* pos [[buffer(7)]], constant uint& rows0 [[buffer(8)]], constant uint& rows1 [[buffer(9)]], constant uint& rows2 [[buffer(10)]], constant uint& cols [[buffer(11)]], constant uint& nm [[buffer(12)]], constant uint& bank [[buffer(13)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
+            "uint g0 = (rows0 + 15u) / 16u; uint g1 = (rows1 + 15u) / 16u; uint sel = (gi < g0) ? 0u : ((gi < g0 + g1) ? 1u : 2u); uint gl = (sel == 0u) ? gi : ((sel == 1u) ? (gi - g0) : (gi - g0 - g1)); uint rows = (sel == 0u) ? rows0 : ((sel == 1u) ? rows1 : rows2); device const uchar* qb = (sel == 0u) ? qb0 : ((sel == 1u) ? qb1 : qb2); device float* y = (sel == 0u) ? y0 : ((sel == 1u) ? y1 : y2); uint row = gl * 16u + lane;"
+            "if (sel == 0u) { y[m * rows + row] = acc; } else { y[m * bank + pos[m] * rows + row] = acc; }"))
+
+    ; --- kernel 4: gate, up and the SwiGLU over M columns. 32 * M folding lanes (lane & 15 the row, lane < 16
+    ; gate else up, m = t >> 5), 64 loaders staging two blocks a row a step (pv[2][32][65]) and the x slice
+    ; (xs[2][8][65]); the up fold crosses threadgroup memory per column (upv[8][16]); the epilogue is
+    ; form_swiglu_f32's own line. cols a multiple of 64. ---
+    (defn q8mm-glu-stage ()
+        "float d = float(as_type<half>(hb[0])); for (uint e = 0u; e < 32u; e += 2u) { ushort two = hb[1u + e / 2u]; pv[cs & 1u][lane][sub * 32u + e] = d * float(q6k_s8(int(two & 0xFFu))); pv[cs & 1u][lane][sub * 32u + e + 1u] = d * float(q6k_s8(int(two >> 8))); } ")
+    (defn q8mm-glu-xstage ()
+        "if (xload) { uint cb = cs * 2u + sub; for (uint e = 0u; e < 32u; e += 1u) { xs[cs & 1u][lane][sub * 32u + e] = x[lane * cols + cb * 32u + e]; } } ")
+    (defn q8mm-glu-fold (k acc)
+        (if (lt k 0) acc
+            (q8mm-glu-fold (sub k 1)
+                (str_concat acc
+                (str_concat "{ float p = pv[ci & 1u][lane]["
+                (str_concat (int_to_str k)
+                (str_concat "u] * xs[ci & 1u][m]["
+                (str_concat (int_to_str k) "u]; acc = p + acc; } "))))))))
+    (defn q8mm-glu-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qg [[buffer(0)]], device const uchar* qu [[buffer(1)]], device const float* x [[buffer(2)]], device float* y [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& nm [[buffer(6)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) { threadgroup float pv[2][32][65]; threadgroup float xs[2][8][65]; threadgroup float upv[8][16]; uint nb = cols / 32u; uint ns = cols / 64u; uint F = 32u * nm; bool isf = (t < F); uint u = isf ? 0u : (t - F); uint lane = isf ? (t & 31u) : (u & 31u); uint m = isf ? (t >> 5) : 0u; uint sub = isf ? 0u : (u >> 5); uint row = gi * 16u + (lane & 15u); device const uchar* qb = (lane < 16u) ? qg : qu; bool fold = isf && (row < rows); bool load = (!isf) && (u < 64u) && (row < rows); bool xload = (!isf) && (u < 64u) && (lane < nm); ushort hb[17]; if (load) { uint cb = (ns - 1u) * 2u + sub; device const ushort* hp = (device const ushort*)(qb + (row * nb + cb) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp[q]; } if (load) { uint cs = ns - 1u; "
+        (str_concat (q8mm-glu-stage)
+        (str_concat "if (ns > 1u) { uint cb2 = (ns - 2u) * 2u + sub; device const ushort* hp2 = (device const ushort*)(qb + (row * nb + cb2) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp2[q]; } } { uint cs = ns - 1u; "
+        (str_concat (q8mm-glu-xstage)
+        (str_concat "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float acc = 0.0f; uint ci = ns; while (ci > 0u) { ci -= 1u; if (load && ci > 0u) { uint cs = ci - 1u; "
+        (str_concat (q8mm-glu-stage)
+        (str_concat "if (cs > 0u) { uint cb2 = (cs - 1u) * 2u + sub; device const ushort* hp2 = (device const ushort*)(qb + (row * nb + cb2) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp2[q]; } } if (ci > 0u) { uint cs = ci - 1u; "
+        (str_concat (q8mm-glu-xstage)
+        (str_concat "} if (fold) { "
+        (str_concat (q8mm-glu-fold 63 "")
+                    "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (fold && lane >= 16u) { upv[m][lane - 16u] = acc; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (fold && lane < 16u) { float gv = acc; float sig = 1.0f / (1.0f + fexp(-1.0f * gv)); float sl = gv * sig; y[m * rows + row] = sl * upv[m][lane]; } }")))))))))))))
+
+    ; ---- the per-sequence kernels: the single-sequence text, once per sequence on its own rows ----
+    ; rmsnorm over row m: one group per sequence, form_rmsnorm_tw_f32's text on x + m*n (the root crosses
+    ; the barrier, every thread its own `inv = 1.0f / gg`)
+    (defn q8mm-rmsnorm-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x0 [[buffer(0)]], device const float* g [[buffer(1)]], device float* y0 [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { threadgroup float sgg[1]; device const float* x = x0 + gi * n; device float* y = y0 + gi * n; if (t == 0u) { float ss = 0.0f; uint j = 0; while (j + 8u <= n) { float x0v = x[j]; float x1 = x[j + 1u]; float x2 = x[j + 2u]; float x3 = x[j + 3u]; float x4 = x[j + 4u]; float x5 = x[j + 5u]; float x6 = x[j + 6u]; float x7 = x[j + 7u]; float s0 = x0v * x0v; float s1 = x1 * x1; float s2 = x2 * x2; float s3 = x3 * x3; float s4 = x4 * x4; float s5 = x5 * x5; float s6 = x6 * x6; float s7 = x7 * x7; ss = ss + s0; ss = ss + s1; ss = ss + s2; ss = ss + s3; ss = ss + s4; ss = ss + s5; ss = ss + s6; ss = ss + s7; j += 8u; } while (j < n) { float xv = x[j]; float sq = xv * xv; ss = ss + sq; j += 1; } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50; while (it > 0) { it -= 1; gg = 0.5f * (gg + sdv / gg); } sgg[0] = gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float gg2 = sgg[0]; float inv = 1.0f / gg2; { uint k = t; while (k < n) { float nm = x[k] * inv; y[k] = nm * g[k]; k += nt; } } }")))
+
+    ; the pair rope over q and k (in its bank of the cache, at the sequence's own position) for M sequences:
+    ; form_rope_pair2_f32's expression per pair; threads = M * (nq + nkv) * hd/2
+    (defn q8mm-rope-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* q0 [[buffer(0)]], device float* k0 [[buffer(1)]], device const float* fr [[buffer(2)]], device const uint* pos [[buffer(3)]], constant uint& nq [[buffer(4)]], constant uint& nkv [[buffer(5)]], constant uint& hd [[buffer(6)]], constant float& base [[buffer(7)]], constant uint& nm [[buffer(8)]], constant uint& bank [[buffer(9)]], uint gid0 [[thread_position_in_grid]]) { uint np = hd / 2u; uint per = (nq + nkv) * np; if (gid0 >= nm * per) return; uint m = gid0 / per; uint gid = gid0 - m * per; uint ps = pos[m]; device float* q = q0 + m * nq * hd; device float* k = k0 + m * bank; uint voff = ps * nkv * hd; bool isq = gid < nq * np; uint g = isq ? gid : (gid - nq * np); device float* v = isq ? q : k; uint h = g / np; uint pr = g - h * np; uint i = pr * 2u; uint o = (isq ? 0u : voff) + h * hd; float ex = (-1.0f * float(i)) / float(hd); float fq = fpow(base, ex) / fr[i / 2u]; float a = float(ps) * fq; float ca = fcos(a); float sa = fsin(a); float q0v = v[o + i]; float q1 = v[o + i + 1u]; float t0 = q0v * ca; float t1 = q1 * sa; v[o + i] = t0 - t1; float t2 = q0v * sa; float t3 = q1 * ca; v[o + i + 1u] = t2 + t3; }")))
+
+    ; the cooperative attention for M sequences: group gi = m * nq + h, over sequence m's bank, npos = pos[m] + 1;
+    ; form_gqa_decode_tg_f32's text (sumes crosses the barrier, never invs). npos <= 1024.
+    (defn q8mm-attn-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* q0 [[buffer(0)]], device const float* kc0 [[buffer(1)]], device const float* vc0 [[buffer(2)]], device float* y0 [[buffer(3)]], device const uint* pos [[buffer(4)]], constant uint& nq [[buffer(5)]], constant uint& nkv [[buffer(6)]], constant uint& hd [[buffer(7)]], constant float& scale [[buffer(8)]], constant uint& nm [[buffer(9)]], constant uint& bank [[buffer(10)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { threadgroup float ss[1024]; threadgroup float ee[1024]; threadgroup float red[2]; uint m = gi / nq; uint h = gi - m * nq; if (m >= nm) return; uint npos = pos[m] + 1u; device const float* q = q0 + m * nq * hd; device const float* kc = kc0 + m * bank; device const float* vc = vc0 + m * bank; device float* y = y0 + m * nq * hd; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint qoff = h * hd; uint koff = kvh * hd; { uint p = t; while (p < npos) { float acc = 0.0f; uint c = hd; while (c > 0) { c -= 1; float pr = q[qoff + c] * kc[p * KVD + koff + c]; acc = pr + acc; } ss[p] = acc * scale; p += nt; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { float mx = ss[0]; uint p = 1; while (p < npos) { if (ss[p] > mx) { mx = ss[p]; } p += 1; } red[0] = mx; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float mx = red[0]; { uint p = t; while (p < npos) { ee[p] = fexp(ss[p] - mx); p += nt; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { float sumes = 0.0f; uint p = 0; while (p < npos) { sumes = sumes + ee[p]; p += 1; } red[1] = sumes; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float sumes = red[1]; float invs = 1.0f / sumes; { uint p = t; while (p < npos) { ss[p] = ee[p] * invs; p += nt; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); { uint i = t; while (i < hd) { float yi = 0.0f; uint p = 0; while (p < npos) { float pv = vc[p * KVD + koff + i] * ss[p]; yi = yi + pv; p += 1; } y[qoff + i] = yi; i += nt; } } }")))
+
+    ; greedy selection per sequence, the two stages: parts over M * parts threads (part p of sequence m
+    ; scans its contiguous chunk of logits row m), then one group per sequence folds its parts ascending
+    (defn q8mm-argmax-part-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x0 [[buffer(0)]], device uint* pi0 [[buffer(1)]], device float* pv0 [[buffer(2)]], constant uint& n [[buffer(3)]], constant uint& parts [[buffer(4)]], constant uint& nm [[buffer(5)]], uint p0 [[thread_position_in_grid]]) { if (p0 >= nm * parts) return; uint m = p0 / parts; uint p = p0 - m * parts; device const float* x = x0 + m * n; device uint* pi = pi0 + m * parts; device float* pv = pv0 + m * parts; uint chunk = (n + parts - 1u) / parts; uint lo = p * chunk; uint hi = lo + chunk; if (hi > n) hi = n; if (lo >= hi) { pi[p] = 0u; pv[p] = x[0]; return; } uint best = lo; float bv = x[lo]; uint i = lo + 1u; while (i < hi) { if (x[i] > bv) { bv = x[i]; best = i; } i += 1u; } pi[p] = best; pv[p] = bv; }")))
+    (defn q8mm-argmax-comb-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uint* pi0 [[buffer(0)]], device const float* pv0 [[buffer(1)]], device uint* out [[buffer(2)]], device float* oval [[buffer(3)]], constant uint& parts [[buffer(4)]], uint m [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { threadgroup uint li[4096]; threadgroup float lv[4096]; device const uint* pi = pi0 + m * parts; device const float* pv = pv0 + m * parts; uint j = t; while (j < parts) { li[j] = pi[j]; lv[j] = pv[j]; j += nt; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t != 0u) return; uint best = li[0]; float bv = lv[0]; uint p = 1u; while (p < parts) { if (lv[p] > bv) { bv = lv[p]; best = li[p]; } p += 1u; } out[m] = best; oval[m] = bv; }")))
+
+    ; the embedding rows of M ids in one dispatch: w[m * d + j] = q80_w(qb, ids[m] * d + j) — the Q8_0
+    ; dequant's own reach, the offset per sequence
+    (defn q8mm-embed-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], device const uint* ids [[buffer(2)]], constant uint& d [[buffer(3)]], constant uint& nm [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= nm * d) return; uint m = i / d; uint j = i - m * d; w[i] = q80_w(qb, ids[m] * d + j); }")))
+
+    ; --- the appendix a unit that already carries q80_w, q6k_s8 and the transcendental spine appends ---
+    (defn q8mm-msl-appendix ()
+        (str_concat (q8mm-matmat-body "form_q80_matmat_f32")
+        (str_concat (q8mm-matmat-add-body "form_q80_matmat_add_f32")
+        (str_concat (q8mm-matmat-x3-body "form_q80_matmat_x3_f32")
+        (str_concat (q8mm-glu-body "form_q80_matmat_glu_f32")
+        (str_concat (q8mm-rmsnorm-body "form_rmsnorm_m_f32")
+        (str_concat (q8mm-rope-body "form_rope_pair2_m_f32")
+        (str_concat (q8mm-attn-body "form_gqa_decode_m_f32")
+        (str_concat (q8mm-argmax-part-body "form_argmax_part_m_f32")
+        (str_concat (q8mm-argmax-comb-body "form_argmax_comb_m_f32")
+                    (q8mm-embed-body "form_q80_embed_m_f32")))))))))))
+    0)

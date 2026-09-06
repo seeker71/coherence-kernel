@@ -1,0 +1,227 @@
+; dense-multi.fk — M sequences through the dense lane in ONE decode step: every weight read once.
+;
+; dense-token-handle.fk's fused block dispatches eight kernels a layer for one sequence, and a token
+; costs 13 ms against the 4 ms floor of one pass over the weights. Four tongues offered for one heard
+; line are four such passes, one after another. This cell is the same block over M sequences at once:
+; the Q8_0 matvecs become matmats over M input columns (q8-0-matmat-msl.fk — the tg4 fold per column,
+; byte for byte), and rmsnorm, rope, attention, argmax and the embedding read run their single-sequence
+; text once per sequence on that sequence's own rows. Each sequence owns a bank of every layer's KV
+; cache (bank = maxpos * kvd floats) and its own position, so sequences of different lengths share a
+; step: at step s sequence m feeds its s-th prompt id while it has one and its last answer after.
+;
+; WHAT IS REUSED, not re-read: dth-open walks the file's header once and answers the geometry, the
+; layer views, the rope frequencies and the single-lane pipes; this cell compiles its own unit (the
+; spine q80_w / q6k_s8 / the transcendental helpers, then the M-kernels) and allocates M-row buffers
+; and M-bank caches beside it. The dispatch count a step is the fused lane's own — 1 + 8 per layer + 4
+; — so the Form-side dispatch loop is paid once for M sequences, not M times.
+;
+; RADIUS, asked of the file: every layer must satisfy dth-fusable? (Q8_0 projections, cols a
+; multiple of 128, adjacent-pair rope, no qkv bias, maxpos <= 1024), the embedding and the head must
+; be Q8_0, and M in 1..8 (the kernels' xs[2][8][...] staging). A file outside it is refused at open,
+; loudly (dm-ok? false and the reason printed), never walked numb.
+;
+; preludes: native/metal/dense-token-handle.fk form-stdlib/q8-0-matmat-msl.fk
+;
+; Proven by: form/native/metal/tests/dense-multi-band.fk
+
+(do
+    ; ================= the unit and its pipes =================
+    ; mps: 0 matmat 1 matmat-add 2 matmat-x3 3 glu 4 rmsnorm-m 5 rope-m 6 attn-m 7 argmax-part-m
+    ;      8 argmax-comb-m 9 embed-m
+    (defn dm-msl ()
+        (str_concat "#include <metal_stdlib>\n#pragma clang fp contract(off)\n"
+        (str_concat (q80-msl-spine)
+        (str_concat (q80-msl-weight)
+        (str_concat (ldm-msl-helpers)
+                    (q8mm-msl-appendix))))))
+    (defn dm-pipes (msl)
+        (list (metal_pipeline msl "form_q80_matmat_f32")
+              (metal_pipeline msl "form_q80_matmat_add_f32")
+              (metal_pipeline msl "form_q80_matmat_x3_f32")
+              (metal_pipeline msl "form_q80_matmat_glu_f32")
+              (metal_pipeline msl "form_rmsnorm_m_f32")
+              (metal_pipeline msl "form_rope_pair2_m_f32")
+              (metal_pipeline msl "form_gqa_decode_m_f32")
+              (metal_pipeline msl "form_argmax_part_m_f32")
+              (metal_pipeline msl "form_argmax_comb_m_f32")
+              (metal_pipeline msl "form_q80_embed_m_f32")))
+
+    ; folding lanes for M columns: 32 * ceil(M / 2); the matmat group is that plus 64 loaders
+    (defn dm-F (m) (mul 32 (div (add m 1) 2)))
+    (defn dm-tpg (m) (add (dm-F m) 64))
+    (defn dm-groups (rows) (div (add rows 15) 16))
+
+    ; ================= buffers =================
+    ; bs: 0 X [M][d] 1 Xb [M][d] 2 Q [M][qOut] 3 Attn [M][qOut] 4 Act [M][dFF] 5 Logits [M][vocab]
+    ;     6 OutI [M] 7 OutV [M] 8 ArgI [M][512] 9 ArgV [M][512] 10 ids [M] 11 pos [M]
+    (defn dm-bufs (m dModel dFF qOut vocabN)
+        (list (metal_buf_alloc (mul (mul m dModel) 4))
+              (metal_buf_alloc (mul (mul m dModel) 4))
+              (metal_buf_alloc (mul (mul m qOut) 4))
+              (metal_buf_alloc (mul (mul m qOut) 4))
+              (metal_buf_alloc (mul (mul m dFF) 4))
+              (metal_buf_alloc (mul (mul m vocabN) 4))
+              (metal_buf_alloc (mul m 4))
+              (metal_buf_alloc (mul m 4))
+              (metal_buf_alloc (mul (mul m (dth-argmax-parts)) 4))
+              (metal_buf_alloc (mul (mul m (dth-argmax-parts)) 4))
+              (metal_buf_alloc (mul m 4))
+              (metal_buf_alloc (mul m 4))))
+
+    ; M banks a cache: sequence m's rows at m * maxpos * kvd
+    (defn dm-cache (n floats acc)
+        (if (le n 0) acc
+            (dm-cache (sub n 1) floats (append acc (list (metal_buf_alloc (mul floats 4)))))))
+
+    ; ================= the radius =================
+    (defn dm-layers-fusable? (lays geo)
+        (if (eq (len lays) 0) true
+            (if (dth-fusable? (head lays) geo) (dm-layers-fusable? (tail lays) geo) false)))
+    (defn dm-q8-128? (tv) (if (eq (dth-tv-ty tv) 8) (eq (mod (dth-tv-c tv) 128) 0) false))
+    (defn dm-reason (m geo lays embTv projTv)
+        (if (lt m 1) "M below 1"
+        (if (gt m 8) "M above 8 (the kernels stage eight columns)"
+        (if (not (dm-layers-fusable? lays geo)) "a layer outside the fused block's radius"
+        (if (not (eq (dth-tv-ty embTv) 8)) "the embedding is not Q8_0"
+        (if (not (dm-q8-128? projTv)) "the head is not Q8_0 with cols a multiple of 128"
+            ""))))))
+
+    ; ================= open =================
+    ; st: 0 ps 1 mps 2 bs 3 geo 4 lays 5 cks 6 cvs 7 embTv 8 onormTv 9 projTv 10 src 11 M 12 arch 13 ok
+    (defn dm-open (path maxpos m)
+        (do
+            (let st (dth-open path maxpos (sub 0 1)))
+            (let geo (nth st 2))
+            (let lays (nth st 3))
+            (let embTv (nth st 6)) (let onormTv (nth st 7)) (let projTv (nth st 8))
+            (let why (dm-reason m geo lays embTv projTv))
+            (let ok (eq (str_len why) 0))
+            (if ok 0 (print_str (str_concat "dense-multi: refused at open: " why)))
+            (let mps (if ok (dm-pipes (dm-msl)) (empty)))
+            (let bs (if ok (dm-bufs m (nth geo 0) (nth geo 1) (nth geo 13) (nth geo 7)) (empty)))
+            (let nbank (mul (mul (nth geo 12) (nth geo 16)) 1))
+            (let cks (if ok (dm-cache nbank (mul (mul m (nth geo 6)) (nth geo 5)) (empty)) (empty)))
+            (let cvs (if ok (dm-cache nbank (mul (mul m (nth geo 6)) (nth geo 5)) (empty)) (empty)))
+            (list (nth st 0) mps bs geo lays cks cvs embTv onormTv projTv (nth st 10) m (nth st 9) ok)))
+
+    (defn dm-ok? (st) (if (nth st 13) (dth-pipe-ok? (nth st 1)) false))
+    (defn dm-bank (geo) (mul (nth geo 6) (nth geo 5)))
+
+    ; ================= dispatches =================
+    (defn dm-rms (mps bs xh gtv yh n epsBits m)
+        (metal_enqueue (nth mps 4) (md-bind16 (list xh (dth-tv-h gtv) yh) (list n epsBits) 256 0 1 0) m))
+    (defn dm-mm (mps tv xh yh m)
+        (metal_enqueue (nth mps 0) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv) m) (dm-tpg m) 0 1 0) (dm-groups (dth-tv-r tv))))
+    (defn dm-mm-add (mps tv xh rh m)
+        (metal_enqueue (nth mps 1) (md-bind16 (list (dth-tv-h tv) xh rh rh) (list (dth-tv-r tv) (dth-tv-c tv) m) (dm-tpg m) 0 1 0) (dm-groups (dth-tv-r tv))))
+    (defn dm-mm-x3 (mps qtv ktv vtv xh qh ck cv posH m bank)
+        (metal_enqueue (nth mps 2)
+                       (md-bind16 (list (dth-tv-h qtv) (dth-tv-h ktv) (dth-tv-h vtv) xh qh ck cv posH)
+                                  (list (dth-tv-r qtv) (dth-tv-r ktv) (dth-tv-r vtv) (dth-tv-c qtv) m bank) (dm-tpg m) 0 1 0)
+                       (add (dm-groups (dth-tv-r qtv)) (add (dm-groups (dth-tv-r ktv)) (dm-groups (dth-tv-r vtv))))))
+    (defn dm-glu (mps gtv utv xh yh m)
+        (metal_enqueue (nth mps 3) (md-bind16 (list (dth-tv-h gtv) (dth-tv-h utv) xh yh) (list (dth-tv-r gtv) (dth-tv-c gtv) m) (add (mul 32 m) 64) 0 1 0) (dm-groups (dth-tv-r gtv))))
+    (defn dm-rope (mps qh kh ropeH posH nq nkv hd baseBits m bank)
+        (metal_enqueue (nth mps 5) (md-bind (list qh kh ropeH posH) (list nq nkv hd baseBits m bank)) (mul m (mul (add nq nkv) (div hd 2)))))
+    (defn dm-attn (mps qh kh vh yh posH nq nkv hd scaleBits m bank)
+        (metal_enqueue (nth mps 6) (md-bind16 (list qh kh vh yh posH) (list nq nkv hd scaleBits m bank) 256 0 1 0) (mul m nq)))
+    (defn dm-argmax (mps lh pih pvh oih ovh n m)
+        (do (metal_enqueue (nth mps 7) (md-bind (list lh pih pvh) (list n (dth-argmax-parts) m)) (mul m (dth-argmax-parts)))
+            (metal_enqueue (nth mps 8) (md-bind16 (list pih pvh oih ovh) (list (dth-argmax-parts)) 256 0 1 0) m)))
+    (defn dm-embed (mps embTv xh idsH d m)
+        (metal_enqueue (nth mps 9) (md-bind (list (dth-tv-h embTv) xh idsH) (list d m)) (mul m d)))
+
+    ; ================= one block, eight dispatches, M sequences =================
+    ; geo: 0 dModel 1 dFF 2 nHead 3 nKV 4 headDim 5 kvd 6 maxpos 7 vocabN 8 epsBits 9 baseBits
+    ;      10 scaleBits 11 ropeH 12 nLayer 13 qOut 14 ropeStyle 15 ropeDim 16 nLoop
+    (defn dm-block (mps bs geo lay ck cv m)
+        (do
+            (dm-rms mps bs (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8) m)
+            (dm-mm-x3 mps (nth lay 1) (nth lay 2) (nth lay 3) (nth bs 1) (nth bs 2) ck cv (nth bs 11) m (dm-bank geo))
+            (dm-rope mps (nth bs 2) ck (nth geo 11) (nth bs 11) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 9) m (dm-bank geo))
+            (dm-attn mps (nth bs 2) ck cv (nth bs 3) (nth bs 11) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) m (dm-bank geo))
+            (dm-mm-add mps (nth lay 4) (nth bs 3) (nth bs 0) m)
+            (dm-rms mps bs (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8) m)
+            (dm-glu mps (nth lay 6) (nth lay 7) (nth bs 1) (nth bs 4) m)
+            (dm-mm-add mps (nth lay 8) (nth bs 4) (nth bs 0) m)
+            1))
+
+    (defn dm-blocks (mps bs geo lays cks cvs m l n loopoff)
+        (if (ge l n) 1
+            (do (dm-block mps bs geo (nth lays l) (nth cks (add l loopoff)) (nth cvs (add l loopoff)) m)
+                (dm-blocks mps bs geo lays cks cvs m (add l 1) n loopoff))))
+
+    (defn dm-passes (mps bs geo lays cks cvs onormTv m lp nLoop)
+        (if (ge lp nLoop) 1
+            (do (dm-blocks mps bs geo lays cks cvs m 0 (nth geo 12) (mul lp (nth geo 12)))
+                (if (lt (add lp 1) nLoop)
+                    (dm-rms mps bs (nth bs 0) onormTv (nth bs 0) (nth geo 0) (nth geo 8) m)
+                    0)
+                (dm-passes mps bs geo lays cks cvs onormTv m (add lp 1) nLoop))))
+
+    (defn dm-head (mps bs geo onormTv projTv m)
+        (do
+            (dm-rms mps bs (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 8) m)
+            (dm-mm mps projTv (nth bs 1) (nth bs 5) m)
+            (dm-argmax mps (nth bs 5) (nth bs 8) (nth bs 9) (nth bs 6) (nth bs 7) (nth geo 7) m)
+            0))
+
+    ; ================= one step =================
+    ; ids: M token ids (one per sequence); poss: M positions. Answers the M argmax ids.
+    (defn dm-u32s (s i n acc)
+        (if (ge i n) acc
+            (dm-u32s s (add i 1) n (append acc (list (dth-u32 (substring s (mul i 4) (add (mul i 4) 4))))))))
+    (defn dm-step (st ids poss)
+        (do
+            (let mps (nth st 1)) (let bs (nth st 2)) (let geo (nth st 3)) (let m (nth st 11))
+            (metal_buf_write (nth bs 10) 0 (md-le32-list ids ""))
+            (metal_buf_write (nth bs 11) 0 (md-le32-list poss ""))
+            (dm-embed mps (nth st 7) (nth bs 0) (nth bs 10) (nth geo 0) m)
+            (dm-passes mps bs geo (nth st 4) (nth st 5) (nth st 6) (nth st 8) m 0 (nth geo 16))
+            (dm-head mps bs geo (nth st 8) (nth st 9) m)
+            (dm-u32s (metal_buf_read (nth bs 6) 0 (mul m 4)) 0 m (empty))))
+
+    ; the logits of sequence m after the last step, as bytes
+    (defn dm-logits (st m)
+        (metal_buf_read (nth (nth st 2) 5) (mul (mul m (nth (nth st 3) 7)) 4) (mul (nth (nth st 3) 7) 4)))
+
+    ; ================= the lock-step run over M prompts =================
+    (defn dm-fill (v n acc) (if (le n 0) acc (dm-fill v (sub n 1) (append acc (list v)))))
+    (defn dm-maxlen (ps acc) (if (eq (len ps) 0) acc (dm-maxlen (tail ps) (if (gt (len (head ps)) acc) (len (head ps)) acc))))
+    ; what sequence m feeds at step s: its s-th prompt id while it has one, else its last answer
+    (defn dm-feed (prompts lasts s acc)
+        (if (eq (len prompts) 0) acc
+            (dm-feed (tail prompts) (tail lasts) s
+                (append acc (list (if (lt s (len (head prompts))) (nth (head prompts) s) (head lasts)))))))
+    ; the answers that count: from the step that consumed the last prompt id on, ngen of them
+    (defn dm-collect (gens outs prompts s ngen acc)
+        (if (eq (len gens) 0) acc
+            (dm-collect (tail gens) (tail outs) (tail prompts) s ngen
+                (append acc (list (if (and (ge s (sub (len (head prompts)) 1)) (lt (len (head gens)) ngen))
+                                      (append (head gens) (list (head outs)))
+                                      (head gens)))))))
+    ; sequence m's logits at the step that produces its ngen-th answer, else the ones already held
+    (defn dm-collect-logits (st logs prompts s ngen i acc)
+        (if (eq (len logs) 0) acc
+            (dm-collect-logits st (tail logs) (tail prompts) s ngen (add i 1)
+                (append acc (list (if (eq s (sub (add (len (head prompts)) ngen) 2)) (dm-logits st i) (head logs)))))))
+    (defn dm-run-steps (st prompts lasts gens logs s nsteps ngen rec)
+        (if (ge s nsteps) (list gens logs)
+            (do (let outs (dm-step st (dm-feed prompts lasts s (empty)) (dm-fill s (nth st 11) (empty))))
+                (dm-run-steps st prompts outs
+                              (dm-collect gens outs prompts s ngen (empty))
+                              (if rec (dm-collect-logits st logs prompts s ngen 0 (empty)) logs)
+                              (add s 1) nsteps ngen rec))))
+    ; prompts: M id lists. Answers (list gens logits): gens[m] the first ngen ids sequence m generates,
+    ; logits[m] the bytes of its logits at the step of its ngen-th answer (when rec), else "".
+    (defn dm-run (st prompts ngen rec)
+        (do (let m (nth st 11))
+            (dm-run-steps st prompts (dm-fill 0 m (empty)) (dm-fill (empty) m (empty)) (dm-fill "" m (empty))
+                          0 (sub (add (dm-maxlen prompts 0) ngen) 1) ngen rec)))
+
+    ; ================= timing: n steps warm, every sequence feeding one id at rising positions =================
+    (defn dm-time-steps (st ids pos n)
+        (if (le n 0) 0
+            (do (let outs (dm-step st ids (dm-fill pos (nth st 11) (empty))))
+                (dm-time-steps st outs (add pos 1) (sub n 1)))))
+    0)

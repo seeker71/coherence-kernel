@@ -1,0 +1,61 @@
+; dense-multi-run-llama1b.fk — four different prompts through llama3.2:1b in ONE batched decode
+; (dense-multi.fk), then the step cost at M = 1, 2, 4, 8. A RUN DRIVER: it prints what happened.
+;
+; preludes: native/metal/dense-multi.fk form-stdlib/model-registry.bml
+
+(do
+    (defn dmr-blob () (mr-path (mr-find "llama32-1b")))
+    (defn dmr-texts () (list "The capital of France is"
+                             "Water boils at"
+                             "The largest planet in the solar system is"
+                             "Once upon a time, in a small village"))
+    (defn dmr-join (xs acc)
+        (if (eq (len xs) 0) acc
+            (dmr-join (tail xs) (str_concat acc (str_concat " " (int_to_str (head xs)))))))
+    (defn dmr-encode (src texts acc)
+        (if (eq (len texts) 0) acc
+            (dmr-encode src (tail texts) (append acc (list (dtk-encode src (head texts)))))))
+    (defn dmr-show (src prompts gens i)
+        (if (eq (len gens) 0) 0
+            (do (print_str (str_concat "seq " (str_concat (int_to_str i)
+                    (str_concat " prompt_ids=" (str_concat (dmr-join (head prompts) "")
+                    (str_concat " | ids=" (str_concat (dmr-join (head gens) "")
+                    (str_concat " | text=" (l3d-text src (head gens))))))))))
+                (dmr-show src (tail prompts) (tail gens) (add i 1)))))
+    ; the step cost at M: open, warm five steps, time twenty
+    (defn dmr-time (m ids)
+        (do (let st (dm-open (dmr-blob) 256 m))
+            (let feed (dm-fill (head ids) m (empty)))
+            (let w (dm-time-steps st feed 0 5))
+            (let t0 (now_unix_ms))
+            (let r (dm-time-steps st feed 5 20))
+            (let t1 (now_unix_ms))
+            (print_str (str_concat "M=" (str_concat (int_to_str m) (str_concat " step_ms_x10=" (int_to_str (div (mul (sub t1 t0) 10) 20))))))
+            (div (mul (sub t1 t0) 10) 20)))
+
+    (let live (md-door-live?))
+    (print (if live "door=live" "door=DEAD"))
+    (let tA (now_unix_ms))
+    (let st (dm-open (dmr-blob) 256 4))
+    (let tB (now_unix_ms))
+    (print (str_concat "open_ms=" (int_to_str (sub tB tA))))
+    (print (str_concat "multi_ok=" (if (dm-ok? st) "1" "0")))
+    (let src (nth st 10))
+    (let tC (now_unix_ms))
+    (let prompts (dmr-encode src (dmr-texts) (empty)))
+    (let tD (now_unix_ms))
+    (print (str_concat "tokenize_ms=" (int_to_str (sub tD tC))))
+    (let tE (now_unix_ms))
+    (let run (dm-run st prompts 16 false))
+    (let tF (now_unix_ms))
+    (let gens (nth run 0))
+    (dmr-show src prompts gens 0)
+    (let nsteps (sub (add (dm-maxlen prompts 0) 16) 1))
+    (print (str_concat "M=4 run: steps=" (str_concat (int_to_str nsteps) (str_concat " ms=" (str_concat (int_to_str (sub tF tE)) (str_concat " ms_per_step=" (int_to_str (div (sub tF tE) nsteps))))))))
+    (let t1 (dmr-time 1 (head prompts)))
+    (let t2 (dmr-time 2 (head prompts)))
+    (let t4 (dmr-time 4 (head prompts)))
+    (let t8 (dmr-time 8 (head prompts)))
+    (print (str_concat "four tongues: batched M=4 step_ms_x10=" (str_concat (int_to_str t4) (str_concat " vs sequential 4 x M=1 step_ms_x10=" (int_to_str (mul 4 t1))))))
+    (print (metal_status))
+    0)
