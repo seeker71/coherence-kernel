@@ -149,6 +149,36 @@ static void *fk_store_take(char letter, long long bytes);
 static void *fk_store_grow(char letter, void *p, long long old_bytes, long long new_bytes, long long reserved, int zero);
 static void fk_store_go_private(void);
 static void fk_store_unlink_pid(long long pid);
+/* ---- the field: one host-wide store every kernel shares -- the same word is the same cell in every process ----
+ * Shared pairs, shared strings and shared floats live in their own index ranges (>= 2^40) behind the same
+ * words the private heap, string pool and float pool use, so every reader dispatches by range. */
+#define FK_PAIR_BASE (1LL << 40)
+#define FK_STR_BASE (1LL << 40)
+#define FK_FLT_BASE (1LL << 40)
+static int fk_field_on;
+static int fk_field_tried;
+static volatile long long *fk_field_hdr;
+static long long *fk_fph;
+static long long *fk_fpt;
+static char *fk_fsb;
+static long long *fk_fso;
+static long long *fk_fsl;
+static double *fk_ffv;
+static long long fk_field_pp(void);
+static long long fk_field_sp(void);
+static long long fk_field_fp(void);
+static unsigned long long fk_field_bytes_hash(const char *b, long long n);
+static long long fk_str_bytes_eq(long long a, long long b);
+static int fk_field_open(void);
+/* every read of a pair, a string cell or a float goes through one door, so the shared arenas can stand behind the same words */
+#define FK_HH(p) ((p) >= FK_PAIR_BASE ? fk_fph[(p) - FK_PAIR_BASE] : fk_hh[(p)])
+#define FK_HT(p) ((p) >= FK_PAIR_BASE ? fk_fpt[(p) - FK_PAIR_BASE] : fk_ht[(p)])
+#define FK_POK(p) ((p) >= FK_PAIR_BASE ? ((p) - FK_PAIR_BASE < fk_field_pp()) : ((p) <= fk_hp))
+#define FK_SO(si) ((si) >= FK_STR_BASE ? fk_fso[(si) - FK_STR_BASE] : fk_so[(si)])
+#define FK_SLEN(si) ((si) >= FK_STR_BASE ? fk_fsl[(si) - FK_STR_BASE] : fk_sl[(si)])
+#define FK_SBYTES(si) ((si) >= FK_STR_BASE ? fk_fsb + fk_fso[(si) - FK_STR_BASE] : fk_sb + fk_so[(si)])
+#define FK_SOK(si) ((si) >= FK_STR_BASE ? ((si) - FK_STR_BASE < fk_field_sp()) : ((si) < fk_sp))
+#define FK_FV(fi) ((fi) >= FK_FLT_BASE ? fk_ffv[(fi) - FK_FLT_BASE] : fk_fv[(fi)])
 static int fk_store_shared;
 static int fk_heap_gen;
 static void *fk_heap_alt_h;
@@ -452,11 +482,11 @@ static long long fk_isf(long long v) {
         return 0;
     }
     long long fi = fk_fidx(v);
-    return v <= fk_fbase - 3 && fi > 0 && fi <= fk_fp;
+    return v <= fk_fbase - 3 && fi > 0 && (fi >= FK_FLT_BASE ? fi - FK_FLT_BASE < fk_field_fp() : fi <= fk_fp);
 }
 static double fk_num(long long v) {
     if (fk_isf(v)) {
-        return fk_fv[fk_fidx(v)];
+        return FK_FV(fk_fidx(v));
     }
     return (double)(v >> 1);
 }
@@ -777,9 +807,9 @@ static long long fk_sintern(long long off, long long len) {
     long long bucket = fk_str_hash(off, len);
     long long c = fk_shash[bucket];
     while (c >= 0) {
-        if (fk_sl[c] == len) {
+        if (FK_SLEN(c) == len) {
             long long j = 0;
-            while (j < len && fk_sb[fk_so[c] + j] == fk_sb[off + j]) {
+            while (j < len && FK_SBYTES(c)[j] == fk_sb[off + j]) {
                 j = j + 1;
             }
             if (j == len) {
@@ -836,7 +866,7 @@ static long long fk_sintern(long long off, long long len) {
  * strings before the band meets nothing.
  *
  * fk_stri is the ONE door from a value word back to a pool index. It answers -1 for
- * anything that is not a string value, so the existing `sa < 0 || sa >= fk_sp` guards
+ * anything that is not a string value, so the existing `sa < 0 || !FK_SOK(sa)` guards
  * at every string-typed op keep their meaning unchanged and a mistyped argument is
  * refused instead of read as text. */
 static const long long fk_sbase = -8500000000000000000LL;
@@ -851,7 +881,7 @@ static long long fk_is_str(long long v) {
         return 0;
     }
     long long si = (fk_sbase - v - 1) >> 1;
-    return (si >= 0 && si < fk_sp) ? 1 : 0;
+    return (si >= 0 && FK_SOK(si)) ? 1 : 0;
 }
 static long long fk_stri(long long v) {
     if (!fk_is_str(v)) {
@@ -865,8 +895,8 @@ static void fk_put_str(long long v) {
         return;
     }
     long long j = 0;
-    while (j < fk_sl[si]) {
-        putchar((int)(unsigned char)fk_sb[fk_so[si] + j]);
+    while (j < FK_SLEN(si)) {
+        putchar((int)(unsigned char)FK_SBYTES(si)[j]);
         j = j + 1;
     }
 }
@@ -875,7 +905,9 @@ static long long *fk_ncat;
 static long long *fk_nkids;
 static long long *fk_nval;
 static long long (*fk_nid)[4];
-static long long fk_np;
+static long long fk_np_private;
+static volatile long long *fk_np_p = &fk_np_private;
+#define fk_np (*fk_np_p)
 static long long fk_nbox(long long i) {
     return 0 - (((long long)i << 1) | 1);
 }
@@ -907,7 +939,7 @@ static long long fk_neq(long long a, long long b) {
             double fnb = fk_num(fk_nval[ib]);
             return ((fna == fnb) || (fna != fna && fnb != fnb)) ? 1 : 0;
         }
-        return fk_nval[ia] == fk_nval[ib];
+        return fk_nval[ia] == fk_nval[ib] || (fk_is_str(fk_nval[ia]) && fk_is_str(fk_nval[ib]) && fk_str_bytes_eq(fk_nval[ia], fk_nval[ib]));
     }
     if (fk_nkind[ia] == 3) {
         return fk_nid[ia][0] == fk_nid[ib][0] && fk_nid[ia][1] == fk_nid[ib][1] &&
@@ -922,19 +954,26 @@ static long long fk_veq(long long a, long long b) {
     if (a == b) {
         return 1;
     }
+    if (fk_isf(a) && fk_isf(b)) {
+        double fa = fk_num(a), fb = fk_num(b);
+        return (fa == fb || (fa != fa && fb != fb)) ? 1 : 0;
+    }
+    if (fk_is_str(a) && fk_is_str(b)) {
+        return fk_str_bytes_eq(a, b);
+    }
     if (a < 0 || b < 0) {
         return fk_neq(a, b);
     }
     if ((a & 1) && (b & 1)) {
         long long pa = a >> 1;
         long long pb = b >> 1;
-        if (pa < 1 || pa > fk_hp || pb < 1 || pb > fk_hp) {
+        if (pa < 1 || !FK_POK(pa) || pb < 1 || !FK_POK(pb)) {
             return 0;
         }
-        if (fk_veq(fk_hh[pa], fk_hh[pb]) == 0) {
+        if (fk_veq(FK_HH(pa), FK_HH(pb)) == 0) {
             return 0;
         }
-        return fk_veq(fk_ht[pa], fk_ht[pb]);
+        return fk_veq(FK_HT(pa), FK_HT(pb));
     }
     return 0;
 }
@@ -999,16 +1038,19 @@ static long long fk_deep_hash(long long v) {
         long long guard = 0;
         while ((p & 1) && p != 1 && guard < 4194304) {
             long long pa = p >> 1;
-            if (pa < 1 || pa > fk_hp) {
+            if (pa < 1 || !FK_POK(pa)) {
                 break;
             }
-            h = fk_mix64(h, (unsigned long long)fk_deep_hash(fk_hh[pa]));
-            p = fk_ht[pa];
+            h = fk_mix64(h, (unsigned long long)fk_deep_hash(FK_HH(pa)));
+            p = FK_HT(pa);
             guard = guard + 1;
         }
         h = fk_mix64(h, (unsigned long long)p);
         return (long long)(h >> 1);
     }
+    if (v == fk_nothing) { return (long long)(fk_mix64(13, 1) >> 1); }
+    if (fk_is_str(v)) { long long si = fk_stri(v); return (long long)(fk_mix64(17, fk_field_bytes_hash(FK_SBYTES(si), FK_SLEN(si))) >> 1); }
+    if (fk_isf(v)) { double d = fk_num(v); unsigned long long bits; { char *pd = (char *)&d; char *pb = (char *)&bits; int b = 0; while (b < 8) { pb[b] = pd[b]; b = b + 1; } } if (d == 0.0) { bits = 0; } return (long long)(fk_mix64(19, bits) >> 1); }
     long long idx = fk_nidx(v);
     if (idx < 1 || idx > fk_np) {
         return (long long)(fk_mix64(5, (unsigned long long)v) >> 1);
@@ -1435,14 +1477,14 @@ static long long fk_cstrlen(const char *s) {
 static void fk_cstr(long long sv, char *out, long long cap) {
     long long sa = fk_stri(sv);
     long long n = 0;
-    if (sa >= 0 && sa < fk_sp) {
-        n = fk_sl[sa];
+    if (sa >= 0 && FK_SOK(sa)) {
+        n = FK_SLEN(sa);
         if (n > cap - 1) {
             fk_die("fk_cstr: string longer than the destination buffer -- silently truncating would corrupt the path / hostname / port / URL / device-name the caller is about to use (every fk_cstr caller is one of these). Raise the caller's buffer if this length is legitimate.");
         }
         long long j = 0;
         while (j < n) {
-            out[j] = fk_sb[fk_so[sa] + j];
+            out[j] = FK_SBYTES(sa)[j];
             j = j + 1;
         }
     }
@@ -1455,14 +1497,14 @@ static void fk_cstr(long long sv, char *out, long long cap) {
  * A non-string answers the empty C string. */
 static char *fk_cstr_heap(long long sv) {
     long long sa = fk_stri(sv);
-    long long n = (sa >= 0 && sa < fk_sp) ? fk_sl[sa] : 0;
+    long long n = (sa >= 0 && FK_SOK(sa)) ? FK_SLEN(sa) : 0;
     char *out = malloc((unsigned long)(n + 1));
     if (out == 0) {
         fk_die("fk_cstr_heap: out of memory");
     }
     long long j = 0;
     while (j < n) {
-        out[j] = fk_sb[fk_so[sa] + j];
+        out[j] = FK_SBYTES(sa)[j];
         j = j + 1;
     }
     out[n] = 0;
@@ -1634,13 +1676,13 @@ FK_METAL_WEAK long long fk_mlx_run_external(const char *src, long long n) {
 }
 static long long fk_srange(long long sv, const char **ptr, long long *len) {
     long long sa = fk_stri(sv);
-    if (sa < 0 || sa >= fk_sp) {
+    if (sa < 0 || !FK_SOK(sa)) {
         *ptr = "";
         *len = 0;
         return 0;
     }
-    *ptr = fk_sb + fk_so[sa];
-    *len = fk_sl[sa];
+    *ptr = FK_SBYTES(sa);
+    *len = FK_SLEN(sa);
     return 1;
 }
 #define FK_METAL_FIXTURE_BUF_CAP 4096
@@ -3485,11 +3527,11 @@ static int fk_arm64_u32_cons(long long cell, long long *head, long long *tail) {
         return 0;
     }
     p = cell >> 1;
-    if (p < 1 || p > fk_hp) {
+    if (p < 1 || !FK_POK(p)) {
         return 0;
     }
-    *head = fk_hh[p];
-    *tail = fk_ht[p];
+    *head = FK_HH(p);
+    *tail = FK_HT(p);
     return 1;
 }
 static int fk_arm64_u32_value(long long value, unsigned int *out) {
@@ -4250,6 +4292,19 @@ static void *fk_nodes_grow_col(void *p, long long old_n, long long new_n, long l
     return q;
 }
 static void fk_nodes_grow(void) {
+    if (fk_field_on) {
+        long long oc = fk_node_cap;
+        long long nc = oc * 2;
+        fk_fbroots = (long long *)fk_nodes_grow_col(fk_fbroots, oc, nc, 8);
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+        fk_inram_node_slot = (unsigned char *)fk_nodes_grow_col(fk_inram_node_slot, oc, nc, 1);
+        fk_inram_node_generation = (unsigned int *)fk_nodes_grow_col(fk_inram_node_generation, oc, nc, 4);
+        fk_inram_node_released = (unsigned char *)fk_nodes_grow_col(fk_inram_node_released, oc, nc, 1);
+#endif
+        fk_node_cap = nc;
+        fk_node_grows = fk_node_grows + 1;
+        return;
+    }
     long long oc = fk_node_cap;
     long long nc = oc * 2;
     if (fk_store_shared && nc > FK_STORE_NODE_CELLS) { fk_store_go_private(); }
@@ -4306,6 +4361,19 @@ static void fk_nodes_init(void) {
     fk_src_root_reserve(1);
     fk_vs_grow(FK_VALUE_STACK_CAP_INIT);
     fk_mem_reserve(FK_MEM_CELL_CAP_INIT);
+    if (fk_field_open()) {
+        fk_fbroots = (long long *)calloc(FK_NODE_CAP_INIT, 8);
+        fk_intern_tab = (long long *)calloc(FK_INTERN_HASH_CAP_INIT, 8);
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+        fk_inram_node_slot = (unsigned char *)calloc(FK_NODE_CAP_INIT, 1);
+        fk_inram_node_generation = (unsigned int *)calloc(FK_NODE_CAP_INIT, 4);
+        fk_inram_node_released = (unsigned char *)calloc(FK_NODE_CAP_INIT, 1);
+#endif
+        if (fk_fbroots == 0 || fk_intern_tab == 0) { fk_die("fk_nodes_init: out of memory for the private node columns"); }
+        fk_node_cap = FK_NODE_CAP_INIT;
+        fk_intern_hash_cap = FK_INTERN_HASH_CAP_INIT;
+        return;
+    }
     fk_nkind = (long long *)fk_store_take('k', FK_STORE_NODE_CELLS * 8);
     fk_ncat = fk_nkind == 0 ? 0 : (long long *)fk_store_take('c', FK_STORE_NODE_CELLS * 8);
     fk_nkids = fk_ncat == 0 ? 0 : (long long *)fk_store_take('i', FK_STORE_NODE_CELLS * 8);
@@ -4654,12 +4722,12 @@ static long long fk_keyeq(long long a, long long b) {
     if (a == b) {
         return 1;
     }
-    if (a < 0 || b < 0 || a >= fk_sp || b >= fk_sp || fk_sl[a] != fk_sl[b]) {
+    if (a < 0 || b < 0 || !FK_SOK(a) || !FK_SOK(b) || FK_SLEN(a) != FK_SLEN(b)) {
         return 0;
     }
     long long j = 0;
-    while (j < fk_sl[a]) {
-        if (fk_sb[fk_so[a] + j] != fk_sb[fk_so[b] + j]) {
+    while (j < FK_SLEN(a)) {
+        if (FK_SBYTES(a)[j] != FK_SBYTES(b)[j]) {
             return 0;
         }
         j = j + 1;
@@ -4717,12 +4785,12 @@ static long long fk_scan_run(long long sv, long long fromv, long long clsv) {
     if (from < 0) {
         from = 0;
     }
-    if (sa < 0 || sa >= fk_sp) {
+    if (sa < 0 || !FK_SOK(sa)) {
         return from << 1;
     }
     long long end = from;
-    long long n = fk_sl[sa];
-    while (end < n && fk_scan_match((unsigned char)fk_sb[fk_so[sa] + end], cls)) {
+    long long n = FK_SLEN(sa);
+    while (end < n && fk_scan_match((unsigned char)FK_SBYTES(sa)[end], cls)) {
         end = end + 1;
     }
     return end << 1;
@@ -4770,14 +4838,14 @@ static int fk_name_eq(const char *a, const char *b) {
 }
 static int fk_skip_entry(long long skipv, const char *name) {
     long long q = skipv >> 1;
-    while (q >= 1 && q <= fk_hp) {
-        long long es = fk_hh[q];
+    while (q >= 1 && FK_POK(q)) {
+        long long es = FK_HH(q);
         static char nb[512];
         fk_cstr(es, nb, 512);
         if (nb[0] != 0 && fk_name_eq(nb, name)) {
             return 1;
         }
-        q = fk_ht[q] >> 1;
+        q = FK_HT(q) >> 1;
     }
     return 0;
 }
@@ -4900,15 +4968,15 @@ static void fk_ls_add(long long sv) {
 static int fk_sv_less(long long a, long long b) {
     long long aa = fk_stri(a);
     long long bb = fk_stri(b);
-    if (aa < 0 || bb < 0 || aa >= fk_sp || bb >= fk_sp) {
+    if (aa < 0 || bb < 0 || !FK_SOK(aa) || !FK_SOK(bb)) {
         return 0;
     }
-    long long la = fk_sl[aa];
-    long long lb = fk_sl[bb];
+    long long la = FK_SLEN(aa);
+    long long lb = FK_SLEN(bb);
     long long j = 0;
     while (j < la && j < lb) {
-        unsigned char ca = (unsigned char)fk_sb[fk_so[aa] + j];
-        unsigned char cb = (unsigned char)fk_sb[fk_so[bb] + j];
+        unsigned char ca = (unsigned char)FK_SBYTES(aa)[j];
+        unsigned char cb = (unsigned char)FK_SBYTES(bb)[j];
         if (ca < cb) {
             return 1;
         }
@@ -5368,10 +5436,10 @@ static long long fk_socket_connect_native(long long hostv, long long portv) {
 static long long fk_socket_send_native(long long h, long long sv) {
     fk_os_socket_t s = fk_sock_lookup(h, 2);
     long long sa = fk_stri(sv);
-    if (!fk_os_socket_ok(s) || sa < 0 || sa >= fk_sp) {
+    if (!fk_os_socket_ok(s) || sa < 0 || !FK_SOK(sa)) {
         return -1;
     }
-    return fk_os_send_socket(s, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
+    return fk_os_send_socket(s, FK_SBYTES(sa), (unsigned long)FK_SLEN(sa));
 }
 static long long fk_socket_recv_native(long long h, long long maxn) {
     fk_os_socket_t s = fk_sock_lookup(h, 2);
@@ -6023,19 +6091,19 @@ static long long fk_cons_val(long long h, long long t);
 static long long fk_list_len_c(long long v) {
     long long p = v >> 1;
     long long n = 0;
-    while (p >= 1 && p <= fk_hp) {
+    while (p >= 1 && FK_POK(p)) {
         n = n + 1;
-        p = fk_ht[p] >> 1;
+        p = FK_HT(p) >> 1;
     }
     return n;
 }
 static long long fk_list_to_f32(long long v, float *out, long long cap) {
     long long p = v >> 1;
     long long n = 0;
-    while (p >= 1 && p <= fk_hp && n < cap) {
-        out[n] = (float)fk_num(fk_hh[p]);
+    while (p >= 1 && FK_POK(p) && n < cap) {
+        out[n] = (float)fk_num(FK_HH(p));
         n = n + 1;
-        p = fk_ht[p] >> 1;
+        p = FK_HT(p) >> 1;
     }
     return n;
 }
@@ -6466,25 +6534,25 @@ static long long fk_http_append_bytes(char *out, long long pos, long long cap, c
 static long long fk_http_append_request_headers(char *req, long long rn, long long cap,
                                                 long long headersv) {
     long long q = headersv >> 1;
-    while (q >= 1 && q <= fk_hp) {
-        long long row = fk_hh[q];
+    while (q >= 1 && FK_POK(q)) {
+        long long row = FK_HH(q);
         if ((row & 1) != 0) {
             long long rp = row >> 1;
-            if (rp >= 1 && rp <= fk_hp && ((fk_hh[rp] >> 1) == 43001)) {
-                long long np = fk_ht[rp] >> 1;
-                if (np >= 1 && np <= fk_hp) {
-                    long long namev = fk_hh[np];
-                    long long vp = fk_ht[np] >> 1;
-                    if (vp >= 1 && vp <= fk_hp) {
-                        long long valuev = fk_hh[vp];
+            if (rp >= 1 && FK_POK(rp) && ((FK_HH(rp) >> 1) == 43001)) {
+                long long np = FK_HT(rp) >> 1;
+                if (np >= 1 && FK_POK(np)) {
+                    long long namev = FK_HH(np);
+                    long long vp = FK_HT(np) >> 1;
+                    if (vp >= 1 && FK_POK(vp)) {
+                        long long valuev = FK_HH(vp);
                         long long ns = fk_stri(namev);
                         long long vs = fk_stri(valuev);
-                        if (fk_is_str(namev) && fk_is_str(valuev) && ns >= 0 && ns < fk_sp &&
-                            vs >= 0 && vs < fk_sp) {
-                            const char *name = fk_sb + fk_so[ns];
-                            const char *value = fk_sb + fk_so[vs];
-                            long long nl = fk_sl[ns];
-                            long long vl = fk_sl[vs];
+                        if (fk_is_str(namev) && fk_is_str(valuev) && ns >= 0 && FK_SOK(ns) &&
+                            vs >= 0 && FK_SOK(vs)) {
+                            const char *name = FK_SBYTES(ns);
+                            const char *value = FK_SBYTES(vs);
+                            long long nl = FK_SLEN(ns);
+                            long long vl = FK_SLEN(vs);
                             if (fk_http_header_name_ok(name, nl) &&
                                 fk_http_header_value_ok(value, vl)) {
                                 if (req == 0) {
@@ -6501,7 +6569,7 @@ static long long fk_http_append_request_headers(char *req, long long rn, long lo
                 }
             }
         }
-        q = fk_ht[q] >> 1;
+        q = FK_HT(q) >> 1;
     }
     return rn;
 }
@@ -6620,7 +6688,7 @@ static long long fk_host_exec_read(int fd, char **hbuf, long long *hcap, long lo
 static long long fk_host_exec(long long cmdv, long long inputv) {
     char *cmd = fk_cstr_heap(cmdv);
     long long in_sa = fk_stri(inputv);
-    long long in_n = (in_sa >= 0 && in_sa < fk_sp) ? fk_sl[in_sa] : 0;
+    long long in_n = (in_sa >= 0 && FK_SOK(in_sa)) ? FK_SLEN(in_sa) : 0;
     long long hcap = 262144;
     char *hbuf = malloc(hcap);
     if (hbuf == 0) {
@@ -6728,7 +6796,7 @@ static long long fk_host_exec(long long cmdv, long long inputv) {
                     chunk = 65536;
                 }
                 void (*old_pipe)(int) = signal(SIGPIPE, SIG_IGN);
-                long long put = write(in_fd, fk_sb + fk_so[in_sa] + sent, (unsigned long)chunk);
+                long long put = write(in_fd, FK_SBYTES(in_sa) + sent, (unsigned long)chunk);
                 signal(SIGPIPE, old_pipe);
                 if (put > 0) {
                     sent = sent + put;
@@ -6774,7 +6842,7 @@ static long long fk_sock_request(long long hostv, long long portv, long long req
     fk_cstr(hostv, host, 512);
     fk_cstr(portv, port, 16);
     long long rsa = fk_stri(reqv);
-    long long rlen = (rsa >= 0 && rsa < fk_sp) ? fk_sl[rsa] : 0;
+    long long rlen = (rsa >= 0 && FK_SOK(rsa)) ? FK_SLEN(rsa) : 0;
     struct addrinfo hints;
     hints.ai_flags = 0;
     hints.ai_family = 0;
@@ -6805,7 +6873,7 @@ static long long fk_sock_request(long long hostv, long long portv, long long req
     if (fd < 0) {
         return fk_nothing;
     }
-    const char *rptr = fk_sb + fk_so[rsa];
+    const char *rptr = FK_SBYTES(rsa);
     long long wr = 0;
     while (wr < rlen) {
         long long nwr = write(fd, rptr + wr, rlen - wr);
@@ -6847,11 +6915,11 @@ static long long fk_is_dict_value(long long v) {
         return 0;
     }
     long long p = v >> 1;
-    if (p < 1 || p > fk_hp) {
+    if (p < 1 || !FK_POK(p)) {
         return 0;
     }
     long long marker = fk_sbuf("__dict__", 8);
-    long long h = fk_hh[p];
+    long long h = FK_HH(p);
     if (!fk_is_str(h)) {
         return 0;
     }
@@ -6859,30 +6927,30 @@ static long long fk_is_dict_value(long long v) {
 }
 static long long fk_get_value(long long target, long long key) {
     if (fk_is_dict_value(target)) {
-        long long p = fk_ht[target >> 1] >> 1;
+        long long p = FK_HT(target >> 1) >> 1;
         long long ks = fk_stri(key);
-        while (p >= 1 && p <= fk_hp) {
-            long long k = fk_hh[p];
-            long long vp = fk_ht[p] >> 1;
-            if (vp < 1 || vp > fk_hp) {
+        while (p >= 1 && FK_POK(p)) {
+            long long k = FK_HH(p);
+            long long vp = FK_HT(p) >> 1;
+            if (vp < 1 || !FK_POK(vp)) {
                 return 0;
             }
             if (fk_is_str(k) && fk_is_str(key) && fk_keyeq(fk_stri(k), ks)) {
-                return fk_hh[vp];
+                return FK_HH(vp);
             }
-            p = fk_ht[vp] >> 1;
+            p = FK_HT(vp) >> 1;
         }
         return 0;
     }
     if ((target & 1) != 0) {
         long long want = key >> 1;
         long long p = target >> 1;
-        while (p >= 1 && p <= fk_hp && want > 0) {
-            p = fk_ht[p] >> 1;
+        while (p >= 1 && FK_POK(p) && want > 0) {
+            p = FK_HT(p) >> 1;
             want = want - 1;
         }
-        if (p >= 1 && p <= fk_hp) {
-            return fk_hh[p];
+        if (p >= 1 && FK_POK(p)) {
+            return FK_HH(p);
         }
     }
     return 0;
@@ -7140,7 +7208,7 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
     fk_cstr(hostv, host, 512);
     fk_cstr(portv, port, 16);
     long long rsa = fk_stri(reqv);
-    long long rlen = (rsa >= 0 && rsa < fk_sp) ? fk_sl[rsa] : 0;
+    long long rlen = (rsa >= 0 && FK_SOK(rsa)) ? FK_SLEN(rsa) : 0;
     void *lib = fk_ssl_lib();
     if (lib == 0) {
         return fk_nothing;
@@ -7204,7 +7272,7 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
         close(fd);
         return fk_nothing;
     }
-    const char *rptr = fk_sb + fk_so[rsa];
+    const char *rptr = FK_SBYTES(rsa);
     long long wr = 0;
     while (wr < rlen) {
         int nwr = SSL_write(ssl, rptr + wr, (int)(rlen - wr));
@@ -7466,20 +7534,20 @@ static double fk_dot_list(long long av, long long bv) {
     long long pa = av >> 1;
     long long pb = bv >> 1;
     double acc = 0.0;
-    while (pa >= 1 && pa <= fk_hp && pb >= 1 && pb <= fk_hp) {
-        acc = acc + fk_num(fk_hh[pa]) * fk_num(fk_hh[pb]);
-        pa = fk_ht[pa] >> 1;
-        pb = fk_ht[pb] >> 1;
+    while (pa >= 1 && FK_POK(pa) && pb >= 1 && FK_POK(pb)) {
+        acc = acc + fk_num(FK_HH(pa)) * fk_num(FK_HH(pb));
+        pa = FK_HT(pa) >> 1;
+        pb = FK_HT(pb) >> 1;
     }
     return acc;
 }
 static double fk_mag_list(long long av) {
     long long pa = av >> 1;
     double acc = 0.0;
-    while (pa >= 1 && pa <= fk_hp) {
-        double x = fk_num(fk_hh[pa]);
+    while (pa >= 1 && FK_POK(pa)) {
+        double x = fk_num(FK_HH(pa));
         acc = acc + x * x;
-        pa = fk_ht[pa] >> 1;
+        pa = FK_HT(pa) >> 1;
     }
     return fk_sqrt_d(acc);
 }
@@ -7531,28 +7599,30 @@ static long long fk_mlive(long long b) {
         return 0;
     }
     long long p = b >> 1;
-    if (p < 1 || p > fk_hp) {
+    if (p >= FK_PAIR_BASE) { return 0; }
+    if (p < 1 || !FK_POK(p)) {
         return 0;
     }
     if (fk_fw[p] != 0) {
         return 0;
     }
     fk_fw[p] = 0 - 1;
-    return 1 + fk_mlive(fk_ht[p]) + fk_mlive(fk_hh[p]);
+    return 1 + fk_mlive(FK_HT(p)) + fk_mlive(FK_HH(p));
 }
 static long long fk_mcopy(long long b) {
     if ((b & 1) == 0) {
         return b;
     }
     long long p = b >> 1;
-    if (p < 1 || p > fk_hp) {
+    if (p >= FK_PAIR_BASE) { return b; }
+    if (p < 1 || !FK_POK(p)) {
         return b;
     }
     if (fk_fw[p] > 0) {
         return (fk_fw[p] << 1) | 1;
     }
-    long long t2 = fk_mcopy(fk_ht[p]);
-    long long h2 = fk_mcopy(fk_hh[p]);
+    long long t2 = fk_mcopy(FK_HT(p));
+    long long h2 = fk_mcopy(FK_HH(p));
     fk_nhp = fk_nhp + 1;
     fk_nh[fk_nhp] = h2;
     fk_nt[fk_nhp] = t2;
@@ -7604,7 +7674,7 @@ static void fk_melt(void) {
         k = k + 1;
     }
     k = 1;
-    while (k <= fk_np) {
+    while (!fk_field_on && k <= fk_np) {
         nlive = nlive + fk_mlive(fk_ncat[k]);
         nlive = nlive + fk_mlive(fk_nkids[k]);
         nlive = nlive + fk_mlive(fk_nval[k]);
@@ -7662,7 +7732,7 @@ static void fk_melt(void) {
         k = k + 1;
     }
     k = 1;
-    while (k <= fk_np) {
+    while (!fk_field_on && k <= fk_np) {
         fk_ncat[k] = fk_mcopy(fk_ncat[k]);
         fk_nkids[k] = fk_mcopy(fk_nkids[k]);
         fk_nval[k] = fk_mcopy(fk_nval[k]);
@@ -7970,10 +8040,10 @@ static long long fk_next() {
 }
 static void fk_psv(long long v) {
     long long sa = fk_stri(v);
-    if (sa >= 0 && sa < fk_sp) {
+    if (sa >= 0 && FK_SOK(sa)) {
         long long j = 0;
-        while (j < fk_sl[sa]) {
-            putchar((int)(unsigned char)fk_sb[fk_so[sa] + j]);
+        while (j < FK_SLEN(sa)) {
+            putchar((int)(unsigned char)FK_SBYTES(sa)[j]);
             j = j + 1;
         }
         putchar(10);
@@ -7995,7 +8065,7 @@ static int fk_is_output_list(long long v) {
         return 0;
     }
     long long p = v >> 1;
-    return p >= 1 && p <= fk_hp;
+    return p >= 1 && FK_POK(p);
 }
 static void fk_pv_inline_number(long long v) {
     if (fk_is_str(v)) {
@@ -8024,9 +8094,9 @@ static void fk_pv_list(long long v) {
     int first = 1;
     putchar(FK_CH_LBRACKET);
     for (;;) {
-        if (p >= 1 && p <= fk_hp) {
-            long long item = fk_hh[p];
-            long long next = fk_ht[p] >> 1;
+        if (p >= 1 && FK_POK(p)) {
+            long long item = FK_HH(p);
+            long long next = FK_HT(p) >> 1;
             if (!first) {
                 putchar(FK_CH_COMMA);
                 putchar(FK_CH_SPACE);
@@ -8249,22 +8319,22 @@ static long long fk_walk_body(long long i, long long fp) {
             long long av44 = fk_walk(fk_node[i][2], fp);
             fk_vp(av44);
             long long p44 = fk_vs[fk_vsp - 2] >> 1;
-            if (p44 < 1 || p44 > fk_hp) {
+            if (p44 < 1 || !FK_POK(p44)) {
                 fk_vsp = fp;
                 return 0;
             }
-            long long f44 = fk_hh[p44] >> 1;
-            long long p44t = fk_ht[p44] >> 1;
-            if (p44t < 1 || p44t > fk_hp) {
+            long long f44 = FK_HH(p44) >> 1;
+            long long p44t = FK_HT(p44) >> 1;
+            if (p44t < 1 || !FK_POK(p44t)) {
                 fk_vsp = fp;
                 return 0;
             }
-            long long a44 = fk_hh[p44t] >> 1;
-            long long caps44 = fk_ht[p44t];
+            long long a44 = FK_HH(p44t) >> 1;
+            long long caps44 = FK_HT(p44t);
             long long args44 = fk_vs[fk_vsp - 1];
             long long rev44 = 1;
             long long cc44 = caps44 >> 1;
-            while (cc44 >= 1 && cc44 <= fk_hp) {
+            while (cc44 >= 1 && FK_POK(cc44)) {
                 /* melt is unsafe mid-copy (cc44/rev44 are untraced C locals);
                  * growth relocates nothing. Before this guard the bump wrote
                  * PAST the arrays at the brim -- corruption, not refusal. */
@@ -8272,22 +8342,22 @@ static long long fk_walk_body(long long i, long long fp) {
                     fk_heap_grow();
                 }
                 fk_hp = fk_hp + 1;
-                fk_hh[fk_hp] = fk_hh[cc44];
+                fk_hh[fk_hp] = FK_HH(cc44);
                 fk_ht[fk_hp] = rev44;
                 rev44 = (fk_hp << 1) | 1;
-                cc44 = fk_ht[cc44] >> 1;
+                cc44 = FK_HT(cc44) >> 1;
             }
             long long comb44 = args44;
             long long rr44 = rev44 >> 1;
-            while (rr44 >= 1 && rr44 <= fk_hp) {
+            while (rr44 >= 1 && FK_POK(rr44)) {
                 if (fk_hp + 1 >= fk_cap) {
                     fk_heap_grow();
                 }
                 fk_hp = fk_hp + 1;
-                fk_hh[fk_hp] = fk_hh[rr44];
+                fk_hh[fk_hp] = FK_HH(rr44);
                 fk_ht[fk_hp] = comb44;
                 comb44 = (fk_hp << 1) | 1;
-                rr44 = fk_ht[rr44] >> 1;
+                rr44 = FK_HT(rr44) >> 1;
             }
             long long carg44 = 1;
             if (a44 == 0) {
@@ -8295,11 +8365,11 @@ static long long fk_walk_body(long long i, long long fp) {
             } else {
                 if (a44 == 1) {
                     long long pa44 = comb44 >> 1;
-                    if (pa44 < 1 || pa44 > fk_hp) {
+                    if (pa44 < 1 || !FK_POK(pa44)) {
                         fk_vsp = fp;
                         return 1;
                     }
-                    carg44 = fk_hh[pa44];
+                    carg44 = FK_HH(pa44);
                 } else {
                     carg44 = comb44;
                 }
@@ -8328,11 +8398,11 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
         char *av155[33];
         long long n155 = 0;
         long long p155 = argv155 >> 1;
-        while (p155 >= 1 && p155 <= fk_hp && n155 < 32) {
-            fk_cstr(fk_hh[p155], ab155[n155], 1024);
+        while (p155 >= 1 && FK_POK(p155) && n155 < 32) {
+            fk_cstr(FK_HH(p155), ab155[n155], 1024);
             av155[n155] = ab155[n155];
             n155 = n155 + 1;
-            p155 = fk_ht[p155] >> 1;
+            p155 = FK_HT(p155) >> 1;
         }
         av155[n155] = 0;
         if (n155 == 0) { return fk_nothing; }
@@ -8617,17 +8687,17 @@ static long long fk_walk(long long i, long long fp) {
     }
     if (t == 20) {
         long long p = fk_walk(fk_node[i][1], fp) >> 1;
-        if (p < 1 || p > fk_hp) {
+        if (p < 1 || !FK_POK(p)) {
             return 1;
         }
-        return fk_hh[p];
+        return FK_HH(p);
     }
     if (t == 21) {
         long long p = fk_walk(fk_node[i][1], fp) >> 1;
-        if (p < 1 || p > fk_hp) {
+        if (p < 1 || !FK_POK(p)) {
             return 1;
         }
-        return fk_ht[p];
+        return FK_HT(p);
     }
     if (t == 22) {
         /* len — a LIST cell's length; a STRING's byte length, as go, rust and
@@ -8642,16 +8712,16 @@ static long long fk_walk(long long i, long long fp) {
          * string: its words carry no string band to read. */
         long long lv22 = fk_walk(fk_node[i][1], fp);
         if (fk_is_str(lv22)) {
-            return fk_sl[fk_stri(lv22)] << 1;
+            return FK_SLEN(fk_stri(lv22)) << 1;
         }
         if ((lv22 & 1) == 0) {
             return 0;
         }
         long long p = lv22 >> 1;
         long long n = 0;
-        while (p >= 1 && p <= fk_hp) {
+        while (p >= 1 && FK_POK(p)) {
             n = n + 1;
-            p = fk_ht[p] >> 1;
+            p = FK_HT(p) >> 1;
         }
         return n << 1;
     }
@@ -8661,14 +8731,14 @@ static long long fk_walk(long long i, long long fp) {
         long long k23 = fk_walk(fk_node[i][2], fp) >> 1;
         fk_vsp = fk_vsp - 1;
         long long p = fk_vs[fk_vsp] >> 1;
-        while (p >= 1 && p <= fk_hp && k23 > 0) {
-            p = fk_ht[p] >> 1;
+        while (p >= 1 && FK_POK(p) && k23 > 0) {
+            p = FK_HT(p) >> 1;
             k23 = k23 - 1;
         }
-        if (p < 1 || p > fk_hp) {
+        if (p < 1 || !FK_POK(p)) {
             return 1;
         }
-        return fk_hh[p];
+        return FK_HH(p);
     }
     if (t == 44) {
         long long fv44 = fk_walk(fk_node[i][1], fp);
@@ -8676,44 +8746,44 @@ static long long fk_walk(long long i, long long fp) {
         long long av44 = fk_walk(fk_node[i][2], fp);
         fk_vp(av44);
         long long p44 = fk_vs[fk_vsp - 2] >> 1;
-        if (p44 < 1 || p44 > fk_hp) {
+        if (p44 < 1 || !FK_POK(p44)) {
             fk_vsp = fk_vsp - 2;
             return 0;
         }
-        long long f44 = fk_hh[p44] >> 1;
-        long long p44t = fk_ht[p44] >> 1;
-        if (p44t < 1 || p44t > fk_hp) {
+        long long f44 = FK_HH(p44) >> 1;
+        long long p44t = FK_HT(p44) >> 1;
+        if (p44t < 1 || !FK_POK(p44t)) {
             fk_vsp = fk_vsp - 2;
             return 0;
         }
-        long long a44 = fk_hh[p44t] >> 1;
-        long long caps44 = fk_ht[p44t];
+        long long a44 = FK_HH(p44t) >> 1;
+        long long caps44 = FK_HT(p44t);
         long long args44 = fk_vs[fk_vsp - 1];
         long long rev44 = 1;
         long long cc44 = caps44 >> 1;
-        while (cc44 >= 1 && cc44 <= fk_hp) {
+        while (cc44 >= 1 && FK_POK(cc44)) {
             /* same shape as the walker's capture copy above: growth, never
              * an unguarded bump past the arrays. */
             if (fk_hp + 1 >= fk_cap) {
                 fk_heap_grow();
             }
             fk_hp = fk_hp + 1;
-            fk_hh[fk_hp] = fk_hh[cc44];
+            fk_hh[fk_hp] = FK_HH(cc44);
             fk_ht[fk_hp] = rev44;
             rev44 = (fk_hp << 1) | 1;
-            cc44 = fk_ht[cc44] >> 1;
+            cc44 = FK_HT(cc44) >> 1;
         }
         long long comb44 = args44;
         long long rr44 = rev44 >> 1;
-        while (rr44 >= 1 && rr44 <= fk_hp) {
+        while (rr44 >= 1 && FK_POK(rr44)) {
             if (fk_hp + 1 >= fk_cap) {
                 fk_heap_grow();
             }
             fk_hp = fk_hp + 1;
-            fk_hh[fk_hp] = fk_hh[rr44];
+            fk_hh[fk_hp] = FK_HH(rr44);
             fk_ht[fk_hp] = comb44;
             comb44 = (fk_hp << 1) | 1;
-            rr44 = fk_ht[rr44] >> 1;
+            rr44 = FK_HT(rr44) >> 1;
         }
         long long carg44 = 1;
         if (a44 == 0) {
@@ -8721,11 +8791,11 @@ static long long fk_walk(long long i, long long fp) {
         } else {
             if (a44 == 1) {
                 long long pa44 = comb44 >> 1;
-                if (pa44 < 1 || pa44 > fk_hp) {
+                if (pa44 < 1 || !FK_POK(pa44)) {
                     fk_vsp = fk_vsp - 2;
                     return 1;
                 }
-                carg44 = fk_hh[pa44];
+                carg44 = FK_HH(pa44);
             } else {
                 carg44 = comb44;
             }
@@ -8992,6 +9062,245 @@ static long long fk_walk(long long i, long long fp) {
 static int fk_gift_live(long long gh) {
     return gh >= 0 && gh < fk_gift_count && fk_gift_base[gh] != 0;
 }
+/* ---- the field store: /fg-field-<letter>, host-wide, never unlinked by a kernel ----
+ * header h (words after the 16-byte gift header): 0 magic 1 version 2 nodes 3 pairs 4 strings 5 string bytes 6 floats
+ * columns: k kind c cat i kids v val n nid f sfile l sline o scol a sattr m hash-memo x intern hash;
+ * P Q shared pairs; s O L X shared node-strings (bytes, offsets, lengths, hash); F Y shared floats (values, hash).
+ * A kernel that cannot open the field keeps private tables and says so on its live page (word 22). */
+#define FK_FIELD_MAGIC 0x4649454C44LL
+#define FK_FIELD_VERSION 1
+#define FK_FIELD_NODES (1LL << 26)
+#define FK_FIELD_PAIRS (1LL << 27)
+#define FK_FIELD_STRB (1LL << 31)
+#define FK_FIELD_STRS (1LL << 25)
+#define FK_FIELD_FLOATS (1LL << 25)
+#define FK_FIELD_HASH (1LL << 27)
+#define FK_FIELD_SHASH (1LL << 25)
+#define FK_FIELD_FHASH (1LL << 25)
+static const char fk_field_letters[] = "hkcivnfloamxPQsOLXFY";
+static long long *fk_field_itab;
+static long long *fk_fstab;
+static long long *fk_fftab;
+static void fk_field_name(char letter, char *out) { const char *p = "/fg-field-"; long long k = 0; while (p[k]) { out[k] = p[k]; k = k + 1; } out[k] = letter; out[k + 1] = 0; }
+static void *fk_field_take(char letter, long long bytes) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    char nm[32];
+    fk_field_name(letter, nm);
+    int fd = shm_open(nm, O_CREAT | O_RDWR, 0600);
+    if (fd < 0) { return 0; }
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); return 0; }
+    if (st.st_size == 0) { if (ftruncate(fd, bytes) != 0) { close(fd); return 0; } }
+    else if ((long long)st.st_size < bytes) { close(fd); return 0; }   /* the host rounds a reservation up to its page */
+    void *p = mmap(0, (size_t)bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    return p == MAP_FAILED ? 0 : p;
+#else
+    (void)letter; (void)bytes;
+    return 0;
+#endif
+}
+static long long fk_field_pp(void) { return fk_field_on ? fk_field_hdr[2 + 3] : 0; }
+static long long fk_field_sp(void) { return fk_field_on ? fk_field_hdr[2 + 4] : 0; }
+static long long fk_field_fp(void) { return fk_field_on ? fk_field_hdr[2 + 6] : 0; }
+static long long fk_field_claim(long long word, long long n) { return __atomic_fetch_add(&fk_field_hdr[2 + word], n, __ATOMIC_ACQ_REL); }
+/* opens every column; answers 1 when this kernel's node tables now live in the field */
+static int fk_field_open(void) {
+    if (fk_field_on) { return 1; }
+    fk_field_tried = 1;
+    if (fk_conf("FK_FIELD_OFF")) { return 0; }
+    void *hdr = fk_field_take('h', 4096);
+    if (fk_conf("FK_FIELD_TRACE")) { dprintf(2, "[field] hdr=%p\n", hdr); }
+    if (hdr == 0) { return 0; }
+    volatile long long *w = (volatile long long *)hdr + 2;
+    long long zero = 0;
+    if (__atomic_compare_exchange_n(&w[0], &zero, FK_FIELD_MAGIC, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) { __atomic_store_n(&w[1], FK_FIELD_VERSION, __ATOMIC_RELEASE); }
+    else if (w[0] != FK_FIELD_MAGIC || w[1] != FK_FIELD_VERSION) { return 0; }
+    void *k = fk_field_take('k', FK_FIELD_NODES * 8), *c = fk_field_take('c', FK_FIELD_NODES * 8), *i = fk_field_take('i', FK_FIELD_NODES * 8), *v = fk_field_take('v', FK_FIELD_NODES * 8);
+    void *n = fk_field_take('n', FK_FIELD_NODES * 32), *f = fk_field_take('f', FK_FIELD_NODES * 8), *l = fk_field_take('l', FK_FIELD_NODES * 8), *o = fk_field_take('o', FK_FIELD_NODES * 8), *a = fk_field_take('a', FK_FIELD_NODES * 8), *m = fk_field_take('m', FK_FIELD_NODES * 8);
+    void *x = fk_field_take('x', FK_FIELD_HASH * 8), *P = fk_field_take('P', FK_FIELD_PAIRS * 8), *Q = fk_field_take('Q', FK_FIELD_PAIRS * 8);
+    void *s = fk_field_take('s', FK_FIELD_STRB), *O = fk_field_take('O', FK_FIELD_STRS * 8), *L = fk_field_take('L', FK_FIELD_STRS * 8), *X = fk_field_take('X', FK_FIELD_SHASH * 8);
+    void *F = fk_field_take('F', FK_FIELD_FLOATS * 8), *Y = fk_field_take('Y', FK_FIELD_FHASH * 8);
+    if (fk_conf("FK_FIELD_TRACE")) { dprintf(2, "[field] k=%d c=%d i=%d v=%d n=%d f=%d l=%d o=%d a=%d m=%d x=%d P=%d Q=%d s=%d O=%d L=%d X=%d F=%d Y=%d\n", !!k, !!c, !!i, !!v, !!n, !!f, !!l, !!o, !!a, !!m, !!x, !!P, !!Q, !!s, !!O, !!L, !!X, !!F, !!Y); }
+    if (!k || !c || !i || !v || !n || !f || !l || !o || !a || !m || !x || !P || !Q || !s || !O || !L || !X || !F || !Y) { return 0; }
+    fk_field_hdr = (volatile long long *)hdr;
+    fk_nkind = k; fk_ncat = c; fk_nkids = i; fk_nval = v; fk_nid = n; fk_nsfile = f; fk_nsline = l; fk_nscol = o; fk_nsattr = a; fk_nhash_memo = m;
+    fk_field_itab = x; fk_fph = P; fk_fpt = Q; fk_fsb = s; fk_fso = O; fk_fsl = L; fk_fstab = X; fk_ffv = F; fk_fftab = Y;
+    fk_np_p = &w[2];
+    fk_field_on = 1;
+    return 1;
+}
+static void fk_field_unlink_all(void) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    long long k = 0;
+    while (fk_field_letters[k]) { char nm[32]; fk_field_name(fk_field_letters[k], nm); shm_unlink(nm); k = k + 1; }
+#endif
+}
+static void fk_field_yield(void) {
+#if !defined(_WIN32)
+    struct timespec ts; ts.tv_sec = 0; ts.tv_nsec = 20000; nanosleep(&ts, 0);
+#endif
+}
+/* claim a slot in an open-addressed shared table: answers the slot index this kernel owns (value -1 while filling),
+ * or a slot holding an existing index the caller must test; -2 when the table is full */
+static unsigned long long fk_field_bytes_hash(const char *b, long long n) { unsigned long long h = 1469598103934665603ULL; long long k = 0; while (k < n) { h = (h ^ (unsigned char)b[k]) * 1099511628211ULL; k = k + 1; } return h; }
+static long long fk_str_bytes_eq(long long a, long long b) {
+    long long sa = fk_stri(a), sb = fk_stri(b);
+    if (sa < 0 || sb < 0 || FK_SLEN(sa) != FK_SLEN(sb)) { return 0; }
+    const char *pa = FK_SBYTES(sa); const char *pb = FK_SBYTES(sb);
+    long long n = FK_SLEN(sa), j = 0;
+    while (j < n) { if (pa[j] != pb[j]) { return 0; } j = j + 1; }
+    return 1;
+}
+/* a private string becomes a shared node-string: same bytes, one index for every kernel */
+static long long fk_field_share_string(long long sv) {
+    long long si = fk_stri(sv);
+    if (si < 0 || si >= FK_STR_BASE) { return sv; }
+    long long len = FK_SLEN(si);
+    const char *bytes = FK_SBYTES(si);
+    long long mask = FK_FIELD_SHASH - 1;
+    long long slot = (long long)(fk_field_bytes_hash(bytes, len) & (unsigned long long)mask);
+    long long probes = 0;
+    while (probes < FK_FIELD_SHASH) {
+        long long cur = __atomic_load_n(&fk_fstab[slot], __ATOMIC_ACQUIRE);
+        if (cur > 0) {
+            long long j = cur - 1;
+            if (fk_fsl[j] == len) { long long q = 0; const char *pj = fk_fsb + fk_fso[j]; while (q < len && pj[q] == bytes[q]) { q = q + 1; } if (q == len) { return fk_strv(FK_STR_BASE + j); } }
+            slot = (slot + 1) & mask; probes = probes + 1; continue;
+        }
+        if (cur == 0) {
+            long long z = 0;
+            if (__atomic_compare_exchange_n(&fk_fstab[slot], &z, -1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                long long off = fk_field_claim(5, len);
+                long long j = fk_field_claim(4, 1);
+                if (off + len > FK_FIELD_STRB || j >= FK_FIELD_STRS) { __atomic_store_n(&fk_fstab[slot], 0, __ATOMIC_RELEASE); return sv; }
+                long long q = 0; while (q < len) { fk_fsb[off + q] = bytes[q]; q = q + 1; }
+                fk_fso[j] = off; fk_fsl[j] = len;
+                __atomic_store_n(&fk_fstab[slot], j + 1, __ATOMIC_RELEASE);
+                return fk_strv(FK_STR_BASE + j);
+            }
+            continue;
+        }
+        fk_field_yield();
+    }
+    return sv;
+}
+/* a private float box becomes a shared float: same bits, one index for every kernel */
+static long long fk_field_share_float(long long fv) {
+    long long fi = fk_fidx(fv);
+    if (fi >= FK_FLT_BASE) { return fv; }
+    double d = FK_FV(fi);
+    unsigned long long bits; { char *pd = (char *)&d; char *pb = (char *)&bits; int b = 0; while (b < 8) { pb[b] = pd[b]; b = b + 1; } }
+    long long mask = FK_FIELD_FHASH - 1;
+    long long slot = (long long)(fk_mix64(11, bits) & (unsigned long long)mask);
+    long long probes = 0;
+    while (probes < FK_FIELD_FHASH) {
+        long long cur = __atomic_load_n(&fk_fftab[slot], __ATOMIC_ACQUIRE);
+        if (cur > 0) {
+            long long j = cur - 1; unsigned long long ob; { double od = fk_ffv[j]; char *pd = (char *)&od; char *pb = (char *)&ob; int b = 0; while (b < 8) { pb[b] = pd[b]; b = b + 1; } }
+            if (ob == bits) { return fk_fbase - ((FK_FLT_BASE + j) << 1) - 1; }
+            slot = (slot + 1) & mask; probes = probes + 1; continue;
+        }
+        if (cur == 0) {
+            long long z = 0;
+            if (__atomic_compare_exchange_n(&fk_fftab[slot], &z, -1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                long long j = fk_field_claim(6, 1);
+                if (j >= FK_FIELD_FLOATS) { __atomic_store_n(&fk_fftab[slot], 0, __ATOMIC_RELEASE); return fv; }
+                fk_ffv[j] = d; 
+                __atomic_store_n(&fk_fftab[slot], j + 1, __ATOMIC_RELEASE);
+                return fk_fbase - ((FK_FLT_BASE + j) << 1) - 1;
+            }
+            continue;
+        }
+        fk_field_yield();
+    }
+    return fv;
+}
+/* every word a shared cell carries must itself be shared: lists copied into shared pairs, strings and floats interned */
+static long long fk_field_share_value(long long v) {
+    if (v == fk_nothing) { return v; }
+    if ((v & 1) == 0) { return v; }
+    if (fk_is_str(v)) { return fk_field_share_string(v); }
+    if (fk_isf(v)) { return fk_field_share_float(v); }
+    if (v < 0) { return v; }
+    long long p = v >> 1;
+    if (p < 1 || p >= FK_PAIR_BASE) { return v; }
+    long long n = 0, q = p;
+    while (q >= 1 && q <= fk_hp) { n = n + 1; q = FK_HT(q) >> 1; }
+    if (n == 0) { return v; }
+    long long base = fk_field_claim(3, n);
+    if (base + n > FK_FIELD_PAIRS) { return v; }
+    long long k = 0;
+    q = p;
+    while (k < n) {
+        long long at = base + k;
+        fk_fph[at] = fk_field_share_value(FK_HH(q));
+        long long tail = FK_HT(q);
+        fk_fpt[at] = (k + 1 < n) ? (((FK_PAIR_BASE + at + 1) << 1) | 1) : ((tail & 1) && (tail >> 1) >= 1 ? 1 : tail);
+        q = tail >> 1;
+        k = k + 1;
+    }
+    return ((FK_PAIR_BASE + base) << 1) | 1;
+}
+static void fk_nodes_grow(void);
+static long long fk_field_node_matches(long long ix, long long kind, long long sub, long long a, long long b, long long *nid4) {
+    if (fk_nkind[ix] != kind) { return 0; }
+    if (kind == 1) {
+        if (fk_nid[ix][2] != sub) { return 0; }
+        if (sub == 2) { return fk_str_bytes_eq(fk_nval[ix], a); }
+        if (sub == 7) { double x = fk_num(fk_nval[ix]), y = fk_num(a); return (x == y || (x != x && y != y)) ? 1 : 0; }
+        return fk_nval[ix] == a;
+    }
+    if (kind == 2) { return fk_veq(fk_ncat[ix], a) != 0 && fk_veq(fk_nkids[ix], b) != 0; }
+    if (kind == 3) { return fk_nid[ix][0] == nid4[0] && fk_nid[ix][1] == nid4[1] && fk_nid[ix][2] == nid4[2] && fk_nid[ix][3] == nid4[3]; }
+    return 0;
+}
+static long long fk_field_fill(long long kind, long long sub, long long a, long long b, long long *nid4, long long h) {
+    long long idx = fk_field_claim(2, 1) + 1;
+    if (idx >= FK_FIELD_NODES) { fk_die("fkwu: the field's node columns are full (2^26 cells): run observe/field-reset-run.fk with no kernel alive"); }
+    while (idx >= fk_node_cap) { fk_nodes_grow(); }
+    fk_nkind[idx] = kind;
+    fk_nhash_memo[idx] = h;
+    if (kind == 1) {
+        fk_nval[idx] = fk_field_share_value(a); fk_nkids[idx] = 1; fk_ncat[idx] = 0;
+        fk_nid[idx][0] = 1; fk_nid[idx][1] = 1; fk_nid[idx][2] = sub;
+        fk_nid[idx][3] = sub == 1 ? (a >> 1) : (sub == 3 ? ((a != 0) ? 1 : 0) : idx);
+    } else if (kind == 2) {
+        fk_ncat[idx] = fk_field_share_value(a); fk_nkids[idx] = fk_field_share_value(b); fk_nval[idx] = 0;
+        fk_nid[idx][0] = 0; fk_nid[idx][1] = 0; fk_nid[idx][2] = 0; fk_nid[idx][3] = idx;
+        if (a < 0) { long long ci = fk_nidx(a); if (ci >= 1 && ci < idx) { fk_nid[idx][1] = fk_nid[ci][1]; fk_nid[idx][2] = fk_nid[ci][2]; } }
+    } else {
+        fk_ncat[idx] = 0; fk_nkids[idx] = 1; fk_nval[idx] = 0;
+        fk_nid[idx][0] = nid4[0]; fk_nid[idx][1] = nid4[1]; fk_nid[idx][2] = nid4[2]; fk_nid[idx][3] = nid4[3];
+    }
+    return idx;
+}
+/* one intern door for every kind: find the cell in the shared hash or claim a slot, fill, publish */
+static long long fk_field_intern_node(long long kind, long long sub, long long a, long long b, long long *nid4, long long h) {
+    if (kind == 3) { return fk_nbox(fk_field_fill(3, 0, 0, 0, nid4, 0)); }
+    long long mask = FK_FIELD_HASH - 1;
+    long long slot = h & mask;
+    long long probes = 0;
+    while (probes < FK_FIELD_HASH) {
+        long long cur = __atomic_load_n(&fk_field_itab[slot], __ATOMIC_ACQUIRE);
+        if (cur > 0) {
+            if (fk_field_node_matches(cur, kind, sub, a, b, nid4)) { return fk_nbox(cur); }
+            slot = (slot + 1) & mask; probes = probes + 1; continue;
+        }
+        if (cur == 0) {
+            long long z = 0;
+            if (__atomic_compare_exchange_n(&fk_field_itab[slot], &z, -1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                long long idx = fk_field_fill(kind, sub, a, b, nid4, h);
+                __atomic_store_n(&fk_field_itab[slot], idx, __ATOMIC_RELEASE);
+                return fk_nbox(idx);
+            }
+            continue;
+        }
+        fk_field_yield();
+    }
+    fk_die("fkwu: the field's intern index is full");
+    return fk_nothing;
+}
 /* ---- the store: every value table of this kernel lives in shared memory ----
  * One sparse reservation per column, /fg-c<pid>-<letter>, sized once (macOS lets a shm object be
  * truncated once) and committed page by page as the table grows: a 4 GiB reservation touched at three
@@ -9003,7 +9312,7 @@ static int fk_gift_live(long long gh) {
  * a sattr, h/t heap generation 0, H/T heap generation 1, s string bytes, O string offsets,
  * L string lengths, F floats. */
 static int fk_store_tried;
-static const char fk_store_letters[] = "kcivnfloahtHTsOLF";
+static const char fk_store_letters[] = "kcivnfloaPQsOLFhtHT";
 static void fk_store_name(char letter, long long pid, char *out) {
     char digits[24];
     long long n = 0, p = pid < 0 ? 0 : pid, o = 0;
@@ -9022,6 +9331,8 @@ static void fk_store_unlink_pid(long long pid) {
 #endif
 }
 static void *fk_store_take(char letter, long long bytes) {
+    if (!fk_field_tried) { fk_field_tried = 1; fk_field_open(); }
+    if (fk_field_on) { return 0; }
 #if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
     if (!fk_store_tried) { fk_store_tried = 1; fk_store_shared = 1; }
     if (!fk_store_shared) { return 0; }
@@ -9052,6 +9363,7 @@ static void *fk_store_copy_out(void *p, long long bytes) {
 }
 /* the process leaves shared memory: every table copied to private memory once, names unlinked */
 static void fk_store_go_private(void) {
+    if (fk_field_on) { fk_store_shared = 0; return; }   /* the field is not this process to privatize */
     if (!fk_store_shared) { return; }
     fk_store_shared = 0;
     long long c = fk_node_cap;
@@ -9172,6 +9484,7 @@ static void fk_sappend(const char *bytes, long long n) {
 }
 static long long fk_intern_int_node(long long iv43) {
         long long h43 = fk_intern_key_trivial(1, iv43);
+        if (fk_field_on) { return fk_field_intern_node(1, 1, iv43, 0, 0, h43); }
         long long slot43 = 0;
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
@@ -9200,6 +9513,7 @@ static long long fk_intern_int_node(long long iv43) {
 static long long fk_intern_str_node(long long sv46) {
         long long sa46 = fk_stri(sv46);
         long long h46 = fk_intern_key_trivial(2, sv46);
+        if (fk_field_on) { return fk_field_intern_node(1, 2, sv46, 0, 0, fk_intern_key_trivial(2, fk_deep_hash(sv46))); }
         long long slot46 = 0;
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
@@ -9212,7 +9526,7 @@ static long long fk_intern_str_node(long long sv46) {
             }
             slot46 = (slot46 + 1) & (fk_intern_hash_cap - 1);
         }
-        if (sa46 < 0 || sa46 >= fk_sp) {
+        if (sa46 < 0 || !FK_SOK(sa46)) {
             return 0;
         }
         fk_np = fk_np + 1;
@@ -9231,6 +9545,7 @@ static long long fk_intern_str_node(long long sv46) {
 static long long fk_intern_bool_node(long long bv112) {
         long long se112 = (bv112 != 0) ? (0 - 9223372036854775807LL) : (0 - 9223372036854775805LL);
         long long h112 = fk_intern_key_trivial(3, se112);
+        if (fk_field_on) { return fk_field_intern_node(1, 3, se112, 0, 0, h112); }
         long long slot112 = 0;
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
@@ -9269,6 +9584,7 @@ static long long fk_intern_float_node(double fd113) {
         double fcanon113;
         memcpy(&fcanon113, &fbits113, 8);
         long long h113 = fk_intern_key_trivial(7, (long long)fbits113);
+        if (fk_field_on) { return fk_field_intern_node(1, 7, fk_fbox(fcanon113), 0, 0, h113); }
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
         }
@@ -9307,6 +9623,7 @@ static long long fk_intern_composite(long long cat47, long long kids47) {
         if (h47 == 0) {
             h47 = 1;
         }
+        if (fk_field_on) { return fk_field_intern_node(2, 0, cat47, kids47, 0, h47); }
         long long slot47 = 0;
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
@@ -9341,6 +9658,7 @@ static long long fk_intern_composite(long long cat47, long long kids47) {
         return fk_nbox(fk_np);
 }
 static long long fk_make_nodeid(long long p91, long long l91, long long ty91, long long in91) {
+        if (fk_field_on) { long long nid91[4]; nid91[0] = p91; nid91[1] = l91; nid91[2] = ty91; nid91[3] = in91; return fk_field_intern_node(3, 0, 0, 0, nid91, 0); }
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
         }
@@ -9425,17 +9743,17 @@ static void fk_cross_emit(long long v, long long depth) {
     if (depth > 100000) { fk_cross_refused = 1; return; }
     if (v == fk_nothing) { fk_sappend("N", 1); return; }
     if (fk_isf(v)) { double d = fk_num(v); fk_sappend("F", 1); fk_sappend((const char *)&d, 8); return; }
-    if (fk_is_str(v)) { long long si = fk_stri(v); fk_sappend("S", 1); fk_cross_put_u32(fk_sl[si]); fk_sappend(fk_sb + fk_so[si], fk_sl[si]); return; }
+    if (fk_is_str(v)) { long long si = fk_stri(v); fk_sappend("S", 1); fk_cross_put_u32(FK_SLEN(si)); fk_sappend(FK_SBYTES(si), FK_SLEN(si)); return; }
     if (v >= fk_fnbase && v < fk_fnbase + 8192) { fk_cross_refused = 1; fk_sappend("N", 1); return; }
     if ((v & 1) == 0) { fk_sappend("I", 1); fk_cross_put_i64(v >> 1); return; }
     if (v >= 0) {
         /* a list: count the proper elements, then emit them and the tail */
         long long p = v, count = 0;
-        while ((p & 1) && p != 1 && (p >> 1) >= 1 && (p >> 1) <= fk_hp && count < 100000000) { count = count + 1; p = fk_ht[p >> 1]; }
+        while ((p & 1) && p != 1 && (p >> 1) >= 1 && FK_POK(p >> 1) && count < 100000000) { count = count + 1; p = FK_HT(p >> 1); }
         fk_sappend("L", 1); fk_cross_put_u32(count);
         p = v;
         long long k = 0;
-        while (k < count) { fk_cross_emit(fk_hh[p >> 1], depth + 1); p = fk_ht[p >> 1]; k = k + 1; }
+        while (k < count) { fk_cross_emit(FK_HH(p >> 1), depth + 1); p = FK_HT(p >> 1); k = k + 1; }
         if (p == 1) { fk_sappend("Z", 1); } else { fk_cross_emit(p, depth + 1); }
         return;
     }
@@ -9445,7 +9763,7 @@ static void fk_cross_emit(long long v, long long depth) {
     if (fk_nkind[ix] == 1) {
         long long sub = fk_nid[ix][2];
         if (sub == 1) { fk_sappend("i", 1); fk_cross_put_i64(fk_nval[ix] >> 1); return; }
-        if (sub == 2) { long long si = fk_stri(fk_nval[ix]); fk_sappend("s", 1); if (si < 0) { fk_cross_put_u32(0); return; } fk_cross_put_u32(fk_sl[si]); fk_sappend(fk_sb + fk_so[si], fk_sl[si]); return; }
+        if (sub == 2) { long long si = fk_stri(fk_nval[ix]); fk_sappend("s", 1); if (si < 0) { fk_cross_put_u32(0); return; } fk_cross_put_u32(FK_SLEN(si)); fk_sappend(FK_SBYTES(si), FK_SLEN(si)); return; }
         if (sub == 3) { fk_sappend("b", 1); fk_sappend(fk_nval[ix] == (0 - 9223372036854775807LL) ? "\1" : "\0", 1); return; }
         if (sub == 7) { double d = fk_num(fk_nval[ix]); fk_sappend("f", 1); fk_sappend((const char *)&d, 8); return; }
         fk_cross_refused = 1; fk_sappend("N", 1); return;
@@ -9560,7 +9878,7 @@ static void fk_live_publish(int final) {
     w[4] = sum; w[5] = fk_heat_total; w[6] = fk_np; w[7] = fk_sp; w[8] = fk_hp; w[9] = fk_fntop;
     w[10] = fk_gift_count; w[11] = gb; w[12] = fk_node_cap; w[13] = fk_cap; w[14] = fk_vsp; w[15] = fk_fp;
     w[16] = hot; w[17] = hotc; w[18] = fk_live_cpu_us(); w[19] = final ? 0 : 1; w[20] = distinct;
-    w[21] = fk_melt_gen; w[22] = fk_store_shared; w[23] = fk_heap_gen;
+    w[21] = fk_melt_gen; w[22] = fk_field_on ? 2 : fk_store_shared; w[23] = fk_heap_gen;
     __atomic_store_n(&w[3], w[3] + 1, __ATOMIC_RELEASE);
 }
 /* read-only mapping of another kernel's page or the roster: the words, then unmap */
@@ -9662,7 +9980,7 @@ static const char *fk_hot_unit_of(long long so) {
 #define FK_CELL_MAPS 16
 #define FK_CELL_BIG (1LL << 61)
 #define FK_CELL_BASE 9000000000000000000LL
-struct fk_cell_map_s { long long pid; void *base[17]; long long size[17]; volatile long long *live; long long live_size; };
+struct fk_cell_map_s { long long pid; void *base[24]; long long size[24]; volatile long long *live; long long live_size; };
 static struct fk_cell_map_s fk_cell_maps[FK_CELL_MAPS];
 static int fk_cell_letter(char c) { int k = 0; while (fk_store_letters[k]) { if (fk_store_letters[k] == c) { return k; } k = k + 1; } return -1; }
 static long long fk_cell_enc(long long raw) { if (raw <= -7000000000000000000LL) { return ((0 - (raw + FK_CELL_BASE)) - FK_CELL_BIG) << 1; } return raw << 1; }
@@ -9673,11 +9991,11 @@ static long long fk_cell_map_open(long long pid) {
     while (s < FK_CELL_MAPS && fk_cell_maps[s].pid != 0) { s = s + 1; }
     if (s == FK_CELL_MAPS) { return -1; }
     struct fk_cell_map_s *m = &fk_cell_maps[s];
-    m->pid = pid;
+    m->pid = pid > 0 ? pid : -1;   /* the field is one; a handle is marked mapped whatever pid was asked for */
     long long k = 0, mapped = 0;
     while (fk_store_letters[k]) {
         char nm[32];
-        fk_store_name(fk_store_letters[k], pid, nm);
+        fk_field_name(fk_store_letters[k], nm);
         m->base[k] = 0; m->size[k] = 0;
         int fd = shm_open(nm, O_RDONLY, 0600);
         if (fd >= 0) {
@@ -9714,7 +10032,7 @@ static void fk_cell_map_close(long long s) {
     if (s < 0 || s >= FK_CELL_MAPS || fk_cell_maps[s].pid == 0) { return; }
     struct fk_cell_map_s *m = &fk_cell_maps[s];
     long long k = 0;
-    while (k < 17) { if (m->base[k] != 0) { munmap(m->base[k], (size_t)m->size[k]); m->base[k] = 0; } k = k + 1; }
+    while (k < 24) { if (m->base[k] != 0) { munmap(m->base[k], (size_t)m->size[k]); m->base[k] = 0; } k = k + 1; }
     if (m->live != 0) { munmap((void *)m->live, (size_t)m->live_size); m->live = 0; }
     m->pid = 0;
 #else
@@ -9725,7 +10043,7 @@ static void fk_cell_map_close(long long s) {
 static void fk_cell_col_open(struct fk_cell_map_s *m, int k) {
 #if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
     char nm[32];
-    fk_store_name(fk_store_letters[k], m->pid, nm);
+    fk_field_name(fk_store_letters[k], nm);
     int fd = shm_open(nm, O_RDONLY, 0600);
     if (fd < 0) { return; }
     struct stat st;
@@ -9776,9 +10094,10 @@ static long long fk_cell_field(long long s, long long raw, long long k) {
     }
     if (kind == 1) {
         long long p = raw >> 1;
-        long long gen = (m->live != 0 && m->live_size >= 4096) ? m->live[2 + 23] : 0;
-        char hc = gen == 1 ? 'H' : 'h';
-        char tc = gen == 1 ? 'T' : 't';
+        if (p < FK_PAIR_BASE) { return fk_nothing; }
+        p = p - FK_PAIR_BASE;
+        char hc = 'P';
+        char tc = 'Q';
         if (k == 0) { return fk_cell_col(m, hc, p, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
         if (k == 1) { return fk_cell_col(m, tc, p, 8, &w) ? fk_cell_enc(w) : fk_nothing; }
         return fk_nothing;
@@ -9793,7 +10112,8 @@ static long long fk_cell_value(long long s, long long raw) {
     if (s < 0 || s >= FK_CELL_MAPS || fk_cell_maps[s].pid == 0) { return fk_nothing; }
     struct fk_cell_map_s *m = &fk_cell_maps[s];
     if (kind == 3) {
-        long long si = (fk_sbase - raw - 1) >> 1;
+        long long si = ((fk_sbase - raw - 1) >> 1) - FK_STR_BASE;
+        if (si < 0) { return fk_nothing; }
         long long off = 0, len = 0;
         if (!fk_cell_col(m, 'O', si, 8, &off) || !fk_cell_col(m, 'L', si, 8, &len)) { return fk_nothing; }
         int sb = fk_cell_letter('s');
@@ -9802,7 +10122,8 @@ static long long fk_cell_value(long long s, long long raw) {
         return fk_sbuf((const char *)m->base[sb] + off, len);
     }
     if (kind == 4) {
-        long long fi = (fk_fbase - raw - 1) >> 1;
+        long long fi = ((fk_fbase - raw - 1) >> 1) - FK_FLT_BASE;
+        if (fi < 0) { return fk_nothing; }
         long long bits = 0;
         if (!fk_cell_col(m, 'F', fi, 8, &bits)) { return fk_nothing; }
         double d;
@@ -9865,10 +10186,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_die("fkwu: str_len: nothing has no length -- ask nothing? before measuring");
         }
         long long sa = fk_stri(sv25);
-        if (sa < 0 || sa >= fk_sp) {
+        if (sa < 0 || !FK_SOK(sa)) {
             return 0;
         }
-        return fk_sl[sa] << 1;
+        return FK_SLEN(sa) << 1;
     }
     if (t == 238) {
         /* form_error — the voice of refusal. A program that raises it has
@@ -9879,8 +10200,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * bp "property" aphonia: bands sailed green past raised errors. */
         long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
         fk_write_all_raw(2, "fkwu: form_error: ", 18);
-        if (sa >= 0 && sa < fk_sp) {
-            fk_write_all_raw(2, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
+        if (sa >= 0 && FK_SOK(sa)) {
+            fk_write_all_raw(2, FK_SBYTES(sa), (unsigned long)FK_SLEN(sa));
         }
         fk_write_all_raw(2, "\n", 1);
         exit(1);
@@ -9896,23 +10217,23 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 27) {
         long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
         long long sb = fk_stri(fk_walk(fk_node[i][2], fp));
-        if (sa < 0 || sa >= fk_sp || sb < 0 || sb >= fk_sp) {
+        if (sa < 0 || !FK_SOK(sa) || sb < 0 || !FK_SOK(sb)) {
             return 0 - 2;
         }
-        long long ln = fk_sl[sa] + fk_sl[sb];
+        long long ln = FK_SLEN(sa) + FK_SLEN(sb);
         while (fk_sbp + ln > fk_scap_b) {
             fk_scap_b = fk_scap_b * 2;
             fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
             fk_sb_check();
         }
         long long j = 0;
-        while (j < fk_sl[sa]) {
-            fk_sb[fk_sbp + j] = fk_sb[fk_so[sa] + j];
+        while (j < FK_SLEN(sa)) {
+            fk_sb[fk_sbp + j] = FK_SBYTES(sa)[j];
             j = j + 1;
         }
         j = 0;
-        while (j < fk_sl[sb]) {
-            fk_sb[fk_sbp + fk_sl[sa] + j] = fk_sb[fk_so[sb] + j];
+        while (j < FK_SLEN(sb)) {
+            fk_sb[fk_sbp + FK_SLEN(sa) + j] = FK_SBYTES(sb)[j];
             j = j + 1;
         }
         return fk_strv(fk_sintern(fk_sbp, ln));
@@ -9920,33 +10241,33 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 28) {
         long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
         long long k = fk_walk(fk_node[i][2], fp) >> 1;
-        if (sa < 0 || sa >= fk_sp || k < 0 || k >= fk_sl[sa]) {
+        if (sa < 0 || !FK_SOK(sa) || k < 0 || k >= FK_SLEN(sa)) {
             return 0 - 2;
         }
-        return ((long long)(unsigned char)fk_sb[fk_so[sa] + k]) << 1;
+        return ((long long)(unsigned char)FK_SBYTES(sa)[k]) << 1;
     }
     if (t == 30) {
         long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
         long long sb = fk_stri(fk_walk(fk_node[i][2], fp));
         long long from = fk_walk(fk_node[i][3], fp) >> 1;
-        if (sa < 0 || sa >= fk_sp || sb < 0 || sb >= fk_sp) {
+        if (sa < 0 || !FK_SOK(sa) || sb < 0 || !FK_SOK(sb)) {
             return 0 - 2;
         }
         if (from < 0) {
             from = 0;
         }
-        if (from > fk_sl[sa]) {
+        if (from > FK_SLEN(sa)) {
             return 0 - 2;
         }
-        long long ln = fk_sl[sb];
+        long long ln = FK_SLEN(sb);
         if (ln == 0) {
             return from << 1;
         }
-        long long lim = fk_sl[sa] - ln;
+        long long lim = FK_SLEN(sa) - ln;
         long long pos = from;
         while (pos <= lim) {
             long long j3 = 0;
-            while (j3 < ln && fk_sb[fk_so[sa] + pos + j3] == fk_sb[fk_so[sb] + j3]) {
+            while (j3 < ln && FK_SBYTES(sa)[pos + j3] == FK_SBYTES(sb)[j3]) {
                 j3 = j3 + 1;
             }
             if (j3 == ln) {
@@ -9958,11 +10279,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 31) {
         long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
-        if (sa < 0 || sa >= fk_sp) {
+        if (sa < 0 || !FK_SOK(sa)) {
             return 0;
         }
-        long long off = fk_so[sa];
-        long long n = fk_sl[sa];
+        long long off = FK_SO(sa);
+        long long n = FK_SLEN(sa);
         long long sign = 1;
         long long j4 = 0;
         while (j4 < n && (fk_sb[off + j4] == FK_CH_SPACE || fk_sb[off + j4] == FK_CH_TAB || fk_sb[off + j4] == FK_CH_LF ||
@@ -10050,20 +10371,20 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long l91 = 0;
         long long ty91 = 0;
         long long in91 = 0;
-        if (q91 >= 1 && q91 <= fk_hp) {
-            p91 = fk_hh[q91] >> 1;
-            q91 = fk_ht[q91] >> 1;
+        if (q91 >= 1 && FK_POK(q91)) {
+            p91 = FK_HH(q91) >> 1;
+            q91 = FK_HT(q91) >> 1;
         }
-        if (q91 >= 1 && q91 <= fk_hp) {
-            l91 = fk_hh[q91] >> 1;
-            q91 = fk_ht[q91] >> 1;
+        if (q91 >= 1 && FK_POK(q91)) {
+            l91 = FK_HH(q91) >> 1;
+            q91 = FK_HT(q91) >> 1;
         }
-        if (q91 >= 1 && q91 <= fk_hp) {
-            ty91 = fk_hh[q91] >> 1;
-            q91 = fk_ht[q91] >> 1;
+        if (q91 >= 1 && FK_POK(q91)) {
+            ty91 = FK_HH(q91) >> 1;
+            q91 = FK_HT(q91) >> 1;
         }
-        if (q91 >= 1 && q91 <= fk_hp) {
-            in91 = fk_hh[q91] >> 1;
+        if (q91 >= 1 && FK_POK(q91)) {
+            in91 = FK_HH(q91) >> 1;
         }
         return fk_make_nodeid(p91, l91, ty91, in91);
     }
@@ -10074,15 +10395,15 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 113) {
         long long sa113 = fk_stri(fk_walk(fk_node[i][1], fp));
         double fd113 = 0.0;
-        if (sa113 >= 0 && sa113 < fk_sp) {
+        if (sa113 >= 0 && FK_SOK(sa113)) {
             char tb113[128];
-            long long n113 = fk_sl[sa113];
+            long long n113 = FK_SLEN(sa113);
             if (n113 > 126) {
                 n113 = 126;
             }
             long long jj113 = 0;
             while (jj113 < n113) {
-                tb113[jj113] = fk_sb[fk_so[sa113] + jj113];
+                tb113[jj113] = FK_SBYTES(sa113)[jj113];
                 jj113 = jj113 + 1;
             }
             tb113[n113] = 0;
@@ -10100,17 +10421,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 50) {
         long long sa = fk_node[i][1];
-        if (sa < 0 || sa >= fk_sp) {
+        if (sa < 0 || !FK_SOK(sa)) {
             return 0;
         }
         char tmp[128];
-        long long n = fk_sl[sa];
+        long long n = FK_SLEN(sa);
         if (n > 126) {
             n = 126;
         }
         long long j = 0;
         while (j < n) {
-            tmp[j] = fk_sb[fk_so[sa] + j];
+            tmp[j] = FK_SBYTES(sa)[j];
             j = j + 1;
         }
         tmp[n] = 0;
@@ -10141,17 +10462,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
         long long fbv53;
-        if (sa < 0 || sa >= fk_sp) {
+        if (sa < 0 || !FK_SOK(sa)) {
             fbv53 = fk_fbox(0.0);
         } else {
             char tmp[128];
-            long long n = fk_sl[sa];
+            long long n = FK_SLEN(sa);
             if (n > 126) {
                 n = 126;
             }
             long long j = 0;
             while (j < n) {
-                tmp[j] = fk_sb[fk_so[sa] + j];
+                tmp[j] = FK_SBYTES(sa)[j];
                 j = j + 1;
             }
             tmp[n] = 0;
@@ -10282,7 +10603,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         static char tmp[8192];
         long long n = 0;
         long long q = xs >> 1;
-        while (q >= 1 && q <= fk_hp) {
+        while (q >= 1 && FK_POK(q)) {
             if (n == 8192) {
                 long long w61 = write(fd, tmp, n);
                 if (w61 < n) {
@@ -10291,9 +10612,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 }
                 n = 0;
             }
-            tmp[n] = (char)(fk_hh[q] >> 1);
+            tmp[n] = (char)(FK_HH(q) >> 1);
             n = n + 1;
-            q = fk_ht[q] >> 1;
+            q = FK_HT(q) >> 1;
         }
         long long wr = n > 0 ? write(fd, tmp, n) : 0;
         long long total = lseek(fd, 0, 2);
@@ -10353,7 +10674,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long si177 = fk_stri(sv177);
         long long pos177 = 0;
         fk_cross_refused = 0;
-        long long out177 = fk_cross_decode(fk_sb + fk_so[si177], fk_sl[si177], &pos177, 0);
+        long long out177 = fk_cross_decode(FK_SBYTES(si177), FK_SLEN(si177), &pos177, 0);
         return fk_cross_refused ? fk_nothing : out177;
     }
     if (t == 178) {
@@ -10589,6 +10910,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_cell_map_close(fk_walk(fk_node[i][1], fp) >> 1);
         return 1 << 1;
     }
+    if (t == 196) {
+        /* field_reset: unlink every field segment; the kernels alive keep their mappings, the next kernel starts a fresh field */
+        fk_field_unlink_all();
+        return 1 << 1;
+    }
     if (t == 173) {
         return fk_host_cpu_busy_us() << 1;
     }
@@ -10662,14 +10988,14 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         volatile long long *glen = gseq + 1;
         char *gpay = (char *)fk_gift_base[gh] + 16;
         long long si = fk_stri(sv);
-        long long n = fk_sl[si];
+        long long n = FK_SLEN(si);
         if (n > fk_gift_size[gh] - 16) {
             /* a frame that does not fit is refused, never truncated silently */
             return fk_nothing;
         }
         long long s0 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
         __atomic_store_n(gseq, s0 + 1, __ATOMIC_RELEASE);
-        { long long k = 0; while (k < n) { gpay[k] = fk_sb[fk_so[si] + k]; k = k + 1; } }
+        { long long k = 0; while (k < n) { gpay[k] = FK_SBYTES(si)[k]; k = k + 1; } }
         __atomic_store_n(glen, n, __ATOMIC_RELEASE);
         __atomic_store_n(gseq, s0 + 2, __ATOMIC_RELEASE);
         return (s0 + 2) << 1;
@@ -10769,8 +11095,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             if (fk_conf("FK_READ_WITNESS")) {
                 long long sa63 = fk_stri(pv63);
                 dprintf(2, "[read_file] OPEN FAILED at read #%lld: '%s' (handle=%lld sa=%lld sl=%lld so=%lld sp=%lld)\n",
-                        fk_nreads, p, pv63, sa63, (sa63 >= 0 && sa63 < fk_sp) ? fk_sl[sa63] : -1,
-                        (sa63 >= 0 && sa63 < fk_sp) ? fk_so[sa63] : -1, fk_sp);
+                        fk_nreads, p, pv63, sa63, (sa63 >= 0 && FK_SOK(sa63)) ? FK_SLEN(sa63) : -1,
+                        (sa63 >= 0 && FK_SOK(sa63)) ? FK_SO(sa63) : -1, fk_sp);
             }
             /* A file that never was answers the axiom-1 nothing, never "" —
              * "" means the file EXISTS and holds zero bytes. The Go arm's
@@ -10819,15 +11145,15 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_rcnt[fk_rp] = 0;
         fk_rbp[fk_rp] = 0;
         long long q64 = xs64 >> 1;
-        while (q64 >= 1 && q64 <= fk_hp) {
-            long long e64 = fk_hh[q64];
+        while (q64 >= 1 && FK_POK(q64)) {
+            long long e64 = FK_HH(q64);
             long long ep64 = e64 >> 1;
-            if (ep64 >= 1 && ep64 <= fk_hp) {
-                long long k64 = fk_stri(fk_hh[ep64]);
-                long long tp64 = fk_ht[ep64] >> 1;
+            if (ep64 >= 1 && FK_POK(ep64)) {
+                long long k64 = fk_stri(FK_HH(ep64));
+                long long tp64 = FK_HT(ep64) >> 1;
                 long long v64 = 0;
-                if (tp64 >= 1 && tp64 <= fk_hp) {
-                    v64 = fk_hh[tp64];
+                if (tp64 >= 1 && FK_POK(tp64)) {
+                    v64 = FK_HH(tp64);
                 }
                 if (k64 == -1) {
                     fk_rbp[fk_rp] = v64;
@@ -10838,7 +11164,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                     fk_rcnt[fk_rp] = fk_rcnt[fk_rp] + 1;
                 }
             }
-            q64 = fk_ht[q64] >> 1;
+            q64 = FK_HT(q64) >> 1;
         }
         return fk_rbox(fk_rp);
     }
@@ -10929,11 +11255,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         long long sv104 = fk_walk(fk_node[i][2], fp);
         long long sa104 = fk_stri(sv104);
-        if (sa104 < 0 || sa104 >= fk_sp) {
+        if (sa104 < 0 || !FK_SOK(sa104)) {
             return -2;
         }
-        long long n104 = fk_sl[sa104];
-        long long base104 = fk_so[sa104];
+        long long n104 = FK_SLEN(sa104);
+        long long base104 = FK_SO(sa104);
         int fd104 = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (fd104 < 0) {
             return -2;
@@ -11819,10 +12145,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 115) {
         long long psv = fk_walk(fk_node[i][1], fp);
         long long psa = fk_stri(psv);
-        if (psa >= 0 && psa < fk_sp) {
+        if (psa >= 0 && FK_SOK(psa)) {
             long long pj = 0;
-            while (pj < fk_sl[psa]) {
-                putchar((int)(unsigned char)fk_sb[fk_so[psa] + pj]);
+            while (pj < FK_SLEN(psa)) {
+                putchar((int)(unsigned char)FK_SBYTES(psa)[pj]);
                 pj = pj + 1;
             }
         }
@@ -11857,18 +12183,18 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long pv = fk_walk(fk_node[i][1], fp);
         long long pp = pv >> 1;
         long long pfirst = 1;
-        while (pp >= 1 && pp <= fk_hp) {
+        while (pp >= 1 && FK_POK(pp)) {
             if (!pfirst) {
                 putchar(FK_CH_SPACE);
             }
             pfirst = 0;
-            long long pel = fk_hh[pp];
+            long long pel = FK_HH(pp);
             if (fk_is_output_list(pel)) {
                 fk_pv_list(pel);
             } else {
                 fk_pv_inline_number(pel);
             }
-            pp = fk_ht[pp] >> 1;
+            pp = FK_HT(pp) >> 1;
         }
         putchar(10);
         /* same live-event door as print_str: a driven emitter's line must reach the
@@ -15420,8 +15746,8 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     }
     ok = ok && fk_fkb_write_signed(fd, fk_sp);
     i = 0;
-    while (ok && i < fk_sp) {
-        ok = fk_fkb_write_bytes(fd, fk_sb + fk_so[i], fk_sl[i]);
+    while (ok && FK_SOK(i)) {
+        ok = fk_fkb_write_bytes(fd, FK_SBYTES(i), FK_SLEN(i));
         i = i + 1;
     }
     ok = ok && fk_fkb_write_signed(fd, fk_fntop);
