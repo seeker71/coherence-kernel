@@ -390,7 +390,11 @@ section [form.bml] {
 
         // Census only records visible to this Glass process. Aggregate count
         // movement is shown per phase; it is never promoted to per-node cause.
-        def fgl-phase?(state, phase) = if str_eq(phase, "gas") then if str_eq(state, "source") then 1 else if str_eq(state, "eligible") then 1 else if str_eq(state, "released") then 1 else 0 else if str_eq(phase, "water") then if str_eq(state, "live") then 1 else if str_eq(state, "active") then 1 else if str_eq(state, "loading") then 1 else if str_eq(state, "prefilling") then 1 else if str_eq(state, "compiling") then 1 else if str_eq(state, "cooling") then 1 else if str_eq(state, "meltable") then 1 else 0 else if str_eq(phase, "ice") then if str_eq(state, "stored") then 1 else if str_eq(state, "ready") then 1 else if str_eq(state, "resident") then 1 else if str_eq(state, "pinned") then 1 else if str_eq(state, "mapped") then 1 else if str_eq(state, "crystallized") then 1 else 0 else 0;
+        // one home for the phase sets: a state is gas (0), water (1), ice (2) or none (3); the sets are disjoint, and the
+        // most common state tonight (live) is read first
+        def fgl-phase-index(state) = if str_eq(state, "live") then 1 else if str_eq(state, "source") then 0 else if str_eq(state, "eligible") then 0 else if str_eq(state, "released") then 0 else if str_eq(state, "active") then 1 else if str_eq(state, "loading") then 1 else if str_eq(state, "prefilling") then 1 else if str_eq(state, "compiling") then 1 else if str_eq(state, "cooling") then 1 else if str_eq(state, "meltable") then 1 else if str_eq(state, "stored") then 2 else if str_eq(state, "ready") then 2 else if str_eq(state, "resident") then 2 else if str_eq(state, "pinned") then 2 else if str_eq(state, "mapped") then 2 else if str_eq(state, "crystallized") then 2 else 3;
+        def fgl-phase-number(phase) = if str_eq(phase, "gas") then 0 else if str_eq(phase, "water") then 1 else if str_eq(phase, "ice") then 2 else -1;
+        def fgl-phase?(state, phase) = if eq(fgl-phase-index(state), fgl-phase-number(phase)) then 1 else 0;
         def fgl-phase-metric-count(rows, phase) = if eq(len(rows), 0) then 0 else add(if and(eq(fgo-present?(head(rows)), 1), eq(fgl-phase?(fgo-lifecycle(head(rows)), phase), 1)) then 1 else 0, fgl-phase-metric-count(tail(rows), phase));
         def fgl-phase-sample-count(rows, phase) = if eq(len(rows), 0) then 0 else add(if eq(fgl-phase?(fgtm-sample-lifecycle(head(rows)), phase), 1) then 1 else 0, fgl-phase-sample-count(tail(rows), phase));
         def fgl-observation-state-text(row) {
@@ -399,6 +403,16 @@ section [form.bml] {
         }
         def fgl-phase-observation-count(rows, phase) = if eq(len(rows), 0) then 0 else add(if eq(fgl-phase?(fgl-observation-state-text(head(rows)), phase), 1) then 1 else 0, fgl-phase-observation-count(tail(rows), phase));
         def fgl-phase-count(metrics, samples, observations, phase) = add(fgl-phase-metric-count(metrics, phase), add(fgl-phase-sample-count(samples, phase), fgl-phase-observation-count(observations, phase)));
+        // the three phase counts in one walk: each row is classified once (fgl-phase-index) and bumps one of three
+        // counters; the triple is (gas, water, ice)
+        def fgl-phase-bump(triple, state) {
+            let phase = fgl-phase-index(state);
+            if eq(phase, 0) then list(add(nth(triple, 0), 1), nth(triple, 1), nth(triple, 2)) else if eq(phase, 1) then list(nth(triple, 0), add(nth(triple, 1), 1), nth(triple, 2)) else if eq(phase, 2) then list(nth(triple, 0), nth(triple, 1), add(nth(triple, 2), 1)) else triple;
+        }
+        def fgl-phase-metric-triple(rows, triple) = if eq(len(rows), 0) then triple else fgl-phase-metric-triple(tail(rows), if eq(fgo-present?(head(rows)), 1) then fgl-phase-bump(triple, fgo-lifecycle(head(rows))) else triple);
+        def fgl-phase-sample-triple(rows, triple) = if eq(len(rows), 0) then triple else fgl-phase-sample-triple(tail(rows), fgl-phase-bump(triple, fgtm-sample-lifecycle(head(rows))));
+        def fgl-phase-observation-triple(rows, triple) = if eq(len(rows), 0) then triple else fgl-phase-observation-triple(tail(rows), fgl-phase-bump(triple, fgl-observation-state-text(head(rows))));
+        def fgl-phase-triple(metrics, samples, observations) = fgl-phase-observation-triple(observations, fgl-phase-sample-triple(samples, fgl-phase-metric-triple(metrics, list(0, 0, 0))));
         def fgl-sample-kind-capacity(rows, kind, found, total) = if eq(len(rows), 0) then if eq(found, 1) then total else -1 else if and(str_eq(fgtm-sample-kind(head(rows)), kind), eq(fgtm-field-present?(fgtm-sample-capacity(head(rows))), 1)) then fgl-sample-kind-capacity(tail(rows), kind, 1, add(total, fgtm-field-value(fgtm-sample-capacity(head(rows))))) else fgl-sample-kind-capacity(tail(rows), kind, found, total);
         def fgl-sample-channel-tag-memberships(rows) = if eq(len(rows), 0) then 0 else add(len(fgtm-sample-channels(head(rows))), fgl-sample-channel-tag-memberships(tail(rows)));
         // A fault key is an opaque, bounded Form NodeID projection. Select the
@@ -445,7 +459,8 @@ section [form.bml] {
                 fgl-gift-source-in(index, "host"),
                 fgl-gift-source-in(index, "glass"),
                 "glass.visible.phase-census", "glass.visible.phase-census", "glass.visible.phase-census", "telemetry.token-position.capacity", "model.owner.tensor.allocated", "telemetry.channel-memberships", if ge(accepted, 0) then fgl-source-for-in(index, list("accepted"), "framebuffer-events") else fgl-source-for-in(index, list("events"), "framebuffer-events"));
-            let point = fgd-flow-point-v4(epoch, fgd-flow-value(base, 2), fgd-flow-value(base, 3), fgd-flow-value(base, 4), fgd-flow-value(base, 5), fgd-flow-value(base, 6), fgd-flow-value(base, 7), fgd-flow-value(base, 8), fgd-flow-value(base, 9), fgl-phase-count(metrics, samples, observations, "gas"), fgl-phase-count(metrics, samples, observations, "water"), fgl-phase-count(metrics, samples, observations, "ice"), fgl-sample-kind-capacity(samples, "token-position", 0, 0), tensorObservation, fgl-sample-channel-tag-memberships(samples), accepted, evidences, sources);
+            let phases = fgl-phase-triple(metrics, samples, observations);
+            let point = fgd-flow-point-v4(epoch, fgd-flow-value(base, 2), fgd-flow-value(base, 3), fgd-flow-value(base, 4), fgd-flow-value(base, 5), fgd-flow-value(base, 6), fgd-flow-value(base, 7), fgd-flow-value(base, 8), fgd-flow-value(base, 9), nth(phases, 0), nth(phases, 1), nth(phases, 2), fgl-sample-kind-capacity(samples, "token-position", 0, 0), tensorObservation, fgl-sample-channel-tag-memberships(samples), accepted, evidences, sources);
             append(take(18, point), list(fgl-number-for-in(index, list("strings")), sources, fgl-jit-fault(samples)));
         }
 
@@ -848,7 +863,9 @@ section [form.bml] {
         // hottest defns with their source pointers (kernel_hot, one pass, microseconds) ----
         def fgl-hot-cell-boxes(cell) = if lt(len(cell), 7) then 0 else nth(cell, 5);
         def fgl-hot-cell-unboxes(cell) = if lt(len(cell), 7) then 0 else nth(cell, 6);
-        // the file name after the last slash of a unit path, built byte by byte (str_byte_at needs a length first)
+        // the file name after the last slash of a unit path, built byte by byte (str_byte_at needs a length first).
+        // str_find and substring are recipes that walk per byte and halve-and-concat: cut through them this walk
+        // cost four times what it costs here (fstr-find-loop 2.3M calls in 600 ticks, witnessed 2026-09-06)
         def fgl-unit-leaf(path) = if nothing?(path) then "?" else fgl-unit-leaf-from(path, fgl-unit-leaf-start(path, str_len(path)));
         def fgl-unit-leaf-start(path, i) = if le(i, 0) then 0 else if eq(str_byte_at(path, sub(i, 1)), 47) then i else fgl-unit-leaf-start(path, sub(i, 1));
         def fgl-unit-leaf-from(path, i) = if ge(i, str_len(path)) then "" else str_concat(byte_to_str(str_byte_at(path, i)), fgl-unit-leaf-from(path, add(i, 1)));
@@ -871,15 +888,19 @@ section [form.bml] {
         // ---- every live kernel's page: /fg-k<pid>, the counters the kernel writes in place every 1024 dispatches ----
         // words: 0 magic 1 pid 2 start-ms 3 seq 4 dispatches 5 heat calls 6 nodes 7 strings 8 cons 9 fns 10 gift frames 11 gift bytes 12 node cap 13 heap cap 14 stack 15 floats 16 hottest tag 17 hottest count 18 cpu us 19 alive 20 distinct arms
         def fgl-kernel-page-source(pid) = str_concat("shm:/fg-k", str_concat(int_to_str(pid), "#"));
-        def fgl-kernel-page-row(pid, w, id, label, k, unit, channel) = fgo-int("kernel", fgd-cat(list("k.", int_to_str(pid), ".", id)), fgd-cat(list("kernel ", int_to_str(pid), " ", label)), nth(w, k), unit, 0, "cpu-arena", "physical-live", str_concat(fgl-kernel-page-source(pid), int_to_str(nth(w, 3))), "live", channel, "read from the kernel's own live page, no wire");
+        // the pid's text and the page's source are rendered once per kernel and shared by its eleven rows
+        def fgl-kernel-page-row(pidText, source, w, id, label, k, unit, channel) = fgo-int("kernel", str_concat("k.", str_concat(pidText, str_concat(".", id))), str_concat("kernel ", str_concat(pidText, str_concat(" ", label))), nth(w, k), unit, 0, "cpu-arena", "physical-live", source, "live", channel, "read from the kernel's own live page, no wire");
         def fgl-kernel-page-rows(pid) = fgl-kernel-page-rows-with(pid, kernel_live(pid));
-        def fgl-kernel-page-rows-with(pid, w) {
-            if lt(len(w), 24) then list() else list(fgl-kernel-page-row(pid, w, "dispatches", "dispatches", 4, "calls", "kernel"), fgl-kernel-page-row(pid, w, "heat", "heat-lane calls", 5, "calls", "jit"), fgl-kernel-page-row(pid, w, "nodes", "nodes", 6, "nodes", "cell"), fgl-kernel-page-row(pid, w, "fns", "fns", 9, "fns", "kernel"), fgl-kernel-page-row(pid, w, "cpu-us", "cpu time", 18, "microseconds", "kernel"), fgl-kernel-page-row(pid, w, "gifts", "gift frames", 10, "frames", "gift"), fgl-kernel-page-row(pid, w, "store-shared", "store in shared memory", 22, "flag", "cell"), fgl-kernel-page-row(pid, w, "melts", "heap melts", 21, "melts", "cell"));
-        }
-        // every live kernel's hottest defns, read from its own page ledgers and names -- no scan, no wire
-        def fgl-kernel-page-hot-row(pid, cell) = if lt(len(cell), 7) then list() else fgo-int("kernel", fgd-cat(list("k.", int_to_str(pid), ".hot.", nth(cell, 1))), fgd-cat(list("k", int_to_str(pid), " ", nth(cell, 1), " ", fgl-unit-leaf(nth(cell, 2)), ":", int_to_str(nth(cell, 3)), " box ", int_to_str(nth(cell, 5)), " unbox ", int_to_str(nth(cell, 6)), fgl-hot-cell-native(cell))), nth(cell, 0), "calls", nth(cell, 0), "cpu-arena", "physical-live", fgl-kernel-page-source(pid), "live", "jit", "read from that kernel live page: heat, float boxes minted, float boxes read");
-        def fgl-kernel-page-hot-rows(pid, cells) = if eq(len(cells), 0) then list() else fgl-kernel-page-hot-next(pid, fgl-kernel-page-hot-row(pid, head(cells)), tail(cells));
-        def fgl-kernel-page-hot-next(pid, row, rest) = if eq(len(row), 0) then fgl-kernel-page-hot-rows(pid, rest) else cons(row, fgl-kernel-page-hot-rows(pid, rest));
+        def fgl-kernel-page-rows-with(pid, w) = if lt(len(w), 24) then list() else fgl-kernel-page-rows-named(int_to_str(pid), str_concat(fgl-kernel-page-source(pid), int_to_str(nth(w, 3))), w);
+        def fgl-kernel-page-rows-named(pidText, source, w) = list(fgl-kernel-page-row(pidText, source, w, "dispatches", "dispatches", 4, "calls", "kernel"), fgl-kernel-page-row(pidText, source, w, "heat", "heat-lane calls", 5, "calls", "jit"), fgl-kernel-page-row(pidText, source, w, "nodes", "nodes", 6, "nodes", "cell"), fgl-kernel-page-row(pidText, source, w, "fns", "fns", 9, "fns", "kernel"), fgl-kernel-page-row(pidText, source, w, "cpu-us", "cpu time", 18, "microseconds", "kernel"), fgl-kernel-page-row(pidText, source, w, "gifts", "gift frames", 10, "frames", "gift"), fgl-kernel-page-row(pidText, source, w, "store-shared", "store in shared memory", 22, "flag", "cell"), fgl-kernel-page-row(pidText, source, w, "melts", "heap melts", 21, "melts", "cell"));
+        // every live kernel's hottest defns, read from its own page ledgers and names -- no scan, no wire. The row's id is
+        // the rank (k.<pid>.hot.0, .1, .2), the defn's name lives in the label: an id carrying the name gave every name a
+        // kernel ever had in its top three a permanent field node and a framebuffer root (three a tick across the
+        // fleet), and the glass walked those roots every frame (rankseat)
+        def fgl-kernel-page-hot-row(pidText, source, cell, rank) = if lt(len(cell), 7) then list() else fgo-int("kernel", str_concat("k.", str_concat(pidText, str_concat(".hot.", int_to_str(rank)))), str_concat("k", str_concat(pidText, str_concat(" ", str_concat(nth(cell, 1), str_concat(" ", str_concat(fgl-unit-leaf(nth(cell, 2)), str_concat(":", str_concat(int_to_str(nth(cell, 3)), str_concat(" box ", str_concat(int_to_str(nth(cell, 5)), str_concat(" unbox ", str_concat(int_to_str(nth(cell, 6)), fgl-hot-cell-native(cell))))))))))))), nth(cell, 0), "calls", nth(cell, 0), "cpu-arena", "physical-live", source, "live", "jit", "read from that kernel live page: heat, float boxes minted, float boxes read");
+        def fgl-kernel-page-hot-rows(pid, cells) = fgl-kernel-page-hot-rows-named(int_to_str(pid), fgl-kernel-page-source(pid), cells, 0);
+        def fgl-kernel-page-hot-rows-named(pidText, source, cells, rank) = if eq(len(cells), 0) then list() else fgl-kernel-page-hot-next(pidText, source, fgl-kernel-page-hot-row(pidText, source, head(cells), rank), tail(cells), rank);
+        def fgl-kernel-page-hot-next(pidText, source, row, rest, rank) = if eq(len(row), 0) then fgl-kernel-page-hot-rows-named(pidText, source, rest, rank) else cons(row, fgl-kernel-page-hot-rows-named(pidText, source, rest, add(rank, 1)));
         def fgl-kernels-rows(pids) = fgl-kernels-rows-with(pids, fgl-kernel-lives(pids));
         // every live kernel's page is read once a frame (fgl-kernel-lives) and the four sums and the per-kernel rows share that reading
         def fgl-kernel-lives(pids) = if eq(len(pids), 0) then list() else cons(kernel_live(head(pids)), fgl-kernel-lives(tail(pids)));
@@ -950,7 +971,8 @@ section [form.bml] {
             let inventoryPair = fgtm-inventory-cached-held(FGLRoot(), roster, fgl-cache-snapshots(cache), kept);
             let inventory = nth(inventoryPair, 0);
             let inventoryMoved = if ge(len(inventoryPair), 2) then fgtm-inventory-moved(inventoryPair, fgl-cache-snapshots(cache)) else 1;
-            let inventorySamples = if and(eq(inventoryMoved, 0), gt(len(fgl-cache-samples(fgl-cache-empty())), 0)) then list() else fgl-external-samples(fgl-inventory-samples-at(inventory, epoch));
+            // decoded only when the next let will read it: an unmoved inventory with cached samples takes the cache below
+            let inventorySamples = if and(eq(inventoryMoved, 0), gt(len(fgl-cache-samples(cache)), 0)) then list() else fgl-external-samples(fgl-inventory-samples-at(inventory, epoch));
             let jitSamples = fgl-jit-current-samples-held(fgl-kept-take(kept, fgtm-space(FGLRoot(), FGLJitPublisher())));
             let externalSamples = if and(eq(inventoryMoved, 0), gt(len(fgl-cache-samples(cache)), 0)) then fgl-cache-samples(cache) else fgl-dedupe-samples(append(jitSamples, inventorySamples));
             let samples = fgl-local-samples(externalSamples, epoch);
