@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 693 rows, 681 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 694 rows, 682 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -254,6 +254,9 @@ form-glass-observation-v2-band         -> 2097151
 form-glass-wait-band                   -> 255
 form-glass-machine-band                -> 255
 form-glass-frame-work-band             -> 255
+persistence-band                       -> 7       (four-way)
+channel-breath-band                    -> 500     (four-way)
+blueprint-authority-band               -> 63487   (from form/, every arm; bit 2048 is doc drift)
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -555,13 +558,26 @@ ms climbing, wait 0, a core at 100%); `form-glass-frame-work-band` 255 reads
 the loop's own cadence rows, hot page and dispatch word from a quiet child.
 (receipts/2026-09-06-the-frame-work-rests.md)
 
+**The binary form crosses the fourth arm.** `read_form_binary`,
+`write_form_binary`, `recipe_to_bytes`, `bytes_to_recipe` and `value_kind` are
+modes 4-8 of the tag-201 door (rewrite rows, no new tag: the tag space is
+full and 150 is the native-surface probe). fkwu re-emits a Go interop
+artifact byte for byte and Go, Rust and TypeScript read the fourth arm's
+bytes. Underneath, `write_file` wrote a field-interned string from the local
+pool -- right length, NUL bytes -- so nine conformance vectors reached the
+kernels as zeros and read bad magic; it writes through the string's own
+arena now. `gate/kernel-conformance.bml` answers 1 with all three witnesses
+(13 canonical expressions each, 12 of 12 malformed artifacts refused), and
+the drift gates stand at 2047 of 2047. persistence 7 and channel-breath 500
+four-way. (receipts/2026-09-06-the-binary-form-on-the-fourth-arm.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=39 moving=0 released=86 -> 39000086
-./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=88 -> 38000088
+./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
 `native-surface`, `category-contract`, `primitive-registry`, `flt-ops-gen`,
@@ -585,16 +601,10 @@ What answered red or nothing in this pass, so no one leans on it:
 - `control/tests/invite-dispatch-band.fk` answers 763 of its declared 1023
   (preflight clean): bit 4 (a second `<CHOICE>` finding nothing declining) and
   bit 256 (`<TIMEOUT>`) are open.
-- `blueprint-authority-band` 51199 of 65535, exit 1: `value_kind` is a native
-  the Go/Rust/TS kernels carry and fkwu does not — a lane seam.
-  `persistence-band` 2 of 7 and `channel-breath-band` 200 of 500 stop on
-  `write_form_binary` the same way; `concept-i18n-band` answers its input-absent
-  word with `read_form_binary`/`write_form_binary` unresolved beneath it.
-- `mesh-sensings-route-band` 63, `sense-loop-band` 8191,
-  `native-mutation-route-side-effects-band` 11111 and `verb-router-band` 3
-  each reach their declared verdict yet exit 1: a Go/Rust-only native
-  (`write_form_binary`, `recipe_to_bytes`, `pg_exec`) sits unresolved in a
-  prelude the run never reaches — lane seams, not defects.
+- `mesh-sensings-route-band` 63 and `native-mutation-route-side-effects-band`
+  11111 reach their declared verdict on every arm; on fkwu `pg_*` and `kh-*`
+  names sit unresolved in preludes the runs never reach (no postgres carrier
+  stands in this seed, and no band reaches one).
 - BML `match` is not lowered on fkwu (`source-language-match-switch-band` 0;
   R77) and `import Num;` binds nothing (`bml-import-ref-resolution-band` 2111
   with `Num` unresolved; R78).
@@ -635,9 +645,6 @@ What answered red or nothing in this pass, so no one leans on it:
   `jit-representation-specialization-band.fk` and `jit-stack-frame-band.fk`
   answer nothing: each file ends with one paren open
   (`[input-ended-mid-form]`).
-- The `kernel-conformance` row of `gate/drift-gates-run.bml` refuses in this
-  checkout: the TypeScript kernel's dependencies are absent, and the row names
-  its own remedy (`npm ci` in `form/form-kernel-ts`).
 
 ## Honest seams
 
