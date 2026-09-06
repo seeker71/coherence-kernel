@@ -27,6 +27,10 @@ section [form.bml] {
         field FGTMMaxSnapshotWireBytes = 1048576;
         field FGTMMaxControlWireBytes = 4096;
         field FGTMMaxPublishers = 128;
+        field FGTMOwnerCommandRoot = "native-model-owner-control";
+        field FGTMOwnerCommandSuffix = ".owner-command";
+        field FGTMOwnerCommandSchema = "native-model-owner-command-v2";
+        field FGTMOwnerCommandLeaseMs = 2000;
         ref fgtm-authority = FormGlassTelemetryMembraneAuthority;
         thought fgtm-law = list("absent-is-not-zero", "caller-root-only", "token-metadata-only", "atomic-current-snapshot", "bounded-control-enums");
 
@@ -281,6 +285,33 @@ section [form.bml] {
         def fgtm-read-ack-parsed(channel, ack) = if and(eq(len(ack), 7), str_eq(head(ack), "glass-control-ack-v1")) then if str_eq(fgtm-ack-channel(ack), channel) then list("glass-control-ack-read-v1", channel, "ack", fgtm-present(ack)) else list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("channel-mismatch")) else list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("ack-shape"));
         def fgtm-read-ack-taken(channel, taken) = if str_eq(head(taken), "absent") then list("glass-control-ack-read-v1", channel, "absent", fgtm-absent()) else if str_eq(head(taken), "unreadable") then list("glass-control-ack-read-v1", channel, "malformed", fgtm-present("frame-unreadable")) else fgtm-read-ack-parsed(channel, nth(taken, 1));
         def fgtm-read-control-ack(root, channel) = if not(eq(fgtm-root-valid?(root), 1)) then list("glass-control-ack-read-v1", channel, "refused", fgtm-present("root")) else if not(eq(fgtm-channel-id?(channel), 1)) then list("glass-control-ack-read-v1", channel, "refused", fgtm-present("channel")) else fgtm-read-ack-taken(channel, fgtm-gift-take(root, fgtm-control-frame(channel, FGTMAckSuffix())));
+
+        // ---- the model owner's command lease: one cell in one frame per owner publisher, <publisher>.owner-command ----
+        // A pending command is the lease: while one stands and is younger than the lease, a second offer is refused;
+        // the owner consumes it by giving the empty cell back into the frame. No lock directory, no lease file.
+        def fgtm-command-frame(publisher) = str_concat(publisher, FGTMOwnerCommandSuffix());
+        def fgtm-command-cell(publisher, command, epochMs) = list(FGTMOwnerCommandSchema(), publisher, command, epochMs);
+        def fgtm-command-cell?(cell) = if nothing?(cell) then 0 else if not(eq(len(cell), 4)) then 0 else if not(str_eq(head(cell), FGTMOwnerCommandSchema())) then 0 else 1;
+        def fgtm-command-cell-command(cell) = nth(cell, 2);
+        def fgtm-command-cell-epoch(cell) = nth(cell, 3);
+        def fgtm-command-pending(publisher) {
+            let taken = fgtm-gift-take(FGTMOwnerCommandRoot(), fgtm-command-frame(publisher));
+            if not(str_eq(head(taken), "read")) then list() else if eq(fgtm-command-cell?(nth(taken, 1)), 1) then nth(taken, 1) else list();
+        }
+        def fgtm-command-lease-live?(pending, epochMs) = if eq(len(pending), 0) then 0 else if lt(sub(epochMs, fgtm-command-cell-epoch(pending)), FGTMOwnerCommandLeaseMs()) then 1 else 0;
+        def fgtm-command-offer-at(publisher, command, epochMs) {
+            let pending = fgtm-command-pending(publisher);
+            let seq = if eq(fgtm-command-lease-live?(pending, epochMs), 1) then -2 else fgtm-gift-give(FGTMOwnerCommandRoot(), fgtm-command-frame(publisher), FGTMMaxControlWireBytes(), fgtm-command-cell(publisher, command, epochMs));
+            if eq(seq, -2) then list("owner-command-offer-v2", "leased", fgtm-command-cell-command(pending)) else if ge(seq, 0) then list("owner-command-offer-v2", "offered", command) else list("owner-command-offer-v2", "failed", command);
+        }
+        def fgtm-command-offer(publisher, command) = fgtm-command-offer-at(publisher, command, now_unix_ms());
+        def fgtm-command-consume(publisher) {
+            let pending = fgtm-command-pending(publisher);
+            let cleared = if eq(len(pending), 0) then -1 else fgtm-gift-give(FGTMOwnerCommandRoot(), fgtm-command-frame(publisher), FGTMMaxControlWireBytes(), list());
+            if eq(len(pending), 0) then list("owner-command-consume-v2", "waiting", "") else if lt(cleared, 0) then list("owner-command-consume-v2", "failed", fgtm-command-cell-command(pending)) else list("owner-command-consume-v2", "ready", fgtm-command-cell-command(pending));
+        }
+        def fgtm-command-status(result) = nth(result, 1);
+        def fgtm-command-value(result) = nth(result, 2);
     }
     0;
 }

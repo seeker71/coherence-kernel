@@ -417,3 +417,43 @@ long long fk_mlx_status_external(char *out, long long cap) {
     }
     return (long long)n;
 }
+
+/* the same state as words, for a glass that reads and never parses:
+ * 0 linked 1 metal available 2 gpu available 3 device (1 gpu, 0 cpu) 4 version major 5 minor 6 patch
+ * 7 ops 8 dispatches 9 last error present 10 last error length 11 reserved. Answers the word count. */
+long long fk_mlx_live_external(long long *out) {
+    if (out == 0) {
+        return 0;
+    }
+    int k = 0;
+    while (k < 12) { out[k] = 0; k = k + 1; }
+    bool metal = 0;
+    mlx_metal_is_available(&metal);
+    mlx_device gpu = mlx_device_new_type(MLX_GPU, 0);
+    bool gpu_ok = 0;
+    mlx_device_is_available(&gpu_ok, gpu);
+    mlx_string ver = mlx_string_new();
+    mlx_version(&ver);
+    const char *vs = mlx_string_data(ver);
+    long long part[3] = {0, 0, 0};
+    int pi = 0;
+    while (vs != 0 && *vs != 0 && pi < 3) {
+        if (*vs >= '0' && *vs <= '9') { part[pi] = part[pi] * 10 + (*vs - '0'); }
+        else if (*vs == '.') { pi = pi + 1; }
+        else { break; }
+        vs = vs + 1;
+    }
+    out[0] = 1;
+    out[1] = metal ? 1 : 0;
+    out[2] = gpu_ok ? 1 : 0;
+    out[3] = gpu_ok ? 1 : 0;
+    out[4] = part[0]; out[5] = part[1]; out[6] = part[2];
+    out[7] = 23;
+    out[8] = fk_mlx_dispatch;
+    out[9] = strcmp(fk_mlx_err, "none") == 0 ? 0 : 1;
+    out[10] = (long long)strlen(fk_mlx_err);
+    out[11] = 0;
+    mlx_string_free(ver);
+    mlx_device_free(gpu);
+    return 12;
+}

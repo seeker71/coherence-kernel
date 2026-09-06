@@ -150,6 +150,26 @@ static long long fk_host_spawn_arm(long long argv155, long long t);
 static void *fk_store_take(char letter, long long bytes);
 static void *fk_store_grow(char letter, void *p, long long old_bytes, long long new_bytes, long long reserved, int zero);
 static void fk_store_go_private(void);
+/* the program surface: the AST rows (A), the source text (S) and the defn table + header (D) of THIS kernel,
+ * per-pid objects /fg-c<pid>-A|S|D, so another process reads a defn's body nodes and source span where they live */
+#define FK_PROG_AST_ROWS (1LL << 25)      /* 1 GiB of 32-byte rows, committed page by page */
+#define FK_PROG_SRC_BYTES (1LL << 30)
+#define FK_PROG_D_BYTES (48LL << 20)
+#define FK_PROG_D_PATH_OFF 4096
+#define FK_PROG_D_FN_OFF 8192             /* row j (a fntop index): sym start, sym length, fn idx -- 3 words, 2^20 rows */
+#define FK_PROG_D_BODY_OFF (8192 + (32LL << 20))   /* word idx: the body node of fn idx, 2^20 words */
+#define FK_PROG_FNS (1LL << 20)
+static void *fk_prog_take(char letter, long long bytes);
+static void fk_prog_note_counts(void);
+static void fk_prog_note_body(long long idx);
+static void fk_prog_note_ice(const char *path, long long len, const char *hash_text);
+static int fk_prog_ast_shared, fk_prog_src_shared;
+static long long *fk_prog_D;
+static void fk_store_name(char letter, long long pid, char *out);
+static void *fk_store_copy_out(void *p, long long bytes);
+static char *fk_srctext;
+static long long fk_slen;
+static unsigned long long fk_bytes_fnv1a(const char *p, long long n);
 static void fk_store_unlink_pid(long long pid);
 /* ---- the field: one host-wide store every kernel shares -- the same word is the same cell in every process ----
  * Shared pairs, shared strings and shared floats live in their own index ranges (>= 2^40) behind the same
@@ -1146,6 +1166,7 @@ extern int ioctl(int, unsigned long, ...);
 #if defined(__has_include) && !defined(_WIN32)
 #if __has_include(<time.h>)
 #include <time.h>
+#include <sched.h>
 #endif
 #endif
 #endif
@@ -1696,6 +1717,7 @@ FK_METAL_WEAK long long fk_metal_deadline_external(long long ms) {
  * the evaluator (holes after metal_fence_wait's 142). Checkout-witness; the
  * Form walker is the shrink target. */
 #define FK_MLX_UNLINKED FK_METAL_HANDLE_UNLINKED
+FK_METAL_WEAK long long fk_mlx_live_external(long long *out) { int k = 0; while (k < 12) { out[k] = 0; k = k + 1; } return -1; } /* strong symbol lives in the MLX carrier */
 FK_METAL_WEAK long long fk_mlx_status_external(char *out, long long cap) {
     (void)out;
     (void)cap;
@@ -7980,7 +8002,11 @@ static void fk_ast_reserve(long long need) {
     long long nc;
     long long i;
     if (fk_ast_cap == 0) {
-        fk_node = (long long (*)[4])calloc(FK_AST_NODE_CAP_INIT, 32);
+        /* the rows live in this kernel's program surface (/fg-c<pid>-A, a sparse reservation another process maps and
+         * reads by row); when the host offers no shared memory they live in private memory as before */
+        fk_node = (long long (*)[4])fk_prog_take('A', FK_PROG_AST_ROWS * 32);
+        fk_prog_ast_shared = fk_node != 0;
+        if (fk_node == 0) { fk_node = (long long (*)[4])calloc(FK_AST_NODE_CAP_INIT, 32); }
         fk_flit_memo = (long long *)calloc(FK_AST_NODE_CAP_INIT, 8);
         if (fk_node == 0 || fk_flit_memo == 0) {
             fk_die("fk_ast_reserve: out of memory for the AST node table");
@@ -7994,13 +8020,21 @@ static void fk_ast_reserve(long long need) {
     while (nc < need) {
         nc = nc * 2;
     }
-    fk_node = (long long (*)[4])realloc(fk_node, (unsigned long)(nc * 32));
+    if (fk_prog_ast_shared && nc > FK_PROG_AST_ROWS) {
+        /* past the reservation: the rows go private once (copied), the shared object is unlinked, the header says so */
+        fk_node = (long long (*)[4])fk_store_copy_out(fk_node, fk_ast_cap * 32);
+        { char nm[32]; fk_store_name('A', (long long)getpid(), nm); shm_unlink(nm); }
+        fk_prog_ast_shared = 0;
+    }
+    if (!fk_prog_ast_shared) {
+        fk_node = (long long (*)[4])realloc(fk_node, (unsigned long)(nc * 32));
+    }
     fk_flit_memo = (long long *)realloc(fk_flit_memo, (unsigned long)(nc * 8));
     if (fk_node == 0 || fk_flit_memo == 0) {
         fk_die("fk_ast_reserve: out of memory growing the AST node table");
     }
     i = fk_ast_cap * 4;
-    while (i < nc * 4) {
+    while (!fk_prog_ast_shared && i < nc * 4) {   /* a shared reservation is zero-filled by the host; touching it would commit it */
         fk_node[i >> 2][i & 3] = 0;
         i = i + 1;
     }
@@ -8796,7 +8830,7 @@ static int fk_f64_install(long long fx, long long root, long long orig, unsigned
     if (!fk_f64_reserve(fx)) { munmap(mem, 4096); return 0; }
     fk_f64_mem[fx] = mem;
     fk_f64_sig[fx] = sig;
-    if (fk_node[root][0] != 194) { fk_fn[fx] = fk_smknode(194, fx, orig, 0); }
+    if (fk_node[root][0] != 194) { fk_fn[fx] = fk_smknode(194, fx, orig, 0); fk_prog_note_body(fx); }
     fk_fn_native[fx] = state;
     return 1;
 #else
@@ -9900,6 +9934,71 @@ static void *fk_store_take(char letter, long long bytes) {
     return 0;
 #endif
 }
+/* ---- the program surface: A (AST rows), S (source text), D (header + defn table) as per-pid objects ----
+ * D words: 0 magic 1 layout 2 node count 3 source length 4 fntop 5 defn count 6 A shared 7 S shared
+ * 8 ice images loaded 9 last ice byte length 10 ice identity fold 11 ice path length 12 AST cap 13 source cap.
+ * byte 4096: the last ice path. byte 8192: per fntop index j (sym start, sym length, fn idx). +32 MiB: per fn idx the
+ * body node. The rows and the text ARE the kernel's own tables; the header and defn words are written at the moment
+ * they change (a defn recorded, a body bound, a unit loaded, the page noted) -- no tick, no copy of the tree. */
+#define FK_PROG_MAGIC 0x53414B46LL   /* 'FKAS' */
+static void *fk_prog_take(char letter, long long bytes) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    if (fk_prog_D == 0 && letter != 'D') {
+        fk_prog_D = (long long *)fk_prog_take('D', FK_PROG_D_BYTES);
+        if (fk_prog_D == 0) { return 0; }
+        fk_prog_D[0] = FK_PROG_MAGIC; fk_prog_D[1] = 1;
+    }
+    char nm[32];
+    fk_store_name(letter, (long long)getpid(), nm);
+    shm_unlink(nm);
+    int fd = shm_open(nm, O_CREAT | O_RDWR, 0600);
+    if (fd < 0) { return 0; }
+    if (ftruncate(fd, bytes) != 0) { close(fd); shm_unlink(nm); return 0; }
+    void *p = mmap(0, (size_t)bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) { shm_unlink(nm); return 0; }
+    return p;
+#else
+    (void)letter; (void)bytes;
+    return 0;
+#endif
+}
+static void fk_prog_unlink_pid(long long pid) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    char nm[32];
+    fk_store_name('A', pid, nm); shm_unlink(nm);
+    fk_store_name('S', pid, nm); shm_unlink(nm);
+    fk_store_name('D', pid, nm); shm_unlink(nm);
+#else
+    (void)pid;
+#endif
+}
+static void fk_prog_note_counts(void) {
+    if (fk_prog_D == 0) { return; }
+    fk_prog_D[2] = fk_node_count; fk_prog_D[3] = fk_slen; fk_prog_D[4] = fk_fntop; fk_prog_D[5] = fk_defn_next;
+    fk_prog_D[6] = fk_prog_ast_shared; fk_prog_D[7] = fk_prog_src_shared; fk_prog_D[12] = fk_ast_cap; fk_prog_D[13] = fk_srctext_cap;
+}
+static void fk_prog_note_defn(long long j) {
+    if (fk_prog_D == 0 || j < 0 || j >= FK_PROG_FNS) { return; }
+    long long *row = (long long *)((char *)fk_prog_D + FK_PROG_D_FN_OFF) + j * 3;
+    row[0] = fk_fnsym_s[j]; row[1] = fk_fnsym_n[j]; row[2] = fk_fnidx[j];
+    fk_prog_note_counts();
+}
+static void fk_prog_note_body(long long idx) {
+    if (fk_prog_D == 0 || idx < 0 || idx >= FK_PROG_FNS) { return; }
+    ((long long *)((char *)fk_prog_D + FK_PROG_D_BODY_OFF))[idx] = fk_fn[idx];
+    fk_prog_note_counts();   /* a body binds after its nodes exist: the counts are current here */
+}
+static void fk_prog_note_ice(const char *path, long long len, const char *hash_text) {
+    if (fk_prog_D == 0) { return; }
+    long long n = 0;
+    char *dst = (char *)fk_prog_D + FK_PROG_D_PATH_OFF;
+    while (path != 0 && path[n] != 0 && n < 4095) { dst[n] = path[n]; n = n + 1; }
+    dst[n] = 0;
+    unsigned long long fold = fk_bytes_fnv1a(dst, n);
+    if (hash_text != 0) { long long hn = 0; while (hash_text[hn] != 0) { hn = hn + 1; } fold = fold ^ fk_bytes_fnv1a(hash_text, hn); }
+    fk_prog_D[8] = fk_prog_D[8] + 1; fk_prog_D[9] = len; fk_prog_D[10] = (long long)(fold >> 1); fk_prog_D[11] = n;
+}
 static void *fk_store_copy_out(void *p, long long bytes) {
     char *q = malloc((unsigned long)bytes);
     if (q == 0) { fk_die("fk_store: out of memory leaving shared memory"); }
@@ -10427,6 +10526,7 @@ static void fk_live_line_col(long long off, long long *line, long long *col) {
 }
 /* a defn's name, unit and source pointer, written once when the defn is recorded */
 static void fk_live_note_defn(long long j) {
+    if (j >= 0 && j < fk_fntop + 1) { fk_prog_note_defn(j); }
     if (fk_live_page == 0 || j < 0 || j >= fk_fntop + 1) { return; }
     long long fx = fk_fnidx[j];
     if (fx < 0 || fx >= FK_LIVE_FNS) { return; }
@@ -10455,7 +10555,7 @@ static void fk_live_roster_register(long long pid) {
     while (k < 256) {
         long long v = slots[k];
         if (v == pid) { free_slot = -1; break; }
-        if (v > 0 && v != pid && kill((int)v, 0) != 0) { char dn[32]; fk_live_pid_name(v, dn); shm_unlink(dn); fk_store_unlink_pid(v); slots[k] = 0; v = 0; }
+        if (v > 0 && v != pid && kill((int)v, 0) != 0) { char dn[32]; fk_live_pid_name(v, dn); shm_unlink(dn); fk_store_unlink_pid(v); fk_prog_unlink_pid(v); slots[k] = 0; v = 0; }
         if (free_slot < 0 && v == 0) { free_slot = k; }
         k = k + 1;
     }
@@ -10517,6 +10617,7 @@ static void fk_live_note(int final) {
     w[6] = fk_np; w[7] = fk_sp; w[8] = fk_hp; w[9] = fk_fntop; w[10] = fk_gift_count; w[11] = gb; w[12] = fk_node_cap; w[13] = fk_cap; w[14] = fk_vsp; w[15] = fk_fp;
     w[18] = fk_live_cpu_us(); w[19] = final ? 0 : 1; w[21] = fk_melt_gen; w[22] = fk_field_on ? 2 : fk_store_shared; w[23] = fk_heap_gen; w[27] = fk_fntop;
     __atomic_store_n(&w[3], w[3] + 1, __ATOMIC_RELEASE);
+    fk_prog_note_counts();
 }
 static void fk_live_publish(int final) { fk_live_note(final); }
 /* read-only mapping of another kernel's page or the roster: the words, then unmap */
@@ -10934,6 +11035,144 @@ static long long fk_float_leaf(long long mode, long long x) {
     long long fi = fk_nid[ni][3];
     if (fi < 0 || fi > fk_fp) { return fk_nothing; }
     return fk_fbox(FK_FV(fi));
+}
+/* ---- the rest that lands, and the wait that wakes on the word (host_sleep_ms, tag 183) ----
+ * An int ask rests that many ms. A list ask (n watch ...) rests at most n ms and wakes early the moment a watched gift
+ * frame's seq word (its first word, the seqlock) differs from the seq the caller last saw: a watch is a frame handle
+ * (seq read at entry) or a (handle seq) pair. The rest is sliced -- a 1 ms nanosleep while the remainder is safely
+ * larger than the worst overshoot seen so far in this rest, a yield spin for the last stretch -- because nanosleep on
+ * this host lands 1-10 ms late (niced or loaded), and a frame that wakes late is a frame that shows a stale word.
+ * Answers: int ask -> ms rested (nearest); list ask -> (ms-rested woke-index us-rested (seq-now ...)). */
+static long long fk_mono_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+}
+static long long fk_rest_arm(long long a) {
+    volatile long long *wp[64];
+    long long ws[64];
+    long long ms = 0, woke = -1, nw = 0;
+    int list_mode = 0;
+    if (a == fk_nothing) { return fk_nothing; }
+    if ((a & 1) == 0) { ms = a >> 1; }
+    else {
+        long long p = a >> 1;
+        if (!(p >= 1 && FK_POK(p))) { return fk_nothing; }
+        list_mode = 1;
+        ms = FK_HH(p) >> 1;
+        p = FK_HT(p) >> 1;
+        while (p >= 1 && FK_POK(p) && nw < 64) {
+            long long w = FK_HH(p), gh = -1, seq0 = -1;
+            if (w != fk_nothing && (w & 1) == 0) { gh = w >> 1; }
+            else if (w != fk_nothing && w >= 3) {
+                long long q = w >> 1;
+                if (q >= 1 && FK_POK(q)) {
+                    gh = FK_HH(q) >> 1;
+                    long long r = FK_HT(q) >> 1;
+                    if (r >= 1 && FK_POK(r)) { seq0 = FK_HH(r) >> 1; }
+                }
+            }
+            if (gh >= 0 && fk_gift_live(gh)) {
+                wp[nw] = (volatile long long *)fk_gift_base[gh];
+                long long cur = __atomic_load_n(wp[nw], __ATOMIC_ACQUIRE);
+                ws[nw] = seq0 >= 0 ? seq0 : cur;
+                nw = nw + 1;
+            }
+            p = FK_HT(p) >> 1;
+        }
+    }
+    long long t0 = fk_mono_ns(), now = t0, deadline = t0 + (ms > 0 ? ms : 0) * 1000000LL, slack = 0;
+    for (;;) {
+        long long k = 0;
+        while (k < nw) { long long s = __atomic_load_n(wp[k], __ATOMIC_ACQUIRE); if (s != ws[k]) { woke = k; break; } k = k + 1; }
+        now = fk_mono_ns();
+        long long rem = deadline - now;
+        if (woke >= 0 || rem <= 0) { break; }
+        if (rem > slack + 300000) {
+            struct timespec req;
+            long long ask = rem - slack - 100000;
+            if (ask > 1000000) { ask = 1000000; }
+            if (ask < 50000) { ask = 50000; }
+            req.tv_sec = 0; req.tv_nsec = ask;
+            nanosleep(&req, 0);
+            long long over = fk_mono_ns() - now - ask;
+            if (over > slack) { slack = over > 5000000 ? 5000000 : over; }
+        } else {
+            sched_yield();
+        }
+    }
+    long long ns = now - t0;
+    if (!list_mode) { return ((ns + 500000) / 1000000) << 1; }
+    long long seqs = 1, k = nw - 1;
+    while (k >= 0) { long long s = __atomic_load_n(wp[k], __ATOMIC_ACQUIRE); seqs = fk_cons_val(((s & 1) ? s - 1 : s) << 1, seqs); k = k - 1; }
+    return fk_cons_val(((ns + 500000) / 1000000) << 1, fk_cons_val(woke << 1, fk_cons_val((ns / 1000) << 1, fk_cons_val(seqs, 1))));
+}
+/* ---- reading another kernel's program surface (kernel_ast, tag 32) ---- */
+static void *fk_prog_map(char letter, long long pid, long long *size) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+    char nm[32];
+    fk_store_name(letter, pid, nm);
+    int fd = shm_open(nm, O_RDONLY, 0600);
+    if (fd < 0) { return 0; }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return 0; }
+    void *p = mmap(0, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) { return 0; }
+    *size = (long long)st.st_size;
+    return p;
+#else
+    (void)letter; (void)pid; (void)size;
+    return 0;
+#endif
+}
+static long long fk_prog_read(long long pid, long long spec) {
+    long long dsz = 0, out = fk_nothing;
+    long long *D = (long long *)fk_prog_map('D', pid, &dsz);
+    if (D == 0) { return fk_nothing; }
+    if (dsz < FK_PROG_D_BYTES || D[0] != FK_PROG_MAGIC) { munmap(D, (size_t)dsz); return fk_nothing; }
+    if (spec != fk_nothing && (spec & 1) == 0) {
+        long long k = spec >> 1;
+        if (k < 0) {
+            long long path = fk_sbuf((char *)D + FK_PROG_D_PATH_OFF, D[11] >= 0 && D[11] < 4096 ? D[11] : 0);
+            out = fk_cons_val(D[2] << 1, fk_cons_val(D[3] << 1, fk_cons_val(D[4] << 1, fk_cons_val(D[5] << 1, fk_cons_val(D[6] << 1, fk_cons_val(D[7] << 1, fk_cons_val(D[8] << 1, fk_cons_val(D[9] << 1, fk_cons_val(D[10] << 1, fk_cons_val(path, 1))))))))));
+        } else if (k < D[2] && D[6] == 1) {
+            long long asz = 0;
+            long long (*A)[4] = (long long (*)[4])fk_prog_map('A', pid, &asz);
+            if (A != 0) {
+                if ((k + 1) * 32 <= asz) { out = fk_cons_val(A[k][0] << 1, fk_cons_val(A[k][1] << 1, fk_cons_val(A[k][2] << 1, fk_cons_val(A[k][3] << 1, 1)))); }
+                munmap(A, (size_t)asz);
+            }
+        }
+    } else if (spec != fk_nothing && spec >= 3) {
+        long long p = spec >> 1;
+        char mode[16];
+        mode[0] = 0;
+        if (p >= 1 && FK_POK(p)) { fk_cstr(FK_HH(p), mode, 16); p = FK_HT(p) >> 1; }
+        if (fk_cstr_eq(mode, "src") && p >= 1 && FK_POK(p)) {
+            long long off = FK_HH(p) >> 1, len = -1;
+            long long q = FK_HT(p) >> 1;
+            if (q >= 1 && FK_POK(q)) { len = FK_HH(q) >> 1; }
+            if (off >= 0 && len >= 0 && off + len <= D[3] && D[7] == 1) {
+                long long ssz = 0;
+                char *S = (char *)fk_prog_map('S', pid, &ssz);
+                if (S != 0) {
+                    if (off + len <= ssz) { out = fk_sbuf(S + off, len); }
+                    munmap(S, (size_t)ssz);
+                }
+            }
+        } else if (fk_cstr_eq(mode, "defn") && p >= 1 && FK_POK(p)) {
+            long long j = FK_HH(p) >> 1;
+            if (j >= 0 && j < D[4] && j < FK_PROG_FNS) {
+                long long *row = (long long *)((char *)D + FK_PROG_D_FN_OFF) + j * 3;
+                long long idx = row[2];
+                long long body = idx >= 0 && idx < FK_PROG_FNS ? ((long long *)((char *)D + FK_PROG_D_BODY_OFF))[idx] : -1;
+                out = fk_cons_val(row[0] << 1, fk_cons_val(row[1] << 1, fk_cons_val(idx << 1, fk_cons_val(body << 1, 1))));
+            }
+        }
+    }
+    munmap(D, (size_t)dsz);
+    return out;
 }
 static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 194) { return fk_walk(fk_node[i][2], fp); }
@@ -11686,6 +11925,22 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* kernel_page_box pid n: that kernel boxing worklist from its page */
         return fk_page_rows(fk_walk(fk_node[i][1], fp) >> 1, 1, fk_walk(fk_node[i][2], fp) >> 1);
     }
+    if (t == 29) {
+        /* mlx_live: the MLX carrier's state as words (linked, metal, gpu, device, version major/minor/patch, ops,
+         * dispatches, error present, error length, 0); nil when MLX is not linked -- no text, nothing to parse */
+        long long m29[12];
+        if (fk_mlx_live_external(m29) <= 0) { return 1; }
+        long long l29 = 1;
+        long long k29 = 11;
+        while (k29 >= 0) { l29 = fk_cons_val(m29[k29] << 1, l29); k29 = k29 - 1; }
+        return l29;
+    }
+    if (t == 32) {
+        /* kernel_ast pid spec: that kernel's program surface where it lives -- spec -1 the header words, k a node's four
+         * words, (list "src" off len) a source span, (list "defn" j) a defn's symbol span, fn idx and body node */
+        long long pid32 = fk_walk(fk_node[i][1], fp) >> 1;
+        return fk_prog_read(pid32, fk_walk(fk_node[i][2], fp));
+    }
     if (t == 165) {
         /* metal_live: the carrier's counters as words; nil when Metal is not up */
         long long m165[18];
@@ -11759,17 +12014,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return ((long long)fk_ts.tv_sec * 1000 + (long long)fk_ts.tv_nsec / 1000000) << 1;
     }
     if (t == 183) {
-        long long ms183 = fk_walk(fk_node[i][1], fp) >> 1;
-        if (ms183 <= 0) {
-            return 0;
-        }
-        struct timespec fk_t0, fk_t1, fk_req;
-        clock_gettime(CLOCK_MONOTONIC, &fk_t0);
-        fk_req.tv_sec = ms183 / 1000;
-        fk_req.tv_nsec = (ms183 % 1000) * 1000000;
-        nanosleep(&fk_req, 0);
-        clock_gettime(CLOCK_MONOTONIC, &fk_t1);
-        return (((long long)fk_t1.tv_sec - fk_t0.tv_sec) * 1000 + ((long long)fk_t1.tv_nsec - fk_t0.tv_nsec) / 1000000) << 1;
+        /* host_sleep_ms n: rest n ms landing within half a millisecond; host_sleep_ms (list n watch...): rest at most n ms,
+         * waking early when a watched gift frame's seq word moves -- the glass's wait door (see fk_rest_arm) */
+        return fk_rest_arm(fk_walk(fk_node[i][1], fp));
     }
     /* THE GIFT FRAME (tags 184-189): a frame in process shared memory that one
      * process offers and any other receives with no latency and no polling of a
@@ -13089,7 +13336,10 @@ static void fk_srctext_reserve(long long need) {
     long long nc;
     char *q;
     if (fk_srctext_cap == 0) {
-        fk_srctext = malloc(FK_SOURCE_TEXT_CAP_INIT);
+        /* the program text lives in this kernel's program surface (/fg-c<pid>-S) when the host offers shared memory */
+        fk_srctext = (char *)fk_prog_take('S', FK_PROG_SRC_BYTES);
+        fk_prog_src_shared = fk_srctext != 0;
+        if (fk_srctext == 0) { fk_srctext = malloc(FK_SOURCE_TEXT_CAP_INIT); }
         if (fk_srctext == 0) {
             fk_die("fk_srctext_reserve: out of memory for the source-text buffer");
         }
@@ -13101,6 +13351,16 @@ static void fk_srctext_reserve(long long need) {
     nc = fk_srctext_cap;
     while (nc < need) {
         nc = nc * 2;
+    }
+    if (fk_prog_src_shared && nc <= FK_PROG_SRC_BYTES) {
+        fk_srctext_cap = nc;   /* inside the reservation nothing moves */
+        fk_srctext_grows = fk_srctext_grows + 1;
+        return;
+    }
+    if (fk_prog_src_shared) {
+        fk_srctext = (char *)fk_store_copy_out(fk_srctext, fk_srctext_cap);
+        { char nm[32]; fk_store_name('S', (long long)getpid(), nm); shm_unlink(nm); }
+        fk_prog_src_shared = 0;
     }
     q = realloc(fk_srctext, (unsigned long)nc);
     if (q == 0) {
@@ -13902,7 +14162,7 @@ static long long fk_sparse(void) {
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
-            fk_fn[idx] = body;
+            fk_fn[idx] = body; fk_prog_note_body(idx);
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
             fk_fntop = saved_fntop;
@@ -14722,7 +14982,7 @@ static long long fk_parse_do(void) {
             if (fk_maxslot > 0) {
                 dbody = fk_smknode(111, fk_smklit(fk_maxslot), dbody, 0);
             }
-            fk_fn[didx] = dbody;
+            fk_fn[didx] = dbody; fk_prog_note_body(didx);
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
             fk_enc_mark = dsaved_enc_mark;
@@ -15199,7 +15459,7 @@ static void fk_parse_top(void) {
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
-            fk_fn[idx] = body;
+            fk_fn[idx] = body; fk_prog_note_body(idx);
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
             return;
@@ -17046,6 +17306,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
         return 0;
     }
+    fk_prog_note_ice(fkb_path, fk_fkb_len, expected_source_hash);
     return 1;
 }
 /* the whole-image loader restores fn symbols instead of skipping them:
@@ -17211,7 +17472,7 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     fk_fn_count = nf;
     long long i = 0;
     while (!fk_fkb_bad && i < nf) {
-        fk_fn[i] = fk_fkb_read_signed();
+        fk_fn[i] = fk_fkb_read_signed(); fk_prog_note_body(i);
         i = i + 1;
     }
     long long nr = fk_fkb_read_signed();
@@ -17259,6 +17520,8 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     fk_defn_next = fk_fn_count;
     fk_const_top = 0;
     fk_root = fk_fn_count > 0 ? fk_fn[0] : -1;
+    fk_prog_note_ice(fkb_path, fk_fkb_len, expected_source_hash);
+    fk_prog_note_counts();
     return 1;
 }
 static int fk_src_load_fkb(const char *fkb_path) {
