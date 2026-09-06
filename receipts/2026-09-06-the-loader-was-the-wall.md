@@ -117,6 +117,31 @@ arms, minimum of six rounds (a loaded minute; read the ratio, not the millisecon
   Paris. The Louvre Museum"), the 3B's sixteen ("Paris. The capital of Italy is Rome. The capital
   of Spain is Madrid.").
 
+## A machine-wide slowdown, named and undiagnosed
+
+Handing this over rather than stepping around it, because it silently taxes every GPU receipt
+written in this window. Through the same door, four hours apart:
+
+| | session start | session end |
+|---|---|---|
+| bandwidth (`fl-measure-bw`) | **347.63 GB/s** | **58.97 GB/s** |
+| arithmetic rate | — (the lens gained it today) | 8.59 TFLOPS (12.88 an hour earlier) |
+| llama3.2:1b token | 10.17 ms | 105.6 ms |
+
+Both bandwidth *and* arithmetic are down ~6x, so it is not a busy GPU alone. What is ruled out, by
+looking rather than by reasoning: **not** low power mode (`pmset -g` powermode 0, on AC, battery
+charged); **not** a thermal event (`pmset -g therm` has recorded no warning); **not** paging (34 MB
+of pageins across a whole lens run, 10.8 GB pages free); **not** another process holding the GPU at
+that instant (`Device Utilization %` read 0 immediately before the last reading). 31 `fkwu`
+processes are alive, three holding 1.23 GB each. `IOAccelerator`'s "Alloc system memory" reads
+115.8 GB against a 128 GB machine, but that counter looks cumulative and I did not establish that it
+is live — so it is a lead, not a finding. **Cause unknown.** Anyone quoting an absolute GPU number
+from this evening should re-take it.
+
+One reading artifact to know about: the lens's new weather line says "a quiet machine" in a fresh
+worktree no matter what, because `.hearth/floor-lens-best.rows` (gitignored, per-checkout) has no
+better reading to compare against yet. It self-heals upward on the first faster reading.
+
 ## Still open
 
 - **The superblock SwiGLU.** Gate, up and the activation are three dispatches on the K lane where
