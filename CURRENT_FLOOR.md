@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 698 rows, 686 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 699 rows, 687 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -610,12 +610,27 @@ flat at 33.5K where it grew 5K a second; 140 string, record, grammar and glass
 bands answer verdict for verdict the same; the heavy compile pays nothing
 measurable. (receipts/2026-09-06-the-dead-slot-is-the-next-string.md)
 
+**The recipe has a twin.** `nil?`, `append`, `int_to_str` and `reverse-onto`
+are core.fk recipes, five dispatches an element and the hottest names on
+every kernel's page, and the tag space is full. When one crosses 1024 calls
+the seed binds a twin: the defn's body entry becomes a tag-194 node with
+native state 3 and the twin id, and the walker meets the twin where it
+already reads a tag. Bound by name, arity AND defining unit (the six copies
+of the same recipes), so a same-named recipe elsewhere is never taken. A twin
+answers exactly what the recipe answers on lists, the empty list, strings,
+ints and nothing, and DECLINES anything else so the recipe's own answer
+stands. `append` x2000 onto a 2000-list 310 -> 27 ms, `int_to_str` x300K
+182 -> 26 ms, `reverse` x2000 202 -> 18 ms; the 140-band sweep answers
+verdict for verdict the same; `kernel_stat 52` counts twin calls and a
+twinned defn wears ` twin` on its hot row.
+(receipts/2026-09-06-the-recipe-has-a-twin.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=91 -> 38000091
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=92 -> 38000092
 ./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
