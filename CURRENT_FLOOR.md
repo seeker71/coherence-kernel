@@ -28,7 +28,7 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is 18,020 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is    18,059 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
 preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 681 rows, 669 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 682 rows, 670 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -244,6 +244,7 @@ form-glass-events-channels-band        -> 255
 node-gift-band                         -> 4095
 cell-store-band                        -> 255
 field-band                             -> 255
+jit-lens-band                          -> 255
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -424,12 +425,26 @@ index range (≥ 2⁴⁰ is the field) behind the same words. The field persists
 across processes as a host memory should; `observe/field-reset-run.fk` starts
 it over when no other kernel is alive. Live page word 22 reads 2.
 
+**The JIT on the glass.** The kernel charges every float box it mints and
+every float box it reads to the defn running (`fk_fn_fbox`, `fk_fn_unbox`),
+counts native arm64 leaf calls, and publishes the three totals on its live page
+(words 24–26) and as `kernel_stat 45/46/47`. `kernel_hot_rows n` (164) answers
+each hot defn as `(heat name unit line col boxes unboxes)`; `kernel_box_rows n`
+(191) is the unboxing worklist — the defns minting the most float boxes, the
+ones an unboxed float lane would take first. The `j` view shows `jit-boxes`,
+`jit-unboxes`, `jit-native-calls`, the worklist rows and the hot defns wearing
+both ledgers; `jit-unroll` is a row named absent by its door — the arm64 u32
+leaf does not claim the loop (`runtime/fkwu-uni.c:3349`), so no lane in this
+seed unrolls one, and the glass says so instead of inventing it.
+`jit-lens-band` 255: a defn adding floats twenty thousand times shows 20001
+boxes and 40000 reads on its own row; the int twin shows 0 and 0.
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=73 -> 47000073
+./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=74 -> 47000074
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,

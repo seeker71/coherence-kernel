@@ -484,8 +484,14 @@ static long long fk_isf(long long v) {
     long long fi = fk_fidx(v);
     return v <= fk_fbase - 3 && fi > 0 && (fi >= FK_FLT_BASE ? fi - FK_FLT_BASE < fk_field_fp() : fi <= fk_fp);
 }
+static long long fk_unbox_total;
+static long long *fk_fn_unbox;
+static long long fk_cur_fn;
+static long long fk_fn_capacity;
 static double fk_num(long long v) {
     if (fk_isf(v)) {
+        fk_unbox_total = fk_unbox_total + 1;
+        if (fk_fn_unbox != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_unbox[fk_cur_fn] = fk_fn_unbox[fk_cur_fn] + 1; }
         return FK_FV(fk_fidx(v));
     }
     return (double)(v >> 1);
@@ -499,6 +505,10 @@ static double fk_num(long long v) {
  * that matter. Written to .fkwu-boxing.<pid> beside the heat board. */
 static long long fk_cur_fn;
 static long long *fk_fn_fbox;
+static long long *fk_fn_unbox;      /* per-recipe float READS (a pool slot dereferenced per operand); beside fk_fn_fbox, the mints */
+static long long fk_box_total;      /* every float box minted this run */
+static long long fk_unbox_total;    /* every float box read this run */
+static long long fk_inram_call_total; /* every call that ran as native arm64 leaf code */
 static long long fk_fn_capacity;
 static long long fk_fbox(double d) {
     if (fk_fv == 0) {
@@ -518,6 +528,7 @@ static long long fk_fbox(double d) {
         }
     }
     fk_fv[fk_fp] = d;
+    fk_box_total = fk_box_total + 1;
     if (fk_fn_fbox != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) {
         fk_fn_fbox[fk_cur_fn] = fk_fn_fbox[fk_cur_fn] + 1;
     }
@@ -3979,6 +3990,7 @@ static long long fk_inram_args(long long arg_value, long long *a) {
  * before the prologue landed. Old single-arg images read only w0/w1;
  * handing eight registers to a page that reads fewer is AAPCS64-clean. */
 static long long fk_inram_call(void *mem, long long *a) {
+    fk_inram_call_total = fk_inram_call_total + 1;
     long long (*fn)(long long, long long, long long, long long, long long,
                     long long, long long, long long) =
         (long long (*)(long long, long long, long long, long long, long long,
@@ -7807,9 +7819,10 @@ static void fk_fn_reserve(long long needed) {
     long long *next_fnidx = malloc(bytes);
     long long *next_fn_heat = malloc(bytes);
     long long *next_fn_fbox = malloc(bytes);
+    long long *next_fn_unbox = malloc(bytes);
     if (next_fn == 0 || next_fnar == 0 || next_fnsym_s == 0 ||
         next_fnsym_n == 0 || next_fnidx == 0 || next_fn_heat == 0 ||
-        next_fn_fbox == 0) {
+        next_fn_fbox == 0 || next_fn_unbox == 0) {
         free(next_fn);
         free(next_fnar);
         free(next_fnsym_s);
@@ -7817,6 +7830,7 @@ static void fk_fn_reserve(long long needed) {
         free(next_fnidx);
         free(next_fn_heat);
         free(next_fn_fbox);
+        free(next_fn_unbox);
         fk_die("fk_fn_reserve: out of memory growing function image");
     }
     long long i = 0;
@@ -7828,6 +7842,7 @@ static void fk_fn_reserve(long long needed) {
         next_fnidx[i] = fk_fnidx[i];
         next_fn_heat[i] = fk_fn_heat[i];
         next_fn_fbox[i] = fk_fn_fbox[i];
+        next_fn_unbox[i] = fk_fn_unbox[i];
         i = i + 1;
     }
     while (i < next) {
@@ -7838,6 +7853,7 @@ static void fk_fn_reserve(long long needed) {
         next_fnidx[i] = 0;
         next_fn_heat[i] = 0;
         next_fn_fbox[i] = 0;
+        next_fn_unbox[i] = 0;
         i = i + 1;
     }
     free(fk_fn);
@@ -7847,6 +7863,7 @@ static void fk_fn_reserve(long long needed) {
     free(fk_fnidx);
     free(fk_fn_heat);
     free(fk_fn_fbox);
+    free(fk_fn_unbox);
     fk_fn = next_fn;
     fk_fnar = next_fnar;
     fk_fnsym_s = next_fnsym_s;
@@ -7854,6 +7871,7 @@ static void fk_fn_reserve(long long needed) {
     fk_fnidx = next_fnidx;
     fk_fn_heat = next_fn_heat;
     fk_fn_fbox = next_fn_fbox;
+    fk_fn_unbox = next_fn_unbox;
     fk_fn_capacity = next;
 }
 /* Closure bookkeeping, PER FUNCTION (not per call, not per instance -- see fk_clo_make for that).
@@ -9811,9 +9829,10 @@ static long long fk_cross_decode(const char *b, long long n, long long *pos, lon
  * (after the 16-byte gift header): 0 magic 1 pid 2 start-ms 3 seq 4 dispatches 5 heat calls
  * 6 nodes 7 strings 8 cons 9 fns 10 gift frames 11 gift bytes 12 node cap 13 heap cap
  * 14 value-stack depth 15 floats 16 hottest tag 17 hottest count 18 cpu us 19 alive 20 distinct arms
- * 21 melt generation 22 store shared (1: the value tables are in /fg-c<pid>-<letter>) 23 heap generation (0: h/t, 1: H/T) */
+ * 21 melt generation 22 store shared (1: per-kernel columns, 2: the field) 23 heap generation (0: h/t, 1: H/T)
+ * 24 float boxes minted 25 float boxes read 26 native leaf calls */
 #define FK_LIVE_MAGIC 0x464B4C4956LL
-#define FK_LIVE_WORDS 24
+#define FK_LIVE_WORDS 27
 static volatile long long *fk_live_page;
 static long long fk_live_ticks;
 static void fk_live_pid_name(long long pid, char *out) {
@@ -9879,6 +9898,7 @@ static void fk_live_publish(int final) {
     w[10] = fk_gift_count; w[11] = gb; w[12] = fk_node_cap; w[13] = fk_cap; w[14] = fk_vsp; w[15] = fk_fp;
     w[16] = hot; w[17] = hotc; w[18] = fk_live_cpu_us(); w[19] = final ? 0 : 1; w[20] = distinct;
     w[21] = fk_melt_gen; w[22] = fk_field_on ? 2 : fk_store_shared; w[23] = fk_heap_gen;
+    w[24] = fk_box_total; w[25] = fk_unbox_total; w[26] = fk_inram_call_total;
     __atomic_store_n(&w[3], w[3] + 1, __ATOMIC_RELEASE);
 }
 /* read-only mapping of another kernel's page or the roster: the words, then unmap */
@@ -9933,13 +9953,15 @@ static long long fk_roster_names(void) {
     return l;
 }
 /* the hottest defns of this process: top-n by heat, then one pass over the program text for line and column */
-static long long fk_hot_pick(long long want, long long *picked_j, long long *picked_h, long long *line_of, long long *col_of) {
+static long long fk_hot_pick_by(long long *ledger, long long want, long long *picked_j, long long *picked_h, long long *line_of, long long *col_of);
+static long long fk_hot_pick(long long want, long long *picked_j, long long *picked_h, long long *line_of, long long *col_of) { return fk_hot_pick_by(fk_fn_heat, want, picked_j, picked_h, line_of, col_of); }
+static long long fk_hot_pick_by(long long *ledger, long long want, long long *picked_j, long long *picked_h, long long *line_of, long long *col_of) {
     long long np = 0;
     long long j = 0;
     while (j < fk_fntop) {
         long long fx = fk_fnidx[j];
-        if (fx >= 0 && fx < fk_fn_count && fk_fn_heat[fx] > 0) {
-            long long h = fk_fn_heat[fx];
+        if (fx >= 0 && fx < fk_fn_count && ledger != 0 && ledger[fx] > 0) {
+            long long h = ledger[fx];
             long long k = np < want ? np : want - 1;
             if (np < want || h > picked_h[k]) {
                 if (np < want) { np = np + 1; }
@@ -10131,6 +10153,25 @@ static long long fk_cell_value(long long s, long long raw) {
         return fk_fbox(d);
     }
     return fk_nothing;
+}
+/* a hot row as a cell: (heat name unit line col boxes unboxes) -- the defn's own source pointer and both float ledgers */
+static long long fk_hot_row_cell(long long sj, long long heat, long long line, long long col) {
+    long long so = fk_fnsym_s[sj];
+    long long fx = fk_fnidx[sj];
+    const char *unit = fk_hot_unit_of(so);
+    long long boxes = (fk_fn_fbox != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_fbox[fx] : 0;
+    long long unboxes = (fk_fn_unbox != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_unbox[fx] : 0;
+    return fk_cons_val(heat << 1, fk_cons_val(fk_sbuf(fk_srctext + so, fk_fnsym_n[sj]), fk_cons_val(fk_sbuf(unit, fk_cstrlen(unit)), fk_cons_val(line << 1, fk_cons_val(col << 1, fk_cons_val(boxes << 1, fk_cons_val(unboxes << 1, 1)))))));
+}
+static long long fk_hot_rows_by(long long *ledger, long long want) {
+    if (want <= 0) { return 1; }
+    if (want > 64) { want = 64; }
+    long long pj[64], ph[64], ln[64], cl[64];
+    long long np = fk_hot_pick_by(ledger, want, pj, ph, ln, cl);
+    long long l = 1;
+    long long q = np - 1;
+    while (q >= 0) { l = fk_cons_val(fk_hot_row_cell(pj[q], ph[q], ln[q], cl[q]), l); q = q - 1; }
+    return l;
 }
 static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 9) {
@@ -10849,23 +10890,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return l163;
     }
     if (t == 164) {
-        /* kernel_hot_rows n: list of (heat name unit line col) for the hottest defns -- cells, no text to split */
-        long long want164 = fk_walk(fk_node[i][1], fp) >> 1;
-        if (want164 <= 0) { return 1; }
-        if (want164 > 64) { want164 = 64; }
-        long long pj164[64], ph164[64], ln164[64], cl164[64];
-        long long np164 = fk_hot_pick(want164, pj164, ph164, ln164, cl164);
-        long long l164 = 1;
-        long long q164 = np164 - 1;
-        while (q164 >= 0) {
-            long long sj = pj164[q164];
-            long long so = fk_fnsym_s[sj];
-            const char *unit = fk_hot_unit_of(so);
-            long long row = fk_cons_val(ph164[q164] << 1, fk_cons_val(fk_sbuf(fk_srctext + so, fk_fnsym_n[sj]), fk_cons_val(fk_sbuf(unit, fk_cstrlen(unit)), fk_cons_val(ln164[q164] << 1, fk_cons_val(cl164[q164] << 1, 1)))));
-            l164 = fk_cons_val(row, l164);
-            q164 = q164 - 1;
-        }
-        return l164;
+        /* kernel_hot_rows n: the hottest defns as cells (heat name unit line col boxes unboxes) */
+        return fk_hot_rows_by(fk_fn_heat, fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 191) {
+        /* kernel_box_rows n: the unboxing worklist -- the defns minting the most float boxes, same cell shape */
+        return fk_hot_rows_by(fk_fn_fbox, fk_walk(fk_node[i][1], fp) >> 1);
     }
     if (t == 165) {
         /* metal_live: the carrier's counters as words; nil when Metal is not up */
@@ -12001,6 +12031,15 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 43) {
             return fk_fntop << 1;
+        }
+        if (ks_k == 45) {
+            return fk_box_total << 1;
+        }
+        if (ks_k == 46) {
+            return fk_unbox_total << 1;
+        }
+        if (ks_k == 47) {
+            return fk_inram_call_total << 1;
         }
         if (ks_k == 44) {
             return fk_heat_total << 1;
