@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 699 rows, 687 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 700 rows, 688 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -253,7 +253,7 @@ form-glass-telemetry-membrane-band     -> 2097151
 form-glass-observation-v2-band         -> 2097151
 form-glass-wait-band                   -> 255
 form-glass-machine-band                -> 255
-form-glass-frame-work-band             -> 8191
+form-glass-frame-work-band             -> 32767
 persistence-band                       -> 7       (four-way)
 channel-breath-band                    -> 500     (four-way)
 blueprint-authority-band               -> 63487   (from form/, every arm; bit 2048 is doc drift)
@@ -625,12 +625,25 @@ verdict for verdict the same; `kernel_stat 52` counts twin calls and a
 twinned defn wears ` twin` on its hot row.
 (receipts/2026-09-06-the-recipe-has-a-twin.md)
 
+**One pass a line.** The live glass builds every changed line's bytes by
+consing each byte once onto the bytes that follow it (`ftcb-onto-*`: style,
+text, position, line, patch, whole frame -- no append chain, no reverse),
+compares lines field-once, renders atlas tokens as strings with the state
+classified once a cell, walks only the points a spark shows, builds map and
+typed lines only in the views that draw them, decodes the inventory only when
+read, counts phases in one walk, and renders each kernel's pid once for its
+eleven rows with hot rows keyed by rank. 2.58M -> 1.26M dispatches a tick,
+frame-work 6-8 ms, CPU about 30%, the drawn frame identical digit-masked;
+`form-glass-frame-work-band` 32767. The loop's framebuffer roots still climb
+about 2.7 a tick from a site no door shows when called alone -- named with
+its rate. (receipts/2026-09-06-one-pass-a-line.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=92 -> 38000092
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=93 -> 38000093
 ./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
