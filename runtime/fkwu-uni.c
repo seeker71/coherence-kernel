@@ -107,7 +107,9 @@ static long long fk_diag_quiet;  /* nonzero: speculative compile — count into
 static int fk_src_truncated;     /* 1 if the source was amputated at the source-text cap (dissolved 2026-09-02: the buffer grows) */
 static long long fk_srctext_cap;   /* live source-text capacity (kernel_stat 25); owned by fk_srctext_reserve below */
 static long long fk_srctext_grows; /* source-text doublings this run (kernel_stat 26) */
-static long long fk_heat_total;    /* heat-lane calls this run (kernel_stat 44); defined with the heat lane below */
+static long long fk_heat_total_private;
+static long long *fk_heat_total_p = &fk_heat_total_private;
+#define fk_heat_total (*fk_heat_total_p)   /* heat-lane calls: a word in this kernel live page once it opens */
 static long long fk_gpu_busy_total_us; /* host GPU busy microseconds integrated in this process (host_gpu_busy_us) */
 static long long fk_gpu_busy_last_us;  /* monotonic clock at the last fresh level read (the integration step) */
 static long long fk_gpu_level_cache = -1; /* the last level read; the utilization the accelerator answers is the mean since the previous query by ANY process, so a second read within the window would read 0 */
@@ -184,6 +186,9 @@ static int fk_heap_gen;
 static void *fk_heap_alt_h;
 static void *fk_heap_alt_t;
 static void fk_live_publish(int final);
+static const char *fk_hot_unit_of(long long so);
+static void fk_live_open(void);
+static void fk_live_note_defn(long long j);
 static long long fk_live_ticks;
 #ifdef __APPLE__
 extern unsigned int mach_host_self(void);
@@ -484,7 +489,15 @@ static long long fk_isf(long long v) {
     long long fi = fk_fidx(v);
     return v <= fk_fbase - 3 && fi > 0 && (fi >= FK_FLT_BASE ? fi - FK_FLT_BASE < fk_field_fp() : fi <= fk_fp);
 }
-static long long fk_unbox_total;
+static long long fk_unbox_total_private;
+static long long *fk_unbox_total_p = &fk_unbox_total_private;
+#define fk_unbox_total (*fk_unbox_total_p)
+static long long fk_box_total_private;
+static long long *fk_box_total_p = &fk_box_total_private;
+#define fk_box_total (*fk_box_total_p)
+static long long fk_inram_call_total_private;
+static long long *fk_inram_call_total_p = &fk_inram_call_total_private;
+#define fk_inram_call_total (*fk_inram_call_total_p)
 static long long *fk_fn_unbox;
 static long long fk_cur_fn;
 static long long fk_fn_capacity;
@@ -506,9 +519,6 @@ static double fk_num(long long v) {
 static long long fk_cur_fn;
 static long long *fk_fn_fbox;
 static long long *fk_fn_unbox;      /* per-recipe float READS (a pool slot dereferenced per operand); beside fk_fn_fbox, the mints */
-static long long fk_box_total;      /* every float box minted this run */
-static long long fk_unbox_total;    /* every float box read this run */
-static long long fk_inram_call_total; /* every call that ran as native arm64 leaf code */
 static long long fk_fn_capacity;
 static long long fk_fbox(double d) {
     if (fk_fv == 0) {
@@ -673,7 +683,8 @@ static void fk_pv(long long v) {
         }
     }
 }
-static long long fk_arms[FK_OPCODE_ARM_CAP];
+static long long fk_arms_private[FK_OPCODE_ARM_CAP];
+static long long *fk_arms = fk_arms_private;   /* per-tag hit counters; the live page own words once it opens */
 /* the once-hold's node tag (declared early: the walker arm reads it far
  * above the const-table machinery that owns the rest of the mechanism). */
 #define FK_TAG_CONST_HOLD 190
@@ -4368,6 +4379,7 @@ static void fk_nodes_init(void) {
     if (fk_node_cap) {
         return;
     }
+    fk_live_open();
     fk_ast_reserve(1);
     fk_srctext_reserve(1);
     fk_src_root_reserve(1);
@@ -7795,6 +7807,7 @@ static long long *fk_fn, *fk_fnar, *fk_fnsym_s, *fk_fnsym_n, *fk_fnidx;
 static long long *fk_fn_heat;
 static long long fk_fn_capacity;
 static long long fk_fntop, fk_defn_next, fk_root;
+static int fk_live_ledgers_paged;   /* 1 once fk_fn_heat/fbox/unbox point into the live page (fixed 2^20 fns) */
 static void fk_fn_reserve(long long needed) {
     if (needed <= fk_fn_capacity) {
         return;
@@ -7817,9 +7830,9 @@ static void fk_fn_reserve(long long needed) {
     long long *next_fnsym_s = malloc(bytes);
     long long *next_fnsym_n = malloc(bytes);
     long long *next_fnidx = malloc(bytes);
-    long long *next_fn_heat = malloc(bytes);
-    long long *next_fn_fbox = malloc(bytes);
-    long long *next_fn_unbox = malloc(bytes);
+    long long *next_fn_heat = fk_live_ledgers_paged ? fk_fn_heat : malloc(bytes);
+    long long *next_fn_fbox = fk_live_ledgers_paged ? fk_fn_fbox : malloc(bytes);
+    long long *next_fn_unbox = fk_live_ledgers_paged ? fk_fn_unbox : malloc(bytes);
     if (next_fn == 0 || next_fnar == 0 || next_fnsym_s == 0 ||
         next_fnsym_n == 0 || next_fnidx == 0 || next_fn_heat == 0 ||
         next_fn_fbox == 0 || next_fn_unbox == 0) {
@@ -7840,9 +7853,9 @@ static void fk_fn_reserve(long long needed) {
         next_fnsym_s[i] = fk_fnsym_s[i];
         next_fnsym_n[i] = fk_fnsym_n[i];
         next_fnidx[i] = fk_fnidx[i];
-        next_fn_heat[i] = fk_fn_heat[i];
-        next_fn_fbox[i] = fk_fn_fbox[i];
-        next_fn_unbox[i] = fk_fn_unbox[i];
+        if (!fk_live_ledgers_paged) { next_fn_heat[i] = fk_fn_heat[i]; }
+        if (!fk_live_ledgers_paged) { next_fn_fbox[i] = fk_fn_fbox[i]; }
+        if (!fk_live_ledgers_paged) { next_fn_unbox[i] = fk_fn_unbox[i]; }
         i = i + 1;
     }
     while (i < next) {
@@ -7851,9 +7864,9 @@ static void fk_fn_reserve(long long needed) {
         next_fnsym_s[i] = 0;
         next_fnsym_n[i] = 0;
         next_fnidx[i] = 0;
-        next_fn_heat[i] = 0;
-        next_fn_fbox[i] = 0;
-        next_fn_unbox[i] = 0;
+        if (!fk_live_ledgers_paged) { next_fn_heat[i] = 0; }
+        if (!fk_live_ledgers_paged) { next_fn_fbox[i] = 0; }
+        if (!fk_live_ledgers_paged) { next_fn_unbox[i] = 0; }
         i = i + 1;
     }
     free(fk_fn);
@@ -7861,9 +7874,9 @@ static void fk_fn_reserve(long long needed) {
     free(fk_fnsym_s);
     free(fk_fnsym_n);
     free(fk_fnidx);
-    free(fk_fn_heat);
-    free(fk_fn_fbox);
-    free(fk_fn_unbox);
+    if (!fk_live_ledgers_paged) { free(fk_fn_heat); }
+    if (!fk_live_ledgers_paged) { free(fk_fn_fbox); }
+    if (!fk_live_ledgers_paged) { free(fk_fn_unbox); }
     fk_fn = next_fn;
     fk_fnar = next_fnar;
     fk_fnsym_s = next_fnsym_s;
@@ -8178,8 +8191,6 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_die("fk_walk_body: node tag outside FK_OPCODE_ARM_CAP (0..255) -- the walker's tag space is the contract the op table is generated against; this is a corrupt node or a tag minted past the last arm");
         }
         fk_arms[t] = fk_arms[t] + 1;
-        fk_live_ticks = fk_live_ticks + 1;
-        if ((fk_live_ticks & 1023) == 1) { fk_live_publish(0); }
         if (t == 6) {
             if (fk_walk(fk_node[i][1], fp) == 0) {
                 i = fk_node[i][3];
@@ -8470,8 +8481,6 @@ static long long fk_walk(long long i, long long fp) {
         fk_die("fk_walk: node tag outside FK_OPCODE_ARM_CAP (0..255) -- the walker's tag space is the contract the op table is generated against; this is a corrupt node or a tag minted past the last arm");
     }
     fk_arms[t] = fk_arms[t] + 1;
-    fk_live_ticks = fk_live_ticks + 1;
-    if ((fk_live_ticks & 1023) == 1) { fk_live_publish(0); }
     if (t == 1) {
         return fk_node[i][1] << 1;
     }
@@ -9146,6 +9155,7 @@ static int fk_field_open(void) {
     fk_field_itab = x; fk_fph = P; fk_fpt = Q; fk_fsb = s; fk_fso = O; fk_fsl = L; fk_fstab = X; fk_ffv = F; fk_fftab = Y;
     fk_np_p = &w[2];
     fk_field_on = 1;
+    fk_live_publish(0); /* the page's store word changes here; the page has no tick, so the change is written where it happens */
     return 1;
 }
 static void fk_field_unlink_all(void) {
@@ -9832,7 +9842,7 @@ static long long fk_cross_decode(const char *b, long long n, long long *pos, lon
  * 21 melt generation 22 store shared (1: per-kernel columns, 2: the field) 23 heap generation (0: h/t, 1: H/T)
  * 24 float boxes minted 25 float boxes read 26 native leaf calls */
 #define FK_LIVE_MAGIC 0x464B4C4956LL
-#define FK_LIVE_WORDS 27
+#define FK_LIVE_WORDS 30
 static volatile long long *fk_live_page;
 static long long fk_live_ticks;
 static void fk_live_pid_name(long long pid, char *out) {
@@ -9856,6 +9866,65 @@ static long long fk_live_cpu_us(void) {
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &tc);
     return (long long)tc.tv_sec * 1000000 + (long long)tc.tv_nsec / 1000;
 }
+/* ---- the live page, second layout: the kernel counts INTO the page ----
+ * bytes 0..15 gift header; words at +16: 0 magic 1 pid 2 start-ms 3 seq 4 (reader sums the arms) 5 heat total
+ * 6 nodes 7 strings 8 cons 9 fns 10 gift frames 11 gift bytes 12 node cap 13 heap cap 14 stack 15 floats
+ * 16 (reader) 17 (reader) 18 cpu us 19 alive 20 (reader) 21 melt gen 22 store 23 heap gen 24 boxes 25 unboxes
+ * 26 native leaf calls 27 fn count 28 layout version (2) 29 meta count.
+ * byte 4096: the 256 arm counters. 8192: heat per fn (2^20 words). +8 MiB: boxes per fn. +16 MiB: unboxes per fn.
+ * +24 MiB: meta per fn, 5 words (name offset, name length, unit length, line, col). +64 MiB: the name blob (name then
+ * unit path, 32 MiB). Every hot-path increment the kernel already made now lands in these words; nothing is copied,
+ * nothing is scheduled, no tick is counted. The words the kernel does not increment (6-15, 18, 21-23, 27) are noted
+ * at melt, at exit and when the kernel reads its own page. */
+#define FK_LIVE_VERSION 2
+#define FK_LIVE_PAGE_BYTES ((100LL << 20))
+#define FK_LIVE_ARMS_OFF 4096
+#define FK_LIVE_FNS (1LL << 20)
+#define FK_LIVE_HEAT_OFF 8192
+#define FK_LIVE_FBOX_OFF (8192 + (8LL << 20))
+#define FK_LIVE_UNBOX_OFF (8192 + (16LL << 20))
+#define FK_LIVE_META_OFF (8192 + (24LL << 20))
+#define FK_LIVE_BLOB_OFF (8192 + (64LL << 20))
+#define FK_LIVE_BLOB_BYTES (32LL << 20)
+static long long fk_live_blob_used;
+static long long *fk_nl_offs;        /* newline offsets of the program text, scanned once and extended as the text grows */
+static long long fk_nl_count, fk_nl_cap, fk_nl_scanned;
+static void fk_live_line_col(long long off, long long *line, long long *col) {
+    while (fk_nl_scanned < fk_slen) {
+        if (fk_srctext[fk_nl_scanned] == FK_CH_LF) {
+            if (fk_nl_count == fk_nl_cap) { long long nc = fk_nl_cap == 0 ? 4096 : fk_nl_cap * 2; long long *nb = realloc(fk_nl_offs, (unsigned long)(nc * 8)); if (nb == 0) { fk_die("fk_live_line_col: out of memory"); } fk_nl_offs = nb; fk_nl_cap = nc; }
+            fk_nl_offs[fk_nl_count] = fk_nl_scanned;
+            fk_nl_count = fk_nl_count + 1;
+        }
+        fk_nl_scanned = fk_nl_scanned + 1;
+    }
+    long long lo = 0, hi = fk_nl_count;   /* newlines strictly before off */
+    while (lo < hi) { long long mid = (lo + hi) / 2; if (fk_nl_offs[mid] < off) { lo = mid + 1; } else { hi = mid; } }
+    *line = lo + 1;
+    *col = off - (lo == 0 ? -1 : fk_nl_offs[lo - 1]);
+}
+/* a defn's name, unit and source pointer, written once when the defn is recorded */
+static void fk_live_note_defn(long long j) {
+    if (fk_live_page == 0 || j < 0 || j >= fk_fntop + 1) { return; }
+    long long fx = fk_fnidx[j];
+    if (fx < 0 || fx >= FK_LIVE_FNS) { return; }
+    long long so = fk_fnsym_s[j], nl = fk_fnsym_n[j];
+    const char *unit = fk_hot_unit_of(so);
+    long long ul = fk_cstrlen(unit);
+    if (fk_live_blob_used + nl + ul > FK_LIVE_BLOB_BYTES) { return; }
+    char *blob = (char *)fk_live_page + FK_LIVE_BLOB_OFF;
+    long long k = 0;
+    while (k < nl) { blob[fk_live_blob_used + k] = fk_srctext[so + k]; k = k + 1; }
+    k = 0;
+    while (k < ul) { blob[fk_live_blob_used + nl + k] = unit[k]; k = k + 1; }
+    long long line = 0, col = 0;
+    fk_live_line_col(so, &line, &col);
+    long long *meta = (long long *)((char *)fk_live_page + FK_LIVE_META_OFF) + fx * 5;
+    meta[0] = fk_live_blob_used; meta[1] = nl; meta[2] = ul; meta[3] = line; meta[4] = col;
+    fk_live_blob_used = fk_live_blob_used + nl + ul;
+    volatile long long *w = fk_live_page + 2;
+    if (fx + 1 > w[29]) { w[29] = fx + 1; }
+}
 static void fk_live_roster_register(long long pid) {
     long long gh = fk_gift_open("/fg-kernels", 4096, 1);
     if (gh == fk_nothing) { return; }
@@ -9872,35 +9941,55 @@ static void fk_live_roster_register(long long pid) {
     munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
     fk_gift_base[gh >> 1] = 0;
 }
-static void fk_live_publish(int final) {
-    if (fk_live_page == 0) {
-        char name[32];
-        long long pid = (long long)getpid();
-        fk_live_pid_name(pid, name);
-        long long gh = fk_gift_open(name, 4096, 1);
-        if (gh == fk_nothing) { return; }
-        fk_live_page = (volatile long long *)fk_gift_base[gh >> 1];
-        fk_live_page[2 + 1] = pid;
-        fk_live_page[2 + 2] = fk_live_now_ms();
-        fk_live_page[2 + 3] = 0;
-        fk_live_page[2 + 0] = FK_LIVE_MAGIC;
-        fk_live_roster_register(pid);
-    }
+static void fk_live_note(int final);
+/* the page opens once: the counters the kernel increments repoint into it, what was counted so far carried over */
+static void fk_live_open(void) {
+    if (fk_live_page != 0) { return; }
+    char name[32];
+    long long pid = (long long)getpid();
+    fk_live_pid_name(pid, name);
+    long long gh = fk_gift_open(name, FK_LIVE_PAGE_BYTES, 1);
+    if (gh == fk_nothing) { return; }
+    fk_live_page = (volatile long long *)fk_gift_base[gh >> 1];
     volatile long long *w = fk_live_page + 2;
-    long long sum = 0, distinct = 0, hot = 0, hotc = 0, u = 1;
-    while (u < FK_OPCODE_ARM_CAP) {
-        if (fk_arms[u] > 0) { sum = sum + fk_arms[u]; distinct = distinct + 1; if (fk_arms[u] > hotc) { hotc = fk_arms[u]; hot = u; } }
-        u = u + 1;
-    }
+    w[1] = pid;
+    w[2] = fk_live_now_ms();
+    w[3] = 0;
+    w[28] = FK_LIVE_VERSION;
+    long long *arms = (long long *)((char *)fk_live_page + FK_LIVE_ARMS_OFF);
+    long long k = 0;
+    while (k < FK_OPCODE_ARM_CAP) { arms[k] = fk_arms[k]; k = k + 1; }
+    fk_arms = arms;
+    w[5] = fk_heat_total; fk_heat_total_p = (long long *)&w[5];
+    w[24] = fk_box_total; fk_box_total_p = (long long *)&w[24];
+    w[25] = fk_unbox_total; fk_unbox_total_p = (long long *)&w[25];
+    w[26] = fk_inram_call_total; fk_inram_call_total_p = (long long *)&w[26];
+    long long *heat = (long long *)((char *)fk_live_page + FK_LIVE_HEAT_OFF);
+    long long *fbox = (long long *)((char *)fk_live_page + FK_LIVE_FBOX_OFF);
+    long long *unbox = (long long *)((char *)fk_live_page + FK_LIVE_UNBOX_OFF);
+    long long cap = fk_fn_capacity < FK_LIVE_FNS ? fk_fn_capacity : FK_LIVE_FNS;
+    k = 0;
+    while (k < cap) { heat[k] = fk_fn_heat ? fk_fn_heat[k] : 0; fbox[k] = fk_fn_fbox ? fk_fn_fbox[k] : 0; unbox[k] = fk_fn_unbox ? fk_fn_unbox[k] : 0; k = k + 1; }
+    free(fk_fn_heat); free(fk_fn_fbox); free(fk_fn_unbox);
+    fk_fn_heat = heat; fk_fn_fbox = fbox; fk_fn_unbox = unbox;
+    fk_live_ledgers_paged = 1;
+    k = 0;
+    while (k < fk_fntop) { fk_live_note_defn(k); k = k + 1; }
+    w[0] = FK_LIVE_MAGIC;
+    fk_live_roster_register(pid);
+    fk_live_note(0);
+}
+/* the words the kernel does not increment on its hot path: noted at melt, at exit, and when it reads its own page */
+static void fk_live_note(int final) {
+    if (fk_live_page == 0) { fk_live_open(); if (fk_live_page == 0) { return; } }
+    volatile long long *w = fk_live_page + 2;
     long long gb = 0, gi = 0;
     while (gi < fk_gift_count) { if (fk_gift_base[gi] != 0) { gb = gb + fk_gift_size[gi]; } gi = gi + 1; }
-    w[4] = sum; w[5] = fk_heat_total; w[6] = fk_np; w[7] = fk_sp; w[8] = fk_hp; w[9] = fk_fntop;
-    w[10] = fk_gift_count; w[11] = gb; w[12] = fk_node_cap; w[13] = fk_cap; w[14] = fk_vsp; w[15] = fk_fp;
-    w[16] = hot; w[17] = hotc; w[18] = fk_live_cpu_us(); w[19] = final ? 0 : 1; w[20] = distinct;
-    w[21] = fk_melt_gen; w[22] = fk_field_on ? 2 : fk_store_shared; w[23] = fk_heap_gen;
-    w[24] = fk_box_total; w[25] = fk_unbox_total; w[26] = fk_inram_call_total;
+    w[6] = fk_np; w[7] = fk_sp; w[8] = fk_hp; w[9] = fk_fntop; w[10] = fk_gift_count; w[11] = gb; w[12] = fk_node_cap; w[13] = fk_cap; w[14] = fk_vsp; w[15] = fk_fp;
+    w[18] = fk_live_cpu_us(); w[19] = final ? 0 : 1; w[21] = fk_melt_gen; w[22] = fk_field_on ? 2 : fk_store_shared; w[23] = fk_heap_gen; w[27] = fk_fntop;
     __atomic_store_n(&w[3], w[3] + 1, __ATOMIC_RELEASE);
 }
+static void fk_live_publish(int final) { fk_live_note(final); }
 /* read-only mapping of another kernel's page or the roster: the words, then unmap */
 static long long fk_live_read_words(const char *name, long long *out, long long count) {
     long long gh = fk_gift_open(name, 0, 0);
@@ -10171,6 +10260,65 @@ static long long fk_hot_rows_by(long long *ledger, long long want) {
     long long l = 1;
     long long q = np - 1;
     while (q >= 0) { l = fk_cons_val(fk_hot_row_cell(pj[q], ph[q], ln[q], cl[q]), l); q = q - 1; }
+    return l;
+}
+/* another kernel's page: header words plus what the reader derives from the arms (dispatches, hottest, distinct) */
+static long long fk_live_read_page(const char *name, long long *out) {
+    long long gh = fk_gift_open(name, 0, 0);
+    if (gh == fk_nothing) { return -1; }
+    long long sz = fk_gift_size[gh >> 1];
+    volatile long long *w = (volatile long long *)fk_gift_base[gh >> 1] + 2;
+    long long k = 0;
+    while (k < FK_LIVE_WORDS) { out[k] = k < 30 ? w[k] : 0; k = k + 1; }
+    if (sz >= FK_LIVE_ARMS_OFF + FK_OPCODE_ARM_CAP * 8 && out[28] == FK_LIVE_VERSION) {
+        long long *arms = (long long *)((char *)fk_gift_base[gh >> 1] + FK_LIVE_ARMS_OFF);
+        long long sum = 0, distinct = 0, hot = 0, hotc = 0, u = 1;
+        while (u < FK_OPCODE_ARM_CAP) { long long a = arms[u]; if (a > 0) { sum = sum + a; distinct = distinct + 1; if (a > hotc) { hotc = a; hot = u; } } u = u + 1; }
+        out[4] = sum; out[16] = hot; out[17] = hotc; out[20] = distinct;
+    }
+    munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
+    fk_gift_base[gh >> 1] = 0;
+    return FK_LIVE_WORDS;
+}
+/* the hottest defns of ANY kernel by one of its page ledgers: (heat name unit line col boxes unboxes) cells */
+static long long fk_page_rows(long long pid, int ledger, long long want) {
+    if (want <= 0) { return 1; }
+    if (want > 64) { want = 64; }
+    char name[32];
+    fk_live_pid_name(pid, name);
+    long long gh = fk_gift_open(name, 0, 0);
+    if (gh == fk_nothing) { return 1; }
+    char *base = (char *)fk_gift_base[gh >> 1];
+    long long sz = fk_gift_size[gh >> 1];
+    volatile long long *w = (volatile long long *)base + 2;
+    if (sz < FK_LIVE_BLOB_OFF + FK_LIVE_BLOB_BYTES || w[28] != FK_LIVE_VERSION) { munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
+    long long *heat = (long long *)(base + FK_LIVE_HEAT_OFF), *fbox = (long long *)(base + FK_LIVE_FBOX_OFF), *unbox = (long long *)(base + FK_LIVE_UNBOX_OFF), *meta = (long long *)(base + FK_LIVE_META_OFF);
+    char *blob = base + FK_LIVE_BLOB_OFF;
+    long long *led = ledger == 1 ? fbox : heat;
+    long long count = w[29] < FK_LIVE_FNS ? w[29] : FK_LIVE_FNS;
+    long long pj[64], ph[64], np = 0, fx = 0;
+    while (fx < count) {
+        long long h = led[fx];
+        if (h > 0 && meta[fx * 5 + 1] > 0) {
+            long long k = np < want ? np : want - 1;
+            if (np < want || h > ph[k]) {
+                if (np < want) { np = np + 1; }
+                while (k > 0 && ph[k - 1] < h) { pj[k] = pj[k - 1]; ph[k] = ph[k - 1]; k = k - 1; }
+                pj[k] = fx; ph[k] = h;
+            }
+        }
+        fx = fx + 1;
+    }
+    long long l = 1, q = np - 1;
+    while (q >= 0) {
+        long long f = pj[q];
+        long long *m = meta + f * 5;
+        long long row = fk_cons_val(heat[f] << 1, fk_cons_val(fk_sbuf(blob + m[0], m[1]), fk_cons_val(fk_sbuf(blob + m[0] + m[1], m[2]), fk_cons_val(m[3] << 1, fk_cons_val(m[4] << 1, fk_cons_val(fbox[f] << 1, fk_cons_val(unbox[f] << 1, 1)))))));
+        l = fk_cons_val(row, l);
+        q = q - 1;
+    }
+    munmap(base, (size_t)sz);
+    fk_gift_base[gh >> 1] = 0;
     return l;
 }
 static long long fk_walk_cold(long long t, long long i, long long fp) {
@@ -10871,7 +11019,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 char nm162[32];
                 long long w162[FK_LIVE_WORDS];
                 fk_live_pid_name(pid162, nm162);
-                if (fk_live_read_words(nm162, w162, FK_LIVE_WORDS) == FK_LIVE_WORDS && w162[0] == FK_LIVE_MAGIC && w162[19] == 1) { l162 = fk_cons_val(pid162 << 1, l162); }
+                if (fk_live_read_page(nm162, w162) == FK_LIVE_WORDS && w162[0] == FK_LIVE_MAGIC && w162[19] == 1) { l162 = fk_cons_val(pid162 << 1, l162); }
             }
             k162 = k162 - 1;
         }
@@ -10883,7 +11031,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         char nm163[32];
         long long w163[FK_LIVE_WORDS];
         fk_live_pid_name(pid163, nm163);
-        if (fk_live_read_words(nm163, w163, FK_LIVE_WORDS) != FK_LIVE_WORDS || w163[0] != FK_LIVE_MAGIC) { return 1; }
+        if (pid163 == (long long)getpid()) { fk_live_note(0); }
+        if (fk_live_read_page(nm163, w163) != FK_LIVE_WORDS || w163[0] != FK_LIVE_MAGIC) { return 1; }
         long long l163 = 1;
         long long k163 = FK_LIVE_WORDS - 1;
         while (k163 >= 0) { l163 = fk_cons_val(w163[k163] << 1, l163); k163 = k163 - 1; }
@@ -10891,11 +11040,19 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 164) {
         /* kernel_hot_rows n: the hottest defns as cells (heat name unit line col boxes unboxes) */
-        return fk_hot_rows_by(fk_fn_heat, fk_walk(fk_node[i][1], fp) >> 1);
+        return fk_page_rows((long long)getpid(), 0, fk_walk(fk_node[i][1], fp) >> 1);
     }
     if (t == 191) {
         /* kernel_box_rows n: the unboxing worklist -- the defns minting the most float boxes, same cell shape */
-        return fk_hot_rows_by(fk_fn_fbox, fk_walk(fk_node[i][1], fp) >> 1);
+        return fk_page_rows((long long)getpid(), 1, fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 192) {
+        /* kernel_page_hot pid n: that kernel hottest defns from its page (heat name unit line col boxes unboxes) */
+        return fk_page_rows(fk_walk(fk_node[i][1], fp) >> 1, 0, fk_walk(fk_node[i][2], fp) >> 1);
+    }
+    if (t == 193) {
+        /* kernel_page_box pid n: that kernel boxing worklist from its page */
+        return fk_page_rows(fk_walk(fk_node[i][1], fp) >> 1, 1, fk_walk(fk_node[i][2], fp) >> 1);
     }
     if (t == 165) {
         /* metal_live: the carrier's counters as words; nil when Metal is not up */
@@ -11874,6 +12031,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_offer_ack(fi199, n199, r199);
     }
     if (t == 127) {
+        fk_live_note(0);
         long long ks_k = fk_walk(fk_node[i][1], fp) >> 1;
         long long ks_n = 256;
         if (ks_k == 0) {
@@ -12399,7 +12557,6 @@ static void fk_diag_flush(void) {
  * discovered after lunch. One file per working directory, last hot
  * writer speaks — a catching signal, not a ledger. */
 #define FK_HEAT_PULSE_MASK ((1LL << 26) - 1)
-static long long fk_heat_total;
 static int fk_heat_reported;
 
 static void fk_heat_write(void) {
@@ -13058,6 +13215,7 @@ static long long fk_sparse(void) {
             fk_fnsym_s[fk_fntop] = ns2;
             fk_fnsym_n[fk_fntop] = fk_fname_n;
             fk_fnidx[fk_fntop] = idx;
+            fk_live_note_defn(fk_fntop);
             fk_fntop = fk_fntop + 1;
             fk_fn_cap_reserve(idx + 1);
             fk_fn_parent_idx[idx] = fk_cur_defn_idx;
@@ -13876,6 +14034,7 @@ static long long fk_parse_do(void) {
             fk_fnsym_s[fk_fntop] = dns;
             fk_fnsym_n[fk_fntop] = dnlen;
             fk_fnidx[fk_fntop] = didx;
+            fk_live_note_defn(fk_fntop);
             fk_fntop = fk_fntop + 1;
             fk_fn_cap_reserve(didx + 1);
             fk_fn_parent_idx[didx] = fk_cur_defn_idx;
@@ -14204,6 +14363,7 @@ static void fk_prescan_form(long long *pp) {
         fk_fnsym_s[fk_fntop] = ns;
         fk_fnsym_n[fk_fntop] = nlen;
         fk_fnidx[fk_fntop] = idx;
+        fk_live_note_defn(fk_fntop);
         fk_fntop = fk_fntop + 1;
 
         /* count arity from the (ARGS...) list so self/forward calls read it */
@@ -14332,6 +14492,7 @@ static void fk_parse_top(void) {
                 fk_fnsym_s[fk_fntop] = ns2;
                 fk_fnsym_n[fk_fntop] = nlen2;
                 fk_fnidx[fk_fntop] = idx;
+                fk_live_note_defn(fk_fntop);
                 fk_fntop = fk_fntop + 1;
             }
             fk_fname_s = ns2;
@@ -16221,6 +16382,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
             if (new_fnidx >= 0 && new_fnidx < fk_fn_capacity) {
                 fk_fnar[new_fnidx] = arity;
             }
+            fk_live_note_defn(fk_fntop);
             fk_fntop = fk_fntop + 1;
         }
         i = i + 1;
@@ -16256,6 +16418,7 @@ static int fk_fkb_restore_symbol_image(long long version) {
     long long symbol_count = fk_fkb_read_signed();
     long long i = 0;
     fk_fntop = 0;
+    if (fk_live_page != 0) { (fk_live_page + 2)[29] = 0; fk_live_blob_used = 0; }
     fk_fn_reserve(symbol_count + 1);
     while (!fk_fkb_bad && i < symbol_count) {
         (void)fk_fkb_read_signed();
@@ -16277,6 +16440,7 @@ static int fk_fkb_restore_symbol_image(long long version) {
             if (fnidx < fk_fn_capacity) {
                 fk_fnar[fnidx] = arity;
             }
+            fk_live_note_defn(fk_fntop);
             fk_fntop = fk_fntop + 1;
         }
         i = i + 1;
@@ -16612,6 +16776,7 @@ static void fk_src_reset_compile_state(void) {
     fk_src_unrunnable = 0;
     fk_string_table_reset();
     fk_fntop = 0;
+    if (fk_live_page != 0) { (fk_live_page + 2)[29] = 0; fk_live_blob_used = 0; }
     fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;
@@ -17342,6 +17507,7 @@ static int fk_run_feval(const char *path) {
     fk_fn_reserve(1);
     fk_fn_count = 1;
     fk_fntop = 0;
+    if (fk_live_page != 0) { (fk_live_page + 2)[29] = 0; fk_live_blob_used = 0; }
     fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;

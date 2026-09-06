@@ -28,7 +28,7 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is    18,059 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is    18,225 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
 preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 682 rows, 670 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 683 rows, 671 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -439,12 +439,29 @@ seed unrolls one, and the glass says so instead of inventing it.
 `jit-lens-band` 255: a defn adding floats twenty thousand times shows 20001
 boxes and 40000 reads on its own row; the int twin shows 0 and 0.
 
+**The kernel counts into the page.** No counter on the live page is copied
+there. `fk_arms`, the heat, box, unbox and native-call totals, and the three
+per-defn ledgers are pointers the kernel repoints into `/fg-k<pid>` when the
+page opens (`fk_live_open`, at `fk_nodes_init`): the increment the dispatch
+loop already does IS the write the glass reads. There is no tick, no publish
+cadence, no serialization -- the 1024-dispatch sampler that carried the words
+before is gone, and a 20-million-iteration loop runs 0.89 s -> 0.67 s (int),
+0.98 s -> 0.78 s (float) on this Mac. A defn's name, unit, line and column land
+in the page meta the moment it is defined (`fk_live_note_defn`, at every
+recording site including `.fkb` ice), so any process reads any kernel's hot
+defns with source from the page alone: `kernel_page_hot pid n` (192) and
+`kernel_page_box pid n` (193). The words that change at moments -- nodes,
+strings, cpu, alive, store, melt generation -- are written where the moment
+happens (open, field open, melt, exit, self-read). The `k` view lists every live
+kernel's three hottest defns as `k<pid> <defn> <unit>:<line> box n unbox n`.
+`jit-lens-band` 255 and `cell-store-band` 255 stand on the page words.
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=74 -> 47000074
+./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=75 -> 47000075
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
