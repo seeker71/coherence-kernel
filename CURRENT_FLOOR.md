@@ -84,7 +84,7 @@ bml-form-size-band                     -> 127      (one 40 KB `def` in a single 
                                                      loop, so one statement's size sets no wall)
 cell-channel-band                      -> 4095     (two cells as processes on spool+bell, a shared
 - `form/form-stdlib/tests/ear-native-band.fk` = 255 — whisper-tiny as the body's own pass on this metal (native mic stream, weights off the npz, fifteen emitted kernels, base64 words); log-mel equal to the reference to six digits; an 8 s window encodes in 41 ms, a token costs 8 ms; the live window is the last 8 s of real room audio, the cut is the decoder's first timestamp, and a line ends where the world ends it.
-- `form/form-stdlib/tests/q8-0-matvec-tg-band.fk` = 1 — the cooperative Q8_0 matvec twin (32 threads a row, the attestant's own fold order) is byte for byte the attestant on llama3.2:1b's first projection and eight times faster; the dense lane dispatches it for every Q8_0 row.
+- `form/form-stdlib/tests/q8-0-matvec-tg-band.fk` = 27 — three cooperative Q8_0 matvec twins byte for byte the attestant on llama3.2:1b's first projection; the double-buffered one (two simdgroups a row) runs 48x the attestant at 88 GB/s against a measured 330 GB/s floor; the dense lane dispatches it, a token 36 ms (floor 4 ms); the two rmsnorm twins are compiled, not exact, not dispatched.
                                                      field admitting grammar offers by whole sha256,
                                                      evaluation through a child membrane under
                                                      hearth-channel-eval-s; the witness door
