@@ -104,19 +104,23 @@ And the same pair alternating round by round on ONE M=8 lane in one process, min
 84.3 / 91.5 / 105.0 / 138.0 ms across M=1,2,4,8 with the old GLU (a 1.64x climb) against
 129.3 / 129.2 / 131.6 / 127.2 with the new — flat.
 
-**Per answer, against the floor.** At the lens's 157.26 GB/s reading, the 1.32 GB blob over M is what
-one answer must move:
+**Per answer, against the floor — said so the field cannot move it.** A lane's floor is the blob over
+M, so the M=8 floor is exactly half the M=4 floor. Comparing the two lanes' distances inside ONE
+driver run divides the bandwidth out entirely:
 
-| | bytes an answer | floor | measured an answer | distance |
+| | step | an answer | floor an answer | distance, as a multiple of the M=4 lane's |
 |---|---|---|---|---|
-| 4in1 (M=4, untouched by this work) | 330.27 MB | 2.10 ms | 33.4 ms | 15.9x |
-| M=8 before | 165.14 MB | 1.05 ms | 21.2 ms | 20.2x |
-| **M=8 after** | 165.14 MB | 1.05 ms | **16.5 ms** | **15.7x** |
+| M=4 (untouched by this work) | 131.2 ms | 32.8 ms | blob / 4 | 1.000 |
+| M=8 before | 169.6 ms | 21.2 ms | blob / 8 | **1.289** |
+| **M=8 after** | 132.0 ms | **16.5 ms** | blob / 8 | **1.006** |
 
-Eight tongues now stand exactly where four stand — 15.7x against 15.9x — which is the gap's goal
-said in floor terms. On a quiet machine the standard's own reading of the 4in1 row is 3.7x, and the
-M=8 row would sit beside it; today's multiples are the field, not the lane. The single lane read
-9.3x and the 3B 23.04x in the same lens run, so the whole board moved together.
+Eight tongues now stand exactly where four stand. What four stand at is the lens's own number, and
+the lens is where the field shows: after the rebase it read **194.26 GB/s** (its own best this
+session, so "a quiet machine" by its reckoning) and put 4in1 at **22.97 ms an answer against a
+1.70 ms memory floor — 13.51x**, with the single lane at 9.1x and the 3B at 18.22x in the same run.
+The standard's own quiet-day reading of that 4in1 row is 3.7x; today the whole board sits 3-4x out
+together, which is the field and not the lane. The eight-tongue lane now carries whatever multiple
+the four-tongue lane carries — 13.51x today, 3.7x on a quiet machine.
 
 ## What I leave, and why — plainly
 
