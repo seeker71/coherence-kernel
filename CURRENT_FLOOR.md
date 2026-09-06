@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 696 rows, 684 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 697 rows, 685 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -234,7 +234,7 @@ form-glass-dashboard-band              -> 16777215
 form-glass-observer-band               -> 8388607
 form-glass-event-loop-band             -> 16777215
 form-glass-staged-startup-band         -> 65535
-form-glass-launch-band                 -> 32767
+form-glass-launch-band                 -> 65535
 form-glass-deadline-cadence-band       -> 4095
 form-glass-jit-hold-band               -> 4095
 form-glass-meaning-ui-band             -> 8191
@@ -253,7 +253,7 @@ form-glass-telemetry-membrane-band     -> 2097151
 form-glass-observation-v2-band         -> 2097151
 form-glass-wait-band                   -> 255
 form-glass-machine-band                -> 255
-form-glass-frame-work-band             -> 255
+form-glass-frame-work-band             -> 8191
 persistence-band                       -> 7       (four-way)
 channel-breath-band                    -> 500     (four-way)
 blueprint-authority-band               -> 63487   (from form/, every arm; bit 2048 is doc drift)
@@ -584,12 +584,23 @@ cold run 2.30 -> 1.87 s; the live glass loop 31M -> 98M dispatches per CPU
 second at 64% -> 49% of a core.
 (receipts/2026-09-06-a-compare-against-len-walks-only-so-far.md)
 
+**The frames stay open.** The live glass keeps one handle per gift frame it
+meets (`ggf-kept-*`: publisher, name computed once, handle, mode), ensured on
+the first tick and at the roster cadence, released at the loop's end; every
+one-shot door has a held twin beside it. Its metrics are read through one
+keyed index a frame (`fgd-metric-index`, a record) and every live kernel's
+page once. Witnessed: 3.03M -> 2.36M dispatches a tick, CPU 68-84% -> 53-58%,
+frame-work 20 -> 15 ms, 17 frames held where 0-1 stood;
+`form-glass-frame-work-band` 8191. The string pool still grows about 230
+strings a tick and the loop self-molts near frame 1200 -- the next wound,
+named with its rate. (receipts/2026-09-06-the-frames-stay-open.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=89 -> 38000089
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=90 -> 38000090
 ./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
