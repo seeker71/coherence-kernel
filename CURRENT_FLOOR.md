@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 697 rows, 685 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 698 rows, 686 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -595,12 +595,27 @@ frame-work 20 -> 15 ms, 17 frames held where 0-1 stood;
 strings a tick and the loop self-molts near frame 1200 -- the next wound,
 named with its rate. (receipts/2026-09-06-the-frames-stay-open.md)
 
+**The dead slot is the next string.** The string table melts with the heap:
+after the pair melt, `fk_smelt` marks every local string reachable from the
+melt's roots (the value stack, memory cells, record values and blueprints,
+value nodes) plus the raw-index holders (record keys, string-literal nodes),
+unlinks every unmarked slot from its hash chain and pushes it on a free list;
+`fk_sintern` takes a freed slot before growing the table and reuses its bytes
+when the new string fits. Live strings never move, so a reader through the
+shared store stays right. Eleven arms that held a string index across a later
+child walk now push it on the value stack around that walk. `kernel_stat 51`
+counts reclaimed slots. 120K temporaries across 42 melts leave a table of
+7,433 entries where 188,605 stood; the live glass loop's string count holds
+flat at 33.5K where it grew 5K a second; 140 string, record, grammar and glass
+bands answer verdict for verdict the same; the heavy compile pays nothing
+measurable. (receipts/2026-09-06-the-dead-slot-is-the-next-string.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=90 -> 38000090
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=91 -> 38000091
 ./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
