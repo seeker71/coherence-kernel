@@ -16,9 +16,11 @@
 ; — so the Form-side dispatch loop is paid once for M sequences, not M times.
 ;
 ; RADIUS, asked of the file: every layer must satisfy dth-fusable? (Q8_0 projections, cols a
-; multiple of 128, adjacent-pair rope, no qkv bias, maxpos <= 1024), the embedding and the head must
-; be Q8_0, and M in 1..8 (the kernels' xs[2][8][...] staging). A file outside it is refused at open,
-; loudly (dm-ok? false and the reason printed), never walked numb.
+; multiple of 128, adjacent-pair rope, no qkv bias), the embedding and the head must be Q8_0, and M
+; in 1..8 (the kernels' xs[2][8][...] staging). A file outside it is refused at open, loudly (dm-ok?
+; false and the reason printed), never walked numb. THE POOL IS NOT IN THE RADIUS: a live transcript
+; may hand this lane any maxpos its KV banks fit, because past 1024 positions the attention dispatches
+; the device-scratch twin instead of the threadgroup-staged one — the same folds, the same bytes.
 ;
 ; preludes: native/metal/dense-token-handle.fk form-stdlib/q8-0-matmat-msl.fk
 ;
@@ -27,7 +29,7 @@
 (do
     ; ================= the unit and its pipes =================
     ; mps: 0 matmat 1 matmat-add 2 matmat-x3 3 glu 4 rmsnorm-m 5 rope-m 6 attn-m 7 argmax-part-m
-    ;      8 argmax-comb-m 9 embed-m
+    ;      8 argmax-comb-m 9 embed-m 10 glu (two columns a lane) 11 glu (four)
     (defn dm-msl ()
         (str_concat "#include <metal_stdlib>\n#pragma clang fp contract(off)\n"
         (str_concat (q80-msl-spine)
@@ -44,16 +46,33 @@
               (metal_pipeline msl "form_gqa_decode_m_f32")
               (metal_pipeline msl "form_argmax_part_m_f32")
               (metal_pipeline msl "form_argmax_comb_m_f32")
-              (metal_pipeline msl "form_q80_embed_m_f32")))
+              (metal_pipeline msl "form_q80_embed_m_f32")
+              (metal_pipeline msl "form_q80_matmat_glu_c2_f32")
+              (metal_pipeline msl "form_q80_matmat_glu_c4_f32")
+              (metal_pipeline msl "form_gqa_decode_m_dev_f32")))
 
+    ; HOW MANY COLUMNS A FOLDING LANE CARRIES. The matmats keep one: their lane count is
+    ; 32 * ceil(M / 2), so M=8 dispatches 192 threads a group against M=1's 96, and they measured
+    ; 1.0 to 1.5x from M=1 to M=8 — in stride. Folding four columns a lane there measured WORSE at
+    ; every width and 6x worse on the 128256-row head, so the room the receipt named is not in them.
+    ; The GLU is the one that broke stride, 3x from M=4 to M=8, and it is the one whose lanes grow
+    ; 32 * M unbounded: 320 threads a group at M=8. Its C is chosen below by what was measured.
+    (defn dm-glu-C (m) (if (gt m 4) 2 1))
+    (defn dm-ng (m c) (div (add m (sub c 1)) c))
     ; folding lanes for M columns: 32 * ceil(M / 2); the matmat group is that plus 64 loaders
     (defn dm-F (m) (mul 32 (div (add m 1) 2)))
     (defn dm-tpg (m) (add (dm-F m) 64))
+    (defn dm-glu-tpg (m c) (add (mul 32 (dm-ng m c)) 64))
+    ; the GLU's pipe for a column width: C=1 at 3, C=2 at 10, C=4 at 11
+    (defn dm-glu-pipe (mps c) (if (eq c 2) (nth mps 10) (if (eq c 4) (nth mps 11) (nth mps 3))))
     (defn dm-groups (rows) (div (add rows 15) 16))
 
     ; ================= buffers =================
     ; bs: 0 X [M][d] 1 Xb [M][d] 2 Q [M][qOut] 3 Attn [M][qOut] 4 Act [M][dFF] 5 Logits [M][vocab]
     ;     6 OutI [M] 7 OutV [M] 8 ArgI [M][512] 9 ArgV [M][512] 10 ids [M] 11 pos [M]
+    ;     12 the attention scratch: 2 rows of maxpos floats for each of the M * nHead groups, where
+    ;        threadgroup memory holds them below 1024 and cannot above
+    (defn dm-scratch (m nq maxpos) (metal_buf_alloc (mul (mul (mul (mul 2 m) nq) maxpos) 4)))
     (defn dm-bufs (m dModel dFF qOut vocabN)
         (list (metal_buf_alloc (mul (mul m dModel) 4))
               (metal_buf_alloc (mul (mul m dModel) 4))
@@ -74,9 +93,19 @@
             (dm-cache (sub n 1) floats (append acc (list (metal_buf_alloc (mul floats 4)))))))
 
     ; ================= the radius =================
+    ; dth-fusable?'s last clause is `maxpos <= 1024`, and it is there for ONE reason: the single lane's
+    ; cooperative attention stages a sequence's scores in threadgroup memory, which holds 32 KB. This
+    ; lane answers that question itself — past 1024 it dispatches the device-scratch twin, the same
+    ; kernel with ss and ee in a buffer instead of a threadgroup — so it asks the rest of the question
+    ; with the pool clamped, and refuses on maxpos only where its own scratch would not fit.
+    (defn dm-geo-1k (geo)
+        (list (nth geo 0) (nth geo 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 5)
+              (if (gt (nth geo 6) 1024) 1024 (nth geo 6))
+              (nth geo 7) (nth geo 8) (nth geo 9) (nth geo 10) (nth geo 11) (nth geo 12)
+              (nth geo 13) (nth geo 14) (nth geo 15) (nth geo 16)))
     (defn dm-layers-fusable? (lays geo)
         (if (eq (len lays) 0) true
-            (if (dth-fusable? (head lays) geo) (dm-layers-fusable? (tail lays) geo) false)))
+            (if (dth-fusable? (head lays) (dm-geo-1k geo)) (dm-layers-fusable? (tail lays) geo) false)))
     (defn dm-q8-128? (tv) (if (eq (dth-tv-ty tv) 8) (eq (mod (dth-tv-c tv) 128) 0) false))
     (defn dm-reason (m geo lays embTv projTv)
         (if (lt m 1) "M below 1"
@@ -98,7 +127,8 @@
             (let ok (eq (str_len why) 0))
             (if ok 0 (print_str (str_concat "dense-multi: refused at open: " why)))
             (let mps (if ok (dm-pipes (dm-msl)) (empty)))
-            (let bs (if ok (dm-bufs m (nth geo 0) (nth geo 1) (nth geo 13) (nth geo 7)) (empty)))
+            (let bs0 (if ok (dm-bufs m (nth geo 0) (nth geo 1) (nth geo 13) (nth geo 7)) (empty)))
+            (let bs (if ok (append bs0 (list (dm-scratch m (nth geo 2) (nth geo 6)))) (empty)))
             (let nbank (mul (mul (nth geo 12) (nth geo 16)) 1))
             (let cks (if ok (dm-cache nbank (mul (mul m (nth geo 6)) (nth geo 5)) (empty)) (empty)))
             (let cvs (if ok (dm-cache nbank (mul (mul m (nth geo 6)) (nth geo 5)) (empty)) (empty)))
@@ -119,12 +149,17 @@
                        (md-bind16 (list (dth-tv-h qtv) (dth-tv-h ktv) (dth-tv-h vtv) xh qh ck cv posH)
                                   (list (dth-tv-r qtv) (dth-tv-r ktv) (dth-tv-r vtv) (dth-tv-c qtv) m bank) (dm-tpg m) 0 1 0)
                        (add (dm-groups (dth-tv-r qtv)) (add (dm-groups (dth-tv-r ktv)) (dm-groups (dth-tv-r vtv))))))
-    (defn dm-glu (mps gtv utv xh yh m)
-        (metal_enqueue (nth mps 3) (md-bind16 (list (dth-tv-h gtv) (dth-tv-h utv) xh yh) (list (dth-tv-r gtv) (dth-tv-c gtv) m) (add (mul 32 m) 64) 0 1 0) (dm-groups (dth-tv-r gtv))))
+    ; the GLU at a named column width — the driver measures C, the block below spends what was measured
+    (defn dm-glu-at (mps gtv utv xh yh m c)
+        (metal_enqueue (dm-glu-pipe mps c) (md-bind16 (list (dth-tv-h gtv) (dth-tv-h utv) xh yh) (list (dth-tv-r gtv) (dth-tv-c gtv) m) (dm-glu-tpg m c) 0 1 0) (dm-groups (dth-tv-r gtv))))
+    (defn dm-glu (mps gtv utv xh yh m) (dm-glu-at mps gtv utv xh yh m (dm-glu-C m)))
     (defn dm-rope (mps qh kh ropeH posH nq nkv hd baseBits m bank)
         (metal_enqueue (nth mps 5) (md-bind (list qh kh ropeH posH) (list nq nkv hd baseBits m bank)) (mul m (mul (add nq nkv) (div hd 2)))))
-    (defn dm-attn (mps qh kh vh yh posH nq nkv hd scaleBits m bank)
-        (metal_enqueue (nth mps 6) (md-bind16 (list qh kh vh yh posH) (list nq nkv hd scaleBits m bank) 256 0 1 0) (mul m nq)))
+    ; the staged attention below 1024 positions, the device-scratch twin above it — the same folds
+    (defn dm-attn (mps qh kh vh yh posH nq nkv hd scaleBits m bank ssh maxpos)
+        (if (le maxpos 1024)
+            (metal_enqueue (nth mps 6) (md-bind16 (list qh kh vh yh posH) (list nq nkv hd scaleBits m bank) 256 0 1 0) (mul m nq))
+            (metal_enqueue (nth mps 12) (md-bind16 (list qh kh vh yh posH ssh) (list nq nkv hd scaleBits m bank maxpos) 256 0 1 0) (mul m nq))))
     (defn dm-argmax (mps lh pih pvh oih ovh n m)
         (do (metal_enqueue (nth mps 7) (md-bind (list lh pih pvh) (list n (dth-argmax-parts) m)) (mul m (dth-argmax-parts)))
             (metal_enqueue (nth mps 8) (md-bind16 (list pih pvh oih ovh) (list (dth-argmax-parts)) 256 0 1 0) m)))
@@ -134,30 +169,30 @@
     ; ================= one block, eight dispatches, M sequences =================
     ; geo: 0 dModel 1 dFF 2 nHead 3 nKV 4 headDim 5 kvd 6 maxpos 7 vocabN 8 epsBits 9 baseBits
     ;      10 scaleBits 11 ropeH 12 nLayer 13 qOut 14 ropeStyle 15 ropeDim 16 nLoop
-    (defn dm-block (mps bs geo lay ck cv m)
+    (defn dm-block (mps bs geo lay ck cv m c)
         (do
             (dm-rms mps bs (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8) m)
             (dm-mm-x3 mps (nth lay 1) (nth lay 2) (nth lay 3) (nth bs 1) (nth bs 2) ck cv (nth bs 11) m (dm-bank geo))
             (dm-rope mps (nth bs 2) ck (nth geo 11) (nth bs 11) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 9) m (dm-bank geo))
-            (dm-attn mps (nth bs 2) ck cv (nth bs 3) (nth bs 11) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) m (dm-bank geo))
+            (dm-attn mps (nth bs 2) ck cv (nth bs 3) (nth bs 11) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) m (dm-bank geo) (nth bs 12) (nth geo 6))
             (dm-mm-add mps (nth lay 4) (nth bs 3) (nth bs 0) m)
             (dm-rms mps bs (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8) m)
-            (dm-glu mps (nth lay 6) (nth lay 7) (nth bs 1) (nth bs 4) m)
+            (dm-glu-at mps (nth lay 6) (nth lay 7) (nth bs 1) (nth bs 4) m c)
             (dm-mm-add mps (nth lay 8) (nth bs 4) (nth bs 0) m)
             1))
 
-    (defn dm-blocks (mps bs geo lays cks cvs m l n loopoff)
+    (defn dm-blocks (mps bs geo lays cks cvs m c l n loopoff)
         (if (ge l n) 1
-            (do (dm-block mps bs geo (nth lays l) (nth cks (add l loopoff)) (nth cvs (add l loopoff)) m)
-                (dm-blocks mps bs geo lays cks cvs m (add l 1) n loopoff))))
+            (do (dm-block mps bs geo (nth lays l) (nth cks (add l loopoff)) (nth cvs (add l loopoff)) m c)
+                (dm-blocks mps bs geo lays cks cvs m c (add l 1) n loopoff))))
 
-    (defn dm-passes (mps bs geo lays cks cvs onormTv m lp nLoop)
+    (defn dm-passes (mps bs geo lays cks cvs onormTv m c lp nLoop)
         (if (ge lp nLoop) 1
-            (do (dm-blocks mps bs geo lays cks cvs m 0 (nth geo 12) (mul lp (nth geo 12)))
+            (do (dm-blocks mps bs geo lays cks cvs m c 0 (nth geo 12) (mul lp (nth geo 12)))
                 (if (lt (add lp 1) nLoop)
                     (dm-rms mps bs (nth bs 0) onormTv (nth bs 0) (nth geo 0) (nth geo 8) m)
                     0)
-                (dm-passes mps bs geo lays cks cvs onormTv m (add lp 1) nLoop))))
+                (dm-passes mps bs geo lays cks cvs onormTv m c (add lp 1) nLoop))))
 
     (defn dm-head (mps bs geo onormTv projTv m)
         (do
@@ -171,15 +206,18 @@
     (defn dm-u32s (s i n acc)
         (if (ge i n) acc
             (dm-u32s s (add i 1) n (append acc (list (dth-u32 (substring s (mul i 4) (add (mul i 4) 4))))))))
-    (defn dm-step (st ids poss)
+    ; the step at a named GLU column width, so a driver can put two widths side by side in ONE process
+    ; — three other agents measure on this GPU and a number taken alone is that moment's contention
+    (defn dm-step-c (st ids poss c)
         (do
             (let mps (nth st 1)) (let bs (nth st 2)) (let geo (nth st 3)) (let m (nth st 11))
             (metal_buf_write (nth bs 10) 0 (md-le32-list ids ""))
             (metal_buf_write (nth bs 11) 0 (md-le32-list poss ""))
             (dm-embed mps (nth st 7) (nth bs 0) (nth bs 10) (nth geo 0) m)
-            (dm-passes mps bs geo (nth st 4) (nth st 5) (nth st 6) (nth st 8) m 0 (nth geo 16))
+            (dm-passes mps bs geo (nth st 4) (nth st 5) (nth st 6) (nth st 8) m c 0 (nth geo 16))
             (dm-head mps bs geo (nth st 8) (nth st 9) m)
             (dm-u32s (metal_buf_read (nth bs 6) 0 (mul m 4)) 0 m (empty))))
+    (defn dm-step (st ids poss) (dm-step-c st ids poss (dm-glu-C (nth st 11))))
 
     ; the logits of sequence m after the last step, as bytes
     (defn dm-logits (st m)
@@ -220,8 +258,9 @@
                           0 (sub (add (dm-maxlen prompts 0) ngen) 1) ngen rec)))
 
     ; ================= timing: n steps warm, every sequence feeding one id at rising positions =================
-    (defn dm-time-steps (st ids pos n)
+    (defn dm-time-steps-c (st ids pos n c)
         (if (le n 0) 0
-            (do (let outs (dm-step st ids (dm-fill pos (nth st 11) (empty))))
-                (dm-time-steps st outs (add pos 1) (sub n 1)))))
+            (do (let outs (dm-step-c st ids (dm-fill pos (nth st 11) (empty)) c))
+                (dm-time-steps-c st outs (add pos 1) (sub n 1) c))))
+    (defn dm-time-steps (st ids pos n) (dm-time-steps-c st ids pos n (dm-glu-C (nth st 11))))
     0)

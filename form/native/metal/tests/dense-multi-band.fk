@@ -4,7 +4,7 @@
 ; PROOF LEVEL: FOURTH-ARM ONLY (metal_* pf-arm-mask 8). Every bit needs a live Metal device behind
 ; the handle door; without bit 1 the fold answers 0, a REFUSAL, not a verdict.
 ;
-; Verdict 255 = 1+2+4+8+16+32+64+128, POWER-OF-TWO WEIGHTS so a reader can subtract.
+; Verdict 1023 = 1+2+4+8+16+32+64+128+256+512, POWER-OF-TWO WEIGHTS so a reader can subtract.
 ;
 ;   bit   1  THE DOOR IS REAL: metal_linked=true AND metal_door=handle.
 ;   bit   2  THE M-LANE OPENS: every one of the ten M-kernels compiled (a zero is an MSL diagnostic
@@ -21,12 +21,22 @@
 ;            its sixteenth answer, batch against single lane — four equal of four.
 ;   bit  64  M=1 IS THE SINGLE LANE: the M-lane opened at M=1 answers the pinned sixteen.
 ;   bit 128  COLUMNS DO NOT CROSS: M=8 with the four prompts twice answers, per sequence, the M=4
-;            run's ids — the second copy equal to the first.
+;            run's ids — the second copy equal to the first. At M=8 the GLU folds TWO columns a
+;            lane (form_q80_matmat_glu_c2_f32), so this bit is also that kernel's equality with the
+;            one-column kernel M=4 runs, through sixteen layers and sixteen answers.
+;   bit 256  THE DEVICE-SCRATCH ATTENTION IS THE STAGED ATTENTION: a lane opened at 1024 takes three
+;            real steps through form_gqa_decode_m_f32; the same q, cache and positions folded by
+;            form_gqa_decode_m_dev_f32 give the same 32 KB of attention output, byte for byte.
+;   bit 512  A POOL PAST THE STAGED CEILING, AGAINST THE ATTESTANT: the lane OPENS at maxpos 1152,
+;            where dth-fusable?'s maxpos clause refused, and takes real steps there; then a cache
+;            filled to 1100 positions from the embedding tensor's own bytes is folded by this lane's
+;            device attention and by form_gqa_decode_f32 — the per-head attestant the single lane
+;            routes a larger pool to — and the 8 KB of output is equal.
 ;
-; WHAT THIS BAND CANNOT SEE: speed (the run driver prints it); files outside the fused radius;
-; M above 8.
+; WHAT THIS BAND CANNOT SEE: speed (the run driver prints it, dense-multi-probe.fk kernel by kernel);
+; files outside the fused radius; M above 8.
 ;
-; Expected: 255
+; Expected: 1023
 ; preludes: native/metal/dense-multi.fk form-stdlib/model-registry.bml
 ;
 ; witnessed: 2026-09-06, fkwu (fourth arm), Apple M4 Max
@@ -111,7 +121,63 @@
     (let run8 (dm-run st8 (append prompts prompts) 16 false))
     (let eight-eq (dmb-eqlists (nth run8 0) (append gens4 gens4)))
 
-    (print_str (str_concat "matmat columns equal " (str_concat (int_to_str mm-eq) (str_concat "/8 | logits equal " (str_concat (int_to_str log-eq) "/4")))))
+    ; ---- bit 256: the device-scratch attention against the staged one, M=4, on real state ----
+    ; a lane opened at 1024 dispatches the STAGED kernel through its steps; the same three steps of
+    ; state are then handed to the device-scratch kernel and the two outputs weighed byte for byte.
+    (let stA (dm-open (dmb-blob) 1024 4))
+    (let bsA (nth stA 2)) (let geoA (nth stA 3)) (let mpsA (nth stA 1))
+    (let lastA (sub (nth geoA 12) 1))
+    (let wA (dm-time-steps stA (list 791 791 791 791) 0 3))
+    (let nA (mul 4 (mul 4 (nth geoA 13))))
+    (let yA (metal_buf_alloc nA))
+    (let eA (metal_enqueue (nth mpsA 12)
+                (md-bind16 (list (nth bsA 2) (nth (nth stA 5) lastA) (nth (nth stA 6) lastA) yA (nth bsA 11) (nth bsA 12))
+                           (list (nth geoA 2) (nth geoA 3) (nth geoA 4) (nth geoA 10) 4 (dm-bank geoA) 1024) 256 0 1 0)
+                (mul 4 (nth geoA 2))))
+    (let sA (metal_sync))
+    (let dev-eq (dmb-same? (metal_buf_read yA 0 nA) (metal_buf_read (nth bsA 3) 0 nA) nA))
+
+    ; ---- bit 512: a pool PAST the staged ceiling, against the single lane's own attestant ----
+    ; the lane opens at 1152 where dth-fusable?'s maxpos clause refused, takes real steps there, and
+    ; then a cache filled to 1100 positions from the embedding tensor's own bytes (one dispatch, not a
+    ; transcript) is folded twice: by this lane's device attention and by form_gqa_decode_f32, the
+    ; per-head attestant the single lane routes a larger pool to.
+    (let stB (dm-open (dmb-blob) 1152 1))
+    (let okB (dm-ok? stB))
+    (let psB (nth stB 0)) (let bsB (nth stB 2)) (let geoB (nth stB 3)) (let mpsB (nth stB 1))
+    (let lastB (sub (nth geoB 12) 1))
+    (let wB (dm-time-steps stB (list 791) 0 4))
+    (let npB 1100)
+    (let cellsB (mul npB (nth geoB 5)))
+    (let w1 (metal_buf_write (nth bsB 10) 0 (md-le32 791)))
+    (let f1 (dm-embed mpsB (nth stB 7) (nth bsB 2) (nth bsB 10) (nth geoB 13) 1))
+    (let y1 (metal_sync))
+    (let w2 (metal_buf_write (nth bsB 10) 0 (md-le32 0)))
+    (let f2 (dm-embed mpsB (nth stB 7) (nth (nth stB 5) lastB) (nth bsB 10) cellsB 1))
+    (let y2 (metal_sync))
+    (let w3 (metal_buf_write (nth bsB 10) 0 (md-le32 1)))
+    (let f3 (dm-embed mpsB (nth stB 7) (nth (nth stB 6) lastB) (nth bsB 10) cellsB 1))
+    (let y3 (metal_sync))
+    (let w4 (metal_buf_write (nth bsB 11) 0 (md-le32 (sub npB 1))))
+    (let nB (mul 4 (nth geoB 13)))
+    (let yB (metal_buf_alloc nB))
+    (let yR (metal_buf_alloc nB))
+    (let scB (metal_buf_alloc (mul 4 (mul 2 (mul (nth geoB 2) 1152)))))
+    (let eB (metal_enqueue (nth mpsB 12)
+                (md-bind16 (list (nth bsB 2) (nth (nth stB 5) lastB) (nth (nth stB 6) lastB) yB (nth bsB 11) (nth bsB 12))
+                           (list (nth geoB 2) (nth geoB 3) (nth geoB 4) (nth geoB 10) 1 (dm-bank geoB) 1152) 256 0 1 0)
+                (nth geoB 2)))
+    (let eR (metal_enqueue (nth psB 9)
+                (md-bind (list (nth bsB 2) (nth (nth stB 5) lastB) (nth (nth stB 6) lastB) yR scB)
+                         (list npB (nth geoB 2) (nth geoB 3) (nth geoB 4) (nth geoB 10) 1152))
+                (nth geoB 2)))
+    (let sB (metal_sync))
+    (let deep-eq (dmb-same? (metal_buf_read yB 0 nB) (metal_buf_read yR 0 nB) nB))
+
+    (print_str (str_concat "matmat columns equal " (str_concat (int_to_str mm-eq)
+        (str_concat "/8 | logits equal " (str_concat (int_to_str log-eq)
+        (str_concat "/4 | attention device=staged " (str_concat (int_to_str dev-eq)
+        (str_concat " | at 1100 positions device=attestant " (int_to_str deep-eq)))))))))
     (add (if live 1 0)
     (add (if live (if ok 2 0) 0)
     (add (if live (if (eq mm-eq 8) 4 0) 0)
@@ -119,4 +185,6 @@
     (add (if live (if ids-eq 16 0) 0)
     (add (if live (if (eq log-eq 4) 32 0) 0)
     (add (if live (if one-eq 64 0) 0)
-         (if live (if eight-eq 128 0) 0)))))))))
+    (add (if live (if eight-eq 128 0) 0)
+    (add (if live (if (eq dev-eq 1) 256 0) 0)
+         (if live (if (and okB (eq deep-eq 1)) 512 0) 0)))))))))))

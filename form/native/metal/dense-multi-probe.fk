@@ -1,0 +1,79 @@
+; dense-multi-probe.fk — WHERE the batched step's time sits, kernel by kernel, at M = 1, 2, 4, 8.
+;
+; The step is 13 ms at M=1 and 19.5 at M=8 and the receipt named a suspect (the loaders waiting on
+; 128*M folders) without measuring it. This driver dispatches ONE kernel of the batched block at a
+; time, n times, and syncs, so each line is that kernel's own microseconds a dispatch at that M.
+;
+; THREE OTHER AGENTS MEASURE ON THIS GPU. A number taken alone is that moment's contention, not the
+; kernel: this driver opens all four M-lanes first and then walks M = 1, 2, 4, 8 ROUND ROBIN for
+; several rounds, keeping the MINIMUM per (kernel, M). Contention that lands on one round lands on
+; every M in it, so the shape across M survives even when the absolute floor does not.
+;
+; A RUN DRIVER: it prints what happened.
+;
+; preludes: native/metal/dense-multi.fk form-stdlib/model-registry.bml
+
+(do
+    (defn dp-blob () (mr-path (mr-find "llama32-1b")))
+
+    ; ---- the four lanes, opened once ----
+    (defn dp-opens (ms acc)
+        (if (eq (len ms) 0) acc
+            (dp-opens (tail ms) (append acc (list (dm-open (dp-blob) 256 (head ms)))))))
+
+    ; ---- one kernel, n dispatches, microseconds each ----
+    (defn dp-mm-n (mps tv xh yh m n) (if (le n 0) 0 (do (dm-mm mps tv xh yh m) (dp-mm-n mps tv xh yh m (sub n 1)))))
+    (defn dp-glu-n (mps g u xh yh m c n) (if (le n 0) 0 (do (dm-glu-at mps g u xh yh m c) (dp-glu-n mps g u xh yh m c (sub n 1)))))
+
+    ; which tensor of the layer, by the name this driver uses: 1 q, 8 down; -1 the head;
+    ; -2 the glu at one column a lane, -3 at two, -4 at four
+    (defn dp-us (st which n)
+        (do (let mps (nth st 1)) (let bs (nth st 2)) (let lay0 (head (nth st 4))) (let m (nth st 11))
+            (let t0 (now_unix_ms))
+            (if (eq which 1) (dp-mm-n mps (nth lay0 1) (nth bs 1) (nth bs 2) m n)
+            (if (eq which 8) (dp-mm-n mps (nth lay0 8) (nth bs 4) (nth bs 0) m n)
+            (if (eq which (sub 0 1)) (dp-mm-n mps (nth st 9) (nth bs 1) (nth bs 5) m n)
+            (if (eq which (sub 0 3)) (dp-glu-n mps (nth lay0 6) (nth lay0 7) (nth bs 1) (nth bs 4) m 2 n)
+            (if (eq which (sub 0 4)) (dp-glu-n mps (nth lay0 6) (nth lay0 7) (nth bs 1) (nth bs 4) m 4 n)
+                (dp-glu-n mps (nth lay0 6) (nth lay0 7) (nth bs 1) (nth bs 4) m 1 n))))))
+            (let s (metal_sync))
+            (let t1 (now_unix_ms))
+            (div (mul (sub t1 t0) 1000) n)))
+
+    (defn dp-step-us (st n c)
+        (do (let m (nth st 11))
+            (let t0 (now_unix_ms))
+            (let r (dm-time-steps-c st (dm-fill 791 m (empty)) 5 n c))
+            (let t1 (now_unix_ms))
+            (div (mul (sub t1 t0) 1000) n)))
+
+    ; ---- round robin over the lanes, minimum kept ----
+    (defn dp-row (sts which n acc)
+        (if (eq (len sts) 0) acc (dp-row (tail sts) which n (append acc (list (dp-us (head sts) which n))))))
+    (defn dp-steprow (sts n c acc)
+        (if (eq (len sts) 0) acc (dp-steprow (tail sts) n c (append acc (list (dp-step-us (head sts) n c))))))
+    (defn dp-mins (a b acc)
+        (if (eq (len a) 0) acc
+            (dp-mins (tail a) (tail b) (append acc (list (if (lt (head a) (head b)) (head a) (head b)))))))
+    (defn dp-rounds (sts which n r acc)
+        (if (le r 0) acc
+            (dp-rounds sts which n (sub r 1) (if (eq (len acc) 0) (dp-row sts which n (empty)) (dp-mins acc (dp-row sts which n (empty)) (empty))))))
+    (defn dp-steprounds (sts n c r acc)
+        (if (le r 0) acc
+            (dp-steprounds sts n c (sub r 1) (if (eq (len acc) 0) (dp-steprow sts n c (empty)) (dp-mins acc (dp-steprow sts n c (empty)) (empty))))))
+
+    (defn dp-join (xs acc) (if (eq (len xs) 0) acc (dp-join (tail xs) (str_concat acc (str_concat " " (int_to_str (head xs)))))))
+    (defn dp-say (name xs) (print_str (str_concat name (str_concat " us(M=1,2,4,8)" (dp-join xs "")))))
+
+    (print (if (md-door-live?) "door=live" "door=DEAD"))
+    (let sts (dp-opens (list 1 2 4 8) (empty)))
+    (let warm (dp-rounds sts 8 8 1 (empty)))
+    (dp-say "mm_q_2048x2048    " (dp-rounds sts 1 40 3 (empty)))
+    (dp-say "mm_down_2048x8192 " (dp-rounds sts 8 40 3 (empty)))
+    (dp-say "glu_c1_one_column " (dp-rounds sts (sub 0 2) 40 3 (empty)))
+    (dp-say "glu_c2_two_columns" (dp-rounds sts (sub 0 3) 40 3 (empty)))
+    (dp-say "glu_c4_four_column" (dp-rounds sts (sub 0 4) 40 3 (empty)))
+    (dp-say "mm_head_128256x2k " (dp-rounds sts (sub 0 1) 20 3 (empty)))
+    (dp-say "STEP_glu_c1       " (dp-steprounds sts 20 1 3 (empty)))
+    (dp-say "STEP_glu_c2       " (dp-steprounds sts 20 2 3 (empty)))
+    0)
