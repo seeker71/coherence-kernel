@@ -8,6 +8,7 @@
 ; preludes: form-stdlib/bml/form-cli-share-health.bml
 ; preludes: form-stdlib/form-glass-telemetry-membrane.bml
 ; preludes: form-stdlib/bml/form-cli-share-glass.bml
+; preludes: form-stdlib/bml/form-cli-token-glass.bml
 
 (defn fctes-join (parts)
     (if (eq (len parts) 0) ""
@@ -64,18 +65,28 @@
 
 ; An active task has no settled share. Its most recent provider call may still
 ; be measured; the result is pressure, never a percentage or completed claim.
-; Nothing is withheld here: when no reading exists the line says unavailable
-; and names why, so a reader can tell an absent measurement from a hidden one.
-(defn fctes-active-provider-tokens ()
+; The source is the explicit binding where one stands, and otherwise the agent
+; transcript this body discovers for its own working tree, so the reading exists
+; on a host where nobody has written a binding by hand. The line names which
+; source answered, so a reader never has to guess where a count came from.
+(defn fctes-token-absent-reason (reading)
+    (if (str_eq (fctel-token-reading-path reading) "")
+        (fctd-discovered-reason)
+        "no-completed-provider-call-in-native-tail"))
+
+(defn fctes-active-provider-tokens (reading)
     (do
-        (let path (fctel-bound-path))
-        (if (str_eq path "") "remote-token-pressure=unavailable reason=no-bound-rollout\n"
+        (let path (fctel-token-reading-path reading))
+        (let state (fctel-token-reading-state reading))
+        (if (str_eq path "")
+            (str_concat "remote-token-pressure=unavailable reason="
+                (str_concat (fctes-token-absent-reason reading) "\n"))
             (do
-                (let state (fctel-last-usage-state path))
                 (if (eq (nth state 6) 0)
                     "remote-token-pressure=unavailable reason=no-completed-provider-call-in-native-tail\n"
                     (fctes-join (list
-                        "remote-token-pressure kind=last-completed-provider-call scope=open-task\n"
+                        "remote-token-pressure kind=last-completed-provider-call scope=open-task source="
+                        (fctel-token-reading-kind reading) "\n"
                         "remote tokens input=" (int_to_str (nth state 1))
                         " cached-input=" (int_to_str (nth state 2))
                         " uncached-input=" (int_to_str (sub (nth state 1) (nth state 2)))
@@ -159,6 +170,13 @@
     ; The attention clock closes only after the atomic Glass snapshot write,
     ; so it covers the whole evidence movement visible to another process.
     (let share-published (fcsg-publish-evidence (now_unix_ms) evidence))
+    ; One traversal answers both the printed line and the glass, so the reading
+    ; a reader sees on the frame is the reading the receipt names.
+    (let token-reading (fctel-token-reading))
+    (let tokens-published (fctg-publish (now_unix_ms)
+        (fctel-token-reading-state token-reading)
+        (fctel-token-reading-kind token-reading)
+        (fctes-token-absent-reason token-reading)))
     (let refresh-ms (sub (now_unix_ms) refresh-start-ms))
     (print_str (fctes-join (list
         "measurement-refresh=" refresh "\n"
@@ -167,6 +185,7 @@
         " attention-ms=" (int_to_str (fctec-attention-ms))
         " measurement-attention=" (fctec-attention-state refresh-ms) "\n"
         "glass-share=" (fcsg-publish-status share-published) "\n"
+        "glass-tokens=" (fctg-publish-status tokens-published) "\n"
         "form-cli share kind=" (fcte-kind-name evidence)
         " scope=" (if (eq (fcte-valid? evidence) 1)
             (if (str_eq (fcte-source evidence) (fcte-source-kind-grok))
@@ -176,7 +195,7 @@
         (if (eq (fcte-valid? evidence) 1) (fctes-observed evidence)
             (fctes-join (list (fcsh-after-refresh refresh)
                 "semantic-contribution=not-measured\n")))
-        (fctes-active-provider-tokens)
+        (fctes-active-provider-tokens token-reading)
         (fctes-route)
         (fcl-spoken-answer))))
     0)
