@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 691 rows, 679 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 692 rows, 680 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -239,9 +239,9 @@ form-glass-deadline-cadence-band       -> 4095
 form-glass-jit-hold-band               -> 4095
 form-glass-meaning-ui-band             -> 8191
 form-glass-gift-frame-band             -> 4095
-form-glass-sensor-rows-band            -> 255
+form-glass-sensor-rows-band            -> 2047
 form-glass-kernel-view-band            -> 511
-form-glass-events-channels-band        -> 255
+form-glass-events-channels-band        -> 8191
 node-gift-band                         -> 4095
 cell-store-band                        -> 255
 field-band                             -> 255
@@ -252,6 +252,7 @@ primitive-registry-band                -> 45      (fkwu; one pending row per abs
 form-glass-telemetry-membrane-band     -> 2097151
 form-glass-observation-v2-band         -> 2097151
 form-glass-wait-band                   -> 255
+form-glass-machine-band                -> 255
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -299,7 +300,7 @@ frame path: the reader knows the format because the format is the seed's own
 node words (`node-gift-band` 4095, a child process witnessing the same
 category). The sensor lane gives `list(schema, sensor, epoch, rows)` this way
 and the projection node the glass holds is the same cell the sensor built
-(`form-glass-sensor-rows-band` 255). The snapshot publishers in other
+(`form-glass-sensor-rows-band` 2047). The snapshot publishers in other
 processes — owner, hearth, voice, share, governor, jit — still give the text
 wire the membrane parses (`release-ledger.bml` R111).
 
@@ -321,10 +322,9 @@ program text (`form-glass-kernel-view-band` 511).
 selected by the sample's own kind — events, choice points, expert routes,
 resolvers, requests, glass flow; channels, channel edges, grammars, mesh, ear
 streams, shares, field observers, meaning code — newest first, and when no
-sample of a kind is published the view names the organ absent by its door
-(`form-glass-events-channels-band` 255). Surprise receipts, choice points,
-channel protocols and the grammars have no live publisher yet; each owes one
-give into the glass (R112).
+sample of a kind is published the view names the organ and its carrier
+(`form-glass-events-channels-band` 8191). Surprise receipts, choice points,
+channel protocols and the grammars give into the `organs` frame (below).
 
 **The frame buffer is the read surface.** Every number on the atlas came out of
 a shared-memory gift frame, and every row set the glass reads carries the
@@ -525,12 +525,30 @@ parsing; the owner-command lease is one cell in one frame, no lock directory
 or lease file. `form-glass-wait-band` 255.
 (receipts/2026-09-06-the-glass-wakes-on-the-word.md)
 
+**Every organ gives into the glass, and the glass says when a giver went
+quiet.** `observe/form-glass-organs-live.fk` is one kernel that, every 500 ms,
+reads the sequence of every standing frame and gives one snapshot into the
+`organs` frame: each channel with its protocol and cell grammar,
+ambient-surprise over each channel's give rate with surprises carried and
+uncarried, the attuned-inquiry movement chosen for the newest surprise as a
+validated choice receipt, and the protocol floor; the `e` and `c` views
+render every row as `shm:<frame>#<seq>`. Sensor frames carry their declared
+cadence as a cell; a frame not given for three cadences reads `silent` (`_`)
+on its row, on every row taken from it, and on the atlas lane it feeds -- a
+frame that stands is not a giver that gives, since shared memory outlives its
+process. The accelerator gauge that Activity Monitor consumes renders
+`contended` (`!`) with the reader's pid (the PerformanceStatistics dictionary
+holds no cumulative busy counter, dumped once and witnessed), and
+`gpu-busy-estimate-us` -- Metal command-buffer time of every frame-giving
+process -- stands beside it uncontended. events-channels 8191, sensor-rows
+2047, machine 255. (receipts/2026-09-06-every-organ-gives-into-the-glass.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=42 moving=0 released=82 -> 42000082
+./fkwu form/form-stdlib/release-ledger.bml -> open=39 moving=0 released=85 -> 39000085
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
