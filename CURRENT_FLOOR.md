@@ -28,7 +28,7 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is 17,694 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is 18,020 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
 preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 680 rows, 668 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 681 rows, 669 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -243,6 +243,7 @@ form-glass-kernel-view-band            -> 511
 form-glass-events-channels-band        -> 255
 node-gift-band                         -> 4095
 cell-store-band                        -> 255
+field-band                             -> 255
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -405,12 +406,30 @@ over 2 and 3; this process reads kind 2, category `cell-store-band` with NodeID
 subtype 2, kids 2 and 3 cons by cons, from the child's columns. Not yet on the
 surface: the program AST, the `.fkb` images, `mlx_status` (still text) — R120.
 
+**One field, one word.** The per-kernel store above is the fallback. When the
+host offers shared memory every `fkwu` opens the *same* store — `/fg-field-
+<letter>`: the node columns, a shared intern index, a shared pair arena for
+the kids of shared cells, a shared string pool and a shared float pool for the
+values shared cells carry, and a header whose counters every kernel claims
+atomically. Interning is one door for every kind: hash by content (strings by
+bytes, floats by bits, composites by their children's content), probe the
+shared index, compare, and either take the cell another kernel already made or
+claim a slot, fill, publish. So a composite interned in one process and again
+in another is **one cell with one word** — no second copy, and the field's node
+count does not move (`field-band` 255: the child's word equals the parent's,
+`kernel_stat 4` before and after equal). The private cons heap, private
+strings and floats stay per process for transient values; a value becomes
+shared the moment a shared cell carries it, and every reader dispatches by
+index range (≥ 2⁴⁰ is the field) behind the same words. The field persists
+across processes as a host memory should; `observe/field-reset-run.fk` starts
+it over when no other kernel is alive. Live page word 22 reads 2.
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=72 -> 47000072
+./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=73 -> 47000073
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,

@@ -113,6 +113,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "cell_value", 2, 170 },
   { "cell_ref", 1, 171 },
   { "cell_unmap", 1, 172 },
+  { "field_reset", 0, 196 },
   { "host_sleep_ms", 1, 183 },
   { "kernel_hot", 1, 179 },
   { "node_gift_read", 1, 177 },
