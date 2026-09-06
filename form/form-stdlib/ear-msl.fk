@@ -1,83 +1,148 @@
 ; ear-msl.fk — the kernels a whisper-tiny pass needs, emitted by the body for its own metal:
-; log-mel from raw s16 microphone frames (a direct 400-point DFT per bin, Hann-windowed, reflect
-; padded, the reference's own filter bank), conv1d+GELU, layernorm, a half-weight gemm with the
-; residual add or the GELU folded in and a row offset so k/v land straight in their caches,
-; attention (one thread per query and head, softmax in registers), sinusoid positions, token +
-; position embedding, and a bounded argmax (the language window is a bound). f32 activations,
-; half weights read straight off the model file. Nothing here leaves the device between calls.
+; the spectrogram as one threadgroup per frame (Hann, a 400-point DFT off a twiddle table in
+; threadgroup memory, the reference's own filter bank, log10, the frame's max), its normalisation
+; as one cooperative dispatch, one fused layernorm+gemm in two shapes — 32x32 tiles folded on
+; simdgroup 8x8 matrices for rows (the encoder, the batched prefill, and the two convolutions as an
+; im2col staged on the fly) and eight rows a threadgroup with a simdgroup's 32 lanes over K for a
+; single row (the decoder) — each taking up to three weights at once so q/k/v (and the cross k/v)
+; are one dispatch, the bias, the GELU or the residual folded in and a row offset for the second and
+; third outputs so k/v land straight in their caches; attention (a threadgroup per head and sixteen
+; queries, a query's sixteen key slices merged with simd shuffles; a threadgroup per head for one
+; row), sinusoid positions, token + position embedding, a cooperative argmax over two windows. f32 activations,
+; half weights read straight off the model file. The shapes that change between calls — the
+; encoder's rows, the decoder's position and rows, the frame count — live in a five-word device
+; buffer (shp: Te pos Tdec Tf 0) written by the kernel that first knows them, so every layer binding
+; is the same bytes each call. Nothing here leaves the device between calls.
 ; preludes: form/form-stdlib/core.fk
 (do
     (defn em-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (em-cat (tail xs)))))
     (defn em-nl () (byte_to_str 10))
     (defn em-lines (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (str_concat (em-nl) (em-lines (tail xs))))))
     (defn em-head () (em-lines (list "#include <metal_stdlib>" "using namespace metal;" "inline float ear_erf(float x) { float s = x < 0.0f ? -1.0f : 1.0f; float ax = fabs(x); float t = 1.0f / (1.0f + 0.3275911f * ax); float y = 1.0f - (((((1.061405429f * t - 1.453152027f) * t) + 1.421413741f) * t - 0.284496736f) * t + 0.254829592f) * t * exp(-ax * ax); return s * y; }" "inline float ear_gelu(float a) { return 0.5f * a * (1.0f + ear_erf(a * 0.70710678118f)); }")))
-    ; y[(yoff+t)*N+n] = (hasb ? b[n] : 0) + sum_k x[t*K+k] * w[n*K+k]; mode 1 = gelu, mode 2 = add r[t*N+n]
-    (defn em-gemm () (em-lines (list
-        "kernel void ear_gemm(device const float* x [[buffer(0)]], device const half* w [[buffer(1)]], device const half* b [[buffer(2)]], device float* y [[buffer(3)]], device const float* r [[buffer(4)]], constant uint& T [[buffer(5)]], constant uint& N [[buffer(6)]], constant uint& K [[buffer(7)]], constant uint& hasb [[buffer(8)]], constant uint& mode [[buffer(9)]], constant uint& yoff [[buffer(10)]], constant uint& xoff [[buffer(11)]], uint gid [[thread_position_in_grid]]) {"
-        "  if (gid >= T * N) return; uint t = gid / N; uint n = gid - t * N;"
-        "  float acc = hasb ? (float)b[n] : 0.0f; device const float* xr = x + (xoff + t) * K; device const half* wr = w + n * K;"
-        "  for (uint k = 0; k < K; k++) acc += xr[k] * (float)wr[k];"
-        "  if (mode == 1) acc = ear_gelu(acc); if (mode == 2) acc += r[gid];"
-        "  y[(yoff + t) * N + n] = acc; }")))
-    ; conv1d kernel 3, pad 1: y[t*Cout+o] = gelu(b[o] + sum_k sum_i x[(t*stride+k-1)*Cin+i] * w[(o*3+k)*Cin+i])
-    (defn em-conv () (em-lines (list
-        "kernel void ear_conv(device const float* x [[buffer(0)]], device const half* w [[buffer(1)]], device const half* b [[buffer(2)]], device float* y [[buffer(3)]], constant uint& Tin [[buffer(4)]], constant uint& Tout [[buffer(5)]], constant uint& Cin [[buffer(6)]], constant uint& Cout [[buffer(7)]], constant uint& stride [[buffer(8)]], uint gid [[thread_position_in_grid]]) {"
-        "  if (gid >= Tout * Cout) return; uint t = gid / Cout; uint o = gid - t * Cout; float acc = (float)b[o];"
-        "  for (uint k = 0; k < 3; k++) { int ti = (int)(t * stride + k) - 1; if (ti < 0 || ti >= (int)Tin) continue;"
-        "    device const float* xr = x + ti * Cin; device const half* wr = w + (o * 3 + k) * Cin; for (uint i = 0; i < Cin; i++) acc += xr[i] * (float)wr[i]; }"
-        "  y[gid] = ear_gelu(acc); }")))
-    ; layernorm, one thread per row, eps 1e-5
-    (defn em-ln () (em-lines (list
-        "kernel void ear_ln(device const float* x [[buffer(0)]], device const half* g [[buffer(1)]], device const half* b [[buffer(2)]], device float* y [[buffer(3)]], constant uint& T [[buffer(4)]], constant uint& D [[buffer(5)]], uint gid [[thread_position_in_grid]]) {"
-        "  if (gid >= T) return; device const float* xr = x + gid * D; float m = 0.0f; for (uint i = 0; i < D; i++) m += xr[i]; m /= (float)D;"
-        "  float v = 0.0f; for (uint i = 0; i < D; i++) { float d = xr[i] - m; v += d * d; } v /= (float)D; float s = rsqrt(v + 1e-5f);"
-        "  for (uint i = 0; i < D; i++) y[gid * D + i] = (xr[i] - m) * s * (float)g[i] + (float)b[i]; }")))
-    ; attention: one thread per (head, query); keys 0..Tk-1, or 0..qoff+t when causal; scale hd^-0.5
-    ; attention: one thread per (head, query), online softmax over the keys (no score array, V read once), scale hd^-0.5; causal keys 0..qoff+t
-    ; attention: one threadgroup per (head, query), 64 threads striding the keys with online softmax partials, merged in threadgroup memory; scale hd^-0.5; causal keys 0..qoff+t
-    (defn em-attn () (em-lines (list
-        "kernel void ear_attn(device const float* q [[buffer(0)]], device const float* k [[buffer(1)]], device const float* v [[buffer(2)]], device float* y [[buffer(3)]], constant uint& Tq [[buffer(4)]], constant uint& Tk [[buffer(5)]], constant uint& H [[buffer(6)]], constant uint& hd [[buffer(7)]], constant uint& causal [[buffer(8)]], constant uint& qoff [[buffer(9)]], threadgroup float* part [[threadgroup(0)]], uint g [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {"
-        "  uint h = g / Tq; uint t = g - h * Tq; uint D = H * hd; uint nk = causal ? (qoff + t + 1) : Tk; if (nk > Tk) nk = Tk;"
-        "  threadgroup float* pm = part; threadgroup float* pl = part + 64; threadgroup float* pacc = part + 128;"
-        "  float scale = rsqrt((float)hd); device const float* qr = q + t * D + h * hd; float qv[64]; for (uint i = 0; i < hd; i++) qv[i] = qr[i] * scale;"
-        "  float m = -1e30f; float l = 0.0f; float acc[64]; for (uint i = 0; i < hd; i++) acc[i] = 0.0f;"
-        "  for (uint j = tid; j < nk; j += 64) { device const float* kr = k + j * D + h * hd; float s = 0.0f; for (uint i = 0; i < hd; i++) s += qv[i] * kr[i];"
-        "    float mn = s > m ? s : m; float cs = exp(m - mn); float p = exp(s - mn); l = l * cs + p; device const float* vr = v + j * D + h * hd; for (uint i = 0; i < hd; i++) acc[i] = acc[i] * cs + p * vr[i]; m = mn; }"
-        "  pm[tid] = m; pl[tid] = l; for (uint i = 0; i < hd; i++) pacc[tid * 64 + i] = acc[i];"
+    ; the shared argument list of the two fused gemms: x, the layernorm's g and b, three (weight, bias) pairs, three outputs, the residual, the normalised rows out, the shape word
+    (defn em-gargs () "device const float* x [[buffer(0)]], device const half* g [[buffer(1)]], device const half* lb [[buffer(2)]], device const half* w0 [[buffer(3)]], device const half* b0 [[buffer(4)]], device const half* w1 [[buffer(5)]], device const half* b1 [[buffer(6)]], device const half* w2 [[buffer(7)]], device const half* b2 [[buffer(8)]], device float* y0 [[buffer(9)]], device float* y1 [[buffer(10)]], device float* y2 [[buffer(11)]], device const float* r [[buffer(12)]], device float* hout [[buffer(13)]], device const uint* shp [[buffer(14)]], constant uint& N [[buffer(15)]], constant uint& K [[buffer(16)]], constant uint& Nper [[buffer(17)]], constant uint& mode [[buffer(18)]], constant uint& hasln [[buffer(19)]]")
+    ; spectrogram: one threadgroup (256 threads) per frame t, centred at t*160 with reflect padding of 200, periodic Hann, N=400;
+    ; the twiddles cos/sin(2pi m/400) once per group, 201 threads own the bins (a += bin mod 400 walks the table), 80 threads the mels
+    ; (log10 clamped at 1e-10), thread 0 the frame's max; group 0 writes the shape word: Te = Tf/2 and Tf
+    (defn em-spec () (em-lines (list
+        "kernel void ear_spec(device const short* pcm [[buffer(0)]], device const float* filt [[buffer(1)]], device float* mel [[buffer(2)]], device float* fmax [[buffer(3)]], device uint* shp [[buffer(4)]], constant uint& L [[buffer(5)]], constant uint& Tf [[buffer(6)]], uint t [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {"
+        "  threadgroup float fr[400]; threadgroup float twc[400]; threadgroup float tws[400]; threadgroup float pw[201]; threadgroup float mv[80]; float w2 = 6.283185307f / 400.0f;"
+        "  for (uint n = tid; n < 400; n += 256) { float a = w2 * (float)n; twc[n] = cos(a); tws[n] = sin(a); }"
         "  threadgroup_barrier(mem_flags::mem_threadgroup);"
-        "  float M = -1e30f; for (uint j = 0; j < 64; j++) if (pm[j] > M) M = pm[j]; float L = 0.0f; float o = 0.0f;"
-        "  for (uint j = 0; j < 64; j++) { float w = exp(pm[j] - M); L += w * pl[j]; if (tid < hd) o += w * pacc[j * 64 + tid]; }"
-        "  if (tid < hd) y[t * D + h * hd + tid] = o / L; }")))
-    ; whisper's sinusoid positions added in place: sin for the first half of channels, cos for the second
-    (defn em-addpos () (em-lines (list
-        "kernel void ear_addpos(device float* y [[buffer(0)]], constant uint& T [[buffer(1)]], constant uint& D [[buffer(2)]], uint gid [[thread_position_in_grid]]) {"
-        "  if (gid >= T * D) return; uint t = gid / D; uint i = gid - t * D; uint half_ = D / 2; float inc = log(10000.0f) / (float)(half_ - 1);"
-        "  uint c = i < half_ ? i : i - half_; float ts = (float)t * exp(-inc * (float)c); y[gid] += (i < half_) ? sin(ts) : cos(ts); }")))
-    ; token + learned position embedding for one token
-    (defn em-embed () (em-lines (list
-        "kernel void ear_embed(device const half* tok [[buffer(0)]], device const half* pos [[buffer(1)]], device float* y [[buffer(2)]], constant uint& id [[buffer(3)]], constant uint& p [[buffer(4)]], constant uint& D [[buffer(5)]], uint gid [[thread_position_in_grid]]) {"
-        "  if (gid >= D) return; y[gid] = (float)tok[id * D + gid] + (float)pos[p * D + gid]; }")))
-    ; argmax over [lo, hi), one thread, ties to the lowest index
-    (defn em-argmax () (em-lines (list
-        "kernel void ear_argmax(device const float* x [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& lo [[buffer(2)]], constant uint& hi [[buffer(3)]], uint gid [[thread_position_in_grid]]) {"
-        "  if (gid != 0) return; uint best = lo; float bv = x[lo]; for (uint i = lo + 1; i < hi; i++) { if (x[i] > bv) { bv = x[i]; best = i; } } out[0] = best; }")))
-    ; STFT power: one thread per (frame, bin); frame t centered at t*160 with reflect padding of 200; periodic Hann; N=400
-    (defn em-stft () (em-lines (list
-        "kernel void ear_stft(device const short* pcm [[buffer(0)]], device float* power [[buffer(1)]], constant uint& L [[buffer(2)]], constant uint& Tf [[buffer(3)]], uint gid [[thread_position_in_grid]]) {"
-        "  if (gid >= Tf * 201) return; uint t = gid / 201; uint bin = gid - t * 201; float re = 0.0f; float im = 0.0f; float w2 = 6.283185307f / 400.0f;"
-        "  for (uint n = 0; n < 400; n++) { int idx = (int)(t * 160 + n) - 200; if (idx < 0) idx = -idx; if (idx >= (int)L) idx = 2 * (int)L - 2 - idx; if (idx < 0) idx = 0;"
-        "    float s = (float)pcm[idx] / 32768.0f; float win = 0.5f - 0.5f * cos(w2 * (float)n); float a = w2 * (float)(bin * n % 400); s *= win; re += s * cos(a); im -= s * sin(a); }"
-        "  power[gid] = re * re + im * im; }")))
-    ; mel: one thread per (frame, mel) over the 80x201 filter bank, log10 clamped at 1e-10
-    (defn em-mel () (em-lines (list
-        "kernel void ear_mel(device const float* power [[buffer(0)]], device const float* filt [[buffer(1)]], device float* mel [[buffer(2)]], constant uint& Tf [[buffer(3)]], uint gid [[thread_position_in_grid]]) {"
-        "  if (gid >= Tf * 80) return; uint t = gid / 80; uint m = gid - t * 80; float acc = 0.0f; for (uint k = 0; k < 201; k++) acc += filt[m * 201 + k] * power[t * 201 + k];"
-        "  mel[gid] = log10(max(acc, 1e-10f)); }")))
-    ; whisper's normalisation: clamp at (max - 8), then (v + 4) / 4; one thread over the whole spectrogram
+        "  for (uint n = tid; n < 400; n += 256) { int idx = (int)(t * 160 + n) - 200; if (idx < 0) idx = -idx; if (idx >= (int)L) idx = 2 * (int)L - 2 - idx; if (idx < 0) idx = 0; float s = (float)pcm[idx] / 32768.0f; float win = 0.5f - 0.5f * twc[n]; fr[n] = s * win; }"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  if (tid < 201) { float re = 0.0f; float im = 0.0f; uint a = 0; for (uint n = 0; n < 400; n++) { float s = fr[n]; re += s * twc[a]; im -= s * tws[a]; a += tid; if (a >= 400) a -= 400; } pw[tid] = re * re + im * im; }"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  if (tid < 80) { float acc = 0.0f; for (uint k = 0; k < 201; k++) acc += filt[tid * 201 + k] * pw[k]; float v = log10(max(acc, 1e-10f)); mel[t * 80 + tid] = v; mv[tid] = v; }"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  if (tid == 0) { float mx = -1e30f; for (uint m = 0; m < 80; m++) if (mv[m] > mx) mx = mv[m]; fmax[t] = mx; if (t == 0) { shp[0] = Tf / 2; shp[3] = Tf; } } }")))
+    ; whisper's normalisation: clamp at (max - 8), then (v + 4) / 4; every group folds the frame maxima, then owns 256 cells
     (defn em-melnorm () (em-lines (list
-        "kernel void ear_melnorm(device float* mel [[buffer(0)]], constant uint& n [[buffer(1)]], uint gid [[thread_position_in_grid]]) {"
-        "  if (gid != 0) return; float mx = -1e30f; for (uint i = 0; i < n; i++) if (mel[i] > mx) mx = mel[i]; float floor_ = mx - 8.0f;"
-        "  for (uint i = 0; i < n; i++) { float v = mel[i] < floor_ ? floor_ : mel[i]; mel[i] = (v + 4.0f) / 4.0f; } }")))
+        "kernel void ear_melnorm(device float* mel [[buffer(0)]], device const float* fmax [[buffer(1)]], device const uint* shp [[buffer(2)]], uint g [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {"
+        "  threadgroup float pm[256]; uint Tf = shp[3]; float mx = -1e30f; for (uint t = tid; t < Tf; t += 256) if (fmax[t] > mx) mx = fmax[t]; pm[tid] = mx;"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  if (tid == 0) { float m = -1e30f; for (uint i = 0; i < 256; i++) if (pm[i] > m) m = pm[i]; pm[0] = m; }"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  float floor_ = pm[0] - 8.0f; uint i = g * 256 + tid; if (i < Tf * 80) { float v = mel[i] < floor_ ? floor_ : mel[i]; mel[i] = (v + 4.0f) / 4.0f; } }")))
+    ; whisper's sinusoid positions added in place over the encoder's rows: sin for the first half of channels, cos for the second
+    (defn em-addpos () (em-lines (list
+        "kernel void ear_addpos(device float* y [[buffer(0)]], device const uint* shp [[buffer(1)]], constant uint& D [[buffer(2)]], uint gid [[thread_position_in_grid]]) {"
+        "  uint T = shp[0]; if (gid >= T * D) return; uint t = gid / D; uint i = gid - t * D; uint half_ = D / 2; float inc = log(10000.0f) / (float)(half_ - 1);"
+        "  uint c = i < half_ ? i : i - half_; float ts = (float)t * exp(-inc * (float)c); y[gid] += (i < half_) ? sin(ts) : cos(ts); }")))
+    ; fused layernorm + gemm over rows: y_w[(yoff+t)*Nper+n] = (mode 1: gelu | mode 2: + r[t*Nper+n]) (b_w[n] + sum_k LN(x)[t][k] * w_w[n*K+k]);
+    ; the output columns n0..n0+31 of a 32x32 tile pick weight w = n0 / Nper (three weights side by side make q/k/v one dispatch);
+    ; the layernorm's mean and rsqrt once per row in threadgroup memory (eight threads a row), applied as the x tile is staged;
+    ; 256 threads = 8 simdgroups, each two 8x8 blocks folded with simdgroup_multiply_accumulate over K steps of 32 (x and w staged as float,
+    ; 8 KB in all, so several tiles share a core); the tile lands in the same memory for the epilogue (bias, gelu or residual, row offset);
+    ; T = shp[tslot], yoff = shp[yslot] for the second and third outputs; wanth = 1 writes the normalised rows to hout;
+    ; cstride > 0 makes it the conv1d (kernel 3, pad 1, stride cstride): x[t][k] is x[(t*cstride + k/Cin - 1)*Cin + k%Cin] with Cin = K/3, zero outside 0..Tin-1 (Tin = shp[tinslot])
+    (defn em-gemm-f () (em-lines (list
+        (str_concat "kernel void ear_gemm_f(" (str_concat (em-gargs) ", constant uint& tslot [[buffer(20)]], constant uint& yslot [[buffer(21)]], constant uint& wanth [[buffer(22)]], constant uint& cstride [[buffer(23)]], constant uint& tinslot [[buffer(24)]], uint gr [[threadgroup_position_in_grid]], uint lt [[thread_position_in_threadgroup]]) {"))
+        "  threadgroup float smem[2048]; threadgroup float* xs = smem; threadgroup float* ws = smem + 1024; threadgroup float* cs = smem; threadgroup float mean[32]; threadgroup float rs[32]; threadgroup float red[256];"
+        "  uint Tin = shp[tinslot]; uint Cin = K / 3; uint T = shp[tslot]; uint tilesN = (N + 31) / 32; uint tgx = gr % tilesN; uint tgy = gr / tilesN; uint t0 = tgy * 32; uint n0 = tgx * 32; uint which = n0 / Nper; uint nb = n0 - which * Nper; uint yoff = which == 0 ? 0 : shp[yslot];"
+        "  device const half* w = which == 0 ? w0 : (which == 1 ? w1 : w2); device const half* bb = which == 0 ? b0 : (which == 1 ? b1 : b2); device float* y = which == 0 ? y0 : (which == 1 ? y1 : y2);"
+        "  uint row = lt / 8; uint q = lt % 8; uint tr = t0 + row;"
+        "  if (hasln) { float s = 0.0f; if (tr < T) { for (uint k = q; k < K; k += 8) s += x[tr * K + k]; } red[lt] = s; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "    float m = 0.0f; for (uint i = 0; i < 8; i++) m += red[row * 8 + i]; m /= (float)K; float v = 0.0f; if (tr < T) { for (uint k = q; k < K; k += 8) { float d = x[tr * K + k] - m; v += d * d; } }"
+        "    threadgroup_barrier(mem_flags::mem_threadgroup); red[lt] = v; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "    if (q == 0) { float vv = 0.0f; for (uint i = 0; i < 8; i++) vv += red[row * 8 + i]; mean[row] = m; rs[row] = rsqrt(vv / (float)K + 1e-5f); } threadgroup_barrier(mem_flags::mem_threadgroup); }"
+        "  uint sg = lt / 32; uint r4 = sg / 2; uint c2 = sg - r4 * 2; simdgroup_float8x8 acc[2]; acc[0] = simdgroup_float8x8(0.0f); acc[1] = simdgroup_float8x8(0.0f);"
+        "  uint xr = lt / 8; uint xc = (lt % 8) * 4; uint xt = t0 + xr; uint wn = lt / 8; uint wc = (lt % 8) * 4; uint wrow = nb + wn;"
+        "  for (uint k0 = 0; k0 < K; k0 += 32) {"
+        "    for (uint j = 0; j < 4; j++) { uint k = k0 + xc + j; float v = 0.0f; if (xt < T && k < K) { if (cstride) { uint kk = k / Cin; uint ci = k - kk * Cin; int ti = (int)(xt * cstride + kk) - 1; if (ti >= 0 && ti < (int)Tin) v = x[ti * Cin + ci]; } else { v = x[xt * K + k]; if (hasln) v = (v - mean[xr]) * rs[xr] * (float)g[k] + (float)lb[k]; if (wanth && tgx == 0) hout[xt * K + k] = v; } } xs[xr * 32 + xc + j] = v; }"
+        "    for (uint j = 0; j < 4; j++) { uint k = k0 + wc + j; ws[(wc + j) * 32 + wn] = (wrow < Nper && k < K) ? (float)w[wrow * K + k] : 0.0f; }"
+        "    threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "    for (uint kb = 0; kb < 4; kb++) { simdgroup_float8x8 a; simdgroup_float8x8 b0m; simdgroup_float8x8 b1m; simdgroup_load(a, xs + (r4 * 8) * 32 + kb * 8, 32); simdgroup_load(b0m, ws + (kb * 8) * 32 + c2 * 16, 32); simdgroup_load(b1m, ws + (kb * 8) * 32 + c2 * 16 + 8, 32);"
+        "      simdgroup_multiply_accumulate(acc[0], a, b0m, acc[0]); simdgroup_multiply_accumulate(acc[1], a, b1m, acc[1]); }"
+        "    threadgroup_barrier(mem_flags::mem_threadgroup); }"
+        "  simdgroup_store(acc[0], cs + (r4 * 8) * 32 + c2 * 16, 32); simdgroup_store(acc[1], cs + (r4 * 8) * 32 + c2 * 16 + 8, 32);"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  uint tx = lt % 16; uint ty = lt / 16;"
+        "  for (uint i = 0; i < 2; i++) { uint tt = t0 + ty * 2 + i; if (tt >= T) continue; for (uint j = 0; j < 2; j++) { uint n = nb + tx * 2 + j; if (n >= Nper) continue; float v = cs[(ty * 2 + i) * 32 + tx * 2 + j] + (float)bb[n]; if (mode == 1) v = ear_gelu(v); if (mode == 2) v += r[tt * Nper + n]; y[(yoff + tt) * Nper + n] = v; } } }")))
+    ; the same fold for one row (the decoder): 256 threads stage the (normalised) row in threadgroup memory, then each simdgroup owns one
+    ; output n = 8*group + simdgroup, its 32 lanes striding K by half4 and folding with simd_sum; lastrow = 1 reads row shp[2]-1 (the prefill's last)
+    (defn em-mv () (em-lines (list
+        (str_concat "kernel void ear_mv(" (str_concat (em-gargs) ", constant uint& yslot [[buffer(20)]], constant uint& lastrow [[buffer(21)]], uint gr [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {"))
+        "  threadgroup float4 xs4[384]; threadgroup float red[8]; threadgroup float* xs = (threadgroup float*)xs4;"
+        "  uint xoff = lastrow ? (shp[2] - 1) * K : 0; device const float* xr = x + xoff;"
+        "  if (hasln) { float s = 0.0f; for (uint k = tid; k < K; k += 256) s += xr[k]; s = simd_sum(s); if (lane == 0) red[sg] = s; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "    float m = 0.0f; for (uint i = 0; i < 8; i++) m += red[i]; m /= (float)K; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "    float v = 0.0f; for (uint k = tid; k < K; k += 256) { float d = xr[k] - m; v += d * d; } v = simd_sum(v); if (lane == 0) red[sg] = v; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "    float vv = 0.0f; for (uint i = 0; i < 8; i++) vv += red[i]; float rsd = rsqrt(vv / (float)K + 1e-5f);"
+        "    for (uint k = tid; k < K; k += 256) xs[k] = (xr[k] - m) * rsd * (float)g[k] + (float)lb[k]; }"
+        "  else { for (uint k = tid; k < K; k += 256) xs[k] = xr[k]; }"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  uint n = gr * 8 + sg; if (n >= N) return; uint which = n / Nper; uint nl = n - which * Nper; uint yoff = which == 0 ? 0 : shp[yslot];"
+        "  device const half* w = which == 0 ? w0 : (which == 1 ? w1 : w2); device const half* bb = which == 0 ? b0 : (which == 1 ? b1 : b2); device float* y = which == 0 ? y0 : (which == 1 ? y1 : y2);"
+        "  device const half4* w4 = (device const half4*)(w + nl * K); float acc = 0.0f; uint K4 = K / 4;"
+        "  for (uint k = lane; k < K4; k += 32) { float4 wv = float4(w4[k]); float4 xv = xs4[k]; acc += wv.x * xv.x + wv.y * xv.y + wv.z * xv.z + wv.w * xv.w; }"
+        "  acc = simd_sum(acc); if (lane == 0) { float v = acc + (float)bb[nl]; if (mode == 1) v = ear_gelu(v); if (mode == 2) v += r[nl]; y[yoff * Nper + nl] = v; } }")))
+    ; attention over rows: one threadgroup (256 threads) per (head, 16 queries); a thread owns one query and one of 16 key slices, online softmax
+    ; over its keys in registers (head dim 64), the 16 slices of a query merged with simd_shuffle_xor (they are one half of a simdgroup): no partials
+    ; in threadgroup memory beyond the scaled q block, so many groups share a core; scale 64^-0.5;
+    ; Tq = shp[tqslot]; tkmode 0: the encoder (keys = queries), 1: the decoder's own rows (causal from qoff = shp[1], keys to qoff+t), 2: the cross window (keys = shp[0])
+    (defn em-attn () (em-lines (list
+        "kernel void ear_attn(device const float* q [[buffer(0)]], device const float* k [[buffer(1)]], device const float* v [[buffer(2)]], device float* y [[buffer(3)]], device const uint* shp [[buffer(4)]], constant uint& H [[buffer(5)]], constant uint& tqslot [[buffer(6)]], constant uint& tkmode [[buffer(7)]], uint g [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {"
+        "  threadgroup float qs[16][64]; uint Tq = shp[tqslot]; uint Tk = Tq; uint qoff = 0; uint causal = 0; if (tkmode == 1) { qoff = shp[1]; Tk = qoff + Tq; causal = 1; } if (tkmode == 2) Tk = shp[0];"
+        "  uint nqb = (Tq + 15) / 16; uint h = g / nqb; uint qb = g - h * nqb; uint qi = tid / 16; uint ks = tid % 16; uint t = qb * 16 + qi; uint D = H * 64; float scale = rsqrt(64.0f);"
+        "  for (uint e = tid; e < 1024; e += 256) { uint rr = e / 64; uint c = e - rr * 64; uint tt = qb * 16 + rr; qs[rr][c] = (tt < Tq) ? q[tt * D + h * 64 + c] * scale : 0.0f; }"
+        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  uint nk = (t < Tq) ? (causal ? (qoff + t + 1) : Tk) : 0; if (nk > Tk) nk = Tk;"
+        "  float m = -1e30f; float l = 0.0f; float acc[64]; for (uint i = 0; i < 64; i++) acc[i] = 0.0f;"
+        "  for (uint j = ks; j < nk; j += 16) { device const float* kr = k + j * D + h * 64; float s = 0.0f; for (uint i = 0; i < 64; i++) s += qs[qi][i] * kr[i];"
+        "    float mn = s > m ? s : m; float cs = exp(m - mn); float p = exp(s - mn); l = l * cs + p; device const float* vr = v + j * D + h * 64; for (uint i = 0; i < 64; i++) acc[i] = acc[i] * cs + p * vr[i]; m = mn; }"
+        "  float M = m; M = max(M, simd_shuffle_xor(M, 8)); M = max(M, simd_shuffle_xor(M, 4)); M = max(M, simd_shuffle_xor(M, 2)); M = max(M, simd_shuffle_xor(M, 1));"
+        "  float w = exp(m - M); l *= w; l += simd_shuffle_xor(l, 8); l += simd_shuffle_xor(l, 4); l += simd_shuffle_xor(l, 2); l += simd_shuffle_xor(l, 1);"
+        "  for (uint i = 0; i < 64; i++) { float a = acc[i] * w; a += simd_shuffle_xor(a, 8); a += simd_shuffle_xor(a, 4); a += simd_shuffle_xor(a, 2); a += simd_shuffle_xor(a, 1); if (ks == (i & 15) && t < Tq) y[t * D + h * 64 + i] = a / l; } }")))
+    ; attention for one row: one threadgroup (256 threads) per head, the keys across the threads, scores in threadgroup memory, the softmax's
+    ; max and sum folded with simd_max/simd_sum, then four key slices x 64 channels fold the values; tkmode 1: keys to shp[1]+1 (own cache), 2: the cross window (shp[0])
+    (defn em-attn-dec () (em-lines (list
+        "kernel void ear_attn_dec(device const float* q [[buffer(0)]], device const float* k [[buffer(1)]], device const float* v [[buffer(2)]], device float* y [[buffer(3)]], device const uint* shp [[buffer(4)]], constant uint& H [[buffer(5)]], constant uint& tkmode [[buffer(6)]], threadgroup float* sc [[threadgroup(0)]], uint h [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {"
+        "  threadgroup float red[8]; threadgroup float part[4][64]; uint Tk = tkmode == 1 ? shp[1] + 1 : shp[0]; uint D = H * 64; float scale = rsqrt(64.0f); device const float* qr = q + h * 64;"
+        "  float mx = -1e30f; for (uint j = tid; j < Tk; j += 256) { device const float* kr = k + j * D + h * 64; float s = 0.0f; for (uint i = 0; i < 64; i++) s += qr[i] * kr[i]; s *= scale; sc[j] = s; if (s > mx) mx = s; }"
+        "  mx = simd_max(mx); if (lane == 0) red[sg] = mx; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  float M = red[0]; for (uint i = 1; i < 8; i++) if (red[i] > M) M = red[i]; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  float sum = 0.0f; for (uint j = tid; j < Tk; j += 256) { float p = exp(sc[j] - M); sc[j] = p; sum += p; } sum = simd_sum(sum); if (lane == 0) red[sg] = sum; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  float S = 0.0f; for (uint i = 0; i < 8; i++) S += red[i]; uint slice = tid / 64; uint dim = tid - slice * 64; float acc = 0.0f;"
+        "  for (uint j = slice; j < Tk; j += 4) acc += sc[j] * v[j * D + h * 64 + dim]; part[slice][dim] = acc; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  if (tid < 64) y[h * 64 + tid] = (part[0][tid] + part[1][tid] + part[2][tid] + part[3][tid]) / S; }")))
+    ; token + learned position embedding for one token; thread 0 writes the shape word: pos and one row
+    (defn em-embed () (em-lines (list
+        "kernel void ear_embed(device const half* tok [[buffer(0)]], device const half* pos [[buffer(1)]], device float* y [[buffer(2)]], device uint* shp [[buffer(3)]], constant uint& id [[buffer(4)]], constant uint& p [[buffer(5)]], constant uint& D [[buffer(6)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= D) return; y[gid] = (float)tok[id * D + gid] + (float)pos[p * D + gid]; if (gid == 0) { shp[1] = p; shp[2] = 1; } }")))
+    ; token + position embedding for T tokens at once (ids in a u32 buffer) from position p0; thread 0 writes the shape word: p0 and T rows
+    (defn em-embed-n () (em-lines (list
+        "kernel void ear_embed_n(device const half* tok [[buffer(0)]], device const half* pos [[buffer(1)]], device const uint* ids [[buffer(2)]], device float* y [[buffer(3)]], device uint* shp [[buffer(4)]], constant uint& p0 [[buffer(5)]], constant uint& D [[buffer(6)]], constant uint& T [[buffer(7)]], uint gid [[thread_position_in_grid]]) {"
+        "  if (gid >= T * D) return; uint t = gid / D; uint i = gid - t * D; y[gid] = (float)tok[ids[t] * D + i] + (float)pos[(p0 + t) * D + i]; if (gid == 0) { shp[1] = p0; shp[2] = T; } }")))
+    ; argmax over two windows [lo,hi) and [lo2,hi2) in one threadgroup of 1024, ties to the lowest index
+    (defn em-argmax () (em-lines (list
+        "kernel void ear_argmax(device const float* xv [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& lo [[buffer(2)]], constant uint& hi [[buffer(3)]], constant uint& lo2 [[buffer(4)]], constant uint& hi2 [[buffer(5)]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {"
+        "  threadgroup float bv[1024]; threadgroup uint bi[1024]; float best = -1e30f; uint bidx = 0xffffffffu;"
+        "  for (uint i = lo + tid; i < hi; i += nt) { float v = xv[i]; if (v > best || (v == best && i < bidx)) { best = v; bidx = i; } }"
+        "  for (uint i = lo2 + tid; i < hi2; i += nt) { float v = xv[i]; if (v > best || (v == best && i < bidx)) { best = v; bidx = i; } }"
+        "  bv[tid] = best; bi[tid] = bidx; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  for (uint s = nt / 2; s > 0; s >>= 1) { if (tid < s) { float ov = bv[tid + s]; uint oi = bi[tid + s]; if (ov > bv[tid] || (ov == bv[tid] && oi < bi[tid])) { bv[tid] = ov; bi[tid] = oi; } } threadgroup_barrier(mem_flags::mem_threadgroup); }"
+        "  if (tid == 0) out[0] = bi[0]; }")))
     ; the reference filter bank (librosa slaney mel, sr 16000, n_fft 400, 80 mels, fmax 8000) computed on the device once: one thread per (mel, bin)
     (defn em-melbank () (em-lines (list
         "inline float ear_hz2mel(float f) { float fsp = 200.0f / 3.0f; float lstep = log(6.4f) / 27.0f; return f >= 1000.0f ? (1000.0f / fsp) + log(f / 1000.0f) / lstep : f / fsp; }"
@@ -90,39 +155,6 @@
     (defn em-copy () (em-lines (list
         "kernel void ear_copy8(device const uchar* src [[buffer(0)]], device uchar* dst [[buffer(1)]], constant uint& srcoff [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) {"
         "  if (gid >= n) return; dst[gid] = src[srcoff + gid]; }")))
-    ; decode attention: one threadgroup per head, threads across the keys; scores in threadgroup memory, then 64 threads each own one output channel
-    (defn em-attn-dec () (em-lines (list
-        "kernel void ear_attn_dec(device const float* q [[buffer(0)]], device const float* k [[buffer(1)]], device const float* v [[buffer(2)]], device float* y [[buffer(3)]], constant uint& Tk [[buffer(4)]], constant uint& H [[buffer(5)]], constant uint& hd [[buffer(6)]], threadgroup float* sc [[threadgroup(0)]], uint h [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {"
-        "  uint D = H * hd; float scale = rsqrt((float)hd); device const float* qr = q + h * hd;"
-        "  for (uint j = tid; j < Tk; j += nt) { device const float* kr = k + j * D + h * hd; float s = 0.0f; for (uint i = 0; i < hd; i++) s += qr[i] * kr[i]; sc[j] = s * scale; }"
-        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
-        "  if (tid == 0) { float mx = -1e30f; for (uint j = 0; j < Tk; j++) if (sc[j] > mx) mx = sc[j]; float sum = 0.0f; for (uint j = 0; j < Tk; j++) { sc[j] = exp(sc[j] - mx); sum += sc[j]; } sc[Tk] = sum; }"
-        "  threadgroup_barrier(mem_flags::mem_threadgroup);"
-        "  if (tid < hd) { float acc = 0.0f; for (uint j = 0; j < Tk; j++) acc += sc[j] * v[j * D + h * hd + tid]; y[h * hd + tid] = acc / sc[Tk]; } }")))
-    ; argmax over two windows at once: the text-or-end window and the timestamp window, so the decoder keeps its own clock
-    (defn em-argmax2 () (em-lines (list
-        "kernel void ear_argmax2(device const float* x [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& lo [[buffer(2)]], constant uint& hi [[buffer(3)]], constant uint& lo2 [[buffer(4)]], constant uint& hi2 [[buffer(5)]], uint gid [[thread_position_in_grid]]) {"
-        "  if (gid != 0) return; uint best = lo; float bv = x[lo]; for (uint i = lo + 1; i < hi; i++) { if (x[i] > bv) { bv = x[i]; best = i; } }"
-        "  for (uint i = lo2; i < hi2; i++) { if (x[i] > bv) { bv = x[i]; best = i; } } out[0] = best; }")))
-    ; tiled gemm: 16x16 output tiles, X and W tiles staged through threadgroup memory, one thread per output; same fold as ear_gemm (bias, gelu or residual, row offset)
-    (defn em-gemm-t () (em-lines (list
-        "kernel void ear_gemm_t(device const float* x [[buffer(0)]], device const half* w [[buffer(1)]], device const half* b [[buffer(2)]], device float* y [[buffer(3)]], device const float* r [[buffer(4)]], constant uint& T [[buffer(5)]], constant uint& N [[buffer(6)]], constant uint& K [[buffer(7)]], constant uint& hasb [[buffer(8)]], constant uint& mode [[buffer(9)]], constant uint& yoff [[buffer(10)]], constant uint& tilesN [[buffer(11)]], uint g [[threadgroup_position_in_grid]], uint lt [[thread_position_in_threadgroup]]) {"
-        "  threadgroup float xs[16][16]; threadgroup float ws[16][16]; uint2 tid = uint2(lt % 16, lt / 16); uint2 tg = uint2(g % tilesN, g / tilesN);"
-        "  uint t = tg.y * 16 + tid.y; uint n = tg.x * 16 + tid.x; float acc = 0.0f;"
-        "  for (uint k0 = 0; k0 < K; k0 += 16) {"
-        "    uint kx = k0 + tid.x; uint kw = k0 + tid.y;"
-        "    xs[tid.y][tid.x] = (t < T && kx < K) ? x[t * K + kx] : 0.0f;"
-        "    ws[tid.y][tid.x] = (n < N && kw < K) ? (float)w[n * K + kw] : 0.0f;"
-        "    threadgroup_barrier(mem_flags::mem_threadgroup);"
-        "    for (uint kk = 0; kk < 16; kk++) acc += xs[tid.y][kk] * ws[kk][tid.x];"
-        "    threadgroup_barrier(mem_flags::mem_threadgroup); }"
-        "  if (t >= T || n >= N) return; if (hasb) acc += (float)b[n];"
-        "  if (mode == 1) acc = ear_gelu(acc); if (mode == 2) acc += r[t * N + n];"
-        "  y[(yoff + t) * N + n] = acc; }")))
-    ; token + position embedding for T tokens at once (ids in a u32 buffer)
-    (defn em-embed-n () (em-lines (list
-        "kernel void ear_embed_n(device const half* tok [[buffer(0)]], device const half* pos [[buffer(1)]], device const uint* ids [[buffer(2)]], device float* y [[buffer(3)]], constant uint& p0 [[buffer(4)]], constant uint& D [[buffer(5)]], constant uint& T [[buffer(6)]], uint gid [[thread_position_in_grid]]) {"
-        "  if (gid >= T * D) return; uint t = gid / D; uint i = gid - t * D; y[gid] = (float)tok[ids[t] * D + i] + (float)pos[(p0 + t) * D + i]; }")))
-    (defn em-unit () (em-lines (list (em-head) (em-gemm) (em-conv) (em-ln) (em-attn) (em-addpos) (em-embed) (em-argmax) (em-stft) (em-mel) (em-melnorm) (em-melbank) (em-copy) (em-attn-dec) (em-argmax2) (em-gemm-t) (em-embed-n))))
-    (defn em-names () (list "ear_gemm" "ear_conv" "ear_ln" "ear_attn" "ear_addpos" "ear_embed" "ear_argmax" "ear_stft" "ear_mel" "ear_melnorm" "ear_melbank" "ear_copy8" "ear_attn_dec" "ear_argmax2" "ear_gemm_t" "ear_embed_n"))
+    (defn em-unit () (em-lines (list (em-head) (em-spec) (em-melnorm) (em-addpos) (em-gemm-f) (em-mv) (em-attn) (em-attn-dec) (em-embed) (em-embed-n) (em-argmax) (em-melbank) (em-copy))))
+    (defn em-names () (list "ear_spec" "ear_melnorm" "ear_addpos" "ear_gemm_f" "ear_mv" "ear_attn" "ear_attn_dec" "ear_embed" "ear_embed_n" "ear_argmax" "ear_melbank" "ear_copy8"))
     0)
