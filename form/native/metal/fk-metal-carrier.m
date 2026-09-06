@@ -1190,6 +1190,15 @@ long long fk_metal_status_external(char *out, long long cap) {
         NSMutableString *r = [NSMutableString string];
         [r appendString:@"metal_owner=fkwu-form-cli\nmetal_linked=true\nmetal_door=handle\n"];
         [r appendFormat:@"device=%@\nunified_memory=%d\n", [fk_dev name], (int)[fk_dev hasUnifiedMemory]];
+        // The device's own memory accounting, asked of the device every time it
+        // is spoken. currentAllocatedSize is the device bytes THIS process's
+        // Metal resources currently hold; recommendedMaxWorkingSetSize is the
+        // ceiling the system suggests this process stay under before it starts
+        // paying for eviction. Neither is a handle count -- fk_buf_objs says how
+        // MANY buffers stand, these say how LARGE the standing set is.
+        [r appendFormat:@"allocated_bytes=%llu\nrecommended_working_set_bytes=%llu\n",
+            (unsigned long long)[fk_dev currentAllocatedSize],
+            (unsigned long long)[fk_dev recommendedMaxWorkingSetSize]];
         [r appendFormat:@"buffers=%lld\npipelines=%lu\n",
             (long long)[fk_buf_objs count] - fk_free_top, (unsigned long)[fk_pipe_objs count]];
         [r appendFormat:@"buffer_slots=%lu\nfree_slots=%lld\n",
