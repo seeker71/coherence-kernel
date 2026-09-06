@@ -1,0 +1,74 @@
+; dense-enqueue-share-run.fk — of one dense token's wall, how much is the CPU saying the dispatches
+; and how much is the GPU running them?
+;
+; The handle door's enqueue never blocks: dispatches accumulate in one command buffer and the GPU
+; starts when something syncs. So a token's wall is the CPU's encode time PLUS the GPU's, in series,
+; and the two can be separated by reading the clock BEFORE the sync. That reading is what found the
+; binding cost: md-bind16 builds its binding from md-le32 words, each byte a div and a mod over an
+; integer power, and one llama3.2:1b token's 133 bindings cost ~2.5 ms of a ~10 ms wall until the
+; still ones were said once at open (2026-09-06).
+;
+; The enqueue arm is honest under a loaded GPU — it is pure CPU work — while the wall arm is not:
+; three siblings may hold this GPU at once, so the block A/B alternates its two arms round by round
+; and reports minimums, and even then a wall number is a reading of this minute, not of the machine.
+;
+; preludes: native/metal/dense-token-handle.fk form-stdlib/model-registry.bml
+(do
+    (defn des-f (n) (str_to_float (int_to_str n)))
+    (defn des-2dp (x) (div (des-f (float_to_int (mul x 100.0))) 100.0))
+    ; a whole token, synced at its end exactly as dth-forward does
+    (defn des-tok (st id pos fused)
+        (do (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2))
+            (dth-dq ps (nth st 6) (nth bs 0) (mul id (nth geo 0)) (nth geo 0))
+            (if (eq fused 1)
+                (dth-passes ps bs geo (nth st 3) (nth st 4) (nth st 5) (nth st 7) pos 0 (nth geo 16))
+                (dth-passes-serial ps bs geo (nth st 3) (nth st 4) (nth st 5) (nth st 7) pos 0 (nth geo 16)))
+            (dth-head ps bs geo (nth st 7) (nth st 8))
+            (dth-u32 (metal_buf_read (nth bs 13) 0 4))))
+    (defn des-toks (st n pos fused) (if (le n 0) 0 (do (let z (des-tok st 791 pos fused)) (des-toks st (sub n 1) (add pos 1) fused))))
+    ; the same enqueues with nothing synced: what the clock reads is the CPU's own encode work
+    (defn des-enq (st id pos fused)
+        (do (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2))
+            (dth-dq ps (nth st 6) (nth bs 0) (mul id (nth geo 0)) (nth geo 0))
+            (if (eq fused 1)
+                (dth-passes ps bs geo (nth st 3) (nth st 4) (nth st 5) (nth st 7) pos 0 (nth geo 16))
+                (dth-passes-serial ps bs geo (nth st 3) (nth st 4) (nth st 5) (nth st 7) pos 0 (nth geo 16)))
+            (dth-head ps bs geo (nth st 7) (nth st 8))
+            0))
+    (defn des-enqs (st n pos fused) (if (le n 0) 0 (do (des-enq st 791 pos fused) (des-enqs st (sub n 1) (add pos 1) fused))))
+    (defn des-min (f st n pos fused k best)
+        (if (le k 0) best
+            (do (let t0 (now_unix_ms))
+                (if (eq f 1) (des-toks st n pos fused) (des-enqs st n pos fused))
+                (let t1 (now_unix_ms))
+                (let z (metal_sync))
+                (des-min f st n pos fused (sub k 1) (if (lt (sub t1 t0) best) (sub t1 t0) best)))))
+    (defn des-say (label st n pos fused)
+        (do (let w (des-toks st 2 pos fused))
+            (let tot (des-min 1 st n pos fused 5 100000000))
+            (let enq (des-min 0 st n pos fused 5 100000000))
+            (print (str_concat label (str_concat "  token_ms=" (str_concat (float_to_str (des-2dp (div (des-f tot) (des-f n))))
+                (str_concat "  enqueue_ms=" (str_concat (float_to_str (des-2dp (div (des-f enq) (des-f n))))
+                (str_concat "  gpu_ms=" (float_to_str (des-2dp (div (des-f (sub tot enq)) (des-f n)))))))))))))
+    ; the two block shapes measured ALTERNATELY, round by round, so a sibling's load lands on both arms
+    (defn des-one (st n pos fused)
+        (do (let t0 (now_unix_ms)) (des-toks st n pos fused) (let t1 (now_unix_ms)) (sub t1 t0)))
+    (defn des-alt (st n pos k bF bS)
+        (if (le k 0) (list bF bS)
+            (do (let a (des-one st n pos 1))
+                (let b (des-one st n pos 0))
+                (des-alt st n pos (sub k 1) (if (lt a bF) a bF) (if (lt b bS) b bS)))))
+    (defn des-ab (label st n pos)
+        (do (let w (des-toks st 2 pos 1))
+            (let r (des-alt st n pos 6 100000000 100000000))
+            (print (str_concat label (str_concat "  fused_token_ms=" (str_concat (float_to_str (des-2dp (div (des-f (head r)) (des-f n))))
+                (str_concat "  serial_token_ms=" (float_to_str (des-2dp (div (des-f (nth r 1)) (des-f n)))))))))))
+    (let st1 (dth-open (mr-path (mr-find "llama32-1b")) 256 (sub 0 1)))
+    (des-say "1b fused " st1 40 4 1)
+    (des-say "1b serial" st1 40 4 0)
+    (des-ab "1b       " st1 20 4)
+    (let st3 (dth-open (mr-path (mr-find "llama32-3b")) 256 (sub 0 1)))
+    (des-say "3b kfused" st3 20 4 1)
+    (des-say "3b serial" st3 20 4 0)
+    (des-ab "3b       " st3 10 4)
+    0)
