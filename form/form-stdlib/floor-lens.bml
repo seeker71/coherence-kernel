@@ -1,0 +1,70 @@
+//////////////////////////////////////////////////////////////////////
+// floor-lens.bml — every lane against the floor the hardware gives it.
+// The floor is measured here, not quoted: a kernel reads a real model
+// blob through the handle door and the bytes it moved over the seconds
+// it took is this Mac's bandwidth. A lane's floor is the bytes one pass
+// MUST touch (its weights, once) over that bandwidth; its distance is
+// the measured time over the floor. A lane at 1.0 has nothing left to
+// give without touching fewer bytes.
+// preludes: form/form-stdlib/metal-door.fk form/form-stdlib/model-registry.bml form/form-stdlib/format-arith.fk form/form-stdlib/term-graphics.bml
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormFloorLens {
+        def fl-nl() = byte_to_str(10);
+        def fl-cat(xs) = if eq(len(xs), 0) then "" else str_concat(head(xs), fl-cat(tail(xs)));
+        def fl-lines(xs) = if eq(len(xs), 0) then "" else str_concat(head(xs), str_concat(fl-nl(), fl-lines(tail(xs))));
+        // one thread per span of 64 sixteen-byte words; the sum is thrown away, the reads are the point
+        def fl-bw-msl() = fl-lines(list(
+            "#include <metal_stdlib>",
+            "using namespace metal;",
+            "kernel void fl_bw(device const uint4* w [[buffer(0)]], device uint* out [[buffer(1)]], constant uint& n16 [[buffer(2)]], constant uint& per [[buffer(3)]], uint gid [[thread_position_in_grid]]) {",
+            "  uint acc = 0; uint base = gid * per; for (uint i = 0; i < per; i++) { uint k = base + i; if (k < n16) { uint4 v = w[k]; acc += v.x ^ v.y ^ v.z ^ v.w; } } if (acc == 0xFFFFFFFFu) out[0] = acc; }"));
+        def fl-pass(p, bufs, n16, per, threads, k) = if le(k, 0) then 0 else fl-pass-go(p, bufs, n16, per, threads, k);
+        def fl-pass-go(p, bufs, n16, per, threads, k) {
+            let e = metal_enqueue(p, md-bind(bufs, list(n16, per)), threads);
+            fl-pass(p, bufs, n16, per, threads, sub(k, 1));
+        }
+        def fl-float(n) = str_to_float(int_to_str(n));
+        // (bytes-per-pass ms-for-five-passes gigabytes-per-second)
+        def fl-measure-bw(path) {
+            let size = file_size(path);
+            let whole = metal_buf_from_file(path, 0, size);
+            let out = metal_buf_alloc(64);
+            let p = metal_pipeline(fl-bw-msl(), "fl_bw");
+            let n16 = div(size, 16);
+            let per = 64;
+            let threads = add(div(n16, per), 1);
+            let warm = fl-pass(p, list(whole, out), n16, per, threads, 1);
+            let s0 = metal_sync();
+            let t0 = now_unix_ms();
+            let five = fl-pass(p, list(whole, out), n16, per, threads, 5);
+            let s1 = metal_sync();
+            let t1 = now_unix_ms();
+            let ms = sub(t1, t0);
+            list(size, ms, div(mul(5.0, div(fl-float(div(size, 1000000)), 1000.0)), div(fl-float(ms), 1000.0)));
+        }
+        def fl-gbs(bw) = nth(bw, 2);
+        // the floor of a pass that must touch `bytes`, in milliseconds, at the measured bandwidth
+        def fl-floor-ms(bytes, gbs) = div(div(fl-float(div(bytes, 1000)), 1000000.0), div(gbs, 1000.0));
+        def fl-2dp(x) = div(fl-float(float_to_int(mul(x, 100.0))), 100.0);
+        // a lane row: (name bytes measured-ms floor-ms distance). The measured time is a TOTAL over a
+        // count, divided as floats: a lane faster than a millisecond a pass is not a lane measured as zero.
+        def fl-row(name, bytes, total-ms, count, gbs) {
+            let f = fl-floor-ms(bytes, gbs);
+            let m = div(fl-float(total-ms), fl-float(count));
+            list(name, bytes, fl-2dp(m), fl-2dp(f), fl-2dp(div(m, f)));
+        }
+        def fl-name(r) = head(r);
+        def fl-bytes(r) = nth(r, 1);
+        def fl-measured(r) = nth(r, 2);
+        def fl-floor(r) = nth(r, 3);
+        def fl-distance(r) = nth(r, 4);
+        def fl-mb(bytes) = div(fl-float(div(bytes, 1000)), 1000.0);
+        def fl-lane-text(r) = fl-cat(list(float_to_str(fl-measured(r)), " ms measured, floor ", float_to_str(fl-floor(r)), " ms over ", float_to_str(fl-mb(fl-bytes(r))), " MB, ", float_to_str(fl-distance(r)), "x the floor"));
+        def fl-tone(r) = if lt(fl-distance(r), 2.0) then "good" else if lt(fl-distance(r), 8.0) then "warn" else "bad";
+        def fl-pad(s) = if ge(str_len(s), 8) then s else fl-pad(str_concat(s, " "));
+        def fl-lanes(rows) = if eq(len(rows), 0) then list() else cons(tg-lane(fl-pad(fl-name(head(rows))), fl-lane-text(head(rows)), fl-tone(head(rows)), sub(0, 1)), fl-lanes(tail(rows)));
+        def fl-frame(gbs, rows) = tg-frame(cons(tg-lane("FLOOR   ", str_concat("this Mac gives ", str_concat(float_to_str(fl-2dp(gbs)), " GB/s through the handle door; a lane's floor is what one pass must move, read once")), "dim", sub(0, 1)), fl-lanes(rows)));
+    }
+    0;
+}

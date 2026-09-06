@@ -1,0 +1,55 @@
+; floor-lens-run.fk — every lane beside the floor its hardware gives it, measured here and now:
+; the bandwidth by reading a real blob through the handle door, then each lane run warm, then the
+; bytes that lane's pass must touch summed from the model's own table — the encoder's tensors for
+; an encode, the decoder's for a token, the blob for a dense token. The distance is measured over
+; floor: a lane at 1.0 has nothing left to give without touching fewer bytes.
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/floor-lens.bml form/form-stdlib/ear-native.fk native/metal/dense-token-handle.fk
+(do
+    (defn flr-zeros (s n) (if (ge (str_len s) n) (substring s 0 n) (flr-zeros (str_concat s s) n)))
+    (defn flr-snap () (str_concat "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/snapshots/" (trim (en-text (read_file "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/refs/main")))))
+    (defn flr-encodes (st pcm n) (if (le n 0) 0 (do (let Te (enw-encode st pcm)) (flr-encodes st pcm (sub n 1)))))
+    (defn flr-steps (st pos Te n) (if (le n 0) 0 (do (let id (enw-step2 st 1033 pos Te)) (flr-steps st (add pos 1) Te (sub n 1)))))
+    (defn flr-tokens (st id pos n) (if (le n 0) 0 (do (let nid (dth-forward (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) id pos)) (flr-tokens st nid (add pos 1) (sub n 1)))))
+    ; the bytes of every tensor whose name begins with a side, from the npz's own table
+    (defn flr-side (rows side acc) (if (eq (len rows) 0) acc (flr-side (tail rows) side (if (eq (str_find (head (head rows)) side 0) 0) (add acc (en-bytes (head rows))) acc))))
+    (let blob (mr-path (mr-find "llama32-1b")))
+    (let bw (fl-measure-bw blob))
+    (let gbs (fl-gbs bw))
+    (let npz (str_concat (flr-snap) "/weights.npz"))
+    (let st (enw-open npz "/Users/ursmuff/.mlx-venv/lib/python3.14/site-packages/mlx_whisper/assets/multilingual.tiktoken"))
+    (let table (en-table npz))
+    (let encbytes (flr-side table "encoder." 0))
+    (let decbytes (flr-side table "decoder." 0))
+    (let bytes (en-text (read_file "form/form-stdlib/tests/fixtures/ear-okay-2s.wav")))
+    (let pcm (str_concat (substring bytes 44 (str_len bytes)) (flr-zeros (byte_to_str 0) (sub 256000 (sub (str_len bytes) 44)))))
+    (let warm (enw-encode st pcm))
+    (let e0 (now_unix_ms))
+    (let encs (flr-encodes st pcm 20))
+    (let e1 (now_unix_ms))
+    (let Te (enw-encode st pcm))
+    (let w2 (enw-step2 st 1033 3 Te))
+    (let d0 (now_unix_ms))
+    (let steps (flr-steps st 4 Te 200))
+    (let d1 (now_unix_ms))
+    (let dst (dth-open blob 256 (sub 0 1)))
+    (let warm2 (flr-tokens dst 128000 0 2))
+    (let t0 (now_unix_ms))
+    (let toks (flr-tokens dst 791 2 40))
+    (let t1 (now_unix_ms))
+    ; the encoder moves more activation than it holds weight, and a floor that counted only weights would
+    ; flatter the lane: each term below is what one 8 s pass must read or write, named as it is dispatched.
+    (let Tf 800)
+    (let Te 400)
+    (let D 384)
+    (let act (add (mul 256000 1)                                  ; the pcm read once
+             (add (mul (mul Tf 201) 8)                             ; the power written and read
+             (add (mul (mul Tf 80) 16)                             ; the mel written, normalised, read
+             (add (mul (mul Tf D) 8)                               ; conv1 out written and read
+             (add (mul (mul Te D) 8)                               ; conv2 out written and read, positions added
+                  (mul 4 (mul (mul Te D) 100))))))))               ; four layers: ~25 reads and writes of a Te x D activation each
+    (let rows (list (fl-row "encode" (add encbytes act) (sub e1 e0) 20 gbs)
+                    (fl-row "wtoken" decbytes (sub d1 d0) 200 gbs)
+                    (fl-row "1btoken" (file_size blob) (sub t1 t0) 40 gbs)))
+    (print_str (fl-frame gbs rows))
+    0)
