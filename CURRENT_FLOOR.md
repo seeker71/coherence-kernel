@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 701 rows, 689 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 703 rows, 691 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -652,12 +652,25 @@ tick and with them nodes into the shared field, which never melts -- its
 node ceiling is about ninety hours away at that rate, named with its rate.
 (receipts/2026-09-06-the-framebuffer-is-a-buffer.md)
 
+**The arena counts its own growth.** A fresh cell in the permanent arena --
+private or shared -- counts itself: `fk_mint_total` at the seven intern
+sites and inside `fk_field_fill`, as live page word 33 repointed at
+`fk_live_open`, so the increment is the reading. `kernel_stat 53` answers
+it and the `k` view carries `nodes-minted` for this kernel and per live
+kernel from its page. The class is witnessed: two hundred rows built with
+the same id mint nothing, two hundred with fresh ids mint two cells a row
+(the id and its projection), so the arena grows exactly where a row's
+identity is new. The rates read directly: machine sensor 0 in 15 s, organs
+carrier 0, host sensors 48, the live loop 1038 in 20 s -- about two a tick,
+inside the render, since all 215 published row ids are stable second to
+second. (receipts/2026-09-06-the-arena-counts-its-own-growth.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=94 -> 38000094
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=95 -> 38000095
 ./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
