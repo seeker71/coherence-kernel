@@ -12657,10 +12657,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 29) {
         /* mlx_live: the MLX carrier's state as words (linked, metal, gpu, device, version major/minor/patch, ops,
          * dispatches, error present, error length, 0); nil when MLX is not linked -- no text, nothing to parse */
-        long long m29[12];
+        long long m29[16];
         if (fk_mlx_live_external(m29) <= 0) { return 1; }
         long long l29 = 1;
-        long long k29 = 11;
+        long long k29 = 15;
         while (k29 >= 0) { l29 = fk_cons_val(m29[k29] << 1, l29); k29 = k29 - 1; }
         return l29;
     }
@@ -12672,10 +12672,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 165) {
         /* metal_live: the carrier's counters as words; nil when Metal is not up */
-        long long m165[18];
+        long long m165[20];
         if (fk_metal_live_external(m165) <= 0) { return 1; }
         long long l165 = 1;
-        long long k165 = 17;
+        long long k165 = 19;
         while (k165 >= 0) { l165 = fk_cons_val(m165[k165] << 1, l165); k165 = k165 - 1; }
         return l165;
     }

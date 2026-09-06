@@ -450,7 +450,7 @@ long long fk_mlx_live_external(long long *out) {
         return 0;
     }
     int k = 0;
-    while (k < 12) { out[k] = 0; k = k + 1; }
+    while (k < 16) { out[k] = 0; k = k + 1; }
     bool metal = 0;
     mlx_metal_is_available(&metal);
     mlx_device gpu = mlx_device_new_type(MLX_GPU, 0);
@@ -477,7 +477,13 @@ long long fk_mlx_live_external(long long *out) {
     out[9] = strcmp(fk_mlx_err, "none") == 0 ? 0 : 1;
     out[10] = (long long)strlen(fk_mlx_err);
     out[11] = 0;
+    /* the MLX allocator ledger as words, beside the status text */
+    size_t lactive = 0, lpeak = 0, lcached = 0, llimit = 0;
+    out[12] = mlx_get_active_memory(&lactive) == 0 ? (long long)lactive : -1;
+    out[13] = mlx_get_peak_memory(&lpeak) == 0 ? (long long)lpeak : -1;
+    out[14] = mlx_get_cache_memory(&lcached) == 0 ? (long long)lcached : -1;
+    out[15] = mlx_get_memory_limit(&llimit) == 0 ? (long long)llimit : -1;
     mlx_string_free(ver);
     mlx_device_free(gpu);
-    return 12;
+    return 16;
 }

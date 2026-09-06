@@ -1337,6 +1337,11 @@ long long fk_metal_live_external(long long *out) {
         out[15] = fk_cb == nil ? 0 : (fk_batch_concurrent ? 2 : 1);
         out[16] = (long long)[fk_buf_objs count];
         out[17] = fk_free_top;
-        return 18;
+        /* the allocator ledger as WORDS, not text: the byte gauges the glass reads
+         * every frame parsed metal_status per byte before this (fstr-find-loop at
+         * 559K calls a tick) -- the same two numbers, read by index */
+        out[18] = (long long)(unsigned long long)[fk_dev currentAllocatedSize];
+        out[19] = (long long)(unsigned long long)[fk_dev recommendedMaxWorkingSetSize];
+        return 20;
     }
 }
