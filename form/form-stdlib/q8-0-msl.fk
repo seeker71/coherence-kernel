@@ -163,16 +163,69 @@
             (q80-tg4-fold (sub k 1) (str_concat acc (str_concat "acc = pv[ci & 1u][lane][" (str_concat (int_to_str k) "u] + acc; "))))))
     (defn q80-tg4-stage ()
         "float d = float(as_type<half>(hb[0])); for (uint e = 0u; e < 32u; e += 2u) { ushort two = hb[1u + e / 2u]; uint j = cb * 32u + e; pv[cs & 1u][lane][sub * 32u + e] = (d * float(q6k_s8(int(two & 0xFFu)))) * float(x[j]); pv[cs & 1u][lane][sub * 32u + e + 1u] = (d * float(q6k_s8(int(two >> 8)))) * float(x[j + 1u]); } ")
-    (defn q80-matvec-tg4-body (fname)
+    ; the kernel, generic over its signature, the prefix that names `qb`, `rows`, `row` and the output, and the
+    ; epilogue that stores the row's fold. Every variant below is THIS text with a different prefix/epilogue —
+    ; the fold is one fold.
+    (defn q80-tg4-kernel (fname sig prefix epilogue)
         (str_concat "kernel void "
         (str_concat fname
-        (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) { threadgroup float pv[2][16][129]; uint nb = cols / 32u; uint ns = cols / 128u; uint u = (t >= 32u) ? (t - 32u) : 0u; uint lane = (t < 32u) ? t : (u & 15u); uint sub = u / 16u; uint row = gi * 16u + lane; bool fold = (t < 32u) && (lane < 16u) && (row < rows); bool load = (t >= 32u) && (row < rows); ushort hb[17]; if (load) { uint cb = (ns - 1u) * 4u + sub; device const ushort* hp = (device const ushort*)(qb + (row * nb + cb) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp[q]; } if (load) { uint cs = ns - 1u; uint cb = cs * 4u + sub; "
+        (str_concat sig
+        (str_concat " { threadgroup float pv[2][16][129]; uint nb = cols / 32u; uint ns = cols / 128u; uint u = (t >= 32u) ? (t - 32u) : 0u; uint lane = (t < 32u) ? t : (u & 15u); uint sub = u / 16u; "
+        (str_concat prefix
+        (str_concat " bool fold = (t < 32u) && (lane < 16u) && (row < rows); bool load = (t >= 32u) && (row < rows); ushort hb[17]; if (load) { uint cb = (ns - 1u) * 4u + sub; device const ushort* hp = (device const ushort*)(qb + (row * nb + cb) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp[q]; } if (load) { uint cs = ns - 1u; uint cb = cs * 4u + sub; "
         (str_concat (q80-tg4-stage)
         (str_concat "if (ns > 1u) { uint cb2 = (ns - 2u) * 4u + sub; device const ushort* hp2 = (device const ushort*)(qb + (row * nb + cb2) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp2[q]; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float acc = 0.0f; uint ci = ns; while (ci > 0u) { ci -= 1u; if (load && ci > 0u) { uint cs = ci - 1u; uint cb = cs * 4u + sub; "
         (str_concat (q80-tg4-stage)
         (str_concat "if (cs > 0u) { uint cb2 = (cs - 1u) * 4u + sub; device const ushort* hp2 = (device const ushort*)(qb + (row * nb + cb2) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp2[q]; } } if (fold) { "
         (str_concat (q80-tg4-fold 127 "")
-                    "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (fold) y[row] = acc; }")))))))))
+        (str_concat "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (fold) { "
+        (str_concat epilogue " } }"))))))))))))))
+    (defn q80-matvec-tg4-body (fname)
+        (q80-tg4-kernel fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
+            "uint row = gi * 16u + lane;"
+            "y[row] = acc;"))
+
+    ; --- kernel 9: the same fold with the residual add in its epilogue. form_add_f32 computes y = a + b with a
+    ; the residual stream and b the projection; here `y[row] = r[row] + acc` is that add, the same two operands
+    ; in the same order, and the projection never lands in a buffer of its own. In place on r (each row is read
+    ; and written by its own lane alone). ---
+    (defn q80-matvec-tg4-add-body (fname)
+        (q80-tg4-kernel fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const float* r [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
+            "uint row = gi * 16u + lane;"
+            "y[row] = r[row] + acc;"))
+
+    ; --- kernel 10: three tensors over one input in ONE dispatch (q, k, v), the group index choosing the tensor,
+    ; each output at a row offset — so k and v land straight in their caches at the position's row and the
+    ; cache copies vanish. Groups: ceil(rows0/16) + ceil(rows1/16) + ceil(rows2/16). ---
+    (defn q80-matvec-tg4x3-body (fname)
+        (q80-tg4-kernel fname
+            " (device const uchar* qb0 [[buffer(0)]], device const uchar* qb1 [[buffer(1)]], device const uchar* qb2 [[buffer(2)]], device const float* x [[buffer(3)]], device float* y0 [[buffer(4)]], device float* y1 [[buffer(5)]], device float* y2 [[buffer(6)]], constant uint& rows0 [[buffer(7)]], constant uint& rows1 [[buffer(8)]], constant uint& rows2 [[buffer(9)]], constant uint& cols [[buffer(10)]], constant uint& yoff1 [[buffer(11)]], constant uint& yoff2 [[buffer(12)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
+            "uint g0 = (rows0 + 15u) / 16u; uint g1 = (rows1 + 15u) / 16u; uint sel = (gi < g0) ? 0u : ((gi < g0 + g1) ? 1u : 2u); uint gl = (sel == 0u) ? gi : ((sel == 1u) ? (gi - g0) : (gi - g0 - g1)); uint rows = (sel == 0u) ? rows0 : ((sel == 1u) ? rows1 : rows2); device const uchar* qb = (sel == 0u) ? qb0 : ((sel == 1u) ? qb1 : qb2); device float* y = (sel == 0u) ? y0 : ((sel == 1u) ? y1 : y2); uint yoff = (sel == 0u) ? 0u : ((sel == 1u) ? yoff1 : yoff2); uint row = gl * 16u + lane;"
+            "y[yoff + row] = acc;"))
+
+    ; --- kernel 11: gate and up over one input, and the SwiGLU, in ONE dispatch. Sixteen rows a group as
+    ; before, but the folder simdgroup uses all 32 lanes: lane i folds gate row i, lane 16+i folds up row i;
+    ; 64 loaders stage two blocks a row a step (pv[2][32][65]), holding the next step in registers. The
+    ; epilogue is form_swiglu_f32's own line — `sig = 1/(1 + fexp(-1*gv)); sl = gv*sig; y = sl*u` — on lane
+    ; i with the up fold handed across threadgroup memory. Neither gate nor up lands in a buffer. Needs
+    ; fexp, so a unit emits it AFTER the transcendental spine. cols a multiple of 64. ---
+    (defn q80-glu-fold (k acc)
+        (if (lt k 0) acc
+            (q80-glu-fold (sub k 1) (str_concat acc (str_concat "acc = pv[ci & 1u][lane][" (str_concat (int_to_str k) "u] + acc; "))))))
+    (defn q80-glu-stage ()
+        "float d = float(as_type<half>(hb[0])); for (uint e = 0u; e < 32u; e += 2u) { ushort two = hb[1u + e / 2u]; uint j = cb * 32u + e; pv[cs & 1u][lane][sub * 32u + e] = (d * float(q6k_s8(int(two & 0xFFu)))) * float(x[j]); pv[cs & 1u][lane][sub * 32u + e + 1u] = (d * float(q6k_s8(int(two >> 8)))) * float(x[j + 1u]); } ")
+    (defn q80-matvec-glu-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qg [[buffer(0)]], device const uchar* qu [[buffer(1)]], device const float* x [[buffer(2)]], device float* y [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) { threadgroup float pv[2][32][65]; threadgroup float upv[16]; uint nb = cols / 32u; uint ns = cols / 64u; uint u = (t >= 32u) ? (t - 32u) : 0u; uint lane = (t < 32u) ? t : (u & 31u); uint sub = u / 32u; uint row = gi * 16u + (lane & 15u); device const uchar* qb = (lane < 16u) ? qg : qu; bool fold = (t < 32u) && (row < rows); bool load = (t >= 32u) && (row < rows); ushort hb[17]; if (load) { uint cb = (ns - 1u) * 2u + sub; device const ushort* hp = (device const ushort*)(qb + (row * nb + cb) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp[q]; } if (load) { uint cs = ns - 1u; uint cb = cs * 2u + sub; "
+        (str_concat (q80-glu-stage)
+        (str_concat "if (ns > 1u) { uint cb2 = (ns - 2u) * 2u + sub; device const ushort* hp2 = (device const ushort*)(qb + (row * nb + cb2) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp2[q]; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float acc = 0.0f; uint ci = ns; while (ci > 0u) { ci -= 1u; if (load && ci > 0u) { uint cs = ci - 1u; uint cb = cs * 2u + sub; "
+        (str_concat (q80-glu-stage)
+        (str_concat "if (cs > 0u) { uint cb2 = (cs - 1u) * 2u + sub; device const ushort* hp2 = (device const ushort*)(qb + (row * nb + cb2) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp2[q]; } } if (fold) { "
+        (str_concat (q80-glu-fold 63 "")
+                    "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (fold && lane >= 16u) { upv[lane - 16u] = acc; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (fold && lane < 16u) { float gv = acc; float sig = 1.0f / (1.0f + fexp(-1.0f * gv)); float sl = gv * sig; y[row] = sl * upv[lane]; } }")))))))))
 
     ; --- the emitted forms. `q80-msl-appendix` is what a carrier that ALREADY emitted q6k-msl.fk's
     ; spine appends; `q80-msl-unit` is the self-contained form, for a caller that wants Q8_0 alone. ---

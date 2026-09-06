@@ -10,8 +10,11 @@
 ;   bit 64 form_q80_matvec_tg4_f32  on ffn_down (2048x8192), the other width the lane dispatches
 ;   bit 128 form_gqa_decode_tg_f32 against the per-head form_gqa_decode_f32 on the last layer's cache at four positions
 ;   bit 256 form_rope_pair_f32      against the per-head form_rope_f32 on the last layer's q
+;   bit 512 the FUSED block (nine dispatches: qkv into the caches, adds in epilogues, gate+up+swiglu) against
+;                                   the serial block (seventeen): one token at position 4, the logits the same
+;                                   bytes, the same id
 ; Forty dispatches of each timed.
-; Expected: 511
+; Expected: 1023
 ; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
 ; preludes: native/metal/dense-token-handle.fk form-stdlib/model-registry.bml
 (do
@@ -112,4 +115,17 @@
     (let s13 (metal_sync))
     (let c9 (mul 256 (qb-same? (metal_buf_read pa 0 (mul 4 qOut)) (metal_buf_read pb 0 (mul 4 qOut)) (mul 4 qOut))))
     (print_str (str_concat (qb-ms "attention at four positions: 40 attestant " x0 x1) (qb-ms ", 40 twin " x1 x2)))
-    (print (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8 c9))))))))))
+    ; --- the fused block: one more token, position 4, first through the serial block (seventeen dispatches, the
+    ; attestants'), then through the fused block (nine) on the same state; the logits must be the same bytes ---
+    (let id4 (nth more 2))
+    (let vocabN (nth geo 7))
+    (let y0 (now_unix_ms))
+    (let idS (dth-forward-serial ps bs geo (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) id4 4))
+    (let logS (metal_buf_read (nth bs 11) 0 (mul 4 vocabN)))
+    (let y1 (now_unix_ms))
+    (let idF (dth-forward ps bs geo (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) id4 4))
+    (let logF (metal_buf_read (nth bs 11) 0 (mul 4 vocabN)))
+    (let y2 (now_unix_ms))
+    (let c10 (mul 512 (if (eq idS idF) (qb-same? logS logF (mul 4 vocabN)) 0)))
+    (print_str (str_concat (qb-ms "one token, serial block " y0 y1) (str_concat (qb-ms ", fused block " y1 y2) (str_concat " | ids " (str_concat (int_to_str idS) (str_concat " " (int_to_str idF)))))))
+    (print (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8 (add c9 c10)))))))))))
