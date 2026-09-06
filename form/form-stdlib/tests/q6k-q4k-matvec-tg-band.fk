@@ -11,8 +11,16 @@
 ;   bit 128 one token through the lane with the twins dispatched (dth-mv chooses them by type): the prompt
 ;           "The capital of France is" (ids 128000 791 6864 315 9822 374) answers 12366 and then 13 578 6864,
 ;           the ids the one-thread lane answered on 2026-09-06 (receipts/2026-09-06-sixteen-rows-on-the-superblock.md)
+;   bit 256 form_q4k_matvec_tg4_off_f32 (attn_k): the fold landing at row offset R answers there exactly
+;           what the plain twin answers at 0 — form_copy_off_f32's move, said in the epilogue
+;   bit 512 form_q6k_matvec_tg4_off_f32 (attn_v), the same
+;   bit 1024 form_q4k_matvec_tg4_add_f32 (attn_output): the epilogue's `r[row] + acc` answers exactly
+;           form_add_f32 of the residual and the plain twin's fold
+;   bit 2048 form_q6k_matvec_tg4_add_f32 (a Q6_K ffn_down), the same
+;   bit 4096 THE K-QUANT BLOCK against the serial block, four forwards deep on real weights: the same
+;           ids AND the last forward's whole 128256-logit buffer byte for byte
 ; Forty dispatches of each timed (eight for the head).
-; Expected: 255
+; Expected: 8191
 ; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
 ; preludes: native/metal/dense-token-handle.fk form-stdlib/model-registry.bml
 (do
@@ -45,6 +53,44 @@
             (print_str (str_concat label (str_concat (if (eq (dth-tv-ty tv) 14) " q6k " " q4k ") (str_concat (int_to_str rows) (str_concat "x" (str_concat (int_to_str cols) (str_concat ": " (str_concat (int_to_str n) (str_concat " attestant " (str_concat (int_to_str (sub t1 t0)) (str_concat " ms, " (str_concat (int_to_str n) (str_concat " tg4 " (str_concat (int_to_str (sub t2 t1)) (str_concat " ms, bytes " (if (eq same 1) "same" "DIFFER"))))))))))))))))
             (if (eq same 1) bit 0)))
     (defn qk-join (xs acc) (if (eq (len xs) 0) acc (qk-join (tail xs) (str_concat acc (str_concat " " (int_to_str (head xs)))))))
+    ; the row-offset epilogue: the twin writing at offset `rows` answers there exactly what the plain
+    ; twin answers at zero — form_copy_off_f32's move, said in the epilogue that already holds the value
+    (defn qk-off (ps tv xh bit)
+        (do (let rows (dth-tv-r tv)) (let cols (dth-tv-c tv)) (let g (div (add rows 15) 16))
+            (let ya (metal_buf_alloc (mul 4 rows))) (let yb (metal_buf_alloc (mul 8 rows)))
+            (let plain (if (eq (dth-tv-ty tv) 14) (nth ps 37) (nth ps 38)))
+            (let off (if (eq (dth-tv-ty tv) 14) (nth ps 39) (nth ps 41)))
+            (let e1 (metal_enqueue plain (md-bind16 (list (dth-tv-h tv) xh ya) (list rows cols) 96 0 1 0) g))
+            (let e2 (metal_enqueue off (md-bind16 (list (dth-tv-h tv) xh yb) (list rows cols) 96 0 1 0) g))
+            (let e3 (metal_enqueue off (md-bind16 (list (dth-tv-h tv) xh yb) (list rows cols rows) 96 0 1 0) g))
+            (let s (metal_sync))
+            (let a (metal_buf_read ya 0 (mul 4 rows)))
+            (let b (metal_buf_read yb (mul 4 rows) (mul 4 rows)))
+            (let z (metal_buf_read yb 0 (mul 4 rows)))
+            (print_str (str_concat "off  " (str_concat (int_to_str rows) (str_concat "x" (str_concat (int_to_str cols) (str_concat ": " (if (and (str_eq a b) (str_eq a z)) "same" "DIFFER")))))))
+            (if (and (str_eq a b) (str_eq a z)) bit 0)))
+    ; the residual epilogue: the twin's own `r[row] + acc` answers exactly form_add_f32 of the residual
+    ; and the plain twin's fold, the same two operands in the same order
+    (defn qk-add (ps tv xh bit)
+        (do (let rows (dth-tv-r tv)) (let cols (dth-tv-c tv)) (let g (div (add rows 15) 16))
+            (let ya (metal_buf_alloc (mul 4 rows))) (let za (metal_buf_alloc (mul 4 rows)))
+            (let zb (metal_buf_alloc (mul 4 rows))) (let rr (metal_buf_alloc (mul 4 rows)))
+            (let wr (metal_buf_write rr 0 (qk-f32s rows 0 "")))
+            (let plain (if (eq (dth-tv-ty tv) 14) (nth ps 37) (nth ps 38)))
+            (let adder (if (eq (dth-tv-ty tv) 14) (nth ps 40) (nth ps 42)))
+            (let e1 (metal_enqueue plain (md-bind16 (list (dth-tv-h tv) xh ya) (list rows cols) 96 0 1 0) g))
+            (let e2 (metal_enqueue (nth ps 11) (md-bind (list rr ya za) (list rows)) rows))
+            (let e3 (metal_enqueue adder (md-bind16 (list (dth-tv-h tv) xh zb rr) (list rows cols) 96 0 1 0) g))
+            (let s (metal_sync))
+            (let a (metal_buf_read za 0 (mul 4 rows)))
+            (let b (metal_buf_read zb 0 (mul 4 rows)))
+            (print_str (str_concat "add  " (str_concat (int_to_str rows) (str_concat "x" (str_concat (int_to_str cols) (str_concat ": " (if (str_eq a b) "same" "DIFFER")))))))
+            (if (str_eq a b) bit 0)))
+    ; the same generation through the serial block only — the attestant path the K-quant block answers to
+    (defn qk-serial (ps bs geo lays cks cvs embTv onormTv projTv id pos n acc)
+        (if (le n 0) acc
+            (do (let nid (dth-forward-serial ps bs geo lays cks cvs embTv onormTv projTv id pos))
+                (qk-serial ps bs geo lays cks cvs embTv onormTv projTv nid (add pos 1) (sub n 1) (append acc (list nid))))))
     (let st (dth-open (mr-path (mr-find "llama32-3b")) 256 (sub 0 1)))
     (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2)) (let lays (nth st 3))
     (let xh (metal_buf_alloc (mul 4 8192)))
@@ -68,4 +114,20 @@
     (let c7 (if (eq (len got) 4)
                 (if (and (eq (nth got 0) 12366) (and (eq (nth got 1) 13) (and (eq (nth got 2) 578) (eq (nth got 3) 6864)))) 128 0)
                 0))
-    (print (add c1 (add c2 (add c3 (add c3b (add c4 (add c5 (add c6 c7)))))))))
+    ; --- the two epilogues, each against the dispatch pair it replaces ---
+    ; off: the twin writing at row offset R answers, at R, exactly what the plain twin answers at 0 —
+    ; which is what form_copy_off_f32 moved there.
+    (let c8 (qk-off ps (qk-find lays 12 2) xh 256))
+    (let c9 (qk-off ps (qk-find lays 14 3) xh 512))
+    ; add: the twin's epilogue answers exactly form_add_f32 of the residual and the plain twin's fold.
+    (let c10 (qk-add ps (qk-find lays 12 4) xh 1024))
+    (let c11 (qk-add ps (qk-find lays 14 8) xh 2048))
+    ; --- the K-quant BLOCK against the serial block it replaces, on real weights, four forwards deep:
+    ; the same ids and the last forward's whole logits buffer byte for byte. ---
+    (let sids (qk-serial ps bs geo lays (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) 12366 6 3 (empty)))
+    (let slog (metal_buf_read (nth bs 11) 0 (mul 4 (nth geo 7))))
+    (let fids (dth-generate ps bs geo lays (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) 12366 6 3 (empty)))
+    (let flog (metal_buf_read (nth bs 11) 0 (mul 4 (nth geo 7))))
+    (print_str (str_concat "serial" (str_concat (qk-join sids "") (str_concat "   kfused" (qk-join fids "")))))
+    (let c12 (if (and (str_eq (qk-join sids "") (qk-join fids "")) (str_eq slog flog)) 4096 0))
+    (print (add c1 (add c2 (add c3 (add c3b (add c4 (add c5 (add c6 (add c7 (add c8 (add c9 (add c10 (add c11 c12))))))))))))))

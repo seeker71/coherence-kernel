@@ -140,7 +140,12 @@
         (str_concat (q5m-msl-appendix "form_q5k_dequant_f32" "form_q5k_matvec_f32"
                                       "form_q50_dequant_f32" "form_q50_matvec_f32")
         (str_concat (str_concat (ldm-msl-unit) (str_concat (dth-attn-tw-msl "form_gqa_decode_tg_f32") (str_concat (q80-matvec-glu-body "form_q80_matvec_glu_f32") (dth-rope-pair2-msl "form_rope_pair2_f32"))))
-        (str_concat (str_concat (q6m-matvec-tg4-body "form_q6k_matvec_tg4_f32") (q4m-matvec-tg4-body "form_q4k_matvec_tg4_f32"))
+        (str_concat (str_concat (q6m-matvec-tg4-body "form_q6k_matvec_tg4_f32")
+                    (str_concat (q4m-matvec-tg4-body "form_q4k_matvec_tg4_f32")
+                    (str_concat (q6m-matvec-tg4-off-body "form_q6k_matvec_tg4_off_f32")
+                    (str_concat (q6m-matvec-tg4-add-body "form_q6k_matvec_tg4_add_f32")
+                    (str_concat (q4m-matvec-tg4-off-body "form_q4k_matvec_tg4_off_f32")
+                                (q4m-matvec-tg4-add-body "form_q4k_matvec_tg4_add_f32"))))))
         (str_concat (dth-copy-msl "form_copy_off_f32")
         (str_concat (dth-neox-msl "form_rope_neox_f32")
         (str_concat (dth-ln-msl "form_layernorm_f32")
@@ -249,6 +254,8 @@
     ;        25 q80mv-tg2 26 rmsnorm-tw (the exact cooperative rmsnorm, dispatched) 27 q80mv-tg3 28 q80mv-tg4 (dispatched)
     ;        29 argmax-part 30 argmax-comb (the two-stage greedy selection, dispatched) 31 rope-pair 32 attention-tw
     ;        33 q80mv-tg4-add 34 q80mv-tg4x3 35 q80mv-glu 36 rope-pair2 (the fused block's, dispatched)
+    ;        37 q6kmv-tg4 38 q4kmv-tg4 39 q6kmv-tg4-off 40 q6kmv-tg4-add 41 q4kmv-tg4-off 42 q4kmv-tg4-add
+    ;        (the K-quant block's epilogues: the cache landing and the residual add, dispatched)
     ; THE COOPERATIVE RMSNORM, byte for byte the one-thread attestant. Thread 0 folds the attestant's own
     ; statements — `sq = xv * xv; ss = ss + sq` ascending, then the Newton-50 sqrt — from device memory, eight
     ; loads issued ahead of eight dependent adds (the chain is one chain: the order is the attestant's). The
@@ -299,7 +306,11 @@
               (metal_pipeline msl "form_q80_matvec_glu_f32")     ; 35 gate, up and the SwiGLU in one dispatch (dispatched)
               (metal_pipeline msl "form_rope_pair2_f32")         ; 36 the pair rope over q and k (in its cache) in one dispatch (dispatched)
               (metal_pipeline msl "form_q6k_matvec_tg4_f32")     ; 37 the Q6_K sixteen-rows-a-group twin (dispatched; q6k-q4k-matvec-tg-band.fk)
-              (metal_pipeline msl "form_q4k_matvec_tg4_f32")))   ; 38 the Q4_K sixteen-rows-a-group twin (dispatched; the same band)
+              (metal_pipeline msl "form_q4k_matvec_tg4_f32")     ; 38 the Q4_K sixteen-rows-a-group twin (dispatched; the same band)
+              (metal_pipeline msl "form_q6k_matvec_tg4_off_f32") ; 39 Q6_K tg4 landing at a row offset (dispatched: v into its cache)
+              (metal_pipeline msl "form_q6k_matvec_tg4_add_f32") ; 40 Q6_K tg4 with the residual add in its epilogue (dispatched: o, down)
+              (metal_pipeline msl "form_q4k_matvec_tg4_off_f32") ; 41 Q4_K tg4 landing at a row offset (dispatched: k and v into their caches)
+              (metal_pipeline msl "form_q4k_matvec_tg4_add_f32")));42 Q4_K tg4 with the residual add in its epilogue (dispatched: o, down)
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
@@ -349,26 +360,38 @@
     ; registers; cols a multiple of 128. Else the double-buffered twin (cols a multiple of 512), else the block-once twin.
     ; Q6_K and Q4_K rows (llama3.2:3b's) go through the same sixteen-rows-a-group shape on their own superblocks
     ; (q6k-msl.fk / q4k-msl.fk kernel 3, bit for bit their attestants: q6k-q4k-matvec-tg-band.fk); cols a multiple of 256.
-    (defn dth-mv-tg16 (pipe tv xh yh)
-        (metal_enqueue pipe (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 96 0 1 0) (div (add (dth-tv-r tv) 15) 16)))
-    (defn dth-mv (ps tv xh yh)
+    ; A DISPATCH SAID BEFORE IT IS FIRED. Every helper below answers a TRIPLE — pipe, binding string,
+    ; thread or group count — and `dth-fire` is the one place that calls the door. The reason is
+    ; measured: md-bind16 builds its binding from md-le32 words, each byte a div and a mod over an
+    ; integer power, and one token's 133 bindings cost ~2.5 ms of a ~10 ms wall (ksplit, 2026-09-06).
+    ; Most of them never change: a projection's binding names buffers and a shape, and only the
+    ; position's own dispatches (the qkv row offset, the rope's angle, the attention's prefix) carry a
+    ; number that moves. So the block builds the still ones ONCE at open and fires them by handle, and
+    ; the moving ones are still built where they are dispatched. One decision, two uses — the branch
+    ; that picks a pipeline lives in exactly one place, so a prebuilt binding cannot drift from a live one.
+    (defn dth-trip (p b n) (list p b n))
+    (defn dth-fire (tr) (metal_enqueue (nth tr 0) (nth tr 1) (nth tr 2)))
+    (defn dth-mv-tg16-trip (pipe tv xh yh)
+        (dth-trip pipe (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 96 0 1 0) (div (add (dth-tv-r tv) 15) 16)))
+    (defn dth-mv-trip (ps tv xh yh)
         (if (eq (dth-tv-ty tv) 8)
             (if (eq (mod (dth-tv-c tv) 128) 0)
-                (dth-mv-tg16 (nth ps 28) tv xh yh)
+                (dth-mv-tg16-trip (nth ps 28) tv xh yh)
             (if (eq (mod (dth-tv-c tv) 512) 0)
-                (metal_enqueue (nth ps 27) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 64 0 1 0) (dth-tv-r tv))
-                (metal_enqueue (nth ps 25) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 32 0 1 0) (dth-tv-r tv))))
+                (dth-trip (nth ps 27) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 64 0 1 0) (dth-tv-r tv))
+                (dth-trip (nth ps 25) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 32 0 1 0) (dth-tv-r tv))))
         (if (and (eq (dth-tv-ty tv) 14) (eq (mod (dth-tv-c tv) 256) 0))
-            (dth-mv-tg16 (nth ps 37) tv xh yh)
+            (dth-mv-tg16-trip (nth ps 37) tv xh yh)
         (if (and (eq (dth-tv-ty tv) 12) (eq (mod (dth-tv-c tv) 256) 0))
-            (dth-mv-tg16 (nth ps 38) tv xh yh)
-        (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 0)
-                       (if (eq (dth-tv-ty tv) 12) (nth ps 1)
-                       (if (eq (dth-tv-ty tv) 13) (nth ps 14)
-                       (if (eq (dth-tv-ty tv) 6) (nth ps 16)
-                       (if (eq (dth-tv-ty tv) 2) (nth ps 18) (nth ps 2))))))
-                       (md-bind (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)))
-                       (dth-tv-r tv))))))
+            (dth-mv-tg16-trip (nth ps 38) tv xh yh)
+        (dth-trip (if (eq (dth-tv-ty tv) 14) (nth ps 0)
+                  (if (eq (dth-tv-ty tv) 12) (nth ps 1)
+                  (if (eq (dth-tv-ty tv) 13) (nth ps 14)
+                  (if (eq (dth-tv-ty tv) 6) (nth ps 16)
+                  (if (eq (dth-tv-ty tv) 2) (nth ps 18) (nth ps 2))))))
+                  (md-bind (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)))
+                  (dth-tv-r tv))))))
+    (defn dth-mv (ps tv xh yh) (dth-fire (dth-mv-trip ps tv xh yh)))
 
     (defn dth-dq (ps tv yh off n)
         (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 3)
@@ -380,15 +403,20 @@
                        n))
 
     ; the cooperative rmsnorm twin: one group of 256 threads, thread 0 the attestant's fold, the root across the barrier
-    (defn dth-rms (ps xh gtv yh n epsBits)
-        (metal_enqueue (nth ps 26) (md-bind16 (list xh (dth-tv-h gtv) yh) (list n epsBits) 256 0 1 0) 1))
+    (defn dth-rms-trip (ps xh gtv yh n epsBits)
+        (dth-trip (nth ps 26) (md-bind16 (list xh (dth-tv-h gtv) yh) (list n epsBits) 256 0 1 0) 1))
+    (defn dth-rms (ps xh gtv yh n epsBits) (dth-fire (dth-rms-trip ps xh gtv yh n epsBits)))
 
     ; greedy selection in two stages, EQUALITY with the one-thread argmax (comparison only, the tie rule kept):
     ; stage one gives each of 512 parts a contiguous chunk and its lowest-index max; stage two folds the parts
     ; ascending in one group. The one-thread scan of 128 256 logits was 8.9 ms of every token; this is 0.13.
+    (defn dth-argmax-trip1 (ps lh pih pvh n)
+        (dth-trip (nth ps 29) (md-bind (list lh pih pvh) (list n (dth-argmax-parts))) (dth-argmax-parts)))
+    (defn dth-argmax-trip2 (ps oih ovh pih pvh)
+        (dth-trip (nth ps 30) (md-bind16 (list pih pvh oih ovh) (list (dth-argmax-parts)) 256 0 1 0) 1))
     (defn dth-argmax (ps lh oih ovh pih pvh n)
-        (do (metal_enqueue (nth ps 29) (md-bind (list lh pih pvh) (list n (dth-argmax-parts))) (dth-argmax-parts))
-            (metal_enqueue (nth ps 30) (md-bind16 (list pih pvh oih ovh) (list (dth-argmax-parts)) 256 0 1 0) 1)))
+        (do (dth-fire (dth-argmax-trip1 ps lh pih pvh n))
+            (dth-fire (dth-argmax-trip2 ps oih ovh pih pvh))))
 
     ; style 0: adjacent pairs over the whole head, one thread per PAIR (form_rope_pair_f32, the per-head
     ; kernel's own expression per pair; hd even, else the per-head kernel). style 1: half-split over the
@@ -410,7 +438,8 @@
                            (md-bind (list qh kh vh yh sh) (list npos nq nkv hd scaleBits sstride))
                            nq)))
 
-    (defn dth-elem (ps p ah bh yh n) (metal_enqueue p (md-bind (list ah bh yh) (list n)) n))
+    (defn dth-elem-trip (p ah bh yh n) (dth-trip p (md-bind (list ah bh yh) (list n)) n))
+    (defn dth-elem (ps p ah bh yh n) (dth-fire (dth-elem-trip p ah bh yh n)))
 
     (defn dth-copy (ps sh dh n doff) (metal_enqueue (nth ps 13) (md-bind (list sh dh) (list n doff)) n))
 
@@ -426,12 +455,33 @@
                        (md-bind16 (list (dth-tv-h qtv) (dth-tv-h ktv) (dth-tv-h vtv) xh qh ck cv)
                                   (list (dth-tv-r qtv) (dth-tv-r ktv) (dth-tv-r vtv) (dth-tv-c qtv) off off) 96 0 1 0)
                        (add (div (add (dth-tv-r qtv) 15) 16) (add (div (add (dth-tv-r ktv) 15) 16) (div (add (dth-tv-r vtv) 15) 16)))))
-    ; the projection with the residual add in its epilogue, in place on the residual stream rh
-    (defn dth-mv-add (ps tv xh rh)
-        (metal_enqueue (nth ps 33) (md-bind16 (list (dth-tv-h tv) xh rh rh) (list (dth-tv-r tv) (dth-tv-c tv)) 96 0 1 0) (div (add (dth-tv-r tv) 15) 16)))
+    ; the projection with the residual add in its epilogue, in place on the residual stream rh.
+    ; Q8_0 through its own tg4-add; Q6_K and Q4_K through the twins q6k-msl.fk / q4k-msl.fk carry.
+    ; A row no epilogue speaks for is NOT quietly dropped — the caller asks dth-addable? first and
+    ; walks the serial block instead, so this door never answers for a shape it cannot compute.
+    (defn dth-addable? (tv)
+        (if (eq (dth-tv-ty tv) 8) (eq (mod (dth-tv-c tv) 128) 0)
+        (if (eq (dth-tv-ty tv) 14) (eq (mod (dth-tv-c tv) 256) 0)
+        (if (eq (dth-tv-ty tv) 12) (eq (mod (dth-tv-c tv) 256) 0) false))))
+    (defn dth-mv-add-trip (ps tv xh rh)
+        (dth-trip (if (eq (dth-tv-ty tv) 14) (nth ps 40) (if (eq (dth-tv-ty tv) 12) (nth ps 42) (nth ps 33)))
+                  (md-bind16 (list (dth-tv-h tv) xh rh rh) (list (dth-tv-r tv) (dth-tv-c tv)) 96 0 1 0)
+                  (div (add (dth-tv-r tv) 15) 16)))
+    (defn dth-mv-add (ps tv xh rh) (dth-fire (dth-mv-add-trip ps tv xh rh)))
+    ; the projection landing straight at a row offset of the destination — the cache move, said in the
+    ; epilogue that already holds the value. Q6_K and Q4_K only: the Q8_0 lane's k and v ride the
+    ; three-tensor group, which lands them itself.
+    (defn dth-offable? (tv)
+        (if (eq (dth-tv-ty tv) 14) (eq (mod (dth-tv-c tv) 256) 0)
+        (if (eq (dth-tv-ty tv) 12) (eq (mod (dth-tv-c tv) 256) 0) false)))
+    (defn dth-mv-off (ps tv xh yh yoff)
+        (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 39) (nth ps 41))
+                       (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv) yoff) 96 0 1 0)
+                       (div (add (dth-tv-r tv) 15) 16)))
     ; gate, up and the SwiGLU in one dispatch
-    (defn dth-glu (ps gtv utv xh yh)
-        (metal_enqueue (nth ps 35) (md-bind16 (list (dth-tv-h gtv) (dth-tv-h utv) xh yh) (list (dth-tv-r gtv) (dth-tv-c gtv)) 96 0 1 0) (div (add (dth-tv-r gtv) 15) 16)))
+    (defn dth-glu-trip (ps gtv utv xh yh)
+        (dth-trip (nth ps 35) (md-bind16 (list (dth-tv-h gtv) (dth-tv-h utv) xh yh) (list (dth-tv-r gtv) (dth-tv-c gtv)) 96 0 1 0) (div (add (dth-tv-r gtv) 15) 16)))
+    (defn dth-glu (ps gtv utv xh yh) (dth-fire (dth-glu-trip ps gtv utv xh yh)))
     ; the pair rope over q and over k where it lives (its cache, at row offset voff), one dispatch
     (defn dth-rope2 (ps qh kh ropeH nq nkv hd pos baseBits voff)
         (metal_enqueue (nth ps 36) (md-bind (list qh kh ropeH) (list nq nkv hd pos baseBits voff)) (mul (add nq nkv) (div hd 2))))
@@ -466,23 +516,100 @@
     ; EIGHT dispatches where the serial block has seventeen: the cache copies, the two residual adds, the
     ; separate k, v, up and swiglu, the second rope are gone into epilogues and multi-tensor groups. The band
     ; proves a fused token's logits byte for byte the serial token's.
+    ; The still five of the eight, said once at open: both rmsnorms, the o projection with its add, the
+    ; gate/up/SwiGLU group, the down projection with its add. The three that move — the qkv group's row
+    ; offset, the rope's position, the attention's prefix length — are built where they are dispatched.
+    (defn dth-prebuild-fused (ps bs geo lay)
+        (list 2
+              (dth-rms-trip ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8))
+              (dth-mv-add-trip ps (nth lay 4) (nth bs 5) (nth bs 0))
+              (dth-rms-trip ps (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8))
+              (dth-glu-trip ps (nth lay 6) (nth lay 7) (nth bs 1) (nth bs 10))
+              (dth-mv-add-trip ps (nth lay 8) (nth bs 10) (nth bs 0))))
+
     (defn dth-block-fused (ps bs geo lay ck cv pos)
-        (do
-            (dth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8))
+        (do (let pb (nth lay 12))
+            (dth-fire (nth pb 1))
             (dth-mv-qkv ps (nth lay 1) (nth lay 2) (nth lay 3) (nth bs 1) (nth bs 2) ck cv (mul pos (nth geo 5)))
             (dth-rope2 ps (nth bs 2) ck (nth geo 11) (nth geo 2) (nth geo 3) (nth geo 4) pos (nth geo 9) (mul pos (nth geo 5)))
             (dth-attn ps (nth bs 2) ck cv (nth bs 5) (nth bs 12)
                       (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6))
-            (dth-mv-add ps (nth lay 4) (nth bs 5) (nth bs 0))
-            (dth-rms ps (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8))
-            (dth-glu ps (nth lay 6) (nth lay 7) (nth bs 1) (nth bs 10))
-            (dth-mv-add ps (nth lay 8) (nth bs 10) (nth bs 0))
+            (dth-fire (nth pb 2))
+            (dth-fire (nth pb 3))
+            (dth-fire (nth pb 4))
+            (dth-fire (nth pb 5))
             1))
 
+    ; ================= the K-quant block =================
+    ; llama3.2:3b's rows are Q6_K and Q4_K, not Q8_0, so the three-tensor group and the fused SwiGLU —
+    ; both written on the 32-weight block — do not speak for them. What DOES carry across is every
+    ; epilogue: k and v land in their caches from the projection that computed them, and the o and down
+    ; projections add into the residual stream where they stand. TWELVE dispatches where the serial
+    ; block has seventeen: the two cache copies and the two residual adds are gone, and the second rope
+    ; rides the first. Gate, up and the SwiGLU stay three dispatches (their fusion is Q8_0's block
+    ; shape; the superblock twin of it is not yet written and is named, not implied).
+    (defn dth-kfusable? (lay geo)
+        (and (dth-offable? (nth lay 2))
+        (and (dth-offable? (nth lay 3))
+        (and (dth-addable? (nth lay 4))
+        (and (dth-addable? (nth lay 8))
+        (and (eq (dth-tv-c (nth lay 2)) (dth-tv-c (nth lay 1)))
+        (and (eq (dth-tv-c (nth lay 3)) (dth-tv-c (nth lay 1)))
+        (and (dth-tv-none? (nth lay 9))
+        (and (dth-tv-none? (nth lay 10))
+        (and (dth-tv-none? (nth lay 11))
+        (and (eq (nth geo 14) 0)
+        (and (eq (mod (nth geo 4) 2) 0)
+             (le (nth geo 6) 1024)))))))))))))
+
+    ; eight of the twelve are still: both rmsnorms, q, the o projection with its add, gate, up, the
+    ; SwiGLU, the down projection with its add. Four move with the position: k and v into their caches,
+    ; the rope, the attention.
+    (defn dth-prebuild-kfused (ps bs geo lay)
+        (list 1
+              (dth-rms-trip ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8))
+              (dth-mv-trip ps (nth lay 1) (nth bs 1) (nth bs 2))
+              (dth-mv-add-trip ps (nth lay 4) (nth bs 5) (nth bs 0))
+              (dth-rms-trip ps (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8))
+              (dth-mv-trip ps (nth lay 6) (nth bs 1) (nth bs 8))
+              (dth-mv-trip ps (nth lay 7) (nth bs 1) (nth bs 9))
+              (dth-elem-trip (nth ps 10) (nth bs 8) (nth bs 9) (nth bs 10) (nth geo 1))
+              (dth-mv-add-trip ps (nth lay 8) (nth bs 10) (nth bs 0))))
+
+    (defn dth-block-kfused (ps bs geo lay ck cv pos)
+        (do (let pb (nth lay 12))
+            (dth-fire (nth pb 1))
+            (dth-fire (nth pb 2))
+            (dth-mv-off ps (nth lay 2) (nth bs 1) ck (mul pos (nth geo 5)))
+            (dth-mv-off ps (nth lay 3) (nth bs 1) cv (mul pos (nth geo 5)))
+            (dth-rope2 ps (nth bs 2) ck (nth geo 11) (nth geo 2) (nth geo 3) (nth geo 4) pos (nth geo 9) (mul pos (nth geo 5)))
+            (dth-attn ps (nth bs 2) ck cv (nth bs 5) (nth bs 12)
+                      (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6))
+            (dth-fire (nth pb 3))
+            (dth-fire (nth pb 4))
+            (dth-fire (nth pb 5))
+            (dth-fire (nth pb 6))
+            (dth-fire (nth pb 7))
+            (dth-fire (nth pb 8))
+            1))
+
+    ; The block a layer takes was DECIDED at open and is carried at index 12 of the layer, so no token
+    ; re-asks a question about the file's own table. 2 fused, 1 K-quant, 0 serial.
+    (defn dth-prebuild (ps bs geo lay)
+        (if (dth-fusable? lay geo) (dth-prebuild-fused ps bs geo lay)
+        (if (dth-kfusable? lay geo) (dth-prebuild-kfused ps bs geo lay)
+            (list 0))))
+    (defn dth-bind-layers (ps bs geo lays acc)
+        (if (eq (len lays) 0) acc
+            (dth-bind-layers ps bs geo (tail lays)
+                (append acc (list (append (head lays) (list (dth-prebuild ps bs geo (head lays)))))))))
+
     (defn dth-block (ps bs geo lay ck cv pos)
-        (if (dth-fusable? lay geo)
+        (if (eq (head (nth lay 12)) 2)
             (dth-block-fused ps bs geo lay ck cv pos)
-            (dth-block-serial ps bs geo lay ck cv pos)))
+            (if (eq (head (nth lay 12)) 1)
+                (dth-block-kfused ps bs geo lay ck cv pos)
+                (dth-block-serial ps bs geo lay ck cv pos))))
 
     (defn dth-block-serial (ps bs geo lay ck cv pos)
         (do
@@ -525,11 +652,19 @@
                     0)
                 (dth-passes ps bs geo lays cks cvs onormTv pos (add lp 1) nLoop))))
 
+    ; the head carries no position at all: all four of its dispatches are built at open and live at
+    ; index 17 of geo (the phi2 shape keeps its own head and never reaches for it)
+    (defn dth-prebuild-head (ps bs geo onormTv projTv)
+        (list (dth-rms-trip ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 8))
+              (dth-mv-trip ps projTv (nth bs 1) (nth bs 11))
+              (dth-argmax-trip1 ps (nth bs 11) (nth bs 15) (nth bs 16) (nth geo 7))
+              (dth-argmax-trip2 ps (nth bs 13) (nth bs 14) (nth bs 15) (nth bs 16))))
     (defn dth-head (ps bs geo onormTv projTv)
-        (do
-            (dth-rms ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 8))
-            (dth-mv ps projTv (nth bs 1) (nth bs 11))
-            (dth-argmax ps (nth bs 11) (nth bs 13) (nth bs 14) (nth bs 15) (nth bs 16) (nth geo 7))
+        (do (let hb (nth geo 17))
+            (dth-fire (nth hb 0))
+            (dth-fire (nth hb 1))
+            (dth-fire (nth hb 2))
+            (dth-fire (nth hb 3))
             0))
 
     (defn dth-u32 (s)
@@ -717,16 +852,19 @@
             (let vocabN (dth-tv-r projTv0))
             (let ps (dth-pipes (dth-msl)))
             (let bs (dth-bufs dModel dFF qOut kvd vocabN nHead maxpos))
-            (let lays (dth-layers tab base path 0 nLayer (empty)))
             (let cks (dth-cache (mul nLayer nLoop) kvd maxpos (empty)))
             (let cvs (dth-cache (mul nLayer nLoop) kvd maxpos (empty)))
             (let embTv (dth-tv tab base path "token_embd.weight"))
             (let onormTv (dth-tv tab base path "output_norm.weight"))
             (let ropeH (dth-rope-freqs tab base path (div headDim 2)))
-            (let geo (list dModel dFF nHead nKV headDim kvd maxpos vocabN
-                           (md-f32-bits rmsEps) (md-f32-bits ropeBase)
-                           (md-f32-bits (div 1.0 (math_sqrt (add headDim 0.0))))
-                           ropeH nLayer qOut style ropeDim nLoop))
+            (let geo0 (list dModel dFF nHead nKV headDim kvd maxpos vocabN
+                            (md-f32-bits rmsEps) (md-f32-bits ropeBase)
+                            (md-f32-bits (div 1.0 (math_sqrt (add headDim 0.0))))
+                            ropeH nLayer qOut style ropeDim nLoop))
+            ; the geometry is complete before a binding is built from it; the still dispatches are then
+            ; said once — the head's four into geo at 17, each layer's into that layer at 12
+            (let geo (append geo0 (list (dth-prebuild-head ps bs geo0 onormTv projTv0))))
+            (let lays (dth-bind-layers ps bs geo (dth-layers tab base path 0 nLayer (empty)) (empty)))
             (list ps bs geo lays cks cvs embTv onormTv projTv0 arch src)))
 
     ; ================= the phi2 shape: parallel residual, LayerNorm, fused qkv =================

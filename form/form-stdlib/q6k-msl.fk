@@ -157,21 +157,28 @@
     (defn q6m-tg4-fold (k acc)
         (if (lt k 0) acc
             (q6m-tg4-fold (sub k 1) (str_concat acc (str_concat "acc = pv[ci & 1u][lane][" (str_concat (int_to_str k) "u] + acc; "))))))
-    ; the register load of step `ls` for loader (row, sub): ushort reads, every offset even (210 is)
+    ; the register load of step `ls` for loader (row, sub): ushort reads, every offset even (210 is).
+    ; THE SUPER-SCALE AND THE TWO SUB-SCALES ARE FOLDED HERE, not per weight: `d * sc` is one float
+    ; per sixteen weights and the stage multiplied it out sixty-four times a step. gs0 and gs1 hold
+    ; exactly the floats `(d * float(sc))` the stage used to recompute, so `(gs * q) * x` is the same
+    ; three-operand expression in the same order — bit for bit, one fewer multiply a weight.
     (defn q6m-tg4-load (step)
         (str_concat "{ uint ls = "
         (str_concat step
-                    "; uint lh = ls & 1u; device const ushort* hp = (device const ushort*)(qb + (row * nbk + ls / 2u) * 210u); for (uint q = 0u; q < 16u; q += 1u) { hb[q] = hp[lh * 32u + (sub & 1u) * 16u + q]; hb[16u + q] = hp[64u + lh * 16u + q]; } hb[32] = hp[96u + lh * 4u + sub]; hb[33] = hp[104u]; } ")))
-    ; the stage of step `cs` from the registers: q6k_w's integers and products, two weights a ushort
+                    "; uint lh = ls & 1u; device const ushort* hp = (device const ushort*)(qb + (row * nbk + ls / 2u) * 210u); for (uint q = 0u; q < 16u; q += 1u) { hb[q] = hp[lh * 32u + (sub & 1u) * 16u + q]; hb[16u + q] = hp[64u + lh * 16u + q]; } ushort scw = hp[96u + lh * 4u + sub]; float dd = q6k_f16(int(hp[104u])); gs0 = dd * float(q6k_s8(int(scw & 0xFFu))); gs1 = dd * float(q6k_s8(int(scw >> 8))); } ")))
+    ; the stage of step `cs` from the registers: q6k_w's integers and products, two weights a ushort.
+    ; The high two bits arrive by SHIFT, not by an integer division whose divisor the compiler cannot
+    ; see: q6k_mod(qh / 4^g, 4) is (qh >> 2g) & 3 for a byte, exactly — and a variable-divisor uint
+    ; division was the one expensive op left in the loader's inner line, paid once a weight.
     (defn q6m-tg4-stage ()
-        "float d = q6k_f16(int(hb[33])); int sc0 = q6k_s8(int(hb[32] & 0xFFu)); int sc1 = q6k_s8(int(hb[32] >> 8)); int p4 = q6k_pow4(int(sub)); bool lo = (sub / 2u == 0u); for (uint e = 0u; e < 32u; e += 2u) { ushort two = hb[e / 2u]; ushort twh = hb[16u + e / 2u]; int la = int(two & 0xFFu); int lb = int(two >> 8); int ua = int(twh & 0xFFu); int ub = int(twh >> 8); int n0 = lo ? q6k_mod(la, 16) : la / 16; int n1 = lo ? q6k_mod(lb, 16) : lb / 16; int q0 = n0 + q6k_mod(ua / p4, 4) * 16 - 32; int q1 = n1 + q6k_mod(ub / p4, 4) * 16 - 32; int sc = (e < 16u) ? sc0 : sc1; uint j = cs * 128u + sub * 32u + e; pv[cs & 1u][lane][sub * 32u + e] = ((d * float(sc)) * float(q0)) * float(x[j]); pv[cs & 1u][lane][sub * 32u + e + 1u] = ((d * float(sc)) * float(q1)) * float(x[j + 1u]); } ")
+        "for (uint e = 0u; e < 32u; e += 2u) { ushort two = hb[e / 2u]; ushort twh = hb[16u + e / 2u]; int la = int(two & 0xFFu); int lb = int(two >> 8); uint ua = uint(twh & 0xFFu); uint ub = uint(twh >> 8); int n0 = lo ? q6k_mod(la, 16) : la / 16; int n1 = lo ? q6k_mod(lb, 16) : lb / 16; int q0 = n0 + int((ua >> psh) & 3u) * 16 - 32; int q1 = n1 + int((ub >> psh) & 3u) * 16 - 32; float dsc = (e < 16u) ? gs0 : gs1; uint j = cs * 128u + sub * 32u + e; pv[cs & 1u][lane][sub * 32u + e] = (dsc * float(q0)) * float(x[j]); pv[cs & 1u][lane][sub * 32u + e + 1u] = (dsc * float(q1)) * float(x[j + 1u]); } ")
     (defn q6m-tg4-kernel (fname sig prefix epilogue)
         (str_concat "kernel void "
         (str_concat fname
         (str_concat sig
-        (str_concat " { threadgroup float pv[2][16][129]; uint nbk = cols / 256u; uint ns = cols / 128u; uint u = (t >= 32u) ? (t - 32u) : 0u; uint lane = (t < 32u) ? t : (u & 15u); uint sub = u / 16u; "
+        (str_concat " { threadgroup float pv[2][16][129]; uint nbk = cols / 256u; uint ns = cols / 128u; uint u = (t >= 32u) ? (t - 32u) : 0u; uint lane = (t < 32u) ? t : (u & 15u); uint sub = u / 16u; uint psh = sub * 2u; bool lo = (sub / 2u == 0u); float gs0 = 0.0f; float gs1 = 0.0f; "
         (str_concat prefix
-        (str_concat " bool fold = (t < 32u) && (lane < 16u) && (row < rows); bool load = (t >= 32u) && (row < rows); ushort hb[34]; if (load) "
+        (str_concat " bool fold = (t < 32u) && (lane < 16u) && (row < rows); bool load = (t >= 32u) && (row < rows); ushort hb[32]; if (load) "
         (str_concat (q6m-tg4-load "ns - 1u")
         (str_concat "if (load) { uint cs = ns - 1u; "
         (str_concat (q6m-tg4-stage)
@@ -190,5 +197,26 @@
             " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
             "uint row = gi * 16u + lane;"
             "y[row] = acc;"))
+
+    ; --- kernel 4: the same fold, landing at a ROW OFFSET in the destination. This is what the copy
+    ; kernel did afterwards — `d[doff + i] = s[i]` — said once, in the epilogue that already holds the
+    ; value: a k or v projection writes straight into its cache at the position's row and no second
+    ; dispatch moves it. The fold is q6m-tg4-kernel's, unchanged. ---
+    (defn q6m-matvec-tg4-off-body (fname)
+        (q6m-tg4-kernel fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& yoff [[buffer(5)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
+            "uint row = gi * 16u + lane;"
+            "y[yoff + row] = acc;"))
+
+    ; --- kernel 5: the same fold with the residual add in its epilogue — q8-0-msl.fk's tg4-add carried
+    ; to the superblock. form_add_f32 computes y = a + b with a the residual stream and b the
+    ; projection; `y[row] = r[row] + acc` is that add, the same two operands in the same order, and the
+    ; projection never lands in a buffer of its own. In place on r: each row is read and written by its
+    ; own lane alone. ---
+    (defn q6m-matvec-tg4-add-body (fname)
+        (q6m-tg4-kernel fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const float* r [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]])"
+            "uint row = gi * 16u + lane;"
+            "y[row] = r[row] + acc;"))
 
     0)
