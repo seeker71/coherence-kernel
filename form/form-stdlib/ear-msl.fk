@@ -1,18 +1,24 @@
 ; ear-msl.fk — the kernels a whisper-tiny pass needs, emitted by the body for its own metal:
 ; the spectrogram as one threadgroup per frame (Hann, a 400-point DFT off a twiddle table in
 ; threadgroup memory, the reference's own filter bank, log10, the frame's max), its normalisation
-; as one cooperative dispatch, one fused layernorm+gemm in two shapes — 32x32 tiles folded on
-; simdgroup 8x8 matrices for rows (the encoder, the batched prefill, and the two convolutions as an
-; im2col staged on the fly) and eight rows a threadgroup with a simdgroup's 32 lanes over K for a
-; single row (the decoder) — each taking up to three weights at once so q/k/v (and the cross k/v)
-; are one dispatch, the bias, the GELU or the residual folded in and a row offset for the second and
-; third outputs so k/v land straight in their caches; attention (a threadgroup per head and sixteen
-; queries, a query's sixteen key slices merged with simd shuffles; a threadgroup per head for one
-; row), sinusoid positions, token + position embedding, a cooperative argmax over two windows. f32 activations,
+; as one cooperative dispatch, a layernorm's row statistics as their own pass, a gemm in two shapes —
+; 32x32 tiles folded on simdgroup 8x8 matrices for rows (the encoder, the batched prefill, and the two
+; convolutions as an im2col staged on the fly, the WEIGHT tile staged in the half it already is, so the
+; multiply is a mixed simdgroup_half8x8 into a float accumulator and not one bit is lost) and four rows
+; a simdgroup with its 32 lanes over K for a single row (the decoder) — each taking up to three weights
+; at once so q/k/v (and the cross k/v) are one dispatch, the bias, the GELU or the residual folded in
+; and a row offset for the second and third outputs so k/v land straight in their caches; attention
+; (a threadgroup per head and eight queries, a query's thirty-two key slices merged with simd shuffles;
+; a threadgroup per head for one row, and for the cross window a threadgroup per head AND CHUNK of
+; sixty-four keys with a fold behind it, because six groups is a sixth of this machine); sinusoid
+; positions, token + position embedding, an argmax in two stages over two windows. f32 activations,
 ; half weights read straight off the model file. The shapes that change between calls — the
 ; encoder's rows, the decoder's position and rows, the frame count — live in a five-word device
 ; buffer (shp: Te pos Tdec Tf 0) written by the kernel that first knows them, so every layer binding
 ; is the same bytes each call. Nothing here leaves the device between calls.
+; Two of the shapes here were CHOSEN BY A RACE, both emitted at once and timed in one process so the
+; same GPU load fell on both: a K step of 64 lost to 32 (16 KB of threadgroup memory costs more
+; occupancy than the barriers it saves), and eight queries a group beat sixteen by a tenth, twice.
 ; preludes: form/form-stdlib/core.fk
 (do
     (defn em-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (em-cat (tail xs)))))
