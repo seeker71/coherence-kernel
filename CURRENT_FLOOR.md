@@ -28,7 +28,7 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is 17153 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is 17,153 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
 preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 675 rows, 663 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 678 rows, 666 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -293,23 +293,13 @@ and the projection node the glass holds is the same cell the sensor built
 processes — owner, hearth, voice, share, governor, jit — still give the text
 wire the membrane parses (`release-ledger.bml` R111).
 
-**The frame path is sub-50 ms.** Measured 2026-09-05 on this M4 Max through
+**The frame path is 10 ms.** Measured 2026-09-06 on this M4 Max through
 `observe/form-glass-frame-budget-run.fk` — twenty consecutive frames with the
-sensor process standing: total mean 30–31 ms including the cold first frame,
-warm maximum 19–35 ms, 19 of 20 under 50 ms (the one over is the cold frame
-building its caches, ~300 ms). It was 763–792 ms this morning. The path now
-holds only gift reads (`shm_seq` first, a re-read only when a frame moved), a
-cached inventory re-parsed per publisher only when its key moved (gift seq or
-file mtime), the deduped sample set held while nothing moved, the publisher
-roster re-listed every tenth frame, observations held every fourth frame,
-in-process kernel rows, the flow point and the render (~9 ms). Every row that
-forks or scans the filesystem — memory_pressure, sysctl, vm_stat, iostat,
-pgrep and ps, the storage catalog, the hearth spools, the governor refresh —
-is gathered by `observe/form-glass-sensors-live.fk` at its own cadence and given
-into shared memory; `observe/form-glass-run.fk` stands it and the machine frame process beside the glass, and an
-absent sensor is one row that names its door. The pacer is `host_sleep_ms` on
-the monotonic clock, never a forked `/bin/sleep`; the terminal is read through
-`terminal_cols`/`terminal_lines`, never `tput`. `FGLActiveHz` 25, `FGLQuietHz` 20.
+frame processes standing: total mean 10 ms, warm maximum 11 ms, 19 of 20 under
+50 ms (the first frame, 53 ms, maps its frames). It was 763–792 ms on the
+morning of the 5th and 30 ms that evening. Nothing on the path forks, scans a
+directory, opens a file or parses a wire: every row is read from shared memory
+or from a door the kernel opens itself.
 
 **`k` is the kernel view**: gift frames mapped and their bytes, functions
 defined, and the hottest defns of this process with their source pointers —
@@ -363,12 +353,39 @@ launch refresh by argv (`host_capture` where an answer is needed). `tools/`
 carries no glass script; the observer carries no text parser for a tool's
 output. Tags 151–161.
 
+**The kernel writes its own page.** Every `fkwu` maps `/fg-k<pid>` at its first
+dispatch, registers its pid in `/fg-kernels`, and every 1024 primitive
+dispatches — and at exit — stores twenty-one words into it in place:
+dispatches, heat-lane calls, nodes, strings, cons, fns, gift frames and bytes,
+capacities, stack depth, floats, hottest arm, cpu microseconds, alive. No
+wire, no serialization, no frame give: a reader maps the same page and reads
+the words by offset (`kernel_live_pids` 162, `kernel_live pid` 163). The `D`
+and `J` lanes sum those words over every live kernel — `shm:/fg-kernels#4` on
+the lens — and the `k` view lists each kernel's page. The hottest defns come
+as cells (`kernel_hot_rows` 164), Metal's counters as words (`metal_live` 165:
+linked, buffers, pipelines, no-copy buffers, pending, in flight, dispatch,
+sync, cpu-jit dispatch and busy, gpu busy, wait, deadline, shelf, batch mode,
+slots); the observer and the observation layer read those words, not text.
+
+**The membrane lives in shared memory.** A published snapshot is a cell given
+into its publisher's frame; the publisher's name goes into the roster page
+`/fg-roster` (`gift_roster_register` 166 / `gift_roster_names` 167, 511 slots
+keyed `root|publisher` so a band's space never meets the live one); a reader
+lists the roster and takes frames. Control offers and acks are cells in
+`<channel>.inbox` and `<channel>.ack` frames; the glass's carried-over cells
+(last flow point, last cadence, last pageins) are frames too. The membrane
+writes and reads no file — the same thirty-seven organs that publish and read
+through it moved with it. What still touches the filesystem, by subject: the
+storage sensor (its subject is the catalog) and the queue sensor (the hearth
+queue files), both in the sensor process; and the owner-command lease the
+glass leaves for a model owner that still reads disk (R119).
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=69 -> 47000069
+./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=71 -> 47000071
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,

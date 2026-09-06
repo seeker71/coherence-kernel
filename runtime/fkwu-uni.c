@@ -139,6 +139,8 @@ static long long fk_sysctl_ll(const char *name) {
 static long long fk_u64_words(unsigned int lo, unsigned int hi) { return (long long)(((unsigned long long)hi << 32) | (unsigned long long)lo); }
 static int fk_cstr_eq(const char *a, const char *b);
 static long long fk_host_spawn_arm(long long argv155, long long t);
+static void fk_live_publish(int final);
+static long long fk_live_ticks;
 #ifdef __APPLE__
 extern unsigned int mach_host_self(void);
 extern int host_statistics(unsigned int host, int flavor, int *info, unsigned int *count);
@@ -1533,6 +1535,7 @@ static long long fk_metal_matvec_f32_external(const char *msl, long long msl_len
 #define FK_METAL_WEAK __attribute__((weak))
 FK_METAL_WEAK long long fk_host_gpu_utilization(void) { return -1; } /* strong symbol lives in the Metal carrier; a build without it answers absent */
 FK_METAL_WEAK long long fk_host_disk_stat(long long *out) { out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0; return -1; }
+FK_METAL_WEAK long long fk_metal_live_external(long long *out) { int k = 0; while (k < 18) { out[k] = 0; k = k + 1; } return -1; }
 #else
 #define FK_METAL_WEAK static
 #endif
@@ -8037,6 +8040,8 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_die("fk_walk_body: node tag outside FK_OPCODE_ARM_CAP (0..255) -- the walker's tag space is the contract the op table is generated against; this is a corrupt node or a tag minted past the last arm");
         }
         fk_arms[t] = fk_arms[t] + 1;
+        fk_live_ticks = fk_live_ticks + 1;
+        if ((fk_live_ticks & 1023) == 1) { fk_live_publish(0); }
         if (t == 6) {
             if (fk_walk(fk_node[i][1], fp) == 0) {
                 i = fk_node[i][3];
@@ -8327,6 +8332,8 @@ static long long fk_walk(long long i, long long fp) {
         fk_die("fk_walk: node tag outside FK_OPCODE_ARM_CAP (0..255) -- the walker's tag space is the contract the op table is generated against; this is a corrupt node or a tag minted past the last arm");
     }
     fk_arms[t] = fk_arms[t] + 1;
+    fk_live_ticks = fk_live_ticks + 1;
+    if ((fk_live_ticks & 1023) == 1) { fk_live_publish(0); }
     if (t == 1) {
         return fk_node[i][1] << 1;
     }
@@ -9347,6 +9354,172 @@ static long long fk_cross_decode(const char *b, long long n, long long *pos, lon
     fk_cross_refused = 1;
     return fk_nothing;
 }
+/* ---- the kernel's live page: its own counters in shared memory, written in place ----
+ * Every fkwu maps /fg-k<pid> once and, every 1024 primitive dispatches and at exit, stores
+ * its counters into it -- no wire, no serialization; a reader maps the same page and reads
+ * the words by offset. /fg-kernels is the roster: a slot per registered pid. Word layout
+ * (after the 16-byte gift header): 0 magic 1 pid 2 start-ms 3 seq 4 dispatches 5 heat calls
+ * 6 nodes 7 strings 8 cons 9 fns 10 gift frames 11 gift bytes 12 node cap 13 heap cap
+ * 14 value-stack depth 15 floats 16 hottest tag 17 hottest count 18 cpu us 19 alive 20 distinct arms */
+#define FK_LIVE_MAGIC 0x464B4C4956LL
+#define FK_LIVE_WORDS 21
+static volatile long long *fk_live_page;
+static long long fk_live_ticks;
+static void fk_live_pid_name(long long pid, char *out) {
+    char digits[24];
+    long long n = 0;
+    long long p = pid < 0 ? 0 : pid;
+    if (p == 0) { digits[n] = '0'; n = n + 1; }
+    while (p > 0) { digits[n] = (char)('0' + (p % 10)); n = n + 1; p = p / 10; }
+    long long o = 0;
+    out[o] = '/'; out[o + 1] = 'f'; out[o + 2] = 'g'; out[o + 3] = '-'; out[o + 4] = 'k'; o = 5;
+    while (n > 0) { n = n - 1; out[o] = digits[n]; o = o + 1; }
+    out[o] = 0;
+}
+static long long fk_live_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (long long)ts.tv_sec * 1000 + (long long)ts.tv_nsec / 1000000;
+}
+static long long fk_live_cpu_us(void) {
+    struct timespec tc;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &tc);
+    return (long long)tc.tv_sec * 1000000 + (long long)tc.tv_nsec / 1000;
+}
+static void fk_live_roster_register(long long pid) {
+    long long gh = fk_gift_open("/fg-kernels", 4096, 1);
+    if (gh == fk_nothing) { return; }
+    volatile long long *slots = (volatile long long *)fk_gift_base[gh >> 1] + 2;
+    long long k = 0, free_slot = -1;
+    while (k < 256) {
+        long long v = slots[k];
+        if (v == pid) { free_slot = -1; break; }
+        if (free_slot < 0 && (v == 0 || (v > 0 && kill((int)v, 0) != 0))) { free_slot = k; }
+        k = k + 1;
+    }
+    if (free_slot >= 0) { slots[free_slot] = pid; }
+    munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
+    fk_gift_base[gh >> 1] = 0;
+}
+static void fk_live_publish(int final) {
+    if (fk_live_page == 0) {
+        char name[32];
+        long long pid = (long long)getpid();
+        fk_live_pid_name(pid, name);
+        long long gh = fk_gift_open(name, 4096, 1);
+        if (gh == fk_nothing) { return; }
+        fk_live_page = (volatile long long *)fk_gift_base[gh >> 1];
+        fk_live_page[2 + 1] = pid;
+        fk_live_page[2 + 2] = fk_live_now_ms();
+        fk_live_page[2 + 3] = 0;
+        fk_live_page[2 + 0] = FK_LIVE_MAGIC;
+        fk_live_roster_register(pid);
+    }
+    volatile long long *w = fk_live_page + 2;
+    long long sum = 0, distinct = 0, hot = 0, hotc = 0, u = 1;
+    while (u < FK_OPCODE_ARM_CAP) {
+        if (fk_arms[u] > 0) { sum = sum + fk_arms[u]; distinct = distinct + 1; if (fk_arms[u] > hotc) { hotc = fk_arms[u]; hot = u; } }
+        u = u + 1;
+    }
+    long long gb = 0, gi = 0;
+    while (gi < fk_gift_count) { if (fk_gift_base[gi] != 0) { gb = gb + fk_gift_size[gi]; } gi = gi + 1; }
+    w[4] = sum; w[5] = fk_heat_total; w[6] = fk_np; w[7] = fk_sp; w[8] = fk_hp; w[9] = fk_fntop;
+    w[10] = fk_gift_count; w[11] = gb; w[12] = fk_node_cap; w[13] = fk_cap; w[14] = fk_vsp; w[15] = fk_fp;
+    w[16] = hot; w[17] = hotc; w[18] = fk_live_cpu_us(); w[19] = final ? 0 : 1; w[20] = distinct;
+    __atomic_store_n(&w[3], w[3] + 1, __ATOMIC_RELEASE);
+}
+/* read-only mapping of another kernel's page or the roster: the words, then unmap */
+static long long fk_live_read_words(const char *name, long long *out, long long count) {
+    long long gh = fk_gift_open(name, 0, 0);
+    if (gh == fk_nothing) { return -1; }
+    volatile long long *w = (volatile long long *)fk_gift_base[gh >> 1] + 2;
+    long long k = 0;
+    while (k < count) { out[k] = w[k]; k = k + 1; }
+    munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
+    fk_gift_base[gh >> 1] = 0;
+    return count;
+}
+/* ---- the publisher roster: names of every gift frame that carries a snapshot, 511 slots of 128 bytes (a name is root, a bar, publisher; up to 119 bytes) ---- */
+#define FK_ROSTER_SLOTS 511
+static long long fk_roster_register(const char *name) {
+    long long gh = fk_gift_open("/fg-roster", 65536, 1);
+    if (gh == fk_nothing) { return -1; }
+    char *base = (char *)fk_gift_base[gh >> 1] + 64;
+    long long k = 0, free_slot = -1, found = -1;
+    while (k < FK_ROSTER_SLOTS) {
+        char *slot = base + k * 128;
+        if (slot[0] == 0) { if (free_slot < 0) { free_slot = k; } }
+        else if (fk_cstr_eq(slot, name)) { found = k; break; }
+        k = k + 1;
+    }
+    if (found < 0 && free_slot >= 0) {
+        char *slot = base + free_slot * 128;
+        long long n = 0;
+        while (n < 119 && name[n] != 0) { slot[n] = name[n]; n = n + 1; }
+        slot[n] = 0;
+        *(long long *)(slot + 120) = fk_live_now_ms();
+        found = free_slot;
+    }
+    munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
+    fk_gift_base[gh >> 1] = 0;
+    return found;
+}
+static long long fk_roster_names(void) {
+    long long gh = fk_gift_open("/fg-roster", 0, 0);
+    if (gh == fk_nothing) { return 1; }
+    char *base = (char *)fk_gift_base[gh >> 1] + 64;
+    long long l = 1;
+    long long k = FK_ROSTER_SLOTS - 1;
+    while (k >= 0) {
+        char *slot = base + k * 128;
+        if (slot[0] != 0) { l = fk_cons_val(fk_sbuf(slot, fk_cstrlen(slot)), l); }
+        k = k - 1;
+    }
+    munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
+    fk_gift_base[gh >> 1] = 0;
+    return l;
+}
+/* the hottest defns of this process: top-n by heat, then one pass over the program text for line and column */
+static long long fk_hot_pick(long long want, long long *picked_j, long long *picked_h, long long *line_of, long long *col_of) {
+    long long np = 0;
+    long long j = 0;
+    while (j < fk_fntop) {
+        long long fx = fk_fnidx[j];
+        if (fx >= 0 && fx < fk_fn_count && fk_fn_heat[fx] > 0) {
+            long long h = fk_fn_heat[fx];
+            long long k = np < want ? np : want - 1;
+            if (np < want || h > picked_h[k]) {
+                if (np < want) { np = np + 1; }
+                while (k > 0 && picked_h[k - 1] < h) { picked_j[k] = picked_j[k - 1]; picked_h[k] = picked_h[k - 1]; k = k - 1; }
+                picked_j[k] = j;
+                picked_h[k] = h;
+            }
+        }
+        j = j + 1;
+    }
+    long long q = 0;
+    while (q < np) { line_of[q] = 0; col_of[q] = 0; q = q + 1; }
+    long long pos = 0, line = 1, lastnl = -1;
+    while (pos <= fk_slen) {
+        q = 0;
+        while (q < np) {
+            if (fk_fnsym_s[picked_j[q]] == pos) { line_of[q] = line; col_of[q] = pos - lastnl; }
+            q = q + 1;
+        }
+        if (pos < fk_slen && fk_srctext[pos] == FK_CH_LF) { line = line + 1; lastnl = pos; }
+        pos = pos + 1;
+    }
+    return np;
+}
+static const char *fk_hot_unit_of(long long so) {
+    const char *unit = fk_src_root_path;
+    long long d = 0;
+    while (d < fk_src_dep_count) {
+        if (so >= fk_src_dep_text_off[d] && so < fk_src_dep_text_off[d] + fk_src_dep_text_len[d] && fk_src_dep_text_len[d] > 0) { unit = fk_src_dep_path[d]; }
+        d = d + 1;
+    }
+    return unit;
+}
 static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 9) {
         putchar((int)(fk_walk(fk_node[i][1], fp) >> 1));
@@ -9853,39 +10026,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (want179 > 64) {
             want179 = 64;
         }
-        long long picked_j[64];
-        long long picked_h[64];
-        long long np = 0;
-        long long j = 0;
-        while (j < fk_fntop) {
-            long long fx = fk_fnidx[j];
-            if (fx >= 0 && fx < fk_fn_count && fk_fn_heat[fx] > 0) {
-                long long h = fk_fn_heat[fx];
-                /* insertion into the top-n, largest first */
-                long long k = np < want179 ? np : want179 - 1;
-                if (np < want179 || h > picked_h[k]) {
-                    if (np < want179) { np = np + 1; }
-                    while (k > 0 && picked_h[k - 1] < h) { picked_j[k] = picked_j[k - 1]; picked_h[k] = picked_h[k - 1]; k = k - 1; }
-                    picked_j[k] = j;
-                    picked_h[k] = h;
-                }
-            }
-            j = j + 1;
-        }
-        /* one pass over the program text: line and column for every picked name */
-        long long line_of[64], col_of[64];
+        long long picked_j[64], picked_h[64], line_of[64], col_of[64];
+        long long np = fk_hot_pick(want179, picked_j, picked_h, line_of, col_of);
         long long q = 0;
-        while (q < np) { line_of[q] = 0; col_of[q] = 0; q = q + 1; }
-        long long pos = 0, line = 1, lastnl = -1;
-        while (pos <= fk_slen) {
-            q = 0;
-            while (q < np) {
-                if (fk_fnsym_s[picked_j[q]] == pos) { line_of[q] = line; col_of[q] = pos - lastnl; }
-                q = q + 1;
-            }
-            if (pos < fk_slen && fk_srctext[pos] == FK_CH_LF) { line = line + 1; lastnl = pos; }
-            pos = pos + 1;
-        }
         fk_sinit();
         long long start179 = fk_sbp;
         q = 0;
@@ -9893,7 +10036,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             long long sj = picked_j[q];
             long long so = fk_fnsym_s[sj];
             /* the unit whose text holds the name; the root text has no dep row */
-            const char *unit = fk_src_root_path;
+            const char *unit = fk_hot_unit_of(so);
             long long d = 0;
             while (d < fk_src_dep_count) {
                 if (so >= fk_src_dep_text_off[d] && so < fk_src_dep_text_off[d] + fk_src_dep_text_len[d] && fk_src_dep_text_len[d] > 0) { unit = fk_src_dep_path[d]; }
@@ -10062,6 +10205,73 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 160) {
         return ((long long)getpid()) << 1;
+    }
+    if (t == 162) {
+        /* kernel_live_pids: every registered kernel whose page says alive and whose pid still answers */
+        long long slots162[256];
+        if (fk_live_read_words("/fg-kernels", slots162, 256) < 0) { return 1; }
+        long long l162 = 1;
+        long long k162 = 255;
+        while (k162 >= 0) {
+            long long pid162 = slots162[k162];
+            if (pid162 > 0 && kill((int)pid162, 0) == 0) {
+                char nm162[32];
+                long long w162[FK_LIVE_WORDS];
+                fk_live_pid_name(pid162, nm162);
+                if (fk_live_read_words(nm162, w162, FK_LIVE_WORDS) == FK_LIVE_WORDS && w162[0] == FK_LIVE_MAGIC && w162[19] == 1) { l162 = fk_cons_val(pid162 << 1, l162); }
+            }
+            k162 = k162 - 1;
+        }
+        return l162;
+    }
+    if (t == 163) {
+        /* kernel_live pid: the 21 words of that kernel's page, read where they live */
+        long long pid163 = fk_walk(fk_node[i][1], fp) >> 1;
+        char nm163[32];
+        long long w163[FK_LIVE_WORDS];
+        fk_live_pid_name(pid163, nm163);
+        if (fk_live_read_words(nm163, w163, FK_LIVE_WORDS) != FK_LIVE_WORDS || w163[0] != FK_LIVE_MAGIC) { return 1; }
+        long long l163 = 1;
+        long long k163 = FK_LIVE_WORDS - 1;
+        while (k163 >= 0) { l163 = fk_cons_val(w163[k163] << 1, l163); k163 = k163 - 1; }
+        return l163;
+    }
+    if (t == 164) {
+        /* kernel_hot_rows n: list of (heat name unit line col) for the hottest defns -- cells, no text to split */
+        long long want164 = fk_walk(fk_node[i][1], fp) >> 1;
+        if (want164 <= 0) { return 1; }
+        if (want164 > 64) { want164 = 64; }
+        long long pj164[64], ph164[64], ln164[64], cl164[64];
+        long long np164 = fk_hot_pick(want164, pj164, ph164, ln164, cl164);
+        long long l164 = 1;
+        long long q164 = np164 - 1;
+        while (q164 >= 0) {
+            long long sj = pj164[q164];
+            long long so = fk_fnsym_s[sj];
+            const char *unit = fk_hot_unit_of(so);
+            long long row = fk_cons_val(ph164[q164] << 1, fk_cons_val(fk_sbuf(fk_srctext + so, fk_fnsym_n[sj]), fk_cons_val(fk_sbuf(unit, fk_cstrlen(unit)), fk_cons_val(ln164[q164] << 1, fk_cons_val(cl164[q164] << 1, 1)))));
+            l164 = fk_cons_val(row, l164);
+            q164 = q164 - 1;
+        }
+        return l164;
+    }
+    if (t == 165) {
+        /* metal_live: the carrier's counters as words; nil when Metal is not up */
+        long long m165[18];
+        if (fk_metal_live_external(m165) <= 0) { return 1; }
+        long long l165 = 1;
+        long long k165 = 17;
+        while (k165 >= 0) { l165 = fk_cons_val(m165[k165] << 1, l165); k165 = k165 - 1; }
+        return l165;
+    }
+    if (t == 166) {
+        /* gift_roster_register name: the publisher's slot in /fg-roster; -1 when the roster is full or absent */
+        static char nm166[128];
+        fk_cstr(fk_walk(fk_node[i][1], fp), nm166, 128);
+        return fk_roster_register(nm166) << 1;
+    }
+    if (t == 167) {
+        return fk_roster_names();
     }
     if (t == 173) {
         return fk_host_cpu_busy_us() << 1;
@@ -11614,6 +11824,7 @@ static void fk_heat_report(void) {
         return;
     }
     fk_heat_reported = 1;
+    fk_live_publish(1);
     fk_heat_write();
 }
 static void fk_heat_pulse(void) {
