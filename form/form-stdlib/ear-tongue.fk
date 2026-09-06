@@ -2,6 +2,12 @@
 ; (the registry's llama32-1b blob) through dense-token-handle, form-native on this metal. A
 ; completion-shaped prompt, greedy, cut at the first line break. Slower than a rented model and
 ; weaker in Persian; named, not hidden. Nothing leaves this Mac.
+;
+; The lane holds what a line must not pay again: the file's bos/eos ids (a header walk each), the
+; vocabulary as fixed-width record buckets (a token is one file read and a byte walk, no
+; substring), the decoded pieces behind an id index (a word is two slices), and the KV cache of
+; the last prompt — a new line prefills only past the tokens it shares with what the cache holds,
+; and the head runs once, on the last prompt token.
 ; preludes: native/metal/dense-token-handle.fk form-stdlib/model-registry.bml form-stdlib/spool-bell-transport.fk form-stdlib/form-fs.fk form-stdlib/line-grammar.fk
 (do
     (defn et-names (code) (if (str_eq code "fa") "Persian" (if (str_eq code "pt") "Brazilian Portuguese" "English")))
@@ -9,17 +15,9 @@
     (defn et-prompt (text from to) (str_concat (et-names from) (str_concat ": " (str_concat text (str_concat (byte_to_str 10) (str_concat (et-names to) ": "))))))
     (defn et-cut1 (s stop) (do (let at (str_find s stop 0)) (if (lt at 0) s (substring s 0 at))))
     (defn et-cut (s) (trim (et-cut1 (et-cut1 s (byte_to_str 10)) "<|")))
-    (defn et-translate (st text from to maxnew)
-        (do (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2)) (let lays (nth st 3)) (let cks (nth st 4)) (let cvs (nth st 5))
-            (let embTv (nth st 6)) (let onormTv (nth st 7)) (let projTv (nth st 8)) (let src (nth st 10))
-            (let ids (dtk-encode src (et-prompt text from to)))
-            (let pf (dth-prefill ps bs geo lays cks cvs embTv onormTv projTv ids 0))
-            (let first (nth pf 0))
-            (let rest (dth-generate ps bs geo lays cks cvs embTv onormTv projTv first (len ids) maxnew (empty)))
-            (et-cut (l3d-text src (append (list first) rest)))))
+    (defn et-text (t) (if (nothing? t) "" t))
     0)
-; ---- the vocabulary rendered once to a file, so a token is a native substring search ----
-; line = "<piece>\t<id>\n" in id order; the first match of "\n<piece>\t" is the lowest id (dtk-best's tie)
+; ---- the vocabulary rendered once to a file: line = "<piece>\t<id>\n" in id order, a leading line break ----
 (do
     (defn et-vocab-path (src) (str_concat ".hearth/vocab-" (str_concat (int_to_str (gmt-vocab-n src)) ".txt")))
     (defn et-piece (src at L k acc) (if (ge k L) acc (et-piece src at L (add k 1) (str_concat acc (byte_to_str (gmt-token-byte src at k))))))
@@ -27,48 +25,125 @@
     (defn et-render-chunks (src at id n acc) (if (ge id n) acc (do (let stop (if (gt (add id 4096) n) n (add id 4096))) (let chunk (et-render src at id stop "")) (let w (sbt-append (et-vocab-path src) chunk)) (et-render-chunks src (et-skip src at (sub stop id)) stop n (add acc 1)))))
     (defn et-skip (src at n) (if (eq n 0) at (et-skip src (gmt-token-next src at) (sub n 1))))
     (defn et-vocab (src) (do (let p (et-vocab-path src)) (if (gt (file_size p) 0) (et-text (read_file p)) (do (let n (et-render-chunks src (gmt-tokens-first src) 0 (gmt-vocab-n src) 0)) (let tail (sbt-append p (byte_to_str 10))) (et-text (read_file p))))))
-    (defn et-text (t) (if (nothing? t) "" t))
-    (defn et-id-at (vocab at) (do (let e (str_find vocab (byte_to_str 10) at)) (str_to_int (substring vocab at e))))
-    ; longest piece at i, up to 24 bytes: the first found line carries the lowest id
-    (defn et-match (vocab text i L) (if (le L 0) (list (sub 0 1) 0) (do (let piece (substring text i (add i L))) (let at (str_find vocab (str_concat (byte_to_str 10) (str_concat piece (byte_to_str 9))) 0)) (if (lt at 0) (et-match vocab text i (sub L 1)) (list (et-id-at vocab (add at (add L 2))) L)))))
-    (defn et-ids (vocab text i n acc) (if (ge i n) (reverse acc) (do (let m (et-match vocab text i (if (gt (sub n i) 24) 24 (sub n i)))) (if (lt (head m) 0) (reverse acc) (et-ids vocab text (add i (nth m 1)) n (cons (head m) acc))))))
-    (defn et-encode (src vocab text) (append (list (gmt-u32 src "tokenizer.ggml.bos_token_id")) (et-ids vocab (dtk-gpt2-map text) 0 (str_len (dtk-gpt2-map text)) (list))))
-    ; generation that stops at the model's own end of turn
-    ; the ends of a line: the file's end-of-sequence (read once, not walked per token), llama3's end of turn, or the line break the prompt asked for
-    (defn et-ends? (eos id) (or (eq id eos) (or (eq id 128009) (or (eq id 128001) (or (eq id 198) (eq id 271))))))
-    (defn et-gen (st src id pos n acc) (et-gen-go st (gmt-u32 src "tokenizer.ggml.eos_token_id") id pos n acc))
-    (defn et-gen-go (st eos id pos n acc) (if (or (le n 0) (et-ends? eos id)) (reverse acc) (do (let nid (dth-forward (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) id pos)) (et-gen-go st eos nid (add pos 1) (sub n 1) (cons id acc)))))
-    (defn et-translate2 (st vocab text from to maxnew)
-        (do (let src (nth st 10))
-            (let ids (et-encode src vocab (et-prompt text from to)))
-            (let pf (dth-prefill (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) ids 0))
-            (et-cut (l3d-text src (et-gen st src (nth pf 0) (len ids) maxnew (list))))))
     0)
-; ---- buckets: the vocabulary split by the first four bytes of each piece into files, each loaded once as a
-; list of (piece id) and searched with the native str_eq, so a probe compares tens of pieces, never scans ----
+; ---- the index: record buckets for the tokenizer, an id-indexed piece file for the detokenizer ----
+; bucket <dir>/<key>: 28-byte records (len, 24 piece bytes, id as three little-endian bytes) in id order,
+; keyed by the first four bytes of the piece (fewer when the piece is shorter); pieces past 24 bytes are
+; not indexed — the longest match the lane offers is 24 bytes, stated. pieces file: every piece decoded
+; through the byte alphabet, concatenated; pidx: per id, offset and length as two little-endian u32.
 (do
-    (defn et-bdir (src) (str_concat ".hearth/vocab-" (str_concat (int_to_str (gmt-vocab-n src)) "-b4")))
-    (defn et-bkey-go (s i n acc) (if (or (ge i n) (ge i 4)) acc (et-bkey-go s (add i 1) n (add (mul acc 256) (add 1 (str_byte_at s i))))))
-    (defn et-bkey (piece) (et-bkey-go piece 0 (str_len piece) 0))
-    (defn et-bpath (src key) (str_concat (et-bdir src) (str_concat "/" (str_concat (int_to_str key) ".txt"))))
-    (defn et-tab-at (l) (str_find l (byte_to_str 9) 0))
-    (defn et-bucket-lines (src lines n) (if (eq (len lines) 0) n (do (let l (head lines)) (let tab (if (lt (str_len l) 2) (sub 0 1) (et-tab-at l))) (let w (if (lt tab 1) 0 (sbt-append (et-bpath src (et-bkey (substring l 0 tab))) (str_concat l (byte_to_str 10))))) (et-bucket-lines src (tail lines) (add n 1)))))
-    (defn et-buckets-ready? (src) (ge (file_size (str_concat (et-bdir src) "/ready")) 0))
-    (defn et-build-buckets (src) (if (et-buckets-ready? src) 1 (do (let mk (fs-mkdir (et-bdir src))) (let vocab (et-vocab src)) (let n (et-bucket-lines src (split-on vocab (byte_to_str 10)) 0)) (let r (write_file_text (str_concat (et-bdir src) "/ready") "ready")) 1)))
-    (defn et-entries (lines acc) (if (eq (len lines) 0) acc (do (let l (head lines)) (let tab (if (lt (str_len l) 2) (sub 0 1) (et-tab-at l))) (et-entries (tail lines) (if (lt tab 1) acc (cons (list (substring l 0 tab) (str_to_int (substring l (add tab 1) (str_len l)))) acc))))))
-    (defn et-bget (cache key) (if (eq (len cache) 0) (list) (if (eq (head (head cache)) key) (head cache) (et-bget (tail cache) key))))
-    ; a bucket cache is a list of (key entries); returns (entries cache)
-    (defn et-bucket (src cache key) (do (let hit (et-bget cache key)) (if (gt (len hit) 0) (list (nth hit 1) cache) (do (let t (et-text (read_file (et-bpath src key)))) (let es (if (eq (str_len t) 0) (list) (et-entries (split-on t (byte_to_str 10)) (list)))) (list es (cons (list key es) cache))))))
-    ; the lowest id wins a tie: entries were consed in file order, so walk to the end and keep the last equal
-    (defn et-bfind (es piece best) (if (eq (len es) 0) best (et-bfind (tail es) piece (if (str_eq (head (head es)) piece) (nth (head es) 1) best))))
-    (defn et-bmatch (src cache text i L) (if (le L 0) (list (sub 0 1) 0 cache) (do (let piece (substring text i (add i L))) (let b (et-bucket src cache (et-bkey piece))) (let id (et-bfind (head b) piece (sub 0 1))) (if (lt id 0) (et-bmatch src (nth b 1) text i (sub L 1)) (list id L (nth b 1))))))
-    (defn et-bids (src cache text i n acc) (if (ge i n) (list (reverse acc) cache) (do (let m (et-bmatch src cache text i (if (gt (sub n i) 24) 24 (sub n i)))) (if (lt (head m) 0) (list (reverse acc) (nth m 2)) (et-bids src (nth m 2) text (add i (nth m 1)) n (cons (head m) acc))))))
-    (defn et-encode-b (src cache text) (do (let surface (dtk-gpt2-map text)) (let r (et-bids src cache surface 0 (str_len surface) (list))) (list (append (list (gmt-u32 src "tokenizer.ggml.bos_token_id")) (head r)) (nth r 1))))
-    ; the tongue lane's translate: bucket tokenizer, stop at the model's end of turn; returns (text cache)
-    (defn et-translate3 (st cache text from to maxnew)
-        (do (let src (nth st 10))
-            (let enc (et-encode-b src cache (et-prompt text from to)))
-            (let ids (head enc))
-            (let pf (dth-prefill (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) ids 0))
-            (list (et-cut (l3d-text src (et-gen st src (nth pf 0) (len ids) maxnew (list)))) (nth enc 1))))
+    (defn et-rdir (src) (str_concat ".hearth/vocab-" (str_concat (int_to_str (gmt-vocab-n src)) "-r28")))
+    (defn et-ppath (src) (str_concat ".hearth/vocab-" (str_concat (int_to_str (gmt-vocab-n src)) ".pieces")))
+    (defn et-ipath (src) (str_concat ".hearth/vocab-" (str_concat (int_to_str (gmt-vocab-n src)) ".pidx")))
+    (defn et-rpath (dir key) (str_concat dir (str_concat "/" (int_to_str key))))
+    (defn et-rkey-go (s i end acc) (if (ge i end) acc (et-rkey-go s (add i 1) end (add (mul acc 256) (add 1 (str_byte_at s i))))))
+    (defn et-rkey (s i k) (et-rkey-go s i (add i k) 0))
+    (defn et-le32 (n) (str_concat (byte_to_str (mod n 256)) (str_concat (byte_to_str (mod (div n 256) 256)) (str_concat (byte_to_str (mod (div n 65536) 256)) (byte_to_str (div n 16777216))))))
+    (defn et-le32-of (s o) (add (str_byte_at s o) (add (mul 256 (str_byte_at s (add o 1))) (add (mul 65536 (str_byte_at s (add o 2))) (mul 16777216 (str_byte_at s (add o 3)))))))
+    (defn et-pad (n acc) (if (le n 0) acc (et-pad (sub n 1) (str_concat acc (byte_to_str 0)))))
+    (defn et-record (piece id) (str_concat (byte_to_str (str_len piece)) (str_concat piece (str_concat (et-pad (sub 24 (str_len piece)) "") (str_concat (byte_to_str (mod id 256)) (str_concat (byte_to_str (mod (div id 256) 256)) (byte_to_str (div id 65536))))))))
+    ; a stored piece to the bytes it means — l3d-piece-go's walk over a string instead of the file
+    (defn et-cp2 (b0 b1) (if (or (lt b1 128) (ge b1 192)) (sub 0 1) (add (mul (sub b0 192) 64) (sub b1 128))))
+    (defn et-decode (raw j n acc)
+        (if (ge j n) acc
+            (do (let b0 (str_byte_at raw j))
+                (let w (l3d-width b0))
+                (if (lt w 0) acc
+                    (do (let c (if (eq w 1) b0 (if (ge (add j 1) n) (sub 0 1) (et-cp2 b0 (str_byte_at raw (add j 1))))))
+                        (let b (if (lt c 0) (sub 0 1) (l3d-uni-byte c)))
+                        (if (lt b 0) acc (et-decode raw (add j w) n (str_concat acc (byte_to_str b)))))))))
+    ; one walk over the rendered vocabulary: each line lands its record and its decoded piece; the piece
+    ; and index files are appended in chunks of 4096 ids, the offset carried across chunks
+    (defn et-flush (ppath ipath pacc iacc) (do (let a (sbt-append ppath pacc)) (let b (sbt-append ipath iacc)) 1))
+    (defn et-land (dir ppath ipath piece id pacc iacc off cnt)
+        (do (let w (if (and (gt (str_len piece) 0) (le (str_len piece) 24)) (sbt-append (et-rpath dir (et-rkey piece 0 (if (gt (str_len piece) 4) 4 (str_len piece)))) (et-record piece id)) 0))
+            (let d (et-decode piece 0 (str_len piece) ""))
+            (let pacc1 (str_concat pacc d))
+            (let iacc1 (str_concat iacc (str_concat (et-le32 off) (et-le32 (str_len d)))))
+            (if (eq (mod (add cnt 1) 4096) 0)
+                (do (let f (et-flush ppath ipath pacc1 iacc1)) (list "" "" (add off (str_len d)) (add cnt 1)))
+                (list pacc1 iacc1 (add off (str_len d)) (add cnt 1)))))
+    (defn et-bwalk (dir ppath ipath t i n piece id pacc iacc off cnt)
+        (if (ge i n) (do (let f (et-flush ppath ipath pacc iacc)) cnt)
+            (do (let b (str_byte_at t i))
+                (if (eq b 10)
+                    (if (lt id 0) (et-bwalk dir ppath ipath t (add i 1) n "" (sub 0 1) pacc iacc off cnt)
+                        (do (let s (et-land dir ppath ipath piece id pacc iacc off cnt))
+                            (et-bwalk dir ppath ipath t (add i 1) n "" (sub 0 1) (nth s 0) (nth s 1) (nth s 2) (nth s 3))))
+                    (if (eq b 9) (et-bwalk dir ppath ipath t (add i 1) n piece 0 pacc iacc off cnt)
+                        (if (ge id 0) (et-bwalk dir ppath ipath t (add i 1) n piece (add (mul id 10) (sub b 48)) pacc iacc off cnt)
+                            (et-bwalk dir ppath ipath t (add i 1) n (str_concat piece (byte_to_str b)) id pacc iacc off cnt)))))))
+    (defn et-index-ready? (src) (ge (file_size (str_concat (et-rdir src) "/ready")) 0))
+    (defn et-build-index (src)
+        (if (et-index-ready? src) 1
+            (do (let dir (et-rdir src))
+                (let gone (fs-remove-tree dir))
+                (let g1 (fs-remove-file (et-ppath src)))
+                (let g2 (fs-remove-file (et-ipath src)))
+                (let mk (fs-mkdir dir))
+                (let t (et-vocab src))
+                (let n (et-bwalk dir (et-ppath src) (et-ipath src) t 0 (str_len t) "" (sub 0 1) "" "" 0 0))
+                (let r (write_file_text (str_concat dir "/ready") (int_to_str n)))
+                1)))
+    ; ---- the tokenizer: at each position the longest indexed piece, the lowest id on a tie ----
+    (defn et-req (t o text i L k) (if (ge k L) 1 (if (eq (str_byte_at t (add o k)) (str_byte_at text (add i k))) (et-req t o text i L (add k 1)) 0)))
+    (defn et-rid (t o) (add (str_byte_at t o) (add (mul 256 (str_byte_at t (add o 1))) (mul 65536 (str_byte_at t (add o 2))))))
+    (defn et-rwalk (t r nrec text i rem bestL bestId)
+        (if (ge r nrec) (list bestId bestL)
+            (do (let o (mul r 28))
+                (let L (str_byte_at t o))
+                (if (and (gt L bestL) (and (le L rem) (eq (et-req t (add o 1) text i L 0) 1)))
+                    (et-rwalk t (add r 1) nrec text i rem L (et-rid t (add o 25)))
+                    (et-rwalk t (add r 1) nrec text i rem bestL bestId)))))
+    (defn et-rmatch (dir text i rem k)
+        (if (le k 0) (list (sub 0 1) 0)
+            (do (let t (et-text (read_file (et-rpath dir (et-rkey text i k)))))
+                (let m (if (eq (str_len t) 0) (list (sub 0 1) 0) (et-rwalk t 0 (div (str_len t) 28) text i rem 0 (sub 0 1))))
+                (if (lt (head m) 0) (et-rmatch dir text i rem (sub k 1)) m))))
+    (defn et-rids (dir text i n acc)
+        (if (ge i n) (reverse acc)
+            (do (let m (et-rmatch dir text i (sub n i) (if (gt (sub n i) 4) 4 (sub n i))))
+                (if (lt (head m) 0) (reverse acc) (et-rids dir text (add i (nth m 1)) n (cons (head m) acc))))))
+    (defn et-encode (dir bos text) (do (let surface (dtk-gpt2-map text)) (cons bos (et-rids dir surface 0 (str_len surface) (list)))))
+    ; ---- the detokenizer: id -> (offset length) -> the piece ----
+    (defn et-piece-of (ppath ipath n id)
+        (if (or (lt id 0) (ge id n)) ""
+            (do (let e (et-text (read_file_slice ipath (mul id 8) 8)))
+                (if (lt (str_len e) 8) ""
+                    (do (let L (et-le32-of e 4))
+                        (if (le L 0) "" (et-text (read_file_slice ppath (et-le32-of e 0) L))))))))
+    (defn et-detok (ppath ipath n ids acc) (if (eq (len ids) 0) acc (et-detok ppath ipath n (tail ids) (str_concat acc (et-piece-of ppath ipath n (head ids))))))
+    0)
+; ---- the lane: (st bos eos loaded dir ppath ipath n) — loaded is what the KV cache holds, position by position ----
+(do
+    (defn et-lane-open ()
+        (do (let st (et-open))
+            (let src (nth st 10))
+            (let built (et-build-index src))
+            (list st (gmt-u32 src "tokenizer.ggml.bos_token_id") (gmt-u32 src "tokenizer.ggml.eos_token_id") (list) (et-rdir src) (et-ppath src) (et-ipath src) (gmt-vocab-n src))))
+    (defn et-lane-st (lane) (nth lane 0))
+    (defn et-lane-with-loaded (lane loaded) (list (nth lane 0) (nth lane 1) (nth lane 2) loaded (nth lane 4) (nth lane 5) (nth lane 6) (nth lane 7)))
+    (defn et-common (a b n) (if (or (eq (len a) 0) (eq (len b) 0)) n (if (eq (head a) (head b)) (et-common (tail a) (tail b) (add n 1)) n)))
+    (defn et-drop (xs n) (if (le n 0) xs (et-drop (tail xs) (sub n 1))))
+    ; the prompt's tokens from position pos on: embed and the layers for each, the head only on the last
+    (defn et-prefill-from (st ids pos)
+        (if (eq (len ids) 1)
+            (dth-forward (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) (head ids) pos)
+            (do (dth-dq (nth st 0) (nth st 6) (nth (nth st 1) 0) (mul (head ids) (nth (nth st 2) 0)) (nth (nth st 2) 0))
+                (dth-passes (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 7) pos 0 (nth (nth st 2) 16))
+                (et-prefill-from st (tail ids) (add pos 1)))))
+    ; the ends of a line: the file's end-of-sequence, llama3's end of turn, or the line break the prompt asked for
+    (defn et-ends? (eos id) (or (eq id eos) (or (eq id 128009) (or (eq id 128001) (or (eq id 198) (eq id 271))))))
+    (defn et-gen-go (st eos id pos n acc) (if (or (le n 0) (et-ends? eos id)) (reverse acc) (do (let nid (dth-forward (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) id pos)) (et-gen-go st eos nid (add pos 1) (sub n 1) (cons id acc)))))
+    ; one line through the lane: (text lane). The cache holds 256 positions; a prompt that leaves no room answers ""
+    (defn et-say (lane text from to maxnew)
+        (do (let st (et-lane-st lane))
+            (let ids (et-encode (nth lane 4) (nth lane 1) (et-prompt text from to)))
+            (let room (sub 250 (len ids)))
+            (if (le room 0) (list "" lane)
+                (do (let m0 (et-common ids (nth lane 3) 0))
+                    (let m (if (ge m0 (len ids)) (sub (len ids) 1) m0))
+                    (let first (et-prefill-from st (et-drop ids m) m))
+                    (let gen (et-gen-go st (nth lane 2) first (len ids) (if (gt maxnew room) room maxnew) (list)))
+                    (list (et-cut (et-detok (nth lane 5) (nth lane 6) (nth lane 7) gen "")) (et-lane-with-loaded lane (append ids gen)))))))
     0)

@@ -4,7 +4,9 @@
 ; one frame per pass into the ear spool with the door's bell rung. Speech is a level above
 ; -55 dBFS; a pause of 500 ms under it, or a full window, commits the line: a heard frame, and
 ; one line for the tongue lane (t_end, tongue, text) with its bell. No host tool, no python:
-; the crossings are the microphone and the model files. stdin line 1: run seconds.
+; the crossings are the microphone and the model files. The window is held as the list of the
+; mic's own chunks, oldest first: a hop appends one and drops what is past 8 s, the level reads the
+; last three, and the window is joined into one string only for a pass. stdin line 1: run seconds.
 ; preflight-exec: forbidden
 ; preludes: form/form-stdlib/ear-native.fk form/form-stdlib/spool-bell-transport.fk form/form-stdlib/hearth.bml form/form-stdlib/line-grammar.fk
 (do
@@ -22,18 +24,26 @@
     (defn el-emit (kind db live livelang livems heard lang heardms)
         (do (let w (sbt-append (el-spool) (el-cat (list "<|ear:frame|>" (el-nl) (el-kv "t" (int_to_str (now_unix_ms))) (el-kv "kind" kind) (el-kv "db" (int_to_str db)) (el-kv "live" live) (el-kv "livelang" livelang) (el-kv "livems" (int_to_str livems)) (el-kv "heard" heard) (el-kv "lang" lang) (el-kv "nsp" "0") (el-kv "heardms" (int_to_str heardms)) "<|/ear:frame|>" (el-nl)))))
             (el-ring (el-bell))))
-    ; level: rms over the last 300 ms, every fourth sample; dBFS from the thresholds 32768 * 10^(dB/20)
+    ; the window: chunks oldest first; a push appends the fresh chunk and cuts the front to the last 8 s
+    (defn el-wlen (win) (if (eq (len win) 0) 0 (add (str_len (head win)) (el-wlen (tail win)))))
+    (defn el-cut-front (win excess)
+        (if (or (le excess 0) (eq (len win) 0)) win
+            (if (ge excess (str_len (head win))) (el-cut-front (tail win) (sub excess (str_len (head win))))
+                (cons (substring (head win) excess (str_len (head win))) (tail win)))))
+    (defn el-push (win fresh) (do (let w1 (append win (list fresh))) (el-cut-front w1 (sub (el-wlen w1) (el-window)))))
+    ; level: rms over the last 300 ms (the newest chunks up to 9600 bytes), every fourth sample; dBFS from the thresholds 32768 * 10^(dB/20)
     (defn el-s16 (s i) (do (let v (add (str_byte_at s i) (mul 256 (str_byte_at s (add i 1))))) (if (ge v 32768) (sub v 65536) v)))
     (defn el-sumsq (s i end acc) (if (ge i end) acc (do (let v (el-s16 s i)) (el-sumsq s (add i 8) end (add acc (mul v v))))))
-    (defn el-rms (s) (do (let n (str_len s)) (let from (if (gt n 9600) (sub n 9600) 0)) (let cnt (div (sub n from) 8)) (if (le cnt 0) 0 (el-isqrt (div (el-sumsq s from n 0) cnt) 0 32768))))
+    (defn el-newest (rwin need acc) (if (or (le need 0) (eq (len rwin) 0)) acc (el-newest (tail rwin) (sub need (str_len (head rwin))) (cons (head rwin) acc))))
+    (defn el-sumsq-all (xs acc) (if (eq (len xs) 0) acc (el-sumsq-all (tail xs) (el-sumsq (head xs) 0 (str_len (head xs)) acc))))
+    (defn el-rms (win) (do (let xs (el-newest (reverse win) 9600 (list))) (let cnt (div (el-wlen xs) 8)) (if (le cnt 0) 0 (el-isqrt (div (el-sumsq-all xs 0) cnt) 0 32768))))
     (defn el-isqrt (v lo hi) (if (ge lo hi) lo (do (let mid (div (add lo (add hi 1)) 2)) (if (gt (mul mid mid) v) (el-isqrt v lo (sub mid 1)) (el-isqrt v mid hi)))))
     (defn el-db-rows () (list (list -6 16422) (list -12 8231) (list -18 4125) (list -24 2067) (list -30 1036) (list -36 519) (list -42 260) (list -48 130) (list -54 65) (list -60 33)))
     (defn el-db-go (rows rms) (if (eq (len rows) 0) -120 (if (ge rms (nth (head rows) 1)) (head (head rows)) (el-db-go (tail rows) rms))))
     (defn el-db (rms) (el-db-go (el-db-rows) rms))
     (defn el-zeros (s n) (if (ge (str_len s) n) (substring s 0 n) (el-zeros (str_concat s s) n)))
     ; the window is the last 8 s of REAL audio; only before 8 s have arrived is silence put in FRONT of it
-    (defn el-front (win) (if (ge (str_len win) (el-window)) win (str_concat (el-zeros (byte_to_str 0) (sub (el-window) (str_len win))) win)))
-    (defn el-tail (s n) (if (le (str_len s) n) s (substring s (sub (str_len s) n) (str_len s))))
+    (defn el-front (s) (if (ge (str_len s) (el-window)) s (str_concat (el-zeros (byte_to_str 0) (sub (el-window) (str_len s))) s)))
     ; the tiny model loops on faint room sound: keep the line up to its first repeated pair of words, marked
     (defn el-words (s) (split-on s " "))
     (defn el-join (xs) (if (eq (len xs) 0) "" (if (eq (len (tail xs)) 0) (head xs) (str_concat (head xs) (str_concat " " (el-join (tail xs)))))))
@@ -42,9 +52,9 @@
     (defn el-unloop-go (ws i acc) (if (lt (len ws) 4) (el-join acc) (if (el-loop? ws) (str_concat (el-join (append acc (el-take ws 2))) " …") (el-unloop-go (tail ws) (add i 1) (append acc (list (head ws)))))))
     (defn el-unloop (s) (el-unloop-go (el-words s) 0 (list)))
     ; the cut (bytes since the mic opened) becomes the decoder's first timestamp: 640 bytes per 20 ms tick, measured from the window's start
-    (defn el-tick (total win cut) (do (let start (sub total (str_len win))) (let rel (sub cut start)) (if (le rel 0) 0 (div rel 640))))
+    (defn el-tick (total wlen cut) (do (let start (sub total wlen)) (let rel (sub cut start)) (if (le rel 0) 0 (div rel 640))))
     ; the pass: tongue detected once per segment (lang < 0 asks), the agreed text prefix prefilled, only the tail decoded
-    (defn el-hear (st win tick cap lang prefix) (do (let t0 (now_unix_ms)) (let Te (enw-encode st (el-front win))) (let t1 (now_unix_ms)) (let r (enw-transcribe-from2 st Te tick cap lang prefix)) (let t2 (now_unix_ms)) (list (enw-lang-code (head r)) (el-unloop (trim (enw-text st (nth r 1)))) (sub t1 t0) (sub t2 t1) (len (nth r 1)) (head r) (nth r 1))))
+    (defn el-hear (st win tick cap lang prefix) (do (let t0 (now_unix_ms)) (let Te (enw-encode st (el-front (el-cat win)))) (let t1 (now_unix_ms)) (let r (enw-transcribe-from2 st Te tick cap lang prefix)) (let t2 (now_unix_ms)) (list (enw-lang-code (head r)) (el-unloop (trim (enw-text st (nth r 1)))) (sub t1 t0) (sub t2 t1) (len (nth r 1)) (head r) (nth r 1))))
     (defn el-text-ids (ids) (if (eq (len ids) 0) (list) (if (lt (head ids) (enw-eot)) (cons (head ids) (el-text-ids (tail ids))) (el-text-ids (tail ids)))))
     (defn el-common (a b) (if (or (eq (len a) 0) (eq (len b) 0)) (list) (if (eq (head a) (head b)) (cons (head a) (el-common (tail a) (tail b))) (list))))
     (defn el-drop-last (xs n) (if (le (len xs) n) (list) (cons (head xs) (el-drop-last (tail xs) n))))
@@ -59,14 +69,14 @@
                 (let tend (now_unix_ms))
                 (if (eq (str_len fresh) 0) (el-loop st win total cut speech lastvoice lastquiet deadline live lasth lang p1 p2)
                     (do (let total1 (add total (str_len fresh)))
-                        (let w1 (el-tail (str_concat win fresh) (el-window)))
+                        (let w1 (el-push win fresh))
                         (let rms (el-rms w1))
                         (let db (el-db rms))
                         (let heard? (if (gt rms 58) 1 0))
                         (let speech1 (if (eq heard? 1) 1 speech))
                         (let lastvoice1 (if (eq heard? 1) tend lastvoice))
                         (if (and (eq speech1 1) (ge (sub total1 cut) 9600))
-                            (do (let h (el-hear st w1 (el-tick total1 w1 cut) (add 8 (div (sub total1 cut) 2000)) (sub 0 1) (if (and (gt (len p1) 0) (eq lang (nth p1 0))) (el-agreed (nth p1 1) p2) (list))))
+                            (do (let h (el-hear st w1 (el-tick total1 (el-wlen w1) cut) (add 8 (div (sub total1 cut) 2000)) (sub 0 1) (if (and (gt (len p1) 0) (eq lang (nth p1 0))) (el-agreed (nth p1 1) p2) (list))))
                                 (let now (now_unix_ms))
                                 (let changed (if (eq (len lasth) 0) 1 (if (str_eq (nth h 1) (nth lasth 1)) 0 1)))
                                 (let e (if (and (eq changed 1) (gt (str_len (nth h 1)) 0)) (el-emit-live db h (sub now tend)) 0))
@@ -84,7 +94,7 @@
     (let st (enw-open (str_concat snap "/weights.npz") "/Users/ursmuff/.mlx-venv/lib/python3.14/site-packages/mlx_whisper/assets/multilingual.tiktoken"))
     (let mic (sense_mic_stream_start))
     (let born (el-emit "born" -120 "" "" 0 "" "" 0))
-    (let frames (el-loop st "" 0 0 0 0 (now_unix_ms) (add (now_unix_ms) (mul 1000 secs)) 0 (list) (sub 0 1) (list) (list)))
+    (let frames (el-loop st (list) 0 0 0 0 (now_unix_ms) (add (now_unix_ms) (mul 1000 secs)) 0 (list) (sub 0 1) (list) (list)))
     (let stopmic (sense_mic_stream_stop))
     (let done (el-emit "done" -120 "" "" 0 "" "" 0))
     (let segdone (sbt-append (el-segs) (str_concat "done" (el-nl))))
