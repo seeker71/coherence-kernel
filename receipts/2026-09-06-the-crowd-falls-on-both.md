@@ -87,12 +87,21 @@ At the baseline reading, before any edit, with the machine at **388.52 GB/s**:
 | encode | 4.05 ms | 0.21 ms | 18.96x |
 | wtoken | 1.00 ms | 0.15 ms | 6.57x |
 
-**No comparable after-reading exists, and I will not invent one.** By the time the work stood, the
-lens read 178 to 188 GB/s and the lanes I never touched had moved with it — `1btoken` 12.6 ms to
-86 ms, `4in1` 3.9 ms to 23 ms. Under that I ran the whole lane both ways, interleaved, putting
-HEAD~2's two files back between runs: three rounds gave encode ratios of 0.95, 0.81 and 1.54 and
-token ratios of 1.04, 0.85 and 0.95. The spread is ±50 percent and the effect I am looking for is
-smaller than the spread. **At the lane level, today, the answer is: not measurable.** What is measured
+**No comparable after-reading exists, and I will not invent one.** The lens on the rebased tree,
+which now names its own weather (a sibling landed that door today, and row 1315 `weatherbound` with
+it), says it plainly:
+
+    FLOOR   173.81 GB/s against a best of 388.52; a busy machine: 44.73% of the best
+    encode  20.55 ms, floor 0.47 ms, 43.05x        wtoken   13.69 ms, floor 0.34 ms, 40.26x
+    1btoken 104.37 ms, floor 7.6 ms, 13.73x        3btoken 342.80 ms, floor 11.61 ms, 29.50x
+
+The three lanes on the right are not mine and I never touched them; they are 3 to 6 times their own
+baseline distance too. (The best of 388.52 is this same door's reading here this morning, written
+into `.hearth/floor-lens-best.rows` so the weather line tells the truth rather than calling 64 GB/s
+quiet.) Under that I ran the whole lane both ways, interleaved, putting HEAD~2's two files back
+between runs: three rounds gave encode ratios of 0.95, 0.81 and 1.54 and token ratios of 1.04, 0.85
+and 0.95. The spread is ±50 percent and the effect I am looking for is smaller than the spread.
+**At the lane level, today, the answer is: not measurable.** What is measured
 is each kernel, adjacent, in one process — the table above — and that every reading the pass produces
 is unchanged.
 
