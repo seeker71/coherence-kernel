@@ -28,7 +28,7 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is 17,153 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is 17,694 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
 preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 678 rows, 666 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 680 rows, 668 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -242,6 +242,7 @@ form-glass-sensor-rows-band            -> 255
 form-glass-kernel-view-band            -> 511
 form-glass-events-channels-band        -> 255
 node-gift-band                         -> 4095
+cell-store-band                        -> 255
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -380,12 +381,36 @@ storage sensor (its subject is the catalog) and the queue sensor (the hearth
 queue files), both in the sensor process; and the owner-command lease the
 glass leaves for a model owner that still reads disk (R119).
 
+**The store is shared memory.** Every value table of a kernel — the node
+columns (kind, category word, kids, value, NodeID, source file/line/column,
+attribute), both generations of the cons heap, the string bytes and table, the
+float pool — lives in one sparse shared-memory reservation per column,
+`/fg-c<pid>-<letter>`, sized once and committed page by page (a 4 GiB
+reservation touched at three pages costs three pages; the kernel's resident
+size is unchanged). A shared table never moves, so another process maps the
+same columns and reads any cell by its word — blueprint word, kids, value,
+NodeID and source pointer on one surface — with no copy, no wire, no
+re-interning: `cell_map pid` (168), `cell_field handle ref k` (169: 0 kind
+1 cat 2 kids 3 val 4–7 NodeID 8 source 9 line 10 col 11 attr; for a cons 0 head
+1 tail), `cell_value handle ref` (170: a foreign int, string, float or
+`nothing` as this process's own value), `cell_ref value` (171: this process's
+own word, the reference another process reads by), `cell_unmap` (172). A
+foreign word travels as a plain int; the far negatives fold below −2⁶¹ so no
+foreign word is ever mistaken for one of the reader's own. The collector melts
+between the two heap reservations and the live page says which generation is
+current (word 23), whether the store is shared (22), and how many melts (21);
+past a reservation the process copies its tables to private memory once and
+goes on — never a wall. `cell-store-band` 255: a child interns a composite
+over 2 and 3; this process reads kind 2, category `cell-store-band` with NodeID
+subtype 2, kids 2 and 3 cons by cons, from the child's columns. Not yet on the
+surface: the program AST, the `.fkb` images, `mlx_status` (still text) — R120.
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=71 -> 47000071
+./fkwu form/form-stdlib/release-ledger.bml -> open=47 moving=0 released=72 -> 47000072
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
