@@ -209,6 +209,12 @@ static void fk_live_publish(int final);
 static void fk_f64_pulse(long long fx);
 static void fk_f64_loop_pulse(long long fx, long long fp, long long n);
 static void fk_f64_reset(void);
+static void fk_twin_pulse(long long fx);
+static long long fk_twin_calls_private;
+static long long *fk_twin_calls_p = &fk_twin_calls_private;
+#define fk_twin_calls (*fk_twin_calls_p)
+static int fk_twin_call(long long fx, long long fp, long long *out);
+static long long fk_len_upto(long long v, long long cap);
 static long long (*fk_node)[4];
 static long long fk_node_count;
 static void **fk_f64_mem; /* per-defn f64 leaf pages (this process) */
@@ -8446,6 +8452,12 @@ static long long fk_walk_body(long long i, long long fp) {
             void *m194 = (c194 >= 0 && c194 < fk_f64_cap) ? fk_f64_mem[c194] : 0;
             long long n194 = fk_fnar[c194];
             long long sig194 = m194 != 0 ? fk_f64_sig[c194] : -1;
+            if (fk_fn_native != 0 && c194 < fk_fn_capacity && fk_fn_native[c194] == 3) {
+                long long r194;
+                if (fk_twin_call(c194, fp, &r194)) { fk_twin_calls = fk_twin_calls + 1; return r194; }
+                i = fk_node[i][2];
+                continue;
+            }
             if (m194 != 0 && sig194 >= 0 && n194 >= 1 && n194 <= 8) {
                 /* the loop leaf: each frame arg must wear the type the loop was emitted for (int = even word, float = pool box);
                  * ints untag once at the door (v >> 1), floats unbox once, the result tags or boxes once on the way out */
@@ -8949,6 +8961,110 @@ static int fk_f64_install(long long fx, long long root, long long orig, unsigned
     return 0;
 #endif
 }
+/* ── recipe twins: the seed carries the body's own list and number recipes ──
+ * nil?, append, int_to_str and reverse-onto are Form recipes in core.fk (and
+ * their copies in line-grammar, sha256, fourth-shim, core-native, form-asm):
+ * five dispatches per element, and the hottest names on every kernel's page.
+ * When one of them crosses FK_F64_HEAT calls, the seed binds a twin: the
+ * defn's body entry becomes a tag-194 node with native state 3 and the twin id
+ * in fk_f64_sig, and the walker meets the twin where it already reads a tag.
+ * A twin answers exactly what the recipe answers on the inputs it claims --
+ * lists, the empty list, strings, ints, nothing -- and DECLINES anything else
+ * (int_to_str of a float, reverse-onto of a string), so the original body
+ * walks and the recipe's own answer stands. Bound by name, arity AND the
+ * defining unit, so a recipe of the same name in another unit is never taken. */
+static const char *fk_twin_units[6] = {"core.fk", "line-grammar.fk", "sha256.fk", "fourth-shim.fk", "core-native.fk", "form-asm.fk"};
+static int fk_twin_name_eq(const char *s, long long n, const char *name) {
+    long long k = 0;
+    while (k < n) { if (name[k] == 0 || s[k] != name[k]) { return 0; } k = k + 1; }
+    return name[n] == 0;
+}
+static int fk_twin_leaf_eq(const char *unit, const char *leaf) {
+    long long n = 0, m = 0;
+    while (unit[n] != 0) { n = n + 1; }
+    while (leaf[m] != 0) { m = m + 1; }
+    if (m > n) { return 0; }
+    if (n > m && unit[n - m - 1] != '/') { return 0; }
+    long long k = 0;
+    while (k < m) { if (unit[n - m + k] != leaf[k]) { return 0; } k = k + 1; }
+    return 1;
+}
+static long long fk_twin_id_of(long long fx) {
+    long long j = 0;
+    while (j < fk_fntop) {
+        if (fk_fnidx[j] == fx) {
+            long long so = fk_fnsym_s[j], sn = fk_fnsym_n[j];
+            long long id = 0;
+            if (sn == 4 && fk_srctext[so] == 'n' && fk_srctext[so + 1] == 'i' && fk_srctext[so + 2] == 'l' && fk_srctext[so + 3] == '?' && fk_fnar[fx] == 1) { id = 1; }
+            else if (sn == 6 && fk_twin_name_eq(fk_srctext + so, 6, "append") && fk_fnar[fx] == 2) { id = 2; }
+            else if (sn == 10 && fk_twin_name_eq(fk_srctext + so, 10, "int_to_str") && fk_fnar[fx] == 1) { id = 3; }
+            else if (sn == 12 && fk_twin_name_eq(fk_srctext + so, 12, "reverse-onto") && fk_fnar[fx] == 2) { id = 4; }
+            if (id == 0) { return 0; }
+            const char *unit = fk_hot_unit_of(so);
+            long long u = 0;
+            while (u < 6) { if (fk_twin_leaf_eq(unit, fk_twin_units[u])) { return id; } u = u + 1; }
+            return 0;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+static void fk_twin_pulse(long long fx) {
+    if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
+    if (fk_fn_native[fx] != 0) { return; }
+    long long id = fk_twin_id_of(fx);
+    if (id == 0) { return; }
+    if (!fk_f64_reserve(fx)) { return; }
+    long long root = fk_fn[fx];
+    if (root < 0 || root >= fk_node_count) { return; }
+    if (fk_node[root][0] != 194) { fk_fn[fx] = fk_smknode(194, fx, root, 0); fk_prog_note_body(fx); }
+    fk_f64_sig[fx] = id;
+    fk_fn_native[fx] = 3;
+}
+static int fk_twin_call(long long fx, long long fp, long long *out) {
+    long long id = fk_f64_sig[fx];
+    if (id == 1) {
+        *out = fk_len_upto(fk_vs[fp], 1) == 0 ? 2 : 0;
+        return 1;
+    }
+    if (id == 2) {
+        long long xs = fk_vs[fp], ys = fk_vs[fp + 1];
+        if (fk_is_str(xs)) { *out = FK_SLEN(fk_stri(xs)) > 0 ? fk_cons_val(1, ys) : ys; return 1; }
+        if ((xs & 1) == 0) { *out = ys; return 1; }
+        long long p = xs >> 1, n = 0;
+        while (p >= 1 && FK_POK(p)) { fk_vp(FK_HH(p)); n = n + 1; p = FK_HT(p) >> 1; }
+        long long acc = ys;
+        while (n > 0) { fk_vsp = fk_vsp - 1; acc = fk_cons_val(fk_vs[fk_vsp], acc); n = n - 1; }
+        *out = acc;
+        return 1;
+    }
+    if (id == 3) {
+        long long v = fk_vs[fp];
+        if (v == fk_nothing) { *out = fk_sbuf("nothing", 7); return 1; }
+        if ((v & 1) != 0) { return 0; }
+        long long n = v >> 1;
+        char b[32];
+        int k = 31;
+        b[k] = 0;
+        int neg = n < 0;
+        unsigned long long u = neg ? (unsigned long long)(0 - n) : (unsigned long long)n;
+        if (u == 0) { k = k - 1; b[k] = '0'; }
+        while (u > 0) { k = k - 1; b[k] = (char)('0' + (u % 10)); u = u / 10; }
+        if (neg) { k = k - 1; b[k] = '-'; }
+        *out = fk_sbuf(b + k, 31 - k);
+        return 1;
+    }
+    if (id == 4) {
+        long long xs = fk_vs[fp], acc = fk_vs[fp + 1];
+        if (fk_is_str(xs)) { if (FK_SLEN(fk_stri(xs)) > 0) { return 0; } *out = acc; return 1; }
+        if ((xs & 1) == 0) { *out = acc; return 1; }
+        long long p = xs >> 1;
+        while (p >= 1 && FK_POK(p)) { acc = fk_cons_val(FK_HH(p), acc); p = FK_HT(p) >> 1; }
+        *out = acc;
+        return 1;
+    }
+    return 0;
+}
 static void fk_f64_pulse(long long fx) {
     if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
     if (fk_fn_native[fx] != 0) { return; }
@@ -9022,6 +9138,7 @@ static int fk_f64_loop_pass(unsigned int *words, long long *wn, int ca, int cb, 
     return fk_f64_put(words, wn, 0x91000508U); /* ADD X8, X8, #1 */
 }
 static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
+    fk_twin_pulse(fx);
     if (fx <= 0 || fx >= fk_fn_count || fk_fn_native == 0 || fx >= fk_fn_capacity) { return; }
     if (fk_fn_native[fx] != 0) { return; }
     long long root = 0, orig = 0, body = 0;
@@ -9254,6 +9371,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_vp(v12);
         long long b12 = fk_vsp - 1;
         fk_fn_heat[c12] = fk_fn_heat[c12] + 1;
+        if ((fk_fn_heat[c12] & (FK_F64_HEAT - 1)) == 0) { fk_twin_pulse(c12); }
         long long caller12 = fk_cur_fn; /* the non-tail call has a return point: boxes minted after it are the caller's again */
         fk_cur_fn = c12;
         fk_heat_pulse();
@@ -9294,6 +9412,7 @@ static long long fk_walk(long long i, long long fp) {
         }
         long long n241 = fk_vsp - base241;
         fk_fn_heat[c241] = fk_fn_heat[c241] + 1;
+        if ((fk_fn_heat[c241] & (FK_F64_HEAT - 1)) == 0) { fk_twin_pulse(c241); }
         long long caller241 = fk_cur_fn;
         fk_cur_fn = c241;
         fk_heat_pulse();
@@ -13572,6 +13691,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 51) {
             return fk_smelt_reclaimed << 1;
+        }
+        if (ks_k == 52) {
+            return fk_twin_calls << 1;
         }
         if (ks_k == 6) {
             return fk_hp << 1;
