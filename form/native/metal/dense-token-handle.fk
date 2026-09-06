@@ -110,7 +110,7 @@
         (str_concat "#include <metal_stdlib>\n#pragma clang fp contract(off)\n"
         (str_concat (q6m-msl-unit "form_q6k_dequant_f32" "form_q6k_matvec_f32")
         (str_concat (q4m-msl-unit "form_q4k_dequant_f32" "form_q4k_matvec_f32")
-        (str_concat (str_concat (q80-msl-appendix "form_q80_dequant_f32" "form_q80_matvec_f32" "form_q80_matvec_lane_f32") (q80-matvec-tg-body "form_q80_matvec_tg_f32"))
+        (str_concat (str_concat (q80-msl-appendix "form_q80_dequant_f32" "form_q80_matvec_f32" "form_q80_matvec_lane_f32") (str_concat (q80-matvec-tg-body "form_q80_matvec_tg_f32") (str_concat (q80-matvec-tg2-body "form_q80_matvec_tg2_f32") (str_concat (q80-matvec-tg3-body "form_q80_matvec_tg3_f32") (dth-rmsnorm-twins-msl)))))
         (str_concat (q5m-msl-appendix "form_q5k_dequant_f32" "form_q5k_matvec_f32"
                                       "form_q50_dequant_f32" "form_q50_matvec_f32")
         (str_concat (ldm-msl-unit)
@@ -219,6 +219,12 @@
     ; pipes: 0 q6mv 1 q4mv 2 q80mv 3 q6dq 4 q4dq 5 q80dq 6 rms 7 rope 8 neox 9 attn 10 swiglu
     ;        11 add 12 argmax 13 copy 14 q5kmv 15 q5kdq 16 q50mv 17 q50dq 18 q40mv 19 q40dq
     ;        20 layernorm 21 gelu 22 copyfrom 23 q80mv-tg (bit-exact twin, the default for Q8_0) 24 rms-tg
+    ; two candidate exact rmsnorm twins, judged by q8-0-matvec-tg-band.fk against the one-thread attestant: A stages the
+    ; x values and folds `ss + xv*xv` as the attestant writes it; B folds with fma(xv, xv, ss), the contraction a
+    ; compiler may have made of the attestant. Whichever is byte for byte the attestant is dispatched.
+    (defn dth-rmsnorm-twins-msl ()
+        (str_concat "kernel void form_rmsnorm_twa_f32 (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { threadgroup float xs[4096]; threadgroup float sinv[1]; for (uint j = t; j < n; j += nt) xs[j] = x[j]; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { float ss = 0.0f; for (uint j = 0u; j < n; j++) { float xv = xs[j]; float sq = xv * xv; ss = ss + sq; } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } sinv[0] = 1.0f / gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float inv = sinv[0]; for (uint j = t; j < n; j += nt) { float nm = x[j] * inv; y[j] = nm * g[j]; } } "
+                    "kernel void form_rmsnorm_twb_f32 (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { threadgroup float xs[4096]; threadgroup float sinv[1]; for (uint j = t; j < n; j += nt) xs[j] = x[j]; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { float ss = 0.0f; for (uint j = 0u; j < n; j++) { float xv = xs[j]; ss = metal::fma(xv, xv, ss); } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } sinv[0] = 1.0f / gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float inv = sinv[0]; for (uint j = t; j < n; j += nt) { float nm = x[j] * inv; y[j] = nm * g[j]; } } "))
     (defn dth-pipes (msl)
         (list (metal_pipeline msl "form_q6k_matvec_f32")
               (metal_pipeline msl "form_q4k_matvec_f32")
@@ -244,7 +250,11 @@
               (metal_pipeline msl "form_gelu_f32")
               (metal_pipeline msl "form_copy_from_f32")
               (metal_pipeline msl "form_q80_matvec_tg_f32")      ; 23 the bit-exact cooperative q8 twin
-              (metal_pipeline msl "form_rmsnorm_tg_f32")))       ; 24 stone 16's cooperative rmsnorm: compiled, NOT dispatched — it differs from the attestant at element 4 (q8-0-matvec-tg-band.fk)
+              (metal_pipeline msl "form_rmsnorm_tg_f32")         ; 24
+              (metal_pipeline msl "form_q80_matvec_tg2_f32")     ; 25 the twin that reads each block once
+              (metal_pipeline msl "form_rmsnorm_twa_f32")        ; 26 rmsnorm twin A
+              (metal_pipeline msl "form_rmsnorm_twb_f32")        ; 27 rmsnorm twin B (fma fold)
+              (metal_pipeline msl "form_q80_matvec_tg3_f32")))   ; 28 the double-buffered twin (two simdgroups a row)
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
@@ -286,10 +296,13 @@
                 (dth-tv-h (dth-tv tab base path "rope_freqs.weight")))))
 
     ; ================= dispatches =================
-    ; Q8_0 rows go through the cooperative twin (bit for bit the attestant, q8-0-matvec-tg-band.fk): 32 threads a row
+    ; Q8_0 rows go through the double-buffered cooperative twin (bit for bit the attestant, q8-0-matvec-tg-band.fk):
+    ; two simdgroups a row, one loading the next chunk while the other folds; cols a multiple of 512, else the block-once twin
     (defn dth-mv (ps tv xh yh)
         (if (eq (dth-tv-ty tv) 8)
-            (metal_enqueue (nth ps 23) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 32 0 1 0) (dth-tv-r tv))
+            (if (eq (mod (dth-tv-c tv) 512) 0)
+                (metal_enqueue (nth ps 28) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 64 0 1 0) (dth-tv-r tv))
+                (metal_enqueue (nth ps 25) (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)) 32 0 1 0) (dth-tv-r tv)))
         (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 0)
                        (if (eq (dth-tv-ty tv) 12) (nth ps 1)
                        (if (eq (dth-tv-ty tv) 13) (nth ps 14)
