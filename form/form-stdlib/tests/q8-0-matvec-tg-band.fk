@@ -1,10 +1,15 @@
 ; q8-0-matvec-tg-band.fk — the cooperative twins answer to their attestants bit for bit, on real
-; weights (llama3.2:1b's first Q8_0 projection, a fixed input, byte equality of the read-back):
-; bit 1 form_q80_matvec_tg_f32, bit 2 form_q80_matvec_tg2_f32 (each block read once), and of the two
-; candidate rmsnorm twins bit 4 for A (the attestant's own statements) or bit 8 for B (an fma fold)
-; — exactly one of them can be the attestant's compiled arithmetic; bit 16 form_q80_matvec_tg3_f32, the
-; double-buffered twin (two simdgroups a row). Forty dispatches of each timed.
-; Expected: 27
+; weights (llama3.2:1b, a fixed input, byte equality of the read-back):
+;   bit 1  form_q80_matvec_tg_f32   on the first Q8_0 projection (2048x2048)
+;   bit 2  form_q80_matvec_tg2_f32  (each block read once), the same
+;   bit 4  form_rmsnorm_tw_f32      against the one-thread form_rmsnorm_f32 (the root crosses the barrier)
+;   bit 8  form_argmax_part/comb    against the one-thread form_argmax_f32 on REAL logits (a BOS forward pass),
+;                                   id and value
+;   bit 16 form_q80_matvec_tg3_f32  (double-buffered, two simdgroups a row), the first projection
+;   bit 32 form_q80_matvec_tg4_f32  (sixteen rows a group, prefetching loaders), the first projection
+;   bit 64 form_q80_matvec_tg4_f32  on ffn_down (2048x8192), the other width the lane dispatches
+; Forty dispatches of each timed.
+; Expected: 127
 ; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
 ; preludes: native/metal/dense-token-handle.fk form-stdlib/model-registry.bml
 (do
@@ -12,13 +17,15 @@
     (defn qb-q8 (views) (if (eq (len views) 0) (list) (if (eq (dth-tv-ty (head views)) 8) (head views) (qb-q8 (tail views)))))
     (defn qb-n (pipe bind threads n) (if (le n 0) 0 (do (let e (metal_enqueue pipe bind threads)) (qb-n pipe bind threads (sub n 1)))))
     (defn qb-same? (a b n) (if (and (eq (str_len a) n) (str_eq a b)) 1 0))
+    (defn qb-ms (label t0 t1) (str_concat label (str_concat (int_to_str (sub t1 t0)) " ms")))
     (let st (dth-open (mr-path (mr-find "llama32-1b")) 256 (sub 0 1)))
-    (let ps (nth st 0)) (let layer (head (nth st 3)))
+    (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2)) (let layer (head (nth st 3)))
     (let tv (qb-q8 layer))
     (let rows (dth-tv-r tv)) (let cols (dth-tv-c tv))
-    (let xh (metal_buf_alloc (mul 4 cols)))
-    (let w (metal_buf_write xh 0 (qb-f32s cols 0 "")))
+    (let xh (metal_buf_alloc (mul 4 8192)))
+    (let w (metal_buf_write xh 0 (qb-f32s 8192 0 "")))
     (let ya (metal_buf_alloc (mul 4 rows))) (let yb (metal_buf_alloc (mul 4 rows))) (let yc (metal_buf_alloc (mul 4 rows)))
+    (let yd (metal_buf_alloc (mul 4 rows))) (let ye (metal_buf_alloc (mul 4 rows)))
     (let t0 (now_unix_ms))
     (let a (qb-n (nth ps 2) (md-bind (list (dth-tv-h tv) xh ya) (list rows cols)) rows 40))
     (let s0 (metal_sync))
@@ -29,30 +36,56 @@
     (let c (qb-n (nth ps 25) (md-bind16 (list (dth-tv-h tv) xh yc) (list rows cols) 32 0 1 0) rows 40))
     (let s2 (metal_sync))
     (let t3 (now_unix_ms))
-    (let ra (metal_buf_read ya 0 (mul 4 rows))) (let rb (metal_buf_read yb 0 (mul 4 rows))) (let rc (metal_buf_read yc 0 (mul 4 rows)))
-    (let yd (metal_buf_alloc (mul 4 rows)))
-    (let t4 (now_unix_ms))
-    (let dd (qb-n (nth ps 28) (md-bind16 (list (dth-tv-h tv) xh yd) (list rows cols) 64 0 1 0) rows 40))
-    (let s5 (metal_sync))
-    (let t5 (now_unix_ms))
-    (let rd (metal_buf_read yd 0 (mul 4 rows)))
-    (let c1 (qb-same? ra rb (mul 4 rows)))
-    (let c2 (mul 2 (qb-same? ra rc (mul 4 rows))))
-    (let c5 (mul 16 (qb-same? ra rd (mul 4 rows))))
-    (print_str (str_concat "40 twin3 (double-buffered) ms=" (int_to_str (sub t5 t4))))
-    (let gh (dth-tv-h (head layer)))
-    (let na (metal_buf_alloc (mul 4 cols))) (let nb (metal_buf_alloc (mul 4 cols))) (let nc (metal_buf_alloc (mul 4 cols)))
-    (let epsBits (md-f32-bits 0.00001))
-    (let u0 (now_unix_ms))
-    (let r1 (qb-n (nth ps 6) (md-bind (list xh gh na) (list cols epsBits)) 1 40))
+    (let d (qb-n (nth ps 27) (md-bind16 (list (dth-tv-h tv) xh yd) (list rows cols) 64 0 1 0) rows 40))
     (let s3 (metal_sync))
-    (let u1 (now_unix_ms))
-    (let r2 (qb-n (nth ps 26) (md-bind16 (list xh gh nb) (list cols epsBits) 256 0 1 0) 1 40))
-    (let r3 (qb-n (nth ps 27) (md-bind16 (list xh gh nc) (list cols epsBits) 256 0 1 0) 1 40))
+    (let t4 (now_unix_ms))
+    (let e (qb-n (nth ps 28) (md-bind16 (list (dth-tv-h tv) xh ye) (list rows cols) 96 0 1 0) (div (add rows 15) 16) 40))
     (let s4 (metal_sync))
+    (let t5 (now_unix_ms))
+    (let ra (metal_buf_read ya 0 (mul 4 rows)))
+    (let c1 (qb-same? ra (metal_buf_read yb 0 (mul 4 rows)) (mul 4 rows)))
+    (let c2 (mul 2 (qb-same? ra (metal_buf_read yc 0 (mul 4 rows)) (mul 4 rows))))
+    (let c5 (mul 16 (qb-same? ra (metal_buf_read yd 0 (mul 4 rows)) (mul 4 rows))))
+    (let c6 (mul 32 (qb-same? ra (metal_buf_read ye 0 (mul 4 rows)) (mul 4 rows))))
+    (print_str (str_concat "q8 " (str_concat (int_to_str rows) (str_concat "x" (str_concat (int_to_str cols) (str_concat ": 40 attestant " (str_concat (int_to_str (sub t1 t0)) (str_concat " ms, 40 tg " (str_concat (int_to_str (sub t2 t1)) (str_concat " ms, 40 tg2 " (str_concat (int_to_str (sub t3 t2)) (str_concat " ms, 40 tg3 " (str_concat (int_to_str (sub t4 t3)) (str_concat " ms, 40 tg4 " (str_concat (int_to_str (sub t5 t4)) " ms")))))))))))))))
+    ; --- the other width: ffn_down, 2048 x 8192 ---
+    (let dv (nth layer 8))
+    (let drows (dth-tv-r dv)) (let dcols (dth-tv-c dv))
+    (let za (metal_buf_alloc (mul 4 drows))) (let zb (metal_buf_alloc (mul 4 drows)))
+    (let u0 (now_unix_ms))
+    (let f (qb-n (nth ps 2) (md-bind (list (dth-tv-h dv) xh za) (list drows dcols)) drows 40))
+    (let s5 (metal_sync))
+    (let u1 (now_unix_ms))
+    (let g (qb-n (nth ps 28) (md-bind16 (list (dth-tv-h dv) xh zb) (list drows dcols) 96 0 1 0) (div (add drows 15) 16) 40))
+    (let s6 (metal_sync))
     (let u2 (now_unix_ms))
-    (let qa (metal_buf_read na 0 (mul 4 cols))) (let qb (metal_buf_read nb 0 (mul 4 cols))) (let qc (metal_buf_read nc 0 (mul 4 cols)))
-    (let c3 (mul 4 (qb-same? qa qb (mul 4 cols))))
-    (let c4 (mul 8 (qb-same? qa qc (mul 4 cols))))
-    (print_str (str_concat "q8 " (str_concat (int_to_str rows) (str_concat "x" (str_concat (int_to_str cols) (str_concat ": 40 attestant " (str_concat (int_to_str (sub t1 t0)) (str_concat " ms, 40 twin " (str_concat (int_to_str (sub t2 t1)) (str_concat " ms, 40 twin2 " (str_concat (int_to_str (sub t3 t2)) (str_concat " ms | rmsnorm 40 attestant " (str_concat (int_to_str (sub u1 u0)) (str_concat " ms, 40 A + 40 B " (str_concat (int_to_str (sub u2 u1)) " ms")))))))))))))))
-    (print (add c1 (add c2 (add c3 (add c4 c5))))))
+    (let c7 (mul 64 (qb-same? (metal_buf_read za 0 (mul 4 drows)) (metal_buf_read zb 0 (mul 4 drows)) (mul 4 drows))))
+    (print_str (str_concat "q8 " (str_concat (int_to_str drows) (str_concat "x" (str_concat (int_to_str dcols) (str_concat ": 40 attestant " (str_concat (int_to_str (sub u1 u0)) (str_concat " ms, 40 tg4 " (str_concat (int_to_str (sub u2 u1)) " ms")))))))))
+    ; --- rmsnorm: the twin against the one-thread attestant, the layer's own norm weight ---
+    (let gh (dth-tv-h (head layer)))
+    (let na (metal_buf_alloc (mul 4 cols))) (let nb (metal_buf_alloc (mul 4 cols)))
+    (let epsBits (nth geo 8))
+    (let v0 (now_unix_ms))
+    (let r1 (qb-n (nth ps 6) (md-bind (list xh gh na) (list cols epsBits)) 1 40))
+    (let s7 (metal_sync))
+    (let v1 (now_unix_ms))
+    (let r2 (qb-n (nth ps 26) (md-bind16 (list xh gh nb) (list cols epsBits) 256 0 1 0) 1 40))
+    (let s8 (metal_sync))
+    (let v2 (now_unix_ms))
+    (let c3 (mul 4 (qb-same? (metal_buf_read na 0 (mul 4 cols)) (metal_buf_read nb 0 (mul 4 cols)) (mul 4 cols))))
+    ; --- argmax: a real forward pass (BOS at position 0) leaves real logits in bs 11 and the two-stage
+    ; answer in bs 13/14; the one-thread attestant then reads the same logits into its own pair ---
+    (let bos (gmt-u32 (nth st 10) "tokenizer.ggml.bos_token_id"))
+    (let nid (dth-forward ps bs geo (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) bos 0))
+    (let oi (metal_buf_alloc 16)) (let ov (metal_buf_alloc 16))
+    (let w0 (now_unix_ms))
+    (let r3 (qb-n (nth ps 12) (md-bind (list (nth bs 11) oi ov) (list (nth geo 7))) 1 40))
+    (let s9 (metal_sync))
+    (let w1 (now_unix_ms))
+    (let r4 (qb-n (nth ps 29) (md-bind (list (nth bs 11) (nth bs 15) (nth bs 16)) (list (nth geo 7) (dth-argmax-parts))) (dth-argmax-parts) 40))
+    (let s10 (metal_sync))
+    (let w2 (now_unix_ms))
+    (let idA (dth-u32 (metal_buf_read oi 0 4))) (let idB (dth-u32 (metal_buf_read (nth bs 13) 0 4)))
+    (let c4 (mul 8 (if (eq idA idB) (qb-same? (metal_buf_read ov 0 4) (metal_buf_read (nth bs 14) 0 4) 4) 0)))
+    (print_str (str_concat (qb-ms "rmsnorm 2048: 40 attestant " v0 v1) (str_concat (qb-ms ", 40 twin " v1 v2) (str_concat (qb-ms " | argmax 128256: 40 one-thread " w0 w1) (str_concat (qb-ms ", 40 stage-one " w1 w2) (str_concat " | BOS forward: one-thread id " (str_concat (int_to_str idA) (str_concat " two-stage id " (int_to_str idB)))))))))
+    (print (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))

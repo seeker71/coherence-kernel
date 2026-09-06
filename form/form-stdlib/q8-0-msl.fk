@@ -150,6 +150,30 @@
         (str_concat fname
             " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) { threadgroup float pv[2][512]; if (i >= rows) return; uint rowblk = uint(i) * (cols / 32u); uint nch = cols / 512u; if (t >= 32u && t < 48u) { uint ci = nch - 1u; uint tb = t - 32u; uint b = (rowblk + ci * 16u + tb) * 34u; device const ushort* hp = (device const ushort*)(qb + b); float d = float(as_type<half>(hp[0])); for (uint e = 0u; e < 32u; e += 2u) { ushort two = hp[1u + e / 2u]; uint j = ci * 512u + tb * 32u + e; pv[ci & 1u][tb * 32u + e] = (d * float(q6k_s8(int(two & 0xFFu)))) * float(x[j]); pv[ci & 1u][tb * 32u + e + 1u] = (d * float(q6k_s8(int(two >> 8)))) * float(x[j + 1u]); } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float acc = 0.0f; uint ci = nch; while (ci > 0u) { ci -= 1u; if (t >= 32u && t < 48u && ci > 0u) { uint cn = ci - 1u; uint tb = t - 32u; uint b = (rowblk + cn * 16u + tb) * 34u; device const ushort* hp = (device const ushort*)(qb + b); float d = float(as_type<half>(hp[0])); for (uint e = 0u; e < 32u; e += 2u) { ushort two = hp[1u + e / 2u]; uint j = cn * 512u + tb * 32u + e; pv[cn & 1u][tb * 32u + e] = (d * float(q6k_s8(int(two & 0xFFu)))) * float(x[j]); pv[cn & 1u][tb * 32u + e + 1u] = (d * float(q6k_s8(int(two >> 8)))) * float(x[j + 1u]); } } if (t == 0u) { uint k = 512u; while (k > 0u) { k -= 1u; acc = pv[ci & 1u][k] + acc; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (t == 0u) y[i] = acc; }")))
 
+    ; --- kernel 8: the twin that folds SIXTEEN rows a group. The serial fold is the floor of this exactness
+    ; (cols dependent adds a row), so the way to bandwidth is more rows folding at once, not a faster fold:
+    ; the sixteen lanes of simdgroup 0 each fold their own row from threadgroup memory (row stride 129 floats,
+    ; so the sixteen lanes read sixteen banks), while the 64 threads of simdgroups 1..2 load and dequantize
+    ; the NEXT 128-column step — four blocks a row, one block a thread — and hold the step after that in
+    ; registers, so a load is issued a whole step before its products are needed. Same products, same order,
+    ; `p + acc`, j counting down. Dispatch: mode 1, groups = ceil(rows / 16), 96 threads a group; rows any
+    ; (a lane past the last row folds nothing), cols a multiple of 128. ---
+    (defn q80-tg4-fold (k acc)
+        (if (lt k 0) acc
+            (q80-tg4-fold (sub k 1) (str_concat acc (str_concat "acc = pv[ci & 1u][lane][" (str_concat (int_to_str k) "u] + acc; "))))))
+    (defn q80-tg4-stage ()
+        "float d = float(as_type<half>(hb[0])); for (uint e = 0u; e < 32u; e += 2u) { ushort two = hb[1u + e / 2u]; uint j = cb * 32u + e; pv[cs & 1u][lane][sub * 32u + e] = (d * float(q6k_s8(int(two & 0xFFu)))) * float(x[j]); pv[cs & 1u][lane][sub * 32u + e + 1u] = (d * float(q6k_s8(int(two >> 8)))) * float(x[j + 1u]); } ")
+    (defn q80-matvec-tg4-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gi [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]]) { threadgroup float pv[2][16][129]; uint nb = cols / 32u; uint ns = cols / 128u; uint u = (t >= 32u) ? (t - 32u) : 0u; uint lane = (t < 32u) ? t : (u & 15u); uint sub = u / 16u; uint row = gi * 16u + lane; bool fold = (t < 32u) && (lane < 16u) && (row < rows); bool load = (t >= 32u) && (row < rows); ushort hb[17]; if (load) { uint cb = (ns - 1u) * 4u + sub; device const ushort* hp = (device const ushort*)(qb + (row * nb + cb) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp[q]; } if (load) { uint cs = ns - 1u; uint cb = cs * 4u + sub; "
+        (str_concat (q80-tg4-stage)
+        (str_concat "if (ns > 1u) { uint cb2 = (ns - 2u) * 4u + sub; device const ushort* hp2 = (device const ushort*)(qb + (row * nb + cb2) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp2[q]; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float acc = 0.0f; uint ci = ns; while (ci > 0u) { ci -= 1u; if (load && ci > 0u) { uint cs = ci - 1u; uint cb = cs * 4u + sub; "
+        (str_concat (q80-tg4-stage)
+        (str_concat "if (cs > 0u) { uint cb2 = (cs - 1u) * 4u + sub; device const ushort* hp2 = (device const ushort*)(qb + (row * nb + cb2) * 34u); for (uint q = 0u; q < 17u; q += 1u) hb[q] = hp2[q]; } } if (fold) { "
+        (str_concat (q80-tg4-fold 127 "")
+                    "} metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); } if (fold) y[row] = acc; }")))))))))
+
     ; --- the emitted forms. `q80-msl-appendix` is what a carrier that ALREADY emitted q6k-msl.fk's
     ; spine appends; `q80-msl-unit` is the self-contained form, for a caller that wants Q8_0 alone. ---
     (defn q80-msl-appendix (dname mname lname)
