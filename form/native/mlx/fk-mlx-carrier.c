@@ -394,6 +394,14 @@ long long fk_mlx_status_external(char *out, long long cap) {
     if (vs == 0) {
         vs = "";
     }
+    /* MLX's own allocator ledger (mlx/c/memory.h). Each door answers 0 on
+     * success; a door that refuses leaves its line out of the status entirely,
+     * so a reader sees the named missing door rather than a fabricated 0. */
+    size_t active = 0, peak = 0, cached = 0, limit = 0;
+    int active_ok = mlx_get_active_memory(&active);
+    int peak_ok = mlx_get_peak_memory(&peak);
+    int cache_ok = mlx_get_cache_memory(&cached);
+    int limit_ok = mlx_get_memory_limit(&limit);
     int n = snprintf(out, (size_t)cap,
         "mlx_owner=fkwu-form-cli\n"
         "mlx_linked=true\n"
@@ -410,6 +418,22 @@ long long fk_mlx_status_external(char *out, long long cap) {
         vs,
         fk_mlx_dispatch,
         fk_mlx_err);
+    if (n > 0 && (long long)n < cap && active_ok == 0) {
+        n = n + snprintf(out + n, (size_t)(cap - n),
+            "mlx_active_memory=%llu\n", (unsigned long long)active);
+    }
+    if (n > 0 && (long long)n < cap && peak_ok == 0) {
+        n = n + snprintf(out + n, (size_t)(cap - n),
+            "mlx_peak_memory=%llu\n", (unsigned long long)peak);
+    }
+    if (n > 0 && (long long)n < cap && cache_ok == 0) {
+        n = n + snprintf(out + n, (size_t)(cap - n),
+            "mlx_cache_memory=%llu\n", (unsigned long long)cached);
+    }
+    if (n > 0 && (long long)n < cap && limit_ok == 0) {
+        n = n + snprintf(out + n, (size_t)(cap - n),
+            "mlx_memory_limit=%llu\n", (unsigned long long)limit);
+    }
     mlx_string_free(ver);
     mlx_device_free(gpu);
     if (n < 0) {
