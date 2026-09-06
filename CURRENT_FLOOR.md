@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 692 rows, 680 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 693 rows, 681 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -253,6 +253,7 @@ form-glass-telemetry-membrane-band     -> 2097151
 form-glass-observation-v2-band         -> 2097151
 form-glass-wait-band                   -> 255
 form-glass-machine-band                -> 255
+form-glass-frame-work-band             -> 255
 ```
 
 `s` is the meaning view: for zero to four selected dialects (GO, PY, RS, TS —
@@ -543,12 +544,23 @@ holds no cumulative busy counter, dumped once and witnessed), and
 process -- stands beside it uncontended. events-channels 8191, sensor-rows
 2047, machine 255. (receipts/2026-09-06-every-organ-gives-into-the-glass.md)
 
+**The live glass's frame work rests inside its budget.** A projection node
+names a field once (`fgo-field-node`): `intern_node_at` records a framebuffer
+root on every call in all four arms, so re-minting the same field each frame
+grew the kernel's root list by a root per row per frame, and the loop walked
+that list quadratically every tick. The period the TICK line shows (`dt`) is
+not the work; the loop's own `frame-work-ms` and `frame-wait-ms` rows are.
+Work now holds at 11-20 of a 40 ms budget with wait 13-21 (before: 69 -> 207
+ms climbing, wait 0, a core at 100%); `form-glass-frame-work-band` 255 reads
+the loop's own cadence rows, hot page and dispatch word from a quiet child.
+(receipts/2026-09-06-the-frame-work-rests.md)
+
 ## Beliefs, ledger, drift
 
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=39 moving=0 released=85 -> 39000085
+./fkwu form/form-stdlib/release-ledger.bml -> open=39 moving=0 released=86 -> 39000086
 ./fkwu gate/drift-gates-run.bml            -> pass=2015 full=2047 refused=32 names=kernel-conformance
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
