@@ -949,6 +949,32 @@ carrier 0, host sensors 48, the live loop 1038 in 20 s -- about two a tick,
 inside the render, since all 215 published row ids are stable second to
 second. (receipts/2026-09-06-the-arena-counts-its-own-growth.md)
 
+**The body says where its own tissue lives.** `kernel_stat` answers fifteen
+more keys, all of them over state the seed already stood on. The six the
+sibling table-walker lane had already named are paid: `9` roots recorded,
+`10` nodes carrying an attribution, `11` attributions refused, `12` entered,
+`13` accepted, `14` the last node index seen -- 9 and 11 were the pair first
+on the seam line. Nine are fresh: `54/55` the root ring's standing count and
+its 2048-wide window, so a root the window overwrote is a number
+(`roots-dropped`) instead of a silence; `56` the float pool's capacity beside
+its fill at `8`, which equals the mint count at `45` exactly because the pool
+never reclaims; `57` the floats interned into the shared field; `58/59/60`
+the node population by home -- gas the private heap, water the per-pid store
+`/fg-c<pid>-*`, ice the shared field `/fg-field-*` -- exactly one home
+carrying the whole population and the other two reading a measured zero that
+says which zero it is; `61` the tissue's extent at 104 bytes a node; `62` the
+private RAM this kernel holds over it whatever the home. Witnessed on this
+host: 2,057,155 nodes in ice, 213,944,120 arena bytes, and the private side
+of the same table doubling 14,155,776 -> 54,525,952 during a 3,000-cell
+intern -- a body whose every node is ice still pays that much gas to reach
+it. With the field closed the same run fills water from zero: 3,048 nodes,
+316,992 bytes. The `k` view carries all twelve as rows. Seconds of string
+work and forty frames of the glass's own row build mint NOTHING and record
+no root; the value-node table fills at compile and at `intern_node_at`, and
+that door is the only one that records a root at all.
+`kernel-census-band` **2047**, in both homes.
+(receipts/2026-09-08-the-body-says-where-its-tissue-lives.md)
+
 **A door nobody wrote closed the glass, and the arena grew where a row was
 named.** Three governor cells called `fgov2-status-number-truth`, which was
 never defined; axiom 5 recovered the unresolved call to nothing and the
@@ -997,9 +1023,9 @@ more` tail rather than one of four, and the three model-route seams name the
 cell that stands both owners. The staged startup states the program image it
 runs on, read from the kernel's own program surface through `kernel_ast`, and
 renders the route it had already computed for the in-process call door still
-to build. Two seed words stay owed and named: `kernel_stat 11` with
-`kernel_stat 9`, and `runtime.full-program-image.call`. live 2147483647,
-staged-startup 262143. (receipts/2026-09-07-the-last-seams-close.md)
+to build. One seed word stays owed and named:
+`runtime.full-program-image.call`. live 2147483647, staged-startup 262143.
+(receipts/2026-09-07-the-last-seams-close.md)
 
 **Nothing is withheld.** The completed-turn share published one node named
 `share.previous.withheld` whenever a reading had not reconciled, so a stale
