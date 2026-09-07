@@ -298,7 +298,7 @@ two runs an hour apart differ in their seconds and agree to the step.
 form/form-stdlib/tests/bearing-census-band.fk    -> 32767
 form/form-stdlib/tests/sha256-list-floor-band.fk -> 32767
 observe/bearing-census-run.fk         -> the corpus band, 6.13M steps, 99.9% covered
-observe/bearing-census-locale-run.fk  -> the locale-row walk, 59.1M steps, 99.4% covered
+observe/bearing-census-locale-run.fk  -> the locale-row walk, 167,731 steps, 98.1% covered
 observe/bearing-census-take.fk        -> 16 rows back off glass.sensor.bearing
 ```
 
@@ -329,7 +329,33 @@ The seed's op table carries seven string natives (`str_len`, `str_eq`,
 search among them. What the lens names next is therefore a native `str_find` in
 the seed, and the caller-side half of it is `meaning-codes.bml` re-reading and
 re-splitting the same locale file 235,936 times per round to answer 238,856 key
-lookups. Neither is opened here: both are another hand's file this hour.
+lookups.
+
+**The caller-side half, opened (2026-09-08).** The cell was asked what it re-did
+and it answered exactly: **5,256** `mc-codes` calls per round, each one listing
+the locale directory and reading all three `symbol-*.rows` files again —
+**15,768** file reads and **235,936** splits to answer questions about
+thirty-six meanings whose rows total thirty-two. The quadratic came from
+`mc-resolve-all`, which rebuilt every meaning's codes to answer about one code,
+once per code, of every meaning. Form has no mutable state, so *read once* here
+is not a cache: `mc-table()` is the door that reads, and every walker visiting
+more than one meaning now takes that table as an argument and hands it down its
+own recursion; `mc-book()` is the same move one level up, so resolving is a walk
+over answers instead of a re-derivation of them. Per round the reads go
+**15,768 -> 3** and the splits **235,936 -> 38**; the census reads
+**5,214 ms / 59,076,054 steps -> 14 ms / 167,731 steps**, and the band
+**7.21-7.57 s -> 0.11 s** with the round trip alone, timed inside one process,
+**5,266/5,226/5,247 ms -> 14/13/14 ms**. `split-on` is no longer among the forty
+warmest doors of that workload; the standing name there is now `append-1`.
+Verdicts did not move: `meaning-codes-band` 127 on fkwu and 15 on the three
+walkers, measured on both sides of the change, and 175 lines of behaviour — every
+meaning's whole code line, every collision, every tongue, every perception
+symbol's round trip — byte-identical before and after. What did **not** move is
+the reading for a caller that asks about one meaning at a time: `mc-codes(sym)`
+still reads the three files, because for one question that is the work.
+`meaning-codes-table-band` (255 on fkwu, 195 on the three walkers, which carry no
+file reading and so cannot ask the four row bits) guards the shape, so a future
+edit that stops carrying the table goes red instead of slow.
 
 The sha256 heal carries the teaching that reversed its own arithmetic. Routing
 `append-1` and `append-list` to core's `append` adds a frame to a walk with no
