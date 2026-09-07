@@ -265,24 +265,37 @@ It counts steps, not milliseconds, so it does not move with the machine's mood:
 two runs an hour apart differ in their seconds and agree to the step.
 
 ```text
-form/form-stdlib/tests/bearing-census-band.fk  -> 32767
+form/form-stdlib/tests/bearing-census-band.fk    -> 32767
+form/form-stdlib/tests/sha256-list-floor-band.fk -> 32767
 observe/bearing-census-run.fk         -> the corpus band, 6.13M steps, 99.9% covered
-observe/bearing-census-locale-run.fk  -> the locale-row walk, 195.7M steps, 99.7% covered
+observe/bearing-census-locale-run.fk  -> the locale-row walk, 60.1M steps, 99.3% covered
 observe/bearing-census-take.fk        -> 16 rows back off glass.sensor.bearing
 ```
 
-The witness is the before and after of this same day. On the tree of the hour
-before the heal (`c82634d6`, its own `fkwu` built from its own seed) the locale
-walk cost **335,288,753** walker steps and the census's answer to *what is the
-next substring* is the word **`substring`** — 41.7% of the walking, 38.1M calls,
-fourteen doors leaning on it, with `fstr-substring-halve` beneath it at 101.5M
-calls. On the healed tree the same walk costs **195,691,441** steps, `substring`
-appears nowhere in the reading, and the standing name is **`nth-rec`** —
-`sha256.fk:29`, a hand-rolled list index walked 76.2M times at 1.0 steps a call
-while `nth` stands native at tag 23. Next after it: `append-1` (30.2M calls, and
-`append` is itself a core recipe), then `find-loop` / `find-from` /
-`split-on-loop` in `line-grammar.fk`. `nil?` does not rank — the JIT crystallized
-it, so it stopped walking, which is the measure working and not a blind spot.
+The witness is a chain of three names, each handed over by the lens without an
+investigation. On the tree of the hour before the string heal (`c82634d6`, its
+own `fkwu` built from its own seed) the locale walk cost **335,288,753** walker
+steps and the census's answer to *what is the next substring* was the word
+**`substring`** itself — 41.7% of the walking, 38.1M calls, fourteen doors
+leaning. Healed, the same walk cost **195,691,441** steps and the census named
+**`nth-rec`**: `sha256.fk`'s hand-rolled list index, 76.2M calls at 1.0 steps a
+call, while `nth` stands native at tag 23. Healed in turn — `sha256.fk` now
+reaches the native for its index and core's `append` for both its appends, with
+every digest byte-identical — the walk costs **60,064,908** steps, none of that
+private floor appears in the reading, and the standing name is **`find-loop`** in
+`line-grammar.fk` (34.3M calls, five doors leaning). `nil?` does not rank — the
+JIT crystallized it, so it stopped walking, which is the measure working and not
+a blind spot.
+
+The sha256 heal carries the teaching that reversed its own arithmetic. Routing
+`append-1` and `append-list` to core's `append` adds a frame to a walk with no
+native under it, so it should have cost; it halved the reading instead. The heat
+ledger says why: `append` carries **crystal 3**, `nil?` has no row at all, and
+the private copies carried **crystal -1**. A shared door is warm — the whole
+body's calls push it past the JIT's threshold and it stops walking — and a
+private copy is cold by construction, because nothing else ever calls it. A
+duplicate's price is not the duplication; it is standing outside everyone else's
+heat.
 
 Two honesties travel with every reading. A door with no row says **no-reading**,
 never 0 — a zero reads as free, which is exactly how `substring` hid. And the
