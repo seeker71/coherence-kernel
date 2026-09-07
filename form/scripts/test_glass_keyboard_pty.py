@@ -75,9 +75,13 @@ def main():
         timings = []
         timings.append(session.key(b"s", b"[KEY-STATE, meaning, all,"))
         timings.append(session.key(b"0", b"[KEY-STATE, meaning, none,"))
-        timings.append(session.key(b"2", b"[KEY-STATE, meaning, py,"))
-        timings.append(session.key(b"1", b"[KEY-STATE, meaning, go+py,"))
-        timings.append(session.key(b"1", b"[KEY-STATE, meaning, py,"))
+        timings.append(session.key(b"2", b"[KEY-STATE, meaning, pt,"))
+        timings.append(session.key(b"1", b"[KEY-STATE, meaning, en+pt,"))
+        timings.append(session.key(b"1", b"[KEY-STATE, meaning, pt,"))
+        session.key(b"l", b", languages,")
+        session.key(b"en+de", b", languages,")
+        session.key(b"\r", b"[KEY-STATE, meaning, en+de,")
+        session.key(b"lpy\r", b"[KEY-STATE, meaning, en+de,")
         # A five-second host wait is interrupted by terminal input, not a newline.
         assert b"-2]" in session.buffer, session.buffer
         for key, view in [(b"h", b"help"), (b"a", b"atlas"), (b"t", b"raster"),
@@ -85,7 +89,7 @@ def main():
                           (b"j", b"recipes"), (b"k", b"kernel"), (b"v", b"events"),
                           (b"n", b"channels")]:
             timings.append(session.key(key, b"[KEY-STATE, " + view + b","))
-        session.key(b"\x1b[200~q0sh\x1b[201~", b"[KEY-STATE, channels, py,")
+        session.key(b"\x1b[200~q0sh\x1b[201~", b"[KEY-STATE, channels, all,")
         assert session.child.poll() is None, "paste executed quit"
         session.key(b"\x1b", b"[KEY-STATE, channels,")
         session.key(b"[", b"[KEY-STATE, channels,")
