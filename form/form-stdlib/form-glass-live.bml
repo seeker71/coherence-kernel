@@ -31,6 +31,7 @@ section [form.bml] {
         field FGLNodeMoltGrowth = 262144;
         field FGLQwenRouteId = "model.qwen3.8-flash-next.ud-q2_k_xl.unsloth";
         field FGLThreeBRouteId = "model.llama-3.2-3b-instruct";
+        field FGLDualResidentDoor = "observe/native-model-dual-resident-live-run.fk";
         field FGLQwenWeightId = "weights.qwen3.8-flash-next.ud-q2_k_xl.unsloth";
         field FGLThreeBWeightId = "weights.llama-3.2-3b-instruct";
         field FGLJitPublisher = "jit.bml-demand";
@@ -262,6 +263,12 @@ section [form.bml] {
         def fgl-first-metric-in-found(index, ids, found) = if gt(len(found), 0) then found else fgl-first-metric-in(index, tail(ids));
         def fgl-number-for-in(index, ids) = fgl-metric-number(fgl-first-metric-in(index, ids));
         def fgl-evidence-for-in(index, ids) = fgl-metric-evidence(fgl-first-metric-in(index, ids));
+        // The word a zero reading means: the row's own lifecycle when that
+        // lifecycle is one of the semantic zeros (idle, empty, drained, quiet),
+        // and nothing at all when the number is not a semantic zero -- a lane
+        // never borrows a state it did not measure.
+        def fgl-metric-lane-state(metric) = if eq(len(metric), 0) then "" else if eq(fgo-present?(metric), 0) then "" else if eq(fgd-semantic-zero-state?(fgo-lifecycle(metric)), 1) then fgo-lifecycle(metric) else "";
+        def fgl-lane-state-in(index, ids) = fgl-metric-lane-state(fgl-first-metric-in(index, ids));
         def fgl-source-for-in(index, ids, door) {
             let metric = fgl-first-metric-in(index, ids);
             if or(eq(len(metric), 0), eq(fgo-present?(metric), 0)) then door else fgo-source(metric);
@@ -461,7 +468,16 @@ section [form.bml] {
                 "glass.visible.phase-census", "glass.visible.phase-census", "glass.visible.phase-census", "telemetry.token-position.capacity", "model.owner.tensor.allocated", "telemetry.channel-memberships", if ge(accepted, 0) then fgl-source-for-in(index, list("accepted"), "framebuffer-events") else fgl-source-for-in(index, list("events"), "framebuffer-events"));
             let phases = fgl-phase-triple(metrics, samples, observations);
             let point = fgd-flow-point-v4(epoch, fgd-flow-value(base, 2), fgd-flow-value(base, 3), fgd-flow-value(base, 4), fgd-flow-value(base, 5), fgd-flow-value(base, 6), fgd-flow-value(base, 7), fgd-flow-value(base, 8), fgd-flow-value(base, 9), nth(phases, 0), nth(phases, 1), nth(phases, 2), fgl-sample-kind-capacity(samples, "token-position", 0, 0), tensorObservation, fgl-sample-channel-tag-memberships(samples), accepted, evidences, sources);
-            append(take(18, point), list(fgl-number-for-in(index, list("strings")), sources, fgl-jit-fault(samples)));
+            let states = list(
+                fgl-lane-state-in(index, list("gpu-busy-us")),
+                fgl-lane-state-in(index, list("cpu-busy-us")),
+                fgl-lane-state-in(index, list("kernels-dispatches")),
+                fgl-lane-state-in(index, list("queue-depth", "queue-task-frames")),
+                fgl-lane-state-in(index, list("kernels-heat-calls")),
+                fgl-lane-state-in(index, list("cells")),
+                fgl-lane-state-in(index, list("memory-free")),
+                fgl-lane-state-in(index, list("inflight")));
+            append(take(18, point), list(fgl-number-for-in(index, list("strings")), sources, fgl-jit-fault(samples), states));
         }
 
         def fgl-monitor-sample(epoch) = fgtm-sample("process.form-glass" , fgtm-absent(), "organ", "form", "glass.monitor", "observation", "render-and-control", fgtm-absent(), fgtm-absent(), "active", fgtm-present(epoch), fgtm-present(epoch), fgtm-present(1000), fgtm-absent(), "unknown", "physical-live", "glass.monitor", list("all", "health", "primitive", "membrane"));
@@ -574,7 +590,13 @@ section [form.bml] {
         def fgl-external-publishers(publishers) = if eq(len(publishers), 0) then list() else if str_eq(head(publishers), FGLPublisher()) then fgl-external-publishers(tail(publishers)) else cons(head(publishers), fgl-external-publishers(tail(publishers)));
         def fgl-local-samples(externalSamples, epoch) = cons(fgl-monitor-sample(epoch), append(fgl-owner-derived-ledger-samples(externalSamples, epoch), externalSamples));
         def fgl-route-metric-id(fact) = str_concat("route.", nmrr-fact-id(fact));
-        def fgl-route-row(fact, label) = if eq(nmrr-fact-present?(fact), 1) then fgo-sized("model", fgl-route-metric-id(fact), label, nmrr-fact-value(fact), "ready", 1, mul(nmrr-fact-value(fact), 1000), "metal", nmrr-fact-evidence(fact), "native-model.route-readiness", if eq(nmrr-fact-value(fact), 1) then "ready" else "idle", "query-lane", nmrr-fact-reason(fact)) else fgo-unavailable("model", fgl-route-metric-id(fact), label, "ready", "metal", nmrr-fact-missing-door(fact), "query-lane", nmrr-fact-reason(fact));
+        // A route with no owner behind it is not a door nobody can open: the
+        // two model contexts these routes name stand together in one resident
+        // process, and the sensor rows already teach that an absent frame says
+        // which cell to run.  The reason carries that cell, so the seam line
+        // points at work rather than at a wall.
+        def fgl-route-absent-reason(fact) = str_concat(nmrr-fact-reason(fact), str_concat("; no model owner process is standing -- run ", FGLDualResidentDoor()));
+        def fgl-route-row(fact, label) = if eq(nmrr-fact-present?(fact), 1) then fgo-sized("model", fgl-route-metric-id(fact), label, nmrr-fact-value(fact), "ready", 1, mul(nmrr-fact-value(fact), 1000), "metal", nmrr-fact-evidence(fact), "native-model.route-readiness", if eq(nmrr-fact-value(fact), 1) then "ready" else "idle", "query-lane", nmrr-fact-reason(fact)) else fgo-unavailable("model", fgl-route-metric-id(fact), label, "ready", "metal", nmrr-fact-missing-door(fact), "query-lane", fgl-route-absent-reason(fact));
         def fgl-route-row-at(fact, label, sequence) = if eq(nmrr-fact-present?(fact), 1) then fgo-observe-row(fgl-route-row(fact, label), nmrr-fact-observed(fact), sequence) else fgo-observe-row(fgl-route-row(fact, label), -1, sequence);
         def fgl-model-route-rows(samples, epoch, sequence) {
             let qwen = nmrr-model-route-from-current-samples(samples, epoch, FGLQwenRouteId());
