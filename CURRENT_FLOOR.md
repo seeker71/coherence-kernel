@@ -236,7 +236,42 @@ repaint, and a correlated line-commit control sidecar
 carrier). Keys `h a t o m f j s k v n` choose a view, `1 2 3 4` and `0` select
 dialects, `i e c q` inspect, ask evidence, continue, abstain.
 
+The ear stands awake with the glass. The carrier writes `.hearth/ear.wanted` at
+birth unless `.hearth/ear.slept` stands — a body that hears is the default, and a
+sleeping ear is a choice someone made and it persists across every rebirth and
+every login. Key **`z`** is that choice, from the glass itself: it writes one
+marker and removes the other, and a write that did not land refuses in the
+footer's control word rather than leaving a mark that says the opposite of the
+mic. Every frame and every view opens its caption with the standing mark —
+`ear ● OPEN speaking` / `ear ○ asleep` / `ear ◌ deaf` / `ear ? unread` /
+`ear ○ closing` — read from the ear's own `ear.state` row and not from the marker
+alone, so a marker over a lane writing nothing reads deaf. The markers are
+relative paths while the gift frames are named machine-wide: a carrier, its
+sensors and its glass are one cwd, and a second body on this Mac needs a second
+hearth.
+
+Beside the mark stands the perception in symbols. The words a line closes on
+already resolve (`ear.symbols`, `ear.nodes`); `form/form-stdlib/perception-symbols.bml`
+gives the rest of the point a symbol too — the room's kind (`still voice tone
+knock noise`), the colour of its own quiet (`hiss air rumble`), the ear's
+condition (`asleep deaf silent speaking heard`) and the seven voice-manner axes
+(`cadence intonation pitch volume expression stillness resonance`) — read off the
+sensors' own row values, never invented beside them. A manner whose row carries no
+reading is not perceived and stays out of the line rather than reading as a zero,
+and neither is a row from a frame whose publisher stopped giving: witnessed
+2026-09-07, no room sensor was standing while its last frame still said `still,
+airy` from minutes before and the ear beside it was hearing a whole sentence, so a
+row the glass marks silent now reads as nothing here rather than as a room.
+`meaning-codes.bml` addresses each symbol (`mc-anchor`, eight hex) and speaks it in
+every tongue the locale rows carry (`form/form-stdlib/locale-rows/symbol-*.rows`);
+a tongue with no cell yet says `[symbol?]` instead of inventing a word.
+`observe/perception-say-run.fk` is the door: it says the whole current perception
+in any named tongue and, given a whisper code, aloud in this Mac's own mouth.
+Two rosters, one grammar: a spoken "still" stays the word, the room being still is
+a different thing, and `mc-resolve-among` walks whichever roster the caller reads in.
+
 ```text
+perception-symbols-band                -> 8191
 form-glass-live-band                   -> 2147483647
 form-glass-live-ui-band                -> 4294967295
 form-glass-dashboard-band              -> 16777215
