@@ -1,0 +1,186 @@
+//////////////////////////////////////////////////////////////////////
+//
+// aware-axes.bml — the body's sense of its own aliveness while it listens.
+//
+// Authority: form/form-stdlib/aware-axes.bml
+// preludes: form/form-stdlib/core.fk form/form-stdlib/line-grammar.fk form/form-stdlib/form-glass-observer.bml
+//
+// The ear says WHAT arrived. These axes say what the arrival was TO THE BODY:
+// whether the moment carried anything the body did not already hold, or was the
+// body running while nothing happened. Six axes, each answering one question,
+// each built only from what the body can measure about itself:
+//
+//   surprise    how far the line fell from what the body expected. The dense
+//               lane forwards the line token by token, conditioned on the
+//               PREVIOUS committed line, and counts the tokens the body's own
+//               argmax already named. Context-conditioned on purpose: without
+//               the previous line as context a repeated line scores exactly as
+//               it did the first time, and a body that cannot notice repetition
+//               cannot tell aliveness from a loop.
+//   margin      the same in logit units: how far below the body's own best the
+//               word that actually came sat. Zero means the body would have
+//               said this word itself.
+//   contest     how many of the vocabulary's 512 partitions still held a
+//               candidate within one logit of the winner. One means the body
+//               was sure; many means it was hedging. A proxy for the
+//               distribution's shape, not its entropy -- entropy over 128 256
+//               logits would cost a half-megabyte readback and a fold per
+//               token, and this cell does not pretend to have paid it.
+//   novelty     pieces per word from the body's OWN vocabulary. A word the
+//               body holds whole costs one piece; a word it has never held
+//               shatters into bytes. 100 is ordinary speech; 400 is a stranger.
+//   own         how many of the line's words the body has itself minted --
+//               matched against the words its corpus named fresh. This is the
+//               narrow novelty: not "is this a word" but "is this OUR word".
+//   coherence   how many of the line's words the vocabulary holds whole at all.
+//               The floor under novelty: is this language, or is it noise?
+//   recurrence  how many times this exact line has already been committed in
+//               this session, and the gap in ms since the last commit.
+//
+// And one crossing, because a single axis can be counterfeited: surprise alone
+// is highest for nonsense, coherence alone is highest for a canned line.
+//
+//   alive = surprise * coherence / 1000
+//
+// -- high only when the line was BOTH unexpected and language the body holds.
+// Every axis answers -1 when it was not measured; a -1 is the axis saying so,
+// never a zero pretending to be a reading.
+//
+// The arithmetic here is pure: it takes counts and answers rows. The dense
+// walk that produces the counts is aware-dense.bml; the sensor that gives the
+// rows into the glass is observe/form-glass-aware-live.fk. Proven by
+// form/form-stdlib/tests/aware-axes-band.fk.
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormAwareAxesAuthority {
+        field AWXAuthorityPath = "form/form-stdlib/aware-axes.bml";
+        field AWXAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class FormAwareAxes {
+        field AWXSensor = "aware";
+        field AWXDomain = "aware";
+        field AWXSource = "aware-organ";
+        field AWXChannel = "aware";
+        field AWXCadenceMs = 1000;
+        field AWXContestBand = 1.0;
+        field AWXHistoryKeep = 64;
+        ref awx-authority = FormAwareAxesAuthority;
+        thought awx-law = list("an axis not measured says -1", "surprise is conditioned or it cannot see repetition", "one axis can be counterfeited, a crossing cannot", "the proxy names itself a proxy");
+
+        // ---- words: the line as the body's own lowercase tokens ----------------
+        def awx-lower-byte(b) = if and(ge(b, 65), le(b, 90)) then add(b, 32) else b;
+        def awx-word-byte?(b) = if and(ge(b, 97), le(b, 122)) then 1 else if and(ge(b, 65), le(b, 90)) then 1 else if and(ge(b, 48), le(b, 57)) then 1 else if eq(b, 39) then 1 else 0;
+        def awx-words-go(text, i, n, cur, acc) {
+            let b = if ge(i, n) then 0 else str_byte_at(text, i);
+            let keep = if ge(i, n) then 0 else awx-word-byte?(b);
+            let next = if eq(keep, 1) then str_concat(cur, byte_to_str(awx-lower-byte(b))) else "";
+            let closed = if and(eq(keep, 0), gt(str_len(cur), 0)) then cons(cur, acc) else acc;
+            if ge(i, n) then closed else awx-words-go(text, add(i, 1), n, next, closed);
+        }
+        def awx-words(text) = reverse(awx-words-go(text, 0, str_len(text), "", list()));
+
+        // ---- membership: is this word one the body has itself named? ----------
+        def awx-in?(vocab, w) = if eq(len(vocab), 0) then 0 else if str_eq(head(vocab), w) then 1 else awx-in?(tail(vocab), w);
+        def awx-held-go(words, vocab, acc) = if eq(len(words), 0) then acc else awx-held-go(tail(words), vocab, add(acc, awx-in?(vocab, head(words))));
+        def awx-held(words, vocab) = awx-held-go(words, vocab, 0);
+
+        // ---- recurrence: this exact line, already committed, this session -----
+        def awx-recurrence-go(hist, line, acc) = if eq(len(hist), 0) then acc else awx-recurrence-go(tail(hist), line, if str_eq(head(hist), line) then add(acc, 1) else acc);
+        def awx-recurrence(hist, line) = awx-recurrence-go(hist, line, 0);
+        def awx-keep-go(hist, n, acc) = if or(eq(len(hist), 0), le(n, 0)) then reverse(acc) else awx-keep-go(tail(hist), sub(n, 1), cons(head(hist), acc));
+        def awx-remember(hist, line) = awx-keep-go(cons(line, hist), AWXHistoryKeep(), list());
+
+        // ---- the axes ---------------------------------------------------------
+        def awx-permille(part, whole) = if le(whole, 0) then -1 else div(mul(part, 1000), whole);
+        def awx-surprise(hits, scored) = if le(scored, 0) then -1 else sub(1000, awx-permille(hits, scored));
+        def awx-margin(sumMargin, scored) = if le(scored, 0) then -1 else div(sumMargin, scored);
+        def awx-contest(sumContest, scored) = if le(scored, 0) then -1 else div(sumContest, scored);
+        def awx-novelty(tokens, words) = if le(words, 0) then -1 else div(mul(tokens, 100), words);
+        def awx-coherence(whole, words) = if le(words, 0) then -1 else awx-permille(whole, words);
+        def awx-alive(surprise, coherence) = if or(lt(surprise, 0), lt(coherence, 0)) then -1 else div(mul(surprise, coherence), 1000);
+
+        // ---- the reading: everything one committed line measured ---------------
+        // 0 line 1 ctx 2 hits 3 scored 4 sumMargin100 5 maxMargin100 6 sumContest
+        // 7 tokens 8 words 9 whole 10 own 11 recurrence 12 denseMs 13 gapMs 14 vocabMs
+        // 15 tokenizeMs
+        // The three costs are kept APART because they are three lanes of three different
+        // magnitudes: denseMs is GPU forwards, tokenizeMs is the line cut into pieces once,
+        // vocabMs is the longest-match walk repeated per word. One number over all three
+        // hid, on this cell's first reading, that the transformer was the CHEAP part.
+        def awx-reading(line, ctx, hits, scored, sumMargin, maxMargin, sumContest, tokens, words, whole, own, recurrence, denseMs, gap, vocabMs, tokenizeMs) = list(line, ctx, hits, scored, sumMargin, maxMargin, sumContest, tokens, words, whole, own, recurrence, denseMs, gap, vocabMs, tokenizeMs);
+        def awx-reading-empty() = awx-reading("", "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        def awx-r-line(r) = nth(r, 0);
+        def awx-r-ctx(r) = nth(r, 1);
+        def awx-r-hits(r) = nth(r, 2);
+        def awx-r-scored(r) = nth(r, 3);
+        def awx-r-sum-margin(r) = nth(r, 4);
+        def awx-r-max-margin(r) = nth(r, 5);
+        def awx-r-sum-contest(r) = nth(r, 6);
+        def awx-r-tokens(r) = nth(r, 7);
+        def awx-r-words(r) = nth(r, 8);
+        def awx-r-whole(r) = nth(r, 9);
+        def awx-r-own(r) = nth(r, 10);
+        def awx-r-recurrence(r) = nth(r, 11);
+        def awx-r-dense-ms(r) = nth(r, 12);
+        def awx-r-gap(r) = nth(r, 13);
+        def awx-r-vocab-ms(r) = nth(r, 14);
+        def awx-r-tokenize-ms(r) = nth(r, 15);
+        def awx-r-ms(r) = add(awx-r-dense-ms(r), add(awx-r-vocab-ms(r), awx-r-tokenize-ms(r)));
+        def awx-r-empty?(r) = if eq(str_len(awx-r-line(r)), 0) then 1 else 0;
+
+        // the reading's own axis values, named once so a row and a band read the same number
+        def awx-r-surprise(r) = awx-surprise(awx-r-hits(r), awx-r-scored(r));
+        def awx-r-margin(r) = awx-margin(awx-r-sum-margin(r), awx-r-scored(r));
+        def awx-r-contest(r) = awx-contest(awx-r-sum-contest(r), awx-r-scored(r));
+        def awx-r-novelty(r) = awx-novelty(awx-r-tokens(r), awx-r-words(r));
+        def awx-r-coherence(r) = awx-coherence(awx-r-whole(r), awx-r-words(r));
+        def awx-r-alive(r) = awx-alive(awx-r-surprise(r), awx-r-coherence(r));
+        def awx-r-per-token-ms(r) = if le(awx-r-scored(r), 0) then -1 else div(awx-r-dense-ms(r), awx-r-scored(r));
+        def awx-r-per-word-ms(r) = if le(awx-r-words(r), 0) then -1 else div(awx-r-vocab-ms(r), awx-r-words(r));
+
+        // ---- rows: the axes as the glass's own eighteen-field shape -------------
+        def awx-int-row(id, label, value, unit, note) = fgo-int(AWXDomain(), id, label, value, unit, 0, "organ", "physical-live", AWXSource(), "live", AWXChannel(), note);
+        def awx-text-row(id, label, value, note) = fgo-text(AWXDomain(), id, label, value, "organ", "physical-live", AWXSource(), "live", AWXChannel(), note);
+
+        def awx-cat(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), awx-cat(tail(parts)));
+        def awx-alive-word(a) = if lt(a, 0) then "not measured" else if ge(a, 400) then "wide awake: unexpected and understood" else if ge(a, 150) then "awake" else if ge(a, 40) then "familiar" else "the body could have said this itself";
+
+        def awx-rows(r) {
+            let surprise = awx-r-surprise(r);
+            let coherence = awx-r-coherence(r);
+            list(
+                awx-text-row("aware.line", "the line the body weighed", awx-r-line(r), "the committed line, off the ear's live path"),
+                awx-text-row("aware.context", "what it was weighed against", awx-r-ctx(r), "the previous committed line; surprise is conditioned on it, so a repeat can fall"),
+                awx-int-row("aware.surprise", "how far it fell from what the body expected", surprise, "per-mille", awx-cat(list("per-mille of ", int_to_str(awx-r-scored(r)), " tokens the body's own argmax did NOT already name; 0 = the body would have said every word of this itself"))),
+                awx-int-row("aware.margin", "how far below its own best", awx-r-margin(r), "centi-logits", awx-cat(list("mean gap between the body's top logit and the logit of the word that actually came; peak ", int_to_str(awx-r-max-margin(r)), " centi-logits"))),
+                awx-int-row("aware.contest", "candidates still in the running", awx-r-contest(r), "partitions", "mean count of the vocabulary's 512 argmax partitions holding a value within one logit of the winner; 1 = sure, many = hedging. A proxy for the distribution's shape, NOT its entropy -- entropy would cost a half-megabyte readback and a 128k fold per token, unpaid here"),
+                awx-int-row("aware.novelty", "pieces per word", awx-r-novelty(r), "centi-pieces", awx-cat(list(int_to_str(awx-r-tokens(r)), " tokens over ", int_to_str(awx-r-words(r)), " words; 100 = every word held whole, 400 = a stranger shattering into bytes"))),
+                awx-int-row("aware.own", "words the body itself minted", awx-r-own(r), "words", "words of this line that appear as a fresh word in the body's own distillation corpus -- not 'is this a word' but 'is this OUR word'"),
+                awx-int-row("aware.coherence", "words the vocabulary holds whole", coherence, "per-mille", "the floor under novelty: is this language at all, or noise wearing a sentence's shape"),
+                awx-int-row("aware.recurrence", "times heard before, this session", awx-r-recurrence(r), "times", "exact line matches already committed; the axis that catches a loop, which context-free surprise cannot"),
+                awx-int-row("aware.gap", "since the last committed line", awx-r-gap(r), "ms", "the body's own rhythm of arrival"),
+                awx-int-row("aware.alive", "unexpected AND understood", awx-r-alive(r), "index", awx-cat(list(awx-alive-word(awx-r-alive(r)), " -- surprise x coherence / 1000; one axis alone can be counterfeited (nonsense is all surprise, a canned line is all coherence), the crossing cannot"))),
+                awx-int-row("aware.cost", "what this moment of awareness spent", awx-r-ms(r), "ms", "the whole reading, off the live path; the ear's own line is never delayed for this"),
+                awx-int-row("aware.cost.surprise", "what surprise, margin and contest cost", awx-r-dense-ms(r), "ms", awx-cat(list(int_to_str(awx-r-per-token-ms(r)), " ms per scored token: one dense forward each on the shared GPU. Margin and contest ride this pass for free -- they are readbacks of work the argmax already did"))),
+                awx-int-row("aware.cost.tokenize", "cutting the line into pieces at all", awx-r-tokenize-ms(r), "ms", "one longest-match pass over the line, the shared prerequisite of surprise and novelty. It walks the whole vocabulary per position, so it costs MORE than running the transformer over the same line -- the body's own measurement of itself, 2026-09-07"),
+                awx-int-row("aware.cost.vocab", "what coherence cost on top", awx-r-vocab-ms(r), "ms", awx-cat(list(int_to_str(awx-r-per-word-ms(r)), " ms per word: the same walk once per word, cached per process. Cold it is the most expensive axis here; warm it is free, because speech repeats its words"))),
+                awx-int-row("aware.tokens", "tokens forwarded to know it", awx-r-tokens(r), "tokens", "one dense forward per token of context and line, on the shared GPU"));
+        }
+
+        // ---- the floor this scoring stands on, and today's weather -------------
+        def awx-floor-rows(gbs100, tflops100, weather, openMs) = list(
+            awx-int-row("aware.floor.bandwidth", "the memory floor under the scoring lane", gbs100, "centi-GB/s", "measured here and now by reading a real blob through the handle door; the surprise lane is memory-bound and cannot beat this"),
+            awx-int-row("aware.floor.arithmetic", "the arithmetic floor", tflops100, "centi-TFLOPS", "six independent fused-multiply-add chains, measured on this machine at this hour"),
+            awx-text-row("aware.floor.weather", "the machine this reading was taken on", weather, "a reading taken on a taxed machine is honest about being taxed"),
+            awx-int-row("aware.floor.open", "standing the scoring lane up", openMs, "ms", "one header walk and one binding, paid once for the process's whole life -- never per line"));
+
+        def awx-waiting-rows() = list(
+            awx-text-row("aware.line", "the line the body weighed", "no committed line yet", "the axes wait for the ear to close a line; nothing is measured, so nothing is claimed"),
+            awx-int-row("aware.surprise", "how far it fell from what the body expected", -1, "per-mille", "not measured"),
+            awx-int-row("aware.alive", "unexpected AND understood", -1, "index", "not measured"));
+    }
+    0;
+}
