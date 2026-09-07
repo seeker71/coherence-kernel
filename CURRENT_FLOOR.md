@@ -245,6 +245,50 @@ under test, plus every byte offset of the real locale rows. Measured on a kernel
 carrying only the flooring half of the wound it answers 3455 — bits 128 and 512
 are exactly what separates a byte cut from a floored one.
 
+## What stands on a door
+
+`form/form-stdlib/bearing-census.bml` answers the question `substring` left
+behind (corpus row 1345, keeldrag): every band says a door ANSWERS RIGHTLY and
+none says how much of the body stands on it. Three readings off two ledgers the
+seed already keeps — `kernel_hot_rows`' per-defn walker heat, and the source each
+hot row points at. **calls** is the times the walker entered the defn; **bearing**
+is that plus every door reachable from it, closed over a call graph read out of
+the bodies themselves (boundary-checked mentions, comments cut first, so
+`substring` inside `fstr-substring-loop` is not an edge); **leaning** is the same
+graph read upward. Beside them **per-call** separates a cheap door called a
+million times from an expensive door called twice, and the op table says whether
+a native of that name — or of that stem, `nth-rec` → `nth` — already stands, so a
+hot native is never named a recipe to heal. `bearing-census-band` **32767** over
+hand-written rows, and it holds on a kernel where `substring` is still a recipe.
+
+It counts steps, not milliseconds, so it does not move with the machine's mood:
+two runs an hour apart differ in their seconds and agree to the step.
+
+```text
+form/form-stdlib/tests/bearing-census-band.fk  -> 32767
+observe/bearing-census-run.fk         -> the corpus band, 6.13M steps, 99.9% covered
+observe/bearing-census-locale-run.fk  -> the locale-row walk, 195.7M steps, 99.7% covered
+observe/bearing-census-take.fk        -> 16 rows back off glass.sensor.bearing
+```
+
+The witness is the before and after of this same day. On the tree of the hour
+before the heal (`c82634d6`, its own `fkwu` built from its own seed) the locale
+walk cost **335,288,753** walker steps and the census's answer to *what is the
+next substring* is the word **`substring`** — 41.7% of the walking, 38.1M calls,
+fourteen doors leaning on it, with `fstr-substring-halve` beneath it at 101.5M
+calls. On the healed tree the same walk costs **195,691,441** steps, `substring`
+appears nowhere in the reading, and the standing name is **`nth-rec`** —
+`sha256.fk:29`, a hand-rolled list index walked 76.2M times at 1.0 steps a call
+while `nth` stands native at tag 23. Next after it: `append-1` (30.2M calls, and
+`append` is itself a core recipe), then `find-loop` / `find-from` /
+`split-on-loop` in `line-grammar.fk`. `nil?` does not rank — the JIT crystallized
+it, so it stopped walking, which is the measure working and not a blind spot.
+
+Two honesties travel with every reading. A door with no row says **no-reading**,
+never 0 — a zero reads as free, which is exactly how `substring` hid. And the
+census carries its own **coverage**: the snapshot is the warmest forty doors, and
+the row says what share of the whole process's walking that was.
+
 ## The JIT string crossing
 
 `form-lower.fk` embeds compile-time strings and carries a runtime haystack and

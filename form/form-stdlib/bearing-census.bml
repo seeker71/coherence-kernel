@@ -1,0 +1,279 @@
+//////////////////////////////////////////////////////////////////////
+//
+// bearing-census.bml — how much of the body stands on a given door.
+//
+// Authority: form-stdlib/bml/bearing-census.bml
+// preludes: form/form-stdlib/core.fk
+// Proven by: form-stdlib/tests/bearing-census-band.fk
+//
+// The body already knows whether each door ANSWERS RIGHTLY: every band says
+// so. What it had no measure of, until this cell, is how much of its own
+// walking happens AT OR BENEATH a door — so a door that answers rightly and
+// costs the world stayed invisible for as long as its correctness held.
+// `substring` walked at 4.59 MB/s underneath every parser, frame reader and
+// row walker in this tree for months, and was found by tripping over it
+// (corpus row 1345, keeldrag). The question that row left open is the one
+// this cell answers with a number: which door is next.
+//
+// Three readings, from two ledgers the seed already keeps:
+//
+//   calls    — kernel_hot_rows heat: the times the WALKER entered this defn.
+//              A defn the JIT crystallized stops accruing here, because it
+//              stopped walking; that is the measure working, not a blind spot.
+//   bearing  — calls at this door plus the calls of every door reachable from
+//              it. A leaf door three levels down that does the real per-byte
+//              work carries its own weight AND its helpers'; a thin door that
+//              only forwards carries what it forwards to.
+//   leaning  — how many distinct doors reach this one. Two callers make a
+//              door carry both their weights; this is the count of what would
+//              break, or speed up, if the door changed.
+//
+// And the two that turn a reading into a decision:
+//
+//   per-call — bearing per invocation, x100. A cheap door called a million
+//              times and an expensive door called twice have the same bearing
+//              and want opposite repairs; only this tells them apart.
+//   remedy   — a door whose NAME the op table already carries as a native is
+//              never "mint a native": the native stands, and the walking that
+//              still reaches the recipe is a routing wound. A door with no
+//              native twin and real drag is the next substring.
+//
+// The graph is drawn from the source the hot rows themselves point at: every
+// row carries its unit and line, so the defn's own body is read back off disk
+// and the names it mentions become its callees. Mentions are boundary-checked,
+// so `substring` inside `fstr-substring-loop` is not an edge.
+//
+// Every number here is honest about its own absence. A door with no row says
+// -1 (no reading), never 0 (free) — the distinction the whole measure exists
+// for. And the census carries its own coverage: the share of the body's
+// walking the snapshot actually saw, so a top-N reading cannot pass itself
+// off as the whole body.
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class BearingCensusAuthority {
+        field BCSAuthorityPath = "form/form-stdlib/bml/bearing-census.bml";
+        field BCSAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class BearingCensus {
+        field BCSSensor = "bearing";
+        field BCSCadenceMs = 5000;
+        field BCSScale = 10000;
+        field BCSTopN = 40;
+        field BCSBodyLines = 40;
+        field BCSNoReading = -1;
+        ref bcs-authority = BearingCensusAuthority;
+        thought bcs-pattern = list("no-reading-is-not-free", "bearing-includes-what-it-calls", "a-native-is-not-a-recipe-to-heal", "coverage-travels-with-the-census", "the-graph-comes-from-the-source-the-row-points-at");
+
+        // --- the hot row, as kernel_hot_rows gives it -------------------------
+        // list(heat, name, unit, line, col, boxes, unboxes, crystal, spare)
+        def bcs-heat(r) = if lt(len(r), 2) then 0 else nth(r, 0);
+        def bcs-name(r) = if lt(len(r), 2) then "" else nth(r, 1);
+        def bcs-unit(r) = if lt(len(r), 3) then "" else nth(r, 2);
+        def bcs-line(r) = if lt(len(r), 4) then 0 else nth(r, 3);
+        def bcs-crystal(r) = if lt(len(r), 8) then 0 else nth(r, 7);
+
+        def bcs-names(rows) = if eq(len(rows), 0) then list() else cons(bcs-name(head(rows)), bcs-names(tail(rows)));
+        def bcs-member?(names, n) = if eq(len(names), 0) then 0 else if str_eq(head(names), n) then 1 else bcs-member?(tail(names), n);
+        def bcs-row-of(rows, name) = if eq(len(rows), 0) then list() else if str_eq(bcs-name(head(rows)), name) then head(rows) else bcs-row-of(tail(rows), name);
+        // measured or not is the first question asked of any door: an absent row is a missing
+        // reading, and every number downstream of it answers -1 rather than a confident zero
+        def bcs-measured?(rows, name) = if eq(len(bcs-row-of(rows, name)), 0) then 0 else 1;
+        def bcs-heat-of(rows, name) = if eq(bcs-measured?(rows, name), 0) then 0 else bcs-heat(bcs-row-of(rows, name));
+        def bcs-total-heat(rows, acc) = if eq(len(rows), 0) then acc else bcs-total-heat(tail(rows), add(acc, bcs-heat(head(rows))));
+
+        // --- the call graph: edges are list(caller, callee) --------------------
+        def bcs-callees(edges, name, acc) = if eq(len(edges), 0) then acc else bcs-callees(tail(edges), name, if str_eq(nth(head(edges), 0), name) then cons(nth(head(edges), 1), acc) else acc);
+        // the reachable set INCLUDES the door itself, so bearing counts its own steps first;
+        // the seen list is the cycle guard, so a recursive door is walked once, not forever
+        def bcs-reach-go(edges, frontier, seen) = if eq(len(frontier), 0) then seen else bcs-reach-step(edges, head(frontier), tail(frontier), seen);
+        def bcs-reach-step(edges, n, rest, seen) = if eq(bcs-member?(seen, n), 1) then bcs-reach-go(edges, rest, seen) else bcs-reach-go(edges, append(bcs-callees(edges, n, list()), rest), cons(n, seen));
+        def bcs-reach(edges, name) = bcs-reach-go(edges, list(name), list());
+        // every door's reach is computed once and held, so leaning is a membership walk
+        // over short lists instead of N squared closures
+        def bcs-reaches(edges, names) = if eq(len(names), 0) then list() else cons(list(head(names), bcs-reach(edges, head(names))), bcs-reaches(edges, tail(names)));
+        def bcs-reach-of(reaches, name) = if eq(len(reaches), 0) then list() else if str_eq(nth(head(reaches), 0), name) then nth(head(reaches), 1) else bcs-reach-of(tail(reaches), name);
+
+        // --- the three readings ------------------------------------------------
+        def bcs-sum-heat(rows, names, acc) = if eq(len(names), 0) then acc else bcs-sum-heat(rows, tail(names), add(acc, bcs-heat-of(rows, head(names))));
+        def bcs-bearing(rows, reaches, name) = if eq(bcs-measured?(rows, name), 0) then BCSNoReading() else bcs-sum-heat(rows, bcs-reach-of(reaches, name), 0);
+        def bcs-leaning(reaches, target, acc) = if eq(len(reaches), 0) then acc else bcs-leaning(tail(reaches), target, if and(not(str_eq(nth(head(reaches), 0), target)), eq(bcs-member?(nth(head(reaches), 1), target), 1)) then add(acc, 1) else acc);
+        def bcs-share-bp(bearing, total) = if or(le(total, 0), lt(bearing, 0)) then BCSNoReading() else div(mul(bearing, BCSScale()), total);
+        def bcs-per-call(bearing, calls) = if or(le(calls, 0), lt(bearing, 0)) then BCSNoReading() else div(mul(bearing, 100), calls);
+        // the census's own honesty: the share of the body's whole walking this snapshot saw.
+        // A top-N reading that cannot say what it missed is a reading that reads its own edge as the world
+        def bcs-coverage-bp(seen, walked) = if le(walked, 0) then BCSNoReading() else div(mul(seen, BCSScale()), walked);
+
+        // --- the natives the seed already carries ------------------------------
+        // the op table is a row set in text: every native stands as `{ "name",` on its own line.
+        // One forward pass lifts every name; membership is then str_eq, not another scan per door.
+        def bcs-open() = str_concat("{ ", byte_to_str(34));
+        def bcs-native-names-go(table, from, acc) = bcs-native-names-at(table, str_find(table, bcs-open(), from), acc);
+        def bcs-native-names-at(table, at, acc) = if lt(at, 0) then acc else bcs-native-names-close(table, add(at, str_len(bcs-open())), acc);
+        def bcs-native-names-close(table, i, acc) = bcs-native-names-take(table, i, str_find(table, byte_to_str(34), i), acc);
+        def bcs-native-names-take(table, i, close, acc) = if lt(close, 0) then acc else bcs-native-names-go(table, add(close, 1), cons(substring(table, i, close), acc));
+        def bcs-native-names(table) = bcs-native-names-go(table, 0, list());
+        def bcs-native?(natives, name) = bcs-member?(natives, name);
+
+        // A door can carry a native's MEANING under another name. sha256.fk walks its own
+        // `nth-rec` seventy-six million times on a locale read while `nth` stands native at
+        // tag 23; nothing in the name says so, and every band it sits under is green. So the
+        // stem — the name with one working suffix cut, or the file's own prefix — is held
+        // against the op table, and a match is reported as a TWIN and not as proof: it names
+        // the native to check against, and the reader decides whether the meanings are one.
+        def bcs-ends-with?(s, suf) = if gt(str_len(suf), str_len(s)) then 0 else if str_eq(substring(s, sub(str_len(s), str_len(suf)), str_len(s)), suf) then 1 else 0;
+        def bcs-cut-suffix(s, suf) = if eq(bcs-ends-with?(s, suf), 1) then substring(s, 0, sub(str_len(s), str_len(suf))) else s;
+        def bcs-cut-prefix(s, pre) = if eq(bcs-starts-with?(s, 0, pre), 1) then substring(s, str_len(pre), str_len(s)) else s;
+        def bcs-suffixes() = list("-rec", "-loop", "-go", "-acc", "-next", "-1", "-here", "-in");
+        def bcs-cut-any(s, sufs) = if eq(len(sufs), 0) then s else bcs-cut-any-next(s, sufs, bcs-cut-suffix(s, head(sufs)));
+        def bcs-cut-any-next(s, sufs, cut) = if not(str_eq(cut, s)) then cut else bcs-cut-any(s, tail(sufs));
+        def bcs-stem(name) = bcs-cut-prefix(bcs-cut-any(name, bcs-suffixes()), "fstr-");
+        def bcs-twin(natives, name) = bcs-twin-of(natives, name, bcs-stem(name));
+        def bcs-twin-of(natives, name, stem) = if str_eq(stem, name) then "" else if eq(bcs-member?(natives, stem), 1) then stem else "";
+        def bcs-twinned?(natives, name) = if gt(str_len(bcs-twin(natives, name)), 0) then 1 else 0;
+
+        // --- what the reading asks for -----------------------------------------
+        // a door the op table already carries is never "mint a native": the native stands,
+        // and walking that still reaches the recipe is a routing wound, a different repair
+        def bcs-kind(natives, rows, name) = if eq(bcs-measured?(rows, name), 0) then "no-reading" else if eq(bcs-native?(natives, name), 1) then "shadowed" else if gt(bcs-crystal(bcs-row-of(rows, name)), 0) then "crystal" else if eq(bcs-twinned?(natives, name), 1) then "twinned" else "recipe";
+        def bcs-remedy(natives, rows, name) = if eq(bcs-measured?(rows, name), 0) then "no-reading" else if eq(bcs-native?(natives, name), 1) then "route-to-the-native-that-stands" else if gt(bcs-crystal(bcs-row-of(rows, name)), 0) then "stands-crystallized" else if eq(bcs-twinned?(natives, name), 1) then str_concat("check against the native ", bcs-twin(natives, name)) else "mint-a-native";
+        // a twinned door still carries its cost, so it stays in the ranking; only its remedy
+        // changes, from minting a native to checking the one that already stands
+        def bcs-heal?(natives, rows, name) = if str_eq(bcs-remedy(natives, rows, name), "mint-a-native") then 1 else if str_eq(bcs-kind(natives, rows, name), "twinned") then 1 else 0;
+        // drag ranks the heal candidates only. Share alone puts a hot root on top; leaning alone
+        // puts a tiny shared helper on top; the product is the door whose cost is large AND spread
+        // across many callers -- the shape substring wore
+        def bcs-drag(shareBp, leaning, heal) = if or(eq(heal, 0), lt(shareBp, 0)) then 0 else mul(shareBp, add(leaning, 1));
+
+        // --- a census cell ------------------------------------------------------
+        // list(name, calls, bearing, shareBp, perCall, leaning, kind, remedy, drag, unit, line)
+        def bcs-cell(rows, reaches, natives, total, name) = bcs-cell-with(rows, natives, name, bcs-heat-of(rows, name), bcs-bearing(rows, reaches, name), total, bcs-leaning(reaches, name, 0));
+        def bcs-cell-with(rows, natives, name, calls, bearing, total, leaning) = bcs-cell-at(rows, natives, name, calls, bearing, leaning, bcs-share-bp(bearing, total));
+        def bcs-cell-at(rows, natives, name, calls, bearing, leaning, shareBp) = list(name, calls, bearing, shareBp, bcs-per-call(bearing, calls), leaning, bcs-kind(natives, rows, name), bcs-remedy(natives, rows, name), bcs-drag(shareBp, leaning, bcs-heal?(natives, rows, name)), bcs-unit(bcs-row-of(rows, name)), bcs-line(bcs-row-of(rows, name)));
+        def bcs-c-name(c) = if eq(len(c), 0) then "" else nth(c, 0);
+        def bcs-c-calls(c) = if eq(len(c), 0) then BCSNoReading() else nth(c, 1);
+        def bcs-c-bearing(c) = if eq(len(c), 0) then BCSNoReading() else nth(c, 2);
+        def bcs-c-share(c) = if eq(len(c), 0) then BCSNoReading() else nth(c, 3);
+        def bcs-c-per-call(c) = if eq(len(c), 0) then BCSNoReading() else nth(c, 4);
+        def bcs-c-leaning(c) = if eq(len(c), 0) then BCSNoReading() else nth(c, 5);
+        def bcs-c-kind(c) = if eq(len(c), 0) then "no-reading" else nth(c, 6);
+        def bcs-c-remedy(c) = if eq(len(c), 0) then "no-reading" else nth(c, 7);
+        def bcs-c-drag(c) = if eq(len(c), 0) then 0 else nth(c, 8);
+        def bcs-c-unit(c) = if eq(len(c), 0) then "" else nth(c, 9);
+        def bcs-c-line(c) = if eq(len(c), 0) then 0 else nth(c, 10);
+
+        def bcs-census-over(rows, reaches, natives, total, names) = if eq(len(names), 0) then list() else cons(bcs-cell(rows, reaches, natives, total, head(names)), bcs-census-over(rows, reaches, natives, total, tail(names)));
+        def bcs-census(rows, edges, natives) = bcs-census-over(rows, bcs-reaches(edges, bcs-names(rows)), natives, bcs-total-heat(rows, 0), bcs-names(rows));
+        def bcs-of(census, name) = if eq(len(census), 0) then list() else if str_eq(bcs-c-name(head(census)), name) then head(census) else bcs-of(tail(census), name);
+
+        // --- the standing name ---------------------------------------------------
+        def bcs-insert(c, sorted) = if eq(len(sorted), 0) then list(c) else if ge(bcs-c-drag(c), bcs-c-drag(head(sorted))) then cons(c, sorted) else cons(head(sorted), bcs-insert(c, tail(sorted)));
+        def bcs-sort(census) = if eq(len(census), 0) then list() else bcs-insert(head(census), bcs-sort(tail(census)));
+        def bcs-worst-go(census, held) = if eq(len(census), 0) then held else bcs-worst-go(tail(census), if gt(bcs-c-drag(head(census)), bcs-c-drag(held)) then head(census) else held);
+        def bcs-worst(census) = bcs-worst-go(census, list());
+        // the answer to "what is the next substring?" as one name a glass row can carry.
+        // No candidate is a whole answer, not an empty one: a body walking only natives has no next substring
+        def bcs-worst-name(census) = bcs-worst-name-of(bcs-worst(census));
+        def bcs-worst-name-of(c) = if eq(len(c), 0) then "no-reading" else if eq(bcs-c-drag(c), 0) then "no-recipe-carries-drag" else bcs-c-name(c);
+        def bcs-take(l, n) = if or(le(n, 0), eq(len(l), 0)) then list() else cons(head(l), bcs-take(tail(l), sub(n, 1)));
+        def bcs-heal-list(census) = if eq(len(census), 0) then list() else if gt(bcs-c-drag(head(census)), 0) then cons(head(census), bcs-heal-list(tail(census))) else bcs-heal-list(tail(census));
+
+        // --- the graph, read off the source each hot row points at -----------------
+        def bcs-split-go(text, sep, from, acc) = bcs-split-at(text, sep, from, acc, str_find(text, sep, from));
+        def bcs-split-at(text, sep, from, acc, at) = if lt(at, 0) then reverse(cons(substring(text, from, str_len(text)), acc)) else bcs-split-go(text, sep, add(at, str_len(sep)), cons(substring(text, from, at), acc));
+        def bcs-split(text, sep) = if eq(str_len(text), 0) then list() else bcs-split-go(text, sep, 0, list());
+        def bcs-lines(text) = bcs-split(text, byte_to_str(10));
+        def bcs-nth-line(lines, n) = if or(lt(n, 1), gt(n, len(lines))) then "" else nth(lines, sub(n, 1));
+
+        def bcs-space?(b) = if eq(b, 32) then 1 else if eq(b, 9) then 1 else 0;
+        def bcs-skip-spaces(s, i) = if ge(i, str_len(s)) then i else if eq(bcs-space?(str_byte_at(s, i)), 1) then bcs-skip-spaces(s, add(i, 1)) else i;
+        def bcs-starts-with?(s, i, p) = if gt(add(i, str_len(p)), str_len(s)) then 0 else if str_eq(substring(s, i, add(i, str_len(p))), p) then 1 else 0;
+        // both authoring lanes open a door the same way to a reader: `def name(` in BML,
+        // `(defn name ` in Form. A line that opens one ends the body above it
+        def bcs-opens-def?(line) = bcs-opens-def-at(line, bcs-skip-spaces(line, 0));
+        def bcs-opens-def-at(line, i) = if eq(bcs-starts-with?(line, i, "def "), 1) then 1 else if eq(bcs-starts-with?(line, i, "(defn "), 1) then 1 else 0;
+        // a comment is not a call. This tree's comments name doors densely — core.fk's own
+        // note about substring says the word twenty times — so a graph drawn over raw text
+        // would give every door an edge to whatever its prose discusses. The cut is at the
+        // first `;` or `//`, which loses a call standing after a semicolon inside a string
+        // literal: the measure would rather miss an edge than invent one.
+        def bcs-min-mark(a, b) = if lt(a, 0) then b else if lt(b, 0) then a else if lt(a, b) then a else b;
+        def bcs-comment-at(line) = bcs-min-mark(str_find(line, ";", 0), str_find(line, "//", 0));
+        def bcs-strip-comment(line) = bcs-strip-at(line, bcs-comment-at(line));
+        def bcs-strip-at(line, i) = if lt(i, 0) then line else substring(line, 0, i);
+        def bcs-body-go(lines, n, left, acc) = if or(le(left, 0), gt(n, len(lines))) then acc else bcs-body-next(lines, n, left, acc, bcs-nth-line(lines, n));
+        def bcs-body-next(lines, n, left, acc, line) = if and(gt(str_len(acc), 0), eq(bcs-opens-def?(line), 1)) then acc else bcs-body-go(lines, add(n, 1), sub(left, 1), str_concat(acc, str_concat(byte_to_str(10), bcs-strip-comment(line))));
+        def bcs-body(lines, n) = bcs-body-go(lines, n, BCSBodyLines(), "");
+
+        // a name mention is an edge only on both boundaries: `substring` inside
+        // `fstr-substring-loop` is the same bytes and not the same door
+        def bcs-name-byte?(b) = if and(ge(b, 97), le(b, 122)) then 1 else if and(ge(b, 65), le(b, 90)) then 1 else if and(ge(b, 48), le(b, 57)) then 1 else if eq(b, 45) then 1 else if eq(b, 95) then 1 else if eq(b, 63) then 1 else if eq(b, 33) then 1 else 0;
+        def bcs-left-free?(text, at) = if le(at, 0) then 1 else if eq(bcs-name-byte?(str_byte_at(text, sub(at, 1))), 1) then 0 else 1;
+        def bcs-right-free?(text, end) = if ge(end, str_len(text)) then 1 else if eq(bcs-name-byte?(str_byte_at(text, end)), 1) then 0 else 1;
+        def bcs-mentions-go(text, name, from) = bcs-mentions-at(text, name, from, str_find(text, name, from));
+        def bcs-mentions-at(text, name, from, at) = if lt(at, 0) then 0 else if and(eq(bcs-left-free?(text, at), 1), eq(bcs-right-free?(text, add(at, str_len(name))), 1)) then 1 else bcs-mentions-go(text, name, add(at, 1));
+        def bcs-mentions?(text, name) = if eq(str_len(name), 0) then 0 else bcs-mentions-go(text, name, 0);
+
+        def bcs-edges-for(caller, body, names, acc) = if eq(len(names), 0) then acc else bcs-edges-for(caller, body, tail(names), if and(not(str_eq(head(names), caller)), eq(bcs-mentions?(body, head(names)), 1)) then cons(list(caller, head(names)), acc) else acc);
+
+        // --- finding a door's body by NAME, never by the row's line -----------------
+        // A hot row's unit and line are coordinates in the RESOLVED text of a resolution
+        // frame, not in the file on disk: witnessed 2026-09-07, core.fk's own defns land on
+        // their true lines while a preluded unit's defns drift, and a band loaded as a
+        // prelude reports every door under the first unit. Reading a body at that line
+        // would quote the wrong door with total confidence. So the body is found by the
+        // name the row carries, and a door whose body is nowhere in the units given is
+        // named unread rather than silently drawn with no callees.
+        def bcs-name-end(s, i) = if ge(i, str_len(s)) then i else if eq(bcs-name-byte?(str_byte_at(s, i)), 1) then bcs-name-end(s, add(i, 1)) else i;
+        def bcs-def-name(line) = bcs-def-name-at(line, bcs-skip-spaces(line, 0));
+        def bcs-def-name-at(line, i) = if eq(bcs-starts-with?(line, i, "def "), 1) then substring(line, add(i, 4), bcs-name-end(line, add(i, 4))) else if eq(bcs-starts-with?(line, i, "(defn "), 1) then substring(line, add(i, 6), bcs-name-end(line, add(i, 6))) else "";
+        // the body walks the remaining lines directly rather than indexing by number:
+        // nth into a fifteen-thousand-line unit is a walk per line, and the walk of walks
+        // is the very cost this cell exists to find
+        def bcs-body-here(rest) = bcs-body-here-go(rest, BCSBodyLines(), "");
+        def bcs-body-here-go(rest, left, acc) = if or(le(left, 0), eq(len(rest), 0)) then acc else if and(gt(str_len(acc), 0), eq(bcs-opens-def?(head(rest)), 1)) then acc else bcs-body-here-go(tail(rest), sub(left, 1), str_concat(acc, str_concat(byte_to_str(10), bcs-strip-comment(head(rest)))));
+
+        // one pass per unit builds name -> body for the doors under census; the first
+        // definition of a name wins, the way the resolver reads it
+        def bcs-index-has?(index, nm) = if eq(len(index), 0) then 0 else if str_eq(nth(head(index), 0), nm) then 1 else bcs-index-has?(tail(index), nm);
+        def bcs-index-body(index, nm) = if eq(len(index), 0) then "" else if str_eq(nth(head(index), 0), nm) then nth(head(index), 1) else bcs-index-body(tail(index), nm);
+        def bcs-index-add(index, nm, body) = if eq(bcs-index-has?(index, nm), 1) then index else cons(list(nm, body), index);
+        def bcs-index-walk(rest, names, index) = if eq(len(rest), 0) then index else bcs-index-walk-at(rest, names, index, bcs-def-name(head(rest)));
+        def bcs-index-walk-at(rest, names, index, nm) = if and(gt(str_len(nm), 0), eq(bcs-member?(names, nm), 1)) then bcs-index-walk(tail(rest), names, bcs-index-add(index, nm, bcs-body-here(rest))) else bcs-index-walk(tail(rest), names, index);
+        def bcs-index-units(units, names, index) = if eq(len(units), 0) then index else bcs-index-units(tail(units), names, bcs-index-walk(nth(head(units), 1), names, index));
+        def bcs-index(units, names) = bcs-index-units(units, names, list());
+
+        // each unit is read once and its lines held, so a file carrying twelve hot doors
+        // is opened once instead of twelve times
+        def bcs-unit-has?(units, path) = if eq(len(units), 0) then 0 else if str_eq(nth(head(units), 0), path) then 1 else bcs-unit-has?(tail(units), path);
+        def bcs-unit-lines(units, path) = if eq(len(units), 0) then list() else if str_eq(nth(head(units), 0), path) then nth(head(units), 1) else bcs-unit-lines(tail(units), path);
+        def bcs-read-lines(path) = if lt(file_size(path), 0) then list() else bcs-lines(read_file(path));
+        def bcs-unit-add(units, path) = if or(eq(str_len(path), 0), eq(bcs-unit-has?(units, path), 1)) then units else cons(list(path, bcs-read-lines(path)), units);
+        def bcs-units(rows, acc) = if eq(len(rows), 0) then acc else bcs-units(tail(rows), bcs-unit-add(acc, bcs-unit(head(rows))));
+        def bcs-units-of(paths, acc) = if eq(len(paths), 0) then acc else bcs-units-of(tail(paths), bcs-unit-add(acc, head(paths)));
+        // the caller adds the workload's own files, because the unit a row names is the
+        // resolution frame and not always the file the door lives in
+        def bcs-units-for(rows, paths) = bcs-units-of(paths, bcs-units(rows, list()));
+
+        def bcs-edges-indexed(names, index, all) = if eq(len(names), 0) then list() else append(bcs-edges-for(head(names), bcs-index-body(index, head(names)), all, list()), bcs-edges-indexed(tail(names), index, all));
+        def bcs-graph-with(rows, paths) = bcs-graph-indexed(bcs-names(rows), bcs-index(bcs-units-for(rows, paths), bcs-names(rows)));
+        def bcs-graph-indexed(names, index) = bcs-edges-indexed(names, index, names);
+        def bcs-graph(rows) = bcs-graph-with(rows, list());
+        // the doors whose body was nowhere in the units given: measured, but their callees
+        // are unknown, so their bearing is a floor and not a reading
+        def bcs-unread-in(names, index) = if eq(len(names), 0) then list() else if eq(bcs-index-has?(index, head(names)), 1) then bcs-unread-in(tail(names), index) else cons(head(names), bcs-unread-in(tail(names), index));
+        def bcs-unread-with(rows, paths) = bcs-unread-in(bcs-names(rows), bcs-index(bcs-units-for(rows, paths), bcs-names(rows)));
+        def bcs-unread(rows) = bcs-unread-with(rows, list());
+
+        // --- rendering the reading in words ---------------------------------------
+        def bcs-cat(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), bcs-cat(tail(parts)));
+        def bcs-num(v) = if lt(v, 0) then "no-reading" else int_to_str(v);
+        def bcs-pct(bp) = if lt(bp, 0) then "no-reading" else bcs-cat(list(int_to_str(div(bp, 100)), ".", int_to_str(div(mod(bp, 100), 10)), "%"));
+        def bcs-per-call-text(v) = if lt(v, 0) then "no-reading" else bcs-cat(list(int_to_str(div(v, 100)), ".", int_to_str(div(mod(v, 100), 10)), " steps/call"));
+        def bcs-c-text(c) = bcs-cat(list("drag ", int_to_str(bcs-c-drag(c)), "  ", bcs-c-name(c), " — ", bcs-pct(bcs-c-share(c)), " of the walking, ", bcs-num(bcs-c-calls(c)), " calls, ", bcs-per-call-text(bcs-c-per-call(c)), ", ", bcs-num(bcs-c-leaning(c)), " doors lean on it, ", bcs-c-remedy(c)));
+        def bcs-where(c) = bcs-cat(list(bcs-c-unit(c), ":", int_to_str(bcs-c-line(c))));
+    }
+    0;
+}
