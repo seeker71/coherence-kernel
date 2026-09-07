@@ -558,6 +558,40 @@ holds no cumulative busy counter, dumped once and witnessed), and
 process -- stands beside it uncontended. events-channels 8191, sensor-rows
 2047, machine 255. (receipts/2026-09-06-every-organ-gives-into-the-glass.md)
 
+**The body's real choices are on the glass, and they are playable.** Eight
+choice points, each with a ledger that is a count the body was already
+keeping: crystallize or walk, box or fold, reuse or mint, where a surprise
+moves, the protocol floor, which frame the glass takes, whether the metal
+admits, and which route serves a category. Every offer lands as one of the
+body's own three outcomes -- taken, declined, or SILENCE, the held offer of
+axioms 1 and 4 -- so flow, restriction and holding are three separate shares
+of the same hundred offers and a point that was never offered reads `-1`, not
+zero. A sequence plays at its NARROWEST gate, never its average, because an
+average hides the step worth healing. A choice with one option is a
+`gap-corridor` and a choice never metered is `gap-dark`; a choice that closes
+more than it opens is a `wound-restricting`, and each finding carries what it
+asks for. Press `d` on the glass to open them, `g` to step, `y` to take, `w`
+to hold; a take or a hold writes through the control inbox and the next frame
+shows the ledger move. form-choice-flow 4095, sources 16383, view 16383.
+
+**Nothing put is not a decline, and a number the body knows is published as a
+number.** Three places wrote `failed` where the body had never got to ask: the
+surprise organ scored its own resting movements (hold, rest, compost) as
+failures, so a point that closed nothing read as closing 96 of every 100
+offers; the governor's admission row and its release row wrote `failed` when
+the typed signals were never current, so an idle host published a body
+declining every quantum it was never offered. The admission and release rows
+now read `unknown` -- the word the pressure row beside them already used for
+exactly this not-knowing -- and a tick the governor never measured moves no
+ledger at all (`fcf-outcome-none`): silence is the offer held OPEN, this is
+the offer never made. Alongside, the organs frame stopped publishing one
+number twice: the routing row's capacity is the whole (every surprise
+attempted) and the choice row's capacity is the part that MOVED, so the
+choice lane reads counts as counts instead of parsing them back out of a
+purpose label -- and the rested count it used to parse was added to a
+difference that subtracted it again. governor-glass 4194303,
+events-channels 32767.
+
 **The live glass's frame work rests inside its budget.** A projection node
 names a field once (`fgo-field-node`): `intern_node_at` records a framebuffer
 root on every call in all four arms, so re-minting the same field each frame
