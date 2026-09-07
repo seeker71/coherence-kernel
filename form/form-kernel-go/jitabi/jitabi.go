@@ -2,6 +2,7 @@ package jitabi
 
 import (
 	"fmt"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -137,6 +138,29 @@ func Substring(s, start, end Value) Value {
 		return Str("")
 	}
 	return Str(text[from:to])
+}
+
+// StrFind — BYTES, CLAMPED, NEVER DIES, exactly as main.go's interpreter native
+// answers it. A primitive that lives twice must be healed twice: hot code
+// crossing the auto-JIT threshold reverts to whatever this file says. Before
+// 2026-09-08 there was no mirror here at all, so a recipe containing str_find
+// could not be JIT-compiled — the whole recipe bailed as unsupported, and
+// split-on, trim and every row walker over them stayed interpreted.
+func StrFind(s, needle, from Value) Value {
+	hay := s.AsString()
+	pat := needle.AsString()
+	at := int(from.AsInt())
+	if at < 0 {
+		at = 0
+	}
+	if at > len(hay) {
+		return Int(-1)
+	}
+	idx := strings.Index(hay[at:], pat)
+	if idx < 0 {
+		return Int(-1)
+	}
+	return Int(int64(at + idx))
 }
 
 func CharAt(s, idx Value) Value {

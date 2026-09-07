@@ -1587,6 +1587,27 @@ func emitGoFnCall(k *Kernel, kids []NodeID, scope *goCompileScope) (string, erro
 		}
 		return "jitabi.Substring(" + sSrc + ", " + startSrc + ", " + endSrc + ")", nil
 	}
+	if name == "str_find" {
+		if len(kids) < 4 {
+			return "", unsupported("jit: str_find expects string, needle, from")
+		}
+		if scope.abi != goJITABIValue {
+			return "", unsupported("jit: str_find requires value ABI")
+		}
+		sSrc, err := emitGoExpr(k, kids[1], scope)
+		if err != nil {
+			return "", err
+		}
+		needleSrc, err := emitGoExpr(k, kids[2], scope)
+		if err != nil {
+			return "", err
+		}
+		fromSrc, err := emitGoExpr(k, kids[3], scope)
+		if err != nil {
+			return "", err
+		}
+		return "jitabi.StrFind(" + sSrc + ", " + needleSrc + ", " + fromSrc + ")", nil
+	}
 	if name == "char_at" {
 		if len(kids) < 3 {
 			return "", unsupported("jit: char_at expects string and index")
@@ -1906,7 +1927,7 @@ func jitRecipeNeedsValueABI(k *Kernel, node NodeID) bool {
 				switch name {
 				case "list", "empty", "cons", "head", "tail", "len", "nil?", "concat", "nth",
 					"str_len", "str_concat", "str_eq", "substring", "char_at", "ord",
-					"byte_to_str", "scan_run":
+					"byte_to_str", "scan_run", "str_find":
 					return true
 				}
 				// Static callee resolved — scan only the argument slots.

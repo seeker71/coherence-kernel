@@ -80,20 +80,6 @@ var (
 	socketNextHnd int64 = 0
 )
 
-// ceilCharBoundary snaps a byte index up to the nearest char boundary at or
-// above it. Search starts (str_find `from`) snap forward so a find-next loop
-// stepping +1 from a match advances past a multibyte char instead of
-// re-finding it forever. Sibling parity with Rust's ceil_char_boundary_idx.
-func ceilCharBoundary(s string, i int) int {
-	if i >= len(s) {
-		return len(s)
-	}
-	for i < len(s) && !utf8.RuneStart(s[i]) {
-		i++
-	}
-	return i
-}
-
 func socketRegister(v interface{}) int64 {
 	socketTableMu.Lock()
 	defer socketTableMu.Unlock()
@@ -2269,6 +2255,19 @@ func (k *Kernel) registerNatives() {
 	// Form closure dispatch per byte, no Form recursion. This is what
 	// `tokenizeSexp` does internally — exposed for Form scanners that
 	// would otherwise blow the walker stack with per-character recursion.
+	// BYTES, CLAMPED, NEVER DIES — the one meaning, held by all four arms since
+	// 2026-09-08 (form-stdlib/tests/str-find-one-meaning-band.fk, 8191 four ways,
+	// a drift gate; core.fk's fstr-find is the body's own statement of it).
+	// Until that day this snapped `from` UP to the nearest char boundary. For a
+	// needle that is well-formed UTF-8 that snap is a no-op — no valid needle can
+	// begin on a continuation byte, so skipping continuation bytes can never skip
+	// a match. For a needle that IS a byte fragment of a character, which a Go
+	// string and fkwu's byte buffer can both hold, it skipped real matches: in
+	// "aΩΩb" the second 0xA9 was found at 4 where the byte answer is 2. The
+	// comment it carried ("so a find-next loop stepping +1 advances past a
+	// multibyte char instead of re-finding it forever") described a hazard that
+	// cannot occur: +1 from a match lands on a continuation byte, where no valid
+	// needle matches, so the scan advances on its own.
 	k.registerNative("str_find", catAccess(), func(_ *Kernel, args []Value) Value {
 		s := argStr(args, 0)
 		needle := argStr(args, 1)
@@ -2279,7 +2278,6 @@ func (k *Kernel) registerNatives() {
 		if from > len(s) {
 			return Value{Kind: VInt, Int: -1}
 		}
-		from = ceilCharBoundary(s, from)
 		idx := strings.Index(s[from:], needle)
 		if idx < 0 {
 			return Value{Kind: VInt, Int: -1}

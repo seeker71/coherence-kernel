@@ -1507,7 +1507,15 @@ export class Kernel {
       // band that would have caught it (core-str-find-equivalence-band, bit 16)
       // could not run on this arm at all until substring stopped dying.
       if (rawFrom > bytes.length) return { kind: "int", int: -1 };
-      const from = ceilUtf8Boundary(bytes, rawFrom);
+      // BYTES, CLAMPED, NEVER DIES — the one meaning, held by all four arms since
+      // 2026-09-08 (form-stdlib/tests/str-find-one-meaning-band.fk, 8191 four
+      // ways, a drift gate). Until then `rawFrom` was snapped UP to the next UTF-8
+      // character start, in sibling parity with Go and Rust. It is a no-op for any
+      // needle this arm can hold — a valid needle never begins on a continuation
+      // byte — and where a needle IS a byte fragment (which fkwu and Go can hold
+      // and this arm cannot) it skipped real matches. The scan already walks the
+      // encoded bytes, so there is nothing here that needs a boundary.
+      const from = rawFrom;
       const idx = byteSubarrayIndex(bytes, needleBytes, from);
       // `kind: "int"` carries a JS Number — using BigInt here would
       // poison downstream arithmetic with "Cannot mix BigInt and other

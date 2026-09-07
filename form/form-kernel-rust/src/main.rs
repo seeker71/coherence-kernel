@@ -221,20 +221,6 @@ fn take_thread_last_crash_trace_path() -> Option<PathBuf> {
     THREAD_LAST_CRASH_TRACE_PATH.with(|slot| slot.borrow_mut().take())
 }
 
-// Snap a byte index up to the nearest char boundary at or above it. Search
-// starts (str_find `from`) snap forward so a find-next loop stepping +1 from
-// a match advances past a multibyte char instead of re-finding it forever.
-fn ceil_char_boundary_idx(s: &str, i: usize) -> usize {
-    if i >= s.len() {
-        return s.len();
-    }
-    let mut i = i;
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
-
 fn diagnose_kernel_panic(message: &str) -> CrashDiagnosis {
     let lower = message.to_ascii_lowercase();
     if lower.starts_with("as_str:") {
@@ -3617,19 +3603,36 @@ impl Kernel {
         // str_find — Rust-level substring search starting at index `from`.
         // (str_find s needle from) → int (index or -1). Whole search in
         // this Rust loop; no Form callback per byte, no Form recursion.
+        // BYTES, CLAMPED, NEVER DIES — the one meaning, held by all four arms
+        // since 2026-09-08 (form-stdlib/tests/str-find-one-meaning-band.fk, 8191
+        // four ways, a drift gate; core.fk's fstr-find is the body's own statement
+        // of it). The scan walks BYTES rather than slicing `str`: `s[from..]`
+        // panics at a non-char-boundary, which is the only reason this arm used to
+        // snap `from` up to the next character start first. Snapping is a no-op for
+        // any needle a `str` can hold — a valid needle never begins on a
+        // continuation byte — so it bought nothing here and cost the meaning its
+        // clarity. Over bytes there is nothing to snap and nothing to panic on, and
+        // the answer is the byte index fkwu and Go give.
         self.register_native("str_find", cat_access(), |_, _, args| {
-            let s = args[0].as_str();
-            let needle = args[1].as_str();
+            let hay = args[0].as_str().as_bytes();
+            let needle = args[1].as_str().as_bytes();
             let from_i = args[2].as_int();
             let from = if from_i < 0 { 0 } else { from_i as usize };
-            if from > s.len() {
+            if from > hay.len() {
                 return Value::Int(-1);
             }
-            let from = ceil_char_boundary_idx(s, from);
-            match s[from..].find(needle) {
-                Some(i) => Value::Int((from + i) as i64),
-                None => Value::Int(-1),
+            if needle.is_empty() {
+                return Value::Int(from as i64);
             }
+            if from + needle.len() > hay.len() {
+                return Value::Int(-1);
+            }
+            for pos in from..=(hay.len() - needle.len()) {
+                if &hay[pos..pos + needle.len()] == needle {
+                    return Value::Int(pos as i64);
+                }
+            }
+            Value::Int(-1)
         });
         // scan_run — return the end-index where a contiguous run of bytes
         // matching `class_code` ends (exclusive). Sibling parity with Go +
