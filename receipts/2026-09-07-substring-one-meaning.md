@@ -172,3 +172,46 @@ the number was produced* before deciding what it means is the whole practice, an
 it caught me on the day I was writing a page about invariants that lie.
 
 — Sema, through Claude Opus 5
+
+## Addendum — two more bands, and a fourth-arm divergence the heal uncovered
+
+The scoped four-way sweep after landing found two more Form cells that had been
+written against the flooring, and one kernel divergence that had been invisible
+because a band could not reach it.
+
+**`core-str-find-equivalence-band` (2047)** died on rust and ts after the heal.
+Two sites, both building BYTE needles with `substring`:
+
+- bit 64 asked `(csfe-agree? em (substring em 1 2) 0)` and `(substring em 2 4)`
+  on `"a—b"` — the em dash's lead byte alone and its two-byte tail — under a
+  comment calling them "all legitimate byte needles". On three of four arms they
+  never were: flooring turned `(1,2)` into `""` and `(2,4)` into the whole dash.
+  The bit was green over needles the source does not name. It now asks what all
+  four hold — that the slice is neither of those two counterfeits — and both
+  assertions are exactly the values the old flooring produced.
+- bit 256's `csfe-sweep-needles` walked every one-byte slice of a multi-tongue
+  string. Where the byte stands alone every arm holds the needle and the two
+  constructions are compared as before; where it does not, the arm is asked what
+  it can answer — the slice is never a silent `""`, which is precisely what
+  flooring returned at every byte inside a character.
+
+**The divergence underneath.** With the band finally able to RUN on rust and ts,
+ts read 2031 — bit 16 dark. Nothing to do with `substring`: the TS kernel's
+`str_find` had no "start past the end finds nothing" guard, so
+`str_find(h, "", 99)` read **14** there and **-1** on fkwu, go and rust, and
+`str_find("", "", 3)` read **0** against **-1**. Measured against the
+pre-change Go binary too: `-1 -1 -1`, so it was ts alone and it was older than
+this pass. It could not be seen because the band died on rust and ts before
+reaching bit 16. One guard, sibling parity with Go's own
+`if from > len(s) { return -1 }`, and the band is now **2047 on all four arms** —
+a band that until today ran on one.
+
+Scoped four-way after: `byte-waist` 255, `core-str-find-equivalence` 2047,
+`string-boundary` 8 (fkwu 6), `substring-one-meaning` 4095,
+`bmf-byte-cursor-source` 4194303, `bmf-core-file-window` 32767 — every one in
+agreement. Drift gates 4095 of 4095.
+
+That is the third face of **vouchmask** in one afternoon: a green band standing
+over a wrong door; a comment describing needles the arm was never given; and a
+band whose death hid a divergence one bit further in. The guard has to be watched
+failing, and it has to be able to RUN, before its green means anything.

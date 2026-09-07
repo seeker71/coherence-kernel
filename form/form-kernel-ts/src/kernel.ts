@@ -1498,7 +1498,16 @@ export class Kernel {
       const needle = argStr(args, 1);
       const bytes = utf8Encode(s);
       const needleBytes = utf8Encode(needle);
-      const from = ceilUtf8Boundary(bytes, Math.max(0, argInt(args, 2)));
+      const rawFrom = Math.max(0, argInt(args, 2));
+      // A start past the end finds nothing — including the empty needle, which
+      // this arm otherwise reported as found AT the clamped end. Sibling parity
+      // with the Go kernel's `if from > len(s) { return -1 }` and with rust and
+      // fkwu: measured 2026-09-07, str_find(h, "", 99) read 14 here and -1 on
+      // the other three, and str_find("", "", 3) read 0 here and -1 there. The
+      // band that would have caught it (core-str-find-equivalence-band, bit 16)
+      // could not run on this arm at all until substring stopped dying.
+      if (rawFrom > bytes.length) return { kind: "int", int: -1 };
+      const from = ceilUtf8Boundary(bytes, rawFrom);
       const idx = byteSubarrayIndex(bytes, needleBytes, from);
       // `kind: "int"` carries a JS Number — using BigInt here would
       // poison downstream arithmetic with "Cannot mix BigInt and other
