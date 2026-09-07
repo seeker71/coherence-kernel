@@ -1,0 +1,60 @@
+// Native terminal byte door and incremental VT key decoder. No Glass actions
+// live in the host carrier. A read never waits for a newline. Bracketed paste
+// is text, never a stream of commands; unknown escape sequences are discarded.
+// preludes: form/form-stdlib/core.fk
+section [form.bml] {
+    class FormGlassInput {
+        def fgki-open() = host_sleep_ms(list("terminal-input", 1));
+        def fgki-close() = host_sleep_ms(list("terminal-input", 0));
+        def fgki-read() = host_sleep_ms(list("terminal-input", 2));
+        def fgki-active() = host_sleep_ms(list("terminal-input", 3));
+        field FGKITextLimit = 256;
+        field FGKIEscapeMs = 120;
+        def fgki-state(mode, text, escape, paste, started, serial) = list(mode, text, escape, paste, started, serial);
+        def fgki-empty() = fgki-state("", "", "", 0, 0, 0);
+        def fgki-mode(s) = nth(s, 0);
+        def fgki-text(s) = nth(s, 1);
+        def fgki-escape(s) = nth(s, 2);
+        def fgki-paste?(s) = nth(s, 3);
+        def fgki-started(s) = nth(s, 4);
+        def fgki-serial(s) = nth(s, 5);
+        def fgki-prompt(s, mode) = fgki-state(mode, "", "", 0, 0, fgki-serial(s));
+        def fgki-clear(s) = fgki-state("", "", "", 0, 0, fgki-serial(s));
+        def fgki-edit(s, text) = fgki-state(fgki-mode(s), text, "", fgki-paste?(s), 0, fgki-serial(s));
+        def fgki-result(s, kind, value) = list(s, kind, value);
+        def fgki-none(s) = fgki-result(s, "", "");
+        def fgki-expire(s, now) = if and(gt(str_len(fgki-escape(s)), 0), ge(sub(now, fgki-started(s)), FGKIEscapeMs())) then fgki-state("", "", "", fgki-paste?(s), 0, fgki-serial(s)) else s;
+        def fgki-sequence(s, byte, now) {
+            let held = fgki-escape(s);
+            let seq = str_concat(held, byte_to_str(byte));
+            let next = fgki-state(fgki-mode(s), fgki-text(s), if lt(str_len(seq), 24) then seq else held, fgki-paste?(s), now, fgki-serial(s));
+            let clear = fgki-edit(s, fgki-text(s));
+            if and(eq(str_len(held), 1), or(eq(byte, 91), eq(byte, 79))) then fgki-none(next)
+            else if and(gt(str_len(held), 1), lt(byte, 64)) then fgki-none(next)
+            else if str_eq(seq, str_concat(byte_to_str(27), "[200~")) then fgki-none(fgki-state(fgki-mode(s), fgki-text(s), "", 1, 0, fgki-serial(s)))
+            else if str_eq(seq, str_concat(byte_to_str(27), "[201~")) then fgki-none(fgki-state(fgki-mode(s), fgki-text(s), "", 0, 0, fgki-serial(s)))
+            else if eq(fgki-paste?(s), 1) then fgki-none(clear)
+            else if or(str_eq(seq, str_concat(byte_to_str(27), "[A")), str_eq(seq, str_concat(byte_to_str(27), "OA"))) then fgki-result(clear, "move", -1)
+            else if or(str_eq(seq, str_concat(byte_to_str(27), "[B")), str_eq(seq, str_concat(byte_to_str(27), "OB"))) then fgki-result(clear, "move", 1)
+            else fgki-none(clear);
+        }
+        def fgki-byte(s0, byte, now) {
+            let s = fgki-state(fgki-mode(s0), fgki-text(s0), fgki-escape(s0), fgki-paste?(s0), fgki-started(s0), add(fgki-serial(s0), 1));
+            if gt(str_len(fgki-escape(s)), 0) then fgki-sequence(s, byte, now)
+            else if eq(byte, 27) then fgki-none(fgki-state(fgki-mode(s), fgki-text(s), byte_to_str(27), fgki-paste?(s), now, fgki-serial(s)))
+            else if and(eq(fgki-paste?(s), 1), eq(str_len(fgki-mode(s)), 0)) then fgki-none(s)
+            else if gt(str_len(fgki-mode(s)), 0) then fgki-text-byte(s, byte)
+            else if eq(byte, 9) then fgki-result(s, "move", 1)
+            else if eq(byte, 3) then fgki-result(s, "key", "q")
+            else if and(ge(byte, 32), le(byte, 126)) then fgki-result(s, "key", byte_to_str(byte))
+            else fgki-none(s);
+        }
+        def fgki-text-byte(s, byte) {
+            if and(eq(fgki-paste?(s), 0), or(eq(byte, 13), eq(byte, 10))) then fgki-result(fgki-clear(s), fgki-mode(s), fgki-text(s))
+            else if and(eq(fgki-paste?(s), 0), or(eq(byte, 127), eq(byte, 8))) then fgki-none(fgki-edit(s, substring(fgki-text(s), 0, if gt(str_len(fgki-text(s)), 0) then sub(str_len(fgki-text(s)), 1) else 0)))
+            else if and(and(ge(byte, 32), le(byte, 126)), lt(str_len(fgki-text(s)), FGKITextLimit())) then fgki-none(fgki-edit(s, str_concat(fgki-text(s), byte_to_str(byte))))
+            else fgki-none(s);
+        }
+    }
+    0;
+}

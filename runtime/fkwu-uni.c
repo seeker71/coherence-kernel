@@ -1233,6 +1233,7 @@ extern void _exit(int);
  * holds SIGPIPE off while writing to a child that may already have closed */
 #include <poll.h>
 #include <signal.h>
+#include <termios.h>
 #endif
 #if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
 #define FK_HAVE_DARWIN_ARM64_JIT_WITNESS 1
@@ -11824,6 +11825,89 @@ static long long fk_mono_ns(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
 }
+/* Temporary terminal-byte carrier; all decoding/bindings live in
+ * bml/form-glass-input.bml. Shrink: docs/glass-keyboard.md. No subprocess,
+ * terminal mode change on non-TTY input, or reads from another process's tty. */
+#if !defined(_WIN32)
+static struct termios fk_tty_saved, fk_tty_direct;
+static int fk_tty_active, fk_tty_cleanup_registered;
+static const int fk_tty_signals[] = { SIGINT, SIGTERM, SIGHUP, SIGTSTP, SIGCONT };
+static struct sigaction fk_tty_old[5];
+extern int atexit(void (*)(void));
+static void fk_tty_restore(void) {
+    if (!fk_tty_active) { return; }
+    tcsetattr(0, TCSANOW, &fk_tty_saved);
+    fk_tty_active = 0;
+    for (int k = 0; k < 5; k++) { sigaction(fk_tty_signals[k], &fk_tty_old[k], 0); }
+    write(1, "\033[?2004l", 8);
+}
+static void fk_tty_signal(int sig) {
+    if (sig == SIGCONT) {
+        if (fk_tty_active) { tcsetattr(0, TCSANOW, &fk_tty_direct); }
+        return;
+    }
+    if (sig == SIGTSTP) {
+        tcsetattr(0, TCSANOW, &fk_tty_saved);
+        /* SIGSTOP avoids changing the saved SIGTSTP disposition while suspended. */
+        raise(SIGSTOP);
+        if (fk_tty_active) { tcsetattr(0, TCSANOW, &fk_tty_direct); }
+        return;
+    }
+    fk_tty_restore();
+    raise(sig);
+}
+static int fk_tty_ready(void) {
+    if (!fk_tty_active) { return 0; }
+    struct pollfd p = { 0, POLLIN, 0 };
+    return poll(&p, 1, 0) > 0 && (p.revents & (POLLIN | POLLHUP | POLLERR));
+}
+#else
+static void fk_tty_restore(void) {}
+static int fk_tty_ready(void) { return 0; }
+#endif
+static long long fk_tty_door(long long mode) {
+#if !defined(_WIN32)
+    if (mode == 0) { fk_tty_restore(); return 2; }
+    if (mode == 3) { return fk_tty_active ? 2 : 0; }
+    if (mode == 1) {
+        if (fk_tty_active) { return 2; }
+        if (!isatty(0) || !isatty(1) || tcgetattr(0, &fk_tty_saved) != 0) { return 0; }
+        fk_tty_direct = fk_tty_saved;
+        fk_tty_direct.c_lflag &= ~(ICANON | ECHO | IEXTEN);
+        fk_tty_direct.c_iflag &= ~(IXON | ICRNL | INLCR);
+        fk_tty_direct.c_cc[VMIN] = 0;
+        fk_tty_direct.c_cc[VTIME] = 0;
+        if (tcsetattr(0, TCSANOW, &fk_tty_direct) != 0) { return fk_nothing; }
+        struct sigaction sa;
+        sa.sa_handler = fk_tty_signal; sigemptyset(&sa.sa_mask); sa.sa_flags = 0;
+        int k = 0;
+        for (; k < 5; k++) {
+            if (sigaction(fk_tty_signals[k], &sa, &fk_tty_old[k]) != 0) {
+                while (k > 0) { k--; sigaction(fk_tty_signals[k], &fk_tty_old[k], 0); }
+                tcsetattr(0, TCSANOW, &fk_tty_saved); return fk_nothing;
+            }
+        }
+        fk_tty_active = 1;
+        if (!fk_tty_cleanup_registered) {
+            if (atexit(fk_tty_restore) != 0) { fk_tty_restore(); return fk_nothing; }
+            fk_tty_cleanup_registered = 1;
+        }
+        write(1, "\033[?2004h", 8);
+        return 2;
+    }
+    if (mode == 2 && fk_tty_active) {
+        char bytes[64];
+        if (!fk_tty_ready()) { return fk_sbuf("", 0); }
+        long long n = read(0, bytes, sizeof(bytes));
+        if (n > 0) { return fk_sbuf(bytes, n); }
+        if (n < 0 && (errno == EINTR || errno == EAGAIN)) { return fk_sbuf("", 0); }
+        fk_tty_restore();
+    }
+#else
+    if (mode == 0 || mode == 1 || mode == 3) { return 0; }
+#endif
+    return fk_nothing;
+}
 static long long fk_rest_arm(long long a) {
     volatile long long *wp[64];
     long long ws[64];
@@ -11834,6 +11918,13 @@ static long long fk_rest_arm(long long a) {
     else {
         long long p = a >> 1;
         if (!(p >= 1 && FK_POK(p))) { return fk_nothing; }
+        if (fk_is_str(FK_HH(p))) {
+            char kind[32]; fk_cstr(FK_HH(p), kind, 32);
+            long long q = FK_HT(p) >> 1;
+            if (fk_cstr_eq(kind, "terminal-input") && q >= 1 && FK_POK(q)
+                && (FK_HH(q) & 1) == 0) { return fk_tty_door(FK_HH(q) >> 1); }
+            return fk_nothing;
+        }
         list_mode = 1;
         ms = FK_HH(p) >> 1;
         p = FK_HT(p) >> 1;
@@ -11863,7 +11954,8 @@ static long long fk_rest_arm(long long a) {
         while (k < nw) { long long s = __atomic_load_n(wp[k], __ATOMIC_ACQUIRE); if (s != ws[k]) { woke = k; break; } k = k + 1; }
         now = fk_mono_ns();
         long long rem = deadline - now;
-        if (woke >= 0 || rem <= 0) { break; }
+        if (list_mode && fk_tty_ready()) { woke = -2; }
+        if (woke >= 0 || woke == -2 || rem <= 0) { break; }
         if (rem > slack + 300000) {
             struct timespec req;
             long long ask = rem - slack - 100000;
