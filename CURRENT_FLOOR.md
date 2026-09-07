@@ -217,19 +217,24 @@ mint.** fkwu's tag-30 arm never left `runtime/fkwu-uni.c` when the name left
 a serializer arm — and three of the four were still standing; only the row was
 gone, and with it the only way to reach either arm. The whole heal is one
 restored row, and from a call site an orphaned arm reads exactly like an absent
-one. Measured on this quiet Mac (347.63 GB/s through the handle door, 25.77
-TFLOPS, `observe/floor-lens-run.fk`), warm, three runs each, both binaries built
-by the same compiler minutes apart: `meaning-codes-band` **7306/7321/7310 ms →
-3711/3716/3708 ms**, 1.97x with a 0.2% spread that does not swallow it; the
-bearing census's locale walk **5310 → 3610 ms**; and inside one process
-(`observe/line-grammar-search-floor-run.fk`) `split-on` over 16.1 MB of locale
-rows **1895 → 254 ms** and one miss over the 972 kB corpus **97 → 1 ms**, while
-`trim` (263 → 261), `lines-from-source` (235 → 233) and `starts-with?` (26 → 26)
-did not move — because those three do not search. The census's own step total
-moved the *other* way, 60,556,932 → 80,285,715, deterministic across four cold
-and warm readings; removing ~39.5M Form call entries cannot raise a total, so
-that figure is measuring something whose denominator moves with the door
-distribution. Named, not explained, and handed to `bearing-census.bml`'s hand.
+one. Measured on this quiet Mac (347.63 GB/s through the handle door, unchanged
+across every reading, `observe/floor-lens-run.fk`), warm, three runs each, both
+binaries built by the same compiler minutes apart, in one process with the
+allocating column as a shared control agreeing within 1%
+(`observe/line-grammar-search-floor-run.fk`): `split-on` over 16.1 MB of locale
+rows **1955 → 253 ms** (7.7x) and one miss over the 980 kB corpus **97 → 0 ms**
+(>97x), while `trim` (261 → 259), `lines-from-source` (234 → 234) and
+`starts-with?` (26 → 25) did not move — because those three do not search.
+`meaning-codes-band` measured **7306/7321/7310 → 3711/3716/3708 ms** (1.97x, 0.2%
+spread) on the tree this work started from, and **122/122/121 → 114/116/115 ms**
+(1.06x) after the rebase brought the same hour's caller-side heal, which stopped
+that round searching 235,936 times. Both are true; the second is what is left
+once the caller stopped asking. The bearing census's own step total moved the
+*other* way at the old scale, 60,556,932 → 80,285,715, deterministic cold and
+warm; removing ~39.5M Form call entries cannot raise a total, and at the new
+168,453-step scale it behaves (168,453 → 155,292), so that figure measures
+something whose denominator moves with the door distribution. Named, not
+explained, and handed to `bearing-census.bml`'s hand.
 
 **One meaning for the search, held by four arms (2026-09-08).**
 `str_find(h, n, from)` answers the BYTE INDEX of the first occurrence of `n` in
