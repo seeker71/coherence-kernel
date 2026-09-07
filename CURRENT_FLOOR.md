@@ -346,6 +346,66 @@ never 0 — a zero reads as free, which is exactly how `substring` hid. And the
 census carries its own **coverage**: the snapshot is the warmest forty doors, and
 the row says what share of the whole process's walking that was.
 
+## Which door is a private copy of a warm one
+
+`form/form-stdlib/twin-census.bml` is the bearing census read backwards. That one
+ranks by heat, so a door nothing drives hard never rises, and a private copy is
+exactly that door — it waited under `sha256.fk` until a locale walk entered it
+seventy-six million times. This one finds its pairs in the **source**, so a door
+nobody has driven is named all the same, and the heat only colours the pair.
+
+Sameness is the whole difficulty, and the cell carries three verdicts and never a
+bare claim. **looks-identical** — the same bytes after comments are cut,
+whitespace squeezed, the door's own name rewritten `@s` and each parameter
+rewritten to its position, so `append-list(xs, ys)` and `append(xs, ys)` read as
+the one body they are. **differs-at** — a long shared prefix AND suffix with one
+window between them, both sides carried, because the window is not noise: it is
+the adapter. **unproven** — the twin named is a native, which has no body
+anywhere, so no body comparison exists and the pair goes to a band rather than to
+a reroute. Each pair also says what it costs: how many other doors mention the
+cold name.
+
+```text
+form/form-stdlib/tests/twin-census-band.fk  -> 65535   (hand-built doors and rows; fkwu-staged)
+observe/twin-census-run.fk    -> the locale-row walk, 181 doors, 31 pairs, 99.9% covered
+observe/twin-census-take.fk   -> 21 rows back off glass.sensor.twin, cadence 5000 ms in-frame
+```
+
+The witness is the morning of the heal. On `c82634d6` — the tree an hour before
+`sha256.fk`'s private floor was routed, its own `fkwu` built from its own seed —
+the lens read 187 doors, found 45 pairs, and put **all four** of that floor's
+doors in its top rows before anything had been investigated: `nth-rec` at
+76,254,048 cold walks (unproven against native `nth`), `nil?` as a three-way
+shadow across `core.fk`, `line-grammar.fk` and `sha256.fk`, `append-list`
+**looks-identical** to core's `append`, and `append-1` **differs-at** `append`,
+84.7% alike, *parting where it says `(list @1)` and the warm one says `@1`*. The
+heal that landed that day wrote exactly the window:
+`(defn append-1 (xs x) (append xs (list x)))`.
+
+Two things the ledger teaches, and the section above reads one of them the other
+way round. **Heat cannot tell a warm door from a cold one.** Heat counts WALKS
+and a crystallized door stops walking, so its heat freezes where it took off
+while a door that never crystallizes accrues without bound: that morning
+`append-1` sat at 30,191,048 walks with crystal 0 and `append` sat at 21,547 with
+crystal 3. Read as calls the cold one looks a thousand times the hotter, and only
+crystal separates them — which is also why the snapshot must be read as deep as
+the seed gives (64 rows): at 40 the warm side was simply missing, because being
+warm is what removed it. And **crystal 3 is not a threshold the body's calls
+buy.** In this seed it is set only by `fk_twin_pulse`, for four names — `nil?`,
+`append`, `int_to_str`, `reverse-onto` — at a fixed arity, and only in a unit
+whose leaf is one of six the seed lists. States 1 and 2 are earned by the JIT
+compiling that body; 3 is granted by name. That is why `sha256.fk`'s own PRIVATE
+`nil?` carried crystal 3 that morning: a private copy is not cold by law, it is
+cold when its name is one the seed does not know.
+
+On today's tree the lens names `reverse-acc-loop` in `line-grammar.fk` —
+1,623,666 cold walks at crystal -1 against core's `reverse-onto` at crystal 3,
+79.3% alike, parting where it says `eq (len @0)` and the warm one says `nil? @`.
+`line-grammar.fk` carries the same private list floor `sha256.fk` did (`nil?`,
+`nth` shadowing the native, `append`, `reverse-acc-loop`), `sha256.fk` still
+carries `sha256-stream-reverse-onto` identical to core's, and `append` stands
+defined twice, byte for byte, in `core.fk` and `line-grammar.fk`.
+
 ## The JIT string crossing
 
 `form-lower.fk` embeds compile-time strings and carries a runtime haystack and
