@@ -9,6 +9,15 @@ the whole path measured in seconds. This is where those milliseconds actually we
 **25.77 TFLOPS**. Every reading below is from that hour, and the before and the after are from the
 same hour on the same feed, so the field cannot move one and not the other.
 
+**And the same door an hour later, after the work had landed, said 3387 ms.** The lens said why:
+**254.03 GB/s**, **12.88 TFLOPS**, the 1B's token 8.67 ms → **67.45 ms**, `4in1` 3.82 ms →
+**21.81 ms**. The lane's chunk had gone 60 ms → 400-800 ms with it. Nothing in the lane moved
+between those two runs; the machine did. So every absolute here is that hour's, and what carries
+across hours is the shape: the bell was 101 ms of a 158 ms chunk, and it is now zero of a chunk
+whose whole length is the decode. A fork's price is CPU and page tables and does not fall when the
+GPU is busy — so on a loaded machine the removed 101 ms is a smaller share of a longer chunk, and
+on a quiet one it was most of it.
+
 ## Where the 640 ms went
 
 The instrument is a room without a microphone. `observe/ear-tongue-feed.fk` writes the segment
