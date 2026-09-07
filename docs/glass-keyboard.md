@@ -6,7 +6,9 @@ newline, shell, or helper process is needed for a view change. The one-shot
 
 Keys: `h` help; `a` atlas; `t` raster; `o` overview; `m` memory; `f` flow;
 `j` recipes; `s` live transcripts; `k` kernel; `v` events; `n` channels; `d` choice;
-`r` room (focus only; it does not activate a microphone). Choice controls are
+`r` room (focus only; it does not activate a microphone). `z` is the explicit
+ear awake/asleep control added upstream; stale ear state is labelled stale,
+not OPEN. Choice controls are
 `g` next option, `y` offer a take, `w` offer a hold; missing slots or a refused
 command offer remain refused, not an acknowledged outcome. Transcript languages:
 `1` English, `2` Portuguese, `3` Persian, `4` Indonesian toggle independently;
@@ -35,6 +37,9 @@ and renders all twelve views at 80×24 and 160×40. Its completion row must say
 Missing source doors and silent source ages follow. It does not request an owner
 refresh, publish a competing Glass sensor frame, refresh a governor, or admit a
 model. The bounded-current-frame doors use this same read-only collector.
+Rows keep their own source clock when present. An unbound row clock uses the
+carried frame's publication epoch/sequence, so its displayed age is publication
+age, not an inferred capture time; re-reading does not renew that epoch.
 
 `./fkwu observe/form-glass-memory-current-run.fk` renders narrow/wide memory
 panels from this inspecting process, native host VM counters, and published owner
