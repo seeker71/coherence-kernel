@@ -1,0 +1,82 @@
+; room-prosody-band.fk — the prosody organ against truth it was handed, not against an impression.
+;
+; PURE: it opens no mic and writes nothing. Every axis is fed a series or a waveform this band
+; BUILT, so the expected answer is known before the organ speaks. A sawtooth of period P is the
+; instrument: one unambiguous fundamental, harmonics all the way up, and a detector that cannot
+; find P in it cannot find a voice either.
+;
+; Expected: 65535
+; preludes: form-stdlib/room-prosody.bml
+
+(do
+    (defn rb-bit (ok bit) (if ok bit 0))
+
+    ; ---- a sawtooth of exactly known period, as s16le bytes ----------------------
+    (defn rb-le16 (v) (do (let u (if (lt v 0) (add v 65536) v)) (str_concat (byte_to_str (mod u 256)) (byte_to_str (div u 256)))))
+    (defn rb-saw-go (n period amp i acc) (if (ge i n) acc (rb-saw-go n period amp (add i 1) (str_concat acc (rb-le16 (sub (div (mul (mod i period) (mul 2 amp)) period) amp))))))
+    (defn rb-saw (period amp) (rb-saw-go 1600 period amp 0 ""))
+    (defn rb-silence-go (n acc) (if (ge (str_len acc) (mul 2 n)) (substring acc 0 (mul 2 n)) (rb-silence-go n (str_concat acc (rb-le16 0)))))
+    (defn rb-silence () (rb-silence-go 1600 (rb-le16 0)))
+    (defn rb-hz (period amp) (head (rpr-pitch-of (rb-saw period amp))))
+
+    ; ---- series the axes are read off ------------------------------------------
+    (defn rb-rep (v n acc) (if (le n 0) acc (rb-rep v (sub n 1) (cons v acc))))
+    (defn rb-flat () (rb-rep -300 30 (list)))                        ; a level that never moves
+    ; oldest-first energy: 10 quiet, 5 loud, 10 quiet, 5 loud, 10 quiet -- two clean onsets
+    (defn rb-two-bursts () (append (rb-rep -600 10 (list)) (append (rb-rep -200 5 (list)) (append (rb-rep -600 10 (list)) (append (rb-rep -200 5 (list)) (rb-rep -600 10 (list)))))))
+
+    (let saw200 (rb-saw 80 8000))
+    (let quietRow (nth (rpr-rows (rpr-reading (list (list) (list) (RPRFloorStart) ""))) 2))
+    (let liveRow (head (rpr-rows (rpr-reading (list (list -300) (list 200) -420 saw200)))))
+    ; a state holding a voiced octave: 100 Hz then 200 Hz, newest first
+    (let octave (rpr-reading (list (rb-flat) (list 200 150 120 100) -420 saw200)))
+    (let steady (rpr-reading (list (rb-flat) (list 200 200 200 200) -420 saw200)))
+    ; the two-burst series read as a live window
+    (let bursts (rpr-reading (list (reverse (rb-two-bursts)) (list) -600 "")))
+
+    (sum (list
+        ; --- volume: dBFS off a root-mean-square, exactly ---------------------
+        (rb-bit (and (eq (rpr-db10 32768) 0) (eq (rpr-db10 3277) -200)) 1)
+        (rb-bit (and (eq (rpr-db10 0) (RPRQuiet)) (eq (rpr-db10 16384) -60)) 2)
+
+        ; --- pitch: the period it was handed, and nothing in silence ----------
+        (rb-bit (eq (rb-hz 80 8000) 200) 4)
+        ; 100, 262 and 400 Hz to the hertz: the search band is computed wider than it reports, so
+        ; even the fundamental sitting on its own edge has real neighbours to interpolate between
+        (rb-bit (and (eq (rb-hz 160 8000) 100) (and (eq (rb-hz 61 8000) 262) (eq (rb-hz 40 8000) 400))) 8)
+        (rb-bit (eq (head (rpr-pitch-of (rb-silence))) 0) 16)
+        ; a crest is high enough AND lower on both sides; a ridge is not a period
+        (rb-bit (and (eq (rpr-crest? (list 0.1 0.9 0.2) 1 0.5) 1)
+                     (and (eq (rpr-crest? (list 0.95 0.9 0.2) 1 0.5) 0)
+                          (eq (rpr-crest? (list 0.1 0.4 0.2) 1 0.5) 0))) 32)
+
+        ; --- the speech line: a follower one dropout cannot take --------------
+        ; a single empty reading is passed over; a real quiet one pulls at most RPRFloorFall
+        (rb-bit (eq (rpr-floor-next -400 (list (RPRQuiet) -390)) (add -400 (RPRFloorRise))) 64)
+        (rb-bit (eq (rpr-floor-next -400 (list -900)) (sub -400 (RPRFloorFall))) 128)
+        (rb-bit (and (eq (rpr-floor-next (RPRFloorCeil) (list -100)) (RPRFloorCeil))
+                     (eq (rpr-line (list (list) (list) -420 "")) (add -420 (RPRLineDb10)))) 256)
+
+        ; --- cadence: two built bursts are two onsets, and silence is none ----
+        (rb-bit (eq (head (rpr-onsets (rb-two-bursts) -480)) 2) 512)
+        (rb-bit (eq (head (rpr-onsets (rb-rep -600 40 (list)) -480)) 0) 1024)
+
+        ; --- stillness: the share under the line, and the longest run ---------
+        (rb-bit (and (eq (rpr-r-still bursts) 75) (eq (rpr-r-pause bursts) 100)) 2048)
+
+        ; --- expression: flat reads flat, moving reads moving ------------------
+        ; a level that never changes has no spread; an octave of pitch is 1200 cents apart
+        (rb-bit (and (eq (rpr-sd (rb-rep -300 8 (list))) 0) (gt (rpr-sd (list -200 -400 -300 -500)) 0)) 4096)
+        (rb-bit (and (eq (rpr-r-sdpitch steady) 0) (gt (rpr-r-sdpitch octave) 300)) 8192)
+
+        ; --- intonation: an octave is twelve semitones, and it knows which way -
+        (rb-bit (and (eq (rpr-r-span octave) 12) (eq (rpr-r-span steady) 0)) 16384)
+        ; the state's pitch list runs newest first, so 200-newest over 100-oldest is a rise
+        (rb-bit (and (str_eq (rpr-move-word (rpr-r-move octave)) "rising")
+                     (and (str_eq (rpr-move-word (rpr-r-move steady)) "level")
+                          ; --- the rows: a live axis is present, an absent one says so
+                          (and (eq (fgo-present? liveRow) 1)
+                               (and (eq (fgo-present? quietRow) 0)
+                                    (and (str_eq (fgo-value-kind quietRow) "absent")
+                                         (and (eq (len (rpr-rows (rpr-reading (list (list) (list) (RPRFloorStart) "")))) 14)
+                                              (str_eq (fgo-domain liveRow) "prosody"))))))) 32768))))
