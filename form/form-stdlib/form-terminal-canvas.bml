@@ -205,7 +205,7 @@ section [form.bml] {
         def ftc-ansi-bg(style) = if lt(ftc-style-back-red(style), 0) then "" else str_concat(";", tg-bg-rgb(ftc-style-back-red(style), ftc-style-back-green(style), ftc-style-back-blue(style)));
         def ftc-ansi-weight(style) = if eq(ftc-style-bold?(style), 1) then str_concat(tg-code("bold"), ";") else if lt(ftc-style-alpha(style), 160) then str_concat(tg-code("dim"), ";") else "";
         def ftc-ansi-cell(cell) = ftc-cat(list(ftc-ansi-style(ftc-cell-style(cell)), ftc-cell-glyph(cell), tg-reset()));
-        def ftc-ansi-style(style) = tg-sgr(ftc-cat(list(ftc-ansi-weight(style), ftc-ansi-fg(style), ftc-ansi-bg(style))));
+        def ftc-ansi-style(style) = tg-sgr(ftc-cat(list("0;", ftc-ansi-weight(style), ftc-ansi-fg(style), ftc-ansi-bg(style))));
         def ftc-ansi-segment(segment) = ftc-cat(list(ftc-ansi-style(ftc-segment-style(segment)), ftc-text-as-string(ftc-segment-text(segment))));
         def ftc-ansi-segments(segments) = if eq(len(segments), 0) then tg-reset() else str_concat(ftc-ansi-segment(head(segments)), ftc-ansi-segments(tail(segments)));
         def ftc-ansi-line-end() = str_concat(tg-reset(), tg-line-erase-rest());
@@ -262,7 +262,7 @@ section [form.bml] {
         def ftcb-onto-weight(style, rest) = if eq(ftc-style-bold?(style), 1) then cons(49, cons(59, rest)) else if lt(ftc-style-alpha(style), 160) then cons(50, cons(59, rest)) else rest;
         def ftcb-onto-fg(style, rest) = cons(51, cons(56, cons(59, cons(50, cons(59, ftcb-onto-int(ftc-style-red(style), cons(59, ftcb-onto-int(ftc-style-green(style), cons(59, ftcb-onto-int(ftc-style-blue(style), rest))))))))));
         def ftcb-onto-bg(style, rest) = if lt(ftc-style-back-red(style), 0) then rest else cons(59, cons(52, cons(56, cons(59, cons(50, cons(59, ftcb-onto-int(ftc-style-back-red(style), cons(59, ftcb-onto-int(ftc-style-back-green(style), cons(59, ftcb-onto-int(ftc-style-back-blue(style), rest)))))))))));
-        def ftcb-onto-style(style, rest) = cons(27, cons(91, ftcb-onto-weight(style, ftcb-onto-fg(style, ftcb-onto-bg(style, cons(109, rest))))));
+        def ftcb-onto-style(style, rest) = cons(27, cons(91, cons(48, cons(59, ftcb-onto-weight(style, ftcb-onto-fg(style, ftcb-onto-bg(style, cons(109, rest))))))));
         def ftcb-onto-text-value(text, rest) = if eq(ftc-byte-text?(text), 1) then ftcb-onto-list(nth(text, 1), rest) else ftcb-onto-text(text, rest);
         def ftcb-onto-segment(segment, rest) = ftcb-onto-style(ftc-segment-style(segment), ftcb-onto-text-value(ftc-segment-text(segment), rest));
         def ftcb-onto-segments(segments, rest) = if eq(len(segments), 0) then rest else ftcb-onto-segment(head(segments), ftcb-onto-segments(tail(segments), rest));
@@ -292,6 +292,29 @@ section [form.bml] {
             ftcb-onto-lines-diff(previous, nextLines, sub(count, 1), list());
         }
         def ftcb-full-frame(lines) = cons(27, cons(91, cons(72, ftcb-onto-segment-lines(lines, list(27, 91, 74)))));
+        // Absolute rows never scroll at the bottom margin. A new renderer
+        // paints over the retained screen; it never exposes an empty screen.
+        def ftcb-screen-rows(lines, y) = if eq(len(lines), 0) then list() else ftcb-onto-position(0, y, ftcb-onto-segment-line(head(lines), ftcb-screen-rows(tail(lines), add(y, 1))));
+        def ftcb-screen-frame(lines) = ftcb-screen-rows(lines, 0);
+        // Column offsets are safe only for ASCII. Wider glyphs keep the whole
+        // row fallback until the canvas has a display-width carrier.
+        def ftcb-ascii-byte(text, i) = if eq(ftc-byte-text?(text), 1) then nth(nth(text, 1), i) else str_byte_at(text, i);
+        def ftcb-ascii?(text, i) = if ge(i, ftc-text-width(text)) then 1 else if gt(ftcb-ascii-byte(text, i), 126) then 0 else if lt(ftcb-ascii-byte(text, i), 32) then 0 else ftcb-ascii?(text, add(i, 1));
+        def ftcb-aligned?(old, next) = if not(eq(len(old), len(next))) then 0 else if eq(len(old), 0) then 1 else if not(eq(ftc-text-width(ftc-segment-text(head(old))), ftc-text-width(ftc-segment-text(head(next))))) then 0 else if not(eq(ftcb-ascii?(ftc-segment-text(head(next)), 0), 1)) then 0 else if not(eq(ftcb-ascii?(ftc-segment-text(head(old)), 0), 1)) then 0 else ftcb-aligned?(tail(old), tail(next));
+        def ftcb-screen-segments(old, next, x, y, rest) = if eq(len(next), 0) then rest else ftcb-screen-segments-more(old, next, x, y, rest);
+        def ftcb-screen-segments-more(old, next, x, y, rest) {
+            let later = ftcb-screen-segments(tail(old), tail(next), add(x, ftc-text-width(ftc-segment-text(head(next)))), y, rest);
+            if eq(ftcb-segment-visible-equal?(head(old), head(next)), 1) then later else ftcb-onto-position(x, y, ftcb-onto-reset(ftcb-onto-segment(head(next), ftcb-onto-reset(later))));
+        }
+        def ftcb-screen-diff-rows(old, next, y, count) = if ge(y, count) then list() else ftcb-screen-diff-more(old, next, y, count);
+        def ftcb-screen-diff-more(old, next, y, count) {
+            let before = ftc-segment-line-at(old, y);
+            let after = ftc-segment-line-at(next, y);
+            let rest = ftcb-screen-diff-rows(old, next, add(y, 1), count);
+            if eq(ftcb-segment-list-equal?(before, after), 1) then rest else if eq(ftcb-aligned?(before, after), 1) then ftcb-screen-segments(before, after, 0, y, rest) else ftcb-onto-position(0, y, ftcb-onto-reset(ftcb-onto-segment-line(after, rest)));
+        }
+        def ftcb-screen-diff(old, next) = ftcb-screen-diff-rows(old, next, 0, if gt(len(old), len(next)) then len(old) else len(next));
+        def ftcb-display-patch(bytes) = if eq(len(bytes), 0) then list() else ftcb-onto-text(tg-sync-begin(), ftcb-onto-text(tg-cursor-hide(), ftcb-onto-reset(ftcb-onto-list(bytes, ftcb-onto-reset(ftcb-onto-text(tg-cursor-home(), ftcb-onto-text(tg-cursor-show(), ftcb-text(tg-sync-end()))))))));
         def ftcb-write-stdout(bytes) = if eq(len(bytes), 0) then 0 else file_append_bytes("/dev/stdout", bytes);
     }
     0;

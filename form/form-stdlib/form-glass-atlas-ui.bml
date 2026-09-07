@@ -49,6 +49,10 @@ section [form.bml] {
         def fglat-token-value(text) = fgd-pad-right(fgd-fit(text, 3), 3);
         def fglat-compact-zero(state) = if str_eq(state, "idle") then "0i" else if str_eq(state, "empty") then "0e" else if str_eq(state, "drained") then "0d" else if str_eq(state, "quiet") then "0q" else "0";
         def fglat-metric-live?(metric) = if eq(len(metric), 0) then 0 else fgo-present?(metric);
+        // Retained tiles may show last-observed values; headline gauges may not.
+        def fglat-metric-current?(metric) = if not(eq(fglat-metric-live?(metric), 1)) then 0 else if str_eq(fgo-lifecycle(metric), "silent") then 0 else if str_eq(fgo-lifecycle(metric), "stale") then 0 else if str_eq(fgo-lifecycle(metric), "contended") then 0 else if str_eq(fgo-evidence(metric), "physical-live") then 1 else str_eq(fgo-evidence(metric), "derived-window");
+        def fglat-current-metrics(rows) = if eq(len(rows), 0) then list() else if eq(fglat-metric-current?(head(rows)), 1) then cons(head(rows), fglat-current-metrics(tail(rows))) else fglat-current-metrics(tail(rows));
+        def fglat-cpu-text(cpu) = if not(eq(fglat-metric-current?(cpu), 1)) then "?" else if str_eq(fgo-unit(cpu), "microseconds") then str_concat(fgd-format-count(div(fgo-int-value(cpu), 1000)), "ms-total") else if str_eq(fgo-unit(cpu), "tenths-percent") then fgd-cat(list(int_to_str(div(fgo-int-value(cpu), 10)), ".", int_to_str(mod(fgo-int-value(cpu), 10)), "%")) else "?";
         def fglat-moving-metric?(metric) = if eq(fglat-metric-live?(metric), 0) then 0 else if str_eq(fgo-value-kind(metric), "text") then 1 else if not(eq(fgo-int-value(metric), 0)) then 1 else if eq(fgd-semantic-zero-state?(fgo-lifecycle(metric)), 1) then 0 else 1;
         def fglat-moving-metrics(rows) = if eq(len(rows), 0) then list() else if eq(fglat-moving-metric?(head(rows)), 1) then cons(head(rows), fglat-moving-metrics(tail(rows))) else fglat-moving-metrics(tail(rows));
         def fglat-id-ends?(id, suffix) = if lt(str_len(id), str_len(suffix)) then 0 else str_eq(substring(id, sub(str_len(id), str_len(suffix)), str_len(id)), suffix);
@@ -297,13 +301,13 @@ section [form.bml] {
             let present = fgd-index-find(index, "model-owner-present");
             let rss = fgd-index-find(index, "model-owner-rss");
             let cpu = fgd-index-find(index, "model-owner-cpu");
-            if eq(fglat-metric-live?(rss), 1) then fgd-cat(list("owner=", fgd-format-bytes(fgo-int-value(rss)), " cpu=", fgd-format-count(div(fgo-int-value(cpu), 1000)), "ms")) else if and(eq(fglat-metric-live?(present), 1), eq(fgo-int-value(present), 0)) then if str_eq(fgo-lifecycle(present), "released") then "owner=dead" else "owner=absent" else "owner=absent";
+            if eq(fglat-metric-current?(rss), 1) then fgd-cat(list("owner=", fgd-format-bytes(fgo-int-value(rss)), " cpu=", fglat-cpu-text(cpu))) else if and(eq(fglat-metric-current?(present), 1), eq(fgo-int-value(present), 0)) then if str_eq(fgo-lifecycle(present), "released") then "owner=dead" else "owner=absent" else "owner=?";
         }
-        def fglat-disk-rate-text(disk, tps) = if eq(fglat-metric-live?(disk), 1) then if str_eq(fgo-unit(disk), "centi-MB/s") then fgd-cat(list(int_to_str(div(fgo-int-value(disk), 100)), ".", if lt(mod(fgo-int-value(disk), 100), 10) then "0" else "", int_to_str(mod(fgo-int-value(disk), 100)), "MB/s")) else str_concat(int_to_str(fgo-int-value(disk)), "MB/s") else if eq(fglat-metric-live?(tps), 1) then str_concat(int_to_str(fgo-int-value(tps)), "tps") else "?";
-        def fglat-doing-line(metrics, samples, epoch, width) = fglat-doing-line-in(fgd-metric-index(metrics), metrics, samples, epoch, width);
+        def fglat-disk-rate-text(disk, tps) = if eq(fglat-metric-current?(disk), 1) then if str_eq(fgo-unit(disk), "centi-MB/s") then fgd-cat(list(int_to_str(div(fgo-int-value(disk), 100)), ".", if lt(mod(fgo-int-value(disk), 100), 10) then "0" else "", int_to_str(mod(fgo-int-value(disk), 100)), "MB/s")) else if str_eq(fgo-unit(disk), "MB/s") then str_concat(int_to_str(fgo-int-value(disk)), "MB/s") else "?" else if eq(fglat-metric-current?(tps), 1) then str_concat(int_to_str(fgo-int-value(tps)), "tps") else "?";
+        def fglat-doing-line(metrics, samples, epoch, width) = fglat-doing-line-in(fgd-metric-index(fglat-current-metrics(metrics)), metrics, samples, epoch, width);
         def fglat-doing-line-in(index, metrics, samples, epoch, width) {
-            let cpus = fglat-process-suffix-metrics(metrics, "-cpu");
-            let rsses = fglat-process-suffix-metrics(metrics, "-rss");
+            let cpus = fglat-process-suffix-metrics(fglat-current-metrics(metrics), "-cpu");
+            let rsses = fglat-process-suffix-metrics(fglat-current-metrics(metrics), "-rss");
             let maxCpu = fglat-metric-max(cpus, 0);
             let sumRss = fglat-metric-sum(rsses, 0);
             let pageins = fgd-index-find(index, "pageins");
@@ -313,14 +317,14 @@ section [form.bml] {
             let load = fgd-index-find(index, "load-1");
             let metal = fglat-find-sample-id(samples, "memory.owner.metal-current-allocated");
             let mapped = fglat-find-sample-id(samples, "mapped.qwen3.8-flash-next");
-            let pinText = if eq(fglat-metric-live?(pinDelta), 1) then if eq(fgo-int-value(pinDelta), 0) then "0" else str_concat("+", fgd-format-count(fgo-int-value(pinDelta))) else if eq(fglat-metric-live?(pageins), 1) then fgd-format-count(fgo-int-value(pageins)) else "?";
-            let loadText = if eq(fglat-metric-live?(load), 1) then fgd-cat(list(" load=", int_to_str(div(fgo-int-value(load), 10)), ".", int_to_str(mod(fgo-int-value(load), 10)))) else "";
-            fgd-segment-line(fgd-cat(list("DOING n=", int_to_str(len(rsses)), " cpu=", fgd-format-count(div(maxCpu, 1000)), "ms rss=", if eq(sumRss, 0) then "?" else fgd-format-bytes(sumRss), loadText, " ", fglat-owner-doing-text-in(index), " ", fglat-token-stall-text(samples, epoch), " pin=", pinText, " dsk=", fglat-disk-rate-text(disk, tps), " ", fglat-sample-bytes-text(metal))), width, fgd-style-for-plane("cpu", 255, if gt(maxCpu, 200) then 1 else 0), "atlas.doing", list("atlas", "process", "health", "flow"), "physical-live");
+            let pinText = if eq(fglat-metric-current?(pinDelta), 1) then if eq(fgo-int-value(pinDelta), 0) then "0" else str_concat("+", fgd-format-count(fgo-int-value(pinDelta))) else if eq(fglat-metric-current?(pageins), 1) then fgd-format-count(fgo-int-value(pageins)) else "?";
+            let loadText = if eq(fglat-metric-current?(load), 1) then fgd-cat(list(" load=", int_to_str(div(fgo-int-value(load), 10)), ".", int_to_str(mod(fgo-int-value(load), 10)))) else "";
+            fgd-segment-line(fgd-cat(list("DOING dsk=", fglat-disk-rate-text(disk, tps), " ", fglat-token-stall-text(samples, epoch), " n=", int_to_str(len(rsses)), " cpuT=", if eq(len(cpus), 0) then "?" else str_concat(fgd-format-count(div(maxCpu, 1000)), "ms"), " rss=", if eq(len(rsses), 0) then "?" else fgd-format-bytes(sumRss), " pin=", pinText, loadText, " ", fglat-owner-doing-text-in(index), " ", fglat-sample-bytes-text(metal))), width, fgd-style-for-plane("cpu", 255, 0), "atlas.doing", list("atlas", "process", "health", "flow"), "physical-live");
         }
         def fglat-pressure-line(metrics, samples, history, width) = fglat-pressure-line-in(fgd-metric-index(metrics), samples, history, width);
         def fglat-pressure-line-in(index, samples, history, width) {
             let freeM = fgd-index-find(index, "memory-free");
-            let free = if eq(fglat-metric-live?(freeM), 1) then fgo-int-value(freeM) else -1;
+            let free = if eq(fglat-metric-current?(freeM), 1) then fgo-int-value(freeM) else -1;
             let rss = fgd-index-find(index, "model-owner-rss");
             let cpu = fgd-index-find(index, "model-owner-cpu");
             let compressor = fgd-index-find(index, "compressor-pages");
@@ -328,10 +332,10 @@ section [form.bml] {
             let pressure = fglat-find-sample-kind(samples, "pressure");
             let level = fglat-pressure-level(free);
             let used = if lt(free, 0) then "?" else int_to_str(sub(100, free));
-            let rssText = if eq(fglat-metric-live?(rss), 1) then fgd-format-bytes(fgo-int-value(rss)) else "?";
-            let cpuText = if eq(fglat-metric-live?(cpu), 1) then str_concat(fgd-format-count(div(fgo-int-value(cpu), 10)), "%") else "?";
+            let rssText = if eq(fglat-metric-current?(rss), 1) then fgd-format-bytes(fgo-int-value(rss)) else "?";
+            let cpuText = fglat-cpu-text(cpu);
             let gov = if eq(len(pressure), 0) then "?" else if eq(fgtm-field-present?(fgtm-sample-capacity(pressure)), 1) then fgd-format-count(fgtm-field-value(fgtm-sample-capacity(pressure))) else fgtm-sample-purpose(pressure);
-            fgd-segment-line(fgd-cat(list("PRESS free=", if lt(free, 0) then "?" else str_concat(int_to_str(free), "%"), " used=", used, "% ", level, " file=", if eq(fglat-metric-live?(fileBacked), 1) then fgd-format-count(fgo-int-value(fileBacked)) else "?", " cmp=", if eq(fglat-metric-live?(compressor), 1) then fgd-format-count(fgo-int-value(compressor)) else "?", " rss=", rssText, " cpu=", cpuText, " gov=", gov, " g", fglat-phase-move(history, 10), "w", fglat-phase-move(history, 11), "i", fglat-phase-move(history, 12))), width, fgd-style-for-plane("unified", if str_eq(level, "ok") then 220 else 255, if or(str_eq(level, "warn"), str_eq(level, "crit")) then 1 else 0), "atlas.pressure", list("atlas", "pressure", "memory", "health"), if lt(free, 0) then "unavailable" else "physical-live");
+            fgd-segment-line(fgd-cat(list("PRESS free=", if lt(free, 0) then "?" else str_concat(int_to_str(free), "%"), " used=", used, "% ", level, " file=", if eq(fglat-metric-current?(fileBacked), 1) then fgd-format-count(fgo-int-value(fileBacked)) else "?", " cmp=", if eq(fglat-metric-current?(compressor), 1) then fgd-format-count(fgo-int-value(compressor)) else "?", " rss=", rssText, " cpu=", cpuText, " gov=", gov, " g", fglat-phase-move(history, 10), "w", fglat-phase-move(history, 11), "i", fglat-phase-move(history, 12))), width, fgd-style-for-plane("unified", if str_eq(level, "ok") then 220 else 255, if or(str_eq(level, "warn"), str_eq(level, "crit")) then 1 else 0), "atlas.pressure", list("atlas", "pressure", "memory", "health"), if lt(free, 0) then "unavailable" else "physical-live");
         }
         def fglat-seam-line(missing, width) = if eq(len(missing), 0) then fgd-segment-line("SEAM 0 live tiles occupy the rows; missing doors named here", width, fgd-ready(), "atlas.seam", list("atlas", "health", "evidence"), "physical-live") else fgd-segment-line(fgd-cat(list("SEAM n=", int_to_str(len(missing)), " next=", fgo-source(head(missing)))), width, fgd-health(), "atlas.seam", list("atlas", "health", "evidence"), "unavailable");
         def fglat-shown(count, capacity) = fgd-min(count, capacity);
