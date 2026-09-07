@@ -627,6 +627,35 @@ purpose label -- and the rested count it used to parse was added to a
 difference that subtracted it again. governor-glass 4194303,
 events-channels 32767.
 
+**The choice view shows the frame's own choices, because now it can.** The
+lane published eighteen rows a second and the view decoded zero of them: it
+was written against a wire whose entries read `point|alpha|Which lane...?`,
+and a membrane channel is a LABEL — lowercase, digits, `- . _`, at most 64
+bytes, at most sixteen per row — so no frame could ever carry it. Its band
+passed because the band built the same impossible samples by hand and never
+asked the membrane whether it would take them. The wire is label-shaped and
+bounded now (`led.<offered>.<taken>.<held>.<declined>.<waitMs>` and one
+`opt.<id>.<cost>.<reward>` per option), the band publishes its own fixture
+through shared memory and reads it back before believing a single bit, and
+prose — a point's question, an option's sentence — is named as what this
+membrane cannot carry rather than pretended. The view also stopped keeping a
+second opinion: it read the lane's counts and then computed its OWN findings
+off its own thresholds, so `gap-corridor` on the glass meant low flow while
+the same word in the frame meant one option. The findings are the lane's now,
+read from the frame's finding rows. choice-view 32767, choice-flow 8191.
+
+**A control frame is not a publisher, and a wait nobody clocked is not a
+stalled wait.** The glass's roster walk took every gift frame in its space,
+including the control inbox and its ack, and read them with the snapshot
+parser: two rows a tick reading `malformed` for two channels working exactly
+as built, and the choice lane scoring them as two declines. The membrane
+already named them by suffix; the roster asks now (`fgtm-control-frame-name?`),
+and `fgtm-frames-in-space` still names every frame for anyone who wants one.
+Alongside, a point holding most of its offers and timing none of them read as
+`wound-stalled` — a claim about a wait that was never taken. It reads
+`gap-unclocked` now and asks for the clock, and a gap no longer publishes with
+a wound's lifecycle. membrane 2097151, awareness 1048575.
+
 **The live glass's frame work rests inside its budget.** A projection node
 names a field once (`fgo-field-node`): `intern_node_at` records a framebuffer
 root on every call in all four arms, so re-minting the same field each frame
