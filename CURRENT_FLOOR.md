@@ -667,6 +667,31 @@ off its own thresholds, so `gap-corridor` on the glass meant low flow while
 the same word in the frame meant one option. The findings are the lane's now,
 read from the frame's finding rows. choice-view 32767, choice-flow 8191.
 
+**The publisher roster ages by last speech instead of refusing at its wall.**
+There are 511 slots and no door to give one back, so every band run and every
+short-lived publisher registers a name that stands until reboot — 34 frames on
+this host, 28 of them dead. Past 511 the roster refused SILENTLY and every
+publisher after that was simply never listed. A slot's timestamp is now
+refreshed on every register, which a live publisher does on every publish, and
+a full roster takes the least recently spoken slot. Nothing alive is displaced:
+a publisher still giving is, by definition, not the oldest. Witnessed on a
+private roster in a scratch build — 511 filled, the newcomer listed, the
+silent slot taken, and a name that spoke again keeping its slot while the
+neighbour that stayed quiet lost one. The frames themselves still outlive
+their processes: the body has no `shm_unlink` door, and the last free AST tag
+is the price of one.
+
+**A zero the body never measured is not a reading.** Every organ row published
+`heat` present-0, so each one told a reader it had taken a heat reading and
+found nothing there — and a row with no other number (`surprise.last`, the
+grammars) rendered `0` on the atlas as its value. The atlas held two opinions
+about what counts as a value, too: its row-picker asked for heat greater than
+zero and its renderer only asked whether heat was present, so it drew a value
+the same file had just said was not one. Organ rows publish heat absent now,
+and both doors ask one question. In the choice lane, a whole with no part is
+no reading either: a surprise routing row standing without its choice row used
+to publish 100% holding out of a row that never came.
+
 **A control frame is not a publisher, and a wait nobody clocked is not a
 stalled wait.** The glass's roster walk took every gift frame in its space,
 including the control inbox and its ack, and read them with the snapshot
