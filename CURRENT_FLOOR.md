@@ -208,6 +208,27 @@ waist (`str_len`, `str_byte_at`, `byte_to_str`, `str_concat`). `str_find` is
 byte-wise (`core-str-find-equivalence-band` 2047 keeps the old loop verbatim as
 its reference).
 
+`substring` is a native again on fkwu (2026-09-07) — mode 9 of the leaf door
+(tag 201), not a tag of its own: every tag 0..255 carries an arm and 150 is held
+as the native-surface probe, so it rides the door modes 4-8 already ride. Bytes,
+not codepoints, exactly as the recipe cut them. Measured warm on this Mac with
+six siblings live (load 4.2-6.6, so these are minimums of two or three): the same
+192 kB cut runs at **4.59 MB/s composed and 660 MB/s native**, 144x, against
+`str_concat`'s 566 MB/s on the same pool. Real doors: `meaning-codes-band`
+20.2 s → 10.5 s, `ear-native-band` 828 ms → 279 ms, `ear-axes-band` 239 ms →
+164 ms — every verdict unchanged. The homecoming corpus band does **not** move
+(317 ms → 316 ms): its prose walker is token-shaped, jumping whole runs through
+the `scan_run` native precisely so it would never pay this cost.
+`fstr-substring-halve` and `fstr-substring-loop` stay in `core.fk` as the
+portable fallback and as what the bands measure against:
+`core-substring-equivalence-band` still 2047 (an exhaustive start/end sweep,
+written against the original byte-at-a-time loop before this native existed) and
+`substring-native-band` 511 (the locale rows, and the byte adjacency law at every
+byte offset of a Persian/Romanian/German file). go, rust and ts keep their own
+native, which floors both offsets to character starts and dies on out-of-range
+bounds where fkwu answers `""` — a divergence older than this change and not
+closed by it.
+
 ## The JIT string crossing
 
 `form-lower.fk` embeds compile-time strings and carries a runtime haystack and
