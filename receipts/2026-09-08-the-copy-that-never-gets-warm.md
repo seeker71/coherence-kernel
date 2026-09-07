@@ -121,7 +121,7 @@ private copy of the seed's own table would be the wound it exists to name.
 
 ## What it names on today's tree
 
-The same workload, 181 doors, 31 pairs, 99.9% covered:
+The same workload, 183 doors, 32 pairs, 99.9% covered (59,076,054 walker steps):
 
 ```text
 coldest: reverse-acc-loop — a cold side measured against a crystallized one
@@ -191,6 +191,26 @@ cells is a family of `differs-at` pairs whose only parting is `twg` against
 that calls the other's, and the lens says `differs-at`, which is the correct
 answer.
 
+## The frontier question
+
+*What makes one of two identical doors warm and the other cold?*
+
+The body has no door that answers this. It reports the crystal flag and nothing
+says where the flag comes from, so every reading of it is an inference — and row
+1351's inference was that the whole body's calls pool on one name and push it
+past a threshold. Answered by reading the seed rather than the number: crystal 3
+is set in one place, `fk_twin_pulse`, for four names at a fixed arity in six
+units the seed lists by hand. **It is granted by name, not bought by calls.** The
+warmth is on the name, not on the door: `append-1` was cold for want of being
+spelled `append`, and a rename can take a door's heat away with nothing else
+changed. So the column that separates two twins is crystal, never heat — and it
+has to be read to the seed's own depth, because the warm one is exactly the row a
+heat-ranked snapshot drops first.
+
+Offered as corpus row **1355**, `nameheat`. The lens now says which state it is
+looking at where it renders the flag — earned by the JIT, or granted by the seed
+— and it does not keep a copy of the seed's list of names to say so.
+
 ## Still open
 
 - `looks-identical` on a short accessor is a body match, not a meaning match.
@@ -255,7 +275,7 @@ form/form-stdlib/tests/twin-census-band.fk        -> 65535
   (the same band with two assertions falsified    -> 56319)
 form/form-stdlib/tests/bearing-census-band.fk     -> 32767   (the instrument, unchanged)
 form/form-stdlib/tests/binary-freshness-band.fk   -> 31
-observe/twin-census-run.fk    -> reverse-acc-loop; 181 doors, 31 pairs, 99.9% covered
+observe/twin-census-run.fk    -> reverse-acc-loop; 183 doors, 32 pairs, 99.9% covered
 observe/twin-census-take.fk   -> 21 rows, seq-tracked, cadence 5000 ms in-frame
 c82634d6 + its own fkwu       -> 187 doors, 45 pairs, all four sha256 doors named
 learn/tests/homecoming-distillation-corpus-band.fk -> 32767

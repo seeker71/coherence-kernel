@@ -367,7 +367,7 @@ cold name.
 
 ```text
 form/form-stdlib/tests/twin-census-band.fk  -> 65535   (hand-built doors and rows; fkwu-staged)
-observe/twin-census-run.fk    -> the locale-row walk, 181 doors, 31 pairs, 99.9% covered
+observe/twin-census-run.fk    -> the locale-row walk, 183 doors, 32 pairs, 99.9% covered
 observe/twin-census-take.fk   -> 21 rows back off glass.sensor.twin, cadence 5000 ms in-frame
 ```
 
