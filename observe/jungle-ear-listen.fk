@@ -1,0 +1,110 @@
+; jungle-ear-listen.fk — the door: open the mic for a bounded stretch, hand every
+; 100 ms frame to the jungle ear, and write back what this place taught it.
+;
+; The organ holds no clock and no mic. This door holds both: it reads this host's
+; offset from UTC once, opens the stream, hands in frames with the hour each event
+; actually fell in, and persists the voices when the stretch closes. Nothing of the
+; sound survives the frame -- the only thing that outlives a listening is a row of
+; integers per voice.
+;
+; stdin: one line, how many SECONDS to listen (default 60).
+;
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/jungle-ear.bml form/form-stdlib/form-fs.fk
+(do
+    (defn jel-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (jel-cat (tail xs)))))
+    (defn jel-line () (do (let l (read_line)) (if (nothing? l) "" l)))
+    (defn jel-secs () (do (let l (jel-line)) (if (eq (str_len l) 0) 60 (str_to_int l))))
+    (defn jel-text (v) (if (nothing? v) "" v))
+    ; The hour is derived, not re-asked. One fork reads this host's offset from
+    ; UTC once ("+0800" here) and every event's hour comes from its own millisecond
+    ; -- so a stretch that crosses an hour boundary stamps each event where it fell
+    ; instead of stamping the whole run with the hour it began in. The first build
+    ; asked `date +%H` once at the start and a run beginning at 18:57 wrote 18 on
+    ; events that happened at 19:01; the fix is arithmetic, not more forks
+    ; (a fork is priced by what the process has touched -- corpus row 1341).
+    (defn jel-zone () (do (let out (trim (jel-text (host-exec "date +%z" "")))) (if (lt (str_len out) 5) 0 (jel-zone-of out))))
+    (defn jel-zone-of (s) (do (let m (add (mul 60 (str_to_int (substring s 1 3))) (str_to_int (substring s 3 5)))) (if (eq (str_byte_at s 0) 45) (sub 0 m) m)))
+    (defn jel-hour-at (ms off) (do (let mins (add (div ms 60000) off)) (let h (div mins 60)) (sub h (mul 24 (div h 24)))))
+    (defn jel-load () (do (let t (jel-text (read_file (JERowsPath)))) (if (eq (str_len t) 0) (list) (je-rows-of t))))
+
+    ; state = (cs floor bed ev frames misses events lastGive)
+    (defn jel-cs (st) (nth st 0))
+    (defn jel-floor (st) (nth st 1))
+    (defn jel-bed (st) (nth st 2))
+    (defn jel-ev (st) (nth st 3))
+    (defn jel-frames (st) (nth st 4))
+    (defn jel-misses (st) (nth st 5))
+    (defn jel-events (st) (nth st 6))
+    (defn jel-give-at (st) (nth st 7))
+    (defn jel-with (st cs fl bed ev n miss ev2 give) (list cs fl bed ev n miss ev2 give))
+
+    ; a closed event: place it, say what it was, and start the next one empty
+    (defn jel-close (st f off now)
+        (do (let e (jel-ev st))
+            (let ok (je-ev-ok? e))
+            (let hour (jel-hour-at now off))
+            (let p (je-print e (jel-bed st) hour))
+            (let before (len (jel-cs st)))
+            (let cs2 (je-hear (jel-cs st) e (jel-bed st) hour now))
+            (if (eq ok 1) (print (jel-cat (list
+                "  event " (int_to_str (mul (je-ev-frames e) 100)) " ms"
+                "  br=" (int_to_str (je-pow2t (je-p-br p))) " Hz"
+                "  pd=" (int_to_str (je-p-pd p))
+                "  pr=" (int_to_str (je-p-pr p))
+                "  cr=" (int_to_str (je-p-cr p))
+                "  lv=" (int_to_str (div (je-p-lv p) 10)) " dB"
+                (if (gt (len cs2) before) "   -> NEW VOICE" "   -> known")))) 0)
+            (jel-with st cs2 (jel-floor st) (jel-bed st) (je-ev-empty) (jel-frames st) (jel-misses st) (add (jel-events st) ok) (jel-give-at st))))
+
+    (defn jel-absorb (st f off now)
+        (do (let first (eq (jel-frames st) 0))
+            (let fl (if first (je-f-db f) (je-floor-next (jel-floor st) (je-f-db f))))
+            (let bed (if first (je-f-db f) (je-bed-next (jel-bed st) (je-f-db f))))
+            (let ev (je-ev-step (jel-ev st) f bed now))
+            (let st2 (jel-with st (jel-cs st) fl bed ev (add (jel-frames st) 1) (jel-misses st) (jel-events st) (jel-give-at st)))
+            (if (eq (je-ev-done? ev) 1) (jel-close st2 f off now) st2)))
+
+    (defn jel-give (st off now)
+        (do (let gave (fgsr-give-at (JESensor) now (je-rows (jel-cs st) (jel-floor st) (jel-bed st) (jel-hour-at now off) 1) (JECadenceMs)))
+            (jel-with st (jel-cs st) (jel-floor st) (jel-bed st) (jel-ev st) (jel-frames st) (jel-misses st) (jel-events st) now)))
+
+    (defn jel-maybe-give (st off now)
+        (if (lt (sub now (jel-give-at st)) (JECadenceMs)) st (jel-give st off now)))
+
+    (defn jel-step (st off endMs)
+        (do (let now (now_unix_ms))
+            (if (ge now endMs) st
+              (do (let raw (sense_mic_stream_read 3200 200))
+                  (let f (if (nothing? raw) (list) (je-frame raw now)))
+                  (let st2 (if (eq (len f) 0)
+                              (jel-with st (jel-cs st) (jel-floor st) (jel-bed st) (jel-ev st) (jel-frames st) (add (jel-misses st) 1) (jel-events st) (jel-give-at st))
+                              (jel-absorb st f off now)))
+                  (jel-step (jel-maybe-give st2 off now) off endMs)))))
+
+    (defn jel-show (cs k) (if (eq (len cs) 0) 0
+        (do (print (jel-cat (list "  " (je-c-symbol (head cs)) " " (je-node (head cs)) "  " (je-say (head cs)))))
+            (jel-show (tail cs) (add k 1)))))
+
+    (let secs (jel-secs))
+    (let off (jel-zone))
+    (let cs0 (jel-load))
+    (print (jel-cat (list "jungle ear: listening " (int_to_str secs) " s from hour " (int_to_str (jel-hour-at (now_unix_ms) off))
+                          " (offset " (int_to_str off) " min); " (int_to_str (len cs0)) " voices already known")))
+    (let mic (sense_mic_stream_start))
+    (let st0 (list cs0 -500 -500 (je-ev-empty) 0 0 0 0))
+    (let stN (jel-step st0 off (add (now_unix_ms) (mul secs 1000))))
+    (let stopped (sense_mic_stream_stop))
+    (let cs (jel-cs stN))
+    (print (jel-cat (list "frames=" (int_to_str (jel-frames stN))
+                          " misses=" (int_to_str (jel-misses stN))
+                          " events=" (int_to_str (jel-events stN))
+                          " floor=" (int_to_str (je-db (jel-floor stN))) " dBFS"
+                          " bed=" (int_to_str (je-db (jel-bed stN))) " dBFS"
+                          " voices=" (int_to_str (len cs))
+                          " recurring=" (int_to_str (len (je-recurring cs 3))))))
+    (jel-show (je-sorted cs) 1)
+    ; a listening that heard nothing writes nothing: an empty file would erase a memory
+    (let wrote (if (eq (len cs) 0) 0 (write_file (JERowsPath) (je-rows-wire cs))))
+    (if (eq (jel-frames stN) 0) (print "the mic gave no frame at all this stretch -- the room is not reported, it is unheard") 0)
+    (len cs))

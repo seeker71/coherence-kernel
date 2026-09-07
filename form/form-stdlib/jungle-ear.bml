@@ -1,0 +1,415 @@
+//////////////////////////////////////////////////////////////////////
+//
+// jungle-ear.bml — the voices of this place, learned rather than told.
+//
+// Authority: form-stdlib/jungle-ear.bml
+// preludes: form/form-stdlib/core.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/sha256.fk form/form-stdlib/hex.fk form/form-stdlib/spool-bell-transport.fk form/form-stdlib/line-grammar.fk form/form-stdlib/form-glass-sensor-rows.bml
+//
+// The ear carries words. Prosody carries how one voice said them. Room-sense
+// carries the space, and calls everything that is not a person "noise". In a
+// jungle that is nearly the whole room: the geckos, the frogs, the cicadas, the
+// birds and the dogs of Bali all arrive under one word.
+//
+// This organ gives them coordinates instead of a word, and lets what RECURS
+// grow an identity of its own. Nobody hands it a list of animals. It is told
+// nothing. It hears an event, measures it, and asks the voices it already
+// knows whether one of them is near enough. If one is, that voice has been
+// heard once more, at this hour. If none is, a new voice is founded, and from
+// that moment the place has one more known caller.
+//
+// THE COORDINATES, and how far each is to be trusted. A rough axis named beats
+// a smooth one invented, and every axis here is a MEASUREMENT of one event, in
+// integers, from 100 ms frames of s16le mono 16 kHz:
+//
+//   br  brightness      trusted as an ORDERING, rough as a frequency: zero
+//                       crossings per second over two, in tenths of an octave.
+//                       On a pure tone it IS the tone; on a broadband buzz it
+//                       is the buzz's centre of mass. It reaches to 8 kHz --
+//                       which is the point. Room-sense's period search spans
+//                       71..333 Hz, so a 4 kHz cicada is invisible to it and
+//                       lands on a subharmonic; this axis sees the cicada.
+//   pd  pulse depth     trusted: how far the level falls BETWEEN the pulses,
+//                       measured inside each frame over ten 10 ms sub-blocks,
+//                       in tenths of a dB. A continuous drone is shallow; a
+//                       gecko's separated calls are deep.
+//   pr  pulse rate      ROUGH: envelope peaks per second, counted at the frame
+//                       rate (10 Hz), so it resolves beats up to about 5 a
+//                       second and ALIASES above that. A fast trill and a
+//                       drone can meet here; pd and br separate them.
+//   du  duration        trusted: how long the event stayed over the floor, in
+//                       tenths of an octave of milliseconds.
+//   cr  crest           trusted as tone-versus-noise: peak over root-mean-
+//                       square, in tenths. A pure tone sits near 14, broadband
+//                       noise near 30-40, a knock far above.
+//   bs  brightness spread   recorded, not a distance axis: how much br moved
+//                       across the event. A swept whistle is wide; a steady
+//                       buzz is narrow.
+//   lv  level over floor    recorded, NEVER a distance axis. A gecko near the
+//                       window and the same gecko across the garden are one
+//                       voice; distance is the room's, not the caller's.
+//   hour                the hour the event arrived, given by the caller. This
+//                       organ never reads a clock and never opens the mic --
+//                       the door does both and hands in the numbers.
+//
+// WHAT IS DELIBERATELY NOT MEASURED. There is no autocorrelation period here.
+// Room-sense has one and it is the right instrument for a human voice; over a
+// cicada it answers a subharmonic with confidence, and a confident wrong number
+// is worse than an absent one. The brightness axis carries what this organ
+// needs and says plainly that it is a centre of mass, not a pitch.
+//
+// LEARNING. A voice is a cluster. Its CENTRE moves as it is heard (the running
+// mean over every event it absorbed) -- that is the learning. Its IDENTITY does
+// not: the node id is the content address of the coordinates it was FOUNDED on,
+// frozen, so that the address survives every later hearing and every restart.
+// The centre is what recognises; the address is what remembers.
+//
+// NAMING IS AN OFFERING. A cluster carries its coordinates and a symbol the
+// body mints from its own address -- three syllables, pronounceable, and NOT a
+// claim about any animal. It answers with a name only when a person or a mind
+// gave it one. Unnamed, it answers "the voice that calls most at 19:00 (dusk),
+// heard 42 times, 3100 Hz, 2.1 pulses a second, 400 ms long" -- and never the
+// word gecko, because nobody said gecko.
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class JungleEarAuthority {
+        field JEAuthorityPath = "form/form-stdlib/jungle-ear.bml";
+        field JEAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class JungleEar {
+        field JESchema = "jungle-voice-v1";
+        field JESensor = "jungle";
+        field JECadenceMs = 1000;
+        field JERowsPath = "form/form-stdlib/locale-rows/jungle-voices.rows";
+        field JETonguePath = "form/form-stdlib/locale-rows/symbol-jungle.rows";
+        field JEHeader = "node|symbol|found-br|found-pd|found-pr|found-du|found-cr|found-bs|heard|mean-br|mean-pd|mean-pr|mean-du|mean-cr|mean-bs|mean-lv|hours|first-ms|last-ms|name";
+        field JEFieldCount = 20;
+        field JEFrameBytes = 3200;
+        field JEFrameMs = 100;
+        field JEZcHz = 5;
+        field JEOpenGate = 30;
+        field JECloseGate = 10;
+        field JEQuietFrames = 2;
+        field JEPeakDepth = 20;
+        field JESubDepth = 30;
+        field JEBedWeight = 63;
+        field JEBedDiv = 64;
+        field JEMinFrames = 2;
+        field JEMaxFrames = 100;
+        field JETolBr = 3;
+        field JETolPd = 40;
+        field JETolPr = 8;
+        field JETolDu = 10;
+        field JETolCr = 15;
+        field JERadius = 400;
+        field JEHours = 24;
+        ref je-authority = JungleEarAuthority;
+        thought je-law = list("what-recurs-earns-an-identity", "the-centre-learns-the-address-does-not", "a-name-is-given-never-invented", "coordinates-before-words", "an-absent-axis-beats-a-confident-wrong-one", "the-organ-holds-no-clock-and-no-mic");
+
+        // --- small arithmetic ---------------------------------------------------
+        def je-abs(v) = if lt(v, 0) then sub(0, v) else v;
+        def je-max1(v) = if lt(v, 1) then 1 else v;
+        def je-clamp(v, lo, hi) = if lt(v, lo) then lo else if gt(v, hi) then hi else v;
+        def je-cat(xs) = if eq(len(xs), 0) then "" else str_concat(head(xs), je-cat(tail(xs)));
+        def je-isqrt(n, lo, hi) = if ge(add(lo, 1), hi) then lo else je-isqrt-at(n, lo, hi, div(add(lo, hi), 2));
+        def je-isqrt-at(n, lo, hi, m) = if gt(mul(m, m), n) then je-isqrt(n, lo, m) else je-isqrt(n, m, hi);
+        def je-zeros(n) = if le(n, 0) then list() else cons(0, je-zeros(sub(n, 1)));
+        def je-nth-or(xs, i, d) = if ge(i, len(xs)) then d else nth(xs, i);
+
+        // a log in TENTHS OF AN OCTAVE: the octave is exact, the fraction inside
+        // it is linear. Worth about 0.9 tenths at the middle of an octave, which
+        // is well inside every tolerance below and is named here rather than hidden.
+        def je-oct-up(v, base, k) = if or(ge(k, 20), lt(v, mul(base, 2))) then list(base, k) else je-oct-up(v, mul(base, 2), add(k, 1));
+        def je-log2t(v) = if le(v, 0) then 0 else je-log2t-of(je-oct-up(v, 1, 0), v);
+        def je-log2t-of(o, v) = add(mul(10, nth(o, 1)), div(mul(10, sub(v, head(o))), head(o)));
+        def je-pow2(k) = if le(k, 0) then 1 else mul(2, je-pow2(sub(k, 1)));
+        def je-pow2t(t) = if le(t, 0) then 0 else je-pow2t-at(div(t, 10), sub(t, mul(10, div(t, 10))));
+        def je-pow2t-at(k, r) = div(mul(je-pow2(k), add(10, r)), 10);
+
+        // decibels below full scale in tenths, the same octave-plus-fraction shape
+        def je-oct-dn(rms, base, k) = if or(ge(rms, base), ge(k, 16)) then list(base, k) else je-oct-dn(rms, div(base, 2), add(k, 1));
+        def je-db10(rms) = if le(rms, 0) then -900 else je-db10-at(rms, je-oct-dn(rms, 32768, 0));
+        def je-db10-at(rms, o) = je-clamp(add(sub(0, mul(60, nth(o, 1))), div(mul(60, sub(rms, head(o))), head(o))), -900, 0);
+        def je-db(db10) = div(db10, 10);
+
+        // --- one 100 ms frame ---------------------------------------------------
+        // frame = list(t, db10, brightnessHz, tilt, crest, mod)
+        def je-s16(s, i) = je-s16-of(add(str_byte_at(s, i), mul(256, str_byte_at(s, add(i, 1)))));
+        def je-s16-of(v) = if ge(v, 32768) then sub(v, 65536) else v;
+        // A crossing is a change of SIGN, tested as a negative product -- and that
+        // test has one hole, found by building a triangle to prove the brightness
+        // axis and getting zero: when a sample lands EXACTLY on zero it belongs to
+        // neither side, and both of that period's crossings are swallowed. Real
+        // sound almost never does this; a synthesised tone whose period and
+        // amplitude divide evenly does it every cycle. The hole is left standing
+        // and witnessed in the band rather than papered over, because the repair
+        // (carrying the last non-zero sign) costs an accumulator on the hot path
+        // for a case only synthesis produces.
+        def je-pass(s, i, end, prev, ss, zc, ds, peak) = if ge(i, end) then list(ss, zc, ds, peak) else je-pass-at(s, i, end, prev, ss, zc, ds, peak, je-s16(s, i));
+        def je-pass-at(s, i, end, prev, ss, zc, ds, peak, v) = je-pass(s, add(i, 2), end, v, add(ss, mul(v, v)), if lt(mul(v, prev), 0) then add(zc, 1) else zc, add(ds, mul(sub(v, prev), sub(v, prev))), if gt(je-abs(v), peak) then je-abs(v) else peak);
+
+        // the envelope INSIDE one frame, over ten 10 ms sub-blocks. This is the
+        // pulse-depth axis: what falls between two calls, sampled at 100 Hz
+        // instead of at the 10 Hz frame rate, so a separated call reads deep even
+        // when both its halves land in one frame.
+        def je-sub-ss(s, i, end, acc) = if ge(i, end) then acc else je-sub-ss-at(s, i, end, acc, je-s16(s, i));
+        def je-sub-ss-at(s, i, end, acc, v) = je-sub-ss(s, add(i, 2), end, add(acc, mul(v, v)));
+        def je-sub-db(s, k) = je-db10(je-isqrt(div(je-sub-ss(s, mul(k, 320), mul(add(k, 1), 320), 0), 160), 0, 40000));
+        // the ten sub-blocks computed ONCE; depth, spread and the fast beat count
+        // are three readings of the same list rather than three walks of the bytes
+        def je-subs(s, k, acc) = if ge(k, 10) then acc else je-subs(s, add(k, 1), append(acc, list(je-sub-db(s, k))));
+        def je-list-hi(xs, best) = if eq(len(xs), 0) then best else je-list-hi(tail(xs), if gt(head(xs), best) then head(xs) else best);
+        def je-list-lo(xs, best) = if eq(len(xs), 0) then best else je-list-lo(tail(xs), if lt(head(xs), best) then head(xs) else best);
+        def je-mod-of(xs) = sub(je-list-hi(xs, -900), je-list-lo(xs, 0));
+        // beats INSIDE one frame: an interior sub-block 6 dB over both neighbours.
+        // At 100 Hz this reaches trills the 10 Hz frame rate cannot see at all --
+        // the whole reason a cricket and a gecko are different voices here.
+        def je-subpeaks(xs, acc) = if lt(len(xs), 3) then acc else je-subpeaks(tail(xs), add(acc, je-subpeak?(xs)));
+        def je-subpeak?(xs) = if le(nth(xs, 1), add(head(xs), JESubDepth())) then 0 else if le(nth(xs, 1), add(nth(xs, 2), JESubDepth())) then 0 else 1;
+
+        def je-frame(bytes, now) = if lt(str_len(bytes), JEFrameBytes()) then list() else je-frame-at(bytes, now, je-pass(bytes, 2, sub(JEFrameBytes(), 2), je-s16(bytes, 0), 0, 0, 0, 0), je-subs(bytes, 0, list()));
+        def je-frame-at(bytes, now, p, subs) = je-frame-of(now, je-isqrt(div(head(p), sub(div(JEFrameBytes(), 2), 1)), 0, 40000), p, je-mod-of(subs), je-subpeaks(subs, 0));
+        def je-frame-of(now, rms, p, mod, beats) = list(now, je-db10(rms), mul(nth(p, 1), JEZcHz()), if le(head(p), 0) then 0 else div(mul(100, nth(p, 2)), head(p)), if le(rms, 0) then 0 else div(mul(10, nth(p, 3)), rms), mod, beats);
+        def je-f-t(f) = nth(f, 0);
+        def je-f-db(f) = nth(f, 1);
+        def je-f-br(f) = nth(f, 2);
+        def je-f-tilt(f) = nth(f, 3);
+        def je-f-cr(f) = nth(f, 4);
+        def je-f-mod(f) = nth(f, 5);
+        def je-f-beats(f) = nth(f, 6);
+
+        // TWO references, because the jungle taught this organ that one was wrong.
+        //
+        // The FLOOR is the quiet the place keeps: it falls to a quieter room at
+        // once and climbs a tenth of a dB per frame. In a still room the floor is
+        // also what a sound rises above, and the first build of this organ used it
+        // for both. Measured here at dusk, that fails: the chorus never stops, the
+        // floor pins itself to the bottom of a level that wanders ten decibels,
+        // and half of every minute reads as "above the floor". A gate set there
+        // finds either everything or, once its number is raised to compensate,
+        // three events in a minute -- both witnessed on this room, in that order.
+        //
+        // The BED is the room's TYPICAL level: a slow mean over about six seconds.
+        // An event is a rise above what this place has been sounding like, which
+        // is what a caller actually is. The bed is slow enough that a 200 ms call
+        // moves it by a fortieth of its own height and cannot gate itself away.
+        //
+        // Measured over this room at dusk, the level around the bed is strongly
+        // left-skewed: 399 frames ran -11 dB to +17 dB, with the mass between -6
+        // and 0 and a thin tail above. The gates are that tail's edge, not a
+        // preference: 3 dB over the bed opens, 1 dB over it closes, and that
+        // catches 7% of frames -- a call rate, where 6 dB caught one event in
+        // ninety seconds and the floor-based gate before it caught half the room.
+        def je-floor-next(floor, db10) = if lt(db10, floor) then db10 else if gt(db10, floor) then add(floor, 1) else floor;
+        def je-bed-next(bed, db10) = div(add(mul(JEBedWeight(), bed), db10), JEBedDiv());
+
+        // --- an event: a run of frames over the floor ---------------------------
+        // ev = list(open, startMs, frames, dbHi, brSum, brHi, brLo, crSum, modSum, peaks, p1, p2, quietRun, lastMs, beatSum)
+        def je-ev-empty() = list(0, 0, 0, -900, 0, 0, 999999, 0, 0, 0, -900, -900, 0, 0, 0);
+        def je-ev-open?(e) = nth(e, 0);
+        def je-ev-start(e) = nth(e, 1);
+        def je-ev-frames(e) = nth(e, 2);
+        def je-ev-dbhi(e) = nth(e, 3);
+        def je-ev-quiet(e) = nth(e, 12);
+        def je-ev-last(e) = nth(e, 13);
+        // an envelope peak: a frame 2 dB over BOTH its neighbours. This counts the
+        // beats of a call train; it cannot resolve beats faster than five a second.
+        def je-ev-peaks(e, f) = if eq(je-ev-peak?(e, f), 1) then add(nth(e, 9), 1) else nth(e, 9);
+        def je-ev-peak?(e, f) = if le(nth(e, 11), -900) then 0 else if le(nth(e, 10), add(nth(e, 11), JEPeakDepth())) then 0 else if le(nth(e, 10), add(je-f-db(f), JEPeakDepth())) then 0 else 1;
+        def je-ev-take(e, f, now) = list(1, nth(e, 1), add(nth(e, 2), 1), if gt(je-f-db(f), nth(e, 3)) then je-f-db(f) else nth(e, 3), add(nth(e, 4), je-f-br(f)), if gt(je-f-br(f), nth(e, 5)) then je-f-br(f) else nth(e, 5), if lt(je-f-br(f), nth(e, 6)) then je-f-br(f) else nth(e, 6), add(nth(e, 7), je-f-cr(f)), add(nth(e, 8), je-f-mod(f)), je-ev-peaks(e, f), je-f-db(f), nth(e, 10), 0, now, add(nth(e, 14), je-f-beats(f)));
+        def je-ev-fresh(now) = list(1, now, 0, -900, 0, 0, 999999, 0, 0, 0, -900, -900, 0, now, 0);
+        def je-ev-hold(e, q) = list(nth(e, 0), nth(e, 1), nth(e, 2), nth(e, 3), nth(e, 4), nth(e, 5), nth(e, 6), nth(e, 7), nth(e, 8), nth(e, 9), nth(e, 10), nth(e, 11), q, nth(e, 13), nth(e, 14));
+        def je-ev-step(e, f, bed, now) = je-ev-step-at(e, f, now, sub(je-f-db(f), bed));
+        def je-ev-step-at(e, f, now, above) = if eq(je-ev-open?(e), 0) then je-ev-idle(e, f, now, above) else je-ev-live(e, f, now, above);
+        def je-ev-idle(e, f, now, above) = if ge(above, JEOpenGate()) then je-ev-take(je-ev-fresh(now), f, now) else e;
+        def je-ev-live(e, f, now, above) = if ge(above, JECloseGate()) then je-ev-take(e, f, now) else je-ev-hold(e, add(je-ev-quiet(e), 1));
+        def je-ev-done?(e) = if eq(je-ev-open?(e), 0) then 0 else if ge(je-ev-quiet(e), JEQuietFrames()) then 1 else 0;
+        // an event too short is a tick in the room; too long is a machine or a rain
+        def je-ev-ok?(e) = if lt(je-ev-frames(e), JEMinFrames()) then 0 else if gt(je-ev-frames(e), JEMaxFrames()) then 0 else 1;
+
+        // --- a print: one event's coordinates -----------------------------------
+        // print = list(br, pd, pr, du, cr, bs, lv, hour)
+        // the rate axis sums TWO counters over the same event: the slow one at the
+        // frame rate (beats up to five a second) and the fast one inside the frames
+        // (up to fifty). A cricket and a gecko meet on neither.
+        def je-print(e, bed, hour) = je-print-at(e, bed, hour, je-max1(je-ev-frames(e)), add(nth(e, 9), nth(e, 14)));
+        def je-print-at(e, bed, hour, n, pulses) = list(je-log2t(div(nth(e, 4), n)), div(nth(e, 8), n), je-log2t(add(div(mul(pulses, 100), n), 10)), je-log2t(mul(n, JEFrameMs())), div(nth(e, 7), n), sub(je-log2t(je-max1(nth(e, 5))), je-log2t(je-max1(nth(e, 6)))), sub(je-ev-dbhi(e), bed), hour);
+        def je-p-br(p) = nth(p, 0);
+        def je-p-pd(p) = nth(p, 1);
+        def je-p-pr(p) = nth(p, 2);
+        def je-p-du(p) = nth(p, 3);
+        def je-p-cr(p) = nth(p, 4);
+        def je-p-bs(p) = nth(p, 5);
+        def je-p-lv(p) = nth(p, 6);
+        def je-p-hour(p) = nth(p, 7);
+
+        // --- distance: each axis in units of its own tolerance, times a hundred --
+        // Level is absent from this sum on purpose: the same caller near and far is
+        // one voice. Brightness spread is absent too -- it varies with how much of
+        // a call the mic caught, and adding it split single callers in the witness.
+        def je-ax(d, tol) = div(mul(100, je-abs(d)), tol);
+        def je-dist(c, p) = add(je-ax(sub(nth(c, 0), je-p-br(p)), JETolBr()), add(je-ax(sub(nth(c, 1), je-p-pd(p)), JETolPd()), add(je-ax(sub(nth(c, 2), je-p-pr(p)), JETolPr()), add(je-ax(sub(nth(c, 3), je-p-du(p)), JETolDu()), je-ax(sub(nth(c, 4), je-p-cr(p)), JETolCr())))));
+
+        // --- a voice: a cluster that keeps its founding address -----------------
+        // c = list(found, n, sums, hours, firstMs, lastMs, name)
+        def je-c-found(c) = nth(c, 0);
+        def je-c-n(c) = nth(c, 1);
+        def je-c-sums(c) = nth(c, 2);
+        def je-c-hours(c) = nth(c, 3);
+        def je-c-first(c) = nth(c, 4);
+        def je-c-last(c) = nth(c, 5);
+        def je-c-name(c) = nth(c, 6);
+        def je-c-mean(c, i) = div(nth(je-c-sums(c), i), je-max1(je-c-n(c)));
+        def je-c-center(c) = list(je-c-mean(c, 0), je-c-mean(c, 1), je-c-mean(c, 2), je-c-mean(c, 3), je-c-mean(c, 4), je-c-mean(c, 5));
+        def je-c-center7(c) = list(je-c-mean(c, 0), je-c-mean(c, 1), je-c-mean(c, 2), je-c-mean(c, 3), je-c-mean(c, 4), je-c-mean(c, 5), je-c-mean(c, 6));
+
+        def je-hours-bump(hs, h) = je-hours-go(hs, h, 0);
+        def je-hours-go(hs, h, i) = if eq(len(hs), 0) then list() else cons(if eq(i, h) then add(head(hs), 1) else head(hs), je-hours-go(tail(hs), h, add(i, 1)));
+        def je-found(p, now) = list(list(je-p-br(p), je-p-pd(p), je-p-pr(p), je-p-du(p), je-p-cr(p), je-p-bs(p)), 1, list(je-p-br(p), je-p-pd(p), je-p-pr(p), je-p-du(p), je-p-cr(p), je-p-bs(p), je-p-lv(p)), je-hours-bump(je-zeros(JEHours()), je-p-hour(p)), now, now, "");
+        def je-sums-add(s, p) = list(add(nth(s, 0), je-p-br(p)), add(nth(s, 1), je-p-pd(p)), add(nth(s, 2), je-p-pr(p)), add(nth(s, 3), je-p-du(p)), add(nth(s, 4), je-p-cr(p)), add(nth(s, 5), je-p-bs(p)), add(nth(s, 6), je-p-lv(p)));
+        def je-absorb(c, p, now) = list(je-c-found(c), add(je-c-n(c), 1), je-sums-add(je-c-sums(c), p), je-hours-bump(je-c-hours(c), je-p-hour(p)), je-c-first(c), now, je-c-name(c));
+
+        // --- learning: place one print among the voices already known -----------
+        def je-nearest(cs, p, i, bi, bd) = if eq(len(cs), 0) then list(bi, bd) else je-nearest-at(cs, p, i, bi, bd, je-dist(je-c-center(head(cs)), p));
+        def je-nearest-at(cs, p, i, bi, bd, d) = if lt(d, bd) then je-nearest(tail(cs), p, add(i, 1), i, d) else je-nearest(tail(cs), p, add(i, 1), bi, bd);
+        def je-learn(cs, p, now) = je-learn-at(cs, p, now, je-nearest(cs, p, 0, -1, 999999999));
+        def je-learn-at(cs, p, now, b) = if lt(head(b), 0) then append(cs, list(je-found(p, now))) else je-learn-near(cs, p, now, b);
+        def je-learn-near(cs, p, now, b) = if gt(nth(b, 1), JERadius()) then append(cs, list(je-found(p, now))) else je-at(cs, head(b), p, now, 0);
+        def je-at(cs, at, p, now, i) = if eq(len(cs), 0) then list() else cons(if eq(i, at) then je-absorb(head(cs), p, now) else head(cs), je-at(tail(cs), at, p, now, add(i, 1)));
+        // a closed event enters the set only when it is a real event
+        def je-hear(cs, e, bed, hour, now) = if eq(je-ev-ok?(e), 0) then cs else je-learn(cs, je-print(e, bed, hour), now);
+
+        // --- the address: the content address of the FOUNDING coordinates -------
+        // Frozen at founding, so it survives every later hearing and every restart.
+        // The centre recognises; this address remembers.
+        def je-found-text(f) = je-cat(list(JESchema(), "|", int_to_str(nth(f, 0)), "|", int_to_str(nth(f, 1)), "|", int_to_str(nth(f, 2)), "|", int_to_str(nth(f, 3)), "|", int_to_str(nth(f, 4)), "|", int_to_str(nth(f, 5))));
+        def je-addr(text) = substring(hex-encode(sha256(sbt-bytes-of(text, 0, str_len(text), list()))), 0, 8);
+        def je-node(c) = je-addr(je-found-text(je-c-found(c)));
+
+        // a symbol the body mints from its own address: three consonant-vowel
+        // syllables, pronounceable, stable, and NOT a claim about any animal.
+        // It is a call sign, the way a ship has one before anyone knows its cargo.
+        def je-hexv(b) = if le(b, 57) then sub(b, 48) else sub(b, 87);
+        def je-hexpair(s, i) = add(mul(16, je-hexv(str_byte_at(s, i))), je-hexv(str_byte_at(s, add(i, 1))));
+        def je-cons-of(i) = nth(list("k", "g", "t", "d", "p", "b", "m", "n", "s", "r", "l", "v"), i);
+        def je-vow-of(i) = nth(list("a", "e", "i", "o", "u"), i);
+        def je-syl(node, i) = je-syl-of(je-hexpair(node, i));
+        def je-syl-of(b) = str_concat(je-cons-of(sub(b, mul(12, div(b, 12)))), je-vow-of(sub(div(b, 12), mul(5, div(div(b, 12), 5)))));
+        def je-symbol(node) = je-cat(list(je-syl(node, 0), je-syl(node, 2), je-syl(node, 4)));
+        def je-c-symbol(c) = je-symbol(je-node(c));
+
+        // --- rows on disk: the memory that outlives one listening ---------------
+        // The file carries the node for a human reader; the body RE-DERIVES it from
+        // the founding coordinates on every load, so a hand-edited address cannot
+        // rename a voice -- the coordinates are the truth and a disagreement shows.
+        def je-ints-wire(xs, sep) = if eq(len(xs), 0) then "" else if eq(len(tail(xs)), 0) then int_to_str(head(xs)) else str_concat(int_to_str(head(xs)), str_concat(sep, je-ints-wire(tail(xs), sep)));
+        def je-int-of(t) = if eq(str_len(t), 0) then 0 else str_to_int(t);
+        def je-ints-of(text) = je-ints-go(split-on(text, ","));
+        def je-ints-go(ps) = if eq(len(ps), 0) then list() else cons(je-int-of(trim(head(ps))), je-ints-go(tail(ps)));
+        def je-hours-of(text) = je-hours-fill(je-ints-of(text));
+        def je-hours-fill(xs) = if ge(len(xs), JEHours()) then xs else append(xs, je-zeros(sub(JEHours(), len(xs))));
+        def je-row-wire(c) = je-cat(list(je-node(c), "|", je-c-symbol(c), "|", je-ints-wire(je-c-found(c), "|"), "|", int_to_str(je-c-n(c)), "|", je-ints-wire(je-c-center7(c), "|"), "|", je-ints-wire(je-c-hours(c), ","), "|", int_to_str(je-c-first(c)), "|", int_to_str(je-c-last(c)), "|", je-c-name(c)));
+        def je-fields(fs, at, k) = if le(k, 0) then list() else cons(je-int-of(trim(nth(fs, at))), je-fields(fs, add(at, 1), sub(k, 1)));
+        def je-scale(xs, n) = if eq(len(xs), 0) then list() else cons(mul(head(xs), n), je-scale(tail(xs), n));
+        def je-row-of(fs) = if lt(len(fs), JEFieldCount()) then list() else je-row-at(fs, je-max1(je-int-of(trim(nth(fs, 8)))));
+        // the file stores the CENTRE, which is what a reader wants to see; the sums
+        // come back as centre times count, so the centre round-trips exactly and
+        // only the unrounded sum is lost. That loss is named, and it is a tenth.
+        def je-row-at(fs, n) = list(je-fields(fs, 2, 6), n, je-scale(je-fields(fs, 9, 7), n), je-hours-of(trim(nth(fs, 16))), je-int-of(trim(nth(fs, 17))), je-int-of(trim(nth(fs, 18))), trim(je-nth-or(fs, 19, "")));
+        def je-skip?(line) = if eq(str_len(trim(line)), 0) then 1 else if eq(str_find(line, "node|", 0), 0) then 1 else if eq(str_byte_at(trim(line), 0), 35) then 1 else 0;
+        def je-line-cluster(line) = if eq(je-skip?(line), 1) then list() else je-row-of(split-on(line, "|"));
+        def je-rows-wire(cs) = str_concat(JEHeader(), str_concat(byte_to_str(10), je-rows-lines(cs)));
+        def je-rows-lines(cs) = if eq(len(cs), 0) then "" else str_concat(je-row-wire(head(cs)), str_concat(byte_to_str(10), je-rows-lines(tail(cs))));
+        def je-rows-of(text) = je-rows-from(split-on(text, byte_to_str(10)));
+        def je-rows-from(lines) = if eq(len(lines), 0) then list() else je-rows-next(je-line-cluster(head(lines)), tail(lines));
+        def je-rows-next(c, rest) = if eq(len(c), 0) then je-rows-from(rest) else cons(c, je-rows-from(rest));
+
+        // --- naming: an offering, never an invention ----------------------------
+        def je-named?(c) = if eq(str_len(je-c-name(c)), 0) then 0 else 1;
+        def je-with-name(c, name) = list(je-c-found(c), je-c-n(c), je-c-sums(c), je-c-hours(c), je-c-first(c), je-c-last(c), name);
+        def je-bind(cs, node, name) = if eq(len(cs), 0) then list() else cons(if str_eq(je-node(head(cs)), node) then je-with-name(head(cs), name) else head(cs), je-bind(tail(cs), node, name));
+        def je-find(cs, node) = if eq(len(cs), 0) then list() else if str_eq(je-node(head(cs)), node) then head(cs) else je-find(tail(cs), node);
+        // THE REFUSAL. An unnamed voice answers with nothing where a name would
+        // go. It does not guess "gecko" from a frequency and an hour, because a
+        // guess in the name column is indistinguishable from a fact once written.
+        def je-name-or-refuse(c) = if eq(je-named?(c), 1) then je-c-name(c) else "";
+        def je-say(c) = if eq(je-named?(c), 1) then je-c-name(c) else je-describe(c);
+
+        // --- what a voice says about itself when nobody has named it ------------
+        def je-hz(c) = je-pow2t(je-c-mean(c, 0));
+        def je-ms(c) = je-pow2t(je-c-mean(c, 3));
+        def je-rate10(c) = je-clamp(sub(je-pow2t(je-c-mean(c, 2)), 10), 0, 1000000);
+        def je-peak-hour(hs, i, bi, bv) = if eq(len(hs), 0) then bi else je-peak-hour-at(hs, i, bi, bv);
+        def je-peak-hour-at(hs, i, bi, bv) = if gt(head(hs), bv) then je-peak-hour(tail(hs), add(i, 1), i, head(hs)) else je-peak-hour(tail(hs), add(i, 1), bi, bv);
+        def je-c-hour(c) = je-peak-hour(je-c-hours(c), 0, -1, 0);
+        def je-part-of-day(h) = if lt(h, 5) then "deep night" else if lt(h, 8) then "dawn" else if lt(h, 11) then "morning" else if lt(h, 15) then "midday" else if lt(h, 18) then "afternoon" else if lt(h, 21) then "dusk" else "night";
+        def je-when(c) = je-when-of(je-c-hour(c));
+        def je-when-of(h) = if lt(h, 0) then "has kept no hour yet" else je-cat(list("calls most at ", int_to_str(h), ":00 (", je-part-of-day(h), ")"));
+        def je-tenths(v) = je-cat(list(int_to_str(div(v, 10)), ".", int_to_str(sub(v, mul(10, div(v, 10))))));
+        def je-ms-text(ms) = if lt(ms, 1000) then str_concat(int_to_str(ms), " ms long") else str_concat(je-tenths(div(ms, 100)), " s long");
+        def je-tone-text(c) = if lt(je-c-mean(c, 4), 20) then "near-pure" else if lt(je-c-mean(c, 4), 34) then "buzzy" else "clattery";
+        def je-describe(c) = je-cat(list("the voice that ", je-when(c), ", heard ", int_to_str(je-c-n(c)), " times, ", int_to_str(je-hz(c)), " Hz ", je-tone-text(c), ", ", je-tenths(je-rate10(c)), " pulses a second, ", je-ms-text(je-ms(c))));
+
+        // --- the tongue lane ----------------------------------------------------
+        // A name that arrives travels into locale-rows as one row keyed on every
+        // column, the same shape symbol-words.rows carries, so any tongue on the
+        // header can say it. An unnamed voice contributes no row at all.
+        def je-tongue-header(tongues) = je-strs(tongues, "|");
+        def je-strs(xs, sep) = if eq(len(xs), 0) then "" else if eq(len(tail(xs)), 0) then head(xs) else str_concat(head(xs), str_concat(sep, je-strs(tail(xs), sep)));
+        def je-tongue-row(c, words) = if eq(je-named?(c), 0) then "" else je-strs(cons(je-c-name(c), words), "|");
+        def je-tongue-lines(lines, name) = if eq(len(lines), 0) then list() else je-tongue-match(lines, name);
+        def je-tongue-match(lines, name) = if eq(je-cell-match?(split-on(head(lines), "|"), name), 1) then split-on(head(lines), "|") else je-tongue-lines(tail(lines), name);
+        def je-cell-match?(cells, name) = if eq(len(cells), 0) then 0 else if str_eq(trim(head(cells)), name) then 1 else je-cell-match?(tail(cells), name);
+        def je-col-of(header, kind, i) = if eq(len(header), 0) then -1 else if str_eq(trim(head(header)), kind) then i else je-col-of(tail(header), kind, add(i, 1));
+        // say a named voice in one tongue; an unnamed one answers "" and no tongue
+        // can make it speak, which is the point
+        def je-say-in(c, text, kind) = if eq(je-named?(c), 0) then "" else je-say-in-at(je-c-name(c), split-on(text, byte_to_str(10)), kind);
+        def je-say-in-at(name, lines, kind) = if eq(len(lines), 0) then "" else je-say-in-col(name, lines, je-col-of(split-on(head(lines), "|"), kind, 0));
+        def je-say-in-col(name, lines, col) = if lt(col, 0) then "" else je-say-in-row(je-tongue-lines(tail(lines), name), col);
+        def je-say-in-row(row, col) = if eq(len(row), 0) then "" else if ge(col, len(row)) then "" else trim(nth(row, col));
+
+        // --- reading the set ----------------------------------------------------
+        def je-heard-total(cs) = if eq(len(cs), 0) then 0 else add(je-c-n(head(cs)), je-heard-total(tail(cs)));
+        def je-named-count(cs) = if eq(len(cs), 0) then 0 else add(je-named?(head(cs)), je-named-count(tail(cs)));
+        def je-recurring(cs, k) = if eq(len(cs), 0) then list() else je-recurring-next(cs, k);
+        def je-recurring-next(cs, k) = if ge(je-c-n(head(cs)), k) then cons(head(cs), je-recurring(tail(cs), k)) else je-recurring(tail(cs), k);
+        def je-most-heard(cs, best) = if eq(len(cs), 0) then best else je-most-heard-at(cs, best);
+        def je-most-heard-at(cs, best) = if eq(len(best), 0) then je-most-heard(tail(cs), head(cs)) else je-most-heard(tail(cs), if gt(je-c-n(head(cs)), je-c-n(best)) then head(cs) else best);
+        def je-latest(cs, best) = if eq(len(cs), 0) then best else je-latest-at(cs, best);
+        def je-latest-at(cs, best) = if eq(len(best), 0) then je-latest(tail(cs), head(cs)) else je-latest(tail(cs), if gt(je-c-last(head(cs)), je-c-last(best)) then head(cs) else best);
+        def je-at-hour(cs, h) = if eq(len(cs), 0) then list() else je-at-hour-next(cs, h);
+        def je-at-hour-next(cs, h) = if gt(nth(je-c-hours(head(cs)), h), 0) then cons(head(cs), je-at-hour(tail(cs), h)) else je-at-hour(tail(cs), h);
+
+        // --- the rows the glass paints ------------------------------------------
+        def je-row(id, label, value, note) = fgo-text("jungle", id, label, value, "room", "derived-window", "mic", "rough", "jungle", note);
+        def je-num(id, label, value, unit, note) = fgo-int("jungle", id, label, value, unit, 0, "room", "derived-window", "mic", "rough", "jungle", note);
+        def je-voice-row(c, k) = je-row(str_concat("jungle.voice", int_to_str(k)), str_concat("voice ", je-c-symbol(c)), je-cat(list(je-c-symbol(c), " (", je-node(c), "): ", je-say(c))), "one learned voice of this place: its own call sign, its content address over the coordinates it was founded on, and either the name a person gave it or the coordinates themselves. Never an animal's name this body was not told");
+        // voice1 is the one this place has said most; the rank is the ordering, so
+        // it counts up from the top rather than down from the cap
+        def je-voice-rows(cs, i, k) = if eq(len(cs), 0) then list() else if gt(i, k) then list() else cons(je-voice-row(head(cs), i), je-voice-rows(tail(cs), add(i, 1), k));
+        def je-top(cs, k) = je-voice-rows(je-sorted(cs), 1, k);
+        def je-sorted(cs) = je-sort-go(cs, list());
+        def je-sort-go(cs, acc) = if eq(len(cs), 0) then acc else je-sort-take(cs, acc, je-most-heard(cs, list()));
+        def je-sort-take(cs, acc, best) = je-sort-go(je-without(cs, best), append(acc, list(best)));
+        def je-without(cs, x) = if eq(len(cs), 0) then list() else if str_eq(je-node(head(cs)), je-node(x)) then tail(cs) else cons(head(cs), je-without(tail(cs), x));
+        def je-rows(cs, floor, bed, hour, listening) = append(je-head-rows(cs, floor, bed, hour, listening), je-top(cs, 5));
+        def je-head-rows(cs, floor, bed, hour, listening) = list(
+            je-row("jungle.state", "the jungle ear", if eq(listening, 1) then "listening" else "not listening -- run observe/jungle-ear-listen.fk", "this organ opens no mic of its own; a door listens in bounded stretches and hands it frames"),
+            je-num("jungle.voices", "voices this place keeps", len(cs), "voices", "distinct recurring clusters in the coordinate space -- brightness, pulse depth, pulse rate, duration, crest. A cluster is founded when nothing already known sits inside the radius, and every later event that does sit inside moves its centre"),
+            je-num("jungle.recurring", "voices heard more than twice", len(je-recurring(cs, 3)), "voices", "the ones that have earned the word recurring: three hearings or more. A cluster of one is a sound that happened, not yet a voice of this place"),
+            je-num("jungle.heard", "events placed", je-heard-total(cs), "events", "every non-speech event this body has placed into a voice, across every listening it remembers"),
+            je-num("jungle.named", "voices a person has named", je-named-count(cs), "voices", "a name arrives from outside and binds to a node id; the body never mints one. Unnamed voices answer with their coordinates and their call sign"),
+            je-num("jungle.floor", "the quiet this place keeps", je-db(floor), "dbfs", "the bottom of the level: it falls to a quieter room at once and climbs a dB a second. In a jungle this is NOT what a call rises above -- the chorus never stops and the floor pins itself to the bottom of a wandering level"),
+            je-num("jungle.bed", "what this place is sounding like", je-db(bed), "dbfs", "the room's typical level, a slow mean over about six seconds. THIS is the reference an event rises above: 6 dB over it opens a call, 3 dB over it closes one. The gap between this row and the floor row is how much the chorus wanders"),
+            je-row("jungle.hour", "who calls at this hour", je-hour-text(cs, hour), "the voices whose hour histogram carries a count in the current hour -- what this place sounds like now, as against all the hours it remembers"),
+            je-row("jungle.latest", "heard last", je-latest-text(cs), "the voice whose most recent hearing is the most recent of all"));
+        def je-hour-text(cs, hour) = if lt(hour, 0) then "no hour given" else je-hour-text-at(je-at-hour(cs, hour), hour);
+        def je-hour-text-at(here, hour) = if eq(len(here), 0) then je-cat(list("nothing yet known calls at ", int_to_str(hour), ":00")) else je-cat(list(int_to_str(len(here)), " of the known voices call at ", int_to_str(hour), ":00 (", je-part-of-day(hour), "): ", je-symbols(here)));
+        def je-symbols(cs) = if eq(len(cs), 0) then "" else if eq(len(tail(cs)), 0) then je-c-symbol(head(cs)) else str_concat(je-c-symbol(head(cs)), str_concat(", ", je-symbols(tail(cs))));
+        def je-latest-text(cs) = je-latest-text-of(je-latest(cs, list()));
+        def je-latest-text-of(c) = if eq(len(c), 0) then "nothing heard yet" else je-cat(list(je-c-symbol(c), ": ", je-say(c)));
+    }
+    0;
+}
