@@ -10958,25 +10958,39 @@ static long long fk_live_read_words(const char *name, long long *out, long long 
 }
 /* ---- the publisher roster: names of every gift frame that carries a snapshot, 511 slots of 128 bytes (a name is root, a bar, publisher; up to 119 bytes) ---- */
 #define FK_ROSTER_SLOTS 511
+/* The roster is 511 slots and there is no door to give a slot back: a band or a
+ * short-lived publisher registers once and its name stands until reboot. So the
+ * slot's timestamp is what it always looked like -- when this name last SPOKE --
+ * and it is refreshed on every register, which a live publisher does every
+ * publish. When the roster is full the least recently spoken slot is taken.
+ * Nothing alive is displaced: a publisher that is still giving is, by
+ * definition, not the oldest. Before this the roster filled and refused
+ * silently, and every publisher after the 511th was simply never listed. */
 static long long fk_roster_register(const char *name) {
     long long gh = fk_gift_open("/fg-roster", 65536, 1);
     if (gh == fk_nothing) { return -1; }
     char *base = (char *)fk_gift_base[gh >> 1] + 64;
-    long long k = 0, free_slot = -1, found = -1;
+    long long k = 0, free_slot = -1, found = -1, oldest = -1;
+    long long oldest_at = 0;
     while (k < FK_ROSTER_SLOTS) {
         char *slot = base + k * 128;
         if (slot[0] == 0) { if (free_slot < 0) { free_slot = k; } }
         else if (fk_cstr_eq(slot, name)) { found = k; break; }
+        else {
+            long long at = *(long long *)(slot + 120);
+            if (oldest < 0 || at < oldest_at) { oldest = k; oldest_at = at; }
+        }
         k = k + 1;
     }
+    if (found < 0 && free_slot < 0) { free_slot = oldest; }
     if (found < 0 && free_slot >= 0) {
         char *slot = base + free_slot * 128;
         long long n = 0;
         while (n < 119 && name[n] != 0) { slot[n] = name[n]; n = n + 1; }
         slot[n] = 0;
-        *(long long *)(slot + 120) = fk_live_now_ms();
         found = free_slot;
     }
+    if (found >= 0) { *(long long *)(base + found * 128 + 120) = fk_live_now_ms(); }
     munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
     fk_gift_base[gh >> 1] = 0;
     return found;
