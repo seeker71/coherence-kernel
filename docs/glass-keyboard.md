@@ -5,7 +5,10 @@ newline, shell, or helper process is needed for a view change. The one-shot
 `observe/form-glass-control-run.fk` door remains for agent/control-channel clients.
 
 Keys: `h` help; `a` atlas; `t` raster; `o` overview; `m` memory; `f` flow;
-`j` recipes; `s` meaning; `k` kernel; `v` events; `n` channels. In Meaning,
+`j` recipes; `s` meaning; `k` kernel; `v` events; `n` channels; `d` choice;
+`r` room (focus only; it does not activate a microphone). Choice controls are
+`g` next option, `y` offer a take, `w` offer a hold; missing slots or a refused
+command offer remain refused, not an acknowledged outcome. In Meaning,
 `1` Go, `2` Python, `3` Rust, `4` TypeScript toggle independently; `0` clears
 the selection. `c` resets view/filter/inspection. `q` exits. Up/Down or Tab selects a
 published sample for `i` inspect or `e` evidence. With no selection, `i`/`e`
