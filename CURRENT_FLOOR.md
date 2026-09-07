@@ -28,7 +28,7 @@ The four-way proof host-execs the three minimal walkers; they build from
 directly). Without them the cell answers 2 (WALKER-SUSPECT), which is the
 honest reading of an unbuilt walker, not a kernel fault.
 
-`runtime/fkwu-uni.c` is    18762 lines — a temporary seed and shrink target, not
+`runtime/fkwu-uni.c` is    19,925 lines — a temporary seed and shrink target, not
 the destination (`release-ledger.bml` R13); this week's growth on it is
 correctness heals (#573 nested-defn scope, #574 bool literals, #575 kernel
 preludes, the host-exec stdin door, `metal_deadline` off its scratch slot, the gift
@@ -44,7 +44,7 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 717 rows, 705 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 721 rows, 709 admissible)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
@@ -232,12 +232,13 @@ carrier). Keys `h a t o m f j s k v n` choose a view, `1 2 3 4` and `0` select
 dialects, `i e c q` inspect, ask evidence, continue, abstain.
 
 ```text
-form-glass-live-band                   -> 1073741823
-form-glass-live-ui-band                -> 1073741823
+form-glass-live-band                   -> 2147483647
+form-glass-live-ui-band                -> 4294967295
 form-glass-dashboard-band              -> 16777215
 form-glass-observer-band               -> 67108863
 form-glass-event-loop-band             -> 16777215
-form-glass-staged-startup-band         -> 65535
+form-glass-staged-startup-band         -> 262143
+gift-frame-writers-band                -> 255
 form-glass-launch-band                 -> 65535
 form-glass-deadline-cadence-band       -> 4095
 form-glass-jit-hold-band               -> 4095
@@ -669,6 +670,58 @@ carrier 0, host sensors 48, the live loop 1038 in 20 s -- about two a tick,
 inside the render, since all 215 published row ids are stable second to
 second. (receipts/2026-09-06-the-arena-counts-its-own-growth.md)
 
+**A door nobody wrote closed the glass, and the arena grew where a row was
+named.** Three governor cells called `fgov2-status-number-truth`, which was
+never defined; axiom 5 recovered the unresolved call to nothing and the
+cached image carried the refusal forward, so the glass would not open. Metal
+in-flight is word 6 of `metal_live` and the three cells read it there.
+Underneath, the permanent arena grew while the glass ran: every mint is
+charged to the recipe that made it now (`fk_fn_mint`, page-backed,
+`kernel_page_box pid -n` answers it), which named the site in one read --
+`fgo-field-node` and `fgo-metric`, 453 events in 40 seconds, two cells each.
+A field node carried the row's id among its kids, so per-kernel rows minted
+two permanent cells for every pid the host ever ran. The projection is the
+field now (domain, kind, unit, plane, channel) and the row keeps its id.
+Mints on the live glass: 22 at fifteen seconds, 22 at forty-five.
+(receipts/2026-09-07-the-field-node-is-the-field.md)
+
+**A give claims the sequence.** A gift frame's give loaded the sequence,
+stored sequence+1, copied, stored sequence+2, so two writers could load the
+same sequence and a frame whose writer died between the stores stayed odd
+forever -- readers retried 4096 times and answered nothing, and the frame
+never came back. A give compare-exchanges an EVEN sequence now (the odd value
+IS the lock) and closes with the even successor; a writer that watches an odd
+sequence not move closes it on the dead writer's behalf, so a frame heals.
+Three writers of one frame, twenty-thousand-byte payloads, 150 reads during
+and 150 after: before, 150 of 150 answered nothing, during and after every
+writer had left; after, 150 of 150 whole. `gift-frame-writers-band` 255.
+(receipts/2026-09-07-the-field-node-is-the-field.md)
+
+**Every field of the two densest rows names a reading or the door that owes
+it.** `fglat-door` renders an absence as `?` plus who would give it, so the
+four situations that all read `owner=absent` are told apart; the trailing
+bare `?` is `gpu=`, the owner's device bytes scoped `@owner` or this Glass
+process's own scoped `@glass`; and `gov` stopped printing the policy's
+critical constant where a measurement belongs -- it reads the measured level
+over that critical level from the published frame, or from the same vm_stat
+door the publisher samples. A live line: `DOING dsk=6.35MB/s T=?token n=9
+cpuT=236Kms rss=3GiB pin=+45 load=5.7 owner=?dual-liveness gpu=1MiB@glass`.
+`form-glass-live-ui-band` 4294967295.
+(receipts/2026-09-07-the-doing-line-names-its-owner.md)
+
+**A zero says which zero it is, and every seam names its door.** The atlas
+in-flight lane reads `0b(idle)`: the flow point carries each lane's own
+lifecycle beside its number, evidence and source, and only a standing gauge
+borrows that word -- a delta lane's zero means nothing moved in this window,
+a different sentence. The seam line lists every distinct door with a `+N
+more` tail rather than one of four, and the three model-route seams name the
+cell that stands both owners. The staged startup states the program image it
+runs on, read from the kernel's own program surface through `kernel_ast`, and
+renders the route it had already computed for the in-process call door still
+to build. Two seed words stay owed and named: `kernel_stat 11` with
+`kernel_stat 9`, and `runtime.full-program-image.call`. live 2147483647,
+staged-startup 262143. (receipts/2026-09-07-the-last-seams-close.md)
+
 **Nothing is withheld.** The completed-turn share published one node named
 `share.previous.withheld` whenever a reading had not reconciled, so a stale
 percentage could not stand as current -- a real protection whose means was
@@ -744,7 +797,7 @@ column widths each row names. Live: 475,136 bytes of Metal under a
 ```text
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
-./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=99 -> 38000099
+./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=103 -> 38000103
 ./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
