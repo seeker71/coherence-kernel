@@ -203,10 +203,53 @@ engine is discovered at runtime through its directory with header verification
 
 ## The string floor
 
-`core.fk` composes `substring` / `str_find` / `str_to_int` over the four-native
-waist (`str_len`, `str_byte_at`, `byte_to_str`, `str_concat`). `str_find` is
-byte-wise (`core-str-find-equivalence-band` 2047 keeps the old loop verbatim as
-its reference).
+`core.fk` composes `str_to_int` over the four-native waist (`str_len`,
+`str_byte_at`, `byte_to_str`, `str_concat`); `substring` and `str_find` are
+natives on all four arms with their recipes kept beside them as the body's own
+statement of what they mean (`core-str-find-equivalence-band` 2047 keeps the old
+loop verbatim as its reference).
+
+**The search is a native again on fkwu (2026-09-08), and there was nothing to
+mint.** fkwu's tag-30 arm never left `runtime/fkwu-uni.c` when the name left
+`flt-ops` on 2026-07-01, and neither did its `fkc-tri2` arm in
+`fkc-table-serialize.fk`. A native here stands on four mirrors — a
+`native-op-manifest.fk` row, a `flt-ops` row, the generated `fkwu-optable.h`, and
+a serializer arm — and three of the four were still standing; only the row was
+gone, and with it the only way to reach either arm. The whole heal is one
+restored row, and from a call site an orphaned arm reads exactly like an absent
+one. Measured on this quiet Mac (347.63 GB/s through the handle door, 25.77
+TFLOPS, `observe/floor-lens-run.fk`), warm, three runs each, both binaries built
+by the same compiler minutes apart: `meaning-codes-band` **7306/7321/7310 ms →
+3711/3716/3708 ms**, 1.97x with a 0.2% spread that does not swallow it; the
+bearing census's locale walk **5310 → 3610 ms**; and inside one process
+(`observe/line-grammar-search-floor-run.fk`) `split-on` over 16.1 MB of locale
+rows **1895 → 254 ms** and one miss over the 972 kB corpus **97 → 1 ms**, while
+`trim` (263 → 261), `lines-from-source` (235 → 233) and `starts-with?` (26 → 26)
+did not move — because those three do not search. The census's own step total
+moved the *other* way, 60,556,932 → 80,285,715, deterministic across four cold
+and warm readings; removing ~39.5M Form call entries cannot raise a total, so
+that figure is measuring something whose denominator moves with the door
+distribution. Named, not explained, and handed to `bearing-census.bml`'s hand.
+
+**One meaning for the search, held by four arms (2026-09-08).**
+`str_find(h, n, from)` answers the BYTE INDEX of the first occurrence of `n` in
+`h` at or after `max(from, 0)`, or `-1`; an empty needle answers `max(from, 0)`;
+a start past `str_len(h)` answers `-1`, the empty needle included; overlapping
+occurrences answer the first. It refuses nothing and it floors nothing. Two
+silent divergences were measured before the heal and both are closed. fkwu did
+not clamp a negative `from`: `(str_find "abcdefghij" "" -3)` read **-3** here and
+**0** on the other three, and had since both were written — harmless for a
+non-empty needle, which is why every ordinary call agreed. And go, rust and ts
+each snapped `from` UP to the next character start, which skips a needle
+beginning on a continuation byte: on the pre-heal Go kernel
+`(str_find "aΩΩb" <the byte 0xA9> 2)` answered **4** where the byte answer is
+**2**. `str-find-one-meaning-band` **8191 on all four arms** is the guard and is
+a `gate/drift-gates.bml` row, so it runs at every land. It has been watched
+failing: **6140** against a build with the clamp removed, **7679** against one
+that snaps `from` (bit 512 dark and nothing else — the only thing in the tree
+that can see a snapped start), and **5880** against one that drops the
+past-the-end refusal. The standing lesson is
+[`docs/str-find-one-meaning.md`](docs/str-find-one-meaning.md).
 
 **There is one search in this body (2026-09-08).** `line-grammar.fk` carried a
 second one — `find-loop`, cutting a substring at every offset and comparing the

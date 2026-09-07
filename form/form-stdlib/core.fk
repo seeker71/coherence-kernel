@@ -238,9 +238,58 @@
                 (fstr-to-int-loop s fi flen 0))))
 
     ; str_find — substring search from `from`, over the floor, comparing BYTES.
-    ; -1 when not found. There is no fkwu native to fall through to: probed
-    ; 2026-08-25 with a preludeless cell, `str_find` answers [unresolved-call].
-    ; This defn is the only str_find the body has, at 1,596 call sites.
+    ; -1 when not found. 1,596 call sites here.
+    ;
+    ; NO KERNEL REACHES THIS THROUGH THE NAME `str_find` ANY MORE (2026-09-08).
+    ; All four carry a native. fkwu's is tag 30 — and that arm is OLDER than this
+    ; recipe: it never left runtime/fkwu-uni.c when the name left flt-ops on
+    ; 2026-07-01, and neither did its fkc-tri2 arm in fkc-table-serialize.fk. Four
+    ; mirrors hold a native here; three of them still held this one. What the
+    ; bearing census read as "fstr-find-loop, 35.1M calls, 64.3% of the locale
+    ; walk, mint-a-native" was one missing row, and an orphaned arm reads exactly
+    ; like an absent one from the call site. Read every mirror before you mint.
+    ;
+    ; THE ONE MEANING OF THE SEARCH — BYTES, CLAMPED, NEVER DIES.
+    ; witnessed: 2026-09-08 -> str-find-one-meaning-band 8191 on all four arms
+    ;
+    ;   str_find(h, n, from) answers the BYTE INDEX of the first occurrence of n
+    ;   in h at or after max(from, 0), or -1. An empty needle answers max(from,0);
+    ;   a `from` past str_len(h) answers -1, the empty needle included; a needle
+    ;   longer than what is left answers -1; overlapping occurrences answer the
+    ;   first. It refuses nothing and it FLOORS nothing.
+    ;
+    ; WHY CLAMPED, AND THE ONE ANSWER THAT MOVED. Until 2026-09-08 this recipe
+    ; handed a negative `from` straight to the loop: for a non-empty needle that
+    ; was harmless (no byte matches below 0, so it walked up to the same answer),
+    ; but for an EMPTY needle it answered the negative number itself — a position
+    ; that is not in the string. go, rust and ts all clamped, so fkwu was the odd
+    ; arm: `(str_find "abcdefghij" "" -3)` read -3 here and 0 on the other three.
+    ; Measured before the row came back. The clamp is now written down four times,
+    ; and line-grammar.fk's `find-from` has clamped at the caller since 2026-09-08.
+    ;
+    ; WHY BYTES: every index in this dialect is a byte offset. str_byte_at indexes
+    ; bytes, substring cuts bytes, the locale rows are Persian, Hebrew, Chinese and
+    ; Japanese. Until 2026-09-08 go, rust and ts snapped `from` UP to the nearest
+    ; character start — a no-op for any needle that is well-formed UTF-8, and a
+    ; skipped match for a needle that begins on a continuation byte, which fkwu and
+    ; go can both hold. No ASCII band can see that; the sweep in
+    ; tests/str-find-one-meaning-band.fk walks every byte offset of the real rows.
+    ;
+    ; WHERE AN ARM CANNOT SAY IT: rust's `str` and the TS kernel's string cannot
+    ; HOLD a needle that is a fragment of a multi-byte character, so those two
+    ; refuse out loud rather than answer. What all four hold together is:
+    ; NO ARM EVER ANSWERS A DIFFERENT INDEX — the byte index, or the refusal.
+    ;
+    ; THE RECIPE STAYS, AND STAYS REACHABLE BY ITS OWN NAME (`fstr-find`), exactly
+    ; as fstr-substring-halve does. It is this body's statement of what the door
+    ; MEANS, and core-str-find-equivalence-band.fk (2047) asks it rather than a
+    ; stored answer. TWO EDGES THE NATIVE ANSWERS AND THE RECIPE DOES NOT: a
+    ; `nothing` from — which reads as a hugely negative int, so the loop walks up
+    ; from nine quintillion below zero and never returns (measured: a 120 s probe
+    ; printed nothing at all) — and a non-string h or n, where the native answers
+    ; -1 and str_len's 0 makes this recipe answer 0 for an absent NEEDLE. An
+    ; absence is not a needle found at position 0; the native is right and the
+    ; three siblings die there, so no four-way meaning exists for that argument.
     ;
     ; WHY IT NO LONGER ALLOCATES. The first form of this loop cut
     ; `(substring h i (add i nlen))` at EVERY position and compared the piece.
@@ -310,12 +359,14 @@
     ;   [0, 3, -1, 0, -1, -1, 5, 1, 2]
     ;   for ("abc" "" 0) ("abc" "" 3) ("abc" "" 99) ("" "" 0) ("" "abc" 0)
     ;       ("" "" 5) ("a—b中c" "中" 0) ("aΩb" "Ω" 0) ("abc" "c" 0)
-    (defn str_find (h n from)
+    (defn fstr-find (h n from)
         (do (let hlen (str_len h))
             (let nlen (str_len n))
-            (if (eq nlen 0)
-                (if (gt from hlen) -1 from)
-                (fstr-find-loop h n hlen nlen from (str_byte_at n 0)))))
+            (let start (if (lt from 0) 0 from))
+            (if (gt start hlen) -1
+                (if (eq nlen 0) start
+                    (fstr-find-loop h n hlen nlen start (str_byte_at n 0))))))
+    (defn str_find (h n from) (fstr-find h n from))
 
     ; float_to_str — the missing dual of the native str_to_float. Scoped
     ; honestly: fixed 6 fractional digits, trailing zeros trimmed, decimal

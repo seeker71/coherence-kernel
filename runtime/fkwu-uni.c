@@ -12196,31 +12196,90 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return ((long long)(unsigned char)FK_SBYTES(sa)[k]) << 1;
     }
     if (t == 30) {
-        long long wa30 = fk_walk(fk_node[i][1], fp); fk_vp(wa30); long long sa = fk_stri(wa30);
-        long long wb30 = fk_walk(fk_node[i][2], fp); fk_vp(wb30); long long sb = fk_stri(wb30);
-        long long from = fk_walk(fk_node[i][3], fp) >> 1; fk_vsp = fk_vsp - 2;
+        /* str_find(h, needle, from) -- the body's search. It answers the BYTE
+         * INDEX of the first occurrence of `needle` in `h` at or after
+         * max(from, 0), or -1.
+         *
+         * THIS ARM IS OLDER THAN ITS NAME. str_find left flt-ops on 2026-07-01
+         * with substring/int_to_str/str_to_int and became Form composition in
+         * core.fk. The other three arms went with their rows; THIS one stayed,
+         * unreachable, together with its fkc-tri2 arm in fkc-table-serialize.fk.
+         * On 2026-09-08 the bearing census named `fstr-find-loop` at 35.1M calls
+         * and 64.3% of the locale walk with the remedy "mint-a-native", and the
+         * mint was a row: four mirrors, three of them already standing. An
+         * orphaned arm reads exactly like an absent one from the call site, so
+         * READ EVERY MIRROR FOR THE NAME BEFORE YOU MINT.
+         *
+         * THE ONE MEANING -- BYTES, CLAMPED, NEVER DIES.
+         * witnessed: 2026-09-08 -> str-find-one-meaning-band 8191 on all four arms
+         *   from < 0                       -> 0 (a search cannot start before the
+         *                                    first byte; go/rust/ts already clamped
+         *                                    and the recipe did not -- the ONE edge
+         *                                    that moved when this row came back)
+         *   from > str_len(h)              -> -1, the empty needle included
+         *   needle empty                   -> from, once clamped into range
+         *   needle longer than what is left-> -1
+         *   overlapping occurrences        -> the first
+         *   h or needle not a string       -> -1 (an absence is not a haystack and
+         *                                    not a needle; the three siblings die
+         *                                    here, so no four-way meaning exists
+         *                                    and fkwu answers rather than dying)
+         * BYTES, NOT CODEPOINTS. Every index in this dialect is a byte offset --
+         * str_byte_at indexes bytes, substring cuts bytes, and the locale rows are
+         * Persian, Hebrew, Chinese and Japanese. A `from` snapped up to a character
+         * start (which go, rust and ts did until 2026-09-08) skips a needle that
+         * begins on a continuation byte, and no ASCII band can say so.
+         *
+         * ONE PLACE THIS ANSWERS WHERE THE RECIPE DOES NOT: a `nothing` from.
+         * `nothing` reads as a hugely negative int, so fstr-find-loop walks up
+         * from nine quintillion below zero and never returns -- measured, a 120 s
+         * probe printed nothing at all. This clamps to 0 and answers. A spin
+         * carries no meaning to break.
+         *
+         * The two byte pointers are hoisted OUT of the scan: FK_SBYTES is a macro
+         * over fk_sb + fk_so[si], and nothing in this loop walks, interns or grows,
+         * so the pool cannot move under it. Re-reading it per byte cost the inner
+         * compare two extra loads on every position of a 35M-position walk. */
+        long long wa30 = fk_walk(fk_node[i][1], fp); fk_vp(wa30);
+        long long wb30 = fk_walk(fk_node[i][2], fp); fk_vp(wb30);
+        long long from = fk_walk(fk_node[i][3], fp) >> 1;
+        /* re-read the two strings from the value stack AFTER every walk: a melt
+         * inside the `from` expression relocates through fk_vs, and an index taken
+         * before it would name a string that has moved. */
+        long long sa = fk_stri(fk_vs[fk_vsp - 2]);
+        long long sb = fk_stri(fk_vs[fk_vsp - 1]);
+        fk_vsp = fk_vsp - 2;
         if (sa < 0 || !FK_SOK(sa) || sb < 0 || !FK_SOK(sb)) {
             return 0 - 2;
         }
         if (from < 0) {
             from = 0;
         }
-        if (from > FK_SLEN(sa)) {
+        long long hl30 = FK_SLEN(sa);
+        if (from > hl30) {
             return 0 - 2;
         }
         long long ln = FK_SLEN(sb);
         if (ln == 0) {
             return from << 1;
         }
-        long long lim = FK_SLEN(sa) - ln;
+        long long lim = hl30 - ln;
+        if (from > lim) {
+            return 0 - 2;
+        }
+        const char *hb30 = FK_SBYTES(sa);
+        const char *nb30 = FK_SBYTES(sb);
+        char b030 = nb30[0];
         long long pos = from;
         while (pos <= lim) {
-            long long j3 = 0;
-            while (j3 < ln && FK_SBYTES(sa)[pos + j3] == FK_SBYTES(sb)[j3]) {
-                j3 = j3 + 1;
-            }
-            if (j3 == ln) {
-                return pos << 1;
+            if (hb30[pos] == b030) {
+                long long j3 = 1;
+                while (j3 < ln && hb30[pos + j3] == nb30[j3]) {
+                    j3 = j3 + 1;
+                }
+                if (j3 == ln) {
+                    return pos << 1;
+                }
             }
             pos = pos + 1;
         }
