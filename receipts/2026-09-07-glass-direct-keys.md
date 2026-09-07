@@ -33,3 +33,12 @@ The useful surprise: quit had restored every terminal setting; Darwin additional
 set its PENDIN queue-state bit. The PTY witness now distinguishes that transient
 state while comparing every actual setting. The awkward Enter requirement became
 a real input path, with restoration tested as carefully as arrival.
+
+Rebase retained the room focus and exposed an upstream regression: Choice's
+help and renderer survived, but its `d/g/y/w` controller definitions did not.
+Those bindings and the step/take/hold protocol symbols are restored. Direct
+input uses the same choice command offer; missing slots and refused offers do
+not claim an applied outcome.
+The Choice band returned 16383 with exit 0, including an actual native command
+offer and refusal of a second offer while the first is leased. Its inbox is now
+process-private; validation never clears the living Choice inbox.
