@@ -12383,32 +12383,30 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (fd < 0) {
             return -2;
         }
-        /* Flush-and-continue, never truncate: the old `n < 8192` gate FILLED the buffer, wrote
-         * it once, and returned the file's size as if all was written -- the silent-partial
-         * family, on the write side. Witnessed 2026-07-30: a 9644-byte WAV ("sema", the body's
-         * first word) landed as 8192 bytes and the ear heard (1 3) out of the stump. Tag 104
-         * twenty lines down always had the loop-until-done shape; this is the same shape for
-         * the byte-list walk. */
+        /* Files return their resulting extent; nonseekable streams return bytes
+         * accepted. Form owns the frame commit; this seed only carries the write. */
         static char tmp[8192];
         long long n = 0;
+        long long written = 0;
         long long q = xs >> 1;
         while (q >= 1 && FK_POK(q)) {
             if (n == 8192) {
-                long long w61 = write(fd, tmp, n);
-                if (w61 < n) {
+                if (!fk_write_all_raw(fd, tmp, n)) {
                     close(fd);
                     return -2;
                 }
+                written += n;
                 n = 0;
             }
             tmp[n] = (char)(FK_HH(q) >> 1);
             n = n + 1;
             q = FK_HT(q) >> 1;
         }
-        long long wr = n > 0 ? write(fd, tmp, n) : 0;
+        int complete = fk_write_all_raw(fd, tmp, n);
         long long total = lseek(fd, 0, 2);
+        if (total < 0 && errno == ESPIPE) total = written + n;
         close(fd);
-        if (wr < 0 || total < 0) {
+        if (!complete || total < 0) {
             return -2;
         }
         return total << 1;
@@ -16331,6 +16329,7 @@ static int fk_write_all_raw(int fd, const void *buf, unsigned long n) {
     const char *p = (const char *)buf;
     while (done < n) {
         long long w = write(fd, p + done, n - done);
+        if (w < 0 && errno == EINTR) continue;
         if (w <= 0) {
             return 0;
         }
