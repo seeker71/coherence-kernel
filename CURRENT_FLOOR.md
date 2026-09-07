@@ -208,6 +208,28 @@ waist (`str_len`, `str_byte_at`, `byte_to_str`, `str_concat`). `str_find` is
 byte-wise (`core-str-find-equivalence-band` 2047 keeps the old loop verbatim as
 its reference).
 
+**There is one search in this body (2026-09-08).** `line-grammar.fk` carried a
+second one — `find-loop`, cutting a substring at every offset and comparing the
+piece, which is the shape `core.fk` had already been healed off. `find-from` is
+now `str_find` with the negative-`start` clamp the old scan gave for free, and
+that reaches `split-on`, `native-edit`, `sh-bi-grep` and the thirty-odd units
+that prelude this file at once. The same file's `trim`, `trim-leading-ws`,
+`trim-trailing-ws` and `lines-loop` stopped cutting a fresh string per byte and
+walk byte offsets, making at most one cut. Both implementations run against each
+other inside one process (`observe/line-grammar-search-floor-run.fk`), because a
+wall-clock reading on this host today is quieter about the change than about the
+machine (row 1321): one miss over the 972 kB corpus **297 ms → 97 ms** (3.27 →
+10.0 MB/s), `lines-from-source` over the same file **513 ms → 235 ms**, `trim`
+over 18.1 MB of padded rows **725 ms → 263 ms**, and `split-on` on a ONE-byte
+separator **2100 ms → 1895 ms** — the old cut was already small there, so what
+the routing removes is the growth with needle length, not a constant. A
+first-byte gate ahead of `starts-with?`'s cut was written, measured at 25 ms
+against 26 ms over 240,000 real misses, and **removed rather than shipped**.
+`line-grammar-search-equivalence-band` **8191** keeps all four old bodies
+verbatim as its reference and pins the literal answers of the named edges; it
+answers 6143 and 4079 and 2362 against three deliberately broken references, so
+its green is a green that can fail.
+
 `substring` is a native again on fkwu (2026-09-07) — mode 9 of the leaf door
 (tag 201), not a tag of its own: every tag 0..255 carries an arm and 150 is held
 as the native-surface probe, so it rides the door modes 4-8 already ride. Bytes,
@@ -268,7 +290,7 @@ two runs an hour apart differ in their seconds and agree to the step.
 form/form-stdlib/tests/bearing-census-band.fk    -> 32767
 form/form-stdlib/tests/sha256-list-floor-band.fk -> 32767
 observe/bearing-census-run.fk         -> the corpus band, 6.13M steps, 99.9% covered
-observe/bearing-census-locale-run.fk  -> the locale-row walk, 60.1M steps, 99.3% covered
+observe/bearing-census-locale-run.fk  -> the locale-row walk, 59.1M steps, 99.4% covered
 observe/bearing-census-take.fk        -> 16 rows back off glass.sensor.bearing
 ```
 
@@ -286,6 +308,20 @@ private floor appears in the reading, and the standing name is **`find-loop`** i
 `line-grammar.fk` (34.3M calls, five doors leaning). `nil?` does not rank — the
 JIT crystallized it, so it stopped walking, which is the measure working and not
 a blind spot.
+
+The fourth name is where the chain reaches a floor rather than a heal. Routing
+`find-loop` to `str_find` costs the walk **59,076,054** steps, and the census now
+names **`fstr-find-loop`** in `core.fk`: 35.1M calls, seven doors leaning,
+remedy **mint-a-native**. That reading is honest and it is not another door to
+open. The positions are the work — a split on every occurrence cannot skip a
+byte — and every one of them is one walker entry, so a byte scan written in Form
+runs at about **10 MB/s** against the `substring` native's 660 on the same pool.
+The seed's op table carries seven string natives (`str_len`, `str_eq`,
+`str_concat`, `str_byte_at`, `byte_to_str`, `str_to_float`, `substring`) and no
+search among them. What the lens names next is therefore a native `str_find` in
+the seed, and the caller-side half of it is `meaning-codes.bml` re-reading and
+re-splitting the same locale file 235,936 times per round to answer 238,856 key
+lookups. Neither is opened here: both are another hand's file this hour.
 
 The sha256 heal carries the teaching that reversed its own arithmetic. Routing
 `append-1` and `append-list` to core's `append` adds a frame to a walk with no

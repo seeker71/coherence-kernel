@@ -50,19 +50,47 @@
     ;; whitespace trimming
     ;; ──────────────────────────────────────────────────────────────────
 
+    ;; Both trims used to CUT a fresh string per whitespace byte: leading fed
+    ;; itself s[1..] and trailing fed itself s[..len-1], so trimming k bytes off
+    ;; a row of length n interned k strings totalling about k*n bytes, and `trim`
+    ;; did it twice. The bearing census over the locale-row walk read 1,177,051
+    ;; calls to each on 2026-09-07. Now each walks BYTE OFFSETS and makes at most
+    ;; one cut, so the work is the whitespace run and the interning is one string.
+    ;;
+    ;; `(ord (char_at s i))` became `(str_byte_at s i)`, which is the same value
+    ;; on fkwu — char_at is a one-byte substring and ord is str_byte_at of it —
+    ;; and is the same value on every arm, which the old form was not: rust and
+    ;; ts answer the axiom-1 absence for a cut that severs a character, so
+    ;; `char_at` at the LAST byte of a row ending in Persian handed `ord` an
+    ;; absence there and a byte here. Neither reading is whitespace, so no
+    ;; answer moves; the door simply stopped asking a question two arms cannot
+    ;; hold. Pinned by tests/line-grammar-search-equivalence-band.fk (4095),
+    ;; which keeps both cutting bodies verbatim and demands agreement.
+
+    (defn ws-run-start (s i len)
+        (if (ge i len) i
+            (if (is-ws-cp (str_byte_at s i)) (ws-run-start s (add i 1) len) i)))
+
+    (defn ws-run-end (s j)
+        (if (le j 0) 0
+            (if (is-ws-cp (str_byte_at s (sub j 1))) (ws-run-end s (sub j 1)) j)))
+
     (defn trim-leading-ws (s)
-        (if (eq (str_len s) 0) s
-            (if (is-ws-cp (ord (char_at s 0)))
-                (trim-leading-ws (substring s 1 (str_len s)))
-                s)))
+        (do (let len (str_len s))
+            (let i (ws-run-start s 0 len))
+            (if (eq i 0) s (substring s i len))))
 
     (defn trim-trailing-ws (s)
-        (if (eq (str_len s) 0) s
-            (if (is-ws-cp (ord (char_at s (sub (str_len s) 1))))
-                (trim-trailing-ws (substring s 0 (sub (str_len s) 1)))
-                s)))
+        (do (let len (str_len s))
+            (let j (ws-run-end s len))
+            (if (eq j len) s (substring s 0 j))))
 
-    (defn trim (s) (trim-leading-ws (trim-trailing-ws s)))
+    (defn trim (s)
+        (do (let len (str_len s))
+            (let i (ws-run-start s 0 len))
+            (let j (ws-run-end s len))
+            (if (le j i) ""
+                (if (and (eq i 0) (eq j len)) s (substring s i j)))))
 
     (defn is-blank? (text) (eq (str_len (trim text)) 0))
 
@@ -92,15 +120,26 @@
     (defn lines-from-source (s)
         (lines-loop s 0 0 1 (empty)))
 
+    ;; The scan asked `(str_len s)` again at every byte of the file and read the
+    ;; byte as `(ord (char_at s i))` — a one-byte CUT interned per byte, then a
+    ;; second walker frame to read its first byte back out. A megabyte of source
+    ;; interned a million throwaway strings to find its newlines. The length is
+    ;; hoisted into the loop now and the byte is read straight through the
+    ;; native. `lines-loop` keeps its five-argument shape, because it is a name
+    ;; other units can reach, and hands off once per call rather than per byte.
+
     (defn lines-loop (s i start line acc)
-        (if (eq i (str_len s))
+        (lines-scan s i start line acc (str_len s)))
+
+    (defn lines-scan (s i start line acc len)
+        (if (eq i len)
             (if (gt i start)
                 (reverse-acc (cons (list (substring s start i) line) acc))
                 (reverse-acc acc))
-            (if (eq (ord (char_at s i)) 10)
-                (lines-loop s (add i 1) (add i 1) (add line 1)
-                            (cons (list (substring s start i) line) acc))
-                (lines-loop s (add i 1) start line acc))))
+            (if (eq (str_byte_at s i) 10)
+                (lines-scan s (add i 1) (add i 1) (add line 1)
+                            (cons (list (substring s start i) line) acc) len)
+                (lines-scan s (add i 1) start line acc len))))
 
     (defn line-text (ln) (head ln))
     (defn line-num  (ln) (head (tail ln)))
@@ -108,6 +147,15 @@
     ;; ──────────────────────────────────────────────────────────────────
     ;; prefix detection
     ;; ──────────────────────────────────────────────────────────────────
+
+    ;; This one cuts too, and it was LEFT ALONE. A first-byte gate ahead of the
+    ;; cut was written and measured against this body on 2026-09-08 — 240,000
+    ;; misses over the real locale rows, 25 ms cutting against 26 ms gated — so
+    ;; it bought nothing and was removed rather than shipped. The markers this
+    ;; door is asked about are one to five bytes long, which is a cut `substring`
+    ;; now makes natively; the pool pressure that made the old search degrade
+    ;; needs a cut worth degrading over. Pinned by the equivalence band all the
+    ;; same, so the next reader inherits the measurement and not the temptation.
 
     (defn starts-with? (text prefix)
         (if (lt (str_len text) (str_len prefix)) false
@@ -126,13 +174,36 @@
     ;; substringing search
     ;; ──────────────────────────────────────────────────────────────────
 
-    (defn find-from (s needle start)
-        (find-loop s needle start))
+    ;; THERE IS ONE SEARCH IN THIS BODY AND IT LIVES IN core.fk.
+    ;;
+    ;; `find-loop` used to be a second one: it cut `(substring s i (add i nlen))`
+    ;; at EVERY offset and compared the piece, re-measuring both lengths on each
+    ;; position as well. core.fk's `str_find` had already been healed off exactly
+    ;; that shape — read one byte, compare further only when it matches the
+    ;; needle's first — but this copy kept the old cost, and the callers above it
+    ;; are how the body reads everything: `split-on` is a loop over `find-from`,
+    ;; and more than thirty units prelude this file.
+    ;;
+    ;; The bearing census over the locale-row walk read it on 2026-09-07 as the
+    ;; single heaviest composed door in the body: 34,264,886 walker entries,
+    ;; 57.4% of the walking, five doors leaning on it — every one of those
+    ;; entries interning a string it threw away. Routing here removes the second
+    ;; search rather than making it faster: the meaning is now stated in one
+    ;; place, and a heal to `str_find` reaches every reader at once.
+    ;;
+    ;; THE CLAMP IS THE OLD BEHAVIOUR, WRITTEN DOWN. A negative `start` used to
+    ;; scan harmlessly toward zero — the cut clamped, the lengths never matched,
+    ;; nothing could match before 0 — so `find-from s n -3` answered as if it
+    ;; were `0`. `str_find` would instead hand `str_byte_at` a negative index,
+    ;; which fkwu answers and form-kernel-go and form-kernel-rust take as fatal
+    ;; (core.fk names that measurement). So the clamp stays here, where the
+    ;; callers are, and the equivalence band asks for it.
+    ;;
+    ;; Pinned by tests/line-grammar-search-equivalence-band.fk (4095), which
+    ;; keeps the allocating loop verbatim as its reference.
 
-    (defn find-loop (s needle i)
-        (if (gt (add i (str_len needle)) (str_len s)) (sub 0 1)
-            (if (str_eq (substring s i (add i (str_len needle))) needle) i
-                (find-loop s needle (add i 1)))))
+    (defn find-from (s needle start)
+        (str_find s needle (if (lt start 0) 0 start)))
 
     ;; ──────────────────────────────────────────────────────────────────
     ;; split on substringing
