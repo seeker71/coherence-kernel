@@ -171,6 +171,13 @@ glass **32743, 20479**; with `origin/main`'s glass swapped back in under the
 same binary, **20479, 24575**. The failing bits are timing bits and the band's
 own header names the cause — sibling publishers moving. Same spread either way.
 
+One red found on arrival, not made here. After rebasing onto `99cbcdb9` the
+corpus band read **32655**: row 1352 (siblingsweep) had landed on main without
+its three pins moving, so count, admissible and field code were all one row
+behind. Healed in the same pass rather than handed on — the pins now carry 1352
+and 1353 together, probed in one cell (745 / 733 / 2 / 1353 / 0 duplicates /
+745073321353) before any of the three numbers was written down. **32767.**
+
 ## The most surprising teaching
 
 **Six seconds of the body's hardest string work minted nothing, and forty
