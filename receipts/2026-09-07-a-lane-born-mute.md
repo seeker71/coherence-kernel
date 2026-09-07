@@ -9,8 +9,8 @@ room, the mic measuring free and hearing — and `.hearth/ear.spool` at **0 byte
 reading `silent`, level 0. Three of us had debugged it blind, because a lane spawned with
 `host_spawn_quiet` has no voice.
 
-It stands now. Four wounds, each found by looking rather than by reasoning, and a witness so the
-next one is visible.
+It stands now. Five wounds, each found by looking rather than by reasoning, and a witness so the
+next one is visible. The fifth was found *by* that witness, during the landing of the first four.
 
 ## What was actually wrong
 
@@ -76,7 +76,8 @@ look.
   thing that makes it a clock.
 - One `kill -0` probe every 2 s catches a lane that exited in its first half second without waiting
   out the birth patience, and watches the tongue lane, which speaks only when a line closes and so
-  has no clock of its own.
+  has no clock of its own. Its answer also chooses which patience the silence is measured against —
+  see the fifth wound below.
 - A bell path that is not a fifo is removed before the fifo is made. Waking clears the stop marker.
 
 ## What a dying lane now tells the glass
@@ -111,9 +112,38 @@ completion — the mouth's hand-off to the speaker — to the moment the axis ca
 | 2 | ~2 s | 1788777092605 | 1788777100871 | **8 266 ms** | 1 |
 | 3 | ~2 s | 1788777153232 | 1788777154709 | **1 477 ms** | 1 |
 | 4 | ~2 s | 1788777605194 | 1788777612722 | **7 528 ms** | 1 |
+| 5 | ~2 s | 1788778035723 | 1788778043061 | **7 338 ms** | 1 |
 
 The fourth is the landing witness: the same cold start run again after the rebase onto
 `bab331cb`, on the exact bytes that land, with a sibling's transcript rows appended to the give.
+
+## A fifth wound the landing itself surfaced: a busy machine is not a dead lane
+
+Minutes after witness four the glass read `ear.stands 4` on a lane standing three seconds — and
+the chronicle said exactly why, at a cadence too regular to be chance:
+
+```
+--- stood at 1788777578435 ---   --- stood at 1788777687615 ---
+--- stood at 1788777785704 ---   --- stood at 1788777893344 ---
+```
+
+Every ~100 s, and the ~100 s were the minutes I spent running the corpus band and the eleven
+drift gates beside the live ear — Go, Rust and TypeScript kernels, whole-tree compiles. The lanes
+were **starved**, not dead: silent past four seconds because nothing was scheduling them. The
+sensor killed a healthy pair each time, paying the dense model's reopen and losing the tongue
+lane's mark.
+
+The clock alone cannot tell a stalled lane from a dead one. The probe can, and it was already
+there. So the probe's answer now chooses the patience: `fge-patience` (4 s) stands only while the
+host has **not** vouched for the pid, and `fge-stall-patience` (60 s) once it has — long enough
+that a lane wedged forever is still eventually re-stood, far past anything a loaded machine does
+to a living one. Witness five is that same load run again against the fixed sensor: the full drift
+gates *and* the corpus band beside a live ear, and **one stand each**, the chronicle two lines
+long, `ear.stands` reading 1 at 59 s standing.
+
+Which is the whole lesson twice over: the instrument I built to prove the first fix is what found
+the fourth wound, and then the fifth — and the fifth only existed because the landing itself was
+the load.
 
 Witness 2's point, whole:
 
