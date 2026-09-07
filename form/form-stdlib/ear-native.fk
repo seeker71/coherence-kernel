@@ -29,6 +29,9 @@
     (defn enw-lang-lo () 50259)
     (defn enw-lang-hi () 50358)
     (defn enw-tok-transcribe () 50359)
+    ; the token the model has for "there are no words here" — it never leaves the decoder as a choice, it is only
+    ; ever READ: the reference takes its probability at the <|startoftranscript|> position and calls it no_speech_prob
+    (defn enw-nospeech () 50362)
     (defn enw-notimestamps () 50363)
     (defn enw-ts0 () 50364)
     ; ---- pipelines, in em-names order ----
@@ -47,6 +50,7 @@
     (defn enw-pi-attn-x () 12)
     (defn enw-pi-attn-xfin () 13)
     (defn enw-pi-lnstat () 14)
+    (defn enw-pi-softp () 15)
     ; the cross window cut into chunks of 64 keys: the group count both halves of the split attention agree on
     (defn enw-xchunks (Tk) (div (add Tk 63) 64))
     (defn enw-pipes-go (msl names) (if (eq (len names) 0) (list) (cons (metal_pipeline msl (head names)) (enw-pipes-go msl (tail names)))))
@@ -92,7 +96,9 @@
               (metal_buf_alloc (mul 2 (enw-V)))                 ; 24 a zero bias (half) for the weights that carry none
               (metal_buf_alloc 1024)                            ; 25 the argmax's first-stage (value, index) pairs
               (enw-f32 (mul 6 (mul 24 66)))                     ; 26 the cross attention's per-chunk (m, l, acc[64]) partials
-              (enw-f32 (mul 2 (enw-TE)))))                      ; 27 each row's layernorm (mean, rsqrt), read by every tile
+              (enw-f32 (mul 2 (enw-TE)))                        ; 27 each row's layernorm (mean, rsqrt), read by every tile
+              (enw-f32 (mul 2 (em-argmax-G)))                   ; 28 the softmax fold's per-group (max, sum-of-exp) partials
+              (enw-f32 2)))                                     ; 29 the decoded line's (sum of log-probabilities, token count)
     (defn enw-b (st i) (nth (nth st 4) i))
     (defn enw-bl (st i l) (nth (nth (nth st 4) i) l))
     (defn enw-mel (st) (enw-b st 1))
@@ -169,8 +175,8 @@
     ; the rest: melnorm, conv1, conv2, positions, ln+logits (row 0; the prefill's last row), the three argmax windows (tongue, text, text-or-timestamp)
     ; an argmax is a PAIR of binds now — the fold over G groups, then the fold over their G answers
     (defn enw-argmax-bind (st lo hi lo2 hi2)
-        (list (md-bind16 (list (enw-b st 15) (enw-b st 16) (enw-b st 25)) (list lo hi lo2 hi2 0 (em-argmax-G)) 256 0 1 0)
-              (md-bind16 (list (enw-b st 15) (enw-b st 16) (enw-b st 25)) (list lo hi lo2 hi2 1 (em-argmax-G)) 256 0 1 0)))
+        (list (md-bind16 (list (enw-b st 15) (enw-b st 16) (enw-b st 25) (enw-b st 29)) (list lo hi lo2 hi2 0 (em-argmax-G)) 256 0 1 0)
+              (md-bind16 (list (enw-b st 15) (enw-b st 16) (enw-b st 25) (enw-b st 29)) (list lo hi lo2 hi2 1 (em-argmax-G)) 256 0 1 0)))
     (defn enw-argmax-go (st pair)
         (add (enw-go st (enw-pi-argmax) (head pair) (em-argmax-G))
              (enw-go st (enw-pi-argmax) (nth pair 1) 1)))
@@ -201,6 +207,53 @@
         (if (and (eq lo 0) (and (eq hi (add (enw-eot) 1)) (eq hi2 0))) (enw-bind-misc st 7)
         (if (and (eq lo 0) (and (eq hi (add (enw-eot) 1)) (and (eq lo2 (enw-ts0)) (eq hi2 (enw-V))))) (enw-bind-misc st 8)
             (enw-argmax-bind st lo hi lo2 hi2)))))
+    ; ---- the model's own doubt ----
+    ; A float word off a device buffer: the same IEEE-754 read the band and the tongue's logits use.
+    (defn enw-f32-of (b i) (do (let bits (en-u32 b i)) (let s (div bits 2147483648)) (let e (mod (div bits 8388608) 256)) (let m (mod bits 8388608)) (if (eq e 0) 0.0 (if (eq e 255) -99999.0 (mul (if (eq s 1) -1.0 1.0) (mul (add 1.0 (div (str_to_float (int_to_str m)) 8388608.0)) (fq-pow2 (sub e 127))))))))
+    ; one probability off the resident logits: softmax over [lo, hi) read at idx, landing as float bits at dout[slot]
+    (defn enw-softp-bind (st lo hi idx stage slot) (md-bind16 (list (enw-b st 15) (enw-b st 16) (enw-b st 28)) (list lo hi idx stage (em-argmax-G) slot) 256 0 1 0))
+    (defn enw-softp-go (st lo hi idx slot)
+        (add (enw-go st (enw-pi-softp) (enw-softp-bind st lo hi idx 0 slot) (em-argmax-G))
+             (enw-go st (enw-pi-softp) (enw-softp-bind st lo hi idx 1 slot) 1)))
+    ; THE PASS ANSWERED WITHOUT DOUBT AND THE ROOM PAID FOR IT. A quiet room decodes as confident ambient tags —
+    ; birds, water, suspenseful music — and the whole body downstream took them for words because the pass carried
+    ; no way to say otherwise. The model always knew: the <|nospeech|> token's probability at the sot position is
+    ; its own reading of "there is nothing here to write down". This reads it, and the tongue's own probability
+    ; beside it, off the logits the sot step already left resident — one extra pair of folds per LINE, none per token.
+    ; Call it while those logits still stand: the next step overwrites them.
+    (defn enw-doubt (st langtok)
+        (do (let a (enw-softp-go st 0 (enw-V) (enw-nospeech) 1))
+            (let b (enw-softp-go st (enw-lang-lo) (enw-lang-hi) langtok 2))
+            (let s (metal_sync))
+            (let w (en-text (metal_buf_read (enw-b st 16) 0 12)))
+            (list (enw-f32-of w 4) (enw-f32-of w 8))))
+    ; the same reading when a batched prefill has moved on: row 0 of the decoder's rows is still the sot row,
+    ; so one logits pass over it (lastrow = 0) puts the sot step's logits back where the folds read them
+    (defn enw-doubt-sot (st langtok)
+        (do (let lg (enw-go st (enw-pi-mv) (enw-bind-misc st 4) (enw-mv-groups (enw-V))))
+            (enw-doubt st langtok)))
+    ; ---- the decoded line's own confidence ----
+    ; The argmax accumulates into these two floats on every dispatch, so a caller zeroes them where its line begins.
+    (defn enw-lp-reset (st) (metal_buf_write (enw-b st 29) 0 (enw-zeros (byte_to_str 0) 8)))
+    (defn enw-avg-logprob (st) (do (let w (en-text (metal_buf_read (enw-b st 29) 0 8))) (let n (enw-f32-of w 4)) (if (le n 0.0) 0.0 (div (enw-f32-of w 0) n))))
+    ; ---- what a caller does with the doubt ----
+    ; WHERE THE LINE IS, AND WHY IT IS NOT THE REFERENCE'S. The same utterance was walked across the eight-second window
+    ; at every one-second offset and read against three disjoint eight-second windows of this room's own silence
+    ; (2026-09-07, mic organ, -48 dBFS). Speech windows answered 0.426 to 0.621; the silent room answered 0.900, 0.921,
+    ; 0.922 — a gap of 0.28 with nothing in it. The reference's 0.6 falls INSIDE the speech band on a window this short
+    ; (an utterance at the window's end reads 0.6104), so 0.6 here silences real words. 0.75 sits in the middle of the
+    ; measured gap: 0.13 above the loudest doubt any speech produced, 0.15 below the quietest the empty room produced.
+    ; THE LINE-CONFIDENCE READING IS CARRIED, NOT GATED ON. The reference also rescues a doubted line when its
+    ; avg_logprob stays above -1.0. On this body that reading does not separate at all — speech spanned -0.43 to -2.49
+    ; and the silent room -1.85 to -2.08, fully overlapping — and the ONE window that scored highest of everything
+    ; (-0.428) was a decoder gone round in a loop saying "Press or hit" eight times. A rescue clause keyed on per-token
+    ; confidence rescues exactly the most confident phantom there is. So it stays an honest number in the answer for a
+    ; caller to read, and the gate is the reading that was measured to separate.
+    (defn enw-doubt-line () 0.75)
+    (defn enw-nospeech-prob (r) (if (lt (len r) 3) 0.0 (nth r 2)))
+    (defn enw-tongue-prob (r) (if (lt (len r) 4) 0.0 (nth r 3)))
+    (defn enw-line-logprob (r) (if (lt (len r) 5) 0.0 (nth r 4)))
+    (defn enw-doubted? (r) (if (gt (enw-nospeech-prob r) (enw-doubt-line)) 1 0))
     ; ---- the open state: (path rows hs pipes bufs toklines enc-tables dec-tables binds) ----
     (defn enw-open (path tokpath)
         (do (let rows (en-table path))
@@ -284,28 +337,36 @@
             (let maxtick (add (div (mul Te 3) 1) 50))
             (if (or (eq nid (enw-eot)) (or (ge (len acc) cap) (or (eq (enw-looping? nid acc) 1) (or (eq (enw-round? nid acc) 1) (and (enw-ts? nid) (gt (sub nid (enw-ts0)) maxtick)))))) (reverse acc) (enw-greedy2 st nid (add pos 1) Te cap (cons nid acc)))))
     ; transcribe from a tick (20 ms units) into the window: the cut point is handed to the decoder as its first timestamp,
-    ; so only what came after it is spoken; returns (lang-token ids) with timestamps kept in ids
+    ; so only what came after it is spoken; returns (lang-token ids nospeech-prob tongue-prob avg-logprob), timestamps kept in ids
     (defn enw-transcribe-from (st Te tick cap)
         (do (let lang (enw-step st (enw-sot) 0 Te (enw-lang-lo) (enw-lang-hi)))
+            (let d (enw-doubt st lang))
             (let t1 (enw-step st lang 1 Te 0 (add (enw-eot) 1)))
             (let t2 (enw-step st (enw-tok-transcribe) 2 Te 0 (add (enw-eot) 1)))
-            (list lang (enw-greedy2 st (add (enw-ts0) tick) 3 Te cap (list)))))
+            (let z (enw-lp-reset st))
+            (let ids (enw-greedy2 st (add (enw-ts0) tick) 3 Te cap (list)))
+            (append (list lang ids) (append d (list (enw-avg-logprob st))))))
     ; the decoder's last word on time: the final timestamp if the line closed with one, else -1
     (defn enw-last-ts (ids) (if (eq (len ids) 0) (sub 0 1) (do (let last (nth ids (sub (len ids) 1))) (if (enw-ts? last) (sub last (enw-ts0)) (sub 0 1)))))
     ; ---- greedy line: prompt sot, lang, transcribe, notimestamps; then text until eot or cap ----
     (defn enw-greedy (st pos Te cap acc)
         (do (let id (enw-step st (if (eq (len acc) 0) (enw-notimestamps) (head acc)) pos Te 0 (add (enw-eot) 1)))
             (if (or (eq id (enw-eot)) (ge (len acc) cap)) (reverse acc) (enw-greedy st (add pos 1) Te cap (cons id acc)))))
-    ; returns (lang-token ids)
+    ; returns (lang-token ids nospeech-prob tongue-prob avg-logprob)
     (defn enw-transcribe (st Te cap)
         (do (let lang (enw-step st (enw-sot) 0 Te (enw-lang-lo) (enw-lang-hi)))
+            (let d (enw-doubt st lang))
             (let t1 (enw-step st lang 1 Te 0 (add (enw-eot) 1)))
             (let t2 (enw-step st (enw-tok-transcribe) 2 Te 0 (add (enw-eot) 1)))
-            (list lang (enw-greedy st 3 Te cap (list)))))
+            (let z (enw-lp-reset st))
+            (let ids (enw-greedy st 3 Te cap (list)))
+            (append (list lang ids) (append d (list (enw-avg-logprob st))))))
     ; ---- words: rank -> base64 line -> bytes ----
     (defn enw-bytes-str (xs) (if (eq (len xs) 0) "" (str_concat (byte_to_str (head xs)) (enw-bytes-str (tail xs)))))
     (defn enw-tok (st id) (if (ge id (enw-eot)) "" (do (let line (nth (nth st 5) id)) (let sp (str_find line " " 0)) (if (lt sp 0) "" (enw-bytes-str (base64-decode (substring line 0 sp)))))))
     (defn enw-text (st ids) (if (eq (len ids) 0) "" (str_concat (enw-tok st (head ids)) (enw-text st (tail ids)))))
+    ; the words, or the silence the model itself asked for. A caller that wants the doubted line anyway reads enw-text.
+    (defn enw-heard (st r) (if (eq (enw-doubted? r) 1) "" (enw-text st (nth r 1))))
     ; the language token's own name is the code the reference uses (en, fa, pt, ...): the tiktoken has no line for it, so a small table
     (defn enw-langs () (list "en" "zh" "de" "es" "ru" "ko" "fr" "ja" "pt" "tr" "pl" "ca" "nl" "ar" "sv" "it" "id" "hi" "fi" "vi" "he" "uk" "el" "ms" "cs" "ro" "da" "hu" "ta" "no" "th" "ur" "hr" "bg" "lt" "la" "mi" "ml" "cy" "sk" "te" "fa" "lv" "bn" "sr" "az" "sl" "kn" "et" "mk" "br" "eu" "is" "hy" "ne" "mn" "bs" "kk" "sq" "sw" "gl" "mr" "pa" "si" "km" "sn" "yo" "so" "af" "oc" "ka" "be" "tg" "sd" "gu" "am" "yi" "lo" "uz" "fo" "ht" "ps" "tk" "nn" "mt" "sa" "lb" "my" "bo" "tl" "mg" "as" "tt" "haw" "ln" "ha" "ba" "jw" "su"))
     (defn enw-lang-code (tok) (do (let i (sub tok (enw-lang-lo))) (if (or (lt i 0) (ge i (len (enw-langs)))) "?" (nth (enw-langs) i))))
@@ -341,19 +402,23 @@
             (let s (metal_sync))
             (en-u32 (en-text (metal_buf_read (enw-b st 16) 0 4)) 0)))
     ; transcribe from a tick with the tongue known (or detected when lang < 0) and an agreed text prefix prefilled;
-    ; returns (lang ids) where ids = prefix + what the decoder added (timestamps kept)
+    ; returns (lang ids nospeech-prob tongue-prob) where ids = prefix + what the decoder added (timestamps kept)
     ; the tongue: the argmax over the language window, unless it lies outside the three the glass offers and one of them is within 3 logits of it
-    (defn enw-f32-of (b i) (do (let bits (en-u32 b i)) (let s (div bits 2147483648)) (let e (mod (div bits 8388608) 256)) (let m (mod bits 8388608)) (if (eq e 0) 0.0 (if (eq e 255) -99999.0 (mul (if (eq s 1) -1.0 1.0) (mul (add 1.0 (div (str_to_float (int_to_str m)) 8388608.0)) (fq-pow2 (sub e 127))))))))
     (defn enw-lang-logit (b tok) (enw-f32-of b (mul 4 (sub tok (enw-lang-lo)))))
     (defn enw-three () (list 50259 50300 50267))
     (defn enw-best-of (b toks best bv) (if (eq (len toks) 0) (list best bv) (do (let v (enw-lang-logit b (head toks))) (if (gt v bv) (enw-best-of b (tail toks) (head toks) v) (enw-best-of b (tail toks) best bv)))))
     (defn enw-lang-pick (st top) (if (or (eq top 50259) (or (eq top 50300) (eq top 50267))) top (do (let b (en-text (metal_buf_read (enw-b st 15) (mul 4 (enw-lang-lo)) (mul 4 99)))) (let three (enw-best-of b (enw-three) 50259 -99999.0)) (if (ge (add (nth three 1) 3.0) (enw-lang-logit b top)) (head three) top))))
     (defn enw-transcribe-from2 (st Te tick cap lang prefix)
         (do (let l (if (lt lang 0) (enw-lang-pick st (enw-prefill st (list (enw-sot)) 0 Te (enw-lang-lo) (enw-lang-hi) 0 0)) lang))
+            ; the detection prefill leaves the sot logits standing, so the doubt is free there; when the tongue
+            ; arrived known there was no sot step, and row 0 of the prefill's rows is still the sot row
+            (let d0 (if (lt lang 0) (enw-doubt st l) (list)))
             (let head-ids (append (list l (enw-tok-transcribe) (add (enw-ts0) tick)) prefix))
+            (let z (enw-lp-reset st))
             (let first (enw-prefill st (if (lt lang 0) head-ids (cons (enw-sot) head-ids)) (if (lt lang 0) 1 0) Te 0 (add (enw-eot) 1) (enw-ts0) (enw-V)))
+            (let d (if (lt lang 0) d0 (enw-doubt-sot st l)))
             (let p0 (add 1 (len head-ids)))
             (let room (sub cap (len prefix)))
             (let tail-ids (if (or (eq first (enw-eot)) (le room 0)) (list) (enw-greedy2 st first p0 Te (if (lt room 4) 4 room) (list first))))
-            (list l (append prefix tail-ids))))
+            (append (list l (append prefix tail-ids)) (append d (list (enw-avg-logprob st))))))
     0)

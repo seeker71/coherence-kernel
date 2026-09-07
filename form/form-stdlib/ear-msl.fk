@@ -199,17 +199,40 @@
     ; 51,865 logits is one core of forty reading 207 KB alone. Stage 0: em-argmax-G groups of 256, each folding its own stride
     ; of both windows and writing (value bits, index) to part[2g]; stage 1: one group folding those G pairs. Every element lands
     ; in exactly one group and a group reports the lowest index at its own maximum, so the lowest-index rule survives the split.
+    ; AND THE CHOSEN TOKEN'S LOG-PROBABILITY, WHICH COSTS NOTHING HERE AND A WHOLE SECOND PASS ANYWHERE ELSE. A softmax
+    ; normaliser is the same walk over the same logits this kernel is already doing, so each lane carries an online
+    ; sum-of-exp beside its running maximum — merged by the same rule the attention kernels use, the larger max winning and
+    ; the other side scaled by exp(its max - that one). The argmax's winner IS the maximum, so its log-softmax is exactly
+    ; -log(L): no second index, no second read. Stage 1 adds that to lp[0] and one to lp[1], so a caller that zeroes those
+    ; two floats before a line reads back the sum and the count of exactly the tokens it decoded. The reference calls the
+    ; quotient avg_logprob and will not silence a doubted line without it.
     (defn em-argmax-G () 64)
     (defn em-argmax () (em-lines (list
-        "kernel void ear_argmax(device const float* xv [[buffer(0)]], device uint* out [[buffer(1)]], device uint* part [[buffer(2)]], constant uint& lo [[buffer(3)]], constant uint& hi [[buffer(4)]], constant uint& lo2 [[buffer(5)]], constant uint& hi2 [[buffer(6)]], constant uint& stage [[buffer(7)]], constant uint& G [[buffer(8)]], uint g [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {"
-        "  threadgroup float bv[256]; threadgroup uint bi[256]; float best = -1e30f; uint bidx = 0xffffffffu;"
+        "kernel void ear_argmax(device const float* xv [[buffer(0)]], device uint* out [[buffer(1)]], device uint* part [[buffer(2)]], device float* lp [[buffer(3)]], constant uint& lo [[buffer(4)]], constant uint& hi [[buffer(5)]], constant uint& lo2 [[buffer(6)]], constant uint& hi2 [[buffer(7)]], constant uint& stage [[buffer(8)]], constant uint& G [[buffer(9)]], uint g [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {"
+        "  threadgroup float bv[256]; threadgroup uint bi[256]; threadgroup float bl[256]; float best = -1e30f; uint bidx = 0xffffffffu; float l = 0.0f;"
         "  if (stage == 0) { uint step = G * nt; uint base = g * nt + tid;"
-        "    for (uint i = lo + base; i < hi; i += step) { float v = xv[i]; if (v > best || (v == best && i < bidx)) { best = v; bidx = i; } }"
-        "    for (uint i = lo2 + base; i < hi2; i += step) { float v = xv[i]; if (v > best || (v == best && i < bidx)) { best = v; bidx = i; } } }"
-        "  else { for (uint i = tid; i < G; i += nt) { float v = as_type<float>(part[2 * i]); uint ix = part[2 * i + 1]; if (v > best || (v == best && ix < bidx)) { best = v; bidx = ix; } } }"
-        "  bv[tid] = best; bi[tid] = bidx; threadgroup_barrier(mem_flags::mem_threadgroup);"
-        "  for (uint s = nt / 2; s > 0; s >>= 1) { if (tid < s) { float ov = bv[tid + s]; uint oi = bi[tid + s]; if (ov > bv[tid] || (ov == bv[tid] && oi < bi[tid])) { bv[tid] = ov; bi[tid] = oi; } } threadgroup_barrier(mem_flags::mem_threadgroup); }"
-        "  if (tid == 0) { if (stage == 0) { part[2 * g] = as_type<uint>(bv[0]); part[2 * g + 1] = bi[0]; } else out[0] = bi[0]; } }")))
+        "    for (uint i = lo + base; i < hi; i += step) { float v = xv[i]; float mn = v > best ? v : best; l = l * exp(best - mn) + exp(v - mn); if (v > best || (v == best && i < bidx)) bidx = i; best = mn; }"
+        "    for (uint i = lo2 + base; i < hi2; i += step) { float v = xv[i]; float mn = v > best ? v : best; l = l * exp(best - mn) + exp(v - mn); if (v > best || (v == best && i < bidx)) bidx = i; best = mn; } }"
+        "  else { for (uint i = tid; i < G; i += nt) { float v = as_type<float>(part[2 * i]); uint ix = part[2 * i + 1]; float pl = as_type<float>(part[2 * G + i]); float mn = v > best ? v : best; l = l * exp(best - mn) + pl * exp(v - mn); if (v > best || (v == best && ix < bidx)) bidx = ix; best = mn; } }"
+        "  bv[tid] = best; bi[tid] = bidx; bl[tid] = l; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  for (uint s = nt / 2; s > 0; s >>= 1) { if (tid < s) { float ov = bv[tid + s]; uint oi = bi[tid + s]; float mn = ov > bv[tid] ? ov : bv[tid]; bl[tid] = bl[tid] * exp(bv[tid] - mn) + bl[tid + s] * exp(ov - mn); if (ov > bv[tid] || (ov == bv[tid] && oi < bi[tid])) bi[tid] = oi; bv[tid] = mn; } threadgroup_barrier(mem_flags::mem_threadgroup); }"
+        "  if (tid == 0) { if (stage == 0) { part[2 * g] = as_type<uint>(bv[0]); part[2 * g + 1] = bi[0]; part[2 * G + g] = as_type<uint>(bl[0]); } else { out[0] = bi[0]; lp[0] -= log(bl[0]); lp[1] += 1.0f; } } }")))
+    ; THE MODEL'S OWN DOUBT, folded where the logits already are. A softmax normaliser over 51,865 logits is the same
+    ; shape of reduction the argmax is, so it is the same two stages: G groups fold their own stride, one group folds
+    ; their G answers. It carries (max, sum-of-exp) rather than (value, index), merged by the online rule the attention
+    ; kernels already use — the larger max wins and the other side's sum is scaled by exp(its max - that one) — so no
+    ; pass over the window is needed to find the max first, and nothing overflows at any logit magnitude.
+    ; The answer is ONE probability: exp(xv[idx] - M) / L, written as float bits at out[slot], for whatever index the
+    ; caller asks about over whatever window it asks about. Over the whole vocabulary at the <|nospeech|> index that is
+    ; the reference's no_speech_prob; over the language window at the chosen tongue it is that tongue's own confidence.
+    (defn em-softp () (em-lines (list
+        "kernel void ear_softp(device const float* xv [[buffer(0)]], device uint* out [[buffer(1)]], device float* part [[buffer(2)]], constant uint& lo [[buffer(3)]], constant uint& hi [[buffer(4)]], constant uint& idx [[buffer(5)]], constant uint& stage [[buffer(6)]], constant uint& G [[buffer(7)]], constant uint& slot [[buffer(8)]], uint g [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) {"
+        "  threadgroup float bm[256]; threadgroup float bl[256]; float m = -1e30f; float l = 0.0f;"
+        "  if (stage == 0) { uint step = G * nt; for (uint i = lo + g * nt + tid; i < hi; i += step) { float v = xv[i]; float mn = v > m ? v : m; l = l * exp(m - mn) + exp(v - mn); m = mn; } }"
+        "  else { for (uint i = tid; i < G; i += nt) { float pm = part[2 * i]; float pl = part[2 * i + 1]; float mn = pm > m ? pm : m; l = l * exp(m - mn) + pl * exp(pm - mn); m = mn; } }"
+        "  bm[tid] = m; bl[tid] = l; threadgroup_barrier(mem_flags::mem_threadgroup);"
+        "  for (uint s = nt / 2; s > 0; s >>= 1) { if (tid < s) { float om = bm[tid + s]; float ol = bl[tid + s]; float mn = om > bm[tid] ? om : bm[tid]; bl[tid] = bl[tid] * exp(bm[tid] - mn) + ol * exp(om - mn); bm[tid] = mn; } threadgroup_barrier(mem_flags::mem_threadgroup); }"
+        "  if (tid == 0) { if (stage == 0) { part[2 * g] = bm[0]; part[2 * g + 1] = bl[0]; } else out[slot] = as_type<uint>(exp(xv[idx] - bm[0]) / bl[0]); } }")))
     ; the reference filter bank (librosa slaney mel, sr 16000, n_fft 400, 80 mels, fmax 8000) computed on the device once: one thread per (mel, bin)
     (defn em-melbank () (em-lines (list
         "inline float ear_hz2mel(float f) { float fsp = 200.0f / 3.0f; float lstep = log(6.4f) / 27.0f; return f >= 1000.0f ? (1000.0f / fsp) + log(f / 1000.0f) / lstep : f / fsp; }"
@@ -222,6 +245,7 @@
     (defn em-copy () (em-lines (list
         "kernel void ear_copy8(device const uchar* src [[buffer(0)]], device uchar* dst [[buffer(1)]], constant uint& srcoff [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) {"
         "  if (gid >= n) return; dst[gid] = src[srcoff + gid]; }")))
-    (defn em-unit () (em-lines (list (em-head) (em-spec) (em-melnorm) (em-addpos) (em-lnstat) (em-gemm-f) (em-mv) (em-attn) (em-attn-dec) (em-attn-x) (em-attn-xfin) (em-embed) (em-embed-n) (em-argmax) (em-melbank) (em-copy))))
-    (defn em-names () (list "ear_spec" "ear_melnorm" "ear_addpos" "ear_gemm_f" "ear_mv" "ear_attn" "ear_attn_dec" "ear_embed" "ear_embed_n" "ear_argmax" "ear_melbank" "ear_copy8" "ear_attn_x" "ear_attn_xfin" "ear_lnstat"))
+    (defn em-unit () (em-lines (list (em-head) (em-spec) (em-melnorm) (em-addpos) (em-lnstat) (em-gemm-f) (em-mv) (em-attn) (em-attn-dec) (em-attn-x) (em-attn-xfin) (em-embed) (em-embed-n) (em-argmax) (em-softp) (em-melbank) (em-copy))))
+    ; a kernel named here must also be in em-unit, and its POSITION here is its pipeline index: append, never insert
+    (defn em-names () (list "ear_spec" "ear_melnorm" "ear_addpos" "ear_gemm_f" "ear_mv" "ear_attn" "ear_attn_dec" "ear_embed" "ear_embed_n" "ear_argmax" "ear_melbank" "ear_copy8" "ear_attn_x" "ear_attn_xfin" "ear_lnstat" "ear_softp"))
     0)
