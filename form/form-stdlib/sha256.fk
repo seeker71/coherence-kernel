@@ -24,18 +24,44 @@
 ; other in 20-sha256-as-recipe.
 
 (do
-    (defn nil? (xs) (eq (len xs) 0))
+    ;; ---- THE LIST FLOOR THIS CELL STANDS ON ------------------------
+    ;; The `; preludes:` line above is recursive, so core.fk arrives with this
+    ;; file and `nil?` and `append` are already in scope. No copy of them is
+    ;; kept here. `nth-rec`, `append-1` and `append-list` keep their names
+    ;; because merkle.fk, bloom.fk and file-byte-digest.fk prelude this file
+    ;; alone and reach them by name.
+    ;;
+    ;; `nth-rec` IS the native `nth`. tests/sha256-list-floor-band.fk holds the
+    ;; two meanings against each other over every edge and reads 32767: one
+    ;; answer at every index inside the list, and where they part the walked
+    ;; form was the weaker one — at a negative index its base case is an
+    ;; equality with 0 and its step moves away from it, so it never returned.
+    ;; One caution travels with the native, for whoever indexes from a
+    ;; subtraction: fkwu's `nth` CLAMPS a negative index to the first element
+    ;; and hands it back as a live int, while Go and Rust answer null there.
+    ;; Every index this cell asks for is inside its list by construction —
+    ;; state and h8 are 8-lists read at 0..7, k-list and w-list are 64-lists
+    ;; read at 0..63, a block is 64 bytes read at 0..63, and build-schedule's
+    ;; i-15, i-2, i-16, i-7 for i in 16..63 land in 0..61 of a list already i
+    ;; long — and so is every index this file's callers ask for. The digests
+    ;; never stand where the two meanings used to part.
+    (defn nth-rec (xs i) (nth xs i))
 
-    (defn nth-rec (xs i)
-        (if (eq i 0) (head xs) (nth-rec (tail xs) (sub i 1))))
+    ;; append-1 and append-list mean `(append xs (list x))` and `append`, and
+    ;; the band proves both. They reach core's `append` against the arithmetic:
+    ;; `append` is not a native and forwarding adds a frame, so routing there
+    ;; should have cost. The locale walk said otherwise — 119,437,393 walker
+    ;; steps with the private bodies, 60,064,908 with these — and the heat
+    ;; ledger says why. Asked after that same workload: `append` carries
+    ;; crystal 3 and 1,010,134 heat for work that walked 30,191,048 times
+    ;; here; `nil?` has no row at all. The private copies carried crystal -1.
+    ;; A shared door is WARM — the whole body's calls push it past the JIT's
+    ;; threshold and it stops walking — and a private copy is cold by
+    ;; construction, because nothing else ever calls it. The duplicate's price
+    ;; was never the duplication. It was standing outside everyone else's heat.
+    (defn append-1 (xs x) (append xs (list x)))
 
-    ;; Append a single element. O(n) but the call sites bound it.
-    (defn append-1 (xs x)
-        (if (nil? xs) (list x) (cons (head xs) (append-1 (tail xs) x))))
-
-    ;; Append a list to a list.
-    (defn append-list (xs ys)
-        (if (nil? xs) ys (cons (head xs) (append-list (tail xs) ys))))
+    (defn append-list (xs ys) (append xs ys))
 
     ;; ---- BIG-ENDIAN BYTE / WORD ENCODING ---------------------------
     (defn u32-to-bytes (w)
@@ -106,11 +132,11 @@
     (defn build-schedule (w i)
         (if (eq i 64) w
             (do
-                (let x (nth-rec w (sub i 15)))
-                (let y (nth-rec w (sub i 2)))
-                (let new-w (add_u32 (nth-rec w (sub i 16))
+                (let x (nth w (sub i 15)))
+                (let y (nth w (sub i 2)))
+                (let new-w (add_u32 (nth w (sub i 16))
                                     (add_u32 (sigma-0 x)
-                                             (add_u32 (nth-rec w (sub i 7))
+                                             (add_u32 (nth w (sub i 7))
                                                       (sigma-1 y)))))
                 (build-schedule (append-1 w new-w) (add i 1)))))
 
@@ -132,19 +158,19 @@
     (defn compress-round (state w-list k-list i)
         (if (eq i 64) state
             (do
-                (let a (nth-rec state 0))
-                (let b (nth-rec state 1))
-                (let c (nth-rec state 2))
-                (let d (nth-rec state 3))
-                (let e (nth-rec state 4))
-                (let f (nth-rec state 5))
-                (let g (nth-rec state 6))
-                (let h (nth-rec state 7))
+                (let a (nth state 0))
+                (let b (nth state 1))
+                (let c (nth state 2))
+                (let d (nth state 3))
+                (let e (nth state 4))
+                (let f (nth state 5))
+                (let g (nth state 6))
+                (let h (nth state 7))
                 (let t1 (add_u32 h
                           (add_u32 (big-sigma-1 e)
                             (add_u32 (ch e f g)
-                              (add_u32 (nth-rec k-list i)
-                                       (nth-rec w-list i))))))
+                              (add_u32 (nth k-list i)
+                                       (nth w-list i))))))
                 (let t2 (add_u32 (big-sigma-0 a) (maj a b c)))
                 (compress-round
                     (list (add_u32 t1 t2) a b c (add_u32 d t1) e f g)
@@ -157,10 +183,10 @@
             (do
                 (let p (mul i 4))
                 (let word (bytes-to-u32
-                              (nth-rec block p)
-                              (nth-rec block (add p 1))
-                              (nth-rec block (add p 2))
-                              (nth-rec block (add p 3))))
+                              (nth block p)
+                              (nth block (add p 1))
+                              (nth block (add p 2))
+                              (nth block (add p 3))))
                 (block-to-words-rec block (add i 1) (append-1 acc word)))))
 
     (defn process-block (state block)
@@ -169,14 +195,14 @@
             (let w64 (build-schedule w16 16))
             (let new-state (compress-round state w64 (sha256-k) 0))
             ;; Add new state to incoming state, element-wise (u32).
-            (list (add_u32 (nth-rec state 0) (nth-rec new-state 0))
-                  (add_u32 (nth-rec state 1) (nth-rec new-state 1))
-                  (add_u32 (nth-rec state 2) (nth-rec new-state 2))
-                  (add_u32 (nth-rec state 3) (nth-rec new-state 3))
-                  (add_u32 (nth-rec state 4) (nth-rec new-state 4))
-                  (add_u32 (nth-rec state 5) (nth-rec new-state 5))
-                  (add_u32 (nth-rec state 6) (nth-rec new-state 6))
-                  (add_u32 (nth-rec state 7) (nth-rec new-state 7)))))
+            (list (add_u32 (nth state 0) (nth new-state 0))
+                  (add_u32 (nth state 1) (nth new-state 1))
+                  (add_u32 (nth state 2) (nth new-state 2))
+                  (add_u32 (nth state 3) (nth new-state 3))
+                  (add_u32 (nth state 4) (nth new-state 4))
+                  (add_u32 (nth state 5) (nth new-state 5))
+                  (add_u32 (nth state 6) (nth new-state 6))
+                  (add_u32 (nth state 7) (nth new-state 7)))))
 
     ;; ---- SPLIT PADDED MESSAGE INTO 64-BYTE BLOCKS, PROCESS EACH ----
     (defn take-rec (xs n acc)
@@ -207,10 +233,10 @@
     ;; is no host SHA or crypto shortcut.
     (defn sha256-stream-state (total reversed-partial partial-length h8)
         (list total reversed-partial partial-length h8))
-    (defn sha256-stream-total (state) (nth-rec state 0))
-    (defn sha256-stream-reversed-partial (state) (nth-rec state 1))
-    (defn sha256-stream-partial-length (state) (nth-rec state 2))
-    (defn sha256-stream-h8 (state) (nth-rec state 3))
+    (defn sha256-stream-total (state) (nth state 0))
+    (defn sha256-stream-reversed-partial (state) (nth state 1))
+    (defn sha256-stream-partial-length (state) (nth state 2))
+    (defn sha256-stream-h8 (state) (nth state 3))
 
     (defn sha256-stream-initial ()
         (sha256-stream-state 0 (list) 0 (sha256-h-init)))
@@ -254,14 +280,14 @@
             (append-list (u32-to-bytes bits-hi) (u32-to-bytes bits-lo))))
 
     (defn sha256-stream-h8-bytes (h8)
-        (append-list (u32-to-bytes (nth-rec h8 0))
-          (append-list (u32-to-bytes (nth-rec h8 1))
-            (append-list (u32-to-bytes (nth-rec h8 2))
-              (append-list (u32-to-bytes (nth-rec h8 3))
-                (append-list (u32-to-bytes (nth-rec h8 4))
-                  (append-list (u32-to-bytes (nth-rec h8 5))
-                    (append-list (u32-to-bytes (nth-rec h8 6))
-                                 (u32-to-bytes (nth-rec h8 7))))))))))
+        (append-list (u32-to-bytes (nth h8 0))
+          (append-list (u32-to-bytes (nth h8 1))
+            (append-list (u32-to-bytes (nth h8 2))
+              (append-list (u32-to-bytes (nth h8 3))
+                (append-list (u32-to-bytes (nth h8 4))
+                  (append-list (u32-to-bytes (nth h8 5))
+                    (append-list (u32-to-bytes (nth h8 6))
+                                 (u32-to-bytes (nth h8 7))))))))))
 
     ;; Only one or two bounded blocks exist here: partial is 0..63 bytes,
     ;; followed by 0x80, zero padding, and the fixed eight-byte length.
@@ -291,11 +317,11 @@
         (do
             (let padded (pad-message bytes))
             (let final (process-all-blocks (sha256-h-init) padded))
-            (append-list (u32-to-bytes (nth-rec final 0))
-              (append-list (u32-to-bytes (nth-rec final 1))
-                (append-list (u32-to-bytes (nth-rec final 2))
-                  (append-list (u32-to-bytes (nth-rec final 3))
-                    (append-list (u32-to-bytes (nth-rec final 4))
-                      (append-list (u32-to-bytes (nth-rec final 5))
-                        (append-list (u32-to-bytes (nth-rec final 6))
-                                     (u32-to-bytes (nth-rec final 7))))))))))))
+            (append-list (u32-to-bytes (nth final 0))
+              (append-list (u32-to-bytes (nth final 1))
+                (append-list (u32-to-bytes (nth final 2))
+                  (append-list (u32-to-bytes (nth final 3))
+                    (append-list (u32-to-bytes (nth final 4))
+                      (append-list (u32-to-bytes (nth final 5))
+                        (append-list (u32-to-bytes (nth final 6))
+                                     (u32-to-bytes (nth final 7))))))))))))
