@@ -22,17 +22,22 @@
 //                     this point is a corridor and asks for its second leg.
 //   jit.mint          the mint ledger (kernel_page_box pid -n): a call either
 //                     answered from an interned node or grew the arena.
-//   organ.surprise-route  the organs frame's own choice rows: attempts,
-//                     successes and failures the surprise organ already keeps,
-//                     and the options it publishes in the row's own channels.
-//   organ.protocol-floor  the same frame's protocol row: proven-N-of-M.
+//   organ.surprise-route  the organs frame's own choice rows, as NUMBERS: the
+//                     routing row's capacity is every surprise attempted, the
+//                     choice row's capacity is the part that moved, and the
+//                     options are the movement states published in that row's
+//                     own channels.
+//   organ.protocol-floor  the same frame's protocol row: the proven count is
+//                     its capacity, the floor's size still its purpose text.
 //   glass.frame       the live roster: every publisher in this space, and
 //                     whether its frame read current, absent or malformed.
 //   governor.metal-admission  the resource governor's admission row, whose
-//                     three lifecycles ARE the body's three outcomes —
-//                     active is a taking, failed a decline, ready the held
-//                     offer standing. Fed through fcf-ledger-note, tick by
-//                     tick, so this ledger grows as the governor decides.
+//                     lifecycles ARE the body's outcomes — active is a taking,
+//                     failed a decline, ready the held offer standing, and
+//                     unknown a tick where the governor never read its signals
+//                     and so put no choice at all. Fed through fcf-ledger-note,
+//                     tick by tick, so this ledger grows as the governor
+//                     decides and stands still when it never got to ask.
 //   route.category    bml-route-choice-runtime's real protocol candidates,
 //                     lifted through branch-choice-order so the option scale
 //                     is the body's own. Its ledger is empty and it reads
@@ -63,19 +68,28 @@ section [form.bml] {
 
         // ---- 1. crystallize or walk ------------------------------------------
         // The kernel decides this per defn, every time the heat lane sees one.
-        def fcfs-crystallized?(r) = if gt(fcfs-row-native(r), 0) then 1 else 0;
-        def fcfs-walking?(r) = if eq(fcfs-row-native(r), 0) then 1 else 0;
-        def fcfs-refused?(r) = if lt(fcfs-row-native(r), 0) then 1 else 0;
-        def fcfs-sum-crystallized(rows, acc) = if eq(len(rows), 0) then acc else fcfs-sum-crystallized(tail(rows), add(acc, fcfs-crystallized?(head(rows))));
-        def fcfs-sum-walking(rows, acc) = if eq(len(rows), 0) then acc else fcfs-sum-walking(tail(rows), add(acc, fcfs-walking?(head(rows))));
-        def fcfs-sum-refused(rows, acc) = if eq(len(rows), 0) then acc else fcfs-sum-refused(tail(rows), add(acc, fcfs-refused?(head(rows))));
-        // the wait a still-walking recipe has already served: the calls it made while not yet crystallized
-        def fcfs-walking-wait(rows, acc) = if eq(len(rows), 0) then acc else fcfs-walking-wait(tail(rows), add(acc, mul(fcfs-walking?(head(rows)), fcfs-row-heat(head(rows)))));
-        def fcfs-walking-last(rows) = if eq(len(rows), 0) then 0 else if eq(fcfs-walking?(head(rows)), 1) then fcfs-row-heat(head(rows)) else fcfs-walking-last(tail(rows));
+        // One walk of the rows, not five. Each leg used to walk them alone, and
+        // the last-wait leg walked them a sixth time to find the first row still
+        // walking; the page hands every leg over in one pass.
+        // acc = list(crystallized, walking, refused, waitServed, firstWalkingHeat)
+        //   the wait a still-walking recipe has served is the calls it made while not yet crystallized
+        def fcfs-crystallize-step(r, acc) {
+            let native = fcfs-row-native(r);
+            let walking = if eq(native, 0) then 1 else 0;
+            list(add(nth(acc, 0), if gt(native, 0) then 1 else 0),
+                 add(nth(acc, 1), walking),
+                 add(nth(acc, 2), if lt(native, 0) then 1 else 0),
+                 add(nth(acc, 3), mul(walking, fcfs-row-heat(r))),
+                 if and(eq(walking, 1), lt(nth(acc, 4), 0)) then fcfs-row-heat(r) else nth(acc, 4));
+        }
+        def fcfs-crystallize-fold(rows, acc) = if eq(len(rows), 0) then acc else fcfs-crystallize-fold(tail(rows), fcfs-crystallize-step(head(rows), acc));
         def fcfs-crystallize-options() = list(
             fcf-option("walk", "walk the tree again, every call", 2, 1, 100, 100),
             fcf-option("crystallize", "run it as this machine's own instructions", 8, 40, 90, 80));
-        def fcfs-crystallize-ledger(rows) = fcf-ledger(len(rows), fcfs-sum-crystallized(rows, 0), fcfs-sum-walking(rows, 0), fcfs-sum-refused(rows, 0), fcfs-walking-wait(rows, 0), fcfs-walking-last(rows));
+        def fcfs-crystallize-ledger(rows) {
+            let f = fcfs-crystallize-fold(rows, list(0, 0, 0, 0, -1));
+            fcf-ledger(len(rows), nth(f, 0), nth(f, 1), nth(f, 2), nth(f, 3), fcfs-floor0(nth(f, 4)));
+        }
         def fcfs-crystallize-point(rows) = fcf-point("jit.crystallize", "walk this recipe again, or crystallize it?", fcfs-crystallize-options(), fcfs-crystallize-ledger(rows));
         def fcfs-crystallize-point-live(pid) = fcfs-crystallize-point(kernel_page_hot(pid, FCFSHotRows()));
 
@@ -84,10 +98,15 @@ section [form.bml] {
         // float that stayed transparent leaves nothing behind. So the point
         // carries the ONE option it can witness and reads as a corridor —
         // the ask is a counter for the fold leg, not a second option invented here.
-        def fcfs-sum-fbox(rows, acc) = if eq(len(rows), 0) then acc else fcfs-sum-fbox(tail(rows), add(acc, fcfs-row-fbox(head(rows))));
-        def fcfs-sum-read(rows, acc) = if eq(len(rows), 0) then acc else fcfs-sum-read(tail(rows), add(acc, fcfs-least(fcfs-row-fbox(head(rows)), fcfs-row-unbox(head(rows)))));
+        // acc = list(minted, read); the held leg is their difference, and it used
+        // to be found by summing both columns a second and third time.
+        def fcfs-box-step(r, acc) = list(add(nth(acc, 0), fcfs-row-fbox(r)), add(nth(acc, 1), fcfs-least(fcfs-row-fbox(r), fcfs-row-unbox(r))));
+        def fcfs-box-fold(rows, acc) = if eq(len(rows), 0) then acc else fcfs-box-fold(tail(rows), fcfs-box-step(head(rows), acc));
         def fcfs-box-options() = list(fcf-option("box", "mint a float slot the value can be read from", 3, 6, 100, 100));
-        def fcfs-box-ledger(rows) = fcf-ledger(fcfs-sum-fbox(rows, 0), fcfs-sum-read(rows, 0), fcfs-floor0(sub(fcfs-sum-fbox(rows, 0), fcfs-sum-read(rows, 0))), 0, 0, 0);
+        def fcfs-box-ledger(rows) {
+            let f = fcfs-box-fold(rows, list(0, 0));
+            fcf-ledger(nth(f, 0), nth(f, 1), fcfs-floor0(sub(nth(f, 0), nth(f, 1))), 0, 0, 0);
+        }
         def fcfs-box-point(rows) = fcf-point("jit.box", "box this float, or fold it where it stands?", fcfs-box-options(), fcfs-box-ledger(rows));
         def fcfs-box-point-live(pid) = fcfs-box-point(kernel_page_box(pid, FCFSHotRows()));
 
@@ -95,28 +114,27 @@ section [form.bml] {
         // Every call either answered from an interned node or grew the permanent
         // arena by one. Reuse is the taking; a mint is the offer to flow for free
         // closing, so it lands on the declined leg and reads as restriction.
-        def fcfs-sum-heat(rows, acc) = if eq(len(rows), 0) then acc else fcfs-sum-heat(tail(rows), add(acc, fcfs-row-heat(head(rows))));
-        def fcfs-sum-mint(rows, acc) = if eq(len(rows), 0) then acc else fcfs-sum-mint(tail(rows), add(acc, fcfs-row-mint(head(rows))));
+        // acc = list(calls, minted), one walk for both columns
+        def fcfs-mint-step(r, acc) = list(add(nth(acc, 0), fcfs-row-heat(r)), add(nth(acc, 1), fcfs-row-mint(r)));
+        def fcfs-mint-fold(rows, acc) = if eq(len(rows), 0) then acc else fcfs-mint-fold(tail(rows), fcfs-mint-step(head(rows), acc));
         def fcfs-mint-options() = list(
             fcf-option("reuse", "answer from the node already interned", 0, 10, 100, 100),
             fcf-option("mint", "grow the permanent arena by one node", 10, 10, 70, 90));
         def fcfs-mint-ledger(rows) {
-            let offered = fcfs-sum-heat(rows, 0);
-            let minted = fcfs-least(fcfs-sum-mint(rows, 0), offered);
+            let f = fcfs-mint-fold(rows, list(0, 0));
+            let offered = nth(f, 0);
+            let minted = fcfs-least(nth(f, 1), offered);
             fcf-ledger(offered, sub(offered, minted), 0, minted, 0, 0);
         }
         def fcfs-mint-point(rows) = fcf-point("jit.mint", "reuse an interned value, or grow the arena with a fresh one?", fcfs-mint-options(), fcfs-mint-ledger(rows));
         def fcfs-mint-point-live(pid) = fcfs-mint-point(kernel_page_box(pid, sub(0, FCFSHotRows())));
 
         // ---- reading a number the body already wrote into a row's purpose -----
-        // The organs frame publishes its counts as text in the sample's own
-        // purpose ("s3-f1", "proven-7-of-9"). This reads them back; it never
-        // guesses a missing one — an absent marker answers the caller's fallback.
-        def fcfs-number-between(text, open, close, fallback) {
-            let a = str_find(text, open, 0);
-            let b = if lt(a, 0) then -1 else str_find(text, close, add(a, str_len(open)));
-            if lt(b, 0) then fallback else str_to_int(substring(text, add(a, str_len(open)), b));
-        }
+        // A count the body publishes as a NUMBER is read as a number: the
+        // membrane's own capacity field, through fcfs-sample-capacity. Only
+        // where a row still carries a count in its purpose text alone does a
+        // reader parse, and it never guesses a missing one — an absent marker
+        // answers the caller's fallback.
         def fcfs-number-after(text, open, fallback) {
             let a = str_find(text, open, 0);
             if lt(a, 0) then fallback else str_to_int(substring(text, add(a, str_len(open)), str_len(text)));
@@ -131,27 +149,30 @@ section [form.bml] {
         def fcfs-route-channel-options(channels) = if le(len(channels), 2) then list() else fcfs-options-of-names(tail(tail(channels)));
         def fcfs-options-of-names(names) = if eq(len(names), 0) then list() else cons(fcf-option(head(names), str_concat("move as ", head(names)), 1, 8, 100, 100), fcfs-options-of-names(tail(names)));
         def fcfs-surprise-options(choiceSample) = if eq(len(choiceSample), 0) then list() else fcfs-route-channel-options(fgtm-sample-channels(choiceSample));
-        def fcfs-surprise-ledger(routingSample) {
+        // The routing row's capacity is every surprise attempted; the choice
+        // row's capacity is the part that MOVED. Everything else attempted is
+        // held: a rested surprise is a movement chosen (hold, rest or compost),
+        // never a decline — the routing row stopped calling its own resting
+        // states failures on 2026-09-07. The rested count used to be parsed out
+        // of the purpose text and then added to a difference that subtracted it
+        // again, so the reader walked a string to arrive back where it started.
+        def fcfs-surprise-ledger(routingSample, choiceSample) {
             let attempts = fcfs-sample-capacity(routingSample, 0);
-            let purpose = if eq(len(routingSample), 0) then "" else fgtm-sample-purpose(routingSample);
-            // the organ says "carried N rested M": a rested surprise is a movement chosen
-            // (hold, rest or compost), so it is HELD, never a decline -- the routing row
-            // stopped calling its own resting states failures on 2026-09-07
-            let successes = fcfs-number-between(purpose, "carried", "-rested", 0);
-            let rested = fcfs-number-after(purpose, "-rested", 0);
-            fcf-ledger(attempts, successes, add(rested, fcfs-floor0(sub(attempts, add(successes, rested)))), 0, 0, 0);
+            let carried = fcfs-least(fcfs-sample-capacity(choiceSample, 0), attempts);
+            fcf-ledger(attempts, carried, fcfs-floor0(sub(attempts, carried)), 0, 0, 0);
         }
-        def fcfs-surprise-point(routingSample, choiceSample) = fcf-point("organ.surprise-route", "where does this surprise move?", fcfs-surprise-options(choiceSample), fcfs-surprise-ledger(routingSample));
+        def fcfs-surprise-point(routingSample, choiceSample) = fcf-point("organ.surprise-route", "where does this surprise move?", fcfs-surprise-options(choiceSample), fcfs-surprise-ledger(routingSample, choiceSample));
         def fcfs-surprise-point-of(samples) = fcfs-surprise-point(fcfs-find-sample(samples, FCFSRouteSample()), fcfs-find-sample(samples, FCFSChoiceSample()));
 
         // ---- 5. the protocol floor -------------------------------------------
         def fcfs-protocol-options() = list(
             fcf-option("proven", "carry a source the four-way floor has proven", 2, 20, 100, 100),
             fcf-option("unproven", "carry a source no band has stood behind yet", 2, 20, 40, 30));
+        // The proven count is the row's own capacity; only the floor's SIZE is
+        // still text on this row, so exactly one number here is parsed.
         def fcfs-protocol-ledger(sample) {
-            let purpose = if eq(len(sample), 0) then "" else fgtm-sample-purpose(sample);
-            let total = fcfs-number-after(purpose, "-of-", 0);
-            let proven = fcfs-least(fcfs-number-between(purpose, "proven-", "-of-", 0), total);
+            let total = fcfs-number-after(if eq(len(sample), 0) then "" else fgtm-sample-purpose(sample), "-of-", 0);
+            let proven = fcfs-least(fcfs-sample-capacity(sample, 0), total);
             fcf-ledger(total, proven, sub(total, proven), 0, 0, 0);
         }
         def fcfs-protocol-point(sample) = fcf-point("organ.protocol-floor", "which protocol sources does this channel stand on?", fcfs-protocol-options(), fcfs-protocol-ledger(sample));
@@ -181,7 +202,12 @@ section [form.bml] {
         // The admission row's three lifecycles are already the body's three
         // outcomes, so this point's ledger grows through fcf-ledger-note and
         // nothing here has to count anything twice.
-        def fcfs-admission-outcome(sample) = if eq(len(sample), 0) then cr-outcome-silence() else if str_eq(fgtm-sample-lifecycle(sample), "active") then cr-outcome-success() else if str_eq(fgtm-sample-lifecycle(sample), "failed") then cr-outcome-fail() else cr-outcome-silence();
+        // A tick where the governor never read its signals put no choice at all,
+        // and neither does a tick where the governor's frame is not standing.
+        // Both once landed as silence, which counts an OFFER, so an idle host
+        // grew a ledger of offers nobody ever made and the point read as a
+        // wound. Nothing put, nothing noted.
+        def fcfs-admission-outcome(sample) = if eq(len(sample), 0) then fcf-outcome-none() else if str_eq(fgtm-sample-lifecycle(sample), "unknown") then fcf-outcome-none() else if str_eq(fgtm-sample-lifecycle(sample), "active") then cr-outcome-success() else if str_eq(fgtm-sample-lifecycle(sample), "failed") then cr-outcome-fail() else cr-outcome-silence();
         def fcfs-admission-options() = list(
             fcf-option("admit", "submit this quantum to the metal now", 4, 30, 100, 90),
             fcf-option("hold", "hold it until the frame has room", 1, 6, 100, 100));
