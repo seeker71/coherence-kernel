@@ -1,0 +1,88 @@
+; room-sense-band.fk — the room organ over SYNTHETIC truth: sample strings built in
+; Form, no mic, no host, no clock. Every bit is a claim about the room organ that a
+; reader can check by hand from the numbers in the cell above it.
+;
+; Verdict: 32767 (fifteen bits, power-of-two weights)
+;
+; preludes: form/form-stdlib/room-sense.bml
+(do
+    ; ---- synthetic sound: one s16le frame of 1600 samples at 16 kHz --------------
+    (defn rsb-samp (v) (do (let u (if (lt v 0) (add v 65536) v)) (str_concat (byte_to_str (sub u (mul 256 (div u 256)))) (byte_to_str (div u 256)))))
+    (defn rsb-tri (i p a) (do (let ph (sub i (mul p (div i p)))) (let h (div p 2)) (if (lt ph h) (sub (div (mul 2 (mul a ph)) h) a) (sub a (div (mul 2 (mul a (sub ph h))) h)))))
+    (defn rsb-tone (i n p a acc) (if (ge i n) acc (rsb-tone (add i 1) n p a (str_concat acc (rsb-samp (rsb-tri i p a))))))
+    ; a deterministic congruential walk: broadband, no host entropy, same on every arm
+    (defn rsb-lcg (s) (do (let x (add (mul s 1103515245) 12345)) (sub x (mul 2147483648 (div x 2147483648)))))
+    (defn rsb-noise (i n s a acc) (if (ge i n) acc (do (let s1 (rsb-lcg s)) (rsb-noise (add i 1) n s1 a (str_concat acc (rsb-samp (sub (sub (div s1 65536) (mul a (div (div s1 65536) a))) (div a 2))))))))
+    (defn rsb-zeros (i n acc) (if (ge i n) acc (rsb-zeros (add i 1) n (str_concat acc (rsb-samp 0)))))
+    ; a tone that stops halfway: the within-frame envelope depth the laugh gate reads
+    (defn rsb-gapped (i n p a acc) (if (ge i n) acc (rsb-gapped (add i 1) n p a (str_concat acc (rsb-samp (if (lt (sub i (mul 320 (div i 320))) 160) (rsb-tri i p a) 0))))))
+
+    (let toneA (rsb-tone 0 1600 160 8000 ""))        ; 100 Hz, lag 40 at 4 kHz
+    (let toneB (rsb-tone 0 1600 80 8000 ""))         ; 200 Hz, lag 20
+    (let toneC (rsb-tone 0 1600 64 8000 ""))         ; 250 Hz, lag 16
+    (let hiss (rsb-noise 0 1600 7 6000 ""))
+    (let quiet (rsb-zeros 0 1600 ""))
+    (let gapped (rsb-gapped 0 1600 160 8000 ""))
+    (let fA (rs-frame toneA 1000 -500))
+    (let fB (rs-frame toneB 1000 -500))
+    (let fC (rs-frame toneC 1000 -500))
+    (let fH (rs-frame hiss 1000 -500))
+    (let fQ (rs-frame quiet 1000 -500))
+    (let fG (rs-frame gapped 1000 -500))
+
+    ; ---- the state, driven by hand over synthetic frames -------------------------
+    (defn rsb-drive (st bytes t n) (if (le n 0) st (rsb-drive (rs-step st bytes t) bytes (add t 100) (sub n 1))))
+    ; a still room: twelve quiet frames
+    (let stQuiet (rsb-drive (rs-empty) quiet 1000 12))
+    ; a held note: twelve frames of one steady tone
+    (let stTone (rsb-drive (rs-empty) toneA 1000 12))
+    ; one turn: three tone frames, then five quiet frames long enough to close it
+    (let stTurn (rsb-drive (rsb-drive (rs-empty) toneA 1000 3) quiet 1300 8))
+    ; two turns at two different periods: the timbre marks must not merge
+    (let stTwo (rsb-drive (rsb-drive (rsb-drive (rsb-drive (rs-empty) toneA 1000 3) quiet 1300 8) toneB 2100 3) quiet 2400 8))
+    ; the same voice twice: one mark, two turns
+    (let stSame (rsb-drive (rsb-drive (rsb-drive (rsb-drive (rs-empty) toneA 1000 3) quiet 1300 8) toneA 2100 3) quiet 2400 8))
+
+    (defn rsb-bit (ok w) (if (eq ok 1) w 0))
+    (defn rsb-eq (a b) (if (eq a b) 1 0))
+    (defn rsb-str (a b) (if (str_eq a b) 1 0))
+    (defn rsb-marks (st t) (len (rs-marks (rs-tc-turns (rs-turns-of st)) t (list))))
+    (defn rsb-sum (xs) (if (eq (len xs) 0) 0 (add (head xs) (rsb-sum (tail xs)))))
+
+    ; ---- the fifteen claims ------------------------------------------------------
+    ; 1  a 100 Hz triangle is voiced and reads 100 Hz
+    (let b1 (rsb-bit (if (and (eq (rs-f-voiced fA) 1) (eq (rs-f-hz fA) 100)) 1 0) 1))
+    ; 2  a 200 Hz triangle is voiced and reads 200 Hz -- the search is not pinned to one period
+    (let b2 (rsb-bit (if (and (eq (rs-f-voiced fB) 1) (eq (rs-f-hz fB) 200)) 1 0) 2))
+    ; 3  a 250 Hz triangle is voiced: the half-lag test follows the peak instead of a fixed lag
+    (let b3 (rsb-bit (rsb-eq (rs-f-voiced fC) 1) 4))
+    ; 4  at half a period the correlation is far below the peak -- the whole voicing idea
+    (let b4 (rsb-bit (if (ge (sub (rs-f-r fA) (rs-f-half fA)) 400) 1 0) 8))
+    ; 5  broadband noise is NOT voiced and pins its best lag to the search boundary
+    (let b5 (rsb-bit (if (and (eq (rs-f-voiced fH) 0) (eq (rs-f-lag fH) 56)) 1 0) 16))
+    ; 6  silence is not voiced, and measures the floor of the scale rather than a number
+    (let b6 (rsb-bit (if (and (eq (rs-f-voiced fQ) 0) (eq (rs-f-db fQ) -900)) 1 0) 32))
+    ; 7  the decibel scale is exact at full scale and right to a decibel below it
+    (let b7 (rsb-bit (if (and (eq (rs-db10 32768) 0) (and (eq (rs-db10 2000) -243) (eq (rs-db10 100) -507))) 1 0) 64))
+    ; 8  a still room is called still; a held note is called a tone
+    (let b8 (rsb-bit (if (and (rsb-str (rs-kind fQ (rs-hist stQuiet)) "still") (rsb-str (rs-kind fA (rs-hist stTone)) "tone")) 1 0) 128))
+    ; 9  noise over the floor is called noise
+    (let b9 (rsb-bit (rsb-str (rs-kind fH (rs-hist stQuiet)) "noise") 256))
+    ; 10 the floor falls to a quieter room at once and climbs one tenth of a dB a frame
+    (let b10 (rsb-bit (if (and (eq (rs-fc-floor (rs-floor-of (rsb-drive (rs-empty) quiet 1000 3))) -900) (eq (rs-fc-floor (rs-floor-of (rsb-drive (rsb-drive (rs-empty) quiet 1000 3) toneA 1300 5))) -895)) 1 0) 512))
+    ; 11 a turn opens on the first periodic frame and closes after the gap
+    (let b11 (rsb-bit (if (and (eq (rs-tc-in? (rs-turns-of stTurn)) 0) (eq (len (rs-tc-turns (rs-turns-of stTurn))) 1)) 1 0) 1024))
+    ; 12 two turns a period apart are two timbres; the same period twice is one
+    (let b12 (rsb-bit (if (and (eq (rsb-marks stTwo 2500) 2) (eq (rsb-marks stSame 2500) 1)) 1 0) 2048))
+    ; 13 a held note is heard as a hum, and a still room is not
+    (let b13 (rsb-bit (if (and (eq (rs-hum? (rs-hist stTone)) 1) (eq (rs-hum? (rs-hist stQuiet)) 0)) 1 0) 4096))
+    ; 14 the within-frame envelope: a tone that stops halfway is deep, a steady tone is not
+    (let b14 (rsb-bit (if (and (ge (rs-f-mod fG) 200) (lt (rs-f-mod fA) 100)) 1 0) 8192))
+    ; 15 the organ answers a full row set awake and names its own sleep and its own refusal
+    (let b15 (rsb-bit (if (and (eq (len (rs-rows stTone 2200)) 22) (and (eq (len (rs-asleep-rows)) 2) (rsb-str (fgo-id (nth (rs-asleep-rows) 1)) "room.camera"))) 1 0) 16384))
+
+    ; a fold over a list, not a nest fifteen deep: a net paren count is blind to
+    ; depth, and the reader who has to walk one is the one who pays
+    (let v (rsb-sum (list b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15)))
+    (print (str_concat "room-sense-band verdict " (int_to_str v)))
+    v)
