@@ -98,10 +98,36 @@ hop, so a lane using only the new door pays no more than this and probably less.
 
 ## The ear's axes, before and after
 
-`ear.encode` is `el-hear`'s `t1 - t0`. On a real room: **19–28 ms before, 3–8 ms after** at the
-full window; **58–68 before, 5–8 after** while it fills. `ear.decode` 7–21 ms and `ear.tokens`
-12–23 are untouched. `ear.latency` and `ear.hops` follow the hop budget, which falls from about
-41 ms to about 25 ms per hop at the full window.
+The **before** is not a reconstruction. `observe/ear-live-native.fk` was stood unmodified on this
+room for 28 s with the mouth speaking, and its own `encms` field — the number that becomes
+`ear.encode` — was read straight off `.hearth/ear.spool`:
+
+```
+encms  18 19 19 19 19 19 19 19 19 19 19 19 19 19 19 19 20 20 20 20 20 20 20 20 20 20 20 20
+       20 20 21 21 21 21 21 21 21 21 21 22 22 22 22 22 22 23 23 23 23 24 24 24
+       53 53 54 54 54 55 55 56 56 56 56 58 63
+decms  7 17 9 11 10 15 28 18 39 21 15 29 40 12 16 14 13 14 22 20 14 14 16 7 7 12 8 7 20 31 …
+heard  live=The wind is told what stands and the note folded.
+```
+
+Two regimes, exactly as the parts predicted: **18–24 ms** for the 52 hops at the full 8 s window,
+**53–63 ms** for the 13 hops while it was still filling. The lane's own axis, unmodified, on a
+real room.
+
+| axis | before (the lane's own frames) | after (paired, same windows) |
+|---|---|---|
+| `ear.encode`, full window | 18–24 ms | **3–8 ms** |
+| `ear.encode`, window filling | 53–63 ms | **5–8 ms** |
+| `ear.decode` | 7–41 ms | unchanged |
+| `ear.tokens` | 12–24 | unchanged |
+
+`ear.latency` and `ear.hops` follow the hop budget, which falls from about 41 ms to about 25 ms
+per hop at the full window — and from about 60 ms to about 25 ms during the lane's first eight
+seconds, which is when someone first speaks to it.
+
+The room also gave the day's small joke: the mouth said *the witness told what stands and the
+note folded*, and the ear wrote down *the wind is told what stands and the note folded*. The
+timing is the subject here; the hearing is whisper-tiny's own, and unchanged by this work.
 
 ## What the two lanes need to know
 
