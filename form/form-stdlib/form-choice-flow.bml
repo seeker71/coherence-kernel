@@ -1,0 +1,191 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-choice-flow.bml — choice points as living cells: what was offered,
+// what flowed, what restricted, and which sequence of choices flows best.
+//
+// Urs, 2026-09-07: "more choices more options more choice sequence play to
+// maximize flow and minimize restriction and find gaps and wounds to heal
+// and nourish."
+//
+// The body already speaks this. `choice-receipt.fk` names three outcomes and
+// the third is the one that matters here: success, fail, and SILENCE — the
+// held offer of core-axioms.form, which is not a refusal but a NOT-YET, the
+// offer standing unconsumed while the sequence waits. `branch-choice-order.fk`
+// already scores a candidate by short and long success and fail, alignment and
+// trust. This shard adds only what neither had: the LEDGER of a choice point
+// over time, the flow and restriction it carries, and the play of a sequence.
+//
+// Three readings of a choice point, and they are not the same thing:
+//   FLOW        — offers that became a taking. The body moved.
+//   RESTRICTION — offers that closed: declined, or a wait that never ripened.
+//   HELD        — offers still standing. Not a wound; a not-yet, and the
+//                 question is only whether its wait is falling or growing.
+//
+// preludes: form-stdlib/core.fk form-stdlib/choice-receipt.fk form-stdlib/branch-choice-order.fk
+
+section [form.bml] {
+    class FormChoiceFlow {
+        field FCFSchema = "form-choice-flow-v1";
+        field FCFPointSchema = "form-choice-point-v1";
+        field FCFOptionSchema = "form-choice-option-v1";
+        field FCFPlaySchema = "form-choice-play-v1";
+        // a corridor is not a choice: fewer options than this and the point is named a gap
+        field FCFLeastOptions = 2;
+        // an option offered this many times and never taken is dead weight on every reader
+        field FCFDeadAfter = 8;
+        // a held offer whose wait is not falling after this many offers is no longer ripening
+        field FCFRipenWindow = 4;
+
+        // ---- an option: what may be offered, and what it is worth ------------
+        // cost and reward are the caller's own units, whatever the point measures
+        // in; alignment and trust are the branch-choice-order scale the body
+        // already uses, so a point can be scored by bco-* without translation.
+        def fcf-option(id, offer, cost, reward, alignment, trust) =
+            list(FCFOptionSchema(), id, offer, cost, reward, alignment, trust);
+        def fcf-option-id(o) = nth(o, 1);
+        def fcf-option-offer(o) = nth(o, 2);
+        def fcf-option-cost(o) = nth(o, 3);
+        def fcf-option-reward(o) = nth(o, 4);
+        def fcf-option-alignment(o) = nth(o, 5);
+        def fcf-option-trust(o) = nth(o, 6);
+        def fcf-option?(o) = if lt(len(o), 7) then 0 else if str_eq(head(o), FCFOptionSchema()) then 1 else 0;
+        // an option's own worth: what it returns over what it costs, weighted by
+        // how aligned and how trusted it is. Never divides: a zero cost is free,
+        // not infinite.
+        def fcf-option-worth(o) =
+            if eq(fcf-option?(o), 0) then 0
+            else add(mul(sub(fcf-option-reward(o), fcf-option-cost(o)), 2),
+                     add(fcf-option-alignment(o), fcf-option-trust(o)));
+
+        // ---- the ledger: what this point has actually done -------------------
+        def fcf-ledger(offered, taken, held, declined, waitMs, lastWaitMs) =
+            list("form-choice-ledger-v1", offered, taken, held, declined, waitMs, lastWaitMs);
+        def fcf-ledger-offered(l) = nth(l, 1);
+        def fcf-ledger-taken(l) = nth(l, 2);
+        def fcf-ledger-held(l) = nth(l, 3);
+        def fcf-ledger-declined(l) = nth(l, 4);
+        def fcf-ledger-wait(l) = nth(l, 5);
+        def fcf-ledger-last-wait(l) = nth(l, 6);
+        def fcf-ledger-empty() = fcf-ledger(0, 0, 0, 0, 0, 0);
+        // one outcome lands: the body's own three, from choice-receipt.fk
+        def fcf-ledger-note(l, outcome, waitMs) =
+            if str_eq(outcome, cr-outcome-success())
+                then fcf-ledger(add(fcf-ledger-offered(l), 1), add(fcf-ledger-taken(l), 1), fcf-ledger-held(l), fcf-ledger-declined(l), add(fcf-ledger-wait(l), waitMs), waitMs)
+            else if str_eq(outcome, cr-outcome-fail())
+                then fcf-ledger(add(fcf-ledger-offered(l), 1), fcf-ledger-taken(l), fcf-ledger-held(l), add(fcf-ledger-declined(l), 1), add(fcf-ledger-wait(l), waitMs), waitMs)
+            else if str_eq(outcome, cr-outcome-silence())
+                then fcf-ledger(add(fcf-ledger-offered(l), 1), fcf-ledger-taken(l), add(fcf-ledger-held(l), 1), fcf-ledger-declined(l), add(fcf-ledger-wait(l), waitMs), waitMs)
+            else l;
+
+        // ---- a choice point --------------------------------------------------
+        def fcf-point(id, question, options, ledger) =
+            list(FCFPointSchema(), id, question, options, ledger);
+        def fcf-point-id(p) = nth(p, 1);
+        def fcf-point-question(p) = nth(p, 2);
+        def fcf-point-options(p) = nth(p, 3);
+        def fcf-point-ledger(p) = nth(p, 4);
+        def fcf-point?(p) = if lt(len(p), 5) then 0 else if str_eq(head(p), FCFPointSchema()) then 1 else 0;
+        def fcf-point-note(p, outcome, waitMs) =
+            fcf-point(fcf-point-id(p), fcf-point-question(p), fcf-point-options(p), fcf-ledger-note(fcf-point-ledger(p), outcome, waitMs));
+
+        // ---- flow and restriction, per hundred offers ------------------------
+        // Percent, not a fraction, so a reader sees whole numbers on a glass and
+        // a point that has never been offered reads -1: no reading, not zero flow.
+        def fcf-share(part, whole) = if le(whole, 0) then sub(0, 1) else div(mul(part, 100), whole);
+        def fcf-flow(p) = fcf-share(fcf-ledger-taken(fcf-point-ledger(p)), fcf-ledger-offered(fcf-point-ledger(p)));
+        def fcf-restriction(p) = fcf-share(fcf-ledger-declined(fcf-point-ledger(p)), fcf-ledger-offered(fcf-point-ledger(p)));
+        def fcf-holding(p) = fcf-share(fcf-ledger-held(fcf-point-ledger(p)), fcf-ledger-offered(fcf-point-ledger(p)));
+        def fcf-mean-wait(p) = fcf-share(fcf-ledger-wait(fcf-point-ledger(p)), mul(fcf-ledger-offered(fcf-point-ledger(p)), 100));
+        // a held offer whose latest wait is under its own mean is ripening
+        def fcf-ripening?(p) =
+            if le(fcf-ledger-held(fcf-point-ledger(p)), 0) then 0
+            else if lt(fcf-ledger-last-wait(fcf-point-ledger(p)), fcf-mean-wait(p)) then 1 else 0;
+
+        // ---- gaps and wounds, each with what it asks for ---------------------
+        // A gap is a choice that was never a choice; a wound is a choice that
+        // closes more than it opens. Naming which is which is the whole point:
+        // a gap is nourished by adding an option, a wound by healing the door
+        // the declines come through.
+        def fcf-corridor?(p) = if lt(len(fcf-point-options(p)), FCFLeastOptions()) then 1 else 0;
+        def fcf-dark?(p) = if le(fcf-ledger-offered(fcf-point-ledger(p)), 0) then 1 else 0;
+        def fcf-restricting?(p) = if eq(fcf-dark?(p), 1) then 0 else if gt(fcf-restriction(p), fcf-flow(p)) then 1 else 0;
+        def fcf-finding(kind, pointId, note, asks) = list("form-choice-finding-v1", kind, pointId, note, asks);
+        def fcf-finding-kind(f) = nth(f, 1);
+        def fcf-finding-point(f) = nth(f, 2);
+        def fcf-finding-note(f) = nth(f, 3);
+        def fcf-finding-asks(f) = nth(f, 4);
+        def fcf-point-findings(p) {
+            let corridor = if eq(fcf-corridor?(p), 1) then list(fcf-finding("gap-corridor", fcf-point-id(p), "one way through is not a choice", "offer a second option")) else list();
+            let dark = if eq(fcf-dark?(p), 1) then list(fcf-finding("gap-dark", fcf-point-id(p), "this choice has never been offered", "reach it, or retire it")) else list();
+            let wound = if eq(fcf-restricting?(p), 1) then list(fcf-finding("wound-restricting", fcf-point-id(p), "it closes more often than it opens", "heal the door the declines come through")) else list();
+            let holding = if and(gt(fcf-holding(p), 50), eq(fcf-ripening?(p), 0)) then list(fcf-finding("wound-stalled", fcf-point-id(p), "held offers whose wait is not falling", "ripen the arguments or widen the boundary")) else list();
+            append(corridor, append(dark, append(wound, holding)));
+        }
+        def fcf-findings(points) = if eq(len(points), 0) then list() else append(fcf-point-findings(head(points)), fcf-findings(tail(points)));
+        def fcf-findings-of-kind(fs, kind) = if eq(len(fs), 0) then list() else if str_eq(fcf-finding-kind(head(fs)), kind) then cons(head(fs), fcf-findings-of-kind(tail(fs), kind)) else fcf-findings-of-kind(tail(fs), kind);
+
+        // ---- sequence play ---------------------------------------------------
+        // A play is a sequence of points walked in order, each taking the option
+        // that carries the most worth. Its flow is the LEAST flowing step, never
+        // the average: a sequence moves as fast as its narrowest gate, and an
+        // average hides exactly the step worth healing.
+        def fcf-best-option(options, best) =
+            if eq(len(options), 0) then best
+            else if eq(len(best), 0) then fcf-best-option(tail(options), head(options))
+            else if gt(fcf-option-worth(head(options)), fcf-option-worth(best)) then fcf-best-option(tail(options), head(options))
+            else fcf-best-option(tail(options), best);
+        def fcf-step(pointId, optionId, flow, restriction, worth) = list("form-choice-step-v1", pointId, optionId, flow, restriction, worth);
+        def fcf-step-point(s) = nth(s, 1);
+        def fcf-step-option(s) = nth(s, 2);
+        def fcf-step-flow(s) = nth(s, 3);
+        def fcf-step-restriction(s) = nth(s, 4);
+        def fcf-step-worth(s) = nth(s, 5);
+        def fcf-point-step(p) {
+            let best = fcf-best-option(fcf-point-options(p), list());
+            fcf-step(fcf-point-id(p), if eq(len(best), 0) then "none" else fcf-option-id(best), fcf-flow(p), fcf-restriction(p), if eq(len(best), 0) then 0 else fcf-option-worth(best));
+        }
+        def fcf-steps(points) = if eq(len(points), 0) then list() else cons(fcf-point-step(head(points)), fcf-steps(tail(points)));
+        def fcf-least-flow(steps, least) =
+            if eq(len(steps), 0) then least
+            else if lt(fcf-step-flow(head(steps)), 0) then fcf-least-flow(tail(steps), least)
+            else if or(lt(least, 0), lt(fcf-step-flow(head(steps)), least)) then fcf-least-flow(tail(steps), fcf-step-flow(head(steps)))
+            else fcf-least-flow(tail(steps), least);
+        def fcf-most-restricting(steps, worst) =
+            if eq(len(steps), 0) then worst
+            else if eq(len(worst), 0) then fcf-most-restricting(tail(steps), head(steps))
+            else if gt(fcf-step-restriction(head(steps)), fcf-step-restriction(worst)) then fcf-most-restricting(tail(steps), head(steps))
+            else fcf-most-restricting(tail(steps), worst);
+        def fcf-sum-worth(steps, acc) = if eq(len(steps), 0) then acc else fcf-sum-worth(tail(steps), add(acc, fcf-step-worth(head(steps))));
+        // the play: every step, the narrowest gate, the step that restricts most,
+        // the worth carried, and the findings the sequence walked past
+        def fcf-play(points) {
+            let steps = fcf-steps(points);
+            let narrow = fcf-least-flow(steps, sub(0, 1));
+            let worst = fcf-most-restricting(steps, list());
+            list(FCFPlaySchema(), steps, narrow, if eq(len(worst), 0) then "none" else fcf-step-point(worst), fcf-sum-worth(steps, 0), fcf-findings(points));
+        }
+        def fcf-play-steps(pl) = nth(pl, 1);
+        def fcf-play-flow(pl) = nth(pl, 2);
+        def fcf-play-narrowest(pl) = nth(pl, 3);
+        def fcf-play-worth(pl) = nth(pl, 4);
+        def fcf-play-findings(pl) = nth(pl, 5);
+        def fcf-play?(pl) = if lt(len(pl), 6) then 0 else if str_eq(head(pl), FCFPlaySchema()) then 1 else 0;
+
+        // ---- what to offer next ----------------------------------------------
+        // The next choice to put in front of a reader is the one whose options
+        // carry the most worth and whose point is not already flowing freely:
+        // a choice that always flows needs no attention, and a dark one needs
+        // reaching before it can be judged.
+        def fcf-attention(p) =
+            if eq(fcf-dark?(p), 1) then 90
+            else if eq(fcf-corridor?(p), 1) then 80
+            else if eq(fcf-restricting?(p), 1) then add(70, div(fcf-restriction(p), 10))
+            else sub(60, div(fcf-flow(p), 10));
+        def fcf-next-choice(points, best) =
+            if eq(len(points), 0) then best
+            else if eq(len(best), 0) then fcf-next-choice(tail(points), head(points))
+            else if gt(fcf-attention(head(points)), fcf-attention(best)) then fcf-next-choice(tail(points), head(points))
+            else fcf-next-choice(tail(points), best);
+    }
+    0;
+}
