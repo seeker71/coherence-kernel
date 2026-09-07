@@ -1,0 +1,423 @@
+//////////////////////////////////////////////////////////////////////
+//
+// room-sense.bml — the room itself, beyond the words and beyond one voice's prosody.
+//
+// Authority: form-stdlib/room-sense.bml
+// preludes: form/form-stdlib/core.fk form/form-stdlib/form-glass-observer.bml
+//
+// The ear carries what was SAID. Prosody carries HOW one voice said it. This
+// organ carries the space the saying happened in: how many beings are turning,
+// how long the silence between them ran, whether someone breathed before the
+// line, whether the room's own hum changed while nobody spoke, how near the
+// speaker stood, and whether a person is at this machine at all.
+//
+// Everything here is read from 100 ms of s16le mono 16 kHz and from the Mac's
+// own presence organs. Nothing is retained: the organ keeps two seconds of
+// numbers and a minute of turn boundaries, never a sample, never a word, never
+// a name. The camera is not opened -- room.camera is a row that says so.
+//
+// THE FRAME. Three measurements over one 100 ms frame, all integers:
+//   a full-rate pass          sum of squares, zero crossings, sum of squared
+//                             first differences (a high-band proxy), peak
+//   an interior period search decimated to 4 kHz, lags 12..56 = 333..71 Hz;
+//                             a period is an INTERIOR peak, because a still
+//                             room always pins its best lag to the boundary
+//   the peak's own half-lag   the voicing test, and the surprise of this hour:
+//                             at HALF a period the wave stands inverted, so the
+//                             correlation there collapses. Measured on this
+//                             room's real speech the peak ran 750..984 while
+//                             its half-lag ran -440..-915; the still room's
+//                             rumble answered +140..+550 and never held an
+//                             interior peak at all. One extra lag, and voicing
+//                             is told from rumble at any pitch.
+//
+// THE AXES, and how far each is to be trusted -- a rough axis named is worth
+// more than a smooth one invented:
+//   level, floor, room-tone  trusted; the floor falls at once and rises 1 dB/s,
+//                            so one loud word never lifts it and a fan that
+//                            starts does, over its own seconds
+//   kind + sureness          trusted for still / voice / noise; TONE does not
+//                            separate music from a held sung note, and says so
+//   pitch, voiced fraction   trusted
+//   turn count, gap          trusted
+//   voices present           ROUGH -- one coordinate (mean period), two marks
+//                            merge inside 2 lag steps; it counts timbres, and
+//                            it neither separates nor names anybody
+//   breath                   ROUGH -- an unvoiced, high-tilt, 200-900 ms rise
+//                            near speech; built and witnessed on played sound
+//   laugh / hum / throat     ROUGH -- envelope-rate and pitch-spread evidence
+//   nearness                 ROUGH by construction -- a true direct-to-room
+//                            ratio needs an impulse response; this is level
+//                            over floor plus how fast the tail falls
+//   at the machine           trusted; HIDIdleTime and pmset's own UserIsActive
+//   display                  probed and ABSENT on this host, with both doors
+//                            and their answers on the row
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class RoomSenseAuthority {
+        field RSAuthorityPath = "form/form-stdlib/room-sense.bml";
+        field RSAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class RoomSense {
+        field RSSchema = "room-sense-v1";
+        field RSSensor = "room";
+        field RSFrameBytes = 3200;
+        field RSFrameMs = 100;
+        field RSCadenceMs = 200;
+        field RSSleepCadenceMs = 500;
+        field RSLagLo = 12;
+        field RSLagHi = 56;
+        field RSAcRate = 4000;
+        field RSAcSamples = 336;
+        field RSVoicedR = 700;
+        field RSHalfMargin = 400;
+        field RSLaughMod = 200;
+        field RSHistory = 20;
+        field RSSecond = 10;
+        field RSTurnGapMs = 400;
+        field RSMinuteMs = 60000;
+        field RSStillGate = 60;
+        field RSMarkMerge = 2;
+        field RSToneChange = 40;
+        field RSMachineEvery = 20;
+        field RSRowCount = 22;
+        ref rs-authority = RoomSenseAuthority;
+        thought rs-law = list("the-room-is-a-being-not-a-background", "an-interior-peak-is-a-period", "the-sign-at-half-a-period-tells-voicing", "the-floor-falls-at-once-and-rises-slowly", "rough-named-beats-smooth-invented", "nothing-is-retained", "the-camera-stays-shut-and-says-so");
+
+        // --- small arithmetic the body does not carry natively ------------------
+        def rs-abs(v) = if lt(v, 0) then sub(0, v) else v;
+        def rs-clamp(v, lo, hi) = if lt(v, lo) then lo else if gt(v, hi) then hi else v;
+        def rs-cat(xs) = if eq(len(xs), 0) then "" else str_concat(head(xs), rs-cat(tail(xs)));
+        def rs-cap(xs, n) = if or(le(n, 0), eq(len(xs), 0)) then list() else cons(head(xs), rs-cap(tail(xs), sub(n, 1)));
+        def rs-isqrt(n, lo, hi) = if ge(add(lo, 1), hi) then lo else rs-isqrt-at(n, lo, hi, div(add(lo, hi), 2));
+        def rs-isqrt-at(n, lo, hi, m) = if gt(mul(m, m), n) then rs-isqrt(n, lo, m) else rs-isqrt(n, m, hi);
+
+        // decibels below full scale in TENTHS. The octave is exact, the fraction
+        // inside it is linear -- worth about 0.5 dB at the middle of an octave,
+        // which is named on every row that carries this unit rather than hidden.
+        def rs-oct(rms, base, k) = if or(ge(rms, base), ge(k, 16)) then list(base, k) else rs-oct(rms, div(base, 2), add(k, 1));
+        def rs-db10(rms) = if le(rms, 0) then -900 else rs-db10-at(rms, rs-oct(rms, 32768, 0));
+        def rs-db10-at(rms, o) = rs-clamp(add(sub(0, mul(60, nth(o, 1))), div(mul(60, sub(rms, head(o))), head(o))), -900, 0);
+        def rs-db(db10) = div(db10, 10);
+
+        // --- the frame ----------------------------------------------------------
+        def rs-s16(s, i) = rs-s16-of(add(str_byte_at(s, i), mul(256, str_byte_at(s, add(i, 1)))));
+        def rs-s16-of(v) = if ge(v, 32768) then sub(v, 65536) else v;
+        def rs-pass(s, i, end, prev, ss, zc, ds, peak) = if ge(i, end) then list(ss, zc, ds, peak) else rs-pass-at(s, i, end, prev, ss, zc, ds, peak, rs-s16(s, i));
+        def rs-pass-at(s, i, end, prev, ss, zc, ds, peak, v) = rs-pass(s, add(i, 2), end, v, add(ss, mul(v, v)), if lt(mul(v, prev), 0) then add(zc, 1) else zc, add(ds, mul(sub(v, prev), sub(v, prev))), if gt(rs-abs(v), peak) then rs-abs(v) else peak);
+
+        // Ten 10 ms sub-blocks: the envelope INSIDE one frame, sampled at 100 Hz
+        // instead of 10. A frame rate of 10 Hz cannot tell a five-beat-a-second
+        // laugh from three-beat-a-second syllables -- the two alias onto each
+        // other. What separates them is DEPTH, not rate: between two "ha"s the
+        // level falls most of the way back to the room, and connected speech
+        // never does that. This is the measure of that fall.
+        def rs-sub-ss(s, i, end, acc) = if ge(i, end) then acc else rs-sub-ss-at(s, i, end, acc, rs-s16(s, i));
+        def rs-sub-ss-at(s, i, end, acc, v) = rs-sub-ss(s, add(i, 4), end, add(acc, mul(v, v)));
+        def rs-sub-db(s, k) = rs-db10(rs-isqrt(div(rs-sub-ss(s, mul(k, 320), mul(add(k, 1), 320), 0), 80), 0, 40000));
+        def rs-sub-hi(s, k, best) = if ge(k, 10) then best else rs-sub-hi(s, add(k, 1), if gt(rs-sub-db(s, k), best) then rs-sub-db(s, k) else best);
+        def rs-sub-lo(s, k, best) = if ge(k, 10) then best else rs-sub-lo(s, add(k, 1), if lt(rs-sub-db(s, k), best) then rs-sub-db(s, k) else best);
+        def rs-sub-spread(s) = sub(rs-sub-hi(s, 0, -900), rs-sub-lo(s, 0, 0));
+
+        def rs-ac(s, lag, n, i, num, e0, el) = if ge(i, n) then list(num, e0, el) else rs-ac-at(s, lag, n, i, num, e0, el, rs-s16(s, mul(i, 8)), rs-s16(s, mul(add(i, lag), 8)));
+        def rs-ac-at(s, lag, n, i, num, e0, el, a, b) = rs-ac(s, lag, n, add(i, 1), add(num, mul(a, b)), add(e0, mul(a, a)), add(el, mul(b, b)));
+        def rs-r(s, n, lag) = rs-r-of(rs-ac(s, lag, n, 0, 0, 0, 0));
+        def rs-r-of(t) = rs-r-at(head(t), mul(rs-isqrt(nth(t, 1), 0, 1000000), rs-isqrt(nth(t, 2), 0, 1000000)));
+        def rs-r-at(num, d) = if le(d, 0) then 0 else div(mul(1000, num), d);
+        def rs-best(s, n, lag, hi, bl, br) = if gt(lag, hi) then list(bl, br) else rs-best-at(s, n, lag, hi, bl, br, rs-r(s, n, lag));
+        def rs-best-at(s, n, lag, hi, bl, br, r) = if gt(r, br) then rs-best(s, n, add(lag, 1), hi, lag, r) else rs-best(s, n, add(lag, 1), hi, bl, br);
+
+        // a frame cell: list(t, db10, zc, tilt, lag, r, r12, voiced, above, crest)
+        def rs-f-t(f) = nth(f, 0);
+        def rs-f-db(f) = nth(f, 1);
+        def rs-f-zc(f) = nth(f, 2);
+        def rs-f-tilt(f) = nth(f, 3);
+        def rs-f-lag(f) = nth(f, 4);
+        def rs-f-r(f) = nth(f, 5);
+        def rs-f-half(f) = nth(f, 6);
+        def rs-f-voiced(f) = nth(f, 7);
+        def rs-f-above(f) = nth(f, 8);
+        def rs-f-crest(f) = nth(f, 9);
+        def rs-f-mod(f) = nth(f, 10);
+        def rs-f-hz(f) = if le(rs-f-lag(f), 0) then 0 else div(RSAcRate(), rs-f-lag(f));
+
+        // an INTERIOR peak strong enough, with the half-period probe negative.
+        // A boundary peak is the still room's own short-lag correlation, not a period.
+        // A period, not a coincidence: at HALF a period the wave stands inverted,
+        // so the correlation there falls far below the peak. Measured on this
+        // room's own speech the peak ran 750..984 and its half-lag -440..-915;
+        // the still room never gets an interior peak at all.
+        def rs-voiced?(lag, r, half) = if or(le(lag, RSLagLo()), ge(lag, RSLagHi())) then 0 else if lt(r, RSVoicedR()) then 0 else if lt(sub(r, half), RSHalfMargin()) then 0 else 1;
+        def rs-half-lag(lag) = if lt(div(lag, 2), 4) then 4 else div(lag, 2);
+
+        def rs-frame(bytes, now, floor) = if lt(str_len(bytes), RSFrameBytes()) then list() else rs-frame-best(bytes, now, floor, rs-pass(bytes, 2, sub(RSFrameBytes(), 2), rs-s16(bytes, 0), 0, 0, 0, 0), rs-best(bytes, RSAcSamples(), RSLagLo(), RSLagHi(), 0, 0));
+        def rs-frame-best(bytes, now, floor, p, b) = rs-frame-at(now, floor, p, b, rs-r(bytes, RSAcSamples(), rs-half-lag(head(b))), rs-sub-spread(bytes));
+        def rs-frame-at(now, floor, p, b, half, mod) = rs-frame-of(now, floor, rs-isqrt(div(head(p), sub(div(RSFrameBytes(), 2), 1)), 0, 40000), nth(p, 1), if le(head(p), 0) then 0 else div(mul(100, nth(p, 2)), head(p)), nth(p, 3), head(b), nth(b, 1), half, mod);
+        def rs-frame-of(now, floor, rms, zc, tilt, peak, lag, r, half, mod) = list(now, rs-db10(rms), zc, tilt, lag, r, half, rs-voiced?(lag, r, half), sub(rs-db10(rms), floor), if le(rms, 0) then 0 else div(mul(10, peak), rms), mod);
+
+        // --- the room's own floor, and the moment it changes --------------------
+        // floorCell = list(floor, mark, lastChangeMs, dir, zc, tilt)
+        def rs-floor-cell(floor, mark, at, dir, zc, tilt) = list(floor, mark, at, dir, zc, tilt);
+        def rs-fc-floor(c) = nth(c, 0);
+        def rs-fc-mark(c) = nth(c, 1);
+        def rs-fc-at(c) = nth(c, 2);
+        def rs-fc-dir(c) = nth(c, 3);
+        def rs-fc-zc(c) = nth(c, 4);
+        def rs-fc-tilt(c) = nth(c, 5);
+        // down at once, up one tenth of a dB per frame: a shout cannot lift the
+        // floor, a fan that starts lifts it over its own six seconds
+        def rs-floor-next(floor, db10) = if lt(db10, floor) then db10 else if gt(db10, floor) then add(floor, 1) else floor;
+        def rs-floor-quiet?(f, floor) = if lt(sub(rs-f-db(f), floor), 30) then 1 else 0;
+        def rs-smooth(old, fresh) = div(add(mul(7, old), fresh), 8);
+        def rs-floor-step(c, f, now) = rs-floor-settle(rs-floor-next(rs-fc-floor(c), rs-f-db(f)), c, f, now);
+        def rs-floor-settle(floor, c, f, now) {
+            let zc = if eq(rs-floor-quiet?(f, floor), 1) then rs-smooth(rs-fc-zc(c), rs-f-zc(f)) else rs-fc-zc(c);
+            let tilt = if eq(rs-floor-quiet?(f, floor), 1) then rs-smooth(rs-fc-tilt(c), rs-f-tilt(f)) else rs-fc-tilt(c);
+            let moved = sub(floor, rs-fc-mark(c));
+            // a slow drift crosses four decibels again and again; without this
+            // guard "steady" reset every few hundred milliseconds while a fan
+            // was simply being absorbed. One declared change per two seconds.
+            let armed = if lt(rs-fc-at(c), 0) then 1 else if gt(sub(now, rs-fc-at(c)), 2000) then 1 else 0;
+            if or(lt(rs-abs(moved), RSToneChange()), eq(armed, 0)) then rs-floor-cell(floor, rs-fc-mark(c), rs-fc-at(c), rs-fc-dir(c), zc, tilt) else rs-floor-cell(floor, floor, now, if gt(moved, 0) then 1 else -1, zc, tilt);
+        }
+
+        // --- turns: who is speaking, when they yielded, how long the gap ran ----
+        // turnCell = list(turns, inTurn, startMs, lagSum, lagN, peakDb, lastVoiceMs, lastGapMs)
+        // a turn   = list(startMs, endMs, markLag, peakDb)
+        def rs-turn-cell(turns, inTurn, start, lagSum, lagN, peak, lastVoice, gap) = list(turns, inTurn, start, lagSum, lagN, peak, lastVoice, gap);
+        def rs-tc-turns(c) = nth(c, 0);
+        def rs-tc-in?(c) = nth(c, 1);
+        def rs-tc-start(c) = nth(c, 2);
+        def rs-tc-sum(c) = nth(c, 3);
+        def rs-tc-n(c) = nth(c, 4);
+        def rs-tc-peak(c) = nth(c, 5);
+        def rs-tc-voice(c) = nth(c, 6);
+        def rs-tc-gap(c) = nth(c, 7);
+        def rs-t-start(t) = nth(t, 0);
+        def rs-t-end(t) = nth(t, 1);
+        def rs-t-mark(t) = nth(t, 2);
+        def rs-t-peak(t) = nth(t, 3);
+        def rs-mark-of(sum, n) = if le(n, 0) then 0 else div(sum, n);
+        def rs-turn-close(c, now) = rs-turn-cell(rs-cap(cons(list(rs-tc-start(c), rs-tc-voice(c), rs-mark-of(rs-tc-sum(c), rs-tc-n(c)), rs-tc-peak(c)), rs-tc-turns(c)), 24), 0, 0, 0, 0, -900, rs-tc-voice(c), rs-tc-gap(c));
+        def rs-turn-open(c, f, now) = rs-turn-cell(rs-tc-turns(c), 1, now, rs-f-lag(f), 1, rs-f-db(f), now, if le(rs-tc-voice(c), 0) then -1 else sub(now, rs-tc-voice(c)));
+        def rs-turn-grow(c, f, now) = rs-turn-cell(rs-tc-turns(c), 1, rs-tc-start(c), add(rs-tc-sum(c), rs-f-lag(f)), add(rs-tc-n(c), 1), if gt(rs-f-db(f), rs-tc-peak(c)) then rs-f-db(f) else rs-tc-peak(c), now, rs-tc-gap(c));
+        def rs-turn-voiced(c, f, now) = if eq(rs-tc-in?(c), 1) then rs-turn-grow(c, f, now) else rs-turn-open(c, f, now);
+        def rs-turn-step(c, f, now) = if eq(rs-f-voiced(f), 1) then rs-turn-voiced(c, f, now) else rs-turn-idle(c, now);
+        def rs-turn-idle(c, now) = if and(eq(rs-tc-in?(c), 1), gt(sub(now, rs-tc-voice(c)), RSTurnGapMs())) then rs-turn-close(c, now) else c;
+
+        // distinct timbre marks: two turns are the same voice when their mean
+        // periods sit inside two lag steps. One coordinate only -- it counts
+        // timbres in the room; it does not separate anybody and names nobody.
+        def rs-same-mark?(a, b) = if le(rs-abs(sub(a, b)), RSMarkMerge()) then 1 else 0;
+        def rs-mark-seen?(marks, m) = if eq(len(marks), 0) then 0 else if eq(rs-same-mark?(head(marks), m), 1) then 1 else rs-mark-seen?(tail(marks), m);
+        def rs-marks(turns, now, acc) = if eq(len(turns), 0) then acc else rs-marks-at(turns, now, acc, head(turns));
+        def rs-marks-at(turns, now, acc, t) = if gt(sub(now, rs-t-end(t)), RSMinuteMs()) then acc else if or(le(rs-t-mark(t), 0), eq(rs-mark-seen?(acc, rs-t-mark(t)), 1)) then rs-marks(tail(turns), now, acc) else rs-marks(tail(turns), now, cons(rs-t-mark(t), acc));
+        def rs-turns-in-minute(turns, now, acc) = if eq(len(turns), 0) then acc else if gt(sub(now, rs-t-end(head(turns))), RSMinuteMs()) then acc else rs-turns-in-minute(tail(turns), now, add(acc, 1));
+        // the mark whose last turn ended longest ago: the voice that has been quiet
+        def rs-mark-last-end(turns, m) = if eq(len(turns), 0) then -1 else if eq(rs-same-mark?(rs-t-mark(head(turns)), m), 1) then rs-t-end(head(turns)) else rs-mark-last-end(tail(turns), m);
+        def rs-quietest(marks, turns, bestMark, bestEnd) = if eq(len(marks), 0) then list(bestMark, bestEnd) else rs-quietest-at(marks, turns, bestMark, bestEnd, rs-mark-last-end(turns, head(marks)));
+        def rs-quietest-at(marks, turns, bestMark, bestEnd, e) = if or(lt(bestEnd, 0), lt(e, bestEnd)) then rs-quietest(tail(marks), turns, head(marks), e) else rs-quietest(tail(marks), turns, bestMark, bestEnd);
+
+        // --- history aggregates over the last second ----------------------------
+        def rs-h-voiced(hs, k, acc) = if or(le(k, 0), eq(len(hs), 0)) then acc else rs-h-voiced(tail(hs), sub(k, 1), add(acc, rs-f-voiced(head(hs))));
+        def rs-h-lag-hi(hs, k, best) = if or(le(k, 0), eq(len(hs), 0)) then best else rs-h-lag-hi(tail(hs), sub(k, 1), if and(eq(rs-f-voiced(head(hs)), 1), gt(rs-f-lag(head(hs)), best)) then rs-f-lag(head(hs)) else best);
+        def rs-h-lag-lo(hs, k, best) = if or(le(k, 0), eq(len(hs), 0)) then best else rs-h-lag-lo(tail(hs), sub(k, 1), if and(eq(rs-f-voiced(head(hs)), 1), lt(rs-f-lag(head(hs)), best)) then rs-f-lag(head(hs)) else best);
+        def rs-h-db-hi(hs, k, best) = if or(le(k, 0), eq(len(hs), 0)) then best else rs-h-db-hi(tail(hs), sub(k, 1), if gt(rs-f-db(head(hs)), best) then rs-f-db(head(hs)) else best);
+        def rs-h-db-lo(hs, k, best) = if or(le(k, 0), eq(len(hs), 0)) then best else rs-h-db-lo(tail(hs), sub(k, 1), if lt(rs-f-db(head(hs)), best) then rs-f-db(head(hs)) else best);
+        // an envelope peak: a frame 2 dB over both its neighbours. Laughter beats
+        // the envelope faster than syllables do; this counts the beats.
+        def rs-h-peaks(hs, k, acc) = if or(lt(k, 3), lt(len(hs), 3)) then acc else rs-h-peaks(tail(hs), sub(k, 1), if and(gt(rs-f-db(nth(hs, 1)), add(rs-f-db(head(hs)), 20)), gt(rs-f-db(nth(hs, 1)), add(rs-f-db(nth(hs, 2)), 20))) then add(acc, 1) else acc);
+        def rs-pitch-spread(hs, k) = if eq(rs-h-lag-hi(hs, k, 0), 0) then 0 else sub(rs-h-lag-hi(hs, k, 0), rs-h-lag-lo(hs, k, 999));
+        def rs-level-spread(hs, k) = sub(rs-h-db-hi(hs, k, -900), rs-h-db-lo(hs, k, 0));
+
+        // --- what kind of sound this is, and how sure ---------------------------
+        // still / voice / tone / knock / noise. TONE is honest about its own
+        // limit: a held sung note, a cello and a fan's whine all land here.
+        // The kind is the ROOM's kind, not one frame's. A voice is unvoiced between
+        // its own syllables; reading only the newest frame made the row flicker to
+        // "noise" in the middle of a sentence the very next row called 90% voiced.
+        // So the still gate and the voice gate both consult the last second.
+        def rs-kind(f, hs) = if and(lt(rs-f-above(f), RSStillGate()), lt(rs-h-voiced(hs, RSSecond(), 0), 3)) then "still" else if or(eq(rs-f-voiced(f), 1), ge(rs-h-voiced(hs, RSSecond(), 0), 3)) then rs-kind-voiced(hs) else rs-kind-unvoiced(f, hs);
+        def rs-kind-voiced(hs) = if or(ge(rs-pitch-spread(hs, RSSecond()), 3), ge(rs-level-spread(hs, RSSecond()), 60)) then "voice" else "tone";
+        def rs-kind-unvoiced(f, hs) = if eq(rs-knock?(f, hs), 1) then "knock" else "noise";
+        def rs-knock?(f, hs) = if lt(len(hs), 1) then 0 else if and(gt(sub(rs-f-db(f), rs-f-db(head(hs))), 120), ge(rs-f-crest(f), 40)) then 1 else 0;
+        // sureness is a margin, never a decoration: how far the deciding
+        // measurement sits from the gate that decided it
+        def rs-sure(f, hs, kind) = if str_eq(kind, "still") then rs-clamp(add(50, sub(RSStillGate(), rs-f-above(f))), 0, 100) else if str_eq(kind, "knock") then rs-clamp(div(mul(sub(rs-f-crest(f), 40), 100), 60), 0, 100) else if str_eq(kind, "noise") then rs-clamp(add(30, div(sub(rs-f-above(f), RSStillGate()), 2)), 0, 100) else rs-sure-voiced(f, hs);
+        // when the frame itself is voiced the peak's own strength is the evidence;
+        // between two syllables the evidence is how much of the second was voiced
+        def rs-sure-voiced(f, hs) = if eq(rs-f-voiced(f), 1) then rs-clamp(div(mul(sub(rs-f-r(f), 500), 100), 500), 0, 100) else rs-clamp(mul(10, rs-h-voiced(hs, RSSecond(), 0)), 0, 100);
+
+        // --- breath: unvoiced, high-tilt, four to sixteen dB over the floor -----
+        // breathCell = list(run, last, times) ; last = list(kind, atMs) or list()
+        def rs-breath-cell(run, last, times, runFloor) = list(run, last, times, runFloor);
+        def rs-bc-run(c) = nth(c, 0);
+        def rs-bc-last(c) = nth(c, 1);
+        def rs-bc-times(c) = nth(c, 2);
+        def rs-bc-runfloor(c) = nth(c, 3);
+        // The first gates here (4 dB over the floor, tilt 6) fired on the room's own
+        // rumble every few seconds in a still room -- witnessed, not guessed. A real
+        // breath sits well clear of the floor and is much hissier than the rumble:
+        // this room's quiet frames measure tilt 0..5, a fricative measured 25..63.
+        def rs-breathy?(f) = if eq(rs-f-voiced(f), 1) then 0 else if lt(rs-f-above(f), 60) then 0 else if gt(rs-f-above(f), 200) then 0 else if lt(rs-f-tilt(f), 10) then 0 else 1;
+        def rs-breath-kind(tc, now, run) = if and(gt(rs-tc-voice(tc), 0), lt(sub(sub(now, mul(run, RSFrameMs())), rs-tc-voice(tc)), 600)) then "sigh" else "breath";
+        def rs-breath-step(c, f, tc, now, floor) = if eq(rs-breathy?(f), 1) then rs-breath-grow(c, floor) else rs-breath-end(c, tc, now, floor);
+        def rs-breath-grow(c, floor) = if eq(rs-bc-run(c), 0) then rs-breath-cell(1, rs-bc-last(c), rs-bc-times(c), floor) else rs-breath-cell(add(rs-bc-run(c), 1), rs-bc-last(c), rs-bc-times(c), rs-bc-runfloor(c));
+        // A pink-noise fan played into this room measured exactly like a breath in
+        // every coordinate above -- witnessed, and the honest separator is not in
+        // the sound at all: a breath does not move the room's floor and a machine
+        // that keeps running does. A candidate whose floor drifted 2 dB is the room
+        // changing, not somebody breathing.
+        def rs-breath-real?(c, floor) = if lt(rs-bc-run(c), 3) then 0 else if gt(rs-bc-run(c), 9) then 0 else if ge(rs-abs(sub(floor, rs-bc-runfloor(c))), 20) then 0 else 1;
+        def rs-breath-end(c, tc, now, floor) = if eq(rs-breath-real?(c, floor), 0) then rs-breath-cell(0, rs-bc-last(c), rs-bc-times(c), floor) else rs-breath-cell(0, list(rs-breath-kind(tc, now, rs-bc-run(c)), now), rs-cap(cons(now, rs-bc-times(c)), 32), floor);
+        // a breath already named becomes an INHALE when a voice opens right after it
+        def rs-breath-inhale(c, f, now) = if or(eq(rs-f-voiced(f), 0), eq(len(rs-bc-last(c)), 0)) then c else if or(gt(sub(now, nth(rs-bc-last(c), 1)), 600), str_eq(head(rs-bc-last(c)), "inhale")) then c else rs-breath-cell(rs-bc-run(c), list("inhale", nth(rs-bc-last(c), 1)), rs-bc-times(c), rs-bc-runfloor(c));
+        def rs-breaths-in-minute(ts, now, acc) = if eq(len(ts), 0) then acc else if gt(sub(now, head(ts)), RSMinuteMs()) then acc else rs-breaths-in-minute(tail(ts), now, add(acc, 1));
+
+        // --- the human sounds that are not words --------------------------------
+        // nonwordCell = list(last) ; last = list(kind, atMs) or list()
+        def rs-nonword-cell(last) = list(last);
+        def rs-nw-last(c) = nth(c, 0);
+        def rs-h-mod(hs, k, acc) = if or(le(k, 0), eq(len(hs), 0)) then acc else rs-h-mod(tail(hs), sub(k, 1), add(acc, rs-f-mod(head(hs))));
+        def rs-mod-mean(hs, k) = if lt(len(hs), k) then 0 else div(rs-h-mod(hs, k, 0), k);
+        def rs-laugh?(hs) = if lt(len(hs), RSSecond()) then 0 else if lt(rs-h-voiced(hs, RSSecond(), 0), 5) then 0 else if lt(rs-mod-mean(hs, RSSecond()), RSLaughMod()) then 0 else if lt(rs-pitch-spread(hs, RSSecond()), 4) then 0 else 1;
+        def rs-hum?(hs) = if lt(len(hs), RSSecond()) then 0 else if lt(rs-h-voiced(hs, RSSecond(), 0), 8) then 0 else if gt(rs-pitch-spread(hs, RSSecond()), 2) then 0 else if gt(rs-level-spread(hs, RSSecond()), 40) then 0 else 1;
+        def rs-throat?(f, hs) = if eq(rs-f-voiced(f), 1) then 0 else if lt(rs-f-above(f), RSStillGate()) then 0 else if gt(rs-f-tilt(f), 4) then 0 else if lt(len(hs), 2) then 0 else if ge(rs-f-above(head(hs)), RSStillGate()) then 0 else 1;
+        def rs-nonword-step(c, f, hs, now) = if eq(rs-laugh?(hs), 1) then rs-nonword-cell(list("laugh", now)) else if eq(rs-hum?(hs), 1) then rs-nonword-cell(list("hum", now)) else if eq(rs-throat?(f, hs), 1) then rs-nonword-cell(list("throat", now)) else c;
+
+        // --- nearness: level over floor, and how fast the tail falls ------------
+        // decayCell = list(quietRun, decayFrames, lastPeak)
+        def rs-decay-cell(run, frames, peak) = list(run, frames, peak);
+        def rs-dc-run(c) = nth(c, 0);
+        def rs-dc-frames(c) = nth(c, 1);
+        def rs-dc-peak(c) = nth(c, 2);
+        def rs-decay-step(c, f, floor, lastVoice, now) = if eq(rs-f-voiced(f), 1) then rs-decay-cell(0, rs-dc-frames(c), rs-f-db(f)) else rs-decay-tail(c, f, floor, lastVoice, now);
+        // the tail is only a tail in the second after a voice; measured any later it
+        // is the room's own fluctuation, and it made this score wander 24..100 while
+        // nothing at all was happening
+        def rs-decay-tail(c, f, floor, lastVoice, now) = if or(le(lastVoice, 0), gt(sub(now, lastVoice), 1000)) then c else rs-decay-close(c, f, floor);
+        def rs-decay-settled(c) = if gt(rs-dc-run(c), 0) then rs-decay-cell(0, rs-dc-run(c), rs-dc-peak(c)) else c;
+        def rs-decay-close(c, f, floor) = if le(sub(rs-f-db(f), floor), 30) then rs-decay-settled(c) else rs-decay-cell(add(rs-dc-run(c), 1), rs-dc-frames(c), rs-dc-peak(c));
+        def rs-nearness(dc, floor) = if le(rs-dc-peak(dc), -900) then -1 else add(rs-clamp(div(sub(sub(rs-dc-peak(dc), floor), 60), 3), 0, 60), rs-clamp(sub(40, mul(rs-dc-frames(dc), 10)), 0, 40));
+
+        // --- presence at this machine, read from the Mac's own organs ----------
+        // machine = list(idleSeconds, userActive, consoleUser, atMs)
+        def rs-machine-cmd() = "ioreg -c IOHIDSystem | grep HIDIdleTime | head -1; pmset -g assertions | grep UserIsActive | head -1; stat -f%Su /dev/console";
+        def rs-host-text(v) = if nothing?(v) then "" else v;
+        def rs-line(text, n, from) = if le(n, 0) then substring(text, from, rs-eol(text, from)) else rs-line-next(text, n, rs-eol(text, from));
+        def rs-line-next(text, n, at) = if ge(at, str_len(text)) then "" else rs-line(text, sub(n, 1), add(at, 1));
+        def rs-eol(s, i) = if ge(i, str_len(s)) then i else if eq(str_byte_at(s, i), 10) then i else rs-eol(s, add(i, 1));
+        def rs-digit?(b) = if and(ge(b, 48), le(b, 57)) then 1 else 0;
+        def rs-first-digit(s, i) = if ge(i, str_len(s)) then -1 else if eq(rs-digit?(str_byte_at(s, i)), 1) then i else rs-first-digit(s, add(i, 1));
+        def rs-digits-end(s, i) = if ge(i, str_len(s)) then i else if eq(rs-digit?(str_byte_at(s, i)), 1) then rs-digits-end(s, add(i, 1)) else i;
+        def rs-num-after(s, key) = rs-num-from(s, str_find(s, key, 0));
+        def rs-num-from(s, at) = if lt(at, 0) then -1 else rs-num-at(s, rs-first-digit(s, at));
+        def rs-num-at(s, d) = if lt(d, 0) then -1 else str_to_int(substring(s, d, rs-digits-end(s, d)));
+        def rs-strip(s) = if eq(str_len(s), 0) then s else if le(str_byte_at(s, sub(str_len(s), 1)), 32) then rs-strip(substring(s, 0, sub(str_len(s), 1))) else s;
+        def rs-machine-read(now) = rs-machine-of(rs-host-text(host-exec(rs-machine-cmd(), "")), now);
+        def rs-machine-of(out, now) = list(rs-machine-idle(rs-num-after(rs-line(out, 0, 0), "= ")), rs-num-after(rs-line(out, 1, 0), "UserIsActive"), rs-strip(rs-line(out, 2, 0)), now);
+        def rs-machine-idle(ns) = if lt(ns, 0) then -1 else div(ns, 1000000000);
+        def rs-m-idle(m) = nth(m, 0);
+        def rs-m-active(m) = nth(m, 1);
+        def rs-m-user(m) = nth(m, 2);
+        def rs-m-at(m) = nth(m, 3);
+        def rs-machine-empty() = list(-1, -1, "", -1);
+
+        // --- the whole state ----------------------------------------------------
+        // st = list(floorCell, hist, turnCell, breathCell, nonwordCell, machine, frames, decayCell)
+        def rs-empty() = list(rs-floor-cell(-500, -500, -1, 0, 60, 2), list(), rs-turn-cell(list(), 0, 0, 0, 0, -900, 0, -1), rs-breath-cell(0, list(), list(), -500), rs-nonword-cell(list()), rs-machine-empty(), 0, rs-decay-cell(0, -1, -900));
+        def rs-floor-of(st) = nth(st, 0);
+        def rs-hist(st) = nth(st, 1);
+        def rs-turns-of(st) = nth(st, 2);
+        def rs-breath-of(st) = nth(st, 3);
+        def rs-nonword-of(st) = nth(st, 4);
+        def rs-machine(st) = nth(st, 5);
+        def rs-frames(st) = nth(st, 6);
+        def rs-decay-of(st) = nth(st, 7);
+        def rs-head(st) = if eq(len(rs-hist(st)), 0) then list() else head(rs-hist(st));
+
+        // one 100 ms frame becomes one new state. Nothing of the sound survives it.
+        def rs-step(st, bytes, now) = rs-step-at(st, rs-frame(bytes, now, rs-fc-floor(rs-floor-of(st))), now);
+        def rs-step-at(st, f, now) {
+            if eq(len(f), 0) then st else rs-step-with(st, f, now, rs-floor-step(rs-floor-of(st), f, now));
+        }
+        def rs-step-with(st, f, now, fc) {
+            let hist = rs-cap(cons(f, rs-hist(st)), RSHistory());
+            let tc = rs-turn-step(rs-turns-of(st), f, now);
+            let bc = rs-breath-inhale(rs-breath-step(rs-breath-of(st), f, rs-turns-of(st), now, rs-fc-floor(fc)), f, now);
+            let nw = rs-nonword-step(rs-nonword-of(st), f, hist, now);
+            let dc = rs-decay-step(rs-decay-of(st), f, rs-fc-floor(fc), rs-tc-voice(rs-turns-of(st)), now);
+            let n = add(rs-frames(st), 1);
+            list(fc, hist, tc, bc, nw, rs-machine(st), n, dc);
+        }
+        // the machine lane forks; it is refreshed on its own slower beat, never per frame
+        def rs-machine-due?(st) = if lt(rs-m-at(rs-machine(st)), 0) then 1 else if eq(sub(rs-frames(st), mul(div(rs-frames(st), RSMachineEvery()), RSMachineEvery())), 0) then 1 else 0;
+        def rs-with-machine(st, m) = list(rs-floor-of(st), rs-hist(st), rs-turns-of(st), rs-breath-of(st), rs-nonword-of(st), m, rs-frames(st), rs-decay-of(st));
+        def rs-machine-step(st, now) = if eq(rs-machine-due?(st), 1) then rs-with-machine(st, rs-machine-read(now)) else st;
+
+        // --- the rows the glass paints -----------------------------------------
+        def rs-row(id, label, value, note) = fgo-text("room", id, label, value, "room", "physical-live", "mic+machine", "live", "room", note);
+        def rs-num(id, label, value, unit, note) = fgo-int("room", id, label, value, unit, 0, "room", "physical-live", "mic+machine", "live", "room", note);
+        def rs-rough(id, label, value, note) = fgo-text("room", id, label, value, "room", "derived-window", "mic", "rough", "room", note);
+        def rs-rough-num(id, label, value, unit, note) = fgo-int("room", id, label, value, unit, 0, "room", "derived-window", "mic", "rough", "room", note);
+        def rs-ms(ms) = if lt(ms, 0) then "never" else if lt(ms, 1000) then str_concat(int_to_str(ms), " ms") else if lt(ms, 60000) then str_concat(int_to_str(div(ms, 1000)), " s") else str_concat(int_to_str(div(ms, 60000)), " min");
+        def rs-db-text(db10) = str_concat(int_to_str(rs-db(db10)), " dBFS");
+
+        def rs-asleep-rows() = list(rs-row("room.state", "the room", "asleep -- write .hearth/room.wanted to wake it", "the mic opens only when it is wanted; nothing is heard until then"), rs-camera-row());
+        def rs-camera-row() = fgo-text("room", "room.camera", "the camera", "shut, by this organ's choice", "room", "declared", "AVFoundation camera (available, not opened)", "refused", "room", "a lens on a room holds beings who did not consent to it; every axis here is answered by the mic and by this Mac's own presence organs, so the camera buys aliveness nothing and costs consent everything");
+
+        def rs-rows(st, now) = if eq(len(rs-head(st)), 0) then rs-asleep-rows() else rs-rows-at(st, now, rs-head(st), rs-hist(st), rs-floor-of(st), rs-turns-of(st));
+        def rs-rows-at(st, now, f, hs, fc, tc) = append(rs-sound-rows(st, now, f, hs, fc), append(rs-turn-rows(st, now, tc, fc), rs-machine-rows(st, now)));
+
+        def rs-sound-rows(st, now, f, hs, fc) {
+            let kind = rs-kind(f, hs);
+            list(
+                rs-num("room.level", "the room's level now", rs-db(rs-f-db(f)), "dbfs", "root-mean-square of one 100 ms frame, in dBFS within about half a dB; the octave is exact and the fraction inside it is linear"),
+                rs-num("room.floor", "the room's own floor", rs-db(rs-fc-floor(fc)), "dbfs", "the quiet the room keeps under everything; it falls to a quieter room at once and climbs one dB a second, so one loud word never lifts it and a fan that starts does"),
+                rs-row("room.tone", "the room's signature", rs-cat(list(rs-db-text(rs-fc-floor(fc)), ", ", if gt(rs-fc-zc(fc), 120) then "hissy" else if gt(rs-fc-zc(fc), 60) then "airy" else "low rumble", if lt(rs-fc-at(fc), 0) then ", steady since the ear opened" else rs-cat(list(", steady ", rs-ms(sub(now, rs-fc-at(fc))))))), "the ambient the room makes when nobody is speaking: its level and the colour of it, read from the zero crossings of the quiet frames themselves"),
+                rs-row("room.tone-change", "the room last changed", if lt(rs-fc-at(fc), 0) then "not since the ear opened" else rs-cat(list("the floor ", if gt(rs-fc-dir(fc), 0) then "rose" else "fell", " 4 dB or more, ", rs-ms(sub(now, rs-fc-at(fc))), " ago")), "a door opening, a fan starting, a window closing: the moment the room's own floor moved by four decibels and stayed there"),
+                rs-row("room.kind", "what kind of sound this is", kind, if str_eq(kind, "tone") then "a sustained periodic sound; this organ does NOT separate music from a held sung note or a machine's whine -- all three land here, and the pitch row says which frequency" else "still / voice / tone / knock / noise, decided from the frame's level over the floor, its interior period and the sign at half that period"),
+                rs-num("room.kind-sure", "how sure that kind is", rs-sure(f, hs, kind), "percent", "the margin between the deciding measurement and the gate that decided it -- not a decoration; 100 means the evidence is far from the gate"),
+                rs-num("room.pitch", "the voice's pitch", if eq(rs-f-voiced(f), 1) then rs-f-hz(f) else 0, "hertz", "an interior autocorrelation peak between 80 and 307 Hz, decimated to 4 kHz; 0 when the frame carries no period"),
+                rs-num("room.voiced", "voiced in the last second", mul(10, rs-h-voiced(hs, RSSecond(), 0)), "percent", "how much of the last ten frames carried a period; the voicing test is the SIGN of the correlation at half a period, negative for a voice and positive for the room's own rumble"),
+                rs-rough("room.breath", "breath", rs-breath-text(rs-breath-of(st), now), "ROUGH, and honest about why: an unvoiced rise 6 to 20 dB over the floor, hissy, lasting 300 to 900 ms, whose floor did not move. A pink-noise fan played into this room measured identical to a breath in every sound coordinate; the separator that works is that a breath leaves the room's floor where it was and a machine that keeps running lifts it. Called an inhale when a voice opens within 600 ms after, a sigh when one closed within 600 ms before"),
+                rs-rough-num("room.breaths", "breaths in the last minute", rs-breaths-in-minute(rs-bc-times(rs-breath-of(st)), now, 0), "breaths", "ROUGH: the same evidence counted over a minute. No human breath has been witnessed at this mic yet -- the gates were set by watching what this room's own rumble and a played fan do, so this count is bounded from the false side, not confirmed from the true one"),
+                rs-rough("room.nonword", "the sounds that are not words", rs-nonword-text(rs-nonword-of(st), now), "HUM is witnessed: a played 150 Hz sine read as a hum and as a tone. LAUGH is NOT witnessed -- a speech synthesiser saying ha ha ha produces connected speech, not laughter, and no laughing being has been at this mic; its gate sits at 20 dB of within-frame envelope depth, far above the 5.5 dB this room's connected speech measured, so it stays silent rather than guesses. THROAT is not witnessed either"),
+                rs-camera-row());
+        }
+        def rs-breath-text(bc, now) = if eq(len(rs-bc-last(bc)), 0) then "none heard yet" else rs-cat(list(head(rs-bc-last(bc)), ", ", rs-ms(sub(now, nth(rs-bc-last(bc), 1))), " ago"));
+        def rs-nonword-text(nw, now) = if eq(len(rs-nw-last(nw)), 0) then "none heard yet" else rs-cat(list(head(rs-nw-last(nw)), ", ", rs-ms(sub(now, nth(rs-nw-last(nw), 1))), " ago"));
+
+        def rs-turn-rows(st, now, tc, fc) {
+            let marks = rs-marks(rs-tc-turns(tc), now, list());
+            let quiet = rs-quietest(marks, rs-tc-turns(tc), 0, -1);
+            list(
+                rs-row("room.turn", "the turn now", if eq(rs-tc-in?(tc), 1) then rs-cat(list("a voice near ", int_to_str(if le(rs-mark-of(rs-tc-sum(tc), rs-tc-n(tc)), 0) then 0 else div(RSAcRate(), rs-mark-of(rs-tc-sum(tc), rs-tc-n(tc)))), " Hz is speaking, ", rs-ms(sub(now, rs-tc-start(tc))), " so far")) else if le(rs-tc-voice(tc), 0) then "no one has spoken since the ear opened" else rs-cat(list("the room has been between turns for ", rs-ms(sub(now, rs-tc-voice(tc))))), "a turn opens on the first frame that carries a period and closes after 400 ms with none"),
+                rs-num("room.turns", "turns in the last minute", rs-turns-in-minute(rs-tc-turns(tc), now, 0), "turns", "closed turns whose end falls inside the last minute; a turn is a run of voiced frames, not a sentence. A machine holding a steady note opens turns too -- witnessed on a played 150 Hz sine -- because a turn here is periodicity in the room, not a claim about who made it"),
+                rs-num("room.gap", "the silence before this turn", rs-tc-gap(tc), "milliseconds", "how long the room stayed quiet before the current turn opened; -1 until a second turn has opened"),
+                rs-rough-num("room.voices", "voices present", len(marks), "voices", "ROUGH: distinct mean periods among the last minute's turns, merged inside two lag steps. It counts timbres in the room. It does not separate two people who sit near the same pitch, it does not follow anyone across a pause, and it names nobody"),
+                rs-rough("room.quiet-longest", "quiet the longest", if eq(len(marks), 0) then "no turn has closed yet" else rs-cat(list("the voice near ", int_to_str(if le(head(quiet), 0) then 0 else div(RSAcRate(), head(quiet))), " Hz last spoke ", rs-ms(sub(now, nth(quiet, 1))), " ago")), "ROUGH: among the timbres heard this minute, the one whose last turn ended furthest back -- the one the room has not heard from"),
+                rs-rough-num("room.nearness", "how near the voice is", rs-nearness(rs-decay-of(st), rs-fc-floor(fc)), "score", "ROUGH BY CONSTRUCTION: a true direct-to-reverberant ratio needs an impulse response and this has none. It is the last turn's peak over the floor plus how fast the tail fell back into the floor -- close voices are loud over the room and stop quickly; -1 before any voice"));
+        }
+
+        def rs-machine-rows(st, now) {
+            let m = rs-machine(st);
+            list(
+                rs-num("room.hid-idle", "since a hand touched this machine", rs-m-idle(m), "seconds", "IOHIDSystem's own HIDIdleTime in nanoseconds, divided down; it counts keyboard and trackpad, and it says nothing about anyone who is only sitting here"),
+                rs-row("room.at-machine", "is a person at this machine", rs-at-machine-text(m), "pmset's own UserIsActive assertion, held by WindowServer while a person is working; read beside HIDIdleTime so the two can disagree out loud"),
+                rs-row("room.console", "who is logged in at the screen", if eq(str_len(rs-m-user(m)), 0) then "unread" else rs-m-user(m), "the console owner, from stat on /dev/console; who the machine belongs to right now, not who is in the room"),
+                fgo-probed-absent("room", "room.display", "the display's own state", "state", "room", "ioreg -c IODisplayWrangler and pmset -g powerstate IODisplayWrangler", "IODisplayWrangler is absent on this Apple Silicon host and powerstate answers Internal failure", "room", "the display would say whether the screen is lit for someone; on this host neither door answers, and pmset -g gives the SETTING (displaysleep 120) rather than the state"));
+        }
+        // The two doors disagreed the first time both were read: pmset said a
+        // person was active while nothing had been touched for eleven minutes.
+        // Neither is lying -- UserIsActive is held by an assertion that survives
+        // for up to two hours past the last touch. So the idle clock leads, and
+        // when they part the row says so instead of picking a winner quietly.
+        def rs-at-machine-text(m) = if and(lt(rs-m-active(m), 0), lt(rs-m-idle(m), 0)) then "unread -- neither door answered" else if and(ge(rs-m-idle(m), 0), lt(rs-m-idle(m), 120)) then rs-cat(list("yes -- a hand was on it ", int_to_str(rs-m-idle(m)), " s ago")) else if eq(rs-m-active(m), 1) then rs-cat(list("the machine still claims a person is active, but nothing has been touched for ", rs-idle-text(m), "; that assertion outlives the last touch by up to two hours, so the idle clock is the sharper of the two")) else rs-cat(list("no -- no assertion stands and nothing has been touched for ", rs-idle-text(m)));
+        def rs-idle-text(m) = if lt(rs-m-idle(m), 0) then "an unread time" else if lt(rs-m-idle(m), 120) then rs-cat(list(int_to_str(rs-m-idle(m)), " s")) else rs-cat(list(int_to_str(div(rs-m-idle(m), 60)), " min"));
+    }
+    0;
+}
