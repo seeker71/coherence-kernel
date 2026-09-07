@@ -110,6 +110,10 @@ completion — the mouth's hand-off to the speaker — to the moment the axis ca
 | 1 | ~3 s | 1788777013400 | 1788777024033 | **10 633 ms** | 1 |
 | 2 | ~2 s | 1788777092605 | 1788777100871 | **8 266 ms** | 1 |
 | 3 | ~2 s | 1788777153232 | 1788777154709 | **1 477 ms** | 1 |
+| 4 | ~2 s | 1788777605194 | 1788777612722 | **7 528 ms** | 1 |
+
+The fourth is the landing witness: the same cold start run again after the rebase onto
+`bab331cb`, on the exact bytes that land, with a sibling's transcript rows appended to the give.
 
 Witness 2's point, whole:
 
@@ -137,6 +141,12 @@ axis. `ear.stands` read 1 in all three and was still 1 after 44 s of continuous 
   it was stood, a gone lane saying `gone` rather than reading as a pid, no lane at all naming its own
   door instead of painting a standing that is not there, and the last words surviving into sleep.
 - Preflight on the band: parens balanced, 0 errors, 0 unresolved, chain clean.
+- `learn/tests/homecoming-distillation-corpus-band.fk` = **32767** — and it was **red at 32655**
+  on main as inherited. Row 1338 (`neverasked`) had landed without its three pins moving, so
+  count, admissible and field-code all read one row behind. Asked of the body rather than counted
+  by hand (`hdc-count` 731, `hdc-count-admissible` 719, `hdc-max-mid` 1339, `hdc-dup-mid-rows` 0,
+  `hdc-field-code` 731071921339), the pins now cover row 1338 and row 1339 together — the count
+  rises by two, which is exactly the shape this band's own comments describe.
 
 ## Still open
 
@@ -153,6 +163,14 @@ axis. `ear.stands` read 1 in all three and was still 1 after 44 s of continuous 
   painting a zero.
 - Whisper over a quiet room still offers `(thunder rumbling)`, `[Clock ticking]`, `(cow mooing)`.
   Named already in the body; unchanged here.
+- One measurement fault of my own, kept here because it cost a run: `printf ... | ./fkwu
+  observe/ear-wake-run.fk 2>&1 | head -1` SIGPIPE'd the wake cell before its writes landed, and
+  the ear simply never woke. `head` on a cell's own output is not a reader, it is a killer.
+
+## Corpus
+
+Row **1339**, `mutebirth`: *what does a spawned part carry so that its death is legible from
+outside?*
 
 ## The closing
 
