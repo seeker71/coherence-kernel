@@ -31,7 +31,10 @@
 //   organ.protocol-floor  the same frame's protocol row: the proven count is
 //                     its capacity, the floor's size still its purpose text.
 //   glass.frame       the live roster: every publisher in this space, and
-//                     whether its frame read current, absent or malformed.
+//                     whether its frame was GIVEN inside its window (a taking),
+//                     absent or standing-but-silent (the offer held), or
+//                     malformed (a decline). Standing is not giving: shared
+//                     memory outlives the process.
 //   governor.metal-admission  the resource governor's admission row, whose
 //                     lifecycles ARE the body's outcomes — active is a taking,
 //                     failed a decline, ready the held offer standing, and
@@ -50,6 +53,9 @@
 section [form.bml] {
     class FormChoiceFlowSources {
         field FCFSHotRows = 24;
+        // a frame not given for this many of its own tick windows is standing, not giving
+        field FCFSFrameCadenceMs = 1000;
+        field FCFSSilentFactor = 3;
         field FCFSOrgansPublisher = "organs";
         field FCFSGovernorPublisher = "resource.governor";
         field FCFSRouteSample = "surprise.routing";
@@ -199,12 +205,26 @@ section [form.bml] {
 
         // ---- 6. which frame the glass takes ----------------------------------
         // Every tick the glass may take any publisher standing in this space.
-        // A frame that reads current is a taking; absent is the held offer, it
-        // may stand next tick; malformed or refused is a decline.
-        def fcfs-frame-status(root, publisher) = fgtm-read-state-status(fgtm-read-current(root, publisher));
+        // A frame GIVEN inside its window is a taking; a frame absent, or
+        // standing but silent, is the held offer -- its giver may speak again;
+        // malformed or refused is a decline.
+        //
+        // "current" only says a frame parsed. Shared memory outlives the
+        // process, so a publisher that stopped hours ago reads current with all
+        // its rows forever: witnessed 2026-09-07, four publishers current and
+        // two of them silent for 100 and 118 minutes, and this point reading
+        // 100% flow over them. A giver that has stopped is not the glass taking
+        // its frame.
+        def fcfs-frame-window() = mul(FCFSSilentFactor(), FCFSFrameCadenceMs());
+        def fcfs-frame-status-at(root, publisher, now) {
+            let reading = fgtm-read-current(root, publisher);
+            let status = fgtm-read-state-status(reading);
+            if not(str_eq(status, "current")) then status else if eq(fgtm-read-given-within?(reading, now, fcfs-frame-window()), 1) then "current" else "silent";
+        }
+        def fcfs-frame-status(root, publisher) = fcfs-frame-status-at(root, publisher, now_unix_ms());
         def fcfs-frame-taken?(status) = if str_eq(status, "current") then 1 else 0;
-        def fcfs-frame-held?(status) = if str_eq(status, "absent") then 1 else 0;
-        def fcfs-frame-declined?(status) = if str_eq(status, "current") then 0 else if str_eq(status, "absent") then 0 else 1;
+        def fcfs-frame-held?(status) = if str_eq(status, "absent") then 1 else if str_eq(status, "silent") then 1 else 0;
+        def fcfs-frame-declined?(status) = if eq(fcfs-frame-taken?(status), 1) then 0 else if eq(fcfs-frame-held?(status), 1) then 0 else 1;
         def fcfs-frame-fold(statuses, taken, held, declined) = if eq(len(statuses), 0) then list(taken, held, declined) else fcfs-frame-fold(tail(statuses), add(taken, fcfs-frame-taken?(head(statuses))), add(held, fcfs-frame-held?(head(statuses))), add(declined, fcfs-frame-declined?(head(statuses))));
         def fcfs-frame-statuses(root, publishers) = if eq(len(publishers), 0) then list() else cons(fcfs-frame-status(root, head(publishers)), fcfs-frame-statuses(root, tail(publishers)));
         def fcfs-frame-option(publisher, status) = fcf-option(publisher, str_concat("take the ", str_concat(publisher, " frame")), 1, 12, 100, if eq(fcfs-frame-taken?(status), 1) then 100 else 0);

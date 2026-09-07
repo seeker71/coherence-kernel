@@ -671,6 +671,24 @@ off its own thresholds, so `gap-corridor` on the glass meant low flow while
 the same word in the frame meant one option. The findings are the lane's now,
 read from the frame's finding rows. choice-view 32767, choice-flow 8191.
 
+**A frame carries when it was given, because standing is not giving.** Shared
+memory outlives the process, so `fgtm-read-current` answered "current" — with
+every row — for a publisher that stopped hours ago. Witnessed 2026-09-07 on
+this host: four publishers current, `resource.governor` 344 ms and `organs`
+441 ms old, `share.token-pressure` **100 minutes** and `choices` **118
+minutes**, and the choice lane counting all four as takings at 100% flow. The
+age is a fact and it lives beside the read now (`fgtm-snapshot-age`,
+`fgtm-read-age`, `fgtm-read-given-within?`); the BOUND stays the reader's,
+because only the reader knows the cadence it expects. A frame standing but
+silent is the offer HELD — its giver may speak again — never a taking, and
+`glass.frame` reads 50/50 where it read 100. The glass's own
+`fgl-snapshot-fresh?` asks the same door rather than doing the subtraction its
+own way. This is R98 exactly, released a day earlier for the SENSOR lane
+(cadence cells, `fgsr-silent?`, the `_` symbol) and left standing on its
+sibling, the membrane lane; the sensor lane was measured at the same moment and
+is honest — `ear` silent for 79 minutes and marked, every other frame inside
+its cadence. sources 32767.
+
 **The fold leg is counted, so box-or-fold is a choice with two legs.** The live
 page counted every float result that took a pool slot (`fbox`) and nothing at
 all for the leg it was chosen against: a body that ran as this machine's own
