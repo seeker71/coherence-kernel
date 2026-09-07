@@ -848,6 +848,17 @@ off its own thresholds, so `gap-corridor` on the glass meant low flow while
 the same word in the frame meant one option. The findings are the lane's now,
 read from the frame's finding rows. choice-view 32767, choice-flow 8191.
 
+**No parsing is required, because a snapshot crosses as the cell it is.** R111
+moved the membrane to `node_gift_write` of the snapshot cell -- "there is no
+wire and no file" -- and the text grammar it replaced stayed: fourteen doors
+building `sample|id|a|kind|...` and splitting it back, kept alive by one band
+bit that round-tripped a string nothing carried. They are gone. The band proves
+the round trip over the carrier instead, which is the only crossing there is,
+and asks "no content body crosses" of the samples a reader actually holds
+rather than of a wire built only to be searched. What the control lane still
+sends as text (offers, acks) keeps its wire, because that text really crosses.
+membrane 2097151, dual-telemetry 67108863.
+
 **Every lane that takes a frame's rows now asks when it was given.** The
 membrane's `fgtm-read-samples-within` hands back the rows only from a frame
 given inside the caller's own bound, and three lanes were swept for the shape
