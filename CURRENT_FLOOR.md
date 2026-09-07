@@ -744,6 +744,16 @@ off its own thresholds, so `gap-corridor` on the glass meant low flow while
 the same word in the frame meant one option. The findings are the lane's now,
 read from the frame's finding rows. choice-view 32767, choice-flow 8191.
 
+**Every lane that takes a frame's rows now asks when it was given.** The
+membrane's `fgtm-read-samples-within` hands back the rows only from a frame
+given inside the caller's own bound, and three lanes were swept for the shape
+the night the wound was named. `we-glass` labelled an owner's dispatch counters
+`physical-live` from whatever stood — R98's original wound, on the lane where
+it was first seen. The choice lane poured a dead giver's counts into a ledger
+every tick. `native-model-route-readiness` was already honest: it asks the
+OWNER's liveness, its snapshot binding and its heartbeat, not just whether the
+frame parsed. we-glass 2047, sources 32767.
+
 **A frame carries when it was given, because standing is not giving.** Shared
 memory outlives the process, so `fgtm-read-current` answered "current" — with
 every row — for a publisher that stopped hours ago. Witnessed 2026-09-07 on
