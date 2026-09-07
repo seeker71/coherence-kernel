@@ -10605,6 +10605,21 @@ static long long fk_make_nodeid(long long p91, long long l91, long long ty91, lo
 }
 /* give n bytes into gift frame gh under the seqlock; answers the even sequence
  * after the give, or nothing when the handle is dead or the frame does not fit */
+/* A give CLAIMS the sequence, so two writers cannot take the same one.
+ * Until 2026-09-07 a give loaded s0, stored s0+1, copied, stored s0+2. Two
+ * processes could load the same s0 and both close it, and a frame left odd
+ * never repaired -- its next give computed parity from what it had loaded, so
+ * the readers' seqlock retried 4096 times and answered nothing, forever.
+ * Witnessed that morning: one writer of a ten-row frame reads back current,
+ * three concurrent writers leave it malformed after every writer has exited,
+ * and the live resource.governor frame read malformed 30 of 30 with three
+ * glass fleets standing on this host.
+ * Now: acquire by compare-exchange on an EVEN sequence (the odd value IS the
+ * lock), copy, close with the even successor. A writer that dies mid-give
+ * leaves the sequence odd and unmoving; a later writer that watches it not
+ * move for FK_GIFT_GIVE_SPINS closes it on that writer's behalf and takes its
+ * own turn -- a frame heals rather than staying dark. */
+#define FK_GIFT_GIVE_SPINS 200000
 static long long fk_gift_give(long long gh, const char *bytes, long long n) {
     if (!fk_gift_live(gh)) {
         return fk_nothing;
@@ -10615,8 +10630,29 @@ static long long fk_gift_give(long long gh, const char *bytes, long long n) {
     if (n > fk_gift_size[gh] - 16) {
         return fk_nothing;
     }
-    long long s0 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
-    __atomic_store_n(gseq, s0 + 1, __ATOMIC_RELEASE);
+    long long s0;
+    long long stuck = -1;
+    long long spins = 0;
+    for (;;) {
+        s0 = __atomic_load_n(gseq, __ATOMIC_ACQUIRE);
+        if ((s0 & 1) == 0) {
+            long long want = s0;
+            if (__atomic_compare_exchange_n(gseq, &want, s0 + 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                break;
+            }
+            stuck = -1;
+            spins = 0;
+            continue;
+        }
+        if (s0 != stuck) { stuck = s0; spins = 0; }
+        spins = spins + 1;
+        if (spins > FK_GIFT_GIVE_SPINS) {
+            long long want = s0;
+            __atomic_compare_exchange_n(gseq, &want, s0 + 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+            stuck = -1;
+            spins = 0;
+        }
+    }
     { long long k = 0; while (k < n) { gpay[k] = bytes[k]; k = k + 1; } }
     __atomic_store_n(glen, n, __ATOMIC_RELEASE);
     __atomic_store_n(gseq, s0 + 2, __ATOMIC_RELEASE);

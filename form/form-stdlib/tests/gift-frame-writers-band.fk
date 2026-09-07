@@ -1,0 +1,80 @@
+; gift-frame-writers-band.fk — one frame, three writers, and a reader that
+; asks for the whole thing.
+;
+; A gift frame is a 16-byte seqlock header and a payload. Until 2026-09-07 a
+; give LOADED the sequence, stored sequence+1, copied, stored sequence+2 — so
+; two processes could load the same sequence, and a frame whose writer died
+; between the two stores stayed odd forever, because the next give computed
+; its parity from what it had loaded. A reader retries 4096 times and then
+; answers nothing, so the frame went dark and never came back. Witnessed that
+; morning on this host: the live resource.governor frame read malformed 30 of
+; 30 with three glass fleets standing, and three of six sensor lanes answered
+; zero rows to an outside reader.
+;
+; A give CLAIMS the sequence now: compare-exchange on an EVEN value, the odd
+; value IS the lock, and the close stores the even successor. A writer that
+; died mid-give leaves the sequence odd and unmoving, and the next writer that
+; watches it not move closes it on that writer's behalf, so a frame heals.
+;
+; This band spawns three writers of one frame, each with its own letter, and
+; reads while they run and after they leave. Every read must be whole: exactly
+; the payload one writer wrote, never a mix of two and never nothing. Measured
+; on the seed before the claim: 150 of 150 reads answered nothing, during and
+; after. Bits are powers of two so a partial pass is legible.
+;
+; Expected: 255
+; preludes: form/form-stdlib/form-glass-gift-frame.bml
+
+(do
+    (defn gfwb-bit (ok bit) (if ok bit 0))
+    (defn gfwb-rep (c n acc) (if (eq n 0) acc (gfwb-rep c (sub n 1) (str_concat acc c))))
+    (defn gfwb-uniform? (s i first)
+        (if (ge i (str_len s)) 1
+            (if (eq (str_byte_at s i) first) (gfwb-uniform? s (add i 1) first) 0)))
+    ; one read: whole (the payload exactly as one writer wrote it), torn, short, or nothing
+    (defn gfwb-read (name)
+        (do (let h (ggf-receive name))
+            (let v (ggf-taken h))
+            (let r (ggf-release h))
+            (if (nothing? v) "nothing"
+                (if (not (eq (str_len v) 20000)) "short"
+                    (if (eq (gfwb-uniform? v 0 (str_byte_at v 0)) 1) "whole" "torn")))))
+    (defn gfwb-reads (name n whole other)
+        (if (eq n 0) (list whole other)
+            (do (let k (gfwb-read name))
+                (if (str_eq k "whole")
+                    (gfwb-reads name (sub n 1) (add whole 1) other)
+                    (gfwb-reads name (sub n 1) whole (add other 1))))))
+    (defn gfwb-wait-all (pids)
+        (if (eq (len pids) 0) 0 (do (let w (host_wait (head pids))) (gfwb-wait-all (tail pids)))))
+
+    (let name "gift-frame-writers-band.frame")
+    (let a (host_spawn_quiet (list "./fkwu" "form/form-stdlib/tests/gift-frame-writers-a.fk")))
+    (let b (host_spawn_quiet (list "./fkwu" "form/form-stdlib/tests/gift-frame-writers-b.fk")))
+    (let c (host_spawn_quiet (list "./fkwu" "form/form-stdlib/tests/gift-frame-writers-c.fk")))
+    (let settle (host_sleep_ms 1200))
+    (let during (gfwb-reads name 60 0 0))
+    (let waited (gfwb-wait-all (list a b c)))
+    (let after (gfwb-reads name 60 0 0))
+    (let handle (ggf-receive name))
+    (let seq (ggf-seq handle))
+    (let last (ggf-taken handle))
+    (let released (ggf-release handle))
+
+    (let b0 (gfwb-bit (and (gt a 0) (and (gt b 0) (gt c 0))) 1))
+    ; every read while three writers hammer the frame is whole
+    (let b1 (gfwb-bit (eq (nth during 0) 60) 2))
+    (let b2 (gfwb-bit (eq (nth during 1) 0) 4))
+    ; and every read after they have all left
+    (let b3 (gfwb-bit (eq (nth after 0) 60) 8))
+    (let b4 (gfwb-bit (eq (nth after 1) 0) 16))
+    ; the sequence settles EVEN: no writer's claim is left open
+    (let b5 (gfwb-bit (and (ge seq 2) (eq (mod seq 2) 0)) 32))
+    ; the frame still answers its whole payload after everything
+    (let b6 (gfwb-bit (and (not (nothing? last)) (eq (str_len last) 20000)) 64))
+    (let b7 (gfwb-bit (and (not (nothing? last)) (eq (gfwb-uniform? last 0 (str_byte_at last 0)) 1)) 128))
+
+    (print (list "gift-frame-writers" "during-whole" (nth during 0) "during-other" (nth during 1)
+        "after-whole" (nth after 0) "after-other" (nth after 1) "seq" seq
+        "last-len" (if (nothing? last) -1 (str_len last))))
+    (add b0 (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 b7))))))))
