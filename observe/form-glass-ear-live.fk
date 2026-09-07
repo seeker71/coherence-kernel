@@ -22,11 +22,50 @@
 ; goes it stops them at their own door and lets them end. The tongues it offers
 ; are the marker's own text, whisper codes separated by spaces (blank: en pt fa id).
 ;
-; A lane that has gone is re-stood. The live lane writes a quiet frame at least
-; once a second while it lives, so a spool that has not grown in four seconds
-; while the ear is wanted is a lane that ended (its own deadline, a crash, or
-; the "done" that closes the tongue lane with it) — the sensor lets both go and
-; stands them again rather than giving an empty room as if it were a silent one.
+; ── HOW A LANE IS BORN, AND WHY IT IS BORN THIS WAY ────────────────────────
+;
+; host_spawn_quiet sends the child's stdout and stderr to /dev/null and hands
+; it the PARENT'S OWN STDIN. Both lanes read their first line from stdin, so a
+; lane born from a sensor whose stdin is a terminal sits at that read forever:
+; 0.0% cpu, no model opened, no mic, not one byte of spool — and every axis
+; above then reads awake, level 0, silent, which is a true measurement of a lane
+; that never started and a lie about the room. Witnessed on this Mac: a lane
+; given a stdin that neither delivers nor closes wrote nothing in thirty
+; seconds; the same lane given /dev/null was born in two.
+;
+; So a lane is stood through one `sh -c` that redirects before it execs:
+;
+;     exec ./fkwu <cell> </dev/null >> <log> 2>&1
+;
+; `exec` keeps the pid the sensor holds pointing at the lane itself, so a kill
+; still reaches it; `</dev/null` ends the birth wait at once; and the log is the
+; lane's own voice — its warnings, its open line, its last error, the line it
+; prints as it ends. The sensor appends a birth mark to that log before each
+; stand, so the log reads as a chronicle of every life the lane has had, and
+; hands the newest line back to the glass as ear.voice. A lane that dies now
+; says what it died of.
+;
+; ── WHEN A LANE COUNTS AS GONE ─────────────────────────────────────────────
+;
+; Two clocks and one probe, because one of them alone was wrong three ways.
+; The live lane writes a quiet frame at least once a second while it lives, so
+; silence in that stamp past fge-patience is a lane that ended. But that stamp
+; belongs to whichever lane wrote it, and it does NOT reset when a lane is
+; stood: a sensor reading the dead lane's last stamp declares the newborn gone
+; on the next tick and kills it before it can compile — a re-stand spin at the
+; tick rate that no lane can ever escape. So the clock is the LATER of that
+; stamp and the lane's own birth, and a lane that has not yet spoken since its
+; birth is measured against fge-birth-patience instead: a whisper pass opens a
+; model, and a model whose weights are not in the page cache takes far longer
+; than a living lane's silence is allowed to.
+;
+; The probe closes what neither clock can see. The tongue lane is legitimately
+; silent for minutes at a time — it speaks only when a line closes — so it has
+; no clock at all, and a live lane that exits in its first half second would
+; otherwise wait out the whole birth patience. Once every fge-probe-ms the
+; sensor asks the host whether each pid still answers (kill -0, one fork, no
+; signal delivered) and reads each log's tail. That is the only fork in this
+; loop and it is off the give path.
 ;
 ; preflight-exec: forbidden
 ; preludes: form/form-stdlib/form-glass-sensor-rows.bml form/form-stdlib/ear-axes.bml form/form-stdlib/hearth.bml form/form-stdlib/spool-bell-transport.fk form/form-stdlib/line-grammar.fk
@@ -35,7 +74,18 @@
     (defn fge-spool () ".hearth/ear.spool")
     (defn fge-wanted () ".hearth/ear.wanted")
     (defn fge-stop () ".hearth/ear.spool.stop")
+    (defn fge-log-live () ".hearth/ear.lane.live.log")
+    (defn fge-log-tongue () ".hearth/ear.lane.tongue.log")
+    ; A living lane's silence is five of the live lane's own beats. A newborn's is far
+    ; wider because birth is not silence: measured on this Mac, the live lane reaches its
+    ; first frame in about two seconds with the whisper weights in the page cache and had
+    ; written nothing at fourteen without them, and the tongue lane's own log reports
+    ; "open ... after 20449 ms" on a cold dense model against 2032 ms on a warm one. A
+    ; patience under that kills a lane in the middle of opening, forever.
     (defn fge-patience () 4000)
+    (defn fge-birth-patience () 120000)
+    (defn fge-probe-ms () 2000)
+    (defn fge-tail-bytes () 512)
     ; the frames the two lanes wrote since the last watermark; the newest of each kind is the point
     (defn fge-drain (mark live heard said)
         (do (let sz (file_size (fge-spool)))
@@ -48,41 +98,98 @@
     (defn fge-drain-newest (mark th n) (list (add mark th) (head n) (nth n 1) (nth n 2)))
     (defn fge-wanted-text () (if (lt (file_size (fge-wanted)) 0) "" (trim (ea-text (read_file (fge-wanted))))))
     (defn fge-awake? () (ge (file_size (fge-wanted)) 0))
-    ; the two lanes, stood up once while the ear is wanted and let go when it sleeps
-    (defn fge-stand (pid cell) (if (gt pid 0) pid (host_spawn_quiet (list "./fkwu" cell))))
-    (defn fge-lanes-up (livePid tonguePid) (list (fge-stand livePid "observe/ear-live-native.fk") (fge-stand tonguePid "observe/ear-tongue-native.fk")))
+
+    ; ── the lanes: stood with a stdin the sensor owns and a log that is their voice ──
+    (defn fge-cmd (cell log) (ea-cat (list "exec ./fkwu " cell " </dev/null >> " log " 2>&1")))
+    (defn fge-mark-birth (log) (sbt-append log (ea-cat (list "--- stood at " (int_to_str (now_unix_ms)) " ---" (byte_to_str 10)))))
+    (defn fge-stand (pid cell log)
+        (if (gt pid 0) pid
+            (do (let b (fge-mark-birth log))
+                (host_spawn_quiet (list "sh" "-c" (fge-cmd cell log))))))
+    (defn fge-lanes-up (livePid tonguePid)
+        (list (fge-stand livePid "observe/ear-live-native.fk" (fge-log-live))
+              (fge-stand tonguePid "observe/ear-tongue-native.fk" (fge-log-tongue))))
     (defn fge-stop-one (pid) (if (gt pid 0) (do (let k (host_kill pid)) (let w (host_wait pid)) 0) 0))
     (defn fge-lanes-down (livePid tonguePid) (do (let a (fge-stop-one livePid)) (let b (fge-stop-one tonguePid)) (list 0 0)))
-    ; the lanes wait at these bells, and end at this marker; the door that used to stand them made
-    ; both, so the sensor makes the bells on waking and clears the marker the last sleep left behind
-    (defn fge-bells () (host-exec "[ -p .hearth/ear.spool.bell ] || mkfifo .hearth/ear.spool.bell; [ -p .hearth/ear.spool.seg.bell ] || mkfifo .hearth/ear.spool.seg.bell; echo ok" ""))
+
+    ; The lanes wait at these bells, and end at this marker. A bell is a fifo, and
+    ; `mkfifo` on a path that already holds a REGULAR file fails without changing
+    ; anything — which is exactly what a ring into an absent bell leaves behind
+    ; (`printf x > bell` creates a one-byte file). Both bells were found in that
+    ; state. So a path that is not a fifo is removed before the fifo is made.
+    (defn fge-bell-cmd (p) (ea-cat (list "[ -p " p " ] || { rm -f " p "; mkfifo " p "; }; ")))
+    (defn fge-bells () (host-exec (ea-cat (list (fge-bell-cmd ".hearth/ear.spool.bell") (fge-bell-cmd ".hearth/ear.spool.seg.bell") "echo ok")) ""))
     (defn fge-open (livePid) (if (gt livePid 0) 0 (do (let b (fge-bells)) (let s (fs-remove-file (fge-stop))) 0)))
     (defn fge-close (livePid) (if (le livePid 0) 0 (do (let w (write_file_text (fge-stop) "sleep")) 0)))
-    ; A lane that ended. The spool is the WRONG clock here: the tongue lane keeps writing said
-    ; frames after the live lane is gone, so a growing spool can sit over a dead mic. The live
-    ; lane's own frames carry the clock — it writes a quiet frame at least once a second while it
-    ; lives — so silence past fge-patience in THAT stamp is the lane ending, and nothing else is.
-    (defn fge-heard-at (live lastGrew) (if (eq (str_len live) 0) lastGrew (ea-int live "t")))
-    (defn fge-gone? (awake livePid live lastGrew now) (if (or (eq awake 0) (le livePid 0)) 0 (if (gt (sub now (fge-heard-at live lastGrew)) (fge-patience)) 1 0)))
-    ; a lane just stood: its clock starts now, not at whatever the last sleep left behind
-    (defn fge-grew (pid live lastGrew now) (if (le pid 0) now (fge-heard-at live lastGrew)))
+
+    ; ── the watch: does each pid still answer, and what did each lane last say ──
+    (defn fge-probe-part (pid mark) (if (le pid 0) "" (ea-cat (list "kill -0 " (int_to_str pid) " 2>/dev/null && printf " mark "; "))))
+    (defn fge-alive-cmd (a b) (str_concat (fge-probe-part a "L") (str_concat (fge-probe-part b "T") "echo")))
+    (defn fge-alive (a b) (if (and (le a 0) (le b 0)) "" (ea-text (host-exec (fge-alive-cmd a b) ""))))
+    (defn fge-tail-of (path sz) (do (let from (if (gt sz (fge-tail-bytes)) (sub sz (fge-tail-bytes)) 0))
+                                    (ea-text (read_file_slice path from (sub sz from)))))
+    (defn fge-tail (path) (do (let sz (file_size path)) (if (le sz 0) "" (fge-tail-of path sz))))
+    (defn fge-last-go (xs acc) (if (eq (len xs) 0) acc (fge-last-go (tail xs) (fge-last-keep (trim (head xs)) acc))))
+    (defn fge-last-keep (l acc) (if (eq (str_len l) 0) acc (if (eq (str_byte_at l 0) 45) acc l)))
+    (defn fge-last-line (s) (fge-last-go (split-on s (byte_to_str 10)) ""))
+    (defn fge-voice-of (a b)
+        (if (eq (str_len a) 0) (if (eq (str_len b) 0) "" (str_concat "tongue: " b))
+            (if (eq (str_len b) 0) (str_concat "live: " a) (ea-cat (list "live: " a "   ·   tongue: " b)))))
+    (defn fge-voice () (fge-voice-of (fge-last-line (fge-tail (fge-log-live))) (fge-last-line (fge-tail (fge-log-tongue)))))
+    (defn fge-watch (at alive voice) (list at alive voice))
+    (defn fge-watch-at (w) (head w))
+    (defn fge-watch-alive (w) (nth w 1))
+    (defn fge-watch-voice (w) (nth w 2))
+    (defn fge-watch-next (w livePid tonguePid now)
+        (if (lt (sub now (fge-watch-at w)) (fge-probe-ms)) w
+            (fge-watch now (fge-alive livePid tonguePid) (fge-voice))))
+
+    ; ── gone: the probe first, then the later of the frame stamp and the birth ──
+    (defn fge-dead? (watch pid mark)
+        (if (le pid 0) 0
+            (if (eq (str_len (fge-watch-alive watch)) 0) 0
+                (if (ge (str_find (fge-watch-alive watch) mark 0) 0) 0 1))))
+    ; The live lane's pulse is the newest frame IT wrote, and it writes two kinds: the
+    ; growing line (live, quiet, born, done) and the line when it closed (heard). Only the
+    ; first lands in the live slot — a commit is a commit — so a lane busy closing line after
+    ; line advanced the heard stamp alone and read as silent on the live one. The pulse is the
+    ; later of the two. The said stamp is NOT in it: that frame belongs to the tongue lane,
+    ; which the probe watches instead, and taking it here would let one lane vouch for another.
+    (defn fge-stamp (f) (if (eq (str_len f) 0) 0 (ea-int f "t")))
+    (defn fge-frame-t (live heard) (do (let a (fge-stamp live)) (let b (fge-stamp heard)) (if (gt a b) a b)))
+    (defn fge-mute? (ft born now)
+        (if (gt ft born) (if (gt (sub now ft) (fge-patience)) 1 0)
+            (if (gt (sub now born) (fge-birth-patience)) 1 0)))
+    (defn fge-gone? (awake livePid tonguePid live heard born now watch)
+        (if (or (eq awake 0) (le livePid 0)) 0
+            (if (eq (fge-dead? watch livePid "L") 1) 1
+                (if (eq (fge-dead? watch tonguePid "T") 1) 1
+                    (fge-mute? (fge-frame-t live heard) born now)))))
     (defn fge-pids (awake gone livePid tonguePid)
         (if (eq awake 0) (fge-lanes-down livePid tonguePid)
             (if (eq gone 1) (fge-lanes-up 0 0) (fge-lanes-up livePid tonguePid))))
     (defn fge-restand (gone livePid tonguePid) (if (eq gone 1) (fge-lanes-down livePid tonguePid) (list livePid tonguePid)))
-    (defn fge-step (mark live heard said livePid tonguePid sense lastGrew)
+    ; a lane just stood: its clock starts now, and the standing is counted
+    (defn fge-born-next (releasedLive born now) (if (le releasedLive 0) now born))
+    (defn fge-stands-next (awake releasedLive stands) (if (and (eq awake 1) (le releasedLive 0)) (add stands 1) stands))
+
+    (defn fge-step (mark live heard said livePid tonguePid sense born stands watch)
         (do (let awake (fge-awake?))
             (let now (now_unix_ms))
-            (let gone (fge-gone? awake livePid live lastGrew now))
+            (let w1 (fge-watch-next watch livePid tonguePid now))
+            (let gone (fge-gone? awake livePid tonguePid live heard born now w1))
             (let closed (if (eq awake 1) (if (eq gone 1) (fge-close livePid) 0) (fge-close livePid)))
             (let released (fge-restand gone livePid tonguePid))
             (let opened (if (eq awake 1) (fge-open (head released)) 0))
             (let pids (fge-pids awake gone (head released) (nth released 1)))
+            (let born1 (fge-born-next (head released) born now))
+            (let stands1 (fge-stands-next awake (head released) stands))
+            (let lanes (ea-lanes (head pids) (nth pids 1) (sub now born1) stands1 (fge-watch-voice w1)))
             (let d (if (eq awake 1) (fge-drain mark live heard said) (list mark live heard said)))
             (let next (if (eq awake 1) (ea-sense-step sense (nth d 1) (nth d 2) (nth d 3) awake) sense))
-            (let rows (if (eq awake 1) (append (ea-rows next (nth d 1) (nth d 2) (nth d 3) (fge-wanted-text) 1 now) (ea-transcript-rows (nth d 1) (nth d 2) (nth d 3) (fge-wanted-text))) (ea-asleep-rows)))
+            (let rows (if (eq awake 1) (append (ea-rows next (nth d 1) (nth d 2) (nth d 3) (fge-wanted-text) 1 now lanes) (ea-transcript-rows (nth d 1) (nth d 2) (nth d 3) (fge-wanted-text))) (ea-asleep-rows lanes)))
             (let given (fgsr-give "ear" now (fgo-observe-rows rows now 0)))
             (let rested (host_sleep_ms (if (eq awake 1) 100 500)))
-            (fge-step (head d) (nth d 1) (nth d 2) (nth d 3) (head pids) (nth pids 1) next (fge-grew (head released) (nth d 1) lastGrew now))))
+            (fge-step (head d) (nth d 1) (nth d 2) (nth d 3) (head pids) (nth pids 1) next born1 stands1 w1)))
     ; the tables are walked once, here, before the first give
-    (fge-step 0 "" "" "" 0 0 (ea-sense-born) (now_unix_ms)))
+    (fge-step 0 "" "" "" 0 0 (ea-sense-born) (now_unix_ms) 0 (fge-watch 0 "" "")))
