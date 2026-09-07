@@ -60,7 +60,6 @@ section [form.bml] {
         def fglat-metric-max(rows, held) = if eq(len(rows), 0) then held else if gt(fgo-int-value(head(rows)), held) then fglat-metric-max(tail(rows), fgo-int-value(head(rows))) else fglat-metric-max(tail(rows), held);
         def fglat-metric-sum(rows, held) = if eq(len(rows), 0) then held else fglat-metric-sum(tail(rows), add(held, fgo-int-value(head(rows))));
         def fglat-find-sample-id(rows, id) = if eq(len(rows), 0) then list() else if str_eq(fgtm-sample-id(head(rows)), id) then head(rows) else fglat-find-sample-id(tail(rows), id);
-        def fglat-sample-bytes-text(sample) = if eq(len(sample), 0) then "?" else if eq(fgtm-field-present?(fgtm-sample-bytes(sample)), 1) then fgd-format-bytes(fgtm-field-value(fgtm-sample-bytes(sample))) else "?";
         def fglat-token-stall-max-ms() = 5000;
         def fglat-token-stall-age-ms(sample, epoch) = if eq(fgtm-field-present?(fgtm-sample-write-epoch(sample)), 0) then -1 else if ge(epoch, fgtm-field-value(fgtm-sample-write-epoch(sample))) then sub(epoch, fgtm-field-value(fgtm-sample-write-epoch(sample))) else 0;
         def fglat-token-stall-one(token, epoch) {
@@ -69,7 +68,7 @@ section [form.bml] {
         }
         def fglat-token-stall-text(samples, epoch) {
             let tokens = fglui-owner-token-fallback-samples(samples);
-            if eq(len(tokens), 0) then "T=none" else fglat-token-stall-one(head(tokens), epoch);
+            if eq(len(tokens), 0) then str_concat("T=", fglat-door("token")) else fglat-token-stall-one(head(tokens), epoch);
         }
         def fglat-metric-value(metric) = if eq(fglat-metric-live?(metric), 0) then "---" else if str_eq(fgo-value-kind(metric), "text") then fglat-token-value(fgo-text-value(metric)) else if and(eq(fgo-int-value(metric), 0), eq(fgd-semantic-zero-state?(fgo-lifecycle(metric)), 1)) then fglat-token-value(fglat-compact-zero(fgo-lifecycle(metric))) else if str_eq(fgo-unit(metric), "bytes") then fglat-token-value(fgd-format-bytes(fgo-int-value(metric))) else fglat-token-value(fgd-format-count(fgo-int-value(metric)));
         def fglat-metric-token(metric) = str_concat(fglat-kind-symbol(fgo-domain(metric)), str_concat(fgd-truth-symbol(fgo-evidence(metric)), fglat-metric-value(metric)));
@@ -311,15 +310,37 @@ section [form.bml] {
         def fglat-pipeline-line(metrics, samples, observations) = fglat-pipeline-line-in(fgd-metric-index(metrics), samples, observations);
         def fglat-pipeline-line-in(index, samples, observations) = if eq(fglui-token-flow-present?(samples), 1) then fglat-token-pipeline-line(samples) else fglat-aggregate-pipeline-line-in(index, samples, observations);
 
+        // these free-percent thresholds mirror form-resource-host-pressure's FRGHPWarningFreePercent/FRGHPCriticalFreePercent; they are held here so the render path never loads the governor chain, and fglat-level-number is the same scale the governor publishes
         def fglat-pressure-level(free) = if lt(free, 0) then "gap" else if le(free, 5) then "crit" else if le(free, 10) then "warn" else "ok";
+        def fglat-level-number(level) = if str_eq(level, "crit") then 2 else if str_eq(level, "warn") then 1 else if str_eq(level, "ok") then 0 else -1;
+        // a field with no reading names who owes it: every "?" on this glass carries the door behind it.
+        // host/process/owner are the sensor names observe/form-glass-sensors-live.fk gives under; dual-liveness
+        // and owner-pid are the two steps of the owner-liveness publication; token, metal_live and governor
+        // name the sample kind, the word door and the publisher a reading would come from.
+        def fglat-door(door) = str_concat("?", door);
+        // the metric index is keyed by id alone and two domains publish "allocated-bytes"; a row read by domain says which device answered
+        def fglat-domain-metric(rows, domain, id) = if eq(len(rows), 0) then list() else if and(str_eq(fgo-domain(head(rows)), domain), str_eq(fgo-id(head(rows)), id)) then head(rows) else fglat-domain-metric(tail(rows), domain, id);
+        // four distinct states used to read "absent": the owner sensor has not given, no liveness publisher stands, the liveness row carries no pid, the owner pid is gone
+        def fglat-owner-absent-text(present) = if eq(fglat-metric-live?(present), 0) then fglat-door("owner") else if not(eq(fgo-int-value(present), 0)) then fglat-door("owner-rss") else if str_eq(fgo-lifecycle(present), "released") then "dead" else if str_eq(fgo-source(present), "owner-liveness handle") then fglat-door("owner-pid") else fglat-door("dual-liveness");
         def fglat-owner-doing-text(metrics) = fglat-owner-doing-text-in(fgd-metric-index(metrics));
         def fglat-owner-doing-text-in(index) {
             let present = fgd-index-find(index, "model-owner-present");
             let rss = fgd-index-find(index, "model-owner-rss");
             let cpu = fgd-index-find(index, "model-owner-cpu");
-            if eq(fglat-metric-current?(rss), 1) then fgd-cat(list("owner=", fgd-format-bytes(fgo-int-value(rss)), " cpu=", fglat-cpu-text(cpu))) else if and(eq(fglat-metric-current?(present), 1), eq(fgo-int-value(present), 0)) then if str_eq(fgo-lifecycle(present), "released") then "owner=dead" else "owner=absent" else "owner=?";
+            if eq(fglat-metric-current?(rss), 1) then fgd-cat(list("owner=", fgd-format-bytes(fgo-int-value(rss)), " cpu=", fglat-cpu-text(cpu))) else str_concat("owner=", fglat-owner-absent-text(present));
         }
-        def fglat-disk-rate-text(disk, tps) = if eq(fglat-metric-current?(disk), 1) then if str_eq(fgo-unit(disk), "centi-MB/s") then fgd-cat(list(int_to_str(div(fgo-int-value(disk), 100)), ".", if lt(mod(fgo-int-value(disk), 100), 10) then "0" else "", int_to_str(mod(fgo-int-value(disk), 100)), "MB/s")) else if str_eq(fgo-unit(disk), "MB/s") then str_concat(int_to_str(fgo-int-value(disk)), "MB/s") else "?" else if eq(fglat-metric-current?(tps), 1) then str_concat(int_to_str(fgo-int-value(tps)), "tps") else "?";
+        // the owner's device bytes when an owner stands; otherwise this Glass process's own Metal ledger, scoped by name so the two are never confused
+        def fglat-owner-gpu-text(metal, metrics) {
+            let self = fglat-domain-metric(metrics, "metal", "allocated-bytes");
+            if and(not(eq(len(metal), 0)), eq(fgtm-field-present?(fgtm-sample-bytes(metal)), 1)) then str_concat(fgd-format-bytes(fgtm-field-value(fgtm-sample-bytes(metal))), "@owner") else if eq(fglat-metric-current?(self), 1) then str_concat(fgd-format-bytes(fgo-int-value(self)), "@glass") else if eq(len(self), 0) then fglat-door("machine") else fglat-door("metal_live");
+        }
+        // the measured level over the governor's own critical level, and where it was read: the published frame first, then the same vm_stat door the publisher itself samples
+        def fglat-gov-level-text(level, critical, source) = fgd-cat(list(int_to_str(level), "/", int_to_str(critical), source));
+        def fglat-governor-text(pressure, level) {
+            let local = fglat-level-number(level);
+            if and(not(eq(len(pressure), 0)), and(eq(fgtm-field-present?(fgtm-sample-bytes(pressure)), 1), eq(fgtm-field-present?(fgtm-sample-capacity(pressure)), 1))) then fglat-gov-level-text(fgtm-field-value(fgtm-sample-bytes(pressure)), fgtm-field-value(fgtm-sample-capacity(pressure)), "@governor") else if ge(local, 0) then str_concat(int_to_str(local), "@vm_stat") else fglat-door("governor");
+        }
+        def fglat-disk-rate-text(disk, tps) = if eq(fglat-metric-current?(disk), 1) then if str_eq(fgo-unit(disk), "centi-MB/s") then fgd-cat(list(int_to_str(div(fgo-int-value(disk), 100)), ".", if lt(mod(fgo-int-value(disk), 100), 10) then "0" else "", int_to_str(mod(fgo-int-value(disk), 100)), "MB/s")) else if str_eq(fgo-unit(disk), "MB/s") then str_concat(int_to_str(fgo-int-value(disk)), "MB/s") else fglat-door("host") else if eq(fglat-metric-current?(tps), 1) then str_concat(int_to_str(fgo-int-value(tps)), "tps") else fglat-door("host");
         def fglat-doing-line(metrics, samples, epoch, width) = fglat-doing-line-in(fgd-metric-index(fglat-current-metrics(metrics)), metrics, samples, epoch, width);
         def fglat-doing-line-in(index, metrics, samples, epoch, width) {
             let cpus = fglat-process-suffix-metrics(fglat-current-metrics(metrics), "-cpu");
@@ -333,9 +354,9 @@ section [form.bml] {
             let load = fgd-index-find(index, "load-1");
             let metal = fglat-find-sample-id(samples, "memory.owner.metal-current-allocated");
             let mapped = fglat-find-sample-id(samples, "mapped.qwen3.8-flash-next");
-            let pinText = if eq(fglat-metric-current?(pinDelta), 1) then if eq(fgo-int-value(pinDelta), 0) then "0" else str_concat("+", fgd-format-count(fgo-int-value(pinDelta))) else if eq(fglat-metric-current?(pageins), 1) then fgd-format-count(fgo-int-value(pageins)) else "?";
+            let pinText = if eq(fglat-metric-current?(pinDelta), 1) then if eq(fgo-int-value(pinDelta), 0) then "0" else str_concat("+", fgd-format-count(fgo-int-value(pinDelta))) else if eq(fglat-metric-current?(pageins), 1) then fgd-format-count(fgo-int-value(pageins)) else fglat-door("host");
             let loadText = if eq(fglat-metric-current?(load), 1) then fgd-cat(list(" load=", int_to_str(div(fgo-int-value(load), 10)), ".", int_to_str(mod(fgo-int-value(load), 10)))) else "";
-            fgd-segment-line(fgd-cat(list("DOING dsk=", fglat-disk-rate-text(disk, tps), " ", fglat-token-stall-text(samples, epoch), " n=", int_to_str(len(rsses)), " cpuT=", if eq(len(cpus), 0) then "?" else str_concat(fgd-format-count(div(maxCpu, 1000)), "ms"), " rss=", if eq(len(rsses), 0) then "?" else fgd-format-bytes(sumRss), " pin=", pinText, loadText, " ", fglat-owner-doing-text-in(index), " ", fglat-sample-bytes-text(metal))), width, fgd-style-for-plane("cpu", 255, 0), "atlas.doing", list("atlas", "process", "health", "flow"), "physical-live");
+            fgd-segment-line(fgd-cat(list("DOING dsk=", fglat-disk-rate-text(disk, tps), " ", fglat-token-stall-text(samples, epoch), " n=", int_to_str(len(rsses)), " cpuT=", if eq(len(cpus), 0) then fglat-door("process") else str_concat(fgd-format-count(div(maxCpu, 1000)), "ms"), " rss=", if eq(len(rsses), 0) then fglat-door("process") else fgd-format-bytes(sumRss), " pin=", pinText, loadText, " ", fglat-owner-doing-text-in(index), " gpu=", fglat-owner-gpu-text(metal, metrics))), width, fgd-style-for-plane("cpu", 255, if gt(maxCpu, 200) then 1 else 0), "atlas.doing", list("atlas", "process", "health", "flow"), "physical-live");
         }
         def fglat-pressure-line(metrics, samples, history, width) = fglat-pressure-line-in(fgd-metric-index(metrics), samples, history, width);
         def fglat-pressure-line-in(index, samples, history, width) {
@@ -347,11 +368,12 @@ section [form.bml] {
             let fileBacked = fgd-index-find(index, "file-backed-pages");
             let pressure = fglat-find-sample-kind(samples, "pressure");
             let level = fglat-pressure-level(free);
-            let used = if lt(free, 0) then "?" else int_to_str(sub(100, free));
-            let rssText = if eq(fglat-metric-current?(rss), 1) then fgd-format-bytes(fgo-int-value(rss)) else "?";
-            let cpuText = fglat-cpu-text(cpu);
-            let gov = if eq(len(pressure), 0) then "?" else if eq(fgtm-field-present?(fgtm-sample-capacity(pressure)), 1) then fgd-format-count(fgtm-field-value(fgtm-sample-capacity(pressure))) else fgtm-sample-purpose(pressure);
-            fgd-segment-line(fgd-cat(list("PRESS free=", if lt(free, 0) then "?" else str_concat(int_to_str(free), "%"), " used=", used, "% ", level, " file=", if eq(fglat-metric-current?(fileBacked), 1) then fgd-format-count(fgo-int-value(fileBacked)) else "?", " cmp=", if eq(fglat-metric-current?(compressor), 1) then fgd-format-count(fgo-int-value(compressor)) else "?", " rss=", rssText, " cpu=", cpuText, " gov=", gov, " g", fglat-phase-move(history, 10), "w", fglat-phase-move(history, 11), "i", fglat-phase-move(history, 12))), width, fgd-style-for-plane("unified", if str_eq(level, "ok") then 220 else 255, if or(str_eq(level, "warn"), str_eq(level, "crit")) then 1 else 0), "atlas.pressure", list("atlas", "pressure", "memory", "health"), if lt(free, 0) then "unavailable" else "physical-live");
+            let used = if lt(free, 0) then fglat-door("host") else int_to_str(sub(100, free));
+            let present = fgd-index-find(index, "model-owner-present");
+            let rssText = if eq(fglat-metric-current?(rss), 1) then fgd-format-bytes(fgo-int-value(rss)) else fglat-owner-absent-text(present);
+            let cpuText = if eq(fglat-metric-current?(cpu), 1) then fglat-cpu-text(cpu) else fglat-owner-absent-text(present);
+            let gov = fglat-governor-text(pressure, level);
+            fgd-segment-line(fgd-cat(list("PRESS free=", if lt(free, 0) then fglat-door("host") else str_concat(int_to_str(free), "%"), " used=", used, "% ", level, " file=", if eq(fglat-metric-current?(fileBacked), 1) then fgd-format-count(fgo-int-value(fileBacked)) else fglat-door("host"), " cmp=", if eq(fglat-metric-current?(compressor), 1) then fgd-format-count(fgo-int-value(compressor)) else fglat-door("host"), " rss=", rssText, " cpu=", cpuText, " gov=", gov, " g", fglat-phase-move(history, 10), "w", fglat-phase-move(history, 11), "i", fglat-phase-move(history, 12))), width, fgd-style-for-plane("unified", if str_eq(level, "ok") then 220 else 255, if or(str_eq(level, "warn"), str_eq(level, "crit")) then 1 else 0), "atlas.pressure", list("atlas", "pressure", "memory", "health"), if lt(free, 0) then "unavailable" else "physical-live");
         }
         // "n=4 next=<one door>" leaves three of the four unnamed and nothing
         // on the glass to reach them by: the right column renders present rows
