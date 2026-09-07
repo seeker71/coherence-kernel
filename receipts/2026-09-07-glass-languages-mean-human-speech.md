@@ -25,6 +25,10 @@ The read-only transcript door reported rows=0 and ear=asleep. No live utterance
 is inferred from that absence. The effectful ear sensor is marked execution-
 forbidden in preflight; its pure producer/projection functions are banded,
 and live admission is observed separately from those fixture verdicts.
+The live remote offer initially refused `en+pt`: the old label validator did
+not carry a plus-separated language selection. A language-specific validator
+and codec round-trip assertion now cover that same door, not only the direct
+keyboard's pure controller path.
 
 The surprise was that responsive controls had made the wrong observation easier
 to reach. The useful correction removes that work from every live frame and
