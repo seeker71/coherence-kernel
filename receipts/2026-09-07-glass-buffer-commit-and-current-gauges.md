@@ -36,7 +36,17 @@ warm max 9 ms. This is not a measurement of the terminal emulator's paint time.
 
 The discomfort became useful when the incomplete commit proof was restored,
 not renamed. Actual Terminal-window inspection was denied by the app-control
-surface, so visual flicker is not claimed eliminated. A later machine-frame
-reading was absent; hearth lanes remain unobserved. No all-organs-healthy or
-voice-home claim follows from these renderer repairs. Next observation is the
-updated binary in the viewing carrier, including its machine publisher.
+surface, so visual flicker is not claimed eliminated. A later machine frame
+refused reading while four machine publishers stood. Nine orphaned Glass helpers
+(three fleets, parent PID 1, across the saved and Claude checkouts) were verified
+and stopped through native `host_kill`; all nine returned 0. The viewing carrier
+and its three children were untouched. Re-observation then decoded the machine
+frame: sequence 230602, 2820 payload bytes, five rows, publisher process alive.
+The unexpected missing lane exposed competing writers rather than a missing GPU.
+
+Post-rebase freshness refused 15; rebuilding restored 31 and drift gates 2047.
+Carrier band 15 and marker band 127 pass. The render band also passed 4095 in a
+real PTY (raw bytes were the subject, so that bounded invocation was unwrapped).
+Hearth lanes remain unobserved. No all-organs-healthy or voice-home claim follows
+from these renderer repairs. The already-running foreground supervisor needs one
+relaunch to load its new source; source changes alone reload only its children.
