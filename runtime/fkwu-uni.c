@@ -224,6 +224,7 @@ static long long *fk_f64_loop_iters_p; /* iterations that ran inside a native lo
 #define fk_f64_loop_iters (*fk_f64_loop_iters_p)
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3);
 static long long *fk_fn_native; /* per-defn crystallization state: 0 cold, 1 f64 leaf standing, 2 native loop standing, -1 declined */
+static long long *fk_fn_mint;   /* per-defn value cells minted: the arena grows where a recipe meets a name it has not met */
 static const char *fk_hot_unit_of(long long so);
 static void fk_live_open(void);
 static void fk_live_note_defn(long long j);
@@ -7989,9 +7990,10 @@ static void fk_fn_reserve(long long needed) {
     long long *next_fn_fbox = fk_live_ledgers_paged ? fk_fn_fbox : malloc(bytes);
     long long *next_fn_unbox = fk_live_ledgers_paged ? fk_fn_unbox : malloc(bytes);
     long long *next_fn_native = fk_live_ledgers_paged ? fk_fn_native : malloc(bytes);
+    long long *next_fn_mint = fk_live_ledgers_paged ? fk_fn_mint : malloc(bytes);
     if (next_fn == 0 || next_fnar == 0 || next_fnsym_s == 0 ||
         next_fnsym_n == 0 || next_fnidx == 0 || next_fn_heat == 0 ||
-        next_fn_fbox == 0 || next_fn_unbox == 0 || next_fn_native == 0) {
+        next_fn_fbox == 0 || next_fn_unbox == 0 || next_fn_native == 0 || next_fn_mint == 0) {
         free(next_fn);
         free(next_fnar);
         free(next_fnsym_s);
@@ -8001,6 +8003,7 @@ static void fk_fn_reserve(long long needed) {
         free(next_fn_fbox);
         free(next_fn_unbox);
         free(next_fn_native);
+        free(next_fn_mint);
         fk_die("fk_fn_reserve: out of memory growing function image");
     }
     long long i = 0;
@@ -8014,6 +8017,7 @@ static void fk_fn_reserve(long long needed) {
         if (!fk_live_ledgers_paged) { next_fn_fbox[i] = fk_fn_fbox[i]; }
         if (!fk_live_ledgers_paged) { next_fn_unbox[i] = fk_fn_unbox[i]; }
         if (!fk_live_ledgers_paged) { next_fn_native[i] = fk_fn_native[i]; }
+        if (!fk_live_ledgers_paged) { next_fn_mint[i] = fk_fn_mint[i]; }
         i = i + 1;
     }
     while (i < next) {
@@ -8026,6 +8030,7 @@ static void fk_fn_reserve(long long needed) {
         if (!fk_live_ledgers_paged) { next_fn_fbox[i] = 0; }
         if (!fk_live_ledgers_paged) { next_fn_unbox[i] = 0; }
         if (!fk_live_ledgers_paged) { next_fn_native[i] = 0; }
+        if (!fk_live_ledgers_paged) { next_fn_mint[i] = 0; }
         i = i + 1;
     }
     free(fk_fn);
@@ -8037,6 +8042,7 @@ static void fk_fn_reserve(long long needed) {
     if (!fk_live_ledgers_paged) { free(fk_fn_fbox); }
     if (!fk_live_ledgers_paged) { free(fk_fn_unbox); }
     if (!fk_live_ledgers_paged) { free(fk_fn_native); }
+    if (!fk_live_ledgers_paged) { free(fk_fn_mint); }
     fk_fn = next_fn;
     fk_fnar = next_fnar;
     fk_fnsym_s = next_fnsym_s;
@@ -8046,6 +8052,7 @@ static void fk_fn_reserve(long long needed) {
     fk_fn_fbox = next_fn_fbox;
     fk_fn_unbox = next_fn_unbox;
     fk_fn_native = next_fn_native;
+    fk_fn_mint = next_fn_mint;
     fk_fn_capacity = next;
 }
 /* Closure bookkeeping, PER FUNCTION (not per call, not per instance -- see fk_clo_make for that).
@@ -10111,7 +10118,7 @@ static long long fk_field_node_matches(long long ix, long long kind, long long s
 }
 static long long fk_field_fill(long long kind, long long sub, long long a, long long b, long long *nid4, long long h) {
     long long idx = fk_field_claim(2, 1) + 1;
-    fk_mint_total = fk_mint_total + 1; /* a fresh field cell: this kernel grew the permanent arena by one */
+    fk_mint_total = fk_mint_total + 1; if (fk_fn_mint != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_mint[fk_cur_fn] = fk_fn_mint[fk_cur_fn] + 1; } /* a fresh field cell: this kernel grew the permanent arena by one */
     if (idx >= FK_FIELD_NODES) { fk_die("fkwu: the field's node columns are full (2^26 cells): run observe/field-reset-run.fk with no kernel alive"); }
     while (idx >= fk_node_cap) { fk_nodes_grow(); }
     fk_nkind[idx] = kind;
@@ -10420,7 +10427,7 @@ static long long fk_intern_int_node(long long iv43) {
             }
             slot43 = (slot43 + 1) & (fk_intern_hash_cap - 1);
         }
-        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1; if (fk_fn_mint != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_mint[fk_cur_fn] = fk_fn_mint[fk_cur_fn] + 1; }
         fk_nkind[fk_np] = 1;
         fk_nval[fk_np] = iv43;
         fk_nkids[fk_np] = 1;
@@ -10452,7 +10459,7 @@ static long long fk_intern_str_node(long long sv46) {
         if (sa46 < 0 || !FK_SOK(sa46)) {
             return 0;
         }
-        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1; if (fk_fn_mint != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_mint[fk_cur_fn] = fk_fn_mint[fk_cur_fn] + 1; }
         fk_nkind[fk_np] = 1;
         fk_nval[fk_np] = sv46;
         fk_nkids[fk_np] = 1;
@@ -10481,7 +10488,7 @@ static long long fk_intern_bool_node(long long bv112) {
             }
             slot112 = (slot112 + 1) & (fk_intern_hash_cap - 1);
         }
-        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1; if (fk_fn_mint != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_mint[fk_cur_fn] = fk_fn_mint[fk_cur_fn] + 1; }
         fk_nkind[fk_np] = 1;
         fk_nval[fk_np] = se112;
         fk_nkids[fk_np] = 1;
@@ -10525,7 +10532,7 @@ static long long fk_intern_float_node(double fd113) {
             slot113 = (slot113 + 1) & (fk_intern_hash_cap - 1);
         }
         long long fb113 = fk_fbox(fcanon113);
-        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1; if (fk_fn_mint != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_mint[fk_cur_fn] = fk_fn_mint[fk_cur_fn] + 1; }
         fk_nkind[fk_np] = 1;
         fk_nval[fk_np] = fb113;
         fk_nkids[fk_np] = 1;
@@ -10560,7 +10567,7 @@ static long long fk_intern_composite(long long cat47, long long kids47) {
             }
             slot47 = (slot47 + 1) & (fk_intern_hash_cap - 1);
         }
-        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1; if (fk_fn_mint != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_mint[fk_cur_fn] = fk_fn_mint[fk_cur_fn] + 1; }
         fk_nkind[fk_np] = 2;
         fk_ncat[fk_np] = cat47;
         fk_nkids[fk_np] = kids47;
@@ -10585,7 +10592,7 @@ static long long fk_make_nodeid(long long p91, long long l91, long long ty91, lo
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
         }
-        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
+        fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1; if (fk_fn_mint != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_mint[fk_cur_fn] = fk_fn_mint[fk_cur_fn] + 1; }
         fk_nkind[fk_np] = 3;
         fk_ncat[fk_np] = 0;
         fk_nkids[fk_np] = 1;
@@ -10772,7 +10779,7 @@ static long long fk_live_cpu_us(void) {
  * nothing is scheduled, no tick is counted. The words the kernel does not increment (6-15, 18, 21-23, 27) are noted
  * at melt, at exit and when the kernel reads its own page. */
 #define FK_LIVE_VERSION 3
-#define FK_LIVE_PAGE_BYTES ((112LL << 20))
+#define FK_LIVE_PAGE_BYTES ((120LL << 20))
 #define FK_LIVE_ARMS_OFF 4096
 #define FK_LIVE_FNS (1LL << 20)
 #define FK_LIVE_HEAT_OFF 8192
@@ -10782,6 +10789,7 @@ static long long fk_live_cpu_us(void) {
 #define FK_LIVE_BLOB_OFF (8192 + (64LL << 20))
 #define FK_LIVE_BLOB_BYTES (32LL << 20)
 #define FK_LIVE_NATIVE_OFF (8192 + (96LL << 20))
+#define FK_LIVE_MINT_OFF (8192 + (104LL << 20)) /* per-defn value-cell mints: which recipe grew the permanent arena */
 static long long fk_live_blob_used;
 static long long *fk_nl_offs;        /* newline offsets of the program text, scanned once and extended as the text grows */
 static long long fk_nl_count, fk_nl_cap, fk_nl_scanned;
@@ -10870,9 +10878,13 @@ static void fk_live_open(void) {
     free(fk_fn_heat); free(fk_fn_fbox); free(fk_fn_unbox);
     fk_fn_heat = heat; fk_fn_fbox = fbox; fk_fn_unbox = unbox;
     long long *native = (long long *)((char *)fk_live_page + FK_LIVE_NATIVE_OFF);
+    long long *mint = (long long *)((char *)fk_live_page + FK_LIVE_MINT_OFF);
     k = 0;
     while (k < cap) { native[k] = fk_fn_native ? fk_fn_native[k] : 0; k = k + 1; }
     free(fk_fn_native); fk_fn_native = native;
+    k = 0;
+    while (k < cap) { mint[k] = fk_fn_mint ? fk_fn_mint[k] : 0; k = k + 1; }
+    free(fk_fn_mint); fk_fn_mint = mint;
     w[30] = fk_f64_count; fk_f64_count_p = (long long *)&w[30];
     w[31] = fk_f64_loop_count; fk_f64_loop_count_p = (long long *)&w[31];
     w[32] = fk_f64_loop_iters; fk_f64_loop_iters_p = (long long *)&w[32];
@@ -11157,7 +11169,8 @@ static long long fk_hot_row_cell(long long sj, long long heat, long long line, l
     long long boxes = (fk_fn_fbox != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_fbox[fx] : 0;
     long long unboxes = (fk_fn_unbox != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_unbox[fx] : 0;
     long long native = (fk_fn_native != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_native[fx] : 0;
-    return fk_cons_val(heat << 1, fk_cons_val(fk_sbuf(fk_srctext + so, fk_fnsym_n[sj]), fk_cons_val(fk_sbuf(unit, fk_cstrlen(unit)), fk_cons_val(line << 1, fk_cons_val(col << 1, fk_cons_val(boxes << 1, fk_cons_val(unboxes << 1, fk_cons_val(native << 1, 1))))))));
+    long long mints = (fk_fn_mint != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_mint[fx] : 0;
+    return fk_cons_val(heat << 1, fk_cons_val(fk_sbuf(fk_srctext + so, fk_fnsym_n[sj]), fk_cons_val(fk_sbuf(unit, fk_cstrlen(unit)), fk_cons_val(line << 1, fk_cons_val(col << 1, fk_cons_val(boxes << 1, fk_cons_val(unboxes << 1, fk_cons_val(native << 1, fk_cons_val(mints << 1, 1)))))))));
 }
 static long long fk_hot_rows_by(long long *ledger, long long want) {
     if (want <= 0) { return 1; }
@@ -11198,10 +11211,11 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     char *base = (char *)fk_gift_base[gh >> 1];
     long long sz = fk_gift_size[gh >> 1];
     volatile long long *w = (volatile long long *)base + 2;
-    if (sz < FK_LIVE_NATIVE_OFF + FK_LIVE_FNS * 8 || w[28] != FK_LIVE_VERSION) { munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
+    if (sz < FK_LIVE_MINT_OFF + FK_LIVE_FNS * 8 || w[28] != FK_LIVE_VERSION) { munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
     long long *heat = (long long *)(base + FK_LIVE_HEAT_OFF), *fbox = (long long *)(base + FK_LIVE_FBOX_OFF), *unbox = (long long *)(base + FK_LIVE_UNBOX_OFF), *meta = (long long *)(base + FK_LIVE_META_OFF), *native = (long long *)(base + FK_LIVE_NATIVE_OFF);
     char *blob = base + FK_LIVE_BLOB_OFF;
-    long long *led = ledger == 1 ? fbox : heat;
+    long long *mintl = (long long *)(base + FK_LIVE_MINT_OFF);
+    long long *led = ledger == 1 ? fbox : (ledger == 2 ? mintl : heat);
     long long count = w[29] < FK_LIVE_FNS ? w[29] : FK_LIVE_FNS;
     long long pj[64], ph[64], np = 0, fx = 0;
     while (fx < count) {
@@ -11220,7 +11234,7 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     while (q >= 0) {
         long long f = pj[q];
         long long *m = meta + f * 5;
-        long long row = fk_cons_val(heat[f] << 1, fk_cons_val(fk_sbuf(blob + m[0], m[1]), fk_cons_val(fk_sbuf(blob + m[0] + m[1], m[2]), fk_cons_val(m[3] << 1, fk_cons_val(m[4] << 1, fk_cons_val(fbox[f] << 1, fk_cons_val(unbox[f] << 1, fk_cons_val(native[f] << 1, 1))))))));
+        long long row = fk_cons_val(heat[f] << 1, fk_cons_val(fk_sbuf(blob + m[0], m[1]), fk_cons_val(fk_sbuf(blob + m[0] + m[1], m[2]), fk_cons_val(m[3] << 1, fk_cons_val(m[4] << 1, fk_cons_val(fbox[f] << 1, fk_cons_val(unbox[f] << 1, fk_cons_val(native[f] << 1, fk_cons_val(mintl[f] << 1, 1)))))))));
         l = fk_cons_val(row, l);
         q = q - 1;
     }
@@ -11273,7 +11287,7 @@ static long long fk_intern_float32_node(double d) {
         slot = (slot + 1) & (fk_intern_hash_cap - 1);
     }
     long long fb = fk_fbox((double)f);
-    fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1;
+    fk_np = fk_np + 1; fk_mint_total = fk_mint_total + 1; if (fk_fn_mint != 0 && fk_cur_fn > 0 && fk_cur_fn < fk_fn_capacity) { fk_fn_mint[fk_cur_fn] = fk_fn_mint[fk_cur_fn] + 1; }
     fk_nkind[fk_np] = 1;
     fk_nval[fk_np] = fb;
     fk_nkids[fk_np] = 1;
@@ -12649,8 +12663,13 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_page_rows(fk_walk(fk_node[i][1], fp) >> 1, 0, fk_walk(fk_node[i][2], fp) >> 1);
     }
     if (t == 193) {
-        /* kernel_page_box pid n: that kernel boxing worklist from its page */
-        return fk_page_rows(fk_walk(fk_node[i][1], fp) >> 1, 1, fk_walk(fk_node[i][2], fp) >> 1);
+        /* kernel_page_box pid n: that kernel's boxing worklist from its page.
+         * A NEGATIVE n asks the MINT ledger instead -- which recipes grew the
+         * permanent arena, |n| rows -- the same door, a mode in its own argument. */
+        long long p193 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long n193 = fk_walk(fk_node[i][2], fp) >> 1;
+        if (n193 < 0) { return fk_page_rows(p193, 2, 0 - n193); }
+        return fk_page_rows(p193, 1, n193);
     }
     if (t == 29) {
         /* mlx_live: the MLX carrier's state as words (linked, metal, gpu, device, version major/minor/patch, ops,
