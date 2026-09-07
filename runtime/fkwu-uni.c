@@ -225,6 +225,7 @@ static long long *fk_f64_loop_iters_p; /* iterations that ran inside a native lo
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3);
 static long long *fk_fn_native; /* per-defn crystallization state: 0 cold, 1 f64 leaf standing, 2 native loop standing, -1 declined */
 static long long *fk_fn_mint;   /* per-defn value cells minted: the arena grows where a recipe meets a name it has not met */
+static long long *fk_fn_inram;  /* per-defn FOLDED calls: a body that ran as this machine's own instructions, its intermediates in registers rather than a pool slot each */
 static const char *fk_hot_unit_of(long long so);
 static void fk_live_open(void);
 static void fk_live_note_defn(long long j);
@@ -7992,9 +7993,10 @@ static void fk_fn_reserve(long long needed) {
     long long *next_fn_unbox = fk_live_ledgers_paged ? fk_fn_unbox : malloc(bytes);
     long long *next_fn_native = fk_live_ledgers_paged ? fk_fn_native : malloc(bytes);
     long long *next_fn_mint = fk_live_ledgers_paged ? fk_fn_mint : malloc(bytes);
+    long long *next_fn_inram = fk_live_ledgers_paged ? fk_fn_inram : malloc(bytes);
     if (next_fn == 0 || next_fnar == 0 || next_fnsym_s == 0 ||
         next_fnsym_n == 0 || next_fnidx == 0 || next_fn_heat == 0 ||
-        next_fn_fbox == 0 || next_fn_unbox == 0 || next_fn_native == 0 || next_fn_mint == 0) {
+        next_fn_fbox == 0 || next_fn_unbox == 0 || next_fn_native == 0 || next_fn_mint == 0 || next_fn_inram == 0) {
         free(next_fn);
         free(next_fnar);
         free(next_fnsym_s);
@@ -8019,6 +8021,7 @@ static void fk_fn_reserve(long long needed) {
         if (!fk_live_ledgers_paged) { next_fn_unbox[i] = fk_fn_unbox[i]; }
         if (!fk_live_ledgers_paged) { next_fn_native[i] = fk_fn_native[i]; }
         if (!fk_live_ledgers_paged) { next_fn_mint[i] = fk_fn_mint[i]; }
+        if (!fk_live_ledgers_paged) { next_fn_inram[i] = fk_fn_inram[i]; }
         i = i + 1;
     }
     while (i < next) {
@@ -8044,6 +8047,7 @@ static void fk_fn_reserve(long long needed) {
     if (!fk_live_ledgers_paged) { free(fk_fn_unbox); }
     if (!fk_live_ledgers_paged) { free(fk_fn_native); }
     if (!fk_live_ledgers_paged) { free(fk_fn_mint); }
+    if (!fk_live_ledgers_paged) { free(fk_fn_inram); }
     fk_fn = next_fn;
     fk_fnar = next_fnar;
     fk_fnsym_s = next_fnsym_s;
@@ -8054,6 +8058,7 @@ static void fk_fn_reserve(long long needed) {
     fk_fn_unbox = next_fn_unbox;
     fk_fn_native = next_fn_native;
     fk_fn_mint = next_fn_mint;
+    fk_fn_inram = next_fn_inram;
     fk_fn_capacity = next;
 }
 /* Closure bookkeeping, PER FUNCTION (not per call, not per instance -- see fk_clo_make for that).
@@ -8498,6 +8503,7 @@ static long long fk_walk_body(long long i, long long fp) {
                         out194 = loopi194(f194) << 1;
                     }
                     fk_inram_call_total = fk_inram_call_total + 1;
+                    if (fk_fn_inram != 0 && c194 >= 0 && c194 < fk_fn_capacity) { fk_fn_inram[c194] = fk_fn_inram[c194] + 1; } /* this body FOLDED: its intermediates lived in registers, not one pool slot each */
                     fk_f64_loop_iters = fk_f64_loop_iters + f194[8];
                     fk_unbox_total = fk_unbox_total + nf194;
                     if (fk_fn_unbox != 0 && c194 < fk_fn_capacity) { fk_fn_unbox[c194] = fk_fn_unbox[c194] + nf194; }
@@ -8522,6 +8528,7 @@ static long long fk_walk_body(long long i, long long fp) {
                     double (*leaf194)(double, double, double, double, double, double, double, double) = (double (*)(double, double, double, double, double, double, double, double))m194;
                     double r194 = leaf194(a194[0], a194[1], a194[2], a194[3], a194[4], a194[5], a194[6], a194[7]);
                     fk_inram_call_total = fk_inram_call_total + 1;
+                    if (fk_fn_inram != 0 && c194 >= 0 && c194 < fk_fn_capacity) { fk_fn_inram[c194] = fk_fn_inram[c194] + 1; } /* the f64 leaf FOLDED this body */
                     fk_unbox_total = fk_unbox_total + n194;
                     if (fk_fn_unbox != 0 && c194 < fk_fn_capacity) { fk_fn_unbox[c194] = fk_fn_unbox[c194] + n194; }
                     return fk_fbox(r194);
@@ -10815,8 +10822,8 @@ static long long fk_live_cpu_us(void) {
  * unit path, 32 MiB). Every hot-path increment the kernel already made now lands in these words; nothing is copied,
  * nothing is scheduled, no tick is counted. The words the kernel does not increment (6-15, 18, 21-23, 27) are noted
  * at melt, at exit and when the kernel reads its own page. */
-#define FK_LIVE_VERSION 3
-#define FK_LIVE_PAGE_BYTES ((120LL << 20))
+#define FK_LIVE_VERSION 4
+#define FK_LIVE_PAGE_BYTES ((128LL << 20))
 #define FK_LIVE_ARMS_OFF 4096
 #define FK_LIVE_FNS (1LL << 20)
 #define FK_LIVE_HEAT_OFF 8192
@@ -10827,6 +10834,7 @@ static long long fk_live_cpu_us(void) {
 #define FK_LIVE_BLOB_BYTES (32LL << 20)
 #define FK_LIVE_NATIVE_OFF (8192 + (96LL << 20))
 #define FK_LIVE_MINT_OFF (8192 + (104LL << 20)) /* per-defn value-cell mints: which recipe grew the permanent arena */
+#define FK_LIVE_INRAM_OFF (8192 + (112LL << 20)) /* per-defn FOLDED calls: a whole body run as this machine's own instructions, no pool slot per result */
 static long long fk_live_blob_used;
 static long long *fk_nl_offs;        /* newline offsets of the program text, scanned once and extended as the text grows */
 static long long fk_nl_count, fk_nl_cap, fk_nl_scanned;
@@ -10922,6 +10930,10 @@ static void fk_live_open(void) {
     k = 0;
     while (k < cap) { mint[k] = fk_fn_mint ? fk_fn_mint[k] : 0; k = k + 1; }
     free(fk_fn_mint); fk_fn_mint = mint;
+    long long *inram = (long long *)((char *)fk_live_page + FK_LIVE_INRAM_OFF);
+    k = 0;
+    while (k < cap) { inram[k] = fk_fn_inram ? fk_fn_inram[k] : 0; k = k + 1; }
+    free(fk_fn_inram); fk_fn_inram = inram;
     w[30] = fk_f64_count; fk_f64_count_p = (long long *)&w[30];
     w[31] = fk_f64_loop_count; fk_f64_loop_count_p = (long long *)&w[31];
     w[32] = fk_f64_loop_iters; fk_f64_loop_iters_p = (long long *)&w[32];
@@ -11221,7 +11233,8 @@ static long long fk_hot_row_cell(long long sj, long long heat, long long line, l
     long long unboxes = (fk_fn_unbox != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_unbox[fx] : 0;
     long long native = (fk_fn_native != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_native[fx] : 0;
     long long mints = (fk_fn_mint != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_mint[fx] : 0;
-    return fk_cons_val(heat << 1, fk_cons_val(fk_sbuf(fk_srctext + so, fk_fnsym_n[sj]), fk_cons_val(fk_sbuf(unit, fk_cstrlen(unit)), fk_cons_val(line << 1, fk_cons_val(col << 1, fk_cons_val(boxes << 1, fk_cons_val(unboxes << 1, fk_cons_val(native << 1, fk_cons_val(mints << 1, 1)))))))));
+    long long folds = (fk_fn_inram != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_inram[fx] : 0;
+    return fk_cons_val(heat << 1, fk_cons_val(fk_sbuf(fk_srctext + so, fk_fnsym_n[sj]), fk_cons_val(fk_sbuf(unit, fk_cstrlen(unit)), fk_cons_val(line << 1, fk_cons_val(col << 1, fk_cons_val(boxes << 1, fk_cons_val(unboxes << 1, fk_cons_val(native << 1, fk_cons_val(mints << 1, fk_cons_val(folds << 1, 1))))))))));
 }
 static long long fk_hot_rows_by(long long *ledger, long long want) {
     if (want <= 0) { return 1; }
@@ -11262,11 +11275,12 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     char *base = (char *)fk_gift_base[gh >> 1];
     long long sz = fk_gift_size[gh >> 1];
     volatile long long *w = (volatile long long *)base + 2;
-    if (sz < FK_LIVE_MINT_OFF + FK_LIVE_FNS * 8 || w[28] != FK_LIVE_VERSION) { munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
+    if (sz < FK_LIVE_INRAM_OFF + FK_LIVE_FNS * 8 || w[28] != FK_LIVE_VERSION) { munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
     long long *heat = (long long *)(base + FK_LIVE_HEAT_OFF), *fbox = (long long *)(base + FK_LIVE_FBOX_OFF), *unbox = (long long *)(base + FK_LIVE_UNBOX_OFF), *meta = (long long *)(base + FK_LIVE_META_OFF), *native = (long long *)(base + FK_LIVE_NATIVE_OFF);
     char *blob = base + FK_LIVE_BLOB_OFF;
     long long *mintl = (long long *)(base + FK_LIVE_MINT_OFF);
-    long long *led = ledger == 1 ? fbox : (ledger == 2 ? mintl : heat);
+    long long *inraml = (long long *)(base + FK_LIVE_INRAM_OFF);
+    long long *led = ledger == 1 ? fbox : (ledger == 2 ? mintl : (ledger == 3 ? inraml : heat));
     long long count = w[29] < FK_LIVE_FNS ? w[29] : FK_LIVE_FNS;
     long long pj[64], ph[64], np = 0, fx = 0;
     while (fx < count) {
@@ -11285,7 +11299,7 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     while (q >= 0) {
         long long f = pj[q];
         long long *m = meta + f * 5;
-        long long row = fk_cons_val(heat[f] << 1, fk_cons_val(fk_sbuf(blob + m[0], m[1]), fk_cons_val(fk_sbuf(blob + m[0] + m[1], m[2]), fk_cons_val(m[3] << 1, fk_cons_val(m[4] << 1, fk_cons_val(fbox[f] << 1, fk_cons_val(unbox[f] << 1, fk_cons_val(native[f] << 1, fk_cons_val(mintl[f] << 1, 1)))))))));
+        long long row = fk_cons_val(heat[f] << 1, fk_cons_val(fk_sbuf(blob + m[0], m[1]), fk_cons_val(fk_sbuf(blob + m[0] + m[1], m[2]), fk_cons_val(m[3] << 1, fk_cons_val(m[4] << 1, fk_cons_val(fbox[f] << 1, fk_cons_val(unbox[f] << 1, fk_cons_val(native[f] << 1, fk_cons_val(mintl[f] << 1, fk_cons_val(inraml[f] << 1, 1))))))))));
         l = fk_cons_val(row, l);
         q = q - 1;
     }
@@ -12881,8 +12895,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_page_rows((long long)getpid(), 1, fk_walk(fk_node[i][1], fp) >> 1);
     }
     if (t == 192) {
-        /* kernel_page_hot pid n: that kernel hottest defns from its page (heat name unit line col boxes unboxes) */
-        return fk_page_rows(fk_walk(fk_node[i][1], fp) >> 1, 0, fk_walk(fk_node[i][2], fp) >> 1);
+        /* kernel_page_hot pid n: that kernel's hottest defns from its page
+         * (heat name unit line col boxes unboxes native mints folds).
+         * A NEGATIVE n ranks by the FOLD ledger instead -- which recipes ran as
+         * this machine's own instructions, their intermediates in registers
+         * rather than a pool slot each. The box leg has always been countable
+         * (fbox); this is the leg it is chosen against, and until now nothing
+         * counted it, so "box or fold" could only ever read as one option. */
+        long long p192 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long n192 = fk_walk(fk_node[i][2], fp) >> 1;
+        if (n192 < 0) { return fk_page_rows(p192, 3, 0 - n192); }
+        return fk_page_rows(p192, 0, n192);
     }
     if (t == 193) {
         /* kernel_page_box pid n: that kernel's boxing worklist from its page.

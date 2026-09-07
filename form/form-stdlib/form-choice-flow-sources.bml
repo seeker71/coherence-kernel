@@ -16,10 +16,11 @@
 //   jit.crystallize   the live page's per-defn native flag (kernel_page_hot):
 //                     >0 crystallized (taken), 0 still walking (held), <0
 //                     refused (declined); the held rows' heat is the wait.
-//   jit.box           the boxing worklist (kernel_page_box pid n): slots
-//                     minted and slots read. ONE option: the fold leg — the
-//                     transparent f64 leaf — leaves no count on the page, so
-//                     this point is a corridor and asks for its second leg.
+//   jit.box           both legs from the live page: fbox is a pool slot minted
+//                     for a float result, and the fold column is a body that
+//                     ran as this machine's own instructions with nothing
+//                     minted per result. Flow here is how much of this body's
+//                     float work runs in registers.
 //   jit.mint          the mint ledger (kernel_page_box pid -n): a call either
 //                     answered from an interned node or grew the arena.
 //   organ.surprise-route  the organs frame's own choice rows, as NUMBERS: the
@@ -56,13 +57,17 @@ section [form.bml] {
         field FCFSProtocolSample = "choice.protocol-floor";
         field FCFSAdmissionSample = "governor.admission.metal";
 
-        // ---- one live page row: (heat name unit line col fbox unbox native mint) ----
+        // ---- one live page row: (heat name unit line col fbox unbox native mint fold) ----
         def fcfs-row-heat(r) = if lt(len(r), 1) then 0 else nth(r, 0);
         def fcfs-row-name(r) = if lt(len(r), 2) then "" else nth(r, 1);
         def fcfs-row-fbox(r) = if lt(len(r), 6) then 0 else nth(r, 5);
         def fcfs-row-unbox(r) = if lt(len(r), 7) then 0 else nth(r, 6);
         def fcfs-row-native(r) = if lt(len(r), 8) then 0 else nth(r, 7);
         def fcfs-row-mint(r) = if lt(len(r), 9) then 0 else nth(r, 8);
+        // field 9: the FOLD leg -- calls this recipe ran as this machine's own
+        // instructions, no pool slot per result. Absent from a row an older
+        // kernel gave, and an absent count reads 0 folds, never a fabricated one.
+        def fcfs-row-fold(r) = if lt(len(r), 10) then 0 else nth(r, 9);
         def fcfs-least(a, b) = if lt(a, b) then a else b;
         def fcfs-floor0(n) = if lt(n, 0) then 0 else n;
 
@@ -94,21 +99,24 @@ section [form.bml] {
         def fcfs-crystallize-point-live(pid) = fcfs-crystallize-point(kernel_page_hot(pid, FCFSHotRows()));
 
         // ---- 2. box or fold ---------------------------------------------------
-        // The page counts slots minted and slots read. It counts no folds: a
-        // float that stayed transparent leaves nothing behind. So the point
-        // carries the ONE option it can witness and reads as a corridor —
-        // the ask is a counter for the fold leg, not a second option invented here.
-        // acc = list(minted, read); the held leg is their difference, and it used
-        // to be found by summing both columns a second and third time.
-        def fcfs-box-step(r, acc) = list(add(nth(acc, 0), fcfs-row-fbox(r)), add(nth(acc, 1), fcfs-least(fcfs-row-fbox(r), fcfs-row-unbox(r))));
+        // acc = list(boxed, folded), one walk. BOTH legs are counted on the page
+        // now: fbox is a pool slot minted for a float result, and the fold column
+        // (kernel_page_hot with a negative n, or field 9 of any row) is a body
+        // that ran as this machine's own instructions with its intermediates in
+        // registers. This point read as a corridor until 2026-09-07 for one
+        // reason: nothing counted the leg it was choosing against, so a real
+        // two-way choice could only ever publish one option.
+        def fcfs-box-step(r, acc) = list(add(nth(acc, 0), fcfs-row-fbox(r)), add(nth(acc, 1), fcfs-row-fold(r)));
         def fcfs-box-fold(rows, acc) = if eq(len(rows), 0) then acc else fcfs-box-fold(tail(rows), fcfs-box-step(head(rows), acc));
-        def fcfs-box-options() = list(fcf-option("box", "mint a float slot the value can be read from", 3, 6, 100, 100));
+        def fcfs-box-options() = list(
+            fcf-option("fold", "run the whole body in registers, no slot per result", 0, 8, 100, 100),
+            fcf-option("box", "mint a float pool slot the value can be read from anywhere", 1, 4, 100, 100));
         def fcfs-box-ledger(rows) {
             let f = fcfs-box-fold(rows, list(0, 0));
-            fcf-ledger(nth(f, 0), nth(f, 1), fcfs-floor0(sub(nth(f, 0), nth(f, 1))), 0, 0, 0);
+            fcf-ledger(add(nth(f, 0), nth(f, 1)), nth(f, 1), 0, nth(f, 0), 0, 0);
         }
         def fcfs-box-point(rows) = fcf-point("jit.box", "box this float, or fold it where it stands?", fcfs-box-options(), fcfs-box-ledger(rows));
-        def fcfs-box-point-live(pid) = fcfs-box-point(kernel_page_box(pid, FCFSHotRows()));
+        def fcfs-box-point-live(pid) = fcfs-box-point(kernel_page_hot(pid, FCFSHotRows()));
 
         // ---- 3. reuse or mint -------------------------------------------------
         // Every call either answered from an interned node or grew the permanent
@@ -127,7 +135,12 @@ section [form.bml] {
             fcf-ledger(offered, sub(offered, minted), 0, minted, 0, 0);
         }
         def fcfs-mint-point(rows) = fcf-point("jit.mint", "reuse an interned value, or grow the arena with a fresh one?", fcfs-mint-options(), fcfs-mint-ledger(rows));
-        def fcfs-mint-point-live(pid) = fcfs-mint-point(kernel_page_box(pid, sub(0, FCFSHotRows())));
+        // The HOT rows, not the mint-ranked ones. Ranking by mints means a body
+        // whose arena stopped growing has no rows at all, so the point read DARK
+        // -- never offered -- when the truth is the opposite: the choice was put
+        // on every call and reuse won every time. Every call is offered this
+        // choice, so every hot recipe is in the conversation.
+        def fcfs-mint-point-live(pid) = fcfs-mint-point(kernel_page_hot(pid, FCFSHotRows()));
 
         // ---- reading a number the body already wrote into a row's purpose -----
         // A count the body publishes as a NUMBER is read as a number: the

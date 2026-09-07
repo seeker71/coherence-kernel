@@ -530,7 +530,11 @@ before is gone, and a 20-million-iteration loop runs 0.89 s -> 0.67 s (int),
 in the page meta the moment it is defined (`fk_live_note_defn`, at every
 recording site including `.fkb` ice), so any process reads any kernel's hot
 defns with source from the page alone: `kernel_page_hot pid n` (192) and
-`kernel_page_box pid n` (193). The words that change at moments -- nodes,
+`kernel_page_box pid n` (193). A row carries ten words -- heat, name, unit,
+line, column, boxes, unboxes, native, mints, folds -- and a NEGATIVE n on
+either door asks for a different ranking of the same rows: 192 ranks by folds,
+193 by mints. Both are modes in an argument the door already took, because the
+AST tag space has exactly one free tag left. The words that change at moments -- nodes,
 strings, cpu, alive, store, melt generation -- are written where the moment
 happens (open, field open, melt, exit, self-read). The `k` view lists every live
 kernel's three hottest defns as `k<pid> <defn> <unit>:<line> box n unbox n`.
@@ -666,6 +670,28 @@ second opinion: it read the lane's counts and then computed its OWN findings
 off its own thresholds, so `gap-corridor` on the glass meant low flow while
 the same word in the frame meant one option. The findings are the lane's now,
 read from the frame's finding rows. choice-view 32767, choice-flow 8191.
+
+**The fold leg is counted, so box-or-fold is a choice with two legs.** The live
+page counted every float result that took a pool slot (`fbox`) and nothing at
+all for the leg it was chosen against: a body that ran as this machine's own
+instructions, its intermediates in registers. So the choice could only ever
+publish ONE option and read as a corridor — a gap named honestly and then left
+alone rather than filled. `fk_fn_inram` sits beside `fk_fn_mint`, page-backed at
++112 MiB (the page is 128 MiB and its version is 4), charged at both crystallized
+dispatch arms, and it is the tenth word of every hot row. `kernel_page_hot` with
+a NEGATIVE n ranks by folds, the way `kernel_page_box` with a negative n already
+ranked by mints. Witnessed on a float-warm kernel: `fp-mix` folded 399,659 of
+400,000 calls with 400,684 boxes beside them, and `jit.box` reads 800,344 offers
+at 49% flow — half this body's float results still take a slot.
+
+**A ledger ranked by its losing leg makes a healthy body look like it never
+chose.** `jit.mint` read DARK — never offered — because it ranked rows by mints,
+and a body whose arena has stopped growing has no such rows. The truth was the
+opposite: the choice is put on every call and reuse wins every time. It reads
+the hot rows now, and the live number is 1526 offers at 100% flow. Two of the
+three dark points on the glass were not dark at all. The third,
+`route.category`, is honestly dark: nothing in this body calls the route lane,
+so its ask — reach it, or retire it — still stands.
 
 **The publisher roster ages by last speech instead of refusing at its wall.**
 There are 511 slots and no door to give one back, so every band run and every
