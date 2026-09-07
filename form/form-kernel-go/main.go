@@ -80,21 +80,6 @@ var (
 	socketNextHnd int64 = 0
 )
 
-// floorCharBoundary snaps a byte index down to the nearest UTF-8 char
-// boundary at or below it. The addressing natives (substring, char_at,
-// str_find) accept byte indices computed by recipes that step bytewise; an
-// index inside a multibyte char is answered with the boundary-snapped read.
-// Sibling parity with the Rust kernel's floor_char_boundary_idx.
-func floorCharBoundary(s string, i int) int {
-	if i > len(s) {
-		i = len(s)
-	}
-	for i > 0 && i < len(s) && !utf8.RuneStart(s[i]) {
-		i--
-	}
-	return i
-}
-
 // ceilCharBoundary snaps a byte index up to the nearest char boundary at or
 // above it. Search starts (str_find `from`) snap forward so a find-next loop
 // stepping +1 from a match advances past a multibyte char instead of
@@ -2039,22 +2024,47 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("str_len", catAccess(), func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VInt, Int: int64(len(argStr(args, 0)))}
 	})
+	// substring — BYTES, CLAMPED, NEVER DIES. The one meaning, four ways,
+	// laid 2026-09-07 (substring-one-meaning-band.fk, drift gate).
+	//
+	//   substring(s, start, end) is the bytes of s from max(start,0) up to
+	//   min(end, len(s)); empty when that range is empty or reversed; empty
+	//   when s is not a string. It refuses nothing and it FLOORS nothing.
+	//
+	// WHY BYTES. The body indexes bytes everywhere — str_byte_at is the
+	// narrow waist, the frame readers, the row walkers, str_find, split-on
+	// and trim all compute byte offsets. A cut that floors its ends to
+	// character starts returns a SHORTER, SHIFTED window for those same
+	// indices and says nothing about it, so every Persian, Chinese, Japanese
+	// and Hebrew row in form-stdlib/locale-rows was silently re-cut here.
+	// Flooring does keep adjacency among floored indices; what it cannot keep
+	// is the content.
+	//
+	// WHY CLAMPED. fkwu and the core.fk recipe both clamped from birth. A
+	// panic here turned an out-of-range index — the ordinary end of a scan —
+	// into a dead process on three arms and an empty string on the fourth.
+	// Go's string holds arbitrary bytes, so this arm answers every cut
+	// exactly, like fkwu. Rust's str and the TS kernel's UTF-16 string cannot
+	// hold a severed multi-byte character; those two arms answer the axiom-1
+	// absence there rather than a different window. What all four arms hold
+	// together is that NO ARM EVER ANSWERS A DIFFERENT NON-EMPTY WINDOW.
 	k.registerNative("substring", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := argStr(args, 0)
+		if len(args) < 3 || args[0].Kind != VStr {
+			return Value{Kind: VStr, Str: ""}
+		}
+		s := args[0].Str
 		a := args[1].AsInt()
 		b := args[2].AsInt()
-		if a < 0 || b < a || b > int64(len(s)) {
-			panic(fmt.Sprintf(
-				"substring: bounds out of range start=%d end=%d len=%d",
-				a,
-				b,
-				len(s),
-			))
+		if a < 0 {
+			a = 0
 		}
-		// Both ends floor to char boundaries (sibling parity with the Rust
-		// kernel): the adjacency law substring(s,a,m)+substring(s,m,b) ==
-		// substring(s,a,b) holds for any m, and the window is valid UTF-8.
-		return Value{Kind: VStr, Str: s[floorCharBoundary(s, int(a)):floorCharBoundary(s, int(b))]}
+		if b > int64(len(s)) {
+			b = int64(len(s))
+		}
+		if b <= a {
+			return Value{Kind: VStr, Str: ""}
+		}
+		return Value{Kind: VStr, Str: s[a:b]}
 	})
 	k.registerNative("char_at", catAccess(), func(_ *Kernel, args []Value) Value {
 		s := argStr(args, 0)

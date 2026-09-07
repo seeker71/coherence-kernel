@@ -221,22 +221,6 @@ fn take_thread_last_crash_trace_path() -> Option<PathBuf> {
     THREAD_LAST_CRASH_TRACE_PATH.with(|slot| slot.borrow_mut().take())
 }
 
-// Snap a byte index down to the nearest UTF-8 char boundary at or below it.
-// The addressing natives (substring, char_at, str_find) accept byte indices
-// computed by recipes that step bytewise; an index inside a multibyte char
-// is answered with the boundary-snapped read, never a panic. Flooring BOTH
-// ends keeps the adjacency law: substring(s,a,m) + substring(s,m,b) ==
-// substring(s,a,b) for any m, so split-and-rejoin recipes stay exact.
-fn floor_char_boundary_idx(s: &str, mut i: usize) -> usize {
-    if i > s.len() {
-        i = s.len();
-    }
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 // Snap a byte index up to the nearest char boundary at or above it. Search
 // starts (str_find `from`) snap forward so a find-next loop stepping +1 from
 // a match advances past a multibyte char instead of re-finding it forever.
@@ -3364,20 +3348,48 @@ impl Kernel {
         self.register_native("str_len", cat_access(), |_, _, args| {
             Value::Int(args[0].as_str().len() as i64)
         });
+        // substring — BYTES, CLAMPED, NEVER DIES. The one meaning, four ways,
+        // laid 2026-09-07 (substring-one-meaning-band.fk, drift gate).
+        //
+        //   substring(s, start, end) is the bytes of s from max(start,0) up
+        //   to min(end, str_len(s)); empty when that range is empty or
+        //   reversed; empty when s is not a string. It refuses nothing and it
+        //   FLOORS nothing.
+        //
+        // WHY BYTES. The body indexes bytes everywhere — str_byte_at is the
+        // narrow waist, and str_find, split-on, trim, the frame readers and
+        // the row walkers all compute byte offsets. Flooring both ends to
+        // character starts hands those same indices a SHORTER, SHIFTED window
+        // in silence, which silently re-cut every Persian, Chinese, Japanese
+        // and Hebrew row in form-stdlib/locale-rows.
+        //
+        // WHY CLAMPED. fkwu and the core.fk recipe both clamped from birth. A
+        // panic here turned an ordinary out-of-range index into a dead process
+        // on three arms and an empty string on the fourth.
+        //
+        // THE ONE PLACE THIS ARM CANNOT SAY. Rust's `str` carries a UTF-8
+        // invariant, so a cut that severs a multi-byte character has no
+        // representation here — the same wall read_file_slice already names,
+        // "losslessness would need a byte string in the Value type". fkwu and
+        // the Go kernel hold those bytes exactly; this arm answers the axiom-1
+        // absence rather than a plausible substitute. What all four arms hold
+        // together is that NO ARM EVER ANSWERS A DIFFERENT NON-EMPTY WINDOW.
         self.register_native("substring", cat_access(), |_, _, args| {
-            let s = args[0].as_str();
-            let a_i = args[1].as_int();
-            let b_i = args[2].as_int();
-            if a_i < 0 || b_i < a_i || b_i as usize > s.len() {
-                panic!(
-                    "substring: bounds out of range start={} end={} len={}",
-                    a_i,
-                    b_i,
-                    s.len()
-                );
+            let s = match args.first() {
+                Some(Value::Str(s)) => s.clone(),
+                _ => return Value::Str(String::new().into()),
+            };
+            let len = s.len() as i64;
+            let a_i = args.get(1).map(|v| v.as_int()).unwrap_or(0);
+            let b_i = args.get(2).map(|v| v.as_int()).unwrap_or(0);
+            let a = if a_i < 0 { 0 } else if a_i > len { len } else { a_i } as usize;
+            let b = if b_i < 0 { 0 } else if b_i > len { len } else { b_i } as usize;
+            if b <= a {
+                return Value::Str(String::new().into());
             }
-            let a = floor_char_boundary_idx(s, a_i as usize);
-            let b = floor_char_boundary_idx(s, b_i as usize);
+            if !s.is_char_boundary(a) || !s.is_char_boundary(b) {
+                return Value::Null;
+            }
             Value::Str(s[a..b].to_string().into())
         });
         self.register_native("char_at", cat_access(), |_, _, args| {

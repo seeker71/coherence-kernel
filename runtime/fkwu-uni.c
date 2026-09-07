@@ -12513,8 +12513,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
              * -- the range lives in the leaf node's THIRD child as a tag-19 NODE,
              * read child by child below, so the fast door allocates no pair.
              *
-             * THE CONTRACT IS THE RECIPE'S, measured edge by edge before this arm
-             * existed (substring-byte-edges-band.fk holds them together):
+             * THE ONE MEANING OF THE CUT -- BYTES, CLAMPED, NEVER DIES. It is the recipe's
+             * own contract, measured edge by edge before this arm existed, and since
+             * 2026-09-07 it is what all four kernels answer
+             * (form-stdlib/tests/substring-one-meaning-band.fk, 4095 four ways, a
+             * drift gate):
              *   n = end - start <= 0                 -> ""   (start>end, zero len)
              *   indices outside [0, len)             -> contribute nothing, so the
              *                                           answer is s[max(start,0) ..
@@ -12522,10 +12525,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
              *   s that is not a string (nothing too) -> ""   (every leaf read -1 and
              *                                           byte_to_str answered "")
              * BYTES, NOT CODEPOINTS. str_byte_at indexes bytes and the locale rows
-             * are full of multi-byte tongues; flooring to character starts here --
-             * which is what the Go/Rust/TS natives do -- would silently re-cut every
-             * Persian and Chinese row. (0,1) of "Ω" is one raw byte 206, as it is
-             * through the recipe.
+             * are full of multi-byte tongues; flooring the offsets to character
+             * starts -- which the Go/Rust/TS natives did until that day -- silently
+             * re-cut every Persian, Hebrew, Chinese and Japanese row. (0,1) of "Ω" is
+             * one raw byte 206 here, as it is through the recipe and on the Go arm;
+             * rust and ts cannot HOLD a severed character and answer the absence.
              *
              * ONE PLACE THIS ANSWERS WHERE THE RECIPE DOES NOT: a `nothing` start.
              * (sub 2 nothing) is 8999999999999999999, so the recipe halves a range
