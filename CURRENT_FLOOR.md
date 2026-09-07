@@ -225,10 +225,18 @@ separator **2100 ms → 1895 ms** — the old cut was already small there, so wh
 the routing removes is the growth with needle length, not a constant. A
 first-byte gate ahead of `starts-with?`'s cut was written, measured at 25 ms
 against 26 ms over 240,000 real misses, and **removed rather than shipped**.
-`line-grammar-search-equivalence-band` **8191** keeps all four old bodies
-verbatim as its reference and pins the literal answers of the named edges; it
-answers 6143 and 4079 and 2362 against three deliberately broken references, so
-its green is a green that can fail.
+`line-grammar-search-equivalence-band` **8191 on all four arms** keeps all four
+old bodies verbatim as its reference and pins the literal answers of the named
+edges; it answers 6143 and 4079 and 2362 against three deliberately broken
+references, so its green is a green that can fail. Running it four ways is what
+found the one question it was asking that two arms cannot hold: sweeping
+`(substring t 0 i)` at every byte offset of a Persian row hands `starts-with?` a
+cut that severs a character, and rust and ts answer the axiom-1 absence for
+exactly that cut and then die measuring it — witnessed as `as_str: Null` and
+`expected str, got null` while go and fkwu answered 8191. The sweep now asks each
+arm only about prefixes ending on a character boundary, which is the discipline
+`csfe-sweep-needles` already keeps, and no offset is skipped without a rule
+saying which.
 
 `substring` is a native again on fkwu (2026-09-07) — mode 9 of the leaf door
 (tag 201), not a tag of its own: every tag 0..255 carries an arm and 150 is held
