@@ -12466,6 +12466,86 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * 1 make_float32 (intern a type-6 leaf), 2 make_float64 (a type-7 leaf),
          * 3 math_pi. The four names are rewrite rows over this tag (fk_rwtab). */
         long long fm201 = fk_walk(fk_node[i][1], fp);
+        if ((fm201 >> 1) == 9) {
+            /* MODE 9 -- substring(s, start, end): the byte-indexed string slice.
+             *
+             * It was tag 29 until 2026-07-01, when it became Form composition over
+             * the narrow waist and the tag was spent on mlx_live. The recipe
+             * (fstr-substring-halve, still in core.fk and still the statement of
+             * what this door MEANS) is right, and it is the slowest door in the
+             * body: cutting 192 kB costs ~384,000 interpreted str_byte_at /
+             * byte_to_str / str_concat calls -- 4.4 MB/s where str_concat, the
+             * same bytes through the same pool, runs at ~512 MB/s. char_at,
+             * str_find, split-on and trim are all recipes over it.
+             *
+             * Every tag 0..255 carries an arm and 150 is held as the native-surface
+             * probe, so this rides the leaf door the way modes 4-8 do rather than
+             * spending the probe. The rewrite row (fk_rwtab, "substring") builds
+             *     fk_smknode(201, LIT 9, s, (cons start end))
+             * -- the range lives in the leaf node's THIRD child as a tag-19 NODE,
+             * read child by child below, so the fast door allocates no pair.
+             *
+             * THE CONTRACT IS THE RECIPE'S, measured edge by edge before this arm
+             * existed (substring-byte-edges-band.fk holds them together):
+             *   n = end - start <= 0                 -> ""   (start>end, zero len)
+             *   indices outside [0, len)             -> contribute nothing, so the
+             *                                           answer is s[max(start,0) ..
+             *                                           min(end,len)) and never dies
+             *   s that is not a string (nothing too) -> ""   (every leaf read -1 and
+             *                                           byte_to_str answered "")
+             * BYTES, NOT CODEPOINTS. str_byte_at indexes bytes and the locale rows
+             * are full of multi-byte tongues; flooring to character starts here --
+             * which is what the Go/Rust/TS natives do -- would silently re-cut every
+             * Persian and Chinese row. (0,1) of "Ω" is one raw byte 206, as it is
+             * through the recipe.
+             *
+             * ONE PLACE THIS ANSWERS WHERE THE RECIPE DOES NOT: a `nothing` start.
+             * (sub 2 nothing) is 8999999999999999999, so the recipe halves a range
+             * of nine quintillion and never returns -- measured, an 8 s probe that
+             * printed nothing. A hugely negative start clamps to 0 here and the
+             * slice comes back. A spin carries no meaning to break. */
+            long long rn201 = fk_node[i][3];
+            if (rn201 == 0 || fk_node[rn201][0] != 19) {
+                /* (float_leaf 9 x) written by hand: the door's own arity is 2, so
+                 * no range ever arrived. Never-was answers nothing. */
+                return fk_nothing;
+            }
+            long long ws201 = fk_walk(fk_node[i][2], fp);
+            fk_vp(ws201);
+            long long ss201 = fk_stri(ws201);
+            long long a201 = fk_walk(fk_node[rn201][1], fp) >> 1;
+            long long b201 = fk_walk(fk_node[rn201][2], fp) >> 1;
+            fk_vsp = fk_vsp - 1;
+            if (ss201 < 0 || !FK_SOK(ss201)) {
+                return fk_strv(fk_sintern(fk_sbp, 0));
+            }
+            long long sl201 = FK_SLEN(ss201);
+            if (a201 < 0) {
+                a201 = 0;
+            }
+            if (b201 > sl201) {
+                b201 = sl201;
+            }
+            if (b201 <= a201) {
+                return fk_strv(fk_sintern(fk_sbp, 0));
+            }
+            long long ln201 = b201 - a201;
+            while (fk_sbp + ln201 > fk_scap_b) {
+                fk_scap_b = fk_scap_b * 2;
+                fk_sb = (char *)fk_store_grow('s', fk_sb, fk_scap_b / 2, fk_scap_b, FK_STORE_STR_BYTES, 0);
+                fk_sb_check();
+            }
+            /* FK_SBYTES is re-read AFTER the grow -- fk_store_grow moves fk_sb, and a
+             * pointer taken before it would copy from freed bytes. A plain byte loop,
+             * not memcpy: memcpy is declared only inside this file's __APPLE__ arm, and
+             * str_concat (tag 27) copies its bytes exactly this way on every host. */
+            long long j201 = 0;
+            while (j201 < ln201) {
+                fk_sb[fk_sbp + j201] = FK_SBYTES(ss201)[a201 + j201];
+                j201 = j201 + 1;
+            }
+            return fk_strv(fk_sintern(fk_sbp, ln201));
+        }
         long long fx201 = fk_walk(fk_node[i][2], fp);
         /* modes 4-8: the binary form (value_kind, recipe_to_bytes, bytes_to_recipe,
          * read_form_binary, write_form_binary) -- see fk_fb_door */
