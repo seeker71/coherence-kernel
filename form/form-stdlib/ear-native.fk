@@ -281,13 +281,14 @@
             (add a1 (add a2 (add a3 (add a4 a5))))))
     (defn enw-enc-layers (st l T acc) (if (ge l (enw-layers)) acc (enw-enc-layers st (add l 1) T (add acc (enw-enc-layer st l T)))))
     (defn enw-cross (st l T) (if (ge l (enw-layers)) 0 (add (enw-go st (enw-pi-gemm) (enw-bind-cross st l) (mul (enw-t32 (mul 2 (enw-D))) (enw-t32 T))) (enw-cross st (add l 1) T))))
-    ; returns Tenc, the encoder positions; the encoded window rests in henc and the cross caches
-    (defn enw-encode (st pcm)
-        (do (let L (div (str_len pcm) 2))
+    ; returns Tenc, the encoder positions; the encoded window rests in henc and the cross caches.
+    ; The window's bytes are already in the device buffer when this runs — whoever put them there
+    ; says how many, so a caller holding its audio in pieces never has to make a string of it.
+    (defn enw-encode-at (st nbytes)
+        (do (let L (div nbytes 2))
             (let Tf (div L 160))
             (let Te (div Tf 2))
             (let D (enw-D))
-            (let w0 (metal_buf_write (enw-b st 0) 0 pcm))
             (let s1 (metal_enqueue (enw-p st (enw-pi-spec)) (md-bind16 (list (enw-b st 0) (enw-b st 2) (enw-mel st) (enw-b st 23) (enw-shp st)) (list L Tf) 256 0 1 0) Tf))
             (let s2 (enw-go st (enw-pi-melnorm) (enw-bind-misc st 0) (div (add (mul Tf 80) 255) 256)))
             (let c1 (enw-go st (enw-pi-gemm) (enw-bind-misc st 1) (mul (enw-t32 D) (enw-t32 Tf))))
@@ -298,6 +299,49 @@
             (let cr (enw-cross st 0 Te))
             (let s (metal_sync))
             Te))
+    (defn enw-encode (st pcm)
+        (do (let w0 (metal_buf_write (enw-b st 0) 0 pcm))
+            (enw-encode-at st (str_len pcm))))
+    ; ---- the same encode over a window that is still in pieces ----
+    ; A LIVE LANE HOLDS ITS WINDOW AS THE MIC'S OWN CHUNKS, AND JOINING THEM WAS THE COST OF HEARING.
+    ; Eighty 3200-byte pieces joined right-associated copy ten megabytes to hand the device a quarter
+    ; of one, and that join measured 19.45 ms beside this encoder's own 3.65 ms on a quiet machine
+    ; (314.52 GB/s, 25.77 TFLOPS, 2026-09-07): five sixths of what the live lane's axis called
+    ; "encode" was never the encoder. The bytes have to land in the device buffer regardless, so they
+    ; land there straight from the pieces — one write per piece at its own offset, no string made.
+    ; The pieces are laid at the END of the window, zeros in front while fewer than `want` bytes have
+    ; arrived, which is what a caller's own front-padding meant; a window longer than `want` is cut
+    ; from the front, oldest first. Same answer, same shape, same Te.
+    (defn enw-parts-len (xs) (if (eq (len xs) 0) 0 (add (str_len (head xs)) (enw-parts-len (tail xs)))))
+    (defn enw-parts-drop (xs n)
+        (if (or (le n 0) (eq (len xs) 0)) xs
+            (if (ge n (str_len (head xs))) (enw-parts-drop (tail xs) (sub n (str_len (head xs))))
+                (cons (substring (head xs) n (str_len (head xs))) (tail xs)))))
+    (defn enw-parts-write (st xs off)
+        (if (eq (len xs) 0) off
+            (do (let w (metal_buf_write (enw-b st 0) off (head xs)))
+                (enw-parts-write st (tail xs) (add off (str_len (head xs)))))))
+    ; AND THE SILENCE IN FRONT COST MORE THAN THE JOIN. enw-zeros ends in a substring, and substring
+    ; is not a native here — core.fk halves it down to single bytes and concatenates back, so 192000
+    ; bytes is ~384000 interpreted calls: 43.35 ms measured, against 0.90 ms for the doubling that
+    ; built the same string and 0.50 ms for one 128k+128k str_concat. A doubled block never cut is
+    ; free, so the front is filled with whole 4096-byte blocks of silence. The last block is allowed
+    ; to run PAST the padding into the window: the audio is written after it and covers the overshoot.
+    (defn enw-dbl (s n) (if (ge (str_len s) n) s (enw-dbl (str_concat s s) n)))
+    (defn enw-zblock () (enw-dbl (byte_to_str 0) 4096))
+    (defn enw-zfill (st off pad z)
+        (if (ge off pad) off
+            (do (let w (metal_buf_write (enw-b st 0) off z))
+                (enw-zfill st (add off (str_len z)) pad z))))
+    (defn enw-encode-parts (st parts want)
+        (do (let have (enw-parts-len parts))
+            ; a window longer than `want` is cut from the front; only the straddling piece is ever
+            ; cut, and it is one mic chunk, so the slow door is never handed a large string
+            (let xs (if (gt have want) (enw-parts-drop parts (sub have want)) parts))
+            (let pad (sub want (enw-parts-len xs)))
+            (let z (if (gt pad 0) (enw-zfill st 0 pad (enw-zblock)) 0))
+            (let n (enw-parts-write st xs pad))
+            (enw-encode-at st want)))
     ; ---- one decoder step: token id at position pos; argmax over [lo, hi) and [lo2, hi2) ----
     (defn enw-dec-layer (st l C)
         (do (let D (enw-D)) (let g48 (enw-t8 D))

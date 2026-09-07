@@ -1,0 +1,111 @@
+; ear-gap-probe.fk — where the live lane's "encode" milliseconds actually go.
+; The live lane times (enw-encode st (el-front (el-cat win))) as ONE reading and calls it
+; ear.encode. This walks the same shape in its three parts on the same 8 s window, warm,
+; twenty repetitions each, so a millisecond clock can answer a sub-millisecond question.
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/ear-native.fk
+(do
+    (defn eg-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (eg-cat (tail xs)))))
+    (defn eg-zeros (s n) (if (ge (str_len s) n) (substring s 0 n) (eg-zeros (str_concat s s) n)))
+    (defn eg-front (s) (if (ge (str_len s) 256000) s (str_concat (eg-zeros (byte_to_str 0) (sub 256000 (str_len s))) s)))
+    (defn eg-rep (n acc chunk) (if (eq n 0) acc (eg-rep (sub n 1) (cons chunk acc) chunk)))
+    (defn eg-cat-n (win n acc) (if (eq n 0) acc (eg-cat-n win (sub n 1) (add acc (str_len (eg-cat win))))))
+    (defn eg-front-n (s n acc) (if (eq n 0) acc (eg-front-n s (sub n 1) (add acc (str_len (eg-front s))))))
+    (defn eg-enc-n (st s n acc) (if (eq n 0) acc (eg-enc-n st s (sub n 1) (add acc (enw-encode st s)))))
+    (defn eg-write-n (st s n acc) (if (eq n 0) acc (eg-write-n st s (sub n 1) (add acc (metal_buf_write (enw-b st 0) 0 s)))))
+    (defn eg-whole-n (st win n acc) (if (eq n 0) acc (eg-whole-n st win (sub n 1) (add acc (enw-encode st (eg-front (eg-cat win)))))))
+    (defn eg-parts-n (st win n acc) (if (eq n 0) acc (eg-parts-n st win (sub n 1) (add acc (enw-encode-parts st win 256000)))))
+    (defn eg-zeros-n (want n acc) (if (eq n 0) acc (eg-zeros-n want (sub n 1) (add acc (str_len (eg-zeros (byte_to_str 0) want))))))
+    (defn eg-fill (st off end z) (if (ge off end) end (do (let w (metal_buf_write (enw-b st 0) off z)) (eg-fill st (add off (str_len z)) end z))))
+    (defn eg-zblock-n (st z n acc) (if (eq n 0) acc (eg-zblock-n st z (sub n 1) (add acc (eg-fill st 0 192000 z)))))
+    (defn eg-say (label ms n) (print_str (str_concat label (str_concat " total=" (str_concat (int_to_str ms) (str_concat "ms n=" (str_concat (int_to_str n) (str_concat " per=" (str_concat (int_to_str (div (mul ms 100) n)) "/100 ms")))))))))
+
+    (let snap (str_concat "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/snapshots/" (trim (en-text (read_file "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/refs/main")))))
+    (let st (enw-open (str_concat snap "/weights.npz") "/Users/ursmuff/.mlx-venv/lib/python3.14/site-packages/mlx_whisper/assets/multilingual.tiktoken"))
+    (let bytes (en-text (read_file "form/form-stdlib/tests/fixtures/ear-okay-2s.wav")))
+    (let pcm (substring bytes 44 (str_len bytes)))
+    ; the live lane's window shape: 80 chunks of 3200 bytes, oldest first (8 s at 16 kHz s16)
+    (let chunk (substring pcm 0 3200))
+    (let win (eg-rep 80 (list) chunk))
+    (let full (eg-front (eg-cat win)))
+    ; warm: first touch of the mapped weights lies
+    (let w0 (eg-enc-n st full 3 0))
+
+    (let a0 (now_unix_ms))
+    (let a (eg-cat-n win 20 0))
+    (let a1 (now_unix_ms))
+    (let sayA (eg-say "el-cat  (join 80 chunks)" (sub a1 a0) 20))
+
+    (let joined (eg-cat win))
+    (let b0 (now_unix_ms))
+    (let b (eg-front-n joined 20 0))
+    (let b1 (now_unix_ms))
+    (let sayB (eg-say "el-front(pad to 8 s)   " (sub b1 b0) 20))
+
+    (let c0 (now_unix_ms))
+    (let c (eg-write-n st full 20 0))
+    (let c1 (now_unix_ms))
+    (let sayC (eg-say "metal_buf_write 256 kB " (sub c1 c0) 20))
+
+    (let d0 (now_unix_ms))
+    (let d (eg-enc-n st full 20 0))
+    (let d1 (now_unix_ms))
+    (let sayD (eg-say "enw-encode (alone)     " (sub d1 d0) 20))
+
+    (let e0 (now_unix_ms))
+    (let e (eg-whole-n st win 20 0))
+    (let e1 (now_unix_ms))
+    (let sayE (eg-say "el-hear's whole encms  " (sub e1 e0) 20))
+
+    (let g0 (now_unix_ms))
+    (let g (eg-parts-n st win 20 0))
+    (let g1 (now_unix_ms))
+    (let sayG (eg-say "enw-encode-parts (new) " (sub g1 g0) 20))
+
+    ; the padding path: a window that has not yet filled 8 s (2 s of real audio, 20 chunks)
+    (let short (eg-rep 20 (list) chunk))
+    (let h0 (now_unix_ms))
+    (let h (eg-whole-n st short 20 0))
+    (let h1 (now_unix_ms))
+    (let sayH (eg-say "old, window still short" (sub h1 h0) 20))
+    (let i0 (now_unix_ms))
+    (let i (eg-parts-n st short 20 0))
+    (let i1 (now_unix_ms))
+    (let sayI (eg-say "new, window still short" (sub i1 i0) 20))
+
+    ; what inside the short path costs: the zero string, or writing it?
+    (let j0 (now_unix_ms))
+    (let j (eg-zeros-n 192000 20 0))
+    (let j1 (now_unix_ms))
+    (let sayJ (eg-say "enw-zeros 192000 bytes " (sub j1 j0) 20))
+    (let zblock (eg-zeros (byte_to_str 0) 3200))
+    (let k0 (now_unix_ms))
+    (let k (eg-zblock-n st zblock 20 0))
+    (let k1 (now_unix_ms))
+    (let sayK (eg-say "same 192000 in 3200s   " (sub k1 k0) 20))
+
+    ; SAME ANSWER: mel[0] and enc[0] off both doors on the identical window
+    (let TeA (enw-encode st full))
+    (let melA (en-text (metal_buf_read (enw-mel st) 0 4)))
+    (let encA (en-text (metal_buf_read (enw-b st 10) 0 24)))
+    (let TeB (enw-encode-parts st win 256000))
+    (let melB (en-text (metal_buf_read (enw-mel st) 0 4)))
+    (let encB (en-text (metal_buf_read (enw-b st 10) 0 24)))
+    (print_str (str_concat "same Te=" (str_concat (int_to_str (if (eq TeA TeB) 1 0)) (str_concat " same mel=" (str_concat (int_to_str (if (str_eq melA melB) 1 0)) (str_concat " same enc=" (int_to_str (if (str_eq encA encB) 1 0))))))))
+    ; and on the short window, where the front padding is what has to match
+    (let TeC (enw-encode st (eg-front (eg-cat short))))
+    (let melC (en-text (metal_buf_read (enw-mel st) 0 4)))
+    (let encC (en-text (metal_buf_read (enw-b st 10) 0 24)))
+    (let TeD (enw-encode-parts st short 256000))
+    (let melD (en-text (metal_buf_read (enw-mel st) 0 4)))
+    (let encD (en-text (metal_buf_read (enw-b st 10) 0 24)))
+    (print_str (str_concat "short same Te=" (str_concat (int_to_str (if (eq TeC TeD) 1 0)) (str_concat " same mel=" (str_concat (int_to_str (if (str_eq melC melD) 1 0)) (str_concat " same enc=" (int_to_str (if (str_eq encC encD) 1 0))))))))
+
+    ; the decoder at the live lane's own shape: a fresh line, no prefix
+    (let Te (enw-encode st full))
+    (let f0 (now_unix_ms))
+    (let r (enw-transcribe-from2 st Te 0 24 (sub 0 1) (list)))
+    (let f1 (now_unix_ms))
+    (let sayF (print_str (str_concat "transcribe-from2 ms=" (str_concat (int_to_str (sub f1 f0)) (str_concat " ntok=" (int_to_str (len (nth r 1))))))))
+    (print_str (str_concat "text=" (trim (enw-text st (nth r 1)))))
+    (print (str_len full)))
