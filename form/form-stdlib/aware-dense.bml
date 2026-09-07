@@ -1,0 +1,136 @@
+//////////////////////////////////////////////////////////////////////
+//
+// aware-dense.bml — the walk that gives aware-axes.bml its counts.
+//
+// Authority: form/form-stdlib/aware-dense.bml
+// preludes: form/form-stdlib/aware-axes.bml form/native/metal/dense-token-handle.fk form/form-stdlib/model-registry.bml
+//
+// The dense lane already answers an argmax id per forward. Two more readbacks
+// off the SAME command buffer turn that into a self-measurement and cost
+// nothing extra on the device:
+//
+//   buffer 14 (OutV)   the winning logit -- what the body's best was worth
+//   buffer 11 (Logits) the logit of the word that ACTUALLY came, at its own id
+//   buffer 16 (ArgV)   the 512 partition maxima the two-stage argmax already
+//                      computed on its way to the winner
+//
+// Nothing here dispatches a kernel of its own. The forward is dth-forward
+// unchanged; these are four bytes, four bytes and two kilobytes read back from
+// work the lane had already done. The whole cost of an axis reading is the
+// forwards -- one per token of context plus line -- and those run OFF the live
+// path, on committed lines only, never between a sample and the ear's own row.
+//
+// The handle is opened ONCE for a process's life (dth-open walks the header and
+// binds every layer: measured 1201 ms on this Mac 2026-09-07). A sensor that
+// re-opened per line would spend its whole cadence standing up.
+//
+// Proven by: form/form-stdlib/tests/aware-axes-band.fk (the arithmetic, on
+// synthetic counts) and witnessed by observe/aware-axes-run.fk (the lane, on
+// real lines through the real weights).
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FormAwareDense {
+        field AWDModel = "llama32-1b";
+        field AWDMaxPos = 256;
+        field AWDPosCap = 250;
+
+        def awd-open() = dth-open(mr-path(mr-find(AWDModel())), AWDMaxPos(), sub(0, 1));
+        def awd-src(st) = nth(st, 10);
+        def awd-buf(st, i) = nth(nth(st, 1), i);
+        def awd-forward(st, id, pos) = dth-forward(nth(st, 0), nth(st, 1), nth(st, 2), nth(st, 3), nth(st, 4), nth(st, 5), nth(st, 6), nth(st, 7), nth(st, 8), id, pos);
+
+        // ---- a float word out of a readback string ----------------------------
+        def awd-word(s, i) = add(str_byte_at(s, mul(i, 4)), add(mul(str_byte_at(s, add(mul(i, 4), 1)), 256), add(mul(str_byte_at(s, add(mul(i, 4), 2)), 65536), mul(str_byte_at(s, add(mul(i, 4), 3)), 16777216))));
+        def awd-f32(s, i) = fd-value(awd-word(s, i), 8, 23);
+        def awd-top(st) = awd-f32(metal_buf_read(awd-buf(st, 14), 0, 4), 0);
+        def awd-logit(st, id) = awd-f32(metal_buf_read(awd-buf(st, 11), mul(id, 4), 4), 0);
+
+        // ---- contest: partitions still holding a candidate within one logit ----
+        // The IEEE bit pattern of a POSITIVE float orders exactly as the float does,
+        // so the band is counted with integer compares -- no fd-value per partition.
+        // A partition holding a negative value carries the sign bit and would compare
+        // ABOVE every positive threshold; it is excluded by name, not by luck.
+        // When the threshold itself is negative the ordering flips and this proxy
+        // refuses (-1) instead of answering a number it cannot stand behind.
+        def awd-sign-bit() = 2147483648;
+        def awd-count-go(s, i, n, thr, acc) = if ge(i, n) then acc else awd-count-at(s, i, n, thr, acc);
+        def awd-count-at(s, i, n, thr, acc) {
+            let w = awd-word(s, i);
+            let hit = if and(lt(w, awd-sign-bit()), ge(w, thr)) then 1 else 0;
+            awd-count-go(s, add(i, 1), n, thr, add(acc, hit));
+        }
+        def awd-contest(st, top) {
+            let thr = sub(top, AWXContestBand());
+            if lt(thr, 0.0) then -1 else awd-count-go(metal_buf_read(awd-buf(st, 16), 0, mul(dth-argmax-parts(), 4)), 0, dth-argmax-parts(), md-f32-bits(thr), 0);
+        }
+
+        // ---- the walk ----------------------------------------------------------
+        // acc = list(hits, scored, sumMargin100, maxMargin100, sumContest, contestSeen)
+        def awd-acc0() = list(0, 0, 0, 0, 0, 0);
+        def awd-tally(st, acc, pred, actual) {
+            let top = awd-top(st);
+            let act = awd-logit(st, actual);
+            let m = float_to_int(floor(mul(sub(top, act), 100.0)));
+            let c = awd-contest(st, top);
+            list(add(nth(acc, 0), if eq(pred, actual) then 1 else 0), add(nth(acc, 1), 1), add(nth(acc, 2), m), if gt(m, nth(acc, 3)) then m else nth(acc, 3), add(nth(acc, 4), if lt(c, 0) then 0 else c), add(nth(acc, 5), if lt(c, 0) then 0 else 1));
+        }
+        def awd-walk(st, ids, i, n, from, acc) = if ge(add(i, 1), n) then acc else awd-walk-at(st, ids, i, n, from, acc);
+        def awd-walk-at(st, ids, i, n, from, acc) {
+            let pred = awd-forward(st, nth(ids, i), i);
+            let actual = nth(ids, add(i, 1));
+            let next = if ge(add(i, 1), from) then awd-tally(st, acc, pred, actual) else acc;
+            awd-walk(st, ids, add(i, 1), n, from, next);
+        }
+
+        // ---- ids ---------------------------------------------------------------
+        def awd-bos(src) = dth-u32-or(src, "tokenizer.ggml.bos_token_id", sub(0, 1));
+        def awd-strip-bos(src, ids) = if and(gt(len(ids), 0), eq(head(ids), awd-bos(src))) then tail(ids) else ids;
+        def awd-take(xs, n) = if or(le(n, 0), eq(len(xs), 0)) then list() else cons(head(xs), awd-take(tail(xs), sub(n, 1)));
+        // How many of the line's words the vocabulary holds as ONE piece.
+        //
+        // This is the body's longest-match tokenizer, which walks the WHOLE vocabulary
+        // per position: measured 2026-09-07 at 1.4 s per word against 20 ms per GPU
+        // forward -- the axis that sounds cheapest costs seventy times the transformer.
+        // The stone is an indexed vocabulary; until that exists, the cache is what makes
+        // the axis affordable, because speech repeats its words. A word is priced once
+        // per process, never once per line. The cache travels with the caller so the
+        // cell keeps no living state of its own.
+        def awd-cache-get(cache, w) = if eq(len(cache), 0) then sub(0, 1) else if str_eq(nth(head(cache), 0), w) then nth(head(cache), 1) else awd-cache-get(tail(cache), w);
+        def awd-whole-one(src, w) = if eq(len(awd-strip-bos(src, dtk-encode(src, str_concat(" ", w)))), 1) then 1 else 0;
+        def awd-whole-go(src, words, cache, acc) = if eq(len(words), 0) then list(acc, cache) else awd-whole-at(src, head(words), tail(words), cache, acc);
+        def awd-whole-at(src, w, rest, cache, acc) {
+            let known = awd-cache-get(cache, w);
+            let v = if ge(known, 0) then known else awd-whole-one(src, w);
+            let grown = if ge(known, 0) then cache else cons(list(w, v), cache);
+            awd-whole-go(src, rest, grown, add(acc, v));
+        }
+        // answers list(count, cache)
+        def awd-whole(src, words, cache) = awd-whole-go(src, words, cache, 0);
+
+        // ---- one committed line, weighed against the one before it -------------
+        // One committed line, weighed against the one before it.
+        // ctxIds is the PREVIOUS line's own encoding, carried in rather than cut again:
+        // the context was tokenized when it was itself the line, and re-cutting it doubled
+        // the most expensive lane in this cell for nothing.
+        // answers list(reading, cache, ids) -- the caller carries the word cache and this
+        // line's ids forward as the next line's context.
+        def awd-score(st, ctx, ctxIds, line, own, recurrence, gap, cache) {
+            let src = awd-src(st);
+            let t0 = now_unix_ms();
+            let raw = dtk-encode(src, line);
+            let t1 = now_unix_ms();
+            let lineIds = if eq(len(ctxIds), 0) then raw else awd-strip-bos(src, raw);
+            let all = awd-take(append(ctxIds, lineIds), AWDPosCap());
+            let from = if gt(len(ctxIds), 0) then len(ctxIds) else 1;
+            let acc = awd-walk(st, all, 0, len(all), from, awd-acc0());
+            let t2 = now_unix_ms();
+            let words = awx-words(line);
+            let held = awd-whole(src, words, cache);
+            let t3 = now_unix_ms();
+            list(awx-reading(line, ctx, nth(acc, 0), nth(acc, 1), nth(acc, 2), nth(acc, 3), nth(acc, 4), len(lineIds), len(words), nth(held, 0), own, recurrence, sub(t2, t1), gap, sub(t3, t2), sub(t1, t0)), nth(held, 1), raw);
+        }
+    }
+    0;
+}

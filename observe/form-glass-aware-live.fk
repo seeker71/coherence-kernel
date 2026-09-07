@@ -1,0 +1,77 @@
+; form-glass-aware-live.fk — the body's sense of its own aliveness, as a sensor of the living glass.
+;
+; The ear sensor gives the glass WHAT arrived. This one gives what the arrival was
+; TO THE BODY: whether the moment carried anything it did not already hold, or was
+; the body running while nothing happened. Six axes and one crossing, all in
+; form/form-stdlib/aware-axes.bml; the dense walk that feeds them in aware-dense.bml.
+;
+; OFF THE LIVE PATH, BY CONSTRUCTION. This process reads the ear's spool by its OWN
+; watermark and takes only frames the ear already CLOSED (kind=heard). It never opens
+; the mic, never writes the spool, and never sits between a sample and the ear's own
+; row. The ear's live line lands ~40 ms after the last sample and does not wait for
+; anything here: a reading costs seconds, and it costs them after the line is already
+; on the glass.
+;
+; The declared cadence is 10 s, not the loop's own 500 ms, because that is the truth:
+; a cold line takes ten to twenty seconds to weigh. A sensor that declared a cadence
+; it cannot keep would have the glass call it silent every time it was working.
+;
+; Standing it up:
+;     ./fkwu observe/form-glass-aware-live.fk &
+;     ./fkwu observe/aware-glass-take-run.fk        # a taker, to see the rows cross
+;
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/aware-dense.bml form/form-stdlib/aware-vocab.bml form/form-stdlib/floor-lens.bml form/form-stdlib/form-glass-sensor-rows.bml form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk
+
+(do
+    (defn fga-spool () ".hearth/ear.spool")
+    (defn fga-cadence () 10000)
+    (defn fga-text (t) (if (nothing? t) "" t))
+    (defn fga-line-end (s i) (if (ge i (str_len s)) i (if (eq (str_byte_at s i) 10) i (fga-line-end s (add i 1)))))
+    (defn fga-field (s key) (do (let at (str_find s (str_concat (byte_to_str 10) (str_concat key "=")) 0)) (if (lt at 0) "" (substring s (add at (add (str_len key) 2)) (fga-line-end s (add at (add (str_len key) 2)))))))
+    ; the ear's frames since the last watermark; only the ones it CLOSED are weighed
+    (defn fga-frames (text from acc) (do (let o (str_find text "<|ear:frame|>" from)) (if (lt o 0) (reverse acc) (do (let c (str_find text "<|/ear:frame|>" o)) (if (lt c 0) (reverse acc) (fga-frames text (add c 14) (cons (substring text o (add c 14)) acc)))))))
+    (defn fga-through (text from last) (do (let c (str_find text "<|/ear:frame|>" from)) (if (lt c 0) last (fga-through text (add c 14) (add c 14)))))
+    (defn fga-heard (frames acc) (if (eq (len frames) 0) (reverse acc) (fga-heard (tail frames) (if (str_eq (fga-field (head frames) "kind") "heard") (cons (trim (fga-field (head frames) "heard")) acc) acc))))
+    (defn fga-drain (mark)
+        (do (let sz (file_size (fga-spool)))
+            (if (le sz mark) (list mark (list))
+                (do (let text (fga-text (read_file_slice (fga-spool) mark (sub sz mark))))
+                    (let th (fga-through text 0 0))
+                    (if (eq th 0) (list mark (list))
+                        (list (add mark th) (fga-heard (fga-frames (substring text 0 th) 0 (list)) (list))))))))
+    ; ---- one committed line weighed, and the state that carries forward ----
+    ; state = (reading hist prev prevIds cache last)
+    (defn fga-state (reading hist prev prevIds cache last) (list reading hist prev prevIds cache last))
+    (defn fga-weigh (st vocab state line)
+        (do (let now (now_unix_ms))
+            (let last (nth state 5))
+            (let gap (if (lt last 0) (sub 0 1) (sub now last)))
+            (let rec (awx-recurrence (nth state 1) line))
+            (let own (awx-held (awx-words line) vocab))
+            (let scored (awd-score st (nth state 2) (nth state 3) line own rec gap (nth state 4)))
+            (fga-state (head scored) (awx-remember (nth state 1) line) line (nth scored 2) (nth scored 1) (now_unix_ms))))
+    (defn fga-weigh-all (st vocab state lines)
+        (if (eq (len lines) 0) state (fga-weigh-all st vocab (fga-weigh st vocab state (head lines)) (tail lines))))
+    ; ---- the rows this sensor gives ----
+    (defn fga-rows (state floorRows)
+        (append (if (eq (awx-r-empty? (head state)) 1) (awx-waiting-rows) (awx-rows (head state))) floorRows))
+    (defn fga-step (st vocab state mark floorRows)
+        (do (let d (fga-drain mark))
+            (let next (fga-weigh-all st vocab state (nth d 1)))
+            (let now (now_unix_ms))
+            (let given (fgsr-give-at "aware" now (fgo-observe-rows (fga-rows next floorRows) now 0) (fga-cadence)))
+            (let rested (host_sleep_ms 500))
+            (fga-step st vocab next (head d) floorRows)))
+    (let mk (fs-mkdir ".hearth"))
+    (let t0 (now_unix_ms))
+    (let st (awd-open))
+    (let t1 (now_unix_ms))
+    (let vocab (awv-vocab))
+    (let bw (fl-measure-bw (mr-path (mr-find "llama32-1b"))))
+    (let gbs (fl-gbs bw))
+    (let tfl (fl-tflops (fl-measure-flops)))
+    (let best (fl-best-seen))
+    (let weather (if (le best 0.0) (str_concat "unweighed: " (str_concat (float_to_str gbs) " GB/s measured at this sensor's birth, with no earlier reading of this door in this checkout to call it fast or slow against")) (fl-weather gbs best)))
+    (let floorRows (awx-floor-rows (float_to_int (mul gbs 100.0)) (float_to_int (mul tfl 100.0)) weather (sub t1 t0)))
+    (fga-step st vocab (fga-state (awx-reading-empty) (list) "" (list) (list) (sub 0 1)) 0 floorRows))
