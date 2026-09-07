@@ -8,6 +8,7 @@
 ; device that actually answered metal_status.  Model bytes remain mmap-backed no-copy buffers.
 ;
 ; preludes: native/metal/kat-token-handle.fk form-stdlib/qk-matmul-batch.fk native/metal/qwen35-linear-span-layout-contract.fk form-stdlib/bml/qwen38-open-observation.bml
+; preludes: form-stdlib/declarative-attention-metal.bml
 
 (do
     ; Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
@@ -408,6 +409,9 @@
             1))
 
     (defn q38-full-attn (ps bs geo lay st pos)
+        (q38-full-attn-scoped ps bs geo lay st pos (nothing)))
+
+    (defn q38-full-attn-scoped (ps bs geo lay st pos scope)
         (do
             (q38-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 6) 1)
             (q38-mv ps (nth lay 5) (nth bs 1) (nth bs 2) 1)
@@ -449,11 +453,14 @@
             ; threads argument a GROUP count). The serial one-thread-per-head
             ; dispatch this replaces cost the block ~1.7 ms of its 2.1 ms
             ; (2026-08-24, layer-kind-probe: 2113 -> 553 us per block).
-            (metal_enqueue (nth ps (qlslc-cooperative-gqa-pipeline))
+            (if (nothing? scope)
+              (metal_enqueue (nth ps (qlslc-cooperative-gqa-pipeline))
                 (q38-b16 (list (nth bs 22) (nth st 2) (nth st 3) (nth bs 26) (nth bs 27))
                          (list (add pos 1) (nth geo 12) (nth geo 13) (nth geo 14)
                                (nth geo 17) (nth geo 18)) 1 1)
                 (nth geo 12))
+              (dam-enqueue scope (nth bs 22) (nth st 2) (nth st 3) (nth bs 26) (nth bs 27)
+                  (add pos 1) (nth geo 12) (nth geo 13) (nth geo 14) (nth geo 17) (nth geo 18)))
             (metal_enqueue (nth ps 17)
                 (q38-b16 (list (nth bs 26) (nth bs 23))
                     (list (mul (nth geo 12) (nth geo 14))) 0 1)
@@ -838,12 +845,15 @@
             (list (q38-head-only ps bs geo onormTv projTv) (add pos n))))
 
     (defn q38-blocks (ps bs geo lays sts pos l n interval)
+        (q38-blocks-scoped ps bs geo lays sts pos l n interval (nothing)))
+
+    (defn q38-blocks-scoped (ps bs geo lays sts pos l n interval scope)
         (if (ge l n) 1
             (do (if (kth-full? l interval)
-                    (q38-full-attn ps bs geo (nth lays l) (nth sts l) pos)
+                    (q38-full-attn-scoped ps bs geo (nth lays l) (nth sts l) pos scope)
                     (q38-linear-attn ps bs geo (nth lays l) (nth sts l)))
                 (q38-ffn ps bs geo (nth lays l))
-                (q38-blocks ps bs geo lays sts pos (add l 1) n interval))))
+                (q38-blocks-scoped ps bs geo lays sts pos (add l 1) n interval scope))))
 
     (defn q38-head (ps bs geo onormTv projTv)
         (do
@@ -883,13 +893,16 @@
     ; head, because the head answers a QUESTION (which token is next) and a
     ; position nobody asks about does not need it asked.
     (defn q38-forward-state (ps bs geo lays sts embTv id pos)
+        (q38-forward-state-scoped ps bs geo lays sts embTv id pos (nothing)))
+
+    (defn q38-forward-state-scoped (ps bs geo lays sts embTv id pos scope)
         (do
             (metal_batch_concurrent)
             (metal_enqueue (nth ps 30)
                 (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
                          (list (mul id (nth geo 0)) (nth geo 0)) 0 0)
                 (nth geo 0))
-            (q38-blocks ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22))
+            (q38-blocks-scoped ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22) scope)
             1))
 
     (defn q38-forward (ps bs geo lays sts embTv onormTv projTv id pos)
@@ -897,6 +910,15 @@
             (q38-forward-state ps bs geo lays sts embTv id pos)
             (q38-head ps bs geo onormTv projTv)
             (kth-u32at (metal_buf_read (nth bs 31) 0 4) 0)))
+
+    ; Opt-in scope entry. Refuse before advancing recurrent state or KV when
+    ; the plan cannot cover the present position inside the allocated cache.
+    (defn q38-forward-scoped (ps bs geo lays sts embTv onormTv projTv id pos scope)
+        (if (or (eq (dam-valid? scope (add pos 1)) 0) (ge pos (nth geo 18))) -1
+            (do
+                (q38-forward-state-scoped ps bs geo lays sts embTv id pos scope)
+                (q38-head ps bs geo onormTv projTv)
+                (kth-u32at (metal_buf_read (nth bs 31) 0 4) 0))))
 
     ; The adapted entry refuses a mismatched adapter before any model state is
     ; advanced.  A successful token therefore crossed the device rank-one head,
@@ -1063,6 +1085,7 @@
                 (q38-lm-embed ps bs geo embTv (take n ids) 0)
                 (q38-lm-layers-span ps bs geo lays sts 0 (nth geo 21) n pos)
                 (metal_sync)
+                (q38oo-stage (str_concat "model-prefill-positions-" (int_to_str (add pos n))) 8388623)
                 (q38-prefill-sliced-go ps bs geo lays sts embTv
                     (drop n ids) (add pos n) span))))
     (defn q38-prefill-span-sliced (ps bs geo lays sts embTv onormTv projTv ids pos span)

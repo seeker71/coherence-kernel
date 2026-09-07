@@ -184,7 +184,11 @@ async function lowerBmlSource(bmlAbsPath: string): Promise<string> {
       );
     }
   });
-  const cacheDir = join(dirname(chainPaths[0]), ".cache", "kernel-bml-lowered");
+  const compilerRoot = chainPaths[0];
+  if (compilerRoot === undefined) {
+    throw new Error(`BML compiler chain is empty (needed to lower ${bmlAbsPath})`);
+  }
+  const cacheDir = join(dirname(compilerRoot), ".cache", "kernel-bml-lowered");
   const cachePath = join(cacheDir, `${key}.fk`);
   try {
     const cached = await readFile(cachePath, "utf8");

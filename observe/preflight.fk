@@ -139,6 +139,16 @@
     (defn pf-dir () (do (fs_mkdir (str_concat (temp_dir) "/preflight"))
                         (str_concat (temp_dir) "/preflight")))
     (defn pf-run (cmd) (host-exec (str_concat cmd " 2>&1") ""))
+    (defn pf-command-failure-mark () "[preflight-command-failed]")
+    (defn pf-command-failed? (out)
+        (if (ge (str_find out (pf-command-failure-mark) 0) 0) 1 0))
+    ; A signal or runtime failure can emit no compiler diagnostic. Preserve
+    ; the child exit status before interpreting the diagnostic text.
+    (defn pf-run-checked (cmd)
+        (host-exec (pf-cat (list "( " cmd " ) 2>&1; pf_child_status=$?; "
+            "if [ \"$pf_child_status\" -ne 0 ]; then printf '\\n"
+            (pf-command-failure-mark)
+            " exit=%s\\n' \"$pf_child_status\"; fi")) ""))
 
     ;; ── does an arm resolve this name? ──────────────────────────────
     ;; The probe calls the name with one argument and asks only whether the
@@ -233,7 +243,7 @@
                     " effectful-execution-refused source-preserved path=" path))
                 (do (fs_remove (pf-sub path ".fk" ".fkb"))
                     (fs_remove (pf-sub path ".fk" ".sym"))
-                    (pf-run (str_concat "./fkwu " path))))))
+                    (pf-run-checked (str_concat "./fkwu " path))))))
 
     ;; ── the unresolved names in that output ─────────────────────────
     (defn pf-mark () "[unresolved-call] '")
@@ -330,10 +340,13 @@
                     (pf-tally-loop out start (if valid line held))))))
     (defn pf-tally (out) (pf-tally-loop out 0 ""))
     (defn pf-errors (out)
-        (if (eq (pf-unsupported? out) 1) 1
+        (do (let counted (pf-num-before (pf-tally out) " error(s)"
+                (if (ge (str_find out "fkwu: error:" 0) 0) 1 0)))
+          (if (eq (pf-unsupported? out) 1) 1
             (if (eq (pf-effect-refused? out) 1) 1
-                (pf-num-before (pf-tally out) " error(s)"
-                    (if (ge (str_find out "fkwu: error:" 0) 0) 1 0)))))
+                (if (pf-command-failed? out)
+                    (if (gt counted 0) counted 1)
+                    counted)))))
     (defn pf-warnings (out) (pf-num-before (pf-tally out) " warning(s)" 0))
     (defn pf-clean? (out) (if (eq (pf-errors out) 0) 1 0))
 

@@ -1,0 +1,68 @@
+// Reversible attention scopes, driven only by generated output bytes.
+// Source: https://arxiv.org/abs/2609.02737 (protocol); native interval plan here.
+// Prelude/response positions stay absolute. A declaration never evicts KV.
+// preludes: form-stdlib/core.fk
+
+section [form.bml] {
+    class DeclarativeAttention {
+        field DAControlBytes = 128;
+        field DAFocusOpen = "<focus magic_chunks=\"";
+        field DAMaxChunks = 64;
+
+        // config: prefix end, question start, response start, ordered chunks.
+        // chunk: positive id, inclusive start, exclusive end.
+        def da-member(x, xs) = if eq(len(xs), 0) then 0 else if eq(x, head(xs)) then 1 else da-member(x, tail(xs));
+        def da-chunks-valid(xs, lower, upper, seen) = if eq(len(xs), 0) then 1 else if not(eq(len(head(xs)), 3)) then 0 else da-chunk-valid(head(xs), tail(xs), lower, upper, seen);
+        def da-chunk-valid(c, rest, lower, upper, seen) = if le(nth(c, 0), 0) then 0 else if da-member(nth(c, 0), seen) then 0 else if lt(nth(c, 1), lower) then 0 else if le(nth(c, 2), nth(c, 1)) then 0 else if gt(nth(c, 2), upper) then 0 else da-chunks-valid(rest, nth(c, 2), upper, cons(nth(c, 0), seen));
+        def da-config(prefixEnd, questionStart, responseStart, chunks) = if lt(prefixEnd, 0) then nothing() else if lt(questionStart, prefixEnd) then nothing() else if le(responseStart, questionStart) then nothing() else if gt(len(chunks), DAMaxChunks()) then nothing() else if eq(da-chunks-valid(chunks, prefixEnd, questionStart, list()), 0) then nothing() else list(prefixEnd, questionStart, responseStart, chunks);
+
+        // state: mode, static ranges, live tail start, pending control bytes,
+        // refused controls, completed transitions, first response position.
+        // Static ranges are resolved ONLY at a completed mode transition.
+        def da-state(mode, ranges, tailStart, pending, refused, transitions, responseStart) = list(mode, ranges, tailStart, pending, refused, transitions, responseStart);
+        def da-initial(cfg) = if nothing?(cfg) then nothing() else da-state(0, list(), 0, "", 0, 0, nth(cfg, 2));
+        def da-mode(s) = nth(s, 0);
+        def da-ranges(s) = nth(s, 1);
+        def da-tail(s) = nth(s, 2);
+        def da-pending(s) = nth(s, 3);
+        def da-refused(s) = nth(s, 4);
+        def da-transitions(s) = nth(s, 5);
+        def da-held(s, text) = da-state(da-mode(s), da-ranges(s), da-tail(s), text, da-refused(s), da-transitions(s), nth(s, 6));
+        def da-global(s, refused) = da-state(0, list(), 0, "", add(da-refused(s), refused), add(da-transitions(s), 1), nth(s, 6));
+        def da-prefix(cfg) = if eq(nth(cfg, 0), 0) then list() else list(list(0, nth(cfg, 0)));
+        def da-selected(chunks, ids) = if eq(len(chunks), 0) then list() else if da-member(nth(head(chunks), 0), ids) then cons(list(nth(head(chunks), 1), nth(head(chunks), 2)), da-selected(tail(chunks), ids)) else da-selected(tail(chunks), ids);
+        def da-local(s, cfg) = da-state(2, da-prefix(cfg), nth(cfg, 1), "", da-refused(s), add(da-transitions(s), 1), nth(cfg, 2));
+        def da-focus(s, cfg, ids) {
+            let ranges = da-selected(nth(cfg, 3), ids);
+            if eq(len(ids), 0) then da-global(s, 1) else if not(eq(len(ranges), len(ids))) then da-global(s, 1) else da-state(1, append(da-prefix(cfg), ranges), nth(cfg, 1), "", da-refused(s), add(da-transitions(s), 1), nth(cfg, 2));
+        }
+        def da-digits(text, i) = if ge(i, str_len(text)) then 1 else if and(ge(ord(char_at(text, i)), 48), le(ord(char_at(text, i)), 57)) then da-digits(text, add(i, 1)) else 0;
+        def da-id(text) = if eq(str_len(text), 0) then 0 else if eq(da-digits(text, 0), 0) then 0 else if not(str_eq(int_to_str(str_to_int(text)), text)) then 0 else str_to_int(text);
+        def da-ids(text, acc) {
+            let comma = str_find(text, ",", 0);
+            let part = if lt(comma, 0) then text else substring(text, 0, comma);
+            let id = da-id(part);
+            if le(id, 0) then list() else if da-member(id, acc) then list() else if lt(comma, 0) then reverse(cons(id, acc)) else da-ids(substring(text, add(comma, 1), str_len(text)), cons(id, acc));
+        }
+        def da-tag(s, tag, cfg) {
+            if str_eq(tag, "<local>") then da-local(s, cfg)
+            else if or(str_eq(tag, "<global>"), or(str_eq(tag, "</global>"), or(str_eq(tag, "</focus>"), str_eq(tag, "</local>")))) then da-global(s, 0)
+            else if eq(str_find(tag, "<focus", 0), 0) then da-focus-tag(s, tag, cfg)
+            else da-held(s, "");
+        }
+        def da-focus-tag(s, tag, cfg) = if not(eq(str_find(tag, DAFocusOpen(), 0), 0)) then da-global(s, 1) else if not(str_eq(substring(tag, sub(str_len(tag), 2), str_len(tag)), "\">")) then da-global(s, 1) else da-focus(s, cfg, da-ids(substring(tag, str_len(DAFocusOpen()), sub(str_len(tag), 2)), list()));
+        def da-byte(s, c, cfg) {
+            if str_eq(c, "<") then da-held(s, c)
+            else if eq(str_len(da-pending(s)), 0) then s
+            else da-control-byte(s, c, cfg, str_concat(da-pending(s), c));
+        }
+        def da-control-byte(s, c, cfg, held) = if gt(str_len(held), DAControlBytes()) then da-global(s, 1) else if str_eq(c, ">") then da-tag(s, held, cfg) else da-held(s, held);
+        def da-feed-go(s, text, i, cfg) = if ge(i, str_len(text)) then s else da-feed-go(da-byte(s, char_at(text, i), cfg), text, add(i, 1), cfg);
+        def da-feed-output(s, text, cfg) = if nothing?(s) then nothing() else if nothing?(cfg) then nothing() else da-feed-go(s, text, 0, cfg);
+        def da-range-count(ranges) = if eq(len(ranges), 0) then 0 else add(sub(nth(head(ranges), 1), nth(head(ranges), 0)), da-range-count(tail(ranges)));
+        def da-attended(s, npos) = if lt(npos, nth(s, 6)) then nothing() else add(da-range-count(da-ranges(s)), sub(npos, da-tail(s)));
+        def da-in-ranges(pos, ranges) = if eq(len(ranges), 0) then 0 else if and(ge(pos, nth(head(ranges), 0)), lt(pos, nth(head(ranges), 1))) then 1 else da-in-ranges(pos, tail(ranges));
+        def da-visible(s, pos, npos) = if or(lt(pos, 0), ge(pos, npos)) then 0 else if ge(pos, da-tail(s)) then 1 else da-in-ranges(pos, da-ranges(s));
+    }
+    0;
+}

@@ -1,0 +1,42 @@
+// Metal executes the declared ranges against the resident KV buffers.
+// Static ranges upload at transitions; the response tail grows by a constant.
+// preludes: form-stdlib/core.fk form-stdlib/declarative-attention.bml form-stdlib/metal-door.fk form-stdlib/llama-decode-msl.fk
+
+section [form.bml] {
+    class DeclarativeAttentionMetal {
+        field DAMKernel = "form_declarative_gqa_f32";
+        field DAMThreads = 256;
+        def dam-cat(xs) = if eq(len(xs), 0) then "" else str_concat(head(xs), dam-cat(tail(xs)));
+        def dam-msl() = dam-cat(list(
+            "#include <metal_stdlib>\n#pragma clang fp contract(off)\n",
+            ldm-msl-helpers(),
+            "inline uint da_position(device const uint* ranges, uint nr, uint base, uint tail, uint t) { if (t >= base) return tail + t - base; for (uint r=0; r<nr; ++r) { uint n=ranges[2*r+1]-ranges[2*r]; if(t<n) return ranges[2*r]+t; t-=n; } return tail; }\n",
+            "kernel void ", DAMKernel(),
+            "(device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device float* y [[buffer(3)]], device float* sc [[buffer(4)]], device const uint* ranges [[buffer(5)]], constant uint& npos [[buffer(6)]], constant uint& nr [[buffer(7)]], constant uint& nq [[buffer(8)]], constant uint& nkv [[buffer(9)]], constant uint& hd [[buffer(10)]], constant float& scale [[buffer(11)]], constant uint& stride [[buffer(12)]], constant uint& base [[buffer(13)]], constant uint& tail [[buffer(14)]], uint3 group [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simd [[simdgroup_index_in_threadgroup]]) {",
+            " uint h=group.x; if(h>=nq) return; uint count=base+npos-tail; uint lid=uint(simd)*32u+uint(lane); uint kvh=h/(nq/nkv), kvd=nkv*hd, qo=h*hd, ko=kvh*hd, S=h*stride, E=(nq+h)*stride; threadgroup float sh[16];",
+            " for(uint t=lid;t<count;t+=256u) { uint p=da_position(ranges,nr,base,tail,t); float a=0; for(uint c=0;c<hd;++c) a=metal::fma(q[qo+c],kc[p*kvd+ko+c],a); sc[S+t]=a*scale; } metal::threadgroup_barrier(metal::mem_flags::mem_device);",
+            " float mx=-3.4e38f; for(uint t=lid;t<count;t+=256u) mx=metal::max(mx,sc[S+t]); mx=metal::simd_max(mx); if(lane==0) sh[simd]=mx; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float maximum=sh[0]; for(uint k=1;k<8;++k) maximum=metal::max(maximum,sh[k]);",
+            " float se=0; for(uint t=lid;t<count;t+=256u) { float e=fexp(sc[S+t]-maximum); sc[E+t]=e; se+=e; } se=metal::simd_sum(se); if(lane==0) sh[8+simd]=se; metal::threadgroup_barrier(metal::mem_flags::mem_device|metal::mem_flags::mem_threadgroup); float total=0; for(uint k=0;k<8;++k) total+=sh[8+k]; float inv=1.0f/total;",
+            " for(uint c=lid;c<hd;c+=256u) { float a=0; for(uint t=0;t<count;++t) { uint p=da_position(ranges,nr,base,tail,t); a=metal::fma(vc[p*kvd+ko+c],sc[E+t],a); } y[qo+c]=a*inv; } }"));
+
+        // device: pipeline, range buffer, capacity. Caller owns one per stream.
+        def dam-open() {
+            let pipeline = metal_pipeline(dam-msl(), DAMKernel());
+            if le(pipeline, 0) then nothing() else dam-open-buffer(pipeline, metal_buf_alloc(mul(add(DAMaxChunks(), 1), 8)));
+        }
+        def dam-open-buffer(pipeline, buffer) = if le(buffer, 0) then nothing() else list(pipeline, buffer, add(DAMaxChunks(), 1));
+        def dam-close(device) = if nothing?(device) then 0 else metal_buf_free(nth(device, 1));
+        def dam-range-bytes(ranges) = if eq(len(ranges), 0) then "" else dam-cat(list(md-le32(nth(head(ranges), 0)), md-le32(nth(head(ranges), 1)), dam-range-bytes(tail(ranges))));
+        // scope: pipeline, ranges handle, range count, static count, tail,
+        // response start. No token ids or KV buffers are copied or renumbered.
+        def dam-select(device, state) = if nothing?(device) then nothing() else if nothing?(state) then nothing() else if gt(len(da-ranges(state)), nth(device, 2)) then nothing() else dam-upload(device, state, dam-range-bytes(da-ranges(state)));
+        def dam-upload(device, state, bytes) {
+            let wrote = if eq(str_len(bytes), 0) then 0 else metal_buf_write(nth(device, 1), 0, bytes);
+            if not(eq(wrote, str_len(bytes))) then nothing() else list(nth(device, 0), nth(device, 1), len(da-ranges(state)), da-range-count(da-ranges(state)), da-tail(state), nth(state, 6));
+        }
+        def dam-valid?(scope, npos) = if nothing?(scope) then 0 else if not(eq(len(scope), 6)) then 0 else if le(nth(scope, 0), 0) then 0 else if le(nth(scope, 1), 0) then 0 else if lt(npos, nth(scope, 5)) then 0 else if ge(nth(scope, 4), npos) then 0 else 1;
+        def dam-attended(scope, npos) = add(nth(scope, 3), sub(npos, nth(scope, 4)));
+        def dam-enqueue(scope, q, keys, values, out, scratch, npos, nq, nkv, hd, scaleBits, stride) = if eq(dam-valid?(scope, npos), 0) then 0 else if gt(dam-attended(scope, npos), stride) then 0 else metal_enqueue(nth(scope, 0), md-bind16(list(q, keys, values, out, scratch, nth(scope, 1)), list(npos, nth(scope, 2), nq, nkv, hd, scaleBits, stride, nth(scope, 3), nth(scope, 4)), DAMThreads(), 0, 1, 1), nq);
+    }
+    0;
+}

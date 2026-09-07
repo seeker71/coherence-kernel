@@ -1,0 +1,353 @@
+// A bounded repair movement, callable by the real form-cli dispatch.
+// preludes: form-stdlib/bml/form-cli-heal-resources.bml form-stdlib/bml/form-cli-heal-eval-policy.bml form-stdlib/bml/form-cli-heal-learning.bml observe/bidirectional-framebuffer-channel.fk
+section [form.bml] {
+    class FormCliHeal {
+        field HealHost = "form/scripts/heal-host.py";
+        field HealMemory = ".form-heal/learned.tsv";
+        def fh-append(path, text) = host-exec(str_concat("python3", fh-args(list(HealHost(), "append", path))), text);
+        def fh-host(args) = fh-trim(host-exec(str_concat("python3", fh-args(cons(HealHost(), args))), ""));
+        def fh-path(job, leaf) = fh-cat(list(job, "/", leaf));
+        def fh-read(path) = if gt(file_size(path), 0) then read_file_slice(path, 0, HealMaxSource()) else "";
+        def fh-write(job, leaf, text) = write_file(fh-path(job, leaf), text);
+        def fh-log(job, stage, result) = fh-append(fh-path(job, "attempts.tsv"), fh-cat(list(stage, "\t", result, "\n")));
+        def fh-choice(job, stage, id, state, offered, selected, reason, result) = fh-host(list("choice", job, stage, int_to_str(id), state, json-emit(json-node-array(fhe-strings(offered))), selected, reason, result));
+        def fh-stage-line(stage) {
+            let observed = fb_record(intern_trivial_string(stage), "form-cli-heal.bml", 0);
+            print_str(fh-cat(list("form-peer stage route=healing phase=", stage, " status=value stamp-ms=", int_to_str(now_unix_ms()), "\n")));
+        }
+        def fh-stage(job, stage) = if gt(file_size(fh-path(job, "evaluation-only")), 0) then fh-stage-line(stage) else 0;
+        def fh-run(job, name, seconds, directory, input, argv) {
+            let id = now_unix_ms();
+            let options = list(if eq(seconds, 0) then "run-with-dynamic-observation" else "run-with-fixed-deadline");
+            let selected = fh-choice(job, name, id, "selected", options, head(options), if eq(seconds, 0) then "progress-driven;explicit-stop-control;no-lifetime-deadline" else str_concat("caller-bound;budget-seconds=", int_to_str(seconds)), "awaiting-process");
+            let entered = fh-stage(job, fh-cat(list("healing-process-", name, "-begin")));
+            let status = fh-host(append(list("run", job, name, int_to_str(seconds), directory, input), argv));
+            let returned = fh-stage(job, fh-cat(list("healing-process-", name, "-ready")));
+            let applied = fh-choice(job, name, id, "applied", options, head(options), if eq(seconds, 0) then "dynamic-observation-returned" else "deadline-and-output-bound-enforced", str_concat("exit=", status));
+            let notice = if str_eq(status, "124") then print_str(fh-report(job)) else 0;
+            status;
+        }
+        def fh-report(job) {
+            let entered = fh-stage(job, "healing-report-begin");
+            let report = fh-host(list("report", job));
+            let returned = fh-stage(job, "healing-report-ready");
+            report;
+        }
+        def fh-out(job, name) = fh-read(fh-path(job, str_concat(name, ".out")));
+        def fh-status(job, name) = fh-read(fh-path(job, str_concat(name, ".status")));
+        def fh-errors(job, name) = fh-read(fh-path(job, str_concat(name, ".err")));
+        def fh-tested(job, name, expected) = fh-check(fh-status(job, name), fh-out(job, name), fh-errors(job, name), expected);
+        def fh-test(job, name, band, expected, seconds) {
+            let input = fh-write(job, str_concat(name, ".preflight-input"), str_concat(band, "\n"));
+            let preflight = fh-run(job, str_concat(name, "-preflight"), seconds, "work", fh-path(job, str_concat(name, ".preflight-input")), list("./fkwu", "observe/preflight-stdin-run.fk"));
+            let clean = and(str_eq(preflight, "0"), fh-has(fh-out(job, str_concat(name, "-preflight")), "chain         clean"));
+            let status = fh-run(job, name, seconds, "work", "-", list("./fkwu", band));
+            let passed = and(clean, fh-tested(job, name, expected));
+            let logged = fh-log(job, name, fh-cat(list("exit=", status, " expected=", expected, " pass=", int_to_str(passed))));
+            passed;
+        }
+        def fh-symbol(log) {
+            let at = str_find(log, "[unresolved-call]", 0);
+            let first = if lt(at, 0) then -1 else str_find(log, "'", at);
+            let end = if lt(first, 0) then -1 else str_find(log, "'", add(first, 1));
+            if or(lt(first, 0), lt(end, 0)) then "healing" else fh-cap(substring(log, add(first, 1), end), 128);
+        }
+        def fh-evidence(job, target) {
+            let log = str_concat(fh-out(job, "baseline"), fh-errors(job, "baseline"));
+            let symbol = fh-symbol(log);
+            let git = fh-run(job, "git", 15, "root", "-", list("git", "log", "-3", "-p", "--", target));
+            let history = fh-run(job, "symbol-history", 15, "root", "-", list("git", "log", "-3", "--all", "-p", "-S", symbol, "--", "form", "model", "observe"));
+            let files = fh-run(job, "files", 15, "root", "-", list("rg", "-n", "-F", "--glob", "*.fk", "--glob", "*.bml", "--", symbol, "form", "observe", "model", "cognition", "learn"));
+            let query = fh-write(job, "rag.query", fh-cat(list(symbol, " ", target, " repair\n")));
+            let rag = fh-run(job, "rag", 30, "root", fh-path(job, "rag.query"), list("./fkwu", "observe/form-cli-heal-rag-run.bml"));
+            let evidence = fh-cat(list("Class: ", fh-classify(log), "\nChecker contract: ", fh-read(fh-path(job, "contract")), "\nChecker source:\n", fh-cap(fh-read(fh-read(fh-path(job, "band"))), 2500), "\nBaseline process status: ", fh-status(job, "baseline"), "\n", fh-cap(log, 3000), "\nRepair lessons:\n", fh-read(HealLessonPath()), "\nCurrent filesystem references (exit ", files, "):\n", fh-cap(fh-out(job, "files"), 3000), "\nGit history (exit ", git, "):\n", fh-cap(fh-out(job, "git"), 4000), "\nRAG (exit ", rag, "):\n", fh-cap(fh-out(job, "rag"), 3000)));
+            fh-write(job, "evidence.txt", evidence);
+            fh-append(fh-path(job, "evidence.txt"), str_concat("\nSymbol history:\n", fh-cap(fh-out(job, "symbol-history"), 3000)));
+        }
+        def fh-adjudicate(exchange, passed) {
+            let out = bfc-envelope(0, exchange, 0, list(passed), 0);
+            let recorded = bfc-record-out(out, passed);
+            let control = bfc-control(out, if passed then 6 else 8);
+            let incoming = bfc-record-in(control, bfc-payload(control));
+            if and(eq(bfc-exchange(out), bfc-exchange(control)), and(eq(bfc-direction(control), 1), eq(bfc-kind(control), 1))) then if eq(bfc-payload(control), 6) then 1 else 0 else 0;
+        }
+        def fh-remember(job, target, band, expected, route, candidate) {
+            let saved = fh-write(job, "accepted-source", candidate);
+            let receipt = fh-write(job, "verified.tsv", fh-cat(list(HealVersion(), "\t", target, "\t", band, "\t", expected, "\t", route, "\n")));
+            let evaluation = gt(file_size(fh-path(job, "evaluation-only")), 0);
+            let memory = if fhe-memory-allowed(evaluation) then fh-append(HealMemory(), fh-cat(list(job, "\t", target, "\t", band, "\t", expected, "\n"))) else "excluded";
+            let training = fh-write(job, "training-candidate.txt", if evaluation then "Evaluation-only record. Excluded from repair memory and training; no weight update has occurred.\n" else "Verified repair example: original + accepted-source + verified.tsv + process records. Candidate for training and held-out evaluation; no weight update has occurred.\n");
+            fh-log(job, "learning", if evaluation then "evaluation-only;memory-excluded;weights-unchanged" else "retrievable-example;weights-unchanged");
+        }
+        def fh-try(job, target, band, expected, seconds, candidate, route, number) {
+            let result = if or(str_eq(candidate, ""), gt(str_len(candidate), HealMaxSource())) then fh-no-proposal(job, route, number) else fh-try-reset(job, target, band, expected, seconds, candidate, route, add(now_unix_ms(), number));
+            let learned = fh-learn-round(job, route, result);
+            result;
+        }
+        def fh-learn-round(job, route, result) {
+            let state = fhl-state(gt(file_size(fh-path(job, "evaluation-only")), 0), gt(file_size(HealLearnerConfig()), 0));
+            let observation = fh-cat(list("Checker contract: ", fh-read(fh-path(job, "contract")), "\nRecorded attempts:\n", fh-cap(fh-read(fh-path(job, "attempts.tsv")), 2000), if eq(result, 1) then str_concat("\nVerified source:\n", fh-cap(fh-read(fh-path(job, "accepted-source")), 4000)) else "\nNo verified replacement was admitted in this round."));
+            let learned = if str_eq(state, "training-required") then fh-learn-prepare(job, route, fhl-row(route, fhl-outcome(result), observation)) else state;
+            fh-log(job, str_concat("learning-", route), learned);
+        }
+        def fh-learn-prepare(job, route, row) {
+            let stage = str_concat("learn-prepare-", route);
+            let input = fh-path(job, str_concat(stage, ".json"));
+            let wrote = write_file(input, row);
+            let request = list("python3", HealHost(), "learn-prepare", job, route, mr-path(mr-find(HealLearnerModel())), HealLearnerSeed(), HealLearnerValidation());
+            let status = fh-run(job, stage, HealLearnerSeconds(), "root", input, request);
+            let prepared = fh-trim(fh-out(job, stage));
+            let fields = split-on(prepared, "\n");
+            if not(and(str_eq(status, "0"), eq(len(fields), 2))) then str_concat("learning-prepare-refused:", prepared) else fh-learn-execute(job, head(fields), nth(fields, 1));
+        }
+        def fh-learn-execute(job, roundPath, parent) {
+            let round = head(reverse(split-on(roundPath, "/")));
+            let status = fh-run(job, round, HealLearnerSeconds(), "root", "-", fhl-command(mr-path(mr-find(HealLearnerModel())), str_concat(roundPath, "/data"), str_concat(roundPath, "/adapter"), parent));
+            fh-host(list("learn-complete", roundPath, status));
+        }
+        def fh-no-proposal(job, route, number) {
+            let control = fh-adjudicate(add(now_unix_ms(), number), 0);
+            let logged = fh-log(job, route, "no-admissible-proposal;return-unresolved-to-caller");
+            let observed = fb_record(intern_trivial_int(number), "form-cli-heal.bml", 0);
+            0;
+        }
+        def fh-try-list(job, target, band, expected, seconds, candidates, i) = if or(nil?(candidates), ge(i, HealMaxCandidates())) then 0 else fh-try-next(job, target, band, expected, seconds, candidates, i);
+        def fh-memory(rows, original, band, expected, remaining) = if or(nil?(rows), le(remaining, 0)) then list() else fh-memory-row(rows, original, band, expected, remaining);
+        def fh-prompt-file(job, role) {
+            let context = fh-cat(list("Attempts so far:\n", fh-cap(fh-read(fh-path(job, "attempts.tsv")), 2000), "\nLocal diagnosis:\n", fh-cap(fh-out(job, "local-diagnosis"), 1500), if str_eq(role, "review") then str_concat("\nProposed patch:\n", fh-cap(fh-out(job, "local-patch"), 5000)) else "", "\n", fh-cap(fh-read(fh-path(job, "evidence.txt")), 7000)));
+            let prompt = fh-prompt(role, context, fh-read(fh-path(job, "original")));
+            if gt(str_len(prompt), 24000) then "" else fh-save-prompt(job, role, prompt);
+        }
+        def fh-model(job, mode, model, artifact, stage, offered, reason) {
+            let id = now_unix_ms();
+            let selected = fh-choice(job, stage, id, "selected", offered, model, reason, "awaiting-generation");
+            let prompt = fh-prompt-file(job, "patch");
+            let reply = fh-path(job, str_concat(stage, ".reply"));
+            let frozen = if str_eq(artifact, "") then "" else fh-path(job, str_concat(stage, ".adapter.safetensors"));
+            let copied = if str_eq(artifact, "") then 0 else write_file(frozen, read_file(artifact));
+            let input = fh-cat(list(mode, "\n", model, "\n", prompt, "\n", reply, "\n", frozen, "\n"));
+            let request = fh-write(job, str_concat(stage, ".request"), input);
+            let status = if str_eq(prompt, "") then "prompt-limit" else fh-run(job, stage, HealNativeSeconds(), "root", fh-path(job, str_concat(stage, ".request")), list("./fkwu", "observe/form-cli-heal-model-run.bml"));
+            let logged = fh-log(job, stage, str_concat("exit=", status));
+            let applied = fh-choice(job, stage, id, "applied", offered, model, reason, str_concat("generation-exit=", status));
+            if str_eq(status, "0") then fh-read(reply) else "";
+        }
+        // Adapter registration binds base and adapter bytes to an evaluation
+        // receipt. A seed artifact without this evidence is not admitted here.
+        def fh-adapter(model, inventory) {
+            let fields = split-on(fh-trim(fh-read(".form-heal/adapter.tsv")), "\t");
+            if not(eq(len(fields), 6)) then "" else if not(str_eq(head(fields), model)) then "" else if not(str_eq(fh-host(list("hash", fh-model-path(inventory, model))), nth(fields, 1))) then "" else fh-adapter-receipt(model, fields);
+        }
+        def fh-model-path(rows, model) = if nil?(rows) then "" else fh-model-path-row(rows, model, split-on(head(rows), "\t"));
+        def fh-model-path-row(rows, model, fields) = if not(eq(len(fields), 4)) then fh-model-path(tail(rows), model) else if str_eq(head(fields), model) then nth(fields, 1) else fh-model-path(tail(rows), model);
+        def fh-local-pick(names, word) = if nil?(names) then "" else if and(not(str_eq(head(names), "")), fh-has(head(names), word)) then head(names) else fh-local-pick(tail(names), word);
+        def fh-local-name(names, role) {
+            let preferred = fh-local-pick(names, if str_eq(role, "patch") then "coder" else if str_eq(role, "diagnosis") then "reason" else "qwen");
+            if not(str_eq(preferred, "")) then preferred else if nil?(names) then "" else head(names);
+        }
+        def fh-ollama(job, names, role) {
+            let model = fh-local-name(names, role);
+            let prompt = fh-prompt-file(job, role);
+            let stage = str_concat("local-", role);
+            let id = now_unix_ms();
+            let action = if str_eq(model, "") then "skip-empty-local-inventory" else model;
+            let options = if str_eq(model, "") then list(action) else names;
+            let selected = fh-choice(job, stage, id, "selected", options, action, str_concat("role-preference-then-inventory-order:", role), "awaiting-local-role");
+            let status = if or(str_eq(model, ""), str_eq(prompt, "")) then "unavailable" else fh-run(job, stage, HealLocalSeconds(), "root", prompt, list("python3", "form/scripts/heal-ollama.py", "generate", model));
+            let logged = fh-log(job, stage, fh-cat(list("model=", model, ";exit=", status)));
+            let applied = fh-choice(job, stage, id, "applied", options, action, "local-role-returned", status);
+            if str_eq(status, "0") then fh-out(job, stage) else "";
+        }
+        def fh-remote(job, target, band, expected, seconds, allowed) {
+            let probe = fh-run(job, "remote-probe", 10, "empty", "-", list("codex", "exec", "--help"));
+            let available = and(eq(allowed, 1), and(str_eq(probe, "0"), fh-has(fh-out(job, "remote-probe"), "--ephemeral")));
+            let admission = fh-frontier(fh-job-id(job), fh-local-left(job), if gt(file_size(fh-path(job, "attempts.tsv")), 0) then 1 else 0, available, if gt(file_size(fh-path(job, "remote-used")), 0) then 1 else 0);
+            let admitted = fh-log(job, "remote-admission", int_to_str(admission));
+            if not(admission) then 0 else if not(str_eq(fh-host(list("claim", fh-path(job, "remote-used"))), "claimed")) then 0 else fh-rent-once(job, target, band, expected, seconds);
+        }
+        def fh-job-id(job) = head(reverse(split-on(job, "/")));
+        def fh-local-left(job) = add(fh-native-left(job), fh-missing-stages(fh-read(fh-path(job, "attempts.tsv")), list("adapter-admission", "native-model-admission", "local-diagnosis", "local-patch", "local-review")));
+        def fh-native-left(job) = if not(str_eq(fh-read(fh-path(job, "native-inventory-status")), "complete")) then 1 else fhr-pending(fhr-plan(split-on(fh-out(job, "inventory"), "\n")), fh-read(fh-path(job, "attempts.tsv")));
+        def fh-missing-stages(log, stages) = if nil?(stages) then 0 else add(if fh-has(str_concat("\n", log), fh-cat(list("\n", head(stages), "\t"))) then 0 else 1, fh-missing-stages(log, tail(stages)));
+        def fh-local(job, target, band, expected, seconds, allowed) {
+            let listed = fh-run(job, "local-list", 5, "root", "-", list("python3", "form/scripts/heal-ollama.py", "list"));
+            let names = if str_eq(listed, "0") then split-on(fh-trim(fh-out(job, "local-list")), "\n") else list();
+            let diagnosis = fh-ollama(job, names, "diagnosis");
+            let appended = fh-append(fh-path(job, "evidence.txt"), str_concat("\nLocal diagnosis (proposal):\n", fh-cap(diagnosis, 3000)));
+            let proposal = fh-ollama(job, names, "patch");
+            let original = fh-read(fh-path(job, "original"));
+            let candidate = fh-proposal(original, proposal);
+            let reviewPrompt = fh-append(fh-path(job, "evidence.txt"), str_concat("\nProposed patch for review:\n", fh-cap(proposal, 5000)));
+            let review = fh-ollama(job, names, "review");
+            let saved = fh-write(job, "review.txt", review);
+            let result = if str_eq(fh-trim(review), "ACCEPT") then fh-try(job, target, band, expected, seconds, candidate, "local-patch", 205) else 0;
+            if not(eq(result, 0)) then result else fh-remote(job, target, band, expected, seconds, allowed);
+        }
+        def fh-models(job, target, band, expected, seconds, allowed) {
+            let request = fh-write(job, "inventory.request", "inventory\n");
+            let status = fh-run(job, "inventory", 30, "root", fh-path(job, "inventory.request"), list("./fkwu", "observe/form-cli-heal-model-run.bml"));
+            let rows = split-on(fh-out(job, "inventory"), "\n");
+            let valid = and(str_eq(status, "0"), and(le(file_size(fh-path(job, "inventory.out")), HealMaxSource()), fhr-valid(rows)));
+            let plan = if valid then fhr-plan(rows) else list();
+            let saved = fh-write(job, "native-plan.tsv", fhr-plan-text(plan));
+            let inventoryState = fh-write(job, "native-inventory-status", if valid then "complete" else "refused-inventory-evidence");
+            let admission = fh-log(job, "native-model-admission", if valid then fh-cat(list("eligible=", int_to_str(len(fhr-eligible(plan))))) else "refused-inventory-evidence;remote-closed");
+            let registration = split-on(fh-trim(fh-read(".form-heal/adapter.tsv")), "\t");
+            let model = if eq(len(registration), 6) then fhr-model(plan, head(registration)) else "";
+            let artifact = if str_eq(model, "") then "" else fh-adapter(model, rows);
+            let adapterLog = fh-log(job, "adapter-admission", if str_eq(artifact, "") then "unavailable-or-unverified" else "evaluated-artifact");
+            let original = fh-read(fh-path(job, "original"));
+            let adapted = if str_eq(artifact, "") then "" else fh-model(job, "adapter", model, artifact, "native-adapter", list(model), "evaluated-adapter-bound-to-this-base");
+            let result = fh-try(job, target, band, expected, seconds, fh-proposal(original, adapted), "native-adapter", 203);
+            if not(eq(result, 0)) then result else fh-native-queue(job, target, band, expected, seconds, allowed, fhr-eligible(plan), original);
+        }
+        def fh-execute(job, target, band, expected, seconds, allowed) {
+            let original = fh-read(fh-path(job, "original"));
+            let contract = fh-write(job, "contract", fh-cat(list(band, " stdout=", expected, " exit=0; diagnostic stderr empty; budget=", int_to_str(seconds), "s\n")));
+            let baseline = fh-test(job, "baseline", band, expected, seconds);
+            if baseline then "already-passes" else fh-repair-failure(job, target, band, expected, seconds, allowed, original);
+        }
+        def fh-ground(job) {
+            let ground = fh-run(job, "ground", 10, "work", "-", list("./fkwu", "bootstrap/ground.fk"));
+            let fresh = fh-run(job, "freshness", 10, "work", "-", list("./fkwu", "form/form-stdlib/tests/binary-freshness-band.fk"));
+            let ready = and(fh-tested(job, "ground", "42"), fh-tested(job, "freshness", "31"));
+            let logged = fh-log(job, "bootstrap", if ready then "ground=42;freshness=31" else "refused;inspect-ground-and-freshness-process-records");
+            ready;
+        }
+        def fh-report-request(fields) = if eq(len(fields), 2) then fh-report(nth(fields, 1)) else "heal report|<retained-evidence-directory>";
+        // Service lifetime has no round limit. Each request retains its own
+        // explicit process budgets; EOF/release ends this owned input stream.
+        def fh-stream(round) {
+            let request = read_line();
+            if or(nothing?(request), str_eq(request, "release")) then round else fh-stream-round(request, round);
+        }
+        def fh-stream-round(request, round) {
+            let begin = print_str(fh-cat(list("heal-stream round=", int_to_str(round), " state=begin\n")));
+            let answer = fh-command(request);
+            let returned = print_str(str_concat(answer, "\n"));
+            let end = print_str(fh-cat(list("heal-stream round=", int_to_str(round), " state=complete\n")));
+            fh-stream(add(round, 1));
+        }
+        def fh-command(arg) = if eq(str_find(arg, "report|", 0), 0) then fh-report-request(split-on(arg, "|")) else if or(str_eq(arg, "eval"), eq(str_find(arg, "eval|", 0), 0)) then fh-eval-command(split-on(arg, "|")) else if str_eq(arg, "lesson") then fh-read(HealLessonPath()) else if or(str_eq(arg, ""), str_eq(arg, "help")) then "heal <source.fk|source.bml>|<band.fk>|<exact expected stdout>[|seconds][|local]. The default check bound is 30 seconds. heal report|<evidence-directory> reads current retained timing and choices. Repairs one production source after an isolated band passes; retains evidence under .form-heal. heal lesson explains the repair practice. heal eval measures the deterministic curriculum; heal eval|native|model|case measures one native case. Local-only mode omits the final remote CLI. See docs/form-cli-healing.md."
+            else fh-command-fields(split-on(arg, "|"));
+        def fh-eval-command(fields) = if not(fhe-request(fields)) then "heal eval refused: use eval, eval|deterministic, or eval|native|model|case" else fh-trim(host-exec(fh-cat(list("python3 ", fh-quote(HealEvalHost()), fh-args(tail(fields)))), ""));
+        def fh-command-fields(fields) = if or(lt(len(fields), 3), gt(len(fields), 5)) then "heal refused: expected source|band|verdict[|seconds][|local]" else if and(eq(len(fields), 5), not(str_eq(nth(fields, 4), "local"))) then "heal refused: unknown mode; omit mode or use local" else if and(ge(len(fields), 4), not(fsuf-uint?(nth(fields, 3)))) then "heal refused: seconds must be a canonical integer" else fh-command-validated(fields);
+        def fh-refuse-reset(job, route, reset) {
+            fh-log(job, route, reset); -1;
+        }
+        def fh-accepted(job, target, band, expected, candidate, route) {
+            fh-remember(job, target, band, expected, route, candidate); 1;
+        }
+        def fh-apply(job, target, band, expected, candidate, route, number) {
+            let applied = fh-host(list("commit", job, fh-path(job, str_concat(route, ".candidate"))));
+            let after = fb_record(intern_trivial_int(number), "form-cli-heal.bml", if str_eq(applied, "applied") then 1 else 0);
+            let logged = fh-log(job, route, applied);
+            if str_eq(applied, "applied") then fh-accepted(job, target, band, expected, candidate, route) else -1;
+        }
+        def fh-rejected(job, route, number) {
+            let restored = fh-host(list("reset", job));
+            let after = fb_record(intern_trivial_int(number), "form-cli-heal.bml", if str_eq(restored, "ready") then 0 else -1);
+            let logged = fh-log(job, route, str_concat("rejected;", restored));
+            if str_eq(restored, "ready") then 0 else -1;
+        }
+        def fh-try-source(job, target, band, expected, seconds, candidate, route, number) {
+            let saved = fh-write(job, str_concat(route, ".candidate"), candidate);
+            let wrote = write_file(fh-path(job, str_concat("work/", target)), candidate);
+            let stage = str_concat("check-", route);
+            let passed = if lt(wrote, 0) then 0 else fh-test(job, stage, band, expected, seconds);
+            let guarded = fh-host(list("guard", job));
+            let admitted = fh-adjudicate(number, and(passed, and(str_eq(guarded, "clean"), str_eq(fh-read(fh-path(job, str_concat("work/", target))), candidate))));
+            if admitted then fh-apply(job, target, band, expected, candidate, route, number) else fh-rejected(job, route, number);
+        }
+        def fh-try-reset(job, target, band, expected, seconds, candidate, route, number) {
+            let reset = fh-host(list("reset", job));
+            if not(str_eq(reset, "ready")) then fh-refuse-reset(job, route, reset) else fh-try-source(job, target, band, expected, seconds, candidate, route, number);
+        }
+        def fh-try-next(job, target, band, expected, seconds, candidates, i) {
+            let result = fh-try(job, target, band, expected, seconds, head(candidates), str_concat("native-", int_to_str(i)), add(100, i));
+            if eq(result, 0) then fh-try-list(job, target, band, expected, seconds, tail(candidates), add(i, 1)) else result;
+        }
+        def fh-memory-row(rows, original, band, expected, remaining) {
+            let fields = split-on(head(rows), "\t");
+            let rest = fh-memory(tail(rows), original, band, expected, sub(remaining, 1));
+            if not(eq(len(fields), 4)) then rest else if gt(file_size(fh-path(head(fields), "evaluation-only")), 0) then rest else if and(str_eq(nth(fields, 2), band), and(str_eq(nth(fields, 3), expected), str_eq(fh-read(fh-path(head(fields), "original")), original))) then cons(fh-read(fh-path(head(fields), "accepted-source")), rest) else rest;
+        }
+        def fh-save-prompt(job, role, prompt) {
+            fh-write(job, str_concat(role, ".prompt"), prompt); fh-path(job, str_concat(role, ".prompt"));
+        }
+        def fh-adapter-receipt(model, fields) {
+            let receipt = fh-trim(fh-read(nth(fields, 4)));
+            let values = split-on(receipt, "|");
+            if not(eq(len(values), 7)) then "" else if not(and(str_eq(head(values), "repair-heldout-v1"), and(str_eq(nth(values, 1), model), and(str_eq(nth(values, 2), nth(fields, 1)), and(str_eq(nth(values, 3), nth(fields, 3)), and(fsuf-uint?(nth(values, 4)), and(gt(str_to_int(nth(values, 4)), 0), and(str_eq(nth(values, 4), nth(values, 5)), str_eq(nth(values, 6), "0"))))))))) then "" else if and(str_eq(fh-host(list("hash", nth(fields, 2))), nth(fields, 3)), str_eq(fh-host(list("hash", nth(fields, 4))), nth(fields, 5))) then nth(fields, 2) else "";
+        }
+        def fh-rent-once(job, target, band, expected, seconds) {
+            let prompt = fh-prompt-file(job, "patch");
+            let reply = fh-path(job, "remote.reply");
+            let status = if str_eq(prompt, "") then "prompt-limit" else fh-run(job, "remote", HealLocalSeconds(), "empty", prompt, list("codex", "exec", "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "-o", reply, "-"));
+            let logged = fh-log(job, "remote", str_concat("exit=", status));
+            let candidate = if str_eq(status, "0") then fh-proposal(fh-read(fh-path(job, "original")), fh-read(reply)) else "";
+            let result = fh-try(job, target, band, expected, seconds, candidate, "remote", 206);
+            let learned = fh-write(job, "frontier-return.tsv", fh-cat(list("@", fh-job-id(job), "\t", fh-job-id(job), "\tagent-cli\t@", fh-job-id(job), "-lesson\t", if eq(result, 1) then "learned" else "refused", "\t1\n")));
+            result;
+        }
+        def fh-native-queue(job, target, band, expected, seconds, allowed, plan, original) = if nil?(plan) then fh-local(job, target, band, expected, seconds, allowed) else fh-native-attempt(job, target, band, expected, seconds, allowed, plan, original);
+        def fh-plan-names(plan) = if nil?(plan) then list() else cons(head(head(plan)), fh-plan-names(tail(plan)));
+        def fh-route-control(id) {
+            let out = bfc-envelope(0, id, 0, list(0), 3);
+            let sent = bfc-record-out(out, 0);
+            let control = bfc-control(out, 1);
+            let received = bfc-record-in(control, bfc-payload(control));
+            if and(eq(bfc-exchange(control), id), and(eq(bfc-direction(control), 1), eq(bfc-kind(control), 1))) then bfc-payload(control) else 3;
+        }
+        def fh-native-next(job, target, band, expected, seconds, allowed, plan, original, stage) {
+            let id = now_unix_ms();
+            let next = if nil?(plan) then "local-model-roles" else str_concat("native-model:", head(head(plan)));
+            let options = list(next, "finish-unresolved");
+            let control = fh-route-control(id);
+            let action = if eq(control, 1) then next else "finish-unresolved";
+            let selected = fh-choice(job, stage, id, "selected", options, action, "unresolved;advance-resource-order;no-automatic-budget-extension", "awaiting-next-resource");
+            let result = if eq(control, 1) then fh-native-queue(job, target, band, expected, seconds, allowed, plan, original) else 0;
+            let applied = fh-choice(job, stage, id, "applied", options, action, "next-resource-returned", int_to_str(result));
+            let observed = fb_record(intern_trivial_int(result), "form-cli-heal.bml", 204);
+            result;
+        }
+        def fh-native-attempt(job, target, band, expected, seconds, allowed, plan, original) {
+            let row = head(plan);
+            let stage = nth(row, 3);
+            let started = fh-log(job, str_concat(stage, "-admission"), str_concat("model=", head(row)));
+            let reply = fh-model(job, "base", head(row), "", stage, fh-plan-names(plan), "first-eligible-untried-native-in-registry-order");
+            let base = fh-try(job, target, band, expected, seconds, fh-proposal(original, reply), stage, 204);
+            let completed = fh-log(job, fhr-completion(row), fh-cat(list("model=", head(row), ";result=", int_to_str(base))));
+            if not(eq(base, 0)) then base else fh-native-next(job, target, band, expected, seconds, allowed, tail(plan), original, stage);
+        }
+        def fh-repair-failure(job, target, band, expected, seconds, allowed, original) {
+            let evidence = fh-evidence(job, target);
+            let memories = fh-memory(reverse(split-on(fh-trim(fh-read(HealMemory())), "\n")), original, band, expected, 32);
+            let result = fh-try-list(job, target, band, expected, seconds, append(memories, fh-candidates(original)), 0);
+            let final = if eq(result, 0) then fh-models(job, target, band, expected, seconds, allowed) else result;
+            if eq(final, 1) then "healed" else if eq(final, -1) then "refused-stale-or-mutated-input" else "unresolved-local-evidence-retained";
+        }
+        def fh-command-execute(target, band, expected, seconds, allowed, job) {
+            let result = if fh-ground(job) then fh-execute(job, target, band, expected, seconds, allowed) else "refused-bootstrap";
+            let saved = fh-write(job, "result.txt", result);
+            let released = fh-host(list("finish", job));
+            let logged = fh-log(job, "snapshot-release", released);
+            let report = fh-report(job);
+            fh-cat(list("heal ", result, "\nevidence=", job, "\n", report));
+        }
+        def fh-command-prepare(target, band, expected, seconds, allowed) {
+            let job = fh-host(list("prepare", target, band));
+            if or(str_eq(job, ""), fh-has(job, "refused:")) then str_concat("heal ", job) else fh-command-execute(target, band, expected, seconds, allowed, job);
+        }
+        def fh-command-validated(fields) {
+            let target = nth(fields, 0);
+            let band = nth(fields, 1);
+            let expected = nth(fields, 2);
+            let seconds = if gt(len(fields), 3) then str_to_int(nth(fields, 3)) else 30;
+            let allowed = if and(gt(len(fields), 4), str_eq(nth(fields, 4), "local")) then 0 else 1;
+            if or(str_eq(expected, ""), or(lt(seconds, 1), gt(seconds, 120))) then "heal refused: expected result and 1..120 second check bound required" else if or(gt(file_size(target), HealMaxSource()), fh-has(fh-read(target), "DO NOT REPAIR:")) then "heal refused: source limit or explicit repair exclusion" else fh-command-prepare(target, band, expected, seconds, allowed);
+        }
+
+    }
+    0;
+}
