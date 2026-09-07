@@ -111,7 +111,26 @@ matches, a whole Persian needle at byte 5 of a real row, the separator after it
 at 11, a needle at the end of a real row, an absent needle, and a negative
 `start`.
 
-`form/form-stdlib/tests/line-grammar-search-equivalence-band.fk` = **8191**. It
+`form/form-stdlib/tests/line-grammar-search-equivalence-band.fk` = **8191 on all
+four arms** — go, rust, typescript and the runtime fkwu source/JIT door,
+registered in `form/fourth-arm-bands.txt`. Running it four ways paid for itself
+immediately: it found the one question the band was asking that two arms cannot
+hold. Sweeping `(substring t 0 i)` at every byte offset of a Persian row hands
+`starts-with?` a cut that severs a character, rust and ts answer the axiom-1
+absence for exactly that cut, and both then die measuring it —
+
+```text
+go         = 8191
+rust       = fatal[type_contract_violation]: as_str: Null
+             str_len < starts-with? < lgse-sw? < lgse-sw-prefixes
+typescript = arg 0: expected str, got null
+```
+
+— while go and fkwu answered 8191 and would have shipped a band that quietly
+proved three arms. The sweep now asks each arm only about prefixes ending on a
+character boundary, which is the discipline `csfe-sweep-needles` already keeps
+in `core-str-find-equivalence-band`, and no offset is skipped without a rule
+saying which. It
 keeps all four old bodies verbatim as its reference and asks them the same
 questions, so no expected value stands between the two to absorb a disagreement,
 and it pins the literal answers above besides — because a reference and a door
@@ -192,6 +211,14 @@ separator, so it was never the constant that hurt — it was the growth, and the
 proof is that both routed lanes converge on one rate regardless of needle
 length. The 1.11x is a better sentence than the 3.06x, and the discomfort was
 the thing that found it.
+
+The four-way run is the third and it was the one nearly skipped. The band was
+green on fkwu, the answers were pinned, the heal was measured, and running
+`form/validate.sh` felt like ceremony over work already finished. It came back
+divergent — not on the door, on the *band*, which was asking two of the four arms
+for a prefix their own strings cannot represent. A band that proves three arms
+and reads as four is exactly the shape this body has a word for, and the only
+reason it was caught is that the ceremony was performed anyway.
 
 The second one is smaller and sharper. The `starts-with?` gate was already
 written, already correct, already pinned by a band at 8191, and it measured at a
