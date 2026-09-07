@@ -1278,22 +1278,46 @@ export class Kernel {
       kind: "int",
       int: utf8Encode(argStr(args, 0)).length,
     }));
+    // substring — BYTES, CLAMPED, NEVER DIES. The one meaning, four ways,
+    // laid 2026-09-07 (substring-one-meaning-band.fk, drift gate).
+    //
+    //   substring(s, start, end) is the bytes of s from max(start,0) up to
+    //   min(end, str_len(s)); empty when that range is empty or reversed;
+    //   empty when s is not a string. It refuses nothing and it FLOORS
+    //   nothing.
+    //
+    // WHY BYTES. The body indexes bytes everywhere — str_byte_at is the
+    // narrow waist, and str_find, split-on, trim, the frame readers and the
+    // row walkers all compute byte offsets. Flooring both ends to character
+    // starts hands those same indices a SHORTER, SHIFTED window in silence,
+    // which silently re-cut every Persian, Chinese, Japanese and Hebrew row
+    // in form-stdlib/locale-rows.
+    //
+    // WHY CLAMPED. fkwu and the core.fk recipe both clamped from birth. A
+    // throw here turned an ordinary out-of-range index into a dead process on
+    // three arms and an empty string on the fourth.
+    //
+    // THE ONE PLACE THIS ARM CANNOT SAY. A JS string is UTF-16 code units and
+    // str_len MEASURES its UTF-8 bytes, so a cut that severs a multi-byte
+    // character has no representation here: utf8Decode would hand back U+FFFD
+    // replacement characters, a plausible longer string. fkwu and the Go
+    // kernel hold those bytes exactly; this arm answers the axiom-1 absence
+    // instead. What all four arms hold together is that NO ARM EVER ANSWERS
+    // A DIFFERENT NON-EMPTY WINDOW.
     this.registerNative("substring", catAccess(), (_k, args) => {
-      const s = argStr(args, 0);
-      const bytes = utf8Encode(s);
-      const start = argInt(args, 1);
-      const end = argInt(args, 2);
-      if (start < 0 || end < start || end > bytes.length) {
-        throw new Error(
-          `substring: bounds out of range start=${start} end=${end} len=${bytes.length}`,
-        );
+      const v = args[0];
+      if (v?.kind !== "str") return { kind: "str", str: "" };
+      const bytes = utf8Encode(v.str);
+      const n = bytes.length;
+      const rawStart = args[1] ? argInt(args, 1) : 0;
+      const rawEnd = args[2] ? argInt(args, 2) : 0;
+      const a = rawStart < 0 ? 0 : rawStart > n ? n : rawStart;
+      const b = rawEnd < 0 ? 0 : rawEnd > n ? n : rawEnd;
+      if (b <= a) return { kind: "str", str: "" };
+      if (isUtf8Continuation(bytes[a]!) || (b < n && isUtf8Continuation(bytes[b]!))) {
+        return { kind: "null" };
       }
-      const a = floorUtf8Boundary(bytes, start);
-      const b = floorUtf8Boundary(bytes, end);
-      return {
-        kind: "str",
-        str: utf8Decode(bytes.subarray(a, b)),
-      };
+      return { kind: "str", str: utf8Decode(bytes.subarray(a, b)) };
     });
     this.registerNative("char_at", catAccess(), (_k, args) => {
       const s = argStr(args, 0);
@@ -3738,12 +3762,6 @@ function argBigInt(args: Value[], i: number): bigint {
 }
 function isUtf8Continuation(b: number): boolean {
   return (b & 0xc0) === 0x80;
-}
-
-function floorUtf8Boundary(bytes: Uint8Array, i: number): number {
-  if (i > bytes.length) i = bytes.length;
-  while (i > 0 && i < bytes.length && isUtf8Continuation(bytes[i]!)) i--;
-  return i;
 }
 
 function ceilUtf8Boundary(bytes: Uint8Array, i: number): number {

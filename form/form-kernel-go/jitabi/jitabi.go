@@ -120,31 +120,23 @@ func StrLen(v Value) Value       { return Int(Len(v)) }
 func StrConcat(a, b Value) Value { return Str(a.AsString() + b.AsString()) }
 func StrEq(a, b Value) Value     { return boolInt(a.AsString() == b.AsString()) }
 
-// floorCharBoundary snaps a byte index down to the nearest UTF-8 char
-// boundary at or below it. Same contract as the interpreter natives in
-// main.go — JIT-compiled string addressing must answer byte-for-byte what
-// the walker answers, or hot loops mojibake after the auto-JIT threshold.
-func floorCharBoundary(s string, i int) int {
-	if i > len(s) {
-		i = len(s)
-	}
-	for i > 0 && i < len(s) && !utf8.RuneStart(s[i]) {
-		i--
-	}
-	return i
-}
-
+// Substring — BYTES, CLAMPED, NEVER DIES, exactly as main.go's interpreter
+// native answers it. A primitive that lives twice must be healed twice: hot
+// code crossing the auto-JIT threshold reverts to whatever this file says.
 func Substring(s, start, end Value) Value {
 	text := s.AsString()
 	from := int(start.AsInt())
 	to := int(end.AsInt())
-	if from < 0 || to < from || to > len(text) {
-		panic(fmt.Sprintf(
-			"substring: bounds out of range start=%d end=%d len=%d",
-			from, to, len(text),
-		))
+	if from < 0 {
+		from = 0
 	}
-	return Str(text[floorCharBoundary(text, from):floorCharBoundary(text, to)])
+	if to > len(text) {
+		to = len(text)
+	}
+	if to <= from {
+		return Str("")
+	}
+	return Str(text[from:to])
 }
 
 func CharAt(s, idx Value) Value {

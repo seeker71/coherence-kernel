@@ -224,10 +224,26 @@ portable fallback and as what the bands measure against:
 `core-substring-equivalence-band` still 2047 (an exhaustive start/end sweep,
 written against the original byte-at-a-time loop before this native existed) and
 `substring-native-band` 511 (the locale rows, and the byte adjacency law at every
-byte offset of a Persian/Romanian/German file). go, rust and ts keep their own
-native, which floors both offsets to character starts and dies on out-of-range
-bounds where fkwu answers `""` — a divergence older than this change and not
-closed by it.
+byte offset of a Persian/Romanian/German file).
+
+**One meaning for the cut, held by four arms (2026-09-07).** `substring(s, start,
+end)` answers the BYTES of `s` from `max(start,0)` up to `min(end, str_len(s))`;
+`""` when that range is empty or reversed; `""` when `s` is not a string. It
+refuses nothing and it floors nothing. Until this day go, rust and ts *panicked*
+on a reversed range, a negative start or an end past the length — the same source
+killed three processes and answered on the fourth — and all three floored both
+byte offsets to character starts, silently handing byte-indexed callers a
+shorter, shifted window through every Persian, Hebrew, Chinese and Japanese row.
+fkwu and Go hold every cut exactly; rust's `str` and the TS kernel's UTF-16
+string cannot hold a cut that severs a multi-byte character and answer the
+axiom-1 absence there rather than a different window, so what all four arms
+hold together is **no arm ever answers a different non-empty window**.
+`substring-one-meaning-band` **4095 on all four arms** is the guard and is a
+drift gate (`gate/drift-gates.bml`, now 4095 of 4095): an exhaustive
+`[-4,14]x[-4,14]` sweep against a ruler it builds from `str_byte_at` on the arm
+under test, plus every byte offset of the real locale rows. Measured on a kernel
+carrying only the flooring half of the wound it answers 3455 — bits 128 and 512
+are exactly what separates a byte cut from a floored one.
 
 ## The JIT string crossing
 
@@ -769,7 +785,8 @@ pool -- right length, NUL bytes -- so nine conformance vectors reached the
 kernels as zeros and read bad magic; it writes through the string's own
 arena now. `gate/kernel-conformance.bml` answers 1 with all three witnesses
 (13 canonical expressions each, 12 of 12 malformed artifacts refused), and
-the drift gates stand at 2047 of 2047. persistence 7 and channel-breath 500
+the drift gates stand at 4095 of 4095 (twelve rows; substring-one-meaning
+joined them 2026-09-07). persistence 7 and channel-breath 500
 four-way. (receipts/2026-09-06-the-binary-form-on-the-fourth-arm.md)
 
 **A compare against `len` walks only so far.** `nil?` is `(eq (len xs) 0)`
@@ -993,7 +1010,7 @@ column widths each row names. Live: 475,136 bytes of Metal under a
 ./fkwu observe/belief-stamps.bml           -> field stamped*10^6 + owed*10^3 + laws = 495459011
 observe/tests/belief-rewitness-band        -> 63         (the re-witness door, observe/belief-rewitness.bml)
 ./fkwu form/form-stdlib/release-ledger.bml -> open=38 moving=0 released=103 -> 38000103
-./fkwu gate/drift-gates-run.bml            -> pass=2047 full=2047 refused=0 names=-
+./fkwu gate/drift-gates-run.bml            -> pass=4095 full=4095 refused=0 names=-
 
 Every row of that door is a Form lens now — `gate/op-manifest.bml`,
 `native-surface`, `category-contract`, `primitive-registry`, `flt-ops-gen`,
