@@ -1,0 +1,342 @@
+//////////////////////////////////////////////////////////////////////
+//
+// room-prosody.bml — how a thing was said, measured from the room.
+//
+// preludes: form/form-stdlib/core.fk form/form-stdlib/form-glass-observer.bml
+//
+// The ear carries WHAT was said. This organ carries HOW. Seven axes read off
+// the same s16le mono 16 kHz samples the mic hands over, each one a number the
+// glass can paint beside the transcript:
+//
+//   volume      the running level in dBFS and the window's peak
+//   pitch       the fundamental of the newest 50 ms, by normalized
+//               autocorrelation over a half-rate copy; absent when unvoiced
+//   intonation  how that fundamental moved across the phrase: its span in
+//               semitones, and whether the phrase rose or fell
+//   cadence     the rate of energy onsets (syllable nuclei) per minute, and
+//               the longest pause inside the window
+//   expression  how much level and pitch VARY rather than sitting flat: the
+//               spread of speech-level in decibel-tenths, of pitch in cents
+//   stillness   the share of the window under the speech line, and how long
+//               the room has been continuously quiet
+//   resonance   how the room answers: the fall time after an onset, and the
+//               low-to-high spectral tilt of the newest 50 ms
+//
+// THE SPEECH LINE. Every axis that says "speech" or "quiet" is judged against
+// one adaptive line: a floor-follower that steps toward the quietest 10 ms the
+// room offers, at most 2 dB down and 0.2 dB up a frame, with the line twelve
+// decibels above it. A room at -55 dBFS and a room at -30 dBFS each get their
+// own line; no absolute threshold is written anywhere in this organ.
+//
+// THE WINDOW. Energy is kept as one number per 10 ms (its dBFS), newest first,
+// three seconds deep -- 300 readings. That single series feeds volume's peak,
+// cadence's onsets, expression's level spread, stillness and resonance's decay.
+// Pitch is kept as one reading per 100 ms frame, thirty deep, and feeds
+// intonation and expression's pitch spread. Nothing else is retained: the organ
+// holds the shape of the last three seconds and not their sound.
+//
+// HONEST EDGES, named where they live rather than hidden:
+//   - pitch runs on a half-rate copy (8 kHz), so its raw resolution is one
+//     sample of lag; parabolic interpolation over the correlation peak sharpens
+//     it, but a fundamental above 400 Hz or below 70 Hz is outside the search
+//     and reads absent, not wrong;
+//   - resonance's tilt is a two-tap complementary split (a Haar pair), not a
+//     spectrum -- it separates roughly-below-3-kHz from roughly-above and says
+//     their ratio in decibel-tenths. It moves the way a spectrum's tilt moves; it is
+//     not one;
+//   - cadence counts energy onsets, which track syllable nuclei but are not
+//     syllables. A drawn-out vowel is one onset; a hard consonant inside a
+//     vowel can be two.
+//
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class RoomProsodyAuthority {
+        field RPRAuthorityPath = "form/form-stdlib/room-prosody.bml";
+        field RPRAuthorityKind = "high-bml-interface-class-const";
+    }
+
+    class RoomProsody {
+        field RPRSchema = "room-prosody-v1";
+        field RPRSensor = "prosody";
+        field RPRCadenceMs = 100;          // the sensor's declared give cadence
+        field RPRRate = 16000;             // samples per second the mic hands over
+        field RPRSubMs = 10;               // one energy reading per 10 ms
+        field RPRSubBytes = 320;           // 10 ms of s16le mono 16 kHz
+        field RPREnvCap = 300;             // three seconds of energy readings
+        field RPRPitchCap = 30;            // three seconds of pitch readings
+        field RPRPitchBytes = 1600;        // the newest 50 ms feeds pitch and tilt
+        field RPRDecRate = 8000;           // pitch runs on a half-rate copy
+        field RPRLagLo = 20;               // 8000/20  = 400 Hz, the top of the search
+        field RPRLagHi = 114;              // 8000/114 = 70 Hz, the bottom
+        // MEASURED on this room, not chosen: observe/prosody-voicing-probe.fk held the mic open over
+        // silence and over a spoken line and printed every frame's correlation. The quiet room
+        // reached 0.13 to 0.73; the spoken line reached 0.73 to 0.98. Height alone therefore
+        // separates most of it but not all -- so voicing also asks that the winning lag be a real
+        // LOCAL MAXIMUM of the correlation curve. A voice makes a crest with lower lags on both
+        // sides of it; a room's noise makes a ridge with no interior crest, and its winner used to
+        // land on whichever lag came first, pinned at 400 Hz -- the exact shape of a fabricated pitch.
+        field RPRVoicedR = 0.55;           // the correlation a frame reaches before it is called voiced
+        field RPROctaveKeep = 0.85;        // a shorter crest this close to the best wins (octave guard)
+        field RPRLagPad = 2;               // the curve is computed wider than the band it reports, so
+                                           // every reportable lag has real neighbours on both sides
+        field RPRLineDb10 = 120;           // the speech line sits 12.0 dB over the room floor
+        field RPRFloorRise = 2;            // the floor creeps up 0.2 dB per frame
+        field RPRFloorFall = 20;           // and down at most 2.0 dB, so ONE dropout cannot take it
+        field RPRFloorStart = -600;        // where the follower begins, before the room has spoken
+        field RPRFloorCeil = -200;         // the follower never climbs past -20 dBFS
+        field RPRFloorBase = -750;         // nor drops past -75: under that is a dropout, not a room
+        // Cadence needs more headroom than stillness does, and that is not a compromise but two
+        // different questions. Stillness asks whether anything at all rose over the room, so its
+        // line sits close and a whisper still counts. An onset asks whether a SYLLABLE landed, and
+        // measured here a quiet room clears a 12 dB line often enough to fake ten onsets a second.
+        // So an onset clears the line by a further 6 dB and rises 8 dB out of its own valley.
+        field RPRRiseDb10 = 80;            // 8.0 dB over the quietest of the last 30 ms
+        field RPROnsetOver = 60;           // and 6.0 dB clear of the speech line besides
+        field RPRRefract = 5;              // and no second onset for 50 ms after one
+        field RPRPeakSpan = 10;            // an onset's peak is sought in its first 100 ms
+        field RPRDecayDb10 = 100;          // decay is measured to 10 dB under that peak
+        // and only if that fall happens within half a second. A three-second tone played into this
+        // room reported a 2590 ms decay, which is not the room answering -- it is the length of the
+        // tone. A sound still going has no tail yet, and the honest reading for it is absent.
+        field RPRDecayMax = 50;
+        field RPRQuiet = -1200;            // the dBFS an empty measurement reports
+        field RPRAbsent = -9999;           // the reading's own word for "this axis has nothing to say"
+        ref rpr-authority = RoomProsodyAuthority;
+        thought rpr-law = list("the-line-is-the-room-not-a-constant", "absent-is-a-reading-too", "the-window-keeps-shape-not-sound", "every-axis-off-one-series");
+
+        // ---- samples ---------------------------------------------------------
+        def rpr-f(n) = mul(1.0, n);
+        def rpr-s16(s, i) {
+            let v = add(str_byte_at(s, i), mul(256, str_byte_at(s, add(i, 1))));
+            if ge(v, 32768) then sub(v, 65536) else v;
+        }
+        def rpr-db10(rms) = if le(rms, 0) then RPRQuiet() else float_to_int(round(mul(200.0, div(math_log(div(rpr-f(rms), 32768.0)), math_log(10.0)))));
+
+        // ---- the energy series: one dBFS reading per 10 ms, newest first ------
+        def rpr-sumsq(s, i, end, acc) = if ge(add(i, 1), end) then acc else rpr-sumsq(s, add(i, 2), end, add(acc, mul(rpr-s16(s, i), rpr-s16(s, i))));
+        def rpr-sub-db10(s, at) {
+            let end = min2(add(at, RPRSubBytes()), str_len(s));
+            let n = div(sub(end, at), 2);
+            if le(n, 0) then RPRQuiet() else rpr-db10(float_to_int(math_sqrt(div(rpr-f(rpr-sumsq(s, at, end, 0)), rpr-f(n)))));
+        }
+        def rpr-env-of-go(s, at, acc) = if gt(add(at, RPRSubBytes()), str_len(s)) then acc else rpr-env-of-go(s, add(at, RPRSubBytes()), cons(rpr-sub-db10(s, at), acc));
+        def rpr-env-of(s) = if lt(str_len(s), RPRSubBytes()) then list() else rpr-env-of-go(s, 0, list());
+
+        // ---- the speech line: a follower, never a constant --------------------
+        // It moves in both directions and quickly in neither. An earlier form of this snapped
+        // straight down to the quietest reading it saw, and one 10 ms dropout -- a digital zero the
+        // mic handed over, not a room -- carried the line to -92 dBFS and put every other axis
+        // under it: stillness read 0 percent in a silent room. A dropout is not a floor, so
+        // readings at the empty value are passed over, and the fall is rate-limited besides.
+        def rpr-quietest(fresh, best) = if eq(len(fresh), 0) then best else rpr-quietest(tail(fresh), if and(gt(head(fresh), RPRQuiet()), lt(head(fresh), best)) then head(fresh) else best);
+        def rpr-floor-up(floor) = min2(add(floor, RPRFloorRise()), RPRFloorCeil());
+        def rpr-floor-next(floor, fresh) = rpr-floor-at(floor, rpr-quietest(fresh, 9999));
+        def rpr-floor-at(floor, q) = if ge(q, 9999) then rpr-floor-up(floor) else if lt(q, floor) then max2(RPRFloorBase(), max2(q, sub(floor, RPRFloorFall()))) else rpr-floor-up(floor);
+
+        // ---- pitch: normalized autocorrelation over a half-rate copy ----------
+        def rpr-tail-from(s, want) = if le(str_len(s), want) then s else substring(s, sub(str_len(s), want), str_len(s));
+        def rpr-dec-go(s, i, end, acc) = if gt(add(i, 3), end) then acc else rpr-dec-go(s, add(i, 4), end, cons(div(add(rpr-s16(s, i), rpr-s16(s, add(i, 2))), 2), acc));
+        def rpr-sum-list(xs, acc) = if eq(len(xs), 0) then acc else rpr-sum-list(tail(xs), add(acc, head(xs)));
+        def rpr-shift(xs, m, acc) = if eq(len(xs), 0) then acc else rpr-shift(tail(xs), m, cons(sub(head(xs), m), acc));
+        def rpr-centred(s) {
+            let raw = rpr-dec-go(rpr-tail-from(s, RPRPitchBytes()), 0, str_len(rpr-tail-from(s, RPRPitchBytes())), list());
+            let m = if eq(len(raw), 0) then 0 else div(rpr-sum-list(raw, 0), len(raw));
+            rpr-shift(raw, m, list());
+        }
+        def rpr-corr(xs, ys, num, d1, d2) = if or(eq(len(xs), 0), eq(len(ys), 0)) then list(num, d1, d2) else rpr-corr(tail(xs), tail(ys), add(num, mul(head(xs), head(ys))), add(d1, mul(head(xs), head(xs))), add(d2, mul(head(ys), head(ys))));
+        def rpr-nccf(xs, lag) {
+            let t = rpr-corr(xs, drop(lag, xs), 0, 0, 0);
+            let d = mul(math_sqrt(rpr-f(nth(t, 1))), math_sqrt(rpr-f(nth(t, 2))));
+            if le(d, 0.0) then 0.0 else div(rpr-f(head(t)), d);
+        }
+        def rpr-lag-first() = sub(RPRLagLo(), RPRLagPad());
+        def rpr-lag-last() = add(RPRLagHi(), RPRLagPad());
+        def rpr-rlist(xs, lag, acc) = if gt(lag, rpr-lag-last()) then reverse(acc) else rpr-rlist(xs, add(lag, 1), cons(rpr-nccf(xs, lag), acc));
+        def rpr-fmax(xs, best) = if eq(len(xs), 0) then best else rpr-fmax(tail(xs), if gt(head(xs), best) then head(xs) else best);
+        def rpr-fmax-range(rs, i, hi, best) = if gt(i, hi) then best else rpr-fmax-range(rs, add(i, 1), hi, max2(best, nth(rs, i)));
+        // a crest: high enough, and lower on both sides. A ridge with no crest is not a period.
+        def rpr-crest?(rs, i, want) = if lt(nth(rs, i), want) then 0 else if lt(nth(rs, i), nth(rs, sub(i, 1))) then 0 else if lt(nth(rs, i), nth(rs, add(i, 1))) then 0 else 1;
+        def rpr-first-crest(rs, want, i, hi) = if gt(i, hi) then -1 else if eq(rpr-crest?(rs, i, want), 1) then i else rpr-first-crest(rs, want, add(i, 1), hi);
+        // the vertex of the parabola through the peak and its two neighbours, in lag samples.
+        // At either end of the search band a neighbour does not exist, and standing in a copy of
+        // the peak for it manufactures a fraction the samples never carried -- so the edges take
+        // no interpolation at all and report their own lag exactly.
+        def rpr-vertex(rs, i) = if or(le(i, 0), ge(add(i, 1), len(rs))) then 0.0 else rpr-vertex-at(nth(rs, sub(i, 1)), nth(rs, i), nth(rs, add(i, 1)));
+        def rpr-vertex-at(rm, r0, rp) {
+            let den = add(sub(rm, mul(2.0, r0)), rp);
+            if ge(den, -0.000001) then 0.0 else max2(-0.5, min2(0.5, div(sub(rm, rp), mul(2.0, den))));
+        }
+        // list(hz, r) -- hz is 0 when nothing in the search band correlates
+        def rpr-pitch-of(s) {
+            let xs = rpr-centred(s);
+            if lt(len(xs), mul(2, rpr-lag-last())) then list(0, 0.0) else rpr-pitch-peak(xs, rpr-rlist(xs, rpr-lag-first(), list()));
+        }
+        def rpr-pitch-peak(xs, rs) {
+            let lo = RPRLagPad();
+            let hi = sub(sub(len(rs), 1), RPRLagPad());
+            let best = rpr-fmax-range(rs, lo, hi, -1.0);
+            let i = if lt(best, RPRVoicedR()) then -1 else rpr-first-crest(rs, mul(RPROctaveKeep(), best), lo, hi);
+            let lag = add(rpr-f(add(rpr-lag-first(), i)), rpr-vertex(rs, i));
+            if lt(i, 0) then list(0, best) else list(float_to_int(round(div(rpr-f(RPRDecRate()), lag))), best);
+        }
+
+        // ---- resonance's tilt: a two-tap complementary split, in decibels -----
+        // the mean is removed first: a mic's standing DC offset is not low-frequency room, and
+        // left in it would sit entirely in the low half and read as warmth the room never had
+        def rpr-mean-done(acc, n) = if le(n, 0) then 0 else div(acc, n);
+        def rpr-mean-samples(s, i, end, acc, n) = if ge(add(i, 1), end) then rpr-mean-done(acc, n) else rpr-mean-samples(s, add(i, 2), end, add(acc, rpr-s16(s, i)), add(n, 1));
+        def rpr-tilt-go(s, i, end, dc, lo, hi) = if gt(add(i, 3), end) then list(lo, hi) else rpr-tilt-step(s, i, end, dc, lo, hi, sub(rpr-s16(s, i), dc), sub(rpr-s16(s, add(i, 2)), dc));
+        def rpr-tilt-step(s, i, end, dc, lo, hi, a, b) {
+            let l = div(add(a, b), 2);
+            let h = div(sub(a, b), 2);
+            rpr-tilt-go(s, add(i, 2), end, dc, add(lo, mul(l, l)), add(hi, mul(h, h)));
+        }
+        def rpr-tilt-of(s) {
+            let w = rpr-tail-from(s, RPRPitchBytes());
+            let t = if lt(str_len(w), 8) then list(0, 0) else rpr-tilt-go(w, 0, str_len(w), rpr-mean-samples(w, 0, str_len(w), 0, 0), 0, 0);
+            if or(le(head(t), 0), le(nth(t, 1), 0)) then RPRAbsent() else float_to_int(round(mul(100.0, div(math_log(div(rpr-f(head(t)), rpr-f(nth(t, 1)))), math_log(10.0)))));
+        }
+
+        // ---- the state a live sensor carries between frames -------------------
+        // list(energy series newest-first, pitch series newest-first, room floor, newest chunk)
+        def rpr-state0() = list(list(), list(), RPRFloorStart(), "");
+        def rpr-env(st) = nth(st, 0);
+        def rpr-pitches(st) = nth(st, 1);
+        def rpr-floor(st) = nth(st, 2);
+        def rpr-chunk(st) = nth(st, 3);
+        def rpr-line(st) = add(rpr-floor(st), RPRLineDb10());
+        def rpr-advance(st, chunk) = if lt(str_len(chunk), RPRSubBytes()) then st else rpr-advance-at(st, chunk, rpr-env-of(chunk));
+        def rpr-advance-at(st, chunk, fresh) {
+            let floor1 = rpr-floor-next(rpr-floor(st), fresh);
+            let line1 = add(floor1, RPRLineDb10());
+            let loud = rpr-fmax(take(5, fresh), RPRQuiet());
+            let heard = if lt(loud, line1) then list(0, 0.0) else rpr-pitch-of(chunk);
+            list(take(RPREnvCap(), append(fresh, rpr-env(st))), take(RPRPitchCap(), cons(head(heard), rpr-pitches(st))), floor1, chunk);
+        }
+
+        // ---- cadence: onsets over the energy series ---------------------------
+        // list(count, index of the newest onset) over an oldest-first series
+        def rpr-onset-scan(ev, line, i, p1, p2, p3, refr, count, last) = if eq(len(ev), 0) then list(count, last) else rpr-onset-step(ev, line, i, p1, p2, p3, refr, count, last, head(ev));
+        def rpr-onset-step(ev, line, i, p1, p2, p3, refr, count, last, x) {
+            let low = min2(p1, min2(p2, p3));
+            let fire = if and(le(refr, 0), and(ge(x, add(line, RPROnsetOver())), ge(sub(x, low), RPRRiseDb10()))) then 1 else 0;
+            rpr-onset-scan(tail(ev), line, add(i, 1), x, p1, p2, if eq(fire, 1) then RPRRefract() else sub(refr, 1), add(count, fire), if eq(fire, 1) then i else last);
+        }
+        def rpr-onsets(ev, line) = rpr-onset-scan(ev, line, 0, RPRQuiet(), RPRQuiet(), RPRQuiet(), 0, 0, -1);
+
+        // ---- stillness: what the window spent under the line ------------------
+        // list(longest quiet run, readings under the line)
+        def rpr-quiet-scan(ev, line, run, best, below) = if eq(len(ev), 0) then list(best, below) else rpr-quiet-step(ev, line, run, best, below, head(ev));
+        def rpr-quiet-step(ev, line, run, best, below, x) {
+            let under = if lt(x, line) then 1 else 0;
+            let r1 = if eq(under, 1) then add(run, 1) else 0;
+            rpr-quiet-scan(tail(ev), line, r1, max2(best, r1), add(below, under));
+        }
+        def rpr-since(env, line, n) = if eq(len(env), 0) then n else if ge(head(env), line) then n else rpr-since(tail(env), line, add(n, 1));
+
+        // ---- expression: the spread of what the room did ----------------------
+        def rpr-above(ev, line, acc) = if eq(len(ev), 0) then acc else rpr-above(tail(ev), line, if ge(head(ev), line) then cons(head(ev), acc) else acc);
+        def rpr-var-go(xs, m, acc) = if eq(len(xs), 0) then acc else rpr-var-go(tail(xs), m, add(acc, mul(sub(head(xs), m), sub(head(xs), m))));
+        def rpr-sd(xs) = if lt(len(xs), 3) then RPRAbsent() else float_to_int(round(math_sqrt(div(rpr-f(rpr-var-go(xs, div(rpr-sum-list(xs, 0), len(xs)), 0)), rpr-f(len(xs))))));
+        def rpr-voiced(ps, acc) = if eq(len(ps), 0) then reverse(acc) else rpr-voiced(tail(ps), if gt(head(ps), 0) then cons(head(ps), acc) else acc);
+        def rpr-cents(f, ref) = mul(1200.0, div(math_log(div(rpr-f(f), rpr-f(ref))), math_log(2.0)));
+        def rpr-cents-list(vs, ref, acc) = if eq(len(vs), 0) then acc else rpr-cents-list(tail(vs), ref, cons(rpr-cents(head(vs), ref), acc));
+        def rpr-fsum(xs, acc) = if eq(len(xs), 0) then acc else rpr-fsum(tail(xs), add(acc, head(xs)));
+        def rpr-fmean-list(xs) = if eq(len(xs), 0) then 0.0 else div(rpr-fsum(xs, 0.0), rpr-f(len(xs)));
+        def rpr-fvar(xs, m, acc) = if eq(len(xs), 0) then acc else rpr-fvar(tail(xs), m, add(acc, mul(sub(head(xs), m), sub(head(xs), m))));
+        def rpr-fsd(xs) = if lt(len(xs), 3) then RPRAbsent() else float_to_int(round(math_sqrt(div(rpr-fvar(xs, div(rpr-fsum(xs, 0.0), rpr-f(len(xs))), 0.0), rpr-f(len(xs))))));
+        def rpr-pitch-sd(vs) = if lt(len(vs), 3) then RPRAbsent() else rpr-fsd(rpr-cents-list(vs, head(vs), list()));
+
+        // ---- intonation: where the fundamental went across the phrase ---------
+        def rpr-span(vs) = if lt(len(vs), 2) then RPRAbsent() else float_to_int(round(mul(12.0, div(math_log(div(rpr-f(maximum(vs)), rpr-f(minimum(vs)))), math_log(2.0)))));
+        def rpr-mean-of(xs) = if eq(len(xs), 0) then 0 else div(rpr-sum-list(xs, 0), len(xs));
+        // semitones between the newest third of the phrase and its oldest third
+        def rpr-move(vs) = if lt(len(vs), 4) then RPRAbsent() else rpr-move-at(vs, max2(1, div(len(vs), 3)));
+        def rpr-move-at(vs, k) {
+            let newest = rpr-mean-of(take(k, vs));
+            let oldest = rpr-mean-of(take(k, reverse(vs)));
+            if or(le(newest, 0), le(oldest, 0)) then RPRAbsent() else float_to_int(round(mul(12.0, div(math_log(div(rpr-f(newest), rpr-f(oldest))), math_log(2.0)))));
+        }
+        def rpr-move-word(m) = if eq(m, RPRAbsent()) then "not yet — the phrase has too few voiced frames" else if ge(m, 1) then "rising" else if le(m, -1) then "falling" else "level";
+
+        // ---- resonance: how long the energy took to fall after an onset -------
+        def rpr-index-of(xs, v, i) = if eq(len(xs), 0) then -1 else if eq(head(xs), v) then i else rpr-index-of(tail(xs), v, add(i, 1));
+        def rpr-fall(xs, target, i) = if or(eq(len(xs), 0), gt(i, RPRDecayMax())) then -1 else if le(head(xs), target) then i else rpr-fall(tail(xs), target, add(i, 1));
+        def rpr-decay(ev, last) = if lt(last, 0) then RPRAbsent() else rpr-decay-at(drop(last, ev));
+        def rpr-decay-at(seg) {
+            let win = take(RPRPeakSpan(), seg);
+            let pk = if eq(len(win), 0) then RPRQuiet() else maximum(win);
+            let pi = rpr-index-of(win, pk, 0);
+            let fall = if lt(pi, 0) then -1 else rpr-fall(drop(add(pi, 1), seg), sub(pk, RPRDecayDb10()), 1);
+            if lt(fall, 0) then RPRAbsent() else mul(fall, RPRSubMs());
+        }
+
+        // ---- the reading: seven axes off one state ---------------------------
+        // list(db, peak, hz, voiced?, span, move, rate, pause, sdLevel, sdPitch,
+        //      still, since, decay, tilt, line, voicedCount)
+        def rpr-reading(st) = rpr-reading-at(st, reverse(rpr-env(st)), rpr-line(st), rpr-voiced(rpr-pitches(st), list()));
+        def rpr-reading-at(st, ev, line, vs) {
+            let on = rpr-onsets(ev, line);
+            let q = rpr-quiet-scan(ev, line, 0, 0, 0);
+            let n = len(ev);
+            let hz = if eq(len(rpr-pitches(st)), 0) then 0 else head(rpr-pitches(st));
+            list(if eq(len(rpr-env(st)), 0) then RPRQuiet() else head(rpr-env(st)),
+                 if eq(n, 0) then RPRQuiet() else maximum(ev),
+                 hz,
+                 if gt(hz, 0) then 1 else 0,
+                 rpr-span(vs),
+                 rpr-move(vs),
+                 if eq(n, 0) then 0 else div(mul(head(on), 60000), mul(n, RPRSubMs())),
+                 mul(head(q), RPRSubMs()),
+                 rpr-sd(rpr-above(ev, line, list())),
+                 rpr-pitch-sd(vs),
+                 if eq(n, 0) then 100 else div(mul(nth(q, 1), 100), n),
+                 mul(rpr-since(rpr-env(st), line, 0), RPRSubMs()),
+                 rpr-decay(ev, nth(on, 1)),
+                 rpr-tilt-of(rpr-chunk(st)),
+                 line,
+                 len(vs));
+        }
+        def rpr-r-db(r) = nth(r, 0);
+        def rpr-r-peak(r) = nth(r, 1);
+        def rpr-r-hz(r) = nth(r, 2);
+        def rpr-r-voiced(r) = nth(r, 3);
+        def rpr-r-span(r) = nth(r, 4);
+        def rpr-r-move(r) = nth(r, 5);
+        def rpr-r-rate(r) = nth(r, 6);
+        def rpr-r-pause(r) = nth(r, 7);
+        def rpr-r-sdlevel(r) = nth(r, 8);
+        def rpr-r-sdpitch(r) = nth(r, 9);
+        def rpr-r-still(r) = nth(r, 10);
+        def rpr-r-since(r) = nth(r, 11);
+        def rpr-r-decay(r) = nth(r, 12);
+        def rpr-r-tilt(r) = nth(r, 13);
+        def rpr-r-line(r) = nth(r, 14);
+        def rpr-r-nvoiced(r) = nth(r, 15);
+
+        // ---- the rows the glass paints ---------------------------------------
+        def rpr-int-row(id, label, value, unit, note) = fgo-int("prosody", id, label, value, unit, 0, "organ", "physical-live", "room-prosody", "live", "voice", note);
+        def rpr-text-row(id, label, value, note) = fgo-text("prosody", id, label, value, "organ", "physical-live", "room-prosody", "live", "voice", note);
+        def rpr-gone-row(id, label, unit, reason) = fgo-unavailable("prosody", id, label, unit, "organ", "room-prosody", "voice", reason);
+        def rpr-or-gone(present, row, id, label, unit, reason) = if eq(present, 1) then row else rpr-gone-row(id, label, unit, reason);
+        def rpr-db-str(d10) = str_concat(int_to_str(div(d10, 10)), " dBFS");
+
+        def rpr-rows(r) = list(
+            rpr-int-row("prosody.volume", "the room's level now", div(rpr-r-db(r), 10), "dbfs", "root-mean-square of the newest 10 ms, in dBFS; the axis the ear already carries as db"),
+            rpr-int-row("prosody.volume.peak", "the loudest 10 ms in three seconds", div(rpr-r-peak(r), 10), "dbfs", "the highest 10 ms reading held in the three-second window"),
+            rpr-or-gone(rpr-r-voiced(r), rpr-int-row("prosody.pitch", "the voice's fundamental", rpr-r-hz(r), "hertz", str_concat("normalized autocorrelation over the newest 50 ms at half rate, peak sharpened by parabola; searched 70-400 Hz over a room line of ", rpr-db-str(rpr-r-line(r)))), "prosody.pitch", "the voice's fundamental", "hertz", "no voiced sound in the newest 50 ms: either the room is under its speech line or nothing in 70-400 Hz correlates with itself"),
+            rpr-or-gone(if gt(rpr-r-span(r), RPRAbsent()) then 1 else 0, rpr-int-row("prosody.intonation.span", "how far the pitch travelled", rpr-r-span(r), "semitones", "the interval between the phrase's lowest and highest voiced fundamental over three seconds; a monotone reads near zero"), "prosody.intonation.span", "how far the pitch travelled", "semitones", "fewer than two voiced frames in the last three seconds; a span needs two ends"),
+            rpr-text-row("prosody.intonation.move", "where the phrase went", rpr-move-word(rpr-r-move(r)), "the newest third of the voiced track against its oldest third, in semitones; one semitone either way decides it"),
+            rpr-int-row("prosody.cadence.rate", "the pace of the speaking", rpr-r-rate(r), "onsets-per-minute", "energy onsets (a 4 dB rise over the previous 30 ms, above the room line, at most one per 50 ms) counted over the window and carried to a minute; ordinary speech runs 240-360"),
+            rpr-int-row("prosody.cadence.pause", "the longest silence inside the window", rpr-r-pause(r), "milliseconds", "the longest unbroken run of 10 ms readings under the speech line, inside the last three seconds"),
+            rpr-or-gone(if gt(rpr-r-sdlevel(r), RPRAbsent()) then 1 else 0, rpr-int-row("prosody.expression.level", "how much the level lives", rpr-r-sdlevel(r), "decibel-tenths", "the spread of the SPEECH readings only (silence excluded, or every pause would read as expression); a flat delivery sits low, a living one high"), "prosody.expression.level", "how much the level lives", "decibel-tenths", "fewer than three 10 ms readings above the speech line; a spread needs a few points"),
+            rpr-or-gone(if gt(rpr-r-sdpitch(r), RPRAbsent()) then 1 else 0, rpr-int-row("prosody.expression.pitch", "how much the pitch lives", rpr-r-sdpitch(r), "cents", "the spread of the voiced fundamentals over three seconds, in hundredths of a semitone; a monotone reads under a hundred"), "prosody.expression.pitch", "how much the pitch lives", "cents", "fewer than three voiced frames in the last three seconds"),
+            rpr-int-row("prosody.stillness", "the share of the window that was quiet", rpr-r-still(r), "percent", "10 ms readings under the speech line, as a share of the three-second window"),
+            rpr-int-row("prosody.stillness.since", "how long the room has been quiet", rpr-r-since(r), "milliseconds", "unbroken time under the speech line counting back from now; it stops at the window's edge, three seconds"),
+            rpr-or-gone(if gt(rpr-r-decay(r), RPRAbsent()) then 1 else 0, rpr-int-row("prosody.resonance.decay", "how long the sound took to fall", rpr-r-decay(r), "milliseconds", "from the newest onset's peak to the first 10 ms ten decibels under it; a live room holds the sound, a dead one drops it"), "prosody.resonance.decay", "how long the sound took to fall", "milliseconds", "no onset in the window, or its energy has not yet fallen ten decibels — the sound is still going"),
+            rpr-or-gone(if gt(rpr-r-tilt(r), RPRAbsent()) then 1 else 0, rpr-int-row("prosody.resonance.tilt", "the room's low against its high", rpr-r-tilt(r), "decibel-tenths", "a two-tap complementary split of the newest 50 ms: the low half's energy over the high half's, in decibels. A vowel and a warm room read high, breath and hiss read low. It moves as a spectrum's tilt moves; it is not a spectrum"), "prosody.resonance.tilt", "the room's low against its high", "decibel-tenths", "the newest 50 ms carries no energy in one half of the split"),
+            rpr-int-row("prosody.line", "the speech line this room earned", div(rpr-r-line(r), 10), "dbfs", "twelve decibels over a floor-follower that snaps down to any quieter 10 ms and creeps up 0.2 dB a frame; every axis above that says speech or quiet is judged against this and no constant"));
+    }
+    0;
+}
