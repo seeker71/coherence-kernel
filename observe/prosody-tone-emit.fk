@@ -1,0 +1,56 @@
+; prosody-tone-emit.fk — put a sound of exactly known shape into the room, so the axes can be checked
+; against truth and not against an impression.
+;
+; A synthesized voice will not honour a pitch instruction reliably -- two lines asked for flat and for
+; lively came back identical here -- and a null stimulus read as a null axis is how a working organ gets
+; called broken. So this cell writes a wav whose fundamental, loudness, glide and burst rate the caller
+; CHOSE, and afplay carries it through the speakers, the room and the mic like any other sound. A
+; sawtooth is the shape: one unambiguous period, harmonics all the way up, the same thing a glottis does.
+;
+; stdin line 1: one of steady glide fall quiet bursts. It writes /tmp/prosody-<kind>.wav.
+;
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/core.fk form/form-stdlib/line-grammar.fk
+
+(do
+    (defn pe-rate () 16000)
+    (defn pe-u32 (n) (list (mod n 256) (mod (div n 256) 256) (mod (div n 65536) 256) (mod (div n 16777216) 256)))
+    (defn pe-header (nbytes)
+        (append (list 82 73 70 70)
+        (append (pe-u32 (add 36 nbytes))
+        (append (list 87 65 86 69 102 109 116 32)
+        (append (pe-u32 16)
+        (append (list 1 0 1 0)
+        (append (pe-u32 (pe-rate))
+        (append (pe-u32 (mul 2 (pe-rate)))
+        (append (list 2 0 16 0 100 97 116 97) (pe-u32 nbytes))))))))))
+    ; a sample's two bytes, little-endian signed, pushed so that a final reverse leaves low then high
+    (defn pe-push (v acc) (do (let u (if (lt v 0) (add v 65536) v)) (cons (div u 256) (cons (mod u 256) acc))))
+    ; the phase walks by f/rate each sample, so a glide stays continuous across its whole length
+    (defn pe-freq (f0 f1 i n) (mul f0 (math_pow (div f1 f0) (div (mul 1.0 i) (mul 1.0 n)))))
+    (defn pe-gate (i on off) (if (le on 0) 1 (do (let ms (div (mul i 1000) (pe-rate))) (if (lt (mod ms (add on off)) on) 1 0))))
+    (defn pe-go (i n f0 f1 amp on off ph acc)
+        (if (ge i n) acc
+            (do (let f (pe-freq f0 f1 i n))
+                (let v (if (eq (pe-gate i on off) 1) (float_to_int (mul (sub (mul 2.0 ph) 1.0) (mul 1.0 amp))) 0))
+                (let p1 (add ph (div f (mul 1.0 (pe-rate)))))
+                (pe-go (add i 1) n f0 f1 amp on off (if (ge p1 1.0) (sub p1 1.0) p1) (pe-push v acc)))))
+    (defn pe-write (path ms f0 f1 amp on off)
+        (do (let n (div (mul ms (pe-rate)) 1000))
+            (let bytes (reverse (pe-go 0 n f0 f1 amp on off 0.0 (list))))
+            (let gone (fs_remove path))
+            (let w (file_append_bytes path (append (pe-header (mul 2 n)) bytes)))
+            (file_size path)))
+    (defn pe-first () (do (let l (read_line)) (if (nothing? l) "steady" (trim l))))
+    (let kind (pe-first))
+    (let path (str_concat "/tmp/prosody-" (str_concat kind ".wav")))
+    (let size
+        (if (str_eq kind "steady") (pe-write path 3000 200.0 200.0 6000 0 0)
+        (if (str_eq kind "glide")  (pe-write path 3000 120.0 240.0 6000 0 0)
+        (if (str_eq kind "fall")   (pe-write path 3000 240.0 120.0 6000 0 0)
+        (if (str_eq kind "soft")   (pe-write path 3000 200.0 200.0 1500 0 0)
+        (if (str_eq kind "quiet")  (pe-write path 3000 200.0 200.0 380 0 0)
+        (if (str_eq kind "bursts") (pe-write path 3000 200.0 200.0 6000 100 100)
+            0)))))))
+    (print_str (str_concat path (str_concat "  bytes " (str_concat (int_to_str size) (byte_to_str 10)))))
+    0)
