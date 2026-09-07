@@ -190,6 +190,30 @@ homecoming-distillation-corpus-band  32767     32767
 is the weakest question that can be asked of a hash. The new band asks the
 strong one.
 
+## The frontier question, and the next lens
+
+*Which of my doors is slow only because it is a private copy of a warm one?*
+
+The body cannot ask this yet. `bearing-census` names what the body **leans on**;
+it ranks by heat, and a cold duplicate is exactly the door that does not rank
+until something drives it hard. Nothing anywhere asks the inverse: *this door
+has a twin on the shared floor, the twin is crystallized, and this one is not.*
+
+The answer, this pass: **a duplicate is not a copy of a door, it is an exit from
+a pool.** Crystallization is bought with the whole body's calls landing on one
+name. A private copy looks free because its body is identical — and it is
+identical, which is why the arithmetic says routing away from it costs a frame.
+What it does not have is everyone else's heat, and it can never earn it alone.
+That is `coldtwin`, corpus row **1351**.
+
+It is also a buildable lens, and a small one, because both halves already exist
+in ledgers the seed keeps: the hot row's `crystal` field says whether a door
+crystallized, and `bearing-census` already reads defn bodies by name to draw its
+call graph. A door whose body matches another door's body, where one carries
+crystal ≥ 1 and the other -1, is a coldtwin — reported by name, with the shared
+door to route to. `nil?`, `nth-rec`, `append-1` and `append-list` would all have
+been named by it this morning, before the census ever got to `nth-rec`.
+
 ## Still open
 
 - The kernels' native `nth` disagrees at a negative index: fkwu clamps to the
