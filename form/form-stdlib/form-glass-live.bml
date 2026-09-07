@@ -334,7 +334,7 @@ section [form.bml] {
         }
         // the governor refreshes its own publication from the sensor process (observe/form-glass-sensors-live.fk); the frame path forks nothing
         def fgl-refresh-governor(frame) = "sensor-process";
-        def fgl-carrier-seam() = str_concat("keys=hatomfjskvn 1-4 0 iecq; input=line-commit sidecar; event-wait=", str_concat(FGELWaitDoor(), ":host_sleep_ms"));
+        def fgl-carrier-seam() = str_concat("keys=hatomfjskvnd 1-4 0 iecq gyw; input=line-commit sidecar; event-wait=", str_concat(FGELWaitDoor(), ":host_sleep_ms"));
         def fgl-v2-provenance(epoch, sequence) = fgov2-provenance("physical-live", "glass.monitor", fgov2-unavailable("process-lifetime-not-carried", "glass.monitor.process-lifetime"), fgov2-measured(sequence), fgov2-measured(epoch), "glass.live.current-process");
         def fgl-prefix?(text, prefix) = eq(str_find(text, prefix, 0), 0);
         def fgl-owner-heartbeat-for(samples, owner) = if eq(len(samples), 0) then list() else if and(str_eq(fgtm-sample-kind(head(samples)), "owner-heartbeat"), and(str_eq(fgtm-sample-owner(head(samples)), owner), and(eq(fgtm-field-present?(fgtm-sample-handle(head(samples))), 1), and(eq(fgtm-field-present?(fgtm-sample-write-epoch(head(samples))), 1), eq(fgtm-field-present?(fgtm-sample-read-epoch(head(samples))), 1))))) then head(samples) else fgl-owner-heartbeat-for(tail(samples), owner);
@@ -616,7 +616,19 @@ section [form.bml] {
         def fgl-control-filter(state) = nth(state, 6);
         def fgl-control-selected(state) = nth(state, 7);
         def fgl-control-evidence-open?(state) = nth(state, 8);
-        def fgl-control-supported?(action) = if str_eq(action, "focus") then 1 else if str_eq(action, "inspect") then 1 else if str_eq(action, "continue") then 1 else if str_eq(action, "request-evidence") then 1 else if str_eq(action, "abstain") then 1 else 0;
+        // ---- walking the choice sequence: step the cursor, take the option under it, hold it standing ----
+        // A take or a hold is an outcome, and an outcome belongs in the point's ledger, not in the
+        // view: the glass writes it as one command into the choice publisher's inbox, the choice
+        // organ consumes it and republishes the point, and the next frame reads the moved ledger.
+        def fgl-choice-walk?(action) = if str_eq(action, "step") then 1 else if str_eq(action, "take") then 1 else if str_eq(action, "hold") then 1 else 0;
+        def fgl-choice-outcome?(action) = if str_eq(action, "take") then 1 else if str_eq(action, "hold") then 1 else 0;
+        def fgl-choice-outcome-kind(action) = if str_eq(action, "take") then "taken" else "held";
+        def fgl-choice-command(previous, offer, samples, epoch) = fgch-slot-command(fgch-samples-points(samples), fgl-control-selected(previous), fgl-choice-outcome-kind(fgtm-offer-action(offer)), fgd-max(0, sub(epoch, fgtm-offer-epoch(offer))));
+        def fgl-choice-record(previous, offer, samples, epoch) {
+            let command = fgl-choice-command(previous, offer, samples, epoch);
+            if lt(str_len(command), 1) then list("owner-command-offer-v2", "refused", "no-slot-under-cursor") else fgtm-command-offer(FGCHPublisher(), command);
+        }
+        def fgl-control-supported?(action) = if str_eq(action, "focus") then 1 else if str_eq(action, "inspect") then 1 else if str_eq(action, "continue") then 1 else if str_eq(action, "request-evidence") then 1 else if str_eq(action, "abstain") then 1 else fgl-choice-walk?(action);
         def fgl-control-selector-valid?(samples, argument) = if not(eq(fgtm-field-present?(argument), 1)) then 0 else if eq(fgd-view?(fgtm-field-value(argument)), 1) then 1 else if eq(fglm-lang-key?(fgtm-field-value(argument)), 1) then 1 else if gt(fgd-count-visible(samples, fgtm-field-value(argument)), 0) then 1 else 0;
         def fgl-control-offer-applicable?(samples, offer) {
             let action = fgtm-offer-action(offer);
@@ -640,11 +652,11 @@ section [form.bml] {
             let applicable = fgl-control-offer-applicable?(samples, offer);
             let argumentText = if eq(fgtm-field-present?(argument), 1) then fgtm-field-value(argument) else "none";
             let isView = if eq(fgtm-field-present?(argument), 1) then fgd-view?(argumentText) else 0;
-            let nextView = if not(eq(applicable, 1)) then fgl-control-view(previous) else if and(str_eq(action, "focus"), eq(isView, 1)) then argumentText else if str_eq(action, "continue") then "overview" else fgl-control-view(previous);
+            let nextView = if not(eq(applicable, 1)) then fgl-control-view(previous) else if and(str_eq(action, "focus"), eq(isView, 1)) then argumentText else if str_eq(action, "continue") then "overview" else if eq(fgl-choice-walk?(action), 1) then "choice" else fgl-control-view(previous);
             let isLang = if eq(fgtm-field-present?(argument), 1) then fglm-lang-key?(argumentText) else 0;
             let nextFocus = if not(eq(applicable, 1)) then fgl-control-focus(previous) else if str_eq(action, "continue") then "all" else if and(str_eq(action, "focus"), and(eq(isView, 0), eq(isLang, 0))) then argumentText else fgl-control-focus(previous);
             let nextFilter = if str_eq(action, "continue") then "all" else if and(str_eq(action, "focus"), eq(isLang, 1)) then fglm-toggle(fgl-control-filter(previous), argumentText) else if and(str_eq(action, "focus"), eq(isView, 0)) then argumentText else fgl-control-filter(previous);
-            let nextSelected = if and(eq(applicable, 1), str_eq(action, "inspect")) then argumentText else if and(eq(applicable, 1), str_eq(action, "request-evidence")) then if eq(fgtm-field-present?(argument), 1) then argumentText else fgl-control-selected(previous) else fgl-control-selected(previous);
+            let nextSelected = if and(eq(applicable, 1), str_eq(action, "step")) then fgch-cursor-step(fgl-control-selected(previous)) else if and(eq(applicable, 1), eq(fgl-choice-outcome?(action), 1)) then fgch-cursor-text(fgch-cursor-number(fgl-control-selected(previous))) else if and(eq(applicable, 1), str_eq(action, "inspect")) then argumentText else if and(eq(applicable, 1), str_eq(action, "request-evidence")) then if eq(fgtm-field-present?(argument), 1) then argumentText else fgl-control-selected(previous) else fgl-control-selected(previous);
             let evidenceOpen = if and(eq(applicable, 1), str_eq(action, "request-evidence")) then 1 else if and(eq(applicable, 1), str_eq(action, "inspect")) then 0 else fgl-control-evidence-open?(previous);
             let quit = if and(eq(applicable, 1), str_eq(action, "abstain")) then 1 else 0;
             fgl-control-state-full(nextFocus, fgtm-offer-id(offer), quit, if eq(applicable, 1) then action else "refused", nextView, nextFilter, nextSelected, evidenceOpen);
@@ -652,6 +664,7 @@ section [form.bml] {
         def fgl-control-commit-full(previous, proposed, writeResult) = if eq(fgl-control-write-acknowledged?(writeResult), 1) then proposed else fgl-control-state-full(fgl-control-focus(previous), fgl-control-last-offer(previous), 0, "ack-failed", fgl-control-view(previous), fgl-control-filter(previous), fgl-control-selected(previous), fgl-control-evidence-open?(previous));
         def fgl-control-apply-full(previous, offer, samples, epoch) {
             let proposed = fgl-control-proposed(previous, offer, samples);
+            let recorded = if eq(fgl-choice-outcome?(fgtm-offer-action(offer)), 1) then fgl-choice-record(previous, offer, samples, epoch) else list();
             let disposition = if str_eq(fgl-control-status(proposed), "refused") then "refused" else "applied";
             let ackEpoch = fgl-control-ack-epoch(fgtm-offer-epoch(offer), now_unix_ms());
             let ack = fgtm-control-ack(fgtm-offer-channel(offer), fgtm-offer-id(offer), ackEpoch, disposition, "physical-live", "glass.monitor");
@@ -1104,14 +1117,14 @@ section [form.bml] {
             let wrote = fgtm-offer-control(FGLRoot(), offer);
             if and(ge(len(wrote), 2), str_eq(nth(wrote, 1), "offered")) then fgl-control-await(offer, 8) else list("glass-control-result-v1", "not-offered", "missing-door=glass.monitor.control-inbox", offer, wrote);
         }
-        def fgl-control-key-view(key) = if str_eq(key, "h") then "help" else if str_eq(key, "s") then "meaning" else if str_eq(key, "k") then "kernel" else if str_eq(key, "v") then "events" else if str_eq(key, "n") then "channels" else if str_eq(key, "a") then "atlas" else if str_eq(key, "t") then "raster" else if str_eq(key, "o") then "overview" else if str_eq(key, "m") then "memory" else if str_eq(key, "f") then "flow" else if str_eq(key, "j") then "recipes" else "";
+        def fgl-control-key-view(key) = if str_eq(key, "h") then "help" else if str_eq(key, "s") then "meaning" else if str_eq(key, "k") then "kernel" else if str_eq(key, "v") then "events" else if str_eq(key, "n") then "channels" else if str_eq(key, "a") then "atlas" else if str_eq(key, "t") then "raster" else if str_eq(key, "o") then "overview" else if str_eq(key, "m") then "memory" else if str_eq(key, "f") then "flow" else if str_eq(key, "j") then "recipes" else if str_eq(key, "d") then "choice" else "";
         def fgl-control-key-lang(key) = if str_eq(key, "1") then "go" else if str_eq(key, "2") then "py" else if str_eq(key, "3") then "rs" else if str_eq(key, "4") then "ts" else if str_eq(key, "0") then "none" else "";
-        def fgl-control-key-action(key) = if gt(str_len(fgl-control-key-lang(key)), 0) then "focus" else if gt(str_len(fgl-control-key-view(key)), 0) then "focus" else if str_eq(key, "i") then "inspect" else if str_eq(key, "e") then "request-evidence" else if str_eq(key, "c") then "continue" else if str_eq(key, "q") then "abstain" else key;
-        def fgl-control-key-needs-argument?(key, action) = if gt(str_len(fgl-control-key-lang(key)), 0) then 0 else if gt(str_len(fgl-control-key-view(key)), 0) then 0 else if str_eq(action, "continue") then 0 else if str_eq(action, "abstain") then 0 else 1;
+        def fgl-control-key-action(key) = if gt(str_len(fgl-control-key-lang(key)), 0) then "focus" else if gt(str_len(fgl-control-key-view(key)), 0) then "focus" else if str_eq(key, "i") then "inspect" else if str_eq(key, "e") then "request-evidence" else if str_eq(key, "c") then "continue" else if str_eq(key, "q") then "abstain" else if str_eq(key, "g") then "step" else if str_eq(key, "y") then "take" else if str_eq(key, "w") then "hold" else key;
+        def fgl-control-key-needs-argument?(key, action) = if gt(str_len(fgl-control-key-lang(key)), 0) then 0 else if gt(str_len(fgl-control-key-view(key)), 0) then 0 else if str_eq(action, "continue") then 0 else if str_eq(action, "abstain") then 0 else if eq(fgl-choice-walk?(action), 1) then 0 else 1;
         def fgl-control-key-argument(key, entered) = if gt(str_len(fgl-control-key-lang(key)), 0) then fgl-control-key-lang(key) else if gt(str_len(fgl-control-key-view(key)), 0) then fgl-control-key-view(key) else entered;
         def fgl-control-interactive() {
             let p0 = say-line("FORM GLASS CONTROL channel=glass-monitor");
-            let p1 = say-line("key h help | a atlas | t raster | o overview | m memory | f flow | j recipes | s meaning | k kernel | v events | n channels | 1-4 dialect | 0 none | i inspect | e evidence | c continue | q abstain; or full action:");
+            let p1 = say-line("key h help | a atlas | t raster | o overview | m memory | f flow | j recipes | s meaning | k kernel | v events | n channels | d choice | 1-4 dialect | 0 none | i inspect | e evidence | c continue | g step | y take | w hold | q abstain; or full action:");
             let actionRaw = read_line();
             let key = if nothing?(actionRaw) then "" else trim(actionRaw);
             let action = fgl-control-key-action(key);
