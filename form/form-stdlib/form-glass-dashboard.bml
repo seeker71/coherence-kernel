@@ -206,7 +206,15 @@ section [form.bml] {
         def fgd-map-sample-state(sample) = if eq(fgd-catalog-weight-sample?(sample), 1) then "catalog" else fgtm-sample-lifecycle(sample);
         def fgd-map-sample-item(sample, epoch) = fgd-map-item(fgtm-sample-id(sample), fgd-map-sample-label(sample), fgtm-field-present?(fgtm-sample-bytes(sample)), fgd-field-number(fgtm-sample-bytes(sample)), "bytes", fgtm-sample-plane(sample), fgtm-sample-evidence(sample), fgd-sample-alpha(sample, epoch), fgtm-sample-channels(sample), fgd-map-sample-state(sample), if eq(fgtm-field-present?(fgtm-sample-bytes(sample)), 1) then "" else str_concat(fgtm-sample-id(sample), ".materialized-resident-bytes"), if eq(fgtm-field-present?(fgtm-sample-bytes(sample)), 1) then "" else "sample-bytes-not-published; handle does not prove materialization or callability");
         def fgd-map-sample-attached?(sample, allSamples) = if not(str_eq(fgtm-sample-evidence(sample), "catalog")) then 1 else if not(str_eq(fgtm-sample-kind(sample), "weights")) then 1 else if not(eq(fgtm-field-present?(fgtm-sample-parent(sample)), 1)) then 0 else fgd-physical-model-id?(allSamples, fgtm-field-value(fgtm-sample-parent(sample)));
-        def fgd-map-sample-items(samples, allSamples, epoch, focus) = if eq(len(samples), 0) then list() else if and(eq(fgd-visible?(head(samples), focus), 1), eq(fgd-map-sample-attached?(head(samples), allSamples), 1)) then cons(fgd-map-sample-item(head(samples), epoch), fgd-map-sample-items(tail(samples), allSamples, epoch, focus)) else fgd-map-sample-items(tail(samples), allSamples, epoch, focus);
+        // Counters, pressure, controls and recipe events are not allocations.
+        // Byte-bearing records remain extensible; known non-allocation kinds
+        // must not become 0-byte bars or invented resident-byte missing doors.
+        def fgd-kind-in?(kind, kinds) = if eq(len(kinds), 0) then 0 else if str_eq(kind, head(kinds)) then 1 else fgd-kind-in?(kind, tail(kinds));
+        def fgd-memory-record?(sample) {
+            let kind = fgtm-sample-kind(sample);
+            if fgd-kind-in?(kind, list("pressure", "release", "release-plan", "release-selection", "tensor-reconciliation", "owner-heartbeat", "artifact-open-stat", "budget", "event", "recipe", "token-position")) then 0 else if eq(fgtm-field-present?(fgtm-sample-bytes(sample)), 1) then 1 else fgd-kind-in?(kind, list("model", "weights", "tensor", "buffer", "allocation", "allocated-tensors", "allocated-state", "mapped-tensors", "model-allocation"));
+        }
+        def fgd-map-sample-items(samples, allSamples, epoch, focus) = if eq(len(samples), 0) then list() else if and(eq(fgd-memory-record?(head(samples)), 1), and(eq(fgd-visible?(head(samples), focus), 1), eq(fgd-map-sample-attached?(head(samples), allSamples), 1))) then cons(fgd-map-sample-item(head(samples), epoch), fgd-map-sample-items(tail(samples), allSamples, epoch, focus)) else fgd-map-sample-items(tail(samples), allSamples, epoch, focus);
         def fgd-map-known(items) = if eq(len(items), 0) then list() else if eq(fgd-map-present?(head(items)), 1) then cons(head(items), fgd-map-known(tail(items))) else fgd-map-known(tail(items));
         def fgd-map-unknown(items) = if eq(len(items), 0) then list() else if eq(fgd-map-present?(head(items)), 0) then cons(head(items), fgd-map-unknown(tail(items))) else fgd-map-unknown(tail(items));
         def fgd-map-unknown-count(items) = if eq(len(items), 0) then 0 else add(if eq(fgd-map-present?(head(items)), 0) then 1 else 0, fgd-map-unknown-count(tail(items)));
@@ -251,7 +259,11 @@ section [form.bml] {
         def fgd-current-or-last-observed-model?(sample) = if str_eq(fgtm-sample-evidence(sample), "physical-live") then 1 else if and(str_eq(fgtm-sample-evidence(sample), "derived-window"), str_eq(fgtm-sample-source(sample), "glass.stale-snapshot")) then 1 else 0;
         def fgd-physical-model-id?(samples, id) = if eq(len(samples), 0) then 0 else if and(str_eq(fgtm-sample-id(head(samples)), id), and(str_eq(fgtm-sample-kind(head(samples)), "model"), and(eq(fgd-current-or-last-observed-model?(head(samples)), 1), not(str_eq(fgtm-sample-lifecycle(head(samples)), "released"))))) then 1 else fgd-physical-model-id?(tail(samples), id);
         def fgd-material-plane?(plane) = if str_eq(plane, "metal") then 1 else if str_eq(plane, "mlx") then 1 else if str_eq(plane, "unified") then 1 else if str_eq(plane, "gpu") then 1 else 0;
-        def fgd-resident-byte-sample?(sample, allSamples) = if not(eq(fgtm-field-present?(fgtm-sample-bytes(sample)), 1)) then 0 else if not(eq(fgd-material-plane?(fgtm-sample-plane(sample)), 1)) then 0 else if str_eq(fgtm-sample-evidence(sample), "physical-live") then 1 else if and(str_eq(fgtm-sample-evidence(sample), "derived-window"), eq(fgd-sample-stale?(sample), 1)) then 1 else 0;
+        // Aggregate only model roots or an owner's explicit allocated ledger.
+        // Leaf/subtotal records remain visible individually, never added twice.
+        def fgd-allocated-ledger?(sample) = and(str_eq(fgtm-sample-id(sample), "tensor.owner.allocated"), and(eq(fgtm-field-present?(fgtm-sample-bytes(sample)), 1), and(eq(fgd-material-plane?(fgtm-sample-plane(sample)), 1), and(not(str_eq(fgtm-sample-lifecycle(sample), "released")), or(str_eq(fgtm-sample-evidence(sample), "physical-live"), str_eq(fgtm-sample-evidence(sample), "derived-window"))))));
+        def fgd-owner-ledger?(samples, owner) = if eq(len(samples), 0) then 0 else if and(str_eq(fgtm-sample-owner(head(samples)), owner), eq(fgd-allocated-ledger?(head(samples)), 1)) then 1 else fgd-owner-ledger?(tail(samples), owner);
+        def fgd-resident-byte-sample?(sample, allSamples) = if not(eq(fgd-memory-record?(sample), 1)) then 0 else if not(eq(fgtm-field-present?(fgtm-sample-bytes(sample)), 1)) then 0 else if not(eq(fgd-material-plane?(fgtm-sample-plane(sample)), 1)) then 0 else if str_eq(fgtm-sample-lifecycle(sample), "released") then 0 else if eq(fgd-allocated-ledger?(sample), 1) then 1 else if not(and(str_eq(fgtm-sample-kind(sample), "model"), eq(fgd-owner-ledger?(allSamples, fgtm-sample-owner(sample)), 0))) then 0 else if str_eq(fgtm-sample-evidence(sample), "physical-live") then 1 else if and(str_eq(fgtm-sample-evidence(sample), "derived-window"), eq(fgd-sample-stale?(sample), 1)) then 1 else 0;
         def fgd-memory-bar-value-go(samples, allSamples) = if eq(len(samples), 0) then 0 else add(if eq(fgd-resident-byte-sample?(head(samples), allSamples), 1) then fgd-field-number(fgtm-sample-bytes(head(samples))) else 0, fgd-memory-bar-value-go(tail(samples), allSamples));
         def fgd-memory-bar-value(samples) = fgd-memory-bar-value-go(samples, samples);
         def fgd-memory-bar-contributors-go(samples, allSamples) = if eq(len(samples), 0) then 0 else add(if eq(fgd-resident-byte-sample?(head(samples), allSamples), 1) then 1 else 0, fgd-memory-bar-contributors-go(tail(samples), allSamples));
@@ -260,12 +272,14 @@ section [form.bml] {
         def fgd-logical-artifact-bytes(samples) = if eq(len(samples), 0) then 0 else add(if eq(fgd-logical-artifact-byte-sample?(head(samples)), 1) then fgd-field-number(fgtm-sample-bytes(head(samples))) else 0, fgd-logical-artifact-bytes(tail(samples)));
         def fgd-model-handle-count(samples) = if eq(len(samples), 0) then 0 else add(if and(str_eq(fgtm-sample-kind(head(samples)), "model"), eq(fgtm-field-present?(fgtm-sample-handle(head(samples))), 1)) then 1 else 0, fgd-model-handle-count(tail(samples)));
         def fgd-budget-capacity?(sample) = if not(eq(fgtm-field-present?(fgtm-sample-capacity(sample)), 1)) then 0 else if str_eq(fgtm-sample-kind(sample), "budget") then 1 else 0;
-        def fgd-memory-bar-capacity-go(samples, allSamples, fallback) = if eq(len(samples), 0) then fallback else if eq(fgd-budget-capacity?(head(samples)), 1) then fgd-max(fgtm-field-value(fgtm-sample-capacity(head(samples))), fgd-memory-bar-capacity-go(tail(samples), allSamples, fallback)) else if and(eq(fgd-resident-byte-sample?(head(samples), allSamples), 1), eq(fgtm-field-present?(fgtm-sample-capacity(head(samples))), 1)) then fgd-max(fgtm-field-value(fgtm-sample-capacity(head(samples))), fgd-memory-bar-capacity-go(tail(samples), allSamples, fallback)) else fgd-memory-bar-capacity-go(tail(samples), allSamples, fallback);
+        def fgd-memory-bar-capacity-go(samples, allSamples, fallback) = if eq(len(samples), 0) then fallback else if eq(fgd-budget-capacity?(head(samples)), 1) then fgd-max(fgtm-field-value(fgtm-sample-capacity(head(samples))), fgd-memory-bar-capacity-go(tail(samples), allSamples, fallback)) else fgd-memory-bar-capacity-go(tail(samples), allSamples, fallback);
         def fgd-memory-bar-capacity(samples, fallback) = fgd-memory-bar-capacity-go(samples, samples, fallback);
         def fgd-model-id-stale?(samples, id) = if eq(len(samples), 0) then 0 else if and(str_eq(fgtm-sample-id(head(samples)), id), and(str_eq(fgtm-sample-kind(head(samples)), "model"), eq(fgd-sample-stale?(head(samples)), 1))) then 1 else fgd-model-id-stale?(tail(samples), id);
         def fgd-resident-contributor-stale?(sample, allSamples) = if eq(fgd-sample-stale?(sample), 1) then 1 else if and(str_eq(fgtm-sample-evidence(sample), "catalog"), and(str_eq(fgtm-sample-kind(sample), "weights"), eq(fgtm-field-present?(fgtm-sample-parent(sample)), 1))) then fgd-model-id-stale?(allSamples, fgtm-field-value(fgtm-sample-parent(sample))) else 0;
         def fgd-memory-bar-has-stale?(samples, allSamples) = if eq(len(samples), 0) then 0 else if and(eq(fgd-resident-byte-sample?(head(samples), allSamples), 1), eq(fgd-resident-contributor-stale?(head(samples), allSamples), 1)) then 1 else fgd-memory-bar-has-stale?(tail(samples), allSamples);
-        def fgd-memory-bar-evidence(samples) = if eq(fgd-memory-bar-has-stale?(samples, samples), 1) then "derived-window" else "physical-live";
+        def fgd-memory-bar-has-derived?(samples, allSamples) = if eq(len(samples), 0) then 0 else if and(eq(fgd-resident-byte-sample?(head(samples), allSamples), 1), str_eq(fgtm-sample-evidence(head(samples)), "derived-window")) then 1 else fgd-memory-bar-has-derived?(tail(samples), allSamples);
+        def fgd-memory-bar-evidence(samples) = if or(eq(fgd-memory-bar-has-stale?(samples, samples), 1), eq(fgd-memory-bar-has-derived?(samples, samples), 1)) then "derived-window" else "physical-live";
+        def fgd-memory-bar-label(samples) = if eq(fgd-memory-bar-has-stale?(samples, samples), 1) then "last-observed allocated extents " else if eq(fgd-memory-bar-has-derived?(samples, samples), 1) then "derived allocated extents " else "allocated extents ";
 
         // Retained segment projection is the live fast lane.  It follows the
         // Rich lesson directly: measure, allocate regions, then emit styled
@@ -274,11 +288,12 @@ section [form.bml] {
         def fgd-byte-segment-line(bytes, width, style, nodeId, channels, evidence) = list(ftc-segment(ftc-byte-text(fgdb-fit(bytes, width)), style, "none", nodeId, channels, evidence));
         def fgd-blank-segment-line(width) = fgd-segment-line("", width, fgd-neutral(40), "glass.blank", list(), "declared");
         def fgd-title-segment-line(text, width, nodeId) = fgd-segment-line(text, width, fgd-title(), nodeId, list("all"), "declared");
-        def fgd-sample-segment-line(sample, width, epoch) = fgd-segment-line(fgd-sample-line-at(sample, width, epoch), width, fgd-sample-style(sample, epoch), fgd-sample-projection-id(sample), append(list(fgtm-sample-id(sample)), fgtm-sample-channels(sample)), fgtm-sample-evidence(sample));
+        def fgd-sample-segment-line(sample, width, epoch) = fgd-segment-line(fgd-sample-line-at(sample, width, epoch), width, fgd-sample-style(sample, epoch), fgd-sample-projection-id(sample), append(list(fgtm-sample-id(sample), str_concat("selector.", fgtm-sample-selection-id(sample))), fgtm-sample-channels(sample)), fgtm-sample-evidence(sample));
         def fgd-metric-style(metric) = if eq(len(metric), 0) then fgd-neutral(56) else fgd-style-for-metric(metric);
         def fgd-metric-id-or-missing(metric) = if eq(len(metric), 0) then "metric.missing" else if eq(fgo-nodeid-bound?(metric), 1) then fgo-nodeid-value(metric) else str_concat("metric.", fgo-id(metric));
         def fgd-metric-evidence-or-missing(metric) = if eq(len(metric), 0) then "unavailable" else fgo-evidence(metric);
-        def fgd-metric-channels(metric) = if eq(len(metric), 0) then list("health") else list(fgo-channel(metric), fgo-domain(metric));
+        def fgd-metric-selector(metric) = fgd-cat(list("metric.", fgo-domain(metric), ".", fgo-id(metric)));
+        def fgd-metric-channels(metric) = if eq(len(metric), 0) then list("health") else list(str_concat("selector.", fgd-metric-selector(metric)), fgo-channel(metric), fgo-domain(metric));
         def fgd-metric-segment-line(metric, width) = fgd-byte-segment-line(fgd-metric-line-bytes(metric, width), width, fgd-metric-style(metric), fgd-metric-id-or-missing(metric), fgd-metric-channels(metric), fgd-metric-evidence-or-missing(metric));
         def fgd-segment-row-text(text, width, style, nodeId, channel, evidence) = ftc-segment(fgd-fit(text, width), style, "none", nodeId, list(channel), evidence);
         def fgd-line-or-blank(lines, index, width) = if or(lt(index, 0), ge(index, len(lines))) then fgd-blank-segment-line(width) else nth(lines, index);
@@ -291,12 +306,12 @@ section [form.bml] {
         }
         def fgd-memory-bar-segment(samples, width) {
             let value = fgd-memory-bar-value(samples);
-            let capacity = fgd-memory-bar-capacity(samples, value);
+            let capacity = fgd-memory-bar-capacity(samples, 0);
             let evidence = fgd-memory-bar-evidence(samples);
             let contributors = fgd-memory-bar-contributors(samples);
             let artifact = fgd-logical-artifact-bytes(samples);
             let handles = fgd-model-handle-count(samples);
-            if eq(contributors, 0) then fgd-segment-line(fgd-cat(list("materialized=? door=model.materialized-resident-bytes artifact=", if gt(artifact, 0) then fgd-format-bytes(artifact) else "absent", "(catalog) handles=", int_to_str(handles), " callable=? door=model.route-readiness")), width, fgd-neutral(96), "memory.materialized", list("memory", "metal", "model"), "unavailable") else if le(capacity, 0) then fgd-segment-line("materialized residence unavailable door=model.resident-byte-capacity", width, fgd-neutral(96), "memory.capacity", list("memory", "metal"), "unavailable") else fgd-segment-line(fgd-cat(list(if str_eq(evidence, "derived-window") then "last-observed materialized " else "materialized ", fgd-format-bytes(value), " / budget ", fgd-format-bytes(capacity), " ", fgd-bar-text(fgd-max(4, sub(width, 30)), value, capacity))), width, fgd-style-for-plane("metal", if str_eq(evidence, "derived-window") then 112 else 220, if str_eq(evidence, "physical-live") then 1 else 0), "memory.capacity", list("memory", "metal"), evidence);
+            if eq(contributors, 0) then fgd-segment-line(fgd-cat(list("materialized=? door=model.materialized-resident-bytes artifact=", if gt(artifact, 0) then fgd-format-bytes(artifact) else "absent", "(catalog) handles=", int_to_str(handles), " callable=? door=model.route-readiness")), width, fgd-neutral(96), "memory.materialized", list("memory", "metal", "model"), "unavailable") else if le(capacity, 0) then fgd-segment-line(fgd-cat(list(fgd-memory-bar-label(samples), fgd-format-bytes(value), " budget=? door=model.resident-byte-capacity")), width, fgd-neutral(96), "memory.capacity", list("memory", "metal"), "unavailable") else fgd-segment-line(fgd-cat(list(fgd-memory-bar-label(samples), fgd-format-bytes(value), " / budget ", fgd-format-bytes(capacity), " ", fgd-bar-text(fgd-max(4, sub(width, 30)), value, capacity))), width, fgd-style-for-plane("metal", if str_eq(evidence, "derived-window") then 112 else 220, if str_eq(evidence, "physical-live") then 1 else 0), "memory.capacity", list("memory", "metal"), evidence);
         }
         def fgd-wide-row(leftLines, rightLines, index, leftWidth, gap, rightWidth) {
             let left = fgd-line-or-blank(leftLines, index, leftWidth);
@@ -392,7 +407,7 @@ section [form.bml] {
             let topSamples = fgd-top-samples(samples, focus, sampleRows);
             let important = fgd-focus-metrics(metrics, focus);
             let totalBytes = fgd-memory-bar-value(topSamples);
-            let totalCapacity = fgd-memory-bar-capacity(topSamples, totalBytes);
+            let totalCapacity = fgd-memory-bar-capacity(topSamples, 0);
             let left0 = fgd-put-section-title(canvas, 0, 3, leftWidth, fgd-cat(list("MEMORY / MODELS [", int_to_str(len(samples)), "]")), fgd-style-for-plane("unified", 255, 1));
             let left1 = if gt(leftWidth, 10) then ftc-blit(left0, ftc-bar(leftWidth, totalBytes, totalCapacity, fgd-style-for-plane("metal", 220, 1), fgd-neutral(64)), 0, 4) else left0;
             let left2 = fgd-put-samples(left1, topSamples, 0, 5, leftWidth, epoch);

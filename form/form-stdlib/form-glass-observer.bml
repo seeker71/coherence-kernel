@@ -3,7 +3,7 @@
 // form-glass-observer.bml — executable whole-body observation rows.
 //
 // Authority: form-stdlib/bml/form-glass-observer.bml
-// preludes: form/form-stdlib/core.fk form/form-stdlib/line-grammar.fk
+// preludes: form/form-stdlib/core.fk form/form-stdlib/line-grammar.fk form/form-stdlib/bml/glass-memory-accounting.bml
 //
 //////////////////////////////////////////////////////////////////////
 
@@ -169,15 +169,15 @@ section [form.bml] {
         // fbroots (8 B) and the Darwin in-RAM triple (slot 1 + generation 4 +
         // released 1) are further per-slot columns that figure does not count, so
         // this stands on the seed's number rather than a wider one of our own.
-        def FGOCellColumnBytes() = 104;
+        def FGOCellColumnBytes() = CellColumnBytes();
         // fk_nid[i][4] -- pkg, level, type, inst -- is the blueprint identity every
         // minted cell carries: four of the 104 bytes, not a table beside them.
-        def FGOBlueprintColumnBytes() = 32;
-        // fk_fn_reserve holds nine parallel 8-byte columns per recipe: fk_fn,
+        def FGOBlueprintColumnBytes() = BlueprintColumnBytes();
+        // fk_fn_reserve holds ten parallel 8-byte columns per recipe: fk_fn,
         // fk_fnar, fk_fnsym_s, fk_fnsym_n, fk_fnidx, fk_fn_heat, fk_fn_fbox,
-        // fk_fn_unbox, fk_fn_native.  The recipe BODIES stand in the AST table,
+        // fk_fn_unbox, fk_fn_native, fk_fn_mint. The recipe BODIES stand in the AST table,
         // which this width does not count.
-        def FGORecipeColumnBytes() = 72;
+        def FGORecipeColumnBytes() = RecipeColumnBytes();
 
         def fgo-kernel-rows() {
             let cells = kernel_stat(4);
@@ -194,9 +194,9 @@ section [form.bml] {
                 fgo-int("memory", "cons", "arena cons cells", kernel_stat(6), "cons", kernel_stat(6), "cpu-arena", "physical-live", "kernel_stat:6", "resident", "list", "arena pointer; not bytes"),
                 fgo-int("memory", "value-stack", "value stack depth", kernel_stat(7), "values", kernel_stat(7), "cpu-stack", "physical-live", "kernel_stat:7", "live", "stack", "current depth; high-water unavailable"),
                 fgo-int("memory", "floats", "float values", floats, "values", floats, "cpu-arena", "physical-live", "kernel_stat:8", if eq(floats, 0) then "empty" else "resident", "float", if eq(floats, 0) then "semantic-zero=empty; current Glass process boxed-float pool has no values; the pool has no live-size stat in kernel_stat" else "current Glass process boxed-float count; the pool has no live-size stat in kernel_stat"),
-                fgo-int("memory", "blueprint-bytes", "blueprint allocation bytes", mul(cells, FGOBlueprintColumnBytes()), "bytes", mul(cells, FGOBlueprintColumnBytes()), "cpu-arena", "physical-live", "kernel_stat:4 x fk_nid[4]", if eq(cells, 0) then "empty" else "resident", "blueprint", "kernel_stat:4 cells x 32 B: the NodeID quartet (pkg, level, type, inst) every minted cell carries, the fk_nid column of the seed's value-cell table; four of the 104 bytes counted by memory.cell-bytes, not a table beside them"),
-                fgo-int("memory", "recipe-bytes", "recipe allocation bytes", mul(recipes, FGORecipeColumnBytes()), "bytes", mul(recipes, FGORecipeColumnBytes()), "cpu-arena", "physical-live", "kernel_stat:43 x fk_fn_reserve columns", if eq(recipes, 0) then "empty" else "resident", "recipe", "kernel_stat:43 recipes x 72 B: the nine parallel 8-byte columns fk_fn_reserve holds per recipe (fn, fnar, fnsym_s, fnsym_n, fnidx, heat, fbox, unbox, native); the recipe bodies stand in the AST table, whose bytes are their own question"),
-                fgo-int("memory", "cell-bytes", "per-cell allocation bytes", mul(cells, FGOCellColumnBytes()), "bytes", mul(cells, FGOCellColumnBytes()), "cpu-arena", "physical-live", "kernel_stat:4 x FK_NODE_CAP_INIT column widths", if eq(cells, 0) then "empty" else "resident", "cell", "kernel_stat:4 cells x 104 B, the seed's own per-cell figure at FK_NODE_CAP_INIT (262144*104B ~= 27MB at birth); this is the fill, not the table's reservation, which is kernel_stat:19 x 104 B"));
+                fgo-int("memory", "blueprint-bytes", "identity columns (cell subset)", fgma-blueprint-bytes(cells), "bytes", 0, "cpu-arena", "derived-window", "kernel_stat:4 x fk_nid[4]", "logical", "blueprint", "NodeID quartet footprint is included in cell columns; not distinct blueprint definitions or extra memory"),
+                fgo-int("memory", "recipe-bytes", "recipe columns (logical fill)", fgma-recipe-bytes(recipes), "bytes", 0, "cpu-arena", "derived-window", "kernel_stat:43 x ten recipe columns", "logical", "recipe", "includes mint column; excludes AST bodies, spare capacity and allocator overhead"),
+                fgo-int("memory", "cell-bytes", "cell columns (logical fill)", fgma-cell-bytes(cells), "bytes", 0, "cpu-arena", "derived-window", "kernel_stat:4 x tracked cell column widths", "logical", "cell", "tracked column fill, not RSS; excludes fbroots and platform-specific auxiliary tables"));
         }
 
         def fgo-event-attributed?(node) = if eq(len(node_source(node)), 0) then 0 else 1;
@@ -293,6 +293,8 @@ section [form.bml] {
         def fgo-vm-used-bytes(vm) = mul(add(nth(vm, 5), add(nth(vm, 3), nth(vm, 8))), nth(vm, 0));
         def fgo-host-free-percent(vm) = if eq(fgo-vm-valid?(vm), 0) then -1 else sub(100, div(mul(fgo-vm-used-bytes(vm), 100), nth(vm, 1)));
         def fgo-host-total-bytes(vm) = if eq(fgo-vm-valid?(vm), 0) then -1 else nth(vm, 1);
+        def fgo-vm-byte-row(vm, id, label, slot) = if eq(fgo-vm-valid?(vm), 0) then fgo-unavailable("host", id, label, "bytes", "os-memory", "host_vm_stat", "memory", "native VM snapshot unavailable") else fgo-int("host", id, label, mul(nth(vm, slot), nth(vm, 0)), "bytes", 0, "os-memory", "physical-live", str_concat("host_vm_stat.pages slot=", int_to_str(slot)), "live", "memory", "system-wide page-category bytes; categories may overlap, do not sum as a process allocation");
+        def fgo-vm-byte-rows(vm) = list(fgo-vm-byte-row(vm, "vm-free-bytes", "host free pages", 2), fgo-vm-byte-row(vm, "vm-active-bytes", "host active pages", 3), fgo-vm-byte-row(vm, "vm-inactive-bytes", "host inactive pages", 4), fgo-vm-byte-row(vm, "vm-wired-bytes", "host wired pages", 5), fgo-vm-byte-row(vm, "vm-compressor-bytes", "host compressor storage", 8));
         def fgo-vm-count-row(id, label, value, source, note) = if lt(value, 0) then fgo-unavailable("host", id, label, "pages", "os-memory", source, "health", "the Mach VM statistics door did not answer") else fgo-int("host", id, label, value, "pages", value, "os-memory", "physical-live", source, "live", "health", note);
         def fgo-vmstat-rows(vm) = if eq(fgo-vm-valid?(vm), 0) then list(fgo-vm-count-row("pageins", "Mach pageins", -1, "mach.vm_statistics64.pageins", "")) else list(fgo-vm-count-row("pageins", "Mach pageins", nth(vm, 9), "mach.vm_statistics64.pageins", "cumulative since boot; the delta row is what moves"), fgo-vm-count-row("compressions", "compressor puts", nth(vm, 11), "mach.vm_statistics64.compressions", "cumulative since boot"), fgo-vm-count-row("decompressions", "compressor gets", nth(vm, 12), "mach.vm_statistics64.decompressions", "cumulative since boot"), fgo-vm-count-row("file-backed-pages", "file-backed pages", nth(vm, 15), "mach.vm_statistics64.external_page_count", "resident pages backed by files"), fgo-vm-count-row("compressor-pages", "compressor occupancy", nth(vm, 8), "mach.vm_statistics64.compressor_page_count", "pages held by the compressor"));
         // ---- host load: getloadavg, thousandths kept as tenths ----
@@ -304,7 +306,7 @@ section [form.bml] {
         def fgo-host-rows(vm) {
             let free = fgo-host-free-percent(vm);
             let total = fgo-host-total-bytes(vm);
-            append(list(if lt(free, 0) then fgo-unavailable("host", "memory-free", "system memory free", "percent", "os-memory", "mach.host_statistics64.vm_statistics64", "health", "the Mach VM statistics door did not answer") else fgo-sized("host", "memory-free", "system memory free", free, "percent", 100, sub(100, free), "os-memory", "physical-live", "mach.host_statistics64: 100 - (wired+active+compressor)/memsize", "live", "health", "free = memory the host can hand out without reclaim; wired, active and compressed pages count as used"), if lt(total, 0) then fgo-unavailable("host", "memory-total", "physical memory", "bytes", "os-memory", "sysctl.hw.memsize", "health", "the memsize door did not answer") else fgo-int("host", "memory-total", "physical memory", total, "bytes", 0, "os-memory", "physical-live", "sysctl.hw.memsize", "live", "health", "system-wide physical bytes")), append(fgo-loadavg-rows(host_load_avg()), append(fgo-vmstat-rows(vm), fgo-disk-rows(host_disk_stat()))));
+            append(list(if lt(free, 0) then fgo-unavailable("host", "memory-free", "host reclaimable headroom", "percent", "os-memory", "mach.host_statistics64.vm_statistics64", "health", "the Mach VM statistics door did not answer") else fgo-sized("host", "memory-free", "host reclaimable headroom", free, "percent", 100, sub(100, free), "os-memory", "derived-window", "mach.host_statistics64: 100 - (wired+active+compressor)/memsize", "live", "health", "complement of active, wired and compressor storage; includes reclaimable pages, not literal free pages"), if lt(total, 0) then fgo-unavailable("host", "memory-total", "physical memory", "bytes", "os-memory", "sysctl.hw.memsize", "health", "the memsize door did not answer") else fgo-int("host", "memory-total", "physical memory", total, "bytes", 0, "os-memory", "physical-live", "sysctl.hw.memsize", "live", "health", "system-wide physical bytes")), append(fgo-vm-byte-rows(vm), append(fgo-loadavg-rows(host_load_avg()), append(fgo-vmstat-rows(vm), fgo-disk-rows(host_disk_stat())))));
         }
         // ---- processes: libproc, no ps, no pgrep -- tuples (pid, rss bytes, cpu microseconds, elapsed seconds) ----
         def fgo-processes-from(tuples, remaining) = if or(eq(len(tuples), 0), le(remaining, 0)) then list() else if lt(len(head(tuples)), 4) then fgo-processes-from(tail(tuples), remaining) else cons(append(fgo-ps-process(nth(head(tuples), 0), nth(head(tuples), 1), nth(head(tuples), 2), nth(head(tuples), 3)), list(if ge(len(head(tuples)), 5) then nth(head(tuples), 4) else 0)), fgo-processes-from(tail(tuples), sub(remaining, 1)));

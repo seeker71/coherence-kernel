@@ -91,8 +91,12 @@ def main():
             timings.append(session.key(key, b"[KEY-STATE, " + view + b","))
         session.key(b"\x1b[200~q0sh\x1b[201~", b"[KEY-STATE, channels, all,")
         assert session.child.poll() is None, "paste executed quit"
-        session.key(b"\x1b", b"[KEY-STATE, channels,")
-        session.key(b"[", b"[KEY-STATE, channels,")
+        # This bounded fixture publishes only a monitor sample, not a channel.
+        # Empty filtered navigation stays empty; overview contains that sample.
+        session.key(b"\x1b[B", b"[KEY-STATE, channels, all, none,")
+        session.key(b"o", b"[KEY-STATE, overview, all,")
+        session.key(b"\x1b", b"[KEY-STATE, overview,")
+        session.key(b"[", b"[KEY-STATE, overview,")
         session.key(b"B", b"sample.")
         session.key(b"e", b", 1, ,")
         session.key(b"q", b"RESTORED")

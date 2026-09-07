@@ -14,8 +14,41 @@ command offer remain refused, not an acknowledged outcome. Transcript languages:
 Enter. `all` shows languages actually published; choosing a digit from `all`
 starts an explicit selection. Unknown codes are refused without changing it.
 `c` resets view/filter/inspection. `q` exits. Up/Down or Tab selects a
-published sample for `i` inspect or `e` evidence. With no selection, `i`/`e`
+published field (metric, sample, or typed observation) for `i` inspect or `e`
+evidence. Navigation uses distinct identities in the current view/filter, with
+no 128-sample ceiling. The viewport follows the selected field and reports rows
+above/below; open evidence stays at the bottom. With no selection, `i`/`e`
 opens an identifier prompt: Enter submits, Backspace edits, Escape cancels.
+
+Exact metric selectors include the domain: `metric.mlx.allocated-bytes` and
+`metric.metal.allocated-bytes` name different readings. Legacy
+`metric.blueprint-bytes` still resolves. Interaction keys are textual channels,
+not newly minted projection nodes: many readings intentionally share one
+projection shape. Sample selectors retain publisher/lane/id; typed observations
+use their published ID, for example `recipes.allocation.bytes`.
+
+## Native inspection
+
+`./fkwu observe/form-glass-views-current-run.fk` reads published native frames
+and renders all twelve views at 80×24 and 160×40. Its completion row must say
+`audit-complete, 12, expected, 12`; an opening row alone is not a completed audit.
+Missing source doors and silent source ages follow. It does not request an owner
+refresh, publish a competing Glass sensor frame, refresh a governor, or admit a
+model. The bounded-current-frame doors use this same read-only collector.
+
+`./fkwu observe/form-glass-memory-current-run.fk` renders narrow/wide memory
+panels from this inspecting process, native host VM counters, and published owner
+data. Typed local measurements say `glass.probe`, not `glass.monitor`.
+Column bytes are logical occupancy, not RSS: cell columns 104 bytes, identity
+quartets 32 (a subset, not additive), recipe columns 80, cons pairs 16.
+Host page bytes, host reclaimable headroom, owner buffer extents and process RSS
+remain separate scopes. Handles are not byte budgets. Owner ledgers replace
+overlapping model-root totals; leaves are not counted again. Derived extents
+remain derived. Missing budgets stay unknown.
+
+The remaining `tensor.owner.allocated` door requires an owner-bound byte
+publication; a local inspection does not create one. Silent microphone/awareness
+sources remain silent. Inspecting their views does not activate capture.
 
 The transcript view receives original recognition and local translations from
 the native ear's metric frame. It labels each kind and its source timestamp;
