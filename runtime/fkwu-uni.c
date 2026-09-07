@@ -1164,6 +1164,16 @@ static long long *fk_nscol;
 static long long *fk_nsattr;
 static long long *fk_fbroots;
 static long long fk_fbn;
+/* the four framebuffer counters the sibling table-walker lane already defines
+ * (form/form-stdlib/fkc-table-serialize.fk, kernel_stat keys 11..14). The seed
+ * recorded roots without ever counting the calls that reached fb_record, so a
+ * refused attribution -- a value that was not a live cell handle -- left no
+ * trace at all: the glass could see roots arrive but never that one had been
+ * turned away. kernel_stat 9/11/12/13/14 read them. */
+static long long fk_fbrejected;  /* fb_record calls whose value was not a live cell handle (kernel_stat 11) */
+static long long fk_fbentered;   /* fb_record calls entered (kernel_stat 12) */
+static long long fk_fbaccepted;  /* fb_record calls accepted (kernel_stat 13) */
+static long long fk_fblastidx;   /* the last node index fb_record saw, accepted or not (kernel_stat 14) */
 #define FK_FB_RING 2048 /* the framebuffer keeps the newest roots: a buffer, not a ledger -- framebuffer-events answers at most this many, oldest first */
 static void **fk_gift_base;      /* gift frames: mapped bases (0 = released) */
 static long long *fk_gift_size;  /* gift frames: mapped sizes */
@@ -13979,9 +13989,41 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 8) {
             return fk_fp << 1;
         }
-        /* 9..14 belong to the table-walker lane's framebuffer counters
-         * (fkc-table-serialize.fk emits them over counters this seed does not
-         * carry); left clear here so the key vocabulary stays one space. */
+        /* 9..14 -- the framebuffer census, in the vocabulary the sibling
+         * table-walker lane already fixed (fkc-table-serialize.fk). The seed
+         * carried fk_fbn all along and simply never said it, so the glass had
+         * roots arriving and no count of them; 2026-09-07 named the pair 9/11
+         * owed and first on the seam line. Paid here. Note 9 counts roots
+         * recorded SINCE THE LAST framebuffer-clear (tag 131 zeroes it), while
+         * 13 counts every accepted call this process ever made -- 9 below 13
+         * is a clear, not a loss. */
+        if (ks_k == 9) {
+            return fk_fbn << 1;
+        }
+        if (ks_k == 10) {
+            /* nodes carrying a source attribution. A walk of the whole node
+             * population, so the caller pays for it by asking -- the glass
+             * reads it on its slow cadence, never per frame. */
+            long long ks_a = 0;
+            long long ks_u = 1;
+            while (ks_u <= fk_np) {
+                if (fk_nsattr[ks_u] != 0) { ks_a = ks_a + 1; }
+                ks_u = ks_u + 1;
+            }
+            return ks_a << 1;
+        }
+        if (ks_k == 11) {
+            return fk_fbrejected << 1;
+        }
+        if (ks_k == 12) {
+            return fk_fbentered << 1;
+        }
+        if (ks_k == 13) {
+            return fk_fbaccepted << 1;
+        }
+        if (ks_k == 14) {
+            return fk_fblastidx << 1;
+        }
         if (ks_k == 15) {
             return fk_run_door << 1;
         }
@@ -14100,6 +14142,66 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (ks_k == 40) {
             return fk_conf_pool_grows << 1;
         }
+        /* 54..62 -- the root ring, the float pool and the node census by HOME.
+         * Every one of these was already standing in this file; none of them
+         * had a way out. The node population lives in exactly one of three
+         * homes at a time (fk_nodes_init chooses; fk_store_go_private can move
+         * it), and those three homes ARE the phases the glass already speaks:
+         *   ice   -- the shared field /fg-field-*: content-addressed, shared by
+         *            every kernel on the host, outlives all of them;
+         *   water -- the per-pid shared store /fg-c<pid>-*: mapped and visible
+         *            to siblings, gone when this pid goes;
+         *   gas   -- the private heap: RAM only, no other process can see it,
+         *            it evaporates at exit. This is the home a host with no
+         *            shared memory falls to, so its zero here is a measured
+         *            zero and the row says which zero it is.
+         * A count is never split across homes: exactly one of 58/59/60 carries
+         * the whole population, and which one carries it is the reading. */
+        if (ks_k == 54) {
+            /* roots STANDING in the ring -- what framebuffer-events can hand
+             * back right now. Below 9 means older roots fell out of the window. */
+            return (fk_fbn < FK_FB_RING ? fk_fbn : FK_FB_RING) << 1;
+        }
+        if (ks_k == 55) {
+            return ((long long)FK_FB_RING) << 1;
+        }
+        if (ks_k == 56) {
+            /* the float pool's live capacity; 8 is its fill. The pool never
+             * reclaims -- fk_fp only ever rises -- so 8 is a high-water, and 45
+             * (boxes minted) rises with it slot for slot while 46 counts the
+             * reads of those slots, which no pool growth bounds. */
+            return fk_fcap << 1;
+        }
+        if (ks_k == 57) {
+            return fk_field_fp() << 1;
+        }
+        if (ks_k == 58) {
+            return (fk_field_on || fk_store_shared) ? 0 : (fk_np << 1);
+        }
+        if (ks_k == 59) {
+            return (!fk_field_on && fk_store_shared) ? (fk_np << 1) : 0;
+        }
+        if (ks_k == 60) {
+            return fk_field_on ? (fk_np << 1) : 0;
+        }
+        if (ks_k == 61) {
+            /* the tissue's own extent: the ten interned columns are 104 bytes a
+             * node (kind, cat, kids, val, the four-word id, file, line, col,
+             * attr, hash memo), committed page by page as the fill advances. */
+            return (fk_np * 104) << 1;
+        }
+        if (ks_k == 62) {
+            /* the RAM this kernel holds privately over that tissue whatever its
+             * home: the root ring and hash memo (8 bytes a node each), the inram
+             * slot/generation/released columns (6, only where the arm64 JIT
+             * witness stands), and the intern index. A body whose every node is
+             * ice still pays this in gas to reach it. */
+#if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
+            return ((fk_node_cap * 22) + (fk_intern_hash_cap * 8)) << 1;
+#else
+            return ((fk_node_cap * 16) + (fk_intern_hash_cap * 8)) << 1;
+#endif
+        }
         if (ks_k >= 100 && ks_k < 100 + ks_n) {
             return fk_arms[ks_k - 100] << 1;
         }
@@ -14122,13 +14224,18 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long fr_fv = fk_walk(fk_node[i][2], fp);
         long long fr_pk = fk_walk(fk_node[i][3], fp) >> 1;
         long long fr_ni = fk_nidx(fr_nv);
+        fk_fbentered = fk_fbentered + 1;
+        fk_fblastidx = fr_ni;
         if (fr_ni >= 1 && fr_ni <= fk_np) {
+            fk_fbaccepted = fk_fbaccepted + 1;
             fk_nsfile[fr_ni] = fr_fv;
             fk_nsline[fr_ni] = fr_pk >> 16;
             fk_nscol[fr_ni] = fr_pk & 65535;
             fk_nsattr[fr_ni] = 1;
             fk_fbroots[fk_fbn % FK_FB_RING] = fr_nv;
             fk_fbn = fk_fbn + 1;
+        } else {
+            fk_fbrejected = fk_fbrejected + 1;
         }
         return fr_nv;
     }

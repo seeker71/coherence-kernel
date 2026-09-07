@@ -1002,9 +1002,15 @@ section [form.bml] {
         def fgl-kernel-box-row(cell) = if lt(len(cell), 7) then list() else fgo-int("jit", str_concat("box.", nth(cell, 1)), fgd-cat(list(nth(cell, 1), " mints ", int_to_str(nth(cell, 5)), " reads ", int_to_str(nth(cell, 6)), " ", fgl-unit-leaf(nth(cell, 2)), ":", int_to_str(nth(cell, 3)))), nth(cell, 5), "boxes", nth(cell, 5), "cpu-arena", "physical-live", "kernel_box_rows", "live", "jit", "float pool slots this defn allocated; an unboxed float lane would spare every one");
         def fgl-kernel-box-rows(cells) = if eq(len(cells), 0) then list() else fgl-kernel-box-rows-next(fgl-kernel-box-row(head(cells)), tail(cells));
         def fgl-kernel-box-rows-next(row, rest) = if eq(len(row), 0) then fgl-kernel-box-rows(rest) else cons(row, fgl-kernel-box-rows(rest));
+        // the float pool the boxes land in: 45 counts the mints, 46 the reads, and
+        // float-values below is the standing population. It only ever rises -- fk_fp is
+        // never reclaimed and no melt walks it -- so the fill is a high-water for the
+        // life of the process, and a value the intern already held costs no slot.
         def fgl-jit-rows() = list(
             fgo-int("jit", "jit-boxes", "float boxes minted", kernel_stat(45), "boxes", 0, "cpu-arena", "physical-live", "kernel_stat.45", if eq(kernel_stat(45), 0) then "idle" else "live", "jit", "every float result allocates a pool slot; ints ride unboxed as tagged words"),
             fgo-int("jit", "jit-unboxes", "float boxes read", kernel_stat(46), "reads", 0, "cpu-arena", "physical-live", "kernel_stat.46", if eq(kernel_stat(46), 0) then "idle" else "live", "jit", "a pool slot dereferenced per float operand"),
+            fgo-sized("cell", "float-values", "float values standing in the pool", kernel_stat(8), "slots", kernel_stat(56), 0, "cpu-arena", "physical-live", "kernel_stat.8", if eq(kernel_stat(8), 0) then "empty" else "resident", "cell", "one slot per float minted here. The pool never reclaims -- no melt walks it -- so the fill equals the mint count exactly and the new reading is the capacity beside it: the headroom before the pool doubles again"),
+            fgo-int("cell", "field-float-values", "float values in the shared field", kernel_stat(57), "slots", 0, "unified", "physical-live", "kernel_stat.57", if eq(kernel_stat(57), 0) then "empty" else "resident", "cell", if eq(kernel_stat(57), 0) then "semantic-zero=the shared field is closed in this kernel, or no float has been interned into it yet" else "floats interned into /fg-field-F: content-addressed like the nodes, read by every kernel on this host"),
             fgo-int("jit", "jit-native-calls", "native arm64 leaf calls", kernel_stat(47), "calls", 0, "cpu-arena", "physical-live", "kernel_stat.47", if eq(kernel_stat(47), 0) then "idle" else "live", "jit", "calls that ran as machine code from an in-RAM leaf image instead of the tree walk"),
             fgo-int("jit", "jit-crystallized", "defns crystallized on boxing heat", kernel_stat(48), "defns", 0, "cpu-arena", "physical-live", "kernel_stat.48", if eq(kernel_stat(48), 0) then "idle" else "live", "jit", "float bodies whose box ledger crossed 1024 boxes: emitted as arm64 f64 leaves, intermediates folded into d-registers, one box per call"),
             fgo-int("cell", "nodes-minted", "value nodes minted", kernel_stat(53), "nodes", 0, "cpu-arena", "physical-live", "kernel_stat.53", if eq(kernel_stat(53), 0) then "idle" else "live", "cell", "fresh cells this kernel interned into the permanent arena: the rate the shared field grows by, counted where a cell is minted"),
@@ -1037,6 +1043,40 @@ section [form.bml] {
         def fgl-kernel-word(w, k) = if lt(len(w), 24) then 0 else nth(w, k);
         def fgl-kernels-sum-row(pids, id, label, k, unit, channel, note) = fgl-lives-sum-row(pids, fgl-kernel-lives(pids), id, label, k, unit, channel, note);
         def fgl-lives-sum-row(pids, lives, id, label, k, unit, channel, note) = fgo-int("kernel", id, label, fgl-lives-sum(lives, k, 0), unit, 0, "cpu-arena", "physical-live", str_concat("shm:/fg-kernels#", int_to_str(len(pids))), if eq(len(pids), 0) then "empty" else "live", channel, note);
+        // ---- the body's own tissue, by where it lives ----
+        // The flow point's gas/water/ice triple counts ROWS THIS GLASS CAN SEE by
+        // their lifecycle word, and its sources say so (glass.visible.phase-census).
+        // These rows count the body's NODES by their home. The two are deliberately
+        // separate: folding two million ice nodes into a triple whose other members
+        // are single-digit row counts would drown the observation census in one
+        // number and quietly change a lane three bands already pin. The phase WORD
+        // is shared so a reader learns one vocabulary, not two --
+        //   ice   -- the shared field /fg-field-*, content-addressed, every kernel on
+        //            the host reads the same cells and they outlive all of them;
+        //   water -- the per-pid store /fg-c<pid>-*, mapped and visible to siblings,
+        //            gone when this pid goes;
+        //   gas   -- the private heap: RAM only, no sibling can see it, it evaporates
+        //            at exit. Exactly one home carries the whole population, so two of
+        //            the three read a MEASURED zero and each says which zero it is.
+        def fgl-node-home-lifecycle(count) = if gt(count, 0) then "resident" else "empty";
+        def fgl-node-census-rows() = list(
+            fgo-int("cell", "nodes-gas", "value nodes in gas (private RAM)", kernel_stat(58), "nodes", 0, "cpu-arena", "physical-live", "kernel_stat.58", fgl-node-home-lifecycle(kernel_stat(58)), "cell", if gt(kernel_stat(58), 0) then "this kernel's node table is private malloc: no other process can read a cell of it and it evaporates at exit" else "semantic-zero=this kernel's nodes are not in private RAM; the private heap is where the table falls when neither the shared field nor the per-pid store can be mapped, and one of them is"),
+            fgo-int("cell", "nodes-water", "value nodes in water (per-pid shared store)", kernel_stat(59), "nodes", 0, "unified", "physical-live", "kernel_stat.59", fgl-node-home-lifecycle(kernel_stat(59)), "cell", if gt(kernel_stat(59), 0) then "this kernel's node table is mapped at /fg-c<pid>-*: siblings can read it while this pid stands, and it is unlinked when the pid goes" else "semantic-zero=this kernel's nodes are not in the per-pid store; the store is taken only when the shared field is closed"),
+            fgo-int("cell", "nodes-ice", "value nodes in ice (shared field)", kernel_stat(60), "nodes", 0, "unified", "physical-live", "kernel_stat.60", fgl-node-home-lifecycle(kernel_stat(60)), "cell", if gt(kernel_stat(60), 0) then "the node table is mapped at /fg-field-*: content-addressed, shared by every kernel on this host, outliving all of them -- a cell minted here is minted for everyone" else "semantic-zero=the shared field is closed in this kernel (FK_FIELD_OFF, or the mapping refused); its nodes live in one of the other two homes"),
+            fgo-int("cell", "node-arena-bytes", "bytes the node population occupies", kernel_stat(61), "bytes", 0, "unified", "physical-live", "kernel_stat.61", if eq(kernel_stat(61), 0) then "empty" else "resident", "cell", "104 bytes a node over the ten interned columns (kind, category, kids, value, the four-word id, file, line, column, attribution, hash memo), committed page by page as the fill advances -- the reservation above it is virtual"),
+            fgo-int("cell", "node-private-bytes", "private RAM this kernel holds over the nodes", kernel_stat(62), "bytes", 0, "cpu-arena", "physical-live", "kernel_stat.62", "resident", "cell", "the root ring, the hash memo, the in-RAM leaf columns and the intern index -- private to this process whatever the population's home, so a body whose every node is ice still pays this much gas to reach it"));
+        // ---- the framebuffer's roots: what was recorded, what still stands, what fell out ----
+        // The seed carried fk_fbn from the beginning and never published it, so roots
+        // arrived on the glass with no count; 2026-09-07 named kernel_stat 9 and 11 owed
+        // and first on the seam line. The ring is a WINDOW of 2048, not a ledger: past
+        // that, recording a root drops the oldest, and roots-dropped is the only place
+        // that loss is visible.
+        def fgl-root-rows() = list(
+            fgo-sized("kernel", "roots-standing", "framebuffer roots standing", kernel_stat(54), "roots", kernel_stat(55), 0, "cpu-arena", "physical-live", "kernel_stat.54", if eq(kernel_stat(54), 0) then "empty" else "resident", "kernel", "the roots framebuffer-events can hand back right now; the ring holds the newest and no more"),
+            fgo-int("kernel", "roots-recorded", "framebuffer roots recorded", kernel_stat(9), "roots", 0, "cpu-arena", "physical-live", "kernel_stat.9", if eq(kernel_stat(9), 0) then "empty" else "live", "kernel", "roots recorded since the last framebuffer-clear; below the accepted count means a clear, not a loss"),
+            fgo-int("kernel", "roots-dropped", "framebuffer roots fallen out of the ring", sub(kernel_stat(9), kernel_stat(54)), "roots", 0, "cpu-arena", "physical-live", "kernel_stat.9-54", if eq(sub(kernel_stat(9), kernel_stat(54)), 0) then "idle" else "live", "kernel", "recorded minus standing: roots the window overwrote, invisible to framebuffer-events and to every reader downstream of it"),
+            fgo-int("kernel", "attributions-entered", "cell attributions entered", kernel_stat(12), "calls", 0, "cpu-arena", "physical-live", "kernel_stat.12", if eq(kernel_stat(12), 0) then "idle" else "live", "kernel", "every fb_record call, accepted or turned away"),
+            fgo-int("kernel", "attributions-refused", "cell attributions refused", kernel_stat(11), "calls", 0, "cpu-arena", "physical-live", "kernel_stat.11", if eq(kernel_stat(11), 0) then "idle" else "bad", "kernel", "fb_record calls whose value was not a live cell handle: the attribution was dropped and the caller got its value back unchanged, so a refusal is silent everywhere else"));
         def fgl-kernel-rows() {
             let pids = kernel_live_pids();
             let lives = fgl-kernel-lives(pids);
@@ -1048,7 +1088,7 @@ section [form.bml] {
                 fgo-int("kernel", "gift-frames", "gift frames mapped", kernel_stat(41), "frames", 0, "unified", "physical-live", "kernel_stat.41", if eq(kernel_stat(41), 0) then "empty" else "live", "kernel", "shared-memory frames this process holds open"),
                 fgo-int("kernel", "gift-bytes", "gift bytes mapped", kernel_stat(42), "bytes", 0, "unified", "physical-live", "kernel_stat.42", if eq(kernel_stat(42), 0) then "empty" else "live", "kernel", "bytes of shared memory mapped by this process"),
                 fgo-int("kernel", "fns", "functions defined", kernel_stat(43), "fns", 0, "cpu-arena", "physical-live", "kernel_stat.43", "live", "kernel", "defns in this process symbol map")),
-                append(fgl-kernels-rows-with(pids, lives), append(fgl-jit-rows(), append(fgl-kernel-box-rows(kernel_box_rows(4)), fgl-kernel-hot-rows(kernel_hot_rows(8))))));
+                append(fgl-root-rows(), append(fgl-node-census-rows(), append(fgl-kernels-rows-with(pids, lives), append(fgl-jit-rows(), append(fgl-kernel-box-rows(kernel_box_rows(4)), fgl-kernel-hot-rows(kernel_hot_rows(8))))))));
         }
         // the accelerator's PerformanceStatistics dictionary, read once on this host (2026-09-06): Device / Renderer / Tiler
         // Utilization %, Alloc system memory, In use system memory (driver), Allocated PB Size, TiledSceneBytes, SplitSceneCount,
