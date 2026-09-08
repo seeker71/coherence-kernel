@@ -1,13 +1,23 @@
-; ear-tongue-said.fk — the tongue lane's own frames, read back as the glass reads them. Every frame
-; in the order it landed: its kind, its clock, the milliseconds since the frame before it, and
-; `saidms` — the frame's clock less the line's end, which is exactly what the `ear.said` axis
-; carries. Then the said frames on their own, with each tongue's words.
+; ear-tongue-said.fk — the tongue lane's own frames, read back as the glass reads them, and the one
+; table the path owes: a committed line, then each tongue with its OWN arrival.
+;
+; A said frame carries `saidms` — the frame's clock less the line's end, which is exactly what the
+; `ear.said` axis carries — and that number belongs to the SLOWEST tongue. Each tongue's own arrival
+; is read two ways, and they are printed side by side:
+;
+;   `d_<code>` — the lane's own stamp, the clock at which that tongue stopped at its own end id, as
+;   ms from the line's end. A tongue already complete when the line closed stamps 0.
+;
+;   derived — the first frame carrying this line's end whose `t_<code>` already held the words the
+;   said frame carries. That is how the arrival was read by hand before the lane stamped it, it
+;   works on any spool ever written, and where both exist they attest each other.
 ;
 ; The instrument for the last seconds of the path: stand the lane, hand it lines with
 ; observe/ear-tongue-feed.fk, read the numbers here. Nothing is written.
+; stdin line 1: the spool to read (blank -> .hearth/ear.spool); line 2: `frames` to also walk every
+; frame in order with the gap to the one before it (blank -> the said table alone).
 ; preludes: form/form-stdlib/line-grammar.fk
 (do
-    (defn ets-spool () ".hearth/ear.spool")
     (defn ets-text (t) (if (nothing? t) "" t))
     (defn ets-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (ets-cat (tail xs)))))
     (defn ets-field (lines k)
@@ -16,6 +26,7 @@
                 (let at (str_find l "=" 0))
                 (if (and (gt at 0) (str_eq (substring l 0 at) k)) (substring l (add at 1) (str_len l)) (ets-field (tail lines) k)))))
     (defn ets-cut (s n) (if (le (str_len s) n) s (substring s 0 n)))
+    (defn ets-pad (s n) (if (ge (str_len s) n) s (ets-pad (str_concat s " ") n)))
     ; every frame in order, with the gap to the one before it
     (defn ets-walk (parts prev i)
         (if (eq (len parts) 0) 0
@@ -25,17 +36,44 @@
                     (do (let t (str_to_int (ets-field lines "t")))
                         (print_str (ets-cat (list (int_to_str i) " " kind " t=" (int_to_str t) " +" (int_to_str (if (eq prev 0) 0 (sub t prev))) " saidms=" (ets-field lines "saidms") " pt=" (ets-cut (ets-field lines "t_pt") 44))))
                         (ets-walk (tail parts) t (add i 1)))))))
-    ; the said frames alone: the axis's own number and the tongues it carried
-    (defn ets-said (parts i)
+    ; ---- each tongue's own arrival ----
+    ; the first frame carrying this line's end whose t_<code> already held these words; -1 when no
+    ; frame before the said frame did, which is the said frame's own number
+    (defn ets-first (parts tend code want)
+        (if (eq (len parts) 0) (sub 0 1)
+            (do (let lines (split-on (head parts) (byte_to_str 10)))
+                (if (and (str_eq (ets-field lines "tend") tend) (str_eq (ets-field lines (str_concat "t_" code)) want))
+                    (str_to_int (ets-field lines "t"))
+                    (ets-first (tail parts) tend code want)))))
+    (defn ets-derived (parts tend code want saidms)
+        (if (eq (str_len want) 0) (sub 0 1)
+            (do (let at (ets-first parts tend code want))
+                (if (lt at 0) saidms (do (let d (sub at (str_to_int tend))) (if (lt d 0) 0 d))))))
+    (defn ets-ms (n) (if (lt n 0) "—" (str_concat "+" (str_concat (int_to_str n) " ms"))))
+    (defn ets-stamp (lines code) (do (let d (ets-field lines (str_concat "d_" code))) (if (eq (str_len d) 0) (sub 0 1) (str_to_int d))))
+    (defn ets-tongue-rows (parts lines codes tend saidms)
+        (if (eq (len codes) 0) 0
+            (do (let c (head codes))
+                (let want (ets-field lines (str_concat "t_" c)))
+                (print_str (ets-cat (list "    " (ets-pad c 4) (ets-pad (ets-ms (ets-stamp lines c)) 10) "stamped   " (ets-pad (ets-ms (ets-derived parts tend c want saidms)) 10) "derived   " want)))
+                (ets-tongue-rows parts lines (tail codes) tend saidms))))
+    ; the said frames alone: the committed line, its own number, and every tongue under it
+    (defn ets-said (all parts i)
         (if (eq (len parts) 0) i
             (do (let lines (split-on (head parts) (byte_to_str 10)))
                 (if (str_eq (ets-field lines "kind") "said")
-                    (do (print_str (ets-cat (list "said#" (int_to_str i) " saidms=" (ets-field lines "saidms") " | " (ets-field lines "heard") " | pt=" (ets-field lines "t_pt") " | fa=" (ets-field lines "t_fa") " | id=" (ets-field lines "t_id"))))
-                        (ets-said (tail parts) (add i 1)))
-                    (ets-said (tail parts) i)))))
-    (let t (ets-text (read_file (ets-spool))))
+                    (do (let tend (ets-field lines "tend"))
+                        (let saidms (str_to_int (ets-field lines "saidms")))
+                        (print_str (ets-cat (list "line#" (int_to_str i) "  committed +0 ms  said +" (int_to_str saidms) " ms  |  " (ets-field lines "heard"))))
+                        (ets-tongue-rows all lines (split-on (ets-field lines "tongues") " ") tend saidms)
+                        (ets-said all (tail parts) (add i 1)))
+                    (ets-said all (tail parts) i)))))
+    (defn ets-line1 () (do (let l (read_line)) (if (nothing? l) "" (trim l))))
+    (let path (do (let l (ets-line1)) (if (eq (str_len l) 0) ".hearth/ear.spool" l)))
+    (let want-frames (ets-line1))
+    (let t (ets-text (read_file path)))
     (let parts (split-on t "<|ear:frame|>"))
-    (ets-walk parts 0 1)
-    (let n (ets-said parts 1))
-    (print_str (ets-cat (list "said_frames=" (int_to_str (sub n 1)) " frames_total=" (int_to_str (sub (len parts) 1)))))
+    (let w (if (str_eq want-frames "frames") (ets-walk parts 0 1) 0))
+    (let n (ets-said parts parts 1))
+    (print_str (ets-cat (list "said_frames=" (int_to_str (sub n 1)) " frames_total=" (int_to_str (sub (len parts) 1)) " spool=" path)))
     1)
