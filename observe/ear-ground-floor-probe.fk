@@ -1,0 +1,102 @@
+; ear-ground-floor-probe.fk — the two floors under every reaction the ear can have, measured
+; rather than assumed: how fast the microphone actually GIVES, and what a window of audio costs
+; the encoder and the decoder at each length.
+;
+; The first question is not how often the lane asks the mic but how often the mic answers. The
+; lane asks for 3200 bytes (100 ms) at a time; this asks for 640 (20 ms) and records the wall
+; time of every arrival, so the granule the diaphragm is actually delivered in shows itself as
+; the gap between arrivals — not as the size of the ask.
+;
+; The second is the window. The encoder's work is proportional to the window (Tf = samples/160,
+; Te = Tf/2), so eight seconds is four times two seconds of arithmetic. This times the same
+; encode and the same decode at 1, 2, 4 and 8 seconds of the SAME captured audio, so the cost of
+; the reference's eight-second habit is a number and not a belief.
+;
+; Opens the microphone: it must never be preflighted.
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/ear-native.fk
+(do
+    (defn egfp-snap ()
+        (str_concat "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/snapshots/"
+            (trim (en-text (read_file "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/refs/main")))))
+    (defn egfp-tok () "/Users/ursmuff/.mlx-venv/lib/python3.14/site-packages/mlx_whisper/assets/multilingual.tiktoken")
+    (defn egfp-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (egfp-cat (tail xs)))))
+    (defn egfp-say (label ms) (print_str (egfp-cat (list label " " (int_to_str ms) " ms"))))
+    ; ---- the mic's own cadence: ask small and often, record when bytes actually land ----
+    ; returns (arrivals empties bytes gaps-list) with gaps in ms between consecutive arrivals
+    (defn egfp-cad (deadline last arrivals empties bytes gaps)
+        (if (gt (now_unix_ms) deadline) (list arrivals empties bytes (reverse gaps))
+            (do (let s (sense_mic_stream_read 640 20))
+                (let now (now_unix_ms))
+                (if (eq (str_len s) 0)
+                    (egfp-cad deadline last arrivals (add empties 1) bytes gaps)
+                    (egfp-cad deadline now (add arrivals 1) empties (add bytes (str_len s))
+                        (if (eq last 0) gaps (cons (sub now last) gaps)))))))
+    ; a run-length picture of the gaps: how many arrivals came within 3 ms of the one before
+    ; (the same 100 ms granule handed out in pieces) and how many waited longer
+    (defn egfp-fast (gs n) (if (eq (len gs) 0) n (egfp-fast (tail gs) (if (le (head gs) 3) (add n 1) n))))
+    (defn egfp-max (gs m) (if (eq (len gs) 0) m (egfp-max (tail gs) (if (gt (head gs) m) (head gs) m))))
+    (defn egfp-slowsum (gs a) (if (eq (len gs) 0) a (egfp-slowsum (tail gs) (if (gt (head gs) 3) (add a (head gs)) a))))
+    (defn egfp-slown (gs n) (if (eq (len gs) 0) n (egfp-slown (tail gs) (if (gt (head gs) 3) (add n 1) n))))
+    ; ---- fill a window of `want` bytes from the mic, as the live lane holds it: chunks, oldest first ----
+    (defn egfp-fill (have want acc)
+        (if (ge have want) (reverse acc)
+            (do (let s (sense_mic_stream_read 3200 400))
+                (if (eq (str_len s) 0) (egfp-fill have want acc)
+                    (egfp-fill (add have (str_len s)) want (cons s acc))))))
+    (defn egfp-take (xs n) (if (or (le n 0) (eq (len xs) 0)) (list) (cons (head xs) (egfp-take (tail xs) (sub n 1)))))
+    ; ---- one timed pass at a given window size: (encms decms ntok text) ----
+    (defn egfp-pass (st parts want)
+        (do (let t0 (now_unix_ms))
+            (let Te (enw-encode-parts st parts want))
+            (let t1 (now_unix_ms))
+            (let r (enw-transcribe st Te 40))
+            (let t2 (now_unix_ms))
+            (list (sub t1 t0) (sub t2 t1) (len (nth r 1)) (trim (enw-text st (nth r 1))))))
+    ; three passes at one size, the minimum kept: the machine is contended and a minimum is honest
+    (defn egfp-best (st parts want k enc dec ntok text)
+        (if (le k 0) (list enc dec ntok text)
+            (do (let p (egfp-pass st parts want))
+                (egfp-best st parts want (sub k 1)
+                    (if (or (lt enc 0) (lt (head p) enc)) (head p) enc)
+                    (if (or (lt dec 0) (lt (nth p 1) dec)) (nth p 1) dec)
+                    (nth p 2) (nth p 3)))))
+    (defn egfp-report (label p)
+        (print_str (egfp-cat (list label "  encode " (int_to_str (head p)) " ms  decode " (int_to_str (nth p 1))
+                                   " ms  tokens " (int_to_str (nth p 2)) "  |" (nth p 3) "|"))))
+
+    (let m0 (now_unix_ms))
+    (let mic (sense_mic_stream_start))
+    (let m1 (now_unix_ms))
+    (egfp-say "sense_mic_stream_start        " (sub m1 m0))
+    (print_str (str_concat "mic answered " (int_to_str mic)))
+
+    (print_str "")
+    (print_str "--- how often the microphone GIVES (asking for 20 ms at a time, 3 s) ---")
+    (let cad (egfp-cad (add (now_unix_ms) 3000) 0 0 0 0 (list)))
+    (print_str (egfp-cat (list "arrivals " (int_to_str (head cad)) "   empty asks " (int_to_str (nth cad 1))
+                               "   bytes " (int_to_str (nth cad 2)))))
+    (let gs (nth cad 3))
+    (print_str (egfp-cat (list "gaps: " (int_to_str (egfp-fast gs 0)) " within 3 ms of the one before, "
+                               (int_to_str (egfp-slown gs 0)) " waited longer, longest " (int_to_str (egfp-max gs 0)) " ms")))
+    (let sn (egfp-slown gs 0))
+    (print_str (egfp-cat (list "the waiting gaps average " (int_to_str (if (le sn 0) 0 (div (egfp-slowsum gs 0) sn))) " ms — that is the granule the mic hands out")))
+
+    (print_str "")
+    (print_str "--- what a window costs, same audio, four lengths ---")
+    (let t0 (now_unix_ms))
+    (let st (enw-open (str_concat (egfp-snap) "/weights.npz") (egfp-tok)))
+    (let t1 (now_unix_ms))
+    (egfp-say "enw-open (whisper-tiny)       " (sub t1 t0))
+    (let win8 (egfp-fill 0 256000 (list)))
+    (print_str (egfp-cat (list "window held as " (int_to_str (len win8)) " chunks")))
+    ; the newest N chunks are the last N; egfp-take from the reverse gives the newest, oldest-first again
+    (let w1s (reverse (egfp-take (reverse win8) 10)))
+    (let w2s (reverse (egfp-take (reverse win8) 20)))
+    (let w4s (reverse (egfp-take (reverse win8) 40)))
+    (egfp-report "1 s (32000 B)  " (egfp-best st w1s 32000 3 -1 -1 0 ""))
+    (egfp-report "2 s (64000 B)  " (egfp-best st w2s 64000 3 -1 -1 0 ""))
+    (egfp-report "4 s (128000 B) " (egfp-best st w4s 128000 3 -1 -1 0 ""))
+    (egfp-report "8 s (256000 B) " (egfp-best st win8 256000 3 -1 -1 0 ""))
+    (let stopmic (sense_mic_stream_stop))
+    0)
