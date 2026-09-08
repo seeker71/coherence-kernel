@@ -33,17 +33,19 @@
 ; given a stdin that neither delivers nor closes wrote nothing in thirty
 ; seconds; the same lane given /dev/null was born in two.
 ;
-; So a lane is stood through one `sh -c` that redirects before it execs:
+; So a lane is stood through host_spawn_at, the door that places a child's three
+; standard streams where the caller says:
 ;
-;     exec ./fkwu <cell> </dev/null >> <log> 2>&1
+;     (host_spawn_at (list "./fkwu" <cell>) (list "/dev/null" <log> <log>))
 ;
-; `exec` keeps the pid the sensor holds pointing at the lane itself, so a kill
-; still reaches it; `</dev/null` ends the birth wait at once; and the log is the
-; lane's own voice — its warnings, its open line, its last error, the line it
-; prints as it ends. The sensor appends a birth mark to that log before each
-; stand, so the log reads as a chronicle of every life the lane has had, and
-; hands the newest line back to the glass as ear.voice. A lane that dies now
-; says what it died of.
+; The seed forks and execs the argument list itself, so the pid the sensor holds
+; IS the lane and a kill reaches it; the placed input ends the birth wait at
+; once; and the log is the lane's own voice — its warnings, its open line, its
+; last error, the line it prints as it ends. Output and error land in the one
+; log and the door opens it APPEND, so the sensor's birth mark and every life
+; the lane has had stay under the newest one. A lane that cannot be born at all
+; says so at birth: the door answers a negative refusal instead of a pid, the
+; sensor writes that number into the log, and ear.voice carries it to the glass.
 ;
 ; ── WHEN A LANE COUNTS AS GONE ─────────────────────────────────────────────
 ;
@@ -63,9 +65,9 @@
 ; silent for minutes at a time — it speaks only when a line closes — so it has
 ; no clock at all, and a live lane that exits in its first half second would
 ; otherwise wait out the whole birth patience. Once every fge-probe-ms the
-; sensor asks the host whether each pid still answers (kill -0, one fork, no
-; signal delivered) and reads each log's tail. That is the only fork in this
-; loop and it is off the give path.
+; sensor asks host_alive whether each pid still answers — a signal of zero,
+; delivered to nobody, and no process born to ask it — and reads each log's
+; tail. Nothing in this loop forks now, on the give path or off it.
 ;
 ; preflight-exec: forbidden
 ; preludes: form/form-stdlib/form-glass-sensor-rows.bml form/form-stdlib/ear-axes.bml form/form-stdlib/hearth.bml form/form-stdlib/spool-bell-transport.fk form/form-stdlib/line-grammar.fk
@@ -110,12 +112,17 @@
     (defn fge-awake? () (ge (file_size (fge-wanted)) 0))
 
     ; ── the lanes: stood with a stdin the sensor owns and a log that is their voice ──
-    (defn fge-cmd (cell log) (ea-cat (list "exec ./fkwu " cell " </dev/null >> " log " 2>&1")))
     (defn fge-mark-birth (log) (sbt-append log (ea-cat (list "--- stood at " (int_to_str (now_unix_ms)) " ---" (byte_to_str 10)))))
+    ; A refusal is not a pid. The door judges the argv and the three redirects before
+    ; it forks, so a lane that cannot be born answers -1, -2, -3 or -4 and never looks
+    ; alive for a patience. The number goes into the lane's own log, where ear.voice
+    ; reads it, and the sensor answers 0 so the next tick tries again.
+    (defn fge-say-refusal (pid log) (sbt-append log (ea-cat (list "refused at birth: " (int_to_str pid) (byte_to_str 10)))))
+    (defn fge-born (pid log) (if (gt pid 0) pid (do (let s (fge-say-refusal pid log)) 0)))
     (defn fge-stand (pid cell log)
         (if (gt pid 0) pid
             (do (let b (fge-mark-birth log))
-                (host_spawn_quiet (list "sh" "-c" (fge-cmd cell log))))))
+                (fge-born (host_spawn_at (list "./fkwu" cell) (list "/dev/null" log log)) log))))
     (defn fge-lanes-up (livePid tonguePid)
         (list (fge-stand livePid "observe/ear-live-native.fk" (fge-log-live))
               (fge-stand tonguePid "observe/ear-tongue-native.fk" (fge-log-tongue))))
@@ -127,15 +134,23 @@
     ; anything — which is exactly what a ring into an absent bell leaves behind
     ; (`printf x > bell` creates a one-byte file). Both bells were found in that
     ; state. So a path that is not a fifo is removed before the fifo is made.
-    (defn fge-bell-cmd (p) (ea-cat (list "[ -p " p " ] || { rm -f " p "; mkfifo " p "; }; ")))
-    (defn fge-bells () (host-exec (ea-cat (list (fge-bell-cmd ".hearth/ear.spool.bell") (fge-bell-cmd ".hearth/ear.spool.seg.bell") "echo ok")) ""))
+    ; fs_mkfifo reports what IS there — 1 it made one, 0 a fifo already stands, -1 the
+    ; path holds something else — and it never removes a path on its own, so the
+    ; removal is this cell's decision and lives here where it can be read.
+    (defn fge-bell-again (p made) (if (ge made 0) made (do (let r (fs-remove-file p)) (fs_mkfifo p))))
+    (defn fge-bell (p) (fge-bell-again p (fs_mkfifo p)))
+    (defn fge-bells () (list (fge-bell ".hearth/ear.spool.bell") (fge-bell ".hearth/ear.spool.seg.bell")))
     (defn fge-open (livePid) (if (gt livePid 0) 0 (do (let b (fge-bells)) (let s (fs-remove-file (fge-stop))) 0)))
     (defn fge-close (livePid) (if (le livePid 0) 0 (do (let w (write_file_text (fge-stop) "sleep")) 0)))
 
     ; ── the watch: does each pid still answer, and what did each lane last say ──
-    (defn fge-probe-part (pid mark) (if (le pid 0) "" (ea-cat (list "kill -0 " (int_to_str pid) " 2>/dev/null && printf " mark "; "))))
-    (defn fge-alive-cmd (a b) (str_concat (fge-probe-part a "L") (str_concat (fge-probe-part b "T") "echo")))
-    (defn fge-alive (a b) (if (and (le a 0) (le b 0)) "" (ea-text (host-exec (fge-alive-cmd a b) ""))))
+    ; host_alive answers one pid — 1 it answers, 0 it is gone, -1 none was given — with
+    ; no process born to ask. The marks are the ones fge-alive? already reads, and the
+    ; leading mark is the ASKED mark: an answer carrying no lane mark says both lanes
+    ; are gone, an EMPTY answer says nothing was asked. Those are different readings and
+    ; taking one for the other kills a newborn on its first tick.
+    (defn fge-probe-part (pid mark) (if (le pid 0) "" (if (eq (host_alive pid) 1) mark "")))
+    (defn fge-alive (a b) (if (and (le a 0) (le b 0)) "" (str_concat "?" (str_concat (fge-probe-part a "L") (fge-probe-part b "T")))))
     (defn fge-tail-of (path sz) (do (let from (if (gt sz (fge-tail-bytes)) (sub sz (fge-tail-bytes)) 0))
                                     (ea-text (read_file_slice path from (sub sz from)))))
     (defn fge-tail (path) (do (let sz (file_size path)) (if (le sz 0) "" (fge-tail-of path sz))))

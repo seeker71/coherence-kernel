@@ -273,6 +273,9 @@ static const struct fk_rwtab_row fk_rwtab[] = {
   { "sense_speaker_stream_start_at", 1, 7, { 1,14,0,0,2,201,2,} },
   { "sense_speaker_stream_write", 1, 7, { 1,15,0,0,2,201,2,} },
   { "sense_speaker_stream_stop", 0, 7, { 1,16,1,0,2,201,2,} },
+  { "host_spawn_at", 2, 12, { 1,17,0,0,0,1,2,19,2,2,201,2,} },
+  { "host_alive", 1, 7, { 1,18,0,0,2,201,2,} },
+  { "fs_mkfifo", 1, 7, { 1,19,0,0,2,201,2,} },
   { "abs", 1, 19, { 1,0,0,0,2,5,2,0,0,1,0,0,0,2,4,2,2,6,3,} },
 
 };

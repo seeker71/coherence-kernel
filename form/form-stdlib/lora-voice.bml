@@ -43,10 +43,27 @@ section [form.bml] {
         }
         def lv-receipts-emit(data, dir, names, i) = if eq(len(names), 0) then i else lv-receipts-emit(data, dir, tail(names), lv-receipt-emit(data, fs-path-join(dir, head(names)), i));
         // the git history: every landing is a teaching, dated and attributed; one host
-        // read of the log (records on byte 30, fields on byte 31), parsed natively
+        // read of the log (records on byte 30, fields on byte 31), parsed natively.
+        //
+        // git ITSELF stays a crossing, and the reason is measured rather than assumed:
+        // its object store is zlib-deflated and this body carries no inflate, so nothing
+        // here can read a commit body that git cannot. What came home is the SHELL that
+        // stood around it. host_spawn_at execs the argument list itself — no quoting to
+        // get wrong, and git's own voice lands in a file instead of being swallowed —
+        // and the log goes to a path named after this process's pid, because siblings
+        // share /tmp. Measured on this Mac 2026-09-09: 3,581,274 bytes, byte-identical
+        // to the shell's answer, 36 ms against 40.
+        //
+        // The OTHER shell-free door cannot carry this read, and that is why the pipe is
+        // a file. host_capture answers out of a 1 MiB static buffer: asked for the same
+        // log it returned 1,048,575 bytes and no refusal, losing 2,532,699 of the body's
+        // own history silently. A crossing that tells the truth beats a native that
+        // does not.
         def lv-rs() = byte_to_str(30);
         def lv-fs() = byte_to_str(31);
-        def lv-git-cmd() = "git log --no-merges --format='%h%x1f%ad%x1f%an%x1f%s%x1f%b%x1e' --date=short 2>/dev/null";
+        def lv-git-argv() = list("git", "log", "--no-merges", "--format=%h%x1f%ad%x1f%an%x1f%s%x1f%b%x1e", "--date=short");
+        def lv-git-out() = str_concat("/tmp/lora-voice-history-", str_concat(int_to_str(host_pid()), ".txt"));
+        def lv-git-err() = str_concat(lv-git-out(), ".err");
         def lv-git-row(rec) {
             let f = split-on(rec, lv-fs());
             if lt(len(f), 5) then "" else if lt(str_len(nth(f, 3)), 12) then "" else lv-row(lv-cat(list("From the landing ", trim(nth(f, 1)), " ", trim(nth(f, 0)), " by ", trim(nth(f, 2)), ", speak what landed and why.")), lv-cat(list(trim(nth(f, 3)), if lt(str_len(trim(nth(f, 4))), 20) then "" else str_concat(byte_to_str(10), substring(trim(nth(f, 4)), 0, if gt(str_len(trim(nth(f, 4))), 1600) then 1600 else str_len(trim(nth(f, 4))))))));
@@ -54,9 +71,18 @@ section [form.bml] {
         def lv-git-emit(data, recs, i) = if eq(len(recs), 0) then i else lv-git-emit-one(data, tail(recs), i, lv-git-row(head(recs)));
         def lv-git-emit-one(data, recs, i, line) = if eq(str_len(line), 0) then lv-git-emit(data, recs, i) else lv-git-emit-next(data, recs, add(i, 1), lv-put(data, i, line));
         def lv-git-emit-next(data, recs, i, wrote) = lv-git-emit(data, recs, i);
+        // a refusal is not a pid: the door judges the argv and the three redirects
+        // before it forks, so a history that could not be read answers a negative
+        // number here and emits no rows rather than half of them
+        def lv-git-read(pid) = if lt(pid, 0) then "" else lv-git-waited(host_wait(pid));
+        def lv-git-waited(w) = read_file_slice_or_empty(read_file(lv-git-out()));
         def lv-history-emit(data, i) {
-            let text = read_file_slice_or_empty(host-exec(lv-git-cmd(), ""));
-            lv-git-emit(data, split-on(text, lv-rs()), i);
+            let stale = fs-remove-file(lv-git-out());
+            let text = lv-git-read(host_spawn_at(lv-git-argv(), list("/dev/null", lv-git-out(), lv-git-err())));
+            let n = lv-git-emit(data, split-on(text, lv-rs()), i);
+            let spent = fs-remove-file(lv-git-out());
+            let voice = fs-remove-file(lv-git-err());
+            n;
         }
         def read_file_slice_or_empty(t) = if nothing?(t) then "" else t;
         def lv-emit(data) {
