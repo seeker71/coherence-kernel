@@ -1,0 +1,204 @@
+//////////////////////////////////////////////////////////////////////
+// voice-msl.bml — the kernels a VITS voice needs, emitted by the body for its own metal.
+//
+// This is `ear-msl.fk`'s twin for the mouth. The ear emits a spectrogram, a gemm and an
+// attention; a voice needs a different small set, and the set is small because a VITS is
+// convolutions almost all the way down: 129 Conv nodes, 3 ConvTranspose, 26 MatMul and a
+// handful of elementwise maps. So thirteen kernels carry all 2755 nodes' arithmetic.
+//
+// EVERY SHAPE ARRIVES AS A CONSTANT. Nothing here knows a channel count, a kernel width, a
+// dilation or a padding: the pass reads each of those off the model's own Conv attributes
+// (`voice-onnx.bml`'s vo-n-attrs) and hands them to the dispatch. A kernel that held a
+// number the file also holds would be a second truth, and the file's is the one that ships.
+//
+// ACTIVATIONS ARE [C][L] FLOAT32, CONTIGUOUS, BATCH ONE. That is not a simplification of the
+// model, it is what the model does: a piper voice's graph carries batch as a literal 1 and
+// every tensor in the pass is (1, C, L). Because batch is 1 and no sequence is padded, every
+// `* x_mask` in the graph multiplies by ones — 60-odd Mul nodes that are identity, verified by
+// reading what feeds them (/enc_p/Cast_1_output_0, a mask of length T over a sequence of
+// length T). They are not emitted. A voice with a padded batch would need them back.
+//
+// WEIGHTS ARE FLOAT32 AND MISALIGNED. An ONNX initializer's raw_data starts wherever the
+// protobuf put it (the phoneme embedding of this voice starts at byte 439250, which is not
+// even a multiple of four), so a bound view would read shifted halves — the wound
+// `metal_buf_from_file` paid for in the ear. The file is mapped ONCE at offset 0 and
+// `voice_copy8` copies each tensor's bytes into its own aligned buffer on the device.
+//
+// FP CONTRACTION IS ON, deliberately. The carrier compiles with the default options, which
+// fuse a multiply-add into an fma; that is MORE accurate than the reference's separate
+// rounding, not less, and this pass is held against the reference to digits rather than to
+// bits. A cell that needs bit-equality emits `#pragma clang fp contract(off)`; this one does
+// not, and says so rather than leaving the reader to find out from a last-digit disagreement.
+// preludes: form/form-stdlib/core.fk
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormVoiceMsl {
+        def vm-cat(xs) = if eq(len(xs), 0) then "" else str_concat(head(xs), vm-cat(tail(xs)));
+        def vm-nl() = byte_to_str(10);
+        def vm-lines(xs) = if eq(len(xs), 0) then "" else str_concat(head(xs), str_concat(vm-nl(), vm-lines(tail(xs))));
+        def vm-head() = vm-lines(list("#include <metal_stdlib>", "using namespace metal;", "inline float vm_erf(float x) { float s = x < 0.0f ? -1.0f : 1.0f; float ax = fabs(x); float t = 1.0f / (1.0f + 0.3275911f * ax); float y = 1.0f - (((((1.061405429f * t - 1.453152027f) * t) + 1.421413741f) * t - 0.284496736f) * t + 0.254829592f) * t * exp(-ax * ax); return s * y; }"));
+
+        // a byte copy off the whole-file map into an aligned buffer — the same door the ear opened
+        def vm-copy8() = vm-lines(list(
+            "kernel void voice_copy8(device const uchar* src [[buffer(0)]], device uchar* dst [[buffer(1)]], constant uint& srcoff [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= n) return; dst[gid] = src[srcoff + gid]; }"));
+
+        // the general 1-D convolution: groups carry the depthwise separable convolutions of the
+        // duration predictor, dilation carries the vocoder's residual stacks, and the same kernel
+        // is every 1x1 linear layer in the model with K = 1.
+        def vm-conv1d() = vm-lines(list(
+            "kernel void voice_conv1d(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]], device const float* b [[buffer(2)]], device float* y [[buffer(3)]], constant uint& Cin [[buffer(4)]], constant uint& Cout [[buffer(5)]], constant uint& Lin [[buffer(6)]], constant uint& Lout [[buffer(7)]], constant uint& K [[buffer(8)]], constant uint& stride [[buffer(9)]], constant uint& pad [[buffer(10)]], constant uint& dil [[buffer(11)]], constant uint& groups [[buffer(12)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= Cout * Lout) return; uint co = gid / Lout; uint t = gid - co * Lout;",
+            "  uint cpi = Cin / groups; uint cpo = Cout / groups; uint g = co / cpo;",
+            "  float acc = b[co]; int base = (int)(t * stride) - (int)pad;",
+            "  for (uint ci = 0; ci < cpi; ci++) {",
+            "    device const float* xr = x + (ulong)(g * cpi + ci) * Lin;",
+            "    device const float* wr = w + (ulong)(co * cpi + ci) * K;",
+            "    for (uint k = 0; k < K; k++) { int idx = base + (int)(k * dil); if (idx >= 0 && idx < (int)Lin) acc += xr[idx] * wr[k]; } }",
+            "  y[gid] = acc; }"));
+
+        // the transposed convolution, written as the inverse index map rather than as a scatter:
+        // an output cell asks which input cells could have reached it, so nothing needs an atomic.
+        def vm-convt1d() = vm-lines(list(
+            "kernel void voice_convt1d(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]], device const float* b [[buffer(2)]], device float* y [[buffer(3)]], constant uint& Cin [[buffer(4)]], constant uint& Cout [[buffer(5)]], constant uint& Lin [[buffer(6)]], constant uint& Lout [[buffer(7)]], constant uint& K [[buffer(8)]], constant uint& stride [[buffer(9)]], constant uint& pad [[buffer(10)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= Cout * Lout) return; uint co = gid / Lout; uint t = gid - co * Lout;",
+            "  float acc = b[co];",
+            "  for (uint k = 0; k < K; k++) {",
+            "    int num = (int)t + (int)pad - (int)k; if (num < 0) continue; if ((uint)num % stride != 0) continue;",
+            "    uint s = (uint)num / stride; if (s >= Lin) continue;",
+            "    for (uint ci = 0; ci < Cin; ci++) acc += x[(ulong)ci * Lin + s] * w[((ulong)ci * Cout + co) * K + k]; }",
+            "  y[gid] = acc; }"));
+
+        // VITS's layernorm normalises over the CHANNEL axis at each position — the module
+        // transposes, calls layer_norm over the last axis, and transposes back. One thread a
+        // position walks the column twice; the columns are 192 deep and there are hundreds of them.
+        def vm-ln() = vm-lines(list(
+            "kernel void voice_ln(device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device const float* bt [[buffer(2)]], device float* y [[buffer(3)]], constant uint& C [[buffer(4)]], constant uint& L [[buffer(5)]], constant float& eps [[buffer(6)]], uint t [[thread_position_in_grid]]) {",
+            "  if (t >= L) return; float m = 0.0f;",
+            "  for (uint c = 0; c < C; c++) m += x[(ulong)c * L + t];",
+            "  m /= (float)C; float v = 0.0f;",
+            "  for (uint c = 0; c < C; c++) { float d = x[(ulong)c * L + t] - m; v += d * d; }",
+            "  float r = rsqrt(v / (float)C + eps);",
+            "  for (uint c = 0; c < C; c++) { ulong i = (ulong)c * L + t; y[i] = (x[i] - m) * r * g[c] + bt[c]; } }"));
+
+        // the relative-position attention's scores, in the one form the whole pad-reshape-slice
+        // dance reduces to: score[i][j] = q[i] . (k[j] + rel_k[j - i + W]) / sqrt(HD), the relative
+        // term present only inside the window. That identity is derived, not assumed — the export's
+        // `_relative_position_to_absolute_position` is a reindex whose fixed point is exactly this.
+        def vm-attn-scores() = vm-lines(list(
+            "kernel void voice_attn_scores(device const float* q [[buffer(0)]], device const float* k [[buffer(1)]], device const float* rk [[buffer(2)]], device float* s [[buffer(3)]], constant uint& T [[buffer(4)]], constant uint& H [[buffer(5)]], constant uint& HD [[buffer(6)]], constant uint& W [[buffer(7)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= H * T * T) return; uint h = gid / (T * T); uint r = gid - h * T * T; uint i = r / T; uint j = r - i * T;",
+            "  float acc = 0.0f; int m = (int)j - (int)i + (int)W; bool inw = (m >= 0) && (m <= (int)(2 * W));",
+            "  for (uint d = 0; d < HD; d++) { float qv = q[(ulong)(h * HD + d) * T + i]; acc += qv * k[(ulong)(h * HD + d) * T + j]; if (inw) acc += qv * rk[(ulong)m * HD + d]; }",
+            "  s[gid] = acc * rsqrt((float)HD); }"));
+
+        def vm-softmax() = vm-lines(list(
+            "kernel void voice_softmax(device float* x [[buffer(0)]], constant uint& n [[buffer(1)]], uint g [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]]) {",
+            "  threadgroup float red[256]; device float* r = x + (ulong)g * n;",
+            "  float mx = -1e30f; for (uint i = tid; i < n; i += 256) mx = max(mx, r[i]);",
+            "  red[tid] = mx; threadgroup_barrier(mem_flags::mem_threadgroup);",
+            "  float m = -1e30f; for (uint i = 0; i < 256; i++) m = max(m, red[i]);",
+            "  threadgroup_barrier(mem_flags::mem_threadgroup);",
+            "  float s = 0.0f; for (uint i = tid; i < n; i += 256) { float e = exp(r[i] - m); r[i] = e; s += e; }",
+            "  red[tid] = s; threadgroup_barrier(mem_flags::mem_threadgroup);",
+            "  float ss = 0.0f; for (uint i = 0; i < 256; i++) ss += red[i];",
+            "  float inv = 1.0f / ss; for (uint i = tid; i < n; i += 256) r[i] *= inv; }"));
+
+        // and the attention's other half, by the mirror identity: out[i] = sum_j p[i][j] * (v[j] + rel_v[j - i + W])
+        def vm-attn-out() = vm-lines(list(
+            "kernel void voice_attn_out(device const float* p [[buffer(0)]], device const float* v [[buffer(1)]], device const float* rv [[buffer(2)]], device float* y [[buffer(3)]], constant uint& T [[buffer(4)]], constant uint& H [[buffer(5)]], constant uint& HD [[buffer(6)]], constant uint& W [[buffer(7)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= H * HD * T) return; uint h = gid / (HD * T); uint r = gid - h * HD * T; uint d = r / T; uint i = r - d * T;",
+            "  float acc = 0.0f; device const float* pr = p + (ulong)(h * T + i) * T;",
+            "  for (uint j = 0; j < T; j++) acc += pr[j] * v[(ulong)(h * HD + d) * T + j];",
+            "  for (uint mm = 0; mm <= 2 * W; mm++) { int j = (int)i + (int)mm - (int)W; if (j >= 0 && j < (int)T) acc += pr[j] * rv[(ulong)mm * HD + d]; }",
+            "  y[(ulong)(h * HD + d) * T + i] = acc; }"));
+
+        // the coupling layer's gate: the first half of a 2C-channel tensor through tanh, the second
+        // through sigmoid, multiplied. VITS calls it fused_add_tanh_sigmoid_multiply; with no speaker
+        // conditioning there is nothing to add, and the graph shows the addend gone.
+        def vm-gate() = vm-lines(list(
+            "kernel void voice_gate(device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant uint& C [[buffer(2)]], constant uint& L [[buffer(3)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= C * L) return; uint c = gid / L; uint t = gid - c * L;",
+            "  y[gid] = precise::tanh(x[gid]) * (1.0f / (1.0f + exp(-x[(ulong)(C + c) * L + t]))); }"));
+
+        // one map with an opcode: 0 copy, 1 tanh, 2 sigmoid, 3 leaky, 4 relu, 5 exp, 6 gelu,
+        // 7 softplus, 8 neg, 9 scale by alpha, 10 add alpha
+        def vm-unary() = vm-lines(list(
+            "kernel void voice_unary(device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& op [[buffer(3)]], constant float& a [[buffer(4)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= n) return; float v = x[gid]; float o = v;",
+            "  if (op == 1) o = precise::tanh(v);",
+            "  else if (op == 2) o = 1.0f / (1.0f + exp(-v));",
+            "  else if (op == 3) o = v >= 0.0f ? v : a * v;",
+            "  else if (op == 4) o = max(v, 0.0f);",
+            "  else if (op == 5) o = exp(v);",
+            "  else if (op == 6) o = 0.5f * v * (1.0f + vm_erf(v * 0.70710678118f));",
+            "  else if (op == 7) o = log(1.0f + exp(-fabs(v))) + max(v, 0.0f);",
+            "  else if (op == 8) o = -v;",
+            "  else if (op == 9) o = v * a;",
+            "  else if (op == 10) o = v + a;",
+            "  y[gid] = o; }"));
+
+        // and one binary map over equal shapes: 0 add, 1 mul, 2 sub, 3 div
+        def vm-binary() = vm-lines(list(
+            "kernel void voice_binary(device const float* p [[buffer(0)]], device const float* q [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant uint& op [[buffer(4)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= n) return; float a = p[gid]; float b = q[gid];",
+            "  y[gid] = op == 0 ? a + b : (op == 1 ? a * b : (op == 2 ? a - b : a / b)); }"));
+
+        // a float run copied between buffers — channels are contiguous, so a channel RANGE is a run,
+        // and Split, Concat and the coupling layer's halves are all this one kernel.
+        def vm-copyf() = vm-lines(list(
+            "kernel void voice_copyf(device const float* src [[buffer(0)]], device float* dst [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& soff [[buffer(3)]], constant uint& doff [[buffer(4)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= n) return; dst[doff + gid] = src[soff + gid]; }"));
+
+        // the flow's Flip, which the export writes as a negative-step Slice: channel order reversed
+        def vm-flip() = vm-lines(list(
+            "kernel void voice_flip(device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant uint& C [[buffer(2)]], constant uint& L [[buffer(3)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= C * L) return; uint c = gid / L; uint t = gid - c * L;",
+            "  y[gid] = x[(ulong)(C - 1 - c) * L + t]; }"));
+
+        // the alignment, as what it is. The graph builds a [T_y, T_x] zero-one matrix with a cumsum,
+        // a Less, a Pad and a Sub and then MATRIX-MULTIPLIES the encoder's means by it — but every row
+        // of that matrix has exactly one 1, so the product is a gather, and a gather over an index row
+        // costs T_y reads instead of T_y * T_x multiplies.
+        def vm-take() = vm-lines(list(
+            "kernel void voice_take(device const float* x [[buffer(0)]], device const uint* idx [[buffer(1)]], device float* y [[buffer(2)]], constant uint& C [[buffer(3)]], constant uint& Lin [[buffer(4)]], constant uint& Lout [[buffer(5)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= C * Lout) return; uint c = gid / Lout; uint t = gid - c * Lout;",
+            "  y[gid] = x[(ulong)c * Lin + idx[t]]; }"));
+
+        // the phoneme embedding and the model's own scale, landing already transposed to [D][T]
+        def vm-embed() = vm-lines(list(
+            "kernel void voice_embed(device const uint* ids [[buffer(0)]], device const float* tbl [[buffer(1)]], device float* y [[buffer(2)]], constant uint& T [[buffer(3)]], constant uint& D [[buffer(4)]], constant float& scale [[buffer(5)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= D * T) return; uint d = gid / T; uint t = gid - d * T;",
+            "  y[gid] = tbl[(ulong)ids[t] * D + d] * scale; }"));
+
+        // and the last step, which is where a number becomes a sound: the samples as signed
+        // 16-bit, written on the device so the whole line comes back as ONE string. A body that
+        // folded 32000 samples into bytes with str_concat would move two billion bytes to say
+        // one sentence; metal_buf_read already answers a string, so the conversion belongs here.
+        def vm-pcm16() = vm-lines(list(
+            "kernel void voice_pcm16(device const float* x [[buffer(0)]], device short* y [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& g [[buffer(3)]], uint gid [[thread_position_in_grid]]) {",
+            "  if (gid >= n) return; float v = clamp(x[gid], -1.0f, 1.0f) * g; y[gid] = (short)rint(v); }"));
+
+        def vm-unit() = vm-lines(list(vm-head(), vm-copy8(), vm-conv1d(), vm-convt1d(), vm-ln(), vm-attn-scores(), vm-softmax(), vm-attn-out(), vm-gate(), vm-unary(), vm-binary(), vm-copyf(), vm-flip(), vm-take(), vm-embed(), vm-pcm16()));
+        // a kernel named here is also defined in vm-unit, and its POSITION here is its pipeline index:
+        // append, never insert. A name in this list that the unit does not define compiles to a
+        // pipeline handle of 0 and every dispatch through it is silently numb (the ear paid for this).
+        def vm-names() = list("voice_copy8", "voice_conv1d", "voice_convt1d", "voice_ln", "voice_attn_scores", "voice_softmax", "voice_attn_out", "voice_gate", "voice_unary", "voice_binary", "voice_copyf", "voice_flip", "voice_take", "voice_embed", "voice_pcm16");
+        def vm-pi-copy8() = 0;
+        def vm-pi-conv() = 1;
+        def vm-pi-convt() = 2;
+        def vm-pi-ln() = 3;
+        def vm-pi-scores() = 4;
+        def vm-pi-softmax() = 5;
+        def vm-pi-attnout() = 6;
+        def vm-pi-gate() = 7;
+        def vm-pi-unary() = 8;
+        def vm-pi-binary() = 9;
+        def vm-pi-copyf() = 10;
+        def vm-pi-flip() = 11;
+        def vm-pi-take() = 12;
+        def vm-pi-embed() = 13;
+        def vm-pi-pcm16() = 14;
+    }
+    0;
+}
