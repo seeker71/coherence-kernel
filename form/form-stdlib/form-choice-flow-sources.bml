@@ -82,22 +82,34 @@ section [form.bml] {
         // walking; the page hands every leg over in one pass.
         // acc = list(crystallized, walking, refused, waitServed, firstWalkingHeat)
         //   the wait a still-walking recipe has served is the calls it made while not yet crystallized
+        // A recipe the heat lane has never ASKED about was never offered this
+        // choice. The kernel puts the question at a 1024-call boundary
+        // (FK_F64_HEAT in the seed: fk_heat_pulse and fk_f64_pulse both fire on
+        // `heat & (FK_F64_HEAT - 1)`), so a defn called nine times is not a
+        // recipe holding out against crystallization -- it is a recipe nobody
+        // has been asked about yet. Every hot row counted as an offer until
+        // 2026-09-08, which is why a kernel one second old read "24 of 24 held,
+        // wait not falling" and published a stall that was a cold start.
+        field FCFSAskedAt = 1024;
+        def fcfs-row-asked?(r) = if lt(fcfs-row-heat(r), FCFSAskedAt()) then 0 else 1;
         def fcfs-crystallize-step(r, acc) {
             let native = fcfs-row-native(r);
-            let walking = if eq(native, 0) then 1 else 0;
-            list(add(nth(acc, 0), if gt(native, 0) then 1 else 0),
+            let asked = fcfs-row-asked?(r);
+            let walking = if and(eq(asked, 1), eq(native, 0)) then 1 else 0;
+            list(add(nth(acc, 0), if and(eq(asked, 1), gt(native, 0)) then 1 else 0),
                  add(nth(acc, 1), walking),
-                 add(nth(acc, 2), if lt(native, 0) then 1 else 0),
+                 add(nth(acc, 2), if and(eq(asked, 1), lt(native, 0)) then 1 else 0),
                  add(nth(acc, 3), mul(walking, fcfs-row-heat(r))),
                  if and(eq(walking, 1), lt(nth(acc, 4), 0)) then fcfs-row-heat(r) else nth(acc, 4));
         }
         def fcfs-crystallize-fold(rows, acc) = if eq(len(rows), 0) then acc else fcfs-crystallize-fold(tail(rows), fcfs-crystallize-step(head(rows), acc));
+        def fcfs-asked-count(rows, acc) = if eq(len(rows), 0) then acc else fcfs-asked-count(tail(rows), add(acc, fcfs-row-asked?(head(rows))));
         def fcfs-crystallize-options() = list(
             fcf-option("walk", "walk the tree again, every call", 2, 1, 100, 100),
             fcf-option("crystallize", "run it as this machine's own instructions", 8, 40, 90, 80));
         def fcfs-crystallize-ledger(rows) {
             let f = fcfs-crystallize-fold(rows, list(0, 0, 0, 0, -1));
-            fcf-ledger(len(rows), nth(f, 0), nth(f, 1), nth(f, 2), nth(f, 3), fcfs-floor0(nth(f, 4)));
+            fcf-ledger(fcfs-asked-count(rows, 0), nth(f, 0), nth(f, 1), nth(f, 2), nth(f, 3), fcfs-floor0(nth(f, 4)));
         }
         def fcfs-crystallize-point(rows) = fcf-point("jit.crystallize", "walk this recipe again, or crystallize it?", fcfs-crystallize-options(), fcfs-crystallize-ledger(rows));
         def fcfs-crystallize-point-live(pid) = fcfs-crystallize-point(kernel_page_hot(pid, FCFSHotRows()));
