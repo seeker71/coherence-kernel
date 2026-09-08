@@ -1,0 +1,109 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-glass-crossings.bml — what actually crosses the membrane, by
+// type, shape, volume, time and source.
+//
+// Urs, 2026-09-09: "glass can see membrane crossing by type shape volume
+// time and source where different histograms can illuminate where
+// attention can heal being truly home."
+//
+// A crossing leaves five facts behind and every one of them is already
+// kept — this lens invents none of them:
+//
+//   SOURCE  the frame's own name in the space (root|publisher)
+//   TYPE    what kind of surface it is: a snapshot publisher, a control
+//           inbox, or a control ack — told apart by the membrane's own
+//           suffixes, never by a list written here
+//   VOLUME  the frame's SEQUENCE is how many times it has been given,
+//           and the snapshot's own sample count is how many rows ride
+//           each give. Their product is the real traffic: row-crossings.
+//   SHAPE   the kinds the rows carry, counted — a frame that gives the
+//           same ninety-five recipe rows every tick says so here
+//   TIME    how long since the last give (fgtm-read-age), which is the
+//           same door that tells a giver from a frame merely standing
+//
+// The histograms are folds over those five, and the finding is a
+// question rather than a verdict: attention pays most where the largest
+// traffic meets the least change, because that is a body carrying the
+// same thing across itself over and over.
+//
+// preludes: form/form-stdlib/core.fk form/form-stdlib/form-glass-telemetry-membrane.bml
+
+section [form.bml] {
+    class FormGlassCrossings {
+        field FGXSchema = "form-glass-crossing-v1";
+        // a crossing older than this has stopped; it is counted apart so a
+        // corpse's lifetime traffic never reads as present load
+        field FGXSilentMs = 3000;
+        // volume buckets, in row-crossings: the powers a reader can hold
+        field FGXBucketSmall = 1000;
+        field FGXBucketMedium = 100000;
+        field FGXBucketLarge = 10000000;
+
+        // ---- one crossing surface --------------------------------------------
+        def fgx-crossing(source, kind, gives, rows, ageMs, shapes) = list(FGXSchema(), source, kind, gives, rows, ageMs, shapes);
+        def fgx-source(c) = nth(c, 1);
+        def fgx-type(c) = nth(c, 2);
+        def fgx-gives(c) = nth(c, 3);
+        def fgx-rows(c) = nth(c, 4);
+        def fgx-age(c) = nth(c, 5);
+        def fgx-shapes(c) = nth(c, 6);
+        def fgx-crossing?(c) = if lt(len(c), 7) then 0 else if str_eq(head(c), FGXSchema()) then 1 else 0;
+        // the real traffic: every give carries every row
+        def fgx-row-crossings(c) = mul(fgx-gives(c), fgx-rows(c));
+        // a surface whose last give is inside the window is still carrying
+        def fgx-live?(c) = if lt(fgx-age(c), 0) then 0 else if gt(fgx-age(c), FGXSilentMs()) then 0 else 1;
+
+        // ---- a histogram: (label count) pairs, in first-seen order ------------
+        def fgx-bump(h, label, by) = if eq(len(h), 0) then list(list(label, by)) else if str_eq(head(head(h)), label) then cons(list(label, add(nth(head(h), 1), by)), tail(h)) else cons(head(h), fgx-bump(tail(h), label, by));
+        def fgx-bin-label(b) = head(b);
+        def fgx-bin-count(b) = nth(b, 1);
+        def fgx-bin-of(h, label) = if eq(len(h), 0) then 0 else if str_eq(head(head(h)), label) then nth(head(h), 1) else fgx-bin-of(tail(h), label);
+        def fgx-total(h) = if eq(len(h), 0) then 0 else add(fgx-bin-count(head(h)), fgx-total(tail(h)));
+        def fgx-largest(h, held) = if eq(len(h), 0) then held else if eq(len(held), 0) then fgx-largest(tail(h), head(h)) else if gt(fgx-bin-count(head(h)), fgx-bin-count(held)) then fgx-largest(tail(h), head(h)) else fgx-largest(tail(h), held);
+
+        // ---- the five histograms ---------------------------------------------
+        // BY TYPE: how the traffic divides between telemetry and control
+        def fgx-by-type(cs, h) = if eq(len(cs), 0) then h else fgx-by-type(tail(cs), fgx-bump(h, fgx-type(head(cs)), fgx-row-crossings(head(cs))));
+        // BY SOURCE: which giver carries how much
+        def fgx-by-source(cs, h) = if eq(len(cs), 0) then h else fgx-by-source(tail(cs), fgx-bump(h, fgx-source(head(cs)), fgx-row-crossings(head(cs))));
+        // BY SHAPE: which KINDS of row cross, weighted by how often their frame is given
+        def fgx-shape-fold(shapes, gives, h) = if eq(len(shapes), 0) then h else fgx-shape-fold(tail(shapes), gives, fgx-bump(h, fgx-bin-label(head(shapes)), mul(fgx-bin-count(head(shapes)), gives)));
+        def fgx-by-shape(cs, h) = if eq(len(cs), 0) then h else fgx-by-shape(tail(cs), fgx-shape-fold(fgx-shapes(head(cs)), fgx-gives(head(cs)), h));
+        // BY VOLUME: each surface in the bucket its traffic falls in
+        def fgx-volume-bucket(n) = if lt(n, FGXBucketSmall()) then "under-1k" else if lt(n, FGXBucketMedium()) then "under-100k" else if lt(n, FGXBucketLarge()) then "under-10m" else "over-10m";
+        def fgx-by-volume(cs, h) = if eq(len(cs), 0) then h else fgx-by-volume(tail(cs), fgx-bump(h, fgx-volume-bucket(fgx-row-crossings(head(cs))), 1));
+        // BY TIME: how long since each surface last crossed
+        def fgx-age-bucket(ms) = if lt(ms, 0) then "never" else if le(ms, 1000) then "this-second" else if le(ms, 60000) then "this-minute" else if le(ms, 3600000) then "this-hour" else "older";
+        def fgx-by-time(cs, h) = if eq(len(cs), 0) then h else fgx-by-time(tail(cs), fgx-bump(h, fgx-age-bucket(fgx-age(head(cs))), 1));
+
+        // ---- reading the space -----------------------------------------------
+        def fgx-surface-type(name) = if eq(fgtm-suffix?(name, FGTMInboxSuffix()), 1) then "control-inbox" else if eq(fgtm-suffix?(name, FGTMAckSuffix()), 1) then "control-ack" else "snapshot";
+        def fgx-kinds(ss, h) = if eq(len(ss), 0) then h else fgx-kinds(tail(ss), fgx-bump(h, fgtm-sample-kind(head(ss)), 1));
+        def fgx-gives-of(root, name) {
+            let handle = ggf-receive(fgtm-space(root, name));
+            let seq = ggf-seq(handle);
+            let released = ggf-release(handle);
+            if lt(seq, 0) then 0 else seq;
+        }
+        def fgx-read-crossing(root, name, now) {
+            let reading = fgtm-read-current(root, name);
+            let samples = if str_eq(fgtm-read-state-status(reading), "current") then fgtm-snapshot-samples(fgtm-field-value(fgtm-read-state-value(reading))) else list();
+            fgx-crossing(name, fgx-surface-type(name), fgx-gives-of(root, name), len(samples), fgtm-read-age(reading, now), fgx-kinds(samples, list()));
+        }
+        def fgx-of-names(root, names, now) = if eq(len(names), 0) then list() else cons(fgx-read-crossing(root, head(names), now), fgx-of-names(root, tail(names), now));
+        def fgx-of-space(root, now) = fgx-of-names(root, fgtm-frames-in-space(gift_roster_names(), root), now);
+
+        // ---- where attention pays --------------------------------------------
+        // The largest traffic that is still LIVE: a corpse's lifetime count is
+        // history, not load, so it never wins this. A body carrying the same
+        // rows across itself over and over is the site worth looking at, and
+        // this names it without claiming to know what should change there.
+        def fgx-live-only(cs) = if eq(len(cs), 0) then list() else if eq(fgx-live?(head(cs)), 1) then cons(head(cs), fgx-live-only(tail(cs))) else fgx-live-only(tail(cs));
+        def fgx-heaviest(cs, held) = if eq(len(cs), 0) then held else if eq(len(held), 0) then fgx-heaviest(tail(cs), head(cs)) else if gt(fgx-row-crossings(head(cs)), fgx-row-crossings(held)) then fgx-heaviest(tail(cs), head(cs)) else fgx-heaviest(tail(cs), held);
+        def fgx-attention(cs) = fgx-heaviest(fgx-live-only(cs), list());
+        def fgx-live-traffic(cs) = fgx-total(fgx-by-source(fgx-live-only(cs), list()));
+        def fgx-standing-traffic(cs) = fgx-total(fgx-by-source(cs, list()));
+    }
+    0;
+}

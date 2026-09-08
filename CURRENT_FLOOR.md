@@ -1060,6 +1060,28 @@ warm kernel shows offered 2 at 50% flow where it showed 24 at 4%, and
 because a body whose arena stopped growing has none of those and the choice is
 put on every call: 1526 offers, 100% flow.
 
+**The glass sees what crosses its own membrane, by type, shape, volume, time
+and source.** `form-glass-crossings.bml` folds five facts a crossing already
+leaves behind and invents none of them: the frame's SEQUENCE is how many times
+it was given, the snapshot's sample count is how many rows rode each give, the
+sample kinds are the shapes, the membrane's own suffixes tell a control surface
+from a publisher, and `fgtm-read-age` is the time. Their product is the reading
+that matters — **row-crossings**, gives × rows — and it is folded into five
+histograms: by type, by source, by shape, by volume bucket, by age bucket. A
+surface silent past its window is counted apart, so a corpse's lifetime traffic
+never reads as present load, and attention names the heaviest surface that is
+still giving. crossings 4095.
+
+Read live on this host: **78,630,838 live row-crossings**, of which `organs`
+carries 75,781,206 — 495,302 gives of 153 rows, 96% of everything moving. By
+shape the body is mostly carrying `recipe` (47,052,170), then `event`
+(15,849,268), then `channel` and `grammar` at exactly 5,943,432 each, since
+those rows are given as a pair. `resource.governor` gives 285,218 times and
+carries ten rows. Two publishers stand silent with lifetime traffic that is
+history, not load. The reading is not that a giver is wasteful: a snapshot is
+WHOLE by contract, so a reader takes every row every time, and this is what
+that contract costs when it is measured rather than assumed.
+
 **The glass names its own hot path, and the JIT declines its shape.** Read from
 a standing glass's own page: the top sixty-four recipes carry **172 million
 dispatches**, of which **one** is crystallized, 39 are still walking and 24 were
