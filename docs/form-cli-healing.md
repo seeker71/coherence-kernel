@@ -56,9 +56,9 @@ alongside the state.
    and otherwise uses the first observed local model. Roles may share a model;
    that is not independent-model validation. The patch is eligible only after
    the reviewer returns exactly `ACCEPT`. The outer process uses dynamic
-   observation; the current Ollama transport still has its own 110-second HTTP
-   timeout and 512-token response limit. That remaining transport limit is
-   visible in its retained status and is not unlimited streaming.
+   observation. Form reads the loopback NDJSON stream through curl and retains
+   partial responses as they arrive. This client sets no generation lifetime
+   or token limit; the service and model retain their own context limits.
 6. Require a valid native inventory, a completed candidate check or refusal
    for each planned native model, and receipts for the adapter and local model
    roles before using the existing exact frontier-admission predicate. A model
@@ -94,7 +94,7 @@ completion. These show which resource remains owed after an interrupted attempt.
 The source limit is 64 KiB; model replacements total at most 4 KiB, and model
 prompts at most 24,000 bytes. Larger or multi-file repairs need a separate
 contract. Only production `.fk` and `.bml` targets are admitted; test targets,
-external source symlinks, and explicit `DO NOT REPAIR:` exclusions are refused.
+managed source symlinks, and explicit `DO NOT REPAIR:` exclusions are refused.
 No source, test expectation, historical recording, or model weight is changed
 merely to make a verdict look successful.
 
@@ -112,7 +112,7 @@ Write `stop` to the recorded `<stage>.control` file to cancel a dynamic stage.
 The supervisor records Form's offered, selected, and applied action, signals
 the owned process group, and verifies its release. Explicit positive process
 deadlines remain supported, including the caller's checker bound. A failed
-signal is retained with its OS error; it cannot erase the child's actual exit
+signal is retained with its command status; it cannot erase the child's actual exit
 or turn incomplete cleanup into a completed process.
 
 The stdin door accepts `stream` followed by requests until EOF or `release`.
@@ -122,7 +122,9 @@ prompt count, cumulative output count, and position. Counts are cumulative,
 not a sum of successive readings. Completion publishes `.reply` only after EOS
 and resource release. Context capacity still bounds each native request;
 continuous context recycling and a resident model across these requests remain
-unimplemented. Ollama and remote-provider token telemetry remain separate gaps.
+unimplemented. Ollama exposes its actual token totals on its final response;
+earlier stream chunks remain byte observations, never invented token counts.
+Remote-provider token telemetry remains a gap.
 
 Each bounded process records its wall-clock start/end, monotonic elapsed time,
 budget, stage transitions, deadline signal, and reaped process status. Native
@@ -152,18 +154,16 @@ includes both the initial timeout and the subsequent recovery result.
 Timeout summaries appear in command output. Re-read retained evidence with:
 
 ```text
-heal report|.form-heal/evaluations/<run>/<case>/evidence
+heal report|.form-heal/<eval-native-run>/<case>/evidence
 ```
 
 Reports retain lifecycle and opaque stage information without copying prompt
 or answer text into diagnostic events. An older run without process boundary
 events needs a fresh observation; the reporter does not fabricate its timeline.
-An outer evaluation timeout preserves its unfinished inner events before the
-disposable source tree is released. It checks recorded process ownership,
-stops any unfinished model process in its separate group, and observes that
-group becoming empty. The report attributes this cleanup to the evaluation
-process carrier. Evaluation traces also separate snapshot preparation, each
-checker and model call, snapshot release, and report generation.
+Cancellation observes descendants before termination and signals children in
+their separate groups too. An incomplete evaluation retains its source tree
+and unfinished evidence. Evaluation traces separate snapshot preparation,
+each checker and model call, snapshot release, and report generation.
 
 ## What it remembers
 
@@ -175,20 +175,23 @@ The shared teaching names the successful and refused repairs from 2026-09-07.
 
 Retrieval alone does not train a neural model. When this checkout contains a
 nonempty `.form-heal/learning-enabled`, every candidate/check round also invokes
-the local MLX learner selected by `form-cli-heal-learning.bml`. Evaluation rounds
-are excluded. One SGD step distills the actual observed outcome, including
-unresolved attempts, into the local Llama 3.2 3B LoRA candidate. The next round
-resumes that candidate. The configured interpreter, model, seed adapter, and
-validation corpus must exist; absence is a recorded refusal.
+the native Qwen learner through `form-cli-heal-native-learning-run.bml`.
+Evaluation rounds are excluded. The learner observes one fixed-probe hidden
+state on the actual local Qwen model and takes one rank-one squared-error step
+toward an embedding of the observed outcome, including unresolved attempts.
+The next round resumes the resulting candidate. Its objective is explicitly
+`fixed-probe-activation-space-outcome-embedding-squared-error`: this is not
+next-token loss or a demonstrated improvement in repair quality.
 
-`learning.jsonl` and `.form-heal/learning/<round>/result.json` retain the real
-process completion, trained tokens, parent/candidate hashes, changed tensors,
-base-file checks, and the trainer's printed before/after validation values.
-Only a completed, released process with observed tensor changes can advance the
-candidate pointer. Concurrent parent changes retain the candidate without
-overwriting a newer pointer. The saved candidate is not automatically serving:
-it still requires independent repair evaluation and a compatible inference
-route. The MLX adapter is distinct from the native Qwen output-head adapter.
+`learning.jsonl` and `.form-heal/native-learning/<round>/result.json` retain
+parent/candidate hashes, changed tensors, one observed forward token, objective
+element count, and the before/after fitting loss. Loss values use a declared
+scale of 10^12 to preserve small differences in the text formatter. The native
+SHA reader checks the complete base file before and after the update. Adapter
+bytes are read back and checked before the candidate pointer advances. The
+supervisor separately records the child's actual exit and resource release.
+The candidate is not automatically serving: independent repair evaluation
+still decides admission. Older MLX artifacts remain separate historical data.
 
 ## Measure repair behavior before training
 
@@ -220,7 +223,7 @@ Semantic cases also require a clean baseline preflight, successful checker
 execution, and empty diagnostic stderr before admitting a model. A compiler
 failure cannot stand in for a semantic defect merely because it prints a number.
 
-Reports live under `.form-heal/evaluations/`. They retain the curriculum hash,
+Reports live under `.form-heal/eval-native-*/`. They retain the curriculum hash,
 per-case source and checker hashes, before/after evidence, process records,
 durations, and outcomes. The disposable source tree is released. Evaluation
 records are marked `evaluation-only`, omitted from repair memory, and refused
@@ -251,9 +254,11 @@ need their own compatible inference transport and evaluation.
 
 The snapshot is filesystem isolation, not an OS sandbox for arbitrary test
 code. Run trusted repository checks: absolute-path effects in a checker can
-still reach host resources. Git, Python 3.11+, and the existing fkwu binary are
-host prerequisites; the OS carrier remains a replaceable Python transport.
-No C seed runtime meaning was added.
+still reach host resources. The healing path requires fkwu and ordinary host
+utilities (git, tar, cp, ps, sh; curl for loopback HTTP). It runs no Python.
+Form owns process supervision, snapshot hashes, guarded replacement, stream
+parsing, choices, reports, evaluation, and native adapter fitting. No C seed
+runtime meaning was added.
 
 The local model registry is an inventory, not a claim that every listed model
 has a working native lane. The healer offers every eligible native artifact
@@ -276,14 +281,16 @@ Verification doors:
 form-run ./form/validate.sh form-stdlib/tests/form-cli-heal-policy-band.fk
 form-run ./form/validate.sh form-stdlib/tests/form-cli-heal-resources-band.fk
 form-run ./fkwu form/form-stdlib/tests/form-cli-heal-load-band.fk
-form-run python3 form/scripts/heal-integration-test.py
+form-run ./fkwu observe/form-cli-heal-native-io-witness.bml
 form-run ./form/validate.sh form-stdlib/tests/form-cli-heal-eval-policy-band.fk
-form-run python3 form/scripts/heal-eval-test.py
+form-run sh -c 'printf "%s\n" eval | ./fkwu observe/form-cli-heal-run.fk'
 form-run ./form/validate.sh form-stdlib/tests/form-cli-heal-timing-band.fk
-form-run python3 form/scripts/heal-trace-test.py
+form-run ./fkwu observe/form-cli-heal-native-process-witness.bml
 form-run ./form/validate.sh form-stdlib/tests/form-cli-heal-dynamic-band.fk
-form-run python3 form/scripts/heal-dynamic-test.py
-form-run python3 form/scripts/heal-flow-test.py
+form-run ./fkwu form/form-stdlib/tests/form-cli-heal-flow-band.fk
+form-run ./fkwu form/form-stdlib/tests/qwen-lora-finite-band.fk
+form-run ./fkwu form/native/metal/tests/qwen38-embedding-band.fk
+form-run ./fkwu observe/form-cli-heal-native-learning-witness.bml
 ```
 
 Policy authority: `form/form-stdlib/bml/form-cli-heal-policy.bml`.

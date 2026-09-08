@@ -1,0 +1,39 @@
+// A current projection of retained process, token and choice evidence.
+// preludes: form-stdlib/bml/form-cli-heal-native-process.bml
+section [form.bml] {
+ class FormCliHealNativeReport {
+  def fhn-suffix(name, suffix) = and(ge(str_len(name), str_len(suffix)), str_eq(substring(name, sub(str_len(name), str_len(suffix)), str_len(name)), suffix));
+  def fhn-files(names, suffix) = if nil?(names) then list() else if fhn-suffix(head(names), suffix) then cons(head(names), fhn-files(tail(names), suffix)) else fhn-files(tail(names), suffix);
+  def fhn-timing-events(events) = if nil?(events) then list() else cons(json-node-array(list(json-object-get(head(events), "phase"), json-object-get(head(events), "elapsed_ms"))), fhn-timing-events(tail(events)));
+  def fhn-flow-key(row) = json-emit(json-node-array(list(json-object-get(row, "route"), json-object-get(row, "model"), json-object-get(row, "model_path"), json-object-get(row, "adapter_path"))));
+  def fhn-flow-latest(rows, seen) = if nil?(rows) then list() else if fhn-member(seen, fhn-flow-key(head(rows))) then fhn-flow-latest(tail(rows), seen) else cons(head(rows), fhn-flow-latest(tail(rows), cons(fhn-flow-key(head(rows)), seen)));
+  def fhn-report-process(job, file) {
+   let stage = substring(file, 0, sub(str_len(file), str_len(".process.json")));
+   let process = fhn-report-current(job, stage, fhn-json(fhn-at(job, file)));
+   let timing = parse-json("native-timing", fhwt-report(json-node-object(list(json-object-get-pair(process, "elapsed_ms"), fhn-a("events", fhn-timing-events(json-array-elements(json-object-get(process, "events"))))))));
+   let flows = fhn-json-rows(split-on(fhn-read(fhn-stage-path(job, stage, ".flow.jsonl")), "\n"));
+   json-node-object(list(fhn-s("stage", stage), json-node-pair("process", process), json-node-pair("timing", timing), fhn-a("token_flows", reverse(fhn-flow-latest(reverse(flows), list()))), fhn-n("token_events", len(flows))));
+  }
+  def fhn-report-current(job, stage, doc) {
+   let public = json-node-object(fhn-without(json-object-pairs(doc), "argv"));
+   if not(str_eq(fhn-string(doc, "state"), "running")) then public else fhn-put(fhn-put(public, "elapsed_ms", json-node-int(sub(host_monotonic_ms(), fhn-number(doc, "started_monotonic_ms")))), "events", json-node-array(fhn-json-rows(split-on(fhn-read(fhn-stage-path(job, stage, ".events.jsonl")), "\n"))));
+  }
+  def json-object-get-pair(doc, key) = json-node-pair(key, json-object-get(doc, key));
+  def fhn-report-processes(job, files) = if nil?(files) then list() else cons(fhn-report-process(job, head(files)), fhn-report-processes(job, tail(files)));
+  def fhn-report-valid(rows) = if nil?(rows) then 1 else and(eq(fhn-number(json-object-get(head(rows), "timing"), "valid"), 1), and(eq(fhn-number(json-object-get(head(rows), "timing"), "accounted_ms"), fhn-number(json-object-get(head(rows), "process"), "elapsed_ms")), fhn-report-valid(tail(rows))));
+  def fhn-report-lines(rows) = if nil?(rows) then "" else fh-cat(list("- ", fhn-string(head(rows), "stage"), ": ", int_to_str(fhn-number(json-object-get(head(rows), "process"), "elapsed_ms")), " ms; state=", fhn-string(json-object-get(head(rows), "process"), "state"), "; reason=", fhn-string(json-object-get(head(rows), "process"), "reason"), "; exit=", int_to_str(fhn-number(json-object-get(head(rows), "process"), "status")), "\n  intervals=", json-emit(json-object-get(json-object-get(head(rows), "timing"), "spans")), "\n  token_flows=", json-emit(json-object-get(head(rows), "token_flows")), "\n", fhn-report-lines(tail(rows))));
+  def fhn-report-choice-lines(rows) = if nil?(rows) then "" else fh-cat(list("- ", fhn-string(head(rows), "stage"), " [", fhn-string(head(rows), "id"), "] ", fhn-string(head(rows), "state"), ": offered=", json-emit(json-object-get(head(rows), "offered")), "; selected=", fhn-string(head(rows), "selected"), "; reason=", fhn-string(head(rows), "reason"), "; result=", fhn-string(head(rows), "result"), "\n", fhn-report-choice-lines(tail(rows))));
+  def fhn-report(job) {
+   let rows = fhn-report-processes(job, fhn-files(host_dir_list(job), ".process.json"));
+   let choices = fhn-json-rows(split-on(fhn-read(fhn-at(job, "choices.jsonl")), "\n"));
+   let learning = fhn-json-rows(split-on(fhn-read(fhn-at(job, "learning.jsonl")), "\n"));
+   let valid = and(gt(len(rows), 0), fhn-report-valid(rows));
+   let summary = json-node-object(list(fhn-s("version", "heal-observation-v1"), fhn-n("generated_unix_ms", now_unix_ms()), fhn-s("evidence", job), fhn-n("timing_reconciled", valid), fhn-a("processes", rows), fhn-a("choices", choices), fhn-a("learning_rounds", learning)));
+   let saved = fhn-write-json(fhn-at(job, "timing-report.json"), summary);
+   let text = fh-cat(list("# Observed healing run\n\nWall intervals include waiting; they are not CPU or hardware-floor measurements.\n\n", fhn-report-lines(rows), "\n## Recorded choices\n\n", fhn-report-choice-lines(choices), "\n## Learning rounds\n\n", json-emit(json-node-array(learning)), "\n"));
+   let human = write_file(fhn-at(job, "timing-report.md"), text);
+   fh-cat(list("timing-report=", fhn-at(job, "timing-report.json"), "; processes=", int_to_str(len(rows)), "; choice-events=", int_to_str(len(choices)), "; timing-reconciled=", int_to_str(valid), "\n", fhn-report-lines(rows), fhn-report-choice-lines(choices)));
+  }
+ }
+ 0;
+}

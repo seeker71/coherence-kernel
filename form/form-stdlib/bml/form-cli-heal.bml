@@ -1,16 +1,23 @@
 // A bounded repair movement, callable by the real form-cli dispatch.
-// preludes: form-stdlib/bml/form-cli-heal-resources.bml form-stdlib/bml/form-cli-heal-eval-policy.bml form-stdlib/bml/form-cli-heal-learning.bml observe/bidirectional-framebuffer-channel.fk
+// preludes: form-stdlib/bml/form-cli-heal-resources.bml form-stdlib/bml/form-cli-heal-eval-policy.bml form-stdlib/bml/form-cli-heal-learning.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/form-cli-heal-native-ollama.bml form-stdlib/bml/form-cli-heal-native-eval.bml observe/bidirectional-framebuffer-channel.fk
 section [form.bml] {
     class FormCliHeal {
-        field HealHost = "form/scripts/heal-host.py";
         field HealMemory = ".form-heal/learned.tsv";
-        def fh-append(path, text) = host-exec(str_concat("python3", fh-args(list(HealHost(), "append", path))), text);
-        def fh-host(args) = fh-trim(host-exec(str_concat("python3", fh-args(cons(HealHost(), args))), ""));
+        def fh-append(path, text) = fhn-append(path, text);
+        def fh-host(args) = if str_eq(head(args), "prepare") then fhn-prepare(nth(args, 1), nth(args, 2)) else if str_eq(head(args), "reset") then fhn-reset(nth(args, 1)) else if str_eq(head(args), "guard") then fhn-guard(nth(args, 1)) else if str_eq(head(args), "commit") then fhn-commit(nth(args, 1), nth(args, 2)) else if str_eq(head(args), "hash") then fhn-hash(nth(args, 1)) else if str_eq(head(args), "finish") then fhn-finish(nth(args, 1)) else if str_eq(head(args), "claim") then fhn-claim(nth(args, 1)) else "refused:unknown-native-operation";
+        def fhn-claim(path) {
+            let lock = str_concat(path, ".claim");
+            if not(eq(host_dir_mkdir(lock), 1)) then "refused:already-claimed" else fhn-claim-write(path);
+        }
+        def fhn-claim-write(path) {
+            let wrote = write_file(path, "claimed\n");
+            if gt(wrote, 0) then "claimed" else "refused:claim-write";
+        }
         def fh-path(job, leaf) = fh-cat(list(job, "/", leaf));
         def fh-read(path) = if gt(file_size(path), 0) then read_file_slice(path, 0, HealMaxSource()) else "";
         def fh-write(job, leaf, text) = write_file(fh-path(job, leaf), text);
         def fh-log(job, stage, result) = fh-append(fh-path(job, "attempts.tsv"), fh-cat(list(stage, "\t", result, "\n")));
-        def fh-choice(job, stage, id, state, offered, selected, reason, result) = fh-host(list("choice", job, stage, int_to_str(id), state, json-emit(json-node-array(fhe-strings(offered))), selected, reason, result));
+        def fh-choice(job, stage, id, state, offered, selected, reason, result) = fhn-choice(job, stage, int_to_str(id), state, offered, selected, reason, result);
         def fh-stage-line(stage) {
             let observed = fb_record(intern_trivial_string(stage), "form-cli-heal.bml", 0);
             print_str(fh-cat(list("form-peer stage route=healing phase=", stage, " status=value stamp-ms=", int_to_str(now_unix_ms()), "\n")));
@@ -21,7 +28,7 @@ section [form.bml] {
             let options = list(if eq(seconds, 0) then "run-with-dynamic-observation" else "run-with-fixed-deadline");
             let selected = fh-choice(job, name, id, "selected", options, head(options), if eq(seconds, 0) then "progress-driven;explicit-stop-control;no-lifetime-deadline" else str_concat("caller-bound;budget-seconds=", int_to_str(seconds)), "awaiting-process");
             let entered = fh-stage(job, fh-cat(list("healing-process-", name, "-begin")));
-            let status = fh-host(append(list("run", job, name, int_to_str(seconds), directory, input), argv));
+            let status = fhn-run(job, name, seconds, directory, input, argv);
             let returned = fh-stage(job, fh-cat(list("healing-process-", name, "-ready")));
             let applied = fh-choice(job, name, id, "applied", options, head(options), if eq(seconds, 0) then "dynamic-observation-returned" else "deadline-and-output-bound-enforced", str_concat("exit=", status));
             let notice = if str_eq(status, "124") then print_str(fh-report(job)) else 0;
@@ -29,7 +36,7 @@ section [form.bml] {
         }
         def fh-report(job) {
             let entered = fh-stage(job, "healing-report-begin");
-            let report = fh-host(list("report", job));
+            let report = fhn-report(job);
             let returned = fh-stage(job, "healing-report-ready");
             report;
         }
@@ -94,16 +101,9 @@ section [form.bml] {
             let stage = str_concat("learn-prepare-", route);
             let input = fh-path(job, str_concat(stage, ".json"));
             let wrote = write_file(input, row);
-            let request = list("python3", HealHost(), "learn-prepare", job, route, mr-path(mr-find(HealLearnerModel())), HealLearnerSeed(), HealLearnerValidation());
-            let status = fh-run(job, stage, HealLearnerSeconds(), "root", input, request);
-            let prepared = fh-trim(fh-out(job, stage));
-            let fields = split-on(prepared, "\n");
-            if not(and(str_eq(status, "0"), eq(len(fields), 2))) then str_concat("learning-prepare-refused:", prepared) else fh-learn-execute(job, head(fields), nth(fields, 1));
-        }
-        def fh-learn-execute(job, roundPath, parent) {
-            let round = head(reverse(split-on(roundPath, "/")));
-            let status = fh-run(job, round, HealLearnerSeconds(), "root", "-", fhl-command(mr-path(mr-find(HealLearnerModel())), str_concat(roundPath, "/data"), str_concat(roundPath, "/adapter"), parent));
-            fh-host(list("learn-complete", roundPath, status));
+            let request = write_file(str_concat(input, ".request"), fh-cat(list(job, "\n", route, "\n", row, "\n")));
+            let status = fh-run(job, stage, HealLearnerSeconds(), "root", str_concat(input, ".request"), list("./fkwu", "observe/form-cli-heal-native-learning-run.bml"));
+            fh-cat(list("native-learning-exit=", status, ";result=", fh-trim(fh-out(job, stage))));
         }
         def fh-no-proposal(job, route, number) {
             let control = fh-adjudicate(add(now_unix_ms(), number), 0);
@@ -153,10 +153,10 @@ section [form.bml] {
             let action = if str_eq(model, "") then "skip-empty-local-inventory" else model;
             let options = if str_eq(model, "") then list(action) else names;
             let selected = fh-choice(job, stage, id, "selected", options, action, str_concat("role-preference-then-inventory-order:", role), "awaiting-local-role");
-            let status = if or(str_eq(model, ""), str_eq(prompt, "")) then "unavailable" else fh-run(job, stage, HealLocalSeconds(), "root", prompt, list("python3", "form/scripts/heal-ollama.py", "generate", model));
+            let status = if or(str_eq(model, ""), str_eq(prompt, "")) then "unavailable" else fho-generate(job, stage, model, prompt);
             let logged = fh-log(job, stage, fh-cat(list("model=", model, ";exit=", status)));
             let applied = fh-choice(job, stage, id, "applied", options, action, "local-role-returned", status);
-            if str_eq(status, "0") then fh-out(job, stage) else "";
+            if str_eq(status, "0") then fh-read(fhn-stage-path(job, stage, ".reply.partial")) else "";
         }
         def fh-remote(job, target, band, expected, seconds, allowed) {
             let probe = fh-run(job, "remote-probe", 10, "empty", "-", list("codex", "exec", "--help"));
@@ -170,8 +170,7 @@ section [form.bml] {
         def fh-native-left(job) = if not(str_eq(fh-read(fh-path(job, "native-inventory-status")), "complete")) then 1 else fhr-pending(fhr-plan(split-on(fh-out(job, "inventory"), "\n")), fh-read(fh-path(job, "attempts.tsv")));
         def fh-missing-stages(log, stages) = if nil?(stages) then 0 else add(if fh-has(str_concat("\n", log), fh-cat(list("\n", head(stages), "\t"))) then 0 else 1, fh-missing-stages(log, tail(stages)));
         def fh-local(job, target, band, expected, seconds, allowed) {
-            let listed = fh-run(job, "local-list", 5, "root", "-", list("python3", "form/scripts/heal-ollama.py", "list"));
-            let names = if str_eq(listed, "0") then split-on(fh-trim(fh-out(job, "local-list")), "\n") else list();
+            let names = fho-inventory(job);
             let diagnosis = fh-ollama(job, names, "diagnosis");
             let appended = fh-append(fh-path(job, "evidence.txt"), str_concat("\nLocal diagnosis (proposal):\n", fh-cap(diagnosis, 3000)));
             let proposal = fh-ollama(job, names, "patch");
@@ -230,7 +229,7 @@ section [form.bml] {
         }
         def fh-command(arg) = if eq(str_find(arg, "report|", 0), 0) then fh-report-request(split-on(arg, "|")) else if or(str_eq(arg, "eval"), eq(str_find(arg, "eval|", 0), 0)) then fh-eval-command(split-on(arg, "|")) else if str_eq(arg, "lesson") then fh-read(HealLessonPath()) else if or(str_eq(arg, ""), str_eq(arg, "help")) then "heal <source.fk|source.bml>|<band.fk>|<exact expected stdout>[|seconds][|local]. The default check bound is 30 seconds. heal report|<evidence-directory> reads current retained timing and choices. Repairs one production source after an isolated band passes; retains evidence under .form-heal. heal lesson explains the repair practice. heal eval measures the deterministic curriculum; heal eval|native|model|case measures one native case. Local-only mode omits the final remote CLI. See docs/form-cli-healing.md."
             else fh-command-fields(split-on(arg, "|"));
-        def fh-eval-command(fields) = if not(fhe-request(fields)) then "heal eval refused: use eval, eval|deterministic, or eval|native|model|case" else fh-trim(host-exec(fh-cat(list("python3 ", fh-quote(HealEvalHost()), fh-args(tail(fields)))), ""));
+        def fh-eval-command(fields) = if not(fhe-request(fields)) then "heal eval refused: use eval, eval|deterministic, or eval|native|model|case" else fhn-evaluate(fields);
         def fh-command-fields(fields) = if or(lt(len(fields), 3), gt(len(fields), 5)) then "heal refused: expected source|band|verdict[|seconds][|local]" else if and(eq(len(fields), 5), not(str_eq(nth(fields, 4), "local"))) then "heal refused: unknown mode; omit mode or use local" else if and(ge(len(fields), 4), not(fsuf-uint?(nth(fields, 3)))) then "heal refused: seconds must be a canonical integer" else fh-command-validated(fields);
         def fh-refuse-reset(job, route, reset) {
             fh-log(job, route, reset); -1;

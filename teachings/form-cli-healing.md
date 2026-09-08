@@ -114,3 +114,27 @@ alternative callers and git history, and compare existing local implementations
 under the same source and model contract. Verify outputs and resource release
 before keeping a faster path. Save the next full run too: removing a prefill
 bottleneck can expose decoding cost rather than complete the requested repair.
+
+The 2026-09-08 native migration removed the healing workflow's Python carrier.
+Form now owns its snapshots, process streams, choices, reports and evaluation.
+The six-case curriculum still measured three repairs, two unresolved semantic
+defects, and one preserved control, with repair memory unchanged.
+
+A training attempt exposed a deeper inference defect: the Q4 GGUF declared
+Q4_K token embeddings, while the walker selected the Q8 decoder. The resulting
+nonfinite hidden values could be misread as enormous finite numbers. Read the
+tensor's actual type, select its decoder, and reject nonfinite device values
+before fitting. The corrected native learner completed two chained adapter
+updates with unchanged base hashes. It fits an outcome embedding in activation
+space; those updates do not establish next-token or repair-quality improvement.
+
+Read a check's full contract before rejecting its output. The Metal attention
+band prints its attended-position observation before its final verdict. A
+wrapper expecting only the number was defective. Preserve the observation and
+verify the documented complete output and process status.
+
+When moving a helper into the body, load it with its real callers. The timing
+reporter and an older heed reporter shared a function name; isolated checks
+passed while a combined import selected the wrong function. The healing timing
+authority now has its own prefix, and combined process/learning witnesses read
+the real reports. A count from an isolated helper cannot prove integration.
