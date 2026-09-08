@@ -1,0 +1,110 @@
+; own-word-run.fk — the body reads its own room, says one thing about it,
+; refuses what it cannot stand behind, and speaks what is left.
+;
+; stdin line 1: the spool to read (blank -> this checkout's .hearth/ear.spool)
+; stdin line 2: which lane generates — "native" (the dense lane on this
+;   Mac's GPU, llama32-1b, no crossing at all), "mlx" (the trainer crossing,
+;   base and the perception adapter side by side), or "both" (blank -> both)
+; stdin line 3: the tongue to speak the surviving sentence in (blank -> the
+;   sentence is shown and not said)
+;
+; Effectful: it opens the GPU, may cross to the trainer, and — when a tongue
+; is given and a sentence survives — opens the mouth, which signs a frame
+; into the spool. That signature is the point: the ear then hears the body's
+; own words as attested, and tomorrow's perception rows carry them.
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/own-word.bml form/form-stdlib/ear-tongue.fk form/form-stdlib/voice-say.bml
+(do
+    (defn owr-say (k v) (print_str (str_concat "own-word " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn owr-line (s) (print_str (str_concat s "\n")))
+    (defn owr-trim (s) (if (nothing? s) "" (trim s)))
+    (defn owr-or (s d) (if (eq (str_len s) 0) d s))
+    (defn owr-text (t) (if (nothing? t) "" t))
+
+    ; ---- the native lane: et-*'s own prompting and detokenizing shapes, our prompt ----
+    (defn owr-gen-native (lane prompt maxnew)
+        (do (let ids (et-encode (nth lane 4) (nth lane 1) prompt))
+            (let room (sub 250 (len ids)))
+            (if (le room 0) "" (owr-gen-go lane (et-lane-st lane) ids (if (gt maxnew room) room maxnew)))))
+    (defn owr-gen-go (lane st ids maxnew)
+        (do (let m0 (et-common ids (nth lane 3) 0))
+            (let m (if (ge m0 (len ids)) (sub (len ids) 1) m0))
+            (let first (et-prefill-from st (et-drop ids m) m))
+            (let gen (et-gen-go st (nth lane 2) first (len ids) maxnew (list)))
+            (et-detok (nth lane 5) (nth lane 6) (nth lane 7) gen "")))
+
+    ; ---- the mlx crossing: the same ask, base and adapter, named as a crossing ----
+    (defn owr-perception-adapter () "form/form-stdlib/adapters/llama-3.2-3b-perception")
+    (defn owr-gen-mlx (ask adapter) (lv-said (lv-ask-at adapter ask (OWMaxNew))))
+
+    ; ---- one candidate, weighed ----
+    (defn owr-weigh (r who raw)
+        (do (let cand (ow-candidate raw))
+            (owr-line "")
+            (owr-say "lane" who)
+            (owr-say "raw" (str_concat "|" (str_concat (trim (owr-text raw)) "|")))
+            (if (eq (str_len cand) 0)
+                (do (owr-say "sentence" "none — the lane did not finish a sentence, so there is nothing to weigh")
+                    "")
+                (do (owr-say "sentence" (str_concat "|" (str_concat cand "|")))
+                    (owr-say "claims" (owr-claims-say r cand))
+                    (owr-say "verdict" (ow-why r cand))
+                    (if (eq (ow-stands? r cand) 1) cand "")))))
+    (defn owr-claims-say (r cand) (owr-claims-go r (ow-claims r cand) ""))
+    (defn owr-claims-go (r cs acc)
+        (if (eq (len cs) 0) (if (eq (str_len acc) 0) "none" acc)
+            (owr-claims-go r (tail cs)
+                (str_concat acc (str_concat (if (eq (str_len acc) 0) "" "; ")
+                    (str_concat (ow-c-kind (head cs)) (str_concat " " (str_concat (ow-c-surface (head cs))
+                        (if (eq (ow-backs? r (head cs)) 1) " [held]" " [REFUSED]")))))))))
+
+    (let want (owr-or (owr-trim (read_line)) (PRSpool)))
+    (let lane (owr-or (owr-trim (read_line)) "both"))
+    (let tongue (owr-trim (read_line)))
+    ; stdin line 4: how many recurring shapes the ask carries (blank -> the
+    ; cell's own number). One room asked with one, two and three shapes is
+    ; three different asks, so a survival fraction is over more than one draw.
+    (let kraw (owr-trim (read_line)))
+    (let k (if (eq (str_len kraw) 0) (OWPromptShapes) (str_to_int kraw)))
+    (let frames (pr-frames (owr-text (read_file want))))
+
+    (if (eq (len frames) 0)
+        (owr-say "signal" (str_concat "nothing reason=no-frames-in-spool at=" want))
+        (do
+            (let r (ow-record frames))
+            (let day (ow-r-day r))
+            (let ask (ow-ask-k frames k))
+            (owr-say "spool" (str_concat want (str_concat " shapes-in-ask=" (int_to_str k))))
+            (owr-say "record" (pr-cat (list
+                "frames=" (int_to_str (head day))
+                " closed=" (int_to_str (nth day 5))
+                " words=" (int_to_str (nth day 7))
+                " attested=" (int_to_str (nth day 6))
+                " floor=" (int_to_str (nth day 3))
+                " loudest=" (int_to_str (nth day 4))
+                " shapes=" (int_to_str (ow-r-nshapes r))
+                " tongues=" (int_to_str (len (ow-r-tongues r)))
+                " room-lines=" (int_to_str (len (ow-r-lines r))))))
+            (owr-line "")
+            (owr-line "---- the ask (the body's own two sentences, and one line asking) ----")
+            (owr-line ask)
+            (owr-line "---- end of ask ----")
+
+            ; the native lane first: no crossing anywhere in it
+            (let nat (if (str_eq lane "mlx") ""
+                (do (let l (et-lane-open))
+                    (owr-weigh r "native-dense-llama32-1b-on-metal" (owr-gen-native l ask (OWMaxNew))))))
+            ; then the crossing, base beside adapter, on the same ask
+            (let base (if (str_eq lane "native") "" (owr-weigh r "mlx-crossing-base-llama32-3b" (owr-gen-mlx ask ""))))
+            (let adap (if (str_eq lane "native") "" (owr-weigh r "mlx-crossing-perception-adapter" (owr-gen-mlx ask (owr-perception-adapter)))))
+
+            (let stood (if (gt (str_len nat) 0) nat (if (gt (str_len adap) 0) adap base)))
+            (owr-line "")
+            (if (eq (str_len stood) 0)
+                (owr-say "stands" "nothing — no candidate survived the record, and a refused sentence is not spoken")
+                (do (owr-say "stands" (str_concat "|" (str_concat stood "|")))
+                    (if (eq (str_len tongue) 0)
+                        (owr-say "spoke" "not asked — no tongue on stdin line 3")
+                        (do (owr-say "mouth" (vs-say tongue stood))
+                            (owr-say "signed" "the mouth wrote its own frame into the spool; the ear can now hear this body as attested")))))))
+    0)
