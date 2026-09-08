@@ -1,0 +1,239 @@
+//////////////////////////////////////////////////////////////////////
+// voice-onnx.bml — a voice model read, natively: the tensor table of an ONNX
+// file (a protobuf ModelProto) so that each weight becomes a span the body can
+// map straight off the file — no onnxruntime, no protobuf library, no python.
+//
+// This is the ear's `ear-npz.fk` for the other model format the body holds. The
+// ear reads .npz (a stored zip of .npy members); the mouth's twenty-nine voices,
+// whisper's exported graphs and the Chinese pinyin lane are all ONNX. A row here
+// is (name dtype dims raw-offset raw-bytes), the same shape ear-npz answers, so a
+// tensor is `metal_buf_from_file(path, off, bytes)` and nothing is copied.
+//
+// Protobuf is four wire types behind a varint key: key = field * 8 + wire.
+// Wire 2 carries its own length, so a walker can stride a 63 MB file by reading
+// twenty bytes at each field head and jumping — the whole tensor table of a
+// medium voice costs a few thousand seeks and no megabyte ever enters a string.
+//
+// The shapes it reads, by ONNX's own field numbers:
+//   ModelProto: 1 ir_version, 2 producer_name, 7 graph, 8 opset_import
+//   GraphProto: 1 node, 2 name, 5 initializer, 11 input, 12 output, 13 value_info
+//   NodeProto:  1 input, 2 output, 3 name, 4 op_type, 5 attribute
+//   TensorProto: 1 dims, 2 data_type, 8 name, 9 raw_data, 13 external_data
+//
+// IS IT A MODEL AT ALL. ear-npz paid for this once: pointed at a non-archive it
+// answered 7720 confident rows of nothing. A protobuf has no magic number, so the
+// honest check here is structural — the top-level fields must tile the file exactly
+// from byte 0 to its last byte, and field 7 must be present and be the largest of
+// them. A file that does not tile is not walked; the table is empty rather than
+// invented. (`vo-model?`, and every table door refuses through it.)
+// preludes: form/form-stdlib/core.fk
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormVoiceOnnx {
+        field VOWin = 24;
+
+        // ---- varints: base-128, low group first, high bit continues ----
+        def vo-vi-go(s, i, sh, acc) = if ge(i, str_len(s)) then acc else if lt(str_byte_at(s, i), 128) then add(acc, mul(str_byte_at(s, i), sh)) else vo-vi-go(s, add(i, 1), mul(sh, 128), add(acc, mul(sub(str_byte_at(s, i), 128), sh)));
+        def vo-vi(s, i) = if ge(i, str_len(s)) then 0 else vo-vi-go(s, i, 1, 0);
+        def vo-vin-go(s, i, n) = if ge(i, str_len(s)) then add(n, 1) else if lt(str_byte_at(s, i), 128) then add(n, 1) else vo-vin-go(s, add(i, 1), add(n, 1));
+        def vo-vin(s, i) = if ge(i, str_len(s)) then 1 else vo-vin-go(s, i, 0);
+
+        // ---- one field at a file offset: (fnum wire datum len next) ----
+        // wire 2: datum is the file offset of the payload, len its bytes
+        // wire 0: datum is the varint's VALUE, len 0
+        // wire 5 / 1: datum is the offset of the 4 / 8 fixed bytes
+        def vo-fd(path, off) {
+            let h = read_file_slice(path, off, VOWin());
+            let key = vo-vi(h, 0);
+            let kl = vo-vin(h, 0);
+            let wt = mod(key, 8);
+            let fnum = div(key, 8);
+            let ll = vo-vin(h, kl);
+            let dl = vo-vi(h, kl);
+            let dof = add(off, add(kl, ll));
+            if eq(wt, 2) then list(fnum, 2, dof, dl, add(dof, dl)) else if eq(wt, 0) then list(fnum, 0, dl, 0, add(off, add(kl, ll))) else if eq(wt, 5) then list(fnum, 5, add(off, kl), 4, add(off, add(kl, 4))) else if eq(wt, 1) then list(fnum, 1, add(off, kl), 8, add(off, add(kl, 8))) else list(fnum, wt, 0, 0, 0);
+        }
+        def vo-fnum(f) = head(f);
+        def vo-wire(f) = nth(f, 1);
+        def vo-datum(f) = nth(f, 2);
+        def vo-dlen(f) = nth(f, 3);
+        def vo-next(f) = nth(f, 4);
+        // a field that did not advance is a wall, not a field: stop rather than spin
+        def vo-fd-ok?(f, off, end) = if le(vo-next(f), off) then 0 else if gt(vo-next(f), end) then 0 else 1;
+
+        // ---- the top-level walk: every field of the model, tiling the file ----
+        def vo-walk-go(path, off, end, k, acc) = if ge(off, end) then reverse(acc) else vo-walk-take(path, off, end, k, acc, vo-fd(path, off));
+        def vo-walk-take(path, off, end, k, acc, f) = if eq(vo-fd-ok?(f, off, end), 0) then reverse(acc) else if eq(vo-fnum(f), k) then vo-walk-go(path, vo-next(f), end, k, cons(f, acc)) else vo-walk-go(path, vo-next(f), end, k, acc);
+        // every field of a span, whatever its number
+        def vo-all-go(path, off, end, acc) = if ge(off, end) then reverse(acc) else vo-all-take(path, off, end, acc, vo-fd(path, off));
+        def vo-all-take(path, off, end, acc, f) = if eq(vo-fd-ok?(f, off, end), 0) then reverse(acc) else vo-all-go(path, vo-next(f), end, cons(f, acc));
+        def vo-fields(path, off, end) = vo-all-go(path, off, end, list());
+        def vo-of(path, off, end, k) = vo-walk-go(path, off, end, k, list());
+        def vo-first(path, off, end, k) {
+            let xs = vo-of(path, off, end, k);
+            if eq(len(xs), 0) then list() else head(xs);
+        }
+
+        // ---- structural honesty: do the top-level fields tile the whole file? ----
+        def vo-tiles?(path, off, end) = if eq(off, end) then 1 else if gt(off, end) then 0 else vo-tiles-step(path, off, end, vo-fd(path, off));
+        def vo-tiles-step(path, off, end, f) = if eq(vo-fd-ok?(f, off, end), 0) then 0 else vo-tiles?(path, vo-next(f), end);
+        def vo-model?(path) {
+            let sz = file_size(path);
+            let tiled = if le(sz, 0) then 0 else vo-tiles?(path, 0, sz);
+            let hasg = if eq(tiled, 0) then 0 else len(vo-of(path, 0, sz, 7));
+            if eq(tiled, 0) then 0 else if eq(hasg, 0) then 0 else 1;
+        }
+
+        // ---- the graph: (offset length), or an empty list when the file is not a model ----
+        def vo-graph(path) = if eq(vo-model?(path), 0) then list() else vo-graph-span(path, vo-first(path, 0, file_size(path), 7));
+        def vo-graph-span(path, f) = if eq(len(f), 0) then list() else list(vo-datum(f), vo-dlen(f));
+        def vo-g-off(g) = head(g);
+        def vo-g-end(g) = add(head(g), nth(g, 1));
+
+        // ---- strings and scalars inside a span ----
+        def vo-str-of(path, off, end, k) {
+            let f = vo-first(path, off, end, k);
+            if eq(len(f), 0) then "" else read_file_slice(path, vo-datum(f), vo-dlen(f));
+        }
+        def vo-int-of(path, off, end, k, dflt) {
+            let f = vo-first(path, off, end, k);
+            if eq(len(f), 0) then dflt else vo-datum(f);
+        }
+        // repeated varints: proto2 writes them one field each, proto3 packs them into one wire-2 run
+        def vo-packed-go(s, i, acc) = if ge(i, str_len(s)) then reverse(acc) else vo-packed-go(s, add(i, vo-vin(s, i)), cons(vo-vi(s, i), acc));
+        def vo-unpacked(fs) = if eq(len(fs), 0) then list() else cons(vo-datum(head(fs)), vo-unpacked(tail(fs)));
+        def vo-ints-of(path, off, end, k) {
+            let fs = vo-of(path, off, end, k);
+            let packed = if eq(len(fs), 0) then 0 else eq(vo-wire(head(fs)), 2);
+            if eq(len(fs), 0) then list() else if eq(packed, 1) then vo-packed-go(read_file_slice(path, vo-datum(head(fs)), vo-dlen(head(fs))), 0, list()) else vo-unpacked(fs);
+        }
+
+        // ---- the tensor table ----
+        // a row: (name dtype dims raw-offset raw-bytes) — raw-offset -1 when the tensor
+        // does not carry raw_data (float_data, or a tensor whose bytes live in a side file)
+        def vo-t-row(path, off, end) {
+            let raw = vo-first(path, off, end, 9);
+            list(vo-str-of(path, off, end, 8), vo-int-of(path, off, end, 2, 0), vo-ints-of(path, off, end, 1), if eq(len(raw), 0) then sub(0, 1) else vo-datum(raw), if eq(len(raw), 0) then 0 else vo-dlen(raw));
+        }
+        def vo-rows-go(fs, path, acc) = if eq(len(fs), 0) then reverse(acc) else vo-rows-go(tail(fs), path, cons(vo-t-row(path, vo-datum(head(fs)), add(vo-datum(head(fs)), vo-dlen(head(fs)))), acc));
+        def vo-inits(path) {
+            let g = vo-graph(path);
+            if eq(len(g), 0) then list() else vo-rows-go(vo-of(path, vo-g-off(g), vo-g-end(g), 5), path, list());
+        }
+
+        def vo-name(r) = head(r);
+        def vo-dtype(r) = nth(r, 1);
+        def vo-dims(r) = nth(r, 2);
+        def vo-off(r) = nth(r, 3);
+        def vo-bytes(r) = nth(r, 4);
+        def vo-find(rows, name) = if eq(len(rows), 0) then list() else if str_eq(vo-name(head(rows)), name) then head(rows) else vo-find(tail(rows), name);
+        // ONNX's own type numbers, only the ones a voice actually carries
+        def vo-dtype-name(d) = if eq(d, 1) then "float" else if eq(d, 10) then "half" else if eq(d, 7) then "int64" else if eq(d, 6) then "int32" else if eq(d, 11) then "double" else if eq(d, 9) then "bool" else int_to_str(d);
+        def vo-elem-bytes(d) = if eq(d, 1) then 4 else if eq(d, 10) then 2 else if eq(d, 7) then 8 else if eq(d, 6) then 4 else if eq(d, 11) then 8 else if eq(d, 9) then 1 else 0;
+        def vo-count(dims) = if eq(len(dims), 0) then 1 else mul(head(dims), vo-count(tail(dims)));
+        // the row's own arithmetic check: does its declared shape and type account for its bytes?
+        def vo-row-sound?(r) = if lt(vo-off(r), 0) then 0 else if eq(mul(vo-count(vo-dims(r)), vo-elem-bytes(vo-dtype(r))), vo-bytes(r)) then 1 else 0;
+        def vo-sound-count(rows) = if eq(len(rows), 0) then 0 else add(vo-row-sound?(head(rows)), vo-sound-count(tail(rows)));
+        def vo-param-sum(rows) = if eq(len(rows), 0) then 0 else add(vo-count(vo-dims(head(rows))), vo-param-sum(tail(rows)));
+        def vo-byte-sum(rows) = if eq(len(rows), 0) then 0 else add(vo-bytes(head(rows)), vo-byte-sum(tail(rows)));
+
+        // ---- the graph's program: which operators a next hand owes a kernel ----
+        def vo-nodes(path) {
+            let g = vo-graph(path);
+            if eq(len(g), 0) then list() else vo-of(path, vo-g-off(g), vo-g-end(g), 1);
+        }
+        def vo-op-of(path, f) = vo-str-of(path, vo-datum(f), add(vo-datum(f), vo-dlen(f)), 4);
+        def vo-bump(rows, op) = if eq(len(rows), 0) then list(list(op, 1)) else if str_eq(head(head(rows)), op) then cons(list(op, add(nth(head(rows), 1), 1)), tail(rows)) else cons(head(rows), vo-bump(tail(rows), op));
+        def vo-census-go(path, fs, acc) = if eq(len(fs), 0) then acc else vo-census-go(path, tail(fs), vo-bump(acc, vo-op-of(path, head(fs))));
+        def vo-op-census(path) = vo-census-go(path, vo-nodes(path), list());
+        // which PART of the voice a node belongs to, from its own exported name:
+        // "/dec/resblocks.8/convs.0/Conv" is the vocoder, "/enc_p/..." the text encoder.
+        // The four parts of a VITS are not a reading of the paper here; they are the four
+        // prefixes the export itself wrote, counted.
+        def vo-node-name(path, f) = vo-str-of(path, vo-datum(f), add(vo-datum(f), vo-dlen(f)), 3);
+        def vo-part-of(nm) {
+            let at = if eq(str_len(nm), 0) then sub(0, 1) else str_find(nm, "/", 1);
+            if lt(at, 1) then "(top)" else substring(nm, 1, at);
+        }
+        def vo-part-go(path, fs, acc) = if eq(len(fs), 0) then acc else vo-part-go(path, tail(fs), vo-bump(acc, vo-part-of(vo-node-name(path, head(fs)))));
+        def vo-part-census(path) = vo-part-go(path, vo-nodes(path), list());
+        // and where the NUMBERS live, which is a different question from where the nodes do:
+        // a weight's exported name carries its part before the first dot ("dec.ups.0.weight"),
+        // or between the first two slashes when the export folded it into a constant.
+        def vo-bumpn(rows, k, n) = if eq(len(rows), 0) then list(list(k, n)) else if str_eq(head(head(rows)), k) then cons(list(k, add(nth(head(rows), 1), n)), tail(rows)) else cons(head(rows), vo-bumpn(tail(rows), k, n));
+        def vo-w-part(nm) {
+            let slash = if eq(str_len(nm), 0) then sub(0, 1) else if eq(str_byte_at(nm, 0), 47) then str_find(nm, "/", 1) else sub(0, 1);
+            let dot = str_find(nm, ".", 0);
+            if ge(slash, 1) then substring(nm, 1, slash) else if ge(dot, 1) then substring(nm, 0, dot) else "(loose)";
+        }
+        def vo-wparts-go(rs, acc) = if eq(len(rs), 0) then acc else vo-wparts-go(tail(rs), vo-bumpn(acc, vo-w-part(vo-name(head(rs))), vo-bytes(head(rs))));
+        def vo-weight-parts(rows) = vo-wparts-go(rows, list());
+        def vo-op-count(cs) = len(cs);
+        def vo-node-count(path) = len(vo-nodes(path));
+
+        // ---- the graph's declared doors: what the model eats and what it answers ----
+        // ValueInfoProto: 1 name, 2 type; TypeProto: 1 tensor_type;
+        // Tensor: 1 elem_type, 2 shape; Shape: 1 dim; Dimension: 1 dim_value, 2 dim_param.
+        // A dimension is a number OR a symbol ("phoneme_ids") — a voice's length axis is symbolic,
+        // which is exactly why the pass cannot pretend to know its shape before the text arrives.
+        def vo-dim-text(path, off, end) {
+            let dv = vo-first(path, off, end, 1);
+            let dp = vo-str-of(path, off, end, 2);
+            if eq(len(dv), 0) then dp else int_to_str(vo-datum(dv));
+        }
+        def vo-dims-go(path, fs, acc) = if eq(len(fs), 0) then reverse(acc) else vo-dims-go(path, tail(fs), cons(vo-dim-text(path, vo-datum(head(fs)), add(vo-datum(head(fs)), vo-dlen(head(fs)))), acc));
+        def vo-io-row(path, off, end) {
+            let tf = vo-first(path, off, end, 2);
+            let tt = if eq(len(tf), 0) then list() else vo-first(path, vo-datum(tf), add(vo-datum(tf), vo-dlen(tf)), 1);
+            let et = if eq(len(tt), 0) then 0 else vo-int-of(path, vo-datum(tt), add(vo-datum(tt), vo-dlen(tt)), 1, 0);
+            let sh = if eq(len(tt), 0) then list() else vo-first(path, vo-datum(tt), add(vo-datum(tt), vo-dlen(tt)), 2);
+            let ds = if eq(len(sh), 0) then list() else vo-dims-go(path, vo-of(path, vo-datum(sh), add(vo-datum(sh), vo-dlen(sh)), 1), list());
+            list(vo-str-of(path, off, end, 1), et, ds);
+        }
+        def vo-io-go(path, fs, acc) = if eq(len(fs), 0) then reverse(acc) else vo-io-go(path, tail(fs), cons(vo-io-row(path, vo-datum(head(fs)), add(vo-datum(head(fs)), vo-dlen(head(fs)))), acc));
+        def vo-io(path, k) {
+            let g = vo-graph(path);
+            if eq(len(g), 0) then list() else vo-io-go(path, vo-of(path, vo-g-off(g), vo-g-end(g), k), list());
+        }
+        def vo-inputs(path) = vo-io(path, 11);
+        def vo-outputs(path) = vo-io(path, 12);
+
+        // ---- IEEE-754 binary32, decoded from the file's own bytes ----
+        // little-endian: b3 carries the sign and seven exponent bits, b2's top bit the eighth.
+        // exponent 0 is subnormal (no implicit 1); 255 is infinity or a NaN and answers 0.0 rather
+        // than a lie — a weight file has neither, so a nonzero count there is a wound, not a value.
+        def vo-pow2-up(n, acc) = if le(n, 0) then acc else vo-pow2-up(sub(n, 1), mul(acc, 2.0));
+        def vo-pow2-dn(n, acc) = if ge(n, 0) then acc else vo-pow2-dn(add(n, 1), divide(acc, 2.0));
+        def vo-pow2(n) = if ge(n, 0) then vo-pow2-up(n, 1.0) else vo-pow2-dn(n, 1.0);
+        def vo-f32-at(s, i) {
+            let b0 = str_byte_at(s, i);
+            let b1 = str_byte_at(s, add(i, 1));
+            let b2 = str_byte_at(s, add(i, 2));
+            let b3 = str_byte_at(s, add(i, 3));
+            let sign = if ge(b3, 128) then -1.0 else 1.0;
+            let ex = add(mul(mod(b3, 128), 2), div(b2, 128));
+            let mant = add(add(mul(mod(b2, 128), 65536), mul(b1, 256)), b0);
+            let sub? = eq(ex, 0);
+            let mag = if eq(ex, 255) then 0.0 else if sub? then mul(divide(mant, 8388608.0), vo-pow2(-126)) else mul(add(1.0, divide(mant, 8388608.0)), vo-pow2(sub(ex, 127)));
+            mul(sign, mag);
+        }
+        def vo-f32(path, off) = vo-f32-at(read_file_slice(path, off, 4), 0);
+        def vo-floats-go(s, i, n, acc) = if le(n, 0) then reverse(acc) else vo-floats-go(s, add(i, 4), sub(n, 1), cons(vo-f32-at(s, i), acc));
+        // n floats of a tensor, starting at element `from` — read as one slice, decoded in the body
+        def vo-floats(path, row, from, n) = vo-floats-go(read_file_slice(path, add(vo-off(row), mul(from, 4)), mul(n, 4)), 0, n, list());
+
+        // ---- text, for a reader with eyes ----
+        def vo-cat(xs) = if eq(len(xs), 0) then "" else str_concat(head(xs), vo-cat(tail(xs)));
+        def vo-nl() = byte_to_str(10);
+        def vo-dims-text(xs) = if eq(len(xs), 0) then "" else vo-cat(list(int_to_str(head(xs)), if eq(len(tail(xs)), 0) then "" else "x", vo-dims-text(tail(xs))));
+        def vo-row-text(r) = vo-cat(list(vo-name(r), " @", int_to_str(vo-off(r)), " +", int_to_str(vo-bytes(r)), " ", vo-dtype-name(vo-dtype(r)), " ", vo-dims-text(vo-dims(r))));
+        def vo-rows-text(rows) = if eq(len(rows), 0) then "" else vo-cat(list(vo-row-text(head(rows)), vo-nl(), vo-rows-text(tail(rows))));
+        def vo-census-text(cs) = if eq(len(cs), 0) then "" else vo-cat(list(head(head(cs)), " ", int_to_str(nth(head(cs), 1)), vo-nl(), vo-census-text(tail(cs))));
+        def vo-io-text(rows) = if eq(len(rows), 0) then "" else vo-cat(list(head(head(rows)), " ", vo-dtype-name(nth(head(rows), 1)), " [", vo-join(nth(head(rows), 2), ","), "]", vo-nl(), vo-io-text(tail(rows))));
+        def vo-join(xs, sep) = if eq(len(xs), 0) then "" else vo-cat(list(head(xs), if eq(len(tail(xs)), 0) then "" else sep, vo-join(tail(xs), sep)));
+        def vo-floats-text(xs) = if eq(len(xs), 0) then "" else vo-cat(list(float_to_str(head(xs)), if eq(len(tail(xs)), 0) then "" else " ", vo-floats-text(tail(xs))));
+        def vo-producer(path) = vo-str-of(path, 0, file_size(path), 2);
+        def vo-ir(path) = vo-int-of(path, 0, file_size(path), 1, 0);
+    }
+    0;
+}

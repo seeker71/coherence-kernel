@@ -1,0 +1,63 @@
+//////////////////////////////////////////////////////////////////////
+// voice-native.bml — the mouth's pass, as far as it runs today.
+//
+// What runs here: the voice's own weights read off its file by the body
+// (`voice-onnx.bml`), the phoneme row built by the body (`voice-phoneme.bml`),
+// and the FIRST STAGE of the VITS text encoder computed by the body — the
+// phoneme embedding lookup and the scaling that follows it.
+//
+// The scale is not typed in from a paper. VITS multiplies the embedding by
+// sqrt(hidden_channels), and this graph carries that number as its own float
+// scalar initializer — `/enc_p/Constant_output_0` = 13.856406 for a 192-channel
+// voice. The body reads it out of the model, so a voice with other channels
+// scales by ITS number and nothing here has to be told.
+//
+// What does NOT run here, named exactly: the six relative-position attention
+// layers after this stage, the stochastic duration predictor, the flow, and the
+// HiFi-GAN decoder — 2755 nodes over 50 distinct operators, of which this stage
+// is one Gather and one Mul. `observe/voice-onnx-run.fk` prints the whole
+// operator census so the next hand can see the owed kernels rather than guess at
+// them. Until those land, `voice-say.bml` keeps its crossing and speaks.
+//
+// The stage is folded rather than materialised: 65 phonemes times 192 channels is
+// 12480 values, and a body that built them all as cells to answer one question
+// would be paying list overhead for arithmetic. The two doors are the whole
+// stage's sum (a checksum a reference can reproduce exactly, left to right, in the
+// same order) and one phoneme's own first channels.
+// preludes: form/form-stdlib/voice-onnx.bml form/form-stdlib/voice-phoneme.bml
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormVoiceNative {
+        field VNScaleName = "/enc_p/Constant_output_0";
+        field VNEmbName = "sid";
+
+        // the embedding table and the scale, both read out of the model file itself
+        def vn-emb(rows) = vo-find(rows, VNEmbName());
+        def vn-channels(rows) = nth(vo-dims(vn-emb(rows)), 1);
+        def vn-symbols(rows) = head(vo-dims(vn-emb(rows)));
+        def vn-scale(path, rows) = vo-f32(path, vo-off(vo-find(rows, VNScaleName())));
+
+        // one phoneme's row, scaled — the stage's output for a single id
+        def vn-scaled-go(xs, s) = if eq(len(xs), 0) then list() else cons(mul(head(xs), s), vn-scaled-go(tail(xs), s));
+        def vn-row(path, rows, id, n) {
+            let e = vn-emb(rows);
+            let d = vn-channels(rows);
+            vn-scaled-go(vo-floats(path, e, mul(id, d), n), vn-scale(path, rows));
+        }
+        // an id outside the table is not a row of zeros, it is an absence — say so
+        def vn-id-ok?(rows, id) = if lt(id, 0) then 0 else if ge(id, vn-symbols(rows)) then 0 else 1;
+
+        // the whole stage, folded: sum over every id's every channel, left to right in id order
+        def vn-sum-row(s, i, n, acc) = if le(n, 0) then acc else vn-sum-row(s, add(i, 4), sub(n, 1), add(acc, vo-f32-at(s, i)));
+        def vn-stage-go(path, e, d, ids, acc) = if eq(len(ids), 0) then acc else vn-stage-go(path, e, d, tail(ids), vn-sum-row(read_file_slice(path, add(vo-off(e), mul(mul(head(ids), d), 4)), mul(d, 4)), 0, d, acc));
+        def vn-stage-sum(path, rows, ids) {
+            let e = vn-emb(rows);
+            let d = vn-channels(rows);
+            mul(vn-stage-go(path, e, d, ids, 0.0), vn-scale(path, rows));
+        }
+        def vn-stage-values(rows, ids) = mul(len(ids), vn-channels(rows));
+
+        def vn-floats-text(xs) = if eq(len(xs), 0) then "" else str_concat(float_to_str(head(xs)), str_concat(if eq(len(tail(xs)), 0) then "" else " ", vn-floats-text(tail(xs))));
+    }
+    0;
+}
