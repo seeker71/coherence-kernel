@@ -1,0 +1,98 @@
+; value-eq-arena-band.fk — a comparison must not depend on where its answer sits.
+;
+; A value in this body is an INDEX: a cons cell is a position in an arena, a
+; string is a slot in a pool. Both are reclaimed while a program runs — the
+; arena is compacted and every live pair MOVES, the pool's dead slots are
+; handed back and REUSED with other bytes. That is fine as long as every value
+; a comparison still needs is somewhere the reclaimer can see. `value_eq` held
+; its first operand in a place the reclaimer could not see, for as long as it
+; took to compute the second, and then compared an index that had since become
+; somebody else's. It answered false for two things that were the same.
+;
+; It did not announce itself. On real work it was wrong about once in seven
+; hundred (corpus row 1357, `seldomred`, found because a new band read 254 once
+; and 255 the next seven times), and at that rate re-running looks like
+; diligence and comes back green. So this band does not ask for a verdict. It
+; asks for a COUNT, over comparisons made under enough allocation pressure to
+; move the arena underneath them — the same instrument that broke it open.
+;
+; The pressure is the point and it is not decoration: `churn` allocates roughly
+; forty cons cells per call and every one of them is dropped, so a run of it is
+; a run of garbage that forces the compaction. Shrink it and this band goes
+; quietly green on a broken kernel. Bit 16 is there so that shrinking it to
+; nothing cannot pass unnoticed.
+;
+; The strings and the lists fail differently and both are asked. A relocated
+; list index reads as another list; a reclaimed string slot reads as other
+; bytes only once something else has taken it, which is why the string count
+; is small and the list count is large for one and the same defect.
+;
+; str_eq is here as the control. It was never wrong, because it reduces its
+; first operand to a string INDEX before walking the second and string bytes
+; never move. Its zero beside value_eq's non-zero is what the defect looked
+; like from outside, and it is what made the wound look like a property of one
+; op rather than of the arena under both.
+;
+; Expected: 31 on all four arms. The three proof walkers hold values as their
+; host language's own objects — no arena, no relocation, no slot reuse — so
+; they answered 31 before the heal as well; that was measured, not assumed
+; (Go, Rust and TypeScript all read 31 against the unhealed C seed). fkwu read
+; 28 before it: bits 1 and 2 dark, five wrong list comparisons in sixteen and
+; one wrong string comparison in sixteen, deterministic across runs.
+;
+;    1 two freshly built EQUAL LISTS compare equal, every time, under pressure
+;    2 two freshly built EQUAL STRINGS compare equal, every time, under pressure
+;    4 str_eq says the same about those strings, every time — the control
+;    8 values that DIFFER still compare unequal — bit 1 was not bought with blindness
+;   16 the pressure really ran: the churn walked every cell it claims to
+(do
+    (defn veab-bit (ok bit) (if ok bit 0))
+
+    ; --- the pressure -------------------------------------------------------
+    ; forty pairs a call, all dropped. Written wide on purpose: a loop that
+    ; allocates one cell a call spends its time in the loop, and the arena has
+    ; to move for this band to mean anything.
+    (defn veab-c40 (n)
+        (cons n (cons n (cons n (cons n (cons n (cons n (cons n (cons n
+        (cons n (cons n (cons n (cons n (cons n (cons n (cons n (cons n
+        (cons n (cons n (cons n (cons n (cons n (cons n (cons n (cons n
+        (cons n (cons n (cons n (cons n (cons n (cons n (cons n (cons n
+        (cons n (cons n (cons n (cons n (cons n (cons n (cons n
+        (cons n (list))))))))))))))))))))))))))))))))))))))))))
+    (defn veab-churn (n seen)
+        (if (le n 0) seen (veab-churn (sub n 1) (add seen (len (veab-c40 n))))))
+
+    ; --- the freshly built values ------------------------------------------
+    (defn veab-grow (n acc) (if (le n 1) acc (veab-grow (sub n 1) (str_concat acc "x"))))
+    (defn veab-mint (n) (if (le n 0) 0 (do (veab-grow n "z") (veab-mint (sub n 1)))))
+    ; a list built AFTER the arena has been forced to move
+    (defn veab-list (n) (do (veab-churn 8000 0) (list (veab-grow n "a") (veab-grow n "b"))))
+    ; a string built after the same, with fresh minting in between so a
+    ; reclaimed slot is actually taken by other bytes before the compare
+    (defn veab-str (n) (do (do (veab-churn 8000 0) (veab-mint 80)) (veab-grow n "a")))
+
+    ; --- the counts ---------------------------------------------------------
+    (defn veab-off-list (i bad)
+        (if (le i 0) bad
+            (veab-off-list (sub i 1)
+                (if (value_eq (veab-list i) (veab-list i)) bad (add bad 1)))))
+    (defn veab-off-str (i bad)
+        (if (le i 0) bad
+            (veab-off-str (sub i 1)
+                (if (value_eq (veab-str i) (veab-str i)) bad (add bad 1)))))
+    (defn veab-off-seq (i bad)
+        (if (le i 0) bad
+            (veab-off-seq (sub i 1)
+                (if (str_eq (veab-str i) (veab-str i)) bad (add bad 1)))))
+    ; the other direction: things that differ must still differ
+    (defn veab-off-diff (i bad)
+        (if (le i 0) bad
+            (veab-off-diff (sub i 1)
+                (if (value_eq (veab-list i) (veab-list (add i 1))) (add bad 1) bad))))
+
+    (add (veab-bit (eq (veab-off-list 16 0) 0) 1)
+    (add (veab-bit (eq (veab-off-str 16 0) 0) 2)
+    (add (veab-bit (eq (veab-off-seq 16 0) 0) 4)
+    (add (veab-bit (eq (veab-off-diff 8 0) 0) 8)
+         (veab-bit (eq (veab-churn 100 0) 4000) 16)))))
+)
