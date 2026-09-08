@@ -922,6 +922,20 @@ off its own thresholds, so `gap-corridor` on the glass meant low flow while
 the same word in the frame meant one option. The findings are the lane's now,
 read from the frame's finding rows. choice-view 32767, choice-flow 8191.
 
+**A sample can carry a cell, so the point crosses as the point.** The nineteen
+membrane fields stay exactly as they are — the shared vocabulary every view
+renders and every reader indexes by, all label-shaped. The twentieth is the
+publisher's own structure in the publisher's own shape, for readers that know
+it and invisible to those that do not (`fgtm-with-cell`, `fgtm-sample-cell`,
+and `fgtm-carry-cell` so a rebuilt sample keeps it). A choice row now carries
+an `fcf-point`: its question, its `fcf-option`s and its `fcf-ledger`; a finding
+row carries the `fcf-finding`. The choice view keeps no second model beside the
+lane's and decodes nothing — `fgch-point` IS `fcf-point`. **Prose crosses
+again**: `jit.crystallize … walk this recipe again, or crystallize it?` and
+`walk … walk the tree again, every call` render from a real publish, sentences
+that could not cross yesterday. choice-view 65535, choice-flow 8191, membrane
+2097151.
+
 **No parsing is required, because a snapshot crosses as the cell it is.** R111
 moved the membrane to `node_gift_write` of the snapshot cell -- "there is no
 wire and no file" -- and the text grammar it replaced stayed: fourteen doors
