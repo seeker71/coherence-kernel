@@ -926,78 +926,128 @@ holds no cumulative busy counter, dumped once and witnessed), and
 process -- stands beside it uncontended. events-channels 8191, sensor-rows
 2047, machine 255. (receipts/2026-09-06-every-organ-gives-into-the-glass.md)
 
-**The body's real choices are on the glass, and they are playable.** Eight
-choice points, each with a ledger that is a count the body was already
-keeping: crystallize or walk, box or fold, reuse or mint, where a surprise
-moves, the protocol floor, which frame the glass takes, whether the metal
-admits, and which route serves a category. Every offer lands as one of the
-body's own three outcomes -- taken, declined, or SILENCE, the held offer of
-axioms 1 and 4 -- so flow, restriction and holding are three separate shares
-of the same hundred offers and a point that was never offered reads `-1`, not
-zero. A sequence plays at its NARROWEST gate, never its average, because an
-average hides the step worth healing. A choice with one option is a
-`gap-corridor` and a choice never metered is `gap-dark`; a choice that closes
-more than it opens is a `wound-restricting`, and each finding carries what it
-asks for. Press `d` on the glass to open them, `g` to step, `y` to take, `w`
-to hold; a take or a hold writes through the control inbox and the next frame
-shows the ledger move. form-choice-flow 4095, sources 16383, view 16383.
+**The body's real choices are on the glass, and they are playable.** Seven
+choice points, each with a ledger that is a count the body was already keeping:
+crystallize or walk, box or fold, reuse or mint, where a surprise moves, the
+protocol floor, which frame the glass takes, and whether the metal admits.
+Every offer lands as one of the body's own three outcomes — taken, declined, or
+SILENCE, the held offer of axioms 1 and 4 — so flow, restriction and holding are
+three separate shares of the same hundred offers, and a point never offered
+reads `-1`, not zero. A tick where nothing was put moves no ledger at all
+(`fcf-outcome-none`): silence is the offer held OPEN, that is the offer never
+made. A sequence plays at its NARROWEST gate, never its average, because an
+average hides the step worth healing; the gate and the most restricting step are
+different steps and the play carries both. A choice with one option is a
+`gap-corridor`, a choice never metered is `gap-dark`, a choice that closes more
+than it opens is a `wound-restricting`, and a held offer nothing times is
+`gap-unclocked` — each carrying what it asks for, and none of them declared from
+fewer than `FCFLeastOffers` offers, because a share of one observation is 0 or
+100 and neither is a rate. Press `d` on the glass to open them, `g` to step, `y`
+to take, `w` to hold; a take or a hold writes through the control inbox and the
+next frame shows the ledger move. choice-flow 16383, sources 32767, view 65535.
 
-**Nothing put is not a decline, and a number the body knows is published as a
-number.** Three places wrote `failed` where the body had never got to ask: the
-surprise organ scored its own resting movements (hold, rest, compost) as
-failures, so a point that closed nothing read as closing 96 of every 100
-offers; the governor's admission row and its release row wrote `failed` when
-the typed signals were never current, so an idle host published a body
-declining every quantum it was never offered. The admission and release rows
-now read `unknown` -- the word the pressure row beside them already used for
-exactly this not-knowing -- and a tick the governor never measured moves no
-ledger at all (`fcf-outcome-none`): silence is the offer held OPEN, this is
-the offer never made. Alongside, the organs frame stopped publishing one
-number twice: the routing row's capacity is the whole (every surprise
-attempted) and the choice row's capacity is the part that MOVED, so the
-choice lane reads counts as counts instead of parsing them back out of a
-purpose label -- and the rested count it used to parse was added to a
-difference that subtracted it again. governor-glass 4194303,
-events-channels 32767.
+**A sample can carry a cell, so the point crosses as the point.** The nineteen
+membrane fields are the shared vocabulary every view renders and every reader
+indexes by, all label-shaped. The twentieth is the publisher's own structure in
+its own shape, for readers that know it and invisible to those that do not
+(`fgtm-with-cell`, `fgtm-sample-cell`, and `fgtm-carry-cell` so a rebuilt sample
+keeps it). A choice row carries an `fcf-point` — question, `fcf-option`s,
+`fcf-ledger` — and a finding row the `fcf-finding`, so an ask arrives as the
+sentence the lane wrote. The choice view keeps no model beside the lane's:
+`fgch-point` IS `fcf-point`, it decodes nothing, and it computes no findings of
+its own, so a corridor on the glass means what the frame says a corridor is.
+Prose crosses: `jit.crystallize … walk this recipe again, or crystallize it?`
+renders from a real publish. A snapshot crosses as the cell it is (R111) and
+nothing is serialized or parsed on that path; what the control lane sends as
+text — offers and acks — keeps its wire, because that text really crosses.
+membrane 2097151.
 
-**The choice view shows the frame's own choices, because now it can.** The
-lane published eighteen rows a second and the view decoded zero of them: it
-was written against a wire whose entries read `point|alpha|Which lane...?`,
-and a membrane channel is a LABEL — lowercase, digits, `- . _`, at most 64
-bytes, at most sixteen per row — so no frame could ever carry it. Its band
-passed because the band built the same impossible samples by hand and never
-asked the membrane whether it would take them. The wire is label-shaped and
-bounded now (`led.<offered>.<taken>.<held>.<declined>.<waitMs>` and one
-`opt.<id>.<cost>.<reward>` per option), the band publishes its own fixture
-through shared memory and reads it back before believing a single bit, and
-prose — a point's question, an option's sentence — is named as what this
-membrane cannot carry rather than pretended. The view also stopped keeping a
-second opinion: it read the lane's counts and then computed its OWN findings
-off its own thresholds, so `gap-corridor` on the glass meant low flow while
-the same word in the frame meant one option. The findings are the lane's now,
-read from the frame's finding rows. choice-view 32767, choice-flow 8191.
+**Standing is not giving.** Shared memory outlives the process, so a frame
+parses `current` with all its rows long after its giver has stopped. The age is
+a fact and it lives beside the read (`fgtm-snapshot-age`, `fgtm-read-age`,
+`fgtm-read-given-within?`, `fgtm-read-samples-within`); the BOUND stays the
+reader's, because only the reader knows the cadence it expects. A frame standing
+but silent is the offer HELD — its giver may speak again — never a taking, and a
+silent frame's own age is the wait on the offer it holds. Every lane that turns
+rows into a claim asks the question: the choice lane before it feeds a ledger,
+`we-glass` before it labels an owner's counters `physical-live`, the glass
+itself in `fgl-snapshot-fresh?`. `native-model-route-readiness` asks more — the
+owner's liveness, its snapshot binding, its heartbeat. The sensor lane carries
+its own declared cadence and marks a frame silent past three of them
+(`fgsr-silent?`, truth symbol `_`). we-glass 2047, sensor-rows 2047.
 
-**The gate and the restrictor are different steps, and the play named the wrong
-one.** `fcf-play-narrowest` read position 3 of the play cell, which held the
-MOST RESTRICTING point — so every reading reported the gate's flow beside a
-different point's name. Witnessed: flow 7, belonging to the surprise point,
-printed beside `governor.metal-admission`, which flows at 33. A reader healing
-"the narrowest gate" went to the wrong step. The play carries both now
-(`fcf-play-narrowest`, `fcf-play-restricting`), and the gate is the point whose
-flow the play reports.
+**A zero the body never measured is not a reading.** A row that carries no heat
+reading publishes heat ABSENT: a present zero says a reading was taken and found
+nothing, which is a different claim, and the atlas asks one door whether a value
+is a value rather than two that disagreed. A whole with no part is no reading
+either — a surprise routing row standing without its choice row publishes
+nothing rather than 100% holding. A governor that could not read its signals
+granted nothing because it never got to ask, so its admission and release rows
+read `unknown`, the word the pressure row beside them already used; only a
+governor that read the frame and then closed the door reads `failed`. A rested
+surprise is a movement chosen (axiom 3 calls composting health), never a
+decline. governor-glass 4194303, events-channels 32767.
 
-**The cold start was never the compiling.** A band chain took 1.097 s cold and
-0.019 s warm, and 0.94 s of it was SYSTEM time. Timed inside the kernel: the
-parse cost **2 ms** and writing the image cost **551 ms** — because every value
-went out as its own `write(2)`. A signed value is three of them (sign, hi, lo)
-and a node is four values, so a 1.4 MB image issued well over a million
-syscalls. The bytes were never the cost; the crossings were, and a syscall per
-byte cannot approach the disk's own bandwidth however fast the disk is. One
-buffer, flushed when full and once before close, and the `.sym` lens beside it.
-What remained was a second shape: both writers ask "which symbol owns this node"
-once per node, and both answers were a linear scan over every symbol — n×s,
-twice. The tables are built once per write and freed after, and the scan still
-answers when they are absent, so it is a shortcut and never a second truth.
+**The publisher roster ages by last speech instead of refusing at its wall.**
+There are 511 slots and no door to give one back, so every band run and every
+short-lived publisher registers a name that stands until reboot. Past 511 the
+roster refused SILENTLY and every publisher after that was never listed. A
+slot's timestamp is refreshed on every register — which a live publisher does on
+every publish — and a full roster takes the least recently spoken slot, so
+nothing alive is displaced. A control inbox and its ack are not publishers
+(`fgtm-control-frame-name?`); `fgtm-frames-in-space` still names every frame for
+anyone who wants one. The frames themselves outlive their processes: there is no
+`shm_unlink` door, and the body has exactly one free AST tag.
+
+**The fold leg is counted, so box-or-fold is a choice with two legs.**
+`fk_fn_inram` sits beside `fk_fn_mint`, page-backed at +112 MiB (the page is
+128 MiB, version 4), charged at both crystallized dispatch arms, and it is the
+tenth word of every hot row. `kernel_page_hot` with a NEGATIVE n ranks by folds,
+the way `kernel_page_box` with a negative n ranks by mints — modes in arguments
+the doors already took, because one AST tag is free in the whole body. Witnessed
+on a float-warm kernel: `fp-mix` folded 399,659 of 400,000 calls with 400,684
+boxes beside them, and `jit.box` reads 800,344 offers at 49% flow — half this
+body's float results still take a pool slot.
+
+**The JIT asks on boxes, not on calls.** The loop lane's question fires on a
+1024-CALL boundary (`fk_heat_pulse`) and the float lane's on a 1024-BOX boundary
+(`fk_f64_pulse` from `fk_fbox`), so a float-heavy recipe is asked after about
+five hundred calls: a defn called 1000 times is already crystallized. Measured:
+the first thousand calls 0 ms, two hundred thousand across the crystallization
+8 ms, two hundred thousand steady after it 9 ms — no measurable cold-JIT penalty
+at this scale. Only the recipes the kernel actually asked are offered the
+crystallize choice, and a crystallized row counts as asked whatever its heat
+says, since an answer proves the question was put. Read over the asked alone a
+warm kernel shows offered 2 at 50% flow where it showed 24 at 4%, and
+`jit.mint` reads its offers from the hot rows rather than the mint-ranked ones,
+because a body whose arena stopped growing has none of those and the choice is
+put on every call: 1526 offers, 100% flow.
+
+**The glass names its own hot path, and the JIT declines its shape.** Read from
+a standing glass's own page: the top sixty-four recipes carry **172 million
+dispatches**, of which **one** is crystallized, 39 are still walking and 24 were
+declined. Eleven of the top twelve are one-line field accessors — `nth(x, k)` —
+and `fgtm-sample-id` alone was called 5.9 million times. The two crystallization
+lanes take a pure-float leaf and an int loop; a body that returns a field is
+neither, so the shape the body actually spends its time in is the shape the JIT
+cannot take. The leverage where it does apply is large: 2,000,000 iterations of
+a crystallized loop cost 0 ms against 95 ms walked, and a one-line accessor
+recipe costs about 10 ns more per call than the `nth` it wraps.
+`fgl-newest-entries` — the glass's hottest loop — recomputed the fixed entry's
+publisher and sample id at every comparison of an O(n²) walk; both are read once
+at the door now.
+
+**The cold start is not the compiling.** Timed inside the kernel on a band
+chain: the parse costs **2 ms**. Writing the image cost **551 ms** because every
+value went out as its own `write(2)` — a signed value is three of them and a
+node is four values, so a 1.4 MB image issued well over a million syscalls. The
+bytes were never the cost; the crossings were, and a syscall per byte cannot
+approach the disk's own bandwidth however fast the disk is. Both writers go
+through one buffer, flushed when full and once before close. Both also ask
+"which symbol owns this fn / this node" once per node, and both answers were a
+linear scan over every symbol — n×s, twice; the tables are built once per write
+and freed after, and the scan still answers when they are absent, so it is a
+shortcut and never a second truth.
 
 | chain | before | after |
 | --- | --- | --- |
@@ -1007,164 +1057,10 @@ answers when they are absent, so it is a shortcut and never a second truth.
 
 The image is byte-identical to what the old writer produced: same 1,466,821
 bytes, **two differing bytes**, both inside the builder id's own `__TIME__`
-stamp. Nothing about the format moved.
-
-The ice identity is anchored at the lexical repo root (`fk_path_canon_id`) so it
-survives a checkout move, but the image is stored beside its source — this host
-holds **6241 `.fkb` files, 7.7 GB** across 57 worktrees and the main checkout,
-each re-storing what the others already have.
-
-**The JIT asks on boxes, not on calls.** The loop lane's question fires on a
-1024-CALL boundary (`fk_heat_pulse`) and the float lane's on a 1024-BOX
-boundary (`fk_f64_pulse` from `fk_fbox`), so a float-heavy recipe is asked after
-about five hundred calls: a defn called 1000 times was already crystallized.
-Measured on this Mac: the first thousand calls cost 0 ms, two hundred thousand
-across the crystallization cost 8 ms, and two hundred thousand steady after it
-cost 9 ms — there is no measurable cold-JIT penalty at this scale, and the
-choice lane counts a crystallized row as asked whatever its heat says.
-
-**A verdict needs enough offers to be one, and only the asked are offered.** The
-glass published `wound-restricting` on the governor from a ledger of ONE offer —
-a share of one observation is 0 or 100 and neither is a rate — so a wound is a
-pattern over at least `FCFLeastOffers` offers now, and a point put fewer times
-carries its reading with no verdict. And every hot row counted as an offer of
-the crystallize choice, including recipes the kernel had never asked about: the
-seed puts that question at a 1024-call boundary (`FK_F64_HEAT`, where
-`fk_heat_pulse` and `fk_f64_pulse` fire), so a defn called nine times was being
-counted as a recipe holding out. Witnessed on a warm kernel: the point read
-offered 24 at 4% flow, diluted by twenty-two recipes nobody had asked; it reads
-offered 2 at 50% — of the recipes the JIT actually asked about, half
-crystallized. A one-second kernel now reads no crystallize reading at all
-rather than publishing a stall that was a cold start. choice-flow 16383,
-sources 32767.
-
-**Two findings closed rather than listed.** `route.category` read DARK on every
-tick since it landed and its own ask said "reach it, or retire it".
-`brcr-protocol-choice-candidates` had exactly one caller in the body — the
-choice shard, calling it to display candidates for a choice no live path puts —
-so the point could never learn anything and published a permanent dark row and
-a permanent finding every second. Retired, which is the half of its own ask the
-body could answer; `bml-route-choice-runtime.fk` stands with its band, and the
-point returns with a ledger if a live path ever routes a category.
-`gap-unclocked` on the surprise point is closed by a clock the body already
-had: `surprise.last` now carries the epoch of the last surprise that MOVED
-rather than stamping "now" like every other organ row, so the wait on offers
-still resting is now minus that. The glass frame point is clocked the same way
-— a silent frame's own age is the wait on the offer it holds. Seven points, and
-the findings the body carries are three, all of them readings rather than
-holes. sources 32767, events-channels 32767.
-
-**A sample can carry a cell, so the point crosses as the point.** The nineteen
-membrane fields stay exactly as they are — the shared vocabulary every view
-renders and every reader indexes by, all label-shaped. The twentieth is the
-publisher's own structure in the publisher's own shape, for readers that know
-it and invisible to those that do not (`fgtm-with-cell`, `fgtm-sample-cell`,
-and `fgtm-carry-cell` so a rebuilt sample keeps it). A choice row now carries
-an `fcf-point`: its question, its `fcf-option`s and its `fcf-ledger`; a finding
-row carries the `fcf-finding`. The choice view keeps no second model beside the
-lane's and decodes nothing — `fgch-point` IS `fcf-point`. **Prose crosses
-again**: `jit.crystallize … walk this recipe again, or crystallize it?` and
-`walk … walk the tree again, every call` render from a real publish, sentences
-that could not cross yesterday. choice-view 65535, choice-flow 8191, membrane
-2097151.
-
-**No parsing is required, because a snapshot crosses as the cell it is.** R111
-moved the membrane to `node_gift_write` of the snapshot cell -- "there is no
-wire and no file" -- and the text grammar it replaced stayed: fourteen doors
-building `sample|id|a|kind|...` and splitting it back, kept alive by one band
-bit that round-tripped a string nothing carried. They are gone. The band proves
-the round trip over the carrier instead, which is the only crossing there is,
-and asks "no content body crosses" of the samples a reader actually holds
-rather than of a wire built only to be searched. What the control lane still
-sends as text (offers, acks) keeps its wire, because that text really crosses.
-membrane 2097151, dual-telemetry 67108863.
-
-**Every lane that takes a frame's rows now asks when it was given.** The
-membrane's `fgtm-read-samples-within` hands back the rows only from a frame
-given inside the caller's own bound, and three lanes were swept for the shape
-the night the wound was named. `we-glass` labelled an owner's dispatch counters
-`physical-live` from whatever stood — R98's original wound, on the lane where
-it was first seen. The choice lane poured a dead giver's counts into a ledger
-every tick. `native-model-route-readiness` was already honest: it asks the
-OWNER's liveness, its snapshot binding and its heartbeat, not just whether the
-frame parsed. we-glass 2047, sources 32767.
-
-**A frame carries when it was given, because standing is not giving.** Shared
-memory outlives the process, so `fgtm-read-current` answered "current" — with
-every row — for a publisher that stopped hours ago. Witnessed 2026-09-07 on
-this host: four publishers current, `resource.governor` 344 ms and `organs`
-441 ms old, `share.token-pressure` **100 minutes** and `choices` **118
-minutes**, and the choice lane counting all four as takings at 100% flow. The
-age is a fact and it lives beside the read now (`fgtm-snapshot-age`,
-`fgtm-read-age`, `fgtm-read-given-within?`); the BOUND stays the reader's,
-because only the reader knows the cadence it expects. A frame standing but
-silent is the offer HELD — its giver may speak again — never a taking, and
-`glass.frame` reads 50/50 where it read 100. The glass's own
-`fgl-snapshot-fresh?` asks the same door rather than doing the subtraction its
-own way. This is R98 exactly, released a day earlier for the SENSOR lane
-(cadence cells, `fgsr-silent?`, the `_` symbol) and left standing on its
-sibling, the membrane lane; the sensor lane was measured at the same moment and
-is honest — `ear` silent for 79 minutes and marked, every other frame inside
-its cadence. sources 32767.
-
-**The fold leg is counted, so box-or-fold is a choice with two legs.** The live
-page counted every float result that took a pool slot (`fbox`) and nothing at
-all for the leg it was chosen against: a body that ran as this machine's own
-instructions, its intermediates in registers. So the choice could only ever
-publish ONE option and read as a corridor — a gap named honestly and then left
-alone rather than filled. `fk_fn_inram` sits beside `fk_fn_mint`, page-backed at
-+112 MiB (the page is 128 MiB and its version is 4), charged at both crystallized
-dispatch arms, and it is the tenth word of every hot row. `kernel_page_hot` with
-a NEGATIVE n ranks by folds, the way `kernel_page_box` with a negative n already
-ranked by mints. Witnessed on a float-warm kernel: `fp-mix` folded 399,659 of
-400,000 calls with 400,684 boxes beside them, and `jit.box` reads 800,344 offers
-at 49% flow — half this body's float results still take a slot.
-
-**A ledger ranked by its losing leg makes a healthy body look like it never
-chose.** `jit.mint` read DARK — never offered — because it ranked rows by mints,
-and a body whose arena has stopped growing has no such rows. The truth was the
-opposite: the choice is put on every call and reuse wins every time. It reads
-the hot rows now, and the live number is 1526 offers at 100% flow. Two of the
-three dark points on the glass were not dark at all. The third,
-`route.category`, is honestly dark: nothing in this body calls the route lane,
-so its ask — reach it, or retire it — still stands.
-
-**The publisher roster ages by last speech instead of refusing at its wall.**
-There are 511 slots and no door to give one back, so every band run and every
-short-lived publisher registers a name that stands until reboot — 34 frames on
-this host, 28 of them dead. Past 511 the roster refused SILENTLY and every
-publisher after that was simply never listed. A slot's timestamp is now
-refreshed on every register, which a live publisher does on every publish, and
-a full roster takes the least recently spoken slot. Nothing alive is displaced:
-a publisher still giving is, by definition, not the oldest. Witnessed on a
-private roster in a scratch build — 511 filled, the newcomer listed, the
-silent slot taken, and a name that spoke again keeping its slot while the
-neighbour that stayed quiet lost one. The frames themselves still outlive
-their processes: the body has no `shm_unlink` door, and the last free AST tag
-is the price of one.
-
-**A zero the body never measured is not a reading.** Every organ row published
-`heat` present-0, so each one told a reader it had taken a heat reading and
-found nothing there — and a row with no other number (`surprise.last`, the
-grammars) rendered `0` on the atlas as its value. The atlas held two opinions
-about what counts as a value, too: its row-picker asked for heat greater than
-zero and its renderer only asked whether heat was present, so it drew a value
-the same file had just said was not one. Organ rows publish heat absent now,
-and both doors ask one question. In the choice lane, a whole with no part is
-no reading either: a surprise routing row standing without its choice row used
-to publish 100% holding out of a row that never came.
-
-**A control frame is not a publisher, and a wait nobody clocked is not a
-stalled wait.** The glass's roster walk took every gift frame in its space,
-including the control inbox and its ack, and read them with the snapshot
-parser: two rows a tick reading `malformed` for two channels working exactly
-as built, and the choice lane scoring them as two declines. The membrane
-already named them by suffix; the roster asks now (`fgtm-control-frame-name?`),
-and `fgtm-frames-in-space` still names every frame for anyone who wants one.
-Alongside, a point holding most of its offers and timing none of them read as
-`wound-stalled` — a claim about a wait that was never taken. It reads
-`gap-unclocked` now and asks for the clock, and a gap no longer publishes with
-a wound's lifecycle. membrane 2097151, awareness 1048575.
+stamp. Ice identity is anchored at the lexical repo root (`fk_path_canon_id`)
+so it survives a checkout move, but the image is stored beside its source —
+this host holds **6241 `.fkb` files, 7.7 GB** across 57 worktrees and the main
+checkout, each re-storing what the others already have.
 
 **The live glass's frame work rests inside its budget.** A projection node
 names a field once (`fgo-field-node`): `intern_node_at` records a framebuffer
