@@ -922,6 +922,34 @@ off its own thresholds, so `gap-corridor` on the glass meant low flow while
 the same word in the frame meant one option. The findings are the lane's now,
 read from the frame's finding rows. choice-view 32767, choice-flow 8191.
 
+**The gate and the restrictor are different steps, and the play named the wrong
+one.** `fcf-play-narrowest` read position 3 of the play cell, which held the
+MOST RESTRICTING point — so every reading reported the gate's flow beside a
+different point's name. Witnessed: flow 7, belonging to the surprise point,
+printed beside `governor.metal-admission`, which flows at 33. A reader healing
+"the narrowest gate" went to the wrong step. The play carries both now
+(`fcf-play-narrowest`, `fcf-play-restricting`), and the gate is the point whose
+flow the play reports.
+
+**Cold start, measured.** A band chain compiles cold in 1.097 s and loads warm
+in 0.019 s — 58×, and 0.94 s of the cold run is system time, not user: reading
+sources and writing ice. The ice identity is already anchored at the lexical
+repo root (`fk_path_canon_id`), so it survives a checkout move, but the image
+is stored beside its source — so this host holds **6241 `.fkb` files, 7.7 GB**,
+across 57 worktrees and the main checkout, each recompiling and re-storing what
+the others already have. A whole-program image also carries its whole prelude
+chain, so bands that share preludes store them again in every image. Warm reads
+pay none of this; cold ones pay all of it.
+
+**The JIT asks on boxes, not on calls.** The loop lane's question fires on a
+1024-CALL boundary (`fk_heat_pulse`) and the float lane's on a 1024-BOX
+boundary (`fk_f64_pulse` from `fk_fbox`), so a float-heavy recipe is asked after
+about five hundred calls: a defn called 1000 times was already crystallized.
+Measured on this Mac: the first thousand calls cost 0 ms, two hundred thousand
+across the crystallization cost 8 ms, and two hundred thousand steady after it
+cost 9 ms — there is no measurable cold-JIT penalty at this scale, and the
+choice lane counts a crystallized row as asked whatever its heat says.
+
 **A verdict needs enough offers to be one, and only the asked are offered.** The
 glass published `wound-restricting` on the governor from a ledger of ONE offer —
 a share of one observation is 0 or 100 and neither is a rate — so a wound is a
