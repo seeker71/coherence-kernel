@@ -1,0 +1,159 @@
+//////////////////////////////////////////////////////////////////////
+// native-ask.bml — the body asks its own mind, on its own metal, with
+// no membrane crossing anywhere in the ask.
+//
+// The dense lane could already decode a token in single-digit
+// milliseconds; what it could not do was finish a sentence. Measured
+// 2026-09-09 on this Mac, three things stood between the lane and an
+// answer, and all three were the ASK's, not the lane's:
+//
+//   THE SHAPE. The ask went in as bare completion text. An instructed
+//   model handed a dump of readings and one instruction continues the
+//   DUMP: "1 room = 1 space with a defined area and boundaries.\n\n
+//   Observation: 2 rooms = 2 spaces ..." — witnessed here, and the same
+//   shape as the `352 0 0 0` and `1|1|1|` that stood 0 of 3 yesterday.
+//   The crossing was never asking the same question: mlx_lm applies the
+//   model's chat template and the native lane applied none. Through the
+//   same 1B, through its own headers, the same ask answers "A room is a
+//   space enclosed by walls, floor, and ceiling, typically used for
+//   various activities or purposes." in 22 tokens and stops itself.
+//
+//   THE BOUNDARY. A greedy longest match is right inside ordinary text
+//   and wrong across a marker's first byte: `.` followed by `<` matched
+//   the piece `.<` and swallowed the `<` of `<|eot_id|>`, after which
+//   every header downstream shredded into `<|`, `eo`, `t`, `_id`. The
+//   prompt did not reach the lane unchanged, and nothing said so. So the
+//   text is cut at each marker the body holds as ONE token — read from
+//   its own vocabulary, never a hand-written id — the pieces between are
+//   encoded on their own, and the marker's id is spliced whole.
+//
+//   THE END. `et-ends?` knows four ids, two of them bare line breaks.
+//   This model does not write a bare line break to end a sentence; it
+//   writes `382`, whose piece is ".\n\n" — the break arrives INSIDE the
+//   piece. A reader stopping on its four ids ran to the caller's cap
+//   every time, and a sentence cut at the cap is the cap talking, so
+//   `ow-candidate` refused it. Corpus row 1368 `cutkept` named this a
+//   day earlier on a rendering: a line ends where its reader stops, not
+//   where the writer does. Here the end is read from the PIECE — an id
+//   whose piece carries a break ends the answer and is KEPT, because the
+//   period the sentence needs is inside that same piece.
+//
+// What still crosses, and why: an adapter. `adapter_config.json` names
+// the model it was fitted to — the mlx 4-bit 3B — and this lane holds
+// the registry's 1B gguf. Weights fitted to one do not apply to the
+// other, so an adapter ask crosses, named, until a native LoRA lane
+// stands. `lv-route` answers which door an ask takes and why.
+// preludes: form/form-stdlib/ear-tongue.fk
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormNativeAsk {
+        // The lane's model, and the room its cache states. The tongue lane
+        // opens 256 positions because a line to translate is short; an ask
+        // ABOUT A ROOM is not. `own-word`'s two-shape ask over a real 217-
+        // frame spool measured 147 tokens here on 2026-09-09 — under the
+        // tongue's 250 and not being cut, which is worth stating because the
+        // first guess was that it WAS: the ask was not the reason that ask
+        // came back refused. A room with more shapes, or three shapes in the
+        // ask, walks past 250 with nothing to say it did, so this lane opens
+        // its own cache rather than borrowing the tongue's, and keeps a
+        // margin back for the answer's own growth.
+        field NAModel = "llama32-1b";
+        field NAPositions = 1024;
+        field NARoom = 900;
+        field NAMaxNew = 64;
+
+        def na-model-path() = mr-path(mr-find(NAModel()));
+        def na-model-at?(path) = if gt(file_size(path), 0) then 1 else 0;
+        def na-model?() = na-model-at?(na-model-path());
+        // et-lane-open-of's own shape, opened at this lane's position count:
+        // the state, the file's bos and eos, an empty cache, and the three
+        // paths of the vocabulary index it shares with the tongue lane
+        def na-open() = na-lane-of(dth-open(na-model-path(), NAPositions(), sub(0, 1)));
+        def na-lane-of(st) = na-lane-src(st, nth(st, 10));
+        def na-lane-src(st, src) = na-lane-built(st, src, et-build-index(src));
+        def na-lane-built(st, src, built) = list(st, gmt-u32(src, "tokenizer.ggml.bos_token_id"), gmt-u32(src, "tokenizer.ggml.eos_token_id"), list(), et-rdir(src), et-ppath(src), et-ipath(src), gmt-vocab-n(src));
+        def na-dir(lane) = nth(lane, 4);
+        def na-nl() = byte_to_str(10);
+        def na-text(t) = if nothing?(t) then "" else t;
+
+        // ── a marker's own id, read from the body's own vocabulary ────────
+        // et-rmatch answers (id length) for the longest indexed piece at a
+        // position. A marker whose longest match covers the WHOLE marker is
+        // one token here; anything else this body does not hold as one, and
+        // it travels as ordinary text rather than as a fabricated id.
+        def na-mark-id(lane, mark) = na-mark-at(na-dir(lane), dtk-gpt2-map(mark));
+        def na-mark-at(dir, sfc) = na-mark-of(et-rmatch(dir, sfc, 0, str_len(sfc), if gt(str_len(sfc), 4) then 4 else str_len(sfc)), str_len(sfc));
+        def na-mark-of(m, L) = if eq(nth(m, 1), L) then head(m) else sub(0, 1);
+
+        // ── encoding that does not break a marker's boundary ──────────────
+        def na-plain(dir, s) = if eq(str_len(s), 0) then list() else na-plain-of(dir, dtk-gpt2-map(s));
+        def na-plain-of(dir, sfc) = et-rids(dir, sfc, 0, str_len(sfc), list());
+        def na-mark-end(s, a) = na-mark-end-of(str_find(s, "|>", a));
+        def na-mark-end-of(b) = if lt(b, 0) then sub(0, 1) else add(b, 2);
+        def na-ids-go(lane, s, acc) = na-ids-at(lane, s, acc, str_find(s, "<|", 0));
+        def na-ids-at(lane, s, acc, a) {
+            if lt(a, 0) then append(acc, na-plain(na-dir(lane), s))
+            else na-ids-end(lane, s, acc, a, na-mark-end(s, a));
+        }
+        def na-ids-end(lane, s, acc, a, e) {
+            if lt(e, 0) then append(acc, na-plain(na-dir(lane), s))
+            else na-ids-mark(lane, s, acc, a, e, na-mark-id(lane, substring(s, a, e)));
+        }
+        def na-ids-mark(lane, s, acc, a, e, id) {
+            if lt(id, 0) then na-ids-go(lane, substring(s, e, str_len(s)), append(acc, na-plain(na-dir(lane), substring(s, 0, e))))
+            else na-ids-go(lane, substring(s, e, str_len(s)), append(append(acc, na-plain(na-dir(lane), substring(s, 0, a))), list(id)));
+        }
+        def na-ids(lane, prompt) = cons(nth(lane, 1), na-ids-go(lane, prompt, list()));
+
+        // ── the ends this file itself names, plus every break-carrying piece ─
+        def na-end-marks() = list("<|eot_id|>", "<|end_of_text|>", "<|eom_id|>");
+        def na-end-go(lane, marks, acc) = if eq(len(marks), 0) then acc else na-end-go(lane, tail(marks), append(acc, list(na-mark-id(lane, head(marks)))));
+        def na-ends(lane) = na-end-go(lane, na-end-marks(), list(nth(lane, 2)));
+        def na-member?(xs, x) = if eq(len(xs), 0) then 0 else if eq(head(xs), x) then 1 else na-member?(tail(xs), x);
+        def na-piece(lane, id) = et-piece-of(nth(lane, 5), nth(lane, 6), nth(lane, 7), id);
+        def na-break?(lane, id) = if lt(str_find(na-piece(lane, id), na-nl(), 0), 0) then 0 else 1;
+
+        // ── the greedy walk: an end id stops and is dropped, a break-carrying
+        // piece stops and is KEPT (the sentence's own full stop lives in it) ─
+        def na-gen(lane, st, ends, id, pos, n, acc) {
+            if le(n, 0) then reverse(acc)
+            else if eq(na-member?(ends, id), 1) then reverse(acc)
+            else if eq(na-break?(lane, id), 1) then reverse(cons(id, acc))
+            else na-gen-next(lane, st, ends, id, pos, n, acc, dth-forward(nth(st, 0), nth(st, 1), nth(st, 2), nth(st, 3), nth(st, 4), nth(st, 5), nth(st, 6), nth(st, 7), nth(st, 8), id, pos));
+        }
+        def na-gen-next(lane, st, ends, id, pos, n, acc, nid) = na-gen(lane, st, ends, nid, add(pos, 1), sub(n, 1), cons(id, acc));
+
+        def na-cut(s) = na-cut-at(s, str_find(s, na-nl(), 0));
+        def na-cut-at(s, a) = if lt(a, 0) then trim(s) else trim(substring(s, 0, a));
+        def na-detok(lane, ids) = et-detok(nth(lane, 5), nth(lane, 6), nth(lane, 7), ids, "");
+
+        // ── the ask, and the refusal that says which ──────────────────────
+        // Answers (text reason): a reason is empty exactly when the lane
+        // answered. Nothing here returns a plausible empty string on a
+        // failure the caller cannot see.
+        def na-said(r) = head(r);
+        def na-why(r) = nth(r, 1);
+        def na-answered?(r) = if eq(str_len(nth(r, 1)), 0) then 1 else 0;
+        def na-refuse(why) = list("", why);
+        def na-ask-ids(lane, ids, maxnew) {
+            let room = sub(NARoom(), len(ids));
+            if le(room, 0) then na-refuse(str_concat("prompt-too-long ids=", str_concat(int_to_str(len(ids)), str_concat(" room=", int_to_str(NARoom())))))
+            else na-ask-run(lane, ids, if gt(maxnew, room) then room else maxnew);
+        }
+        def na-ask-run(lane, ids, maxnew) = na-ask-gen(lane, ids, maxnew, et-prefill-from(et-lane-st(lane), ids, 0));
+        def na-ask-gen(lane, ids, maxnew, first) = na-ask-of(lane, na-gen(lane, et-lane-st(lane), na-ends(lane), first, len(ids), maxnew, list()));
+        def na-ask-of(lane, gen) = if eq(len(gen), 0) then na-refuse("lane-said-nothing") else list(na-cut(na-detok(lane, gen)), "");
+        def na-ask-on(lane, prompt, maxnew) = na-ask-ids(lane, na-ids(lane, prompt), maxnew);
+        def na-ask(prompt, maxnew) = if eq(na-model?(), 0) then na-refuse(str_concat("no-model at=", na-model-path())) else na-ask-on(na-open(), prompt, maxnew);
+
+        // ── the shape an instructed model was taught to answer ────────────
+        field NAUser = "<|start_header_id|>user<|end_header_id|>";
+        field NAAsst = "<|start_header_id|>assistant<|end_header_id|>";
+        field NAEot = "<|eot_id|>";
+        def na-nl2() = str_concat(na-nl(), na-nl());
+        def na-chat(prompt) = str_concat(NAUser(), str_concat(na-nl2(), str_concat(prompt, str_concat(NAEot(), str_concat(NAAsst(), na-nl2())))));
+        def na-chat-ask(prompt, maxnew) = if eq(na-model?(), 0) then na-refuse(str_concat("no-model at=", na-model-path())) else na-ask-on(na-open(), na-chat(prompt), maxnew);
+        def na-chat-ask-on(lane, prompt, maxnew) = na-ask-on(lane, na-chat(prompt), maxnew);
+    }
+    0;
+}

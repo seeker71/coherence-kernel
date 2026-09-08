@@ -1,0 +1,99 @@
+; native-ask-band.fk — the body's own asking door, pinned against the three wounds that kept the
+; native dense lane from finishing a sentence (measured 2026-09-09 on this Mac, 347.63 GB/s through
+; the handle door, 12.884902 TFLOPS):
+;
+;   the PROMPT reaches the lane unchanged — the greedy longest match took the piece `.<` across the
+;   first byte of `<|eot_id|>` and shredded every header after it (bits 1, 2, 4);
+;   the answer STOPS where it should — this model ends a sentence with a piece carrying the break
+;   inside it (`.\n\n`), which the four known end ids never saw, so every answer ran to the caller's
+;   cap and was refused as cut (bits 8, 16, 32, 512);
+;   a REFUSAL says which — no model, or a prompt with no room left in this lane's own cache (bits
+;   64, 128);
+;   an ask with an adapter and an ask without are DISTINGUISHABLE, and the crossing is kept, not
+;   deleted (bits 256, 1024, 2048).
+;
+; Nothing here is a hand-written token id: every marker is looked up in the body's own vocabulary
+; index, so a band that passes has read this model's file rather than a memory of it.
+; Expected: 4095
+; PROOF LEVEL: FOURTH-ARM ONLY (metal handle door)
+; preludes: form/form-stdlib/lora-voice.bml
+(do
+    (defn nab-bit (ok v) (if ok v 0))
+    (defn nab-txt (x) (if (nothing? x) "" x))
+    (defn nab-last (s) (if (eq (str_len s) 0) 0 (str_byte_at s (sub (str_len s) 1))))
+    (defn nab-end-mark? (s) (do (let b (nab-last s)) (if (or (eq b 46) (or (eq b 33) (eq b 63))) 1 0)))
+    (defn nab-starts? (s p) (if (eq (str_find s p 0) 0) 1 0))
+    (defn nab-has? (s p) (if (lt (str_find s p 0) 0) 0 1))
+    (defn nab-all-ge0 (xs) (if (eq (len xs) 0) 1 (if (lt (head xs) 0) 0 (nab-all-ge0 (tail xs)))))
+    (defn nab-rep (s n acc) (if (le n 0) acc (nab-rep s (sub n 1) (str_concat acc s))))
+
+    (let lane (na-open))
+    (let ask "Say in one short sentence what a room is.")
+    (let chat (na-chat ask))
+    (let ids (na-ids lane chat))
+    ; the prompt as the lane received it, read back through the lane's own detokenizer (the bos
+    ; this cell prepends is not part of the text)
+    (let back (na-detok lane (tail ids)))
+
+    ; ---- 1: the body holds its end marker as ONE token, read from its own vocabulary ----
+    (let eotid (na-mark-id lane "<|eot_id|>"))
+    (let b1 (nab-bit (and (ge eotid 0) (str_eq (na-piece lane eotid) "<|eot_id|>")) 1))
+
+    ; ---- 2: the prompt reaches the lane UNCHANGED ----
+    ; The bytes alone cannot say this and it took a red probe to see it: the shredded pieces `<|`,
+    ; `eo`, `t`, `_id`, `|>` detokenize back to `<|eot_id|>` exactly, so a text round-trip reads
+    ; green over the wound. Unchanged means every marker arrives as its OWN id — what the model
+    ; attends to — and the bytes agree as well.
+    (let uid (na-mark-id lane "<|start_header_id|>"))
+    (let aid (na-mark-id lane "<|end_header_id|>"))
+    (let b2 (nab-bit (and (str_eq back chat)
+                     (and (eq (na-member? ids eotid) 1)
+                     (and (eq (na-member? ids uid) 1) (eq (na-member? ids aid) 1)))) 2))
+
+    ; ---- 4: the exact boundary the greedy match broke: a full stop against a marker's first byte ----
+    (let bids (na-ids lane ".<|eot_id|>"))
+    (let b4 (nab-bit (and (eq (len bids) 3) (eq (nth bids 2) eotid)) 4))
+
+    ; ---- 8: a piece carrying a line break ENDS the answer; an ordinary word piece does not ----
+    (let brk (na-plain (na-dir lane) (str_concat "." (str_concat (byte_to_str 10) (byte_to_str 10)))))
+    (let wrd (na-plain (na-dir lane) "room"))
+    (let b8 (nab-bit (and (eq (len brk) 1) (and (eq (na-break? lane (head brk)) 1) (eq (na-break? lane (head wrd)) 0))) 8))
+
+    ; ---- 16: the lane finishes a sentence, and stops before the cap ----
+    (let r16 (na-chat-ask-on lane ask 64))
+    (let b16 (nab-bit (and (eq (na-answered? r16) 1) (and (gt (str_len (na-said r16)) 20) (eq (nab-end-mark? (na-said r16)) 1))) 16))
+
+    ; ---- 32: the same ask WITHOUT the model's own headers does not finish one ----
+    ; the wound itself, kept as evidence: a bare completion of an instruction runs on and is cut
+    (let r32 (na-ask-on lane ask 64))
+    (let b32 (nab-bit (or (eq (na-answered? r32) 0) (eq (str_eq (na-said r32) (na-said r16)) 0)) 32))
+
+    ; ---- 64: a prompt with no room left in the cache is REFUSED, and the refusal says which ----
+    (let long (na-chat (nab-rep "the room holds a reading. " 200 "")))
+    (let r64 (na-ask-on lane long 8))
+    (let b64 (nab-bit (and (eq (na-answered? r64) 0) (eq (nab-starts? (na-why r64) "prompt-too-long") 1)) 64))
+
+    ; ---- 128: an absent model is refused by name, and this one is present ----
+    (let b128 (nab-bit (and (eq (na-model-at? "/no/such/blob/at/all") 0) (eq (na-model? ) 1)) 128))
+
+    ; ---- 256: the chat shape carries the model's own headers and hands the turn to the assistant ----
+    (let b256 (nab-bit (and (eq (nab-starts? chat (NAUser)) 1) (and (nab-has? chat (NAEot)) (nab-has? chat (NAAsst)))) 256))
+
+    ; ---- 512: every end mark the body names was FOUND in its own vocabulary ----
+    (let ends (na-ends lane))
+    (let b512 (nab-bit (and (eq (len ends) 4) (and (eq (nab-all-ge0 ends) 1) (eq (na-member? ends eotid) 1))) 512))
+
+    ; ---- 1024: an ask with no adapter and an ask with one take different doors, each with a reason ----
+    (let adap "form/form-stdlib/adapters/llama-3.2-3b-perception")
+    (let b1024 (nab-bit (and (str_eq (lv-route "") "native")
+                        (and (str_eq (lv-route adap) "crossing")
+                             (eq (str_eq (lv-route-why "") (lv-route-why adap)) 0))) 1024))
+
+    ; ---- 2048: the crossing is KEPT — its command still names the trainer, and its lane is named ----
+    (let cmd (lv-ask-cmd-n (lv-model) adap "hello" 8))
+    (let b2048 (nab-bit (and (nab-has? cmd "mlx_lm")
+                        (and (nab-has? cmd adap)
+                             (eq (str_eq (lv-native-lane) (lv-cross-lane)) 0))) 2048))
+
+    (add b1 (add b2 (add b4 (add b8 (add b16 (add b32 (add b64 (add b128 (add b256 (add b512 (add b1024 b2048)))))))))))
+)

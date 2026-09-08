@@ -1,12 +1,102 @@
-; lora-voice-ask-run.fk — one question to the base model and to the adapter.
-; stdin: line 1 the data folder (blank -> the native one), line 2 the question.
+; lora-voice-ask-run.fk — one question about a real room, asked three ways, side by side.
+;
+; The three lanes are the whole of the body's asking as it stands:
+;   native   — this Mac's own metal, llama32-1b through dense-token-handle, nothing crossed
+;   cross    — the mlx crossing, base Llama-3.2-3B-Instruct-4bit
+;   adapter  — the same crossing wearing the perception adapter
+; The first is the routed default; the other two are named crossings. Each answer is held against
+; the room's own record by own-word's checker, so what is printed is not three opinions but three
+; answers and what the record does and does not back in each.
+;
+; stdin line 1: the spool to read (blank -> this checkout's .hearth/ear.spool)
+; stdin line 2: how many recurring shapes the ask carries (blank -> own-word's own number)
+; stdin line 3: which lanes — "all" (blank), "native", "cross", "adapter"
+;
+; Effectful: it opens the GPU and may cross to the trainer. It writes nothing and signs nothing.
 ; preflight-exec: forbidden
-; preludes: form/form-stdlib/lora-voice.bml
+; preludes: form/form-stdlib/lora-voice.bml form/form-stdlib/own-word.bml
 (do
+    (defn lva-say (k v) (print_str (str_concat "ask " (str_concat k (str_concat "=" (str_concat v "\n"))))))
+    (defn lva-line (s) (print_str (str_concat s "\n")))
+    (defn lva-t (x) (if (nothing? x) "" x))
     (defn lva-trim (s) (if (nothing? s) "" (trim s)))
-    (let data0 (lva-trim (read_line)))
-    (let data (if (eq (str_len data0) 0) (LVData) data0))
-    (let q (lva-trim (read_line)))
-    (print_str (str_concat "base: " (str_concat (if (nothing? (lv-ask data q 0)) "nothing" (lv-ask data q 0)) "\n")))
-    (print_str (str_concat "adapter: " (str_concat (if (nothing? (lv-ask data q 1)) "nothing" (lv-ask data q 1)) "\n")))
+    (defn lva-or (s d) (if (eq (str_len s) 0) d s))
+    (defn lva-want? (sel who) (if (str_eq sel "all") 1 (if (str_eq sel who) 1 0)))
+
+    ; one lane's answer, weighed against the record and printed whole
+    (defn lva-weigh (r who route why res)
+        (do (lva-line "")
+            (lva-say "lane" who)
+            (lva-say "door" (str_concat route (str_concat " — " why)))
+            (if (eq (lv-r-answered? res) 0)
+                (do (lva-say "refused" (lv-r-why res)) "")
+                (lva-weigh-said r who (lv-r-said res)))))
+    (defn lva-weigh-said (r who raw)
+        (do (lva-say "raw" (str_concat "|" (str_concat (trim raw) "|")))
+            (lva-weigh-cand r who (ow-candidate raw))))
+    (defn lva-weigh-cand (r who cand)
+        (if (eq (str_len cand) 0)
+            (do (lva-say "sentence" "none — the lane did not finish a sentence, so there is nothing to weigh") "")
+            (do (lva-say "sentence" (str_concat "|" (str_concat cand "|")))
+                (lva-say "claims" (lva-claims r cand))
+                (lva-say "verdict" (ow-why r cand))
+                (if (eq (ow-stands? r cand) 1) cand ""))))
+    (defn lva-claims (r cand) (lva-claims-go r (ow-claims r cand) ""))
+    (defn lva-claims-go (r cs acc)
+        (if (eq (len cs) 0) (if (eq (str_len acc) 0) "none" acc)
+            (lva-claims-go r (tail cs)
+                (str_concat acc (str_concat (if (eq (str_len acc) 0) "" "; ")
+                    (str_concat (ow-c-kind (head cs)) (str_concat " " (str_concat (ow-c-surface (head cs))
+                        (if (eq (ow-backs? r (head cs)) 1) " [held]" " [REFUSED]")))))))))
+
+    ; the native lane, opened once: its cache room, the ask's size in it, then the answer
+    (defn lva-native (r ask)
+        (do (let lane (na-open))
+            (let ids (na-ids lane (na-chat ask)))
+            (lva-line "")
+            (lva-say "native-cache" (str_concat "positions=" (str_concat (int_to_str (NAPositions))
+                (str_concat " room=" (str_concat (int_to_str (NARoom))
+                (str_concat " ask-tokens=" (int_to_str (len ids))))))))
+            (lva-weigh r (lv-native-lane) (lv-route "") (lv-route-why "") (lv-r-native (na-ask-ids lane ids (OWMaxNew))))))
+
+    (let adap "form/form-stdlib/adapters/llama-3.2-3b-perception")
+    (let want (lva-or (lva-trim (read_line)) (PRSpool)))
+    (let kraw (lva-trim (read_line)))
+    (let sel (lva-or (lva-trim (read_line)) "all"))
+    (let k (if (eq (str_len kraw) 0) (OWPromptShapes) (str_to_int kraw)))
+    (let frames (pr-frames (lva-t (read_file want))))
+
+    (if (eq (len frames) 0)
+        (lva-say "signal" (str_concat "nothing reason=no-frames-in-spool at=" want))
+        (do
+            (let r (ow-record frames))
+            (let day (ow-r-day r))
+            (let ask (ow-ask-k frames k))
+            (lva-say "spool" (str_concat want (str_concat " shapes-in-ask=" (int_to_str k))))
+            (lva-say "record" (pr-cat (list
+                "frames=" (int_to_str (head day))
+                " closed=" (int_to_str (nth day 5))
+                " words=" (int_to_str (nth day 7))
+                " floor=" (int_to_str (nth day 3))
+                " loudest=" (int_to_str (nth day 4))
+                " shapes=" (int_to_str (ow-r-nshapes r))
+                " tongues=" (int_to_str (len (ow-r-tongues r))))))
+            (lva-line "")
+            (lva-line "---- the ask (the body's own sentences about its own room) ----")
+            (lva-line ask)
+            (lva-line "---- end of ask ----")
+
+            ; the native lane is opened once here rather than through lv-ask-r, so the ask's own
+            ; size in this lane's cache is read from the same lane that answers it
+            (let a-nat (if (eq (lva-want? sel "native") 1) (lva-native r ask) ""))
+            (let a-crs (if (eq (lva-want? sel "cross") 1)
+                (lva-weigh r (lv-cross-lane) "crossing" "the named membrane, base weights, no adapter" (lv-r-cross (lv-cross-ask-at "" ask (OWMaxNew)))) ""))
+            (let a-adp (if (eq (lva-want? sel "adapter") 1)
+                (lva-weigh r (str_concat (lv-cross-lane) " + perception adapter") (lv-route adap) (lv-route-why adap) (lv-ask-r adap ask (OWMaxNew))) ""))
+
+            (lva-line "")
+            (lva-say "stood" (pr-cat (list
+                "native=" (if (gt (str_len a-nat) 0) "yes" "no")
+                " crossing-base=" (if (gt (str_len a-crs) 0) "yes" "no")
+                " crossing-adapter=" (if (gt (str_len a-adp) 0) "yes" "no"))))))
     0)
