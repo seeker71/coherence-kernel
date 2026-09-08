@@ -1,0 +1,141 @@
+//////////////////////////////////////////////////////////////////////
+// micro-thought.bml — a compiled thing, addressed by its own shape.
+//
+// WHAT A THOUGHT IS. A big borrowed thing becomes many small owned ones one
+// kernel at a time, and the kernels repeat. The voice's graph is 2755 nodes
+// over 50 distinct operators (`observe/voice-onnx-run.fk` counts them off the
+// file); a hand that mints one compiled kernel per node mints 2755 of them and
+// mints them again in the next process. A THOUGHT is that kernel named by what
+// makes it different from its neighbours — the recipe and the arguments that
+// change the emitted source — and nothing else. Two nodes whose shapes agree
+// are one thought, so the census of nodes stops being the census of mints.
+//
+// WHY THE SHAPE AND NOT THE TEXT. Content-addressing the emitted SOURCE would
+// be exact, and it would also mean emitting the source before you can ask
+// whether you need it — the ask would cost the work it is trying to skip. The
+// shape row is short, is known before any emission, and for a deterministic
+// emitter it names the same thing. Measured on this host: interning a 427-byte
+// MSL text costs 0.7 us and interning a 15-byte shape row costs under 0.1 us,
+// while this body's own SHA-256 recipe costs 700 us on that text and 130 us on
+// that row — a digest is a thousand times the price of the identity the kernel
+// is already keeping.
+//
+// THE ADDRESS IS ALREADY NATIVE, AND THAT IS THE FIND. A record's key is
+// interned by the kernel (`fk_stri`) and `record_get` walks the interned key
+// ids in C. So the address door costs nothing to build: the shape row IS the
+// key, and the lookup is a native scan rather than a Form list walk. Measured
+// per lookup on this host, warm — 10 keys: 0.08 us against 0.33; 50 keys: 0.13
+// against 1.41; 401 keys: 0.60 against 10.6; 863 keys: 1.20 against 22.5. The
+// scan is linear and honest about it: it is the constant, not the exponent,
+// that this door buys, and past a few thousand keys the exponent will win and
+// this cell will owe a bucketed address. It does not owe one at 50.
+//
+// THE SEAL, AND WHY THE CHEAP ADDRESS NEEDS ONE. A shape row is trusted to be
+// INJECTIVE: everything the emitter reads appears in the row. Where it does
+// not, two different kernels land on one address and the second silently runs
+// the first — a plausible answer, which is the failure this body refuses. So a
+// minted thought also records the interned identity of the source it was minted
+// from, and `mt-agrees?` re-checks a found thought against a freshly emitted
+// source. The fast path never emits and never seals; the seal is what makes the
+// fast path provable, and `micro-thought-band` spends it.
+//
+// THE REFUSALS. `record_get` answers 0 for a key it does not hold, and 0 is
+// also the Metal carrier's refusal for a source that did not compile. Those are
+// two different absences wearing one number, so this cell never stores a
+// non-positive handle — a kernel that failed to compile is NOT remembered as a
+// thought, or every later ask would read its plausible 0 — and `mt-recall`
+// answers -1 for "no thought here" so a caller can tell an empty address from a
+// dead one. `mt-known?` is the door that says which.
+//
+// preludes: form/form-stdlib/core.fk
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormMicroThought {
+        field MtSep = "|";
+        field MtSealMark = "#src";
+        // -1: an address no thought sits at. It cannot collide with a stored
+        // handle, because a non-positive handle is never stored.
+        def MtAbsent() = sub(0, 1);
+
+        // ---- the address ----------------------------------------------------
+        // A shape row is the recipe's name and every argument that changes the
+        // emitted source, joined by one separator. Parts are the caller's: this
+        // cell cannot know what an emitter reads, and pretending to would be the
+        // injectivity failure it is guarding against.
+        def mt-join-go(parts, acc) = if eq(len(parts), 0) then acc else mt-join-go(tail(parts), if eq(str_len(acc), 0) then head(parts) else str_concat(acc, str_concat(MtSep(), head(parts))));
+        def mt-address(parts) = mt-join-go(parts, "");
+
+        // The identity the kernel already keeps for a text. Same bytes, same
+        // number, however the string was built (str_concat, a literal, a read).
+        def mt-identity(text) = intern_trivial_string(text);
+
+        // ---- the table ------------------------------------------------------
+        def mt-table() = record_new(0);
+        def mt-seal-key(addr) = str_concat(addr, MtSealMark());
+
+        // Is there a thought at this address? The one door that separates an
+        // empty address from a dead handle, and the whole of the fast path's ask.
+        def mt-known?(t, addr) = if eq(record_has(t, addr), 0) then 0 else 1;
+
+        // The handle, or MtAbsent. Never a plausible 0.
+        def mt-recall(t, addr) = if eq(mt-known?(t, addr), 0) then MtAbsent() else record_get(t, addr);
+
+        // The interned identity of the source this address was minted from.
+        def mt-seal(t, addr) = if eq(record_has(t, mt-seal-key(addr)), 0) then MtAbsent() else record_get(t, mt-seal-key(addr));
+
+        // ---- minting --------------------------------------------------------
+        // Compile, and remember ONLY a live handle. A refused compile leaves the
+        // address empty so the next ask tries again and hears the compiler's own
+        // words, rather than reading a remembered zero forever.
+        def mt-mint-keep(t, addr, src, h) = record_set(record_set(t, addr, h), mt-seal-key(addr), mt-identity(src));
+        def mt-mint(t, addr, src, kname) = mt-mint-take(t, addr, src, metal_pipeline(src, kname));
+        def mt-mint-take(t, addr, src, h) = if le(h, 0) then t else mt-mint-keep(t, addr, src, h);
+
+        // Find-or-mint over a source the caller has already emitted. The slow
+        // path; `mt-known?` first is the one that skips the emission.
+        def mt-think(t, addr, src, kname) = if eq(mt-known?(t, addr), 0) then mt-mint(t, addr, src, kname) else t;
+
+        // ---- the seal ------------------------------------------------------
+        // Does the thought at this address answer to this source? A row that is
+        // not injective fails here, and this is the only door that can catch it.
+        def mt-agrees?(t, addr, src) = if eq(mt-known?(t, addr), 0) then 0 else if eq(mt-seal(t, addr), mt-identity(src)) then 1 else 0;
+
+        // ---- the collapse ---------------------------------------------------
+        // How many thoughts does a list of shape rows actually need? This is the
+        // number a port is bought for: nodes in, mints out.
+        def mt-collapse-go(t, rows, n) = if eq(len(rows), 0) then n else mt-collapse-take(t, rows, n, head(rows));
+        def mt-collapse-take(t, rows, n, r) = if eq(mt-known?(t, r), 0) then mt-collapse-go(record_set(t, r, 1), tail(rows), add(n, 1)) else mt-collapse-go(t, tail(rows), n);
+        def mt-collapse(rows) = mt-collapse-go(mt-table(), rows, 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // The same address, pointed at rows the body already holds on disk.
+    //
+    // A registry line is `key|rest`; an index is that line's key interned as a
+    // record key with the whole line as its value. Building the index walks the
+    // rows once; every ask after that is the native scan. The walk this replaces
+    // is not a straw man — `observe/substrate-reclaim-run.fk` finds a content
+    // address's unique path by walking every entry for every entry, which is the
+    // same lookup performed n times inside a fold over n.
+    // ---------------------------------------------------------------------
+    class FormAddressIndex {
+        field AiSep = "|";
+        field AiMissing = "";
+
+        def ai-key(line) = ai-key-at(line, str_find(line, AiSep(), 0));
+        def ai-key-at(line, c) = if lt(c, 0) then line else substring(line, 0, c);
+
+        def ai-build-go(t, lines) = if eq(len(lines), 0) then t else ai-build-take(t, lines, head(lines));
+        def ai-build-take(t, lines, l) = if eq(str_len(l), 0) then ai-build-go(t, tail(lines)) else ai-build-go(record_set(t, ai-key(l), l), tail(lines));
+        def ai-build(lines) = ai-build-go(record_new(0), lines);
+
+        // A key the index does not hold answers the empty text, never another
+        // row's line.
+        def ai-at(t, key) = if eq(record_has(t, key), 0) then AiMissing() else record_get(t, key);
+        def ai-holds?(t, key) = if eq(record_has(t, key), 0) then 0 else 1;
+
+        // The walk this replaces, kept here so the two can be measured against
+        // each other on the same rows in the same process.
+        def ai-walk(lines, key) = if eq(len(lines), 0) then AiMissing() else if str_eq(ai-key(head(lines)), key) then head(lines) else ai-walk(tail(lines), key);
+    }
+}
