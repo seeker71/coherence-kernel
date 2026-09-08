@@ -1,0 +1,164 @@
+; lora-step-native-run.fk — one training step computed by this body, on this
+; Mac's own metal, against a real row the body itself perceived.
+;
+; The row comes from .form-lora-voice-native/perception.jsonl. It is tokenized
+; by the body's tokenizer, walked through llama-3.2-1B on the graphics chip by
+; dense-token-handle.fk, and the last token of the row becomes the target the
+; loss is measured against. Nothing here asks the crossing for a number.
+;
+; The adapter is a rank-one pair on the head's input. The forward already
+; leaves the normalized hidden state in one buffer and the base logits in
+; another; firing the output projection once more with the writer vector in
+; the hidden buffer gives u = W b. From those two vocabulary-wide readings
+; the exact loss, the exact gradient of the reader side, and the step follow
+; with no further dispatch.
+;
+; What this run prints is the loss before and after, the same weights on
+; disk read back, and the wall time each part took — so the cost of the six
+; hundred iterations that trained yesterday's adapter through the crossing
+; can be named rather than guessed.
+;
+; preflight-exec: forbidden
+; preludes: native/metal/dense-token-handle.fk form-stdlib/model-registry.bml form-stdlib/lora-step-live.bml
+(do
+    (defn lsn-blob () (mr-path (mr-find "llama32-1b")))
+    (defn lsn-rows-path () ".form-lora-voice-native/perception.jsonl")
+    (defn lsn-scale () 1.0)
+    (defn lsn-lr () 0.05)
+    (defn lsn-steps () 8)
+    (defn lsn-adapter () (fs-path-join (fs-temp-dir) "lora-step-native.safetensors"))
+
+    (defn lsn-fwd (st ids pos)
+        (if (le (len ids) 1) pos
+            (do (dth-forward (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5)
+                             (nth st 6) (nth st 7) (nth st 8) (head ids) pos)
+                (lsn-fwd st (tail ids) (add pos 1)))))
+    (defn lsn-last (xs) (if (eq (len xs) 1) (head xs) (lsn-last (tail xs))))
+    (defn lsn-f6 (x) (div (add (float_to_int (mul x 1000000.0)) 0.0) 1000000.0))
+
+    ; the descent: a moves, b is held, and every step size has to earn itself
+    ; against the loss it claims to lower. Answer: (a losses lrs)
+    (defn lsn-descend (z0 u a h t scale lr k loss0 losses lrs)
+        (if (le k 0) (list a (reverse losses) (reverse lrs))
+            (do (let step (lsl-try z0 u a h t scale lr loss0 24))
+                (lsn-descend z0 u (lsl-took-a step) h t scale lr (sub k 1)
+                             (lsl-took-loss step)
+                             (cons (lsl-took-loss step) losses)
+                             (cons (lsl-took-lr step) lrs)))))
+    (defn lsn-losses (xs acc)
+        (if (eq (len xs) 0) acc
+            (lsn-losses (tail xs) (str_concat acc (str_concat " " (int_to_str (float_to_int (mul (head xs) 1000.0))))))))
+    (defn lsn-lrs (xs acc)
+        (if (eq (len xs) 0) acc
+            (lsn-lrs (tail xs) (str_concat acc (str_concat " " (int_to_str (float_to_int (mul (head xs) 1000000.0))))))))
+
+    (print "; lora-step-native — one gradient step, this body, this metal")
+    (print (if (md-door-live?) "door=live" "door=DEAD"))
+
+    (let line (head (lsl-rows (lsn-rows-path))))
+    (let text (lsl-row-text line))
+    (print (str_concat "row_chars=" (int_to_str (str_len text))))
+
+    (let t0 (now_unix_ms))
+    (let st (dth-open (lsn-blob) 1024 (sub 0 1)))
+    (let t1 (now_unix_ms))
+    (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2))
+    (let projTv (nth st 8)) (let src (nth st 10))
+    (let dModel (nth geo 0)) (let vocab (nth geo 7))
+    (print (str_concat "open_ms=" (int_to_str (sub t1 t0))))
+    (print (str_concat "dModel=" (int_to_str dModel)))
+    (print (str_concat "vocab=" (int_to_str vocab)))
+
+    (let ids (dtk-encode src text))
+    (let target (lsn-last ids))
+    (print (str_concat "tokens=" (int_to_str (len ids))))
+    (print (str_concat "target_id=" (int_to_str target)))
+
+    (let t2 (now_unix_ms))
+    (let pos (lsn-fwd st ids 0))
+    (let t3 (now_unix_ms))
+    (print (str_concat "forward_ms=" (int_to_str (sub t3 t2))))
+
+    (let hraw (metal_buf_read (nth bs 1) 0 (mul dModel 4)))
+    (let z0raw (metal_buf_read (nth bs 11) 0 (mul vocab 4)))
+    (let h (lsl-vec hraw dModel))
+    (print (str_concat "hidden_read=" (int_to_str (len h))))
+
+    ; the same output projection, fired again with the hidden state written back:
+    ; if the logits come back where they were, the door is trustworthy for u
+    (let t4 (now_unix_ms))
+    (let wroteh (metal_buf_write (nth bs 1) 0 (lsl-bytes h)))
+    (dth-mv ps projTv (nth bs 1) (nth bs 11))
+    (let z0b (metal_buf_read (nth bs 11) 0 (mul vocab 4)))
+    (let t5 (now_unix_ms))
+    (print (str_concat "roundtrip_ms=" (int_to_str (sub t5 t4))))
+    (print (str_concat "roundtrip_logit0_delta_micro="
+        (int_to_str (float_to_int (mul 1000000.0 (abs (sub (lsl-at z0raw 0) (lsl-at z0b 0))))))))
+    (print (str_concat "roundtrip_logit_target_delta_micro="
+        (int_to_str (float_to_int (mul 1000000.0 (abs (sub (lsl-at z0raw target) (lsl-at z0b target))))))))
+
+    ; u = W b: the writer direction through the same dispatch
+    (let b (lsl-b text dModel))
+    (let t6 (now_unix_ms))
+    (let wroteb (metal_buf_write (nth bs 1) 0 (lsl-bytes b)))
+    (dth-mv ps projTv (nth bs 1) (nth bs 11))
+    (let uraw (metal_buf_read (nth bs 11) 0 (mul vocab 4)))
+    (let t7 (now_unix_ms))
+    (print (str_concat "u_dispatch_ms=" (int_to_str (sub t7 t6))))
+    (print (str_concat "u0_milli=" (int_to_str (float_to_int (mul 1000.0 (lsl-at uraw 0))))))
+
+    ; the step: a starts at zero, so the first loss is the base model's own
+    (let a0 (lsl-zeros dModel))
+    (let t8 (now_unix_ms))
+    (let r0 (lsl-head z0raw uraw 0.0 target vocab (lsn-scale)))
+    (let t9 (now_unix_ms))
+    (print (str_concat "head_fold_ms=" (int_to_str (sub t9 t8))))
+    (print (str_concat "loss0_milli=" (int_to_str (float_to_int (mul 1000.0 (lsl-loss r0))))))
+    (print (str_concat "p_target_micro=" (int_to_str (float_to_int (mul 1000000.0 (lsl-ptarget r0))))))
+    (print (str_concat "dLds_micro=" (int_to_str (float_to_int (mul 1000000.0 (lsl-dlds r0))))))
+
+    (let da (lsl-da r0 h))
+    (print (str_concat "dA_len=" (int_to_str (len da))))
+    (print (str_concat "dA_maxabs_micro=" (int_to_str (float_to_int (mul 1000000.0 (lbw-maxabs da))))))
+
+    ; the vocabulary decoded once: a descent asks for the loss many times
+    (let tDa (now_unix_ms))
+    (let z0l (lsl-vec z0raw vocab))
+    (let ul (lsl-vec uraw vocab))
+    (let tDb (now_unix_ms))
+    (print (str_concat "vocab_decode_ms=" (int_to_str (sub tDb tDa))))
+    (let tDc (now_unix_ms))
+    (let rl0 (lsl-headl z0l ul 0.0 target (lsn-scale)))
+    (let tDd (now_unix_ms))
+    (print (str_concat "list_fold_ms=" (int_to_str (sub tDd tDc))))
+    (print (str_concat "list_vs_byte_loss_nano="
+        (int_to_str (float_to_int (mul 1000000000.0 (abs (sub (lsl-loss rl0) (lsl-loss r0))))))))
+
+    (let tA (now_unix_ms))
+    (let run (lsn-descend z0l ul a0 h target (lsn-scale) (lsn-lr) (lsn-steps) (lsl-loss rl0) (empty) (empty)))
+    (let tB (now_unix_ms))
+    (let aN (head run))
+    (print (str_concat "descent_ms=" (int_to_str (sub tB tA))))
+    (print (str_concat "steps=" (int_to_str (lsn-steps))))
+    (print (str_concat "loss_milli_by_step=" (lsn-losses (nth run 1) "")))
+    (print (str_concat "lr_micro_by_step=" (lsn-lrs (nth run 2) "")))
+    (let rN (lsl-headl z0l ul (mul (lsn-scale) (lbw-dot aN h)) target (lsn-scale)))
+    (print (str_concat "lossN_milli=" (int_to_str (float_to_int (mul 1000.0 (lsl-loss rN))))))
+    (print (str_concat "p_target_after_micro=" (int_to_str (float_to_int (mul 1000000.0 (lsl-ptarget rN))))))
+    (print (str_concat "a_maxabs_micro=" (int_to_str (float_to_int (mul 1000000.0 (lbw-maxabs aN))))))
+    (print (str_concat "moved=" (if (lt (lsl-loss rN) (lsl-loss r0)) "loss-fell" "loss-did-not-fall")))
+
+    ; the moved weights as an artifact, read back
+    (let wrote (ln-write (lsn-adapter) (list (list "head.input.lora_a" (list 1 dModel) aN)
+                                             (list "head.input.lora_b" (list dModel 1) b))))
+    (let census (la-census (lsn-adapter)))
+    (let back (ln-floats (lsn-adapter) (la-header-len (lsn-adapter))
+                         (ln-tensor-begin (la-header (lsn-adapter)) "head.input.lora_a") dModel))
+    (print (str_concat "adapter_bytes=" (int_to_str (nth census 6))))
+    (print (str_concat "adapter_whole=" (int_to_str (nth census 7))))
+    (print (str_concat "adapter_readback_len=" (int_to_str (len back))))
+    (print (str_concat "adapter_readback_maxdiff_nano="
+        (int_to_str (float_to_int (mul 1000000000.0 (lbw-maxabs (lbw-sub back aN)))))))
+
+    (print (metal_status))
+    0)

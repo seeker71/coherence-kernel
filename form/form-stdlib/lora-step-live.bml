@@ -1,0 +1,134 @@
+//////////////////////////////////////////////////////////////////////
+// lora-step-live.bml — the reverse walk standing on real weights.
+//
+// lora-backward.bml holds the arithmetic. This cell is what it takes to
+// put that arithmetic against a model this Mac actually runs: reading
+// float32 out of a device buffer fast enough to walk a whole vocabulary,
+// and folding a 128256-wide softmax without ever building a list that
+// long.
+//
+// The adapter here sits on the head's input — the normalized hidden state
+// the output projection reads:
+//
+//     h' = h + scale * s * b      s = a . h
+//     z  = W h' = z0 + (scale * s) * u        u = W b
+//
+// Both z0 and u come from the SAME output matvec the forward already
+// emits: z0 is what the forward left in the logit buffer, and u is that
+// same dispatch fired once more with b written into the hidden buffer.
+// So the whole live step asks the graphics chip for one extra dispatch
+// and no new kernel.
+//
+// What that buys is an exact gradient for the reader side:
+//
+//     dL/dz = p - onehot(t)
+//     dL/ds = scale * ( sum_v p_v u_v  -  u_t )
+//     dL/da = dL/ds * h
+//
+// and the writer side b is held, because dL/db = scale*s*W^T(p-onehot)
+// wants the output matrix walked down its columns — a transposed matvec
+// no kernel in this tree emits. That is the seam, and it is named rather
+// than papered over: the reader learns, the writer waits.
+//
+// The float reader takes the exponent through math_pow rather than by
+// doubling one step at a time. Over a vocabulary that is the difference
+// between a walk and a wait.
+// preludes: form/form-stdlib/lora-backward.bml form/form-stdlib/lora-adapter.bml
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraStepRead {
+        def lsl-u32(b, i) = add(str_byte_at(b, i), add(mul(str_byte_at(b, add(i, 1)), 256), add(mul(str_byte_at(b, add(i, 2)), 65536), mul(str_byte_at(b, add(i, 3)), 16777216))));
+        def lsl-mag(e, m) = if eq(e, 0) then 0.0 else mul(add(1.0, div(add(m, 0.0), 8388608.0)), math_pow(2.0, add(sub(e, 127), 0.0)));
+        def lsl-f32-of(u) = lsl-signed(if ge(u, 2147483648) then 1 else 0, lsl-mag(mod(div(if ge(u, 2147483648) then sub(u, 2147483648) else u, 8388608), 256), mod(u, 8388608)));
+        def lsl-signed(neg, mag) = if eq(neg, 1) then sub(0.0, mag) else mag;
+        // the k'th float32 of a byte string
+        def lsl-at(b, k) = lsl-f32-of(lsl-u32(b, mul(k, 4)));
+        def lsl-inf?(b, k) = if eq(mod(div(mod(lsl-u32(b, mul(k, 4)), 2147483648), 8388608), 256), 255) then 1 else 0;
+        // a whole small vector as a Form list (the hidden state, never the vocabulary)
+        def lsl-vec-go(b, i, n, acc) = if ge(i, n) then reverse(acc) else lsl-vec-go(b, add(i, 1), n, cons(lsl-at(b, i), acc));
+        def lsl-vec(b, n) = if lt(str_len(b), mul(n, 4)) then nothing() else lsl-vec-go(b, 0, n, list());
+        // the same, back to bytes for the device
+        def lsl-u32-str(u) = la-cat(list(byte_to_str(mod(u, 256)), byte_to_str(mod(div(u, 256), 256)), byte_to_str(mod(div(u, 65536), 256)), byte_to_str(mod(div(u, 16777216), 256))));
+        def lsl-bytes-go(xs, acc) = if nil?(xs) then acc else lsl-bytes-go(tail(xs), str_concat(acc, lsl-u32-str(ln-f32-encode(head(xs)))));
+        def lsl-bytes(xs) = lsl-bytes-go(xs, "");
+    }
+    0;
+}
+section [form.bml] {
+    class FormLoraStepHead {
+        // z_v = z0_v + k u_v, walked over the raw bytes: no list the width of a vocabulary
+        def lsl-zmax-go(z0, u, k, i, n, m) = if ge(i, n) then m else lsl-zmax-go(z0, u, k, add(i, 1), n, lsl-bigger(m, add(lsl-at(z0, i), mul(k, lsl-at(u, i)))));
+        def lsl-bigger(a, b) = if gt(b, a) then b else a;
+        def lsl-zmax(z0, u, k, n) = lsl-zmax-go(z0, u, k, 1, n, add(lsl-at(z0, 0), mul(k, lsl-at(u, 0))));
+        // one walk returning both the partition function and the u-weighted mass:
+        // sum exp(z-m) and sum exp(z-m) u
+        def lsl-sums-go(z0, u, k, m, i, n, sz, su) = if ge(i, n) then list(sz, su) else lsl-sums-add(z0, u, k, m, i, n, sz, su, math_exp(sub(add(lsl-at(z0, i), mul(k, lsl-at(u, i))), m)), lsl-at(u, i));
+        def lsl-sums-add(z0, u, k, m, i, n, sz, su, e, uv) = lsl-sums-go(z0, u, k, m, add(i, 1), n, add(sz, e), add(su, mul(e, uv)));
+        def lsl-sums(z0, u, k, m, n) = lsl-sums-go(z0, u, k, m, 0, n, 0.0, 0.0);
+        // the reading a live step is made of:
+        //   (loss  dLds  p_target  n)
+        // loss = logsumexp(z) - z_t ; dLds = scale ( sum_v p_v u_v - u_t )
+        def lsl-head(z0, u, k, t, n, scale) = lsl-head-of(z0, u, k, t, n, scale, lsl-zmax(z0, u, k, n));
+        def lsl-head-of(z0, u, k, t, n, scale, m) = lsl-head-sums(z0, u, k, t, n, scale, m, lsl-sums(z0, u, k, m, n));
+        def lsl-head-sums(z0, u, k, t, n, scale, m, s) {
+            let sz = head(s);
+            let zt = add(lsl-at(z0, t), mul(k, lsl-at(u, t)));
+            let loss = sub(add(m, math_log(sz)), zt);
+            let pu = div(nth(s, 1), sz);
+            list(loss, mul(scale, sub(pu, lsl-at(u, t))), div(math_exp(sub(zt, m)), sz), n);
+        }
+        def lsl-loss(r) = head(r);
+        def lsl-dlds(r) = nth(r, 1);
+        def lsl-ptarget(r) = nth(r, 2);
+        // the reader side moves by the chain rule: dL/da = dL/ds * h
+        def lsl-da(r, h) = lbw-scale(h, lsl-dlds(r));
+        def lsl-step-a(a, r, h, lr) = lbw-sgd(a, lsl-da(r, h), lr);
+        // The same reading over two vocabulary-wide lists rather than raw bytes.
+        // A descent asks for the loss again after every step, and decoding
+        // 128256 float32 out of a byte string twice per ask is most of the
+        // wall time. Decoded once, the walk costs what the arithmetic costs.
+        def lsl-zmaxl-go(z0, u, k, m) = if nil?(z0) then m else lsl-zmaxl-go(tail(z0), tail(u), k, lsl-bigger(m, add(head(z0), mul(k, head(u)))));
+        def lsl-zmaxl(z0, u, k) = if nil?(z0) then nothing() else lsl-zmaxl-go(tail(z0), tail(u), k, add(head(z0), mul(k, head(u))));
+        def lsl-sumsl-go(z0, u, k, m, sz, su) = if nil?(z0) then list(sz, su) else lsl-sumsl-add(tail(z0), tail(u), k, m, sz, su, math_exp(sub(add(head(z0), mul(k, head(u))), m)), head(u));
+        def lsl-sumsl-add(z0, u, k, m, sz, su, e, uv) = lsl-sumsl-go(z0, u, k, m, add(sz, e), add(su, mul(e, uv)));
+        def lsl-headl(z0, u, k, t, scale) = lsl-headl-of(z0, u, k, t, scale, lsl-zmaxl(z0, u, k));
+        def lsl-headl-of(z0, u, k, t, scale, m) = if nothing?(m) then nothing() else lsl-headl-sums(z0, u, k, t, scale, m, lsl-sumsl-go(z0, u, k, m, 0.0, 0.0), nth(z0, t), nth(u, t));
+        def lsl-headl-sums(z0, u, k, t, scale, m, s, z0t, ut) {
+            let sz = head(s);
+            let zt = add(z0t, mul(k, ut));
+            list(sub(add(m, math_log(sz)), zt), mul(scale, sub(div(nth(s, 1), sz), ut)), div(math_exp(sub(zt, m)), sz), len(z0));
+        }
+        // one descent step with a step size that has to earn itself: the
+        // proposed move is halved until the loss actually falls, and a move
+        // that never falls hands back the weights it was given rather than a
+        // step taken on faith. Answer: (a loss lr)
+        def lsl-try(z0, u, a, h, t, scale, lr, loss0, tries) = lsl-try-of(z0, u, a, h, t, scale, lr, loss0, tries, lbw-sgd(a, lbw-scale(h, lsl-dlds(lsl-headl(z0, u, mul(scale, lbw-dot(a, h)), t, scale))), lr));
+        def lsl-try-of(z0, u, a, h, t, scale, lr, loss0, tries, a1) = lsl-try-read(z0, u, a, h, t, scale, lr, loss0, tries, a1, lsl-headl(z0, u, mul(scale, lbw-dot(a1, h)), t, scale));
+        def lsl-try-read(z0, u, a, h, t, scale, lr, loss0, tries, a1, r1) {
+            if lt(lsl-loss(r1), loss0) then list(a1, lsl-loss(r1), lr) else if le(tries, 0) then list(a, loss0, 0.0) else lsl-try(z0, u, a, h, t, scale, div(lr, 2.0), loss0, sub(tries, 1));
+        }
+        def lsl-took-a(step) = head(step);
+        def lsl-took-loss(step) = nth(step, 1);
+        def lsl-took-lr(step) = nth(step, 2);
+    }
+    0;
+}
+section [form.bml] {
+    class FormLoraStepRow {
+        // one row of the body's own perception, as the trainer writes it
+        def lsl-q() = byte_to_str(34);
+        def lsl-mark() = la-cat(list(lsl-q(), "content", lsl-q(), ":", lsl-q()));
+        def lsl-content(line, from) = lsl-content-at(line, str_find(line, lsl-mark(), from));
+        def lsl-content-at(line, at) = if lt(at, 0) then "" else lsl-content-cut(line, add(at, str_len(lsl-mark())));
+        def lsl-content-cut(line, s) = substring(line, s, str_find(line, lsl-q(), s));
+        def lsl-rows(path) = split-on(la-text(read_file(path)), byte_to_str(10));
+        def lsl-row-text(line) = la-cat(list(lsl-content(line, 0), " ", lsl-content(line, str_find(line, "assistant", 0))));
+        // the writer direction, minted from the body's own bytes: deterministic,
+        // small, and the same on every run of the same source
+        def lsl-b-value(s, i) = div(add(sub(mod(add(str_byte_at(s, mod(add(i, 97), str_len(s))), mul(i, 3)), 31), 15), 0.0), 64.0);
+        def lsl-b-go(s, i, n, acc) = if ge(i, n) then reverse(acc) else lsl-b-go(s, add(i, 1), n, cons(lsl-b-value(s, i), acc));
+        def lsl-b(s, n) = lsl-b-go(s, 0, n, list());
+        def lsl-zeros(n) = lbw-zeros(n, list());
+    }
+    0;
+}

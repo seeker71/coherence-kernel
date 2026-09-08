@@ -1,0 +1,76 @@
+; lora-step-live-band.fk — the live step's arithmetic held to the small
+; arithmetic that can be checked by hand. Everything the live run does over a
+; 128256-wide vocabulary is done here over a five-wide one, beside the plain
+; softmax cross-entropy of lora-backward.bml, and beside the body's own finite
+; differences. No graphics chip is touched.
+; Expected: 511
+;    1 the fast float32 reader agrees with the slow one, bit pattern for bit pattern
+;    2 the vocabulary fold gives the same loss and the same target mass as the plain softmax
+;    4 dL/ds matches the finite difference of the loss in the scalar the adapter moves
+;    8 a step that lowers the loss is taken, and the size it was taken at is reported
+;   16 a step that cannot lower the loss is refused: the weights come back unmoved, at size zero
+;   32 the writer direction is the same vector for the same text and a different one for different text
+;   64 the row reader pulls both contents out of one training line
+;  128 floats written to device bytes and read back come back unchanged
+;  256 an empty vocabulary answers nothing rather than a number
+; preludes: form/form-stdlib/lora-step-live.bml
+(do
+    (defn lsb-bit (ok bit) (if ok bit 0))
+    (defn lsb-close? (a b) (lt (abs (sub a b)) 0.000001))
+    (defn lsb-eqlist? (xs ys)
+        (if (eq (len xs) (len ys))
+            (if (nil? xs) 1 (if (eq (head xs) (head ys)) (lsb-eqlist? (tail xs) (tail ys)) 0))
+            0))
+
+    (defn lsb-h () (list 1.0 -2.0 0.5))
+    (defn lsb-z0 () (list 0.5 -1.25 2.0 0.125 -0.75))
+    (defn lsb-u () (list 0.25 1.5 -0.5 0.75 -1.0))
+    (defn lsb-flat () (list 0.375 0.375 0.375 0.375 0.375))
+    (defn lsb-t () 2)
+    (defn lsb-eps () 0.0001)
+
+    ; the same logits the fold walks, as a plain list, so the plain softmax can judge it
+    (defn lsb-z (k) (lbw-axpy (lsb-z0) (lbw-scale (lsb-u) k) 1.0))
+    (defn lsb-loss-at (k) (lbw-ce (lsb-z k) (lsb-t)))
+    (defn lsb-fd-k (k eps)
+        (div (sub (lsb-loss-at (add k eps)) (lsb-loss-at (sub k eps))) (mul 2.0 eps)))
+
+    (defn lsb-line () (head (lsl-rows ".form-lora-voice-native/perception.jsonl")))
+    (defn lsb-known () (list 1.0 -2.0 0.5 0.0 3.25 -0.0625))
+
+    (let r (lsl-headl (lsb-z0) (lsb-u) 0.375 (lsb-t) 1.0))
+    (let p (lbw-softmax (lsb-z 0.375)))
+    (let bytes (lsl-bytes (lsb-known)))
+    (let backfloats (lsl-vec bytes 6))
+
+    ; a step that can fall, and a step that cannot
+    (let a0 (list 0.0 0.0 0.0))
+    (let l0 (lsl-loss (lsl-headl (lsb-z0) (lsb-u) 0.0 (lsb-t) 1.0)))
+    (let took (lsl-try (lsb-z0) (lsb-u) a0 (lsb-h) (lsb-t) 1.0 0.5 l0 24))
+    (let flatl0 (lsl-loss (lsl-headl (lsb-z0) (lsb-flat) 0.0 (lsb-t) 1.0)))
+    (let stuck (lsl-try (lsb-z0) (lsb-flat) a0 (lsb-h) (lsb-t) 1.0 0.5 flatl0 24))
+
+    (sum (list
+        (lsb-bit (and (lsb-close? (lsl-at bytes 0) 1.0)
+                      (and (lsb-close? (lsl-at bytes 1) -2.0)
+                           (and (lsb-close? (lsl-at bytes 4) 3.25)
+                                (and (lsb-close? (lsl-at bytes 3) 0.0)
+                                     (lsb-close? (lsl-at bytes 5) (ln-f32-decode (ln-u32-le bytes 20))))))) 1)
+        (lsb-bit (and (lsb-close? (lsl-loss r) (lsb-loss-at 0.375))
+                      (lsb-close? (lsl-ptarget r) (nth p (lsb-t)))) 2)
+        (lsb-bit (lsb-close? (lsl-dlds r) (lsb-fd-k 0.375 (lsb-eps))) 4)
+        (lsb-bit (and (lt (lsl-took-loss took) l0)
+                      (and (gt (lsl-took-lr took) 0.0)
+                           (gt (lbw-maxabs (lsl-took-a took)) 0.0))) 8)
+        (lsb-bit (and (eq (lsl-took-lr stuck) 0.0)
+                      (and (lsb-eqlist? (lsl-took-a stuck) a0)
+                           (lsb-close? (lsl-took-loss stuck) flatl0))) 16)
+        (lsb-bit (and (lsb-eqlist? (lsl-b "form native" 8) (lsl-b "form native" 8))
+                      (not (lsb-eqlist? (lsl-b "form native" 8) (lsl-b "rented voice" 8)))) 32)
+        (lsb-bit (and (gt (str_len (lsl-content (lsb-line) 0)) 40)
+                      (and (gt (str_len (lsl-content (lsb-line) (str_find (lsb-line) "assistant" 0))) 40)
+                           (gt (str_len (lsl-row-text (lsb-line)))
+                               (str_len (lsl-content (lsb-line) 0))))) 64)
+        (lsb-bit (and (eq (str_len bytes) 24) (lsb-eqlist? backfloats (lsb-known))) 128)
+        (lsb-bit (and (nothing? (lsl-headl (empty) (empty) 0.0 0 1.0))
+                      (nothing? (lsl-vec bytes 99))) 256))))
