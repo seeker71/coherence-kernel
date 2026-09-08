@@ -11,7 +11,7 @@
 // decision has only one leg the body can witness, it is published as ONE
 // option so the corridor shows as a corridor.
 //
-// Eight points, and where each ledger comes from:
+// Seven points, and where each ledger comes from:
 //
 //   jit.crystallize   the live page's per-defn native flag (kernel_page_hot):
 //                     >0 crystallized (taken), 0 still walking (held), <0
@@ -27,7 +27,9 @@
 //                     routing row's capacity is every surprise attempted, the
 //                     choice row's capacity is the part that moved, and the
 //                     options are the movement states published in that row's
-//                     own channels.
+//                     own channels. surprise.last carries the epoch of the last
+//                     surprise that MOVED, so the wait on every offer still
+//                     resting is now minus that.
 //   organ.protocol-floor  the same frame's protocol row: the proven count is
 //                     its capacity, the floor's size still its purpose text.
 //   glass.frame       the live roster: every publisher in this space, and
@@ -42,13 +44,8 @@
 //                     and so put no choice at all. Fed through fcf-ledger-note,
 //                     tick by tick, so this ledger grows as the governor
 //                     decides and stands still when it never got to ask.
-//   route.category    bml-route-choice-runtime's real protocol candidates,
-//                     lifted through branch-choice-order so the option scale
-//                     is the body's own. Its ledger is empty and it reads
-//                     DARK: this lane has never been metered. That is the
-//                     finding, not a defect in this file.
 //
-// preludes: form/form-stdlib/core.fk form/form-stdlib/form-choice-flow.bml form/form-stdlib/form-glass-telemetry-membrane.bml form/form-stdlib/bml-route-choice-runtime.fk
+// preludes: form/form-stdlib/core.fk form/form-stdlib/form-choice-flow.bml form/form-stdlib/form-glass-telemetry-membrane.bml
 
 section [form.bml] {
     class FormChoiceFlowSources {
@@ -60,6 +57,7 @@ section [form.bml] {
         field FCFSGovernorPublisher = "resource.governor";
         field FCFSRouteSample = "surprise.routing";
         field FCFSChoiceSample = "choice.surprise-route";
+        field FCFSLastSample = "surprise.last";
         field FCFSProtocolSample = "choice.protocol-floor";
         field FCFSAdmissionSample = "governor.admission.metal";
 
@@ -181,13 +179,25 @@ section [form.bml] {
         // and answering "carried 0" there would publish 100% holding out of a
         // row that never came.
         def fcfs-capacity-read?(sample) = if eq(len(sample), 0) then 0 else fgtm-field-present?(fgtm-sample-capacity(sample));
-        def fcfs-surprise-ledger(routingSample, choiceSample) {
+        // The held offers here ARE clocked: surprise.last carries the epoch of
+        // the last surprise that moved, so how long the routing has been resting
+        // is now minus that. The point held nine of every ten offers with no
+        // clock on them -- a real gap-unclocked, and it stood only because every
+        // organ row stamped its write epoch "now" whatever it reported.
+        def fcfs-sample-wrote-at(sample, fallback) = if eq(len(sample), 0) then fallback else if eq(fgtm-field-present?(fgtm-sample-write-epoch(sample)), 1) then fgtm-field-value(fgtm-sample-write-epoch(sample)) else fallback;
+        def fcfs-rest-wait(lastSample, now) {
+            let at = fcfs-sample-wrote-at(lastSample, now);
+            if or(lt(at, 0), gt(at, now)) then 0 else sub(now, at);
+        }
+        def fcfs-surprise-ledger(routingSample, choiceSample, lastSample, now) {
             let attempts = fcfs-sample-capacity(routingSample, 0);
             let carried = fcfs-least(fcfs-sample-capacity(choiceSample, 0), attempts);
-            if eq(fcfs-capacity-read?(routingSample), 0) then fcf-ledger-empty() else if eq(fcfs-capacity-read?(choiceSample), 0) then fcf-ledger-empty() else fcf-ledger(attempts, carried, fcfs-floor0(sub(attempts, carried)), 0, 0, 0);
+            let resting = fcfs-floor0(sub(attempts, carried));
+            let wait = fcfs-rest-wait(lastSample, now);
+            if eq(fcfs-capacity-read?(routingSample), 0) then fcf-ledger-empty() else if eq(fcfs-capacity-read?(choiceSample), 0) then fcf-ledger-empty() else fcf-ledger(attempts, carried, resting, 0, mul(resting, wait), wait);
         }
-        def fcfs-surprise-point(routingSample, choiceSample) = fcf-point("organ.surprise-route", "where does this surprise move?", fcfs-surprise-options(choiceSample), fcfs-surprise-ledger(routingSample, choiceSample));
-        def fcfs-surprise-point-of(samples) = fcfs-surprise-point(fcfs-find-sample(samples, FCFSRouteSample()), fcfs-find-sample(samples, FCFSChoiceSample()));
+        def fcfs-surprise-point(routingSample, choiceSample, lastSample, now) = fcf-point("organ.surprise-route", "where does this surprise move?", fcfs-surprise-options(choiceSample), fcfs-surprise-ledger(routingSample, choiceSample, lastSample, now));
+        def fcfs-surprise-point-of(samples) = fcfs-surprise-point(fcfs-find-sample(samples, FCFSRouteSample()), fcfs-find-sample(samples, FCFSChoiceSample()), fcfs-find-sample(samples, FCFSLastSample()), now_unix_ms());
 
         // ---- 5. the protocol floor -------------------------------------------
         def fcfs-protocol-options() = list(
@@ -222,20 +232,44 @@ section [form.bml] {
             if not(str_eq(status, "current")) then status else if eq(fgtm-read-given-within?(reading, now, fcfs-frame-window()), 1) then "current" else "silent";
         }
         def fcfs-frame-status(root, publisher) = fcfs-frame-status-at(root, publisher, now_unix_ms());
+        // The wait on a held offer here is not a guess: a silent frame's own age
+        // IS how long that offer has stood. The point held half its offers with
+        // no clock on them, which is a gap-unclocked waiting to fire -- and the
+        // number was already being read one door away to decide "silent".
+        def fcfs-frame-reading-at(root, publisher, now) {
+            let reading = fgtm-read-current(root, publisher);
+            let status = fgtm-read-state-status(reading);
+            let age = fgtm-read-age(reading, now);
+            let given = if not(str_eq(status, "current")) then 0 else fgtm-read-given-within?(reading, now, fcfs-frame-window());
+            list(if not(str_eq(status, "current")) then status else if eq(given, 1) then "current" else "silent", if lt(age, 0) then 0 else age);
+        }
+        def fcfs-reading-status(r) = head(r);
+        def fcfs-reading-age(r) = nth(r, 1);
         def fcfs-frame-taken?(status) = if str_eq(status, "current") then 1 else 0;
         def fcfs-frame-held?(status) = if str_eq(status, "absent") then 1 else if str_eq(status, "silent") then 1 else 0;
         def fcfs-frame-declined?(status) = if eq(fcfs-frame-taken?(status), 1) then 0 else if eq(fcfs-frame-held?(status), 1) then 0 else 1;
-        def fcfs-frame-fold(statuses, taken, held, declined) = if eq(len(statuses), 0) then list(taken, held, declined) else fcfs-frame-fold(tail(statuses), add(taken, fcfs-frame-taken?(head(statuses))), add(held, fcfs-frame-held?(head(statuses))), add(declined, fcfs-frame-declined?(head(statuses))));
-        def fcfs-frame-statuses(root, publishers) = if eq(len(publishers), 0) then list() else cons(fcfs-frame-status(root, head(publishers)), fcfs-frame-statuses(root, tail(publishers)));
-        def fcfs-frame-option(publisher, status) = fcf-option(publisher, str_concat("take the ", str_concat(publisher, " frame")), 1, 12, 100, if eq(fcfs-frame-taken?(status), 1) then 100 else 0);
-        def fcfs-frame-options(publishers, statuses) = if eq(len(publishers), 0) then list() else cons(fcfs-frame-option(head(publishers), head(statuses)), fcfs-frame-options(tail(publishers), tail(statuses)));
-        def fcfs-frame-ledger(statuses) {
-            let f = fcfs-frame-fold(statuses, 0, 0, 0);
-            fcf-ledger(len(statuses), nth(f, 0), nth(f, 1), nth(f, 2), 0, 0);
+        // acc = list(taken, held, declined, waitOnHeld, firstHeldAge)
+        def fcfs-frame-step(r, acc) {
+            let held = fcfs-frame-held?(fcfs-reading-status(r));
+            list(add(nth(acc, 0), fcfs-frame-taken?(fcfs-reading-status(r))),
+                 add(nth(acc, 1), held),
+                 add(nth(acc, 2), fcfs-frame-declined?(fcfs-reading-status(r))),
+                 add(nth(acc, 3), mul(held, fcfs-reading-age(r))),
+                 if and(and(eq(held, 1), gt(fcfs-reading-age(r), 0)), lt(nth(acc, 4), 0)) then fcfs-reading-age(r) else nth(acc, 4));
         }
-        def fcfs-frame-point(publishers, statuses) = fcf-point("glass.frame", "which publisher's frame does the glass take this tick?", fcfs-frame-options(publishers, statuses), fcfs-frame-ledger(statuses));
+        def fcfs-frame-fold(readings, acc) = if eq(len(readings), 0) then acc else fcfs-frame-fold(tail(readings), fcfs-frame-step(head(readings), acc));
+        def fcfs-frame-readings(root, publishers) = if eq(len(publishers), 0) then list() else cons(fcfs-frame-reading-at(root, head(publishers), now_unix_ms()), fcfs-frame-readings(root, tail(publishers)));
+        // a status with no age is a reading with no clock, and reads as one
+        def fcfs-readings-of-statuses(ss) = if eq(len(ss), 0) then list() else cons(list(head(ss), 0), fcfs-readings-of-statuses(tail(ss)));
+        def fcfs-frame-option(publisher, r) = fcf-option(publisher, str_concat("take the ", str_concat(publisher, " frame")), 1, 12, 100, if eq(fcfs-frame-taken?(fcfs-reading-status(r)), 1) then 100 else 0);
+        def fcfs-frame-options(publishers, readings) = if eq(len(publishers), 0) then list() else cons(fcfs-frame-option(head(publishers), head(readings)), fcfs-frame-options(tail(publishers), tail(readings)));
+        def fcfs-frame-ledger(readings) {
+            let f = fcfs-frame-fold(readings, list(0, 0, 0, 0, -1));
+            fcf-ledger(len(readings), nth(f, 0), nth(f, 1), nth(f, 2), nth(f, 3), fcfs-floor0(nth(f, 4)));
+        }
+        def fcfs-frame-point(publishers, readings) = fcf-point("glass.frame", "which publisher's frame does the glass take this tick?", fcfs-frame-options(publishers, readings), fcfs-frame-ledger(readings));
         def fcfs-frame-point-live(root) = fcfs-frame-point-with(root, fgtm-roster-in-space(gift_roster_names(), root));
-        def fcfs-frame-point-with(root, publishers) = fcfs-frame-point(publishers, fcfs-frame-statuses(root, publishers));
+        def fcfs-frame-point-with(root, publishers) = fcfs-frame-point(publishers, fcfs-frame-readings(root, publishers));
 
         // ---- 7. the governor's admission -------------------------------------
         // The admission row's three lifecycles are already the body's three
@@ -254,23 +288,16 @@ section [form.bml] {
         def fcfs-admission-note(ledger, sample, waitMs) = fcf-ledger-note(ledger, fcfs-admission-outcome(sample), waitMs);
         def fcfs-admission-point-of(samples, ledger, waitMs) = fcfs-admission-point(fcfs-admission-note(ledger, fcfs-find-sample(samples, FCFSAdmissionSample()), waitMs));
 
-        // ---- 8. which route serves a category --------------------------------
-        // bml-route-choice-runtime already builds real candidates; branch-choice
-        // -order already carries the alignment-and-trust scale fcf-option takes.
-        // So a candidate becomes an option through the body's own two lanes and
-        // nothing is translated by hand. What is missing is the ledger: no
-        // counter anywhere records that this choice was ever put. It reads DARK,
-        // and asking for a counter is the whole value of publishing it.
-        def fcfs-branch-of-candidate(c) = bco-candidate(bml-source-choice-candidate-path(c), 0, 0, 0, 0, bml-source-choice-candidate-score(c), bml-source-choice-candidate-pressure(c));
-        def fcfs-option-of-branch(b) = fcf-option(bco-path(b), str_concat("route through ", bco-path(b)), add(bco-short-fail(b), bco-long-fail(b)), add(bco-short-success(b), bco-long-success(b)), bco-alignment(b), bco-trust(b));
-        def fcfs-options-of-branches(bs) = if eq(len(bs), 0) then list() else cons(fcfs-option-of-branch(head(bs)), fcfs-options-of-branches(tail(bs)));
-        def fcfs-branches-of-candidates(cs) = if eq(len(cs), 0) then list() else cons(fcfs-branch-of-candidate(head(cs)), fcfs-branches-of-candidates(tail(cs)));
-        def fcfs-branch-ledger(bs, acc) = if eq(len(bs), 0) then acc else fcfs-branch-ledger(tail(bs), fcf-ledger(add(fcf-ledger-offered(acc), fcfs-branch-offers(head(bs))), add(fcf-ledger-taken(acc), add(bco-short-success(head(bs)), bco-long-success(head(bs)))), 0, add(fcf-ledger-declined(acc), add(bco-short-fail(head(bs)), bco-long-fail(head(bs)))), 0, 0));
-        def fcfs-branch-offers(b) = add(add(bco-short-success(b), bco-short-fail(b)), add(bco-long-success(b), bco-long-fail(b)));
-        def fcfs-branch-point(id, question, bs) = fcf-point(id, question, fcfs-options-of-branches(bs), fcfs-branch-ledger(bs, fcf-ledger-empty()));
-        def fcfs-route-category-point(candidates) = fcfs-branch-point("route.category", "which route serves this category?", fcfs-branches-of-candidates(candidates));
-        def fcfs-route-category-candidates() = brcr-protocol-choice-candidates("form/form-stdlib/bml-source.fk", "form/form-stdlib/kernel-http.fk", 60, 80, 40, 50);
-        def fcfs-route-category-point-live() = fcfs-route-category-point(fcfs-route-category-candidates());
+        // A route.category point stood here until 2026-09-08 and read DARK on
+        // every tick since it landed. Its finding asked "reach it, or retire
+        // it", and the reading that answers it is this: brcr-protocol-choice-
+        // candidates had exactly ONE caller in the whole body -- this shard,
+        // calling it to display candidates for a choice no live path ever puts.
+        // A point watching a lane nothing reaches cannot learn anything, so it
+        // published a permanent dark row and a permanent finding every second.
+        // Retired, which is the half of its own ask that the body could answer;
+        // bml-route-choice-runtime.fk stands with its band, and if a live path
+        // ever routes a category the point comes back with a ledger.
 
         // ---- every point this body has, in one sequence ----------------------
         // The order is the order a decision actually travels: the kernel decides
@@ -285,8 +312,7 @@ section [form.bml] {
             fcfs-surprise-point-of(organSamples),
             fcfs-protocol-point-of(organSamples),
             fcfs-frame-point-live(root),
-            fcfs-admission-point-of(governorSamples, admissionLedger, waitMs),
-            fcfs-route-category-point-live());
+            fcfs-admission-point-of(governorSamples, admissionLedger, waitMs));
         def fcfs-point-ids(points) = if eq(len(points), 0) then list() else cons(fcf-point-id(head(points)), fcfs-point-ids(tail(points)));
         def fcfs-find-point(points, id) = if eq(len(points), 0) then list() else if str_eq(fcf-point-id(head(points)), id) then head(points) else fcfs-find-point(tail(points), id);
     }
