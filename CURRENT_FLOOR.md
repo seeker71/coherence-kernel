@@ -922,6 +922,21 @@ off its own thresholds, so `gap-corridor` on the glass meant low flow while
 the same word in the frame meant one option. The findings are the lane's now,
 read from the frame's finding rows. choice-view 32767, choice-flow 8191.
 
+**A verdict needs enough offers to be one, and only the asked are offered.** The
+glass published `wound-restricting` on the governor from a ledger of ONE offer —
+a share of one observation is 0 or 100 and neither is a rate — so a wound is a
+pattern over at least `FCFLeastOffers` offers now, and a point put fewer times
+carries its reading with no verdict. And every hot row counted as an offer of
+the crystallize choice, including recipes the kernel had never asked about: the
+seed puts that question at a 1024-call boundary (`FK_F64_HEAT`, where
+`fk_heat_pulse` and `fk_f64_pulse` fire), so a defn called nine times was being
+counted as a recipe holding out. Witnessed on a warm kernel: the point read
+offered 24 at 4% flow, diluted by twenty-two recipes nobody had asked; it reads
+offered 2 at 50% — of the recipes the JIT actually asked about, half
+crystallized. A one-second kernel now reads no crystallize reading at all
+rather than publishing a stall that was a cold start. choice-flow 16383,
+sources 32767.
+
 **Two findings closed rather than listed.** `route.category` read DARK on every
 tick since it landed and its own ask said "reach it, or retire it".
 `brcr-protocol-choice-candidates` had exactly one caller in the body — the
