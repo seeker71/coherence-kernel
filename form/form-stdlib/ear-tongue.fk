@@ -15,11 +15,31 @@
     (defn et-name-of (rows code) (if (eq (len rows) 0) "" (if (str_eq (head (head rows)) code) (nth (head rows) 1) (et-name-of (tail rows) code))))
     (defn et-names (code) (do (let n (et-name-of (et-name-rows) code)) (if (str_eq code "pt") "Brazilian Portuguese" (if (eq (str_len n) 0) "English" n))))
     (defn et-known? (code) (gt (str_len (et-name-of (et-name-rows) code)) 0))
-    (defn et-open () (dth-open (mr-path (mr-find "llama32-1b")) 256 (sub 0 1)))
+    ; the lane's own model, and any other the registry names — the tongues ride the 1B because
+    ; `dense-multi` can batch it, and the honest question of whether a tongue belongs on a bigger
+    ; model is asked by opening that model here rather than by argument (observe/ear-tongue-two-models.fk)
+    (defn et-open-of (name) (dth-open (mr-path (mr-find name)) 256 (sub 0 1)))
+    (defn et-open () (et-open-of "llama32-1b"))
     (defn et-prompt (text from to) (str_concat (et-names from) (str_concat ": " (str_concat text (str_concat (byte_to_str 10) (str_concat (et-names to) ": "))))))
     (defn et-cut1 (s stop) (do (let at (str_find s stop 0)) (if (lt at 0) s (substring s 0 at))))
     (defn et-cut (s) (trim (et-cut1 (et-cut1 s (byte_to_str 10)) "<|")))
     (defn et-text (t) (if (nothing? t) "" t))
+    ; the live lane's loop marker (" …") stays on the frame and off the prompt — the 1B answers a
+    ; marked line in English
+    (defn et-unmark (text) (if (and (gt (str_len text) 4) (and (eq (str_byte_at text (sub (str_len text) 4)) 32) (eq (str_byte_at text (sub (str_len text) 3)) 226))) (substring text 0 (sub (str_len text) 4)) text))
+    ; whisper marks what is not speech in brackets or parentheses — "[Music]", "(mouse clicking)":
+    ; such a line is shown in every tongue as it is and not offered through the lane. The mark has to
+    ; be the WHOLE line: `[INAUDIBLE] Like Jill, actually, will go over her. [INAUDIBLE]` opens and
+    ; closes with a bracket and carries a real sentence between them, and it stood untranslated in a
+    ; real room because the first and last bytes were all this asked. So the opening bracket's own
+    ; close must be the line's last byte — a close before the end means the line went on speaking
+    ; after the mark.
+    (defn et-close-at (text a) (str_find text (byte_to_str (if (eq a 91) 93 41)) 0))
+    (defn et-tag? (text0)
+        (do (let text (et-unmark text0))
+            (if (lt (str_len text) 2) 0
+                (do (let a (str_byte_at text 0))
+                    (if (or (eq a 91) (eq a 40)) (if (eq (et-close-at text a) (sub (str_len text) 1)) 1 0) 0)))))
     0)
 ; ---- the vocabulary rendered once to a file: line = "<piece>\t<id>\n" in id order, a leading line break ----
 (do
@@ -128,8 +148,9 @@
     0)
 ; ---- the lane: (st bos eos loaded dir ppath ipath n) — loaded is what the KV cache holds, position by position ----
 (do
-    (defn et-lane-open ()
-        (do (let st (et-open))
+    (defn et-lane-open () (et-lane-open-of "llama32-1b"))
+    (defn et-lane-open-of (name)
+        (do (let st (et-open-of name))
             (let src (nth st 10))
             (let built (et-build-index src))
             (list st (gmt-u32 src "tokenizer.ggml.bos_token_id") (gmt-u32 src "tokenizer.ggml.eos_token_id") (list) (et-rdir src) (et-ppath src) (et-ipath src) (gmt-vocab-n src))))
@@ -174,6 +195,33 @@
                     (let gen (et-gen-go st (nth lane 2) first (len ids) (if (gt maxnew room) room maxnew) (list)))
                     (list (append forced gen) (et-lane-with-loaded lane (append ids gen)))))))
     (defn et-take (xs n) (if (or (le n 0) (eq (len xs) 0)) (list) (cons (head xs) (et-take (tail xs) (sub n 1)))))
+    ; ---- a rendering that has begun to repeat itself ----
+    ; Greedy decoding falls into cycles, and the streaming commitment amplifies one: two consecutive
+    ; renderings of a growing line agree on the repetition, so the repetition is committed, forced on
+    ; the next round, and grown again — the commitment only grows, so a loop entered is a loop kept.
+    ; Witnessed in a real room, 2026-09-08: Persian said `... به عنوان someone` around thirty times
+    ; inside one closed line, and an earlier hour saw `BODY BODY BODY` and `k k k k`. A cap on new
+    ; ids bounds the rate at which a loop grows and never its total.
+    ; So a rendering is cut where its own cycle begins: a tail that is three copies of the same block
+    ; (a block of 1 to 8 ids, the shortest such block winning) is walked back to the block's first
+    ; copy, that copy is kept, and everything after it is dropped. Three copies rather than two
+    ; because a real sentence repeats a word or a pair — "no, no" — and does not say it three times.
+    ; The healthy case costs the scan alone: at most 24 walks over the tail and no answer.
+    (defn et-heads-eq (a b p) (if (le p 0) 1 (if (or (eq (len a) 0) (eq (len b) 0)) 0 (if (eq (head a) (head b)) (et-heads-eq (tail a) (tail b) (sub p 1)) 0))))
+    (defn et-cycle? (ids n p)
+        (if (lt n (mul 3 p)) 0
+            (if (and (eq (et-heads-eq (et-drop ids (sub n p)) (et-drop ids (sub n (mul 2 p))) p) 1)
+                     (eq (et-heads-eq (et-drop ids (sub n (mul 2 p))) (et-drop ids (sub n (mul 3 p))) p) 1)) 1 0)))
+    (defn et-loop-p (ids n p) (if (gt p 8) 0 (if (eq (et-cycle? ids n p) 1) p (et-loop-p ids n (add p 1)))))
+    ; the start of the first copy of the block that ends at `at`
+    (defn et-loop-back (ids p at)
+        (if (lt (sub at p) 0) at
+            (if (eq (et-heads-eq (et-drop ids (sub at p)) (et-drop ids at) p) 1) (et-loop-back ids p (sub at p)) at)))
+    (defn et-loopcut (ids)
+        (do (let n (len ids))
+            (let p (et-loop-p ids n 1))
+            (if (eq p 0) ids (et-take ids (add (et-loop-back ids p (sub n p)) p)))))
+    (defn et-looped? (ids) (if (lt (len (et-loopcut ids)) (len ids)) 1 0))
     ; local agreement: what two consecutive renderings of a growing source agree on is committed and
     ; forced on the next; both begin with what was committed before, so the commitment only grows.
     ; (committed prev) -> (ids agreed lane): ids is this rendering, agreed the prefix it shares with prev.
@@ -181,6 +229,16 @@
         (do (let r (et-say-ids lane text from to committed maxnew))
             (list (head r) (et-take (head r) (et-common (head r) prev 0)) (nth r 1))))
     (defn et-ids-text (lane ids) (et-cut (et-detok (nth lane 5) (nth lane 6) (nth lane 7) ids "")))
+    ; a rendering the cut has already reached has ENDED, whatever the model's own end ids say. The
+    ; prompt asks for one line, and `et-cut` takes the answer at the first line break or the file's
+    ; own `<|` marker — but a line break arrives inside a PIECE far more often than as one of the
+    ; four ids `et-ends?` knows, and a round that does not notice goes on writing a second paragraph
+    ; nobody will ever read. Measured on a real sentence, 2026-09-08: Indonesian's words were final
+    ; at 563 ms and its round ran to 898, so 208 ms of a 898 ms line — and the whole wait between the
+    ; last tongue's words and the frame — was spent generating what the cut then threw away.
+    (defn et-ids-cut? (lane ids)
+        (do (let raw (et-detok (nth lane 5) (nth lane 6) (nth lane 7) ids ""))
+            (if (or (ge (str_find raw (byte_to_str 10) 0) 0) (ge (str_find raw "<|" 0) 0)) 1 0)))
     0)
 ; ---- the batched lane: the tongues as M sequences in one decode step (dense-multi), each its own KV bank ----
 ; A round feeds every sequence its prompt (only past what its bank holds) and then its own answers, in

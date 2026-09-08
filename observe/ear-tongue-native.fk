@@ -47,49 +47,77 @@
     (defn tl-known? (l) (et-known? l))
     (defn tl-from (lang) (if (tl-known? lang) lang "en"))
     (defn tl-join (codes) (if (eq (len codes) 0) "" (if (eq (len (tail codes)) 0) (head codes) (str_concat (head codes) (str_concat " " (tl-join (tail codes)))))))
-    ; the live lane's loop marker (" …") stays on the frame and off the prompt — the 1B answers a marked line in English
-    (defn tl-unmark (text) (if (and (gt (str_len text) 4) (and (eq (str_byte_at text (sub (str_len text) 4)) 32) (eq (str_byte_at text (sub (str_len text) 3)) 226))) (substring text 0 (sub (str_len text) 4)) text))
-    ; ---- the renderings: one state a tongue, (code committed prev text source ended), under the
-    ; segment they belong to. `ended` says the last rendering stopped at its own end id and not at
-    ; the round's cap — that tongue has nothing left to say about that source.
-    (defn tl-fresh (codes) (if (eq (len codes) 0) (list) (cons (list (head codes) (list) (list) "" "" 0) (tl-fresh (tail codes)))))
-    (defn tl-ts-get (ts code) (if (eq (len ts) 0) (list code (list) (list) "" "" 0) (if (str_eq (head (head ts)) code) (head ts) (tl-ts-get (tail ts) code))))
+    ; ---- the renderings: one state a tongue, (code committed prev text source ended doneT), under
+    ; the segment they belong to. `ended` says the last rendering stopped at its own end id and not
+    ; at the round's cap — that tongue has nothing left to say about that source. `doneT` is the
+    ; clock at which that happened, 0 while the tongue is still forming.
+    (defn tl-fresh (codes) (if (eq (len codes) 0) (list) (cons (list (head codes) (list) (list) "" "" 0 0) (tl-fresh (tail codes)))))
+    (defn tl-ts-get (ts code) (if (eq (len ts) 0) (list code (list) (list) "" "" 0 0) (if (str_eq (head (head ts)) code) (head ts) (tl-ts-get (tail ts) code))))
     (defn tl-ts-put (ts s) (if (eq (len ts) 0) (list s) (if (str_eq (head (head ts)) (head s)) (cons s (tail ts)) (cons (head ts) (tl-ts-put (tail ts) s)))))
     (defn tl-ts-text (ts code) (nth (tl-ts-get ts code) 3))
     (defn tl-ts-fields (ts) (if (eq (len ts) 0) "" (str_concat (tl-kv (str_concat "t_" (head (head ts))) (nth (head ts) 3)) (tl-ts-fields (tail ts)))))
+    ; when each tongue arrived, as ms from the line's end. `saidms` is the frame's own clock and so
+    ; belongs to the SLOWEST tongue; this is each tongue's own. A tongue already complete when the
+    ; line closed says 0, a tongue still forming says nothing at all rather than a number.
+    (defn tl-d-of (s tend) (if (le (nth s 6) 0) "" (int_to_str (if (lt (nth s 6) tend) 0 (sub (nth s 6) tend)))))
+    (defn tl-ds-fields (ts tend)
+        (if (eq (len ts) 0) ""
+            (str_concat (do (let d (tl-d-of (head ts) tend)) (if (eq (str_len d) 0) "" (tl-kv (str_concat "d_" (head (head ts))) d)))
+                        (tl-ds-fields (tail ts) tend))))
     ; a frame of renderings: said when the line closed, saying while it grows; saidms from the line's last sample
     (defn tl-emit (kind heard lang tend codes ts)
-        (sbt-append (tl-spool) (tl-cat (list "<|ear:frame|>" (tl-nl) (tl-kv "t" (int_to_str (now_unix_ms))) (tl-kv "kind" kind) (tl-kv "heard" heard) (tl-kv "lang" lang) (tl-kv "nsp" "0") (tl-kv "heardms" "0") (tl-kv "tend" (int_to_str tend)) (tl-kv "en" (tl-ts-text ts "en")) (tl-kv "fa" (tl-ts-text ts "fa")) (tl-kv "pt" (tl-ts-text ts "pt")) (tl-kv "tongues" (tl-join codes)) (tl-ts-fields ts) (tl-kv "saidms" (int_to_str (sub (now_unix_ms) tend))) "<|/ear:frame|>" (tl-nl)))))
+        (sbt-append (tl-spool) (tl-cat (list "<|ear:frame|>" (tl-nl) (tl-kv "t" (int_to_str (now_unix_ms))) (tl-kv "kind" kind) (tl-kv "heard" heard) (tl-kv "lang" lang) (tl-kv "nsp" "0") (tl-kv "heardms" "0") (tl-kv "tend" (int_to_str tend)) (tl-kv "en" (tl-ts-text ts "en")) (tl-kv "fa" (tl-ts-text ts "fa")) (tl-kv "pt" (tl-ts-text ts "pt")) (tl-kv "tongues" (tl-join codes)) (tl-ts-fields ts) (tl-ds-fields ts tend) (tl-kv "saidms" (int_to_str (sub (now_unix_ms) tend))) "<|/ear:frame|>" (tl-nl)))))
     ; what a tongue forces this round: what was committed, or the whole previous rendering when the source
     ; is the one it already rendered (a closed line paying only what the live cap left)
     (defn tl-forced (s text) (if (str_eq text (nth s 4)) (nth s 2) (nth s 1)))
     ; ---- the serial path: one tongue over the line as it stands: (lane ts changed). The heard tongue is its
     ; own text; a source already rendered costs nothing while the line grows. ----
+    ; the clock a tongue's rendering stopped at: kept while it is still the same source, taken now
+    ; when this is the round that ended it, and 0 while it is still forming
+    (defn tl-done-t (held ended) (if (and (eq ended 1) (le held 0)) (now_unix_ms) held))
+    (defn tl-held (s text) (if (str_eq text (nth s 4)) (nth s 6) 0))
     (defn tl-step (lane ts code lang text maxnew final)
         (do (let s (tl-ts-get ts code))
             (if (str_eq code lang)
-                (list lane (tl-ts-put ts (list code (list) (list) text text 1)) (if (str_eq text (nth s 3)) 0 1))
+                (list lane (tl-ts-put ts (list code (list) (list) text text 1 (tl-done-t (tl-held s text) 1))) (if (str_eq text (nth s 3)) 0 1))
                 (if (and (str_eq text (nth s 4)) (eq final 0)) (list lane ts 0)
                     (do (let forced (tl-forced s text))
-                        (let r (et-say-step lane (tl-unmark text) (tl-from lang) code forced (nth s 2) maxnew))
-                        (let txt (et-ids-text (nth r 2) (head r)))
+                        (let r0 (et-say-step lane (et-unmark text) (tl-from lang) code forced (nth s 2) maxnew))
+                        ; a rendering that has begun to repeat itself is cut at its own cycle, and a
+                        ; tongue so cut has nothing more to say about this source
+                        (let ids (et-loopcut (head r0)))
+                        (let looped (if (lt (len ids) (len (head r0))) 1 0))
+                        (let txt (et-ids-text (nth r0 2) ids))
                         ; fewer new ids than the cap allowed means the lane stopped at an end id
-                        (let ended (if (lt (sub (len (head r)) (len forced)) maxnew) 1 0))
+                        (let ended (if (or (eq looped 1) (lt (sub (len (head r0)) (len forced)) maxnew)) 1 0))
                         ; a source already rendered does not commit again — see tm-agree
-                        (let commit (if (str_eq text (nth s 4)) (nth s 1) (nth r 1)))
-                        (list (nth r 2) (tl-ts-put ts (list code commit (head r) txt text ended)) (if (str_eq txt (nth s 3)) 0 1)))))))
+                        (let commit (if (str_eq text (nth s 4)) (nth s 1) (et-take ids (et-common ids (nth r0 1) 0))))
+                        (list (nth r0 2) (tl-ts-put ts (list code commit ids txt text ended (tl-done-t (tl-held s text) ended))) (if (str_eq txt (nth s 3)) 0 1)))))))
     ; ---- the batched path: every tongue in one round, each its own sequence; the heard tongue sits out ----
     (defn tm-idss (ml ts codes lang text)
         (if (eq (len codes) 0) (list)
-            (cons (if (str_eq (head codes) lang) (list) (append (et-encode (nth ml 4) (nth ml 1) (et-prompt (tl-unmark text) (tl-from lang) (head codes))) (tl-forced (tl-ts-get ts (head codes)) text)))
+            (cons (if (str_eq (head codes) lang) (list) (append (et-encode (nth ml 4) (nth ml 1) (et-prompt (et-unmark text) (tl-from lang) (head codes))) (tl-forced (tl-ts-get ts (head codes)) text)))
                   (tm-idss ml ts (tail codes) lang text))))
     (defn tm-forceds (ts codes text) (if (eq (len codes) 0) (list) (cons (tl-forced (tl-ts-get ts (head codes)) text) (tm-forceds ts (tail codes) text))))
-    ; the renderings as they stand: the heard tongue its text, the others forced ++ generated; (ts changed)
-    (defn tm-texts (ml ts codes lang text forceds gens changed)
-        (if (eq (len codes) 0) (list ts changed)
+    ; the renderings as they stand: the heard tongue its text, the others forced ++ generated, each
+    ; cut at its own cycle; (ts changed). A tongue that reached its end id — or was cut — carries the
+    ; clock it did so, so a frame says not only what every tongue holds but when each of them
+    ; arrived. The frame is due when a rendering changed OR when a tongue newly arrived, so a tongue
+    ; that finishes without adding a word still reaches the glass at the chunk it finished in.
+    ; A tongue is done three ways, and only the first was ever read: the model's own end id, a
+    ; rendering cut at its own cycle, and a rendering the line-cut has already reached. All three
+    ; stamp the tongue's arrival, and a round every tongue is done with ends at that chunk instead
+    ; of running on for a sequence that will add nothing a reader ever sees.
+    (defn tm-done? (ml heardt ids forceds gens end) (if (eq heardt 1) 1 (if (lt (len ids) (add (len forceds) (len gens))) 1 (if (eq end 1) 1 (et-ids-cut? ml ids)))))
+    (defn tm-texts (ml ts codes lang text forceds gens ends changed alldone)
+        (if (eq (len codes) 0) (list ts changed alldone)
             (do (let s (tl-ts-get ts (head codes)))
-                (let txt (if (str_eq (head codes) lang) text (et-ids-text ml (append (head forceds) (head gens)))))
-                (tm-texts ml (tl-ts-put ts (list (head codes) (nth s 1) (nth s 2) txt (nth s 4) (nth s 5))) (tail codes) lang text (tail forceds) (tail gens) (if (str_eq txt (nth s 3)) changed 1)))))
+                (let heardt (if (str_eq (head codes) lang) 1 0))
+                (let ids (if (eq heardt 1) (list) (et-loopcut (append (head forceds) (head gens)))))
+                (let txt (if (eq heardt 1) text (et-ids-text ml ids)))
+                (let e (tm-done? ml heardt ids (head forceds) (head gens) (head ends)))
+                (let d (tl-done-t (nth s 6) e))
+                (tm-texts ml (tl-ts-put ts (list (head codes) (nth s 1) (nth s 2) txt (nth s 4) e d)) (tail codes) lang text (tail forceds) (tail gens) (tail ends) (if (and (str_eq txt (nth s 3)) (eq d (nth s 6))) changed 1) (if (eq e 1) alldone 0)))))
     ; the round's end: local agreement per tongue — committed is what this rendering shares with the
     ; previous — and the round's own word on whether that tongue reached its end id.
     ;
@@ -103,10 +131,12 @@
     (defn tm-agree (ml ts codes lang text forceds gens ends)
         (if (eq (len codes) 0) ts
             (do (let s (tl-ts-get ts (head codes)))
-                (let ids (append (head forceds) (head gens)))
+                (let ids (et-loopcut (append (head forceds) (head gens))))
                 (let same (str_eq text (nth s 4)))
-                (let commit (if same (nth s 1) (et-take ids (et-common ids (nth s 2) 0))))
-                (tm-agree ml (tl-ts-put ts (if (str_eq (head codes) lang) (list (head codes) (list) (list) text text 1) (list (head codes) commit ids (nth s 3) text (head ends)))) (tail codes) lang text (tail forceds) (tail gens) (tail ends)))))
+                ; the commitment never reaches past the cut: a cycle committed is a cycle forced
+                (let commit (if same (et-take (nth s 1) (et-common (nth s 1) ids 0)) (et-take ids (et-common ids (nth s 2) 0))))
+                (let e (tm-done? ml (if (str_eq (head codes) lang) 1 0) ids (head forceds) (head gens) (head ends)))
+                (tm-agree ml (tl-ts-put ts (if (str_eq (head codes) lang) (list (head codes) (list) (list) text text 1 (nth s 6)) (list (head codes) commit ids (nth s 3) text e (nth s 6)))) (tail codes) lang text (tail forceds) (tail gens) (tail ends)))))
     ; the round in chunks, a saying frame whenever a rendering changed: (ml ts)
     ; A live round is abandoned the chunk after the line it renders has closed: the closed line is
     ; the one the room is waiting for, and a rendering of the live text is worth nothing once the
@@ -115,13 +145,22 @@
     (defn tm-closed-waits? (mark) (if (lt mark 0) 0 (if (eq (head (tl-peek mark)) 2) 1 0)))
     (defn tm-round-go (ml ts codes lang text forceds seqs s maxnew tend mark)
         (do (let r (et-mround-go ml seqs s (tl-chunk) maxnew))
-            (let tx (tm-texts ml ts codes lang text forceds (et-mgens (head r)) 0))
+            (let tx (tm-texts ml ts codes lang text forceds (et-mgens (head r)) (et-mends (head r)) 0 1))
             (let e (if (eq (nth tx 1) 1) (tl-emit "saying" text lang tend codes (head tx)) 0))
-            (if (or (eq (nth r 2) 1) (eq (tm-closed-waits? mark) 1))
+            ; the round ends at the chunk every tongue is done in — the frame no longer waits on a
+            ; sequence whose remaining tokens the cut will discard
+            (if (or (eq (nth tx 2) 1) (or (eq (nth r 2) 1) (eq (tm-closed-waits? mark) 1)))
                 (list (et-mround-close ml (head r) (nth r 1)) (tm-agree ml (head tx) codes lang text forceds (et-mgens (head r)) (et-mends (head r))))
                 (tm-round-go ml (head tx) codes lang text forceds (head r) (nth r 1) maxnew tend mark))))
+    ; a round's arrivals belong to the source it renders: a tongue whose stamp was taken against an
+    ; earlier text starts this round unarrived, and one still rendering the same text keeps the clock
+    ; it already reached, so a chunk never re-stamps what already landed
+    (defn tm-reset (ts codes text)
+        (if (eq (len codes) 0) ts
+            (do (let s (tl-ts-get ts (head codes)))
+                (tm-reset (if (str_eq text (nth s 4)) ts (tl-ts-put ts (list (head codes) (nth s 1) (nth s 2) (nth s 3) (nth s 4) (nth s 5) 0))) (tail codes) text))))
     (defn tm-round (ml ts codes lang text maxnew tend mark)
-        (tm-round-go ml ts codes lang text (tm-forceds ts codes text) (et-mround-open ml (tm-idss ml ts codes lang text)) 0 maxnew tend mark))
+        (tm-round-go ml (tm-reset ts codes text) codes lang text (tm-forceds ts codes text) (et-mround-open ml (tm-idss ml ts codes lang text)) 0 maxnew tend mark))
     ; ---- the segment lines: "live\t<seg>\t<tend>\t<lang>\t<text>" while a line grows, "<tend>\t<lang>\t<text>" when it closed ----
     (defn tl-live? (line) (and (gt (str_len line) 5) (and (eq (str_byte_at line 0) 108) (and (eq (str_byte_at line 1) 105) (eq (str_byte_at line 4) 9)))))
     (defn tl-cols (line i acc) (do (let a (str_find line (byte_to_str 9) i)) (if (lt a 0) (reverse (cons (substring line i (str_len line)) acc)) (tl-cols line (add a 1) (cons (substring line i a) acc)))))
@@ -184,15 +223,14 @@
                         (tl-closed-go (tl-with lane (head s)) codes (nth s 1) tend lang text (tail queue)))))))
     ; the last line said, (lang text ts): the same line closed again lands its frame without paying
     (defn tl-same-said? (last lang text) (and (gt (len last) 0) (and (str_eq (head last) lang) (str_eq (nth last 1) text))))
-    ; whisper marks what is not speech in brackets or parentheses — "[Music]", "(mouse clicking)": such a line is
-    ; shown in every tongue as it is and not offered through the lane (the loop marker may follow the tag)
-    (defn tl-tag? (text0) (do (let text (tl-unmark text0)) (if (lt (str_len text) 2) 0 (do (let a (str_byte_at text 0)) (let z (str_byte_at text (sub (str_len text) 1))) (if (or (and (eq a 91) (eq z 93)) (and (eq a 40) (eq z 41))) 1 0)))))
-    (defn tl-tag-ts (codes text) (if (eq (len codes) 0) (list) (cons (list (head codes) (list) (list) text text 1) (tl-tag-ts (tail codes) text))))
+    ; a line that is only whisper's mark for what is not speech is shown as it is, never offered
+    ; through the lane: the rule and the room it was corrected in live in `et-tag?`
+    (defn tl-tag-ts (codes text) (if (eq (len codes) 0) (list) (cons (list (head codes) (list) (list) text text 1 (now_unix_ms)) (tl-tag-ts (tail codes) text))))
     ; the lines past the mark in order: a closed line is said (the live lines before it are behind it), the
     ; newest live line after the last closed one is cycled: (done lane seg ts mark last)
     (defn tl-lines (lane codes seg ts lines pend mark deadline last)
         (if (eq (len lines) 0)
-            (if (or (eq (len pend) 0) (eq (tl-tag? (nth pend 3)) 1)) (list 0 lane seg ts mark last)
+            (if (or (eq (len pend) 0) (eq (et-tag? (nth pend 3)) 1)) (list 0 lane seg ts mark last)
                 (do (let seg1 (head pend))
                     (let r (tl-cycle lane codes seg1 (if (eq seg1 seg) ts (tl-fresh codes)) pend mark codes 0 deadline))
                     (list 0 (head r) (nth r 1) (nth r 2) (nth r 3) last)))
@@ -203,7 +241,7 @@
                             (if (tl-same-said? last (nth c 1) (nth c 2))
                                 (do (let e (tl-emit "said" (nth c 2) (nth c 1) (head c) codes (nth last 2)))
                                     (tl-lines lane codes (sub 0 1) (tl-fresh codes) (tail lines) (list) mark deadline last))
-                                (if (eq (tl-tag? (nth c 2)) 1)
+                                (if (eq (et-tag? (nth c 2)) 1)
                                     (do (let tts (tl-tag-ts codes (nth c 2)))
                                         (let e (tl-emit "said" (nth c 2) (nth c 1) (head c) codes tts))
                                         (tl-lines lane codes (sub 0 1) (tl-fresh codes) (tail lines) (list) mark deadline (list (nth c 1) (nth c 2) tts)))

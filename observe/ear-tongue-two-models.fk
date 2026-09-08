@@ -1,0 +1,56 @@
+; ear-tongue-two-models.fk — should the tongues be split across two models by tongue?
+;
+; The tongue lane rides the 1B because `dense-multi` can batch it: M sequences in one pass over the
+; weights, so eight tongues cost what one costs. `dense-multi` REFUSES the 3B at open — "a layer
+; outside the fused block's radius" — so a tongue moved to the 3B leaves the batch and is said one
+; token at a time. That is the whole trade, and it has two halves that must be measured together:
+; what the bigger model SAYS, and what it costs to say it.
+;
+; This asks both models the same tongues on the same lines in ONE process, warm, and prints the
+; words beside the milliseconds — because the question is not "is the 3B slower" (it is) but
+; "is what the 1B says in this tongue worth keeping at all". Persian is where the doubt lives:
+; a real room, 2026-09-08, had the 1B answer `شما به طور کلی یک corpo است ... observatory ... observes`
+; and, on another line, the English sentence back verbatim.
+;
+; stdin: one line per sentence to try (blank line or EOF ends the list; nothing -> three real lines
+; the room actually produced). Nothing is written.
+; preludes: form/form-stdlib/ear-tongue.fk
+(do
+    (defn e2-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (e2-cat (tail xs)))))
+    (defn e2-pad (s n) (if (ge (str_len s) n) s (e2-pad (str_concat s " ") n)))
+    (defn e2-held ()
+        (list "You have basically, you know, a body that observes the glass and the water and the ice."
+              "Water and ice and gas."
+              "The body observed the glass, water and ice and gas."))
+    (defn e2-read (acc)
+        (do (let l (read_line))
+            (if (nothing? l) (reverse acc)
+                (do (let t (trim l)) (if (eq (str_len t) 0) (reverse acc) (e2-read (cons t acc)))))))
+    (defn e2-lines-of (xs) (if (eq (len xs) 0) (e2-held) xs))
+    ; one tongue on one model: the words and what they cost, from a cache already warm
+    (defn e2-one (lane name code text maxnew)
+        (do (let t0 (now_unix_ms))
+            (let r (et-say lane text "en" code maxnew))
+            (print_str (e2-cat (list "    " (e2-pad name 4) (e2-pad code 3) (e2-pad (str_concat (int_to_str (sub (now_unix_ms) t0)) " ms") 9) (head r))))
+            (nth r 1)))
+    (defn e2-codes (lane name codes text maxnew)
+        (if (eq (len codes) 0) lane (e2-codes (e2-one lane name (head codes) text maxnew) name (tail codes) text maxnew)))
+    (defn e2-lines (lane name lines codes maxnew)
+        (if (eq (len lines) 0) lane
+            (do (let p (print_str (str_concat "  | " (head lines))))
+                (e2-lines (e2-codes lane name codes (head lines) maxnew) name (tail lines) codes maxnew))))
+    ; The per-token cost of each model belongs to `observe/floor-lens-run.fk`, which measures it
+    ; against the memory the weights actually occupy; this cell does not re-derive it. A first
+    ; attempt here to time a greedy step read 0 ms for both models, and 0 ms is not a fast step —
+    ; the helper threaded its accumulator where the lane belonged, so it timed nothing at all. The
+    ; reading is kept as a caution rather than the number: a lane handed a number instead of a lane
+    ; does not die here, it answers quickly.
+    (let lines (e2-lines-of (e2-read (list))))
+    (let codes (list "pt" "fa" "id"))
+    (let one (et-lane-open-of "llama32-1b"))
+    (let three (et-lane-open-of "llama32-3b"))
+    (print_str "1B — the model the batched lane rides")
+    (let a (e2-lines one "1B" lines codes 40))
+    (print_str "3B — the model dense-multi refuses at open")
+    (let b (e2-lines three "3B" lines codes 40))
+    1)
