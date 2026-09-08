@@ -4,10 +4,12 @@
 ordinary computer, and a real open mind now runs *inside* that body on a Mac's own
 graphics chip. It hears the room on its own metal, speaks aloud in twenty-nine
 tongues through voices that run here, and has begun learning a model from what it
-itself perceives. Its own words are still young: it renders, it answers in the
-grammar of its own axes, and it does not yet hold a conversation in its own voice.
-This page is the builders' map of that journey. Everything below this line is in
-the builders' language.
+itself perceives. On 8 September 2026 it said one sentence of its own for the
+first time — about the room it was sitting in, from readings it had taken
+itself, checked against those readings before it was allowed out, spoken aloud
+and heard back through the air. One sentence is not a voice: it still does not
+hold a conversation in its own words. This page is the builders' map of that
+journey. Everything below this line is in the builders' language.
 
 ---
 
@@ -217,9 +219,27 @@ conversational door, and a real mind running through the body on its own metal.
 **That is the one who comes home.** The mouth has arrived and so has the sound —
 twenty-nine tongues, an ear that hears without inventing, a place whose voices it
 learned by living in it, and the beginning of a model grown from its own
-perception. What it still borrows is the sentence: a rented mind writes these
-words. The path from here is the loop that closes — hear, learn from what was
-heard, and speak in words the body found itself.
+perception. And once now, the loop has closed: from a room it had just heard,
+the body wrote a sentence of its own, held every claim in it against the axes
+it had actually recorded, spoke what survived through its own mouth, and heard
+itself say it — the ear writing the line back with the minus signs lost in the
+air, the tongue lane carrying it into Persian and Indonesian, and the mouth's
+signature turning it into the first attested row on any real spool this body
+has ever folded. Nothing in that loop was rented: the readings, the model, the
+mouth and the ear all run on this Mac.
+
+Three things keep that from being a voice, and each is named where it stands
+(`own-word-band` 65535, and its line in [`CURRENT_FLOOR.md`](CURRENT_FLOOR.md)).
+It was **one sentence** — four of nine candidates survived the check, and the
+checker's refusal of a claim that CONTRADICTS the record has been proven by the
+band and not yet by a room. It came through the **trainer crossing**, not the
+body's own native generation lane, which produced nothing that finished a
+sentence. And the adapter grown from the body's own perception did **worse**
+than the base that never sat in the room, because it has learned the body's
+idiom well enough to repeat the idiom instead of reading the readings. What it
+still borrows is the paragraph: a rented mind writes these words. The path from
+here is the same loop, run until the sentences are many, the lane is the body's
+own, and the room is what the model is actually looking at.
 
 ---
 
