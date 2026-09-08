@@ -1,0 +1,88 @@
+// Native rank-one outcome fitting. This objective is activation-space squared
+// error, not next-token loss; independent repair evaluation gates serving.
+// preludes: form-stdlib/bml/form-cli-heal-native-io.bml form-stdlib/qwen-lora-train.fk
+section [form.bml] {
+ class FormCliHealNativeLearning {
+  field HealNativeLearningModel = "qwen38-q4";
+  def fhl-native-stage(phase) = print_str(fh-cat(list("form-peer stage route=learning phase=", phase, " status=value stamp-ms=", int_to_str(now_unix_ms()), "\n")));
+  def fhl-native-step(target, b, scale, rate) = if nil?(b) then list() else cons(sub(head(b), mul(rate, mul(scale, sub(mul(scale, head(b)), head(target))))), fhl-native-step(tail(target), tail(b), scale, rate));
+  def fhl-native-main() {
+   let job = read_line();
+   let route = read_line();
+   let row = read_line();
+   let doc = fhn-json(fhn-at(job, "snapshot.json"));
+   if not(fhn-owned(job, doc)) then "refused:learning-job" else if gt(file_size(fhn-at(job, "evaluation-only")), 0) then "evaluation-excluded" else fhl-native-prepare(job, route, row, fhn-string(doc, "root"));
+  }
+  def fhl-native-prepare(job, route, row, root) {
+   let home = fhn-at(root, ".form-heal/native-learning");
+   let made = fs_mkdir(home);
+   let lock = fhn-at(home, "update.lock");
+   if not(eq(host_dir_mkdir(lock), 1)) then "refused:native-learner-active" else fhl-native-held(job, route, row, home, lock);
+  }
+  def fhl-native-held(job, route, row, home, lock) {
+   let owner = write_file(fhn-at(lock, "owner.pid"), int_to_str(host_pid()));
+   let round = fhn-unique(home, "round-", 0);
+   let data = write_file(fhn-at(round, "outcome.json"), row);
+   let pointer = fhn-json(fhn-at(home, "candidate.json"));
+   let parent = fhn-string(pointer, "adapter");
+   let model = mr-path(mr-find(HealNativeLearningModel()));
+   let started = now_unix_ms();
+   let entered = fhl-native-stage("native-learning-base-seal-begin");
+   let baseHash = fhn-hash(model);
+   let sealed = and(fhn-valid-hash(baseHash), str_eq(baseHash, nth(qaf-seal-fields(model), 1)));
+   let ready = fhl-native-stage("native-learning-base-seal-ready");
+   let parentBound = if str_eq(parent, "") then 1 else and(str_eq(fhn-string(pointer, "model"), model), and(str_eq(fhn-string(pointer, "base_sha256"), baseHash), and(str_eq(fhn-hash(parent), fhn-string(pointer, "sha256")), qlh-whole?(parent))));
+   let result = if and(sealed, parentBound) then fhl-native-forward(job, route, round, home, model, baseHash, parent, started) else fhl-native-refused(job, round, "refused:base-or-parent-binding", started);
+   let cleared = fs_remove(fhn-at(lock, "owner.pid"));
+   let released = host_dir_rmdir(lock);
+   result;
+  }
+  def fhl-native-refused(job, round, state, started) {
+   let record = list(fhn-s("round", fs-path-basename(round)), fhn-s("state", state), fhn-n("started_unix_ms", started), fhn-n("ended_unix_ms", now_unix_ms()));
+   let saved = fhn-write-json(fhn-at(round, "result.json"), json-node-object(record));
+   let logged = fhn-json-line(fhn-at(job, "learning.jsonl"), record);
+   state;
+  }
+  def fhl-native-forward(job, route, round, home, model, baseHash, parent, started) {
+   let entered = fhl-native-stage("native-learning-forward-begin");
+   let hidden = qlt-local-hidden(model, 42);
+   let ready = fhl-native-stage("native-learning-forward-ready");
+   if not(eq(len(hidden), qlh-width())) then fhl-native-refused(job, round, "refused:native-hidden-width", started) else fhl-native-fit(job, route, round, home, model, baseHash, parent, started, hidden);
+  }
+  def fhl-native-fit(job, route, round, home, model, baseHash, parent, started, hidden) {
+   let a = if str_eq(parent, "") then qlt-scale(hidden, div(1.0, add(qlh-width(), 0.0))) else qlt-f32s(qlh-tensor-bytes(parent, qlh-a-name()), qlh-width());
+   let b = if str_eq(parent, "") then qlt-scale(hidden, 0.0) else qlt-f32s(qlh-tensor-bytes(parent, qlh-b-name()), qlh-width());
+   let target = qlh-values(fhn-read(fhn-at(round, "outcome.json")), 1);
+   let scale = qlt-dot(a, hidden);
+   if le(mul(scale, scale), 0.000000000001) then fhl-native-refused(job, round, "refused:degenerate-activation", started) else fhl-native-write(job, route, round, home, model, baseHash, parent, started, hidden, a, b, target, scale);
+  }
+  def fhl-native-write(job, route, round, home, model, baseHash, parent, started, hidden, a, b, target, scale) {
+   let entered = fhl-native-stage("native-learning-update-begin");
+   let before = qlt-loss(target, b, scale);
+   let fresh = fhl-native-step(target, b, scale, div(0.25, mul(scale, scale)));
+   let seed = if str_eq(parent, "") then fhn-at(round, "parent.safetensors") else parent;
+   let seedWritten = if str_eq(parent, "") then qlh-write-vectors(seed, a, b) else 0;
+   let parentHash = fhn-hash(seed);
+   let candidate = fhn-at(round, "adapter.safetensors");
+   let wrote = qlh-write-vectors(candidate, a, fresh);
+   let observed = qlt-f32s(qlh-tensor-bytes(candidate, qlh-b-name()), qlh-width());
+   let after = qlt-loss(target, observed, scale);
+   let candidateHash = fhn-hash(candidate);
+   let ready = fhl-native-stage("native-learning-update-ready");
+   let checking = fhl-native-stage("native-learning-base-recheck-begin");
+   let baseUnchanged = str_eq(fhn-hash(model), baseHash);
+   let checked = fhl-native-stage("native-learning-base-recheck-ready");
+   let changedA = not(str_eq(qlh-tensor-bytes(seed, qlh-a-name()), qlh-tensor-bytes(candidate, qlh-a-name())));
+   let changedB = not(str_eq(qlh-tensor-bytes(seed, qlh-b-name()), qlh-tensor-bytes(candidate, qlh-b-name())));
+   let valid = and(baseUnchanged, and(str_eq(fhn-hash(seed), parentHash), and(qlh-whole?(candidate), and(fhn-valid-hash(candidateHash), and(not(str_eq(candidateHash, parentHash)), lt(after, before))))));
+   let record = json-node-object(list(fhn-s("round", fs-path-basename(round)), fhn-s("route", route), fhn-s("job", job), fhn-s("state", if valid then "candidate-updated" else "refused:native-update-verification"), fhn-s("model", model), fhn-s("base_sha256", baseHash), fhn-n("base_weights_unchanged", baseUnchanged), fhn-s("parent", seed), fhn-s("parent_sha256", parentHash), fhn-s("adapter", candidate), fhn-s("sha256", candidateHash), fhn-s("training_sha256", fhn-hash(fhn-at(round, "outcome.json"))), fhn-s("objective", "fixed-probe-activation-space-outcome-embedding-squared-error"), fhn-s("serving_state", "candidate-only;independent-repair-evaluation-required"), fhn-n("forward_tokens", 1), fhn-n("probe_token_id", 42), fhn-n("training_examples", 1), fhn-n("objective_elements", qlh-width()), fhn-n("changed_tensor_count", add(changedA, changedB)), fhn-a("changed_tensors", append(if changedA then list(json-node-string(qlh-a-name())) else list(), if changedB then list(json-node-string(qlh-b-name())) else list())), fhn-n("loss_scale", 1000000000000), fhn-s("loss_before_scaled", float_to_str(mul(before, 1000000000000.0))), fhn-s("loss_after_scaled", float_to_str(mul(after, 1000000000000.0))), fhn-n("started_unix_ms", started), fhn-n("ended_unix_ms", now_unix_ms())));
+   let updated = if valid then fhn-write-json(fhn-at(home, "candidate.staged.json"), record) else 0;
+   let published = if valid then fs_rename(fhn-at(home, "candidate.staged.json"), fhn-at(home, "candidate.json")) else -1;
+   let observedRecord = if and(valid, not(eq(published, 0))) then fhn-put(record, "state", json-node-string("refused:native-pointer-publication")) else record;
+   let saved = fhn-write-json(fhn-at(round, "result.json"), observedRecord);
+   let logged = fhn-json-line(fhn-at(job, "learning.jsonl"), json-object-pairs(observedRecord));
+   fhn-string(observedRecord, "state");
+  }
+ }
+ 0;
+}

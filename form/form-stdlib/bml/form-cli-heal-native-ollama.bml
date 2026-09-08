@@ -1,0 +1,32 @@
+// Loopback HTTP bytes ride curl; Form admits models and reads each response.
+// API contract: https://docs.ollama.com/api/generate and /api/tags
+// preludes: form-stdlib/bml/form-cli-heal-native-process.bml
+section [form.bml] {
+ class FormCliHealNativeOllama {
+  def fho-local(row) = and(gt(fhn-number(row, "size"), 0), and(not(json-object-has?(row, "remote_host")), and(gt(str_len(fhn-string(row, "name")), 0), not(fh-has(fhn-string(row, "name"), "cloud")))));
+  def fho-names(rows) = if nil?(rows) then list() else if fho-local(head(rows)) then cons(fhn-string(head(rows), "name"), fho-names(tail(rows))) else fho-names(tail(rows));
+  def fho-curl(path) = list("/usr/bin/curl", "--silent", "--show-error", "--fail", "--no-buffer", "--noproxy", "*", "--connect-timeout", "5", str_concat("http://127.0.0.1:11434/api/", path));
+  def fho-inventory(job) {
+   let stage = str_concat("local-list-", int_to_str(now_unix_ms()));
+   let status = fhn-run(job, stage, 5, "root", "-", fho-curl("tags"));
+   let names = if str_eq(status, "0") then fho-names(json-array-elements(json-object-get(fhn-json(fhn-stage-path(job, stage, ".out")), "models"))) else list();
+   let saved = write_file(fhn-at(job, "local-models.txt"), fhn-lines(names));
+   names;
+  }
+  def fho-generate(job, stage, model, prompt) {
+   let names = fho-inventory(job);
+   if not(fhn-member(names, model)) then "refused:model-not-observed-local" else fho-request(job, stage, model, prompt);
+  }
+  def fho-request(job, stage, model, prompt) {
+   let body = fhn-stage-path(job, stage, ".http.json");
+   let wrote = fhn-write-json(body, json-node-object(list(fhn-s("model", model), fhn-s("prompt", fhn-read(prompt)), json-node-pair("stream", json-node-bool(true)), json-node-pair("options", json-node-object(list(fhn-n("temperature", 0)))))));
+   let partial = write_file(fhn-stage-path(job, stage, ".reply.partial"), "");
+   let cleared = write_file(fhn-stage-path(job, stage, ".generation-status"), "pending");
+   let mode = write_file(fhn-stage-path(job, stage, ".format"), "ollama-ndjson");
+   let status = fhn-run(job, stage, 0, "root", "-", append(fho-curl("generate"), list("--header", "Content-Type: application/json", "--data-binary", str_concat("@", body))));
+   let complete = str_eq(fhn-read(fhn-stage-path(job, stage, ".generation-status")), "done");
+   if and(str_eq(status, "0"), complete) then "0" else str_concat("incomplete:transport=", status);
+  }
+ }
+ 0;
+}

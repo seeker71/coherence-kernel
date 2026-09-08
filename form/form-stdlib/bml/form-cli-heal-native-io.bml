@@ -1,0 +1,136 @@
+// Form owns snapshot identity, admission and guarded replacement.
+// git/tar/cp carry filesystem operations; no interpreter owns repair meaning.
+// preludes: form-stdlib/bml/form-cli-heal-policy.bml form-stdlib/json.fk form-stdlib/qwen35-artifact-seal-reader.fk form-stdlib/spool-bell-transport.fk
+section [form.bml] {
+ class FormCliHealNativeIO {
+  def fhn-at(dir, leaf) = fh-cat(list(dir, "/", leaf));
+  def fhn-read(path) = if lt(file_size(path), 0) then "" else read_file(path);
+  def fhn-json(path) = parse-json(path, fhn-read(path));
+  def fhn-string(doc, key) = json-string-value(json-object-get(doc, key));
+  def fhn-number(doc, key) = json-int-value(json-object-get(doc, key));
+  def fhn-s(key, value) = json-node-pair(key, json-node-string(value));
+  def fhn-n(key, value) = json-node-pair(key, json-node-int(value));
+  def fhn-without(pairs, key) = if nil?(pairs) then list() else if str_eq(json-pair-key(head(pairs)), key) then fhn-without(tail(pairs), key) else cons(head(pairs), fhn-without(tail(pairs), key));
+  def fhn-put(doc, key, value) = json-node-object(append(fhn-without(json-object-pairs(doc), key), list(json-node-pair(key, value))));
+  def fhn-a(key, value) = json-node-pair(key, json-node-array(value));
+  def fhn-strings(xs) = if nil?(xs) then list() else cons(json-node-string(head(xs)), fhn-strings(tail(xs)));
+  def fhn-write-json(path, doc) = write_file(path, str_concat(json-emit(doc), "\n"));
+  def fhn-append(path, text) = if eq(sbt-append(path, text), str_len(text)) then "appended" else "refused:short-append";
+  def fhn-json-line(path, pairs) = fhn-append(path, str_concat(json-emit(json-node-object(pairs)), "\n"));
+  def fhn-command(argv) {
+   let pid = host_spawn_quiet(argv);
+   if nothing?(pid) then 127 else host_wait(pid);
+  }
+  def fhn-capture(argv) {
+   let out = host_capture(argv);
+   if nothing?(out) then "" else fh-trim(out);
+  }
+  def fhn-shell(path, source) {
+   let wrote = write_file(path, str_concat("umask 077\n", source));
+   if lt(wrote, 0) then 127 else fhn-command(list("/bin/sh", path));
+  }
+  def fhn-hash(path) = if lt(file_size(path), 0) then "absent" else qaf-string-hex(saj-file-digest-any-tail(path, file_size(path)));
+  def fhn-valid-hash(hash) = eq(str_len(hash), 64);
+  def fhn-parts-valid(parts) = if nil?(parts) then 1 else if or(str_eq(head(parts), ".."), or(str_eq(head(parts), ".git"), or(str_eq(head(parts), ".form-heal"), str_eq(head(parts), "")))) then 0 else fhn-parts-valid(tail(parts));
+  def fhn-relative(path) = and(gt(str_len(path), 0), and(not(eq(str_byte_at(path, 0), 47)), and(not(fh-has(path, "\n")), and(not(fh-has(path, "\r")), fhn-parts-valid(split-on(path, "/"))))));
+  def fhn-member(paths, path) = if nil?(paths) then 0 else if str_eq(head(paths), path) then 1 else fhn-member(tail(paths), path);
+  def fhn-clean-names(paths, seen) = if nil?(paths) then reverse(seen) else if or(str_eq(head(paths), ""), lt(file_size(head(paths)), 0)) then fhn-clean-names(tail(paths), seen) else fhn-clean-names(tail(paths), cons(head(paths), seen));
+  def fhn-add-name(paths, path) = if fhn-member(paths, path) then paths else append(paths, list(path));
+  def fhn-names-valid(paths, root) = if nil?(paths) then 1 else and(fhn-relative(head(paths)), and(not(fs_is_dir(fhn-at(root, head(paths)))), fhn-names-valid(tail(paths), root)));
+  def fhn-lines(paths) = if nil?(paths) then "" else fh-cat(list(head(paths), "\n", fhn-lines(tail(paths))));
+  def fhn-nuls(paths) = if nil?(paths) then "" else fh-cat(list(head(paths), byte_to_str(0), fhn-nuls(tail(paths))));
+  def fhn-unique(parent, prefix, attempt) {
+   let path = fhn-at(parent, fh-cat(list(prefix, int_to_str(host_pid()), "-", int_to_str(host_monotonic_ms()), "-", int_to_str(attempt))));
+   if ge(attempt, 32) then "" else if eq(host_dir_mkdir(path), 1) then fhn-private-dir(path) else fhn-unique(parent, prefix, add(attempt, 1));
+  }
+  def fhn-private-dir(path) {
+   let protected = fhn-command(list("/bin/chmod", "700", path));
+   if eq(protected, 0) then path else "";
+  }
+  def fhn-root() = fhn-capture(list("/bin/pwd", "-P"));
+  // Refuse managed symlinks, including ancestors, before reading through them.
+  def fhn-link-scan-script(root, names) = fh-cat(list("cd ", fh-quote(root), " || exit 1\nwhile IFS= read -r fh_item; do\n fh_probe=$fh_item\n while [ \"$fh_probe\" != . ]; do\n  [ ! -L \"$fh_probe\" ] || exit 1\n  case \"$fh_probe\" in */*) fh_probe=${fh_probe%/*};; *) fh_probe=.;; esac\n done\ndone < ", fh-quote(names), "\n"));
+  def fhn-no-links(job, root, names) = eq(fhn-shell(fhn-at(job, "links-check.sh"), fhn-link-scan-script(root, names)), 0);
+  def fhn-manifest(paths, root) = if nil?(paths) then list() else cons(fhn-s(head(paths), fhn-hash(fhn-at(root, head(paths)))), fhn-manifest(tail(paths), root));
+  def fhn-manifest-valid(pairs) = if nil?(pairs) then 1 else and(fhn-valid-hash(json-string-value(json-pair-value(head(pairs)))), fhn-manifest-valid(tail(pairs)));
+  def fhn-dirty(pairs, root, except) = if nil?(pairs) then "" else if and(not(str_eq(json-pair-key(head(pairs)), except)), not(str_eq(fhn-hash(fhn-at(root, json-pair-key(head(pairs)))), json-string-value(json-pair-value(head(pairs)))))) then json-pair-key(head(pairs)) else fhn-dirty(tail(pairs), root, except);
+  def fhn-owned(job, doc) = str_eq(fs-path-dirname(job), fhn-at(fhn-string(doc, "root"), ".form-heal"));
+  def fhn-prepare(target, band) {
+   let root = fhn-root();
+   let spool = fhn-at(root, ".form-heal");
+   let made = fs_mkdir(spool);
+   let job = fhn-unique(spool, "attempt-native-", 0);
+   if or(str_eq(job, ""), not(and(fhn-relative(target), fhn-relative(band)))) then "refused:invalid-relative-source" else if or(str_eq(target, band), or(fhn-member(split-on(target, "/"), "tests"), not(or(str_eq(fs-path-extension(target), ".fk"), str_eq(fs-path-extension(target), ".bml"))))) then "refused:production-source-and-separate-checker-required" else fhn-prepare-files(job, root, target, band);
+  }
+  def fhn-prepare-files(job, root, target, band) {
+   let namesPath = fhn-at(job, "names.nul");
+   let listed = fhn-shell(fhn-at(job, "inventory.sh"), fh-cat(list("git ls-files -z --cached --others --exclude-standard > ", fh-quote(namesPath), "\n")));
+   let names = fhn-add-name(fhn-add-name(fhn-add-name(fhn-clean-names(split-on(fhn-read(namesPath), byte_to_str(0)), list()), target), band), "fkwu");
+   let lines = write_file(fhn-at(job, "names.txt"), fhn-lines(names));
+   let nuls = write_file(namesPath, fhn-nuls(names));
+   if not(and(eq(listed, 0), and(fhn-names-valid(names, root), fhn-no-links(job, root, fhn-at(job, "names.txt"))))) then "refused:snapshot-inventory-or-symlink" else fhn-prepare-sealed(job, root, target, band, names);
+  }
+  def fhn-prepare-sealed(job, root, target, band, names) {
+   let manifest = fhn-manifest(names, root);
+   let work = fhn-at(job, "work");
+   let made = fs_mkdir(work);
+   let empty = fs_mkdir(fhn-at(job, "empty"));
+   let archive = fhn-command(list("/usr/bin/tar", "-c", "-f", fhn-at(job, "source.tar"), "-C", root, "--null", "-T", fhn-at(job, "names.nul")));
+   let copied = if eq(archive, 0) then fhn-command(list("/usr/bin/tar", "-x", "-p", "-f", fhn-at(job, "source.tar"), "-C", work)) else archive;
+   let doc = json-node-object(list(fhn-s("root", root), fhn-s("target", target), fhn-s("band", band), json-node-pair("manifest", json-node-object(manifest)), fhn-s("carrier", "native-form-v1")));
+   let saved = fhn-write-json(fhn-at(job, "snapshot.json"), doc);
+   let original = write_file(fhn-at(job, "original"), fhn-read(fhn-at(root, target)));
+   let checker = write_file(fhn-at(job, "checker"), fhn-read(fhn-at(root, band)));
+   let t = write_file(fhn-at(job, "target"), target);
+   let b = write_file(fhn-at(job, "band"), band);
+   let ledger = write_file(fhn-at(job, "attempts.tsv"), "");
+   if not(and(eq(copied, 0), fhn-manifest-valid(manifest))) then "refused:snapshot-copy-or-digest" else if not(str_eq(fhn-dirty(manifest, work, ""), "")) then "refused:snapshot-byte-mismatch" else job;
+  }
+  def fhn-guard(job) {
+   let doc = fhn-json(fhn-at(job, "snapshot.json"));
+   if not(fhn-owned(job, doc)) then "refused:session-outside-spool" else if not(fhn-no-links(job, fhn-at(job, "work"), fhn-at(job, "names.txt"))) then "changed:source-symlink" else fhn-guard-hashes(job, doc);
+  }
+  def fhn-guard-hashes(job, doc) {
+   let dirty = fhn-dirty(json-object-pairs(json-object-get(doc, "manifest")), fhn-at(job, "work"), fhn-string(doc, "target"));
+   if str_eq(dirty, "") then "clean" else str_concat("changed:", dirty);
+  }
+  def fhn-reset(job) {
+   let doc = fhn-json(fhn-at(job, "snapshot.json"));
+   let root = fhn-string(doc, "root");
+   if not(fhn-owned(job, doc)) then "refused:session-outside-spool" else if not(fhn-no-links(job, root, fhn-at(job, "names.txt"))) then "refused:live-source-symlink" else if not(str_eq(fhn-dirty(json-object-pairs(json-object-get(doc, "manifest")), root, ""), "")) then "refused:stale-input" else fhn-reset-copy(job, fhn-at(job, "work"));
+  }
+  def fhn-reset-copy(job, work) {
+   let removed = fhn-command(list("/bin/rm", "-rf", "--", work));
+   let made = fs_mkdir(work);
+   let copied = fhn-command(list("/usr/bin/tar", "-x", "-p", "-f", fhn-at(job, "source.tar"), "-C", work));
+   if and(eq(removed, 0), eq(copied, 0)) then "ready" else "refused:snapshot-reset";
+  }
+  def fhn-commit(job, proposal) {
+   let doc = fhn-json(fhn-at(job, "snapshot.json"));
+   let lock = fhn-at(fhn-at(fhn-string(doc, "root"), ".form-heal"), "commit.native-lock");
+   if not(fhn-owned(job, doc)) then "refused:session-outside-spool" else if not(eq(host_dir_mkdir(lock), 1)) then "refused:commit-lock-held" else fhn-commit-held(job, proposal, doc, lock);
+  }
+  def fhn-commit-held(job, proposal, doc, lock) {
+   let root = fhn-string(doc, "root");
+   let target = fhn-at(root, fhn-string(doc, "target"));
+   let candidate = fhn-at(fhn-at(job, "work"), fhn-string(doc, "target"));
+   let proposalNames = write_file(fhn-at(job, "proposal-name.txt"), str_concat(fs-path-basename(proposal), "\n"));
+   let offered = and(str_eq(fs-path-dirname(proposal), job), and(fhn-relative(fs-path-basename(proposal)), fhn-no-links(job, job, fhn-at(job, "proposal-name.txt"))));
+   let valid = and(offered, and(fhn-valid-hash(fhn-hash(proposal)), and(fhn-no-links(job, root, fhn-at(job, "names.txt")), and(str_eq(fhn-dirty(json-object-pairs(json-object-get(doc, "manifest")), root, ""), ""), and(str_eq(fhn-guard(job), "clean"), and(str_eq(fhn-hash(candidate), fhn-hash(proposal)), not(str_eq(fhn-hash(candidate), fhn-hash(fhn-at(job, "original"))))))))));
+   let result = if valid then fhn-commit-copy(job, candidate, target) else "refused:stale-or-mutated-input";
+   let released = host_dir_rmdir(lock);
+   result;
+  }
+  def fhn-commit-copy(job, candidate, target) {
+   let staged = str_concat(target, fh-cat(list(".heal-", int_to_str(host_pid()))));
+   let copied = fhn-command(list("/bin/cp", "-p", candidate, staged));
+   let moved = if eq(copied, 0) then fs_rename(staged, target) else -1;
+   if eq(moved, 0) then "applied" else "refused:atomic-source-replacement";
+  }
+  def fhn-finish(job) {
+   let doc = fhn-json(fhn-at(job, "snapshot.json"));
+   if not(fhn-owned(job, doc)) then "refused:session-outside-spool" else if eq(fhn-command(list("/bin/rm", "-rf", "--", fhn-at(job, "work"), fhn-at(job, "source.tar"))), 0) then "snapshot-released;evidence-retained" else "refused:snapshot-release";
+  }
+ }
+ 0;
+}

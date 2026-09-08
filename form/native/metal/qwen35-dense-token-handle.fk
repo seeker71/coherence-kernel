@@ -9,6 +9,7 @@
 ;
 ; preludes: native/metal/kat-token-handle.fk form-stdlib/qk-matmul-batch.fk native/metal/qwen35-linear-span-layout-contract.fk form-stdlib/bml/qwen38-open-observation.bml
 ; preludes: form-stdlib/declarative-attention-metal.bml
+; preludes: form-stdlib/bml/qwen38-embedding.bml
 
 (do
     ; Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
@@ -193,7 +194,7 @@
         (str_concat (q38-cachespan-msl "form_cache_span_f32")
         (str_concat (q38-attn-span-msl "form_gqa_span_f32")
                     (q38-gqa-tg-msl "form_gqa_decode_tg_f32")))))))
-    (defn q38-msl ()
+    (defn q38-msl-base ()
         (str_concat (kth-msl)
         (str_concat (q80-matvec-wide-body "form_q8_0_matvec_wide_f32")
         (str_concat (qmb-q80-batch)
@@ -202,6 +203,7 @@
         (str_concat (q38-joined-attention-msl)
         (str_concat (q38-linear-span-msl)
                     (q38-lora-rank1-msl)))))))))
+    (defn q38-msl () (str_concat (q38-msl-base) (q38e-msl)))
 
     ; Order here IS the pipeline order for indices 40..46, and the layout
     ; contract names each one. Appending is safe; inserting renumbers a
@@ -242,7 +244,14 @@
                   (metal_pipeline msl (nth linear 6)))))
         ; 47/48 follow the existing 40..46 span lane; appending preserves all
         ; established pipeline identities.
-        (append base (q38-lora-rank1-pipes msl))))
+        (append (append base (q38-lora-rank1-pipes msl)) (q38e-pipes msl))))
+
+    (defn q38-embed (ps bs geo embTv id barrier)
+        (if (lt (q38e-index (kth-tv-ty embTv)) 0) -1
+            (metal_enqueue (nth ps (q38e-index (kth-tv-ty embTv)))
+                (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
+                    (list (mul id (nth geo 0)) (nth geo 0)) 0 barrier)
+                (nth geo 0))))
 
     ; One exact 256-thread group per output-row pair for Q8_0.  All other declared types retain the
     ; already-proven KAT dispatches.  Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
@@ -557,10 +566,7 @@
 
     (defn q38-forward-state-b (ps bs geo lays sts embTv id pos barrier ntok)
         (do
-            (metal_enqueue (nth ps 30)
-                (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
-                         (list (mul id (nth geo 0)) (nth geo 0)) 0 barrier)
-                (nth geo 0))
+            (q38-embed ps bs geo embTv id barrier)
             (q38-blocks-b ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22) ntok)
             1))
 
@@ -805,10 +811,7 @@
 
     (defn q38-lm-embed (ps bs geo embTv ids t)
         (if (eq (len ids) 0) t
-            (do (metal_enqueue (nth ps 30)
-                    (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
-                        (list (mul (head ids) (nth geo 0)) (nth geo 0)) 0 1)
-                    (nth geo 0))
+            (do (q38-embed ps bs geo embTv (head ids) 1)
                 (q38-scatter ps bs geo t 1)
                 (q38-lm-embed ps bs geo embTv (tail ids) (add t 1)))))
 
@@ -898,10 +901,7 @@
     (defn q38-forward-state-scoped (ps bs geo lays sts embTv id pos scope)
         (do
             (metal_batch_concurrent)
-            (metal_enqueue (nth ps 30)
-                (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
-                         (list (mul id (nth geo 0)) (nth geo 0)) 0 0)
-                (nth geo 0))
+            (q38-embed ps bs geo embTv id 0)
             (q38-blocks-scoped ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22) scope)
             1))
 
@@ -1023,10 +1023,7 @@
     ; costs a barrier rather than a stall.
     (defn q38-forward-state-after (ps bs geo lays sts embTv id pos barrier)
         (do
-            (metal_enqueue (nth ps 30)
-                (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
-                         (list (mul id (nth geo 0)) (nth geo 0)) 0 barrier)
-                (nth geo 0))
+            (q38-embed ps bs geo embTv id barrier)
             (q38-blocks ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22))
             1))
 
@@ -1169,7 +1166,7 @@
             (let src (eqr-of-file path 0 40000000))
             (let base (egg-data-base src 32))
             (let required (q38-artifact-required-src src))
-            (if (or (le required 0) (lt (file_size path) required))
+            (if (or (lt (q38e-index (egg-ti-type src (egg-find-tensor src "token_embd.weight"))) 0) (or (le required 0) (lt (file_size path) required)))
                 (do (let _artifact-refused (q38oo-artifact-refused)) (empty))
             (do (let _artifact-ready (q38oo-artifact-ready))
             (let _geometry-begin (q38oo-geometry-begin))
