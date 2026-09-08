@@ -121,6 +121,25 @@ section [form.bml] {
             if eq(len(g), 0) then list() else vo-rows-go(vo-of(path, vo-g-off(g), vo-g-end(g), 5), path, list());
         }
 
+        // ---- the OTHER place a number lives ----
+        // Two exports of the same architecture do not agree on where a scalar goes. The medium
+        // voices hoist every folded constant into the graph's initializer list; the high ones
+        // leave them as `Constant` NODES carrying a tensor attribute. Same file, same number,
+        // different shelf — and a pass that reads only one shelf renders silence on half the
+        // voices while refusing nothing (witnessed: en_GB-cori-high answered 16640 samples of
+        // exact zero). A Constant node's row is named by its OUTPUT, which is the name every
+        // consumer uses, so once it is in the table nothing downstream can tell the two apart.
+        def vo-const-row(path, f) {
+            let t = vo-a-tensor(vo-n-attrs(path, f), "value");
+            if eq(len(t), 0) then list() else list(vo-str-of(path, vo-n-off(f), vo-n-end(f), 2), nth(t, 1), nth(t, 2), nth(t, 3), nth(t, 4));
+        }
+        def vo-consts-step(path, fs, acc, op) = if str_eq(op, "Constant") then vo-consts-add(path, fs, acc, vo-const-row(path, head(fs))) else vo-consts-go(path, tail(fs), acc);
+        def vo-consts-add(path, fs, acc, r) = if eq(len(r), 0) then vo-consts-go(path, tail(fs), acc) else vo-consts-go(path, tail(fs), cons(r, acc));
+        def vo-consts-go(path, fs, acc) = if eq(len(fs), 0) then reverse(acc) else vo-consts-step(path, fs, acc, vo-n-op(path, head(fs)));
+        def vo-consts(path) = vo-consts-go(path, vo-nodes(path), list());
+        // every number the graph holds still, whichever shelf it sits on
+        def vo-table(path) = append(vo-inits(path), vo-consts(path));
+
         def vo-name(r) = head(r);
         def vo-dtype(r) = nth(r, 1);
         def vo-dims(r) = nth(r, 2);
@@ -171,6 +190,73 @@ section [form.bml] {
         def vo-op-count(cs) = len(cs);
         def vo-node-count(path) = len(vo-nodes(path));
 
+        // ---- a node's own program: what it eats, what it names, how it is set ----
+        // The census above counts nodes; a PASS has to read them. NodeProto's repeated
+        // strings are fields 1 and 2, and its AttributeProto list is field 5 —
+        // AttributeProto: 1 name, 2 f (wire 5), 3 i (varint), 6 floats, 7 ints, 20 type.
+        // This is the door that ends namewash: a fused convolution's WEIGHT lost its module
+        // path, but the NODE that reads it kept its own ("/flow/flows.0/enc/in_layers.0/Conv"),
+        // so the weight is found by asking the node, never by guessing at a serial number.
+        def vo-strs-go(path, fs, acc) = if eq(len(fs), 0) then reverse(acc) else vo-strs-go(path, tail(fs), cons(read_file_slice(path, vo-datum(head(fs)), vo-dlen(head(fs))), acc));
+        def vo-strs-of(path, off, end, k) = vo-strs-go(path, vo-of(path, off, end, k), list());
+        def vo-n-off(f) = vo-datum(f);
+        def vo-n-end(f) = add(vo-datum(f), vo-dlen(f));
+        def vo-n-inputs(path, f) = vo-strs-of(path, vo-n-off(f), vo-n-end(f), 1);
+        def vo-n-outputs(path, f) = vo-strs-of(path, vo-n-off(f), vo-n-end(f), 2);
+        def vo-n-name(path, f) = vo-str-of(path, vo-n-off(f), vo-n-end(f), 3);
+        def vo-n-op(path, f) = vo-str-of(path, vo-n-off(f), vo-n-end(f), 4);
+        def vo-n-in(path, f, i) = nth(vo-n-inputs(path, f), i);
+        def vo-n-out(path, f, i) = nth(vo-n-outputs(path, f), i);
+
+        // one attribute row: (name i f ints tensor) — the shapes a convolution is actually set by.
+        // AttributeProto's own field numbers, and they are not the obvious ones: f is 2, i is 3,
+        // t (a whole TensorProto) is 5, FLOATS is 7 and INTS is 8. Reading ints at 7 answers an
+        // empty list for every convolution in the file — a shape that is silently absent rather
+        // than wrong, which is the more dangerous kind.
+        def vo-attr-row(path, off, end) {
+            let ff = vo-first(path, off, end, 2);
+            let tf = vo-first(path, off, end, 5);
+            list(vo-str-of(path, off, end, 1), vo-int-of(path, off, end, 3, 0), if eq(len(ff), 0) then 0.0 else vo-f32(path, vo-datum(ff)), vo-ints-of(path, off, end, 8), if eq(len(tf), 0) then list() else vo-t-row(path, vo-datum(tf), add(vo-datum(tf), vo-dlen(tf))));
+        }
+        def vo-attrs-go(path, fs, acc) = if eq(len(fs), 0) then reverse(acc) else vo-attrs-go(path, tail(fs), cons(vo-attr-row(path, vo-datum(head(fs)), add(vo-datum(head(fs)), vo-dlen(head(fs)))), acc));
+        def vo-n-attrs(path, f) = vo-attrs-go(path, vo-of(path, vo-n-off(f), vo-n-end(f), 5), list());
+        def vo-a-find(attrs, nm) = if eq(len(attrs), 0) then list() else if str_eq(head(head(attrs)), nm) then head(attrs) else vo-a-find(tail(attrs), nm);
+        def vo-a-int(attrs, nm, dflt) {
+            let a = vo-a-find(attrs, nm);
+            if eq(len(a), 0) then dflt else nth(a, 1);
+        }
+        def vo-a-float(attrs, nm, dflt) {
+            let a = vo-a-find(attrs, nm);
+            if eq(len(a), 0) then dflt else nth(a, 2);
+        }
+        def vo-a-ints(attrs, nm) {
+            let a = vo-a-find(attrs, nm);
+            if eq(len(a), 0) then list() else nth(a, 3);
+        }
+        // a Constant node's own tensor, as a table row: (name dtype dims off bytes)
+        def vo-a-tensor(attrs, nm) {
+            let a = vo-a-find(attrs, nm);
+            if eq(len(a), 0) then list() else nth(a, 4);
+        }
+        def vo-n-attr-ints(path, f, nm) = vo-a-ints(vo-n-attrs(path, f), nm);
+        def vo-n-attr-int(path, f, nm, dflt) = vo-a-int(vo-n-attrs(path, f), nm, dflt);
+        def vo-n-attr-float(path, f, nm, dflt) = vo-a-float(vo-n-attrs(path, f), nm, dflt);
+
+        // ---- finding a node ----
+        def vo-node-by-name-go(path, fs, nm) = if eq(len(fs), 0) then list() else if str_eq(vo-n-name(path, head(fs)), nm) then head(fs) else vo-node-by-name-go(path, tail(fs), nm);
+        def vo-node-by-name(path, nodes, nm) = vo-node-by-name-go(path, nodes, nm);
+        def vo-has-out-go(xs, nm) = if eq(len(xs), 0) then 0 else if str_eq(head(xs), nm) then 1 else vo-has-out-go(tail(xs), nm);
+        def vo-node-by-out-go(path, fs, nm) = if eq(len(fs), 0) then list() else if eq(vo-has-out-go(vo-n-outputs(path, head(fs)), nm), 1) then head(fs) else vo-node-by-out-go(path, tail(fs), nm);
+        def vo-node-by-out(path, nodes, nm) = vo-node-by-out-go(path, nodes, nm);
+        // the weight a named node reads at input slot i — the answer to a fused tensor's lost name
+        def vo-node-weight(path, nodes, nm, i) {
+            let n = vo-node-by-name(path, nodes, nm);
+            if eq(len(n), 0) then "" else vo-n-in(path, n, i);
+        }
+        def vo-node-text(path, f) = vo-cat(list(vo-n-op(path, f), "  ", vo-n-name(path, f), "  <- ", vo-join(vo-n-inputs(path, f), " "), "  -> ", vo-join(vo-n-outputs(path, f), " ")));
+        def vo-attr-text(a) = vo-cat(list(head(a), " i=", int_to_str(nth(a, 1)), " f=", float_to_str(nth(a, 2)), " ints=", vo-dims-text(nth(a, 3))));
+        def vo-attrs-text(xs) = if eq(len(xs), 0) then "" else vo-cat(list("      ", vo-attr-text(head(xs)), vo-nl(), vo-attrs-text(tail(xs))));
+
         // ---- the graph's declared doors: what the model eats and what it answers ----
         // ValueInfoProto: 1 name, 2 type; TypeProto: 1 tensor_type;
         // Tensor: 1 elem_type, 2 shape; Shape: 1 dim; Dimension: 1 dim_value, 2 dim_param.
@@ -218,6 +304,20 @@ section [form.bml] {
             mul(sign, mag);
         }
         def vo-f32(path, off) = vo-f32-at(read_file_slice(path, off, 4), 0);
+        // ---- int64, the other half of what a graph's constants are made of ----
+        // A shape, a pad and an axis all arrive as int64 raw_data. Form's ints are 62-bit
+        // tagged words, so the top two bytes are read as a SIGN rather than as magnitude:
+        // 0xFFFF is the two's-complement -1 a Pad or a Slice actually carries, and folding it
+        // as an unsigned 2^64 would answer a huge positive number that indexes plausibly.
+        def vo-u48(s, i) = add(add(add(str_byte_at(s, i), mul(str_byte_at(s, add(i, 1)), 256)), add(mul(str_byte_at(s, add(i, 2)), 65536), mul(str_byte_at(s, add(i, 3)), 16777216))), add(mul(str_byte_at(s, add(i, 4)), 4294967296), mul(str_byte_at(s, add(i, 5)), 1099511627776)));
+        def vo-i64-at(s, i) {
+            let lo = vo-u48(s, i);
+            let hi = add(str_byte_at(s, add(i, 6)), mul(str_byte_at(s, add(i, 7)), 256));
+            if eq(hi, 0) then lo else if eq(hi, 65535) then sub(lo, 281474976710656) else add(lo, mul(hi, 281474976710656));
+        }
+        def vo-ints-go(s, i, n, acc) = if le(n, 0) then reverse(acc) else vo-ints-go(s, add(i, 8), sub(n, 1), cons(vo-i64-at(s, i), acc));
+        // n int64 of a tensor row, from element `from`
+        def vo-i64s(path, row, from, n) = vo-ints-go(read_file_slice(path, add(vo-off(row), mul(from, 8)), mul(n, 8)), 0, n, list());
         def vo-floats-go(s, i, n, acc) = if le(n, 0) then reverse(acc) else vo-floats-go(s, add(i, 4), sub(n, 1), cons(vo-f32-at(s, i), acc));
         // n floats of a tensor, starting at element `from` — read as one slice, decoded in the body
         def vo-floats(path, row, from, n) = vo-floats-go(read_file_slice(path, add(vo-off(row), mul(from, 4)), mul(n, 4)), 0, n, list());
