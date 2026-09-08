@@ -133,12 +133,50 @@ llama-architecture model.
 NOT embedded in string literals — it is 19 ordinary `.metal` files totalling 21 671 lines, read and
 concatenated at runtime (`ds4_metal.m:3675-3699`). Full working: `receipts/2026-07-21-ds4-metal-gap-map.md`.*
 
+## G. Learning on this metal (opened 2026-09-09 — the body trains, and where it cannot)
+
+The arithmetic of a backward pass has been here for a long time and is easy to
+mistake for the capability. `form-stdlib/transformer-backprop.fk` (band 127)
+carries the affine reverse (`db = gy`, `dW = outer(gy,x)`, `dx = Wᵀgy`) plus
+gelu, softmax, layernorm and single-head attention, in pure Form, fp64, CPU,
+over synthetic tensors. What was missing is the other half of the sentence:
+**of the 217 distinct `kernel void` names this tree emits, not one computes a
+gradient.** The nearest is `form_axpy_f32` — the update that would apply one.
+Every kernel here walks forward.
+
+`form-stdlib/lora-backward.bml` (band 511) is the low-rank pair as one reverse
+node — both factors' gradients from one upstream `dy` — with softmax
+cross-entropy and the descent step, each gradient held against finite
+differences the body computes itself rather than against any oracle.
+`form-stdlib/lora-step-live.bml` (band 511) puts it against llama-3.2-1B on
+this Mac; `observe/lora-step-native-run.fk` is the door.
+
+| what a LoRA step needs | today |
+|---|---|
+| forward to the loss point | ✅ `dense-token-handle.fk`, 133 dispatches, ~11.7 ms/token on the 1B |
+| the hidden state and the base logits out of the forward | ✅ they are already in `bs 1` and `bs 11`; re-firing the output projection on a written-back hidden reproduces the logits to zero microns |
+| softmax cross-entropy over the real vocabulary, and `p − onehot` | ✅ Form-native, 128 256 wide, 108 ms to decode the vocabulary once and 57 ms per loss-and-gradient after |
+| `W b` for an adapter on the head's input | ✅ the SAME forward matvec, fired once more — no new kernel |
+| the reader side's gradient `dL/da` | ✅ exact, `dL/ds · h`, checked against finite differences |
+| a step size | ✅ earned, not typed: halved until the loss falls (see `pointtrue`, corpus row 1376 — an exact gradient at 0.05 sent the loss 3.333 → 4.695 → 30.7 → 84.1) |
+| **`Wᵀ v` — a transposed matvec** | ⬜ **nothing, for any quantisation or f32.** This is the wall. It is what `dL/db` needs, and what `dx` through any frozen projection needs, so it blocks BOTH the writer half of a head adapter and every adapter inside the stack. One kernel, and it unblocks more than any other single thing here. |
+| outer product / rank-1 accumulate as a kernel | ⬜ (exists as Form arithmetic; nothing on the device) |
+| reverses of rmsnorm, rope, GQA attention, SwiGLU as kernels | ⬜ (rmsnorm/softmax exist as Form recipes in `transformer-backprop.fk`; rope and GQA-with-cache do not exist in either form) |
+| holding activations for the reverse walk | ⬜ structural, not a kernel: the decode forward reuses 17 buffers totalling ~1.1 MB and overwrites them every layer; a reverse walk over the 1B needs ~2.6 MB per token across 16 layers, before any recompute |
+| an optimizer with state (AdamW) | ⬜ (plain SGD exists in Form; `form_axpy_f32` is the update kernel) |
+
+Named cost, so the next hand starts from numbers: the crossing's own log
+(`.form-lora-voice-native/train.log`) reads **3.473 M trainable parameters at
+0.45 it/s and 453–488 tokens/s**. This lane moves **2048 parameters at
+86 tokens/s** on the 1B. The gap is not mainly speed — it is the 1 696× in
+what can be reached at all, and the transposed matvec is the first factor of it.
+
 ## Active lanes (who's on what)
 - **RTX climb**: ✅ 11 kernels (verdict 8191, four-way) + **a FULL transformer block end-to-end on the GPU, bit-exact** (kernel-graph). NEXT: stack N blocks (the kernel-graph generalizes) → a whole tiny model forward; add projections/gamma-beta for the exact tb-block; MHA/causal/KV.
 - **Android/Vulkan**: ✅ matvec proven (RTX Vulkan) + Form-emitted + arm64-android cross-compiled. NEXT: on-device run (needs device); f16/bf16 GLSL; FFN/attention compute shaders.
 - **Mac/quantized residency**: ✅ **A REAL llama3.2:3b TOKEN, form-native** — `form/native/metal/metal_first_token.sh`, VERDICT PASS **13 gates** (re-run 2026-07-21, Stone 11: same token ids): full width (28 layers, d=3072, 24/8 GQA, dff=8192, vocab 128 256), real tokenizer ids in and out, every op a body-emitted kernel off the one resident quantized buffer, no f32 tensor materialized anywhere. `"The capital of France is"` → `" Paris. The capital of Italy is Rome. The capital of"`. ~~**3.53 tok/s end-to-end**, 4.78 decode-only~~ — **STALE (Stone 4's numbers).** Stone 5's lane path measured **8.317 end-to-end / 12.227 decode-only** (§C), and a quiet-machine re-measure on 2026-07-21 reported **10.965 end-to-end / 12.25 decode / 52.28 prefill**. Treat all of these as *timing*, not verdict: a Stone-11 re-run with three sibling sessions on the same machine gave 5.097 end-to-end on the identical binary and the identical token ids. **The harness gates are id-identity and epsilon bounds — never throughput** (`fkwu` constant-folds band results; bands are correctness artifacts). NEXT: MoE (§F — the router is the shared prerequisite of both the near and far targets); a true threadgroup reduction; the `brimwidth` measurement (corpus row 829). *(Prefill-as-a-batched-pass, listed as NEXT here since Stone 4, is DONE: `metal_batched_prefill.sh` proves one batched pass bit-exact against P lane matvecs at four prompt lengths with token ids preserved.)*
 - **Diffusion**: ✅ conv2d/groupnorm recipe. NEXT: GPU carriers (PTX/MSL/GLSL) for conv2d.
-- **Serving/Training**: ✅ sampling (top-k/p, temperature). NEXT: loss functions (cross-entropy + log) — agent.
+- **Serving/Training**: ✅ sampling (top-k/p, temperature); ✅ softmax cross-entropy and its gradient, Form-native, over a real 128 256-wide vocabulary (§G). NEXT: the transposed matvec (§G) — it is the single kernel that unblocks the most.
 
 ## Proven milestones (RTX/PTX lane)
 - **11 kernels** bit-exact on RTX 4070, driver-only, `form-ptx` band **verdict 8191 PASS-4WAY**: matvec f32/f16/bf16, affine-train, gelu(Taylor), FFN, softmax, attention, layernorm, rmsnorm, residual.
