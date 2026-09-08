@@ -3008,8 +3008,13 @@ static int fk_aq_load(void) {
     return fk_AQNewInput != 0 && fk_AQNewOutput != 0 && fk_AQAllocBuf != 0 && fk_AQEnqueue != 0 &&
            fk_AQStart != 0 && fk_AQStop != 0 && fk_AQDispose != 0;
 }
-static void fk_asbd_16k(struct fk_asbd *f) {
-    f->mSampleRate = 16000.0;
+/* The EAR's wire is 16 kHz and fixed: every cell that reads sense_mic_stream_read counts on
+ * 32 bytes to the millisecond. The MOUTH's is not, and measurement is what said so — piper
+ * renders this body's own voice at 22050 Hz (measured off .hearth/voice-en.wav, 2026-09-08),
+ * and playing those samples through a 16 kHz queue drops the voice a fourth and slows it by
+ * 1.38x. So the speaking doors carry their rate and the ear door keeps its constant. */
+static void fk_asbd_rate(struct fk_asbd *f, double hz) {
+    f->mSampleRate = hz;
     f->mFormatID = 0x6C70636D; /* 'lpcm' */
     f->mFormatFlags = 0x4 | 0x8; /* signed-integer | packed */
     f->mBytesPerPacket = 2;
@@ -3018,6 +3023,9 @@ static void fk_asbd_16k(struct fk_asbd *f) {
     f->mChannelsPerFrame = 1;
     f->mBitsPerChannel = 16;
     f->mReserved = 0;
+}
+static void fk_asbd_16k(struct fk_asbd *f) {
+    fk_asbd_rate(f, 16000.0);
 }
 /* ── the STREAM session (tags 239-241): one input queue held open across calls, so the live
  * loop's frame quantum is the only latency and no file stands between the diaphragm and the
@@ -3134,12 +3142,12 @@ static void fk_spk_outcb(void *ud, void *q, struct fk_aqbuf *b) {
     (void)b;
     fk_spk_pending = fk_spk_pending - 1;
 }
-static long long fk_spk_play(const char *inbuf, long long doff, long long dlen) {
+static long long fk_spk_play(const char *inbuf, long long doff, long long dlen, long long hz) {
     if (!fk_aq_load()) {
         return -1;
     }
     struct fk_asbd f;
-    fk_asbd_16k(&f);
+    fk_asbd_rate(&f, (double)hz);
     void *q = 0;
     if (fk_AQNewOutput(&f, fk_spk_outcb, 0, 0, 0, 0, &q) != 0 || q == 0) {
         printf("sense: speaker open refused\n");
@@ -3164,7 +3172,7 @@ static long long fk_spk_play(const char *inbuf, long long doff, long long dlen) 
         off = off + n;
     }
     fk_AQStart(q, 0);
-    long long ms = dlen / 32;
+    long long ms = hz > 0 ? dlen * 500 / hz : dlen / 32; /* 2 bytes a frame: ms = bytes*500/hz */
     long long waited = 0;
     while (fk_spk_pending > 0 && waited < ms + 2000) {
         usleep(10000);
@@ -3172,6 +3180,169 @@ static long long fk_spk_play(const char *inbuf, long long doff, long long dlen) 
     }
     fk_AQStop(q, 1);
     fk_AQDispose(q, 1);
+    return off; /* BYTES enqueued and drained — the honest count, not a flag */
+}
+/* ── the SPEAKING family (tag 190, modes 0-6): the twin of the mic doors above ─────────────
+ * The seed has held ears since 2026-07-31 and no mouth: every sense_* door named an inward
+ * direction, so when the body spoke, voice-say.bml handed a wav to `afplay` through host-exec
+ * and a crossing stood in the middle of the body's own voice. fk_spk_play was already here —
+ * complete, correct, and reachable from exactly one place, fk_wav_loopback's air probe. A door
+ * nothing can call is not a capability (mirror-census armhush, corpus row 1358). These are the
+ * rows that give it a name.
+ *
+ * ONE WIRE, THE MIC'S OWN: s16le mono 16 kHz, the shape fk_asbd_16k already declares for both
+ * directions, the shape sense_mic_stream_read hands back (3200 bytes = 100 ms), and the shape
+ * every ear cell's wav carries after its 44-byte header. Samples arrive as a Form STRING, read
+ * by pointer and length — never through fk_cstr, because s16le is full of NUL bytes and a
+ * C-string copy would cut the voice at the first silent sample.
+ *
+ * TWO REFUSALS, AND THEY ANSWER DIFFERENT QUESTIONS:
+ *   -1  the mouth: no output device, the open was refused, or no stream stands.
+ *   -2  the samples: not a string at all (nothing, an int, a list), or an odd byte count —
+ *       half a sample is not a sample. Checked FIRST, so a bad wire never opens a device and
+ *       never makes a sound; a band can walk every refusal in a silent room.
+ * Zero samples answer 0 and open nothing: honest, not an error.
+ *
+ * The STREAM lane exists for the mouth that is coming. A voice generating token by token must
+ * be able to speak its first word before its last one is decided, so the queue is held open
+ * across calls and a write returns as soon as the samples are handed to the device. Bounded
+ * everywhere: a write waits at most 4 s for a free buffer and then answers the partial count it
+ * truly accepted; a stop drains at most 30 s so a sentence finishes rather than being cut. */
+#define FK_SPKBUFS 16
+#define FK_SPKBUFB 32000 /* 1 s of 16 kHz s16le in each */
+static void *fk_spkq;
+static struct fk_aqbuf *fk_spkbufs[FK_SPKBUFS];
+static volatile int fk_spkbusy[FK_SPKBUFS];
+static int fk_spk_running;
+static void fk_spk_streamcb(void *ud, void *q, struct fk_aqbuf *b) {
+    (void)ud;
+    (void)q;
+    long long i;
+    for (i = 0; i < FK_SPKBUFS; i = i + 1) {
+        if (fk_spkbufs[i] == b) {
+            fk_spkbusy[i] = 0;
+            return;
+        }
+    }
+}
+static long long fk_spk_present(void) {
+    return fk_aq_load() ? 1 : 0;
+}
+static long long fk_spk_name(long long i) {
+    if (i == 0 && fk_aq_load()) {
+        return fk_sbuf("coreaudio-default", 17);
+    }
+    return fk_sbuf("", 0);
+}
+static long long fk_spk_health(long long i) {
+    return (i == 0 && fk_aq_load()) ? 1 : -1;
+}
+static long long fk_spk_say(const char *p, long long n, long long hz) {
+    long long b = fk_spk_play(p, 0, n, hz);
+    return b < 0 ? -1 : b / 2;
+}
+static long long fk_spk_stream_start(long long hz) {
+    if (!fk_aq_load()) {
+        return -1;
+    }
+    if (fk_spkq != 0) {
+        return 0; /* already open: idempotent, like the mic's own start */
+    }
+    struct fk_asbd f;
+    fk_asbd_rate(&f, (double)hz);
+    if (fk_AQNewOutput(&f, fk_spk_streamcb, 0, 0, 0, 0, &fk_spkq) != 0 || fk_spkq == 0) {
+        printf("sense: speaker stream open refused\n");
+        fk_spkq = 0;
+        return -1;
+    }
+    long long i;
+    for (i = 0; i < FK_SPKBUFS; i = i + 1) {
+        fk_spkbufs[i] = 0;
+        fk_spkbusy[i] = 0;
+        if (fk_AQAllocBuf(fk_spkq, FK_SPKBUFB, &fk_spkbufs[i]) != 0) {
+            fk_spkbufs[i] = 0;
+        }
+    }
+    fk_spk_running = 0;
+    return 0;
+}
+/* hand samples to the open mouth and return: the queue starts on the FIRST write, so a voice
+ * that has decided one word does not wait for the sentence. Answers the samples accepted. */
+static long long fk_spk_stream_write(const char *p, long long n) {
+    if (fk_spkq == 0) {
+        return -1;
+    }
+    long long off = 0;
+    while (off < n) {
+        long long take = n - off > FK_SPKBUFB ? FK_SPKBUFB : n - off;
+        long long idx = -1;
+        long long waited = 0;
+        while (idx < 0) {
+            long long i;
+            for (i = 0; i < FK_SPKBUFS; i = i + 1) {
+                if (fk_spkbufs[i] != 0 && fk_spkbusy[i] == 0) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx >= 0 || waited >= 4000) {
+                break;
+            }
+            usleep(10000);
+            waited = waited + 10;
+        }
+        if (idx < 0) {
+            break; /* every buffer still in flight: answer what was truly taken */
+        }
+        long long j;
+        for (j = 0; j < take; j = j + 1) {
+            ((char *)fk_spkbufs[idx]->mAudioData)[j] = p[off + j];
+        }
+        fk_spkbufs[idx]->mAudioDataByteSize = (unsigned int)take;
+        fk_spkbusy[idx] = 1;
+        if (fk_AQEnqueue(fk_spkq, fk_spkbufs[idx], 0, 0) != 0) {
+            fk_spkbusy[idx] = 0;
+            break;
+        }
+        if (!fk_spk_running) {
+            if (fk_AQStart(fk_spkq, 0) != 0) {
+                printf("sense: speaker stream start refused\n");
+                fk_spkbusy[idx] = 0;
+                break;
+            }
+            fk_spk_running = 1;
+        }
+        off = off + take;
+    }
+    return off / 2;
+}
+static long long fk_spk_stream_stop(void) {
+    if (fk_spkq == 0) {
+        return 0;
+    }
+    long long waited = 0;
+    while (waited < 30000) {
+        long long busy = 0, i;
+        for (i = 0; i < FK_SPKBUFS; i = i + 1) {
+            if (fk_spkbusy[i]) {
+                busy = 1;
+            }
+        }
+        if (!busy) {
+            break;
+        }
+        usleep(10000);
+        waited = waited + 10;
+    }
+    fk_AQStop(fk_spkq, 1);
+    fk_AQDispose(fk_spkq, 1);
+    fk_spkq = 0;
+    fk_spk_running = 0;
+    long long i;
+    for (i = 0; i < FK_SPKBUFS; i = i + 1) {
+        fk_spkbufs[i] = 0;
+        fk_spkbusy[i] = 0;
+    }
     return 0;
 }
 static long long fk_mic_count(void) {
@@ -3309,7 +3480,8 @@ static long long fk_wav_loopback(const char *inpath, const char *outpath) {
             mark = fk_mic_produced;
         }
     }
-    long long played = fk_spk_play(inbuf, doff, dlen) == 0 ? dlen / 2 : 0;
+    long long pb = fk_spk_play(inbuf, doff, dlen, 16000); /* the air probe's own canonical wav */
+    long long played = pb > 0 ? pb / 2 : 0;
     free(inbuf);
     long long got = 0, peak = 0, sumabs = 0;
     if (capture) {
@@ -3432,7 +3604,126 @@ static long long fk_mic_stream_read(long long maxbytes, long long wait_ms) {
 static long long fk_mic_stream_stop(void) {
     return 0;
 }
+/* the speaking family off this host: no mouth stands, and every door says so in the same
+ * word it uses when a mac has no reachable device. Nothing here pretends to a sound. */
+static long long fk_spk_present(void) {
+    return 0;
+}
+static long long fk_spk_name(long long i) {
+    (void)i;
+    return fk_sbuf("", 0);
+}
+static long long fk_spk_health(long long i) {
+    (void)i;
+    return -1;
+}
+static long long fk_spk_say(const char *p, long long n, long long hz) {
+    (void)p;
+    (void)n;
+    (void)hz;
+    return -1;
+}
+static long long fk_spk_stream_start(long long hz) {
+    (void)hz;
+    return -1;
+}
+static long long fk_spk_stream_write(const char *p, long long n) {
+    (void)p;
+    (void)n;
+    return -1;
+}
+static long long fk_spk_stream_stop(void) {
+    return 0;
+}
 #endif
+/* ── the speaking door, modes 10-16 of the leaf door (tag 201) ─────────────────────────────
+ * NO TAG WAS TAKEN. The mic family spends one AST tag per door; this family cannot, because
+ * on 2026-09-08 the space 0..255 held nothing to spend. 0 is not a tag; 150 is held in
+ * writing as the native-surface probe; and 190 — the one number a census of `if (t == N)`
+ * sites reports free — is FK_TAG_CONST_HOLD, the once-hold for a top-level let, named by a
+ * #define that no op row and no `t == N` site spells. A first cut of this family took 190 and
+ * every door answered its own mode number back: the const-hold walked the first child and
+ * returned it. The seed had already written that trap down (the gift-frame note above tag
+ * 184, "the third such collision in a week") and the census still could not see it. So the
+ * nine names ride the leaf door as rewrite rows the way the binary form (modes 4-8) and
+ * substring (mode 9) do, and the tag ledger does not move at all.
+ *   10 count   11 name(i)   12 health(i)   13 play (cons samples hz)
+ *   14 stream_start(hz)   15 stream_write(samples)   16 stream_stop
+ *
+ * THE RATE IS CARRIED, NOT ASSUMED. The mic's wire is 16 kHz and every ear cell counts on it,
+ * so sense_speaker_play defaults there — but piper renders this body's own voice at 22050 Hz
+ * (measured off .hearth/voice-en.wav on the day this door was written), and a 22050 Hz voice
+ * played through a 16 kHz queue comes back a fourth lower and 1.38x slow. So play and
+ * stream_start take an explicit rate, and the two plain names are rewrites that fill in 16000.
+ * Mode 13's operand is a cons pair, the shape write_form_binary (mode 8) already uses to carry
+ * two things through a one-operand door.
+ *
+ * THREE REFUSALS, ANSWERING DIFFERENT QUESTIONS:
+ *   -1  the mouth — no output device, an open refused, or no stream standing.
+ *   -2  the samples — not a string at all (nothing, an int, a list), or an odd byte count,
+ *       because half a sample is not a sample. Checked FIRST, so a bad wire never opens a
+ *       device and never makes a sound: every refusal here is walkable in a silent room.
+ *   -3  the rate — outside 4000..192000 Hz, which no output device on this host will hold.
+ * Zero samples answer 0 and open nothing — honest, not an error.
+ *
+ * The negatives are written `* 2` rather than `<< 1`: a Form int rides as value*2 and the two
+ * are the same bits, but shifting a negative constant is undefined in C and the compiler says
+ * so. A warning stepped around is work handed on without consent. */
+static long long fk_spk_rate_ok(long long hz) {
+    return hz >= 4000 && hz <= 192000;
+}
+static long long fk_spk_door(long long mode, long long x) {
+    if (mode == 13 || mode == 15) {
+        long long sv = x;
+        long long hz = 16000;
+        if (mode == 13) {
+            /* (cons samples hz): the one-operand pair, read head then tail */
+            long long p = x >> 1;
+            if ((x & 1) == 0 || p < 1 || !FK_POK(p)) {
+                return (0 - 2) * 2;
+            }
+            sv = FK_HH(p);
+            hz = FK_HT(p) >> 1;
+            if (!fk_spk_rate_ok(hz)) {
+                return (0 - 3) * 2; /* a rate no device here will hold */
+            }
+        }
+        long long si = fk_stri(sv);
+        if (si < 0 || !FK_SOK(si)) {
+            return (0 - 2) * 2; /* these are not samples */
+        }
+        long long n = FK_SLEN(si);
+        if ((n & 1) != 0) {
+            return (0 - 2) * 2; /* half a sample is not a sample */
+        }
+        if (n == 0) {
+            return 0; /* zero samples: nothing sounds, and nothing is opened */
+        }
+        return (mode == 13 ? fk_spk_say(FK_SBYTES(si), n, hz)
+                           : fk_spk_stream_write(FK_SBYTES(si), n))
+               << 1;
+    }
+    if (mode == 10) {
+        return fk_spk_present() << 1;
+    }
+    if (mode == 11) {
+        return fk_spk_name(x >> 1);
+    }
+    if (mode == 12) {
+        return fk_spk_health(x >> 1) << 1;
+    }
+    if (mode == 14) {
+        long long hz14 = x >> 1;
+        if (!fk_spk_rate_ok(hz14)) {
+            return (0 - 3) * 2;
+        }
+        return fk_spk_stream_start(hz14) << 1;
+    }
+    if (mode == 16) {
+        return fk_spk_stream_stop() << 1;
+    }
+    return (0 - 2) * 2; /* an unnamed mode is a wire this door cannot play either */
+}
 static long long fk_sense_report(void) {
     long long open = 0;
     long long nm = fk_mic_count();
@@ -12734,6 +13025,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return fk_strv(fk_sintern(fk_sbp, ln201));
         }
         long long fx201 = fk_walk(fk_node[i][2], fp);
+        /* modes 10-16: the SPEAKING family -- the mouth that answers the sense_mic_* ears.
+         * Every sense door in this seed pointed inward until 2026-09-08, so the body's own
+         * voice left through afplay. No tag was spendable; see fk_spk_door. */
+        if ((fm201 >> 1) >= 10) { return fk_spk_door(fm201 >> 1, fx201); }
         /* modes 4-8: the binary form (value_kind, recipe_to_bytes, bytes_to_recipe,
          * read_form_binary, write_form_binary) -- see fk_fb_door */
         if ((fm201 >> 1) >= 4) { return fk_fb_door(fm201 >> 1, fx201); }

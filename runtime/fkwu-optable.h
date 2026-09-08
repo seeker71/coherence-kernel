@@ -264,6 +264,15 @@ static const struct fk_rwtab_row fk_rwtab[] = {
   { "read_form_binary", 1, 7, { 1,7,0,0,2,201,2,} },
   { "write_form_binary", 2, 12, { 1,8,0,0,0,1,2,19,2,2,201,2,} },
   { "substring", 3, 14, { 1,9,0,0,0,1,0,2,2,19,2,2,201,3,} },
+  { "sense_speaker_count", 0, 7, { 1,10,1,0,2,201,2,} },
+  { "sense_speaker_name", 1, 7, { 1,11,0,0,2,201,2,} },
+  { "sense_speaker_health", 1, 7, { 1,12,0,0,2,201,2,} },
+  { "sense_speaker_play", 1, 12, { 1,13,0,0,1,16000,2,19,2,2,201,2,} },
+  { "sense_speaker_play_at", 2, 12, { 1,13,0,0,0,1,2,19,2,2,201,2,} },
+  { "sense_speaker_stream_start", 0, 7, { 1,14,1,16000,2,201,2,} },
+  { "sense_speaker_stream_start_at", 1, 7, { 1,14,0,0,2,201,2,} },
+  { "sense_speaker_stream_write", 1, 7, { 1,15,0,0,2,201,2,} },
+  { "sense_speaker_stream_stop", 0, 7, { 1,16,1,0,2,201,2,} },
   { "abs", 1, 19, { 1,0,0,0,2,5,2,0,0,1,0,0,0,2,4,2,2,6,3,} },
 
 };
