@@ -922,6 +922,22 @@ off its own thresholds, so `gap-corridor` on the glass meant low flow while
 the same word in the frame meant one option. The findings are the lane's now,
 read from the frame's finding rows. choice-view 32767, choice-flow 8191.
 
+**Two findings closed rather than listed.** `route.category` read DARK on every
+tick since it landed and its own ask said "reach it, or retire it".
+`brcr-protocol-choice-candidates` had exactly one caller in the body — the
+choice shard, calling it to display candidates for a choice no live path puts —
+so the point could never learn anything and published a permanent dark row and
+a permanent finding every second. Retired, which is the half of its own ask the
+body could answer; `bml-route-choice-runtime.fk` stands with its band, and the
+point returns with a ledger if a live path ever routes a category.
+`gap-unclocked` on the surprise point is closed by a clock the body already
+had: `surprise.last` now carries the epoch of the last surprise that MOVED
+rather than stamping "now" like every other organ row, so the wait on offers
+still resting is now minus that. The glass frame point is clocked the same way
+— a silent frame's own age is the wait on the offer it holds. Seven points, and
+the findings the body carries are three, all of them readings rather than
+holes. sources 32767, events-channels 32767.
+
 **A sample can carry a cell, so the point crosses as the point.** The nineteen
 membrane fields stay exactly as they are — the shared vocabulary every view
 renders and every reader indexes by, all label-shaped. The twentieth is the
