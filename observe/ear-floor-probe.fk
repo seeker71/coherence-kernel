@@ -1,0 +1,50 @@
+; ear-floor-probe.fk — what level does THIS room actually sit at, and where does the live lane's
+; speech gate sit against it? The lane calls a hop "voice" at rms > 58, which is about -54.7 dBFS
+; on the lane's own table — and the room the ear stands in reads -54 dBFS quiet. A gate at the
+; noise floor never falls silent, so the 500 ms pause that closes a line never arrives and the
+; only close left is the window filling. This probe asks the room instead of reasoning about it:
+; it reads the mic the way the lane does (3200 bytes, 120 ms), reports the one-chunk rms (100 ms)
+; and the lane's own three-chunk rms (300 ms) for every hop, and names how many hops each gate
+; would have called voice. stdin line 1: seconds to listen (blank -> 6).
+; Authored as .fk beside its family (ear-gap-probe, ear-live-gap-probe, ear-string-probe): the
+; mic doors are fkwu natives the BML lane does not carry, and the drop is named rather than hidden.
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/line-grammar.fk
+(do
+    (defn efp-s16 (s i) (do (let v (add (str_byte_at s i) (mul 256 (str_byte_at s (add i 1))))) (if (ge v 32768) (sub v 65536) v)))
+    (defn efp-sumsq (s i end acc) (if (ge i end) acc (do (let v (efp-s16 s i)) (efp-sumsq s (add i 8) end (add acc (mul v v))))))
+    (defn efp-isqrt (v lo hi) (if (ge lo hi) lo (do (let mid (div (add lo (add hi 1)) 2)) (if (gt (mul mid mid) v) (efp-isqrt v lo (sub mid 1)) (efp-isqrt v mid hi)))))
+    (defn efp-rms-of (s) (do (let n (str_len s)) (if (le n 0) 0 (efp-isqrt (div (efp-sumsq s 0 n 0) (div n 8)) 0 32768))))
+    (defn efp-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (efp-cat (tail xs)))))
+    (defn efp-sumsq-all (xs acc) (if (eq (len xs) 0) acc (efp-sumsq-all (tail xs) (efp-sumsq (head xs) 0 (str_len (head xs)) acc))))
+    (defn efp-blen (xs) (if (eq (len xs) 0) 0 (add (str_len (head xs)) (efp-blen (tail xs)))))
+    (defn efp-rms-all (xs) (do (let n (efp-blen xs)) (if (le n 0) 0 (efp-isqrt (div (efp-sumsq-all xs 0) (div n 8)) 0 32768))))
+    (defn efp-take (xs n) (if (or (eq n 0) (eq (len xs) 0)) (list) (cons (head xs) (efp-take (tail xs) (sub n 1)))))
+    (defn efp-db-rows () (list (list -6 16422) (list -12 8231) (list -18 4125) (list -24 2067) (list -30 1036) (list -36 519) (list -42 260) (list -48 130) (list -54 65) (list -60 33)))
+    (defn efp-db-go (rows rms) (if (eq (len rows) 0) -120 (if (ge rms (nth (head rows) 1)) (head (head rows)) (efp-db-go (tail rows) rms))))
+    (defn efp-db (rms) (efp-db-go (efp-db-rows) rms))
+    ; the walk: recent holds the newest three chunks, newest first
+    (defn efp-walk (deadline recent hops lo hi v58 v300)
+        (if (gt (now_unix_ms) deadline) (list hops lo hi v58 v300)
+            (do (let fresh (sense_mic_stream_read 3200 120))
+                (if (eq (str_len fresh) 0) (efp-walk deadline recent hops lo hi v58 v300)
+                    (do (let r1 (efp-rms-of fresh))
+                        (let rec1 (efp-take (cons fresh recent) 3))
+                        (let r3 (efp-rms-all rec1))
+                        (let p (print_str (efp-cat (list "hop " (int_to_str hops) " rms100=" (int_to_str r1) " (" (int_to_str (efp-db r1)) " dbfs)  rms300=" (int_to_str r3) " (" (int_to_str (efp-db r3)) " dbfs)"))))
+                        (efp-walk deadline rec1 (add hops 1)
+                            (if (lt r1 lo) r1 lo) (if (gt r1 hi) r1 hi)
+                            (if (gt r1 58) (add v58 1) v58)
+                            (if (gt r3 58) (add v300 1) v300)))))))
+    (defn efp-first-line () (do (let l (read_line)) (if (nothing? l) "" (trim l))))
+    (let secs (do (let l (efp-first-line)) (if (eq (str_len l) 0) 6 (str_to_int l))))
+    (let mic (sense_mic_stream_start))
+    (let m (print_str (str_concat "mic=" (int_to_str mic))))
+    (let r (efp-walk (add (now_unix_ms) (mul 1000 secs)) (list) 0 32768 0 0 0))
+    (let s (sense_mic_stream_stop))
+    (print_str (efp-cat (list "hops=" (int_to_str (head r))
+                              " one-chunk rms min=" (int_to_str (nth r 1)) " (" (int_to_str (efp-db (nth r 1))) " dbfs)"
+                              " max=" (int_to_str (nth r 2)) " (" (int_to_str (efp-db (nth r 2))) " dbfs)"
+                              "  hops the gate calls voice: 100ms=" (int_to_str (nth r 3))
+                              " 300ms=" (int_to_str (nth r 4)))))
+    0)
