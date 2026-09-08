@@ -28,7 +28,9 @@ candidate races, guarded replacement, and snapshot release.
 The native six-case evaluation measured three structural repairs, two unresolved
 semantic cases, and one preserved correct control. Remote calls were zero;
 training was excluded and live repair memory remained unchanged. Evidence:
-`.form-heal/eval-native-23555-83216440-0/summary.json`.
+`.form-heal/eval-native-43128-85192218-0/summary.json`. All six archived
+case reports and the coordinator reconcile their timing; archive references
+point to the retained evidence after the disposable checkout is released.
 
 The first native learning attempts were refused. They exposed a Q4 embedding
 decoded through the Q8 kernel, an incorrect RMS epsilon index in the fitting
@@ -37,14 +39,17 @@ follows the tensor type across all four embedding call paths. A real Metal
 Q4_K row-offset witness returned 31, and the nonfinite-value band returned 15.
 The dense Qwen pipeline band returned 2147483647.
 
-After those repairs, two real native fitting rounds completed in **38,926 ms**
-and **34,014 ms**. Each changed the B tensor; the second parent hash matched the
+With the merged, rebuilt kernel, two real native fitting rounds completed in
+**60,545 ms** and **35,798 ms**. Each changed the B tensor; the second parent hash matched the
 first candidate hash. Both full base-file checks matched. Loss values, scaled
-by 10^12, moved from 1458.026588 to 820.139956 and from 1509.922409 to 849.331355.
+by 10^12, moved from 1032.693569 to 580.890133 and from 1144.067525 to 643.537981.
 Each round observed one fixed-probe forward token and fit 5,120 activation-space
 elements. This is an outcome-embedding squared-error objective, not next-token
 loss, general repair skill, or a serving promotion. Evidence:
-`.form-heal/learning-native-witness-36394-83802333-0/learning.jsonl`.
+`.form-heal/learning-native-witness-46334-85332757-0/learning.jsonl`.
+The reports retain 14 selected/applied choice events. In the second round,
+the first base-file scan occupied 7,855 ms, layer mapping 13,747 ms, forward
+execution after model-open 2,994 ms, and the final base scan 7,824 ms.
 
 The local HTTP client uses the documented Ollama streaming response and final
 token counters ([API contract](https://docs.ollama.com/api/generate)). It does
@@ -62,6 +67,19 @@ scripts. Their narrow OS carrier role is now explicit under the healing spool;
 arbitrary shell and Python remain unclassified. Evidence was retained. Empty
 process reports no longer claim reconciled timing, and repeat local model
 inventories retain distinct traces.
+
+The change was rebased onto origin/main at 482ec452, keeping upstream's
+selection-aware viewports. The freshness band then returned 15, triggering the
+required rebuild; it returned 31 afterward. Merged alignment returned 4095,
+the upstream view/navigation band 4194303, and the expanded drift gate
+**8191/8191 with zero refusals**. No C-seed delta was introduced. The actual
+live counsel reading was zero orphans and eleven of twelve lanes unobserved
+because no hearth stood. Contribution share remained withheld while carrier
+and coordinate reconciliation was unfinished.
+
+Current machine-readable results, including adapter hashes, stage intervals,
+and offered/selected/applied choices, are retained in
+[the observation record](2026-09-08-native-healing-and-aligned-glass.json).
 
 The exchange stayed alive by turning each refusal into a smaller observable
 check. The surprising teaching was that two matching decoder paths can share
