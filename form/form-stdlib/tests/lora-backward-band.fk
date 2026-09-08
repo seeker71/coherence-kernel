@@ -1,0 +1,96 @@
+; lora-backward-band.fk — the body's own reverse walk over a low-rank pair,
+; every gradient checked against the body's own finite differences. No
+; graphics chip is touched here: hand-written numbers, arithmetic, and the
+; loss recomputed twice per weight to see which way it leans.
+; Expected: 511
+;    1 forward: u = A x, then y = scale B u, exact on written numbers
+;    2 dA matches the finite difference the body computes itself
+;    4 dB matches it
+;    8 dx matches it
+;   16 the cross-entropy gradient p - onehot matches it, logit by logit
+;   32 one descent step lowers the loss on the same row
+;   64 the moved weights round-trip through safetensors and settle
+;  128 a mis-shaped matvec answers nothing rather than a silent partial
+;  256 a target outside the vocabulary answers nothing
+; preludes: form/form-stdlib/lora-backward.bml form/form-stdlib/lora-adapter.bml
+(do
+    (defn lbwb-bit (ok bit) (if ok bit 0))
+    (defn lbwb-close? (a b) (lt (abs (sub a b)) 0.000001))
+    (defn lbwb-agree? (analytic finite)
+        (if (nothing? analytic) 0
+            (if (nothing? finite) 0
+                (if (lt (lbw-reldiff analytic finite) 0.000001) 1 0))))
+    (defn lbwb-eqlist? (xs ys)
+        (if (eq (len xs) (len ys))
+            (if (nil? xs) 1
+                (if (eq (head xs) (head ys)) (lbwb-eqlist? (tail xs) (tail ys)) 0))
+            0))
+    (defn lbwb-nearlist? (xs ys)
+        (if (eq (len xs) (len ys))
+            (if (nil? xs) 1
+                (if (lt (abs (sub (head xs) (head ys))) 0.0000005)
+                    (lbwb-nearlist? (tail xs) (tail ys)) 0))
+            0))
+
+    ; the row: a rank-2 pair on a 3-wide input writing into a 4-wide head
+    (defn lbwb-A () (list 0.5 -0.25 1.0 0.75 0.125 -0.5))
+    (defn lbwb-B () (list 2.0 -1.0 0.25 3.0 -0.5 0.5 1.5 0.0))
+    (defn lbwb-x () (list 1.0 -2.0 0.5))
+    (defn lbwb-z0 () (list 0.1 -0.3 0.7 0.2))
+    (defn lbwb-scale () 0.5)
+    (defn lbwb-target () 2)
+    (defn lbwb-eps () 0.0001)
+
+    ; a finite difference over a logit itself, for the head's own gradient
+    (defn lbwb-fd-z (z t i eps)
+        (div (sub (lbw-ce (lbw-bump z i eps) t)
+                  (lbw-ce (lbw-bump z i (sub 0.0 eps)) t))
+             (mul 2.0 eps)))
+    (defn lbwb-fd-zvec-go (z t eps i n acc)
+        (if (ge i n) (reverse acc)
+            (lbwb-fd-zvec-go z t eps (add i 1) n (cons (lbwb-fd-z z t i eps) acc))))
+    (defn lbwb-fd-zvec (z t eps) (lbwb-fd-zvec-go z t eps 0 (len z) (empty)))
+
+    (defn lbwb-path () (fs-path-join (fs-temp-dir) "lora-backward-band.safetensors"))
+    (defn lbwb-tensors (a b) (list (list "step.lora_a" (list 2 3) a) (list "step.lora_b" (list 4 2) b)))
+    (defn lbwb-readback (path name n)
+        (ln-floats path (la-header-len path) (ln-tensor-begin (la-header path) name) n))
+
+    (let st (lbw-forward (lbwb-A) (lbwb-B) 2 3 4 (lbwb-x) (lbwb-scale)))
+    (let z (lbw-logits (lbwb-z0) (lbwb-A) (lbwb-B) 2 3 4 (lbwb-x) (lbwb-scale)))
+    (let l0 (lbw-loss (lbwb-z0) (lbwb-A) (lbwb-B) 2 3 4 (lbwb-x) (lbwb-scale) (lbwb-target)))
+    (let g (lbw-grad (lbwb-z0) (lbwb-A) (lbwb-B) 2 3 4 (lbwb-x) (lbwb-scale) (lbwb-target)))
+    (let fdA (lbw-fd-vec-a (lbwb-z0) (lbwb-A) (lbwb-B) 2 3 4 (lbwb-x) (lbwb-scale) (lbwb-target) (lbwb-eps)))
+    (let fdB (lbw-fd-vec-b (lbwb-z0) (lbwb-A) (lbwb-B) 2 3 4 (lbwb-x) (lbwb-scale) (lbwb-target) (lbwb-eps)))
+    (let fdx (lbw-fd-vec-x (lbwb-z0) (lbwb-A) (lbwb-B) 2 3 4 (lbwb-x) (lbwb-scale) (lbwb-target) (lbwb-eps)))
+
+    ; one descent step, then the same loss again
+    (let A1 (lbw-sgd (lbwb-A) (lbw-dA g) 0.05))
+    (let B1 (lbw-sgd (lbwb-B) (lbw-dB g) 0.05))
+    (let l1 (lbw-loss (lbwb-z0) A1 B1 2 3 4 (lbwb-x) (lbwb-scale) (lbwb-target)))
+
+    ; the moved weights as an artifact, read back, written again, read again
+    (let wrote1 (ln-write (lbwb-path) (lbwb-tensors A1 B1)))
+    (let rA1 (lbwb-readback (lbwb-path) "step.lora_a" 6))
+    (let rB1 (lbwb-readback (lbwb-path) "step.lora_b" 8))
+    (let wrote2 (ln-write (lbwb-path) (lbwb-tensors rA1 rB1)))
+    (let rA2 (lbwb-readback (lbwb-path) "step.lora_a" 6))
+    (let rB2 (lbwb-readback (lbwb-path) "step.lora_b" 8))
+
+    (sum (list
+        (lbwb-bit (and (lbwb-nearlist? (lbw-u st) (list 1.5 0.25))
+                       (lbwb-nearlist? (lbw-y st) (list 1.375 0.5625 -0.3125 1.125))) 1)
+        (lbwb-bit (eq (lbwb-agree? (lbw-dA g) fdA) 1) 2)
+        (lbwb-bit (eq (lbwb-agree? (lbw-dB g) fdB) 1) 4)
+        (lbwb-bit (eq (lbwb-agree? (lbw-dx g) fdx) 1) 8)
+        (lbwb-bit (eq (lbwb-agree? (lbw-dce z (lbwb-target)) (lbwb-fd-zvec z (lbwb-target) (lbwb-eps))) 1) 16)
+        (lbwb-bit (and (not (nothing? l1)) (lt l1 l0)) 32)
+        (lbwb-bit (and (eq (nth (la-census (lbwb-path)) 7) 1)
+                       (and (lbwb-nearlist? rA1 A1)
+                            (and (lbwb-nearlist? rB1 B1)
+                                 (and (lbwb-eqlist? rA1 rA2) (lbwb-eqlist? rB1 rB2))))) 64)
+        (lbwb-bit (and (nothing? (lbw-mv (lbwb-A) 2 3 (list 1.0 2.0)))
+                       (and (nothing? (lbw-tmv (lbwb-B) 4 2 (list 1.0)))
+                            (nothing? (lbw-dot (list 1.0) (list 1.0 2.0))))) 128)
+        (lbwb-bit (and (nothing? (lbw-ce z 9))
+                       (nothing? (lbw-dce z (sub 0 1)))) 256))))

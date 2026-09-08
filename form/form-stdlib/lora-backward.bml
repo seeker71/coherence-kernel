@@ -1,0 +1,161 @@
+//////////////////////////////////////////////////////////////////////
+// lora-backward.bml — the body's own reverse walk over a low-rank pair.
+//
+// A forward pass is a walk. A backward pass is a second walk in reverse,
+// holding what the first one saw. This cell is that second walk for the
+// one shape LoRA training is made of: a projection's delta
+//
+//     u = A x            (A is rank x in,  row-major)
+//     y = scale * B u    (B is out x rank, row-major)
+//
+// Given the gradient arriving at y, it hands back the gradient of A, of
+// B, and of x, by the chain rule written out:
+//
+//     dB = scale * dy (x) u        dA = du (x) x
+//     du = scale * B^T dy          dx = A^T du
+//
+// The head that turns a projection into a loss lives here too — softmax
+// cross-entropy, whose gradient is p - onehot — and the step that moves
+// the weights.
+//
+// Nothing here asks the graphics chip for anything. Every number is the
+// body's own arithmetic, and every gradient can be checked against the
+// body's own finite differences (lbw-fd-*): the body perturbs one weight
+// by +eps and -eps, recomputes the whole loss twice, and divides. That
+// check needs no oracle and no crossing; it is the arithmetic asking
+// itself.
+//
+// A mis-shaped call refuses. A matvec whose vector is not the matrix's
+// width answers nothing rather than folding over what it was given: a
+// silent partial in a gradient is a wrong direction that still descends
+// somewhere, which is worse than a stop.
+// preludes: form/form-stdlib/core.fk
+//////////////////////////////////////////////////////////////////////
+section [form.bml] {
+    class FormLoraBackwardVec {
+        // ---- vector arithmetic, all consuming walks (no nth in a hot loop) ----
+        def lbw-revonto(xs, acc) = if nil?(xs) then acc else lbw-revonto(tail(xs), cons(head(xs), acc));
+        def lbw-zeros(n, acc) = if le(n, 0) then acc else lbw-zeros(sub(n, 1), cons(0.0, acc));
+        def lbw-scale-go(xs, k, acc) = if nil?(xs) then reverse(acc) else lbw-scale-go(tail(xs), k, cons(mul(head(xs), k), acc));
+        def lbw-scale(xs, k) = lbw-scale-go(xs, k, list());
+        def lbw-dot-go(xs, ys, acc) = if or(nil?(xs), nil?(ys)) then acc else lbw-dot-go(tail(xs), tail(ys), add(acc, mul(head(xs), head(ys))));
+        def lbw-dot(xs, ys) = if eq(len(xs), len(ys)) then lbw-dot-go(xs, ys, 0.0) else nothing();
+        // ys scaled by k added onto xs, elementwise
+        def lbw-axpy-go(xs, ys, k, acc) = if or(nil?(xs), nil?(ys)) then reverse(acc) else lbw-axpy-go(tail(xs), tail(ys), k, cons(add(head(xs), mul(head(ys), k)), acc));
+        def lbw-axpy(xs, ys, k) = if eq(len(xs), len(ys)) then lbw-axpy-go(xs, ys, k, list()) else nothing();
+        def lbw-sub-go(xs, ys, acc) = if or(nil?(xs), nil?(ys)) then reverse(acc) else lbw-sub-go(tail(xs), tail(ys), cons(sub(head(xs), head(ys)), acc));
+        def lbw-sub(xs, ys) = if eq(len(xs), len(ys)) then lbw-sub-go(xs, ys, list()) else nothing();
+        def lbw-maxabs-go(xs, m) = if nil?(xs) then m else lbw-maxabs-go(tail(xs), if gt(abs(head(xs)), m) then abs(head(xs)) else m);
+        def lbw-maxabs(xs) = lbw-maxabs-go(xs, 0.0);
+        // how far two gradients stand apart, relative to the larger of them:
+        // the number a finite-difference check is read by
+        def lbw-reldiff(xs, ys) {
+            let d = lbw-sub(xs, ys);
+            if nothing?(d) then nothing() else lbw-reldiff-of(lbw-maxabs(d), lbw-maxabs(xs), lbw-maxabs(ys));
+        }
+        def lbw-reldiff-of(dm, am, bm) {
+            let scale = if gt(am, bm) then am else bm;
+            if le(scale, 0.0) then dm else div(dm, scale);
+        }
+    }
+    0;
+}
+section [form.bml] {
+    class FormLoraBackwardMat {
+        // M is rows x cols, row-major and flat. y[i] = sum_j M[i][j] x[j]
+        def lbw-mv-go(m, rows, cols, x, acc) = if le(rows, 0) then reverse(acc) else lbw-mv-go(drop(cols, m), sub(rows, 1), cols, x, cons(lbw-dot-go(take(cols, m), x, 0.0), acc));
+        def lbw-mv(m, rows, cols, x) = if and(eq(len(x), cols), eq(len(m), mul(rows, cols))) then lbw-mv-go(m, rows, cols, x, list()) else nothing();
+        // z[j] = sum_i M[i][j] g[i] — the transposed walk, accumulated a row at a time
+        def lbw-tmv-go(m, rows, cols, g, acc) = if le(rows, 0) then acc else lbw-tmv-go(drop(cols, m), sub(rows, 1), cols, tail(g), lbw-axpy-go(acc, take(cols, m), head(g), list()));
+        def lbw-tmv(m, rows, cols, g) = if and(eq(len(g), rows), eq(len(m), mul(rows, cols))) then lbw-tmv-go(m, rows, cols, g, lbw-zeros(cols, list())) else nothing();
+        // O[i][j] = g[i] x[j] — the rank-one outer product a weight gradient is
+        def lbw-outer-go(g, x, acc) = if nil?(g) then reverse(acc) else lbw-outer-go(tail(g), x, lbw-revonto(lbw-scale(x, head(g)), acc));
+        def lbw-outer(g, x) = lbw-outer-go(g, x, list());
+    }
+    0;
+}
+section [form.bml] {
+    class FormLoraBackwardHead {
+        // softmax cross-entropy over a logit vector, and its gradient.
+        // The max comes off first so exp never overflows.
+        def lbw-max-go(xs, m) = if nil?(xs) then m else lbw-max-go(tail(xs), if gt(head(xs), m) then head(xs) else m);
+        def lbw-max(xs) = if nil?(xs) then nothing() else lbw-max-go(tail(xs), head(xs));
+        def lbw-sumexp-go(xs, m, acc) = if nil?(xs) then acc else lbw-sumexp-go(tail(xs), m, add(acc, math_exp(sub(head(xs), m))));
+        def lbw-lse(xs) = lbw-lse-of(xs, lbw-max(xs));
+        def lbw-lse-of(xs, m) = if nothing?(m) then nothing() else add(m, math_log(lbw-sumexp-go(xs, m, 0.0)));
+        def lbw-softmax-go(xs, lse, acc) = if nil?(xs) then reverse(acc) else lbw-softmax-go(tail(xs), lse, cons(math_exp(sub(head(xs), lse)), acc));
+        def lbw-softmax(xs) = lbw-softmax-go(xs, lbw-lse(xs), list());
+        // the loss: -log p[target] written as logsumexp minus the target logit
+        def lbw-ce(z, t) = if or(lt(t, 0), ge(t, len(z))) then nothing() else sub(lbw-lse(z), nth(z, t));
+        // its gradient: p minus the one-hot at the target
+        def lbw-dce-go(p, t, i, acc) = if nil?(p) then reverse(acc) else lbw-dce-go(tail(p), t, add(i, 1), cons(if eq(i, t) then sub(head(p), 1.0) else head(p), acc));
+        def lbw-dce(z, t) = if or(lt(t, 0), ge(t, len(z))) then nothing() else lbw-dce-go(lbw-softmax(z), t, 0, list());
+    }
+    0;
+}
+section [form.bml] {
+    class FormLoraBackwardStep {
+        // ---- the pair, forward and reverse ----
+        // state: (u y) — u is what A read, y is what B wrote
+        def lbw-forward(a, b, rank, din, dout, x, scale) {
+            let u = lbw-mv(a, rank, din, x);
+            if nothing?(u) then nothing() else lbw-forward-y(u, lbw-mv(b, dout, rank, u), scale);
+        }
+        def lbw-forward-y(u, bu, scale) = if nothing?(bu) then nothing() else list(u, lbw-scale(bu, scale));
+        def lbw-u(st) = nth(st, 0);
+        def lbw-y(st) = nth(st, 1);
+        // the reverse walk: (dA dB dx)
+        def lbw-backward(a, b, rank, din, dout, x, u, dy, scale) {
+            let dys = lbw-scale(dy, scale);
+            let dB = lbw-outer(dys, u);
+            let du = lbw-tmv(b, dout, rank, dys);
+            if nothing?(du) then nothing() else lbw-backward-rest(a, rank, din, x, dB, du);
+        }
+        def lbw-backward-rest(a, rank, din, x, dB, du) {
+            let dA = lbw-outer(du, x);
+            let dx = lbw-tmv(a, rank, din, du);
+            if nothing?(dx) then nothing() else list(dA, dB, dx);
+        }
+        def lbw-dA(g) = nth(g, 0);
+        def lbw-dB(g) = nth(g, 1);
+        def lbw-dx(g) = nth(g, 2);
+        // one plain descent step: theta <- theta - lr * grad
+        def lbw-sgd(theta, grad, lr) = lbw-axpy(theta, grad, sub(0.0, lr));
+        // ---- the whole small step, base logits included ----
+        // z = z0 + scale * B (A x); loss = cross entropy at target
+        def lbw-logits(z0, a, b, rank, din, dout, x, scale) = lbw-logits-of(z0, lbw-forward(a, b, rank, din, dout, x, scale));
+        def lbw-logits-of(z0, st) = if nothing?(st) then nothing() else lbw-axpy(z0, lbw-y(st), 1.0);
+        def lbw-loss(z0, a, b, rank, din, dout, x, scale, t) = lbw-loss-of(lbw-logits(z0, a, b, rank, din, dout, x, scale), t);
+        def lbw-loss-of(z, t) = if nothing?(z) then nothing() else lbw-ce(z, t);
+        // the analytic gradient of that loss with respect to A, B and x
+        def lbw-grad(z0, a, b, rank, din, dout, x, scale, t) = lbw-grad-of(z0, a, b, rank, din, dout, x, scale, t, lbw-forward(a, b, rank, din, dout, x, scale));
+        def lbw-grad-of(z0, a, b, rank, din, dout, x, scale, t, st) {
+            if nothing?(st) then nothing() else lbw-grad-dy(a, b, rank, din, dout, x, scale, st, lbw-dce(lbw-axpy(z0, lbw-y(st), 1.0), t));
+        }
+        def lbw-grad-dy(a, b, rank, din, dout, x, scale, st, dy) = if nothing?(dy) then nothing() else lbw-backward(a, b, rank, din, dout, x, lbw-u(st), dy, scale);
+    }
+    0;
+}
+section [form.bml] {
+    class FormLoraBackwardFinite {
+        // ---- the check the body computes itself ----
+        // One entry of one parameter moved by +eps and by -eps, the whole
+        // loss recomputed both times, the difference over 2 eps. Form holds
+        // no first-class functions, so which parameter is bumped is named
+        // rather than passed: A, B, or the input.
+        def lbw-bump-go(xs, i, eps, k, acc) = if nil?(xs) then reverse(acc) else lbw-bump-go(tail(xs), i, eps, add(k, 1), cons(if eq(k, i) then add(head(xs), eps) else head(xs), acc));
+        def lbw-bump(xs, i, eps) = lbw-bump-go(xs, i, eps, 0, list());
+        def lbw-fd-of(lplus, lminus, eps) = if or(nothing?(lplus), nothing?(lminus)) then nothing() else div(sub(lplus, lminus), mul(2.0, eps));
+        def lbw-fd-a(z0, a, b, rank, din, dout, x, scale, t, i, eps) = lbw-fd-of(lbw-loss(z0, lbw-bump(a, i, eps), b, rank, din, dout, x, scale, t), lbw-loss(z0, lbw-bump(a, i, sub(0.0, eps)), b, rank, din, dout, x, scale, t), eps);
+        def lbw-fd-b(z0, a, b, rank, din, dout, x, scale, t, i, eps) = lbw-fd-of(lbw-loss(z0, a, lbw-bump(b, i, eps), rank, din, dout, x, scale, t), lbw-loss(z0, a, lbw-bump(b, i, sub(0.0, eps)), rank, din, dout, x, scale, t), eps);
+        def lbw-fd-x(z0, a, b, rank, din, dout, x, scale, t, i, eps) = lbw-fd-of(lbw-loss(z0, a, b, rank, din, dout, lbw-bump(x, i, eps), scale, t), lbw-loss(z0, a, b, rank, din, dout, lbw-bump(x, i, sub(0.0, eps)), scale, t), eps);
+        // the whole finite-difference gradient of a parameter, entry by entry
+        def lbw-fd-vec-a-go(z0, a, b, rank, din, dout, x, scale, t, eps, i, n, acc) = if ge(i, n) then reverse(acc) else lbw-fd-vec-a-go(z0, a, b, rank, din, dout, x, scale, t, eps, add(i, 1), n, cons(lbw-fd-a(z0, a, b, rank, din, dout, x, scale, t, i, eps), acc));
+        def lbw-fd-vec-a(z0, a, b, rank, din, dout, x, scale, t, eps) = lbw-fd-vec-a-go(z0, a, b, rank, din, dout, x, scale, t, eps, 0, len(a), list());
+        def lbw-fd-vec-b-go(z0, a, b, rank, din, dout, x, scale, t, eps, i, n, acc) = if ge(i, n) then reverse(acc) else lbw-fd-vec-b-go(z0, a, b, rank, din, dout, x, scale, t, eps, add(i, 1), n, cons(lbw-fd-b(z0, a, b, rank, din, dout, x, scale, t, i, eps), acc));
+        def lbw-fd-vec-b(z0, a, b, rank, din, dout, x, scale, t, eps) = lbw-fd-vec-b-go(z0, a, b, rank, din, dout, x, scale, t, eps, 0, len(b), list());
+        def lbw-fd-vec-x-go(z0, a, b, rank, din, dout, x, scale, t, eps, i, n, acc) = if ge(i, n) then reverse(acc) else lbw-fd-vec-x-go(z0, a, b, rank, din, dout, x, scale, t, eps, add(i, 1), n, cons(lbw-fd-x(z0, a, b, rank, din, dout, x, scale, t, i, eps), acc));
+        def lbw-fd-vec-x(z0, a, b, rank, din, dout, x, scale, t, eps) = lbw-fd-vec-x-go(z0, a, b, rank, din, dout, x, scale, t, eps, 0, len(x), list());
+    }
+    0;
+}
