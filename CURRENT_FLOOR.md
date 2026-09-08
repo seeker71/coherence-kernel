@@ -44,7 +44,11 @@ observe/door-link-health-run.bml       -> doors=12 links=63 broken=0 code=120630
 observe/body-link-graph.fk             -> body-link-graph-check 63; blg-field-code 13029046
                                           (13 orphans, 29 broken, 46 candidates; the organ
                                           has no run door — prelude it and call both)
-homecoming-distillation-corpus-band    -> 32767   (asserts 721 rows, 709 admissible)
+homecoming-distillation-corpus-band    -> 32767   (asserts 759 rows, 747 admissible)
+value-eq-arena-band                    -> 31      (a comparison does not depend on where its
+                                                   answer sits: counts, under arena pressure,
+                                                   how often value_eq and str_eq disagree about
+                                                   freshly built values — 0 each; four arms)
 no-fixed-tables-band                   -> 63      (every seed table grows; none is a wall)
 form-cli-author-high-band              -> 4095
 host-os-membrane-band                  -> 8191
