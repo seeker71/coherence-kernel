@@ -272,21 +272,23 @@ LoRA candidates when enabled.
 
 The remote CLI options are verified against the installed `codex exec --help`
 and [official non-interactive documentation](https://learn.chatgpt.com/docs/non-interactive-mode).
-Routing tests use simulated providers, with real Form verification and file
-replacement. They establish ordering and refusal behavior, not model quality.
+Native policy bands check routing decisions. Process and snapshot witnesses
+use real children and disposable files; the curriculum uses real Form checks.
+These establish transport and refusal behavior, not model quality.
 
-Verification doors:
+Verification doors (preflight each FK band before reading its verdict):
 
 ```sh
-form-run ./form/validate.sh form-stdlib/tests/form-cli-heal-policy-band.fk
-form-run ./form/validate.sh form-stdlib/tests/form-cli-heal-resources-band.fk
+form-run sh -c 'printf "%s\n" form/form-stdlib/tests/form-cli-heal-policy-band.fk | ./fkwu observe/preflight-stdin-run.fk'
+form-run ./fkwu form/form-stdlib/tests/form-cli-heal-policy-band.fk
+form-run ./fkwu form/form-stdlib/tests/form-cli-heal-resources-band.fk
 form-run ./fkwu form/form-stdlib/tests/form-cli-heal-load-band.fk
 form-run ./fkwu observe/form-cli-heal-native-io-witness.bml
-form-run ./form/validate.sh form-stdlib/tests/form-cli-heal-eval-policy-band.fk
+form-run ./fkwu form/form-stdlib/tests/form-cli-heal-eval-policy-band.fk
 form-run sh -c 'printf "%s\n" eval | ./fkwu observe/form-cli-heal-run.fk'
-form-run ./form/validate.sh form-stdlib/tests/form-cli-heal-timing-band.fk
+form-run ./fkwu form/form-stdlib/tests/form-cli-heal-timing-band.fk
 form-run ./fkwu observe/form-cli-heal-native-process-witness.bml
-form-run ./form/validate.sh form-stdlib/tests/form-cli-heal-dynamic-band.fk
+form-run ./fkwu form/form-stdlib/tests/form-cli-heal-dynamic-band.fk
 form-run ./fkwu form/form-stdlib/tests/form-cli-heal-flow-band.fk
 form-run ./fkwu form/form-stdlib/tests/qwen-lora-finite-band.fk
 form-run ./fkwu form/native/metal/tests/qwen38-embedding-band.fk
