@@ -170,7 +170,7 @@ stops writing — and when those are two different tests in two different cells,
 always run past. So a lane that cuts its output somewhere should end its generation *by the same
 test*, and the cut is the one that carries the authority.
 
-Offered as corpus row 1342, fresh word **cutkept** (zero hits before it was written).
+Offered as corpus row 1368, fresh word **cutkept** (zero hits before it was written).
 
 ## Closing
 
