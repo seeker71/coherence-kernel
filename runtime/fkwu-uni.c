@@ -9071,6 +9071,193 @@ static long long fk_host_spawn_arm(long long argv155, long long t) {
         waitpid((int)pid155, &st155, 0);
         return fk_sbuf(ob155, tot155);
 }
+/* ── the doors that end the shell ─────────────────────────────────────────────
+ * Three names, modes 17-19 of the leaf door. NO AST TAG WAS TAKEN. The space
+ * 0..255 has nothing to spend: 150 is the reserved native-surface probe and 190
+ * is FK_TAG_CONST_HOLD however free a census of `if (t == N)` sites calls it
+ * (corpus rows 1358 limbkept, 1373 freefeint -- a census that enumerates
+ * occupants in one notation cannot certify a vacancy). So this family rides
+ * float_leaf the way the binary form, substring and the speaking mouth do.
+ *
+ * They exist because observe/form-glass-ear-live.fk stood its two lanes through
+ * `sh -c` -- not to run a shell program, but only to say where the child's three
+ * standard streams go. A lane born holding the parent's own terminal stdin sits
+ * at its first read forever (receipts/2026-09-07-a-lane-born-mute.md, corpus row
+ * 1339 mutebirth). The REASON was sound; the shell was furniture.
+ *
+ *   host_spawn_at argv (list in out err)
+ *       The missing sibling of host_spawn / host_spawn_quiet / host_wait /
+ *       host_kill: fork and execvp the argument list itself -- no shell reads it,
+ *       so a path holding a space or a metacharacter is a path and not a program.
+ *       Each standard stream opens where the caller says; "" keeps the parent's.
+ *       OUT AND ERR OPEN APPEND, because a log that chronicles every life a lane
+ *       has had must not be truncated by the next birth, and an err path
+ *       byte-equal to the out path SHARES the one descriptor -- which is all
+ *       `2>&1` ever meant.
+ *
+ *       Four refusals, each answering its own question, and every one of them
+ *       arriving BEFORE the caller holds a pid it could mistake for a live child:
+ *         -1 the argv      nothing here can be run: not a list, empty, or a
+ *                          word in it is not a string
+ *         -2 the redirect  a stream could not be opened where it was sent
+ *         -3 the fork      the host refused to fork
+ *         -4 the binary    the fork happened and execvp did not
+ *
+ *       The last is why this door carries a pipe. host_spawn answers a pid
+ *       whatever follows, and a missing binary surfaces later as a 127 from
+ *       host_wait -- the very shape the ear cell calls indistinguishable from a
+ *       quiet room. Here the child holds the write end of a close-on-exec pipe:
+ *       a successful execvp closes it and the parent's read gives 0; a failed one
+ *       writes its errno and _exit(127)s, and the parent reaps the corpse and
+ *       answers -4. A lane that could not be born says so AT BIRTH. The cost of
+ *       that honesty is that the door answers after the exec rather than at the
+ *       fork -- and exec is not the child's work, so the whole call still lands
+ *       inside the plain spawn's own millisecond.
+ *
+ *   host_alive pid   1 the pid answers, 0 it is gone, -1 no pid was given.
+ *       kill(pid, 0) delivers no signal. EPERM is a LIVING process that is not
+ *       ours, so it answers 1: "gone" is ESRCH and nothing else. This is the
+ *       whole of what `kill -0 <pid> && printf L` was doing through a fork.
+ *
+ *   fs_mkfifo path   1 the fifo was made, 0 a fifo already stands there,
+ *       -1 refused (the path holds something that is not a fifo, or the host
+ *       said no). A ring into an absent bell leaves a one-byte REGULAR file
+ *       behind and mkfifo over it fails without changing anything; both of the
+ *       ear's bells were found in exactly that state. This door REPORTS what is
+ *       there and never removes a path on its own -- the Form cell decides.
+ */
+static long long fk_host_door(long long mode, long long x) {
+    if (mode == 18) {
+        /* host_alive pid */
+        if ((x & 1) != 0) { return (0 - 1) * 2; }
+        long long pid18 = x >> 1;
+        if (pid18 <= 0) { return (0 - 1) * 2; }
+        if (kill((int)pid18, 0) == 0) { return 1 * 2; }
+        if (errno == ESRCH) { return 0; }
+        return 1 * 2;
+    }
+    if (mode == 19) {
+        /* fs_mkfifo path */
+        static char pf19[FK_PATH_CAP];
+        if (!fk_is_str(x)) { return (0 - 1) * 2; }
+        fk_cstr(x, pf19, FK_PATH_CAP);
+        if (pf19[0] == 0) { return (0 - 1) * 2; }
+        struct stat st19;
+        if (stat(pf19, &st19) == 0) {
+            if (S_ISFIFO(st19.st_mode)) { return 0; }
+            return (0 - 1) * 2;
+        }
+        if (mkfifo(pf19, 0600) == 0) { return 1 * 2; }
+        return (0 - 1) * 2;
+    }
+    if (mode != 17) { return fk_nothing; }
+    /* host_spawn_at (cons argv redirects) */
+    if ((x & 1) == 0 || fk_is_str(x)) { return (0 - 1) * 2; }
+    long long pr17 = x >> 1;
+    if (pr17 < 1 || !FK_POK(pr17)) { return (0 - 1) * 2; }
+    long long argv17 = FK_HH(pr17);
+    long long redir17 = FK_HT(pr17);
+
+    static char ab17[32][1024];
+    char *av17[33];
+    long long n17 = 0;
+    long long p17 = argv17 >> 1;
+    while (p17 >= 1 && FK_POK(p17) && n17 < 32) {
+        if (!fk_is_str(FK_HH(p17))) { return (0 - 1) * 2; }
+        fk_cstr(FK_HH(p17), ab17[n17], 1024);
+        av17[n17] = ab17[n17];
+        n17 = n17 + 1;
+        p17 = FK_HT(p17) >> 1;
+    }
+    av17[n17] = 0;
+    if (n17 == 0 || av17[0][0] == 0) { return (0 - 1) * 2; }
+
+    /* the three redirect paths, in order; a short list leaves the rest inherited */
+    static char rp17[3][FK_PATH_CAP];
+    long long k17 = 0;
+    while (k17 < 3) { rp17[k17][0] = 0; k17 = k17 + 1; }
+    k17 = 0;
+    long long q17 = redir17 >> 1;
+    while (k17 < 3 && q17 >= 1 && FK_POK(q17)) {
+        if (fk_is_str(FK_HH(q17))) { fk_cstr(FK_HH(q17), rp17[k17], FK_PATH_CAP); }
+        k17 = k17 + 1;
+        q17 = FK_HT(q17) >> 1;
+    }
+
+    int rfd17[3];
+    rfd17[0] = -1; rfd17[1] = -1; rfd17[2] = -1;
+    if (rp17[0][0] != 0) {
+        rfd17[0] = open(rp17[0], O_RDONLY);
+        if (rfd17[0] < 0) { return (0 - 2) * 2; }
+    }
+    if (rp17[1][0] != 0) {
+        rfd17[1] = open(rp17[1], O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (rfd17[1] < 0) {
+            if (rfd17[0] >= 0) { close(rfd17[0]); }
+            return (0 - 2) * 2;
+        }
+    }
+    if (rp17[2][0] != 0) {
+        /* the same path twice is one descriptor: that is what 2>&1 meant */
+        if (rfd17[1] >= 0 && fk_cstr_eq(rp17[2], rp17[1])) {
+            rfd17[2] = rfd17[1];
+        } else {
+            rfd17[2] = open(rp17[2], O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (rfd17[2] < 0) {
+                if (rfd17[0] >= 0) { close(rfd17[0]); }
+                if (rfd17[1] >= 0) { close(rfd17[1]); }
+                return (0 - 2) * 2;
+            }
+        }
+    }
+
+    int ef17[2];
+    if (pipe(ef17) != 0) {
+        if (rfd17[0] >= 0) { close(rfd17[0]); }
+        if (rfd17[1] >= 0) { close(rfd17[1]); }
+        if (rfd17[2] >= 0 && rfd17[2] != rfd17[1]) { close(rfd17[2]); }
+        return (0 - 3) * 2;
+    }
+    fcntl(ef17[1], F_SETFD, FD_CLOEXEC);
+
+    long long pid17 = fork();
+    if (pid17 < 0) {
+        close(ef17[0]); close(ef17[1]);
+        if (rfd17[0] >= 0) { close(rfd17[0]); }
+        if (rfd17[1] >= 0) { close(rfd17[1]); }
+        if (rfd17[2] >= 0 && rfd17[2] != rfd17[1]) { close(rfd17[2]); }
+        return (0 - 3) * 2;
+    }
+    if (pid17 == 0) {
+        close(ef17[0]);
+        if (rfd17[0] >= 0) { dup2(rfd17[0], 0); }
+        if (rfd17[1] >= 0) { dup2(rfd17[1], 1); }
+        if (rfd17[2] >= 0) { dup2(rfd17[2], 2); }
+        if (rfd17[0] > 2) { close(rfd17[0]); }
+        if (rfd17[1] > 2) { close(rfd17[1]); }
+        if (rfd17[2] > 2 && rfd17[2] != rfd17[1]) { close(rfd17[2]); }
+        execvp(av17[0], av17);
+        {
+            int en17c = errno;
+            long long w17 = write(ef17[1], &en17c, sizeof(int));
+            (void)w17;
+        }
+        _exit(127);
+    }
+    close(ef17[1]);
+    if (rfd17[0] >= 0) { close(rfd17[0]); }
+    if (rfd17[1] >= 0) { close(rfd17[1]); }
+    if (rfd17[2] >= 0 && rfd17[2] != rfd17[1]) { close(rfd17[2]); }
+    int en17 = 0;
+    long long got17 = read(ef17[0], &en17, sizeof(int));
+    close(ef17[0]);
+    if (got17 == (long long)sizeof(int)) {
+        int st17 = 0;
+        waitpid((int)pid17, &st17, 0);
+        return (0 - 4) * 2;
+    }
+    return pid17 * 2;
+}
 /* ── crystallize-on-boxing: the f64 leaf ─────────────────────────────────────
  * The box ledger is the trigger. fk_fbox charges every float box to the defn
  * running; each time a defn's count crosses a FK_F64_HEAT boundary while it is
@@ -13041,6 +13228,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         /* modes 10-16: the SPEAKING family -- the mouth that answers the sense_mic_* ears.
          * Every sense door in this seed pointed inward until 2026-09-08, so the body's own
          * voice left through afplay. No tag was spendable; see fk_spk_door. */
+        /* modes 17-19: the doors that END THE SHELL -- host_spawn_at, host_alive,
+         * fs_mkfifo. The ear's lanes reached for `sh -c` only to place three file
+         * descriptors and to ask whether a pid answers; see fk_host_door. */
+        if ((fm201 >> 1) >= 17) { return fk_host_door(fm201 >> 1, fx201); }
         if ((fm201 >> 1) >= 10) { return fk_spk_door(fm201 >> 1, fx201); }
         /* modes 4-8: the binary form (value_kind, recipe_to_bytes, bytes_to_recipe,
          * read_form_binary, write_form_binary) -- see fk_fb_door */
