@@ -1044,6 +1044,34 @@ static long long fk_neq(long long a, long long b) {
     }
     return fk_veq(fk_nkids[ia], fk_nkids[ib]);
 }
+/* fk_movable — can a melt take this word's meaning away while it waits?
+ *
+ * The seed reclaims two things mid-run, and each takes a different kind of
+ * word with it: fk_melt compacts the cons arena, so every live PAIR moves and
+ * every pair index changes; fk_smelt hands dead LOCAL string slots back on
+ * fk_sfree, and fk_sintern gives the next string the same index with other
+ * bytes. A word of either kind that an evaluator arm holds in a C local while
+ * it walks something else is a word the reclaimer cannot see and therefore
+ * cannot fix. Everything else keeps its meaning across a melt: ints and floats
+ * carry their value in the word, value nodes never relocate, field strings are
+ * shared by content and are never reclaimed, and nil and nothing are stones.
+ *
+ * Two-arg arms use this to root only when rooting is needed. The int test is
+ * first and is one AND: `eq` and `lt` walk integers in every loop this body
+ * runs, and they must not pay for a hazard they cannot have. */
+static long long fk_movable(long long v) {
+    if ((v & 1) == 0) {
+        return 0;                       /* an int carries itself */
+    }
+    if (v > 1) {
+        return 1;                       /* a cons pair index — the arena compacts */
+    }
+    if (v == 1) {
+        return 0;                       /* nil */
+    }
+    long long si = fk_stri(v);          /* negative and odd: string, node, float, nothing */
+    return (si >= 0 && si < FK_STR_BASE) ? 1 : 0;
+}
 static long long fk_veq(long long a, long long b) {
     if (a == b) {
         return 1;
@@ -9738,7 +9766,39 @@ static long long fk_walk(long long i, long long fp) {
         return 0;
     }
     if (t == 80) {
-        if (fk_veq(fk_walk(fk_node[i][1], fp), fk_walk(fk_node[i][2], fp)) != 0) {
+        /* value_eq / node_eq — THE COMPARISON THAT LIED ONCE IN SEVEN HUNDRED.
+         * This arm used to read
+         *     fk_veq(fk_walk(...[1], fp), fk_walk(...[2], fp))
+         * and that single line carried the whole defect. A walked value is an
+         * INDEX — into the cons arena, or into the string pool — and neither
+         * index survives the other operand's walk on its own:
+         *   • fk_melt relocates every live pair into a fresh arena and rewrites
+         *     its ROOTS in place (the value stack, the memory cells, records,
+         *     value nodes). A first operand living only in a C local is not a
+         *     root, so its index afterwards names whatever now sits at that
+         *     arena position — measured: value_eq of two freshly built lists
+         *     answered false 11 times in 40 under melt pressure;
+         *   • fk_smelt then reclaims every unmarked LOCAL string slot onto
+         *     fk_sfree, and fk_sintern hands that same index to the next
+         *     string with different bytes. Same wound, rarer: the fresh-string
+         *     case is the 1-in-700 that corpus row 1357 (`seldomred`) named.
+         * The cure is the one the cons arm (t == 19) has always used and this
+         * arm never did: push the first operand so the melt can SEE it, and
+         * read it BACK off the stack afterwards, because a melt updates the
+         * stack slot and cannot reach a register. Rooting without reading back
+         * would still compare a stale index — half a cure is none.
+         * The neighbours str_eq/str_concat/str_byte_at (t == 26/27/28) root
+         * but never read back, and stay correct only because they reduce their
+         * operand to a string INDEX before the second walk and string bytes
+         * never move. This arm cannot: it does not know its operands' kind. */
+        long long a80 = fk_walk(fk_node[i][1], fp);
+        fk_vp(a80);
+        long long b80 = fk_walk(fk_node[i][2], fp);
+        fk_vp(b80);
+        a80 = fk_vs[fk_vsp - 2];
+        b80 = fk_vs[fk_vsp - 1];
+        fk_vsp = fk_vsp - 2;
+        if (fk_veq(a80, b80) != 0) {
             return 2;
         }
         return 0;
@@ -9854,8 +9914,25 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 102) {
         { long long r102; if (fk_len_cmp(i, fp, 0, &r102)) { return r102; } }
         /* int/int exact, float promotes — the tag-5 compare law. */
+        /* The first operand waits here while the second is walked, and a walk
+         * can melt. Only a cons index or a local string slot loses its meaning
+         * that way (fk_movable), and `eq` compares integers in every loop this
+         * body runs, so the rooting is paid only by the words that need it.
+         * Unlike t == 80 this shape was NOT witnessed answering wrong — the
+         * probes that made value_eq lie 5 times in 16 could not make `eq` lie
+         * once in 60. It is healed by reading, because the arm holds exactly
+         * the word the melt was proven to take, and a hazard you cannot make
+         * fire is still the hazard whose mechanism you already watched work. */
         long long ae = fk_walk(fk_node[i][1], fp);
-        long long be = fk_walk(fk_node[i][2], fp);
+        long long be;
+        if (fk_movable(ae)) {
+            fk_vp(ae);
+            be = fk_walk(fk_node[i][2], fp);
+            ae = fk_vs[fk_vsp - 1];
+            fk_vsp = fk_vsp - 1;
+        } else {
+            be = fk_walk(fk_node[i][2], fp);
+        }
         if (fk_isf(ae) || fk_isf(be)) {
             return (fk_num(ae) == fk_num(be)) ? 2 : 0;
         }
@@ -9880,9 +9957,18 @@ static long long fk_walk(long long i, long long fp) {
     }
     if (t == 103) {
         { long long r103; if (fk_len_cmp(i, fp, 1, &r103)) { return r103; } }
-        /* int/int exact, float promotes — the tag-5 compare law. */
+        /* int/int exact, float promotes — the tag-5 compare law.
+         * Same rooting as t == 102, same reason, same cost on the int path. */
         long long al = fk_walk(fk_node[i][1], fp);
-        long long bl = fk_walk(fk_node[i][2], fp);
+        long long bl;
+        if (fk_movable(al)) {
+            fk_vp(al);
+            bl = fk_walk(fk_node[i][2], fp);
+            al = fk_vs[fk_vsp - 1];
+            fk_vsp = fk_vsp - 1;
+        } else {
+            bl = fk_walk(fk_node[i][2], fp);
+        }
         if (fk_isf(al) || fk_isf(bl)) {
             return (fk_num(al) < fk_num(bl)) ? 2 : 0;
         }
@@ -17525,11 +17611,36 @@ static int fk_src_collect_preludes(const char *owner_path, const char *text, lon
                                 if (low == 0) {
                                     return 0;
                                 }
+                                /* THE FLAG THAT LANDED ON THE WRONG UNIT.
+                                 * This used to mark fk_src_dep_count - 1 AFTER
+                                 * the call, on the belief that the unit just
+                                 * collected is the last one. It is only the
+                                 * last one when the lowered .bml has no
+                                 * preludes of its own: fk_src_collect_bytes
+                                 * registers the .bml at the count it was
+                                 * handed and THEN collects the .bml's own
+                                 * prelude chain behind it, so for any .bml
+                                 * that preludes anything the flag came to rest
+                                 * on that chain's last transitive dependency —
+                                 * a plain .fk — and the .bml itself stayed
+                                 * unmarked. Both halves of that then went
+                                 * wrong at once: the import lane saw an
+                                 * unmarked .bml among the root's direct
+                                 * dependencies, tried to build a standalone
+                                 * image from its RAW high-grammar bytes (no
+                                 * lowering happens on that path), counted the
+                                 * thousand-odd unresolved calls that must
+                                 * follow, refused the image and fell the whole
+                                 * program back to the flat compile — while a
+                                 * .fk that could have been imaged was carried
+                                 * as text instead. The .bml's index is known
+                                 * before the call; take it there. */
+                                long long bml_idx = fk_src_dep_count;
                                 if (!fk_src_collect_bytes(dep_path, low, low_len,
                                         bml_mtime, low_len, owner_idx)) {
                                     return 0;
                                 }
-                                fk_src_dep_lowered[fk_src_dep_count - 1] = 1;
+                                fk_src_dep_lowered[bml_idx] = 1;
                             }
                         } else if (!fk_src_collect_file(dep_path, owner_idx)) {
                             return 0;
@@ -19146,14 +19257,31 @@ static int fk_src_compile_artifact_only(const char *path) {
         malloc(sizeof(*saved_dep_text_off) * (unsigned long)saved_dep_count) : 0;
     long long *saved_dep_text_len = saved_dep_count > 0 ?
         malloc(sizeof(*saved_dep_text_len) * (unsigned long)saved_dep_count) : 0;
+    /* THE ONE FIELD THE SNAPSHOT FORGOT. Every other dependency column is
+     * saved here and restored below; `lowered` was not. A speculative compile
+     * rebuilds the whole dependency table for ITS unit — setting and clearing
+     * `lowered` for ITS chain — and then hands back a table whose paths,
+     * mtimes, digests, parents, ends and text spans are the caller's again
+     * while the lowered flags belong to somebody else. The import lane reads
+     * those flags immediately afterwards to decide, per unit, image or carry.
+     * A .bml read as a plain .fk is probed as an image it cannot be; a .fk
+     * read as lowered is carried when it could have been imaged; and a unit
+     * that falls between the two decisions is simply absent from the program
+     * that runs, which is what "every later call went numb as
+     * [unresolved-call] with nothing naming the drop" already described from
+     * the far end. Snapshot it like the rest. */
+    long long *saved_dep_lowered = saved_dep_count > 0 ?
+        malloc(sizeof(*saved_dep_lowered) * (unsigned long)saved_dep_count) : 0;
     if (saved_root_text == 0 || saved_srctext == 0 || saved_dep_path == 0 ||
         saved_dep_mtime == 0 || saved_dep_size == 0 || saved_dep_digest == 0 ||
         saved_dep_parent == 0 || saved_dep_end == 0 ||
-        saved_dep_text_off == 0 || saved_dep_text_len == 0) {
+        saved_dep_text_off == 0 || saved_dep_text_len == 0 ||
+        saved_dep_lowered == 0) {
         if (saved_dep_count == 0 && saved_dep_path == 0 &&
             saved_dep_mtime == 0 && saved_dep_size == 0 &&
             saved_dep_digest == 0 && saved_dep_parent == 0 && saved_dep_end == 0 &&
-            saved_dep_text_off == 0 && saved_dep_text_len == 0) {
+            saved_dep_text_off == 0 && saved_dep_text_len == 0 &&
+            saved_dep_lowered == 0) {
             /* zero dependency entries need no snapshot allocation */
         } else {
             fk_die("fk_import_compile: out of memory saving source unit");
@@ -19184,6 +19312,7 @@ static int fk_src_compile_artifact_only(const char *path) {
         saved_dep_end[i] = fk_src_dep_end[i];
         saved_dep_text_off[i] = fk_src_dep_text_off[i];
         saved_dep_text_len[i] = fk_src_dep_text_len[i];
+        saved_dep_lowered[i] = fk_src_dep_lowered[i];
         i = i + 1;
     }
     char source_hash[FK_SRC_HASH_CAP];
@@ -19191,9 +19320,33 @@ static int fk_src_compile_artifact_only(const char *path) {
     char sym_path[FK_PATH_CAP];
     long long unit_mtime = 0;
     int ok = 0;
+    int loaded = 0;
     if (fk_path_replace_ext(compile_path, ".fkb", fkb_path, FK_PATH_CAP) &&
-        fk_path_replace_ext(compile_path, ".sym", sym_path, FK_PATH_CAP) &&
-        fk_src_load_unit(compile_path, source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
+        fk_path_replace_ext(compile_path, ".sym", sym_path, FK_PATH_CAP)) {
+        if (fk_unit_lowers(compile_path)) {
+            /* A UNIT IS LOADED THE WAY IT IS WRITTEN. fk_src_load_unit reads
+             * bytes off disk and hands them to the .fk collector, which is
+             * right for a .fk and blind for a .bml: the brace surface is not
+             * .fk, and a "// preludes:" line is not a ";" comment, so a .bml
+             * loaded that way arrives as a stranger with no prelude chain and
+             * a thousand unresolved names — the count that the import gate's
+             * warning then reported as if it were news about the unit. Lower
+             * it first, through the same in-memory door the root lane uses,
+             * and the unit that gets compiled is the unit that was written. */
+            long long src_m = fk_path_mtime_raw(compile_path);
+            if (src_m > 0) {
+                long long low_len = 0;
+                char *low = fk_bml_lower_to_mem(compile_path, &low_len);
+                if (low != 0) {
+                    loaded = fk_src_load_unit_buffer(compile_path, low, low_len, src_m,
+                            source_hash, FK_SRC_HASH_CAP, &unit_mtime);
+                }
+            }
+        } else {
+            loaded = fk_src_load_unit(compile_path, source_hash, FK_SRC_HASH_CAP, &unit_mtime);
+        }
+    }
+    if (loaded) {
         /* This compile is SPECULATIVE: it builds a candidate per-unit image
          * for the import path. A unit that only resolves inside the root's
          * flat prelude chain (e.g. it carries no "; preludes:" line of its
@@ -19238,6 +19391,7 @@ static int fk_src_compile_artifact_only(const char *path) {
         fk_src_dep_end[i] = saved_dep_end[i];
         fk_src_dep_text_off[i] = saved_dep_text_off[i];
         fk_src_dep_text_len[i] = saved_dep_text_len[i];
+        fk_src_dep_lowered[i] = saved_dep_lowered[i];
         i = i + 1;
     }
     free(saved_root_text);
@@ -19250,6 +19404,7 @@ static int fk_src_compile_artifact_only(const char *path) {
     free(saved_dep_end);
     free(saved_dep_text_off);
     free(saved_dep_text_len);
+    free(saved_dep_lowered);
     return ok;
 }
 static int fk_src_try_import_fkb_images(const char *root_path) {
