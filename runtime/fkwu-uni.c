@@ -731,8 +731,21 @@ static void fk_pv(long long v) {
 static long long fk_arms_private[FK_OPCODE_ARM_CAP];
 static long long *fk_arms = fk_arms_private;   /* per-tag hit counters; the live page own words once it opens */
 /* the once-hold's node tag (declared early: the walker arm reads it far
- * above the const-table machinery that owns the rest of the mechanism). */
-#define FK_TAG_CONST_HOLD 190
+ * above the const-table machinery that owns the rest of the mechanism).
+ *
+ * THIS TAG IS TAKEN, AND IT READS FREE. Every census of the tag space — the
+ * mirror census's arm mirror, and every hand that has grepped this file —
+ * looks for the arm's own spelling, `if (t == 190)`, and this one is spelled
+ * `if (t == FK_TAG_CONST_HOLD)` instead. Three collisions in the week of
+ * 2026-09-05 walked into it, and a fourth on 2026-09-08 took 190 for the
+ * speaking doors and watched every one of them answer its own mode number
+ * back: the once-hold walks a node's first child and returns it, so the
+ * collision is silent, self-consistent and green. The line below is the tag
+ * written in the notation the censuses read, so the number stops feigning
+ * freedom (freefeint, corpus row 1371). It changes no dispatch — the arm it
+ * names is the real one, twelve thousand lines down — and it makes 190 what
+ * it has always been: an arm no op row names. */
+#define FK_TAG_CONST_HOLD 190 /* arm: if (t == 190) — the once-hold, below */
 static long long *fk_mem;
 static long long fk_mem_cap;
 static void fk_mem_reserve(long long need) {
