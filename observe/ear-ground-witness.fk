@@ -1,0 +1,122 @@
+; ear-ground-witness.fk — mouth to standing line, measured in one process.
+;
+; Every end-to-end number this body has for the live path was assembled across processes, and a
+; process boundary costs about seventy milliseconds of its own before anything is measured. This
+; cell holds the mouth and the reader together: it stamps the clock, speaks the line into the
+; room in the body's own voice, stamps the clock again the moment the mouth falls silent, and
+; then watches the ear ground's frame until the words come back. The difference is the whole
+; path — the last sample of the speaking to the words standing where a reader can see them —
+; with no fork between the two stamps.
+;
+; It does not open the microphone; the ground does. If no ground is standing this says so and
+; measures nothing, rather than reporting a room.
+;
+; stdin line 1: the tongue (default en); line 2 and on: the line to speak.
+; Speaks aloud into the room: never preflight it.
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/ear-ground.bml form/form-stdlib/voice-say.bml
+(do
+    (defn egw-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (egw-cat (tail xs)))))
+    (defn egw-trim (s) (if (nothing? s) "" (trim s)))
+    (defn egw-rest (acc) (do (let l (read_line)) (if (nothing? l) acc (egw-rest (if (eq (str_len acc) 0) (trim l) (str_concat acc (str_concat " " (trim l))))))))
+    ; WHAT IS MEASURED, and why it is not the words.
+    ;
+    ; Waiting for the utterance's own words back was tried twice and both attempts measured
+    ; something other than the path. Waiting for its FIRST word measured a negative — the ear
+    ; already had "The ground under the…" while the mouth was still saying the rest. Waiting for
+    ; its LAST word made the answer depend on whether whisper-tiny happened to hear that
+    ; particular word, which on a contended machine it often does not: the reading became a
+    ; transcription score wearing a latency's clothes.
+    ;
+    ; So the question is the one the path actually answers: after the mouth falls silent, how
+    ; long until a COMMITTED line stands where a reader can see it. Both lanes are read for the
+    ; first committed line stamped after the mouth's last sample — the new ground by its close
+    ; reason, the old lane by its `heard` kind — and neither is credited with a line that was
+    ; already there. What was heard is printed beside the number, so a fast wrong line cannot
+    ; hide inside a good one.
+    ;
+    ; answers (ms seq hops line reason found?)
+    (defn egw-watch (h t1 deadline last)
+        (if (gt (now_unix_ms) deadline) (list (sub 0 1) (ggf-seq h) 0 last "" 0)
+            (do (let f (node_gift_read h))
+                (let ok (if (eq (eg-frame-valid? f) 1) 1 0))
+                (let reason (if (eq ok 1) (eg-frame-reason f) ""))
+                (let line (if (eq ok 1) (eg-frame-line f) ""))
+                ; a close reason the ground names, on a frame stamped after the mouth fell silent
+                (if (and (eq ok 1) (and (gt (eg-frame-epoch f) (sub t1 4000)) (eq (eg-close-word? reason) 1)))
+                    (list (sub (eg-frame-epoch f) t1) (ggf-seq h) (eg-frame-hops f) line reason 1)
+                    (do (let w (host_sleep_ms 10))
+                        (egw-watch h t1 deadline (if (gt (str_len line) 0) line last)))))))
+    ; ---- the old ground, read from its own spool, in the SAME room and the same breath ----
+    ; Both lanes stamp every frame they write with their own clock, so the comparison does not
+    ; depend on when this reader happened to look: the number is the frame's own t minus the
+    ; moment the mouth fell silent. Only the tail is read — a spool grows all day.
+    (defn egw-text (t) (if (nothing? t) "" t))
+    (defn egw-spool () ".hearth/ear.spool")
+    (defn egw-tail (n) (do (let sz (file_size (egw-spool))) (if (le sz 0) "" (egw-text (read_file_slice (egw-spool) (if (gt sz n) (sub sz n) 0) (if (gt sz n) n sz))))))
+    (defn egw-field (fr key)
+        (do (let at (str_find fr (str_concat (byte_to_str 10) (str_concat key "=")) 0))
+            (if (lt at 0) ""
+                (do (let from (add at (add 2 (str_len key))))
+                    (let end (str_find fr (byte_to_str 10) from))
+                    (if (lt end 0) (substring fr from (str_len fr)) (substring fr from end))))))
+    ; The old lane's first COMMITTED line stamped after the mouth fell silent: kind=heard, which
+    ; is what that lane calls a line it closed. Frames of kind `spoke` are excluded by name and
+    ; the exclusion is the point — the mouth writes its own words into this same spool so the ear
+    ; is not blind to them, and a first pass at this measurement matched that record and reported
+    ; ZERO milliseconds. Nought was the mouth reading its own handwriting.
+    ; best is (ms line kind found?).
+    (defn egw-scan (frs t1 best)
+        (if (eq (len frs) 0) best
+            (do (let fr (head frs))
+                (let t (do (let s (egw-field fr "t")) (if (eq (str_len s) 0) 0 (str_to_int s))))
+                (let kind (egw-field fr "kind"))
+                (let line (egw-field fr "heard"))
+                (if (and (gt t (sub t1 4000)) (and (str_eq kind "heard") (gt (str_len line) 0)))
+                    (if (eq (nth best 3) 1) best (egw-scan (tail frs) t1 (list (sub t t1) line kind 1)))
+                    (egw-scan (tail frs) t1 best)))))
+    (defn egw-old (t1) (egw-scan (split-on (egw-tail 400000) "<|ear:frame|>") t1 (list (sub 0 1) "" "" 0)))
+    ; the stamp on the newest frame in the spool: the old lane's own pulse, read the same way the
+    ; new ground's sequence is read, so "it heard nothing" and "it is not there" stay apart
+    (defn egw-newest-go (frs best) (if (eq (len frs) 0) best (do (let s (egw-field (head frs) "t")) (let t (if (eq (str_len s) 0) 0 (str_to_int s))) (egw-newest-go (tail frs) (if (gt t best) t best)))))
+    (defn egw-newest-t () (egw-newest-go (split-on (egw-tail 400000) "<|ear:frame|>") 0))
+
+    (let tongue (do (let c (egw-trim (read_line))) (if (eq (str_len c) 0) "en" c)))
+    (let text (egw-rest ""))
+    (let h (ggf-receive (eg-publisher)))
+    (if (nothing? h)
+        (print_str "no ear ground is standing — nothing to measure. Stand observe/ear-ground-live.fk first.")
+        (do (let s0 (ggf-seq h))
+            (let w0 (host_sleep_ms (mul 2 (EGCadenceMs))))
+            (let s1 (ggf-seq h))
+            (let word (eg-standing 1 s1 s0 0))
+            (if (eq (eg-alive? word) 0)
+                (print_str (egw-cat (list "the ear ground is " word " — " (eg-word-note word) ". Measuring nothing.")))
+                (do (let t0 (now_unix_ms))
+                    (let said (vs-say-tongues tongue text))
+                    (let t1 (now_unix_ms))
+                    (let r (egw-watch h t1 (add t1 15000) ""))
+                    (print_str (egw-cat (list "spoke [" tongue "] " text)))
+                    (print_str (egw-cat (list "  the mouth took        " (int_to_str (sub t1 t0)) " ms")))
+                    ; a NEGATIVE reading is not a failure and not zero: it means the ear had the
+                    ; whole line before the mouth had finished saying it, and the honest thing is
+                    ; to say so by that many milliseconds rather than to floor it
+                    (if (eq (nth r 5) 0)
+                        (print_str (egw-cat (list "  new ground: the words never came back within 15 s; its last line was |" (nth r 3) "|")))
+                        (do (print_str (egw-cat (list "  NEW GROUND mouth to line " (int_to_str (head r)) " ms"
+                            (if (lt (head r) 0) "  (the ear had the line before the mouth finished)" ""))))
+                            (print_str (egw-cat (list "    |" (nth r 3) "|  (" (nth r 4) ", hop " (int_to_str (nth r 2)) ")")))))
+                    ; and the old lane, in the same room and the same breath, from its own spool
+                    (let o (egw-old t1))
+                    ; the old lane is held to the same standard as the new one: a spool that
+                    ; stopped moving is not a lane that heard nothing, and the two are said apart
+                    (if (lt (head o) 0)
+                        (print_str (egw-cat (list "  old lane:   "
+                            (if (le (file_size (egw-spool)) 0) "no spool stands — the live lane never ran in this cwd"
+                                (if (gt (sub (now_unix_ms) (egw-newest-t)) 3000)
+                                    (egw-cat (list "its spool stopped " (int_to_str (div (sub (now_unix_ms) (egw-newest-t)) 1000)) " s ago — the live lane is not standing, so this is absence and not a quiet room"))
+                                    "standing, but it committed no line after the mouth within the watch")))))
+                        (do (print_str (egw-cat (list "  OLD LANE   mouth to line " (int_to_str (head o)) " ms")))
+                            (print_str (egw-cat (list "    |" (nth o 1) "|  (" (nth o 2) ")")))))))
+            (let rel (ggf-release h))
+            0)))

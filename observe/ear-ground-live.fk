@@ -1,0 +1,178 @@
+; ear-ground-live.fk — the re-envisioned ground, standing beside the live lane rather than
+; replacing it. One process holds the microphone, the model and its reader's frame for its whole
+; life, and pays each open once.
+;
+; What it does differently, and only these three things, so the measurement is readable:
+;
+;   it does not fork.   The live lane writes each frame to a spool and rings a fifo by forking a
+;                       shell; measured from inside a process holding the model that fork is
+;                       7.5 ms, and a live frame rings two. Here the line crosses a gift frame on
+;                       a handle opened once at birth: 200 writes measured under one millisecond,
+;                       under 5 us each. The cell crosses as a cell — no wire, no parser.
+;   it does not wait    three hops to act on a signal the decoder already gave. The decoder ends
+;                       a segment with its own timestamp token; the live lane reads that token and
+;                       then holds it behind three more hops of agreeing text — 405 ms. Acting on
+;                       the raw signal was tried here and the room refused it: nineteen shattered
+;                       lines in eight seconds, most of them "[INAUDIBLE]". The signal says this
+;                       window holds a complete segment, not that the speaker stopped. So ONE
+;                       confirming hop stands where three did, 270 ms moves, and the guard the
+;                       third hop was really performing is kept rather than discovered again.
+;   it says when it     is not standing. A resident holding everything is one point of failure,
+;                       and a lane that dies quietly reads exactly like a quiet room (mutebirth,
+;                       corpus row 1339). So the frame's sequence advances EVERY hop whether or
+;                       not the line moved, its epoch is the hop's own clock, and it carries this
+;                       process's pid. A reader that finds no frame says absent; one whose
+;                       sequence stopped says silent. Neither is ever shown as a room.
+;
+; What it does NOT change: the window is still eight seconds and the microphone is still read in
+; the granule the seed hands out. Both were measured (observe/ear-ground-floor-probe.fk) and both
+; are named in ear-ground.bml's ledger — the window because it turned out to cost 5 ms and not
+; the compute lever it was believed to be, the granule because it is one integer in the C seed
+; and another hand owns that.
+;
+; stdin line 1: seconds to stand (default 86400). Opens the microphone: never preflight it.
+; preflight-exec: forbidden
+; preludes: form/form-stdlib/ear-native.fk form/form-stdlib/ear-ground.bml
+(do
+    (defn egl-window () 256000)
+    (defn egl-chunk () 3200)
+    (defn egl-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (egl-cat (tail xs)))))
+    (defn egl-snap ()
+        (str_concat "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/snapshots/"
+            (trim (en-text (read_file "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/refs/main")))))
+    (defn egl-tok () "/Users/ursmuff/.mlx-venv/lib/python3.14/site-packages/mlx_whisper/assets/multilingual.tiktoken")
+    ; ---- the window, held as the mic's own chunks, oldest first ----
+    (defn egl-wlen (win) (if (eq (len win) 0) 0 (add (str_len (head win)) (egl-wlen (tail win)))))
+    (defn egl-cut (win excess)
+        (if (or (le excess 0) (eq (len win) 0)) win
+            (if (ge excess (str_len (head win))) (egl-cut (tail win) (sub excess (str_len (head win))))
+                (cons (substring (head win) excess (str_len (head win))) (tail win)))))
+    (defn egl-push (win fresh) (do (let w1 (append win (list fresh))) (egl-cut w1 (sub (egl-wlen w1) (egl-window)))))
+    ; ---- the level, over the newest 300 ms, every fourth sample ----
+    (defn egl-s16 (s i) (do (let v (add (str_byte_at s i) (mul 256 (str_byte_at s (add i 1))))) (if (ge v 32768) (sub v 65536) v)))
+    (defn egl-sumsq (s i end acc) (if (ge i end) acc (do (let v (egl-s16 s i)) (egl-sumsq s (add i 8) end (add acc (mul v v))))))
+    (defn egl-newest (rwin need acc) (if (or (le need 0) (eq (len rwin) 0)) acc (egl-newest (tail rwin) (sub need (str_len (head rwin))) (cons (head rwin) acc))))
+    (defn egl-sumsq-all (xs acc) (if (eq (len xs) 0) acc (egl-sumsq-all (tail xs) (egl-sumsq (head xs) 0 (str_len (head xs)) acc))))
+    (defn egl-isqrt (v lo hi) (if (ge lo hi) lo (do (let mid (div (add lo (add hi 1)) 2)) (if (gt (mul mid mid) v) (egl-isqrt v lo (sub mid 1)) (egl-isqrt v mid hi)))))
+    (defn egl-rms (win) (do (let xs (egl-newest (reverse win) 9600 (list))) (let cnt (div (egl-wlen xs) 8)) (if (le cnt 0) 0 (egl-isqrt (div (egl-sumsq-all xs 0) cnt) 0 32768))))
+    (defn egl-db-rows () (list (list -6 16422) (list -12 8231) (list -18 4125) (list -24 2067) (list -30 1036) (list -36 519) (list -42 260) (list -48 130) (list -54 65) (list -60 33)))
+    (defn egl-db-go (rows rms) (if (eq (len rows) 0) -120 (if (ge rms (nth (head rows) 1)) (head (head rows)) (egl-db-go (tail rows) rms))))
+    (defn egl-db (rms) (egl-db-go (egl-db-rows) rms))
+    ; ---- the gate, taken from the lane that owns the listening ----
+    ; This ground was first stood with the fixed rms 58 the live lane carried, and its first five
+    ; witnesses were measured against it. In the same hour the hand that owns that lane found what
+    ; the number was doing: this room reads rms 55-98 when nobody is speaking, so a fixed 58 called
+    ; every hop VOICE, refreshed the last-voice stamp forever, and made the 500 ms pause unable to
+    ; fire at all — the close fell through to the window filling. A ground measured against a gate
+    ; that cannot close is not ground, so this takes their shape (observe/ear-live-native.fk, on
+    ; main): the room's own quiet times four, never under a floor, and the floor learns ONLY on
+    ; hops already called quiet so a voice can never pull the gate up behind itself.
+    (defn egl-gate-mult () 4)
+    (defn egl-gate-floor () 100)
+    (defn egl-floor-next (fl r voice) (if (eq voice 1) fl (if (lt r fl) (div (add fl (mul r 3)) 4) (div (add (mul fl 7) r) 8))))
+    (defn egl-gate (fl) (do (let g (mul fl (egl-gate-mult))) (if (lt g (egl-gate-floor)) (egl-gate-floor) g)))
+    (defn egl-rms-of (s) (do (let n (str_len s)) (if (le n 0) 0 (egl-isqrt (div (egl-sumsq s 0 n 0) (div n 8)) 0 32768))))
+    ; ---- the tiny model loops on faint sound: keep the line up to its first repeated span ----
+    (defn egl-bare (w) (do (let n (str_len w)) (if (eq n 0) w (do (let z (str_byte_at w (sub n 1))) (if (or (eq z 46) (or (eq z 44) (or (eq z 63) (eq z 33)))) (substring w 0 (sub n 1)) w)))))
+    (defn egl-join (xs) (if (eq (len xs) 0) "" (if (eq (len (tail xs)) 0) (head xs) (str_concat (head xs) (str_concat " " (egl-join (tail xs)))))))
+    (defn egl-take (xs n) (if (or (eq n 0) (eq (len xs) 0)) (list) (cons (head xs) (egl-take (tail xs) (sub n 1)))))
+    (defn egl-span-eq (ws L k) (if (ge k L) 1 (if (str_eq (egl-bare (nth ws k)) (egl-bare (nth ws (add L k)))) (egl-span-eq ws L (add k 1)) 0)))
+    (defn egl-loop-at (ws L) (if (gt L 12) 0 (if (lt (len ws) (mul 2 L)) 0 (if (and (eq (egl-span-eq ws L 0) 1) (or (gt L 1) (and (ge (len ws) 3) (str_eq (egl-bare (nth ws 0)) (egl-bare (nth ws 2)))))) L (egl-loop-at ws (add L 1))))))
+    (defn egl-unloop-go (ws acc) (if (lt (len ws) 2) (egl-join (append acc ws)) (do (let L (egl-loop-at ws 1)) (if (gt L 0) (str_concat (egl-join (append acc (egl-take ws L))) " …") (egl-unloop-go (tail ws) (append acc (list (head ws))))))))
+    (defn egl-unloop (s) (egl-unloop-go (split-on s " ") (list)))
+    ; ---- one pass: (tongue line encms decms ntok endsign nsp) ----
+    (defn egl-tick (total wlen cut) (do (let start (sub total wlen)) (let rel (sub cut start)) (if (le rel 0) 0 (div rel 640))))
+    (defn egl-hear (st win tick cap)
+        (do (let t0 (now_unix_ms))
+            (let Te (enw-encode-parts st win (egl-window)))
+            (let t1 (now_unix_ms))
+            (let r (enw-transcribe-from2 st Te tick cap (sub 0 1) (list)))
+            (let t2 (now_unix_ms))
+            (list (enw-lang-code (head r)) (egl-unloop (trim (enw-heard st r))) (sub t1 t0) (sub t2 t1) (len (nth r 1))
+                  (enw-last-ts (nth r 1)) (float_to_int (mul (enw-nospeech-prob r) 1000.0)))))
+    ; ---- the give: one write on the handle opened at birth. No spool, no fifo, no fork. ----
+    (defn egl-give (h pid hops closes db tongue line reason)
+        (if (nothing? h) (sub 0 1) (node_gift_write h (eg-frame (now_unix_ms) pid hops closes db tongue line reason))))
+    ; ---- the hop ----
+    ; carried: st h pid birth win total cut speech lastvoice deadline hops closes lasth stable
+    (defn egl-loop (st h pid birth win total cut speech lastvoice deadline hops closes lasth stable fl)
+        (if (gt (now_unix_ms) deadline) (list hops closes)
+            (do (let fresh (sense_mic_stream_read (egl-chunk) 120))
+                (if (eq (str_len fresh) 0)
+                    (do (let g (egl-give h pid hops closes -120 "" (if (eq (len lasth) 0) "" (nth lasth 1)) "waiting"))
+                        (egl-loop st h pid birth win total cut speech lastvoice deadline (add hops 1) closes lasth stable fl))
+                    (do (let total1 (add total (str_len fresh)))
+                        (let w1 (egl-push win fresh))
+                        (let rms (egl-rms w1))
+                        (let db (egl-db rms))
+                        ; the gate reads the FRESH 100 ms chunk against the room's own learned
+                        ; quiet; the three-chunk rms above stays the level the frame reports
+                        (let voice (if (gt (egl-rms-of fresh) (egl-gate fl)) 1 0))
+                        (let fl1 (egl-floor-next fl (egl-rms-of fresh) voice))
+                        (let speech1 (if (eq voice 1) 1 speech))
+                        (let lastvoice1 (if (eq voice 1) (now_unix_ms) lastvoice))
+                        (if (and (eq speech1 1) (ge (sub total1 cut) 9600))
+                            (do (let hr (egl-hear st w1 (egl-tick total1 (egl-wlen w1) cut) (add 8 (div (sub total1 cut) 2000))))
+                                (let now (now_unix_ms))
+                                (let full (if (ge (sub total1 cut) (egl-window)) 1 0))
+                                ; THE CLOSE. The decoder's own end-of-line timestamp leads, and ONE
+                                ; confirming hop stands behind it where three used to. Closing on the
+                                ; raw signal was tried in this room on 2026-09-08 and it shattered
+                                ; nineteen lines in eight seconds, most of them "[INAUDIBLE]" — the
+                                ; signal means this window holds a complete segment, not that the
+                                ; speaker stopped. Silence and a full window remain the fallbacks for a
+                                ; line the model never closed itself.
+                                (let stable1 (if (and (gt (len lasth) 0) (str_eq (nth hr 1) (nth lasth 1))) (add stable 1) 0))
+                                (let reason (eg-close-new (nth hr 5) stable1 (sub now lastvoice1) full))
+                                (let has (if (gt (str_len (nth hr 1)) 0) 1 0))
+                                (let best (if (eq has 1) hr lasth))
+                                ; Every hop gives, so the sequence is a clock a reader can trust.
+                                ; The reason word on THIS frame must be what the hop did, not what
+                                ; the policy said: a hop that met a close condition with no words to
+                                ; commit does not commit, and an early version wrote "silence" on it
+                                ; anyway. A reader watching for a committed line then read an empty
+                                ; frame as a finished one and measured 11216 ms to a line that was
+                                ; never there. A word that does not match the world is the whole
+                                ; wound this ground was built to name, and it was in the ground.
+                                (let did (if (and (eq (eg-closed? reason) 1) (gt (len best) 0)) reason "growing"))
+                                (let g (egl-give h pid hops closes db (head hr) (nth hr 1) did))
+                                (if (and (eq (eg-closed? reason) 1) (eq (len best) 0))
+                                    (egl-loop st h pid birth w1 total1 (sub total1 (egl-chunk)) 0 lastvoice1 deadline (add hops 1) closes (list) 0 fl1)
+                                    (if (eq (eg-closed? reason) 1)
+                                        (do (let gc (egl-give h pid (add hops 1) (add closes 1) db (head best) (nth best 1) reason))
+                                            ; HOW FAR BEHIND THE ROOM THIS LANE IS. A hop consumes
+                                            ; 3200 bytes — exactly 100 ms of 16 kHz s16 — so a lane
+                                            ; whose hop costs more than 100 ms falls behind the
+                                            ; diaphragm and never catches up: the backlog sits in the
+                                            ; ring and every later reading is that much stale. It is
+                                            ; the one delay a lane can measure about ITSELF, and it is
+                                            ; invisible in every axis that times a pass. bytes/32 is
+                                            ; the milliseconds of audio consumed; the wall clock since
+                                            ; birth is the milliseconds that happened.
+                                            (let lag (sub (sub now birth) (div total1 32)))
+                                            (let said (print_str (egl-cat (list "closed on " reason " after " (int_to_str (nth hr 4)) " tokens, " (int_to_str lag) " ms behind the room: " (nth best 1)))))
+                                            (egl-loop st h pid birth w1 total1 (sub total1 (egl-chunk)) 0 lastvoice1 deadline (add hops 2) (add closes 1) (list) 0 fl1))
+                                        (egl-loop st h pid birth w1 total1 cut speech1 lastvoice1 deadline (add hops 1) closes best stable1 fl1))))
+                            (do (let g (egl-give h pid hops closes db "" "" "quiet"))
+                                (egl-loop st h pid birth w1 total1 (if (eq speech1 1) cut (sub total1 (egl-chunk))) speech1 lastvoice1 deadline (add hops 1) closes lasth stable fl1))))))))
+    (defn egl-first-line () (do (let l (read_line)) (if (nothing? l) "" (trim l))))
+
+    (let secs (do (let l (egl-first-line)) (if (eq (str_len l) 0) 86400 (str_to_int l))))
+    (let b0 (now_unix_ms))
+    (let st (enw-open (str_concat (egl-snap) "/weights.npz") (egl-tok)))
+    (let b1 (now_unix_ms))
+    (let mic (sense_mic_stream_start))
+    (let b2 (now_unix_ms))
+    (let h (ggf-offer (eg-publisher) 262144))
+    (let b3 (now_unix_ms))
+    (let pid (host_pid))
+    ; the ground names its own birth in its own voice, so a reader is never left to infer it
+    (let said (print_str (egl-cat (list "ear ground standing, pid " (int_to_str pid)
+        "  model " (int_to_str (sub b1 b0)) " ms, mic " (int_to_str (sub b2 b1)) " ms, frame " (int_to_str (sub b3 b2))
+        " ms, open total " (int_to_str (sub b3 b0)) " ms  |  " (if (nothing? h) "NO FRAME OFFERED — no reader can see this ground" (eg-publisher))))))
+    (let g0 (egl-give h pid 0 0 -120 "" "" "born"))
+    (let r (egl-loop st h pid (now_unix_ms) (list) 0 0 0 (now_unix_ms) (add (now_unix_ms) (mul 1000 secs)) 1 0 (list) 0 (egl-gate-floor)))
+    (let stopmic (sense_mic_stream_stop))
+    (let rel (ggf-release h))
+    (print_str (egl-cat (list "ear ground done, hops " (int_to_str (head r)) ", lines closed " (int_to_str (nth r 1)))))
+    0)

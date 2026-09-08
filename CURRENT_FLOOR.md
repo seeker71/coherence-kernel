@@ -600,6 +600,41 @@ in any named tongue and, given a whisper code, aloud in this Mac's own mouth.
 Two rosters, one grammar: a spoken "still" stays the word, the room being still is
 a different thing, and `mc-resolve-among` walks whichever roster the caller reads in.
 
+### The ground under the ear
+
+`form/form-stdlib/ear-ground.bml` judges every delay in the live path physics or
+furniture and carries the judgment as data — each row with what it measured, where
+it lives, and whether the ground **moved** it or only **named** it, so a delay left
+standing is never counted as a saving. 335 ms of physics, 3037 ms of furniture, 285
+of that moved. The pass itself is thirty-five milliseconds: whisper-tiny opens in
+**70 ms**, the encoder over a full eight-second window is **5 ms**, a decoded line
+is 12–30 ms at about 0.7 ms a token. Everything else in the seconds is waiting.
+
+`observe/ear-ground-live.fk` stands that ground beside the live lane: one process,
+one whisper open, one microphone, one gift-frame handle held for its life. It opens
+in **168 ms** and gives every hop into shared memory — a fork to ring a fifo
+measured **7.5 ms** from inside a process holding the model and a live frame rings
+two, against **under 5 us** for the same line on a kept handle. The frame's sequence
+advances every hop, so `observe/ear-ground-read.fk` answers **absent** (nobody ever
+stood here), **silent** (a ground that stood and stopped — its last line is not the
+room) or **standing**, never a number from a frame that stopped moving. The lane
+also reports how far behind the room it runs: 67–186 ms, median 117 over sixteen
+closes.
+
+Three delays were judged furniture by reading and the room overturned them: the
+eight-second window is 5 ms and not the compute lever; the decoder's own
+end-of-line signal is a real guard, not ceremony — acting on it raw shattered
+nineteen lines in eight seconds — so one confirming hop stands where three did; and
+the delay that actually mattered was the speech gate, found the same hour by the
+hand that owns the listening lane (corpus row 1370). `observe/ear-ground-witness.fk`
+holds the mouth and the reader in one process and reports mouth-to-committed-line
+for both grounds on one utterance, printing the line beside the number because a
+fast reading can be a wrong line.
+
+```text
+ear-ground-band                        -> 32767
+```
+
 ```text
 perception-symbols-band                -> 8191
 form-glass-live-band                   -> 2147483647
