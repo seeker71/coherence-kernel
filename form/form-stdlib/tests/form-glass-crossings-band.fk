@@ -1,0 +1,141 @@
+; form-glass-crossings-band.fk — the crossing lens: what goes over the
+; membrane, by type, shape, volume, time and source.
+;
+; Every fact this lens folds is one a crossing already left behind: the frame's
+; sequence is how many times it was given, the snapshot's sample count is how
+; many rows rode each give, the sample kinds are the shapes, the membrane's own
+; suffixes tell a control surface from a publisher, and fgtm-read-age is the
+; time. Nothing here is sampled and nothing is estimated.
+;
+; Bits 1..1024 are pure over a fixture. Bit 2048 crosses for real: a fixture is
+; published into a band-private space and read back through the lens, so the
+; volume the lens reports is a give that actually happened.
+;
+; Expected: 4095
+;
+;   1     a crossing carries source, type, gives, rows, age and shapes, and the
+;         traffic it reports is gives TIMES rows -- the rows really crossed
+;   2     by TYPE: a control inbox and its ack are told from a publisher by the
+;         membrane's own suffixes, never by a list written in the lens
+;   4     by SOURCE: each giver's traffic, and the total over all of them
+;   8     by SHAPE: a kind's traffic is its count in the frame times the frame's
+;         gives -- ninety-five rows given a thousand times is ninety-five
+;         thousand crossings of that shape
+;   16    by VOLUME: each surface falls in one bucket and the buckets partition
+;   32    by TIME: never, this-second, this-minute, this-hour, older
+;   64    a surface silent past the window is not LIVE, so its lifetime count is
+;         history and never present load
+;   128   attention names the heaviest LIVE surface, and a corpse with more
+;         lifetime traffic never takes that place
+;   256   the largest bin of a histogram is found, and an empty one answers empty
+;   512   live traffic and standing traffic are different totals when a corpse
+;         stands in the space
+;   1024  a frame that never stood reads age -1, bucket "never", and no shapes
+;   2048  the lens reads a REAL crossing: published into a band-private space,
+;         read back, and the give it counts is the one that happened
+;
+; preludes: form/form-stdlib/form-glass-crossings.bml
+
+(do
+    (defn xb (ok bit) (if ok bit 0))
+    (defn kinds2 (a n b m) (list (list a n) (list b m)))
+
+    ; ---- the fixture: four surfaces, the shapes a body actually gives
+    (let organs (fgx-crossing "organs" "snapshot" 1000 153 341 (kinds2 "recipe" 95 "event" 32)))
+    (let gov (fgx-crossing "resource.governor" "snapshot" 500 10 778 (kinds2 "pressure" 1 "admission" 1)))
+    (let dead (fgx-crossing "choices" "snapshot" 1414 18 108024087 (kinds2 "choice" 8 "finding" 7)))
+    (let inbox (fgx-crossing "glass-monitor.glass-control-inbox" "control-inbox" 64 0 -1 (list)))
+    (let ack (fgx-crossing "glass-monitor.glass-control-ack" "control-ack" 724 0 -1 (list)))
+    (let cs (list organs gov dead inbox ack))
+
+    (let byType (fgx-by-type cs (list)))
+    (let bySource (fgx-by-source cs (list)))
+    (let byShape (fgx-by-shape cs (list)))
+    (let byVolume (fgx-by-volume cs (list)))
+    (let byTime (fgx-by-time cs (list)))
+
+    (let b1 (xb (and (str_eq (fgx-source organs) "organs")
+              (and (eq (fgx-crossing? organs) 1)
+              (and (eq (fgx-gives organs) 1000)
+              (and (eq (fgx-rows organs) 153)
+                   (eq (fgx-row-crossings organs) 153000))))) 1))
+
+    ; the membrane's own suffixes name a control surface
+    (let b2 (xb (and (str_eq (fgx-surface-type "glass-monitor.glass-control-inbox") "control-inbox")
+              (and (str_eq (fgx-surface-type "glass-monitor.glass-control-ack") "control-ack")
+              (and (str_eq (fgx-surface-type "organs") "snapshot")
+                   (eq (fgx-bin-of byType "snapshot") (add 153000 (add 5000 25452)))))) 2))
+
+    (let b3 (xb (and (eq (fgx-bin-of bySource "organs") 153000)
+              (and (eq (fgx-bin-of bySource "resource.governor") 5000)
+              (and (eq (len bySource) 5)
+                   (eq (fgx-total bySource) (fgx-total byType))))) 4))
+
+    ; a shape's traffic is its rows times its frame's gives
+    (let b4 (xb (and (eq (fgx-bin-of byShape "recipe") 95000)
+              (and (eq (fgx-bin-of byShape "event") 32000)
+              (and (eq (fgx-bin-of byShape "pressure") 500)
+                   (eq (fgx-bin-of byShape "choice") (mul 8 1414))))) 8))
+
+    (let b5 (xb (and (eq (fgx-bin-of byVolume "over-10m") 0)
+              (and (eq (fgx-bin-of byVolume "under-1k") 2)
+              (and (eq (fgx-bin-of byVolume "under-100k") 2)
+              (and (eq (fgx-bin-of byVolume "under-10m") 1)
+                   (eq (fgx-total byVolume) 5))))) 16))
+
+    (let b6 (xb (and (eq (fgx-bin-of byTime "this-second") 2)
+              (and (eq (fgx-bin-of byTime "older") 1)
+              (and (eq (fgx-bin-of byTime "never") 2)
+              (and (eq (fgx-total byTime) 5)
+              (and (str_eq (fgx-age-bucket 30000) "this-minute")
+              (and (str_eq (fgx-age-bucket 600000) "this-hour")
+                   (str_eq (fgx-age-bucket 108024087) "older"))))))) 32))
+
+    ; a corpse's lifetime traffic is history, not load
+    (let b7 (xb (and (eq (fgx-live? organs) 1)
+              (and (eq (fgx-live? gov) 1)
+              (and (eq (fgx-live? dead) 0)
+                   (eq (fgx-live? inbox) 0)))) 64))
+
+    ; the heaviest LIVE surface, even though the corpse has crossed more rows
+    (let heavier (fgx-crossing "corpse" "snapshot" 100000 100 999999999 (list)))
+    (let b8 (xb (and (str_eq (fgx-source (fgx-attention cs)) "organs")
+              (and (gt (fgx-row-crossings heavier) (fgx-row-crossings organs))
+                   (str_eq (fgx-source (fgx-attention (cons heavier cs))) "organs"))) 128))
+
+    (let b9 (xb (and (str_eq (fgx-bin-label (fgx-largest byShape (list))) "recipe")
+              (and (eq (len (fgx-largest (list) (list))) 0)
+                   (eq (fgx-total (list)) 0))) 256))
+
+    (let b10 (xb (and (eq (fgx-live-traffic cs) (add 153000 5000))
+                 (and (eq (fgx-standing-traffic cs) (add 153000 (add 5000 25452)))
+                      (gt (fgx-standing-traffic cs) (fgx-live-traffic cs)))) 512))
+
+    ; ---- a surface that never stood
+    (let root (str_concat "/tmp/form-glass-crossings-band." (int_to_str (host_pid))))
+    (let absent (fgx-read-crossing root "never.stood" (now_unix_ms)))
+    (let b11 (xb (and (eq (fgx-age absent) -1)
+                 (and (str_eq (fgx-age-bucket (fgx-age absent)) "never")
+                 (and (eq (fgx-rows absent) 0)
+                      (eq (len (fgx-shapes absent)) 0)))) 1024))
+
+    ; ---- a real crossing: publish, then read the give the lens counts
+    (defn xb-sample (id kind)
+        (fgtm-sample id (fgtm-absent) kind "membrane" "band" "lane" "crossing"
+            (fgtm-absent) (fgtm-absent) "active" (fgtm-present 1) (fgtm-present 1)
+            (fgtm-absent) (fgtm-absent) "never" "declared" "band" (list "crossing")))
+    (let rows (list (xb-sample "a.one" "metric") (xb-sample "a.two" "metric") (xb-sample "a.three" "event")))
+    (let put1 (fgtm-publish-snapshot root "band.crossing" (now_unix_ms) rows))
+    (let put2 (fgtm-publish-snapshot root "band.crossing" (now_unix_ms) rows))
+    (let crossed (fgx-read-crossing root "band.crossing" (now_unix_ms)))
+    (let b12 (xb (and (str_eq (nth put2 1) "published")
+                 (and (eq (fgx-rows crossed) 3)
+                 (and (ge (fgx-gives crossed) 2)
+                 (and (eq (fgx-bin-of (fgx-shapes crossed) "metric") 2)
+                 (and (le (fgx-age crossed) 2000)
+                      (eq (fgx-row-crossings crossed) (mul (fgx-gives crossed) 3))))))) 2048))
+
+    (print (list "crossings" "by-type" byType "by-volume" byVolume "by-time" byTime
+                 "heaviest-live" (fgx-source (fgx-attention cs))
+                 "live" (fgx-live-traffic cs) "standing" (fgx-standing-traffic cs)))
+    (sum (list b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12)))
