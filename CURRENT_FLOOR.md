@@ -931,15 +931,33 @@ printed beside `governor.metal-admission`, which flows at 33. A reader healing
 (`fcf-play-narrowest`, `fcf-play-restricting`), and the gate is the point whose
 flow the play reports.
 
-**Cold start, measured.** A band chain compiles cold in 1.097 s and loads warm
-in 0.019 s — 58×, and 0.94 s of the cold run is system time, not user: reading
-sources and writing ice. The ice identity is already anchored at the lexical
-repo root (`fk_path_canon_id`), so it survives a checkout move, but the image
-is stored beside its source — so this host holds **6241 `.fkb` files, 7.7 GB**,
-across 57 worktrees and the main checkout, each recompiling and re-storing what
-the others already have. A whole-program image also carries its whole prelude
-chain, so bands that share preludes store them again in every image. Warm reads
-pay none of this; cold ones pay all of it.
+**The cold start was never the compiling.** A band chain took 1.097 s cold and
+0.019 s warm, and 0.94 s of it was SYSTEM time. Timed inside the kernel: the
+parse cost **2 ms** and writing the image cost **551 ms** — because every value
+went out as its own `write(2)`. A signed value is three of them (sign, hi, lo)
+and a node is four values, so a 1.4 MB image issued well over a million
+syscalls. The bytes were never the cost; the crossings were, and a syscall per
+byte cannot approach the disk's own bandwidth however fast the disk is. One
+buffer, flushed when full and once before close, and the `.sym` lens beside it.
+What remained was a second shape: both writers ask "which symbol owns this node"
+once per node, and both answers were a linear scan over every symbol — n×s,
+twice. The tables are built once per write and freed after, and the scan still
+answers when they are absent, so it is a shortcut and never a second truth.
+
+| chain | before | after |
+| --- | --- | --- |
+| `form-choice-flow-sources-band` | 1.097 s | **0.051 s** |
+| `form-glass-live-ui-band` | 3.660 s | **0.321 s** |
+| `form-glass-observer-band` | 0.576 s | **0.100 s** |
+
+The image is byte-identical to what the old writer produced: same 1,466,821
+bytes, **two differing bytes**, both inside the builder id's own `__TIME__`
+stamp. Nothing about the format moved.
+
+The ice identity is anchored at the lexical repo root (`fk_path_canon_id`) so it
+survives a checkout move, but the image is stored beside its source — this host
+holds **6241 `.fkb` files, 7.7 GB** across 57 worktrees and the main checkout,
+each re-storing what the others already have.
 
 **The JIT asks on boxes, not on calls.** The loop lane's question fires on a
 1024-CALL boundary (`fk_heat_pulse`) and the float lane's on a 1024-BOX

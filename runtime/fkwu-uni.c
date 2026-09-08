@@ -17689,9 +17689,47 @@ static int fk_src_load_unit_buffer(const char *root_path, char *owned, long long
     fk_srctext[fk_slen] = 0;
     return 1;
 }
+/* ── the image goes out through ONE buffer ───────────────────────────────────
+ * Every value used to be its own write(2): a signed value is three of them
+ * (sign, hi, lo) and a node is four values, so a 1.4 MB image issued well over
+ * a million syscalls. Measured 2026-09-08 on this Mac, cold, one band chain:
+ * 551 ms writing the image, 2 ms compiling it, 1.19 s total. The bytes were
+ * never the cost -- the crossings were, and a syscall per byte cannot reach
+ * anywhere near the disk's own bandwidth however fast the disk is.
+ * The buffer flushes when full and once before close; ordering is preserved
+ * because EVERY writer below goes through it, header included. */
+#define FK_FKB_OUT_CAP (1 << 20)
+static unsigned char fk_fkb_out_buf[FK_FKB_OUT_CAP];
+static long long fk_fkb_out_n;
+static int fk_fkb_flush(int fd) {
+    if (fk_fkb_out_n <= 0) {
+        return 1;
+    }
+    int ok = fk_write_all_raw(fd, (const char *)fk_fkb_out_buf, (unsigned long)fk_fkb_out_n);
+    fk_fkb_out_n = 0;
+    return ok;
+}
+static int fk_fkb_out(int fd, const char *p, long long n) {
+    if (n < 0) {
+        return 0;
+    }
+    if (n >= FK_FKB_OUT_CAP) {
+        return fk_fkb_flush(fd) && fk_write_all_raw(fd, p, (unsigned long)n);
+    }
+    if (fk_fkb_out_n + n > FK_FKB_OUT_CAP && !fk_fkb_flush(fd)) {
+        return 0;
+    }
+    long long k = 0;
+    while (k < n) {
+        fk_fkb_out_buf[fk_fkb_out_n + k] = (unsigned char)p[k];
+        k = k + 1;
+    }
+    fk_fkb_out_n = fk_fkb_out_n + n;
+    return 1;
+}
 static int fk_fkb_write_u8(int fd, long long v) {
-    unsigned char b = (unsigned char)(v & 255);
-    return fk_write_all_raw(fd, &b, 1);
+    char b = (char)(v & 255);
+    return fk_fkb_out(fd, &b, 1);
 }
 /* An out-of-range value is a WRITER refusal, not an I/O failure -- flagged so
  * the artifact-write diagnostic can name the range instead of a generic
@@ -17707,7 +17745,7 @@ static int fk_fkb_write_u32(int fd, long long v) {
     b[1] = (unsigned char)((v >> 16) & 255);
     b[2] = (unsigned char)((v >> 8) & 255);
     b[3] = (unsigned char)(v & 255);
-    return fk_write_all_raw(fd, b, 4);
+    return fk_fkb_out(fd, (const char *)b, 4);
 }
 static int fk_fkb_write_signed(int fd, long long v) {
     /* v4 lane: sign u8 + hi u32 + lo u32 -- the full long long range, so
@@ -17725,10 +17763,10 @@ static int fk_fkb_write_signed(int fd, long long v) {
 }
 static int fk_fkb_write_cstr(int fd, const char *s) {
     long long n = fk_path_len(s);
-    return fk_fkb_write_u32(fd, n) && fk_write_all_raw(fd, s, (unsigned long)n);
+    return fk_fkb_write_u32(fd, n) && fk_fkb_out(fd, s, n);
 }
 static int fk_fkb_write_bytes(int fd, const char *s, long long n) {
-    return fk_fkb_write_u32(fd, n) && fk_write_all_raw(fd, s, (unsigned long)n);
+    return fk_fkb_write_u32(fd, n) && fk_fkb_out(fd, s, n);
 }
 static int fk_fkb_write_srctext_slice(int fd, long long start, long long n) {
     if (start < 0 || n < 0 || start + n > fk_slen) {
@@ -17736,7 +17774,62 @@ static int fk_fkb_write_srctext_slice(int fd, long long start, long long n) {
     }
     return fk_fkb_write_bytes(fd, fk_srctext + start, n);
 }
+/* ── which symbol owns this fn / this node, in one step ──────────────────────
+ * Both answers used to be a linear scan over every symbol, and both writers ask
+ * them ONCE PER NODE -- so a program with n nodes and s symbols paid n*s twice.
+ * Measured 2026-09-08 on a large band: 254 ms in the sym lens and 228 ms in the
+ * image, after the syscall-per-byte was already gone. The tables are built once
+ * per write and freed after; when they are absent (any other caller, or a
+ * malloc that refused) the scan still answers, so this is a shortcut and never
+ * a second source of truth. */
+static long long *fk_src_sym_of_fn;
+static long long *fk_src_sym_of_node;
+static long long fk_src_sym_of_fn_n;
+static long long fk_src_sym_of_node_n;
+static void fk_src_sym_index_free(void) {
+    free(fk_src_sym_of_fn);
+    free(fk_src_sym_of_node);
+    fk_src_sym_of_fn = 0;
+    fk_src_sym_of_node = 0;
+    fk_src_sym_of_fn_n = 0;
+    fk_src_sym_of_node_n = 0;
+}
+static void fk_src_sym_index_build(void) {
+    fk_src_sym_index_free();
+    if (fk_fn_count <= 0 || fk_node_count <= 0) {
+        return;
+    }
+    fk_src_sym_of_fn = malloc(sizeof(long long) * (unsigned long)fk_fn_count);
+    fk_src_sym_of_node = malloc(sizeof(long long) * (unsigned long)fk_node_count);
+    if (fk_src_sym_of_fn == 0 || fk_src_sym_of_node == 0) {
+        fk_src_sym_index_free();
+        return;
+    }
+    long long i = 0;
+    while (i < fk_fn_count) { fk_src_sym_of_fn[i] = -1; i = i + 1; }
+    i = 0;
+    while (i < fk_node_count) { fk_src_sym_of_node[i] = -1; i = i + 1; }
+    /* the scans answered with the FIRST symbol that matched, so fill forwards
+     * and keep the first: same answer, one pass */
+    i = 0;
+    while (i < fk_fntop) {
+        long long fi = fk_fnidx[i];
+        if (fi >= 0 && fi < fk_fn_count) {
+            if (fk_src_sym_of_fn[fi] < 0) { fk_src_sym_of_fn[fi] = i; }
+            long long nd = fk_fn[fi];
+            if (nd >= 0 && nd < fk_node_count && fk_src_sym_of_node[nd] < 0) {
+                fk_src_sym_of_node[nd] = i;
+            }
+        }
+        i = i + 1;
+    }
+    fk_src_sym_of_fn_n = fk_fn_count;
+    fk_src_sym_of_node_n = fk_node_count;
+}
 static long long fk_src_symbol_id_for_fn(long long fnidx) {
+    if (fk_src_sym_of_fn != 0 && fnidx >= 0 && fnidx < fk_src_sym_of_fn_n) {
+        return fk_src_sym_of_fn[fnidx];
+    }
     long long i = 0;
     while (i < fk_fntop) {
         if (fk_fnidx[i] == fnidx) {
@@ -17747,6 +17840,9 @@ static long long fk_src_symbol_id_for_fn(long long fnidx) {
     return -1;
 }
 static long long fk_src_symbol_id_for_node(long long node) {
+    if (fk_src_sym_of_node != 0 && node >= 0 && node < fk_src_sym_of_node_n) {
+        return fk_src_sym_of_node[node];
+    }
     long long i = 0;
     while (i < fk_fntop) {
         long long fi = fk_fnidx[i];
@@ -17778,6 +17874,7 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
         return 0;
     }
     char line[512];
+    fk_fkb_out_n = 0;
     /* compile-errors records fk_nerr at image-write time, placed right after
      * the version line so readers find it in the first bytes; a cached run
      * replays this count as its exit truth (absent line reads as 0).
@@ -17795,13 +17892,13 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
     int hn = sprintf(line,
                      "program-image-sym-lens-v1\ncompile-errors %lld\nunrunnable %d\nsource ",
                      fk_nerr, fk_src_unrunnable ? 1 : 0);
-    if (!fk_write_all_raw(fd, line, (unsigned long)hn) ||
-        !fk_write_all_raw(fd, src_path, (unsigned long)fk_path_len(src_path)) ||
-        !fk_write_all_raw(fd, "\nfkb ", 5) ||
-        !fk_write_all_raw(fd, fkb_path, (unsigned long)fk_path_len(fkb_path)) ||
-        !fk_write_all_raw(fd, "\nsource-hash ", 13) ||
-        !fk_write_all_raw(fd, source_hash, (unsigned long)fk_path_len(source_hash)) ||
-        !fk_write_all_raw(fd, "\n", 1)) {
+    if (!fk_fkb_out(fd, line, hn) ||
+        !fk_fkb_out(fd, src_path, fk_path_len(src_path)) ||
+        !fk_fkb_out(fd, "\nfkb ", 5) ||
+        !fk_fkb_out(fd, fkb_path, fk_path_len(fkb_path)) ||
+        !fk_fkb_out(fd, "\nsource-hash ", 13) ||
+        !fk_fkb_out(fd, source_hash, fk_path_len(source_hash)) ||
+        !fk_fkb_out(fd, "\n", 1)) {
         close(fd);
         return 0;
     }
@@ -17809,10 +17906,10 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
     while (dep_i < fk_src_dep_count) {
         int n = sprintf(line, "dependency %lld mtime %lld size %lld path ", dep_i,
                         fk_src_dep_mtime[dep_i], fk_src_dep_size[dep_i]);
-        if (!fk_write_all_raw(fd, line, (unsigned long)n) ||
-            !fk_write_all_raw(fd, fk_src_dep_path[dep_i],
-                              (unsigned long)fk_path_len(fk_src_dep_path[dep_i])) ||
-            !fk_write_all_raw(fd, "\n", 1)) {
+        if (!fk_fkb_out(fd, line, n) ||
+            !fk_fkb_out(fd, fk_src_dep_path[dep_i],
+                          fk_path_len(fk_src_dep_path[dep_i])) ||
+            !fk_fkb_out(fd, "\n", 1)) {
             close(fd);
             return 0;
         }
@@ -17823,9 +17920,9 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
         long long name_s = fk_fnsym_s[i];
         long long name_n = fk_fnsym_n[i];
         int n = sprintf(line, "symbol %lld ", i);
-        if (!fk_write_all_raw(fd, line, (unsigned long)n) ||
-            !fk_write_all_raw(fd, fk_srctext + name_s, (unsigned long)name_n) ||
-            !fk_write_all_raw(fd, "\n", 1)) {
+        if (!fk_fkb_out(fd, line, n) ||
+            !fk_fkb_out(fd, fk_srctext + name_s, name_n) ||
+            !fk_fkb_out(fd, "\n", 1)) {
             close(fd);
             return 0;
         }
@@ -17840,13 +17937,14 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
             long long target = (dep_fn >= 0 && dep_fn < fk_fn_count) ? fk_fn[dep_fn] : -1;
             int n = sprintf(line, "node %lld defines %lld depends %lld target %lld\n", node,
                             defined, dep_sym, target);
-            if (!fk_write_all_raw(fd, line, (unsigned long)n)) {
+            if (!fk_fkb_out(fd, line, n)) {
                 close(fd);
                 return 0;
             }
         }
         node = node + 1;
     }
+    if (!fk_fkb_flush(fd)) { close(fd); return 0; }
     close(fd);
     return 1;
 }
@@ -17981,6 +18079,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     }
 #if !defined(_WIN32)
     fk_src_sweep_dead_temps(fkb_path);
+    fk_src_sym_index_build();
 #endif
     sprintf(fkb_tmp, "%s.w%d", fkb_path, getpid());
     sprintf(sym_tmp, "%s.w%d", sym_path, getpid());
@@ -17995,7 +18094,8 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     fk_fkb_write_overflow = 0;
     int ok = 1;
     char canon[FK_PATH_CAP];
-    ok = ok && fk_write_all_raw(fd, "FKPIFB1", 7);
+    fk_fkb_out_n = 0;
+    ok = ok && fk_fkb_out(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
     ok = ok && fk_fkb_write_u32(fd, 5);
     ok = ok && fk_fkb_write_cstr(fd, FK_FKB_BUILDER_ID);
@@ -18048,21 +18148,26 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
         }
         i = i + 1;
     }
+    ok = ok && fk_fkb_flush(fd);
     close(fd);
     if (!ok) {
+        fk_src_sym_index_free();
         unlink(fkb_tmp);
         return 0;
     }
     if (!fk_src_write_sym_text(sym_tmp, src_path, fkb_path, source_hash)) {
+        fk_src_sym_index_free();
         unlink(fkb_tmp);
         unlink(sym_tmp);
         return 0;
     }
     if (rename(sym_tmp, sym_path) != 0) {
+        fk_src_sym_index_free();
         unlink(fkb_tmp);
         unlink(sym_tmp);
         return 0;
     }
+    fk_src_sym_index_free();
     if (rename(fkb_tmp, fkb_path) != 0) {
         unlink(fkb_tmp);
         return 0;
