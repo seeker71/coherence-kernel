@@ -84,8 +84,3 @@ and my held number was wrong (1 + 4599 = 4600, not 5599). The body's own
 doctrine — never hold a number a cell can derive — caught its author.
 
 ## Still standing, named
-
-The flatten lane's deletion (above); the emitted mirror's other owed heals
-(socket_recv, slice, fs_list, response growth); the sense organs' absent-device
-`""`; `metal_buf_read`'s dead-handle `""`; Go's `jit_emit_c` err-fold and
-`_get` dual mask.

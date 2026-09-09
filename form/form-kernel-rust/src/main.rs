@@ -4669,10 +4669,8 @@ impl Kernel {
         // sha256_bytes / bytes_sum / bytes_hash were temporarily added
         // as natives here but composted: those are composites, not
         // primitives. SHA-256 lives in form-stdlib/sha256.fk as a Form
-        // recipe over the bitwise primitives above. The real JIT path
-        // (Form recipe → host machine code via cranelift/Go-source/JS
-        // emission) is the next walk; this kernel currently relies on
-        // recipe-walk for composite operations.
+        // recipe over the bitwise primitives above. This proof interpreter
+        // walks composite operations; native compilation uses fkwu.
         // register_jit form-name-str native-name-str → 1 on bind, 0 if
         // native-name has no registered native (refuse silent miss).
         // Inserts (form-name → native-name) into k.jit_aliases. After this,

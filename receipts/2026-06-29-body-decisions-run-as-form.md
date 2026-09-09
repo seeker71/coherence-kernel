@@ -8,7 +8,7 @@ seed and no C-flattener growth. This is the homecoming for what fits, witnessed,
 ## Witnessed native on Windows 11 (`fkwu --src <cell.fk> <arg>`)
 
 **jit-decision** — the crystallize/melt that gates the native dispatch wired earlier (heat >= 5 crystallize, heat
-< 2 melt; matches `observe/jit-decision.fk`, four-way):
+< 2 melt; matches `form/form-stdlib/jit-decision.fk`, four-way):
 
 ```
 (defn jitpolicy (heat) (if (le 5 heat) 1 (if (le heat 1) 2 0)))

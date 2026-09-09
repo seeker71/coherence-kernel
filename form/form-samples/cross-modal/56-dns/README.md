@@ -1,5 +1,3 @@
-# 56-dns — DNS-like name resolution in Form, sibling-verified
-
 ## What walked
 
 ```
@@ -140,12 +138,6 @@ on the first match — best case O(1), worst case O(n).
 per record — O(n) traversals each calling the host's `indexOf` for
 the substring search.
 
-For the 3-entry demo here the total work is ~5 list traversals
-plus 3 `str_find` calls — well inside the recursion budget. The
-same recipe lifts to host-asm speed via the Form→host-JIT path (see
-`16-jit-registry`). The canonical source in `dns.fk` doesn't
-change; the cell chooses dispatch.
-
 ## What this is NOT yet
 
 - **No persistence.** The table lives in process memory. Pairing
@@ -163,8 +155,6 @@ change; the cell chooses dispatch.
   recipe doesn't check authority. Composing with HMAC-SHA-256
   (`29-hmac-sha256`) over `(name, value)` would bind each record
   to an emitter — a small layer above this one.
-- **No native fast path.** Every resolve walks the recipe. JIT
-  lifts that to host speed without changing this source.
 
 ## Cross-refs
 
@@ -173,4 +163,11 @@ change; the cell chooses dispatch.
 - `23-cell-registry-osi` — the capability registry this layer naturally pairs with for name + verb routing
 - `40-kv-store` — sibling primitive: string-keyed lookup over channels (this layer is hierarchical naming, not flat KV)
 - `52-heartbeat` — sibling primitive: liveness; the future TTL layer for DNS records
-- `16-jit-registry` — the future host-speed dispatch path
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

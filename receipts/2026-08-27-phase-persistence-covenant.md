@@ -31,15 +31,6 @@ witnessed defect from this week.
   process time that stopped meaning anything at exit; persist hot/warm/
   cold so hysteresis resumes honestly without inventing a clock.
 
-## RELEASE AT EXIT, ALWAYS (the capability side — heavyhome)
-
-  MAP_JIT pages, retained handles, KV state, intern indexes, open fifos,
-  resident model context. Cheap to keep, ruinous to move — and every one
-  is rebirthable from the persisted side in ms-to-seconds (once-born:
-  8ms; fifo: mkfifo; KV: re-prefill from the kept token history). A
-  serialized capability is a stale ABI waiting to answer (the jitabi
-  seam; the kernel-stamp partiality is named in jit-meaning-epoch).
-
 ## THE RESTART IS A MEMBRANE, NOT A RESUME
 
   Recompute the meaning epoch FIRST (jme-epoch over the prelude closure +

@@ -508,53 +508,17 @@ defined twice, byte for byte, in `core.fk` and `line-grammar.fk`.
 
 ## Which of a native's mirrors still stand
 
-`form/form-stdlib/mirror-census.bml` answers the question the str_find day left
-behind (corpus row 1358, limbkept): a cost lens weighs each door and sees
-**weight**, never **reach**. It named a wall where a complete native had stood in
-the seed since before it was named, and asked for a mint. A native here stands on
-eleven mirrors at once — the manifest, flt-ops, the op table's `fk_optab` row, the
-walker's arm by tag, the serializer's arm, the rewrite table `fk_rwtab`, three
-sibling registrations, and the Go JIT's two name surfaces — and this lens takes a
-name and says which stand. The wounds are ranked by cost: **armhush** (an arm with
-no row: a native the body cannot reach and pays a recipe for), **seedgap** (all
-three siblings hold it, the seed has no route — the reading that says GO LOOK
-before minting), then tagclash, rowhush, fkcgap, siblinggap, jitsplit,
-siblinglone, manifestgap. Being well is a verdict too: `whole`, `rewrite`,
-`no-native-here`. `mirror-census-band` **65535** over hand-written mirror rows.
+`form/form-stdlib/mirror-census.bml` reads nine current mirrors: manifest,
+flattening table, opcode row, walker arm, serializer, rewrite table, and the
+three proof interpreter registrations. It ranks unreachable arms, missing
+routes, tag clashes, serializer gaps and sibling divergence. A name reached
+through a rewrite is reported as reached; a name with no tag reports the
+tag-based readings as unread.
 
-```text
-form/form-stdlib/tests/mirror-census-band.fk -> 65535
-observe/mirror-census-run.fk   -> 362 names, 11 mirrors, 151 disagreeing, ~490 ms
-observe/mirror-census-take.fk  -> 18 rows back off glass.sensor.mirror, cadence 15000 ms in-frame
-```
-
-The witness is the tree that had the wound. On a detached worktree at
-`0609d921~1` — the commit before the restoration — the lens names **`str_find`**
-`seedgap`: three sibling registrations, no row, no rewrite, and `arm ?` because
-every mirror carrying its NAME had gone, so no tag was left to find its arm by.
-Beside it the panel's `arms nobody names` list carries **tag 30**. Cross the two
-and the standing arm is found in one reading. On today's tree `str_find` reads
-`whole` across all eleven; seedgap fell 49 → 48 and the orphan arms 41 → 40, and
-the one name that left is `str_find`.
-
-The lens found the same shape still open. **Tag 31 in `runtime/fkwu-uni.c` is a
-complete `str_to_int`** — whitespace skipped, sign read, digits accumulated —
-with no `fk_optab` row and no manifest row, while `str_to_int` is walked as a
-recipe in `core.fk:233` and stands native in all three siblings. `int_to_str`
-(`core.fk:202`) reads `seedgap` too, and no orphan arm was found for it. And three
-manifest rows — `string_bytes` 205, `string_byte_fold` 206, `form_table_text` 207
-— are `armhush` **and** `tagclash`: their declared tags belong to
-`sense_mic_count`, `sense_cam_count` and `sense_mic_name` in the op table, so a
-str_find-style restore driven off the manifest would route each into a stranger's
-arm. Four seed natives read `siblinggap`: `host-exec` (go alone), `http_get` and
-`jit_compile_value` (rust and ts, not go), `host_file_append_bytes` (go and ts,
-not rust).
-
-The lens does not rank a native as "the JIT ought to carry this". Nothing in this
-tree declares which natives it ought to carry, so that ranking would be the lens's
-opinion wearing a measurement's clothes; the `jit` and `abi` columns are reported
-and left to the reader, and only their disagreement is a wound. Naming what a lens
-cannot judge is part of the lens.
+`./fkwu form/form-stdlib/tests/mirror-census-band.fk` returned 65535 on
+2026-09-09, including the nine-column shape and rewrite-field migration.
+Run `./fkwu observe/mirror-census-run.fk` for the current tree's counts and
+time. Native compilation follows [the Form route](docs/native-jit-routing.md).
 
 ## The JIT string crossing
 

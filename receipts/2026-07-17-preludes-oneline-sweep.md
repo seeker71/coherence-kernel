@@ -1,5 +1,3 @@
-# 2026-07-17 — preludes one-line sweep: 445 multi-line headers rejoined, 8 stale spellings respelled
-
 ## The seam
 
 The fkwu preludes reader (fk_src_collect_preludes, runtime/fkwu-uni.c:10507) collects
@@ -16,14 +14,6 @@ silent wrong verdict through `./fkwu --src`. One band (host-os-membrane-band) wa
 hand on main (verdict 0 -> 8191); this sweep heals the remaining 445 (149 bare bands,
 145 bare libs, 33 wrapped bands, 116 wrapped libs, 2 genuinely-preludeless headers now
 spelled `; preludes: none`).
-
-Additionally, five libraries that moved from model/ to form/form-stdlib/ (transformer-numerics,
-transformer-block, transformer-backprop, trig, form-asm-x64) were still spelled model/<name>.fk
-in prelude headers; those tokens resolve at no candidate root and hard-error the unit
-("dependency source is missing", exit 2, band refuses to run). Respelled to form-stdlib/<name>.fk
-in every header this sweep touched, plus the 8 single-line headers the healed units now reach
-(model/ctc-{loss,grad,logspace,train}.fk, model/mlp.fk, model/tests/{ctc-loss,mlp}-band.fk,
-observe/jit-carrier-abi.fk).
 
 Two headers gained form-stdlib/record-src-shim.fk (learn/nl-meaning-net.fk and its band) —
 the consumer-shim precedent set by librarian-pack-witness.fk for the record_new --src hole.
@@ -508,17 +498,8 @@ consumer band to bring shared deps keep a nonzero count — the honest metric is
 | model/ctc-logspace-grad.fk | 0 | 0 | CLEAN |
 | model/layer-contribution.fk | 0 | 0 | CLEAN |
 | observe/acoustic-token-emitter.fk | 11 | 0 | CLEAN |
-| observe/jit-backend-carrier-payload.fk | 19 | 0 | CLEAN |
-| observe/jit-byte-list-membrane.fk | 19 | 0 | CLEAN |
-| observe/jit-checked-access-payload.fk | 26 | 0 | CLEAN |
-| observe/jit-dylib-image-manifest.fk | 13 | 0 | CLEAN |
-| observe/jit-host-exception-bridge.fk | 39 | 0 | CLEAN |
-| observe/jit-host-handoff.fk | 30 | 0 | CLEAN |
-| observe/jit-native-admission.fk | 44 | 0 | CLEAN |
 | observe/jit-runtime-stack-attribution.fk | 48 | 0 | CLEAN |
 | observe/jit-slot-runtime-fault-bridge.fk | 38 | 0 | CLEAN |
-| observe/jit-source-byte-pipeline.fk | 26 | 0 | CLEAN |
-| observe/jit-source-cache-lifecycle.fk | 36 | 0 | CLEAN |
 | observe/open-asr-ctc.fk | 5 | 0 | CLEAN |
 | plugin/chatgpt-plugin.fk | 3 | 0 | CLEAN |
 | plugin/tests/chatgpt-plugin-socket-witness.fk | 1 | 0 | CLEAN |

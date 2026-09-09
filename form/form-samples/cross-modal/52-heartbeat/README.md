@@ -1,5 +1,3 @@
-# 52-heartbeat — periodic liveness tracking in Form, sibling-verified
-
 ## What walked
 
 ```
@@ -132,11 +130,6 @@ accumulator, O(n). `alive-count` walks once without materializing the
 pruned list, O(n). The table stays small in recipe-mode runs because
 `heartbeat-prune` composts stale entries when called.
 
-For the 3-entry demo here the total work is ~12 list traversals — well
-inside the recursion budget. The same recipe lifts to host-asm speed
-via the Form→host-JIT path (see `16-jit-registry`). The canonical
-source in `heartbeat.fk` doesn't change; the cell chooses dispatch.
-
 ## What this is NOT yet
 
 - **No persistence.** The table lives in process memory. Pairing with
@@ -151,8 +144,6 @@ source in `heartbeat.fk` doesn't change; the cell chooses dispatch.
   clock absolutely. Pairing with a clock-sync recipe (Lamport,
   vector, or hybrid logical clocks) would let two observers agree on
   liveness across an unsynchronized network. Not yet in this recipe.
-- **No native fast path.** Every record/query/prune walks the recipe.
-  JIT lifts that to host speed without changing this source.
 
 ## Cross-refs
 
@@ -161,4 +152,11 @@ source in `heartbeat.fk` doesn't change; the cell chooses dispatch.
 - `42-ping` — sibling composition: single round-trip liveness check (this layer turns ping into history)
 - `49-token` — sibling composition: observer-side trust shape, time-bounded
 - `23-cell-registry-osi` — the cell registry this layer naturally pairs with for presence
-- `16-jit-registry` — the future host-speed dispatch path
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

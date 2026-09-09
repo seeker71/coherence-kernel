@@ -1,5 +1,3 @@
-# 46-audit-log — append-only hash-chained audit log in Form
-
 ## What walked
 
 ```
@@ -100,10 +98,6 @@ For the 3-entry demo here we make 6 sha256 calls (3 for append + 3
 for verify), each over a ~33-byte input — well inside the recursion
 budget.
 
-The same recipe lifts to host-asm speed via the Form→host-JIT path
-(see `16-jit-registry`). The canonical source in `audit-log.fk` and
-`sha256.fk` doesn't change; the cell chooses dispatch.
-
 ## What this is NOT yet
 
 - **No proofs of inclusion.** To prove a specific entry is in the
@@ -124,4 +118,11 @@ The same recipe lifts to host-asm speed via the Form→host-JIT path
 - `20-sha256-as-recipe` — SHA-256 from primitives, the foundation
 - `29-hmac-sha256` — sibling composition: message-auth instead of chained-attestation
 - `33-merkle` — sibling composition: set-attest instead of sequence-attest
-- `16-jit-registry` — the future host-speed dispatch path
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

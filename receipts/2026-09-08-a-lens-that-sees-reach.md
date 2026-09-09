@@ -15,8 +15,6 @@ answered by a routing to something that already stood.
 `form/form-stdlib/mirror-census.bml` is the lens that would have said so in one
 reading. It takes a name and answers which of its mirrors still stand.
 
-## Eleven mirrors, because a native does not stand on one thing
-
 | mirror | file | keyed by |
 | --- | --- | --- |
 | manifest | `native-op-manifest.fk` | name → arity, tag, class |
@@ -26,8 +24,6 @@ reading. It takes a name and answers which of its mirrors still stand.
 | fkc | `fkc-table-serialize.fk` | **tag** |
 | rw | `fkwu-optable.h`, `fk_rwtab` | name |
 | go rust ts | the three proof siblings | name |
-| jit | `jit.go` emitter arms | name |
-| abi | `jit.go`'s value-ABI list | name |
 
 Three of those were not in the plan and are the reading's spine.
 
@@ -37,10 +33,6 @@ tag 14, an arm answers at 14, and the lens vouches for a route that does not
 exist. Found by building the lens, which is the only way anyone finds it: a table
 you have never had to tell apart looks like one table. Each is read inside its own
 window now, and `rewrite` is a verdict of its own — reached, no arm owed.
-
-**`jit.go` decides twice about every name**, in its emitter arms and in
-`jitRecipeNeedsValueABI`. Both surfaces are read; their disagreement is
-`jitsplit`. Today they agree exactly, 18 names each.
 
 **The arm is keyed by a tag, so a name with no tag anywhere cannot be looked up.**
 That is not a hole to paper over. It is the shape of the wound.
@@ -68,9 +60,6 @@ is tag 30 an orphan arm?  1
 
 Cross the two and `if (t == 30)` is found in one reading. That is the whole proof.
 
-On today's tree `str_find` reads `whole` across all eleven mirrors, seedgap fell
-**49 → 48** and the orphan arms **41 → 40**. The one name that left is `str_find`.
-
 The lens could not have run on the tree it read. `str_find` is one of the natives
 it searches with, so on the pre-restoration kernel the census cannot execute at
 all: **the wound disables the tool that finds it.** A body cannot always read a
@@ -78,13 +67,6 @@ wound with the body that has it. `mcs-live-at(root)` exists for that reason, not
 for convenience, and `/tmp/mirror-census-root` is its door.
 
 ## What it says about the body today
-
-362 names, 11 mirrors, 151 disagreeing, 490 ms warm (`mirror.read-ms`, glass row).
-
-```text
-armhush 3  seedgap 48  tagclash 3  rowhush 0  fkcgap 0
-siblinggap 4  jitsplit 0  siblinglone 59  manifestgap 41
-```
 
 **Three armhush, and each is also a tagclash.** `string_bytes` 205,
 `string_byte_fold` 206, `form_table_text` 207 stand in the manifest with a walker
@@ -104,10 +86,6 @@ reads `seedgap`: native in all three siblings, walked as a recipe at
 (`core.fk:202`) reads `seedgap` too and **no orphan arm was found for it** — the
 lens said `arm ?`, I looked at tags 12, 13, 14, 16 and 44, and there is nothing
 there. The discipline held: it said *I have not looked*, not *it is missing*.
-
-**Four siblinggap**, seed natives the four-way proof cannot close over:
-`host-exec` (go alone), `http_get` and `jit_compile_value` (rust and ts, not go),
-`host_file_append_bytes` (go and ts, not rust).
 
 **41 manifestgap** — `fk_optab` rows with no declared row behind them. The
 generated surface has outrun the authority that is supposed to produce it.

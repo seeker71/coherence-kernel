@@ -71,45 +71,10 @@ the literal via `substring`/`ord` (which agrees across kernels for
 ASCII bytes < 128); for multibyte text we spell the UTF-8 byte sequence
 directly: `(list 104 195 169 108 108 111)` for "héllo".
 
-## The shape (today, and next breath)
+## Recipe behavior
 
-```
-                  ┌─ FORM RECIPE (canonical) ───────┐
-                  │  form-stdlib/url-encode.fk      │
-                  │                                  │
-                  │  uses small-int primitives       │
-   (url-encode    │   add, sub, div, mod, mul,      │
-        bytes)    │   and / or, eq / lt / le / ge   │
-   ───────────▶   │  plus string natives             │
-                  │   byte_to_str, str_concat,       │
-                  │   ord, substring, str_len        │
-                  │                                  │
-                  │  per-byte conditional:           │
-                  │    unreserved? → pass through    │
-                  │    else        → "%XX"           │
-                  │  → ASCII percent-encoded string  │
-                  └──────────────────────────────────┘
-                                   │
-                  [next walk: register_jit triggers]
-                  [a real Form→host-asm compiler:    ]
-                  [  Rust : cranelift                ]
-                  [  Go   : recipe→Go-source→plugin  ]
-                  [  TS   : compiler.ts → new Function]
-                                   ▼
-                  ┌─ HOST MACHINE CODE (fast) ──────┐
-                  │  same Form recipe; emitted as    │
-                  │  the host's native instructions  │
-                  │  → URL-encode at host speed      │
-                  └──────────────────────────────────┘
-```
-
-Today: only the top half walks — the Form recipe computes percent-encoding
+The Form recipe computes percent-encoding
 from primitives. Validates four canonical vectors three-way.
-
-Next walk: the bottom half. `register_jit` triggers a real recipe→host-asm
-compiler, so the SAME Form recipe dispatches at machine-code speed. No
-new natives; no JIT-alias-to-native. The recipe IS the canonical source
-the compiler reads.
 
 ## The Form recipe shape
 
@@ -146,4 +111,11 @@ recipe stays within the kernel's bitwise and integer surface.
 - 38-hex — unconditional hex envelope (every byte → 2 chars)
 - 30-base64 — Base64 from the same string/bitwise primitives
 - 34-http-parse — where URL-encoded query strings travel
-- 16-jit-registry — the bind mechanism the JIT walk will use
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

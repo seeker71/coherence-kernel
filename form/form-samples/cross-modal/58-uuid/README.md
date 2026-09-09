@@ -96,4 +96,4 @@ non-hex characters at any data position.
 - 43-ulid — same deterministic-input discipline, different identifier shape
 - 38-hex — the lowercase hex alphabet UUID reuses
 - 11-randomness-doorway — where `random_bytes` enters the body
-- 16-jit-registry — the bind mechanism a future UUID JIT will use
+- 16-jit-registry — explicit binding to an existing native alias

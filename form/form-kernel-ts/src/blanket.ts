@@ -81,7 +81,7 @@ function blanketCategory(): NodeID {
 }
 
 // Category NodeID for a LIST recipe (used for each of the four boundary
-// lists). Mirrors how reader.ts / compiler.ts build list recipes.
+// lists). Mirrors how reader.ts build list recipes.
 function listCategory(): NodeID {
   return {
     pkg: 1,

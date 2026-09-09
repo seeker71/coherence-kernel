@@ -142,7 +142,7 @@ didn't print the channel-path so it never hit the bug. Fixed now.
 ## Cross-refs
 
 - 21-cell-query-protocol — verb/response vocabulary (L7)
-- 22-form-to-host-asm — JIT path to scale the recipe-walk to host speed
+- 22-form-to-host-asm — Form emission and native image execution witness
 - 23-cell-registry-osi — L3 addressing
 - 24-wire-binary-symbols — symbols + recipe_to_bytes (the wire layer)
 - `form-stdlib/channel.fk` — L2 channel framing

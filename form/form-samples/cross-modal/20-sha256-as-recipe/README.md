@@ -27,42 +27,10 @@ hashes for both FIPS test vectors three-way.
 
 **Final verdict: 2** — both vectors match in every kernel.
 
-## The shape (today, and next breath)
+## Recipe behavior
 
-```
-                  ┌─ FORM RECIPE (canonical) ───────┐
-                  │  form-stdlib/sha256.fk           │
-                  │                                  │
-                  │  uses kernel bitwise primitives  │
-   (sha256 bs)    │   band, bor, bxor, bnot_u32,    │
-   ───────────▶   │   shl_u32, shr_u32, rotr_u32,   │
-                  │   add_u32                        │
-                  │                                  │
-                  │  computes padding, message       │
-                  │  schedule, 64 compression rounds │
-                  │  → 32-byte digest                │
-                  └──────────────────────────────────┘
-                                   │
-                  [next walk: register_jit triggers]
-                  [a real Form→host-asm compiler:    ]
-                  [  Rust : cranelift                ]
-                  [  Go   : recipe→Go-source→plugin  ]
-                  [  TS   : compiler.ts → new Function]
-                                   ▼
-                  ┌─ HOST MACHINE CODE (fast) ──────┐
-                  │  same Form recipe; emitted as    │
-                  │  the host's native instructions  │
-                  │  → 32-byte digest                │
-                  └──────────────────────────────────┘
-```
-
-Today: only the top half walks — the Form recipe computes SHA-256
+The Form recipe computes SHA-256
 from primitives. Validates FIPS test vectors three-way.
-
-Next walk: the bottom half. `register_jit` triggers a real recipe→
-host-asm compiler, so the SAME Form recipe dispatches at machine-code
-speed. No new natives; no JIT-alias-to-native. The recipe IS the
-canonical source the compiler reads.
 
 ## The kernel additions
 
@@ -99,12 +67,6 @@ the recipe IS the implementation across all three kernels.
     ...big-endian digest emission...)
 ```
 
-The recipe is the canonical authoring of "what SHA-256 means" in
-this body. Today it walks via the recipe interpreter — each
-`nth-rec` is O(n) on a Form list, so it's slow for large inputs.
-Test vectors and small inputs validate fine; large inputs need the
-real Form→host-asm JIT (next walk) for practical speed.
-
 ## Why this matters for novel-state sharing
 
 `15-private-channel` and `19-novel-state-share` both use a toy
@@ -132,14 +94,17 @@ PRFs." This walk seeds that future:
   full byte-list. A streaming `sha256_init` / `sha256_update` /
   `sha256_finalize` shape would let a cell hash arbitrarily large
   streams without materializing all bytes at once.
-- **Recipe is slow.** Form-walk SHA-256 is dominated by `nth-rec`'s
-  O(n) list indexing. For inputs over a few hundred bytes, the JIT
-  alias is essentially required. The recipe stays canonical anyway —
-  the cell chooses dispatch.
 
 ## Cross-refs
 
 - [`form-stdlib/sha256.fk`](../../../form-stdlib/sha256.fk) — the canonical recipe
-- 16-jit-registry — the bind mechanism this uses
 - 19-novel-state-share — the toy hash-fold this would replace
 - 15-private-channel — the fingerprint protocol this would harden
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

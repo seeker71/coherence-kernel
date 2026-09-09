@@ -104,32 +104,12 @@ lexer carried.
 
 ## If you change this door
 
-1. It lives **four times** in the kernels and **five** places in all:
-   - `runtime/fkwu-uni.c` — tag 201 mode 9 (the reference)
-   - `form/form-kernel-go/main.go` — the interpreter native
-   - `form/form-kernel-go/jitabi/jitabi.go` — the **JIT mirror**; a primitive
-     that lives twice must be healed twice or hot code silently reverts past the
-     auto-JIT threshold
-   - `form/form-kernel-rust/src/main.rs`
-   - `form/form-kernel-ts/src/kernel.ts`
-2. `form/form-stdlib/core.fk` keeps `fstr-substring-halve` and
-   `fstr-substring-loop` as the portable fallback and as the body's own
-   statement of what the door means. They are reachable by their own names and
-   two bands ask them rather than a stored answer. **They re-encode every byte
-   above 127 on the three walkers** (`byte_to_str` is not the exact dual there —
-   see core.fk's byte-waist header), which is why the bands that hold the native
-   against the recipe are fkwu's.
-3. Run, in this order:
-   ```sh
-   rm -f fkwu && cc -O2 -o fkwu runtime/fkwu-uni.c \
-     form/native/metal/fk-metal-carrier.m form/native/mlx/fk-mlx-carrier.c \
-     -framework Metal -framework Foundation -fobjc-arc \
-     -I/opt/homebrew/include -L/opt/homebrew/lib -lmlxc -Wl,-rpath,/opt/homebrew/lib
-   ./fkwu form/form-stdlib/tests/substring-one-meaning-band.fk       # -> 4095
-   ./fkwu form/form-stdlib/tests/substring-native-band.fk            # -> 511
-   ./fkwu form/form-stdlib/tests/core-substring-equivalence-band.fk  # -> 2047
-   ./fkwu gate/drift-gates-run.bml                                   # -> pass=4095 full=4095
-   ( cd form && ./validate.sh form-stdlib/tests/substring-one-meaning-band.fk )
-   ```
-   `rm -f fkwu` first is not decoration: macOS SIGKILLs every exec of an
-   overwritten signed executable, and a `| tail` pipe launders the rc to 0.
+
+## If you change this door
+
+Read the native byte-slice implementation and all three proof interpreter
+registrations. `form/form-stdlib/core.fk` carries the portable byte-walk
+meaning. Follow the repository freshness check, then run the substring-one-meaning,
+substring-native and core-substring-equivalence bands, shared proof validation,
+and the drift gates. A passing comparison must preserve byte offsets as well
+as values.

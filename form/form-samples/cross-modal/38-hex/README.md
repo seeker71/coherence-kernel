@@ -130,4 +130,4 @@ the end. Three sibling kernels converge on identical results.
 - 30-base64 — the denser textual envelope
 - 32-crc32 — the same primitive composition discipline
 - 20-sha256-as-recipe — what hex is most often used to display
-- 16-jit-registry — the bind mechanism a future hex JIT will use
+- 16-jit-registry — explicit binding to an existing native alias

@@ -25,7 +25,7 @@ needs on the sibling lane, and fkwu reads such a file raw.
 ```bash
 ./validate.sh             # all samples
 ./validate.sh path.fk     # one
-./validate.sh --bench     # side-by-side bench output
+./validate.sh --bench     # native Form emission and execution witness
 ```
 
 ## What "all of Form in Form" means

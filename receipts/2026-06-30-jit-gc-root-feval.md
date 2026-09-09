@@ -67,7 +67,7 @@ ANY native dispatch (not just the form-eval shape) provably safe — the cleaner
 ## PIECE B — re-landed: heat-gated self-JIT for the --feval walk path
 
 `FK_JIT`-only (`fk_feval_jit_on`, default 0 → byte-identical). A per-fn heat counter (`fk_fheat`, hot ≥ 5,
-matching `observe/jit-decision.fk`; override `FK_JIT_HOT`) at `fk_walk_body`'s call trampoline (tags 12/240/241).
+matching `form/form-stdlib/jit-decision.fk`; override `FK_JIT_HOT`) at `fk_walk_body`'s call trampoline (tags 12/240/241).
 On hot, `fk_feval_try_native` crystallizes the callee once (`fk_jit_lower`, cached in `fk_src_nat`), installs
 once (cached exec ptr), dispatches native reading args from `fk_vs[fp..]`, and returns the result as the tail
 value. A callee whose body doesn't lower is marked `fk_nat_tried` and never retried (falls through to the walker).

@@ -94,8 +94,6 @@ even if we wanted it, because it implements a model we are not running.
 
 ---
 
-## 2. The quant formats — and a finding that changes the evening's plan
-
 ### 2a. The downloading GGUF cannot be read by ds4
 
 This is the highest-consequence finding in the stone, so it goes first.
@@ -204,12 +202,6 @@ all 26 cells returns nothing. The only "GPU" in that family is an integer schedu
 in `model/jit-container-byteplan.fk:14–16` is a word size (8 vs 4) and a payload base (20000 vs
 10000).
 
-What `model/jit-*.fk` actually is: a Form-level **x86-64 byte-plan and receipt/gate system** that
-emits lists of x64 bytes via `form/form-stdlib/form-asm-x64.fk` and **explicitly does not install or
-execute them** — stated in the cells' own headers at `model/jit-container-backend.fk:8`,
-`model/jit-container-byteplan.fk:9`, `model/jit-source-dylib-runtime-executor.fk:6`,
-`model/jit-self-host-ingress-runtime.fk:9`.
-
 The name collision that caused the confusion: `form/form-stdlib/jit-tensor-emit.fk` *does* emit MSL.
 It is in `form-stdlib`, not `model/`, and is unrelated.
 
@@ -310,8 +302,6 @@ blob on disk                 = 115 529 748 672 B = 107.595 GiB
 | 9 | flash attention / FP8 KV / DSpark / sparse indexer | ~20 DSv4 kernels + `metal/dsv4_kv.metal` | none | out of scope until 1–5 land |
 
 ---
-
-## The three teachings this stone owes
 
 ### Most surprising — what I expected and the body corrected
 

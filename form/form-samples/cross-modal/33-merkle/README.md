@@ -1,5 +1,3 @@
-# 33-merkle — Merkle tree in Form, composed over the canonical sha256
-
 ## What walked
 
 ```
@@ -102,10 +100,6 @@ The underlying sha256 recipe is O(n²) per round through Form-list
 boundary). Expect each kernel run to take 30–60 seconds — feasible
 for validation, not for production traffic.
 
-The next walk lifts the SAME recipe to host-asm speed via the
-Form→host-JIT path (see `16-jit-registry`). The canonical source in
-`merkle.fk` and `sha256.fk` doesn't change; the cell chooses dispatch.
-
 ## What this is NOT yet
 
 - **No streaming root.** `merkle-root` takes the full block list. A
@@ -113,10 +107,6 @@ Form→host-JIT path (see `16-jit-registry`). The canonical source in
   forward block-by-block without materializing all leaves at once.
 - **No sparse proofs.** This is a binary balanced Merkle tree; sparse
   Merkle trees (Ethereum-style state tries) are a different recipe.
-- **No native fast path.** Unlike a `register_jit` alias to a host
-  Merkle library, every Merkle call here walks the full sha256
-  recipe. The JIT path (next walk) lifts that to host speed without
-  changing this source.
 
 ## Cross-refs
 
@@ -124,4 +114,11 @@ Form→host-JIT path (see `16-jit-registry`). The canonical source in
 - [`form-stdlib/sha256.fk`](../../../form-stdlib/sha256.fk) — the SHA-256 composition this builds on
 - `20-sha256-as-recipe` — SHA-256 from primitives, the foundation this stands on
 - `29-hmac-sha256` — the sibling composition over sha256 (message-auth instead of set-attest)
-- `16-jit-registry` — the future host-speed dispatch path
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

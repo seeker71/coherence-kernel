@@ -1,5 +1,3 @@
-# 55-rate-limit — token-bucket rate limiter in Form, sibling-verified
-
 ## What walked
 
 ```
@@ -151,9 +149,7 @@ list cons on admission (or zero on rejection). No history is kept;
 the bucket carries only its current state and the last-refill
 timestamp. For the 5-step walk here the total work is ~10 list
 operations and ~25 arithmetic ops — well inside the recursion
-budget. The same recipe lifts to host-asm speed via the Form→host-
-JIT path (see `16-jit-registry`). The canonical source in
-`rate-limit.fk` doesn't change; the cell chooses dispatch.
+budget.
 
 ## What this is NOT yet
 
@@ -176,8 +172,6 @@ JIT path (see `16-jit-registry`). The canonical source in
   refill — the recipe doesn't currently floor at zero. Pairing with
   a clock-sync recipe (Lamport, vector, or hybrid logical clocks)
   would harden the limiter against backward-jumping callers.
-- **No native fast path.** Every consume/can-consume walks the
-  recipe. JIT lifts that to host speed without changing this source.
 
 ## Cross-refs
 
@@ -187,4 +181,11 @@ JIT path (see `16-jit-registry`). The canonical source in
 - `49-token` — sibling composition: time-bounded capability (deadline) vs. time-bounded throughput (rate)
 - `42-ping` — sibling composition: single liveness reading at one moment
 - `53-now-unix-ms` — the host clock the caller passes in as `now-time`
-- `16-jit-registry` — the future host-speed dispatch path
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

@@ -64,11 +64,6 @@ path, which is preluded and left exactly as it was:
 - heat is still earned, melting is unchanged, hysteresis still holds
 - the same answer on mlx, metal and cpu from one predicate
 
-```
-./fkwu form/form-stdlib/tests/jit-flow-admission-band.fk   # 1023
-./fkwu form/form-stdlib/tests/jit-decision-band.fk         # 11111 (untouched)
-```
-
 This also retracts my own suggestion from an hour ago. I had proposed
 hand-batching `q38-prefill` so the sync happens once per span. That would buy the
 win **once, for one recipe, on one backend**, as a special case standing exactly

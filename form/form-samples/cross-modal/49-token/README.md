@@ -1,5 +1,3 @@
-# 49-token — time-bounded capability token in Form, composed over HMAC-SHA-256
-
 ## What walked
 
 ```
@@ -122,11 +120,6 @@ HMAC input, plus a 3-byte secret), the underlying sha256 fits in
 two blocks. Expect each kernel run to take ~20–40 seconds —
 feasible for validation, not for production traffic.
 
-The next walk lifts the SAME recipe to host-asm speed via the
-Form→host-JIT path (see `16-jit-registry`). The canonical sources
-in `token.fk`, `hmac-sha256.fk`, and `sha256.fk` don't change;
-the cell chooses dispatch.
-
 ## What this is NOT yet
 
 - **No revocation channel.** A token is valid until its `expires-at`
@@ -140,9 +133,6 @@ the cell chooses dispatch.
   verifier holds the same secret as the issuer. The asymmetric
   shape (Ed25519 / RSA signatures over the same field tuple) is a
   different recipe over different primitives.
-- **No native fast path.** Every mint/verify walks the full
-  hmac-sha256 recipe. JIT lifts that to host speed without
-  changing this source.
 
 ## Cross-refs
 
@@ -151,4 +141,11 @@ the cell chooses dispatch.
 - [`form-stdlib/sha256.fk`](../../../form-stdlib/sha256.fk) — the SHA-256 foundation under HMAC
 - `29-hmac-sha256` — the sibling composition over sha256 (message-auth, the layer below)
 - `33-merkle` — sibling composition for set-attestation (root over many leaves)
-- `16-jit-registry` — the future host-speed dispatch path
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

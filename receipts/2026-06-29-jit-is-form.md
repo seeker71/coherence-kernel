@@ -9,7 +9,7 @@ none in this kernel.** The JIT is Form. Here is the exact boundary.
 | job | where it lives | proof |
 |---|---|---|
 | **lower** a recipe → native machine **bytes** | `model/form-asm.fk` (arm64), `model/form-asm-x64.fk`, `model/form-asm-matvec.fk` | Form recipe → asm bytes, **clang dropped behind a byte-identity gate** (`form-asm-float` 2047 four-way) |
-| **decide** when to crystallize / melt | `observe/jit-decision.fk` | Form, **four-way** — hot ∧ pure → crystallize (heat ≥ 5); cool → melt (heat < 2); hysteresis so it never thrashes |
+| **decide** when to crystallize / melt | `form/form-stdlib/jit-decision.fk` | Form, **four-way** — hot ∧ pure → crystallize (heat ≥ 5); cool → melt (heat < 2); hysteresis so it never thrashes |
 
 Lower + decide **is** the JIT. Neither is C. The lowering even *removes* a toolchain (clang) rather than adding
 one — it is the opposite of "needs C."

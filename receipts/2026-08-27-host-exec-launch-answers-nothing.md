@@ -22,10 +22,6 @@ length-guarded caller keeps its old reading — only `(nothing? r)` sees the new
 truth. The token doors in `observe/hot-crossing-run.fk` stand unchanged as the
 calling-side witness.
 
-jitabi carries no host-exec seat — the Go JIT leaves natives to the interpreter
-("Natives we don't support in the compiled body", jit.go:1313) — witnessed by
-grep, not assumed, so the two heals cover every seat.
-
 ## Witnessed
 
 - `form/form-stdlib/tests/host-exec-launch-honesty-band.fk` → **15**, rc 0,

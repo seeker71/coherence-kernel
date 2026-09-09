@@ -1,5 +1,3 @@
-# 57-session — multi-request session state in Form, sibling-verified
-
 ## What walked
 
 ```
@@ -150,11 +148,6 @@ fresh entry — so the most recent write wins and sits at the head.
 recipe-mode runs because sessions are added on connect and (eventually)
 removed when the client signs off.
 
-For the 4-attestation demo here the total work is ~8 list traversals
-— well inside the recursion budget. The same recipe lifts to host-asm
-speed via the Form→host-JIT path (`16-jit-registry`). The canonical
-source in `session.fk` doesn't change; the cell chooses dispatch.
-
 ## What this is NOT yet
 
 - **No `session-table-drop`.** Sessions never leave the table except
@@ -171,8 +164,6 @@ source in `session.fk` doesn't change; the cell chooses dispatch.
 - **No persistence.** The table lives in process memory. Pairing with
   `channel.fk` (the substrate's append-only message channel) would
   give durable on-disk storage across server restarts.
-- **No native fast path.** Every set/get walks the recipe. JIT lifts
-  that to host speed without changing this source.
 
 ## Cross-refs
 
@@ -183,4 +174,11 @@ source in `session.fk` doesn't change; the cell chooses dispatch.
 - `49-token` — sibling composition: opaque handle the holder presents, the authority decides what it means
 - `52-heartbeat` — the freshness check that composts silent sessions
 - `53-now-unix-ms` — the clock that lifts session state into time-bound state
-- `16-jit-registry` — the future host-speed dispatch path
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

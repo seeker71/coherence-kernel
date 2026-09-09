@@ -5,7 +5,7 @@ is a backend TABLE, not a hand-written emitter `.fk`. Grok's proposal #2, built 
 
 ## The smell
 
-`model/form-glsl.fk` (GLSL/Vulkan), `model/form-ptx.fk` (PTX/CUDA), `model/jit-tensor-emit.fk` (MSL +
+`model/form-glsl.fk` (GLSL/Vulkan), `model/form-ptx.fk` (PTX/CUDA), `form/form-stdlib/jit-tensor-emit.fk` (MSL +
 CUDA spines) each RE-WROTE the same numeric discipline — a downward right-fold dot, an explicit NON-fused
 mul+add (two roundings split through a named temporary `p`), recipe-Taylor exp/tanh/gelu, barrier/workgroup
 load/store — in that ISA's syntax. The arithmetic body of `jte-matvec-msl-spine` and `jte-matvec-cuda-spine`

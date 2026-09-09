@@ -1,5 +1,3 @@
-# Receipt - Form-native JIT call tracking and inlining policy lands (2026-06-30)
-
 ## What landed
 
 The JIT track now has an executable Form policy for call-site inlining. It does
@@ -37,7 +35,7 @@ The policy requires:
 Run:
 
 ```sh
-( cat observe/jit-decision.fk observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-tier-policy.fk observe/jit-inline-policy.fk observe/tests/jit-inline-policy-band.fk ) > /tmp/jip.fk
+( cat form/form-stdlib/jit-decision.fk observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-tier-policy.fk observe/jit-inline-policy.fk observe/tests/jit-inline-policy-band.fk ) > /tmp/jip.fk
 ./fkwu --src /tmp/jip.fk
 ```
 

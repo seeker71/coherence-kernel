@@ -101,33 +101,14 @@ before the index, and run four ways before you believe a verdict.
 
 ## If you change this door
 
-1. It lives **five** times in the kernels and **six** places in all:
-   - `runtime/fkwu-uni.c` — tag 30 (the reference)
-   - `form/form-kernel-go/main.go` — the interpreter native
-   - `form/form-kernel-go/jitabi/jitabi.go` — the **JIT mirror**; a primitive
-     that lives twice must be healed twice or hot code silently reverts past the
-     auto-JIT threshold. Before 2026-09-08 there was no mirror at all, so any
-     recipe containing `str_find` bailed out of the JIT entirely.
-   - `form/form-kernel-rust/src/main.rs`
-   - `form/form-kernel-ts/src/kernel.ts`
-   - `form/form-stdlib/core.fk` — `fstr-find`, the portable fallback and the
-     body's own statement of what the door means, reachable by its own name.
-     `core-str-find-equivalence-band.fk` (2047) asks it rather than a stored
-     answer, and bit 2048 of the one-meaning band holds the native against it.
-2. Run, in this order:
-   ```sh
-   rm -f fkwu && cc -O2 -o fkwu runtime/fkwu-uni.c \
-     form/native/metal/fk-metal-carrier.m form/native/mlx/fk-mlx-carrier.c \
-     -framework Metal -framework Foundation -fobjc-arc \
-     -I/opt/homebrew/include -L/opt/homebrew/lib -lmlxc -Wl,-rpath,/opt/homebrew/lib
-   ./fkwu form/form-stdlib/tests/str-find-one-meaning-band.fk        # -> 8191
-   ./fkwu form/form-stdlib/tests/core-str-find-equivalence-band.fk   # -> 2047
-   ./fkwu form/form-stdlib/tests/line-grammar-search-equivalence-band.fk  # -> 8191
-   ./fkwu gate/drift-gates-run.bml
-   ( cd form && ./validate.sh form-stdlib/tests/str-find-one-meaning-band.fk )
-   ```
-   `rm -f fkwu` first is not decoration: macOS SIGKILLs every exec of an
-   overwritten signed executable, and a `| tail` pipe launders the rc to 0.
+Read `runtime/fkwu-uni.c`, the Go/Rust/TypeScript interpreter registrations,
+and `form/form-stdlib/core.fk`. Keep the manifest, flattening table, generated
+opcode table and serializer aligned. Follow the repository freshness check
+before trusting a binary.
+
+Run the str-find-one-meaning, core-str-find-equivalence and
+line-grammar-search-equivalence bands, shared proof validation, and the drift
+gates. The portable recipe supplies an independent meaning witness.
 
 ## The mirror that was already there
 

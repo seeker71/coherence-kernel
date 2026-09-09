@@ -58,44 +58,10 @@ example documented in RFC 1950 §9. The 9-byte "123456789" vector
 0xCBF43926 — every Adler-32 implementation in the world cross-checks
 itself against it.
 
-## The shape (today, and next breath)
+## Recipe behavior
 
-```
-                  ┌─ FORM RECIPE (canonical) ───────┐
-                  │  form-stdlib/adler32.bml         │
-                  │                                  │
-                  │  uses kernel primitives:         │
-   (adler32 bs)   │   band, mod, add, head, tail     │
-   ───────────▶   │   plus u32 pair shl_u32, add_u32 │
-                  │                                  │
-                  │  head/tail loop, two running     │
-                  │  16-bit sums modulo 65521, fold  │
-                  │  to (b << 16) | a at the tail —  │
-                  │  no precomputed table, no nth    │
-                  │  lookups, O(n) over input        │
-                  │  → unsigned 32-bit int           │
-                  └──────────────────────────────────┘
-                                   │
-                  [next walk: register_jit triggers]
-                  [a real Form→host-asm compiler,    ]
-                  [reading the SAME recipe; emitted  ]
-                  [as host machine code, no separate ]
-                  [native required                   ]
-                                   ▼
-                  ┌─ HOST MACHINE CODE (fast) ──────┐
-                  │  same Form recipe; emitted as    │
-                  │  the host's native instructions  │
-                  │  → Adler-32 at host speed        │
-                  └──────────────────────────────────┘
-```
-
-Today: only the top half walks — the Form recipe computes Adler-32
+The Form recipe computes Adler-32
 from primitives. Validates five canonical vectors three-way.
-
-Next walk: the bottom half. `register_jit` triggers a real recipe→
-host-asm compiler, so the SAME Form recipe dispatches at machine-code
-speed. No new natives; no JIT-alias-to-native. The recipe IS the
-canonical source the compiler reads.
 
 ## The Form recipe shape
 
@@ -150,4 +116,11 @@ sovereign across sibling kernels.
 - 29-hmac-sha256 — HMAC composed atop SHA-256, same composition
 - 30-base64 — textual envelope from the same bitwise primitives
 - 38-hex — readable byte→char encoding, same primitive-composition shape
-- 16-jit-registry — the bind mechanism a future Adler-32 JIT will use
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

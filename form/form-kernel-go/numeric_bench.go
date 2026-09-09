@@ -1,6 +1,6 @@
 // numeric_bench.go — three-workload format-recipe arithmetic bench.
 //
-// Same shape as form/form-kernel-ts/src/numeric-bench.ts:
+// Workloads:
 //   - fp64 sum         (arithmetic-hint = native-fp)
 //   - fp8 sum          (arithmetic-hint = table-lookup-via-fp32, fp32 narrow)
 //   - bitnet ternary   (arithmetic-hint = native-int)
@@ -10,13 +10,7 @@
 //   2. Pass 0  — generic dispatcher (applyArith) per op
 //   3. Pass 1  — per-(format, op) cached closure from FormatTable
 //
-// The TS bench also has Pass 2 (recipe-driven full-function codegen via
-// `new Function`). Go doesn't have an equivalent runtime-JIT story; the
-// closest analogue would be writing source to a .go file, invoking the
-// Go compiler, and dlopen-loading the result — outside the scope of
-// "kernel reads format-recipes" for v0. The Pass 0/Pass 1 arc covers
-// the architectural claim: format-recipe dispatch pays a constant
-// overhead, and the cache closes most of the gap.
+// The measurements compare arithmetic dispatch and cached handlers.
 
 package main
 
