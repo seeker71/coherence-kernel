@@ -53,3 +53,11 @@ run checks 256,000 lookups over 1,000 changing frames and prints elapsed time,
 heap capacity, reclamations, and permanent-record allocations. No live sensor,
 microphone, or renderer is started, and no transcript is read. Compare repeated
 warm runs: bounded memory does not by itself establish lower CPU cost.
+
+Transcript bodies now pass directly into `ftc-byte-text` segments. The native
+wrapper walks only visible spans, retains UTF-8 character boundaries, replaces
+terminal controls with spaces, and leaves off-screen suffixes untouched. It does
+not build every growing text prefix as an interned string. The string-returning
+`fglm-clean` remains available to bounded callers, outside the live render path.
+`./fkwu form/form-stdlib/tests/form-glass-transcript-bytes-band.fk` checks this
+contract, including unchanged-frame suppression; the expected verdict is 1023.
