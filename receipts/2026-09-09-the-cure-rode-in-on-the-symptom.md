@@ -597,3 +597,110 @@ session touched, and I have not diagnosed them. I am naming them as a boundary a
 it is a boundary: three band names, verified independent of this work, is a pointer that removes the
 rediscovery of "which are red and are they yours" — and it is not a diagnosis, which is the thing
 `twicepaid` says not to pretend I am handing over.
+
+---
+
+# Heal the lanes; find what is absent, unavailable and stale
+
+Urs, three asks in one turn: heal all MLX and Metal lanes, find more absent/unavailable/stale flows and
+close them, and — arriving mid-work — **prefer native Metal over MLX wherever it can do the job.**
+
+## The fatal path
+
+Sweeping 74 lane bands against their own declared verdicts found three mismatches, and chasing the
+worst one found something much larger than a band.
+
+`mlx-matmul-band`'s bit 32 claimed "a shape mismatch is refused, giving 0". It has never tested that.
+Running the mismatch **kills the process**: MLX's default error handler aborts, rc 255, and in a
+pipeline the 255 launders to 0 — the body could die and read as success. The old carrier armed
+`mlx_set_error_handler` and carried a paragraph explaining exactly this, ending *"a refusal has to be
+survivable or it is not a refusal."* The 2026-08-25 consolidation took the handler out with everything
+else. **From that day until today, any cell handing MLX a bad shape killed fkwu outright.**
+
+Nothing found it in two weeks, and the reason is the sharpest thing here: the bands that would have hit
+a shape error were failing one token EARLIER, on `mRxC` — a literal the same commit retired. Two wounds
+in a row, and the first hid the second. A fatal path stays unnoticed not because nobody looks but
+because nobody can REACH it.
+
+Restored, and the generic `"mlx op failed"` no longer papers over MLX's own words: a bad matmul now
+returns 0, keeps the process, and says `[matmul] Last dimension of first input with shape (1,3) must
+match second to last dimension of second input with shape (2,2)`.
+
+## Nine ops claimed and never written
+
+`fk-mlx-carrier.c`'s header has listed `gelu layernorm scale axpy shift select clamp rope-pair attn`
+as Form-emitted graphs since 2026-08-25. **Not one was in `mlx-derived.fk`.** Nine names, two weeks.
+
+An overclaim in a header is not a lie that fails — it is a lie that CLOSES THE QUESTION. A reader
+checking whether the carrier is minimal reads the list, sees the op accounted for, and stops looking.
+A gap nobody is looking for outlives one that is red.
+
+Seven written and pinned (`mlx-derived-band` 16777215 → **1073741823**, thirty ops): scale 21.000,
+axpy 19.000, clamp at both ends (3 and 0, via `-max(-a,-b)` since max is the only comparison row),
+gelu(1) = 0.841 with every constant an integer ratio because the carrier's only literal is int32, and
+layernorm as centre-then-rmsnorm. `shift` and `select` are deliberately NOT written and are gone from
+the header instead: select IS `where`, a shift by k IS scale by 2^k, and rows that compute nothing new
+break the same law from the Form side.
+
+## The three red bands, and what they were made of
+
+`mlx-matmul-band` 57→63, `mlx-softmax-band` 1→63, `form-cli-gpu-band` 1009→1023 (the last via its BML
+source, the authoring altitude, not the lowering). All three ran programs in a vocabulary the carrier
+retired: `mRxC` literals and a `softmax` row. Rewritten in the vocabulary that IS — `vN … rN`, the Form
+softmax, `i32` to land — and their refusal bits now name the refusal instead of accepting any 0, which
+they could not do before because the refusal killed the process.
+
+## Sixty-four paths that are not there
+
+A grep of the tree's cells found **80 script paths named and 64 absent**, including all twelve
+`scripts/metal_*_audit.sh` parity gates the tensor emitters cite as proof of their arithmetic on
+silicon. Cells have been citing gates that are not in this checkout, in prose, for as long as the prose
+has existed. Nothing fails, because a citation is not executed — it is read.
+
+The twelve are repointed at the live bands that now do that work and DO exist. The CUDA pair is marked
+absent in place, because there neither the script nor the GPU is here and repointing it at a Metal band
+would be a worse lie than the one it replaces.
+
+And the class is now the body's to watch: `lane-named-paths-band.fk` = 15 walks the lane's cells with
+`fs-read-text`, extracts every `scripts/…` path, and demands each exist — with bit 8 as a live control
+(the CUDA citation, absent by design) so a scanner that quietly matched nothing could not read green.
+Adding one absent path to the emitter drops it to 13.
+
+**The native Metal lane names 16 paths and all 16 exist.** The preferred lane is already honest about
+what it cites.
+
+## The preference, recorded where it will be read
+
+Native Metal over MLX for new work, written into `fk-mlx-carrier.c`'s first paragraph and
+`mlx-derived.fk`'s — the two places someone would extend that lane. Not a verdict on the repairs: an
+honest organ beats a quietly broken one in either lane. But this carrier borrows a library's kernels
+while `form/native/metal/` writes the body's own, and the quant doors restored today dequantize what
+`q6k-msl.fk` and `q8-0-msl.fk` already dequantize in kernels the body emits and can read back. Two
+paths to one meaning is the parallel path the minimum law exists to prevent, one level up from the op
+table.
+
+## Surprise
+
+I wrote the absence back into existence. Healing `mlp-fwd-emit-band`'s stale citation, I explained it
+by naming the missing path — and the scanner I had just built found it again, because a comment that
+explains an absence by writing the absent path out **re-creates exactly what the scanner looks for**.
+This is the second time in two turns: last turn I left a "Verdict 31" in prose describing a header I
+was correcting, and the declaration-reader picked it up. A document that quotes what it removes has not
+removed it. The fix is to describe rather than quote, and it is now written into that band.
+
+## Where discomfort became gold
+
+The discomfort was being handed "prefer native Metal" in the middle of an hour of restoring MLX doors
+and writing MLX recipes. The cheap readings were both available: treat it as a correction and tear the
+work out, or treat it as future-only and keep going unchanged.
+
+Neither is right, and the distinction is worth having. **A broken thing and an unpreferred thing are
+different problems.** The MLX bands were red AND lying — bits scoring green on the absence of what they
+guard, a refusal path that killed the process. Leaving that because the lane is not preferred would
+have left the body a dishonest organ AND a preference. Fixing it does not grow the lane; the preference
+governs what comes NEXT, and the honest place to put it is the header of the file someone would open to
+extend it.
+
+The gold: **direction applies to the next stone, not to the wound already open.** Healing something you
+are moving away from is not wasted work — an organ you are stepping back from should still tell the
+truth about itself, because it stays in the body either way.

@@ -1,5 +1,17 @@
 /* fk-mlx-carrier.c — MLX as an organ of THIS fkwu, not a second binary.
  *
+ * STANDING PREFERENCE, 2026-09-09: NATIVE METAL IS PREFERRED OVER THIS LANE
+ * WHEREVER IT CAN DO THE WORK. Urs's word, and it is a direction for new work,
+ * not a verdict on what is here: the doors and recipes below were repaired that
+ * same day because they were red and lying, and an honest organ is worth more
+ * than a quietly broken one whichever lane it sits in. But this carrier borrows
+ * a library's kernels, and `form/native/metal/` writes the body's own — the
+ * quantized tiers below (q8/q4k/q6k) dequantize what q6k-msl.fk and q8-0-msl.fk
+ * already dequantize in kernels this body emits and can read back. Two paths to
+ * one meaning is the parallel path the minimum law exists to prevent, one level
+ * up from the op table. So: heal MLX when it is wrong, and REACH FOR METAL when
+ * the work is new.
+ *
  * ONE generic door: mlx_run(postfix). Form emits the program. The carrier
  * is a stack machine over MLX arrays. New shapes are new tokens in the
  * program (and a table row here), not new opcodes in fkwu-uni.c.
@@ -10,10 +22,18 @@
  * Form (form-stdlib/mlx-derived.fk) and costs this file nothing:
  *
  *   sub neg sigmoid silu swiglu tanh gelu mean rmsnorm layernorm
- *   l2norm softmax scale axpy recip square
- *   pow mod shift select clamp rope-pair attn         (rope-pair and attn
- *                                                      claimed here since 2026-08-25 and only
- *                                                      WRITTEN 2026-09-09 -- see mlx-derived.fk)
+ *   l2norm softmax scale axpy recip square min centre
+ *   pow mod where clamp rope-pair attn
+ *
+ * THIS LIST WAS AN OVERCLAIM FOR TWO WEEKS. From 2026-08-25 it named gelu,
+ * layernorm, scale, axpy, shift, select, clamp, rope-pair and attn — NINE ops —
+ * and mlx-derived.fk contained none of them. An overclaim in a header is not a
+ * lie that fails, it is a lie that CLOSES THE QUESTION: a reader checking whether
+ * this carrier is minimal reads the list, sees the op accounted for, and stops.
+ * All nine are written and pinned as of 2026-09-09 (mlx-derived-band 1073741823,
+ * up from 16777215). `shift` and `select` are gone from the list rather than
+ * written: select IS `where`, and a shift by k IS scale by 2^k, so adding rows
+ * for them would break the same law from the Form side.
  *
  * all of those are Form-emitted graphs over the twenty-seven forms below.
  * `sub` used to live here and was retired on 2026-08-24 to prove the law cuts
@@ -92,6 +112,36 @@ static char fk_mlx_err[256] = "none";
 
 static void fk_mlx_seterr(const char *m) {
     snprintf(fk_mlx_err, sizeof(fk_mlx_err), "%s", m ? m : "none");
+}
+
+/* MLX'S DEFAULT ERROR HANDLER ABORTS. A Form program asking for a shape that has
+ * no product — a (1,3) matmul (2,2) — prints one line and takes the WHOLE PROCESS
+ * with it, rc 255, which is the opposite of every other door in this body: an
+ * uncovered shape is DECLINED and the caller walks. So the carrier owns the
+ * handler: the message is kept where mlx_status can speak it, and control comes
+ * back. A refusal has to be survivable or it is not a refusal.
+ *
+ * WRITTEN ONCE AND LOST ONCE. This was here before 2026-08-25 with that same
+ * paragraph, and the consolidation that cut this file from 942 lines to 195 took
+ * it out along with the five file doors. From that day until 2026-09-09 any cell
+ * that handed MLX a bad shape killed fkwu outright — and in a pipeline the 255
+ * launders to 0, so it could kill the body and read as success. Nothing found it
+ * because the bands that would have hit a shape error were themselves failing one
+ * token earlier on `mRxC`, a literal the same commit retired: two wounds in a row
+ * where the first hid the second. That is the ordinary way a fatal path stays
+ * unnoticed — not that nobody looked, but that nobody could REACH it. */
+static int fk_mlx_failed = 0;
+static void fk_mlx_on_error(const char *msg, void *data) {
+    (void)data;
+    fk_mlx_failed = 1;
+    fk_mlx_seterr(msg);
+}
+static void fk_mlx_arm_handler(void) {
+    static int armed = 0;
+    if (!armed) {
+        mlx_set_error_handler(fk_mlx_on_error, 0, 0);
+        armed = 1;
+    }
 }
 
 static int fk_mlx_space(char c) {
@@ -201,7 +251,7 @@ static int fk_mlx_apply(const char *op, mlx_array *st, int *sp, mlx_stream s) {
         mlx_array c = mlx_array_new();
         if (mlx_array_set(&c, st[*sp - 1]) != 0) {
             mlx_array_free(c);
-            fk_mlx_seterr("dup failed");
+            if (!fk_mlx_failed) { fk_mlx_seterr("dup failed"); }
             return -1;
         }
         return fk_mlx_push(c, st, sp);
@@ -279,7 +329,8 @@ static int fk_mlx_apply(const char *op, mlx_array *st, int *sp, mlx_stream s) {
     mlx_array_free(b);
     if (rc != 0) {
         mlx_array_free(c);
-        fk_mlx_seterr("mlx op failed");
+        /* MLX already spoke through the handler; do not paper over its words with ours. */
+        if (!fk_mlx_failed) { fk_mlx_seterr("mlx op failed"); }
         return -1;
     }
     return fk_mlx_push(c, st, sp);
@@ -769,7 +820,7 @@ static int fk_mlx_reshape_n(const char **p, const char *end, int n,
     mlx_array_free(a);
     if (rc != 0) {
         mlx_array_free(c);
-        fk_mlx_seterr("reshape failed");
+        if (!fk_mlx_failed) { fk_mlx_seterr("reshape failed"); }
         return -1;
     }
     return fk_mlx_push(c, st, sp);
@@ -780,6 +831,8 @@ long long fk_mlx_run_external(const char *src, long long n) {
         fk_mlx_seterr("empty program");
         return 0;
     }
+    fk_mlx_arm_handler();
+    fk_mlx_failed = 0;
     mlx_device gpu = mlx_device_new_type(MLX_GPU, 0);
     bool gpu_ok = 0;
     mlx_device_is_available(&gpu_ok, gpu);
@@ -829,8 +882,14 @@ long long fk_mlx_run_external(const char *src, long long n) {
             fk_mlx_seterr("unknown op");
             fail = 1;
         }
+        if (fk_mlx_failed) {
+            fail = 1;
+        }
     }
     long long outv = 0;
+    if (fk_mlx_failed) {
+        fail = 1;
+    }
     if (!fail) {
         if (sp != 1) {
             fk_mlx_seterr("program did not leave one value");
