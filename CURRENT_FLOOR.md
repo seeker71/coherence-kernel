@@ -1080,12 +1080,12 @@ and source.** `form-glass-crossings.bml` folds five facts a crossing already
 leaves behind and invents none of them: the frame's SEQUENCE is how many times
 it was given, the snapshot's sample count is how many rows rode each give, the
 sample kinds are the shapes, the membrane's own suffixes tell a control surface
-from a publisher, and `fgtm-read-age` is the time. Their product is the reading
-that matters — **row-crossings**, gives × rows — and it is folded into five
-histograms: by type, by source, by shape, by volume bucket, by age bucket. A
-surface silent past its window is counted apart, so a corpse's lifetime traffic
-never reads as present load, and attention names the heaviest surface that is
-still giving. crossings 4095.
+from a publisher, and the roster's own stamp is the time. Their product is the
+reading that matters — **row-crossings**, gives × rows — and it is folded into
+five histograms: by type, by source, by shape, by volume bucket, by age bucket.
+A surface silent past its window is counted apart, so a corpse's lifetime
+traffic never reads as present load, and attention names the heaviest surface
+that is still giving. crossings 8191.
 
 Read live on this host: **78,630,838 live row-crossings**, of which `organs`
 carries 75,781,206 — 495,302 gives of 153 rows, 96% of everything moving. By
@@ -1096,6 +1096,30 @@ carries ten rows. Two publishers stand silent with lifetime traffic that is
 history, not load. The reading is not that a giver is wasteful: a snapshot is
 WHOLE by contract, so a reader takes every row every time, and this is what
 that contract costs when it is measured rather than assumed.
+
+**A roster row carries when its name last spoke.** The roster has always kept
+that moment — byte 120 of each 128-byte slot, refreshed on every register,
+which a publisher does on every publish — and handed back only the name, so a
+reader had to open every frame to learn what the directory already knew, and a
+control frame, which carries no epoch of its own, could not be dated at all.
+`gift_roster_names` now answers rows of `(name lastSpokeMs)`;
+`fgtm-roster-row-age`, `fgtm-spoken-in-space` and `fgtm-spoke-of` read them,
+and `fgx-roster-slots` / `fgx-slots-by-time` / `fgx-slots-silent` /
+`fgx-oldest-slot` fold the whole body's staleness with **no frame opened and
+nothing parsed**. The bound stays the reader's: `fgx-slots-silent` takes it as
+an argument rather than deciding for anyone what counts as too long ago.
+
+Read live on this host: **122 slots, two of which spoke inside three seconds**
+— `resource.governor` and `organs`. One spoke inside the minute, two inside the
+hour, and **117 last spoke over an hour ago**; the oldest,
+`/tmp/form-glass-jit-hold-witness|jit.bml-demand`, has been silent 178,309
+seconds — 49.5 hours. That is not a leak and burying it would delete a true
+reading: shared memory outlives its giver on purpose, so a frame published
+yesterday is still there to be read, and `/tmp/form-glass-telemetry|choices`
+still answers status `current` with all eighteen of its rows 40.6 hours after
+anyone last gave it. `current` says a frame parsed and named its publisher; it
+never said recent. Time is the only thing that separates a voice from an echo,
+and now every slot carries it.
 
 **The glass names its own hot path, and the JIT declines its shape.** Read from
 a standing glass's own page: the top sixty-four recipes carry **172 million

@@ -19,8 +19,9 @@
 //           each give. Their product is the real traffic: row-crossings.
 //   SHAPE   the kinds the rows carry, counted — a frame that gives the
 //           same ninety-five recipe rows every tick says so here
-//   TIME    how long since the last give (fgtm-read-age), which is the
-//           same door that tells a giver from a frame merely standing
+//   TIME    how long since the surface last spoke, taken from the roster's
+//           own stamp -- the one clock that covers every slot, including a
+//           control frame that carries no epoch of its own
 //
 // The histograms are folds over those five, and the finding is a
 // question rather than a verdict: attention pays most where the largest
@@ -32,6 +33,7 @@
 section [form.bml] {
     class FormGlassCrossings {
         field FGXSchema = "form-glass-crossing-v1";
+        field FGXSlotSchema = "form-glass-slot-v1";
         // a crossing older than this has stopped; it is counted apart so a
         // corpse's lifetime traffic never reads as present load
         field FGXSilentMs = 3000;
@@ -86,13 +88,38 @@ section [form.bml] {
             let released = ggf-release(handle);
             if lt(seq, 0) then 0 else seq;
         }
-        def fgx-read-crossing(root, name, now) {
+        // TIME comes from the roster's own stamp, and from nowhere else. The
+        // roster records the moment a name last registered, which a publisher
+        // does on every publish, so it is the one clock that covers EVERY
+        // surface: a control inbox carries no epoch of its own, and a snapshot
+        // that outlives its giver carries an epoch that says when it was
+        // written, not that anyone is still writing. One time source, one
+        // answer -- a frame with no roster row has never spoken here, and that
+        // reads -1, which is not an age of zero.
+        def fgx-age-since(spokeMs, now) = if lt(spokeMs, 0) then -1 else if gt(spokeMs, now) then 0 else sub(now, spokeMs);
+        def fgx-read-crossing(root, name, spokeMs, now) {
             let reading = fgtm-read-current(root, name);
             let samples = if str_eq(fgtm-read-state-status(reading), "current") then fgtm-snapshot-samples(fgtm-field-value(fgtm-read-state-value(reading))) else list();
-            fgx-crossing(name, fgx-surface-type(name), fgx-gives-of(root, name), len(samples), fgtm-read-age(reading, now), fgx-kinds(samples, list()));
+            fgx-crossing(name, fgx-surface-type(name), fgx-gives-of(root, name), len(samples), fgx-age-since(spokeMs, now), fgx-kinds(samples, list()));
         }
-        def fgx-of-names(root, names, now) = if eq(len(names), 0) then list() else cons(fgx-read-crossing(root, head(names), now), fgx-of-names(root, tail(names), now));
-        def fgx-of-space(root, now) = fgx-of-names(root, fgtm-frames-in-space(gift_roster_names(), root), now);
+        def fgx-of-spoken(root, spoken, now) = if eq(len(spoken), 0) then list() else cons(fgx-read-crossing(root, head(head(spoken)), nth(head(spoken), 1), now), fgx-of-spoken(root, tail(spoken), now));
+        def fgx-of-space(root, now) = fgx-of-spoken(root, fgtm-spoken-in-space(gift_roster_names(), root), now);
+
+        // ---- the staleness census: every slot in the body, no frame opened ----
+        // "Is this stale, and where?" is a question about the whole roster, not
+        // about one space, and the roster answers it alone: a name and when it
+        // last spoke. No frame is opened, nothing is parsed, and a surface in a
+        // space this reader has never heard of is counted the same as its own.
+        // The BOUND is the reader's -- fgx-slots-silent takes it as an argument
+        // rather than deciding for anyone what counts as too long ago.
+        def fgx-slot(name, ageMs) = list(FGXSlotSchema(), name, ageMs);
+        def fgx-slot-name(s) = nth(s, 1);
+        def fgx-slot-age(s) = nth(s, 2);
+        def fgx-slots-of(rows, now) = if eq(len(rows), 0) then list() else cons(fgx-slot(fgtm-roster-row-name(head(rows)), fgtm-roster-row-age(head(rows), now)), fgx-slots-of(tail(rows), now));
+        def fgx-roster-slots(now) = fgx-slots-of(gift_roster_names(), now);
+        def fgx-slots-by-time(ss, h) = if eq(len(ss), 0) then h else fgx-slots-by-time(tail(ss), fgx-bump(h, fgx-age-bucket(fgx-slot-age(head(ss))), 1));
+        def fgx-slots-silent(ss, ms) = if eq(len(ss), 0) then list() else if gt(fgx-slot-age(head(ss)), ms) then cons(head(ss), fgx-slots-silent(tail(ss), ms)) else fgx-slots-silent(tail(ss), ms);
+        def fgx-oldest-slot(ss, held) = if eq(len(ss), 0) then held else if eq(len(held), 0) then fgx-oldest-slot(tail(ss), head(ss)) else if gt(fgx-slot-age(head(ss)), fgx-slot-age(held)) then fgx-oldest-slot(tail(ss), head(ss)) else fgx-oldest-slot(tail(ss), held);
 
         // ---- where attention pays --------------------------------------------
         // The largest traffic that is still LIVE: a corpse's lifetime count is
