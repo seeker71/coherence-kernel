@@ -44,3 +44,11 @@ and the revised census re-observed 65535. Subsequent migrations preflighted a
 read-only import before applying edits. The exchange stayed alive by following
 the stale references into their callers and measurements, then witnessing the
 current Form route.
+
+After rebasing onto `9cc11ed2`, the clean implementation commit `39abd1d5`
+passed all eleven native cases again. Its [complete per-case evidence](2026-09-09-native-jit-reference-cleanup-evidence/)
+records the source commit, index tree, timestamp, empty unstaged path list,
+preflight streams, run streams, exits and durations. The census and panel bands
+again returned 65535, 2097151 and 4294967295. The current guide read seven
+references with none unread; the tracked-tree scan again found zero retired
+references. The full drift gate again passed 8191/8191 with no refusals.
