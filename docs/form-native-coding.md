@@ -41,6 +41,7 @@ model on completion; it is not a long-lived shared hearth service.
 | Split | `{"tasks":["first task","next task"]}` | An ordered work queue; no rented subagents |
 | Implement | Tool calls, then `{"task":"done"}` | In-memory edits and advancement to the next task |
 | Review | `{"verdict":"accept","reason":"..."}` or `reject` | Rework on rejection; caller verification on acceptance |
+| Repair | `{"diagnosis":"observed cause","change":"different approach","next":"implement"}` or `next:"plan"` | Retain failure evidence, then resume editing or rebuild the plan and task queue |
 
 Every role may inspect documents. Only implementation may edit. Native calls use
 `{"tool":"rg","arguments":["-nF","enabled","config.json"],"input":""}`.
@@ -59,6 +60,23 @@ existing supported subsets and error behavior remain unchanged. An unavailable
 tool or invalid edit becomes a tool observation, not a shell fallback. Malformed
 model responses receive a correlated native revise action and a format reminder.
 
+Repair is an active role, not a stopped job. A native tool error, review finding,
+or failed check enters repair. Read-only inspection stays available; its output
+does not overwrite the separately retained failure evidence. Qwen names what
+failed and what it will change. Replanning preserves original documents,
+constraints, candidates, completed-task counts and repair memory. If the exact
+same counterexample survives a repair, the next route must be `plan` before
+further edits. An `rg` no-match result is an observation, not a tool malfunction.
+Malformed JSON and unavailable tools receive correction in the current role.
+
+The result returns `repair_attempts`, `check_runs` and `repair_notes` containing
+each model diagnosis, intended change, selected route and the evidence it saw.
+These are within-run reflections, **not proven causal explanations or weight
+training**. They remain available to the caller for inspection and storage;
+this door does not automatically persist them into another job or LoRA.
+Budget/context exhaustion retains these notes and the candidate instead of
+calling unfinished work complete.
+
 ## What a successful result proves
 
 Completion requires an actual document change, completed tasks, Qwen review,
@@ -67,8 +85,10 @@ text, and exact stdout. The JSON door supports **read-only native tool assertion
 and executable arithmetic checks through the existing native definition grammar.
 A `jq` check establishes a configuration property, not that an
 arbitrary application compiles or runs. Tests and acceptance criteria do not
-come from the model. Failed verification returns its actual result to Qwen and
-resumes implementation, followed by another review and verification.
+come from the model. Failed verification returns its actual result to Qwen's
+repair role, followed by a changed implementation or plan, another review, and
+verification. A model's claim that it repaired something never substitutes for
+rerunning the caller's checks.
 
 For an executable source check, supply a document such as
 `module calc { fn bump(x) = add(x,1); }` and this immutable check:
@@ -104,7 +124,9 @@ parity, broad coding quality improvement, or `voice-home=1` from a passing examp
 ## Observe
 
 Each movement publishes a fresh `qwen.coding.<pid>` Glass snapshot with the
-current role, actual native tool-call count and cumulative generated-ID count.
+current role, actual native tool-call count, cumulative generated-ID count,
+repair attempts and caller-check runs. Check runs count whole callback calls,
+not individual assertions. A failed check remains counted after a later pass.
 Generation refreshes these counts every 32 IDs, preserving the pending ID
 exactly once and decoding the complete reply only after generation ends.
 Terminal metadata adds injected IDs, position and elapsed milliseconds.
@@ -120,8 +142,33 @@ form/form-stdlib/tests/form-cli-code-session-band.fk  -> 31
 form/form-stdlib/tests/form-cli-code-telemetry-band.fk -> 7
 form/form-stdlib/tests/form-cli-code-definition-band.fk -> 127
 form/form-stdlib/tests/form-cli-code-dispatch-band.fk -> 7
+form/form-stdlib/tests/form-cli-code-repair-band.fk -> 262143
+form/form-stdlib/tests/form-cli-code-documents-band.fk -> 255
+form/form-stdlib/tests/form-cli-agent-tool-wire-band.fk -> 131071
 form/form-stdlib/tests/form-cli-agent-tools-examples-band.fk -> 32767
+form/form-stdlib/tests/qwen38-sliced-head-band.fk -> 7
 ```
+
+For an explicit real-model recovery exercise, run
+`form-run ./fkwu observe/form-cli-code-retry-witness.fk` and send `qwen38-q8`
+on stdin. The fixture deliberately supplies a wrong candidate for `x*x+x+1`.
+The native checker fails it before Qwen is admitted; Qwen must then diagnose,
+repair, review and pass six arithmetic cases plus preservation of a second
+document. The initial wrong edit and six initial policy turns are **fixture
+inputs, not model-generated behavior**. The witness reports newly generated
+model replies separately. It admits real weights, publishes actual Glass
+metadata, and releases its model; it is not a simulated model test.
+
+`observe/form-cli-code-first-reply-witness.fk` accepts the same model-name line
+and checks a bounded first reply on public two-document data. It requires a
+completed refinement reply advancing to `plan` and successful release. Its
+128-ID generation bound is a probe bound, not a production reply limit.
+The 2026-09-09 probe found that sliced prefill drained its concurrent batch,
+then submitted the gather/head with no concurrent batch armed. Re-arming
+before the head changed the identical prompt's first response from unrelated
+54-ID JavaScript to a valid 70-ID refinement. Generated text was never executed
+as host code. The structural band guards this batch boundary; the live probe
+checks actual first-role behavior.
 
 The native tokenizer parity witness is
 `observe/form-cli-code-tokenizer-witness.fk`. On this host, its 34 observation
