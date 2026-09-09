@@ -7,6 +7,7 @@
 ; preludes: form-stdlib/form-cli-turn-evidence.fk
 ; preludes: form-stdlib/bml/form-cli-remote-token-evidence.bml
 ; preludes: form-stdlib/bml/form-cli-transcript-discovery.bml
+; preludes: form-stdlib/bml/form-cli-tool-output-evidence.bml
 ;
 ; Nothing here asks Python, SQLite, a shell, or another parser to interpret
 ; the evidence. The private binding is an explicit capability: absence,
@@ -614,8 +615,7 @@
         (let call-id (fctel-json-payload-string line "call_id"))
         (if (str_eq call-id "") state
             (do
-                (let command (fctel-json-payload-string line "arguments"))
-                (let native-request (fctel-native-command? command))
+                (let native-request (fcto-request line 0))
                 (let calls (fctel-calls-add
                     (nth state 20) call-id native-request))
                 (fctel-set (fctel-add-at state 7 1) 20 calls)))))
@@ -625,16 +625,16 @@
         (let call-id (fctel-json-payload-string-from segment from "call_id"))
         (if (str_eq call-id "") state
             (do
-                (let command
-                    (fctel-json-payload-string-from segment from "arguments"))
-                (let native-request (fctel-native-command? command))
+                (let native-request (fcto-request segment from))
                 (let calls (fctel-calls-add
                     (nth state 20) call-id native-request))
                 (fctel-set (fctel-add-at state 7 1) 20 calls)))))
 
 (defn fctel-add-output-measure (state measure)
     (do
-        (let s1 (fctel-add-at state 10 (nth measure 0)))
+        (let s1 (if (or (lt (nth state 10) 0) (lt (nth measure 0) 0))
+            (fctel-set state 10 -1)
+            (fctel-add-at state 10 (nth measure 0))))
         (let s2 (fctel-add-at s1 11 (nth measure 1)))
         (let s3 (fctel-add-at s2 12 (nth measure 2)))
         (let s4 (fctel-add-at s3 13 (nth measure 3)))
@@ -649,7 +649,7 @@
 (defn fctel-add-output (state line)
     (do
         (let call-id (fctel-json-payload-string line "call_id"))
-        (let measure (fctel-raw-output-measure line
+        (let measure (fcto-output-range line 0 (str_len line) line
             (fctel-call-native-request? (nth state 20) call-id)))
         (let measured (fctel-add-output-measure
             (fctel-add-at state 8 1) measure))
@@ -660,7 +660,7 @@
     (do
         (let call-id
             (fctel-json-payload-string-from segment from "call_id"))
-        (let measure (fctel-raw-output-measure-range segment from end prefix
+        (let measure (fcto-output-range segment from end prefix
             (fctel-call-native-request? (nth state 20) call-id)))
         (let measured (fctel-add-output-measure
             (fctel-add-at state 8 1) measure))
@@ -784,7 +784,7 @@
         (fctel-calls-parse-loop (split-on text ";") (list)
             (add (fctel-max-pending-calls) 1))))
 
-(defn fctel-progress-tag () "turn-evidence-progress-v2")
+(defn fctel-progress-tag () "turn-evidence-progress-v3")
 
 (defn fctel-progress-row (carrier-size turn-id segment-start complete-at cursor state)
     (fctel-join (list (fctel-progress-tag) "|"
@@ -947,7 +947,8 @@
                 (str_eq (nth parts 6) (fctel-carrier-thread-id path size))
                 (str_eq (nth parts 7) (fctel-carrier-provider path size))))
             (let terminal-ok (eq (fctel-terminal-line?
-                (read_file_slice path complete-at 4096) turn-id) 1))
+                (fctel-first-line (read_file_slice path complete-at 4096))
+                turn-id) 1))
             (if (and shape-ok (and start-ok (and identity-ok terminal-ok)))
                 1 0))))
 
@@ -1023,8 +1024,10 @@
         (fctel-join (list "turn-evidence-refresh=unavailable reason=" reason "\n"))))
 
 (defn fctel-collect-finish (path size complete-at turn-id segment-start segment-end state)
-    (if (eq (fctel-calls-overflow? (nth state 20)) 1)
-        (fctel-collector-refuse "pending-call-cap-exceeded")
+    (if (gt (len (nth state 20)) 0)
+        (fctel-collector-refuse
+            (if (eq (fctel-calls-overflow? (nth state 20)) 1)
+                "pending-call-cap-exceeded" "unmatched-tool-call"))
         (do
             (let meta-line (fctel-first-line
                 (read_file_slice path 0 (fctel-min size 1048576))))
