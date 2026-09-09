@@ -28,7 +28,7 @@ no 128-sample ceiling. The viewport follows the selected field and reports rows
 above/below; open evidence stays at the bottom. With no selection, `i`/`e`
 opens an identifier prompt: Enter submits, Backspace edits, Escape cancels.
 
-Exact metric selectors include the domain: `metric.mlx.allocated-bytes` and
+Exact metric selectors include the domain: `metric.metal.allocated-bytes` and
 `metric.metal.allocated-bytes` name different readings. Legacy
 `metric.blueprint-bytes` still resolves. Interaction keys are textual channels,
 not newly minted projection nodes: many readings intentionally share one

@@ -30,15 +30,8 @@ checkout witness reachable while the seed is reduced toward zero.
 # ONE binary. Metal is this host's organ, not a second executable (no fkwu-metal).
 # Darwin: link the carrier; it SKIP's when the machine has no GPU.
 if [ "$(uname -s)" = Darwin ] && [ -f form/native/metal/fk-metal-carrier.m ]; then
-  if [ -f /opt/homebrew/lib/libmlxc.dylib ] && [ -f form/native/mlx/fk-mlx-carrier.c ]; then
-    cc -O2 -o fkwu runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
-      form/native/mlx/fk-mlx-carrier.c \
-      -framework Metal -framework Foundation -fobjc-arc \
-      -I/opt/homebrew/include -L/opt/homebrew/lib -lmlxc -Wl,-rpath,/opt/homebrew/lib
-  else
-    cc -O2 -o fkwu runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
-      -framework Metal -framework Foundation -fobjc-arc
-  fi
+  cc -O2 -o fkwu runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
+    -framework Metal -framework Foundation -fobjc-arc
 else
   cc -O2 -o fkwu runtime/fkwu-uni.c
 fi

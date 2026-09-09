@@ -1802,27 +1802,6 @@ FK_METAL_WEAK long long fk_metal_deadline_external(long long ms) {
     (void)ms;
     return FK_METAL_HANDLE_UNLINKED;
 }
-/* MLX organ. Same weak-stub shape as Metal: a build without the mlx carrier
- * still compiles and still speaks mlx_linked=false. Tags 143/144 are free in
- * the evaluator (holes after metal_fence_wait's 142). Checkout-witness; the
- * Form walker is the shrink target. */
-#define FK_MLX_UNLINKED FK_METAL_HANDLE_UNLINKED
-FK_METAL_WEAK long long fk_mlx_live_external(long long *out) { int k = 0; while (k < 12) { out[k] = 0; k = k + 1; } return -1; } /* strong symbol lives in the MLX carrier */
-FK_METAL_WEAK long long fk_mlx_status_external(char *out, long long cap) {
-    (void)out;
-    (void)cap;
-    return FK_MLX_UNLINKED;
-}
-FK_METAL_WEAK long long fk_mlx_add_external(long long a, long long b) {
-    (void)a;
-    (void)b;
-    return FK_MLX_UNLINKED;
-}
-FK_METAL_WEAK long long fk_mlx_run_external(const char *src, long long n) {
-    (void)src;
-    (void)n;
-    return FK_MLX_UNLINKED;
-}
 static long long fk_srange(long long sv, const char **ptr, long long *len) {
     long long sa = fk_stri(sv);
     if (sa < 0 || !FK_SOK(sa)) {
@@ -2032,42 +2011,6 @@ static long long fk_metal_status_native(void) {
         n = FK_METAL_STATUS_BUF_CAP;
     }
     return fk_sbuf(out, n);
-}
-#define FK_MLX_STATUS_BUF_CAP 4096
-static long long fk_mlx_status_native(void) {
-    static char out[FK_MLX_STATUS_BUF_CAP];
-    long long n = fk_mlx_status_external(out, FK_MLX_STATUS_BUF_CAP);
-    if (n == FK_MLX_UNLINKED) {
-        const char *m = "mlx_owner=fkwu-form-cli\nmlx_linked=false\nmlx_metal_available=false\nmlx_gpu_available=false\nlast_error=unlinked\n";
-        return fk_sbuf(m, fk_cstrlen(m));
-    }
-    if (n < 0) {
-        const char *m = "mlx_owner=fkwu-form-cli\nmlx_linked=false\nlast_error=carrier returned error\n";
-        return fk_sbuf(m, fk_cstrlen(m));
-    }
-    if (n > FK_MLX_STATUS_BUF_CAP) {
-        n = FK_MLX_STATUS_BUF_CAP;
-    }
-    return fk_sbuf(out, n);
-}
-static long long fk_mlx_add_native(long long a, long long b) {
-    long long r = fk_mlx_add_external(a, b);
-    if (r == FK_MLX_UNLINKED) {
-        return 0;
-    }
-    return r;
-}
-static long long fk_mlx_run_native(long long srcv) {
-    const char *p;
-    long long n;
-    if (!fk_srange(srcv, &p, &n)) {
-        return 0;
-    }
-    long long r = fk_mlx_run_external(p, n);
-    if (r == FK_MLX_UNLINKED) {
-        return 0;
-    }
-    return r;
 }
 /* ── host sense-channel carriers: camera (world-video) + mic (world-audio) ── The two conditions of
  * host-kernel.form, made concrete: ALLOW-PRESENCE (detect the device through the host's own OS API)
@@ -13117,10 +13060,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 82) {
         return ((long long)fk_num(fk_walk(fk_node[i][1], fp))) << 1;
     }
-    if (t == 83) {
-        fk_walk(fk_node[i][1], fp);
-        return 0;
-    }
     if (t == 84) {
         long long a84 = fk_walk(fk_node[i][1], fp);
         fk_vp(a84);
@@ -13184,7 +13123,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             /* MODE 9 -- substring(s, start, end): the byte-indexed string slice.
              *
              * It was tag 29 until 2026-07-01, when it became Form composition over
-             * the narrow waist and the tag was spent on mlx_live. The recipe
+             * the narrow waist. The recipe
              * (fstr-substring-halve, still in core.fk and still the statement of
              * what this door MEANS) is right, and it is the slowest door in the
              * body: cutting 192 kB costs ~384,000 interpreted str_byte_at /
@@ -13625,16 +13564,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long n193 = fk_walk(fk_node[i][2], fp) >> 1;
         if (n193 < 0) { return fk_page_rows(p193, 2, 0 - n193); }
         return fk_page_rows(p193, 1, n193);
-    }
-    if (t == 29) {
-        /* mlx_live: the MLX carrier's state as words (linked, metal, gpu, device, version major/minor/patch, ops,
-         * dispatches, error present, error length, 0); nil when MLX is not linked -- no text, nothing to parse */
-        long long m29[16];
-        if (fk_mlx_live_external(m29) <= 0) { return 1; }
-        long long l29 = 1;
-        long long k29 = 15;
-        while (k29 >= 0) { l29 = fk_cons_val(m29[k29] << 1, l29); k29 = k29 - 1; }
-        return l29;
     }
     if (t == 32) {
         /* kernel_ast pid spec: that kernel's program surface where it lives -- spec -1 the header words, k a node's four
@@ -14296,17 +14225,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 148) {
         return fk_metal_deadline_native(fk_walk(fk_node[i][1], fp) >> 1) << 1;
-    }
-    if (t == 143) {
-        return fk_mlx_status_native();
-    }
-    if (t == 144) {
-        long long a144 = fk_walk(fk_node[i][1], fp) >> 1;
-        long long b144 = fk_walk(fk_node[i][2], fp) >> 1;
-        return fk_mlx_add_native(a144, b144) << 1;
-    }
-    if (t == 145) {
-        return fk_mlx_run_native(fk_walk(fk_node[i][1], fp)) << 1;
     }
     if (t == 205) {
         return fk_mic_count() << 1;

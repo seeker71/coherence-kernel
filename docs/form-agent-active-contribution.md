@@ -88,13 +88,14 @@ The live doors are:
 | File delta, scannerless cursor, recovery, diagnostics | CPU / fkwu | wall time, kernel/framebuffer deltas, I/O dispatches |
 | Local Qwen prefill and decode | native Metal | this process's `gpu_busy_us_total`, dispatch/sync/pending |
 | Generated recipe kernels | native Metal today; NodeID route may evolve | cursor callback, carrier, value, native-code-generated, lifecycle |
-| Adapter training or array work | MLX | this fkwu's `mlx_dispatch`; an external trainer enters as an explicit reservation observation |
+| Tensor array work | Form-emitted Metal | result-owned stage rows, Metal dispatches, GPU busy time, mapped buffers and cleanup |
+| External adapter training | external model process | explicit reservation observation; not counted as work by this fkwu |
 | CPU JIT leaves | Form CPU JIT | `cpu_jit_busy_us_total` |
 
-`metal_status` and `mlx_status` do not see another process's MLX queues or GPU
+`metal_status` does not see another process's queues or GPU
 occupancy. A zero delta is therefore never interpreted as “the whole GPU is
-idle.” The live runner accepts external MLX reservation as observed input, and
-future host-utilization sensing can replace that supplied fact: an external MLX
+idle.” The live runner accepts external reservation as observed input, and
+future host-utilization sensing can replace that supplied fact: external
 training can be active while a supplied `0` says idle, and the resident then
 waits on that word. Route and quantum choice remain data. The C seed's function
 arrays grow geometrically together (`form/form-stdlib/tests/no-fixed-tables-band.fk`

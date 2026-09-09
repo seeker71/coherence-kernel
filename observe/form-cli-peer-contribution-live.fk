@@ -4,15 +4,15 @@
 ; Startup stdin, one line each:
 ;   sealed qwen35 GGUF, task spool, reply spool, fifo bell, channel identity,
 ;   context positions, generation quantum, byte quantum, event capacity,
-;   external MLX reservation observation (0 or 1).
+;   external Form tensor reservation observation (0 or 1).
 ; After startup stdin is irrelevant. Clients append complete or partial
 ; fcpa-task-frame bytes to the task spool and ring the fifo. The resident blocks
 ; on the bell at idle: no polling core and no HTTP/server/model membrane.
 ;
 ; CPU carries file deltas, scannerless BMF cursors, recovery and diagnostics.
-; Native Metal carries Qwen and any emitted recipe kernels. MLX may train in
+; Native Metal carries Qwen and any emitted recipe kernels. Form tensor may train in
 ; another process concurrently; its reservation is supplied because this
-; fkwu's metal_status/mlx_status counters cannot witness another process.
+; fkwu's metal_status/tensor_status counters cannot witness another process.
 ;
 ; Effectful. A `release` byte written to the bell closes model/state handles.
 ; preludes: form-stdlib/form-cli-peer-contribution-turnwheel.fk form-stdlib/spool-bell-transport.fk form-stdlib/bml/form-cli-peer-contribution-live-birth.bml
@@ -67,14 +67,12 @@
                     (if (lt stop 0) 0
                         (str_to_int (substring status start stop)))))))
 
-    (defn fcpctl-observed-turn (state budget mlx-reservation turn)
+    (defn fcpctl-observed-turn (state budget tensor-reservation turn)
         (do
             (let started-ms (now_unix_ms))
             (let metal-before (metal_status))
-            (let mlx-before (mlx_status))
             (let result (fcpct-turn state (now_unix_ms) budget))
             (let metal-after (metal_status))
-            (let mlx-after (mlx_status))
             (let wall (sub (now_unix_ms) started-ms))
             (let gpu-us (sub
                 (fcpctl-status-int metal-after "gpu_busy_us_total")
@@ -82,16 +80,12 @@
             (let cpu-jit-us (sub
                 (fcpctl-status-int metal-after "cpu_jit_busy_us_total")
                 (fcpctl-status-int metal-before "cpu_jit_busy_us_total")))
-            (let mlx-dispatch (sub
-                (fcpctl-status-int mlx-after "mlx_dispatch")
-                (fcpctl-status-int mlx-before "mlx_dispatch")))
             (fcpctl-int "turn" turn)
             (fcpctl-line "signal" (fcpct-result-signal result))
             (fcpctl-int "wall-ms" wall)
             (fcpctl-int "gpu-busy-us" gpu-us)
             (fcpctl-int "cpu-jit-busy-us" cpu-jit-us)
-            (fcpctl-int "mlx-dispatch" mlx-dispatch)
-            (fcpctl-int "mlx-external-reservation" mlx-reservation)
+            (fcpctl-int "tensor-external-reservation" tensor-reservation)
             (fcpctl-int "completed"
                 (fcpct-completed (fcpct-result-state result)))
             (fcpctl-int "contributions"
@@ -149,20 +143,20 @@
                 state)
             state))
 
-    (defn fcpctl-drain (state budget mlx-reservation turn floor)
+    (defn fcpctl-drain (state budget tensor-reservation turn floor)
         (do
-            (let result (fcpctl-observed-turn state budget mlx-reservation turn))
+            (let result (fcpctl-observed-turn state budget tensor-reservation turn))
             (let next (fcpctl-recycle-if-grown (fcpct-result-state result) floor))
             (if (str_eq (fcpct-result-signal result) "failure") next
             (if (not (nothing? (fcpct-staged next)))
-                (fcpctl-drain next budget mlx-reservation (add turn 1) floor)
+                (fcpctl-drain next budget tensor-reservation (add turn 1) floor)
             (if (gt (len (fcpat-pending (fcpct-transport next))) 0)
-                (fcpctl-drain next budget mlx-reservation (add turn 1) floor)
+                (fcpctl-drain next budget tensor-reservation (add turn 1) floor)
             (if (not (str_eq (fcpct-result-signal result) "nothing"))
-                (fcpctl-drain next budget mlx-reservation (add turn 1) floor)
+                (fcpctl-drain next budget tensor-reservation (add turn 1) floor)
                 next))))))
 
-    (defn fcpctl-loop (state bell budget mlx-reservation turn floor)
+    (defn fcpctl-loop (state bell budget tensor-reservation turn floor)
         (do
             (fcpctl-line "ready" "1")
             (let wake (sbt-bell-wait bell))
@@ -175,8 +169,8 @@
                     (fcpctl-int "release-ok" released)
                     released)
                 (do
-                    (let next (fcpctl-drain state budget mlx-reservation turn floor))
-                    (fcpctl-loop next bell budget mlx-reservation
+                    (let next (fcpctl-drain state budget tensor-reservation turn floor))
+                    (fcpctl-loop next bell budget tensor-reservation
                         (add turn 1) floor)))))
 
     ; an empty model line resolves from the registry by ROLE — the birth
@@ -192,7 +186,7 @@
     (let budget (fcpctl-read-int 160))
     (let byte-quantum (fcpctl-read-int 1048576))
     (let capacity (fcpctl-read-int 64))
-    (let mlx-reservation (fcpctl-read-int 0))
+    (let tensor-reservation (fcpctl-read-int 0))
     ; Birth and announce capabilities before model admission. A coordinate from
     ; another process is never borrowed as if it were this residence's NodeID.
     (let recipe (frex-recipe))
@@ -267,4 +261,4 @@
             (fcpctl-int "recovered-task-keys"
                 (len (fcpct-recovery-keys state)))
             (let floor (fcpctl-floor state))
-            (fcpctl-loop state bell budget mlx-reservation 1 floor))))))
+            (fcpctl-loop state bell budget tensor-reservation 1 floor))))))

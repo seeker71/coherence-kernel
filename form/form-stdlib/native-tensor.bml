@@ -1,0 +1,207 @@
+// Native tensor programs. Form owns parsing, shapes, types and emitted MSL.
+// Buffers stay shared and resident through a program; dup and reshape share
+// handles. File tensors map their existing pages; quant decoding runs on Metal.
+// Results carry presence separately from value, errors and physical counters.
+// No mutable last-error slot and no library graph hidden behind a primitive.
+// preludes: form-stdlib/metal-door.fk form-stdlib/line-grammar.fk form-stdlib/q8-0-msl.fk form-stdlib/q4k-msl.fk
+
+section [form.bml] {
+    class NativeTensor {
+        def nt-cat(xs) = if eq(len(xs), 0) then "" else str_concat(head(xs), nt-cat(tail(xs)));
+        def nt-num(n) = int_to_str(n);
+        def nt-max(a, b) = if gt(a, b) then a else b;
+        def nt-product(xs) = if eq(len(xs), 0) then 1 else mul(head(xs), nt-product(tail(xs)));
+        def nt-drop(xs, n) = if le(n, 0) then xs else nt-drop(tail(xs), sub(n, 1));
+        def nt-first(xs, n) = if le(n, 0) then list() else cons(head(xs), nt-first(tail(xs), sub(n, 1)));
+        def nt-digits(s, i) = if ge(i, str_len(s)) then 1 else if is-digit-cp(str_byte_at(s, i)) then nt-digits(s, add(i, 1)) else 0;
+        def nt-integer?(s) = if eq(str_len(s), 0) then 0 else if or(eq(str_byte_at(s, 0), 45), eq(str_byte_at(s, 0), 43)) then if eq(str_len(s), 1) then 0 else nt-digits(s, 1) else nt-digits(s, 0);
+        def nt-word-end(s, i) = if ge(i, str_len(s)) then i else if is-ws-cp(str_byte_at(s, i)) then i else nt-word-end(s, add(i, 1));
+        def nt-token-tail(s, i, out) = if ge(i, str_len(s)) then reverse(out) else nt-token-word(s, i, nt-word-end(s, i), out);
+        def nt-token-word(s, i, end, out) = nt-tokens-at(s, end, cons(substring(s, i, end), out));
+        def nt-tokens-at(s, i, out) = nt-token-tail(s, ws-run-start(s, i, str_len(s)), out);
+        def nt-counted(t, c) = if le(str_len(t), 1) then 0 else if eq(str_byte_at(t, 0), c) then if nt-integer?(substring(t, 1, str_len(t))) then str_to_int(substring(t, 1, str_len(t))) else 0 else 0;
+        def nt-int-list(xs) = if eq(len(xs), 0) then list() else cons(str_to_int(head(xs)), nt-int-list(tail(xs)));
+        def nt-integers?(xs) = if eq(len(xs), 0) then 1 else if nt-integer?(head(xs)) then nt-integers?(tail(xs)) else 0;
+        def nt-positive?(xs) = if eq(len(xs), 0) then 1 else if gt(head(xs), 0) then nt-positive?(tail(xs)) else 0;
+        def nt-i32-bytes(xs) = if eq(len(xs), 0) then "" else str_concat(md-le32(mod(add(head(xs), 4294967296), 4294967296)), nt-i32-bytes(tail(xs)));
+        def nt-u32(s) = add(str_byte_at(s, 0), add(mul(str_byte_at(s, 1), 256), add(mul(str_byte_at(s, 2), 65536), mul(str_byte_at(s, 3), 16777216))));
+        def nt-signed(n) = if ge(n, 2147483648) then sub(n, 4294967296) else n;
+        def nt-read-int(h) = nt-signed(nt-u32(metal_buf_read(h, 0, 4)));
+
+        // tensor = handle, shape, element type; state = stack, owned handles,
+        // reason, device error buffer. Every allocation has one cleanup owner.
+        def nt-tensor(h, shape, type) = list(h, shape, type);
+        def nt-h(t) = nth(t, 0);
+        def nt-shape(t) = nth(t, 1);
+        def nt-type(t) = nth(t, 2);
+        def nt-size(t) = nt-product(nt-shape(t));
+        def nt-state(stack, owned, reason, err) = list(stack, owned, reason, err, list(), 0);
+        def nt-restate(s, stack, owned, reason) = list(stack, owned, reason, nt-err(s), nth(s, 4), nth(s, 5));
+        def nt-stack(s) = nth(s, 0);
+        def nt-owned(s) = nth(s, 1);
+        def nt-reason(s) = nth(s, 2);
+        def nt-err(s) = nth(s, 3);
+        def nt-ok?(s) = str_eq(nt-reason(s), "none");
+        def nt-fail(s, reason) = nt-restate(s, nt-stack(s), nt-owned(s), reason);
+        def nt-with-stack(s, stack) = nt-restate(s, stack, nt-owned(s), nt-reason(s));
+        def nt-own(s, h) = nt-restate(s, nt-stack(s), cons(h, nt-owned(s)), nt-reason(s));
+        def nt-command(s, pipe, binding, threads) = list(nt-stack(s), nt-owned(s), nt-reason(s), nt-err(s), cons(list(pipe, binding, threads), nth(s, 4)), nth(s, 5));
+        def nt-file-state(s) = list(nt-stack(s), nt-owned(s), nt-reason(s), nt-err(s), nth(s, 4), 1);
+        def nt-push(s, t) = nt-with-stack(s, cons(t, nt-stack(s)));
+        def nt-pop(s, n) = nt-with-stack(s, nt-drop(nt-stack(s), n));
+        def nt-release(hs) = if eq(len(hs), 0) then 0 else add(metal_buf_free(head(hs)), nt-release(tail(hs)));
+        def nt-live?() = md-door-live?();
+        def nt-budget-live(live) = nt-max(0, sub(nth(live, 19), nth(live, 18)));
+        def nt-budget() = nt-budget-live(metal_live());
+        def nt-shape-valid?(shape) = if nt-positive?(shape) then if le(nt-product(shape), 2147483647) then le(mul(nt-product(shape), 4), nt-budget()) else 0 else 0;
+
+        // Scalar and equal-rank broadcasting use one right-aligned rule.
+        def nt-broadcast-rev(a, b) = if eq(len(a), 0) then b else if eq(len(b), 0) then a else if or(eq(head(a), head(b)), or(eq(head(a), 1), eq(head(b), 1))) then cons(nt-max(head(a), head(b)), nt-broadcast-rev(tail(a), tail(b))) else list(0);
+        def nt-broadcast(a, b) = reverse(nt-broadcast-rev(reverse(a), reverse(b)));
+        def nt-index-at(shape, out, stride, terms) = if eq(len(shape), 0) then nt-cat(terms) else nt-index-next(shape, out, stride, terms);
+        def nt-index-next(shape, out, stride, terms) = nt-index-at(tail(shape), tail(out), mul(stride, head(shape)), cons(nt-cat(list(" + ((i / ", nt-num(nt-product(tail(out))), "u) % ", nt-num(head(shape)), "u) * ", nt-num(nt-product(tail(shape))), "u")), terms));
+        def nt-index(shape, out) = if eq(len(shape), 0) then "0u" else nt-cat(list("(0u", nt-index-at(shape, nt-drop(out, sub(len(out), len(shape))), 1, list()), ")"));
+        def nt-msl-header() = "#include <metal_stdlib>\nusing namespace metal;\n";
+        def nt-kernel(ta, tb, tc, body) = nt-cat(list(nt-msl-header(), "kernel void form_tensor(device const ", ta, "* a [[buffer(0)]], device const ", tb, "* b [[buffer(1)]], device ", tc, "* y [[buffer(2)]], device atomic_uint* error [[buffer(3)]], uint i [[thread_position_in_grid]]) { ", body, " }"));
+        def nt-issue(s, a, b, shape, type, source) = if nt-shape-valid?(shape) then nt-issue-pipe(s, a, b, shape, type, metal_pipeline(source, "form_tensor")) else nt-fail(s, "shape exceeds device working set");
+        def nt-issue-pipe(s, a, b, shape, type, pipe) = if le(pipe, 0) then nt-fail(s, str_concat("pipeline: ", metal_status())) else nt-issue-buffer(s, a, b, shape, type, pipe, metal_buf_alloc(mul(nt-product(shape), 4)));
+        def nt-issue-buffer(s, a, b, shape, type, pipe, h) = if le(h, 0) then nt-fail(s, str_concat("allocation: ", metal_status())) else nt-issue-enqueue(nt-own(s, h), a, b, shape, type, pipe, h);
+        def nt-issue-enqueue(s, a, b, shape, type, pipe, h) {
+            let binding = md-bind(list(a, b, h, nt-err(s)), list());
+            let accepted = metal_enqueue(pipe, binding, nt-product(shape));
+            if gt(accepted, 0) then nt-push(nt-command(s, pipe, binding, nt-product(shape)), nt-tensor(h, shape, type)) else nt-fail(s, str_concat("enqueue: ", metal_status()));
+        }
+        def nt-literal(s, values, shape) = nt-literal-buffer(s, values, shape, metal_buf_alloc(mul(len(values), 4)));
+        def nt-literal-buffer(s, values, shape, h) = if le(h, 0) then nt-fail(s, "literal allocation failed") else nt-literal-write(nt-own(s, h), values, shape, h);
+        def nt-literal-write(s, values, shape, h) {
+            let written = metal_buf_write(h, 0, nt-i32-bytes(values));
+            if eq(written, mul(len(values), 4)) then nt-push(s, nt-tensor(h, shape, "int")) else nt-fail(s, "literal write failed");
+        }
+
+        def nt-binary?(op) = or(str_eq(op, "add"), or(str_eq(op, "mul"), or(str_eq(op, "div"), or(str_eq(op, "max"), or(str_eq(op, "gt"), or(str_eq(op, "matmul"), str_eq(op, "take")))))));
+        def nt-unary?(op) = or(str_eq(op, "f32"), or(str_eq(op, "i32"), or(str_eq(op, "exp"), or(str_eq(op, "log"), or(str_eq(op, "sin"), or(str_eq(op, "cos"), or(str_eq(op, "rsqrt"), or(str_eq(op, "sum"), or(str_eq(op, "rmax"), or(str_eq(op, "argmax"), str_eq(op, "iota")))))))))));
+        def nt-float-op?(op) = or(str_eq(op, "div"), or(str_eq(op, "f32"), or(str_eq(op, "exp"), or(str_eq(op, "log"), or(str_eq(op, "sin"), or(str_eq(op, "cos"), str_eq(op, "rsqrt")))))));
+        def nt-output-type(op, a, b) = if or(str_eq(op, "gt"), or(str_eq(op, "i32"), str_eq(op, "argmax"))) then "int" else if or(nt-float-op?(op), or(str_eq(nt-type(a), "float"), str_eq(nt-type(b), "float"))) then "float" else "int";
+        def nt-expression(op, x, y, type) = if str_eq(op, "add") then nt-cat(list("(", x, " + ", y, ")")) else if str_eq(op, "mul") then nt-cat(list("(", x, " * ", y, ")")) else if str_eq(op, "div") then nt-cat(list("(float(", x, ") / float(", y, "))")) else if str_eq(op, "max") then nt-cat(list("max(", type, "(", x, "), ", type, "(", y, "))")) else if str_eq(op, "gt") then nt-cat(list("(", x, " > ", y, ")")) else if or(str_eq(op, "f32"), str_eq(op, "i32")) then nt-cat(list(type, "(", x, ")")) else nt-cat(list(op, "(float(", x, "))"));
+        def nt-element(s, op, a, b, shape, type) = nt-issue(s, nt-h(a), nt-h(b), shape, type, nt-kernel(nt-type(a), nt-type(b), type, nt-cat(list("if (i < ", nt-num(nt-product(shape)), "u) y[i] = ", nt-expression(op, nt-cat(list("a[", nt-index(nt-shape(a), shape), "]")), nt-cat(list("b[", nt-index(nt-shape(b), shape), "]")), type), ";"))));
+        def nt-reduction(s, op, a) = if and(str_eq(op, "sum"), gt(nt-size(a), 256)) then nt-sum-parts(s, a, div(add(nt-size(a), 255), 256)) else nt-reduce-type(s, op, a, if str_eq(op, "argmax") then "int" else nt-type(a));
+        def nt-sum-parts(s, a, parts) = nt-sum-next(nt-issue(s, nt-h(a), nt-h(a), list(parts), nt-type(a), nt-kernel(nt-type(a), nt-type(a), nt-type(a), nt-cat(list(nt-type(a), " v = 0; for (uint j = i; j < ", nt-num(nt-size(a)), "u; j += ", nt-num(parts), "u) v = v + a[j]; y[i] = v;")))));
+        def nt-sum-next(s) = if nt-ok?(s) then nt-reduction(nt-pop(s, 1), "sum", head(nt-stack(s))) else s;
+        def nt-reduce-type(s, op, a, type) = nt-issue(s, nt-h(a), nt-h(a), list(), type, nt-kernel(nt-type(a), nt-type(a), type, nt-cat(list("if (i != 0u) return; ", nt-type(a), " v = ", if str_eq(op, "sum") then "0" else "a[0]", "; int at = 0; for (uint j = ", if str_eq(op, "sum") then "0" else "1", "u; j < ", nt-num(nt-size(a)), "u; ++j) { ", if str_eq(op, "sum") then "v = v + a[j];" else "if (a[j] > v) { v = a[j]; at = int(j); }", " } y[0] = ", if str_eq(op, "argmax") then "at" else "v", ";"))));
+        def nt-take(s, a, b) = if str_eq(nt-type(b), "int") then nt-issue(s, nt-h(a), nt-h(b), nt-shape(b), nt-type(a), nt-kernel(nt-type(a), "int", nt-type(a), nt-cat(list("if (i >= ", nt-num(nt-size(b)), "u) return; int j = b[i]; if (j < 0) j += ", nt-num(nt-size(a)), "; if (j < 0 || j >= ", nt-num(nt-size(a)), ") { atomic_store_explicit(error, 1u, memory_order_relaxed); y[i] = 0; } else y[i] = a[j];")))) else nt-fail(s, "take indices must be int32");
+
+        def nt-matrix-shape(t, left) = if eq(len(nt-shape(t)), 1) then if left then list(1, nt-size(t)) else list(nt-size(t), 1) else nt-shape(t);
+        def nt-matrix(s, a, b) = if or(eq(len(nt-shape(a)), 0), eq(len(nt-shape(b)), 0)) then nt-fail(s, "matmul needs rank >= 1") else if or(str_eq(nt-type(a), "int"), str_eq(nt-type(b), "int")) then nt-fail(s, "matmul needs float32 operands") else nt-matrix-dims(s, a, b, nt-matrix-shape(a, 1), nt-matrix-shape(b, 0));
+        def nt-matrix-dims(s, a, b, sa, sb) = nt-matrix-contract(s, a, b, sa, sb, nth(sa, sub(len(sa), 2)), nth(sa, sub(len(sa), 1)), nth(sb, sub(len(sb), 1)));
+        def nt-matrix-contract(s, a, b, sa, sb, m, k, n) = if eq(k, nth(sb, sub(len(sb), 2))) then nt-matrix-batch(s, a, b, sa, sb, m, k, n, nt-broadcast(nt-first(sa, sub(len(sa), 2)), nt-first(sb, sub(len(sb), 2)))) else nt-fail(s, "matmul last dimension must match second to last dimension");
+        def nt-matrix-batch(s, a, b, sa, sb, m, k, n, batch) = nt-matrix-emit(s, a, b, sa, sb, m, k, n, batch, append(batch, append(if eq(len(nt-shape(a)), 1) then list() else list(m), if eq(len(nt-shape(b)), 1) then list() else list(n))));
+        def nt-matrix-emit(s, a, b, sa, sb, m, k, n, batch, shape) = nt-issue(s, nt-h(a), nt-h(b), shape, "float", nt-kernel("float", "float", "float", nt-cat(list("uint oi = i; uint row = (i / ", nt-num(n), "u) % ", nt-num(m), "u; uint col = i % ", nt-num(n), "u; i /= ", nt-num(mul(m, n)), "u; uint ba = ", nt-index(nt-first(sa, sub(len(sa), 2)), batch), "; uint bb = ", nt-index(nt-first(sb, sub(len(sb), 2)), batch), "; float v = 0.0f; for (uint j = 0u; j < ", nt-num(k), "u; ++j) v = v + a[ba * ", nt-num(mul(m, k)), "u + row * ", nt-num(k), "u + j] * b[bb * ", nt-num(mul(k, n)), "u + j * ", nt-num(n), "u + col]; y[oi] = v;"))));
+        def nt-iota(s, a) = if and(str_eq(nt-type(a), "int"), eq(nt-size(a), 1)) then nt-iota-count(s, a, nt-read-int(nt-h(a))) else nt-fail(s, "iota needs a positive int32 length");
+        def nt-iota-count(s, a, n) = if gt(n, 0) then nt-issue(s, nt-h(a), nt-h(a), list(n), "int", nt-kernel("int", "int", "int", "y[i] = int(i);")) else nt-fail(s, "iota needs a positive int32 length");
+        def nt-apply2(s, op, a, b) = if str_eq(op, "matmul") then nt-matrix(s, a, b) else if str_eq(op, "take") then nt-take(s, a, b) else nt-element(s, op, a, b, nt-broadcast(nt-shape(a), nt-shape(b)), nt-output-type(op, a, b));
+        def nt-apply1(s, op, a) = if or(str_eq(op, "sum"), or(str_eq(op, "rmax"), str_eq(op, "argmax"))) then nt-reduction(s, op, a) else if str_eq(op, "iota") then nt-iota(s, a) else nt-element(s, op, a, a, nt-shape(a), nt-output-type(op, a, a));
+        def nt-apply(s, op) = if nt-binary?(op) then if lt(len(nt-stack(s)), 2) then nt-fail(s, "stack underflow") else nt-apply2(nt-pop(s, 2), op, nth(nt-stack(s), 1), head(nt-stack(s))) else if nt-unary?(op) then if eq(len(nt-stack(s)), 0) then nt-fail(s, "stack underflow") else nt-apply1(nt-pop(s, 1), op, head(nt-stack(s))) else nt-fail(s, "unknown tensor token; offer NodeID JIT");
+
+        def nt-file?(op) = or(str_eq(op, "tf32"), or(str_eq(op, "q8"), or(str_eq(op, "q4k"), str_eq(op, "q6k"))));
+        def nt-block(op) = if str_eq(op, "tf32") then 1 else if str_eq(op, "q8") then 32 else 256;
+        def nt-block-bytes(op) = if str_eq(op, "tf32") then 4 else if str_eq(op, "q8") then 34 else if str_eq(op, "q4k") then 144 else 210;
+        def nt-file(s, op, args) = if nt-integers?(tail(args)) then nt-file-shape(s, op, head(args), str_to_int(nth(args, 1)), list(str_to_int(nth(args, 2)), str_to_int(nth(args, 3)))) else nt-fail(s, str_concat(op, " needs integer offset and shape"));
+        def nt-file-shape(s, op, path, off, shape) = if or(lt(off, 0), eq(nt-shape-valid?(shape), 0)) then nt-fail(s, str_concat(op, " shape out of range")) else if not(eq(mod(nt-product(shape), nt-block(op)), 0)) then nt-fail(s, str_concat(op, " shape needs whole quant blocks")) else nt-file-range(s, op, path, off, shape, mul(div(nt-product(shape), nt-block(op)), nt-block-bytes(op)));
+        def nt-file-range(s, op, path, off, shape, bytes) = if lt(file_size(path), 0) then nt-fail(s, str_concat(op, " cannot open path")) else if gt(add(off, bytes), file_size(path)) then nt-fail(s, str_concat(op, " file is shorter than the shape asked for")) else nt-file-map(s, op, shape, metal_buf_from_file(path, off, bytes));
+        def nt-file-map(s, op, shape, h) = if le(h, 0) then nt-fail(s, str_concat("mapping: ", metal_status())) else if str_eq(op, "tf32") then nt-push(nt-file-state(nt-own(s, h)), nt-tensor(h, shape, "float")) else nt-file-dequant(nt-file-state(nt-own(s, h)), op, shape, h);
+        def nt-quant-helpers(op) = if str_eq(op, "q4k") then q4m-msl-helpers() else if str_eq(op, "q6k") then q6m-msl-helpers() else str_concat(q80-msl-spine(), q80-msl-weight());
+        def nt-file-dequant(s, op, shape, h) = nt-issue(s, h, h, shape, "float", nt-cat(list(nt-msl-header(), nt-quant-helpers(op), "kernel void form_tensor(device const uchar* a [[buffer(0)]], device const uchar* b [[buffer(1)]], device float* y [[buffer(2)]], device atomic_uint* error [[buffer(3)]], uint i [[thread_position_in_grid]]) { y[i] = ", if str_eq(op, "q8") then "q80_w" else if str_eq(op, "q4k") then "q4k_w" else "q6k_w", "(a, i); }")));
+
+        def nt-reshape(s, dims) = if eq(len(nt-stack(s)), 0) then nt-fail(s, "stack underflow") else nt-reshape-top(s, dims, head(nt-stack(s)));
+        def nt-inferred-count(dims) = if eq(len(dims), 0) then 0 else add(if eq(head(dims), -1) then 1 else 0, nt-inferred-count(tail(dims)));
+        def nt-inferred-fill(dims, n) = if eq(len(dims), 0) then list() else cons(if eq(head(dims), -1) then n else head(dims), nt-inferred-fill(tail(dims), n));
+        def nt-inferred-dims(dims, size) = if eq(nt-inferred-count(dims), 0) then dims else if eq(nt-inferred-count(dims), 1) then nt-inferred-size(dims, size, nt-product(nt-inferred-fill(dims, 1))) else list(0);
+        def nt-inferred-size(dims, size, known) = if le(known, 0) then list(0) else if eq(mod(size, known), 0) then nt-inferred-fill(dims, div(size, known)) else list(0);
+        def nt-reshape-top(s, dims, t) = nt-reshape-resolved(s, nt-inferred-dims(dims, nt-size(t)), t);
+        def nt-reshape-resolved(s, dims, t) = if and(nt-positive?(dims), eq(nt-product(dims), nt-size(t))) then nt-push(nt-pop(s, 1), nt-tensor(nt-h(t), dims, nt-type(t))) else nt-fail(s, "reshape must preserve element count with positive dimensions");
+        def nt-shuffle(s, op) = if str_eq(op, "dup") then if eq(len(nt-stack(s)), 0) then nt-fail(s, "stack underflow") else nt-push(s, head(nt-stack(s))) else if lt(len(nt-stack(s)), 2) then nt-fail(s, "stack underflow") else nt-with-stack(s, cons(nth(nt-stack(s), 1), cons(head(nt-stack(s)), nt-drop(nt-stack(s), 2))));
+        def nt-step-fail(s, reason) = list(list(), nt-fail(s, reason));
+        def nt-counted-step(ts, s, n, vector) = if lt(len(tail(ts)), n) then nt-step-fail(s, "counted token needs integer lanes") else if nt-integers?(nt-first(tail(ts), n)) then list(nt-drop(ts, add(n, 1)), if vector then nt-literal(s, nt-int-list(nt-first(tail(ts), n)), list(n)) else nt-reshape(s, nt-int-list(nt-first(tail(ts), n)))) else nt-step-fail(s, "counted token needs integer lanes");
+        def nt-step(ts, s, op) = if nt-integer?(op) then list(tail(ts), nt-literal(s, list(str_to_int(op)), list())) else if gt(nt-counted(op, 118), 0) then nt-counted-step(ts, s, nt-counted(op, 118), 1) else if gt(nt-counted(op, 114), 0) then nt-counted-step(ts, s, nt-counted(op, 114), 0) else if nt-file?(op) then if lt(len(tail(ts)), 4) then nt-step-fail(s, str_concat(op, " needs path offset rows cols")) else list(nt-drop(ts, 5), nt-file(s, op, nt-first(tail(ts), 4))) else if or(str_eq(op, "dup"), str_eq(op, "swap")) then list(tail(ts), nt-shuffle(s, op)) else list(tail(ts), nt-apply(s, op));
+        // Stage rows contain operation kinds and counters, never file paths or
+        // tensor values. GPU time is batch time, not invented per-op timing.
+        def nt-stage-kind(op) = if nt-integer?(op) then "literal" else if gt(nt-counted(op, 118), 0) then "vector" else if gt(nt-counted(op, 114), 0) then "reshape" else if or(nt-file?(op), or(nt-unary?(op), or(nt-binary?(op), or(str_eq(op, "dup"), str_eq(op, "swap"))))) then op else "unrecognized";
+        def nt-stage(ts, s, trace) {
+            let began = host_monotonic_ms();
+            let before = metal_live();
+            let step = nt-step(ts, s, head(ts));
+            let after = metal_live();
+            let ended = host_monotonic_ms();
+            let next = nth(step, 1);
+            let dispatches = sub(nth(after, 7), nth(before, 7));
+            let row = list(len(trace), nt-stage-kind(head(ts)), if gt(dispatches, 0) then "native-metal" else "form", sub(ended, began), sub(nth(after, 3), nth(before, 3)), dispatches, sub(nth(after, 2), nth(before, 2)), sub(nth(after, 4), nth(before, 4)), nt-reason(next));
+            nt-walk(nth(step, 0), next, cons(row, trace));
+        }
+        def nt-walk(ts, s, trace) = if eq(nt-ok?(s), 0) then list(s, reverse(trace)) else if eq(len(ts), 0) then list(s, reverse(trace)) else nt-stage(ts, s, trace);
+        def nt-finish(s) = if eq(nt-ok?(s), 0) then s else if not(eq(len(nt-stack(s)), 1)) then nt-fail(s, "program did not leave one value") else if not(str_eq(nt-type(head(nt-stack(s))), "int")) then nt-fail(s, "program did not land an int32; emit i32") else if not(eq(nt-size(head(nt-stack(s))), 1)) then nt-fail(s, "program did not land one scalar") else s;
+
+        // result = presence, value, reason, before, after, carrier status.
+        // Reading the result is independent of every subsequent tensor call.
+        def nt-present(r) = nth(r, 0);
+        def nt-value(r) = nth(r, 1);
+        def nt-error(r) = nth(r, 2);
+        def nt-before(r) = nth(r, 3);
+        def nt-after(r) = nth(r, 4);
+        def nt-capture(s, before, trace, began, release) {
+            let wait-began = host_monotonic_ms();
+            let synced = metal_sync();
+            let wait-ms = sub(host_monotonic_ms(), wait-began);
+            let error = if lt(synced, 0) then "metal synchronization failed" else if eq(nt-read-int(nt-err(s)), 1) then "take index out of range" else nt-reason(s);
+            let present = str_eq(error, "none");
+            let value = if present then nt-read-int(nt-h(head(nt-stack(s)))) else 0;
+            let status = metal_status();
+            let peak = metal_live();
+            let freed = if release then nt-release(nt-owned(s)) else 0;
+            list(present, value, error, before, metal_live(), status, trace, peak, sub(host_monotonic_ms(), began), wait-ms);
+        }
+        def nt-result(s, before, trace, began) = nt-capture(s, before, trace, began, 1);
+        def nt-run-walk(walk, before, began) = nt-result(nt-finish(nth(walk, 0)), before, nth(walk, 1), began);
+        def nt-run-buffer(program, before, err, began) = if le(err, 0) then list(0, 0, "error buffer allocation failed", before, metal_live(), metal_status(), list(), metal_live(), sub(host_monotonic_ms(), began), 0) else nt-run-walk(nt-walk(nt-tokens-at(program, 0, list()), nt-state(list(), list(err), "none", err), list()), before, began);
+        def nt-run(program) = if nt-live?() then nt-run-buffer(program, metal_live(), metal_buf_alloc(4), host_monotonic_ms()) else list(0, 0, "native Metal unavailable", list(), list(), metal_status(), list(), list(), 0, 0);
+        def nt-eval-result(r) = if nt-present(r) then nt-value(r) else form_error(nt-error(r));
+        def nt-eval(program) = nt-eval-result(nt-run(program));
+        def nt-check-result(r, expected) = and(nt-present(r), eq(nt-value(r), expected));
+        def nt-check(program, expected) = nt-check-result(nt-run(program), expected);
+        def nt-refused-result(r, reason) = and(eq(nt-present(r), 0), str_eq(nt-error(r), reason));
+        def nt-refused(program, reason) = nt-refused-result(nt-run(program), reason);
+        def nt-status() = str_concat("tensor_owner=form\ntensor_backend=native-metal\n", metal_status());
+        def nt-result-status(r) = nt-cat(list("tensor_owner=form\ntensor_backend=native-metal\nvalue_present=", nt-num(nt-present(r)), "\nlast_error=", nt-error(r), "\n"));
+        def nt-add(a, b) = nt-eval(nt-cat(list(nt-num(a), " ", nt-num(b), " add")));
+
+        // An explicit owner can keep the immutable program's buffers and its
+        // command image. No cache borrows a closed handle. File programs keep
+        // using nt-run: replay requires a separately attested file identity.
+        def nt-image-failure(reason) = list("native-tensor-image-v1", list(0, 0, reason, metal_live(), metal_live(), metal_status(), list(), metal_live(), 0, 0), nt-state(list(), list(), reason, 0));
+        def nt-image-result(image) = nth(image, 1);
+        def nt-image-state(image) = nth(image, 2);
+        def nt-image-open(program) = if nt-live?() then nt-image-buffer(program, metal_live(), metal_buf_alloc(4), host_monotonic_ms()) else nt-image-failure("native Metal unavailable");
+        def nt-image-buffer(program, before, err, began) = if le(err, 0) then nt-image-failure("error buffer allocation failed") else nt-image-walk(nt-walk(nt-tokens-at(program, 0, list()), nt-state(list(), list(err), "none", err), list()), before, began);
+        def nt-image-walk(walk, before, began) {
+            let s = nt-finish(nth(walk, 0));
+            let r = nt-capture(s, before, nth(walk, 1), began, 0);
+            list("native-tensor-image-v1", r, s);
+        }
+        def nt-image-close(image) = nt-release(nt-owned(nt-image-state(image)));
+        def nt-image-replay(image) = if eq(nt-present(nt-image-result(image)), 0) then nt-image-result(image) else if eq(nth(nt-image-state(image), 5), 1) then nt-image-result(nt-image-failure("file image requires fresh extent/identity admission")) else nt-image-replay-live(nt-image-state(image), metal_live(), host_monotonic_ms());
+        def nt-image-replay-live(s, before, began) {
+            let reset = metal_buf_write(nt-err(s), 0, md-le32(0));
+            if not(eq(reset, 4)) then nt-image-result(nt-image-failure("tensor image is closed")) else nt-image-replayed(nt-image-commands(reverse(nth(s, 4)), s, list()), before, began);
+        }
+        def nt-image-replayed(replay, before, began) = nt-capture(nth(replay, 0), before, nth(replay, 1), began, 0);
+        def nt-image-commands(commands, s, trace) = if eq(nt-ok?(s), 0) then list(s, reverse(trace)) else if eq(len(commands), 0) then list(s, reverse(trace)) else nt-image-command(commands, s, trace);
+        def nt-image-command(commands, s, trace) {
+            let command = head(commands);
+            let began = host_monotonic_ms();
+            let accepted = metal_enqueue(nth(command, 0), nth(command, 1), nth(command, 2));
+            let next = if gt(accepted, 0) then s else nt-fail(s, str_concat("resident enqueue: ", metal_status()));
+            let row = list(len(trace), "resident-kernel", "native-metal", sub(host_monotonic_ms(), began), 0, if gt(accepted, 0) then 1 else 0, 0, 0, nt-reason(next));
+            nt-image-commands(tail(commands), next, cons(row, trace));
+        }
+    }
+    0;
+}
