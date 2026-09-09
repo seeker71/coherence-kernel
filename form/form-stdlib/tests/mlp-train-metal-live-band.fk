@@ -1,0 +1,113 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/transformer-backprop.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
+;
+; mlp-train-metal-live-band — the emitted FFN TRAINING-STEP kernel run on this host's GPU, and its
+; whole SGD step held to `tbp-mlp-step`, the fp64 recipe it was emitted FROM. The forward band
+; (ffn-fwd-metal-live-band) proved a forward pass computes; this proves the backward half — the two
+; gradients and all four parameter updates — which is what the parity gates named in these cells
+; (scripts/metal_ffn_audit.sh, metal_backprop_audit.sh) were for, and those scripts are not in this
+; checkout. Until 2026-09-09 this family did not compile here at all.
+;
+; The kernel is BARRIERED, and the barriers are the reason it existed to be broken: dh1 (phase 3)
+; reads the OLD W2 to backprop into the hidden layer, so it has to finish before phase 4 overwrites
+; W2. That ordering is carried entirely by threadgroup_barrier(metal::mem_flags::mem_device) between
+; phases — the exact call whose unqualified form this host refused. So this band is not only checking
+; arithmetic: with more than one thread in the group, a W1 update that matches the recipe is evidence
+; the read-then-write ordering held. It runs 32 threads over hid 3 and outd 2 for that reason, never
+; one, because a single-threaded group would make every barrier vacuous and the band would pass over
+; a kernel whose phases could not be trusted at width.
+;
+; fp64 recipe against fp32 silicon walking the same folds — the downward two-rounding dot, the forward
+; dh1 column reduction, the recipe's own gelu Taylor — so they agree to fp32 epsilon, not to the bit.
+;
+; Verdict 63 when the silicon takes the step:
+;    1  the pipeline mints, and the dispatch and sync both come back clean
+;    2  the loss and the output gradient gy are the recipe's
+;    4  b2 after the step is the recipe's — layer 2's bias, the shallowest update
+;    8  W2 after the step is the recipe's — layer 2's weights, from (gy, a)
+;   16  b1 and W1 after the step are the recipe's — the update that had to read the OLD W2 across a
+;       barrier, computed by 32 threads striding over the hidden units
+;   32  THE STEP IS NOT A NO-OP: every parameter the band checks actually MOVED from where it started,
+;       so agreement means the walk happened and not that both sides did nothing
+;
+(do
+    (defn mtl-close? (a b)
+        (lt (if (lt (sub a b) 0.0) (sub b a) (sub a b)) 0.0000305))
+    (defn mtl-far? (a b) (if (mtl-close? a b) 0 1))
+    (defn mtl-f32s (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (md-le32 (md-f32-bits (head xs))) (mtl-f32s (tail xs)))))
+    (defn mtl-getf (h i) (ln-f32-decode (ln-u32-le (metal_buf_read h (mul i 4) 4) 0)))
+    ; the GPU holds a matrix row-major and flat; the recipe holds a list of rows
+    (defn mtl-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (mtl-flat (tail rows)))))
+    (defn mtl-agree? (h xs i)
+        (if (eq (len xs) 0) 1
+            (if (mtl-close? (mtl-getf h i) (head xs)) (mtl-agree? h (tail xs) (add i 1)) 0)))
+    (defn mtl-moved? (h xs i)
+        (if (eq (len xs) 0) 0
+            (if (eq (mtl-far? (mtl-getf h i) (head xs)) 1) 1 (mtl-moved? h (tail xs) (add i 1)))))
+
+    ; --- indim 2, hid 3, outd 2. Nothing symmetric, nothing zero: a wrong index shows up. ---
+    (let W1 (list (list 0.5 -0.25) (list 0.125 0.75) (list -0.375 0.625)))
+    (let B1 (list 0.25 -0.5 0.125))
+    (let W2 (list (list 0.75 -0.125 0.5) (list -0.25 0.375 -0.625)))
+    (let B2 (list 0.0625 -0.1875))
+    (let X (list 1.5 -0.75))
+    (let T (list 0.25 -0.5))
+    (let LR 0.125)
+
+    ; --- the recipe's own answer, fp64, from the cell the kernel was emitted from ---
+    (let step (tbp-mlp-step W1 B1 W2 B2 X T LR))
+    (let e-W1 (mtl-flat (tbp-mlp-W1 step)))
+    (let e-b1 (tbp-mlp-b1 step))
+    (let e-W2 (mtl-flat (tbp-mlp-W2 step)))
+    (let e-b2 (tbp-mlp-b2 step))
+    (let e-h1 (tb-affine W1 B1 X))
+    (let e-y (tb-affine W2 B2 (tb-gelu-map e-h1)))
+    (let e-gy (tn-scale (tbp-vsub e-y T) 2.0))
+    (let e-loss (list (mul (sub (nth e-y 0) (nth T 0)) (sub (nth e-y 0) (nth T 0)))
+                      (mul (sub (nth e-y 1) (nth T 1)) (sub (nth e-y 1) (nth T 1)))))
+
+    ; --- mint ---
+    (let src (jte-mlp-train-msl-fmt "form_mlp_train_live_f32" "f32"))
+    (let pipe (metal_pipeline src "form_mlp_train_live_f32"))
+
+    ; --- buffers: w1 b1 w2 b2 x t loss h1 a gy dh1, then indim hid outd lr ---
+    (let bw1 (metal_buf_alloc 24))
+    (let bb1 (metal_buf_alloc 12))
+    (let bw2 (metal_buf_alloc 24))
+    (let bb2 (metal_buf_alloc 8))
+    (let bx (metal_buf_alloc 8))
+    (let bt (metal_buf_alloc 8))
+    (let bloss (metal_buf_alloc 8))
+    (let bh1 (metal_buf_alloc 12))
+    (let ba (metal_buf_alloc 12))
+    (let bgy (metal_buf_alloc 8))
+    (let bdh1 (metal_buf_alloc 12))
+    (let w0 (metal_buf_write bw1 0 (mtl-f32s (mtl-flat W1))))
+    (let w1w (metal_buf_write bb1 0 (mtl-f32s B1)))
+    (let w2w (metal_buf_write bw2 0 (mtl-f32s (mtl-flat W2))))
+    (let w3 (metal_buf_write bb2 0 (mtl-f32s B2)))
+    (let w4 (metal_buf_write bx 0 (mtl-f32s X)))
+    (let w5 (metal_buf_write bt 0 (mtl-f32s T)))
+
+    ; --- 32 threads in ONE group, so every barrier between phases carries real weight ---
+    (let bind (md-bind16
+                  (list bw1 bb1 bw2 bb2 bx bt bloss bh1 ba bgy bdh1)
+                  (list 2 3 2 (md-f32-bits LR)) 32 0 0 0))
+    (let enq (metal_enqueue pipe bind 32))
+    (let syn (metal_sync))
+    (let c0 (if (gt pipe 0) (if (ge enq 0) (if (ge syn 0) 1 0) 0) 0))
+
+    ; --- hold the silicon to the recipe, phase by phase ---
+    (let c1 (if (eq (mtl-agree? bloss e-loss 0) 1) (if (eq (mtl-agree? bgy e-gy 0) 1) 2 0) 0))
+    (let c2 (if (eq (mtl-agree? bb2 e-b2 0) 1) 4 0))
+    (let c3 (if (eq (mtl-agree? bw2 e-W2 0) 1) 8 0))
+    (let c4 (if (eq (mtl-agree? bb1 e-b1 0) 1) (if (eq (mtl-agree? bw1 e-W1 0) 1) 16 0) 0))
+
+    ; --- and prove the step was a step: each parameter left where it started ---
+    (let c5 (if (eq (mtl-moved? bw1 (mtl-flat W1) 0) 1)
+            (if (eq (mtl-moved? bb1 B1 0) 1)
+            (if (eq (mtl-moved? bw2 (mtl-flat W2) 0) 1)
+            (if (eq (mtl-moved? bb2 B2 0) 1) 32 0) 0) 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))
