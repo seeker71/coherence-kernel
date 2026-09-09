@@ -11832,14 +11832,28 @@ static long long fk_hot_row_cell(long long sj, long long heat, long long line, l
     long long folds = (fk_fn_inram != 0 && fx >= 0 && fx < fk_fn_count) ? fk_fn_inram[fx] : 0;
     return fk_cons_val(heat << 1, fk_cons_val(fk_sbuf(fk_srctext + so, fk_fnsym_n[sj]), fk_cons_val(fk_sbuf(unit, fk_cstrlen(unit)), fk_cons_val(line << 1, fk_cons_val(col << 1, fk_cons_val(boxes << 1, fk_cons_val(unboxes << 1, fk_cons_val(native << 1, fk_cons_val(mints << 1, fk_cons_val(folds << 1, 1))))))))));
 }
+/* The rank arrays were sixty-four wide on the stack, and a want past that was
+ * silently cut to sixty-four -- ask for nine hundred, receive sixty-four, with
+ * nothing said. This body closed that family (silent partials GROW, walls
+ * refuse loudly), and this door was still in it. Witnessed 2026-09-09: a glass
+ * carrying 3248 recipes and three to seven MILLION dispatches a frame could
+ * only ever show its top sixty-four, whose rates summed to under a fortieth of
+ * the frame, so the question "where does the frame go" had no door.
+ * The honest bound is how many recipes there ARE: you cannot rank more defns
+ * than exist. Clamping to that says nothing false, and the arrays are taken
+ * from the heap at the size actually asked for. */
 static long long fk_hot_rows_by(long long *ledger, long long want) {
     if (want <= 0) { return 1; }
-    if (want > 64) { want = 64; }
-    long long pj[64], ph[64], ln[64], cl[64];
+    if (want > fk_fntop) { want = fk_fntop; }
+    if (want <= 0) { return 1; }
+    long long *pj = (long long *)malloc((size_t)want * 8), *ph = (long long *)malloc((size_t)want * 8);
+    long long *ln = (long long *)malloc((size_t)want * 8), *cl = (long long *)malloc((size_t)want * 8);
+    if (pj == 0 || ph == 0 || ln == 0 || cl == 0) { free(pj); free(ph); free(ln); free(cl); return 1; }
     long long np = fk_hot_pick_by(ledger, want, pj, ph, ln, cl);
     long long l = 1;
     long long q = np - 1;
     while (q >= 0) { l = fk_cons_val(fk_hot_row_cell(pj[q], ph[q], ln[q], cl[q]), l); q = q - 1; }
+    free(pj); free(ph); free(ln); free(cl);
     return l;
 }
 /* another kernel's page: header words plus what the reader derives from the arms (dispatches, hottest, distinct) */
@@ -11861,9 +11875,12 @@ static long long fk_live_read_page(const char *name, long long *out) {
     return FK_LIVE_WORDS;
 }
 /* the hottest defns of ANY kernel by one of its page ledgers: (heat name unit line col boxes unboxes) cells */
+/* Same heal as fk_hot_rows_by: the wall was sixty-four and it cut in silence.
+ * Here the honest bound lives in the page itself -- w[29], how many defns that
+ * kernel carries -- so the clamp waits until the page is mapped and then says
+ * only what is true. */
 static long long fk_page_rows(long long pid, int ledger, long long want) {
     if (want <= 0) { return 1; }
-    if (want > 64) { want = 64; }
     char name[32];
     fk_live_pid_name(pid, name);
     long long gh = fk_gift_open(name, 0, 0);
@@ -11878,7 +11895,11 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     long long *inraml = (long long *)(base + FK_LIVE_INRAM_OFF);
     long long *led = ledger == 1 ? fbox : (ledger == 2 ? mintl : (ledger == 3 ? inraml : heat));
     long long count = w[29] < FK_LIVE_FNS ? w[29] : FK_LIVE_FNS;
-    long long pj[64], ph[64], np = 0, fx = 0;
+    if (want > count) { want = count; }
+    if (want <= 0) { munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
+    long long *pj = (long long *)malloc((size_t)want * 8), *ph = (long long *)malloc((size_t)want * 8);
+    if (pj == 0 || ph == 0) { free(pj); free(ph); munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
+    long long np = 0, fx = 0;
     while (fx < count) {
         long long h = led[fx];
         if (h > 0 && meta[fx * 5 + 1] > 0) {
@@ -11899,6 +11920,7 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
         l = fk_cons_val(row, l);
         q = q - 1;
     }
+    free(pj); free(ph);
     munmap(base, (size_t)sz);
     fk_gift_base[gh >> 1] = 0;
     return l;
