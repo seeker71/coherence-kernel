@@ -71,13 +71,18 @@ band (`form/form-stdlib/tests/form-glass-local-publication-band.fk`) returns 255
 
 ## Stable, locally owned transcripts
 
-The ear retains one latest original and translation per language, not an
-ever-growing transcript history. Quiet frames leave that text in place. A
+The ear retains one latest original and one translation per target language,
+not an ever-growing transcript history. A detected source-language change
+replaces the original slot. Quiet frames leave that text in place. A
 growing heartbeat with unchanged words keeps its source timestamp; corrections
 replace words, and a newer final replaces its partial. Older source timestamps
-cannot rewind a newer slot. Each selected language occupies five terminal rows,
-including its heading, so wrapping and partial/final transitions do not push
-other languages around. Evidence and partial/final labels remain visible.
+cannot rewind a newer slot. Selected languages share the available panel height
+in stable two-to-five-row slots, including headings. Slot height depends on
+language count and panel size, not text length or partial/final state. Catalog
+order keeps the default languages ahead of a newly detected source language.
+Clipped text ends with an ellipsis inside its slot; evidence and partial/final
+labels remain visible. More selected languages than the physical panel can
+hold still require filtering or viewport navigation.
 
 The sensor passes a checkout-local owner lease through the workers' native
 stdin file. The input is three lines: duration, language codes, owner token.
@@ -94,7 +99,7 @@ to earlier source words discards that forced prefix so the translation can
 correct itself. This does not establish general translation accuracy.
 
 ```text
-./fkwu form/form-stdlib/tests/ear-transcript-flow-band.fk  # 65535
+./fkwu form/form-stdlib/tests/ear-transcript-flow-band.fk  # 524287
 ./fkwu form/form-stdlib/tests/form-glass-meaning-ui-band.fk  # 8191
 ```
 
