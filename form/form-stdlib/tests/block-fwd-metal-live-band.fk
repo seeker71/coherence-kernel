@@ -1,0 +1,116 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
+;
+; block-fwd-metal-live-band — the emitted WHOLE-BLOCK forward kernel run on this host's GPU and held to
+; `tb-block`, the fp64 recipe it was emitted from: a pre-LN transformer block over a sequence, attention
+; sub-layer and FFN sub-layer, both with residual highways, in ONE kernel.
+;
+; This is the first band here that puts a SEQUENCE through the silicon rather than a single position, and
+; that is the whole point: everything a single-token check cannot see lives in the token axis. A block
+; that transposes its score matrix, that lets token 0's attention output land in token 1's residual slot,
+; or that shares one softmax across the sequence, computes a perfectly plausible vector per token and is
+; a different block. Two tokens with deliberately different content is the smallest fixture that can tell
+; them apart, and the band checks EVERY element of y, not a fold over it — a sum would forgive a swap.
+;
+; The kernel walks the block in one thread through a flat scratch buffer whose offsets it computes from
+; the runtime dims (oLN, oQ, oK, oV, oA, oH, oN2, oSR, oE, oFA). The band hands it a scratch larger than
+; it needs, so a wrong offset lands in unread space rather than over live data — an aliasing bug shows up
+; as a wrong number here, not as a crash.
+;
+; fp64 recipe against fp32 silicon walking the same folds — the recipe's own gelu Taylor, the same
+; downward dots, the same LayerNorm with its Newton sqrt — so they agree to fp32 epsilon, not to the bit.
+;
+; Verdict 15 when the silicon answers:
+;    1  the pipeline mints, and the dispatch and sync both come back clean
+;    2  token 0's output vector is the recipe's, element by element
+;    4  token 1's output vector is the recipe's, element by element — the sequence axis is real
+;    8  THE TWO TOKENS DIFFER: the block did not compute one answer and write it twice, and the recipe
+;       says they differ too, so the fixture is not accidentally symmetric
+;
+(do
+    (defn bfl-close? (a b)
+        (lt (if (lt (sub a b) 0.0) (sub b a) (sub a b)) 0.0000305))
+    (defn bfl-f32s (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (md-le32 (md-f32-bits (head xs))) (bfl-f32s (tail xs)))))
+    (defn bfl-getf (h i) (ln-f32-decode (ln-u32-le (metal_buf_read h (mul i 4) 4) 0)))
+    (defn bfl-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (bfl-flat (tail rows)))))
+    (defn bfl-agree? (h xs i)
+        (if (eq (len xs) 0) 1
+            (if (bfl-close? (bfl-getf h i) (head xs)) (bfl-agree? h (tail xs) (add i 1)) 0)))
+    (defn bfl-differ? (as bs)
+        (if (eq (len as) 0) 0
+            (if (bfl-close? (head as) (head bs)) (bfl-differ? (tail as) (tail bs)) 1)))
+
+    ; --- S 2, d 3, dq 2, dv 3, hid 4. The two tokens are deliberately unalike. ---
+    (let XS (list (list 1.5 -0.75 0.5) (list -0.25 0.875 -1.25)))
+    (let G1 (list 1.25 0.75 -0.5))
+    (let BE1 (list 0.125 -0.25 0.375))
+    (let WQ (list (list 0.5 -0.25 0.125) (list -0.375 0.625 0.25)))
+    (let BQ (list 0.0625 -0.125))
+    (let WK (list (list 0.25 0.5 -0.375) (list 0.75 -0.125 0.25)))
+    (let BK (list -0.0625 0.1875))
+    (let WV (list (list 0.5 -0.25 0.125) (list -0.75 0.5 0.25) (list 0.25 0.125 -0.5)))
+    (let BV (list 0.125 -0.0625 0.25))
+    (let WO (list (list 0.75 -0.125 0.5) (list 0.25 0.625 -0.375) (list -0.5 0.125 0.875)))
+    (let BO (list -0.125 0.25 0.0625))
+    (let G2 (list 0.875 -1.125 0.625))
+    (let BE2 (list -0.25 0.125 0.375))
+    (let W1 (list (list 0.5 -0.25 0.125) (list 0.75 0.375 -0.5) (list -0.125 0.625 0.25) (list 0.25 -0.75 0.5)))
+    (let C1 (list 0.25 -0.5 0.125 0.375))
+    (let W2 (list (list 0.5 -0.25 0.75 0.125) (list -0.375 0.625 -0.125 0.5) (list 0.25 0.125 -0.625 0.375)))
+    (let C2 (list 0.0625 -0.1875 0.125))
+    (let SCALE 0.7071067811865476)
+    (let EPS 0.00001)
+
+    ; --- the recipe's own answer, fp64 ---
+    (let e-ys (tb-block XS EPS G1 BE1 WQ BQ WK BK WV BV WO BO SCALE G2 BE2 W1 C1 W2 C2))
+    (let e-y0 (nth e-ys 0))
+    (let e-y1 (nth e-ys 1))
+
+    ; --- mint ---
+    (let src (jte-block-fwd-msl "form_block_fwd_live_f32"))
+    (let pipe (metal_pipeline src "form_block_fwd_live_f32"))
+
+    ; --- buffers: wq bq wk bk wv bv wo bo g1 be1 w1 b1 w2 b2 g2 be2 x y sc ---
+    (let bwq (metal_buf_alloc 24))   (let bbq (metal_buf_alloc 8))
+    (let bwk (metal_buf_alloc 24))   (let bbk (metal_buf_alloc 8))
+    (let bwv (metal_buf_alloc 36))   (let bbv (metal_buf_alloc 12))
+    (let bwo (metal_buf_alloc 36))   (let bbo (metal_buf_alloc 12))
+    (let bg1 (metal_buf_alloc 12))   (let bbe1 (metal_buf_alloc 12))
+    (let bw1 (metal_buf_alloc 48))   (let bb1 (metal_buf_alloc 16))
+    (let bw2 (metal_buf_alloc 48))   (let bb2 (metal_buf_alloc 12))
+    (let bg2 (metal_buf_alloc 12))   (let bbe2 (metal_buf_alloc 12))
+    (let bx (metal_buf_alloc 24))    (let by (metal_buf_alloc 24))
+    (let bsc (metal_buf_alloc 16384))
+    (let z0 (metal_buf_write bwq 0 (bfl-f32s (bfl-flat WQ))))
+    (let z1 (metal_buf_write bbq 0 (bfl-f32s BQ)))
+    (let z2 (metal_buf_write bwk 0 (bfl-f32s (bfl-flat WK))))
+    (let z3 (metal_buf_write bbk 0 (bfl-f32s BK)))
+    (let z4 (metal_buf_write bwv 0 (bfl-f32s (bfl-flat WV))))
+    (let z5 (metal_buf_write bbv 0 (bfl-f32s BV)))
+    (let z6 (metal_buf_write bwo 0 (bfl-f32s (bfl-flat WO))))
+    (let z7 (metal_buf_write bbo 0 (bfl-f32s BO)))
+    (let z8 (metal_buf_write bg1 0 (bfl-f32s G1)))
+    (let z9 (metal_buf_write bbe1 0 (bfl-f32s BE1)))
+    (let z10 (metal_buf_write bw1 0 (bfl-f32s (bfl-flat W1))))
+    (let z11 (metal_buf_write bb1 0 (bfl-f32s C1)))
+    (let z12 (metal_buf_write bw2 0 (bfl-f32s (bfl-flat W2))))
+    (let z13 (metal_buf_write bb2 0 (bfl-f32s C2)))
+    (let z14 (metal_buf_write bg2 0 (bfl-f32s G2)))
+    (let z15 (metal_buf_write bbe2 0 (bfl-f32s BE2)))
+    (let z16 (metal_buf_write bx 0 (bfl-f32s (bfl-flat XS))))
+
+    (let bind (md-bind16
+                  (list bwq bbq bwk bbk bwv bbv bwo bbo bg1 bbe1 bw1 bb1 bw2 bb2 bg2 bbe2 bx by bsc)
+                  (list 2 3 2 3 4 (md-f32-bits SCALE) (md-f32-bits EPS)) 1 0 0 0))
+    (let enq (metal_enqueue pipe bind 1))
+    (let syn (metal_sync))
+    (let c0 (if (gt pipe 0) (if (ge enq 0) (if (ge syn 0) 1 0) 0) 0))
+
+    (let c1 (if (eq (bfl-agree? by e-y0 0) 1) 2 0))
+    (let c2 (if (eq (bfl-agree? by e-y1 3) 1) 4 0))
+    (let c3 (if (eq (bfl-differ? e-y0 e-y1) 1)
+            (if (eq (bfl-differ? (list (bfl-getf by 0) (bfl-getf by 1) (bfl-getf by 2))
+                                 (list (bfl-getf by 3) (bfl-getf by 4) (bfl-getf by 5))) 1) 8 0) 0))
+
+    (add c0 (add c1 (add c2 c3))))

@@ -1,0 +1,79 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
+;
+; gqa-attn-metal-live-band — the emitted GROUPED-QUERY attention core run on this host's GPU, each
+; (token, head) output held to `tb-attend-one`, the body's four-way-proven attention over that head's own
+; keys and values. There is no single Form recipe for GQA to point at, and the band does not invent a
+; mirror for one: it COMPOSES the proven per-head core over the head partition, which is the honest shape
+; because the partition is exactly what is new. The same discipline qk-matvec-lane-band uses on the lane
+; split — check the partition AS a partition, against a core that already travels.
+;
+; The fixture is real GQA, not MHA wearing its name: n = 2 query heads over nkv = 1 kv head, so grp = 2
+; and both query heads must read kv head 0. That is the one line where grouping lives (`kvh = h / grp`),
+; and it is the line a rewrite gets wrong — with `kvh = h` head 1 would index past KVD into the NEXT
+; token's keys and return a confident, plausible, wrong vector. Nothing about the number's shape would
+; say so; only its value does, which is why every element of y is checked against the recipe rather than
+; a norm or a sum over it.
+;
+; Verdict 31 when the silicon answers:
+;    1  the pipeline mints, and the dispatch and sync both come back clean
+;    2  token 0's two head outputs are the recipe's, element by element
+;    4  token 1's two head outputs are the recipe's — the sequence axis is real
+;    8  THE TWO HEADS DIFFER at the same token: the grouping shares K and V but not Q, so a kernel that
+;       collapsed the head axis would write one answer twice and this catches it
+;   16  THE TWO TOKENS DIFFER at the same head: full attention over both positions, not a per-token copy
+;
+(do
+    (defn gal-close? (a b)
+        (lt (if (lt (sub a b) 0.0) (sub b a) (sub a b)) 0.0000305))
+    (defn gal-f32s (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (md-le32 (md-f32-bits (head xs))) (gal-f32s (tail xs)))))
+    (defn gal-getf (h i) (ln-f32-decode (ln-u32-le (metal_buf_read h (mul i 4) 4) 0)))
+    (defn gal-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (gal-flat (tail rows)))))
+    (defn gal-agree? (h xs i)
+        (if (eq (len xs) 0) 1
+            (if (gal-close? (gal-getf h i) (head xs)) (gal-agree? h (tail xs) (add i 1)) 0)))
+    (defn gal-differ? (as bs)
+        (if (eq (len as) 0) 0
+            (if (gal-close? (head as) (head bs)) (gal-differ? (tail as) (tail bs)) 1)))
+    (defn gal-pair (h i) (list (gal-getf h i) (gal-getf h (add i 1))))
+
+    ; --- S 2, n 2 query heads, nkv 1 kv head (grp 2 — genuine grouping), hd 2 ---
+    (let Q00 (list 1.5 -0.75))   (let Q01 (list -0.25 0.875))
+    (let Q10 (list 0.625 1.25))  (let Q11 (list -1.125 0.375))
+    (let KS (list (list 1.0 -0.5) (list -0.25 0.75)))
+    (let VS (list (list 0.5 -0.25) (list -0.75 0.625)))
+    (let SCALE 0.7071067811865476)
+
+    ; --- the recipe's own answer, fp64, per (token, head) over that head's kv slice ---
+    (let e00 (tb-attend-one Q00 KS VS SCALE))
+    (let e01 (tb-attend-one Q01 KS VS SCALE))
+    (let e10 (tb-attend-one Q10 KS VS SCALE))
+    (let e11 (tb-attend-one Q11 KS VS SCALE))
+
+    ; --- mint ---
+    (let src (jte-gqa-attn-msl "form_gqa_attn_live_f32"))
+    (let pipe (metal_pipeline src "form_gqa_attn_live_f32"))
+
+    ; --- buffers: qs ks vs y sc, then S n nkv hd scale.  qs is s-major, then head, then channel. ---
+    (let bqs (metal_buf_alloc 32))
+    (let bks (metal_buf_alloc 16))
+    (let bvs (metal_buf_alloc 16))
+    (let by (metal_buf_alloc 32))
+    (let bsc (metal_buf_alloc 4096))
+    (let z0 (metal_buf_write bqs 0 (gal-f32s (gal-flat (list Q00 Q01 Q10 Q11)))))
+    (let z1 (metal_buf_write bks 0 (gal-f32s (gal-flat KS))))
+    (let z2 (metal_buf_write bvs 0 (gal-f32s (gal-flat VS))))
+
+    (let bind (md-bind16 (list bqs bks bvs by bsc)
+                         (list 2 2 1 2 (md-f32-bits SCALE)) 1 0 0 0))
+    (let enq (metal_enqueue pipe bind 1))
+    (let syn (metal_sync))
+    (let c0 (if (gt pipe 0) (if (ge enq 0) (if (ge syn 0) 1 0) 0) 0))
+
+    (let c1 (if (eq (gal-agree? by e00 0) 1) (if (eq (gal-agree? by e01 2) 1) 2 0) 0))
+    (let c2 (if (eq (gal-agree? by e10 4) 1) (if (eq (gal-agree? by e11 6) 1) 4 0) 0))
+    (let c3 (if (eq (gal-differ? (gal-pair by 0) (gal-pair by 2)) 1) 8 0))
+    (let c4 (if (eq (gal-differ? (gal-pair by 0) (gal-pair by 4)) 1) 16 0))
+
+    (add c0 (add c1 (add c2 (add c3 c4)))))

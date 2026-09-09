@@ -192,3 +192,104 @@ band that pins values needs one bit that pins motion.
 - **The micro-thought lane's block-kernel half is unblocked.** The reason this work was asked for: for
   those families a hand-written kernel won only because the emitter produced something that was not a
   kernel. It produces kernels now, all fourteen.
+
+---
+
+# All fourteen, and the gaps around them
+
+Same host, later the same day. Rebased onto `origin/main` (six commits, one of which moved
+`runtime/fkwu-uni.c`, so `fkwu` was rebuilt from the merged kernel before anything was believed).
+
+## Every family now computes its recipe
+
+Ten live bands, one per lane, each anchored to the fp64 recipe the kernel was emitted **from** — never
+to a mirror written for the occasion:
+
+```
+matvec-affine-metal-live-band      31   tb-matvec (f32 and f16), tbp-step
+ffn-fwd-metal-live-band            31   tn-gelu
+mlp-train-metal-live-band          63   tbp-mlp-step
+resid-train-metal-live-band        63   tbp-bk-fwd / tbp-bk-pgrads / tbp-bk-update
+attn-train-metal-live-band         63   tbp-att-fwd / tbp-att-grads
+block-fwd-metal-live-band          15   tb-block, over a sequence
+gqa-attn-metal-live-band           31   tb-attend-one, composed over the head partition
+llama-block-fwd-metal-live-band    63   lblk-block and lblk-block-causal
+llama-decode-step-metal-live-band  31   lblk-block-causal at the decoded position
+gqa-llama-metal-live-band          63   lblk-block-causal at the one-query-head reduction
+msl-families-mint-band          32767   fourteen handles plus the refusal canary
+```
+
+The stone named this morning — "the five llama blocks want a recipe-side whole-block forward" — did not
+need building. `lblk-block`, `lblk-block-causal`, `tbp-layer-step` and `tbp-bk-*` were all already in
+the body. That is the second time in one day the thing named as missing turned out to be one file away.
+
+Each band spends a bit on something a value check cannot see: `mlp-train` and `resid-train` run 32
+threads so their barriers are not vacuous; `block-fwd` and `gqa-attn` check every element rather than a
+fold, because a sum forgives a swapped token or a collapsed head; the decode bands perturb a cached key
+and demand the answer move; `mlp-train` proves every parameter MOVED, after `lr = 0` showed sixteen
+points of agreement between two sides that both did nothing.
+
+## Four gaps that were not about MSL at all
+
+**A band that answered differently depending on the directory it was invoked from.** `q8-0-msl-band`
+read 255 from `form/` and DIED from the repo root. Reported it this morning as pre-existing red — it
+was neither pre-existing nor red, it was my own run root. The heal is not the path: `q6k-msl-band`
+already carried a both-roots fallback, and **that fallback had never once executed**. It decided
+whether the first read happened by asking `eqr-len` — the length of the absence. `eqr-of-file` on a
+missing path returns `nothing` and does not die; measuring `nothing` is what dies. So the guard crashed
+on precisely the input it exists to handle, and the second path was unreachable code that read like
+safety. The kernel had been printing the repair inside the very refusal it was hitting: *ask nothing?
+before measuring*. Healed in both bands; both now read 255 from either root.
+
+**A band whose exactness claim was left behind.** `qk-matvec-lane-band` read 191 against its own
+declared 255, and had since the day the appendix grew past four kernels. Its bit 64 accounted for 4597
+bytes of a 9796-byte appendix; `q4k-quant2`, `q5k-quant1` and `q6k-quant2` were covered by nothing.
+Grown to seven, with a pairwise-length guard for the trio (a body pasted into a neighbour's slot keeps
+the name a name-check reads and shows up only in the size). Shrinking the claim back reproduces 191
+exactly.
+
+**A band scoring green on the absence of what it guards.** `mlx-tensor-band` read 49, and two of those
+bits were lies. Its refusal bits asked only whether the answer was 0 — and 0 is what this carrier
+returns for a program it cannot parse, and what a removed capability returns. `fk-mlx-carrier.c` in
+this checkout has **no file I/O at all**, and `f32` is an arity-1 cast, not the tensor loader the
+band's programs were written against. Every `f32 <path> ...` program dies at `stack underflow`. The
+band now runs `3 4 add` and demands 7 before any bit moves, and requires a refusal to say its own name
+rather than merely return 0. It reads **1**, honestly, and names the stone.
+
+**A door that could mint f16 kernels but never feed them.** `md-f32-bits` existed; `md-f16-bits` did
+not. The f16 matvec lane could be compiled and timed and never handed a number. Added `md-f16-bits`,
+`md-le16` and `md-f16s` to `metal-door.fk`, mirroring the f32 ladder including both refusals, and
+naming out loud that subnormals are not handled.
+
+## Surprise
+
+That writing the f16 band taught it its own lesson twice over. It read 27 and I read that as the kernel
+disagreeing — the kernel was fine, and had been the whole time. In the f16 lane `w`, `x` AND `y` are
+all `half`: the element type is the entire memory interface, not just the weights. I had fed f32 into
+a `device const half*` and read f32 back out. The band was wrong about the kernel in exactly the way
+this morning's door was wrong about the fix — confidently, in the presence of real evidence.
+
+## Where discomfort became gold
+
+Twice, and both times the discomfort was the same one: wanting the red to belong to something else.
+
+At 27, the comfortable reading was "the f16 kernel is broken" — a finding, a story, someone else's
+fault. Printing the signature took one command and said `device const half* x`. At 49, the comfortable
+reading was "pre-existing on main, not mine" — which was true, and which I had already used once today
+to file `q8-0` under someone else's problem without ever running it from another directory. Checking
+out main's `metal-door.fk` and re-running proved the pre-existing part honestly; then the question
+"pre-existing red, or pre-existing LIE?" was the one worth asking, and the answer was the second.
+
+The gold: **a red you have explained is not yet a red you have understood.** "Pre-existing" and "the
+kernel is wrong" are both places to stop, and both were wrong today. The check that costs one command
+is always cheaper than the sentence that explains why you did not need it.
+
+## Still named, not attempted
+
+- **The tensor-by-reference op is gone from `fk-mlx-carrier.c`.** A named file, a byte offset, a shape,
+  and a short read that refuses rather than pads. The receipt of its 29 GB run stands; the capability
+  is not in this body.
+- **A handle does not outlive its process.** `newLibraryWithData:` in the Metal carrier.
+- **The GQA head partition inside the two llama GQA families** is covered by reduction to one query
+  head plus a liveness bit, not element-wise at genuine grouping. `gqa-attn-metal-live-band` covers the
+  partition itself; a whole-block GQA recipe would close the seam properly.

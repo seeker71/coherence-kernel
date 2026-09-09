@@ -1,0 +1,111 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/llama-block.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
+;
+; llama-block-fwd-metal-live-band — the emitted LLAMA decoder block run on this host's GPU, both the
+; non-causal block against `lblk-block` and the causal one against `lblk-block-causal`, the fp64 recipes
+; they were emitted from. These two families carried the `round` wound: their shared helper's rr_2pi
+; calls a round no unit defined, so neither compiled here until 2026-09-09, and RoPE is precisely where
+; that round lives. A block whose range reduction is wrong still returns a vector.
+;
+; The llama block differs from the whisper block in the numerics lifted to standalone recipes — RMSNorm
+; instead of LayerNorm (no mean-subtract, no bias, a root-mean-square rescale times a per-channel gain),
+; RoPE on q and k, SwiGLU instead of gelu, and no biases anywhere. All four are four-way-proven cells;
+; what this band asks is whether the emitted kernel walks THEM.
+;
+; The causal half is the sharper claim. `lblk-block-causal` says the LAST position is bit-identical to the
+; non-causal block, because at the last token the visible prefix IS the whole sequence, while EARLIER
+; tokens differ because the non-causal block let them see the future. So the two kernels must agree on
+; token S-1 and disagree on token 0 — a mask that is off by one position, or applied to the wrong axis,
+; breaks exactly one of those two and not the other. Checking only agreement, or only disagreement, would
+; pass a kernel with no mask at all or a kernel that masked everything.
+;
+; Verdict 63 when the silicon answers:
+;    1  both pipelines mint, and both dispatches and syncs come back clean
+;    2  the non-causal block's token 0 is `lblk-block`'s, element by element
+;    4  the non-causal block's token 1 is `lblk-block`'s
+;    8  the causal block's token 0 is `lblk-block-causal`'s — the masked position, which sees only itself
+;   16  the causal block's token 1 is `lblk-block-causal`'s — the unmasked last position
+;   32  THE MASK IS REAL AND EXACT: causal and non-causal AGREE at the last token and DIFFER at the first
+;
+(do
+    (defn lbl-close? (a b)
+        (lt (if (lt (sub a b) 0.0) (sub b a) (sub a b)) 0.0000305))
+    (defn lbl-f32s (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (md-le32 (md-f32-bits (head xs))) (lbl-f32s (tail xs)))))
+    (defn lbl-getf (h i) (ln-f32-decode (ln-u32-le (metal_buf_read h (mul i 4) 4) 0)))
+    (defn lbl-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (lbl-flat (tail rows)))))
+    (defn lbl-agree? (h xs i)
+        (if (eq (len xs) 0) 1
+            (if (lbl-close? (lbl-getf h i) (head xs)) (lbl-agree? h (tail xs) (add i 1)) 0)))
+    (defn lbl-quad (h i) (list (lbl-getf h i) (lbl-getf h (add i 1)) (lbl-getf h (add i 2)) (lbl-getf h (add i 3))))
+    (defn lbl-differ? (as bs)
+        (if (eq (len as) 0) 0
+            (if (lbl-close? (head as) (head bs)) (lbl-differ? (tail as) (tail bs)) 1)))
+    (defn lbl-same? (as bs) (if (eq (lbl-differ? as bs) 1) 0 1))
+
+    ; --- S 2, d 4, dq 4, dv 4, hid 6, HD 2. Two tokens, deliberately unalike. ---
+    (let XS (list (list 1.5 -0.75 0.5 0.25) (list -0.25 0.875 -1.25 0.625)))
+    (let G1 (list 1.25 0.75 -0.5 1.125))
+    (let WQ (list (list 0.5 -0.25 0.125 0.375) (list -0.375 0.625 0.25 -0.125)
+                  (list 0.25 0.5 -0.75 0.125) (list 0.625 -0.5 0.375 0.25)))
+    (let WK (list (list 0.25 0.5 -0.375 0.125) (list 0.75 -0.125 0.25 0.5)
+                  (list -0.5 0.375 0.625 -0.25) (list 0.125 0.25 -0.125 0.75)))
+    (let WV (list (list 0.5 -0.25 0.125 0.625) (list -0.75 0.5 0.25 -0.375)
+                  (list 0.25 0.125 -0.5 0.75) (list 0.375 -0.625 0.5 0.125)))
+    (let WO (list (list 0.75 -0.125 0.5 0.25) (list 0.25 0.625 -0.375 0.5)
+                  (list -0.5 0.125 0.875 -0.25) (list 0.125 -0.375 0.25 0.625)))
+    (let G2 (list 0.875 -1.125 0.625 0.75))
+    (let WG (list (list 0.5 -0.25 0.125 0.375) (list 0.75 0.375 -0.5 0.125)
+                  (list -0.125 0.625 0.25 -0.75) (list 0.25 -0.75 0.5 0.375)
+                  (list 0.625 0.125 -0.25 0.5) (list -0.375 0.5 0.75 -0.125)))
+    (let WU (list (list 0.25 0.5 -0.125 0.625) (list -0.5 0.125 0.75 -0.25)
+                  (list 0.375 -0.625 0.25 0.5) (list 0.125 0.75 -0.375 0.25)
+                  (list -0.25 0.375 0.5 -0.625) (list 0.5 -0.125 0.625 0.375)))
+    (let WD (list (list 0.5 -0.25 0.125 0.375 -0.625 0.25) (list 0.25 0.625 -0.5 0.125 0.375 -0.75)
+                  (list -0.375 0.125 0.75 -0.25 0.5 0.625) (list 0.625 -0.5 0.25 0.75 -0.125 0.375)))
+    (let SCALE 0.5)
+    (let EPS 0.00001)
+
+    ; --- the recipes' own answers, fp64 ---
+    (let e-full (lblk-block XS G1 EPS WQ WK WV WO SCALE 2 G2 WG WU WD))
+    (let e-caus (lblk-block-causal XS G1 EPS WQ WK WV WO SCALE 2 G2 WG WU WD))
+
+    ; --- mint both ---
+    (let pf (metal_pipeline (jte-llama-block-fwd-msl "form_llama_blk_live_f32") "form_llama_blk_live_f32"))
+    (let pc (metal_pipeline (jte-llama-block-fwd-causal-msl "form_llama_blkc_live_f32") "form_llama_blkc_live_f32"))
+
+    ; --- buffers: wq wk wv wo g1 wg wu wd g2 x y sc, then S d dq dv hid HD scale eps ---
+    (let bwq (metal_buf_alloc 64))  (let bwk (metal_buf_alloc 64))
+    (let bwv (metal_buf_alloc 64))  (let bwo (metal_buf_alloc 64))
+    (let bg1 (metal_buf_alloc 16))  (let bg2 (metal_buf_alloc 16))
+    (let bwg (metal_buf_alloc 96))  (let bwu (metal_buf_alloc 96))
+    (let bwd (metal_buf_alloc 96))
+    (let bx (metal_buf_alloc 32))
+    (let byf (metal_buf_alloc 32))  (let byc (metal_buf_alloc 32))
+    (let bscf (metal_buf_alloc 16384)) (let bscc (metal_buf_alloc 16384))
+    (let z0 (metal_buf_write bwq 0 (lbl-f32s (lbl-flat WQ))))
+    (let z1 (metal_buf_write bwk 0 (lbl-f32s (lbl-flat WK))))
+    (let z2 (metal_buf_write bwv 0 (lbl-f32s (lbl-flat WV))))
+    (let z3 (metal_buf_write bwo 0 (lbl-f32s (lbl-flat WO))))
+    (let z4 (metal_buf_write bg1 0 (lbl-f32s G1)))
+    (let z5 (metal_buf_write bwg 0 (lbl-f32s (lbl-flat WG))))
+    (let z6 (metal_buf_write bwu 0 (lbl-f32s (lbl-flat WU))))
+    (let z7 (metal_buf_write bwd 0 (lbl-f32s (lbl-flat WD))))
+    (let z8 (metal_buf_write bg2 0 (lbl-f32s G2)))
+    (let z9 (metal_buf_write bx 0 (lbl-f32s (lbl-flat XS))))
+
+    (let dims (list 2 4 4 4 6 2 (md-f32-bits SCALE) (md-f32-bits EPS)))
+    (let ef (metal_enqueue pf (md-bind16 (list bwq bwk bwv bwo bg1 bwg bwu bwd bg2 bx byf bscf) dims 1 0 0 0) 1))
+    (let sf (metal_sync))
+    (let ec (metal_enqueue pc (md-bind16 (list bwq bwk bwv bwo bg1 bwg bwu bwd bg2 bx byc bscc) dims 1 0 0 0) 1))
+    (let sc2 (metal_sync))
+    (let c0 (if (gt pf 0) (if (gt pc 0) (if (ge ef 0) (if (ge sf 0) (if (ge ec 0) (if (ge sc2 0) 1 0) 0) 0) 0) 0) 0))
+
+    (let c1 (if (eq (lbl-agree? byf (nth e-full 0) 0) 1) 2 0))
+    (let c2 (if (eq (lbl-agree? byf (nth e-full 1) 4) 1) 4 0))
+    (let c3 (if (eq (lbl-agree? byc (nth e-caus 0) 0) 1) 8 0))
+    (let c4 (if (eq (lbl-agree? byc (nth e-caus 1) 4) 1) 16 0))
+    (let c5 (if (eq (lbl-same?   (lbl-quad byf 4) (lbl-quad byc 4)) 1)
+            (if (eq (lbl-differ? (lbl-quad byf 0) (lbl-quad byc 0)) 1) 32 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))

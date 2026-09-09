@@ -1,0 +1,106 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/transformer-backprop.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
+;
+; resid-train-metal-live-band — the emitted FFN-RESIDUAL training-step kernel run on this host's GPU and
+; held to the recipe it was emitted from: y = h + FFN(LN(h)), one SGD step, the architect's actual layer.
+; The recipe side is transformer-backprop.fk's block engine, not a mirror written for the occasion —
+; `tbp-bk-fwd` for the forward, `tbp-bk-pgrads` for the four parameter gradients, `tbp-bk-update` for the
+; step. Until 2026-09-09 this family did not compile here: its four barriers wrote `mem_flags::` bare.
+;
+; The kernel adds two things to the FFN core the mlp-train band covers, and this band exists for exactly
+; those two: a PRE-LN computed by thread 0 alone (biased variance, eps inside a 50-iteration Newton
+; sqrt) and the RESIDUAL HIGHWAY, y = h + ffn, so gy = 2(y - t) reaches the FFN unchanged as its output
+; gradient and the W1 update reads z = LN(h) rather than the raw input. A kernel that forgot the highway
+; would still train, still fall, and still look like a layer — it would just be a different layer. The
+; W1 check is what tells the two apart, because it is the only update that reads z.
+;
+; Phase 0 is a SINGLE thread writing z, and every later phase reads it: that ordering is carried by the
+; first of the four barriers. The band runs 32 threads over hid 4 so all four carry weight.
+;
+; fp64 recipe against fp32 silicon walking the same folds — they agree to fp32 epsilon, not to the bit.
+;
+; Verdict 63 when the silicon takes the step:
+;    1  the pipeline mints, and the dispatch and sync both come back clean
+;    2  the loss and the output gradient gy are the recipe's
+;    4  z is the recipe's LN(h) — phase 0 ran, and every later phase read what it wrote
+;    8  b2 and W2 after the step are the recipe's
+;   16  b1 and W1 after the step are the recipe's — the updates that read z across the barrier
+;   32  THE STEP IS NOT A NO-OP: every parameter the band checks actually MOVED
+;
+(do
+    (defn rtl-close? (a b)
+        (lt (if (lt (sub a b) 0.0) (sub b a) (sub a b)) 0.0000305))
+    (defn rtl-f32s (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (md-le32 (md-f32-bits (head xs))) (rtl-f32s (tail xs)))))
+    (defn rtl-getf (h i) (ln-f32-decode (ln-u32-le (metal_buf_read h (mul i 4) 4) 0)))
+    (defn rtl-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (rtl-flat (tail rows)))))
+    (defn rtl-agree? (h xs i)
+        (if (eq (len xs) 0) 1
+            (if (rtl-close? (rtl-getf h i) (head xs)) (rtl-agree? h (tail xs) (add i 1)) 0)))
+    (defn rtl-moved? (h xs i)
+        (if (eq (len xs) 0) 0
+            (if (rtl-close? (rtl-getf h i) (head xs)) (rtl-moved? h (tail xs) (add i 1)) 1)))
+
+    ; --- indim 3, hid 4, outd 3. The residual forces outd = indim; nothing else is symmetric. ---
+    (let W1 (list (list 0.5 -0.25 0.125) (list 0.75 0.375 -0.5) (list -0.125 0.625 0.25) (list 0.25 -0.75 0.5)))
+    (let B1 (list 0.25 -0.5 0.125 0.375))
+    (let W2 (list (list 0.5 -0.25 0.75 0.125) (list -0.375 0.625 -0.125 0.5) (list 0.25 0.125 -0.625 0.375)))
+    (let B2 (list 0.0625 -0.1875 0.125))
+    (let H (list 1.5 -0.75 0.5))
+    (let T (list 0.25 -0.5 0.75))
+    (let LR 0.125)
+    (let EPS 0.00001)
+
+    ; --- the recipe's own answer, fp64, from the block engine the kernel was emitted from ---
+    (let blk (tbp-bk W1 B1 W2 B2))
+    (let e-z (tn-layernorm H EPS))
+    (let e-y (tbp-bk-fwd blk H EPS))
+    (let e-gy (tn-scale (tbp-vsub e-y T) 2.0))
+    (let e-loss (tb-vec-mul (tbp-vsub e-y T) (tbp-vsub e-y T)))
+    (let nb (tbp-bk-update blk (tbp-bk-pgrads blk H e-gy EPS) LR))
+    (let e-W1 (rtl-flat (tbp-bk-w1 nb)))
+    (let e-b1 (tbp-bk-b1 nb))
+    (let e-W2 (rtl-flat (tbp-bk-w2 nb)))
+    (let e-b2 (tbp-bk-b2 nb))
+
+    ; --- mint ---
+    (let src (jte-resid-train-msl-fmt "form_resid_train_live_f32" "f32"))
+    (let pipe (metal_pipeline src "form_resid_train_live_f32"))
+
+    ; --- buffers: w1 b1 w2 b2 h t loss h1 a gy dh1 z, then indim hid outd lr eps ---
+    (let bw1 (metal_buf_alloc 48))
+    (let bb1 (metal_buf_alloc 16))
+    (let bw2 (metal_buf_alloc 48))
+    (let bb2 (metal_buf_alloc 12))
+    (let bh (metal_buf_alloc 12))
+    (let bt (metal_buf_alloc 12))
+    (let bloss (metal_buf_alloc 12))
+    (let bh1 (metal_buf_alloc 16))
+    (let ba (metal_buf_alloc 16))
+    (let bgy (metal_buf_alloc 12))
+    (let bdh1 (metal_buf_alloc 16))
+    (let bz (metal_buf_alloc 12))
+    (let w0 (metal_buf_write bw1 0 (rtl-f32s (rtl-flat W1))))
+    (let w1w (metal_buf_write bb1 0 (rtl-f32s B1)))
+    (let w2w (metal_buf_write bw2 0 (rtl-f32s (rtl-flat W2))))
+    (let w3 (metal_buf_write bb2 0 (rtl-f32s B2)))
+    (let w4 (metal_buf_write bh 0 (rtl-f32s H)))
+    (let w5 (metal_buf_write bt 0 (rtl-f32s T)))
+
+    (let bind (md-bind16
+                  (list bw1 bb1 bw2 bb2 bh bt bloss bh1 ba bgy bdh1 bz)
+                  (list 3 4 3 (md-f32-bits LR) (md-f32-bits EPS)) 32 0 0 0))
+    (let enq (metal_enqueue pipe bind 32))
+    (let syn (metal_sync))
+    (let c0 (if (gt pipe 0) (if (ge enq 0) (if (ge syn 0) 1 0) 0) 0))
+
+    (let c1 (if (eq (rtl-agree? bloss e-loss 0) 1) (if (eq (rtl-agree? bgy e-gy 0) 1) 2 0) 0))
+    (let c2 (if (eq (rtl-agree? bz e-z 0) 1) 4 0))
+    (let c3 (if (eq (rtl-agree? bb2 e-b2 0) 1) (if (eq (rtl-agree? bw2 e-W2 0) 1) 8 0) 0))
+    (let c4 (if (eq (rtl-agree? bb1 e-b1 0) 1) (if (eq (rtl-agree? bw1 e-W1 0) 1) 16 0) 0))
+    (let c5 (if (eq (rtl-moved? bw1 (rtl-flat W1) 0) 1)
+            (if (eq (rtl-moved? bb1 B1 0) 1)
+            (if (eq (rtl-moved? bw2 (rtl-flat W2) 0) 1)
+            (if (eq (rtl-moved? bb2 B2 0) 1) 32 0) 0) 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))
