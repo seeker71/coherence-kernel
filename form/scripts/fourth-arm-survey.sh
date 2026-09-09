@@ -7,6 +7,9 @@
 #   stem<TAB>category<TAB>expected<TAB>fkw
 # Categories: pass mismatch bml multi-prelude multi-line non-1line-int
 #             flatten-empty go-timeout in-manifest
+# Read the resulting vocabulary candidates with the native source lens:
+# from the repository root: ./fkwu observe/fourth-arm-gap-analysis-run.fk </dev/null
+# The lens does not execute bands or establish semantic parity.
 set -u
 cd "$(dirname "$0")/.."
 

@@ -42,3 +42,8 @@ is `observe/native-op-emitter-witness.bml`.
 
 This guide adds no approval step or landing rule. The existing behavior checks
 remain responsible for the claims we make about a replacement.
+
+The [native fourth-arm gap lens](fourth-arm-gap-analysis.md) replaces the former
+Python survey helper. It reads current vocabulary candidates with per-band
+evidence; it keeps an absent survey explicit and leaves runtime repair claims
+to fresh execution witnesses.
