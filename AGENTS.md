@@ -274,6 +274,11 @@ Naming it *is* the practice.
    declare the lane). Preflight offers the name to all four kernels and tells you which.
 
    Two rules fall out, and both were paid for:
+   - **A failed check asks for repair (Urs, 2026-09-09).** Keep attention on the
+     failing command, repair its cause, and re-run the required checks until
+     they pass. Failure pauses the claim and landing, not the work. Do not
+     bypass or weaken a gate. Ask for help only when the next necessary action
+     needs information, access, or authority that is genuinely unavailable.
    - **Read the exit code, not the number.** `fkwu` exits 1 when the compile carried errors. With an existing
      cache you get only "cached image was compiled with errors" — delete the `.fkb`/`.sym` and run again before
      reporting anything.
