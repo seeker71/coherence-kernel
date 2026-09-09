@@ -54,3 +54,11 @@ follow-up makes slot height follow available body rows and language count,
 orders languages by the shared catalog and keeps only the current original
 language slot. Its flow band now returns **524287**; meaning UI remains **8191**
 and live UI **4294967295**. No captured text was copied into this receipt.
+
+Both changes landed on origin/main and fast-forwarded the saved live checkout.
+After the second automatic renewal, old sensor 62328 and workers 62369/62370
+were gone without manual release. New sensor 67047 owned workers 67052/67053;
+renderer 67082 stood. Live ear frame **300132** was **55 ms** old, `stands=1`,
+and all **four** current transcript texts were present in the production
+80×24 projection. This observes native frame data and the production renderer's
+projection, not human terminal pixels or long-term recognition accuracy.
