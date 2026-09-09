@@ -41,3 +41,7 @@ The pure band is `form/form-stdlib/tests/fourth-arm-gap-analysis-band.fk`.
 changes, BML lowering, reports, and failures. It keeps each observation separately
 and uses a correlated framebuffer choice to rehearse fixture evidence when the
 input is absent. Fixture observations remain distinct from a real survey.
+
+The survey producer now uses [native source preparation](native-source-preparation.md).
+Its compiler freshness belongs to the native image's dependency graph, and its
+lowered proof inputs are disposable. The gap reader remains an in-memory source lens.

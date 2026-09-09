@@ -939,26 +939,22 @@ func sourceCompileServeProgram(parts []sourcePart, stdlibDir string) ([]byte, er
 	// compiler prelude each time retained multi-GB heaps before Go's collector
 	// could recover them. Hash exact prelude + application bytes and reuse only
 	// the immutable FORMBIN2 artifact. Any source-byte change is a cache miss.
-	type loadedSource struct {
-		label  string
-		source string
+	paths := make([]string, 0, len(sourceRouteLanguagePreludes))
+	for _, name := range sourceRouteLanguagePreludes {
+		paths = append(paths, filepath.Join(stdlibAbs, name))
 	}
-	loaded := make([]loadedSource, 0, len(sourceRouteLanguagePreludes))
+	loaded, err := loadFormSourceClosure(paths)
+	if err != nil {
+		return nil, fmt.Errorf("route-language dependency closure: %w", err)
+	}
 	hasher := sha256.New()
 	writeHashPart := func(label, source string) {
 		_, _ = fmt.Fprintf(hasher, "%d:%s%d:", len(label), label, len(source))
 		_, _ = hasher.Write([]byte(source))
 	}
 	writeHashPart("stdlib", stdlibAbs)
-	for _, name := range sourceRouteLanguagePreludes {
-		path := filepath.Join(stdlibAbs, name)
-		source, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return nil, fmt.Errorf("route-language prelude %s: %w", path, readErr)
-		}
-		text := string(source)
-		loaded = append(loaded, loadedSource{label: path, source: text})
-		writeHashPart(path, text)
+	for _, part := range loaded {
+		writeHashPart(part.path, part.source)
 	}
 	for _, part := range parts {
 		writeHashPart(part.label, part.source)
@@ -981,7 +977,7 @@ func sourceCompileServeProgram(parts []sourcePart, stdlibDir string) ([]byte, er
 	k := NewKernel()
 	roots := []NodeID{}
 	for _, prelude := range loaded {
-		if err := compileRouteSourceIntoRecipe(k, &roots, prelude.label, prelude.source, stdlibAbs); err != nil {
+		if err := compileRouteSourceIntoRecipe(k, &roots, prelude.path, prelude.source, stdlibAbs); err != nil {
 			return nil, err
 		}
 	}
@@ -1011,14 +1007,17 @@ func sourceCompileServeProgram(parts []sourcePart, stdlibDir string) ([]byte, er
 }
 
 func sourceCompileDriver(stdlibAbs, body string) (string, error) {
-	parts := make([]string, 0, len(sourceCompilePreludes)+1)
+	paths := make([]string, 0, len(sourceCompilePreludes))
 	for _, name := range sourceCompilePreludes {
-		path := filepath.Join(stdlibAbs, name)
-		source, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("read source-compile prelude %s: %w", path, err)
-		}
-		parts = append(parts, string(source))
+		paths = append(paths, filepath.Join(stdlibAbs, name))
+	}
+	loaded, err := loadFormSourceClosure(paths)
+	if err != nil {
+		return "", fmt.Errorf("source-compile dependency closure: %w", err)
+	}
+	parts := make([]string, 0, len(loaded)+1)
+	for _, part := range loaded {
+		parts = append(parts, part.source)
 	}
 	parts = append(parts, body)
 	return strings.Join(parts, "\n"), nil
