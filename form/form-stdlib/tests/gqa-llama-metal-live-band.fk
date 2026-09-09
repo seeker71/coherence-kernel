@@ -1,31 +1,43 @@
-; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/llama-block.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/llama-block.fk form-stdlib/llama-gqa-block.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
 ;
 ; gqa-llama-metal-live-band — the two GROUPED-QUERY llama families run on this host's GPU: the causal
 ; whole-sequence block and the decode step. Both were refused here until 2026-09-09 (the `round` their
 ; shared helper calls was defined in no unit), and neither had ever produced a number on this silicon.
 ;
-; HOW THEY ARE ANCHORED, and the radius of it. There is no Form recipe for a grouped-query llama block,
-; and this band does not invent one. The body already names the reduction that makes one unnecessary:
-; GQA at one query head IS the single-head block. NQ = dq / HD, so at dq = KVD = HD and nkv = 1 there is
-; exactly one query head reading exactly one kv head, and the kernel must then be `lblk-block-causal` —
-; the four-way-proven recipe — to the last element. That anchors the whole block ASSEMBLY: RMSNorm, RoPE,
-; the causal mask, SwiGLU, both residual highways, the cache.
+; HOW THEY ARE ANCHORED, on both axes, against recipes. The REDUCTION first: NQ = dq / HD, so at
+; dq = KVD = HD and nkv = 1 there is exactly one query head reading exactly one kv head, and the kernel
+; must then be `lblk-block-causal` — the four-way-proven recipe — to the last element. That anchors the
+; whole block ASSEMBLY: RMSNorm, RoPE, the causal mask, SwiGLU, both residual highways, the cache.
 ;
-; What that reduction does NOT cover is the head partition itself, and the band says so rather than
-; implying otherwise: the grouping axis is covered by gqa-attn-metal-live-band, which checks genuine
-; grouping (two query heads over one kv head) against the composed per-head recipe. This band adds the
-; one thing that check cannot give — that the grouping dims are LIVE in these two kernels rather than
-; accepted and ignored. Bit 32 re-runs the block at real grouping (dq 4, HD 2, KVD 2, nkv 1: two query
-; heads sharing one kv head) and demands the answer MOVE. A kernel that read dq and quietly treated the
-; whole width as one head would pass every value check above and fail only this one.
+; Then the PARTITION, which the reduction cannot reach because at one head there is no partition. Bits
+; 32 and 64 run both kernels at genuine grouping — dq 4, HD 2 so NQ = 2, KVD 2, nkv 1: two query heads
+; sharing one kv head — and hold every element to `lgqa-block-causal` (llama-gqa-block.fk), the body's
+; own GQA recipe, at the inert base-10000 rope-cfg so the comparison isolates the head partition.
 ;
-; Verdict 63 when the silicon answers:
+; An earlier draft of this band spent bit 32 on a LIVENESS check instead: run at grouping, demand the
+; answer move. It moved. It was also reading a wo buffer tail the band never wrote, because that draft
+; truncated wo to d x KVD — wo is d x dq and the attention output stays dq-wide, head-major — so the
+; bit passed on a wrong shape for a reason unrelated to grouping. A liveness bit is the weakest thing
+; a band can say and the easiest to fool.
+;
+; The draft after THAT wrote a fresh GQA recipe into llama-block.fk, because a grep for `gqa` across
+; two files found nothing. `llama-gqa-block.fk` had carried `lgqa-block-causal` the whole time, with
+; RoPE scaling this one does not even have. The duplicate is gone; a name you cannot find is a name
+; you searched for in one shape (`lblk-gqa-`) when the body spells it in another (`lgqa-`), and the
+; cheap reflex is a repo-wide grep before the first line, not after the last.
+;
+; Telling the recipe n_kv = 2 when the kernel groups at n_kv = 1 drops both bits to 31; telling the
+; kernel HD = 4 when the recipe partitions at HD = 2 drops the block bit to 95.
+;
+; Verdict 127 when the silicon answers:
 ;    1  both pipelines mint, and every dispatch and sync comes back clean
 ;    2  the GQA causal block is `lblk-block-causal` at ALL THREE positions, element by element
 ;    4  the GQA decode step at p = 2 is `lblk-block-causal`'s position 2 — the cache reproduces the block
 ;    8  the decode wrote its own RoPE'd key and its own value into the KVD-strided cache at slot p
 ;   16  THE CACHE IS READ: perturb a cached key from an earlier position and the decode's answer MOVES
-;   32  THE GROUPING DIMS ARE LIVE: at two query heads over one kv head the block computes something else
+;   32  GENUINE GROUPING, ELEMENT BY ELEMENT: two query heads over one kv head, held to
+;       `lgqa-block-causal` at all three positions — the head partition itself, not a liveness bit
+;   64  and the DECODE step at that same grouping, over a KVD-strided cache, with its own k and v
 ;
 (do
     (defn gll-close? (a b)
@@ -126,15 +138,39 @@
     (let sd2 (metal_sync))
     (let c4 (if (ge sd2 0) (if (eq (gll-differ? d-true (gll-quad byd 0)) 1) 16 0) 0))
 
-    ; --- genuine grouping: two query heads over one kv head. wk/wv become KVD x d, wo becomes d x KVD. ---
-    (let b-true (gll-quad byb 8))
-    (let z14 (metal_buf_write bwk 0 (gll-f32s (gll-flat (gll-take WK 2)))))
-    (let z15 (metal_buf_write bwv 0 (gll-f32s (gll-flat (gll-take WV 2)))))
-    (let z16 (metal_buf_write bwo 0 (gll-f32s (gll-flat (list (gll-take (nth WO 0) 2) (gll-take (nth WO 1) 2)
-                                                             (gll-take (nth WO 2) 2) (gll-take (nth WO 3) 2))))))
+    ; --- GENUINE GROUPING, held to the recipe element by element. Two query heads over one kv head:
+    ; dq stays 4, HD becomes 2 so NQ = dq/HD = 2, and KVD = nkv*HD = 2, so wk and wv narrow to KVD x d
+    ; while wq and wo DO NOT MOVE — wo is d x dq and the attention output is still dq-wide, head-major.
+    ; An earlier draft of this band truncated wo to d x KVD and asked only whether the answer moved. It
+    ; moved, and the bit passed, and it was measuring the kernel reading a buffer tail the band never
+    ; wrote. A liveness bit is the weakest thing a band can say and the easiest to fool; now that
+    ; lblk-gqa-block-causal exists, the partition has a recipe and gets checked like everything else. ---
+    (let WK2 (gll-take WK 2))
+    (let WV2 (gll-take WV 2))
+    (let RCFG (rope-cfg 10000.0 32.0 1.0 4.0 8192.0))
+    (let e-gblk (lgqa-block-causal XS G1 EPS WQ WK2 WV2 WO SCALE 2 1 2 RCFG G2 WG WU WD))
+    (let g-n1 (lblk-rms-seq XS G1 EPS))
+    (let g-ks (lgqa-rope-seq (lblk-proj-seq WK2 g-n1) 2 RCFG))
+    (let g-vs (lblk-proj-seq WV2 g-n1))
+    (let z14 (metal_buf_write bwk 0 (gll-f32s (gll-flat WK2))))
+    (let z15 (metal_buf_write bwv 0 (gll-f32s (gll-flat WV2))))
     (let gdims (list 3 4 4 2 6 2 1 (md-f32-bits SCALE) (md-f32-bits EPS)))
     (let eg (metal_enqueue pb (md-bind16 (list bwq bwk bwv bwo bg1 bwg bwu bwd bg2 bxs byb bscb) gdims 1 0 0 0) 1))
     (let sg (metal_sync))
-    (let c5 (if (ge sg 0) (if (eq (gll-differ? b-true (gll-quad byb 8)) 1) 32 0) 0))
+    (let c5 (if (ge sg 0)
+            (if (eq (gll-agree? byb (nth e-gblk 0) 0) 1)
+            (if (eq (gll-agree? byb (nth e-gblk 1) 4) 1)
+            (if (eq (gll-agree? byb (nth e-gblk 2) 8) 1) 32 0) 0) 0) 0))
 
-    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))
+    ; --- and the DECODE step at the same genuine grouping, over a KVD-strided cache ---
+    (let z17 (metal_buf_write bck 0 (gll-f32s (tb-cat (nth g-ks 0) (nth g-ks 1)))))
+    (let z18 (metal_buf_write bcv 0 (gll-f32s (tb-cat (nth g-vs 0) (nth g-vs 1)))))
+    (let gddims (list 2 4 4 2 6 2 1 (md-f32-bits SCALE) (md-f32-bits EPS)))
+    (let egd (metal_enqueue pd (md-bind16 dbufs gddims 1 0 0 0) 1))
+    (let sgd (metal_sync))
+    (let c6 (if (ge sgd 0)
+            (if (eq (gll-agree? byd (nth e-gblk 2) 0) 1)
+            (if (eq (gll-agree? bck (nth g-ks 2) 4) 1)
+            (if (eq (gll-agree? bcv (nth g-vs 2) 4) 1) 64 0) 0) 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 c6)))))))
