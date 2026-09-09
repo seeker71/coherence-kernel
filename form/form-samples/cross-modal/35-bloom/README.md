@@ -81,14 +81,6 @@ union of present bits.
 - **False negatives never.** A value previously inserted ALWAYS reads
   back as present. The three bits it set stay set.
 
-## Cost note
-
-`sha256` itself is O(n²) per round through Form-list `nth` lookups, so
-single-byte inputs are deliberate — they keep the recipe-walk fast
-across all three sibling kernels. The Form→host-asm JIT (walking now
-in `22-form-to-host-asm` and `33-go-jit`) lifts the same recipe to
-native speed without changing the canonical source.
-
 ## Cross-refs
 
 - [`form-stdlib/bloom.fk`](../../../form-stdlib/bloom.fk) — the canonical recipe
@@ -96,3 +88,11 @@ native speed without changing the canonical source.
 - [`form-stdlib/tests/bloom-band.fk`](../../../form-stdlib/tests/bloom-band.fk) — sibling-witness band test
 - 20-sha256-as-recipe — the sha256 walk this builds on
 - 29-hmac-sha256, 30-base64, 32-crc32 — sibling Form-recipe constructions
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

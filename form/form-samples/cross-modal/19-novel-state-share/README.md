@@ -24,11 +24,6 @@ data was different (live `/dev/urandom` per kernel — the doorway).
 The protocol verdict converged across all three: integrity verified
 twice, identity recognized on the second packet, total `3`.
 
-The 4 KB scale is the recursion-safe ceiling for Form-walk integrity
-computation. Multi-megabyte transmission needs the Form→host-asm
-JIT (next walk) — the SAME canonical Form recipes compiled to host
-machine code, no in-kernel composite natives required.
-
 ## The honest shape
 
 Novel data — sensor readings, model activations, captured images, LoRA
@@ -87,21 +82,8 @@ The Form recipes for `sum-bytes` and `hash-fold` are canonical:
                    (mod (add (mul acc 31) (head bs)) 1000003))))
 ```
 
-They are correct but Form-walk recursion limits them to ~8 KB before
-stack pressure. An earlier version of this sample bound the Form
-names to in-kernel iterative natives (`bytes_sum`, `bytes_hash`) —
-but those composites had no business in the kernel. Composted.
-
-The principled path is the real Form→host-asm JIT (next walk):
-
-- Rust: cranelift compiles the recipe to native machine code at
-  registration time.
-- Go: emit a Go function, compile to `.so`, `plugin.Open`.
-- TS: `compiler.ts` already exists — wire it to `register_jit` so
-  `new Function(src)` lets V8 JIT to native.
-
-Same canonical Form recipe; host-fast dispatch per kernel. No new
-natives required for any composite operation.
+The sample uses small payloads for a repeatable protocol witness. Larger
+workloads need their own dispatch and resource measurements.
 
 ## Sibling parity at the meaning layer
 
@@ -130,7 +112,7 @@ same packet shape lifts onto an open transport:
 cell A process              wire                 cell B process
 ──────────────                                   ──────────────
  random_bytes(1MB)   ──packet bytes──▶            recv bytes
- hash-fold (JIT)                                  hash-fold (JIT)
+ hash-fold (Form)                                  hash-fold (Form)
  packet                                            verify
  socket_send                                       identity-recognize
 ```
@@ -172,6 +154,13 @@ default for **truly novel** state.
 - `lc-divergence-is-the-doorway` — bytes diverge per observer; meaning converges
 - `lc-private-channel-via-substrate` — fingerprint over substrate
 - 15-private-channel — fingerprint protocol shape this builds on
-- 16-jit-registry — the bind that makes megabyte-scale honest
 - 17-novel-nodes — sharing novel substrate identity (structural)
 - 18-substrate-compression — the complementary case (referenceable content)
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

@@ -1,11 +1,8 @@
 // CUDA C++ emit backend for form-kernel-ts.
 //
-// Multi-target codegen task #13. The companion to the JS compiler in
-// ../compiler.ts: instead of lifting recipe trees into JS source for
-// V8 to JIT, this backend lifts them into CUDA C++ source for nvcc
-// to compile into device code.
+// Source-format proof: lift recipe trees into CUDA C++ source.
 //
-// Architecture parallel to compiler.ts:
+// Emission shape:
 //
 //   CudaBackend.emit(kernel, root, opts)
 //     → walks the NodeID tree
@@ -23,8 +20,7 @@
 // emitted source.
 //
 // This is the smallest backend surface that proves the multi-target
-// pattern: same recipe → JS source (compiler.ts) → CUDA source (this
-// file). Future backends (Metal, ROCm, SPIR-V) follow the same shape.
+// pattern: recipe → CUDA source.
 
 import {
   Level,
@@ -81,8 +77,7 @@ export const CudaBackend: Backend = {
 };
 
 // ---------------------------------------------------------------------------
-// Emit pipeline — recipe walk + string concatenation. Kept structurally
-// close to compiler.ts so the two read as siblings.
+// Emit pipeline — recipe walk + string concatenation.
 // ---------------------------------------------------------------------------
 
 interface EmitScope {

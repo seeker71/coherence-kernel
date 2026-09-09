@@ -54,8 +54,3 @@ witness (two rows in, two keys out) now stands in a receipt instead of a
 belief standing in code.
 
 ## Still open, named
-
-The sense organs' absent-device "" (mic/cam/wifi, and the mic/cam_health
-Win-arm 0-vs-−1 divergence); metal_buf_read's dead-handle ""; Go's
-jit_emit_c err-fold and `_get` dual mask; the emitted mirror's owed copies
-of every heal since the flatten word — waiting on source-native emission.

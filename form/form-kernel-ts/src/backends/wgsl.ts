@@ -1,8 +1,7 @@
 // WGSL emit backend — Task #10.
 //
 // Walks a recipe tree and emits a WGSL compute-shader source string ready
-// to hand to a WebGPU `createShaderModule`. The backend follows the same
-// shape as the JS compiler in `../compiler.ts`: a recursive walker over
+// to hand to a WebGPU `createShaderModule`. A recursive walker over
 // NodeIDs that produces source text, plus a top-level emit() that wraps
 // the body in a `@compute` kernel.
 //

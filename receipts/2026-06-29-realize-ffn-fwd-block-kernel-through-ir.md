@@ -1,7 +1,7 @@
 # Receipt — Realize the transcendental fragment + the FIRST BLOCK KERNEL (FFN-forward) through the tensor IR (2026-06-29)
 
 B2's named wall: the tensor IR (`model/tensor-ir.fk`) NAMED `exp`/`tanh`/`gelu`/softmax/RoPE/norm in its vocabulary
-but did not REALIZE them as shared spine fragments, so the block kernels in `model/jit-tensor-emit.fk` stayed
+but did not REALIZE them as shared spine fragments, so the block kernels in `form/form-stdlib/jit-tensor-emit.fk` stayed
 hand-authored. This uplift closes the gap for the cleanest block kernel: it **realizes the transcendental fragment**
 (exp/tanh/gelu/gelu') as a shared, data-driven IR spine, and emits the **FFN-forward block kernel** —
 `y = W2·gelu(W1·x + b1) + b2` — THROUGH it, **byte-identical** to the hand-authored `jte-mlp-fwd-msl`.
@@ -24,7 +24,7 @@ hand-authored. This uplift closes the gap for the cleanest block kernel: it **re
 
 ## The HARD GATE — byte-identical, diff = 0, every lane + every untouched kernel
 
-OLD hand-spines captured from `git HEAD:model/jit-tensor-emit.fk`; the IR-driven output emitted from the working tree
+OLD hand-spines captured from `git HEAD:form/form-stdlib/jit-tensor-emit.fk`; the IR-driven output emitted from the working tree
 (via the go walker, which prints strings faithfully — fkwu's value-print collapses a computed string, so the byte
 gate runs inside the four-way band via `str_eq`, exactly the B2 pattern).
 
@@ -62,7 +62,7 @@ affine band 31 (four-way).
 ```
 model/tensor-ir.fk        283 -> 404   (+121: the realized transcendental + FFN-forward fragments + ffnsig +
                                          emitter, absorbed ONCE as data-driven generality)
-model/jit-tensor-emit.fk  593 -> 588   (the FFN-forward standalone spine retired to a thin IR delegation, and the
+form/form-stdlib/jit-tensor-emit.fk  593 -> 588   (the FFN-forward standalone spine retired to a thin IR delegation, and the
                                          1294-char jte-mlp-helpers hand-block became a 1-line delegation to
                                          tir-transcendentals-ty — a real altitude rise the small net line delta hides)
 ```
@@ -104,5 +104,5 @@ precision), the transcendentals as a shared realized fragment, the metal-proven 
 the north star — fewer special cases, more generic recipes — and away from nothing.
 
 Source `model/tensor-ir.fk`                  sha256: `bf543b7eb36df913929b44e2a62d74b2d228200148ec30c6fd1d467af909f8b9`
-Source `model/jit-tensor-emit.fk`            sha256: `ced24939eb3c2b9929649d84c104d40e0590ee7719094e88b7e8d5e25c42ae00`
+Source `form/form-stdlib/jit-tensor-emit.fk`            sha256: `ced24939eb3c2b9929649d84c104d40e0590ee7719094e88b7e8d5e25c42ae00`
 Band   `model/tests/tensor-ir-ffn-fwd-band.fk` sha256: `463561143dc93a60a906235ed339970bd392d8a6d159c83cd5d32c8043645367`

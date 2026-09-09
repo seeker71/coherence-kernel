@@ -108,9 +108,6 @@ verifiable before use.
 - **No content-hash verification in the demo flow.** A doesn't
   actually fetch the URL or check the hash — that's the next walk
   (wire the verify loop using `http_get` + `sha256`).
-- **Form-walk speed, not host-native.** The real Form→host-asm JIT
-  (next walk) compiles the channel-query recipes to machine code per
-  kernel; the protocol shape stays the same.
 - **Verb vocabulary is one word ("about").** A richer vocabulary —
   `"recipe"`, `"introspect"`, `"compute"`, `"witness"` — lives in
   channel-query.fk as the body grows.
@@ -125,3 +122,11 @@ verifiable before use.
 - 18-substrate-compression — SUBSTRATE-REF wire economics
 - 19-novel-state-share — bulk novel data + persistent cell identity
 - 20-sha256-as-recipe — the canonical hash this protocol relies on
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

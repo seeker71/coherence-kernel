@@ -1,8 +1,7 @@
 // backends/types.ts — minimal CodegenBackend interface.
 //
 // Anticipates #7 (BackendRegistry). Each backend is a recipe walker that
-// emits its target language as text — same pattern as compiler.ts emits
-// JS, with the output language varying. The registry will key on
+// emits its target language as text. The registry will key on
 // `target_hints` to pick the most specific backend for a given target.
 //
 // Backends added without registry land:

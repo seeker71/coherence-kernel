@@ -1,6 +1,6 @@
 # Receipt — Uplift: jit-tensor-emit's matvec + affine-train emit THROUGH the tensor IR (2026-06-29)
 
-The hand-written per-op / per-ISA emitter bodies in `model/jit-tensor-emit.fk` are RETIRED for the two
+The hand-written per-op / per-ISA emitter bodies in `form/form-stdlib/jit-tensor-emit.fk` are RETIRED for the two
 kernels the data-driven IR (`model/tensor-ir.fk`, stone 7) can express: **matvec** and the **affine-layer
 training step**. They now emit through the IR's shared spine + backend TABLES — the ISA (MSL vs CUDA) and
 the precision (f32/f16/bf16) are TABLE rows, not hand-rolled spines. High-grammar rises; the emitted code
@@ -32,7 +32,7 @@ only `if`s outside `tb-slot`, and they live on the PRECISION axis, not the ISA a
 
 ## The HARD GATE — byte-identical, diff = 0, every retired lane
 
-The OLD hand-spines were captured from `git HEAD:model/jit-tensor-emit.fk`; the IR-driven entries (which now
+The OLD hand-spines were captured from `git HEAD:form/form-stdlib/jit-tensor-emit.fk`; the IR-driven entries (which now
 delegate to `tir-matvec-*` / `tir-affine-train-*`) were emitted from the working tree. Per lane, `diff = 0`:
 
 ```
@@ -72,7 +72,7 @@ str_eq / if / list-via-function-args — no `let`-bound lists).
 ## Line count — the per-op/per-ISA bodies became data
 
 ```
-model/jit-tensor-emit.fk   727 -> 593   (-134 lines: matvec MSL/CUDA spines, affine-train MSL/CUDA
+form/form-stdlib/jit-tensor-emit.fk   727 -> 593   (-134 lines: matvec MSL/CUDA spines, affine-train MSL/CUDA
                                           sig/fwd/upd spines, and the orphaned jte-cuda-elem/acc rows retired)
 model/tensor-ir.fk         170 -> 283   (+113: the train body ops + precision table-builders absorbed,
                                           ONCE, as data-driven generality serving BOTH ISAs and ALL formats)
@@ -110,5 +110,5 @@ ISA at each precision), the ISA and the precision as data, the metal-proven path
 points at the north star — fewer special cases, more generic recipes — and away from nothing.
 
 Source `model/tensor-ir.fk`               sha256: `c12c317bbc7d03d45a45c810785e6db7665a6bea99004fe617c5a922d1f4a788`
-Source `model/jit-tensor-emit.fk`         sha256: `3547af69198283a342885978f1c2e5fbf2d022b43d1ba5daf3cb0696fc759412`
+Source `form/form-stdlib/jit-tensor-emit.fk`         sha256: `3547af69198283a342885978f1c2e5fbf2d022b43d1ba5daf3cb0696fc759412`
 Band   `model/tests/tensor-ir-affine-band.fk` sha256: `4df3c46bf58b4d77917d95045cd9694f660e8491e3a2104cf8fd624203e6c156`

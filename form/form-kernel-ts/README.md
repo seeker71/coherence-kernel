@@ -32,10 +32,9 @@ kernels carry the load-bearing ones):
   write surface (`make_nodeid`, `intern_trivial_int`, `intern_trivial_string`,
   `intern_node`, `node_category`, `node_children`, `node_value`,
   `walk_recipe`), `trace`
-- S-expression bootstrap reader with `buildVerb`-style name dispatch
-  (matches Go/Rust exactly — `add`, `sub`, `mul`, `eq`, `le`, ... all
-  intern to the same NodeIDs across kernels)
-Native compilation uses `./fkwu path.fk` or `./fkwu path.bml` from the repository root. See [native JIT routing](../../docs/native-jit-routing.md). The TypeScript proof interpreter contains no recipe-to-JavaScript JIT.
+
+Native compilation runs through `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../docs/native-jit-routing.md).
 
 ## Browser entry
 

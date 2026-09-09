@@ -1,5 +1,3 @@
-# Receipt - Form-native JIT category-fed tiering lands (2026-06-30)
-
 ## What landed
 
 The optimizer track now has an executable Form policy that composes heat/purity,
@@ -32,7 +30,7 @@ receipt may still crystallize, but it does not get the direct specialized path.
 Run:
 
 ```sh
-( cat observe/jit-decision.fk observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-tier-policy.fk observe/tests/jit-tier-policy-band.fk ) > /tmp/jtp.fk
+( cat form/form-stdlib/jit-decision.fk observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-tier-policy.fk observe/tests/jit-tier-policy-band.fk ) > /tmp/jtp.fk
 ./fkwu --src /tmp/jtp.fk
 ```
 

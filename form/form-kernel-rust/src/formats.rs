@@ -559,9 +559,7 @@ fn narrow_int(v: i32, bits: u32) -> i32 {
 // ---------------------------------------------------------------------------
 
 // Specialized handler: takes two NumVals, returns a NumVal. Rc<dyn Fn>
-// is the Rust equivalent of the TS `new Function`-returned closure —
-// shared so multiple borrowers can hold a reference to the same compiled
-// handler without fighting the borrow checker.
+// shares a cached arithmetic handler between borrowers.
 pub type ArithHandler = Rc<dyn Fn(NumVal, NumVal) -> NumVal>;
 
 pub struct FormatTable {

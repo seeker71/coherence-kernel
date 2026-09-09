@@ -110,16 +110,6 @@ Form bands and in prose.
 - **`runtime/fkwu-uni.c`** named `substring-byte-edges-band.fk` as its witness.
   That band does not exist and never did. It names the two that do.
 
-## Where the meaning is written now
-
-`form/form-stdlib/core.fk` (the door's own comment, with the re-measured `"Ω+1"`
-table and a `witnessed:` stamp), the four kernel natives plus the Go **JIT
-mirror** (`jitabi.go` — a primitive that lives twice must be healed twice, or hot
-code silently reverts past the auto-JIT threshold), `runtime/fkwu-uni.c`, the
-band's own header, one section of `CURRENT_FLOOR.md`, and the standing lesson at
-[`docs/substring-one-meaning.md`](../docs/substring-one-meaning.md). The four
-dead flooring helpers are removed rather than retired.
-
 ## Guarded, before and after
 
 fkwu, every band the brief named: `substring-native` 511 → 511,

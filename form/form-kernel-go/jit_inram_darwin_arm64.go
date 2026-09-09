@@ -103,7 +103,7 @@ func dylibCall(path, sym string, arg int64) (int64, bool) {
 // registerInRAMJIT — bind the host-native execution doors. `jit_leaf_inram`
 // runs an image in-RAM; `dylib_call` loads a durable recipe dylib and calls it.
 // Present only where the host can execute them; the stub registers nothing and
-// Form callers fall back to the Go-plugin path or the walker.
+// Form callers observe missing capability and select their next native route.
 func (k *Kernel) registerInRAMJIT() {
 	k.registerNative("jit_leaf_inram", catMethod(), func(_ *Kernel, args []Value) Value {
 		if len(args) != 2 || args[0].Kind != VList || args[1].Kind != VInt {

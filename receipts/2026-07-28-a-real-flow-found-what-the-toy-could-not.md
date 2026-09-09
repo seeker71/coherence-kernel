@@ -38,12 +38,6 @@ find_subject     3045002010  the mediator of the polarity → Christ
 
 **The toy could not have found this, because counting never returns an id.**
 
-The moment a real query returned a node id, the three kernels split. Node ids in
-this body are ~3.0×10⁹, and the TypeScript kernel's recipe walker is **I32 by
-design** — `form-kernel-ts/src/compiler.ts:268`, `int: n | 0`, with line 423
-explaining it keeps V8's SMI tagging. So `3045007003` came back as
-`-1249960293`. Minimal repro:
-
 ```
 (walk_recipe (intern_trivial_int 3045007003))
   go 3045007003 / rust 3045007003 / ts -1249960293

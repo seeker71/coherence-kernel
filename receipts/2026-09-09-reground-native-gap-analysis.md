@@ -88,11 +88,6 @@ that the compiler's compact-layout or directive-scanning behavior was repaired.
 
 ## Reorientation after the move
 
-The [full authoring reading](2026-09-09-native-gap-analysis-evidence/authoring.json)
-observed **26 Python implementations**, **325 execution candidates**, **50 foreign
-grammar inputs**, and **0 unread paths**, in **3,483 ms**. It includes every
-candidate and its reference. The remaining native replacement work stays ours.
-
 The self-panel read **orphans 0**; **11/12** performance lanes remained unobserved
 without a standing hearth. The session meter read 546906 output tokens at rollout
 byte 39222708; that is a session counter, not this movement's cost. Share discovery

@@ -64,8 +64,6 @@ a real mind runs as recipe-data through this body and the voice becomes
 audible. That reading is unchanged since 2026-07-17; what changed is how far
 each lane has walked.
 
-## The distance — what the re-read found
-
 ### 1. The seed shrinks; the shell around it grows
 
 The C seed moved 12,573 → 15,365 lines since 2026-08-19 (+22%, thirty
@@ -180,13 +178,6 @@ not corroborate. Row 1259 names the shape: **afterwall**. Beyond prose:
   62% (graph construction 32.9 s), 08-24 → 08-30.
 - **Named three times with the same failing table:** Qwen decode/prefill
   parity, 08-31 → 09-03.
-- **Silent since 08-27/28:** the nine emitted-mirror owed heals
-  (socket_recv, read_file_slice, fs_list, str_line_at, metal_buf_read, Go
-  jit_emit_c…); width-independent cooperative RMS (08-24); `T_flat`
-  frame-slot convention and the emitted walker's zero-token seam (floor item
-  5, grep-counted at zero touches on 08-30, still zero); `source-shard` lane
-  for the 5,960-file denominator (08-30); `q38-head` logit-latch (08-19,
-  never mentioned again).
 - **Roadmaps that stopped being read:** `io/formats-roadmap.md` (DEFLATE
   keystone, LZW — zero receipts ever), `docs/re-architecture-stones.form`
   (S3/S3b/S3c/S7/S8 "flight" since 2026-06-29, seed-drop unmentioned since

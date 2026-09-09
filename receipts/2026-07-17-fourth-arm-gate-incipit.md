@@ -45,7 +45,6 @@ job is proving agreement. The script is now executable (mode `100755`).
 | form-cli-request | DIVERGENT (truncated to line 1 of 10) | **PASS-4WAY** |
 | rag-ask-grounded | DIVERGENT (truncated to line 1 of 5) | **PASS-4WAY** |
 | form-debug (control: mid-list core.fk) | — | **PASS-4WAY**, declared order intact |
-| int-literal-width, go-jit (control: no header) | — | **PASS-4WAY** via fallback |
 | nl-reason | DIVERGENT | DIVERGENT — **pre-existing**, identical error (`bp: unreviewed bootstrap name: property` via `norm-en@nl-translate.fk:75` → `bp@form-ontology-loader.fk:343`) with and without core.fk; flagged as its own task |
 
 ## Corpus

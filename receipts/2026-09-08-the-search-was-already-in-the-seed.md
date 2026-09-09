@@ -109,11 +109,6 @@ Nothing moved.
   non-boundary, which was the only reason the snap was there; over bytes there is
   nothing to snap and nothing to panic on.
 - **ts** — the boundary call dropped; it already scanned encoded bytes.
-- **go's JIT** — `jitabi.StrFind`, which **did not exist**. There was no second
-  copy to drift, because there was no second copy at all: any recipe containing
-  `str_find` bailed out of the JIT entirely as an unsupported call, so `split-on`,
-  `trim` and every row walker over them stayed interpreted past the auto-JIT
-  threshold. Mirrored now, and wired into the value-ABI list.
 - **core.fk** — the recipe stays and stays reachable, as `fstr-find`, exactly as
   `fstr-substring-halve` did. It carries the clamp too, so recipe and native are
   one meaning.

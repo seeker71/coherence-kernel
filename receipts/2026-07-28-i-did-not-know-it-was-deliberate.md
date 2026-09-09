@@ -5,19 +5,12 @@ three arms; the declared lane it was hiding behind is gone.*
 
 ## The claim I made
 
-An hour earlier I wrote that the TypeScript kernel truncates node ids **"I32 by
-design"**, cited `compiler.ts:268` (`int: n | 0`) and a comment on line 423
-about keeping V8's SMI tagging, and split a band's proof lane to declare that
-TypeScript could not carry the value.
-
 Urs asked how I knew it was deliberate.
 
 ## I didn't
 
 Tracing it properly:
 
-- `walk_recipe` calls `walk()` in **kernel.ts**. It never touches `compiler.ts`.
-  The file I cited was not on the code path.
 - The comment I quoted was about arithmetic emission, a different function from
   the line I blamed.
 - The actual loss is `kernel.ts:765`, `internTrivialInt`, packing the value into

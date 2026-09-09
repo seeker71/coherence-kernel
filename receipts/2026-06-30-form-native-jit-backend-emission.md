@@ -55,11 +55,7 @@ Meaning:
 
 ## Honest boundary
 
-This is backend emission metadata and execution simulation in Form, not loaded
-host machine code. It deliberately consumes a compact packet summary because the
-full policy/emitter/IR/dispatch source exceeds current `fkwu --src` composition
-envelopes. Follow-up receipt `2026-06-30-form-native-jit-backend-bytes.md`
-adds deterministic x64/arm64/PTX-like payload emission as Form data. The
-remaining lift is to load and execute host-native code generated from these
-Form-owned backend bundles while preserving the witnessed maps and
-guard/deopt/exception behavior.
+This dated witness covers backend emission metadata and execution simulation
+in Form using a compact packet summary. It does not establish loaded native
+execution. The [current Form route](../docs/native-jit-routing.md) provides
+the executable emission and carrier witnesses.

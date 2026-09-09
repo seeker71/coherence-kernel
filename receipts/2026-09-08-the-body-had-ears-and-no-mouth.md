@@ -179,10 +179,6 @@ any sense door at all** (measured: zero `sense_` hits in `walkers/go`,
 `walkers/rust`, `walkers/ts`). That is the honest floor `mirror-census.bml`
 itself names, not a lane I declined to walk.
 
-Panel, before → after: names 362 → 371 (+9, exactly mine), disagreeing 151 →
-151, armhush 3 → 3, seedgap 48 → 48, siblinggap 4 → 4, jitsplit 0 → 0,
-orphan-arms 40 → 41 (tag 190, on purpose).
-
 Found in passing and not mine to move: `sense_mic_capture` reads `manifestgap`
 — the whole existing ear family has flt-ops rows and no manifest rows.
 

@@ -56,7 +56,7 @@ helpers plus the one `div`, one `mod`, one `lt` fn.
 ## PIECE B — wired, witnessed firing, then root-caused to a GC-root divergence and REVERTED
 
 The wire was built and **works on shallow recipes**: a heat-gated dispatcher (`fk_jit_feval_dispatch`,
-hot ≥ 5 matching `observe/jit-decision.fk`) consulted at `fk_walk`'s call sites (tags 12/240/241/244,
+hot ≥ 5 matching `form/form-stdlib/jit-decision.fk`) consulted at `fk_walk`'s call sites (tags 12/240/241/244,
 guarded by an `FK_JIT`-only flag so the default path stays byte-identical). It crystallizes each hot
 callee once (install-exec cached, no per-call syscall) and dispatches native. Witnessed BEFORE revert:
 - `FK_JIT=1 --feval (do (defn fac …) (fac 6))` → **720** with **`[jit]` lines, njit>0** (and **720**

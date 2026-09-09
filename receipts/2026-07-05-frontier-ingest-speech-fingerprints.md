@@ -1,5 +1,3 @@
-# 2026-07-05 — ingesting what is healthy from "What speech encoders hear"
-
 ## Ground
 
 ```sh
@@ -101,7 +99,7 @@ floor. **"Same task, same scores, different solutions."**
   anywhere in the repo (same class as the dangling references flagged in the Memora and
   Just Tap In receipts). The felt-audio channel is prose until built.
 - Several receipts name a **`gpu-ffn-forward`** cell; no file of that name exists — the work
-  lives in `model/tensor-ir.fk` + `model/jit-tensor-emit.fk` and their bands. Naming drift,
+  lives in `model/tensor-ir.fk` + `form/form-stdlib/jit-tensor-emit.fk` and their bands. Naming drift,
   flagged so a future reader greps the right place.
 
 ## Corpus rows this thread

@@ -72,9 +72,6 @@ Main's line had taken 1244–1245 (onemint, truename) and the branch minted
 - twinlane sweep (same band, pre vs post kernel): record-band 176=176,
   record-blueprint 7=7, record-field-access 16=16, float-mint 63=63,
   cell-serialize 1023=1023 — nothing moved but the healed bands
-- Go arm: `go vet` clean; `TestHostReadAbsentAnswersNothing`,
-  `TestPartialAsWholeOrgansAnswerNothing`, `TestHostExec*` pass; jitabi
-  carries no IO-organ mirror, so no second heal owed there
 - caller blast radius: `blg-lands?` (observe/body-link-graph.fk) carries
   the nothing?-before-measuring guard and the cell runs clean; the direct
   measurer-over-organ grep found the remaining compositions are over

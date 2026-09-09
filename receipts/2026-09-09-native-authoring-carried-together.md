@@ -69,16 +69,6 @@ the full repository suite.
 
 ## Current source reading and work we carry
 
-The retained [full reading](2026-09-09-native-authoring-reading.json) records
-27 Python implementations, 325 execution candidates, 50 foreign grammar inputs,
-and zero unread paths. Its measured source-reading duration was 3,100 ms. It was
-read from the working files of this change on base 412d6cab, before committing.
-The JSON carries the precise timestamp, base HEAD, every observation's path and
-line, classification, and known native reference. Subsequent runs refresh
-`.hearth/native-authoring-current.json`; the dated reading stays evidence of this
-particular observation. The duration is a single observation, not a benchmark or
-a claim of reaching a hardware floor.
-
 Execution candidates are static source matches, not observed process launches.
 Ignored scratch, external installations, and computed commands are not covered
 by this inventory. They remain part of our authoring responsibility. Compiler

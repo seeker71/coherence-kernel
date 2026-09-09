@@ -77,14 +77,6 @@ Port = capability-contract (structure + interface)  ⟗  carrier (host realizati
   `form_native.cosine` is the same registry that
   `lc-tools-as-form-cells` notes "can swap one carrier for another." Binding is
   data, not code.
-- **The host seam already exists in all three kernels** — Go's `plugin.Open`,
-  Rust's `libloading`, TS's `new Function` are the same physical seam by which
-  a host realization is loaded. Effectful natives
-  (`read_file`, `write_form_binary`, the `socket_*` family, `fetch`) are all
-  attributed `catCall()` — "invoke external effect" — which is precisely the
-  *carrier-invocation* category. The kernel already distinguishes
-  pure-structural work (`catWitness`, `catMath`, `catAccess`) from
-  reach-the-environment work (`catCall`).
 
 A **Port** is the missing noun that says: *this capability-contract is realized
 by this carrier.* Tools become one port-family (`carrier: shell|http|in_process`).

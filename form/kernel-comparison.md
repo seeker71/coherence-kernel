@@ -4,9 +4,9 @@ Three implementations keep the smallest Form host honest: Go
 (`form-kernel-go/main.go`), Rust (`form-kernel-rust/src/main.rs`), and TypeScript
 (`form-kernel-ts/src/kernel.ts`). Each reads real `.fk` source end-to-end through
 NodeID/content-addressed intern, recipe walking, frame/closure state, native
-primitives, and the S-expression bootstrap reader. The TypeScript kernel adds a
-compiled path — tracked in [`kernel-ts-comparison.md`](kernel-ts-comparison.md) —
-and the shared [`validate.sh`](validate.sh) checks all siblings.
+primitives, and the S-expression bootstrap reader. The
+[TypeScript proof interpreter](kernel-ts-comparison.md) also runs in browsers.
+The shared [`validate.sh`](validate.sh) checks all siblings.
 
 ## Why all siblings stay
 
@@ -27,8 +27,7 @@ new `.fk` source file joins the diff.
 
 The runtime difference is a feature, not a verdict. Go is fast on native walker
 workloads; Rust is small and safe and the natural candidate when the kernel ships
-to edge cells via WASM; TypeScript has the browser-adjacent path and a compiled
-recipe-to-JS mode for hot interactive work. None of them is the runtime of this
+to edge cells via WASM; TypeScript carries browser proof evaluation. The runtime of this
 body — `fkwu` is (`../MANIFEST.md`); they are the arms that witness it.
 
 ## The shape of each kernel
@@ -38,21 +37,24 @@ body — `fkwu` is (`../MANIFEST.md`); they are the arms that witness it.
 - Kernel overhead over native code is the cost of "recipes as runtime data" versus
   instructions the CPU recognizes directly — the normal range for tree-walking
   interpreters, and invisible for a substrate that processes a few thousand recipes
-  a second. Hot inner loops fall through to native primitives or to the compiled
-  path.
+  a second. Native compilation follows the [Form route](../docs/native-jit-routing.md).
 - The Rust kernel splits an immutable `Kernel` (substrate) from a mutable `Arena`
   (frames), closures holding a `FrameId`; the Go kernel uses linear-scan frames keyed
   by `NameID` and one lookup per walk step.
 
 ## Measure, don't remember
 
-Bench numbers are re-taken, never quoted from a page:
+Measure proof interpreter timings from `form/`:
 
 ```bash
 form-kernel-go/bin-go --bench
 form-kernel-rust/target/release/form-kernel-rust --bench
-node --experimental-strip-types form-kernel-ts/src/main.ts --bench
-./validate.sh --bench            # side by side
+```
+
+Measure the native Form route from the repository root:
+
+```sh
+./fkwu observe/native-jit-witness-run.fk
 ```
 
 ## Run

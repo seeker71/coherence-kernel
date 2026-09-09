@@ -46,42 +46,10 @@ POSIX `cksum` is NOT this CRC (different polynomial, different framing,
 no final XOR). When in doubt, the 9-byte vector `"123456789"` → `0xCBF43926`
 is the cross-implementation witness.
 
-## The shape (today, and next breath)
+## Recipe behavior
 
-```
-                  ┌─ FORM RECIPE (canonical) ───────┐
-                  │  form-stdlib/crc32.fk            │
-                  │                                  │
-                  │  uses kernel bitwise primitives  │
-   (crc32 bs)     │   band, bxor, shr_u32, add_u32  │
-   ───────────▶   │                                  │
-                  │  inner 8-iteration shift/xor     │
-                  │  loop, no precomputed table —    │
-                  │  Form list nth would dominate    │
-                  │  cost anyway                     │
-                  │  → unsigned 32-bit int           │
-                  └──────────────────────────────────┘
-                                   │
-                  [next walk: register_jit triggers]
-                  [a real Form→host-asm compiler:    ]
-                  [  Rust : cranelift                ]
-                  [  Go   : recipe→Go-source→plugin  ]
-                  [  TS   : compiler.ts → new Function]
-                                   ▼
-                  ┌─ HOST MACHINE CODE (fast) ──────┐
-                  │  same Form recipe; emitted as    │
-                  │  the host's native instructions  │
-                  │  → CRC at host speed             │
-                  └──────────────────────────────────┘
-```
-
-Today: only the top half walks — the Form recipe computes CRC-32
+The Form recipe computes CRC-32
 from primitives. Validates four canonical vectors three-way.
-
-Next walk: the bottom half. `register_jit` triggers a real recipe→
-host-asm compiler, so the SAME Form recipe dispatches at machine-code
-speed. No new natives; no JIT-alias-to-native. The recipe IS the
-canonical source the compiler reads.
 
 ## The Form recipe shape
 
@@ -120,4 +88,11 @@ sibling kernels.
 - 20-sha256-as-recipe — the SHA-256 walk this echoes
 - 29-hmac-sha256 — HMAC composed atop SHA-256, same primitives
 - 30-base64 — Base64 from the same bitwise primitives
-- 16-jit-registry — the bind mechanism the JIT walk will use
+
+## Native execution
+
+Run Form source with `./fkwu path.fk` or `./fkwu path.bml` from the
+repository root. See [native JIT routing](../../../../docs/native-jit-routing.md)
+for the current compiler, emission and dispatch witnesses. This sample's
+result checks establish behavior; performance and native entry coverage need
+measurements of the executed workload.

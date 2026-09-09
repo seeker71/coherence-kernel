@@ -186,4 +186,4 @@ is the cell's choice; lookup is everyone's.
 - [`form-stdlib/channel.fk`](../../../form-stdlib/channel.fk) — the L2 substrate
 - [`form-stdlib/channel-query.fk`](../../../form-stdlib/channel-query.fk) — the L7 vocabulary
 - 21-cell-query-protocol — the application-layer demo this builds on
-- 22-form-to-host-asm — the JIT path that scales L1–L7 to host speed
+- 22-form-to-host-asm — Form emission and native image execution witness

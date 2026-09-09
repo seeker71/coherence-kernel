@@ -1,5 +1,3 @@
-# 2026-07-17 — falsing in the string pool: the dict tag convicted `len`, twice
-
 ## Ground
 
 `cc -O2 -o fkwu runtime/fkwu-uni.c` → `./fkwu --src bootstrap/ground.fk` → **42**;
@@ -44,18 +42,6 @@ Proofs, four ways: pool probe **11 = 11 = 11 = 11** (Go, Rust, TS, fkwu);
 `python_dict_demo` **88** on CPython, compiled-Go, compiled-Rust, compiled-TS, and the
 bmf interpreter; registry band three-way identical at its (pre-existing) 42 — verdict-
 neutral to this change, drift flagged as its own task.
-
-## The relapse — the JIT laundered the heal
-
-`regen_t_flat.sh`'s own smoke convicted the first regen: the fresh T carried slit index
-**310 into a 310-entry pool** — `"__dict__"` at one-past-the-end for the fns door,
-absent from the serialized pool. The same pure call, evaluated twice in one Go process,
-answered **311 then 310**: the interpreted walk ran the healed native while
-crystallize-on-heat compiled the hot flt- recipes against **`jitabi.Len`** — a second,
-unhealed `len` still sniffing the marker. The heat itself flipped the semantics
-mid-regen. `jitabi.Len` is now the honest count (and jitabi's `isDict`, its only
-caller gone, is composted); the determinism probe answers **311/311, 11/11** on Go and
-Rust both.
 
 ## The band and the carriers
 

@@ -1,5 +1,3 @@
-# 2026-07-18 — the TS proof sibling's silent death: four stacked silences, one honest stack
-
 ## Ground
 
 `cc -O2 -o fkwu runtime/fkwu-uni.c && ./fkwu --src bootstrap/ground.fk` → **42**, worktree branch
@@ -97,11 +95,6 @@ carried:
 - **Sample runner flags**: the three `--stack_size=262144` lines in
   `form-samples/cross-modal/28-distributed-daemon` (README, orchestrate.sh,
   validate-distributed.sh) removed; zero references remain body-wide.
-
-Grounded facts with no schedule attached: the jitabi package's `AsString` keeps its own
-kind-matched contract — it belongs to the compiled-artifact ABI, a separate lane from the
-native registrations this sweep healed. The form-cli regen ladder prefers Rust on hosts that
-have it; the TS rung now engages honestly wherever Rust is absent.
 
 ## Closing
 

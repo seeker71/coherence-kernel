@@ -1,5 +1,3 @@
-# Receipt - Form-native JIT policy spine rungs (2026-06-30)
-
 ## What landed
 
 This receipt extends the Form-native JIT track beyond profile/tiering/runtime
@@ -30,16 +28,16 @@ Run:
 ( cat observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-register-lowering.fk observe/tests/jit-register-lowering-band.fk ) > /tmp/jrl.fk
 ./fkwu --src /tmp/jrl.fk
 
-( cat observe/jit-decision.fk observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-tier-policy.fk observe/jit-deopt-cache.fk observe/tests/jit-deopt-cache-band.fk ) > /tmp/jdc.fk
+( cat form/form-stdlib/jit-decision.fk observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-tier-policy.fk observe/jit-deopt-cache.fk observe/tests/jit-deopt-cache-band.fk ) > /tmp/jdc.fk
 ./fkwu --src /tmp/jdc.fk
 
-( cat observe/jit-decision.fk observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-tier-policy.fk observe/jit-inline-policy.fk observe/form-static-analyzer.fk observe/tests/jit-policy-front-sweep-band.fk ) > /tmp/jpfs.fk
+( cat form/form-stdlib/jit-decision.fk observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-tier-policy.fk observe/jit-inline-policy.fk observe/form-static-analyzer.fk observe/tests/jit-policy-front-sweep-band.fk ) > /tmp/jpfs.fk
 ./fkwu --src /tmp/jpfs.fk
 
 ( cat observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-stack-frame.fk observe/jit-representation-specialization.fk observe/jit-register-lowering.fk observe/tests/jit-policy-access-sweep-band.fk ) > /tmp/jpas.fk
 ./fkwu --src /tmp/jpas.fk
 
-( cat observe/jit-decision.fk observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-tier-policy.fk observe/jit-deopt-cache.fk observe/tests/jit-policy-cache-sweep-band.fk ) > /tmp/jpcs.fk
+( cat form/form-stdlib/jit-decision.fk observe/jit-profile-receipt.fk observe/jit-runtime-fault.fk observe/jit-tier-policy.fk observe/jit-deopt-cache.fk observe/tests/jit-policy-cache-sweep-band.fk ) > /tmp/jpcs.fk
 ./fkwu --src /tmp/jpcs.fk
 ```
 

@@ -1,7 +1,6 @@
 // MetalBackend — emit Metal Shading Language (MSL) source from a recipe tree.
 //
-// Companion to compiler.ts (which emits JS for V8) and the still-ripening
-// vector.ts / parallel.ts modules (Form-level vector/parallel intrinsics).
+// Source-format proof for Form-level vector/parallel intrinsics.
 // This backend targets Apple GPUs via MSL — `kernel void` functions dispatched
 // across a grid, with optional SIMD-group matrix ops for BF16/FP16 paths.
 //
@@ -777,8 +776,7 @@ const METAL_NATIVE_MAP: Record<string, string> = {
 };
 
 // -----------------------------------------------------------------------------
-// Frame is imported but not actively used in MSL emit — keeping the import
-// so the surface mirrors compiler.ts and we can wire reflection later.
+// Frame is reserved for reflection in the MSL source-format proof.
 // -----------------------------------------------------------------------------
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const _frameRef: typeof Frame = Frame;
