@@ -1191,6 +1191,28 @@ once a frame still holds (the three index-rebuilding wrappers are dead in the
 live path). The glass already computes `frame-work-ms` against
 `frame-budget-ms` every frame and publishes it; nothing was reading it.
 
+**A principle the corpus will not vouch for is a choice, and says so.** In this
+body a `rule` is a mechanism — `object-rule` 153, `compiler-rule` 121,
+`apply-object-rule` 57 — something applied and watched produce a result, never
+something believed; the normative sense is imported. But the receipts refuse to
+settle the matter either way: across 1720 of them, `never` 1933, `must` 624,
+`law` 329, against `witnessed` 1623, `observed` 1328, `measured` 1079. The count
+licenses no purge of the vocabulary and no principle either — which is the
+finding. `form-glass-vitals.bml` now names "a surface still resembling itself"
+as **the choice it is**, written down to be argued with rather than inherited,
+with the cost recorded beside it: a purely relative reading is blind wherever
+the sickness is older than the watch, and that door called a glass at 99% of a
+core `easy` while it missed its frame budget. A choice with a named blind spot
+is worth more than a principle with an unknown one. The one place the door
+endorsed a constraint now reports what was seen instead: the publish answered
+`refused snapshot` until the id was one the check accepts.
+
+The same pass caught a flaky bit of my own: vitals' effort bit measures this
+process's own CPU over a burn loop, and the loop is hot enough that a
+crystallized burn finishes inside a millisecond, leaving no wall time to divide
+by. It now sleeps 5 ms beside the burn — CPU spent, wall time guaranteed — and
+reads 1023 four runs running.
+
 **The glass names its own hot path, and the JIT declines its shape.** Read from
 a standing glass's own page: the top sixty-four recipes carry **172 million
 dispatches**, of which **one** is crystallized, 39 are still walking and 24 were
