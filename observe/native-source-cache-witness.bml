@@ -1,0 +1,133 @@
+// Isolated compiler edits and disposable proof fixtures; never edits live source.
+// preludes: form-stdlib/bml/native-source-prepare.bml form-stdlib/string-byte-fold-src-shim.fk form-stdlib/sha256.fk form-stdlib/hex.fk observe/bidirectional-framebuffer-channel.fk
+section [form.bml] {
+ class NativeSourceCacheWitness {
+  def nsc-at(root, path) = fs-path-join(root, path);
+  def nsc-mkdir(path) {
+   let parent = fs-path-dirname(path);
+   let above = if or(str_eq(parent, path), str_eq(parent, ".")) then 0 else if ge(file_size(parent), 0) then 0 else nsc-mkdir(parent);
+   host_dir_mkdir(path);
+  }
+  def nsc-copy(root, path) {
+   let prefix = str_concat(read_file(nsc-at(root, "source-root")), "/");
+   let relative = if lx-at?(path, 0, prefix) then substring(path, str_len(prefix), str_len(path)) else path;
+   let dest = nsc-at(root, relative);
+   let dir = nsc-mkdir(fs-path-dirname(dest));
+   let source = read_file(path);
+   if nothing?(source) then 0 else eq(write_file(dest, source), str_len(source));
+  }
+  def nsc-copy-deps(root, lines) {
+   if nil?(lines) then 1 else nsc-copy-dep(root, head(lines), tail(lines));
+  }
+  def nsc-copy-dep(root, line, rest) {
+   let at = str_find(line, " path ", 0);
+   let copied = if and(lx-at?(line, 0, "dependency "), ge(at, 0)) then nsc-copy(root, substring(line, add(at, 6), str_len(line))) else 1;
+   let more = nsc-copy-deps(root, rest);
+   and(copied, more);
+  }
+  def nsc-run(root, name, argv, input) {
+   let base = nsc-at(root, name);
+   let written = write_file(str_concat(base, ".in"), input);
+   let started = host_monotonic_ms();
+   let pid = host_spawn_at(argv, list(str_concat(base, ".in"), str_concat(base, ".out"), str_concat(base, ".err")));
+   let status = if gt(pid, 0) then host_wait(pid) else -1;
+   let elapsed = sub(host_monotonic_ms(), started);
+   let row = list(name, status, elapsed, read_file(str_concat(base, ".out")), read_file(str_concat(base, ".err")));
+   print(list(name, status, elapsed));
+   let saved = write_file(str_concat(base, ".json"), json-emit(json-node-object(list(json-node-pair("case", json-node-string(name)), json-node-pair("exit", json-node-int(status)), json-node-pair("elapsed_ms", json-node-int(elapsed)), json-node-pair("stdout", json-node-string(nth(row, 3))), json-node-pair("stderr", json-node-string(nth(row, 4)))))));
+   row;
+  }
+  def nsc-prepare(root, name, src, out) = nsc-run(root, name, list("sh", "-c", "cd \"$1\" && exec ./fkwu observe/native-source-prepare-run.fk", "native-source-witness", root), str_concat(src, str_concat("\n", str_concat(out, "\n"))));
+  def nsc-ready(row, path) = and(eq(nth(row, 1), 0), str_eq(nth(row, 3), str_concat(path, "\n1\n")));
+  def nsc-eval(root, name, path, value) {
+   let row = nsc-run(root, name, list(nsc-at(root, "fkwu"), path), "");
+   and(eq(nth(row, 1), 0), str_eq(nth(row, 3), str_concat(int_to_str(value), "\n")));
+  }
+  def nsc-source(value) = str_concat("section [form.bml] {\n class CacheFixture {\n  def cache-answer() = ", str_concat(int_to_str(value), ";\n }\n cache-answer();\n}\n"));
+  def nsc-k(name, ok, bit) {
+   print(list(name, ok));
+   if ok then bit else 0;
+  }
+  def nsc-start() {
+   let cwd = lx-strip(host_capture(list("pwd")));
+   let root = nsc-at(cwd, str_concat(".hearth/native-source-cache-", int_to_str(host_pid())));
+   let made = host_dir_mkdir(root);
+   if not(eq(made, 1)) then "fresh witness directory unavailable" else nsc-cases(root, cwd);
+  }
+  def nsc-cases(root, cwd) {
+   let owner = write_file(nsc-at(root, "source-root"), cwd);
+   let copied = nsc-copy-deps(root, lx-lines(read_file("observe/native-source-prepare-run.sym")));
+   let floor = nsc-copy(root, "form/form-stdlib/bml-floor-compile.fk");
+   // These proof-only roots carry the Go sibling's constant installation.
+   // They are absent from the native compiler manifest by design.
+   let proofConstants = nsc-copy(root, "form/form-stdlib/engine-constants.fk");
+   let proofLoader = nsc-copy(root, "form/form-stdlib/form-ontology-loader.fk");
+   let binary = nsc-run(root, "copy-binary", list("cp", "fkwu", nsc-at(root, "fkwu")), "");
+   let authored = nsc-mkdir(nsc-at(root, "authored"));
+   let transport = nsc-mkdir(nsc-at(root, "proof-input"));
+   let src = nsc-at(root, "authored/fixture.bml");
+   let out = nsc-at(root, "proof-input/prepared.fk");
+   let first = write_file(src, nsc-source(42));
+   let cold = nsc-prepare(root, "cold", src, out);
+   let coldText = read_file(out);
+   let coldEval = nsc-eval(root, "cold-execute", out, 42);
+   let k1 = nsc-k("cold native compiler", and(copied, and(floor, and(nsc-ready(cold, out), coldEval))), 1);
+   let warm = nsc-prepare(root, "warm", src, out);
+   let k2 = nsc-k("warm same source", and(nsc-ready(warm, out), str_eq(read_file(out), coldText)), 2);
+   let edit = write_file(src, nsc-source(43));
+   let changed = nsc-prepare(root, "source-change", src, out);
+   let changedEval = nsc-eval(root, "changed-execute", out, 43);
+   let k3 = nsc-k("source edit changes execution", and(nsc-ready(changed, out), changedEval), 4);
+   let lens = nsc-at(root, "form/form-stdlib/source-compiler-text-lens.fk");
+   let oldLens = read_file(lens);
+   let position = str_find(oldLens, "    (defn fsc-compile-section", 0);
+   let newLens = str_concat(substring(oldLens, 0, position), "    (defn fsc-compile-section (dialect-name body out-path)\n        (str_concat \"; current-compiler-witness\\n\" (fsc-source-emit-module\n            (fsc-compile-section-recipe dialect-name body))))\n    0)\n");
+   let compilerEdit = write_file(lens, newLens);
+   let refreshed = nsc-prepare(root, "compiler-change", src, out);
+   let refreshedEval = nsc-eval(root, "compiler-change-execute", out, 43);
+   let k4 = nsc-k("compiler dependency invalidates warm image", and(nsc-ready(refreshed, out), and(ge(str_find(read_file(out), "; current-compiler-witness", 0), 0), refreshedEval)), 8);
+   let missing = nsc-prepare(root, "missing-source", nsc-at(root, "absent.bml"), out);
+   let k5 = nsc-k("missing source stays explicit", and(eq(nth(missing, 1), 0), str_eq(nth(missing, 3), "source-unavailable\n0\n")), 16);
+   let outbound = bfc-envelope(0, host_pid(), 0, list(nth(missing, 1), nth(missing, 3)), "retain-source-unavailable");
+   let sent = bfc-record-out(outbound, 1);
+   let control = bfc-control(outbound, 5);
+   let received = bfc-record-in(control, 2);
+   let selected = bfc-apply(outbound, control, "retain-source-unavailable", src);
+   let dependency = nsc-at(root, "authored/value.fk");
+   let wrongOwner = write_file(nsc-at(root, "value.fk"), "(defn carried-value () 999)\n");
+   let depWrite = write_file(dependency, "(defn carried-value () 44)\n");
+   let importSource = str_concat("import \"value.fk\";\n", "section [form.bml] {\n class Imported {\n  def cache-answer() = carried-value();\n }\n cache-answer();\n}\n");
+   let dependencySource = write_file(src, importSource);
+   let carried = nsc-prepare(root, "relative-import", selected, out);
+   let carriedEval = nsc-eval(root, "relative-import-execute", out, 44);
+   let k6 = nsc-k("relative import survives temporary location", and(nsc-ready(carried, out), carriedEval), 32);
+   let observed = bfc-record-out(bfc-envelope(0, host_pid(), 0, list(nth(carried, 1), carriedEval), "retain-evidence"), 3);
+   let choice = write_file(nsc-at(root, "choice.json"), json-emit(json-node-object(list(json-node-pair("exchange", json-node-int(host_pid())), json-node-pair("offered", json-node-string("retain source-unavailable or rehearse owned fixture")), json-node-pair("selected_action", json-node-int(bfc-payload(control))), json-node-pair("applied_source", json-node-string(selected)), json-node-pair("after_exit", json-node-int(nth(carried, 1))), json-node-pair("after_execution_ok", json-node-int(carriedEval))))));
+   let noOutput = nsc-prepare(root, "write-failure", src, nsc-at(root, "absent-directory/output.fk"));
+   let k7 = nsc-k("write failure stays explicit", and(eq(nth(noOutput, 1), 0), str_eq(nth(noOutput, 3), "proof-input-write-failed\n0\n")), 64);
+   let poisonSource = str_concat(str_concat("// owned fixture ", int_to_str(host_pid())), str_concat("\n", nsc-source(45)));
+   let poisonKey = substring(hex-encode(sha256-stream-string(poisonSource)), 0, 24);
+   let cache = nsc-at(root, str_concat("form/form-stdlib/.cache/kernel-bml-lowered/", str_concat(poisonKey, ".fk")));
+   let cacheDir = nsc-mkdir(fs-path-dirname(cache));
+   let poison = write_file(cache, "(defn cache-answer () 999)\n");
+   let poisonFixture = write_file(src, poisonSource);
+   let wrapper = nsc-at(root, "proof.fk");
+   let wrapped = write_file(wrapper, str_concat(str_concat("; pre", "ludes: "), str_concat(src, "\n(cache-answer)\n")));
+   let go = nsc-run(root, "poisoned-old-proof-cache", list(nsc-at(cwd, "form/form-kernel-go/bin-go"), wrapper), "");
+   let k8 = nsc-k("old source-only proof cache ignored", and(eq(nth(go, 1), 0), and(str_eq(nth(go, 3), "45\n"), str_eq(read_file(cache), "(defn cache-answer () 999)\n"))), 128);
+   let poisonEvidence = write_file(nsc-at(root, "poison.json"), json-emit(json-node-object(list(json-node-pair("source_sha256_prefix", json-node-string(poisonKey)), json-node-pair("cache_path", json-node-string(cache)), json-node-pair("compiler_root", json-node-string(nsc-at(root, "form/form-stdlib/engine-constants.fk"))), json-node-pair("cache_bytes_after_execution", json-node-string(read_file(cache))), json-node-pair("execution_stdout", json-node-string(nth(go, 3)))))));
+   let released = nsc-run(root, "release-owned-poison", list("rm", cache), "");
+   let absentDependency = write_file(src, str_concat(str_concat("// pre", "ludes: absent-value.fk\n"), nsc-source(42)));
+   let refused = nsc-prepare(root, "missing-dependency", src, out);
+   let k9 = nsc-k("missing dependency has no raw fallback", and(eq(nth(refused, 1), 0), str_eq(nth(refused, 3), "lowering-unavailable\n0\n")), 256);
+   let bmlDependency = write_file(nsc-at(root, "authored/value.bml"), "section [form.bml] {\n class Value {\n  def carried-bml-value() = 46;\n }\n}\n");
+   let bmlSource = write_file(src, str_concat(str_concat("// pre", "ludes: value.bml\n"), "section [form.bml] {\n class Imported {\n  def cache-answer() = carried-bml-value();\n }\n cache-answer();\n}\n"));
+   let bmlCarried = nsc-prepare(root, "bml-prelude", src, out);
+   let bmlEval = nsc-eval(root, "bml-prelude-execute", out, 46);
+   let k10 = nsc-k("BML prelude retains owner", and(nsc-ready(bmlCarried, out), bmlEval), 512);
+   print(str_concat("evidence=", root));
+   add(k1, add(k2, add(k3, add(k4, add(k5, add(k6, add(k7, add(k8, add(k9, k10)))))))));
+  }
+ }
+ 0;
+}

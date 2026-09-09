@@ -5820,16 +5820,9 @@ func resolveFormImport(ownerPath, imported string) (string, error) {
 	return "", fmt.Errorf("import %q from %s: file not found", imported, ownerPath)
 }
 
-// formBmlSourceCompileChain is the fixed set of Form units that implement
-// source-compiler.fk's "section [form.bml]" -> plain Form lowering pass
-// (validate.sh's own compiler_chain, kept in the same order). fkwu cannot
-// run this chain itself -- source-compiler.fk needs host-I/O natives fkwu
-// lacks -- which is why bare fkwu can never parse a raw BML section and
-// validate.sh's prepare_sources instead shells out to a Go kernel to run
-// this chain externally. This kernel doesn't need to shell out to anything:
-// it already implements every native the chain needs, so it runs the
-// lowering on itself, in a throwaway Kernel instance, the moment it meets a
-// ".bml" prelude dependency it can't otherwise read.
+// Roots of the Form compiler used by this proof sibling. Their declared
+// dependency closure is loaded for each lowering. The body's native fkwu
+// source door admits its own compiler independently of this proof carrier.
 var formBmlSourceCompileChain = []string{
 	"form-stdlib/engine-constants.fk",
 	"form-stdlib/compiler-objects.fk",
@@ -5848,14 +5841,10 @@ var formBmlSourceCompileChain = []string{
 	"form-stdlib/source-compiler-text-lens.fk",
 }
 
-// lowerBmlSource lowers one whole ".bml" prelude file into plain Form text
-// by running form-source-compile-file (source-compiler.fk) in a fresh,
-// throwaway Kernel -- entirely separate from the kernel the CLI eventually
-// builds to run the caller's own program. Cached by content hash under
-// form-stdlib/.cache/kernel-bml-lowered/ (a namespace of its own: the key
-// here is a plain content hash, not validate.sh's compiler_stamp-qualified
-// one, so the two caches don't collide but also don't need to agree bit for
-// bit) so a repeated run doesn't re-pay the several-second compile.
+// lowerBmlSource runs the current Form compiler in a separate proof kernel.
+// Source bytes alone cannot identify a lowering: compiler dependencies also
+// determine it. Each proof run reads those dependencies afresh; the directory
+// below holds temporary transport files only, removed before this call returns.
 func lowerBmlSource(bmlAbsPath string) (string, error) {
 	body, err := os.ReadFile(bmlAbsPath)
 	if err != nil {
@@ -5873,10 +5862,6 @@ func lowerBmlSource(bmlAbsPath string) (string, error) {
 		chainPaths[i] = resolved
 	}
 	cacheDir := filepath.Join(filepath.Dir(chainPaths[0]), ".cache", "kernel-bml-lowered")
-	cachePath := filepath.Join(cacheDir, key+".fk")
-	if cached, err := os.ReadFile(cachePath); err == nil && len(cached) > 0 {
-		return string(cached), nil
-	}
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return "", fmt.Errorf("create BML lowering cache dir: %w", err)
 	}
@@ -5907,7 +5892,6 @@ func lowerBmlSource(bmlAbsPath string) (string, error) {
 	if err != nil || len(lowered) == 0 {
 		return "", fmt.Errorf("form-source-compile-file produced no output for %s", bmlAbsPath)
 	}
-	_ = os.WriteFile(cachePath, lowered, 0644) // best-effort cache; a miss just re-lowers next time
 	return string(lowered), nil
 }
 
@@ -6761,7 +6745,7 @@ func deserializeArtifact(k *Kernel, bytes []byte) (NodeID, error) {
 		root, end, err = deserializeNidWithStringsV1(k, bytes, pos, stringsTable, scope, budget, 0)
 	} else {
 		scope := k.nextImportScope()
-		root, end, err = deserializeNidWithStrings(k, bytes, pos, stringsTable, scope, budget, 0)
+		root, end, err = deserializeFormbinDepth(k, bytes, pos, stringsTable, scope)
 	}
 	if err != nil {
 		return NodeID{}, err
@@ -6770,73 +6754,4 @@ func deserializeArtifact(k *Kernel, bytes []byte) (NodeID, error) {
 		return NodeID{}, fmt.Errorf("form binary: trailing bytes")
 	}
 	return root, nil
-}
-
-func deserializeNidWithStrings(k *Kernel, bytes []byte, pos int, stringsTable []string, scope uint32, budget *formBinaryDecodeBudget, depth int) (NodeID, int, error) {
-	if err := budget.enter(depth); err != nil {
-		return NodeID{}, pos, err
-	}
-	tag, pos, err := readU32(bytes, pos)
-	if err != nil {
-		return NodeID{}, pos, err
-	}
-	switch tag {
-	case formBinaryFloat64:
-		value, next, err := readF64LE(bytes, pos)
-		if err != nil {
-			return NodeID{}, pos, err
-		}
-		return k.internTrivialFloat64(value), next, nil
-	case formBinaryInt64:
-		value, next, err := readI64LE(bytes, pos)
-		if err != nil {
-			return NodeID{}, pos, err
-		}
-		return k.internTrivialInt(value), next, nil
-	case formBinaryLeaf:
-		var pkg, level, ty, inst uint32
-		if pkg, pos, err = readU32(bytes, pos); err != nil {
-			return NodeID{}, pos, err
-		}
-		if level, pos, err = readU32(bytes, pos); err != nil {
-			return NodeID{}, pos, err
-		}
-		if ty, pos, err = readU32(bytes, pos); err != nil {
-			return NodeID{}, pos, err
-		}
-		if inst, pos, err = readU32(bytes, pos); err != nil {
-			return NodeID{}, pos, err
-		}
-		if level == LevelTrivial && ty == TrivString {
-			if int(inst) >= len(stringsTable) {
-				return NodeID{}, pos, fmt.Errorf("form binary: bad string index %d", inst)
-			}
-			return k.internString(stringsTable[inst]), pos, nil
-		}
-		return k.remapImportedLeaf(scope, NodeID{Pkg: pkg, Level: level, Type: ty, Inst: inst}), pos, nil
-	case formBinaryComposite:
-		category, next, err := deserializeNidWithStrings(k, bytes, pos, stringsTable, scope, budget, depth+1)
-		if err != nil {
-			return NodeID{}, pos, err
-		}
-		count, next, err := readU32(bytes, next)
-		if err != nil {
-			return NodeID{}, pos, err
-		}
-		if count > formBinaryMaxChildren {
-			return NodeID{}, pos, fmt.Errorf("form binary: maximum child count exceeded")
-		}
-		children := make([]NodeID, int(count))
-		for i := uint32(0); i < count; i++ {
-			var c NodeID
-			c, next, err = deserializeNidWithStrings(k, bytes, next, stringsTable, scope, budget, depth+1)
-			if err != nil {
-				return NodeID{}, pos, err
-			}
-			children[i] = c
-		}
-		return k.intern(category, children), next, nil
-	default:
-		return NodeID{}, pos, fmt.Errorf("form binary: unknown node tag %d", tag)
-	}
 }

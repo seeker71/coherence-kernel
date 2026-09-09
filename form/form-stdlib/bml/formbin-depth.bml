@@ -1,0 +1,86 @@
+// FORMBIN2 traversal and attention. Continuations live in data, independent
+// of the host call stack. A checkpoint changes the next slice, never validity.
+// preludes: form-stdlib/core.fk observe/bidirectional-framebuffer-channel.fk
+section [form.bml] {
+ class FormbinDepth {
+  def fbd-max(a, b) = if gt(a, b) then a else b;
+  // Linked pairs keep pushes constant-size on array-list proof carriers too.
+  def fbd-push(value, rest) = list(value, rest);
+  def fbd-rest(stack) = nth(stack, 1);
+  // state: cursor, frames, nodes, peak-depth, mode, error, depth.
+  // mode: 0 read node, 1 complete child, 2 complete root, 3 malformed.
+  // frame: composite byte offset, original child count, children remaining;
+  // -1 remaining means the category has just been requested.
+  def fbd-state(p, frames, nodes, peak, mode, error, depth) = list(p, frames, nodes, peak, mode, error, depth);
+  def fbd-start(p) = fbd-state(p, list(), 0, 0, 0, "", 0);
+  def fbd-initial-attention() = list(256, 32, 50);
+  def fbd-u32(s, p) = add(mul(str_byte_at(s, p), 16777216), add(mul(str_byte_at(s, add(p, 1)), 65536), add(mul(str_byte_at(s, add(p, 2)), 256), str_byte_at(s, add(p, 3)))));
+  def fbd-error(st, reason) = fbd-state(nth(st, 0), nth(st, 1), nth(st, 2), nth(st, 3), 3, str_concat("form binary: ", reason), nth(st, 6));
+  def fbd-slice(source, state, quantum) = fbd-loop(source, state, fbd-max(1, quantum), list());
+  def fbd-loop(source, st, left, rows) {
+   if or(le(left, 0), ge(nth(st, 4), 2)) then list(st, rows)
+   else if eq(nth(st, 4), 1) then fbd-complete(source, st, left, rows)
+   else fbd-node(source, st, left, rows);
+  }
+  def fbd-node(source, st, left, rows) {
+   let p = nth(st, 0);
+   if ge(nth(st, 2), 1000000) then list(fbd-error(st, "maximum node count exceeded"), rows)
+   else if gt(add(p, 4), str_len(source)) then list(fbd-error(st, "truncated u32"), rows)
+   else fbd-tag(source, st, left, rows, fbd-u32(source, p));
+  }
+  def fbd-tag(source, st, left, rows, tag) {
+   let p = nth(st, 0);
+   let depth = nth(st, 6);
+   let peak = fbd-max(depth, nth(st, 3));
+   if eq(tag, 1) then fbd-loop(source, fbd-state(add(p, 4), fbd-push(list(p, -1, -1), nth(st, 1)), add(nth(st, 2), 1), peak, 0, "", add(depth, 1)), sub(left, 1), rows)
+   else if or(eq(tag, 0), or(eq(tag, 2), eq(tag, 3))) then fbd-leaf(source, st, left, rows, tag, if eq(tag, 0) then 20 else 12, peak)
+   else list(fbd-error(st, str_concat("unknown node tag ", int_to_str(tag))), rows);
+  }
+  def fbd-leaf(source, st, left, rows, tag, size, peak) {
+   let p = nth(st, 0);
+   if gt(add(p, size), str_len(source)) then list(fbd-error(st, if eq(tag, 0) then "truncated u32" else if eq(tag, 2) then "truncated float64" else "truncated int64"), rows)
+   else fbd-loop(source, fbd-state(add(p, size), nth(st, 1), add(nth(st, 2), 1), peak, 1, "", nth(st, 6)), sub(left, 1), fbd-push(list(tag, p, 0), rows));
+  }
+  def fbd-complete(source, st, left, rows) {
+   if nil?(nth(st, 1)) then
+    if eq(nth(st, 0), str_len(source)) then list(fbd-state(nth(st, 0), list(), nth(st, 2), nth(st, 3), 2, "", 0), rows)
+    else list(fbd-error(st, "trailing bytes"), rows)
+   else fbd-parent(source, st, left, rows, head(nth(st, 1)));
+  }
+  def fbd-parent(source, st, left, rows, frame) {
+   if eq(nth(frame, 2), -1) then
+    if gt(add(nth(st, 0), 4), str_len(source)) then list(fbd-error(st, "truncated u32"), rows)
+    else fbd-count(source, st, left, rows, frame, fbd-u32(source, nth(st, 0)))
+   else if eq(nth(frame, 2), 1) then fbd-close(source, st, left, rows, frame)
+   else fbd-loop(source, fbd-state(nth(st, 0), fbd-push(list(head(frame), nth(frame, 1), sub(nth(frame, 2), 1)), fbd-rest(nth(st, 1))), nth(st, 2), nth(st, 3), 0, "", nth(st, 6)), sub(left, 1), rows);
+  }
+  def fbd-count(source, st, left, rows, frame, count) {
+   let next = fbd-state(add(nth(st, 0), 4), nth(st, 1), nth(st, 2), nth(st, 3), 0, "", nth(st, 6));
+   if gt(count, 262144) then list(fbd-error(st, "maximum child count exceeded"), rows)
+   else if eq(count, 0) then fbd-close(source, next, left, rows, list(head(frame), 0, 0))
+   else fbd-loop(source, fbd-state(nth(next, 0), fbd-push(list(head(frame), count, count), fbd-rest(nth(st, 1))), nth(st, 2), nth(st, 3), 0, "", nth(st, 6)), sub(left, 1), rows);
+  }
+  def fbd-close(source, st, left, rows, frame) = fbd-loop(source, fbd-state(nth(st, 0), fbd-rest(nth(st, 1)), nth(st, 2), nth(st, 3), 1, "", sub(nth(st, 6), 1)), sub(left, 1), fbd-push(list(1, head(frame), nth(frame, 1)), rows));
+  // Observations: peak, watermark, quantum, slice-ms, attention-ms, GC cycles.
+  // Decision: attention level, action, next watermark, next quantum.
+  // action 0 continue, 1 yield with smaller slice, 2 grow slice.
+  def fbd-attend(peak, watermark, quantum, elapsed, attentionMs, collections) {
+   let crossed = ge(peak, watermark);
+   // Collection is a signal to watch. Shrinking a fast slice on every GC
+   // creates its own pressure through extra observations and continuations.
+   let pressured = gt(elapsed, attentionMs);
+   let action = if pressured then 1 else if lt(mul(elapsed, 4), attentionMs) then 2 else 0;
+   let nextQuantum = if eq(action, 1) then fbd-max(1, div(quantum, 2)) else if eq(action, 2) then mul(quantum, 2) else quantum;
+   list(if pressured then 2 else if or(crossed, gt(collections, 0)) then 1 else 0, action, if crossed then mul(add(peak, 1), 2) else watermark, nextQuantum);
+  }
+  def fbd-control-row(values, exchange, round) {
+   let outbound = bfc-envelope(0, exchange, 0, values, "retain-continuation");
+   let observed = bfc-record-out(outbound, mul(round, 2));
+   let decision = fbd-attend(nth(values, 0), nth(values, 1), nth(values, 2), nth(values, 3), nth(values, 4), nth(values, 5));
+   let inbound = bfc-envelope(1, exchange, 1, decision, "retain-continuation");
+   let selected = bfc-record-in(inbound, add(mul(round, 2), 1));
+   if and(eq(bfc-direction(inbound), 1), eq(bfc-exchange(outbound), bfc-exchange(inbound))) then bfc-payload(inbound) else list(2, 0, nth(values, 1), nth(values, 2));
+  }
+ }
+ 0;
+}

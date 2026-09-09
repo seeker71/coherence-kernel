@@ -1,0 +1,70 @@
+// Proof-carrier text preparation. The running fkwu owns compiler admission.
+// No independent compiler key, historical source cache, or raw BML fallback.
+// preludes: form-stdlib/form-bml-lower.fk form-stdlib/source-compiler-text-lens.fk form-stdlib/form-fs.fk gate/lens-text.bml
+section [form.bml] {
+ class NativeSourcePrepare {
+  def nsp-words(s) = nsp-words-at(s, 0, list());
+  def nsp-words-at(s, i, words) {
+   let start = lx-skip-ws(s, i);
+   if ge(start, str_len(s)) then reverse(words) else nsp-word(s, start, nsp-word-end(s, start), words);
+  }
+  def nsp-word-end(s, i) = if ge(i, str_len(s)) then i else if lx-ws-at?(s, i) then i else nsp-word-end(s, add(i, 1));
+  def nsp-word(s, start, end, words) = nsp-words-at(s, end, cons(substring(s, start, end), words));
+  def nsp-first-file(paths) = if nil?(paths) then nothing() else if ge(file_size(head(paths)), 0) then head(paths) else nsp-first-file(tail(paths));
+  def nsp-resolve(owner, token) {
+   if lx-at?(token, 0, "/") then nsp-first-file(list(token)) else nsp-resolve-up(fs-path-dirname(owner), token);
+  }
+  def nsp-resolve-up(dir, token) {
+   let direct = nsp-first-file(list(fs-path-join(dir, token), fs-path-join(fs-path-join(dir, "form"), token)));
+   let parent = fs-path-dirname(dir);
+   if not(nothing?(direct)) then direct else if or(str_eq(parent, dir), str_eq(dir, "")) then nothing() else nsp-resolve-up(parent, token);
+  }
+  def nsp-dependencies(owner, tokens) {
+   if nil?(tokens) then "" else nsp-dependency(owner, head(tokens), tail(tokens));
+  }
+  def nsp-dependency(owner, token, rest) {
+   let path = nsp-resolve(owner, token);
+   let more = nsp-dependencies(owner, rest);
+   if or(nothing?(path), nothing?(more)) then nothing() else nsp-directive(path, more);
+  }
+  def nsp-directive(path, more) {
+   if str_eq(fs-path-extension(path), ".bml") then
+    if not(eq(len(nsp-words(path)), 1)) then nothing() else str_concat(str_concat("; pre", "ludes: "), str_concat(path, str_concat("\n", more)))
+   else str_concat("import ", str_concat(json-emit(json-node-string(path)), str_concat("\n", more)));
+  }
+  def nsp-carried(owner, lines) = if nil?(lines) then "" else nsp-carry-line(owner, lx-strip(head(lines)), tail(lines));
+  def nsp-carry-line(owner, line, rest) {
+   let isPrelude = or(lx-at?(line, 0, "// preludes:"), lx-at?(line, 0, "; preludes:"));
+   let here = if isPrelude then nsp-dependencies(owner, nsp-words(substring(line, if lx-at?(line, 0, "//") then 12 else 11, str_len(line)))) else nsp-import(owner, line);
+   let more = nsp-carried(owner, rest);
+   if or(nothing?(here), nothing?(more)) then nothing() else str_concat(here, more);
+  }
+  def nsp-import(owner, line) {
+   let end = if str_eq(substring(line, sub(str_len(line), 1), str_len(line)), ";") then sub(str_len(line), 1) else str_len(line);
+   if not(lx-at?(line, 0, "import ")) then "" else nsp-import-path(owner, json-string-value(parse-json("source-import", lx-strip(substring(line, 7, end)))));
+  }
+  def nsp-import-path(owner, path) = if nothing?(path) then nothing() else nsp-dependency(owner, path, list());
+  def nsp-lower(owner, source) {
+   let carried = nsp-carried(owner, lx-lines(source));
+   let lowered = form-source-compile-text(source, owner);
+   if or(nothing?(carried), or(nothing?(lowered), str_eq(lowered, ""))) then nothing() else str_concat(carried, lowered);
+  }
+  // [selected path, result]. Plain source stays at its own path so relative
+  // imports retain their owner. Only BML needs a temporary proof input.
+  def nsp-prepare(sourcePath, temporaryPath) {
+   let source = read_file(sourcePath);
+   if nothing?(source) then list("source-unavailable", 0)
+   else if lt(fsc-find-section-open(source, 0), 0) then list(sourcePath, 1)
+   else if str_eq(sourcePath, temporaryPath) then list("temporary-path-is-source", 0)
+   else nsp-publish(temporaryPath, nsp-lower(sourcePath, source));
+  }
+  def nsp-publish(path, lowered) {
+   if nothing?(lowered) then list("lowering-unavailable", 0) else nsp-write(path, lowered);
+  }
+  def nsp-write(path, lowered) {
+   let wrote = write_file(path, lowered);
+   if and(eq(wrote, str_len(lowered)), str_eq(read_file(path), lowered)) then list(path, 1) else list("proof-input-write-failed", 0);
+  }
+ }
+ 0;
+}
