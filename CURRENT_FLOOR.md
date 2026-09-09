@@ -1121,6 +1121,32 @@ anyone last gave it. `current` says a frame parsed and named its publisher; it
 never said recent. Time is the only thing that separates a voice from an echo,
 and now every slot carries it.
 
+**Alive is movement, not recency — and what is MEANT to move is declared.** Two
+censuses a window apart, and a slot whose stamp advanced spoke inside it:
+`fgx-beating` / `fgx-still`, no cadence known to anyone. The reading is
+one-sided and says so — movement proves alive, stillness proves nothing until
+the window is wider than the cadence being asked about, and the stamp is
+milliseconds, so two gives inside one millisecond leave it unmoved (witnessed:
+the same publisher read `1788934128031` across two gives and moved to `…035`
+only once three milliseconds stood between the censuses).
+
+Stillness alone can never separate a band that published once and finished from
+an organ that was meant to keep giving and stopped, because the difference is
+not in the evidence — it is **intent**, and intent is declared by the one who
+holds it. `form-glass-standing.bml` holds that declaration and nothing else: a
+publisher, the cadence it promises, and the cell that gives it, every row taken
+from the giving cell's own words. An organ quiet past its own window reads
+`stopped` — the one reading here that is a wound — and names the door that
+gives it. **A publisher that never promised is never called stopped.**
+`observe/membrane-heartbeat-run.fk` asks both questions and keeps them apart;
+its answer is the count of unkept promises. standing 63, crossings 16383.
+
+Read live on this host: 135 slots, three moving in a three-second window. The
+declaration found `choices` **stopped — silent 169,857 s (47.2 hours) against
+its own promised 3 s window**, naming `observe/form-choice-flow-live.fk`, which
+was not running. It is running again, and the same door now reads two kept
+promises and zero unkept, with `choices` among the moving.
+
 **The glass names its own hot path, and the JIT declines its shape.** Read from
 a standing glass's own page: the top sixty-four recipes carry **172 million
 dispatches**, of which **one** is crystallized, 39 are still walking and 24 were
