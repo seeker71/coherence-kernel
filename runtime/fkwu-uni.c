@@ -11557,14 +11557,19 @@ static long long fk_live_read_words(const char *name, long long *out, long long 
 }
 /* ---- the publisher roster: names of every gift frame that carries a snapshot, 511 slots of 128 bytes (a name is root, a bar, publisher; up to 119 bytes) ---- */
 #define FK_ROSTER_SLOTS 511
-/* The roster is 511 slots and there is no door to give a slot back: a band or a
- * short-lived publisher registers once and its name stands until reboot. So the
- * slot's timestamp is what it always looked like -- when this name last SPOKE --
- * and it is refreshed on every register, which a live publisher does every
- * publish. When the roster is full the least recently spoken slot is taken.
- * Nothing alive is displaced: a publisher that is still giving is, by
- * definition, not the oldest. Before this the roster filled and refused
- * silently, and every publisher after the 511th was simply never listed. */
+/* A slot's timestamp is when this name last SPOKE, refreshed on every register,
+ * which a live publisher does every publish. When the roster is full the least
+ * recently spoken slot is taken; nothing alive is displaced, because a
+ * publisher that is still giving is, by definition, not the oldest.
+ *
+ * A name stands after its process ends, and that is the carrier's contract, not
+ * a leak: shared memory outlives the giver, so a frame published an hour ago is
+ * still there to be read. What separates a giver from a frame merely standing
+ * is TIME, and the roster is the only place that time is kept for every slot --
+ * a malformed or non-snapshot frame has no epoch of its own to ask. So the
+ * roster hands its stamp back with every name: a roster row is (name
+ * lastSpokeMs), and a reader tells the living from the standing without opening
+ * a single frame. The BOUND stays the reader's; only the fact is published. */
 static long long fk_roster_register(const char *name) {
     long long gh = fk_gift_open("/fg-roster", 65536, 1);
     if (gh == fk_nothing) { return -1; }
@@ -11602,7 +11607,11 @@ static long long fk_roster_names(void) {
     long long k = FK_ROSTER_SLOTS - 1;
     while (k >= 0) {
         char *slot = base + k * 128;
-        if (slot[0] != 0) { l = fk_cons_val(fk_sbuf(slot, fk_cstrlen(slot)), l); }
+        if (slot[0] != 0) {
+            long long at = *(long long *)(slot + 120);
+            long long row = fk_cons_val(fk_sbuf(slot, fk_cstrlen(slot)), fk_cons_val(at << 1, 1));
+            l = fk_cons_val(row, l);
+        }
         k = k - 1;
     }
     munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
@@ -13606,6 +13615,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_roster_register(nm166) << 1;
     }
     if (t == 167) {
+        /* gift_roster_names: a row per standing slot, (name lastSpokeMs) */
         return fk_roster_names();
     }
     if (t == 168) {
