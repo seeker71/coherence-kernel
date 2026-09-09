@@ -1,4 +1,4 @@
-; ear-tongue-native.fk — the ear's tongue lane, the body's own: woken by the segment bell, it takes
+; ear-tongue-native.fk — the ear's tongue lane, the body's own: draining the segment spool, it takes
 ; each line the live lane hands it — the live line while it grows, the closed line when it ends —
 ; and offers the tongues not heard through the native llama lane (ear-tongue). The tongues ride
 ; one batched decode (dense-multi: every tongue its own sequence and KV bank, one pass over the
@@ -15,20 +15,18 @@
 ; what each KV bank holds) is opened once and carried line to line.
 ;
 ; The three things the closed line does not wait for, each of them a measured number:
-;   - the lane forks nothing after its first decode step (the bell stands beside it, at open);
+;   - the lane forks nothing; a 20 ms native idle wait checks owner and deadline;
 ;   - a live round is abandoned the chunk after the line it renders has closed, so a closed line
 ;     waits at most one chunk for a round already in flight and not a whole round;
 ;   - a line every tongue has already finished saying lands its frame from what is in hand.
 ; `ear.said` — closed line to tongues — was 1464 ms and 650 ms on the two lines of one feed and is
 ; 557 ms and 0 ms on the same feed (observe/ear-tongue-feed.fk, observe/ear-tongue-said.fk).
-; stdin line 1: run seconds; line 2: the tongues, whisper codes (blank -> "en pt fa id").
+; stdin: run seconds; tongues, whisper codes (blank -> "en pt fa id"); optional owner lease.
 ; preflight-exec: forbidden
-; preludes: form/form-stdlib/ear-tongue.fk form/form-stdlib/spool-bell-transport.fk form/form-stdlib/hearth.bml form/form-stdlib/line-grammar.fk
+; preludes: form/form-stdlib/ear-tongue.fk form/form-stdlib/spool-bell-transport.fk form/form-stdlib/hearth.bml form/form-stdlib/line-grammar.fk form/form-stdlib/bml/ear-worker-life.bml form/form-stdlib/bml/ear-translation-flow.bml
 (do
     (defn tl-spool () ".hearth/ear.spool")
-    (defn tl-bell () ".hearth/ear.spool.bell")
     (defn tl-segs () ".hearth/ear.spool.segments")
-    (defn tl-segbell () ".hearth/ear.spool.seg.bell")
     ; new ids a live round may generate past the committed prefix; a closed line runs to its end
     (defn tl-live-new () 12)
     (defn tl-closed-new () 32)
@@ -37,12 +35,7 @@
     (defn tl-text (t) (if (nothing? t) "" t))
     (defn tl-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (tl-cat (tail xs)))))
     (defn tl-nl () (byte_to_str 10))
-    ; The lane does NOT ring its own bell. A fork costs the page tables the forking process has
-    ; TOUCHED: 3.4 ms before the weights are opened, 3.6 ms after they are mapped, 100 ms once the
-    ; decode has walked the blob (observe/ear-tongue-fork-cost.fk). A shell per frame cost this lane
-    ; 100 ms where its four decode steps cost 60. `observe/ear-tongue-ring.fk` stands at open, before
-    ; the first step, and rings from a process that never touches a weight.
-    (defn tl-stand-bell (secs) (host-exec (tl-cat (list "( echo " (int_to_str secs) " | tools/ftimeout " (int_to_str (add secs 30)) " ./fkwu observe/ear-tongue-ring.fk ) >/dev/null 2>&1 &")) ""))
+    ; The spool is authoritative. No detached ring or timer process owns its liveness.
     (defn tl-kv (k v) (tl-cat (list k "=" v (tl-nl))))
     (defn tl-known? (l) (et-known? l))
     (defn tl-from (lang) (if (tl-known? lang) lang "en"))
@@ -65,11 +58,12 @@
             (str_concat (do (let d (tl-d-of (head ts) tend)) (if (eq (str_len d) 0) "" (tl-kv (str_concat "d_" (head (head ts))) d)))
                         (tl-ds-fields (tail ts) tend))))
     ; a frame of renderings: said when the line closed, saying while it grows; saidms from the line's last sample
-    (defn tl-emit (kind heard lang tend codes ts)
-        (sbt-append (tl-spool) (tl-cat (list "<|ear:frame|>" (tl-nl) (tl-kv "t" (int_to_str (now_unix_ms))) (tl-kv "kind" kind) (tl-kv "heard" heard) (tl-kv "lang" lang) (tl-kv "nsp" "0") (tl-kv "heardms" "0") (tl-kv "tend" (int_to_str tend)) (tl-kv "en" (tl-ts-text ts "en")) (tl-kv "fa" (tl-ts-text ts "fa")) (tl-kv "pt" (tl-ts-text ts "pt")) (tl-kv "tongues" (tl-join codes)) (tl-ts-fields ts) (tl-ds-fields ts tend) (tl-kv "saidms" (int_to_str (sub (now_unix_ms) tend))) "<|/ear:frame|>" (tl-nl)))))
+    (defn tl-emit (kind heard lang tend codes ts deadline)
+        (if (not (ewl-running? deadline)) 0
+        (sbt-append (tl-spool) (tl-cat (list "<|ear:frame|>" (tl-nl) (tl-kv "t" (int_to_str (now_unix_ms))) (tl-kv "kind" kind) (tl-kv "heard" heard) (tl-kv "lang" lang) (tl-kv "nsp" "0") (tl-kv "heardms" "0") (tl-kv "tend" (int_to_str tend)) (tl-kv "en" (tl-ts-text ts "en")) (tl-kv "fa" (tl-ts-text ts "fa")) (tl-kv "pt" (tl-ts-text ts "pt")) (tl-kv "tongues" (tl-join codes)) (tl-ts-fields ts) (tl-ds-fields ts tend) (tl-kv "saidms" (int_to_str (sub (now_unix_ms) tend))) "<|/ear:frame|>" (tl-nl))))))
     ; what a tongue forces this round: what was committed, or the whole previous rendering when the source
     ; is the one it already rendered (a closed line paying only what the live cap left)
-    (defn tl-forced (s text) (if (str_eq text (nth s 4)) (nth s 2) (nth s 1)))
+    (defn tl-forced (s text) (etf-forced (nth s 4) text (nth s 1) (nth s 2)))
     ; ---- the serial path: one tongue over the line as it stands: (lane ts changed). The heard tongue is its
     ; own text; a source already rendered costs nothing while the line grows. ----
     ; the clock a tongue's rendering stopped at: kept while it is still the same source, taken now
@@ -143,15 +137,16 @@
     ; text is final. `mark` is where the lane's reading of the segments stands; a mark below zero
     ; means never look (the closed line's own round runs to its end).
     (defn tm-closed-waits? (mark) (if (lt mark 0) 0 (if (eq (head (tl-peek mark)) 2) 1 0)))
-    (defn tm-round-go (ml ts codes lang text forceds seqs s maxnew tend mark)
+    (defn tm-round-go (ml ts codes lang text forceds seqs s maxnew tend mark deadline)
+        (if (not (ewl-running? deadline)) (list (et-mround-close ml seqs s) ts)
         (do (let r (et-mround-go ml seqs s (tl-chunk) maxnew))
             (let tx (tm-texts ml ts codes lang text forceds (et-mgens (head r)) (et-mends (head r)) 0 1))
-            (let e (if (eq (nth tx 1) 1) (tl-emit "saying" text lang tend codes (head tx)) 0))
+            (let e (if (eq (nth tx 1) 1) (tl-emit "saying" text lang tend codes (head tx) deadline) 0))
             ; the round ends at the chunk every tongue is done in — the frame no longer waits on a
             ; sequence whose remaining tokens the cut will discard
             (if (or (eq (nth tx 2) 1) (or (eq (nth r 2) 1) (eq (tm-closed-waits? mark) 1)))
                 (list (et-mround-close ml (head r) (nth r 1)) (tm-agree ml (head tx) codes lang text forceds (et-mgens (head r)) (et-mends (head r))))
-                (tm-round-go ml (head tx) codes lang text forceds (head r) (nth r 1) maxnew tend mark))))
+                (tm-round-go ml (head tx) codes lang text forceds (head r) (nth r 1) maxnew tend mark deadline)))))
     ; a round's arrivals belong to the source it renders: a tongue whose stamp was taken against an
     ; earlier text starts this round unarrived, and one still rendering the same text keeps the clock
     ; it already reached, so a chunk never re-stamps what already landed
@@ -159,8 +154,8 @@
         (if (eq (len codes) 0) ts
             (do (let s (tl-ts-get ts (head codes)))
                 (tm-reset (if (str_eq text (nth s 4)) ts (tl-ts-put ts (list (head codes) (nth s 1) (nth s 2) (nth s 3) (nth s 4) (nth s 5) 0))) (tail codes) text))))
-    (defn tm-round (ml ts codes lang text maxnew tend mark)
-        (tm-round-go ml (tm-reset ts codes text) codes lang text (tm-forceds ts codes text) (et-mround-open ml (tm-idss ml ts codes lang text)) 0 maxnew tend mark))
+    (defn tm-round (ml ts codes lang text maxnew tend mark deadline)
+        (tm-round-go ml (tm-reset ts codes text) codes lang text (tm-forceds ts codes text) (et-mround-open ml (tm-idss ml ts codes lang text)) 0 maxnew tend mark deadline))
     ; ---- the segment lines: "live\t<seg>\t<tend>\t<lang>\t<text>" while a line grows, "<tend>\t<lang>\t<text>" when it closed ----
     (defn tl-live? (line) (and (gt (str_len line) 5) (and (eq (str_byte_at line 0) 108) (and (eq (str_byte_at line 1) 105) (eq (str_byte_at line 4) 9)))))
     (defn tl-cols (line i acc) (do (let a (str_find line (byte_to_str 9) i)) (if (lt a 0) (reverse (cons (substring line i (str_len line)) acc)) (tl-cols line (add a 1) (cons (substring line i a) acc)))))
@@ -187,12 +182,12 @@
     ; has not spoken. Measured 524 ms -> 1079 ms said, and the tongues themselves worse.
     ; the live line through every tongue, again while it keeps changing: (lane seg ts mark)
     (defn tl-cycle (lane codes seg ts src mark queue dirty deadline)
-        (if (gt (now_unix_ms) deadline) (list lane seg ts mark)
+        (if (not (ewl-running? deadline)) (list lane seg ts mark)
             (if (eq (len queue) 0) (if (eq dirty 1) (tl-cycle lane codes seg ts src mark codes 0 deadline) (list lane seg ts mark))
                 (do (let s (if (eq (tl-mode lane) 1)
-                               (do (let r (tm-round (tl-st lane) ts codes (nth src 2) (nth src 3) (tl-live-new) (nth src 1) mark)) (list (tl-with lane (head r)) (nth r 1) 0))
+                               (do (let r (tm-round (tl-st lane) ts codes (nth src 2) (nth src 3) (tl-live-new) (nth src 1) mark deadline)) (list (tl-with lane (head r)) (nth r 1) 0))
                                (do (let r (tl-step (tl-st lane) ts (head queue) (nth src 2) (nth src 3) (tl-live-new) 0)) (list (tl-with lane (head r)) (nth r 1) (nth r 2)))))
-                    (let e (if (eq (nth s 2) 1) (tl-emit "saying" (nth src 3) (nth src 2) (nth src 1) codes (nth s 1)) 0))
+                    (let e (if (eq (nth s 2) 1) (tl-emit "saying" (nth src 3) (nth src 2) (nth src 1) codes (nth s 1) deadline) 0))
                     (let rest (if (eq (tl-mode lane) 1) (list) (tail queue)))
                     (let p (tl-peek mark))
                     (if (eq (head p) 2) (list (head s) seg (nth s 1) mark)
@@ -210,17 +205,17 @@
             (do (let s (tl-ts-get ts (head codes)))
                 (if (and (str_eq text (nth s 4)) (eq (nth s 5) 1)) (tl-all-said? ts (tail codes) text) 0))))
     ; the closed line through every tongue from what the live renderings hold, then the said frame: (lane ts-said)
-    (defn tl-closed-go (lane codes ts tend lang text queue)
+    (defn tl-closed-go (lane codes ts tend lang text queue deadline)
         (if (eq (tl-all-said? ts codes text) 1)
-            (do (let e (tl-emit "said" text lang tend codes ts)) (list lane ts))
+            (do (let e (tl-emit "said" text lang tend codes ts deadline)) (list lane ts))
             (if (eq (tl-mode lane) 1)
-                (do (let r (tm-round (tl-st lane) ts codes lang text (tl-closed-new) tend (sub 0 1)))
-                    (let e (tl-emit "said" text lang tend codes (nth r 1)))
+                (do (let r (tm-round (tl-st lane) ts codes lang text (tl-closed-new) tend (sub 0 1) deadline))
+                    (let e (tl-emit "said" text lang tend codes (nth r 1) deadline))
                     (list (tl-with lane (head r)) (nth r 1)))
-                (if (eq (len queue) 0) (do (let e (tl-emit "said" text lang tend codes ts)) (list lane ts))
+                (if (or (eq (len queue) 0) (not (ewl-running? deadline))) (do (let e (tl-emit "said" text lang tend codes ts deadline)) (list lane ts))
                     (do (let s (tl-step (tl-st lane) ts (head queue) lang text (tl-closed-new) 1))
-                        (let e (if (eq (nth s 2) 1) (tl-emit "saying" text lang tend codes (nth s 1)) 0))
-                        (tl-closed-go (tl-with lane (head s)) codes (nth s 1) tend lang text (tail queue)))))))
+                        (let e (if (eq (nth s 2) 1) (tl-emit "saying" text lang tend codes (nth s 1) deadline) 0))
+                        (tl-closed-go (tl-with lane (head s)) codes (nth s 1) tend lang text (tail queue) deadline))))))
     ; the last line said, (lang text ts): the same line closed again lands its frame without paying
     (defn tl-same-said? (last lang text) (and (gt (len last) 0) (and (str_eq (head last) lang) (str_eq (nth last 1) text))))
     ; a line that is only whisper's mark for what is not speech is shown as it is, never offered
@@ -229,6 +224,7 @@
     ; the lines past the mark in order: a closed line is said (the live lines before it are behind it), the
     ; newest live line after the last closed one is cycled: (done lane seg ts mark last)
     (defn tl-lines (lane codes seg ts lines pend mark deadline last)
+        (if (not (ewl-running? deadline)) (list 1 lane seg ts mark last)
         (if (eq (len lines) 0)
             (if (or (eq (len pend) 0) (eq (et-tag? (nth pend 3)) 1)) (list 0 lane seg ts mark last)
                 (do (let seg1 (head pend))
@@ -239,41 +235,43 @@
                     (if (tl-live? (head lines)) (tl-lines lane codes seg ts (tail lines) (tl-live-of (head lines)) mark deadline last)
                         (do (let c (tl-closed-of (head lines)))
                             (if (tl-same-said? last (nth c 1) (nth c 2))
-                                (do (let e (tl-emit "said" (nth c 2) (nth c 1) (head c) codes (nth last 2)))
+                                (do (let e (tl-emit "said" (nth c 2) (nth c 1) (head c) codes (nth last 2) deadline))
                                     (tl-lines lane codes (sub 0 1) (tl-fresh codes) (tail lines) (list) mark deadline last))
                                 (if (eq (et-tag? (nth c 2)) 1)
                                     (do (let tts (tl-tag-ts codes (nth c 2)))
-                                        (let e (tl-emit "said" (nth c 2) (nth c 1) (head c) codes tts))
+                                        (let e (tl-emit "said" (nth c 2) (nth c 1) (head c) codes tts deadline))
                                         (tl-lines lane codes (sub 0 1) (tl-fresh codes) (tail lines) (list) mark deadline (list (nth c 1) (nth c 2) tts)))
-                                    (do (let r (tl-closed-go lane codes ts (head c) (nth c 1) (nth c 2) codes))
-                                        (tl-lines (head r) codes (sub 0 1) (tl-fresh codes) (tail lines) (list) mark deadline (list (nth c 1) (nth c 2) (nth r 1))))))))))))
+                                    (do (let r (tl-closed-go lane codes ts (head c) (nth c 1) (nth c 2) codes deadline))
+                                        (tl-lines (head r) codes (sub 0 1) (tl-fresh codes) (tail lines) (list) mark deadline (list (nth c 1) (nth c 2) (nth r 1)))))))))))))
     (defn tl-loop (lane codes seg ts mark deadline last)
-        (if (gt (now_unix_ms) deadline) 0
+        (if (or (not (ewl-running? deadline)) (ge (file_size ".hearth/ear.spool.stop") 0)) 0
             (do (let sz (file_size (tl-segs)))
                 (if (le sz mark)
-                    (do (let woke (sbt-bell-wait (tl-segbell))) (tl-loop lane codes seg ts mark deadline last))
+                    (do (let woke (ewl-rest)) (tl-loop lane codes seg ts mark deadline last))
                     (do (let text (tl-text (read_file_slice (tl-segs) mark (sub sz mark))))
                         (let r (tl-lines lane codes seg ts (split-on text (tl-nl)) (list) sz deadline last))
                         (if (eq (head r) 1) 0 (tl-loop (nth r 1) codes (nth r 2) (nth r 3) (nth r 4) deadline (nth r 5))))))))
     ; a door feeds these; a sensor stands the lane with no stdin at all, and it stands until it is stopped
     (defn tl-first-line () (do (let l (read_line)) (if (nothing? l) "" (trim l))))
-    (let secs (do (let l (tl-first-line)) (if (eq (str_len l) 0) 86400 (str_to_int l))))
     ; a sensor has no stdin to hand the tongues through, so the marker that wants the ear carries
     ; them: .hearth/ear.wanted is the same text a door would have typed. stdin still wins when a
     ; door feeds it; the fixed four are the floor when neither speaks.
     (defn tl-wanted () (if (lt (file_size ".hearth/ear.wanted") 0) "" (trim (tl-text (read_file ".hearth/ear.wanted")))))
     (defn tl-codes-text (l) (if (gt (str_len l) 0) l (tl-codes-marker (tl-wanted))))
     (defn tl-codes-marker (w) (if (gt (str_len w) 0) w "en pt fa id"))
-    (let codes (split-on (tl-codes-text (tl-first-line)) " "))
+    (defn tl-start (secs codes owner) (do
     ; the mark is taken before the lane opens: a line the live lane hands over while the model loads is not lost
     (let mark (if (lt (file_size (tl-segs)) 0) 0 (file_size (tl-segs))))
     (let t0 (now_unix_ms))
-    ; the bell and the patience are forked HERE, before a weight is touched, where a fork is 3.4 ms
-    ; instead of 100 (observe/ear-tongue-fork-cost.fk). After this line the lane forks nothing.
-    (let bell (tl-stand-bell (add secs 60)))
-    (let patience (host-exec (tl-cat (list "( sleep " (int_to_str (add secs 60)) "; printf x > " (tl-segbell) " ) >/dev/null 2>&1 &")) ""))
+    ; No detached bell or timer: the native wait checks both deadline and owner.
     ; the batched lane, one sequence a tongue; the serial lane when the file sits outside its radius
     (let ml (et-mlane-open (len codes)))
     (let lane (if (et-mlane-ok? ml) (list 1 ml) (list 0 (et-lane-open))))
     (let opened (print_str (tl-cat (list "tongue lane open at " (int_to_str (now_unix_ms)) " after " (int_to_str (sub (now_unix_ms) t0)) " ms, mark " (int_to_str mark) (if (eq (tl-mode lane) 1) ", batched" ", serial")))))
-    (tl-loop lane codes (sub 0 1) (tl-fresh codes) mark (add (now_unix_ms) (mul 1000 (add secs 60))) (list)))
+    (let finished (tl-loop lane codes (sub 0 1) (tl-fresh codes) mark (ewl-session (add (now_unix_ms) (mul 1000 (add secs 60))) owner) (list)))
+    (print "ear tongue: stopped")
+    0))
+    (let secs (do (let l (tl-first-line)) (if (eq (str_len l) 0) 86400 (str_to_int l))))
+    (let codes (split-on (tl-codes-text (tl-first-line)) " "))
+    (let owner (tl-first-line))
+    (if (ewl-owned? owner) (tl-start secs codes owner) (print "ear tongue: owner retired before admission")))

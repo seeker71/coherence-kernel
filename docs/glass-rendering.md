@@ -68,3 +68,36 @@ publication, not readback. A refused write still reads the prior shared frame
 with its original age. This removes a per-frame encode/decode round trip without
 changing the published frame or external readers. The pure local-publication
 band (`form/form-stdlib/tests/form-glass-local-publication-band.fk`) returns 255.
+
+## Stable, locally owned transcripts
+
+The ear retains one latest original and translation per language, not an
+ever-growing transcript history. Quiet frames leave that text in place. A
+growing heartbeat with unchanged words keeps its source timestamp; corrections
+replace words, and a newer final replaces its partial. Older source timestamps
+cannot rewind a newer slot. Each selected language occupies five terminal rows,
+including its heading, so wrapping and partial/final transitions do not push
+other languages around. Evidence and partial/final labels remain visible.
+
+The sensor passes a checkout-local owner lease through the workers' native
+stdin file. The input is three lines: duration, language codes, owner token.
+Empty duration/languages use existing defaults; an empty owner supports bounded
+standalone callers. A worker checks its owner before model admission, between
+model rounds and before publishing translations. Retirement ends it without
+writing a `done` marker into its successor's segment stream. The model workers
+spawn no bell, shell or timer processes: a 20 ms native idle wait checks the
+authoritative spool, deadline and owner. This interval is not an end-to-end
+latency promise; model and scheduler time remain separate.
+
+An agreed translation prefix is reused for an extending source. A correction
+to earlier source words discards that forced prefix so the translation can
+correct itself. This does not establish general translation accuracy.
+
+```text
+./fkwu form/form-stdlib/tests/ear-transcript-flow-band.fk  # 65535
+./fkwu form/form-stdlib/tests/form-glass-meaning-ui-band.fk  # 8191
+```
+
+These bands use synthetic rows and do not open a microphone or publish a live
+frame. Live inspection should retain only counts, ages and stage timings in
+receipts, never captured speech.
