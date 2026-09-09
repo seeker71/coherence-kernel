@@ -1,5 +1,13 @@
 # Repair by witnessed replacement
 
+Native authoring is ours to carry, including temporary helpers, measurements,
+generators and migrations. `heal guide` reads current Python detours;
+`heal guide|<command>` offers a local Form reference and witness without running
+the command. Use the reference where it fits, or build and observe the native
+equivalent, update callers, and retire the former implementation. Urs does not
+need to repeat this direction or approve it again. The practice lives in
+[the native authoring guide](../docs/native-authoring-guide.md).
+
 Source: Codex's 2026-09-07 repair movement, retained in
 `receipts/2026-09-07-declarative-attention-and-source-repair.md` and its
 verification JSON. These are observations with a date, not universal rules.

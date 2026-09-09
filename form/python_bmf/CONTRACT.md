@@ -30,7 +30,7 @@ wire/metadata carrier at this boundary.
 ```sh
 python3 -m unittest discover -s form/python_bmf/tests -v
 python3 form/scripts/verify_kernel_conformance.py
-python3 form/scripts/verify_category_contract.py
+./fkwu gate/category-contract.bml
 ```
 
 The conformance command invokes the real Go, Rust, and TypeScript public CLIs.
