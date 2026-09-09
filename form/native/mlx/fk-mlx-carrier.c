@@ -11,9 +11,11 @@
  *
  *   sub neg sigmoid silu swiglu tanh gelu mean rmsnorm layernorm
  *   l2norm softmax scale axpy recip square
- *   pow mod shift select clamp rope-pair              (added 2026-08-24)
+ *   pow mod shift select clamp rope-pair attn         (rope-pair and attn
+ *                                                      claimed here since 2026-08-25 and only
+ *                                                      WRITTEN 2026-09-09 -- see mlx-derived.fk)
  *
- * all of those are Form-emitted graphs over the twenty-four forms below.
+ * all of those are Form-emitted graphs over the twenty-seven forms below.
  * `sub` used to live here and was retired on 2026-08-24 to prove the law cuts
  * both ways — a carrier row is not kept because it is convenient. The law cuts
  * a third way too, and that one took longest to see: a row can be lost without
@@ -21,7 +23,7 @@
  * went out in the 2026-08-25 consolidation as collateral — restored 2026-09-09
  * only because someone asked why its band was still red.
  *
- * THE TWENTY-FOUR, and why each is irreducible:
+ * THE TWENTY-SEVEN, and why each is irreducible:
  *   <int>       push int32 scalar          — the only literal
  *   vN a1..aN   push int32 vector          — the only shaped literal
  *   f32 / i32   astype                     — dtype is not computable
@@ -55,6 +57,14 @@
  *                                            a computation, it is a DOOR, and
  *                                            it is what makes this a generation
  *                                            lane instead of a calculator
+ *   q8 / q4k / q6k <path> <off> <r> <c>    — the same door at the quantized
+ *                                            tiers, dequantizing on the way in.
+ *                                            f32 tensors are a GGUF's norms; the
+ *                                            weight lives here. Removed by the
+ *                                            same 2026-08-25 consolidation and
+ *                                            restored 2026-09-09 — mlx-q8-band
+ *                                            and mlx-kquant-band had been
+ *                                            reading 49/63 and 53/63 throughout
  *
  * A program lands ONE int32. A float pipeline scales and says `i32` before it
  * ends: the carrier owns no float return path and needs no float parser.
@@ -380,6 +390,354 @@ static int fk_mlx_push_tensor(const char **p, const char *end, mlx_array *st, in
     }
 }
 
+static float fk_mlx_f16(unsigned short h) {
+    int sign = (h >> 15) & 1;
+    int exp = (h >> 10) & 0x1f;
+    int mant = h & 0x3ff;
+    float v;
+    if (exp == 0) {
+        v = (float)mant * 5.9604644775390625e-8f;   /* 2^-24, the subnormal step */
+    } else if (exp == 31) {
+        v = 0.0f;                                   /* no finite value to carry */
+    } else {
+        float m = 1.0f + (float)mant / 1024.0f;
+        int e = exp - 15;
+        float scale = 1.0f;
+        int k = 0;
+        if (e > 0) {
+            while (k < e) { scale = scale * 2.0f; k = k + 1; }
+        } else {
+            while (k > e) { scale = scale * 0.5f; k = k - 1; }
+        }
+        v = m * scale;
+    }
+    return sign ? -v : v;
+}
+
+static int fk_mlx_q4k_scale(const unsigned char *sc, int j) {
+    if (j < 4) {
+        return sc[j] & 63;
+    }
+    return (sc[j + 4] & 15) | ((sc[j - 4] >> 6) << 4);
+}
+
+static int fk_mlx_q4k_minv(const unsigned char *sc, int j) {
+    if (j < 4) {
+        return sc[j + 4] & 63;
+    }
+    return (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
+}
+
+
+/* q8 / q4k / q6k <path> <off> <r> <c> — THE QUANTIZED TIERS, where the weight lives.
+ *
+ * `tf32` above reads the f32 tensors, which in a real GGUF are the norms — a few thousand floats out
+ * of billions. Everything that matters by volume is quantized, so a lane that can only reach f32 can
+ * read a model's punctuation and not its words. These three dequantize on the way in: a Q8_0 block is
+ * 34 bytes (an f16 scale and 32 int8 weights), Q4_K and Q6_K are the 144- and 210-byte superblocks
+ * whose arithmetic q6k-dequant.fk carries four-way, and the reference for all three is the body's own
+ * transcription, not a library's.
+ *
+ * They are file doors, so they earn their rows the same way tf32 does — no graph over the other
+ * tokens names a byte offset — and they were removed by the same 2026-08-25 consolidation, for the
+ * same reason: collateral, not law. mlx-q8-band and mlx-kquant-band have been reading 49/63 and 53/63
+ * ever since, which is the shape a partial score always has (row 1385 `namedaway`): high enough to
+ * look like a rough edge, never low enough to get opened.
+ *
+ * Restored under their ORIGINAL names, not renamed like tf32, because nothing in the current
+ * vocabulary collides with them — and because two bands written against the old carrier then go green
+ * UNTOUCHED, which is a stronger proof the restoration is faithful than any edit I could make to them.
+ *
+ * A SHORT READ IS A REFUSAL here too, and so is a shape that is not a whole number of blocks: a
+ * partial superblock has no honest reading, and rounding one would hand the GPU a tensor whose tail is
+ * whatever malloc last held. */
+static int fk_mlx_push_q8(const char **p, const char *end, mlx_array *st, int *sp) {
+    int rc = 0;
+    char path[512];
+    char tok[64];
+    long long off = 0;
+    long long r = 0;
+    long long c = 0;
+    long long n = 0;
+    long long blocks = 0;
+    unsigned char *raw = 0;
+    float *data = 0;
+    FILE *f = 0;
+    size_t got = 0;
+    long long bi = 0;
+    if (!fk_mlx_tok(p, end, path, 512)) {
+        fk_mlx_seterr("q8 needs a path");
+        return -1;
+    }
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q8 needs a byte offset");
+        return -1;
+    }
+    off = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q8 needs rows");
+        return -1;
+    }
+    r = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q8 needs cols");
+        return -1;
+    }
+    c = atoll(tok);
+    n = r * c;
+    if (r < 1 || c < 1 || n > FK_MLX_TENSOR_CAP || off < 0) {
+        fk_mlx_seterr("q8 shape out of range");
+        return -1;
+    }
+    if ((n % 32) != 0) {
+        /* A Q8_0 block is 32 weights. A shape that is not a whole number of
+         * blocks has no honest reading, so it is refused rather than rounded. */
+        fk_mlx_seterr("q8 shape is not a whole number of 32-weight blocks");
+        return -1;
+    }
+    blocks = n / 32;
+    f = fopen(path, "rb");
+    if (f == 0) {
+        fk_mlx_seterr("q8 cannot open path");
+        return -1;
+    }
+    raw = (unsigned char *)malloc((size_t)blocks * 34);
+    data = (float *)malloc((size_t)n * sizeof(float));
+    if (raw == 0 || data == 0) {
+        free(raw);
+        free(data);
+        fclose(f);
+        fk_mlx_seterr("q8 out of memory");
+        return -1;
+    }
+    if (fseek(f, (long)off, SEEK_SET) != 0) {
+        free(raw);
+        free(data);
+        fclose(f);
+        fk_mlx_seterr("q8 cannot seek to offset");
+        return -1;
+    }
+    got = fread(raw, 1, (size_t)blocks * 34, f);
+    fclose(f);
+    if (got != (size_t)blocks * 34) {
+        free(raw);
+        free(data);
+        fk_mlx_seterr("q8 file is shorter than the shape asked for");
+        return -1;
+    }
+    while (bi < blocks) {
+        const unsigned char *b = raw + bi * 34;
+        unsigned short hb = (unsigned short)(b[0] | (b[1] << 8));
+        float d = fk_mlx_f16(hb);
+        int j = 0;
+        while (j < 32) {
+            signed char q = (signed char)b[2 + j];
+            data[bi * 32 + j] = d * (float)q;
+            j = j + 1;
+        }
+        bi = bi + 1;
+    }
+    free(raw);
+    {
+        int shape[2];
+        shape[0] = (int)r;
+        shape[1] = (int)c;
+        rc = fk_mlx_push(mlx_array_new_data(data, shape, 2, MLX_FLOAT32), st, sp);
+    }
+    free(data);
+    return rc;
+}
+
+static int fk_mlx_push_q4k(const char **p, const char *end, mlx_array *st, int *sp) {
+    int rc = 0;
+    char path[512];
+    char tok[64];
+    long long off = 0, r = 0, c = 0, n = 0, blocks = 0, bi = 0;
+    unsigned char *raw = 0;
+    float *data = 0;
+    FILE *f = 0;
+    size_t got = 0;
+    if (!fk_mlx_tok(p, end, path, 512)) {
+        fk_mlx_seterr("q4k needs a path");
+        return -1;
+    }
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q4k needs a byte offset");
+        return -1;
+    }
+    off = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q4k needs rows");
+        return -1;
+    }
+    r = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q4k needs cols");
+        return -1;
+    }
+    c = atoll(tok);
+    n = r * c;
+    if (r < 1 || c < 1 || n > FK_MLX_TENSOR_CAP || off < 0) {
+        fk_mlx_seterr("q4k shape out of range");
+        return -1;
+    }
+    if ((n % 256) != 0) {
+        fk_mlx_seterr("q4k shape is not a whole number of 256-weight superblocks");
+        return -1;
+    }
+    blocks = n / 256;
+    f = fopen(path, "rb");
+    if (f == 0) {
+        fk_mlx_seterr("q4k cannot open path");
+        return -1;
+    }
+    raw = (unsigned char *)malloc((size_t)blocks * 144);
+    data = (float *)malloc((size_t)n * sizeof(float));
+    if (raw == 0 || data == 0) {
+        free(raw); free(data); fclose(f);
+        fk_mlx_seterr("q4k out of memory");
+        return -1;
+    }
+    if (fseek(f, (long)off, SEEK_SET) != 0) {
+        free(raw); free(data); fclose(f);
+        fk_mlx_seterr("q4k cannot seek to offset");
+        return -1;
+    }
+    got = fread(raw, 1, (size_t)blocks * 144, f);
+    fclose(f);
+    if (got != (size_t)blocks * 144) {
+        free(raw); free(data);
+        fk_mlx_seterr("q4k file is shorter than the shape asked for");
+        return -1;
+    }
+    while (bi < blocks) {
+        const unsigned char *b = raw + bi * 144;
+        float d = fk_mlx_f16((unsigned short)(b[0] | (b[1] << 8)));
+        float dmin = fk_mlx_f16((unsigned short)(b[2] | (b[3] << 8)));
+        const unsigned char *sc = b + 4;
+        const unsigned char *qs = b + 16;
+        int i = 0;
+        while (i < 256) {
+            int chunk = i / 64;
+            int within = i - chunk * 64;
+            int hf = within / 32;
+            int l = within - hf * 32;
+            int sidx = 2 * chunk + hf;
+            int qbyte = qs[chunk * 32 + l];
+            int nib = (hf == 0) ? (qbyte & 15) : (qbyte >> 4);
+            int scv = fk_mlx_q4k_scale(sc, sidx);
+            int mnv = fk_mlx_q4k_minv(sc, sidx);
+            data[bi * 256 + i] = (d * (float)scv) * (float)nib - (dmin * (float)mnv);
+            i = i + 1;
+        }
+        bi = bi + 1;
+    }
+    free(raw);
+    {
+        int shape[2];
+        shape[0] = (int)r;
+        shape[1] = (int)c;
+        rc = fk_mlx_push(mlx_array_new_data(data, shape, 2, MLX_FLOAT32), st, sp);
+    }
+    free(data);
+    return rc;
+}
+
+static int fk_mlx_push_q6k(const char **p, const char *end, mlx_array *st, int *sp) {
+    int rc = 0;
+    char path[512];
+    char tok[64];
+    long long off = 0, r = 0, c = 0, n = 0, blocks = 0, bi = 0;
+    unsigned char *raw = 0;
+    float *data = 0;
+    FILE *f = 0;
+    size_t got = 0;
+    if (!fk_mlx_tok(p, end, path, 512)) {
+        fk_mlx_seterr("q6k needs a path");
+        return -1;
+    }
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q6k needs a byte offset");
+        return -1;
+    }
+    off = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q6k needs rows");
+        return -1;
+    }
+    r = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("q6k needs cols");
+        return -1;
+    }
+    c = atoll(tok);
+    n = r * c;
+    if (r < 1 || c < 1 || n > FK_MLX_TENSOR_CAP || off < 0) {
+        fk_mlx_seterr("q6k shape out of range");
+        return -1;
+    }
+    if ((n % 256) != 0) {
+        fk_mlx_seterr("q6k shape is not a whole number of 256-weight superblocks");
+        return -1;
+    }
+    blocks = n / 256;
+    f = fopen(path, "rb");
+    if (f == 0) {
+        fk_mlx_seterr("q6k cannot open path");
+        return -1;
+    }
+    raw = (unsigned char *)malloc((size_t)blocks * 210);
+    data = (float *)malloc((size_t)n * sizeof(float));
+    if (raw == 0 || data == 0) {
+        free(raw); free(data); fclose(f);
+        fk_mlx_seterr("q6k out of memory");
+        return -1;
+    }
+    if (fseek(f, (long)off, SEEK_SET) != 0) {
+        free(raw); free(data); fclose(f);
+        fk_mlx_seterr("q6k cannot seek to offset");
+        return -1;
+    }
+    got = fread(raw, 1, (size_t)blocks * 210, f);
+    fclose(f);
+    if (got != (size_t)blocks * 210) {
+        free(raw); free(data);
+        fk_mlx_seterr("q6k file is shorter than the shape asked for");
+        return -1;
+    }
+    while (bi < blocks) {
+        const unsigned char *ql = raw + bi * 210;
+        const unsigned char *qh = ql + 128;
+        const signed char *scales = (const signed char *)(ql + 192);
+        float d = fk_mlx_f16((unsigned short)(ql[208] | (ql[209] << 8)));
+        int i = 0;
+        while (i < 256) {
+            int h = i / 128;
+            int wi = i - h * 128;
+            int l = wi % 32;
+            int g = wi / 32;
+            int is_ = l / 16;
+            int qlidx = h * 64 + l + (g % 2) * 32;
+            int nib = (g / 2 == 0) ? (ql[qlidx] & 15) : (ql[qlidx] >> 4);
+            int hi = (qh[h * 32 + l] >> (2 * g)) & 3;
+            int q = (nib | (hi << 4)) - 32;
+            int scv = (int)scales[h * 8 + is_ + 2 * g];
+            data[bi * 256 + i] = d * (float)scv * (float)q;
+            i = i + 1;
+        }
+        bi = bi + 1;
+    }
+    free(raw);
+    {
+        int shape[2];
+        shape[0] = (int)r;
+        shape[1] = (int)c;
+        rc = fk_mlx_push(mlx_array_new_data(data, shape, 2, MLX_FLOAT32), st, sp);
+    }
+    free(data);
+    return rc;
+}
+
 static int fk_mlx_push_vec(const char **p, const char *end, int n,
                            mlx_array *st, int *sp) {
     int32_t data[16];
@@ -449,6 +807,18 @@ long long fk_mlx_run_external(const char *src, long long n) {
             }
         } else if (strcmp(tok, "tf32") == 0) {
             if (fk_mlx_push_tensor(&p, end, st, &sp) != 0) {
+                fail = 1;
+            }
+        } else if (strcmp(tok, "q8") == 0) {
+            if (fk_mlx_push_q8(&p, end, st, &sp) != 0) {
+                fail = 1;
+            }
+        } else if (strcmp(tok, "q4k") == 0) {
+            if (fk_mlx_push_q4k(&p, end, st, &sp) != 0) {
+                fail = 1;
+            }
+        } else if (strcmp(tok, "q6k") == 0) {
+            if (fk_mlx_push_q6k(&p, end, st, &sp) != 0) {
                 fail = 1;
             }
         } else if ((applied = fk_mlx_apply(tok, st, &sp, s)) != 1) {
@@ -528,7 +898,7 @@ long long fk_mlx_status_external(char *out, long long cap) {
         "mlx_gpu_available=%s\n"
         "mlx_device=%s\n"
         "mlx_version=%s\n"
-        "mlx_ops=24\n"
+        "mlx_ops=27\n"
         "mlx_dispatch=%lld\n"
         "last_error=%s\n",
         metal ? "true" : "false",

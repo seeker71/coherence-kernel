@@ -46,6 +46,39 @@
     ; softmax(x) = exp(x - rmax x) / sum(exp(x - rmax x))
     (defn mld-softmax () (mld-j "dup rmax" (mld-j (mld-neg) "add exp dup sum div")))
 
+    ; -- attention, composed. The carrier used to carry `attn` as a row calling MLX's FUSED
+    ; scaled_dot_product_attention, and the 2026-08-25 consolidation retired it. That retirement was
+    ; law-consistent — attention IS derivable, softmax(Q·Kᵀ·s)·V over three matmuls and the softmax
+    ; above — but the Form graph it was retired IN FAVOUR OF was never written, so from that day the
+    ; carrier had no `attn` and this file had no replacement, and mlx-home-band scored 137 of 255 with
+    ; nothing anywhere saying a row had gone. The header of fk-mlx-carrier.c even listed `rope-pair`
+    ; among the graphs living here, which was not true either. Both are written now.
+    ;
+    ; What is LOST and what is not: the meaning is identical, the fast path is not. MLX's fused kernel
+    ; does this in one dispatch; this is four. That is the trade the minimum law makes every time, and
+    ; it is worth saying out loud rather than letting "derivable" quietly mean "as fast".
+    ;
+    ; Stack contract: q already on the stack shaped (1,dk) — scores, softmax, then v as (1,dv).
+    (defn mld-attn-scores (kfrag) (mld-j kfrag "matmul"))
+    (defn mld-attn (kfrag vfrag)
+        (mld-j (mld-attn-scores kfrag) (mld-j (mld-softmax) (mld-j vfrag "matmul"))))
+
+    ; -- the RoPE pair rotation, composed from sin/cos and `take`. (x0,x1) by angle a becomes
+    ; (x0·cos a − x1·sin a, x1·cos a + x0·sin a).
+    ;
+    ; The rotation MATRIX cannot be built here — there is no concat, so [[cos,-sin],[sin,cos]] has no
+    ; expression — and the first draft of this recipe tried anyway and died on a reshape. `take` is
+    ; what makes it composable: take(x,[1,0]) is (x1,x0), and multiplied by (-1,1) that is (-x1,x0),
+    ; which is exactly the sin term. So the pair rotation is a gather, two scalar multiplies and an
+    ; add, and it needed no carrier row after all.
+    ;
+    ; PINNED AT A REAL ANGLE, deliberately: at a = 0 this is the identity, so a check at position 0
+    ; proves only that the op exists and would pass over a rotation that does nothing. At a = 1 rad
+    ; with x = (3,4) the sum is 7·cos 1 − sin 1 = 2.9408, and mlx-home-band pins 2940.
+    (defn mld-rope-pair (afrag)
+        (mld-j "dup v2 1 0 take v2 -1 1 f32 mul"
+        (mld-j afrag (mld-j "sin mul swap" (mld-j afrag "cos mul add")))))
+
     ; -- the sixteen witnesses --------------------------------------------
     (defn mld-p-sub () (mld-j "7 3" (mld-j (mld-sub) "i32")))
     (defn mld-p-neg () (mld-j "5" (mld-j (mld-neg) "i32")))
