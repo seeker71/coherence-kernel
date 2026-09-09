@@ -13,11 +13,15 @@
  *   l2norm softmax scale axpy recip square
  *   pow mod shift select clamp rope-pair              (added 2026-08-24)
  *
- * all of those are Form-emitted graphs over the twenty-three forms below.
+ * all of those are Form-emitted graphs over the twenty-four forms below.
  * `sub` used to live here and was retired on 2026-08-24 to prove the law cuts
- * both ways — a carrier row is not kept because it is convenient.
+ * both ways — a carrier row is not kept because it is convenient. The law cuts
+ * a third way too, and that one took longest to see: a row can be lost without
+ * anyone deciding to lose it. `tf32` passed the law, was written in #470, and
+ * went out in the 2026-08-25 consolidation as collateral — restored 2026-09-09
+ * only because someone asked why its band was still red.
  *
- * THE TWENTY-THREE, and why each is irreducible:
+ * THE TWENTY-FOUR, and why each is irreducible:
  *   <int>       push int32 scalar          — the only literal
  *   vN a1..aN   push int32 vector          — the only shaped literal
  *   f32 / i32   astype                     — dtype is not computable
@@ -45,6 +49,12 @@
  *   take                                   — gather (the embedding row)
  *   argmax                                 — index-of-max; deriving it needs
  *                                            eq+where, two rows for one
+ *   tf32 <path> <off> <r> <c>              — a tensor by REFERENCE. No graph
+ *                                            over the other tokens can name a
+ *                                            byte offset in a file; this is not
+ *                                            a computation, it is a DOOR, and
+ *                                            it is what makes this a generation
+ *                                            lane instead of a calculator
  *
  * A program lands ONE int32. A float pipeline scales and says `i32` before it
  * ends: the carrier owns no float return path and needs no float parser.
@@ -265,6 +275,111 @@ static int fk_mlx_apply(const char *op, mlx_array *st, int *sp, mlx_stream s) {
     return fk_mlx_push(c, st, sp);
 }
 
+/* tf32 <path> <off> <r> <c> — A TENSOR ARRIVES BY REFERENCE.
+ *
+ * Without this the only way data reaches the GPU is as literal lanes in the
+ * program text. That is fine for proving a matmul and useless for a forward
+ * pass: a program is a string, and a string is not how gigabytes of weights
+ * should ever travel. This token names a file, a byte offset and a shape, and
+ * the carrier reads r*c float32 from where they already lie. It is what makes
+ * the MLX lane a GENERATION lane rather than a calculator.
+ *
+ * IT EARNS ITS ROW under the minimum law at the top of this file, and by the
+ * strictest reading of that law: no graph over the other tokens can name a
+ * byte offset in a file. It is not derivable, it is a DOOR.
+ *
+ * WHY IT IS BEING WRITTEN A SECOND TIME. It landed in #470 as `f32`, and the
+ * 2026-08-25 consolidation that cut this file from 942 lines to 195 took it out
+ * — not by the law, which it passes, but as collateral, and nothing said so.
+ * `mlx-tensor-band.fk` kept asking for it and kept scoring 49 of 63, because
+ * its refusal bits accepted any 0 and 0 is also what an unparseable program
+ * returns. A capability can be deleted, its band can keep running, and the band
+ * can keep reading most of the way to green: that is the whole failure, and it
+ * took a person asking why the red was still there to close it.
+ *
+ * IT IS `tf32` AND NOT `f32` because `f32` now means the astype cast, which is
+ * also irreducible and also earns its row. Two irreducible meanings cannot
+ * share one token; the dtype prefix leaves room for the named next stone, the
+ * quantized tiers (`tq8` and the K-quants) where the model's weight actually
+ * lives.
+ *
+ * Bounded, and the bound is honest: FK_MLX_TENSOR_CAP elements, and the file
+ * must actually contain the extent asked for — a short read is a REFUSAL, never
+ * a partial tensor padded with whatever the buffer last held. */
+#define FK_MLX_TENSOR_CAP 4000000
+
+static int fk_mlx_push_tensor(const char **p, const char *end, mlx_array *st, int *sp) {
+    char path[512];
+    char tok[64];
+    long long off = 0;
+    long long r = 0;
+    long long c = 0;
+    long long n = 0;
+    float *data = 0;
+    FILE *f = 0;
+    size_t got = 0;
+    if (!fk_mlx_tok(p, end, path, 512)) {
+        fk_mlx_seterr("tf32 needs a path");
+        return -1;
+    }
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("tf32 needs a byte offset");
+        return -1;
+    }
+    off = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("tf32 needs rows");
+        return -1;
+    }
+    r = atoll(tok);
+    if (!fk_mlx_tok(p, end, tok, 64) || !fk_mlx_num(tok)) {
+        fk_mlx_seterr("tf32 needs cols");
+        return -1;
+    }
+    c = atoll(tok);
+    n = r * c;
+    if (r < 1 || c < 1 || n > FK_MLX_TENSOR_CAP || off < 0) {
+        fk_mlx_seterr("tf32 shape out of range");
+        return -1;
+    }
+    f = fopen(path, "rb");
+    if (f == 0) {
+        fk_mlx_seterr("tf32 cannot open path");
+        return -1;
+    }
+    data = (float *)malloc((size_t)n * sizeof(float));
+    if (data == 0) {
+        fclose(f);
+        fk_mlx_seterr("tf32 out of memory");
+        return -1;
+    }
+    if (fseek(f, (long)off, SEEK_SET) != 0) {
+        free(data);
+        fclose(f);
+        fk_mlx_seterr("tf32 cannot seek to offset");
+        return -1;
+    }
+    got = fread(data, sizeof(float), (size_t)n, f);
+    fclose(f);
+    if (got != (size_t)n) {
+        /* A SHORT READ IS A REFUSAL. Padding here would hand the GPU a tensor
+         * whose tail is whatever malloc last held, and every number downstream
+         * would be confidently wrong with no instrument saying so. */
+        free(data);
+        fk_mlx_seterr("tf32 file is shorter than the shape asked for");
+        return -1;
+    }
+    {
+        int shape[2];
+        int rc;
+        shape[0] = (int)r;
+        shape[1] = (int)c;
+        rc = fk_mlx_push(mlx_array_new_data(data, shape, 2, MLX_FLOAT32), st, sp);
+        free(data);
+        return rc;
+    }
+}
+
 static int fk_mlx_push_vec(const char **p, const char *end, int n,
                            mlx_array *st, int *sp) {
     int32_t data[16];
@@ -330,6 +445,10 @@ long long fk_mlx_run_external(const char *src, long long n) {
             }
         } else if (fk_mlx_counted(tok, 'r', FK_MLX_RANK, &cn)) {
             if (fk_mlx_reshape_n(&p, end, cn, st, &sp, s) != 0) {
+                fail = 1;
+            }
+        } else if (strcmp(tok, "tf32") == 0) {
+            if (fk_mlx_push_tensor(&p, end, st, &sp) != 0) {
                 fail = 1;
             }
         } else if ((applied = fk_mlx_apply(tok, st, &sp, s)) != 1) {
@@ -409,7 +528,7 @@ long long fk_mlx_status_external(char *out, long long cap) {
         "mlx_gpu_available=%s\n"
         "mlx_device=%s\n"
         "mlx_version=%s\n"
-        "mlx_ops=23\n"
+        "mlx_ops=24\n"
         "mlx_dispatch=%lld\n"
         "last_error=%s\n",
         metal ? "true" : "false",
