@@ -131,13 +131,19 @@ section [form.bml] {
             else fctec-validation-finish-clear(e, path, snapshot, step);
         }
         def fctec-validation-continue(e, path, snapshot, floor, cursor) = fctec-validation-finish(e, path, snapshot, floor, fctec-latest-range-step(path, floor, cursor, snapshot));
+        // Once the entire unchecked tail fits one slice, check that union
+        // against the current snapshot. Otherwise each invocation's own
+        // carrier output makes the next generation lag forever. Large tails
+        // keep their frozen cursor; no unchecked bytes or terminals are skipped.
+        def fctec-validation-coalescible?(matched, size, floor) = and(eq(matched, 1), and(ge(size, floor), le(sub(size, floor), fctec-processing-bytes())));
         def fctec-advance-latest(e, path) {
             let size = file_size(path);
             let prior = fctec-read-validation();
             let matched = fctec-validation-matches?(prior, e, size);
-            let snapshot = fctec-validation-snapshot(prior, e, size);
-            let cursor = fctec-validation-cursor(prior, e, size);
             let floor = if eq(matched, 1) then fctec-validation-floor(prior, e) else fcte-carrier-size(e);
+            let coalesce = fctec-validation-coalescible?(matched, size, floor);
+            let snapshot = if coalesce then size else fctec-validation-snapshot(prior, e, size);
+            let cursor = if coalesce then size else fctec-validation-cursor(prior, e, size);
             if lt(size, fcte-carrier-size(e)) then fctec-validation-finish(e, path, snapshot, floor, fctec-latest-result(0, 0, -1, size))
             else if eq(size, fcte-carrier-size(e)) then fctec-validation-finish(e, path, snapshot, floor, fctec-latest-result(1, size, fcte-complete-at(e), size))
             else fctec-validation-continue(e, path, snapshot, floor, cursor);
@@ -159,8 +165,12 @@ section [form.bml] {
             let size = file_size(path);
             let meta = fctel-first-line(read_file_slice(path, 0, fctel-min(size, 1048576)));
             let start_prefix = read_file_slice(path, fcte-start-at(e), 4096);
-            let complete_prefix = read_file_slice(path, fcte-complete-at(e), 4096);
-            let c1 = and(eq(fcte-provenance-shape?(e), 1), ge(size, fcte-carrier-size(e)));
+            // Physical reads may include later rows in this living carrier.
+            // Frame exactly one row before the strict whole-document decoder.
+            let complete_prefix = fctel-first-line(read_file_slice(path, fcte-complete-at(e), 4096));
+            // Earlier readers omitted structured tool results. Their rows
+            // remain historical data, but must be recollected for live share.
+            let c1 = and(str_eq(head(e), fcte-tag-current()), and(eq(fcte-provenance-shape?(e), 1), ge(size, fcte-carrier-size(e))));
             let c2 = str_eq(fctec-turn-id-at(path, fcte-complete-at(e)), fcte-turn-id(e));
             let c3 = str_eq(fctel-session-meta-thread-id(meta), fcte-thread-id(e));
             let c4 = str_eq(fctel-session-meta-provider(meta), fcte-model-provider(e));

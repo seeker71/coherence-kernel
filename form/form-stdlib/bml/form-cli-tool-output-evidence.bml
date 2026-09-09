@@ -1,0 +1,82 @@
+// Native carrier decoding: custom calls carry input, and their results may
+// carry typed text blocks instead of one string. Only an exact executor
+// result's final receipt is admitted; quoted examples are not boundaries.
+// No private text leaves this reducer. Unsupported output shapes are an
+// explicit negative coverage sentinel, never a measured zero.
+// preludes: form-stdlib/core.fk form-stdlib/json.fk
+section [form.bml] {
+    class FormCliToolOutputEvidence {
+        def fcto-unknown() = list(-1, 0, 0, 0, 0, 0, 0, 0);
+        def fcto-request(segment, from) {
+            let input = fctel-json-payload-string-from(segment, from, "input");
+            let arguments = fctel-json-payload-string-from(segment, from, "arguments");
+            let name = fctel-json-payload-string-from(segment, from, "name");
+            let runner = or(or(str_eq(name, "exec"), str_eq(name, "functions.exec")), or(str_eq(name, "wait"), str_eq(name, "functions.wait")));
+            if and(runner, gt(str_len(input), 0)) then 2
+            else if and(runner, gt(str_len(arguments), 0)) then 2
+            else if ge(str_find(str_concat(input, arguments), "form-run ", 0), 0) then 1
+            else fctel-native-command?(arguments);
+        }
+        def fcto-last-line(text, from, last) {
+            let at = str_find(text, "\n", from);
+            if lt(at, 0) then substring(text, last, str_len(text))
+            else fcto-last-line(text, add(at, 1), add(at, 1));
+        }
+        def fcto-receipt(text) {
+            let tail = trim(substring(text, fctel-max(0, sub(str_len(text), 512)), str_len(text)));
+            let line = trim(fcto-last-line(tail, 0, 0));
+            let parts = split-on(line, " ");
+            if not(eq(len(parts), 6)) then fctel-zero-output-measure()
+            else if not(str_eq(head(parts), "@form")) then fctel-zero-output-measure()
+            else if not(and(fcte-digits?(nth(parts, 2)), and(fcte-digits?(nth(parts, 3)), and(fcte-digits?(nth(parts, 4)), fcte-digits?(nth(parts, 5)))))) then fcto-unknown()
+            else if not(eq(add(str_to_int(nth(parts, 3)), str_to_int(nth(parts, 4))), str_to_int(nth(parts, 5)))) then fcto-unknown()
+            else fctel-form-line-measure(line);
+        }
+        def fcto-executor-result(text) {
+            let document = frte-json-document(text);
+            let root = frte-json-document-root(document);
+            let shaped = and(eq(frte-json-document-valid?(document), 1), and(json-object-has?(root, "wall_time_seconds"), and(json-object-has?(root, "chunk_id"), json-object-has?(root, "output"))));
+            if not(shaped) then fctel-zero-output-measure()
+            else if not(eq(frte-json-nonnegative-int-field?(root, "exit_code"), 1)) then fctel-zero-output-measure()
+            else fcto-executor-measure(root, fcto-receipt(frte-json-string-field(root, "output")));
+        }
+        def fcto-executor-measure(root, measure) {
+            let failed = if eq(json-int-value(json-object-get(root, "exit_code")), 0) then 0 else 1;
+            if and(gt(nth(measure, 1), 0), not(eq(nth(measure, 2), failed))) then fcto-unknown()
+            else measure;
+        }
+        def fcto-block(block, scan) {
+            let kind = frte-json-string-field(block, "type");
+            let text = frte-json-string-field(block, "text");
+            if not(or(str_eq(kind, "input_text"), str_eq(kind, "text"))) then fctel-zero-output-measure()
+            else if eq(scan, 0) then fctel-zero-output-measure()
+            else if not(eq(str_find(text, "{", 0), 0)) then fctel-zero-output-measure()
+            else fcto-executor-result(text);
+        }
+        def fcto-blocks(xs, scan, acc) {
+            if eq(len(xs), 0) then acc else fcto-blocks-next(xs, scan, acc, fcto-block(head(xs), scan));
+        }
+        def fcto-blocks-next(xs, scan, acc, measure) {
+            if lt(nth(measure, 0), 0) then fcto-unknown()
+            else fcto-blocks(tail(xs), scan, fctel-measure-add(acc, measure));
+        }
+        def fcto-array(segment, at, stop, scan) {
+            let parsed = json-parse-value(segment, at, "form-tool-output");
+            let array = json-pair-r(parsed);
+            if not(and(eq(json-pair-pos(parsed), stop), node_eq(node_category(array), JSON-ARRAY()))) then fcto-unknown()
+            else fcto-array-count(sub(stop, at), fcto-blocks(json-array-elements(array), scan, fctel-zero-output-measure()));
+        }
+        def fcto-array-count(bytes, measure) {
+            if lt(nth(measure, 0), 0) then measure
+            else cons(bytes, tail(measure));
+        }
+        def fcto-output-range(segment, from, end, prefix, scan) {
+            let at = fctel-json-payload-field-start-from(segment, from, "output");
+            let stop = fctel-json-value-end(segment, at);
+            if or(lt(at, 0), or(lt(stop, at), gt(stop, end))) then fcto-unknown()
+            else if eq(ord(char_at(segment, at)), 34) then fctel-raw-output-measure-range(segment, from, end, prefix, if gt(scan, 0) then 1 else 0)
+            else if eq(ord(char_at(segment, at)), 91) then fcto-array(segment, at, stop, scan)
+            else fcto-unknown();
+        }
+    }
+}
