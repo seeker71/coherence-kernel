@@ -72,3 +72,27 @@ publication, not readback. Refused writes retain the existing readback fallback.
 External shared frames still publish normally. Pure publication band 255,
 live UI 4294967295, live 2147483647, all exit 0 after clean preflight.
 This is a Form-only repair; the C seed remains unchanged.
+
+## Final live window
+
+`8138caa1` landed and fast-forwarded into the saved checkout. The existing
+supervisor renewed its children; no second live dashboard was started. Renderer
+12403 held heap capacity at 1,048,576 cons through 135 → 305 reclamations.
+Across 51 samples over 50,131 ms, frame-work averaged 34 ms, maximum 77 ms;
+the 40 ms budget is still exceeded on some frames. RSS rose 190,251,008 →
+311,656,448 bytes, about 2.4 MB/s versus about 7.1 MB/s in the preceding
+50-second window. These are successive live windows, not a controlled claim
+that every timing difference came from this patch. Total memory is not bounded.
+The controlled index and transcript measurements above remain the narrow proofs.
+
+Ear frame 257072 was 43 ms old, OPEN speaking, stands=1. Four complete
+transcript texts were visible in the 24-line production projection; neither
+captured words nor human terminal pixels were inspected here. Saved checkout
+freshness 31; local-publication band 255 and index band 65535 also passed there.
+Unrelated untracked node-id files were preserved. Native share remains
+declared/unmeasured because no rollout is bound; no percentage is claimed.
+
+The movement stayed alive by checking each deployment and following the remaining
+growth into another native repair. The useful surprise: decoding our own offered
+frame was avoidable work. Residual RSS growth and over-budget frames remain
+visible attention, not hidden beneath the smaller index or faster text path.
