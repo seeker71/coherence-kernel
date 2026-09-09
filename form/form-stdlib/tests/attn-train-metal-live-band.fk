@@ -1,0 +1,109 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/transformer-backprop.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
+;
+; attn-train-metal-live-band — the emitted ATTENTION training-step kernel run on this host's GPU and held
+; to `tbp-att-fwd` / `tbp-att-grads`, the fp64 recipe it was emitted from. This closes the type axis on
+; silicon: the FFN core (mlp-train), the FFN-residual layer (resid-train) and now the attention layer all
+; compute their recipe here, which is what the architect's two layer kinds are.
+;
+; h = x + Wo·attend(Wq·LN(x), ks, vs, scale), one SGD step over Wq and Wo. It composes every gradient the
+; attention core has — softmax-back through the α-weighted subtraction, the dv partition, the dq weighted
+; key sum — plus the pre-LN and the residual highway. Three of those can be wrong in ways that still
+; produce a number that falls: softmax-back without the α·(g − Σαg) centering, a dq that forgets `scale`,
+; and a dWq that reads x instead of LN(x). Each shows up in exactly one of the checked parameters, which
+; is why Wq and Wo are checked apart rather than as one verdict.
+;
+; This kernel runs the whole step in ONE thread (`if (gid != 0u) return;`) — the architect's contexts are
+; small and the recipe's folds are serial, so there is no barrier here to carry weight and this band makes
+; no claim about width. What it claims is the arithmetic, and the arithmetic is the hard part: the band's
+; fixture uses three keys with genuinely different scores, so the softmax is not near-uniform and its
+; backward cannot be right by accident.
+;
+; Verdict 63 when the silicon takes the step:
+;    1  the pipeline mints, and the dispatch and sync both come back clean
+;    2  the loss and the output gradient gy are the recipe's
+;    4  the attention weights alpha are the recipe's softmax — the forward reached the core
+;    8  Wo after the step is the recipe's — the shallow update, from (gy, att)
+;   16  Wq after the step is the recipe's — the update behind softmax-back, dq and the pre-LN
+;   32  THE STEP IS NOT A NO-OP: both matrices actually MOVED
+;
+(do
+    (defn atl-close? (a b)
+        (lt (if (lt (sub a b) 0.0) (sub b a) (sub a b)) 0.0000305))
+    (defn atl-f32s (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (md-le32 (md-f32-bits (head xs))) (atl-f32s (tail xs)))))
+    (defn atl-getf (h i) (ln-f32-decode (ln-u32-le (metal_buf_read h (mul i 4) 4) 0)))
+    (defn atl-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (atl-flat (tail rows)))))
+    (defn atl-agree? (h xs i)
+        (if (eq (len xs) 0) 1
+            (if (atl-close? (atl-getf h i) (head xs)) (atl-agree? h (tail xs) (add i 1)) 0)))
+    (defn atl-moved? (h xs i)
+        (if (eq (len xs) 0) 0
+            (if (atl-close? (atl-getf h i) (head xs)) (atl-moved? h (tail xs) (add i 1)) 1)))
+
+    ; --- dmodel 3, dq 2, dv 3, nk 3. dv = dmodel because Wo maps the attention output back onto the
+    ; residual stream; the three keys are chosen so their scores are far apart and the softmax is sharp.
+    (let WQ (list (list 0.5 -0.25 0.125) (list -0.375 0.625 0.25)))
+    (let WO (list (list 0.75 -0.125 0.5) (list 0.25 0.625 -0.375) (list -0.5 0.125 0.875)))
+    (let X (list 1.5 -0.75 0.5))
+    (let T (list 0.25 -0.5 0.75))
+    (let KS (list (list 1.0 -0.5) (list -0.25 0.75) (list 0.5 0.25)))
+    (let VS (list (list 0.5 -0.25 0.125) (list -0.75 0.5 0.25) (list 0.25 0.125 -0.5)))
+    (let SCALE 0.7071067811865476)
+    (let LR 0.125)
+    (let EPS 0.00001)
+
+    ; --- the recipe's own answer, fp64 ---
+    (let e-n (tn-layernorm X EPS))
+    (let e-q (tb-matvec WQ e-n))
+    (let e-alpha (tbp-attn-weights e-q KS SCALE))
+    (let e-att (tb-attend-one e-q KS VS SCALE))
+    (let e-h (tbp-att-fwd WQ WO X KS VS SCALE EPS))
+    (let e-gy (tn-scale (tbp-vsub e-h T) 2.0))
+    (let e-loss (list (tbp-sse e-h T)))
+    (let g (tbp-att-grads WQ WO X KS VS SCALE EPS e-gy))
+    (let e-WQ (atl-flat (tbp-sgd-mat WQ (nth g 0) LR)))
+    (let e-WO (atl-flat (tbp-sgd-mat WO (nth g 1) LR)))
+
+    ; --- mint ---
+    (let src (jte-attn-train-msl-fmt "form_attn_train_live_f32" "f32"))
+    (let pipe (metal_pipeline src "form_attn_train_live_f32"))
+
+    ; --- buffers: wq wo x t ks vs loss n q alpha att gy datt dqg es, then dmodel dq dv nk scale lr eps ---
+    (let bwq (metal_buf_alloc 24))
+    (let bwo (metal_buf_alloc 36))
+    (let bx (metal_buf_alloc 12))
+    (let bt (metal_buf_alloc 12))
+    (let bks (metal_buf_alloc 24))
+    (let bvs (metal_buf_alloc 36))
+    (let bloss (metal_buf_alloc 4))
+    (let bn (metal_buf_alloc 12))
+    (let bq (metal_buf_alloc 8))
+    (let balpha (metal_buf_alloc 12))
+    (let batt (metal_buf_alloc 12))
+    (let bgy (metal_buf_alloc 12))
+    (let bdatt (metal_buf_alloc 12))
+    (let bdqg (metal_buf_alloc 8))
+    (let bes (metal_buf_alloc 12))
+    (let w0 (metal_buf_write bwq 0 (atl-f32s (atl-flat WQ))))
+    (let w1w (metal_buf_write bwo 0 (atl-f32s (atl-flat WO))))
+    (let w2w (metal_buf_write bx 0 (atl-f32s X)))
+    (let w3 (metal_buf_write bt 0 (atl-f32s T)))
+    (let w4 (metal_buf_write bks 0 (atl-f32s (atl-flat KS))))
+    (let w5 (metal_buf_write bvs 0 (atl-f32s (atl-flat VS))))
+
+    (let bind (md-bind16
+                  (list bwq bwo bx bt bks bvs bloss bn bq balpha batt bgy bdatt bdqg bes)
+                  (list 3 2 3 3 (md-f32-bits SCALE) (md-f32-bits LR) (md-f32-bits EPS)) 1 0 0 0))
+    (let enq (metal_enqueue pipe bind 1))
+    (let syn (metal_sync))
+    (let c0 (if (gt pipe 0) (if (ge enq 0) (if (ge syn 0) 1 0) 0) 0))
+
+    (let c1 (if (eq (atl-agree? bloss e-loss 0) 1) (if (eq (atl-agree? bgy e-gy 0) 1) 2 0) 0))
+    (let c2 (if (eq (atl-agree? balpha e-alpha 0) 1) (if (eq (atl-agree? batt e-att 0) 1) 4 0) 0))
+    (let c3 (if (eq (atl-agree? bwo e-WO 0) 1) 8 0))
+    (let c4 (if (eq (atl-agree? bwq e-WQ 0) 1) 16 0))
+    (let c5 (if (eq (atl-moved? bwq (atl-flat WQ) 0) 1)
+            (if (eq (atl-moved? bwo (atl-flat WO) 0) 1) 32 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))

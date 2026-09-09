@@ -1,0 +1,116 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/llama-block.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
+;
+; llama-decode-step-metal-live-band — the emitted DECODE-STEP kernel run on this host's GPU, holding it
+; to the claim it is built on: one new token against a KV cache reproduces the whole-sequence causal
+; block's output AT THAT POSITION. `lblk-block-causal` computes all three positions from scratch; the
+; decode kernel computes only the third, reading the first two out of the cache — and the two must agree.
+; That equality is the entire reason a cache is allowed to exist, and it is the thing nothing in the emit
+; bands could ever see. This family did not compile on this host until 2026-09-09.
+;
+; The cache is filled from the SAME recipe, not from the kernel's own earlier run: k_t is the RoPE'd
+; projection of RMSNorm(x_t) and v_t the raw projection, both from `lblk-rope-seq`/`lblk-proj-seq`. If the
+; band filled the cache from the kernel it would be asking the kernel whether it agrees with itself.
+;
+; Position 2 with two cached positions is the smallest fixture that can fail honestly: position 0's RoPE
+; is the identity (angle zero), so a cache checked only at position 0 would pass a kernel with no RoPE at
+; all. Position 1 rotates, and it is in the prefix here.
+;
+; Verdict 31 when the silicon answers:
+;    1  the pipeline mints, and the dispatch and sync both come back clean
+;    2  y is `lblk-block-causal`'s position-2 output, element by element — the cache reproduces the block
+;    4  the kernel wrote its OWN RoPE'd key into ck at slot p, and it is the recipe's k_2
+;    8  the kernel wrote its OWN value into cv at slot p, and it is the recipe's v_2
+;   16  THE CACHE IS READ, NOT IGNORED: perturb one cached key from an earlier position and y MOVES. A
+;       kernel that recomputed the prefix, or that attended only to itself, would answer identically and
+;       pass every bit above.
+;
+(do
+    (defn ldl-close? (a b)
+        (lt (if (lt (sub a b) 0.0) (sub b a) (sub a b)) 0.0000305))
+    (defn ldl-f32s (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (md-le32 (md-f32-bits (head xs))) (ldl-f32s (tail xs)))))
+    (defn ldl-getf (h i) (ln-f32-decode (ln-u32-le (metal_buf_read h (mul i 4) 4) 0)))
+    (defn ldl-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (ldl-flat (tail rows)))))
+    (defn ldl-agree? (h xs i)
+        (if (eq (len xs) 0) 1
+            (if (ldl-close? (ldl-getf h i) (head xs)) (ldl-agree? h (tail xs) (add i 1)) 0)))
+    (defn ldl-quad (h i) (list (ldl-getf h i) (ldl-getf h (add i 1)) (ldl-getf h (add i 2)) (ldl-getf h (add i 3))))
+    (defn ldl-differ? (as bs)
+        (if (eq (len as) 0) 0
+            (if (ldl-close? (head as) (head bs)) (ldl-differ? (tail as) (tail bs)) 1)))
+
+    ; --- S 3, d 4, dq 4, dv 4, hid 6, HD 2; decode at p = 2 over a two-deep cache ---
+    (let XS (list (list 1.5 -0.75 0.5 0.25) (list -0.25 0.875 -1.25 0.625) (list 0.75 0.375 -0.5 1.125)))
+    (let G1 (list 1.25 0.75 -0.5 1.125))
+    (let WQ (list (list 0.5 -0.25 0.125 0.375) (list -0.375 0.625 0.25 -0.125)
+                  (list 0.25 0.5 -0.75 0.125) (list 0.625 -0.5 0.375 0.25)))
+    (let WK (list (list 0.25 0.5 -0.375 0.125) (list 0.75 -0.125 0.25 0.5)
+                  (list -0.5 0.375 0.625 -0.25) (list 0.125 0.25 -0.125 0.75)))
+    (let WV (list (list 0.5 -0.25 0.125 0.625) (list -0.75 0.5 0.25 -0.375)
+                  (list 0.25 0.125 -0.5 0.75) (list 0.375 -0.625 0.5 0.125)))
+    (let WO (list (list 0.75 -0.125 0.5 0.25) (list 0.25 0.625 -0.375 0.5)
+                  (list -0.5 0.125 0.875 -0.25) (list 0.125 -0.375 0.25 0.625)))
+    (let G2 (list 0.875 -1.125 0.625 0.75))
+    (let WG (list (list 0.5 -0.25 0.125 0.375) (list 0.75 0.375 -0.5 0.125)
+                  (list -0.125 0.625 0.25 -0.75) (list 0.25 -0.75 0.5 0.375)
+                  (list 0.625 0.125 -0.25 0.5) (list -0.375 0.5 0.75 -0.125)))
+    (let WU (list (list 0.25 0.5 -0.125 0.625) (list -0.5 0.125 0.75 -0.25)
+                  (list 0.375 -0.625 0.25 0.5) (list 0.125 0.75 -0.375 0.25)
+                  (list -0.25 0.375 0.5 -0.625) (list 0.5 -0.125 0.625 0.375)))
+    (let WD (list (list 0.5 -0.25 0.125 0.375 -0.625 0.25) (list 0.25 0.625 -0.5 0.125 0.375 -0.75)
+                  (list -0.375 0.125 0.75 -0.25 0.5 0.625) (list 0.625 -0.5 0.25 0.75 -0.125 0.375)))
+    (let SCALE 0.5)
+    (let EPS 0.00001)
+
+    ; --- the recipe's cache and the recipe's answer, fp64 ---
+    (let n1 (lblk-rms-seq XS G1 EPS))
+    (let e-ks (lblk-rope-seq (lblk-proj-seq WK n1) 2))
+    (let e-vs (lblk-proj-seq WV n1))
+    (let e-y (nth (lblk-block-causal XS G1 EPS WQ WK WV WO SCALE 2 G2 WG WU WD) 2))
+
+    ; --- mint ---
+    (let src (jte-llama-block-decode-step-msl "form_llama_dec_live_f32"))
+    (let pipe (metal_pipeline src "form_llama_dec_live_f32"))
+
+    ; --- buffers: wq wk wv wo g1 wg wu wd g2 x ck cv y sc, then p d dq dv hid HD scale eps ---
+    (let bwq (metal_buf_alloc 64))  (let bwk (metal_buf_alloc 64))
+    (let bwv (metal_buf_alloc 64))  (let bwo (metal_buf_alloc 64))
+    (let bg1 (metal_buf_alloc 16))  (let bg2 (metal_buf_alloc 16))
+    (let bwg (metal_buf_alloc 96))  (let bwu (metal_buf_alloc 96))
+    (let bwd (metal_buf_alloc 96))
+    (let bx (metal_buf_alloc 16))
+    (let bck (metal_buf_alloc 48))  (let bcv (metal_buf_alloc 48))
+    (let by (metal_buf_alloc 16))   (let bsc (metal_buf_alloc 16384))
+    (let z0 (metal_buf_write bwq 0 (ldl-f32s (ldl-flat WQ))))
+    (let z1 (metal_buf_write bwk 0 (ldl-f32s (ldl-flat WK))))
+    (let z2 (metal_buf_write bwv 0 (ldl-f32s (ldl-flat WV))))
+    (let z3 (metal_buf_write bwo 0 (ldl-f32s (ldl-flat WO))))
+    (let z4 (metal_buf_write bg1 0 (ldl-f32s G1)))
+    (let z5 (metal_buf_write bwg 0 (ldl-f32s (ldl-flat WG))))
+    (let z6 (metal_buf_write bwu 0 (ldl-f32s (ldl-flat WU))))
+    (let z7 (metal_buf_write bwd 0 (ldl-f32s (ldl-flat WD))))
+    (let z8 (metal_buf_write bg2 0 (ldl-f32s G2)))
+    (let z9 (metal_buf_write bx 0 (ldl-f32s (nth XS 2))))
+    ; the cache: positions 0 and 1 only — slot 2 is the kernel's to fill
+    (let z10 (metal_buf_write bck 0 (ldl-f32s (tb-cat (nth e-ks 0) (nth e-ks 1)))))
+    (let z11 (metal_buf_write bcv 0 (ldl-f32s (tb-cat (nth e-vs 0) (nth e-vs 1)))))
+
+    (let dims (list 2 4 4 4 6 2 (md-f32-bits SCALE) (md-f32-bits EPS)))
+    (let bufs (list bwq bwk bwv bwo bg1 bwg bwu bwd bg2 bx bck bcv by bsc))
+    (let enq (metal_enqueue pipe (md-bind16 bufs dims 1 0 0 0) 1))
+    (let syn (metal_sync))
+    (let c0 (if (gt pipe 0) (if (ge enq 0) (if (ge syn 0) 1 0) 0) 0))
+
+    (let c1 (if (eq (ldl-agree? by e-y 0) 1) 2 0))
+    (let c2 (if (eq (ldl-agree? bck (nth e-ks 2) 8) 1) 4 0))
+    (let c3 (if (eq (ldl-agree? bcv (nth e-vs 2) 8) 1) 8 0))
+    (let y-true (ldl-quad by 0))
+
+    ; --- perturb one cached key from position 1 and demand the answer moves ---
+    (let z12 (metal_buf_write bck 0 (ldl-f32s (tb-cat (nth e-ks 0) (tb-vec-add (nth e-ks 1) (list 0.5 0.0 0.0 0.0))))))
+    (let enq2 (metal_enqueue pipe (md-bind16 bufs dims 1 0 0 0) 1))
+    (let syn2 (metal_sync))
+    (let c4 (if (ge syn2 0) (if (eq (ldl-differ? y-true (ldl-quad by 0)) 1) 16 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 c4)))))

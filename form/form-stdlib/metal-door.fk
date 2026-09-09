@@ -102,6 +102,44 @@
             (md-f32-neg (md-f32-pos (sub 0.0 x)))
             (md-f32-pos x))))
 
+    ; ---- binary16 ---------------------------------------------------------------------------
+    ; The same ladder at half the width: 10 explicit mantissa bits, exponent bias 15. The body has
+    ; emitted f16 kernels since the IR's elem/acc split (tir-msl-elem "half"), and until now the door
+    ; could only hand them f32 — so the f16 lane could be minted and timed but never fed, and what a
+    ; kernel does with `half` weights is exactly what an f32 test cannot say. Mirrors md-f32-* line for
+    ; line rather than reworking it, including the two refusals that matter: a mantissa that rounded up
+    ; to 2^10 is 2.0 in disguise and belongs one exponent higher, and a value outside [2^-14, 2^15)
+    ; returns -1 rather than the nearest representable — the door refuses instead of quietly answering
+    ; with a different number, because a silently clamped weight is a kernel that trains on a lie.
+    ; SUBNORMALS ARE NOT HANDLED: below 2^-14 this refuses. Half's subnormal range is real and a model
+    ; that needs it needs a wider door; naming that is cheaper than a wrong bit pattern.
+    (defn md-f16-mant (a e) (float_to_int (fq-rne (mul (sub (div a (fq-pow2 e)) 1.0) 1024.0))))
+
+    (defn md-f16-word (e m)
+        (if (eq m 1024)
+            (md-f16-word (add e 1) 0)
+            (if (lt e (sub 0 14)) (sub 0 1)
+            (if (gt e 15) (sub 0 1)
+                (add (mul (add e 15) 1024) m)))))
+
+    (defn md-f16-pos (a) (md-f16-word (fq-exponent a) (md-f16-mant a (fq-exponent a))))
+    (defn md-f16-neg (b) (if (lt b 0) b (add b 32768)))
+
+    (defn md-f16-bits (x)
+        (if (eq x 0.0) 0
+        (if (lt x 0.0)
+            (md-f16-neg (md-f16-pos (sub 0.0 x)))
+            (md-f16-pos x))))
+
+    (defn md-le16 (v)
+        (str_concat (byte_to_str (md-byte-at v 0))
+                    (byte_to_str (md-byte-at v 1))))
+
+    ; a whole vector of halves, in the layout a `device const half*` reads
+    (defn md-f16s (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (md-le16 (md-f16-bits (head xs))) (md-f16s (tail xs)))))
+
     ; ---- the binding string -----------------------------------------------------------------
     (defn md-le32-list (xs acc)
         (if (eq (len xs) 0) acc

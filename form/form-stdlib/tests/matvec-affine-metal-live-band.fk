@@ -1,0 +1,115 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/transformer-backprop.fk form-stdlib/f16-decode.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
+;
+; matvec-affine-metal-live-band — the IR's three oldest MSL families held to their recipes on the GPU:
+; the f32 matvec, the f16 matvec, and the affine training step. These three always compiled here, which
+; is why they were the last to be asked anything: `observe/` probes dispatch them for TIMING, and timing
+; a kernel proves it ran, never that it was right. This is the band that asks for the number.
+;
+; They are ONE THREAD PER OUTPUT ROW, unlike every other family in this tree — the whole grid is the
+; parallelism, so a kernel that indexed its row from the wrong builtin, or that let two rows land in one
+; slot, still returns a full y of plausible values. Four rows with four different answers is the smallest
+; fixture where that shows, and every element is checked.
+;
+; The f16 lane is a DIFFERENT CLAIM, not a repetition of the f32 one, and writing it taught the band its
+; own lesson: w, x AND y are all `half` there — the elem type is the whole memory interface, not just the
+; weights. Fed f32 into a `device const half*` this band read 27 and blamed the kernel, which had been
+; refusing nothing and computing correctly the whole time. So the fixture hands it halves through the
+; door's own `md-f16s` and reads y back through the body's own `fd-f16`, at HALF's resolution rather than
+; f32's, because an answer stored in ten mantissa bits cannot carry more and a tolerance that pretends
+; otherwise is measuring the band, not the kernel. The weights are exactly representable in half, so the
+; recipe over the originals is the right thing to compare against; what this proves is the widening path
+; — load widens elem to acc, the fold runs in float, the store rounds once — not that half is lossless.
+;
+; The door could not do this before today. `md-f32-bits` existed and `md-f16-bits` did not, so the f16
+; lane could be minted and timed but never FED, which is exactly how a family stays green and unasked.
+;
+; Verdict 31 when the silicon answers:
+;    1  all three pipelines mint, and every dispatch and sync comes back clean
+;    2  the f32 matvec is `tb-matvec`'s, every row
+;    4  the f16 matvec is `tb-matvec`'s too, to half's own last place — w, x and y are all `half`, so
+;       this is the elem/acc split proven end to end: widen at the load, accumulate in float, round once
+;    8  the affine step's loss and its updated W and b are `tbp-step`'s
+;   16  THE ROWS ARE NOT ONE ROW: the four outputs differ from each other, in the recipe and on the GPU,
+;       so a kernel that computed one row and broadcast it could not pass the checks above by luck
+;
+(do
+    (defn mal-close? (a b)
+        (lt (if (lt (sub a b) 0.0) (sub b a) (sub a b)) 0.0000305))
+    (defn mal-f32s (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (md-le32 (md-f32-bits (head xs))) (mal-f32s (tail xs)))))
+    (defn mal-getf (h i) (ln-f32-decode (ln-u32-le (metal_buf_read h (mul i 4) 4) 0)))
+    (defn mal-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (mal-flat (tail rows)))))
+    (defn mal-agree? (h xs i)
+        (if (eq (len xs) 0) 1
+            (if (mal-close? (mal-getf h i) (head xs)) (mal-agree? h (tail xs) (add i 1)) 0)))
+    ; the f16 lane stores w, x AND y as `half`, so its output is read back through the body's own
+    ; f16 decoder and held to half's OWN resolution, not f32's. 1/2048 is one unit in the last place
+    ; at magnitude 1 — tight enough that a wrong row or a truncating load fails, honest about the fact
+    ; that a half-stored answer cannot carry more.
+    (defn mal-h-getf (h i)
+        (fd-f16 (add (str_byte_at (metal_buf_read h (mul i 2) 2) 0)
+                     (mul 256 (str_byte_at (metal_buf_read h (mul i 2) 2) 1)))))
+    (defn mal-h-close? (a b)
+        (lt (if (lt (sub a b) 0.0) (sub b a) (sub a b)) 0.00049))
+    (defn mal-h-agree? (h xs i)
+        (if (eq (len xs) 0) 1
+            (if (mal-h-close? (mal-h-getf h i) (head xs)) (mal-h-agree? h (tail xs) (add i 1)) 0)))
+    (defn mal-alldiff? (xs)
+        (if (le (len xs) 1) 1
+            (if (eq (mal-cnt (head xs) (tail xs)) 0) (mal-alldiff? (tail xs)) 0)))
+    (defn mal-cnt (v xs)
+        (if (eq (len xs) 0) 0
+            (if (mal-close? v (head xs)) 1 (mal-cnt v (tail xs)))))
+    ; half is 10 explicit mantissa bits; these weights are exact in it, so the f16 lane's one load
+    ; rounding is the identity and the recipe over the originals is the right thing to compare with.
+    (let W (list (list 0.5 -0.25 0.125 0.375) (list -0.375 0.625 0.25 -0.125)
+                 (list 0.25 0.5 -0.75 0.125) (list 0.625 -0.5 0.375 0.25)))
+    (let X (list 1.5 -0.75 0.5 0.25))
+    (let B (list 0.0625 -0.1875 0.125 -0.25))
+    (let T (list 0.25 -0.5 0.75 -0.125))
+    (let LR 0.125)
+
+    (let e-mv (tb-matvec W X))
+    (let e-y (tb-affine W B X))
+    (let e-loss (tb-vec-mul (tbp-vsub e-y T) (tbp-vsub e-y T)))
+    (let step (tbp-step W B X T LR))
+    (let e-W (mal-flat (tbp-W step)))
+    (let e-b (tbp-b step))
+
+    (let p32 (metal_pipeline (jte-matvec-msl-fmt "form_mv32_live" "f32") "form_mv32_live"))
+    (let p16 (metal_pipeline (jte-matvec-msl-fmt "form_mv16_live" "f16") "form_mv16_live"))
+    (let pat (metal_pipeline (jte-affine-train-msl-fmt "form_at32_live" "f32") "form_at32_live"))
+
+    (let bw (metal_buf_alloc 64))   (let bwh (metal_buf_alloc 32))
+    (let bx (metal_buf_alloc 16))   (let by32 (metal_buf_alloc 16))
+    (let by16 (metal_buf_alloc 16))  (let bxh (metal_buf_alloc 8))
+    (let baw (metal_buf_alloc 64))  (let bab (metal_buf_alloc 16))
+    (let bat (metal_buf_alloc 16))  (let bal (metal_buf_alloc 16))
+    (let z0 (metal_buf_write bw 0 (mal-f32s (mal-flat W))))
+    (let z1 (metal_buf_write bwh 0 (md-f16s (mal-flat W))))
+    (let z2 (metal_buf_write bx 0 (mal-f32s X)))
+    (let z2h (metal_buf_write bxh 0 (md-f16s X)))
+    (let z3 (metal_buf_write baw 0 (mal-f32s (mal-flat W))))
+    (let z4 (metal_buf_write bab 0 (mal-f32s B)))
+    (let z5 (metal_buf_write bat 0 (mal-f32s T)))
+
+    (let e1 (metal_enqueue p32 (md-bind (list bw bx by32) (list 4 4)) 4))
+    (let s1 (metal_sync))
+    (let e2 (metal_enqueue p16 (md-bind (list bwh bxh by16) (list 4 4)) 4))
+    (let s2 (metal_sync))
+    (let e3 (metal_enqueue pat (md-bind (list baw bab bx bat bal) (list 4 4 (md-f32-bits LR))) 4))
+    (let s3 (metal_sync))
+    (let c0 (if (gt p32 0) (if (gt p16 0) (if (gt pat 0)
+            (if (ge s1 0) (if (ge s2 0) (if (ge s3 0) 1 0) 0) 0) 0) 0) 0))
+
+    (let c1 (if (eq (mal-agree? by32 e-mv 0) 1) 2 0))
+    (let c2 (if (eq (mal-h-agree? by16 e-mv 0) 1) 4 0))
+    (let c3 (if (eq (mal-agree? bal e-loss 0) 1)
+            (if (eq (mal-agree? bab e-b 0) 1)
+            (if (eq (mal-agree? baw e-W 0) 1) 8 0) 0) 0))
+    (let c4 (if (eq (mal-alldiff? e-mv) 1)
+            (if (eq (mal-alldiff? (list (mal-getf by32 0) (mal-getf by32 1)
+                                        (mal-getf by32 2) (mal-getf by32 3))) 1) 16 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 c4)))))
