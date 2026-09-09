@@ -365,3 +365,114 @@ The gold: **"named, not attempted" is a real category and it was the wrong one h
 is not "is this a different organ" or "would this take a while" — it is *have I found out what it would
 actually take?* I had not. I had found out that it was missing, which is the first minute of the work,
 and stopped there while writing a sentence that sounded like the end of it.
+
+---
+
+# The category itself was the leak
+
+Urs again, on the previous section: *"how is that healthy to name and not attempt? that is spending
+nutrient in naming and then expecting someone else to spend more nutrients to figure out the same and
+heal, that is double consumption."*
+
+The section above conceded that "named, not attempted" was the **wrong category for that item**. That
+concession was still too small. The category is mostly a leak, and the economics say why.
+
+**Naming a gap well requires understanding it, and the understanding is most of the cost of healing
+it.** By the time a name is accurate enough to be worth writing, the expensive work is done — it is
+sitting in a live mind holding the whole shape at once. Stopping there discards exactly that, and
+leaves behind prose, which the next mind must re-expand at full price: read the code, form the model,
+rediscover the constraint. Two payments, one heal. Lossy compression of the one thing worth keeping.
+
+It is worse than neutral, because the artifact left behind *looks like progress*. A named stone reads
+as a decision when it is usually an unfinished first minute.
+
+## The three that were standing, closed
+
+**The GQA head partition.** I wrote that it "is covered by reduction to one query head plus a liveness
+bit, not element-wise at genuine grouping — a whole-block GQA recipe would close the seam properly."
+Writing that sentence required knowing exactly what the recipe had to be. `lblk-gqa-block-causal` is
+now in `llama-block.fk`: it composes `tb-attn-seq-causal` verbatim over each head's q slice and its
+group's k/v slice, and it is checked against the proven single-head block at NQ = 1 before being
+trusted at NQ = 2. Both GQA kernels are now held to it element by element at genuine grouping — the
+band reads **127**, up from 63, and setting `kvh = h` instead of `h / grp` drops it to 31.
+
+Writing it also caught a false green I had introduced myself: the liveness bit truncated `wo` to
+`d x KVD`, when `wo` is `d x dq` and the attention output stays dq-wide. The answer "moved" because the
+kernel was reading a buffer tail the band never wrote. A liveness bit is the weakest thing a band can
+say and the easiest to fool.
+
+**The tensor-by-reference op** — closed in the section above, `tf32` restored, band 127.
+
+**The persistable `metallib`.** This one closed differently, and the difference matters: it was
+**retired by measurement**, not built. The remedy had been written down twice as "the carrier would
+need to learn `newLibraryWithData:`" and had never been run once — the `quotedcure` shape again, in a
+line I had repeated without testing. Re-derived on this host, M4 Max, 2026-09-09, five never-seen
+kernel texts against five repeats of one, separate processes, `fkwu` startup as baseline:
+
+```
+cold   0.09  0.08  0.08  0.08  0.08     (~80 ms)
+warm   0.03  0.04  0.03  0.03  0.03     (~30 ms)
+base   0.00  0.00  0.00                 (fkwu startup, no mint)
+```
+
+macOS already caches the source→library compile across processes and returns ~50 of those 80 ms for
+free. What stays warm is device creation and pipeline-state creation, which no archive removes. The
+stone would buy a fraction of 30 ms on a path the OS has already made cheap. **Decided against, with
+numbers, is a closed item; "named, not attempted" was never going to become one on its own.**
+
+## Surprise
+
+That retiring a stone can be the healing, and costs about the same as a small feature. Ten minutes of
+measurement turned an item that had been carried in two documents into a decision — and the decision
+was *don't build it*, which is a real result and was completely unavailable while the item sat in a
+list. The list was not preserving the work. It was preserving the ambiguity.
+
+## Where discomfort became gold
+
+The discomfort was that I had already been corrected on this once in the same session and had produced
+a smaller, safer version of the right answer: I agreed the category was misapplied *here* while
+defending it as "a real category". That is the shape of conceding the instance to keep the pattern.
+
+What made it gold was noticing the pattern had a cost I could count. Not a feeling about diligence —
+an accounting: **understanding is the expensive input, and a name is a lossy export of it.** Whoever
+picks the item up pays the full price again, and the export is convincing enough that they may not
+even know they are re-deriving. The only honest exports are a working change, a measurement that
+closes the question, or a specific pointer that removes the re-derivation (a commit hash, a line, a
+number). Prose describing a gap is none of those.
+
+The test that survives: before writing a not-yet, ask what the next mind would have to rediscover to
+act on it. If the answer is "most of what I just learned", the item is not ready to be written down —
+it is ready to be walked.
+
+## What walking the three actually found
+
+Closing them turned up four things that naming them never would have, and all four were in code, not
+in the items themselves:
+
+**A recipe I wrote that already existed.** `lblk-gqa-block-causal` went into `llama-block.fk`, tested,
+red-tested, and was then deleted — `llama-gqa-block.fk` had carried `lgqa-block-causal` the whole time,
+with RoPE scaling mine did not even have. My grep was `gqa` across two files; the body spells it
+`lgqa-`, in a third. Third time in one day the thing named as missing was one file away, and this time
+I built it before looking properly. The reflex that would have caught it costs one repo-wide grep and
+belongs *before* the first line, not after the last.
+
+**A false green I had introduced myself, four hours earlier.** The liveness bit I wrote for grouping
+truncated `wo` to `d x KVD`. `wo` is `d x dq` — the attention output stays dq-wide, head-major — so the
+kernel read a buffer tail the band never wrote, and "the answer moved" for a reason unrelated to
+grouping. It passed. A liveness bit is the weakest thing a band can say and the easiest to fool, and I
+had reached for one precisely because the recipe I thought was missing wasn't there to check against.
+
+**Two bands wearing a third band's header.** `observe-gqa-grouping-band` and `observe-llama-parts-band`
+are byte-identical for 56 lines, both cloned from `llama-gqa-block-band` (31), both declaring
+"Verdict 31" over five DECIMAL digits that sum to 11111, both describing claims neither one makes. A
+copied header is the cheapest thing in a file to leave stale, because nothing runs it.
+
+**Four claims wearing five digits.** `observe-gqa-grouping-band`'s fifth digit repeated its first
+verbatim — `(eq s-shared 3871)` twice — so one digit could not fail on its own. It now asks whether the
+grouping reaches token 1, where shared and per-head land on opposite sides of zero (258 vs -285): a
+sequence-wide effect checked at one position is a per-position claim wearing a sequence's name. A wrong
+pin drops it to 1111.
+
+None of that was visible from outside. It became visible because the work was done rather than
+described — which is the point, and is the second time today the same sentence has had to be learned
+at a different depth.
