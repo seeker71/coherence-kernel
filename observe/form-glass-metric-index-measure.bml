@@ -1,0 +1,44 @@
+// Bounded native comparison; no sensors, transcript content, or live renderer.
+// stdin: map or record. 1,000 frames x 256 keys; each invocation owns its heap.
+// Run twice per mode to distinguish cold admission from cached execution.
+// preludes: form/form-stdlib/form-glass-dashboard.bml observe/bidirectional-framebuffer-channel.fk
+section [form.bml] {
+    class FormGlassMetricIndexMeasure {
+        def fgmim-keys(i, n) = if ge(i, n) then list() else cons(str_concat("measure.metric.", int_to_str(i)), fgmim-keys(add(i, 1), n));
+        def fgmim-rows(keys, frame) = if eq(len(keys), 0) then list() else cons(fgo-int("kernel", head(keys), "bounded index measurement", frame, "frames", frame, "cpu-arena", "physical-live", "index-measure", "live", "kernel", "synthetic rows; not sensor evidence"), fgmim-rows(tail(keys), frame));
+        // Prior implementation retained only as the bounded comparison control.
+        def fgmim-record(rows) = fgmim-record-go(record_new(bp("glass-index-measure-control")), rows);
+        def fgmim-record-go(index, rows) = if eq(len(rows), 0) then index else fgmim-record-next(index, head(rows), tail(rows));
+        def fgmim-record-next(index, row, rest) {
+            let held = if record_has(index, fgo-id(row)) then 0 else record_set(index, fgo-id(row), row);
+            fgmim-record-go(index, rest);
+        }
+        def fgmim-get(mode, index, key) = if str_eq(mode, "record") then record_get(index, key) else fgd-index-find(index, key);
+        def fgmim-check(mode, index, keys, frame) = if eq(len(keys), 0) then 1 else if eq(fgo-int-value(fgmim-get(mode, index, head(keys))), frame) then fgmim-check(mode, index, tail(keys), frame) else 0;
+        def fgmim-snapshot(mode, frame, started) {
+            let words = kernel_live(host_pid());
+            print(list("index-measure", mode, "frames", frame, "elapsed-ms", sub(now_unix_ms(), started), "cons", nth(words, 8), "heap-capacity", nth(words, 13), "melts", nth(words, 21), "record-new-calls", kernel_stat(164)));
+        }
+        def fgmim-loop(mode, keys, frame, end, started) {
+            let index = if str_eq(mode, "record") then fgmim-record(fgmim-rows(keys, frame)) else fgd-metric-index(fgmim-rows(keys, frame));
+            let ok = fgmim-check(mode, index, keys, frame);
+            let sample = if eq(mod(frame, 250), 0) then fgmim-snapshot(mode, frame, started) else 0;
+            if eq(ok, 0) then list("lookup-mismatch", frame) else if ge(frame, end) then list("complete", mode, "frames", frame, "lookups", mul(frame, len(keys))) else fgmim-loop(mode, keys, add(frame, 1), end, started);
+        }
+        def fgmim-run(mode) = if and(not(str_eq(mode, "map")), not(str_eq(mode, "record"))) then list("input-required", "map or record") else fgmim-run-mode(mode);
+        def fgmim-run-mode(mode) {
+                let keys = fgmim-keys(0, 256);
+                let started = now_unix_ms();
+                let before = fgmim-snapshot(mode, 0, started);
+                let observation = bfc-envelope(0, started, 0, list("bounded-index-measure", mode, "keys", len(keys)), "input-required");
+                let emitted = bfc-record-out(observation, 0);
+                let control = bfc-control(observation, 1);
+                let received = bfc-record-in(control, 1);
+                let selected = if and(eq(bfc-exchange(control), bfc-exchange(observation)), eq(bfc-payload(control), 1)) then mode else bfc-alternative(observation);
+                let result = fgmim-loop(selected, keys, 1, 1000, started);
+                let after = bfc-record-out(bfc-envelope(0, started, 0, result, "lookup-mismatch"), 2);
+                result;
+        }
+    }
+    print(fgmim-run(read_line()));
+}

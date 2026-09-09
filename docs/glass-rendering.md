@@ -32,3 +32,24 @@ Bounded checks (each also has its printed verdict):
 time, not utilization. Owner CPU carries microseconds; absent or stale values
 show `?`. Retained detailed tiles still carry last-observed evidence. Organ
 coverage requires the exact census identities, not just an equal row count.
+
+## Frame-local metric memory
+
+`fgd-metric-index(rows)` builds a reclaimable native keyed trie. Its depth follows
+the row count; keys are exact bytes, not a fixed field list. The first row for an
+ID wins, including an unavailable row; absent IDs return an empty list. Old index
+snapshots stay unchanged when another frame is built. Dropping a frame lets its
+index and rows be reclaimed, unlike a kernel record whose fields remain rooted
+for the process lifetime.
+
+```text
+./fkwu form/form-stdlib/tests/form-glass-metric-index-band.fk  # 65535
+./fkwu observe/form-glass-metric-index-measure.bml
+```
+
+At the measurement door, enter `map` followed by Enter. Repeat in a separate
+invocation with `record` to measure the previous implementation. Each bounded
+run checks 256,000 lookups over 1,000 changing frames and prints elapsed time,
+heap capacity, reclamations, and permanent-record allocations. No live sensor,
+microphone, or renderer is started, and no transcript is read. Compare repeated
+warm runs: bounded memory does not by itself establish lower CPU cost.
