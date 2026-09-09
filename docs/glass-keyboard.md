@@ -4,6 +4,12 @@ Glass owns immediate input in its existing renderer process. No control command,
 newline, shell, or helper process is needed for a view change. The one-shot
 `observe/form-glass-control-run.fk` door remains for agent/control-channel clients.
 
+The carrier wakes the microphone by default. A fresh renderer opens live
+transcripts with `all` published languages visible. `z` closes the ear and keeps
+that choice across restarts; pressing it again wakes the ear. The opening view
+does not itself activate capture, and an empty transcript says what the ear is
+waiting for instead of inventing speech.
+
 Keys: `h` help; `a` atlas; `t` raster; `o` overview; `m` memory; `f` flow;
 `j` recipes; `s` live transcripts; `k` kernel; `v` events; `n` channels; `d` choice;
 `r` room (focus only; it does not activate a microphone). `z` is the explicit
