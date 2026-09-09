@@ -1,0 +1,140 @@
+// Current source vocabulary for the historical flatten-survey lane.
+// This reads and lowers source; it does not execute surveyed bands.
+// preludes: gate/lens-text.bml form-stdlib/native-op-manifest.fk form-stdlib/json.fk form-stdlib/hearth.bml form-stdlib/form-ontology-bp.fk form-stdlib/line-grammar.fk form-stdlib/bmf-core.fk form-stdlib/bmf-grammar.fk form-stdlib/bml.fk form-stdlib/bml-source.fk form-stdlib/source-compiler.fk form-stdlib/grammars/form-bml.fk form-stdlib/grammars/form-lift.fk form-stdlib/form-bml-lower.fk form-stdlib/source-compiler-text-lens.fk
+section [form.bml] {
+ class FourthArmGapAnalysis {
+  // token = [kind, text, source line]; kinds: symbol, open, close, string.
+  def fga-token(kind, text, line) = list(kind, text, line);
+  def fga-is(token, kind, text) = and(eq(head(token), kind), str_eq(nth(token, 1), text));
+  def fga-end(s, i) = if ge(i, str_len(s)) then i else if or(lx-ws-at?(s, i), lx-int-in?(list(40, 41, 34, 59), lx-byte(s, i))) then i else fga-end(s, add(i, 1));
+  def fga-quote(s, i) = if ge(i, str_len(s)) then -1 else if eq(lx-byte(s, i), 92) then fga-quote(s, add(i, 2)) else if eq(lx-byte(s, i), 34) then i else fga-quote(s, add(i, 1));
+  def fga-newlines(s, a, b) = if ge(a, b) then 0 else add(if eq(lx-byte(s, a), 10) then 1 else 0, fga-newlines(s, add(a, 1), b));
+  def fga-lex(s) = fga-lex-at(s, 0, 1, 0, list());
+  def fga-lex-at(s, i, line, depth, tokens) {
+   if ge(i, str_len(s)) then list(reverse(tokens), if eq(depth, 0) then "" else "unclosed-list")
+   else if eq(lx-byte(s, i), 59) then fga-comment(s, i, line, depth, tokens)
+   else if lx-ws-at?(s, i) then fga-lex-at(s, add(i, 1), add(line, if eq(lx-byte(s, i), 10) then 1 else 0), depth, tokens)
+   else if eq(lx-byte(s, i), 40) then fga-lex-at(s, add(i, 1), line, add(depth, 1), cons(fga-token(1, "(", line), tokens))
+   else if eq(lx-byte(s, i), 41) then if le(depth, 0) then list(reverse(tokens), "unexpected-close") else fga-lex-at(s, add(i, 1), line, sub(depth, 1), cons(fga-token(2, ")", line), tokens))
+   else if eq(lx-byte(s, i), 34) then fga-string(s, i, line, depth, tokens, fga-quote(s, add(i, 1)))
+   else fga-symbol(s, i, line, depth, tokens, fga-end(s, i));
+  }
+  def fga-comment(s, i, line, depth, tokens) {
+   let end = str_find(s, "\n", i);
+   fga-lex-at(s, if lt(end, 0) then str_len(s) else end, line, depth, tokens);
+  }
+  def fga-string(s, i, line, depth, tokens, end) = if lt(end, 0) then list(reverse(tokens), "unclosed-string") else fga-lex-at(s, add(end, 1), add(line, fga-newlines(s, i, end)), depth, cons(fga-token(3, substring(s, add(i, 1), end), line), tokens));
+  def fga-symbol(s, i, line, depth, tokens, end) = fga-lex-at(s, end, line, depth, cons(fga-token(0, substring(s, i, end), line), tokens));
+  def fga-values(tokens) = if nil?(tokens) then list() else cons(nth(head(tokens), 1), fga-values(tail(tokens)));
+  def fga-words(s) = fga-values(head(fga-lex(s)));
+  def fga-heads(tokens) = if lt(len(tokens), 2) then list() else if and(fga-is(head(tokens), 1, "("), eq(head(nth(tokens, 1)), 0)) then cons(nth(tokens, 1), fga-heads(tail(tokens))) else fga-heads(tail(tokens));
+  def fga-params(tokens) = if nil?(tokens) then list() else if eq(head(head(tokens)), 2) then list() else if eq(head(head(tokens)), 0) then cons(nth(head(tokens), 1), fga-params(tail(tokens))) else list();
+  def fga-defs(tokens) = if lt(len(tokens), 3) then list() else if and(fga-is(head(tokens), 1, "("), fga-is(nth(tokens, 1), 0, "defn")) then cons(nth(nth(tokens, 2), 1), fga-defs(tail(tokens))) else fga-defs(tail(tokens));
+  def fga-bindings(tokens) {
+   if lt(len(tokens), 3) then list()
+   else if and(fga-is(head(tokens), 1, "("), fga-is(nth(tokens, 1), 0, "defn")) then append(fga-params(drop(4, tokens)), fga-bindings(tail(tokens)))
+   else if and(fga-is(head(tokens), 1, "("), fga-is(nth(tokens, 1), 0, "fn")) then append(fga-params(drop(3, tokens)), fga-bindings(tail(tokens)))
+   else fga-bindings(tail(tokens));
+  }
+  // Read special cases from the actual flattener dispatch, alongside manifest
+  // rows and the shim's definitions. No held copy of the native operator list.
+  def fga-specials(tokens) = if lt(len(tokens), 4) then list() else if and(fga-is(head(tokens), 1, "("), and(fga-is(nth(tokens, 1), 0, "str_eq"), and(fga-is(nth(tokens, 2), 0, "op"), eq(head(nth(tokens, 3)), 3)))) then cons(nth(nth(tokens, 3), 1), fga-specials(tail(tokens))) else fga-specials(tail(tokens));
+  def fga-row-names(rows) = if nil?(rows) then list() else cons(head(head(rows)), fga-row-names(tail(rows)));
+  def fga-known(flat, shim) = lx-str-uniq(append(fga-row-names(nom-ops()), append(fga-specials(head(fga-lex(flat))), append(fga-defs(head(fga-lex(shim))), list("defn", "let", "fn")))));
+  def fga-missing(tokens, known) = lx-str-sort(lx-str-uniq(lx-str-minus(fga-values(fga-heads(tokens)), append(known, append(fga-defs(tokens), fga-bindings(tokens))))));
+  def fga-selected(category) = or(fga-suffix(category, "-mismatch"), fga-suffix(category, "-flatten-empty"));
+  def fga-suffix(s, suffix) = and(ge(str_len(s), str_len(suffix)), str_eq(substring(s, sub(str_len(s), str_len(suffix)), str_len(s)), suffix));
+  def fga-stem(s) = and(gt(str_len(s), 0), fga-stem-at(s, 0));
+  def fga-stem-at(s, i) = if ge(i, str_len(s)) then 1 else if or(lx-word-at?(s, i), eq(lx-byte(s, i), 45)) then fga-stem-at(s, add(i, 1)) else 0;
+  def fga-preludes(lines) = if nil?(lines) then list() else fga-prelude-line(lx-strip(head(lines)), tail(lines));
+  def fga-prelude-line(line, rest) = if lx-at?(line, 0, "; preludes:") then append(fga-words(substring(line, 11, str_len(line))), fga-preludes(rest)) else if lx-at?(line, 0, "// preludes:") then append(fga-words(substring(line, 12, str_len(line))), fga-preludes(rest)) else fga-preludes(rest);
+  def fga-noncore(paths) = if nil?(paths) then list() else if fga-suffix(head(paths), "core.fk") then fga-noncore(tail(paths)) else cons(head(paths), fga-noncore(tail(paths)));
+  def fga-under(root, path) = str_concat(root, str_concat("/", path));
+  def fga-source(root, path) {
+   let full = fga-under(root, path);
+   let source = read_file(full);
+   if nothing?(source) then list(path, list(), "unread") else fga-lower(path, source);
+  }
+  def fga-lower(path, source) {
+   let bml = ge(fsc-find-section-open(source, 0), 0);
+   let lowered = if bml then form-source-compile-text(source, path) else source;
+   let lexed = if nothing?(lowered) then list(list(), "lowering-unavailable") else fga-lex(lowered);
+   list(path, head(lexed), if and(bml, str_eq(lowered, "")) then "lowering-empty" else nth(lexed, 1));
+  }
+  def fga-sources(root, paths) = if nil?(paths) then list() else cons(fga-source(root, head(paths)), fga-sources(root, tail(paths)));
+  def fga-source-tokens(sources) = if nil?(sources) then list() else append(nth(head(sources), 1), fga-source-tokens(tail(sources)));
+  def fga-unread(sources) = if nil?(sources) then list() else if str_eq(nth(head(sources), 2), "") then fga-unread(tail(sources)) else cons(list(head(head(sources)), nth(head(sources), 2)), fga-unread(tail(sources)));
+  def fga-locations(sources, missing) = if nil?(sources) then list() else append(fga-locations-at(head(head(sources)), fga-heads(nth(head(sources), 1)), missing), fga-locations(tail(sources), missing));
+  def fga-locations-at(path, heads, missing) = if nil?(heads) then list() else if lx-str-in?(missing, nth(head(heads), 1)) then cons(list(path, nth(head(heads), 2), nth(head(heads), 1)), fga-locations-at(path, tail(heads), missing)) else fga-locations-at(path, tail(heads), missing);
+  // band = [stem, category, state, missing names, unread sources, locations].
+  def fga-band-result(stem, category, sources, known) {
+   let unread = fga-unread(sources);
+   let missing = if nil?(unread) then fga-missing(fga-source-tokens(sources), known) else list();
+   list(stem, category, if nil?(unread) then "analyzed" else "unread", missing, unread, fga-locations(sources, missing));
+  }
+  def fga-band(root, stem, category, known) {
+   let band = str_concat("form/form-stdlib/tests/", str_concat(stem, "-band.fk"));
+   let text = read_file(fga-under(root, band));
+   let declared = if nothing?(text) then list() else fga-noncore(fga-preludes(lx-lines(text)));
+   let fallback = str_concat("form/form-stdlib/", str_concat(stem, ".fk"));
+   let modules = if nil?(declared) then if ge(file_size(fga-under(root, fallback)), 0) then list(fallback) else list() else fga-form-paths(declared);
+   fga-band-result(stem, category, fga-sources(root, append(modules, list(band))), known);
+  }
+  def fga-form-paths(paths) = if nil?(paths) then list() else cons(if lx-at?(head(paths), 0, "form/") then head(paths) else str_concat("form/", head(paths)), fga-form-paths(tail(paths)));
+  def fga-survey(root, lines, known, seen) = if nil?(lines) then list() else if lx-blank?(head(lines)) then fga-survey(root, tail(lines), known, seen) else fga-survey-row(root, split-on(head(lines), "\t"), tail(lines), known, seen);
+  def fga-survey-row(root, row, rest, known, seen) {
+   if or(lt(len(row), 2), not(fga-stem(head(row)))) then cons(list(head(row), "", "malformed-survey-row", list(), list(), list()), fga-survey(root, rest, known, seen))
+   else if not(fga-selected(nth(row, 1))) then fga-survey(root, rest, known, seen)
+   else if lx-str-in?(seen, head(row)) then cons(list(head(row), nth(row, 1), "duplicate-survey-row", list(), list(), list()), fga-survey(root, rest, known, seen))
+   else cons(fga-band(root, head(row), nth(row, 1), known), fga-survey(root, rest, known, cons(head(row), seen)));
+  }
+  def fga-analyzed(rows) = if nil?(rows) then list() else if str_eq(nth(head(rows), 2), "analyzed") then cons(head(rows), fga-analyzed(tail(rows))) else fga-analyzed(tail(rows));
+  def fga-all-missing(rows) = if nil?(rows) then list() else append(nth(head(rows), 3), fga-all-missing(tail(rows)));
+  def fga-blocked(rows, op) = if nil?(rows) then list() else if lx-str-in?(nth(head(rows), 3), op) then cons(head(head(rows)), fga-blocked(tail(rows), op)) else fga-blocked(tail(rows), op);
+  def fga-ranked-row(op, rows) = list(op, len(fga-blocked(rows, op)), fga-blocked(rows, op));
+  def fga-rank-before(a, b) = or(gt(nth(a, 1), nth(b, 1)), and(eq(nth(a, 1), nth(b, 1)), lx-str-lt?(head(a), head(b))));
+  def fga-insert(row, rows) = if nil?(rows) then list(row) else if fga-rank-before(row, head(rows)) then cons(row, rows) else cons(head(rows), fga-insert(row, tail(rows)));
+  def fga-rank(ops, bands) = if nil?(ops) then list() else fga-insert(fga-ranked-row(head(ops), bands), fga-rank(tail(ops), bands));
+  def fga-covered(rows, taught) = if nil?(rows) then 0 else add(if nil?(lx-str-minus(nth(head(rows), 3), taught)) then 1 else 0, fga-covered(tail(rows), taught));
+  def fga-cumulative(ranked, bands, taught) = if nil?(ranked) then list() else cons(list(head(head(ranked)), fga-covered(bands, cons(head(head(ranked)), taught))), fga-cumulative(tail(ranked), bands, cons(head(head(ranked)), taught)));
+  def fga-json-strings(rows) = if nil?(rows) then list() else cons(json-node-string(head(rows)), fga-json-strings(tail(rows)));
+  def fga-js(key, value) = json-node-pair(key, json-node-string(value));
+  def fga-jn(key, value) = json-node-pair(key, json-node-int(value));
+  def fga-ja(key, values) = json-node-pair(key, json-node-array(values));
+  def fga-json-unread(rows) = if nil?(rows) then list() else cons(json-node-object(list(fga-js("path", head(head(rows))), fga-js("reason", nth(head(rows), 1)))), fga-json-unread(tail(rows)));
+  def fga-json-locations(rows) = if nil?(rows) then list() else cons(json-node-object(list(fga-js("path", head(head(rows))), fga-jn("line", nth(head(rows), 1)), fga-js("op", nth(head(rows), 2)))), fga-json-locations(tail(rows)));
+  def fga-json-bands(rows) = if nil?(rows) then list() else cons(fga-json-band(head(rows)), fga-json-bands(tail(rows)));
+  def fga-json-band(row) = json-node-object(list(fga-js("band", head(row)), fga-js("category", nth(row, 1)), fga-js("state", nth(row, 2)), fga-ja("missing_candidates", fga-json-strings(nth(row, 3))), fga-ja("unread", fga-json-unread(nth(row, 4))), fga-ja("locations", fga-json-locations(nth(row, 5)))));
+  def fga-json-ranking(rows) = if nil?(rows) then list() else cons(json-node-object(list(fga-js("op", head(head(rows))), fga-jn("blocked_bands", nth(head(rows), 1)), fga-ja("bands", fga-json-strings(nth(head(rows), 2))))), fga-json-ranking(tail(rows)));
+  def fga-json-cumulative(rows) = if nil?(rows) then list() else cons(json-node-object(list(fga-js("add_candidate", head(head(rows))), fga-jn("bands_in_vocabulary", nth(head(rows), 1)))), fga-json-cumulative(tail(rows)));
+  def fga-tsv(rows) = if nil?(rows) then "" else str_concat(head(head(rows)), str_concat("\t", str_concat(tb-join(nth(head(rows), 3), identity, " "), str_concat("\n", fga-tsv(tail(rows))))));
+  def fga-report(input, state, rows, started) {
+   let analyzed = fga-analyzed(rows);
+   let ranked = fga-rank(lx-str-uniq(fga-all-missing(analyzed)), analyzed);
+   json-emit(json-node-object(list(fga-js("version", "fourth-arm-gap-v1"), fga-js("input", input), fga-js("state", state), fga-jn("observed_unix_ms", now_unix_ms()), fga-jn("elapsed_ms", sub(host_monotonic_ms(), started)), fga-js("scope", "historical flatten-survey vocabulary; current band plus declared non-core prelude slice; no band execution or semantic repair claim; parameter names are excluded across that slice"), fga-js("line_basis", "original Form source; in-memory lowered Form for BML"), fga-jn("analyzed", len(analyzed)), fga-jn("unread_or_invalid", sub(len(rows), len(analyzed))), fga-ja("bands", fga-json-bands(rows)), fga-ja("ranking", fga-json-ranking(ranked)), fga-ja("cumulative", fga-json-cumulative(fga-cumulative(take(40, ranked), analyzed, list()))))));
+  }
+  def fga-run-at(root, input, output, detail) {
+   let started = host_monotonic_ms();
+   let survey = read_file(input);
+   let flat = read_file(fga-under(root, "form/form-stdlib/form-flatten.fk"));
+   let shim = read_file(fga-under(root, "form/form-stdlib/fourth-shim.fk"));
+   let vocabulary = if or(nothing?(flat), nothing?(shim)) then 0 else and(gt(str_len(flat), 0), and(gt(str_len(shim), 0), and(str_eq(nth(fga-lex(flat), 1), ""), str_eq(nth(fga-lex(shim), 1), ""))));
+   let ready = and(not(nothing?(survey)), vocabulary);
+   let rows = if ready then fga-survey(root, lx-lines(survey), fga-known(flat, shim), list()) else list();
+   let state = if nothing?(survey) then "survey-unavailable" else if not(ready) then "vocabulary-unavailable" else if eq(len(rows), len(fga-analyzed(rows))) then "observed-source-slice" else "partial-source-reading";
+   let report = str_concat(fga-report(input, state, rows, started), "\n");
+   let tsv = fga-tsv(fga-analyzed(rows));
+   let wrote = write_file(output, report);
+   let listed = write_file(detail, tsv);
+   print(str_concat("fourth-arm-gap state=", str_concat(state, str_concat(" analyzed=", str_concat(int_to_str(len(fga-analyzed(rows))), str_concat(" unread-or-invalid=", int_to_str(sub(len(rows), len(fga-analyzed(rows))))))))));
+   print(str_concat(if eq(wrote, str_len(report)) then "reading=" else "reading-unwritten target=", output));
+   print(str_concat(if eq(listed, str_len(tsv)) then "per-band=" else "per-band-unwritten target=", detail));
+   if and(eq(wrote, str_len(report)), eq(listed, str_len(tsv))) then if str_eq(state, "observed-source-slice") then 1 else 0 else -1;
+  }
+  def fga-run(input) {
+   let made = fs_mkdir(HearthDir());
+   fga-run-at(".", if or(nothing?(input), str_eq(input, "")) then hearth-fourth-survey-input() else input, hearth-fourth-gap-report(), hearth-fourth-gap-detail());
+  }
+ }
+ 0;
+}
