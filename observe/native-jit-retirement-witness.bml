@@ -1,0 +1,62 @@
+// Each row keeps its preflight, process status, answer and elapsed time.
+// Prelude-only: importing this unit never starts the witness.
+// preludes: gate/lens-text.bml form-stdlib/json.fk
+section [form.bml] {
+ class NativeJitRetirementWitness {
+  def njw-cases() = list(
+   list("observe/native-jit-witness-run.fk", "1"),
+   list("form/form-stdlib/tests/native-recursion-band.fk", "8"),
+   list("form/form-stdlib/tests/native-list-calls-band.fk", "4"),
+   list("form/form-stdlib/tests/native-helper-calls-band.fk", "4"),
+   list("form/form-stdlib/tests/jit-native-span-band.fk", "255"),
+   list("form/form-stdlib/tests/jit-coverage-band.fk", "5"),
+   list("form/form-stdlib/tests/jit-lower-band.fk", "15"),
+   list("form/form-stdlib/tests/jit-leaf-inram-band.fk", "63"),
+   list("form/form-stdlib/tests/direct-source-jit-discovery-band.fk", "32767"),
+   list("form/form-stdlib/tests/jit-once-born-band.fk", "32767"),
+   list("form/form-stdlib/tests/form-cli-jit-band.fk", "16383"));
+  def njw-last(source) {
+   let lines = lx-lines(lx-strip(source));
+   if nil?(lines) then "" else nth(lines, sub(len(lines), 1));
+  }
+  def njw-run() {
+   let root = str_concat(".hearth/native-jit-check-", int_to_str(host_pid()));
+   let made = host_dir_mkdir(root);
+   if not(eq(made, 1)) then form_error("native JIT witness: evidence directory refused") else njw-start(root);
+  }
+  def njw-start(root) {
+   let head = host_capture(list("git", "rev-parse", "HEAD"));
+   let tree = host_capture(list("git", "write-tree"));
+   let diff = host_capture(list("git", "diff", "--name-only"));
+   let meta = json-emit(json-node-object(list(json-node-pair("observed_unix_ms", json-node-int(now_unix_ms())), json-node-pair("head", json-node-string(lx-strip(head))), json-node-pair("index_tree", json-node-string(lx-strip(tree))), json-node-pair("unstaged_paths", json-node-string(diff)))));
+   let kept = write_file(str_concat(root, "/source.json"), str_concat(meta, "\n"));
+   print(meta);
+   njw-finish(root, njw-rows(root, njw-cases(), 0, 0), head);
+  }
+  def njw-rows(root, cases, index, failures) = if nil?(cases) then failures else njw-rows(root, tail(cases), add(index, 1), add(failures, njw-case(root, head(cases), index)));
+  def njw-case(root, row, index) {
+   let prefix = str_concat(root, str_concat("/", int_to_str(index)));
+   let input = str_concat(prefix, ".input");
+   let wrote = write_file(input, str_concat(head(row), "\n"));
+   let start = host_monotonic_ms();
+   let preflight = host_wait(host_spawn_at(list("./fkwu", "observe/preflight-stdin-run.fk"), list(input, str_concat(prefix, ".preflight.out"), str_concat(prefix, ".preflight.err"))));
+   let report = read_file(str_concat(prefix, ".preflight.out"));
+   let clean = and(eq(preflight, 0), ge(str_find(report, "chain         clean", 0), 0));
+   let ready = host_monotonic_ms();
+   let status = if clean then host_wait(host_spawn_at(list("./fkwu", head(row)), list("/dev/null", str_concat(prefix, ".out"), str_concat(prefix, ".err")))) else -1;
+   let answer = if clean then njw-last(read_file(str_concat(prefix, ".out"))) else "preflight-refused";
+   let end = host_monotonic_ms();
+   let good = and(clean, and(eq(status, 0), str_eq(answer, nth(row, 1))));
+   let observed = json-emit(json-node-object(list(json-node-pair("path", json-node-string(head(row))), json-node-pair("preflight_exit", json-node-int(preflight)), json-node-pair("preflight_clean", json-node-bool(clean)), json-node-pair("preflight_ms", json-node-int(sub(ready, start))), json-node-pair("exit", json-node-int(status)), json-node-pair("run_ms", json-node-int(sub(end, ready))), json-node-pair("expected", json-node-string(nth(row, 1))), json-node-pair("actual", json-node-string(answer)), json-node-pair("pass", json-node-bool(good)))));
+   let kept = write_file(str_concat(prefix, ".json"), str_concat(observed, "\n"));
+   print(observed);
+   if good then 0 else 1;
+  }
+  def njw-finish(root, failures, before) {
+   let after = host_capture(list("git", "rev-parse", "HEAD"));
+   print(list("evidence", root, "cases", len(njw-cases()), "failures", failures));
+   if not(str_eq(before, after)) then form_error("native JIT witness: HEAD moved; re-witness") else if eq(failures, 0) then 1 else form_error("native JIT retirement witness failed; inspect retained rows");
+  }
+ }
+ 0;
+}

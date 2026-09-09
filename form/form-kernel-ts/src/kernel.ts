@@ -677,31 +677,11 @@ export class Kernel {
   // native. Removing the entry restores the Form walk.
   jitAliases = new Map<NameID, NameID>();
 
-  // jitCompiled — closure-body-NodeID → CompiledFn. When (jit_compile
-  // "name") fires, the closure under `name` has its body compiled via
-  // compiler.ts and stored here. The walker checks this map on every
-  // FNCALL — if the closure body has a compiled version, dispatch
-  // through it instead of walking. Keyed by content-addressed body
-  // NodeID, so re-defining the same body re-uses the cached compile.
-  // Indexed by stringified NodeID tuple (pkg.level.type.inst).
-  jitCompiled = new Map<string, (frame: Frame) => Value>();
-  jitFailedReason = new Map<string, string>();
-  jitDispatchMisses = new Map<string, number>();
-
   // SWITCH recipe cache — source-level BML/Form `match` lowers to
   // RBasic.MATCH/RMatch.SWITCH. Literal arms are direct NodeID→body edges,
   // keyed by the substrate identity of the scrutinee value. The cache key is
   // the match recipe's own content-addressed NodeID.
   switchTables = new Map<string, SwitchTable>();
-
-  // jitCompileHook — pluggable Form→host-asm compiler. Installed at
-  // startup by main.ts via compiler.ts. The kernel holds the hook
-  // pointer rather than importing the compiler directly so this module
-  // stays the canonical foundation (compiler.ts imports kernel.ts;
-  // hoisting compiler into kernel would create a cycle). When the hook
-  // is null, the jit_compile native returns 0 honestly — telling the
-  // Form caller "no compiler available on this kernel."
-  jitCompileHook: ((k: Kernel, body: NodeID) => (frame: Frame) => Value) | null = null;
 
   // Optional tracing — undefined for hot-path runs, set by trace
   // subcommand. Sibling-parity with Go/Rust kernels.
@@ -2404,19 +2384,15 @@ export class Kernel {
       kind: "int",
       int: (argInt(args, 0) + argInt(args, 1)) >>> 0,
     }));
-    // sha256_bytes / bytes_sum / bytes_hash were temporarily added as
-    // natives here but composted: those are composites, not primitives.
-    // SHA-256 lives in form-stdlib/sha256.fk as a Form recipe over the
-    // bitwise primitives above. The real JIT path (Form recipe → host
-    // JS via compiler.ts + new Function) is the next walk; this kernel
-    // currently relies on recipe-walk for composite operations.
+    // SHA-256 lives in form-stdlib/sha256.fk. This proof interpreter walks
+    // composite operations; Form running on fkwu owns native compilation.
     // register_jit form-name-str native-name-str → 1 on bind, 0 if
     // native-name has no registered native (refuse silent miss).
     // Inserts (form-name → native-name) into k.jitAliases. After this,
     // every (form-name ...) call goes through the aliased native instead
     // of walking the Form definition. Form recipes are canonical truth;
-    // register_jit is the opt-in that promotes a recipe to host-native
-    // execution. Removing the entry restores the Form walk.
+    // register_jit binds an existing primitive alias; it performs no
+    // compilation. Removing the entry restores the Form walk.
     this.registerNative("register_jit", catWitness(), (k, args) => {
       const formName = argStr(args, 0);
       const nativeName = argStr(args, 1);
@@ -2473,94 +2449,6 @@ export class Kernel {
       } catch {
         return { kind: "null" };
       }
-    });
-    // jit_compile form-name-str → 1 if a host-JIT compile succeeded
-    // for the closure under this name, 0 if no compiler is available
-    // (Rust + Go return 0 today; cranelift + plugin paths are future
-    // walks), -1 if the name isn't bound to a closure in the current
-    // env. After a successful compile, every (form-name args...) call
-    // dispatches through the compiled function instead of walking the
-    // recipe tree — same canonical Form recipe; host-native speed.
-    // jit_compile_value — the Value-ABI JIT lives on the go carrier today;
-    // honest 0 so sibling-Form code can branch on availability
-    // (1 compiled, 0 not compiled here, -1 missing).
-    this.registerNative("jit_compile_value", catWitness(), () => ({
-      kind: "int",
-      int: 0,
-    }));
-
-    // jit_emit_c — the recipe→C projection lives on the go carrier today;
-    // honest "" so sibling-Form code can branch on it.
-    this.registerNative("jit_emit_c", catWitness(), () => ({
-      kind: "str",
-      str: "",
-    }));
-
-    this.registerEnvNative("jit_compile", catWitness(), (k, env, args) => {
-      if (k.jitCompileHook === null) {
-        // Compiler not installed on this kernel build — honest 0 so
-        // sibling-Form code can branch on availability.
-        return { kind: "int", int: 0 };
-      }
-      const formName = argStr(args, 0);
-      const formID = k.internName(formName);
-      const v = env.lookup(formID);
-      if (v === undefined || v.kind !== "closure") {
-        return { kind: "int", int: -1 };
-      }
-      const bodyKey = `${v.closure.body.pkg}.${v.closure.body.level}.${v.closure.body.type}.${v.closure.body.inst}`;
-      let compiled: (frame: Frame) => Value;
-      try {
-        compiled = k.jitCompileHook(k, v.closure.body);
-      } catch (err) {
-        k.jitFailedReason.set(bodyKey, err instanceof Error ? err.message : String(err));
-        return { kind: "int", int: 0 };
-      }
-      k.jitCompiled.set(bodyKey, compiled);
-      return { kind: "int", int: 1 };
-    });
-    // jit-stats -> list(kind, body-nodeid, count, detail). Sibling observer
-    // shape with Go/Rust; TS currently reports compiled bodies.
-    this.registerNative("jit-stats", catWitness(), (k, _args) => {
-      const rows: Value[] = Array.from(k.jitCompiled.keys()).map((body) => ({
-          kind: "list",
-          list: [
-            { kind: "str", str: "compiled" },
-            { kind: "str", str: body },
-            { kind: "int", int: 0 },
-            { kind: "str", str: "" },
-          ],
-        }) as Value);
-      for (const [body, reason] of k.jitFailedReason) {
-        rows.push({
-          kind: "list",
-          list: [
-            { kind: "str", str: "compile-failed" },
-            { kind: "str", str: body },
-            { kind: "int", int: 1 },
-            { kind: "str", str: reason },
-          ],
-        });
-      }
-      for (const [body, count] of k.jitDispatchMisses) {
-        rows.push({
-          kind: "list",
-          list: [
-            { kind: "str", str: "dispatch-miss" },
-            { kind: "str", str: body },
-            { kind: "int", int: count },
-            { kind: "str", str: "compiled artifact guard fell back to walker" },
-          ],
-        });
-      }
-      rows.sort((a, b) => {
-        const al = (a as { kind: "list"; list: Value[] }).list;
-        const bl = (b as { kind: "list"; list: Value[] }).list;
-        const ak = (al[0] as { str: string }).str + ":" + (al[1] as { str: string }).str;
-        const bk = (bl[0] as { str: string }).str + ":" + (bl[1] as { str: string }).str;
-        return ak.localeCompare(bk);
-      });
-      return { kind: "list", list: rows };
     });
     // seeded_bytes(seed, count) — deterministic LCG byte stream.
     // Same (seed, count) → byte-identical output across Go / Rust / TS.
@@ -5148,27 +5036,6 @@ function invokeClosure(
   }
   k.trace?.recordFn(k.nameStr(closure.name));
   k.formStack.push(k.formFrameLabel(closure.name, closure.body));
-  // JIT-compiled fast path: if this closure's body has been compiled
-  // via (jit_compile ...), dispatch through the host-JIT'd function
-  // instead of walking the recipe tree. Form recipe stays canonical
-  // truth; the compiled fn is opt-in bootstrap to host speed.
-  const bodyKey = nodeIDKey(closure.body);
-  const compiled = k.jitCompiled.get(bodyKey);
-  if (compiled !== undefined) {
-    const depth = k.formStack.length;
-    try {
-      const out = compiled(callFrame);
-      k.formStack.pop();
-      return out;
-    } catch (err) {
-      // The walker retries below — a swallowed JIT failure must not
-      // leave its frames behind.
-      k.formStack.length = depth;
-      const reason = err instanceof Error ? err.message : String(err);
-      k.jitFailedReason.set(bodyKey, reason);
-      k.jitDispatchMisses.set(bodyKey, (k.jitDispatchMisses.get(bodyKey) ?? 0) + 1);
-    }
-  }
   const out = walk(k, closure.body, callFrame);
   k.formStack.pop();
   return out;

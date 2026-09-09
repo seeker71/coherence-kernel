@@ -38,8 +38,6 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"form-kernel-go/jitabi"
 )
 
 // --- core types extracted to package core (so JIT plugins can import them) ---
@@ -47,6 +45,12 @@ type NodeID = core.NodeID
 type NameID = core.NameID
 type ValueKind = core.ValueKind
 type Value = core.Value
+
+// nodeIDKey identifies a recipe in observation and dispatch tables.
+func nodeIDKey(n NodeID) string {
+	return fmt.Sprintf("%d.%d.%d.%d", n.Pkg, n.Level, n.Type, n.Inst)
+}
+
 type Record = core.Record
 type Closure = core.Closure
 type Frame = core.Frame
@@ -591,40 +595,8 @@ type Kernel struct {
 	observeSeq       uint32
 	// Optional tracing — nil for hot-path runs, set for trace subcommand.
 	// Per lc-native-kernel-binary's "tracing and observation pattern."
-	Trace *Trace
-	// jitCompiledGo - body-NodeID-key -> host-native typed function pointers.
-	// Populated by the recipe→Go-source+plugin.Open JIT path (see jit.go's
-	// machinery wired into the `jit_compile` env-aware native). Read on every
-	// FNCALL closure dispatch: when present, marshal Form values into the ABI
-	// whose guard matches (i64, f64, or jitabi.Value), call generated Go, and
-	// box the result. Same shape as TS kernel's k.jitCompiled, widened for
-	// honest guard-miss observation.
-	jitCompiledGo map[string]*GoJITCompiled
-	// jitCompiledGoV — body-NodeID-key → Value-typed native function. The
-	// general JIT path (jit_value.go): compiles ANY recipe to a plugin that
-	// operates on core.Value and routes native / cross-function calls back
-	// through a kernel-supplied dispatch. Read on FNCALL closure dispatch
-	// before the int64 fast path; when present, runs the body native with no
-	// walk-interpreter overhead. Falls back to walk when a shape can't lower.
-	jitCompiledGoV  map[string]jitValueFn
-	jitHits         map[NodeID]uint32
-	jitFailed       map[NodeID]bool
-	jitFailedReason map[NodeID]string
-	jitDispatchHits map[NodeID]uint32
-	// jitAsync* — landing zone for hot-threshold builds running off the
-	// walker goroutine (jit.go's jitAsyncKick/jitAsyncTake). Only these
-	// maps are shared across goroutines; jitCompiledGo itself stays
-	// walker-only — landed artifacts are adopted into it at dispatch.
-	jitAsyncMu       sync.Mutex
-	jitAsyncBuilding map[string]bool
-	jitAsyncLanded   map[string]*jitAsyncResult
-	// installedLeaves — installed-name → artifact body NodeID for callables
-	// bound into k.natives AT RUNTIME by jit_install (the
-	// install-as-named-callable-leaf carrier; protocol:
-	// form-stdlib/install-leaf.fk). Lets Form code distinguish a leaf the
-	// surface grew by offer from a native compiled into the binary.
-	installedLeaves map[NameID]NodeID
-	switchTables    map[NodeID]*switchTable
+	Trace        *Trace
+	switchTables map[NodeID]*switchTable
 }
 
 type switchTable struct {
@@ -652,29 +624,20 @@ type sourceLoc struct {
 
 func NewKernel() *Kernel {
 	k := &Kernel{
-		byHash:           make(map[uint64]NodeID),
-		byID:             make(map[NodeID]Recipe),
-		strIdx:           make(map[string]NameID),
-		sourceAttr:       make(map[NodeID]sourceLoc),
-		importSeq:        1,
-		walkCache:        make(map[NodeID]Value),
-		next:             1,
-		f64Idx:           make(map[uint64]uint32),
-		i64Idx:           make(map[int64]uint32),
-		natives:          make(map[NameID]NativeEntry),
-		envNatives:       make(map[NameID]EnvAwareNativeEntry),
-		methods:          make(map[methodKey]*Closure),
-		jitAliases:       make(map[NameID]NameID),
-		jitCompiledGo:    make(map[string]*GoJITCompiled),
-		jitCompiledGoV:   make(map[string]jitValueFn),
-		jitHits:          make(map[NodeID]uint32),
-		jitFailed:        make(map[NodeID]bool),
-		jitFailedReason:  make(map[NodeID]string),
-		jitDispatchHits:  make(map[NodeID]uint32),
-		jitAsyncBuilding: make(map[string]bool),
-		jitAsyncLanded:   make(map[string]*jitAsyncResult),
-		installedLeaves:  make(map[NameID]NodeID),
-		switchTables:     make(map[NodeID]*switchTable),
+		byHash:       make(map[uint64]NodeID),
+		byID:         make(map[NodeID]Recipe),
+		strIdx:       make(map[string]NameID),
+		sourceAttr:   make(map[NodeID]sourceLoc),
+		importSeq:    1,
+		walkCache:    make(map[NodeID]Value),
+		next:         1,
+		f64Idx:       make(map[uint64]uint32),
+		i64Idx:       make(map[int64]uint32),
+		natives:      make(map[NameID]NativeEntry),
+		envNatives:   make(map[NameID]EnvAwareNativeEntry),
+		methods:      make(map[methodKey]*Closure),
+		jitAliases:   make(map[NameID]NameID),
+		switchTables: make(map[NodeID]*switchTable),
 	}
 	k.registerNatives()
 	return k
@@ -935,10 +898,6 @@ func (k *Kernel) observeRecipeDispatch(cat NodeID) {
 
 func (k *Kernel) observeNamedDispatch(file string, name NameID) {
 	k.observeFrame(file, uint32(name), 1, k.internString(k.nameStr(name)))
-}
-
-func (k *Kernel) observeJIT(file string, body NodeID, line uint32, col uint32) {
-	k.observeFrame(file, line, col, body)
 }
 
 func (k *Kernel) nodeDisplay(n NodeID) string {
@@ -1874,64 +1833,6 @@ func composeScaledDecimal(kept string, n int, neg bool) string {
 // This Go kernel follows TS — the bootstrap reference — and a future
 // breath will harmonize Rust's render to match.) Specials follow the JS
 // surface: NaN → "NaN", +Inf → "Infinity", -Inf → "-Infinity".
-
-type GoJITCompiled struct {
-	I64   func([]int64) int64
-	F64   func([]float64) float64
-	Value func([]jitabi.Value) jitabi.Value
-}
-
-func valueToJIT(v Value) (jitabi.Value, bool) {
-	switch v.Kind {
-	case VNull:
-		return jitabi.Null(), true
-	case VInt:
-		return jitabi.Int(v.Int), true
-	case VFloat:
-		return jitabi.Float(v.Float), true
-	case VStr:
-		return jitabi.Str(v.Str), true
-	case VBool:
-		return jitabi.Bool(v.Bool), true
-	case VNodeID:
-		return jitabi.Node(v.Nid.Pkg, v.Nid.Level, v.Nid.Type, v.Nid.Inst), true
-	case VList:
-		out := make([]jitabi.Value, 0, len(v.List))
-		for _, child := range v.List {
-			jv, ok := valueToJIT(child)
-			if !ok {
-				return jitabi.Null(), false
-			}
-			out = append(out, jv)
-		}
-		return jitabi.List(out...), true
-	}
-	return jitabi.Null(), false
-}
-
-func valueFromJIT(v jitabi.Value) Value {
-	switch v.Kind {
-	case jitabi.NullKind:
-		return Value{Kind: VNull}
-	case jitabi.IntKind:
-		return Value{Kind: VInt, Int: v.Int}
-	case jitabi.FloatKind:
-		return Value{Kind: VFloat, Float: v.Float}
-	case jitabi.StrKind:
-		return Value{Kind: VStr, Str: v.Str}
-	case jitabi.BoolKind:
-		return Value{Kind: VBool, Bool: v.Bool}
-	case jitabi.NodeKind:
-		return Value{Kind: VNodeID, Nid: NodeID{Pkg: v.Node.Pkg, Level: v.Node.Level, Type: v.Node.Type, Inst: v.Node.Inst}}
-	case jitabi.ListKind:
-		out := make([]Value, 0, len(v.List))
-		for _, child := range v.List {
-			out = append(out, valueFromJIT(child))
-		}
-		return Value{Kind: VList, List: out}
-	}
-	return Value{Kind: VNull}
-}
 
 type choiceFailSignal struct{}
 type choiceStopSignal struct{}
@@ -3090,19 +2991,15 @@ func (k *Kernel) registerNatives() {
 		b := uint32(args[1].AsInt())
 		return Value{Kind: VInt, Int: int64(a + b)}
 	})
-	// sha256_bytes / bytes_sum / bytes_hash were temporarily added as
-	// natives here but composted: those are composites, not primitives.
-	// SHA-256 lives in form-stdlib/sha256.fk as a Form recipe over the
-	// bitwise primitives above. The real JIT path (Form recipe → host
-	// machine code via recipe-emitter+plugin.Open) is the next walk;
-	// this kernel currently relies on recipe-walk for composite ops.
+	// SHA-256 lives in form-stdlib/sha256.fk. This proof interpreter walks
+	// composite operations; Form running on fkwu owns native compilation.
 	// register_jit form-name-str native-name-str → 1 on bind, 0 if
 	// native-name has no registered native (refuse silent miss).
 	// Inserts (form-name → native-name) into k.jitAliases. After this,
 	// every (form-name ...) call goes through the aliased native instead
 	// of walking the Form definition. Form recipes are canonical truth;
-	// register_jit is the opt-in that promotes a recipe to host-native
-	// execution. Removing the entry restores the Form walk.
+	// register_jit binds an existing primitive alias; it performs no
+	// compilation. Removing the entry restores the Form walk.
 	k.registerNative("register_jit", catWitness(), func(k *Kernel, args []Value) Value {
 		formName := argStr(args, 0)
 		nativeName := argStr(args, 1)
@@ -3153,128 +3050,6 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VNodeID, Nid: root}
 	})
-	// jit_compile form-name-str → 1 if a host-JIT compile succeeded,
-	//   0 if the compile fell back (toolchain missing, body uses ops the
-	//   emitter can't lower, plugin.Open failed), -1 if the name isn't
-	//   bound to a closure at all. Env-aware: needs the caller's env to
-	//   resolve the named closure.
-	//
-	// The Go path: Form recipe body → generated Go source under /tmp/
-	//   → `go build -buildmode=plugin -o plugin.so` (via os/exec)
-	//   -> plugin.Open + plugin.Lookup("FnI64"/"FnF64") to load ABI symbols
-	//   -> store typed artifact under bodyKey in k.jitCompiledGo
-	//   -> FNCALL closure path checks ABI guards and dispatches when present.
-	//
-	// Same shape as TS kernel's compileNode+jitCompiled — same canonical
-	// truth (the recipe) expressed through each host's available compiler.
-	k.registerEnvNative("jit_compile", catWitness(), func(k *Kernel, env *Frame, args []Value) Value {
-		if len(args) < 1 || args[0].Kind != VStr {
-			return Value{Kind: VInt, Int: -1}
-		}
-		nameID := k.internName(args[0].Str)
-		v, ok := env.Lookup(nameID)
-		if !ok || v.Kind != VClosure {
-			return Value{Kind: VInt, Int: -1}
-		}
-		cl := v.Cl
-		bodyKey := nodeIDKey(cl.Body)
-		// Already compiled? Reuse — the body NodeID is content-addressed,
-		// so the same shape across calls always resolves to the same .so.
-		if _, exists := k.jitCompiledGo[bodyKey]; exists {
-			delete(k.jitHits, cl.Body)
-			k.observeJIT("observe/go/jit/compile-hit", cl.Body, 1, 1)
-			return Value{Kind: VInt, Int: 1}
-		}
-		fn, err := jitCompileClosureGo(k, cl)
-		if err != nil {
-			// Honest fallback — the recipe still walks. The body remains
-			// canonical truth; the JIT path is just unavailable for this
-			// shape today.
-			k.jitFailed[cl.Body] = true
-			k.jitFailedReason[cl.Body] = err.Error()
-			k.observeJIT("observe/go/jit/compile-fail", cl.Body, 1, 1)
-			return Value{Kind: VInt, Int: 0}
-		}
-		k.jitCompiledGo[bodyKey] = fn
-		delete(k.jitHits, cl.Body)
-		k.observeJIT("observe/go/jit/compile-success", cl.Body, 1, 1)
-		return Value{Kind: VInt, Int: 1}
-	})
-	// jit_compile_value form-name-str → 1 if the Value-typed JIT compiled
-	//   the named closure to a native plugin, 0 on honest fallback (source
-	//   root unavailable, or a recipe shape the emitter can't lower yet),
-	//   -1 if the name isn't bound to a closure. The general path: compiles
-	//   ANY recipe (lists, strings, native calls, cross-function calls) to a
-	//   plugin operating on core.Value, with calls routed through dispatch.
-	//   The recipe stays canonical truth; this just runs it native.
-	// jit_emit_c form-name-str → the recipe lowered to freestanding C
-	//   source (jit_c.go int64 subset), or "" when the shape isn't in the
-	//   subset / the name isn't a closure. The projection surface for
-	//   cross-ISA assembly: scripts/jit_assembly_audit tooling feeds it to
-	//   LLVM for aarch64/hexagon/amdgcn/nvptx and reads the instructions.
-	k.registerEnvNative("jit_emit_c", catWitness(), func(k *Kernel, env *Frame, args []Value) Value {
-		if len(args) < 1 || args[0].Kind != VStr {
-			return Value{Kind: VStr, Str: ""}
-		}
-		nameID := k.internName(args[0].Str)
-		v, ok := env.Lookup(nameID)
-		if !ok || v.Kind != VClosure {
-			return Value{Kind: VStr, Str: ""}
-		}
-		src, err := jitEmitCClosure(k, v.Cl)
-		if err != nil {
-			return Value{Kind: VStr, Str: ""}
-		}
-		return Value{Kind: VStr, Str: src}
-	})
-	k.registerEnvNative("jit_compile_value", catWitness(), func(k *Kernel, env *Frame, args []Value) Value {
-		if len(args) < 1 || args[0].Kind != VStr {
-			return Value{Kind: VInt, Int: -1}
-		}
-		nameID := k.internName(args[0].Str)
-		v, ok := env.Lookup(nameID)
-		if !ok || v.Kind != VClosure {
-			return Value{Kind: VInt, Int: -1}
-		}
-		cl := v.Cl
-		bodyKey := nodeIDKey(cl.Body)
-		if _, exists := k.jitCompiledGoV[bodyKey]; exists {
-			return Value{Kind: VInt, Int: 1}
-		}
-		fnv, err := jitCompileClosureValueGo(k, cl)
-		if err != nil {
-			return Value{Kind: VInt, Int: 0}
-		}
-		k.jitCompiledGoV[bodyKey] = fnv
-		return Value{Kind: VInt, Int: 1}
-	})
-	// jit_install closure-name-str installed-name-str expected-arity →
-	//   the install-as-named-callable-leaf carrier (protocol:
-	//   form-stdlib/install-leaf.fk; band: tests/install-leaf-band.fk).
-	//   Compiles the named closure's body to a host-native artifact (the
-	//   jit.go .so lane, content-addressed plugin cache reused) and binds
-	//   it under installed-name in the kernel's OWN native table at
-	//   runtime — callable from recipes by name, the surface grown by
-	//   offer instead of recompile. Ack (axiom-5):
-	//     node — the artifact's body NodeID (axiom-3: unforgeable identity)
-	//     0    — refusal: installed-name already callable (first-bind-wins),
-	//            expected-arity is not the closure's own interface, or the
-	//            body's shape has no artifact (compile refused)
-	//     nothing — closure-name is not bound to a closure (no cell)
-	k.registerEnvNative("jit_install", catWitness(), func(k *Kernel, env *Frame, args []Value) Value {
-		if len(args) < 3 || args[0].Kind != VStr || args[1].Kind != VStr || args[2].Kind != VInt {
-			return Value{Kind: VNull}
-		}
-		return jitInstallLeaf(k, env, args[0].Str, args[1].Str, args[2].AsInt())
-	})
-	// installed_leaf? name-str → 1 if the name is a callable the surface
-	// grew at runtime via jit_install, else 0 (build-time natives answer 0).
-	k.registerNative("installed_leaf?", catCompare(RCompareEq), func(k *Kernel, args []Value) Value {
-		if _, ok := k.installedLeaves[k.internName(argStr(args, 0))]; ok {
-			return Value{Kind: VInt, Int: 1}
-		}
-		return Value{Kind: VInt, Int: 0}
-	})
 	// jit_aliased? form-name-str → 1 if a JIT alias is currently bound
 	// for this name, else 0. Lets Form code introspect dispatch routing.
 	k.registerNative("jit_aliased?", catCompare(RCompareEq), func(k *Kernel, args []Value) Value {
@@ -3286,79 +3061,9 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VInt, Int: 0}
 	})
 	// jit_leaf_inram (image, arg) — run a Form-emitted arm64 leaf image
-	// (lo-compile-fn's output) in-process via MAP_JIT: no `go build`, no
-	// plugin .so, a ~20-byte image. The north-star backend the Go-plugin path
-	// composts toward for the pure-i64 leaf subset. Present only on
-	// darwin/arm64+cgo; elsewhere the native is absent and callers fall back.
+	// (lo-compile-fn's output) in-process via MAP_JIT. Form owns emission;
+	// this carrier is available on darwin/arm64+cgo.
 	k.registerInRAMJIT()
-	// jit_compiled? form-name-str -> 1 if the named closure's body NodeID has
-	// a loaded Go plugin artifact, else 0. This reports compile-state only:
-	// dispatch still depends on the artifact ABI matching the call's runtime
-	// argument values. The trace's `jit-go-dispatch` native is the proof that a
-	// call actually crossed into generated Go.
-	k.registerEnvNative("jit_compiled?", catCompare(RCompareEq), func(k *Kernel, env *Frame, args []Value) Value {
-		if len(args) < 1 || args[0].Kind != VStr {
-			return Value{Kind: VInt, Int: 0}
-		}
-		formID := k.internName(args[0].Str)
-		v, ok := env.Lookup(formID)
-		if !ok || v.Kind != VClosure {
-			return Value{Kind: VInt, Int: 0}
-		}
-		bodyKey := nodeIDKey(v.Cl.Body)
-		if jc, ok := k.jitCompiledGo[bodyKey]; ok && jc != nil && (jc.I64 != nil || jc.F64 != nil || jc.Value != nil) {
-			return Value{Kind: VInt, Int: 1}
-		}
-		return Value{Kind: VInt, Int: 0}
-	})
-	// jit-stats -> list(kind, body-nodeid, count, detail). This is the
-	// observer-facing JIT state: warming counters, compiled artifacts,
-	// dispatch hits, and failed bodies with their compiler reason.
-	k.registerNative("jit-stats", catWitness(), func(k *Kernel, _ []Value) Value {
-		type jitStatRow struct {
-			kind   string
-			body   string
-			count  uint32
-			detail string
-		}
-		rows := []jitStatRow{}
-		for bodyKey := range k.jitCompiledGo {
-			rows = append(rows, jitStatRow{kind: "compiled", body: bodyKey})
-		}
-		for body, count := range k.jitDispatchHits {
-			rows = append(rows, jitStatRow{kind: "dispatch-hit", body: nodeIDKey(body), count: count})
-		}
-		for body, count := range k.jitHits {
-			rows = append(rows, jitStatRow{kind: "warming", body: nodeIDKey(body), count: count})
-		}
-		for body, failed := range k.jitFailed {
-			if !failed {
-				continue
-			}
-			rows = append(rows, jitStatRow{
-				kind:   "compile-failed",
-				body:   nodeIDKey(body),
-				count:  1,
-				detail: k.jitFailedReason[body],
-			})
-		}
-		sort.Slice(rows, func(i, j int) bool {
-			if rows[i].kind != rows[j].kind {
-				return rows[i].kind < rows[j].kind
-			}
-			return rows[i].body < rows[j].body
-		})
-		out := make([]Value, 0, len(rows))
-		for _, row := range rows {
-			out = append(out, Value{Kind: VList, List: []Value{
-				{Kind: VStr, Str: row.kind},
-				{Kind: VStr, Str: row.body},
-				{Kind: VInt, Int: int64(row.count)},
-				{Kind: VStr, Str: row.detail},
-			}})
-		}
-		return Value{Kind: VList, List: out}
-	})
 	// seeded_bytes(seed, count) — deterministic LCG byte stream.
 	// Same (seed, count) → byte-identical output across Go / Rust / TS.
 	// glibc rand(): state = (state * 1103515245 + 12345) & 0x7FFFFFFF
@@ -4799,107 +4504,6 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 			argVals := make([]Value, len(cl.Params))
 			for i := 1; i < len(kids); i++ {
 				argVals[i-1] = k.walk(kids[i], env)
-			}
-			bodyKey := nodeIDKey(cl.Body)
-			if _, ok := k.jitCompiledGoV[bodyKey]; ok {
-				if k.Trace != nil {
-					k.Trace.recordFn(k.nameStr(cl.Name))
-					k.Trace.recordNative("jit-go-value-dispatch")
-				}
-				k.jitDispatchHits[cl.Body]++
-				k.observeNamedDispatch("observe/go/function-dispatch", cl.Name)
-				k.observeJIT("observe/go/jit/dispatch-hit", cl.Body, 4, uint32(len(argVals)))
-				return k.applyClosureValue(cl, argVals)
-			}
-			if jc, ok := k.jitCompiledGo[bodyKey]; ok && jc != nil {
-				allInt := true
-				allNumeric := true
-				hasFloat := false
-				allJITValue := true
-				intArgs := make([]int64, len(cl.Params))
-				floatArgs := make([]float64, len(cl.Params))
-				jitArgs := make([]jitabi.Value, len(cl.Params))
-				for i, av := range argVals {
-					if av.Kind != VInt {
-						allInt = false
-					}
-					if jv, ok := valueToJIT(av); ok {
-						jitArgs[i] = jv
-					} else {
-						allJITValue = false
-					}
-					switch av.Kind {
-					case VInt:
-						intArgs[i] = av.Int
-						floatArgs[i] = float64(av.Int)
-					case VFloat:
-						hasFloat = true
-						floatArgs[i] = av.Float
-					default:
-						allNumeric = false
-					}
-				}
-				if allInt && jc.I64 != nil {
-					if k.Trace != nil {
-						k.Trace.recordFn(k.nameStr(cl.Name))
-						k.Trace.recordNative("jit-go-dispatch")
-					}
-					k.jitDispatchHits[cl.Body]++
-					k.observeNamedDispatch("observe/go/function-dispatch", cl.Name)
-					k.observeJIT("observe/go/jit/dispatch-hit", cl.Body, 1, uint32(len(argVals)))
-					return Value{Kind: VInt, Int: jc.I64(intArgs)}
-				}
-				if allNumeric && hasFloat && jc.F64 != nil {
-					if k.Trace != nil {
-						k.Trace.recordFn(k.nameStr(cl.Name))
-						k.Trace.recordNative("jit-go-dispatch")
-					}
-					k.jitDispatchHits[cl.Body]++
-					k.observeNamedDispatch("observe/go/function-dispatch", cl.Name)
-					k.observeJIT("observe/go/jit/dispatch-hit", cl.Body, 2, uint32(len(argVals)))
-					return Value{Kind: VFloat, Float: jc.F64(floatArgs)}
-				}
-				if allJITValue && jc.Value != nil {
-					if k.Trace != nil {
-						k.Trace.recordFn(k.nameStr(cl.Name))
-						k.Trace.recordNative("jit-go-dispatch")
-					}
-					k.jitDispatchHits[cl.Body]++
-					k.observeNamedDispatch("observe/go/function-dispatch", cl.Name)
-					k.observeJIT("observe/go/jit/dispatch-hit", cl.Body, 3, uint32(len(argVals)))
-					return valueFromJIT(jc.Value(jitArgs))
-				}
-				k.observeJIT("observe/go/jit/guard-miss", cl.Body, 1, uint32(len(argVals)))
-			} else if !k.jitFailed[cl.Body] {
-				// The hot crossing kicks the build on a goroutine; this call
-				// and the ones after it keep walking until the artifact
-				// lands, then adoption swaps it in and later calls dispatch
-				// native. The walk is the same answer either way.
-				goJITHotThreshold := jitHotThreshold()
-				if res, building := k.jitAsyncTake(bodyKey); res != nil {
-					if res.jc != nil {
-						k.jitCompiledGo[bodyKey] = res.jc
-						k.observeJIT("observe/go/jit/auto-compile-success", cl.Body, 1, 1)
-					} else {
-						k.jitFailed[cl.Body] = true
-						k.jitFailedReason[cl.Body] = res.reason
-						k.observeJIT("observe/go/jit/auto-compile-fail", cl.Body, 1, 1)
-					}
-					delete(k.jitHits, cl.Body)
-				} else if !building {
-					hits := k.jitHits[cl.Body] + 1
-					if hits >= goJITHotThreshold {
-						if err := k.jitAsyncKick(cl, bodyKey); err != nil {
-							// Emit refused before any goroutine started.
-							k.jitFailed[cl.Body] = true
-							k.jitFailedReason[cl.Body] = err.Error()
-							k.observeJIT("observe/go/jit/auto-compile-fail", cl.Body, 1, 1)
-						}
-						delete(k.jitHits, cl.Body)
-					} else {
-						k.jitHits[cl.Body] = hits
-					}
-				}
 			}
 			call := NewCallFrame(cl.Env, len(cl.Params))
 			for i, p := range cl.Params {
