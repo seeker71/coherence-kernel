@@ -57,3 +57,18 @@ renamed it `emptyIndex` and checked its actual map shape. Fresh preflight now
 reports zero warnings as well as zero errors. Drift gates 8191/8191.
 Further live observation follows the byte-buffer deployment; total renderer
 memory is not yet established as bounded.
+
+The byte-buffer change landed as `503fac2b`. The renewed renderer (pid 5297)
+averaged 17 ms, maximum 32 ms, over 51 samples; its heap stayed at 1,048,576
+cons through 105 → 293 reclamations. RSS still grew 299,941,888 → 655,572,992
+bytes over 50 seconds. The smaller text operation is proven; that operation was
+not the remaining RSS cause. Five transcript rows remained fully visible in a
+24-line production projection, checked without printing captured words.
+
+The next native repair removes Glass's self-readback: it was decoding its own
+just-published frame into a transient serialized string every tick. A successful
+write now reuses the acknowledged Form rows; the sequence evidence says
+publication, not readback. Refused writes retain the existing readback fallback.
+External shared frames still publish normally. Pure publication band 255,
+live UI 4294967295, live 2147483647, all exit 0 after clean preflight.
+This is a Form-only repair; the C seed remains unchanged.

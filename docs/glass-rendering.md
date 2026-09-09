@@ -61,3 +61,10 @@ not build every growing text prefix as an interned string. The string-returning
 `fglm-clean` remains available to bounded callers, outside the live render path.
 `./fkwu form/form-stdlib/tests/form-glass-transcript-bytes-band.fk` checks this
 contract, including unchanged-frame suppression; the expected verdict is 1023.
+
+After a successful local frame publication, Glass renders the same Form rows
+using the carrier's acknowledged sequence. Its frame evidence explicitly names
+publication, not readback. A refused write still reads the prior shared frame
+with its original age. This removes a per-frame encode/decode round trip without
+changing the published frame or external readers. The pure local-publication
+band (`form/form-stdlib/tests/form-glass-local-publication-band.fk`) returns 255.
