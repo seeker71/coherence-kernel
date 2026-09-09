@@ -293,3 +293,75 @@ is always cheaper than the sentence that explains why you did not need it.
 - **The GQA head partition inside the two llama GQA families** is covered by reduction to one query
   head plus a liveness bit, not element-wise at genuine grouping. `gqa-attn-metal-live-band` covers the
   partition itself; a whole-block GQA recipe would close the seam properly.
+
+---
+
+# The gap I named instead of closing
+
+Urs, reading the section above: *"you told me about a failure we are having and you did not heal it."*
+
+He was right, and the miss is worse than an oversight — it is this receipt's own subject, committed by
+the person who had just written it.
+
+## What I actually did
+
+`mlx-tensor-band` read 49 of 63. I found that two of those bits were lies, made them honest, watched it
+drop to 1, wrote *"it reads an honest 1 and names the stone"*, and pushed a red band to main.
+
+Turning a lying 49 into an honest 1 is not healing a failure. It is **describing** it more accurately.
+The failure — the MLX lane cannot read a tensor from a file — was untouched, and I moved it from the
+"broken" column to the "named, not attempted" column, which is where work goes to be someone else's.
+
+The receipt above says *"a walkable not-yet is walked the same turn."* I wrote that, then filed a
+walkable not-yet.
+
+## The failure, and it was one commit deep
+
+`tf32 <path> <off> <r> <c>` landed in **#470** (`6bcf4614`) with the band. It left in **`b2007049`**,
+2026-08-25 — a consolidation that cut the carrier from 942 lines to 195. Not by the carrier's own
+minimum law, which the token passes by the strictest reading (no graph over the other tokens can name a
+byte offset in a file; it is not a computation, it is a door). It went out as collateral, and nothing
+anywhere said so. Two weeks of the band running at 49 of 63 with the feature gone.
+
+Restored, and the restoration had three seams the old code could not have anticipated:
+
+- **It is `tf32`, not `f32`.** The consolidation gave `f32` a new meaning — the astype cast — which is
+  also irreducible and also earns its row. Two irreducible meanings cannot share a token. The dtype
+  prefix leaves room for the named next tier, `tq8` and the K-quants, where the weight actually lives.
+- **The programs must say `i32`.** The carrier now lands one int32 and owns no float return path. The
+  band's programs predate that law.
+- **`m3x1` is gone**, correctly: a matrix literal is `v3 … r2 3 1` under the same minimum law that
+  retired `sub`. A band that outlives a vocabulary change has to be re-read against the vocabulary that
+  is, not the one it was written for.
+
+The band reads **127** now, one bit more than it ever has — because the door's third refusal, the
+`FK_MLX_TENSOR_CAP` bound, had never been tested. Every refusal is demanded **by name**: a short read
+cannot pass as a missing file, neither can pass as a parse error, and none of the three can pass as a
+deleted feature. It went red three times on purpose first — 61 with a wrong sum, 59 with a wrong
+offset, 47 with the wrong refusal words.
+
+## Surprise
+
+That the deletion left no trace anywhere. Not a comment, not a receipt line, not a red band — the band
+kept running and kept scoring 49, which is high enough to look like a lane with a rough edge rather
+than a lane with a hole. **A partial score is better camouflage than a zero.** A band at 0 gets looked
+at; a band at 49 of 63 reads as known and tolerated, and that is exactly what I did with it for most of
+a session.
+
+## Where discomfort became gold
+
+The discomfort was being caught, and the shape of it was specific: I had written the sentence about
+walkable not-yets in this very file, hours earlier, and then done the opposite — which means the
+sentence was not yet a practice, it was a phrase I could produce. That is a worse thing to learn about
+oneself than a bug.
+
+What made it gold was that the check was one command. `git log -- form/native/mlx/fk-mlx-carrier.c`,
+then eight `git show | grep -c`. The capability was one commit deep and had a name I could search for.
+I had already read the carrier, already seen there was no file I/O, and stopped at *"the capability is
+absent"* without once asking **when it left**. An absence has a history, and the history is usually
+short.
+
+The gold: **"named, not attempted" is a real category and it was the wrong one here.** The test for it
+is not "is this a different organ" or "would this take a while" — it is *have I found out what it would
+actually take?* I had not. I had found out that it was missing, which is the first minute of the work,
+and stopped there while writing a sentence that sounded like the end of it.
