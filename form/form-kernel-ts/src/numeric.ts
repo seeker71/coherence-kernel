@@ -14,7 +14,6 @@
 import { Kernel, Level, RBasic, type NodeID } from "./kernel.ts";
 import {
   applyArith,
-  ArithHintCode,
   canonicalize,
   type ArithOp,
   type FormatLibrary,
@@ -49,111 +48,13 @@ export class FormatTable {
     return this.byHandle[h];
   }
 
-  // Cache: format-handle → (op, ArithOp) → compiled (a, b) => result.
-  // Populated lazily on first use; subsequent ops hit the cache.
-  // The cache is the Pass 1 efficiency optimization — monomorphizes
-  // dispatch from "read format-recipe, branch on arithmetic-hint" to
-  // "lookup compiled handler".
-  private handlers = new Map<string, (a: Numberish, b: Numberish) => Numberish>();
-
-  // handler — Pass 1 efficiency optimization.
-  //
-  // For each (format, op) combination, generate a specialized closure
-  // via `new Function` that contains ONLY the relevant arithmetic. No
-  // dispatch on hint or op inside the closure; V8 JITs it to the same
-  // machine code a direct JS operator would produce.
-  //
-  // Cold path: emits source, eval-compiles via `new Function`. ~µs once.
-  // Hot path: direct closure call, inlined.
-  //
-  // This is what makes the format-recipe architecture pay no runtime
-  // tax. Format-recipes carry the codegen rules; the cache materializes
-  // them as JIT'd closures the first time they're asked for.
-  handler(
-    h: number,
-    op: ArithOp,
-  ): (a: Numberish, b: Numberish) => Numberish {
-    const key = `${h}:${op}`;
-    const cached = this.handlers.get(key);
-    if (cached) return cached;
+  // Proof execution uses the existing arithmetic interpreter. Native
+  // specialization belongs to the Form compiler running on fkwu.
+  handler(h: number, op: ArithOp): (a: Numberish, b: Numberish) => Numberish {
     const fmt = this.byHandle[h];
     if (!fmt) throw new Error(`unknown format-handle ${h}`);
-    const fn = compileHandler(fmt, op);
-    this.handlers.set(key, fn);
-    return fn;
+    return (a, b) => applyArith(fmt, op, a, b);
   }
-}
-
-// compileHandler — emit a per-(format, op) JS closure. The body is the
-// format's arithmetic-hint specialized to just this op.
-function compileHandler(
-  fmt: FormatRecipe,
-  op: ArithOp,
-): (a: Numberish, b: Numberish) => Numberish {
-  const body = arithBody(fmt, op);
-  // Build a closure via `new Function` so V8 sees specialized JS code
-  // rather than a generic dispatcher.
-  return new Function("a", "b", body) as (
-    a: Numberish,
-    b: Numberish,
-  ) => Numberish;
-}
-
-function arithBody(fmt: FormatRecipe, op: ArithOp): string {
-  switch (fmt.arithHintCode) {
-    case ArithHintCode.NATIVE_FP: {
-      const opStr = jsBinop(op);
-      if (op === "mod") return `return a - Math.floor(a / b) * b;`;
-      return `return (+a) ${opStr} (+b);`;
-    }
-    case ArithHintCode.NATIVE_INT: {
-      if (op === "mul") return `return Math.imul(a | 0, b | 0);`;
-      const opStr = jsBinop(op);
-      if (op === "div") return `return b === 0 ? 0 : ((a | 0) / (b | 0)) | 0;`;
-      if (op === "mod")
-        return `return b === 0 ? 0 : (a | 0) - (((a | 0) / (b | 0)) | 0) * (b | 0);`;
-      return `return ((a | 0) ${opStr} (b | 0)) | 0;`;
-    }
-    case ArithHintCode.NATIVE_INT_NARROW: {
-      const shift = 32 - fmt.bits;
-      if (op === "mul")
-        return `return ((Math.imul(a | 0, b | 0)) << ${shift}) >> ${shift};`;
-      const opStr = jsBinop(op);
-      return `return (((a | 0) ${opStr} (b | 0)) << ${shift}) >> ${shift};`;
-    }
-    case ArithHintCode.BIGINT: {
-      const opStr = jsBinop(op);
-      return `return (typeof a === "bigint" ? a : BigInt(a)) ${opStr} (typeof b === "bigint" ? b : BigInt(b));`;
-    }
-    case ArithHintCode.TABLE_LOOKUP_VIA_FP32:
-    case ArithHintCode.DEQUANT_FP32_THEN_NATIVE:
-    case ArithHintCode.SOFTWARE_FP_VIA_FP32: {
-      if (op === "mod") return `return Math.fround(a - Math.floor(a / b) * b);`;
-      const opStr = jsBinop(op);
-      return `return Math.fround((+a) ${opStr} (+b));`;
-    }
-    case ArithHintCode.LOGADDEXP_LOGSUBEXP:
-      if (op === "add")
-        return `var m = Math.max(+a, +b); return m + Math.log1p(Math.exp(-Math.abs((+a) - (+b))));`;
-      if (op === "mul") return `return (+a) + (+b);`;
-      if (op === "div") return `return (+a) - (+b);`;
-      if (op === "sub")
-        return `if ((+b) >= (+a)) return -Infinity; return (+a) + Math.log1p(-Math.exp((+b) - (+a)));`;
-      return `throw new Error("log-prob: op not defined");`;
-    case ArithHintCode.XOR_POPCOUNT:
-      if (op === "add" || op === "sub") return `return ((a | 0) ^ (b | 0)) & 1;`;
-      if (op === "mul") return `return (a | 0) & (b | 0) & 1;`;
-      return `return 0;`;
-    default:
-      throw new Error(
-        `compileHandler: arithmetic-hint code ${fmt.arithHintCode} unsupported`,
-      );
-  }
-}
-
-function jsBinop(op: ArithOp): string {
-  return op === "add" ? "+" : op === "sub" ? "-" : op === "mul" ? "*"
-    : op === "div" ? "/" : "%";
 }
 
 // Encode a numeric leaf NodeID. For values that fit in 16 bits, inline;

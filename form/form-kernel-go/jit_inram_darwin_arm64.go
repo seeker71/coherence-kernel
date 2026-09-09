@@ -1,13 +1,8 @@
 //go:build darwin && arm64 && cgo
 
 // jit_inram_darwin_arm64.go — the in-RAM JIT executor: run a Form-emitted
-// arm64 leaf image (from lo-compile-fn) IN-PROCESS, with zero `go build`,
-// zero plugin .so, and a ~20-byte image instead of a 4.8MB Go plugin.
-//
-// This is the north-star JIT backend the Go-plugin path (jit.go) composts
-// toward for the pure-i64 leaf subset: lo-compile-fn IS the executable
-// backend, so the same recipe that proves four-way (Go/Rust/TS/fkwu) is the
-// one that runs natively here. No parallel emitter — one engine.
+// arm64 leaf image from lo-compile-fn in-process. Form owns emission;
+// this physical carrier only admits and executes the bytes.
 //
 // Apple Silicon enforces W^X: a page is never writable and executable at the
 // same instant. MAP_JIT pages are the sanctioned exception — allocated once,
@@ -16,15 +11,15 @@
 // flip to executable, clear the i-cache for the range, call it as
 // int64 f(int64), and unmap. The toggle is a libsystem call, so this file is
 // cgo + darwin/arm64 only; every other target uses the no-op stub
-// (jit_inram_other.go) and Form callers fall back to the Go-plugin path.
+// (jit_inram_other.go). Unsupported targets have no arm64 execution door.
 //
 // Two host-native doors live here, both Form-callable:
 //   • `jit_leaf_inram` (image, arg) — run an arm64 leaf image IN-RAM via MAP_JIT
 //     (ephemeral, this process).
 //   • `dylib_call` (path, sym, arg) — dlopen a DURABLE recipe binary (a Mach-O
 //     dylib that form-macho emits + `ld -dylib` signs), dlsym the recipe symbol,
-//     and call it. The dylib carries ONLY the recipe (~16KB vs the 4.8MB Go
-//     plugin); it survives process restarts, so it is the on-disk counterpart
+//     and call it. The dylib carries the recipe and survives process
+//     restarts, so it is the on-disk counterpart
 //     to the in-RAM path — the durable, content-addressable JIT cache.
 
 package main

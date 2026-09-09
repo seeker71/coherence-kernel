@@ -10,10 +10,15 @@
 #   ./validate.sh prelude.fk test.fk  # validate one workload
 #   ./validate.sh --binary  # compile every workload, execute artifacts
 #   ./validate.sh --binary prelude.fk test.fk  # compile once, execute artifact
-#   ./validate.sh --bench    # sibling bench suites, side-by-side
+#   ./validate.sh --bench    # native Form JIT witness
 
 set -euo pipefail
 cd "$(dirname "$0")"
+
+if [[ "${1:-}" == "--bench" ]]; then
+    cd ..
+    exec ./fkwu observe/native-jit-witness-run.fk
+fi
 
 # --- THE SEAL: a verdict belongs to the tree it was read from ---------------
 # Laid 2026-08-17, from a run that was still going while the files under it
@@ -555,19 +560,6 @@ prepare_sources() {
     done
 }
 
-# --- bench mode: run sibling bench suites side-by-side -------------------
-if [[ "${1:-}" == "--bench" ]]; then
-    echo "=== Go ==="
-    "$GO_BIN" --bench
-    echo ""
-    echo "=== Rust ==="
-    "$RS_BIN" --bench
-    echo ""
-    echo "=== TypeScript ==="
-    run_ts --bench
-    exit 0
-fi
-
 binary_mode=0
 if [[ "${1:-}" == "--binary" ]]; then
     binary_mode=1
@@ -579,7 +571,7 @@ fi
 # prelude + test file). Every kernel receives the same file list.
 run_siblings() {
     local label="$1"; shift
-    local go_out rs_out ts_out legs
+    local go_out rs_out ts_out go_rc rs_rc ts_rc legs
     prepare_sources "$@"
     # Fourth leg: a manifest-covered band runs from source on runtime fkwu.
     # There is no table/index preparation and no cold flatten build. A nonzero
@@ -592,13 +584,15 @@ run_siblings() {
     fi
     # The three kernels run CONCURRENTLY: a band's wall time is max(leg), not
     # sum — on compiler-heavy bands the Go+Rust legs ride inside the TS leg's
-    # shadow for free. Outputs stay byte-compared exactly as before.
+    # shadow for free. Compare result stdout. Stderr is a distinct diagnostic
+    # channel: timing and resource receipts belong to each physical carrier.
+    # Every exit status and both streams remain available in the evidence dir.
     #
     # Each leg gets its OWN TMPDIR under the legs dir: bands reach scratch
     # space through the `temp_dir` native, so concurrent sibling legs (and
-    # concurrent validate runs) never share a scratch path. The legs dir is
-    # removed after comparison, so band scratch leaves no sediment.
-    legs="$(mktemp -d "${TMPDIR:-/tmp}/form-legs.XXXXXX")"
+    # concurrent validate runs) never share a scratch path.
+    mkdir -p ../.hearth
+    legs="$(mktemp -d "$PWD/../.hearth/validation-legs.XXXXXX")"
     prepare_leg_args() {
         local leg="$1"
         local root="$legs/tmp-$leg"
@@ -622,15 +616,15 @@ run_siblings() {
     rs_args=("${leg_args[@]}")
     prepare_leg_args ts
     ts_args=("${leg_args[@]}")
-    ( TMPDIR="$legs/tmp-go" "$GO_BIN" "${go_args[@]}" > "$legs/go" 2>&1 || true ) &
-    ( TMPDIR="$legs/tmp-rs" "$RS_BIN" "${rs_args[@]}" > "$legs/rs" 2>&1 || true ) &
-    ( TMPDIR="$legs/tmp-ts" run_ts "${ts_args[@]}" > "$legs/ts" 2>&1 || true ) &
+    ( set +e; TMPDIR="$legs/tmp-go" "$GO_BIN" "${go_args[@]}" > "$legs/go" 2> "$legs/go.err"; printf '%s\n' "$?" > "$legs/go.rc" ) &
+    ( set +e; TMPDIR="$legs/tmp-rs" "$RS_BIN" "${rs_args[@]}" > "$legs/rs" 2> "$legs/rs.err"; printf '%s\n' "$?" > "$legs/rs.rc" ) &
+    ( set +e; TMPDIR="$legs/tmp-ts" run_ts "${ts_args[@]}" > "$legs/ts" 2> "$legs/ts.err"; printf '%s\n' "$?" > "$legs/ts.rc" ) &
     if [[ -n "$fourth_stem" ]]; then
         fourth_src="$(fourth_prepare_source_workload "$FOURTH_SOURCE_RUN_DIR" "${prepared_args[@]}")"
         if [[ -z "$fourth_src" ]]; then
             echo "validate.sh: $fourth_stem is declared in $FOURTH_MANIFEST but its source closure" >&2
             echo "  did not prepare. Refusing to run it three-arm under a four-arm declaration." >&2
-            rm -rf "$legs" 2>/dev/null || true
+            echo "  evidence=$legs" >&2
             exit 1
         fi
         (
@@ -655,13 +649,14 @@ run_siblings() {
     fi
     wait
     go_out=$(cat "$legs/go"); rs_out=$(cat "$legs/rs"); ts_out=$(cat "$legs/ts")
+    go_rc=$(cat "$legs/go.rc"); rs_rc=$(cat "$legs/rs.rc"); ts_rc=$(cat "$legs/ts.rc")
     if [[ -n "$fourth_stem" ]]; then
         fk_out=$(cat "$legs/fk" 2>/dev/null || true)
         fk_rc=$(cat "$legs/fk.rc" 2>/dev/null || echo 1)
         fk_diags=$(grep -c 'unresolved-call\|error:' "$legs/fk.err" 2>/dev/null || true)
     fi
-    rm -rf "$legs" 2>/dev/null || true
-    if [[ "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]] \
+    printf '  evidence=%s exits go=%s rust=%s typescript=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc"
+    if [[ "$go_rc" == 0 && "$rs_rc" == 0 && "$ts_rc" == 0 && "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]] \
         && { [[ -z "$fourth_stem" ]] || { [[ "$fk_rc" == 0 && "$fk_diags" == 0 && "$fk_out" == "$go_out" ]]; }; }; then
         # REGISTERED-VERDICT GATE (2026-08-17). fourth-arm-bands.txt column 3 is
         # the band's registered verdict, and until today NOTHING read it — every
@@ -714,11 +709,17 @@ run_siblings() {
 run_siblings_binary() {
     local label="$1"; shift
     local artifact="$1"; shift
-    local go_out rs_out ts_out
-    go_out=$("$GO_BIN" --binary "$artifact" 2>&1 || true)
-    rs_out=$("$RS_BIN" --binary "$artifact" 2>&1 || true)
-    ts_out=$(run_ts --binary "$artifact" 2>&1 || true)
-    if [[ "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]]; then
+    local go_out rs_out ts_out go_rc rs_rc ts_rc legs
+    mkdir -p ../.hearth
+    legs="$(mktemp -d "$PWD/../.hearth/validation-binary.XXXXXX")"
+    ( set +e; "$GO_BIN" --binary "$artifact" > "$legs/go" 2> "$legs/go.err"; printf '%s\n' "$?" > "$legs/go.rc" ) &
+    ( set +e; "$RS_BIN" --binary "$artifact" > "$legs/rs" 2> "$legs/rs.err"; printf '%s\n' "$?" > "$legs/rs.rc" ) &
+    ( set +e; run_ts --binary "$artifact" > "$legs/ts" 2> "$legs/ts.err"; printf '%s\n' "$?" > "$legs/ts.rc" ) &
+    wait
+    go_out=$(cat "$legs/go"); rs_out=$(cat "$legs/rs"); ts_out=$(cat "$legs/ts")
+    go_rc=$(cat "$legs/go.rc"); rs_rc=$(cat "$legs/rs.rc"); ts_rc=$(cat "$legs/ts.rc")
+    printf '  evidence=%s exits go=%s rust=%s typescript=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc"
+    if [[ "$go_rc" == 0 && "$rs_rc" == 0 && "$ts_rc" == 0 && "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]]; then
         printf "  ✓  %-30s  → %s\n" "$label" "$go_out"
         ok=$((ok + 1))
         if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok" > "$SUITE_STATUS_FILE"; fi
@@ -964,6 +965,6 @@ if [[ $fail -eq 0 ]]; then
     fi
     exit 0
 else
-    echo "  $ok ok, $fail divergent — kernels disagree. Investigate which is correct."
+    echo "  $ok ok, $fail failed or divergent — inspect exit statuses and retained streams."
     exit 1
 fi

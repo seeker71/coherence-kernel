@@ -22,9 +22,6 @@ import {
 } from "./kernel.ts";
 import { createNodeKernelHost } from "./node-host.ts";
 import { readAll, readForm } from "./reader.ts";
-import { runBench } from "./bench.ts";
-import { compileNode } from "./compiler.ts";
-import { runNumericBench } from "./numeric-bench.ts";
 
 type CrashTraceContext = {
   mode: string;
@@ -387,19 +384,14 @@ async function main(): Promise<void> {
   setCrashTraceContext("startup", args);
   if (args.length === 0) {
     console.error(
-      "usage: tsx src/main.ts (--binary file.fkb | --emit-binary out.fkb file.fk... | --expr <expr> | --bench | --compiled <expr> | trace ... | <file.fk>)",
+      "usage: tsx src/main.ts (--binary file.fkb | --emit-binary out.fkb file.fk... | --expr <expr> | trace ... | <file.fk>); native compilation: ./fkwu <file.fk|file.bml>",
     );
     process.exit(2);
   }
 
-  if (args[0] === "--bench") {
-    runBench();
-    return;
-  }
-
-  if (args[0] === "--numeric-bench") {
-    runNumericBench();
-    return;
+  if (args[0] === "--bench" || args[0] === "--compiled" || args[0] === "--numeric-bench") {
+    console.error("Native compilation runs through Form: ./fkwu <file.fk|file.bml>. Native JIT witness: ./fkwu form/form-stdlib/tests/jit-leaf-inram-band.fk");
+    process.exit(2);
   }
 
   if (args[0] === "trace") {
@@ -409,9 +401,6 @@ async function main(): Promise<void> {
 
   const k = new Kernel(createNodeKernelHost());
   crashKernel = k;
-  // Install the Form→host-JS JIT hook so (jit_compile "name") from Form
-  // code compiles the named closure's body through compiler.ts.
-  k.jitCompileHook = compileNode;
   const frame = new Frame(null);
 
   if (args[0] === "--binary") {
@@ -456,20 +445,6 @@ async function main(): Promise<void> {
     k.setActiveRoots([node]);
     const value = walk(k, node, frame);
     k.substrateGC([value], frame);
-    console.log(k.render(value));
-    return;
-  }
-
-  if (args[0] === "--compiled") {
-    const expr = args[1];
-    if (expr === undefined) {
-      console.error("--compiled requires an argument");
-      process.exit(2);
-    }
-    setCrashTraceContext("compiled", args, expr);
-    const node = readForm(k, expr);
-    const compiled = compileNode(k, node);
-    const value = compiled(frame);
     console.log(k.render(value));
     return;
   }
@@ -538,9 +513,6 @@ async function runTrace(args: string[]): Promise<void> {
 
   const k = new Kernel(createNodeKernelHost());
   crashKernel = k;
-  // Install the Form→host-JS JIT hook so (jit_compile "name") from Form
-  // code compiles the named closure's body through compiler.ts.
-  k.jitCompileHook = compileNode;
   k.trace = new Trace();
   const frame = new Frame(null);
   const node = readAll(k, src);

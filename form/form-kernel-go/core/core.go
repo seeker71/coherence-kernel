@@ -1,14 +1,5 @@
-// core/core.go — the kernel's shared value/recipe type cluster, extracted from
-// package main so JIT-compiled plugins can import it. A Go plugin is itself
-// package main and cannot import the kernel's main; putting Value/NodeID/Frame/
-// Record/Closure here lets the kernel binary AND every JIT'd plugin share the
-// same types. This is the foundation for compiling ANY recipe to a native
-// plugin: the generated plugin operates on core.Value, calls natives, runs
-// native — no walk-interpreter overhead. (Verified mechanism: a plugin importing
-// a shared package took/returned shared Values + called shared funcs correctly.)
-//
-// The cluster is pure data + pure methods — no *Kernel coupling — which is what
-// makes the extraction clean. Fields the kernel reaches externally are exported.
+// core/core.go — shared value, recipe and frame types for the proof interpreter.
+// The cluster has no *Kernel coupling. Form owns native compilation.
 package core
 
 import (

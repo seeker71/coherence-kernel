@@ -35,28 +35,7 @@ kernels carry the load-bearing ones):
 - S-expression bootstrap reader with `buildVerb`-style name dispatch
   (matches Go/Rust exactly — `add`, `sub`, `mul`, `eq`, `le`, ... all
   intern to the same NodeIDs across kernels)
-- **Recipe → JS compiler** — emits JS source from recipe trees, compiles
-  via `new Function`, V8 JITs the result. Brings overhead from 100–500×
-  native down to 1× for arithmetic recursion.
-
-## Performance — bench numbers
-
-Three of four canonical workloads at **1× native overhead** with the
-compiled path. See
-[`kernel-ts-comparison.md`](../kernel-ts-comparison.md) for the
-full analysis.
-
-| Workload | Native TS | Walker | walk-over | Compiled | comp-over |
-|---|---|---|---|---|---|
-| `fib(28)` | 1.97 ms | 590 ms | 300× | **2.25 ms** | **1×** |
-| `fact(12)` | 31 ns | 14 µs | 454× | 377 ns | 12× |
-| `sum(1000)` | 7.46 µs | 780 µs | 105× | **7.83 µs** | **1×** |
-| `ackermann(3,6)` | 773 µs | 135 ms | 174× | **832 µs** | **1×** |
-
-```sh
-npx tsx src/main.ts --bench       # walker + compiled side-by-side
-npx tsx src/main.ts --compiled "(do (defn fib (n) (if (le n 1) n (add (fib (sub n 1)) (fib (sub n 2))))) (fib 28))"
-```
+Native compilation uses `./fkwu path.fk` or `./fkwu path.bml` from the repository root. See [native JIT routing](../../docs/native-jit-routing.md). The TypeScript proof interpreter contains no recipe-to-JavaScript JIT.
 
 ## Browser entry
 
@@ -93,9 +72,6 @@ npm run proof              # browser proof plus Node host-effect parity
 - Expand the canonical real-kernel vector set in
   [`../conformance/canonical-s-expression-vectors.json`](../conformance/canonical-s-expression-vectors.json).
 - Form-on-top stack from `form/form-stdlib/` running on TS
-- Compiler LIST literal emission through direct Form list recipes
-- Compiler closure-over-outer-frame optimization (currently
-  `frame.lookup` slow path)
 
 ## Category and NodeID contract
 
@@ -120,8 +96,7 @@ Cross-kernel conformance is driven by the public kernel CLIs, not by a
 TypeScript-side language imitation:
 
 ```sh
-python3 form/scripts/verify_kernel_conformance.py
-python3 form/scripts/verify_kernel_conformance.py --kernel ts
+./fkwu gate/kernel-conformance.bml
 ```
 
 The vectors use canonical S-expressions, binary arithmetic/logic, `mod`, and
