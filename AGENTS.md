@@ -115,6 +115,34 @@ thresholds arriving as the caller's data), a panel being a lane list folded by `
 no cell names an SGR code or spells a time twice. Bands prove logic; a band that writes living
 state stains the world it measures (`bandstain`, corpus row 1193).
 
+### Native authoring is a shared practice
+
+Implementation, analysis helpers, generators, measurements, and migrations belong
+in native Form/BML. This includes temporary work. Shell may carry OS operations;
+moving Python computation into JavaScript or another helper language leaves the
+same detour. We carry the return to Form ourselves, without asking Urs to repeat
+the direction or choose whether it applies.
+
+At task start and before closing a code change, read the native guide:
+
+```sh
+form-run ./fkwu observe/native-authoring-guide-run.fk
+```
+
+It reads current source, names Python implementations and invocation candidates,
+and links available Form references and witnesses. `form-cli` exposes the same
+reading through `heal guide`. Follow the next relevant observation: search local
+Form cells, RAG, git history and receipts; make the native attempt; preserve the
+behavior checks; update callers; then remove the old implementation. A missing
+native capability is work we carry, with the attempt and remaining seam recorded.
+The reading guides the work; it creates no new approval step or landing rule.
+
+Foreign-language specimens used as input to Form's own compiler remain input
+data. Historical receipts keep their evidence. Neither is a reason to run a
+Python interpreter. Do not rename an implementation or relax its checks to make
+the reading look clean. The full current inventory lives at the path the guide
+prints, including unresolved candidates and unread files.
+
 ## The hearth — the serving floor that outlives sessions
 
 One resident form-cli process serves sessions and cells as clients. The interface lives

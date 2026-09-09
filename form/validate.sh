@@ -83,35 +83,17 @@ export NO_UPDATE_NOTIFIER=1
 export NPM_CONFIG_UPDATE_NOTIFIER=false
 export npm_config_update_notifier=false
 
-# Resolve a working Python 3: prefer `py -3` on Windows (a bare `python3` there
-# resolves to the App-Execution-Alias stub that prints "Python was not found"),
-# and verify the interpreter actually runs before using it.
-BP_PY=""
-if command -v py >/dev/null 2>&1 && py -3 --version >/dev/null 2>&1; then
-    BP_PY="py -3"
-elif command -v python3 >/dev/null 2>&1 && python3 --version >/dev/null 2>&1; then
-    BP_PY="python3"
+# Form owns the phase-zero check list and its verdict. This carrier maps the
+# observed native value and process status into the existing validation flow.
+if native_result="$(cd .. && ./fkwu gate/validation-start-run.fk)"; then
+    native_rc=0
+else
+    native_rc=$?
 fi
-# Phase 0 fkwu native surface gate.
-if [[ -n "$BP_PY" && -f scripts/validate_fkwu_native_surface.py ]]; then
-    $BP_PY scripts/validate_fkwu_native_surface.py
-fi
-if [[ -n "$BP_PY" && -f scripts/gen_flt_ops_from_manifest.py ]]; then
-    $BP_PY scripts/gen_flt_ops_from_manifest.py
-fi
-if [[ -n "$BP_PY" && -f scripts/sync_native_op_manifest.py ]]; then
-    $BP_PY scripts/sync_native_op_manifest.py
-fi
-if [[ -n "$BP_PY" && -f scripts/verify_category_contract.py ]]; then
-    $BP_PY scripts/verify_category_contract.py
-fi
-# Registry drift gate: every Go native carries a registry row and the band's
-# pinned counts match — the primitive-registry-band's declared verdict (63)
-# is only honest while these numbers agree. Before this line the gate was a
-# bell nobody rang: the band answered 42 three-way from birth (#231) and the
-# agreement-only sibling comparison printed a green check over it.
-if [[ -n "$BP_PY" && -f scripts/validate_primitive_registry.py ]]; then
-    $BP_PY scripts/validate_primitive_registry.py --quiet
+printf '%s\n' "$native_result"
+if [[ "$native_rc" -ne 0 || "${native_result##*$'\n'}" != "1" ]]; then
+    printf '%s\n' 'validate.sh: native validation-start needs attention.' >&2
+    exit 1
 fi
 
 GO_DIR="form-kernel-go"

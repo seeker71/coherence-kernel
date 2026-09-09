@@ -4,6 +4,12 @@ The `heal` verb turns a failing source/band pair into a checked repair attempt.
 The policy, candidate edits, resource order, verification decision, and learning
 live in executable BML. The working tree changes only after verification.
 
+`heal guide` reads current Python detours and available native references;
+`heal guide|<proposed command>` guides a command without running it. The acting
+agent carries the native replacement and its checks. This includes temporary
+helpers. [Native authoring practice](native-authoring-guide.md) keeps that
+responsibility with us.
+
 Inside form-cli:
 
 ```text
