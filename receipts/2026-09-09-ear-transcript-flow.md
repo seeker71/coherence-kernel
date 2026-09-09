@@ -47,3 +47,10 @@ translation quality remains open, not hidden under a fluent stream.
 The surprising teaching: a quiet text lane and a dead process need different
 clocks. The duplicate-writer discomfort became explicit lifetime ownership,
 while the model error kept the quality claim honest.
+
+Live renewal then exposed a display-budget gap: five published languages in an
+80×24 projection only showed three complete texts with five-row slots. The
+follow-up makes slot height follow available body rows and language count,
+orders languages by the shared catalog and keeps only the current original
+language slot. Its flow band now returns **524287**; meaning UI remains **8191**
+and live UI **4294967295**. No captured text was copied into this receipt.
