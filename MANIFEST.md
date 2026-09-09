@@ -147,7 +147,7 @@ silently lacking newer evaluator capabilities. Run it before believing anything 
   the JIT family (86 `.fk`; the ladder is `docs/form-native-jit-track.form`).
 - **`form/native/metal`** — the Form-native Metal lane: the Qwen3.8-27B dense token handle, the
   crystal, the KAT and llama handles. Bands re-run 2026-09-04: `kat-token-handle-band` 262143,
-  `metal-handle-door-band` 65535, `jit-metal-lanes-band` 8191, `mlx-derived-band` 16777215,
+  `metal-handle-door-band` 65535, `jit-metal-lanes-band` 8191, `native-tensor-derived-band` 16777215,
   `metal-door-band` 15. The Qwen handle and crystal bands declare their own verdicts.
 - **`observe/`** — the trust stack (444 `.fk`, 128 bands): thought-framebuffer, the bidirectional
   framebuffer channel (observe → control → actuate → re-observe), jacobian-lens, heal-titration,

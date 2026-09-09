@@ -13,7 +13,8 @@ File presence establishes availability; executable witnesses establish behavior.
 two inputs through the physical carrier, and checks malformed-image refusal.
 `./fkwu form/form-stdlib/tests/direct-source-jit-discovery-band.fk` checks heat,
 choice, birth, reuse, timeout and undo. `form-cli-jit.bml` carries demand and
-CPU/Metal/MLX routes. Device drivers admit Form-emitted device programs.
+CPU and native Metal routes. Tensor programs run through
+`form/form-stdlib/native-tensor.bml`. Device drivers admit Form-emitted programs.
 
 The Go, Rust and TypeScript kernels are proof interpreters. Physical MAP_JIT
 and library loaders carry Form-emitted images. `register_jit` binds an existing

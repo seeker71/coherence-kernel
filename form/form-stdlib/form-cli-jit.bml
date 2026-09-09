@@ -1,10 +1,11 @@
+// preludes: form-stdlib/native-tensor.bml
 //////////////////////////////////////////////////////////////////////
 //
 // form-cli-jit.bml
 //
 // High-grammar authority: form-stdlib/bml/form-cli-jit.bml
 //
-// One thought f(n)=n*Mul+Add. Backends are data (Mlx/Metal/Cpu).
+// One thought f(n)=n*Mul+Add. Backends are data (Tensor/Metal/Cpu).
 // Apply(backend, n) emits and runs. Host leaves are not fields.
 //
 // Proven by: form-stdlib/tests/form-cli-jit-band.fk
@@ -23,18 +24,18 @@ section [form.bml] {
         field Add = 7;
         field Sample = 5;
         field Expect = 22;
-        field Mlx = 0;
+        field Tensor = 0;
         field Metal = 1;
         field Cpu = 2;
         field FJitDemandSource = "form/form-stdlib/form-cli-jit.bml";
         field FJitDemandCache = "form/form-stdlib/form-cli-jit.bml.demand.fkb";
 
-        thought fjit-pattern = list("mlx", "metal", "cpu");
+        thought fjit-pattern = list("tensor", "metal", "cpu");
 
         def fjit-spc() = " ";
         def fjit-nl() = byte_to_str(10);
 
-        def fjit-mlx(n) = str_concat(int_to_str(n), str_concat(fjit-spc(), str_concat(int_to_str(Mul()), str_concat(" mul ", str_concat(int_to_str(Add()), " add")))));
+        def fjit-tensor(n) = str_concat(int_to_str(n), str_concat(fjit-spc(), str_concat(int_to_str(Mul()), str_concat(" mul ", str_concat(int_to_str(Add()), " add")))));
 
         def fjit-msl() {
             let n = fjit-nl();
@@ -43,8 +44,8 @@ section [form.bml] {
 
         def fjit-ssa() = list(list(1, Add()), list(2), list(1, Mul()), list(5, 1, 2), list(3, 3, 0));
 
-        def fjit-apply-mlx(n) = mlx_run(fjit-mlx(n));
-        def fjit-apply-cpu(n) = jit_leaf_inram(lo-compile-fn(fjit-ssa(), 4), n);
+        def fjit-apply-tensor(n) = nt-eval(fjit-tensor(n));
+        def fjit-apply-cpu(n) = nt-signed(jit_leaf_inram(lo-compile-fn(fjit-ssa(), 4), n));
 
         // Generic state-threaded CPU offer. Any program reaches this gate;
         // lowerable heat may crystallize, while an unsupported shape remains
@@ -64,23 +65,26 @@ section [form.bml] {
 
         def fjit-apply-metal(n) {
             let buf = metal_buf_alloc(4);
-            let wrote = metal_buf_write(buf, 0, md-le32(n));
+            if le(buf, 0) then form_error(metal_status()) else fjit-metal-buffer(buf, n);
+        }
+        def fjit-metal-buffer(buf, n) {
+            let wrote = metal_buf_write(buf, 0, nt-i32-bytes(list(n)));
             let pipe = metal_pipeline(fjit-msl(), "form_jit_f");
-            let enq = metal_enqueue(pipe, md-bind(list(buf), empty()), 1);
+            let enq = if and(eq(wrote, 4), gt(pipe, 0)) then metal_enqueue(pipe, md-bind(list(buf), empty()), 1) else 0;
             let sync = metal_sync();
-            let res = metal_buf_read(buf, 0, 4);
-            let v = str_byte_at(res, 0);
+            let res = if and(gt(enq, 0), ge(sync, 0)) then metal_buf_read(buf, 0, 4) else "";
+            let diagnostic = metal_status();
             let shut = metal_buf_free(buf);
-            v;
+            if eq(str_len(res), 4) then nt-signed(nt-u32(res)) else form_error(diagnostic);
         }
 
-        def fjit-apply(backend, n) = if eq(backend, Mlx()) then fjit-apply-mlx(n) else if eq(backend, Metal()) then fjit-apply-metal(n) else fjit-apply-cpu(n);
+        def fjit-apply(backend, n) = if eq(backend, Tensor()) then fjit-apply-tensor(n) else if eq(backend, Metal()) then fjit-apply-metal(n) else fjit-apply-cpu(n);
 
         def fjit-check() {
             let b0 = if eq(Mul(), 3) then if eq(Add(), 7) then 1 else 0 else 0;
             let b1 = if eq(Sample(), 5) then if eq(Expect(), 22) then 2 else 0 else 0;
-            let b2 = if str_eq(fjit-mlx(Sample()), "5 3 mul 7 add") then 4 else 0;
-            let b3 = if eq(Mlx(), 0) then if eq(Metal(), 1) then if eq(Cpu(), 2) then 8 else 0 else 0 else 0;
+            let b2 = if str_eq(fjit-tensor(Sample()), "5 3 mul 7 add") then 4 else 0;
+            let b3 = if eq(Tensor(), 0) then if eq(Metal(), 1) then if eq(Cpu(), 2) then 8 else 0 else 0 else 0;
             add(b0, add(b1, add(b2, b3)));
         }
     }

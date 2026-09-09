@@ -34,8 +34,8 @@ gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwl
 aarch64-linux-android34-clang -O2 -pthread runtime/fkwu-uni.c -o fkwu-android
 ```
 
-On a Mac with a GPU, link the Metal (and, when `/opt/homebrew/lib/libmlxc.dylib`
-is present, MLX) carriers into the same binary — the exact lines are in
+On a Mac with a GPU, link the Metal carrier into the same binary. Tensor
+programs run through `form/form-stdlib/native-tensor.bml`; the build lines are in
 [`AGENTS.md`](AGENTS.md). One binary; Metal is this host's organ, never a second
 executable.
 

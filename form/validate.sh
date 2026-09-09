@@ -175,30 +175,17 @@ build_fkwu_src() {
         command -v cc >/dev/null 2>&1 || return 0
         echo "  building runtime fkwu (repo root, door)..." >&2
         # One binary carries its own doors: on Darwin the Metal carrier links in
-        # by default (fk-metal-carrier.m header's own claim), and a link failure
-        # falls back to the plain build — weak stubs answer SKIP, never crash.
+        # by default. A failed link is a failed build; retain its diagnostics.
         if [[ "$(uname -s)" == "Darwin" && -f "$carrier" ]]; then
-            local mlx_c="native/mlx/fk-mlx-carrier.c"
-            if [[ -f /opt/homebrew/lib/libmlxc.dylib && -f "$mlx_c" ]]; then
-                cc -O2 -o "$bin" "$src" "$carrier" "$mlx_c" \
-                    -framework Metal -framework Foundation -fobjc-arc \
-                    -I/opt/homebrew/include -L/opt/homebrew/lib -lmlxc -Wl,-rpath,/opt/homebrew/lib \
-                    2>/dev/null \
-                    || cc -O2 -o "$bin" "$src" "$carrier" \
-                        -framework Metal -framework Foundation -fobjc-arc 2>/dev/null \
-                    || cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
-            else
-                cc -O2 -o "$bin" "$src" "$carrier" \
-                    -framework Metal -framework Foundation -fobjc-arc 2>/dev/null \
-                    || cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
-            fi
+            cc -O2 -o "$bin" "$src" "$carrier" \
+                -framework Metal -framework Foundation -fobjc-arc || return 1
         else
-            cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+            cc -O2 -o "$bin" "$src" || return 1
         fi
     fi
     [[ -x "$bin" ]] && FKWU_SRC="$bin"
 }
-build_fkwu_src
+build_fkwu_src || exit 1
 
 # ── FORM BALANCE, and the response to it ────────────────────────────────────
 # Cells whose forms do not close were found four times in one week, each by

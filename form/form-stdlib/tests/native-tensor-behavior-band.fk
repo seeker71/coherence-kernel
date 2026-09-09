@@ -1,0 +1,63 @@
+; Form tensor recipes on native Metal. Behavior and refusals travel together.
+; Verdict 1, or an error with all failed rows printed.
+; preludes: form-stdlib/native-tensor.bml form-stdlib/native-tensor-derived.fk
+(do
+ (defn ntp-cases ()
+  (list (mld-p-sub) (mld-p-neg) (mld-p-square) (mld-p-recip)
+   (mld-p-sigmoid) (mld-p-silu) (mld-p-tanh) (mld-p-swiglu)
+   (mld-p-mean) (mld-p-l2norm) (mld-p-rmsnorm) (mld-p-softmax)
+   (mld-p-matmul) (mld-p-take) (mld-p-argmax) (mld-p-gated)
+   (mld-p-sin) (mld-p-cos) (mld-p-log) (mld-p-pow) (mld-p-gt)
+   (mld-p-iota) (mld-p-where) (mld-p-mod) (mld-p-scale)
+   (mld-p-axpy) (mld-p-clamp) (mld-p-clamp-lo) (mld-p-gelu)
+   (mld-p-layernorm)
+   (mld-j "v2 3 4 f32" (mld-j (mld-rope-pair "1 f32") "sum 1000 mul i32"))
+   (mld-j "v2 1 0 r2 1 2 f32" (mld-j (mld-attn "v2 1 0 r2 2 1 f32" "v2 4 5 r2 1 2 f32") "sum i32"))
+   "0" "-2147483648" "2147483647 1 add" "16777217 1 add"
+   "v2 10 20 v2 1 2 add sum"
+   "v4 1 2 3 4 r2 2 2 v2 10 20 add sum"
+   "v2 10 20 r2 2 1 v3 1 2 3 add sum"
+   "v3 1 2 3 f32 v3 4 5 6 f32 matmul i32"
+   "v4 1 2 3 4 r2 2 2 f32 v2 5 6 f32 matmul sum i32"
+   "v2 5 6 f32 v4 1 2 3 4 r2 2 2 f32 matmul sum i32"
+   "v4 1 2 3 4 r3 2 1 2 f32 v2 1 2 r2 2 1 f32 matmul sum i32"
+   "3 4 add iota sum i32" "v3 5 9 9 argmax i32"
+   "v3 10 20 30 v2 -1 0 take sum i32"))
+ (defn ntp-expected () (list 4 -5 36 250 500 0 0 0 2500 1400 2000 1000 54000 30 1 3000 0 1000 0 8000 1 10 7 2 21000 19000 3 0 841 3999 2940 9 0 -2147483648 -2147483648 16777218 33 70 102 32 56 57 16 21 1 40))
+ (defn ntp-row (program i)
+  (do
+   (let fresh (nt-run program))
+   (let good (and (nt-check-result fresh (nth (ntp-expected) i))
+    (eq (nth (nt-after fresh) 2) (nth (nt-before fresh) 2))))
+   (if good 0 (print (list "failed-row" i (nt-value fresh) (nt-error fresh))))
+   good))
+ (defn ntp-walk (cases i failures)
+  (if (eq (len cases) 0) (if (eq failures 0) 1 (form_error "native tensor value/cleanup regression"))
+   (ntp-walk (tail cases) (add i 1) (add failures (if (ntp-row (head cases) i) 0 1)))))
+ (defn ntp-refusals () (list
+   (list "" "program did not leave one value")
+   (list "1 2" "program did not leave one value")
+   (list "1 f32" "program did not land an int32; emit i32")
+   (list "v2 1 2" "program did not land one scalar")
+   (list "add" "stack underflow")
+   (list "dup" "stack underflow")
+   (list "1 swap" "stack underflow")
+   (list "v3 1 2" "counted token needs integer lanes")
+   (list "v2 1 nope" "counted token needs integer lanes")
+   (list "v2 1 2 r2 3 1 sum" "reshape must preserve element count with positive dimensions")
+   (list "v3 1 2 3 r2 -1 -1 sum" "reshape must preserve element count with positive dimensions")
+   (list "0 iota sum" "iota needs a positive int32 length")
+   (list "v2 1 2 iota sum" "iota needs a positive int32 length")
+   (list "v2 1 2 v1 2 take sum" "take index out of range")
+   (list "v2 1 2 v1 -3 take sum" "take index out of range")
+   (list "v2 1 2 v1 0 f32 take sum" "take indices must be int32")
+   (list "v2 1 2 v3 1 2 3 add sum" "shape exceeds device working set")
+   (list "1 unknown" "unknown tensor token; offer NodeID JIT")))
+ (defn ntp-refusals-walk (rows)
+  (if (eq (len rows) 0) 1
+   (if (nt-refused (nth (head rows) 0) (nth (head rows) 1))
+    (ntp-refusals-walk (tail rows)) (form_error (nth (head rows) 1)))))
+ (let values (ntp-walk (ntp-cases) 0 0))
+ (let refusals (ntp-refusals-walk (ntp-refusals)))
+ (if (and values (and refusals (and (nt-check "v6 1 2 3 4 5 6 r2 2 -1 sum" 21)
+   (nt-check "100000 iota sum i32" 704982704)))) 1 (form_error "native tensor extended regression")))

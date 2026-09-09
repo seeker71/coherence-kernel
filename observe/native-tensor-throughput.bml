@@ -1,0 +1,48 @@
+// Measure the whole native tensor path and its actual command-buffer time.
+// This is an iota/sum workload, not a physical memory bandwidth measurement.
+// Prelude-only; the runnable door calls ntbp-run.
+// preludes: form-stdlib/native-tensor.bml
+section [form.bml] {
+    def ntbp-expected(n) = nt-signed(mod(div(mul(n, sub(n, 1)), 2), 4294967296));
+    def ntbp-measure(n, temperature) {
+        let r = nt-run(str_concat(nt-num(n), " iota sum i32"));
+        let before = nt-before(r);
+        let after = nt-after(r);
+        let valid = nt-check-result(r, ntbp-expected(n));
+        print(list("native-tensor-iota-sum", temperature, "lanes", n, "expected", ntbp-expected(n), "value", nt-value(r), "present", nt-present(r), "error", nt-error(r), "wall-ms", nth(r, 8), "gpu-busy-us", sub(nth(after, 11), nth(before, 11)), "dispatches", sub(nth(after, 7), nth(before, 7)), "pipeline-births", sub(nth(after, 3), nth(before, 3)), "buffers-retained", sub(nth(after, 2), nth(before, 2)), "stages", nth(r, 6)));
+        if valid then r else form_error("native tensor throughput value check failed");
+    }
+    def ntbp-round(n) {
+        let cold = ntbp-measure(n, "first-shape");
+        let warm = ntbp-measure(n, "reused-shape");
+        let resident = ntbp-resident(n);
+        let next = mul(n, 4);
+        let pressure = gt(mul(next, 8), nt-budget());
+        let enough = ge(nth(warm, 8), 25);
+        let selected = if or(pressure, enough) then "report" else "increase-shape";
+        print(list("choice", "offered", list("increase-shape", "report"), "selected", selected, "observed-warm-ms", nth(warm, 8), "available-working-set-bytes", nt-budget()));
+        if str_eq(selected, "report") then 1 else ntbp-round(next);
+    }
+    def ntbp-resident-row(n, image, index) {
+        let r = nt-image-replay(image);
+        let before = nt-before(r);
+        let after = nt-after(r);
+        print(list("native-tensor-resident", "lanes", n, "round", index, "value", nt-value(r), "present", nt-present(r), "error", nt-error(r), "wall-ms", nth(r, 8), "gpu-busy-us", sub(nth(after, 11), nth(before, 11)), "dispatches", sub(nth(after, 7), nth(before, 7)), "pipeline-births", sub(nth(after, 3), nth(before, 3)), "buffer-births", sub(nth(after, 2), nth(before, 2))));
+        if nt-check-result(r, ntbp-expected(n)) then 1 else form_error("resident tensor value regression");
+    }
+    def ntbp-resident(n) {
+        let before = metal_live();
+        let image = nt-image-open(str_concat(nt-num(n), " iota sum i32"));
+        let first = nt-image-result(image);
+        print(list("native-tensor-prepare", "lanes", n, "wall-ms", nth(first, 8), "present", nt-present(first), "error", nt-error(first)));
+        let r0 = ntbp-resident-row(n, image, 0);
+        let r1 = ntbp-resident-row(n, image, 1);
+        let r2 = ntbp-resident-row(n, image, 2);
+        let closed = nt-image-close(image);
+        let after = metal_live();
+        print(list("native-tensor-close", "lanes", n, "buffers-retained", sub(nth(after, 2), nth(before, 2))));
+        if eq(nth(after, 2), nth(before, 2)) then 1 else form_error("resident tensor buffer leak");
+    }
+    def ntbp-run() = ntbp-round(1048576);
+    0;
+}
