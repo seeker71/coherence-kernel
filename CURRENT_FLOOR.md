@@ -1149,6 +1149,47 @@ its own promised 3 s window**, naming `observe/form-choice-flow-live.fk`, which
 was not running. It is running again, and the same door now reads two kept
 promises and zero unkept, with `choices` among the moving.
 
+**The body takes its own vitals, and names no organ to do it.** A declaration is
+only ever as good as what somebody remembered to write in it — two hand-typed
+rows, and every organ nobody thought of stayed invisible. `form-glass-vitals.bml`
+writes down no organ at all. It watches, and lets every surface teach its own
+rhythm: a surface seen to move at least twice has demonstrated its own widest
+gap, and while it stays inside that gap times the slack it is **beating**; past
+it, having taught a cadence and then departed from itself, it is **faltering** —
+the one reading that asks for attention; and a surface not yet seen to move
+twice is **resting**, which is a statement about the watch, not about the
+surface. Health is not a number anyone set. It is a surface still resembling
+itself, so the reading is true for organs nobody has named, including ones that
+arrive after the door was written.
+
+Two refusals keep it honest, and they are the hard part rather than the
+detection: a slow publisher is never called sick, and a young watch reports how
+long it has been watching rather than passing its own youth off as the body's
+stillness. **One gap is not a rhythm** — witnessed 2026-09-09, a surface whose
+only gap was 4 ms got a 12 ms bound and was called faltering by the very pass
+that was measuring it, so two beats are the least a rhythm can be made of.
+
+`observe/body-vitals-live.fk` stands, folds the roster every second — one shared
+page, no frame opened — and **signals**: `fgv-publish` gives the reading back
+into the membrane as the `vitals` frame. The signal is a finding, not a mirror:
+one row carries the whole reading, then one row per surface asking for
+attention, so it is bounded by what is wrong and not by how much exists. A
+surface's own name cannot be a sample id — the membrane's fields are labels and
+a roster name carries a path and a bar — and that law is right: the true name
+rides in the cell, with the evidence the state came from, so a reader can
+disagree. Nor are `lifecycle` and `heat` this lane's words to borrow; lifecycle
+answers `unknown`, because the membrane lifecycle of a watched surface is
+genuinely not something a watch of stamps can know. The vitals frame registers
+like any other publisher, so the watch sees **itself**.
+
+`observe/membrane-heartbeat-run.fk` asks the body first and only then reaches
+for instruments: the signal, then the raw two-census heartbeat, then the
+declaration — which narrows to the one reading a watch structurally cannot make,
+an organ that must exist and has never once registered. Read live: **152
+surfaces watched, 4 beating, 0 faltering, 148 resting after 93 s of watching**;
+the raw heartbeat found the same 4 moving, and the declaration 2 kept, 0 unkept.
+vitals 255.
+
 **The glass names its own hot path, and the JIT declines its shape.** Read from
 a standing glass's own page: the top sixty-four recipes carry **172 million
 dispatches**, of which **one** is crystallized, 39 are still walking and 24 were
