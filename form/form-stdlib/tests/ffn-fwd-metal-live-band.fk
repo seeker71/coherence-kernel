@@ -1,0 +1,78 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/metal-door.fk form-stdlib/lora-adapter.bml
+;
+; ffn-fwd-metal-live-band — the emitted FFN-forward kernel RUN on this host's GPU, and its answer held
+; to the body's own recipe. The emit bands prove the text is stable; they cannot tell a kernel from a
+; string. Until 2026-09-09 this family's text was not a kernel at all on this Metal — the unit wrote
+; `mem_flags` unqualified and the compiler refused it — and every emit band stayed green through the
+; whole refusal, because a band that reads only bytes cannot hear the silicon say no. The parity gates
+; those cells name (scripts/metal_ffn_audit.sh and its siblings) are NOT in this checkout, so this is
+; the first band here that asks the GPU to answer instead of asking the emitter to repeat itself.
+;
+; y = W2*gelu(W1*x + b1) + b2 over indim 2, hid 2, outd 1 — small enough to follow by hand, and the
+; gelu is the recipe's OWN (tn-gelu's Taylor, which the emitted MSL walks as fgelu), never a hardware
+; tanh. So the comparison is fp64-recipe against fp32-silicon walking the SAME approximation: they
+; agree to fp32 epsilon, not to the bit, and this band says fp32 epsilon and means it.
+;
+; Verdict 31 when the silicon answers:
+;    1  the pipeline mints — the emitted text IS a kernel on this host (handle > 0)
+;    2  the dispatch and the sync both come back clean
+;    4  y agrees with the body's own recipe to fp32 epsilon
+;    8  the hidden pre-activations h1 are the recipe's too, so the agreement is the whole walk
+;   16  THE REFUSAL IS STILL REAL: a bare `mem_flags::` barrier is still refused by this host, and the
+;       same unit with `metal::` in front of it mints — so the qualification is load-bearing, not decor
+;
+(do
+    (defn fmlb-close? (a b)
+        (lt (if (lt (sub a b) 0.0) (sub b a) (sub a b)) 0.0000305))
+    (defn fmlb-f32s (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (md-le32 (md-f32-bits (head xs))) (fmlb-f32s (tail xs)))))
+    (defn fmlb-getf (h i) (ln-f32-decode (ln-u32-le (metal_buf_read h (mul i 4) 4) 0)))
+
+    ; --- the numbers, and the recipe's own answer to them ---
+    (let x0 1.0)
+    (let x1 2.0)
+    (let e-h1a (add (add (mul 1.0 x0) (mul 0.0 x1)) 0.5))
+    (let e-h1b (add (add (mul 0.0 x0) (mul 1.0 x1)) -0.25))
+    (let e-y (add (add (mul 1.0 (tn-gelu e-h1a)) (mul -0.5 (tn-gelu e-h1b))) 0.125))
+
+    ; --- mint ---
+    (let src (jte-mlp-fwd-msl-fmt "form_ffn_fwd_live_f32" "f32"))
+    (let pipe (metal_pipeline src "form_ffn_fwd_live_f32"))
+    (let c0 (if (gt pipe 0) 1 0))
+
+    ; --- buffers: w1 b1 w2 b2 x y h1 a, then the three uint dims ---
+    (let bw1 (metal_buf_alloc 16))
+    (let bb1 (metal_buf_alloc 8))
+    (let bw2 (metal_buf_alloc 8))
+    (let bb2 (metal_buf_alloc 4))
+    (let bx (metal_buf_alloc 8))
+    (let by (metal_buf_alloc 4))
+    (let bh1 (metal_buf_alloc 8))
+    (let ba (metal_buf_alloc 8))
+    (let w0 (metal_buf_write bw1 0 (fmlb-f32s (list 1.0 0.0 0.0 1.0))))
+    (let w1w (metal_buf_write bb1 0 (fmlb-f32s (list 0.5 -0.25))))
+    (let w2w (metal_buf_write bw2 0 (fmlb-f32s (list 1.0 -0.5))))
+    (let w3 (metal_buf_write bb2 0 (fmlb-f32s (list 0.125))))
+    (let w4 (metal_buf_write bx 0 (fmlb-f32s (list x0 x1))))
+
+    ; --- run: one threadgroup, the phases stride inside it ---
+    (let bind (md-bind16 (list bw1 bb1 bw2 bb2 bx by bh1 ba) (list 2 2 1) 32 0 0 0))
+    (let enq (metal_enqueue pipe bind 32))
+    (let syn (metal_sync))
+    (let c1 (if (ge enq 0) (if (ge syn 0) 2 0) 0))
+
+    ; --- read the silicon back and hold it to the recipe ---
+    (let g-y (fmlb-getf by 0))
+    (let g-h1a (fmlb-getf bh1 0))
+    (let g-h1b (fmlb-getf bh1 1))
+    (let c2 (if (fmlb-close? g-y e-y) 4 0))
+    (let c3 (if (fmlb-close? g-h1a e-h1a) (if (fmlb-close? g-h1b e-h1b) 8 0) 0))
+
+    ; --- the refusal this band was born from, kept alive on purpose ---
+    (let bare "kernel void fmlb_bare(device float* o [[buffer(0)]], uint t [[thread_position_in_threadgroup]]) { o[t] = 1.0f; threadgroup_barrier(mem_flags::mem_device); }")
+    (let qual "kernel void fmlb_qual(device float* o [[buffer(0)]], uint t [[thread_position_in_threadgroup]]) { o[t] = 1.0f; threadgroup_barrier(metal::mem_flags::mem_device); }")
+    (let c4 (if (eq (metal_pipeline bare "fmlb_bare") 0)
+            (if (gt (metal_pipeline qual "fmlb_qual") 0) 16 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 c4)))))
