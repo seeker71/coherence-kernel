@@ -476,3 +476,98 @@ pin drops it to 1111.
 None of that was visible from outside. It became visible because the work was done rather than
 described — which is the point, and is the second time today the same sentence has had to be learned
 at a different depth.
+
+---
+
+# Embodied end to end
+
+Urs: *"this does not sound fully embodied end-to-end."* He was pointing at the shape of the previous
+section, and the sharpest instance was an hour old: I had measured the metallib question with
+`/usr/bin/time` and shell loops — a claim about the body made from **outside** it. I looked for a clock
+door for about ten seconds, said "no obvious clock door", and reached for the shell.
+
+`host_monotonic_ms` and `host_cpu_us` are doors. They have been doors the whole time. I grepped the C
+for name strings, missed them, and never grepped the cells that already print microseconds.
+
+## The body reads its own price
+
+`observe/mint-price-run.fk`, warming the Metal device on its own line so device creation is not charged
+to the first kernel:
+
+```
+COLD  never-seen text        42 ms wall   1263 us cpu
+WARM  same text, same proc    0 ms          13 us cpu
+WARM  same text, third time   0 ms           3 us cpu
+COLD  a second never-seen      8 ms         545 us cpu
+WARM  that second again        0 ms          10 us cpu
+```
+
+The shell had said "cold ~80 ms, warm ~30 ms" and was mostly timing `fkwu` startup and device
+creation, which a process-level timer **cannot separate from minting at all**. The body's own clock
+puts the confound on its own line, and the real warm mint is **13 microseconds** — three orders of
+magnitude from what I reported. The retirement conclusion survives; the number I published to support
+it was measuring something else.
+
+## The lane's wholeness is now the body's claim
+
+`form/form-stdlib/tests/msl-lane-coverage-band.fk` = 31 walks the tests directory with `fs-list` and
+`fs-read-text`, keeps only bands that call `metal_enqueue`, and demands all thirteen `-msl` entry
+points appear in one — with bit 16 pinning the roster to the emitter's own count so a fourteenth family
+cannot arrive uncovered. Until it existed, "every family is run" was true and lived in a receipt.
+
+Writing it found two things about my own hands. `substring` is `(s, start, END)`, not `(s, start, len)`
+— every prefix check in the tree uses `0 (str_len p)` where both readings agree, so a suffix check
+written from assumption silently matched nothing. The body's own `fki-ends-with?` already had it right;
+I wrote mine without reading it. And its bit 8 was born weak: the first witness was an emit-only band,
+which touches no Metal at all and therefore cannot tell `metal_enqueue` from `metal_pipeline`.
+Loosening the dispatch test left the verdict at 31 until the witness became `msl-families-mint-band`,
+which mints fourteen handles and enqueues nothing.
+
+## Following the thread all the way down
+
+Three MLX bands were red — 137/255, 53/63, 49/63 — pre-existing, verified against the pristine carrier
+both ways. The same 2026-08-25 consolidation that took `tf32` took **five** file-reading tokens:
+`f32`, `q8`, `q4k`, `q6k`, `attn`. I had restored one and left its siblings, which is the same partial
+move I had just been corrected for.
+
+`q8`, `q4k` and `q6k` are back, ported through the current `fk_mlx_push` rather than the old raw stack
+writes. The proof is the pins, not the port: **528** and **1056** out of the Q8_0 fixture, exactly the
+values `mlx-q8-band` had been asserting into a void for two weeks.
+
+Then the bands needed the vocabulary that IS. Their programs predate the one-int32 law, so each closes
+with `i32` now; `m32x1` is gone under the same minimum law that retired `sub`, so the 32-wide ones
+column is **built** — `32 iota 0 mul 1 add` — which is that law working exactly as intended.
+
+`mlx-home-band` was different again: its `rope`, `attn` and `softmax` were retired as *composable*, and
+the carrier header listed `rope-pair` among the graphs living in `mlx-derived.fk`. It was not there.
+Neither was `attn`. Retired in favour of a Form graph nobody wrote, for two weeks, with the header
+asserting otherwise. Both are written now — `mld-attn` is matmul, the Form softmax, matmul; **9**, the
+fused kernel's own answer in four dispatches instead of one, and that trade is named in the cell rather
+than hidden behind "derivable".
+
+`mld-rope-pair` took two attempts and the first one is the reason this section exists. I wrote it from
+reasoning — build the rotation matrix and multiply — and it died on a reshape, because there is no
+concat here and `[[cos,-sin],[sin,cos]]` has no expression. `take` is what makes it composable:
+take(x,[1,0]) is (x1,x0), times (-1,1) is the sin term exactly. **I nearly shipped the first one.**
+
+All five MLX bands are green: 16777215, 255, 63, 63, 127.
+
+## Surprise
+
+That `mlx-home-band`'s rope claim had been pinned at **position 0**, where RoPE is the identity — so
+the check would have passed over a rope that did nothing at all. It is now pinned at 1 radian, where
+7·cos 1 − sin 1 = 2.9408. A fixture chosen because it is easy to compute by hand is often chosen
+because the operation vanishes there, and those are the same property seen from two sides.
+
+## Where discomfort became gold
+
+The discomfort was how ordinary the shell felt. Reaching for `/usr/bin/time` did not feel like leaving
+the body — it felt like using a tool. That is what made it worth noticing: embodiment fails at the
+places where the outside tool is *convenient*, not at the places where it is obviously wrong. I did not
+decide to measure from outside; I failed to spend ten seconds asking whether the inside could.
+
+The gold, and it is the same shape as `quotedcure` and `namedaway` one turn down: **a claim measured
+from outside the body is a claim the body cannot hold** — it can only be told, and it will report the
+number long after the number stops being true. The test is not "is this measurement correct" but "who
+would notice if it stopped being correct". For the shell timing, the answer was nobody. For
+`observe/mint-price-run.fk` and `msl-lane-coverage-band`, the answer is the body.
