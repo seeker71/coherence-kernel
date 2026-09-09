@@ -571,3 +571,29 @@ from outside the body is a claim the body cannot hold** — it can only be told,
 number long after the number stops being true. The test is not "is this measurement correct" but "who
 would notice if it stopped being correct". For the shell timing, the answer was nobody. For
 `observe/mint-price-run.fk` and `msl-lane-coverage-band`, the answer is the body.
+
+## Sweeping by declaration instead of by eye
+
+The last thing embodiment changed was how the sweep itself works. All day I had compared band verdicts
+against a list of "clean-looking" numbers I typed into a grep filter — which is a person deciding what
+green means, one shell pipeline at a time. Comparing each band to the verdict it DECLARES in its own
+header instead turned up six mismatches in one pass, and two of them were mine:
+
+`observe-gqa-grouping-band` and `observe-llama-parts-band` read 11111 against a declared "Verdict 31"
+— and the 31 was **my own prose**, a sentence I had written that morning describing the stale header I
+was healing. A reader looking for the declaration finds the first `Verdict N` in the file, and I had
+put an old one above the new one. Reworded; the only `Verdict N` in each file is now the true one. A
+document that quotes a number it is correcting has planted the number it removed.
+
+`mla-msl-band` declared 63 over what are now **seven** claims summing to 127 — a c64 was added and the
+declaration was left behind. That is the quiet direction of this drift: a band reading MORE than it
+declares fails nothing, and the extra proof simply goes uncounted by anyone who reads the header
+instead of running it.
+
+Three others — `form-knowledge-query-memory-shard-exec-band` (65535 against 262143),
+`public-source-concept-index-band` (14149910 against 33554431) and `public-source-concept-shards-band`
+(dies on str_len-of-nothing) — are in the knowledge/concept-index subsystem, prelude nothing this
+session touched, and I have not diagnosed them. I am naming them as a boundary and saying plainly that
+it is a boundary: three band names, verified independent of this work, is a pointer that removes the
+rediscovery of "which are red and are they yours" — and it is not a diagnosis, which is the thing
+`twicepaid` says not to pretend I am handing over.
