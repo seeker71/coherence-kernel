@@ -1185,10 +1185,45 @@ like any other publisher, so the watch sees **itself**.
 `observe/membrane-heartbeat-run.fk` asks the body first and only then reaches
 for instruments: the signal, then the raw two-census heartbeat, then the
 declaration — which narrows to the one reading a watch structurally cannot make,
-an organ that must exist and has never once registered. Read live: **152
-surfaces watched, 4 beating, 0 faltering, 148 resting after 93 s of watching**;
-the raw heartbeat found the same 4 moving, and the declaration 2 kept, 0 unkept.
-vitals 255.
+an organ that must exist and has never once registered. vitals 1023.
+
+**Being on time is not the same as being well.** An hour after that watch stood
+reading zero faltering, the glass had dropped far below target — publishing
+exactly on rhythm while pinned at 99% of a core. Rhythm asks only *whether* a
+thing moved, never what moving cost. So vitals reads **effort** too, and every
+gauge it needs was already in the body: word 18 of each kernel's own live page
+is its process CPU microseconds. Two looks give CPU microseconds per wall
+millisecond, where 1000 is one processor wholly consumed — no sampling, no host
+tool. (The wall clock is the reader's own: word 2 is written once at
+registration and never moves, so a reader taking it for "when this was written"
+divides by zero elapsed forever — witnessed on the first run, all thirty kernels
+reporting zero samples.)
+
+Two readings, two different questions. **`labouring`** is relative — a departure
+from this kernel's own calmest demonstrated effort. **`saturated`** is absolute,
+and it earns that place because *departure-from-self is blind to a steady
+sickness*: the glass had been at 99% for two hours, so its calmest and its
+busiest were both 99% and it read `easy`. A core is a core — not a threshold
+anyone chose but the unit itself — so a kernel yielding almost none of the wall
+time between two looks cannot go faster whatever it is doing, and one reading is
+enough to say so. Fifteen sixteenths is the allowance for a scheduler never
+handing back a perfect thousand.
+
+`observe/body-vitals-live.fk` now carries both watches and signals both. Read
+live from the body's own frame, unprompted: **164 surfaces watched, 5 beating, 0
+faltering**, and three findings — `saturated kernel.30129 at 996 µs/ms` (the
+standing glass), `labouring kernel.58120 at 541` and `labouring kernel.81564`.
+
+**The glass, witnessed.** A *fresh* glass measures `dt=43/40ms`, `58/40`, `40/40`
+— at or over its own 40 ms budget at 25 Hz before any ageing, at 3–7 **million**
+dispatches per frame. The standing one is CPU-saturated and building its metric
+index about twenty times a second against a twenty-five-times target. The
+dashboard's keyed-map trie — 436k dispatches/s, the largest cluster in the top
+sixty-four named recipes — is **not** the cause: at 3M+ dispatches a frame it is
+under half a percent of the work, and R128's promise that the index is built
+once a frame still holds (the three index-rebuilding wrappers are dead in the
+live path). The glass already computes `frame-work-ms` against
+`frame-budget-ms` every frame and publishes it; nothing was reading it.
 
 **The glass names its own hot path, and the JIT declines its shape.** Read from
 a standing glass's own page: the top sixty-four recipes carry **172 million
