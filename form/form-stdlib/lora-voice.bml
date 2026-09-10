@@ -4,20 +4,14 @@
 // the fresh word that answered it) and every receipt section (Sema's own
 // voice), one JSON line each, split ten-to-one into train and valid.
 //
-// One crossing remains, and it is named where it is: the TRAINER
-// (mlx_lm on this Mac) until native training callers replace it.
-// An ask with no adapter goes to `native-ask.bml` (llama32-1b dense).
-// An ask WEARING an adapter goes to `native-llama-voice.bml` (llama32-3b
-// LoRA on Metal). `lv-cross-ask` keeps the mlx generate membrane for
-// side-by-side grades. `lv-route` answers which door an ask takes and
-// `lv-route-why` says why.
-// preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/spool-bell-transport.fk learn/homecoming-distillation-corpus.fk form/form-stdlib/native-ask.bml form/form-stdlib/native-llama-voice.bml
+// Training and adapter asking use the same native 3B model and full LoRA layers.
+// The adapterless routed ask retains the native dense 1B door.
+// The supervisor exposes actual process exits and per-stage learning events.
+// preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk form/form-stdlib/line-grammar.fk form/form-stdlib/spool-bell-transport.fk learn/homecoming-distillation-corpus.fk form/form-stdlib/native-ask.bml form/form-stdlib/native-lora-worker.bml
 //////////////////////////////////////////////////////////////////////
 section [form.bml] {
     class FormLoraVoice {
         field LVData = ".form-lora-voice-native";
-        field LVVenv = "/Users/ursmuff/.mlx-venv";
-        field LVModelDir = "/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--Llama-3.2-3B-Instruct-4bit/snapshots";
         field LVIters = 600;
         def lv-cat(parts) = if eq(len(parts), 0) then "" else str_concat(head(parts), lv-cat(tail(parts)));
         def lv-q() = byte_to_str(34);
@@ -102,90 +96,44 @@ section [form.bml] {
             let n = lv-rumi-emit(data, np);
             list(sub(ncorpus, 1), sub(nr, ncorpus), sub(nh, nr), sub(n, 1), sub(np, nd));
         }
-        def lv-model() {
-            let snaps = fs-list(LVModelDir());
-            if eq(len(snaps), 0) then "" else fs-path-join(LVModelDir(), head(snaps));
-        }
-        def lv-train-cmd(data, model, iters) = lv-cat(list("( ", LVVenv(), "/bin/python -m mlx_lm lora --model ", model, " --train --data ", data, " --iters ", int_to_str(iters), " --batch-size 4 --num-layers 8 --learning-rate 1e-4 --max-seq-length 1024 --adapter-path ", data, "/adapter --save-every 100 --steps-per-eval 100 > ", data, "/train.log 2>&1; echo $? > ", data, "/train.rc ) >/dev/null 2>&1 &"));
-        def lv-training?(data) = if eq(fs-exists?(str_concat(data, "/train.log")), 0) then 0 else if eq(fs-exists?(str_concat(data, "/train.rc")), 1) then 0 else 1;
-        // one held-out question, answered by the base and by the adapter (one crossing each)
-        // 60 tokens answers a corpus question, whose word is the first thing
-        // said. It TRUNCATES a perception answer, whose shape is the last —
-        // and a grader reading a cut answer scores the cut, not the model.
-        field LVMaxTokens = 60;
-        def lv-ask-cmd(model, adapter, prompt) = lv-ask-cmd-n(model, adapter, prompt, LVMaxTokens());
-        def lv-ask-cmd-n(model, adapter, prompt, maxTokens) = lv-cat(list(LVVenv(), "/bin/python -m mlx_lm generate --model ", model, if eq(str_len(adapter), 0) then "" else str_concat(" --adapter-path ", adapter), " --max-tokens ", int_to_str(maxTokens), " --prompt '", prompt, "' 2>/dev/null | tail -n +1"));
-        // the adapter's home: the local training folder when one stands, else the
-        // committed one — a locally trained preference is vital and travels as ice
+        def lv-model() = mr-path(mr-find("llama32-3b-mlx-4bit"));
+        field LVMaxTokens = 0;
         field LVTracked = "form/form-stdlib/adapters/llama-3.2-3b-voice";
-        def lv-adapter-path(data) = if gt(file_size(str_concat(data, "/adapter/adapters.safetensors")), 0) then str_concat(data, "/adapter") else LVTracked();
-        // What the crossing hands back is not what the model said: mlx_lm wraps
-        // the answer in its own banner and follows it with a speed report. A
-        // reader that takes the whole of it reads the BANNER as the model's
-        // first word, and a grader built on first-word equality then scores
-        // every answer wrong with no sign that anything is amiss. So the
-        // transport's framing comes off here, once, where the crossing is.
-        field LVBanner = "==========";
+        def lv-adapter-path(data) = if gt(file_size(str_concat(data,"/adapter/native-current")),0) then str_concat(data,"/adapter") else if gt(file_size(str_concat(data,"/adapter/adapters.safetensors")),0) then str_concat(data,"/adapter") else LVTracked();
+        def lv-training?(data) = nlw-running(data);
+        def lv-train-request(data,model,iters) = ntr-request(model,lv-adapter-path(data),data,str_concat(data,"/adapter"),iters,4,0.0001,0,8);
+        def lv-launch(data,iters) = head(nlw-launch(lv-train-request(data,lv-model(),iters),data));
         def lv-txt(t) = if nothing?(t) then "" else t;
-        def lv-said(raw) = lv-said-of(lv-txt(raw));
-        def lv-said-of(s) = lv-said-at(s, str_find(s, LVBanner(), 0));
-        def lv-said-at(s, a) = if lt(a, 0) then trim(s) else lv-said-cut(s, add(a, str_len(LVBanner())));
-        def lv-said-cut(s, from) = lv-said-end(s, from, str_find(s, LVBanner(), from));
-        def lv-said-end(s, from, b) = if lt(b, 0) then trim(substring(s, from, str_len(s))) else trim(substring(s, from, b));
-        // ── the crossing, always, and named as one ────────────────────────
-        // These three keep the membrane on purpose. A base-versus-adapter
-        // grade must hold the MODEL still while the adapter moves, so the
-        // school asks through here and not through the routed door below.
-        def lv-cross-ask(data, prompt, withAdapter) = host-exec(lv-ask-cmd(lv-model(), if eq(withAdapter, 1) then lv-adapter-path(data) else "", prompt), "");
-        def lv-cross-ask-at(adapter, prompt, maxTokens) = host-exec(lv-ask-cmd-n(lv-model(), adapter, prompt, maxTokens), "");
-        def lv-cross-ask-n(data, prompt, withAdapter, maxTokens) = host-exec(lv-ask-cmd-n(lv-model(), if eq(withAdapter, 1) then lv-adapter-path(data) else "", prompt, maxTokens), "");
-
-        // ── which door an ask takes, and why ──────────────────────────────
-        // An ask with no adapter goes to the body's own dense lane on this
-        // Mac's metal — llama32-1b through `dense-token-handle`, nothing
-        // crossed. An ask WEARING an adapter goes to the native LoRA lane
-        // — llama32-3b through `nlg-ask`, the worn adapter on Metal.
-        // mlx_lm generate remains as `lv-cross-ask` for side-by-side grades.
-        // mlx_lm train remains the trainer crossing.
-        //
-        // The dense native lane is the SMALLER model, and where its answer is
-        // worse the measurement says so rather than the routing hiding it:
-        // `observe/lora-voice-ask-run.fk` asks one question three ways and
-        // prints the three answers beside each other.
+        def lv-said(raw) = trim(lv-txt(raw));
+        // The 1B comparison door keeps its own identity. Both school samples below
+        // use the exact same 3B base, with only adapter ownership changing.
         def lv-native-lane() = "native-dense-llama32-1b-on-metal";
+        def lv-model-lane() = "native-affine-llama32-3b-on-metal";
         def lv-lora-lane() = "native-lora-llama32-3b-on-metal";
-        def lv-cross-lane() = "mlx-crossing-llama32-3b-instruct-4bit";
-        def lv-route(adapter) = if eq(str_len(adapter), 0) then "native" else "native-lora";
-        def lv-route-why(adapter) {
-            if eq(str_len(adapter), 0) then "the body's own dense lane on this Mac's metal; no membrane crossed"
-            else str_concat("native LoRA lane on this Mac's metal; llama32-3b wearing ", adapter);
+        def lv-route(adapter) = if eq(str_len(adapter),0) then "native" else "native-lora";
+        def lv-route-why(adapter) = if eq(str_len(adapter),0) then "the native dense 1B asking door" else str_concat("the adapter's 3B base and full LoRA on native Metal: ",adapter);
+        def lv-events() = str_concat(".hearth/native-voice-",str_concat(int_to_str(host_pid()),".jsonl"));
+        def lv-model-ask-r(adapter,prompt,maxTokens) {
+            if le(file_size(str_concat(lv-model(),"/model.safetensors")),0) then list("","no-local-checkpoint",lv-model-lane())
+            else if and(gt(str_len(adapter),0),le(file_size(str_concat(nag-resolve(adapter),"/adapters.safetensors")),0)) then list("","no-adapter",lv-lora-lane())
+            else lv-r-model(nlg-once(lv-model(),adapter,prompt,maxTokens,"","",lv-events()));
         }
-        // the full-truth door: (text reason lane). A reason is empty exactly
-        // when a lane answered; a refusal names which — no model, a prompt
-        // with no room left in the cache, a missing adapter, a crossing that vanished.
-        def lv-lora-ask-r(adapter, prompt, maxTokens) {
-            let base = nlg-base();
-            if le(file_size(str_concat(base, "/model.safetensors")), 0) then list("", "no-local-checkpoint", lv-lora-lane())
-            else if le(file_size(str_concat(adapter, "/adapters.safetensors")), 0) then list("", "no-adapter", lv-lora-lane())
-            else lv-r-lora(nlg-once(base, adapter, prompt, maxTokens, "", "", ""));
-        }
-        def lv-ask-r(adapter, prompt, maxTokens) {
-            if eq(str_len(adapter), 0) then lv-r-native(na-chat-ask(prompt, maxTokens))
-            else lv-lora-ask-r(adapter, prompt, maxTokens);
-        }
-        def lv-r-native(r) = list(na-said(r), na-why(r), lv-native-lane());
-        def lv-r-lora(r) = list(head(r), nth(r, 1), lv-lora-lane());
-        def lv-r-cross(raw) = if nothing?(raw) then list("", "crossing-vanished", lv-cross-lane()) else list(lv-said(raw), "", lv-cross-lane());
+        def lv-lora-ask-r(adapter,prompt,maxTokens) = lv-r-lora(lv-model-ask-r(adapter,prompt,maxTokens));
+        def lv-ask-r(adapter,prompt,maxTokens) = if eq(str_len(adapter),0) then lv-r-native(na-chat-ask(prompt,if eq(maxTokens,0) then NAPositions() else maxTokens)) else lv-lora-ask-r(adapter,prompt,maxTokens);
+        def lv-r-model(r) = list(head(r),nth(r,1),lv-model-lane());
+        def lv-r-lora(r) = list(head(r),nth(r,1),lv-lora-lane());
+        def lv-r-native(r) = list(na-said(r),na-why(r),lv-native-lane());
         def lv-r-said(r) = head(r);
-        def lv-r-why(r) = nth(r, 1);
-        def lv-r-lane(r) = nth(r, 2);
-        def lv-r-answered?(r) = if eq(str_len(nth(r, 1)), 0) then 1 else 0;
-
-        // the routed doors: the body's own lane unless an adapter is worn
-        def lv-ask(data, prompt, withAdapter) = lv-ask-n(data, prompt, withAdapter, LVMaxTokens());
-        def lv-ask-at(adapter, prompt, maxTokens) = lv-r-said(lv-ask-r(adapter, prompt, maxTokens));
-        def lv-ask-n(data, prompt, withAdapter, maxTokens) = lv-ask-at(if eq(withAdapter, 1) then lv-adapter-path(data) else "", prompt, maxTokens);
-        def lv-launch(data, iters) = if eq(lv-training?(data), 1) then "already-training" else if eq(str_len(lv-model()), 0) then "no-model" else if nothing?(host-exec(lv-train-cmd(data, lv-model(), iters), "")) then "launch-vanished" else "launched";
+        def lv-r-why(r) = nth(r,1);
+        def lv-r-lane(r) = nth(r,2);
+        def lv-r-answered?(r) = eq(str_len(nth(r,1)),0);
+        def lv-complete(r) = if lv-r-answered?(r) then lv-r-said(r) else nothing();
+        def lv-model-ask(data,prompt,withAdapter) = lv-model-ask-n(data,prompt,withAdapter,LVMaxTokens());
+        def lv-model-ask-at(adapter,prompt,maxTokens) = lv-complete(lv-model-ask-r(adapter,prompt,maxTokens));
+        def lv-model-ask-n(data,prompt,withAdapter,maxTokens) = lv-model-ask-at(if eq(withAdapter,1) then lv-adapter-path(data) else "",prompt,maxTokens);
+        def lv-ask(data,prompt,withAdapter) = lv-ask-n(data,prompt,withAdapter,LVMaxTokens());
+        def lv-ask-at(adapter,prompt,maxTokens) = lv-complete(lv-ask-r(adapter,prompt,maxTokens));
+        def lv-ask-n(data,prompt,withAdapter,maxTokens) = lv-ask-at(if eq(withAdapter,1) then lv-adapter-path(data) else "",prompt,maxTokens);
     }
     0;
 }

@@ -1,0 +1,74 @@
+// Shell-free launch and supervision. The supervisor retains the child's real exit
+// status even when compilation or training aborts before a completion event.
+// preludes: form-stdlib/native-lora-train.bml
+section [form.bml] {
+ class NativeLoraWorker {
+  def nlw-argv() = list("./fkwu","observe/native-lora-train-run.fk");
+  def nlw-supervisor-argv() = list("./fkwu","observe/native-lora-supervise-run.fk");
+  def nlw-pid(path) {
+   let text = read_file(path);
+   if nothing?(text) then 0 else str_to_int(trim(text));
+  }
+  def nlw-running(dir) = or(eq(host_alive(nlw-pid(str_concat(dir,"/train.pid"))),1),eq(host_alive(nlw-pid(str_concat(dir,"/train-worker.pid"))),1));
+  def nlw-status(dir) {
+   let rc = read_file(str_concat(dir,"/train.rc"));
+   if nlw-running(dir) then "running" else if nothing?(rc) then if gt(file_size(str_concat(dir,"/train.pid")),0) then "interrupted-without-exit-status" else "idle" else if eq(str_to_int(trim(rc)),0) then "completed" else str_concat("failed-exit-",trim(rc));
+  }
+  def nlw-lock(dir) {
+   let path = str_concat(dir,"/.native-training-lock");
+   let pid = host_spawn_at(list("/bin/mkdir",path),list("/dev/null","/dev/null","/dev/null"));
+   if le(pid,0) then 0 else if eq(host_wait(pid),0) then 1 else if nlw-running(dir) then 0 else nlw-reclaim(dir,path);
+  }
+  def nlw-reclaim(dir,path) {
+   // A lock with no published pid may be between mkdir and spawn. Its age must
+   // exceed the launch window before another process may recover it.
+   if lt(sub(div(now_unix_ms(),1000),file_mtime(path)),60) then 0 else nlw-reclaim-old(dir,path);
+  }
+  def nlw-reclaim-old(dir,path) {
+   let remove = fs-remove-tree(path);
+   let pid = host_spawn_at(list("/bin/mkdir",path),list("/dev/null","/dev/null","/dev/null"));
+   if le(pid,0) then 0 else eq(host_wait(pid),0);
+  }
+  def nlw-launch(r,dir) {
+   let made = fs-mkdir(dir);
+   if not(nlw-lock(dir)) then list("already-training-or-launching",0,dir) else nlw-launch-locked(r,dir);
+  }
+  def nlw-launch-locked(r,dir) {
+   let prefix = str_concat(dir,str_concat("/.training-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(host_monotonic_ms())))));
+   let request = str_concat(prefix,".json"); let ticket = str_concat(prefix,".ticket");
+   let w = nag-write(request,str_concat(json-emit(r),"\n"));
+   let t = nag-write(ticket,str_concat(request,str_concat("\n",str_concat(dir,"\n"))));
+   let stale = fs-remove-file(str_concat(dir,"/train.rc"));
+   let cancel = fs-remove-file(str_concat(ntr-get(r,"output"),"/cancel"));
+   let pid = host_spawn_at(nlw-supervisor-argv(),list(ticket,str_concat(dir,"/train-supervisor.log"),str_concat(dir,"/train-supervisor.err")));
+   if le(pid,0) then nlw-launch-failed(dir,pid) else nlw-launched(dir,pid);
+  }
+  def nlw-launched(dir,pid) {
+   let wrote = nag-write(str_concat(dir,"/train.pid"),int_to_str(pid));
+   list("launched",pid,dir);
+  }
+  def nlw-launch-failed(dir,rc) {
+   let wrote = nag-write(str_concat(dir,"/train.rc"),int_to_str(rc)); let unlock = fs-remove-tree(str_concat(dir,"/.native-training-lock"));
+   list("launch-refused",rc,dir);
+  }
+  def nlw-supervise(request,dir) {
+   let pid = host_spawn_at(nlw-argv(),list(request,str_concat(dir,"/train.log"),str_concat(dir,"/train.err")));
+   let wrote = nag-write(str_concat(dir,"/train-worker.pid"),int_to_str(pid));
+   let rc = if le(pid,0) then pid else host_wait(pid);
+   let finished = nag-write(str_concat(dir,"/train.rc"),int_to_str(rc));
+   let workerGone = fs-remove-file(str_concat(dir,"/train-worker.pid"));
+   let supervisorGone = fs-remove-file(str_concat(dir,"/train.pid"));
+   let unlock = fs-remove-tree(str_concat(dir,"/.native-training-lock"));
+   rc;
+  }
+  def nlw-run(r,dir) {
+   let launch = nlw-launch(r,dir);
+   if not(str_eq(head(launch),"launched")) then list(head(launch),-1,dir) else nlw-waited(host_wait(nth(launch,1)),dir);
+  }
+  def nlw-waited(supervisorExit,dir) {
+   let rc = read_file(str_concat(dir,"/train.rc"));
+   if or(not(eq(supervisorExit,0)),nothing?(rc)) then list("supervisor-failed",supervisorExit,dir) else list(nlw-status(dir),str_to_int(trim(rc)),str_concat(dir,"/train.log"));
+  }
+ }
+ 0;
+}

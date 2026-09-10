@@ -32,13 +32,18 @@ section [form.bml] {
         def vs-lower(s, i, acc) = if ge(i, str_len(s)) then acc else vs-lower(s, add(i, 1), str_concat(acc, byte_to_str(if and(ge(str_byte_at(s, i), 65), le(str_byte_at(s, i), 90)) then add(str_byte_at(s, i), 32) else str_byte_at(s, i))));
         def vs-corpus-line?(line) = if ge(str_find(line, "The body asks the smallest question", 0), 0) then 1 else 0;
         def vs-corpus-lines(lines, n) = if or(eq(len(lines), 0), le(n, 0)) then list() else if eq(vs-corpus-line?(head(lines)), 1) then cons(head(lines), vs-corpus-lines(tail(lines), sub(n, 1))) else vs-corpus-lines(tail(lines), n);
-        // The school grades an ADAPTER, so it holds the model still and asks
-        // through the crossing on both sides. The routed door (`lv-ask`) now
-        // sends an adapterless ask to the body's own 1B lane, and a base of
-        // one size against an adapter on another grades the size, not the
-        // school. Which lane the body prefers for its own asking is a
-        // different question, measured in `observe/lora-voice-ask-run.fk`.
-        def vs-answer-word(data, q, withAdapter) = vs-lower(vs-first-word(lv-said(lv-cross-ask(data, q, withAdapter))), 0, "");
+        // The same 3B base on both sides; one shared tokenizer, two model owners.
+        def vs-open-pair(data) {
+            let base = nlg-open(lv-model(),"");
+            list(base,list(nll-open(lv-model(),lv-adapter-path(data)),nth(base,1)));
+        }
+        def vs-close-pair(pair,result) {
+            let a = nlg-close(head(pair)); let b = nlg-close(nth(pair,1));
+            result;
+        }
+        def vs-ask-on(pair,q,withAdapter) = vs-complete(nlg-ask(nth(pair,withAdapter),q,0,"","",lv-events()));
+        def vs-complete(result) = if or(gt(str_len(nth(result,1)),0),eq(str_len(head(result)),0)) then form_error(str_concat("school grade awaits a complete answer: ",nth(result,1))) else head(result);
+        def vs-answer-word(pair,q,withAdapter) = vs-lower(vs-first-word(vs-ask-on(pair,q,withAdapter)),0,"");
         // grade: (n base-hits adapter-hits)
         def vs-grade-go(data, lines, n, bh, ah) {
             if eq(len(lines), 0) then list(n, bh, ah)
@@ -49,7 +54,29 @@ section [form.bml] {
             let a = if str_eq(vs-answer-word(data, q, 1), want) then 1 else 0;
             vs-grade-go(data, rest, add(n, 1), add(bh, b), add(ah, a));
         }
-        def vs-grade(data, n) = vs-grade-go(data, vs-corpus-lines(split-on(vs-text(read_file(str_concat(data, "/valid.jsonl"))), byte_to_str(10)), n), 0, 0, 0);
+        def vs-grade(data,n) {
+            let rows = vs-corpus-lines(split-on(vs-text(read_file(str_concat(data,"/valid.jsonl"))),byte_to_str(10)),n);
+            if not(eq(len(rows),n)) then form_error("school held-out corpus is incomplete") else vs-grade-ready(data,rows);
+        }
+        def vs-grade-ready(data,rows) {
+            let pair = vs-open-pair(data);
+            vs-close-pair(pair,vs-grade-go(pair,rows,0,0,0));
+        }
+        def vs-harvest(data,home) {
+            if not(str_eq(nlw-status(data),"completed")) then form_error("school harvest awaits successful training") else vs-harvest-ready(nag-complete(nag-resolve(str_concat(data,"/adapter"))),home);
+        }
+        def vs-harvest-ready(source,home) {
+            let generation = str_concat(home,str_concat("/generations/",fs-path-basename(source)));
+            let made = fs-mkdir(generation);
+            let args = append(list("/bin/cp"),append(vs-generation-files(source),list(generation)));
+            let pid = host_spawn_at(args,list("/dev/null","/dev/null","/dev/null"));
+            if le(pid,0) then form_error("school generation copy could not launch") else if not(eq(host_wait(pid),0)) then form_error("school generation copy failed") else vs-harvest-copied(source,generation,home);
+        }
+        def vs-generation-files(dir) = list(str_concat(dir,"/adapters.safetensors"),str_concat(dir,"/optimizer.safetensors"),str_concat(dir,"/adapter_config.json"),str_concat(dir,"/complete.json"));
+        def vs-copy-sizes(a,b) = if nil?(a) then 1 else and(eq(file_size(head(a)),file_size(head(b))),vs-copy-sizes(tail(a),tail(b)));
+        def vs-harvest-copied(source,generation,home) {
+            if not(vs-copy-sizes(vs-generation-files(source),vs-generation-files(generation))) then form_error("school generation copy extent mismatch") else nag-publish(home,generation);
+        }
         def vs-tags() = list("all", "we", "mesh", "voice");
         def vs-sample(id, purpose, n, lifecycle, epoch) = fgtm-sample(id, fgtm-absent(), "voice-school", "form", "voice.school", "voice", purpose, fgtm-absent(), fgtm-present(n), lifecycle, fgtm-absent(), fgtm-present(epoch), fgtm-absent(), fgtm-absent(), "never", "physical-live", "voice-school", vs-tags());
         def vs-publish(troot, cycle, rows, grade, epoch) = fgtm-publish-snapshot(troot, "voice.school", epoch, list(
@@ -83,11 +110,17 @@ section [form.bml] {
         def vsp-go(data, lines, n, bh, ah) = if eq(len(lines), 0) then list(n, bh, ah) else vsp-one(data, tail(lines), n, bh, ah, vs-question(head(lines)), vsp-shape-of(head(lines)));
         // the shape is the LAST thing a perception answer says, so the answer
         // must be allowed to reach it before it is read
-        field VSPTokens = 220;
         // the same reason as `vs-answer-word`: both sides of a shape grade
         // ride the one model the adapter was fitted to
-        def vsp-one(data, rest, n, bh, ah, q, shape) = vsp-go(data, rest, add(n, 1), add(bh, vsp-hit?(lv-cross-ask-n(data, q, 0, VSPTokens()), shape)), add(ah, vsp-hit?(lv-cross-ask-n(data, q, 1, VSPTokens()), shape)));
-        def vsp-grade(data, n) = vsp-go(data, vsp-lines(split-on(vs-text(read_file(str_concat(data, "/valid.jsonl"))), byte_to_str(10)), n), 0, 0, 0);
+        def vsp-one(pair,rest,n,bh,ah,q,shape) = vsp-go(pair,rest,add(n,1),add(bh,vsp-hit?(vs-ask-on(pair,q,0),shape)),add(ah,vsp-hit?(vs-ask-on(pair,q,1),shape)));
+        def vsp-grade(data,n) {
+            let rows = vsp-lines(split-on(vs-text(read_file(str_concat(data,"/valid.jsonl"))),byte_to_str(10)),n);
+            if not(eq(len(rows),n)) then form_error("school held-out perception rows are incomplete") else vsp-grade-ready(data,rows);
+        }
+        def vsp-grade-ready(data,rows) {
+            let pair = vs-open-pair(data);
+            vs-close-pair(pair,vsp-go(pair,rows,0,0,0));
+        }
     }
     0;
 }

@@ -9,10 +9,17 @@ section [form.bml] {
  class NativeLlamaVoice {
   def nlg-event(path,stage,count,start,live,model) {
    let now = host_monotonic_ms(); let current = metal_live();
-   let event = json-node-object(list(json-node-pair("stage",json-node-string(stage)),json-node-pair("tokens",json-node-int(count)),json-node-pair("wall_ms",json-node-int(sub(now,start))),json-node-pair("gpu_busy_us",json-node-int(sub(nth(current,11),nth(live,11)))),json-node-pair("dispatches",json-node-int(sub(nth(current,7),nth(live,7)))),json-node-pair("buffers_created",json-node-int(sub(nth(current,16),nth(live,16)))),json-node-pair("new_pipelines",json-node-int(sub(nth(current,3),nth(live,3)))),json-node-pair("live_buffers",json-node-int(nth(current,2))),json-node-pair("device_bytes",json-node-int(nth(current,18))),json-node-pair("model",json-node-string(nth(model,4))),json-node-pair("lora_pairs",json-node-int(nll-pair-count(nth(model,1)))),json-node-pair("lora_rank",json-node-int(if eq(nll-pair-count(nth(model,1)),0) then 0 else nll-rank(nth(model,1))))));
+   let event = json-node-object(list(json-node-pair("stage",json-node-string(stage)),json-node-pair("tokens",json-node-int(count)),json-node-pair("wall_ms",json-node-int(sub(now,start))),json-node-pair("gpu_busy_us",json-node-int(sub(nth(current,11),nth(live,11)))),json-node-pair("dispatches",json-node-int(sub(nth(current,7),nth(live,7)))),json-node-pair("buffers_created",json-node-int(sub(nth(current,16),nth(live,16)))),json-node-pair("new_pipelines",json-node-int(sub(nth(current,3),nth(live,3)))),json-node-pair("live_buffers",json-node-int(nth(current,2))),json-node-pair("device_bytes",json-node-int(nth(current,18))),json-node-pair("model",json-node-string(nth(model,4))),json-node-pair("adapter",json-node-string(nll-adapter(model))),json-node-pair("lora_pairs",json-node-int(nll-pair-count(nth(model,1)))),json-node-pair("lora_rank",json-node-int(if eq(nll-pair-count(nth(model,1)),0) then 0 else nll-rank(nth(model,1))))));
    if eq(str_len(path),0) then 0 else sbt-append(path,str_concat(json-emit(event),"\n"));
   }
-  def nlg-open(dir,adapter) = list(nll-open(dir,adapter),nlt-open(dir));
+  def nlg-open(dir,adapter) = nlg-open-at(dir,adapter,"");
+  def nlg-open-at(dir,adapter,events) {
+   let start = host_monotonic_ms(); let live = metal_live(); let model = nll-open(dir,adapter);
+   let opened = nlg-event(events,"model-admission",0,start,live,model);
+   let t0 = host_monotonic_ms(); let lg = metal_live(); let tk = nlt-open(dir);
+   let indexed = nlg-event(events,"tokenizer-index",0,t0,lg,model);
+   list(model,tk);
+  }
   def nlg-close(session) = nll-close(head(session));
   def nlg-min(a,b) = if lt(a,b) then a else b;
   def nlg-room(bytes) {
@@ -111,7 +118,17 @@ section [form.bml] {
   }
   def nlg-grew(model,tk,old,id,pos,n,limit,acc,stream,cancel,events,next) = if nothing?(next) then nlg-result(acc,if ge(pos,nth(head(model),9)) then "model-position-limit" else "memory-pressure",n,old,events) else nlg-feed(model,tk,next,id,pos,n,limit,acc,stream,cancel,events);
   def nlg-feed(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) = if not(nlg-room(nlg-forward-bytes(model,1,pos))) then nlg-result(acc,"memory-pressure",n,ctx,events) else nlg-decode(model,tk,ctx,nlg-forward-next(model,ctx,list(id),pos,events,"decode"),add(pos,1),n,limit,acc,stream,cancel,events);
+  def nlg-finish-event(model,result,events,start) {
+   let event = json-node-object(list(json-node-pair("stage",json-node-string("finished")),json-node-pair("wall_ms",json-node-int(sub(host_monotonic_ms(),start))),json-node-pair("tokens_emitted",json-node-int(nth(result,2))),json-node-pair("bytes_emitted",json-node-int(str_len(head(result)))),json-node-pair("reason",json-node-string(if eq(str_len(nth(result,1)),0) then "eos" else nth(result,1))),json-node-pair("model",json-node-string(nth(model,4))),json-node-pair("adapter",json-node-string(nll-adapter(model)))));
+   if eq(str_len(events),0) then 0 else sbt-append(events,str_concat(json-emit(event),"\n"));
+  }
   def nlg-ask(session,prompt,limit,stream,cancel,events) {
+   let start = host_monotonic_ms();
+   let result = nlg-ask-inner(session,prompt,limit,stream,cancel,events);
+   let finished = nlg-finish-event(head(session),result,events,start);
+   result;
+  }
+  def nlg-ask-inner(session,prompt,limit,stream,cancel,events) {
    let model = head(session); let tk = nth(session,1);
    let ids = nlt-chat(tk,prompt); let maxpos = nth(head(model),9);
    if or(lt(limit,0),gt(len(ids),maxpos)) then list("","context-admission-refused",0,events) else nlg-ask-fit(model,tk,ids,nlg-admit-capacity(nlg-want-capacity(len(ids),limit),maxpos),limit,stream,cancel,events);
@@ -127,7 +144,7 @@ section [form.bml] {
    list(head(result),nth(result,1),nth(result,2),events);
   }
   def nlg-once(dir,adapter,prompt,limit,stream,cancel,events) {
-   let session = nlg-open(dir,adapter);
+   let session = nlg-open-at(dir,adapter,events);
    let result = nlg-ask(session,prompt,limit,stream,cancel,events);
    let closed = nlg-close(session);
    result;

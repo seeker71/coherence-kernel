@@ -46,8 +46,8 @@ Focused witnesses are `native-affine-metal-band.fk` (127),
 They live under `form/form-stdlib/tests`. The backward witness checks 28 finite
 differences, covering both factors of every projection in a two-layer GQA model.
 
-Current integration work remains in the existing voice/corpus training callers,
-model fusion and the large Whisper speech path. These organs establish the
-native execution and learning path; their presence alone does not remove those
-remaining external calls. Tokenizer construction and repeated inference buffer
-allocation also remain measured performance work.
+The voice and corpus callers now use the [native supervised trainer](native-lora-training.md).
+The school retains one tokenizer across its base/adapter comparison and refuses
+partial grades. Model fusion and the large Whisper speech path remain the next
+external calls to replace. Tokenizer construction and repeated inference buffer
+allocation remain measured performance work.

@@ -1,0 +1,130 @@
+// One resident model and tokenizer serve a training run. Sequence microbatches
+// accumulate a token-weighted batch gradient; every completed round updates LoRA.
+// Parameters and Adam moments publish together, after device health and byte checks.
+// preludes: form-stdlib/native-lora-dataset.bml form-stdlib/native-lora-checkpoint.bml form-stdlib/native-llama-voice.bml observe/bidirectional-framebuffer-channel.fk
+section [form.bml] {
+ class NativeLoraTrain {
+  def ntr-int(k,v) = json-node-pair(k,json-node-int(v));
+  def ntr-text(k,v) = json-node-pair(k,json-node-string(v));
+  def ntr-real(k,v) = json-node-pair(k,json-node-float-text(float_to_str(v)));
+  def ntr-get(r,k) = node_value(json-object-get(r,k));
+  def ntr-request(model,adapter,data,out,steps,batch,lr,masked,layers) = json-node-object(list(ntr-text("schema","native-lora-training-v1"),ntr-text("model",model),ntr-text("adapter",adapter),ntr-text("data",data),ntr-text("output",out),ntr-int("steps",steps),ntr-int("batch",batch),ntr-real("learning_rate",lr),ntr-int("mask_prompt",masked),ntr-int("layers",layers)));
+  def ntr-event(out,kind,fields) {
+   let text = str_concat(json-emit(json-node-object(append(list(ntr-text("stage",kind),ntr-int("at_ms",host_monotonic_ms()),ntr-int("pid",host_pid()),ntr-text("owner","Form-native-Metal")),fields))),"\n");
+   let wrote = sbt-append(str_concat(out,"/training-events.jsonl"),text);
+   let shown = print_str(text);
+   wrote;
+  }
+  def ntr-config(model,r,step) = json-node-object(list(ntr-text("model",nth(model,4)),ntr-text("fine_tune_type","lora"),ntr-int("num_layers",ntr-get(r,"layers")),json-node-pair("lora_parameters",json-object-get(nth(model,5),"lora_parameters")),ntr-text("optimizer","adam"),ntr-real("learning_rate",ntr-get(r,"learning_rate")),ntr-int("batch_size",ntr-get(r,"batch")),ntr-int("mask_prompt",ntr-get(r,"mask_prompt")),ntr-int("native_step",step),ntr-text("data",ntr-get(r,"data")),ntr-text("sequence_policy","whole-row; memory admission; no silent truncation")));
+  def ntr-save(model,state,r,step) {
+   let out = ntr-get(r,"output"); let made = fs-mkdir(str_concat(out,"/generations"));
+   let gen = str_concat(out,str_concat("/generations/",str_concat(int_to_str(step),str_concat("-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(host_monotonic_ms())))))));
+   let mkdir = fs-mkdir(gen);
+   let a = nlc-save(str_concat(gen,"/adapters.safetensors"),nlc-adapter-rows(nlb-pairs(nth(model,1))),nth(model,4),step);
+   let o = nlc-save(str_concat(gen,"/optimizer.safetensors"),nlc-optimizer-rows(state),nth(model,4),step);
+   let c = nag-write(str_concat(gen,"/adapter_config.json"),json-emit(ntr-config(model,r,step)));
+   let complete = nag-write(str_concat(gen,"/complete.json"),json-emit(json-node-object(list(ntr-int("step",step),ntr-int("adapter_bytes",nth(a,1)),ntr-int("adapter_tensors",nth(a,2)),ntr-int("optimizer_bytes",nth(o,1)),ntr-int("optimizer_tensors",nth(o,2))))));
+   let sync = nlc-sync-host(host_spawn_at(list("/bin/sync"),list("/dev/null","/dev/null","/dev/null")));
+   nag-publish(out,gen);
+  }
+  def ntr-resume(model,state,adapter) {
+   let config = nth(model,5);
+   if not(json-object-has?(config,"native_step")) then list(0,"new Adam state; historical adapter has no optimizer checkpoint") else ntr-resume-native(state,nag-resolve(adapter),ntr-get(config,"native_step"));
+  }
+  def ntr-resume-native(state,dir,step) {
+   let marker = parse-json("native-generation",read_file(str_concat(dir,"/complete.json")));
+   if or(lt(step,0),not(eq(step,ntr-get(marker,"step")))) then form_error("native checkpoint step disagreement") else ntr-resume-checked(state,dir,step);
+  }
+  def ntr-resume-checked(state,dir,step) {
+   let restore = nlc-load-optimizer(state,str_concat(dir,"/optimizer.safetensors"));
+   list(step,"Adam moments and step restored from the same published generation");
+  }
+  def ntr-row-bytes(model,t) = add(nlg-cache-bytes(model,t),add(mul(3,nlg-forward-bytes(model,t,0)),mul(12,mul(t,nth(head(model),5)))));
+  def ntr-validation(model,tk,rows,masked,out,step) {
+   let start = host_monotonic_ms();
+   let totals = ntr-validation-rows(model,tk,rows,masked,0.0,0.0,0);
+   if le(nth(totals,1),0.0) then form_error("native validation has no supervised tokens") else ntr-event(out,"validation",list(ntr-int("optimizer_step",step),ntr-int("rows",nth(totals,2)),ntr-real("supervised_tokens",nth(totals,1)),ntr-real("loss",div(head(totals),nth(totals,1))),ntr-int("wall_ms",sub(host_monotonic_ms(),start))));
+  }
+  def ntr-validation-rows(model,tk,rows,masked,loss,tokens,count) {
+   if nil?(rows) then list(loss,tokens,count) else ntr-validation-row(model,tk,head(nld-prepare(tk,list(head(rows)),masked)),tail(rows),masked,loss,tokens,count);
+  }
+  def ntr-validation-row(model,tk,sample,rest,masked,loss,tokens,count) {
+   let admitted = ntr-admit(model,sample); let ctx = nll-context(model,len(head(sample)));
+   let r = nll-forward(model,ctx,head(sample),0,1);
+   let value = nlb-loss-masked(model,r,nth(sample,1),nth(sample,2));
+   let closeForward = nll-forward-close(r); let closeContext = nll-context-close(ctx);
+   ntr-validation-rows(model,tk,rest,masked,add(loss,mul(value,nth(sample,3))),add(tokens,nth(sample,3)),add(count,1));
+  }
+  def ntr-admit(model,sample) {
+   let t = len(head(sample)); let bytes = ntr-row-bytes(model,t);
+   if gt(t,nth(head(model),9)) then form_error(str_concat("native training row exceeds model positions; line=",int_to_str(nth(sample,4)))) else if not(nlg-room(bytes)) then form_error(str_concat("native training whole row awaits memory; line=",str_concat(int_to_str(nth(sample,4)),str_concat(" required_additional_bytes=",int_to_str(bytes))))) else 1;
+  }
+  def ntr-batch(model,state,rows,total,out,loss) {
+   if nil?(rows) then loss else ntr-batch-row(model,state,head(rows),tail(rows),total,out,loss);
+  }
+  def ntr-batch-row(model,state,sample,rest,total,out,loss) {
+   let admitted = ntr-admit(model,sample); let start = host_monotonic_ms(); let live = metal_live();
+   let ctx = nll-context(model,len(head(sample))); let r = nll-forward(model,ctx,head(sample),0,1);
+   let forward = host_monotonic_ms(); let fg = metal_live();
+   let weight = div(nth(sample,3),total);
+   let value = nlb-backward-masked(model,r,nth(sample,1),nth(sample,2),state,weight);
+   let backward = host_monotonic_ms(); let bg = metal_live();
+   let release = nll-forward-close(r); let close = nll-context-close(ctx);
+   let event = ntr-event(out,"row",list(ntr-int("line",nth(sample,4)),ntr-int("input_tokens",len(head(sample))),ntr-real("supervised_tokens",nth(sample,3)),ntr-real("batch_weight",weight),ntr-real("sequence_loss",value),ntr-int("forward_ms",sub(forward,start)),ntr-int("backward_ms",sub(backward,forward)),ntr-int("forward_gpu_us",sub(nth(fg,11),nth(live,11))),ntr-int("backward_gpu_us",sub(nth(bg,11),nth(fg,11))),ntr-int("dispatches",sub(nth(bg,7),nth(live,7)))));
+   ntr-batch(model,state,rest,total,out,add(loss,mul(value,weight)));
+  }
+  def ntr-cycle-rows(rows,cursor,batch) = take(batch,append(drop(cursor,rows),rows));
+  def ntr-round(model,tk,state,rows,r,round,step,cursor) {
+   let out = ntr-get(r,"output"); let steps = ntr-get(r,"steps");
+   if ge(round,steps) then list(step,round,"completed") else if gt(file_size(str_concat(out,"/cancel")),0) then list(step,round,"cancelled") else ntr-round-ready(model,tk,state,rows,r,round,step,cursor);
+  }
+  def ntr-round-ready(model,tk,state,rows,r,round,step,cursor) {
+   let out = ntr-get(r,"output"); let start = host_monotonic_ms();
+   let batch = nlg-min(ntr-get(r,"batch"),len(rows));
+   let selected = ntr-cycle-rows(rows,cursor,batch);
+   let prepared = nld-prepare(tk,selected,ntr-get(r,"mask_prompt"));
+   let tokensAt = host_monotonic_ms(); let zero = nlb-clear(state);
+   let loss = ntr-batch(model,state,prepared,nld-weight(prepared),out,0.0);
+   let beforeUpdate = host_monotonic_ms();
+   let health = nlb-health(state,1,0,0.0);
+   let observation = bfc-envelope(0,add(920000,step),0,list(round,nld-tokens(prepared),head(health),nth(health,1)),3);
+   let sent = bfc-record-out(observation,0);
+   let control = bfc-control(observation,if eq(head(health),0) then 6 else 3);
+   let received = bfc-record-in(control,1);
+   let update = if eq(bfc-payload(control),6) then nlb-safe-step(state,ntr-get(r,"learning_rate"),add(step,1),1.0) else form_error("native training non-finite gradient; update abstained");
+   let after = bfc-record-out(bfc-envelope(0,add(920000,step),0,append(update,nlb-health(state,0,0,0.0)),3),2);
+   let updated = host_monotonic_ms();
+   let checkpoint = ntr-save(model,state,r,add(step,1));
+   let end = host_monotonic_ms(); let live = metal_live();
+   let event = ntr-event(out,"round",list(ntr-int("round",add(round,1)),ntr-int("optimizer_step",add(step,1)),ntr-int("rows",len(prepared)),ntr-int("input_tokens",nld-tokens(prepared)),ntr-real("supervised_tokens",nld-weight(prepared)),ntr-real("loss",loss),ntr-real("gradient_norm",nth(update,1)),ntr-real("gradient_clip",nth(update,2)),ntr-int("lora_pairs_updated",nth(update,3)),ntr-int("tokenize_ms",sub(tokensAt,start)),ntr-int("training_ms",sub(beforeUpdate,tokensAt)),ntr-int("update_ms",sub(updated,beforeUpdate)),ntr-int("checkpoint_ms",sub(end,updated)),ntr-int("wall_ms",sub(end,start)),ntr-int("device_bytes",nth(live,18)),ntr-text("checkpoint",checkpoint),ntr-text("selected","whole-row sequence microbatches; token-weighted gradient; Adam; atomic generation")));
+   ntr-round(model,tk,state,rows,r,add(round,1),add(step,1),mod(add(cursor,batch),len(rows)));
+  }
+  def ntr-run(r) {
+   if or(le(ntr-get(r,"steps"),0),or(le(ntr-get(r,"batch"),0),or(le(ntr-get(r,"learning_rate"),0.0),not(or(eq(ntr-get(r,"mask_prompt"),0),eq(ntr-get(r,"mask_prompt"),1)))))) then form_error("native training request values refused") else ntr-run-ready(r);
+  }
+  def ntr-run-ready(r) {
+   let out = ntr-get(r,"output"); let made = fs-mkdir(out); let start = host_monotonic_ms();
+   let rows = nld-file(str_concat(ntr-get(r,"data"),"/train.jsonl"));
+   if nil?(rows) then form_error("native training corpus has no rows") else ntr-run-data(r,rows,start);
+  }
+  def ntr-run-data(r,rows,start) {
+   let out = ntr-get(r,"output");
+   let adapter = if gt(file_size(str_concat(out,"/native-current")),0) then out else ntr-get(r,"adapter");
+   let session = nlg-open(ntr-get(r,"model"),adapter); let model = head(session); let tk = nth(session,1);
+   if not(eq(ntr-get(nth(model,5),"num_layers"),ntr-get(r,"layers"))) then form_error("native training adapter layer lineage mismatch") else ntr-run-model(r,rows,start,session,adapter);
+  }
+  def ntr-run-model(r,rows,start,session,adapter) {
+   let out = ntr-get(r,"output"); let model = head(session); let tk = nth(session,1); let state = nlb-state(model);
+   let resumed = ntr-resume(model,state,adapter);
+   let event = ntr-event(out,"admitted",list(ntr-text("model",nth(model,4)),ntr-text("adapter",nag-resolve(adapter)),ntr-int("rows",len(rows)),ntr-int("steps_requested",ntr-get(r,"steps")),ntr-int("batch",ntr-get(r,"batch")),ntr-int("lora_pairs",len(state)),ntr-int("optimizer_step",head(resumed)),ntr-text("optimizer_resume",nth(resumed,1)),ntr-int("open_ms",sub(host_monotonic_ms(),start)),ntr-text("sequence_policy","whole-row, device-memory admission, no token truncation")));
+   let validationRows = nld-file(str_concat(ntr-get(r,"data"),"/valid.jsonl"));
+   let baseline = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,head(resumed));
+   let result = ntr-round(model,tk,state,rows,r,0,head(resumed),mod(mul(head(resumed),nlg-min(ntr-get(r,"batch"),len(rows))),len(rows)));
+   let validation = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,head(result));
+   let done = nam-sync(); let closeState = nlb-state-close(state); let closeModel = nlg-close(session);
+   let final = ntr-event(out,"finished",list(ntr-int("optimizer_step",head(result)),ntr-int("rounds_completed",nth(result,1)),ntr-text("reason",nth(result,2)),ntr-int("wall_ms",sub(host_monotonic_ms(),start)),ntr-int("retained_buffers",nth(metal_live(),2))));
+   result;
+  }
+ }
+ 0;
+}
