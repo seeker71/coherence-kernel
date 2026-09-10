@@ -196,3 +196,69 @@ publish it — built an isolated tree, ran main's band against main's corpus, an
 got 32655. The number is the finding. The reading was only a suspicion, and a
 suspicion published as a fact is how a false claim about someone else's work
 gets made.
+
+## Postscript: the third one, and it was the guard
+
+Written after the rest had landed and been pushed.
+
+The corpus band's four-way pass came back clean, 32767 across Go, Rust and
+TypeScript. It should not have. That run began at `09ad6b2e`, and I committed
+`60239a6f` forty-one minutes before it ended — I had edited two tracked files
+while it was in flight, which is precisely what `validate.sh`'s void-reading
+seal exists to catch. I said so in the previous report and expected exit 3.
+
+It exited 0. Noticed from a timestamp, which is how the drift that seal was
+built for was noticed in the first place, and the reason its own comment
+says "Once is luck."
+
+The mechanism, witnessed in six lines of bash rather than reasoned:
+
+```text
+trap first EXIT
+trap second EXIT     # bash REPLACES; it does not chain
+→ only "second" runs
+```
+
+`validate.sh` sets the seal at line 65 and `trap cleanup EXIT` at line 312.
+Every run reaches line 312 long before it does any work, so the seal has been
+disarmed for every validate verdict since that cleanup handler was added. The
+guard laid down after a verdict was read about a tree that no longer existed
+was itself not running.
+
+The handler owning the exit slot now carries both: the scratch dirs go, and the
+seal keeps the last word. Proven by dirtying the tree one second into a real
+run:
+
+```text
+validate.sh: VOID READING — the tree moved while this run was in flight.
+              start 60239a6f…:489b2fb2…
+              end   60239a6f…:68f2633a…
+rc=3
+```
+
+And the clean-tree run still passes at 31.
+
+## What the three had in common
+
+This was the third time today, and only now is the shape plain.
+
+A queue window that measured zero said `window-missing`. A door showed eight
+findings of twenty-four and said nothing. A seal that was not armed let every
+verdict read as sealed. In each, something partial or absent wore the grammar
+of something whole or armed, and no reader could tell from the surface. Two
+were found by reading the same line five times; the third by comparing two
+timestamps.
+
+None of them needed anyone to be careless. That is the part worth keeping: the
+failure mode is not inattention, it is a surface that gives attention nothing
+to catch on. `not-shown=16`, `quiet-for=`, and `rc=3` are all the same repair —
+the bound stays, and the bound speaks.
+
+Corpus row 1406, `inoperative`: a safeguard installed, believed active, and
+having no effect. Not `vestigial`, which says it once worked and decayed —
+right about this one, wrong about the class. Not `notional` from row 716, which
+names what was never made real. `inoperative` names what is real, is installed,
+and does not operate. A guard is the worst place for it, because a guard is
+trusted precisely so it need not be checked, so its silence is
+indistinguishable from its working. The only way to know which you have is to
+make it fire on purpose.
