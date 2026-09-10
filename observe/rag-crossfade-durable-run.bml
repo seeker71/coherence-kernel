@@ -1,0 +1,117 @@
+// rag-crossfade-durable-run.bml — the crossfade's background breath, killed on purpose.
+//
+// PROOF LEVEL: FKWU ONLY (host_spawn_at / host_kill / host_wait / host_alive / host_pid /
+// host_sleep_ms all answer pf-arm-mask 8, probed 2026-09-10 — one arm, and it is this one). Its
+// arithmetic is four-way elsewhere: form-stdlib/tests/rag-crossfade-queue-band.bml, 2097151. The
+// death is not four-way and does not pretend to be. Run it from the repo root:
+//     ./fkwu observe/rag-crossfade-durable-run.bml     -> 2047
+//
+// preludes: form-stdlib/bml/rag-crossfade-spool.bml
+//
+// rag-crossfade.bml's queue is a list in the answer, and the honest question about a durable one
+// is not whether the code looks recoverable — it is whether a claimed id comes back after a real
+// death. So this cell arranges one. It enqueues four documents, forks observe/rag-crossfade-claimer.fk,
+// waits until the journal on disk shows that child holding two of them under its own pid, and then
+// kills it. The child never releases anything. What comes back is read off the same file.
+//
+// Every path is this process's own pid, so two agents running this at once do not meet. The cell
+// removes every file it made at the end: it measures a world it made and leaves none behind.
+//
+// The trap this run paid for, measured rather than reasoned about: a killed child still answers
+// kill(pid, 0) until its parent reaps it. Killed and left unreaped, the owner read alive both
+// immediately and 300 ms later, and rcq-abandoned named NOTHING — a durable queue that looks
+// broken because the corpse was never buried. After host_wait answered 143 the same reading gave
+// (d1 d2). Reap first, then ask who is breathing. No amount of reading the recovery code says
+// this; only a real death does.
+//
+// Verdict 2047 when every claim lands:
+//   1    four documents enqueue to four pending rows on an empty journal, and the repeat writes
+//        nothing — dedupe survives the disk
+//   2    a separate process claims two of them; the parent reads the claim off the file
+//   4    the claim's owner is the CHILD's pid, alive at the moment the parent looks, and not the
+//        parent's own
+//   8    the child dies by signal without releasing: host_wait answers 143 (128 + SIGTERM), and
+//        only after that reaping does the owner read gone
+//   16   rcq-abandoned names exactly the two ids the dead owner was holding
+//   32   opening recovers them: pending again at one attempt, no owner, the recovery written into
+//        the journal rather than inferred from it
+//   64   the recovery is idempotent — a second open over the same journal owes nothing
+//   128  the recovered ids are workable: the parent claims all four and holds all four
+//   256  the journal compacts to fewer bytes and folds to the very same rows
+//   512  every file this cell made is gone at the end
+//   1024 and the whole point, on disk: a cold crossfade answer's leftover queue becomes three
+//        pending rows through rcs-answer, one breath encodes the two the ear can answer, and
+//        rcs-breath lands that outcome — a and b done, c pending at one attempt, waiting for an
+//        ear that can reach it
+//
+// What the witness itself cannot do: host_kill sends SIGTERM and there is no SIGKILL door, so a
+// child that installed a handler would survive this death. fkwu installs none and takes it (143
+// below is 128 + SIGTERM). It does not matter to the queue either way — recovery keys on an owner
+// being GONE, never on what made it gone.
+section [form.bml] {
+    class RagCrossfadeDurable {
+        def rcd-journal() = str_concat("/tmp/rag-crossfade-journal-", int_to_str(host_pid()));
+        def rcd-target() = str_concat(rcd-journal(), ".target");
+        def rcd-seam() = str_concat(rcd-journal(), ".seam");
+        def rcd-docs() = list("d1", "d2", "d3", "d4");
+        // the crossfade itself, small enough to read: the old ear finds a b c, the new ear
+        // answers a and b and has nothing for c
+        def rcd-index() = list(rag-entry("a", list(10, 20, 30)), rag-entry("b", list(10, 20, 32)), rag-entry("c", list(50, 50, 50)));
+        def rcd-ear() = list(rag-entry("a", list(0, 0, 10)), rag-entry("b", list(0, 0, 40)));
+        def rcd-contract() = rcf-contract("q", "r1", 3, "mean");
+        def rcd-fresh(a, b) = 1;
+        // wait until the child's claim is on disk; bounded, so a child that never starts ends the wait
+        def rcd-rest(path, tries, rested) = rcd-await(path, sub(tries, 1));
+        def rcd-seen(path, tries, rows) = if gt(len(rcq-claimed-ids(rows)), 0) then rows else rcd-rest(path, tries, host_sleep_ms(100));
+        def rcd-await(path, tries) = if le(tries, 0) then rcs-rows(path) else rcd-seen(path, tries, rcs-rows(path));
+        // the kill, then the reaping: a zombie still answers kill(pid, 0)
+        def rcd-reap(killed, pid) = host_wait(pid);
+        def rcd-kill(pid) = rcd-reap(host_kill(pid), pid);
+        def rcd-bit(ok, weight) = if ok then weight else 0;
+        def rcd-run() {
+            let journal = rcd-journal();
+            let target = rcd-target();
+            let clean = rcd-fresh(fs_remove(journal), fs_remove(target));
+            let seeded = rcs-enqueue(journal, rcd-docs());
+            let repeated = rcs-enqueue(journal, rcd-docs());
+            let pointed = write_file(target, str_concat(journal, byte_to_str(10)));
+            let child = host_spawn_at(list("./fkwu", "observe/rag-crossfade-claimer.fk"), list(target, "/dev/null", "/dev/null"));
+            let working = rcd-await(journal, 100);
+            let owner = int_to_str(child);
+            let held = rcq-held(working, owner);
+            let breathing = rcs-alive?(owner);
+            let status = rcd-kill(child);
+            let buried = rcs-alive?(owner);
+            let abandoned = rcq-abandoned(working, rcs-gone(rcq-owners(working)));
+            let opened = rcs-open(journal);
+            let journal-after-open = rcs-text(journal);
+            let again = rcs-open(journal);
+            let mine = rcs-claim(journal, 4, rcs-me());
+            let before = str_len(rcs-text(journal));
+            let compacted = rcs-compact(journal);
+            let after = str_len(rcs-text(journal));
+            let seam = rcd-seam();
+            let seam-clean = fs_remove(seam);
+            let answer = rcf-serve(list(10, 20, 30), list(0, 0, 10), rcd-index(), list(), rcd-contract(), rcd-ear(), 3, 0, list());
+            let owes = rcs-answer(seam, answer);
+            let taken = rcs-claim(seam, 3, rcs-me());
+            let breath = rcf-materialize(list(), rcd-contract(), rcd-ear(), rcq-held(taken, rcs-me()), 5);
+            let landed = rcs-breath(seam, breath);
+            let swept = rcd-fresh(fs_remove(journal), rcd-fresh(fs_remove(target), fs_remove(seam)));
+            sum(list(
+                rcd-bit(and(rcf-same?(rcq-pending-ids(seeded), rcd-docs()), and(eq(len(seeded), 4), rcq-rows-same?(seeded, repeated))), 1),
+                rcd-bit(and(eq(len(rcq-claimed-ids(working)), 2), rcf-same?(rcq-claimed-ids(working), list("d1", "d2"))), 2),
+                rcd-bit(and(rcf-same?(held, list("d1", "d2")), and(eq(breathing, 1), and(gt(child, 0), eq(str_eq(owner, rcs-me()), 0)))), 4),
+                rcd-bit(and(eq(status, 143), eq(buried, 0)), 8),
+                rcd-bit(rcf-same?(abandoned, list("d1", "d2")), 16),
+                rcd-bit(and(rcf-same?(rcq-pending-ids(opened), rcd-docs()), and(eq(rcq-attempts(opened, "d1"), 1), and(str_eq(rcq-owner(opened, "d1"), rcq-no-owner()), gt(str_len(journal-after-open), 0)))), 32),
+                rcd-bit(and(rcq-rows-same?(again, opened), eq(len(rcq-recover-events(again, rcs-gone(rcq-owners(again)))), 0)), 64),
+                rcd-bit(and(rcf-same?(rcq-held(mine, rcs-me()), rcd-docs()), eq(len(rcq-pending-ids(mine)), 0)), 128),
+                rcd-bit(and(rcq-rows-same?(compacted, mine), lt(after, before)), 256),
+                rcd-bit(and(eq(swept, 1), and(lt(file_size(journal), 0), and(lt(file_size(target), 0), lt(file_size(seam), 0)))), 512),
+                rcd-bit(and(str_eq(rcf-answer-state(answer), "cold"), and(rcf-same?(rcq-pending-ids(owes), rcf-answer-queue(answer)), and(rcf-same?(rcq-held(taken, rcs-me()), list("a", "b", "c")), and(rcf-same?(rcf-breath-done(breath), list("a", "b")), and(rcf-same?(rcf-breath-unanswered(breath), list("c")), and(rcf-same?(rcq-done-ids(landed), list("a", "b")), and(rcf-same?(rcq-pending-ids(landed), list("c")), eq(rcq-attempts(landed, "c"), 1)))))))), 1024)
+            ));
+        }
+    }
+    rcd-run();
+}

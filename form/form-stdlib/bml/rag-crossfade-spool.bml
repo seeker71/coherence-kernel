@@ -1,0 +1,80 @@
+// rag-crossfade-spool.bml — the crossfade's journal on this host's disk.
+//
+// PROOF LEVEL: FKWU ONLY, and the reason is narrower than it looks (pf-arm-mask, probed
+// 2026-09-10; bits are go 1, rust 2, ts 4, fkwu 8). The FILE doors carry further than this arm —
+// read_file, write_file, fs_rename, fs_remove, host_file_append_bytes, str_to_int all answer 11,
+// so they bind on go and rust as well and only the TS arm lacks them. What pins this cell to one
+// arm is the pair that asks about a process: host_pid and host_alive answer 8. Durability is
+// three-arm capable here; knowing who is still breathing is not. The arithmetic it serves is
+// four-way and lives in rag-crossfade-queue.bml; nothing below decides anything, it only carries.
+//
+// preludes: form-stdlib/spool-bell-transport.fk form-stdlib/bml/rag-crossfade-queue.bml
+//
+// The split is the whole design. rag-crossfade-queue.bml says what a movement owes as events;
+// this cell appends those events to a file and folds the file back. So the durable queue is a
+// spool — the same shape the hearth already uses for tasks and replies — and durability costs
+// exactly one append per movement, with no lock and no daemon between a worker and its work.
+//
+// Two things only the host can answer, and both arrive here rather than in the pure lane:
+//
+//   who is breathing   A claim with no release is either a worker still working or a worker that
+//                      died. rcq-abandoned cannot tell them apart; kill(pid, 0) can. rcs-alive?
+//                      calls an owner alive ONLY when the host says so — an owner that is gone,
+//                      and an owner whose name is not a pid this host can ask about, are both
+//                      recovered. Work returning to pending costs one re-encode; work stuck under
+//                      a name nobody can witness never comes back at all, so the doubt is spent
+//                      on the side that heals. A zombie still answers kill(pid, 0) until its
+//                      parent reaps it (host_wait), so a reading taken before the reaping says
+//                      alive about a corpse — measured, not reasoned about, in the durable run.
+//
+//   where it lands     rcs-write is one sbt-append per movement — one O_APPEND write, so two
+//                      workers appending at once interleave whole lines rather than bytes, and a
+//                      death mid-write can only truncate the tail, which rcq-parse drops whole.
+//                      rcs-compact is the one door that REWRITES, so it writes a sibling file and
+//                      fs_renames it over the journal — atomic, and the rename happens only when
+//                      the short journal folds to the very rows the long one held.
+//
+// Every door answers the folded rows AFTER its own write, so a caller never has to guess whether
+// its append landed: it reads the state the disk now holds. rcq-held names what an owner won.
+//
+// Witnessed on this host by: observe/rag-crossfade-durable-run.bml — a child claims a batch, is
+// killed before it can release, and the ids come back.
+section [form.bml] {
+    class RagCrossfadeSpool {
+        // --- reading the journal ---
+        def rcs-text(path) = if lt(file_size(path), 0) then "" else read_file(path);
+        def rcs-rows(path) = rcq-replay(rcs-text(path), rcq-ceiling());
+        def rcs-after(path, wrote) = rcs-rows(path);
+        // one append per movement; an empty movement writes nothing at all
+        def rcs-write(path, events) = if eq(len(events), 0) then 0 else sbt-append(path, rcq-render-all(events));
+
+        // --- this process's name in the journal ---
+        def rcs-me() = int_to_str(host_pid());
+
+        // --- the movements ---
+        def rcs-enqueue-rows(path, rows, ids) = rcs-after(path, rcs-write(path, rcq-enqueue-events(rows, ids)));
+        def rcs-enqueue(path, ids) = rcs-enqueue-rows(path, rcs-rows(path), ids);
+        def rcs-claim-rows(path, rows, n, owner) = rcs-after(path, rcs-write(path, rcq-claim-events(rows, n, owner)));
+        def rcs-claim(path, n, owner) = rcs-claim-rows(path, rcs-rows(path), n, owner);
+        def rcs-release(path, ids) = rcs-after(path, rcs-write(path, rcq-release-events(ids)));
+        def rcs-fail(path, ids) = rcs-after(path, rcs-write(path, rcq-fail-events(ids)));
+
+        // --- the seam with the crossfade organ ---
+        def rcs-answer(path, answer) = rcs-enqueue(path, rcf-answer-queue(answer));
+        def rcs-breath(path, breath) = rcs-after(path, rcs-write(path, rcq-breath-events(breath)));
+
+        // --- opening: the last life's abandoned claims become failures, durably ---
+        def rcs-alive?(owner) = if eq(host_alive(str_to_int(owner)), 1) then 1 else 0;
+        def rcs-gone(owners) = if eq(len(owners), 0) then list() else if eq(rcs-alive?(head(owners)), 1) then rcs-gone(tail(owners)) else cons(head(owners), rcs-gone(tail(owners)));
+        def rcs-open-rows(path, rows) = rcs-after(path, rcs-write(path, rcq-recover-events(rows, rcs-gone(rcq-owners(rows)))));
+        def rcs-open(path) = rcs-open-rows(path, rcs-rows(path));
+
+        // --- compaction: the only rewrite, and it earns the rename by folding to the same rows ---
+        def rcs-tmp(path) = str_concat(path, ".compacting");
+        def rcs-swap(path, tmp, wrote) = fs_rename(tmp, path);
+        def rcs-compact-keep(path, short) = rcs-after(path, rcs-swap(path, rcs-tmp(path), write_file(rcs-tmp(path), rcq-render-all(short))));
+        def rcs-compact-rows(path, rows, short) = if eq(rcq-rows-same?(rcq-state(short, rcq-ceiling()), rows), 1) then rcs-compact-keep(path, short) else rows;
+        def rcs-compact(path) = rcs-compact-rows(path, rcs-rows(path), rcq-compact-events(rcs-rows(path)));
+    }
+    0;
+}
