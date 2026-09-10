@@ -116,11 +116,18 @@ same list arithmetic the band proves.
 - The queue is a list in the answer, not a durable one. The body's spool and
   fifo doors are where durability lives when it is wanted.
 - `M` is a count of relevant answers in the top-n, said so in the header; not
-  nDCG.
+  nDCG. CLOSED the same day: `rcf-ndcg` gives per-mille nDCG over a declared
+  weight table, and the gap is measured on it. This list is what was open when
+  this receipt was written; where a line has since been walked it says so.
 - Preflight cannot vouch for a `.bml` yet ("fresh compile currently accepts
   .fk only"); the run and the band are the witness.
 - A defn frame cannot see an enclosing `let` (the live cell passes path, src
   and offs down by hand); fkwu says so in one line, which is the right shape.
+  WRONG, and corrected the same day. I named a design without asking the other
+  kernels. Go and Rust both close over a top-level let and answer 107 where the
+  runtime refuses the name outright; one frame deeper all three agree. The
+  runtime is the odd one out, not the strict one. `observe/defn-scope-divergence.bml`
+  is the measurement I owed, and it reads 21: two close over, one refuses.
 
 ## Surprise
 
