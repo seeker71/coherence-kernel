@@ -1,0 +1,69 @@
+// Native listening policy. Energy admits an ASR candidate, never a word.
+// Quiet level is measured before gain; the model's doubt gates stay independent.
+// preludes: form/form-stdlib/core.fk
+section [form.bml] {
+ class EarListening {
+  field ELWindowBytes = 256000;
+  field ELPrerollBytes = 32000;
+  field ELGainUnity = 1000;
+  field ELGainLimit = 16000;
+  field ELTargetPeak = 1024;
+  field ELDecoderPauseMs = 200;
+  field ELPauseMs = 500;
+  def elp-max(a, b) = if gt(a, b) then a else b;
+  def elp-min(a, b) = if lt(a, b) then a else b;
+  def elp-s16(s, i) {
+   let v = add(str_byte_at(s, i), mul(256, str_byte_at(s, add(i, 1))));
+   if ge(v, 32768) then sub(v, 65536) else v;
+  }
+  def elp-stats-go(s, i, sum, peak, count) = if ge(add(i, 1), str_len(s)) then list(sum, peak, count) else elp-stats-add(s, i, sum, peak, count, elp-s16(s, i));
+  def elp-stats-add(s, i, sum, peak, count, v) = elp-stats-go(s, add(i, 2), add(sum, mul(v, v)), elp-max(peak, abs(v)), add(count, 1));
+  def elp-sqrt(v, lo, hi) {
+   let mid = div(add(lo, add(hi, 1)), 2);
+   if ge(lo, hi) then lo else if gt(mul(mid, mid), v) then elp-sqrt(v, lo, sub(mid, 1)) else elp-sqrt(v, mid, hi);
+  }
+  def elp-stats(s) {
+   let r = elp-stats-go(s, 0, 0, 0, 0);
+   list(if eq(nth(r, 2), 0) then 0 else elp-sqrt(div(head(r), nth(r, 2)), 0, 32768), nth(r, 1));
+  }
+  def elp-db-rows() = list(list(-6, 16422), list(-12, 8231), list(-18, 4125), list(-24, 2067), list(-30, 1036), list(-36, 519), list(-42, 260), list(-48, 130), list(-54, 65), list(-60, 33), list(-66, 16), list(-72, 8), list(-78, 4), list(-84, 2), list(-90, 1));
+  def elp-db-go(rows, rms) = if eq(len(rows), 0) then -120 else if ge(rms, nth(head(rows), 1)) then head(head(rows)) else elp-db-go(tail(rows), rms);
+  def elp-db(rms) = elp-db-go(elp-db-rows(), rms);
+  // State: noise estimate, consecutive candidate hops, window peak metadata.
+  // Keep the straddling oldest chunk's peak conservatively when cutting a window.
+  def elp-born() = list(-1, 0, list());
+  def elp-floor(state) = elp-max(0, head(state));
+  def elp-enter(fl) = elp-max(8, mul(2, fl));
+  def elp-hold(fl) = elp-max(6, div(mul(3, fl), 2));
+  def elp-strong(fl) = elp-max(100, mul(4, fl));
+  // A single quiet/dropout chunk must not drag the estimate below ordinary room noise.
+  def elp-floor-next(fl, r, candidate) = if candidate then fl else div(add(mul(fl, 7), r), 8);
+  def elp-meta-bytes(rows) = if eq(len(rows), 0) then 0 else add(head(head(rows)), elp-meta-bytes(tail(rows)));
+  def elp-meta-cut(rows, excess) = if or(le(excess, 0), eq(len(rows), 0)) then rows else if ge(excess, head(head(rows))) then elp-meta-cut(tail(rows), sub(excess, head(head(rows)))) else cons(list(sub(head(head(rows)), excess), nth(head(rows), 1)), tail(rows));
+  def elp-meta-push(rows, bytes, peak) {
+   let more = append(rows, list(list(bytes, peak)));
+   elp-meta-cut(more, sub(elp-meta-bytes(more), ELWindowBytes()));
+  }
+  def elp-peak(rows) = if eq(len(rows), 0) then 0 else elp-max(nth(head(rows), 1), elp-peak(tail(rows)));
+  def elp-step(state, rms, peak, bytes, speaking) {
+   let fl = if lt(head(state), 0) then rms else head(state);
+   let candidate = gt(rms, elp-enter(fl));
+   let streak = if candidate then add(nth(state, 1), 1) else 0;
+   let voice = or(gt(rms, elp-strong(fl)), or(and(speaking, gt(rms, elp-hold(fl))), ge(streak, 2)));
+   let next = list(elp-floor-next(fl, rms, or(candidate, voice)), streak, elp-meta-push(nth(state, 2), bytes, peak));
+   list(next, voice);
+  }
+  // One gain for the whole window, never quantized back into microphone PCM.
+  // Peak normalization cannot recover SNR or information lost below quantization.
+  def elp-gain(peak) = if le(peak, 0) then ELGainUnity() else elp-max(ELGainUnity(), elp-min(ELGainLimit(), div(mul(ELTargetPeak(), ELGainUnity()), peak)));
+  def elp-window-gain(state) {
+   let peak = elp-peak(nth(state, 2));
+   if gt(peak, mul(4, elp-floor(state))) then elp-gain(peak) else ELGainUnity();
+  }
+  def elp-quiet-cut(total) = elp-max(0, sub(total, ELPrerollBytes()));
+  // Agreement is display evidence, not a forced decoder prefix. Every open
+  // phrase may be corrected from all of its audio, even after repeated agreement.
+  def elp-revision-prefix(previous, agreed) = list();
+  def elp-close(quietMs, tailMs, stable, full) = if and(ge(quietMs, ELDecoderPauseMs()), and(ge(tailMs, ELDecoderPauseMs()), ge(stable, 1))) then "decoder" else if gt(quietMs, ELPauseMs()) then "pause" else if full then "full" else "";
+ }
+}

@@ -2,7 +2,7 @@
 ; (sense_mic_stream_read, 200 ms at a time), a window of the audio since the last commit (at
 ; most 8 s), the native whisper-tiny pass (ear-native) on every arrival once speech is heard,
 ; one frame per pass into the ear spool. Speech is a level above the
-; room's OWN quiet times four; the decoder's own end timestamp, a real pause at the mic, or a
+; room's own quiet, with a two-hop soft onset; the decoder's own end timestamp, a real pause at the mic, or a
 ; full window commits the line: a heard frame naming which of the three closed it, and
 ; one line for the tongue lane (t_end, tongue, text). While the line grows, every
 ; pass that changes it hands the tongue lane the line as it stands (a "live" segment line, so
@@ -12,13 +12,12 @@
 ; last three, and the window is joined into one string only for a pass. stdin: run seconds,
 ; reserved language line, optional owner lease. Blank owner keeps the standalone door.
 ; preflight-exec: forbidden
-; preludes: form/form-stdlib/ear-native.fk form/form-stdlib/spool-bell-transport.fk form/form-stdlib/hearth.bml form/form-stdlib/line-grammar.fk form/form-stdlib/bml/ear-worker-life.bml
+; preludes: form/form-stdlib/ear-native.fk form/form-stdlib/spool-bell-transport.fk form/form-stdlib/hearth.bml form/form-stdlib/line-grammar.fk form/form-stdlib/bml/ear-worker-life.bml form/form-stdlib/bml/ear-listening.bml
 (do
     (defn el-spool () ".hearth/ear.spool")
     (defn el-segs () ".hearth/ear.spool.segments")
     (defn el-stop () ".hearth/ear.spool.stop")
-    (defn el-window () 256000)
-    (defn el-preroll () 32000)
+    (defn el-window () (ELWindowBytes))
     ; how often this lane writes a frame whether or not the line moved: its own pulse,
     ; and the only thing a watcher can read to tell a lane that is thinking from one that is gone
     (defn el-beat () 800)
@@ -42,28 +41,10 @@
     (defn el-sumsq-all (xs acc) (if (eq (len xs) 0) acc (el-sumsq-all (tail xs) (el-sumsq (head xs) 0 (str_len (head xs)) acc))))
     (defn el-rms (win) (do (let xs (el-newest (reverse win) 9600 (list))) (let cnt (div (el-wlen xs) 8)) (if (le cnt 0) 0 (el-isqrt (div (el-sumsq-all xs 0) cnt) 0 32768))))
     (defn el-isqrt (v lo hi) (if (ge lo hi) lo (do (let mid (div (add lo (add hi 1)) 2)) (if (gt (mul mid mid) v) (el-isqrt v lo (sub mid 1)) (el-isqrt v mid hi)))))
-    (defn el-db-rows () (list (list -6 16422) (list -12 8231) (list -18 4125) (list -24 2067) (list -30 1036) (list -36 519) (list -42 260) (list -48 130) (list -54 65) (list -60 33)))
-    (defn el-db-go (rows rms) (if (eq (len rows) 0) -120 (if (ge rms (nth (head rows) 1)) (head (head rows)) (el-db-go (tail rows) rms))))
-    (defn el-db (rms) (el-db-go (el-db-rows) rms))
-    ; ── the room's own floor, and the gate that stands over it ────────────────────────────────
-    ; The gate was a fixed rms 58 — about -54.7 dBFS on the table above. This room, measured with
-    ; observe/ear-floor-probe.fk, sits quiet at rms 55-98 (-54 to -60 dBFS): 61 of 61 hops read as
-    ; VOICE with nobody speaking, and 100 of 101 with the mouth speaking for two of ten seconds.
-    ; So lastvoice was refreshed on every hop forever, the pause below could never once fire, and
-    ; the only close left to a line was the window filling — which is exactly the 1.5 s to 10.6 s
-    ; spread the receipts measured from mouth to committed line.
-    ; A gate is therefore the room's own quiet times four (+12 dB), never under el-gate-floor.
-    ; The floor learns ONLY on hops it already calls quiet, so a voice can never pull the gate up
-    ; after itself; it goes down three quarters of the way to a quieter hop and up by an eighth toward a louder one,
-    ; because ONE hop of near-silence is a dropout and not a room: an instant descent pinned this
-    ; room's floor at 11 where its quiet reads 55 to 98, and only the el-gate-floor clamp caught it.
-    ; The one-chunk level (100 ms) is what the gate reads — the three-chunk level stays the room's
-    ; own reported level, so ear.level keeps the meaning the receipts pinned it at.
-    (defn el-gate-mult () 4)
-    (defn el-gate-floor () 100)
-    (defn el-floor-next (fl r voice) (if (eq voice 1) fl (if (lt r fl) (div (add fl (mul r 3)) 4) (div (add (mul fl 7) r) 8))))
-    (defn el-gate (fl) (do (let g (mul fl (el-gate-mult))) (if (lt g (el-gate-floor)) (el-gate-floor) g)))
-    (defn el-rms-of (s) (do (let n (str_len s)) (if (le n 0) 0 (el-isqrt (div (el-sumsq s 0 n 0) (div n 8)) 0 32768))))
+    (defn el-db (rms) (elp-db rms))
+    ; The BML listening policy owns onset, hysteresis, pre-roll, and bounded gain.
+    ; This displayed gate admits candidates; the ASR doubt and word checks still decide words.
+    (defn el-gate (fl) (elp-enter fl))
     ; ── a phantom shown as a phantom ──────────────────────────────────────────────────────────
     ; whisper-tiny names the room's own sound the way a transcript does — (music playing),
     ; [BLANK_AUDIO], ♪ — and those are not words anybody said. The doubt gate does not catch them:
@@ -131,14 +112,12 @@
     ; window filling. The heard frame names WHICH of the three closed it, so what each one costs
     ; is read off the spool instead of argued.
     (defn el-ticks () (div (el-window) 640))
-    (defn el-decoder-pause () 200)
-    (defn el-pause () 500)
     (defn el-tail-sil (ids) (do (let e (enw-last-ts ids)) (if (lt e 0) (sub 0 1) (mul 20 (sub (el-ticks) e)))))
-    ; the pass: tongue detected once per segment (lang < 0 asks), the agreed text prefix prefilled, only the tail decoded
+    ; the pass: the whole open phrase is revisable; gain is one bounded scale for the window
     ; the window is handed to the encoder still in its pieces (the join cost five sixths of this reading), and
     ; the line the pass hands back is the one it does NOT doubt — its own doubt travels beside it in per-mille
-    (defn el-hear (st win tick cap lang prefix)
-        (do (let t0 (now_unix_ms)) (let Te (enw-encode-parts st win (el-window))) (let t1 (now_unix_ms))
+    (defn el-hear (st win tick cap lang prefix gain)
+        (do (let t0 (now_unix_ms)) (let Te (enw-encode-parts-gain st win (el-window) gain)) (let t1 (now_unix_ms))
             (let r (enw-transcribe-from2 st Te tick cap lang prefix)) (let t2 (now_unix_ms))
             (let raw (el-unloop (trim (enw-heard st r))))
             (let clean (el-detag raw))
@@ -149,26 +128,22 @@
                   ; the model reports is about the WINDOW; this is about the WORDS, and it is the
                   ; number the reference implementation refuses a segment on. Carried and read
                   ; before it is trusted with anything.
-                  (float_to_int (mul (nth r 4) 1000.0)))))
-    (defn el-text-ids (ids) (if (eq (len ids) 0) (list) (if (lt (head ids) (enw-eot)) (cons (head ids) (el-text-ids (tail ids))) (el-text-ids (tail ids)))))
-    (defn el-common (a b) (if (or (eq (len a) 0) (eq (len b) 0)) (list) (if (eq (head a) (head b)) (cons (head a) (el-common (tail a) (tail b))) (list))))
-    (defn el-drop-last (xs n) (if (le (len xs) n) (list) (cons (head xs) (el-drop-last (tail xs) n))))
-    ; what two consecutive passes agreed on, minus their last two tokens, is forced next time
-    (defn el-agreed (p1 p2) (el-drop-last (el-common (el-text-ids p1) (el-text-ids p2)) 2))
+                  (float_to_int (mul (nth r 4) 1000.0)) gain)))
     ; a live pass that changed the line: the live frame for the glass, and the line as it stands for the
     ; tongue lane ("live", the segment's cut, the last sample's time, tongue, text).
     ; the live frame carries what the line is AND how settled it is: `stable` counts the passes in
     ; a row that have said the same words, so a reader can paint a line as settled long before it
     ; is closed; `gate` and `floor` are the room's own quiet and the level standing over it — the
     ; one instrument that would have found today's wound in a single look.
+    (defn el-quality-fields (h) (el-cat (list (el-kv "avglp" (int_to_str (nth h 9))) (el-kv "gainmilli" (int_to_str (nth h 10))) (el-kv "revision" "open-phrase"))))
     (defn el-emit-live (db h livems tend seg stable fl)
-        (do (let w (sbt-append (el-spool) (el-cat (list "<|ear:frame|>" (el-nl) (el-kv "t" (int_to_str (now_unix_ms))) (el-kv "kind" "live") (el-kv "db" (int_to_str db)) (el-kv "live" (nth h 1)) (el-kv "livelang" (head h)) (el-kv "livems" (int_to_str livems)) (el-kv "encms" (int_to_str (nth h 2))) (el-kv "decms" (int_to_str (nth h 3))) (el-kv "ntok" (int_to_str (nth h 4))) (el-kv "heard" "") (el-kv "lang" "") (el-kv "nsp" (int_to_str (nth h 7))) (el-kv "heardms" "0") (el-kv "stable" (int_to_str stable)) (el-kv "floor" (int_to_str fl)) (el-kv "gate" (int_to_str (el-gate fl))) (el-kv "tags" (nth h 8)) (el-kv "avglp" (int_to_str (nth h 9))) "<|/ear:frame|>" (el-nl)))))
+        (do (let w (sbt-append (el-spool) (el-cat (list "<|ear:frame|>" (el-nl) (el-kv "t" (int_to_str (now_unix_ms))) (el-kv "kind" "live") (el-kv "db" (int_to_str db)) (el-kv "live" (nth h 1)) (el-kv "livelang" (head h)) (el-kv "livems" (int_to_str livems)) (el-kv "encms" (int_to_str (nth h 2))) (el-kv "decms" (int_to_str (nth h 3))) (el-kv "ntok" (int_to_str (nth h 4))) (el-kv "heard" "") (el-kv "lang" "") (el-kv "nsp" (int_to_str (nth h 7))) (el-kv "heardms" "0") (el-kv "stable" (int_to_str stable)) (el-kv "floor" (int_to_str fl)) (el-kv "gate" (int_to_str (el-gate fl))) (el-kv "tags" (nth h 8)) (el-quality-fields h) "<|/ear:frame|>" (el-nl)))))
             (let seg (sbt-append (el-segs) (el-cat (list "live" (byte_to_str 9) (int_to_str seg) (byte_to_str 9) (int_to_str tend) (byte_to_str 9) (head h) (byte_to_str 9) (nth h 1) (el-nl)))))
             seg))
     ; the closed line, with the reason it closed and the two numbers that reason cost: the silence
     ; the decoder itself heard at the tail, and the passes the words held still for
     (defn el-emit-heard (db best why closems stable tsil settled)
-        (do (let w (sbt-append (el-spool) (el-cat (list "<|ear:frame|>" (el-nl) (el-kv "t" (int_to_str (now_unix_ms))) (el-kv "kind" "heard") (el-kv "db" (int_to_str db)) (el-kv "live" "") (el-kv "livelang" "") (el-kv "livems" "0") (el-kv "heard" (nth best 1)) (el-kv "lang" (head best)) (el-kv "nsp" (int_to_str (nth best 7))) (el-kv "heardms" (int_to_str closems)) (el-kv "why" why) (el-kv "stable" (int_to_str stable)) (el-kv "tailsil" (int_to_str tsil)) (el-kv "settled" (int_to_str settled)) (el-kv "tags" (nth best 8)) (el-kv "avglp" (int_to_str (nth best 9))) "<|/ear:frame|>" (el-nl)))))
+        (do (let w (sbt-append (el-spool) (el-cat (list "<|ear:frame|>" (el-nl) (el-kv "t" (int_to_str (now_unix_ms))) (el-kv "kind" "heard") (el-kv "db" (int_to_str db)) (el-kv "live" "") (el-kv "livelang" "") (el-kv "livems" "0") (el-kv "heard" (nth best 1)) (el-kv "lang" (head best)) (el-kv "nsp" (int_to_str (nth best 7))) (el-kv "heardms" (int_to_str closems)) (el-kv "why" why) (el-kv "stable" (int_to_str stable)) (el-kv "tailsil" (int_to_str tsil)) (el-kv "settled" (int_to_str settled)) (el-kv "tags" (nth best 8)) (el-quality-fields best) "<|/ear:frame|>" (el-nl)))))
             w))
     ; ── settled, long before closed ───────────────────────────────────────────────────────────
     ; Measured on this room (observe/ear-path-table.fk): a line's words were already final 1.0 to
@@ -191,7 +166,7 @@
     ; readings separate, and it is five lines in one room, not a law.
     (defn el-trust-line () (sub 0 1500))
     (defn el-emit-stable (db h saved stable fl)
-        (do (let w (sbt-append (el-spool) (el-cat (list "<|ear:frame|>" (el-nl) (el-kv "t" (int_to_str (now_unix_ms))) (el-kv "kind" "stable") (el-kv "db" (int_to_str db)) (el-kv "live" (nth h 1)) (el-kv "livelang" (head h)) (el-kv "livems" "0") (el-kv "heard" "") (el-kv "lang" "") (el-kv "nsp" (int_to_str (nth h 7))) (el-kv "heardms" "0") (el-kv "stable" (int_to_str stable)) (el-kv "savedms" (int_to_str saved)) (el-kv "floor" (int_to_str fl)) (el-kv "gate" (int_to_str (el-gate fl))) (el-kv "avglp" (int_to_str (nth h 9))) "<|/ear:frame|>" (el-nl)))))
+        (do (let w (sbt-append (el-spool) (el-cat (list "<|ear:frame|>" (el-nl) (el-kv "t" (int_to_str (now_unix_ms))) (el-kv "kind" "stable") (el-kv "db" (int_to_str db)) (el-kv "live" (nth h 1)) (el-kv "livelang" (head h)) (el-kv "livems" "0") (el-kv "heard" "") (el-kv "lang" "") (el-kv "nsp" (int_to_str (nth h 7))) (el-kv "heardms" "0") (el-kv "stable" (int_to_str stable)) (el-kv "savedms" (int_to_str saved)) (el-kv "floor" (int_to_str fl)) (el-kv "gate" (int_to_str (el-gate fl))) (el-quality-fields h) "<|/ear:frame|>" (el-nl)))))
             w))
     ; the room, when nobody is speaking. It carries the gate: that row is the instrument that
     ; finds a gate standing on the noise floor, and a room is quiet most of the time, so an
@@ -204,22 +179,24 @@
     (defn el-emit-phantom (db tags nsp)
         (do (let w (sbt-append (el-spool) (el-cat (list "<|ear:frame|>" (el-nl) (el-kv "t" (int_to_str (now_unix_ms))) (el-kv "kind" "phantom") (el-kv "db" (int_to_str db)) (el-kv "live" "") (el-kv "livelang" "") (el-kv "livems" "0") (el-kv "heard" "") (el-kv "lang" "") (el-kv "nsp" (int_to_str nsp)) (el-kv "heardms" "0") (el-kv "tags" tags) "<|/ear:frame|>" (el-nl)))))
             w))
-    (defn el-loop (st win total cut speech lastvoice lastquiet deadline live lasth lang p1 p2 stable fl annt tst)
+    (defn el-loop (st win total cut speech lastvoice lastquiet deadline live lasth lang p1 p2 stable listening annt tst)
         (if (or (not (ewl-running? deadline)) (ge (file_size (el-stop)) 0)) live
             (do (let fresh (sense_mic_stream_read 3200 120))
                 (let tend (now_unix_ms))
-                (if (eq (str_len fresh) 0) (el-loop st win total cut speech lastvoice lastquiet deadline live lasth lang p1 p2 stable fl annt tst)
+                (if (eq (str_len fresh) 0) (el-loop st win total cut speech lastvoice lastquiet deadline live lasth lang p1 p2 stable listening annt tst)
                     (do (let total1 (add total (str_len fresh)))
                         (let w1 (el-push win fresh))
                         (let rms (el-rms w1))
                         (let db (el-db rms))
-                        (let r1 (el-rms-of fresh))
-                        (let heard? (if (gt r1 (el-gate fl)) 1 0))
-                        (let fl1 (el-floor-next fl r1 heard?))
+                        (let measured (elp-stats fresh))
+                        (let decision (elp-step listening (head measured) (nth measured 1) (str_len fresh) speech))
+                        (let listening1 (head decision))
+                        (let heard? (nth decision 1))
+                        (let fl1 (elp-floor listening1))
                         (let speech1 (if (eq heard? 1) 1 speech))
                         (let lastvoice1 (if (eq heard? 1) tend lastvoice))
                         (if (and (eq speech1 1) (ge (sub total1 cut) 9600))
-                            (do (let h (el-hear st w1 (el-tick total1 (el-wlen w1) cut) (add 8 (div (sub total1 cut) 2000)) (sub 0 1) (if (and (gt (len p1) 0) (eq lang (nth p1 0))) (el-agreed (nth p1 1) p2) (list))))
+                            (do (let h (el-hear st w1 (el-tick total1 (el-wlen w1) cut) (add 8 (div (sub total1 cut) 2000)) (sub 0 1) (elp-revision-prefix p1 p2) (elp-window-gain listening1)))
                                 (if (not (ewl-running? deadline)) live
                                 (do (let now (now_unix_ms))
                                 (let changed (if (eq (len lasth) 0) 1 (if (str_eq (nth h 1) (nth lasth 1)) 0 1)))
@@ -253,16 +230,14 @@
                                 ; end is first because it is looking at the audio: it costs one comparison on a
                                 ; number the pass already answered with.
                                 (let tsil (el-tail-sil (nth h 6)))
-                                (let why1 (if (and (eq words? 1) (and (ge tsil (el-decoder-pause)) (ge stable1 1))) "decoder"
-                                              (if (gt (sub now lastvoice1) (el-pause)) "pause"
-                                                  (if (ge (sub total1 cut) (el-window)) "full" ""))))
+                                (let why1 (elp-close (sub now lastvoice1) tsil (if (eq words? 1) stable1 0) (ge (sub total1 cut) (el-window))))
                                 (if (gt (str_len why1) 0)
-                                    (if (or (eq (len best) 0) (or (eq (el-has-words (nth best 1)) 0) (lt (nth best 9) (el-trust-line)))) (do (let ep (if (and (gt (len best) 0) (eq (el-has-words (nth best 1)) 1)) (el-emit-phantom db (nth best 1) (nth best 7)) 0)) (el-loop st w1 total1 (sub total1 3200) 0 lastvoice1 lq1 deadline (add live 1) (list) (sub 0 1) (list) (list) 0 fl1 "" 0)) (do (let e2 (el-emit-heard db best why1 (sub (now_unix_ms) tend) stable1 tsil (if (and (gt tst1 0) (str_eq (nth best 1) annt1)) (sub now tst1) (sub 0 1))))
+                                    (if (or (eq (len best) 0) (or (eq (el-has-words (nth best 1)) 0) (lt (nth best 9) (el-trust-line)))) (do (let ep (if (and (gt (len best) 0) (eq (el-has-words (nth best 1)) 1)) (el-emit-phantom db (nth best 1) (nth best 7)) 0)) (el-loop st w1 total1 (sub total1 3200) 0 lastvoice1 lq1 deadline (add live 1) (list) (sub 0 1) (list) (list) 0 listening1 "" 0)) (do (let e2 (el-emit-heard db best why1 (sub (now_unix_ms) tend) stable1 tsil (if (and (gt tst1 0) (str_eq (nth best 1) annt1)) (sub now tst1) (sub 0 1))))
                                         (let seg (sbt-append (el-segs) (el-cat (list (int_to_str tend) (byte_to_str 9) (head best) (byte_to_str 9) (nth best 1) (el-nl)))))
-                                        (el-loop st w1 total1 (sub total1 3200) 0 lastvoice1 (now_unix_ms) deadline (add live 1) (list) (sub 0 1) (list) (list) 0 fl1 "" 0)))
-                                    (el-loop st w1 total1 cut speech1 lastvoice1 lq1 deadline (add live 1) best (nth h 5) (list (nth h 5) (nth h 6)) (if (and (gt (len p1) 0) (eq (nth h 5) (nth p1 0))) (nth p1 1) (list)) stable1 fl1 annt1 tst1)))))
+                                        (el-loop st w1 total1 (sub total1 3200) 0 lastvoice1 (now_unix_ms) deadline (add live 1) (list) (sub 0 1) (list) (list) 0 listening1 "" 0)))
+                                    (el-loop st w1 total1 cut speech1 lastvoice1 lq1 deadline (add live 1) best (nth h 5) (list (nth h 5) (nth h 6)) (if (and (gt (len p1) 0) (eq (nth h 5) (nth p1 0))) (nth p1 1) (list)) stable1 listening1 annt1 tst1)))))
                             (do (let q (if (gt (sub tend lastquiet) 1000) (el-emit-quiet db fl1) 0))
-                                (el-loop st w1 total1 (if (eq speech1 1) cut (sub total1 3200)) speech1 lastvoice1 (if (gt (sub tend lastquiet) 1000) tend lastquiet) deadline live lasth lang p1 p2 stable fl1 annt tst))))))))
+                                (el-loop st w1 total1 (if (eq speech1 1) cut (elp-quiet-cut total1)) speech1 lastvoice1 (if (gt (sub tend lastquiet) 1000) tend lastquiet) deadline live lasth lang p1 p2 stable listening1 annt tst))))))))
     ; a door feeds these seconds; a sensor stands the lane with no stdin at all, and it stands until it is stopped
     (defn el-first-line () (do (let l (read_line)) (if (nothing? l) "" (trim l))))
     (defn el-start (secs owner) (do
@@ -273,9 +248,8 @@
     ; the lane names its own birth in its own log, so the glass reads who is standing
     ; from the lane's mouth and not only from the sensor's bookkeeping
     (let said (print_str (el-cat (list "live lane open, pid " (int_to_str (host_pid)) ", mic " (int_to_str mic) ", standing " (int_to_str secs) " s"))))
-    ; the floor starts at nothing and the gate therefore at el-gate-floor: the room teaches it its
-    ; own quiet within a second or two of hops the gate already calls quiet
-    (let frames (el-loop st (list) 0 0 0 0 (now_unix_ms) (ewl-session (add (now_unix_ms) (mul 1000 secs)) owner) 0 (list) (sub 0 1) (list) (list) 0 0 "" 0))
+    ; The first real chunk initializes the noise estimate; pre-roll keeps its audio available.
+    (let frames (el-loop st (list) 0 0 0 0 (now_unix_ms) (ewl-session (add (now_unix_ms) (mul 1000 secs)) owner) 0 (list) (sub 0 1) (list) (list) 0 (elp-born) "" 0))
     (let stopmic (sense_mic_stream_stop))
     (let done (if (ewl-owned? owner) (el-emit "done" -120 "" "" 0 "" "" 0 0) 0))
     (let segdone (if (ewl-owned? owner) (sbt-append (el-segs) (str_concat "done" (el-nl))) 0))
