@@ -1,0 +1,101 @@
+; rag-crossfade-band.bml — the crossfade made falsifiable: an old index finds, a new ear scores
+; what it has, every answer names its own state, and the gap is measured rather than assumed.
+;
+; preludes: form-stdlib/bml/rag-crossfade.bml
+;
+; The old ear (source index, quantized ints) and the new ear (target table) disagree on purpose:
+;   source  a [10 20 30]  b [10 20 32]  c [50 50 50]  d [12 20 30]  e [90 90 90]  f [10 25 30]
+;   target  a [0 0 10]    b [0 0 40]    c [0 0 12]    d [0 0 30]    e [0 0 11]    f [0 0 50]
+; Source query [10 20 30] orders a b d f c e (L1; b and d tie at 2, b first by position).
+; Target query [0 0 10] orders a e c d b f natively; the relevant set is (a e c).
+; So source top-3 (a b d) holds ONE of the native top-3 — a small pool the new ear cannot fix
+; by reranking — and top-6 holds all three. On nDCG per mille (weights 1000 631 500) the native
+; top-3 scores 1000, the restricted top-3 at K=3 is (a d b) = 1000/2131 = 469, so the curve at
+; K = 3, 4, 6 is 531, 531, 0.
+;
+; Verdict 8388607 when every claim lands:
+;   1       cold: no vector for any candidate — the old ear's order is served and named cold
+;   2       partial: budget 1 encodes one inside the answer, two are queued
+;   4       partial ranks only the warm candidate
+;   8       the queue holds the two misses in candidate order; enqueuing them again adds nothing
+;   16      a breath of 5 drains the queue, fills the cache to 3, reports both done
+;   32      warm: three hits, no misses, nothing encoded, nothing queued
+;   64      warm ranks by the new ear (a d b), ties to source position, the same twice
+;   128     a vector cached under another contract is a miss
+;   256     an ear that cannot answer fills no slot; the breath reports it unanswered
+;   512     containment: 333 per mille at K=3, 1000 at K=6
+;   1024    gap on nDCG: 531 at K=3, 531 at K=4, 0 at K=6
+;   2048    observed depth: eps 0 -> 6, eps 531 -> 3, eps 500 -> 6, an empty curve -> 0
+;   4096    the reading rule: (0,3,3) ice, (100,3,3) water, (334,3,3) gas, (0,6,3) water
+;   8192    the reading composed: K=3 gas, K=6 ice
+;   16384   the contract key joins its semantic fields: new@r1/d3/mean; dim reads back 3
+;   32768   a 2-wide vector under a d3 contract fills no slot; admit keeps only this contract's
+;           well-formed rows (2 of 4)
+;   65536   prewarm fills a named set now (3 of 3), and again fills nothing
+;   131072  nDCG: native 1000, restricted 469; an ideal shorter than n; a repeated id scored once
+;   262144  ann: fidelity 1000 and 333; reading unknown without a reference, pass at 1000,
+;           warning at 333
+;   524288  settle: a reading hovering at 80 keeps its phase from ice, from gas and from water;
+;           ice leaves at 120, gas enters ice at 40, and depth past K still moves ice to water
+;   1048576 the rule seal reads 501009504543
+;   2097152 plan: ice + unknown ann -> ready / progressive / one warning; water + pass with a
+;           cache larger than the corpus -> review / progressive-with-review / two warnings;
+;           the backfill of 750 remaining documents at 6700 ms each is 5025000 ms
+;   4194304 the same warm answer serves from an admitted cache (loaded rows of two contracts)
+
+section [form.bml] {
+    def rcb-index() = list(rag-entry("a", list(10, 20, 30)), rag-entry("b", list(10, 20, 32)), rag-entry("c", list(50, 50, 50)), rag-entry("d", list(12, 20, 30)), rag-entry("e", list(90, 90, 90)), rag-entry("f", list(10, 25, 30)));
+    def rcb-ear() = list(rag-entry("a", list(0, 0, 10)), rag-entry("b", list(0, 0, 40)), rag-entry("c", list(0, 0, 12)), rag-entry("d", list(0, 0, 30)), rag-entry("e", list(0, 0, 11)), rag-entry("f", list(0, 0, 50)));
+    def rcb-sq() = list(10, 20, 30);
+    def rcb-tq() = list(0, 0, 10);
+    def rcb-contract() = rcf-contract("new", "r1", 3, "mean");
+    def rcb-old-key() = rcf-contract-key(rcf-contract("old", "r0", 3, "mean"));
+    def rcb-bit(ok, weight) = if ok then weight else 0;
+    def rcb-serve(cache, budget, queue) = rcf-serve(rcb-sq(), rcb-tq(), rcb-index(), cache, rcb-contract(), rcb-ear(), 3, budget, queue);
+    def rcb-mixed-cache() = list(rcf-cached("a", rcf-contract-key(rcb-contract()), list(0, 0, 10)), rcf-cached("b", rcb-old-key(), list(0, 0, 40)), rcf-cached("d", rcf-contract-key(rcb-contract()), list(0, 0, 30)), rcf-cached("b", rcf-contract-key(rcb-contract()), list(0, 40)));
+    def rcb-score() {
+        let cold = rcb-serve(list(), 0, list());
+        let part = rcb-serve(list(), 1, list());
+        let again = rcf-enqueue(rcf-answer-queue(part), list("b", "d"));
+        let breath = rcf-materialize(rcf-answer-cache(part), rcb-contract(), rcb-ear(), rcf-answer-queue(part), 5);
+        let warm = rcb-serve(rcf-breath-cache(breath), 1, rcf-breath-queue(breath));
+        let warm2 = rcb-serve(rcf-breath-cache(breath), 1, rcf-breath-queue(breath));
+        let foreign = rcb-serve(list(rcf-cached("a", rcb-old-key(), list(0, 0, 10))), 0, list());
+        let hollow = rcf-materialize(list(), rcb-contract(), rcb-ear(), list("zz", "a"), 5);
+        let native = rcf-native(rcb-tq(), rcb-ear(), 3);
+        let curve = rcf-curve(rcb-sq(), rcb-tq(), rcb-index(), rcb-ear(), list("a", "e", "c"), 3, list(3, 4, 6));
+        let admitted = rcf-cache-admit(rcb-mixed-cache(), rcb-contract());
+        let pre = rcf-prewarm(list(), rcb-contract(), rcb-ear(), list("a", "b", "c"));
+        let pre2 = rcf-prewarm(rcf-prewarm-cache(pre), rcb-contract(), rcb-ear(), list("a", "b", "c"));
+        let restricted3 = rcf-restricted(rcb-sq(), rcb-tq(), rcb-index(), rcb-ear(), 3);
+        let plan-ready = rcf-plan("ice", "unknown", 1000, 250, 50);
+        let plan-review = rcf-plan("water", "pass", 1000, 1200, 50);
+        let from-admitted = rcb-serve(admitted, 1, list());
+        sum(list(
+            rcb-bit(and(str_eq(rcf-answer-state(cold), "cold"), rcf-same?(rcf-answer-ranked(cold), list("a", "b", "d"))), 1),
+            rcb-bit(and(str_eq(rcf-answer-state(part), "partial"), and(eq(rcf-answer-encoded(part), 1), eq(rcf-answer-queued(part), 2))), 2),
+            rcb-bit(rcf-same?(rcf-answer-ranked(part), list("a")), 4),
+            rcb-bit(and(rcf-same?(rcf-answer-queue(part), list("b", "d")), eq(len(again), 2)), 8),
+            rcb-bit(and(eq(len(rcf-breath-queue(breath)), 0), and(eq(len(rcf-breath-cache(breath)), 3), rcf-same?(rcf-breath-done(breath), list("b", "d")))), 16),
+            rcb-bit(and(str_eq(rcf-answer-state(warm), "warm"), and(eq(rcf-answer-hits(warm), 3), and(eq(rcf-answer-misses(warm), 0), and(eq(rcf-answer-encoded(warm), 0), eq(rcf-answer-queued(warm), 0))))), 32),
+            rcb-bit(and(rcf-same?(rcf-answer-ranked(warm), list("a", "d", "b")), rcf-same?(rcf-answer-ranked(warm), rcf-answer-ranked(warm2))), 64),
+            rcb-bit(and(str_eq(rcf-answer-state(foreign), "cold"), eq(rcf-answer-hits(foreign), 0)), 128),
+            rcb-bit(and(eq(len(rcf-cache-put(list(), rcb-contract(), "zz", list())), 0), and(rcf-same?(rcf-breath-unanswered(hollow), list("zz")), rcf-same?(rcf-breath-done(hollow), list("a")))), 256),
+            rcb-bit(and(eq(rcf-containment(rag-topk(rcb-sq(), rcb-index(), 3), native, 3), 333), eq(rcf-containment(rag-topk(rcb-sq(), rcb-index(), 6), native, 3), 1000)), 512),
+            rcb-bit(and(eq(rcf-point-gap(nth(curve, 0)), 531), and(eq(rcf-point-gap(nth(curve, 1)), 531), eq(rcf-point-gap(nth(curve, 2)), 0))), 1024),
+            rcb-bit(and(eq(rcf-observed-depth(curve, 0), 6), and(eq(rcf-observed-depth(curve, 531), 3), and(eq(rcf-observed-depth(curve, 500), 6), eq(rcf-observed-depth(list(), 0), 0)))), 2048),
+            rcb-bit(and(str_eq(rcf-reading(0, 3, 3), "ice"), and(str_eq(rcf-reading(100, 3, 3), "water"), and(str_eq(rcf-reading(334, 3, 3), "gas"), str_eq(rcf-reading(0, 6, 3), "water")))), 4096),
+            rcb-bit(and(str_eq(rcf-read(rcb-sq(), rcb-tq(), rcb-index(), rcb-ear(), 3, 6, 3), "gas"), str_eq(rcf-read(rcb-sq(), rcb-tq(), rcb-index(), rcb-ear(), 6, 6, 3), "ice")), 8192),
+            rcb-bit(and(str_eq(rcf-contract-key(rcb-contract()), "new@r1/d3/mean"), eq(rcf-contract-dim(rcb-contract()), 3)), 16384),
+            rcb-bit(and(eq(len(rcf-cache-put(list(), rcb-contract(), "a", list(0, 10))), 0), and(eq(len(admitted), 2), and(eq(len(rcf-cache-get(admitted, rcb-contract(), "d")), 3), eq(len(rcf-cache-get(admitted, rcb-contract(), "b")), 0)))), 32768),
+            rcb-bit(and(eq(rcf-prewarm-materialized(pre), 3), and(eq(len(rcf-prewarm-cache(pre)), 3), and(eq(rcf-prewarm-requested(pre2), 3), eq(rcf-prewarm-materialized(pre2), 0)))), 65536),
+            rcb-bit(and(eq(rcf-ndcg(native, list("a", "e", "c"), 3), 1000), and(eq(rcf-ndcg(restricted3, list("a", "e", "c"), 3), 469), and(eq(rcf-ndcg(list("a", "e", "c"), list("a", "e"), 3), 1000), eq(rcf-ndcg(list("a", "a", "a"), list("a"), 3), 1000)))), 131072),
+            rcb-bit(and(eq(rcf-ann-fidelity(list("a", "d", "b"), list("a", "b", "d"), 3), 1000), and(eq(rcf-ann-fidelity(list("a", "x", "y"), list("a", "b", "d"), 3), 333), and(str_eq(rcf-ann-reading(0, 1000), "unknown"), and(str_eq(rcf-ann-reading(1, 1000), "pass"), str_eq(rcf-ann-reading(1, 333), "warning"))))), 262144),
+            rcb-bit(and(str_eq(rcf-settle("ice", 80, 3, 3), "ice"), and(str_eq(rcf-settle("gas", 80, 3, 3), "gas"), and(str_eq(rcf-settle("water", 80, 3, 3), "water"), and(str_eq(rcf-settle("ice", 120, 3, 3), "gas"), and(str_eq(rcf-settle("gas", 40, 3, 3), "ice"), str_eq(rcf-settle("ice", 40, 6, 3), "water")))))), 524288),
+            rcb-bit(eq(rcf-rule-seal(), 501009504543), 1048576),
+            rcb-bit(and(str_eq(rcf-plan-status(plan-ready), "ready"), and(str_eq(rcf-plan-strategy(plan-ready), "progressive"), and(eq(rcf-plan-warnings(plan-ready), 1), and(eq(rcf-plan-fraction(plan-ready), 250), and(str_eq(rcf-plan-status(plan-review), "review"), and(str_eq(rcf-plan-strategy(plan-review), "progressive-with-review"), and(eq(rcf-plan-warnings(plan-review), 2), eq(rcf-backfill-ms(1000, 250, 6700), 5025000)))))))), 2097152),
+            rcb-bit(and(str_eq(rcf-answer-state(from-admitted), "warm"), and(eq(rcf-answer-hits(from-admitted), 2), and(eq(rcf-answer-encoded(from-admitted), 1), rcf-same?(rcf-answer-ranked(from-admitted), list("a", "d", "b"))))), 4194304)
+        ));
+    }
+    rcb-score();
+}
