@@ -1349,6 +1349,7 @@ extern int rmdir(const char *);
 extern int unlink(const char *);
 extern int rename(const char *, const char *);
 extern int getpid(void);
+extern char *getcwd(char *, unsigned long);
 extern int sprintf(char *, const char *, ...);
 extern char *getenv(const char *);
 static long long fk_read_all_bounded(int fd, char *buf, long long cap) {
@@ -13561,6 +13562,22 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 160) {
         return ((long long)getpid()) << 1;
+    }
+    if (t == 29) {
+        /* host_cwd: this process's working directory, as its own word.
+         *
+         * The body used to fork a process and read `pwd` back through
+         * host_capture to learn this -- observe/native-source-cache-witness.bml
+         * and gate/kernel-conformance.bml both did, and a witness that shells
+         * out to ask where it is standing is not standing anywhere it can
+         * describe. Urs, 2026-09-10: remove the external tools and the
+         * non-Form-native flows.
+         *
+         * The tag is 29, which MLX vacated the same day. Nothing new was minted
+         * for this; a lane that went home left the room its replacement needed. */
+        char cwd29[FK_PATH_CAP];
+        if (getcwd(cwd29, sizeof(cwd29)) == 0) { return fk_nothing; }
+        return fk_sbuf(cwd29, fk_cstrlen(cwd29));
     }
     if (t == 162) {
         /* kernel_live_pids: every registered kernel whose page says alive and whose pid still answers */

@@ -103,6 +103,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "host_nice", 1, 158 },
   { "host_capture", 1, 159 },
   { "host_pid", 0, 160 },
+  { "host_cwd", 0, 29 },
   { "host_spawn_quiet", 1, 161 },
   { "kernel_live_pids", 0, 162 },
   { "kernel_live", 1, 163 },
