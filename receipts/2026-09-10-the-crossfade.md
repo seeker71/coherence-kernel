@@ -114,13 +114,27 @@ same list arithmetic the band proves.
 ## Named, not hidden
 
 - The queue is a list in the answer, not a durable one. The body's spool and
-  fifo doors are where durability lives when it is wanted.
+  fifo doors are where durability lives when it is wanted. CLOSED the same day:
+  `form/form-stdlib/bml/rag-crossfade-queue.bml` writes the same movements as a
+  journal and folds it forward — dedupe, a bounded claim stamped with its owner,
+  release, a retry ceiling, and recovery of claims a death left behind — four-way
+  at 2097151. `rag-crossfade-spool.bml` appends it to a real file through
+  `sbt-append`, and `observe/rag-crossfade-durable-run.bml` kills a claiming
+  child and reads the ids back, at 2047. rag-crossfade.bml itself is untouched:
+  the pure lane stayed pure and durability arrived beside it.
 - `M` is a count of relevant answers in the top-n, said so in the header; not
   nDCG. CLOSED the same day: `rcf-ndcg` gives per-mille nDCG over a declared
   weight table, and the gap is measured on it. This list is what was open when
   this receipt was written; where a line has since been walked it says so.
 - Preflight cannot vouch for a `.bml` yet ("fresh compile currently accepts
-  .fk only"); the run and the band are the witness.
+  .fk only"); the run and the band are the witness. CLOSED the same day:
+  `form/form-stdlib/bml/preflight-source.bml` reads the lane a unit travels and
+  preflight vouches for a `.bml` end to end, four-way at 65535, with
+  `observe/tests/preflight-band.fk` moving 4095 -> 65535. It found a second
+  wound on the way: the removal path came from the suffix, while a lowering unit
+  hangs its cache off the whole path, so preflight had been deleting a file that
+  was never there and a warm artifact could hide an unresolved call. Both runner
+  doors now carry the reading in their exit code.
 - A defn frame cannot see an enclosing `let` (the live cell passes path, src
   and offs down by hand); fkwu says so in one line, which is the right shape.
   WRONG, and corrected the same day. I named a design without asking the other
