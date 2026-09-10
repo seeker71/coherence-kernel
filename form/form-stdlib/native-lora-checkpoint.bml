@@ -1,0 +1,66 @@
+// Safetensors checkpoint publication from resident Metal owners into shared file pages.
+// Form writes metadata; the GPU copies payloads once into their destination mapping.
+// A rename publishes a complete file. OS sync requests writeback before publication.
+// preludes: form-stdlib/native-llama-backward.bml form-stdlib/form-fs.fk
+section [form.bml] {
+ class NativeLoraCheckpoint {
+  def nlc-msl() = "#include <metal_stdlib>\nusing namespace metal;\nkernel void nlc_copy(device const uchar* src [[buffer(0)]],device uchar* dst [[buffer(1)]],constant uint& offset [[buffer(2)]],constant uint& bytes [[buffer(3)]],uint i [[thread_position_in_grid]]){if(i<bytes)dst[offset+i]=src[i];}\nkernel void nlc_equal(device const uchar* src [[buffer(0)]],device const uchar* dst [[buffer(1)]],device uint* out [[buffer(2)]],constant uint& offset [[buffer(3)]],constant uint& bytes [[buffer(4)]],uint lane [[thread_index_in_simdgroup]]){uint bad=0;for(uint i=lane;i<bytes;i+=32)bad+=uint(src[i]!=dst[offset+i]);bad=simd_sum(bad);if(lane==0)out[0]=bad;}\n";
+  // tensor row: name, handle, dimensions.
+  def nlc-adapter-rows(pairs) = if nil?(pairs) then list() else append(nlc-pair-rows(head(pairs)),nlc-adapter-rows(tail(pairs)));
+  def nlc-pair-rows(p) = list(list(str_concat(head(p),".lora_a"),nth(p,1),list(nth(p,3),nth(p,4))),list(str_concat(head(p),".lora_b"),nth(p,2),list(nth(p,4),nth(p,5))));
+  def nlc-state-row(p,name,h,shape) = list(str_concat(head(p),name),h,shape);
+  def nlc-optimizer-row(row) {
+   let p = head(row); let a = list(nth(p,3),nth(p,4)); let b = list(nth(p,4),nth(p,5));
+   list(nlc-state-row(p,".adam_m_a",nth(row,3),a),nlc-state-row(p,".adam_v_a",nth(row,4),a),nlc-state-row(p,".adam_m_b",nth(row,5),b),nlc-state-row(p,".adam_v_b",nth(row,6),b));
+  }
+  def nlc-optimizer-rows(state) = if nil?(state) then list() else append(nlc-optimizer-row(head(state)),nlc-optimizer-rows(tail(state)));
+  def nlc-ints(xs) = if nil?(xs) then list() else cons(json-node-int(head(xs)),nlc-ints(tail(xs)));
+  def nlc-bytes(row) = mul(4,sti-product(nth(row,2)));
+  def nlc-total(rows) = if nil?(rows) then 0 else add(nlc-bytes(head(rows)),nlc-total(tail(rows)));
+  def nlc-entry(row,offset) = json-node-pair(head(row),json-node-object(list(json-node-pair("dtype",json-node-string("F32")),json-node-pair("shape",json-node-array(nlc-ints(nth(row,2)))),json-node-pair("data_offsets",json-node-array(list(json-node-int(offset),json-node-int(add(offset,nlc-bytes(row)))))))));
+  def nlc-entries(rows,offset) = if nil?(rows) then list() else cons(nlc-entry(head(rows),offset),nlc-entries(tail(rows),add(offset,nlc-bytes(head(rows)))));
+  def nlc-pad(text) = if eq(mod(str_len(text),8),0) then text else nlc-pad(str_concat(text," "));
+  def nlc-header(rows,base,step) = nlc-pad(json-emit(json-node-object(cons(json-node-pair("__metadata__",json-node-object(list(json-node-pair("owner",json-node-string("Form-native-Metal")),json-node-pair("base",json-node-string(base)),json-node-pair("step",json-node-string(int_to_str(step)))))),nlc-entries(rows,0)))));
+  def nlc-copy(rows,dest,offset,pipeline) {
+   if nil?(rows) then 1 else nlc-copy-next(rows,dest,offset,pipeline,metal_enqueue(pipeline,md-bind(list(nth(head(rows),1),dest),list(offset,nlc-bytes(head(rows)))),nlc-bytes(head(rows))));
+  }
+  def nlc-copy-next(rows,dest,offset,pipeline,rc) = if lt(rc,0) then form_error("native checkpoint device write refused") else nlc-copy(tail(rows),dest,add(offset,nlc-bytes(head(rows))),pipeline);
+  def nlc-equal(rows,dest,offset,pipeline,out) {
+   if nil?(rows) then 1 else nlc-equal-next(rows,dest,offset,pipeline,out,metal_enqueue(pipeline,md-bind16(list(nth(head(rows),1),dest,out),list(offset,nlc-bytes(head(rows))),32,0,1,0),1));
+  }
+  def nlc-equal-next(rows,dest,offset,pipeline,out,rc) = if lt(rc,0) then form_error("native checkpoint verification dispatch refused") else if not(eq(ln-u32-le(metal_buf_read(out,0,4),0),0)) then form_error("native checkpoint byte verification failed") else nlc-equal(tail(rows),dest,add(offset,nlc-bytes(head(rows))),pipeline,out);
+  def nlc-save(path,rows,base,step) {
+   let candidate = str_concat(path,str_concat(".candidate-",int_to_str(host_pid())));
+   let header = nlc-header(rows,base,step); let start = add(8,str_len(header));
+   let written = write_file_text(candidate,str_concat(md-le32(str_len(header)),str_concat(md-le32(0),header)));
+   if not(eq(file_size(candidate),start)) then form_error("native checkpoint metadata write incomplete") else nlc-save-mapped(path,candidate,rows,start,base,step);
+  }
+  def nlc-save-mapped(path,candidate,rows,start,base,step) {
+   let size = add(start,nlc-total(rows));
+   let dest = nam-held(metal_buf_from_file(candidate,0,sub(0,size)));
+   let copied = nlc-copy(rows,dest,start,nam-held-pipe(metal_pipeline(nlc-msl(),"nlc_copy")));
+   let done = nam-sync();
+   let out = nam-alloc(1);
+   let equal = nlc-equal(rows,dest,start,nam-held-pipe(metal_pipeline(nlc-msl(),"nlc_equal")),out);
+   let released = nam-free(list(dest,out));
+   let synced = nlc-sync-host(host_spawn_at(list("/bin/sync"),list("/dev/null","/dev/null","/dev/null")));
+   let rename = fs-rename(candidate,path);
+   if or(not(eq(rename,0)),not(eq(file_size(path),size))) then form_error("native checkpoint publication failed") else list(path,size,len(rows),step,equal);
+  }
+  def nlc-sync-host(pid) = if le(pid,0) then form_error("native checkpoint OS writeback launch refused") else if not(eq(host_wait(pid),0)) then form_error("native checkpoint OS writeback failed") else 1;
+  def nlc-load-optimizer(state,path) = nlc-restore(nlc-optimizer-rows(state),sti-open(path));
+  def nlc-restore(rows,index) {
+   if nil?(rows) then 1 else nlc-restore-row(head(rows),tail(rows),index);
+  }
+  def nlc-restore-row(row,rest,index) {
+   let mapped = sti-map(index,head(row));
+   if not(and(str_eq(nth(mapped,2),"F32"),eq(sti-product(nth(mapped,1)),sti-product(nth(row,2))))) then form_error("native optimizer checkpoint shape refused") else nlc-restore-shaped(row,rest,index,mapped);
+  }
+  def nlc-restore-shaped(row,rest,index,mapped) {
+   let rc = nam-run("nam_cast",list(head(mapped),nth(row,1)),list(sti-product(nth(row,2)),0),sti-product(nth(row,2)),0);
+   let done = nam-sync(); let freed = nam-free(list(head(mapped)));
+   nlc-restore(rest,index);
+  }
+ }
+ 0;
+}

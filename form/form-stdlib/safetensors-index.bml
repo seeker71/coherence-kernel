@@ -1,0 +1,43 @@
+// Safetensors metadata stays in Form; tensor payloads remain mapped by the owner.
+// preludes: form-stdlib/safetensors-header.fk form-stdlib/json.fk form-stdlib/metal-door.fk
+section [form.bml] {
+ class FormSafetensorsIndex {
+  def sti-value(obj, key) = node_value(json-object-get(obj, key));
+  def sti-values(nodes) = if nil?(nodes) then list() else cons(node_value(head(nodes)), sti-values(tail(nodes)));
+  def sti-product(shape) = if nil?(shape) then 1 else if le(head(shape), 0) then 0 else mul(head(shape), sti-product(tail(shape)));
+  def sti-width(dtype) = if or(str_eq(dtype, "F32"), str_eq(dtype, "U32")) then 4 else if or(str_eq(dtype, "F16"), str_eq(dtype, "BF16")) then 2 else 0;
+  // row = name, dtype, dimensions, absolute offset, extent
+  def sti-row(pair, base, size) {
+   let obj = json-pair-value(pair);
+   let shape = sti-values(json-array-elements(json-object-get(obj, "shape")));
+   let offsets = sti-values(json-array-elements(json-object-get(obj, "data_offsets")));
+   let dtype = sti-value(obj, "dtype");
+   if not(eq(len(offsets), 2)) then form_error("safetensors offsets need two integers") else sti-row-at(json-pair-key(pair), dtype, shape, offsets, base, size);
+  }
+  def sti-row-at(name, dtype, shape, offsets, base, size) {
+   let count = sti-product(shape);
+   let bytes = mul(count, sti-width(dtype));
+   let begin = head(offsets);
+   let end = nth(offsets, 1);
+   if or(le(bytes, 0), or(lt(begin, 0), or(not(eq(sub(end, begin), bytes)), gt(add(base, end), size)))) then form_error(str_concat("safetensors tensor extent/dtype refused: ", name)) else list(name, dtype, shape, add(base, begin), bytes);
+  }
+  def sti-rows(pairs, base, size) = if nil?(pairs) then list() else if str_eq(json-pair-key(head(pairs)), "__metadata__") then sti-rows(tail(pairs), base, size) else cons(sti-row(head(pairs), base, size), sti-rows(tail(pairs), base, size));
+  def sti-open(path) {
+   let size = file_size(path);
+   let prefix = read_file_slice(path, 0, 8);
+   if or(lt(size, 10), or(nothing?(prefix), not(eq(str_len(prefix), 8)))) then form_error("safetensors file/header absent") else sti-open-sized(path, size, sfh-header-len(prefix));
+  }
+  def sti-open-sized(path, size, length) {
+   if or(le(length, 0), gt(add(length, 8), size)) then form_error("safetensors header extent refused") else sti-open-header(path, size, length, read_file_slice(path, 8, length));
+  }
+  def sti-open-header(path, size, length, text) {
+   if or(nothing?(text), not(eq(str_len(text), length))) then form_error("safetensors header incomplete") else list(path, add(length, 8), sti-rows(json-object-pairs(parse-json(path, text)), add(length, 8), size));
+  }
+  def sti-find-in(rows, name) = if nil?(rows) then list() else if str_eq(head(head(rows)), name) then head(rows) else sti-find-in(tail(rows), name);
+  def sti-find(index, name) = sti-find-in(nth(index, 2), name);
+  def sti-map(index, name) = sti-map-row(index, sti-find(index, name));
+  def sti-map-row(index, row) = if nil?(row) then form_error("safetensors required tensor absent") else sti-map-held(metal_buf_from_file(head(index), nth(row, 3), nth(row, 4)), row);
+  def sti-map-held(handle, row) = if le(handle, 0) then form_error("safetensors shared mapping refused") else list(handle, nth(row, 2), nth(row, 1));
+ }
+ 0;
+}

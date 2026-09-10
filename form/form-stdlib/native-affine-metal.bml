@@ -1,0 +1,81 @@
+// Form owns affine quantization and linear/LoRA arithmetic on shared Metal buffers.
+// The immutable checkpoint has U32 packed nibbles and per-group scales/biases.
+// No interpreter, subprocess, or host weight expansion participates.
+// preludes: form-stdlib/safetensors-index.bml form-stdlib/lora-adapter.bml
+section [form.bml] {
+ class NativeAffineMetal {
+  def nam-msl() = str_concat("#include <metal_stdlib>\nusing namespace metal;\n", str_concat(nam-linear-msl(), nam-basic-msl()));
+  def nam-linear-msl() = "
+inline float nam_read(device const uchar* p, uint i, uint ty) {uint at=i*(ty==0?4:2);uint bits=uint(p[at])|(uint(p[at+1])<<8);if(ty==0)return as_type<float>(bits|(uint(p[at+2])<<16)|(uint(p[at+3])<<24));if(ty==1)return float(as_type<half>(ushort(bits)));return as_type<float>(bits<<16);}
+inline float nam_w(device const uchar* w, device const uchar* s, device const uchar* b, uint i, uint group, uint ty) { return float((w[i/2] >> ((i%2)*4))&15)*nam_read(s,i/group,ty)+nam_read(b,i/group,ty); }
+kernel void nam_affine(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const float* x [[buffer(3)]], device float* y [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant uint& tokens [[buffer(7)]], constant uint& group [[buffer(8)]], constant uint& ty [[buffer(9)]], constant uint& transpose [[buffer(10)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+ uint width=transpose?cols:rows; uint token=gid/width, r=gid%width; if(token>=tokens) return; float a=0; uint n=transpose?rows:cols; for(uint c=lane;c<n;c+=32) { uint wi=transpose?c*cols+r:r*cols+c; a+=nam_w(w,s,b,wi,group,ty)*x[token*n+c]; } a=simd_sum(a); if(lane==0) y[token*width+r]=a;
+}
+kernel void nam_embed(device const uchar* w [[buffer(0)]], device const uchar* s [[buffer(1)]], device const uchar* b [[buffer(2)]], device const uint* ids [[buffer(3)]], device float* y [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& tokens [[buffer(6)]], constant uint& group [[buffer(7)]], constant uint& ty [[buffer(8)]], uint i [[thread_position_in_grid]]) { if(i<tokens*cols) y[i]=nam_w(w,s,b,ids[i/cols]*cols+i%cols,group,ty); }
+kernel void nam_matmul(device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* y [[buffer(2)]], constant uint& m [[buffer(3)]], constant uint& k [[buffer(4)]], constant uint& n [[buffer(5)]], constant uint& ta [[buffer(6)]], constant uint& tb [[buffer(7)]], constant float& scale [[buffer(8)]], constant uint& add [[buffer(9)]], uint gid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r=gid/n,c=gid%n; if(r>=m) return; float v=0; for(uint j=lane;j<k;j+=32) v+=a[ta?j*m+r:r*k+j]*b[tb?c*k+j:j*n+c]; v=simd_sum(v)*scale; if(lane==0) { if(add) y[gid]+=v; else y[gid]=v; } }
+kernel void nam_cast(device const uchar* x [[buffer(0)]], device float* y [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& ty [[buffer(3)]], uint i [[thread_position_in_grid]]) { if(i<n) y[i]=nam_read(x,i,ty); }
+";
+  def nam-basic-msl() = "
+kernel void nam_add(device const float* a [[buffer(0)]],device const float* b [[buffer(1)]],device float* y [[buffer(2)]],constant uint& n [[buffer(3)]],constant float& scale [[buffer(4)]],uint i [[thread_position_in_grid]]) {if(i<n)y[i]=a[i]+scale*b[i];}
+kernel void nam_swiglu(device const float* g [[buffer(0)]],device const float* u [[buffer(1)]],device float* y [[buffer(2)]],constant uint& n [[buffer(3)]],uint i [[thread_position_in_grid]]) {if(i<n)y[i]=g[i]/(1+exp(-g[i]))*u[i];}
+kernel void nam_rms(device const float* x [[buffer(0)]],device const float* g [[buffer(1)]],device float* y [[buffer(2)]],device float* inv [[buffer(3)]],constant uint& d [[buffer(4)]],constant uint& t [[buffer(5)]],constant float& eps [[buffer(6)]],uint row [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {if(row>=t)return;float ss=0;for(uint j=lane;j<d;j+=32)ss+=x[row*d+j]*x[row*d+j];float r=rsqrt(simd_sum(ss)/d+eps);if(lane==0)inv[row]=r;for(uint j=lane;j<d;j+=32)y[row*d+j]=x[row*d+j]*r*g[j];}
+kernel void nam_zero(device float* x [[buffer(0)]],constant uint& n [[buffer(1)]],uint i [[thread_position_in_grid]]) {if(i<n)x[i]=0;}
+kernel void nam_copy(device const float* x [[buffer(0)]],device float* y [[buffer(1)]],constant uint& n [[buffer(2)]],uint i [[thread_position_in_grid]]) {if(i<n)y[i]=x[i];}
+kernel void nam_stats(device const float* x [[buffer(0)]],device float* out [[buffer(1)]],constant uint& n [[buffer(2)]],uint lane [[thread_index_in_simdgroup]]) {uint bad=0;float ss=0,m=0;for(uint i=lane;i<n;i+=32){float v=x[i];if(!isfinite(v)){bad++;}else{ss+=v*v;m=max(m,abs(v));}}bad=simd_sum(bad);ss=simd_sum(ss);m=simd_max(m);if(lane==0){out[0]=float(bad+uint(!isfinite(ss)));out[1]=isfinite(ss)?ss:0;out[2]=m;}}
+";
+  def nam-type(dtype) = if str_eq(dtype, "F32") then 0 else if str_eq(dtype, "F16") then 1 else if str_eq(dtype, "BF16") then 2 else form_error("native affine scalar dtype refused");
+  def nam-pipe(name) = nam-held-pipe(metal_pipeline(nam-msl(), name));
+  def nam-held-pipe(p) = if le(p, 0) then form_error("native affine Metal compile refused") else p;
+  def nam-run(name, handles, values, count, grouped) {
+   let p = nam-pipe(name);
+   let rc = metal_enqueue(p, if grouped then md-bind16(handles, values, 32, 0, 1, 0) else md-bind(handles, values), count);
+   if lt(rc, 0) then form_error(str_concat("native affine dispatch refused: ", name)) else rc;
+  }
+  def nam-alloc(n) = if le(n, 0) then form_error("native affine empty allocation") else nam-held(metal_buf_alloc(mul(n, 4)));
+  def nam-held(h) = if le(h, 0) then form_error("native affine allocation refused") else h;
+  def nam-sync() = if lt(metal_sync(), 0) then form_error("native affine GPU completion refused") else 1;
+  def nam-free(handles) = if nil?(handles) then 1 else nam-free-next(metal_buf_free(head(handles)), tail(handles));
+  def nam-free-next(rc, rest) = if lt(rc, 0) then form_error("native affine release refused") else nam-free(rest);
+  def nam-floats(mapped) {
+   let n = sti-product(nth(mapped, 1));
+   let out = nam-alloc(n);
+   let rc = nam-run("nam_cast", list(head(mapped), out), list(n, nam-type(nth(mapped, 2))), n, 0);
+   let done = nam-sync();
+   let freed = nam-free(list(head(mapped)));
+   out;
+  }
+  // affine view: W, scales, biases, rows, cols, group, scalar type
+  def nam-view(index, prefix, group) {
+   let w = sti-find(index, str_concat(prefix, ".weight"));
+   let s = sti-find(index, str_concat(prefix, ".scales"));
+   let b = sti-find(index, str_concat(prefix, ".biases"));
+   if or(le(group,0),not(eq(mod(group,8),0))) then form_error("native affine group size refused") else if or(nil?(w), or(nil?(s), nil?(b))) then form_error(str_concat("native affine tensors missing: ", prefix)) else nam-view-shaped(index, prefix, group, w, s, b);
+  }
+  def nam-view-shaped(index, prefix, group, w, s, b) {
+   let ws = nth(w, 2); let ss = nth(s, 2); let bs = nth(b, 2);
+   if not(and(str_eq(nth(w, 1), "U32"), and(eq(len(ws), 2), and(eq(len(ss), 2), and(eq(len(bs), 2), and(eq(head(ws), head(ss)), and(eq(head(ss), head(bs)), and(eq(nth(ss, 1), nth(bs, 1)), and(eq(mul(nth(ws, 1), 8), mul(nth(ss, 1), group)), str_eq(nth(s, 1), nth(b, 1))))))))))) then form_error("native affine shape/group mismatch") else list(head(sti-map-row(index, w)), head(sti-map-row(index, s)), head(sti-map-row(index, b)), head(ws), mul(nth(ws, 1), 8), group, nam-type(nth(s, 1)));
+  }
+  def nam-linear(view, x, y, tokens, transpose) = nam-run("nam_affine", list(nth(view, 0), nth(view, 1), nth(view, 2), x, y), list(nth(view, 3), nth(view, 4), tokens, nth(view, 5), nth(view, 6), transpose), mul(tokens, if transpose then nth(view, 4) else nth(view, 3)), 1);
+  def nam-embed(view, ids, out, tokens) = nam-run("nam_embed", list(nth(view, 0), nth(view, 1), nth(view, 2), ids, out), list(nth(view, 4), tokens, nth(view, 5), nth(view, 6)), mul(tokens, nth(view, 4)), 0);
+  def nam-mm(a, b, y, m, k, n, ta, tb, scale, accumulate) = nam-run("nam_matmul", list(a, b, y), list(m, k, n, ta, tb, md-f32-bits(scale), accumulate), mul(m, n), 1);
+  def nam-add(a, b, y, n, scale) = nam-run("nam_add", list(a, b, y), list(n, md-f32-bits(scale)), n, 0);
+  def nam-copy(a, y, n) = nam-run("nam_copy", list(a, y), list(n), n, 0);
+  def nam-zero(a, n) = nam-run("nam_zero", list(a), list(n), n, 0);
+  def nam-rms(x, gain, y, inv, d, t, eps) = nam-run("nam_rms", list(x, gain, y, inv), list(d, t, md-f32-bits(eps)), t, 1);
+  def nam-swiglu(g, u, y, n) = nam-run("nam_swiglu", list(g, u, y), list(n), n, 0);
+  def nam-write(h, bytes) = if not(eq(metal_buf_write(h, 0, bytes), str_len(bytes))) then form_error("native affine buffer write incomplete") else h;
+  def nam-f32s(xs) = if nil?(xs) then "" else str_concat(md-le32(md-f32-bits(head(xs))), nam-f32s(tail(xs)));
+  def nam-buffer(xs) = nam-write(nam-alloc(len(xs)), nam-f32s(xs));
+  def nam-read(h, n) = nam-read-bytes(metal_buf_read(h, 0, mul(n, 4)), n);
+  def nam-read-bytes(bytes, n) = if or(nothing?(bytes), not(eq(str_len(bytes), mul(n, 4)))) then form_error("native affine read incomplete") else ln-floats-go(bytes, 0, n, list());
+  // Non-finite count, squared norm, maximum absolute value. Values never leave the GPU.
+  def nam-stats(h,n) {
+   let out = nam-alloc(3);
+   let rc = nam-run("nam_stats",list(h,out),list(n),1,1);
+   let values = nam-read(out,3);
+   let released = nam-free(list(out));
+   values;
+  }
+ }
+ 0;
+}
