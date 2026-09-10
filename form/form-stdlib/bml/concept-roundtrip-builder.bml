@@ -1,0 +1,212 @@
+// Complete lexical candidate compilation from held concept source bytes.
+// preludes: form-stdlib/bml/concept-materializer.bml form-stdlib/keyed-map.fk
+section [form.bml] {
+ class ConceptRoundtripBuilder {
+  def crb-base() = "cognition/concept-text-roundtrip-10000-13";
+  def crb-path(suffix) = str_concat(crb-base(),suffix);
+  def crb-inputs() = list(cmm-path("-omw.tsv"),cmm-path("-sources.dat"),"model/concept-semantics-10000-index.dat","model/concept-semantics-10000-wiktionary-index.dat","model/concept-semantics-10000-wiktionary-lexical-index.dat","model/concept-semantics-10000-wiktionary-lexical-payload.dat","model/concept-10000-substantive-repair-semantic-index.dat","model/concept-10000-substantive-repair-semantic-payload.dat");
+  def crb-input(state,slot) = csa-file(state,nth(crb-inputs(),slot));
+  def crb-check(state,aspect,ok) = csa-check(state,str_concat("roundtrip-",aspect),ok,"complete lexical candidate and sense bindings");
+  def crb-number(state,bytes,start,width,end) {
+   if not(and(ge(start,0),and(le(add(start,width),end),le(end,str_len(bytes))))) then crb-check(state,"numeric-span",0) else 0;
+   let text = substring(bytes,start,add(start,width));
+   if not(csa-digits(text,0)) then crb-check(state,"complete-decimal",0) else 0;
+   str_to_int(text);
+  }
+  def crb-field-end(state,bytes,at,end,left) {
+   if eq(left,0) then at else crb-field-next(state,bytes,at,end,left,crb-number(state,bytes,at,2,end));
+  }
+  def crb-field-next(state,bytes,at,end,left,width) {
+   let next = add(at,add(2,width));
+   if gt(next,end) then crb-check(state,"lexical-field-span",0) else 0;
+   crb-field-end(state,bytes,next,end,sub(left,1));
+  }
+  def crb-lexical-count(state,index,payload,id) {
+   let at = mul(id,15); let flag = str_byte_at(index,at);
+   if not(or(eq(flag,49),eq(flag,50))) then 0 else crb-lexical-record(state,index,payload,at);
+  }
+  def crb-lexical-record(state,index,payload,at) {
+   let offset = crb-number(state,index,add(at,2),8,str_len(index));
+   let size = crb-number(state,index,add(at,10),5,str_len(index));
+   if eq(size,0) then 0 else crb-lexical-payload(state,payload,offset,add(offset,size));
+  }
+  def crb-lexical-payload(state,payload,offset,end) {
+   let at = crb-field-end(state,payload,add(offset,104),end,4);
+   let width = crb-number(state,payload,at,5,end);
+   crb-number(state,payload,add(at,add(5,width)),3,end);
+  }
+  def crb-sense(state,id) {
+   let repair = crb-input(state,6); let primary = crb-input(state,2); let overlay = crb-input(state,3);
+   if eq(str_byte_at(repair,mul(id,15)),49) then crb-lexical-count(state,repair,crb-input(state,7),id)
+   else if not(eq(str_byte_at(primary,mul(id,35)),48)) then crb-number(state,primary,add(mul(id,35),23),3,str_len(primary))
+   else if not(eq(str_byte_at(overlay,mul(id,35)),48)) then crb-number(state,overlay,add(mul(id,35),23),3,str_len(overlay))
+   else crb-lexical-count(state,crb-input(state,4),crb-input(state,5),id);
+  }
+  def crb-u16(value) = str_concat(byte_to_str(mod(value,256)),byte_to_str(mod(div(value,256),256)));
+  def crb-u32(value) = str_concat(crb-u16(mod(value,65536)),crb-u16(div(value,65536)));
+  def crb-inc(work,key,amount) = record_set(work,key,add(record_get(work,key),amount));
+  def crb-key(lens,surface) = str_concat(int_to_str(lens),str_concat(":",surface));
+  def crb-locale-key(lens,kind) = str_concat("locale:",str_concat(int_to_str(lens),str_concat(":",kind)));
+  def crb-add-group(work,lens,surface,id) {
+   let key = km-key-of-string(crb-key(lens,surface)); let hash = km-hash(key);
+   let group = km-get-h(record_get(work,"groups"),hash,key,0);
+   if record?(group) then crb-append-group(group,id) else crb-new-group(work,key,hash,lens,id);
+  }
+  def crb-append-group(group,id) {
+   record_set(group,"ids",cons(id,record_get(group,"ids")));
+   crb-inc(group,"count",1);
+  }
+  def crb-new-group(work,key,hash,lens,id) {
+   let group = record_new(0,"ids",list(id),"count",1,"lens",lens);
+   record_set(work,"groups",km-put-h(record_get(work,"groups"),hash,key,group));
+   record_set(work,"group-list",cons(group,record_get(work,"group-list")));
+   crb-inc(work,crb-locale-key(lens,"unique"),1);
+  }
+  def crb-row-groups(work,fields,lens,id) = if eq(lens,13) then 1 else crb-row-group(work,fields,lens,id);
+  def crb-row-group(work,fields,lens,id) {
+   crb-add-group(work,lens,nth(fields,add(lens,1)),id);
+   crb-row-groups(work,fields,add(lens,1),id);
+  }
+  def crb-rows(state,work,lines,id) {
+   if nil?(lines) then id else crb-row(state,work,csa-fields(head(lines)),tail(lines),id);
+  }
+  def crb-row(state,work,fields,rest,id) {
+   if not(and(eq(len(fields),14),csa-nonempty(tail(fields)))) then crb-check(state,"table-row-width-and-surfaces",0) else 0;
+   let count = crb-sense(state,id);
+   if not(and(ge(count,0),le(count,65535))) then crb-check(state,"sense-count-u16",0) else 0;
+   record_set(work,"rows",cons(list(fields,count),record_get(work,"rows")));
+   crb-row-groups(work,fields,0,id);
+   crb-rows(state,work,rest,add(id,1));
+  }
+  def crb-ids(ids,bins) = if nil?(ids) then fbc-finish(bins,"") else crb-ids(tail(ids),fbc-put(bins,crb-u16(head(ids))));
+  def crb-groups(state,work,groups) = if nil?(groups) then 1 else crb-group(state,work,head(groups),tail(groups));
+  def crb-group(state,work,group,rest) {
+   let ids = reverse(record_get(group,"ids")); let count = record_get(group,"count"); let lens = record_get(group,"lens");
+   if not(and(eq(len(ids),count),and(gt(count,0),le(count,65535)))) then crb-check(state,"complete-group-u16",0) else 0;
+   record_set(group,"ids",ids);
+   record_set(group,"bytes",crb-ids(ids,list()));
+   if gt(count,1) then crb-collision(work,lens,count) else 0;
+   crb-groups(state,work,rest);
+  }
+  def crb-collision(work,lens,count) {
+   crb-inc(work,"collisionCells",count); crb-inc(work,"collisionGroups",1);
+   record_set(work,"maxCollision",max2(record_get(work,"maxCollision"),count));
+   crb-inc(work,crb-locale-key(lens,"cells"),count); crb-inc(work,crb-locale-key(lens,"groups"),1);
+   let key = crb-locale-key(lens,"max"); record_set(work,key,max2(record_get(work,key),count));
+  }
+  def crb-build-rows(state,work,rows,sources,id) = if nil?(rows) then id else crb-build-row(state,work,head(rows),tail(rows),sources,id);
+  def crb-build-row(state,work,row,rest,sources,id) {
+   crb-build-cells(state,work,head(row),nth(row,1),sources,id,0);
+   crb-build-rows(state,work,rest,sources,add(id,1));
+  }
+  def crb-build-cells(state,work,fields,senses,sources,id,lens) {
+   if eq(lens,13) then 1 else crb-build-cell(state,work,fields,senses,sources,id,lens);
+  }
+  def crb-build-cell(state,work,fields,senses,sources,id,lens) {
+   let group = km-get(record_get(work,"groups"),km-key-of-string(crb-key(lens,nth(fields,add(lens,1)))),0);
+   let count = record_get(group,"count"); let offset = record_get(work,"candidateEntries");
+   let source = byte_to_str(str_byte_at(sources,add(mul(id,13),lens)));
+   let present = oh-has(record_get(group,"ids"),id); let collision = if gt(count,1) then 1 else 0;
+   let senseState = if eq(senses,0) then 0 else if eq(senses,1) then 1 else 2;
+   if not(and(present,and(fbc-u32?(offset),oh-has(cmm-count-codes(),source)))) then crb-check(state,"cell-presence-source-offset",0) else 0;
+   let record = str_concat(crb-u32(offset),str_concat(crb-u16(count),str_concat(source,str_concat(byte_to_str(senseState),str_concat(crb-u16(senses),str_concat(byte_to_str(present),byte_to_str(collision)))))));
+   record_set(work,"index",fbc-put(record_get(work,"index"),record));
+   record_set(work,"candidates",fbc-put(record_get(work,"candidates"),record_get(group,"bytes")));
+   crb-inc(work,"candidateEntries",count);
+   crb-inc(record_get(work,"sourceCounts"),source,1);
+   crb-inc(record_get(work,"senseCounts"),nth(crb-sense-names(),senseState),1);
+   crb-build-cells(state,work,fields,senses,sources,id,add(lens,1));
+  }
+  def crb-sense-names() = list("semantic-unmapped","sense-unique","sense-ambiguous");
+  def crb-source-shapes(state) {
+   crb-check(state,"source-shapes",and(eq(str_len(crb-input(state,1)),130000),and(eq(str_len(crb-input(state,2)),350000),and(eq(str_len(crb-input(state,3)),350000),and(eq(str_len(crb-input(state,4)),150000),eq(str_len(crb-input(state,6)),150000))))));
+  }
+  def crb-prepare(root,engine) {
+   let state = cmm-state(root,engine);
+   crb-check(state,"hash-policy",or(str_eq(engine,"form-sha256"),str_eq(engine,"arm64-sha256")));
+   let table = crb-input(state,0);
+   crb-check(state,"exact-table-header",str_eq(substring(table,0,str_len(cmm-header())),cmm-header()));
+   let lines = tail(csa-lines(table));
+   crb-check(state,"table-row-count",eq(len(lines),10000));
+   crb-source-shapes(state);
+   let work = record_new(0,"input",state,"groups",km-for(130000),"group-list",list(),"rows",list(),"index",list(),"candidates",list(),"candidateEntries",0,"collisionCells",0,"collisionGroups",0,"maxCollision",1,"sourceCounts",record_new(0),"senseCounts",record_new(0));
+   crb-check(state,"all-source-rows",eq(crb-rows(state,work,lines,0),10000));
+   crb-groups(state,work,record_get(work,"group-list"));
+   crb-check(state,"all-generated-rows",eq(crb-build-rows(state,work,reverse(record_get(work,"rows")),crb-input(state,1),0),10000));
+   let index = fbc-finish(record_get(work,"index"),""); let candidates = fbc-finish(record_get(work,"candidates"),"");
+   crb-check(state,"complete-output-spans",and(eq(str_len(index),1560000),eq(str_len(candidates),mul(record_get(work,"candidateEntries"),2))));
+   record_set(work,"index",index); record_set(work,"candidates",candidates);
+   record_set(work,"indexSha256",csa-hash(state,index)); record_set(work,"candidatesSha256",csa-hash(state,candidates));
+   work;
+  }
+  def crb-locale(work,lens) = list(nth(cmm-codes(),lens),record_get(work,crb-locale-key(lens,"unique")),record_get(work,crb-locale-key(lens,"groups")),record_get(work,crb-locale-key(lens,"cells")),max2(1,record_get(work,crb-locale-key(lens,"max"))));
+  def crb-numbers(values) = if nil?(values) then "" else str_concat(int_to_str(head(values)),if nil?(tail(values)) then "" else str_concat(" ",crb-numbers(tail(values))));
+  def crb-count-values(counts,keys) = if nil?(keys) then list() else cons(record_get(counts,head(keys)),crb-count-values(counts,tail(keys)));
+  def crb-form-counts(counts,keys) = str_concat("(list ",str_concat(crb-numbers(crb-count-values(counts,keys)),")"));
+  def crb-form-locale(work,lens) {
+   if eq(lens,13) then "" else str_concat("    (list \"",str_concat(nth(cmm-codes(),lens),str_concat("\" ",str_concat(crb-numbers(tail(crb-locale(work,lens))),str_concat(")\n",crb-form-locale(work,add(lens,1)))))));
+  }
+  def crb-fn(name,value) = str_concat("  (defn ctr13-",str_concat(name,str_concat(" () ",str_concat(value,")\n"))));
+  def crb-quoted(value) = json-emit-precise(json-node-string(value));
+  def crb-number-fns(work,pairs) = if nil?(pairs) then "" else str_concat(crb-fn(head(head(pairs)),int_to_str(record_get(work,nth(head(pairs),1)))),crb-number-fns(work,tail(pairs)));
+  def crb-bindings(work) {
+   let state = record_get(work,"input");
+   cons(list(crb-path("-index.dat"),record_get(work,"indexSha256")),cons(list(crb-path("-candidates.dat"),record_get(work,"candidatesSha256")),crb-input-bindings(state,crb-inputs())));
+  }
+  def crb-input-bindings(state,paths) = if nil?(paths) then list() else cons(list(head(paths),csa-file-hash(state,head(paths))),crb-input-bindings(state,tail(paths)));
+  def crb-form-bindings(bindings) = if nil?(bindings) then "" else str_concat("    (list ",str_concat(crb-quoted(head(head(bindings))),str_concat(" ",str_concat(crb-quoted(nth(head(bindings),1)),str_concat(")\n",crb-form-bindings(tail(bindings)))))));
+  def crb-metadata(work) {
+   let bins = fbc-put(list(),"; Complete lexical candidate metadata, generated by the Form builder.\n; preludes: form/form-stdlib/core.fk form/form-stdlib/sha256.fk form/form-stdlib/hex.fk form/form-stdlib/str-byte-at.fk\n(do\n");
+   let a = fbc-put(bins,str_concat(crb-fn("cell-count","130000"),crb-number-fns(work,list(list("candidate-entry-count","candidateEntries"),list("collision-cells","collisionCells"),list("collision-groups","collisionGroups"),list("max-collision","maxCollision")))));
+   let b = fbc-put(a,str_concat(crb-fn("failures","0"),str_concat(crb-fn("source-counts",crb-form-counts(record_get(work,"sourceCounts"),cmm-count-codes())),crb-fn("sense-cell-counts",crb-form-counts(record_get(work,"senseCounts"),crb-sense-names())))));
+   let c = fbc-put(b,crb-fn("locale-stats",str_concat("(list\n",str_concat(crb-form-locale(work,0),"  )"))));
+   let d = fbc-put(c,str_concat(crb-fn("index-path",crb-quoted(crb-path("-index.dat"))),str_concat(crb-fn("candidates-path",crb-quoted(crb-path("-candidates.dat"))),str_concat(crb-fn("index-sha256",crb-quoted(record_get(work,"indexSha256"))),crb-fn("candidates-sha256",crb-quoted(record_get(work,"candidatesSha256")))))));
+   let e = fbc-put(d,"  (defn ctr13-sha256-valid? (path expected)\n    (do (let size (file_size path))\n        (let bytes (read_file path))\n        (if (and (ge size 0) (and (not (nothing? bytes))\n                  (and (eq size (str_len bytes)) (eq size (file_size path)))))\n          (str_eq (hex-encode (sha256-stream-string bytes)) expected) 0)))\n  (defn ctr13-hashes-valid? (bindings)\n    (if (nil? bindings) 1\n      (and (ctr13-sha256-valid? (head (head bindings)) (nth (head bindings) 1))\n           (ctr13-hashes-valid? (tail bindings)))))\n");
+   fbc-finish(fbc-put(e,str_concat(crb-fn("artifacts-valid?",str_concat("(ctr13-hashes-valid? (list\n",str_concat(crb-form-bindings(crb-bindings(work)),"  ))"))),")\n")),"");
+  }
+  def crb-manifest-inputs(state,names,paths) = if nil?(paths) then "" else str_concat(head(names),str_concat(" ",str_concat(csa-file-hash(state,head(paths)),str_concat("\n",crb-manifest-inputs(state,tail(names),tail(paths))))));
+  def crb-line(key,value) = str_concat(key,str_concat(" ",str_concat(int_to_str(value),"\n")));
+  def crb-manifest(work) {
+   let state = record_get(work,"input"); let senses = record_get(work,"senseCounts");
+   let a = fbc-put(list(),"concept_text_roundtrip_10000_13_v4\nbuilder observe/concept-roundtrip-build-run.bml\n");
+   let b = fbc-put(a,crb-manifest-inputs(state,list("input_nl_sha256","input_sources_sha256","input_primary_semantic_index_sha256","input_wiktionary_overlay_index_sha256","input_wiktionary_lexical_index_sha256","input_wiktionary_lexical_payload_sha256","input_substantive_repair_index_sha256","input_substantive_repair_payload_sha256"),crb-inputs()));
+   let c = fbc-put(b,str_concat(crb-line("cells",130000),str_concat(crb-line("candidate_entries",record_get(work,"candidateEntries")),str_concat(crb-line("collision_cells",record_get(work,"collisionCells")),str_concat(crb-line("collision_groups",record_get(work,"collisionGroups")),crb-line("max_collision",record_get(work,"maxCollision")))))));
+   let d = fbc-put(c,str_concat(crb-line("combined_semantic_mapped_anchors",sub(10000,div(record_get(senses,"semantic-unmapped"),13))),str_concat(crb-line("combined_semantic_unmapped_anchors",div(record_get(senses,"semantic-unmapped"),13)),str_concat(crb-line("sense_cells_unmapped",record_get(senses,"semantic-unmapped")),str_concat(crb-line("sense_cells_unique",record_get(senses,"sense-unique")),crb-line("sense_cells_ambiguous",record_get(senses,"sense-ambiguous")))))));
+   fbc-finish(fbc-put(d,str_concat("failures 0\nfailure_cells none\nindex_sha256 ",str_concat(record_get(work,"indexSha256"),str_concat("\ncandidates_sha256 ",str_concat(record_get(work,"candidatesSha256"),"\n"))))),"");
+  }
+  def crb-report(work) = json-node-object(list(oh-s("schema","form-concept-roundtrip-build-v1"),oh-n("cells",130000),oh-n("candidateEntries",record_get(work,"candidateEntries")),oh-n("collisionCells",record_get(work,"collisionCells")),oh-n("collisionGroups",record_get(work,"collisionGroups")),oh-n("maxCollision",record_get(work,"maxCollision")),oh-n("failures",0),json-node-pair("sourceCounts",json-node-object(cmm-count-fields(record_get(work,"sourceCounts"),cmm-count-codes()))),json-node-pair("senseCellCounts",json-node-object(cmm-count-fields(record_get(work,"senseCounts"),crb-sense-names()))),oh-n("indexBytes",str_len(record_get(work,"index"))),oh-n("candidateBytes",str_len(record_get(work,"candidates"))),oh-s("indexSha256",record_get(work,"indexSha256")),oh-s("candidatesSha256",record_get(work,"candidatesSha256"))));
+  def crb-complete(work) {
+   record_set(work,"outputs",list(list(crb-path("-index.dat"),record_get(work,"index")),list(crb-path("-candidates.dat"),record_get(work,"candidates")),list(crb-path("-metadata.fk"),crb-metadata(work)),list(crb-path("-source-manifest.txt"),crb-manifest(work))));
+   work;
+  }
+  def crb-publish(work) {
+   let state = record_get(work,"input"); let outputs = record_get(work,"outputs");
+   cmm-freeze-outputs(state,outputs);
+   let suffix = str_concat(".stage-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(host_monotonic_ms()))));
+   let stages = cmm-stages(state,outputs,suffix);
+   record_set(state,"owned-stages",list()); record_set(state,"published",0);
+   crb-check(state,"private-stage-paths",cmm-stage-free(state,stages));
+   cmm-stage-all(state,stages);
+   cmm-fresh(state,record_get(state,"files"));
+   let count = cmm-publish-all(state,stages,0);
+   crb-check(state,"all-artifacts-published",eq(count,4));
+   crb-check(state,"private-stages-released",cmm-clean-stages(record_get(state,"owned-stages")));
+   record_set(state,"owned-stages",list());
+   print_str(json-emit-precise(crb-report(work)));
+   1;
+  }
+  def crb-run(root,engine) = crb-publish(crb-complete(crb-prepare(root,engine)));
+  def crb-request(text) {
+   if not(jwa-valid(text)) then csa-input-refused("complete JSON required") else 0;
+   let request = parse-json("concept-roundtrip-build-request",text);
+   if not(node_eq(node_category(request),JSON-OBJECT())) then csa-input-refused("request object required") else 0;
+   if not(csa-request-fields(json-object-pairs(request),list())) then csa-input-refused("unique string root/hash fields required") else 0;
+   crb-run(if json-object-has?(request,"root") then json-string-value(json-object-get(request,"root")) else ".",if json-object-has?(request,"hash") then json-string-value(json-object-get(request,"hash")) else "form-sha256");
+  }
+  def crb-home() {
+   let text = read_line();
+   if or(nothing?(text),str_eq(text,"")) then crb-run(".","form-sha256") else crb-request(text);
+  }
+ }
+ 0;
+}

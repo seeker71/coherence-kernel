@@ -337,12 +337,12 @@ for (let i = 0; i < 111; i++) {
 await buildCarriers(evidence, current);
 await buildForms(evidence);
 await writeManifest(evidence);
-for (const script of [
-  "cognition/concept-nl-substantive-repair-materialize.mjs",
-  "cognition/concept-text-roundtrip-10000-13-build.mjs",
-  "cognition/concept-human-corpus-13-reindex.mjs",
+for (const [command, script] of [
+  [resolve(root, "fkwu"), "observe/concept-materialize-run.bml"],
+  [resolve(root, "fkwu"), "observe/concept-roundtrip-build-run.bml"],
+  [process.execPath, "cognition/concept-human-corpus-13-reindex.mjs"],
 ]) {
-  const result = spawnSync(process.execPath, [script], { cwd: root, stdio: "inherit" });
+  const result = spawnSync(command, [script], { cwd: root, stdio: ["ignore", "inherit", "inherit"] });
   if (result.status !== 0) throw new Error(`downstream canonical rebuild failed: ${script}`);
 }
 process.stdout.write(`repaired 111 stable IDs; 111 aliases; 111 definitions; 1,443 attributed NL cells\n`);

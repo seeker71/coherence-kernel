@@ -1,10 +1,6 @@
-; form-stdlib/grammars/python-bmf-compiler.fk
-;
-; Form-native Python S-expression (.fk) compiler and emitter.
-; Walks the PY-BMF-* category nodes lifted by python-bmf-lift.fk
-; and outputs S-expression source strings that the Go/Rust/TS kernels
-; can parse and execute natively.
-;
+; Form-native Python specimen compiler: canonical recipe nodes to native source.
+; Class selection, fields and inheritance live in the Form class runtime.
+; preludes: form-stdlib/form-ontology-loader.fk form-stdlib/python-bmf-lift.fk form-stdlib/bml/python-native-dispatch.bml
 
 (do
     ;; ---- compiler state ---------------------------------------------
@@ -42,17 +38,7 @@
     (defn comp-res-state (r) (nth r 1))
 
     ;; ---- helpers ----------------------------------------------------
-    (defn py-quote-loop (s i)
-        (if (ge i (str_len s)) ""
-            (do
-                (let ch (char_at s i))
-                (let rest (py-quote-loop s (add i 1)))
-                (if (str_eq ch "\\") (str_concat "\\\\" rest)
-                (if (str_eq ch "\"") (str_concat "\\\"" rest)
-                    (str_concat ch rest))))))
-
-    (defn py-q (s)
-        (str_concat "\"" (str_concat (py-quote-loop s 0) "\"")))
+    (defn py-q (s) (fsc-source-emit-string s))
 
     (defn join-strings-with-spaces (strs)
         (if (nil? strs) ""
@@ -240,7 +226,7 @@
                                 (let fields2 (if (eq (list-contains? fields attr) 0) (cons attr fields) fields))
                                 (let bind (str_concat "(let " (str_concat attr (str_concat " " (str_concat (comp-res-str res-val) ")")))))
                                 (py-compile-init-stmt-loop (tail stmts) fields2 (cons bind initBindings) superInitCalled baseName (comp-res-state res-val)))
-                            (form_error "init attribute assign receiver must be self")))
+                            (pch-refuse "init attribute assign receiver must be self")))
                     (if (node_eq cat PY-BMF-ASSIGN)
                         (do
                             (let name (node_value (head kids)))
@@ -262,8 +248,8 @@
                                         (let call-expr (str_concat "(" (str_concat baseName (str_concat args-str ")"))))
                                         (let bind (str_concat "(let _super_init " (str_concat call-expr ")")))
                                         (py-compile-init-stmt-loop (tail stmts) fields (cons bind initBindings) 1 baseName (comp-res-state res-args)))
-                                    (form_error "unsupported statement kind in __init__")))
-                            (form_error "unsupported statement kind in __init__")))))))
+                                    (pch-refuse "unsupported statement kind in __init__")))
+                            (pch-refuse "unsupported statement kind in __init__")))))))
 
     ;; ---- expression list compiler -----------------------------------
     (defn py-compile-expr-list-loop (nodes acc state)
@@ -382,14 +368,13 @@
                         (comp-res (str_concat "(" (str_concat (py-math-resolve-name attr) ")")) state)
                         (do
                             (let res-base (py-compile-expr base state))
-                            (comp-res (str_concat "(_get " (str_concat (comp-res-str res-base) (str_concat " " (str_concat (py-q attr) ")"))))
+                            (comp-res (str_concat "(_py_native_attr " (str_concat (comp-res-str res-base) (str_concat " " (str_concat (py-q attr) ")"))))
                                       (comp-res-state res-base)))))
             (if (node_eq cat PY-BMF-METHOD-CALL)
                 (do
                     (let base (nth kids 0))
                     (let method (node_value (nth kids 1)))
                     (let args (drop 2 kids))
-                    (let is-append (and (str_eq method "append") (eq (len args) 1)))
                     (let is-math-alias (py-module-alias-of? state base "math"))
                     (if (and is-math-alias (not (str_eq (py-math-resolve-name method) "")))
                         (do
@@ -397,12 +382,6 @@
                             (let native (py-math-resolve-name method))
                             (comp-res (str_concat "(" (str_concat native (str_concat " " (str_concat (join-strings-with-spaces (comp-res-str res-args)) ")"))))
                                       (comp-res-state res-args)))
-                    (if is-append
-                        (do
-                            (let recv-name (node_value (head (node_children base))))
-                            (let res-arg (py-compile-expr (head args) state))
-                            (comp-res (str_concat "(let " (str_concat recv-name (str_concat " (_list_append " (str_concat recv-name (str_concat " " (str_concat (comp-res-str res-arg) "))"))))))
-                                      (comp-res-state res-arg)))
                     (if (super-call? base)
                         (do
                             (let current-class (py-state-current-class state))
@@ -410,7 +389,7 @@
                             (let tail-str
                                 (if (nil? (comp-res-str res-args)) ""
                                     (str_concat " " (join-strings-with-spaces (comp-res-str res-args)))))
-                            (comp-res (str_concat "(_dispatch_super self " (str_concat (py-q current-class) (str_concat " " (str_concat (py-q method) (str_concat tail-str ")")))))
+                            (comp-res (pnd-super current-class method (comp-res-str res-args))
                                       (comp-res-state res-args)))
                         (do
                             (let res-base (py-compile-expr base state))
@@ -418,8 +397,8 @@
                             (let tail-str
                                 (if (nil? (comp-res-str res-args)) ""
                                     (str_concat " " (join-strings-with-spaces (comp-res-str res-args)))))
-                            (comp-res (str_concat "(_dispatch " (str_concat (comp-res-str res-base) (str_concat " " (str_concat (py-q method) (str_concat tail-str ")")))))
-                                      (comp-res-state res-base)))))))
+                            (comp-res (pnd-call (comp-res-str res-base) method (comp-res-str res-args))
+                                      (comp-res-state res-args))))))
             (if (node_eq cat PY-BMF-CALL)
                 (do
                     (let callee (node_value (head kids)))
@@ -430,7 +409,7 @@
                     ; string bytes) — it lowers to the underscore-family _len
                     ; native. The kernel `len` is an honest cell count and would
                     ; read a dict's marker slot as a member.
-                    (let mapped2 (if (str_eq mapped "") (if (str_eq callee "len") "_len" "") mapped))
+                    (let mapped2 (if (str_eq mapped "") (if (str_eq callee "len") "_py_native_len" "") mapped))
                     (let fn-name (if (not (str_eq mapped2 "")) mapped2 callee))
                     (let args-str
                         (if (nil? (comp-res-str res-args)) ""
@@ -474,7 +453,7 @@
                     (let res-iter (py-compile-expr iter state4))
                     (comp-res (str_concat "(map " (str_concat lambda-name (str_concat " " (str_concat (comp-res-str res-iter) ")"))))
                               (comp-res-state res-iter)))
-                (form_error "py-compile-expr: unsupported category"))))))))))))))))))))
+                (pch-refuse "py-compile-expr: unsupported category"))))))))))))))))))))
 
     ;; ---- definition body compiler (def scope with CPS) -------------
     (defn py-compile-def-body (body state)
@@ -484,12 +463,32 @@
             (py-compile-stmt-seq stmts 0 state)))
 
     ;; ---- statement sequence compiler --------------------------------
+    ; Append in statement position carries both its resulting receiver and
+    ; expression value into the continuation. Class methods retain their value;
+    ; list append owns a local rebinding before subsequent statements execute.
+    (defn py-local-append? (stmt)
+        (if (not (node_eq (node_category stmt) PY-BMF-METHOD-CALL)) 0
+            (do (let kids (node_children stmt))
+                (and (eq (len kids) 3) (and (node_eq (node_category (head kids)) PY-BMF-IDENT) (str_eq (node_value (nth kids 1)) "append"))))))
+    (defn py-compile-append-seq (stmt stmts start state)
+        (do
+            (let kids (node_children stmt))
+            (let receiver (node_value (head (node_children (head kids)))))
+            (let temporary (str_concat "_append_" (int_to_str (py-state-while-counter state))))
+            (let argument-name (str_concat temporary "_argument"))
+            (let argument (py-compile-expr (nth kids 2) (py-state-inc-while-counter state)))
+            (let next (if (ge (add start 1) (len stmts))
+                (comp-res (pnd-cat (list "(nth " temporary " 1)")) (comp-res-state argument))
+                (py-compile-stmt-seq stmts (add start 1) (comp-res-state argument))))
+            (comp-res (pnd-cat (list "(do (let " argument-name " " (comp-res-str argument) ") (let " temporary " (if (_py_native_instance " receiver ") (list " receiver " " (pnd-call receiver "append" (list argument-name)) ") (list (_py_native_append " receiver " " argument-name ") 0))) (let " receiver " (nth " temporary " 0)) " (comp-res-str next) ")")) (comp-res-state next))))
     (defn py-compile-stmt-seq (stmts start state)
         (if (ge start (len stmts)) (comp-res "false" state)
             (do
                 (let stmt (nth stmts start))
                 (let cat (node_category stmt))
                 (let kids (node_children stmt))
+                (if (py-local-append? stmt)
+                    (py-compile-append-seq stmt stmts start state)
                 (if (node_eq cat PY-BMF-RETURN)
                     (py-compile-expr (head kids) state)
                 (if (node_eq cat PY-BMF-IF-STMT)
@@ -524,7 +523,7 @@
                             (do
                                 (let res-rest (py-compile-stmt-seq stmts next-start (comp-res-state res-side)))
                                 (comp-res (str_concat "(do " (str_concat (comp-res-str res-side) (str_concat " " (str_concat (comp-res-str res-rest) ")"))))
-                                          (comp-res-state res-rest)))))))))))))
+                                          (comp-res-state res-rest))))))))))))))
 
     ;; ---- if-statement compiler in def body (CPS short circuit) -----
     (defn py-compile-if-in-def-body (if-kids stmts start state)
@@ -632,7 +631,7 @@
                                 (cons (head flds) (cons (py-q (head flds)) parts)))))
                     (let recordParts-full (reverse (py-build-record-parts fields (reverse recordParts))))
                     (let recordExpr (str_concat "(list " (str_concat (join-strings-with-spaces recordParts-full) ")")))
-                    (let recordExpr-merged (if (eq superInitCalled 1) (str_concat "(_merge_record " (str_concat recordExpr " _super_init)")) recordExpr))
+                    (let recordExpr-merged (if (eq superInitCalled 1) (str_concat "(_py_native_merge " (str_concat recordExpr " _super_init)")) recordExpr))
                     (let ctorBody
                         (if (nil? initBindings)
                             recordExpr-merged
@@ -640,13 +639,13 @@
                     (let ctorDef (str_concat "(defn " (str_concat className (str_concat " (" (str_concat (join-strings-with-spaces ctorParams) (str_concat ") " (str_concat ctorBody ")")))))))
                     (let state4 (py-state-add-lifted-defn state-after-init ctorDef))
                     ;; Other methods
-                    (defn py-compile-other-methods (meths st)
+                    (defn py-compile-other-methods (meths st className)
                         (if (nil? meths) st
                             (do
                                 (let m (head meths))
                                 (let mname (node_value (head (node_children m))))
                                 (if (str_eq mname "__init__")
-                                    (py-compile-other-methods (tail meths) st)
+                                    (py-compile-other-methods (tail meths) st className)
                                     (do
                                         (let mKids (node_children m))
                                         (let paramNodes (take (sub (len mKids) 2) (tail mKids)))
@@ -655,8 +654,8 @@
                                         (let res-mbody (py-compile-def-body mBody st))
                                         (let mdefn (str_concat "(defn " (str_concat className (str_concat "__" (str_concat mname (str_concat " (" (str_concat (join-strings-with-spaces paramNames) (str_concat ") " (str_concat (comp-res-str res-mbody) ")")))))))))
                                         (let st2 (py-state-add-lifted-defn (comp-res-state res-mbody) mdefn))
-                                        (py-compile-other-methods (tail meths) st2))))))
-                    (let state5 (py-compile-other-methods methods state4))
+                                        (py-compile-other-methods (tail meths) st2 className))))))
+                    (let state5 (py-compile-other-methods methods state4 className))
                     (comp-res "false" (py-state-with-current-class state5 (py-state-current-class state))))
             (if (node_eq cat PY-BMF-WHILE)
                 (do
@@ -738,6 +737,8 @@
     ;; This keeps a multibyte character whole across cursor movement.
     (defn py-compile-text (source out-path)
         (do
+            (if (not (str_eq (value-kind source) "string"))
+                (pch-refuse "Python source bytes required") 0)
             (let ast (lift-module-text source))
             (let kids (node_children ast))
             (let state (py-state-init))
@@ -755,9 +756,22 @@
                                 (let inner (substring body 4 (sub (str_len body) 1)))
                                 (str_concat "(do " (str_concat (join-strings-with-spaces (reverse lifted-defns)) (str_concat " " (str_concat inner ")")))))
                             (str_concat "(do " (str_concat (join-strings-with-spaces (reverse lifted-defns)) (str_concat " " (str_concat body ")"))))))))
-            (write_file_text out-path final-str)))
+            (py-write-source out-path (str_concat (pnd-source ast) final-str))))
+
+    (defn py-write-source (path source)
+        (if (and (eq (write_file path source) (str_len source))
+                 (str_eq (read_file path) source))
+            (str_len source)
+            (pch-refuse "compiled source write refused")))
 
     (defn py-compile-file (in-path out-path)
-        (py-compile-text (read_file in-path) out-path))
+        (do
+            (let size (file_size in-path))
+            (let source (read_file in-path))
+            (if (not (and (ge size 0)
+                    (and (str_eq (value-kind source) "string")
+                        (and (eq (str_len source) size) (eq (file_size in-path) size)))))
+                (pch-refuse "Python source read incomplete") 0)
+            (py-compile-text source out-path)))
 
     0)
