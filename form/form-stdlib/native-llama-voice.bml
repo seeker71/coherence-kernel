@@ -1,0 +1,98 @@
+// Resident model/tokenizer ownership with a growing KV context and a token stream.
+// maxTokens=0 keeps streaming until EOS, cancellation, architectural or memory pressure.
+// Partial output always carries its actual stopping reason.
+// preludes: form-stdlib/native-llama-metal.bml form-stdlib/native-llama-tokenizer.bml form-stdlib/spool-bell-transport.fk form-stdlib/form-fs.fk
+section [form.bml] {
+ class NativeLlamaVoice {
+  def nlg-event(path,stage,count,start,live,model) {
+   let now = host_monotonic_ms(); let current = metal_live();
+   let event = json-node-object(list(json-node-pair("stage",json-node-string(stage)),json-node-pair("tokens",json-node-int(count)),json-node-pair("wall_ms",json-node-int(sub(now,start))),json-node-pair("gpu_busy_us",json-node-int(sub(nth(current,11),nth(live,11)))),json-node-pair("dispatches",json-node-int(sub(nth(current,7),nth(live,7)))),json-node-pair("buffers_created",json-node-int(sub(nth(current,16),nth(live,16)))),json-node-pair("new_pipelines",json-node-int(sub(nth(current,3),nth(live,3)))),json-node-pair("live_buffers",json-node-int(nth(current,2))),json-node-pair("device_bytes",json-node-int(nth(current,18))),json-node-pair("model",json-node-string(nth(model,4))),json-node-pair("lora_pairs",json-node-int(nll-pair-count(nth(model,1)))),json-node-pair("lora_rank",json-node-int(if eq(nll-pair-count(nth(model,1)),0) then 0 else nll-rank(nth(model,1))))));
+   if eq(str_len(path),0) then 0 else sbt-append(path,str_concat(json-emit(event),"\n"));
+  }
+  def nlg-open(dir,adapter) = list(nll-open(dir,adapter),nlt-open(dir));
+  def nlg-close(session) = nll-close(head(session));
+  def nlg-min(a,b) = if lt(a,b) then a else b;
+  def nlg-room(bytes) {
+   let live = metal_live();
+   and(gt(nth(live,19),0),le(add(nth(live,18),bytes),nth(live,19)));
+  }
+  def nlg-cache-bytes(model,positions) = mul(8,mul(positions,mul(nth(head(model),6),mul(nth(head(model),3),nth(head(model),4)))));
+  def nlg-copy-cache(old,new,n,width) {
+   if nil?(old) then 1 else nlg-copy-cache-next(old,new,n,width,nam-copy(head(old),head(new),mul(n,width)));
+  }
+  def nlg-copy-cache-next(old,new,n,width,rc) = nlg-copy-cache(tail(old),tail(new),n,width);
+  def nlg-grow(model,ctx,used) {
+   let size = nlg-min(nth(head(model),9),mul(head(ctx),2));
+   if or(le(size,head(ctx)),not(nlg-room(nlg-cache-bytes(model,size)))) then nothing() else nlg-grow-admitted(model,ctx,used,size);
+  }
+  def nlg-grow-admitted(model,ctx,used,size) {
+   let next = nll-context(model,size); let width = mul(nth(head(model),3),nth(head(model),4));
+   let k = nlg-copy-cache(nth(ctx,1),nth(next,1),used,width);
+   let v = nlg-copy-cache(nth(ctx,2),nth(next,2),used,width);
+   let done = nam-sync(); let released = nll-context-close(ctx);
+   next;
+  }
+  def nlg-forward-next(model,ctx,ids,pos,events,stage) {
+   let t0 = host_monotonic_ms(); let live = metal_live();
+   let r = nll-forward(model,ctx,ids,pos,0);
+   let selected = nll-select(head(r),nth(head(model),5));
+   let event = nlg-event(events,stage,len(ids),t0,live,model);
+   let released = nll-forward-close(r);
+   selected;
+  }
+  // Conservative byte estimate for the actual forward tape, including attention scores.
+  def nlg-forward-bytes(model,t,pos) {
+   let g = head(model); let d = nth(g,0); let kd = mul(nth(g,3),nth(g,4));
+   let layer = add(mul(t,add(add(mul(7,d),mul(2,kd)),add(mul(3,nth(g,1)),2))),mul(t,mul(nth(g,2),add(pos,t))));
+   mul(4,add(mul(nth(g,6),layer),add(mul(t,add(d,nll-rank(nth(model,1)))),add(nth(g,5),mul(2,d)))));
+  }
+  def nlg-chunk(model,t,pos) = if le(t,0) then 0 else if nlg-room(nlg-forward-bytes(model,t,pos)) then t else nlg-chunk(model,div(t,2),pos);
+  def nlg-prefill(model,ctx,ids,pos,events) {
+   let t = nlg-chunk(model,len(ids),pos);
+   if eq(t,0) then list(-1,pos,"memory-pressure") else nlg-prefill-chunk(model,ctx,ids,pos,events,t);
+  }
+  def nlg-prefill-chunk(model,ctx,ids,pos,events,t) {
+   let next = nlg-forward-next(model,ctx,take(t,ids),pos,events,"prefill");
+   if eq(t,len(ids)) then list(next,add(pos,t),"") else nlg-prefill(model,ctx,drop(t,ids),add(pos,t),events);
+  }
+  def nlg-eos(t,id) = or(eq(id,nlt-special(t,"<|eot_id|>")),eq(id,nlt-special(t,"<|end_of_text|>")));
+  // Result: text, reason (empty only on EOS), emitted count, final context, event file.
+  def nlg-result(text,why,n,ctx,events) = list(text,why,n,ctx,events);
+  def nlg-stream(stream,text) = if eq(str_len(stream),0) then 0 else sbt-append(stream,text);
+  def nlg-decode(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) {
+   if or(lt(id,0),ge(id,nth(head(model),5))) then nlg-result(acc,"non-finite-logits",n,ctx,events)
+   else if nlg-eos(tk,id) then nlg-result(acc,"",n,ctx,events)
+   else if and(gt(limit,0),ge(n,limit)) then nlg-result(acc,"token-limit",n,ctx,events)
+   else if and(gt(str_len(cancel),0),gt(file_size(cancel),0)) then nlg-result(acc,"cancelled",n,ctx,events)
+   else nlg-emit(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events);
+  }
+  def nlg-emit(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) {
+   let text = nlt-decode-id(tk,id); let sent = nlg-stream(stream,text);
+   let all = str_concat(acc,text); let count = add(n,1);
+   if and(gt(limit,0),ge(count,limit)) then nlg-result(all,"token-limit",count,ctx,events)
+   else if ge(pos,head(ctx)) then nlg-grew(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events,nlg-grow(model,ctx,pos))
+   else nlg-feed(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events);
+  }
+  def nlg-grew(model,tk,old,id,pos,n,limit,acc,stream,cancel,events,next) = if nothing?(next) then nlg-result(acc,if ge(pos,nth(head(model),9)) then "model-position-limit" else "memory-pressure",n,old,events) else nlg-feed(model,tk,next,id,pos,n,limit,acc,stream,cancel,events);
+  def nlg-feed(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) = if not(nlg-room(nlg-forward-bytes(model,1,pos))) then nlg-result(acc,"memory-pressure",n,ctx,events) else nlg-decode(model,tk,ctx,nlg-forward-next(model,ctx,list(id),pos,events,"decode"),add(pos,1),n,limit,acc,stream,cancel,events);
+  def nlg-ask(session,prompt,limit,stream,cancel,events) {
+   let model = head(session); let tk = nth(session,1);
+   let ids = nlt-chat(tk,prompt); let capacity = add(len(ids),16);
+   if or(lt(limit,0),or(gt(capacity,nth(head(model),9)),not(nlg-room(nlg-cache-bytes(model,capacity))))) then list("","context-admission-refused",0,events) else nlg-ask-admitted(model,tk,ids,capacity,limit,stream,cancel,events);
+  }
+  def nlg-ask-admitted(model,tk,ids,capacity,limit,stream,cancel,events) {
+   let ctx = nll-context(model,capacity);
+   let pre = nlg-prefill(model,ctx,ids,0,events);
+   let result = if gt(str_len(nth(pre,2)),0) then nlg-result("",nth(pre,2),0,ctx,events) else nlg-decode(model,tk,ctx,head(pre),nth(pre,1),0,limit,"",stream,cancel,events);
+   let released = nll-context-close(nth(result,3));
+   list(head(result),nth(result,1),nth(result,2),events);
+  }
+  def nlg-once(dir,adapter,prompt,limit,stream,cancel,events) {
+   let session = nlg-open(dir,adapter);
+   let result = nlg-ask(session,prompt,limit,stream,cancel,events);
+   let closed = nlg-close(session);
+   result;
+  }
+ }
+ 0;
+}

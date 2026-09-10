@@ -1,0 +1,39 @@
+// Small grouped-query transformer with all seven projections trained in two layers.
+// Nonzero A and B exercise both factor gradients, residuals and rotary positions.
+// preludes: form-stdlib/native-llama-backward.bml
+section [form.bml] {
+ class NativeLlamaFixture {
+  def nlf-values(n,seed,scale) = if le(n,0) then list() else cons(mul(scale,sub(mod(add(mul(n,37),mul(seed,13)),101),50)),nlf-values(sub(n,1),seed,scale));
+  def nlf-words(n,seed) = if le(n,0) then "" else str_concat(md-le32(mod(add(mul(n,2654435761),mul(seed,104729)),4294967296)),nlf-words(sub(n,1),seed));
+  def nlf-repeat(n,x) = if le(n,0) then list() else cons(x,nlf-repeat(sub(n,1),x));
+  def nlf-view(rows,cols,seed) = list(nam-write(nam-alloc(div(mul(rows,cols),8)),nlf-words(div(mul(rows,cols),8),seed)),nam-buffer(nlf-repeat(div(mul(rows,cols),64),0.0125)),nam-buffer(nlf-repeat(div(mul(rows,cols),64),-0.09375)),rows,cols,64,0);
+  def nlf-projection(name,rows,cols,seed) = list(nlf-view(rows,cols,seed),list(name,nam-buffer(nlf-values(mul(cols,2),seed,0.006)),nam-buffer(nlf-values(mul(rows,2),add(seed,7),0.006)),cols,2,rows,0.7));
+  def nlf-layer(i) = list(nam-buffer(nlf-repeat(64,1.0)),nlf-projection(nll-prefix(i,"self_attn.q_proj"),64,64,add(i,1)),nlf-projection(nll-prefix(i,"self_attn.k_proj"),32,64,add(i,3)),nlf-projection(nll-prefix(i,"self_attn.v_proj"),32,64,add(i,5)),nlf-projection(nll-prefix(i,"self_attn.o_proj"),64,64,add(i,7)),nam-buffer(nlf-repeat(64,1.0)),nlf-projection(nll-prefix(i,"mlp.gate_proj"),64,64,add(i,9)),nlf-projection(nll-prefix(i,"mlp.up_proj"),64,64,add(i,11)),nlf-projection(nll-prefix(i,"mlp.down_proj"),64,64,add(i,13)));
+  def nlf-freqs(i) = if ge(i,16) then list() else cons(div(1.0,math_pow(10000.0,div(i,16.0))),nlf-freqs(add(i,1)));
+  def nlf-model() = list(list(64,64,2,1,32,64,2,0.00001,64,1024,nam-buffer(nlf-freqs(0))),list(nlf-layer(0),nlf-layer(1)),nlf-view(64,64,23),nam-buffer(nlf-repeat(64,1.0)),"fixture",list());
+  def nlf-loss(m,c) {
+   let r = nll-forward(m,c,list(1,5,9,12),0,1);
+   let loss = nlb-loss(m,r,list(5,9,12,17));
+   let done = nll-forward-close(r);
+   loss;
+  }
+  def nlf-largest(xs,i,best,value) = if nil?(xs) then best else if gt(abs(head(xs)),value) then nlf-largest(tail(xs),add(i,1),i,abs(head(xs))) else nlf-largest(tail(xs),add(i,1),best,value);
+  def nlf-perturb(h,i,value) = if eq(metal_buf_write(h,mul(i,4),md-le32(md-f32-bits(value))),4) then 1 else form_error("fixture perturbation write refused");
+  def nlf-check-factor(m,c,row,factor) {
+   let pair = head(row); let h = nth(pair,factor); let gh = nth(row,factor);
+   let n = if eq(factor,1) then mul(nth(pair,3),nth(pair,4)) else mul(nth(pair,4),nth(pair,5));
+   let grad = nam-read(gh,n); let i = nlf-largest(grad,0,0,-1.0);
+   let analytical = nth(grad,i); let old = head(nam-read-bytes(metal_buf_read(h,mul(i,4),4),1));
+   let plus = nlf-perturb(h,i,add(old,0.003)); let high = nlf-loss(m,c);
+   let minus = nlf-perturb(h,i,sub(old,0.003)); let low = nlf-loss(m,c);
+   let restore = nlf-perturb(h,i,old);
+   let numeric = div(sub(high,low),0.006);
+   let error = abs(sub(analytical,numeric));
+   let pass = lt(error,add(0.0002,mul(0.03,abs(numeric))));
+   let evidence = print(list(head(pair),factor,i,analytical,numeric,error,pass));
+   pass;
+  }
+  def nlf-check-pairs(m,c,state) = if nil?(state) then 0 else add(add(nlf-check-factor(m,c,head(state),1),nlf-check-factor(m,c,head(state),2)),nlf-check-pairs(m,c,tail(state)));
+ }
+ 0;
+}
