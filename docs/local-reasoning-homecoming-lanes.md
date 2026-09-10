@@ -79,7 +79,7 @@ returns as a typed observation into the same original-ID/KV session, and the
 session continues (`form-recipe-exec-token-band` 1048575 and
 `form-cli-recipe-exec-cursor-band` 33554431; `form-recipe-exec-token-live-band`
 needs the resident model and declares its own). That is one live
-affine Metal thought, not yet CPU/MLX parity or a recursive model-authored
+affine Metal thought, not yet CPU parity or a recursive model-authored
 recipe-birth run.
 
 ## Effective Form reasoning in practice

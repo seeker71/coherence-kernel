@@ -101,7 +101,7 @@ the runtime touches no Go, Rust, Python, or TypeScript. The same fresh-checkout 
 | `surface/` | the minimal host-OS / resource surface |
 | `grammars/` | the BMF cursor + grammars-as-data — the body's tongue (incl. `form-eval`: source runs straight off the cursor) |
 | `form/form-stdlib/` | the portable Form stdlib body and sole agent surface: canonical `form-cli-*.fk`, the BML authority, HTTP, serialization, ports, tools, satsang, and focused bands — among them `core-lexicon.fk`, a 64-word dictionary whose every defining sentence stays inside the 64 plus twelve counted glue words, a closure it checks on itself |
-| `form/native/` | the Metal and MLX carriers and the Form-native model lane (the Qwen3.8-27B handle) |
+| `form/native/` | the Metal carrier and the Form-native model lane (the Qwen3.8-27B handle) |
 | `model/` | the form-native model execution body and the JIT family |
 | `observe/` · `learn/` · `ingest/` · `presence/` | the organs of a self-aware mind |
 | `docs/live-dynamic-diagnostics.md` | bidirectional framebuffer usage: observe → control → actuate → re-observe |
