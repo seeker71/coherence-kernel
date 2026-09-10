@@ -166,7 +166,11 @@ section [form.bml] {
         // kinds and a reader needs no second grammar. For rhythm the measure is
         // silence in milliseconds; for effort it is microseconds of CPU per
         // millisecond of wall, and the bound is one core.
-        def fgv-effort-finding(x) = list(FGVFindingSchema(), str_concat("kernel.", int_to_str(fgv-effort-pid(x))), fgv-effort-state(x), fgv-effort-latest(x), fgv-saturation(), fgv-effort-samples(x), fgv-effort-busiest(x));
+        // the bound a finding reports is the line IN FORCE for this reading: the
+        // entering line when the kernel is not saturated, the holding line when
+        // it is. A reader that sees the word can see what it would take to lose it.
+        def fgv-effort-line(x) = if str_eq(fgv-effort-state(x), "saturated") then fgv-release() else fgv-saturation();
+        def fgv-effort-finding(x) = list(FGVFindingSchema(), str_concat("kernel.", int_to_str(fgv-effort-pid(x))), fgv-effort-state(x), fgv-effort-latest(x), fgv-effort-line(x), fgv-effort-samples(x), fgv-effort-busiest(x));
         def fgv-effort-findings(xs) = if eq(len(xs), 0) then list() else cons(fgv-effort-finding(head(xs)), fgv-effort-findings(tail(xs)));
         def fgv-rows(es, xs, now) = cons(fgv-body-row(es, now), fgv-attention-rows(append(fgv-findings(fgv-needing-attention(es, now), now), fgv-effort-findings(fgv-labouring(xs))), now, 0));
         def fgv-publish(root, es, xs, now) = fgtm-publish-snapshot(root, FGVPublisher(), now, fgv-rows(es, xs, now));
@@ -219,14 +223,40 @@ section [form.bml] {
         // blind to a steady sickness. Both readings are kept, and they are
         // different questions: saturated asks what the machine can still give,
         // labouring asks what this kernel used to need.
+        //
+        // An absolute line, though, is the one place a reading can flicker, and
+        // this one did. Measured 2026-09-10 over 150 one-second reads of the
+        // published vitals frame: 203 changes of the saturation word, and eight
+        // of them were a kernel hovering rather than a kernel moving.
+        // `./fkwu observe/form-cli-heal-eval-case.bml` sat at nine tenths of a
+        // core and its word flipped between saturated and labouring while its
+        // rate moved by 6, 9, 14, 16, 22, 23, 25 and 27 microseconds per
+        // millisecond around a line at 937. The other 195 changes were real
+        // crossings — a kernel going from nothing to seven or twenty thousand —
+        // and a reading with memory leaves those alone.
+        //
+        // So leaving saturation asks more than entering it, the way rcf-settle
+        // reads a phase in form-stdlib/bml/rag-crossfade.bml. The second number
+        // is not a new one: it is the SAME sixteenth of a core the entering
+        // allowance already spends, spent once more on the way out. Fourteen
+        // sixteenths is 875, and the widest hover witnessed was 27 — the band
+        // between the two lines is 62, so every measured flicker is damped with
+        // room over, and a kernel that actually stops working still falls
+        // through it in one reading. A state that flips at every read is not a
+        // state.
         field FGVLivePageWords = 21;
         field FGVCpuWord = 18;
         field FGVCoreUs = 1000;
         field FGVYieldSixteenths = 15;
+        field FGVReleaseSixteenths = 14;
         field FGVEffortFactor = 3;
         field FGVLeastEfforts = 2;
-        // one kernel's effort, as it teaches it
+        // one kernel's effort, as it teaches it. A record that has said a word
+        // before carries it as a ninth cell; one that never has is honest about
+        // having no memory, and reads exactly as this door read before it had any.
         def fgv-effort(pid, cpuUs, stamp, samples, calmest, busiest, latest) = list("form-glass-effort-v1", pid, cpuUs, stamp, samples, calmest, busiest, latest);
+        def fgv-effort-word(x) = if lt(len(x), 9) then "" else nth(x, 8);
+        def fgv-effort-remember(was, x) = append(x, list(fgv-settled-word(was, x)));
         def fgv-effort-pid(x) = nth(x, 1);
         def fgv-effort-cpu(x) = nth(x, 2);
         def fgv-effort-stamp(x) = nth(x, 3);
@@ -235,7 +265,10 @@ section [form.bml] {
         def fgv-effort-busiest(x) = nth(x, 6);
         def fgv-effort-latest(x) = nth(x, 7);
         def fgv-saturation() = div(mul(FGVCoreUs(), FGVYieldSixteenths()), 16);
+        // the line to ENTER saturation, and the lower one that still HOLDS it
+        def fgv-release() = div(mul(FGVCoreUs(), FGVReleaseSixteenths()), 16);
         def fgv-saturated?(x) = if lt(fgv-effort-samples(x), 1) then 0 else if ge(fgv-effort-latest(x), fgv-saturation()) then 1 else 0;
+        def fgv-holding?(x) = if lt(fgv-effort-samples(x), 1) then 0 else if ge(fgv-effort-latest(x), fgv-release()) then 1 else 0;
         def fgv-page-word(page, k) = if lt(len(page), FGVLivePageWords()) then -1 else nth(page, k);
         def fgv-page-of(pid) = kernel_live(pid);
         // us of CPU per ms of wall: 1000 is one core wholly consumed
@@ -254,7 +287,7 @@ section [form.bml] {
         def fgv-effort-fresh(pid, cpu, stamp) = fgv-effort(pid, cpu, stamp, 0, 0, 0, 0);
         def fgv-effort-step(held, pid, page, now) {
             let cpu = fgv-page-word(page, FGVCpuWord());
-            if lt(cpu, 0) then held else if eq(len(held), 0) then fgv-effort-fresh(pid, cpu, now) else fgv-effort-seen(held, pid, cpu, now);
+            if lt(cpu, 0) then held else if eq(len(held), 0) then fgv-effort-remember("", fgv-effort-fresh(pid, cpu, now)) else fgv-effort-remember(fgv-effort-word(held), fgv-effort-seen(held, pid, cpu, now));
         }
         def fgv-effort-find(xs, pid) = if eq(len(xs), 0) then list() else if eq(fgv-effort-pid(head(xs)), pid) then head(xs) else fgv-effort-find(tail(xs), pid);
         def fgv-efforts-of(xs, pids, now) = if eq(len(pids), 0) then list() else fgv-efforts-cons(fgv-effort-step(fgv-effort-find(xs, head(pids)), head(pids), fgv-page-of(head(pids)), now), fgv-efforts-of(xs, tail(pids), now));
@@ -268,7 +301,13 @@ section [form.bml] {
         // efforts seen nothing has been taught, and "unlearned" says so rather
         // than guessing -- but saturation needs only ONE reading, because a core
         // spent is a core spent.
-        def fgv-effort-state(x) = if eq(fgv-saturated?(x), 1) then "saturated" else if lt(fgv-effort-samples(x), FGVLeastEfforts()) then "unlearned" else if gt(fgv-effort-busiest(x), mul(FGVEffortFactor(), add(fgv-effort-calmest(x), 1))) then "labouring" else "easy";
+        def fgv-effort-plain(x) = if lt(fgv-effort-samples(x), FGVLeastEfforts()) then "unlearned" else if gt(fgv-effort-busiest(x), mul(FGVEffortFactor(), add(fgv-effort-calmest(x), 1))) then "labouring" else "easy";
+        def fgv-entering-word(x) = if eq(fgv-saturated?(x), 1) then "saturated" else fgv-effort-plain(x);
+        def fgv-holding-word(x) = if eq(fgv-holding?(x), 1) then "saturated" else fgv-effort-plain(x);
+        // the reading with memory: a record that already said "saturated" is held
+        // to the lower line; every other record enters at the full one
+        def fgv-settled-word(was, x) = if str_eq(was, "saturated") then fgv-holding-word(x) else fgv-entering-word(x);
+        def fgv-effort-state(x) = if ge(len(x), 9) then fgv-effort-word(x) else fgv-settled-word("", x);
         def fgv-effort-attention?(x) = if str_eq(fgv-effort-state(x), "saturated") then 1 else if str_eq(fgv-effort-state(x), "labouring") then 1 else 0;
         def fgv-labouring(xs) = if eq(len(xs), 0) then list() else if eq(fgv-effort-attention?(head(xs)), 1) then cons(head(xs), fgv-labouring(tail(xs))) else fgv-labouring(tail(xs));
 

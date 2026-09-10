@@ -65,16 +65,26 @@
 ;
 ; EFFECTFUL TOP-LEVEL CELLS
 ;   fkwu currently has no compile-only door. `pf-fresh` therefore has to run a
-;   .fk to obtain fresh whole-chain diagnostics. A top-level cell that owns a
-;   model, network listener, mutation, or other external effect must carry:
+;   cell to obtain fresh whole-chain diagnostics. A top-level cell that owns a
+;   model, network listener, mutation, or other external effect carries the
+;   marker on a line of its own, in whichever tongue it is written:
 ;
-;       ; preflight-exec: forbidden
+;       ; preflight-exec: forbidden          (direct source)
+;       // preflight-exec: forbidden         (high grammar)
 ;
 ;   Preflight then preserves the source and refuses the run visibly. This is a
 ;   smaller honest boundary than calling execution "preflight" and changing
 ;   the world while claiming to inspect it.
 ;
-; preludes: form-stdlib/core.fk
+; WHICH LANE THE UNIT TRAVELS
+;   .bml, and .fk carrying a `section [` block, lower through the body's own
+;   compiler and cache under a different name than a direct-source .fk does.
+;   That reading — kind, cache paths, brace surface, marker — lives in high
+;   grammar next door: form/form-stdlib/bml/preflight-source.bml, four-way in
+;   form/form-stdlib/tests/preflight-source-band.bml. This cell asks it and
+;   spends its own words on the arms and the diagnostics.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bml/preflight-source.bml
 
 (do
     (defn pf-cat2 (a b) (str_concat a b))
@@ -101,40 +111,28 @@
                 (str_concat (substring s 0 i)
                     (str_concat v (substring s (add i (str_len mark)) (str_len s)))))))
 
-    ;; Fresh artifact removal is defined only for .fk source. `pf-sub` returns
-    ;; its input unchanged when the mark is absent; using that result as a
-    ;; removal path deleted a .bml source while trying to remove its .fkb and
-    ;; .sym on 2026-08-26. Unsupported source is now a visible refusal and the
-    ;; source remains byte-identical. A BML-aware compiler pass can be added as
-    ;; its own observed lane; it must never be guessed through the .fk lane.
-    (defn pf-ends-with? (s suffix)
-        (do (let sn (str_len s))
-            (let xn (str_len suffix))
-            (if (lt sn xn) 0
-                (if (str_eq (substring s (sub sn xn) sn) suffix) 1 0))))
-    (defn pf-fresh-supported? (path) (pf-ends-with? path ".fk"))
+    ;; A removal path is never DERIVED from the source path by substitution.
+    ;; `pf-sub` returns its input unchanged when the mark is absent, and that
+    ;; unchanged input, used as a removal path, deleted a .bml source on
+    ;; 2026-08-26 while preflight believed it was clearing a .fkb. The unit's
+    ;; artifacts are read from `pfs-artifacts` as a list, and an unsupported
+    ;; kind answers with an EMPTY list — the source cannot be reached through
+    ;; a fold over what is not in it.
+    (defn pf-text (path) (if (eq (fs_exists path) 0) "" (read_file path)))
+    (defn pf-kind (path) (pfs-kind path (pf-text path)))
+    (defn pf-fresh-supported? (path) (pfs-supported? path (pf-text path)))
     (defn pf-unsupported-mark () "[preflight-unsupported-source-kind]")
     (defn pf-unsupported? (out)
         (if (ge (str_find out (pf-unsupported-mark) 0) 0) 1 0))
     (defn pf-effect-refused-mark () "[preflight-effect-refused]")
     (defn pf-effect-refused? (out)
         (if (ge (str_find out (pf-effect-refused-mark) 0) 0) 1 0))
-    (defn pf-effect-forbidden? (path)
-        (if (eq (fs_exists path) 0) 0
-            (pf-effect-marker? (read_file path) 0)))
-    (defn pf-effect-space (text at)
-        (if (ge at (str_len text)) at
-            (if (or (eq (str_byte_at text at) 32) (or (eq (str_byte_at text at) 9) (eq (str_byte_at text at) 13)))
-                (pf-effect-space text (add at 1)) at)))
-    (defn pf-effect-marker? (text at)
-        (if (ge at (str_len text)) 0
-            (do (let start (pf-effect-space text at))
-                (let marker "; preflight-exec: forbidden")
-                (let end (pf-effect-space text (add start (str_len marker))))
-                (let next (str_find text "\n" at))
-                (if (and (str_eq (substring text start (add start (str_len marker))) marker)
-                         (or (ge end (str_len text)) (eq (str_byte_at text end) 10))) 1
-                    (if (lt next 0) 0 (pf-effect-marker? text (add next 1)))))))
+    ;; A marker is a complete comment line, never quoted test data — and it
+    ;; answers to both tongues, because a writer reaching for `//` in high
+    ;; grammar was previously watching preflight execute the very effect the
+    ;; line asked it to leave alone.
+    (defn pf-effect-forbidden? (path) (pfs-effect-marked? (pf-text path)))
+    (defn pf-effect-marker? (text at) (pfs-effect-scan text at))
 
     (defn pf-dir () (do (fs_mkdir (str_concat (temp_dir) "/preflight"))
                         (str_concat (temp_dir) "/preflight")))
@@ -234,15 +232,29 @@
 
     ;; ── a compile whose detail no cache can replace ─────────────────
     ;; The artifacts are removed first ON PURPOSE. A warm run reports a tally
-    ;; and drops the name and the line, and a tally is not an insight.
+    ;; and drops the name and the line, and a tally is not an insight. Which
+    ;; artifacts those are is the unit's own answer, not a guess from its
+    ;; suffix: a lowering unit hangs its cache off the WHOLE path
+    ;; (x.bml.fkb, x.bml.sym, x.bml.lowfk) and a direct-source .fk replaces
+    ;; its suffix (x.fkb, x.sym). preflight computed only the second shape,
+    ;; so on every .bml — and on every .fk carrying a `section [` block — it
+    ;; removed a file that was never there and read today's error through
+    ;; yesterday's image. Witnessed 2026-09-10 on a sectioned .fk holding one
+    ;; unresolved call: warm, the page said `unresolved 0`.
+    ;;
+    ;; The lowering memo goes too. It is keyed content-true (raw bytes plus a
+    ;; digest of the floor compiler's own chain) and costs one spawn to
+    ;; rebuild — 0.1s measured on a 19 KB unit — which is a small price for a
+    ;; page with nothing cached anywhere between the reader and today.
+    (defn pf-remove-all (xs)
+        (if (eq (len xs) 0) 0 (do (fs_remove (head xs)) (pf-remove-all (tail xs)))))
     (defn pf-fresh (path)
         (if (eq (pf-fresh-supported? path) 0)
             (pf-cat (list (pf-unsupported-mark) " source-preserved path=" path))
             (if (eq (pf-effect-forbidden? path) 1)
                 (pf-cat (list (pf-effect-refused-mark)
                     " effectful-execution-refused source-preserved path=" path))
-                (do (fs_remove (pf-sub path ".fk" ".fkb"))
-                    (fs_remove (pf-sub path ".fk" ".sym"))
+                (do (pf-remove-all (pfs-artifacts path (pf-text path)))
                     (pf-run-checked (str_concat "./fkwu " path))))))
 
     ;; ── the unresolved names in that output ─────────────────────────
@@ -287,8 +299,34 @@
                         (pf-bal-loop s (add i 1) n depth 0)))))))))
     (defn pf-eol (s i n)
         (if (ge i n) n (if (str_eq (substring s i (add i 1)) "\n") i (pf-eol s (add i 1) n))))
+    ;; A surface is read as itself. Held against a brace surface this walker is
+    ;; not wrong so much as absent: `//` is not a comment to it, `{` is not a
+    ;; delimiter, and `;` — a statement TERMINATOR in high grammar — makes it
+    ;; skip the rest of every line of real code. It answered depth 0 on
+    ;; grammars/bml.fk by walking past most of the file. So a unit that lowers
+    ;; is read by the brace-surface walker next door, block by block, and a
+    ;; direct-source .fk keeps this one. A unit carrying both — a .fk with a
+    ;; `section [` block — gets both readings, the .fk surface up to its first
+    ;; block and the brace surface inside every block it has.
     (defn pf-balance (path)
-        (do (let s (read_file path)) (pf-bal-loop s 0 (str_len s) 0 0)))
+        (do (let s (pf-text path)) (pf-bal-loop s 0 (str_len s) 0 0)))
+    (defn pf-brace-balance (path) (pfs-balance (pf-text path)))
+    ;; The one row a reader reads: "" when the surface closes, otherwise the
+    ;; delimiter family that stayed open and how deep.
+    (defn pf-open-text (text kind)
+        (do (let head (if (str_eq kind "lowering-fk")
+                          (pf-bal-loop text 0 (pfs-body-start text) 0 0)
+                          (if (str_eq kind "fk") (pf-bal-loop text 0 (str_len text) 0 0) 0)))
+            (if (not (eq head 0))
+                (pf-cat (list (if (str_eq kind "fk") "parens, depth "
+                                  "parens outside the block, depth ")
+                              (int_to_str head)))
+                (do (let brace (pfs-balance text))
+                    (if (eq (pfs-closed? brace) 1) ""
+                        (pf-cat (list (pfs-open-name brace) ", depth "
+                                      (int_to_str (pfs-open-depth brace)))))))))
+    (defn pf-open (path)
+        (do (let text (pf-text path)) (pf-open-text text (pfs-kind path text))))
 
     ;; ── counts a reader actually wants ──────────────────────────────
     (defn pf-count-loop (s mark from n)
@@ -355,19 +393,36 @@
         (if (eq (len ns) 0) ""
             (pf-cat (list "    " (head ns) "  ->  " (pf-classify (head ns)) (pf-nl)
                           (pf-lines-loop (tail ns))))))
-    (defn pf-report (path)
-        (do (let b (pf-balance path))
+    (defn pf-scan (path)
+        (do (let text (pf-text path))
+            (let kind (pfs-kind path text))
+            (let open (pf-open-text text kind))
             (let out (pf-fresh path))
             (let ns (pf-unresolved out))
-            (pf-cat (list
+            (list (pf-page path kind open out ns) (pf-readable out ns))))
+    ;; ONE reading, TWO answers: the page a person reads, and the one bit a
+    ;; script can act on. They come from a single fresh compile on purpose —
+    ;; asking twice would pay the compile twice and could answer differently.
+    (defn pf-readable (out ns)
+        (if (eq (pf-unsupported? out) 1) 0
+            (if (eq (pf-effect-refused? out) 1) 0
+                (if (eq (pf-errors out) 0) (if (eq (len ns) 0) 1 0) 0))))
+    (defn pf-report (path) (nth (pf-scan path) 0))
+    (defn pf-page (path kind open out ns)
+        (do (pf-cat (list
                 "preflight " path (pf-nl)
-                "  parens        " (if (eq b 0) "balanced" (pf-cat (list "UNBALANCED, depth " (int_to_str b)))) (pf-nl)
+                "  source-kind   " kind " — " (pfs-kind-note kind) (pf-nl)
+                ;; No surface, no reading. A source with no compile lane has
+                ;; nothing this walker could call balanced, and printing the
+                ;; word anyway would be a green with nothing behind it.
+                (if (str_eq kind "unsupported") ""
+                    (pf-cat (list
+                        (if (str_eq kind "fk") "  parens        " "  delimiters    ")
+                        (if (str_eq open "") "balanced" (pf-cat (list "UNBALANCED " open)))
+                        (pf-nl))))
                 "  errors        " (int_to_str (pf-errors out)) (pf-nl)
                 "  warnings      " (int_to_str (pf-warnings out)) (pf-nl)
                 "  unresolved    " (int_to_str (len ns)) (pf-nl)
-                (if (eq (pf-unsupported? out) 1)
-                    "  source-kind   unsupported — source preserved; fresh compile currently accepts .fk only\n"
-                    "")
                 (if (eq (pf-effect-refused? out) 1)
                     "  execution     effectful — source preserved; fkwu has no compile-only carrier\n"
                     "")
@@ -392,11 +447,11 @@
                 ;; word instead of being folded into "clean".
                 "  chain         "
                 (if (eq (pf-unsupported? out) 1)
-                    "UNSUPPORTED SOURCE KIND — no compile verdict; source preserved"
+                    "UNSUPPORTED SOURCE KIND — no compile verdict; source preserved. The compile lanes are .fk and the lowering lane (.bml, or a .fk carrying a `section [` block)"
                 (if (eq (pf-effect-refused? out) 1)
                     "EFFECTFUL EXECUTION REFUSED — no compile verdict until fkwu exposes a compile-only carrier"
                     (if (eq (pf-errors out) 0)
-                        (if (eq (len (pf-unresolved out)) 0)
+                        (if (eq (len ns) 0)
                             "clean — no errors, no unresolved calls; a verdict from it can be read"
                             "UNRESOLVED CALLS — the chain compiles, but each unresolved name answers `nothing`; every bit that touches one reads 0, so a verdict from it is partial, not a pass")
                         "CARRIED ERRORS — any verdict from this chain is a fold over `nothing`, not a pass")))

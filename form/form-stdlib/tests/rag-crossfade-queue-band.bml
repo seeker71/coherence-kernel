@@ -1,0 +1,117 @@
+; rag-crossfade-queue-band.bml — the background breath made to survive its breather: a journal
+; folded forward, a claim that is a line rather than a frame, and a death that costs an attempt.
+;
+; preludes: form-stdlib/bml/rag-crossfade-queue.bml
+;
+; The queue in rag-crossfade.bml is a list threaded through the answer, so a worker killed
+; between the claim and the encode takes the batch with it. Here the same movements are events
+; appended to a journal, and every reading is the fold over what is written. Nothing below asks
+; the disk anything — the disk is rag-crossfade-spool.bml's half of the seam. This band asks
+; whether the arithmetic under it survives a death, and it walks the death as data: a claim whose
+; owner is named gone, with a second owner still breathing beside it.
+;
+; The fixture for the seam is the crossfade itself, three documents and an ear that answers two:
+;   index  a [10 20 30]  b [10 20 32]  c [50 50 50]   source query [10 20 30] -> a b c
+;   ear    a [0 0 10]    b [0 0 40]                    c is absent — the ear cannot answer it
+; So a cold answer queues all three, and one breath releases two and fails the third.
+;
+; Verdict 1048575 when every claim lands:
+;   1       enqueue dedupes at the source: four asks write three lines, three pending rows in
+;           enqueue order, depth 3 — a repeated ask costs no bytes at all
+;   2       a claim is bounded and stamped: two of three claimed with their owner on the row,
+;           the third still pending
+;   4       the claimer reads back exactly what it won; rcq-owners names each owner once
+;   8       release: done, depth falls, the attempts the row already spent are kept
+;   16      a failure below the ceiling returns the row to pending at attempts 1 and frees its owner
+;   32      the ceiling: three failures leave the row dead at attempts 3, and a dead row draws no
+;           further claim
+;   64      a death recovers: an abandoned claim becomes a fail event, so the id is pending again
+;           and the recovery is itself written rather than inferred
+;   128     recovery is scoped by who is gone: a claim whose owner still breathes is untouched
+;   256     recovery is idempotent — the second open over the recovered state owes nothing
+;   512     a death costs an attempt, so three deaths reach dead: a document that kills its worker
+;           every time stops asking, which is the whole reason a ceiling exists
+;   1024    the codec round-trips: render then parse is the same events and the same folded state
+;   2048    an append torn by a death is dropped whole — the complete lines fold, the fragment
+;           never becomes a half-id
+;   4096    a malformed line is skipped and the lines around it still fold
+;   8192    an id may hold spaces and survives the line; an id holding a newline does not, which is
+;           the one thing the line format cannot carry and says so by losing it
+;   16384   done is terminal: a later claim or fail does not move it
+;   32768   a release lands on a dead row — work that actually finished is finished, whatever the
+;           count said on the way
+;   65536   the journal settles a contest: two owners reaching for one id, the first line's owner
+;           holds it and the second is a no-op; no lock, no lease
+;   131072  the seam with rag-crossfade.bml: an answer's leftover queue becomes enqueue events, a
+;           breath's done becomes releases and its unanswered becomes fails
+;   262144  an id nobody enqueued reads absent, at zero attempts and no owner
+;   524288  the rule seal reads 402001502
+;   1048576 compaction: a journal of every movement collapses to the shortest history that folds
+;           to the same rows — a churned state (p survived two deaths, q is done, r is claimed,
+;           s is dead) took 14 events and compacts to 11, rcq-compacts? holds, and the short
+;           journal survives the line codec too; an empty state compacts to nothing
+
+section [form.bml] {
+    def rqb-c() = rcq-ceiling();
+    def rqb-bit(ok, weight) = if ok then weight else 0;
+    def rqb-fresh() = rcq-state(rcq-enqueue-events(list(), list("a", "b", "c")), rqb-c());
+    def rqb-index() = list(rag-entry("a", list(10, 20, 30)), rag-entry("b", list(10, 20, 32)), rag-entry("c", list(50, 50, 50)));
+    def rqb-ear() = list(rag-entry("a", list(0, 0, 10)), rag-entry("b", list(0, 0, 40)));
+    def rqb-contract() = rcf-contract("q", "r1", 3, "mean");
+    def rqb-torn() = str_concat("e - a", str_concat(rcq-newline(), str_concat("e - b", str_concat(rcq-newline(), str_concat("c 111 a", str_concat(rcq-newline(), "e - par"))))));
+    def rqb-bad() = str_concat("e - a", str_concat(rcq-newline(), str_concat("nospace", str_concat(rcq-newline(), str_concat("e  b", str_concat(rcq-newline(), str_concat("e - c", rcq-newline())))))));
+    def rqb-newline-id() = str_concat("a", str_concat(rcq-newline(), "b"));
+    def rqb-score() {
+        let seeded = rqb-fresh();
+        let two = rcq-fold(seeded, rcq-claim-events(seeded, 2, "111"), rqb-c());
+        let freed = rcq-fold(two, rcq-release-events(list("a")), rqb-c());
+        let failed = rcq-fold(two, rcq-fail-events(list("a")), rqb-c());
+        let doomed = rcq-fold(failed, rcq-append(rcq-fail-events(list("a")), rcq-fail-events(list("a"))), rqb-c());
+        let split = rcq-fold(rcq-fold(seeded, rcq-claim-events(seeded, 1, "111"), rqb-c()), list(rcq-event(rcq-op-claim(), "222", "b")), rqb-c());
+        let gone = rcq-recover-events(split, list("111"));
+        let reopened = rcq-fold(split, gone, rqb-c());
+        let killed1 = rcq-fold(seeded, rcq-append(rcq-claim-events(seeded, 1, "p1"), rcq-fail-events(list("a"))), rqb-c());
+        let killed2 = rcq-fold(killed1, rcq-append(rcq-claim-events(killed1, 1, "p2"), rcq-fail-events(list("a"))), rqb-c());
+        let killed3 = rcq-fold(killed2, rcq-append(rcq-claim-events(killed2, 1, "p3"), rcq-fail-events(list("a"))), rqb-c());
+        let journal = rcq-append(rcq-enqueue-events(list(), list("a", "b", "c")), rcq-claim-events(seeded, 2, "111"));
+        let text = rcq-render-all(journal);
+        let spacey = rcq-parse(rcq-render-all(rcq-enqueue-events(list(), list("an id with spaces"))));
+        let severed = rcq-parse(rcq-render-all(list(rcq-event(rcq-op-enqueue(), rcq-no-owner(), rqb-newline-id()))));
+        let settled = rcq-fold(freed, rcq-append(rcq-claim-events(freed, 3, "9"), rcq-fail-events(list("a"))), rqb-c());
+        let revived = rcq-fold(doomed, rcq-release-events(list("a")), rqb-c());
+        let contest = rcq-fold(seeded, list(rcq-event(rcq-op-claim(), "111", "a"), rcq-event(rcq-op-claim(), "222", "a")), rqb-c());
+        let answer = rcf-serve(list(10, 20, 30), list(0, 0, 10), rqb-index(), list(), rqb-contract(), rqb-ear(), 3, 0, list());
+        let owed = rcq-answer-events(list(), answer);
+        let queued = rcq-state(owed, rqb-c());
+        let working = rcq-fold(queued, rcq-claim-events(queued, 3, "w"), rqb-c());
+        let breath = rcf-materialize(list(), rqb-contract(), rqb-ear(), rcq-claimed-ids(working), 5);
+        let after = rcq-fold(working, rcq-breath-events(breath), rqb-c());
+        let churn-events = rcq-append(rcq-enqueue-events(list(), list("p", "q", "r", "s")), list(rcq-event(rcq-op-claim(), "1", "p"), rcq-event(rcq-op-fail(), rcq-no-owner(), "p"), rcq-event(rcq-op-claim(), "2", "p"), rcq-event(rcq-op-fail(), rcq-no-owner(), "p"), rcq-event(rcq-op-claim(), "3", "q"), rcq-event(rcq-op-release(), rcq-no-owner(), "q"), rcq-event(rcq-op-claim(), "77", "r"), rcq-event(rcq-op-fail(), rcq-no-owner(), "s"), rcq-event(rcq-op-fail(), rcq-no-owner(), "s"), rcq-event(rcq-op-fail(), rcq-no-owner(), "s")));
+        let churn = rcq-state(churn-events, rqb-c());
+        let short = rcq-compact-events(churn);
+        sum(list(
+            rqb-bit(and(eq(len(rcq-enqueue-events(list(), list("a", "b", "a", "c"))), 3), and(rcf-same?(rcq-pending-ids(seeded), list("a", "b", "c")), eq(rcq-depth(seeded), 3))), 1),
+            rqb-bit(and(rcf-same?(rcq-claimed-ids(two), list("a", "b")), and(rcf-same?(rcq-pending-ids(two), list("c")), and(str_eq(rcq-owner(two, "a"), "111"), str_eq(rcq-status(two, "c"), rcq-pending())))), 2),
+            rqb-bit(and(rcf-same?(rcq-held(two, "111"), list("a", "b")), and(eq(len(rcq-held(two, "222")), 0), rcf-same?(rcq-owners(two), list("111")))), 4),
+            rqb-bit(and(str_eq(rcq-status(freed, "a"), rcq-done()), and(rcf-same?(rcq-done-ids(freed), list("a")), and(eq(rcq-depth(freed), 1), eq(rcq-attempts(freed, "a"), 0)))), 8),
+            rqb-bit(and(str_eq(rcq-status(failed, "a"), rcq-pending()), and(eq(rcq-attempts(failed, "a"), 1), and(str_eq(rcq-owner(failed, "a"), rcq-no-owner()), rcf-same?(rcq-pending-ids(failed), list("a", "c"))))), 16),
+            rqb-bit(and(str_eq(rcq-status(doomed, "a"), rcq-dead()), and(eq(rcq-attempts(doomed, "a"), 3), and(rcf-same?(rcq-dead-ids(doomed), list("a")), eq(len(rcq-claim-events(doomed, 9, "9")), 1)))), 32),
+            rqb-bit(and(eq(len(gone), 1), and(str_eq(rcq-event-op(head(gone)), rcq-op-fail()), and(str_eq(rcq-event-id(head(gone)), "a"), and(str_eq(rcq-status(reopened, "a"), rcq-pending()), eq(rcq-attempts(reopened, "a"), 1))))), 64),
+            rqb-bit(and(rcf-same?(rcq-abandoned(split, list("111")), list("a")), and(str_eq(rcq-status(reopened, "b"), rcq-claimed()), and(str_eq(rcq-owner(reopened, "b"), "222"), rcf-same?(rcq-owners(split), list("111", "222"))))), 128),
+            rqb-bit(and(eq(len(rcq-recover-events(reopened, list("111"))), 0), eq(len(rcq-recover-events(seeded, list("111"))), 0)), 256),
+            rqb-bit(and(str_eq(rcq-status(killed1, "a"), rcq-pending()), and(str_eq(rcq-status(killed2, "a"), rcq-pending()), and(str_eq(rcq-status(killed3, "a"), rcq-dead()), eq(rcq-attempts(killed3, "a"), 3)))), 512),
+            rqb-bit(and(eq(len(rcq-parse(text)), len(journal)), and(str_eq(rcq-event-id(nth(rcq-parse(text), 3)), "a"), and(str_eq(rcq-event-owner(nth(rcq-parse(text), 3)), "111"), and(rcf-same?(rcq-pending-ids(rcq-replay(text, rqb-c())), rcq-pending-ids(two)), rcf-same?(rcq-claimed-ids(rcq-replay(text, rqb-c())), rcq-claimed-ids(two)))))), 1024),
+            rqb-bit(and(eq(len(rcq-parse(rqb-torn())), 3), and(rcf-same?(rcq-pending-ids(rcq-replay(rqb-torn(), rqb-c())), list("b")), eq(rcq-known?(rcq-replay(rqb-torn(), rqb-c()), "par"), 0))), 2048),
+            rqb-bit(and(eq(len(rcq-parse(rqb-bad())), 2), rcf-same?(rcq-pending-ids(rcq-replay(rqb-bad(), rqb-c())), list("a", "c"))), 4096),
+            rqb-bit(and(eq(len(spacey), 1), and(str_eq(rcq-event-id(head(spacey)), "an id with spaces"), and(eq(len(severed), 1), eq(str_eq(rcq-event-id(head(severed)), rqb-newline-id()), 0)))), 8192),
+            rqb-bit(and(str_eq(rcq-status(settled, "a"), rcq-done()), and(eq(rcq-attempts(settled, "a"), 0), str_eq(rcq-owner(settled, "a"), rcq-no-owner()))), 16384),
+            rqb-bit(and(str_eq(rcq-status(revived, "a"), rcq-done()), and(eq(rcq-attempts(revived, "a"), 3), eq(len(rcq-dead-ids(revived)), 0))), 32768),
+            rqb-bit(and(str_eq(rcq-owner(contest, "a"), "111"), and(rcf-same?(rcq-held(contest, "111"), list("a")), and(eq(len(rcq-held(contest, "222")), 0), eq(len(rcq-claimed-ids(contest)), 1)))), 65536),
+            rqb-bit(and(eq(len(owed), 3), and(rcf-same?(rcq-pending-ids(queued), rcf-answer-queue(answer)), and(rcf-same?(rcq-done-ids(after), list("a", "b")), and(rcf-same?(rcq-pending-ids(after), list("c")), eq(rcq-attempts(after, "c"), 1))))), 131072),
+            rqb-bit(and(str_eq(rcq-status(seeded, "nope"), rcq-absent()), and(eq(rcq-attempts(seeded, "nope"), 0), and(str_eq(rcq-owner(seeded, "nope"), rcq-no-owner()), eq(rcq-known?(seeded, "nope"), 0)))), 262144),
+            rqb-bit(eq(rcq-seal(), 402001502), 524288),
+            rqb-bit(and(eq(rcq-compacts?(churn, rqb-c()), 1), and(eq(len(churn-events), 14), and(eq(len(short), 11), and(eq(rcq-rows-same?(rcq-replay(rcq-render-all(short), rqb-c()), churn), 1), and(rcf-same?(rcq-pending-ids(churn), list("p")), and(rcf-same?(rcq-dead-ids(churn), list("s")), and(eq(rcq-attempts(churn, "p"), 2), and(str_eq(rcq-owner(churn, "r"), "77"), eq(len(rcq-compact-events(list())), 0))))))))), 1048576)
+        ));
+    }
+    rqb-score();
+}
