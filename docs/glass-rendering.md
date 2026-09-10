@@ -147,6 +147,25 @@ band (`form/form-stdlib/tests/form-glass-local-publication-band.fk`) returns 255
 
 ## Stable, locally owned transcripts
 
+The ear's shared-memory publisher is scoped to the native body working directory,
+the same boundary as its `.hearth` spool and owner lease. Two checkouts may each
+have a live ear, but neither can overwrite the other's transcript frame. Glass
+does not fall back to the old unscoped ear name. Machine-wide sensor names are
+unchanged. `fgsr-publisher-in("ear", bodyRoot)` names an explicit body's channel;
+ordinary producers and readers use `fgsr-publisher("ear")` in that body root.
+Run transcript inspection there too. This uses native `host_cwd`, not a process
+launched to discover the directory.
+
+The live reader retains its last coherent ear snapshot in the frame cache.
+Unchanged sequence words skip decoding, and an overlapping or invalid read cannot
+briefly remove its transcript slots. The original clock stays attached: missed
+publications become visibly stale, while a coherent sleep frame clears the text.
+
+`./fkwu form/form-stdlib/tests/form-glass-transcript-isolation-band.fk` returns
+4095. Two private native shared-memory gifts exercise competing publications,
+retained invalid reads, genuine new speech, stale evidence, explicit sleep,
+and mapping release. Tests never offer a living ear's name or capture speech.
+
 The ear retains one latest original and one translation per target language,
 not an ever-growing transcript history. A detected source-language change
 replaces the original slot. Quiet frames leave that text in place. A
