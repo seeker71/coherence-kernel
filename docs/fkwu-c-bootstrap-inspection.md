@@ -33,17 +33,19 @@ Generated evidence lives under:
 - `receipts/evidence/2026-09-10-c-bootstrap-inspection/metal-carrier-functions.txt`
 - `receipts/evidence/2026-09-10-c-bootstrap-inspection/metal-carrier-globals.txt`
 
-Latest audit result:
+Latest audit: [Form frame retirement and AI board receipt](../receipts/2026-09-10-frame-kernel-review.md).
+Its full per-function/per-global index is
+`receipts/evidence/2026-09-10-frame-kernel-review/c-bootstrap-audit.json`.
 
 ```text
-source lexical census: functions=649 declarations=657 directives=306 unresolved=0
+source lexical census: functions=642 declarations=657 directives=306 unresolved=0
 global names: 374
 static declaration units: 58
-active clang functions: 568
+active clang functions: 561
 active clang globals: 365
 missing functions: [__sigbits]
 missing globals: [fk_optab, fk_optab_n, fk_rwtab, fk_rwtab_n]
-written bytes: 722586
+written bytes: 718307
 ```
 
 `__sigbits` comes from the host signal headers in the active Clang AST. `fk_optab`, `fk_optab_n`, `fk_rwtab`, and `fk_rwtab_n` come from the generated opcode table header. The lexical audit intentionally sees all source branches; the Clang AST is the active Darwin build path.
@@ -52,11 +54,11 @@ written bytes: 722586
 
 The JSON locates every indexed symbol within 34 regions, anchored to named definitions. These cover values and intern pools; parsing, compilation and images; collection; host ABI and dispatch; CPU specialization; Metal; media; files; sockets and protocols; mapped stores; observation; and startup. Regions describe source organization. A declaration next to a region boundary still needs its own ownership reading; the declaration and references are retained for that purpose.
 
-The outline contains 649 function definitions and 395 file-scope global declarations, including repeated declarations and conditional branches. The audit also includes 58 local-static declaration units. Distinct names and active-platform counts are given above so those different populations remain visible.
+The original outline contains 649 function definitions. The current audit contains 642, after retiring seven C frame/sensing functions. Both contain 395 file-scope global declarations, including repeated declarations and conditional branches, and 58 local-static declaration units. Distinct names and active-platform counts are given above so those different populations remain visible.
 
 The separate Objective-C carrier inventory contains 33 function definitions and 40 file-scope global declarations, with zero unresolved lexical units. Its remaining process state owns device/queue admission, buffer and pipeline tables, open/submitted/shelved work, deadlines and counters. Form owns the new program descriptors, cache identity, thought recall and domain-specific policy selection. Moving those carrier globals into independently destroyable contexts remains necessary for full multi-context isolation.
 
-## Repairs landed in this pass
+## Initial bootstrap repair pass
 
 | Gap | Repair | Witness |
 | --- | --- | --- |
@@ -73,7 +75,7 @@ The separate Objective-C carrier inventory contains 33 function definitions and 
 | Metal timeouts could leave outstanding work invisible to later reads, writes, or frees. | Shelved timed-out command buffers, made outstanding work visible, made reads/writes drain as needed, and refused free while work still owns the buffer. | `form/form-stdlib/tests/metal-deadline-band.fk` returns `511`; `form/form-stdlib/tests/metal-door-band.fk` returns `15`. |
 | Windows-target syntax saw host-size prototype drift and missing common declarations. | Introduced a shared `fk_size_t` and common memory prototypes; moved `fk_melt_gen` declaration to common scope. | Windows syntax probe now reaches the remaining POSIX carrier boundary instead of allocator/prototype errors. |
 
-These repairs remove hard limits, repair ownership, and create Form-native witnesses. The seed nevertheless grows by 301 lines in this movement; the receipt names the replacement and caller-migration obligations before that temporary code can be retired. A smaller eventual carrier is the target, not a reduction already achieved by this patch.
+The initial repair pass grew the seed by 301 lines. The AI-board follow-up retires 243 seed lines and 11 handwritten adapter lines: BMP interpretation and synthetic sensing have left C. Form now validates bytes, supplies the reference fold, generates a GPU reduction in RAM, and owns real capture/job lifetimes. Tags 213/214 are permanently retired. The new receipt carries comparative timings, lifetime/error witnesses and the remaining synchronization limits.
 
 ## Remaining C-owned gaps and home paths
 

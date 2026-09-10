@@ -1,0 +1,33 @@
+; Page-aligned NoCopy allocation with exact unaligned/partial-file views.
+; Expected 255; both private and explicit shared writes retain file semantics.
+; preflight-exec: forbidden
+; preludes: form-stdlib/bml/metal-jit.bml
+(do
+ (let path (str_concat (temp_dir) (str_concat "/form-mapped-view-" (int_to_str (host_pid)))))
+ (write_file path "abcdef")
+ (let private (metal_buf_from_file path 1 4))
+ (let out (metal_buf_alloc 4))
+ (let program (mj-memory (mj-source "kernel void bytes(device const uchar *x [[buffer(0)]], device uchar *y [[buffer(1)]], uint i [[thread_position_in_grid]]) { y[i]=x[i]; }") "bytes"))
+ (let enqueued (mj-enqueue program (md-bind (list private out) (list)) 4))
+ (let fence (metal_submit))
+ (let waited (metal_fence_wait fence))
+ (let observed (metal_buf_read out 0 4))
+ (let changed (metal_buf_write private 0 "WXYZ"))
+ (let unchanged-file (read_file path))
+ (let private-free (metal_buf_free private))
+ (let output-free (metal_buf_free out))
+ (let shared (metal_buf_from_file path 1 -4))
+ (let shared-write (metal_buf_write shared 0 "WXYZ"))
+ (let shared-file (read_file path))
+ (let shared-free (metal_buf_free shared))
+ (let final-size (file_size path))
+ (fs_remove path)
+ (sum (list
+  (if (and (gt private 0) (gt shared 0)) 1 0)
+  (if (and (eq enqueued 1) (eq waited 1)) 2 0)
+  (if (str_eq observed "bcde") 4 0)
+  (if (and (eq changed 4) (str_eq unchanged-file "abcdef")) 8 0)
+  (if (and (eq shared-write 4) (str_eq shared-file "aWXYZf")) 16 0)
+  (if (and (eq private-free 1) (eq output-free 1)) 32 0)
+  (if (and (eq shared-free 1) (eq final-size 6)) 64 0)
+  (if (not (fs_exists path)) 128 0))))

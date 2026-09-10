@@ -1,0 +1,36 @@
+; Real GPU dependency chain. A timeout preserves the exact fence for retry.
+; Cancellation drains and discards; it cannot abort submitted Metal work.
+; Expected 511. This program tests the job protocol, not BMP interpretation.
+; preludes: form-stdlib/bml/frame-metal.bml form-stdlib/tests/frame-luma-fixture.fk
+(do
+ (let program (mj-memory (mj-source "kernel void spin(device const uchar *s [[buffer(0)]], device uint *o [[buffer(1)]], uint gid [[thread_position_in_grid]]) { uint a=0; for(uint i=0;i<8000000u;i++) a+=uint(s[a&3u]); o[gid]=a; }") "spin"))
+ (let version (fg-version-admit 1024 program))
+ (let owner (fg-open version))
+ (let before (fg-status-number (metal_status) "buffers"))
+ (let frame (fg-capture owner (flmb-bmp 1)))
+ (let previous (metal_deadline 1))
+ (let job (fg-submit owner frame (flm-default-policy)))
+ (let fence (record_get job "fence"))
+ (let first (fg-await owner job))
+ (let s1 (metal_status))
+ (let free-pending (fg-release owner job))
+ (let cancelled (fg-cancel owner job))
+ (let withheld (fg-result owner job))
+ (metal_deadline 15000)
+ (let second (fg-await owner job))
+ (let s2 (metal_status))
+ (let duplicate (fg-await owner job))
+ (let s3 (metal_status))
+ (let closed (fg-close owner))
+ (metal_deadline previous)
+ (sum (list
+  (if (str_eq first "pending") 1 0)
+  (if (and (eq (fg-status-number s1 "in_flight") 1) (eq (fg-status-number s1 "shelf") 0)) 2 0)
+  (if (and (eq (record_get job "fence") fence) (gt fence 0)) 4 0)
+  (if (and (eq free-pending 0) (nothing? withheld)) 8 0)
+  (if (and (eq cancelled 1) (str_eq second "cancelled")) 16 0)
+  (if (and (str_eq duplicate "unchanged") (nothing? (fg-result owner job))) 32 0)
+  (if (and (gt (fg-status-number s2 "gpu_busy_us_total") 0)
+           (eq (fg-status-number s2 "gpu_busy_us_total") (fg-status-number s3 "gpu_busy_us_total"))) 64 0)
+  (if (and (eq closed 1) (eq (fg-status-number (metal_status) "buffers") before)) 128 0)
+  (if (and (eq (fg-status-number s2 "in_flight") 0) (eq (fg-status-number s2 "shelf") 0)) 256 0))))

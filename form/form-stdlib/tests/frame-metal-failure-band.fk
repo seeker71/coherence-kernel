@@ -1,0 +1,45 @@
+; Refused enqueue retains output ownership until an explicit cleanup; closed
+; captures and physical stale generations cannot be reused for another job.
+; Expected 255. Intentional invalid handles exercise the effect boundary.
+; preludes: form-stdlib/bml/frame-metal.bml form-stdlib/tests/frame-luma-fixture.fk
+(do
+ (let version (fg-version 1024))
+ (let owner (fg-open version))
+ (let before (fg-status-number (metal_status) "buffers"))
+ (let frame (fg-capture owner (flmb-bmp 1)))
+ (let old-input (record_get frame "input"))
+ (let forged (record_new (make_nodeid 1 5 4 1) "owner" owner "state" "ready"))
+ (let refused (fg-submit owner forged (flm-default-policy)))
+ (let invalid-program (record_get version "program"))
+ ; API misuse is deliberate test input; no failed carrier call is a success.
+ (record_set version "program" (list 4294967295 "invalid" "" "" 0 ""))
+ (let failed (fg-submit owner frame (flm-default-policy)))
+ (let enqueue-status (metal_status))
+ (let kept (eq (record_get failed "released") 0))
+ (let indeterminate (str_eq (record_get failed "state") "indeterminate"))
+ (let result (fg-result owner failed))
+ (let drained (fg-drain owner))
+ (record_set version "program" invalid-program)
+ ; A stale input reaches buffer validation after the encoder has opened.
+ (record_set frame "input" 4294967295)
+ (let half-open (fg-submit owner frame (flm-default-policy)))
+ (let half-status (metal_status))
+ (let half-drained (fg-drain owner))
+ (record_set frame "input" old-input)
+ (let closed (fg-close owner))
+ (let other (fg-open version))
+ (let other-frame (fg-capture other (flmb-bmp 1)))
+ (let stale-write (metal_buf_write old-input 0 "x"))
+ (let stale-status (metal_status))
+ (let stale-submit (fg-submit other frame (flm-default-policy)))
+ (let other-closed (fg-close other))
+ (sum (list
+  (if (nothing? refused) 1 0)
+  (if (and kept (and indeterminate (ge (str_find enqueue-status "enqueue: bad pipeline" 0) 0))) 2 0)
+  (if (nothing? result) 4 0)
+  (if (and (eq drained 1) (eq closed 1)) 8 0)
+  (if (and (eq stale-write 0) (and (ge (str_find stale-status "buf_write: bad handle" 0) 0) (nothing? stale-submit))) 16 0)
+  (if (eq other-closed 1) 32 0)
+  (if (eq (fg-status-number (metal_status) "buffers") before) 64 0)
+  (if (and (str_eq (record_get half-open "state") "indeterminate")
+       (and (ge (str_find half-status "batch=serial" 0) 0) (eq half-drained 1))) 128 0))))
