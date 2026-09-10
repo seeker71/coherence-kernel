@@ -54,7 +54,7 @@ path for those is owed.
 **Minimal walkers; fkwu owns the native path.** The walkers do the minimum — independent proof oracles
 that witness four-way agreement on the *pure-recipe* surface, never feature bearers. Everything natively
 owned lives in or derives from **fkwu**: the JIT (crystallize on heat), the host-OS surface, the
-Form→asm lowering, Metal and MLX. Build out fkwu; keep the walkers thin.
+Form→asm lowering and Metal. Build out fkwu; keep the walkers thin.
 
 **One home per organ.** Recipes are content-addressed: the same `.fk` interns to the same NodeID on
 every kernel, so the body is shareable — but only if there is no second *copy* to diverge. This repo is

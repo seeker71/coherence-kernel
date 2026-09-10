@@ -36,11 +36,12 @@ Sibling branch carrying the width-5120 RMS and cross-cell work:
 The bounded route above has landed on `codex/form-local-reasoning-homecoming`:
 `c132ed82`, `311e7c27`, `82f6a5da`. Do not rebuild the old tokfast blob.
 
-While reconciling the MLX carrier, do not select the larger branch merely
+While reconciling a carrier, do not select the larger branch merely
 because it has 32 `strcmp(op, ...)` cases instead of eight. Urs explicitly
 closed a static Form operations table and explicitly rejected invented laws.
-The destination is on-demand Form-native JIT generation of the CPU/GPU/Metal/
-MLX operation a NodeID recipe requests. A fixed carrier switch may remain only
+The destination is on-demand Form-native JIT generation of the CPU/GPU/Metal
+operation a NodeID recipe requests -- tensor execution reached that
+destination on 2026-09-10 (2be4b0b9, docs/native-tensors.md). A fixed carrier switch may remain only
 as an honestly named temporary witness/proof seam with an owed shrink path; it
 must not become the world model, registry, authority, or definition of what
 operations can exist. Do not carry “THE MINIMUM LAW” language as legislation.
