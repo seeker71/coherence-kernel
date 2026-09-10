@@ -673,6 +673,7 @@ fourth_band_stem() {
     [[ "$band" == form-stdlib/tests/* || "$band" == */form-stdlib/tests/* ]] || return 0
     stem="$(basename "$band")"
     stem="${stem%.fk}"
+    stem="${stem%.bml}"
     [[ -f "$FOURTH_MANIFEST" ]] || return 0
     # Exact name FIRST, stripped second. Stripping -band unconditionally sent a
     # file literally named <x>-band.fk to look up row <x>, so the four rows whose
