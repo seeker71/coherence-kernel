@@ -1,7 +1,7 @@
 // One resident model and tokenizer serve a training run. Sequence microbatches
 // accumulate a token-weighted batch gradient; every completed round updates LoRA.
 // Parameters and Adam moments publish together, after device health and byte checks.
-// preludes: form-stdlib/native-lora-dataset.bml form-stdlib/native-lora-checkpoint.bml form-stdlib/native-llama-voice.bml observe/bidirectional-framebuffer-channel.fk form-stdlib/json-precise.bml form-stdlib/sha256.fk
+// preludes: form-stdlib/native-lora-dataset.bml form-stdlib/native-lora-checkpoint.bml form-stdlib/native-llama-voice.bml observe/bidirectional-framebuffer-channel.fk form-stdlib/json-precise.bml form-stdlib/sha256.fk form-stdlib/native-lora-progress.bml
 section [form.bml] {
  class NativeLoraTrain {
   def ntr-int(k,v) = json-node-pair(k,json-node-int(v));
@@ -15,6 +15,19 @@ section [form.bml] {
    let shown = print_str(text);
    wrote;
   }
+  def ntr-health-event(out,kind,reading,fields) {
+   let voice = oh-voice(reading);
+   ntr-event(out,kind,append(fields,list(json-node-pair("health",reading))));
+  }
+  def ntr-progress-observe(out,checkpoint,expected,step) {
+   let config = parse-json("native-checkpoint-configuration",read_file(str_concat(checkpoint,"/adapter_config.json")));
+   let marker = parse-json("native-checkpoint-completion",read_file(str_concat(checkpoint,"/complete.json")));
+   let actual = json-object-get(config,"training_progress");
+   let valid = and(nlp-checkpoint(config,marker),nlp-same(expected,actual));
+   let reading = oh-reading("native-lora",out,"dataset-continuity",expected,actual,json-node-int(valid),if valid then list() else list(oh-need("checkpoint-progress-agreement",oh-reference(checkpoint))),list("continue-checkpoint","inspect-checkpoint"),oh-reference(checkpoint));
+   let observed = ntr-health-event(out,"dataset-progress",reading,list(ntr-int("optimizer_step",step),json-node-pair("training_progress",actual),ntr-int("next_row_index",nlp-cursor(expected)),ntr-text("checkpoint",checkpoint)));
+   if valid then 1 else form_error("published native dataset progress disagrees");
+  }
   def ntr-config(model,r,step) = json-node-object(list(ntr-text("model",nth(model,4)),ntr-text("fine_tune_type","lora"),ntr-int("num_layers",ntr-get(r,"layers")),json-node-pair("lora_parameters",json-object-get(nth(model,5),"lora_parameters")),ntr-text("optimizer","adam"),ntr-real("learning_rate",ntr-get(r,"learning_rate")),ntr-int("batch_size",ntr-get(r,"batch")),ntr-int("mask_prompt",ntr-get(r,"mask_prompt")),ntr-int("native_step",step),ntr-text("data",ntr-get(r,"data")),ntr-text("sequence_policy","whole-row; memory admission; no silent truncation")));
   def ntr-save(model,state,r,step) {
    let out = ntr-get(r,"output"); let made = fs-mkdir(str_concat(out,"/generations"));
@@ -22,18 +35,19 @@ section [form.bml] {
    let mkdir = fs-mkdir(gen);
    let a = nlc-save(str_concat(gen,"/adapters.safetensors"),nlc-adapter-rows(nlb-pairs(nth(model,1))),nth(model,4),step);
    let o = nlc-save(str_concat(gen,"/optimizer.safetensors"),nlc-optimizer-rows(state),nth(model,4),step);
-   let c = nag-write(str_concat(gen,"/adapter_config.json"),json-emit-precise(ntr-config(model,r,step)));
-   let complete = nag-write(str_concat(gen,"/complete.json"),json-emit-precise(json-node-object(list(ntr-int("step",step),ntr-int("adapter_bytes",nth(a,1)),ntr-int("adapter_tensors",nth(a,2)),ntr-int("optimizer_bytes",nth(o,1)),ntr-int("optimizer_tensors",nth(o,2))))));
+   let progress = json-object-get(r,"training_progress");
+   let c = if nlp-valid(progress) then nag-write(str_concat(gen,"/adapter_config.json"),json-emit-precise(oh-set(ntr-config(model,r,step),"training_progress",progress))) else form_error("native checkpoint requires dataset progress");
+   let complete = nag-write(str_concat(gen,"/complete.json"),json-emit-precise(json-node-object(list(ntr-int("step",step),ntr-int("adapter_bytes",nth(a,1)),ntr-int("adapter_tensors",nth(a,2)),ntr-int("optimizer_bytes",nth(o,1)),ntr-int("optimizer_tensors",nth(o,2)),json-node-pair("training_progress",progress)))));
    let sync = nlc-sync-host(host_spawn_at(list("/bin/sync"),list("/dev/null","/dev/null","/dev/null")));
    nag-publish(out,gen);
   }
   def ntr-resume(model,state,adapter) {
    let config = nth(model,5);
-   if not(json-object-has?(config,"native_step")) then list(0,"new Adam state; historical adapter has no optimizer checkpoint") else ntr-resume-native(state,nag-resolve(adapter),ntr-get(config,"native_step"));
+   if not(json-object-has?(config,"native_step")) then list(0,"new Adam state; historical adapter has no optimizer checkpoint") else ntr-resume-native(state,nag-resolve(adapter),ntr-get(config,"native_step"),config);
   }
-  def ntr-resume-native(state,dir,step) {
+  def ntr-resume-native(state,dir,step,config) {
    let marker = parse-json("native-generation",read_file(str_concat(dir,"/complete.json")));
-   if or(lt(step,0),not(eq(step,ntr-get(marker,"step")))) then form_error("native checkpoint step disagreement") else ntr-resume-checked(state,dir,step);
+   if or(lt(step,0),not(eq(step,ntr-get(marker,"step")))) then form_error("native checkpoint step disagreement") else if not(nlp-checkpoint(config,marker)) then form_error("native checkpoint dataset progress disagreement") else ntr-resume-checked(state,dir,step);
   }
   def ntr-resume-checked(state,dir,step) {
    let restore = nlc-load-optimizer(state,str_concat(dir,"/optimizer.safetensors"));
@@ -55,7 +69,7 @@ section [form.bml] {
    let closeForward = nll-forward-close(r); let closeContext = nll-context-close(ctx);
    ntr-validation-rows(model,tk,rest,masked,add(loss,mul(value,nth(sample,3))),add(tokens,nth(sample,3)),add(count,1));
   }
-  def ntr-grade-hex(bytes) = if nil?(bytes) then "" else str_concat(str_concat(json-hex-digit(div(head(bytes),16)),json-hex-digit(mod(head(bytes),16))),ntr-grade-hex(tail(bytes)));
+  def ntr-grade-hex(bytes) = nlp-hex(bytes);
   def ntr-grade-rows(model,tk,rows,index) = if nil?(rows) then list() else cons(ntr-grade-row(model,tk,head(rows),index),ntr-grade-rows(model,tk,tail(rows),add(index,1)));
   def ntr-grade-row(model,tk,row,index) {
    let sample = nld-row(tk,row,1,add(index,1)); let admitted = ntr-admit(model,sample);
@@ -98,14 +112,15 @@ section [form.bml] {
    ntr-batch(model,state,rest,total,out,add(loss,mul(value,weight)));
   }
   def ntr-cycle-rows(rows,cursor,batch) = take(batch,append(drop(cursor,rows),rows));
-  def ntr-round(model,tk,state,rows,r,round,step,cursor) {
+  def ntr-round(model,tk,state,rows,r,round,step) {
    let out = ntr-get(r,"output"); let steps = ntr-get(r,"steps");
-   if ge(round,steps) then list(step,round,"completed") else if gt(file_size(str_concat(out,"/cancel")),0) then list(step,round,"cancelled") else ntr-round-ready(model,tk,state,rows,r,round,step,cursor);
+   if ge(round,steps) then list(step,round,"completed") else if gt(file_size(str_concat(out,"/cancel")),0) then list(step,round,"cancelled") else ntr-round-ready(model,tk,state,rows,r,round,step);
   }
-  def ntr-round-ready(model,tk,state,rows,r,round,step,cursor) {
+  def ntr-round-ready(model,tk,state,rows,r,round,step) {
    let out = ntr-get(r,"output"); let start = host_monotonic_ms();
    let batch = nlg-min(ntr-get(r,"batch"),len(rows));
-   let selected = ntr-cycle-rows(rows,cursor,batch);
+   let progress = json-object-get(r,"training_progress");
+   let selected = ntr-cycle-rows(rows,nlp-cursor(progress),batch);
    let prepared = nld-prepare(tk,selected,ntr-get(r,"mask_prompt"));
    let tokensAt = host_monotonic_ms(); let zero = nlb-clear(state);
    let loss = ntr-batch(model,state,prepared,nld-weight(prepared),out,0.0);
@@ -118,18 +133,25 @@ section [form.bml] {
    let update = if eq(bfc-payload(control),6) then nlb-safe-step(state,ntr-get(r,"learning_rate"),add(step,1),1.0) else form_error("native training non-finite gradient; update abstained");
    let after = bfc-record-out(bfc-envelope(0,add(920000,step),0,append(update,nlb-health(state,0,0,0.0)),3),2);
    let updated = host_monotonic_ms();
-   let checkpoint = ntr-save(model,state,r,add(step,1));
+   let nextProgress = nlp-advance(progress,len(prepared));
+   let nextRequest = nlp-request(r,nextProgress);
+   let checkpoint = ntr-save(model,state,nextRequest,add(step,1));
+   let coverage = ntr-progress-observe(out,checkpoint,nextProgress,add(step,1));
    let end = host_monotonic_ms(); let live = metal_live();
    let event = ntr-event(out,"round",list(ntr-int("round",add(round,1)),ntr-int("optimizer_step",add(step,1)),ntr-int("rows",len(prepared)),ntr-int("input_tokens",nld-tokens(prepared)),ntr-real("supervised_tokens",nld-weight(prepared)),ntr-real("loss",loss),ntr-real("gradient_norm",nth(update,1)),ntr-real("gradient_clip",nth(update,2)),ntr-int("lora_pairs_updated",nth(update,3)),ntr-int("tokenize_ms",sub(tokensAt,start)),ntr-int("training_ms",sub(beforeUpdate,tokensAt)),ntr-int("update_ms",sub(updated,beforeUpdate)),ntr-int("checkpoint_ms",sub(end,updated)),ntr-int("wall_ms",sub(end,start)),ntr-int("device_bytes",nth(live,18)),ntr-text("checkpoint",checkpoint),ntr-text("selected","whole-row sequence microbatches; token-weighted gradient; Adam; atomic generation")));
-   ntr-round(model,tk,state,rows,r,add(round,1),add(step,1),mod(add(cursor,batch),len(rows)));
+   ntr-round(model,tk,state,rows,nextRequest,add(round,1),add(step,1));
   }
   def ntr-run(r) {
    if or(le(ntr-get(r,"steps"),0),or(le(ntr-get(r,"batch"),0),or(le(ntr-get(r,"learning_rate"),0.0),not(or(eq(ntr-get(r,"mask_prompt"),0),eq(ntr-get(r,"mask_prompt"),1)))))) then form_error("native training request values refused") else ntr-run-ready(r);
   }
   def ntr-run-ready(r) {
    let out = ntr-get(r,"output"); let made = fs-mkdir(out); let start = host_monotonic_ms();
-   let rows = nld-file(str_concat(ntr-get(r,"data"),"/train.jsonl"));
-   if nil?(rows) then form_error("native training corpus has no rows") else ntr-run-data(r,rows,start);
+   let text = read_file(str_concat(ntr-get(r,"data"),"/train.jsonl"));
+   if nothing?(text) then form_error("native training corpus unreadable") else ntr-run-text(r,text,start);
+  }
+  def ntr-run-text(r,text,start) {
+   let rows = nld-lines(text);
+   if nil?(rows) then form_error("native training corpus has no rows") else ntr-run-data(nlp-request(r,nlp-bind(text,len(rows),ntr-get(r,"mask_prompt"))),rows,start);
   }
   def ntr-run-data(r,rows,start) {
    let out = ntr-get(r,"output");
@@ -140,11 +162,21 @@ section [form.bml] {
   def ntr-run-model(r,rows,start,session,adapter) {
    let out = ntr-get(r,"output"); let model = head(session); let tk = nth(session,1); let state = nlb-state(model);
    let resumed = ntr-resume(model,state,adapter);
+   let traversal = nlp-restore(nth(model,5),json-object-get(r,"training_progress"));
    let event = ntr-event(out,"admitted",list(ntr-text("model",nth(model,4)),ntr-text("adapter",nag-resolve(adapter)),ntr-int("rows",len(rows)),ntr-int("steps_requested",ntr-get(r,"steps")),ntr-int("batch",ntr-get(r,"batch")),ntr-int("lora_pairs",len(state)),ntr-int("optimizer_step",head(resumed)),ntr-text("optimizer_resume",nth(resumed,1)),ntr-int("open_ms",sub(host_monotonic_ms(),start)),ntr-text("sequence_policy","whole-row, device-memory admission, no token truncation")));
    let validationRows = nld-file(str_concat(ntr-get(r,"data"),"/valid.jsonl"));
    let baseline = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,head(resumed));
    let assessedBefore = ntr-assessment(model,tk,r,"before");
-   let result = ntr-round(model,tk,state,rows,r,0,head(resumed),mod(mul(head(resumed),nlg-min(ntr-get(r,"batch"),len(rows))),len(rows)));
+   let progress = head(traversal);
+   let continuing = str_eq(nth(traversal,1),"same dataset; continue checkpointed examples");
+   let reading = oh-reading("native-lora",out,"dataset-continuity",json-node-string("same dataset; continue checkpointed examples"),json-node-string(nth(traversal,1)),json-node-int(continuing),if continuing then list() else list(oh-need("observed-dataset-traversal",json-node-string("start at first row; retain optimizer"))),list("continue-checkpoint","start-first-row"),oh-reference(nag-resolve(adapter)));
+   let progressEvent = ntr-health-event(out,"dataset-resume",reading,list(json-node-pair("training_progress",progress),ntr-text("reason",nth(traversal,1)),ntr-int("next_row_index",nlp-cursor(progress))));
+   let response = oh-response(reading,if continuing then "continue-checkpoint" else "start-first-row");
+   let selected = oh-select(reading,response,"defer");
+   let received = ntr-health-event(out,"dataset-response",response,list());
+   let ready = if str_eq(selected,"defer") then form_error("native dataset response did not correlate") else nlp-request(r,progress);
+   let applied = ntr-health-event(out,"dataset-applied",oh-applied(reading,selected,progress),list());
+   let result = ntr-round(model,tk,state,rows,ready,0,head(resumed));
    let validation = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,head(result));
    let assessedAfter = ntr-assessment(model,tk,r,"after");
    let done = nam-sync(); let closeState = nlb-state-close(state); let closeModel = nlg-close(session);
