@@ -1,0 +1,135 @@
+; buffer-dependency-isolation-band.fk -- host ownership follows one handle.
+;
+; Three separate submitted descriptors touch only `used`. While each fence is
+; still tracked, the host reads, writes, then frees an unrelated `spare` buffer.
+; Every operation must leave that fence and its pipeline lease standing for the
+; explicit wait. Separate fences keep each door independently diagnostic.
+;
+; The free also creates a generation-qualified replacement and hands the stale
+; old handle to a valid-shaped enqueue. Admission must refuse before publishing
+; an encoder: batch remains none and pending remains zero.
+;
+; Verdict 4095 on a loaded Metal carrier; a host without it answers 0.
+; witnessed: 2026-09-10 -> 4095 (Apple M4 Max, dynamic carrier)
+; preludes: form-stdlib/bml/metal-jit.bml
+
+(do
+    (defn bdi-bit (ok bit) (if ok bit 0))
+    (defn bdi-has? (text needle) (ge (str_find text needle 0) 0))
+    (defn bdi-status-start (status key)
+        (do
+            (let first (str_concat key "="))
+            (let later (str_concat "\n" first))
+            (let at-first (str_find status first 0))
+            (let at-later (str_find status later 0))
+            (if (eq at-first 0)
+                (str_len first)
+                (if (lt at-later 0) -1 (add at-later (str_len later))))))
+    (defn bdi-status-int (status key)
+        (do
+            (let start (bdi-status-start status key))
+            (let stop (if (lt start 0) -1 (str_find status "\n" start)))
+            (if (lt start 0) -1
+                (str_to_int (if (lt stop 0)
+                    (substring status start (str_len status))
+                    (substring status start stop))))))
+    (defn bdi-source ()
+        (mj-source "kernel void form_buffer_isolation_inc_u32(device uint *out [[buffer(0)]]) { out[0] += 1u; }"))
+
+    (let first-status (metal_status))
+    (let loaded (and (bdi-has? first-status "metal_loaded=true")
+                     (bdi-has? first-status "metal_carrier=dynamic")))
+    (if (not loaded)
+        0
+        (do
+            (let program (mj-memory (bdi-source) "form_buffer_isolation_inc_u32"))
+            (let used (metal_buf_alloc 4))
+            (let spare (metal_buf_alloc 4))
+            (let wrote-used (metal_buf_write used 0 (md-le32 0)))
+            (let wrote-spare (metal_buf_write spare 0 (md-le32 11)))
+            (let binding (md-bind (list used) (list)))
+            (let baseline (metal_status))
+            (let base-flight (bdi-status-int baseline "in_flight"))
+            (let base-leases (bdi-status-int baseline "pipeline_work_leases"))
+            (let base-sync (bdi-status-int baseline "total_sync"))
+            (let base-buffers (bdi-status-int baseline "buffers"))
+
+            ; Read an unrelated handle while a submission remains owned by its fence.
+            (let enqueue-r (mj-enqueue program binding 1))
+            (let fence-r (metal_submit))
+            (let read-spare (metal_buf_read spare 0 4))
+            (let status-r (metal_status))
+            (let wait-r (metal_fence_wait fence-r))
+
+            ; Write an unrelated handle under a fresh fence.
+            (let enqueue-w (mj-enqueue program binding 1))
+            (let fence-w (metal_submit))
+            (let write-spare (metal_buf_write spare 0 (md-le32 22)))
+            (let status-w (metal_status))
+            (let wait-w (metal_fence_wait fence-w))
+
+            ; Free an unrelated handle under a third fresh fence.
+            (let enqueue-f (mj-enqueue program binding 1))
+            (let fence-f (metal_submit))
+            (let free-spare (metal_buf_free spare))
+            (let status-f (metal_status))
+
+            ; A successful free makes spare stale. Its replacement should reuse
+            ; the same 16-bit buffer slot with a new generation. That stale handle
+            ; must be rejected before an empty encoder becomes globally visible.
+            (let replacement (if (eq free-spare 1) (metal_buf_alloc 4) 0))
+            (let stale-enqueue (if (gt replacement 0)
+                (mj-enqueue program (md-bind (list spare) (list)) 1) 1))
+            (let stale-status (metal_status))
+            (let wait-f (metal_fence_wait fence-f))
+            (let used-bytes (metal_buf_read used 0 4))
+            (let settled (metal_status))
+
+            ; Preserve every obligation when a tested operation refuses: drain a
+            ; published empty batch, and retry a held spare after its fence wait.
+            (let cleaned-batch (if (bdi-has? stale-status "batch=none") 0 (metal_sync)))
+            (let cleanup-spare (if (eq free-spare 1) 0 (metal_buf_free spare)))
+            (let freed-rest (add (metal_buf_free used)
+                                 (if (gt replacement 0) (metal_buf_free replacement) 0)))
+            (let released (mj-release program))
+            (let after (metal_status))
+
+            (sum (list
+                (bdi-bit (and loaded (and (gt (mj-handle program) 0)
+                    (and (eq wrote-used 4) (and (eq wrote-spare 4)
+                    (and (gt used 0) (gt spare 0)))))) 1)
+                (bdi-bit (and (eq enqueue-r 1) (gt fence-r 0)) 2)
+                (bdi-bit (and (str_eq read-spare (md-le32 11))
+                    (and (eq (bdi-status-int status-r "in_flight") (add base-flight 1))
+                    (and (eq (bdi-status-int status-r "pipeline_work_leases") (add base-leases 1))
+                         (eq (bdi-status-int status-r "total_sync") base-sync)))) 4)
+                (bdi-bit (eq wait-r 1) 8)
+                (bdi-bit (and (eq enqueue-w 1) (gt fence-w 0)) 16)
+                (bdi-bit (and (eq write-spare 4)
+                    (and (eq (bdi-status-int status-w "in_flight") (add base-flight 1))
+                    (and (eq (bdi-status-int status-w "pipeline_work_leases") (add base-leases 1))
+                         (eq (bdi-status-int status-w "total_sync") (add base-sync 1))))) 32)
+                (bdi-bit (eq wait-w 1) 64)
+                (bdi-bit (and (eq enqueue-f 1) (gt fence-f 0)) 128)
+                (bdi-bit (and (eq free-spare 1)
+                    (and (eq (bdi-status-int status-f "buffers") (sub base-buffers 1))
+                    (and (eq (bdi-status-int status-f "in_flight") (add base-flight 1))
+                    (and (eq (bdi-status-int status-f "pipeline_work_leases") (add base-leases 1))
+                         (eq (bdi-status-int status-f "total_sync") (add base-sync 2)))))) 256)
+                (bdi-bit (and (gt replacement 0)
+                    (and (eq (mod spare 65536) (mod replacement 65536))
+                    (and (not (eq spare replacement))
+                    (and (eq stale-enqueue 0)
+                    (and (bdi-has? stale-status "batch=none")
+                         (eq (bdi-status-int stale-status "pending") 0)))))) 512)
+                (bdi-bit (and (eq wait-f 1)
+                    (and (str_eq used-bytes (md-le32 3))
+                    (and (eq (bdi-status-int settled "in_flight") base-flight)
+                    (and (eq (bdi-status-int settled "pipeline_work_leases") base-leases)
+                         (eq (bdi-status-int settled "total_sync") (add base-sync 3)))))) 1024)
+                (bdi-bit (and (eq cleaned-batch 0)
+                    (and (eq cleanup-spare 0)
+                    (and (eq freed-rest 2)
+                    (and (eq released 1)
+                    (and (eq (bdi-status-int after "pipelines") 0)
+                         (eq (bdi-status-int after "in_flight") 0)))))) 2048))))))

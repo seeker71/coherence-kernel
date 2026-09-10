@@ -1,0 +1,50 @@
+// Native i386 leaves emitted by Form. The assembler only packages their bytes.
+// preludes: form-stdlib/core.fk
+section [form.bml] {
+ class HatiGuestNative {
+  def hg-bytes(values) = if nil?(values) then "" else str_concat(byte_to_str(head(values)), hg-bytes(tail(values)));
+  def hg-label(name) = list("label", name);
+  def hg-raw(values) = list("bytes", hg-bytes(values));
+  def hg-jump(opcode, name) = list("jump", opcode, name);
+  def hg-size(instruction) = if str_eq(head(instruction), "label") then 0 else if str_eq(head(instruction), "jump") then 2 else if str_eq(head(instruction), "bytes") then str_len(nth(instruction, 1)) else -1;
+  def hg-labels(program, offset, labels) = if nil?(program) then labels else hg-labels-one(head(program), tail(program), offset, labels);
+  def hg-labels-one(instruction, remaining, offset, labels) {
+   let size = hg-size(instruction);
+   if lt(size, 0) then nothing() else hg-labels(remaining, add(offset, size), if str_eq(head(instruction), "label") then cons(list(nth(instruction, 1), offset), labels) else labels);
+  }
+  def hg-target(labels, name) = if nothing?(labels) then nothing() else if nil?(labels) then nothing() else if str_eq(head(head(labels)), name) then nth(head(labels), 1) else hg-target(tail(labels), name);
+  def hg-branch(opcode, target, offset) = if nothing?(target) then nothing() else hg-branch-distance(opcode, sub(target, add(offset, 2)));
+  def hg-branch-distance(opcode, distance) = if or(lt(distance, -128), gt(distance, 127)) then nothing() else hg-bytes(list(opcode, mod(add(distance, 256), 256)));
+  def hg-instruction(instruction, labels, offset) = if str_eq(head(instruction), "label") then "" else if str_eq(head(instruction), "bytes") then nth(instruction, 1) else if str_eq(head(instruction), "jump") then hg-branch(nth(instruction, 1), hg-target(labels, nth(instruction, 2)), offset) else nothing();
+  def hg-code-at(program, labels, offset) = if nothing?(labels) then nothing() else if nil?(program) then "" else hg-code-join(hg-instruction(head(program), labels, offset), tail(program), labels, add(offset, hg-size(head(program))));
+  def hg-code-join(bytes, remaining, labels, offset) = if nothing?(bytes) then nothing() else hg-code-tail(bytes, hg-code-at(remaining, labels, offset));
+  def hg-code-tail(bytes, remaining) = if nothing?(remaining) then nothing() else str_concat(bytes, remaining);
+  def hg-code(program) = hg-code-at(program, hg-labels(program, 0, list()), 0);
+
+  // cdecl(u32 address_a, u32 address_b) -> u32 equality. Read-only NUL strings.
+  // EAX/ECX/EDX are scratch; EBX/ESI/EDI/EBP/ESP retain their caller's values.
+  def hg-streq-program() = list(
+   hg-raw(list(139, 68, 36, 4, 139, 84, 36, 8)),
+   hg-label("compare"), hg-raw(list(138, 8, 58, 10)), hg-jump(117, "different"),
+   hg-raw(list(132, 201)), hg-jump(116, "equal"), hg-raw(list(64, 66)), hg-jump(235, "compare"),
+   hg-label("different"), hg-raw(list(49, 192, 195)),
+   hg-label("equal"), hg-raw(list(184, 1, 0, 0, 0, 195)));
+  // cdecl(u32 address) -> u32 bytes before NUL. The caller owns valid memory.
+  def hg-slen-program() = list(
+   hg-raw(list(139, 84, 36, 4, 49, 192)), hg-label("count"),
+   hg-raw(list(128, 60, 2, 0)), hg-jump(116, "done"),
+   hg-raw(list(64)), hg-jump(235, "count"), hg-label("done"), hg-raw(list(195)));
+  def hg-byte-text(bytes, index) = if ge(index, str_len(bytes)) then "" else str_concat(if eq(index, 0) then "" else ",", str_concat(int_to_str(str_byte_at(bytes, index)), hg-byte-text(bytes, add(index, 1))));
+  def hg-function(name, program) {
+   let bytes = hg-code(program);
+   if nothing?(bytes) then nothing() else str_concat(".global ", str_concat(name, str_concat("\n.type ", str_concat(name, str_concat(", @function\n", str_concat(name, str_concat(":\n.byte ", str_concat(hg-byte-text(bytes, 0), "\n"))))))));
+  }
+  def hg-assembly() = str_concat(".code32\n.section .text.form,\"ax\",@progbits\n", str_concat(hg-function("hati_guest_streq", hg-streq-program()), str_concat(hg-function("hati_guest_slen", hg-slen-program()), ".section .note.GNU-stack,\"\",@progbits\n")));
+  def hg-write(directory) = write_file(str_concat(directory, "/guest-native.S"), hg-assembly());
+  def hg-padding(count, piece, result) = if le(count, 0) then result else hg-padding(div(count, 2), str_concat(piece, piece), if eq(mod(count, 2), 1) then str_concat(result, piece) else result);
+  def hg-image(boot, kernel) = if or(nothing?(boot), nothing?(kernel)) then nothing() else if not(and(eq(str_len(boot), 512), and(eq(str_byte_at(boot, 510), 85), eq(str_byte_at(boot, 511), 170)))) then nothing() else if or(eq(str_len(kernel), 0), gt(str_len(kernel), 31744)) then nothing() else str_concat(boot, str_concat(kernel, hg-padding(sub(31744, str_len(kernel)), byte_to_str(0), "")));
+  def hg-pack(directory) = hg-pack-image(directory, hg-image(read_file(str_concat(directory, "/boot.bin")), read_file(str_concat(directory, "/kernel.bin"))));
+  def hg-pack-image(directory, bytes) = if nothing?(bytes) then -1 else write_file(str_concat(directory, "/hati.img"), bytes);
+ }
+ 0;
+}

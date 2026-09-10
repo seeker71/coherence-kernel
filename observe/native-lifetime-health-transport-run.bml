@@ -1,0 +1,104 @@
+// Read one frame-kernel-witness process-evidence directory from stdin.
+// Replay its actual lifetime rows through the shared reader, then retain the
+// current transport observation. Source/capture contents never enter the report.
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/form-cli-heal-native-process.bml
+section [form.bml] {
+ class NativeLifetimeHealthTransport {
+  def nlht-all(checks) = if nil?(checks) then 1 else and(head(checks), nlht-all(tail(checks)));
+  def nlht-rows(lines) = if nil?(lines) then list() else if eq(str_find(head(lines), "form-organ health ", 0), 0) then cons(parse-json("emitted-health", substring(head(lines), 18, str_len(head(lines)))), nlht-rows(tail(lines))) else nlht-rows(tail(lines));
+  def nlht-count(rows, stage, action) = if nil?(rows) then 0 else add(if and(str_eq(oh-str(head(rows), "stage"), stage), str_eq(oh-str(head(rows), "selected"), action)) then 1 else 0, nlht-count(tail(rows), stage, action));
+  def nlht-pains(rows) = if nil?(rows) then 0 else add(if and(str_eq(oh-str(head(rows), "stage"), "observe"), oh-pain(head(rows))) then 1 else 0, nlht-pains(tail(rows)));
+  def nlht-valid(rows, organ) = if nil?(rows) then 1 else and(oh-valid(head(rows)), and(str_eq(oh-str(head(rows), "organ"), organ), and(str_eq(oh-str(head(rows), "aspect"), "release"), and(node_eq(oh-get(head(rows), "evidence"), json-node-null()), nlht-valid(tail(rows), organ)))));
+  def nlht-no-fault(rows) = if nil?(rows) then 1 else and(not(str_eq(oh-str(head(rows), "organ"), "health-flow")), nlht-no-fault(tail(rows)));
+  def nlht-healthy(rows) = if nil?(rows) then 1 else and(node_eq(oh-get(head(rows), "health"), json-node-int(1)), nlht-healthy(tail(rows)));
+  def nlht-extract(rows) = if nil?(rows) then list() else cons(oh-extract(head(rows)), nlht-extract(tail(rows)));
+  def nlht-audit(rows, held) = if nil?(rows) then 1 else nlht-audit-step(head(rows), tail(rows), held, oh-current(list(head(rows)), held));
+  def nlht-audit-step(row, rest, prior, current) {
+   let previous = oh-find(prior, row);
+   let reading = oh-find(current, row);
+   let control = not(str_eq(oh-str(row, "stage"), "observe"));
+   let identity = if control then and(oh-valid(previous), str_eq(oh-str(previous, "id"), oh-str(row, "id"))) else if oh-valid(previous) then not(str_eq(oh-str(previous, "id"), oh-str(row, "id"))) else 1;
+   let honest = if control then and(oh-pain(reading), node_eq(oh-get(reading, "health"), oh-get(previous, "health"))) else 1;
+   and(nlht-no-fault(current), and(identity, and(honest, nlht-audit(rest, current))));
+  }
+  def nlht-result-count(rows, result) = if nil?(rows) then 0 else add(if and(str_eq(oh-str(head(rows), "stage"), "applied"), and(str_eq(oh-str(head(rows), "selected"), "retry-release"), node_eq(oh-get(head(rows), "result"), json-node-int(result)))) then 1 else 0, nlht-result-count(tail(rows), result));
+  def nlht-emit-rows(path, rows) = if nil?(rows) then 0 else add(if oh-valid(oh-emit(path, head(rows))) then 1 else 0, nlht-emit-rows(path, tail(rows)));
+  def nlht-check(source, job, stage, organ, verdict) {
+   let output = fhn-read(fhn-stage-path(source, stage, ".out"));
+   let lines = split-on(output, "\n");
+   let raw = nlht-rows(lines);
+   let status = fhn-read(fhn-stage-path(source, stage, ".raw-status"));
+   let errors = fhn-read(fhn-stage-path(source, stage, ".err"));
+   write_file(fhn-stage-path(job, stage, ".out"), output);
+   write_file(fhn-stage-path(job, stage, ".err"), errors);
+   write_file(fhn-stage-path(job, stage, ".raw-status"), status);
+   let observed = fhn-observe-lines(job, stage, lines, 0);
+   let eventsPath = fhn-stage-path(job, stage, ".events.jsonl");
+   let events = nlht-extract(fhn-json-rows(split-on(fhn-read(eventsPath), "\n")));
+   let current = oh-read(eventsPath);
+   let directPath = fhn-stage-path(job, stage, ".direct-health.jsonl");
+   let directlyEmitted = nlht-emit-rows(directPath, raw);
+   let direct = oh-read(directPath);
+   let pains = nlht-pains(raw);
+   let evidenceResponses = nlht-count(events, "response", "request-evidence");
+   let evidenceApplied = nlht-count(events, "applied", "request-evidence");
+   let correlated = nlht-audit(events, list());
+   let checks = list(str_eq(status, "0"), str_eq(head(reverse(fhn-nonempty(lines))), verdict),
+    str_eq(errors, ""), gt(pains, 0), eq(observed, len(raw)),
+    eq(len(events), add(len(raw), mul(2, pains))), nlht-valid(raw, organ), correlated,
+    eq(evidenceResponses, pains), eq(evidenceApplied, pains),
+    eq(nlht-count(raw, "response", "retry-release"), pains),
+    eq(add(nlht-result-count(raw, 0), nlht-result-count(raw, 1)), pains),
+    gt(nlht-result-count(raw, 1), 0), gt(len(current), 0), nlht-healthy(current),
+    eq(directlyEmitted, len(raw)), eq(len(direct), len(current)), nlht-healthy(direct), nlht-no-fault(direct));
+   let accepted = nlht-all(checks);
+   json-node-object(list(fhn-s("stage", stage), fhn-s("child_verdict", verdict), fhn-n("child_exit", str_to_int(status)), fhn-n("child_stderr_bytes", str_len(errors)),
+    fhn-n("emitted_rows", len(raw)), fhn-n("reader_accepted_rows", observed), fhn-n("retained_events", len(events)),
+    fhn-n("correlated_evidence_responses", evidenceResponses), fhn-n("correlated_evidence_actions", evidenceApplied),
+    fhn-n("control_identity_and_unhealed_action_state", correlated), fhn-n("release_refusals", pains),
+    fhn-n("retry_still_retained", nlht-result-count(raw, 0)), fhn-n("retry_released", nlht-result-count(raw, 1)),
+    fhn-n("healthy_owners", len(current)), fhn-n("direct_health_rows_accepted", directlyEmitted), fhn-n("accepted", accepted)));
+  }
+  def nlht-append(job) {
+   let path = fhn-at(job, "append-bytes");
+   let first = sbt-append-count(path, "abc");
+   let second = sbt-append-count(path, "def");
+   let emptyCount = sbt-append-count(path, "");
+   let extent = sbt-append(path, "");
+   let unavailable = str_concat(path, "/unavailable");
+   let refused = sbt-append-count(unavailable, "x");
+   let refusedEvent = fhn-append(unavailable, "x");
+   let firstEvent = fhn-append(path, "ghi");
+   let secondEvent = fhn-append(path, "jkl");
+   let accepted = nlht-all(list(eq(first, 3), eq(second, 3), eq(emptyCount, 0), eq(extent, 6),
+    lt(refused, 0), str_eq(refusedEvent, "refused:short-append"),
+    str_eq(firstEvent, "appended"), str_eq(secondEvent, "appended"),
+    str_eq(read_file(path), "abcdefghijkl")));
+   json-node-object(list(fhn-a("successive_byte_counts", list(json-node-int(first), json-node-int(second))),
+    fhn-n("empty_byte_count", emptyCount), fhn-n("preserved_extent", extent), fhn-n("unavailable_parent_result", refused),
+    fhn-s("unavailable_parent_reader_result", refusedEvent), fhn-a("successive_reader_results", fhn-strings(list(firstEvent, secondEvent))),
+    fhn-n("complete_bytes_match", str_eq(read_file(path), "abcdefghijkl")), fhn-n("accepted", accepted)));
+  }
+  def nlht-run() {
+   let source = read_line();
+   if not(fs_is_dir(source)) then form_error("supply the frame kernel witness process-evidence directory") else 0;
+   let job = fhn-unique("/tmp", "native-health-transport-", 0);
+   if str_eq(job, "") then form_error("cannot retain native health transport observation") else 0;
+   let context = nlht-check(source, job, "runtime-contexts", "form-runtime-context", "524287");
+   let frame = nlht-check(source, job, "frame-release-retry", "frame-metal-version", "4095");
+   let transport = nlht-append(job);
+   let accepted = nlht-all(list(fhn-number(context, "accepted"), fhn-number(frame, "accepted"), fhn-number(transport, "accepted")));
+   let report = json-node-object(list(fhn-s("schema", "native-lifetime-health-transport-v1"), fhn-n("observed_at_ms", now_unix_ms()),
+    fhn-s("probe", "observe/native-lifetime-health-transport-run.bml"), fhn-s("source_witness", "observe/frame-kernel-witness-run.fk"),
+    fhn-s("source_process_evidence", source), fhn-s("replay_evidence", job),
+    fhn-a("readers", fhn-strings(list("fhn-observe-lines", "oh-current", "oh-read"))),
+    fhn-a("sources", fhn-strings(list("form/form-stdlib/bml/native-lifetime-health.bml", "form/form-stdlib/spool-bell-transport.fk", "form/form-stdlib/organ-health.bml", "form/form-stdlib/bml/form-cli-heal-native-io.bml", "form/form-stdlib/bml/form-cli-heal-flow.bml"))),
+    json-node-pair("append", transport), fhn-a("organs", list(context, frame)), fhn-n("accepted", accepted)));
+   let saved = fhn-write-json("docs/evidence/fkwu/health-transport.json", report);
+   print_str(json-emit-precise(report));
+   if and(accepted, gt(saved, 0)) then 1 else form_error("native lifetime health transport refused");
+  }
+ }
+ nlht-run();
+}

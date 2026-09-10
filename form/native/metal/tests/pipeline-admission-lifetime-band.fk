@@ -1,0 +1,108 @@
+; pipeline-admission-lifetime-band.fk -- content reuse is separate from ownership.
+;
+; Two identical FMJ1 admissions reuse one compiled Metal pipeline while receiving
+; distinct generation-qualified handles. Retiring one admission cannot retire the
+; other. A command submitted before retirement keeps the exact native pipeline
+; object until its fence settles. Reuse of the retired slot changes generation,
+; and the old handle refuses an otherwise-valid enqueue.
+;
+; Verdict 4095 on a loaded Metal carrier; a host without it answers 0.
+; witnessed: 2026-09-10 -> 4095 (Apple M4 Max, dynamic carrier)
+; preludes: form-stdlib/bml/metal-jit.bml
+
+(do
+    (defn pal-bit (ok bit) (if ok bit 0))
+    (defn pal-has? (text needle) (ge (str_find text needle 0) 0))
+    (defn pal-status-start (status key)
+        (do
+            (let first (str_concat key "="))
+            (let later (str_concat "\n" first))
+            (let at-first (str_find status first 0))
+            (let at-later (str_find status later 0))
+            (if (eq at-first 0)
+                (str_len first)
+                (if (lt at-later 0) -1 (add at-later (str_len later))))))
+    (defn pal-status-int (status key)
+        (do
+            (let start (pal-status-start status key))
+            (let stop (if (lt start 0) -1 (str_find status "\n" start)))
+            (if (lt start 0) -1
+                (str_to_int (if (lt stop 0)
+                    (substring status start (str_len status))
+                    (substring status start stop))))))
+    (defn pal-source ()
+        (mj-source "kernel void pal_twice(device const uint *x [[buffer(0)]], device uint *y [[buffer(1)]], uint i [[thread_position_in_grid]]) { y[i] = x[i] * 2u; }"))
+
+    (let before (metal_status))
+    (let loaded (and (pal-has? before "metal_loaded=true")
+                     (pal-has? before "metal_carrier=dynamic")))
+    (if (not loaded)
+        0
+        (do
+            (let source (pal-source))
+            (let a (mj-memory source "pal_twice"))
+            (let same (mj-memory source "pal_twice"))
+            (let admitted (metal_status))
+            (let input (metal_buf_alloc 16))
+            (let output (metal_buf_alloc 16))
+            (let expected (md-le32-list (list 2 14 26 202) ""))
+            (let wrote (metal_buf_write input 0 (md-le32-list (list 1 7 13 101) "")))
+            (let binding (md-bind (list input output) (list)))
+
+            ; Retirement closes admission now, while the submitted descriptor
+            ; keeps the native PSO it already encoded until fence completion.
+            (let enqueued-a (mj-enqueue a binding 4))
+            (let fence-a (metal_submit))
+            (let released-a (mj-release a))
+            (let stale-before-reuse (mj-enqueue a binding 4))
+            (let leased (metal_status))
+            (let waited-a (metal_fence_wait fence-a))
+            (let bytes-a (metal_buf_read output 0 16))
+
+            ; The duplicate admission remains independently live. A second
+            ; release of a is a refusal and cannot consume same's admission.
+            (let released-a-again (mj-release a))
+            (let enqueued-same (mj-enqueue same binding 4))
+            (let bytes-same (metal_buf_read output 0 16))
+
+            ; a's free slot is reused while same keeps the compiled content in
+            ; cache. The slot agrees, the generation and full handle do not.
+            (let renewed (mj-memory source "pal_twice"))
+            (let stale-after-reuse (mj-enqueue a binding 4))
+            (let enqueued-renewed (mj-enqueue renewed binding 4))
+            (let bytes-renewed (metal_buf_read output 0 16))
+            (let released-rest (add (mj-release same) (mj-release renewed)))
+            (let after (metal_status))
+            (let freed (add (metal_buf_free input) (metal_buf_free output)))
+
+            (sum (list
+                (pal-bit loaded 1)
+                (pal-bit (and (gt (mj-handle a) 0)
+                              (and (gt (mj-handle same) 0)
+                                   (not (eq (mj-handle a) (mj-handle same))))) 2)
+                (pal-bit (str_eq (nth a 1) (nth same 1)) 4)
+                (pal-bit (and (eq (sub (pal-status-int admitted "metal_jit_source_compiles")
+                                           (pal-status-int before "metal_jit_source_compiles")) 1)
+                              (and (eq (sub (pal-status-int admitted "metal_jit_ram_hits")
+                                                (pal-status-int before "metal_jit_ram_hits")) 1)
+                                   (eq (pal-status-int admitted "pipeline_cache_entries") 1))) 8)
+                (pal-bit (and (eq wrote 16)
+                              (and (eq enqueued-a 1) (gt fence-a 0))) 16)
+                (pal-bit (and (eq released-a 1) (eq stale-before-reuse 0)) 32)
+                (pal-bit (and (eq (pal-status-int leased "pipelines") 1)
+                              (and (eq (pal-status-int leased "pipeline_cache_entries") 1)
+                                   (eq (pal-status-int leased "pipeline_work_leases") 1))) 64)
+                (pal-bit (and (eq waited-a 1) (str_eq bytes-a expected)) 128)
+                (pal-bit (and (eq released-a-again 0)
+                              (and (eq enqueued-same 1) (str_eq bytes-same expected))) 256)
+                (pal-bit (and (eq (mod (mj-handle a) 2147483648)
+                                       (mod (mj-handle renewed) 2147483648))
+                              (and (not (eq (mj-handle a) (mj-handle renewed)))
+                                   (gt (mj-handle renewed) 2147483648))) 512)
+                (pal-bit (and (eq stale-after-reuse 0)
+                              (and (eq enqueued-renewed 1)
+                                   (str_eq bytes-renewed expected))) 1024)
+                (pal-bit (and (eq released-rest 2)
+                              (and (eq freed 2)
+                              (and (eq (pal-status-int after "pipelines") 0)
+                                   (eq (pal-status-int after "pipeline_cache_entries") 0)))) 2048))))))

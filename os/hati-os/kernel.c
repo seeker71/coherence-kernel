@@ -67,12 +67,9 @@ static void putu(u32 n) {
     while (i) putc(b[--i]);
 }
 
-/* ── tiny string room ─────────────────────────────────────────────────── */
-static int streq(const char *a, const char *b) {
-    while (*a && *a == *b) { a++; b++; }
-    return *a == 0 && *b == 0;
-}
-static int slen(const char *s) { int n = 0; while (s[n]) n++; return n; }
+/* Form emits these i386 cdecl leaves; guest-native.bml owns their behavior. */
+extern int hati_guest_streq(const char *a, const char *b);
+extern u32 hati_guest_slen(const char *s);
 static void scpy(char *d, const char *s, int cap) {
     int i = 0;
     while (s[i] && i < cap - 1) { d[i] = s[i]; i++; }
@@ -89,10 +86,6 @@ static void *page_alloc(void) {
     for (u32 i = 0; i < PHYS_PAGES; i++)
         if (!page_used[i]) { page_used[i] = 1; pages_alloced++; return (void *)(PHYS_BASE + i * PAGE); }
     return (void *)0;
-}
-static void page_free(void *p) {
-    u32 i = ((u32)p - PHYS_BASE) / PAGE;
-    if (i < PHYS_PAGES && page_used[i]) { page_used[i] = 0; pages_alloced--; }
 }
 
 /* ── IDT + PIC + PIT ──────────────────────────────────────────────────── */
@@ -171,7 +164,7 @@ struct file { char name[24]; char *data; u32 size; int used; };
 static struct file files[NFILES];
 static struct file *fs_find(const char *name) {
     for (int i = 0; i < NFILES; i++)
-        if (files[i].used && streq(files[i].name, name)) return &files[i];
+        if (files[i].used && hati_guest_streq(files[i].name, name)) return &files[i];
     return (struct file *)0;
 }
 static int fs_write(const char *name, const char *text) {
@@ -183,7 +176,7 @@ static int fs_write(const char *name, const char *text) {
         f->data = (char *)page_alloc();
         if (!f->data) { f->used = 0; return -1; }
     }
-    u32 n = (u32)slen(text); if (n > PAGE - 1) n = PAGE - 1;
+    u32 n = hati_guest_slen(text); if (n > PAGE - 1) n = PAGE - 1;
     for (u32 i = 0; i < n; i++) f->data[i] = text[i];
     f->data[n] = 0; f->size = n;
     return (int)n;
@@ -219,9 +212,9 @@ static void shell(void) {
     for (;;) {
         read_line(line, sizeof line);
         char *arg = arg_split(line);
-        if (streq(line, "help")) {
+        if (hati_guest_streq(line, "help")) {
             puts("help ps mem ls cat <f> write <f> <text> echo <s> uptime spin halt\n");
-        } else if (streq(line, "ps")) {
+        } else if (hati_guest_streq(line, "ps")) {
             for (int i = 0; i < ntasks; i++) {
                 puts("  task "); putu((u32)i); puts(" "); puts(tasks[i].name);
                 puts(" runs="); putu(tasks[i].runs);
@@ -229,30 +222,30 @@ static void shell(void) {
             }
             puts("  hearts a="); putu(heart_a); puts(" b="); putu(heart_b);
             puts(" (climbing between calls = preemption is real)\n");
-        } else if (streq(line, "mem")) {
+        } else if (hati_guest_streq(line, "mem")) {
             puts("  pages used "); putu(pages_alloced); puts(" / "); putu(PHYS_PAGES);
             puts(" (4096 bytes each, phys 1MB..8MB)\n");
-        } else if (streq(line, "ls")) {
+        } else if (hati_guest_streq(line, "ls")) {
             for (int i = 0; i < NFILES; i++)
                 if (files[i].used) { puts("  "); puts(files[i].name); puts(" ("); putu(files[i].size); puts(" bytes)\n"); }
-        } else if (streq(line, "cat")) {
+        } else if (hati_guest_streq(line, "cat")) {
             struct file *f = fs_find(arg);
             if (f) { puts(f->data); putc('\n'); } else puts("  no such file (honest miss)\n");
-        } else if (streq(line, "write")) {
+        } else if (hati_guest_streq(line, "write")) {
             char *text = arg_split(arg);
             int n = fs_write(arg, text);
             if (n < 0) puts("  fs full\n");
             else { puts("  wrote "); putu((u32)n); puts(" bytes to "); puts(arg); putc('\n'); }
-        } else if (streq(line, "echo")) {
+        } else if (hati_guest_streq(line, "echo")) {
             puts(arg); putc('\n');
-        } else if (streq(line, "uptime")) {
+        } else if (hati_guest_streq(line, "uptime")) {
             puts("  ticks="); putu(ticks); puts(" ("); putu(ticks / HZ); puts("s at 100 Hz)\n");
-        } else if (streq(line, "spin")) {
+        } else if (hati_guest_streq(line, "spin")) {
             u32 until = ticks + 2 * HZ;
             puts("  spinning 2s under preemption...\n");
             while (ticks < until) { }
             puts("  back. hearts kept beating: a="); putu(heart_a); puts(" b="); putu(heart_b); putc('\n');
-        } else if (streq(line, "halt")) {
+        } else if (hati_guest_streq(line, "halt")) {
             puts("  hati-os: witnessed, resting. goodbye.\n");
             qemu_exit();
         } else if (line[0]) {
