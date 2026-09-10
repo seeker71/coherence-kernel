@@ -9,7 +9,8 @@ The inventory also includes native Metal request ownership, concept-source
 auditing, source inspection, adaptive artifact traversal, byte slicing and
 searching, declarative attention, Glass observation/rendering, and quiet-speech
 context. Their implementation boundaries and recorded counterexamples remain in
-the targets. In particular, the attributed byte-operation documents supplement
+the targets. Form-owned specimen compilation and ordered binary64 native memory
+also have source-backed examples. In particular, the byte-operation documents supplement
 the omitted bare edge contracts; they do not erase differences between carriers.
 Historical measurements retain their source date and scope rather than becoming
 claims that the publisher just reran those experiments.
