@@ -1,13 +1,19 @@
 // Form supervises native argv children, streams and correlated choices.
 // The shell script only establishes cwd, file descriptors and a child group.
-// preludes: form-stdlib/bml/form-cli-heal-native-io.bml form-stdlib/bml/form-cli-heal-dynamic.bml form-stdlib/bml/form-cli-heal-timing.bml form-stdlib/bml/form-cli-heal-attention.bml
+// preludes: form-stdlib/bml/form-cli-heal-native-io.bml form-stdlib/bml/form-cli-heal-dynamic.bml form-stdlib/bml/form-cli-heal-timing.bml form-stdlib/organ-health.bml
 section [form.bml] {
  class FormCliHealNativeProcess {
   def fhn-stage-path(job, stage, suffix) = fhn-at(job, str_concat(stage, suffix));
   def fhn-id-char(b) = or(and(ge(b, 48), le(b, 57)), or(and(ge(b, 65), le(b, 90)), or(and(ge(b, 97), le(b, 122)), eq(b, 45))));
   def fhn-id-go(s, i) = if ge(i, str_len(s)) then 1 else and(fhn-id-char(str_byte_at(s, i)), fhn-id-go(s, add(i, 1)));
   def fhn-id(s) = and(gt(str_len(s), 0), and(le(str_len(s), 128), fhn-id-go(s, 0)));
-  def fhn-stage-event(job, stage, phase, elapsed, extra) = fhn-json-line(fhn-stage-path(job, stage, ".events.jsonl"), append(list(fhn-s("phase", phase), fhn-n("elapsed_ms", elapsed)), extra));
+  def fhn-stage-event(job, stage, phase, elapsed, extra) {
+   let origin = str_to_int(fhn-read(fhn-stage-path(job,stage,".clock")));
+   let recorded = if gt(origin,0) then sub(host_monotonic_ms(),origin) else elapsed;
+   let health = oh-extract(json-node-object(extra));
+   let frame = if oh-valid(health) then oh-frame(health) else 0;
+   fhn-json-line(fhn-stage-path(job, stage, ".events.jsonl"), append(list(fhn-s("phase", phase), fhn-n("elapsed_ms", recorded),fhn-n("sample_elapsed_ms",elapsed)), extra));
+  }
   def fhn-choice(job, stage, id, state, offered, selected, reason, result) {
    let saved = fhn-json-line(fhn-at(job, "choices.jsonl"), list(fhn-s("stage", stage), fhn-s("id", id), fhn-s("state", state), fhn-a("offered", fhn-strings(offered)), fhn-s("selected", selected), fhn-s("reason", reason), fhn-s("result", result), fhn-n("stamp_ms", now_unix_ms()), fhn-s("actor", "form-policy")));
    if str_eq(saved, "appended") then "recorded" else saved;
@@ -56,24 +62,23 @@ section [form.bml] {
   // Command-duration text has a separate, narrower grammar in fsuf-uint?.
   def fhn-flow-uint(node) = and(eq(node_type(node),1),and(str_eq(value_kind(node_value(node)),"int"),ge(node_value(node),0)));
   def fhn-flow-fields(doc, names, numeric) = if nil?(names) then 1 else and(json-object-has?(doc, head(names)), and(if numeric then fhn-flow-uint(json-object-get(doc, head(names))) else and(eq(str_byte_at(json-emit(json-object-get(doc, head(names))), 0), 34), le(str_len(fhn-string(doc, head(names))), 4096)), fhn-flow-fields(doc, tail(names), numeric)));
-  def fhn-flow-valid(doc) = and(eq(len(json-object-keys(doc)), 12), and(fhn-flow-fields(doc, list("phase", "route", "model", "model_path", "base_seal_sha256", "adapter_path", "adapter_sha256", "adapter_state"), 0), fhn-flow-fields(doc, list("input_tokens", "output_tokens", "position", "stamp_ms"), 1)));
+  def fhn-flow-valid(doc) = and(eq(len(json-object-keys(doc)),12),and(fhn-flow-fields(doc, list("phase", "route", "model", "model_path", "base_seal_sha256", "adapter_path", "adapter_sha256", "adapter_state"), 0), fhn-flow-fields(doc, list("input_tokens", "output_tokens", "position", "stamp_ms"), 1)));
   def fhn-observe-flow(job, stage, line, elapsed) {
    let doc = parse-json("native-token-flow", substring(line, 15, str_len(line)));
-   if fhn-flow-valid(doc) then fhn-save-flow(job, stage, doc, elapsed) else "";
+   if fhn-flow-valid(doc) then fhn-json-line(fhn-stage-path(job, stage, ".flow.jsonl"), append(json-object-pairs(doc), list(fhn-n("elapsed_ms", elapsed)))) else fhn-record-health(job,stage,oh-reading("token-flow-reader",stage,"protocol",json-node-string("typed counters and route"),json-node-int(str_len(line)),json-node-int(0),list(oh-need("source-diagnostics",oh-reference(fhn-stage-path(job,stage,".out")))),list("request-evidence","defer"),oh-reference(fhn-stage-path(job,stage,".out"))),elapsed);
   }
-  def fhn-note-error(job, stage, phase, elapsed) = if fha-error-phase(phase) then fhn-json-line(fhn-stage-path(job, stage, ".signals.jsonl"), list(fhn-s("phase", phase), fhn-n("elapsed_ms", elapsed))) else "";
-  def fhn-save-flow(job, stage, doc, elapsed) {
-   let signal = fhn-note-error(job, stage, fhn-string(doc, "phase"), elapsed);
-   fhn-json-line(fhn-stage-path(job, stage, ".flow.jsonl"), append(json-object-pairs(doc), list(fhn-n("elapsed_ms", elapsed))));
+  def fhn-observe-health(job,stage,line,elapsed) {
+   let row = parse-json("organ-health",substring(line,18,str_len(line)));
+   if oh-valid(row) then fhn-record-health(job,stage,row,elapsed) else fhn-record-health(job,stage,oh-reading("health-flow-reader",stage,"protocol",json-node-string("complete organ reading"),json-node-int(str_len(line)),json-node-int(0),list(oh-need("source-diagnostics",oh-reference(fhn-stage-path(job,stage,".out")))),list("request-evidence","defer"),oh-reference(fhn-stage-path(job,stage,".out"))),elapsed);
   }
-  def fhn-observe-line(job, stage, line, elapsed) = if eq(str_find(line, "form-peer stage ", 0), 0) then fhn-observe-stage(job, stage, line, elapsed) else if eq(str_find(line, "form-heal flow ", 0), 0) then fhn-observe-flow(job, stage, line, elapsed) else if and(str_eq(fhn-read(fhn-stage-path(job, stage, ".format")), "ollama-ndjson"), eq(str_byte_at(line, 0), 123)) then fhn-observe-ollama(job, stage, line, elapsed) else "";
+  def fhn-observe-line(job, stage, line, elapsed) = if eq(str_find(line,"form-organ health ",0),0) then fhn-observe-health(job,stage,line,elapsed) else if eq(str_find(line, "form-peer stage ", 0), 0) then fhn-observe-stage(job, stage, line, elapsed) else if eq(str_find(line, "form-heal flow ", 0), 0) then fhn-observe-flow(job, stage, line, elapsed) else if and(str_eq(fhn-read(fhn-stage-path(job, stage, ".format")), "ollama-ndjson"), eq(str_byte_at(line, 0), 123)) then fhn-observe-ollama(job, stage, line, elapsed) else "";
   def fhn-observe-ollama(job, stage, line, elapsed) {
    let doc = parse-json("ollama-response", line);
    let text = if eq(node_type(json-object-get(doc, "response")), 2) then fhn-string(doc, "response") else "";
    let appended = fhn-append(fhn-stage-path(job, stage, ".reply.partial"), text);
    let done = node_eq(json-object-get(doc, "done"), intern_trivial_bool(true));
    let state = if json-object-has?(doc, "error") then "error" else if done then "done" else "streaming";
-   let signal = fhn-note-error(job, stage, state, elapsed);
+   let signal = if json-object-has?(doc,"error") then fhn-record-health(job,stage,oh-reading("loopback-generation",stage,"provider-error",json-node-int(0),json-node-int(1),json-node-int(0),list(oh-need("provider-diagnostics",oh-reference(fhn-stage-path(job,stage,".out")))),list("request-evidence","defer"),oh-reference(fhn-stage-path(job,stage,".out"))),elapsed) else "";
    let saved = write_file(fhn-stage-path(job, stage, ".generation-status"), state);
    let counts = if and(done, and(eq(node_type(json-object-get(doc, "prompt_eval_count")), 1), eq(node_type(json-object-get(doc, "eval_count")), 1))) then list(fhn-n("input_tokens", fhn-number(doc, "prompt_eval_count")), fhn-n("output_tokens", fhn-number(doc, "eval_count"))) else list(fhn-s("token_count_state", "provider-has-not-reported-counts"));
    let flow = if done then fhn-json-line(fhn-stage-path(job, stage, ".flow.jsonl"), append(list(fhn-s("route", "ollama-loopback"), fhn-s("model", fhn-string(doc, "model")), fhn-s("model_path", "loopback-model-registry"), fhn-s("adapter_path", ""), fhn-s("adapter_state", "service-owned;no-caller-adapter-selected"), fhn-s("phase", state), fhn-n("elapsed_ms", elapsed)), counts)) else "";
@@ -111,9 +116,9 @@ section [form.bml] {
   def fhn-run-start(job, stage, seconds, cwd, input, argv) {
    let started = host_monotonic_ms();
    let wall = now_unix_ms();
+   let clock = write_file(fhn-stage-path(job,stage,".clock"),int_to_str(started));
    let eventFile = write_file(fhn-stage-path(job, stage, ".events.jsonl"), "");
    let flowFile = write_file(fhn-stage-path(job, stage, ".flow.jsonl"), "");
-   let signalFile = write_file(fhn-stage-path(job, stage, ".signals.jsonl"), "");
    let clearedAttention = fs_remove(fhn-stage-path(job, stage, ".attention.json"));
    let clearedStatus = fs_remove(fhn-stage-path(job, stage, ".raw-status"));
    let clearedPid = fs_remove(fhn-stage-path(job, stage, ".pid"));
@@ -164,8 +169,12 @@ section [form.bml] {
    let response = parse-json("native-dynamic-control", fhd-report(json-node-object(list(fhn-n("id", id), fhn-n("quiet_ms", quiet), fhn-n("progress_gap_ms", gap), fhn-s("control", "")))));
    let correlated = and(eq(fhn-number(response, "id"), id), and(eq(fhn-number(response, "correlated"), 1), fhn-member(list("continue", "inspect", "stop"), fhn-string(response, "action"))));
    let action = if correlated then fhn-string(response, "action") else "control-error";
+   let reading = oh-reading("process-progress",fhn-stage-path(job,stage,""),"cadence",json-node-int(mul(3,gap)),json-node-int(quiet),json-node-int(str_eq(action,"continue")),if str_eq(action,"continue") then list() else list(oh-need("process-state",json-node-int(child))),list("continue","inspect","stop"),oh-reference(fhn-stage-path(job,stage,".events.jsonl")));
+   let sensed = fhn-stage-event(job,stage,"organ-health",elapsed,list(json-node-pair("health",reading)));
+   let responseEvent = fhn-stage-event(job,stage,"organ-response",elapsed,list(json-node-pair("health",oh-response(reading,action))));
    let selected = fhn-choice(job, stage, int_to_str(id), "selected", list("continue", "inspect", "stop"), action, "observed-progress-gap", "awaiting-action");
    let sample = if str_eq(action, "inspect") then fhn-capture(list("/bin/ps", "-p", int_to_str(child), "-o", "pid=,stat=,time=,rss=")) else "progress-observation-continues";
+   let reobserved = fhn-stage-event(job,stage,"organ-action-observed",elapsed,list(json-node-pair("health",oh-applied(reading,action,json-node-string(sample)))));
    let applied = fhn-choice(job, stage, int_to_str(id), "applied", list("continue", "inspect", "stop"), action, "process-state-is-not-semantic-progress", sample);
    action;
   }
@@ -198,43 +207,29 @@ section [form.bml] {
    let reaped = fhn-stage-event(job, stage, "process-reaped", sub(host_monotonic_ms(), started), list(fhn-s("child_wait_status", actual), fhn-n("wrapper_status", waited)));
    let cleanup = json-node-object(list(fhn-s("state", if groupReleased then "released" else "members-remain"), fhn-s("group_members", fhn-group-members(child)), fhn-s("child_wait_status", actual)));
    let observed = fhn-stage-event(job, stage, "process-cleanup-observed", sub(host_monotonic_ms(), started), list(json-node-pair("cleanup", cleanup)));
-   let attention = fhn-attend(job, stage, finalStatus, if groupReleased then nth(reconciled, 1) else "cleanup-incomplete", started);
+   let ended = fhn-stage-event(job,stage,"organ-health",sub(host_monotonic_ms(),started),list(json-node-pair("health",oh-reading("process-progress",fhn-stage-path(job,stage,""),"cadence",json-node-string("work-settled"),json-node-string(if groupReleased then "work-settled" else "release-pending"),if groupReleased then json-node-null() else json-node-int(0),if groupReleased then list() else list(oh-need("owned-process-release",cleanup)),list("request-evidence","defer"),cleanup))));
+   let health = fhn-record-health(job,stage,oh-reading("native-process",stage,"exit",json-node-int(0),json-node-int(finalStatus),json-node-int(eq(finalStatus,0)),if eq(finalStatus,0) then list() else list(oh-need(if str_eq(reason,"timeout") then "stage-timing" else if str_eq(reason,"cancelled") then "caller-direction" else "source-diagnostics",json-node-string(reason))),list("request-evidence","defer"),json-node-object(list(json-node-pair("stdout",oh-reference(fhn-stage-path(job,stage,".out"))),json-node-pair("stderr",oh-reference(fhn-stage-path(job,stage,".err")))))),sub(host_monotonic_ms(),started));
    let saved = fhn-process-record(job, stage, if groupReleased then "finished" else "release-pending", started, wall, seconds, program, child, finalStatus, if groupReleased then nth(reconciled,1) else "cleanup-incomplete", cleanup);
    let result = write_file(fhn-stage-path(job, stage, ".status"), int_to_str(finalStatus));
    let learnerLock = if groupReleased then fhn-release-learner-lock(job, child) else 0;
    int_to_str(finalStatus);
   }
-  def fhn-attend(job, stage, status, reason, started) {
-   let signals = fhn-json-rows(split-on(fhn-read(fhn-stage-path(job, stage, ".signals.jsonl")), "\n"));
-   let kind = fha-kind(status, reason, len(signals));
-   if str_eq(kind, "") then "" else fhn-attention-exchange(job, stage, status, reason, started, kind, signals);
+  def fhn-record-health(job,stage,row,elapsed) {
+   let recorded = fhn-stage-event(job,stage,"organ-health",elapsed,list(json-node-pair("health",row)));
+   if and(oh-pain(row),str_eq(oh-str(row,"stage"),"observe")) then fhn-care-health(job,stage,row,elapsed) else recorded;
   }
-  def fhn-attention-exchange(job, stage, status, reason, started, kind, signals) {
-   let id = now_unix_ms();
-   let outbound = bfc-envelope(0, id, 0, list(status, len(signals)), 4);
-   let sent = bfc-record-out(outbound, status);
-   let before = fhn-stage-event(job, stage, "attention-observed", sub(host_monotonic_ms(), started), list(fhn-n("exchange", id), fhn-s("kind", kind), fhn-n("status", status), fhn-n("reported_errors", len(signals))));
-   let inbound = bfc-control(outbound, 4);
-   let received = bfc-record-in(inbound, bfc-payload(inbound));
-   fhn-attention-apply(job, stage, status, reason, started, kind, signals, outbound, inbound);
-  }
-  def fhn-attention-apply(job, stage, status, reason, started, kind, signals, outbound, inbound) {
-   let id = bfc-exchange(outbound);
-   let action = fha-action(fha-select(outbound, inbound));
-   let selected = fhn-choice(job, stage, int_to_str(id), "selected", list("request-evidence", "defer"), action, kind, "awaiting-action");
-   let result = if str_eq(action, "request-evidence") then fhn-attention-evidence(job, stage, status, reason, kind, signals, id) else "deferred;original-failure-retained";
-   let applied = fhn-choice(job, stage, int_to_str(id), "applied", list("request-evidence", "defer"), action, kind, result);
-   let after = fhn-stage-event(job, stage, "attention-reobserved", sub(host_monotonic_ms(), started), list(fhn-n("exchange", id), fhn-s("action", action), fhn-s("result", result), fhn-n("status", status), fhn-n("resolved", 0)));
-   let observed = bfc-record-out(bfc-envelope(0, id, 0, list(status, file_size(fhn-stage-path(job, stage, ".attention.json"))), 4), status);
-   result;
-  }
-  def fhn-attention-evidence(job, stage, status, reason, kind, signals, id) {
-   let raw = fhn-read(fhn-stage-path(job, stage, ".raw-status"));
-   let signal = ela-attend(ela-signal(if str_eq(kind, "timeout") then "timeout" else "error", 0, list(status, len(signals)), "native-process"));
-   let path = fhn-stage-path(job, stage, ".attention.json");
-   let row = json-node-object(list(fhn-s("version", "failure-attention-v1"), fhn-n("exchange", id), fhn-s("kind", kind), fhn-s("reason", reason), fhn-n("status", status), fhn-s("child_wait_status", raw), fhn-n("observed_unix_ms", now_unix_ms()), fhn-n("resolved", ela-release?(signal)), fhn-s("next", fha-next(kind)), fhn-a("signals", signals), json-node-pair("stdout", fha-file(fhn-stage-path(job, stage, ".out"))), json-node-pair("stderr", fha-file(fhn-stage-path(job, stage, ".err"))), json-node-pair("token_flow", fha-file(fhn-stage-path(job, stage, ".flow.jsonl"))), json-node-pair("stage_events", fha-file(fhn-stage-path(job, stage, ".events.jsonl")))));
-   let saved = fhn-write-json(path, row);
-   if and(gt(saved, 0), str_eq(fhn-read(path), str_concat(json-emit(row), "\n"))) then path else "attention-evidence-write-failed";
+  def fhn-care-health(job,stage,row,elapsed) {
+   let offers = oh-values(json-array-elements(oh-get(row,"offers")));
+   let response = oh-response(row,if oh-has(offers,"request-evidence") then "request-evidence" else "defer");
+   let action = oh-select(row,response,"defer");
+   let selected = fhn-choice(job,stage,oh-str(row,"id"),"selected",offers,action,oh-str(row,"aspect"),"organ-request");
+   let incoming = fhn-stage-event(job,stage,"organ-response",elapsed,list(json-node-pair("health",response)));
+   let started = host_monotonic_ms();
+   let result = if str_eq(action,"request-evidence") then json-node-object(list(json-node-pair("stdout",oh-reference(fhn-stage-path(job,stage,".out"))),json-node-pair("stderr",oh-reference(fhn-stage-path(job,stage,".err"))),json-node-pair("token_flow",oh-reference(fhn-stage-path(job,stage,".flow.jsonl"))),fhn-s("child_status",fhn-read(fhn-stage-path(job,stage,".raw-status"))))) else json-node-string("need-remains-open");
+   let applied = oh-applied(row,action,result);
+   let observed = fhn-stage-event(job,stage,"organ-action-observed",add(elapsed,sub(host_monotonic_ms(),started)),list(json-node-pair("health",applied)));
+   let choice = fhn-choice(job,stage,oh-str(row,"id"),"applied",offers,action,oh-str(row,"aspect"),json-emit-precise(result));
+   "appended";
   }
   // The status rename can occur between the first read and the liveness probe.
   // Reconcile after reaping; explicit cancellation/deadline statuses retain meaning.

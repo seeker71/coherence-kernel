@@ -51,6 +51,15 @@ optimizer, configuration and input data are content-bound. An interrupted round
 with a complete generation can finish assessment without repeating its update.
 All completed generations remain available; storage grows with experience.
 
+The learner expresses its own health through `organ-health-v1` in the session
+event flow. Every assessed row carries its actual before/after loss and source
+identity. A hurt row asks for rehearsal, or for related training evidence when
+the assessment row itself must stay excluded. Promotion emits the same
+observation, response and applied-action shape as the process and generation
+organs. Retaining a serving adapter is observed care; it does not erase the
+candidate's need. `observe/organ-health-run.bml` reads these current needs from
+the session's `events.jsonl` without another model admission.
+
 After native execution or retrieval misses, `ask` can use the evaluated session
 adapter when it has a promoted dialogue teaching. Coding and healing require a
 promoted checked example in their respective scope before trying its proposal.

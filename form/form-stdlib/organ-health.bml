@@ -1,0 +1,69 @@
+// One language for an organ's live reading, need, response and changed state.
+// The organ supplies health and meaning. This carrier knows no error names,
+// model families, resource catalogue, thresholds or expected verdict numbers.
+// preludes: form-stdlib/json-precise.bml form-stdlib/spool-bell-transport.fk form-stdlib/line-grammar.fk
+section [form.bml] {
+ class OrganHealth {
+  def oh-s(key,value) = json-node-pair(key,json-node-string(value));
+  def oh-n(key,value) = json-node-pair(key,json-node-int(value));
+  def oh-get(row,key) = json-object-get(row,key);
+  def oh-str(row,key) = json-string-value(oh-get(row,key));
+  def oh-has(values,value) = if nil?(values) then 0 else or(str_eq(head(values),value),oh-has(tail(values),value));
+  def oh-strings(values) = if nil?(values) then list() else cons(json-node-string(head(values)),oh-strings(tail(values)));
+  def oh-values(nodes) = if nil?(nodes) then list() else cons(json-string-value(head(nodes)),oh-values(tail(nodes)));
+  def oh-without(pairs,key) = if nil?(pairs) then list() else if str_eq(json-pair-key(head(pairs)),key) then oh-without(tail(pairs),key) else cons(head(pairs),oh-without(tail(pairs),key));
+  def oh-set(row,key,value) = json-node-object(append(oh-without(json-object-pairs(row),key),list(json-node-pair(key,value))));
+  def oh-need(resource,detail) = json-node-object(list(oh-s("resource",resource),json-node-pair("detail",detail)));
+  def oh-reference(path) = json-node-object(list(oh-s("path",path),oh-n("bytes",file_size(path)),oh-n("observed_unix_ms",now_unix_ms())));
+  def oh-reading(organ,flow,aspect,expected,observed,health,needs,offers,evidence) {
+   let id = str_concat(int_to_str(host_pid()),str_concat(":",str_concat(int_to_str(now_unix_ms()),str_concat(":",str_concat(flow,str_concat(":",aspect))))));
+   json-node-object(list(oh-s("schema","organ-health-v1"),oh-s("id",id),oh-s("organ",organ),oh-s("flow",flow),oh-s("aspect",aspect),oh-s("stage","observe"),json-node-pair("expected",expected),json-node-pair("observed",observed),json-node-pair("health",health),oh-n("surprise",not(node_eq(expected,observed))),json-node-pair("needs",json-node-array(needs)),json-node-pair("offers",json-node-array(oh-strings(offers))),oh-s("selected",""),json-node-pair("evidence",evidence),oh-n("observed_at_ms",now_unix_ms()),oh-n("at_ms",now_unix_ms())));
+  }
+  def oh-text(row,key) = and(eq(node_type(oh-get(row,key)),2),gt(str_len(oh-str(row,key)),0));
+  def oh-health-value(value) = or(node_eq(value,json-node-null()),or(node_eq(value,json-node-int(0)),node_eq(value,json-node-int(1))));
+  def oh-array(row,key) = node_eq(node_category(oh-get(row,key)),JSON-ARRAY());
+  def oh-valid(row) = and(str_eq(oh-str(row,"schema"),"organ-health-v1"),and(oh-text(row,"id"),and(oh-text(row,"organ"),and(oh-text(row,"flow"),and(oh-text(row,"aspect"),and(oh-has(list("observe","response","applied"),oh-str(row,"stage")),and(json-object-has?(row,"expected"),and(json-object-has?(row,"observed"),and(oh-health-value(oh-get(row,"health")),and(oh-array(row,"needs"),oh-array(row,"offers")))))))))));
+  def oh-pain(row) = node_eq(oh-get(row,"health"),json-node-int(0));
+  def oh-response(reading,selected) = oh-set(oh-set(reading,"stage",json-node-string("response")),"selected",json-node-string(selected));
+  def oh-select(reading,response,fallback) = if not(oh-valid(response)) then fallback else if not(and(str_eq(oh-key(reading),oh-key(response)),and(str_eq(oh-str(reading,"id"),oh-str(response,"id")),and(str_eq(oh-str(response,"stage"),"response"),oh-has(oh-values(json-array-elements(oh-get(reading,"offers"))),oh-str(response,"selected")))))) then fallback else oh-str(response,"selected");
+  // Applied describes an action, never a repaired health reading.
+  def oh-applied(reading,selected,result) = oh-set(oh-set(oh-set(oh-response(reading,selected),"stage",json-node-string("applied")),"result",result),"at_ms",json-node-int(now_unix_ms()));
+  def oh-frame(row) = fb_record(intern_trivial_int(now_unix_ms()),"organ-health.bml",if oh-pain(row) then 1 else 0);
+  def oh-emit(path,row) {
+   if not(oh-valid(row)) then form_error("organ health event has no complete identity or observation") else oh-emit-valid(path,row);
+  }
+  def oh-emit-valid(path,row) {
+   let text = str_concat(json-emit-precise(row),"\n");
+   let wrote = sbt-append(path,text);
+   let frame = oh-frame(row);
+   if ne(wrote,str_len(text)) then form_error("organ health event transport is incomplete") else row;
+  }
+  def oh-voice(row) {
+   let frame = oh-frame(row);
+   print_str(str_concat("form-organ health ",str_concat(json-emit-precise(row),"\n")));
+  }
+  def oh-extract(row) = if str_eq(oh-str(row,"schema"),"organ-health-v1") then row else if json-object-has?(row,"health") then oh-get(row,"health") else json-node-null();
+  def oh-key(row) = json-emit(json-node-array(list(oh-get(row,"organ"),oh-get(row,"flow"),oh-get(row,"aspect"))));
+  def oh-replace(rows,row) = if nil?(rows) then list(row) else if str_eq(oh-key(head(rows)),oh-key(row)) then cons(row,tail(rows)) else cons(head(rows),oh-replace(tail(rows),row));
+  def oh-observed(row) = if json-object-has?(row,"observed_at_ms") then row else oh-set(row,"observed_at_ms",oh-get(row,"at_ms"));
+  def oh-find(rows,row) = if nil?(rows) then json-node-null() else if str_eq(oh-key(head(rows)),oh-key(row)) then head(rows) else oh-find(tail(rows),row);
+  def oh-control-reading(held,row) {
+   let prior = oh-find(held,row);
+   let bound = and(oh-valid(prior),and(str_eq(oh-str(prior,"id"),oh-str(row,"id")),oh-has(oh-values(json-array-elements(oh-get(prior,"offers"))),oh-str(row,"selected"))));
+   if bound then oh-replace(held,oh-set(oh-set(oh-set(oh-set(prior,"stage",oh-get(row,"stage")),"selected",oh-get(row,"selected")),"result",oh-get(row,"result")),"at_ms",oh-get(row,"at_ms"))) else oh-replace(held,oh-reading("health-flow",oh-str(row,"flow"),"control-correlation",json-node-string("response bound to an observed offer"),json-node-string(oh-str(row,"id")),json-node-int(0),list(oh-need("correlated-observation",oh-get(row,"evidence"))),list("request-evidence","defer"),oh-get(row,"evidence")));
+  }
+  def oh-current(rows,held) = if nil?(rows) then held else oh-current(tail(rows),if not(oh-valid(oh-extract(head(rows)))) then held else if str_eq(oh-str(oh-extract(head(rows)),"stage"),"observe") then oh-replace(held,oh-observed(oh-extract(head(rows)))) else oh-control-reading(held,oh-extract(head(rows))));
+  def oh-lines(lines,held) = if nil?(lines) then held else if str_eq(head(lines),"") then oh-lines(tail(lines),held) else oh-lines(tail(lines),oh-current(list(parse-json("organ-health-flow",head(lines))),held));
+  // One transport chunk and the unfinished event are held while the file flows.
+  // The current map grows with distinct organ/flow/aspect identities, not tokens.
+  def oh-age(rows,now) = if nil?(rows) then list() else cons(oh-set(head(rows),"observation_age_ms",if json-object-has?(head(rows),"observed_at_ms") then json-node-int(sub(now,json-int-value(oh-get(head(rows),"observed_at_ms")))) else json-node-null()),oh-age(tail(rows),now));
+  def oh-read(path) = oh-age(oh-read-from(path,0,"",list()),now_unix_ms());
+  def oh-read-from(path,offset,pending,held) = if ge(offset,file_size(path)) then if str_eq(pending,"") then held else oh-lines(list(pending),held) else oh-read-chunk(path,offset,pending,held,read_file_slice(path,offset,65536));
+  def oh-read-chunk(path,offset,pending,held,chunk) {
+   let lines = split-on(str_concat(pending,chunk),"\n");
+   let reversed = reverse(lines);
+   if eq(str_len(chunk),0) then held else oh-read-from(path,add(offset,str_len(chunk)),head(reversed),oh-lines(reverse(tail(reversed)),held));
+  }
+ }
+ 0;
+}

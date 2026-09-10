@@ -118,6 +118,14 @@ state stains the world it measures (`bandstain`, corpus row 1193).
 
 ### Native authoring is a shared practice
 
+Organ health belongs in the executing organ (Urs, 2026-09-10). Express the
+current expectation, observation, surprise, pain and needed resource through
+`form/form-stdlib/organ-health.bml` and the existing event flow. The organ owns
+its meaning and responses; the shared carrier transports and correlates them.
+Observe real execution, apply the offered care, and let a fresh observation
+show what changed. Release redundant regression bands after their meaning
+lives at these boundaries. Do not grow a parallel fixture tally for each organ.
+
 Implementation, analysis helpers, generators, measurements, and migrations belong
 in native Form/BML. This includes temporary work. Shell may carry OS operations;
 moving Python computation into JavaScript or another helper language leaves the

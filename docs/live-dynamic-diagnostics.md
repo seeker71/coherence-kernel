@@ -63,34 +63,50 @@ For ordinary successful work with no meaningful branch or surprise, a new window
 is optional. The practice exists to increase diagnostic resolution, not to add
 ceremony to every command.
 
-## Fast checkout witness
+## Health belongs to the running organ
 
-The native healing process runner now opens an attention exchange after a
-nonzero exit, explicit timeout, cancellation, or a retained typed model error.
-It records the offered actions (`request-evidence`, `defer`), correlates the
-selected response, reads the original exit and output-file metadata, writes
-and rereads the evidence manifest, and re-observes the unresolved status.
-Missing or mismatched control selects evidence acquisition. The runner returns
-the original process status so its caller can make the next checked attempt.
+`form/form-stdlib/organ-health.bml` carries a shared event language. An organ
+names its identity, flow and aspect; its expectation and observation; its own
+health reading (`1`, `0`, or `null` for unknown); needed resources; offered
+responses; and source evidence. The transport does not maintain an error-name
+catalogue or decide what health means for another organ.
 
-Each stage's `.attention.json` links its original stdout, stderr, token flow,
-and timing events; output bytes are shared by reference. File sizes are the
-snapshot at `observed_unix_ms`. The current JSON timing report includes this
-attention reading. Framebuffer events contain only opaque exchange identities
-and numeric observations. Private output is never placed in the framebuffer.
+The process organ observes its actual exit and owned-process release. The
+generation organ senses output-byte delivery, prediction refusal and context
+pressure where they occur. The session learner reads each actual before/after
+loss and asks for rehearsal or related training evidence when it needs care.
+Held-out assessment rows remain excluded from training. These observations
+flow during execution, without a separate fixture tally.
 
-A final diagnostic line without a newline is still consumed. Explicit native
-`forward-refused`, `stream-write-refused`, `context-capacity`, and `error` phases,
-plus loopback provider errors, remain signals even with process exit zero or a
-later provider `done` row. Words such as “error” in ordinary text do not trigger
-this policy. Evidence acquisition does not establish that the cause is fixed;
-`resolved` remains zero. This exchange runs at process completion; live silence
-still uses the existing dynamic inspection path. Numerical corruption that the
-model has not reported requires its own diagnostic probe.
+Responses correlate with the organ's observation and offered action. Applied
+care retains that observation's health; only a new observation can change it.
+The generic reader retains a mismatched response as a request for the missing
+correlated observation. A healthy process exit cannot erase another organ's
+pain. Resource names are open data, so an unfamiliar organ can ask through the
+same flow. A request does not claim the resource was supplied.
+Readings retain their observation time and expose their age. Recording care
+does not refresh the health observation's age. The latest recorded reading is
+an observation at that time, not a claim of continuous monitoring afterward.
 
-`form/form-stdlib/tests/form-cli-heal-attention-band.fk` witnesses these cases
-with real local children and isolated files (expected `262143`). It calls no
-model and trains no evaluation example.
+The native process runner consumes `form-organ health` events while its child
+runs, including a final line without a newline. It gathers available evidence
+when offered that action and leaves unsupported needs open. Original output
+bytes remain referenced; framebuffer events carry only opaque numeric data.
+Stage timing and choices retain their actual observations. The current JSON
+timing report projects the health of each organ/flow/aspect.
+
+Read a flow by sending its event-file path to
+`./fkwu observe/organ-health-run.bml`. The reader holds one input chunk, the
+unfinished event and the current organ map. An empty flow yields no readings;
+it cannot establish that every organ is healthy.
+
+`./fkwu observe/form-cli-heal-process-run.bml` accepts one JSON request with
+`argv`, optional `input`, and optional `seconds` (zero means dynamic progress).
+It runs that real command through the process organ and returns its actual
+status, evidence directory and health readings. This is a general execution
+door, with no fixture list or expected verdict.
+
+## Kernel protocol witness
 
 After the normal ground and freshness checks:
 
