@@ -10,7 +10,10 @@ It was built from this checkout with the repository's ordinary Darwin carrier:
 ```
 cc -O2 -mmacosx-version-min=13.3 \
   -o fkwu-darwin-arm64 \
-  runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
+  runtime/fkwu-uni.c
+cc -O2 -dynamiclib -mmacosx-version-min=13.3 \
+  -o form/native/metal/fk-metal-carrier.dylib \
+  form/native/metal/fk-metal-carrier.m \
   -framework Metal -framework Foundation -fobjc-arc
 ```
 
@@ -22,7 +25,7 @@ c62fdab08475f5fbf936ace910af1d047e82b593c18f825fe6556a96ed876c1b  runtime/fkwu-u
 9480a7cc95ad5415264c850003207869a93aacbee05110c1508fddfee9f1ced6  runtime/bootstrap/fkwu-darwin-arm64
 ```
 
-The Mach-O declares arm64 and macOS 13.3. It links only macOS system libraries
-and the Metal, Foundation, and CoreFoundation frameworks. The committed binary
+The Mach-O declares arm64 and macOS 13.3. The binary links only macOS system
+libraries; Metal is admitted through the dynamic carrier artifact. The committed binary
 directly answered grounding `42`, recursion `55`, freshness `31`, and numeric
 lists `[1, 2.5, [3, 4]]` before admission.

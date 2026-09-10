@@ -9,20 +9,27 @@
 ;     not finish at all, which is the point);
 ;   - metal_status speaks wait_frame=timeout and shelf=1 — the zero is typed, and the
 ;     buffer is owed, not dropped.
-; Then the cell hands the Form row (hearth-metal-deadline-ms, the one home of the
-; default) and syncs again: the shelf settles, wait_frame=released, shelf=0, the
-; status no longer claims a timeout, and the buffer's answer reads back as exactly
-; 8000000 — nothing was fabricated on the timeout path; the work was real and it
-; finished. The hand-over itself reads back as data: the door answers the deadline
-; that stood before (-1 when none did, then the 1 it replaced).
+; A free while that shelf stands is refused, including for the mmap-backed lifetime
+; that cannot be left to Metal. Then the cell hands the Form row
+; (hearth-metal-deadline-ms, the one home of the default) and READS WITHOUT AN
+; EXPLICIT SYNC: read is the quiescence door, so it settles the shelf itself,
+; wait_frame=released, shelf=0, and the answer is exactly 8000000. A free after
+; that read succeeds. Nothing was fabricated on the timeout path; the work was
+; real and it finished. The hand-over itself reads back as data: the door answers
+; the deadline that stood before (-1 when none did, then the 1 it replaced).
+; Finally it enqueues the same work over ones and immediately overwrites the input
+; with twos. The write must first drain the encoded batch: the output remains N,
+; not 2N, and status says no batch is still pending. This is the live witness for
+; pooled-buffer refresh ownership, not a source-shape assertion.
 ;
 ; RUN:  ./fkwu form/form-stdlib/tests/metal-deadline-band.fk
-; A ./fkwu built without the carrier answers metal_linked=false and this band reports 0:
+; A ./fkwu run without the dynamic carrier answers metal_loaded=false and this band reports 0:
 ; every other bit is evidence only once the door is real (bit 1).
 ;
-; Verdict 127 = 1 door-linked | 2 none-stood-before | 4 short-deadline-typed-timeout
+; Verdict 511 = 1 door-loaded | 2 none-stood-before | 4 short-deadline-typed-timeout
 ;             | 8 hand-over-reads-back | 16 shelf-released | 32 answer-exact
-;             | 64 status-carries-the-row.
+;             | 64 status-carries-the-row | 128 free-refused-until-read-quiesced
+;             | 256 host-write-drains-before-mutation.
 ; Bits are powers of two so a dark bit is readable on sight.
 ;
 ; preludes: form-stdlib/hearth.bml
@@ -56,8 +63,8 @@
                     "}" )))))))))))))))))))))
 
     (let st0 (metal_status))
-    (let linked (mdl-has st0 "metal_linked=true"))
-    (if (eq linked 0)
+    (let loaded (if (mdl-has st0 "metal_loaded=true") (mdl-has st0 "metal_carrier=dynamic") 0))
+    (if (eq loaded 0)
         (do (print_str st0) 0)
         (do
             (let before (metal_deadline 1))
@@ -76,16 +83,39 @@
                 (str_concat " waited-ms=" (str_concat (int_to_str waited-ms) (mdl-nl))))))
             (print_str st1)
             (let prev (metal_deadline (hearth-metal-deadline-ms)))
+            ; Free must see a timed-out command buffer as outstanding even though
+            ; it has left both the open batch and in-flight fence tables.
+            (let free-while-shelved (metal_buf_free hx))
             (let t1 (now_unix_ms))
-            (let s2 (metal_sync))
+            ; No explicit metal_sync here: this is the regression witness. Read
+            ; must share the same quiescence predicate and settle the shelf.
+            (let ybytes (metal_buf_read hy 0 4))
             (let settled-ms (sub (now_unix_ms) t1))
             (let st2 (metal_status))
-            (let ybytes (metal_buf_read hy 0 4))
+
+            ; The input is ones when this dispatch is encoded. A write of twos
+            ; follows before any explicit sync. If host write races the still-open
+            ; batch, the GPU sees twos and answers 2N. Quiescence makes it finish
+            ; over ones first and only then admits the mutation.
+            (let enq2 (metal_enqueue pipe (mdl-bind hx hy (mdl-n)) 1))
+            (let twos (str_concat (mdl-le32 2) (str_concat (mdl-le32 2)
+                       (str_concat (mdl-le32 2) (mdl-le32 2)))))
+            (let write-after-enqueue (metal_buf_write hx 0 twos))
+            (let st3 (metal_status))
+            (let y-after-write (metal_buf_read hy 0 4))
+            (let free-after-read (metal_buf_free hx))
+            (let free-output (metal_buf_free hy))
             (print_str (str_concat "row: before=" (str_concat (int_to_str before)
                 (str_concat " prev=" (str_concat (int_to_str prev)
-                (str_concat " settled-ms=" (str_concat (int_to_str settled-ms) (mdl-nl))))))))
+                (str_concat " free-shelved=" (str_concat (int_to_str free-while-shelved)
+                (str_concat " free-settled=" (str_concat (int_to_str free-after-read)
+                (str_concat " settled-ms=" (str_concat (int_to_str settled-ms) (mdl-nl))))))))))))
             (print_str st2)
-            (add (mul linked 1)
+            (print_str (str_concat "write-quiescence: enqueue="
+                (str_concat (int_to_str enq2)
+                (str_concat " write=" (str_concat (int_to_str write-after-enqueue) (mdl-nl))))))
+            (print_str st3)
+            (add (mul loaded 1)
             (add (mul (if (eq before -1) 1 0) 2)
             (add (mul (if (and (eq s1 0)
                           (and (lt waited-ms 1000)
@@ -96,5 +126,11 @@
                           (and (eq (mdl-has st2 "shelf=0") 1)
                                (eq (mdl-has st2 "timeout") 0))) 1 0) 16)
             (add (mul (if (str_eq ybytes (mdl-le32 (mdl-n))) 1 0) 32)
-                 (mul (mdl-has st2 (str_concat "wait_deadline_ms="
-                        (int_to_str (hearth-metal-deadline-ms)))) 64))))))))))
+            (add (mul (mdl-has st2 (str_concat "wait_deadline_ms="
+                        (int_to_str (hearth-metal-deadline-ms)))) 64)
+            (add (mul (if (and (eq free-while-shelved 0)
+                          (and (eq free-after-read 1) (eq free-output 1))) 1 0) 128)
+                 (mul (if (and (eq enq2 1)
+                          (and (eq write-after-enqueue 16)
+                          (and (eq (mdl-has st3 "pending=0") 1)
+                               (str_eq y-after-write (mdl-le32 (mdl-n)))))) 1 0) 256))))))))))))

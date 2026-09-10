@@ -1,30 +1,28 @@
-// fk-metal-carrier.m — the strong symbol behind the kernel's Metal door.
+// fk-metal-carrier.m — optional dynamic carrier behind the kernel's Metal door.
 //
 // WHAT WAS MISSING. runtime/fkwu-uni.c has declared two Metal primitives for a long time —
 // metal_matvec_fixture (tag 203) and metal_matvec_f32 (tag 204) — and form-cli-repl.fk:82 has
 // been CALLING metal_matvec_f32 with (msl-text, kernel-name, model-bytes) the whole time. Both
-// primitives are __attribute__((weak)) stubs that return FK_METAL_*_UNLINKED, which the kernel
-// turns into "SKIP ... metal_linked=false". So the door was built, wired, and called, and no one
-// ever wrote the thing on the other side of it. Every call to it has answered SKIP. This file is
-// that missing side. Nothing in the kernel changes; linking this translation unit in overrides
-// the weak stubs, and the SAME Form cell that printed SKIP yesterday dispatches on the GPU.
+// primitives now route through a small dynamic resolver in runtime/fkwu-uni.c. Without a carrier
+// artifact the kernel answers "metal_loaded=false". When this file is compiled as a .dylib and
+// found by that resolver, the SAME Form cell that printed SKIP yesterday dispatches on the GPU.
 //
-// BUILD. Metal linking is automatic: validate.sh's own build_fkwu_src links this file into the
-// repo-root fkwu by default on Darwin (falling back to a plain build elsewhere or on link
-// failure) — there is no separate binary to hand-compile and no "fkwu-metal" name. For a
-// standalone build outside validate.sh (direct experimentation), the same one-liner produces
-// the same binary, just named fkwu, not "fkwu-metal":
+// BUILD. fkwu is plain C. This carrier is an optional dynamic artifact loaded by the running
+// process, not a second executable and not a source file linked into the seed. validate.sh builds
+// both artifacts on Darwin. For direct experimentation:
 //
-//   cc -O2 -o fkwu runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
+//   cc -O2 -o fkwu runtime/fkwu-uni.c
+//   cc -O2 -dynamiclib -o form/native/metal/fk-metal-carrier.dylib \
+//      form/native/metal/fk-metal-carrier.m \
 //      -framework Metal -framework Foundation -fobjc-arc
 //
-// WHY THIS IS NATIVE AND THAT IS NOT A COMPROMISE. Metal is reachable only through an Objective-C
-// API; there is no C-only and no Form-only path to a GPU on this machine. That makes this an ORGAN,
-// the same category as sense_cam_grab and sense_mic_capture, which are native in the kernel for the
-// identical reason. The standing instruction this body works under is that the RECIPE must be the
-// body's — no bash deciding, no python computing. An organ that opens a device is not a recipe. The
-// arithmetic here is zero: this file compiles text it was handed, binds bytes it was handed, and
-// dispatches a kernel it was named. Every number belongs to the MSL, and the MSL is emitted by Form.
+// FKWU_METAL_CARRIER selects an adapter when starting a process. Form program versions are
+// admitted and compared live through bml/metal-jit.bml, using this same loaded adapter.
+//
+// This temporary adapter calls Metal's Objective-C ABI. Form owns the generated programs,
+// their identities, cache policy and version selection. Source and pipeline creation happen
+// in RAM; a caller can capture/reuse a compiled binary archive. Form-emitted host-ABI calls
+// can replace this adapter as that narrower native call surface is witnessed.
 //
 // THE CONTRACT, stated here because nothing else states it. The door is three strings in, one
 // string out. Byte layout of the model argument, little-endian:
@@ -80,7 +78,7 @@
 //
 // WHY metal_status EXISTS AND IS NOT DECORATION. Every other primitive here returns
 // an integer handle, and an unbound name under axiom-5 recovers to NOTHING and
-// answers 0. A 0 handle from a door that was never linked and a 0 handle from a
+// answers 0. A 0 handle from a door whose dynamic carrier was not admitted and a 0 handle from a
 // door that refused are the same shape, and so is a 0 from a typo. metal_status
 // speaks — it is the one primitive whose answer cannot be counterfeited by a numb
 // call, and the band gates on it before it believes any other number.
@@ -163,11 +161,8 @@
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <unistd.h>
-
-#define FK_METAL_FIXTURE_UNLINKED (0 - 4611686018427387903LL)
-#define FK_METAL_MATVEC_UNLINKED (0 - 4611686018427387902LL)
-#define FK_METAL_HANDLE_UNLINKED (0 - 4611686018427387901LL)
 
 // One device and one pipeline cache for the process. Compiling MSL costs tens of milliseconds, and
 // a caller stepping a model would otherwise pay it on every single dispatch. Keyed by the MSL text
@@ -201,11 +196,11 @@ long long fk_metal_matvec_fixture_external(char *out, long long cap) {
         if (!fk_metal_up(&err)) {
             return fk_emit(out, cap,
                 [NSString stringWithFormat:
-                    @"SKIP fkwu-form-cli-metal-direct: %@\nmetal_owner=fkwu-form-cli\nmetal_linked=false\n", err]);
+                    @"SKIP fkwu-form-cli-metal-direct: %@\nmetal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=false\n", err]);
         }
         return fk_emit(out, cap,
             [NSString stringWithFormat:
-                @"PASS fkwu-form-cli-metal-direct\nmetal_owner=fkwu-form-cli\nmetal_linked=true\n"
+                @"PASS fkwu-form-cli-metal-direct\nmetal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=true\n"
                  "device=%@\nunified_memory=%d\nmax_threadgroup=%lu\n",
                 [fk_dev name], (int)[fk_dev hasUnifiedMemory],
                 (unsigned long)[fk_dev maxThreadsPerThreadgroup].width]);
@@ -221,7 +216,7 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
         if (!fk_metal_up(&err)) {
             return fk_emit(out, cap,
                 [NSString stringWithFormat:
-                    @"SKIP fkwu-form-cli-metal-matvec-f32: %@\nmetal_owner=fkwu-form-cli\nmetal_linked=false\n", err]);
+                    @"SKIP fkwu-form-cli-metal-matvec-f32: %@\nmetal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=false\n", err]);
         }
 
         // The header must be present before it is trusted. A truncated model argument that we read
@@ -323,7 +318,7 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
 
         NSMutableString *r = [NSMutableString string];
         [r appendString:@"PASS fkwu-form-cli-metal-matvec-f32\n"];
-        [r appendString:@"metal_owner=fkwu-form-cli\nmetal_linked=true\n"];
+        [r appendString:@"metal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=true\n"];
         [r appendFormat:@"device=%@\nkernel=%@\n", [fk_dev name], fn];
         [r appendFormat:@"rows=%u\ncols=%u\n", rows, cols];
         [r appendFormat:@"sum=%.9g\n", sum];
@@ -341,11 +336,15 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
 // THE HANDLE DOOR — resident buffers, batched enqueue, one sync.
 // ═════════════════════════════════════════════════════════════════════════════
 
-// Caps are stated, not silent. A 43-layer DS4 needs ~400 weight buffers plus
-// activations; 8192 is comfortable and the wall, when reached, is spoken through
-// metal_status rather than answered as a plausible handle.
-#define FK_MAX_BUF 8192
-#define FK_MAX_PIPE 512
+// Buffer and pipeline tables grow with the work instead of asking model shape to
+// fit a carrier policy. Buffer handles remain the u32 words the Form-owned binding
+// format states. Their low 16 bits name a slot and their high 16 bits name that
+// slot's generation, so 65535 live/retired slots is the protocol wall. A slot at
+// generation 65535 is retired when freed rather than wrapping and making an
+// ancient stale handle live again. Pipelines are append-only identities and have
+// no carrier-authored count wall.
+#define FK_BUF_SLOT_MAX 65535
+#define FK_TABLE_INITIAL_CAP 64
 
 typedef struct {
     void *map_base;        // non-NULL when this buffer is an mmap of a file
@@ -361,21 +360,26 @@ typedef struct {
 // handle a Form cell is still holding. Freeing bumps the slot's generation, so
 // every outstanding handle to it stops matching and is refused at the door rather
 // than answering a stranger's bytes. Generation 0 makes every pre-free handle
-// value numerically identical to the plain slot index, so nothing that held a
-// handle before this scheme existed sees a different number. The generation wraps
-// at 16 bits; a slot freed and reused 65536 times could in principle revive one
-// ancient stale handle, and that is stated here rather than discovered.
+// value numerically identical to the plain slot index. Generation never wraps:
+// after generation 65535 that slot retires, while the table grows another seat.
 static NSMutableArray *fk_buf_objs = nil;   // slot s -> element s-1 (NSNull when freed)
-static fk_bufmeta fk_buf_meta[FK_MAX_BUF];
-static unsigned int fk_buf_gen[FK_MAX_BUF];
-static long long fk_free_slots[FK_MAX_BUF];
+static fk_bufmeta *fk_buf_meta = NULL;
+static unsigned int *fk_buf_gen = NULL;
+static long long *fk_free_slots = NULL;
+static size_t fk_buf_cap = 0;
 static long long fk_free_top = 0;
+static long long fk_retired_slots = 0;
 static NSMutableArray *fk_pipe_objs = nil;  // handle h -> element h-1
-static NSMutableDictionary *fk_pipe_by_key = nil;  // msl+name -> NSNumber handle
+static NSMutableDictionary *fk_pipe_by_key = nil;  // source, entry, archive mode/path -> handle
 static NSMutableArray *fk_cpu_pipe_images = nil;   // NSData for CPU JIT, NSNull for Metal
-static void *fk_cpu_pipe_mem[FK_MAX_PIPE];
+static void **fk_cpu_pipe_mem = NULL;
+static size_t fk_pipe_cap = 0;
 static long long fk_total_cpu_jit_dispatch = 0;
 static double fk_total_cpu_jit_busy_s = 0.0;
+static long long fk_metal_jit_compiles = 0;
+static long long fk_metal_jit_ram_hits = 0;
+static long long fk_metal_jit_archive_reads = 0;
+static long long fk_metal_jit_archive_writes = 0;
 
 // The open batch. One command buffer and one compute encoder stay open across
 // enqueues, so N dispatches become ONE GPU submission at sync. Within a single
@@ -422,6 +426,71 @@ long long fk_metal_sync_external(void);
 
 static void fk_err(NSString *s) { fk_last_err = s; }
 
+// Grow bookkeeping only when a new identity needs a seat. These arrays carry no
+// model bytes; their size follows observed use and their allocation failures are
+// returned through metal_status instead of becoming a plausible handle.
+static int fk_buf_tables_reserve(size_t need) {
+    if (need <= fk_buf_cap) { return 1; }
+    size_t next = fk_buf_cap == 0 ? FK_TABLE_INITIAL_CAP : fk_buf_cap;
+    while (next < need && next < FK_BUF_SLOT_MAX) {
+        size_t doubled = next * 2;
+        next = doubled > FK_BUF_SLOT_MAX ? FK_BUF_SLOT_MAX : doubled;
+    }
+    if (next < need) {
+        fk_err([NSString stringWithFormat:
+            @"buffer handle protocol exhausted at %d slots", FK_BUF_SLOT_MAX]);
+        return 0;
+    }
+    fk_bufmeta *meta = (fk_bufmeta *)calloc(next, sizeof(fk_bufmeta));
+    unsigned int *gen = (unsigned int *)calloc(next, sizeof(unsigned int));
+    long long *free_slots = (long long *)calloc(next, sizeof(long long));
+    if (meta == NULL || gen == NULL || free_slots == NULL) {
+        free(meta); free(gen); free(free_slots);
+        fk_err(@"buffer bookkeeping allocation failed");
+        return 0;
+    }
+    if (fk_buf_cap > 0) {
+        memcpy(meta, fk_buf_meta, fk_buf_cap * sizeof(fk_bufmeta));
+        memcpy(gen, fk_buf_gen, fk_buf_cap * sizeof(unsigned int));
+        memcpy(free_slots, fk_free_slots, fk_buf_cap * sizeof(long long));
+    }
+    free(fk_buf_meta); free(fk_buf_gen); free(fk_free_slots);
+    fk_buf_meta = meta;
+    fk_buf_gen = gen;
+    fk_free_slots = free_slots;
+    fk_buf_cap = next;
+    return 1;
+}
+
+static int fk_pipe_table_reserve(size_t need) {
+    if (need <= fk_pipe_cap) { return 1; }
+    if (need > ((size_t)-1) / sizeof(void *)) {
+        fk_err(@"pipeline bookkeeping size overflow");
+        return 0;
+    }
+    size_t next = fk_pipe_cap == 0 ? FK_TABLE_INITIAL_CAP : fk_pipe_cap;
+    while (next < need) {
+        if (next > ((size_t)-1) / (2 * sizeof(void *))) {
+            next = need;
+            break;
+        }
+        if (next > ((size_t)-1) / 2) {
+            fk_err(@"pipeline bookkeeping size overflow");
+            return 0;
+        }
+        next *= 2;
+    }
+    void **mem = (void **)realloc(fk_cpu_pipe_mem, next * sizeof(void *));
+    if (mem == NULL) {
+        fk_err(@"pipeline bookkeeping allocation failed");
+        return 0;
+    }
+    memset(mem + fk_pipe_cap, 0, (next - fk_pipe_cap) * sizeof(void *));
+    fk_cpu_pipe_mem = mem;
+    fk_pipe_cap = next;
+    return 1;
+}
+
 // ── the caller's patience ──────────────────────────────────────────────────
 // A committed buffer's completion is observed, not presumed, and the wait is the
 // kernel's own: at commit every buffer is armed with a completed handler that
@@ -440,9 +509,9 @@ static void fk_err(NSString *s) { fk_last_err = s; }
 //   timeout    the deadline passed with the buffer still on the device; shelved
 //   released   this wait also settled work an earlier deadline had abandoned
 // Witnessed 2026-08-25: two residents of one 27 GB artifact on this host — the
-// second walker hung 17+ min on an idle GPU. A fixed five-minute watchdog with a
-// 50 us -> 4 ms backoff poll answered that; the fixed number and the poll were
-// the workaround this replaces (Urs, 2026-09-03: remove limits and workarounds).
+// second walker hung 17+ min on an idle GPU. The current door is typed and
+// caller-owned: the caller supplies a deadline or asks for the kernel's own
+// blocking wait, and status reports the exact frame that occurred.
 enum { FK_WAIT_NONE = 0, FK_WAIT_COMPLETED = 1, FK_WAIT_ERROR = 2,
        FK_WAIT_TIMEOUT = 3, FK_WAIT_RELEASED = 4 };
 static long long fk_deadline_ms = -1;      // handed by the caller; -1 = kernel's own wait
@@ -451,6 +520,16 @@ static double fk_wait_last_s = 0.0;        // host seconds the last wait took
 static NSMutableArray *fk_shelf = nil;     // buffers a deadline abandoned, still owed
 static NSString *fk_timeout_line = nil;    // the red line a timeout wrote; cleared on release
 static const void *fk_sem_key = &fk_sem_key;
+
+// One predicate owns the meaning of quiescence. Open, submitted, and timed-out
+// command buffers all retain work which may still read or write shared storage.
+// Any host access or release path that needs settled bytes asks this predicate;
+// adding another outstanding-work lane therefore cannot silently miss one door.
+static int fk_work_outstanding(void) {
+    return fk_cb != nil ||
+        (fk_inflight != nil && [fk_inflight count] > 0) ||
+        (fk_shelf != nil && [fk_shelf count] > 0);
+}
 
 static const char *fk_wait_frame_name(void) {
     switch (fk_wait_frame) {
@@ -511,16 +590,22 @@ static void fk_shelve(id<MTLCommandBuffer> cb) {
 // owed (frame = timeout; it and everything behind it stay shelved).
 static long long fk_shelf_settle(void) {
     long long released = 0;
+    NSString *settled_error = nil;
     while (fk_shelf != nil && [fk_shelf count] > 0) {
         id<MTLCommandBuffer> cb = fk_shelf[0];
         if (fk_wait_observed(cb) < 0) { return -1; }
         fk_total_gpu_busy_s += ([cb GPUEndTime] - [cb GPUStartTime]);
         if ([cb error] != nil) {
-            fk_err([NSString stringWithFormat:@"dispatch (released from shelf): %@",
-                    [[cb error] localizedDescription]]);
+            settled_error = [NSString stringWithFormat:@"dispatch (released from shelf): %@",
+                             [[cb error] localizedDescription]];
         }
         [fk_shelf removeObjectAtIndex:0];
         released++;
+    }
+    if (settled_error != nil) {
+        fk_wait_frame = FK_WAIT_ERROR;
+        fk_err(settled_error);
+        return -2;
     }
     // Nothing is owed any more: the red line a timeout wrote no longer stands.
     if (fk_last_err != nil && fk_last_err == fk_timeout_line) { fk_last_err = nil; }
@@ -565,6 +650,39 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
     @autoreleasepool {
         NSString *err = nil;
         if (!fk_metal_up(&err)) { fk_err(err); return 0; }
+        // Form owns this descriptor and the selected cache mode. All source
+        // compilation remains in memory. Mode 0 never touches a cache file;
+        // mode 1 records a compiled archive; mode 2 requires an archive hit.
+        // FMJ1 | u32 mode | u32 entry bytes | u32 path bytes | entry | path | MSL
+        unsigned int cache_mode = 0;
+        NSString *cache_path = @"";
+        if (name_len == 17 && memcmp(name, "form_metal_jit_v1", 17) == 0) {
+            if (msl_len < 16 || memcmp(msl, "FMJ1", 4) != 0) {
+                fk_err(@"metal jit descriptor header invalid"); return 0;
+            }
+            const unsigned char *p = (const unsigned char *)msl;
+            unsigned int fields[3];
+            for (int k = 0; k < 3; k++) {
+                const unsigned char *q = p + 4 + k * 4;
+                fields[k] = (unsigned int)q[0] | ((unsigned int)q[1] << 8) |
+                    ((unsigned int)q[2] << 16) | ((unsigned int)q[3] << 24);
+            }
+            cache_mode = fields[0];
+            unsigned long long prefix = 16ULL + fields[1] + fields[2];
+            if (cache_mode > 2 || fields[1] == 0 || prefix >= (unsigned long long)msl_len ||
+                (cache_mode == 0 ? fields[2] != 0 : fields[2] == 0)) {
+                fk_err(@"metal jit descriptor lengths or mode invalid"); return 0;
+            }
+            name = msl + 16;
+            name_len = fields[1];
+            cache_path = [[NSString alloc] initWithBytes:name + name_len length:fields[2]
+                                                encoding:NSUTF8StringEncoding];
+            if (cache_path == nil || memchr(name, 0, fields[1] + (size_t)fields[2]) != NULL) {
+                fk_err(@"metal jit entry/path is invalid UTF-8 or contains NUL"); return 0;
+            }
+            msl += prefix;
+            msl_len -= (long long)prefix;
+        }
         if (fk_pipe_objs == nil) {
             fk_pipe_objs = [NSMutableArray array];
             fk_pipe_by_key = [NSMutableDictionary dictionary];
@@ -589,10 +707,7 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
                     return (long long)k + 1;
                 }
             }
-            if ([fk_pipe_objs count] >= FK_MAX_PIPE) {
-                fk_err([NSString stringWithFormat:@"pipeline table full at %d", FK_MAX_PIPE]);
-                return 0;
-            }
+            if (!fk_pipe_table_reserve((size_t)[fk_pipe_objs count] + 1)) { return 0; }
             size_t pg = (size_t)getpagesize();
             size_t span = ((size_t)msl_len + pg - 1) & ~(pg - 1);
             void *mem = mmap(NULL, span, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -616,14 +731,11 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
         // Compile once. This is requirement 3's other half: if the pipeline were
         // rebuilt per dispatch, enqueue could never be cheap no matter how little
         // it waited. Same text + same name = same handle, always.
-        NSString *key = [NSString stringWithFormat:@"%@\n%@", fn, src];
+        NSArray *key = @[fn, src, @(cache_mode), cache_path];
         NSNumber *have = fk_pipe_by_key[key];
-        if (have != nil) { return [have longLongValue]; }
+        if (have != nil) { fk_metal_jit_ram_hits++; return [have longLongValue]; }
 
-        if ([fk_pipe_objs count] >= FK_MAX_PIPE) {
-            fk_err([NSString stringWithFormat:@"pipeline table full at %d", FK_MAX_PIPE]);
-            return 0;
-        }
+        if (!fk_pipe_table_reserve((size_t)[fk_pipe_objs count] + 1)) { return 0; }
         NSError *e = nil;
         id<MTLLibrary> lib = [fk_dev newLibraryWithSource:src options:nil error:&e];
         if (lib == nil) {
@@ -631,16 +743,45 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
             fk_err([NSString stringWithFormat:@"msl compile: %@", [e localizedDescription]]);
             return 0;
         }
+        fk_metal_jit_compiles++;
         id<MTLFunction> f = [lib newFunctionWithName:fn];
         if (f == nil) {
             fk_err([NSString stringWithFormat:@"msl has no kernel named %@", fn]);
             return 0;
         }
-        id<MTLComputePipelineState> pipe = [fk_dev newComputePipelineStateWithFunction:f error:&e];
+        MTLComputePipelineDescriptor *descriptor = [MTLComputePipelineDescriptor new];
+        descriptor.computeFunction = f;
+        id<MTLBinaryArchive> archive = nil;
+        NSURL *archive_url = nil;
+        if (cache_mode != 0) {
+            archive_url = [NSURL fileURLWithPath:cache_path];
+            MTLBinaryArchiveDescriptor *ad = [MTLBinaryArchiveDescriptor new];
+            if (cache_mode == 2) { ad.url = archive_url; }
+            archive = [fk_dev newBinaryArchiveWithDescriptor:ad error:&e];
+            if (archive == nil) {
+                fk_err([NSString stringWithFormat:@"metal jit archive: %@", e.localizedDescription]);
+                return 0;
+            }
+            if (cache_mode == 1 && ![archive addComputePipelineFunctionsWithDescriptor:descriptor error:&e]) {
+                fk_err([NSString stringWithFormat:@"metal jit archive compile: %@", e.localizedDescription]);
+                return 0;
+            }
+            descriptor.binaryArchives = @[archive];
+        }
+        MTLPipelineOption options = cache_mode == 2 ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
+        id<MTLComputePipelineState> pipe = [fk_dev newComputePipelineStateWithDescriptor:descriptor
+            options:options reflection:nil error:&e];
         if (pipe == nil) {
             fk_err([NSString stringWithFormat:@"pipeline: %@", [e localizedDescription]]);
             return 0;
         }
+        if (cache_mode == 1) {
+            if (![archive serializeToURL:archive_url error:&e]) {
+                fk_err([NSString stringWithFormat:@"metal jit archive write: %@", e.localizedDescription]);
+                return 0;
+            }
+            fk_metal_jit_archive_writes++;
+        } else if (cache_mode == 2) { fk_metal_jit_archive_reads++; }
         [fk_pipe_objs addObject:pipe];
         [fk_cpu_pipe_images addObject:[NSNull null]];
         long long h = (long long)[fk_pipe_objs count];
@@ -658,8 +799,15 @@ static long long fk_buf_register(id<MTLBuffer> b, void *map_base, size_t map_len
         slot = fk_free_slots[fk_free_top];
         fk_buf_objs[(NSUInteger)(slot - 1)] = b;
     } else {
-        if ([fk_buf_objs count] >= FK_MAX_BUF) {
-            fk_err([NSString stringWithFormat:@"buffer table full at %d live slots", FK_MAX_BUF]);
+        if ([fk_buf_objs count] >= FK_BUF_SLOT_MAX) {
+            fk_err([NSString stringWithFormat:
+                @"buffer handle protocol exhausted at %d live or retired slots",
+                FK_BUF_SLOT_MAX]);
+            if (map_base != NULL) { munmap(map_base, map_len); }
+            return 0;
+        }
+        if (!fk_buf_tables_reserve((size_t)[fk_buf_objs count] + 1)) {
+            if (map_base != NULL) { munmap(map_base, map_len); }
             return 0;
         }
         [fk_buf_objs addObject:b];
@@ -775,12 +923,19 @@ long long fk_metal_buf_write_external(long long h, long long off, const char *by
     @autoreleasepool {
         long long slot = fk_buf_slot(h);
         if (slot == 0) { fk_err([NSString stringWithFormat:@"buf_write: bad handle %lld", h]); return -1; }
+        // Shared storage has one ownership transition: GPU work settles before
+        // the host mutates it. This also commits an open batch, so a write used
+        // to refresh a pooled buffer cannot run ahead of dispatches already
+        // encoded against that buffer. Double-buffering remains available to a
+        // Form recipe that wants overlap without this dependency.
+        if (fk_work_outstanding() && fk_metal_sync_external() < 0) { return -1; }
         id<MTLBuffer> b = fk_buf_objs[(NSUInteger)(slot - 1)];
         if (off < 0 || len < 0) { fk_err(@"buf_write: negative off or len"); return -1; }
         fk_bufmeta *m = &fk_buf_meta[slot - 1];
-        if ((unsigned long long)(off + len) > m->view_len) {
-            fk_err([NSString stringWithFormat:@"buf_write: [%lld,%lld) past view_len %llu",
-                    off, off + len, m->view_len]);
+        if ((unsigned long long)off > m->view_len ||
+            (unsigned long long)len > m->view_len - (unsigned long long)off) {
+            fk_err([NSString stringWithFormat:@"buf_write: off=%lld len=%lld past view_len %llu",
+                    off, len, m->view_len]);
             return -1;
         }
         memcpy((char *)[b contents] + m->view_off + off, bytes, (size_t)len);
@@ -871,7 +1026,7 @@ long long fk_metal_enqueue_external(long long pipe, const char *binding,
             if (tpg != 0 || tgmem != 0 || mode != 0 || barrier != 0) {
                 fk_err(@"cpu jit binding accepts no Metal dispatch tail"); return -1;
             }
-            if (fk_cb != nil || (fk_inflight != nil && [fk_inflight count] > 0)) {
+            if (fk_work_outstanding()) {
                 if (fk_metal_sync_external() < 0) { return -1; }
             }
             void *bufs[64];
@@ -983,15 +1138,16 @@ long long fk_metal_sync_external(void) {
                 // Real device-busy span for THIS command buffer, added to the
                 // process-wide running total.
                 fk_total_gpu_busy_s += ([cb GPUEndTime] - [cb GPUStartTime]);
+                long long drained = [fk_inflight_n[key] longLongValue];
+                [fk_inflight removeObjectForKey:key];
+                [fk_inflight_n removeObjectForKey:key];
                 if ([cb error] != nil) {
                     fk_err([NSString stringWithFormat:@"dispatch: %@",
                             [[cb error] localizedDescription]]);
                     return -1;
                 }
-                n += [fk_inflight_n[key] longLongValue];
+                n += drained;
             }
-            [fk_inflight removeAllObjects];
-            [fk_inflight_n removeAllObjects];
             had_work = 1;
         }
         if (fk_cb != nil) {
@@ -1040,7 +1196,7 @@ long long fk_metal_sync_external(void) {
 long long fk_metal_buf_read_external(long long h, long long off, long long len,
                                      char *out, long long cap) {
     @autoreleasepool {
-        if (fk_cb != nil || (fk_inflight != nil && [fk_inflight count] > 0)) {
+        if (fk_work_outstanding()) {
             if (fk_metal_sync_external() < 0) { return -1; }
         }
         long long slot = fk_buf_slot(h);
@@ -1048,9 +1204,10 @@ long long fk_metal_buf_read_external(long long h, long long off, long long len,
         id<MTLBuffer> b = fk_buf_objs[(NSUInteger)(slot - 1)];
         if (off < 0 || len < 0 || len > cap) { fk_err(@"buf_read: off/len out of range"); return -1; }
         fk_bufmeta *m = &fk_buf_meta[slot - 1];
-        if ((unsigned long long)(off + len) > m->view_len) {
-            fk_err([NSString stringWithFormat:@"buf_read: [%lld,%lld) past view_len %llu",
-                    off, off + len, m->view_len]);
+        if ((unsigned long long)off > m->view_len ||
+            (unsigned long long)len > m->view_len - (unsigned long long)off) {
+            fk_err([NSString stringWithFormat:@"buf_read: off=%lld len=%lld past view_len %llu",
+                    off, len, m->view_len]);
             return -1;
         }
         memcpy(out, (const char *)[b contents] + m->view_off + off, (size_t)len);
@@ -1085,10 +1242,11 @@ long long fk_metal_buf_free_external(long long h) {
         // Only at a quiescent point. For a plain buffer Metal would keep the object
         // alive through any command buffer that references it, but an mmap'd one is
         // OUR mapping under Metal's object — munmap while a dispatch reads it is a
-        // fault Metal cannot see coming. One rule for both kinds, stated: free when
-        // nothing is open and nothing is in flight.
-        if (fk_cb != nil || (fk_inflight != nil && [fk_inflight count] > 0)) {
-            fk_err(@"buf_free: work is open or in flight; sync first");
+        // fault Metal cannot see coming. One rule for both kinds, stated by
+        // fk_work_outstanding: free only when nothing is open, in flight, or
+        // shelved after a deadline.
+        if (fk_work_outstanding()) {
+            fk_err(@"buf_free: work is open, in flight, or shelved; sync first");
             return -1;
         }
         fk_bufmeta *m = &fk_buf_meta[slot - 1];
@@ -1100,9 +1258,15 @@ long long fk_metal_buf_free_external(long long h) {
         m->view_len = 0;
         m->nocopy = 0;
         fk_buf_objs[(NSUInteger)(slot - 1)] = [NSNull null];
-        fk_buf_gen[slot - 1] = (fk_buf_gen[slot - 1] + 1) & 0xFFFF;
-        fk_free_slots[fk_free_top] = slot;
-        fk_free_top++;
+        if (fk_buf_gen[slot - 1] == 0xFFFFU) {
+            // Never revive an ancient handle. The table can grow another slot;
+            // this one remains an explicit retired identity.
+            fk_retired_slots++;
+        } else {
+            fk_buf_gen[slot - 1]++;
+            fk_free_slots[fk_free_top] = slot;
+            fk_free_top++;
+        }
         return 1;
     }
 }
@@ -1185,11 +1349,13 @@ long long fk_metal_status_external(char *out, long long cap) {
         NSString *err = nil;
         if (!fk_metal_up(&err)) {
             return fk_emit(out, cap, [NSString stringWithFormat:
-                @"metal_owner=fkwu-form-cli\nmetal_linked=false\nmetal_door=handle\nlast_error=%@\n", err]);
+                @"metal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=false\nmetal_door=handle\nlast_error=%@\n", err]);
         }
         NSMutableString *r = [NSMutableString string];
-        [r appendString:@"metal_owner=fkwu-form-cli\nmetal_linked=true\nmetal_door=handle\n"];
+        [r appendString:@"metal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=true\nmetal_device=true\nmetal_door=handle\n"];
         [r appendFormat:@"device=%@\nunified_memory=%d\n", [fk_dev name], (int)[fk_dev hasUnifiedMemory]];
+        [r appendFormat:@"metal_jit_target=%llu|%@|FMJ1\n",
+            (unsigned long long)[fk_dev registryID], [NSProcessInfo processInfo].operatingSystemVersionString];
         // The device's own memory accounting, asked of the device every time it
         // is spoken. currentAllocatedSize is the device bytes THIS process's
         // Metal resources currently hold; recommendedMaxWorkingSetSize is the
@@ -1200,9 +1366,18 @@ long long fk_metal_status_external(char *out, long long cap) {
             (unsigned long long)[fk_dev currentAllocatedSize],
             (unsigned long long)[fk_dev recommendedMaxWorkingSetSize]];
         [r appendFormat:@"buffers=%lld\npipelines=%lu\n",
-            (long long)[fk_buf_objs count] - fk_free_top, (unsigned long)[fk_pipe_objs count]];
-        [r appendFormat:@"buffer_slots=%lu\nfree_slots=%lld\n",
-            (unsigned long)[fk_buf_objs count], fk_free_top];
+            (long long)[fk_buf_objs count] - fk_free_top - fk_retired_slots,
+            (unsigned long)[fk_pipe_objs count]];
+        [r appendFormat:@"metal_jit_source_compiles=%lld\nmetal_jit_ram_hits=%lld\n"
+            "metal_jit_archive_reads=%lld\nmetal_jit_archive_writes=%lld\n",
+            fk_metal_jit_compiles, fk_metal_jit_ram_hits,
+            fk_metal_jit_archive_reads, fk_metal_jit_archive_writes];
+        [r appendFormat:
+            @"buffer_slots=%lu\nfree_slots=%lld\nretired_slots=%lld\n"
+             "buffer_table_capacity=%lu\nbuffer_slot_protocol_limit=%d\n"
+             "pipeline_table_capacity=%lu\n",
+            (unsigned long)[fk_buf_objs count], fk_free_top, fk_retired_slots,
+            (unsigned long)fk_buf_cap, FK_BUF_SLOT_MAX, (unsigned long)fk_pipe_cap];
         [r appendFormat:@"mmap_nocopy_buffers=%lld\n", fk_nocopy_bufs];
         [r appendFormat:@"pending=%lld\n", fk_pending];
         [r appendFormat:@"batch=%s\n",
@@ -1313,15 +1488,17 @@ long long fk_host_disk_stat(long long *out) {
 // METAL LIVE, AS NUMBERS. The same counters the text status carries, handed as words so no reader parses:
 // [0] linked [1] unified [2] buffers [3] pipelines [4] nocopy buffers [5] pending [6] in flight
 // [7] total dispatch [8] total sync [9] cpu-jit dispatch [10] cpu-jit busy us [11] gpu busy us
-// [12] last wait ms [13] deadline ms [14] shelf [15] batch mode (0 none, 1 serial, 2 concurrent) [16] buffer slots [17] free slots. Answers 18, or 0 when Metal is not up.
+// [12] last wait ms [13] deadline ms [14] shelf [15] batch mode (0 none, 1 serial, 2 concurrent)
+// [16] buffer slots [17] free slots [18] allocated bytes [19] recommended working-set bytes.
+// Answers 20, or 0 when Metal is not up.
 long long fk_metal_live_external(long long *out) {
     @autoreleasepool {
-        for (int k = 0; k < 18; k++) out[k] = 0;
+        for (int k = 0; k < 20; k++) out[k] = 0;
         NSString *err = nil;
         if (!fk_metal_up(&err)) return 0;
         out[0] = 1;
         out[1] = (long long)[fk_dev hasUnifiedMemory];
-        out[2] = (long long)[fk_buf_objs count] - fk_free_top;
+        out[2] = (long long)[fk_buf_objs count] - fk_free_top - fk_retired_slots;
         out[3] = (long long)[fk_pipe_objs count];
         out[4] = fk_nocopy_bufs;
         out[5] = fk_pending;

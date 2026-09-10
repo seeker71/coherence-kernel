@@ -64,7 +64,7 @@ done
 form_cli_write_generation_attestation \
     "$bootstrap_attestation" "$source_sha256" "$source_stamp" "$table" "$emitted_c" \
     "$bml_compiler_sha256" rust-form-kernel "$flattener_sha256" \
-    not-applicable not-applicable not-applicable
+    not-applicable not-applicable not-applicable fkwu-source
 form_cli_verify_generation_attestation \
     "$bootstrap_attestation" "$source_sha256" "$source_stamp" "$table" "$emitted_c" \
     not-applicable
@@ -92,7 +92,7 @@ form_cli_write_generation_attestation \
     "$alternate_bootstrap_attestation" "$source_sha256" "$source_stamp" "$table" "$emitted_c" \
     'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' \
     rust-form-kernel "$flattener_sha256" \
-    not-applicable not-applicable not-applicable
+    not-applicable not-applicable not-applicable go-form-kernel
 if form_cli_verify_generation_attestation \
         "$platform_attestation" "$source_sha256" "$source_stamp" "$table" "$emitted_c" \
         darwin-arm64 "$platform" "$alternate_bootstrap_attestation" >/dev/null 2>&1; then

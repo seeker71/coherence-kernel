@@ -9,7 +9,8 @@ declares its own.
 ## Grounding
 
 ```text
-cc -O2 -o fkwu runtime/fkwu-uni.c \
+cc -O2 -o fkwu runtime/fkwu-uni.c
+cc -O2 -dynamiclib -o form/native/metal/fk-metal-carrier.dylib \
   form/native/metal/fk-metal-carrier.m \
   -framework Metal -framework Foundation -fobjc-arc
 

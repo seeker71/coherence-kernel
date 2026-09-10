@@ -27,18 +27,26 @@ New runtime meaning belongs in Form/native-walker cells proven on `fkwu`; C exis
 checkout witness reachable while the seed is reduced toward zero.
 
 ```sh
-# ONE binary. Metal is this host's organ, not a second executable (no fkwu-metal).
-# Darwin: link the carrier; it SKIP's when the machine has no GPU.
+# ONE process. Metal is a dynamic host carrier, not a second executable and not
+# linked into the seed.
+cc -O2 -o fkwu runtime/fkwu-uni.c
+
+# Darwin: build the optional carrier artifact. fkwu admits it dynamically on
+# first Metal call; it SKIP's when the machine has no GPU.
 if [ "$(uname -s)" = Darwin ] && [ -f form/native/metal/fk-metal-carrier.m ]; then
-  cc -O2 -o fkwu runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
+  cc -O2 -dynamiclib -o form/native/metal/fk-metal-carrier.dylib \
+    form/native/metal/fk-metal-carrier.m \
     -framework Metal -framework Foundation -fobjc-arc
-else
-  cc -O2 -o fkwu runtime/fkwu-uni.c
 fi
 
 # Windows (mingw-w64 / TDM-GCC) — temporary checkout witness with host-carrier libs
 gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp
 ```
+
+Form-generated CPU and Metal programs are admitted and executed in RAM. Disk
+artifacts are reusable caches. `form/form-stdlib/bml/metal-jit.bml` owns Metal
+program identity, optional binary-archive capture/reuse and live selection;
+the dynamic Objective-C adapter currently carries the platform API calls.
 
 Verify the direct source bootstrap first:
 
@@ -55,7 +63,7 @@ stale binary from before an upstream merge **still passes ground.fk** while sile
 evaluator capabilities. If the freshness band does not return 31, rebuild before believing anything
 else you observe.
 
-form-cli is a recipe this same `fkwu` loads (`.dylib` when emission sits, `.fkb` today) — not a second product. Metal lives in this binary.
+form-cli is a recipe this same `fkwu` loads (`.dylib` when emission sits, `.fkb` today) — not a second product. Metal is admitted dynamically by this process.
 
 Then verify it runs the body — a **real cell**, native, with no Go, no flatten, no T_flat:
 

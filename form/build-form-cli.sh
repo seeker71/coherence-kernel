@@ -27,28 +27,18 @@ FORM_CLI_CALLER_EXTRA_LDFLAGS="${FORM_CLI_EXTRA_LDFLAGS:-}"
 FORM_CLI_EXTRA_SRC="$FORM_CLI_CALLER_EXTRA_SRC"
 FORM_CLI_EXTRA_LDFLAGS="$FORM_CLI_CALLER_EXTRA_LDFLAGS"
 
-# Canonical bootstrap/platform publication is not an extension point.  The
+# Canonical bootstrap/platform publication is not an extension point. The
 # normal build command may still accept an explicit local carrier addition,
 # but a publisher has to produce the exact source-defined carrier rather than
-# inherit arbitrary objects or linker flags from its environment.  The host's
-# built-in Metal carrier is appended below after this check.
+# inherit arbitrary objects or linker flags from its environment.
 if [[ "${FORM_CLI_CANONICAL_PUBLISH:-0}" == 1 ]] && \
         [[ -n "$FORM_CLI_CALLER_EXTRA_SRC" || -n "$FORM_CLI_CALLER_EXTRA_LDFLAGS" ]]; then
     printf '%s\n' 'form-cli canonical publish refuses FORM_CLI_EXTRA_SRC/FORM_CLI_EXTRA_LDFLAGS' >&2
     exit 1
 fi
 
-# The accelerator this host HAS is not a question for the caller. The kernel already settles the
-# Windows side with no flag at all — fkwu-uni.c LoadLibraryA's nvcuda.dll at runtime, JITs the
-# Form-emitted PTX, and reports absence if no driver answers. Darwin gets the same treatment here:
-# Metal.framework ships on every Mac, so there is nothing to opt into, and the carrier itself
-# returns SKIP when MTLCreateSystemDefaultDevice() finds no device. A build that asked
-# FORM_CLI_EXTRA_SRC for this was asking the caller a question the host already answers, which is
-# how a body ends up not knowing what it is capable of.
-if [[ "$(uname -s 2>/dev/null)" == "Darwin" && -f "native/metal/fk-metal-carrier.m" ]]; then
-    FORM_CLI_EXTRA_SRC="native/metal/fk-metal-carrier.m${FORM_CLI_EXTRA_SRC:+ $FORM_CLI_EXTRA_SRC}"
-    FORM_CLI_EXTRA_LDFLAGS="-framework Metal -framework Foundation -fobjc-arc${FORM_CLI_EXTRA_LDFLAGS:+ $FORM_CLI_EXTRA_LDFLAGS}"
-fi
+# Metal is admitted as a dynamic carrier by the runtime. This builder does not
+# link the Objective-C carrier into form-cli.
 
 is_windows_host() {
     [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]
@@ -91,13 +81,6 @@ SNAPSHOT_PLATFORM_ATTESTATION="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-platform.generat
 # capitalised assignment in this file for a matching read: 3 of 31 had none, and
 # EMIT_CHAIN's only reader was FLAT_CHAIN, itself dead.
 
-# Prefer fkwu self-host flatten (no Go) when T_flat + cached fkwu are warm.
-# This list authors the stamp the build compares against the one
-# scripts/regen_form_cli_bootstrap.sh wrote, so it mirrors that script's
-# FORM_CLI_SRCS in CONTENT AND ORDER. A cell added there and not here stops the
-# build with "source stamp stale (have=... want=...)" — two hashes and no
-# filename — which reads like a stale tree and is a mirroring gap. See the
-# "SIX lists, one program" note in that script.
 # One source identity is shared by the build, bootstrap regeneration, and
 # platform-carrier regeneration.  The retired host turn carrier is neither
 # part of this identity nor a Form flatten input.
@@ -208,103 +191,7 @@ if [[ "$bootstrap_carrier_fresh" == 1 && "$platform_carrier_fresh" == 1 && "$FOR
     printf '%s\n' 'form-cli bootstrap: staged platform carrier attestation missing or mixed; relinking from staged C' >&2
 fi
 
-# 1. flatten form-cli-repl into its program table (string pool rides behind it).
-# The self-host fallback list is the executable no-Go program order, with the
-# shim dropped because fourth_band_request prepends it.  It is deliberately
-# separate from the source-identity list: shell carrier files are stamped but
-# never parsed as Form.  BML-dialect sources (http-client.bml) ride raw here;
-# the compiled lowering lives in scripts/regen_form_cli_bootstrap.sh.
-FORM_CLI_SELFHOST_SRCS=(
-    "$S/core.fk" "$S/grammars/sanskrit-roots.fk" "$S/resource-port.fk" "$S/bml-native-interface-package-import.fk"
-    "$S/hati-os-targets.fk" "$S/form-native-resource-interfaces.fk" "$S/form-fs.fk"
-    "$S/storage-port.fk" "$S/host-kernel-carrier.fk" "$S/fnri-standin.fk" "$S/fnri-receipt.fk"
-    "$S/http-client.bml" "$S/line-grammar.fk" "$S/str-byte-at.fk" "$S/sha256.fk"
-    "$S/hmac-sha256.fk" "$S/hex.fk" "$S/format-arith.fk" "$S/f16-decode.fk"
-    "$S/q6k-dequant.fk" "$S/equireach.fk" "$S/equireach-gguf.fk" "$S/gguf-meta.fk" "$S/model-discovery.fk" "$S/q4k-dequant.fk" "$S/weight-load.fk" "$S/voice-traits.fk"
-    "$S/nearest-shape.fk" "$S/co-learning.fk" "$S/co-learning-stream.fk" "$S/mesh-dispatch.fk"
-    "$S/surprise-salience.fk" "$S/host-sense-organ.fk" "$S/speech-organ.fk"
-    "$S/native-host-instance.fk" "$S/text-tokenize.fk" "$S/rag-embed.fk" "$S/rag-index-codec.fk"
-    "$S/rag-retrieve.fk" "$S/rag-ask.fk" "$S/ask-cost-receipt.fk" "$S/ask-native-lane.fk" "$S/form-cli-ask.fk" "$S/form-cli-router.fk"
-    "$S/form-cli-judge.fk" "$S/confidence-weighted-vote.fk" "$S/lineage-discounted-vote.fk"
-    "$S/form-cli-oracle-loop.fk" "$S/form-cli-sufficiency.fk" "$S/form-freq-check.fk"
-    "$S/trust-row.fk" "$S/form-cli-ask-gate.fk" "$S/form-cli-staged-trace.fk"
-    "$S/form-cli-request.fk" "$S/form-cli-carrier.fk" "$S/form-cli-ask-plus.fk" "$S/form-cli-surface-inquiry.fk"
-    "$S/current-branch-landing.fk" "$S/form-cli-inquiry-edge-ledger.fk" "$S/form-cli-inquiry.fk" "$S/ds4-query-channel.fk" "$S/form-cli.fk" "$S/form-cli-gguf-cell.fk"
-    "$S/relational-inquiry-metabolism.fk"
-    "$S/native-model-native-hierarchy.fk"
-    "$S/native-model-control-plane.fk"
-    "$S/ask-lane-router.fk"
-    "$S/dsv4-tokenizer.fk"
-    "$S/qwen35-tokenizer.fk"
-    "$S/qwen35-tokfast-v2-live-reader.fk"
-    "$S/kernel-http-header.fk"
-    "$S/kernel-http.fk"
-    "$S/form-asm.fk"
-    "$S/metal-door.fk"
-    "native/metal/sha256-arm64-jit.fk"
-    "$S/qwen35-artifact-seal-reader.fk"
-    "$S/q6k-msl.fk"
-    "$S/q8-0-msl.fk"
-    "$S/q3k-msl.fk"
-    "$S/q4k-msl.fk"
-    "$S/gated-deltanet-msl.fk"
-    "$S/transformer-numerics.fk"
-    "$S/trig.fk"
-    "$S/tensor-ir.fk"
-    "$S/jit-tensor-emit.fk"
-    "$S/llama-decode-msl.fk"
-    "$S/mla-msl.fk"
-    "$S/moe-route-wide-msl.fk"
-    "$S/gguf-tensor-index.fk"
-    "$S/q3k-dequant.fk"
-    "$S/q3k-equireach.fk"
-    "$S/kat-coder-embed.fk"
-    "native/metal/kat-token-handle.fk"
-    "native/metal/qwen35-linear-span-layout-contract.fk"
-    "native/metal/qwen35-dense-token-handle.fk"
-    "native/metal/qwen35-crystal.fk"
-    "native/metal/model-bandwidth.fk"
-    "$S/form-teach-layer.fk"
-    "$S/qwen35-form-layer.fk"
-    "$S/active-learning-tier-cycle.fk"
-    "$S/local-model-choice.fk"
-    "$S/substrate-phase.fk"
-    "$S/source-resonance-stream.fk"
-    "$S/local-generate-organ.fk"
-    "$S/language-template.fk"
-    "$S/language-model.fk"
-    "$S/form-cli-heedmark-xtal.fk"
-    "$S/form-cli-qwen-teach-layer.fk"
-    "$S/form-cli-heed-cursor.fk"
-    "$S/form-ontology-bp.fk"
-    "$S/form-cli-heed-telemetry.fk"
-    "$S/form-knowledge-query-token.fk"
-    "$S/file-byte-window.fk"
-    "$S/form-knowledge-source-search.fk"
-    "$S/form-cli-heed-current-source.fk"
-    "$S/form-cli-heed-grounded.fk"
-    "$S/qwen35-tokenizer-live-cursor.fk"
-    "$S/form-cli-model-generate.fk"
-    "$S/form-cli-model-session.fk"
-    "$S/bmf-byte-cursor.fk"
-    "$S/public-source-concept-index.fk"
-    "$S/public-source-concept-shards.fk"
-    "$S/form-nodeid-knowledge-query.fk"
-    "$S/form-cli-nodeid-knowledge-session.fk"
-    "$S/public-source-concept-key-routes.fk"
-    "$S/form-nodeid-knowledge-routed-query.fk"
-    "$S/form-cli-nodeid-knowledge-door.fk"
-    "$S/form-recipe-birth-token.fk"
-    "$S/form-recipe-exec-token.fk"
-    "$S/form-cli-recipe-exec-cursor.fk"
-    "$S/form-recipe-exec-token-live.fk"
-    "$S/form-cli-recipe-exec-session.fk"
-    "$S/form-cli-resident-recipe-birth-exec-categories.fk"
-    "$S/form-cli-resident-recipe-birth-exec.fk"
-    "$S/form-nodeid-mastery-cell-categories.fk"
-    "$S/form-nodeid-mastery-cell-loop.fk"
-    "$S/form-cli-repl.fk"
-)
+# 1. Link the verified table/C pair published by native Form regeneration.
 if [[ "$bootstrap_carrier_fresh" == 1 ]]; then
     verify_staged_bootstrap_carrier || {
         printf '%s\n' 'form-cli bootstrap: staged table/C identity changed before flatten; refusing link' >&2
@@ -312,10 +199,8 @@ if [[ "$bootstrap_carrier_fresh" == 1 ]]; then
     }
     cp "$SNAPSHOT_TABLE" "$W/table.txt"
     echo "  flatten: bootstrap table (no Go)" >&2
-elif fourth_selfhost && fourth_flatten_sources form-cli-build fks "$W/table.txt" "${FORM_CLI_SELFHOST_SRCS[@]}"; then
-    echo "  flatten: fkwu self-host (no Go)" >&2
 else
-    echo "  flatten: unavailable — need bootstrap/form-cli-table.txt or T_flat self-host (maintainer: scripts/regen_form_cli_bootstrap.sh)" >&2
+    echo "  flatten: verified bootstrap required; run scripts/regen_form_cli_bootstrap.sh" >&2
     exit 1
 fi
 [[ -s "$W/table.txt" ]] || { echo "flatten produced no table"; exit 1; }
