@@ -1,0 +1,36 @@
+// CPU SHA over caller-held bytes, with an independent RAM program admission.
+// The caller keeps its immutable string. One owned prefix buffer receives a
+// bulk copy; the existing SHA owner handles padding, compression and release.
+// preludes: form-stdlib/bml/sha256-owned.bml form-stdlib/hex.fk
+section [form.bml] {
+ class Sha256OwnedBytes {
+  def sob-hex(raw,at) = if ge(at,str_len(raw)) then "" else str_concat(hex-byte-to-pair(str_byte_at(raw,at)),sob-hex(raw,add(at,1)));
+  // This structural capability accepts recipe data, never foreign bytes.
+  // Its seed implementation is compiled only for Darwin ARM64 and returns
+  // nothing elsewhere. Its small compiled leaf stays in the seed's cache.
+  // The context records that actual observation and belongs to this process.
+  def sob-context() = sob-observed(jit_arm64_u32_leaf(list(list(1,42)),0,0));
+  def sob-observed(result) = record_new(0,"kind","sha256-arm64-context","pid",host_pid(),"probe",result);
+  def sob-context-ready(context) = if not(record?(context)) then 0 else and(str_eq(record_get(context,"kind"),"sha256-arm64-context"),and(eq(record_get(context,"pid"),host_pid()),and(str_eq(value-kind(record_get(context,"probe")),"int"),eq(record_get(context,"probe"),42))));
+  def sob-hash(text) = if not(str_eq(value-kind(text),"string")) then sho-refuse(sho-owner(),"bytes-required") else sob-hash-in(sob-context(),text);
+  def sob-hash-in(context,text) = if not(str_eq(value-kind(text),"string")) then sho-refuse(sho-owner(),"bytes-required") else if not(sob-context-ready(context)) then sho-refuse(sho-owner(),"host-isa-unobserved") else sob-admit(sho-owner(),text,str_len(text));
+  def sob-admit(owner,text,size) {
+   let version = mj-memory(saj-code(),"form_cpu_jit");
+   record_set(owner,"pipeline",mj-handle(version));
+   if gt(mj-handle(version),0) then sob-program(owner,text,size,version) else sho-refuse(owner,"native-cpu-admission-refused");
+  }
+  def sob-program(owner,text,size,version) {
+   let prefix = sub(size,mod(size,64));
+   let message = if gt(prefix,0) then metal_buf_alloc(prefix) else 0;
+   let padding = saj-padding-string(substring(text,prefix,size),size);
+   let state = metal_buf_alloc(32); let rounds = metal_buf_alloc(256); let pad = metal_buf_alloc(str_len(padding));
+   record_set(owner,"buffers",list(message,state,rounds,pad));
+   let ready = and(gt(mj-handle(version),0),and(gt(state,0),and(gt(rounds,0),and(gt(pad,0),or(eq(prefix,0),gt(message,0))))));
+   let wrote = if and(ready,gt(prefix,0)) then metal_buf_write(message,0,substring(text,0,prefix)) else 0;
+   let digest = sho-admitted-digest(and(ready,eq(wrote,prefix)),mj-handle(version),message,state,rounds,pad,prefix,padding);
+   let closed = sho-close(owner);
+   if not(closed) then sho-refuse(owner,"release-refused") else if not(eq(str_len(digest),32)) then sho-refuse(owner,"digest-refused") else sho-accept(owner,digest);
+  }
+ }
+ 0;
+}

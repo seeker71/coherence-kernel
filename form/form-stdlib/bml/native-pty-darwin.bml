@@ -1,0 +1,131 @@
+// Form-owned Darwin ARM64 PTY resources through the existing RAM image ABI.
+// The SDK's syscall and ioctl contracts are data; no generated C is involved.
+// Borrowed strings are immutable. ioctl writes target an owned anonymous map.
+// Owners are cooperative records, not protected address spaces. This module
+// does not establish another target's syscall, termios or native-image ABI.
+// preludes: form-stdlib/core.fk form-stdlib/form-asm.fk
+section [form.bml] {
+ class NativePtyDarwin {
+  def npd-label(name) = list("label",name);
+  def npd-branch(cond,name) = list("branch",cond,name);
+  def npd-kind(row,name) = and(str_eq(value_kind(head(row)),"string"),str_eq(head(row),name));
+  def npd-labels(rows,pc,out) = if nil?(rows) then out else if npd-kind(head(rows),"label") then npd-labels(tail(rows),pc,cons(list(nth(head(rows),1),pc),out)) else npd-labels(tail(rows),add(pc,1),out);
+  def npd-find(labels,name) = if nil?(labels) then form_error("native PTY unresolved instruction label") else if str_eq(head(head(labels)),name) then nth(head(labels),1) else npd-find(tail(labels),name);
+  def npd-emit(rows,labels,pc) = if nil?(rows) then list() else if npd-kind(head(rows),"label") then npd-emit(tail(rows),labels,pc) else cons(if npd-kind(head(rows),"branch") then fa-bcond(nth(head(rows),1),sub(npd-find(labels,nth(head(rows),2)),pc)) else head(rows),npd-emit(tail(rows),labels,add(pc,1)));
+  def npd-cat(rows) = if nil?(rows) then list() else append(head(rows),npd-cat(tail(rows)));
+  def npd-route(code,name) = list(fa-cmp-x(0,code),npd-branch(0,name));
+  def npd-sys(number) = list(fa-movz-x(16,number),npd-branch(14,"syscall"));
+  def npd-shift1() = list(fa-add-x-imm(0,1,0));
+  def npd-shift2() = list(fa-add-x-imm(0,1,0),fa-add-x-imm(1,2,0));
+  def npd-shift3() = list(fa-add-x-imm(0,1,0),fa-add-x-imm(1,2,0),fa-add-x-imm(2,3,0));
+  def npd-peek-code(at) = if eq(at,7) then list() else append(list(fa-cmp-x(1,add(at,1)),npd-branch(11,"peek-return"),fa-ldrb(9,0,at)),append(if eq(at,0) then list() else list(fa-lsl-x-imm(9,9,mul(at,8))),cons(fa-add-x-r(8,8,9),npd-peek-code(add(at,1)))));
+  // x0 selects one operation; remaining registers carry that operation's
+  // integers or synchronous borrowed pointer/length pair. Syscall failures
+  // return negative errno, preserving EOF/zero/success as separate outcomes.
+  def npd-image() {
+   let rows = npd-cat(list(
+    npd-route(0,"pid"),npd-route(1,"map"),npd-route(2,"unmap"),npd-route(3,"open"),npd-route(4,"close"),npd-route(5,"ioctl"),npd-route(6,"peek"),npd-route(7,"write"),npd-route(8,"kill"),npd-route(9,"wait"),npd-route(10,"session"),npd-route(11,"poll"),
+    list(fa-movz-x(0,22),npd-branch(14,"negate")),
+    list(npd-label("pid")),npd-sys(20),
+    list(npd-label("map"),fa-movz-x(0,0),fa-movz-x(2,3),fa-movz-x(3,4098),fa-movz-x(4,0),fa-sub-x-imm(4,4,1),fa-movz-x(5,0)),npd-sys(197),
+    list(npd-label("unmap")),npd-shift2(),npd-sys(73),
+    list(npd-label("open"),fa-add-x-imm(0,1,0),fa-add-x-imm(1,3,0),fa-movz-x(2,0)),npd-sys(5),
+    list(npd-label("close")),npd-shift1(),npd-sys(6),
+    list(npd-label("ioctl")),npd-shift3(),npd-sys(54),
+    list(npd-label("peek")),npd-shift2(),list(fa-movz-x(8,0)),npd-peek-code(0),list(npd-label("peek-return"),fa-add-x-imm(0,8,0),npd-branch(14,"return")),
+    list(npd-label("write")),npd-shift3(),npd-sys(4),
+    list(npd-label("kill")),npd-shift2(),npd-sys(37),
+    list(npd-label("wait")),npd-shift3(),list(fa-movz-x(3,0)),npd-sys(7),
+    list(npd-label("session")),npd-sys(147),
+    list(npd-label("poll"),fa-sub-x-imm(31,31,16),fa-str-w(1,31,0),fa-movz(8,1),fa-str-w(8,31,4),fa-add-x-imm(0,31,0),fa-movz-x(1,1),fa-movz-x(2,0),fa-movz-x(16,230),fa-movk-x-16(16,512),fa-svc(128),npd-branch(2,"poll-error"),fa-ldrb(0,31,6),fa-add-x-imm(31,31,16),npd-branch(14,"return"),npd-label("poll-error"),fa-add-x-imm(31,31,16),npd-branch(14,"negate")),
+    list(npd-label("syscall"),fa-movk-x-16(16,512),fa-svc(128),npd-branch(3,"return"),npd-label("negate"),fa-asm(3405774848,list(1,32,65536),list(0,31,0)),npd-label("return"),fa-ret())));
+   fa-image(npd-emit(rows,npd-labels(rows,0,list()),0));
+  }
+  def npd-nodes(bytes) = if nil?(bytes) then list() else cons(intern_trivial_int(head(bytes)),npd-nodes(tail(bytes)));
+  // This structured probe is guarded by the existing Darwin ARM64 carrier.
+  // No raw syscall image is admitted before the host/ISA floor answers itself.
+  def npd-open() = if eq(jit_arm64_u32_leaf(list(list(1,42)),0,0),42) then npd-admit() else form_error("Darwin ARM64 native PTY host capability unavailable");
+  def npd-admit() {
+   let owner = record_new(0,"kind","native-pty-runtime","pid",host_pid(),"active",1,"calls",0,"regions",list());
+   let image = npd-image();
+   let identity = intern_node(make_nodeid(31,2,0,180),cons(intern_trivial_string("native-pty-darwin-arm64-v1"),cons(intern_trivial_int(owner),npd-nodes(image))));
+   record_set(owner,"identity",identity);
+   record_set(owner,"request",list(0,identity,image));
+   let pid = npd-native(owner,list(0));
+   if or(nothing?(pid),not(eq(pid,host_pid()))) then npd-admission-refused(owner) else owner;
+  }
+  def npd-admission-refused(owner) {
+   print(list("native-pty-admission-refused","release",npd-close(owner)));
+   form_error("Darwin ARM64 RAM PTY carrier unavailable");
+  }
+  def npd-active(owner) = and(record?(owner),and(str_eq(record_get(owner,"kind"),"native-pty-runtime"),and(eq(record_get(owner,"pid"),host_pid()),eq(record_get(owner,"active"),1))));
+  def npd-native(owner,args) {
+   if not(npd-active(owner)) then nothing() else npd-invoke(owner,args);
+  }
+  def npd-invoke(owner,args) {
+   record_set(owner,"calls",add(record_get(owner,"calls"),1));
+   jit_leaf_inram(record_get(owner,"request"),args);
+  }
+  def npd-region(owner,bytes) {
+   if or(not(str_eq(value_kind(bytes),"int")),le(bytes,0)) then nothing() else npd-region-admit(owner,bytes);
+  }
+  def npd-region-admit(owner,bytes) {
+   let pointer = npd-native(owner,list(1,bytes));
+   if or(nothing?(pointer),le(pointer,0)) then nothing() else npd-region-ready(owner,pointer,bytes);
+  }
+  def npd-region-ready(owner,pointer,bytes) {
+   let region = record_new(0,"kind","native-pty-region","owner",owner,"pointer",pointer,"bytes",bytes,"active",1);
+   record_set(owner,"regions",cons(region,record_get(owner,"regions")));
+   region;
+  }
+  def npd-span(region,offset,bytes) = if not(record?(region)) then nothing() else if not(str_eq(record_get(region,"kind"),"native-pty-region")) then nothing() else if not(eq(record_get(region,"active"),1)) then nothing() else if not(npd-active(record_get(region,"owner"))) then nothing() else if not(and(str_eq(value_kind(offset),"int"),str_eq(value_kind(bytes),"int"))) then nothing() else if or(lt(offset,0),or(lt(bytes,0),gt(bytes,sub(record_get(region,"bytes"),offset)))) then nothing() else add(record_get(region,"pointer"),offset);
+  def npd-peek(region,offset,bytes) = if or(lt(bytes,0),gt(bytes,7)) then nothing() else npd-peek-at(region,bytes,npd-span(region,offset,bytes));
+  def npd-peek-at(region,bytes,pointer) = if nothing?(pointer) then nothing() else npd-native(record_get(region,"owner"),list(6,pointer,bytes));
+  def npd-unpack(value,count) = if eq(count,0) then list() else cons(mod(value,256),npd-unpack(div(value,256),sub(count,1)));
+  def npd-bytes(region,offset,bytes) = if eq(bytes,0) then list() else npd-bytes-next(region,offset,bytes,if lt(bytes,7) then bytes else 7);
+  def npd-bytes-next(region,offset,bytes,count) {
+   let packed = npd-peek(region,offset,count);
+   if nothing?(packed) then form_error("owned PTY span read refused") else append(npd-unpack(packed,count),npd-bytes(region,add(offset,count),sub(bytes,count)));
+  }
+  def npd-cstring(region,offset,left) = if eq(left,0) then nothing() else npd-cstring-next(region,offset,left,npd-peek(region,offset,1));
+  def npd-cstring-next(region,offset,left,byte) = if nothing?(byte) then nothing() else if eq(byte,0) then "" else npd-cstring-join(byte,npd-cstring(region,add(offset,1),sub(left,1)));
+  def npd-cstring-join(byte,rest) = if nothing?(rest) then nothing() else str_concat(byte_to_str(byte),rest);
+  def npd-region-close(region) {
+   if not(record?(region)) then 0 else if not(eq(record_get(region,"active"),1)) then 0 else npd-region-closed(region,npd-native(record_get(region,"owner"),list(2,record_get(region,"pointer"),record_get(region,"bytes"))));
+  }
+  def npd-region-closed(region,status) {
+   if eq(status,0) then record_set(region,"active",0) else 0;
+   status;
+  }
+  def npd-cpath(path) = str_concat(path,byte_to_str(0));
+  // _IOC(direction, 't', number, size), from the current Darwin SDK.
+  def npd-ioc(direction,bytes,number) = add(direction,add(mul(bytes,65536),add(mul(116,256),number)));
+  def npd-open-flags(nonblocking) = add(16908290,if nonblocking then 4 else 0);
+  def npd-file-open(owner,path,flags) = npd-native(owner,list(3,npd-cpath(path),flags));
+  def npd-file-close(owner,fd) = npd-native(owner,list(4,fd));
+  def npd-ioctl(owner,fd,request,pointer) = npd-native(owner,list(5,fd,request,pointer));
+  def npd-owned-span(owner,region,offset,bytes) = if not(record?(region)) then nothing() else if not(eq(owner,record_get(region,"owner"))) then nothing() else npd-span(region,offset,bytes);
+  def npd-ioctl-region(owner,fd,request,region,offset,bytes) = npd-ioctl-at(owner,fd,request,npd-owned-span(owner,region,offset,bytes));
+  def npd-ioctl-at(owner,fd,request,pointer) = if nothing?(pointer) then nothing() else npd-ioctl(owner,fd,request,pointer);
+  def npd-write(owner,fd,bytes) = npd-native(owner,list(7,fd,bytes));
+  def npd-poll(owner,fd) = npd-native(owner,list(11,fd));
+  def npd-signal(owner,pid,signal) = if le(pid,0) then nothing() else npd-native(owner,list(8,pid,signal));
+  def npd-wait(owner,pid,region,options) = npd-wait-at(owner,pid,npd-owned-span(owner,region,512,4),options);
+  def npd-wait-at(owner,pid,pointer,options) = if nothing?(pointer) then nothing() else npd-native(owner,list(9,pid,pointer,options));
+  def npd-regions-closed(regions) = if nil?(regions) then 1 else and(not(eq(record_get(head(regions),"active"),1)),npd-regions-closed(tail(regions)));
+  def npd-close(owner) {
+   if not(npd-active(owner)) then 0 else if not(npd-regions-closed(record_get(owner,"regions"))) then nothing() else npd-closed(owner,jit_leaf_inram(list(1,record_get(owner,"identity"),list()),0));
+  }
+  def npd-closed(owner,status) {
+   if eq(status,1) then record_set(owner,"active",0) else 0;
+   status;
+  }
+  def npd-child-session() {
+   let owner = npd-open();
+   let session = npd-native(owner,list(10));
+   let released = npd-close(owner);
+   if and(eq(session,host_pid()),eq(released,1)) then print(list("PTY-SESSION",session)) else form_error("native PTY child session refused");
+  }
+ }
+ 0;
+}

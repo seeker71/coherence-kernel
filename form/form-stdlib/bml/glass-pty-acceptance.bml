@@ -1,0 +1,199 @@
+// The executing Glass keyboard organ observed through a private real PTY.
+// Form owns input, byte matching, deadlines, termios comparison and cleanup.
+// The production fixture source is read unchanged into a private driver; its
+// sole prefix establishes the child session through an owned RAM image.
+// preludes: form-stdlib/bml/native-pty-darwin.bml form-stdlib/bml/native-source-inventory.bml form-stdlib/organ-health.bml
+section [form.bml] {
+ class GlassPtyAcceptance {
+  def gpa-door() = "form/form-stdlib/tests/form-glass-input-pty-run.fk";
+  def gpa-path(run,leaf) = nsi-path(record_get(run,"job"),leaf);
+  def gpa-write(path,text) = if and(eq(write_file(path,text),str_len(text)),str_eq(read_file(path),text)) then path else form_error("PTY evidence write refused");
+  def gpa-voice(run,row) {
+   oh-emit(gpa-path(run,"health.jsonl"),row);
+   oh-voice(row);
+   row;
+  }
+  def gpa-health(run,session,aspect,expected,observed,ok) {
+   let serial = add(record_get(run,"observations"),1);
+   record_set(run,"observations",serial);
+   let reading = oh-reading("glass-keyboard-pty",record_get(session,"name"),aspect,expected,json-node-int(ok),json-node-int(ok),if ok then list() else list(oh-need("owned-pty-evidence",oh-reference(record_get(session,"transcript")))),list("release-owned-session","defer"),json-node-object(list(json-node-pair("measurement",observed),json-node-pair("transcript",oh-reference(record_get(session,"transcript"))))));
+   let row = oh-set(reading,"id",json-node-string(str_concat(int_to_str(host_pid()),str_concat(":pty:",int_to_str(serial)))));
+   gpa-voice(run,row);
+  }
+  def gpa-check(run,session,aspect,ok,observed) {
+   let row = gpa-health(run,session,aspect,json-node-int(1),observed,ok);
+   if ok then 1 else gpa-fail(run,session,row);
+  }
+  def gpa-fail(run,session,row) {
+   let response = oh-response(row,"release-owned-session");
+   gpa-voice(run,response);
+   let selected = oh-select(row,response,"defer");
+   let cleaned = if str_eq(selected,"release-owned-session") then gpa-close(session) else 0;
+   gpa-voice(run,oh-applied(row,selected,json-node-int(cleaned)));
+   gpa-health(run,session,"resources-after-refusal",json-node-int(1),json-node-int(cleaned),cleaned);
+   let runtimeRelease = npd-close(record_get(run,"runtime"));
+   gpa-resources(run,runtimeRelease);
+   print(list("failed-session",record_get(session,"name"),"cleanup",cleaned,"runtime-release",runtimeRelease,"evidence",record_get(run,"job")));
+   form_error("Glass PTY acceptance refused; owned cleanup and observations retained");
+  }
+  def gpa-resource-rows(sessions) = if nil?(sessions) then list() else cons(gpa-resource-row(head(sessions)),gpa-resource-rows(tail(sessions)));
+  def gpa-resource-row(session) = json-node-object(list(oh-s("session",record_get(session,"name")),oh-n("pid",record_get(session,"pid")),oh-n("reaped",record_get(session,"reaped")),oh-n("wait_status",record_get(session,"status")),oh-n("closed",record_get(session,"closed")),oh-n("master",record_get(session,"master")),oh-n("slave",record_get(session,"slave")),oh-n("termios_restored",record_get(session,"restored-on-close"))));
+  def gpa-resources(run,released) {
+   let row = json-node-object(list(oh-n("native_image_released",released),json-node-pair("sessions",json-node-array(gpa-resource-rows(record_get(run,"sessions"))))));
+   gpa-write(gpa-path(run,"resources.json"),json-emit-precise(row));
+  }
+  def gpa-session(run,name) {
+   let session = record_new(0,"kind","glass-pty-session","runtime",record_get(run,"runtime"),"name",name,"region",nothing(),"master",-1,"slave",-1,"pid",0,"reaped",0,"status",-1,"stopped",0,"closed",0,"baseline",list(),"buffer","","transcript",gpa-path(run,str_concat(name,".pty")));
+   record_set(run,"sessions",cons(session,record_get(run,"sessions")));
+   let region = npd-region(record_get(run,"runtime"),4096);
+   record_set(session,"region",region);
+   gpa-check(run,session,"owned-memory",not(nothing?(region)),json-node-int(not(nothing?(region))));
+   gpa-write(record_get(session,"transcript"),"");
+   let master = npd-file-open(record_get(run,"runtime"),"/dev/ptmx",npd-open-flags(1));
+   record_set(session,"master",master);
+   gpa-check(run,session,"master-open",ge(master,0),json-node-int(master));
+   let grant = npd-ioctl(record_get(run,"runtime"),master,npd-ioc(536870912,0,84),0);
+   let unlock = npd-ioctl(record_get(run,"runtime"),master,npd-ioc(536870912,0,82),0);
+   let named = npd-ioctl-region(record_get(run,"runtime"),master,npd-ioc(1073741824,128,83),region,256,128);
+   gpa-check(run,session,"slave-admission",and(eq(grant,0),and(eq(unlock,0),eq(named,0))),json-node-array(list(json-node-int(grant),json-node-int(unlock),json-node-int(named))));
+   let path = npd-cstring(region,256,128);
+   gpa-check(run,session,"nul-terminated-slave-name",and(not(nothing?(path)),gt(str_len(path),0)),json-node-int(str_len(path)));
+   let slave = npd-file-open(record_get(run,"runtime"),path,npd-open-flags(0));
+   record_set(session,"slave",slave);
+   gpa-check(run,session,"slave-open",ge(slave,0),json-node-int(slave));
+   let saved = npd-ioctl-region(record_get(run,"runtime"),slave,npd-ioc(1073741824,72,19),region,0,72);
+   gpa-check(run,session,"termios-snapshot",eq(saved,0),json-node-int(saved));
+   record_set(session,"baseline",npd-bytes(region,0,72));
+   let child = host_spawn_at(list("./fkwu",record_get(run,"driver")),list(path,path,path));
+   record_set(session,"pid",child);
+   gpa-check(run,session,"child-exec",gt(child,0),json-node-int(child));
+   gpa-until(run,session,str_concat("[PTY-SESSION, ",str_concat(int_to_str(child),"]")),90000);
+   gpa-until(run,session,"[INPUT-READY, 1]",90000);
+   gpa-direct(run,session,"direct-mode");
+   session;
+  }
+  def gpa-current(session) {
+   let result = npd-ioctl-region(record_get(session,"runtime"),record_get(session,"slave"),npd-ioc(1073741824,72,19),record_get(session,"region"),128,72);
+   if eq(result,0) then npd-bytes(record_get(session,"region"),128,72) else list();
+  }
+  def gpa-direct(run,session,aspect) {
+   let bytes = gpa-current(session);
+   let ok = and(eq(len(bytes),72),and(eq(mod(div(nth(bytes,24),8),2),0),eq(mod(nth(bytes,25),2),0)));
+   gpa-check(run,session,aspect,ok,json-node-int(ok));
+  }
+  // Padding at 52..55 is outside the POSIX termios fields. PENDIN is the
+  // Darwin kernel queue-state bit, byte 27 bit 5; every other bit survives.
+  def gpa-normal(byte,index) = if and(eq(index,27),eq(mod(div(byte,32),2),1)) then sub(byte,32) else byte;
+  def gpa-termios-equal(a,b,index) = if nil?(a) then nil?(b) else if nil?(b) then 0 else and(if and(ge(index,52),lt(index,56)) then 1 else eq(gpa-normal(head(a),index),gpa-normal(head(b),index)),gpa-termios-equal(tail(a),tail(b),add(index,1)));
+  def gpa-restored(run,session,aspect) {
+   let actual = gpa-current(session);
+   let ok = and(eq(len(actual),72),gpa-termios-equal(record_get(session,"baseline"),actual,0));
+   gpa-check(run,session,aspect,ok,json-node-int(ok));
+  }
+  def gpa-poll(session) {
+   if or(le(record_get(session,"pid"),0),eq(record_get(session,"reaped"),1)) then 0 else gpa-poll-live(session);
+  }
+  def gpa-poll-live(session) {
+   let pid = npd-wait(record_get(session,"runtime"),record_get(session,"pid"),record_get(session,"region"),3);
+   if eq(pid,record_get(session,"pid")) then gpa-status(session,npd-peek(record_get(session,"region"),512,4)) else pid;
+  }
+  def gpa-status(session,status) {
+   record_set(session,"status",status);
+   if eq(mod(status,128),127) then record_set(session,"stopped",1) else record_set(session,"reaped",1);
+   1;
+  }
+  def gpa-exit-code(session) = if eq(mod(record_get(session,"status"),128),0) then mod(div(record_get(session,"status"),256),256) else add(128,mod(record_get(session,"status"),128));
+  def gpa-read(run,session) {
+   let ready = npd-poll(record_get(session,"runtime"),record_get(session,"master"));
+   if or(nothing?(ready),lt(ready,0)) then gpa-check(run,session,"pty-poll",0,json-node-int(ready)) else 0;
+   if eq(mod(ready,2),1) then gpa-read-count(run,session,65536) else if gt(ready,0) then gpa-check(run,session,"pty-poll-without-readable-data",0,json-node-int(ready)) else 0;
+  }
+  def gpa-read-count(run,session,count) {
+   let bytes = file_read(record_get(session,"master"),count);
+   // The existing bulk door merges EOF/refusal into empty. A single owner
+   // admits it only after readiness and treats empty as a visible refusal.
+   if or(eq(str_len(bytes),0),gt(str_len(bytes),count)) then gpa-check(run,session,"bulk-read-after-readiness",0,json-node-int(str_len(bytes))) else 0;
+   record_set(run,"bulk-reads",add(record_get(run,"bulk-reads"),1));
+   record_set(session,"buffer",str_concat(record_get(session,"buffer"),bytes));
+   if not(eq(sbt-append-count(record_get(session,"transcript"),bytes),str_len(bytes))) then gpa-check(run,session,"transcript-append",0,json-node-int(str_len(bytes))) else 0;
+   str_len(bytes);
+  }
+  def gpa-until(run,session,marker,millis) = gpa-until-at(run,session,marker,add(host_monotonic_ms(),millis));
+  def gpa-until-at(run,session,marker,deadline) {
+   let at = str_find(record_get(session,"buffer"),marker,0);
+   if ge(at,0) then gpa-consume(session,marker,at) else gpa-until-read(run,session,marker,deadline);
+  }
+  def gpa-consume(session,marker,at) {
+   let buffer = record_get(session,"buffer");
+   record_set(session,"buffer",substring(buffer,add(at,str_len(marker)),str_len(buffer)));
+   substring(buffer,0,at);
+  }
+  def gpa-until-read(run,session,marker,deadline) {
+   gpa-read(run,session);
+   let at = str_find(record_get(session,"buffer"),marker,0);
+   if ge(at,0) then gpa-consume(session,marker,at) else gpa-until-wait(run,session,marker,deadline);
+  }
+  def gpa-until-wait(run,session,marker,deadline) {
+   let poll = gpa-poll(session);
+   if or(lt(poll,0),or(eq(record_get(session,"reaped"),1),ge(host_monotonic_ms(),deadline))) then gpa-check(run,session,"expected-output",0,json-node-string(marker)) else 0;
+   host_sleep_ms(2);
+   gpa-until-at(run,session,marker,deadline);
+  }
+  def gpa-send(run,session,bytes,offset) {
+   if ge(offset,str_len(bytes)) then 1 else gpa-sent(run,session,bytes,offset,npd-write(record_get(session,"runtime"),record_get(session,"master"),substring(bytes,offset,str_len(bytes))));
+  }
+  def gpa-sent(run,session,bytes,offset,written) {
+   if or(nothing?(written),le(written,0)) then gpa-check(run,session,"pty-write",0,json-node-int(written)) else 0;
+   gpa-send(run,session,bytes,add(offset,written));
+  }
+  def gpa-key(run,session,bytes,marker) {
+   record_set(session,"buffer","");
+   let started = host_monotonic_ms();
+   gpa-send(run,session,bytes,0);
+   gpa-until(run,session,marker,2000);
+   record_set(session,"last-key-tail",gpa-until(run,session,"\n",2000));
+   let elapsed = sub(host_monotonic_ms(),started);
+   gpa-check(run,session,"direct-input-transition",1,json-node-object(list(oh-n("bytes",str_len(bytes)),oh-n("elapsed_ms",elapsed),oh-s("expected_marker",marker))));
+   elapsed;
+  }
+  def gpa-wait-state(session,stopped,deadline) {
+   let polled = gpa-poll(session);
+   if or(lt(polled,0),ge(host_monotonic_ms(),deadline)) then 0 else if eq(record_get(session,if stopped then "stopped" else "reaped"),1) then 1 else gpa-wait-next(session,stopped,deadline);
+  }
+  def gpa-wait-next(session,stopped,deadline) {
+   host_sleep_ms(2);
+   gpa-wait-state(session,stopped,deadline);
+  }
+  def gpa-close(session) {
+   if eq(record_get(session,"closed"),1) then 1 else gpa-close-live(session);
+  }
+  def gpa-stop-child(session) {
+   if or(le(record_get(session,"pid"),0),eq(record_get(session,"reaped"),1)) then 1 else gpa-terminate(session);
+  }
+  def gpa-terminate(session) {
+   let owner = record_get(session,"runtime");
+   npd-signal(owner,record_get(session,"pid"),19);
+   npd-signal(owner,record_get(session,"pid"),15);
+   if gpa-wait-state(session,0,add(host_monotonic_ms(),5000)) then 1 else gpa-kill(session);
+  }
+  def gpa-kill(session) {
+   npd-signal(record_get(session,"runtime"),record_get(session,"pid"),9);
+   gpa-wait-state(session,0,add(host_monotonic_ms(),5000));
+  }
+  def gpa-close-live(session) {
+   let child = gpa-stop-child(session);
+   let owner = record_get(session,"runtime");
+   let restored = if nil?(record_get(session,"baseline")) then 1 else if and(child,ge(record_get(session,"slave"),0)) then gpa-termios-equal(record_get(session,"baseline"),gpa-current(session),0) else 0;
+   record_set(session,"restored-on-close",restored);
+   let slave = if lt(record_get(session,"slave"),0) then 0 else npd-file-close(owner,record_get(session,"slave"));
+   if eq(slave,0) then record_set(session,"slave",-1) else 0;
+   let master = if lt(record_get(session,"master"),0) then 0 else npd-file-close(owner,record_get(session,"master"));
+   if eq(master,0) then record_set(session,"master",-1) else 0;
+   let region = if nothing?(record_get(session,"region")) then 0 else if child then npd-region-close(record_get(session,"region")) else -1;
+   let ok = and(child,and(eq(slave,0),and(eq(master,0),eq(region,0))));
+   if ok then record_set(session,"closed",1) else 0;
+   and(ok,restored);
+  }
+ }
+ 0;
+}

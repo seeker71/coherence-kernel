@@ -102,11 +102,28 @@ selected state, frame production and a human-visible paint are distinct claims.
 
 - `form/form-stdlib/tests/form-glass-input-band.fk`: pure decoder and production
   controller transitions, including a correlated framebuffer clear/re-observation.
-- `form/scripts/test_glass_keyboard_pty.py`: real POSIX PTY bytes without Enter,
-  using the production native door and Form controller; no sensor fleet or shared
-  live data writes. Also checks quit, SIGINT/TERM/HUP, suspend/resume and non-TTY
-  behavior. Darwin's transient PENDIN queue-state bit is excluded from the
-  restoration comparison; all settings, control characters and speeds must match.
+- `./fkwu observe/glass-keyboard-pty-run.bml`: Form owns real Darwin arm64 PTY
+  admission, byte matching, deadlines, signals, terminal snapshots and cleanup.
+  It executes the unchanged production fixture through a private session driver.
+  Six sessions observe immediate keys, filters, views, split VT input, bracketed
+  paste, evidence selection, quit, SIGINT/TERM/HUP, suspend/resume and non-TTY
+  input retention. All termios fields, control characters and speeds must match;
+  only Darwin's transient PENDIN bit and structure padding are excluded.
+  A seventh session deliberately reaches a missing-output deadline. The shared
+  process reader verifies its nonzero exit, exact observation/response/applied
+  correlation and subsequent restoration, reaping and release. Private evidence
+  retains terminal bytes, stdout, stderr, wait statuses and resource reports.
+- `bml/native-pty-darwin.bml` emits its ARM64 syscall image in Form and admits it
+  in RAM through the existing CPU JIT door. Mutable ioctl outputs live in owned
+  anonymous memory; borrowed strings remain immutable. One nonblocking owner
+  polls and reads terminal output in chunks up to 65,536 bytes. A chunk size is
+  not a transcript limit. These are cooperative process-local owners, not
+  protected address spaces. This acceptance module does not replace the
+  production terminal signal hooks in C.
+- `form/scripts/test_glass_keyboard_pty.py` retains the unretired POSIX/Linux
+  acceptance responsibility. The current native RAM admission carrier is
+  Darwin arm64; the Form door explicitly refuses other targets. No native Linux
+  PTY result is claimed, and Python is not invoked by the native witness.
 - Existing `form-glass-live-ui-band.fk`, `form-glass-launch-band.fk` and
   `form-glass-event-loop-band.fk` retain the full renderer/launcher proofs.
 

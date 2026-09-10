@@ -1,0 +1,74 @@
+// Independent process supervision and exact health transport correlation for
+// the native PTY organ. Retained stdout/stderr, termios evidence and child wait
+// statuses remain inspectable after both successful and refused execution.
+// preludes: form-stdlib/bml/form-cli-heal-native-process.bml
+section [form.bml] {
+ class GlassPtyRunner {
+  def gpr-read(path) {
+   let text = read_file(path);
+   if and(not(nothing?(text)),and(ge(file_size(path),0),eq(str_len(text),file_size(path)))) then text else form_error("native PTY retained evidence read incomplete");
+  }
+  def gpr-save(path,row) {
+   let text = json-emit-precise(row);
+   if and(eq(write_file(path,text),str_len(text)),str_eq(gpr-read(path),text)) then row else form_error("native PTY report write refused");
+  }
+  def gpr-events(events) = if nil?(events) then list() else gpr-event(head(events),tail(events));
+  def gpr-event(event,rest) {
+   let row = oh-get(event,"health");
+   if and(str_eq(fhn-string(event,"phase"),"organ-health"),str_eq(oh-str(row,"organ"),"glass-keyboard-pty")) then cons(row,gpr-events(rest)) else gpr-events(rest);
+  }
+  def gpr-correlated(rows,events) = if nil?(rows) then nil?(events) else if nil?(events) then 0 else and(str_eq(json-emit-precise(head(rows)),json-emit-precise(head(events))),gpr-correlated(tail(rows),tail(events)));
+  def gpr-observations(rows) = if nil?(rows) then list() else if str_eq(oh-str(head(rows),"stage"),"observe") then cons(head(rows),gpr-observations(tail(rows))) else gpr-observations(tail(rows));
+  def gpr-pain(rows) = if nil?(rows) then list() else if oh-pain(head(rows)) then cons(head(rows),gpr-pain(tail(rows))) else gpr-pain(tail(rows));
+  def gpr-unique(rows,seen) = if nil?(rows) then 1 else and(not(oh-has(seen,oh-str(head(rows),"id"))),gpr-unique(tail(rows),cons(oh-str(head(rows),"id"),seen)));
+  def gpr-resources(rows) = if nil?(rows) then 1 else and(gpr-resource(head(rows)),gpr-resources(tail(rows)));
+  def gpr-resource(row) = and(eq(fhn-number(row,"closed"),1),and(eq(fhn-number(row,"reaped"),1),and(eq(fhn-number(row,"master"),-1),and(eq(fhn-number(row,"slave"),-1),and(eq(fhn-number(row,"termios_restored"),1),and(ge(fhn-number(row,"wait_status"),0),not(fhn-alive(fhn-number(row,"pid")))))))));
+  def gpr-control(rows,reading,stage) = if nil?(rows) then json-node-null() else if and(str_eq(oh-str(head(rows),"id"),oh-str(reading,"id")),str_eq(oh-str(head(rows),"stage"),stage)) then head(rows) else gpr-control(tail(rows),reading,stage);
+  def gpr-refused(rows,observations,pain) {
+   let failed = head(pain);
+   let response = gpr-control(rows,failed,"response");
+   let applied = gpr-control(rows,failed,"applied");
+   let final = head(reverse(observations));
+   and(eq(len(pain),1),and(str_eq(oh-str(failed,"aspect"),"expected-output"),and(str_eq(oh-select(failed,response,"unbound"),"release-owned-session"),and(str_eq(oh-select(failed,oh-set(applied,"stage",json-node-string("response")),"unbound"),"release-owned-session"),and(eq(fhn-number(applied,"result"),1),and(str_eq(oh-str(final,"aspect"),"resources-after-refusal"),eq(fhn-number(final,"health"),1)))))));
+  }
+  def gpr-report(job,status,refusal) {
+   let rows = fhn-json-rows(split-on(gpr-read(fhn-at(job,"health.jsonl")),"\n"));
+   let process = parse-json("pty-process",gpr-read(fhn-at(job,"pty.process.json")));
+   let resources = parse-json("pty-resources",gpr-read(fhn-at(job,"resources.json")));
+   let sessions = json-array-elements(oh-get(resources,"sessions"));
+   let events = gpr-events(json-array-elements(oh-get(process,"events")));
+   let observations = gpr-observations(rows);
+   let pain = gpr-pain(observations);
+   let correlated = gpr-correlated(rows,events);
+   let unique = gpr-unique(observations,list());
+   let cleanup = oh-get(process,"cleanup");
+   let released = and(str_eq(fhn-string(cleanup,"state"),"released"),str_eq(fhn-string(cleanup,"group_members"),""));
+   let owned = and(eq(fhn-number(resources,"native_image_released"),1),and(gt(len(sessions),0),gpr-resources(sessions)));
+   let semantic = if refusal then and(str_eq(status,"1"),gpr-refused(rows,observations,pain)) else and(str_eq(status,"0"),and(nil?(pain),eq(fhn-number(parse-json("pty-verdict",gpr-read(fhn-at(job,"report.json"))),"accepted"),1)));
+   let accepted = and(semantic,and(correlated,and(unique,and(released,owned))));
+   let report = json-node-object(list(oh-s("schema","native-glass-pty-transport-v1"),oh-s("evidence",job),oh-s("case",if refusal then "deadline-refusal-and-release" else "full-production-acceptance"),oh-n("observations",len(observations)),oh-n("health_rows",len(rows)),oh-n("transported_health_rows",len(events)),oh-n("exact_health_correlation",correlated),oh-n("unique_observation_ids",unique),oh-n("owned_sessions",len(sessions)),oh-n("sessions_and_native_image_released",owned),oh-n("process_group_released",released),oh-s("status",status),oh-n("stdout_bytes",file_size(fhn-at(job,"pty.out"))),oh-n("stderr_bytes",file_size(fhn-at(job,"pty.err"))),oh-n("accepted",accepted)));
+   gpr-save(fhn-at(job,"transport-report.json"),report);
+   print_str(json-emit-precise(report));
+   let errors = gpr-read(fhn-at(job,"pty.err"));
+   if gt(str_len(errors),0) then print_str(errors) else 0;
+   if and(released,str_eq(fhn-string(process,"state"),"finished")) then fs_remove(fhn-at(job,"pty.launch.sh")) else 0;
+   if accepted then 1 else form_error("native PTY process, health correlation or release refused");
+  }
+  def gpr-stage(refusal) {
+   let job = fhn-unique(host_temp_dir(),"form-native-pty-",0);
+   if str_eq(job,"") then form_error("native PTY supervisor evidence directory refused") else 0;
+   let input = fhn-at(job,"input");
+   let text = str_concat(job,if refusal then "\nrefusal\n" else "\nacceptance\n");
+   if ne(write_file(input,text),str_len(text)) then form_error("native PTY supervisor input incomplete") else 0;
+   print_str(str_concat("process-evidence=",job));
+   let status = fhn-run-start(job,"pty",240,fhn-root(),input,list("./fkwu","observe/glass-keyboard-pty-exercise.bml"));
+   gpr-report(job,status,refusal);
+  }
+  def gpr-run() {
+   let accepted = gpr-stage(0);
+   let refused = gpr-stage(1);
+   if and(accepted,refused) then 1 else form_error("native PTY acceptance incomplete");
+  }
+ }
+ 0;
+}

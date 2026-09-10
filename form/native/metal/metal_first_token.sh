@@ -665,19 +665,11 @@ func attn(_ s: Step, _ l: Int, _ pos: Int) {
 // so the overhead is visible rather than folded into a conclusion.
 var profAcc: [String: Double] = [:], profN: [String: Int] = [:]
 let profile = ProcessInfo.processInfo.environment["FORM_PROFILE"] == "1"
-// ---- FORM_GEN_ONLY: the ANSWERING mode, and why it lives INSIDE the witness ----------------------
-// The full suite generates the same prompt EIGHT times — once short and once long on each of the
-// attestant, split, lane and slot paths — because its subject is that they AGREE. An ask's subject
-// is the answer, and paying 8x (the attestant alone is 18x slower per token) to re-prove agreement
-// on every question a person types is what makes a local model unusable rather than merely slow.
-// FORM_GEN_ONLY=1 runs the slot path ONCE and reports it.
-// It is a mode of THIS file and not a second runner, and that is the whole point: metal_ask.sh's own
-// header names the risk — "a lean generation-only runner ... will have to prove it emits the same ids
-// as this one before it is allowed to answer anything." A separate runner would have to prove that
-// forever, against drift nobody watches. A flag around the CALLS to the SAME `generate`, over the
-// same kernels, the same buffers and the same pool, has nothing left to drift: the agreement gates
-// are what is skipped, never the code they were agreeing about. The verdict says so out loud, and
-// metal_ask.sh stamps GATES with `-genonly` so no receipt can quote a lean run as the full suite.
+// FORM_GEN_ONLY=1 runs this numerical witness's slot generation once. The full
+// suite compares short and long generations on the attestant, split, lane and
+// slot paths. Generation-only output does not establish those agreement checks.
+// Public asks run through observe/metal-ask-run.bml; their native live witness
+// checks exact token IDs, model identity, answer binding and resource release.
 let genOnly = ProcessInfo.processInfo.environment["FORM_GEN_ONLY"] == "1"
 let modelGlass = ProcessInfo.processInfo.environment["FORM_MODEL_GLASS"] == "1"
 let modelGlassRole = ProcessInfo.processInfo.environment["FORM_MODEL_GLASS_ROLE"] ?? "general-text"
