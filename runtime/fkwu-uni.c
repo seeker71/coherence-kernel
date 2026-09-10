@@ -13303,6 +13303,27 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_cstr(fk_walk(fk_node[i][1], fp), p, FK_PATH_CAP);
         return unlink(p) << 1;
     }
+    if (t == 143) {
+        /* fs_truncate path size: set a file's extent, creating it if absent.
+         * Answers the resulting extent, or -1 when the host refuses.
+         *
+         * The kernel-conformance gate built its oversize malformed artifact by
+         * spawning a shell: printf a header, then head -c sixty-four megabytes
+         * of /dev/zero. Every byte of that crossed a pipe to make a file whose
+         * whole point is its LENGTH. The seed already calls ftruncate for its
+         * own shared pages; this door is that same call, offered to Form.
+         * Sparse, so the sixty-four megabytes cost no bytes and no pipe. */
+        static char p143[FK_PATH_CAP];
+        fk_cstr(fk_walk(fk_node[i][1], fp), p143, FK_PATH_CAP);
+        long long want143 = fk_walk(fk_node[i][2], fp) >> 1;
+        if (want143 < 0) { return fk_nothing; }
+        int fd143 = open(p143, O_WRONLY | O_CREAT, 0666);
+        if (fd143 < 0) { return fk_nothing; }
+        if (ftruncate(fd143, want143) != 0) { close(fd143); return fk_nothing; }
+        long long got143 = lseek(fd143, 0, 2);
+        close(fd143);
+        return got143 << 1;
+    }
     if (t == 59) {
         static char a[FK_PATH_CAP];
         static char b[FK_PATH_CAP];
