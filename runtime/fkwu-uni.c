@@ -1026,7 +1026,13 @@ static long long fk_neq(long long a, long long b) {
     if (a == b) {
         return 1;
     }
-    if (a >= 0 || b >= 0) {
+    /* Node boxes and floats are negative and ODD; an integer is v << 1 and so
+     * EVEN. Testing only `< 0` let a negative INTEGER be read as a node index
+     * here, exactly as in the tag-102 arm: value_eq(-3, -2) answered 1, and so
+     * did value_eq(list(1, -2), list(1, -3)) -- two different lists, equal.
+     * Witnessed 2026-09-10. An even negative word is an integer and is settled
+     * by the `a == b` above. */
+    if (a >= 0 || b >= 0 || (a & 1) == 0 || (b & 1) == 0) {
         return 0;
     }
     long long ia = fk_nidx(a);
@@ -9296,6 +9302,12 @@ static int fk_f64_push(int kind, int a, int b, double lit, long long ilit) {
 static int fk_f64_type_of(int n) { int k = fk_f64_prog[n].kind; return (k >= 7 && k <= 12) ? 1 : 2; }
 /* an int-typed node promoted to float (SCVTF) -- the walker's fk_num on the int side of a mixed op */
 static int fk_f64_cvt(int n) { return fk_f64_type_of(n) == 2 ? n : fk_f64_push(13, n, 0, 0.0, 0); }
+/* The tag this lane fell through on -- the operation it has no arm for. A
+ * decline used to record only that admission failed, which is a location in
+ * this walker and not a fact about the recipe. The tag IS the fact: it names
+ * the operation a lane would have to learn to absorb that recipe's dispatches,
+ * so a histogram over it reads as work to do rather than a count to regret. */
+static long long fk_f64_refuse_tag = -1;
 /* admit a body node under a per-parameter type signature (types[k]: 1 int, 2 float): returns 0 declined, 1 int-typed,
  * 2 float-typed; appends to fk_f64_prog, *out = its index */
 static int fk_f64_admit(long long i, long long arity, const int *types, int *out) {
@@ -9340,6 +9352,7 @@ static int fk_f64_admit(long long i, long long arity, const int *types, int *out
         *out = fk_f64_push(9 + op, a, b, 0.0, 0); /* the int lane: exact 64-bit word math, the walker's own */
         return *out < 0 ? 0 : 1;
     }
+    fk_f64_refuse_tag = t; /* no arm for this operation: the reason, and the work */
     return 0;
 }
 static int fk_f64_put(unsigned int *words, long long *n, unsigned int w) {
@@ -9562,12 +9575,29 @@ static void fk_f64_pulse(long long fx) {
     long long root = 0, orig = 0, body = 0;
     if (!fk_f64_body_of(fx, &root, &orig, &body)) { fk_fn_native[fx] = -1; return; }
     if (fk_node[body][0] == 6) { return; } /* loop-shaped: the heat pulse reads the signature off a whole frame; stay cold until then */
-    fk_fn_native[fx] = -1;
+    /* Declined used to be a single -1: looked at, not taken, no reason kept.
+     * Urs, 2026-09-10, having read 18.1 billion declined dispatches: the goal
+     * is declined at zero, and walking turning into JIT.
+     *
+     * A first attempt recorded which STAGE the walker stopped at. That is a
+     * location and a stone placed, not a reason -- it says where I gave up, and
+     * a histogram over it only redescribes this function. The reason is a
+     * property of the RECIPE: the operation this lane has no arm for. So a
+     * decline carries that tag, and reads as work rather than as regret:
+     *   -1                 no readable body
+     *   -(1000 + tag)      no arm for AST tag `tag`
+     * A reader decodes it against the body's own op manifest, which already
+     * holds every (name, arity, tag) row, so no new table is minted here. */
+    fk_f64_refuse_tag = -1;
+    fk_fn_native[fx] = -3;
     long long arity = fk_fnar[fx];
     int types[8] = {2, 2, 2, 2, 2, 2, 2, 2}; /* the expression leaf: every parameter a float, the door holds the rest to the walker */
     fk_f64_prog_n = 0;
     int top = 0;
-    if (fk_f64_admit(body, arity, types, &top) != 2) { return; }
+    if (fk_f64_admit(body, arity, types, &top) != 2) {
+        if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); }
+        return;
+    }
     unsigned int words[FK_F64_WORD_CAP];
     long long wn = 0;
     int ntemp = 0, nitemp = 0;
@@ -9637,11 +9667,12 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     if (fk_node[body][0] != 6) { fk_f64_pulse(fx); return; } /* not a loop: the expression leaf is asked instead */
     long long arity = fk_fnar[fx];
     if (n != arity) { return; } /* a partial frame carries stale slots: no signature to read this time */
+    fk_f64_refuse_tag = -1;
     fk_fn_native[fx] = -1;
     long long cond = fk_node[body][1], thn = fk_node[body][2], els = fk_node[body][3];
     if (cond < 0 || cond >= fk_node_count || thn < 0 || thn >= fk_node_count || els < 0 || els >= fk_node_count) { return; }
     long long ct = fk_node[cond][0];
-    if (ct != 5 && ct != 102 && ct != 103) { return; }
+    if (ct != 5 && ct != 102 && ct != 103) { fk_fn_native[fx] = 0 - (1000 + ct); return; } /* the comparison this lane has no arm for: a fact about the recipe */
     /* which branch is the self tail call: tag 241 on this fn index, or tag 12 (one arg) on it */
     int self_then = (fk_node[thn][0] == 241 || fk_node[thn][0] == 12) && fk_node[thn][1] == fx;
     int self_else = (fk_node[els][0] == 241 || fk_node[els][0] == 12) && fk_node[els][1] == fx;
@@ -9655,7 +9686,7 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     while (k < arity) {
         long long v = fk_vs[fp + k];
         if (fk_isf(v)) { types[k] = 2; sig = sig | (1LL << k); }
-        else if ((v & 1) != 0) { return; } /* not a number: not this lane's frame */
+        else if ((v & 1) != 0) { fk_fn_native[fx] = -2; return; } /* a frame slot is not a number: this lane carries numeric frames only, and THAT is the reason -- not where the walk stopped */
         k = k + 1;
     }
     /* the tail call's arguments, one per parameter, each the type of the parameter it feeds */
@@ -9663,12 +9694,12 @@ static void fk_f64_loop_pulse(long long fx, long long fp, long long n) {
     fk_f64_prog_n = 0;
     if (fk_node[call][0] == 12) {
         if (arity != 1) { return; }
-        if (fk_f64_admit(fk_node[call][2], arity, types, &argn[0]) != types[0]) { return; }
+        if (fk_f64_admit(fk_node[call][2], arity, types, &argn[0]) != types[0]) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } return; }
     } else {
         long long cell = fk_node[call][2];
         k = 0;
         while (cell >= 0 && fk_node[cell][0] == 242 && k < arity) {
-            if (fk_f64_admit(fk_node[cell][1], arity, types, &argn[k]) != types[k]) { return; }
+            if (fk_f64_admit(fk_node[cell][1], arity, types, &argn[k]) != types[k]) { if (fk_f64_refuse_tag >= 0) { fk_fn_native[fx] = 0 - (1000 + fk_f64_refuse_tag); } return; }
             cell = fk_node[cell][2];
             k = k + 1;
         }
@@ -10370,7 +10401,19 @@ static long long fk_walk(long long i, long long fp) {
         if (fk_isf(ae) || fk_isf(be)) {
             return (fk_num(ae) == fk_num(be)) ? 2 : 0;
         }
-        if (ae < 0 && be < 0) {
+        /* Both words must actually BE node boxes. A node box is
+         * 0 - ((i << 1) | 1), so its word is negative and ODD; an integer is
+         * v << 1, so its word is EVEN -- the invariant fk_isf's own comment
+         * states. This case tested only `< 0`, so a negative INTEGER was read
+         * as a node index: -2 is the word -4 and fk_nidx(-4) is 1, -3 is -6 and
+         * maps to 2, and where those nodes were both kind 3 the arm compared
+         * their coordinates and answered EQUAL. Witnessed 2026-09-10:
+         * eq(-3, -2) answered 1, and so did eq(-2, -4) and eq(-3, -4), while
+         * eq(-1, -2) answered 0 -- because -1 is the word -2, which maps to
+         * index 0 and fell out at `>= 1`. So every sentinel of -1 in this body
+         * was safe and every distinct sentinel below it silently collided.
+         * lt, le, add and sub were never affected; only this arm. */
+        if (ae < 0 && be < 0 && (ae & 1) != 0 && (be & 1) != 0) {
             long long ia102 = fk_nidx(ae);
             long long ib102 = fk_nidx(be);
             if (ia102 >= 1 && ia102 <= fk_np && ib102 >= 1 && ib102 <= fk_np &&
