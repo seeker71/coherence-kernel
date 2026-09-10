@@ -1,0 +1,233 @@
+// Attributed corpus reindexing from three held local sources.
+// Byte Aho transitions preserve complete UTF8 pattern boundaries and output order.
+// preludes: form-stdlib/bml/concept-roundtrip-builder.bml
+section [form.bml] {
+ class ConceptHumanReindex {
+  def chr-base() = "cognition/concept-human-corpus-13";
+  def chr-path(suffix) = str_concat(chr-base(),suffix);
+  def chr-data() = "cognition/fixtures/human-corpus-13/tatoeba-human-sentences.tsv";
+  def chr-manifest() = "cognition/fixtures/human-corpus-13/ARCHIVES.tsv";
+  def chr-inputs() = list(cmm-path("-omw.tsv"),chr-data(),chr-manifest());
+  def chr-lf-end(text,end) = if eq(end,0) then 0 else if eq(str_byte_at(text,sub(end,1)),10) then chr-lf-end(text,sub(end,1)) else end;
+  def chr-lines(text) = split-on(substring(text,0,chr-lf-end(text,str_len(text))),"\n");
+  def chr-header() = "locale\ttatoeba_lang\tsentence_id\tauthor\tadded_utc\tmodified_utc\tlicense\tsentence_url\trole\tdomain\texpected_concept_id\tmatched_surface\tdetected_concept_count\tdetected_concept_ids\treview_state\tsource_row_sha256\tsentence\n";
+  def chr-check(state,aspect,ok) = csa-check(state,str_concat("human-reindex-",aspect),ok,"held attributed source bytes, complete matcher and exact generated evidence");
+  def chr-code(lens) = nth(cmm-codes(),lens);
+  def chr-lens(code,at) = if eq(at,13) then nothing() else if str_eq(code,chr-code(at)) then at else chr-lens(code,add(at,1));
+  def chr-count(work,key) = record_set(work,key,add(record_get(work,key),1));
+  def chr-fold(s) = chr-fold-go(s,0,0,list());
+  def chr-fold-go(s,at,from,bins) {
+   if eq(at,str_len(s)) then fbc-finish(fbc-put(bins,substring(s,from,at)),"") else if and(ge(str_byte_at(s,at),65),le(str_byte_at(s,at),90)) then chr-fold-go(s,add(at,1),add(at,1),fbc-put(fbc-put(bins,substring(s,from,at)),byte_to_str(add(str_byte_at(s,at),32)))) else chr-fold-go(s,add(at,1),from,bins);
+  }
+  // Valid UTF8 makes each adjacent non-ASCII byte equivalent to the source
+  // matcher testing a non-ASCII UTF16 code unit. ASCII '_' is not a word byte.
+  def chr-word(s,at) = if or(lt(at,0),ge(at,str_len(s))) then 0 else chr-word-byte(str_byte_at(s,at));
+  def chr-word-byte(b) = or(ge(b,128),or(and(ge(b,48),le(b,57)),or(and(ge(b,65),le(b,90)),and(ge(b,97),le(b,122)))));
+  def chr-node(root) = record_new(0,"edges",record_new(0),"children",list(),"own",list(),"out",list(),"fail",root);
+  def chr-tree(lens) {
+   let root = chr-node(0); record_set(root,"fail",root);
+   record_new(0,"root",root,"lens",lens,"nodes",1);
+  }
+  def chr-trees(work,lens) {
+   if eq(lens,13) then 1 else chr-tree-next(work,lens);
+  }
+  def chr-tree-next(work,lens) {
+   record_set(work,str_concat("tree:",int_to_str(lens)),chr-tree(lens)); chr-trees(work,add(lens,1));
+  }
+  def chr-edge(node,b) = record_get(record_get(node,"edges"),int_to_str(b));
+  def chr-add(tree,node,s,at,group) {
+   if eq(at,str_len(s)) then record_set(node,"own",cons(group,record_get(node,"own"))) else chr-add-byte(tree,node,s,at,group,str_byte_at(s,at));
+  }
+  def chr-add-byte(tree,node,s,at,group,b) {
+   let old = chr-edge(node,b); let child = if record?(old) then old else chr-node(record_get(tree,"root"));
+   if record?(old) then 0 else chr-child(tree,node,b,child);
+   chr-add(tree,child,s,add(at,1),group);
+  }
+  def chr-child(tree,node,b,child) {
+   record_set(record_get(node,"edges"),int_to_str(b),child);
+   record_set(node,"children",cons(list(b,child),record_get(node,"children"))); chr-count(tree,"nodes");
+  }
+  def chr-groups(state,work,lines,id) = if nil?(lines) then id else chr-group-row(state,work,csa-fields(head(lines)),tail(lines),id);
+  def chr-group-row(state,work,fields,rest,id) {
+   if not(and(eq(len(fields),14),csa-nonempty(tail(fields)))) then chr-check(state,"primary-field-shape",0) else 0;
+   chr-group-fields(work,tail(fields),0,id); chr-groups(state,work,rest,add(id,1));
+  }
+  def chr-group-fields(work,fields,lens,id) {
+   if eq(lens,13) then 1 else chr-group-field(work,head(fields),tail(fields),lens,id);
+  }
+  def chr-group-field(work,surface,rest,lens,id) {
+   let key = km-key-of-string(crb-key(lens,surface)); let hash = km-hash(key);
+   let group = km-get-h(record_get(work,"groups"),hash,key,0);
+   if record?(group) then crb-append-group(group,id) else chr-new-group(work,key,hash,lens,surface,id);
+   chr-group-fields(work,rest,add(lens,1),id);
+  }
+  def chr-new-group(work,key,hash,lens,surface,id) {
+   let group = record_new(0,"ids",list(id),"count",1,"lens",lens,"surface",surface,"width",str_len(surface));
+   record_set(work,"groups",km-put-h(record_get(work,"groups"),hash,key,group));
+   record_set(work,"group-list",cons(group,record_get(work,"group-list")));
+   let tree = record_get(work,str_concat("tree:",int_to_str(lens)));
+   chr-add(tree,record_get(tree,"root"),chr-fold(surface),0,group);
+  }
+  def chr-order-ids(groups) = if nil?(groups) then 1 else chr-order-group(head(groups),tail(groups));
+  def chr-order-group(group,rest) {
+   record_set(group,"ids",reverse(record_get(group,"ids"))); chr-order-ids(rest);
+  }
+  def chr-failure(root,at,b) = if record?(chr-edge(at,b)) then chr-edge(at,b) else if eq(at,root) then root else chr-failure(root,record_get(at,"fail"),b);
+  def chr-root-children(root,children,back) {
+   if nil?(children) then back else chr-root-child(root,nth(head(children),1),tail(children),back);
+  }
+  def chr-root-child(root,node,rest,back) {
+   record_set(node,"out",reverse(record_get(node,"own")));
+   chr-root-children(root,rest,cons(node,back));
+  }
+  def chr-build-tree(tree) {
+   let root = record_get(tree,"root");
+   chr-bfs(root,list(),chr-root-children(root,reverse(record_get(root,"children")),list())); 1;
+  }
+  def chr-bfs(root,front,back) {
+   if nil?(front) then if nil?(back) then 1 else chr-bfs(root,reverse(back),list()) else chr-bfs(root,tail(front),chr-fail-children(root,head(front),reverse(record_get(head(front),"children")),back));
+  }
+  def chr-fail-children(root,parent,children,back) = if nil?(children) then back else chr-fail-child(root,parent,head(children),tail(children),back);
+  def chr-fail-child(root,parent,edge,rest,back) {
+   let child = nth(edge,1); let fail = chr-failure(root,record_get(parent,"fail"),head(edge));
+   record_set(child,"fail",fail); record_set(child,"out",append(reverse(record_get(child,"own")),record_get(fail,"out")));
+   chr-fail-children(root,parent,rest,cons(child,back));
+  }
+  def chr-build-trees(state,work,lens) {
+   if eq(lens,13) then 1 else chr-build-locale(state,work,lens);
+  }
+  def chr-build-locale(state,work,lens) {
+   let tree = record_get(work,str_concat("tree:",int_to_str(lens))); chr-build-tree(tree);
+   chr-check(state,str_concat("matcher-",chr-code(lens)),gt(record_get(tree,"nodes"),1)); chr-build-trees(state,work,add(lens,1));
+  }
+  def chr-insert-id(ids,id) = if nil?(ids) then list(id) else if eq(id,head(ids)) then ids else if lt(id,head(ids)) then cons(id,ids) else cons(head(ids),chr-insert-id(tail(ids),id));
+  def chr-merge-ids(ids,fresh) = if nil?(fresh) then ids else chr-merge-ids(chr-insert-id(ids,head(fresh)),tail(fresh));
+  def chr-found(group,found) {
+   let key = int_to_str(group); let seen = record_get(found,"seen");
+   if eq(record_get(seen,key),1) then 0 else chr-found-new(group,found,seen,key);
+  }
+  def chr-found-new(group,found,seen,key) {
+   record_set(seen,key,1); record_set(found,"surfaces",cons(group,record_get(found,"surfaces")));
+   record_set(found,"ids",chr-merge-ids(record_get(found,"ids"),record_get(group,"ids")));
+  }
+  def chr-outs(s,end,unsegmented,outs,found) {
+   if nil?(outs) then 1 else chr-out(s,end,unsegmented,head(outs),tail(outs),found);
+  }
+  def chr-out(s,end,unsegmented,group,rest,found) {
+   if or(unsegmented,not(or(chr-word(s,sub(sub(end,record_get(group,"width")),1)),chr-word(s,end)))) then chr-found(group,found) else 0;
+   chr-outs(s,end,unsegmented,rest,found);
+  }
+  def chr-match(tree,sentence) {
+   let found = record_new(0,"ids",list(),"surfaces",list(),"seen",record_new(0)); let root = record_get(tree,"root");
+   chr-scan(root,root,chr-fold(sentence),0,or(eq(record_get(tree,"lens"),8),eq(record_get(tree,"lens"),9)),found);
+   record_set(found,"surfaces",reverse(record_get(found,"surfaces"))); found;
+  }
+  def chr-scan(root,at,s,offset,unsegmented,found) {
+   if eq(offset,str_len(s)) then 1 else chr-scan-byte(root,chr-failure(root,at,str_byte_at(s,offset)),s,add(offset,1),unsegmented,found);
+  }
+  def chr-scan-byte(root,at,s,end,unsegmented,found) {
+   chr-outs(s,end,unsegmented,record_get(at,"out"),found); chr-scan(root,at,s,end,unsegmented,found);
+  }
+  def chr-has-id(ids,id) = if nil?(ids) then 0 else or(eq(head(ids),id),chr-has-id(tail(ids),id));
+  def chr-surface-for(groups,id) = if nil?(groups) then "" else if chr-has-id(record_get(head(groups),"ids"),id) then record_get(head(groups),"surface") else chr-surface-for(tail(groups),id);
+  def chr-collision(groups) = if nil?(groups) then nothing() else if gt(record_get(head(groups),"count"),1) then head(groups) else chr-collision(tail(groups));
+  def chr-roles() = list("domain","open","ambiguity","negative");
+  def chr-expected(s) = if str_eq(s,"-1") then -1 else if and(csa-digits(s,0),le(str_len(s),4)) then str_to_int(s) else nothing();
+  def chr-row(state,work,fields,index) {
+   if not(eq(len(fields),17)) then chr-check(state,"source-row-fields",0) else 0;
+   let lens = chr-lens(head(fields),0); let role = nth(fields,8); let expected = chr-expected(nth(fields,10));
+   if not(and(not(nothing?(lens)),and(oh-has(chr-roles(),role),not(nothing?(expected))))) then chr-check(state,"source-locale-role-id",0) else 0;
+   let found = chr-match(record_get(work,str_concat("tree:",int_to_str(lens))),nth(fields,16));
+   let ids = record_get(found,"ids"); let groups = record_get(found,"surfaces"); let collision = chr-collision(groups);
+   if and(str_eq(role,"domain"),not(chr-has-id(ids,expected))) then chr-check(state,"domain-expected-id-observed",0) else 0;
+   let zero = nil?(ids); let ambiguous = and(str_eq(role,"ambiguity"),not(nothing?(collision)));
+   let nextRole = if zero then "negative" else if ambiguous then "ambiguity" else if str_eq(role,"domain") then role else "open";
+   let domain = if zero then "none" else if ambiguous then "collision" else if str_eq(role,"domain") then nth(fields,9) else "open-lexical";
+   let id = if zero then -1 else if ambiguous then head(record_get(collision,"ids")) else if str_eq(role,"domain") then expected else head(ids);
+   let surface = if zero then "" else if ambiguous then record_get(collision,"surface") else chr-surface-for(groups,id);
+   let changed = append(chr-take(fields,8),append(list(nextRole,domain,int_to_str(id),surface,int_to_str(len(ids)),chr-id-text(ids)),chr-drop(fields,14)));
+   chr-row-counts(work,lens,nextRole,nth(fields,3),ids);
+   let line = str_concat(csa-join(changed,"\t"),"\n");
+   record_set(work,"snapshot",fbc-put(record_get(work,"snapshot"),line));
+   record_set(work,"offset",add(record_get(work,"offset"),str_len(line)));
+   record_set(work,"offsets",cons(record_get(work,"offset"),record_get(work,"offsets")));
+   chr-count(work,"rows"); 1;
+  }
+  def chr-take(xs,n) = if eq(n,0) then list() else cons(head(xs),chr-take(tail(xs),sub(n,1)));
+  def chr-drop(xs,n) = if eq(n,0) then xs else chr-drop(tail(xs),sub(n,1));
+  def chr-id-text(ids) = if nil?(ids) then "" else str_concat(int_to_str(head(ids)),if nil?(tail(ids)) then "" else str_concat(",",chr-id-text(tail(ids))));
+  def chr-row-counts(work,lens,role,author,ids) {
+   chr-count(work,role); chr-count(work,crb-locale-key(lens,"rows")); chr-count(work,crb-locale-key(lens,role));
+   record_set(work,"detections",add(record_get(work,"detections"),len(ids)));
+   chr-distinct(work,"unique-ids",ids);
+   let key = km-key-of-string(crb-key(lens,author)); let hash = km-hash(key);
+   if eq(km-get-h(record_get(work,"author-seen"),hash,key,0),1) then 0 else chr-author(work,lens,key,hash);
+  }
+  def chr-author(work,lens,key,hash) {
+   record_set(work,"author-seen",km-put-h(record_get(work,"author-seen"),hash,key,1)); chr-count(work,crb-locale-key(lens,"authors"));
+  }
+  def chr-distinct(work,key,values) {
+   if nil?(values) then 1 else chr-distinct-value(work,key,head(values),tail(values));
+  }
+  def chr-distinct-value(work,key,value,rest) {
+   let bytes = if str_eq(value_kind(value),"string") then km-key-of-string(value) else list(value);
+   let map = record_get(work,key); let hash = km-hash(bytes);
+   if eq(km-get-h(map,hash,bytes,0),1) then 0 else chr-distinct-new(work,key,map,hash,bytes);
+   chr-distinct(work,key,rest);
+  }
+  def chr-distinct-new(work,key,map,hash,bytes) {
+   record_set(work,key,km-put-h(map,hash,bytes,1)); chr-count(work,str_concat(key,"-count"));
+  }
+  def chr-rows(state,work,lines,index) = if nil?(lines) then index else chr-row-next(state,work,head(lines),tail(lines),index);
+  def chr-row-next(state,work,line,rest,index) {
+   chr-row(state,work,csa-fields(line),index); chr-rows(state,work,rest,add(index,1));
+  }
+  def chr-prepare(root,engine) {
+   let state = cmm-state(root,engine);
+   chr-check(state,"hash-policy",or(str_eq(engine,"form-sha256"),str_eq(engine,"arm64-sha256")));
+   let table = csa-file(state,cmm-path("-omw.tsv")); let original = csa-file(state,chr-data()); let manifest = csa-file(state,chr-manifest());
+   chr-check(state,"utf8-source-bytes",and(fbc-utf8(table,0),and(fbc-utf8(original,0),fbc-utf8(manifest,0))));
+   chr-check(state,"exact-source-headers",and(str_eq(substring(table,0,str_len(cmm-header())),cmm-header()),str_eq(substring(original,0,str_len(chr-header())),chr-header())));
+   let labels = tail(chr-lines(table)); let rows = tail(chr-lines(original));
+   chr-check(state,"complete-source-shapes",and(eq(len(labels),10000),eq(len(rows),1300)));
+   let start = str_len(chr-header());
+   let work = record_new(0,"input",state,"groups",km-for(130000),"group-list",list(),"snapshot",fbc-put(list(),chr-header()),"offset",start,"offsets",list(start),"unique-ids",km-for(10000),"author-seen",km-for(1300));
+   chr-trees(work,0); chr-check(state,"complete-label-groups",eq(chr-groups(state,work,labels,0),10000));
+   chr-order-ids(record_get(work,"group-list")); chr-build-trees(state,work,0);
+   chr-check(state,"complete-attributed-rows",eq(chr-rows(state,work,rows,0),1300));
+   record_set(work,"snapshot",fbc-finish(record_get(work,"snapshot"),"")); record_set(work,"offsets",reverse(record_get(work,"offsets")));
+   chr-check(state,"complete-offsets",and(eq(len(record_get(work,"offsets")),1301),eq(record_get(work,"offset"),str_len(record_get(work,"snapshot")))));
+   record_set(work,"snapshotSha256",csa-hash(state,record_get(work,"snapshot"))); record_set(work,"manifestSha256",csa-hash(state,manifest)); work;
+  }
+  def chr-fn(name,value) = str_concat("  (defn hcnl13-",str_concat(name,str_concat(" () ",str_concat(value,")\n"))));
+  def chr-number-fns(work,pairs) = if nil?(pairs) then "" else str_concat(chr-fn(head(head(pairs)),int_to_str(record_get(work,nth(head(pairs),1)))),chr-number-fns(work,tail(pairs)));
+  def chr-locale-stats(work,lens) = list(chr-code(lens),record_get(work,crb-locale-key(lens,"rows")),record_get(work,crb-locale-key(lens,"domain")),record_get(work,crb-locale-key(lens,"open")),record_get(work,crb-locale-key(lens,"ambiguity")),record_get(work,crb-locale-key(lens,"negative")),record_get(work,crb-locale-key(lens,"authors")));
+  def chr-form-locales(work,lens) = if eq(lens,13) then "" else str_concat("    (list ",str_concat(crb-quoted(chr-code(lens)),str_concat(" ",str_concat(crb-numbers(tail(chr-locale-stats(work,lens))),str_concat(")\n",chr-form-locales(work,add(lens,1)))))));
+  def chr-offset-lines(offsets,bins) = if nil?(offsets) then fbc-finish(bins,"") else chr-offset-lines(tail(offsets),fbc-put(bins,str_concat("    ",str_concat(int_to_str(head(offsets)),"\n"))));
+  def chr-offset-source(work) = str_concat("; Generated byte index over the complete attributed corpus.\n; preludes: form/form-stdlib/core.fk\n(do\n  (defn hcnl13-offsets () (list\n",str_concat(chr-offset-lines(record_get(work,"offsets"),list()),"  ))\n)\n"));
+  def chr-metadata(work) {
+   let a = fbc-put(list(),"; Exact attributed Tatoeba corpus evidence, generated by Form.\n; Human-contributed-unreviewed retains its source attribution and CC BY 2.0 FR license.\n; preludes: form/form-stdlib/core.fk form/form-stdlib/sha256.fk form/form-stdlib/hex.fk form/form-stdlib/str-byte-at.fk\n(do\n");
+   let b = fbc-put(a,chr-number-fns(work,list(list("row-count","rows"),list("domain-count","domain"),list("open-count","open"),list("ambiguity-count","ambiguity"),list("negative-count","negative"),list("detection-count","detections"),list("unique-concept-count","unique-ids-count"),list("attributed-count","rows"))));
+   let c = fbc-put(b,str_concat(chr-fn("locale-count","13"),str_concat(chr-fn("human-reviewed-count","0"),str_concat(chr-fn("data-path",crb-quoted(chr-data())),chr-fn("manifest-path",crb-quoted(chr-manifest()))))));
+   let d = fbc-put(c,str_concat(chr-fn("data-sha256",crb-quoted(record_get(work,"snapshotSha256"))),chr-fn("manifest-sha256",crb-quoted(record_get(work,"manifestSha256")))));
+   let e = fbc-put(d,"  (defn hcnl13-hash-valid? (path expected)\n    (do (let size (file_size path)) (let bytes (read_file path))\n      (if (and (ge size 0) (and (not (nothing? bytes))\n          (and (eq size (str_len bytes)) (eq size (file_size path)))))\n        (str_eq (hex-encode (sha256-stream-string bytes)) expected) 0)))\n  (defn hcnl13-artifacts-valid? ()\n    (and (hcnl13-hash-valid? (hcnl13-data-path) (hcnl13-data-sha256))\n         (hcnl13-hash-valid? (hcnl13-manifest-path) (hcnl13-manifest-sha256))))\n");
+   fbc-finish(fbc-put(e,str_concat(chr-fn("locale-stats",str_concat("(list\n",str_concat(chr-form-locales(work,0),"  )"))),")\n")),"");
+  }
+  def chr-complete(work) {
+   record_set(work,"outputs",list(list(chr-data(),record_get(work,"snapshot")),list(chr-path("-offsets.fk"),chr-offset-source(work)),list(chr-path("-metadata.fk"),chr-metadata(work)))); work;
+  }
+  def chr-report(work) = json-node-object(list(oh-s("schema","form-human-corpus-reindex-v1"),oh-n("rows",record_get(work,"rows")),oh-n("detections",record_get(work,"detections")),oh-n("uniqueConcepts",record_get(work,"unique-ids-count")),json-node-pair("roles",json-node-object(cmm-count-fields(work,chr-roles()))),oh-s("snapshotSha256",record_get(work,"snapshotSha256"))));
+  def chr-publish(work) {
+   let state = record_get(work,"input"); let outputs = record_get(work,"outputs"); cmm-freeze-outputs(state,outputs);
+   let suffix = str_concat(".stage-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(host_monotonic_ms()))));
+   let stages = cmm-stages(state,outputs,suffix); record_set(work,"stages",stages); record_set(state,"owned-stages",list()); record_set(state,"published",0);
+   chr-check(state,"private-stage-paths",cmm-stage-free(state,stages)); cmm-stage-all(state,stages);
+   cmm-fresh(state,record_get(state,"files"));
+   chr-check(state,"all-three-artifacts-published",eq(cmm-publish-all(state,stages,0),3));
+   chr-check(state,"private-stages-released",cmm-clean-stages(record_get(state,"owned-stages"))); record_set(state,"owned-stages",list());
+   print_str(json-emit-precise(chr-report(work))); 1;
+  }
+  def chr-run(root,engine) = chr-publish(chr-complete(chr-prepare(root,engine)));
+ }
+ 0;
+}

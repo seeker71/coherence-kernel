@@ -340,7 +340,7 @@ await writeManifest(evidence);
 for (const [command, script] of [
   [resolve(root, "fkwu"), "observe/concept-materialize-run.bml"],
   [resolve(root, "fkwu"), "observe/concept-roundtrip-build-run.bml"],
-  [process.execPath, "cognition/concept-human-corpus-13-reindex.mjs"],
+  [resolve(root, "fkwu"), "observe/concept-human-reindex-run.bml"],
 ]) {
   const result = spawnSync(command, [script], { cwd: root, stdio: ["ignore", "inherit", "inherit"] });
   if (result.status !== 0) throw new Error(`downstream canonical rebuild failed: ${script}`);

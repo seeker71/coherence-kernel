@@ -536,7 +536,7 @@ func gpuRope(_ v: MTLBuffer, _ nh: Int, _ hd: Int, _ pos: Int, _ inverse: Bool) 
     enc.setBuffer(freqBuf, offset: 0, index: 2)
     enc.setBytes(&a, length: 4, index: 3); enc.setBytes(&b, length: 4, index: 4); enc.setBytes(&c, length: 4, index: 5)
     enc.setBytes(&p, length: 4, index: 6); enc.setBytes(&s, length: 4, index: 7)
-    enc.dispatchThreads(MTLSize(width: nh, height: 1, depth: 1),
+    enc.dispatchThreads(MTLSize(width: nh*hd, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: min(pRope.maxTotalThreadsPerThreadgroup, 64), height: 1, depth: 1))
     enc.endEncoding(); run(cb); return out
 }
@@ -742,7 +742,7 @@ check(mixRel < 1e-4 && oMix.count == hfRows && gpuErrors == 0,
 // alternating column/row normalisations. The FIRST normalisation is by column, then the loop starts at 1.
 let hcSplit = sentinelled(2*nHc + nHc*nHc)
 do { var a = UInt32(nHc), it = UInt32(hcIters), e0 = hcEps
-     enc1(pHcSplit, 1) { e in e.setBuffer(hcMix, offset: 0, index: 0)
+     enc1(pHcSplit, nHc) { e in e.setBuffer(hcMix, offset: 0, index: 0)
                               e.setBuffer(views[hsIdx], offset: hsInner, index: 1)
                               e.setBuffer(views[hbIdx], offset: hbInner, index: 2)
                               e.setBuffer(hcSplit, offset: 0, index: 3)
@@ -797,7 +797,7 @@ check(okR, "gate 28 the WHOLE MLA block on the REAL layer-0 input at pos \(posA)
 // is addressed [dst, src] — transposing it is a choice a self-carve cannot see.
 let afterAttn = sentinelled(hcDim)
 do { var a = UInt32(nHc), b = UInt32(nEmbd)
-     enc1(pHcPost, nHc) { e in e.setBuffer(realAttnOut, offset: 0, index: 0); e.setBuffer(residHc, offset: 0, index: 1)
+     enc1(pHcPost, hcDim) { e in e.setBuffer(realAttnOut, offset: 0, index: 0); e.setBuffer(residHc, offset: 0, index: 1)
                                e.setBuffer(hcSplit, offset: nHc*4, index: 2)
                                e.setBuffer(hcSplit, offset: 2*nHc*4, index: 3)
                                e.setBuffer(afterAttn, offset: 0, index: 4)

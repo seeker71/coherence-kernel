@@ -23,7 +23,7 @@ Form owns the following executing surfaces. Each linked page names its public do
 | [Specimen compilation](native-python-compiler.md) | Form parses, lifts, dispatches and emits the supported Python grammar in the current process; complete source admission and owned publication preserve an existing output on refusal |
 | [Proof traces](native-kernel-trace.md) | Form compiles specimens, supervises independent Rust execution and renders its real dispatch trace |
 | [Routing proofs](../form/form-kernel-rust/README.md) | Form owns socket fixtures, concurrent clients, exact response checks and child settlement around the independent Rust server |
-| [Concept construction and audit](native-concept-source-audit.md) | Form owns canonical projection, all lexical candidate groups, binary indices, offsets, metadata, staged publication, stable IDs, aliases, provenance and exact held-byte hashing; portable and explicitly selected ARM64 policies agree |
+| [Concept construction and audit](native-concept-source-audit.md) | Form owns canonical projection, all lexical candidate groups, attributed corpus reindexing, complete WordNet sense construction, binary indices, offsets, metadata, staged publication, stable IDs, aliases, provenance and exact held-byte hashing; portable and explicitly selected ARM64 policies agree |
 | [Terminal acceptance](glass-keyboard.md) | Form owns real Darwin ARM64 PTYs, immediate input checks, signals, exact termios restoration, deadlines and independently supervised resource release |
 | [Ordered CPU mathematics](native-fp64-matrix.md) | Form emits binary64 MXFP8 matrix code in RAM; repeated calls reuse owned output memory without boxing intermediate products or sums |
 
