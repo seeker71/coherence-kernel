@@ -29,6 +29,38 @@ Readers use `nag-resolve(output)`. Native continuation restores moments and step
 a historical adapter without optimizer state starts a disclosed new Adam state.
 Generations are retained, so storage grows with completed rounds.
 
+## Dataset continuity
+
+Adam's step counts weight updates, not rows learned from the current corpus.
+`native-lora-progress.bml` binds traversal to SHA-256 of the exact loaded
+`train.jsonl` bytes, its nonempty row count and prompt-masking policy. The same
+read supplies both the digest and training rows. New datasets begin at the
+first row even when their adapter has thousands of optimizer steps.
+
+Each completed checkpoint carries `training_progress` in both its configuration
+and completion marker. `examples_seen` counts checkpointed row exposures for
+that dataset and supervision policy; the next zero-based row index is its
+remainder modulo `dataset_rows`. Changing batch size continues from that row.
+Wrapping starts another pass. Repeated rows are exposures, not new knowledge.
+If publication fails, the preceding complete generation still owns progress.
+
+Continuation checks agreement between the configuration and completion marker.
+A legacy checkpoint without coverage metadata retains its Adam state but starts
+at the first row, explicitly reporting prior coverage as unmeasured. Changing
+dataset bytes or masking policy also starts at the first row. Invalid metadata
+and same-digest row-count disagreements refuse instead of guessing a cursor.
+The first complete new pass establishes coverage; it cannot recover historical
+exposures that were never recorded.
+
+`dataset-resume`, `dataset-response`, `dataset-applied` and `dataset-progress`
+events retain the chosen traversal, dataset identity, next row and checkpoint,
+without training text. The resume observation and its correlated response live
+inside the trainer; the subsequent checkpoint observes actual advancement.
+These are consumption measurements, not evidence of answer quality or Qwen
+weight training.
+
+## Observe the run
+
 `training-events.jsonl` records row numbers, counts, per-stage elapsed/GPU time,
 gradient norm, clipping, actual pair updates, checkpoint path, validation loss and
 completion reason. It contains no training text. `train.log`, `train.err` and
