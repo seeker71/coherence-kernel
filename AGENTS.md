@@ -130,6 +130,18 @@ behavior checks; update callers; then remove the old implementation. A missing
 native capability is work we carry, with the attempt and remaining seam recorded.
 The reading guides the work; it creates no new approval step or landing rule.
 
+Session learning is carried by the body as well. `learn`, `code`, `heal` and
+interactive session completion retain their observed outcomes for native LoRA;
+`session status` reports the actual candidate, serving generation and queue.
+Before closing an agent coding movement, return a concise verified teaching
+through `./fkwu observe/form-cli-session-home-embody-run.fk`: one JSON stdin line
+with `prompt`, `completion`, stable `session` and `event` identity. Ground that
+teaching in the checks just run; do not use unverified model output as a correct
+target. With empty stdin the same door drains retained examples and reports
+current state. Evaluation examples stay excluded. This is local learning under
+the standing request, not a new permission step. The evidence and current
+boundaries live in `docs/native-session-learning.md`.
+
 Foreign-language specimens used as input to Form's own compiler remain input
 data. Historical receipts keep their evidence. Neither is a reason to run a
 Python interpreter. Do not rename an implementation or relax its checks to make

@@ -179,25 +179,26 @@ against the current snapshot. Each accepted example includes a training-candidat
 record; failed candidates remain counterexamples in their attempt directories.
 The shared teaching names the successful and refused repairs from 2026-09-07.
 
-Retrieval alone does not train a neural model. When this checkout contains a
-nonempty `.form-heal/learning-enabled`, every candidate/check round also invokes
-the native Qwen learner through `form-cli-heal-native-learning-run.bml`.
-Evaluation rounds are excluded. The learner observes one fixed-probe hidden
-state on the actual local Qwen model and takes one rank-one squared-error step
-toward an embedding of the observed outcome, including unresolved attempts.
-The next round resumes the resulting candidate. Its objective is explicitly
-`fixed-probe-activation-space-outcome-embedding-squared-error`: this is not
-next-token loss or a demonstrated improvement in repair quality.
+Every candidate/check round now offers its observed outcome to the shared
+native session learner by default. Verified replacements become supervised
+repair targets; failed proposals teach only the observed execution status.
+Evaluation rounds are excluded. `learning.jsonl` links the private example and
+worker state; queued work is never labelled a completed weight update.
 
-`learning.jsonl` and `.form-heal/native-learning/<round>/result.json` retain
-parent/candidate hashes, changed tensors, one observed forward token, objective
-element count, and the before/after fitting loss. Loss values use a declared
-scale of 10^12 to preserve small differences in the text formatter. The native
-SHA reader checks the complete base file before and after the update. Adapter
-bytes are read back and checked before the candidate pointer advances. The
-supervisor separately records the child's actual exit and resource release.
-The candidate is not automatically serving: independent repair evaluation
-still decides admission. Older MLX artifacts remain separate historical data.
+The Llama learner uses full next-token LoRA gradients and restores Adam state
+from the previous generation. Every completed learning round updates all loaded
+LoRA pairs. Current-example loss must improve, and every held-out and rehearsal
+row must avoid regression against both the preceding candidate and the serving
+adapter before promotion. The per-row scores, checkpoints, source seals, actual
+process exits and timing stay under `.hearth/session-learning/`.
+
+After deterministic repair and verified memory, healing attempts the evaluated
+session adapter before the existing native/local model inventory. Its generated
+replacement still has to pass the unchanged isolated checker. Failure continues
+through local resources and models; the rented CLI remains the final fallback.
+`session status`, `session pause` and `session resume` expose the shared learner.
+See [Native session learning](native-session-learning.md) for the exact scope
+and the distinction between validation loss and demonstrated repair quality.
 
 ## Measure repair behavior before training
 
@@ -298,10 +299,14 @@ form-run ./fkwu form/form-stdlib/tests/form-cli-heal-dynamic-band.fk
 form-run ./fkwu form/form-stdlib/tests/form-cli-heal-flow-band.fk
 form-run ./fkwu form/form-stdlib/tests/qwen-lora-finite-band.fk
 form-run ./fkwu form/native/metal/tests/qwen38-embedding-band.fk
-form-run ./fkwu observe/form-cli-heal-native-learning-witness.bml
+form-run ./fkwu form/form-stdlib/tests/native-session-learning-band.fk
+form-run ./fkwu form/form-stdlib/tests/native-session-worker-band.fk
+form-run ./fkwu observe/native-session-homecoming-run.fk
 ```
 
 Policy authority: `form/form-stdlib/bml/form-cli-heal-policy.bml`.
+The separate `form-cli-heal-native-learning-witness.bml` measures the older
+Qwen activation-probe objective; it is not the production session learner.
 Native resource planning: `form/form-stdlib/bml/form-cli-heal-resources.bml`.
 Evaluation curriculum: `form/form-stdlib/bml/form-cli-heal-eval-policy.bml`.
 Executable movement: `form/form-stdlib/bml/form-cli-heal.bml`.
