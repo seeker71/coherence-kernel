@@ -1,0 +1,83 @@
+// Independent conversations share admitted weights, never stream history.
+// The returned session replaces the caller's owner, including on refusal.
+// Success retires the old stream; it must never be resumed or released again.
+// No model admission, weight update, transcript persistence or remote call.
+// preludes: form-stdlib/form-cli-model-session.fk form-stdlib/organ-health.bml
+section [form.bml] {
+ class FormCliModelRenew {
+  def fcmr-result(changed,reason,session) = list(changed,reason,session);
+  def fcmr-changed(result) = nth(result,0);
+  def fcmr-reason(result) = nth(result,1);
+  def fcmr-session(result) = nth(result,2);
+  def fcmr-id-valid(id,vocab) = if not(str_eq(value_kind(id),"int")) then 0 else and(ge(id,0),lt(id,vocab));
+  def fcmr-ids-valid(ids,vocab) = if nil?(ids) then 1 else and(fcmr-id-valid(head(ids),vocab),fcmr-ids-valid(tail(ids),vocab));
+  def fcmr-input-reason(session,ids) {
+   if not(fcms-resident?(session)) then "no-resident-context"
+   else if not(fcms-live?(session)) then "session-not-live"
+   else if not(str_eq(value_kind(ids),"list")) then "prompt-ids-need-list"
+   else if nil?(ids) then "empty-prompt"
+   else if ge(len(ids),fcms-maxpos(session)) then "prompt-context-window-refused"
+   else if not(fcmr-ids-valid(ids,nth(nth(fcms-ctx(session),2),19))) then "prompt-token-id-refused"
+   else "";
+  }
+  def fcmr-new-session(previous,state,prefill,count) = fcms-session("live","fresh-stream-same-weights",fcms-path(previous),fcms-src(previous),fcms-ctx(previous),state,fcms-maxpos(previous),nth(prefill,1),head(prefill),0,count,0,0,0);
+  def fcmr-reading(flow,reason,good,expected,observed) = oh-reading("model-session",flow,"independent-stream",expected,observed,json-node-int(good),if good then list() else list(oh-need(reason,json-node-null())),list("replace-stream","retain-session","inspect-state-release"),json-node-null());
+  def fcmr-observed(flow,result,expected,observed) {
+   let reading = oh-voice(fcmr-reading(flow,fcmr-reason(result),and(fcmr-changed(result),str_eq(fcmr-reason(result),"fresh-stream-same-weights")),expected,observed));
+   result;
+  }
+  def fcmr-replace-ids(session,ids) {
+   let flow = str_concat(int_to_str(host_pid()),str_concat(":renew:",int_to_str(now_unix_ms())));
+   let reason = fcmr-input-reason(session,ids);
+   if not(str_eq(reason,"")) then fcmr-observed(flow,fcmr-result(0,reason,session),json-node-string("admissible independent prompt"),json-node-string(reason))
+   else if not(fcmo-settled(metal_live())) then fcmr-observed(flow,fcmr-result(0,"device-work-not-settled",session),json-node-string("settled device"),json-node-string("pending device work"))
+   else fcmr-prepare(flow,session,ids);
+  }
+  def fcmr-prepare(flow,session,ids) {
+   let reading = fcmr-reading(flow,"independent-stream-needed",0,json-node-string("fresh conversation state"),json-node-string("existing conversation state"));
+   let voiced = oh-voice(reading);
+   let response = oh-response(reading,"replace-stream");
+   let answered = oh-voice(response);
+   let selected = oh-select(reading,response,"retain-session");
+   if not(str_eq(selected,"replace-stream")) then fcmr-result(0,"renewal-not-selected",session)
+   else fcmr-allocated(flow,session,ids,reading,q38-new-state(nth(fcms-ctx(session),2)));
+  }
+  def fcmr-allocated(flow,session,ids,reading,fresh) {
+   let good = fcmr-state-complete?(fresh,nth(fcms-ctx(session),2));
+   if not(good) then fcmr-discard(flow,session,fresh,"new-stream-allocation-refused")
+   else fcmr-prefilled(flow,session,ids,reading,fresh,fcmr-prefill(fcms-ctx(session),fresh,ids));
+  }
+  def fcmr-state-complete?(state,geo) = and(eq(len(state),nth(geo,21)),and(eq(q38-state-handle-count(state),mul(2,nth(geo,21))),q38-state-ok?(state)));
+  def fcmr-span(ctx,count) = if lt(q38-ctx-span(ctx),fcma-span(count)) then q38-ctx-span(ctx) else fcma-span(count);
+  def fcmr-prefill(ctx,state,ids) = fcmo-walk(fcmo-native-step,ctx,state,ids,0,fcmr-span(ctx,len(ids)));
+  def fcmr-discard(flow,session,fresh,reason) {
+   let settled = metal_sync();
+   let expected = q38-state-handle-count(fresh);
+   let released = q38-free-state(fresh);
+   fcmr-observed(flow,fcmr-result(0,if eq(expected,released) then reason else "candidate-stream-release-incomplete",session),json-node-int(expected),json-node-int(released));
+  }
+  def fcmr-prefilled(flow,session,ids,reading,fresh,prefill) {
+   if not(fcmo-shape(prefill,0,len(ids))) then fcmr-discard(flow,session,fresh,"new-stream-prefill-refused")
+   else fcmr-retire(flow,session,ids,reading,fresh,prefill);
+  }
+  def fcmr-retire(flow,session,ids,reading,fresh,prefill) {
+   let settled = metal_sync();
+   let expected = q38-state-handle-count(fcms-sts(session));
+   let released = q38-free-state(fcms-sts(session));
+   let next = fcmr-new-session(session,fresh,prefill,len(ids));
+   let applied = oh-voice(oh-applied(reading,"replace-stream",json-node-object(list(oh-n("prompt_ids",len(ids)),oh-n("old_state_handles_expected",expected),oh-n("old_state_handles_released",released),oh-n("weight_admissions",0)))));
+   fcmr-observed(flow,fcmr-result(1,if eq(expected,released) then "fresh-stream-same-weights" else "old-stream-release-incomplete",next),json-node-int(expected),json-node-int(released));
+  }
+  def fcmr-replace-with-profile(session,prompt,profile) {
+   if not(fcms-resident?(session)) then fcmr-result(0,"no-resident-context",session)
+   else if not(fcms-live?(session)) then fcmr-result(0,"session-not-live",session)
+   else fcmr-encode(session,prompt,profile,qsx-load(fcms-path(session)));
+  }
+  def fcmr-encode(session,prompt,profile,crystal) {
+   if ne(nth(crystal,0),1) then fcmr-replace-ids(session,fcmg-chat-ids-profile(fcms-src(session),prompt,profile))
+   else fcmr-encoded(session,qtlc-drain(fcmg-chat-cursor-profile(fcms-path(session),prompt,profile,crystal)));
+  }
+  def fcmr-encoded(session,result) = if not(str_eq(head(result),"done")) then fcmr-result(0,"prompt-cursor-refused",session) else fcmr-replace-ids(session,nth(result,1));
+ }
+ 0;
+}
