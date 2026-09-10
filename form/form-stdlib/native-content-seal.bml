@@ -1,0 +1,56 @@
+// SHA-256 compression on shared Metal file pages, authored and dispatched by Form.
+// File identity is a domain-separated tree, explicitly not the ordinary file SHA.
+// Leaf size is 65536 bytes; root hashes domain, file length, then ordered digests.
+// preludes: form-stdlib/native-affine-metal.bml form-stdlib/sha256.fk
+section [form.bml] {
+ class NativeContentSeal {
+  def ncs-constants(xs) = if nil?(xs) then "" else str_concat(int_to_str(add_u32(head(xs),0)),str_concat("u",if nil?(tail(xs)) then "" else str_concat(",",ncs-constants(tail(xs)))));
+  def ncs-msl() = str_concat("#include <metal_stdlib>\nusing namespace metal;\nconstant uint ncs_k[64]={",str_concat(ncs-constants(sha256-k()),str_concat("};\nconstant uint ncs_h[8]={",str_concat(ncs-constants(sha256-h-init()),"};
+inline uint ncs_r(uint x,uint n){return (x>>n)|(x<<(32-n));}
+kernel void ncs_sha(device const uchar* in [[buffer(0)]],device uchar* out [[buffer(1)]],constant uint& lo [[buffer(2)]],constant uint& hi [[buffer(3)]],constant uint& chunk [[buffer(4)]],uint id [[thread_position_in_grid]]) {
+ ulong size=ulong(lo)|(ulong(hi)<<32),start=ulong(id)*chunk; if(start>=size && !(size==0 && id==0))return;
+ uint n=uint(min(ulong(chunk),size-start)),blocks=(n+9+63)/64,h[8];for(uint i=0;i<8;i++)h[i]=ncs_h[i];
+ for(uint block=0;block<blocks;block++){uint w[64];for(uint j=0;j<16;j++){uint word=0;for(uint k=0;k<4;k++){uint p=block*64+j*4+k;uchar b=p<n?in[start+p]:(p==n?128:0);if(p>=blocks*64-8)b=uchar((ulong(n)*8)>>((blocks*64-1-p)*8));word=(word<<8)|b;}w[j]=word;}
+ for(uint j=16;j<64;j++){uint x=w[j-15],y=w[j-2];w[j]=w[j-16]+(ncs_r(x,7)^ncs_r(x,18)^(x>>3))+w[j-7]+(ncs_r(y,17)^ncs_r(y,19)^(y>>10));}
+ uint a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],z=h[7];for(uint j=0;j<64;j++){uint t=z+(ncs_r(e,6)^ncs_r(e,11)^ncs_r(e,25))+((e&f)^((~e)&g))+ncs_k[j]+w[j];uint u=(ncs_r(a,2)^ncs_r(a,13)^ncs_r(a,22))+((a&b)^(a&c)^(b&c));z=g;g=f;f=e;e=d+t;d=c;c=b;b=a;a=t+u;}h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=d;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=z;}
+ for(uint j=0;j<8;j++)for(uint k=0;k<4;k++)out[id*32+j*4+k]=uchar(h[j]>>((3-k)*8));
+}
+kernel void ncs_copy(device const uchar* src [[buffer(0)]],device uchar* dst [[buffer(1)]],constant uint& offset [[buffer(2)]],constant uint& n [[buffer(3)]],uint i [[thread_position_in_grid]]){if(i<n)dst[offset+i]=src[i];}
+"))));
+  def ncs-hash(h,n,chunk) {
+   let count = if eq(n,0) then 1 else div(add(n,sub(chunk,1)),chunk); let out = nam-alloc(mul(count,8));
+   let rc = metal_enqueue(nam-held-pipe(metal_pipeline(ncs-msl(),"ncs_sha")),md-bind(list(h,out),list(mod(n,4294967296),div(n,4294967296),chunk)),count);
+   if lt(rc,0) then form_error("native content digest dispatch refused") else list(out,count);
+  }
+  def ncs-hex(bytes,i) = if ge(i,str_len(bytes)) then "" else str_concat(substring("0123456789abcdef",div(str_byte_at(bytes,i),16),add(div(str_byte_at(bytes,i),16),1)),str_concat(substring("0123456789abcdef",mod(str_byte_at(bytes,i),16),add(mod(str_byte_at(bytes,i),16),1)),ncs-hex(bytes,add(i,1))));
+  def ncs-digest(h,n) {
+   let hashed = ncs-hash(h,n,if eq(n,0) then 1 else n); let bytes = metal_buf_read(head(hashed),0,32); let free = nam-free(list(head(hashed)));
+   bytes;
+  }
+  def ncs-string(text) {
+   let h = nam-write(nam-held(metal_buf_alloc(if eq(str_len(text),0) then 1 else str_len(text))),text); let result = ncs-digest(h,str_len(text)); let free = nam-free(list(h));
+   result;
+  }
+  def ncs-domain(n,chunk) = str_concat("Form-SHA256-tree-v1:",str_concat(int_to_str(chunk),str_concat(":",str_concat(int_to_str(n),":"))));
+  def ncs-tree(h,n,chunk) {
+   let leaves = ncs-hash(h,n,chunk); let prefix = ncs-domain(n,chunk); let bytes = mul(nth(leaves,1),32); let size = add(str_len(prefix),bytes);
+   let root = nam-write(nam-held(metal_buf_alloc(size)),prefix);
+   let copy = metal_enqueue(nam-held-pipe(metal_pipeline(ncs-msl(),"ncs_copy")),md-bind(list(head(leaves),root),list(str_len(prefix),bytes)),bytes);
+   if lt(copy,0) then form_error("native content root assembly refused") else ncs-tree-done(leaves,root,size);
+  }
+  def ncs-tree-done(leaves,root,size) {
+   let digest = ncs-digest(root,size); let free = nam-free(list(head(leaves),root));
+   ncs-hex(digest,0);
+  }
+  def ncs-file(path) {
+   let size = file_size(path);
+   if lt(size,0) then form_error(str_concat("native content file missing: ",path)) else ncs-file-sized(path,size);
+  }
+  def ncs-file-sized(path,size) {
+   let h = nam-held(if eq(size,0) then metal_buf_alloc(1) else metal_buf_from_file(path,0,size));
+   let digest = ncs-tree(h,size,65536); let free = nam-free(list(h));
+   str_concat("sha256-tree-65536-v1:",digest);
+  }
+ }
+ 0;
+}
