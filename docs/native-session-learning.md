@@ -70,6 +70,45 @@ Generic generated prose is labelled an unverified proposal. All token streams
 use the existing dynamic native generation path, including cancellation and
 observed context/memory pressure. There is no fixed total generation budget.
 
+The serialized learner consumes resource needs through `organ-care.bml`.
+Its native verified-memory responder accepts an offered retrieval action,
+announces responsibility, searches retained sealed examples with the existing
+RAG features, and returns references with source hashes and selection reasons.
+It chooses the strongest shared-feature/union overlap, retaining exact ties;
+all eligible alternatives and their scores remain visible. This is a lexical
+retrieval heuristic. Subsequent losses measure the usefulness of its choice.
+The requesting learner rereads those references and excludes assessment prompts
+before observing whether the resource arrived. That closes an evidence request;
+the later loss observations determine whether model capability recovered.
+
+Normal training preparation requests related rehearsal through this same flow
+and incorporates accepted examples in the actual gradient batch. Retaining a
+new verified example wakes the worker, which also revisits the last candidate's
+open needs. Unchanged evidence under the same running program image reuses its
+response; a miss stays open. Source-compiled processes without an observed image
+identity do not reuse another process's answer. The cache reads the executing
+image identity, rather than treating current source-file bytes as running code.
+This provider searches retained session memory. It does not turn arbitrary RAG hits,
+git content, filesystem prose or generated text into verified training targets.
+The callback carrier accepts other providers without a central error catalogue.
+
+`./fkwu observe/native-session-evidence-run.bml` attends to current needs when
+the worker is idle. Optional stdin names a session home. The worker owns care
+while running. `.hearth/session-learning/evidence-current.json` exposes the
+current requests; each training row retains `training-evidence.json`. Original
+observation, named response, delivered references, fresh resource observation,
+consumption and subsequent loss readings remain in the normal event flow.
+The old standalone learning-policy band is released. Promotion consumes the
+actual emitted progress and per-row health readings; identity binding and
+assessment exclusion remain at the executing boundaries.
+
+An interrupted trainer also uses the care carrier. The learner observes missing
+worker completion, offers continuation of its already bound inputs, and the
+native trainer takes responsibility. Training rechecks the source and adapter
+bindings before resuming. Its real result and exit status drive the learner's
+fresh execution-continuity observation. A completed training attempt does not
+establish promotion; the progress and loss observations still decide that.
+
 Use `session status` for candidate and serving generations, optimizer step,
 promotions, pending/refused examples, live-worker state, actual exits and paths
 to evidence. `session pause` lets the current round finish and keeps examples;
@@ -85,7 +124,7 @@ calls and broader coding quality must be measured on real subsequent requests.
 The existing code and repair checks remain the decision at each such request.
 
 Witnesses: `native-session-memory-band.fk`, `native-session-journal-band.fk`,
-`native-session-routing-band.fk`, `native-session-learning-band.fk`,
+`native-session-routing-band.fk`,
 `native-session-worker-band.fk` and `native-session-code-band.fk` under
 `form/form-stdlib/tests/`. The public two-worker, real-3B witness is
 `observe/native-session-homecoming-run.fk`; its input is a fresh evidence directory.

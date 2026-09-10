@@ -100,6 +100,16 @@ Read a flow by sending its event-file path to
 unfinished event and the current organ map. An empty flow yields no readings;
 it cannot establish that every organ is healthy.
 
+`form/form-stdlib/organ-care.bml` connects a resource need to a native provider
+callback and the asking organ's observation callback in the same process.
+Providers declare supported resources and an action the asker must have offered.
+The response names the provider before it acts; delivery records actual supply
+time. The asker re-observes through its own callback, with the original identity
+linked as `care_of`. The carrier accepts no callback or executable command from
+event text. Its first production provider is verified session memory, consumed
+by the learner during normal preparation and worker drains. Resource delivery
+and loss recovery are separate observations.
+
 `./fkwu observe/form-cli-heal-process-run.bml` accepts one JSON request with
 `argv`, optional `input`, and optional `seconds` (zero means dynamic progress).
 It runs that real command through the process organ and returns its actual

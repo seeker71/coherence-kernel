@@ -1,0 +1,103 @@
+// The serialized learner asks retained verified memory for training nutrients.
+// Delivery is by sealed reference. Assessment targets never become training data.
+// preludes: form-stdlib/native-session-memory.bml form-stdlib/organ-care.bml form-stdlib/rag-embed.fk
+section [form.bml] {
+ class NativeSessionEvidence {
+  def nse-resource() = "verified-training-evidence";
+  def nse-resources() = list(nse-resource(),"rehearsal","related-training-evidence;assessment-row-excluded");
+  def nse-json-lines(lines) = if nil?(lines) then list() else if str_eq(head(lines),"") then nse-json-lines(tail(lines)) else cons(parse-json("training-source",head(lines)),nse-json-lines(tail(lines)));
+  def nse-valid(home,dir) = append(nse-json-lines(split-on(nsm-text(nsm-valid-path(home)),"\n")),nse-json-lines(split-on(nsm-text(nsm-at(dir,"valid.jsonl")),"\n")));
+  def nse-prompt(row) = nsm-str(row,"prompt");
+  def nse-overlap(row,held) = if nil?(held) then 0 else or(value_eq(re-words(nse-prompt(row)),re-words(nse-prompt(head(held)))),nse-overlap(row,tail(held)));
+  def nse-example(rows,hash) = if nil?(rows) then json-node-null() else if str_eq(nsm-hash(json-emit-precise(head(rows))),hash) then head(rows) else nse-example(tail(rows),hash);
+  def nse-record-valid(record) {
+   let original = json-node-object(oh-without(oh-without(json-object-pairs(record),"content_sha256"),"observed_at_ms"));
+   let example = oh-get(record,"example");
+   and(str_eq(nsm-str(record,"content_sha256"),nsm-hash(str_concat(json-emit-precise(original),"\n"))),and(str_eq(nsm-str(record,"objective"),"supervised-answer"),and(oh-has(list("verified-answer","caller-teaching"),nsm-str(record,"outcome")),and(oh-text(record,"evidence"),and(oh-text(example,"prompt"),oh-text(example,"completion"))))));
+  }
+  def nse-sources(home,names) = if nil?(names) then list() else cons(nse-source(nsm-at(nsm-at(nsm-at(home,"rows"),head(names)),"record.json")),nse-sources(home,tail(names)));
+  def nse-source(path) = json-node-object(list(nsm-s("path",path),nsm-s("bytes_sha256",nsm-hash(nsm-text(path)))));
+  def nse-authority() {
+   let image = kernel_ast(host_pid(),-1);
+   if or(nothing?(image),lt(len(image),10)) then json-node-object(list(nsm-s("basis","process-instance;no-cross-process-reuse"),nsm-n("pid",host_pid()))) else if le(nth(image,6),0) then json-node-object(list(nsm-s("basis","source-instance;no-cross-process-reuse"),nsm-n("pid",host_pid()))) else json-node-object(list(nsm-s("basis","running-program-image"),nsm-n("identity",nth(image,8)),nsm-s("path",nth(image,9))));
+  }
+  def nse-revision(sources,held,dir) = nsm-hash(json-emit-precise(json-node-array(list(json-node-array(sources),json-node-array(held),nse-source(nsm-at(dir,"assessment.json")),nse-authority()))));
+  def nse-common(query,features) = if nil?(query) then list() else if oh-has(features,head(query)) then cons(head(query),nse-common(tail(query),features)) else nse-common(tail(query),features);
+  def nse-eligible(record,held,skill) = and(nse-record-valid(record),and(str_eq(nsm-skill(nsm-str(record,"route")),skill),not(nse-overlap(oh-get(record,"example"),held))));
+  def nse-best(rows,score,held) = if nil?(rows) then held else if gt(nsm-num(head(rows),"feature_overlap"),score) then nse-best(tail(rows),nsm-num(head(rows),"feature_overlap"),list(head(rows))) else nse-best(tail(rows),score,if eq(nsm-num(head(rows),"feature_overlap"),score) then append(held,list(head(rows))) else held);
+  def nse-scan(sources,query,held,skill,found,rejected) = if nil?(sources) then json-node-object(list(json-node-pair("sources",json-node-array(nse-best(found,0,list()))),json-node-pair("eligible",json-node-array(found)),json-node-pair("examined",json-node-array(rejected)),nsm-s("match_basis","native-rag-features;strongest-shared-over-union;ties-retained;verified-memory-only"))) else nse-scan-one(head(sources),tail(sources),query,held,skill,found,rejected);
+  def nse-scan-one(source,rest,query,held,skill,found,rejected) {
+   let record = nsm-json(nsm-str(source,"path")); let example = oh-get(record,"example");
+   let features = re-semantic-features(nse-prompt(example));
+   let common = nse-common(query,features);
+   let unchanged = str_eq(nsm-str(source,"bytes_sha256"),nsm-hash(nsm-text(nsm-str(source,"path"))));
+   let reason = if not(unchanged) then "source-changed" else if not(nse-record-valid(record)) then "unverified-or-unbound" else if nse-overlap(example,held) then "assessment-excluded" else if not(str_eq(nsm-skill(nsm-str(record,"route")),skill)) then "different-skill" else if nil?(common) then "no-shared-prompt-feature" else "eligible";
+   let overlap = if nil?(common) then 0.0 else div(mul(1.0,len(common)),sub(add(len(query),len(features)),len(common)));
+   let reference = oh-set(oh-set(oh-set(source,"row_sha256",json-node-string(nsm-hash(json-emit-precise(example)))),"matched_features",json-node-array(oh-strings(common))),"feature_overlap",json-precise-float(overlap));
+   nse-scan(rest,query,held,skill,if str_eq(reason,"eligible") then append(found,list(reference)) else found,append(rejected,list(oh-set(source,"reason",json-node-string(reason)))));
+  }
+  // Context is resident data: home, source references, query, held-out rows, skill.
+  def nse-supply(context,reading,need) = nse-scan(nth(context,1),nth(context,2),nth(context,3),nth(context,4),list(),list());
+  def nse-emit(context,stage,row) = nsm-event(head(context),stage,list(json-node-pair("health",row)));
+  def nse-received(refs,held,skill,rows) = if nil?(refs) then rows else nse-received-one(head(refs),tail(refs),held,skill,rows);
+  def nse-received-one(reference,rest,held,skill,rows) {
+   let path = nsm-str(reference,"path"); let record = nsm-json(path); let example = oh-get(record,"example");
+   let valid = and(str_eq(nsm-str(reference,"bytes_sha256"),nsm-hash(nsm-text(path))),and(nse-eligible(record,held,skill),str_eq(nsm-str(reference,"row_sha256"),nsm-hash(json-emit-precise(example)))));
+   nse-received(rest,held,skill,if and(valid,not(nse-overlap(example,rows))) then append(rows,list(example)) else rows);
+  }
+  def nse-observe(context,reading,delivery) {
+   let rows = nse-received(json-array-elements(oh-get(delivery,"sources")),nth(context,3),nth(context,4),list());
+   let evidence = json-node-object(list(json-node-pair("sources",oh-get(delivery,"sources")),nsm-n("received_rows",len(rows)),nsm-s("next",if nil?(rows) then "await-verified-memory-change" else "include-in-next-training;loss-recovery-unmeasured")));
+   let fresh = oh-reading(oh-str(reading,"organ"),oh-str(reading,"flow"),oh-str(reading,"aspect"),json-node-int(1),json-node-int(len(rows)),json-node-int(gt(len(rows),0)),if nil?(rows) then json-array-elements(oh-get(reading,"needs")) else list(),oh-values(json-array-elements(oh-get(reading,"offers"))),evidence);
+   oh-set(fresh,"care_of",json-node-string(oh-str(reading,"id")));
+  }
+  def nse-need(row) = nse-find-need(json-array-elements(oh-get(row,"needs")));
+  def nse-find-need(needs) = if nil?(needs) then json-node-null() else if oh-has(nse-resources(),oh-str(head(needs),"resource")) then head(needs) else nse-find-need(tail(needs));
+  def nse-attend(home) {
+   let dir = nsm-str(nsm-state(home),"last_row");
+   let sources = nse-sources(home,nsm-dirs(home));
+   let held = nse-valid(home,dir);
+   let revision = nse-revision(sources,held,dir);
+   let made = fs-mkdir(nsm-at(home,"evidence-requests"));
+   let rows = nse-attend-rows(home,dir,sources,held,revision,oh-read(nsm-at(home,"events.jsonl")),list());
+   nsm-atomic(nsm-at(home,"evidence-current.json"),json-node-object(list(nsm-s("candidate_row",dir),nsm-s("revision",revision),json-node-pair("requests",json-node-array(rows)))));
+  }
+  def nse-attend-rows(home,dir,sources,held,revision,rows,done) = if nil?(rows) then done else nse-attend-row(home,dir,sources,held,revision,head(rows),tail(rows),done);
+  def nse-attend-row(home,dir,sources,held,revision,row,rest,done) {
+   let need = nse-need(row);
+   let relevant = and(str_eq(oh-str(row,"organ"),"session-learning"),and(str_eq(oh-str(row,"flow"),dir),and(oh-pain(row),oh-text(oh-get(need,"detail"),"row_sha256"))));
+   let key = nsm-str(oh-get(need,"detail"),"row_sha256");
+   if not(relevant) then nse-attend-rows(home,dir,sources,held,revision,rest,done) else nse-attend-rows(home,dir,sources,held,revision,rest,nse-append-request(done,nse-request(home,dir,sources,held,revision,row,key)));
+  }
+  def nse-append-request(done,row) = if nil?(done) then list(row) else if str_eq(nsm-str(head(done),"request_key"),nsm-str(row,"request_key")) then done else cons(head(done),nse-append-request(tail(done),row));
+  def nse-request(home,dir,sources,held,revision,pain,key) {
+   let requestKey = nsm-hash(str_concat(dir,key)); let path = nsm-at(nsm-at(home,"evidence-requests"),str_concat(requestKey,".json"));
+   let prior = nsm-json(path);
+   if str_eq(nsm-str(prior,"revision"),revision) then prior else nse-request-new(home,dir,sources,held,revision,pain,key,requestKey,path);
+  }
+  def nse-request-new(home,dir,sources,held,revision,pain,key,requestKey,path) {
+   let example = nse-query-example(dir,key);
+   let context = list(home,sources,re-semantic-features(nse-prompt(example)),held,nsm-skill(nsm-str(nsm-json(nsm-at(dir,"record.json")),"route")));
+   let need = oh-need(nse-resource(),json-node-object(list(nsm-s("row_sha256",key),nsm-s("assessment",nsm-at(dir,"assessment.json")))));
+   let reading = oh-set(oh-reading("session-learning",dir,str_concat("training-evidence:",key),json-node-int(1),json-node-int(0),json-node-int(0),list(need),list("retrieve-evidence","defer"),oh-get(pain,"evidence")),"origin_observation",json-node-string(oh-str(pain,"id")));
+   let asked = nse-emit(context,"organ-health",reading);
+   let cared = oc-care(context,reading,need,list(oc-provider("verified-session-memory",list(nse-resource()),"retrieve-evidence",nse-supply)),nse-emit,nse-observe);
+   nsm-atomic(path,oh-set(oh-set(cared,"revision",json-node-string(revision)),"request_key",json-node-string(requestKey)));
+  }
+  def nse-query-example(dir,key) {
+   let recorded = oh-get(nsm-json(nsm-at(dir,"record.json")),"example");
+   if str_eq(nsm-hash(json-emit-precise(recorded)),key) then recorded else nse-example(json-array-elements(nsm-json(nsm-at(dir,"assessment.json"))),key);
+  }
+  def nse-for-example(home,dir,example,valid) {
+   let held = cons(example,valid); let sources = nse-sources(home,nsm-dirs(home));
+   let key = nsm-hash(json-emit-precise(example));
+   let made = fs-mkdir(nsm-at(home,"evidence-requests"));
+   let request = nse-request(home,dir,sources,held,nse-revision(sources,held,dir),json-node-object(list(json-node-pair("evidence",oh-reference(nsm-at(dir,"record.json"))))),key);
+   let saved = nsm-atomic(nsm-at(dir,"training-evidence.json"),request);
+   nse-received(json-array-elements(oh-get(oh-get(request,"delivery"),"sources")),held,nsm-skill(nsm-str(nsm-json(nsm-at(dir,"record.json")),"route")),list());
+  }
+  def nse-replay(home,held,skill) = nse-replay-requests(json-array-elements(oh-get(nsm-json(nsm-at(home,"evidence-current.json")),"requests")),held,skill,list());
+  def nse-replay-requests(requests,held,skill,rows) = if nil?(requests) then rows else nse-replay-requests(tail(requests),held,skill,nse-received(json-array-elements(oh-get(oh-get(head(requests),"delivery"),"sources")),held,skill,rows));
+ }
+ 0;
+}

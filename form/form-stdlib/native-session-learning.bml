@@ -1,7 +1,7 @@
 // Full next-token LoRA learning from session evidence, with Adam continuation.
 // Candidate and serving pointers are distinct. Every assessment compares the
 // same examples before/after; held-out rows never enter the gradient.
-// preludes: form-stdlib/native-session-memory.bml form-stdlib/native-lora-worker.bml form-stdlib/native-content-seal.bml form-stdlib/organ-health.bml
+// preludes: form-stdlib/native-session-evidence.bml form-stdlib/native-lora-worker.bml form-stdlib/native-content-seal.bml
 section [form.bml] {
  class NativeSessionLearning {
   def nsl-adapter-seal(dir) = json-emit(json-node-array(list(json-node-string(ncs-file(nsm-at(dir,"adapters.safetensors"))),json-node-string(ncs-file(nsm-at(dir,"adapter_config.json"))),json-node-string(if gt(file_size(nsm-at(dir,"optimizer.safetensors")),0) then ncs-file(nsm-at(dir,"optimizer.safetensors")) else "historical-no-optimizer"))));
@@ -27,8 +27,7 @@ section [form.bml] {
   }
   def nsl-grade-rows(model,tk,rows,index) = ntr-grade-rows(model,tk,rows,index);
   def nsl-row-health(before,after) = and(str_eq(nsm-str(before,"row_sha256"),nsm-str(after,"row_sha256")),le(nsm-num(after,"loss"),add(nsm-num(before,"loss"),0.000001)));
-  def nsl-no-regression(before,after) = if nil?(before) then nil?(after) else if nil?(after) then 0 else and(nsl-row-health(head(before),head(after)),nsl-no-regression(tail(before),tail(after)));
-  def nsl-promotable(before,after) = if or(lt(len(before),2),not(eq(len(before),len(after)))) then 0 else and(lt(nsm-num(head(after),"loss"),nsm-num(head(before),"loss")),nsl-no-regression(before,after));
+  def nsl-health-ready(rows) = if nil?(rows) then 1 else and(node_eq(oh-get(head(rows),"health"),json-node-int(1)),nsl-health-ready(tail(rows)));
   def nsl-scores-match(rows,scores,index) = if nil?(rows) then nil?(scores) else if nil?(scores) then 0 else and(eq(nsm-num(head(scores),"index"),index),and(gt(nsm-num(head(scores),"supervised_tokens"),0),and(str_eq(nsm-str(head(scores),"row_sha256"),nsm-hash(json-emit-precise(head(rows)))),nsl-scores-match(tail(rows),tail(scores),add(index,1)))));
   def nsl-inputs(dir) = nsm-hash(str_concat(nsm-text(nsm-at(dir,"train.jsonl")),str_concat(nsm-text(nsm-at(dir,"valid.jsonl")),nsm-text(nsm-at(dir,"assessment.json")))));
   def nsl-replay(state) {
@@ -45,7 +44,9 @@ section [form.bml] {
    let start = host_monotonic_ms();
    let beginning = nsm-event(home,"prepare-begin",list(nsm-s("id",fs-path-basename(dir))));
    let base = nsm-model(); let parent = nsl-candidate(home,base);
-   let prior = if or(nil?(replay),nsl-overlap(example,replay)) then list() else replay;
+   let supplied = append(nse-for-example(home,dir,example,valid),nse-replay(home,valid,nsm-skill(nsm-str(nsm-json(nsm-at(dir,"record.json")),"route"))));
+   let prior = nsl-distinct(append(replay,supplied),cons(example,valid),list());
+   let delivered = nsm-event(home,"training-evidence-consumed",list(nsm-s("id",fs-path-basename(dir)),nsm-n("supplied_rows",len(supplied)),nsm-n("replay_rows",len(prior)),nsm-s("source",nsm-at(dir,"training-evidence.json")),nsm-s("open_needs",nsm-at(home,"evidence-current.json")),nsm-s("selected","revalidate-references;exclude-assessment;train")));
    let train = nag-write(nsm-at(dir,"train.jsonl"),nsl-lines(cons(example,prior)));
    let held = nag-write(nsm-at(dir,"valid.jsonl"),nsl-lines(valid));
    let assessment = cons(example,append(valid,prior));
@@ -58,6 +59,7 @@ section [form.bml] {
    let measured = nsm-event(home,"prepare-complete",list(nsm-s("id",fs-path-basename(dir)),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),nsm-n("rows",len(assessment))));
    "prepared";
   }
+  def nsl-distinct(rows,exclude,held) = if nil?(rows) then held else if nse-overlap(head(rows),append(exclude,held)) then nsl-distinct(tail(rows),exclude,held) else nsl-distinct(tail(rows),exclude,append(held,list(head(rows))));
   def nsl-refused(home,dir,why) {
    let out = nsm-at(dir,"adapter");
    let generation = if gt(file_size(nsm-at(out,"native-current")),0) then nag-resolve(out) else "";
@@ -80,7 +82,25 @@ section [form.bml] {
   }
   def nsl-train(home,dir,before) {
    let out = nsm-at(dir,"adapter");
-   if nlw-running(dir) then "child-still-running" else if gt(file_size(nsm-at(out,"native-current")),0) then nsl-evaluate(home,dir,before,nag-resolve(out)) else nsl-train-new(home,dir,before);
+   if nlw-running(dir) then "child-still-running" else if gt(file_size(nsm-at(out,"native-current")),0) then nsl-evaluate(home,dir,before,nag-resolve(out)) else if str_eq(nlw-status(dir),"interrupted-without-exit-status") then nsl-resume(home,dir,before) else nsl-train-new(home,dir,before);
+  }
+  def nsl-resume(home,dir,before) {
+   let context = list(home,dir,before);
+   let need = oh-need("bound-training-continuation",oh-reference(nsm-at(dir,"before.json")));
+   let reading = oh-reading("session-learning",dir,"execution-continuity",json-node-string("completed-worker-exit"),json-node-string(nlw-status(dir)),json-node-int(0),list(need),list("resume-bound-inputs","defer"),oh-reference(nsm-at(nsm-at(dir,"adapter"),"training-events.jsonl")));
+   let asked = nse-emit(context,"organ-health",reading);
+   let result = oc-care(context,reading,need,list(oc-provider("native-session-trainer",list("bound-training-continuation"),"resume-bound-inputs",nsl-resume-supply)),nse-emit,nsl-resume-observe);
+   nsm-str(oh-get(result,"delivery"),"status");
+  }
+  def nsl-resume-supply(context,reading,need) {
+   let status = nsl-train-new(head(context),nth(context,1),nth(context,2));
+   json-node-object(list(nsm-s("status",status),json-node-pair("result",oh-reference(nsm-at(nth(context,1),"result.json")))));
+  }
+  def nsl-resume-observe(context,reading,delivery) {
+   let dir = nth(context,1); let result = nsm-json(nsm-at(dir,"result.json"));
+   let completed = and(str_eq(nsm-str(delivery,"status"),"completed"),and(str_eq(nlw-status(dir),"completed"),eq(nsm-num(result,"lora_rounds"),1)));
+   let fresh = oh-reading("session-learning",dir,"execution-continuity",json-node-string("completed-worker-exit"),json-node-string(nlw-status(dir)),json-node-int(completed),if completed then list() else json-array-elements(oh-get(reading,"needs")),oh-values(json-array-elements(oh-get(reading,"offers"))),oh-reference(nsm-at(dir,"result.json")));
+   oh-set(fresh,"care_of",json-node-string(oh-str(reading,"id")));
   }
   def nsl-train-new(home,dir,before) {
    let started = nsm-event(home,"training-begin",list(nsm-s("id",fs-path-basename(dir)),nsm-s("events",nsm-at(nsm-at(dir,"adapter"),"training-events.jsonl"))));
@@ -106,15 +126,16 @@ section [form.bml] {
    let bound = and(str_eq(nsm-str(before,"input_sha256"),nsl-inputs(dir)),and(eq(step,add(nsm-num(parentConfig,"native_step"),1)),and(str_eq(nsm-str(before,"base_seal"),nsl-base-seal(nsm-model())),str_eq(nsm-str(before,"parent_seal"),nsl-adapter-seal(nsm-str(before,"parent"))))));
    let measured = nsm-event(home,"assessment-binding-complete",list(nsm-s("id",fs-path-basename(dir)),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),nsm-n("rows",len(scores))));
    let measured = and(nsl-scores-match(assessment,baseline,0),and(nsl-scores-match(assessment,scores,0),nsl-scores-match(assessment,servingScores,0)));
-   let better = and(nsl-promotable(baseline,scores),nsl-no-regression(servingScores,scores));
-   if not(and(bound,measured)) then nsl-refused(home,dir,"completed-generation-lineage-or-assessment-disagreement") else nsl-publish(home,dir,scored,candidate,scores,better,step);
+   if not(and(bound,measured)) then nsl-refused(home,dir,"completed-generation-lineage-or-assessment-disagreement") else nsl-publish(home,dir,scored,candidate,scores,step);
   }
   def nsl-without-scores(pairs) = if nil?(pairs) then list() else if or(str_eq(json-pair-key(head(pairs)),"scores"),str_eq(json-pair-key(head(pairs)),"serving_scores")) then nsl-without-scores(tail(pairs)) else cons(head(pairs),nsl-without-scores(tail(pairs)));
-  def nsl-publish(home,dir,before,candidate,scores,promote,step) {
+  def nsl-publish(home,dir,before,candidate,scores,step) {
    let old = json-object-get(before,"state"); let seal = nsl-adapter-seal(candidate);
    let rows = nsl-health-rows(home,dir,json-array-elements(json-object-get(before,"scores")),scores,nsm-num(before,"heldout_rows"),"candidate");
    let servingRows = nsl-health-rows(home,dir,json-array-elements(json-object-get(before,"serving_scores")),scores,nsm-num(before,"heldout_rows"),"serving");
-   let observation = oh-reading("session-learning",dir,"promotion",json-node-int(1),json-node-int(promote),json-node-int(promote),if promote then list() else list(oh-need("improved-training-evidence",oh-reference(nsm-at(dir,"assessment.json")))),list("admit-candidate","retain-serving","defer"),oh-reference(nsm-at(dir,"result.json")));
+   let progress = nsl-progress-health(home,dir,before,scores);
+   let promote = nsl-health-ready(cons(progress,append(rows,servingRows)));
+   let observation = oh-reading("session-learning",dir,"promotion",json-node-int(1),json-node-int(promote),json-node-int(promote),if promote then list() else list(oh-need("improved-training-evidence",oh-reference(nsm-at(dir,"assessment.json")))),list("admit-candidate","retain-serving","defer"),oh-reference(nsm-at(nsm-at(dir,"adapter"),"assessment-after.json")));
    let sent = nsm-event(home,"organ-health",list(json-node-pair("health",observation)));
    let control = oh-response(observation,if promote then "admit-candidate" else "retain-serving");
    let incoming = nsm-event(home,"organ-response",list(json-node-pair("health",control)));
@@ -123,14 +144,21 @@ section [form.bml] {
    let servingSeal = if accepted then seal else nsm-str(old,"serving_seal");
    nsl-publish-state(home,dir,before,candidate,scores,accepted,step,seal,serving,servingSeal,old,control);
   }
-  def nsl-health-rows(home,dir,before,after,heldout,basis) = if nil?(before) then 0 else nsl-health-row(home,dir,head(before),head(after),heldout,basis,tail(before),tail(after));
+  def nsl-progress-health(home,dir,before,scores) {
+   let baseline = json-array-elements(oh-get(before,"scores"));
+   let improved = and(ge(len(scores),2),and(eq(len(baseline),len(scores)),lt(nsm-num(head(scores),"loss"),nsm-num(head(baseline),"loss"))));
+   let reading = oh-reading("session-learning",dir,"learning-progress",json-node-int(1),json-node-int(improved),json-node-int(improved),if improved then list() else list(oh-need("improved-training-evidence",oh-reference(nsm-at(dir,"assessment.json")))),list("retain-serving","defer"),oh-reference(nsm-at(nsm-at(dir,"adapter"),"assessment-after.json")));
+   let emitted = nsm-event(home,"organ-health",list(json-node-pair("health",reading)));
+   reading;
+  }
+  def nsl-health-rows(home,dir,before,after,heldout,basis) = if nil?(before) then list() else nsl-health-row(home,dir,head(before),head(after),heldout,basis,tail(before),tail(after));
   def nsl-health-row(home,dir,before,after,heldout,basis,restBefore,restAfter) {
    let healthy = nsl-row-health(before,after);
    let index = nsm-num(before,"index");
-   let resource = if and(gt(index,0),le(index,heldout)) then "related-training-evidence;assessment-row-excluded" else "rehearsal";
+   let resource = nse-resource();
    let reading = oh-reading("session-learning",dir,str_concat(basis,str_concat(":",nsm-str(before,"row_sha256"))),json-precise-float(nsm-num(before,"loss")),json-precise-float(nsm-num(after,"loss")),json-node-int(healthy),if healthy then list() else list(oh-need(resource,json-node-object(list(nsm-s("row_sha256",nsm-str(before,"row_sha256")),nsm-real("loss_increase",sub(nsm-num(after,"loss"),nsm-num(before,"loss"))))))),list("retain-serving","defer"),oh-reference(nsm-at(nsm-at(dir,"adapter"),"assessment-after.json")));
    let observed = nsm-event(home,"organ-health",list(json-node-pair("health",reading)));
-   nsl-health-rows(home,dir,restBefore,restAfter,heldout,basis);
+   cons(reading,nsl-health-rows(home,dir,restBefore,restAfter,heldout,basis));
   }
   def nsl-publish-state(home,dir,before,candidate,scores,accepted,step,seal,serving,servingSeal,old,control) {
    let record = nsm-json(nsm-at(dir,"record.json")); let skill = nsm-skill(nsm-str(record,"route")); let prior = nsm-skills(old);
@@ -147,6 +175,7 @@ section [form.bml] {
    "completed";
   }
   def nsl-drain(home) {
+   let care = nse-attend(home);
    let pending = nsm-pending(home,nsm-dirs(home));
    if or(not(nsm-enabled(home)),nil?(pending)) then "drained" else nsl-drained-one(home,nsl-one(home,head(pending)));
   }

@@ -296,7 +296,7 @@ form-run sh -c 'printf "%s\n" eval | ./fkwu observe/form-cli-heal-run.fk'
 form-run ./fkwu form/form-stdlib/tests/form-cli-heal-timing-band.fk
 form-run ./fkwu form/form-stdlib/tests/qwen-lora-finite-band.fk
 form-run ./fkwu form/native/metal/tests/qwen38-embedding-band.fk
-form-run ./fkwu form/form-stdlib/tests/native-session-learning-band.fk
+form-run ./fkwu observe/native-session-evidence-run.bml </dev/null
 form-run ./fkwu form/form-stdlib/tests/native-session-worker-band.fk
 form-run ./fkwu observe/native-session-homecoming-run.fk
 ```
