@@ -10,10 +10,14 @@ remain dictionary/world values; they do not become numeric tokens. Existing
 empty-coordinate refusal is unchanged. Scalar zero, negative integers, axioms,
 gaps, nonempty nested meanings and anchors still round-trip.
 
+Follow-through found a second seam: the relation constructor could wrap a
+refused token in an invalid edge. It now propagates the same absence before
+interning an edge; the valid relation path is preserved.
+
 Observed on fkwu, with fresh clean preflight and exit zero:
 
 - Existing token-space band: `1073741823`.
-- Existing query band, extended to 32 named observations: `4294967295`.
+- Existing query band, extended to 34 named observations: `17179869183`.
 - Native-vs-rented checkout witness: `11111`.
 - All thirteen drift gates: `8191/8191`, refused `0`.
 
