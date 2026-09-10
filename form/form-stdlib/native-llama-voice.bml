@@ -1,11 +1,11 @@
 // Resident model/tokenizer ownership with a growing KV context and a token stream.
 // maxTokens=0 keeps streaming until EOS, cancellation, architectural or memory pressure.
 // A cap is a signal, not a ceiling. Caller token caps grow toward EOS.
-// A 24-character tail repeat is a cap. A sentence-frame repeat (case-folded
-// prefix of the current sentence matching an earlier sentence start) is a
-// cap. A 12-character span appearing twice, case-folded, anywhere in the
-// text is a cap. Prefer second-best, then third-best, when first-best would
-// stick; stop as adapted-repeat when all three would. An adapted-repeat
+// Consecutive repetition at the active tail is an adaptation signal. Shared
+// references and sentence openings alone are not loops. The byte-period witness
+// reads at most 512 tail bytes; it is a bounded heuristic, not a semantic judge.
+// Prefer second-best, then third-best, when first-best would stick; stop as
+// adapted-repeat when all three would. An adapted-repeat
 // drops an unfinished last sentence. Admission that would refuse for want>maxpos clamps to
 // maxpos when the prompt itself fits.
 // Partial output always carries its actual stopping reason.
@@ -133,17 +133,29 @@ section [form.bml] {
   def nlg-grown-limit-room(limit,room) {
    if le(room,limit) then limit else if gt(mul(limit,2),room) then room else mul(limit,2);
   }
+  def nlg-repeat-min-bytes() = 24;
+  def nlg-repeat-max-period() = 256;
+  def nlg-repeat-window() = mul(2,nlg-repeat-max-period());
+  def nlg-repeat-copies(period) = if ge(period,nlg-repeat-min-bytes()) then 2 else nlg-max(3,div(add(nlg-repeat-min-bytes(),sub(period,1)),period));
+  def nlg-repeat-space(b) = or(or(eq(b,32),eq(b,9)),or(eq(b,10),eq(b,13)));
+  def nlg-repeat-content(s,i,end) = if ge(i,end) then 0 else if nlg-repeat-space(str_byte_at(s,i)) then nlg-repeat-content(s,add(i,1),end) else 1;
+  def nlg-repeat-equal(s,period,start,end) = str_eq(substring(s,start,sub(end,period)),substring(s,add(start,period),end));
+  def nlg-repeat-at(s,period,end) {
+   let start = sub(end,mul(period,nlg-repeat-copies(period)));
+   if lt(start,0) then 0 else and(nlg-repeat-content(s,sub(end,period),end),nlg-repeat-equal(s,period,start,end));
+  }
+  def nlg-repeat-periods(s,period,end) {
+   if or(gt(period,nlg-repeat-max-period()),gt(mul(period,2),end)) then 0
+   else if nlg-repeat-at(s,period,end) then 1 else nlg-repeat-periods(s,add(period,1),end);
+  }
   def nlg-looping(acc) {
-   if lt(str_len(acc),24) then 0 else nlg-looping-span(acc,substring(acc,sub(str_len(acc),24),str_len(acc)));
+   let end = str_len(acc);
+   if lt(end,nlg-repeat-min-bytes()) then 0 else nlg-looping-tail(nlg-lower(substring(acc,nlg-max(0,sub(end,nlg-repeat-window())),end)));
   }
-  def nlg-looping-span(acc,span) {
-   let first = str_find(acc,span,0);
-   if lt(first,0) then 0 else if ge(str_find(acc,span,add(first,1)),0) then 1 else 0;
-  }
+  def nlg-looping-tail(s) = nlg-repeat-periods(s,1,str_len(s));
   def nlg-lower-byte(b) = if and(ge(b,65),le(b,90)) then add(b,32) else b;
   def nlg-lower-at(s,i,acc) = if ge(i,str_len(s)) then acc else nlg-lower-at(s,add(i,1),str_concat(acc,byte_to_str(nlg-lower-byte(str_byte_at(s,i)))));
   def nlg-lower(s) = nlg-lower-at(s,0,"");
-  def nlg-skip-space(s,i) = if ge(i,str_len(s)) then i else if eq(str_byte_at(s,i),32) then nlg-skip-space(s,add(i,1)) else i;
   def nlg-last-sep(acc,from,best) {
    let p = str_find(acc,". ",from);
    if lt(p,0) then best else nlg-last-sep(acc,add(p,1),p);
@@ -152,40 +164,9 @@ section [form.bml] {
    let sep = nlg-last-sep(acc,0,-1);
    if lt(sep,0) then acc else if ge(str_find(acc,".",add(sep,2)),0) then acc else substring(acc,0,add(sep,1));
   }
-  def nlg-current-start(acc) {
-   let sep = nlg-last-sep(acc,0,-1);
-   if lt(sep,0) then 0 else nlg-skip-space(acc,add(sep,2));
-  }
-  def nlg-prefix-at(s,i,n) {
-   if ge(i,str_len(s)) then "" else if lt(str_len(s),add(i,n)) then substring(s,i,str_len(s)) else substring(s,i,add(i,n));
-  }
-  def nlg-next-sentence(s,i) {
-   let p = str_find(s,". ",i);
-   if lt(p,0) then str_len(s) else nlg-skip-space(s,add(p,2));
-  }
-  def nlg-frame-hit(prior,prefix,i) {
-   if or(eq(str_len(prefix),0),ge(i,str_len(prior))) then 0 else if str_eq(nlg-prefix-at(prior,i,str_len(prefix)),prefix) then 1 else nlg-frame-hit(prior,prefix,nlg-next-sentence(prior,i));
-  }
-  def nlg-framing(acc) {
-   let start = nlg-current-start(acc);
-   let cur = nlg-lower(nlg-prefix-at(acc,start,16));
-   if lt(str_len(cur),8) then 0 else nlg-frame-hit(nlg-lower(substring(acc,0,start)),cur,0);
-  }
-  def nlg-echo-n() = 12;
-  def nlg-echo-dup(s,i) {
-   if gt(add(i,nlg-echo-n()),str_len(s)) then 0 else nlg-echo-dup-at(s,i,nlg-prefix-at(s,i,nlg-echo-n()));
-  }
-  def nlg-echo-dup-at(s,i,span) {
-   let first = str_find(s,span,0);
-   if lt(first,0) then nlg-echo-dup(s,add(i,1)) else if ge(str_find(s,span,add(first,1)),0) then 1 else nlg-echo-dup(s,add(i,1));
-  }
-  def nlg-echoing(acc) {
-   let s = nlg-lower(acc);
-   if lt(str_len(s),mul(nlg-echo-n(),2)) then 0 else nlg-echo-dup(s,0);
-  }
   def nlg-stuck(acc,added) {
-   let all = str_concat(acc,added);
-   if eq(nlg-looping(all),1) then 1 else if eq(nlg-framing(all),1) then 1 else nlg-echoing(all);
+   let room = sub(nlg-repeat-window(),str_len(added));
+   if le(room,0) then nlg-looping(added) else nlg-looping(str_concat(substring(acc,nlg-max(0,sub(str_len(acc),room)),str_len(acc)),added));
   }
   def nlg-adapt-token(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,ids) {
    if eq(nlg-stuck(acc,""),1) then nlg-result(acc,"adapted-repeat",n,ctx,events)
