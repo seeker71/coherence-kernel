@@ -1,0 +1,126 @@
+// Full direct-key, terminal-lifetime and non-TTY acceptance on the observed
+// Darwin ARM64 host. Other POSIX targets retain their existing responsibility.
+// preludes: form-stdlib/bml/glass-pty-acceptance.bml
+section [form.bml] {
+ class GlassPtyCases {
+  def gpc-run() {
+   let supplied = read_line();
+   let mode = read_line();
+   let platform = nsi-require(nsi-capture(list("/usr/bin/uname","-sm")));
+   if not(str_eq(nsi-text(platform),"Darwin arm64\n")) then form_error("native PTY acceptance requires observed Darwin arm64; other POSIX acceptance remains unretired") else 0;
+   let job = if or(nothing?(supplied),str_eq(supplied,"")) then nsi-directory(host_temp_dir(),"form-glass-pty-",0) else supplied;
+   if not(fs_is_dir(job)) then form_error("PTY observation directory unavailable") else 0;
+   let source = read_file(gpa-door());
+   if not(eq(str_len(source),file_size(gpa-door()))) then form_error("production PTY fixture source read incomplete") else 0;
+   let owner = npd-open();
+   let run = record_new(0,"job",job,"runtime",owner,"observations",0,"bulk-reads",0,"sessions",list());
+   gpa-write(gpa-path(run,"health.jsonl"),"");
+   let prefix = "; preludes: form-stdlib/bml/native-pty-darwin.bml\n(npd-child-session)\n";
+   record_set(run,"driver",gpa-write(gpa-path(run,"production-pty.fk"),str_concat(prefix,source)));
+   record_set(run,"non-tty-driver",gpa-write(gpa-path(run,"production-non-tty.fk"),str_concat(prefix,str_concat(source,"\n(print (list \"NON-TTY-REMAINDER\" (read_line)))\n"))));
+   print(str_concat("pty-evidence=",job));
+   if str_eq(mode,"refusal") then gpc-refusal(run) else 0;
+   gpc-keys(run);
+   gpc-signals(run,list(2,15,1));
+   gpc-suspend(run);
+   gpc-non-tty(run);
+   let calls = record_get(owner,"calls");
+   let released = npd-close(owner);
+   let closed = gpc-all-closed(record_get(run,"sessions"));
+   gpa-resources(run,released);
+   let report = json-node-object(list(oh-s("schema","native-glass-pty-v1"),oh-s("target","Darwin-arm64"),oh-s("production_source",gpa-door()),oh-n("production_source_bytes",str_len(source)),oh-n("sessions",len(record_get(run,"sessions"))),oh-n("observations",record_get(run,"observations")),oh-n("native_calls",calls),oh-n("bulk_reads",record_get(run,"bulk-reads")),oh-n("all_sessions_closed",closed),oh-n("native_image_released",released),oh-s("evidence",job),oh-n("accepted",and(closed,eq(released,1)))));
+   let text = json-emit-precise(report);
+   gpa-write(gpa-path(run,"report.json"),str_concat(text,"\n"));
+   print(text);
+   if and(closed,eq(released,1)) then 1 else form_error("PTY final ownership unsettled");
+  }
+  // A real missing-output deadline exercises the executing failure boundary:
+  // observe, select owned release, stop/reap, restore, close, unmap, re-observe.
+  def gpc-refusal(run) {
+   let session = gpa-session(run,"missing-output");
+   gpa-until(run,session,"[UNPUBLISHED-PTY-MARKER]",10);
+   form_error("missing output unexpectedly appeared");
+  }
+  def gpc-all-closed(sessions) = if nil?(sessions) then 1 else and(eq(record_get(head(sessions),"closed"),1),gpc-all-closed(tail(sessions)));
+  def gpc-finished(run,session) {
+   let closed = gpa-close(session);
+   gpa-check(run,session,"child-fds-map-released",closed,json-node-object(list(oh-n("closed",record_get(session,"closed")),oh-n("reaped",record_get(session,"reaped")),oh-n("restored",record_get(session,"restored-on-close")))));
+  }
+  def gpc-exited(run,session,expected) {
+   let ended = gpa-wait-state(session,0,add(host_monotonic_ms(),5000));
+   gpa-check(run,session,"actual-child-exit",and(ended,eq(gpa-exit-code(session),expected)),json-node-int(gpa-exit-code(session)));
+  }
+  def gpc-keys(run) {
+   let s = gpa-session(run,"direct-keys");
+   let a = gpa-key(run,s,"s","[KEY-STATE, meaning, all,");
+   let b = gpa-key(run,s,"0","[KEY-STATE, meaning, none,");
+   let c = gpa-key(run,s,"2","[KEY-STATE, meaning, pt,");
+   let d = gpa-key(run,s,"1","[KEY-STATE, meaning, en+pt,");
+   let e = gpa-key(run,s,"1","[KEY-STATE, meaning, pt,");
+   gpa-key(run,s,"l",", languages,");
+   gpa-key(run,s,"en+de",", languages,");
+   gpa-key(run,s,"\r","[KEY-STATE, meaning, en+de,");
+   gpa-key(run,s,"lpy\r","[KEY-STATE, meaning, en+de,");
+   gpa-check(run,s,"host-wait-interrupted-before-newline",ge(str_find(record_get(s,"last-key-tail"),"-2]",0),0),json-node-string(record_get(s,"last-key-tail")));
+   let views = gpc-views(run,s,list(list("h","help"),list("a","atlas"),list("t","raster"),list("o","overview"),list("m","memory"),list("f","flow"),list("j","recipes"),list("k","kernel"),list("v","events"),list("n","channels")));
+   gpa-key(run,s,str_concat(byte_to_str(27),str_concat("[200~q0sh",str_concat(byte_to_str(27),"[201~"))),"[KEY-STATE, channels, all,");
+   gpa-poll(s);
+   gpa-check(run,s,"paste-keeps-child-running",not(eq(record_get(s,"reaped"),1)),json-node-int(record_get(s,"reaped")));
+   gpa-key(run,s,str_concat(byte_to_str(27),"[B"),"[KEY-STATE, channels, all, none,");
+   gpa-key(run,s,"o","[KEY-STATE, overview, all,");
+   gpa-key(run,s,byte_to_str(27),"[KEY-STATE, overview,");
+   gpa-key(run,s,"[","[KEY-STATE, overview,");
+   gpa-key(run,s,"B","sample.");
+   gpa-key(run,s,"e",", 1, ,");
+   gpa-key(run,s,"q","RESTORED");
+   gpc-exited(run,s,0);
+   gpa-restored(run,s,"termios-after-clean-quit");
+   gpa-check(run,s,"fifteen-immediate-view-transitions",1,json-node-object(list(oh-n("transitions",add(5,len(views))),json-node-pair("elapsed_ms",json-node-array(gpc-integers(append(list(a,b,c,d,e),views)))))));
+   gpc-finished(run,s);
+  }
+  def gpc-integers(values) = if nil?(values) then list() else cons(json-node-int(head(values)),gpc-integers(tail(values)));
+  def gpc-views(run,s,rows) = if nil?(rows) then list() else cons(gpa-key(run,s,head(head(rows)),str_concat("[KEY-STATE, ",str_concat(nth(head(rows),1),","))),gpc-views(run,s,tail(rows)));
+  def gpc-signals(run,signals) = if nil?(signals) then 1 else gpc-signal-next(run,head(signals),tail(signals));
+  def gpc-signal-next(run,signal,rest) {
+   let s = gpa-session(run,str_concat("signal-",int_to_str(signal)));
+   let sent = npd-signal(record_get(s,"runtime"),record_get(s,"pid"),signal);
+   gpa-check(run,s,"signal-delivered",eq(sent,0),json-node-int(sent));
+   gpc-exited(run,s,add(128,signal));
+   gpa-restored(run,s,"termios-after-signal");
+   gpc-finished(run,s);
+   gpc-signals(run,rest);
+  }
+  def gpc-suspend(run) {
+   let s = gpa-session(run,"suspend-resume");
+   let sent = npd-signal(record_get(s,"runtime"),record_get(s,"pid"),18);
+   let stopped = gpa-wait-state(s,1,add(host_monotonic_ms(),5000));
+   gpa-check(run,s,"actual-stopped-child",and(eq(sent,0),and(stopped,eq(mod(record_get(s,"status"),128),127))),json-node-int(record_get(s,"status")));
+   gpa-restored(run,s,"termios-while-stopped");
+   record_set(s,"stopped",0);
+   let resumed = npd-signal(record_get(s,"runtime"),record_get(s,"pid"),19);
+   gpa-check(run,s,"resume-delivered",eq(resumed,0),json-node-int(resumed));
+   gpa-key(run,s,"s","[KEY-STATE, meaning, all,");
+   gpa-direct(run,s,"direct-mode-after-resume");
+   gpa-key(run,s,"q","RESTORED");
+   gpc-exited(run,s,0);
+   gpa-restored(run,s,"termios-after-resumed-quit");
+   gpc-finished(run,s);
+  }
+  def gpc-non-tty(run) {
+   let s = record_new(0,"kind","glass-pty-session","runtime",record_get(run,"runtime"),"name","non-tty","region",npd-region(record_get(run,"runtime"),4096),"master",-1,"slave",-1,"pid",0,"reaped",0,"status",-1,"stopped",0,"closed",0,"baseline",list(),"buffer","","transcript",gpa-path(run,"non-tty.out"));
+   record_set(run,"sessions",cons(s,record_get(run,"sessions")));
+   gpa-check(run,s,"non-tty-owned-memory",not(nothing?(record_get(s,"region"))),json-node-int(not(nothing?(record_get(s,"region")))));
+   let input = gpa-write(gpa-path(run,"non-tty.in"),"q");
+   let errors = gpa-path(run,"non-tty.err");
+   let pid = host_spawn_at(list("./fkwu",record_get(run,"non-tty-driver")),list(input,record_get(s,"transcript"),errors));
+   record_set(s,"pid",pid);
+   gpa-check(run,s,"non-tty-child-exec",gt(pid,0),json-node-int(pid));
+   let ended = gpa-wait-state(s,0,add(host_monotonic_ms(),15000));
+   let output = read_file(record_get(s,"transcript"));
+   let valid = and(ended,and(eq(gpa-exit-code(s),0),and(eq(str_len(output),file_size(record_get(s,"transcript"))),and(ge(str_find(output,"NON-TTY",0),0),ge(str_find(output,"[NON-TTY-REMAINDER, q]",0),0)))));
+   gpa-check(run,s,"non-tty-leaves-input-untouched",valid,json-node-object(list(oh-n("exit",gpa-exit-code(s)),oh-n("stdout_bytes",str_len(output)),oh-n("stderr_bytes",file_size(errors)))));
+   gpc-finished(run,s);
+  }
+ }
+ 0;
+}

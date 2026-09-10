@@ -1,0 +1,244 @@
+// Current canonical concept bytes, provenance and stable-ID bindings.
+// Every check consumes held source bytes. Hashing is an explicit Form policy:
+// the portable Form recipe or its independently owned ARM64 RAM image.
+// preludes: form-stdlib/bml/formbin-codec.bml form-stdlib/bml/sha256-owned-bytes.bml form-stdlib/bml/json-wire-admission.bml form-stdlib/organ-health.bml form-stdlib/form-fs.fk
+section [form.bml] {
+ class ConceptSourceAudit {
+  def csa-at(state,path) = fs-path-join(record_get(state,"root"),path);
+  def csa-check(state,aspect,ok,evidence) {
+   let flow = str_concat(record_get(state,"root"),str_concat(":",int_to_str(record_get(state,"observations"))));
+   let row = oh-reading("concept-source",flow,aspect,json-node-int(1),json-node-int(if ok then 1 else 0),json-node-int(if ok then 1 else 0),if ok then list() else list(oh-need("exact-canonical-source",json-node-string(evidence))),list("request-evidence","defer"),json-node-string(evidence));
+   oh-voice(row);
+   record_set(state,"observations",add(record_get(state,"observations"),1));
+   if ok then 1 else csa-refuse(row,aspect);
+  }
+  def csa-refuse(row,aspect) {
+   let response = oh-response(row,"request-evidence");
+   oh-voice(response);
+   oh-voice(oh-applied(row,oh-select(row,response,"defer"),oh-get(row,"evidence")));
+   form_error(str_concat("concept source refused: ",aspect));
+  }
+  def csa-file(state,path) {
+   let key = str_concat("bytes:",path);
+   let held = record_get(state,key);
+   if str_eq(value-kind(held),"string") then held else csa-read(state,path,key);
+  }
+  def csa-read(state,path,key) {
+   let read = fbc-read-exact(csa-at(state,path),0);
+   if not(fbc-good(read)) then csa-check(state,"complete-file-read",0,str_concat(path,fbc-error(read))) else 0;
+   let bytes = fbc-value(read);
+   record_set(state,key,bytes);
+   record_set(state,"files",cons(path,record_get(state,"files")));
+   bytes;
+  }
+  def csa-hash(state,text) = if str_eq(record_get(state,"hash"),"form-sha256") then hex-encode(sha256-stream-string(text)) else csa-cpu-hash(state,text);
+  def csa-cpu-hash(state,text) {
+   let context = record_get(state,"cpu-context");
+   if not(record?(context)) then record_set(state,"cpu-context",sob-context()) else 0;
+   let owner = sob-hash-in(record_get(state,"cpu-context"),text);
+   if not(str_eq(record_get(owner,"reason"),"ready")) then csa-check(state,"owned-cpu-hash",0,record_get(owner,"reason")) else 0;
+   sob-hex(record_get(owner,"digest"),0);
+  }
+  def csa-file-hash(state,path) {
+   let key = str_concat("sha:",path);
+   let held = record_get(state,key);
+   if str_eq(value-kind(held),"string") then held else csa-remember-hash(state,key,csa-hash(state,csa-file(state,path)));
+  }
+  def csa-remember-hash(state,key,value) {
+   record_set(state,key,value);
+   value;
+  }
+  def csa-lines(text) = split-on(trim(text),"\n");
+  def csa-fields(line) = split-on(line,"\t");
+  def csa-join(xs,separator) = if nil?(xs) then "" else if nil?(tail(xs)) then head(xs) else str_concat(head(xs),str_concat(separator,csa-join(tail(xs),separator)));
+  def csa-digits(text,at) = if ge(at,str_len(text)) then gt(at,0) else if and(ge(str_byte_at(text,at),48),le(str_byte_at(text,at),57)) then csa-digits(text,add(at,1)) else 0;
+  def csa-number-fields(fields,indices) = if nil?(indices) then 1 else and(csa-digits(nth(fields,head(indices)),0),csa-number-fields(fields,tail(indices)));
+  def csa-label(text) = substring(text,0,csa-label-end(text,str_len(text)));
+  def csa-label-end(text,end) = if le(end,0) then 0 else if eq(str_byte_at(text,sub(end,1)),32) then csa-label-end(text,sub(end,1)) else end;
+  def csa-nonempty(xs) = if nil?(xs) then 1 else and(gt(str_len(head(xs)),0),csa-nonempty(tail(xs)));
+  def csa-overlay?(row) = str_eq(value-kind(row),"list");
+  def csa-unique(state,kind,value) {
+   let key = str_concat(kind,value);
+   let absent = eq(record_get(state,key),0);
+   record_set(state,key,1);
+   absent;
+  }
+  def csa-repairs(state,lines,slot) {
+   if nil?(lines) then slot else csa-repair(state,csa-fields(head(lines)),tail(lines),slot);
+  }
+  def csa-repair(state,fields,rest,slot) {
+   let text = head(fields); let id = str_to_int(text);
+   let valid = and(eq(len(fields),15),and(csa-nonempty(fields),and(csa-digits(text,0),and(ge(id,0),lt(id,10000)))));
+   if not(valid) then csa-check(state,"overlay-row-shape",0,int_to_str(slot)) else 0;
+   if not(csa-unique(state,"overlay-seen:",int_to_str(id))) then csa-check(state,"overlay-id-unique",0,text) else 0;
+   record_set(state,str_concat("overlay:",int_to_str(id)),list(slot,fields));
+   csa-repairs(state,rest,add(slot,1));
+  }
+  def csa-primary-rows(state,rows,sources,overlaySources,ranked,id,bins,repaired) {
+   if nil?(rows) then list(id,bins,repaired) else csa-primary-row(state,csa-fields(head(rows)),tail(rows),sources,overlaySources,ranked,id,bins,repaired);
+  }
+  def csa-primary-row(state,fields,rest,sources,overlaySources,ranked,id,bins,repaired) {
+   if not(eq(len(fields),14)) then csa-check(state,"primary-row-shape",0,int_to_str(id)) else 0;
+   if not(str_eq(nth(fields,1),csa-label(substring(ranked,mul(id,30),add(mul(id,30),20))))) then csa-check(state,"english-stable-id",0,int_to_str(id)) else 0;
+   let overlay = record_get(state,str_concat("overlay:",int_to_str(id)));
+   let raw = substring(sources,mul(id,13),mul(add(id,1),13));
+   let joined = csa-join(fields,"\t");
+   let same = if not(csa-overlay?(overlay)) then 1 else and(str_eq(joined,csa-join(tail(nth(overlay,1)),"\t")),str_eq(raw,substring(overlaySources,mul(head(overlay),13),mul(add(head(overlay),1),13))));
+   if not(same) then csa-check(state,"primary-overlay-binding",0,int_to_str(id)) else 0;
+   let next = if not(csa-overlay?(overlay)) then fbc-put(bins,str_concat(int_to_str(id),str_concat("\t",str_concat(joined,str_concat("\t",str_concat(raw,"\n")))))) else bins;
+   csa-primary-rows(state,rest,sources,overlaySources,ranked,add(id,1),next,if not(csa-overlay?(overlay)) then repaired else add(repaired,13));
+  }
+  def csa-primary(state) {
+   let tablePath = "cognition/concept-nl-semantic-13-omw.tsv";
+   let sourcePath = "cognition/concept-nl-semantic-13-sources.dat";
+   let overlayPath = "cognition/concept-10000-substantive-repair-111-nl.tsv";
+   let overlaySourcePath = "cognition/concept-10000-substantive-repair-111-nl-sources.dat";
+   let rankedPath = "model/concept-10000-ranked.dat";
+   let table = csa-file(state,tablePath); let sources = csa-file(state,sourcePath);
+   let overlay = csa-file(state,overlayPath); let overlaySources = csa-file(state,overlaySourcePath);
+   let ranked = csa-file(state,rankedPath); let rows = tail(csa-lines(table));
+   csa-check(state,"primary-carrier-shapes",and(eq(len(rows),10000),and(eq(str_len(sources),130000),and(eq(len(csa-lines(overlay)),111),and(eq(str_len(overlaySources),1443),eq(str_len(ranked),300000))))),tablePath);
+   csa-check(state,"overlay-shape-and-unique-ids",eq(csa-repairs(state,csa-lines(overlay),0),111),overlayPath);
+   let checked = csa-primary-rows(state,rows,sources,overlaySources,ranked,0,list(),0);
+   csa-check(state,"all-english-and-overlay-cells",and(eq(head(checked),10000),eq(nth(checked,2),1443)),"10000 English labels and 1443 overlay cells");
+   let unaffected = csa-hash(state,fbc-finish(nth(checked,1),""));
+   csa-check(state,"unaffected-cell-identity",str_eq(unaffected,"14443ca02c45549f845facc53b2f5d2bed09e382c0cd791afce13f1d89bba85c"),unaffected);
+   csa-examples(state,list(list(104,"welcoming",3,"menyambut"),list(5019,"damp",2,"damp"),list(9965,"plum",11,"梅")));
+   let metadata = csa-file(state,"cognition/concept-nl-semantic-13-metadata.fk");
+   csa-metadata(state,metadata,list(tablePath,sourcePath,overlayPath,overlaySourcePath));
+   let manifest = csa-file(state,"cognition/concept-nl-semantic-13-source-manifest.txt");
+   csa-primary-manifest(state,manifest,list(list(tablePath,"concept-nl-semantic-13-omw.tsv"),list(sourcePath,"concept-nl-semantic-13-sources.dat"),list(rankedPath,rankedPath)));
+   130000;
+  }
+  def csa-examples(state,rows) {
+   if nil?(rows) then 1 else csa-example(state,head(rows),tail(rows));
+  }
+  def csa-example(state,row,rest) {
+   let held = record_get(state,str_concat("overlay:",int_to_str(head(row))));
+   let fields = nth(held,1);
+   csa-check(state,"canonical-example",and(str_eq(nth(fields,2),nth(row,1)),str_eq(nth(fields,nth(row,2)),nth(row,3))),int_to_str(head(row)));
+   csa-examples(state,rest);
+  }
+  def csa-metadata(state,text,paths) {
+   if nil?(paths) then 1 else csa-metadata-next(state,text,head(paths),tail(paths));
+  }
+  def csa-metadata-next(state,text,path,rest) {
+   csa-check(state,"primary-metadata-content-binding",ge(str_find(text,csa-file-hash(state,path),0),0),path);
+   csa-metadata(state,text,rest);
+  }
+  def csa-primary-manifest(state,text,rows) {
+   if nil?(rows) then 1 else csa-primary-manifest-next(state,text,head(rows),tail(rows));
+  }
+  def csa-primary-manifest-next(state,text,row,rest) {
+   csa-check(state,"primary-manifest-content-binding",ge(str_find(text,str_concat(csa-file-hash(state,head(row)),str_concat("  ",nth(row,1))),0),0),head(row));
+   csa-primary-manifest(state,text,rest);
+  }
+  def csa-migrations(state,lines,previous,count) {
+   if nil?(lines) then count else csa-migration(state,csa-fields(head(lines)),tail(lines),previous,count);
+  }
+  def csa-migration(state,f,rest,previous,count) {
+   let id = str_to_int(head(f)); let rank = str_to_int(nth(f,3));
+   if not(csa-number-fields(f,list(0,3,4,5,6))) then csa-check(state,"migration-numeric-fields",0,int_to_str(count)) else 0;
+   let valid = and(eq(len(f),11),and(csa-digits(head(f),0),and(ge(id,0),and(lt(id,10000),and(gt(rank,10000),and(gt(rank,previous),and(gt(str_to_int(nth(f,4)),0),and(gt(str_to_int(nth(f,5)),0),and(gt(str_to_int(nth(f,6)),0),and(eq(str_len(nth(f,7)),20),and(eq(str_len(nth(f,9)),64),and(gt(str_len(nth(f,8)),0),gt(str_len(nth(f,10)),0)))))))))))));
+   if not(valid) then csa-check(state,"migration-provenance-order",0,int_to_str(count)) else 0;
+   if not(and(csa-unique(state,"migration-id:",int_to_str(id)),and(csa-unique(state,"migration-label:",nth(f,2)),csa-unique(state,"migration-old:",nth(f,1))))) then csa-check(state,"migration-uniqueness",0,int_to_str(count)) else 0;
+   let ranked = csa-file(state,"model/concept-10000-ranked.dat");
+   if not(str_eq(csa-label(substring(ranked,mul(id,30),add(mul(id,30),20))),nth(f,2))) then csa-check(state,"migration-canonical-id",0,int_to_str(id)) else 0;
+   record_set(state,str_concat("alias:",nth(f,1)),id);
+   csa-migrations(state,rest,rank,add(count,1));
+  }
+  def csa-aliases(state,bytes,slot,previous) {
+   if eq(slot,111) then 1 else csa-alias-fields(state,bytes,slot,previous,substring(bytes,add(mul(slot,26),21),add(mul(slot,26),25)));
+  }
+  def csa-alias-fields(state,bytes,slot,previous,idText) {
+   if not(csa-digits(idText,0)) then csa-check(state,"alias-complete-integer",0,int_to_str(slot)) else 0;
+   csa-alias(state,bytes,slot,previous,csa-label(substring(bytes,mul(slot,26),add(mul(slot,26),20))),str_to_int(idText));
+  }
+  def csa-byte-less(a,b,at) = if ge(at,str_len(a)) then lt(at,str_len(b)) else if ge(at,str_len(b)) then 0 else if eq(str_byte_at(a,at),str_byte_at(b,at)) then csa-byte-less(a,b,add(at,1)) else lt(str_byte_at(a,at),str_byte_at(b,at));
+  def csa-alias(state,bytes,slot,previous,label,id) {
+   let expected = record_get(state,str_concat("alias:",label));
+   if not(and(eq(record_get(state,str_concat("migration-old:",label)),1),and(eq(expected,id),or(eq(slot,0),csa-byte-less(previous,label,0))))) then csa-check(state,"alias-id-and-byte-order",0,int_to_str(slot)) else 0;
+   csa-aliases(state,bytes,add(slot,1),label);
+  }
+  def csa-semantic(state,bytes,id,count) {
+   if eq(id,10000) then count else csa-semantic-next(state,bytes,id,count,eq(str_byte_at(bytes,mul(id,15)),49));
+  }
+  def csa-semantic-next(state,bytes,id,count,present) {
+   if and(eq(record_get(state,str_concat("migration-id:",int_to_str(id))),1),not(present)) then csa-check(state,"semantic-migration-id",0,int_to_str(id)) else 0;
+   csa-semantic(state,bytes,add(id,1),if present then add(count,1) else count);
+  }
+  def csa-source-matrix(bytes,at) = if eq(at,str_len(bytes)) then 1 else and(eq(str_byte_at(bytes,at),if eq(mod(at,13),0) then 70 else 71),csa-source-matrix(bytes,add(at,1)));
+  def csa-manifest(state,lines,count) {
+   if nil?(lines) then count else csa-manifest-row(state,csa-fields(head(lines)),tail(lines),count);
+  }
+  def csa-manifest-row(state,f,rest,count) {
+   if lt(len(f),3) then csa-manifest(state,rest,count) else csa-manifest-file(state,f,rest,count);
+  }
+  def csa-manifest-file(state,f,rest,count) {
+   if not(csa-digits(nth(f,1),0)) then csa-check(state,"manifest-complete-integer",0,head(f)) else 0;
+   let path = head(f); let bytes = csa-file(state,path);
+   let actual = csa-file-hash(state,path);
+   csa-check(state,"manifest-exact-file",and(eq(str_len(bytes),str_to_int(nth(f,1))),str_eq(actual,nth(f,2))),str_concat(path,str_concat(" bytes=",str_concat(int_to_str(str_len(bytes)),str_concat(" sha256=",actual)))));
+   csa-manifest(state,rest,add(count,1));
+  }
+  def csa-stable-ids(state) {
+   let ranked = csa-file(state,"model/concept-10000-ranked.dat");
+   let lexical = csa-file(state,"model/concept-10000-lexical-index.dat");
+   let aliases = csa-file(state,"model/concept-10000-substantive-repair-alias-index.dat");
+   let semantics = csa-file(state,"model/concept-10000-substantive-repair-semantic-index.dat");
+   csa-check(state,"stable-id-carrier-widths",and(eq(str_len(ranked),300000),and(eq(str_len(lexical),260000),and(eq(str_len(aliases),2886),eq(str_len(semantics),150000)))),"ranked, lexical, alias and semantic carriers");
+   let migration = csa-file(state,"model/concept-10000-substantive-repair-migration.tsv");
+   csa-check(state,"stable-id-provenance-and-uniqueness",eq(csa-migrations(state,tail(csa-lines(migration)),0,0),111),"111 current stable IDs");
+   csa-check(state,"all-alias-routes-and-order",csa-aliases(state,aliases,0,""),"111 aliases");
+   csa-check(state,"semantic-coverage",eq(csa-semantic(state,semantics,0,0),111),"111 present semantic records");
+   let sources = csa-file(state,"cognition/concept-10000-substantive-repair-111-nl-sources.dat");
+   csa-check(state,"overlay-source-provenance",and(eq(str_len(sources),1443),csa-source-matrix(sources,0)),"F followed by twelve unreviewed G cells per row");
+   let manifest = csa-file(state,"model/concept-10000-substantive-repair-source-manifest.txt");
+   csa-check(state,"complete-manifest",eq(csa-manifest(state,csa-lines(manifest),0),11),"11 exact file hashes");
+   111;
+  }
+  def csa-fresh(state,paths) {
+   if nil?(paths) then 1 else csa-fresh-next(state,head(paths),tail(paths));
+  }
+  def csa-fresh-next(state,path,rest) {
+   let read = fbc-read-exact(csa-at(state,path),0);
+   if not(and(fbc-good(read),str_eq(fbc-value(read),csa-file(state,path)))) then csa-check(state,"source-changed-during-audit",0,path) else 0;
+   csa-fresh(state,rest);
+  }
+  def csa-run(root) = csa-run-with(root,"form-sha256");
+  def csa-run-with(root,engine) {
+   let state = record_new(0,"root",root,"files",list(),"observations",0,"hash",engine);
+   if not(or(str_eq(engine,"form-sha256"),str_eq(engine,"arm64-sha256"))) then csa-check(state,"hash-policy",0,engine) else 0;
+   let before = if str_eq(engine,"arm64-sha256") then metal_live() else list();
+   let cells = csa-primary(state);
+   let ids = csa-stable-ids(state);
+   csa-check(state,"source-reread",csa-fresh(state,record_get(state,"files")),"all held input bytes observed again");
+   let after = if str_eq(engine,"arm64-sha256") then metal_live() else list();
+   if str_eq(engine,"arm64-sha256") then csa-check(state,"owned-resource-release",and(eq(nth(before,2),nth(after,2)),eq(nth(before,3),nth(after,3))),"live buffers and program admissions return to entry counts") else 0;
+   print(list("concept-source-audit", "cells",cells,"stable-ids",ids,"files",len(record_get(state,"files")),"observations",record_get(state,"observations"),"hash",engine));
+   1;
+  }
+  def csa-home() {
+   let line = read_line();
+   if or(nothing?(line),str_eq(line,"")) then csa-run(".") else csa-request(line);
+  }
+  def csa-request(line) {
+   if not(jwa-valid(line)) then csa-input-refused("complete JSON required") else 0;
+   let request = parse-json("concept-source-request",line);
+   if not(node_eq(node_category(request),JSON-OBJECT())) then csa-input-refused("request object required") else 0;
+   if not(csa-request-fields(json-object-pairs(request),list())) then csa-input-refused("unique string root/hash fields required") else 0;
+   csa-run-with(if json-object-has?(request,"root") then json-string-value(json-object-get(request,"root")) else ".",if json-object-has?(request,"hash") then json-string-value(json-object-get(request,"hash")) else "form-sha256");
+  }
+  def csa-request-fields(pairs,seen) {
+   if nil?(pairs) then 1 else csa-request-field(head(pairs),tail(pairs),seen);
+  }
+  def csa-request-field(pair,rest,seen) {
+   let key = json-pair-key(pair);
+   if not(and(oh-has(list("root","hash"),key),and(not(oh-has(seen,key)),eq(node_type(json-pair-value(pair)),2)))) then 0 else csa-request-fields(rest,cons(key,seen));
+  }
+  def csa-input-refused(reason) {
+   csa-check(record_new(0,"root","request","observations",0),"request-admission",0,reason);
+  }
+ }
+ 0;
+}
