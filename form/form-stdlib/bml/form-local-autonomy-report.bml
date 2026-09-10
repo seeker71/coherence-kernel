@@ -1,0 +1,48 @@
+// Recheck frozen caller contracts and account stage events without another model call.
+// preludes: form-stdlib/bml/form-local-autonomy-eval.bml form-stdlib/rag-ask.fk
+section [form.bml] {
+ class FormLocalAutonomyReport {
+  def flar-read(path) = if le(file_size(path),0) then form_error(str_concat("evaluation evidence absent: ",path)) else parse-json(path,read_file(path));
+  def flar-lines(lines) = if nil?(lines) then list() else if str_eq(trim(head(lines)),"") then flar-lines(tail(lines)) else cons(parse-json("trace",head(lines)),flar-lines(tail(lines)));
+  def flar-find(rows,key,value) = if nil?(rows) then form_error(str_concat("evaluation row absent: ",value)) else if str_eq(nsm-str(head(rows),key),value) then head(rows) else flar-find(tail(rows),key,value);
+  def flar-sum(rows,stage,key) = if nil?(rows) then 0 else add(if str_eq(nsm-str(head(rows),"stage"),stage) then nsm-num(head(rows),key) else 0,flar-sum(tail(rows),stage,key));
+  def flar-state(contract) = fcap-open(nsm-str(contract,"goal"),fat-wire-value(fat-wire-documents(contract)),nsm-strings(json-array-elements(json-object-get(contract,"writable"))));
+  def flar-diagnosis(state,checks,text,reason) = if not(str_eq(reason,"")) then str_concat("generation-incomplete:",reason) else if not(faj-valid(text)) then "response-is-not-JSON" else flar-parsed(state,checks,fat-wire-documents(faj-json("response",text)));
+  def flar-parsed(state,checks,parsed) = if not(str_eq(fat-wire-error(parsed),"")) then fat-wire-error(parsed) else if value_eq(fat-wire-value(parsed),nth(state,2)) then "original-documents-unchanged" else if not(fcap-readonly-preserved(nth(state,2),fat-wire-value(parsed),nth(state,4))) then "read-only-documents-not-preserved" else nth(fcaq-check(checks,fat-wire-value(parsed)),1);
+  def flar-case(home,row,contracts) {
+   let contract = flar-find(contracts,"task",nsm-str(row,"task"));
+   let state = flar-state(contract); let checks = json-array-elements(json-object-get(contract,"checks"));
+   let response = flar-read(nsm-at(home,fs-path-basename(nsm-str(row,"response"))));
+   let trace = read_file(nsm-at(home,fs-path-basename(nsm-str(row,"events"))));
+   let events = flar-lines(ra-lines(trace));
+   let finish = flar-find(events,"stage","finished");
+   let verified = flae-valid(state,checks,nsm-str(response,"text"),nsm-str(response,"reason"));
+   let prefill = flar-sum(events,"prefill","wall_ms"); let decode = flar-sum(events,"decode","wall_ms");
+   let prompt = nsc-prompt(state,json-emit(json-node-array(checks)));
+   let reconciled = and(eq(verified,nsm-num(row,"verified")),and(eq(nsm-num(finish,"tokens_emitted"),nsm-num(row,"generated_tokens")),str_eq(nsm-hash(prompt),nsm-str(row,"contract_sha256"))));
+   json-node-object(list(nsm-s("task",nsm-str(row,"task")),nsm-s("condition",nsm-str(row,"condition")),nsm-n("verified",verified),nsm-n("reconciled",reconciled),nsm-s("diagnosis",flar-diagnosis(state,checks,nsm-str(response,"text"),nsm-str(response,"reason"))),nsm-n("generated_tokens",nsm-num(row,"generated_tokens")),nsm-n("prompt_tokens",flar-sum(events,"prefill","tokens")),nsm-n("wall_ms",nsm-num(row,"wall_ms")),nsm-n("prefill_wall_ms",prefill),nsm-n("decode_wall_ms",decode),nsm-n("other_wall_ms",sub(nsm-num(row,"wall_ms"),add(prefill,decode))),nsm-n("prefill_gpu_us",flar-sum(events,"prefill","gpu_busy_us")),nsm-n("decode_gpu_us",flar-sum(events,"decode","gpu_busy_us")),nsm-s("response_sha256",nsm-hash(nsm-str(response,"text"))),nsm-s("trace_sha256",nsm-hash(trace))));
+  }
+  def flar-cases(home,rows,contracts) = if nil?(rows) then list() else cons(flar-case(home,head(rows),contracts),flar-cases(home,tail(rows),contracts));
+  def flar-conditions(home,rows,contracts) = if nil?(rows) then list() else append(flar-cases(home,json-array-elements(json-object-get(head(rows),"cases")),contracts),flar-conditions(home,tail(rows),contracts));
+  def flar-ready(rows) = if nil?(rows) then 1 else and(eq(nsm-num(head(rows),"reconciled"),1),flar-ready(tail(rows)));
+  def flar-report(home) {
+   let summary = flar-read(nsm-at(home,"summary.json"));
+   let contracts = json-array-elements(flar-read(nsm-at(home,"contracts.json")));
+   let rows = flar-conditions(home,json-array-elements(json-object-get(summary,"conditions")),contracts);
+   let complete = and(gt(len(contracts),0),and(eq(len(rows),mul(2,len(contracts))),and(eq(nsm-num(summary,"state_unchanged"),1),flar-ready(rows))));
+   let report = json-node-object(list(nsm-s("schema","form-local-autonomy-recheck-v1"),nsm-n("observed_at_ms",now_unix_ms()),nsm-n("reconciled",complete),nsm-s("scope","frozen-contract-replay;no-training;no-inference;times-observed-under-existing-host-load"),json-node-pair("cases",json-node-array(rows))));
+   let saved = nsm-write(nsm-at(home,"recheck.json"),report);
+   if complete then report else form_error("evaluation incomplete or contract, result or token trace disagrees");
+  }
+  def flar-index-rows(lines) = if nil?(lines) then list() else if str_eq(trim(head(lines)),"") then flar-index-rows(tail(lines)) else cons(ric-source-path(head(lines)),flar-index-rows(tail(lines)));
+  def flar-ground(query) {
+   let index = ra-default-index(); let hit = ra-grounded-hit(query);
+   let out = bfc-envelope(0,now_unix_ms(),0,list(ra-hit?(hit),file_size(index)),4);
+   let sent = bfc-record-out(out,0); let control = bfc-control(out,4); let inbound = bfc-record-in(control,1);
+   let paths = flar-index-rows(ra-lines(nsm-text(index)));
+   let reobserved = bfc-record-out(bfc-envelope(0,bfc-exchange(control),0,list(len(paths),hearth-standing()),4),2);
+   json-node-object(list(nsm-s("query",query),nsm-s("result",ra-hit-output(hit)),nsm-n("observed_at_ms",now_unix_ms()),nsm-n("hearth_standing",hearth-standing()),nsm-s("index",index),nsm-n("index_bytes",file_size(index)),nsm-n("index_mtime_seconds",file_mtime(index)),nsm-s("index_sha256",nsm-hash(nsm-text(index))),json-node-pair("indexed_source_paths",json-node-array(nsm-string-nodes(paths))),nsm-s("selected","request-evidence;read-current-index-inventory"),nsm-s("scope","current-local-index;source-inventory-is-not-source-freshness-or-answer-sufficiency")));
+  }
+ }
+ 0;
+}
