@@ -10,6 +10,7 @@ kernel void nll_last(device const float* x [[buffer(0)]],device float* y [[buffe
 kernel void nll_scores(device const float* q [[buffer(0)]],device const float* k [[buffer(1)]],device float* p [[buffer(2)]],constant uint& t [[buffer(3)]],constant uint& nq [[buffer(4)]],constant uint& nk [[buffer(5)]],constant uint& d [[buffer(6)]],constant uint& offset [[buffer(7)]],uint g [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {uint row=g/nq,h=g%nq,nh=offset+t;if(row>=t)return;uint kh=h/(nq/nk);float m=-INFINITY;for(uint s=lane;s<nh;s+=32){float z=-INFINITY;if(s<=offset+row){z=0;for(uint c=0;c<d;c++)z+=q[(row*nq+h)*d+c]*k[(s*nk+kh)*d+c];z*=rsqrt(float(d));}p[g*nh+s]=z;m=max(m,z);}m=simd_max(m);threadgroup_barrier(mem_flags::mem_device);float sum=0;for(uint s=lane;s<nh;s+=32){float e=exp(p[g*nh+s]-m);p[g*nh+s]=e;sum+=e;}sum=simd_sum(sum);for(uint s=lane;s<nh;s+=32)p[g*nh+s]/=sum;}
 kernel void nll_attend(device const float* p [[buffer(0)]],device const float* v [[buffer(1)]],device float* out [[buffer(2)]],constant uint& t [[buffer(3)]],constant uint& nq [[buffer(4)]],constant uint& nk [[buffer(5)]],constant uint& d [[buffer(6)]],constant uint& offset [[buffer(7)]],uint g [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {uint row=g/nq,h=g%nq,nh=offset+t;if(row>=t)return;uint kh=h/(nq/nk);for(uint c=lane;c<d;c+=32){float a=0;for(uint s=0;s<=offset+row;s++)a+=p[g*nh+s]*v[(s*nk+kh)*d+c];out[(row*nq+h)*d+c]=a;}}
 kernel void nll_argmax(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],uint lane [[thread_index_in_simdgroup]]) {float m=-INFINITY;uint id=0xffffffff,bad=0;for(uint i=lane;i<n;i+=32){bad+=uint(!isfinite(x[i]));if(x[i]>m || (x[i]==m&&i<id)){m=x[i];id=i;}}float best=simd_max(m);uint win=simd_min(m==best?id:0xffffffff);bad=simd_sum(bad);if(lane==0)out[0]=bad?0xffffffff:win;}
+kernel void nll_argmax_except(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],constant uint& skip [[buffer(3)]],uint lane [[thread_index_in_simdgroup]]) {float m=-INFINITY;uint id=0xffffffff,bad=0;for(uint i=lane;i<n;i+=32){if(i==skip)continue;bad+=uint(!isfinite(x[i]));if(x[i]>m || (x[i]==m&&i<id)){m=x[i];id=i;}}float best=simd_max(m);uint win=simd_min(m==best?id:0xffffffff);bad=simd_sum(bad);if(lane==0)out[0]=bad?0xffffffff:win;}
 ");
   def nll-run(name, handles, values, count, grouped) {
    let p = nam-held-pipe(metal_pipeline(nll-msl(), name));
@@ -203,6 +204,13 @@ kernel void nll_argmax(device const float* x [[buffer(0)]],device uint* out [[bu
   def nll-select(logits,vocab) {
    let out = nam-alloc(1);
    let rc = nll-run("nll_argmax",list(logits,out),list(vocab),1,1);
+   let value = ln-u32-le(metal_buf_read(out,0,4),0);
+   let released = nam-free(list(out));
+   value;
+  }
+  def nll-select-except(logits,vocab,skip) {
+   let out = nam-alloc(1);
+   let rc = nll-run("nll_argmax_except",list(logits,out),list(vocab,skip),1,1);
    let value = ln-u32-le(metal_buf_read(out,0,4),0);
    let released = nam-free(list(out));
    value;

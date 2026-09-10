@@ -2,9 +2,9 @@
 // maxTokens=0 keeps streaming until EOS, cancellation, architectural or memory pressure.
 // A cap is a signal, not a ceiling. Caller token caps grow toward EOS, or
 // stop as adapted-repeat if they revealed a loop. A loop mid-stream is itself
-// a cap: stop at the first repeat, do not wait for the token number.
-// Admission that would refuse for want>maxpos clamps to maxpos when the
-// prompt itself fits.
+// a cap: prefer the second-best token when first-best would repeat; only
+// stop as adapted-repeat when both would. Admission that would refuse for
+// want>maxpos clamps to maxpos when the prompt itself fits.
 // Partial output always carries its actual stopping reason.
 // preludes: form-stdlib/native-llama-metal.bml form-stdlib/native-llama-tokenizer.bml form-stdlib/spool-bell-transport.fk form-stdlib/form-fs.fk
 section [form.bml] {
@@ -51,6 +51,25 @@ section [form.bml] {
    let event = nlg-event(events,stage,len(ids),t0,live,model);
    let released = nll-forward-close(r);
    selected;
+  }
+  def nlg-forward-choice(model,ctx,ids,pos,events,stage) {
+   let t0 = host_monotonic_ms(); let live = metal_live();
+   let r = nll-forward(model,ctx,ids,pos,0);
+   let vocab = nth(head(model),5);
+   let best = nll-select(head(r),vocab);
+   let second = nll-select-except(head(r),vocab,best);
+   let event = nlg-event(events,stage,len(ids),t0,live,model);
+   let released = nll-forward-close(r);
+   list(best,second);
+  }
+  def nlg-pick(acc,best-text,second-text,best-id,second-id) {
+   if eq(nlg-looping(str_concat(acc,best-text)),1) then nlg-pick-second(acc,second-text,second-id) else list(best-id,"");
+  }
+  def nlg-pick-second(acc,second-text,second-id) {
+   if lt(second-id,0) then list(-1,"adapted-repeat") else if eq(nlg-looping(str_concat(acc,second-text)),1) then list(-1,"adapted-repeat") else list(second-id,"adapted-choice");
+  }
+  def nlg-pick-id(tk,acc,best,second) {
+   if nlg-eos(tk,best) then list(best,"") else nlg-pick(acc,nlt-decode-id(tk,best),if or(lt(second,0),nlg-eos(tk,second)) then "" else nlt-decode-id(tk,second),best,second);
   }
   // Conservative byte estimate for the actual forward tape, including attention scores.
   def nlg-forward-bytes(model,t,pos) {
@@ -120,7 +139,16 @@ section [form.bml] {
    else nlg-feed(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events);
   }
   def nlg-grew(model,tk,old,id,pos,n,limit,acc,stream,cancel,events,next) = if nothing?(next) then nlg-result(acc,if ge(pos,nth(head(model),9)) then "model-position-limit" else "memory-pressure",n,old,events) else nlg-feed(model,tk,next,id,pos,n,limit,acc,stream,cancel,events);
-  def nlg-feed(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) = if not(nlg-room(nlg-forward-bytes(model,1,pos))) then nlg-result(acc,"memory-pressure",n,ctx,events) else nlg-decode(model,tk,ctx,nlg-forward-next(model,ctx,list(id),pos,events,"decode"),add(pos,1),n,limit,acc,stream,cancel,events);
+  def nlg-feed(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) = if not(nlg-room(nlg-forward-bytes(model,1,pos))) then nlg-result(acc,"memory-pressure",n,ctx,events) else nlg-chosen(model,tk,ctx,nlg-forward-choice(model,ctx,list(id),pos,events,"decode"),add(pos,1),n,limit,acc,stream,cancel,events);
+  def nlg-chosen(model,tk,ctx,choice,pos,n,limit,acc,stream,cancel,events) {
+   let picked = nlg-pick-id(tk,acc,head(choice),nth(choice,1));
+   if eq(head(picked),-1) then nlg-result(acc,"adapted-repeat",n,ctx,events)
+   else nlg-chosen-go(model,tk,ctx,head(picked),pos,n,limit,acc,stream,cancel,events,nth(picked,1));
+  }
+  def nlg-chosen-go(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,why) {
+   let logged = if str_eq(why,"adapted-choice") then nlg-event(events,"adapt-choice",n,host_monotonic_ms(),metal_live(),model) else 0;
+   nlg-decode(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events);
+  }
   def nlg-finish-event(model,result,events,start) {
    let event = json-node-object(list(json-node-pair("stage",json-node-string("finished")),json-node-pair("wall_ms",json-node-int(sub(host_monotonic_ms(),start))),json-node-pair("tokens_emitted",json-node-int(nth(result,2))),json-node-pair("bytes_emitted",json-node-int(str_len(head(result)))),json-node-pair("reason",json-node-string(if eq(str_len(nth(result,1)),0) then "eos" else nth(result,1))),json-node-pair("model",json-node-string(nth(model,4))),json-node-pair("adapter",json-node-string(nll-adapter(model)))));
    if eq(str_len(events),0) then 0 else sbt-append(events,str_concat(json-emit(event),"\n"));
