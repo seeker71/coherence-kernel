@@ -1,0 +1,57 @@
+// A bounded local comparison: identical public prompt, fresh recurrent state per route.
+// preflight-exec: forbidden
+// preludes: form-stdlib/form-cli-model-generate.fk form-stdlib/model-registry.bml
+// preludes: ../observe/bidirectional-framebuffer-channel.fk
+section [form.bml] {
+ class QwenPrefillQuantDiagnostic {
+  def qpqd-count(bytes, i, nonfinite, zero) {
+   if ge(mul(i, 4), str_len(bytes)) then list(nonfinite, zero) else qpqd-count-step(bytes, i, nonfinite, zero);
+  }
+  def qpqd-count-step(bytes, i, nonfinite, zero) {
+   let word = kth-u32at(bytes, i);
+   qpqd-count(bytes, add(i, 1), add(nonfinite, eq(mod(div(word, 8388608), 256), 255)), add(zero, eq(mod(word, 2147483648), 0)));
+  }
+  // Reproduce the old Q8-only dispatch on the SAME model bytes, only in this diagnostic.
+  def qpqd-legacy(ps, i) = if ge(i, len(ps)) then list() else cons(if ge(i, 52) then nth(ps, 31) else nth(ps, i), qpqd-legacy(ps, add(i, 1)));
+  def qpqd-run(ctx, ids, sliced) {
+   let ps = if eq(sliced, 2) then qpqd-legacy(nth(ctx, 0), 0) else nth(ctx, 0); let bs = nth(ctx, 1); let geo = nth(ctx, 2);
+   let sts = q38-new-state(geo);
+   let start = now_unix_ms();
+   let answer = if sliced then q38-prefill-span-sliced(ps, bs, geo, nth(ctx, 3), sts, nth(ctx, 4), nth(ctx, 5), nth(ctx, 6), ids, 0, q38-ctx-span(ctx)) else q38-prefill(ps, bs, geo, nth(ctx, 3), sts, nth(ctx, 4), nth(ctx, 5), nth(ctx, 6), ids, 0);
+   let elapsed = sub(now_unix_ms(), start);
+   let logits = metal_buf_read(nth(bs, 28), 0, mul(nth(geo, 19), 4));
+   let counts = qpqd-count(logits, 0, 0, 0);
+   let released = q38-free-state(sts);
+   let row = list("route", if eq(sliced, 2) then "legacy-q8-only-sliced" else if sliced then "typed-sliced" else "scalar", "positions", nth(answer, 1), "pending-token", nth(answer, 0), "logit-bytes", str_len(logits), "nonfinite", nth(counts, 0), "zero", nth(counts, 1), "wall-ms", elapsed);
+   print(row); print_str("\n");
+   row;
+  }
+  def qpqd-main() {
+   let line = read_line();
+   let model = if or(nothing?(line), str_eq(line, "")) then "qwen38-q4" else line;
+   let path = mr-path(mr-find(model));
+   let start = now_unix_ms();
+   let ctx = q38-open-span(path, 32, 8);
+   print(list("model", model, "open-ms", sub(now_unix_ms(), start))); print_str("\n");
+   if not(q38-context-ok?(ctx)) then print(list("refused", metal_status())) else qpqd-opened(ctx);
+  }
+  def qpqd-opened(ctx) {
+    let ids = q35-encode(nth(ctx, 7), "The capital of France is");
+    print(list("prompt-ids", ids, "embedding-type", kth-tv-ty(nth(ctx, 4)), "first-ffn-type", kth-tv-ty(nth(nth(nth(ctx, 3), 0), 2))));
+    let scalar = qpqd-run(ctx, ids, 0);
+    let legacy = qpqd-run(ctx, ids, 2);
+    let out = bfc-envelope(0, now_unix_ms(), 0, list(nth(legacy, 9), nth(scalar, 9)), -1);
+    let sent = bfc-record-out(out, 0);
+    let control = bfc-control(out, 5);
+    let incoming = bfc-record-in(control, 1);
+    let selected = bfc-apply(out, control, 2, 1);
+    let sliced = qpqd-run(ctx, ids, selected);
+    let seen = bfc-record-out(bfc-envelope(0, bfc-exchange(out), 0, list(nth(sliced, 9), nth(scalar, 9)), -1), 2);
+    print(list("selected", "typed-sliced", "diagnostic-events", len(framebuffer-events()), "pending-matches-scalar", eq(nth(scalar, 5), nth(sliced, 5))));
+    let closed = q38-close(ctx, list());
+    print(list("metal-after-release", metal_status()));
+    list(scalar, legacy, sliced);
+  }
+ }
+ qpqd-main();
+}
