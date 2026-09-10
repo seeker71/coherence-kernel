@@ -44,6 +44,32 @@ section [form.bml] {
   }
   // Exclude already committed audio, including a cut inside a retained chunk.
   def eac-phrase(parts, total, cut) = enw-parts-drop(parts, elp-max(0, sub(cut, sub(total, enw-parts-len(parts)))));
+  // Audio and gain must cover the same phrase. A finished loud phrase is not
+  // context for this phrase's mel normalization or its gain estimate.
+  def eac-straddles?(rows, drop) = if or(le(drop, 0), eq(len(rows), 0)) then 0 else if lt(drop, head(head(rows))) then 1 else eac-straddles?(tail(rows), sub(drop, head(head(rows))));
+  def eac-window(parts, total, cut, listening) {
+   let drop = elp-max(0, sub(cut, sub(total, enw-parts-len(parts))));
+   let phrase = enw-parts-drop(parts, drop);
+   let rows = nth(listening, 2);
+   let kept = elp-meta-cut(rows, drop);
+   // Whole chunks reuse their measured peaks. Only a straddling first chunk
+   // needs its retained samples measured; its removed peak must not survive.
+   let peaks = if and(gt(len(phrase), 0), eac-straddles?(rows, drop)) then cons(list(str_len(head(phrase)), nth(elp-stats(head(phrase)), 1)), tail(kept)) else kept;
+   list(phrase, elp-window-gain(list(head(listening), nth(listening, 1), peaks)));
+  }
+  def eac-tick(bytes) = div(elp-max(0, sub(ELWindowBytes(), bytes)), 640);
+  // The complete live open-phrase pass lives here, so physical bands exercise
+  // the same cut, gain, timestamp, and unconstrained revision as the microphone.
+  def eac-open(st, parts, total, cut, cap, listening) {
+   let window = eac-window(parts, total, cut, listening);
+   let phrase = head(window);
+   let gain = nth(window, 1);
+   let t0 = now_unix_ms();
+   let te = enw-encode-parts-gain(st, phrase, ELWindowBytes(), gain);
+   let t1 = now_unix_ms();
+   let r = enw-transcribe-from2(st, te, eac-tick(enw-parts-len(phrase)), cap, -1, elp-revision-prefix(list(), list()));
+   eac-pack(st, r, sub(t1, t0), sub(now_unix_ms(), t1), gain);
+  }
   // Exact trailing fill: unlike front padding, no audio will cover an overshoot.
   def eac-zero-tail(st, off, end, block) = if ge(off, end) then off else eac-zero-write(st, off, end, block, elp-min(str_len(block), sub(end, off)));
   def eac-zero-write(st, off, end, block, bytes) {
