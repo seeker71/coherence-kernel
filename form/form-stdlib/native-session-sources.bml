@@ -1,0 +1,75 @@
+// Retained examples stay in their owning hearth. Git supplies the local roots;
+// Form reads their records and assessment references without importing copies.
+// preludes: form-stdlib/native-session-memory.bml
+section [form.bml] {
+ class NativeSessionSources {
+  def nss-absolute(root,path) = if eq(str_byte_at(path,0),47) then path else nsm-at(root,path);
+  def nss-reference(path) = json-node-object(list(nsm-s("path",path),nsm-n("bytes",file_size(path)),nsm-s("bytes_sha256",nsm-hash(nsm-text(path)))));
+  def nss-current(reference) = and(eq(nsm-num(reference,"bytes"),file_size(nsm-str(reference,"path"))),str_eq(nsm-str(reference,"bytes_sha256"),nsm-hash(nsm-text(nsm-str(reference,"path")))));
+  def nss-references-current(refs) = if nil?(refs) then 1 else and(nss-current(head(refs)),nss-references-current(tail(refs)));
+  def nss-authority() {
+   let image = kernel_ast(host_pid(),-1);
+   if or(nothing?(image),lt(len(image),10)) then json-node-object(list(nsm-s("basis","process-instance;no-cross-process-reuse"),nsm-n("pid",host_pid()))) else if le(nth(image,6),0) then json-node-object(list(nsm-s("basis","source-instance;no-cross-process-reuse"),nsm-n("pid",host_pid()))) else json-node-object(list(nsm-s("basis","running-program-image"),nsm-n("identity",nth(image,8)),nsm-s("path",nth(image,9))));
+  }
+  def nss-source(root,home,name) {
+   let dir = nsm-at(nsm-at(home,"rows"),name);
+   let exclusions = list(nss-reference(nss-absolute(root,nsm-valid-path(home))),nss-reference(nsm-at(dir,"valid.jsonl")));
+   let source = nss-reference(nsm-at(dir,"record.json"));
+   oh-set(oh-set(oh-set(source,"home",json-node-string(home)),"home_config",nss-reference(nsm-at(home,"config.json"))),"assessment_sources",json-node-array(exclusions));
+  }
+  def nss-sources(root,home,names) = if nil?(names) then list() else cons(nss-source(root,home,head(names)),nss-sources(root,home,tail(names)));
+  def nss-home(root,home) {
+   let present = fs-is-dir?(home); let rows = nsm-dirs(home);
+   json-node-object(list(nsm-s("root",root),nsm-s("home",home),nsm-s("state",if not(present) then "absent" else if nothing?(rows) then "unreadable" else "read"),json-node-pair("sources",json-node-array(if nothing?(rows) then list() else nss-sources(root,home,rows)))));
+  }
+  def nss-roots(fields,current,held) = if nil?(fields) then held else if eq(str_find(head(fields),"worktree ",0),0) then nss-root(substring(head(fields),9,str_len(head(fields))),tail(fields),current,held) else nss-roots(tail(fields),current,held);
+  def nss-root(root,rest,current,held) = nss-roots(rest,current,if or(str_eq(root,current),nsm-has(held,root)) then held else append(held,list(root)));
+  def nss-homes(roots) = if nil?(roots) then list() else cons(nss-home(head(roots),nsm-at(head(roots),hearth-session-learning())),nss-homes(tail(roots)));
+  def nss-flatten(homes) = if nil?(homes) then list() else append(json-array-elements(oh-get(head(homes),"sources")),nss-flatten(tail(homes)));
+  def nss-catalog(home) {
+   let root = host_cwd(); let absolute = nss-absolute(root,home);
+   let own = nss-home(root,absolute);
+   if not(str_eq(absolute,nsm-at(root,hearth-session-learning()))) then nss-publish(home,"explicit-home-only",json-node-null(),list(own)) else nss-discover(home,root,own);
+  }
+  def nss-discover(home,root,own) {
+   let made = fs-mkdir(nsm-at(home,"evidence-discovery"));
+   let prefix = nsm-at(nsm-at(home,"evidence-discovery"),nsm-id());
+   let output = str_concat(prefix,".worktrees"); let errors = str_concat(prefix,".err");
+   let pid = host_spawn_at(list("git","-C",root,"worktree","list","--porcelain","-z"),list("/dev/null",output,errors));
+   let rc = if gt(pid,0) then host_wait(pid) else -1;
+   let inventory = nsm-text(output);
+   let complete = and(eq(rc,0),and(gt(str_len(inventory),0),eq(str_byte_at(inventory,sub(str_len(inventory),1)),0)));
+   let discovery = json-node-object(list(nsm-n("exit",rc),nsm-n("complete",complete),json-node-pair("registry",nss-retain(output,".worktrees")),json-node-pair("stderr",nss-retain(errors,".err"))));
+   let homes = if complete then cons(own,nss-homes(nss-roots(split-on(inventory,byte_to_str(0)),root,list()))) else list(own);
+   nss-publish(home,if complete then "repository-worktrees" else "local-only;worktree-discovery-incomplete",discovery,homes);
+  }
+  def nss-retain(path,suffix) {
+   let kept = nsm-at(fs-path-dirname(path),str_concat(nsm-hash(nsm-text(path)),suffix));
+   let saved = if fs-exists?(kept) then fs-remove-file(path) else fs-rename(path,kept);
+   if not(eq(saved,0)) then form_error("session source discovery evidence could not be retained") else nss-reference(kept);
+  }
+  def nss-unread(homes) = if nil?(homes) then 0 else add(if str_eq(nsm-str(head(homes),"state"),"unreadable") then 1 else 0,nss-unread(tail(homes)));
+  def nss-publish(home,scope,discovery,homes) {
+   let data = json-node-object(list(nsm-s("scope",scope),json-node-pair("discovery",discovery),json-node-pair("homes",json-node-array(homes)),json-node-pair("authority",nss-authority())));
+   let coverage = list(nsm-s("scope",scope),json-node-pair("complete",oh-get(discovery,"complete")),json-node-pair("exit",oh-get(discovery,"exit")),json-node-pair("homes",json-node-array(homes)),json-node-pair("authority",nss-authority()));
+   let revision = nsm-hash(json-emit-precise(json-node-object(coverage)));
+   let prior = nsm-json(nsm-at(home,"evidence-catalog.json"));
+   let catalog = oh-set(oh-set(data,"revision",json-node-string(revision)),"observed_at_ms",json-node-int(now_unix_ms()));
+   let saved = if str_eq(nsm-str(prior,"revision"),revision) then prior else nss-published(home,scope,discovery,homes,catalog);
+   nss-flatten(homes);
+  }
+  def nss-published(home,scope,discovery,homes,catalog) {
+   let path = nsm-at(home,"evidence-catalog.json"); let saved = nsm-atomic(path,catalog);
+   let complete = or(str_eq(scope,"explicit-home-only"),eq(nsm-num(discovery,"complete"),1));
+   let unread = nss-unread(homes); let healthy = and(complete,eq(unread,0));
+   let expected = json-node-object(list(nsm-n("discovery_complete",1),nsm-n("unread_homes",0)));
+   let observed = json-node-object(list(nsm-n("discovery_complete",complete),nsm-n("unread_homes",unread)));
+   let reading = oh-reading("session-learning",home,"source-discovery",expected,observed,json-node-int(healthy),if healthy then list() else list(oh-need("readable-local-memory-sources",oh-reference(path))),list("retry-discovery","defer"),oh-reference(path));
+   let emitted = nsm-event(home,"organ-health",list(json-node-pair("health",reading)));
+   let response = if healthy then 0 else nsm-event(home,"organ-response",list(json-node-pair("health",oh-response(reading,"defer"))));
+   catalog;
+  }
+  def nss-source-current(source) = if not(json-object-has?(source,"home_config")) then 0 else and(nss-current(source),and(nss-current(oh-get(source,"home_config")),nss-references-current(json-array-elements(oh-get(source,"assessment_sources"))))));
+ }
+ 0;
+}

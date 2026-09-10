@@ -38,7 +38,7 @@ replace the working adapter.
 `model/fixtures/session-learning/valid.jsonl` supplies two public held-out
 sentinels. A private `config.json` may name a `validation` JSONL and a positive
 `learning_rate`; the default rate is `0.00001`. The new example cannot share a
-prompt with a held-out row. Rows are processed whole; the trainer reports
+normalized prompt with a held-out row. Rows are processed whole; the trainer reports
 position or memory refusal instead of silently truncating a row. The one loaded
 training model produces the before/after per-row scores as well as gradients.
 When a deferred candidate differs from the serving adapter, that serving
@@ -88,8 +88,29 @@ open needs. Unchanged evidence under the same running program image reuses its
 response; a miss stays open. Source-compiled processes without an observed image
 identity do not reuse another process's answer. The cache reads the executing
 image identity, rather than treating current source-file bytes as running code.
-This provider searches retained session memory. It does not turn arbitrary RAG hits,
-git content, filesystem prose or generated text into verified training targets.
+The default hearth discovers this repository's other local worktrees through
+Git and reads their retained session records by reference. A nondefault
+session home stays scoped to that home. `evidence-catalog.json` reports the
+discovered homes, absent or unreadable homes, source records, registry exit,
+and the executing image identity. Discovery emits its own health reading when
+that evidence changes. A failed registry call leaves local evidence available
+and reports incomplete coverage. Identical registry bytes share one retained
+artifact, and unchanged observations preserve their original timestamp.
+Worktree commit movement alone does not change the memory-coverage reading.
+
+Each reference binds its donor's configuration and both current and row-bound
+held-out data. Retrieval and consumption check those bytes again and exclude
+both the requesting learner's and donor's assessment prompts. A changed record
+or assessment invalidates reuse; a donor with unavailable current validation
+cannot supply a training target. Prompt normalization also applies to primary
+example admission. Donor records and learning state remain in their own homes;
+the requesting learner only materializes accepted examples in its training
+input. This is filesystem reference sharing, not a shared resident tensor or
+model process. Worker drains rediscover local homes; changes in another idle
+home do not independently wake this worker yet.
+
+This provider does not turn arbitrary RAG hits, git history, filesystem prose
+or generated text into verified training targets.
 The callback carrier accepts other providers without a central error catalogue.
 
 `./fkwu observe/native-session-evidence-run.bml` attends to current needs when
