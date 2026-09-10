@@ -50,7 +50,78 @@ or 33 with ARM64 hashing, including the CPU resource-count observation.
 Independent review also executes malformed numeric and significant-whitespace
 cases through the actual door. The audit never edits its input files.
 
-Concept builders and materializers in JavaScript remain active migration
-targets. Native verification establishes current source agreement; it does not
-establish Form ownership of those builders. The north star is the same held-byte
-identity and observed publication contract through Form-owned construction.
+## Native materialization
+
+`form-run ./fkwu observe/concept-materialize-run.bml </dev/null` constructs and
+publishes the canonical projection in Form. It accepts the same optional
+`root`/`hash` JSON object. The exact table header, row widths and unique repair
+IDs are checked before constructing the 10,000 rows, 130,000 source bytes,
+10,001 byte offsets, thirteen locale hashes, metadata and manifest.
+
+Construction holds all input bytes and checks the proposed result through the
+native source audit before publication. Files first discovered during that
+validation also join the freshness check. All original output files and source
+dependencies are read again after staging. The five staged files must read back
+exactly before their per-file renames; the manifest is last. A final full audit
+observes the published generation. Each rename is atomic; the five-file change
+is not one atomic snapshot.
+
+A failed write, source freshness check or rename produces correlated
+observation, response and applied rows. The owner removes its remaining private
+stages and observes their disposition. Failure evidence retains all owned stage
+paths and the number of destinations already changed, including a successful
+rename whose subsequent readback refuses. Already published destinations remain
+explicit; a fresh materialization reconstructs the complete projection from its
+current inputs. A refused removal retains its path in the evidence.
+
+The final JSON report carries `rows`, `repairs`, `cells`, `tableSha256`,
+`sourcesSha256` and `sourceCounts` for `F`, `W`, `D`, `C`, `G` and `0`, plus its
+schema and artifact count. The source builder invokes this native door with
+closed stdin. Its other JavaScript construction responsibilities remain visible.
+
+`form-run ./fkwu observe/concept-materializer-witness.bml` operates only on
+private source copies. It verifies exact projected artifacts, executes all
+10,001 offsets and all metadata functions against current runtime values,
+repeats publication with portable hashing, rejects an altered header and a
+changed validation dependency, and restores both before fresh publication.
+Real failures after a first staged write and after a first successful rename
+verify the owned-file cleanup and changed-destination count. The witness returns
+`8` with exit zero and prints its retained evidence directory.
+
+The current metadata generator expects its canonical generated function layout;
+an absent or duplicate required function boundary refuses.
+
+## Complete lexical candidate construction
+
+`form-run ./fkwu observe/concept-roundtrip-build-run.bml </dev/null` builds the
+complete 10,000-by-13 candidate index in Form. It accepts the same optional
+`root`/`hash` request. The Form keyed map separates each locale and exact UTF-8
+surface; every group retains all matching IDs in ascending order. Semantic
+counts follow repair, primary, morphology overlay and lexical precedence.
+Complete decimal fields and payload-relative spans are checked before use.
+
+The builder emits 130,000 twelve-byte index records and 219,952 two-byte
+candidate entries for the current sources. The 1,560,000-byte index and
+439,904-byte candidate artifact reproduce the committed bytes exactly. Current
+counts are 44,716 collision cells, 17,649 collision groups and a largest group
+of seventeen. There is no candidate truncation.
+
+Eight input files are held and hash-bound. All inputs and existing outputs are
+reread after staging; the shared materializer owner publishes four artifacts,
+with the manifest last. Per-file rename and cleanup have the same observed
+ownership contract as canonical materialization. Generated metadata retains its
+runtime values and validates all ten input/output file identities with portable
+Form SHA, without command execution. Metadata itself remains direct Form so
+existing proof readers can import it.
+
+`form-run ./fkwu observe/concept-roundtrip-builder-witness.bml` constructs and
+publishes a private source copy, compares both complete binary outputs and all
+metadata values, checks manifest bindings, executes native file hashes, repeats
+publication with portable hashing, and observes malformed decimal/span refusal
+and CPU resource release. It returns `11`, exit zero, and retains the complete
+evidence directory. The existing 130,000-cell operational detector remains the
+independent consumer check.
+
+Concept acquisition, translation and corpus builders still have JavaScript
+owners. Their native replacements must preserve source identity and observed
+publication before those implementations can retire.

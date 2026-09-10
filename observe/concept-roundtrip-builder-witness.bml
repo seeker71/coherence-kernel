@@ -1,0 +1,67 @@
+// Private source copies witness complete construction and actual publication.
+// preludes: form-stdlib/bml/concept-roundtrip-builder.bml form-stdlib/bml/native-source-inventory.bml
+section [form.bml] {
+ class ConceptRoundtripWitness {
+  def crw-put(path,bytes) = if and(eq(write_file(path,bytes),str_len(bytes)),str_eq(read_file(path),bytes)) then path else form_error("roundtrip witness write refused");
+  def crw-copy(state,root,paths) = if nil?(paths) then 1 else crw-copy-file(state,root,head(paths),tail(paths));
+  def crw-copy-file(state,root,path,rest) {
+   let target = fs-path-join(root,path); fs_mkdir(fs-path-dirname(target));
+   crw-put(target,csa-file(state,path)); crw-copy(state,root,rest);
+  }
+  def crw-child(job,name,preludes,body) {
+   let path = crw-put(nsi-path(job,str_concat(name,".bml")),str_concat("// preludes: ",str_concat(preludes,str_concat("\nsection [form.bml] {\n",str_concat(body,"\n}\n")))));
+   nsi-capture(list("./fkwu",path));
+  }
+  def crw-runtime(job,name,path) = crw-child(job,name,path,"list(ctr13-cell-count(),ctr13-candidate-entry-count(),ctr13-collision-cells(),ctr13-collision-groups(),ctr13-max-collision(),ctr13-failures(),ctr13-source-counts(),ctr13-sense-cell-counts(),ctr13-locale-stats(),ctr13-index-path(),ctr13-candidates-path(),ctr13-index-sha256(),ctr13-candidates-sha256());");
+  def crw-equal(root,outputs) = if nil?(outputs) then 1 else and(str_eq(read_file(fs-path-join(root,head(head(outputs)))),nth(head(outputs),1)),crw-equal(root,tail(outputs)));
+  def crw-paths(outputs) = if nil?(outputs) then list() else cons(head(head(outputs)),crw-paths(tail(outputs)));
+  def crw-manifest-content(state,text) {
+   let start = add(str_find(text,"\n",0),1); let end = str_find(text,"\n",start);
+   crb-check(state,"manifest-builder-line",and(gt(start,0),and(gt(end,start),str_eq(substring(text,start,add(start,8)),"builder "))));
+   str_concat(substring(text,0,start),substring(text,add(end,1),str_len(text)));
+  }
+  def crw-native-hash(job,metadata) {
+   let path = crw-put(nsi-path(job,"hash-bytes"),"abc");
+   let digest = "\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"";
+   let body = csa-join(list("list(ctr13-artifacts-valid?(),ctr13-sha256-valid?(",crb-quoted(path),",",digest,"),ctr13-sha256-valid?(",crb-quoted(str_concat(path,"-absent")),",",digest,"));"),"");
+   crw-child(job,"native-metadata-hashes",metadata,body);
+  }
+  def crw-admission(job,state) {
+   let owner = "form-stdlib/bml/concept-roundtrip-builder.bml";
+   let decimal = crw-child(job,"partial-decimal",owner,"crb-number(cmm-state(\".\",\"form-sha256\"),\"01x\",0,3,3);");
+   let span = crw-child(job,"lexical-outside-record",owner,"crb-lexical-payload(cmm-state(\".\",\"form-sha256\"),\"tiny\",0,4);");
+   crb-check(state,"partial-decimal-refused",and(eq(nsi-status(decimal),1),ge(str_find(nsi-text(decimal),"roundtrip-complete-decimal",0),0)));
+   crb-check(state,"lexical-record-span-refused",and(eq(nsi-status(span),1),ge(str_find(nsi-text(span),"roundtrip-numeric-span",0),0)));
+   2;
+  }
+  def crw-run() {
+   let job = nsi-job(); let start = host_monotonic_ms(); let before = metal_live();
+   let work = crb-complete(crb-prepare(".","arm64-sha256")); let state = record_get(work,"input");
+   let built = sub(host_monotonic_ms(),start);
+   crb-check(state,"current-index-byte-equality",str_eq(record_get(work,"index"),csa-file(state,crb-path("-index.dat"))));
+   crb-check(state,"current-candidate-byte-equality",str_eq(record_get(work,"candidates"),csa-file(state,crb-path("-candidates.dat"))));
+   let oldManifest = csa-file(state,crb-path("-source-manifest.txt"));
+   crb-check(state,"manifest-content-bindings",str_eq(crw-manifest-content(state,crb-manifest(work)),crw-manifest-content(state,oldManifest)));
+   let oldRuntime = crw-runtime(job,"current-metadata",crb-path("-metadata.fk"));
+   let root = nsi-directory(job,"canonical-",0);
+   crw-copy(state,root,crw-paths(record_get(work,"outputs")));
+   crw-copy(state,root,record_get(state,"files"));
+   record_set(state,"root",root);
+   crb-check(state,"actual-owned-publication",eq(crb-publish(work),1));
+   crb-check(state,"four-published-artifacts",crw-equal(root,record_get(work,"outputs")));
+   let metadata = fs-path-join(root,crb-path("-metadata.fk"));
+   let nextRuntime = crw-runtime(job,"generated-metadata",metadata);
+   crb-check(state,"all-runtime-metadata-values",and(nsi-ok(oldRuntime),and(nsi-ok(nextRuntime),str_eq(nsi-text(oldRuntime),nsi-text(nextRuntime)))));
+   let hashes = crw-native-hash(job,metadata);
+   crb-check(state,"native-file-hashes",and(nsi-ok(hashes),str_eq(trim(nsi-text(hashes)),"[1, 1, 0]")));
+   let repeated = crw-child(job,"portable-republication","form-stdlib/bml/concept-roundtrip-builder.bml",csa-join(list("crb-run(",crb-quoted(root),",\"form-sha256\");"),""));
+   crb-check(state,"portable-idempotence",and(nsi-ok(repeated),crw-equal(root,record_get(work,"outputs"))));
+   let admission = crw-admission(job,state);
+   let after = metal_live();
+   crb-check(state,"cpu-owner-release",and(eq(nth(before,2),nth(after,2)),eq(nth(before,3),nth(after,3))));
+   print(list("concept-roundtrip-builder","cells",130000,"artifacts",4,"build_ms",built,"refusals",admission,"evidence",job));
+   11;
+  }
+ }
+ crw-run();
+}

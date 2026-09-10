@@ -409,7 +409,7 @@ do {
 func gpuRope(_ v: MTLBuffer, _ nh: Int, _ pos: Int, _ inverse: Bool) -> MTLBuffer {
     let out = sentinelled(nh*headDim)
     var a = UInt32(nh), b = UInt32(headDim), c32 = UInt32(nRot), p = Float(pos), s: Float = inverse ? -1.0 : 1.0
-    enc(pRope, nh, 64) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+    enc(pRope, nh*headDim, 64) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                               c.setBuffer(freqBuf, offset: 0, index: 2)
                               c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
                               c.setBytes(&p, length: 4, index: 6); c.setBytes(&s, length: 4, index: 7) }
@@ -524,7 +524,7 @@ func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLB
 // The combine matrix is addressed [dst, src]; transposing it is a choice no self-carve can see.
 func hcPost(_ blockOut: MTLBuffer, _ resid: MTLBuffer, _ split: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(hcDim); var a = UInt32(nHc), b = UInt32(nEmbd)
-    enc(pHcPost, nHc, 256) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
+    enc(pHcPost, hcDim, 256) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
                                   c.setBuffer(split, offset: nHc*4, index: 2)
                                   c.setBuffer(split, offset: 2*nHc*4, index: 3)
                                   c.setBuffer(out, offset: 0, index: 4)
