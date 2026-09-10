@@ -1,0 +1,60 @@
+// Fixed existing caller contracts, no intervening hint, no remote route, no training.
+// This measures task execution. The caller still chooses to start this evaluation.
+// preludes: form-stdlib/bml/form-cli-code-repair-fixture.bml form-stdlib/native-session-learning.bml
+section [form.bml] {
+ class FormLocalAutonomyEvaluation {
+  def flae-tasks() {
+   let configChecks = json-array-elements(parse-json("config-checks","[{\"tool\":\"jq\",\"arguments\":[\".enabled\",\"config.json\"],\"stdout\":\"true\\n\"},{\"tool\":\"jq\",\"arguments\":[\".provider\",\"config.json\"],\"stdout\":\"\\\"native-qwen\\\"\\n\"},{\"tool\":\"jq\",\"arguments\":[\".remote\",\"config.json\"],\"stdout\":\"false\\n\"},{\"tool\":\"read\",\"arguments\":[\"expected.json\"],\"stdout\":\"{\\\"provider\\\":\\\"native-qwen\\\"}\"}]"));
+   list(list("read-and-update-config",fcrf-first-state(),configChecks),list("quadratic-repair",fcap-open(fcrf-goal(),fcrf-docs(),list("calc.form")),fcrf-contract()));
+  }
+  def flae-positive(row) = str_eq(nsm-str(row,"outcome"),"verified");
+  def flae-count(rows) = if nil?(rows) then 0 else add(flae-positive(head(rows)),flae-count(tail(rows)));
+  def flae-contract(row) = json-node-object(list(nsm-s("task",head(row)),nsm-s("goal",nth(nth(row,1),1)),json-node-pair("documents",fat-wire-documents-node(nth(nth(row,1),2))),json-node-pair("writable",json-node-array(nsm-string-nodes(nth(nth(row,1),4)))),json-node-pair("checks",json-node-array(nth(row,2)))));
+  def flae-contracts(rows) = if nil?(rows) then list() else cons(flae-contract(head(rows)),flae-contracts(tail(rows)));
+  def flae-valid(state,checks,text,reason) {
+   if or(not(str_eq(reason,"")),not(faj-valid(text))) then 0 else flae-docs(state,checks,fat-wire-documents(faj-json("local-eval-proposal",text)));
+  }
+  def flae-docs(state,checks,parsed) = if not(str_eq(fat-wire-error(parsed),"")) then 0 else nsc-valid(state,fat-wire-value(parsed),list(fcaq-check,checks));
+  def flae-case(home,label,session,row) {
+   let id = head(row); let state = nth(row,1); let checks = nth(row,2);
+   let prefix = nsm-at(home,str_concat(label,str_concat("-",id)));
+   let prompt = nsc-prompt(state,json-emit(json-node-array(checks)));
+   let saved = nag-write(str_concat(prefix,".prompt"),prompt);
+   let started = host_monotonic_ms();
+   let answer = nlg-ask(session,prompt,0,str_concat(prefix,".stream"),str_concat(prefix,".cancel"),str_concat(prefix,".events.jsonl"));
+   let verified = flae-valid(state,checks,head(answer),nth(answer,1));
+   let observation = bfc-envelope(0,now_unix_ms(),0,list(verified,nth(answer,2)),3);
+   let sent = bfc-record-out(observation,0); let control = bfc-control(observation,if verified then 0 else 3); let incoming = bfc-record-in(control,1);
+   let result = json-node-object(list(nsm-s("task",id),nsm-s("condition",label),nsm-s("outcome",if verified then "verified" else if not(str_eq(nth(answer,1),"")) then str_concat("unresolved:",nth(answer,1)) else "unresolved:original-caller-checks"),nsm-n("verified",verified),nsm-n("generated_tokens",nth(answer,2)),nsm-n("wall_ms",sub(host_monotonic_ms(),started)),nsm-s("reason",if str_eq(nth(answer,1),"") then "eos" else nth(answer,1)),nsm-s("model",nsm-model()),nsm-s("adapter",nll-adapter(head(session))),nsm-n("lora_pairs",nll-pair-count(nth(head(session),1))),nsm-s("contract_sha256",nsm-hash(prompt)),flae-scope(),nsm-n("training_updates",0),nsm-n("remote_model_calls",0),nsm-n("intervening_hints",0),nsm-s("selection",if eq(bfc-payload(control),0) then "accept-checked-documents" else "abstain;retain-original-documents"),nsm-s("events",str_concat(prefix,".events.jsonl")),nsm-s("response",str_concat(prefix,".response.json"))));
+   let response = nsm-write(str_concat(prefix,".response.json"),json-node-object(list(nsm-s("text",head(answer)),nsm-s("reason",nth(answer,1)))));
+   let wrote = nsm-write(str_concat(prefix,".result.json"),result);
+   let reobserved = bfc-record-out(bfc-envelope(0,bfc-exchange(control),0,list(verified,0),3),2);
+   let printed = print_str(json-emit-precise(result));
+   result;
+  }
+  def flae-scope() = nsm-s("scope","existing-public-contract;no-general-autonomy-score");
+  def flae-cases(home,label,session,rows) = if nil?(rows) then list() else cons(flae-case(home,label,session,head(rows)),flae-cases(home,label,session,tail(rows)));
+  def flae-condition(home,label,adapter) {
+   let started = host_monotonic_ms();
+   let session = nlg-open-at(nsm-model(),adapter,nsm-at(home,str_concat(label,"-admission.events.jsonl")));
+   let results = flae-cases(home,label,session,flae-tasks());
+   let closed = nlg-close(session);
+   let report = json-node-object(list(nsm-s("condition",label),nsm-n("tasks",len(results)),nsm-n("verified",flae-count(results)),nsm-n("wall_ms",sub(host_monotonic_ms(),started)),nsm-n("retained_buffers",nth(metal_live(),2)),json-node-pair("cases",json-node-array(results))));
+   let saved = nsm-write(nsm-at(home,str_concat(label,".json")),report);
+   report;
+  }
+  def flae-run(home) {
+   let made = nsm-init(home); let stateBefore = nsm-text(nsm-at(hearth-session-learning(),"state.json"));
+   let serving = nsl-serving(hearth-session-learning());
+   let contract = nsm-write(nsm-at(home,"contracts.json"),json-node-array(flae-contracts(flae-tasks())));
+   let before = nag-write(nsm-at(home,"session-state-before.json"),stateBefore);
+   let seed = flae-condition(home,"historical-seed",nsm-seed());
+   let learned = if str_eq(serving,"") then json-node-object(list(nsm-s("condition","session-serving"),nsm-s("status","no-evaluated-adapter"))) else flae-condition(home,"session-serving",serving);
+   let unchanged = str_eq(stateBefore,nsm-text(nsm-at(hearth-session-learning(),"state.json")));
+   let report = json-node-object(list(nsm-s("schema","form-local-autonomy-eval-v1"),nsm-s("home",home),nsm-n("state_unchanged",unchanged),nsm-n("live_code_route_eligible",nsm-can(hearth-session-learning(),"code")),nsm-s("initiation","caller-started;contracts-selected-by-Codex-from-existing-public-fixtures"),nsm-s("task_execution","native-Form-and-local-Metal;no-external-reasoning-or-intervening-hints"),nsm-n("remote_model_calls",0),nsm-n("training_updates",0),json-node-pair("conditions",json-node-array(list(seed,learned)))));
+   let saved = nsm-write(nsm-at(home,"summary.json"),report);
+   if unchanged then report else form_error("session adapter state changed during evaluation; comparison incomplete");
+  }
+ }
+ 0;
+}

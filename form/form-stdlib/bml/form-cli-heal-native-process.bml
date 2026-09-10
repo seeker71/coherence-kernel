@@ -52,7 +52,10 @@ section [form.bml] {
    let state = fhn-field(parts, "status=");
    if and(fhn-id(phase), and(fhn-id(route), and(fhn-id(state), eq(len(parts), 6)))) then fhn-stage-event(job, stage, phase, elapsed, list(fhn-s("route", route), fhn-s("state", state), fhn-s("child_stamp_ms", fhn-field(parts, "stamp-ms=")))) else "";
   }
-  def fhn-flow-fields(doc, names, numeric) = if nil?(names) then 1 else and(json-object-has?(doc, head(names)), and(if numeric then fsuf-uint?(json-emit(json-object-get(doc, head(names)))) else and(eq(str_byte_at(json-emit(json-object-get(doc, head(names))), 0), 34), le(str_len(fhn-string(doc, head(names))), 4096)), fhn-flow-fields(doc, tail(names), numeric)));
+  // Runtime counters and epoch milliseconds use the full native integer lane.
+  // Command-duration text has a separate, narrower grammar in fsuf-uint?.
+  def fhn-flow-uint(node) = and(eq(node_type(node),1),and(str_eq(value_kind(node_value(node)),"int"),ge(node_value(node),0)));
+  def fhn-flow-fields(doc, names, numeric) = if nil?(names) then 1 else and(json-object-has?(doc, head(names)), and(if numeric then fhn-flow-uint(json-object-get(doc, head(names))) else and(eq(str_byte_at(json-emit(json-object-get(doc, head(names))), 0), 34), le(str_len(fhn-string(doc, head(names))), 4096)), fhn-flow-fields(doc, tail(names), numeric)));
   def fhn-flow-valid(doc) = and(eq(len(json-object-keys(doc)), 12), and(fhn-flow-fields(doc, list("phase", "route", "model", "model_path", "base_seal_sha256", "adapter_path", "adapter_sha256", "adapter_state"), 0), fhn-flow-fields(doc, list("input_tokens", "output_tokens", "position", "stamp_ms"), 1)));
   def fhn-observe-flow(job, stage, line, elapsed) {
    let doc = parse-json("native-token-flow", substring(line, 15, str_len(line)));
@@ -181,16 +184,20 @@ section [form.bml] {
    let out = fhn-drain-final(job, stage, ".out", outReader, started);
    let err = fhn-drain-final(job, stage, ".err", errReader, started);
    let groupReleased = and(fhn-group-empty(child), not(fhn-alive(wrapper)));
-   let finalStatus = if groupReleased then status else 125;
    let actual = fhn-read(fhn-stage-path(job, stage, ".raw-status"));
+   let reconciled = fhn-exit-observed(status,reason,actual);
+   let finalStatus = if groupReleased then head(reconciled) else 125;
    let reaped = fhn-stage-event(job, stage, "process-reaped", sub(host_monotonic_ms(), started), list(fhn-s("child_wait_status", actual), fhn-n("wrapper_status", waited)));
    let cleanup = json-node-object(list(fhn-s("state", if groupReleased then "released" else "members-remain"), fhn-s("group_members", fhn-group-members(child)), fhn-s("child_wait_status", actual)));
    let observed = fhn-stage-event(job, stage, "process-cleanup-observed", sub(host_monotonic_ms(), started), list(json-node-pair("cleanup", cleanup)));
-   let saved = fhn-process-record(job, stage, if groupReleased then "finished" else "release-pending", started, wall, seconds, program, child, finalStatus, if groupReleased then reason else "cleanup-incomplete", cleanup);
+   let saved = fhn-process-record(job, stage, if groupReleased then "finished" else "release-pending", started, wall, seconds, program, child, finalStatus, if groupReleased then nth(reconciled,1) else "cleanup-incomplete", cleanup);
    let result = write_file(fhn-stage-path(job, stage, ".status"), int_to_str(finalStatus));
    let learnerLock = if groupReleased then fhn-release-learner-lock(job, child) else 0;
    int_to_str(finalStatus);
   }
+  // The status rename can occur between the first read and the liveness probe.
+  // Reconcile after reaping; explicit cancellation/deadline statuses retain meaning.
+  def fhn-exit-observed(status,reason,actual) = if and(str_eq(reason,"supervisor-exited-without-child-status"),and(fsuf-uint?(actual),le(str_to_int(actual),255))) then list(str_to_int(actual),"completed") else list(status,reason);
   def fhn-release-learner-lock(job, child) {
    let root = fhn-string(fhn-json(fhn-at(job, "snapshot.json")), "root");
    let lock = fhn-at(root, ".form-heal/native-learning/update.lock");
