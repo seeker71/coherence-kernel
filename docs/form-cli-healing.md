@@ -294,9 +294,6 @@ form-run ./fkwu observe/form-cli-heal-native-io-witness.bml
 form-run ./fkwu form/form-stdlib/tests/form-cli-heal-eval-policy-band.fk
 form-run sh -c 'printf "%s\n" eval | ./fkwu observe/form-cli-heal-run.fk'
 form-run ./fkwu form/form-stdlib/tests/form-cli-heal-timing-band.fk
-form-run ./fkwu observe/form-cli-heal-native-process-witness.bml
-form-run ./fkwu form/form-stdlib/tests/form-cli-heal-dynamic-band.fk
-form-run ./fkwu form/form-stdlib/tests/form-cli-heal-flow-band.fk
 form-run ./fkwu form/form-stdlib/tests/qwen-lora-finite-band.fk
 form-run ./fkwu form/native/metal/tests/qwen38-embedding-band.fk
 form-run ./fkwu form/form-stdlib/tests/native-session-learning-band.fk
@@ -305,6 +302,12 @@ form-run ./fkwu observe/native-session-homecoming-run.fk
 ```
 
 Policy authority: `form/form-stdlib/bml/form-cli-heal-policy.bml`.
+Process, generation and session-learning health now travels as organ-owned
+events during real execution. Read an event path with
+`./fkwu observe/organ-health-run.bml`, or submit an argv request to
+`./fkwu observe/form-cli-heal-process-run.bml`. The latter returns the actual
+status and current health/needs without a separate regression fixture.
+The shared protocol and resource requests live in `docs/live-dynamic-diagnostics.md`.
 The separate `form-cli-heal-native-learning-witness.bml` measures the older
 Qwen activation-probe objective; it is not the production session learner.
 Native resource planning: `form/form-stdlib/bml/form-cli-heal-resources.bml`.
