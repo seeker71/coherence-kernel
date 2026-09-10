@@ -1,4 +1,4 @@
-// The serialized learner asks retained verified memory for training nutrients.
+// The serialized learner asks retained observed memory for training nutrients.
 // Delivery is by sealed reference. Assessment targets never become training data.
 // preludes: form-stdlib/native-session-sources.bml form-stdlib/organ-care.bml form-stdlib/rag-embed.fk
 section [form.bml] {
@@ -19,8 +19,19 @@ section [form.bml] {
   def nse-record-valid(record) {
    let original = json-node-object(oh-without(oh-without(json-object-pairs(record),"content_sha256"),"observed_at_ms"));
    let example = oh-get(record,"example");
-   and(str_eq(nsm-str(record,"content_sha256"),nsm-hash(str_concat(json-emit-precise(original),"\n"))),and(str_eq(nsm-str(record,"objective"),"supervised-answer"),and(oh-has(list("verified-answer","caller-teaching"),nsm-str(record,"outcome")),and(oh-text(record,"evidence"),and(oh-text(example,"prompt"),oh-text(example,"completion"))))));
+   let answer = and(str_eq(nsm-str(record,"objective"),"supervised-answer"),oh-has(list("verified-answer","caller-teaching"),nsm-str(record,"outcome")));
+   let observation = nse-observed-target(record);
+   and(str_eq(nsm-str(record,"content_sha256"),nsm-hash(str_concat(json-emit-precise(original),"\n"))),and(or(answer,observation),and(oh-text(record,"evidence"),and(oh-text(example,"prompt"),oh-text(example,"completion")))));
   }
+  def nse-context(record) {
+   let prompt = nsm-str(oh-get(record,"example"),"prompt");
+   if not(and(str_eq(nsm-str(record,"objective"),"contextual-observed-outcome"),eq(str_find(prompt,nsm-outcome-prefix(),0),0))) then json-node-null() else parse-json("observed-attempt-context",substring(prompt,str_len(nsm-outcome-prefix()),str_len(prompt)));
+  }
+  def nse-observed-target(record) {
+   let context = nse-context(record); let example = oh-get(record,"example");
+   and(not(node_eq(context,json-node-null())),and(str_eq(nsm-str(example,"prompt"),nsm-experience-prompt(nsm-str(record,"route"),nsm-str(context,"problem"),nsm-str(context,"attempt"))),str_eq(nsm-str(example,"completion"),nsm-outcome(nsm-str(record,"route"),nsm-str(record,"outcome"),nsm-str(record,"evidence")))));
+  }
+  def nse-record-overlap(record,held) = or(nse-overlap(oh-get(record,"example"),held),if node_eq(nse-context(record),json-node-null()) then 0 else nse-overlap(nsm-row(nsm-str(nse-context(record),"problem"),""),held));
   def nse-sources(home,names) = nss-sources(host_cwd(),nss-absolute(host_cwd(),home),names);
   def nse-source(path) = json-node-object(list(nsm-s("path",path),nsm-s("bytes_sha256",nsm-hash(nsm-text(path)))));
   def nse-source-held(source) = nse-exclusions(json-array-elements(oh-get(source,"assessment_sources")));
@@ -29,15 +40,15 @@ section [form.bml] {
   def nse-authority() = nss-authority();
   def nse-revision(sources,held,dir) = nsm-hash(json-emit-precise(json-node-array(list(json-node-array(sources),json-node-array(held),nse-source(nsm-at(dir,"assessment.json")),nse-authority()))));
   def nse-common(query,features) = if nil?(query) then list() else if oh-has(features,head(query)) then cons(head(query),nse-common(tail(query),features)) else nse-common(tail(query),features);
-  def nse-eligible(record,held,skill) = and(nse-record-valid(record),and(str_eq(nsm-skill(nsm-str(record,"route")),skill),not(nse-overlap(oh-get(record,"example"),held))));
+  def nse-eligible(record,held,skill) = and(nse-record-valid(record),and(str_eq(nsm-skill(nsm-str(record,"route")),skill),not(nse-record-overlap(record,held))));
   def nse-best(rows,score,held) = if nil?(rows) then held else if gt(nsm-num(head(rows),"feature_overlap"),score) then nse-best(tail(rows),nsm-num(head(rows),"feature_overlap"),list(head(rows))) else nse-best(tail(rows),score,if eq(nsm-num(head(rows),"feature_overlap"),score) then append(held,list(head(rows))) else held);
-  def nse-scan(sources,query,held,skill,found,rejected) = if nil?(sources) then json-node-object(list(json-node-pair("sources",json-node-array(nse-best(found,0,list()))),json-node-pair("eligible",json-node-array(found)),json-node-pair("examined",json-node-array(rejected)),nsm-s("match_basis","native-rag-features;strongest-shared-over-union;ties-retained;verified-memory-only"))) else nse-scan-one(head(sources),tail(sources),query,held,skill,found,rejected);
+  def nse-scan(sources,query,held,skill,found,rejected) = if nil?(sources) then json-node-object(list(json-node-pair("sources",json-node-array(nse-best(found,0,list()))),json-node-pair("eligible",json-node-array(found)),json-node-pair("examined",json-node-array(rejected)),nsm-s("match_basis","native-rag-features;strongest-shared-over-union;ties-retained;bound-answer-or-observed-outcome"))) else nse-scan-one(head(sources),tail(sources),query,held,skill,found,rejected);
   def nse-scan-one(source,rest,query,held,skill,found,rejected) {
    let record = nsm-json(nsm-str(source,"path")); let example = oh-get(record,"example");
    let features = re-semantic-features(nse-prompt(example));
    let common = nse-common(query,features);
    let unchanged = nss-source-current(source);
-   let reason = if not(unchanged) then "source-or-assessment-changed" else if not(nse-record-valid(record)) then "unverified-or-unbound" else if not(nse-assessment-known(source)) then "source-assessment-unavailable" else if nse-overlap(example,append(held,nse-source-held(source))) then "assessment-excluded" else if not(str_eq(nsm-skill(nsm-str(record,"route")),skill)) then "different-skill" else if nil?(common) then "no-shared-prompt-feature" else "eligible";
+   let reason = if not(unchanged) then "source-or-assessment-changed" else if not(nse-record-valid(record)) then "missing-bound-observed-target" else if not(nse-assessment-known(source)) then "source-assessment-unavailable" else if nse-record-overlap(record,append(held,nse-source-held(source))) then "assessment-excluded" else if not(str_eq(nsm-skill(nsm-str(record,"route")),skill)) then "different-skill" else if nil?(common) then "no-shared-prompt-feature" else "eligible";
    let overlap = if nil?(common) then 0.0 else div(mul(1.0,len(common)),sub(add(len(query),len(features)),len(common)));
    let reference = oh-set(oh-set(oh-set(source,"row_sha256",json-node-string(nsm-hash(json-emit-precise(example)))),"matched_features",json-node-array(oh-strings(common))),"feature_overlap",json-precise-float(overlap));
    nse-scan(rest,query,held,skill,if str_eq(reason,"eligible") then append(found,list(reference)) else found,append(rejected,list(oh-set(source,"reason",json-node-string(reason)))));

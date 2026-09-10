@@ -8,7 +8,7 @@ with directory access restricted to its owner.
 The integration points are the real CLI doors:
 
 - `learn` retains a caller's vocabulary teaching and offers it for LoRA.
-- `code` records checked document targets, or the actual incomplete status.
+- `code` records checked document targets, or the incomplete documents and status.
 - `heal` records every candidate/check outcome, including the final rented
   outcome when that existing fallback is used. An unsuccessful proposal is
   never trained as a correct answer.
@@ -18,9 +18,13 @@ The integration points are the real CLI doors:
   local correction. Optional `session` and `event` values provide stable replay
   identity. `session ask|question` uses the serving adapter or the disclosed seed.
 
-Examples are immutable and keyed by session/event identity. Replaying the same
-event does not add a gradient step. Reusing an identity for different evidence
-is refused. Evaluation requests are excluded. No transcript, prompt or answer
+Experiences and training examples are immutable and keyed by session/event
+identity. Replaying the same event does not add a gradient step. Reusing an
+identity for different evidence is refused. `experiences/` retains the original
+problem, attempted answer, outcome and evidence for every offered observation,
+including unsuccessful and evaluation attempts. Assessment observations remain
+available as experience while their answers stay outside that assessment's
+gradient. No transcript, prompt or answer
 is copied into Glass or the diagnostic framebuffer. Training text and generated
 streams remain private in the hearth; telemetry carries identities and counts.
 
@@ -28,7 +32,7 @@ One supervisor serializes the learning queue and records the learner's actual
 exit and stderr. Recording does not wait for GPU training during a session.
 Normal session close and the one-shot embodiment door retain the parent process
 until the supervisor returns; an external interruption keeps the immutable queue
-for the next drain. Each new observation
+for the next drain. Each new training example
 gets one full-gradient round, including rehearsal of the last promoted example
 when it has a different prompt. The next round restores the candidate's adapter,
 Adam moments and optimizer step. Candidate generations and the serving selection
@@ -51,6 +55,14 @@ optimizer, configuration and input data are content-bound. An interrupted round
 with a complete generation can finish assessment without repeating its update.
 All completed generations remain available; storage grows with experience.
 
+An unsuccessful attempt trains a contextual outcome: given the original problem
+and attempted answer, recall the result that was actually observed. The attempted
+answer is input data; the supervised completion is the outcome and evidence.
+These bound outcome targets can also supply related rehearsal. The learner checks
+the original problem for assessment overlap as well as the wrapper prompt.
+Older generic status examples remain byte-for-byte intact; their missing original
+context cannot be reconstructed from those records alone.
+
 The learner expresses its own health through `organ-health-v1` in the session
 event flow. Every assessed row carries its actual before/after loss and source
 identity. A hurt row asks for rehearsal, or for related training evidence when
@@ -64,7 +76,8 @@ After native execution or retrieval misses, `ask` can use the evaluated session
 adapter when it has a promoted dialogue teaching. Coding and healing require a
 promoted checked example in their respective scope before trying its proposal.
 They rerun their original checks; an unsuccessful prediction is reconsidered
-for that same prompt only after the serving adapter changes. An explicit coding
+for that same input after the serving adapter changes. Healing includes recalled
+experience in that input, so changed context also permits a fresh attempt. An explicit coding
 model is respected.
 Generic generated prose is labelled an unverified proposal. All token streams
 use the existing dynamic native generation path, including cancellation and
@@ -110,8 +123,35 @@ model process. Worker drains rediscover local homes; changes in another idle
 home do not independently wake this worker yet.
 
 This provider does not turn arbitrary RAG hits, git history, filesystem prose
-or generated text into verified training targets.
+or generated text into correct answers. It can rehearse a sealed contextual
+observation of an unsuccessful attempt without treating that attempt as correct.
 The callback carrier accepts other providers without a central error catalogue.
+
+`native-session-experience.bml` supplies working context independently of a
+gradient update. It discovers experience in this repository's local hearths,
+uses native RAG features to find the strongest related problems, and brings the
+other observations from those sessions alongside them. Complete attempts and
+their source hashes stay private; health events and stdout expose references,
+counts and actual recall time. Source bytes are checked again at consumption.
+Missing experience remains an open enquiry, not a claim that the organ learned.
+
+Before an ordinary repair, the healer recovers completed local `.form-heal`
+runs' baseline observations and retained candidate/check outcomes. It then
+consults session experience before its model routes. A previously checked patch
+that matches the current original source can enter the native candidate path,
+where the current caller's checker runs again. Diagnosis, patching, review and
+session LoRA receive the related attempt context. Independent evaluation does
+not receive prior answers; its resulting experience is retained afterward.
+An ordinary replay of a remembered evaluation case is practice, not unseen
+transfer evidence.
+
+`observe/form-cli-heal-experience-run.bml` recovers existing repair runs with
+JSON stdin `{}` (optional `root` and `home`). It admits no model and does not
+schedule a gradient for every recovered historical observation.
+`observe/native-session-experience-run.bml` accepts a JSON `query`, optional
+`skill` and `home`; its stdout names the private recall report. These doors do
+not yet digest every full host-agent transcript, and lexical matching does not
+establish that every lesson in the recovered sessions has been understood.
 
 `./fkwu observe/native-session-evidence-run.bml` attends to current needs when
 the worker is idle. Optional stdin names a session home. The worker owns care
@@ -132,7 +172,9 @@ establish promotion; the progress and loss observations still decide that.
 
 Use `session status` for candidate and serving generations, optimizer step,
 promotions, pending/refused examples, live-worker state, actual exits and paths
-to evidence. `session pause` lets the current round finish and keeps examples;
+to evidence. Its experience corpus counts retained observations and their distinct
+sessions separately from training examples, repository rows and LoRA matrix pairs.
+`session pause` lets the current round finish and keeps examples;
 `session resume` drains pending work. Stage events link actual per-row token,
 gradient, GPU, checkpoint and assessment timings. Inference events identify
 the model, adapter, LoRA pair count, token flow, streaming path and stop reason.
