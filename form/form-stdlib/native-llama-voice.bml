@@ -27,6 +27,7 @@ section [form.bml] {
   }
   def nlg-close(session) = nll-close(head(session));
   def nlg-min(a,b) = if lt(a,b) then a else b;
+  def nlg-max(a,b) = if gt(a,b) then a else b;
   def nlg-room(bytes) {
    let live = metal_live();
    and(gt(nth(live,19),0),le(add(nth(live,18),bytes),nth(live,19)));
@@ -91,8 +92,11 @@ section [form.bml] {
    if eq(t,0) then list(-1,pos,"memory-pressure") else nlg-prefill-chunk(model,ctx,ids,pos,events,t);
   }
   def nlg-prefill-chunk(model,ctx,ids,pos,events,t) {
+   if eq(t,len(ids)) then list(nlg-forward-choice(model,ctx,take(t,ids),pos,events,"prefill"),add(pos,t),"") else nlg-prefill-more(model,ctx,ids,pos,events,t);
+  }
+  def nlg-prefill-more(model,ctx,ids,pos,events,t) {
    let next = nlg-forward-next(model,ctx,take(t,ids),pos,events,"prefill");
-   if eq(t,len(ids)) then list(next,add(pos,t),"") else nlg-prefill(model,ctx,drop(t,ids),add(pos,t),events);
+   nlg-prefill(model,ctx,drop(t,ids),add(pos,t),events);
   }
   def nlg-eos(t,id) = or(eq(id,nlt-special(t,"<|eot_id|>")),eq(id,nlt-special(t,"<|end_of_text|>")));
   // Result: text, reason (empty only on EOS), emitted count, final context, event file.
@@ -100,6 +104,11 @@ section [form.bml] {
   def nlg-stream(stream,text) = if eq(str_len(stream),0) then 0 else sbt-append(stream,text);
   def nlg-want-capacity(prompt-n,limit) = add(prompt-n,if gt(limit,0) then limit else 16);
   def nlg-admit-capacity(want,maxpos) = if gt(want,maxpos) then maxpos else want;
+  def nlg-floor-capacity(prompt-n) = add(prompt-n,1);
+  def nlg-shrink-capacity(capacity,prompt-n) {
+   let floor = nlg-floor-capacity(prompt-n);
+   if le(capacity,floor) then floor else nlg-max(floor,div(capacity,2));
+  }
   def nlg-grown-limit(limit,maxpos,pos) {
    if le(limit,0) then 0 else nlg-grown-limit-room(limit,sub(maxpos,pos));
   }
@@ -220,12 +229,15 @@ section [form.bml] {
    if or(lt(limit,0),gt(len(ids),maxpos)) then list("","context-admission-refused",0,events) else nlg-ask-fit(model,tk,ids,nlg-admit-capacity(nlg-want-capacity(len(ids),limit),maxpos),limit,stream,cancel,events);
   }
   def nlg-ask-fit(model,tk,ids,capacity,limit,stream,cancel,events) {
-   if not(nlg-room(nlg-cache-bytes(model,capacity))) then list("","context-admission-refused",0,events) else nlg-ask-admitted(model,tk,ids,capacity,limit,stream,cancel,events);
+   if nlg-room(nlg-cache-bytes(model,capacity)) then nlg-ask-admitted(model,tk,ids,capacity,limit,stream,cancel,events) else nlg-ask-shrink(model,tk,ids,capacity,limit,stream,cancel,events,nlg-shrink-capacity(capacity,len(ids)));
+  }
+  def nlg-ask-shrink(model,tk,ids,capacity,limit,stream,cancel,events,next) {
+   if ge(next,capacity) then list("","context-admission-refused",0,events) else nlg-ask-fit(model,tk,ids,next,limit,stream,cancel,events);
   }
   def nlg-ask-admitted(model,tk,ids,capacity,limit,stream,cancel,events) {
    let ctx = nll-context(model,capacity);
    let pre = nlg-prefill(model,ctx,ids,0,events);
-   let result = if gt(str_len(nth(pre,2)),0) then nlg-result("",nth(pre,2),0,ctx,events) else nlg-decode(model,tk,ctx,head(pre),nth(pre,1),0,limit,"",stream,cancel,events);
+   let result = if gt(str_len(nth(pre,2)),0) then nlg-result("",nth(pre,2),0,ctx,events) else nlg-chosen(model,tk,ctx,head(pre),nth(pre,1),0,limit,"",stream,cancel,events);
    let released = nll-context-close(nth(result,3));
    list(head(result),nth(result,1),nth(result,2),events);
   }
