@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the Form-native emitter to produce a cached native-Python module.
 #
-# Phase 1 pipeline (form/python_bmf/CONTRACT.md):
+# Source-emission pipeline (docs/native-form-artifacts.md):
 #
 #   form-ontology.json
 #     └─ build_form_compiler_artifact.sh --categories

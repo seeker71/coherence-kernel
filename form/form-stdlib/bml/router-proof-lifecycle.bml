@@ -1,0 +1,165 @@
+// Form retains each HTTP request until its framed response has been observed.
+// Timing is monotonic whole milliseconds, including this local client driver.
+// preludes: form-stdlib/bml/router-proof-cases.bml
+section [form.bml] {
+ class RouterProofLifecycle {
+  def rpl-int(doc, key) = json-int-value(json-object-get(doc, key));
+  def rpl-wait-exit(pid, deadline) = if not(fhn-alive(pid)) then 1 else if ge(host_monotonic_ms(), deadline) then 0 else rpl-wait-exit-pause(pid, deadline);
+  def rpl-wait-exit-pause(pid, deadline) {
+   host_sleep_ms(10);
+   rpl-wait-exit(pid, deadline);
+  }
+  def rpl-refusal(owner, upstream) {
+   let name = "invalid-route-admission";
+   let pid = rp-spawn(owner, name, list(rpc-bin(), "serve", "--host", "127.0.0.1", "--port", int_to_str(rp-free-port()), "--routes", rp-path(record_get(owner, "job"), "absent-route.fk")), "/dev/null");
+   let ended = rpl-wait-exit(pid, add(host_monotonic_ms(), 3000));
+   let result = rp-release(owner, pid);
+   let bytes = file_size(rp-path(record_get(owner, "job"), str_concat(name, ".err")));
+   rp-check(owner, "invalid-route-admission-refused-and-reaped", json-node-string("nonzero child exit with retained diagnostics and no live child"), json-node-object(list(fhn-n("ended", ended), fhn-n("status", result), fhn-n("stderr_bytes", bytes), fhn-n("alive", host_alive(pid)))), and(ended, and(gt(result, 0), and(gt(bytes, 0), eq(host_alive(pid), 0)))));
+   let truncated = rp-fetch(upstream, rp-get("/framing/truncated"));
+   let chunk = rp-fetch(upstream, rp-get("/framing/bad-chunk"));
+   rp-check(owner, "native-reader-refuses-incomplete-or-malformed-framing", json-node-int(1), json-node-int(and(nothing?(truncated), nothing?(chunk))), and(nothing?(truncated), nothing?(chunk)));
+  }
+  def rpl-sort(values) = if nil?(values) then list() else rpl-insert(head(values), rpl-sort(tail(values)));
+  def rpl-insert(value, values) = if nil?(values) then list(value) else if le(value, head(values)) then cons(value, values) else cons(head(values), rpl-insert(value, tail(values)));
+  def rpl-total(values) = if nil?(values) then 0 else add(head(values), rpl-total(tail(values)));
+  def rpl-timing(times) {
+   let ordered = rpl-sort(times);
+   json-node-object(list(fhn-s("basis", "local-monotonic-whole-ms"), fhn-n("requests", len(times)), fhn-n("p50_ms", nth(ordered, div(len(ordered), 2))), fhn-n("p99_ms", nth(ordered, div(mul(len(ordered), 99), 100))), fhn-n("sum_ms", rpl-total(times))));
+  }
+  def rpl-sample(port, path, body, marker) {
+   let started = host_monotonic_ms();
+   let row = rp-fetch(port, rp-get(path));
+   list(rp-answer(row, 200, body, marker), sub(host_monotonic_ms(), started));
+  }
+  def rpl-sequence(port, prefix, at, count, correct, times) = if ge(at, count) then list(correct, reverse(times)) else rpl-sequence-next(port, prefix, at, count, correct, times, rpl-sample(port, str_concat(prefix, int_to_str(at)), str_concat("UPSTREAM path=", str_concat(prefix, int_to_str(at))), "fanout-python"));
+  def rpl-sequence-next(port, prefix, at, count, correct, times, sample) = rpl-sequence(port, prefix, add(at, 1), count, add(correct, head(sample)), cons(nth(sample, 1), times));
+  def rpl-counts(fixture) = parse-json("native-upstream-counts", rp-text(rp-path(nth(fixture, 2), "counts.json")));
+  def rpl-reuse-case(owner, mode, count) {
+   let name = str_concat("counted-peer-", mode);
+   let fixture = rpc-fixture(owner, name, mode);
+   let router = rpc-router(owner, str_concat("reuse-", mode), "router-body-proof", head(fixture), 1);
+   let warm = rpl-sequence(head(router), "/api/warmup_", 0, 5, 0, list());
+   let measured = rpl-sequence(head(router), "/api/distinct_", 0, count, 0, list());
+   let counts = rpl-counts(fixture);
+   let connections = rpl-int(counts, "connections");
+   let requests = rpl-int(counts, "requests");
+   let expected = add(count, 5);
+   let correct = and(eq(head(warm), 5), and(eq(head(measured), count), eq(requests, expected)));
+   rp-check(owner, str_concat(name, "/distinct-framed-responses"), json-node-int(expected), json-node-object(list(fhn-n("correct", add(head(warm), head(measured))), fhn-n("served", requests), fhn-n("connections", connections), json-node-pair("timing", rpl-timing(nth(measured, 1))))), correct);
+   rp-release(owner, nth(router, 1));
+   rp-release(owner, nth(fixture, 1));
+   list(connections, requests, correct);
+  }
+  def rpl-reuse(owner) {
+   let keep = rpl-reuse-case(owner, "keep", 60);
+   let close = rpl-reuse-case(owner, "close", 60);
+   let structural = and(and(nth(keep, 2), nth(close, 2)), and(le(head(keep), 2), lt(head(keep), head(close))));
+   rp-check(owner, "upstream-reuse-count-contrast", json-node-string("reuse at most two connections and fewer than close-each"), json-node-object(list(fhn-n("reuse_connections", head(keep)), fhn-n("close_connections", head(close)))), structural);
+   let stale = rpl-reuse-case(owner, "stale", 8);
+   rp-check(owner, "silent-stale-reconnect-once", json-node-string("every distinct request served once; several actual connections"), json-node-object(list(fhn-n("connections", head(stale)), fhn-n("requests", nth(stale, 1)))), and(nth(stale, 2), and(ge(head(stale), 2), eq(nth(stale, 1), 13))));
+  }
+  def rpl-native-sequence(port, at, count, okay) = if ge(at, count) then okay else rpl-native-sequence(port, add(at, 1), count, add(okay, rp-answer(rp-fetch(port, rp-get("/health")), 200, "ok", "native-kernel")));
+  def rpl-wait-count(fixture, minimum, deadline) = if ge(rpl-int(rpl-counts(fixture), "requests"), minimum) then 1 else if ge(host_monotonic_ms(), deadline) then 0 else rpl-wait-count-pause(fixture, minimum, deadline);
+  def rpl-wait-count-pause(fixture, minimum, deadline) {
+   host_sleep_ms(10);
+   rpl-wait-count(fixture, minimum, deadline);
+  }
+  def rpl-deadline(owner) {
+   let fixture = rpc-fixture(owner, "hung-peer", "hung");
+   let router = rpc-router(owner, "hung-router", "router-body-proof", head(fixture), 4);
+   let link = rp-open(head(router));
+   let request = rp-get("/api/hung_one");
+   let started = host_monotonic_ms();
+   let sent = rp-send(link, request);
+   let held = rpl-wait-count(fixture, 1, add(started, 2000));
+   let neighborStart = host_monotonic_ms();
+   let correct = rpl-native-sequence(head(router), 0, 20, 0);
+   let neighborTime = sub(host_monotonic_ms(), neighborStart);
+   rp-check(owner, "native-neighbors-during-observed-hung-request", json-node-string("20 correct native replies before 24000ms with upstream holding request"), json-node-object(list(fhn-n("upstream_accepted_request", held), fhn-n("correct", correct), fhn-n("elapsed_ms", neighborTime))), and(held, and(eq(correct, 20), lt(neighborTime, 24000))));
+   let response = rp-response(link);
+   let elapsed = sub(host_monotonic_ms(), started);
+   rp-close(link);
+   let counts = rpl-counts(fixture);
+   let accepted = rp-all(list(eq(sent, str_len(request)), eq(rp-code(response), 504), gt(str_len(rp-body(response)), 0), ge(elapsed, 27000), lt(elapsed, 39000), eq(rpl-int(counts, "requests"), 1), eq(rpl-int(counts, "connections"), 1)));
+   rp-check(owner, "hung-upstream-one-read-deadline", json-node-string("504 once near 30000ms; no second request or connection"), json-node-object(list(fhn-n("status", rp-code(response)), fhn-n("body_bytes", str_len(rp-body(response))), fhn-n("elapsed_ms", elapsed), json-node-pair("upstream", counts))), accepted);
+   rpc-get(owner, "worker-serves-after-deadline", head(router), "/health", 200, "ok", "native-kernel");
+   rp-release(owner, nth(router, 1));
+   rp-release(owner, nth(fixture, 1));
+  }
+  def rpl-native-samples(port, count, times, correct) = if eq(count, 0) then list(correct, times) else rpl-native-sample-next(port, count, times, correct, rpl-sample(port, "/count_signals?values=a,b,c", "3", "native-kernel"));
+  def rpl-native-sample-next(port, count, times, correct, sample) = rpl-native-samples(port, sub(count, 1), cons(nth(sample, 1), times), add(correct, head(sample)));
+  def rpl-proof(owner, upstream) {
+   let router = rpc-router(owner, "native-proof", "router-proof", upstream, 4);
+   let port = head(router);
+   rpc-get(owner, "proof-health", port, "/health", 200, "ok", "native-kernel");
+   rpc-get(owner, "proof-native-float", port, "/coherence_weight", 200, "0.8125", "native-kernel");
+   rpc-get(owner, "proof-empty-input", port, "/count_signals?values=", 200, "0", "native-kernel");
+   rpc-get(owner, "proof-one-input", port, "/count_signals?values=a", 200, "1", "native-kernel");
+   rpc-get(owner, "proof-three-inputs", port, "/count_signals?values=a,b,c", 200, "3", "native-kernel");
+   rpc-get(owner, "proof-tail-path", port, "/api/ideas?limit=2", 200, "UPSTREAM path=/api/ideas?limit=2", "fanout-python");
+   rpc-get(owner, "proof-tail-second-path", port, "/api/tasks", 200, "UPSTREAM path=/api/tasks", "fanout-python");
+   let measured = rpl-native-samples(port, 200, list(), 0);
+   rp-check(owner, "native-route-200-observed-latencies", json-node-int(200), json-node-object(list(fhn-n("correct", head(measured)), json-node-pair("timing", rpl-timing(nth(measured, 1))))), eq(head(measured), 200));
+   rp-release(owner, nth(router, 1));
+  }
+  def rpl-keep-samples(link, port, at, count, correct) = if ge(at, count) then correct else rpl-keep-sample(link, port, at, count, correct, rp-cat(list("/sum?a=", int_to_str(at), "&b=", int_to_str(at))));
+  def rpl-keep-sample(link, port, at, count, correct, path) {
+   let response = if lt(port, 0) then rp-exchange(link, rp-request("GET", path, "1.1", "", "")) else rp-fetch(port, rp-get(path));
+   rpl-keep-samples(link, port, add(at, 1), count, add(correct, rp-answer(response, 200, int_to_str(mul(at, 2)), "native-kernel")));
+  }
+  def rpl-keep-timing(owner) {
+   let router = rpc-router(owner, "keep-timing", "router-body-proof", 0, 4);
+   let link = rp-open(head(router));
+   let startReuse = host_monotonic_ms();
+   let reuse = rpl-keep-samples(link, -1, 0, 30, 0);
+   let reuseTime = sub(host_monotonic_ms(), startReuse);
+   rp-close(link);
+   let startFresh = host_monotonic_ms();
+   let fresh = rpl-keep-samples(nothing(), head(router), 0, 30, 0);
+   let freshTime = sub(host_monotonic_ms(), startFresh);
+   rp-check(owner, "client-reuse-thirty-request-timing", json-node-int(60), json-node-object(list(fhn-n("correct", add(reuse, fresh)), fhn-n("reused_wall_ms", reuseTime), fhn-n("fresh_wall_ms", freshTime), fhn-s("basis", "local-monotonic-whole-ms; timing observation only"))), and(eq(reuse, 30), eq(fresh, 30)));
+   rp-release(owner, nth(router, 1));
+  }
+  // All fifty requests are sent before any response is read. Each cursor owns
+  // its socket, expected body and send timestamp. No response can borrow a peer's
+  // expected value. Twelve waves hold fifty concurrent connections for 600 calls.
+  def rpl-enqueue(port, at, count, commas, held) = if ge(at, count) then reverse(held) else rpl-enqueue-one(port, at, count, commas, held, if lt(commas, 0) then add(at, 1) else commas);
+  def rpl-enqueue-one(port, at, count, commas, held, inputCount) {
+   let link = rp-open(port);
+   let request = rp-get(str_concat("/count_signals?values=", rp-repeat(",", inputCount)));
+   let started = host_monotonic_ms();
+   let sent = rp-send(link, request);
+   rpl-enqueue(port, add(at, 1), count, commas, cons(list(link, int_to_str(add(inputCount, 1)), started, eq(sent, str_len(request))), held));
+  }
+  def rpl-drain(held, correct, times) = if nil?(held) then list(correct, times) else rpl-drain-one(head(held), tail(held), correct, times);
+  def rpl-drain-one(item, rest, correct, times) {
+   let response = rp-response(head(item));
+   let elapsed = sub(host_monotonic_ms(), nth(item, 2));
+   rp-close(head(item));
+   rpl-drain(rest, add(correct, and(nth(item, 3), rp-answer(response, 200, nth(item, 1), "native-kernel"))), cons(elapsed, times));
+  }
+  def rpl-waves(port, left, correct, times) = if eq(left, 0) then list(correct, times) else rpl-wave-next(port, left, correct, times, rpl-drain(rpl-enqueue(port, 0, 50, 4000, list()), 0, list()));
+  def rpl-wave-next(port, left, correct, times, result) = rpl-waves(port, sub(left, 1), add(correct, head(result)), append(nth(result, 1), times));
+  def rpl-throughput(owner, workers) {
+   let name = str_concat("workers-", int_to_str(workers));
+   let router = rpc-router(owner, name, "router-proof", 0, workers);
+   let started = host_monotonic_ms();
+   let result = rpl-waves(head(router), 12, 0, list());
+   let elapsed = sub(host_monotonic_ms(), started);
+   rp-check(owner, str_concat(name, "/600-heavy-requests"), json-node-int(600), json-node-object(list(fhn-n("correct", head(result)), fhn-n("wall_ms", elapsed), fhn-n("concurrent_connections", 50), fhn-n("commas_each", 4000), json-node-pair("send-to-drain-timing", rpl-timing(nth(result, 1))))), eq(head(result), 600));
+   rp-release(owner, nth(router, 1));
+   elapsed;
+  }
+  def rpl-concurrency(owner) {
+   let router = rpc-router(owner, "distinct-pool", "router-proof", 0, 8);
+   let result = rpl-drain(rpl-enqueue(head(router), 0, 50, -1, list()), 0, list());
+   rp-check(owner, "fifty-concurrent-distinct-inputs", json-node-int(50), json-node-int(head(result)), eq(head(result), 50));
+   rp-release(owner, nth(router, 1));
+   let single = rpl-throughput(owner, 1);
+   let multi = rpl-throughput(owner, 8);
+   rp-check(owner, "worker-throughput-margin", json-node-string("same 600 requests: eight workers at least 1.3x throughput"), json-node-object(list(fhn-n("single_wall_ms", single), fhn-n("eight_wall_ms", multi), fhn-s("basis", "whole native client wall time; 12 waves of 50"))), and(gt(multi, 0), ge(mul(single, 10), mul(multi, 13))));
+  }
+ }
+ 0;
+}

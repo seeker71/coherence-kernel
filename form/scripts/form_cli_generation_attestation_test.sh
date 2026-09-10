@@ -47,7 +47,12 @@ if [[ "$form_table_count" != 1 || -z "$host_emit_line" || -z "$form_table_line" 
     exit 1
 fi
 for required_source in \
-    native/metal/metal_ask.sh native/metal/metal_first_token.sh \
+    form-stdlib/bml/metal-ask.bml form-stdlib/bml/metal-ask-request.bml \
+    form-stdlib/bml/json-wire-admission.bml form-stdlib/bml/sha256-owned.bml \
+    ../observe/metal-ask-run.bml ../observe/metal-ask-files-run.bml \
+    form-stdlib/bml/metal-jit.bml form-stdlib/llama32-3b-resident-state.bml \
+    form-stdlib/llama3-tokenize.fk form-stdlib/llama3-detokenize.fk \
+    native/metal/llama-token-handle.fk native/metal/sha256-arm64-jit.fk \
     native/metal/ask-declared-cost.fk native/metal/first-token.fk native/metal/whole-tensor-residency.fk \
     form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/transformer-numerics.fk \
     form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/trig.fk \

@@ -1,0 +1,188 @@
+// Form owns byte framing and process leases for the local Rust sibling proof.
+// All connections target loopback. The current socket listener binds wildcard;
+// socket reads are blocking, bounded by the owning process supervisor.
+// preludes: form-stdlib/kernel-http-header.fk form-stdlib/organ-health.bml form-stdlib/bml/form-cli-heal-native-process.bml
+section [form.bml] {
+ class RouterProofIO {
+  def rp-cat(parts) = if nil?(parts) then "" else str_concat(head(parts), rp-cat(tail(parts)));
+  def rp-all(values) = if nil?(values) then 1 else and(head(values), rp-all(tail(values)));
+  def rp-repeat(text, count) = if le(count, 0) then "" else if eq(count, 1) then text else rp-repeat-pair(rp-repeat(text, div(count, 2)), text, mod(count, 2));
+  def rp-repeat-pair(half, text, odd) = str_concat(str_concat(half, half), if odd then text else "");
+  def rp-pattern(at) = if ge(at, 256) then "" else str_concat(byte_to_str(at), rp-pattern(add(at, 1)));
+  def rp-binary(count) = substring(rp-repeat(rp-pattern(0), div(add(count, 255), 256)), 0, count);
+  def rp-path(job, name) = str_concat(job, str_concat("/", name));
+  def rp-text(path) = if lt(file_size(path), 0) then "" else read_file(path);
+  def rp-number(path) = str_to_int(trim(rp-text(path)));
+  def rp-save(path, value) = write_file(path, str_concat(json-emit-precise(value), "\n"));
+  def rp-publish(path, value) {
+   let text = str_concat(json-emit-precise(value), "\n");
+   let staging = str_concat(path, ".staged");
+   let wrote = write_file(staging, text);
+   if and(eq(wrote, str_len(text)), str_eq(rp-text(staging), text)) then fs_rename(staging, path) else -1;
+  }
+  def rp-link(conn) = record_new(0, "socket", conn, "carry", "", "state", "open");
+  def rp-open(port) = rp-opened(socket_connect("127.0.0.1", port));
+  def rp-opened(socket) = if or(nothing?(socket), le(socket, 0)) then form_error("native proof connection refused") else rp-link(socket);
+  def rp-close(link) {
+   let result = socket_close(record_get(link, "socket"));
+   record_set(link, "state", if eq(result, 0) then "closed" else "close-refused");
+   if eq(result, 0) then result else form_error("native proof socket release refused");
+  }
+  def rp-fill(link) {
+   let chunk = socket_recv(record_get(link, "socket"), 65536);
+   if nothing?(chunk) then rp-read-ended(link, "error") else if eq(str_len(chunk), 0) then rp-read-ended(link, "eof") else rp-read-more(link, chunk);
+  }
+  def rp-read-ended(link, state) {
+   record_set(link, "state", state);
+   0;
+  }
+  def rp-read-more(link, chunk) {
+   record_set(link, "carry", str_concat(record_get(link, "carry"), chunk));
+   1;
+  }
+  def rp-send-at(link, bytes, offset) = if ge(offset, str_len(bytes)) then offset else rp-send-step(link, bytes, offset, socket_send(record_get(link, "socket"), substring(bytes, offset, str_len(bytes))));
+  def rp-send-step(link, bytes, offset, count) = if or(nothing?(count), le(count, 0)) then -1 else rp-send-at(link, bytes, add(offset, count));
+  def rp-send(link, bytes) = rp-send-at(link, bytes, 0);
+  def rp-take(link, count) {
+   let held = record_get(link, "carry");
+   if ge(str_len(held), count) then rp-take-ready(link, held, count) else if rp-fill(link) then rp-take(link, count) else nothing();
+  }
+  def rp-take-ready(link, held, count) {
+   let value = substring(held, 0, count);
+   record_set(link, "carry", substring(held, count, str_len(held)));
+   value;
+  }
+  def rp-until(link, delimiter) {
+   let at = str_find(record_get(link, "carry"), delimiter, 0);
+   if ge(at, 0) then rp-take(link, add(at, str_len(delimiter))) else if rp-fill(link) then rp-until(link, delimiter) else nothing();
+  }
+  def rp-eof-body(link, held) {
+   let next = socket_recv(record_get(link, "socket"), 65536);
+   if nothing?(next) then nothing() else if eq(str_len(next), 0) then held else rp-eof-body(link, str_concat(held, next));
+  }
+  def rp-header-pairs(lines) = if nil?(lines) then list() else rp-header-line(head(lines), tail(lines));
+  def rp-header-line(line, rest) {
+   let at = str_find(line, ":", 0);
+   if lt(at, 0) then rp-header-pairs(rest) else cons(list(kh-ascii-lower(substring(line, 0, at)), trim(substring(line, add(at, 1), str_len(line)))), rp-header-pairs(rest));
+  }
+  def rp-header(headers, name) = if nil?(headers) then "" else if str_eq(head(head(headers)), name) then nth(head(headers), 1) else rp-header(tail(headers), name);
+  def rp-header-values(headers, name) = if nil?(headers) then list() else if str_eq(head(head(headers)), name) then cons(nth(head(headers), 1), rp-header-values(tail(headers), name)) else rp-header-values(tail(headers), name);
+  def rp-response(link) {
+   let raw = rp-until(link, "\r\n\r\n");
+   if nothing?(raw) then nothing() else rp-response-head(link, split-on(raw, "\r\n"));
+  }
+  def rp-response-head(link, lines) {
+   let headers = rp-header-pairs(tail(lines));
+   let parts = split-on(head(lines), " ");
+   let status = str_to_int(nth(parts, 1));
+   let size = rp-header(headers, "content-length");
+   let chunked = str_eq(kh-ascii-lower(rp-header(headers, "transfer-encoding")), "chunked");
+   let body = if chunked then rp-chunks(link, "") else if gt(str_len(size), 0) then rp-take(link, str_to_int(size)) else rp-response-close(link);
+   if nothing?(body) then nothing() else list(status, headers, body);
+  }
+  def rp-response-close(link) {
+   let held = record_get(link, "carry");
+   record_set(link, "carry", "");
+   rp-eof-body(link, held);
+  }
+  def rp-hex-digit(byte) = if and(ge(byte, 48), le(byte, 57)) then sub(byte, 48) else if and(ge(byte, 65), le(byte, 70)) then sub(byte, 55) else if and(ge(byte, 97), le(byte, 102)) then sub(byte, 87) else -1;
+  def rp-hex-number(text, at, value) = if ge(at, str_len(text)) then value else if eq(str_byte_at(text, at), 59) then value else if lt(rp-hex-digit(str_byte_at(text, at)), 0) then -1 else rp-hex-number(text, add(at, 1), add(mul(value, 16), rp-hex-digit(str_byte_at(text, at))));
+  def rp-hex-text(value) = if lt(value, 16) then char_at("0123456789abcdef", value) else str_concat(rp-hex-text(div(value, 16)), char_at("0123456789abcdef", mod(value, 16)));
+  def rp-chunks(link, body) {
+   let line = rp-until(link, "\r\n");
+   if nothing?(line) then nothing() else rp-chunk-size(link, body, rp-hex-number(substring(line, 0, sub(str_len(line), 2)), 0, 0));
+  }
+  def rp-chunk-size(link, body, count) = if lt(count, 0) then nothing() else if eq(count, 0) then rp-chunk-trailers(link, body) else rp-chunk-data(link, body, count, rp-take(link, add(count, 2)));
+  def rp-chunk-data(link, body, count, bytes) = if nothing?(bytes) then nothing() else if not(str_eq(substring(bytes, count, add(count, 2)), "\r\n")) then nothing() else rp-chunks(link, str_concat(body, substring(bytes, 0, count)));
+  def rp-chunk-trailers(link, body) {
+   let line = rp-until(link, "\r\n");
+   if nothing?(line) then nothing() else if str_eq(line, "\r\n") then body else rp-chunk-trailers(link, body);
+  }
+  def rp-request(method, path, version, headers, body) = rp-request-framed(method, path, version, "127.0.0.1", headers, body, if gt(str_len(body), 0) then int_to_str(str_len(body)) else "");
+  def rp-request-framed(method, path, version, host, headers, body, declared) = rp-cat(list(method, " ", path, " HTTP/", version, "\r\nHost: ", host, "\r\n", headers, if gt(str_len(declared), 0) then rp-cat(list("Content-Length: ", declared, "\r\n")) else "", "\r\n", body));
+  def rp-get(path) = rp-request("GET", path, "1.1", "Connection: close\r\n", "");
+  def rp-exchange(link, request) = if eq(rp-send(link, request), str_len(request)) then rp-response(link) else nothing();
+  def rp-fetch(port, request) {
+   let link = rp-open(port);
+   let row = rp-exchange(link, request);
+   rp-close(link);
+   row;
+  }
+  def rp-body(row) = if nothing?(row) then "" else nth(row, 2);
+  def rp-code(row) = if nothing?(row) then -1 else head(row);
+  def rp-h(row, name) = if nothing?(row) then "" else rp-header(nth(row, 1), name);
+  def rp-answer(row, status, body, router) = rp-all(list(eq(rp-code(row), status), str_eq(rp-body(row), body), str_eq(rp-h(row, "x-form-router"), router)));
+  def rp-free-port() {
+   let listener = socket_listen(0);
+   if or(nothing?(listener), le(listener, 0)) then form_error("native proof port admission refused") else 0;
+   let port = socket_port(listener);
+   let released = socket_close(listener);
+   if not(eq(released, 0)) then form_error("native proof port release refused") else 0;
+   port;
+  }
+  def rp-wait-file(path, deadline) = if gt(file_size(path), 0) then 1 else if ge(host_monotonic_ms(), deadline) then 0 else rp-wait-file-pause(path, deadline);
+  def rp-wait-file-pause(path, deadline) {
+   host_sleep_ms(10);
+   rp-wait-file(path, deadline);
+  }
+  def rp-owner(job) = record_new(0, "job", job, "children", list(), "released", list(), "rows", list(), "failed", 0, "started", 0);
+  def rp-spawn(owner, name, argv, input) {
+   let job = record_get(owner, "job");
+   let pid = host_spawn_at(argv, list(input, rp-path(job, str_concat(name, ".out")), rp-path(job, str_concat(name, ".err"))));
+   if or(nothing?(pid), le(pid, 0)) then form_error("native routing child admission refused") else 0;
+   record_set(owner, "children", cons(list(name, pid), record_get(owner, "children")));
+   record_set(owner, "started", add(record_get(owner, "started"), 1));
+   write_file(rp-path(job, str_concat(name, ".pid")), int_to_str(pid));
+   pid;
+  }
+  def rp-stop(pid) {
+   if or(nothing?(pid), le(pid, 0)) then -1 else rp-stop-owned(pid);
+  }
+  def rp-stop-owned(pid) {
+   let requested = if eq(host_alive(pid), 1) then host_kill(pid) else 0;
+   rp-stop-wait(pid, add(host_monotonic_ms(), 2000), requested);
+  }
+  def rp-stop-wait(pid, deadline, requested) = if not(fhn-alive(pid)) then host_wait(pid) else if ge(host_monotonic_ms(), deadline) then rp-stop-force(pid) else rp-stop-pause(pid, deadline, requested);
+  def rp-stop-pause(pid, deadline, requested) {
+   host_sleep_ms(10);
+   rp-stop-wait(pid, deadline, requested);
+  }
+  def rp-stop-force(pid) {
+   let signal = host_spawn_quiet(list("/bin/kill", "-KILL", int_to_str(pid)));
+   host_wait(signal);
+   host_wait(pid);
+  }
+  def rp-stop-all(children) = if nil?(children) then list() else cons(list(head(head(children)), nth(head(children), 1), rp-stop(nth(head(children), 1)), host_alive(nth(head(children), 1))), rp-stop-all(tail(children)));
+  def rp-child-name(children, pid) = if nil?(children) then "unowned" else if eq(nth(head(children), 1), pid) then head(head(children)) else rp-child-name(tail(children), pid);
+  def rp-without-child(children, pid) = if nil?(children) then list() else if eq(nth(head(children), 1), pid) then rp-without-child(tail(children), pid) else cons(head(children), rp-without-child(tail(children), pid));
+  def rp-release(owner, pid) {
+   let children = record_get(owner, "children");
+   let name = rp-child-name(children, pid);
+   let result = if str_eq(name, "unowned") then -1 else rp-stop(pid);
+   let alive = host_alive(pid);
+   record_set(owner, "released", cons(list(name, pid, result, alive), record_get(owner, "released")));
+   if eq(alive, 0) then record_set(owner, "children", rp-without-child(children, pid)) else 0;
+   result;
+  }
+  def rp-resource-rows(rows) = if nil?(rows) then list() else cons(json-node-object(list(fhn-s("child", head(head(rows))), fhn-n("pid", nth(head(rows), 1)), fhn-n("wait_status", nth(head(rows), 2)), fhn-n("alive_after_wait", nth(head(rows), 3)))), rp-resource-rows(tail(rows)));
+  def rp-resources-closed(rows) = if nil?(rows) then 1 else and(eq(nth(head(rows), 3), 0), and(ge(nth(head(rows), 2), 0), rp-resources-closed(tail(rows))));
+  def rp-check(owner, aspect, expected, observed, accepted) {
+   let row = oh-reading("router-native-proof", record_get(owner, "job"), aspect, expected, observed, json-node-int(accepted), if accepted then list() else list(oh-need("local-route-evidence", json-node-null())), if accepted then list() else list("request-evidence", "retain"), json-node-null());
+   oh-voice(row);
+   record_set(owner, "rows", cons(row, record_get(owner, "rows")));
+   if accepted then 0 else rp-retain-pain(owner, row);
+   accepted;
+  }
+  def rp-retain-pain(owner, row) {
+   record_set(owner, "failed", add(record_get(owner, "failed"), 1));
+   oh-voice(oh-response(row, "request-evidence"));
+   let path = rp-path(record_get(owner, "job"), "attention.json");
+   let text = json-emit-precise(row);
+   let wrote = write_file(path, text);
+   let retained = and(eq(wrote, str_len(text)), str_eq(rp-text(path), text));
+   oh-voice(oh-applied(row, "request-evidence", json-node-object(list(fhn-s("path", path), fhn-n("retained", retained)))));
+   retained;
+  }
+ }
+ 0;
+}

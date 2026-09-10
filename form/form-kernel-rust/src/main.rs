@@ -2288,11 +2288,9 @@ impl Kernel {
     // Interned name handle — the NameID this identifier resolves to. No
     // string allocation, no comparison; lookup is a u32 compare downstream.
     //
-    // OPT (2026-05-21): Reads `self.by_id.get(&n)` directly instead of going
-    // through `self.children(n)` which clones the children Vec. Saves one
-    // Vec allocation per IDENT dispatch. With IDENT at 36.5% of dispatches
-    // on python_demo.fk (viz_kernel_trace.py output), this is the single
-    // hottest path in the walker.
+    // Reads `self.by_id.get(&n)` directly, saving the children Vec clone
+    // per IDENT dispatch. Inspect retained dispatch traces through
+    // observe/kernel-trace-run.bml.
     fn ident_id(&self, n: NodeID) -> NameID {
         if n.level == LEVEL_TRIVIAL && n.ty == TRIV_STRING {
             return n.inst;
@@ -13210,7 +13208,7 @@ fn fanout_stream_to_client(
     // and router-owned framing headers are filtered by forward_request_header.
     let mut head = format!(
         "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n",
-        method, request_target, host
+        method, request_target, http_upstream_authority(&host, port)
     );
     for (name, value) in req_headers {
         if forward_request_header(name) {
@@ -13348,6 +13346,35 @@ fn emit_buffered_fanout_error(
         return false;
     }
     client_keep_alive
+}
+
+fn http_upstream_authority(host: &str, port: u16) -> String {
+    // The parsed authority may retain IPv6 brackets. Preserve exactly one pair
+    // and carry the actual port used by the upstream connection into HTTP.
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    }
+}
+
+#[cfg(test)]
+mod upstream_authority_tests {
+    use super::{http_upstream_authority, parse_http_upstream};
+
+    #[test]
+    fn request_authority_preserves_parsed_host_and_port() {
+        for (url, expected) in [
+            ("http://127.0.0.1:43121/base", "127.0.0.1:43121"),
+            ("http://api:8000/base", "api:8000"),
+            ("http://api/base", "api:80"),
+            ("http://[::1]:43121/base", "[::1]:43121"),
+        ] {
+            let (host, port, _) = parse_http_upstream(url).unwrap();
+            assert_eq!(http_upstream_authority(&host, port), expected);
+        }
+        assert_eq!(http_upstream_authority("::1", 43121), "[::1]:43121");
+    }
 }
 
 fn parse_http_upstream(upstream: &str) -> Result<(String, u16, String), String> {

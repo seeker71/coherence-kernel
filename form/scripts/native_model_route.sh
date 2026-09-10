@@ -39,15 +39,18 @@ route_known_names=$(printf '%s\n' "$route_result" |
     awk -F= '$1 == "route_known_names" { print $2; exit }')
 
 if [ "$route_kind" = "direct-metal" ]; then
-    prompt=$(cat)
-    if [ -z "$prompt" ]; then
-        printf 'refusing an empty prompt\n' >&2
-        exit 2
-    fi
-    # Direct model execution: no socket, HTTP, JSON, Ollama, or llama.cpp.
-    # metal_ask stages the question-bound answer plus its 13-gate receipt.
-    exec "$NM_REPO_ROOT/$route_door" \
-        "${FORM_METAL_STEPS:-$route_steps}" "$prompt"
+    # This boundary carries environment bytes and stdin. The Form program
+    # owns validation, model admission, generation, costs and publication.
+    native_request=$(nm_new_temp_dir)
+    trap 'rm -rf "$native_request"' EXIT HUP INT TERM
+    cat > "$native_request/prompt"
+    printf '%s' "${FORM_METAL_STEPS:-$route_steps}" > "$native_request/cap"
+    printf '%s' "${FORM_ASK_MODEL:-}" > "$native_request/model"
+    printf '%s' "${FORM_GGUF_BLOB:-}" > "$native_request/blob"
+    printf '%s' "${FORM_ASK_STAGE:-}" > "$native_request/stage"
+    cd "$NM_REPO_ROOT"
+    printf '%s\n' "$native_request" | "$NM_FKWU" "$route_door"
+    exit $?
 fi
 
 nm_require_command curl

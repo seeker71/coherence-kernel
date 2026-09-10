@@ -11,7 +11,7 @@
 #           └─ python3 imports it, calls add(2,3), factorial(5), factorial(10)
 #              └─ values match form-kernel-go evaluating the same recipes
 #
-# See form/python_bmf/CONTRACT.md for the boundary and proof contract.
+# See docs/native-form-artifacts.md for the boundary and proof contract.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

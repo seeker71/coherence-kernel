@@ -1,0 +1,146 @@
+// Live route observations against the Rust proof sibling and Form peers.
+// preludes: form-stdlib/bml/router-proof-fixture.bml
+section [form.bml] {
+ class RouterProofCases {
+  def rpc-bin() = "form/form-kernel-rust/target/release/form-kernel-rust";
+  def rpc-example(name) = rp-cat(list("form/form-kernel-rust/examples/", name, ".fk"));
+  def rpc-wait-listener(pid, log, deadline) = if ge(str_find(rp-text(log), "listening on", 0), 0) then 1 else if or(not(fhn-alive(pid)), ge(host_monotonic_ms(), deadline)) then 0 else rpc-wait-listener-pause(pid, log, deadline);
+  def rpc-wait-listener-pause(pid, log, deadline) {
+   host_sleep_ms(10);
+   rpc-wait-listener(pid, log, deadline);
+  }
+  def rpc-router(owner, name, routes, upstream, workers) {
+   let port = rp-free-port();
+   let args = list(rpc-bin(), "serve", "--host", "127.0.0.1", "--port", int_to_str(port), "--routes", rpc-example(routes), "--workers", int_to_str(workers));
+   let argv = if le(upstream, 0) then args else append(args, list("--upstream", rp-cat(list("http://127.0.0.1:", int_to_str(upstream)))));
+   let pid = rp-spawn(owner, name, argv, "/dev/null");
+   let ready = rpc-wait-listener(pid, rp-path(record_get(owner, "job"), str_concat(name, ".err")), add(host_monotonic_ms(), 8000));
+   rp-check(owner, str_concat(name, "/listener"), json-node-string("listening child"), json-node-int(ready), ready);
+   list(port, pid);
+  }
+  def rpc-fixture(owner, name, mode) {
+   let job = rp-path(record_get(owner, "job"), name);
+   fs_mkdir(job);
+   let input = rp-path(job, "request.json");
+   rp-save(input, json-node-object(list(fhn-s("job", job), fhn-s("mode", mode))));
+   let pid = rp-spawn(owner, name, list("./fkwu", "form/form-kernel-rust/router-native-fixture.bml"), input);
+   let ready = rp-wait-file(rp-path(job, "port"), add(host_monotonic_ms(), 8000));
+   rp-check(owner, str_concat(name, "/listener"), json-node-string("bound native peer"), json-node-int(ready), ready);
+   list(rp-number(rp-path(job, "port")), pid, job);
+  }
+  def rpc-row(owner, name, row, code, body, router) = rp-check(owner, name, json-node-object(list(fhn-n("status", code), fhn-n("body_bytes", str_len(body)), fhn-s("router", router))), json-node-object(list(fhn-n("status", rp-code(row)), fhn-n("body_bytes", str_len(rp-body(row))), fhn-s("router", rp-h(row, "x-form-router")))), rp-answer(row, code, body, router));
+  def rpc-get(owner, name, port, path, code, body, router) = rpc-row(owner, name, rp-fetch(port, rp-get(path)), code, body, router);
+  def rpc-invitation-pairs() = list(list("x-form-router", "fanout-python"), list("x-form-native-invitation", "offered"), list("x-form-native-invitation-state", "native-invitation-offered"), list("x-form-native-invitation-protocol", "Form/BML route recipe"), list("x-form-native-invitation-selected-path", "fanout-python"), list("x-form-native-invitation-decline-signal", "native_invitation_declined"), list("x-form-native-invitation-decline-header", "X-Form-Python-Fallback"));
+  def rpc-invited(headers, pairs) = if nil?(pairs) then 1 else and(str_eq(rp-header(headers, head(head(pairs))), nth(head(pairs), 1)), rpc-invited(headers, tail(pairs)));
+  def rpc-basic(owner, upstream) {
+   let native = rpc-router(owner, "demo", "routes", 0, 2);
+   let port = head(native);
+   rpc-get(owner, "hello", port, "/hello", 200, "Hello from the kernel", "native-kernel");
+   rpc-get(owner, "query", port, "/echo?msg=foo", 200, "foo", "native-kernel");
+   rpc-get(owner, "query-plus", port, "/echo?msg=hello+world", 200, "hello world", "native-kernel");
+   let absent = rp-fetch(port, rp-get("/missing"));
+   rp-check(owner, "local-404", json-node-int(404), json-node-int(rp-code(absent)), and(eq(rp-code(absent), 404), str_eq(rp-h(absent, "x-form-router"), "local-control")));
+   rp-release(owner, nth(native, 1));
+   let method = rpc-router(owner, "method", "routes-method", upstream, 2);
+   rpc-get(owner, "method-native", head(method), "/api/items", 200, "native items list", "native-kernel");
+   let post = rp-fetch(head(method), rp-request("POST", "/api/items", "1.1", "Content-Type: application/json\r\nConnection: close\r\n", "{}"));
+   rpc-row(owner, "method-forward", post, 200, "UPSTREAM method=POST path=/api/items", "fanout-python");
+   rp-check(owner, "forward-invitation", json-node-int(1), json-node-int(rpc-invited(nth(post, 1), rpc-invitation-pairs())), rpc-invited(nth(post, 1), rpc-invitation-pairs()));
+   let missing = rp-fetch(head(method), rp-get("/upstream-missing"));
+   rpc-row(owner, "upstream-404", missing, 404, "upstream missing", "fanout-python");
+   rp-check(owner, "error-invitation", json-node-int(1), json-node-int(rpc-invited(nth(missing, 1), rpc-invitation-pairs())), rpc-invited(nth(missing, 1), rpc-invitation-pairs()));
+   rp-release(owner, nth(method, 1));
+   let dead = rpc-router(owner, "dead-peer", "routes", rp-free-port(), 2);
+   let started = host_monotonic_ms();
+   let refused = rp-fetch(head(dead), rp-get("/unavailable"));
+   let elapsed = sub(host_monotonic_ms(), started);
+   rp-check(owner, "upstream-refusal", json-node-string("502 with invitation under 7000ms"), json-node-object(list(fhn-n("status", rp-code(refused)), fhn-n("elapsed_ms", elapsed))), and(eq(rp-code(refused), 502), and(lt(elapsed, 7000), rpc-invited(nth(refused, 1), rpc-invitation-pairs()))));
+   rp-release(owner, nth(dead, 1));
+  }
+  def rpc-shapes(owner, upstream) {
+   let router = rpc-router(owner, "bodies", "router-body-proof", upstream, 4);
+   let port = head(router);
+   rpc-get(owner, "body-route-health", port, "/health", 200, "ok", "native-kernel");
+   rpc-row(owner, "form-body", rp-fetch(port, rp-request("POST", "/sum", "1.1", "Content-Type: application/x-www-form-urlencoded\r\nConnection: close\r\n", "a=40&b=2")), 200, "42", "native-kernel");
+   let json = "{\"name\":\"coherence\",\"weight\":0.8125}";
+   rpc-row(owner, "json-body", rp-fetch(port, rp-request("POST", "/echo_len", "1.1", "Content-Type: application/json\r\nConnection: close\r\n", json)), 200, int_to_str(str_len(json)), "native-kernel");
+   let payload = str_concat("payload=", rp-repeat("x", 12000));
+   rpc-row(owner, "body-across-8192-read", rp-fetch(port, rp-request("POST", "/payload_len", "1.1", "Content-Type: application/x-www-form-urlencoded\r\nConnection: close\r\n", payload)), 200, "12000", "native-kernel");
+   let capped = rp-fetch(port, rp-request("POST", "/payload_len", "1.1", "Content-Type: application/x-www-form-urlencoded\r\nConnection: close\r\n", str_concat("payload=", rp-repeat("x", 20000))));
+   rp-check(owner, "current-native-input-boundary", json-node-string("413 for 20000-byte native argument"), json-node-object(list(fhn-n("status", rp-code(capped)), fhn-n("body_bytes", str_len(rp-body(capped))))), eq(rp-code(capped), 413));
+   let forwarded = rp-repeat("binary-body-", 100000);
+   rpc-row(owner, "body-over-one-megabyte-forwarded", rp-fetch(port, rp-request("POST", "/relay/body", "1.1", "Content-Type: application/octet-stream\r\nConnection: close\r\n", forwarded)), 200, forwarded, "fanout-python");
+   let declared = 67112960;
+   let shape = rp-fetch(port, rp-cat(list("POST /payload_len HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: ", int_to_str(declared), "\r\nConnection: close\r\n\r\npayload=x")));
+   rp-check(owner, "declared-request-boundary", json-node-string("413 names observed and held bytes"), json-node-object(list(fhn-n("status", rp-code(shape)), fhn-n("body_bytes", str_len(rp-body(shape))))), and(eq(rp-code(shape), 413), and(ge(str_find(rp-body(shape), int_to_str(declared), 0), 0), ge(str_find(rp-body(shape), "67108864", 0), 0))));
+   rpc-streams(owner, port, list("/stream/big", "/stream/chunked", "/stream/chunked-trap", "/stream/unframed"));
+   rpc-headers(owner, port, upstream);
+   rpc-keepalive(owner, port);
+   rp-release(owner, nth(router, 1));
+  }
+  def rpc-streams(owner, port, paths) = if nil?(paths) then 0 else rpc-stream-one(owner, port, head(paths), tail(paths));
+  def rpc-stream-one(owner, port, path, rest) {
+   let started = host_monotonic_ms();
+   let response = rp-fetch(port, rp-get(path));
+   let expected = rpf-stream-body(path);
+   let chunked = or(str_eq(path, "/stream/chunked"), str_eq(path, "/stream/chunked-trap"));
+   let framing = if chunked then str_eq(rp-h(response, "transfer-encoding"), "chunked") else if str_eq(path, "/stream/unframed") then and(str_eq(rp-h(response, "content-length"), ""), str_eq(rp-h(response, "connection"), "close")) else eq(str_to_int(rp-h(response, "content-length")), str_len(expected));
+   rp-check(owner, path, json-node-object(list(fhn-n("bytes", str_len(expected)), fhn-s("comparison", "every byte"))), json-node-object(list(fhn-n("status", rp-code(response)), fhn-n("bytes", str_len(rp-body(response))), fhn-n("elapsed_ms", sub(host_monotonic_ms(), started)))), and(framing, rp-answer(response, 200, expected, "fanout-python")));
+   rpc-streams(owner, port, rest);
+  }
+  def rpc-headers(owner, port, upstream) {
+   let headers = "Authorization: Bearer test123\r\nCookie: session=abc; theme=dark\r\nAccept: application/json\r\nX-Probe: hello-upstream\r\nUser-Agent: form-native-routing-proof\r\nConnection: close\r\nKeep-Alive: timeout=99\r\nProxy-Connection: close\r\n";
+   let response = rp-fetch(port, rp-request-framed("GET", "/echo/headers", "1.1", "client-sent-host.example", headers, "", ""));
+   let decoded = parse-json("echoed-headers", rp-body(response));
+   let received = json-object-get(decoded, "received_headers");
+   let requestOkay = rp-all(list(str_eq(fhn-string(received, "authorization"), "Bearer test123"), str_eq(fhn-string(received, "cookie"), "session=abc; theme=dark"), str_eq(fhn-string(received, "accept"), "application/json"), str_eq(fhn-string(received, "x-probe"), "hello-upstream"), str_eq(fhn-string(received, "user-agent"), "form-native-routing-proof"), str_eq(fhn-string(received, "host"), str_concat("127.0.0.1:", int_to_str(upstream))), or(str_eq(fhn-string(received, "content-length"), ""), str_eq(fhn-string(received, "content-length"), "0")), str_eq(fhn-string(received, "keep-alive"), ""), str_eq(fhn-string(received, "proxy-connection"), ""), str_eq(fhn-string(received, "connection"), "keep-alive"), rpc-invitation-json(received, rpc-invitation-pairs())));
+   rp-check(owner, "upstream-request-headers", json-node-object(list(fhn-s("host", str_concat("127.0.0.1:", int_to_str(upstream))), fhn-s("connection", "keep-alive"), fhn-s("content-length", "absent or 0"), fhn-s("end-to-end", "exact fixture values and invitation"))), received, requestOkay);
+   let responseOkay = rp-all(list(str_eq(rp-h(response, "set-cookie"), "echosession=xyz789; Path=/; HttpOnly"), str_eq(rp-h(response, "cache-control"), "no-store"), str_eq(rp-h(response, "x-echo-custom"), "relayed-ok"), eq(str_find(rp-h(response, "content-type"), "application/json", 0), 0), str_eq(rp-h(response, "transfer-encoding"), ""), str_eq(rp-h(response, "connection"), "close"), eq(str_to_int(rp-h(response, "content-length")), str_len(rp-body(response))), str_eq(rp-h(response, "x-form-router"), "fanout-python")));
+   rp-check(owner, "downstream-response-headers", json-node-int(1), json-node-int(responseOkay), responseOkay);
+   let postedBody = "{\"hello\":\"upstream\"}";
+   let posted = rp-fetch(port, rp-request-framed("POST", "/echo/post", "1.1", "client-sent-host.example", "Content-Type: application/json\r\nX-Probe: hello-upstream\r\nConnection: close\r\n", postedBody, str_concat("000", int_to_str(str_len(postedBody)))));
+   let doc = parse-json("echoed-post", rp-body(posted));
+   let carried = json-object-get(doc, "received_headers");
+   let postOkay = rp-all(list(str_eq(fhn-string(doc, "method"), "POST"), str_eq(fhn-string(doc, "body"), postedBody), str_eq(fhn-string(carried, "content-type"), "application/json"), str_eq(fhn-string(carried, "content-length"), int_to_str(str_len(postedBody))), str_eq(fhn-string(carried, "x-probe"), "hello-upstream")));
+   rp-check(owner, "forwarded-post-body-and-headers", json-node-int(1), json-node-int(postOkay), postOkay);
+  }
+  def rpc-invitation-json(doc, pairs) = if nil?(pairs) then 1 else and(str_eq(fhn-string(doc, head(head(pairs))), nth(head(pairs), 1)), rpc-invitation-json(doc, tail(pairs)));
+  def rpc-keep-sequence(link, at, count) = if ge(at, count) then 1 else rpc-keep-step(link, at, count, rp-exchange(link, rp-request("GET", rp-cat(list("/sum?a=", int_to_str(at), "&b=", int_to_str(mul(at, 3)))), "1.1", "", "")));
+  def rpc-keep-step(link, at, count, row) = and(and(rp-answer(row, 200, int_to_str(mul(at, 4)), "native-kernel"), str_eq(rp-h(row, "connection"), "keep-alive")), rpc-keep-sequence(link, add(at, 1), count));
+  def rpc-keepalive(owner, port) {
+   let link = rp-open(port);
+   let sequential = rpc-keep-sequence(link, 0, 8);
+   rp-close(link);
+   rp-check(owner, "eight-distinct-on-one-connection", json-node-int(1), json-node-int(sequential), sequential);
+   let pipe = rp-open(port);
+   let bytes = str_concat(rp-request("GET", "/sum?a=10&b=5", "1.1", "", ""), rp-request("GET", "/sum?a=100&b=23", "1.1", "", ""));
+   let sent = rp-send(pipe, bytes);
+   let first = rp-response(pipe);
+   let second = rp-response(pipe);
+   rp-close(pipe);
+   let piped = and(eq(sent, str_len(bytes)), and(rp-answer(first, 200, "15", "native-kernel"), rp-answer(second, 200, "123", "native-kernel")));
+   rp-check(owner, "two-pipelined-responses", json-node-int(1), json-node-int(piped), piped);
+   rpc-close-case(owner, port, "explicit-close", "1.1", "Connection: close\r\n");
+   rpc-close-case(owner, port, "http10-default-close", "1.0", "");
+   let idle = rp-open(port);
+   let admitted = rp-exchange(idle, rp-request("GET", "/health", "1.1", "", ""));
+   let started = host_monotonic_ms();
+   let neighbor = rp-fetch(port, rp-get("/sum?a=7&b=8"));
+   let neighborTime = sub(host_monotonic_ms(), started);
+   let ended = socket_recv(record_get(idle, "socket"), 1);
+   let idleTime = sub(host_monotonic_ms(), started);
+   rp-close(idle);
+   rp-check(owner, "idle-peer-does-not-block-neighbor", json-node-string("correct neighbor under 2500ms"), json-node-int(neighborTime), and(rp-answer(neighbor, 200, "15", "native-kernel"), lt(neighborTime, 2500)));
+   rp-check(owner, "idle-peer-reaped", json-node-string("orderly close near 5000ms"), json-node-int(idleTime), and(and(not(nothing?(ended)), str_eq(ended, "")), and(ge(idleTime, 4000), le(idleTime, 8000))));
+  }
+  def rpc-close-case(owner, port, name, version, headers) {
+   let link = rp-open(port);
+   let response = rp-exchange(link, rp-request("GET", "/health", version, headers, ""));
+   let ended = socket_recv(record_get(link, "socket"), 1);
+   rp-close(link);
+   let accepted = and(rp-answer(response, 200, "ok", "native-kernel"), and(str_eq(rp-h(response, "connection"), "close"), and(not(nothing?(ended)), str_eq(ended, ""))));
+   rp-check(owner, name, json-node-int(1), json-node-int(accepted), accepted);
+  }
+ }
+ 0;
+}

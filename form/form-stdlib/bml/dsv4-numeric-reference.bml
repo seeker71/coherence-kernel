@@ -1,0 +1,159 @@
+// Independent fp64 reference for the tiny DS4 numeric witnesses.
+// Authority: ds4-engine (MIT), ds4.c hc_split_sinkhorn_one,
+// hc_weighted_sum_one, hc_post_one, output_hc_head_one and
+// layer_forward_self_one. The reference uses flat row-major HC storage and
+// dimension-first accumulation; it calls no production HC/MLA/MoE recipes.
+// Weights are shared input data. Held numeric anchors remain in the bands.
+// This is floating-point algebra, not quantized/f32/GPU equivalence.
+// preludes: form-stdlib/core.fk
+section [form.bml] {
+ class Dsv4NumericReference {
+  def dnr-cat(a,b) = if nil?(a) then b else cons(head(a),dnr-cat(tail(a),b));
+  def dnr-drop(a,n) = if eq(n,0) then a else dnr-drop(tail(a),sub(n,1));
+  def dnr-take(a,n) = if eq(n,0) then list() else cons(head(a),dnr-take(tail(a),sub(n,1)));
+  def dnr-slice(a,i,n) = dnr-take(dnr-drop(a,i),n);
+  def dnr-flat(rows) = if nil?(rows) then list() else dnr-cat(head(rows),dnr-flat(tail(rows)));
+  def dnr-fill(n,x) = if eq(n,0) then list() else cons(x,dnr-fill(sub(n,1),x));
+  def dnr-dot-loop(a,b,s) = if nil?(a) then s else dnr-dot-loop(tail(a),tail(b),add(s,mul(head(a),head(b))));
+  def dnr-dot(a,b) = dnr-dot-loop(a,b,0.0);
+  def dnr-sum-loop(a,s) = if nil?(a) then s else dnr-sum-loop(tail(a),add(s,head(a)));
+  def dnr-sum(a) = dnr-sum-loop(a,0.0);
+  def dnr-scale(a,s) = if nil?(a) then list() else cons(mul(head(a),s),dnr-scale(tail(a),s));
+  def dnr-add(a,b) = if nil?(a) then list() else cons(add(head(a),head(b)),dnr-add(tail(a),tail(b)));
+  def dnr-matvec(rows,x) = if nil?(rows) then list() else cons(dnr-dot(head(rows),x),dnr-matvec(tail(rows),x));
+  def dnr-max-loop(a,best) = if nil?(a) then best else dnr-max-loop(tail(a),if gt(head(a),best) then head(a) else best);
+  def dnr-max(a) = dnr-max-loop(tail(a),head(a));
+  def dnr-rms(x,eps) = dnr-scale(x,div(1.0,math_sqrt(add(div(dnr-dot(x,x),mul(1.0,len(x))),eps))));
+  def dnr-mul(a,b) = if nil?(a) then list() else cons(mul(head(a),head(b)),dnr-mul(tail(a),tail(b)));
+  def dnr-rms-weight(x,w,eps) = dnr-mul(dnr-rms(x,eps),w);
+  def dnr-sigmoid(x) = div(1.0,add(1.0,math_exp(sub(0.0,x))));
+
+  // c[src + dst*n]: each row softmax is followed by a column normalization.
+  def dnr-mix(mix,base,s,offset,n,i) = if eq(i,n) then list() else cons(add(mul(nth(mix,add(offset,i)),s),nth(base,add(offset,i))),dnr-mix(mix,base,s,offset,n,add(i,1)));
+  def dnr-gates(xs,factor,eps) = if nil?(xs) then list() else cons(add(mul(factor,dnr-sigmoid(head(xs))),eps),dnr-gates(tail(xs),factor,eps));
+  def dnr-exps(xs,m) = if nil?(xs) then list() else cons(math_exp(sub(head(xs),m)),dnr-exps(tail(xs),m));
+  def dnr-soft-scale(xs,inv,eps) = if nil?(xs) then list() else cons(add(mul(head(xs),inv),eps),dnr-soft-scale(tail(xs),inv,eps));
+  def dnr-soft-row(xs,eps) {
+   let exps = dnr-exps(xs,dnr-max(xs));
+   dnr-soft-scale(exps,div(1.0,dnr-sum(exps)),eps);
+  }
+  def dnr-soft-rows(c,n,eps) = if nil?(c) then list() else dnr-cat(dnr-soft-row(dnr-take(c,n),eps),dnr-soft-rows(dnr-drop(c,n),n,eps));
+  def dnr-column-sum(c,n,src,dst,s) = if eq(dst,n) then s else dnr-column-sum(c,n,src,add(dst,1),add(s,nth(c,add(src,mul(dst,n)))));
+  def dnr-col-inverses(c,n,eps,src) = if eq(src,n) then list() else cons(div(1.0,add(dnr-column-sum(c,n,src,0,0.0),eps)),dnr-col-inverses(c,n,eps,add(src,1)));
+  def dnr-cols-apply(c,inverses,n,i) = if nil?(c) then list() else cons(mul(head(c),nth(inverses,mod(i,n))),dnr-cols-apply(tail(c),inverses,n,add(i,1)));
+  def dnr-cols(c,n,eps) = dnr-cols-apply(c,dnr-col-inverses(c,n,eps,0),n,0);
+  def dnr-rows(c,n,eps) = if nil?(c) then list() else dnr-cat(dnr-scale(dnr-take(c,n),div(1.0,add(dnr-sum(dnr-take(c,n)),eps))),dnr-rows(dnr-drop(c,n),n,eps));
+  def dnr-sink(c,n,eps,remaining) = if le(remaining,0) then c else dnr-sink(dnr-cols(dnr-rows(c,n,eps),n,eps),n,eps,sub(remaining,1));
+  def dnr-hc-split(mix,scale,base,n,iters,eps) {
+   let pre = dnr-gates(dnr-mix(mix,base,nth(scale,0),0,n,0),1.0,eps);
+   let post = dnr-gates(dnr-mix(mix,base,nth(scale,1),n,n,0),2.0,0.0);
+   let raw = dnr-mix(mix,base,nth(scale,2),mul(2,n),mul(n,n),0);
+   let first = dnr-cols(dnr-soft-rows(raw,n,eps),n,eps);
+   dnr-cat(pre,dnr-cat(post,dnr-sink(first,n,eps,sub(iters,1))));
+  }
+  def dnr-weighted-dim(x,w,e,n,d,h,s) = if eq(h,n) then s else dnr-weighted-dim(x,w,e,n,d,add(h,1),add(s,mul(nth(x,add(mul(h,e),d)),nth(w,h))));
+  def dnr-weighted-loop(x,w,e,n,d) = if eq(d,e) then list() else cons(dnr-weighted-dim(x,w,e,n,d,0,0.0),dnr-weighted-loop(x,w,e,n,add(d,1)));
+  def dnr-hc-weighted(x,w,e,n) = dnr-weighted-loop(x,w,e,n,0);
+  def dnr-post-dim(block,resid,post,comb,e,n,dst,d,src,s) = if eq(src,n) then s else dnr-post-dim(block,resid,post,comb,e,n,dst,d,add(src,1),add(s,mul(nth(comb,add(dst,mul(src,n))),nth(resid,add(mul(src,e),d)))));
+  def dnr-post-loop(block,resid,post,comb,e,n,i) = if eq(i,mul(e,n)) then list() else cons(dnr-post-dim(block,resid,post,comb,e,n,div(i,e),mod(i,e),0,mul(nth(block,mod(i,e)),nth(post,div(i,e)))),dnr-post-loop(block,resid,post,comb,e,n,add(i,1)));
+  def dnr-hc-post(block,resid,post,comb,e,n) = dnr-post-loop(block,resid,post,comb,e,n,0);
+  def dnr-hc-pre(fn,scale,base,resid,n,e,iters,eps) {
+   let split = dnr-hc-split(dnr-matvec(fn,dnr-rms(resid,eps)),scale,base,n,iters,eps);
+   list(dnr-hc-weighted(resid,dnr-take(split,n),e,n),dnr-slice(split,n,n),dnr-drop(split,mul(2,n)));
+  }
+  def dnr-hc-head(fn,scale,base,resid,n,e,eps) {
+   let raw = dnr-matvec(fn,dnr-rms(resid,eps));
+   let weights = dnr-gates(dnr-mix(raw,base,head(scale),0,n,0),1.0,eps);
+   dnr-hc-weighted(resid,weights,e,n);
+  }
+
+  // Adjacent tail rotations, with an independently evaluated sine/cosine pair.
+  def dnr-trig-sum(x,k,term,total) = dnr-trig-next(x,k,div(mul(sub(0.0,mul(x,x)),term),mul(mul(1.0,add(k,1)),add(k,2))),total);
+  def dnr-trig-next(x,k,term,total) = if eq(add(total,term),total) then total else dnr-trig-sum(x,add(k,2),term,add(total,term));
+  def dnr-angle(x) = sub(x,mul(6.283185307179586,floor(div(add(x,3.141592653589793),6.283185307179586))));
+  def dnr-sin(x) = dnr-trig-sum(dnr-angle(x),1,dnr-angle(x),dnr-angle(x));
+  def dnr-cos(x) = dnr-trig-sum(dnr-angle(x),0,1.0,1.0);
+  def dnr-rotate-pair(a,b,theta,sign) {
+   let c = dnr-cos(theta); let s = mul(sign,dnr-sin(theta));
+   list(sub(mul(a,c),mul(b,s)),add(mul(a,s),mul(b,c)));
+  }
+  def dnr-rotate-tail(x,nrot,pos,base,sign,k) = if nil?(x) then list() else dnr-cat(dnr-rotate-pair(head(x),nth(x,1),mul(mul(1.0,pos),math_exp(mul(div(sub(0.0,mul(1.0,k)),mul(1.0,nrot)),math_log(base)))),sign),dnr-rotate-tail(dnr-drop(x,2),nrot,pos,base,sign,add(k,2)));
+  def dnr-rope(x,nrot,pos,base,sign) = dnr-cat(dnr-take(x,sub(len(x),nrot)),dnr-rotate-tail(dnr-drop(x,sub(len(x),nrot)),nrot,pos,base,sign,0));
+  def dnr-rope-heads(x,hd,nrot,pos,base,sign) = if nil?(x) then list() else dnr-cat(dnr-rope(dnr-take(x,hd),nrot,pos,base,sign),dnr-rope-heads(dnr-drop(x,hd),hd,nrot,pos,base,sign));
+  def dnr-head-rms(x,hd,eps) = if nil?(x) then list() else dnr-cat(dnr-rms(dnr-take(x,hd),eps),dnr-head-rms(dnr-drop(x,hd),hd,eps));
+  def dnr-attn-scores(q,rows,scale) = if nil?(rows) then list() else cons(mul(dnr-dot(q,head(rows)),scale),dnr-attn-scores(q,tail(rows),scale));
+  def dnr-attn-sum(rows,weights,out) = if nil?(rows) then out else dnr-attn-sum(tail(rows),tail(weights),dnr-add(out,dnr-scale(head(rows),head(weights))));
+  def dnr-attend(q,rows,scale,sink) {
+   let scores = dnr-attn-scores(q,rows,scale);
+   let top = dnr-max(cons(sink,scores));
+   let weights = dnr-exps(scores,top);
+   let denom = add(math_exp(sub(sink,top)),dnr-sum(weights));
+   dnr-scale(dnr-attn-sum(rows,weights,dnr-fill(len(q),0.0)),div(1.0,denom));
+  }
+  def dnr-heads(q,rows,hd,scale,sinks) = if nil?(q) then list() else dnr-cat(dnr-attend(dnr-take(q,hd),rows,scale,head(sinks)),dnr-heads(dnr-drop(q,hd),rows,hd,scale,tail(sinks)));
+  def dnr-grouped(heads,was,width) = if nil?(was) then list() else dnr-cat(dnr-matvec(head(was),dnr-take(heads,width)),dnr-grouped(dnr-drop(heads,width),tail(was),width));
+  def dnr-mla(w,mc,x,pos) {
+   let hd = nth(mc,1); let nrot = nth(mc,2); let base = nth(mc,4); let eps = nth(mc,5);
+   let norm = dnr-rms-weight(x,nth(w,0),eps);
+   let low = dnr-rms-weight(dnr-matvec(nth(w,1),norm),nth(w,2),eps);
+   let q = dnr-rope-heads(dnr-head-rms(dnr-matvec(nth(w,3),low),hd,eps),hd,nrot,pos,base,1.0);
+   let kv = dnr-rope(dnr-rms-weight(dnr-matvec(nth(w,4),norm),nth(w,5),eps),nrot,pos,base,1.0);
+   let heads = dnr-heads(q,list(kv),hd,div(1.0,math_sqrt(mul(1.0,hd))),nth(w,8));
+   let back = dnr-rope-heads(heads,hd,nrot,pos,base,-1.0);
+   dnr-matvec(nth(w,7),dnr-grouped(back,nth(w,6),mul(div(nth(mc,0),nth(mc,3)),hd)));
+  }
+
+  // Router selection uses biased scores; mixture weights use unbiased scores.
+  // The availability scan preserves first-index ties without a sentinel score.
+  def dnr-contains(xs,x) = if nil?(xs) then 0 else if eq(head(xs),x) then 1 else dnr-contains(tail(xs),x);
+  def dnr-best(scores,used,i,best) = if eq(i,len(scores)) then best else dnr-best(scores,used,add(i,1),if dnr-contains(used,i) then best else if lt(best,0) then i else if gt(nth(scores,i),nth(scores,best)) then i else best);
+  def dnr-top-loop(scores,k,used) = if eq(k,0) then list() else dnr-top-next(scores,k,used,dnr-best(scores,used,0,-1));
+  def dnr-top-next(scores,k,used,best) = cons(best,dnr-top-loop(scores,sub(k,1),cons(best,used)));
+  def dnr-top(scores,k) = dnr-top-loop(scores,k,list());
+  def dnr-gather(xs,ids) = if nil?(ids) then list() else cons(nth(xs,head(ids)),dnr-gather(xs,tail(ids)));
+  def dnr-probs(logits) = if nil?(logits) then list() else cons(math_sqrt(math_log(add(1.0,math_exp(head(logits))))),dnr-probs(tail(logits)));
+  def dnr-clamp-gate(x,limit) = if and(gt(limit,0.000001),gt(x,limit)) then limit else x;
+  def dnr-clamp-up(x,limit) = if le(limit,0.000001) then x else if gt(x,limit) then limit else if lt(x,sub(0.0,limit)) then sub(0.0,limit) else x;
+  def dnr-mid-value(g,u,weight,limit) {
+   let gate = dnr-clamp-gate(g,limit); let up = dnr-clamp-up(u,limit);
+   mul(mul(mul(gate,dnr-sigmoid(gate)),up),weight);
+  }
+  def dnr-mid(gate,up,weight,limit) = if nil?(gate) then list() else cons(dnr-mid-value(head(gate),head(up),weight,limit),dnr-mid(tail(gate),tail(up),weight,limit));
+  def dnr-expert(x,expert,weight,limit) = dnr-matvec(nth(expert,2),dnr-mid(dnr-matvec(nth(expert,0),x),dnr-matvec(nth(expert,1),x),weight,limit));
+  def dnr-moe-fold(x,experts,ids,weights,limit,out) = if nil?(ids) then out else dnr-moe-fold(x,experts,tail(ids),tail(weights),limit,dnr-add(out,dnr-expert(x,nth(experts,head(ids)),head(weights),limit)));
+  def dnr-router-weights(probs,denom,scale) = if nil?(probs) then list() else cons(mul(div(head(probs),denom),scale),dnr-router-weights(tail(probs),denom,scale));
+  def dnr-moe(x,gate,bias,experts,count,scale,limit) {
+   let probs = dnr-probs(dnr-matvec(gate,x));
+   let ids = dnr-top(dnr-add(probs,bias),count);
+   let raw = dnr-gather(probs,ids); let total = dnr-sum(raw);
+   let weights = dnr-router-weights(raw,if lt(total,0.00006103515625) then 0.00006103515625 else total,scale);
+   dnr-moe-fold(x,experts,ids,weights,limit,dnr-fill(len(x),0.0));
+  }
+  def dnr-attn-half(cfg,w,resid,pos,e) {
+   let n = nth(cfg,1); let eps = nth(nth(cfg,0),5);
+   let pre = dnr-hc-pre(nth(w,0),nth(w,1),nth(w,2),resid,n,e,nth(cfg,2),eps);
+   let block = dnr-mla(nth(w,6),nth(cfg,0),nth(pre,0),pos);
+   dnr-hc-post(block,resid,nth(pre,1),nth(pre,2),e,n);
+  }
+  def dnr-ffn-half(cfg,w,resid,e) {
+   let n = nth(cfg,1); let eps = nth(nth(cfg,0),5); let limit = nth(cfg,5);
+   let pre = dnr-hc-pre(nth(w,3),nth(w,4),nth(w,5),resid,n,e,nth(cfg,2),eps);
+   let x = dnr-rms-weight(nth(pre,0),nth(w,7),eps);
+   let routed = dnr-moe(x,nth(w,8),nth(w,9),nth(w,10),nth(cfg,3),nth(cfg,4),limit);
+   let shared = dnr-expert(x,list(nth(w,11),nth(w,12),nth(w,13)),1.0,limit);
+   dnr-hc-post(dnr-add(routed,shared),resid,nth(pre,1),nth(pre,2),e,n);
+  }
+  def dnr-layer(cfg,w,resid,pos,e) = dnr-ffn-half(cfg,w,dnr-attn-half(cfg,w,resid,pos,e),e);
+  def dnr-layers(cfg,weights,resid,pos,e) = if nil?(weights) then resid else dnr-layers(cfg,tail(weights),dnr-layer(cfg,head(weights),resid,pos,e),pos,e);
+  def dnr-chunks(xs,width) = if nil?(xs) then list() else cons(dnr-take(xs,width),dnr-chunks(dnr-drop(xs,width),width));
+  // Result: full vocabulary logits and every final HC stream, before collapse.
+  def dnr-forward(cfg,weights,global,plain,pos) {
+   let e = len(plain); let n = nth(cfg,1); let eps = nth(nth(cfg,0),5);
+   let state = dnr-layers(cfg,weights,dnr-flat(dnr-fill(n,plain)),pos,e);
+   let collapsed = dnr-hc-head(nth(global,0),nth(global,1),nth(global,2),state,n,e,eps);
+   let norm = dnr-rms-weight(collapsed,nth(global,3),eps);
+   list(dnr-matvec(nth(global,4),norm),dnr-chunks(state,e));
+  }
+ }
+ 0;
+}

@@ -1,0 +1,69 @@
+// All files belong to one process-private temporary directory.
+// preludes: form-stdlib/bml/formbin-artifacts.bml observe/formbin-depth-fixtures.bml
+section [form.bml] {
+ class FormbinArtifactWitness {
+  def fab-k(ok, bit) = if ok then bit else 0;
+  def fab-at(dir, name) = str_concat(dir, str_concat("/", name));
+  def fab-json-bool(doc, key) = node_value(json-object-get(fbc-value(doc), key));
+  def fab-remove(dir, names) = if nil?(names) then fs_rmdir(dir) else fab-remove-next(dir, tail(names), fs_remove(fab-at(dir, head(names))));
+  def fab-remove-next(dir, names, removed) = if lt(removed, 0) then 0 else fab-remove(dir, names);
+  def fab-invalid-json(xs) = if nil?(xs) then 1 else and(not(jwa-valid(head(xs))), fab-invalid-json(tail(xs)));
+  def fab-file-boundaries(dir) {
+   let path = fab-at(dir, "extent.fkb");
+   let bytes = fbc-value(fbc-encode(fbc-leaf(1, 2, 12, 1)));
+   let written = write_file(path, bytes);
+   let complete = fbc-read-exact(path, fbc-max-bytes());
+   let before = file_size(path);
+   let partial = fbc-read-observed(path, before, read_file_slice(path, 0, sub(before, 1)));
+   let held = read_file(path);
+   let changed = write_file(path, str_concat(held, "extra"));
+   let moved = fbc-read-observed(path, before, held);
+   let lens = fab-at(dir, "extent.fkl");
+   let saved = write_file(lens, "{} ");
+   let shortLens = fba-lens-read(lens, fbc-read-observed(lens, file_size(lens), read_file_slice(lens, 0, 2)));
+   and(fbc-good(complete), and(and(eq(nth(complete, 3), before), eq(nth(complete, 4), before)), and(not(fbc-good(partial)), and(ge(str_find(fbc-error(partial), "incomplete artifact read", 0), 0), and(not(fbc-good(moved)), and(ge(str_find(fbc-error(moved), "extent changed", 0), 0), and(not(fbc-good(shortLens)), and(fbc-good(fba-lens-load(lens)), not(fbc-good(fbc-load(dir)))))))))));
+  }
+  def fab-run() {
+   let dir = fab-at(host_temp_dir(), str_concat("formbin-artifacts-", str_concat(int_to_str(host_pid()), str_concat("-", int_to_str(host_monotonic_ms())))));
+   let made = host_dir_mkdir(dir);
+   if not(eq(made, 1)) then form_error("artifact witness directory creation failed") else 0;
+   let source = fab-at(dir, "source.fkb");
+   let same = fab-at(dir, "same.fkb");
+   let changed = fab-at(dir, "changed.fkb");
+   let malformed = fab-at(dir, "bad.fkb");
+   let a = fbc-dump(source, fbc-string(1, "∴ witnessed"));
+   let b = fbc-dump(same, fbc-string(7, "∴ witnessed"));
+   let c = fbc-dump(changed, fbc-string(1, "changed"));
+   let badWritten = write_file(malformed, "FORMBIN2");
+   let equal = fba-diff(source, same);
+   let different = fba-diff(source, changed);
+   let bad = fba-diff(source, malformed);
+   let id = fba-nodeid(1, 2, 12, 5);
+   let lens = json-node-object(list(fba-lens-entry(id, "answer", fba-span("answer.fk", 0, 2, 1, 0, 1, 2))));
+   let lensPath = fba-lens-path(source);
+   let saved = fba-lens-write(lensPath, lens);
+   let loaded = fba-lens-load(lensPath);
+   let missing = fba-lens-load(fab-at(dir, "absent.fkl"));
+   let readSpan = fba-lens-span(fbc-value(loaded), id);
+   let nested = str_concat(fbw-repeat("[", 1024), str_concat("0", fbw-repeat("]", 1024)));
+   let sumBeforeCleanup = sum(list(
+    fab-k(and(fbc-good(a), and(fbc-good(b), and(fbc-good(c), fab-file-boundaries(dir)))), 1),
+    fab-k(and(fbc-good(equal), and(fab-json-bool(equal, "structurally_equal"), not(fab-json-bool(equal, "byte_equal")))), 2),
+    fab-k(and(fbc-good(different), not(fab-json-bool(different, "structurally_equal"))), 4),
+    fab-k(and(not(fbc-good(bad)), ge(str_find(fbc-error(bad), "truncated u32", 0), 0)), 8),
+    fab-k(and(str_eq(fba-nodeid-text(fba-nodeid-parse("@1.2.12.5")), "@1.2.12.5"), str_eq(fba-nodeid-text(fba-nodeid-parse("4294967295.0.0.0")), "@4294967295.0.0.0")), 16),
+    fab-k(and(nothing?(fba-nodeid-parse("@1.2.12.4294967296")), and(nothing?(fba-nodeid-parse("1.2.12.-1")), and(nothing?(fba-nodeid-parse("1.2.12.1.0")), nothing?(fba-nodeid-parse("1..2.3"))))), 32),
+    fab-k(and(fbc-good(saved), and(fbc-good(loaded), str_eq(node_value(fba-lens-symbol(fbc-value(loaded), id)), "answer"))), 64),
+    fab-k(and(str_eq(node_value(json-object-get(readSpan, "path")), "answer.fk"), eq(node_value(json-object-get(readSpan, "end_offset")), 2)), 128),
+    fab-k(and(fbc-good(missing), nothing?(fba-lens-symbol(fbc-value(missing), id))), 256),
+    fab-k(fab-invalid-json(list("", "{", "{\"a\" 1}", "{\"a\":1,}", "[1,]", "{\"a\":01}", "{\"a\":1} tail", "{\"a\":\"bad\\x\"}")), 512),
+    fab-k(and(jwa-valid(nested), not(jwa-valid(substring(nested, 0, sub(str_len(nested), 1))))), 1024),
+    fab-k(and(not(fbc-good(fba-lens-parse("bad", "{\"a\" 1}"))), not(fbc-good(fba-lens-parse("array", "[]")))), 2048),
+    fab-k(and(str_eq(fba-lens-path("dir.with.dot/answer.fkb"), "dir.with.dot/answer.fkl"), and(str_eq(fba-lens-path("dir.with.dot/answer"), "dir.with.dot/answer.fkl"), str_eq(fba-lens-path("dir/.answer"), "dir/.answer.fkl"))), 4096)
+   ));
+   let clean = fab-remove(dir, list("source.fkb", "same.fkb", "changed.fkb", "bad.fkb", "source.fkl", "extent.fkb", "extent.fkl"));
+   add(sumBeforeCleanup, fab-k(not(eq(fs_exists(dir), 1)), 8192));
+  }
+ }
+ fab-run();
+}
