@@ -30,6 +30,20 @@ after 20,000 real receive/release cycles. `tests/gift-bookkeeping-band.fk`
 under `form/form-stdlib/` verifies the mapping lifecycle, including kernel-page
 readers. This measures bookkeeping cost, not end-to-end screen latency.
 
+Glass reads retained shared-memory handles and decodes changed snapshots. The
+producing organ owns counters at the operation boundary and publishes coherent
+snapshots at its useful cadence. Durable coding checkpoints belong after a
+complete role/tool transition; verified lessons belong after successful checks,
+not in the renderer or on each generated token.
+
+`./fkwu observe/form-glass-presentation-current.bml` reads only the shared last
+presentation and cadence. It reports collection-start-to-terminal-write time,
+terminal-write time, generation, and age. A generation advances only after a
+successful terminal write; staging, unchanged frames and failed writes cannot
+claim presentation. Cadence work includes terminal output. This is a write
+acknowledgment, not display-photon time or upstream microphone/model latency.
+The pure presentation band returns 31.
+
 Run `./fkwu observe/form-glass-run.fk` in the viewing terminal. After a native
 binary repair, relaunch that carrier once to replace its already-running children.
 Thereafter a dependency change renews the renderer and the three sensor processes;
@@ -57,6 +71,37 @@ ID wins, including an unavailable row; absent IDs return an empty list. Old inde
 snapshots stay unchanged when another frame is built. Dropping a frame lets its
 index and rows be reclaimed, unlike a kernel record whose fields remain rooted
 for the process lifetime.
+
+The live loop retains dynamic key-to-position tries in 32-row cache chunks.
+Unchanged keys reuse their trie while values and ages come from the new frame.
+Insertion, removal, reordering, and malformed-row changes rebuild the affected
+chunk. The granule is not a field schema or capacity limit. Exact byte equality,
+hash-collision handling, and first-row precedence apply across chunks. The
+unfiltered atlas shares this index with the flow calculation; filtered views
+build an index from their own rows. Sample deduplication uses an exact-key trie
+instead of repeatedly scanning all preceding samples. The cached-index band
+returns 65535, including cross-chunk precedence, unaffected-chunk reuse, and
+the native bounded-integer hash's equivalence to the established djb2 encoding.
+
+Snapshot identity and first-occurrence sample positions are also retained across
+value-only changes. A changed publisher, ID, model kind, or physical handle
+invalidates the identity proof; duplicates use the existing newest-snapshot and
+physical-alias fold. The sample-index band returns 8191. Tries allow a small
+bucket load to avoid copying unnecessarily deep sparse paths; full-key comparison
+still decides equality. These are reclaimable observer caches, not disk ledgers.
+
+Rows whose age has not changed are retained directly. When a row must be
+restamped, the encoding copies its unchanged slots without redispatching every
+field accessor. Observation time, sequence, projection node, optional producer
+node, unavailable age, and backward-clock indication retain their meanings.
+`form-glass-row-age-band.fk` returns 31; the observer band returns 67108863.
+
+The physical frame-work band uses a child-PID namespace for its output frames
+and control channel. It reads existing producer frames but cannot overwrite
+live Glass cadence, presentation, or supervisor state, and cannot request work
+from the model owner. Its rows and dispatch counter belong to the same child.
+It warms 200 ticks before the four-second measurement. Its original limits,
+including fewer than 1,500,000 dispatches per tick, remain unchanged.
 
 ```text
 ./fkwu form/form-stdlib/tests/form-glass-metric-index-band.fk  # 65535

@@ -73,7 +73,63 @@ section [form.bml] {
             let hash = km-hash(key);
             if eq(len(km-get-h(index, hash, key, list())), 0) then km-put-h(index, hash, key, row) else index;
         }
-        def fgd-index-find(index, id) = km-get(index, km-key-of-string(id), list());
+        // Reuse only the dynamic key-to-position tree. Values and ages always
+        // come from this frame's rows. Any key insertion/removal/reorder rebuilds.
+        field FGDSlotIndex = "glass-metric-slots-v1";
+        field FGDIndexChunkRows = 32;
+        field FGDIndexBucketLoad = 4;
+        def fgd-key-bytes(text) = fgd-key-bytes-in(text, 0, str_len(text));
+        def fgd-key-bytes-in(text, i, end) = if lt(sub(end, i), 8) then km-key-loop(text, i, end) else cons(str_byte_at(text, i), cons(str_byte_at(text, add(i, 1)), cons(str_byte_at(text, add(i, 2)), cons(str_byte_at(text, add(i, 3)), cons(str_byte_at(text, add(i, 4)), cons(str_byte_at(text, add(i, 5)), cons(str_byte_at(text, add(i, 6)), cons(str_byte_at(text, add(i, 7)), fgd-key-bytes-in(text, add(i, 8), end)))))))));
+        // The same djb2 u32 result, expressed with bounded native integer
+        // arithmetic. Masking each input keeps the multiplication below 2^38.
+        field FGDKeyMask = 4294967295;
+        def fgd-key-fold(key, hash) = fgd-key-fold-block(key, hash, FGDKeyMask());
+        // Four polynomial steps, one u32 reduction. With masked inputs the
+        // unreduced sum stays below 2^53; this changes cost, not hash identity.
+        def fgd-key-fold-block(key, hash, mask) = if lt(len(key), 4) then fgd-key-fold-in(key, hash, mask) else fgd-key-fold-block(tail(tail(tail(tail(key)))), band(add(add(mul(hash, 1185921), mul(band(head(key), mask), 35937)), add(mul(band(nth(key, 1), mask), 1089), add(mul(band(nth(key, 2), mask), 33), band(nth(key, 3), mask)))), mask), mask);
+        def fgd-key-fold-in(key, hash, mask) = if eq(len(key), 0) then hash else fgd-key-fold-in(tail(key), band(add(mul(hash, 33), band(head(key), mask)), mask), mask);
+        def fgd-key-hash(key) = fgd-key-fold(key, km-seed());
+        // A trie node has sixteen slots. Copy an unchanged eight-slot prefix
+        // in one native list construction instead of eight recursive calls.
+        def fgd-key-set(xs, i, value) = if lt(i, 8) then km-lset(xs, i, value) else append(list(nth(xs, 0), nth(xs, 1), nth(xs, 2), nth(xs, 3), nth(xs, 4), nth(xs, 5), nth(xs, 6), nth(xs, 7)), km-lset(tail(tail(tail(tail(tail(tail(tail(tail(xs)))))))), sub(i, 8), value));
+        def fgd-key-put-node(node, hash, depth, key, value) {
+            let slot = band(hash, km-mask());
+            let child = nth(node, slot);
+            fgd-key-set(node, slot, if eq(depth, 1) then km-bucket-put(child, key, value) else fgd-key-put-node(if eq(len(child), 0) then km-node() else child, shr_u32(hash, km-nibble()), sub(depth, 1), key, value));
+        }
+        def fgd-key-put(index, hash, key, value) = list(km-depth(index), fgd-key-put-node(km-root(index), hash, km-depth(index), key, value), add(km-count(index), 1));
+        def fgd-slot-index?(index) = if not(eq(len(index), 3)) then 0 else if not(str_eq(value_kind(head(index)), "string")) then 0 else str_eq(head(index), FGDSlotIndex());
+        def fgd-same-row-keys(a, b) = if not(eq(len(a), len(b))) then 0 else fgd-same-row-keys-go(a, b);
+        def fgd-same-row-keys-go(a, b) = if nil?(a) then 1 else if not(eq(lt(len(head(a)), 3), lt(len(head(b)), 3))) then 0 else if and(ge(len(head(a)), 3), not(str_eq(fgo-id(head(a)), fgo-id(head(b))))) then 0 else fgd-same-row-keys-go(tail(a), tail(b));
+        def fgd-metric-index-cached(rows, prior) {
+            let chunks = if fgd-slot-index?(prior) then nth(prior, 2) else list();
+            let slots = fgd-slot-chunks(rows, chunks);
+            list(FGDSlotIndex(), rows, slots);
+        }
+        // A changing heat lane need not rebuild unrelated producer rows. Chunk
+        // size is only a cache granule, never a field schema or lookup limit.
+        def fgd-slot-chunks(rows, prior) = if nil?(rows) then list() else fgd-slot-chunk(fgd-take(rows, FGDIndexChunkRows()), fgd-drop(rows, FGDIndexChunkRows()), prior);
+        def fgd-slot-chunk(rows, rest, prior) {
+            let reusable = if nil?(prior) then 0 else fgd-same-row-keys(rows, head(head(prior)));
+            let previousKeys = if nil?(prior) then list() else if lt(len(head(prior)), 3) then list() else nth(head(prior), 2);
+            let keys = if reusable then previousKeys else fgd-slot-rowkeys(rows, previousKeys);
+            let slots = if reusable then nth(head(prior), 1) else fgd-slot-build-cached(keys, 0, km-for(div(len(rows), FGDIndexBucketLoad())));
+            cons(list(rows, slots, keys), fgd-slot-chunks(rest, if nil?(prior) then list() else tail(prior)));
+        }
+        def fgd-slot-rowkeys(rows, prior) = if nil?(rows) then list() else cons(fgd-slot-rowkey(head(rows), if nil?(prior) then list() else head(prior)), fgd-slot-rowkeys(tail(rows), if nil?(prior) then list() else tail(prior)));
+        def fgd-slot-rowkey(row, prior) = if lt(len(row), 3) then list() else if and(eq(len(prior), 3), str_eq(fgo-id(row), head(prior))) then prior else fgd-slot-rowkey-new(fgo-id(row), fgd-key-bytes(fgo-id(row)));
+        def fgd-slot-rowkey-new(id, key) = list(id, key, fgd-key-hash(key));
+        def fgd-slot-build-cached(keys, position, index) = if nil?(keys) then index else fgd-slot-build-cached(tail(keys), add(position, 1), if nil?(head(keys)) then index else fgd-slot-put-cached(index, nth(head(keys), 1), nth(head(keys), 2), position));
+        def fgd-slot-put-cached(index, key, hash, position) = if lt(km-get-h(index, hash, key, -1), 0) then fgd-key-put(index, hash, key, position) else index;
+        def fgd-slot-build(rows, position, index) = if nil?(rows) then index else fgd-slot-build(tail(rows), add(position, 1), if lt(len(head(rows)), 3) then index else fgd-slot-put(index, km-key-of-string(fgo-id(head(rows))), position));
+        def fgd-slot-put(index, key, position) {
+            let hash = fgd-key-hash(key);
+            if lt(km-get-h(index, hash, key, -1), 0) then km-put-h(index, hash, key, position) else index;
+        }
+        def fgd-slot-find(chunks, key, hash) = if nil?(chunks) then list() else fgd-slot-found(chunks, key, hash, km-get-h(nth(head(chunks), 1), hash, key, -1));
+        def fgd-slot-found(chunks, key, hash, position) = if lt(position, 0) then fgd-slot-find(tail(chunks), key, hash) else nth(head(head(chunks)), position);
+        def fgd-slot-key(chunks, key) = fgd-slot-find(chunks, key, fgd-key-hash(key));
+        def fgd-index-find(index, id) = if fgd-slot-index?(index) then fgd-slot-key(nth(index, 2), fgd-key-bytes(id)) else km-get(index, km-key-of-string(id), list());
         def fgd-semantic-zero-state?(state) = if str_eq(state, "empty") then 1 else if str_eq(state, "drained") then 1 else if str_eq(state, "idle") then 1 else if str_eq(state, "quiet") then 1 else 0;
         def fgd-semantic-zero(metric) = if str_eq(fgo-unit(metric), "bytes") then fgd-cat(list("0B(", fgo-lifecycle(metric), ")")) else fgd-cat(list("0(", fgo-lifecycle(metric), ")"));
         def fgd-metric-value(metric) = if eq(len(metric), 0) then "UNAVAILABLE door=metric.publisher reason=metric-not-published" else if eq(fgo-present?(metric), 0) then fgd-cat(list("UNAVAILABLE door=", fgo-source(metric), " reason=", fgo-note(metric))) else if str_eq(fgo-value-kind(metric), "text") then fgo-text-value(metric) else if and(eq(fgo-int-value(metric), 0), eq(fgd-semantic-zero-state?(fgo-lifecycle(metric)), 1)) then fgd-semantic-zero(metric) else if str_eq(fgo-unit(metric), "bytes") then fgd-format-bytes(fgo-int-value(metric)) else fgd-format-count(fgo-int-value(metric));
