@@ -154,10 +154,16 @@ form/validate.sh, each of the three new bands  -> ✓ go=0 rust=0 typescript=0, 
 
 ## Named, not hidden
 
-- `fkwu` keeps every trivial int in the inline slot and never mints type 5, so
-  the source lens wound was only ever visible from the sibling arms. The two
-  kernels disagree about a leaf's type for the same integer. The heal accepts
-  both; the divergence itself is still there and is not mine to close today.
+- The two kernels disagree about that leaf's type, and the disagreement is now
+  measured rather than named. On four values past the ceiling — the seal,
+  2147483648, -2147483649, and 2^52-1 — `fkwu` answers type 1 and the full Go
+  kernel answers 5, while both round-trip the value exactly, intern distinctly,
+  and re-intern the same value to the same node. Only the type number differs,
+  because one kernel splits its storage at the 32-bit ceiling and the other does
+  not. The cost lands on any cell that dispatches on `node_type` for an integer
+  leaf, which is what the lens did. It cannot be asserted in a band: the three
+  proof walkers bind neither `node_type` nor `node_value`, so such a bit would
+  have exactly one arm. It is written into the band's header with both numbers.
 - The awareness door's eight is now honest but still eight. Whether the right
   bound is eight is a different question from whether the bound speaks.
 - The queue depth genuinely alternates because the observation itself puts a
