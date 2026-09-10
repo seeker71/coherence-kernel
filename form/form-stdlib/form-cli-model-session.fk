@@ -25,7 +25,7 @@
 ; per-conversation state are both explicit and both released. No persistence,
 ; model weight update, or remote call is implied.
 ;
-; preludes: form-stdlib/form-cli-model-generate.fk form-stdlib/model-registry.bml form-stdlib/bml/form-cli-model-admission.bml
+; preludes: form-stdlib/form-cli-model-generate.fk form-stdlib/model-registry.bml form-stdlib/bml/form-cli-model-admission.bml form-stdlib/bml/form-cli-model-observation.bml
 ; Proven by: form-stdlib/tests/form-cli-model-session-band.fk
 
 (do
@@ -414,17 +414,25 @@
                         (fcms-observations s))
                 (do
                     (let ctx (fcms-ctx s))
-                    ; This is an incremental span, not a fresh prompt. Keep it
-                    ; in one concurrent Metal batch and express per-position
-                    ; scratch ordering with the witnessed barrier path.
-                    (let pf (q38-prefill-chunked
-                        (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3)
-                        (fcms-sts s) (nth ctx 4) (nth ctx 5) (nth ctx 6)
-                        ids (fcms-pos s) 0))
-                    (fcms-with-stream s (nth pf 1) (nth pf 0) 0
-                        (fcms-generated-ids s)
-                        (add (fcms-injected-ids s) (len ids))
-                        (add (fcms-observations s) 1))))))
+                    ; All IDs retain their order and the same stream state.
+                    ; Submission width, unlike observation length, is bounded.
+                    (let pf (fcmo-prefill ctx (fcms-sts s) ids (fcms-pos s)))
+                    (if (not (fcmo-shape pf (fcms-pos s) (len ids)))
+                        ; No retry may resume this state: a completed prefix or
+                        ; a partially executed failing submission can be present.
+                        ; Counters retain the last completed observation, not a
+                        ; claim that physical KV was rolled back. Keep ownership
+                        ; so the original context can still be released.
+                        (fcms-session "nothing" "observation-prefill-refused"
+                            (fcms-path s) (fcms-src s) ctx (fcms-sts s)
+                            (fcms-maxpos s) (fcms-pos s) (fcms-pending s)
+                            (fcms-stopped? s) (fcms-prompt-ids s)
+                            (fcms-generated-ids s) (fcms-injected-ids s)
+                            (fcms-observations s))
+                        (fcms-with-stream s (nth pf 1) (nth pf 0) 0
+                            (fcms-generated-ids s)
+                            (add (fcms-injected-ids s) (len ids))
+                            (add (fcms-observations s) 1)))))))
 
     ; Injects one typed Form observation into the SAME q38 state. It returns a
     ; session whose pending ID is the first prediction after the observation.
