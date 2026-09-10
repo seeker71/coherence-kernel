@@ -29,6 +29,43 @@ dependencies; a policy-only edit must also reach the resident ear.
 Changing words in the current phrase is intentional; changing its display slot
 is not. Frames carry `gainmilli` and `revision` only when those facts were measured.
 
+## A doubtful close can listen again
+
+`form/form-stdlib/bml/ear-acoustic-review.bml` owns one local recovery attempt.
+The live ear calls `eac-close` only at an actual phrase boundary. A candidate
+with words below the existing −1500 milli-logprob threshold gets one more
+acoustic reading. Already credible lines, silence, and filtered tags take the
+zero-pass path.
+
+The second view excludes audio before this phrase's cut, writes the remaining
+PCM chunks at the front of the same eight-second encoder window, and fills the
+tail exactly with zeros. It uses the existing native no-timestamp decoder,
+bounded to 136 generated tokens. This is a different window/prompt arrangement,
+not another model, a text completion, or a teacher. Original microphone bytes
+and the current display slot remain unchanged.
+
+Only matching cleaned text **and language**, independently clearing the existing
+word-confidence and no-speech checks, can replace the doubtful candidate. Tag
+filtering, repetition handling, and result packing have one shared implementation
+for both paths. Disagreement or renewed doubt preserves refusal. Worker ownership
+is rechecked after the model pass before any frame or segment is published.
+
+`eac-close(st, parts, totalBytes, cutBytes, cap, gainMilli, candidate)` returns
+`[selectedCandidate, reviewStatus, elapsedMs, firstLPmilli, reviewLPmilli]`.
+Status is empty on the ordinary fast path, otherwise `confirmed`, `uncertain`,
+`disagreed`, or an explicit missing-audio/control status. Glass adds the measured
+local re-listen outcome and cost to the existing close/refusal row; optional
+frame fields are `review`, `reviewms`, `firstlp`, and `reviewlp`. Nothing is
+invented when an older frame lacks those fields.
+
+On the original development fixture, this changes a correct-but-refused close
+to a correct accepted close: −1617 → −1460 milli-LP, with 20–23 ms for the local
+review in two runs. The 4x- and 16x-quieter versions remain below threshold at
+closure. This is one recovered development case, not a broad quality claim or
+a weight update. Deterministic noise can be highly confident on the second view;
+an explicit conflicting-audio test proves confidence alone cannot replace the
+first phrase. Agreement of one model with itself is still not proof of truth.
+
 ## Reproduce locally
 
 Run each band through `observe/preflight-stdin-run.fk` first, passing its path on
@@ -39,7 +76,9 @@ stdin. Then use `form-run ./fkwu` with these paths:
 | `form/form-stdlib/tests/ear-listening-band.fk` | 4194303 | Onset, hysteresis, dropout, gain bounds, pre-roll, revisability, close policy, quiet-level display |
 | `form/form-stdlib/tests/ear-quiet-quality-band.fk` | 255 | Real local model, attenuation ladder, negative controls, erroneous-prefix correction |
 | `form/form-stdlib/tests/ear-native-band.fk` | 32767 | Existing unity-gain mel, encoder, language, text, and doubt pins unchanged |
-| `form/form-stdlib/tests/ear-axes-band.fk` | 131071 | Glass decoding, missing-field honesty, gain and revisability display |
+| `form/form-stdlib/tests/ear-acoustic-review-band.fk` | 2097151 | Shared cleanup, unchanged gates, exact text/language agreement, zero-pass path, phrase cuts |
+| `form/form-stdlib/tests/ear-acoustic-quality-band.fk` | 1023 | Real close recovery, quiet limits, silence/noise, conflicting audio, exact trailing fill and segment isolation |
+| `form/form-stdlib/tests/ear-axes-band.fk` | 524287 | Glass decoding, optional-field honesty, gain, revisability, and local review display |
 
 The quality band uses only the existing committed two-second fixture. Its original,
 4x-quieter, and 16x-quieter versions produced exact open-phrase matches at 3/3

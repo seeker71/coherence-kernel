@@ -1,0 +1,85 @@
+// One bounded second acoustic view at a doubtful close. No teacher, no text
+// completion, no new threshold: both readings must agree on text and language.
+// preludes: form/form-stdlib/ear-native.fk form/form-stdlib/bml/ear-listening.bml form/form-stdlib/line-grammar.fk observe/bidirectional-framebuffer-channel.fk
+section [form.bml] {
+ class EarAcousticReview {
+  field EarWordTrustMilli = -1500;
+  // Shared by the live pass and its review, so tags and loops cannot acquire
+  // a different meaning merely by taking the second door.
+  def el-detag-go(s, i, n, depth, acc) = if ge(i, n) then acc else el-detag-byte(s, i, n, depth, acc, str_byte_at(s, i));
+  def el-detag-byte(s, i, n, depth, acc, c) = if or(eq(c, 40), eq(c, 91)) then el-detag-go(s, add(i, 1), n, add(depth, 1), acc) else if or(eq(c, 41), eq(c, 93)) then el-detag-go(s, add(i, 1), n, elp-max(0, sub(depth, 1)), acc) else el-detag-go(s, add(i, 1), n, depth, if gt(depth, 0) then acc else str_concat(acc, byte_to_str(c)));
+  def el-note?(s, i, n) = and(lt(add(i, 2), n), and(eq(str_byte_at(s, i), 226), and(eq(str_byte_at(s, add(i, 1)), 153), or(eq(str_byte_at(s, add(i, 2)), 170), eq(str_byte_at(s, add(i, 2)), 171)))));
+  def el-note-go(s, i, n, acc) = if ge(i, n) then acc else if el-note?(s, i, n) then el-note-go(s, add(i, 3), n, acc) else el-note-go(s, add(i, 1), n, str_concat(acc, byte_to_str(str_byte_at(s, i))));
+  def el-detag(s) {
+   let a = el-detag-go(s, 0, str_len(s), 0, "");
+   trim(el-note-go(a, 0, str_len(a), ""));
+  }
+  def el-mark?(s, i, n) = or(el-note?(s, i, n), and(lt(add(i, 2), n), and(eq(str_byte_at(s, i), 226), and(eq(str_byte_at(s, add(i, 1)), 128), eq(str_byte_at(s, add(i, 2)), 166)))));
+  def el-letter?(c) = or(and(ge(c, 65), le(c, 90)), or(and(ge(c, 97), le(c, 122)), or(and(ge(c, 48), le(c, 57)), ge(c, 194))));
+  def el-said-go(s, i, n) = if ge(i, n) then 0 else if el-mark?(s, i, n) then el-said-go(s, add(i, 3), n) else if el-letter?(str_byte_at(s, i)) then 1 else el-said-go(s, add(i, 1), n);
+  def el-has-words(s) = el-said-go(s, 0, str_len(s));
+  def el-words(s) = split-on(s, " ");
+  def el-join(xs) = if eq(len(xs), 0) then "" else if eq(len(tail(xs)), 0) then head(xs) else str_concat(head(xs), str_concat(" ", el-join(tail(xs))));
+  def el-take(xs, n) = if or(eq(n, 0), eq(len(xs), 0)) then list() else cons(head(xs), el-take(tail(xs), sub(n, 1)));
+  def el-bare(w) = if eq(str_len(w), 0) then w else el-bare-last(w, str_byte_at(w, sub(str_len(w), 1)));
+  def el-bare-last(w, c) = if or(eq(c, 46), or(eq(c, 44), or(eq(c, 63), eq(c, 33)))) then substring(w, 0, sub(str_len(w), 1)) else w;
+  def el-span-eq(ws, width, k) = if ge(k, width) then 1 else if str_eq(el-bare(nth(ws, k)), el-bare(nth(ws, add(width, k)))) then el-span-eq(ws, width, add(k, 1)) else 0;
+  def el-loop-at(ws, width) = if or(gt(width, 12), lt(len(ws), mul(2, width))) then 0 else if and(el-span-eq(ws, width, 0), or(gt(width, 1), and(ge(len(ws), 3), str_eq(el-bare(head(ws)), el-bare(nth(ws, 2)))))) then width else el-loop-at(ws, add(width, 1));
+  def el-unloop-go(ws, acc) = if lt(len(ws), 2) then el-join(append(acc, ws)) else el-unloop-at(ws, acc, el-loop-at(ws, 1));
+  def el-unloop-at(ws, acc, width) = if gt(width, 0) then str_concat(el-join(append(acc, el-take(ws, width))), " …") else el-unloop-go(tail(ws), append(acc, list(head(ws))));
+  def el-unloop(s) = el-unloop-go(el-words(s), list());
+  def el-trust-line() = EarWordTrustMilli();
+  def eac-pack(st, r, encMs, decMs, gain) {
+   let raw = el-unloop(trim(enw-heard(st, r)));
+   let clean = el-detag(raw);
+   list(enw-lang-code(head(r)), clean, encMs, decMs, len(nth(r, 1)), head(r), nth(r, 1), float_to_int(mul(enw-nospeech-prob(r), 1000.0)), if str_eq(clean, raw) then "" else raw, float_to_int(mul(enw-line-logprob(r), 1000.0)), gain);
+  }
+  def eac-words?(h) = if lt(len(h), 11) then 0 else el-has-words(nth(h, 1));
+  def eac-credible?(h) = if not(eac-words?(h)) then 0 else and(ge(nth(h, 9), EarWordTrustMilli()), le(nth(h, 7), float_to_int(mul(enw-doubt-line(), 1000.0))));
+  def eac-needs?(h) = if not(eac-words?(h)) then 0 else lt(nth(h, 9), EarWordTrustMilli());
+  def eac-agree?(a, b) = if or(not(eac-words?(a)), not(eac-words?(b))) then 0 else and(str_eq(head(a), head(b)), str_eq(nth(a, 1), nth(b, 1)));
+  def eac-select(first, review, ms) {
+   let accepted = and(eac-needs?(first), and(eac-credible?(review), eac-agree?(first, review)));
+   list(if accepted then review else first, if accepted then "confirmed" else if not(eac-credible?(review)) then "uncertain" else "disagreed", ms, nth(first, 9), nth(review, 9));
+  }
+  // Exclude already committed audio, including a cut inside a retained chunk.
+  def eac-phrase(parts, total, cut) = enw-parts-drop(parts, elp-max(0, sub(cut, sub(total, enw-parts-len(parts)))));
+  // Exact trailing fill: unlike front padding, no audio will cover an overshoot.
+  def eac-zero-tail(st, off, end, block) = if ge(off, end) then off else eac-zero-write(st, off, end, block, elp-min(str_len(block), sub(end, off)));
+  def eac-zero-write(st, off, end, block, bytes) {
+   let wrote = metal_buf_write(enw-b(st, 0), off, if eq(bytes, str_len(block)) then block else substring(block, 0, bytes));
+   eac-zero-tail(st, add(off, bytes), end, block);
+  }
+  def eac-encode(st, parts, gain) {
+   let xs = enw-parts-drop(parts, elp-max(0, sub(enw-parts-len(parts), ELWindowBytes())));
+   let end = enw-parts-write(st, xs, 0);
+   let filled = eac-zero-tail(st, end, ELWindowBytes(), enw-zblock());
+   enw-encode-at-gain(st, ELWindowBytes(), gain);
+  }
+  def eac-review(st, parts, cap, gain) {
+   let t0 = now_unix_ms();
+   let te = eac-encode(st, parts, gain);
+   let t1 = now_unix_ms();
+   let r = enw-transcribe(st, te, elp-min(136, elp-max(8, cap)));
+   eac-pack(st, r, sub(t1, t0), sub(now_unix_ms(), t1), gain);
+  }
+  def eac-close(st, parts, total, cut, cap, gain, first) = if not(eac-needs?(first)) then list(first, "", 0, 0, 0) else eac-reconsider(st, eac-phrase(parts, total, cut), cap, gain, first);
+  def eac-reconsider(st, parts, cap, gain, first) = if eq(enw-parts-len(parts), 0) then list(first, "no-audio", 0, nth(first, 9), 0) else eac-attempt(st, parts, cap, gain, first);
+  def eac-attempt(st, parts, cap, gain, first) {
+   let t0 = now_unix_ms();
+   let out = bfc-envelope(0, t0, 0, list(nth(first, 9), EarWordTrustMilli()), 0);
+   let observed = bfc-record-out(out, 0);
+   let measured = fb_record(intern_trivial_int(nth(first, 9)), "ear-acoustic-review:first-lp", 0);
+   let control = bfc-control(out, 5);
+   let received = bfc-record-in(control, 1);
+   let action = bfc-apply(out, control, 0, 1);
+   if eq(action, 1) then eac-finish(out, first, eac-review(st, parts, cap, gain), t0) else list(first, "no-control", 0, nth(first, 9), 0);
+  }
+  def eac-finish(out, first, review, t0) {
+   let result = eac-select(first, review, sub(now_unix_ms(), t0));
+   let measured = fb_record(intern_trivial_int(nth(review, 9)), "ear-acoustic-review:second-lp", 2);
+   let observed = bfc-record-out(bfc-envelope(0, bfc-exchange(out), 0, list(nth(first, 9), nth(review, 9), eac-credible?(head(result))), 0), 2);
+   result;
+  }
+ }
+}
