@@ -1,0 +1,87 @@
+// Model measurement over the existing committed two-second fixture only.
+// No recording and no network. Reports exact-match counts, not corpus WER.
+// preludes: form/form-stdlib/ear-native.fk form/form-stdlib/bml/ear-listening.bml observe/bidirectional-framebuffer-channel.fk
+section [form.bml] {
+ class EarQuietQualityBand {
+  def eqq-pack(v) {
+   let u = if lt(v, 0) then add(v, 65536) else v;
+   str_concat(byte_to_str(mod(u, 256)), byte_to_str(div(u, 256)));
+  }
+  def eqq-attenuate(s, lo, hi, d) = if ge(lo, hi) then "" else if eq(sub(hi, lo), 2) then eqq-pack(div(elp-s16(s, lo), d)) else eqq-split(s, lo, hi, d);
+  def eqq-split(s, lo, hi, d) {
+   let mid = add(lo, mul(2, div(sub(hi, lo), 4)));
+   str_concat(eqq-attenuate(s, lo, mid, d), eqq-attenuate(s, mid, hi, d));
+  }
+  def eqq-chunks(s, i, acc) = if ge(i, str_len(s)) then reverse(acc) else eqq-chunks(s, add(i, 3200), cons(substring(s, i, elp-min(str_len(s), add(i, 3200))), acc));
+  def eqq-onset(parts, state, admitted) = if eq(len(parts), 0) then admitted else eqq-hop(parts, state, admitted, elp-stats(head(parts)));
+  def eqq-hop(parts, state, admitted, stats) {
+   let d = elp-step(state, head(stats), nth(stats, 1), str_len(head(parts)), admitted);
+   eqq-onset(tail(parts), head(d), or(admitted, nth(d, 1)));
+  }
+  def eqq-state(parts, state, admitted) = if eq(len(parts), 0) then state else eqq-state-hop(parts, state, admitted, elp-stats(head(parts)));
+  def eqq-state-hop(parts, state, admitted, stats) {
+   let d = elp-step(state, head(stats), nth(stats, 1), str_len(head(parts)), admitted);
+   eqq-state(tail(parts), head(d), or(admitted, nth(d, 1)));
+  }
+  def eqq-pass(st, parts, tick, gain, prefix) {
+   let t0 = now_unix_ms();
+   let te = enw-encode-parts-gain(st, parts, ELWindowBytes(), gain);
+   let r = enw-transcribe-from2(st, te, tick, 64, -1, prefix);
+   let exact = str_eq(trim(enw-heard(st, r)), "Okay, let's try the guitar.");
+   list(exact, enw-nospeech-prob(r), enw-line-logprob(r), sub(now_unix_ms(), t0), r);
+  }
+  def eqq-row(st, pcm, divisor) {
+   let quiet = eqq-attenuate(pcm, 0, str_len(pcm), divisor);
+   let parts = eqq-chunks(quiet, 0, list());
+   let peak = nth(elp-stats(quiet), 1);
+   let raw = eqq-pass(st, parts, 300, 1000, list());
+   let out = bfc-envelope(0, divisor, 0, list(head(raw), peak), 1000);
+   let observed = bfc-record-out(out, 0);
+   let control = bfc-control(out, 5);
+   let received = bfc-record-in(control, 1);
+   let listening = eqq-state(parts, elp-born(), 0);
+   let gain = bfc-apply(out, control, 1000, elp-window-gain(listening));
+   let improved = eqq-pass(st, parts, 300, gain, elp-revision-prefix(list(), list()));
+   let observed2 = bfc-record-out(bfc-envelope(0, divisor, 0, list(head(raw), head(improved), gain), 1000), 2);
+   let entered = eqq-onset(parts, elp-born(), 0);
+   let shown = print(list("fixture-divisor/peak/gain-milli/raw-exact/new-exact/onset/nsp/avgLP/ms", divisor, peak, gain, head(raw), head(improved), entered, nth(improved, 1), nth(improved, 2), nth(improved, 3)));
+   list(head(improved), entered, raw, improved);
+  }
+  def eqq-noise(i, n, seed, acc) = if ge(i, n) then acc else eqq-noise-next(i, n, mod(add(mul(seed, 1664525), 1013904223), 4294967296), acc);
+  def eqq-noise-next(i, n, seed, acc) = eqq-noise(add(i, 1), n, seed, str_concat(acc, eqq-pack(sub(mod(div(seed, 65536), 161), 80))));
+  def eqq-fold(rows, bit, acc) = if eq(len(rows), 0) then acc else eqq-fold(tail(rows), mul(bit, 2), add(acc, if head(rows) then bit else 0));
+  def eqq-run() {
+   let snap = str_concat("/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/snapshots/", trim(en-text(read_file("/Users/ursmuff/.cache/huggingface/hub/models--mlx-community--whisper-tiny/refs/main"))));
+   let st = enw-open(str_concat(snap, "/weights.npz"), "/Users/ursmuff/.mlx-venv/lib/python3.14/site-packages/mlx_whisper/assets/multilingual.tiktoken");
+   let bytes = en-text(read_file("form/form-stdlib/tests/fixtures/ear-okay-2s.wav"));
+   let pcm = substring(bytes, 44, str_len(bytes));
+   let a = eqq-row(st, pcm, 1);
+   let b = eqq-row(st, pcm, 4);
+   let c = eqq-row(st, pcm, 16);
+   let limit = eqq-row(st, pcm, 64);
+   let silence = list(enw-zeros(byte_to_str(0), 64000));
+   let quietResult = eqq-pass(st, silence, 300, 16000, list());
+   let noiseChunk = eqq-noise(0, 1600, 42, "");
+   let noise = list(enw-dbl(noiseChunk, 64000));
+   let noiseStats = elp-stats(noiseChunk);
+   let noiseState = head(elp-step(elp-born(), head(noiseStats), nth(noiseStats, 1), 3200, 0));
+   let room = eqq-pass(st, noise, 300, elp-window-gain(noiseState), list());
+   let negatives = print(list("silence/noise-doubt/noise-avgLP/noise-onset/gain", nth(quietResult, 1), nth(room, 1), nth(room, 2), eqq-onset(eqq-chunks(head(noise), 0, list()), elp-born(), 0), elp-window-gain(noiseState)));
+   // A forced erroneous prefix cannot correct itself. The same native decoder
+   // without that constraint recovers the fixture's current phrase.
+   let wrong = list(2652, 11);
+   let forced = eqq-pass(st, eqq-chunks(pcm, 0, list()), 300, 1000, wrong);
+   let revised = eqq-pass(st, eqq-chunks(pcm, 0, list()), 300, 1000, elp-revision-prefix(wrong, wrong));
+   // Noise fools no-speech probability even at unity gain. The real pipeline
+   // rejects its onset and its word confidence, and leaves its gain at unity.
+   eqq-fold(list(
+    head(a), head(b), head(c),
+    and(nth(a, 1), and(nth(b, 1), nth(c, 1))),
+    ge(nth(quietResult, 1), enw-doubt-line()),
+    and(eq(elp-window-gain(noiseState), 1000), and(lt(nth(room, 2), -1.5), eq(eqq-onset(eqq-chunks(head(noise), 0, list()), elp-born(), 0), 0))),
+    and(eq(head(forced), 0), eq(head(revised), 1)),
+    and(eq(elp-gain(14), ELGainLimit()), eq(elp-gain(32768), ELGainUnity()))
+   ), 1, 0);
+  }
+ }
+}
