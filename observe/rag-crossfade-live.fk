@@ -1,0 +1,68 @@
+; rag-crossfade-live.fk — the crossfade with the REAL new ear on this host.
+;
+; PROOF LEVEL: METAL-LINKED fkwu ONLY (metal_* through the handle door, a 274 MB GGUF on disk).
+;
+; rag-crossfade.bml's band proves the flow over two hand-built ears. This cell runs the same
+; flow with the ears the body actually has: the old ear is rag-embed.fk's lexical re-vec
+; (64 bins, four-way), the new ear is nomic-embed-text-v1.5 held by nomic-embed-form.fk on
+; Metal, each raw 768-f32 vector unit-normalized and quantized to the rag lane's ints
+; (500 + floor(500 * x)). Everything between the ears is rag-crossfade.bml unchanged.
+;
+; Six texts, one query — "a small cat lay on a carpet" — and the relevant set declared before
+; the run: the four texts about a small animal resting on a soft surface (t1 t2 t4 t6).
+;
+; Witnessed 2026-09-10 (M4 Max, 47 s, most of it the model load):
+;   old-ear-order   t1 t2 t6 t3 t4 t5      (lexical: "cat", "on", "a")
+;   new-ear-native  t2 t1 t6 t4 t3 t5      (nomic puts the kitten on the rug first)
+;   answer-1        partial, candidates (t1 t2 t6), ranked (t1), encoded 1, queued 2
+;   breath          done (t2 t6), unanswered ()
+;   answer-2        warm, ranked (t2 t1 t6), hits 3
+;   containment k3  1000
+;   curve           (2 235) (3 0) (4 0) (6 0) on nDCG per mille; observed depth at eps 0 -> 3
+;   reading         k3 ice, k4 ice
+; Cold, the old ear's order was served; warm, the new ear reordered the same three. The gap at
+; depth 2 (235 per mille of nDCG) is the one the old ear alone would have paid; at depth 3 there is none.
+;
+; preludes: native/metal/nomic-embed-form.fk form-stdlib/rag-embed.fk form-stdlib/bml/rag-crossfade.bml
+(do
+    (let path "/Users/ursmuff/.ollama/models/blobs/sha256-970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6")
+    (let src (nbf-src path))
+    (let offs (nwp-offs src))
+    ; quantize a raw 768-f32 vector to the rag lane: unit-normalize, then 500 + floor(500 * x)
+    (defn lc-rev (in out) (if (eq (len in) 0) out (lc-rev (tail in) (cons (head in) out))))
+    (defn lc-q-go (xs norm acc)
+        (if (eq (len xs) 0) (lc-rev acc (empty))
+            (lc-q-go (tail xs) norm (cons (math_floor (add 500.0 (mul 500.0 (div (head xs) norm)))) acc))))
+    (defn lc-embed (path src offs text)
+        (do (let facts (nbf-embed-text path src offs text))
+            (if (eq facts 0) (empty)
+                (do (let xs (head facts))
+                    (lc-q-go xs (nbf-norm xs) (empty))))))
+    (let t1 "the cat sat on the mat")
+    (let t2 "a kitten rested on the rug")
+    (let t3 "quarterly tax filing deadline")
+    (let t4 "the dog slept on the couch")
+    (let t5 "income tax return due in april")
+    (let t6 "a puppy napped on the sofa")
+    (let q  "a small cat lay on a carpet")
+    (let index (list (rag-entry "t1" (re-vec t1)) (rag-entry "t2" (re-vec t2)) (rag-entry "t3" (re-vec t3))
+                     (rag-entry "t4" (re-vec t4)) (rag-entry "t5" (re-vec t5)) (rag-entry "t6" (re-vec t6))))
+    (let ear (list (rag-entry "t1" (lc-embed path src offs t1)) (rag-entry "t2" (lc-embed path src offs t2)) (rag-entry "t3" (lc-embed path src offs t3))
+                   (rag-entry "t4" (lc-embed path src offs t4)) (rag-entry "t5" (lc-embed path src offs t5)) (rag-entry "t6" (lc-embed path src offs t6))))
+    (let sq (re-vec q))
+    (let tq (lc-embed path src offs q))
+    (let contract (rcf-contract "nomic-embed-text-v1.5" "gguf-970aa74c" 768 "mean"))
+    (let a1 (rcf-serve sq tq index (empty) contract ear 3 1 (empty)))
+    (let b1 (rcf-materialize (rcf-answer-cache a1) contract ear (rcf-answer-queue a1) 8))
+    (let a2 (rcf-serve sq tq index (rcf-breath-cache b1) contract ear 3 1 (rcf-breath-queue b1)))
+    (let relevant (list "t1" "t2" "t4" "t6"))
+    (let curve (rcf-curve sq tq index ear relevant 3 (list 2 3 4 6)))
+    (list (list "ear-dims" (len (rag-vec (head ear))) (len tq))
+          (list "old-ear-order" (rag-topk sq index 6))
+          (list "new-ear-native" (rcf-native tq ear 6))
+          (list "answer-1" (rcf-answer-state a1) (rcf-answer-candidates a1) (rcf-answer-ranked a1) (rcf-answer-encoded a1) (rcf-answer-queued a1))
+          (list "breath" (rcf-breath-done b1) (rcf-breath-unanswered b1))
+          (list "answer-2" (rcf-answer-state a2) (rcf-answer-ranked a2) (rcf-answer-hits a2))
+          (list "containment-k3" (rcf-containment (rag-topk sq index 3) (rcf-native tq ear 3) 3))
+          (list "curve" curve (rcf-observed-depth curve 0))
+          (list "reading-k3" (rcf-read sq tq index ear 3 6 3) "reading-k4" (rcf-read sq tq index ear 4 6 3))))
