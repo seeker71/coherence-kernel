@@ -24,6 +24,15 @@ different content. `current.json` names the publication and actual row counts.
 examples and distinct sessions. LoRA A/B matrix pairs are model parameters,
 not examples, sessions or knowledge coverage.
 
+Historical term examples cover both directions: description → coined term and
+coined term → the exact recorded description. No generated explanation is
+substituted for the source. Both examples retain the same source unit and split;
+the publishing organ checks every reverse association byte-for-byte. `source_units`
+counts their shared source material once, while `examples` counts both learning
+directions. `historical_teachings` and `historical_description_examples` make
+that distinction explicit. More directions are not more independent lessons,
+and historical descriptions can be questions rather than current instructions.
+
 `form-run ./fkwu observe/repo-knowledge-train-run.bml` reads one JSON stdin line,
 for example `{"steps":2,"batch":2}`. Empty stdin uses that bounded request.
 The native trainer checks dataset hashes, restores the local Llama adapter's

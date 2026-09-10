@@ -4,6 +4,9 @@
 section [form.bml] {
  class RepoKnowledgeCorpus {
   def rkc-home() = nsm-knowledge-home(hearth-session-learning());
+  def rkc-schema() = "repo-knowledge-corpus-v2";
+  def rkc-modern?(manifest) = str_eq(nsm-str(manifest,"schema"),rkc-schema());
+  def rkc-supported?(manifest) = or(rkc-modern?(manifest),str_eq(nsm-str(manifest,"schema"),"repo-knowledge-corpus-v1"));
   def rkc-docs() = list(
    "docs/native-jit-routing.md", "docs/native-tensors.md",
    "docs/native-llama-metal.md", "docs/fkwu-form-native-north-star.md",
@@ -29,6 +32,20 @@ section [form.bml] {
    if nil?(rows) then list() else if not(hdc-admissible?(head(rows))) then rkc-teachings(tail(rows),source) else cons(rkc-teaching(head(rows),source),rkc-teachings(tail(rows),source));
   }
   def rkc-teaching(row,source) = rkc-row(cts-question(row),cts-answer(row),source,int_to_str(hdc-mid(row)),"attributed-rented-teaching",if cte-valid-row?(row) then "heldout" else "train");
+  // Recognition alone puts the description in the prompt and only a coined
+  // label in the supervised target. Teach the recorded association in both
+  // directions, after exact deduplication. This adds examples, not lessons.
+  def rkc-descriptive?(row) = str_eq(nsm-str(row,"evidence_kind"),"attributed-corpus-description");
+  def rkc-description-prompt(row) = str_concat("Which recorded description belongs to the historical repository term `",str_concat(nsm-str(row,"completion"),str_concat("` in corpus row ",str_concat(nsm-str(row,"unit"),"? Quote the source association; do not claim a new execution result."))));
+  def rkc-description(row) = rkc-row(rkc-description-prompt(row),nsm-str(row,"prompt"),json-object-get(row,"source"),nsm-str(row,"unit"),"attributed-corpus-description",nsm-str(row,"split"));
+  def rkc-expand(rows) = if nil?(rows) then list() else if str_eq(nsm-str(head(rows),"evidence_kind"),"attributed-rented-teaching") then cons(head(rows),cons(rkc-description(head(rows)),rkc-expand(tail(rows)))) else cons(head(rows),rkc-expand(tail(rows)));
+  def rkc-unit-key(row) = json-emit-precise(json-node-array(list(json-object-get(row,"source"),json-node-string(nsm-str(row,"unit")))));
+  def rkc-unit-count(rows,seen) = if nil?(rows) then len(seen) else rkc-unit-count-key(tail(rows),seen,rkc-unit-key(head(rows)));
+  def rkc-unit-count-key(rest,seen,key) = rkc-unit-count(rest,if nsm-has(seen,key) then seen else cons(key,seen));
+  def rkc-description-keys(rows) = if nil?(rows) then list() else if rkc-descriptive?(head(rows)) then cons(json-emit-precise(head(rows)),rkc-description-keys(tail(rows))) else rkc-description-keys(tail(rows));
+  // Pre-encode each association once. Every original must have its exact
+  // description row on the SAME side, including identity and source evidence.
+  def rkc-description-errors(rows,keys) = if nil?(rows) then 0 else add(if str_eq(nsm-str(head(rows),"evidence_kind"),"attributed-rented-teaching") then not(nsm-has(keys,json-emit-precise(rkc-description(head(rows))))) else 0,rkc-description-errors(tail(rows),keys));
   // These edge contracts have recorded arm differences. Do not teach a bare
   // registry sentence as the current native contract; keep the omission visible.
   def rkc-edge-omissions() = list("substring","char_at","str_byte_at","int_to_str");
@@ -139,8 +156,12 @@ section [form.bml] {
    let samePrompt = rkc-overlap(train,rkc-keys(append(held,valid),"prompt"),"prompt"); let sameAnswer = rkc-overlap(train,rkc-keys(held,"completion"),"completion");
    let bound = and(str_eq(nsm-hash(trainText),nsm-str(manifest,"train_sha256")),and(str_eq(nsm-hash(heldText),nsm-str(manifest,"heldout_sha256")),str_eq(nsm-hash(validText),nsm-str(manifest,"validation_sha256"))));
    let counts = and(eq(len(train),nsm-num(manifest,"train_examples")),and(eq(len(held),nsm-num(manifest,"heldout_examples")),eq(len(valid),nsm-num(manifest,"validation_sentinels"))));
-   let measured = json-node-object(list(nsm-n("train_examples",len(train)),nsm-n("heldout_examples",len(held)),nsm-n("validation_sentinels",len(valid)),nsm-n("source_files_rehashed",rkc-sources(append(train,held),list())),nsm-n("heldout_prompt_overlap",samePrompt),nsm-n("heldout_completion_overlap",sameAnswer),nsm-n("dataset_hashes_match",bound),nsm-n("manifest_counts_match",counts)));
-   if and(bound,and(counts,and(eq(samePrompt,0),eq(sameAnswer,0)))) then measured else form_error(str_concat("repository knowledge separation or content disagrees: ",json-emit-precise(measured)));
+   let allRows = append(train,held); let units = rkc-unit-count(allRows,list());
+   let descriptions = rkc-count(allRows,"evidence_kind","attributed-corpus-description");
+   let descriptionErrors = if rkc-modern?(manifest) then add(rkc-description-errors(train,rkc-description-keys(train)),rkc-description-errors(held,rkc-description-keys(held))) else descriptions;
+   let unitCounts = and(rkc-supported?(manifest),if rkc-modern?(manifest) then and(eq(units,nsm-num(manifest,"source_units")),and(eq(descriptions,nsm-num(manifest,"historical_description_examples")),eq(descriptions,rkc-count(allRows,"evidence_kind","attributed-rented-teaching")))) else eq(descriptions,0));
+   let measured = json-node-object(list(nsm-n("train_examples",len(train)),nsm-n("heldout_examples",len(held)),nsm-n("validation_sentinels",len(valid)),nsm-n("source_units",units),nsm-n("historical_description_examples",descriptions),nsm-n("description_binding_errors",descriptionErrors),nsm-n("source_unit_counts_match",unitCounts),nsm-n("source_files_rehashed",rkc-sources(allRows,list())),nsm-n("heldout_prompt_overlap",samePrompt),nsm-n("heldout_completion_overlap",sameAnswer),nsm-n("dataset_hashes_match",bound),nsm-n("manifest_counts_match",counts)));
+   if and(bound,and(counts,and(unitCounts,and(eq(descriptionErrors,0),and(eq(samePrompt,0),eq(sameAnswer,0)))))) then measured else form_error(str_concat("repository knowledge separation or content disagrees: ",json-emit-precise(measured)));
   }
   def rkc-keep(path,text) {
    if gt(file_size(path),0) then if str_eq(rkc-read(path),text) then 1 else form_error(str_concat("immutable corpus publication differs: ",path)) else nag-write(path,text);
@@ -148,12 +169,14 @@ section [form.bml] {
   def rkc-build(home) {
    let private = nsm-init(hearth-session-learning());
    let valid = rkc-read("model/fixtures/session-learning/valid.jsonl");
-   let rows = rkc-clean(rkc-all(),list(),rkc-sentinel-prompts(split-on(valid,"\n")),list());
+   let blocked = rkc-sentinel-prompts(split-on(valid,"\n"));
+   let originals = rkc-clean(rkc-all(),list(),blocked,list());
+   let rows = rkc-clean(rkc-expand(originals),list(),blocked,list());
    let train = rkc-text(rows,"train"); let heldout = rkc-text(rows,"heldout");
    let id = nsm-hash(str_concat(train,str_concat(heldout,valid))); let dir = nsm-at(nsm-at(home,"versions"),id);
    let root = fs-mkdir(home); let versions = fs-mkdir(nsm-at(home,"versions")); let made = fs-mkdir(dir);
    let t = rkc-keep(nsm-at(dir,"train.jsonl"),train); let v = rkc-keep(nsm-at(dir,"valid.jsonl"),valid); let h = rkc-keep(nsm-at(dir,"heldout.jsonl"),heldout);
-   let manifest = json-node-object(list(nsm-s("schema","repo-knowledge-corpus-v1"),nsm-s("id",id),nsm-s("data",dir),nsm-n("examples",len(rows)),nsm-n("train_examples",rkc-count(rows,"split","train")),nsm-n("heldout_examples",rkc-count(rows,"split","heldout")),nsm-n("validation_sentinels",len(rkc-sentinel-prompts(split-on(valid,"\n")))),nsm-n("documentation_examples",rkc-count(rows,"evidence_kind","source-documentation")),nsm-n("primitive_examples",rkc-count(rows,"evidence_kind","declared-primitive-contract")),nsm-n("historical_teachings",rkc-count(rows,"evidence_kind","attributed-rented-teaching")),json-node-pair("omitted_edge_contracts",json-node-array(nsm-string-nodes(rkc-edge-omissions()))),nsm-s("train_sha256",nsm-hash(train)),nsm-s("heldout_sha256",nsm-hash(heldout)),nsm-s("validation_sha256",nsm-hash(valid)),nsm-s("trained_examples","unmeasured; training-events own consumption"),nsm-s("scope","source-attributed knowledge, not verified session autonomy")));
+   let manifest = json-node-object(list(nsm-s("schema",rkc-schema()),nsm-s("id",id),nsm-s("data",dir),nsm-n("examples",len(rows)),nsm-n("source_units",rkc-unit-count(rows,list())),nsm-n("train_examples",rkc-count(rows,"split","train")),nsm-n("heldout_examples",rkc-count(rows,"split","heldout")),nsm-n("validation_sentinels",len(rkc-sentinel-prompts(split-on(valid,"\n")))),nsm-n("documentation_examples",rkc-count(rows,"evidence_kind","source-documentation")),nsm-n("primitive_examples",rkc-count(rows,"evidence_kind","declared-primitive-contract")),nsm-n("historical_teachings",rkc-count(rows,"evidence_kind","attributed-rented-teaching")),nsm-n("historical_description_examples",rkc-count(rows,"evidence_kind","attributed-corpus-description")),json-node-pair("omitted_edge_contracts",json-node-array(nsm-string-nodes(rkc-edge-omissions()))),nsm-s("train_sha256",nsm-hash(train)),nsm-s("heldout_sha256",nsm-hash(heldout)),nsm-s("validation_sha256",nsm-hash(valid)),nsm-s("trained_examples","unmeasured; training-events own consumption"),nsm-s("scope","source-attributed knowledge, not verified session autonomy")));
    let checked = rkc-check(manifest);
    let complete = rkc-keep(nsm-at(dir,"manifest.json"),json-emit-precise(manifest));
    let published = nsm-atomic(nsm-at(home,"current.json"),manifest);
