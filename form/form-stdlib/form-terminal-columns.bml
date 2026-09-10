@@ -1,0 +1,126 @@
+//////////////////////////////////////////////////////////////////////
+//
+// form-terminal-columns.bml — a column model for the glass.
+//
+// Urs, 2026-09-10: "minimal white space otherwise aligned pretty
+// colorful information dense functional and focused on vitality and
+// showing what is alive and in flow" — and then: "I'm pretty sure the
+// rich framework has rendering support for alignment that we can
+// embody."
+//
+// What that framework has and this body did not is not a pad function —
+// fgd-pad-right and fgd-fit have always been here. It is the idea that a
+// set of cells forms a TABLE: that a column has a width MEASURED FROM ITS
+// CONTENT, that the widths are then fitted to the space actually
+// available, and that a cell is justified inside its own column rather
+// than padded to a number somebody typed.
+//
+// The difference shows on the glass. A half-width padded to 39 leaves a
+// gutter of blanks whenever the reading is short; a column measured from
+// the readings takes the width the readings need, and the separator lands
+// where the content says rather than where the arithmetic guessed.
+//
+// Three refusals this door makes, so the model stays honest:
+//
+//   A column is never wider than its content asked for. Growing one to
+//   fill space is what makes gutters.
+//
+//   When the space is too small, the FLEXIBLE columns give way first and
+//   in proportion to what they asked for; a fixed column keeps its width
+//   or the caller is told it did not fit. Shrinking everything equally
+//   destroys the small columns first.
+//
+//   The line is exactly the width asked for, always. A layout that is
+//   sometimes one column short is a layout that moves, and a reader
+//   cannot compare two frames of something that moves.
+//
+// preludes: form/form-stdlib/core.fk
+
+section [form.bml] {
+    class FormTerminalColumns {
+        field FTBSchema = "form-terminal-column-v1";
+
+        // ---- a column ---------------------------------------------------------
+        // want: the width it asks for, or -1 to be measured from its cells
+        // justify: "left", "right" or "centre"
+        // flex: 1 if it may give way when space is short, 0 if it must not
+        def ftb-col(want, justify, flex) = list(FTBSchema(), want, justify, flex);
+        def ftb-auto(justify) = ftb-col(sub(0, 1), justify, 1);
+        // the one column that may grow past its content, because the caller said
+        // so: on the glass this is the spark, where extra space becomes more
+        // history rather than more blank
+        def ftb-fill(justify) = ftb-col(sub(0, 1), justify, 2);
+        def ftb-fixed(width, justify) = ftb-col(width, justify, 0);
+        def ftb-col-want(c) = nth(c, 1);
+        def ftb-col-justify(c) = nth(c, 2);
+        def ftb-col-flex(c) = nth(c, 3);
+        def ftb-col?(c) = if lt(len(c), 4) then 0 else if str_eq(head(c), FTBSchema()) then 1 else 0;
+
+        // ---- justification within a column -------------------------------------
+        // A cell wider than its column is CUT, never allowed to push its
+        // neighbours: one row overflowing is one row wrong, but a row that
+        // shoves the rest moves every column after it on that line only, and
+        // then the table has different columns on different rows.
+        def ftb-spaces(n) = if le(n, 0) then "" else str_concat(" ", ftb-spaces(sub(n, 1)));
+        def ftb-cut(text, width) = if le(width, 0) then "" else if le(str_len(text), width) then text else substring(text, 0, width);
+        def ftb-cell(text, width, justify) {
+            let t = ftb-cut(text, width);
+            let slack = sub(width, str_len(t));
+            if str_eq(justify, "right") then str_concat(ftb-spaces(slack), t)
+            else if str_eq(justify, "centre") then str_concat(ftb-spaces(div(slack, 2)), str_concat(t, ftb-spaces(sub(slack, div(slack, 2)))))
+            else str_concat(t, ftb-spaces(slack));
+        }
+
+        // ---- measuring ----------------------------------------------------------
+        // the natural width of one column: the widest cell that column holds,
+        // or its declared want when it declared one
+        def ftb-widest(cells, i, held) = if eq(len(cells), 0) then held else ftb-widest(tail(cells), i, ftb-max(held, str_len(ftb-nth-cell(head(cells), i))));
+        def ftb-max(a, b) = if gt(a, b) then a else b;
+        def ftb-min(a, b) = if lt(a, b) then a else b;
+        def ftb-nth-cell(row, i) = if ge(i, len(row)) then "" else nth(row, i);
+        def ftb-natural(cols, rows, i, acc) = if ge(i, len(cols)) then reverse(acc) else ftb-natural(cols, rows, add(i, 1), cons(if ge(ftb-col-want(nth(cols, i)), 0) then ftb-col-want(nth(cols, i)) else ftb-widest(rows, i, 0), acc));
+        def ftb-sum(xs) = if eq(len(xs), 0) then 0 else add(head(xs), ftb-sum(tail(xs)));
+
+        // ---- fitting -------------------------------------------------------------
+        // The separators are counted first -- they are not negotiable, they are
+        // what keeps the columns apart -- and what is left is shared out. When
+        // the natural widths fit, every column gets exactly what it asked for
+        // and no column is inflated beyond it; slack goes only where asked.
+        def ftb-sep-cost(n, sepWidth) = if le(n, 1) then 0 else mul(sub(n, 1), sepWidth);
+        def ftb-flex-total(cols, natural, i, acc) = if ge(i, len(cols)) then acc else ftb-flex-total(cols, natural, add(i, 1), if eq(ftb-col-flex(nth(cols, i)), 1) then add(acc, nth(natural, i)) else acc);
+        def ftb-shrunk(cols, natural, i, room, flexTotal, acc) {
+            if ge(i, len(cols)) then reverse(acc)
+            else if eq(ftb-col-flex(nth(cols, i)), 0) then ftb-shrunk(cols, natural, add(i, 1), room, flexTotal, cons(nth(natural, i), acc))
+            else ftb-shrunk(cols, natural, add(i, 1), room, flexTotal, cons(ftb-max(1, div(mul(nth(natural, i), room), ftb-max(1, flexTotal))), acc));
+        }
+        // Slack goes to the column that ASKED for it -- ftb-fill -- and nowhere
+        // else. An earlier turn of this door handed the remainder to the last
+        // column, which put thirty-one blanks between "gpu" and "80M" and made
+        // exactly the gutter this door was written to remove. The header had
+        // already said a column is never wider than its content asked for; the
+        // code had not read it. With no fill column the widths stay natural and
+        // the LINE pads at its tail, where blank separates nothing.
+        def ftb-fill-at(cols, i) = if ge(i, len(cols)) then sub(0, 1) else if eq(ftb-col-flex(nth(cols, i)), 2) then i else ftb-fill-at(cols, add(i, 1));
+        def ftb-give-at(widths, i, at, extra, acc) = if ge(i, len(widths)) then reverse(acc) else ftb-give-at(widths, add(i, 1), at, extra, cons(if eq(i, at) then add(nth(widths, i), extra) else nth(widths, i), acc));
+        def ftb-fit(cols, rows, total, sepWidth) {
+            let natural = ftb-natural(cols, rows, 0, list());
+            let seps = ftb-sep-cost(len(cols), sepWidth);
+            let room = sub(total, seps);
+            let asked = ftb-sum(natural);
+            let fixedTotal = sub(asked, ftb-flex-total(cols, natural, 0, 0));
+            let widths = if le(asked, room) then natural else ftb-shrunk(cols, natural, 0, ftb-max(0, sub(room, fixedTotal)), ftb-flex-total(cols, natural, 0, 0), list());
+            let at = ftb-fill-at(cols, 0);
+            if lt(at, 0) then widths else ftb-give-at(widths, 0, at, sub(room, ftb-sum(widths)), list());
+        }
+
+        // ---- rendering -------------------------------------------------------------
+        def ftb-row-text(cols, widths, cells, sep, i, acc) = if ge(i, len(cols)) then acc else ftb-row-text(cols, widths, cells, sep, add(i, 1), str_concat(acc, str_concat(if eq(i, 0) then "" else sep, ftb-cell(ftb-nth-cell(cells, i), nth(widths, i), ftb-col-justify(nth(cols, i))))));
+        def ftb-line-raw(cols, widths, cells, sep) = ftb-row-text(cols, widths, cells, sep, 0, "");
+        def ftb-line-to(cols, widths, cells, sep, total) = ftb-cell(ftb-line-raw(cols, widths, cells, sep), total, "left");
+        def ftb-line(cols, widths, cells, sep) = ftb-line-raw(cols, widths, cells, sep);
+        // the whole table at once: measure, fit, render every row to one width
+        def ftb-lines(cols, rows, total, sep, widths, acc) = if eq(len(rows), 0) then reverse(acc) else ftb-lines(cols, tail(rows), total, sep, widths, cons(ftb-line-to(cols, widths, head(rows), sep, total), acc));
+        def ftb-table(cols, rows, total, sep) = ftb-lines(cols, rows, total, sep, ftb-fit(cols, rows, total, str_len(sep)), list());
+    }
+    0;
+}
