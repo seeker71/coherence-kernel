@@ -33,6 +33,24 @@ updated all 56 matrix pairs and published optimizer step 7. Wall time was
 The requested eight-round run remained active at this reading. No serving
 selection or whole-session quality verdict was changed.
 
+After rebasing onto the shared-session and native-lifetime landings, freshness
+returned 15. Rebuilding the committed seed and dynamic Metal carrier restored
+31; bootstrap returned 42, 55, the numeric list and 11111. Session-memory
+returned 127, the trainer preflight was clean, and all 13 drift gates passed
+8191/8191 with exit 0. The tools landed as `c6412754` on `origin/main`.
+The updated source documents produced a new immutable corpus:
+`c4c7c07c9d3b61b85a6a5c3d663782522e3a9f551616bdffbc444717764e8803`,
+with 1,069 pairs (894 train / 175 held-out; 75 documentation / 206 primitive /
+788 historical). All 19 source hashes and exported counts matched; exact
+prompt and completion overlaps remained zero. The running trainer stayed on
+the original frozen corpus and reached optimizer step 10 after four rounds.
+
+The new native cross-worktree discovery found 51 homes but only 21 retained
+session records: 19 verified and eligible against their donor assessment data,
+21 distinct record contents and 19 distinct session identities. This census is
+not raw transcript coverage. It exposes the capture gap without pretending
+that the larger repository corpus has reviewed or embodied those conversations.
+
 The larger corpus is real; throughput at this size still needs care. An OS sample
 located the long span in Metal completion during backward execution. It later
 completed, so a wait was not relabelled a dead process. The source-owned checks
@@ -42,6 +60,7 @@ checks remain and now distinguish two events from one session.
 Glass reading: 123 rows, 273 unread, 18 asks, 44 recipes, 14 ms; 24 of 24 held
 findings shown at 100x30. Several physical observations remain missing. Share
 was declared/unmeasured and no percentage is claimed.
+After rebase: 123 rows, 481 unread, 32 asks, 16 ms, still 24/24 findings shown.
 
 Kept alive: missing examples became a native dataset and an actual weight update.
 Surprise: the immediate limit was consumption and long-row cost, not matrix count.
