@@ -55,8 +55,9 @@ not admitted by the energy policy, not boosted, and fails the existing final wor
 confidence threshold. Silence is independently refused by the model. Gain cannot
 improve signal-to-noise ratio or recover information lost below quantization.
 Live room recordings and a sealed, multilingual, position-varied speech/noise set
-are still needed before claiming broad accuracy gains. The stronger native ASR
-model remains a separate implementation task.
+are still needed before claiming broad accuracy gains. Large-v3-turbo now has a
+[native WAV route](native-whisper.md); integrating that model into this live ear
+remains separate from its file-transcription witness.
 
 ## What we learned from open implementations
 

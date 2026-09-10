@@ -1,0 +1,39 @@
+// The actual Whisper checkpoint, mapped into the existing native ear kernels.
+// No weight conversion or tensor copies: F16 spans stay in their shared file pages.
+// preludes: form-stdlib/ear-native.fk form-stdlib/native-affine-metal.bml form-stdlib/model-registry.bml
+section [form.bml] {
+ class NativeWhisper {
+  def nws-base() = mr-path(mr-find("whisper-large-v3-turbo-safetensors"));
+  def nws-tokenizer() = enw-tokenizer-path();
+  def nws-layer-shape(st,i) = if eq(i,11) then list(eng-F(st),eng-D(st)) else if eq(i,13) then list(eng-D(st),eng-F(st)) else if eq(i,12) then list(eng-F(st)) else if or(eq(i,2),or(eq(i,4),or(eq(i,5),or(eq(i,7),or(eq(i,17),or(eq(i,19),or(eq(i,20),eq(i,22)))))))) then list(eng-D(st),eng-D(st)) else list(eng-D(st));
+  def nws-layer-rows(st,prefix,names,i) = if nil?(names) then list() else cons(list(str_concat(prefix,str_concat(".",head(names))),nws-layer-shape(st,i)),nws-layer-rows(st,prefix,tail(names),add(i,1)));
+  def nws-layers(st,side,names,l,count) = if ge(l,count) then list() else append(nws-layer-rows(st,enw-blk(side,l),names,0),nws-layers(st,side,names,add(l,1),count));
+  def nws-required(st) {
+   let d = eng-D(st);
+   let common = list(list("encoder.conv1.weight",list(d,3,eng-mels(st))),list("encoder.conv1.bias",list(d)),list("encoder.conv2.weight",list(d,3,d)),list("encoder.conv2.bias",list(d)),list("encoder.ln_post.weight",list(d)),list("encoder.ln_post.bias",list(d)),list("decoder.token_embedding.weight",list(eng-V(st),d)),list("decoder.positional_embedding",list(eng-CTX(st),d)),list("decoder.ln.weight",list(d)),list("decoder.ln.bias",list(d)));
+   append(common,append(nws-layers(st,"encoder",enw-enc-names(),0,eng-enc-layers(st)),nws-layers(st,"decoder",enw-dec-names(),0,eng-dec-layers(st))));
+  }
+  def nws-check(index,required) {
+   if nil?(required) then 1 else nws-check-row(index,required,sti-find(index,head(head(required))));
+  }
+  def nws-check-row(index,required,row) {
+   if nil?(row) then form_error(str_concat("native Whisper tensor absent: ",head(head(required)))) else if not(and(str_eq(nth(row,1),"F16"),and(value_eq(nth(row,2),nth(head(required),1)),eq(mod(nth(row,3),2),0)))) then form_error(str_concat("native Whisper tensor shape/dtype/alignment refused: ",head(row))) else nws-check(index,tail(required));
+  }
+  def nws-map(index,required) = if nil?(required) then list() else cons(list(head(head(required)),head(sti-map(index,head(head(required))))),nws-map(index,tail(required)));
+  def nws-open(base,tokpath) {
+   let geometry = eng-config(str_concat(base,"/config.json")); let stub = eng-state(geometry); let path = str_concat(base,"/weights.safetensors");
+   let index = sti-open(path); let required = nws-required(stub); let checked = nws-check(index,required);
+   let ps = enw-pipes-for(stub); let hs = nws-map(index,required);
+   enw-open-ready(path,nth(index,2),hs,ps,tokpath,geometry);
+  }
+  def nws-free-weights(hs) = if nil?(hs) then 1 else nws-free-next(nam-free(list(nth(head(hs),1))),tail(hs));
+  def nws-free-next(rc,hs) = nws-free-weights(hs);
+  def nws-free-buffers(bs,i) = if nil?(bs) then 1 else nws-free-buffers-next(nam-free(if and(ge(i,17),le(i,20)) then head(bs) else list(head(bs))),tail(bs),add(i,1));
+  def nws-free-buffers-next(rc,bs,i) = nws-free-buffers(bs,i);
+  def nws-close(st) {
+   let done = nam-sync(); let weights = nws-free-weights(enw-hs(st)); let buffers = nws-free-buffers(nth(st,4),0);
+   1;
+  }
+ }
+ 0;
+}

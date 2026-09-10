@@ -1,0 +1,62 @@
+// RIFF chunks are read in Form; PCM stays in shared file pages. Metal mixes and
+// resamples each requested window into the ear's s16/16-kHz input buffer.
+// preludes: form-stdlib/ear-native.fk form-stdlib/native-affine-metal.bml
+section [form.bml] {
+ class NativeWav {
+  // metadata: rate, channels, bits, encoding, offset, bytes, stride, output samples
+  def nwa-open(path) {
+   let h = read_file_slice(path,0,12); let size = file_size(path);
+   if or(nothing?(h),lt(size,12)) then form_error("native WAV header absent") else if not(and(str_eq(substring(h,0,4),"RIFF"),str_eq(substring(h,8,12),"WAVE"))) then form_error("native audio requires a RIFF WAVE file") else nwa-chunks(path,12,add(en-u32(h,4),8),size,list(),list());
+  }
+  def nwa-chunks(path,at,end,size,fmt,data) {
+   if gt(end,size) then form_error("native WAV RIFF extent exceeds the file") else if eq(at,end) then nwa-complete(path,fmt,data) else if gt(add(at,8),end) then form_error("native WAV chunk header truncated") else nwa-chunk(path,at,end,size,fmt,data,read_file_slice(path,at,8));
+  }
+  def nwa-chunk(path,at,end,size,fmt,data,h) {
+   let n = en-u32(h,4); let begin = add(at,8); let next = add(begin,add(n,mod(n,2))); let kind = substring(h,0,4);
+   if gt(next,end) then form_error("native WAV chunk extent refused") else if str_eq(kind,"fmt ") then if not(nil?(fmt)) then form_error("native WAV duplicate format chunk") else nwa-chunks(path,next,end,size,nwa-format(read_file_slice(path,begin,n)),data) else if str_eq(kind,"data") then if not(nil?(data)) then form_error("native WAV multiple data chunks require an explicit assembly") else nwa-chunks(path,next,end,size,fmt,list(begin,n)) else nwa-chunks(path,next,end,size,fmt,data);
+  }
+  def nwa-format(bytes) {
+   if lt(str_len(bytes),16) then form_error("native WAV format truncated") else nwa-format-sized(bytes,en-u16(bytes,0));
+  }
+  def nwa-format-sized(b,tag) {
+   let bits = en-u16(b,14); let channels = en-u16(b,2); let rate = en-u32(b,4); let stride = en-u16(b,12);
+   let encoding = if eq(tag,65534) then nwa-extension(b,bits) else tag;
+   if not(and(gt(channels,0),and(le(channels,32),and(ge(rate,8000),and(le(rate,192000),and(eq(stride,mul(channels,div(bits,8))),and(eq(en-u32(b,8),mul(rate,stride)),or(and(eq(encoding,1),or(eq(bits,16),or(eq(bits,24),eq(bits,32)))),and(eq(encoding,3),eq(bits,32)))))))))) then form_error("native WAV encoding/rate/channel geometry refused") else list(rate,channels,bits,encoding,stride);
+  }
+  def nwa-extension(b,bits) {
+   if lt(str_len(b),40) then form_error("native WAV extensible format truncated") else if not(and(ge(en-u16(b,16),22),and(eq(en-u16(b,18),bits),str_eq(substring(b,26,40),enw-bytes-str(list(0,0,0,0,16,0,128,0,0,170,0,56,155,113)))))) then form_error("native WAV extensible subtype/valid bits refused") else en-u16(b,24);
+  }
+  def nwa-complete(path,fmt,data) {
+   if or(nil?(fmt),nil?(data)) then form_error("native WAV format or samples absent") else if or(le(nth(data,1),0),not(eq(mod(nth(data,1),nth(fmt,4)),0))) then form_error("native WAV partial or empty sample frame") else nwa-admit(path,fmt,data);
+  }
+  def nwa-admit(path,fmt,data) {
+   let frames = div(nth(data,1),nth(fmt,4)); let samples = div(add(mul(frames,16000),sub(head(fmt),1)),head(fmt));
+   list(path,nam-held(metal_buf_from_file(path,head(data),nth(data,1))),list(head(fmt),nth(fmt,1),nth(fmt,2),nth(fmt,3),head(data),nth(data,1),nth(fmt,4),samples));
+  }
+  def nwa-msl() = "#include <metal_stdlib>\nusing namespace metal;
+inline float nwa_sample(device const uchar* p,ulong i,uint bits,uint encoding){ulong o=i*(bits/8);uint w=uint(p[o])|(uint(p[o+1])<<8);if(bits==16)return float(as_type<short>(ushort(w)))/32768.0f;w|=uint(p[o+2])<<16;if(bits==24){if(w&0x800000u)w|=0xff000000u;return float(as_type<int>(w))/8388608.0f;}w|=uint(p[o+3])<<24;return encoding==3?as_type<float>(w):float(as_type<int>(w))/2147483648.0f;}
+inline float nwa_mono(device const uchar* p,long i,uint channels,uint bits,uint encoding,ulong frames){if(i<0||ulong(i)>=frames)return 0;float v=0;for(uint c=0;c<channels;c++)v+=nwa_sample(p,ulong(i)*channels+c,bits,encoding);return v/channels;}
+kernel void nwa_window(device const uchar* src [[buffer(0)]],device short* dst [[buffer(1)]],device atomic_uint* bad [[buffer(2)]],constant uint& rate [[buffer(3)]],constant uint& channels [[buffer(4)]],constant uint& bits [[buffer(5)]],constant uint& encoding [[buffer(6)]],constant uint& frames [[buffer(7)]],constant uint& offsetlo [[buffer(8)]],constant uint& offsethi [[buffer(9)]],constant uint& n [[buffer(10)]],uint i [[thread_position_in_grid]]){
+ if(i>=n)return;ulong output=(ulong(offsetlo)|(ulong(offsethi)<<32))+i,phase=output*rate;long center=long(phase/16000);float frac=float(phase%16000)/16000.0f,v=0;
+ if(rate==16000)v=nwa_mono(src,center,channels,bits,encoding,frames);else{float cutoff=min(1.0f,16000.0f/rate);int radius=int(ceil(16.0f/cutoff));float weight=0;for(int j=-radius+1;j<=radius;j++){float x=float(j)-frac,u=x*cutoff;float sinc=abs(u)<1e-6f?1.0f:sin(M_PI_F*u)/(M_PI_F*u);float window=0.5f+0.5f*cos(M_PI_F*x/radius);float w=cutoff*sinc*window;v+=w*nwa_mono(src,center+j,channels,bits,encoding,frames);weight+=w;}v/=weight;}
+ if(!isfinite(v)){atomic_fetch_add_explicit(bad,1u,memory_order_relaxed);v=0;}dst[i]=short(clamp(rint(v*32768.0f),-32768.0f,32767.0f));
+}
+kernel void nwa_level(device const uchar* src [[buffer(0)]],device float* out [[buffer(1)]],constant uint& channels [[buffer(2)]],constant uint& bits [[buffer(3)]],constant uint& encoding [[buffer(4)]],constant uint& frames [[buffer(5)]],uint lane [[thread_index_in_simdgroup]]){float peak=0;uint bad=0;for(uint i=lane;i<frames;i+=32){float v=nwa_mono(src,i,channels,bits,encoding,frames);if(!isfinite(v))bad++;else peak=max(peak,abs(v));}peak=simd_max(peak);bad=simd_sum(bad);float ss=0;if(peak>0)for(uint i=lane;i<frames;i+=32){float v=nwa_mono(src,i,channels,bits,encoding,frames)/peak;ss+=v*v;}ss=simd_sum(ss);if(lane==0){out[0]=float(bad);out[1]=peak;out[2]=ss/float(frames);}}
+";
+  def nwa-window(wav,dst,offset,n) {
+   let m = nth(wav,2); let bad = nam-alloc(1); let zero = nam-zero(bad,1);
+   let rc = metal_enqueue(nam-held-pipe(metal_pipeline(nwa-msl(),"nwa_window")),md-bind(list(nth(wav,1),dst,bad),list(head(m),nth(m,1),nth(m,2),nth(m,3),div(nth(m,5),nth(m,6)),mod(offset,4294967296),div(offset,4294967296),n)),n);
+   let count = ln-u32-le(metal_buf_read(bad,0,4),0); let free = nam-free(list(bad));
+   if or(lt(rc,0),gt(count,0)) then form_error("native WAV resampling refused or encountered non-finite audio") else n;
+  }
+  def nwa-level(wav) = head(nwa-level-state(wav));
+  def nwa-level-state(wav) {
+   let m = nth(wav,2); let out = nam-alloc(3);
+   let rc = metal_enqueue(nam-held-pipe(metal_pipeline(nwa-msl(),"nwa_level")),md-bind16(list(nth(wav,1),out),list(nth(m,1),nth(m,2),nth(m,3),div(nth(m,5),nth(m,6))),32,0,1,0),1);
+   let r = nam-read(out,3); let free = nam-free(list(out));
+   if or(lt(rc,0),gt(head(r),0)) then form_error("native WAV level encountered non-finite audio") else list(if le(nth(r,1),0.0) then -120.0 else add(mul(20.0,div(math_log(nth(r,1)),math_log(10.0))),mul(10.0,div(math_log(nth(r,2)),math_log(10.0)))),nth(r,1));
+  }
+  def nwa-close(wav) = nam-free(list(nth(wav,1)));
+ }
+ 0;
+}
