@@ -1,0 +1,78 @@
+// One native model serves the entire recording. Timestamp progress chooses the
+// next window; incomplete unclosed text never becomes a completed segment.
+// preludes: form-stdlib/native-whisper-decode.bml form-stdlib/native-adapter-generation.bml
+section [form.bml] {
+ class NativeWhisperTranscribe {
+  // segment: start sample, end sample, text. Sample coordinates remain integers.
+  def nwt-segment(st,start,end,ids) = list(start,end,trim(enw-text(st,reverse(ids))));
+  def nwt-segments(st,ids,offset,size,start,words,segments,complete) {
+   if nil?(ids) then if and(complete,not(nil?(words))) then append(segments,list(nwt-segment(st,start,add(offset,size),words))) else segments else if ge(head(ids),eng-ts0(st)) then nwt-timestamp(st,ids,offset,size,start,words,segments,complete,mul(sub(head(ids),eng-ts0(st)),320)) else nwt-segments(st,tail(ids),offset,size,start,cons(head(ids),words),segments,complete);
+  }
+  def nwt-timestamp(st,ids,offset,size,start,words,segments,complete,tick) {
+   let end = add(offset,if gt(tick,size) then size else tick);
+   if lt(end,start) then form_error("native Whisper timestamp moved backwards") else nwt-segments(st,tail(ids),offset,size,end,list(),if nil?(words) then segments else append(segments,list(nwt-segment(st,start,end,words))),complete);
+  }
+  def nwt-paired(ids,ts) = if lt(len(ids),2) then 0 else if and(ge(head(ids),ts),ge(nth(ids,1),ts)) then 1 else nwt-paired(tail(ids),ts);
+  def nwt-next(st,result,segments,offset,size) {
+   let ids = nth(result,1); let n = len(ids); let eos = str_eq(nth(result,2),"eos");
+   let single = and(ge(n,2),and(lt(nth(ids,sub(n,2)),eng-ts0(st)),ge(nth(ids,sub(n,1)),eng-ts0(st))));
+   if and(eos,or(single,not(nwt-paired(ids,eng-ts0(st))))) then add(offset,size) else if nil?(segments) then offset else nth(nth(segments,sub(len(segments),1)),1);
+  }
+  def nwt-segment-json(row) = json-node-object(list(nwd-float("start",div(head(row),16000.0)),nwd-float("end",div(nth(row,1),16000.0)),nwd-text("text",nth(row,2))));
+  def nwt-segment-nodes(rows) = if nil?(rows) then list() else cons(nwt-segment-json(head(rows)),nwt-segment-nodes(tail(rows)));
+  def nwt-text(rows) = if nil?(rows) then "" else str_concat(nth(head(rows),2),if nil?(tail(rows)) then "" else str_concat(" ",nwt-text(tail(rows))));
+  def nwt-stream-segments(path,rows) = if eq(str_len(path),0) then 0 else nag-write(path,nwt-text(rows));
+  def nwt-loop(st,decoder,wav,language,offset,segments,windows,tokens,seed,stream,cancel,events) {
+   let total = nth(nth(wav,2),7);
+   if ge(offset,total) then list(language,segments,"completed",windows,tokens,offset) else if and(gt(str_len(cancel),0),gt(file_size(cancel),0)) then list(language,segments,"cancelled",windows,tokens,offset) else nwt-window(st,decoder,wav,language,offset,segments,windows,tokens,seed,stream,cancel,events,if gt(sub(total,offset),480000) then 480000 else sub(total,offset));
+  }
+  def nwt-window(st,decoder,wav,language,offset,segments,windows,tokens,seed,stream,cancel,events,size) {
+   let frames = div(size,160); let encoded = nwd-encode(st,wav,offset,frames,events);
+   if eq(encoded,0) then nwt-digital(st,decoder,wav,language,offset,segments,windows,tokens,seed,stream,cancel,events,size) else nwt-decode-window(st,decoder,wav,language,offset,segments,windows,tokens,seed,stream,cancel,events,size);
+  }
+  def nwt-digital(st,decoder,wav,language,offset,segments,windows,tokens,seed,stream,cancel,events,size) {
+   let event = nwd-event(events,"window-selected",list(nwd-int("window_sample",offset),nwd-int("next_sample",add(offset,size)),nwd-text("selected","skip-zero-model-input"),nwd-int("sampled_tokens",0)));
+   nwt-loop(st,decoder,wav,language,add(offset,size),segments,add(windows,1),tokens,seed,stream,cancel,events);
+  }
+  def nwt-decode-window(st,decoder,wav,language,offset,segments,windows,tokens,seed,stream,cancel,events,size) {
+   let attemptStream = if eq(str_len(stream),0) then "" else str_concat(stream,".attempt");
+   let result = nwd-decode(st,decoder,language,0,add(seed,windows),attemptStream,cancel,events,offset);
+   let count = list(add(head(tokens),len(nth(result,1))),add(nth(tokens,1),nth(result,8)),add(nth(tokens,2),nth(result,9)),add(nth(tokens,3),nth(result,10)));
+   if str_eq(nth(result,2),"cancelled") then list(head(result),segments,"cancelled",add(windows,1),count,offset) else if nwd-silent(result) then nwt-silence(st,decoder,wav,result,offset,size,segments,windows,count,seed,stream,cancel,events) else nwt-words(st,decoder,wav,result,offset,size,segments,windows,count,seed,stream,cancel,events);
+  }
+  def nwt-silence(st,decoder,wav,result,offset,size,segments,windows,count,seed,stream,cancel,events) {
+   let event = nwd-event(events,"window-selected",list(nwd-int("window_sample",offset),nwd-int("next_sample",add(offset,size)),nwd-text("selected","skip-silence"),nwd-int("accepted_segments",0)));
+   nwt-loop(st,decoder,wav,head(result),add(offset,size),segments,add(windows,1),count,seed,stream,cancel,events);
+  }
+  def nwt-words(st,decoder,wav,result,offset,size,segments,windows,count,seed,stream,cancel,events) {
+   let rows = nwt-segments(st,nth(result,1),offset,size,offset,list(),list(),str_eq(nth(result,2),"eos"));
+   let next = nwt-next(st,result,rows,offset,size); let accepted = append(segments,rows);
+   let event = nwd-event(events,"window-selected",list(nwd-int("window_sample",offset),nwd-int("next_sample",next),nwd-int("accepted_segments",len(rows)),nwd-text("finish",nth(result,2)),nwd-text("selected",if gt(next,offset) then "advance-to-observed-timestamp" else "withhold-no-progress")));
+   let streamed = nwt-stream-segments(stream,accepted);
+   if le(next,offset) then list(head(result),accepted,str_concat("incomplete-",nth(result,2)),add(windows,1),count,offset) else nwt-loop(st,decoder,wav,head(result),next,accepted,add(windows,1),count,seed,stream,cancel,events);
+  }
+  def nwt-transcribe(base,path,hint,stream,cancel,events) {
+   let start = host_monotonic_ms(); let wav = nwa-open(path); let level = nwa-level-state(wav);
+   let cancelled = and(gt(str_len(cancel),0),gt(file_size(cancel),0));
+   if or(cancelled,eq(nth(level,1),0.0)) then nwt-no-model(base,wav,head(level),stream,events,start,cancelled) else nwt-admitted(base,wav,head(level),hint,stream,cancel,events,start);
+  }
+  def nwt-no-model(base,wav,level,stream,events,start,cancelled) {
+   let total = nth(nth(wav,2),7); let status = if cancelled then "cancelled" else "completed"; let processed = if cancelled then 0 else total;
+   let observed = bfc-envelope(0,960001,0,list(total,level,0),3); let sent = bfc-record-out(observed,0); let response = bfc-record-in(bfc-control(observed,3),1);
+   let clear = nwt-stream-segments(stream,list()); let closed = nwa-close(wav);
+   let event = nwd-event(events,"audio-decision",list(nwd-text("model_path",base),nwd-int("model_admitted",0),nwd-text("choices","admit-model|skip-exact-digital-silence|cancel"),nwd-text("selected",if cancelled then "cancel" else "skip-exact-digital-silence"),nwd-float("dbfs",level),nwd-int("processed_samples",processed),nwd-int("total_samples",total),nwd-int("elapsed_ms",sub(host_monotonic_ms(),start)),nwd-int("sampled_tokens",0),nwd-int("retained_buffers",nth(metal_live(),2))));
+   json-node-object(list(nwd-text("owner","Form-native-Metal"),nwd-text("model","Whisper-large-v3-turbo"),nwd-int("model_admitted",0),nwd-text("status",status),nwd-text("language",""),nwd-text("text",""),json-node-pair("segments",json-node-array(list())),nwd-int("windows",0),nwd-int("selected_decoded_tokens",0),nwd-int("sampled_tokens",0),nwd-int("model_forward_tokens",0),nwd-int("decode_attempts",0),nwd-int("processed_samples",processed),nwd-int("total_samples",total),nwd-float("dbfs",level),nwd-int("elapsed_ms",sub(host_monotonic_ms(),start)),nwd-text("events",events)));
+  }
+  def nwt-admitted(base,wav,level,hint,stream,cancel,events,start) {
+   let opened = host_monotonic_ms();
+   let st = nws-open(base,nws-tokenizer()); let decoder = nwd-open(); let language = if eq(str_len(hint),0) then -1 else nwd-language(hint,take(eng-languages(st),nwd-langs()),0); let seed = mod(now_unix_ms(),2147483647);
+   let event = nwd-event(events,"admission",list(nwd-text("model_path",base),nwd-int("model_admitted",1),nwd-int("mapped_tensors",len(enw-hs(st))),nwd-int("input_rate",head(nth(wav,2))),nwd-int("input_channels",nth(nth(wav,2),1)),nwd-int("input_bits",nth(nth(wav,2),2)),nwd-int("input_samples_16k",nth(nth(wav,2),7)),nwd-float("dbfs",level),nwd-int("audio_open_ms",sub(opened,start)),nwd-int("model_open_ms",sub(host_monotonic_ms(),opened)),nwd-int("seed",seed)));
+   let clear = nwt-stream-segments(stream,list());
+   let result = nwt-loop(st,decoder,wav,language,0,list(),0,list(0,0,0,0),seed,stream,cancel,events);
+   let closed = nwd-close(decoder); let model = nws-close(st); let audio = nwa-close(wav);
+   let finished = nwd-event(events,"completion",list(nwd-text("status",nth(result,2)),nwd-int("windows",nth(result,3)),nwd-int("selected_decoded_tokens",head(nth(result,4))),nwd-int("sampled_tokens",nth(nth(result,4),1)),nwd-int("model_forward_tokens",nth(nth(result,4),2)),nwd-int("decode_attempts",nth(nth(result,4),3)),nwd-int("processed_samples",nth(result,5)),nwd-int("elapsed_ms",sub(host_monotonic_ms(),start)),nwd-int("retained_buffers",nth(metal_live(),2))));
+   json-node-object(list(nwd-text("owner","Form-native-Metal"),nwd-text("model","Whisper-large-v3-turbo"),nwd-int("model_admitted",1),nwd-text("status",nth(result,2)),nwd-text("language",if lt(head(result),0) then "" else nwd-code(head(result))),nwd-text("text",nwt-text(nth(result,1))),json-node-pair("segments",json-node-array(nwt-segment-nodes(nth(result,1)))),nwd-int("windows",nth(result,3)),nwd-int("selected_decoded_tokens",head(nth(result,4))),nwd-int("sampled_tokens",nth(nth(result,4),1)),nwd-int("model_forward_tokens",nth(nth(result,4),2)),nwd-int("decode_attempts",nth(nth(result,4),3)),nwd-int("processed_samples",nth(result,5)),nwd-int("total_samples",nth(nth(wav,2),7)),nwd-float("dbfs",level),nwd-int("elapsed_ms",sub(host_monotonic_ms(),start)),nwd-text("events",events)));
+  }
+ }
+ 0;
+}

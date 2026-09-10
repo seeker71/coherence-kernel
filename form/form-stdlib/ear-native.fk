@@ -13,8 +13,16 @@
 ; tile, and the cross attention is a chunk pass plus a fold instead of six lonely threadgroups. Each
 ; costs a launch and saves far more than a launch. The four cross gemms share ONE ln_post reading
 ; because they all read the same rows.
-; preludes: form/form-stdlib/ear-npz.fk form/form-stdlib/ear-msl.fk form/form-stdlib/metal-door.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/base64.fk
+; preludes: form/form-stdlib/ear-npz.fk form/form-stdlib/ear-msl.fk form/form-stdlib/metal-door.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/base64.fk form-stdlib/ear-geometry.bml
 (do
+    (defn enw-held (h) (if (le h 0) (form_error (str_concat "native ear allocation refused: " (metal_status))) h))
+    (defn enw-alloc (n) (enw-held (metal_buf_alloc n)))
+    (defn enw-enqueue (p b n) (enw-enqueued (metal_enqueue p b n)))
+    (defn enw-sync () (enw-enqueued (metal_sync)))
+    (defn enw-write (h off bytes) (enw-enqueued (metal_buf_write h off bytes)))
+    (defn enw-tokenizer-path () "model/tokenizers/whisper/multilingual.tiktoken")
+    (defn enw-token-ranks (lines i) (if (nil? lines) (if (eq i 50257) 1 (form_error "native ear tokenizer rank count refused")) (do (let line (head lines)) (let at (str_find line " " 0)) (if (or (le at 0) (not (str_eq (substring line (add at 1) (str_len line)) (int_to_str i)))) (form_error "native ear tokenizer ranks are not contiguous") (enw-token-ranks (tail lines) (add i 1))))))
+    (defn enw-token-lines (path) (do (let text (read_file path)) (if (nothing? text) (form_error "native ear tokenizer absent") 0) (let lines (split-on (trim text) (byte_to_str 10))) (enw-token-ranks lines 0) lines))
     (defn enw-D () 384)
     (defn enw-F () 1536)
     (defn enw-H () 6)
@@ -53,50 +61,53 @@
     (defn enw-pi-softp () 15)
     ; the cross window cut into chunks of 64 keys: the group count both halves of the split attention agree on
     (defn enw-xchunks (Tk) (div (add Tk 63) 64))
-    (defn enw-pipes-go (msl names) (if (eq (len names) 0) (list) (cons (metal_pipeline msl (head names)) (enw-pipes-go msl (tail names)))))
-    (defn enw-pipes () (enw-pipes-go (em-unit) (em-names)))
+    (defn enw-pipe-held (p name) (if (le p 0) (form_error (str_concat "native ear pipeline refused: " (str_concat name (str_concat "\n" (metal_status))))) p))
+    (defn enw-pipes-go (msl names) (if (eq (len names) 0) (list) (cons (enw-pipe-held (metal_pipeline msl (head names)) (head names)) (enw-pipes-go msl (tail names)))))
+    (defn enw-pipes () (enw-pipes-for (eng-state (eng-tiny))))
+    (defn enw-pipes-for (st) (enw-pipes-go (em-unit-for (eng-mels st) (eng-F st)) (em-names)))
     (defn enw-p (st i) (nth (nth st 3) i))
-    (defn enw-go (st pi bind threads) (metal_enqueue (enw-p st pi) bind threads))
+    (defn enw-enqueued (rc) (if (lt rc 0) (form_error (str_concat "native ear dispatch refused: " (metal_status))) rc))
+    (defn enw-go (st pi bind threads) (enw-enqueued (enw-enqueue (enw-p st pi) bind threads)))
     ; ---- weights: the file mapped once at offset 0 (aligned), every member copied on the device into its own aligned buffer; (name handle) rows ----
-    (defn enw-copy (ps whole row) (do (let h (metal_buf_alloc (en-bytes row))) (let c (metal_enqueue (nth ps (enw-pi-copy)) (md-bind (list whole h) (list (en-off row) (en-bytes row))) (en-bytes row))) h))
+    (defn enw-copy (ps whole row) (do (let h (enw-alloc (en-bytes row))) (let c (enw-enqueue (nth ps (enw-pi-copy)) (md-bind (list whole h) (list (en-off row) (en-bytes row))) (en-bytes row))) h))
     (defn enw-map (ps whole rows) (if (eq (len rows) 0) (list) (cons (list (head (head rows)) (enw-copy ps whole (head rows))) (enw-map ps whole (tail rows)))))
     (defn enw-h (hs name) (if (eq (len hs) 0) 0 (if (str_eq (head (head hs)) name) (nth (head hs) 1) (enw-h (tail hs) name))))
     (defn enw-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (enw-cat (tail xs)))))
     (defn enw-w (hs prefix leaf) (enw-h hs (enw-cat (list prefix "." leaf))))
     (defn enw-blk (side l) (enw-cat (list side ".blocks." (int_to_str l))))
     ; ---- activations ----
-    (defn enw-f32 (n) (metal_buf_alloc (mul 4 n)))
-    (defn enw-per-layer (n l) (if (ge l (enw-layers)) (list) (cons (enw-f32 n) (enw-per-layer n (add l 1)))))
+    (defn enw-f32 (n) (enw-alloc (mul 4 n)))
+    (defn enw-per-layer (st n l) (if (ge l (eng-dec-layers st)) (list) (cons (enw-f32 n) (enw-per-layer st n (add l 1)))))
     (defn enw-zeros (s n) (if (ge (str_len s) n) (substring s 0 n) (enw-zeros (str_concat s s) n)))
-    (defn enw-bufs ()
-        (list (metal_buf_alloc 960000)                        ; 0 pcm (30 s s16)
-              (enw-f32 (mul (enw-TF) 80))                       ; 1 mel
-              (enw-f32 (mul 80 201))                            ; 2 filt
-              (enw-f32 (mul (enw-TF) (enw-D)))                  ; 3 ht (conv1 out)
-              (enw-f32 (mul (enw-TE) (enw-D)))                  ; 4 hx (the encoder's residual stream)
-              (enw-f32 (mul (enw-TE) (enw-D)))                  ; 5 hq
-              (enw-f32 (mul (enw-TE) (enw-D)))                  ; 6 hk
-              (enw-f32 (mul (enw-TE) (enw-D)))                  ; 7 hv
-              (enw-f32 (mul (enw-TE) (enw-D)))                  ; 8 ha
-              (enw-f32 (mul (enw-TE) (enw-F)))                  ; 9 hf
-              (enw-f32 (mul (enw-TE) (enw-D)))                  ; 10 henc (ln_post rows, written by the first cross dispatch)
-              (enw-f32 (mul (enw-CTX) (enw-D)))                 ; 11 dx (CTX rows: the batched prefill)
-              (enw-f32 (mul (enw-CTX) (enw-D)))                 ; 12 dq
-              (enw-f32 (mul (enw-CTX) (enw-D)))                 ; 13 da
-              (enw-f32 (mul (enw-CTX) (enw-F)))                 ; 14 df
-              (enw-f32 (enw-V))                                 ; 15 dl (logits)
-              (metal_buf_alloc 16)                              ; 16 dout
-              (enw-per-layer (mul (enw-TE) (enw-D)) 0)          ; 17 cross k per layer
-              (enw-per-layer (mul (enw-TE) (enw-D)) 0)          ; 18 cross v per layer
-              (enw-per-layer (mul (enw-CTX) (enw-D)) 0)         ; 19 self k cache per layer
-              (enw-per-layer (mul (enw-CTX) (enw-D)) 0)         ; 20 self v cache per layer
-              (metal_buf_alloc (mul 4 (enw-CTX)))               ; 21 ids for the batched prefill
-              (metal_buf_alloc 32)                              ; 22 shp: Te pos Tdec Tf 0
-              (enw-f32 (enw-TF))                                ; 23 frame maxima
-              (metal_buf_alloc (mul 2 (enw-V)))                 ; 24 a zero bias (half) for the weights that carry none
-              (metal_buf_alloc 1024)                            ; 25 the argmax's first-stage (value, index) pairs
-              (enw-f32 (mul 6 (mul 24 66)))                     ; 26 the cross attention's per-chunk (m, l, acc[64]) partials
-              (enw-f32 (mul 2 (enw-TE)))                        ; 27 each row's layernorm (mean, rsqrt), read by every tile
+    (defn enw-bufs (st)
+        (list (enw-alloc 960000)                        ; 0 pcm (30 s s16)
+              (enw-f32 (mul (eng-TF st) (eng-mels st)))                       ; 1 mel
+              (enw-f32 (mul (eng-mels st) 201))                            ; 2 filt
+              (enw-f32 (mul (eng-TF st) (eng-D st)))                  ; 3 ht (conv1 out)
+              (enw-f32 (mul (eng-TE st) (eng-D st)))                  ; 4 hx (the encoder's residual stream)
+              (enw-f32 (mul (eng-TE st) (eng-D st)))                  ; 5 hq
+              (enw-f32 (mul (eng-TE st) (eng-D st)))                  ; 6 hk
+              (enw-f32 (mul (eng-TE st) (eng-D st)))                  ; 7 hv
+              (enw-f32 (mul (eng-TE st) (eng-D st)))                  ; 8 ha
+              (enw-f32 (mul (eng-TE st) (eng-F st)))                  ; 9 hf
+              (enw-f32 (mul (eng-TE st) (eng-D st)))                  ; 10 henc (ln_post rows, written by the first cross dispatch)
+              (enw-f32 (mul (eng-CTX st) (eng-D st)))                 ; 11 dx (CTX rows: the batched prefill)
+              (enw-f32 (mul (eng-CTX st) (eng-D st)))                 ; 12 dq
+              (enw-f32 (mul (eng-CTX st) (eng-D st)))                 ; 13 da
+              (enw-f32 (mul (eng-CTX st) (eng-F st)))                 ; 14 df
+              (enw-f32 (eng-V st))                                 ; 15 dl (logits)
+              (enw-alloc 16)                              ; 16 dout
+              (enw-per-layer st (mul (eng-TE st) (eng-D st)) 0)          ; 17 cross k per layer
+              (enw-per-layer st (mul (eng-TE st) (eng-D st)) 0)          ; 18 cross v per layer
+              (enw-per-layer st (mul (eng-CTX st) (eng-D st)) 0)         ; 19 self k cache per layer
+              (enw-per-layer st (mul (eng-CTX st) (eng-D st)) 0)         ; 20 self v cache per layer
+              (enw-alloc (mul 4 (eng-CTX st)))               ; 21 ids for the batched prefill
+              (enw-alloc 32)                              ; 22 shp: Te pos Tdec Tf 0
+              (enw-f32 (eng-TF st))                                ; 23 frame maxima
+              (enw-alloc (mul 2 (eng-V st)))                 ; 24 a zero bias (half) for the weights that carry none
+              (enw-alloc 1024)                            ; 25 the argmax's first-stage (value, index) pairs
+              (enw-f32 (mul (eng-H st) (mul (enw-xchunks (eng-TE st)) 66)))                     ; 26 the cross attention's per-chunk (m, l, acc[64]) partials
+              (enw-f32 (mul 2 (eng-TE st)))                        ; 27 each row's layernorm (mean, rsqrt), read by every tile
               (enw-f32 (mul 2 (em-argmax-G)))                   ; 28 the softmax fold's per-group (max, sum-of-exp) partials
               (enw-f32 2)))                                     ; 29 the decoded line's (sum of log-probabilities, token count)
     (defn enw-b (st i) (nth (nth st 4) i))
@@ -108,7 +119,7 @@
     (defn enw-enc-names () (list "attn_ln.weight" "attn_ln.bias" "attn.query.weight" "attn.query.bias" "attn.key.weight" "attn.value.weight" "attn.value.bias" "attn.out.weight" "attn.out.bias" "mlp_ln.weight" "mlp_ln.bias" "mlp1.weight" "mlp1.bias" "mlp2.weight" "mlp2.bias"))
     (defn enw-dec-names () (append (enw-enc-names) (list "cross_attn_ln.weight" "cross_attn_ln.bias" "cross_attn.query.weight" "cross_attn.query.bias" "cross_attn.key.weight" "cross_attn.value.weight" "cross_attn.value.bias" "cross_attn.out.weight" "cross_attn.out.bias")))
     (defn enw-table (hs prefix names) (if (eq (len names) 0) (list) (cons (enw-w hs prefix (head names)) (enw-table hs prefix (tail names)))))
-    (defn enw-tables (hs side names l) (if (ge l (enw-layers)) (list) (cons (enw-table hs (enw-blk side l) names) (enw-tables hs side names (add l 1)))))
+    (defn enw-tables (st hs side names l) (if (ge l (if (str_eq side "encoder") (eng-enc-layers st) (eng-dec-layers st))) (list) (cons (enw-table hs (enw-blk side l) names) (enw-tables st hs side names (add l 1)))))
     (defn enw-lt (st side l) (nth (nth st (if (str_eq side "encoder") 6 7)) l))
     (defn enw-hs (st) (nth st 2))
     ; ---- bindings, built once: the fused gemm over rows (tiles), the fused gemm for one row (mv), attention over rows, attention for one row ----
@@ -123,31 +134,31 @@
         (md-bind16 (list x w b w b w b w b y y y y y (enw-shp st) (enw-lnst st)) (list Cout (mul 3 Cin) Cout 1 0 tslot 4 0 cstride 3) 256 0 1 0))
     (defn enw-mbind (st x g b w0 b0 w1 b1 w2 b2 y0 y1 y2 r N K Nper mode hasln yslot lastrow)
         (md-bind16 (list x g b w0 b0 w1 b1 w2 b2 y0 y1 y2 r r (enw-shp st) (enw-lnst st)) (list N K Nper mode hasln yslot lastrow) 256 0 1 0))
-    (defn enw-abind (st q k v y tqslot tkmode) (md-bind16 (list q k v y (enw-shp st)) (list (enw-H) tqslot tkmode) 256 0 1 0))
-    (defn enw-dbind (st q k v y tkmode) (md-bind16 (list q k v y (enw-shp st)) (list (enw-H) tkmode) 256 6152 1 0))
+    (defn enw-abind (st q k v y tqslot tkmode) (md-bind16 (list q k v y (enw-shp st)) (list (eng-H st) tqslot tkmode) 256 0 1 0))
+    (defn enw-dbind (st q k v y tkmode) (md-bind16 (list q k v y (enw-shp st)) (list (eng-H st) tkmode) 256 6152 1 0))
     ; the split cross attention for one row: the chunk pass writes partials, the fold pass writes the row
-    (defn enw-xbind (st q k v tkmode) (md-bind16 (list q k v (enw-b st 26) (enw-shp st)) (list (enw-H) tkmode) 64 0 1 0))
-    (defn enw-xfbind (st y tkmode) (md-bind16 (list (enw-b st 26) y (enw-shp st)) (list (enw-H) tkmode) 64 0 1 0))
+    (defn enw-xbind (st q k v tkmode) (md-bind16 (list q k v (enw-b st 26) (enw-shp st)) (list (eng-H st) tkmode) 64 0 1 0))
+    (defn enw-xfbind (st y tkmode) (md-bind16 (list (enw-b st 26) y (enw-shp st)) (list (eng-H st) tkmode) 64 0 1 0))
     (defn enw-t32 (n) (div (add n 31) 32))
     (defn enw-t8 (n) (div (add n 7) 8))
     ; an encoder layer: ln+qkv, attention, out+residual, ln+mlp1+gelu, mlp2+residual
     (defn enw-enc-binds-l (st l)
-        (do (let w (enw-lt st "encoder" l)) (let Z (enw-b st 24)) (let D (enw-D)) (let F (enw-F))
+        (do (let w (enw-lt st "encoder" l)) (let Z (enw-b st 24)) (let D (eng-D st)) (let F (eng-F st))
             (let hx (enw-b st 4)) (let hq (enw-b st 5)) (let hk (enw-b st 6)) (let hv (enw-b st 7)) (let ha (enw-b st 8)) (let hf (enw-b st 9))
             (list (enw-gbind st hx (nth w 0) (nth w 1) (nth w 2) (nth w 3) (nth w 4) Z (nth w 5) (nth w 6) hq hk hv hx hx (mul 3 D) D D 0 1 0 4 0)
                   (enw-abind st hq hk hv ha 0 0)
                   (enw-gbind st ha (nth w 0) (nth w 1) (nth w 7) (nth w 8) (nth w 7) (nth w 8) (nth w 7) (nth w 8) hx hx hx hx hx D D D 2 0 0 4 0)
                   (enw-gbind st hx (nth w 9) (nth w 10) (nth w 11) (nth w 12) (nth w 11) (nth w 12) (nth w 11) (nth w 12) hf hf hf hf hf F D F 1 1 0 4 0)
                   (enw-gbind st hf (nth w 9) (nth w 10) (nth w 13) (nth w 14) (nth w 13) (nth w 14) (nth w 13) (nth w 14) hx hx hx hx hx D F D 2 0 0 4 0))))
-    (defn enw-enc-binds (st l) (if (ge l (enw-layers)) (list) (cons (enw-enc-binds-l st l) (enw-enc-binds st (add l 1)))))
+    (defn enw-enc-binds (st l) (if (ge l (eng-enc-layers st)) (list) (cons (enw-enc-binds-l st l) (enw-enc-binds st (add l 1)))))
     ; the cross caches: ln_post fused into each layer's k/v gemm (the first also writes the normalised rows to henc)
     (defn enw-cross-bind-l (st l)
-        (do (let w (enw-lt st "decoder" l)) (let hs (enw-hs st)) (let Z (enw-b st 24)) (let D (enw-D))
+        (do (let w (enw-lt st "decoder" l)) (let hs (enw-hs st)) (let Z (enw-b st 24)) (let D (eng-D st))
             (enw-gbind st (enw-b st 4) (enw-h hs "encoder.ln_post.weight") (enw-h hs "encoder.ln_post.bias") (nth w 19) Z (nth w 20) (nth w 21) (nth w 20) (nth w 21) (enw-bl st 17 l) (enw-bl st 18 l) (enw-bl st 18 l) (enw-b st 4) (enw-henc st) (mul 2 D) D D 0 1 0 4 (if (eq l 0) 1 0))))
-    (defn enw-cross-binds (st l) (if (ge l (enw-layers)) (list) (cons (enw-cross-bind-l st l) (enw-cross-binds st (add l 1)))))
+    (defn enw-cross-binds (st l) (if (ge l (eng-dec-layers st)) (list) (cons (enw-cross-bind-l st l) (enw-cross-binds st (add l 1)))))
     ; a decoder layer for one row: ln+qkv (k/v straight into the caches at pos), own attention, out+residual, ln+cross-q, cross attention, out+residual, ln+mlp1+gelu, mlp2+residual
     (defn enw-dec-binds-l (st l)
-        (do (let w (enw-lt st "decoder" l)) (let Z (enw-b st 24)) (let D (enw-D)) (let F (enw-F))
+        (do (let w (enw-lt st "decoder" l)) (let Z (enw-b st 24)) (let D (eng-D st)) (let F (eng-F st))
             (let dx (enw-b st 11)) (let dq (enw-b st 12)) (let da (enw-b st 13)) (let df (enw-b st 14)) (let kc (enw-bl st 19 l)) (let vc (enw-bl st 20 l))
             (list (enw-mbind st dx (nth w 0) (nth w 1) (nth w 2) (nth w 3) (nth w 4) Z (nth w 5) (nth w 6) dq kc vc dx (mul 3 D) D D 0 1 1 0)
                   (enw-dbind st dq kc vc da 1)
@@ -158,10 +169,10 @@
                   (enw-mbind st dx (nth w 9) (nth w 10) (nth w 11) (nth w 12) (nth w 11) (nth w 12) (nth w 11) (nth w 12) df df df dx F D F 1 1 4 0)
                   (enw-mbind st df (nth w 9) (nth w 10) (nth w 13) (nth w 14) (nth w 13) (nth w 14) (nth w 13) (nth w 14) dx dx dx dx D F D 2 0 4 0)
                   (enw-xfbind st da 2))))
-    (defn enw-dec-binds (st l) (if (ge l (enw-layers)) (list) (cons (enw-dec-binds-l st l) (enw-dec-binds st (add l 1)))))
+    (defn enw-dec-binds (st l) (if (ge l (eng-dec-layers st)) (list) (cons (enw-dec-binds-l st l) (enw-dec-binds st (add l 1)))))
     ; the same layer over rows (the batched prefill): rows Tdec from pos, causal own attention
     (defn enw-pre-binds-l (st l)
-        (do (let w (enw-lt st "decoder" l)) (let Z (enw-b st 24)) (let D (enw-D)) (let F (enw-F))
+        (do (let w (enw-lt st "decoder" l)) (let Z (enw-b st 24)) (let D (eng-D st)) (let F (eng-F st))
             (let dx (enw-b st 11)) (let dq (enw-b st 12)) (let da (enw-b st 13)) (let df (enw-b st 14)) (let kc (enw-bl st 19 l)) (let vc (enw-bl st 20 l))
             (list (enw-gbind st dx (nth w 0) (nth w 1) (nth w 2) (nth w 3) (nth w 4) Z (nth w 5) (nth w 6) dq kc vc dx dx (mul 3 D) D D 0 1 2 1 0)
                   (enw-abind st dq kc vc da 2 1)
@@ -171,7 +182,7 @@
                   (enw-gbind st da (nth w 0) (nth w 1) (nth w 22) (nth w 23) (nth w 22) (nth w 23) (nth w 22) (nth w 23) dx dx dx dx dx D D D 2 0 2 4 0)
                   (enw-gbind st dx (nth w 9) (nth w 10) (nth w 11) (nth w 12) (nth w 11) (nth w 12) (nth w 11) (nth w 12) df df df dx dx F D F 1 1 2 4 0)
                   (enw-gbind st df (nth w 9) (nth w 10) (nth w 13) (nth w 14) (nth w 13) (nth w 14) (nth w 13) (nth w 14) dx dx dx dx dx D F D 2 0 2 4 0))))
-    (defn enw-pre-binds (st l) (if (ge l (enw-layers)) (list) (cons (enw-pre-binds-l st l) (enw-pre-binds st (add l 1)))))
+    (defn enw-pre-binds (st l) (if (ge l (eng-dec-layers st)) (list) (cons (enw-pre-binds-l st l) (enw-pre-binds st (add l 1)))))
     ; the rest: melnorm, conv1, conv2, positions, ln+logits (row 0; the prefill's last row), the three argmax windows (tongue, text, text-or-timestamp)
     ; an argmax is a PAIR of binds now — the fold over G groups, then the fold over their G answers
     (defn enw-argmax-bind (st lo hi lo2 hi2)
@@ -183,16 +194,16 @@
     ; the group count the mv kernel's own row rule asks for: eight simdgroups, each taking em-mv-rows(N) outputs
     (defn enw-mv-groups (n) (do (let per (mul 8 (em-mv-rows n))) (div (add n (sub per 1)) per)))
     (defn enw-misc-binds (st)
-        (do (let hs (enw-hs st)) (let Z (enw-b st 24)) (let D (enw-D)) (let tok (enw-h hs "decoder.token_embedding.weight")) (let lw (enw-h hs "decoder.ln.weight")) (let lb (enw-h hs "decoder.ln.bias"))
+        (do (let hs (enw-hs st)) (let Z (enw-b st 24)) (let D (eng-D st)) (let tok (enw-h hs "decoder.token_embedding.weight")) (let lw (enw-h hs "decoder.ln.weight")) (let lb (enw-h hs "decoder.ln.bias"))
             (list (md-bind16 (list (enw-mel st) (enw-b st 23) (enw-shp st)) (list) 256 0 1 0)
-                  (enw-cbind st (enw-mel st) (enw-h hs "encoder.conv1.weight") (enw-h hs "encoder.conv1.bias") (enw-b st 3) 80 D 3 1)
+                  (enw-cbind st (enw-mel st) (enw-h hs "encoder.conv1.weight") (enw-h hs "encoder.conv1.bias") (enw-b st 3) (eng-mels st) D 3 1)
                   (enw-cbind st (enw-b st 3) (enw-h hs "encoder.conv2.weight") (enw-h hs "encoder.conv2.bias") (enw-b st 4) D D 0 2)
                   (md-bind (list (enw-b st 4) (enw-shp st)) (list D))
-                  (enw-mbind st (enw-b st 11) lw lb tok Z tok Z tok Z (enw-b st 15) (enw-b st 15) (enw-b st 15) (enw-b st 11) (enw-V) D (enw-V) 0 1 4 0)
-                  (enw-mbind st (enw-b st 11) lw lb tok Z tok Z tok Z (enw-b st 15) (enw-b st 15) (enw-b st 15) (enw-b st 11) (enw-V) D (enw-V) 0 1 4 1)
-                  (enw-argmax-bind st (enw-lang-lo) (enw-lang-hi) 0 0)
+                  (enw-mbind st (enw-b st 11) lw lb tok Z tok Z tok Z (enw-b st 15) (enw-b st 15) (enw-b st 15) (enw-b st 11) (eng-V st) D (eng-V st) 0 1 4 0)
+                  (enw-mbind st (enw-b st 11) lw lb tok Z tok Z tok Z (enw-b st 15) (enw-b st 15) (enw-b st 15) (enw-b st 11) (eng-V st) D (eng-V st) 0 1 4 1)
+                  (enw-argmax-bind st (enw-lang-lo) (eng-lang-hi st) 0 0)
                   (enw-argmax-bind st 0 (add (enw-eot) 1) 0 0)
-                  (enw-argmax-bind st 0 (add (enw-eot) 1) (enw-ts0) (enw-V))
+                  (enw-argmax-bind st 0 (add (enw-eot) 1) (eng-ts0 st) (eng-V st))
                   (enw-lnbind st (enw-b st 4) D 0)
                   (enw-lnbind st (enw-b st 11) D 2))))
     (defn enw-binds (st) (nth st 8))
@@ -203,13 +214,13 @@
     (defn enw-bind-misc (st i) (nth (nth (enw-binds st) 4) i))
     ; the argmax window asked for, from the three stored or built on the spot
     (defn enw-argmax-pick (st lo hi lo2 hi2)
-        (if (and (eq lo (enw-lang-lo)) (and (eq hi (enw-lang-hi)) (eq hi2 0))) (enw-bind-misc st 6)
+        (if (and (eq lo (enw-lang-lo)) (and (eq hi (eng-lang-hi st)) (eq hi2 0))) (enw-bind-misc st 6)
         (if (and (eq lo 0) (and (eq hi (add (enw-eot) 1)) (eq hi2 0))) (enw-bind-misc st 7)
-        (if (and (eq lo 0) (and (eq hi (add (enw-eot) 1)) (and (eq lo2 (enw-ts0)) (eq hi2 (enw-V))))) (enw-bind-misc st 8)
+        (if (and (eq lo 0) (and (eq hi (add (enw-eot) 1)) (and (eq lo2 (eng-ts0 st)) (eq hi2 (eng-V st))))) (enw-bind-misc st 8)
             (enw-argmax-bind st lo hi lo2 hi2)))))
     ; ---- the model's own doubt ----
     ; A float word off a device buffer: the same IEEE-754 read the band and the tongue's logits use.
-    (defn enw-f32-of (b i) (do (let bits (en-u32 b i)) (let s (div bits 2147483648)) (let e (mod (div bits 8388608) 256)) (let m (mod bits 8388608)) (if (eq e 0) 0.0 (if (eq e 255) -99999.0 (mul (if (eq s 1) -1.0 1.0) (mul (add 1.0 (div (str_to_float (int_to_str m)) 8388608.0)) (fq-pow2 (sub e 127))))))))
+    (defn enw-f32-of (b i) (do (let bits (en-u32 b i)) (let s (div bits 2147483648)) (let e (mod (div bits 8388608) 256)) (let m (mod bits 8388608)) (if (eq e 0) (mul (if (eq s 1) -1.0 1.0) (mul (div m 8388608.0) (fq-pow2 -126))) (if (eq e 255) (form_error "native ear non-finite float readback") (mul (if (eq s 1) -1.0 1.0) (mul (add 1.0 (div (str_to_float (int_to_str m)) 8388608.0)) (fq-pow2 (sub e 127))))))))
     ; one probability off the resident logits: softmax over [lo, hi) read at idx, landing as float bits at dout[slot]
     (defn enw-softp-bind (st lo hi idx stage slot) (md-bind16 (list (enw-b st 15) (enw-b st 16) (enw-b st 28)) (list lo hi idx stage (em-argmax-G) slot) 256 0 1 0))
     (defn enw-softp-go (st lo hi idx slot)
@@ -222,19 +233,19 @@
     ; beside it, off the logits the sot step already left resident — one extra pair of folds per LINE, none per token.
     ; Call it while those logits still stand: the next step overwrites them.
     (defn enw-doubt (st langtok)
-        (do (let a (enw-softp-go st 0 (enw-V) (enw-nospeech) 1))
-            (let b (enw-softp-go st (enw-lang-lo) (enw-lang-hi) langtok 2))
-            (let s (metal_sync))
+        (do (let a (enw-softp-go st 0 (eng-V st) (eng-nospeech st) 1))
+            (let b (enw-softp-go st (enw-lang-lo) (eng-lang-hi st) langtok 2))
+            (let s (enw-sync))
             (let w (en-text (metal_buf_read (enw-b st 16) 0 12)))
             (list (enw-f32-of w 4) (enw-f32-of w 8))))
     ; the same reading when a batched prefill has moved on: row 0 of the decoder's rows is still the sot row,
     ; so one logits pass over it (lastrow = 0) puts the sot step's logits back where the folds read them
     (defn enw-doubt-sot (st langtok)
-        (do (let lg (enw-go st (enw-pi-mv) (enw-bind-misc st 4) (enw-mv-groups (enw-V))))
+        (do (let lg (enw-go st (enw-pi-mv) (enw-bind-misc st 4) (enw-mv-groups (eng-V st))))
             (enw-doubt st langtok)))
     ; ---- the decoded line's own confidence ----
     ; The argmax accumulates into these two floats on every dispatch, so a caller zeroes them where its line begins.
-    (defn enw-lp-reset (st) (metal_buf_write (enw-b st 29) 0 (enw-zeros (byte_to_str 0) 8)))
+    (defn enw-lp-reset (st) (enw-write (enw-b st 29) 0 (enw-zeros (byte_to_str 0) 8)))
     (defn enw-avg-logprob (st) (do (let w (en-text (metal_buf_read (enw-b st 29) 0 8))) (let n (enw-f32-of w 4)) (if (le n 0.0) 0.0 (div (enw-f32-of w 0) n))))
     ; ---- what a caller does with the doubt ----
     ; WHERE THE LINE IS, AND WHY IT IS NOT THE REFERENCE'S. The same utterance was walked across the eight-second window
@@ -257,51 +268,58 @@
     ; ---- the open state: (path rows hs pipes bufs toklines enc-tables dec-tables binds) ----
     (defn enw-open (path tokpath)
         (do (let rows (en-table path))
-            (let ps (enw-pipes))
+            (if (nil? rows) (form_error "native ear NPZ table is empty") 0)
+            (let geometry (eng-tiny)) (let ps (enw-pipes-for (eng-state geometry)))
             (let whole (metal_buf_from_file path 0 (file_size path)))
-            (let hs (enw-map ps whole rows))
-            (let bs (enw-bufs))
-            (let st0 (list path rows hs ps bs (split-on (en-text (read_file tokpath)) (byte_to_str 10)) (enw-tables hs "encoder" (enw-enc-names) 0) (enw-tables hs "decoder" (enw-dec-names) 0)))
-            (let st (append st0 (list (list (enw-enc-binds st0 0) (enw-cross-binds st0 0) (enw-dec-binds st0 0) (enw-pre-binds st0 0) (enw-misc-binds st0)))))
-            (let z1 (metal_buf_write (enw-shp st) 0 (enw-zeros (byte_to_str 0) 32)))
-            (let z2 (metal_buf_write (enw-b st 24) 0 (enw-zeros (byte_to_str 0) (mul 2 (enw-V)))))
-            (let bank (metal_enqueue (enw-p st (enw-pi-melbank)) (md-bind (list (enw-b st 2)) (list)) (mul 80 201)))
-            (let s (metal_sync))
-            st))
+            (let hs (enw-map ps whole rows)) (enw-sync) (metal_buf_free whole)
+            (enw-open-ready path rows hs ps tokpath geometry)))
+    (defn enw-open-ready (path rows hs ps tokpath geometry)
+        (do (let st (eng-state geometry)) (let bs (enw-bufs st))
+            (let st0 (list path rows hs ps bs (enw-token-lines tokpath) (enw-tables st hs "encoder" (enw-enc-names) 0) (enw-tables st hs "decoder" (enw-dec-names) 0) (list) geometry))
+            (let binds (list (enw-enc-binds st0 0) (enw-cross-binds st0 0) (enw-dec-binds st0 0) (enw-pre-binds st0 0) (enw-misc-binds st0)))
+            (let ready (append (take 8 st0) (list binds geometry)))
+            (let z1 (enw-write (enw-shp ready) 0 (enw-zeros (byte_to_str 0) 32)))
+            (let z2 (enw-write (enw-b ready 24) 0 (enw-zeros (byte_to_str 0) (mul 2 (eng-V ready)))))
+            (let bank (enw-enqueue (enw-p ready (enw-pi-melbank)) (md-bind (list (enw-b ready 2)) (list)) (mul (eng-mels ready) 201)))
+            (let done (enw-sync))
+            ready))
     ; ---- encoder over L samples of s16 pcm ----
     (defn enw-enc-layer (st l T)
-        (do (let D (enw-D)) (let r64 (enw-t32 T)) (let ln (enw-bind-misc st 9))
+        (do (let D (eng-D st)) (let r64 (enw-t32 T)) (let ln (enw-bind-misc st 9))
             (let a0 (enw-go st (enw-pi-lnstat) ln T))
             (let a1 (enw-go st (enw-pi-gemm) (enw-bind-enc st l 0) (mul (enw-t32 (mul 3 D)) r64)))
-            (let a2 (enw-go st (enw-pi-attn) (enw-bind-enc st l 1) (mul (enw-H) (enw-t8 T))))
+            (let a2 (enw-go st (enw-pi-attn) (enw-bind-enc st l 1) (mul (eng-H st) (enw-t8 T))))
             (let a3 (enw-go st (enw-pi-gemm) (enw-bind-enc st l 2) (mul (enw-t32 D) r64)))
             (let b0 (enw-go st (enw-pi-lnstat) ln T))
-            (let a4 (enw-go st (enw-pi-gemm) (enw-bind-enc st l 3) (mul (enw-t32 (enw-F)) r64)))
+            (let a4 (enw-go st (enw-pi-gemm) (enw-bind-enc st l 3) (mul (enw-t32 (eng-F st)) r64)))
             (let a5 (enw-go st (enw-pi-gemm) (enw-bind-enc st l 4) (mul (enw-t32 D) r64)))
             (add a1 (add a2 (add a3 (add a4 a5))))))
-    (defn enw-enc-layers (st l T acc) (if (ge l (enw-layers)) acc (enw-enc-layers st (add l 1) T (add acc (enw-enc-layer st l T)))))
-    (defn enw-cross (st l T) (if (ge l (enw-layers)) 0 (add (enw-go st (enw-pi-gemm) (enw-bind-cross st l) (mul (enw-t32 (mul 2 (enw-D))) (enw-t32 T))) (enw-cross st (add l 1) T))))
+    (defn enw-enc-layers (st l T acc) (if (ge l (eng-enc-layers st)) acc (enw-enc-layers st (add l 1) T (add acc (enw-enc-layer st l T)))))
+    (defn enw-cross (st l T) (if (ge l (eng-dec-layers st)) 0 (add (enw-go st (enw-pi-gemm) (enw-bind-cross st l) (mul (enw-t32 (mul 2 (eng-D st))) (enw-t32 T))) (enw-cross st (add l 1) T))))
     ; returns Tenc, the encoder positions; the encoded window rests in henc and the cross caches.
     ; The window's bytes are already in the device buffer when this runs — whoever put them there
     ; says how many, so a caller holding its audio in pieces never has to make a string of it.
     (defn enw-encode-at (st nbytes) (enw-encode-at-gain st nbytes 1000))
     (defn enw-encode-at-gain (st nbytes gain)
-        (do (let L (div nbytes 2))
+        (do (if (not (and (ge nbytes 640) (and (le nbytes 960000) (eq (mod nbytes 2) 0)))) (form_error "native ear PCM extent refused") 0) (let L (div nbytes 2))
             (let Tf (div L 160))
             (let Te (div Tf 2))
-            (let D (enw-D))
-            (let s1 (metal_enqueue (enw-p st (enw-pi-spec)) (md-bind16 (list (enw-b st 0) (enw-b st 2) (enw-mel st) (enw-b st 23) (enw-shp st)) (list L Tf gain) 256 0 1 0) Tf))
-            (let s2 (enw-go st (enw-pi-melnorm) (enw-bind-misc st 0) (div (add (mul Tf 80) 255) 256)))
+            (let D (eng-D st))
+            (let s1 (enw-enqueue (enw-p st (enw-pi-spec)) (md-bind16 (list (enw-b st 0) (enw-b st 2) (enw-mel st) (enw-b st 23) (enw-shp st)) (list L Tf gain) 256 0 1 0) Tf))
+            (let s2 (enw-go st (enw-pi-melnorm) (enw-bind-misc st 0) (div (add (mul Tf (eng-mels st)) 255) 256)))
+            (enw-encode-mel st Tf)))
+    (defn enw-encode-mel (st Tf)
+        (do (if (or (lt Tf 2) (gt Tf (eng-TF st))) (form_error "native ear mel extent refused") 0) (let Te (div Tf 2)) (let D (eng-D st))
             (let c1 (enw-go st (enw-pi-gemm) (enw-bind-misc st 1) (mul (enw-t32 D) (enw-t32 Tf))))
             (let c2 (enw-go st (enw-pi-gemm) (enw-bind-misc st 2) (mul (enw-t32 D) (enw-t32 Te))))
             (let ap (enw-go st (enw-pi-addpos) (enw-bind-misc st 3) (mul Te D)))
             (let ls (enw-enc-layers st 0 Te 0))
             (let lp (enw-go st (enw-pi-lnstat) (enw-bind-misc st 9) Te))
             (let cr (enw-cross st 0 Te))
-            (let s (metal_sync))
+            (let s (enw-sync))
             Te))
     (defn enw-encode (st pcm)
-        (do (let w0 (metal_buf_write (enw-b st 0) 0 pcm))
+        (do (let w0 (enw-write (enw-b st 0) 0 pcm))
             (enw-encode-at st (str_len pcm))))
     ; ---- the same encode over a window that is still in pieces ----
     ; A LIVE LANE HOLDS ITS WINDOW AS THE MIC'S OWN CHUNKS, AND JOINING THEM WAS THE COST OF HEARING.
@@ -320,7 +338,7 @@
                 (cons (substring (head xs) n (str_len (head xs))) (tail xs)))))
     (defn enw-parts-write (st xs off)
         (if (eq (len xs) 0) off
-            (do (let w (metal_buf_write (enw-b st 0) off (head xs)))
+            (do (let w (enw-write (enw-b st 0) off (head xs)))
                 (enw-parts-write st (tail xs) (add off (str_len (head xs)))))))
     ; AND THE SILENCE IN FRONT COST MORE THAN THE JOIN. enw-zeros ends in a substring, and substring
     ; is not a native here — core.fk halves it down to single bytes and concatenates back, so 192000
@@ -332,7 +350,7 @@
     (defn enw-zblock () (enw-dbl (byte_to_str 0) 4096))
     (defn enw-zfill (st off pad z)
         (if (ge off pad) off
-            (do (let w (metal_buf_write (enw-b st 0) off z))
+            (do (let w (enw-write (enw-b st 0) off z))
                 (enw-zfill st (add off (str_len z)) pad z))))
     (defn enw-encode-parts (st parts want)
         (enw-encode-parts-gain st parts want 1000))
@@ -347,30 +365,33 @@
             (enw-encode-at-gain st want gain)))
     ; ---- one decoder step: token id at position pos; argmax over [lo, hi) and [lo2, hi2) ----
     (defn enw-dec-layer (st l C)
-        (do (let D (enw-D)) (let g48 (enw-t8 D))
+        (do (let D (eng-D st)) (let g48 (enw-t8 D))
             (let a1 (enw-go st (enw-pi-mv) (enw-bind-dec st l 0) (enw-t8 (mul 3 D))))
-            (let a2 (enw-go st (enw-pi-attn-dec) (enw-bind-dec st l 1) (enw-H)))
+            (let a2 (enw-go st (enw-pi-attn-dec) (enw-bind-dec st l 1) (eng-H st)))
             (let a3 (enw-go st (enw-pi-mv) (enw-bind-dec st l 2) g48))
             (let a4 (enw-go st (enw-pi-mv) (enw-bind-dec st l 3) g48))
-            (let a5 (enw-go st (enw-pi-attn-x) (enw-bind-dec st l 4) (mul (enw-H) C)))
-            (let a5b (enw-go st (enw-pi-attn-xfin) (enw-bind-dec st l 8) (enw-H)))
+            (let a5 (enw-go st (enw-pi-attn-x) (enw-bind-dec st l 4) (mul (eng-H st) C)))
+            (let a5b (enw-go st (enw-pi-attn-xfin) (enw-bind-dec st l 8) (eng-H st)))
             (let a6 (enw-go st (enw-pi-mv) (enw-bind-dec st l 5) g48))
-            (let a7 (enw-go st (enw-pi-mv) (enw-bind-dec st l 6) (enw-t8 (enw-F))))
+            (let a7 (enw-go st (enw-pi-mv) (enw-bind-dec st l 6) (enw-t8 (eng-F st))))
             (let a8 (enw-go st (enw-pi-mv) (enw-bind-dec st l 7) g48))
             (add a1 (add a2 (add a3 (add a4 (add a5 (add a5b (add a6 (add a7 a8))))))))))
-    (defn enw-dec-layers (st l C acc) (if (ge l (enw-layers)) acc (enw-dec-layers st (add l 1) C (add acc (enw-dec-layer st l C)))))
-    (defn enw-step4 (st id pos Te lo hi lo2 hi2)
-        (do (let hs (enw-hs st))
-            (let e (metal_enqueue (enw-p st (enw-pi-embed)) (md-bind (list (enw-h hs "decoder.token_embedding.weight") (enw-h hs "decoder.positional_embedding") (enw-b st 11) (enw-shp st)) (list id pos (enw-D))) (enw-D)))
+    (defn enw-dec-layers (st l C acc) (if (ge l (eng-dec-layers st)) acc (enw-dec-layers st (add l 1) C (add acc (enw-dec-layer st l C)))))
+    (defn enw-forward-step (st id pos Te)
+        (do (if (not (and (ge id 0) (and (lt id (eng-V st)) (and (ge pos 0) (and (lt pos (eng-CTX st)) (and (gt Te 0) (le Te (eng-TE st)))))))) (form_error "native ear decoder token/position/encoder extent refused") 0) (let hs (enw-hs st))
+            (let e (enw-enqueue (enw-p st (enw-pi-embed)) (md-bind (list (enw-h hs "decoder.token_embedding.weight") (enw-h hs "decoder.positional_embedding") (enw-b st 11) (enw-shp st)) (list id pos (eng-D st))) (eng-D st)))
             (let ls (enw-dec-layers st 0 (enw-xchunks Te) 0))
-            (let lg (enw-go st (enw-pi-mv) (enw-bind-misc st 4) (enw-mv-groups (enw-V))))
+            (let lg (enw-go st (enw-pi-mv) (enw-bind-misc st 4) (enw-mv-groups (eng-V st))))
+            lg))
+    (defn enw-step4 (st id pos Te lo hi lo2 hi2)
+        (do (let forward (enw-forward-step st id pos Te))
             (let am (enw-argmax-go st (enw-argmax-pick st lo hi lo2 hi2)))
-            (let s (metal_sync))
+            (let s (enw-sync))
             (en-u32 (en-text (metal_buf_read (enw-b st 16) 0 4)) 0)))
     (defn enw-step (st id pos Te lo hi) (enw-step4 st id pos Te lo hi 0 0))
     (defn enw-ts? (id) (ge id (enw-ts0)))
     ; a step whose argmax may answer text, end, or a timestamp: the decoder keeps its own clock
-    (defn enw-step2 (st id pos Te) (enw-step4 st id pos Te 0 (add (enw-eot) 1) (enw-ts0) (enw-V)))
+    (defn enw-step2 (st id pos Te) (enw-step4 st id pos Te 0 (add (enw-eot) 1) (eng-ts0 st) (eng-V st)))
     ; a loop of period one, two or three repeated three times is the model going round: stop paying for it
     (defn enw-looping? (id acc) (if (lt (len acc) 5) 0 (if (and (eq id (nth acc 0)) (eq id (nth acc 1))) 1 (if (and (eq id (nth acc 1)) (and (eq (nth acc 0) (nth acc 2)) (eq (nth acc 1) (nth acc 3)))) 1 (if (and (eq id (nth acc 2)) (and (eq (nth acc 0) (nth acc 3)) (eq (nth acc 1) (nth acc 4)))) 1 0)))))
     ; the last twelve tokens carrying four or fewer distinct ids is the model going round: stop paying for it
@@ -382,29 +403,29 @@
     (defn enw-greedy2 (st id pos Te cap acc)
         (do (let nid (enw-step2 st id pos Te))
             (let maxtick (add (div (mul Te 3) 1) 50))
-            (if (or (eq nid (enw-eot)) (or (ge (len acc) cap) (or (eq (enw-looping? nid acc) 1) (or (eq (enw-round? nid acc) 1) (and (enw-ts? nid) (gt (sub nid (enw-ts0)) maxtick)))))) (reverse acc) (enw-greedy2 st nid (add pos 1) Te cap (cons nid acc)))))
+            (if (or (eq nid (enw-eot)) (or (ge (len acc) cap) (or (eq (enw-looping? nid acc) 1) (or (eq (enw-round? nid acc) 1) (and (enw-ts? nid) (gt (sub nid (eng-ts0 st)) maxtick)))))) (reverse acc) (enw-greedy2 st nid (add pos 1) Te cap (cons nid acc)))))
     ; transcribe from a tick (20 ms units) into the window: the cut point is handed to the decoder as its first timestamp,
     ; so only what came after it is spoken; returns (lang-token ids nospeech-prob tongue-prob avg-logprob), timestamps kept in ids
     (defn enw-transcribe-from (st Te tick cap)
-        (do (let lang (enw-step st (enw-sot) 0 Te (enw-lang-lo) (enw-lang-hi)))
+        (do (let lang (enw-step st (enw-sot) 0 Te (enw-lang-lo) (eng-lang-hi st)))
             (let d (enw-doubt st lang))
             (let t1 (enw-step st lang 1 Te 0 (add (enw-eot) 1)))
-            (let t2 (enw-step st (enw-tok-transcribe) 2 Te 0 (add (enw-eot) 1)))
+            (let t2 (enw-step st (eng-transcribe st) 2 Te 0 (add (enw-eot) 1)))
             (let z (enw-lp-reset st))
-            (let ids (enw-greedy2 st (add (enw-ts0) tick) 3 Te cap (list)))
+            (let ids (enw-greedy2 st (add (eng-ts0 st) tick) 3 Te cap (list)))
             (append (list lang ids) (append d (list (enw-avg-logprob st))))))
     ; the decoder's last word on time: the final timestamp if the line closed with one, else -1
     (defn enw-last-ts (ids) (if (eq (len ids) 0) (sub 0 1) (do (let last (nth ids (sub (len ids) 1))) (if (enw-ts? last) (sub last (enw-ts0)) (sub 0 1)))))
     ; ---- greedy line: prompt sot, lang, transcribe, notimestamps; then text until eot or cap ----
     (defn enw-greedy (st pos Te cap acc)
-        (do (let id (enw-step st (if (eq (len acc) 0) (enw-notimestamps) (head acc)) pos Te 0 (add (enw-eot) 1)))
+        (do (let id (enw-step st (if (eq (len acc) 0) (eng-notimestamps st) (head acc)) pos Te 0 (add (enw-eot) 1)))
             (if (or (eq id (enw-eot)) (ge (len acc) cap)) (reverse acc) (enw-greedy st (add pos 1) Te cap (cons id acc)))))
     ; returns (lang-token ids nospeech-prob tongue-prob avg-logprob)
     (defn enw-transcribe (st Te cap)
-        (do (let lang (enw-step st (enw-sot) 0 Te (enw-lang-lo) (enw-lang-hi)))
+        (do (let lang (enw-step st (enw-sot) 0 Te (enw-lang-lo) (eng-lang-hi st)))
             (let d (enw-doubt st lang))
             (let t1 (enw-step st lang 1 Te 0 (add (enw-eot) 1)))
-            (let t2 (enw-step st (enw-tok-transcribe) 2 Te 0 (add (enw-eot) 1)))
+            (let t2 (enw-step st (eng-transcribe st) 2 Te 0 (add (enw-eot) 1)))
             (let z (enw-lp-reset st))
             (let ids (enw-greedy st 3 Te cap (list)))
             (append (list lang ids) (append d (list (enw-avg-logprob st))))))
@@ -423,7 +444,7 @@
 (do
     (defn enw-ids-bytes (ids acc) (if (eq (len ids) 0) acc (enw-ids-bytes (tail ids) (str_concat acc (md-le32 (head ids))))))
     (defn enw-pre-layer (st l T)
-        (do (let D (enw-D)) (let r64 (enw-t32 T)) (let g6 (mul (enw-t32 D) r64)) (let ga (mul (enw-H) (enw-t8 T))) (let ln (enw-bind-misc st 10))
+        (do (let D (eng-D st)) (let r64 (enw-t32 T)) (let g6 (mul (enw-t32 D) r64)) (let ga (mul (eng-H st) (enw-t8 T))) (let ln (enw-bind-misc st 10))
             (let n1 (enw-go st (enw-pi-lnstat) ln T))
             (let a1 (enw-go st (enw-pi-gemm) (enw-bind-pre st l 0) (mul (enw-t32 (mul 3 D)) r64)))
             (let a2 (enw-go st (enw-pi-attn) (enw-bind-pre st l 1) ga))
@@ -433,20 +454,20 @@
             (let a5 (enw-go st (enw-pi-attn) (enw-bind-pre st l 4) ga))
             (let a6 (enw-go st (enw-pi-gemm) (enw-bind-pre st l 5) g6))
             (let n3 (enw-go st (enw-pi-lnstat) ln T))
-            (let a7 (enw-go st (enw-pi-gemm) (enw-bind-pre st l 6) (mul (enw-t32 (enw-F)) r64)))
+            (let a7 (enw-go st (enw-pi-gemm) (enw-bind-pre st l 6) (mul (enw-t32 (eng-F st)) r64)))
             (let a8 (enw-go st (enw-pi-gemm) (enw-bind-pre st l 7) g6))
             0))
-    (defn enw-pre-layers (st l T) (if (ge l (enw-layers)) 0 (do (let x (enw-pre-layer st l T)) (enw-pre-layers st (add l 1) T))))
+    (defn enw-pre-layers (st l T) (if (ge l (eng-dec-layers st)) 0 (do (let x (enw-pre-layer st l T)) (enw-pre-layers st (add l 1) T))))
     ; ids from pos0; answers the argmax over (lo hi) and (lo2 hi2) of the last row's logits
     (defn enw-prefill (st ids pos0 Te lo hi lo2 hi2)
         (do (let hs (enw-hs st))
             (let T (len ids))
-            (let w (metal_buf_write (enw-b st 21) 0 (enw-ids-bytes ids "")))
-            (let e (metal_enqueue (enw-p st (enw-pi-embed-n)) (md-bind (list (enw-h hs "decoder.token_embedding.weight") (enw-h hs "decoder.positional_embedding") (enw-b st 21) (enw-b st 11) (enw-shp st)) (list pos0 (enw-D) T)) (mul T (enw-D))))
+            (let w (enw-write (enw-b st 21) 0 (enw-ids-bytes ids "")))
+            (let e (enw-enqueue (enw-p st (enw-pi-embed-n)) (md-bind (list (enw-h hs "decoder.token_embedding.weight") (enw-h hs "decoder.positional_embedding") (enw-b st 21) (enw-b st 11) (enw-shp st)) (list pos0 (eng-D st) T)) (mul T (eng-D st))))
             (let ls (enw-pre-layers st 0 T))
-            (let lg (enw-go st (enw-pi-mv) (enw-bind-misc st 5) (enw-mv-groups (enw-V))))
+            (let lg (enw-go st (enw-pi-mv) (enw-bind-misc st 5) (enw-mv-groups (eng-V st))))
             (let am (enw-argmax-go st (enw-argmax-pick st lo hi lo2 hi2)))
-            (let s (metal_sync))
+            (let s (enw-sync))
             (en-u32 (en-text (metal_buf_read (enw-b st 16) 0 4)) 0)))
     ; transcribe from a tick with the tongue known (or detected when lang < 0) and an agreed text prefix prefilled;
     ; returns (lang ids nospeech-prob tongue-prob) where ids = prefix + what the decoder added (timestamps kept)
@@ -454,15 +475,15 @@
     (defn enw-lang-logit (b tok) (enw-f32-of b (mul 4 (sub tok (enw-lang-lo)))))
     (defn enw-three () (list 50259 50300 50267))
     (defn enw-best-of (b toks best bv) (if (eq (len toks) 0) (list best bv) (do (let v (enw-lang-logit b (head toks))) (if (gt v bv) (enw-best-of b (tail toks) (head toks) v) (enw-best-of b (tail toks) best bv)))))
-    (defn enw-lang-pick (st top) (if (or (eq top 50259) (or (eq top 50300) (eq top 50267))) top (do (let b (en-text (metal_buf_read (enw-b st 15) (mul 4 (enw-lang-lo)) (mul 4 99)))) (let three (enw-best-of b (enw-three) 50259 -99999.0)) (if (ge (add (nth three 1) 3.0) (enw-lang-logit b top)) (head three) top))))
+    (defn enw-lang-pick (st top) (if (or (eq top 50259) (or (eq top 50300) (eq top 50267))) top (do (let b (en-text (metal_buf_read (enw-b st 15) (mul 4 (enw-lang-lo)) (mul 4 (eng-languages st))))) (let three (enw-best-of b (enw-three) 50259 -99999.0)) (if (ge (add (nth three 1) 3.0) (enw-lang-logit b top)) (head three) top))))
     (defn enw-transcribe-from2 (st Te tick cap lang prefix)
-        (do (let l (if (lt lang 0) (enw-lang-pick st (enw-prefill st (list (enw-sot)) 0 Te (enw-lang-lo) (enw-lang-hi) 0 0)) lang))
+        (do (let l (if (lt lang 0) (enw-lang-pick st (enw-prefill st (list (enw-sot)) 0 Te (enw-lang-lo) (eng-lang-hi st) 0 0)) lang))
             ; the detection prefill leaves the sot logits standing, so the doubt is free there; when the tongue
             ; arrived known there was no sot step, and row 0 of the prefill's rows is still the sot row
             (let d0 (if (lt lang 0) (enw-doubt st l) (list)))
-            (let head-ids (append (list l (enw-tok-transcribe) (add (enw-ts0) tick)) prefix))
+            (let head-ids (append (list l (eng-transcribe st) (add (eng-ts0 st) tick)) prefix))
             (let z (enw-lp-reset st))
-            (let first (enw-prefill st (if (lt lang 0) head-ids (cons (enw-sot) head-ids)) (if (lt lang 0) 1 0) Te 0 (add (enw-eot) 1) (enw-ts0) (enw-V)))
+            (let first (enw-prefill st (if (lt lang 0) head-ids (cons (enw-sot) head-ids)) (if (lt lang 0) 1 0) Te 0 (add (enw-eot) 1) (eng-ts0 st) (eng-V st)))
             (let d (if (lt lang 0) d0 (enw-doubt-sot st l)))
             (let p0 (add 1 (len head-ids)))
             (let room (sub cap (len prefix)))

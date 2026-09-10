@@ -1,7 +1,7 @@
 // Bake the real low-rank delta into standalone affine 4-bit weights on Metal.
 // Changed projections use F32 scales/biases. Other tensors retain their exact bytes.
 // Quantization error is measured per projection; it is never described as lossless.
-// preludes: form-stdlib/native-lora-checkpoint.bml form-stdlib/native-llama-voice.bml form-stdlib/native-content-seal.bml form-stdlib/native-fused-generation.bml
+// preludes: form-stdlib/native-lora-checkpoint.bml form-stdlib/native-llama-voice.bml form-stdlib/native-content-seal.bml form-stdlib/native-fused-generation.bml form-stdlib/json-precise.bml
 section [form.bml] {
  class NativeLoraFuse {
   def nlfu-msl() = str_concat("#include <metal_stdlib>\nusing namespace metal;\n",str_concat(nam-linear-msl(),"
@@ -28,7 +28,7 @@ kernel void nlfu_quant(device const uchar* w [[buffer(0)]],device const uchar* s
   }
   def nlfu-projection-checked(p,qw,qs,qb,error,rows,cols,group,measured,bound,events) {
    let released = nam-free(list(error));
-   let event = json-emit(json-node-object(list(json-node-pair("projection",json-node-string(head(p))),json-node-pair("rank",json-node-int(nth(p,4))),json-node-pair("max_abs_weight_error",json-node-float-text(float_to_str(nth(measured,2)))),json-node-pair("allowed_weight_error",json-node-float-text(float_to_str(bound))))));
+   let event = json-emit-precise(json-node-object(list(json-node-pair("projection",json-node-string(head(p))),json-node-pair("rank",json-node-int(nth(p,4))),json-node-pair("max_abs_weight_error",json-precise-float(nth(measured,2))),json-node-pair("allowed_weight_error",json-precise-float(bound)))));
    let logged = if eq(str_len(events),0) then 0 else sbt-append(events,str_concat(event,"\n"));
    list(list(str_concat(head(p),".weight"),qw,list(rows,div(cols,8)),"U32"),list(str_concat(head(p),".scales"),qs,list(rows,div(cols,group)),"F32"),list(str_concat(head(p),".biases"),qb,list(rows,div(cols,group)),"F32"));
   }
@@ -44,9 +44,9 @@ kernel void nlfu_quant(device const uchar* w [[buffer(0)]],device const uchar* s
   def nlfu-metadata(base,adapter,dir,rows,pairs) {
    let config = nll-config(base);
    let origin = json-node-object(list(json-node-pair("owner",json-node-string("Form-native-Metal")),json-node-pair("base",json-node-string(base)),json-node-pair("adapter",json-node-string(nag-resolve(adapter))),json-node-pair("pairs_baked",json-node-int(pairs)),json-node-pair("quantization",json-node-string("affine 4-bit; per-group nearest-even rounding; F32 scales and biases"))));
-   let c = nag-write(str_concat(dir,"/config.json"),json-emit(json-node-object(append(json-object-pairs(config),list(json-node-pair("native_fusion",origin))))));
+   let c = nag-write(str_concat(dir,"/config.json"),json-emit-precise(json-node-object(append(json-object-pairs(config),list(json-node-pair("native_fusion",origin))))));
    let index = json-node-object(list(json-node-pair("metadata",json-node-object(list(json-node-pair("total_size",json-node-int(nlc-total(rows)))))),json-node-pair("weight_map",json-node-object(nlfu-weight-map(rows)))));
-   let i = nag-write(str_concat(dir,"/model.safetensors.index.json"),json-emit(index));
+   let i = nag-write(str_concat(dir,"/model.safetensors.index.json"),json-emit-precise(index));
    let t = nag-write(str_concat(dir,"/tokenizer.json"),read_file(str_concat(base,"/tokenizer.json")));
    let tc = read_file(str_concat(base,"/tokenizer_config.json")); let tcw = nag-write(str_concat(dir,"/tokenizer_config.json"),tc);
    nag-write(str_concat(dir,"/chat_template.jinja"),nlt-value(parse-json("native-fusion-tokenizer",tc),"chat_template"));
@@ -69,15 +69,15 @@ kernel void nlfu_quant(device const uchar* w [[buffer(0)]],device const uchar* s
    let released = nlfu-free-rows(rows); let closed = nll-close(model);
    let sync = nlc-sync-host(host_spawn_at(list("/bin/sync"),list("/dev/null","/dev/null","/dev/null")));
    let result = list("Form-native-Metal",out,pairs,nth(saved,1),len(rows),sub(merged,start),sub(host_monotonic_ms(),merged),nth(metal_live(),2));
-   let receipt = nag-write(str_concat(candidate,"/fusion-receipt.json"),json-emit(json-node-object(list(json-node-pair("owner",json-node-string(head(result))),json-node-pair("pairs_baked",json-node-int(pairs)),json-node-pair("model_bytes",json-node-int(nth(saved,1))),json-node-pair("tensors",json-node-int(len(rows))),json-node-pair("merge_ms",json-node-int(nth(result,5))),json-node-pair("save_ms",json-node-int(nth(result,6))),json-node-pair("retained_buffers",json-node-int(nth(result,7)))))));
+   let receipt = nag-write(str_concat(candidate,"/fusion-receipt.json"),json-emit-precise(json-node-object(list(json-node-pair("owner",json-node-string(head(result))),json-node-pair("pairs_baked",json-node-int(pairs)),json-node-pair("model_bytes",json-node-int(nth(saved,1))),json-node-pair("tensors",json-node-int(len(rows))),json-node-pair("merge_ms",json-node-int(nth(result,5))),json-node-pair("save_ms",json-node-int(nth(result,6))),json-node-pair("retained_buffers",json-node-int(nth(result,7)))))));
    let outputs = nag-write(str_concat(candidate,"/fusion-outputs.json"),nlfu-outputs(candidate));
    if not(str_eq(read_file(str_concat(candidate,"/fusion-inputs.json")),nlfu-inputs(base,adapter))) then form_error("native fusion inputs changed during the run; candidate withheld") else if not(eq(fs-rename(candidate,out),0)) then form_error("native fusion directory publication failed") else result;
   }
   def nlfu-seals(paths) = if nil?(paths) then list() else cons(json-node-string(ncs-file(head(paths))),nlfu-seals(tail(paths)));
-  def nlfu-code() = list("form/form-stdlib/native-lora-fuse.bml","form/form-stdlib/native-lora-checkpoint.bml","form/form-stdlib/native-affine-metal.bml","form/form-stdlib/native-llama-metal.bml","form/form-stdlib/safetensors-index.bml","form/form-stdlib/native-content-seal.bml");
+  def nlfu-code() = list("form/form-stdlib/native-lora-fuse.bml","form/form-stdlib/native-lora-checkpoint.bml","form/form-stdlib/native-affine-metal.bml","form/form-stdlib/native-llama-metal.bml","form/form-stdlib/safetensors-index.bml","form/form-stdlib/native-content-seal.bml","form/form-stdlib/json-precise.bml","form/form-stdlib/json.fk");
   def nlfu-input-paths(base,adapter) = append(nfg-paths(base,list("model.safetensors","config.json","tokenizer.json","tokenizer_config.json")),append(nfg-paths(adapter,list("adapters.safetensors","adapter_config.json")),nlfu-code()));
-  def nlfu-inputs(base,adapter) = json-emit(json-node-array(cons(json-node-string(base),cons(json-node-string(adapter),nlfu-seals(nlfu-input-paths(base,adapter))))));
-  def nlfu-outputs(out) = json-emit(json-node-array(nlfu-seals(nfg-paths(out,nfg-names()))));
+  def nlfu-inputs(base,adapter) = json-emit-precise(json-node-array(cons(json-node-string(base),cons(json-node-string(adapter),nlfu-seals(nlfu-input-paths(base,adapter))))));
+  def nlfu-outputs(out) = json-emit-precise(json-node-array(nlfu-seals(nfg-paths(out,nfg-names()))));
   def nlfu-current(base,adapter,root) {
    let out = nfg-resolve(root); let resolved = nag-resolve(adapter);
    if not(nfg-complete(out)) then 0 else if not(nfg-present(nlfu-input-paths(base,resolved))) then 0 else and(str_eq(read_file(str_concat(out,"/fusion-inputs.json")),nlfu-inputs(base,resolved)),str_eq(read_file(str_concat(out,"/fusion-outputs.json")),nlfu-outputs(out)));

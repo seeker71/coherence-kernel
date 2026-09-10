@@ -1,0 +1,106 @@
+// Native multilingual decoding with timestamp pairing, adaptive sampling, and
+// explicit EOS/cancellation/pressure outcomes. Each attempt reports its choice.
+// preludes: form-stdlib/native-whisper.bml form-stdlib/native-wav.bml form-stdlib/spool-bell-transport.fk observe/bidirectional-framebuffer-channel.fk form-stdlib/json-precise.bml
+section [form.bml] {
+ class NativeWhisperDecode {
+  def nwd-int(k,v) = json-node-pair(k,json-node-int(v));
+  def nwd-float(k,v) = json-node-pair(k,json-precise-float(v));
+  def nwd-text(k,v) = json-node-pair(k,json-node-string(v));
+  def nwd-append(path,text) {
+   let rc = sbt-append(path,text);
+   if lt(rc,0) then form_error(str_concat("native Whisper output append failed: ",path)) else rc;
+  }
+  def nwd-event(path,stage,fields) = if eq(str_len(path),0) then 0 else nwd-append(path,str_concat(json-emit-precise(json-node-object(append(list(nwd-text("owner","Form-native-Metal"),nwd-text("model","Whisper-large-v3-turbo"),nwd-text("stage",stage),nwd-int("time_ms",now_unix_ms()),nwd-int("lora_pairs",0)),fields))),"\n"));
+  def nwd-langs() = append(enw-langs(),list("yue"));
+  def nwd-language(code,codes,i) = if nil?(codes) then form_error(str_concat("native Whisper language unavailable: ",code)) else if str_eq(code,head(codes)) then add(enw-lang-lo(),i) else nwd-language(code,tail(codes),add(i,1));
+  def nwd-code(id) = if or(lt(id,enw-lang-lo()),ge(id,add(enw-lang-lo(),100))) then form_error("native Whisper language token is invalid") else nth(nwd-langs(),sub(id,enw-lang-lo()));
+  def nwd-filter-suppress(ids) = if nil?(ids) then list() else if lt(head(ids),enw-eot()) then cons(head(ids),nwd-filter-suppress(tail(ids))) else nwd-filter-suppress(tail(ids));
+  def nwd-suppression() = nwd-filter-suppress(sti-values(json-array-elements(json-object-get(parse-json("Whisper-nonspeech-policy",read_file("model/fixtures/whisper-tiny/generation-config.json")),"suppress_tokens"))));
+  def nwd-msl() = "#include <metal_stdlib>\nusing namespace metal;
+kernel void nwd_pcmpeak(device const short* pcm [[buffer(0)]],device uint* out [[buffer(1)]],uint lane [[thread_index_in_simdgroup]]){uint peak=0;for(uint i=lane;i<480000;i+=32)peak=max(peak,uint(abs(int(pcm[i]))));peak=simd_max(peak);if(lane==0)out[0]=peak;}
+kernel void nwd_melpad(device float* mel [[buffer(0)]],constant uint& start [[buffer(1)]],constant uint& n [[buffer(2)]],uint i [[thread_position_in_grid]]){if(i<n&&i>=start)mel[i]=0;}
+kernel void nwd_mask(device const float* logits [[buffer(0)]],device float* masked [[buffer(1)]],device const uint* suppress [[buffer(2)]],device atomic_uint* out [[buffer(3)]],constant uint& n [[buffer(4)]],constant uint& ts [[buffer(5)]],constant uint& last [[buffer(6)]],constant uint& penult [[buffer(7)]],constant uint& floor [[buffer(8)]],constant uint& first [[buffer(9)]],constant uint& count [[buffer(10)]],uint i [[thread_position_in_grid]]) {
+ if(i>=n)return;float v=logits[i];if(!isfinite(v))atomic_fetch_add_explicit(out+2,1u,memory_order_relaxed);
+ bool forbid=(i>50257&&i<ts);for(uint k=0;k<count;k++)forbid=forbid||i==suppress[k];
+ if(first)forbid=forbid||i<ts||i>ts+50;else{if(last&&penult)forbid=forbid||i>=ts;else if(last)forbid=forbid||i<50257;forbid=forbid||(i>=ts&&i<floor);}
+ masked[i]=forbid?-INFINITY:v;
+}
+inline uint nwd_rng(uint x){x^=x>>16;x*=0x7feb352du;x^=x>>15;x*=0x846ca68bu;return x^(x>>16);}
+kernel void nwd_select(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],constant uint& ts [[buffer(3)]],constant float& temperature [[buffer(4)]],constant uint& seed [[buffer(5)]],uint lane [[thread_index_in_simdgroup]]) {
+ float tm=-INFINITY,sm=-INFINITY;for(uint i=lane;i<n;i+=32){if(i<ts)tm=max(tm,x[i]);else sm=max(sm,x[i]);}tm=simd_max(tm);sm=simd_max(sm);float sl=0;if(isfinite(sm))for(uint i=ts+lane;i<n;i+=32)sl+=exp(x[i]-sm);sl=simd_sum(sl);bool force=sl>0&&(sm+log(sl)>tm);
+ float m=-INFINITY,best=-INFINITY;uint id=0xffffffffu;for(uint i=lane;i<n;i+=32){float v=(force&&i<ts)?-INFINITY:x[i];m=max(m,v);if(!isfinite(v))continue;float score=v;if(temperature>0){float u=(float(nwd_rng(seed^i)>>8)+0.5f)/16777216.0f;score=v/temperature-log(-log(u));}if(score>best||(score==best&&i<id)){best=score;id=i;}}
+ float maximum=simd_max(best);id=simd_min(best==maximum?id:0xffffffffu);m=simd_max(m);float sum=0;if(isfinite(m))for(uint i=lane;i<n;i+=32)if(!force||i>=ts)sum+=exp(x[i]-m);sum=simd_sum(sum);
+ if(lane==0){out[0]=id;out[1]=as_type<uint>(id<n&&sum>0?x[id]-m-log(sum):-INFINITY);}
+}
+";
+  def nwd-open() {
+   let ids = nwd-suppression(); let suppress = nam-write(nam-alloc(len(ids)),enw-ids-bytes(ids,""));
+   list(suppress,len(ids),nam-alloc(51866),nam-alloc(4),nam-held-pipe(metal_pipeline(nwd-msl(),"nwd_mask")),nam-held-pipe(metal_pipeline(nwd-msl(),"nwd_select")));
+  }
+  def nwd-close(decoder) = nam-free(list(head(decoder),nth(decoder,2),nth(decoder,3)));
+  def nwd-last-ts(ids,ts) = if nil?(ids) then sub(ts,1) else if ge(head(ids),ts) then head(ids) else nwd-last-ts(tail(ids),ts);
+  def nwd-pick(st,decoder,ids,temperature,seed) {
+   let ts = eng-ts0(st); let first = nil?(ids); let last = and(not(first),ge(head(ids),ts)); let penult = or(lt(len(ids),2),ge(nth(ids,1),ts));
+   let previous = nwd-last-ts(ids,ts); let floor = if lt(previous,ts) then ts else add(previous,if or(not(last),penult) then 1 else 0);
+   let out = nth(decoder,3); let zero = nam-zero(out,4);
+   let mask = metal_enqueue(nth(decoder,4),md-bind(list(enw-b(st,15),nth(decoder,2),head(decoder),out),list(eng-V(st),ts,last,penult,floor,first,nth(decoder,1))),eng-V(st));
+   let select = metal_enqueue(nth(decoder,5),md-bind16(list(nth(decoder,2),out),list(eng-V(st),ts,md-f32-bits(temperature),seed),32,0,1,0),1);
+   let bytes = metal_buf_read(out,0,12); let id = ln-u32-le(bytes,0);
+   if or(lt(mask,0),or(lt(select,0),or(gt(ln-u32-le(bytes,8),0),ge(id,eng-V(st))))) then form_error("native Whisper logits or timestamp selection refused") else list(id,enw-f32-of(bytes,4));
+  }
+  def nwd-loop(st,decoder,ids,pos,temperature,seed,logprob,stream,cancel) {
+   if and(gt(str_len(cancel),0),gt(file_size(cancel),0)) then list(reverse(ids),"cancelled",nwd-mean(logprob,len(ids)),len(ids)) else if ge(pos,eng-CTX(st)) then list(reverse(ids),"position-capacity",nwd-mean(logprob,len(ids)),len(ids)) else nwd-picked(st,decoder,ids,pos,temperature,seed,logprob,stream,cancel,nwd-pick(st,decoder,ids,temperature,add(seed,pos)));
+  }
+  def nwd-mean(lp,n) = if eq(n,0) then 0.0 else div(lp,n);
+  def nwd-picked(st,decoder,ids,pos,temperature,seed,logprob,stream,cancel,picked) {
+   let id = head(picked); let lp = add(logprob,nth(picked,1));
+   if eq(id,enw-eot()) then list(reverse(ids),"eos",div(lp,add(len(ids),1)),add(len(ids),1)) else if or(enw-looping?(id,ids),enw-round?(id,ids)) then list(reverse(ids),"repetition",div(lp,add(len(ids),1)),add(len(ids),1)) else nwd-continue(st,decoder,cons(id,ids),pos,temperature,seed,lp,stream,cancel);
+  }
+  def nwd-continue(st,decoder,ids,pos,temperature,seed,lp,stream,cancel) {
+   let token = head(ids); let streamed = if or(eq(str_len(stream),0),ge(token,enw-eot())) then 0 else nwd-append(stream,enw-tok(st,token));
+   let forward = enw-forward-step(st,token,pos,eng-TE(st));
+   nwd-loop(st,decoder,ids,add(pos,1),temperature,seed,lp,stream,cancel);
+  }
+  def nwd-attempt(st,decoder,language,temperature,seed,stream,cancel) {
+   let detected = enw-step(st,enw-sot(),0,eng-TE(st),enw-lang-lo(),eng-lang-hi(st)); let lang = if lt(language,0) then detected else language;
+   let doubt = enw-doubt(st,lang); let l = enw-forward-step(st,lang,1,eng-TE(st)); let task = enw-forward-step(st,eng-transcribe(st),2,eng-TE(st));
+   let clear = if eq(str_len(stream),0) then 0 else write_file_text(stream,"");
+   let result = nwd-loop(st,decoder,list(),3,temperature,seed,0.0,stream,cancel);
+   append(list(lang,head(result),nth(result,1),nth(result,2)),append(doubt,list(temperature,seed,nth(result,3),add(3,len(head(result))),1)));
+  }
+  // result: language, ids, finish, mean logprob, nospeech, language prob,
+  // temperature, seed, sampled tokens, forward tokens, attempts. Last three
+  // include discarded retries. EOS is sampled but is never fed back.
+  def nwd-silent(r) = and(gt(nth(r,4),0.6),le(nth(r,3),-1.0));
+  def nwd-retry(r) = and(not(nwd-silent(r)),or(str_eq(nth(r,2),"repetition"),or(str_eq(nth(r,2),"position-capacity"),lt(nth(r,3),-1.0))));
+  def nwd-decode(st,decoder,language,attempt,seed,stream,cancel,events,window) {
+   let temperature = mul(attempt,0.2); let start = host_monotonic_ms(); let result = nwd-attempt(st,decoder,language,temperature,seed,stream,cancel);
+   let retry = and(not(str_eq(nth(result,2),"cancelled")),and(lt(attempt,5),nwd-retry(result)));
+   let sent = nwd-event(events,"decode-attempt",list(nwd-int("window_sample",window),nwd-int("attempt",attempt),nwd-float("temperature",temperature),nwd-int("seed",seed),nwd-int("decoded_tokens",len(nth(result,1))),nwd-int("sampled_tokens",nth(result,8)),nwd-int("model_forward_tokens",nth(result,9)),nwd-text("finish",nth(result,2)),nwd-float("mean_logprob",nth(result,3)),nwd-float("no_speech_probability",nth(result,4)),nwd-float("language_probability",nth(result,5)),nwd-int("elapsed_ms",sub(host_monotonic_ms(),start)),nwd-text("choices","retry-higher-temperature|skip-silence|retain-decoded-result|cancel"),nwd-text("selected",if str_eq(nth(result,2),"cancelled") then "cancel" else if retry then "retry-higher-temperature" else if nwd-silent(result) then "skip-silence" else "retain-decoded-result")));
+   let observation = bfc-envelope(0,add(940000,div(window,160)),0,list(attempt,len(nth(result,1)),nth(result,3),nth(result,4)),3);
+   let recorded = bfc-record-out(observation,mul(attempt,2)); let response = bfc-record-in(bfc-control(observation,if retry then 2 else if nwd-silent(result) then 3 else 6),add(mul(attempt,2),1));
+   if retry then nwd-accumulate(result,nwd-decode(st,decoder,head(result),add(attempt,1),add(seed,104729),stream,cancel,events,window)) else result;
+  }
+  def nwd-accumulate(previous,selected) = append(take(8,selected),list(add(nth(previous,8),nth(selected,8)),add(nth(previous,9),nth(selected,9)),add(nth(previous,10),nth(selected,10))));
+  def nwd-encode(st,wav,offset,frames,events) {
+   let start = host_monotonic_ms(); let pcm = nwa-window(wav,enw-b(st,0),offset,480000);
+   let out = nam-alloc(1); let scan = enw-enqueue(nam-held-pipe(metal_pipeline(nwd-msl(),"nwd_pcmpeak")),md-bind16(list(enw-b(st,0),out),list(),32,0,1,0),1);
+   let peak = ln-u32-le(metal_buf_read(out,0,4),0); let free = nam-free(list(out));
+   if eq(peak,0) then nwd-empty-window(offset,frames,events,start) else nwd-encode-active(st,offset,frames,events,start,peak);
+  }
+  def nwd-empty-window(offset,frames,events,start) {
+   let event = nwd-event(events,"encode-window",list(nwd-int("window_sample",offset),nwd-int("audio_frames",frames),nwd-int("pcm_peak",0),nwd-int("elapsed_ms",sub(host_monotonic_ms(),start)),nwd-text("selected","skip-zero-model-input")));
+   0;
+  }
+  def nwd-encode-active(st,offset,frames,events,start,peak) {
+   let gpuBefore = metal_live();
+   let spec = metal_enqueue(enw-p(st,enw-pi-spec()),md-bind16(list(enw-b(st,0),enw-b(st,2),enw-mel(st),enw-b(st,23),enw-shp(st)),list(480000,3000,1000),256,0,1,0),3000);
+   let norm = enw-go(st,enw-pi-melnorm(),enw-bind-misc(st,0),div(add(mul(3000,eng-mels(st)),255),256));
+   let pad = metal_enqueue(nam-held-pipe(metal_pipeline(nwd-msl(),"nwd_melpad")),md-bind(list(enw-mel(st)),list(mul(frames,eng-mels(st)),mul(3000,eng-mels(st)))),mul(3000,eng-mels(st)));
+   let encoded = enw-encode-mel(st,3000); let health = nam-stats(enw-henc(st),mul(eng-TE(st),eng-D(st))); let gpuAfter = metal_live();
+   let event = nwd-event(events,"encode-window",list(nwd-int("window_sample",offset),nwd-int("audio_frames",frames),nwd-int("pcm_peak",peak),nwd-int("encoder_layers",eng-enc-layers(st)),nwd-int("decoder_layers",eng-dec-layers(st)),nwd-int("mel_bins",eng-mels(st)),nwd-int("elapsed_ms",sub(host_monotonic_ms(),start)),nwd-int("gpu_us",sub(nth(gpuAfter,11),nth(gpuBefore,11))),nwd-int("dispatches",sub(nth(gpuAfter,7),nth(gpuBefore,7))),nwd-float("encoded_squared_norm",nth(health,1)),nwd-float("nonfinite",head(health))));
+   if or(lt(spec,0),or(lt(pad,0),or(gt(head(health),0),le(nth(health,1),0.0)))) then form_error("native Whisper encoder invalid") else encoded;
+  }
+ }
+ 0;
+}
