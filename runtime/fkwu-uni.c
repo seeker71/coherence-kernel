@@ -1018,7 +1018,21 @@ static volatile long long *fk_np_p = &fk_np_private;
 static long long fk_nbox(long long i) {
     return 0 - (((long long)i << 1) | 1);
 }
+/* A node box is 0 - ((i << 1) | 1): negative, and ODD. An integer is v << 1 and
+ * so EVEN. This decoder used to compute an index from any word at all, and
+ * seventeen of its call sites guarded on SIGN alone -- so a negative integer
+ * arrived as a plausible node index (-2 is the word -4, which decodes to 1) and
+ * was then read as a node. That was witnessed twice on 2026-09-10: eq and
+ * value_eq answered equal for any two integers at or below -2, and the same
+ * shape stood in fk_bp_ideq, the nodeid doors, the cell readers and the field
+ * builders. Patching seventeen guards would leave the eighteenth.
+ *
+ * So the decoder itself refuses: a word that is not a node box answers 0, which
+ * is outside every caller's `ix >= 1` range check and lands in the refusal each
+ * one already had. A real node box is always odd, so nothing valid is turned
+ * away -- the guard can only reject words that were being misread. */
 static long long fk_nidx(long long v) {
+    if (v >= 0 || (v & 1) == 0) { return 0; }
     return (((0 - v) - 1) >> 1);
 }
 static long long fk_veq(long long a, long long b);
