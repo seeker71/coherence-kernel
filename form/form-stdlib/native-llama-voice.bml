@@ -1,5 +1,8 @@
 // Resident model/tokenizer ownership with a growing KV context and a token stream.
 // maxTokens=0 keeps streaming until EOS, cancellation, architectural or memory pressure.
+// A caller token cap is a signal, not a ceiling: grow toward EOS, or stop as
+// adapted-repeat if the cap revealed a loop. Admission that would refuse for
+// want>maxpos clamps to maxpos when the prompt itself fits.
 // Partial output always carries its actual stopping reason.
 // preludes: form-stdlib/native-llama-metal.bml form-stdlib/native-llama-tokenizer.bml form-stdlib/spool-bell-transport.fk form-stdlib/form-fs.fk
 section [form.bml] {
@@ -59,17 +62,50 @@ section [form.bml] {
   // Result: text, reason (empty only on EOS), emitted count, final context, event file.
   def nlg-result(text,why,n,ctx,events) = list(text,why,n,ctx,events);
   def nlg-stream(stream,text) = if eq(str_len(stream),0) then 0 else sbt-append(stream,text);
+  def nlg-want-capacity(prompt-n,limit) = add(prompt-n,if gt(limit,0) then limit else 16);
+  def nlg-admit-capacity(want,maxpos) = if gt(want,maxpos) then maxpos else want;
+  def nlg-grown-limit(limit,maxpos,pos) {
+   if le(limit,0) then 0 else nlg-grown-limit-room(limit,sub(maxpos,pos));
+  }
+  def nlg-grown-limit-room(limit,room) {
+   if le(room,limit) then limit else if gt(mul(limit,2),room) then room else mul(limit,2);
+  }
+  def nlg-looping(acc) {
+   if lt(str_len(acc),24) then 0 else nlg-looping-span(acc,substring(acc,sub(str_len(acc),24),str_len(acc)));
+  }
+  def nlg-looping-span(acc,span) {
+   let first = str_find(acc,span,0);
+   if lt(first,0) then 0 else if ge(str_find(acc,span,add(first,1)),0) then 1 else 0;
+  }
+  def nlg-adapt-token(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) {
+   if eq(nlg-looping(acc),1) then nlg-result(acc,"adapted-repeat",n,ctx,events)
+   else nlg-adapt-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,nlg-grown-limit(limit,nth(head(model),9),pos));
+  }
+  def nlg-adapt-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,grown) {
+   if le(grown,limit) then nlg-result(acc,"token-limit",n,ctx,events)
+   else nlg-adapt-continue(model,tk,ctx,id,pos,n,grown,acc,stream,cancel,events,nlg-event(events,"adapt-token-limit",n,host_monotonic_ms(),metal_live(),model));
+  }
+  def nlg-adapt-continue(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,logged) = nlg-decode(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events);
+  def nlg-adapt-emitted(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) {
+   if eq(nlg-looping(acc),1) then nlg-result(acc,"adapted-repeat",n,ctx,events)
+   else nlg-adapt-emitted-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,nlg-grown-limit(limit,nth(head(model),9),pos));
+  }
+  def nlg-adapt-emitted-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,grown) {
+   if le(grown,limit) then nlg-result(acc,"token-limit",n,ctx,events)
+   else nlg-adapt-emitted-go(model,tk,ctx,id,pos,n,grown,acc,stream,cancel,events,nlg-event(events,"adapt-token-limit",n,host_monotonic_ms(),metal_live(),model));
+  }
+  def nlg-adapt-emitted-go(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,logged) = if ge(pos,head(ctx)) then nlg-grew(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,nlg-grow(model,ctx,pos)) else nlg-feed(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events);
   def nlg-decode(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) {
    if or(lt(id,0),ge(id,nth(head(model),5))) then nlg-result(acc,"non-finite-logits",n,ctx,events)
    else if nlg-eos(tk,id) then nlg-result(acc,"",n,ctx,events)
-   else if and(gt(limit,0),ge(n,limit)) then nlg-result(acc,"token-limit",n,ctx,events)
+   else if and(gt(limit,0),ge(n,limit)) then nlg-adapt-token(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events)
    else if and(gt(str_len(cancel),0),gt(file_size(cancel),0)) then nlg-result(acc,"cancelled",n,ctx,events)
    else nlg-emit(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events);
   }
   def nlg-emit(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) {
    let text = nlt-decode-id(tk,id); let sent = nlg-stream(stream,text);
    let all = str_concat(acc,text); let count = add(n,1);
-   if and(gt(limit,0),ge(count,limit)) then nlg-result(all,"token-limit",count,ctx,events)
+   if and(gt(limit,0),ge(count,limit)) then nlg-adapt-emitted(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events)
    else if ge(pos,head(ctx)) then nlg-grew(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events,nlg-grow(model,ctx,pos))
    else nlg-feed(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events);
   }
@@ -77,8 +113,11 @@ section [form.bml] {
   def nlg-feed(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) = if not(nlg-room(nlg-forward-bytes(model,1,pos))) then nlg-result(acc,"memory-pressure",n,ctx,events) else nlg-decode(model,tk,ctx,nlg-forward-next(model,ctx,list(id),pos,events,"decode"),add(pos,1),n,limit,acc,stream,cancel,events);
   def nlg-ask(session,prompt,limit,stream,cancel,events) {
    let model = head(session); let tk = nth(session,1);
-   let ids = nlt-chat(tk,prompt); let capacity = add(len(ids),16);
-   if or(lt(limit,0),or(gt(capacity,nth(head(model),9)),not(nlg-room(nlg-cache-bytes(model,capacity))))) then list("","context-admission-refused",0,events) else nlg-ask-admitted(model,tk,ids,capacity,limit,stream,cancel,events);
+   let ids = nlt-chat(tk,prompt); let maxpos = nth(head(model),9);
+   if or(lt(limit,0),gt(len(ids),maxpos)) then list("","context-admission-refused",0,events) else nlg-ask-fit(model,tk,ids,nlg-admit-capacity(nlg-want-capacity(len(ids),limit),maxpos),limit,stream,cancel,events);
+  }
+  def nlg-ask-fit(model,tk,ids,capacity,limit,stream,cancel,events) {
+   if not(nlg-room(nlg-cache-bytes(model,capacity))) then list("","context-admission-refused",0,events) else nlg-ask-admitted(model,tk,ids,capacity,limit,stream,cancel,events);
   }
   def nlg-ask-admitted(model,tk,ids,capacity,limit,stream,cancel,events) {
    let ctx = nll-context(model,capacity);
