@@ -1,7 +1,7 @@
 // One resident model and tokenizer serve a training run. Sequence microbatches
 // accumulate a token-weighted batch gradient; every completed round updates LoRA.
 // Parameters and Adam moments publish together, after device health and byte checks.
-// preludes: form-stdlib/native-lora-dataset.bml form-stdlib/native-lora-checkpoint.bml form-stdlib/native-llama-voice.bml observe/bidirectional-framebuffer-channel.fk form-stdlib/json-precise.bml
+// preludes: form-stdlib/native-lora-dataset.bml form-stdlib/native-lora-checkpoint.bml form-stdlib/native-llama-voice.bml observe/bidirectional-framebuffer-channel.fk form-stdlib/json-precise.bml form-stdlib/sha256.fk
 section [form.bml] {
  class NativeLoraTrain {
   def ntr-int(k,v) = json-node-pair(k,json-node-int(v));
@@ -54,6 +54,27 @@ section [form.bml] {
    let value = nlb-loss-masked(model,r,nth(sample,1),nth(sample,2));
    let closeForward = nll-forward-close(r); let closeContext = nll-context-close(ctx);
    ntr-validation-rows(model,tk,rest,masked,add(loss,mul(value,nth(sample,3))),add(tokens,nth(sample,3)),add(count,1));
+  }
+  def ntr-grade-hex(bytes) = if nil?(bytes) then "" else str_concat(str_concat(json-hex-digit(div(head(bytes),16)),json-hex-digit(mod(head(bytes),16))),ntr-grade-hex(tail(bytes)));
+  def ntr-grade-rows(model,tk,rows,index) = if nil?(rows) then list() else cons(ntr-grade-row(model,tk,head(rows),index),ntr-grade-rows(model,tk,tail(rows),add(index,1)));
+  def ntr-grade-row(model,tk,row,index) {
+   let sample = nld-row(tk,row,1,add(index,1)); let admitted = ntr-admit(model,sample);
+   let ctx = nll-context(model,len(head(sample))); let forward = nll-forward(model,ctx,head(sample),0,1);
+   let loss = nlb-loss-masked(model,forward,nth(sample,1),nth(sample,2));
+   let done = nll-forward-close(forward); let freed = nll-context-close(ctx);
+   json-node-object(list(ntr-int("index",index),ntr-text("row_sha256",ntr-grade-hex(sha256-stream-string(json-emit-precise(row)))),ntr-real("loss",loss),ntr-real("supervised_tokens",nth(sample,3))));
+  }
+  def ntr-assessment(model,tk,r,phase) {
+   if not(json-object-has?(r,"assessment")) then 0 else ntr-assessment-at(model,tk,r,phase,host_monotonic_ms());
+  }
+  def ntr-assessment-at(model,tk,r,phase,started) {
+   let rows = json-array-elements(parse-json("native-assessment",read_file(ntr-get(r,"assessment"))));
+   if nil?(rows) then form_error("native assessment has no rows") else ntr-assessment-save(r,phase,ntr-grade-rows(model,tk,rows,0),started);
+  }
+  def ntr-assessment-save(r,phase,scores,started) {
+   let out = ntr-get(r,"output"); let path = str_concat(out,str_concat("/assessment-",str_concat(phase,".json")));
+   let saved = nag-write(path,json-emit-precise(json-node-array(scores)));
+   ntr-event(out,str_concat("assessment-",phase),list(ntr-int("rows",len(scores)),ntr-int("wall_ms",sub(host_monotonic_ms(),started)),ntr-text("scores",path)));
   }
   def ntr-admit(model,sample) {
    let t = len(head(sample)); let bytes = ntr-row-bytes(model,t);
@@ -119,8 +140,10 @@ section [form.bml] {
    let event = ntr-event(out,"admitted",list(ntr-text("model",nth(model,4)),ntr-text("adapter",nag-resolve(adapter)),ntr-int("rows",len(rows)),ntr-int("steps_requested",ntr-get(r,"steps")),ntr-int("batch",ntr-get(r,"batch")),ntr-int("lora_pairs",len(state)),ntr-int("optimizer_step",head(resumed)),ntr-text("optimizer_resume",nth(resumed,1)),ntr-int("open_ms",sub(host_monotonic_ms(),start)),ntr-text("sequence_policy","whole-row, device-memory admission, no token truncation")));
    let validationRows = nld-file(str_concat(ntr-get(r,"data"),"/valid.jsonl"));
    let baseline = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,head(resumed));
+   let assessedBefore = ntr-assessment(model,tk,r,"before");
    let result = ntr-round(model,tk,state,rows,r,0,head(resumed),mod(mul(head(resumed),nlg-min(ntr-get(r,"batch"),len(rows))),len(rows)));
    let validation = ntr-validation(model,tk,validationRows,ntr-get(r,"mask_prompt"),out,head(result));
+   let assessedAfter = ntr-assessment(model,tk,r,"after");
    let done = nam-sync(); let closeState = nlb-state-close(state); let closeModel = nlg-close(session);
    let final = ntr-event(out,"finished",list(ntr-int("optimizer_step",head(result)),ntr-int("rounds_completed",nth(result,1)),ntr-text("reason",nth(result,2)),ntr-int("wall_ms",sub(host_monotonic_ms(),start)),ntr-int("retained_buffers",nth(metal_live(),2))));
    result;

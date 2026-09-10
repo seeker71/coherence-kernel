@@ -1,9 +1,13 @@
 # Qwen coding inside Form
 
-`code` gives a local Qwen one native session for prompt refinement, planning,
+`code` first offers an evaluated session LoRA a document proposal, unless the
+caller explicitly selects a model or sets `evaluation: 1`. The original caller
+checks decide whether that proposal suffices. Otherwise it gives local Qwen one
+native session for prompt refinement, planning,
 ordered task splitting, implementation, review, and verification. Generated token
 IDs and KV state stay resident across tool observations. No Ollama, HTTP,
-subprocess model engine, shell tool, or rented fallback is invoked by this loop.
+foreign model engine, shell tool, or rented fallback is invoked by this loop.
+The optional LoRA proposal and asynchronous learner run as native `fkwu` workers.
 The existing `heal ... local` command is a different route: it still permits
 Ollama. Do not use that spelling to request this native-only workflow.
 
@@ -93,7 +97,12 @@ process-specific temporary file, are read back, then atomically renamed. A
 digest detects corruption; it is not authentication against someone who can
 rewrite local files. Checkpoint contract changes are refused. Source files
 remain caller-owned: persistence here stores private task state and lessons,
-not a repository edit. Nothing is sent to an external service or LoRA trainer.
+not a repository edit. Nothing is sent to an external service. Each completed
+JSON request also contributes to the private native session learner: verified
+documents teach the caller contract, and unsuccessful requests teach observed
+status only. `session_learning_example` and `session_learning_worker` identify
+that work; `session status` distinguishes queued, failed, learned and promoted.
+`evaluation: 1` excludes session weight training and learned-model admission.
 
 Three identical native tool/argument/result observations with unchanged
 documents select repair and require replanning. A single `rg` miss is still a
@@ -119,8 +128,9 @@ without admitting a model or publishing live telemetry.
 
 ## What a successful result proves
 
-Completion requires an actual document change, completed tasks, Qwen review,
-and all caller-owned checks passing. Checks require exit zero, empty diagnostic
+Completion requires an actual document change and all caller-owned checks
+passing. The Qwen path also completes its task/review loop; the earlier session
+LoRA proposal is checked directly. Checks require exit zero, empty diagnostic
 text, and exact stdout. The JSON door supports **read-only native tool assertions**
 and executable arithmetic checks through the existing native definition grammar.
 A `jq` check establishes a configuration property, not that an
@@ -158,7 +168,8 @@ that callback or its contract. A caller claiming native-only behavior must keep
 its callback native too. No generic shell test runner is implicitly provided.
 
 Review currently shares the same Qwen and context: **not independent-model
-validation**. No weights are updated. The loop does not assert rented-model
+validation**. Qwen weights remain unchanged; the shared native Llama adapter
+learns asynchronously from observed outcomes. The loop does not assert rented-model
 parity, broad coding quality improvement, or `voice-home=1` from a passing example.
 
 ## Observe

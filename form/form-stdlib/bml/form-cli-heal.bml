@@ -1,5 +1,5 @@
 // A bounded repair movement, callable by the real form-cli dispatch.
-// preludes: form-stdlib/bml/form-cli-heal-resources.bml form-stdlib/bml/form-cli-heal-eval-policy.bml form-stdlib/bml/form-cli-heal-learning.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/form-cli-heal-native-ollama.bml form-stdlib/bml/form-cli-heal-native-eval.bml form-stdlib/bml/native-authoring-guide.bml observe/bidirectional-framebuffer-channel.fk
+// preludes: form-stdlib/bml/form-cli-heal-resources.bml form-stdlib/bml/form-cli-heal-eval-policy.bml form-stdlib/bml/form-cli-heal-learning.bml form-stdlib/bml/form-cli-heal-native-report.bml form-stdlib/bml/form-cli-heal-native-ollama.bml form-stdlib/bml/form-cli-heal-native-eval.bml form-stdlib/bml/native-authoring-guide.bml observe/bidirectional-framebuffer-channel.fk form-stdlib/native-session-memory.bml
 section [form.bml] {
     class FormCliHeal {
         field HealMemory = ".form-heal/learned.tsv";
@@ -83,8 +83,8 @@ section [form.bml] {
             let receipt = fh-write(job, "verified.tsv", fh-cat(list(HealVersion(), "\t", target, "\t", band, "\t", expected, "\t", route, "\n")));
             let evaluation = gt(file_size(fh-path(job, "evaluation-only")), 0);
             let memory = if fhe-memory-allowed(evaluation) then fh-append(HealMemory(), fh-cat(list(job, "\t", target, "\t", band, "\t", expected, "\n"))) else "excluded";
-            let training = fh-write(job, "training-candidate.txt", if evaluation then "Evaluation-only record. Excluded from repair memory and training; no weight update has occurred.\n" else "Verified repair example: original + accepted-source + verified.tsv + process records. Candidate for training and held-out evaluation; no weight update has occurred.\n");
-            fh-log(job, "learning", if evaluation then "evaluation-only;memory-excluded;weights-unchanged" else "retrievable-example;weights-unchanged");
+            let training = fh-write(job, "training-candidate.txt", if evaluation then "Evaluation-only record. Excluded from repair memory and session training.\n" else "Verified repair example: original + accepted-source + verified.tsv + process records. The session learner assesses its update separately; learning.jsonl links the example and session status reports completion.\n");
+            fh-log(job, "learning", if evaluation then "evaluation-only;memory-and-training-excluded" else "retrievable-example;weight-update-tracked-by-session-learner");
         }
         def fh-try(job, target, band, expected, seconds, candidate, route, number) {
             let result = if or(str_eq(candidate, ""), gt(str_len(candidate), HealMaxSource())) then fh-no-proposal(job, route, number) else fh-try-reset(job, target, band, expected, seconds, candidate, route, add(now_unix_ms(), number));
@@ -92,19 +92,15 @@ section [form.bml] {
             result;
         }
         def fh-learn-round(job, route, result) {
-            let state = fhl-state(gt(file_size(fh-path(job, "evaluation-only")), 0), gt(file_size(HealLearnerConfig()), 0));
-            let observation = fh-cat(list("Checker contract: ", fh-read(fh-path(job, "contract")), "\nRecorded attempts:\n", fh-cap(fh-read(fh-path(job, "attempts.tsv")), 2000), if eq(result, 1) then str_concat("\nVerified source:\n", fh-cap(fh-read(fh-path(job, "accepted-source")), 4000)) else "\nNo verified replacement was admitted in this round."));
-            let learned = if str_eq(state, "training-required") then fh-learn-prepare(job, route, fhl-row(route, fhl-outcome(result), observation)) else state;
-            fh-log(job, str_concat("learning-", route), learned);
+            let evaluation = gt(file_size(fh-path(job,"evaluation-only")),0);
+            let original = fh-read(fh-path(job,"original")); let accepted = fh-read(fh-path(job,"accepted-source"));
+            let target = fh-cat(list(fh-old-open(),original,fh-middle(),accepted,fh-close()));
+            let positive = and(eq(result,1),not(str_eq(fh-proposal(original,target),"")));
+            let learned = nsm-offer(hearth-session-learning(),fh-job-id(job),str_concat(route,str_concat("-",int_to_str(file_size(fh-path(job,"attempts.tsv"))))),str_concat("heal/",route),fh-session-prompt(job),if positive then target else "",if positive then "verified-answer" else fhl-outcome(result),str_concat("repair-receipt=",fh-path(job,"verified.tsv")),evaluation);
+            let recorded = fhn-json-line(fh-path(job,"learning.jsonl"),list(fhn-s("route",route),fhn-s("state",if evaluation then "evaluation-excluded" else "session-example-retained;training-asynchronous"),fhn-s("example",head(learned)),fhn-s("worker",nth(learned,1)),fhn-s("status",hearth-session-learning())));
+            fh-log(job,str_concat("learning-",route),nth(learned,1));
         }
-        def fh-learn-prepare(job, route, row) {
-            let stage = str_concat("learn-prepare-", route);
-            let input = fh-path(job, str_concat(stage, ".json"));
-            let wrote = write_file(input, row);
-            let request = write_file(str_concat(input, ".request"), fh-cat(list(job, "\n", route, "\n", row, "\n")));
-            let status = fh-run(job, stage, HealLearnerSeconds(), "root", str_concat(input, ".request"), list("./fkwu", "observe/form-cli-heal-native-learning-run.bml"));
-            fh-cat(list("native-learning-exit=", status, ";result=", fh-trim(fh-out(job, stage))));
-        }
+        def fh-session-prompt(job) = fh-prompt("patch",str_concat(fh-read(fh-path(job,"contract")),str_concat("\n",fh-errors(job,"baseline"))),fh-read(fh-path(job,"original")));
         def fh-no-proposal(job, route, number) {
             let control = fh-adjudicate(add(now_unix_ms(), number), 0);
             let logged = fh-log(job, route, "no-admissible-proposal;return-unresolved-to-caller");
@@ -166,7 +162,7 @@ section [form.bml] {
             if not(admission) then 0 else if not(str_eq(fh-host(list("claim", fh-path(job, "remote-used"))), "claimed")) then 0 else fh-rent-once(job, target, band, expected, seconds);
         }
         def fh-job-id(job) = head(reverse(split-on(job, "/")));
-        def fh-local-left(job) = add(fh-native-left(job), fh-missing-stages(fh-read(fh-path(job, "attempts.tsv")), list("adapter-admission", "native-model-admission", "local-diagnosis", "local-patch", "local-review")));
+        def fh-local-left(job) = add(fh-native-left(job), fh-missing-stages(fh-read(fh-path(job, "attempts.tsv")), list("native-session-lora", "adapter-admission", "native-model-admission", "local-diagnosis", "local-patch", "local-review")));
         def fh-native-left(job) = if not(str_eq(fh-read(fh-path(job, "native-inventory-status")), "complete")) then 1 else fhr-pending(fhr-plan(split-on(fh-out(job, "inventory"), "\n")), fh-read(fh-path(job, "attempts.tsv")));
         def fh-missing-stages(log, stages) = if nil?(stages) then 0 else add(if fh-has(str_concat("\n", log), fh-cat(list("\n", head(stages), "\t"))) then 0 else 1, fh-missing-stages(log, tail(stages)));
         def fh-local(job, target, band, expected, seconds, allowed) {
@@ -183,6 +179,30 @@ section [form.bml] {
             if not(eq(result, 0)) then result else fh-remote(job, target, band, expected, seconds, allowed);
         }
         def fh-models(job, target, band, expected, seconds, allowed) {
+            let result = fh-session-attempt(job,target,band,expected,seconds);
+            if not(eq(result,0)) then result else fh-models-rest(job,target,band,expected,seconds,allowed);
+        }
+        def fh-session-attempt(job,target,band,expected,seconds) {
+            let home = hearth-session-learning();
+            if not(nsm-attemptable(home,"repair",fh-session-prompt(job))) then fh-session-absent(job) else fh-session-run(job,target,band,expected,seconds,home);
+        }
+        def fh-session-absent(job) {
+            let logged = fh-log(job,"native-session-lora","no-repair-trained-serving-adapter-or-unchanged-failed-prediction;continue-local-inventory");
+            0;
+        }
+        def fh-session-run(job,target,band,expected,seconds,home) {
+            let output = fh-path(job,"session-lora.reply.json");
+            let request = json-node-object(list(nsm-s("prompt",fh-session-prompt(job)),nsm-n("require_serving",1),nsm-s("output",output),nsm-s("events",fh-path(job,"session-lora.events.jsonl")),nsm-s("stream",fh-path(job,"session-lora.stream")),nsm-s("cancel",fh-path(job,"session-lora.cancel"))));
+            let input = fh-write(job,"session-lora.request",fh-cat(list("ask\n",home,"\n",json-emit-precise(request),"\n")));
+            let status = fh-run(job,"native-session-lora",0,"root",fh-path(job,"session-lora.request"),list("./fkwu","observe/native-session-learning-run.fk"));
+            let result = nsm-json(output);
+            let logged = fh-log(job,"native-session-lora",str_concat("exit=",status));
+            let candidate = if and(str_eq(status,"0"),str_eq(nsm-str(result,"reason"),"")) then fh-proposal(fh-read(fh-path(job,"original")),nsm-str(result,"text")) else "";
+            let checked = fh-try(job,target,band,expected,seconds,candidate,"native-session-lora",202);
+            let pressure = nsm-prediction(home,"repair",fh-session-prompt(job),nsm-str(result,"adapter"),eq(checked,1),nsm-num(result,"generated_tokens"));
+            checked;
+        }
+        def fh-models-rest(job, target, band, expected, seconds, allowed) {
             let request = fh-write(job, "inventory.request", "inventory\n");
             let status = fh-run(job, "inventory", 30, "root", fh-path(job, "inventory.request"), list("./fkwu", "observe/form-cli-heal-model-run.bml"));
             let rows = split-on(fh-out(job, "inventory"), "\n");
