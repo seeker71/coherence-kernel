@@ -78,6 +78,15 @@ section [form.bml] {
         def kcg-schema() = "form-kernel-conformance-v1";
         def kcg-malformed-schema() = "formbin2-malformed-conformance-v1";
         def kcg-build() = ".cache/kernel-conformance";
+        // `mkdir -p`, in Form, through the body's own doors. This gate used to
+        // spawn a shell for it while fs_exists and fs_mkdir sat one call away --
+        // a crossing paid for work already at home. Walk the path and ensure
+        // each prefix at every separator; a directory that already stands is
+        // success, which is the whole of what -p meant.
+        def kcg-both(a, b) = if and(eq(a, 1), eq(b, 1)) then 1 else 0;
+        def kcg-ensure-one(dir) = if eq(str_len(dir), 0) then 1 else if eq(fs_exists(dir), 1) then 1 else if ge(fs_mkdir(dir), 0) then 1 else 0;
+        def kcg-ensure-upto(path, i, n, held) = if gt(i, n) then held else if eq(i, n) then kcg-both(held, kcg-ensure-one(path)) else if eq(str_byte_at(path, i), 47) then kcg-ensure-upto(path, add(i, 1), n, kcg-both(held, kcg-ensure-one(substring(path, 0, i)))) else kcg-ensure-upto(path, add(i, 1), n, held);
+        def kcg-ensure-dir(path) = kcg-ensure-upto(path, 0, str_len(path), 1);
         def kcg-go-dir() = "form/form-kernel-go";
         def kcg-rust-dir() = "form/form-kernel-rust";
         def kcg-ts-dir() = "form/form-kernel-ts";
@@ -125,7 +134,7 @@ section [form.bml] {
         def kcg-child(k, args) = str_concat("cd ", str_concat(kcg-k-dir(k), str_concat(" && ", str_concat(kcg-k-argv(k), str_concat(" ", args)))));
         // builds: list("ok", kernels, ts-present?) or list("refused", message)
         def kcg-build-kernels(root) {
-            let made = lx-sh(str_concat("mkdir -p ", kcg-build()));
+            let made = kcg-ensure-dir(kcg-build());
             let go = lx-sh(str_concat("go build -C ", str_concat(kcg-go-dir(), str_concat(" -o ", str_concat(kcg-abs(root, str_concat(kcg-build(), "/form-kernel-go")), " .")))));
             if not(eq(lx-sh-rc(go), 0)) then list("refused", str_concat("Go kernel build failed (", str_concat(int_to_str(lx-sh-rc(go)), str_concat("):", kcg-detail(lx-sh-text(go))))))
             else kcg-build-rust(root);
@@ -244,14 +253,36 @@ section [form.bml] {
             else if str_eq(kcg-m-builder(m), "oversized-artifact") then kcg-oversized-file(base)
             else list(str_concat("malformed case ", str_concat(kcg-m-name(m), str_concat(": unknown builder ", kcg-py(kcg-m-builder(m))))));
         }
-        def kcg-hex-file(base, hex) {
-            let wrote = write_file(str_concat(base, ".hex"), hex);
-            let r = lx-sh(str_concat("xxd -r -p ", str_concat(base, str_concat(".hex > ", str_concat(base, ".fkb")))));
-            kcg-when(not(eq(lx-sh-rc(r), 0)), str_concat("could not build a malformed artifact from hex: ", lx-sh-text(r)));
+        // hex to bytes, in Form. This spawned a shell for `xxd -r -p` while
+        // str_byte_at and host_file_append_bytes stood ready -- a crossing for
+        // arithmetic. A nibble that is not a hex digit answers -1 and poisons
+        // its byte, so a malformed vector cannot be silently built out of
+        // whatever the text happened to contain.
+        def kcg-nibble(c) = if and(ge(c, 48), le(c, 57)) then sub(c, 48) else if and(ge(c, 97), le(c, 102)) then sub(c, 87) else if and(ge(c, 65), le(c, 70)) then sub(c, 55) else sub(0, 1);
+        def kcg-hex-bytes(hex, i, n, acc) {
+            if ge(add(i, 1), add(n, 1)) then reverse(acc)
+            else if gt(add(i, 2), n) then reverse(acc)
+            else kcg-hex-step(hex, i, n, acc, kcg-nibble(str_byte_at(hex, i)), kcg-nibble(str_byte_at(hex, add(i, 1))));
         }
+        def kcg-hex-step(hex, i, n, acc, hi, lo) = if or(lt(hi, 0), lt(lo, 0)) then reverse(acc) else kcg-hex-bytes(hex, add(i, 2), n, cons(add(mul(hi, 16), lo), acc));
+        def kcg-hex-file(base, hex) {
+            let path = str_concat(base, ".fkb");
+            let cleared = if eq(fs_exists(path), 1) then fs_remove(path) else 0;
+            let bytes = kcg-hex-bytes(hex, 0, str_len(hex), list());
+            let wrote = host_file_append_bytes(path, bytes);
+            kcg-when(or(lt(wrote, 0), not(eq(mul(len(bytes), 2), str_len(hex)))), str_concat("could not build a malformed artifact from hex: wrote ", str_concat(int_to_str(wrote), str_concat(" of ", int_to_str(div(str_len(hex), 2))))));
+        }
+        // One byte over the ceiling, made by naming its length rather than by
+        // piping sixty-four megabytes of /dev/zero through a shell. The header
+        // is eight real bytes; fs_truncate sets the extent, sparse, so the file
+        // whose whole point is how long it is costs nothing to make.
         def kcg-oversized-file(base) {
-            let r = lx-sh(str_concat("{ printf 'FORMBIN2'; head -c ", str_concat(int_to_str(sub(add(kcg-max-bytes(), 1), 8)), str_concat(" /dev/zero; } > ", str_concat(base, ".fkb")))));
-            kcg-when(not(eq(lx-sh-rc(r), 0)), str_concat("could not build the oversized artifact: ", lx-sh-text(r)));
+            let path = str_concat(base, ".fkb");
+            let cleared = if eq(fs_exists(path), 1) then fs_remove(path) else 0;
+            let header = host_file_append_bytes(path, list(70, 79, 82, 77, 66, 73, 78, 50));
+            let want = add(kcg-max-bytes(), 1);
+            let got = fs_truncate(path, want);
+            kcg-when(or(lt(header, 0), not(eq(got, want))), str_concat("could not build the oversized artifact: extent ", str_concat(int_to_str(got), str_concat(" of ", int_to_str(want)))));
         }
         // one malformed vector on every kernel: list(passed?, line, errors)
         def kcg-malformed-line(root, kernels, m, i) {

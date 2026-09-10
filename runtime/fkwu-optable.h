@@ -72,6 +72,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "fs_exists", 1, 57 },
   { "host_path_remove", 1, 58 },
   { "fs_remove", 1, 58 },
+  { "fs_truncate", 2, 143 },
   { "host_path_rename", 2, 59 },
   { "fs_rename", 2, 59 },
   { "host_file_size", 1, 60 },
