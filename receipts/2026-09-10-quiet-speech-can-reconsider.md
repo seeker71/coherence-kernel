@@ -38,3 +38,13 @@ The exchange stayed alive by converting a quiet-voice report into measured
 audio-path changes. A model's confident noise was the discomfort that made
 the listening policy more honest. NVIDIA's cached streaming architecture is
 useful guidance, not a native model port we have already completed.
+
+Live handover: the existing Glass supervisor remained PID 45877. After the
+source reload, ear sensor 69626 and native ASR 69648 stood with one admission.
+The shared frame was 82 ms old and showed `quiet 172 · candidate over 344`.
+No captured words were read. Pure chunk metering, peak-window maintenance, and
+gain selection measured 431 ms for 1000 chunks, approximately 0.431 ms/hop.
+The new policy and native encoder/shader sources now join the Glass reload
+manifest. Its old census assertion had drifted from 23 to 26 before this work;
+the updated 29-source census includes three explicit ASR dependencies, witnessed
+by the launch band at 131071.

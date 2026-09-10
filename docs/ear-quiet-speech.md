@@ -24,6 +24,8 @@ part of this change. Microphone PCM stays local and unmodified.
 
 Glass's room/gate row displays candidate level, applied gain, and `revisable`.
 It retains the existing body-local transcript channel and stable language slots.
+The listening policy, native encoder, and shader source are watched reload
+dependencies; a policy-only edit must also reach the resident ear.
 Changing words in the current phrase is intentional; changing its display slot
 is not. Frames carry `gainmilli` and `revision` only when those facts were measured.
 
