@@ -1,0 +1,36 @@
+// In-process care: providers own resources; the asking organ owns re-observation.
+// Callbacks and context are supplied by the running organ, never by event text.
+// preludes: form-stdlib/organ-health.bml
+section [form.bml] {
+ class OrganCare {
+  def oc-provider(name,resources,action,supply) = list(name,resources,action,supply);
+  def oc-find(providers,reading,need) = if nil?(providers) then list() else if and(oh-has(nth(head(providers),1),oh-str(need,"resource")),oh-has(oh-values(json-array-elements(oh-get(reading,"offers"))),nth(head(providers),2))) then head(providers) else oc-find(tail(providers),reading,need);
+  def oc-call(callback,context,reading,need) = callback(context,reading,need);
+  def oc-emit(callback,context,stage,row) = callback(context,stage,row);
+  def oc-observe(callback,context,reading,delivery) = callback(context,reading,delivery);
+  def oc-care(context,reading,need,providers,emit,observe) {
+   let provider = oc-find(providers,reading,need);
+   if not(oh-valid(reading)) then form_error("care needs a valid organ observation") else if nil?(provider) then json-node-object(list(oh-s("state","unclaimed"),json-node-pair("observation",reading))) else oc-owned(context,reading,need,provider,emit,observe);
+  }
+  def oc-owned(context,reading,need,provider,emit,observe) {
+   let response = oh-set(oh-response(reading,nth(provider,2)),"responder",json-node-string(head(provider)));
+   let selected = oh-select(reading,response,"");
+   if str_eq(selected,"") then form_error("care response does not match the asking organ") else oc-supply(context,reading,need,provider,emit,observe,response);
+  }
+  def oc-supply(context,reading,need,provider,emit,observe,response) {
+   let claimed = oc-emit(emit,context,"organ-response",response);
+   let started = host_monotonic_ms();
+   let supplied = oc-call(nth(provider,3),context,reading,need);
+   let delivery = oh-set(supplied,"supply_elapsed_ms",json-node-int(sub(host_monotonic_ms(),started)));
+   let applied = oc-emit(emit,context,"organ-action-observed",oh-set(oh-applied(reading,oh-str(response,"selected"),delivery),"responder",json-node-string(head(provider))));
+   let fresh = oc-observe(observe,context,reading,delivery);
+   let bound = and(oh-valid(fresh),and(not(str_eq(oh-str(fresh,"id"),oh-str(reading,"id"))),and(str_eq(oh-key(fresh),oh-key(reading)),and(str_eq(oh-str(fresh,"stage"),"observe"),str_eq(oh-str(fresh,"care_of"),oh-str(reading,"id"))))));
+   if not(bound) then form_error("care needs a fresh observation from the asking organ") else oc-finish(context,emit,provider,delivery,fresh);
+  }
+  def oc-finish(context,emit,provider,delivery,fresh) {
+   let observed = oc-emit(emit,context,"organ-health",fresh);
+   json-node-object(list(oh-s("state",if oh-pain(fresh) then "need-open" else if node_eq(oh-get(fresh,"health"),json-node-int(1)) then "resource-observed" else "unmeasured"),oh-s("responder",head(provider)),json-node-pair("delivery",delivery),json-node-pair("observation",fresh)));
+  }
+ }
+ 0;
+}
