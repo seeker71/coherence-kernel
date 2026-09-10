@@ -115,7 +115,37 @@ section [form.bml] {
         def fglui-counter-window(history, index) = if lt(len(history), 2) then list() else fglui-counter-window-go(tail(history), index, fgd-flow-value(head(history), index), list());
         def fglui-gauge-window(history, index, held) = if eq(len(history), 0) then held else if gt(fgd-flow-value(head(history), index), 0) then fglui-gauge-window(tail(history), index, list(fgd-flow-value(head(history), index), head(history))) else fglui-gauge-window(tail(history), index, held);
         def fglui-flow-window(history, index, delta) = if eq(delta, 1) then fglui-counter-window(history, index) else fglui-gauge-window(history, index, list());
-        def fglui-flow-window-text(label, window, epoch) = if eq(len(window), 0) then "window-missing=glass.history.owner-event-after-baseline" else fgd-cat(list("window=", fglui-flow-value-text(label, nth(window, 0)), " age=", fgd-format-age-ms(if ge(epoch, fgd-flow-value(nth(window, 1), 1)) then sub(epoch, fgd-flow-value(nth(window, 1), 1)) else 0)));
+        // A window that found no busy moment is not the same as a window with
+        // nothing in it, and this row said the same words for both: an all-zero
+        // history read "window-missing=glass.history.owner-event-after-baseline",
+        // which claims the glass kept no record while the record was right there
+        // and said quiet. Measured 2026-09-10 on five consecutive reads of
+        // observe/form-glass-flow-current-run.fk: the QUEUE row alternated
+        // between that sentence and "now=1req window=1req age=0ms" as the depth
+        // moved 0, 1, 0 -- one lane, two grammars, flipping. A reader cannot tell
+        // a quiet queue from a blind one, and a row whose SHAPE changes with its
+        // value is read as breakage rather than as calm.
+        //
+        // The membrane already carries the law this broke: absent and measured
+        // zero never share a representation. So the window now answers in three
+        // states instead of two, and the row keeps one shape whatever the number.
+        def fglui-window-absent() = 0;
+        def fglui-window-quiet() = 1;
+        def fglui-window-held() = 2;
+        // how many points of the history carried a measurement at all
+        def fglui-measured-count(history, index) = if eq(len(history), 0) then 0 else add(if ge(fgd-flow-value(head(history), index), 0) then 1 else 0, fglui-measured-count(tail(history), index));
+        def fglui-window-state(history, index, window) = if gt(len(window), 0) then fglui-window-held() else if gt(fglui-measured-count(history, index), 0) then fglui-window-quiet() else fglui-window-absent();
+        def fglui-window-span(history, index) {
+            let measured = fglui-measured-count(history, index);
+            let first = fgd-flow-value(head(history), 1);
+            let last = fgd-flow-value(nth(history, sub(len(history), 1)), 1);
+            if or(eq(measured, 0), ge(first, last)) then 0 else sub(last, first);
+        }
+        def fglui-flow-window-text-in(label, state, history, index, window, epoch) =
+            if eq(state, fglui-window-absent()) then "window-missing=glass.history.owner-event-after-baseline"
+            else if eq(state, fglui-window-quiet()) then fgd-cat(list("window=", fglui-flow-value-text(label, 0), " quiet-for=", fgd-format-age-ms(fglui-window-span(history, index))))
+            else fgd-cat(list("window=", fglui-flow-value-text(label, nth(window, 0)), " age=", fgd-format-age-ms(if ge(epoch, fgd-flow-value(nth(window, 1), 1)) then sub(epoch, fgd-flow-value(nth(window, 1), 1)) else 0)));
+        def fglui-flow-window-text(label, window, epoch) = fglui-flow-window-text-in(label, if gt(len(window), 0) then fglui-window-held() else fglui-window-absent(), list(), 0, window, epoch);
         def fglui-flow-line(label, history, index, delta, width, plane) {
             let values = if eq(delta, 1) then fglui-deltas(history, index) else fglui-values(history, index);
             let missing = fglui-missing(history, index);
@@ -128,7 +158,7 @@ section [form.bml] {
             let sparkWidth = fgd-clamp(sub(width, add(str_len(label), 76)), 4, 48);
             let known = if and(and(gt(len(history), 0), lt(missing, len(history))), not(str_eq(source, "flow-point.source-not-retained"))) then 1 else 0;
             let total = if and(eq(delta, 1), eq(known, 1)) then fgd-cat(list(" total=", fglui-flow-value-text(label, fglui-last(history, index)))) else "";
-            let text = if eq(known, 0) then fgd-cat(list(label, " ", fglui-spark(values, sparkWidth), " missing=", source)) else fgd-cat(list(label, " ", fglui-spark(values, sparkWidth), " scope=", if str_eq(label, "QUEUE") then "hearth.queue" else "model.owner", " now=", fglui-flow-value-text(label, latest), total, " ", fglui-flow-window-text(label, window, epoch), " src=", source));
+            let text = if eq(known, 0) then fgd-cat(list(label, " ", fglui-spark(values, sparkWidth), " missing=", source)) else fgd-cat(list(label, " ", fglui-spark(values, sparkWidth), " scope=", if str_eq(label, "QUEUE") then "hearth.queue" else "model.owner", " now=", fglui-flow-value-text(label, latest), total, " ", fglui-flow-window-text-in(label, fglui-window-state(history, index, window), history, index, window, epoch), " src=", source));
             fgd-segment-line(text, width, fgd-style-for-plane(plane, if eq(known, 1) then 220 else 72, 0), str_concat("flow.request-window.", label), list("flow", plane, "scope.request-window"), if eq(known, 1) then fgd-flow-evidence(current, index) else "unavailable");
         }
         def fglui-jit-fault-line(fault, epoch, width) = fgd-segment-line(fgd-cat(list("! JIT HEALING P", int_to_str(if ge(len(fault), 8) then nth(fault, 7) else 0), " stage=", nth(fault, 1), " last-failure=", nth(fault, 2), " age=", fgd-format-age-ms(if ge(epoch, nth(fault, 3)) then sub(epoch, nth(fault, 3)) else 0), " evidence=", nth(fault, 4), " preemption=", nth(fault, 5), " src=", nth(fault, 6))), width, fgd-style-for-plane("cpu", 255, 1), nth(fault, 0), list("flow", "jit", "fault", "healing", "priority"), nth(fault, 4));
