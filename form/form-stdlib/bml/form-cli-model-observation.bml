@@ -1,0 +1,28 @@
+// Every observation ID enters the same resident state, in bounded submissions.
+// The per-position barrier path is retained; the experimental chunk>1 path is
+// not used. Intermediate predictions are discarded, never injected into KV.
+// preludes: form-stdlib/bml/form-cli-model-admission.bml native/metal/qwen35-dense-token-handle.fk
+section [form.bml] {
+ class FormCliModelObservation {
+  def fcmo-shape(result,pos,count) = and(eq(len(result),2),and(ge(head(result),0),eq(nth(result,1),add(pos,count))));
+  def fcmo-settled(live) = and(eq(len(live),20),and(eq(nth(live,5),0),and(eq(nth(live,6),0),eq(nth(live,14),0))));
+  def fcmo-walk(step,ctx,sts,ids,pos,span) {
+   if or(nil?(ids),le(span,0)) then list(-1,pos)
+   else fcmo-slice(step,ctx,sts,ids,pos,span,if lt(len(ids),span) then len(ids) else span);
+  }
+  def fcmo-slice(step,ctx,sts,ids,pos,span,count) {
+   let result = step(ctx,sts,take(count,ids),pos);
+   if not(fcmo-shape(result,pos,count)) then list(-1,pos)
+   else if eq(count,len(ids)) then result
+   else fcmo-walk(step,ctx,sts,drop(count,ids),nth(result,1),span);
+  }
+  def fcmo-native-step(ctx,sts,ids,pos) {
+   let begin = q38oo-stage(str_concat("model-observation-positions-",str_concat(int_to_str(pos),"-begin")),8388625);
+   let result = q38-prefill-span(nth(ctx,0),nth(ctx,1),nth(ctx,2),nth(ctx,3),sts,nth(ctx,4),nth(ctx,5),nth(ctx,6),ids,pos);
+   let good = and(fcmo-shape(result,pos,len(ids)),and(lt(head(result),nth(nth(ctx,2),19)),fcmo-settled(metal_live())));
+   let observed = q38oo-stage(str_concat("model-observation-positions-",str_concat(int_to_str(if good then nth(result,1) else pos),if good then "-ready" else "-refused")),8388625);
+   if good then result else list(-1,pos);
+  }
+  def fcmo-prefill(ctx,sts,ids,pos) = fcmo-walk(fcmo-native-step,ctx,sts,ids,pos,fcma-span(len(ids)));
+ }
+}

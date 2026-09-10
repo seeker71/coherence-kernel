@@ -1,0 +1,103 @@
+// Real model state comparison; one weight admission, two fresh stream states.
+// Public synthetic input IDs, not a language-quality or whole-session eval.
+// preflight-exec: forbidden
+// preludes: form-stdlib/bml/form-cli-model-observation.bml form-stdlib/form-cli-model-generate.fk form-stdlib/model-registry.bml form-stdlib/hearth.bml
+// preludes: ../observe/bidirectional-framebuffer-channel.fk form-stdlib/spool-bell-transport.fk form-stdlib/json.fk
+section [form.bml] {
+ class QwenObservationParity {
+  def qop-home() = ".hearth/qwen-observation-parity";
+  def qop-numbers(values) = if nil?(values) then list() else cons(json-node-int(head(values)),qop-numbers(tail(values)));
+  def qop-note(kind,values) {
+   let dir = fs-mkdir(qop-home());
+   let row = json-node-object(list(json-node-pair("stamp_ms",json-node-int(now_unix_ms())),json-node-pair("kind",json-node-string(kind)),json-node-pair("values",json-node-array(qop-numbers(values)))));
+   let wrote = sbt-append(fs-path-join(qop-home(),"events.jsonl"),str_concat(json-emit(row),"\n"));
+   if lt(wrote,0) then form_error("observation parity evidence write refused") else wrote;
+  }
+  def qop-span(ctx,sts,ids,pos) = q38-prefill-span(nth(ctx,0),nth(ctx,1),nth(ctx,2),nth(ctx,3),sts,nth(ctx,4),nth(ctx,5),nth(ctx,6),ids,pos);
+  def qop-settled() {
+   let live = metal_live();
+   and(eq(len(live),20),and(eq(nth(live,5),0),and(eq(nth(live,6),0),eq(nth(live,14),0))));
+  }
+  def qop-finite(bytes,i) {
+   if ge(mul(i,4),str_len(bytes)) then 1
+   else if eq(mod(div(kth-u32at(bytes,i),8388608),256),255) then 0
+   else qop-finite(bytes,add(i,1));
+  }
+  def qop-buffer(a,b,n) {
+   let left = metal_buf_read(a,0,n);
+   let right = metal_buf_read(b,0,n);
+   and(eq(str_len(left),n),and(eq(str_len(right),n),str_eq(left,right)));
+  }
+  def qop-state(a,b,geo,layer) {
+   if nil?(a) then 1 else qop-state-row(head(a),head(b),geo,layer,tail(a),tail(b));
+  }
+  def qop-state-row(a,b,geo,layer,as,bs) {
+   let full = kth-full?(layer,nth(geo,22));
+   let first = if full then 2 else 0;
+   let n = mul(4,if full then mul(nth(geo,20),nth(geo,18)) else q38-recur-conv-n(geo));
+   let m = if full then n else mul(4,q38-recur-delta-n(geo));
+   let same = and(qop-buffer(nth(a,first),nth(b,first),n),qop-buffer(nth(a,add(first,1)),nth(b,add(first,1)),m));
+   let saved = qop-note("state-layer/bytes/identical",list(layer,add(n,m),same));
+   print(list("state-layer",layer,"bytes",add(n,m),"identical",same)); print_str("\n");
+   and(same,qop-state(as,bs,geo,add(layer,1)));
+  }
+  def qop-logits(ctx) = metal_buf_read(nth(nth(ctx,1),28),0,mul(nth(nth(ctx,2),19),4));
+  def qop-trial(ctx,sts,bounded) {
+   let begun = qop-note("prefix-begin/bounded",list(bounded));
+   let prefix = qop-span(ctx,sts,range(100,109),0);
+   if not(and(fcmo-shape(prefix,0,9),qop-settled())) then form_error("observation parity prefix refused; physical state unsettled or invalid")
+   else qop-observe(ctx,sts,bounded,now_unix_ms());
+  }
+  def qop-observe(ctx,sts,bounded,start) {
+   let before = metal_live();
+   let result = if bounded then fcmo-prefill(ctx,sts,range(1000,1065),9) else qop-span(ctx,sts,range(1000,1065),9);
+   let elapsed = sub(now_unix_ms(),start);
+   if not(and(fcmo-shape(result,9,65),qop-settled())) then form_error("observation parity submission refused; no pass or release claimed")
+   else qop-observed(ctx,result,bounded,elapsed,before,metal_live());
+  }
+  def qop-observed(ctx,result,bounded,elapsed,before,after) {
+   let logits = qop-logits(ctx);
+   let finite = and(eq(str_len(logits),mul(nth(nth(ctx,2),19),4)),qop-finite(logits,0));
+   let saved = qop-note("bounded/prediction/position/ms/dispatches/syncs/finite",list(bounded,head(result),nth(result,1),elapsed,sub(nth(after,7),nth(before,7)),sub(nth(after,8),nth(before,8)),finite));
+   print(list("bounded",bounded,"result",result,"elapsed-ms",elapsed,"dispatches",sub(nth(after,7),nth(before,7)),"syncs",sub(nth(after,8),nth(before,8)),"finite-logits",finite)); print_str("\n");
+   list(result,logits,finite,elapsed);
+  }
+  def qop-opened(ctx) {
+   let a = q38-new-state(nth(ctx,2)); let b = q38-new-state(nth(ctx,2));
+   if not(and(q38-state-ok?(a),q38-state-ok?(b))) then form_error("observation parity state allocation refused")
+   else qop-compare(ctx,a,b);
+  }
+  def qop-compare(ctx,a,b) {
+   let reference = qop-trial(ctx,a,0);
+   let out = bfc-envelope(0,now_unix_ms(),0,list(65,9,fcma-span(65)), -1);
+   let sent = bfc-record-out(out,0);
+   let control = bfc-control(out,5); let incoming = bfc-record-in(control,1);
+   let selected = bfc-apply(out,control,0,1);
+   let bounded = qop-trial(ctx,b,selected);
+   let states = qop-state(a,b,nth(ctx,2),0);
+   let expected = add(q38-close-expected(ctx,a),q38-state-handle-count(b));
+   let freedB = q38-free-state(b); let freedA = q38-close(ctx,a);
+   let checks = list(eq(selected,1),value_eq(head(reference),head(bounded)),str_eq(nth(reference,1),nth(bounded,1)),nth(reference,2),nth(bounded,2),states,eq(add(freedA,freedB),expected),eq(nth(metal_live(),2),0));
+   let seen = bfc-record-out(bfc-envelope(0,bfc-exchange(out),0,checks,-1),2);
+   let saved = qop-note("completed-checks",checks);
+   print(list("checks",checks,"buffers-after-release",nth(metal_live(),2))); print_str("\n");
+   if value_eq(checks,list(1,1,1,1,1,1,1,1)) then 255 else form_error("real Qwen bounded observation parity failed");
+  }
+  def qop-main() {
+   let line = read_line(); let model = if or(nothing?(line),str_eq(line,"")) then "qwen38-q8" else line;
+   let path = mr-path(mr-find(model));
+   let started = qop-note(str_concat("seal-begin/",model),list());
+   if not(eq(qaf-seal-verdict(path),1)) then form_error("observation parity model seal refused")
+   else qop-admit(path,model);
+  }
+  def qop-admit(path,model) {
+   let deadline = metal_deadline(hearth-metal-deadline-ms());
+   let start = now_unix_ms(); let ctx = q38-open-span(path,75,fcma-span(65));
+   let opened = qop-note(str_concat("opened/",model),list(sub(now_unix_ms(),start)));
+   print(list("model",model,"open-ms",sub(now_unix_ms(),start))); print_str("\n");
+   if not(q38-context-ok?(ctx)) then form_error("observation parity context refused")
+   else print(qop-opened(ctx));
+  }
+ }
+ qop-main();
+}
