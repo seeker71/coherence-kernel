@@ -1,0 +1,169 @@
+// rag-crossfade-queue.bml — the crossfade's background breath, made to outlive the breather.
+// preludes: form-stdlib/bml/rag-crossfade.bml
+//
+// rag-crossfade.bml threads its queue through the answer: rcf-enqueue / rcf-materialize /
+// rcf-release hand a list from one call to the next, and that list lives exactly as long as the
+// process holding it. A worker killed between claiming a batch and encoding it takes every id
+// in that batch with it — the ids were never anywhere but in its own frame.
+//
+// This cell is the same queue written as a JOURNAL instead of a value: an append-only list of
+// events, and the state is the fold over them. Nothing is stored; everything is replayed. That
+// one change is what survives a death, because the fold does not care which process wrote which
+// line, and a line already on disk is a line no death can unwrite.
+//
+// The arithmetic here is as portable as the organ it serves — lists, strings, a fold — so it runs
+// on all four kernels. The disk is not here: rag-crossfade-spool.bml appends these events to a
+// file and reads them back. That seam is deliberate. This lane decides WHAT a movement owes; the
+// host witnesses WHERE it lands and WHO is still breathing.
+//
+// What it holds:
+//   event     (op owner id). Four ops, one byte each: e enqueue, c claim, r release, f fail. The
+//             owner is the claimer's name — a pid on the host — and "-" when the op has no owner.
+//   row       (id status attempts owner), in enqueue order. Four states: pending, claimed, done,
+//             dead. Attempts counts failures, never successes.
+//   ceiling   rcq-ceiling attempts, then the row is dead and no claim reaches it again. A document
+//             the ear cannot encode stops asking. Dead is terminal on purpose: reviving one means
+//             a new id, not a hidden door, so a poison pill cannot be resurrected by a retry loop
+//             that forgot why it stopped.
+//   claim     a bounded batch off the head of pending, each line stamped with its owner. The
+//             journal is the arbiter: two workers claiming the same id both append, the fold keeps
+//             the FIRST line's owner, and rcq-held tells each worker what it actually won. No
+//             lock, no lease — the append order is the decision.
+//   death     a claim with no release is what a death leaves behind. Recovery is not inferred, it
+//             is WRITTEN: rcq-recover-events turns each abandoned claim into a fail event, so the
+//             recovery is itself durable and a second open finds nothing left to recover. And
+//             because a death arrives as a fail, it COUNTS toward the ceiling — an id that kills
+//             its worker every time reaches dead like any other failure, which is the whole reason
+//             a ceiling exists. A claim whose owner still breathes is not abandoned; the host says
+//             which owners are gone (rcq-owners names whom to ask), this lane says what that costs.
+//   line      "<op> <owner> <id>\n". The id is the rest of the line, so an id may hold spaces; it
+//             may not hold a newline. A line counts only when a newline closes it, so an append
+//             torn by a death leaves a fragment the parser drops whole rather than a half-id it
+//             would fold as real.
+//   compact   a journal grows with every movement, so each row compresses back to the shortest
+//             history that folds to it — at most ceiling + 2 events, because attempts is a count
+//             and a count can be re-spent. rcq-compacts? is the guard: the short journal is kept
+//             only when it folds to the same rows the long one did.
+//   seam      an answer's leftover queue becomes enqueue events; a breath's done becomes releases
+//             and its unanswered becomes fails. The two organs meet at rcq-answer-events and
+//             rcq-breath-events and nowhere else.
+//   seal      the ceiling and the op alphabet folded to one number the band pins, so neither can
+//             drift under a green verdict.
+//
+// Proven by: form-stdlib/tests/rag-crossfade-queue-band.bml (four-way at form/validate.sh).
+// Run on this host's disk by: observe/rag-crossfade-durable-run.bml (a real kill, a real recovery).
+section [form.bml] {
+    class RagCrossfadeQueue {
+        // --- the ops, and the name for no owner ---
+        def rcq-op-enqueue() = "e";
+        def rcq-op-claim() = "c";
+        def rcq-op-release() = "r";
+        def rcq-op-fail() = "f";
+        def rcq-no-owner() = "-";
+        def rcq-event(op, owner, id) = list(op, owner, id);
+        def rcq-event-op(ev) = nth(ev, 0);
+        def rcq-event-owner(ev) = nth(ev, 1);
+        def rcq-event-id(ev) = nth(ev, 2);
+
+        // --- the row and its four states ---
+        def rcq-pending() = "pending";
+        def rcq-claimed() = "claimed";
+        def rcq-done() = "done";
+        def rcq-dead() = "dead";
+        def rcq-absent() = "absent";
+        def rcq-row(id, status, attempts, owner) = list(id, status, attempts, owner);
+        def rcq-row-id(r) = nth(r, 0);
+        def rcq-row-status(r) = nth(r, 1);
+        def rcq-row-attempts(r) = nth(r, 2);
+        def rcq-row-owner(r) = nth(r, 3);
+        def rcq-ceiling() = 3;
+
+        // --- list floor: the crossfade's own, plus an append ---
+        def rcq-append(xs, ys) = if eq(len(xs), 0) then ys else cons(head(xs), rcq-append(tail(xs), ys));
+
+        // --- the fold: a journal read forward ---
+        def rcq-known?(rows, id) = if eq(len(rows), 0) then 0 else if str_eq(rcq-row-id(head(rows)), id) then 1 else rcq-known?(tail(rows), id);
+        def rcq-row-of(rows, id) = if eq(len(rows), 0) then list() else if str_eq(rcq-row-id(head(rows)), id) then head(rows) else rcq-row-of(tail(rows), id);
+        def rcq-status(rows, id) = if eq(len(rcq-row-of(rows, id)), 0) then rcq-absent() else rcq-row-status(rcq-row-of(rows, id));
+        def rcq-attempts(rows, id) = if eq(len(rcq-row-of(rows, id)), 0) then 0 else rcq-row-attempts(rcq-row-of(rows, id));
+        def rcq-owner(rows, id) = if eq(len(rcq-row-of(rows, id)), 0) then rcq-no-owner() else rcq-row-owner(rcq-row-of(rows, id));
+        // a failure spends one attempt; the ceiling is where spending stops
+        def rcq-after-fail(r, ceiling) = if ge(add(rcq-row-attempts(r), 1), ceiling) then rcq-row(rcq-row-id(r), rcq-dead(), add(rcq-row-attempts(r), 1), rcq-no-owner()) else rcq-row(rcq-row-id(r), rcq-pending(), add(rcq-row-attempts(r), 1), rcq-no-owner());
+        // a claim reaches a pending row and nothing else: a row already claimed keeps its owner,
+        // which is how the journal settles two workers reaching for the same id
+        def rcq-step-claim(r, ev) = if str_eq(rcq-row-status(r), rcq-pending()) then rcq-row(rcq-row-id(r), rcq-claimed(), rcq-row-attempts(r), rcq-event-owner(ev)) else r;
+        // done is terminal; a release lands from anywhere else, including dead — work that
+        // actually finished is finished, whatever the count said on the way
+        def rcq-step(r, ev, ceiling) = if str_eq(rcq-row-status(r), rcq-done()) then r else if str_eq(rcq-event-op(ev), rcq-op-release()) then rcq-row(rcq-row-id(r), rcq-done(), rcq-row-attempts(r), rcq-no-owner()) else if str_eq(rcq-row-status(r), rcq-dead()) then r else if str_eq(rcq-event-op(ev), rcq-op-claim()) then rcq-step-claim(r, ev) else if str_eq(rcq-event-op(ev), rcq-op-fail()) then rcq-after-fail(r, ceiling) else r;
+        def rcq-touch(rows, ev, ceiling) = if eq(len(rows), 0) then list() else if str_eq(rcq-row-id(head(rows)), rcq-event-id(ev)) then cons(rcq-step(head(rows), ev, ceiling), tail(rows)) else cons(head(rows), rcq-touch(tail(rows), ev, ceiling));
+        def rcq-apply-enqueue(rows, ev) = if eq(rcq-known?(rows, rcq-event-id(ev)), 1) then rows else rcf-snoc(rows, rcq-row(rcq-event-id(ev), rcq-pending(), 0, rcq-no-owner()));
+        def rcq-apply(rows, ev, ceiling) = if str_eq(rcq-event-op(ev), rcq-op-enqueue()) then rcq-apply-enqueue(rows, ev) else if eq(rcq-known?(rows, rcq-event-id(ev)), 0) then rows else rcq-touch(rows, ev, ceiling);
+        def rcq-fold(rows, events, ceiling) = if eq(len(events), 0) then rows else rcq-fold(rcq-apply(rows, head(events), ceiling), tail(events), ceiling);
+        def rcq-state(events, ceiling) = rcq-fold(list(), events, ceiling);
+
+        // --- readings off the folded state ---
+        def rcq-ids-with(rows, status) = if eq(len(rows), 0) then list() else if str_eq(rcq-row-status(head(rows)), status) then cons(rcq-row-id(head(rows)), rcq-ids-with(tail(rows), status)) else rcq-ids-with(tail(rows), status);
+        def rcq-pending-ids(rows) = rcq-ids-with(rows, rcq-pending());
+        def rcq-claimed-ids(rows) = rcq-ids-with(rows, rcq-claimed());
+        def rcq-done-ids(rows) = rcq-ids-with(rows, rcq-done());
+        def rcq-dead-ids(rows) = rcq-ids-with(rows, rcq-dead());
+        def rcq-depth(rows) = len(rcq-pending-ids(rows));
+        // what one owner actually holds — the journal already settled the contest
+        def rcq-held(rows, owner) = if eq(len(rows), 0) then list() else if and(str_eq(rcq-row-status(head(rows)), rcq-claimed()), str_eq(rcq-row-owner(head(rows)), owner)) then cons(rcq-row-id(head(rows)), rcq-held(tail(rows), owner)) else rcq-held(tail(rows), owner);
+        // whom the host asks about: the distinct owners holding claims
+        def rcq-owners-go(rows, seen) = if eq(len(rows), 0) then list() else if or(eq(str_eq(rcq-row-status(head(rows)), rcq-claimed()), 0), eq(rcf-in?(rcq-row-owner(head(rows)), seen), 1)) then rcq-owners-go(tail(rows), seen) else cons(rcq-row-owner(head(rows)), rcq-owners-go(tail(rows), cons(rcq-row-owner(head(rows)), seen)));
+        def rcq-owners(rows) = rcq-owners-go(rows, list());
+        // a claim whose owner is gone: what a death left on the floor
+        def rcq-abandoned(rows, gone) = if eq(len(rows), 0) then list() else if and(str_eq(rcq-row-status(head(rows)), rcq-claimed()), eq(rcf-in?(rcq-row-owner(head(rows)), gone), 1)) then cons(rcq-row-id(head(rows)), rcq-abandoned(tail(rows), gone)) else rcq-abandoned(tail(rows), gone);
+
+        // --- the events a movement owes; the host appends them ---
+        def rcq-events-for(ids, op, owner) = if eq(len(ids), 0) then list() else cons(rcq-event(op, owner, head(ids)), rcq-events-for(tail(ids), op, owner));
+        def rcq-enqueue-go(rows, ids, seen) = if eq(len(ids), 0) then list() else if or(eq(rcq-known?(rows, head(ids)), 1), eq(rcf-in?(head(ids), seen), 1)) then rcq-enqueue-go(rows, tail(ids), seen) else cons(rcq-event(rcq-op-enqueue(), rcq-no-owner(), head(ids)), rcq-enqueue-go(rows, tail(ids), cons(head(ids), seen)));
+        // dedupe before the line is written, so a repeated ask costs no bytes at all
+        def rcq-enqueue-events(rows, ids) = rcq-enqueue-go(rows, ids, list());
+        def rcq-claim-events(rows, n, owner) = rcq-events-for(rcf-take(rcq-pending-ids(rows), n), rcq-op-claim(), owner);
+        def rcq-release-events(ids) = rcq-events-for(ids, rcq-op-release(), rcq-no-owner());
+        def rcq-fail-events(ids) = rcq-events-for(ids, rcq-op-fail(), rcq-no-owner());
+        // recovery, written rather than inferred: an abandoned claim IS a failure
+        def rcq-recover-events(rows, gone) = rcq-fail-events(rcq-abandoned(rows, gone));
+
+        // --- the seam with the crossfade organ ---
+        def rcq-answer-events(rows, answer) = rcq-enqueue-events(rows, rcf-answer-queue(answer));
+        def rcq-breath-events(breath) = rcq-append(rcq-release-events(rcf-breath-done(breath)), rcq-fail-events(rcf-breath-unanswered(breath)));
+
+        // --- the line codec ---
+        def rcq-newline() = byte_to_str(10);
+        def rcq-space() = " ";
+        def rcq-render(ev) = str_concat(rcq-event-op(ev), str_concat(rcq-space(), str_concat(rcq-event-owner(ev), str_concat(rcq-space(), str_concat(rcq-event-id(ev), rcq-newline())))));
+        def rcq-render-all(events) = if eq(len(events), 0) then "" else str_concat(rcq-render(head(events)), rcq-render-all(tail(events)));
+        def rcq-index-of(s, b, i, n) = if ge(i, n) then -1 else if eq(str_byte_at(s, i), b) then i else rcq-index-of(s, b, add(i, 1), n);
+        // three fields, each of them non-empty, or the line never happened
+        def rcq-line-at(s, at, end, s1, s2) = if or(le(sub(s1, at), 0), or(le(sub(s2, add(s1, 1)), 0), le(sub(end, add(s2, 1)), 0))) then list() else rcq-event(substring(s, at, s1), substring(s, add(s1, 1), s2), substring(s, add(s2, 1), end));
+        def rcq-line-second(s, at, end, s1) = if lt(rcq-index-of(s, 32, add(s1, 1), end), 0) then list() else rcq-line-at(s, at, end, s1, rcq-index-of(s, 32, add(s1, 1), end));
+        def rcq-line-event(s, at, end) = if lt(rcq-index-of(s, 32, at, end), 0) then list() else rcq-line-second(s, at, end, rcq-index-of(s, 32, at, end));
+        def rcq-parse-line(s, at, nl, n) = if eq(len(rcq-line-event(s, at, nl)), 0) then rcq-parse-go(s, add(nl, 1), n) else cons(rcq-line-event(s, at, nl), rcq-parse-go(s, add(nl, 1), n));
+        // a line counts only when a newline closes it: a torn append is dropped whole
+        def rcq-parse-go(s, at, n) = if lt(rcq-index-of(s, 10, at, n), 0) then list() else rcq-parse-line(s, at, rcq-index-of(s, 10, at, n), n);
+        def rcq-parse(s) = rcq-parse-go(s, 0, str_len(s));
+        def rcq-replay(text, ceiling) = rcq-state(rcq-parse(text), ceiling);
+
+        // --- compaction: the shortest journal that folds to the state it already holds ---
+        // An append-only journal grows with every movement, and a document encoded once still
+        // costs the lines that got it there. Each row's whole history compresses to at most
+        // ceiling + 2 events — the enqueue that made it, the failures it spent, and the claim or
+        // release it currently wears — because attempts is a COUNT and a count can be re-spent.
+        // rcq-rows-same? is what makes this a claim rather than a hope: the compacted journal is
+        // kept only when it folds back to the same rows.
+        def rcq-repeat(ev, n) = if le(n, 0) then list() else cons(ev, rcq-repeat(ev, sub(n, 1)));
+        def rcq-row-tail(r) = if str_eq(rcq-row-status(r), rcq-claimed()) then list(rcq-event(rcq-op-claim(), rcq-row-owner(r), rcq-row-id(r))) else if str_eq(rcq-row-status(r), rcq-done()) then list(rcq-event(rcq-op-release(), rcq-no-owner(), rcq-row-id(r))) else list();
+        def rcq-row-events(r) = cons(rcq-event(rcq-op-enqueue(), rcq-no-owner(), rcq-row-id(r)), rcq-append(rcq-repeat(rcq-event(rcq-op-fail(), rcq-no-owner(), rcq-row-id(r)), rcq-row-attempts(r)), rcq-row-tail(r)));
+        def rcq-compact-events(rows) = if eq(len(rows), 0) then list() else rcq-append(rcq-row-events(head(rows)), rcq-compact-events(tail(rows)));
+        def rcq-row-same?(x, y) = and(str_eq(rcq-row-id(x), rcq-row-id(y)), and(str_eq(rcq-row-status(x), rcq-row-status(y)), and(eq(rcq-row-attempts(x), rcq-row-attempts(y)), str_eq(rcq-row-owner(x), rcq-row-owner(y)))));
+        def rcq-rows-same?(xs, ys) = if eq(len(xs), 0) then if eq(len(ys), 0) then 1 else 0 else if eq(len(ys), 0) then 0 else if eq(rcq-row-same?(head(xs), head(ys)), 1) then rcq-rows-same?(tail(xs), tail(ys)) else 0;
+        def rcq-compacts?(rows, ceiling) = rcq-rows-same?(rcq-state(rcq-compact-events(rows), ceiling), rows);
+
+        // --- the declared rule, folded: the ceiling and the four op bytes ---
+        def rcq-seal() = add(mul(rcq-ceiling(), 100000000), add(mul(str_byte_at(rcq-op-enqueue(), 0), 1000000), add(mul(str_byte_at(rcq-op-claim(), 0), 10000), add(mul(str_byte_at(rcq-op-release(), 0), 100), str_byte_at(rcq-op-fail(), 0)))));
+    }
+    0;
+}

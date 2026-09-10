@@ -308,11 +308,24 @@ Naming it *is* the practice.
    target as one line on that process's stdin. The target is then process-local;
    siblings cannot replace it between write and read.
 
-   It forces a fresh compile (an existing image replaces the error with a tally — no name, no line), checks paren
-   balance without running anything, and answers the one question the compiler cannot: `[unresolved-call] 'x'`
+   It forces a fresh compile (an existing image replaces the error with a tally — no name, no line), checks that
+   the surface closes without running anything, and answers the one question the compiler cannot: `[unresolved-call] 'x'`
    is **nonspecific** (corpus row 955) — one red line with two opposite repairs. Either nobody defines `x` (a
    TYPO — fix the cell) or another kernel defines it and this one does not (a LANE SEAM — fix the preludes, or
    declare the lane). Preflight offers the name to all four kernels and tells you which.
+
+   It reads the lane a unit actually travels, because that is what decides which cache stands between you and
+   today's diagnostics: a direct-source `.fk` replaces its suffix (`x.fkb`, `x.sym`), while `.bml` — and any `.fk`
+   carrying a `section [` block on a line of its own — hangs its cache off the whole path (`x.bml.fkb`, `x.bml.sym`,
+   `x.bml.lowfk`). Preflight removes the unit's own artifacts, so the high-grammar cells the authoring floor asks
+   for get the same pass a `.fk` gets, and the surface is read as itself: parens on direct source, the brace
+   surface block by block on high grammar. The effect marker answers in both tongues — `; preflight-exec: forbidden`
+   and `// preflight-exec: forbidden`. Lane reading:
+   [`form/form-stdlib/bml/preflight-source.bml`](form/form-stdlib/bml/preflight-source.bml), four-way at 65535.
+
+   Both runner doors carry the reading out in their exit code: 0 when a verdict can be read from the chain,
+   nonzero when it cannot — no compile lane, errors, unresolved calls, or an effectful cell preserved instead of
+   run. The page is printed first either way, so the refusal never costs you the reading.
 
    Two rules fall out, and both were paid for:
    - **A failed check asks for repair (Urs, 2026-09-09).** Keep attention on the
@@ -321,8 +334,8 @@ Naming it *is* the practice.
      bypass or weaken a gate. Ask for help only when the next necessary action
      needs information, access, or authority that is genuinely unavailable.
    - **Read the exit code, not the number.** `fkwu` exits 1 when the compile carried errors. With an existing
-     cache you get only "cached image was compiled with errors" — delete the `.fkb`/`.sym` and run again before
-     reporting anything.
+     cache you get only "cached image was compiled with errors" — remove the unit's own artifacts and run again
+     before reporting anything, and let preflight name them rather than deriving them from the suffix.
    - **Never declare a proof lane from inference — probe it.** A `PROOF LEVEL:` line written from "X is
      surely fkwu-only" is a defect written in as a law (corpus row 914, `teleological`).
      `(pf-arm-mask "host-exec")` answers which arms bind a name, and takes one call.
