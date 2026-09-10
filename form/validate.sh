@@ -50,7 +50,7 @@ _validate_tree_generation() {
 }
 VALIDATE_TREE_AT_START="$(_validate_tree_generation)"
 _validate_seal() {
-    local rc=$? now
+    local rc="${1:-$?}" now
     now="$(_validate_tree_generation)"
     if [[ "$now" != "$VALIDATE_TREE_AT_START" ]]; then
         echo "validate.sh: VOID READING — the tree moved while this run was in flight." >&2
@@ -310,7 +310,22 @@ cleanup() {
         rm -f "$artifact"
     fi
 }
-trap cleanup EXIT
+# bash REPLACES an EXIT trap; it does not chain. `trap cleanup EXIT` alone
+# silently disarmed the seal set above, and the seal is what tells a reader
+# that a verdict describes a tree that has since moved. Witnessed 2026-09-10:
+# a corpus-band run began at 09ad6b2e, HEAD moved to 60239a6f forty-one
+# minutes before it ended, and the run printed a clean verdict and exited 0.
+# It was noticed from a timestamp -- the same way the drift this seal was
+# built for was noticed, and the reason its own comment says "Once is luck."
+#
+# So the handler that owns the EXIT slot carries both: the scratch dirs go,
+# and the seal keeps the last word on the exit status.
+_validate_exit() {
+    local rc=0
+    cleanup
+    _validate_seal ""
+}
+trap _validate_exit EXIT
 
 fk_declared_deps() {
     local file="$1"
