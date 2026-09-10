@@ -10,6 +10,7 @@
 ; preludes: native/metal/kat-token-handle.fk form-stdlib/qk-matmul-batch.fk native/metal/qwen35-linear-span-layout-contract.fk form-stdlib/bml/qwen38-open-observation.bml
 ; preludes: form-stdlib/declarative-attention-metal.bml
 ; preludes: form-stdlib/bml/qwen38-embedding.bml
+; preludes: form-stdlib/bml/qwen38-prefill-quant.bml
 
 (do
     ; Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
@@ -203,7 +204,7 @@
         (str_concat (q38-joined-attention-msl)
         (str_concat (q38-linear-span-msl)
                     (q38-lora-rank1-msl)))))))))
-    (defn q38-msl () (str_concat (q38-msl-base) (q38e-msl)))
+    (defn q38-msl () (str_concat (q38-msl-base) (str_concat (q38e-msl) (q38pq-msl))))
 
     ; Order here IS the pipeline order for indices 40..46, and the layout
     ; contract names each one. Appending is safe; inserting renumbers a
@@ -244,7 +245,7 @@
                   (metal_pipeline msl (nth linear 6)))))
         ; 47/48 follow the existing 40..46 span lane; appending preserves all
         ; established pipeline identities.
-        (append (append base (q38-lora-rank1-pipes msl)) (q38e-pipes msl))))
+        (append (append (append base (q38-lora-rank1-pipes msl)) (q38e-pipes msl)) (q38pq-pipes msl))))
 
     (defn q38-embed (ps bs geo embTv id barrier)
         (if (lt (q38e-index (kth-tv-ty embTv)) 0) -1
@@ -496,7 +497,7 @@
             1))
 
     ; ── the batched matmul, dispatched ─────────────────────────────────────
-    ; form_q8_0_matmul_batch_f32 takes rows, cols and ntok, reads x[t*cols+j] and
+    ; The typed batch kernels take rows, cols and ntok, read x[t*cols+j] and
     ; writes y[t*rows+r]. Grid is rows * ceil(ntok/8) * 32 with a threadgroup that
     ; is a multiple of 32, and mode 0 so the threads argument is the total thread
     ; count rather than a group count.
@@ -517,12 +518,16 @@
     ; q||gate projection and the linear block's wider one. Writing at `rows`
     ; there lays each token down at the wrong pitch and everything downstream
     ; reads the token before it.
+    ; Quantization and output pitch both belong to the producer. Q4_K, Q6_K,
+    ; Q8_0 and F32 use the common tiled fold with their own weight decoder.
     (defn q38-mv-batch-y (ps tv xh yh ntok ystride barrier)
-        (metal_enqueue (nth ps 31)
+        (if (lt (q38pq-index (kth-tv-ty tv)) 0)
+            (form_error "qwen prefill: unsupported matrix quantization")
+        (metal_enqueue (nth ps (q38pq-index (kth-tv-ty tv)))
             (md-bind16 (list (kth-tv-h tv) xh yh)
                 (list (kth-tv-r tv) (kth-tv-c tv) ntok ystride)
                 256 0 0 barrier)
-            (mul (mul (kth-tv-r tv) (div (add ntok 7) 8)) 32)))
+            (mul (mul (kth-tv-r tv) (qmb-ntile ntok)) 32))))
 
     (defn q38-mv-batch (ps tv xh yh ntok barrier)
         (q38-mv-batch-y ps tv xh yh ntok (kth-tv-r tv) barrier))
