@@ -1,4 +1,4 @@
-; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/dsv4-hc.fk
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/dsv4-hc.fk form-stdlib/bml/dsv4-numeric-reference.bml
 ;
 ; dsv4-hc-band — DeepSeek-V4-Flash hyper-connections (dsv4-hc.fk), the residual
 ; structure the whole forward pass runs inside. Six claims; verdict 63 when all cross.
@@ -13,10 +13,9 @@
 ;   (n_hc = 4 for the combine, n_hc = 2 / n_embd = 2 for the full pipeline).
 ;
 ; WHAT IT DOES NOT PROVE
-;   * NOT bit-exactness. There is no independent HC implementation in this repo.
-;     Claim 1's evidence class is AGREEMENT WITH AN INDEPENDENT fp64 TRANSCRIPTION of
-;     ds4.c (scratchpad hc_oracle.py, written from the C control flow, not this
-;     recipe), observed at ~1e-15; the residual is fp32-vs-fp64 rounding, not algebra.
+;   * NOT bit-exactness. Claim 1 compares the production recipes, the independent
+;     flat-array fp64 Form reference in bml/dsv4-numeric-reference.bml and held
+;     numeric anchors. All three comparisons retain the 1e-9 tolerance.
 ;   * NOT the real dims. V4-Flash is n_hc=4, n_embd=4096, fn [16384,24], 43 layers x
 ;     two HC pairs (attn + ffn) + an output head. The recipe is dim-generic; no claim
 ;     here has SEEN those dims.
@@ -50,10 +49,11 @@
 
 (do
   (defn hcb-vmaxdiff (a b)
-    (if (eq (len a) 0) 0.0
+    (if (not (eq (len a) (len b))) 1000000.0
+      (if (eq (len a) 0) 0.0
         (do (let d (tn-abs (sub (head a) (head b))))
             (let r (hcb-vmaxdiff (tail a) (tail b)))
-            (if (gt d r) d r))))
+            (if (gt d r) d r)))))
   (defn hcb-maxdiff (as bs)
     (if (eq (len as) 0) 0.0
         (do (let d (hcb-vmaxdiff (head as) (head bs)))
@@ -116,7 +116,16 @@
     (list 1.272368384440297 0.7547097937069717)
     (list 0.7093133807845177 0.2906856192154831 0.2906856192154824 0.709313380784517)
     (list 0.6817689130931681 0.02163919902622566)))
-  (let c1 (if (lt (hcb-maxdiff got ref) 0.000000001) 1 0))
+  (let native-split (dnr-hc-split mix scale base n4 iters eps))
+  (let native-p2 (dnr-hc-pre fn2 scale2 base2 (hcb-flat resid2) 2 2 iters eps))
+  (let independent (list native-split
+    (dnr-hc-weighted resid-flat (dnr-take native-split n4) 3 n4)
+    (dnr-hc-post blk resid-flat (dnr-slice native-split n4 n4) (dnr-drop native-split 8) 3 n4)
+    (nth native-p2 0) (nth native-p2 1) (nth native-p2 2)
+    (dnr-hc-head fnh scaleh baseh (hcb-flat inph) 2 2 eps)))
+  (let c1 (if (lt (hcb-maxdiff got ref) 0.000000001)
+    (if (lt (hcb-maxdiff independent ref) 0.000000001)
+      (if (lt (hcb-maxdiff got independent) 0.000000001) 1 0) 0) 0))
 
   ; --- claim 2: doubly stochastic (rows AND columns sum to 1) ---
   (let comb4 (hc-split-comb s4))

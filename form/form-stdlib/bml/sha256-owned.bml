@@ -1,0 +1,62 @@
+// One Form-emitted CPU SHA admission, with caller-visible release evidence.
+// Input pages are mapped; only the last 0..63 bytes and padding are copied.
+// preludes: native/metal/sha256-arm64-jit.fk form-stdlib/bml/metal-jit.bml
+section [form.bml] {
+ class Sha256Owned {
+  def sho-free(handles,held) = if nil?(handles) then reverse(held) else sho-free-next(handles,held,if gt(head(handles),0) then metal_buf_free(head(handles)) else 1);
+  def sho-free-next(handles,held,rc) = sho-free(tail(handles),if eq(rc,1) then held else cons(head(handles),held));
+  def sho-close(owner) {
+   let held = sho-free(record_get(owner,"buffers"),list());
+   let freed = if gt(record_get(owner,"pipeline"),0) then mj-release-handle(record_get(owner,"pipeline")) else 1;
+   let buffers = record_set(owner,"buffers",held);
+   let pipeline = if eq(freed,1) then record_set(owner,"pipeline",0) else owner;
+   and(nil?(held),eq(freed,1));
+  }
+  def sho-file(path) {
+   let owner = sho-owner();
+   let size = file_size(path);
+   if lt(size,0) then sho-refuse(owner,"file-absent") else sho-open(owner,path,size);
+  }
+  def sho-owner() = record_new(0,"buffers",list(),"pipeline",0,"digest","","reason","unobserved");
+  def sho-refuse(owner,reason) = record_set(owner,"reason",reason);
+  def sho-open(owner,path,size) = sho-read(owner,path,size,read_file_slice(path,sub(size,mod(size,64)),mod(size,64)));
+  def sho-read(owner,path,size,tail) = if nothing?(tail) then sho-refuse(owner,"tail-read-refused") else if not(eq(str_len(tail),mod(size,64))) then sho-refuse(owner,"tail-read-short") else if not(eq(file_size(path),size)) then sho-refuse(owner,"file-size-changed") else sho-admit(owner,path,size,tail);
+  def sho-admit(owner,path,size,tail) {
+   let version = mj-memory(saj-code(),"form_cpu_jit");
+   let pipeline = record_set(owner,"pipeline",mj-handle(version));
+   let prefix = sub(size,mod(size,64));
+   let message = sho-message(path,prefix);
+   let padding = saj-padding-string(tail,size);
+   let state = metal_buf_alloc(32); let rounds = metal_buf_alloc(256); let pad = metal_buf_alloc(str_len(padding));
+   let buffers = record_set(owner,"buffers",list(message,state,rounds,pad));
+   let ready = and(gt(mj-handle(version),0),and(gt(state,0),and(gt(rounds,0),and(gt(pad,0),or(eq(prefix,0),gt(message,0))))));
+   let digest = sho-admitted-digest(ready,mj-handle(version),message,state,rounds,pad,prefix,padding);
+   sho-settle(owner,path,size,digest);
+  }
+  def sho-settle(owner,path,size,digest) {
+   let closed = sho-close(owner);
+   if not(closed) then sho-refuse(owner,"release-refused") else if not(eq(file_size(path),size)) then sho-refuse(owner,"file-size-changed") else if not(eq(str_len(digest),32)) then sho-refuse(owner,"digest-refused") else sho-accept(owner,digest);
+  }
+  def sho-accept(owner,digest) {
+   let reason = record_set(owner,"reason","ready");
+   record_set(owner,"digest",digest);
+  }
+  def sho-message(path,prefix) = if gt(prefix,0) then metal_buf_from_file(path,0,prefix) else 0;
+  def sho-admitted-digest(ready,pipeline,message,state,rounds,pad,prefix,padding) = if ready then sho-digest(pipeline,message,state,rounds,pad,prefix,padding) else "";
+  def sho-digest(pipeline,message,state,rounds,pad,prefix,padding) {
+   let sw = metal_buf_write(state,0,saj-initial-state-bytes());
+   let rw = metal_buf_write(rounds,0,saj-round-constant-bytes());
+   let pw = metal_buf_write(pad,0,padding);
+   if and(eq(sw,32),and(eq(rw,256),eq(pw,str_len(padding)))) then sho-compress(pipeline,message,state,rounds,pad,prefix,padding) else "";
+  }
+  def sho-compress(pipeline,message,state,rounds,pad,prefix,padding) {
+   let first = sho-prefix(pipeline,message,state,rounds,prefix);
+   let last = sho-last(first,pipeline,pad,state,rounds,padding);
+   let raw = saj-read-state(last,state);
+   if eq(str_len(raw),32) then saj-state-digest(raw) else "";
+  }
+  def sho-prefix(pipeline,message,state,rounds,prefix) = if gt(prefix,0) then metal_enqueue(pipeline,md-bind(list(message,state,rounds),list(div(prefix,64))),1) else 1;
+  def sho-last(first,pipeline,pad,state,rounds,padding) = if eq(first,1) then metal_enqueue(pipeline,md-bind(list(pad,state,rounds),list(div(str_len(padding),64))),1) else 0;
+ }
+ 0;
+}

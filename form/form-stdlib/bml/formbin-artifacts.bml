@@ -1,0 +1,59 @@
+// Artifact comparison and the separate human symbol/source lens.
+// preludes: form-stdlib/bml/formbin-codec.bml form-stdlib/bml/json-wire-admission.bml
+section [form.bml] {
+ class FormbinArtifacts {
+  def fba-s(key, value) = json-node-pair(key, json-node-string(value));
+  def fba-n(key, value) = json-node-pair(key, json-node-int(value));
+  def fba-b(key, value) = json-node-pair(key, json-node-bool(value));
+  def fba-diff(source, target) = fba-diff-readings(source, target, fbc-read-exact(source, fbc-max-bytes()), fbc-read-exact(target, fbc-max-bytes()));
+  def fba-diff-readings(source, target, a, b) = if not(fbc-good(a)) then a else if not(fbc-good(b)) then b else fba-diff-read(source, target, fbc-value(a), fbc-value(b));
+  def fba-diff-read(source, target, a, b) = fba-diff-loaded(source, target, fbc-decode(a), fbc-decode(b), str_eq(a, b));
+  def fba-diff-loaded(source, target, a, b, byteEqual) {
+   if not(fbc-good(a)) then fbc-fail(str_concat(source, str_concat(": ", fbc-error(a))))
+   else if not(fbc-good(b)) then fbc-fail(str_concat(target, str_concat(": ", fbc-error(b))))
+   else fba-diff-structure(source, target, a, b, fbc-structural(fbc-value(a)), fbc-structural(fbc-value(b)), byteEqual);
+  }
+  def fba-diff-structure(source, target, a, b, sa, sb, byteEqual) = fbc-ok(json-node-object(list(
+   fba-s("schema", "formbin2-structural-diff-v2"), fba-s("structural_encoding", "formbin2-value-tree-v1"),
+   fba-s("source", source), fba-s("target", target),
+   fba-n("source_node_count", nth(a, 3)), fba-n("target_node_count", nth(b, 3)),
+   fba-s("source_structural_sha256", fbc-hash(sa)), fba-s("target_structural_sha256", fbc-hash(sb)),
+   fba-b("structurally_equal", str_eq(sa, sb)), fba-b("byte_equal", byteEqual)
+  )), 0, 0);
+  def fba-diff-json(source, target) = fba-diff-render(fba-diff(source, target));
+  def fba-diff-render(result) = if fbc-good(result) then json-emit(fbc-value(result)) else json-emit(json-node-object(list(fba-s("schema", "formbin2-structural-diff-v2"), fba-s("status", "refused"), fba-s("error", fbc-error(result)))));
+  def fba-nodeid(pkg, level, type, inst) = if and(fbc-u32?(pkg), and(fbc-u32?(level), and(fbc-u32?(type), fbc-u32?(inst)))) then list(pkg, level, type, inst) else nothing();
+  def fba-nodeid-text(n) = if nothing?(n) then nothing() else str_concat("@", str_concat(int_to_str(head(n)), str_concat(".", str_concat(int_to_str(nth(n, 1)), str_concat(".", str_concat(int_to_str(nth(n, 2)), str_concat(".", int_to_str(nth(n, 3)))))))));
+  def fba-digits(s, p) = if ge(p, str_len(s)) then 1 else if and(ge(str_byte_at(s, p), 48), le(str_byte_at(s, p), 57)) then fba-digits(s, add(p, 1)) else 0;
+  def fba-coordinate(s) = if or(eq(str_len(s), 0), gt(str_len(s), 10)) then nothing() else if fba-digits(s, 0) then if fbc-u32?(str_to_int(s)) then str_to_int(s) else nothing() else nothing();
+  def fba-nodeid-parse(s) = fba-nodeid-scan(s, if str_eq(substring(s, 0, 1), "@") then 1 else 0, if str_eq(substring(s, 0, 1), "@") then 1 else 0, list());
+  def fba-nodeid-scan(s, start, p, parts) = if ge(p, str_len(s)) then fba-nodeid-parts(reverse(cons(substring(s, start, p), parts))) else if eq(str_byte_at(s, p), 46) then fba-nodeid-scan(s, add(p, 1), add(p, 1), cons(substring(s, start, p), parts)) else fba-nodeid-scan(s, start, add(p, 1), parts);
+  def fba-nodeid-parts(parts) = if not(eq(len(parts), 4)) then nothing() else fba-nodeid-checked(fba-coordinate(head(parts)), fba-coordinate(nth(parts, 1)), fba-coordinate(nth(parts, 2)), fba-coordinate(nth(parts, 3)));
+  def fba-nodeid-checked(a, b, c, d) = if or(nothing?(a), or(nothing?(b), or(nothing?(c), nothing?(d)))) then nothing() else fba-nodeid(a, b, c, d);
+  def fba-span(path, startOffset, endOffset, startLine, startCol, endLine, endCol) = json-node-object(list(fba-s("path", path), fba-n("start_offset", startOffset), fba-n("end_offset", endOffset), fba-n("start_line", startLine), fba-n("start_col", startCol), fba-n("end_line", endLine), fba-n("end_col", endCol)));
+  def fba-lens-entry(nodeid, symbol, span) = json-node-pair(fba-nodeid-text(nodeid), json-node-object(list(fba-s("symbol", symbol), json-node-pair("span", span))));
+  def fba-lens-symbol(lens, nodeid) = fba-lens-field(lens, nodeid, "symbol");
+  def fba-lens-span(lens, nodeid) = fba-lens-field(lens, nodeid, "span");
+  def fba-lens-field(lens, nodeid, key) {
+   let name = fba-nodeid-text(nodeid);
+   if nothing?(name) then nothing() else if not(json-object-has?(lens, name)) then nothing()
+   else fba-present-field(json-object-get(lens, name), key);
+  }
+  def fba-present-field(node, key) = if json-object-has?(node, key) then json-object-get(node, key) else nothing();
+  def fba-lens-load(path) = if not(eq(fs_exists(path), 1)) then fbc-ok(json-node-object(list()), 0, 0) else fba-lens-read(path, fbc-read-exact(path, 0));
+  def fba-lens-read(path, reading) = if fbc-good(reading) then fba-lens-parse(path, fbc-value(reading)) else reading;
+  def fba-lens-parse(path, text) {
+   if nothing?(text) then fbc-fail("unreadable source lens")
+   else if not(and(fbc-utf8(text, 0), jwa-valid(text))) then fbc-fail("invalid source lens JSON")
+   else fba-lens-parsed(faj-json(path, text));
+  }
+  def fba-lens-parsed(node) = if node_eq(node_category(node), JSON-OBJECT()) then fbc-ok(node, 0, 0) else fbc-fail("source lens must be a JSON object");
+  def fba-lens-write(path, lens) = if not(node_eq(node_category(lens), JSON-OBJECT())) then fbc-fail("source lens must be a JSON object") else fba-lens-written(path, json-emit(lens));
+  def fba-lens-written(path, text) = if eq(write_file(path, text), str_len(text)) then fbc-ok(text, 0, 0) else fbc-fail("source lens write incomplete");
+  def fba-lens-path(path) = fba-lens-extension(path, sub(str_len(path), 1));
+  def fba-lens-extension(path, p) = if lt(p, 0) then str_concat(path, ".fkl") else if eq(str_byte_at(path, p), 47) then str_concat(path, ".fkl") else if eq(str_byte_at(path, p), 46) then if or(eq(p, 0), eq(str_byte_at(path, sub(p, 1)), 47)) then str_concat(path, ".fkl") else str_concat(substring(path, 0, p), ".fkl") else fba-lens-extension(path, sub(p, 1));
+  def fba-ensure-parent(path) = fba-parent-prefix(path, 0);
+  def fba-parent-prefix(path, p) = if ge(p, str_len(path)) then 1 else if and(gt(p, 0), eq(str_byte_at(path, p), 47)) then if eq(fs_exists(substring(path, 0, p)), 1) then fba-parent-prefix(path, add(p, 1)) else if eq(host_dir_mkdir(substring(path, 0, p)), 1) then fba-parent-prefix(path, add(p, 1)) else 0 else fba-parent-prefix(path, add(p, 1));
+ }
+ 0;
+}

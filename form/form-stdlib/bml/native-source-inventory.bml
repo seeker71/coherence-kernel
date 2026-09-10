@@ -1,0 +1,60 @@
+// Form owns complete source-inventory capture, child settlement and evidence.
+// argv carries Git or another explicit OS reader. Output lives in an owned
+// file; no bounded stdout buffer or discarded process status certifies it.
+// preludes: form-stdlib/core.fk form-stdlib/form-fs.fk form-stdlib/organ-health.bml
+section [form.bml] {
+ class NativeSourceInventory {
+  def nsi-path(job,leaf) = fs-path-join(job,leaf);
+  def nsi-command(argv) {
+   let pid = host_spawn_quiet(argv);
+   if or(nothing?(pid),le(pid,0)) then -1 else host_wait(pid);
+  }
+  def nsi-directory(parent,prefix,attempt) {
+   let leaf = str_concat(prefix,str_concat(int_to_str(host_pid()),str_concat("-",str_concat(int_to_str(host_monotonic_ms()),str_concat("-",int_to_str(attempt))))));
+   let path = nsi-path(parent,leaf);
+   if fs_is_dir(path) then nsi-directory(parent,prefix,add(attempt,1)) else nsi-make-directory(parent,prefix,attempt,path);
+  }
+  def nsi-make-directory(parent,prefix,attempt,path) {
+   let status = nsi-command(list("/bin/mkdir","-m","700",path));
+   if eq(status,0) then path else if fs_is_dir(path) then nsi-directory(parent,prefix,add(attempt,1)) else form_error("native inventory cannot create its private evidence directory");
+  }
+  def nsi-job() {
+   let made = fs_mkdir(".hearth");
+   nsi-directory(".hearth","source-inventory-",0);
+  }
+  // Capture shape: accepted bytes, child exit, stdout, private evidence path.
+  def nsi-ok(capture) = head(capture);
+  def nsi-status(capture) = nth(capture,1);
+  def nsi-text(capture) = nth(capture,2);
+  def nsi-evidence(capture) = nth(capture,3);
+  def nsi-exact(path,text) = and(not(nothing?(text)),and(ge(file_size(path),0),eq(str_len(text),file_size(path))));
+  def nsi-capture(argv) {
+   let job = nsi-job();
+   let output = nsi-path(job,"stdout");
+   let errors = nsi-path(job,"stderr");
+   let pid = host_spawn_at(argv,list("/dev/null",output,errors));
+   let status = if or(nothing?(pid),le(pid,0)) then -1 else host_wait(pid);
+   let text = read_file(output);
+   let err = read_file(errors);
+   let ok = and(eq(status,0),and(nsi-exact(output,text),nsi-exact(errors,err)));
+   let capture = list(ok,status,if nothing?(text) then "" else text,job);
+   let report = json-emit-precise(json-node-object(list(oh-s("schema","native-source-capture-v1"),oh-n("pid",if nothing?(pid) then -1 else pid),oh-n("exit",status),oh-n("complete",ok),oh-n("stdout_bytes",file_size(output)),oh-n("stderr_bytes",file_size(errors)),oh-n("observed_at_ms",now_unix_ms()))));
+   if ne(write_file(nsi-path(job,"capture.json"),report),str_len(report)) then form_error("native inventory cannot retain capture status") else capture;
+  }
+  def nsi-nuls?(text) = or(eq(str_len(text),0),eq(str_byte_at(text,sub(str_len(text),1)),0));
+  def nsi-admitted?(capture) = and(nsi-ok(capture),nsi-nuls?(nsi-text(capture)));
+  def nsi-refuse(capture,aspect) {
+   let row = oh-reading("source-inventory",nsi-evidence(capture),aspect,json-node-int(1),json-node-int(0),json-node-int(0),list(oh-need("complete-successful-inventory",oh-reference(nsi-path(nsi-evidence(capture),"capture.json")))),list("request-evidence","defer"),oh-reference(nsi-path(nsi-evidence(capture),"stderr")));
+   oh-voice(row);
+   let response = oh-response(row,"request-evidence");
+   oh-voice(response);
+   let selected = oh-select(row,response,"defer");
+   oh-voice(oh-applied(row,selected,oh-reference(nsi-path(nsi-evidence(capture),"stdout"))));
+   form_error("native source inventory incomplete; child status and bytes retained");
+  }
+  def nsi-require(capture) = if nsi-ok(capture) then capture else nsi-refuse(capture,"capture-completion");
+  def nsi-require-nuls(capture) = if nsi-admitted?(capture) then capture else nsi-refuse(capture,"nul-inventory-completion");
+  def nsi-git() = nsi-require-nuls(nsi-capture(list("git","ls-files","-z","--cached","--others","--exclude-standard")));
+ }
+ 0;
+}

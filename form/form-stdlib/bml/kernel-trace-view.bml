@@ -1,0 +1,76 @@
+// Native presentation of the independent Rust sibling's dispatch observations.
+// preludes: form-stdlib/bml/python-specimen-compiler.bml form-stdlib/term-graphics.bml
+section [form.bml] {
+ class KernelTraceView {
+  def ktv-count(row) = fhn-number(row, "count");
+  def ktv-label(row) = if gt(str_len(fhn-string(row, "arm_variant_name")), 0) then fhn-string(row, "arm_variant_name") else fhn-string(row, "arm_name");
+  def ktv-natural(node) = and(eq(node_type(node), 1), and(str_eq(value_kind(node_value(node)), "int"), ge(node_value(node), 0)));
+  def ktv-rows-valid(rows, remaining) = if nil?(rows) then eq(remaining, 0) else and(ktv-natural(json-object-get(head(rows), "count")), and(le(ktv-count(head(rows)), remaining), and(gt(str_len(ktv-label(head(rows))), 0), ktv-rows-valid(tail(rows), sub(remaining, ktv-count(head(rows)))))));
+  def ktv-valid(report) {
+   let trace = json-object-get(report, "trace");
+   and(ktv-natural(json-object-get(report, "elapsed_us")), and(eq(node_type(json-object-get(report, "result")), 2), and(ktv-natural(json-object-get(trace, "total_walks")), and(node_eq(node_category(json-object-get(trace, "variants")), JSON-ARRAY()), ktv-rows-valid(json-array-elements(json-object-get(trace, "variants")), fhn-number(trace, "total_walks"))))));
+  }
+  def ktv-insert(row, rows) = if nil?(rows) then list(row) else if gt(ktv-count(row), ktv-count(head(rows))) then cons(row, rows) else cons(head(rows), ktv-insert(row, tail(rows)));
+  def ktv-sort(rows) = if nil?(rows) then list() else ktv-insert(head(rows), ktv-sort(tail(rows)));
+  def ktv-hot(count, total) = and(gt(total, 0), ge(count, add(div(total, 10), if gt(mod(total, 10), 0) then 1 else 0)));
+  def ktv-targets(rows, total) = if nil?(rows) then list() else if ktv-hot(ktv-count(head(rows)), total) then cons(head(rows), ktv-targets(tail(rows), total)) else ktv-targets(tail(rows), total);
+  def ktv-tenths(count, total) = if eq(total, 0) then 0 else float_to_int(add(0.5, div(mul(count, 1000.0), total)));
+  def ktv-percent(count, total) {
+   let scaled = ktv-tenths(count, total);
+   psc-cat(list(int_to_str(div(scaled, 10)), ".", int_to_str(mod(scaled, 10)), "%"));
+  }
+  def ktv-spaces(count) = if le(count, 0) then "" else str_concat(" ", ktv-spaces(sub(count, 1)));
+  def ktv-pad(text, width) = str_concat(text, ktv-spaces(sub(width, str_len(text))));
+  def ktv-group(text) = if le(str_len(text), 3) then text else psc-cat(list(ktv-group(substring(text, 0, sub(str_len(text), 3))), ",", substring(text, sub(str_len(text), 3), str_len(text))));
+  def ktv-max-label(rows, width) = if nil?(rows) then width else ktv-max-label(tail(rows), if gt(str_len(ktv-label(head(rows))), width) then str_len(ktv-label(head(rows))) else width);
+  def ktv-line(row, total, labelWidth, countWidth, barWidth) {
+   let count = ktv-count(row);
+   let tone = if ktv-hot(count, total) then "warn" else "plain";
+   let fill = if eq(total, 0) then 0 else float_to_int(div(mul(count, mul(1.0, barWidth)), total));
+   let number = ktv-group(int_to_str(count));
+   psc-cat(list("  ", tg-span(tone, ktv-pad(ktv-label(row), labelWidth)), "  ", ktv-spaces(sub(countWidth, str_len(number))), number, "  ", tg-span("dim", ktv-pad(ktv-percent(count, total), 6)), "  ", tg-span(tone, tg-bar(fill, fill)), "\n"));
+  }
+  def ktv-chart(rows, total, labelWidth, countWidth, barWidth) = if nil?(rows) then "" else str_concat(ktv-line(head(rows), total, labelWidth, countWidth, barWidth), ktv-chart(tail(rows), total, labelWidth, countWidth, barWidth));
+  def ktv-target-lines(rows, total) = if nil?(rows) then "" else psc-cat(list("  ", tg-span("warn", ktv-label(head(rows))), "  ", ktv-percent(ktv-count(head(rows)), total), " (", ktv-group(int_to_str(ktv-count(head(rows)))), " dispatches)\n", ktv-target-lines(tail(rows), total)));
+  def ktv-guidance() = "Where to inspect the proof walker:\n  IDENT: frame lookup and name resolution\n  MATH: arithmetic dispatch for trivial leaves\n  COMPARE/COND: compare and branch dispatch\n  FNCALL: tail calls in recursive functions\n  LIST: list recipe allocation and reuse\n";
+  def ktv-render(report, source, columns) {
+   let trace = json-object-get(report, "trace");
+   let rows = ktv-sort(json-array-elements(json-object-get(trace, "variants")));
+   let total = fhn-number(trace, "total_walks");
+   let labelWidth = ktv-max-label(rows, 0);
+   let countWidth = if nil?(rows) then 1 else str_len(ktv-group(int_to_str(ktv-count(head(rows)))));
+   let available = sub(columns, add(add(labelWidth, countWidth), 14));
+   let barWidth = if lt(available, 0) then 0 else available;
+   let hot = ktv-targets(rows, total);
+   psc-cat(list(tg-span("bold", "Workload"), "\nfile: ", source, "\nresult: ", fhn-string(report, "result"), "\n\n", tg-span("bold", "Proof dispatch hot spots"), "\ntotal walks: ", ktv-group(int_to_str(total)), "   elapsed: ", tg-dur-us(fhn-number(report, "elapsed_us")), "\n", if nil?(rows) then "no dispatch variants recorded (trace was empty)\n" else ktv-chart(rows, total, labelWidth, countWidth, barWidth), if eq(total, 0) then "" else psc-cat(list("\n", tg-span("bold", "Optimization targets: at least 10% of dispatches"), "\n", if nil?(hot) then "no variant reaches 10% of total walks\n" else ktv-target-lines(hot, total), "\n", ktv-guidance()))));
+  }
+  def ktv-run() {
+   let request = psc-request();
+   let root = fhn-root();
+   let source = psc-absolute(root, fhn-string(request, "source"));
+   if or(lt(file_size(source), 0), not(or(psc-suffix(source, ".py"), psc-suffix(source, ".fk")))) then form_error("an existing .fk or .py specimen is required") else 0;
+   let widthNode = json-object-get(request, "columns");
+   if and(json-object-has?(request, "columns"), not(and(ktv-natural(widthNode), ge(node_value(widthNode), 40)))) then form_error("columns must be an integer of at least 40") else 0;
+   let columns = if json-object-has?(request, "columns") then node_value(widthNode) else 100;
+   let job = fhn-unique(host_temp_dir(), "form-kernel-trace-", 0);
+   if str_eq(job, "") then form_error("cannot retain trace evidence") else 0;
+   print_str(str_concat("process-evidence=", job));
+   let specimen = if psc-suffix(source, ".py") then psc-compile(root, job, source) else source;
+   psc-stage(job, "trace", root, list(fhn-at(root, "form/form-kernel-rust/target/release/form-kernel-rust"), "trace", specimen));
+   let bytes = fhn-read(fhn-stage-path(job, "trace", ".out"));
+   if not(jwa-valid(bytes)) then form_error("trace JSON syntax refused") else 0;
+   let report = parse-json("kernel-trace", bytes);
+   let valid = ktv-valid(report);
+   let reading = oh-reading("kernel-trace-view", job, "dispatch-conservation", json-node-string("typed variants sum to total walks"), json-node-int(valid), json-node-int(valid), if valid then list() else list(oh-need("trace-evidence", oh-reference(fhn-stage-path(job, "trace", ".out")))), list("render", "retain"), oh-reference(fhn-stage-path(job, "trace", ".out")));
+   oh-voice(reading);
+   oh-voice(oh-response(reading, if valid then "render" else "retain"));
+   if not(valid) then form_error("trace dispatch accounting refused") else 0;
+   let panel = ktv-render(report, source, columns);
+   let saved = psc-write(fhn-at(job, "panel.txt"), panel);
+   oh-voice(oh-applied(reading, "render", oh-reference(saved)));
+   print_str(panel);
+   1;
+  }
+ }
+ 0;
+}

@@ -1,0 +1,91 @@
+// A local Form HTTP peer with observable connection/request counts.
+// The configured behavior is the specimen: echo, framing, reuse, stale close,
+// or an accepted request that never replies before the router's deadline.
+// preludes: form-stdlib/bml/router-proof-io.bml
+section [form.bml] {
+ class RouterProofFixture {
+  def rpf-request(link) {
+   let headBytes = rp-until(link, "\r\n\r\n");
+   if nothing?(headBytes) then nothing() else rpf-request-head(link, split-on(headBytes, "\r\n"));
+  }
+  def rpf-request-head(link, lines) {
+   let parts = split-on(head(lines), " ");
+   let headers = rp-header-pairs(tail(lines));
+   let body = rp-take(link, str_to_int(rp-header(headers, "content-length")));
+   if nothing?(body) then nothing() else list(head(parts), nth(parts, 1), headers, body);
+  }
+  def rpf-headers-json(headers) = if nil?(headers) then list() else cons(fhn-s(head(head(headers)), nth(head(headers), 1)), rpf-headers-json(tail(headers)));
+  def rpf-echo(request) = json-emit-precise(json-node-object(list(fhn-s("method", head(request)), fhn-s("path", nth(request, 1)), fhn-s("body", nth(request, 3)), json-node-pair("received_headers", json-node-object(rpf-headers-json(nth(request, 2)))))));
+  def rpf-response(status, contentType, headers, body, connection) = rp-cat(list("HTTP/1.1 ", int_to_str(status), " ", if eq(status, 404) then "Not Found" else "OK", "\r\nContent-Type: ", contentType, "\r\nContent-Length: ", int_to_str(str_len(body)), "\r\nConnection: ", connection, "\r\n", headers, "\r\n", body));
+  def rpf-stream-body(path) = if str_eq(path, "/stream/big") then rp-binary(16777216) else if str_eq(path, "/stream/chunked") then rp-binary(2304000) else if str_eq(path, "/stream/unframed") then rp-binary(1280000) else rp-cat(list("before-", "0\r\n\r\n", "-after-", rp-repeat("x", 100000), "-end"));
+  def rpf-send-chunks(link, body, offset) = if ge(offset, str_len(body)) then rp-send(link, "0\r\n\r\n") else rpf-send-chunk(link, body, offset, if gt(sub(str_len(body), offset), 65536) then 65536 else sub(str_len(body), offset));
+  def rpf-send-chunk(link, body, offset, count) {
+   let piece = substring(body, offset, add(offset, count));
+   let sent = rp-send(link, rp-cat(list(rp-hex-text(count), "\r\n", piece, "\r\n")));
+   if lt(sent, 0) then sent else rpf-send-chunks(link, body, add(offset, count));
+  }
+  def rpf-stream(link, path) {
+   let body = rpf-stream-body(path);
+   let chunked = or(str_eq(path, "/stream/chunked"), str_eq(path, "/stream/chunked-trap"));
+   let closeFramed = str_eq(path, "/stream/unframed");
+   let headBytes = rp-cat(list("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n", if chunked then "Transfer-Encoding: chunked\r\n" else if closeFramed then "" else rp-cat(list("Content-Length: ", int_to_str(str_len(body)), "\r\n")), "\r\n"));
+   let sent = rp-send(link, headBytes);
+   if lt(sent, 0) then sent else if chunked then rpf-send-chunks(link, body, 0) else rp-send(link, body);
+  }
+  def rpf-sample(state) {
+   let published = rp-publish(rp-path(record_get(state, "job"), "counts.json"), json-node-object(list(fhn-n("connections", record_get(state, "connections")), fhn-n("requests", record_get(state, "requests")))));
+   if eq(published, 0) then 0 else form_error("native fixture count publication refused");
+  }
+  def rpf-serve(state, link, count) {
+   let request = rpf-request(link);
+   if nothing?(request) then 0 else rpf-answer(state, link, count, request);
+  }
+  def rpf-answer(state, link, count, request) {
+   record_set(state, "requests", add(record_get(state, "requests"), 1));
+   rpf-sample(state);
+   let mode = record_get(state, "mode");
+   if str_eq(mode, "hung") then rpf-hold() else rpf-answer-live(state, link, count, request, mode);
+  }
+  def rpf-hold() {
+   host_sleep_ms(60000);
+   rpf-hold();
+  }
+  def rpf-answer-live(state, link, count, request, mode) {
+   let path = nth(request, 1);
+   if eq(str_find(path, "/framing/", 0), 0) then rpf-framing-specimen(link, path) else rpf-answer-route(state, link, count, request, mode, path);
+  }
+  def rpf-framing-specimen(link, path) = rp-send(link, if str_eq(path, "/framing/truncated") then "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nabc" else "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabcXX0\r\n\r\n");
+  def rpf-answer-route(state, link, count, request, mode, path) {
+   let streaming = eq(str_find(path, "/stream/", 0), 0);
+   let keep = or(str_eq(mode, "keep"), str_eq(mode, "stale"));
+   let echo = eq(str_find(path, "/echo/", 0), 0);
+   let missing = str_eq(path, "/upstream-missing");
+   let body = if str_eq(path, "/relay/body") then nth(request, 3) else if echo then rpf-echo(request) else if missing then "upstream missing" else if str_eq(path, "/api/items") then rp-cat(list("UPSTREAM method=", head(request), " path=", path)) else rp-cat(list("UPSTREAM path=", path));
+   let extra = if echo then "Set-Cookie: echosession=xyz789; Path=/; HttpOnly\r\nCache-Control: no-store\r\nX-Echo-Custom: relayed-ok\r\nTransfer-Encoding: chunked-but-not-really\r\n" else "X-Form-Native-Invitation: upstream-owned\r\n";
+   let sent = if streaming then rpf-stream(link, path) else rp-send(link, rpf-response(if missing then 404 else 200, if echo then "application/json" else "text/plain", extra, body, if keep then "keep-alive" else "close"));
+   if or(lt(sent, 0), or(streaming, or(not(keep), and(str_eq(mode, "stale"), ge(add(count, 1), 3))))) then 0 else rpf-serve(state, link, add(count, 1));
+  }
+  def rpf-accept(state, listener) {
+   let socket = socket_accept(listener);
+   if lt(socket, 1) then form_error("native fixture accept refused") else rpf-accepted(state, listener, rp-link(socket));
+  }
+  def rpf-accepted(state, listener, link) {
+   record_set(state, "connections", add(record_get(state, "connections"), 1));
+   rpf-sample(state);
+   rpf-serve(state, link, 0);
+   rp-close(link);
+   rpf-accept(state, listener);
+  }
+  def rpf-run() {
+   let config = parse-json("router-fixture", read_line());
+   let job = fhn-string(config, "job");
+   let state = record_new(0, "job", job, "mode", fhn-string(config, "mode"), "connections", 0, "requests", 0);
+   let listener = socket_listen(0);
+   if lt(listener, 1) then form_error("native fixture listener unavailable") else 0;
+   rpf-sample(state);
+   write_file(rp-path(job, "port"), int_to_str(socket_port(listener)));
+   rpf-accept(state, listener);
+  }
+ }
+ 0;
+}

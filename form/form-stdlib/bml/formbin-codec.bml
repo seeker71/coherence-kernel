@@ -1,0 +1,161 @@
+// FORMBIN2 is inert wire data here. No identity is issued or evaluated.
+// Numeric payloads remain eight little-endian bytes, including every int64
+// value, signed zero, infinities and NaN payloads. Composite continuations
+// and decoded ownership live in Form data, independent of host stack depth.
+// preludes: form-stdlib/core.fk form-stdlib/bml/formbin-depth.bml form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/str-byte-at.fk form-stdlib/json.fk
+section [form.bml] {
+ class FormbinCodec {
+  def fbc-max-bytes() = 67108864;
+  def fbc-fail(reason) = list(0, str_concat("form binary: ", reason), list(), 0, 0);
+  def fbc-ok(value, nodes, depth) = list(1, "", value, nodes, depth);
+  def fbc-good(result) = eq(head(result), 1);
+  def fbc-value(result) = nth(result, 2);
+  def fbc-error(result) = nth(result, 1);
+  def fbc-word(n) = str_concat(byte_to_str(mod(div(n, 16777216), 256)), str_concat(byte_to_str(mod(div(n, 65536), 256)), str_concat(byte_to_str(mod(div(n, 256), 256)), byte_to_str(mod(n, 256)))));
+  def fbc-u32?(n) = if str_eq(value-kind(n), "int") then and(ge(n, 0), le(n, 4294967295)) else 0;
+  def fbc-list?(value) = str_eq(value-kind(value), "list");
+  def fbc-text?(value) = str_eq(value-kind(value), "string");
+  // Binary carries join completed chunks of equal population. Each byte is
+  // copied logarithmically while output grows; no whole-prefix append loop.
+  def fbc-put(bins, text) = fbc-put-weight(bins, text, 1);
+  def fbc-put-weight(bins, text, weight) = if nil?(bins) then fbd-push(list(weight, text), list()) else if eq(head(head(bins)), weight) then fbc-put-weight(fbd-rest(bins), str_concat(nth(head(bins), 1), text), mul(weight, 2)) else fbd-push(list(weight, text), bins);
+  def fbc-finish(bins, out) = if nil?(bins) then out else fbc-finish(fbd-rest(bins), str_concat(nth(head(bins), 1), out));
+  // Constructors carry issued coordinates, never native NodeIDs.
+  def fbc-leaf(pkg, level, type, inst) = if and(fbc-u32?(pkg), and(fbc-u32?(level), and(fbc-u32?(type), fbc-u32?(inst)))) then if and(eq(level, 1), eq(type, 2)) then nothing() else list(0, pkg, level, type, inst) else nothing();
+  def fbc-string(pkg, value) = if and(fbc-u32?(pkg), fbc-text?(value)) then if fbc-utf8(value, 0) then list(4, pkg, value) else nothing() else nothing();
+  def fbc-number(tag, raw) = if and(or(eq(tag, 2), eq(tag, 3)), fbc-text?(raw)) then if eq(str_len(raw), 8) then list(tag, raw) else nothing() else nothing();
+  def fbc-composite(category, children) = if fbc-list?(children) then list(1, category, children) else nothing();
+  def fbc-cont?(s, p) = if ge(p, str_len(s)) then 0 else and(ge(str_byte_at(s, p), 128), le(str_byte_at(s, p), 191));
+  def fbc-utf8(s, p) = if ge(p, str_len(s)) then 1 else fbc-utf8-byte(s, p, str_byte_at(s, p));
+  def fbc-utf8-byte(s, p, b) {
+   if lt(b, 128) then fbc-utf8(s, add(p, 1))
+   else if and(ge(b, 194), le(b, 223)) then if fbc-cont?(s, add(p, 1)) then fbc-utf8(s, add(p, 2)) else 0
+   else if and(ge(b, 224), le(b, 239)) then if and(fbc-cont?(s, add(p, 1)), and(fbc-cont?(s, add(p, 2)), and(if eq(b, 224) then ge(str_byte_at(s, add(p, 1)), 160) else 1, if eq(b, 237) then le(str_byte_at(s, add(p, 1)), 159) else 1))) then fbc-utf8(s, add(p, 3)) else 0
+   else if and(ge(b, 240), le(b, 244)) then if and(fbc-cont?(s, add(p, 1)), and(fbc-cont?(s, add(p, 2)), and(fbc-cont?(s, add(p, 3)), and(if eq(b, 240) then ge(str_byte_at(s, add(p, 1)), 144) else 1, if eq(b, 244) then le(str_byte_at(s, add(p, 1)), 143) else 1)))) then fbc-utf8(s, add(p, 4)) else 0
+   else 0;
+  }
+  def fbc-decode(s) {
+   if nothing?(s) then fbc-fail("unreadable artifact")
+   else if gt(str_len(s), fbc-max-bytes()) then fbc-fail("maximum artifact size exceeded")
+   else if not(str_eq(substring(s, 0, 8), "FORMBIN2")) then fbc-fail("bad magic")
+   else if lt(str_len(s), 12) then fbc-fail("truncated u32")
+   else if gt(fbd-u32(s, 8), 262144) then fbc-fail("maximum string count exceeded")
+   else fbc-pool(s, 12, fbd-u32(s, 8), 0, list());
+  }
+  // File readings retain both extent observations beside the held bytes.
+  // Decoding starts only when one complete, unchanged extent was read.
+  def fbc-read-exact(path, maximum) = fbc-read-sized(path, file_size(path), maximum);
+  def fbc-read-sized(path, before, maximum) = if lt(before, 0) then fbc-fail("unreadable artifact") else if and(gt(maximum, 0), gt(before, maximum)) then fbc-fail("maximum artifact size exceeded") else fbc-read-observed(path, before, read_file(path));
+  def fbc-read-observed(path, before, bytes) = fbc-read-extents(before, file_size(path), bytes);
+  def fbc-read-extents(before, after, bytes) {
+   let readBytes = if nothing?(bytes) then -1 else str_len(bytes);
+   let evidence = str_concat("; before=", str_concat(int_to_str(before), str_concat(" after=", str_concat(int_to_str(after), str_concat(" read=", int_to_str(readBytes))))));
+   if or(lt(before, 0), or(lt(after, 0), nothing?(bytes))) then fbc-fail(str_concat("unreadable artifact", evidence))
+   else if not(eq(before, after)) then fbc-fail(str_concat("artifact extent changed during read", evidence))
+   else if not(eq(readBytes, before)) then fbc-fail(str_concat("incomplete artifact read", evidence))
+   else fbc-ok(bytes, before, after);
+  }
+  def fbc-load(path) = fbc-load-read(fbc-read-exact(path, fbc-max-bytes()));
+  def fbc-load-read(reading) = if fbc-good(reading) then fbc-decode(fbc-value(reading)) else reading;
+  def fbc-pool(s, p, left, total, strings) {
+   if eq(left, 0) then fbc-walk(s, fbd-start(p), reverse(strings), list())
+   else if gt(add(p, 4), str_len(s)) then fbc-fail("truncated u32")
+   else fbc-pool-string(s, add(p, 4), left, total, strings, fbd-u32(s, p));
+  }
+  def fbc-pool-string(s, p, left, total, strings, size) {
+   if gt(add(total, size), 33554432) then fbc-fail("maximum string bytes exceeded")
+   else if gt(size, sub(str_len(s), p)) then fbc-fail("truncated string")
+   else if not(fbc-utf8(substring(s, p, add(p, size)), 0)) then fbc-fail("invalid utf8")
+   else fbc-pool(s, add(p, size), sub(left, 1), add(total, size), cons(substring(s, p, add(p, size)), strings));
+  }
+  def fbc-linked-reverse(xs, acc) = if nil?(xs) then acc else fbc-linked-reverse(fbd-rest(xs), fbd-push(head(xs), acc));
+  def fbc-walk(s, state, strings, stack) {
+   let step = fbd-slice(s, state, 4096);
+   let next = head(step);
+   fbc-walk-built(s, next, strings, fbc-rows(s, strings, fbc-linked-reverse(nth(step, 1), list()), stack));
+  }
+  def fbc-walk-built(s, state, strings, built) {
+   if not(fbc-good(built)) then built
+   else if eq(nth(state, 4), 3) then list(0, nth(state, 5), list(), 0, 0)
+   else if eq(nth(state, 4), 2) then fbc-ok(head(fbc-value(built)), nth(state, 2), nth(state, 3))
+   else fbc-walk(s, state, strings, fbc-value(built));
+  }
+  def fbc-rows(s, strings, rows, stack) {
+   if nil?(rows) then fbc-ok(stack, 0, 0)
+   else fbc-row(s, strings, head(rows), fbd-rest(rows), stack);
+  }
+  def fbc-row(s, strings, row, rows, stack) {
+   let tag = head(row);
+   let p = nth(row, 1);
+   if eq(tag, 1) then fbc-row-composite(s, strings, rows, fbc-pop-children(stack, nth(row, 2), list()))
+   else if or(eq(tag, 2), eq(tag, 3)) then fbc-rows(s, strings, rows, fbd-push(list(tag, substring(s, add(p, 4), add(p, 12))), stack))
+   else fbc-row-leaf(s, strings, rows, stack, fbd-u32(s, add(p, 4)), fbd-u32(s, add(p, 8)), fbd-u32(s, add(p, 12)), fbd-u32(s, add(p, 16)));
+  }
+  def fbc-pop-children(stack, count, children) = if eq(count, 0) then list(head(stack), children, fbd-rest(stack)) else fbc-pop-children(fbd-rest(stack), sub(count, 1), cons(head(stack), children));
+  def fbc-row-composite(s, strings, rows, parts) = fbc-rows(s, strings, rows, fbd-push(fbc-composite(head(parts), nth(parts, 1)), nth(parts, 2)));
+  def fbc-row-leaf(s, strings, rows, stack, pkg, level, type, inst) {
+   if and(eq(level, 1), eq(type, 2)) then
+    if ge(inst, len(strings)) then fbc-fail(str_concat("bad string index ", int_to_str(inst)))
+    else fbc-rows(s, strings, rows, fbd-push(list(4, pkg, nth(strings, inst)), stack))
+   else fbc-rows(s, strings, rows, fbd-push(list(0, pkg, level, type, inst), stack));
+  }
+  // The encoder emits from the decoded model. Traversal tasks include an
+  // explicit child-count token after each category, preserving wire order.
+  def fbc-tasks(children, rest) = fbc-tasks-reversed(reverse(children), rest);
+  def fbc-tasks-reversed(children, rest) = if nil?(children) then rest else fbc-tasks-reversed(tail(children), fbd-push(list(0, head(children)), rest));
+  def fbc-encode(root) {
+   let pool = record_new(0);
+   record_set(pool, "values", list());
+   record_set(pool, "size", 0);
+   let wire = fbc-emit(fbd-push(list(0, root), list()), pool, list());
+   if nothing?(wire) then fbc-fail("invalid node data")
+   else fbc-encoded(str_concat("FORMBIN2", str_concat(fbc-word(record_get(pool, "size")), str_concat(fbc-pool-emit(reverse(record_get(pool, "values")), list()), wire))));
+  }
+  def fbc-encoded(wire) = if fbc-good(fbc-decode(wire)) then fbc-ok(wire, 0, 0) else fbc-decode(wire);
+  def fbc-pool-emit(values, out) = if nil?(values) then fbc-finish(out, "") else fbc-pool-emit(tail(values), fbc-put(out, str_concat(fbc-word(str_len(head(values))), head(values))));
+  def fbc-string-index(pool, s) {
+   let key = str_concat("string:", s);
+   if record_has(pool, key) then record_get(pool, key)
+   else fbc-string-insert(pool, s, key, record_get(pool, "size"));
+  }
+  def fbc-string-insert(pool, s, key, index) {
+   record_set(pool, key, index);
+   record_set(pool, "size", add(index, 1));
+   record_set(pool, "values", cons(s, record_get(pool, "values")));
+   index;
+  }
+  def fbc-emit(tasks, pool, out) {
+   if nil?(tasks) then fbc-finish(out, "")
+   else if eq(head(head(tasks)), 1) then fbc-emit(fbd-rest(tasks), pool, fbc-put(out, fbc-word(nth(head(tasks), 1))))
+   else fbc-emit-node(nth(head(tasks), 1), fbd-rest(tasks), pool, out);
+  }
+  def fbc-emit-node(node, rest, pool, out) {
+   if not(fbc-list?(node)) then nothing()
+   else if eq(head(node), 1) then if and(eq(len(node), 3), and(fbc-list?(nth(node, 2)), le(len(nth(node, 2)), 262144))) then fbc-emit(fbd-push(list(0, nth(node, 1)), fbd-push(list(1, len(nth(node, 2))), fbc-tasks(nth(node, 2), rest))), pool, fbc-put(out, fbc-word(1))) else nothing()
+   else if eq(head(node), 4) then if and(eq(len(node), 3), not(nothing?(fbc-string(nth(node, 1), nth(node, 2))))) then fbc-emit(rest, pool, fbc-put(out, str_concat(fbc-word(0), str_concat(fbc-word(nth(node, 1)), str_concat(fbc-word(1), str_concat(fbc-word(2), fbc-word(fbc-string-index(pool, nth(node, 2))))))))) else nothing()
+   else if or(eq(head(node), 2), eq(head(node), 3)) then if and(eq(len(node), 2), not(nothing?(fbc-number(head(node), nth(node, 1))))) then fbc-emit(rest, pool, fbc-put(out, str_concat(fbc-word(head(node)), nth(node, 1)))) else nothing()
+   else if eq(head(node), 0) then if and(eq(len(node), 5), not(nothing?(fbc-leaf(nth(node, 1), nth(node, 2), nth(node, 3), nth(node, 4))))) then fbc-emit(rest, pool, fbc-put(out, str_concat(fbc-word(0), str_concat(fbc-word(nth(node, 1)), str_concat(fbc-word(nth(node, 2)), str_concat(fbc-word(nth(node, 3)), fbc-word(nth(node, 4)))))))) else nothing()
+   else nothing();
+  }
+  def fbc-dump(path, root) = fbc-dump-result(path, fbc-encode(root));
+  def fbc-dump-result(path, encoded) = if not(fbc-good(encoded)) then encoded else if eq(write_file(path, fbc-value(encoded)), str_len(fbc-value(encoded))) then encoded else fbc-fail("artifact write incomplete");
+  // Structural identity resolves strings and ignores their allocation index
+  // and package, matching their artifact value. All other coordinates and
+  // every numeric payload bit participate. The canonical tree byte stream
+  // receives its own schema; it is not a hash of source formatting.
+  def fbc-structural(root) = fbc-structure(fbd-push(list(0, root), list()), list());
+  def fbc-structure(tasks, out) {
+   if nil?(tasks) then fbc-finish(out, "")
+   else if eq(head(head(tasks)), 1) then fbc-structure(fbd-rest(tasks), fbc-put(out, fbc-word(nth(head(tasks), 1))))
+   else fbc-structure-node(nth(head(tasks), 1), fbd-rest(tasks), out);
+  }
+  def fbc-structure-node(node, rest, out) {
+   if eq(head(node), 1) then fbc-structure(fbd-push(list(0, nth(node, 1)), fbd-push(list(1, len(nth(node, 2))), fbc-tasks(nth(node, 2), rest))), fbc-put(out, fbc-word(1)))
+   else if eq(head(node), 4) then fbc-structure(rest, fbc-put(out, str_concat(fbc-word(4), str_concat(fbc-word(str_len(nth(node, 2))), nth(node, 2)))))
+   else if or(eq(head(node), 2), eq(head(node), 3)) then fbc-structure(rest, fbc-put(out, str_concat(fbc-word(head(node)), nth(node, 1))))
+   else fbc-structure(rest, fbc-put(out, str_concat(fbc-word(0), str_concat(fbc-word(nth(node, 1)), str_concat(fbc-word(nth(node, 2)), str_concat(fbc-word(nth(node, 3)), fbc-word(nth(node, 4))))))));
+  }
+  def fbc-hash(s) = hex-encode(sha256-stream-string(s));
+ }
+ 0;
+}

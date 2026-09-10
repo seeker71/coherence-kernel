@@ -1,0 +1,90 @@
+// GPU source recipes are generated in Form. Target templates are input data;
+// the resulting BML functions emit entirely in RAM without reading files.
+// preludes: form-stdlib/native-edit.fk form-stdlib/organ-health.bml form-stdlib/native-op-manifest.fk
+section [form.bml] {
+ class GpuSourceEmitter {
+  // name, replacement marker, canonical source path.
+  def gse-ptx-catalog() = list(
+   list("fptx-matvec","form_matvec_f32","form/native/cuda/template_matvec.ptx"),
+   list("fptx-affine-train","form_affine_train_f32","form/native/cuda/template_affine_train.ptx"),
+   list("fptx-matvec-f16","form_matvec_f16","form/native/cuda/template_matvec_f16.ptx"),
+   list("fptx-matvec-bf16","form_matvec_bf16","form/native/cuda/template_matvec_bf16.ptx"),
+   list("fptx-gelu","form_gelu_f32","form/native/cuda/template_gelu.ptx"),
+   list("fptx-ffn-fwd","form_ffn_fwd_f32","form/native/cuda/template_ffn_fwd.ptx"),
+   list("fptx-softmax","form_softmax_f32","form/native/cuda/template_softmax.ptx"),
+   list("fptx-attention","form_attention_f32","form/native/cuda/template_attention.ptx"),
+   list("fptx-layernorm","form_layernorm_f32","form/native/cuda/template_layernorm.ptx"),
+   list("fptx-rmsnorm","form_rmsnorm_f32","form/native/cuda/template_rmsnorm.ptx"),
+   list("fptx-residual","form_residual_f32","form/native/cuda/template_residual.ptx"),
+   list("fptx-proj","form_proj_f32","form/native/cuda/template_proj.ptx"),
+   list("fptx-affine-gb","form_affine_gb_f32","form/native/cuda/template_affine_gb.ptx"));
+  def gse-glsl-catalog() = list(list("fglsl-matvec","64","form/native/vulkan/matvec.comp"),list("fglsl-ffn-fwd","64","form/native/vulkan/ffn-fwd.comp"));
+  def gse-catalog(kind) = if str_eq(kind,"ptx") then gse-ptx-catalog() else if str_eq(kind,"glsl") then gse-glsl-catalog() else list();
+  def gse-normalize(text) = if nothing?(text) then nothing() else ne-replace-all(text,"\r\n","\n");
+  def gse-source(path) = gse-normalize(read_file(path));
+  def gse-letter(b) = or(and(ge(b,65),le(b,90)),and(ge(b,97),le(b,122)));
+  def gse-symbol-rest(s,i) = if ge(i,str_len(s)) then 1 else if or(gse-letter(str_byte_at(s,i)),or(and(ge(str_byte_at(s,i),48),le(str_byte_at(s,i),57)),or(eq(str_byte_at(s,i),45),eq(str_byte_at(s,i),95)))) then gse-symbol-rest(s,add(i,1)) else 0;
+  def gse-native-name(s,rows) = if nil?(rows) then 0 else or(str_eq(s,head(head(rows))),gse-native-name(s,tail(rows)));
+  // Source special forms cannot be called as emitted functions. Native names
+  // follow the live manifest, so a newly admitted primitive is covered too.
+  def gse-reserved(s) = or(gse-native-name(s,nom-ops()),oh-has(list("if","else","def","defn","do","let","fn","lambda","quote","then","class","section","field","thought","return","true","false","null","nothing","empty","list","and","or","not","print"),s));
+  def gse-symbol(s) = if nothing?(s) then 0 else and(gt(str_len(s),0),and(gse-letter(str_byte_at(s,0)),and(gse-symbol-rest(s,1),not(gse-reserved(s)))));
+  // GPU source is text. Refuse control bytes which the source string reader
+  // cannot carry, instead of allowing JSON escapes to change their meaning.
+  def gse-text(text,i) = if ge(i,str_len(text)) then 1 else if and(lt(str_byte_at(text,i),32),not(or(eq(str_byte_at(text,i),9),or(eq(str_byte_at(text,i),10),eq(str_byte_at(text,i),13))))) then 0 else gse-text(text,add(i,1));
+  def gse-fail(reason) = list(0,"",reason);
+  def gse-recipe(name,marker,text) {
+   if not(gse-symbol(name)) then gse-fail("invalid Form function name")
+   else if nothing?(text) then gse-fail("template unavailable")
+   else if not(gse-text(text,0)) then gse-fail("template contains unsupported text control bytes")
+   else if or(nothing?(marker),eq(str_len(marker),0)) then gse-fail("empty replacement marker")
+   else gse-recipe-at(name,marker,text,str_find(text,marker,0));
+  }
+  def gse-recipe-at(name,marker,text,at) {
+   if lt(at,0) then gse-fail("replacement marker absent") else
+    list(1,str_concat("  def ",str_concat(name,str_concat("(value) = str_concat(",str_concat(json-quote-string(substring(text,0,at)),str_concat(",str_concat(value,",str_concat(json-quote-string(substring(text,add(at,str_len(marker)),str_len(text))),"));\n")))))),"");
+  }
+  def gse-rows(rows,names,out) {
+   if nil?(rows) then list(1,out,"") else if ne(len(head(rows)),3) then gse-fail("recipe requires name, marker and path")
+   else if oh-has(names,head(head(rows))) then gse-fail("duplicate Form function name")
+   else gse-row(rows,names,out,gse-recipe(head(head(rows)),nth(head(rows),1),gse-source(nth(head(rows),2))));
+  }
+  def gse-row(rows,names,out,result) = if not(head(result)) then result else gse-rows(tail(rows),cons(head(head(rows)),names),str_concat(out,nth(result,1)));
+  def gse-unit(rows) {
+   if nil?(rows) then gse-fail("no GPU source recipes selected") else gse-wrap(gse-rows(rows,list(),""));
+  }
+  def gse-wrap(result) = if not(head(result)) then result else list(1,str_concat("// Form-owned GPU emission. Regenerate with observe/gpu-source-emitter-run.bml.\nsection [form.bml] {\n class GpuSourceRecipes {\n",str_concat(nth(result,1)," }\n 0;\n}\n")),"");
+  def gse-reading(path,aspect,ok,detail) = oh-reading("gpu-source",path,aspect,json-node-int(1),json-node-int(ok),json-node-int(ok),if ok then list() else list(oh-need("complete-source",json-node-string(detail))),if ok then list("publish") else list("defer"),json-node-object(list(oh-s("path",path),oh-s("detail",detail))));
+  def gse-publish(rows,path) {
+   let built = gse-unit(rows);
+   let valid = and(head(built),gt(str_len(path),0));
+   let row = gse-reading(if eq(str_len(path),0) then "missing-output" else path,"generation",valid,if valid then "generated in RAM" else if not(head(built)) then nth(built,2) else "output path absent");
+   oh-voice(row);
+   let response = oh-response(row,if valid then "publish" else "defer");
+   oh-voice(response);
+   let selected = oh-select(row,response,"defer");
+   if not(str_eq(selected,"publish")) then gse-refuse(row,selected) else gse-stage(row,path,nth(built,1));
+  }
+  def gse-refuse(row,selected) {
+   oh-voice(oh-applied(row,selected,json-node-string("source unchanged")));
+   form_error(str_concat("GPU source generation refused: ",oh-str(oh-get(row,"evidence"),"detail")));
+  }
+  def gse-stage(row,path,text) {
+   let stage = str_concat(path,str_concat(".stage-",int_to_str(host_pid())));
+   if ge(file_size(stage),0) then gse-publication(row,path,0,"staging path occupied") else gse-write(row,path,stage,text);
+  }
+  def gse-write(row,path,stage,text) {
+   let wrote = write_file(stage,text);
+   let complete = and(eq(wrote,str_len(text)),str_eq(read_file(stage),text));
+   let renamed = if complete then fs_rename(stage,path) else -1;
+   let held = and(eq(renamed,0),str_eq(read_file(path),text));
+   gse-publication(row,path,held,if held then "published bytes equal generated bytes" else "publication incomplete; inspect staging file");
+  }
+  def gse-publication(row,path,ok,detail) {
+   oh-voice(oh-applied(row,"publish",json-node-string(detail)));
+   oh-voice(gse-reading(path,"publication",ok,detail));
+   if ok then 1 else form_error("GPU source publication refused");
+  }
+ }
+ 0;
+}

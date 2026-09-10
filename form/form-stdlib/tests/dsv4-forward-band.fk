@@ -1,8 +1,8 @@
-; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk form-stdlib/dsv4-hc.fk form-stdlib/dsv4-forward.fk
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk form-stdlib/dsv4-hc.fk form-stdlib/dsv4-forward.fk form-stdlib/bml/dsv4-numeric-reference.bml
 ;
 ; dsv4-forward-band — THE STONE. The assembled DeepSeek-V4-Flash first-token forward
 ; (dsv4-forward.fk), the exact sequence ds4-engine's forward_first_token_cpu runs, proven
-; at toy dims against an INDEPENDENT fp64 transcription of ds4.c. Six claims; verdict 63.
+; at toy dims against an INDEPENDENT fp64 transcription of ds4.c. Seven claims; verdict 127.
 ;
 ; ---------------------------------------------------------------------------
 ; APORON — THE DECLARED RADIUS. Read this before believing the number.
@@ -13,21 +13,21 @@
 ;   (routed top-2 MoE + shared SwiGLU) -> hc_post } -> hc collapse -> ffn_norm -> vocab,
 ;   at toy dims (n_embd 8, n_hc 4, 2 heads, head_dim 4, rank 4, 4 experts top-2, vocab 5),
 ;   reproduced by this body and agreeing with an independent fp64 transcription of ds4.c
-;   (scratchpad dsv4_forward_oracle.py, written from the C control flow, NOT this recipe).
+;   (bml/dsv4-numeric-reference.bml, with separate flat-array HC, MLA and MoE arithmetic).
 ;   Two toy configs (snugcause): A = the faithful first token (pos 0, no clamp, 2 layers);
 ;   B = a second shape (different token, clamp active, 3 layers). Both agree.
 ;
 ; WHAT IT DOES NOT PROVE
-;   * NOT bit-exactness. There is no independent DeepSeek forward in this repo. Claim 1/2's
-;     evidence class is AGREEMENT with the transcription; the residual is this body's
-;     tn-exp/fln/fsin/tn-sqrt vs libm (~1e-11 per op) accumulated through the whole forward.
+;   * NOT bit-exactness. Claims 1/2 compare production, a separate native fp64
+;     reference and held numeric anchors at the original 1e-6 tolerance.
 ;   * NOT the real dims (n_embd 4096, n_hc 4, 64 heads, 256 experts top-6/8, 43 layers).
 ;     The recipe is dim-generic; no claim here has SEEN those dims.
 ;   * NOT the quantised weights (IQ2_XXS/MXFP4/MXFP8/Q8_0) — this band is fp64, invented
 ;     toy weights from a shared deterministic generator.
 ;   * NOT the compressor or the indexer — provably dormant at the first token
 ;     (receipts/2026-07-22-dsv4-subsystems.md), faithfully omitted.
-;   * NOT RoPE-at-position — at a single cache row RoPE is a no-op (owned by the MLA band).
+;   * Single-row rotary cancellation is checked at position 7. Multi-row cache
+;     history and position-dependent attention are outside this tiny forward.
 ;   * NOT the GPU, NOT a real DeepSeek token (gated separately by download reach).
 ;
 ; A gate reading only "the logits have vocab floats and no NaN" would pass on a dead
@@ -47,14 +47,17 @@
 ;           forward (n_used = 0) by > 1e-3. The routed experts fire and matter.
 ;   bit 32  THE CLAMP IS LOAD-BEARING: config-B with clamp 0.9 differs from clamp-off by
 ;           > 1e-3. An unapplied clamp (edgedrop) is not a computed identity.
+;   bit 64  ROTARY REFERENCE: independent sine/cosine agree with numeric anchors,
+;           and complete position-7 logits agree with production and config A.
 
 (do
   ; ---- diff helpers ----
   (defn fb-vmax (a b)
-    (if (eq (len a) 0) 0.0
+    (if (not (eq (len a) (len b))) 1000000.0
+      (if (eq (len a) 0) 0.0
         (do (let d (tn-abs (sub (head a) (head b))))
             (let r (fb-vmax (tail a) (tail b)))
-            (if (gt d r) d r))))
+            (if (gt d r) d r)))))
   (defn fb-min-acc (best xs) (if (eq (len xs) 0) best (fb-min-acc (if (lt (head xs) best) (head xs) best) (tail xs))))
   (defn fb-range (v) (sub (tn-max v) (fb-min-acc (head v) (tail v))))
   ; max pairwise distance among 4 stream rows
@@ -71,9 +74,8 @@
         (if (gt m0 m1) (if (gt m0 m2) m0 m2) (if (gt m1 m2) m1 m2))))
 
   ; ===========================================================================
-  ; the toy fixture — built by dsv4-forward.fk's generator with the SAME seeds the
-  ; oracle uses (dsv4_forward_oracle.py: layer_weights / global_weights). Identical
-  ; weights on both sides by construction.
+  ; The deterministic fixture is shared input data. Both calculations receive
+  ; the same weights; the reference calls no production arithmetic recipes.
   ; ===========================================================================
   ; per-layer weight bundle for layer il
   (defn bnd-lw (il)
@@ -135,24 +137,42 @@
   (let plainB (nth embd 4))
   (let logB (dsv4-forward CB lwsB gw plainB 0))
   (let refB (list 1.6575489181615173 1.5894867988753996 1.5214246795892818 0.8160337522547679 0.7479716329686499))
+  (let independentA (dnr-forward CA lwsA gw plainA 0))
+  (let independentB (dnr-forward CB lwsB gw plainB 0))
 
   ; --- claim 1: agreement A + argmax ---
-  (let c1 (if (lt (fb-vmax logA refA) 0.000001) (if (eq (dsv4-argmax logA) 0) 1 0) 0))
+  (let c1 (if (lt (fb-vmax logA refA) 0.000001)
+    (if (lt (fb-vmax (head independentA) refA) 0.000001)
+      (if (lt (fb-vmax logA (head independentA)) 0.000001)
+        (if (eq (dsv4-argmax logA) 0) 1 0) 0) 0) 0))
   ; --- claim 2: agreement B (second config) ---
-  (let c2 (if (lt (fb-vmax logB refB) 0.000001) 2 0))
+  (let c2 (if (lt (fb-vmax logB refB) 0.000001)
+    (if (lt (fb-vmax (head independentB) refB) 0.000001)
+      (if (lt (fb-vmax logB (head independentB)) 0.000001) 2 0) 0) 0))
   ; --- claim 4: non-degenerate ---
   (let idA (dsv4-argmax logA))
   (let c4 (if (gt (fb-range logA) 0.1) (if (lt idA 5) (if (le 0 idA) 4 0) 0) 0))
   ; --- claim 8: HC load-bearing (streams distinct before collapse) ---
   (let streamsA (dsv4-run-layers CA lwsA (hc-broadcast 4 plainA) 0))
-  (let c8 (if (gt (fb-pairmax4 streamsA) 0.001) 8 0))
+  (let c8 (if (gt (fb-pairmax4 streamsA) 0.001)
+    (if (lt (fb-vmax (dnr-flat streamsA) (dnr-flat (nth independentA 1))) 0.000001) 8 0) 0))
   ; --- claim 16: routed MoE load-bearing (n_used 0 = shared only) ---
   (let CAdrop (dsv4-cfg mla 4 20 0 1.5 1000000.0))
   (let logAshared (dsv4-forward CAdrop lwsA gw plainA 0))
-  (let c16 (if (gt (fb-vmax logA logAshared) 0.001) 16 0))
+  (let independentShared (head (dnr-forward CAdrop lwsA gw plainA 0)))
+  (let c16 (if (gt (fb-vmax logA logAshared) 0.001)
+    (if (lt (fb-vmax logAshared independentShared) 0.000001) 16 0) 0))
   ; --- claim 32: the clamp load-bearing (config B clamp off) ---
   (let CBnoclamp (dsv4-cfg mla 4 20 2 1.5 1000000.0))
   (let logBnoclamp (dsv4-forward CBnoclamp lwsB gw plainB 0))
-  (let c32 (if (gt (fb-vmax logB logBnoclamp) 0.001) 32 0))
+  (let independentUnclamped (head (dnr-forward CBnoclamp lwsB gw plainB 0)))
+  (let c32 (if (gt (fb-vmax logB logBnoclamp) 0.001)
+    (if (lt (fb-vmax logBnoclamp independentUnclamped) 0.000001) 32 0) 0))
+  (let logPosition (dsv4-forward CA lwsA gw plainA 7))
+  (let independentPosition (head (dnr-forward CA lwsA gw plainA 7)))
+  (let c64 (if (lt (abs (sub (dnr-sin 1.0) 0.8414709848078965)) 0.0000000000001)
+    (if (lt (abs (sub (dnr-cos 1.0) 0.5403023058681398)) 0.0000000000001)
+      (if (lt (fb-vmax logPosition independentPosition) 0.000001)
+        (if (lt (fb-vmax independentPosition refA) 0.000001) 64 0) 0) 0) 0))
 
-  (add c1 (add c2 (add c4 (add c8 (add c16 c32))))))
+  (add c1 (add c2 (add c4 (add c8 (add c16 (add c32 c64)))))))

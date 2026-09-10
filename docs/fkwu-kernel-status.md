@@ -10,6 +10,27 @@ Metal is loaded dynamically through a selected adapter. The root and emitted CLI
 
 Form owns BMP validation, the nine-field integer interpretation, policy thresholds, GPU source generation, captures, submissions and result eligibility. Several versions can use one captured input. Its 144-byte ARM64 frame fold reads each pixel once through three synchronous borrowed-string calls for a normal frame. Larger rectangles subdivide according to the integer result capacity. The interpreter is an explicitly requested equivalence reference.
 
+## Native authoring and inspection
+
+Form owns the following executing surfaces. Each linked page names its public door and current boundary.
+
+| Surface | Current execution |
+| --- | --- |
+| [Artifact codec and source lens](native-form-artifacts.md) | FORMBIN2 encoding, decoding, structural comparison, exact numeric payloads, adaptive-depth traversal and independent Go/Rust/TypeScript conformance |
+| [GPU source generation](native-gpu-source-generation.md) | Canonical PTX and GLSL templates become executable BML authorities; generation and publication preserve checked bytes |
+| [Metal asks](native-metal-ask.md) | Typed request admission, full model identity, tokenization, GPU work, owned CPU hashing, resource release and private atomic answer publication |
+| [Numerical references](native-dsv4-numeric-reference.md) | Independent Form hyperconnection and toy-forward mathematics compared with production computations and held anchors |
+| [Proof traces](native-kernel-trace.md) | Native preparation, supervision and rendering of real Rust specimen traces; Python grammar compiler execution remains a Rust proof responsibility |
+| [Routing proofs](../form/form-kernel-rust/README.md) | Form owns socket fixtures, concurrent clients, exact response checks and child settlement around the independent Rust server |
+
+[Native source inspection](native-source-inventory.md) captures source lists into owned files and checks child exit status, exact reads and NUL termination. `observe/carrier-mass.bml` counts source bytes in Form, including unknown-extension shebangs and paths containing spaces or newlines. It retains the complete source reading at `.hearth/carrier-mass-current.json`; weighted exclusions remain present in that evidence. The native authoring guide retains its separate Python inventory at `.hearth/native-authoring-current.json`. Neither lexical inventory establishes execution or native ownership by itself.
+
+The current guide identifies two Python implementations: `dsv4-mla-core-oracle.py` supplies the active large-model numerical reference, and `test_glass_keyboard_pty.py` supplies real terminal acceptance checks. Their replacement still requires equivalent observed native behavior. Shell orchestration, target-language specimens, proof siblings and platform carriers also remain visible in the broader source reading. The checkout is not entirely Form-owned.
+
+The shared BML dependency reader distinguishes actual directives from quoted examples and multiline strings. Direct Form preparation selects semicolon-comment semantics explicitly. Form string emission represents semicolons through byte construction, preserving their value across the seed's dependency-reading boundary. BML-generated strings can carry dependency examples without importing them.
+
+Semicolon-bearing string leaves require byte construction and balanced concatenation; ordinary string leaves remain literals. The balanced tree avoids copying each growing suffix but still performs construction work unless subsequently folded. Handwritten direct `.fk` source still passes through the seed's quote-insensitive dependency collector; the Form emitter repair applies to generated string leaves.
+
 ## Ownership boundary
 
 Each frame job retains its capture, program, policy, output and actual fence. Timeout retains that identity. Cancellation discards an eventual result while resources remain owned. Failed or indeterminate submissions do not publish results. Releases are recorded after carrier confirmation.
@@ -52,4 +73,4 @@ Form emits the guest string-equality and length leaves used by the shell and RAM
 
 Paging, separate address spaces, privilege transitions, persistent block I/O, networking, multicore startup and remaining device/power contracts require their own implementations and execution witnesses. Hosted execution does not establish freestanding ownership.
 
-Current receipt — Codex, with independent kernel architecture and Metal lifetime review. Resource ownership includes names, metadata and event delivery: a native handle is usable only while its Form owner can retain, observe and release it. The checks above make that teaching executable.
+Resource ownership includes names, metadata and event delivery: a native handle is usable only while its Form owner can retain, observe and release it. The checks above make that contract executable.
