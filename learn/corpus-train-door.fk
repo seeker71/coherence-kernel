@@ -1,76 +1,27 @@
-; corpus-train-door.fk — the one training command, decisions baked, no flags.
-;
-; WHY NO OPTIONS. Urs, 2026-08-26: "why arguments for options that are always
-; true? we always want to support all features we have access to, we know at
-; compile time what the host supports, no runtime flags needed." Today's 9/12
-; result was produced by a hand-typed command whose flags were decisions —
-; --mask-prompt, --num-layers 16, --iters 2000 — each re-derivable, each
-; forgettable, each a way for the next run to be silently worse. A flag is a
-; decision deferred to whoever types next. These are decided HERE, once, with
-; the reason beside the value:
-;
-;   prompt-masked   ALWAYS. The corpus is one-word answers; loss on the
-;                   question teaches nothing and dilutes the answer signal.
-;                   Witnessed: unmasked 0.55-epoch run learned format only.
-;   layers 16       the adapter lineage (12..27 of 28) — resuming across a
-;                   different layer set silently drops weights.
-;   epochs 9        the measured knee: 0.55 epochs -> 0/12 facts, 9 -> 9/12.
-;   lr 2e-5         the witnessed vocabulary-acquisition rate.
-;   batch 2         fits every Apple-silicon host we run (3 GB peak).
-;
-; THE CAPABILITY IS INSTALLED, NEVER RE-DECLARED. The first version wrapped
-; every run in `uv run --with mlx-lm` — re-requesting the dependency per
-; invocation as if the host might not have it. Urs: that is the part that is
-; always true. mlx-lm is now installed once (uv tool install mlx-lm,
-; 2026-08-26) and the door calls its entry point directly. Tuning values are
-; the legitimately variable part and stay as stated constants here.
-;
-; ITERS IS DERIVED, NEVER PASSED. iters = ceil(epochs * rows / batch), from
-; the corpus file the door reads itself. A corpus that grows retrains fully
-; with nobody updating a number.
-;
-; The door RESUMES from the newest adapter so learning accumulates, and dates
-; its output. Nothing here is configurable because nothing here is open.
-;
-; preludes: form-stdlib/core.fk learn/train-loop-local-paths.fk
-; Proven by: form-stdlib/tests/corpus-train-door-band.fk
-
+; The corpus door resumes the 16-layer authoring lineage on native Metal.
+; Nine epochs, batch two and rate 2e-5 retain the witnessed training recipe.
+; Prompt masking supervises the answer. Iterations derive from actual JSONL rows,
+; including a final row without a newline. Worker failures retain their exit code.
+; preludes: learn/train-loop-local-paths.fk form-stdlib/native-lora-worker.bml
 (do
-    (defn ctd-data-dir () "/Users/ursmuff/.coherence-network/form-corpus-lora-data")
-    (defn ctd-model () (tlp-base-model))
-    (defn ctd-epochs () 9)
-    (defn ctd-batch () 2)
-    (defn ctd-lr () "2e-5")
-    (defn ctd-layers () 16)
-
-    ; rows = newline count of the train file, read by the door itself
-    (defn ctd-count-nl (s i n acc)
-        (if (ge i n) acc
-            (ctd-count-nl s (add i 1) n (add acc (if (eq (str_byte_at s i) 10) 1 0)))))
-    (defn ctd-rows-at (dir)
-        (do (let p (str_concat dir "/train.jsonl"))
-            (if (lt (file_size p) 0) (nothing)
-                (do (let s (read_file p)) (ctd-count-nl s 0 (str_len s) 0)))))
-    (defn ctd-rows () (ctd-rows-at (ctd-data-dir)))
-
-    ; ceil(epochs*rows/batch), derived — a grown corpus retrains itself fully
-    (defn ctd-iters ()
-        (do (let r (ctd-rows))
-            (if (nothing? r) (nothing)
-                (div (add (mul (ctd-epochs) r) (sub (ctd-batch) 1)) (ctd-batch)))))
-
-    ; the command, as one line anyone or any cell can hand to the host
-    (defn ctd-command (resume-adapter out-dir)
-        (do (let it (ctd-iters))
-            (if (nothing? it) (nothing)
-                (str_concat (tlp-offline-env)
-                (str_concat " /Users/ursmuff/.local/bin/mlx_lm.lora --train --mask-prompt"
-                (str_concat " --model " (str_concat (ctd-model)
-                (str_concat " --data " (str_concat (ctd-data-dir)
-                (str_concat " --resume-adapter-file " (str_concat resume-adapter
-                (str_concat " --adapter-path " (str_concat out-dir
-                (str_concat " --num-layers " (str_concat (int_to_str (ctd-layers))
-                (str_concat " --batch-size " (str_concat (int_to_str (ctd-batch))
-                (str_concat " --learning-rate " (str_concat (ctd-lr)
-                (str_concat " --iters " (int_to_str it)))))))))))))))))))))
-    0)
+ (defn ctd-data-dir () "/Users/ursmuff/.coherence-network/form-corpus-lora-data")
+ (defn ctd-model () (tlp-base-model))
+ (defn ctd-epochs () 9)
+ (defn ctd-batch () 2)
+ (defn ctd-lr () 0.00002)
+ (defn ctd-layers () 16)
+ (defn ctd-rows-at (dir)
+  (do (let text (read_file (str_concat dir "/train.jsonl")))
+   (if (nothing? text) (nothing) (len (nld-lines text)))))
+ (defn ctd-rows () (ctd-rows-at (ctd-data-dir)))
+ (defn ctd-iters-for (rows) (div (add (mul (ctd-epochs) rows) (sub (ctd-batch) 1)) (ctd-batch)))
+ (defn ctd-iters () (do (let rows (ctd-rows)) (if (nothing? rows) (nothing) (ctd-iters-for rows))))
+ (defn ctd-request-at (data resume-adapter out-dir)
+  (do (let rows (ctd-rows-at data))
+   (if (or (nothing? rows) (le rows 0)) (nothing)
+    (ntr-request (ctd-model) (nag-dir resume-adapter) data out-dir (ctd-iters-for rows) (ctd-batch) (ctd-lr) 1 (ctd-layers)))))
+ (defn ctd-request (resume-adapter out-dir) (ctd-request-at (ctd-data-dir) resume-adapter out-dir))
+ (defn ctd-run (resume-adapter out-dir)
+  (do (let request (ctd-request resume-adapter out-dir))
+   (if (nothing? request) (nothing) (nlw-run request (str_concat out-dir "/worker")))))
+ 0)

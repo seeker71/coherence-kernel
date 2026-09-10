@@ -1,6 +1,6 @@
 // Native execution of the local affine-quantized Llama checkpoint and its LoRA pairs.
 // Geometry, quantization, rotary scaling and adapter shapes are read from the files.
-// preludes: form-stdlib/native-affine-metal.bml form-stdlib/model-registry.bml
+// preludes: form-stdlib/native-affine-metal.bml form-stdlib/model-registry.bml form-stdlib/native-adapter-generation.bml
 section [form.bml] {
  class NativeLlamaMetal {
   def nll-msl() = str_concat("#include <metal_stdlib>\nusing namespace metal;\n", "
@@ -9,7 +9,7 @@ kernel void nll_store(device const float* x [[buffer(0)]],device float* y [[buff
 kernel void nll_last(device const float* x [[buffer(0)]],device float* y [[buffer(1)]],constant uint& n [[buffer(2)]],constant uint& offset [[buffer(3)]],uint i [[thread_position_in_grid]]){if(i<n)y[i]=x[offset+i];}
 kernel void nll_scores(device const float* q [[buffer(0)]],device const float* k [[buffer(1)]],device float* p [[buffer(2)]],constant uint& t [[buffer(3)]],constant uint& nq [[buffer(4)]],constant uint& nk [[buffer(5)]],constant uint& d [[buffer(6)]],constant uint& offset [[buffer(7)]],uint g [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {uint row=g/nq,h=g%nq,nh=offset+t;if(row>=t)return;uint kh=h/(nq/nk);float m=-INFINITY;for(uint s=lane;s<nh;s+=32){float z=-INFINITY;if(s<=offset+row){z=0;for(uint c=0;c<d;c++)z+=q[(row*nq+h)*d+c]*k[(s*nk+kh)*d+c];z*=rsqrt(float(d));}p[g*nh+s]=z;m=max(m,z);}m=simd_max(m);threadgroup_barrier(mem_flags::mem_device);float sum=0;for(uint s=lane;s<nh;s+=32){float e=exp(p[g*nh+s]-m);p[g*nh+s]=e;sum+=e;}sum=simd_sum(sum);for(uint s=lane;s<nh;s+=32)p[g*nh+s]/=sum;}
 kernel void nll_attend(device const float* p [[buffer(0)]],device const float* v [[buffer(1)]],device float* out [[buffer(2)]],constant uint& t [[buffer(3)]],constant uint& nq [[buffer(4)]],constant uint& nk [[buffer(5)]],constant uint& d [[buffer(6)]],constant uint& offset [[buffer(7)]],uint g [[threadgroup_position_in_grid]],uint lane [[thread_index_in_simdgroup]]) {uint row=g/nq,h=g%nq,nh=offset+t;if(row>=t)return;uint kh=h/(nq/nk);for(uint c=lane;c<d;c+=32){float a=0;for(uint s=0;s<=offset+row;s++)a+=p[g*nh+s]*v[(s*nk+kh)*d+c];out[(row*nq+h)*d+c]=a;}}
-kernel void nll_argmax(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],uint lane [[thread_index_in_simdgroup]]) {float m=-INFINITY;uint id=0xffffffff;for(uint i=lane;i<n;i+=32){if(x[i]>m || (x[i]==m&&i<id)){m=x[i];id=i;}}float best=simd_max(m);uint win=simd_min(m==best?id:0xffffffff);if(lane==0)out[0]=win;}
+kernel void nll_argmax(device const float* x [[buffer(0)]],device uint* out [[buffer(1)]],constant uint& n [[buffer(2)]],uint lane [[thread_index_in_simdgroup]]) {float m=-INFINITY;uint id=0xffffffff,bad=0;for(uint i=lane;i<n;i+=32){bad+=uint(!isfinite(x[i]));if(x[i]>m || (x[i]==m&&i<id)){m=x[i];id=i;}}float best=simd_max(m);uint win=simd_min(m==best?id:0xffffffff);bad=simd_sum(bad);if(lane==0)out[0]=bad?0xffffffff:win;}
 ");
   def nll-run(name, handles, values, count, grouped) {
    let p = nam-held-pipe(metal_pipeline(nll-msl(), name));
@@ -70,19 +70,23 @@ kernel void nll_argmax(device const float* x [[buffer(0)]],device uint* out [[bu
    nll-projection(base, adapter, ac, nll-prefix(i, "mlp.down_proj"), group));
   def nll-layers(base, adapter, ac, i, n, group) = if ge(i, n) then list() else cons(nll-layer(base, adapter, ac, i, group), nll-layers(base, adapter, ac, add(i, 1), n, group));
   // Model = geo, layers, embedding, final norm, source directory, adapter config.
-  def nll-open(dir, adapterDir) {
+  def nll-open(dir, adapterPath) = nll-open-dir(dir,if eq(str_len(adapterPath),0) then "" else nag-resolve(adapterPath));
+  // The historical repository spelling resolves only to the registry's pinned local snapshot.
+  def nll-base-match(identity,dir) = or(str_eq(identity,dir),and(str_eq(identity,"mlx-community/Llama-3.2-3B-Instruct-4bit"),str_eq(dir,mr-path(mr-find("llama32-3b-mlx-4bit")))));
+  def nll-open-dir(dir, adapterDir) {
    let cfg = nll-config(dir);
    let geo = nll-geo(cfg);
    let base = sti-open(str_concat(dir, "/model.safetensors"));
    let ac = if eq(str_len(adapterDir), 0) then list() else parse-json(str_concat(adapterDir, "/adapter_config.json"), read_file(str_concat(adapterDir, "/adapter_config.json")));
-   if and(not(nil?(ac)),not(str_eq(nll-get(ac,"model"),dir))) then form_error("native LoRA base identity mismatch") else nll-open-matched(dir,adapterDir,geo,base,ac);
+   if and(not(nil?(ac)),not(nll-base-match(nll-get(ac,"model"),dir))) then form_error("native LoRA base identity mismatch") else nll-open-matched(dir,adapterDir,geo,base,ac);
   }
   def nll-open-matched(dir,adapterDir,geo,base,ac) {
    let checked = nll-check-metadata(base,geo);
    let adapter = if eq(str_len(adapterDir), 0) then list() else sti-open(str_concat(adapterDir, "/adapters.safetensors"));
    let layers = nll-layers(base, adapter, ac, 0, nth(geo, 6), nth(geo, 8));
-   if and(not(nil?(adapter)),not(eq(len(nth(adapter,2)),mul(2,nll-pair-count(layers))))) then form_error("native LoRA contains unconsumed tensors") else list(geo, layers, nam-view(base, "model.embed_tokens", nth(geo, 8)), nam-floats(sti-map(base, "model.norm.weight")), dir, ac);
+   if and(not(nil?(adapter)),not(eq(len(nth(adapter,2)),mul(2,nll-pair-count(layers))))) then form_error("native LoRA contains unconsumed tensors") else list(geo, layers, nam-view(base, "model.embed_tokens", nth(geo, 8)), nam-floats(sti-map(base, "model.norm.weight")), dir, ac, adapterDir);
   }
+  def nll-adapter(model) = if gt(len(model),6) then nth(model,6) else "";
   def nll-expect(index,key,shape) = if value_eq(nth(sti-find(index,key),2),shape) then 1 else form_error(str_concat("native Llama tensor geometry mismatch: ",key));
   def nll-expect-affine(index,key,rows,cols,group) {
    let w = nll-expect(index,str_concat(key,".weight"),list(rows,div(cols,8)));
