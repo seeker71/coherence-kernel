@@ -3963,6 +3963,7 @@ static long long fk_melt_gen = 0;
 extern int munmap(void *, unsigned long);
 #endif
 extern void pthread_jit_write_protect_np(int);
+extern int getpagesize(void);
 #endif
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
 static int fk_arm64_u32_cons(long long cell, long long *head, long long *tail) {
@@ -4275,35 +4276,23 @@ static void *fk_arm64_u32_keep(const fk_arm64_u32_node *nodes, long long nodes_n
     return mem;
 }
 
-/* THE FORM LANE'S EXECUTOR. form-lower.fk emits an arm64 leaf image for the
- * AAPCS64 shape `int64 f(int64)` — the emitter is Form, four-way proven, and
- * carries no 32-bit ceiling. The Go sibling has been able to RUN those bytes
- * since jit_inram_darwin_arm64.go; fkwu could not, so the body could compile
- * its own native code and had nowhere to put it. This is that door, with the
- * same contract Go states: (image, arg) -> int64, image a list of bytes.
- *
- * It keeps its page, for the reason the u32 door learned: the Go one mmaps and
- * unmaps per call, and a compiler that forgets is a slower interpreter. The key
- * is the image BYTES — content, not the cons value the collector moves — so two
- * callers that lower the same recipe share one crystallization. */
-#define FK_INRAM_CODE_CAP 4096
-#define FK_INRAM_CACHE 32
+/* Form emits native bytes; the carrier admits exact-sized executable spans.
+ * Distinct resident admissions can share an image. Occupied resident entries
+ * are never evicted. Form owns admission identity, selection and release. */
 typedef struct {
     int live;
     long long n;
-    unsigned char code[FK_INRAM_CODE_CAP];
+    unsigned char *code;
     void *mem;
+    size_t span;
     unsigned int generation;
-    unsigned int residents;
+    unsigned long long residents;
 } fk_inram_entry;
-static fk_inram_entry fk_inram_cache[FK_INRAM_CACHE];
-static long long fk_inram_cursor = 0;
-/* A NodeID is already an interned value-node handle.  Its node-table index is
- * therefore the cheapest resident key the carrier can receive: no SHA, byte
- * fold, image reconstruction or table scan belongs on the hot call.  The
- * generation pair makes slot eviction O(1) too -- stale aliases simply stop
- * matching rather than requiring a sweep over the node table. */
-static unsigned char *fk_inram_node_slot;
+static fk_inram_entry *fk_inram_cache;
+static size_t fk_inram_capacity;
+/* Interned admission nodes resolve slots and generations in O(1).
+ * Slot indices grow with the table; a released admission stays tombstoned. */
+static unsigned long long *fk_inram_node_slot;
 static unsigned int *fk_inram_node_generation;
 static unsigned char *fk_inram_node_released;
 static long long fk_inram_last_slot = -1;
@@ -4322,7 +4311,7 @@ static long long fk_inram_bytes(long long image, unsigned char *out, long long c
             if (b < 0 || b > 255) {
                 return -1;
             }
-            out[n] = (unsigned char)b;
+            if (out != 0) { out[n] = (unsigned char)b; }
         }
         n = n + 1;
         cursor = rest;
@@ -4330,41 +4319,38 @@ static long long fk_inram_bytes(long long image, unsigned char *out, long long c
     return n;
 }
 
-/* The door's argument contract, extended 2026-09-02 (the multi-arg
- * increment the per-recipe-JIT program named) and again 2026-09-03 (R28,
- * the runtime-string increment receipts/2026-09-03-string-family-lowering.md
- * named as its next stone): an EVEN word is ONE integer argument — the
- * standing contract, behavior unchanged; a STRING value is TWO argument
- * SLOTS — base pointer then byte length, fk_srange's own (pointer, length)
- * shape, the same accessor str_byte_at/str_eq/str_find already read
- * through — handed to the page as two AAPCS64 registers, the convention
- * lo-strfind-runtime (form-lower.fk) banks from; a cons list of up to
- * EIGHT SLOTS (an int spending one, a string spending two) is handed to
- * the page in x0..x7, generalizing the existing multi-arg contract rather
- * than replacing it. Returns the slot count (1..8); 0 declines the shape
- * (nil, more than eight slots, or an element that is neither an integer
- * nor a string), and the door answers nothing.
- *
- * POINTER SAFETY, GROUNDED NOT ASSUMED: the pointer handed out is fk_sb's
- * own live base plus offset (fk_srange never copies), so it is only as
- * durable as fk_sb's address. fk_sb moves on realloc, and every realloc
- * site is a string being INTERNED (fk_sintern growing fk_sbp past
- * fk_scap_b) — grep confirms every fk_sb assignment in this file is one of
- * exactly two shapes: the one-time fk_sinit malloc, or a growth realloc
- * beside an intern. Between this call returning and fk_inram_call using
- * the pointer, the only code that runs is image-byte decode (integer/cons
- * walking, no strings), the resident-cache scan (byte compare over
- * fk_inram_cache, not fk_sb), and — on a cold image — mmap plus a raw byte
- * copy into the new executable page: none of that interns a string. Then
- * the crystallized leaf itself runs, and it cannot call back into this
- * interpreter at all (form-lower.fk emits pure ALU/load/branch bytes for
- * every leaf it builds today, no `bl` to a C native), so it cannot trigger
- * fk_sintern either. The pointer is therefore live for the one call it is
- * handed to. NAMED, NOT PAPERED OVER: this holds only while every
- * crystallized leaf stays call-out-free. A future leaf shape that DOES
- * call out mid-body must not carry a raw string pointer across that call
- * — it would need to re-derive the pointer afterward, since fk_sb can have
- * moved underneath it by then. */
+/* An admission owns its page until its final resident releases it. Raw-image
+ * entries may be reused; occupied resident entries force table growth. */
+static long long fk_inram_slot(void) {
+    size_t i;
+    long long reusable = -1;
+    for (i = 0; i < fk_inram_capacity; i++) {
+        if (fk_inram_cache[i].residents == 0 &&
+            fk_inram_cache[i].generation != ~0U) {
+            if (!fk_inram_cache[i].live) { return (long long)i; }
+            if (reusable < 0) { reusable = (long long)i; }
+        }
+    }
+    if (reusable >= 0) { return reusable; }
+    size_t old = fk_inram_capacity;
+    size_t limit = ((size_t)-1) / sizeof(fk_inram_entry);
+    if (old > limit / 2) { return -1; }
+    size_t next = old == 0 ? 32 : old * 2;
+    if (next > limit || next > 9223372036854775807ULL) { return -1; }
+    fk_inram_entry *grown = (fk_inram_entry *)realloc(fk_inram_cache, next * sizeof(*grown));
+    if (grown == 0) { return -1; }
+    memset(grown + old, 0, (next - old) * sizeof(*grown));
+    fk_inram_cache = grown;
+    fk_inram_capacity = next;
+    return (long long)old;
+}
+
+/* A tagged integer spends one AAPCS64 argument slot. A string spends two:
+ * its borrowed base pointer and byte length. Lists supply up to eight slots.
+ * Shape mismatch returns nothing. Bytes remain owned by the caller.
+ * Admission and execution do not intern strings or call the interpreter, so
+ * the borrowed string base remains valid through this synchronous leaf call.
+ * Leaves that call back into the runtime require a different ownership ABI. */
 static long long fk_inram_args(long long arg_value, long long *a) {
     long long i;
     const char *sptr;
@@ -4411,13 +4397,8 @@ static long long fk_inram_args(long long arg_value, long long *a) {
         return n;
     }
 }
-/* ONE call seam for every executable page. Emitted code banks into
- * callee-saved registers (x19..), and lo-compile-fn-n now saves and
- * restores them — the asm fence below is the belt to those suspenders:
- * it declares x19..x28 clobbered so the compiler never keeps a live
- * value there across the page call, even against an image lowered
- * before the prologue landed. Old single-arg images read only w0/w1;
- * handing eight registers to a page that reads fewer is AAPCS64-clean. */
+/* Native entry receives x0..x7 and follows AAPCS64. The clobber fence prevents
+ * carrier locals from depending on x19..x28 across the leaf boundary. */
 static long long fk_inram_call(void *mem, long long *a) {
     fk_inram_call_total = fk_inram_call_total + 1;
     long long (*fn)(long long, long long, long long, long long, long long,
@@ -4433,7 +4414,7 @@ static long long fk_inram_call(void *mem, long long *a) {
     return r;
 }
 static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
-    unsigned char code[FK_INRAM_CODE_CAP];
+    unsigned char *code;
     long long n;
     long long i;
     long long args[8];
@@ -4442,11 +4423,14 @@ static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
     if (fk_inram_args(arg_value, args) == 0) {
         return fk_nothing;
     }
-    n = fk_inram_bytes(image, code, FK_INRAM_CODE_CAP);
-    if (n <= 0 || (n % 4) != 0) {
+    n = fk_inram_bytes(image, 0, 9223372036854775807LL);
+    if (n <= 0 || (n % 4) != 0 || (unsigned long long)n > (size_t)-1) {
         return fk_nothing;
     }
-    for (i = 0; i < FK_INRAM_CACHE; i = i + 1) {
+    code = (unsigned char *)malloc((size_t)n);
+    if (code == 0) { return fk_nothing; }
+    if (fk_inram_bytes(image, code, n) != n) { free(code); return fk_nothing; }
+    for (i = 0; (size_t)i < fk_inram_capacity; i = i + 1) {
         if (fk_inram_cache[i].live && fk_inram_cache[i].n == n) {
             long long j = 0;
             while (j < n && fk_inram_cache[i].code[j] == code[j]) {
@@ -4454,12 +4438,29 @@ static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
             }
             if (j == n) {
                 fk_inram_last_slot = i;
+                free(code);
                 return (fk_inram_call(fk_inram_cache[i].mem, args)) << 1;
             }
         }
     }
-    mem = mmap(0, FK_INRAM_CODE_CAP, 0x7, 0x1802, -1, 0);
+    long long page = getpagesize();
+    if (page <= 0 || (unsigned long long)n > (size_t)-1 - ((size_t)page - 1)) {
+        free(code); return fk_nothing;
+    }
+    size_t span = (((size_t)n + (size_t)page - 1) / (size_t)page) * (size_t)page;
+    long long slot = fk_inram_slot();
+    if (slot < 0) { free(code); return fk_nothing; }
+    fk_inram_entry *e = &fk_inram_cache[slot];
+    if (e->live && e->mem != 0 && munmap(e->mem, e->span) != 0) {
+        free(code); return fk_nothing;
+    }
+    free(e->code);
+    e->code = 0;
+    e->mem = 0;
+    e->live = 0;
+    mem = mmap(0, span, 0x7, 0x1802, -1, 0);
     if (mem == (void *)-1) {
+        free(code);
         return fk_nothing;
     }
     pthread_jit_write_protect_np(0);
@@ -4469,45 +4470,22 @@ static long long fk_jit_leaf_inram_image(long long image, long long arg_value) {
     pthread_jit_write_protect_np(1);
     __builtin___clear_cache((char *)mem, (char *)mem + n);
     {
-        fk_inram_entry *e = &fk_inram_cache[fk_inram_cursor];
-        if (e->live && e->mem != 0) {
-            munmap(e->mem, FK_INRAM_CODE_CAP);
-        }
         e->generation = e->generation + 1;
-        if (e->generation == 0) {
-            e->generation = 1;
-        }
         e->live = 1;
         e->residents = 0;
         e->n = n;
-        for (i = 0; i < n; i = i + 1) {
-            e->code[i] = code[i];
-        }
+        e->code = code;
         e->mem = mem;
-        fk_inram_last_slot = fk_inram_cursor;
-        fk_inram_cursor = (fk_inram_cursor + 1) % FK_INRAM_CACHE;
+        e->span = span;
+        fk_inram_last_slot = slot;
     }
     return (fk_inram_call(mem, args)) << 1;
 }
 
-/* The existing two-argument door also accepts a Form-native resident request:
- *
- *   [0, structural-nodeid, image]  birth if unseen, then invoke
- *   [1, structural-nodeid, []]     dissolve, answering 1/0/nothing
- *
- * A raw byte list keeps the legacy behavior above.  This avoids minting three
- * new fixed op-table seats just to express lifecycle around the same carrier.
- * Birth is the cold trust membrane and may walk bytes.  Invocation reaches the
- * executable page by the interned NodeID's stable value-node index in O(1).
- * That index is SESSION-EPHEMERAL: persistence carries program/meaning data and
- * interns it again after restart; it never stores this process-local index.
- *
- * A byte image cannot be mistaken for this envelope even when its first byte
- * is 0 or 1: field two is required to be a negative interned node, while every
- * admitted raw image field is a nonnegative byte. Release tombstones the index
- * for this session. The same dead meaning cannot silently rebirth; a changed
- * meaning earns a changed NodeID at the Form membrane.
- */
+/* [0, admission-node, image] admits/invokes; [1, admission-node, []] releases.
+ * Distinct admissions share exact image bytes. Slot/generation checks resolve
+ * live admissions without scanning images. Release tombstones that admission
+ * for this process. Form owns content identity and subsequent selection. */
 static int fk_inram_resident_request(long long request, long long *action,
                                       long long *identity, long long *image) {
     long long h0;
@@ -4541,39 +4519,36 @@ static int fk_inram_node_index(long long identity, long long *index) {
 static long long fk_jit_leaf_inram_resident(long long action, long long identity,
                                              long long image, long long arg_value) {
     long long ix;
-    unsigned int encoded_slot;
+    unsigned long long encoded_slot;
     fk_inram_entry *e;
     if (!fk_inram_node_index(identity, &ix)) {
         return fk_nothing;
     }
     encoded_slot = fk_inram_node_slot[ix];
+    if (encoded_slot > fk_inram_capacity) { return fk_nothing; }
     if (action == 1) {
         if (encoded_slot == 0) {
-            if (fk_inram_node_released[ix]) {
-                return 0;
-            }
+            fk_inram_node_released[ix] = 1;
             return 0;
         }
         e = &fk_inram_cache[encoded_slot - 1];
         if (!e->live || fk_inram_node_generation[ix] != e->generation) {
             fk_inram_node_slot[ix] = 0;
+            fk_inram_node_released[ix] = 1;
             return 0;
+        }
+        if (e->residents == 0) { return fk_nothing; }
+        if (e->residents == 1 && e->mem != 0 && munmap(e->mem, e->span) != 0) {
+            return fk_nothing;
         }
         fk_inram_node_slot[ix] = 0;
         fk_inram_node_released[ix] = 1;
-        if (e->residents > 0) {
-            e->residents = e->residents - 1;
-        }
+        e->residents = e->residents - 1;
         if (e->residents == 0) {
-            if (e->mem != 0) {
-                munmap(e->mem, FK_INRAM_CODE_CAP);
-            }
+            free(e->code);
+            e->code = 0;
             e->mem = 0;
             e->live = 0;
-            e->generation = e->generation + 1;
-            if (e->generation == 0) {
-                e->generation = 1;
-            }
         }
         return 2;
     }
@@ -4602,7 +4577,7 @@ static long long fk_jit_leaf_inram_resident(long long action, long long identity
             return answer;
         }
         e = &fk_inram_cache[fk_inram_last_slot];
-        fk_inram_node_slot[ix] = (unsigned char)(fk_inram_last_slot + 1);
+        fk_inram_node_slot[ix] = (unsigned long long)(fk_inram_last_slot + 1);
         fk_inram_node_generation[ix] = e->generation;
         e->residents = e->residents + 1;
         return answer;
@@ -4738,7 +4713,7 @@ static void fk_nodes_grow(void) {
         long long nc = oc * 2;
         fk_fbroots = (long long *)fk_nodes_grow_col(fk_fbroots, oc, nc, 8);
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
-        fk_inram_node_slot = (unsigned char *)fk_nodes_grow_col(fk_inram_node_slot, oc, nc, 1);
+        fk_inram_node_slot = (unsigned long long *)fk_nodes_grow_col(fk_inram_node_slot, oc, nc, sizeof(*fk_inram_node_slot));
         fk_inram_node_generation = (unsigned int *)fk_nodes_grow_col(fk_inram_node_generation, oc, nc, 4);
         fk_inram_node_released = (unsigned char *)fk_nodes_grow_col(fk_inram_node_released, oc, nc, 1);
 #endif
@@ -4761,7 +4736,7 @@ static void fk_nodes_grow(void) {
     fk_nsattr = (long long *)fk_store_grow('a', fk_nsattr, oc * 8, nc * 8, FK_STORE_NODE_CELLS * 8, 1);
     fk_fbroots = (long long *)fk_nodes_grow_col(fk_fbroots, oc, nc, 8);
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
-    fk_inram_node_slot = (unsigned char *)fk_nodes_grow_col(fk_inram_node_slot, oc, nc, 1);
+    fk_inram_node_slot = (unsigned long long *)fk_nodes_grow_col(fk_inram_node_slot, oc, nc, sizeof(*fk_inram_node_slot));
     fk_inram_node_generation = (unsigned int *)fk_nodes_grow_col(fk_inram_node_generation, oc, nc, 4);
     fk_inram_node_released = (unsigned char *)fk_nodes_grow_col(fk_inram_node_released, oc, nc, 1);
 #endif
@@ -4807,7 +4782,7 @@ static void fk_nodes_init(void) {
         fk_fbroots = (long long *)calloc(FK_NODE_CAP_INIT, 8);
         fk_intern_tab = (long long *)calloc(FK_INTERN_HASH_CAP_INIT, 8);
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
-        fk_inram_node_slot = (unsigned char *)calloc(FK_NODE_CAP_INIT, 1);
+        fk_inram_node_slot = (unsigned long long *)calloc(FK_NODE_CAP_INIT, sizeof(*fk_inram_node_slot));
         fk_inram_node_generation = (unsigned int *)calloc(FK_NODE_CAP_INIT, 4);
         fk_inram_node_released = (unsigned char *)calloc(FK_NODE_CAP_INIT, 1);
 #endif
@@ -4848,7 +4823,7 @@ static void fk_nodes_init(void) {
         fk_die("fk_nodes_init: out of memory for the value-node table");
     }
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
-    fk_inram_node_slot = (unsigned char *)calloc(FK_NODE_CAP_INIT, 1);
+    fk_inram_node_slot = (unsigned long long *)calloc(FK_NODE_CAP_INIT, sizeof(*fk_inram_node_slot));
     fk_inram_node_generation = (unsigned int *)calloc(FK_NODE_CAP_INIT, 4);
     fk_inram_node_released = (unsigned char *)calloc(FK_NODE_CAP_INIT, 1);
     if (fk_inram_node_slot == 0 || fk_inram_node_generation == 0 ||

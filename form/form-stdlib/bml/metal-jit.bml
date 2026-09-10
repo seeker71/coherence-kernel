@@ -1,9 +1,10 @@
 // Form owns source generation, version identity, cache selection and dispatch.
 // The host adapter compiles the supplied source in RAM through Metal's API.
 // FMJ1 | u32 mode | u32 entry bytes | u32 path bytes | entry | path | source.
-// Modes: 0 RAM, 1 capture compiled archive, 2 require compiled archive hit.
+// Modes: 0 RAM, 1 capture compiled archive, 2 require compiled archive hit,
+// 3 retire the generation-qualified pipeline handle carried as a u64 payload.
 // Disk is optional. A requested archive that fails is reported, never replaced.
-// preludes: form-stdlib/metal-door.fk form-stdlib/sha256.fk form-stdlib/str-byte-at.fk form-stdlib/hex.fk form-stdlib/micro-thought.bml
+// preludes: form-stdlib/metal-door.fk form-stdlib/sha256.fk form-stdlib/str-byte-at.fk form-stdlib/hex.fk
 section [form.bml] {
  class MetalJit {
   def mj-source(body) = str_concat("#include <metal_stdlib>", str_concat(byte_to_str(10), str_concat("using namespace metal; ", body)));
@@ -31,18 +32,43 @@ section [form.bml] {
    if nothing?(path) then nothing() else mj-admit(source, entry, if lt(file_size(path), 0) then 1 else 2, path);
   }
   def mj-handle(version) = if nothing?(version) then 0 else head(version);
+  def mj-u64(value) = str_concat(md-le32(mod(value, 4294967296)), md-le32(div(value, 4294967296)));
+  def mj-release-handle(handle) = if le(handle, 0) then 0 else metal_pipeline(mj-descriptor(mj-u64(handle), "", 3, ""), "form_metal_jit_v1");
+  def mj-release(version) = mj-release-handle(mj-handle(version));
   def mj-enqueue(version, bindings, threads) = if le(mj-handle(version), 0) then 0 else metal_enqueue(mj-handle(version), bindings, threads);
   // The caller supplies its comparison domain and observed bytes. Selection
   // is a Form value: existing handles and submitted commands keep their version.
   def mj-select(candidate, expected, observed) = if and(gt(mj-handle(candidate), 0), str_eq(expected, observed)) then candidate else nothing();
-  // A short thought address can reuse the resident pipeline. Its exact seal
-  // includes both source and entry; an address collision refuses admission.
+  // Addresses map to independent records. Metadata never occupies the address
+  // namespace, so every string is available to the caller. Exact source and
+  // entry seals govern reuse; a different live program refuses replacement.
+  def mj-thought-table() = record_new(0);
+  def mj-thought-at(table, address) = if not(record?(table)) then nothing() else if not(record_has(table, address)) then nothing() else mj-thought-row(record_get(table, address), table, address);
+  def mj-thought-row(row, table, address) = if not(record?(row)) then nothing() else if and(str_eq(record_get(row, "kind"), "metal-jit-thought"), and(eq(record_get(row, "owner"), table), str_eq(record_get(row, "address"), address))) then row else nothing();
+  def mj-thought-recall(table, address) {
+   let row = mj-thought-at(table, address);
+   if nothing?(row) then -1 else record_get(row, "handle");
+  }
   def mj-thought(table, address, source, entry, mode, path) {
+   if not(record?(table)) then nothing() else if not(str_eq(value_kind(address), "string")) then nothing()
+   else mj-thought-in(table, address, source, entry, mode, path);
+  }
+  def mj-thought-in(table, address, source, entry, mode, path) {
    let seal = mj-descriptor(source, entry, 0, "");
-   if mt-known?(table, address) then if mt-agrees?(table, address, seal) then table else nothing()
+   let row = mj-thought-at(table, address);
+   if and(record_has(table, address), nothing?(row)) then nothing()
+   else if gt(mj-thought-recall(table, address), 0) then if str_eq(record_get(row, "seal"), seal) then table else nothing()
    else mj-thought-keep(table, address, seal, mj-admit(source, entry, mode, path));
   }
-  def mj-thought-keep(table, address, seal, version) = if nothing?(version) then nothing() else mt-mint-take(table, address, seal, mj-handle(version));
+  def mj-thought-keep(table, address, seal, version) = if nothing?(version) then nothing() else record_set(table, address, record_new(0, "kind", "metal-jit-thought", "owner", table, "address", address, "handle", mj-handle(version), "seal", seal));
+  // Retire only after native confirmation. A subsequent explicit thought call
+  // can give the vacant address a new admission; the old handle stays stale.
+  def mj-thought-release(table, address) = if le(mj-thought-recall(table, address), 0) then 0 else mj-thought-release-result(mj-thought-at(table, address), mj-release-handle(mj-thought-recall(table, address)));
+  def mj-thought-release-result(row, released) {
+   if eq(released, 1) then record_set(row, "handle", -1) else 0;
+   if eq(released, 1) then record_set(row, "seal", "") else 0;
+   released;
+  }
  }
  0;
 }

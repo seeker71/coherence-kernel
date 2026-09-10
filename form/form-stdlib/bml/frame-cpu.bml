@@ -1,0 +1,98 @@
+// Form emits and runs the ARM64 frame fold through the existing RAM leaf ABI.
+// The leaf borrows captured string bytes for one synchronous call, never writes
+// them and never calls the interpreter. Form retains the string for every call.
+// One rectangular fold returns sum + dark-count * 2^32. The maximum rectangle
+// is floor(UINT32_MAX / 255), keeping both sum and the complete packed result
+// below the current signed tagged-Form integer ceiling (2^62 - 1).
+// A normal frame takes three native calls, one per third: each pixel is read
+// once. Width/height subdivision only follows the explicit rectangle capacity.
+// preludes: form-stdlib/bml/frame-luma.bml form-stdlib/form-asm.fk
+section [form.bml] {
+ class FrameCpu {
+  def fc-unit() = 4294967296;
+  def fc-max-pixels() = div(sub(fc-unit(), 1), 255);
+  def fc-packed-bound() = add(mul(fc-max-pixels(), fc-unit()), sub(fc-unit(), 1));
+  // AAPCS64 x0/x1 = borrowed bytes/length; x2 = byte offset; x3 = row stride;
+  // x4 = first column; x5 = columns; x6 = rows; x7 = dark threshold.
+  // Only caller-saved x0..x17 are used; x18 and all callee-saved state survive.
+  // The row starts at instruction 12 and its pixel loop at instruction 14.
+  def fc-image() = fa-image(list(
+   fa-movz-x(8, 0), fa-movz-x(9, 0), fa-cmp-x(5, 0), fa-bcond(0, 30),
+   fa-cmp-x(6, 0), fa-bcond(0, 28),
+   fa-add-x-r(12, 0, 2), fa-add-x-r(14, 4, 4), fa-add-x-r(14, 14, 4),
+   fa-add-x-r(12, 12, 14), fa-add-x-imm(10, 6, 0), fa-movz(17, 3),
+   fa-add-x-imm(13, 12, 0), fa-add-x-imm(11, 5, 0),
+   fa-ldrb(14, 13, 0), fa-ldrb(15, 13, 1), fa-ldrb(16, 13, 2),
+   fa-add-r(14, 14, 15), fa-add-r(14, 14, 16), fa-udiv(14, 14, 17),
+   fa-add-x-r(8, 8, 14), fa-cmp-r(14, 7), fa-movz(15, 1),
+   fa-csel(15, 15, 31, 3), fa-add-x-r(9, 9, 15),
+   fa-add-x-imm(13, 13, 3), fa-sub-x-imm(11, 11, 1), fa-cmp-x(11, 0),
+   fa-bcond(1, -14), fa-add-x-r(12, 12, 3), fa-sub-x-imm(10, 10, 1),
+   fa-cmp-x(10, 0), fa-bcond(1, -20),
+   fa-lsl-x-imm(9, 9, 32), fa-add-x-r(0, 9, 8), fa-ret()));
+  def fc-image-nodes(bytes) = if nil?(bytes) then list() else cons(intern_trivial_int(head(bytes)), fc-image-nodes(tail(bytes)));
+  // Program identity is exact emitted bytes plus the ABI version. The public
+  // generation string is a caller label, not a residency or ownership key.
+  // Every open creates a distinct admission identity from its fresh record's
+  // stable identity. This integer leaf is process-local and never a disk key.
+  // The RAM carrier shares equal image bytes and counts these distinct leases.
+  def fc-program-identity(image) = intern_node(make_nodeid(31, 2, 0, 180), cons(intern_trivial_string("frame-cpu-arm64-v1"), fc-image-nodes(image)));
+  def fc-admission-identity(version) = intern_node(make_nodeid(31, 2, 0, 180), list(intern_trivial_string("frame-cpu-admission-v1"), record_get(version, "program-identity"), intern_trivial_int(version)));
+  def fc-open(generation, capacity) = if not(str_eq(value_kind(generation), "string")) then nothing() else if not(flm-integer?(capacity, 1, fc-max-pixels())) then nothing() else fc-open-image(generation, capacity, fc-image());
+  def fc-open-image(generation, capacity, image) = fc-open-version(image, record_new(make_nodeid(1, 5, 4, 1), "kind", "frame-cpu-version", "generation", generation, "program-identity", fc-program-identity(image), "capacity", capacity, "released", 1));
+  def fc-open-version(image, version) = fc-open-id(version, image, fc-admission-identity(version));
+  def fc-open-id(version, image, identity) {
+   let request = list(0, identity, image);
+   record_set(version, "identity", identity);
+   record_set(version, "request", request);
+   let probe = jit_leaf_inram(request, list("", 0, 0, 0, 0, 0, 0));
+   if nothing?(probe) then nothing() else if not(eq(probe, 0)) then nothing()
+   else fc-open-ready(version);
+  }
+  def fc-open-ready(version) {
+   record_set(version, "released", 0);
+   version;
+  }
+  def fc-active?(version) = if not(record?(version)) then 0 else and(str_eq(record_get(version, "kind"), "frame-cpu-version"), eq(record_get(version, "released"), 0));
+  def fc-release(version) = if not(fc-active?(version)) then 0 else fc-release-result(version, jit_leaf_inram(list(1, record_get(version, "identity"), list()), 0));
+  def fc-release-result(version, answer) {
+   if or(eq(answer, 1), eq(answer, 0)) then record_set(version, "released", 1) else 0;
+   answer;
+  }
+  def fc-capture(bytes) = fc-capture-layout(bytes, flm-layout(bytes));
+  def fc-capture-layout(bytes, layout) = if nothing?(layout) then nothing() else list(bytes, layout);
+  def fc-pair-merge(a, b) = if or(nothing?(a), nothing?(b)) then nothing() else list(add(head(a), head(b)), add(nth(a, 1), nth(b, 1)));
+  def fc-unpack(packed) = if nothing?(packed) then nothing() else list(mod(packed, fc-unit()), div(packed, fc-unit()));
+  // Validation has already bounded the full source image. Subdivision compares
+  // against capacity/columns before multiplying; each native rectangle is safe.
+  def fc-rect(version, bytes, offset, row, first, columns, height, dark) =
+   if or(eq(columns, 0), eq(height, 0)) then list(0, 0)
+   else if gt(columns, record_get(version, "capacity")) then fc-split-columns(version, bytes, offset, row, first, columns, height, dark, div(columns, 2))
+   else if gt(height, div(record_get(version, "capacity"), columns)) then fc-split-rows(version, bytes, offset, row, first, columns, height, dark, div(height, 2))
+   else fc-unpack(jit_leaf_inram(record_get(version, "request"), list(bytes, offset, row, first, columns, height, dark)));
+  def fc-split-columns(v, s, off, row, first, cols, height, dark, half) = fc-pair-merge(fc-rect(v, s, off, row, first, half, height, dark), fc-rect(v, s, off, row, add(first, half), sub(cols, half), height, dark));
+  def fc-split-rows(v, s, off, row, first, cols, height, dark, half) = fc-pair-merge(fc-rect(v, s, off, row, first, cols, half, dark), fc-rect(v, s, add(off, mul(half, row)), row, first, cols, sub(height, half), dark));
+  def fc-third(version, capture, first, after, dark) {
+   let layout = nth(capture, 1);
+   fc-rect(version, head(capture), nth(layout, 0), nth(layout, 1), first, sub(after, first), nth(layout, 3), dark);
+  }
+  // Re-derive header bounds before entry. A caller-supplied capture pair cannot
+  // manufacture an unchecked native pointer/length layout by changing field 1.
+  def fc-stat(version, capture, policy) = if not(fc-active?(version)) then nothing() else if not(str_eq(value_kind(capture), "list")) then nothing() else if not(eq(len(capture), 2)) then nothing() else if not(flm-policy-valid?(policy)) then nothing() else fc-stat-capture(version, fc-capture(head(capture)), policy);
+  def fc-stat-capture(version, capture, policy) = if nothing?(capture) then nothing() else fc-stat-layout(version, capture, policy, nth(capture, 1));
+  def fc-stat-layout(version, capture, policy, layout) {
+   let width = nth(layout, 2);
+   let left = div(width, 3);
+   let center = div(mul(width, 2), 3);
+   let a = fc-third(version, capture, 0, left, head(policy));
+   let b = fc-third(version, capture, left, center, head(policy));
+   let c = fc-third(version, capture, center, width, head(policy));
+   if or(nothing?(a), or(nothing?(b), nothing?(c))) then nothing()
+   else fc-result(a, b, c, width, nth(layout, 3), left, center, policy);
+  }
+  def fc-result(a, b, c, width, height, left, center, policy) = flm-result-policy(list(
+   add(head(a), add(head(b), head(c))), add(nth(a, 1), add(nth(b, 1), nth(c, 1))),
+   head(a), head(b), head(c), mul(left, height), mul(sub(center, left), height), mul(sub(width, center), height)), width, height, policy);
+ }
+ 0;
+}

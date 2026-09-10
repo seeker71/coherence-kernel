@@ -1,0 +1,92 @@
+// A cooperative Form owner for reference-walker source, run memory and CPU
+// native admissions. Each call is synchronous; no continuation or thread
+// isolation is implied. Source and memory are separate retained fields.
+// Close blocks entry, releases native admissions, then clears owned values.
+// A refused release keeps the owner closing and all its source/run roots held.
+// Record metadata and intern pools remain owned by the current kernel.
+// preludes: form-stdlib/hati-os-kernel.fk form-stdlib/bml/native-lifetime-health.bml
+section [form.bml] {
+ class FormRuntimeContext {
+  def fctx-context?(ctx) = if not(record?(ctx)) then 0 else str_eq(record_get(ctx, "kind"), "form-runtime-context");
+  def fctx-open?(ctx) = if not(fctx-context?(ctx)) then 0 else str_eq(record_get(ctx, "state"), "open");
+  def fctx-open(fns, source) = if not(str_eq(value_kind(fns), "list")) then nothing() else if nil?(fns) then nothing() else if not(str_eq(value_kind(source), "string")) then nothing() else record_new(make_nodeid(1, 5, 4, 1), "kind", "form-runtime-context", "state", "open", "functions", fns, "source", source, "memory", fkm-memory-new(), "admissions", list());
+  def fctx-call(ctx, index, argument) = if not(fctx-open?(ctx)) then nothing() else if not(str_eq(value_kind(index), "int")) then nothing() else if or(lt(index, 0), ge(index, len(record_get(ctx, "functions")))) then nothing() else fkm-call-source(record_get(ctx, "functions"), nth(record_get(ctx, "functions"), index), argument, record_get(ctx, "memory"), record_get(ctx, "source"));
+  def fctx-run(ctx, argument) = fctx-call(ctx, 0, argument);
+  def fctx-byte?(value) = and(str_eq(value_kind(value), "int"), and(ge(value, 0), le(value, 255)));
+  def fctx-image-bytes?(image) = if nil?(image) then 1 else if not(fctx-byte?(head(image))) then 0 else fctx-image-bytes?(tail(image));
+  def fctx-image?(image) = if not(str_eq(value_kind(image), "list")) then 0 else if nil?(image) then 0 else if not(eq(mod(len(image), 4), 0)) then 0 else fctx-image-bytes?(image);
+  def fctx-image-nodes(image) = if nil?(image) then list() else cons(intern_trivial_int(head(image)), fctx-image-nodes(tail(image)));
+  // Program identity is exact image content plus the existing ARM64 leaf ABI.
+  // Admission identity additionally carries a fresh process-local record id.
+  // Equal code may share a carrier page; independent owners never share a lease.
+  def fctx-program-identity(image) = intern_node(make_nodeid(31, 2, 0, 180), cons(intern_trivial_string("form-context-arm64-i64-leaf-v1"), fctx-image-nodes(image)));
+  def fctx-admission-identity(admission, program) = intern_node(make_nodeid(31, 2, 0, 180), list(intern_trivial_string("form-context-native-admission-v1"), program, intern_trivial_int(admission)));
+  def fctx-admission?(admission) = if not(record?(admission)) then 0 else str_eq(record_get(admission, "kind"), "form-context-native-admission");
+  def fctx-owns?(ctx, admission) = if not(fctx-context?(ctx)) then 0 else if not(fctx-admission?(admission)) then 0 else eq(record_get(admission, "owner"), ctx);
+  // Admission executes the supplied initial invocation once; its value is
+  // retained as probe. A refused admission remains in the owner's cleanup ledger.
+  def fctx-native-admit(ctx, image, argument) = if not(fctx-open?(ctx)) then nothing() else if not(fctx-image?(image)) then nothing() else fctx-admit-record(ctx, image, argument, record_new(make_nodeid(1, 5, 4, 1), "kind", "form-context-native-admission", "owner", ctx, "active", 0, "released", 0));
+  def fctx-admit-record(ctx, image, argument, admission) {
+   let program = fctx-program-identity(image);
+   let identity = fctx-admission-identity(admission, program);
+   let request = list(0, identity, image);
+   record_set(admission, "program", program);
+   record_set(admission, "identity", identity);
+   record_set(admission, "request", request);
+   record_set(ctx, "admissions", cons(admission, record_get(ctx, "admissions")));
+   fctx-admit-result(admission, jit_leaf_inram(request, argument));
+  }
+  def fctx-admit-result(admission, result) {
+   record_set(admission, "probe", result);
+   if nothing?(result) then nothing()
+   else fctx-admit-ready(admission);
+  }
+  def fctx-admit-ready(admission) {
+   record_set(admission, "active", 1);
+   admission;
+  }
+  def fctx-native-call(ctx, admission, argument) = if not(fctx-open?(ctx)) then nothing() else if not(fctx-owns?(ctx, admission)) then nothing() else if not(eq(record_get(admission, "active"), 1)) then nothing() else jit_leaf_inram(record_get(admission, "request"), argument);
+  def fctx-native-release(ctx, admission) = if not(fctx-owns?(ctx, admission)) then nothing() else if eq(record_get(admission, "released"), 1) then 0 else fctx-release-result(admission, jit_leaf_inram(list(1, record_get(admission, "identity"), list()), 0));
+  def fctx-release-result(admission, result) {
+   if or(eq(result, 1), eq(result, 0)) then fctx-release-finished(admission) else 0;
+   result;
+  }
+  def fctx-release-finished(admission) {
+   record_set(admission, "active", 0);
+   record_set(admission, "released", 1);
+   record_set(admission, "request", nothing());
+   record_set(admission, "probe", nothing());
+   1;
+  }
+  def fctx-release-all(ctx, admissions) = if nil?(admissions) then 1 else fctx-release-next(ctx, tail(admissions), fctx-native-release(ctx, head(admissions)));
+  def fctx-release-next(ctx, remaining, result) = if or(eq(result, 1), eq(result, 0)) then fctx-release-all(ctx, remaining) else nothing();
+  def fctx-close(ctx) = if not(fctx-context?(ctx)) then nothing() else if str_eq(record_get(ctx, "state"), "closed") then 0 else fctx-close-start(ctx);
+  def fctx-close-start(ctx) = if not(nlh-retry(ctx)) then nothing() else fctx-close-attempt(ctx);
+  def fctx-close-attempt(ctx) {
+   record_set(ctx, "state", "closing");
+   fctx-close-result(ctx, fctx-release-all(ctx, record_get(ctx, "admissions")));
+  }
+  def fctx-clear-memory(memory, keys) {
+   if nil?(keys) then 1 else fctx-clear-key(memory, head(keys), tail(keys));
+  }
+  def fctx-clear-key(memory, key, remaining) {
+   record_set(memory, key, nothing());
+   fctx-clear-memory(memory, remaining);
+  }
+  def fctx-close-result(ctx, released) {
+   nlh-result(ctx, "form-runtime-context", eq(released, 1));
+   if not(eq(released, 1)) then nothing() else fctx-close-finished(ctx);
+  }
+  def fctx-close-finished(ctx) {
+   let memory = record_get(ctx, "memory");
+   fctx-clear-memory(memory, record_keys(memory));
+   record_set(ctx, "memory", nothing());
+   record_set(ctx, "source", nothing());
+   record_set(ctx, "functions", nothing());
+   record_set(ctx, "admissions", list());
+   record_set(ctx, "state", "closed");
+   1;
+  }
+ }
+ 0;
+}

@@ -241,11 +241,11 @@
     (if (eq (fk-tag node) 6) (if (eq (fkm-eval fns (ms-child (fk-body node) 0) arg) 0)
                                  (fkm-eval fns (ms-child (ms-child (fk-body node) 1) 1) arg)
                                  (fkm-eval fns (ms-child (ms-child (fk-body node) 1) 0) arg))
-    (if (eq (fk-tag node) 7) (fkm-call-eval fns (nth fns 0) (fkm-eval fns (fk-body node) arg) (nth arg 2))
-    (if (eq (fk-tag node) 12) (fkm-call-eval fns (nth fns (ms-value (ms-child (fk-body node) 0)))
-                                            (fkm-eval fns (ms-child (fk-body node) 1) arg) (nth arg 2))
-    (if (eq (fk-tag node) 44) (fkm-icall-frame fns (fkm-eval fns (ms-child (fk-body node) 0) arg)
-                                           (fkm-eval fns (ms-child (fk-body node) 1) arg) (nth arg 2))
+    (if (eq (fk-tag node) 7) (fkm-call-source fns (nth fns 0) (fkm-eval fns (fk-body node) arg) (nth arg 2) (fkm-frame-source arg))
+    (if (eq (fk-tag node) 12) (fkm-call-source fns (nth fns (ms-value (ms-child (fk-body node) 0)))
+                                            (fkm-eval fns (ms-child (fk-body node) 1) arg) (nth arg 2) (fkm-frame-source arg))
+    (if (eq (fk-tag node) 44) (fkm-icall-source fns (fkm-eval fns (ms-child (fk-body node) 0) arg)
+                                           (fkm-eval fns (ms-child (fk-body node) 1) arg) (nth arg 2) (fkm-frame-source arg))
     (if (eq (fk-tag node) 97) (record_get
                                   (fkm-eval fns (ms-child (fk-body node) 0) arg)
                                   (fkm-eval fns (ms-child (fk-body node) 1) arg))
@@ -317,7 +317,8 @@
 (defn fkm-walk-fig (fns node arg)
     (if (eq (fk-tag node) 13) (fkm-memory-set fns node arg)
     (if (eq (fk-tag node) 14) (fkm-memory-get (nth arg 2) (fkm-eval fns (fk-body node) arg))
-        (fkm-walk-fig-rest fns node arg))))
+    (if (eq (fk-tag node) 17) (fkm-source-byte (fkm-frame-source arg) (fkm-eval fns (fk-body node) arg))
+        (fkm-walk-fig-rest fns node arg)))))
 (defn fkm-walk-fig-rest (fns node arg)
     (if (eq (fk-tag node) 10) (div (fkm-eval fns (ms-child (fk-body node) 0) arg)
                                    (fkm-eval fns (ms-child (fk-body node) 1) arg))
@@ -347,9 +348,20 @@
 
 ; The recipe walker owns one memory object per run and one lexical slot list
 ; per call. Recursion keeps the caller's slots; direct and indirect calls share
-; only their run's explicit memory. No process-global state is needed.
+; only their run's explicit memory and retained source. The source-aware entry
+; keeps those two owners separate; existing entry points supply an empty source.
+; Storage for Form values is still supplied by the current kernel.
 (defn fkm-call-eval (fns node value memory)
-    (fkm-eval fns node (list value (list) memory)))
+    (fkm-call-source fns node value memory ""))
+(defn fkm-call-source (fns node value memory source)
+    (fkm-eval fns node (list value (list) memory source)))
+(defn fkm-frame-source (frame)
+    (if (ge (len frame) 4) (nth frame 3) ""))
+; BUF carries the existing byte-stream convention: indices outside the retained
+; stream answer zero, including EOF. No process-global input buffer is read.
+(defn fkm-source-byte (source offset)
+    (if (lt offset 0) 0
+        (if (ge offset (str_len source)) 0 (ord (char_at source offset)))))
 (defn fkm-memory-new () (record_new (make_nodeid 1 5 4 1)))
 (defn fkm-walk (fns node arg)
     (fkm-call-eval fns node arg (fkm-memory-new)))
@@ -366,7 +378,7 @@
         (let offset (fkm-eval fns (ms-child body 0) frame))
         (let value (fkm-eval fns (ms-child (ms-child body 1) 0) frame))
         (fkm-eval fns (ms-child (ms-child body 1) 1)
-            (list (head frame) (cons (list offset value) (nth frame 1)) (nth frame 2)))))
+            (list (head frame) (cons (list offset value) (nth frame 1)) (nth frame 2) (fkm-frame-source frame)))))
 (defn fkm-memory-set (fns node frame)
     (do
         (let offset (fkm-eval fns (ms-child (fk-body node) 0) frame))
@@ -386,12 +398,16 @@
 (defn fkm-icall (fns fv args)
     (fkm-icall-frame fns fv args (fkm-memory-new)))
 (defn fkm-icall-frame (fns fv args memory)
-    (fkm-icall-frame2 fns (head fv) (head (tail fv)) (fkm-cap-append (tail (tail fv)) args) memory))
+    (fkm-icall-source fns fv args memory ""))
+(defn fkm-icall-source (fns fv args memory source)
+    (fkm-icall-source2 fns (head fv) (head (tail fv)) (fkm-cap-append (tail (tail fv)) args) memory source))
 (defn fkm-icall2 (fns fidx arity args)
     (fkm-icall-frame2 fns fidx arity args (fkm-memory-new)))
 (defn fkm-icall-frame2 (fns fidx arity args memory)
-    (fkm-call-eval fns (nth fns fidx)
-        (if (eq arity 0) (list) (if (eq arity 1) (head args) args)) memory))
+    (fkm-icall-source2 fns fidx arity args memory ""))
+(defn fkm-icall-source2 (fns fidx arity args memory source)
+    (fkm-call-source fns (nth fns fidx)
+        (if (eq arity 0) (list) (if (eq arity 1) (head args) args)) memory source))
 
 ; ── organ ops (emitted-lane, like PUTC): the host's body through the sibling ──
 ; 13 SET idx val — RAM efferent (fk_mem write, returns val)
