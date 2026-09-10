@@ -1,0 +1,73 @@
+; preflight-exec: forbidden
+; Interned session gifts enter the standing Llama LoRA: overlay Control: at
+; dim 64, then one full-adapter step on the local 3B. Probe checkpoint stays
+; under .hearth. The committed voice adapter is not overwritten.
+; preludes: form-stdlib/core.fk form-stdlib/language-model.fk
+; preludes: form-stdlib/form-cli-router.fk
+; preludes: form-stdlib/form-cli-local-ready.bml
+; preludes: form-stdlib/form-cli-one-turn.bml
+; preludes: form-stdlib/form-cli-session-local.bml
+; preludes: form-stdlib/line-grammar.fk form-stdlib/form-fs.fk
+; preludes: form-stdlib/form-cli-lora-writer.bml
+; preludes: form-stdlib/walk-home.fk
+; preludes: form-stdlib/form-cli-session-home.bml
+; preludes: ingest/name-build-observe.fk
+; preludes: form-stdlib/native-llama-voice.bml
+; preludes: form-stdlib/native-lora-checkpoint.bml
+
+(do
+    (let fuel (fsh-fuel))
+    (let wrote (fsh-write-from-fuel (fsh-path) fuel (Dim)))
+    (print (list "schema" "session-home-embody-v1"
+        "fuel" fuel
+        "transcript-mark" (fsh-transcript-mark fuel)
+        "overlay-dim" (fsh-written-dim (fsh-path))
+        "control-loaded" (fsh-control-loaded (fsh-path))
+        "fqt-lora" (FqtLora)
+        "nbo-overlay" (nbo-enter (list 1 1 (fsh-control-loaded (fsh-path))))
+        "nbo-qwen-tensor" (nbo-enter (list 1 1 0))))
+    (let dir ".hearth/session-home-embody")
+    (fs-mkdir ".hearth")
+    (fs-mkdir dir)
+    (let start (host_monotonic_ms))
+    (let base (mr-path (mr-find "llama32-3b-mlx-4bit")))
+    (let adapter "form/form-stdlib/adapters/llama-3.2-3b-voice")
+    (if (or (le (file_size (str_concat base "/model.safetensors")) 0)
+            (le (file_size adapter) 0))
+        (do (print (list "llama" "nothing" "reason" "no-local-checkpoint"))
+            0)
+        (do
+            (let session (nlg-open base adapter))
+            (let model (head session))
+            (let tk (nth session 1))
+            (let tokens (append (list (nlt-special tk "<|begin_of_text|>"))
+                                (nlt-encode tk fuel)))
+            (let inputs (take (sub (len tokens) 1) tokens))
+            (let targets (tail tokens))
+            (let ctx (nll-context model (len tokens)))
+            (let state (nlb-state model))
+            (let r1 (nll-forward model ctx inputs 0 1))
+            (let before (nlb-backward model r1 targets state 1.0))
+            (nll-forward-close r1)
+            (let update (nlb-safe-step state 0.00001 1 1.0))
+            (let r2 (nll-forward model ctx inputs 0 1))
+            (let after (nlb-loss model r2 targets))
+            (nll-forward-close r2)
+            (let moved (if (lt after before) 1 0))
+            (print (list "llama" "learned"
+                "tokens" (len inputs)
+                "loss-before" before
+                "loss-after" after
+                "moved" moved
+                "update" update
+                "nbo-llama-tensor" (nbo-enter (list 1 1 moved))))
+            (let saved (nlc-save (str_concat dir "/adapters.safetensors")
+                (nlc-adapter-rows (nlb-pairs (nth model 1))) base 1))
+            (nlb-state-close state)
+            (nll-context-close ctx)
+            (nlg-close session)
+            (print (list "llama" "embodied"
+                "checkpoint" saved
+                "retained-buffers" (nth (metal_live) 2)
+                "total-ms" (sub (host_monotonic_ms) start)))
+            1)))
