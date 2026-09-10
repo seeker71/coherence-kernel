@@ -46,16 +46,9 @@
     ; This displayed gate admits candidates; the ASR doubt and word checks still decide words.
     (defn el-gate (fl) (elp-enter fl))
     ; Tag filtering, repetition handling, and both acoustic views share one BML organ.
-    ; the cut (bytes since the mic opened) becomes the decoder's first timestamp: 640 bytes per
-    ; 20 ms tick. The frame it must be measured in is the ENCODER'S buffer, not the window: the
-    ; buffer is always el-window bytes with the silence in FRONT (enw-encode-parts), so a window
-    ; still filling sits at offset pad and its newest sample is at the buffer's very end. Measuring
-    ; from the window's own start told the decoder to begin inside the padding — earlier than any
-    ; audio — for the whole of the lane's first eight seconds, which is precisely when someone
-    ; first speaks to it, and it shifted every timestamp it answered with by the same amount.
-    (defn el-tick (total wlen cut)
-        (do (let start (sub total wlen)) (let rel (sub cut start)) (let pad (sub (el-window) wlen))
-            (div (add (if (gt pad 0) pad 0) (if (le rel 0) 0 rel)) 640)))
+    ; eac-open crops the PCM and peak metadata at the same phrase cut before
+    ; encoding. Its first timestamp is the front padding in that encoder buffer;
+    ; the newest sample still stands at the eight-second buffer's end.
     ; ── what closes a line, and what each close costs ─────────────────────────────────────────
     ; Because the buffer's end IS the newest sample, the decoder's own last timestamp read against
     ; that end says how much silence WHISPER heard at the tail: its own voice-activity judgment, at
@@ -67,13 +60,6 @@
     ; is read off the spool instead of argued.
     (defn el-ticks () (div (el-window) 640))
     (defn el-tail-sil (ids) (do (let e (enw-last-ts ids)) (if (lt e 0) (sub 0 1) (mul 20 (sub (el-ticks) e)))))
-    ; the pass: the whole open phrase is revisable; gain is one bounded scale for the window
-    ; the window is handed to the encoder still in its pieces (the join cost five sixths of this reading), and
-    ; the line the pass hands back is the one it does NOT doubt — its own doubt travels beside it in per-mille
-    (defn el-hear (st win tick cap lang prefix gain)
-        (do (let t0 (now_unix_ms)) (let Te (enw-encode-parts-gain st win (el-window) gain)) (let t1 (now_unix_ms))
-            (let r (enw-transcribe-from2 st Te tick cap lang prefix)) (let t2 (now_unix_ms))
-            (eac-pack st r (sub t1 t0) (sub t2 t1) gain)))
     ; a live pass that changed the line: the live frame for the glass, and the line as it stands for the
     ; tongue lane ("live", the segment's cut, the last sample's time, tongue, text).
     ; the live frame carries what the line is AND how settled it is: `stable` counts the passes in
@@ -143,7 +129,7 @@
                         (let speech1 (if (eq heard? 1) 1 speech))
                         (let lastvoice1 (if (eq heard? 1) tend lastvoice))
                         (if (and (eq speech1 1) (ge (sub total1 cut) 9600))
-                            (do (let h (el-hear st w1 (el-tick total1 (el-wlen w1) cut) (add 8 (div (sub total1 cut) 2000)) (sub 0 1) (elp-revision-prefix p1 p2) (elp-window-gain listening1)))
+                            (do (let h (eac-open st w1 total1 cut (add 8 (div (sub total1 cut) 2000)) listening1))
                                 (if (not (ewl-running? deadline)) live
                                 (do (let now (now_unix_ms))
                                 (let changed (if (eq (len lasth) 0) 1 (if (str_eq (nth h 1) (nth lasth 1)) 0 1)))
@@ -179,7 +165,7 @@
                                 (let tsil (el-tail-sil (nth h 6)))
                                 (let why1 (elp-close (sub now lastvoice1) tsil (if (eq words? 1) stable1 0) (ge (sub total1 cut) (el-window))))
                                 (if (gt (str_len why1) 0)
-                                    (do (let review (eac-close st w1 total1 cut (add 8 (div (sub total1 cut) 2000)) (elp-window-gain listening1) best))
+                                    (do (let review (eac-close st w1 total1 cut (add 8 (div (sub total1 cut) 2000)) (nth h 10) best))
                                         (let final (head review))
                                         ; A retired owner cannot publish after its second model pass.
                                         (if (not (ewl-running? deadline)) live

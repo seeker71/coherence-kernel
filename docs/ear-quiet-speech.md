@@ -66,6 +66,30 @@ a weight update. Deterministic noise can be highly confident on the second view;
 an explicit conflicting-audio test proves confidence alone cannot replace the
 first phrase. Agreement of one model with itself is still not proof of truth.
 
+## A new phrase owns its audio context
+
+`eac-open(st, parts, totalBytes, cutBytes, cap, listening)` is the live native
+open-phrase door. It crops PCM and measured peak metadata at the same phrase
+boundary **before** mel normalization and gain selection. Audio before that cut
+no longer affects the phrase's gain or encoder input. The room estimate
+and onset pre-roll remain; all audio within the current phrase stays revisable.
+Whole chunks reuse their measured peaks. If the cut crosses a chunk, only its
+retained samples are remeasured. The decoder starts at the resulting front-padding
+timestamp, keeping the latest sample at the same eight-second endpoint.
+
+The close review receives this same phrase gain. Frame and segment formats,
+settled display slots, and confidence thresholds are unchanged. Both live entry
+and physical quality tests call `eac-open`; the test no longer reconstructs that
+path independently.
+
+In the deterministic loud-prefix/16x-quiet development case, the previous window
+held gain at 1x and missed the expected phrase. The cropped path chose 16x and
+recovered it, matching the standalone phrase's token IDs and confidence. A cut
+inside a chunk also matches. Observed open passes took 12–38 ms across runs;
+these are individual timings, not a latency guarantee.
+Final acceptance still refuses this low-confidence fixture. This is an acoustic
+context-isolation regression, not a weight update or held-out accuracy result.
+
 ## Reproduce locally
 
 Run each band through `observe/preflight-stdin-run.fk` first, passing its path on
@@ -76,8 +100,8 @@ stdin. Then use `form-run ./fkwu` with these paths:
 | `form/form-stdlib/tests/ear-listening-band.fk` | 4194303 | Onset, hysteresis, dropout, gain bounds, pre-roll, revisability, close policy, quiet-level display |
 | `form/form-stdlib/tests/ear-quiet-quality-band.fk` | 255 | Real local model, attenuation ladder, negative controls, erroneous-prefix correction |
 | `form/form-stdlib/tests/ear-native-band.fk` | 32767 | Existing unity-gain mel, encoder, language, text, and doubt pins unchanged |
-| `form/form-stdlib/tests/ear-acoustic-review-band.fk` | 2097151 | Shared cleanup, unchanged gates, exact text/language agreement, zero-pass path, phrase cuts |
-| `form/form-stdlib/tests/ear-acoustic-quality-band.fk` | 1023 | Real close recovery, quiet limits, silence/noise, conflicting audio, exact trailing fill and segment isolation |
+| `form/form-stdlib/tests/ear-acoustic-review-band.fk` | 268435455 | Shared cleanup, unchanged gates, agreement, zero-pass path, phrase cuts, scoped gain and timestamps |
+| `form/form-stdlib/tests/ear-acoustic-quality-band.fk` | 32767 | Real close recovery, quiet limits, silence/noise, conflicting audio, trailing fill, loud-prefix and straddling-chunk isolation |
 | `form/form-stdlib/tests/ear-axes-band.fk` | 524287 | Glass decoding, optional-field honesty, gain, revisability, and local review display |
 
 The quality band uses only the existing committed two-second fixture. Its original,
