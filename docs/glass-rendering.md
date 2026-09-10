@@ -14,6 +14,22 @@ Terminal support determines whether intermediate writes are visually batched;
 the Form buffer and changed-region suppression work independently of that support.
 No Rich, Python renderer, shell renderer, or new external service is involved.
 
+## Bookkeeping belongs at the producing boundary
+
+Shared-memory mapping counts and bytes are updated when a mapping opens or
+closes. `kernel_stat` and the kernel live page read that ledger in constant time;
+they do not scan the history of released handles. Live-page word 10 counts
+currently mapped gifts, consistent with `kernel_stat 41`; word 11 and key 42
+count their actual mapped bytes, including the carrier header and host rounding.
+Repeated or refused releases cannot decrement them twice. Native Form owns the
+observation policy and renderer; this small carrier repair removes repeated
+scans and consolidates unmapping (four fewer C lines).
+
+`observe/gift-bookkeeping-cost.bml` measures 20,000 counter reads before and
+after 20,000 real receive/release cycles. `tests/gift-bookkeeping-band.fk`
+under `form/form-stdlib/` verifies the mapping lifecycle, including kernel-page
+readers. This measures bookkeeping cost, not end-to-end screen latency.
+
 Run `./fkwu observe/form-glass-run.fk` in the viewing terminal. After a native
 binary repair, relaunch that carrier once to replace its already-running children.
 Thereafter a dependency change renews the renderer and the three sensor processes;

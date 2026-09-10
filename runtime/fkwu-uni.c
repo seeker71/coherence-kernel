@@ -1226,6 +1226,7 @@ static void **fk_gift_base;      /* gift frames: mapped bases (0 = released) */
 static long long *fk_gift_size;  /* gift frames: mapped sizes */
 static long long fk_gift_count;
 static long long fk_gift_cap;
+static long long fk_gift_active, fk_gift_bytes;
 #if defined(__has_include) && !defined(_WIN32)
 #if __has_include(<sys/stat.h>)
 #include <sys/stat.h>
@@ -10956,8 +10957,16 @@ static long long fk_gift_open(const char *gname, long long want, int writable) {
     fk_gift_base[fk_gift_count] = base;
     fk_gift_size[fk_gift_count] = cap;
     fk_gift_count = fk_gift_count + 1;
+    fk_gift_active = fk_gift_active + 1; fk_gift_bytes = fk_gift_bytes + cap;
     return (fk_gift_count - 1) << 1;
 #endif
+}
+/* Map/unmap owns this ledger; observing it never scans retired handles. */
+static void fk_gift_close(long long gh) {
+    if (!fk_gift_live(gh)) { return; }
+    munmap(fk_gift_base[gh], (size_t)fk_gift_size[gh]);
+    fk_gift_active = fk_gift_active - 1; fk_gift_bytes = fk_gift_bytes - fk_gift_size[gh];
+    fk_gift_base[gh] = 0;
 }
 /* the controlling terminal's window: cols when wantCols, else lines; a
  * non-terminal answers nothing */
@@ -11461,8 +11470,7 @@ static void fk_live_roster_register(long long pid) {
         k = k + 1;
     }
     if (free_slot >= 0) { slots[free_slot] = pid; }
-    munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
-    fk_gift_base[gh >> 1] = 0;
+    fk_gift_close(gh >> 1);
 }
 static void fk_live_note(int final);
 /* the page opens once: the counters the kernel increments repoint into it, what was counted so far carried over */
@@ -11522,9 +11530,7 @@ static void fk_live_open(void) {
 static void fk_live_note(int final) {
     if (fk_live_page == 0) { fk_live_open(); if (fk_live_page == 0) { return; } }
     volatile long long *w = fk_live_page + 2;
-    long long gb = 0, gi = 0;
-    while (gi < fk_gift_count) { if (fk_gift_base[gi] != 0) { gb = gb + fk_gift_size[gi]; } gi = gi + 1; }
-    w[6] = fk_np; w[7] = fk_sp; w[8] = fk_hp; w[9] = fk_fntop; w[10] = fk_gift_count; w[11] = gb; w[12] = fk_node_cap; w[13] = fk_cap; w[14] = fk_vsp; w[15] = fk_fp;
+    w[6] = fk_np; w[7] = fk_sp; w[8] = fk_hp; w[9] = fk_fntop; w[10] = fk_gift_active; w[11] = fk_gift_bytes; w[12] = fk_node_cap; w[13] = fk_cap; w[14] = fk_vsp; w[15] = fk_fp;
     w[18] = fk_live_cpu_us(); w[19] = final ? 0 : 1; w[21] = fk_melt_gen; w[22] = fk_field_on ? 2 : fk_store_shared; w[23] = fk_heap_gen; w[27] = fk_fntop;
     __atomic_store_n(&w[3], w[3] + 1, __ATOMIC_RELEASE);
     fk_prog_note_counts();
@@ -11537,8 +11543,7 @@ static long long fk_live_read_words(const char *name, long long *out, long long 
     volatile long long *w = (volatile long long *)fk_gift_base[gh >> 1] + 2;
     long long k = 0;
     while (k < count) { out[k] = w[k]; k = k + 1; }
-    munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
-    fk_gift_base[gh >> 1] = 0;
+    fk_gift_close(gh >> 1);
     return count;
 }
 /* ---- the publisher roster: names of every gift frame that carries a snapshot, 511 slots of 128 bytes (a name is root, a bar, publisher; up to 119 bytes) ---- */
@@ -11581,8 +11586,7 @@ static long long fk_roster_register(const char *name) {
         found = free_slot;
     }
     if (found >= 0) { *(long long *)(base + found * 128 + 120) = fk_live_now_ms(); }
-    munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
-    fk_gift_base[gh >> 1] = 0;
+    fk_gift_close(gh >> 1);
     return found;
 }
 static long long fk_roster_names(void) {
@@ -11600,8 +11604,7 @@ static long long fk_roster_names(void) {
         }
         k = k - 1;
     }
-    munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
-    fk_gift_base[gh >> 1] = 0;
+    fk_gift_close(gh >> 1);
     return l;
 }
 /* the hottest defns of this process: top-n by heat, then one pass over the program text for line and column */
@@ -11865,8 +11868,7 @@ static long long fk_live_read_page(const char *name, long long *out) {
         while (u < FK_OPCODE_ARM_CAP) { long long a = arms[u]; if (a > 0) { sum = sum + a; distinct = distinct + 1; if (a > hotc) { hotc = a; hot = u; } } u = u + 1; }
         out[4] = sum; out[16] = hot; out[17] = hotc; out[20] = distinct;
     }
-    munmap(fk_gift_base[gh >> 1], (size_t)fk_gift_size[gh >> 1]);
-    fk_gift_base[gh >> 1] = 0;
+    fk_gift_close(gh >> 1);
     return FK_LIVE_WORDS;
 }
 /* the hottest defns of ANY kernel by one of its page ledgers: (heat name unit line col boxes unboxes) cells */
@@ -11883,7 +11885,7 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     char *base = (char *)fk_gift_base[gh >> 1];
     long long sz = fk_gift_size[gh >> 1];
     volatile long long *w = (volatile long long *)base + 2;
-    if (sz < FK_LIVE_INRAM_OFF + FK_LIVE_FNS * 8 || w[28] != FK_LIVE_VERSION) { munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
+    if (sz < FK_LIVE_INRAM_OFF + FK_LIVE_FNS * 8 || w[28] != FK_LIVE_VERSION) { fk_gift_close(gh >> 1); return 1; }
     long long *heat = (long long *)(base + FK_LIVE_HEAT_OFF), *fbox = (long long *)(base + FK_LIVE_FBOX_OFF), *unbox = (long long *)(base + FK_LIVE_UNBOX_OFF), *meta = (long long *)(base + FK_LIVE_META_OFF), *native = (long long *)(base + FK_LIVE_NATIVE_OFF);
     char *blob = base + FK_LIVE_BLOB_OFF;
     long long *mintl = (long long *)(base + FK_LIVE_MINT_OFF);
@@ -11891,9 +11893,9 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
     long long *led = ledger == 1 ? fbox : (ledger == 2 ? mintl : (ledger == 3 ? inraml : heat));
     long long count = w[29] < FK_LIVE_FNS ? w[29] : FK_LIVE_FNS;
     if (want > count) { want = count; }
-    if (want <= 0) { munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
+    if (want <= 0) { fk_gift_close(gh >> 1); return 1; }
     long long *pj = (long long *)malloc((size_t)want * 8), *ph = (long long *)malloc((size_t)want * 8);
-    if (pj == 0 || ph == 0) { free(pj); free(ph); munmap(base, (size_t)sz); fk_gift_base[gh >> 1] = 0; return 1; }
+    if (pj == 0 || ph == 0) { free(pj); free(ph); fk_gift_close(gh >> 1); return 1; }
     long long np = 0, fx = 0;
     while (fx < count) {
         long long h = led[fx];
@@ -11916,8 +11918,7 @@ static long long fk_page_rows(long long pid, int ledger, long long want) {
         q = q - 1;
     }
     free(pj); free(ph);
-    munmap(base, (size_t)sz);
-    fk_gift_base[gh >> 1] = 0;
+    fk_gift_close(gh >> 1);
     return l;
 }
 /* ---- the float-NodeID surface (tags 195 / 201) ---- */
@@ -13791,8 +13792,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (!fk_gift_live(gh)) {
             return fk_nothing;
         }
-        munmap(fk_gift_base[gh], (size_t)fk_gift_size[gh]);
-        fk_gift_base[gh] = 0;
+        fk_gift_close(gh);
         return 1 << 1;
     }
     if (t == 62) {
@@ -14764,14 +14764,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         if (ks_k == 41) {
             /* gift frames mapped in this process (shm_offer/shm_receive handles still standing) */
-            long long ks_g = 0, ks_i = 0;
-            while (ks_i < fk_gift_count) { if (fk_gift_base[ks_i] != 0) { ks_g = ks_g + 1; } ks_i = ks_i + 1; }
-            return ks_g << 1;
+            return fk_gift_active << 1;
         }
         if (ks_k == 42) {
-            long long ks_b = 0, ks_i = 0;
-            while (ks_i < fk_gift_count) { if (fk_gift_base[ks_i] != 0) { ks_b = ks_b + fk_gift_size[ks_i]; } ks_i = ks_i + 1; }
-            return ks_b << 1;
+            return fk_gift_bytes << 1;
         }
         if (ks_k == 43) {
             return fk_fntop << 1;
