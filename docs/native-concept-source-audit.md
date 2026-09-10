@@ -122,6 +122,68 @@ and CPU resource release. It returns `11`, exit zero, and retains the complete
 evidence directory. The existing 130,000-cell operational detector remains the
 independent consumer check.
 
-Concept acquisition, translation and corpus builders still have JavaScript
-owners. Their native replacements must preserve source identity and observed
-publication before those implementations can retire.
+## Attributed corpus reindexing
+
+`form-run ./fkwu observe/concept-human-reindex-run.bml </dev/null` rebuilds the
+attributed corpus in Form. An optional unique `root`/`hash` JSON object selects
+the source root and hash policy. Three held sources supply the canonical labels,
+the 1,300 attributed sentences and their archive manifest.
+
+The byte Aho matcher validates UTF-8, folds ASCII letters only, preserves exact
+surface insertion order and retains every matching concept ID in ascending
+order. Chinese and Japanese use their unsegmented matching rule; other locales
+retain word boundaries. Own matches precede suffix matches, including surfaces
+that become equal under ASCII folding. The first observed ambiguous surface
+therefore retains its identity.
+
+Only detector evidence and role fields change. Contributor, license, source
+row hash, review state, sentence and other attribution fields remain byte
+exact. Row framing removes line terminators without trimming sentence spaces.
+The current 429,086-byte corpus remains identical, with 11,676 detections of
+3,072 concepts and role counts 550 domain, 655 open, 43 ambiguity and 52 negative.
+All 1,301 offsets and metadata runtime values agree with the current consumer.
+Generated file validation uses portable Form SHA directly.
+
+`form-run ./fkwu observe/concept-human-reindex-witness.bml` witnesses complete
+private publication, all preserved fields, matching order and UTF-8 boundaries,
+a final sentence ending in spaces, native hashes, portable republication,
+changed-source refusal and physical release of every private stage. Its final
+value is `1`, exit zero. The shared owner publishes three independently atomic
+files; it does not claim one atomic generation across them.
+
+## Complete WordNet sense construction
+
+`form-run ./fkwu observe/concept-sense-build-run.bml` receives one JSON stdin
+object. The required string `dict` names the local WordNet dictionary directory;
+optional `root` and `hash` select the repository root and portable or ARM64 hash
+policy. Unknown or duplicate fields, incomplete paths and unknown policies
+refuse. The dictionary is supplied explicitly; acquisition is separate.
+
+The source manifest admits the full hashes of `index.sense`, `data.noun`,
+`data.verb`, `data.adj` and `data.adv`. The preserved WordNet license must match
+the source header. The builder holds those bytes and the semantic index and
+payload, retains the original sense order, distinguishes adjective satellites,
+normalizes gloss separators, and checks every projected sense count. A mapped
+lemma requires a positive count and every referenced definition must exist.
+
+The current complete result is 3,867,783 bytes, 34,244 senses, 7,371 mapped
+anchors, 5,618 ambiguous anchors and a maximum of 75 senses per anchor. Its
+SHA-256 is
+`cda433f5de3b5cd1c7787bdbecd3e0ae4daad60b3537e9241bcb47192dc5aafb`.
+All 10,001 offsets and metadata runtime values remain exact. Four staged
+artifacts publish with the manifest last, after rereading both the repository
+inputs and the separately held dictionary. Refusal releases owned stages and
+reports any already published prefix.
+
+`form-run ./fkwu observe/concept-sense-builder-witness.bml` receives a JSON
+object containing the single string field `dict`. It compares the complete
+data, every offset, every metadata value and all manifest bindings; publishes
+a private copy; repeats with portable hashing; and observes malformed numeric
+fields, spans, missing definitions, mapped-zero counts, duplicate requests,
+NUL paths, source-identity changes and changes after staging. It returns `1`
+with exit zero. The two public doors preserve their effectful preflight marker;
+the witness library can be preflighted without acquiring or publishing data.
+
+Acquisition, translation and other builders still have JavaScript owners.
+The deterministic substantive builder has private complete-byte and publication
+proofs; its acquisition and refresh responsibilities remain active in JavaScript.

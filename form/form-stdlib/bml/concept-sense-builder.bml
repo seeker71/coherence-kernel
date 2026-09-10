@@ -1,0 +1,233 @@
+// Full WordNet sense projection from held, admitted source bytes.
+// preludes: form-stdlib/bml/concept-materializer.bml form-stdlib/keyed-map.fk
+section [form.bml] {
+ class ConceptSenseBuilder {
+  def ctsb-base() = "cognition/concept-text-senses-10000";
+  def ctsb-path(suffix) = str_concat(ctsb-base(),suffix);
+  def ctsb-semantic(suffix) = str_concat("model/concept-semantics-10000-",suffix);
+  def ctsb-files() = list("index.sense","data.noun","data.verb","data.adj","data.adv");
+  def ctsb-check(state,aspect,ok) = csa-check(state,str_concat("sense-build-",aspect),ok,"held WordNet identity, complete sense bindings and owned artifacts");
+  def ctsb-host-path?(value) = and(str_eq(value_kind(value),"string"),and(gt(str_len(value),0),lt(str_find(value,byte_to_str(0),0),0)));
+  def ctsb-number(state,text,start,width) {
+   if not(and(ge(start,0),and(gt(width,0),le(add(start,width),str_len(text))))) then ctsb-check(state,"decimal-span",0) else 0;
+   let value = substring(text,start,add(start,width));
+   if not(csa-digits(value,0)) then ctsb-check(state,"complete-decimal",0) else 0;
+   str_to_int(value);
+  }
+  def ctsb-get(map,key) = km-get(map,km-key-of-string(key),0);
+  def ctsb-put(work,map,key,value) = record_set(work,map,km-put(record_get(work,map),km-key-of-string(key),value));
+  def ctsb-inc(work,key,amount) = record_set(work,key,add(record_get(work,key),amount));
+  def ctsb-line(key,value) = str_concat(key,str_concat(" ",str_concat(value,"\n")));
+  def ctsb-manifest-value(state,lines,key,found) {
+   if nil?(lines) then if str_eq(value_kind(found),"string") then found else ctsb-check(state,"source-binding-missing",0)
+   else ctsb-manifest-next(state,head(lines),tail(lines),key,found);
+  }
+  def ctsb-manifest-next(state,line,rest,key,found) {
+   let prefix = str_concat(key," ");
+   if str_eq(substring(line,0,str_len(prefix)),prefix) then ctsb-manifest-found(state,line,rest,key,found,str_len(prefix)) else ctsb-manifest-value(state,rest,key,found);
+  }
+  def ctsb-manifest-found(state,line,rest,key,found,start) {
+   if str_eq(value_kind(found),"string") then ctsb-check(state,"source-binding-unique",0) else 0;
+   let value = substring(line,start,str_len(line));
+   if eq(str_len(value),0) then ctsb-check(state,"source-binding-nonempty",0) else 0;
+   ctsb-manifest-value(state,rest,key,value);
+  }
+  def ctsb-binding(work,key) = ctsb-manifest-value(record_get(work,"input"),record_get(work,"manifest-lines"),key,0);
+  def ctsb-admit(work,files) {
+   if nil?(files) then 1 else ctsb-admit-file(work,head(files),tail(files));
+  }
+  def ctsb-admit-file(work,file,rest) {
+   let expected = ctsb-binding(work,str_concat(file,"_sha256"));
+   let observed = csa-file-hash(record_get(work,"source"),file);
+   ctsb-check(record_get(work,"input"),str_concat("source-identity-",file),str_eq(expected,observed));
+   ctsb-admit(work,rest);
+  }
+  def ctsb-anchors(work,index,payload,id) {
+   if eq(id,10000) then 1 else ctsb-anchor(work,index,payload,id,mul(id,35));
+  }
+  def ctsb-anchor(work,index,payload,id,at) {
+   let state = record_get(work,"input"); let method = ctsb-number(state,index,at,1);
+   let lemma = if gt(method,0) then ctsb-anchor-lemma(work,index,payload,at) else 0;
+   record_set(work,"anchors",cons(lemma,record_get(work,"anchors")));
+   if gt(method,0) then ctsb-inc(work,"mapped",1) else 0;
+   ctsb-anchors(work,index,payload,add(id,1));
+  }
+  def ctsb-anchor-lemma(work,index,payload,at) {
+   let state = record_get(work,"input"); let offset = ctsb-number(state,index,add(at,1),8);
+   let width = ctsb-number(state,payload,offset,2); let start = add(offset,2);
+   if not(and(gt(width,0),le(add(start,width),str_len(payload)))) then ctsb-check(state,"lemma-span",0) else 0;
+   let text = substring(payload,start,add(start,width)); let expected = ctsb-number(state,index,add(at,23),3);
+   if not(gt(expected,0)) then ctsb-check(state,"mapped-sense-count-positive",0) else 0;
+   let found = ctsb-get(record_get(work,"lemmas"),text);
+   if record?(found) then ctsb-existing-lemma(state,found,expected) else ctsb-new-lemma(work,text,expected);
+  }
+  def ctsb-existing-lemma(state,lemma,expected) {
+   if not(eq(record_get(lemma,"expected"),expected)) then ctsb-check(state,"shared-lemma-count",0) else 0;
+   lemma;
+  }
+  def ctsb-new-lemma(work,text,expected) {
+   let lemma = record_new(0,"text",text,"expected",expected,"senses",list(),"count",0);
+   ctsb-put(work,"lemmas",text,lemma);
+   lemma;
+  }
+  def ctsb-index(work,lines) = if nil?(lines) then 1 else ctsb-index-line(work,head(lines),tail(lines));
+  def ctsb-index-line(work,line,rest) {
+   let fields = split-on(line," "); let key = head(fields); let at = str_find(key,"%",0);
+   if not(and(eq(len(fields),4),and(gt(at,0),lt(add(at,1),str_len(key))))) then ctsb-check(record_get(work,"input"),"sense-index-shape",0) else 0;
+   let lemma = ctsb-get(record_get(work,"lemmas"),substring(key,0,at));
+   if record?(lemma) then ctsb-index-sense(work,lemma,fields,substring(key,add(at,1),add(at,2))) else 0;
+   ctsb-index(work,rest);
+  }
+  def ctsb-pos(kind) = if str_eq(kind,"1") then "n" else if str_eq(kind,"2") then "v" else if or(str_eq(kind,"3"),str_eq(kind,"5")) then "a" else if str_eq(kind,"4") then "r" else "";
+  def ctsb-index-sense(work,lemma,fields,kind) {
+   let state = record_get(work,"input"); let pos = ctsb-pos(kind); let offset = nth(fields,1);
+   if not(and(eq(str_len(pos),1),eq(str_len(offset),8))) then ctsb-check(state,"sense-kind-offset",0) else 0;
+   ctsb-number(state,offset,0,8);
+   let number = ctsb-number(state,nth(fields,2),0,str_len(nth(fields,2)));
+   let tags = ctsb-number(state,nth(fields,3),0,str_len(nth(fields,3)));
+   if not(gt(number,0)) then ctsb-check(state,"positive-sense-number",0) else 0;
+   let key = str_concat(pos,offset); let found = ctsb-get(record_get(work,"definitions"),key);
+   let definition = if record?(found) then found else ctsb-new-definition(work,key,pos,offset);
+   record_set(lemma,"senses",cons(list(definition,number,tags),record_get(lemma,"senses")));
+   ctsb-inc(lemma,"count",1);
+  }
+  def ctsb-new-definition(work,key,pos,offset) {
+   let value = record_new(0,"ready",0,"pos",pos,"offset",offset);
+   ctsb-put(work,"definitions",key,value); value;
+  }
+  def ctsb-data(work,file,pos) = ctsb-data-lines(work,csa-lines(csa-file(record_get(work,"source"),file)),pos);
+  def ctsb-data-lines(work,lines,pos) = if nil?(lines) then 1 else ctsb-data-line(work,head(lines),tail(lines),pos);
+  def ctsb-data-line(work,line,rest,pos) {
+   let offset = substring(line,0,8);
+   let definition = if and(eq(str_len(offset),8),and(csa-digits(offset,0),eq(str_byte_at(line,8),32))) then ctsb-get(record_get(work,"definitions"),str_concat(pos,offset)) else 0;
+   if record?(definition) then ctsb-definition(work,definition,line,pos) else 0;
+   ctsb-data-lines(work,rest,pos);
+  }
+  def ctsb-trim-end(text,end) = if eq(end,0) then 0 else if le(str_byte_at(text,sub(end,1)),32) then ctsb-trim-end(text,sub(end,1)) else end;
+  def ctsb-clean(text,at,start,inGap,bins) {
+   if eq(at,str_len(text)) then fbc-finish(fbc-put(bins,substring(text,start,at)),"") else ctsb-clean-byte(text,at,start,inGap,bins,str_byte_at(text,at));
+  }
+  def ctsb-clean-byte(text,at,start,inGap,bins,byte) {
+   let gap = or(eq(byte,9),or(eq(byte,10),eq(byte,13)));
+   if gap then ctsb-clean(text,add(at,1),add(at,1),1,if inGap then bins else fbc-put(fbc-put(bins,substring(text,start,at))," "))
+   else ctsb-clean(text,add(at,1),start,0,bins);
+  }
+  def ctsb-definition(work,definition,line,pos) {
+   let state = record_get(work,"input"); let bar = str_find(line," | ",0);
+   if or(record_get(definition,"ready"),lt(bar,14)) then ctsb-check(state,"unique-complete-definition",0) else 0;
+   let type = substring(line,12,13);
+   if not(or(str_eq(type,pos),and(str_eq(pos,"a"),str_eq(type,"s")))) then ctsb-check(state,"definition-pos",0) else 0;
+   let gloss = substring(line,add(bar,3),ctsb-trim-end(line,str_len(line)));
+   record_set(definition,"type",type); record_set(definition,"gloss",ctsb-clean(gloss,0,0,0,list()));
+   record_set(definition,"ready",1);
+  }
+  def ctsb-senses(work,senses,bins) = if nil?(senses) then bins else ctsb-sense(work,head(senses),tail(senses),bins);
+  def ctsb-sense(work,sense,rest,bins) {
+   let definition = head(sense);
+   if not(record_get(definition,"ready")) then ctsb-check(record_get(work,"input"),"referenced-definition-present",0) else 0;
+   let type = record_get(definition,"type");
+   let fields = list(str_concat(type,record_get(definition,"offset")),type,int_to_str(nth(sense,1)),int_to_str(nth(sense,2)),record_get(definition,"gloss"));
+   ctsb-senses(work,rest,fbc-put(bins,str_concat("\t",csa-join(fields,"\t"))));
+  }
+  def ctsb-render(work,anchors,id) = if nil?(anchors) then id else ctsb-render-row(work,head(anchors),tail(anchors),id);
+  def ctsb-render-row(work,lemma,rest,id) {
+   let count = if record?(lemma) then record_get(lemma,"count") else 0;
+   if record?(lemma) then if not(eq(count,record_get(lemma,"expected"))) then ctsb-check(record_get(work,"input"),"projected-sense-count",0) else 0 else 0;
+   let prefix = str_concat(int_to_str(id),str_concat("\t",int_to_str(count)));
+   let bins = if record?(lemma) then ctsb-senses(work,reverse(record_get(lemma,"senses")),fbc-put(list(),prefix)) else fbc-put(list(),prefix);
+   let row = fbc-finish(fbc-put(bins,"\n"),"");
+   record_set(work,"data",fbc-put(record_get(work,"data"),row));
+   ctsb-inc(work,"bytes",str_len(row)); ctsb-inc(work,"total",count);
+   if gt(count,1) then ctsb-inc(work,"ambiguous",1) else 0;
+   record_set(work,"max",max2(record_get(work,"max"),count));
+   record_set(work,"offsets",fbc-put(record_get(work,"offsets"),str_concat("    ",str_concat(int_to_str(record_get(work,"bytes")),"\n"))));
+   ctsb-render(work,rest,add(id,1));
+  }
+  def ctsb-prepare(root,dict,engine) {
+   let state = cmm-state(root,engine); let source = cmm-state(dict,engine);
+   ctsb-check(state,"hash-policy",or(str_eq(engine,"form-sha256"),str_eq(engine,"arm64-sha256")));
+   ctsb-check(state,"complete-host-paths",and(ctsb-host-path?(root),ctsb-host-path?(dict)));
+   let work = record_new(0,"input",state,"source",source,"manifest-lines",csa-lines(csa-file(state,ctsb-path("-source-manifest.txt"))),"lemmas",km-for(10000),"definitions",km-for(35000),"anchors",list(),"data",list(),"offsets",fbc-put(list(),"    0\n"),"mapped",0,"ambiguous",0,"total",0,"max",0,"bytes",0);
+   ctsb-admit(work,ctsb-files());
+   let licensePath = ctsb-binding(work,"license");
+   ctsb-check(state,"complete-license-path",ctsb-host-path?(licensePath));
+   let license = csa-file(state,licensePath);
+   ctsb-check(state,"source-license-preserved",and(gt(str_len(license),0),str_eq(license,substring(csa-file(source,"data.noun"),0,str_len(license)))));
+   let index = csa-file(state,ctsb-semantic("index.dat")); let payload = csa-file(state,ctsb-semantic("payload.dat"));
+   ctsb-check(state,"semantic-index-extent",eq(str_len(index),350000));
+   ctsb-anchors(work,index,payload,0);
+   ctsb-index(work,csa-lines(csa-file(source,"index.sense")));
+   ctsb-data(work,"data.noun","n"); ctsb-data(work,"data.verb","v"); ctsb-data(work,"data.adj","a"); ctsb-data(work,"data.adv","r");
+   ctsb-check(state,"complete-output-rows",eq(ctsb-render(work,reverse(record_get(work,"anchors")),0),10000));
+   let data = fbc-finish(record_get(work,"data"),"");
+   record_set(work,"data",data); record_set(work,"sha256",csa-hash(state,data));
+   ctsb-check(state,"complete-output-bytes",eq(str_len(data),record_get(work,"bytes")));
+   work;
+  }
+  def ctsb-quoted(value) = json-emit-precise(json-node-string(value));
+  def ctsb-fn(name,value) = str_concat("  (defn cts10-",str_concat(name,str_concat(" () ",str_concat(value,")\n"))));
+  def ctsb-number-fns(work,pairs) = if nil?(pairs) then "" else str_concat(ctsb-fn(head(head(pairs)),int_to_str(record_get(work,nth(head(pairs),1)))),ctsb-number-fns(work,tail(pairs)));
+  def ctsb-offset-source(work) = str_concat("; Complete WordNet sense byte offsets, generated by Form.\n; preludes: form/form-stdlib/core.fk\n(do\n  (defn cts10-offsets () (list\n",str_concat(fbc-finish(record_get(work,"offsets"),""),"  ))\n)\n"));
+  def ctsb-metadata(work) {
+   let a = fbc-put(list(),"; Explicit WordNet ambiguity surface, generated by Form.\n; preludes: form/form-stdlib/core.fk\n(do\n");
+   let b = fbc-put(a,str_concat(ctsb-fn("count","10000"),ctsb-number-fns(work,list(list("mapped-anchors","mapped"),list("total-senses","total"),list("ambiguous-anchors","ambiguous"),list("max-senses","max")))));
+   fbc-finish(fbc-put(b,str_concat(ctsb-fn("data-path",ctsb-quoted(ctsb-path(".tsv"))),str_concat(ctsb-fn("data-sha256",ctsb-quoted(record_get(work,"sha256"))),")\n"))),"");
+  }
+  def ctsb-source-bindings(work,files,bins) = if nil?(files) then bins else ctsb-source-bindings(work,tail(files),fbc-put(bins,ctsb-line(str_concat(head(files),"_sha256"),csa-file-hash(record_get(work,"source"),head(files)))));
+  def ctsb-count-lines(work,pairs,bins) = if nil?(pairs) then bins else ctsb-count-lines(work,tail(pairs),fbc-put(bins,ctsb-line(head(head(pairs)),int_to_str(record_get(work,nth(head(pairs),1))))));
+  def ctsb-manifest(work) {
+   let state = record_get(work,"input");
+   let a = fbc-put(list(),"Explicit concept sense surface source manifest\nbuilder observe/concept-sense-build-run.bml\n\n");
+   let b = fbc-put(a,str_concat(ctsb-line("source",ctsb-binding(work,"source")),ctsb-line("archive_sha256",ctsb-binding(work,"archive_sha256"))));
+   let c = ctsb-source-bindings(work,ctsb-files(),b);
+   let d = fbc-put(c,str_concat(ctsb-line("semantic_index_sha256",csa-file-hash(state,ctsb-semantic("index.dat"))),ctsb-line("semantic_payload_sha256",csa-file-hash(state,ctsb-semantic("payload.dat")))));
+   let e = fbc-put(d,str_concat(ctsb-line("output",ctsb-path(".tsv")),str_concat(ctsb-line("output_sha256",record_get(work,"sha256")),"anchors 10000\n")));
+   let f = ctsb-count-lines(work,list(list("mapped_anchors","mapped"),list("ambiguous_anchors","ambiguous"),list("total_senses","total"),list("max_senses","max")),e);
+   fbc-finish(fbc-put(f,ctsb-line("license",ctsb-binding(work,"license"))),"");
+  }
+  def ctsb-complete(work) {
+   record_set(work,"outputs",list(list(ctsb-path(".tsv"),record_get(work,"data")),list(ctsb-path("-offsets.fk"),ctsb-offset-source(work)),list(ctsb-path("-metadata.fk"),ctsb-metadata(work)),list(ctsb-path("-source-manifest.txt"),ctsb-manifest(work)))); work;
+  }
+  def ctsb-report(work) = json-node-object(list(oh-s("schema","form-concept-sense-build-v1"),oh-n("anchors",10000),oh-n("mappedAnchors",record_get(work,"mapped")),oh-n("ambiguousAnchors",record_get(work,"ambiguous")),oh-n("totalSenses",record_get(work,"total")),oh-n("maxSenses",record_get(work,"max")),oh-n("bytes",record_get(work,"bytes")),oh-s("sha256",record_get(work,"sha256"))));
+  def ctsb-source-fresh(work,files) = if nil?(files) then 1 else ctsb-source-fresh-file(work,head(files),tail(files));
+  def ctsb-source-fresh-file(work,path,rest) {
+   let source = record_get(work,"source"); let observed = fbc-read-exact(csa-at(source,path),0);
+   if not(and(fbc-good(observed),str_eq(fbc-value(observed),csa-file(source,path)))) then cmm-abort(record_get(work,"input"),"wordnet-changed-before-publication",path) else ctsb-source-fresh(work,rest);
+  }
+  def ctsb-publish(work) {
+   let state = record_get(work,"input"); let outputs = record_get(work,"outputs");
+   cmm-freeze-outputs(state,outputs);
+   let suffix = str_concat(".stage-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(host_monotonic_ms()))));
+   let stages = cmm-stages(state,outputs,suffix); record_set(work,"stages",stages);
+   record_set(state,"owned-stages",list()); record_set(state,"published",0);
+   ctsb-check(state,"private-stage-paths",cmm-stage-free(state,stages)); cmm-stage-all(state,stages);
+   cmm-fresh(state,record_get(state,"files")); ctsb-source-fresh(work,record_get(record_get(work,"source"),"files"));
+   ctsb-check(state,"all-four-artifacts-published",eq(cmm-publish-all(state,stages,0),4));
+   ctsb-check(state,"private-stages-released",cmm-clean-stages(record_get(state,"owned-stages"))); record_set(state,"owned-stages",list());
+   print_str(json-emit-precise(ctsb-report(work))); 1;
+  }
+  def ctsb-run(root,dict,engine) = ctsb-publish(ctsb-complete(ctsb-prepare(root,dict,engine)));
+  def ctsb-request-fields(pairs,seen) {
+   if nil?(pairs) then 1 else ctsb-request-field(head(pairs),tail(pairs),seen);
+  }
+  def ctsb-request-field(pair,rest,seen) {
+   let key = json-pair-key(pair); let value = json-pair-value(pair);
+   and(oh-has(list("root","dict","hash"),key),and(not(oh-has(seen,key)),and(eq(node_type(value),2),ctsb-request-fields(rest,cons(key,seen)))));
+  }
+  def ctsb-request(text) {
+   if not(jwa-valid(text)) then csa-input-refused("complete sense-builder JSON required") else 0;
+   let request = parse-json("concept-sense-build-request",text);
+   if not(node_eq(node_category(request),JSON-OBJECT())) then csa-input-refused("sense-builder object required") else 0;
+   if not(ctsb-request-fields(json-object-pairs(request),list())) then csa-input-refused("unique root/dict/hash string fields required") else 0;
+   if not(json-object-has?(request,"dict")) then csa-input-refused("local WordNet dictionary path required") else 0;
+   let dict = json-string-value(json-object-get(request,"dict"));
+   if eq(str_len(dict),0) then csa-input-refused("nonempty WordNet dictionary path required") else 0;
+   ctsb-run(if json-object-has?(request,"root") then json-string-value(json-object-get(request,"root")) else ".",dict,if json-object-has?(request,"hash") then json-string-value(json-object-get(request,"hash")) else "form-sha256");
+  }
+  def ctsb-home() {
+   let text = read_line();
+   if or(nothing?(text),str_eq(text,"")) then csa-input-refused("one JSON line with local WordNet dictionary path required") else ctsb-request(text);
+  }
+ }
+ 0;
+}
