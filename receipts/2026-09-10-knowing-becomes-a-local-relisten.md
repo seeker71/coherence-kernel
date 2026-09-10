@@ -45,3 +45,16 @@ The exchange stayed alive by giving a measured lesson a reusable local action.
 The surprise was that changing the acoustic view helped where changing the
 confidence accounting did not. The discarded correct phrase became a repair;
 the still-uncertain quiet phrases remain the next honest limit.
+
+Live handover: source checkout fast-forwarded to `19b64e6f`; the same Glass
+supervisor 45877 admitted ear sensor 8852 and native ASR 8880. Its loaded symbol
+image contains `eac-pack`, `eac-select`, `eac-review`, and `eac-close`. The shared
+ear frame was 60 ms old, sequence 78622, with one admission. Its latest close
+was an ordinary `pause`, not a witnessed live recovery; the recovery claim above
+comes from the actual close-door fixture test, not invented microphone evidence.
+
+The rebase also received `c38d4e4b`, the native large-v3-turbo and committed
+tokenizer crossing. Both quality bands now use that tokenizer door instead of
+package data in a Python environment. The larger model's disagreement with the
+quiet fixture remains important: these are exact matches to the tiny ear's
+development pin, not independently established acoustic truth.
