@@ -1,0 +1,81 @@
+// Recall attempts together with the later observations in their session.
+// References stay private. Historical outcomes are evidence to consult; the
+// executing caller observes whether any proposed solution works here and now.
+// preludes: form-stdlib/native-session-evidence.bml
+section [form.bml] {
+ class NativeSessionExperience {
+  def nsx-bound(record) {
+   let original = json-node-object(oh-without(oh-without(json-object-pairs(record),"content_sha256"),"observed_at_ms"));
+   str_eq(nsm-str(record,"content_sha256"),nsm-hash(str_concat(json-emit-precise(original),"\n")));
+  }
+  def nsx-reference(home,path,kind) = oh-set(oh-set(nss-reference(path),"home",json-node-string(home)),"kind",json-node-string(kind));
+  def nsx-names(home,names) = if nil?(names) then list() else cons(nsx-reference(home,nsm-at(nsm-at(nsm-at(home,"experiences"),head(names)),"record.json"),"experience"),nsx-names(home,tail(names)));
+  def nsx-homes(homes) = if nil?(homes) then list() else append(nsx-home(nsm-str(head(homes),"home")),nsx-homes(tail(homes)));
+  def nsx-home(home) = if not(fs-is-dir?(nsm-at(home,"experiences"))) then list() else nsx-names(home,fs-list(nsm-at(home,"experiences")));
+  def nsx-legacy(sources) = if nil?(sources) then list() else nsx-legacy-one(head(sources),tail(sources));
+  def nsx-legacy-one(source,rest) {
+   let home = nsm-str(source,"home"); let id = fs-path-basename(fs-path-dirname(nsm-str(source,"path")));
+   let full = nsm-at(nsm-at(nsm-at(home,"experiences"),id),"record.json");
+   if gt(file_size(full),0) then nsx-legacy(rest) else cons(nsx-reference(home,nsm-str(source,"path"),"training-record"),nsx-legacy(rest));
+  }
+  def nsx-sources(home) {
+   let made = nsm-init(home); let legacy = nss-catalog(home);
+   let homes = json-array-elements(oh-get(nsm-json(nsm-at(home,"evidence-catalog.json")),"homes"));
+   append(nsx-homes(homes),nsx-legacy(legacy));
+  }
+  def nsx-experience(reference,record) {
+   if str_eq(nsm-str(reference,"kind"),"experience") then record else json-node-object(list(nsm-s("id",nsm-str(record,"id")),nsm-s("session",nsm-str(record,"session")),nsm-s("event",nsm-str(record,"event")),nsm-s("route",nsm-str(record,"route")),nsm-s("prompt",nsm-str(oh-get(record,"example"),"prompt")),nsm-s("attempt",if str_eq(nsm-str(record,"objective"),"supervised-answer") then nsm-str(oh-get(record,"example"),"completion") else ""),nsm-s("outcome",nsm-str(record,"outcome")),nsm-s("evidence",nsm-str(record,"evidence")),nsm-n("observed_at_ms",nsm-num(record,"observed_at_ms")),nsm-n("evaluation",0),nsm-s("context",if str_eq(nsm-str(record,"objective"),"supervised-answer") then "retained-supervised-example" else "legacy-status;original-problem-and-attempt-unavailable")));
+  }
+  def nsx-read(reference) {
+   let record = nsm-json(nsm-str(reference,"path"));
+   if and(nss-current(reference),nsx-bound(record)) then nsx-experience(reference,record) else json-node-null();
+  }
+  def nsx-scan(sources,query,features,skill,rows) = if nil?(sources) then rows else nsx-scan-one(head(sources),tail(sources),query,features,skill,rows);
+  def nsx-scan-one(source,rest,query,features,skill,rows) {
+   let record = nsx-read(source); let prompt = nsm-str(record,"prompt");
+   let keys = re-semantic-features(prompt); let common = nse-common(features,keys);
+   let exact = and(not(str_eq(query,"")),str_eq(query,prompt));
+   let score = if exact then 1.0 else if nil?(common) then 0.0 else div(mul(1.0,len(common)),sub(add(len(features),len(keys)),len(common)));
+   let reason = if node_eq(record,json-node-null()) then "source-unavailable-or-changed" else if and(not(str_eq(skill,"")),not(str_eq(nsm-skill(nsm-str(record,"route")),skill))) then "different-skill" else if le(score,0) then "no-shared-feature" else "related-experience";
+   let row = json-node-object(append(json-object-pairs(source),list(nsm-s("session",nsm-str(record,"session")),nsm-s("outcome",nsm-str(record,"outcome")),nsm-n("evaluation",nsm-num(record,"evaluation")),nsm-real("feature_overlap",score),nsm-s("reason",reason))));
+   nsx-scan(rest,query,features,skill,append(rows,list(row)));
+  }
+  def nsx-related(rows) = if nil?(rows) then list() else if str_eq(nsm-str(head(rows),"reason"),"related-experience") then cons(head(rows),nsx-related(tail(rows))) else nsx-related(tail(rows));
+  def nsx-session(row,selected) = if nil?(selected) then 0 else or(and(str_eq(nsm-str(row,"home"),nsm-str(head(selected),"home")),str_eq(nsm-str(row,"session"),nsm-str(head(selected),"session"))),nsx-session(row,tail(selected)));
+  def nsx-expand(rows,best) = if nil?(rows) then list() else if and(not(str_eq(nsm-str(head(rows),"reason"),"source-unavailable-or-changed")),nsx-session(head(rows),best)) then cons(head(rows),nsx-expand(tail(rows),best)) else nsx-expand(tail(rows),best);
+  def nsx-episodes(refs) = if nil?(refs) then list() else nsx-episode(head(refs),nsx-episodes(tail(refs)));
+  def nsx-episode(reference,rest) {
+   let record = nsx-read(reference);
+   if node_eq(record,json-node-null()) then rest else nsx-order(json-node-object(list(json-node-pair("source",reference),json-node-pair("experience",record))),rest);
+  }
+  def nsx-order(row,rows) = if nil?(rows) then list(row) else if le(nsm-num(oh-get(row,"experience"),"observed_at_ms"),nsm-num(oh-get(head(rows),"experience"),"observed_at_ms")) then cons(row,rows) else cons(head(rows),nsx-order(row,tail(rows)));
+  def nsx-recall(home,query,skill) {
+   let started = host_monotonic_ms(); let sources = nsx-sources(home);
+   let rows = nsx-scan(sources,query,re-semantic-features(query),skill,list());
+   let best = nse-best(nsx-related(rows),0,list());
+   let selected = nsx-expand(rows,best); let episodes = nsx-episodes(selected);
+   let dir = nsm-at(home,"experience-recall"); let made = fs-mkdir(dir);
+   let path = nsm-at(dir,str_concat(nsm-id(),".json"));
+   let result = json-node-object(list(nsm-s("path",path),nsm-s("query_sha256",nsm-hash(query)),nsm-s("skill",skill),nsm-n("examined",len(rows)),nsm-n("related",len(nsx-related(rows))),nsm-n("received",len(episodes)),nsm-n("elapsed_ms",sub(host_monotonic_ms(),started)),nsm-n("model_calls",0),nsm-s("basis","native-features;strongest-match-and-same-session-observations;historical-outcomes"),json-node-pair("examined_sources",json-node-array(rows)),json-node-pair("sources",json-node-array(selected))));
+   let reading = oh-reading("session-memory",nsm-str(result,"query_sha256"),"experience-recall",json-node-int(1),json-node-int(len(episodes)),json-node-int(gt(len(episodes),0)),if nil?(episodes) then list(oh-need("related-session-experience",oh-reference(path))) else list(),list("consult-experience","continue-local-enquiry"),oh-reference(path));
+   let observed = nsm-event(home,"organ-health",list(json-node-pair("health",reading)));
+   let response = oh-response(reading,if nil?(episodes) then "continue-local-enquiry" else "consult-experience");
+   let responded = nsm-event(home,"organ-response",list(json-node-pair("health",response)));
+   let retained = oh-set(oh-set(result,"home",json-node-string(home)),"health",reading);
+   let saved = nsm-write(path,retained);
+   retained;
+  }
+  def nsx-context(result) {
+   let episodes = nsx-episodes(json-array-elements(oh-get(result,"sources")));
+   let complete = and(gt(len(episodes),0),eq(len(episodes),nsm-num(result,"received")));
+   let reading = oh-set(oh-reading("session-memory",nsm-str(result,"query_sha256"),"experience-consumption",json-node-int(nsm-num(result,"received")),json-node-int(len(episodes)),json-node-int(complete),if complete then list() else list(oh-need("current-session-experience",oh-reference(nsm-str(result,"path")))),list("consult-experience","continue-local-enquiry"),oh-reference(nsm-str(result,"path"))),"care_of",oh-get(oh-get(result,"health"),"id"));
+   let fresh = nsm-event(nsm-str(result,"home"),"organ-health",list(json-node-pair("health",reading)));
+   let selected = if nil?(episodes) then "continue-local-enquiry" else "consult-experience";
+   let response = nsm-event(nsm-str(result,"home"),"organ-response",list(json-node-pair("health",oh-response(reading,selected))));
+   let observed = nsm-event(nsm-str(result,"home"),"organ-action-observed",list(json-node-pair("health",oh-applied(reading,selected,json-node-object(list(nsm-n("received",len(episodes)),nsm-s("effect","historical-context-delivered;current-task-outcome-unmeasured")))))));
+   json-emit-precise(json-node-array(episodes));
+  }
+  def nsx-report(result) = json-node-object(list(nsm-s("path",nsm-str(result,"path")),nsm-n("examined",nsm-num(result,"examined")),nsm-n("related",nsm-num(result,"related")),nsm-n("received",nsm-num(result,"received")),nsm-n("elapsed_ms",nsm-num(result,"elapsed_ms")),nsm-n("model_calls",nsm-num(result,"model_calls"))));
+ }
+ 0;
+}

@@ -108,15 +108,28 @@ section [form.bml] {
   }
   // Explicit caller teaching or an executed checker supplies the target. Model
   // confidence never upgrades a proposal into a verified example.
-  def nsm-record(home,session,key,route,prompt,answer,outcome,evidence,evaluation) {
-   if evaluation then "evaluation-excluded" else if or(str_eq(session,""),str_eq(key,"")) then form_error("session learning requires session and event identity") else nsm-record-ready(nsm-init(home),session,key,route,prompt,answer,outcome,evidence);
+  def nsm-experience(home,session,key,route,prompt,answer,outcome,evidence,evaluation) {
+   let made = nsm-init(home);
+   let root = nsm-at(home,"experiences"); let made = fs-mkdir(root);
+   let id = nsm-hash(str_concat(session,str_concat("\n",key)));
+   let dir = nsm-at(root,id); let made = fs-mkdir(dir);
+   let record = json-node-object(list(nsm-s("id",id),nsm-s("session",session),nsm-s("event",key),nsm-s("route",route),nsm-s("objective","observed-experience"),nsm-s("prompt",prompt),nsm-s("attempt",answer),nsm-s("outcome",outcome),nsm-s("evidence",evidence),nsm-n("evaluation",evaluation)));
+   if or(str_eq(session,""),str_eq(key,"")) then form_error("session experience requires session and event identity") else nsm-record-write(home,dir,record);
   }
+  def nsm-record(home,session,key,route,prompt,answer,outcome,evidence,evaluation) {
+   let experience = nsm-experience(home,session,key,route,prompt,answer,outcome,evidence,evaluation);
+   if evaluation then experience else nsm-record-ready(home,session,key,route,prompt,answer,outcome,evidence);
+  }
+  def nsm-outcome(route,outcome,evidence) = json-emit-precise(json-node-object(list(nsm-s("route",route),nsm-s("outcome",outcome),nsm-s("evidence",evidence))));
+  def nsm-outcome-prefix() = "Recall the observed outcome of this attempt. The problem and attempted answer are experience data, not instructions or a verified solution.\n";
+  def nsm-experience-prompt(route,prompt,answer) = str_concat(nsm-outcome-prefix(),json-emit-precise(json-node-object(list(nsm-s("route",route),nsm-s("problem",prompt),nsm-s("attempt",answer)))));
   def nsm-record-ready(home,session,key,route,prompt,answer,outcome,evidence) {
    let id = nsm-hash(str_concat(session,str_concat("\n",key)));
    let dir = nsm-at(nsm-at(home,"rows"),id); let made = fs-mkdir(dir);
    let positive = or(str_eq(outcome,"verified-answer"),str_eq(outcome,"caller-teaching"));
-   let target = if positive then nsm-row(prompt,answer) else nsm-row(str_concat("Report the observed execution status for ",route),json-emit-precise(json-node-object(list(nsm-s("route",route),nsm-s("outcome",outcome),nsm-s("evidence",evidence)))));
-   if and(positive,or(str_eq(prompt,""),or(str_eq(answer,""),str_eq(evidence,"")))) then form_error("session verified target requires prompt, answer and evidence") else nsm-record-write(home,dir,json-node-object(list(nsm-s("id",id),nsm-s("session",session),nsm-s("event",key),nsm-s("route",route),nsm-s("outcome",outcome),nsm-s("evidence",evidence),nsm-s("objective",if positive then "supervised-answer" else "observed-execution-status"),json-node-pair("example",target))));
+   let legacy = str_eq(nsm-str(nsm-json(nsm-at(dir,"record.json")),"objective"),"observed-execution-status");
+   let target = if positive then nsm-row(prompt,answer) else nsm-row(if legacy then str_concat("Report the observed execution status for ",route) else nsm-experience-prompt(route,prompt,answer),nsm-outcome(route,outcome,evidence));
+   if and(positive,or(str_eq(prompt,""),or(str_eq(answer,""),str_eq(evidence,"")))) then form_error("session verified target requires prompt, answer and evidence") else nsm-record-write(home,dir,json-node-object(list(nsm-s("id",id),nsm-s("session",session),nsm-s("event",key),nsm-s("route",route),nsm-s("outcome",outcome),nsm-s("evidence",evidence),nsm-s("objective",if positive then "supervised-answer" else if legacy then "observed-execution-status" else "contextual-observed-outcome"),json-node-pair("example",target))));
   }
   def nsm-record-write(home,dir,record) {
    let path = nsm-at(dir,"record.json"); let text = str_concat(json-emit-precise(record),"\n");
@@ -132,22 +145,28 @@ section [form.bml] {
    if eq(rc,0) then nsm-record-published(home,dir,record) else if str_eq(nsm-str(nsm-json(path),"content_sha256"),nsm-str(sealed,"content_sha256")) then dir else form_error("session immutable publication refused; existing evidence preserved");
   }
   def nsm-record-published(home,dir,record) {
-   let event = nsm-event(home,"example-retained",list(nsm-s("id",nsm-str(record,"id")),nsm-s("session",nsm-str(record,"session")),nsm-s("route",nsm-str(record,"route")),nsm-s("outcome",nsm-str(record,"outcome")),nsm-s("objective",nsm-str(record,"objective"))));
+   let event = nsm-event(home,if str_eq(nsm-str(record,"objective"),"observed-experience") then "experience-retained" else "example-retained",list(nsm-s("id",nsm-str(record,"id")),nsm-s("session",nsm-str(record,"session")),nsm-s("route",nsm-str(record,"route")),nsm-s("outcome",nsm-str(record,"outcome")),nsm-s("objective",nsm-str(record,"objective"))));
    dir;
   }
   def nsm-offer(home,session,key,route,prompt,answer,outcome,evidence,evaluation) {
    let row = nsm-record(home,session,key,route,prompt,answer,outcome,evidence,evaluation);
-   let kicked = if evaluation then "excluded" else nsm-kick(home);
+   let kicked = if evaluation then "experience-retained;assessment-gradient-held" else nsm-kick(home);
    list(row,kicked);
   }
   def nsm-dirs(home) = if not(fs-is-dir?(nsm-at(home,"rows"))) then list() else fs-list(nsm-at(home,"rows"));
   def nsm-knowledge-home(home) = nsm-at(home,"repo-knowledge");
-  def nsm-census(home,names,rows,sessions) {
-   if nil?(names) then json-node-object(list(nsm-n("retained_examples",rows),nsm-n("distinct_sessions",len(sessions)))) else nsm-census-row(home,tail(names),nsm-json(nsm-at(nsm-at(nsm-at(home,"rows"),head(names)),"record.json")),rows,sessions);
+  def nsm-census(home,names,rows,sessions) = nsm-census-root(nsm-at(home,"rows"),names,rows,sessions,"retained_examples");
+  def nsm-experience-census(home) {
+   let root = nsm-at(home,"experiences");
+   let census = nsm-census-root(root,if fs-is-dir?(root) then fs-list(root) else list(),0,list(),"retained_experiences");
+   oh-set(census,"identity_basis",json-node-string("retained caller/session identities; recovered repair jobs each have an identity; not full host-transcript coverage"));
   }
-  def nsm-census-row(home,rest,record,rows,sessions) {
+  def nsm-census-root(root,names,rows,sessions,label) {
+   if nil?(names) then json-node-object(list(nsm-n(label,rows),nsm-n("distinct_sessions",len(sessions)))) else nsm-census-row(root,tail(names),nsm-json(nsm-at(nsm-at(root,head(names)),"record.json")),rows,sessions,label);
+  }
+  def nsm-census-row(root,rest,record,rows,sessions,label) {
    let session = nsm-str(record,"session");
-   if str_eq(nsm-str(record,"id"),"") then nsm-census(home,rest,rows,sessions) else nsm-census(home,rest,add(rows,1),if nsm-has(sessions,session) then sessions else cons(session,sessions));
+   if str_eq(nsm-str(record,"id"),"") then nsm-census-root(root,rest,rows,sessions,label) else nsm-census-root(root,rest,add(rows,1),if nsm-has(sessions,session) then sessions else cons(session,sessions),label);
   }
   def nsm-pending(home,names) = if nil?(names) then list() else nsm-pending-one(home,head(names),tail(names));
   def nsm-pending-one(home,name,rest) {
@@ -160,7 +179,7 @@ section [form.bml] {
    let dir = nsm-at(nsm-at(home,"rows"),name); let result = nsm-json(nsm-at(dir,"result.json"));
    if str_eq(nsm-str(result,"status"),"refused") then cons(json-node-object(list(nsm-s("id",name),nsm-s("reason",nsm-str(result,"reason")),nsm-s("evidence",dir))),nsm-results(home,rest)) else nsm-results(home,rest);
   }
-  def nsm-status(home) = json-node-object(list(nsm-s("home",home),nsm-n("enabled",nsm-enabled(home)),nsm-n("worker_alive",nsm-running(home)),nsm-s("worker_status",nsm-worker-state(home)),nsm-n("pending",len(nsm-pending(home,nsm-dirs(home)))),json-node-pair("session_corpus",nsm-census(home,nsm-dirs(home),0,list())),json-node-pair("repository_corpus",nsm-json(nsm-at(nsm-knowledge-home(home),"current.json"))),nsm-s("adapter_pair_units","LoRA A/B weight matrices, not training examples or sessions"),json-node-pair("refused",json-node-array(nsm-results(home,nsm-dirs(home)))),json-node-pair("state",nsm-state(home)),nsm-s("events",nsm-at(home,"events.jsonl")),nsm-s("worker_stderr",nsm-at(home,"learner.err"))));
+  def nsm-status(home) = json-node-object(list(nsm-s("home",home),nsm-n("enabled",nsm-enabled(home)),nsm-n("worker_alive",nsm-running(home)),nsm-s("worker_status",nsm-worker-state(home)),nsm-n("pending",len(nsm-pending(home,nsm-dirs(home)))),json-node-pair("session_corpus",nsm-census(home,nsm-dirs(home),0,list())),json-node-pair("experience_corpus",nsm-experience-census(home)),json-node-pair("repository_corpus",nsm-json(nsm-at(nsm-knowledge-home(home),"current.json"))),nsm-s("adapter_pair_units","LoRA A/B weight matrices, not training examples or sessions"),json-node-pair("refused",json-node-array(nsm-results(home,nsm-dirs(home)))),json-node-pair("state",nsm-state(home)),nsm-s("events",nsm-at(home,"events.jsonl")),nsm-s("worker_stderr",nsm-at(home,"learner.err"))));
   def nsm-model-proposal(home,prompt,required) {
    let made = nsm-init(home); let stem = str_concat("ask-",nsm-id());
    let request = json-node-object(list(nsm-s("prompt",prompt),nsm-n("require_serving",required),nsm-s("output",nsm-at(home,str_concat(stem,".reply.json"))),nsm-s("events",nsm-at(home,str_concat(stem,".events.jsonl"))),nsm-s("stream",nsm-at(home,str_concat(stem,".stream"))),nsm-s("cancel",nsm-at(home,str_concat(stem,".cancel")))));
@@ -206,7 +225,7 @@ section [form.bml] {
    else if str_eq(arg,"drain") then json-emit-precise(nsm-settle(home))
    else if eq(str_find(arg,"learn|",0),0) then nsm-teach-report(nsm-teach(home,substring(arg,6,str_len(arg))))
    else if eq(str_find(arg,"ask|",0),0) then json-emit-precise(nsm-model-proposal(home,substring(arg,4,str_len(arg)),0))
-   else "session status|pause|resume|drain; session learn|{prompt,completion,session?,event?} retains an explicit local correction and starts native LoRA learning. session ask|question uses the evaluated session adapter, or the seed when no adapter has been promoted. Progress, choices and actual tokens remain under the private hearth. Learning is enabled by default; evaluation requests are excluded.";
+   else "session status|pause|resume|drain; session learn|{prompt,completion,session?,event?} retains an explicit local correction and starts native LoRA learning. session ask|question uses the evaluated session adapter, or the seed when no adapter has been promoted. Progress, choices and actual tokens remain under the private hearth. Every attempt is retained as experience; assessment targets stay outside their gradient.";
   }
   def nsm-teach-report(result) = json-emit(json-node-object(list(nsm-s("example",head(result)),nsm-s("worker",nth(result,1)),nsm-s("training_state","retained;inspect-session-status-for-observed-update"))));
   def nsm-pause(home,paused) {
