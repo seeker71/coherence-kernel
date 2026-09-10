@@ -1,0 +1,147 @@
+// Form-generated BMP reduction and real asynchronous capture/job ownership.
+// One cooperative owner serializes access to the current process-wide adapter.
+// Upload once; submit versions over the same capture; wait every fence before
+// reading any output. The adapter still has global read/write/free quiescence.
+// Record identity is an ownership check, not protected address-space isolation.
+// preludes: form-stdlib/bml/frame-luma.bml form-stdlib/bml/metal-jit.bml
+section [form.bml] {
+ class FrameMetal {
+  def fg-source(chunk) = mj-source(str_concat(
+   "kernel void frame_luma(device const uchar *s [[buffer(0)]], device uint *o [[buffer(1)]], constant uint &offlo [[buffer(2)]], constant uint &offhi [[buffer(3)]], constant uint &rowlo [[buffer(4)]], constant uint &rowhi [[buffer(5)]], constant uint &countlo [[buffer(6)]], constant uint &counthi [[buffer(7)]], constant uint &width [[buffer(8)]], constant uint &dark [[buffer(9)]], uint gid [[thread_position_in_grid]]) { ulong off=ulong(offlo)|(ulong(offhi)<<32); ulong row=ulong(rowlo)|(ulong(rowhi)<<32); ulong count=ulong(countlo)|(ulong(counthi)<<32); ulong step=",
+   str_concat(int_to_str(chunk),
+   "ul; ulong first=ulong(gid)*step; ulong after=min(count,first+step); uint sum=0,d=0,ls=0,cs=0,rs=0,lc=0,cc=0,rc=0; for(ulong p=first;p<after;p++){ ulong x=p%ulong(width); ulong at=off+(p/ulong(width))*row+x*3ul; uint lum=(uint(s[at])+uint(s[at+1])+uint(s[at+2]))/3u; sum+=lum; d+=uint(lum<dark); if(x<ulong(width)/3ul){ls+=lum;lc++;}else if(x<(2ul*ulong(width))/3ul){cs+=lum;cc++;}else{rs+=lum;rc++;}} ulong out=ulong(gid)*8ul; o[out]=sum;o[out+1]=d;o[out+2]=ls;o[out+3]=cs;o[out+4]=rs;o[out+5]=lc;o[out+6]=cc;o[out+7]=rc; }")));
+  def fg-version(chunk) = if not(flm-integer?(chunk, 1, div(4294967295, 255))) then nothing() else fg-version-admit(chunk, mj-memory(fg-source(chunk), "frame_luma"));
+  def fg-version-admit(chunk, program) = if nothing?(program) then nothing() else record_new(make_nodeid(1, 5, 4, 1), "kind", "frame-version", "chunk", chunk, "program", program, "retired", 0);
+  def fg-kind?(value, kind) = if not(record?(value)) then 0 else str_eq(record_get(value, "kind"), kind);
+  def fg-active?(version) = if not(fg-kind?(version, "frame-version")) then 0 else eq(record_get(version, "retired"), 0);
+  def fg-retire(version) = if not(fg-kind?(version, "frame-version")) then 0 else record_set(version, "retired", 1);
+  def fg-status-number(status, key) {
+   let marker = str_concat("\n", str_concat(key, "="));
+   let at = str_find(str_concat("\n", status), marker, 0);
+   let text = str_concat("\n", status);
+   let start = add(at, str_len(marker));
+   let end = str_find(text, "\n", start);
+   if or(lt(at, 0), lt(end, 0)) then -1 else str_to_int(substring(text, start, end));
+  }
+  def fg-quiescent?() {
+   let s = metal_status();
+   and(ge(str_find(s, "batch=none\n", 0), 0), and(eq(fg-status-number(s, "pending"), 0), and(eq(fg-status-number(s, "in_flight"), 0), eq(fg-status-number(s, "shelf"), 0))));
+  }
+  def fg-open(version) = if not(and(fg-active?(version), fg-quiescent?())) then nothing() else record_new(make_nodeid(1, 5, 4, 1), "kind", "frame-owner", "selected", version, "frames", list(), "jobs", list(), "next", 1, "closed", 0);
+  def fg-open?(owner) = if not(fg-kind?(owner, "frame-owner")) then 0 else eq(record_get(owner, "closed"), 0);
+  def fg-member?(xs, x) = if nil?(xs) then 0 else if eq(head(xs), x) then 1 else fg-member?(tail(xs), x);
+  def fg-owned?(owner, item, collection) = if not(fg-open?(owner)) then 0 else if not(record?(item)) then 0 else and(eq(record_get(item, "owner"), owner), fg-member?(record_get(owner, collection), item));
+  def fg-publish(owner, version) = if not(and(fg-open?(owner), fg-active?(version))) then 0 else fg-publish-ready(owner, version);
+  def fg-publish-ready(owner, version) {
+   record_set(owner, "selected", version);
+   1;
+  }
+  def fg-pending?(jobs) = if nil?(jobs) then 0 else if str_eq(record_get(head(jobs), "state"), "pending") then 1 else fg-pending?(tail(jobs));
+
+  def fg-capture(owner, bytes) = if not(fg-open?(owner)) then nothing() else if or(fg-pending?(record_get(owner, "jobs")), not(fg-quiescent?())) then nothing() else fg-capture-layout(owner, bytes, flm-layout(bytes));
+  def fg-capture-layout(owner, bytes, layout) = if nothing?(layout) then nothing() else fg-capture-buffer(owner, bytes, layout, metal_buf_alloc(str_len(bytes)));
+  def fg-capture-buffer(owner, bytes, layout, handle) = if le(handle, 0) then nothing() else fg-capture-owned(owner, bytes, layout, handle);
+  def fg-capture-owned(owner, bytes, layout, handle) {
+   let frame = record_new(make_nodeid(1, 5, 4, 1), "kind", "frame-capture", "owner", owner, "layout", layout, "input", handle, "bytes", str_len(bytes), "state", "uploading");
+   record_set(owner, "frames", cons(frame, record_get(owner, "frames")));
+   let wrote = metal_buf_write(handle, 0, bytes);
+   record_set(frame, "state", if eq(wrote, str_len(bytes)) then "ready" else "failed");
+   frame;
+  }
+  def fg-wide(n) = list(mod(n, 4294967296), div(n, 4294967296));
+  def fg-constants(layout, policy) = append(fg-wide(nth(layout, 0)), append(fg-wide(nth(layout, 1)), append(fg-wide(nth(layout, 4)), list(nth(layout, 2), head(policy)))));
+  def fg-chunks(layout, version) = add(div(sub(nth(layout, 4), 1), record_get(version, "chunk")), 1);
+  def fg-submit(owner, frame, policy) = if not(fg-owned?(owner, frame, "frames")) then nothing() else if not(and(str_eq(record_get(frame, "state"), "ready"), and(flm-policy-valid?(policy), fg-active?(record_get(owner, "selected"))))) then nothing() else fg-submit-shape(owner, frame, policy, record_get(owner, "selected"));
+  def fg-submit-shape(owner, frame, policy, version) {
+   let chunks = fg-chunks(record_get(frame, "layout"), version);
+   // Metal's grid index is uint; the format/count arithmetic above is wide.
+   if gt(chunks, 4294967295) then nothing() else fg-submit-buffer(owner, frame, policy, version, chunks, metal_buf_alloc(mul(chunks, 32)));
+  }
+  def fg-submit-buffer(owner, frame, policy, version, chunks, output) = if le(output, 0) then nothing() else fg-submit-owned(owner, frame, policy, version, chunks, output);
+  def fg-submit-owned(owner, frame, policy, version, chunks, output) {
+   let serial = record_get(owner, "next");
+   let job = record_new(make_nodeid(1, 5, 4, 1), "kind", "frame-job", "owner", owner, "serial", serial, "frame", frame, "version", version, "policy", policy, "output", output, "chunks", chunks, "fence", 0, "cancel", 0, "state", "indeterminate", "released", 0);
+   record_set(owner, "next", add(serial, 1));
+   record_set(owner, "jobs", cons(job, record_get(owner, "jobs")));
+   let enqueued = mj-enqueue(record_get(version, "program"), md-bind(list(record_get(frame, "input"), output), fg-constants(record_get(frame, "layout"), policy)), chunks);
+   let fence = if eq(enqueued, 1) then metal_submit() else 0;
+   record_set(job, "fence", fence);
+   if gt(fence, 0) then record_set(job, "state", "pending") else 0;
+   job;
+  }
+  def fg-cancel(owner, job) = if not(fg-owned?(owner, job, "jobs")) then 0 else if not(str_eq(record_get(job, "state"), "pending")) then 0 else fg-cancel-owned(job);
+  def fg-cancel-owned(job) {
+   record_set(job, "cancel", 1);
+   1;
+  }
+  def fg-await(owner, job) = if not(fg-owned?(owner, job, "jobs")) then "foreign" else if not(str_eq(record_get(job, "state"), "pending")) then "unchanged" else fg-await-pending(job);
+  def fg-await-pending(job) {
+   let completed = metal_fence_wait(record_get(job, "fence"));
+   let timed = ge(str_find(metal_status(), "wait_frame=timeout\n", 0), 0);
+   let state = if eq(completed, 1) then if record_get(job, "cancel") then "cancelled" else "completed" else if and(eq(completed, -1), timed) then "pending" else "indeterminate";
+   record_set(job, "state", state);
+   state;
+  }
+  def fg-await-jobs(owner, jobs) = if nil?(jobs) then 0 else fg-await-next(owner, jobs);
+  def fg-await-next(owner, jobs) {
+   fg-await(owner, head(jobs));
+   fg-await-jobs(owner, tail(jobs));
+  }
+  def fg-await-all(owner) = if not(fg-open?(owner)) then 0 else fg-await-owner(owner);
+  def fg-await-owner(owner) {
+   fg-await-jobs(owner, record_get(owner, "jobs"));
+   if fg-pending?(record_get(owner, "jobs")) then 0 else 1;
+  }
+  def fg-partial(bytes, i) = list(flm-u32(bytes, i), flm-u32(bytes, add(i, 4)), flm-u32(bytes, add(i, 8)), flm-u32(bytes, add(i, 12)), flm-u32(bytes, add(i, 16)), flm-u32(bytes, add(i, 20)), flm-u32(bytes, add(i, 24)), flm-u32(bytes, add(i, 28)));
+  def fg-fold(bytes, first, after) = if ge(first, after) then flm-zero() else if eq(add(first, 1), after) then fg-partial(bytes, mul(first, 32)) else fg-fold-halves(bytes, first, after, div(add(first, after), 2));
+  def fg-fold-halves(bytes, first, after, middle) = flm-merge(fg-fold(bytes, first, middle), fg-fold(bytes, middle, after));
+  def fg-result(owner, job) = if not(fg-owned?(owner, job, "jobs")) then nothing() else if not(and(str_eq(record_get(job, "state"), "completed"), eq(record_get(job, "released"), 0))) then nothing() else if or(fg-pending?(record_get(owner, "jobs")), not(fg-quiescent?())) then nothing() else fg-result-bytes(job, metal_buf_read(record_get(job, "output"), 0, mul(record_get(job, "chunks"), 32)));
+  def fg-result-bytes(job, bytes) = if nothing?(bytes) then nothing() else if not(eq(str_len(bytes), mul(record_get(job, "chunks"), 32))) then nothing() else fg-result-complete(job, bytes);
+  def fg-result-complete(job, bytes) {
+   let layout = record_get(record_get(job, "frame"), "layout");
+   flm-result-policy(fg-fold(bytes, 0, record_get(job, "chunks")), nth(layout, 2), nth(layout, 3), record_get(job, "policy"));
+  }
+  def fg-release(owner, job) = if not(fg-owned?(owner, job, "jobs")) then 0 else if or(str_eq(record_get(job, "state"), "pending"), record_get(job, "released")) then 0 else if not(eq(metal_buf_free(record_get(job, "output")), 1)) then 0 else fg-release-record(job);
+  def fg-release-record(job) {
+   record_set(job, "released", 1);
+   1;
+  }
+  // Explicit aggregate cleanup withholds any result lacking its own completion.
+  def fg-abandon-jobs(jobs) = if nil?(jobs) then 0 else fg-abandon-next(jobs);
+  def fg-abandon-next(jobs) {
+   if str_eq(record_get(head(jobs), "state"), "pending") then record_set(head(jobs), "state", "indeterminate") else 0;
+   fg-abandon-jobs(tail(jobs));
+  }
+  def fg-drain(owner) = if not(fg-open?(owner)) then 0 else fg-drain-owner(owner);
+  def fg-drain-owner(owner) {
+   let status = metal_sync();
+   if fg-quiescent?() then fg-drained(owner) else 0;
+  }
+  def fg-drained(owner) {
+   fg-abandon-jobs(record_get(owner, "jobs"));
+   1;
+  }
+  def fg-release-jobs(owner, jobs) = if nil?(jobs) then 1 else fg-release-next(owner, jobs);
+  def fg-release-next(owner, jobs) {
+   let job = head(jobs);
+   let done = if record_get(job, "released") then 1 else fg-release(owner, job);
+   if done then fg-release-jobs(owner, tail(jobs)) else 0;
+  }
+  def fg-release-frames(frames) = if nil?(frames) then 1 else fg-release-frame(frames);
+  def fg-release-frame(frames) {
+   let frame = head(frames);
+   let done = if str_eq(record_get(frame, "state"), "released") then 1 else metal_buf_free(record_get(frame, "input"));
+   if eq(done, 1) then fg-release-frame-record(frame, tail(frames)) else 0;
+  }
+  def fg-release-frame-record(frame, remaining) {
+   record_set(frame, "state", "released");
+   fg-release-frames(remaining);
+  }
+  def fg-close(owner) = if not(fg-open?(owner)) then 0 else if not(fg-release-jobs(owner, record_get(owner, "jobs"))) then 0 else if not(fg-release-frames(record_get(owner, "frames"))) then 0 else fg-close-record(owner);
+  def fg-close-record(owner) {
+   record_set(owner, "closed", 1);
+   1;
+  }
+ }
+ 0;
+}

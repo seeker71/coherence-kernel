@@ -884,7 +884,9 @@ long long fk_metal_buf_from_file_external(const char *path, long long path_len,
         long long base = off - (off % pg);
         long long span = (off - base) + len;
         if (span % pg) { span = span + (pg - (span % pg)); }
-        if (base + span > (long long)st.st_size) { span = (long long)st.st_size - base; }
+        // Metal owns a page-aligned region; the exposed view remains exactly
+        // [off, off+len). mmap supplies the final partial page without extending
+        // the file, and the view bounds never expose its padding to callers.
 
         // A positive length keeps the model mapping private. A negative length is
         // an explicit writable-file mode through the same handle door.
@@ -901,21 +903,9 @@ long long fk_metal_buf_from_file_external(const char *path, long long path_len,
             return fk_buf_register(b, m, (size_t)span, (unsigned long long)(off - base),
                                    (unsigned long long)len, shared_file ? 2 : 1);
         }
-        if (shared_file) {
-            munmap(m, (size_t)span);
-            fk_err(@"newBufferWithBytesNoCopy refused writable shared mapping");
-            return 0;
-        }
-        // Fallback, and it is RECORDED, not silent: a copy still gives a correct
-        // answer but not the machine requirement 1 asked for, and metal_status has
-        // to be able to say which one this process is running.
-        fk_err(@"newBufferWithBytesNoCopy refused the mapping; fell back to a copy");
-        b = [fk_dev newBufferWithBytes:((char *)m + (off - base))
-                                length:(NSUInteger)len
-                               options:MTLResourceStorageModeShared];
         munmap(m, (size_t)span);
-        if (b == nil) { fk_err(@"buf_from_file: both nocopy and copy failed"); return 0; }
-        return fk_buf_register(b, NULL, 0, 0, (unsigned long long)len, 0);
+        fk_err(@"newBufferWithBytesNoCopy refused the mapping");
+        return 0;
     }
 }
 
@@ -1323,12 +1313,11 @@ long long fk_metal_fence_wait_external(long long fence) {
         long long released = fk_shelf_settle();
         if (released < 0) { return -1; }
         if (fk_wait_observed(cb) < 0) {
-            // Shelved, not dropped: the fence is spent, the buffer is still owed.
-            fk_shelve(cb);
-            [fk_inflight removeObjectForKey:@(fence)];
-            [fk_inflight_n removeObjectForKey:@(fence)];
+            // A deadline changes the observation, not this submission's identity.
+            // Keep the same fence and resources available to a later wait.
             return -1;
         }
+        fk_total_gpu_busy_s += ([cb GPUEndTime] - [cb GPUStartTime]);
         [fk_inflight removeObjectForKey:@(fence)];
         [fk_inflight_n removeObjectForKey:@(fence)];
         if ([cb error] != nil) {
