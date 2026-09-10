@@ -1,0 +1,96 @@
+//////////////////////////////////////////////////////////////////////
+// frame-luma.bml — the 24-bit BMP interpretation belongs to Form.
+//
+// The host carrier owes bytes. This cell validates their media shape and
+// folds pixels into the nine-value presence row used by the compatibility
+// primitive: present, side, mean, dark%, left/center/right mean, width,
+// height. The divide-and-combine walk keeps call depth logarithmic.
+//
+// preludes: form-stdlib/core.fk
+//////////////////////////////////////////////////////////////////////
+
+section [form.bml] {
+    class FrameLuma {
+        thought frame-luma-boundary = list("host-reads-owned-bytes", "Form-validates-media", "Form-folds-pixels", "C-compatibility-path-can-retire");
+
+        def flm-u16(s, i) = add(str_byte_at(s, i), mul(str_byte_at(s, add(i, 1)), 256));
+        def flm-u32(s, i) = add(flm-u16(s, i), mul(flm-u16(s, add(i, 2)), 65536));
+        def flm-s32(s, i) {
+            let u = flm-u32(s, i);
+            if ge(u, 2147483648) then sub(u, 4294967296) else u;
+        }
+        def flm-height(signed-height) = if lt(signed-height, 0) then sub(0, signed-height) else signed-height;
+        def flm-row-bytes(width) = band(add(mul(width, 3), 3), -4);
+
+        // sum, dark, left sum, center sum, right sum, and their three counts
+        def flm-zero() = list(0, 0, 0, 0, 0, 0, 0, 0);
+        def flm-merge(a, b) = list(
+            add(nth(a, 0), nth(b, 0)), add(nth(a, 1), nth(b, 1)),
+            add(nth(a, 2), nth(b, 2)), add(nth(a, 3), nth(b, 3)),
+            add(nth(a, 4), nth(b, 4)), add(nth(a, 5), nth(b, 5)),
+            add(nth(a, 6), nth(b, 6)), add(nth(a, 7), nth(b, 7)));
+        def flm-one(s, offset, row-bytes, width, pixel) {
+            let x = mod(pixel, width);
+            let y = div(pixel, width);
+            let at = add(offset, add(mul(y, row-bytes), mul(x, 3)));
+            let lum = div(add(str_byte_at(s, at), add(str_byte_at(s, add(at, 1)), str_byte_at(s, add(at, 2)))), 3);
+            let left = lt(x, div(width, 3));
+            let center = and(not(left), lt(x, div(mul(width, 2), 3)));
+            list(lum, if lt(lum, 60) then 1 else 0,
+                if left then lum else 0, if center then lum else 0,
+                if or(left, center) then 0 else lum,
+                if left then 1 else 0, if center then 1 else 0,
+                if or(left, center) then 0 else 1);
+        }
+        def flm-fold(s, offset, row-bytes, width, first, after) =
+            if ge(first, after) then flm-zero()
+            else if eq(add(first, 1), after) then flm-one(s, offset, row-bytes, width, first)
+            else flm-fold-halves(s, offset, row-bytes, width, first, after, div(add(first, after), 2));
+        def flm-fold-halves(s, offset, row-bytes, width, first, after, middle) =
+            flm-merge(flm-fold(s, offset, row-bytes, width, first, middle),
+                      flm-fold(s, offset, row-bytes, width, middle, after));
+
+        def flm-shape-valid?(s, dib, offset, width, signed-height, height, row-bytes) =
+            if lt(str_len(s), 54) then 0
+            else if not(and(eq(str_byte_at(s, 0), 66), eq(str_byte_at(s, 1), 77))) then 0
+            else if lt(dib, 40) then 0
+            else if gt(dib, sub(str_len(s), 14)) then 0
+            else if lt(offset, add(14, dib)) then 0
+            else if gt(offset, str_len(s)) then 0
+            else if not(eq(flm-u16(s, 26), 1)) then 0
+            else if not(eq(flm-u16(s, 28), 24)) then 0
+            else if not(eq(flm-u32(s, 30), 0)) then 0
+            else if le(width, 0) then 0
+            else if eq(signed-height, 0) then 0
+            else if le(row-bytes, 0) then 0
+            else if gt(height, div(sub(str_len(s), offset), row-bytes)) then 0
+            else if gt(mul(width, height), div(4500000000000000000, 255)) then 0
+            else 1;
+
+        def flm-result(fold, width, height) {
+            let count = mul(width, height);
+            let mean = if eq(count, 0) then 0 else div(nth(fold, 0), count);
+            let dark-percent = if eq(count, 0) then 0 else div(mul(nth(fold, 1), 100), count);
+            let left-mean = if eq(nth(fold, 5), 0) then 0 else div(nth(fold, 2), nth(fold, 5));
+            let center-mean = if eq(nth(fold, 6), 0) then 0 else div(nth(fold, 3), nth(fold, 6));
+            let right-mean = if eq(nth(fold, 7), 0) then 0 else div(nth(fold, 4), nth(fold, 7));
+            let side = if and(le(left-mean, center-mean), le(left-mean, right-mean)) then 0 else if and(le(center-mean, left-mean), le(center-mean, right-mean)) then 1 else 2;
+            let spread = if gt(left-mean, right-mean) then sub(left-mean, right-mean) else sub(right-mean, left-mean);
+            let present = if and(and(ge(dark-percent, 8), le(dark-percent, 75)), ge(spread, 12)) then 1 else 0;
+            list(present, side, mean, dark-percent, left-mean, center-mean, right-mean, width, height);
+        }
+
+        def flm-stat(s) = if lt(str_len(s), 54) then nothing() else flm-stat-header(s);
+        def flm-stat-header(s) {
+            let dib = flm-u32(s, 14);
+            let offset = flm-u32(s, 10);
+            let width = flm-s32(s, 18);
+            let signed-height = flm-s32(s, 22);
+            let height = flm-height(signed-height);
+            let row-bytes = flm-row-bytes(width);
+            if eq(flm-shape-valid?(s, dib, offset, width, signed-height, height, row-bytes), 0) then nothing()
+            else flm-result(flm-fold(s, offset, row-bytes, width, 0, mul(width, height)), width, height);
+        }
+    }
+    0;
+}

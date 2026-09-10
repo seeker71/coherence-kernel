@@ -31,6 +31,7 @@ form-stdlib/bmf-core.fk
 form-stdlib/bmf-grammar.fk
 form-stdlib/host-effect-grammar.fk
 form-stdlib/form-flatten.fk
+form-stdlib/bml/native-table-compile.bml
 form-stdlib/form-ontology-loader.fk
 form-stdlib/bml.fk
 form-stdlib/bml-source.fk
@@ -152,7 +153,7 @@ form-stdlib/source-resonance-stream.fk
 form-stdlib/local-generate-organ.fk
 form-stdlib/language-template.fk
 form-stdlib/language-model.fk
-form-stdlib/form-cli-heedmark-xtal.fk
+form-stdlib/form-cli-heedmark.bml
 form-stdlib/form-cli-qwen-teach-layer.fk
 form-stdlib/form-cli-heed-cursor.fk
 form-stdlib/form-ontology-bp.fk
@@ -283,7 +284,7 @@ form_cli_generation_stamp_valid() {
 
 form_cli_generation_flattener_kind_valid() {
     case "$1" in
-        rust-form-kernel|typescript-form-kernel|fkwu-selfhost)
+        rust-form-kernel|typescript-form-kernel|fkwu-selfhost|fkwu-source)
             return 0
             ;;
         *)
@@ -427,7 +428,8 @@ form_cli_generation_load_attestation() {
         printf 'form-cli generation attestation: invalid required hash in %s\n' "$file_path" >&2
         return 1
     }
-    [[ "$FORM_CLI_GENERATION_BML_COMPILER_KIND" == "go-form-kernel" ]] || {
+    [[ "$FORM_CLI_GENERATION_BML_COMPILER_KIND" == "go-form-kernel" \
+        || "$FORM_CLI_GENERATION_BML_COMPILER_KIND" == "fkwu-source" ]] || {
         printf 'form-cli generation attestation: unexpected BML compiler kind in %s\n' "$file_path" >&2
         return 1
     }
@@ -455,11 +457,13 @@ form_cli_write_generation_attestation() {
     local file_path="$1" source_sha256="$2" source_stamp="$3" table="$4" emitted_c="$5"
     local bml_compiler_sha256="$6" flattener_kind="$7" flattener_binary_sha256="$8"
     local bootstrap_attestation_sha256="$9" platform_slug="${10}" platform_carrier_sha256="${11}"
+    local bml_compiler_kind="${12}"
     local table_sha256 emitted_c_sha256
 
     form_cli_generation_hash_valid "$source_sha256" \
         && form_cli_generation_stamp_valid "$source_stamp" \
         && form_cli_generation_hash_valid "$bml_compiler_sha256" \
+        && [[ "$bml_compiler_kind" == "go-form-kernel" || "$bml_compiler_kind" == "fkwu-source" ]] \
         && form_cli_generation_flattener_kind_valid "$flattener_kind" \
         && form_cli_generation_hash_valid "$flattener_binary_sha256" || {
         printf '%s\n' 'form-cli generation attestation: refusing invalid author identity' >&2
@@ -491,7 +495,7 @@ form_cli_write_generation_attestation() {
         printf 'table_sha256=%s\n' "$table_sha256"
         printf 'emitted_c_sha256=%s\n' "$emitted_c_sha256"
         printf 'bootstrap_attestation_sha256=%s\n' "$bootstrap_attestation_sha256"
-        printf '%s\n' 'bml_compiler_kind=go-form-kernel'
+        printf 'bml_compiler_kind=%s\n' "$bml_compiler_kind"
         printf 'bml_compiler_sha256=%s\n' "$bml_compiler_sha256"
         printf 'flattener_kind=%s\n' "$flattener_kind"
         printf 'flattener_binary_sha256=%s\n' "$flattener_binary_sha256"
@@ -567,5 +571,6 @@ form_cli_write_platform_generation_attestation() {
         "$FORM_CLI_GENERATION_SOURCE_STAMP" "$table" "$emitted_c" \
         "$FORM_CLI_GENERATION_BML_COMPILER_SHA256" \
         "$FORM_CLI_GENERATION_FLATTENER_KIND" "$FORM_CLI_GENERATION_FLATTENER_BINARY_SHA256" \
-        "$bootstrap_attestation_sha256" "$platform_slug" "$platform_carrier_sha256"
+        "$bootstrap_attestation_sha256" "$platform_slug" "$platform_carrier_sha256" \
+        "$FORM_CLI_GENERATION_BML_COMPILER_KIND"
 }

@@ -1,0 +1,56 @@
+; metal-resource-lifetime-band.fk -- Metal buffer bookkeeping follows work.
+;
+; The carrier used to impose a fixed bookkeeping table and only considered open
+; and in-flight command buffers when deciding whether host access was quiescent.
+; This witness covers the dynamic table path by allocating past the initial 64
+; slots, then freeing every handle and reading carrier status back from Form.
+;
+; Verdict 63 with a dynamically loaded Metal carrier. Hosts without the carrier answer 0.
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn mrl-bit (ok bit) (if ok bit 0))
+    (defn mrl-has? (text needle) (ge (str_find text needle 0) 0))
+    (defn mrl-status-start (status key)
+        (do
+            (let first (str_concat key "="))
+            (let later (str_concat "\n" first))
+            (let at-first (str_find status first 0))
+            (let at-later (str_find status later 0))
+            (if (eq at-first 0)
+                (str_len first)
+                (if (lt at-later 0) (sub 0 1) (add at-later (str_len later)))))))
+    (defn mrl-status-text-from (status start)
+        (do
+            (let stop (str_find status "\n" start))
+            (if (lt stop 0) (substring status start (str_len status)) (substring status start stop))))
+    (defn mrl-status-int (status key)
+        (do
+            (let start (mrl-status-start status key))
+            (if (lt start 0) (sub 0 1) (str_to_int (mrl-status-text-from status start)))))
+    (defn mrl-alloc (n acc)
+        (if (le n 0)
+            acc
+            (do
+                (let h (metal_buf_alloc 4))
+                (if (gt h 0) (mrl-alloc (sub n 1) (cons h acc)) acc))))
+    (defn mrl-free-all (hs acc)
+        (if (eq (len hs) 0)
+            acc
+            (mrl-free-all (tail hs) (add acc (if (eq (metal_buf_free (head hs)) 1) 1 0)))))
+
+    (let before (metal_status))
+    (if (not (and (mrl-has? before "metal_loaded=true") (mrl-has? before "metal_carrier=dynamic")))
+        0
+        (do
+            (let before-buffers (mrl-status-int before "buffers"))
+            (let handles (mrl-alloc 70 (list)))
+            (let during (metal_status))
+            (let freed (mrl-free-all handles 0))
+            (let after (metal_status))
+            (add (mrl-bit (mrl-has? before "metal_door=handle") 1)
+            (add (mrl-bit (eq (len handles) 70) 2)
+            (add (mrl-bit (ge (mrl-status-int during "buffer_table_capacity") 128) 4)
+            (add (mrl-bit (eq (mrl-status-int during "buffers") (add before-buffers 70)) 8)
+            (add (mrl-bit (eq freed 70) 16)
+                 (mrl-bit (eq (mrl-status-int after "buffers") before-buffers) 32))))))))

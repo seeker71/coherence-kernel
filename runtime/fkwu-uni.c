@@ -41,8 +41,16 @@ extern int fflush(void *);
 extern int printf(const char *, ...);
 extern int dprintf(int, const char *, ...);
 extern int vdprintf(int, const char *, __builtin_va_list);
-extern void *malloc(unsigned long);
-extern void *realloc(void *, unsigned long);
+/* The seed declares the host ABI directly. `unsigned long` is not size_t on
+ * 64-bit Windows (LLP64), so allocator lengths used to be narrowed there.
+ * The compiler's own size type keeps this declaration truthful on every
+ * target without importing a platform header into the bootstrap. */
+typedef __SIZE_TYPE__ fk_size_t;
+extern void *malloc(fk_size_t);
+extern void *realloc(void *, fk_size_t);
+extern void *memcpy(void *, const void *, fk_size_t);
+extern int memcmp(const void *, const void *, fk_size_t);
+extern void *memset(void *, int, fk_size_t);
 extern long long read(int, void *, unsigned long);
 extern int isatty(int);
 extern void exit(int);
@@ -113,9 +121,10 @@ static long long *fk_heat_total_p = &fk_heat_total_private;
 static long long fk_gpu_busy_total_us; /* host GPU busy microseconds integrated in this process (host_gpu_busy_us) */
 static long long fk_gpu_busy_last_us;  /* monotonic clock at the last fresh level read (the integration step) */
 static long long fk_gpu_level_cache = -1; /* the last level read; the utilization the accelerator answers is the mean since the previous query by ANY process, so a second read within the window would read 0 */
-long long fk_host_gpu_utilization(void); /* the Metal carrier answers; the weak stub below answers -1 */
+static const char *fk_self_path = "./fkwu";
+static long long fk_host_gpu_utilization(void); /* the optional Metal carrier answers after dynamic admission; absent answers -1 */
 /* the host's own statistics and processes, no shell between: Mach VM/CPU/load, libproc, IOKit (carrier), fork+execvp on an argv */
-long long fk_host_disk_stat(long long *out);
+static long long fk_host_disk_stat(long long *out);
 #ifdef __APPLE__
 extern int host_statistics64(unsigned int host, int flavor, int *info, unsigned int *count);
 extern int sysctlbyname(const char *name, void *oldp, unsigned long *oldlenp, void *newp, unsigned long newlen);
@@ -808,7 +817,7 @@ static void fk_vs_grow(long long need) {
 }
 static long long fk_vsp;
 extern unsigned int arc4random(void);
-extern void *calloc(unsigned long, unsigned long);
+extern void *calloc(fk_size_t, fk_size_t);
 extern void free(void *);
 extern double strtod(const char *, char **);
 extern void *popen(const char *, const char *);
@@ -1708,121 +1717,318 @@ static long long fk_sbuf(const char *buf, long long n) {
     }
     return fk_strv(fk_sintern(fk_sbp, n));
 }
-#define FK_METAL_FIXTURE_UNLINKED (0 - 4611686018427387903LL)
-#define FK_METAL_MATVEC_UNLINKED (0 - 4611686018427387902LL)
-/* The handle door's unlinked sentinel. Distinct from the two above so a reader of
- * a failing band can tell "no carrier on this build" from "carrier said no". Every
- * handle-returning primitive answers 0 when unlinked and 0 is never a live handle;
- * metal_status is the voice canary that says WHICH of the two it was, because a
- * bare 0 is exactly the shape axiom-5 hands back for a name that was never bound. */
-#define FK_METAL_HANDLE_UNLINKED (0 - 4611686018427387901LL)
-#if defined(__GNUC__) || defined(__clang__)
-__attribute__((weak)) long long fk_metal_matvec_fixture_external(char *out, long long cap) {
-    (void)out;
-    (void)cap;
-    return FK_METAL_FIXTURE_UNLINKED;
+#define FK_METAL_FIXTURE_UNLOADED (0 - 4611686018427387903LL)
+#define FK_METAL_MATVEC_UNLOADED (0 - 4611686018427387902LL)
+/* The handle door's absent-carrier sentinel. Distinct from the two above so a
+ * reader of a failing band can tell "no dynamic carrier was admitted" from
+ * "carrier said no". Every handle-returning primitive answers 0 when absent and
+ * 0 is never a live handle; metal_status is the voice canary that says WHICH of
+ * the two it was, because a bare 0 is exactly the shape axiom-5 hands back for a
+ * name that was never bound. */
+#define FK_METAL_HANDLE_UNLOADED (0 - 4611686018427387901LL)
+#ifndef _WIN32
+extern void *dlopen(const char *, int);
+extern void *dlsym(void *, const char *);
+extern int dlclose(void *);
+#endif
+typedef long long (*fk_metal_gpu_util_fn)(void);
+typedef long long (*fk_metal_disk_stat_fn)(long long *);
+typedef long long (*fk_metal_live_fn)(long long *);
+typedef long long (*fk_metal_matvec_fixture_fn)(char *, long long);
+typedef long long (*fk_metal_matvec_f32_fn)(const char *, long long, const char *, long long,
+                                            const char *, long long, char *, long long);
+typedef long long (*fk_metal_pipeline_fn)(const char *, long long, const char *, long long);
+typedef long long (*fk_metal_buf_alloc_fn)(long long);
+typedef long long (*fk_metal_buf_from_file_fn)(const char *, long long, long long, long long);
+typedef long long (*fk_metal_buf_write_fn)(long long, long long, const char *, long long);
+typedef long long (*fk_metal_enqueue_fn)(long long, const char *, long long, long long);
+typedef long long (*fk_metal_sync_fn)(void);
+typedef long long (*fk_metal_buf_read_fn)(long long, long long, long long, char *, long long);
+typedef long long (*fk_metal_status_fn)(char *, long long);
+typedef long long (*fk_metal_batch_concurrent_fn)(void);
+typedef long long (*fk_metal_buf_free_fn)(long long);
+typedef long long (*fk_metal_submit_fn)(void);
+typedef long long (*fk_metal_fence_wait_fn)(long long);
+typedef long long (*fk_metal_deadline_fn)(long long);
+static void *fk_metal_dyn_handle;
+static int fk_metal_dyn_attempted;
+static int fk_metal_dyn_ready;
+static const char *fk_metal_dyn_reason = "dynamic carrier not tried";
+static fk_metal_gpu_util_fn fk_metal_gpu_util_p;
+static fk_metal_disk_stat_fn fk_metal_disk_stat_p;
+static fk_metal_live_fn fk_metal_live_p;
+static fk_metal_matvec_fixture_fn fk_metal_matvec_fixture_p;
+static fk_metal_matvec_f32_fn fk_metal_matvec_f32_p;
+static fk_metal_pipeline_fn fk_metal_pipeline_p;
+static fk_metal_buf_alloc_fn fk_metal_buf_alloc_p;
+static fk_metal_buf_from_file_fn fk_metal_buf_from_file_p;
+static fk_metal_buf_write_fn fk_metal_buf_write_p;
+static fk_metal_enqueue_fn fk_metal_enqueue_p;
+static fk_metal_sync_fn fk_metal_sync_p;
+static fk_metal_buf_read_fn fk_metal_buf_read_p;
+static fk_metal_status_fn fk_metal_status_p;
+static fk_metal_batch_concurrent_fn fk_metal_batch_concurrent_p;
+static fk_metal_buf_free_fn fk_metal_buf_free_p;
+static fk_metal_submit_fn fk_metal_submit_p;
+static fk_metal_fence_wait_fn fk_metal_fence_wait_p;
+static fk_metal_deadline_fn fk_metal_deadline_p;
+static void *fk_metal_dyn_sym(void *h, const char *name) {
+    void *p = dlsym(h, name);
+    if (p == 0) {
+        fk_metal_dyn_reason = "dynamic carrier missing required symbol";
+    }
+    return p;
 }
-__attribute__((weak)) long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
-                                                             const char *kernel,
-                                                             long long kernel_len,
-                                                             const char *model, long long model_len,
-                                                             char *out, long long cap) {
-    (void)msl;
-    (void)msl_len;
-    (void)kernel;
-    (void)kernel_len;
-    (void)model;
-    (void)model_len;
-    (void)out;
-    (void)cap;
-    return FK_METAL_MATVEC_UNLINKED;
+static int fk_metal_dyn_try_path(const char *path) {
+    void *h;
+    if (path == 0 || path[0] == 0) {
+        return 0;
+    }
+    h = dlopen(path, 2);
+    if (h == 0) {
+        fk_metal_dyn_reason = "dynamic carrier artifact unavailable";
+        return 0;
+    }
+    fk_metal_gpu_util_p = (fk_metal_gpu_util_fn)fk_metal_dyn_sym(h, "fk_host_gpu_utilization");
+    fk_metal_disk_stat_p = (fk_metal_disk_stat_fn)fk_metal_dyn_sym(h, "fk_host_disk_stat");
+    fk_metal_live_p = (fk_metal_live_fn)fk_metal_dyn_sym(h, "fk_metal_live_external");
+    fk_metal_matvec_fixture_p = (fk_metal_matvec_fixture_fn)fk_metal_dyn_sym(h, "fk_metal_matvec_fixture_external");
+    fk_metal_matvec_f32_p = (fk_metal_matvec_f32_fn)fk_metal_dyn_sym(h, "fk_metal_matvec_f32_external");
+    fk_metal_pipeline_p = (fk_metal_pipeline_fn)fk_metal_dyn_sym(h, "fk_metal_pipeline_external");
+    fk_metal_buf_alloc_p = (fk_metal_buf_alloc_fn)fk_metal_dyn_sym(h, "fk_metal_buf_alloc_external");
+    fk_metal_buf_from_file_p = (fk_metal_buf_from_file_fn)fk_metal_dyn_sym(h, "fk_metal_buf_from_file_external");
+    fk_metal_buf_write_p = (fk_metal_buf_write_fn)fk_metal_dyn_sym(h, "fk_metal_buf_write_external");
+    fk_metal_enqueue_p = (fk_metal_enqueue_fn)fk_metal_dyn_sym(h, "fk_metal_enqueue_external");
+    fk_metal_sync_p = (fk_metal_sync_fn)fk_metal_dyn_sym(h, "fk_metal_sync_external");
+    fk_metal_buf_read_p = (fk_metal_buf_read_fn)fk_metal_dyn_sym(h, "fk_metal_buf_read_external");
+    fk_metal_status_p = (fk_metal_status_fn)fk_metal_dyn_sym(h, "fk_metal_status_external");
+    fk_metal_batch_concurrent_p = (fk_metal_batch_concurrent_fn)fk_metal_dyn_sym(h, "fk_metal_batch_concurrent_external");
+    fk_metal_buf_free_p = (fk_metal_buf_free_fn)fk_metal_dyn_sym(h, "fk_metal_buf_free_external");
+    fk_metal_submit_p = (fk_metal_submit_fn)fk_metal_dyn_sym(h, "fk_metal_submit_external");
+    fk_metal_fence_wait_p = (fk_metal_fence_wait_fn)fk_metal_dyn_sym(h, "fk_metal_fence_wait_external");
+    fk_metal_deadline_p = (fk_metal_deadline_fn)fk_metal_dyn_sym(h, "fk_metal_deadline_external");
+    if (fk_metal_gpu_util_p == 0 || fk_metal_disk_stat_p == 0 || fk_metal_live_p == 0 ||
+        fk_metal_matvec_fixture_p == 0 || fk_metal_matvec_f32_p == 0 ||
+        fk_metal_pipeline_p == 0 || fk_metal_buf_alloc_p == 0 ||
+        fk_metal_buf_from_file_p == 0 || fk_metal_buf_write_p == 0 ||
+        fk_metal_enqueue_p == 0 || fk_metal_sync_p == 0 || fk_metal_buf_read_p == 0 ||
+        fk_metal_status_p == 0 || fk_metal_batch_concurrent_p == 0 ||
+        fk_metal_buf_free_p == 0 || fk_metal_submit_p == 0 ||
+        fk_metal_fence_wait_p == 0 || fk_metal_deadline_p == 0) {
+        dlclose(h);
+        return 0;
+    }
+    fk_metal_dyn_handle = h;
+    fk_metal_dyn_ready = 1;
+    fk_metal_dyn_reason = "loaded";
+    return 1;
 }
-#else
+static int fk_metal_dyn_default_path(char *out) {
+    const char *suffix = "form/native/metal/fk-metal-carrier.dylib";
+    long long last_slash = -1;
+    long long i = 0;
+    long long pos = 0;
+    while (fk_self_path[i] != 0) {
+        if (fk_self_path[i] == '/') {
+            last_slash = i;
+        }
+        i = i + 1;
+    }
+    if (last_slash >= 0) {
+        i = 0;
+        while (i <= last_slash) {
+            if (pos + 1 >= FK_PATH_CAP) {
+                fk_metal_dyn_reason = "dynamic carrier path exceeds FK_PATH_CAP";
+                out[0] = 0;
+                return 0;
+            }
+            out[pos] = fk_self_path[i];
+            pos = pos + 1;
+            i = i + 1;
+        }
+    }
+    i = 0;
+    while (suffix[i] != 0) {
+        if (pos + 1 >= FK_PATH_CAP) {
+            fk_metal_dyn_reason = "dynamic carrier path exceeds FK_PATH_CAP";
+            out[0] = 0;
+            return 0;
+        }
+        out[pos] = suffix[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    out[pos] = 0;
+    return 1;
+}
+static int fk_metal_dyn_load(void) {
+    char *env;
+    char path[FK_PATH_CAP];
+    if (fk_metal_dyn_ready) {
+        return 1;
+    }
+    if (fk_metal_dyn_attempted) {
+        return 0;
+    }
+    fk_metal_dyn_attempted = 1;
+    env = getenv("FKWU_METAL_CARRIER");
+    if (env != 0 && env[0] != 0) {
+        return fk_metal_dyn_try_path(env);
+    }
+    if (!fk_metal_dyn_default_path(path)) {
+        return 0;
+    }
+    return fk_metal_dyn_try_path(path);
+}
+static long long fk_metal_status_append(char *out, long long cap, long long off, const char *msg) {
+    long long n = fk_cstrlen(msg);
+    long long k = 0;
+    while (off < cap && k < n) {
+        out[off] = msg[k];
+        off = off + 1;
+        k = k + 1;
+    }
+    return off;
+}
+static long long fk_metal_status_absent(char *out, long long cap) {
+    long long off = 0;
+    if (cap <= 0) {
+        return 0;
+    }
+    off = fk_metal_status_append(out, cap, off,
+        "metal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=false\nmetal_door=handle\nlast_error=");
+    off = fk_metal_status_append(out, cap, off, fk_metal_dyn_reason);
+    off = fk_metal_status_append(out, cap, off, "\n");
+    return off;
+}
+static long long fk_host_gpu_utilization(void) {
+    if (!fk_metal_dyn_load()) {
+        return -1;
+    }
+    return fk_metal_gpu_util_p();
+}
+static long long fk_host_disk_stat(long long *out) {
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = 0;
+    out[3] = 0;
+    if (!fk_metal_dyn_load()) {
+        return -1;
+    }
+    return fk_metal_disk_stat_p(out);
+}
 static long long fk_metal_matvec_fixture_external(char *out, long long cap) {
-    (void)out;
-    (void)cap;
-    return FK_METAL_FIXTURE_UNLINKED;
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_FIXTURE_UNLOADED;
+    }
+    return fk_metal_matvec_fixture_p(out, cap);
 }
 static long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
                                               const char *kernel, long long kernel_len,
                                               const char *model, long long model_len, char *out,
                                               long long cap) {
-    (void)msl;
-    (void)msl_len;
-    (void)kernel;
-    (void)kernel_len;
-    (void)model;
-    (void)model_len;
-    (void)out;
-    (void)cap;
-    return FK_METAL_MATVEC_UNLINKED;
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_MATVEC_UNLOADED;
+    }
+    return fk_metal_matvec_f32_p(msl, msl_len, kernel, kernel_len, model, model_len, out, cap);
 }
-#endif
-/* ── the handle door's eight weak symbols ──
- * Same weak-stub pattern as the two above, and for the same reason: a build with
- * no Metal carrier linked must still COMPILE and still ANSWER, honestly, that the
- * door is shut. It must not fail to link, and it must not answer a plausible
- * number. Each returns FK_METAL_HANDLE_UNLINKED, which the native wrappers turn
- * into 0 for handles and into a spoken metal_linked=false for metal_status. */
-#if defined(__GNUC__) || defined(__clang__)
-#define FK_METAL_WEAK __attribute__((weak))
-FK_METAL_WEAK long long fk_host_gpu_utilization(void) { return -1; } /* strong symbol lives in the Metal carrier; a build without it answers absent */
-FK_METAL_WEAK long long fk_host_disk_stat(long long *out) { out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0; return -1; }
-FK_METAL_WEAK long long fk_metal_live_external(long long *out) { int k = 0; while (k < 18) { out[k] = 0; k = k + 1; } return -1; }
-#else
-#define FK_METAL_WEAK static
-#endif
 /* No error-text parameter here on purpose: an MSL compile diagnostic is far larger
  * than a return value and must not be summarised into one. The carrier keeps the
  * compiler's own words and metal_status speaks them, so the band that got a 0
  * handle has exactly one place to look and finds the real message there. */
-FK_METAL_WEAK long long fk_metal_pipeline_external(const char *msl, long long msl_len,
-                                                   const char *name, long long name_len) {
-    (void)msl; (void)msl_len; (void)name; (void)name_len;
-    return FK_METAL_HANDLE_UNLINKED;
+static long long fk_metal_live_external(long long *out) {
+    int k = 0;
+    while (k < 20) {
+        out[k] = 0;
+        k = k + 1;
+    }
+    if (!fk_metal_dyn_load()) {
+        return -1;
+    }
+    return fk_metal_live_p(out);
 }
-FK_METAL_WEAK long long fk_metal_buf_alloc_external(long long nbytes) {
-    (void)nbytes;
-    return FK_METAL_HANDLE_UNLINKED;
+static long long fk_metal_pipeline_external(const char *msl, long long msl_len,
+                                            const char *name, long long name_len) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_pipeline_p(msl, msl_len, name, name_len);
 }
-FK_METAL_WEAK long long fk_metal_buf_from_file_external(const char *path, long long path_len,
-                                                        long long off, long long len) {
-    (void)path; (void)path_len; (void)off; (void)len;
-    return FK_METAL_HANDLE_UNLINKED;
+static long long fk_metal_buf_alloc_external(long long nbytes) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_buf_alloc_p(nbytes);
 }
-FK_METAL_WEAK long long fk_metal_buf_write_external(long long h, long long off,
-                                                    const char *bytes, long long len) {
-    (void)h; (void)off; (void)bytes; (void)len;
-    return FK_METAL_HANDLE_UNLINKED;
+static long long fk_metal_buf_from_file_external(const char *path, long long path_len,
+                                                 long long off, long long len) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_buf_from_file_p(path, path_len, off, len);
 }
-FK_METAL_WEAK long long fk_metal_enqueue_external(long long pipe, const char *binding,
-                                                  long long binding_len, long long threads) {
-    (void)pipe; (void)binding; (void)binding_len; (void)threads;
-    return FK_METAL_HANDLE_UNLINKED;
+static long long fk_metal_buf_write_external(long long h, long long off,
+                                             const char *bytes, long long len) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_buf_write_p(h, off, bytes, len);
 }
-FK_METAL_WEAK long long fk_metal_sync_external(void) { return FK_METAL_HANDLE_UNLINKED; }
-FK_METAL_WEAK long long fk_metal_buf_read_external(long long h, long long off, long long len,
-                                                   char *out, long long cap) {
-    (void)h; (void)off; (void)len; (void)out; (void)cap;
-    return FK_METAL_HANDLE_UNLINKED;
+static long long fk_metal_enqueue_external(long long pipe, const char *binding,
+                                           long long binding_len, long long threads) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_enqueue_p(pipe, binding, binding_len, threads);
 }
-FK_METAL_WEAK long long fk_metal_status_external(char *out, long long cap) {
-    (void)out; (void)cap;
-    return FK_METAL_HANDLE_UNLINKED;
+static long long fk_metal_sync_external(void) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_sync_p();
 }
-FK_METAL_WEAK long long fk_metal_batch_concurrent_external(void) { return FK_METAL_HANDLE_UNLINKED; }
-FK_METAL_WEAK long long fk_metal_buf_free_external(long long h) {
-    (void)h;
-    return FK_METAL_HANDLE_UNLINKED;
+static long long fk_metal_buf_read_external(long long h, long long off, long long len,
+                                            char *out, long long cap) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_buf_read_p(h, off, len, out, cap);
 }
-FK_METAL_WEAK long long fk_metal_submit_external(void) { return FK_METAL_HANDLE_UNLINKED; }
-FK_METAL_WEAK long long fk_metal_fence_wait_external(long long fence) {
-    (void)fence;
-    return FK_METAL_HANDLE_UNLINKED;
+static long long fk_metal_status_external(char *out, long long cap) {
+    if (!fk_metal_dyn_load()) {
+        return fk_metal_status_absent(out, cap);
+    }
+    return fk_metal_status_p(out, cap);
 }
-FK_METAL_WEAK long long fk_metal_deadline_external(long long ms) {
-    (void)ms;
-    return FK_METAL_HANDLE_UNLINKED;
+static long long fk_metal_batch_concurrent_external(void) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_batch_concurrent_p();
+}
+static long long fk_metal_buf_free_external(long long h) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_buf_free_p(h);
+}
+static long long fk_metal_submit_external(void) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_submit_p();
+}
+static long long fk_metal_fence_wait_external(long long fence) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_fence_wait_p(fence);
+}
+static long long fk_metal_deadline_external(long long ms) {
+    if (!fk_metal_dyn_load()) {
+        return FK_METAL_HANDLE_UNLOADED;
+    }
+    return fk_metal_deadline_p(ms);
 }
 static long long fk_srange(long long sv, const char **ptr, long long *len) {
     long long sa = fk_stri(sv);
@@ -1839,9 +2045,9 @@ static long long fk_srange(long long sv, const char **ptr, long long *len) {
 static long long fk_metal_matvec_fixture_native(void) {
     static char out[FK_METAL_FIXTURE_BUF_CAP];
     long long n = fk_metal_matvec_fixture_external(out, FK_METAL_FIXTURE_BUF_CAP);
-    if (n == FK_METAL_FIXTURE_UNLINKED) {
+    if (n == FK_METAL_FIXTURE_UNLOADED) {
         const char *m =
-            "SKIP fkwu-form-cli-metal-direct: no linked Metal carrier\nmetal_owner=fkwu-form-cli\nmetal_linked=false\n";
+            "SKIP fkwu-form-cli-metal-direct: dynamic Metal carrier not loaded\nmetal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=false\n";
         return fk_sbuf(m, fk_cstrlen(m));
     }
     if (n < 0) {
@@ -1869,9 +2075,9 @@ static long long fk_metal_matvec_f32_native(long long mslv, long long kernelv, l
     static char out[FK_METAL_MATVEC_BUF_CAP];
     long long n = fk_metal_matvec_f32_external(msl, msl_len, kernel, kernel_len, model, model_len,
                                                out, FK_METAL_MATVEC_BUF_CAP);
-    if (n == FK_METAL_MATVEC_UNLINKED) {
+    if (n == FK_METAL_MATVEC_UNLOADED) {
         const char *m =
-            "SKIP fkwu-form-cli-metal-matvec-f32: no linked Metal carrier\nmetal_owner=fkwu-form-cli\nmetal_linked=false\n";
+            "SKIP fkwu-form-cli-metal-matvec-f32: dynamic Metal carrier not loaded\nmetal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=false\n";
         return fk_sbuf(m, fk_cstrlen(m));
     }
     if (n < 0) {
@@ -1897,14 +2103,14 @@ static long long fk_metal_pipeline_native(long long mslv, long long namev) {
         return 0;
     }
     long long h = fk_metal_pipeline_external(msl, ml, name, nl);
-    if (h == FK_METAL_HANDLE_UNLINKED || h < 0) {
+    if (h == FK_METAL_HANDLE_UNLOADED || h < 0) {
         return 0;
     }
     return h;
 }
 static long long fk_metal_buf_alloc_native(long long nbytes) {
     long long h = fk_metal_buf_alloc_external(nbytes);
-    if (h == FK_METAL_HANDLE_UNLINKED || h < 0) {
+    if (h == FK_METAL_HANDLE_UNLOADED || h < 0) {
         return 0;
     }
     return h;
@@ -1916,7 +2122,7 @@ static long long fk_metal_buf_from_file_native(long long pathv, long long off, l
         return 0;
     }
     long long h = fk_metal_buf_from_file_external(path, pl, off, len);
-    if (h == FK_METAL_HANDLE_UNLINKED || h < 0) {
+    if (h == FK_METAL_HANDLE_UNLOADED || h < 0) {
         return 0;
     }
     return h;
@@ -1928,7 +2134,7 @@ static long long fk_metal_buf_write_native(long long h, long long off, long long
         return 0;
     }
     long long n = fk_metal_buf_write_external(h, off, b, bl);
-    if (n == FK_METAL_HANDLE_UNLINKED || n < 0) {
+    if (n == FK_METAL_HANDLE_UNLOADED || n < 0) {
         return 0;
     }
     return n;
@@ -1940,14 +2146,14 @@ static long long fk_metal_enqueue_native(long long pipe, long long bindv, long l
         return 0;
     }
     long long r = fk_metal_enqueue_external(pipe, b, bl, threads);
-    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+    if (r == FK_METAL_HANDLE_UNLOADED || r < 0) {
         return 0;
     }
     return r;
 }
 static long long fk_metal_sync_native(void) {
     long long r = fk_metal_sync_external();
-    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+    if (r == FK_METAL_HANDLE_UNLOADED || r < 0) {
         return 0;
     }
     return r;
@@ -1966,7 +2172,7 @@ static long long fk_metal_buf_read_native(long long h, long long off, long long 
         fk_sb_check();
     }
     long long n = fk_metal_buf_read_external(h, off, len, fk_sb + fk_sbp, len);
-    if (n == FK_METAL_HANDLE_UNLINKED || n < 0) {
+    if (n == FK_METAL_HANDLE_UNLOADED || n < 0) {
         return fk_sbuf("", 0);
     }
     /* The carrier answers all of `len` or it answers an error. A partial read
@@ -1981,28 +2187,28 @@ static long long fk_metal_buf_read_native(long long h, long long off, long long 
 }
 static long long fk_metal_batch_concurrent_native(void) {
     long long r = fk_metal_batch_concurrent_external();
-    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+    if (r == FK_METAL_HANDLE_UNLOADED || r < 0) {
         return 0;
     }
     return r;
 }
 static long long fk_metal_buf_free_native(long long h) {
     long long r = fk_metal_buf_free_external(h);
-    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+    if (r == FK_METAL_HANDLE_UNLOADED || r < 0) {
         return 0;
     }
     return r;
 }
 static long long fk_metal_submit_native(void) {
     long long r = fk_metal_submit_external();
-    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+    if (r == FK_METAL_HANDLE_UNLOADED || r < 0) {
         return 0;
     }
     return r;
 }
 static long long fk_metal_fence_wait_native(long long fence) {
     long long r = fk_metal_fence_wait_external(fence);
-    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+    if (r == FK_METAL_HANDLE_UNLOADED || r < 0) {
         return 0;
     }
     return r;
@@ -2012,7 +2218,7 @@ static long long fk_metal_fence_wait_native(long long fence) {
  * hand-over reads back as data; -2 when no carrier is linked to hand it to. */
 static long long fk_metal_deadline_native(long long ms) {
     long long r = fk_metal_deadline_external(ms);
-    if (r == FK_METAL_HANDLE_UNLINKED) {
+    if (r == FK_METAL_HANDLE_UNLOADED) {
         return -2;
     }
     return r;
@@ -2021,12 +2227,12 @@ static long long fk_metal_deadline_native(long long ms) {
 static long long fk_metal_status_native(void) {
     static char out[FK_METAL_STATUS_BUF_CAP];
     long long n = fk_metal_status_external(out, FK_METAL_STATUS_BUF_CAP);
-    if (n == FK_METAL_HANDLE_UNLINKED) {
-        const char *m = "metal_owner=fkwu-form-cli\nmetal_linked=false\nmetal_door=handle\n";
+    if (n == FK_METAL_HANDLE_UNLOADED) {
+        const char *m = "metal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=false\nmetal_door=handle\n";
         return fk_sbuf(m, fk_cstrlen(m));
     }
     if (n < 0) {
-        const char *m = "metal_owner=fkwu-form-cli\nmetal_linked=false\nmetal_door=handle\nlast_error=carrier returned error\n";
+        const char *m = "metal_owner=fkwu-form-cli\nmetal_carrier=dynamic\nmetal_loaded=false\nmetal_door=handle\nlast_error=carrier returned error\n";
         return fk_sbuf(m, fk_cstrlen(m));
     }
     if (n > FK_METAL_STATUS_BUF_CAP) {
@@ -3756,55 +3962,124 @@ static long long fk_sense_report(void) {
  * The current structural ARM64 u32 leaf intentionally does not claim that loop. The seed then
  * shrinks to the HAL (grab + raw bytes). See
  * receipts/2026-06-29-pixel-walk-is-form.md + 2026-06-29-windows-flatten-reground.md. */
-static unsigned char fk_frame_buf[1000000];
 static long long fk_rd32(unsigned char *p) {
     return (long long)p[0] | ((long long)p[1] << 8) | ((long long)p[2] << 16) |
            ((long long)p[3] << 24);
 }
-/* silent stat over the frame — fills out[0..8] = present,side,mean,darkpct,lm,cm,rm,w,h. Returns 0
- * / -1. */
-static long long fk_frame_stat(const char *path, long long *out) {
+static long long fk_rd16(unsigned char *p) {
+    return (long long)p[0] | ((long long)p[1] << 8);
+}
+static long long fk_srd32(unsigned char *p) {
+    long long u = fk_rd32(p);
+    return u >= 2147483648LL ? u - 4294967296LL : u;
+}
+/* Read one frame into storage owned by this call. 64 KiB is an IO quantum,
+ * not a file-size ceiling: capacity doubles until EOF or allocator refusal.
+ * Keeping ownership local makes concurrent readers independent and gives the
+ * eventual Form decoder a clean byte-string shaped carrier to replace. */
+static unsigned char *fk_frame_load(const char *path, long long *size) {
 #if defined(_WIN32)
     int fd = open(path, 0x8000);
-/* O_RDONLY | O_BINARY — pixel bytes are binary; text mode would mangle CRLF and stop at 0x1A */
+    /* O_RDONLY | O_BINARY — pixel bytes are binary; text mode would mangle CRLF and stop at 0x1A */
 #else
     int fd = open(path, 0);
 #endif
-    if (fd < 0) {
-        return -1;
-    }
+    unsigned char *buf;
+    long long cap = 65536;
     long long n = 0;
-    long long got;
-    while ((got = read(fd, fk_frame_buf + n, 65536)) > 0) {
-        n = n + got;
-        if (n > 999000) {
+    if (fd < 0) {
+        return 0;
+    }
+    buf = (unsigned char *)malloc((fk_size_t)cap);
+    if (buf == 0) {
+        close(fd);
+        return 0;
+    }
+    for (;;) {
+        long long got;
+        if (n == cap) {
+            unsigned char *grown;
+            long long next;
+            if (cap > 4611686018427387903LL) {
+                free(buf);
+                close(fd);
+                return 0;
+            }
+            next = cap * 2;
+            grown = (unsigned char *)realloc(buf, (fk_size_t)next);
+            if (grown == 0) {
+                free(buf);
+                close(fd);
+                return 0;
+            }
+            buf = grown;
+            cap = next;
+        }
+        got = read(fd, buf + n, (unsigned long)((cap - n) > 65536 ? 65536 : (cap - n)));
+        if (got > 0) {
+            n = n + got;
+        } else if (got == 0) {
             break;
+        } else if (errno != EINTR) {
+            free(buf);
+            close(fd);
+            return 0;
         }
     }
     close(fd);
-    if (n < 54) {
+    *size = n;
+    return buf;
+}
+/* silent stat over the frame — fills out[0..8] = present,side,mean,darkpct,lm,cm,rm,w,h. Returns 0
+ * / -1. */
+static long long fk_frame_stat(const char *path, long long *out) {
+    long long n = 0;
+    unsigned char *buf = fk_frame_load(path, &n);
+    long long dib, off, w, signed_h, h, planes, bpp, compression, row, pixels, need;
+    if (buf == 0 || n < 54) {
+        free(buf);
         return -1;
     }
-    long long off = fk_rd32(fk_frame_buf + 10);
-    long long w = fk_rd32(fk_frame_buf + 18);
-    long long h = fk_rd32(fk_frame_buf + 22);
-    long long bpp = (long long)fk_frame_buf[28] | ((long long)fk_frame_buf[29] << 8);
-    if (bpp != 24 || w <= 0 || h <= 0) {
+    if (buf[0] != 'B' || buf[1] != 'M') {
+        free(buf);
         return -1;
     }
-    long long row = (w * 3 + 3) & ~3LL;
+    dib = fk_rd32(buf + 14);
+    off = fk_rd32(buf + 10);
+    w = fk_srd32(buf + 18);
+    signed_h = fk_srd32(buf + 22);
+    planes = fk_rd16(buf + 26);
+    bpp = fk_rd16(buf + 28);
+    compression = fk_rd32(buf + 30);
+    if (dib < 40 || dib > n - 14 || off < 14 + dib || off > n || planes != 1 || bpp != 24 ||
+        compression != 0 || w <= 0 || signed_h == 0) {
+        free(buf);
+        return -1;
+    }
+    h = signed_h < 0 ? 0 - signed_h : signed_h;
+    row = (w * 3 + 3) & ~3LL;
+    if (row <= 0 || h > (9223372036854775807LL - off) / row) {
+        free(buf);
+        return -1;
+    }
+    need = off + h * row;
+    if (need > n || w > 9223372036854775807LL / h) {
+        free(buf);
+        return -1;
+    }
+    pixels = w * h;
+    if (pixels > 9223372036854775807LL / 255) {
+        free(buf);
+        return -1;
+    }
     long long sum = 0, dark = 0, ls = 0, cs = 0, rs = 0, lc = 0, cc = 0, rc = 0, cnt = 0;
     long long y = 0;
     while (y < h) {
         long long x = 0;
         while (x < w) {
             long long idx = off + y * row + x * 3;
-            if (idx + 2 >= n) {
-                x = x + 1;
-                continue;
-            }
-            long long lum = ((long long)fk_frame_buf[idx] + (long long)fk_frame_buf[idx + 1] +
-                             (long long)fk_frame_buf[idx + 2]) /
+            long long lum = ((long long)buf[idx] + (long long)buf[idx + 1] +
+                             (long long)buf[idx + 2]) /
                             3;
             sum = sum + lum;
             if (lum < 60) {
@@ -3842,6 +4117,7 @@ static long long fk_frame_stat(const char *path, long long *out) {
     out[6] = rm;
     out[7] = w;
     out[8] = h;
+    free(buf);
     return 0;
 }
 static long long fk_frame_read(const char *path) {
@@ -3919,6 +4195,10 @@ static long long fk_sense_stream(long long n) {
 #ifndef FK_HAVE_MMAN_HEADER
 extern void *mmap(void *, unsigned long, int, int, int, long);
 #endif
+/* Bumped once per compaction (fk_melt). A cons value is an index into an arena
+ * the collector moves, so every platform needs the generation even when the
+ * Darwin ARM64 executable-image witness is absent. */
+static long long fk_melt_gen = 0;
 #if defined(FK_HAVE_DARWIN_ARM64_JIT_WITNESS)
 #ifndef FK_HAVE_MMAN_HEADER
 extern int munmap(void *, unsigned long);
@@ -4182,10 +4462,6 @@ static int fk_arm64_u32_emit_tree(const fk_arm64_u32_node nodes[FK_ARM64_U32_NOD
  * losing. The hint closes that: the SAME program value asking again inside the
  * same heap generation is three integer compares and a call. It is a shortcut,
  * never an authority — a miss simply falls through to the parse. */
-/* Bumped once per compaction (fk_melt). A cons value is an index into an arena
- * the collector MOVES, so the value-hint below is valid only inside the
- * generation that set it. One counter is the whole guard. */
-static long long fk_melt_gen = 0;
 static long long fk_arm64_hint_prog = 0;
 static long long fk_arm64_hint_root = 0;
 static long long fk_arm64_hint_gen = -1;
@@ -8036,6 +8312,22 @@ static long long fk_mcopy(long long b) {
     fk_fw[p] = fk_nhp;
     return (fk_nhp << 1) | 1;
 }
+static long long fk_clo_mlive_roots(void) {
+    long long nlive = 0;
+    long long k = 0;
+    while (k < fk_clo_capvals_top) {
+        nlive = nlive + fk_mlive(fk_clo_capvals[k]);
+        k = k + 1;
+    }
+    return nlive;
+}
+static void fk_clo_mcopy_roots(void) {
+    long long k = 0;
+    while (k < fk_clo_capvals_top) {
+        fk_clo_capvals[k] = fk_mcopy(fk_clo_capvals[k]);
+        k = k + 1;
+    }
+}
 static long long fk_nmelt;
 /* fk_melt_want: a caller about to build a large flat structure (one whose
  * intermediates cannot be traced mid-build, e.g. the fs_list result) may
@@ -8074,6 +8366,13 @@ static void fk_smark(long long v) {
         v = FK_HT(p);
     }
 }
+static void fk_clo_smark_roots(void) {
+    long long k = 0;
+    while (k < fk_clo_capvals_top) {
+        fk_smark(fk_clo_capvals[k]);
+        k = k + 1;
+    }
+}
 static long long fk_smelt_reclaimed;
 static void fk_smelt(void) {
     if (fk_sp <= 0 || fk_sb == 0) { return; }
@@ -8098,6 +8397,7 @@ static void fk_smelt(void) {
     }
     k = 1;
     while (!fk_field_on && k <= fk_np) { fk_smark(fk_ncat[k]); fk_smark(fk_nkids[k]); fk_smark(fk_nval[k]); k = k + 1; }
+    fk_clo_smark_roots();
     k = 0;
     while (k < fk_node_count) {
         if (fk_node[k][0] == 24) { long long si = fk_node[k][1]; if (si >= 0 && si < fk_sp) { fk_smk[si] = 1; } }
@@ -8168,6 +8468,7 @@ static void fk_melt(void) {
         nlive = nlive + fk_mlive(fk_nval[k]);
         k = k + 1;
     }
+    nlive = nlive + fk_clo_mlive_roots();
     long long ncap = fk_cap;
     if (nlive * 2 > fk_cap) {
         ncap = fk_cap * 2;
@@ -8226,6 +8527,7 @@ static void fk_melt(void) {
         fk_nval[k] = fk_mcopy(fk_nval[k]);
         k = k + 1;
     }
+    fk_clo_mcopy_roots();
     if (fk_store_shared) { fk_heap_alt_h = fk_hh; fk_heap_alt_t = fk_ht; fk_heap_gen = 1 - fk_heap_gen; } else { free(fk_hh); free(fk_ht); }
     free(fk_fw);
     fk_hh = fk_nh;
@@ -20509,7 +20811,6 @@ static void fk_stage_input(const char *s) {
  * with an optimal cached native-speed compiler is the floor). Derived
  * .bml.fk, .bml.fkb and .bml.sym files are cache artifacts, gitignored.
  * Shrink direction: this door retires when the runner's entry self-hosts. */
-static const char *fk_self_path = "./fkwu";
 /* lower a .bml entirely in memory: the child prints the lowered text (its
  * // preludes: line carried) closed by a sentinel; the parent captures it
  * from the pipe. No derived source file is ever created. Returns a

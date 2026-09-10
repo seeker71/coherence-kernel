@@ -1,0 +1,231 @@
+// Lexical inventory of every branch in the checkout C seed.
+// This is a source census, not a C compiler or a proof of behavior.
+// preludes: gate/lens-text.bml form-stdlib/json.fk form-stdlib/form-fs.fk
+section [form.bml] {
+ class CBootstrapInspection {
+  def cbi-word(b) = or(eq(b, 95), or(and(ge(b, 65), le(b, 90)), or(and(ge(b, 97), le(b, 122)), and(ge(b, 48), le(b, 57)))));
+  def cbi-endword(s, i) = if and(lt(i, str_len(s)), cbi-word(str_byte_at(s, i))) then cbi-endword(s, add(i, 1)) else i;
+  def cbi-lines(s, a, b, n) {
+   let at = str_find(s, "\n", a);
+   if or(lt(at, 0), ge(at, b)) then n else cbi-lines(s, add(at, 1), b, add(n, 1));
+  }
+  def cbi-quoted(s, i, q) = if ge(i, str_len(s)) then i else if eq(str_byte_at(s, i), 92) then cbi-quoted(s, add(i, 2), q) else if eq(str_byte_at(s, i), q) then add(i, 1) else cbi-quoted(s, add(i, 1), q);
+  def cbi-directive-end(s, i) {
+   let at = str_find(s, "\n", i);
+   if lt(at, 0) then str_len(s) else if and(gt(at, 0), eq(str_byte_at(s, sub(at, 1)), 92)) then cbi-directive-end(s, add(at, 1)) else add(at, 1);
+  }
+  def cbi-token(s, a, b, line) = list(substring(s, a, b), a, b, line, cbi-lines(s, a, b, line));
+  def cbi-next(s, i, line) {
+   if ge(i, str_len(s)) then cbi-token(s, i, i, line) else cbi-next-byte(s, i, line, str_byte_at(s, i));
+  }
+  def cbi-next-byte(s, i, line, b) {
+   if or(eq(b, 32), or(eq(b, 9), or(eq(b, 10), eq(b, 13)))) then cbi-next(s, add(i, 1), add(line, if eq(b, 10) then 1 else 0))
+   else if lx-at?(s, i, "//") then cbi-skip-comment(s, i, line, str_find(s, "\n", add(i, 2)), 0)
+   else if lx-at?(s, i, "/*") then cbi-skip-comment(s, i, line, str_find(s, "*/", add(i, 2)), 2)
+   else cbi-token(s, i, if eq(b, 35) then cbi-directive-end(s, i) else if or(eq(b, 34), eq(b, 39)) then cbi-quoted(s, add(i, 1), b) else if cbi-word(b) then cbi-endword(s, i) else add(i, 1), line);
+  }
+  def cbi-skip-comment(s, i, line, end, extra) {
+   let after = if lt(end, 0) then str_len(s) else add(end, extra);
+   cbi-next(s, after, cbi-lines(s, i, after, line));
+  }
+  def cbi-text(t) = head(t);
+  def cbi-is(t, text) = str_eq(cbi-text(t), text);
+  def cbi-directive(t) = and(gt(str_len(cbi-text(t)), 0), eq(str_byte_at(cbi-text(t), 0), 35));
+  def cbi-join(ts) = if nil?(ts) then "" else if nil?(tail(ts)) then cbi-text(head(ts)) else str_concat(cbi-text(head(ts)), str_concat(" ", cbi-join(tail(ts))));
+  def cbi-has(ts, text) = if nil?(ts) then 0 else if cbi-is(head(ts), text) then 1 else cbi-has(tail(ts), text);
+  def cbi-function(ts) = and(cbi-has(ts, "("), and(not(cbi-has(ts, "=")), and(not(cbi-has(ts, "typedef")), cbi-is(nth(ts, sub(len(ts), 1)), ")"))));
+  def cbi-fn-name(ts, prev, best, depth) {
+   if nil?(ts) then best else cbi-fn-name(tail(ts), cbi-text(head(ts)), if and(cbi-is(head(ts), "("), eq(depth, 0)) then prev else best, add(depth, if cbi-is(head(ts), "(") then 1 else if cbi-is(head(ts), ")") then -1 else 0));
+  }
+  // Units: kind, first line, last line, byte start, byte end, header tokens.
+  def cbi-unit(kind, ts, end) = list(kind, nth(head(ts), 3), nth(end, 4), nth(head(ts), 1), nth(end, 2), ts);
+  def cbi-block(s, i, line, depth) {
+   let t = cbi-next(s, i, line);
+   if str_eq(cbi-text(t), "") then list(t, depth) else if and(cbi-is(t, "}"), eq(depth, 1)) then list(t, 0) else cbi-block(s, nth(t, 2), nth(t, 4), add(depth, if cbi-is(t, "{") then 1 else if cbi-is(t, "}") then -1 else 0));
+  }
+  def cbi-scan(s, i, line, pending, rows) {
+   let t = cbi-next(s, i, line);
+   if str_eq(cbi-text(t), "") then reverse(if nil?(pending) then rows else cons(cbi-unit("unresolved", reverse(pending), t), rows))
+   else if cbi-directive(t) then cbi-scan(s, nth(t, 2), nth(t, 4), pending, cons(cbi-unit("directive", list(t), t), rows))
+   else if cbi-is(t, "{") then cbi-braced(s, t, reverse(pending), rows, cbi-block(s, nth(t, 2), nth(t, 4), 1))
+   else if cbi-is(t, ";") then cbi-scan(s, nth(t, 2), nth(t, 4), list(), if nil?(pending) then rows else cons(cbi-unit("declaration", reverse(pending), t), rows))
+   else cbi-scan(s, nth(t, 2), nth(t, 4), cons(t, pending), rows);
+  }
+  def cbi-braced(s, open, ts, rows, block) {
+   let end = head(block);
+   if not(eq(nth(block, 1), 0)) then reverse(cons(cbi-unit("unresolved-brace", ts, end), rows))
+   else if cbi-function(ts) then cbi-scan(s, nth(end, 2), nth(end, 4), list(), cons(cbi-unit("function", ts, end), rows))
+   else cbi-scan(s, nth(end, 2), nth(end, 4), cons(cbi-token("{}", 0, 2, nth(open, 3)), reverse(ts)), rows);
+  }
+  def cbi-inventory(s) = cbi-scan(s, 0, 1, list(), list());
+  def cbi-count(rows, kind) = if nil?(rows) then 0 else add(if str_eq(head(head(rows)), kind) then 1 else 0, cbi-count(tail(rows), kind));
+  def cbi-s(key, value) = json-node-pair(key, json-node-string(value));
+  def cbi-n(key, value) = json-node-pair(key, json-node-int(value));
+  def cbi-json-unit(row) = json-node-object(list(cbi-s("kind", head(row)), cbi-s("name", if str_eq(head(row), "function") then cbi-fn-name(nth(row, 5), "", "", 0) else ""), cbi-n("line", nth(row, 1)), cbi-n("end_line", nth(row, 2)), cbi-n("start", nth(row, 3)), cbi-n("end", nth(row, 4)), cbi-s("declaration", cbi-join(nth(row, 5)))));
+  def cbi-json-units(rows) = if nil?(rows) then list() else cons(cbi-json-unit(head(rows)), cbi-json-units(tail(rows)));
+  def cbi-summary(rows) = list("source-lexical-census", "functions", cbi-count(rows, "function"), "declarations", cbi-count(rows, "declaration"), "directives", cbi-count(rows, "directive"), "unresolved", add(cbi-count(rows, "unresolved"), cbi-count(rows, "unresolved-brace")));
+  def cbi-keyword(s) = lx-str-in?(list("static", "extern", "const", "volatile", "unsigned", "signed", "long", "short", "char", "int", "float", "double", "void", "struct", "enum", "union", "typedef"), s);
+  def cbi-ident(s) = and(gt(str_len(s), 0), and(cbi-word(str_byte_at(s, 0)), not(and(ge(str_byte_at(s, 0), 48), le(str_byte_at(s, 0), 57)))));
+  def cbi-object-name(ts, best, prev, depth, bracket) {
+   if nil?(ts) then best else cbi-object-step(head(ts), tail(ts), best, prev, depth, bracket);
+  }
+  def cbi-object-step(t, rest, best, prev, depth, bracket) {
+   let s = cbi-text(t);
+   if and(str_eq(s, "="), eq(depth, 0)) then best else cbi-object-name(rest,
+     if and(cbi-ident(s), and(not(cbi-keyword(s)), and(eq(bracket, 0), or(eq(depth, 0), and(eq(depth, 1), str_eq(prev, "*")))))) then s else best, s,
+     add(depth, if str_eq(s, "(") then 1 else if str_eq(s, ")") then -1 else 0),
+     add(bracket, if str_eq(s, "[") then 1 else if str_eq(s, "]") then -1 else 0));
+  }
+  def cbi-decl-parts(ts, depth, current, done) {
+   if nil?(ts) then reverse(cons(reverse(current), done)) else if and(cbi-is(head(ts), ","), eq(depth, 0)) then cbi-decl-parts(tail(ts), 0, list(), cons(reverse(current), done)) else cbi-decl-parts(tail(ts), add(depth, if or(cbi-is(head(ts), "("), or(cbi-is(head(ts), "["), cbi-is(head(ts), "{"))) then 1 else if or(cbi-is(head(ts), ")"), or(cbi-is(head(ts), "]"), cbi-is(head(ts), "}"))) then -1 else 0), cons(head(ts), current), done);
+  }
+  def cbi-names-parts(parts) = if nil?(parts) then list() else cons(cbi-object-name(head(parts), "", "", 0, 0), cbi-names-parts(tail(parts)));
+  def cbi-global-names(row) = cbi-names-parts(cbi-decl-parts(nth(row, 5), 0, list(), list()));
+  def cbi-decl-kind(row) {
+   let ts = nth(row, 5);
+   let fn = cbi-fn-name(ts, "", "", 0);
+   if cbi-has(ts, "typedef") then "typedef" else if and(cbi-function(ts), and(cbi-ident(fn), not(cbi-keyword(fn)))) then "prototype" else if and(not(cbi-has(ts, "static")), and(not(cbi-has(ts, "extern")), cbi-is(nth(ts, sub(len(ts), 1)), "{}"))) then "type" else "global";
+  }
+  def cbi-global-count(rows) = if nil?(rows) then 0 else add(if and(str_eq(head(head(rows)), "declaration"), str_eq(cbi-decl-kind(head(rows)), "global")) then len(cbi-global-names(head(rows))) else 0, cbi-global-count(tail(rows)));
+  def cbi-unit-name(row) = if or(str_eq(head(row), "function"), and(str_eq(head(row), "declaration"), str_eq(cbi-decl-kind(row), "prototype"))) then cbi-fn-name(nth(row, 5), "", "", 0) else if str_eq(head(row), "declaration") then cbi-strings(cbi-global-names(row)) else cbi-join(nth(row, 5));
+  def cbi-outline-row(row, kind) {
+   let name = lx-strip(cbi-unit-name(row));
+   let prefix = str_concat(int_to_str(nth(row, 1)), str_concat("..", str_concat(int_to_str(nth(row, 2)), if str_eq(kind, "declaration") then str_concat(" ", cbi-decl-kind(row)) else "")));
+   str_concat(prefix, str_concat(if str_eq(name, "") then "" else str_concat(" ", name), "\n"));
+  }
+  def cbi-outline(rows, kind) = if nil?(rows) then "" else str_concat(if str_eq(head(head(rows)), kind) then cbi-outline-row(head(rows), kind) else "", cbi-outline(tail(rows), kind));
+  def cbi-outline-run(path, prefix) {
+   let rows = cbi-inventory(read_file(path));
+   let f = write_file(str_concat(prefix, "-functions.txt"), cbi-outline(rows, "function"));
+   let g = write_file(str_concat(prefix, "-globals.txt"), cbi-outline(rows, "declaration"));
+   list(cbi-summary(rows), "individual-global-declarations", cbi-global-count(rows), f, g);
+  }
+  def cbi-code(s, i, end, line, current, done) {
+   let t = cbi-next(s, i, line);
+   if or(ge(nth(t, 1), end), str_eq(cbi-text(t), "")) then cbi-strings(reverse(cons(current, done)))
+   else if gt(nth(t, 3), line) then cbi-code(s, nth(t, 2), end, nth(t, 4), str_concat(int_to_str(nth(t, 3)), str_concat(": ", cbi-text(t))), if str_eq(current, "") then done else cons(current, done))
+   else cbi-code(s, nth(t, 2), end, nth(t, 4), str_concat(current, str_concat(" ", cbi-text(t))), done);
+  }
+  def cbi-strings(ss) = if nil?(ss) then "" else str_concat(head(ss), str_concat("\n", cbi-strings(tail(ss))));
+  def cbi-code-write(s, rows, out) {
+   if nil?(rows) then 0 else cbi-code-write-one(s, head(rows), tail(rows), out);
+  }
+  def cbi-code-write-one(s, row, rest, out) {
+   let body = lx-strip(cbi-code(s, nth(row, 3), nth(row, 4), nth(row, 1), str_concat(int_to_str(nth(row, 1)), ":"), list()));
+   let code = str_concat(str_concat("\nUNIT ", head(row)), str_concat(" ", str_concat(int_to_str(nth(row, 1)), str_concat("\n", str_concat(body, "\n")))));
+   let wrote = host_file_append_bytes(out, host-abi-string-to-bytes(code));
+   if lt(wrote, 0) then -1 else cbi-code-write(s, rest, out);
+  }
+  def cbi-review-source(path, out) {
+   let s = read_file(path);
+   let clear = write_file(out, "");
+   if or(nothing?(s), lt(clear, 0)) then -1 else cbi-code-write(s, cbi-inventory(s), out);
+  }
+  def cbi-run(path, out) {
+   let source = read_file(path);
+   if nothing?(source) then list("unread", path) else cbi-write(path, source, out, cbi-inventory(source));
+  }
+  def cbi-write(path, source, out, rows) {
+   let result = write_file(out, str_concat(json-emit(json-node-object(list(cbi-s("schema", "c-bootstrap-lexical-inventory-v1"), cbi-s("source", path), cbi-n("source_bytes", str_len(source)), cbi-s("scope", "all preprocessor branches; lexical declaration units; compiler reconciliation required"), json-node-pair("units", json-node-array(cbi-json-units(rows)))))), "\n"));
+   list(cbi-summary(rows), "written-bytes", result, "output", out);
+  }
+  // Nested statics have process lifetime too. Include every conditional branch.
+  def cbi-local-decl(s, i, line, depth, ts) {
+   let t = cbi-next(s, i, line);
+   if or(str_eq(cbi-text(t), ""), and(cbi-is(t, ";"), eq(depth, 0))) then list(reverse(ts), t)
+   else cbi-local-decl(s, nth(t, 2), nth(t, 4), add(depth, if or(cbi-is(t, "("), or(cbi-is(t, "["), cbi-is(t, "{"))) then 1 else if or(cbi-is(t, ")"), or(cbi-is(t, "]"), cbi-is(t, "}"))) then -1 else 0), cons(t, ts));
+  }
+  def cbi-statics(s, i, end, line, owner, rows) {
+   let t = cbi-next(s, i, line);
+   if or(ge(nth(t, 1), end), str_eq(cbi-text(t), "")) then reverse(rows)
+   else if cbi-is(t, "static") then cbi-static-next(s, end, owner, rows, cbi-local-decl(s, nth(t, 2), nth(t, 4), 0, list(t)))
+   else cbi-statics(s, nth(t, 2), end, nth(t, 4), owner, rows);
+  }
+  def cbi-static-next(s, end, owner, rows, d) = cbi-statics(s, nth(nth(d, 1), 2), end, nth(nth(d, 1), 4), owner, cons(list(owner, cbi-unit("static-local", head(d), nth(d, 1))), rows));
+  def cbi-body-start(row) = nth(nth(nth(row, 5), sub(len(nth(row, 5)), 1)), 2);
+  def cbi-body-line(row) = nth(nth(nth(row, 5), sub(len(nth(row, 5)), 1)), 4);
+  def cbi-all-statics(s, rows) = if nil?(rows) then list() else append(if str_eq(head(head(rows)), "function") then cbi-statics(s, cbi-body-start(head(rows)), nth(head(rows), 4), cbi-body-line(head(rows)), cbi-unit-name(head(rows)), list()) else list(), cbi-all-statics(s, tail(rows)));
+  def cbi-all-names(rows, kind) = if nil?(rows) then list() else append(if str_eq(head(head(rows)), kind) then if str_eq(kind, "function") then list(cbi-unit-name(head(rows))) else if str_eq(cbi-decl-kind(head(rows)), "global") then cbi-global-names(head(rows)) else list() else list(), cbi-all-names(tail(rows), kind));
+  // Source-region labels are navigation, not a semantic proof. Resolve each
+  // boundary from a function definition on every run, so edits cannot silently
+  // shift a fixed line-number taxonomy onto different functions.
+  def cbi-region-anchors() = list(
+   list("fk_is_nothing", "value representation and intern pools"), list("fk_read_all_bounded", "configuration"),
+   list("fk_record_reserve", "records and byte conversion"), list("fk_metal_dyn_sym", "Metal carrier boundary"),
+   list("fk_mic_count", "Windows media adapters"), list("fk_aq_load", "audio streams and platform carriers"),
+   list("fk_spk_rate_ok", "sensing policy and frame decoding"), list("fk_arm64_u32_cons", "ARM64 executable images and residency"),
+   list("fk_nodes_grow_col", "node storage"), list("fk_observe_on", "observation and device enumeration"),
+   list("fk_tempdir", "filesystem and source inventory"), list("fk_sock_boot", "socket resource handles"),
+   list("fk_sense_publish", "mesh and HTTP platform recipes"), list("fk_cuda_go", "CUDA adapter and matvec policy"),
+   list("fk_sock_getaddrinfo", "network protocols and process execution"), list("fk_sqrt_d", "numeric algorithms"),
+   list("fk_arena", "collection and root traversal"), list("fk_vp", "AST storage and compact evaluator"),
+   list("fk_host_spawn_arm", "host operation dispatch"), list("fk_f64_reset", "automatic specialization and C twins"),
+   list("fk_len_upto", "hot evaluator and primitive dispatch"), list("fk_gift_live", "shared field and mapped stores"),
+   list("fk_sappend", "node interning and cross-process values"), list("fk_live_pid_name", "process observation and cell inspection"),
+   list("fk_pow_d", "binary node serialization"), list("fk_mono_ns", "terminal and program observation"),
+   list("fk_walk_cold", "cold evaluator and host opcode routing"), list("fk_srctext_reserve", "source parser and diagnostics"),
+   list("fk_path_len", "dependency discovery and source identity"), list("fk_fkb_flush", "compiled images and dynamic loading"),
+   list("fk_src_reset_compile_state", "compilation and execution orchestration"), list("fk_read_whole_file", "BML admission and cache orchestration"),
+   list("fk_run", "startup and thread lifetime"));
+  def cbi-definition-line(rows, name) = if nil?(rows) then -1 else if and(str_eq(head(head(rows)), "function"), str_eq(cbi-unit-name(head(rows)), name)) then nth(head(rows), 1) else cbi-definition-line(tail(rows), name);
+  def cbi-regions(rows, anchors) = if nil?(anchors) then list() else cons(list(cbi-definition-line(rows, head(head(anchors))), nth(head(anchors), 1)), cbi-regions(rows, tail(anchors)));
+  def cbi-regions-valid(regions, prior) = if nil?(regions) then 1 else and(gt(head(head(regions)), prior), cbi-regions-valid(tail(regions), head(head(regions))));
+  def cbi-family(line, regions) = if or(nil?(tail(regions)), lt(line, head(head(tail(regions))))) then nth(head(regions), 1) else cbi-family(line, tail(regions));
+  def cbi-host-name(n) = or(lx-at?(n, 0, "fk_os_"), lx-str-in?(list("fkwu_win_read", "fkwu_win_write", "arc4random", "dlopen", "dlsym", "dlclose", "fk_sysctl_ll", "fk_now_ms", "fk_mono_ns", "fk_live_now_ms", "fk_live_cpu_us", "fk_field_take", "fk_store_take", "fk_prog_take", "fk_write_all_raw", "fk_terminal_dim", "fk_tcp_connect", "fk_sock_boot", "fk_sock_getaddrinfo", "fk_sock_socket", "fk_sock_connect", "fk_sock_close", "fk_sock_read", "fk_sock_write"), n));
+  def cbi-disposition(row, regions) {
+   let n = cbi-unit-name(row);
+   let family = cbi-family(nth(row, 1), regions);
+   if cbi-host-name(n) then "retain mechanical ABI temporarily; expose through owned versioned host context"
+   else if lx-str-in?(list("Metal carrier boundary", "Windows media adapters", "audio streams and platform carriers", "CUDA adapter and matvec policy"), family) then "separate loadable platform adapter; move recipes and formats to Form"
+   else if str_eq(family, "ARM64 executable images and residency") then "Form emits and selects code; retain only executable mapping, ABI call and cache synchronization"
+   else if str_eq(family, "startup and thread lifetime") then "shrink to boot and handoff; move admission and scheduling to native Form"
+   else "replace with native Form after differential behavior and lifetime witness";
+  }
+  def cbi-tokens(s, i, end, line, acc) {
+   let t = cbi-next(s, i, line);
+   if or(ge(nth(t, 1), end), str_eq(cbi-text(t), "")) then reverse(acc) else cbi-tokens(s, nth(t, 2), end, nth(t, 4), cons(t, acc));
+  }
+  def cbi-facts(ts, prev, ids, calls, numbers) {
+   if nil?(ts) then list(lx-str-uniq(reverse(ids)), lx-str-uniq(reverse(calls)), lx-str-uniq(reverse(numbers))) else cbi-facts-next(cbi-text(head(ts)), tail(ts), prev, ids, calls, numbers);
+  }
+  def cbi-facts-next(s, rest, prev, ids, calls, numbers) = cbi-facts(rest, s, if cbi-ident(s) then cons(s, ids) else ids, if and(str_eq(s, "("), and(cbi-ident(prev), not(lx-str-in?(list("if", "while", "for", "switch", "sizeof", "__attribute__"), prev)))) then cons(prev, calls) else calls, if and(gt(str_len(s), 0), and(ge(str_byte_at(s, 0), 48), le(str_byte_at(s, 0), 57))) then cons(s, numbers) else numbers);
+  def cbi-json-strings(xs) = json-node-array(tb-map(xs, json-node-string));
+  def cbi-fn-entry(s, row, globals, regions) {
+   let ts = cbi-tokens(s, cbi-body-start(row), nth(row, 4), nth(row, 1), list());
+   let facts = cbi-facts(ts, "", list(), list(), list());
+   json-node-object(list(cbi-s("kind", "function"), cbi-s("name", cbi-unit-name(row)), cbi-n("line", nth(row, 1)), cbi-n("end_line", nth(row, 2)), cbi-s("signature", cbi-join(nth(row, 5))), cbi-s("family", cbi-family(nth(row, 1), regions)), cbi-s("destination", cbi-disposition(row, regions)), json-node-pair("call_syntax", cbi-json-strings(nth(facts, 1))), json-node-pair("global_name_references", cbi-json-strings(lx-str-common(head(facts), globals))), json-node-pair("numeric_tokens_not_proven_limits", cbi-json-strings(nth(facts, 2)))));
+  }
+  def cbi-fn-entries(s, rows, globals, regions) = if nil?(rows) then list() else if str_eq(head(head(rows)), "function") then cons(cbi-fn-entry(s, head(rows), globals, regions), cbi-fn-entries(s, tail(rows), globals, regions)) else cbi-fn-entries(s, tail(rows), globals, regions);
+  def cbi-global-entry(row, n, owner, regions) = json-node-object(list(cbi-s("kind", if str_eq(owner, "") then "file-scope-object" else "static-local-object"), cbi-s("name", n), cbi-s("owner_function", owner), cbi-n("line", nth(row, 1)), cbi-n("end_line", nth(row, 2)), cbi-s("declaration", cbi-join(nth(row, 5))), cbi-s("family", cbi-family(nth(row, 1), regions)), cbi-s("destination", if and(cbi-has(nth(row, 5), "const"), not(cbi-has(nth(row, 5), "*"))) then "immutable versioned data; inspect member mutability and relocate with its native module" else "explicit owner and lifetime; context, resource, compilation, or worker state; no hidden process singleton")));
+  def cbi-global-entries-one(row, names, owner, regions) = if nil?(names) then list() else cons(cbi-global-entry(row, head(names), owner, regions), cbi-global-entries-one(row, tail(names), owner, regions));
+  def cbi-global-entries(rows, regions) = if nil?(rows) then list() else append(if and(str_eq(head(head(rows)), "declaration"), str_eq(cbi-decl-kind(head(rows)), "global")) then cbi-global-entries-one(head(rows), cbi-global-names(head(rows)), "", regions) else list(), cbi-global-entries(tail(rows), regions));
+  def cbi-static-entries(rows, regions) = if nil?(rows) then list() else append(cbi-global-entries-one(nth(head(rows), 1), cbi-global-names(nth(head(rows), 1)), head(head(rows)), regions), cbi-static-entries(tail(rows), regions));
+  // Clang text AST is a second independent census of the active platform.
+  def cbi-ast-name(s) {
+   let q = str_find(s, "'", 0);
+   if lt(q, 0) then "" else cbi-ast-word-back(s, sub(q, 2), sub(q, 1));
+  }
+  def cbi-ast-word-back(s, i, end) = if or(lt(i, 0), not(cbi-word(str_byte_at(s, i)))) then substring(s, add(i, 1), end) else cbi-ast-word-back(s, sub(i, 1), end);
+  def cbi-ast-root(s) = or(lx-at?(s, 0, "|-"), lx-at?(s, 0, "`-"));
+  def cbi-ast(rows, current, functions, globals) {
+   if nil?(rows) then list(lx-str-uniq(reverse(functions)), lx-str-uniq(reverse(globals))) else cbi-ast-one(head(rows), tail(rows), current, functions, globals);
+  }
+  def cbi-ast-one(s, rest, current, functions, globals) {
+   if cbi-ast-root(s) then cbi-ast(rest, if lx-at?(s, 2, "FunctionDecl ") then cbi-ast-name(s) else "", functions, if and(lx-at?(s, 2, "VarDecl "), or(lx-at?(cbi-ast-name(s), 0, "fk_"), str_eq(cbi-ast-name(s), "errno"))) then cons(cbi-ast-name(s), globals) else globals)
+   else cbi-ast(rest, current, if and(not(str_eq(current, "")), or(lx-at?(s, 5, "CompoundStmt "), lx-at?(s, 4, "CompoundStmt "))) then cons(current, functions) else functions, globals);
+  }
+  def cbi-audit(path, astpath, out) {
+   let s = read_file(path);
+   let rows = cbi-inventory(s);
+   let globals = lx-str-uniq(cbi-all-names(rows, "declaration"));
+   let functions = lx-str-uniq(cbi-all-names(rows, "function"));
+   let ast = cbi-ast(lx-lines(read_file(astpath)), "", list(), list());
+   let statics = cbi-all-statics(s, rows);
+   let regions = cons(list(0, "host ABI and instrumentation"), cbi-regions(rows, cbi-region-anchors()));
+   let doc = json-node-object(list(cbi-s("schema", "c-bootstrap-audit-v1"), cbi-s("source", path), cbi-n("source_bytes", str_len(s)), cbi-n("source_lines", cbi-lines(s, 0, str_len(s), 0)), cbi-s("method", "all raw preprocessor branches; lexical calls and references may include macros, function pointers and shadowed identifiers; numeric tokens are not automatically limits; active-platform Clang reconciliation is by unique names, not behavior"), json-node-pair("census", json-node-object(list(cbi-n("function_definitions_all_branches", cbi-count(rows, "function")), cbi-n("function_unique_names_all_branches", len(functions)), cbi-n("global_declarations_all_branches", cbi-global-count(rows)), cbi-n("global_unique_names_all_branches", len(globals)), cbi-n("active_clang_function_unique_names", len(head(ast))), cbi-n("active_clang_global_unique_names", len(nth(ast, 1))), json-node-pair("clang_functions_missing_from_lexical", cbi-json-strings(lx-str-minus(head(ast), functions))), json-node-pair("clang_globals_missing_from_lexical", cbi-json-strings(lx-str-minus(nth(ast, 1), globals))), json-node-pair("lexical_functions_inactive_here", cbi-json-strings(lx-str-minus(functions, head(ast)))), json-node-pair("lexical_globals_inactive_here", cbi-json-strings(lx-str-minus(globals, nth(ast, 1))))))), json-node-pair("functions", json-node-array(cbi-fn-entries(s, rows, globals, regions))), json-node-pair("globals", json-node-array(cbi-global-entries(rows, regions))), json-node-pair("static_locals", json-node-array(cbi-static-entries(statics, regions))), json-node-pair("all_declaration_units", json-node-array(cbi-json-units(rows)))));
+   let wrote = if cbi-regions-valid(tail(regions), 0) then write_file(out, str_concat(json-emit(doc), "\n")) else -1;
+   list(cbi-summary(rows), "global-names", len(globals), "static-declaration-units", len(statics), "active-clang-functions", len(head(ast)), "active-clang-globals", len(nth(ast, 1)), "missing-functions", lx-str-minus(head(ast), functions), "missing-globals", lx-str-minus(nth(ast, 1), globals), "written", wrote);
+  }
+ }
+ 0;
+}

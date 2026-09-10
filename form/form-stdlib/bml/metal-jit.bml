@@ -1,0 +1,48 @@
+// Form owns source generation, version identity, cache selection and dispatch.
+// The host adapter compiles the supplied source in RAM through Metal's API.
+// FMJ1 | u32 mode | u32 entry bytes | u32 path bytes | entry | path | source.
+// Modes: 0 RAM, 1 capture compiled archive, 2 require compiled archive hit.
+// Disk is optional. A requested archive that fails is reported, never replaced.
+// preludes: form-stdlib/metal-door.fk form-stdlib/sha256.fk form-stdlib/str-byte-at.fk form-stdlib/hex.fk form-stdlib/micro-thought.bml
+section [form.bml] {
+ class MetalJit {
+  def mj-source(body) = str_concat("#include <metal_stdlib>", str_concat(byte_to_str(10), str_concat("using namespace metal; ", body)));
+  def mj-descriptor(source, entry, mode, path) = str_concat("FMJ1", str_concat(md-le32(mode), str_concat(md-le32(str_len(entry)), str_concat(md-le32(str_len(path)), str_concat(entry, str_concat(path, source))))));
+  def mj-target() {
+   let status = metal_status();
+   let start = str_find(status, "metal_jit_target=", 0);
+   let after = if lt(start, 0) then -1 else str_find(status, byte_to_str(10), start);
+   if or(lt(start, 0), lt(after, 0)) then nothing() else substring(status, add(start, 17), after);
+  }
+  def mj-identity(source, entry, target) = hex-encode(sha256-stream-string(str_concat(md-le32(str_len(target)), str_concat(target, mj-descriptor(source, entry, 0, "")))));
+  def mj-cache-path(directory, source, entry) {
+   let target = mj-target();
+   if nothing?(target) then nothing() else str_concat(directory, str_concat("/", str_concat(mj-identity(source, entry, target), ".metalbin")));
+  }
+  // A version holds its live pipeline and the exact program identity.
+  def mj-admit(source, entry, mode, path) {
+   let target = mj-target();
+   let handle = if nothing?(target) then 0 else metal_pipeline(mj-descriptor(source, entry, mode, path), "form_metal_jit_v1");
+   if le(handle, 0) then nothing() else list(handle, mj-identity(source, entry, target), source, entry, mode, path);
+  }
+  def mj-memory(source, entry) = mj-admit(source, entry, 0, "");
+  def mj-cached(source, entry, directory) {
+   let path = mj-cache-path(directory, source, entry);
+   if nothing?(path) then nothing() else mj-admit(source, entry, if lt(file_size(path), 0) then 1 else 2, path);
+  }
+  def mj-handle(version) = if nothing?(version) then 0 else head(version);
+  def mj-enqueue(version, bindings, threads) = if le(mj-handle(version), 0) then 0 else metal_enqueue(mj-handle(version), bindings, threads);
+  // The caller supplies its comparison domain and observed bytes. Selection
+  // is a Form value: existing handles and submitted commands keep their version.
+  def mj-select(candidate, expected, observed) = if and(gt(mj-handle(candidate), 0), str_eq(expected, observed)) then candidate else nothing();
+  // A short thought address can reuse the resident pipeline. Its exact seal
+  // includes both source and entry; an address collision refuses admission.
+  def mj-thought(table, address, source, entry, mode, path) {
+   let seal = mj-descriptor(source, entry, 0, "");
+   if mt-known?(table, address) then if mt-agrees?(table, address, seal) then table else nothing()
+   else mj-thought-keep(table, address, seal, mj-admit(source, entry, mode, path));
+  }
+  def mj-thought-keep(table, address, seal, version) = if nothing?(version) then nothing() else mt-mint-take(table, address, seal, mj-handle(version));
+ }
+ 0;
+}
