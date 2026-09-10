@@ -71,7 +71,23 @@ section [form.bml] {
         def fgl-reading-samples-at(readings, epoch) = if eq(len(readings), 0) then list() else append(fgl-current-reading-samples-at(head(readings), epoch), fgl-reading-samples-at(tail(readings), epoch));
         def fgl-sample-id-held?(held, id) = if eq(len(held), 0) then 0 else if str_eq(fgtm-sample-id(head(held)), id) then 1 else fgl-sample-id-held?(tail(held), id);
         def fgl-dedupe-samples-go(samples, held) = if eq(len(samples), 0) then held else if eq(fgl-sample-id-held?(held, fgtm-sample-id(head(samples))), 1) then fgl-dedupe-samples-go(tail(samples), held) else fgl-dedupe-samples-go(tail(samples), append(held, list(head(samples))));
-        def fgl-dedupe-samples(samples) = fgl-dedupe-samples-go(samples, list());
+        def fgl-identity-map(count) = km-for(div(count, FGDIndexBucketLoad()));
+        def fgl-dedupe-samples(samples) = fgl-dedupe-indexed(samples, fgl-identity-map(len(samples)), list());
+        def fgl-dedupe-indexed(samples, seen, held) = if nil?(samples) then reverse(held) else fgl-dedupe-keyed(head(samples), tail(samples), seen, held, fgd-key-bytes(fgtm-sample-id(head(samples))));
+        def fgl-dedupe-keyed(sample, rest, seen, held, key) {
+            let hash = fgd-key-hash(key);
+            if km-get-h(seen, hash, key, 0) then fgl-dedupe-indexed(rest, seen, held) else fgl-dedupe-indexed(rest, fgd-key-put(seen, hash, key, 1), cons(sample, held));
+        }
+        def fgl-same-sample-ids(a, b) = if not(eq(len(a), len(b))) then 0 else fgl-same-sample-ids-go(a, b);
+        def fgl-same-sample-ids-go(a, b) = if nil?(a) then 1 else if not(str_eq(fgtm-sample-id(head(a)), fgtm-sample-id(head(b)))) then 0 else fgl-same-sample-ids-go(tail(a), tail(b));
+        def fgl-dedupe-cache(samples, prior) = list(samples, if and(eq(len(prior), 2), fgl-same-sample-ids(samples, head(prior))) then nth(prior, 1) else fgl-unique-positions(samples, 0, fgl-identity-map(len(samples)), list()));
+        def fgl-unique-positions(samples, position, seen, held) = if nil?(samples) then reverse(held) else fgl-unique-position(samples, position, seen, held, fgd-key-bytes(fgtm-sample-id(head(samples))));
+        def fgl-unique-position(samples, position, seen, held, key) {
+            let hash = fgd-key-hash(key);
+            if km-get-h(seen, hash, key, 0) then fgl-unique-positions(tail(samples), add(position, 1), seen, held) else fgl-unique-positions(tail(samples), add(position, 1), fgd-key-put(seen, hash, key, 1), cons(position, held));
+        }
+        def fgl-dedupe-cache-values(cache) = fgl-position-values(head(cache), nth(cache, 1));
+        def fgl-position-values(samples, positions) = if nil?(positions) then list() else cons(nth(samples, head(positions)), fgl-position-values(samples, tail(positions)));
         def fgl-sample-entry(snapshotEpoch, publisher, sample) = list("glass-sample-entry-v2", snapshotEpoch, publisher, sample);
         def fgl-entry-epoch(entry) = nth(entry, 1);
         def fgl-entry-publisher(entry) = nth(entry, 2);
@@ -94,11 +110,39 @@ section [form.bml] {
         def fgl-insert-newest-keyed(entry, pub, id, held) = if eq(len(held), 0) then list(entry) else if eq(fgl-same-keyed-identity?(entry, pub, id, head(held)), 1) then if gt(fgl-entry-epoch(entry), fgl-entry-epoch(head(held))) then cons(entry, tail(held)) else held else cons(head(held), fgl-insert-newest-keyed(entry, pub, id, tail(held)));
         def fgl-newest-entries(entries, held) = if eq(len(entries), 0) then held else fgl-newest-entries(tail(entries), fgl-insert-newest-entry(head(entries), held));
         def fgl-entry-samples(entries) = if eq(len(entries), 0) then list() else cons(fgl-entry-sample(head(entries)), fgl-entry-samples(tail(entries)));
-        def fgl-newest-samples-by-snapshot(entries) = fgl-entry-samples(fgl-newest-entries(entries, list()));
+        // Most snapshots already carry distinct identities. Prove that with
+        // exact keys once; retain the established newest/physical-alias fold
+        // when any duplicate exists (its identity relation is not transitive).
+        def fgl-newest-samples-by-snapshot(entries) = fgl-entry-samples(if fgl-entries-distinct(entries, fgl-identity-map(mul(len(entries), 2))) then entries else fgl-newest-entries(entries, list()));
+        def fgl-entries-distinct(entries, seen) = fgl-entries-distinct-in(entries, seen, "", list(), km-seed());
+        def fgl-entries-distinct-in(entries, seen, prior, prefix, prefixHash) = if nil?(entries) then 1 else if str_eq(fgl-entry-publisher(head(entries)), prior) then fgl-entry-distinct(head(entries), tail(entries), seen, prefix, prefixHash) else fgl-entry-distinct-prefix(entries, seen, fgd-key-bytes(fgl-entry-publisher(head(entries))));
+        def fgl-entry-distinct-prefix(entries, seen, prefix) = fgl-entry-distinct(head(entries), tail(entries), seen, prefix, fgd-key-hash(prefix));
+        def fgl-entry-distinct(entry, rest, seen, publisher, prefixHash) {
+            let sample = fgl-entry-sample(entry);
+            let suffix = cons(-1, fgd-key-bytes(fgtm-sample-id(sample)));
+            let key = append(publisher, suffix);
+            let hash = fgd-key-fold(suffix, prefixHash);
+            if km-get-h(seen, hash, key, 0) then 0 else fgl-entry-distinct-model(sample, rest, fgd-key-put(seen, hash, key, 1), fgl-entry-publisher(entry), publisher, prefixHash);
+        }
+        def fgl-entry-distinct-model(sample, rest, seen, name, publisher, prefixHash) = if and(str_eq(fgtm-sample-kind(sample), "model"), eq(fgtm-field-present?(fgtm-sample-handle(sample)), 1)) then fgl-entry-distinct-handle(rest, seen, name, publisher, prefixHash, list(-2, fgtm-field-value(fgtm-sample-handle(sample)))) else fgl-entries-distinct-in(rest, seen, name, publisher, prefixHash);
+        def fgl-entry-distinct-handle(rest, seen, name, publisher, prefixHash, suffix) {
+            let key = append(publisher, suffix);
+            let hash = fgd-key-fold(suffix, prefixHash);
+            if km-get-h(seen, hash, key, 0) then 0 else fgl-entries-distinct-in(rest, fgd-key-put(seen, hash, key, 1), name, publisher, prefixHash);
+        }
+        def fgl-same-entry-keys(a, b) = if not(eq(len(a), len(b))) then 0 else fgl-same-entry-keys-go(a, b);
+        def fgl-same-entry-keys-go(a, b) = if nil?(a) then 1 else if not(and(str_eq(fgl-entry-publisher(head(a)), fgl-entry-publisher(head(b))), fgl-same-sample-key(fgl-entry-sample(head(a)), fgl-entry-sample(head(b))))) then 0 else fgl-same-entry-keys-go(tail(a), tail(b));
+        def fgl-same-sample-key(a, b) = and(str_eq(fgtm-sample-id(a), fgtm-sample-id(b)), and(str_eq(fgtm-sample-kind(a), fgtm-sample-kind(b)), value_eq(fgtm-sample-handle(a), fgtm-sample-handle(b))));
+        def fgl-entry-cache(entries, prior) {
+            let reusable = if not(eq(len(prior), 2)) then 0 else if not(eq(nth(prior, 1), 1)) then 0 else fgl-same-entry-keys(entries, head(prior));
+            list(entries, if reusable then 1 else fgl-entries-distinct(entries, fgl-identity-map(mul(len(entries), 2))));
+        }
+        def fgl-entry-cache-values(cache) = fgl-entry-samples(if eq(nth(cache, 1), 1) then head(cache) else fgl-newest-entries(head(cache), list()));
         def fgl-incarnated-dual-publisher?(publisher) = eq(str_find(publisher, "models.dual-resident.i", 0), 0);
         def fgl-has-incarnated-dual-publisher?(publishers) = if eq(len(publishers), 0) then 0 else if eq(fgl-incarnated-dual-publisher?(head(publishers)), 1) then 1 else fgl-has-incarnated-dual-publisher?(tail(publishers));
         def fgl-current-readings(readings, suppressLegacyDual) = if eq(len(readings), 0) then list() else if and(eq(suppressLegacyDual, 1), str_eq(nth(head(readings), 1), "models.dual-resident")) then fgl-current-readings(tail(readings), suppressLegacyDual) else cons(head(readings), fgl-current-readings(tail(readings), suppressLegacyDual));
         def fgl-inventory-samples-at(inventory, epoch) = if not(str_eq(nth(inventory, 2), "current")) then list() else fgl-newest-samples-by-snapshot(fgl-reading-sample-entries-at(fgl-current-readings(nth(inventory, 4), fgl-has-incarnated-dual-publisher?(nth(inventory, 3))), epoch));
+        def fgl-inventory-entries-at(inventory, epoch) = if not(str_eq(nth(inventory, 2), "current")) then list() else fgl-reading-sample-entries-at(fgl-current-readings(nth(inventory, 4), fgl-has-incarnated-dual-publisher?(nth(inventory, 3))), epoch);
         def fgl-inventory-publishers(inventory) = if not(str_eq(nth(inventory, 2), "current")) then list() else nth(inventory, 3);
 
         def fgl-owner-liveness-row?(sample) = if and(str_eq(fgtm-sample-kind(sample), "owner-liveness"), and(str_eq(fgtm-sample-lifecycle(sample), "active"), and(str_eq(fgtm-sample-purpose(sample), "os-process-lifetime-current"), str_eq(fgtm-sample-evidence(sample), "physical-live")))) then 1 else if and(str_eq(fgtm-sample-kind(sample), "owner-heartbeat"), eq(fgtm-field-present?(fgtm-sample-handle(sample)), 1)) then 1 else 0;
@@ -159,13 +203,13 @@ section [form.bml] {
         }
         // ---- the glass's own carried-over cells (last flow point, last cadence, last pageins): tiny frames, no file ----
         def fgl-last-give(name, cell) {
-            let handle = ggf-offer(str_concat("glass.last.", name), 65536);
+            let handle = ggf-offer(fgl-last-name(name), 65536);
             let seq = if nothing?(handle) then nothing() else node_gift_write(handle, cell);
             let released = ggf-release(handle);
             if nothing?(seq) then -1 else seq;
         }
         def fgl-last-take(name) {
-            let handle = ggf-receive(str_concat("glass.last.", name));
+            let handle = ggf-receive(fgl-last-name(name));
             let cell = if nothing?(handle) then nothing() else node_gift_read(handle);
             let released = ggf-release(handle);
             cell;
@@ -829,7 +873,7 @@ section [form.bml] {
         // give frames. They are ensured on the first tick and at the roster cadence (every tenth tick), when an absent frame is
         // asked for again and a frame no want names any more is released; between those ticks a handle is only looked up.
         def fgl-kept-sensor-wants(sensors) = if eq(len(sensors), 0) then list() else cons(list(fgsr-publisher(head(sensors)), "take", 0), fgl-kept-sensor-wants(tail(sensors)));
-        def fgl-kept-wants(roster) = append(list(list(fgl-wait-inbox-name(), "take", 0), list(fgtm-space(FGLRoot(), FGLJitPublisher()), "take", 0), list(fgsr-publisher("glass"), "give", FGSRFrameBytes()), list(fgl-last-name("cadence"), "give", 65536), list(fgl-last-name("flow-point"), "give", 65536)), append(fgl-kept-sensor-wants(list("host", "machine", "owner", "queue", "storage", "glass", "ear", "prosody", "room", "aware", "jungle", "bearing", "twin", "mirror")), fgtm-roster-wants(FGLRoot(), roster)));
+        def fgl-kept-wants(roster) = append(list(list(fgl-wait-inbox-name(), "take", 0), list(fgtm-space(FGLRoot(), FGLJitPublisher()), "take", 0), list(fgsr-publisher("glass"), "give", FGSRFrameBytes()), list(fgl-last-name("cadence"), "give", 65536), list(fgl-last-name("presentation"), "give", 65536), list(fgl-last-name("flow-point"), "give", 65536)), append(fgl-kept-sensor-wants(list("host", "machine", "owner", "queue", "storage", "glass", "ear", "prosody", "room", "aware", "jungle", "bearing", "twin", "mirror")), fgtm-roster-wants(FGLRoot(), roster)));
         def fgl-kept-refresh(kept, roster) {
             let wants = fgl-kept-wants(roster);
             ggf-kept-ensure-all(ggf-kept-prune(kept, wants), wants, 1);
@@ -870,7 +914,7 @@ section [form.bml] {
             let cell = fgl-last-take("cadence");
             if nothing?(cell) then list() else if lt(len(cell), 3) then list() else cell;
         }
-        def fgl-cadence-measured-rows(workMs, waitMs, budgetMs) = list(fgl-cadence-live-row("frame-work-ms", "previous frame observation work", workMs, budgetMs, "all collection render and control work before wait"), fgl-cadence-live-row("frame-wait-ms", "previous frame deadline wait", waitMs, budgetMs, "actual host wait; measured zero means the frame exceeded its target"), fgl-cadence-live-row("frame-budget-ms", "previous frame target", budgetMs, budgetMs, "250ms active or moving; 500ms quiet"), fgl-cadence-live-row("frame-cycle-ms", "previous frame work plus wait", add(workMs, waitMs), budgetMs, "physical completed-frame cadence excluding recursive call overhead"));
+        def fgl-cadence-measured-rows(workMs, waitMs, budgetMs) = list(fgl-cadence-live-row("frame-work-ms", "previous frame observation work", workMs, budgetMs, "collection control and completed terminal write; excludes deadline wait"), fgl-cadence-live-row("frame-wait-ms", "previous frame deadline wait", waitMs, budgetMs, "actual host wait; measured zero means the frame exceeded its target"), fgl-cadence-live-row("frame-budget-ms", "previous frame target", budgetMs, budgetMs, "target from current active or quiet cadence"), fgl-cadence-live-row("frame-cycle-ms", "previous frame work plus wait", add(workMs, waitMs), budgetMs, "physical completed-frame cadence excluding recursive call overhead"));
         def fgl-cadence-persisted-rows() {
             let last = fgl-cadence-last-load();
             if eq(len(last), 0) then list() else fgl-cadence-measured-rows(nth(last, 0), nth(last, 1), nth(last, 2));
@@ -904,12 +948,24 @@ section [form.bml] {
             fgl-render-commit(shown, buffer, planned);
         }
         def fgl-render-commit(writeResult, prior, planned) = if lt(writeResult, 0) then prior else planned;
+        // Written after the terminal acknowledges a newly presented generation.
+        // A reader takes six native words from shared memory, not the dashboard.
+        def fgl-presentation-value(observed, began, ended, prior, next) = if not(gt(fgel-buffer-presented(next), fgel-buffer-presented(prior))) then list() else list("form-glass-presentation-v1", observed, ended, fgl-frame-elapsed-ms(observed, ended), fgl-frame-elapsed-ms(began, ended), fgel-buffer-presented(next));
+        def fgl-present-observed(buffer, plan, kept, observed) {
+            let began = now_unix_ms();
+            let next = fgl-present-plan(buffer, plan);
+            let ended = now_unix_ms();
+            let reading = fgl-presentation-value(observed, began, ended, buffer, next);
+            let saved = if nil?(reading) then 0 else fgl-last-give-held(fgl-kept-give(kept, fgl-last-name("presentation")), reading);
+            next;
+        }
         def fgl-schedule-for-hz(schedule, epoch, hz) {
             let budget = fgl-frame-budget-ms(hz);
             if not(eq(fgel-schedule-valid?(schedule), 1)) then fgel-schedule-start(epoch, budget) else if not(eq(fgel-schedule-budget(schedule), budget)) then fgel-schedule-start(epoch, budget) else schedule;
         }
         def fgl-schedule-wait-ms(schedule, epoch) = if ge(epoch, fgel-schedule-deadline(schedule)) then 0 else sub(fgel-schedule-deadline(schedule), epoch);
         def fgl-dashboard-frame(width, height, epoch, hz, frame, control, metrics, samples, publishers, history, observations) = fgd-live-segment-frame(width, height, epoch, hz, frame, fgl-control-view(control), fgl-control-focus(control), fgl-control-filter(control), fgl-control-selected(control), fgl-control-evidence-open?(control), metrics, samples, publishers, fgl-control-status(control), history, observations, fgl-input-caption(control, metrics));
+        def fgl-dashboard-frame-in(width, height, epoch, hz, frame, control, metrics, samples, publishers, history, observations, index) = fgd-live-segment-frame-in(width, height, epoch, hz, frame, fgl-control-view(control), fgl-control-focus(control), fgl-control-filter(control), fgl-control-selected(control), fgl-control-evidence-open?(control), metrics, samples, publishers, fgl-control-status(control), history, observations, fgl-input-caption(control, metrics), index);
 
         // Inspection reads published native frames. It does not poke an owner,
         // refresh a governor, or publish a competing glass.sensor.glass frame.
@@ -1133,6 +1189,9 @@ section [form.bml] {
         // the loop's cache also carries the kept frame handles (ggf-kept-*), one per (publisher, mode) for the loop's life
         def fgl-cache-full-kept(snapshots, observations, samples, roster, kept) = list(snapshots, observations, samples, roster, kept);
         def fgl-cache-kept(c) = if ge(len(c), 5) then nth(c, 4) else list();
+        def fgl-cache-index(c) = if ge(len(c), 6) then nth(c, 5) else list();
+        def fgl-cache-entries(c) = if ge(len(c), 7) then nth(c, 6) else list();
+        def fgl-cache-dedupe(c) = if ge(len(c), 8) then nth(c, 7) else list();
         def fgl-cache-roster(c) = if ge(len(c), 4) then nth(c, 3) else list();
         def fgl-cache-samples(c) = if ge(len(c), 3) then nth(c, 2) else list();
         def fgl-cache-empty() = fgl-cache(list(), list());
@@ -1147,9 +1206,12 @@ section [form.bml] {
             let inventory = nth(inventoryPair, 0);
             let inventoryMoved = if ge(len(inventoryPair), 2) then fgtm-inventory-moved(inventoryPair, fgl-cache-snapshots(cache)) else 1;
             // decoded only when the next let will read it: an unmoved inventory with cached samples takes the cache below
-            let inventorySamples = if and(eq(inventoryMoved, 0), gt(len(fgl-cache-samples(cache)), 0)) then list() else fgl-external-samples(fgl-inventory-samples-at(inventory, epoch));
+            let heldInventory = and(eq(inventoryMoved, 0), gt(len(fgl-cache-samples(cache)), 0));
+            let entryCache = if heldInventory then fgl-cache-entries(cache) else fgl-entry-cache(fgl-inventory-entries-at(inventory, epoch), fgl-cache-entries(cache));
+            let inventorySamples = if heldInventory then list() else fgl-external-samples(fgl-entry-cache-values(entryCache));
             let jitSamples = fgl-jit-current-samples-held(fgl-kept-take(kept, fgtm-space(FGLRoot(), FGLJitPublisher())));
-            let externalSamples = if and(eq(inventoryMoved, 0), gt(len(fgl-cache-samples(cache)), 0)) then fgl-cache-samples(cache) else fgl-dedupe-samples(append(jitSamples, inventorySamples));
+            let dedupeCache = if heldInventory then fgl-cache-dedupe(cache) else fgl-dedupe-cache(append(jitSamples, inventorySamples), fgl-cache-dedupe(cache));
+            let externalSamples = if heldInventory then fgl-cache-samples(cache) else fgl-dedupe-cache-values(dedupeCache);
             let samples = fgl-local-samples(externalSamples, epoch);
             let hostHeld = fgl-sensor-take-held(kept, "host", heldHost);
             let hostRows = append(fgsr-rows-or-absent("machine", fgl-sensor-take-held(kept, "machine", list())), fgsr-rows-or-absent("host", hostHeld));
@@ -1169,10 +1231,10 @@ section [form.bml] {
             let governorRefresh = fgl-refresh-governor(frame);
             let metricsObserved = append(baseMetricsObserved, fgl-model-route-rows(samples, epoch, frame));
             let metrics = fgo-age-rows-at(metricsObserved, epoch);
-            let index = fgd-metric-index(metrics);
+            let index = fgd-metric-index-cached(metrics, fgl-cache-index(cache));
             let publishers = fgl-external-publishers(fgl-inventory-publishers(inventory));
             let observations = if or(eq(len(fgl-cache-observations(cache)), 0), eq(fgl-cycle?(frame, 4), 1)) then fgl-v2-observations(epoch, frame, samples) else fgl-cache-observations(cache);
-            let nextCache = fgl-cache-full-kept(nth(inventoryPair, 1), observations, externalSamples, roster, kept);
+            let nextCache = append(fgl-cache-full-kept(nth(inventoryPair, 1), observations, externalSamples, roster, kept), list(index, entryCache, dedupeCache));
             let point = fgl-flow-point-current-full-in(epoch, metrics, observations, samples, index);
             let poke = fgl-poke-owner-status(samples, epoch);
             let saved = fgl-last-give-held(fgl-kept-give(kept, fgl-last-name("flow-point")), point);
@@ -1180,7 +1242,7 @@ section [form.bml] {
             let nextHistory = ftc-ring-push(history, point, FGLHistoryCapacity());
             let remoteControl = fgl-poll-control-full-held(controlState, samples, epoch, fgl-kept-take(kept, fgl-wait-inbox-name()));
             let control = fgl-input-poll(fgl-input-context(fgl-input-with(remoteControl, fgl-input-state(controlState)), metrics, observations), samples, epoch);
-            let nextFrame = fgl-dashboard-frame(nth(liveSurface, 0), nth(liveSurface, 1), epoch, hz, frame, control, metrics, samples, publishers, nextHistory, observations);
+            let nextFrame = fgl-dashboard-frame-in(nth(liveSurface, 0), nth(liveSurface, 1), epoch, hz, frame, control, metrics, samples, publishers, nextHistory, observations, index);
             let jitFault = fgl-jit-fault-sample(jitSamples, list());
             if eq(fgl-control-quit?(control), 1) then fgl-loop-stopped(kept, frame, fglu-supervisor-mark("abstain"), len(nextHistory)) else if eq(fgl-dependency-changed?(dependencyIdentity, frame), 1) then fgl-loop-stopped(kept, frame, fglu-supervisor-mark("selfmolt"), len(nextHistory)) else if eq(fgl-pool-selfmolt?(stringBaseline, nodeBaseline, frame), 1) then fgl-loop-stopped(kept, frame, fglu-supervisor-mark("selfmolt"), len(nextHistory)) else if gt(len(jitFault), 0) then fgl-jit-hold-enter(control, add(frame, 1), fastRows, hostRows, queueRows, storageRows, heatRows, nextHistory, frameBuffer, fgl-schedule-for-hz(schedule, epoch, hz), liveSurface, dependencyIdentity, stringBaseline, nodeBaseline, nextFrame, jitFault, nextCache) else fgl-loop-after(control, add(frame, 1), fastRows, hostRows, queueRows, storageRows, heatRows, nextHistory, frameBuffer, schedule, liveSurface, nextFrame, hz, dependencyIdentity, stringBaseline, nodeBaseline, epoch, nextCache);
         }
@@ -1195,11 +1257,12 @@ section [form.bml] {
             let rested = fgl-wait-rest(waitTargetMs, handles);
             let waitEnded = now_unix_ms();
             let waitMs = fgl-frame-elapsed-ms(workEnded, waitEnded);
-            let cadenceSaved = fgl-cadence-last-save-held(fgl-cache-kept(cache), workMs, waitMs, budgetMs);
             let wake = fgl-wait-wake(rested, watchNames, handles, waitEnded, activeSchedule);
             let plan = fgel-plan-wake(activeSchedule, frameBuffer, wake, nextFrame);
-            let nextBuffer = fgl-present-plan(frameBuffer, plan);
-            fgl-loop(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, nextBuffer, fgel-plan-schedule(plan), surface, dependencyIdentity, stringBaseline, nodeBaseline, workMs, waitMs, budgetMs, cache);
+            let nextBuffer = fgl-present-observed(frameBuffer, plan, fgl-cache-kept(cache), frameStarted);
+            let completeWorkMs = add(workMs, fgl-frame-elapsed-ms(waitEnded, now_unix_ms()));
+            let cadenceSaved = fgl-cadence-last-save-held(fgl-cache-kept(cache), completeWorkMs, waitMs, budgetMs);
+            fgl-loop(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, nextBuffer, fgel-plan-schedule(plan), surface, dependencyIdentity, stringBaseline, nodeBaseline, completeWorkMs, waitMs, budgetMs, cache);
         }
         def fgl-jit-hold-enter(controlState, frame, fastRows, hostRows, queueRows, storageRows, heatRows, history, frameBuffer, schedule, surface, dependencyIdentity, stringBaseline, nodeBaseline, faultFrame, fault, cache) {
             let plan = fgel-plan-wake(schedule, frameBuffer, fgl-jit-fault-wake(fault), faultFrame);
