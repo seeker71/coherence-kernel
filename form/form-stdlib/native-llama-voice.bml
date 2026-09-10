@@ -1,10 +1,11 @@
 // Resident model/tokenizer ownership with a growing KV context and a token stream.
 // maxTokens=0 keeps streaming until EOS, cancellation, architectural or memory pressure.
-// A cap is a signal, not a ceiling. Caller token caps grow toward EOS, or
-// stop as adapted-repeat if they revealed a loop. A loop mid-stream is itself
-// a cap: prefer the second-best token when first-best would repeat; only
-// stop as adapted-repeat when both would. Admission that would refuse for
-// want>maxpos clamps to maxpos when the prompt itself fits.
+// A cap is a signal, not a ceiling. Caller token caps grow toward EOS.
+// A 24-character tail repeat is a cap. A sentence-frame repeat (case-folded
+// prefix of the current sentence matching an earlier sentence start) is a
+// cap. Prefer second-best when first-best would stick; stop as adapted-repeat
+// when both would. Admission that would refuse for want>maxpos clamps to
+// maxpos when the prompt itself fits.
 // Partial output always carries its actual stopping reason.
 // preludes: form-stdlib/native-llama-metal.bml form-stdlib/native-llama-tokenizer.bml form-stdlib/spool-bell-transport.fk form-stdlib/form-fs.fk
 section [form.bml] {
@@ -63,10 +64,10 @@ section [form.bml] {
    list(best,second);
   }
   def nlg-pick(acc,best-text,second-text,best-id,second-id) {
-   if eq(nlg-looping(str_concat(acc,best-text)),1) then nlg-pick-second(acc,second-text,second-id) else list(best-id,"");
+   if eq(nlg-stuck(acc,best-text),1) then nlg-pick-second(acc,second-text,second-id) else list(best-id,"");
   }
   def nlg-pick-second(acc,second-text,second-id) {
-   if lt(second-id,0) then list(-1,"adapted-repeat") else if eq(nlg-looping(str_concat(acc,second-text)),1) then list(-1,"adapted-repeat") else list(second-id,"adapted-choice");
+   if lt(second-id,0) then list(-1,"adapted-repeat") else if eq(nlg-stuck(acc,second-text),1) then list(-1,"adapted-repeat") else list(second-id,"adapted-choice");
   }
   def nlg-pick-id(tk,acc,best,second) {
    if nlg-eos(tk,best) then list(best,"") else nlg-pick(acc,nlt-decode-id(tk,best),if or(lt(second,0),nlg-eos(tk,second)) then "" else nlt-decode-id(tk,second),best,second);
@@ -105,8 +106,39 @@ section [form.bml] {
    let first = str_find(acc,span,0);
    if lt(first,0) then 0 else if ge(str_find(acc,span,add(first,1)),0) then 1 else 0;
   }
+  def nlg-lower-byte(b) = if and(ge(b,65),le(b,90)) then add(b,32) else b;
+  def nlg-lower-at(s,i,acc) = if ge(i,str_len(s)) then acc else nlg-lower-at(s,add(i,1),str_concat(acc,byte_to_str(nlg-lower-byte(str_byte_at(s,i)))));
+  def nlg-lower(s) = nlg-lower-at(s,0,"");
+  def nlg-skip-space(s,i) = if ge(i,str_len(s)) then i else if eq(str_byte_at(s,i),32) then nlg-skip-space(s,add(i,1)) else i;
+  def nlg-last-sep(acc,from,best) {
+   let p = str_find(acc,". ",from);
+   if lt(p,0) then best else nlg-last-sep(acc,add(p,1),p);
+  }
+  def nlg-current-start(acc) {
+   let sep = nlg-last-sep(acc,0,-1);
+   if lt(sep,0) then 0 else nlg-skip-space(acc,add(sep,2));
+  }
+  def nlg-prefix-at(s,i,n) {
+   if ge(i,str_len(s)) then "" else if lt(str_len(s),add(i,n)) then substring(s,i,str_len(s)) else substring(s,i,add(i,n));
+  }
+  def nlg-next-sentence(s,i) {
+   let p = str_find(s,". ",i);
+   if lt(p,0) then str_len(s) else nlg-skip-space(s,add(p,2));
+  }
+  def nlg-frame-hit(prior,prefix,i) {
+   if or(eq(str_len(prefix),0),ge(i,str_len(prior))) then 0 else if str_eq(nlg-prefix-at(prior,i,str_len(prefix)),prefix) then 1 else nlg-frame-hit(prior,prefix,nlg-next-sentence(prior,i));
+  }
+  def nlg-framing(acc) {
+   let start = nlg-current-start(acc);
+   let cur = nlg-lower(nlg-prefix-at(acc,start,16));
+   if lt(str_len(cur),8) then 0 else nlg-frame-hit(nlg-lower(substring(acc,0,start)),cur,0);
+  }
+  def nlg-stuck(acc,added) {
+   let all = str_concat(acc,added);
+   if eq(nlg-looping(all),1) then 1 else nlg-framing(all);
+  }
   def nlg-adapt-token(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) {
-   if eq(nlg-looping(acc),1) then nlg-result(acc,"adapted-repeat",n,ctx,events)
+   if or(eq(nlg-looping(acc),1),eq(nlg-framing(acc),1)) then nlg-result(acc,"adapted-repeat",n,ctx,events)
    else nlg-adapt-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,nlg-grown-limit(limit,nth(head(model),9),pos));
   }
   def nlg-adapt-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,grown) {
@@ -115,7 +147,7 @@ section [form.bml] {
   }
   def nlg-adapt-continue(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,logged) = nlg-decode(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events);
   def nlg-adapt-emitted(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) {
-   if eq(nlg-looping(acc),1) then nlg-result(acc,"adapted-repeat",n,ctx,events)
+   if or(eq(nlg-looping(acc),1),eq(nlg-framing(acc),1)) then nlg-result(acc,"adapted-repeat",n,ctx,events)
    else nlg-adapt-emitted-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,nlg-grown-limit(limit,nth(head(model),9),pos));
   }
   def nlg-adapt-emitted-grow(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events,grown) {
@@ -133,7 +165,7 @@ section [form.bml] {
   def nlg-emit(model,tk,ctx,id,pos,n,limit,acc,stream,cancel,events) {
    let text = nlt-decode-id(tk,id); let sent = nlg-stream(stream,text);
    let all = str_concat(acc,text); let count = add(n,1);
-   if eq(nlg-looping(all),1) then nlg-result(all,"adapted-repeat",count,ctx,events)
+   if or(eq(nlg-looping(all),1),eq(nlg-framing(all),1)) then nlg-result(all,"adapted-repeat",count,ctx,events)
    else if and(gt(limit,0),ge(count,limit)) then nlg-adapt-emitted(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events)
    else if ge(pos,head(ctx)) then nlg-grew(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events,nlg-grow(model,ctx,pos))
    else nlg-feed(model,tk,ctx,id,pos,count,limit,all,stream,cancel,events);
