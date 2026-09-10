@@ -71,11 +71,51 @@ Malformed JSON and unavailable tools receive correction in the current role.
 
 The result returns `repair_attempts`, `check_runs` and `repair_notes` containing
 each model diagnosis, intended change, selected route and the evidence it saw.
-These are within-run reflections, **not proven causal explanations or weight
-training**. They remain available to the caller for inspection and storage;
-this door does not automatically persist them into another job or LoRA.
-Budget/context exhaustion retains these notes and the candidate instead of
-calling unfinished work complete.
+These are model reflections, **not proven causal explanations or weight
+training**. The JSON door now persists native binary checkpoints beneath
+`.hearth/code-memory/` after complete model/tool transitions. A completed repair
+also becomes a lesson. Retrieval requires the exact original goal, documents,
+writable paths and checks; the prior candidate must pass the current checker
+again before its last three repair notes enter a fresh Qwen prompt. Candidates
+are not silently copied into the new job, and a recalled lesson cannot change
+the caller's checks. Other tasks load none of its private context.
+
+Budget/context exhaustion returns `checkpoint_id`. To continue, send the same
+original request with `"resume":"<checkpoint_id>"`; `turns` is the additional
+reply budget and `context` sizes the new local admission. Pending tasks, brief,
+plan, candidate documents, tool outcomes and failure evidence survive. Complete
+checkpoints are rechecked without reopening Qwen. Incomplete generated text is
+discarded, not executed. This is explicit resumability, not automatic KV
+compaction or a persistent model resident across jobs.
+
+The disk format is FORMBIN2 native nodes, decoded directly. Writes go to a
+process-specific temporary file, are read back, then atomically renamed. A
+digest detects corruption; it is not authentication against someone who can
+rewrite local files. Checkpoint contract changes are refused. Source files
+remain caller-owned: persistence here stores private task state and lessons,
+not a repository edit. Nothing is sent to an external service or LoRA trainer.
+
+Three identical native tool/argument/result observations with unchanged
+documents select repair and require replanning. A single `rg` miss is still a
+normal negative result. These bounded signals survive checkpoint restoration;
+they never become successful checks. Glass receives counters only, including
+`lessons-recalled`. Coding token progress publishes every four generated IDs
+instead of 32; actual time between updates still depends on local inference.
+
+For a public-data, separate-process local witness:
+
+```text
+./fkwu observe/form-cli-code-memory-witness.fk
+```
+
+Its three stdin lines are an isolated memory directory, `seed` (write a known
+failing checkpoint), and `qwen38-q8`. Run it again with the returned checkpoint
+ID on line two to resume with local Qwen; then run with an empty second line to
+start a fresh job and observe `lessons-recalled`. The seeded defect is fixture
+data, never attributed to Qwen. `form-cli-code-memory-band.fk` and
+`form-cli-code-progress-band.fk` under `form/form-stdlib/tests/` exercise binary
+round trips, contract mismatch, corruption, verified recall, and replan routing
+without admitting a model or publishing live telemetry.
 
 ## What a successful result proves
 
