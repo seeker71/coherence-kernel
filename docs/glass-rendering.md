@@ -14,6 +14,21 @@ Terminal support determines whether intermediate writes are visually batched;
 the Form buffer and changed-region suppression work independently of that support.
 No Rich, Python renderer, shell renderer, or new external service is involved.
 
+## Aligned panel regions
+
+Two-column views clip each panel to its allocated width before joining them.
+The left region keeps that width even for a short, empty, or exhausted row;
+neutral padding carries no measurement or source identity. The three-column
+gutter therefore starts at the same position on every row. Original segment
+styles, channels, node IDs, and evidence remain attached to their text.
+
+`./fkwu form/form-stdlib/tests/form-glass-column-alignment-band.fk` returns
+4095. It covers short and absent rows, mixed string/byte segments, overflow,
+and the Help, Overview, Memory, and Recipes layouts at different widths.
+This establishes the ASCII telemetry column contract. General Unicode
+display-cell measurement is still a separate seam: byte-safe clipping does
+not measure wide glyphs, combining sequences, or terminal-dependent shaping.
+
 ## Bookkeeping belongs at the producing boundary
 
 Shared-memory mapping counts and bytes are updated when a mapping opens or
