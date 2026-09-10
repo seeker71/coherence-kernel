@@ -65,6 +65,33 @@ ceremony to every command.
 
 ## Fast checkout witness
 
+The native healing process runner now opens an attention exchange after a
+nonzero exit, explicit timeout, cancellation, or a retained typed model error.
+It records the offered actions (`request-evidence`, `defer`), correlates the
+selected response, reads the original exit and output-file metadata, writes
+and rereads the evidence manifest, and re-observes the unresolved status.
+Missing or mismatched control selects evidence acquisition. The runner returns
+the original process status so its caller can make the next checked attempt.
+
+Each stage's `.attention.json` links its original stdout, stderr, token flow,
+and timing events; output bytes are shared by reference. File sizes are the
+snapshot at `observed_unix_ms`. The current JSON timing report includes this
+attention reading. Framebuffer events contain only opaque exchange identities
+and numeric observations. Private output is never placed in the framebuffer.
+
+A final diagnostic line without a newline is still consumed. Explicit native
+`forward-refused`, `stream-write-refused`, `context-capacity`, and `error` phases,
+plus loopback provider errors, remain signals even with process exit zero or a
+later provider `done` row. Words such as “error” in ordinary text do not trigger
+this policy. Evidence acquisition does not establish that the cause is fixed;
+`resolved` remains zero. This exchange runs at process completion; live silence
+still uses the existing dynamic inspection path. Numerical corruption that the
+model has not reported requires its own diagnostic probe.
+
+`form/form-stdlib/tests/form-cli-heal-attention-band.fk` witnesses these cases
+with real local children and isolated files (expected `262143`). It calls no
+model and trains no evaluation example.
+
 After the normal ground and freshness checks:
 
 ```sh
