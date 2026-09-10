@@ -5,6 +5,15 @@ Form reads an explicit technical-document inventory, the primitive registry's
 literal declarations, and admissible historical homecoming teachings. Registry
 callbacks are data, never imported or executed. No model invents the targets.
 
+The inventory also includes native Metal request ownership, concept-source
+auditing, source inspection, adaptive artifact traversal, byte slicing and
+searching, declarative attention, Glass observation/rendering, and quiet-speech
+context. Their implementation boundaries and recorded counterexamples remain in
+the targets. In particular, the attributed byte-operation documents supplement
+the omitted bare edge contracts; they do not erase differences between carriers.
+Historical measurements retain their source date and scope rather than becoming
+claims that the publisher just reran those experiments.
+
 Each JSONL pair carries its source path, SHA-256, source unit and evidence kind.
 Documentation and registry declarations are attributed source claims, not a new
 execution proof. Historical rented teachings retain that attribution. Known
