@@ -5,7 +5,7 @@
 section [form.bml] {
  class NativeLoraCheckpoint {
   def nlc-msl() = "#include <metal_stdlib>\nusing namespace metal;\nkernel void nlc_copy(device const uchar* src [[buffer(0)]],device uchar* dst [[buffer(1)]],constant uint& offset [[buffer(2)]],constant uint& bytes [[buffer(3)]],uint i [[thread_position_in_grid]]){if(i<bytes)dst[offset+i]=src[i];}\nkernel void nlc_equal(device const uchar* src [[buffer(0)]],device const uchar* dst [[buffer(1)]],device uint* out [[buffer(2)]],constant uint& offset [[buffer(3)]],constant uint& bytes [[buffer(4)]],uint lane [[thread_index_in_simdgroup]]){uint bad=0;for(uint i=lane;i<bytes;i+=32)bad+=uint(src[i]!=dst[offset+i]);bad=simd_sum(bad);if(lane==0)out[0]=bad;}\n";
-  // tensor row: name, handle, dimensions.
+  // tensor row: name, handle, dimensions, optional dtype (F32 by default).
   def nlc-adapter-rows(pairs) = if nil?(pairs) then list() else append(nlc-pair-rows(head(pairs)),nlc-adapter-rows(tail(pairs)));
   def nlc-pair-rows(p) = list(list(str_concat(head(p),".lora_a"),nth(p,1),list(nth(p,3),nth(p,4))),list(str_concat(head(p),".lora_b"),nth(p,2),list(nth(p,4),nth(p,5))));
   def nlc-state-row(p,name,h,shape) = list(str_concat(head(p),name),h,shape);
@@ -15,9 +15,10 @@ section [form.bml] {
   }
   def nlc-optimizer-rows(state) = if nil?(state) then list() else append(nlc-optimizer-row(head(state)),nlc-optimizer-rows(tail(state)));
   def nlc-ints(xs) = if nil?(xs) then list() else cons(json-node-int(head(xs)),nlc-ints(tail(xs)));
-  def nlc-bytes(row) = mul(4,sti-product(nth(row,2)));
+  def nlc-dtype(row) = if gt(len(row),3) then nth(row,3) else "F32";
+  def nlc-bytes(row) = mul(sti-width(nlc-dtype(row)),sti-product(nth(row,2)));
   def nlc-total(rows) = if nil?(rows) then 0 else add(nlc-bytes(head(rows)),nlc-total(tail(rows)));
-  def nlc-entry(row,offset) = json-node-pair(head(row),json-node-object(list(json-node-pair("dtype",json-node-string("F32")),json-node-pair("shape",json-node-array(nlc-ints(nth(row,2)))),json-node-pair("data_offsets",json-node-array(list(json-node-int(offset),json-node-int(add(offset,nlc-bytes(row)))))))));
+  def nlc-entry(row,offset) = json-node-pair(head(row),json-node-object(list(json-node-pair("dtype",json-node-string(nlc-dtype(row))),json-node-pair("shape",json-node-array(nlc-ints(nth(row,2)))),json-node-pair("data_offsets",json-node-array(list(json-node-int(offset),json-node-int(add(offset,nlc-bytes(row)))))))));
   def nlc-entries(rows,offset) = if nil?(rows) then list() else cons(nlc-entry(head(rows),offset),nlc-entries(tail(rows),add(offset,nlc-bytes(head(rows)))));
   def nlc-pad(text) = if eq(mod(str_len(text),8),0) then text else nlc-pad(str_concat(text," "));
   def nlc-header(rows,base,step) = nlc-pad(json-emit(json-node-object(cons(json-node-pair("__metadata__",json-node-object(list(json-node-pair("owner",json-node-string("Form-native-Metal")),json-node-pair("base",json-node-string(base)),json-node-pair("step",json-node-string(int_to_str(step)))))),nlc-entries(rows,0)))));
@@ -37,7 +38,7 @@ section [form.bml] {
   }
   def nlc-save-mapped(path,candidate,rows,start,base,step) {
    let size = add(start,nlc-total(rows));
-   let dest = nam-held(metal_buf_from_file(candidate,0,sub(0,size)));
+   let dest = if ge(size,4294967296) then form_error("native checkpoint file exceeds the current 32-bit payload offset; publication withheld") else nam-held(metal_buf_from_file(candidate,0,sub(0,size)));
    let copied = nlc-copy(rows,dest,start,nam-held-pipe(metal_pipeline(nlc-msl(),"nlc_copy")));
    let done = nam-sync();
    let out = nam-alloc(1);

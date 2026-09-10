@@ -1,0 +1,31 @@
+; Every reconstructed weight is compared against independent Form scalar arithmetic.
+; The error bound includes nearest rounding plus FP32 arithmetic tolerance.
+; Mixed U32/F32 safetensors payloads must survive a byte-exact reload.
+; preludes: form-stdlib/native-lora-fuse.bml form-stdlib/tests/native-llama-fixture.bml
+(do
+ (defn nlfb-nibble (bytes i) (mod (div (str_byte_at bytes (div i 2)) (if (eq (mod i 2) 0) 1 16)) 16))
+ (defn nlfb-dot (a b c r rank rows k)
+  (if (ge k rank) 0.0 (add (mul (nth a (add (mul c rank) k)) (nth b (add (mul k rows) r))) (nlfb-dot a b c r rank rows (add k 1)))))
+ (defn nlfb-check (source oldscale oldbias a b packed scales biases rows cols rank factor group i failures maximum)
+  (if (ge i (mul rows cols)) (list failures maximum)
+   (do (let r (div i cols)) (let c (mod i cols)) (let g (div i group))
+    (let exact (add (add (mul (nlfb-nibble source i) (nth oldscale g)) (nth oldbias g)) (mul factor (nlfb-dot a b c r rank rows 0))))
+    (let fused (add (mul (nlfb-nibble packed i) (nth scales g)) (nth biases g)))
+    (let error (abs (sub fused exact)))
+    (let bound (add (mul 0.5 (nth scales g)) 0.000002))
+    (nlfb-check source oldscale oldbias a b packed scales biases rows cols rank factor group (add i 1) (add failures (if (gt error bound) 1 0)) (if (gt error maximum) error maximum)))))
+ (defn nlfb-reload (rows index)
+  (if (nil? rows) 1
+   (do (let row (head rows)) (let mapped (sti-map index (head row)))
+    (let same (and (str_eq (nth mapped 2) (nlc-dtype row)) (str_eq (metal_buf_read (nth row 1) 0 (nlc-bytes row)) (metal_buf_read (head mapped) 0 (nlc-bytes row)))))
+    (nam-free (list (head mapped)))
+    (and same (nlfb-reload (tail rows) index)))))
+ (let projection (nlf-projection "fixture" 64 64 3)) (let view (head projection)) (let pair (nth projection 1))
+ (let fused (nlfu-projection projection ""))
+ (let checked (nlfb-check (metal_buf_read (head view) 0 2048) (nam-read (nth view 1) 64) (nam-read (nth view 2) 64) (nam-read (nth pair 1) 128) (nam-read (nth pair 2) 128) (metal_buf_read (nth (head fused) 1) 0 2048) (nam-read (nth (nth fused 1) 1) 64) (nam-read (nth (nth fused 2) 1) 64) 64 64 2 0.7 64 0 0 0.0))
+ (let path (str_concat "/tmp/native-fusion-" (int_to_str (host_pid))))
+ (let saved (nlc-save path fused "fixture" 0))
+ (let reread (nlfb-reload fused (sti-open path)))
+ (nlfu-free-rows fused) (nam-free (append (take 3 view) (list (nth pair 1) (nth pair 2)))) (fs-remove-file path)
+ (print (list "weights-compared" 4096 "bound-failures" (head checked) "max-absolute-error" (nth checked 1) "typed-reload-equal" reread "retained" (nth (metal_live) 2)))
+ (if (and (eq (head checked) 0) (and reread (eq (nth (metal_live) 2) 0))) 7 (form_error "native fusion scalar or typed-file witness failed")))

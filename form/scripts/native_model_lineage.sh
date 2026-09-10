@@ -132,6 +132,9 @@ do
     esac
 done
 
+# These trainer/fuser files identify the recorded historical Hati production
+# run. They are hashed as evidence only; current training and fusion execute
+# native-lora-train.bml and native-lora-fuse.bml through fkwu.
 required_files="
 $base_snapshot/config.json
 $base_snapshot/model.safetensors
