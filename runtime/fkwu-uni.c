@@ -9408,8 +9408,8 @@ static void fk_proc_file(long long pid, const char *leaf, char *out) {
  * not say what one of them ran: the host's rows carried a pid, a size and a parent, and the glass learned a
  * kernel's cell by running ps through a shell. macOS: the process table (KERN_PROC_PID) for the parent and the start,
  * proc_pidpath, the cwd from PROC_PIDVNODEPATHINFO (its path at byte 152 of 2352), argv from sysctl KERN_PROCARGS2
- * (argc, the exec path, its padding, then the words). Linux: /proc/<pid>/stat, exe, cwd and cmdline; it does not
- * read the start yet and answers 0. */
+ * (argc, the exec path, its padding, then the words). Linux: /proc/<pid>/stat for the parent and the start (field
+ * 22, clock ticks after boot, put on the wall clock through CLOCK_BOOTTIME), exe, cwd and cmdline. */
 static long long fk_host_process(long long pid) {
     if (pid <= 0) { return (0 - 1) * 2; }
     if (kill((int)pid, 0) != 0 && errno == ESRCH) { return (0 - 1) * 2; }
@@ -9488,6 +9488,33 @@ static long long fk_host_process(long long pid) {
         while (k > 0 && sb[k] != ')') { k = k - 1; }
         long long o = k + 4;
         while (k > 0 && o < got && sb[o] >= '0' && sb[o] <= '9') { ppid = ppid * 10 + (sb[o] - '0'); o = o + 1; }
+        /* the start: field 22 (starttime, clock ticks after boot), the twentieth word after the name's ')', put on
+         * the wall clock a live page's opening is read on: now, less the time since boot on the clock starttime
+         * counts on (CLOCK_BOOTTIME), plus starttime over the tick rate. A start outside boot..now is a misread and
+         * stays 0, so the census reads the page's start as untold rather than wrong. */
+        extern long sysconf(int name);
+#ifndef _SC_CLK_TCK
+#define _SC_CLK_TCK 2
+#endif
+#ifndef CLOCK_BOOTTIME
+#define CLOCK_BOOTTIME 7
+#endif
+        long long p = k + 2;
+        int tw = 1;
+        while (k > 0 && p < got && tw < 20) { if (sb[p] == ' ') { tw = tw + 1; } p = p + 1; }
+        long long ticks = -1;
+        if (k > 0 && tw == 20 && p < got && sb[p] >= '0' && sb[p] <= '9') {
+            ticks = 0;
+            while (p < got && sb[p] >= '0' && sb[p] <= '9') { ticks = ticks * 10 + (sb[p] - '0'); p = p + 1; }
+        }
+        long hz = sysconf(_SC_CLK_TCK);
+        struct timespec rt, bt;
+        if (ticks >= 0 && hz > 0 && clock_gettime(CLOCK_REALTIME, &rt) == 0 && clock_gettime(CLOCK_BOOTTIME, &bt) == 0) {
+            long long now = (long long)rt.tv_sec * 1000 + (long long)rt.tv_nsec / 1000000;
+            long long boot = now - ((long long)bt.tv_sec * 1000 + (long long)bt.tv_nsec / 1000000);
+            long long at = boot + ticks * 1000 / hz;
+            if (at >= boot && at <= now) { start = at; }
+        }
     }
     fk_proc_file(pid, "exe", pf);
     errno = 0;
@@ -11947,25 +11974,38 @@ static void fk_live_bury(long long pid) {
 }
 static long long fk_live_read_words(const char *name, long long *out, long long count);
 /* Whether a page is an ended kernel's, so it may be buried. The host hands a pid out again within minutes
- * (every five on 2026-09-11), and a kernel that takes it opens a fresh page under the same name, so the
- * page must name that pid and say it ended (alive 0) or have been opened before the pid was seen gone, and
- * the pid must still be gone once the page has been read: a kernel that took the pid meanwhile answers
- * kill. */
+ * (every five on 2026-09-11), and a kernel that takes it opens a fresh page under the same name, so a page
+ * that carries a live page's words must name that pid and say it ended (alive 0) or have been opened before
+ * the pid was seen gone, and the pid must still be gone once the page has been read: a kernel that took the
+ * pid meanwhile answers kill. A page that carries no live page's words -- none at all (a kernel ended between
+ * naming its page and sizing it) or no magic (one ended before it wrote them) -- is an ended kernel's when
+ * the pid is gone before and after it is read. */
 static int fk_live_ended(long long pid) {
     long long seen = fk_live_now_ms();
     if (pid <= 0 || !fk_pid_gone(pid)) { return 0; }
     char dn[32];
     long long w[FK_LIVE_WORDS];
     fk_live_pid_name(pid, dn);
-    if (fk_live_read_words(dn, w, FK_LIVE_WORDS) != FK_LIVE_WORDS) { return 0; }
+    if (fk_live_read_words(dn, w, FK_LIVE_WORDS) != FK_LIVE_WORDS) {
+#if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
+        int fd = shm_open(dn, O_RDONLY, 0600);
+        if (fd < 0) { return 0; }
+        close(fd);
+        return fk_pid_gone(pid);
+#else
+        return 0;
+#endif
+    }
+    if (w[0] != FK_LIVE_MAGIC) { return fk_pid_gone(pid); }
     return w[1] == pid && (w[19] == 0 || w[2] < seen) && fk_pid_gone(pid);
 }
 /* kernel_page_ended pid, as the census walks the pages: 1 that pid's kernel has ended with its page standing (what
- * kernel_page_bury would bury); 2 a page stands under the pid's name, this kernel read it, and it is not an ended
- * kernel's (a living kernel's, or one on a pid another process holds now); 0 no page stands; -1 a page stands and the
- * host will not let this kernel read it, so whether its kernel lives or has ended is not known here. A sandbox that
- * denies other kernels' pages answers EPERM for a page that stands and ENOENT for one that does not, so an absent page
- * and a withheld one stay apart. */
+ * kernel_page_bury would bury: fk_live_ended); 2 a page stands under the pid's name and is not an ended kernel's (a
+ * living kernel's, one on a pid another process holds now, or one a starting kernel has named and not yet written);
+ * 0 no page stands; -1 a page stands and the host will not let this kernel open it, so whether its kernel lives or
+ * has ended is not known here. A sandbox that denies other kernels' pages answers EPERM for a page that stands and
+ * ENOENT for one that does not, so an absent page and a withheld one stay apart; a page the host lets this kernel
+ * open is never withheld, even one with no words in it. */
 static long long fk_live_page_state(long long pid) {
     if (pid <= 0) { return 0; }
 #if !defined(_WIN32) && defined(FK_HAVE_MMAN_HEADER)
@@ -11975,10 +12015,8 @@ static long long fk_live_page_state(long long pid) {
     if (fd < 0) { return errno == ENOENT ? 0 : -1; }
     close(fd);
     if (fk_live_ended(pid)) { return 1; }
-    long long w[FK_LIVE_WORDS];
-    if (fk_live_read_words(dn, w, FK_LIVE_WORDS) == FK_LIVE_WORDS) { return 2; }
     fd = shm_open(dn, O_RDONLY, 0600);
-    if (fd >= 0) { close(fd); return -1; }
+    if (fd >= 0) { close(fd); return 2; }
     return errno == ENOENT ? 0 : -1;
 #else
     return 0;
