@@ -16452,6 +16452,40 @@ static long long fk_enc_lookup(long long s, long long n) {
  * wrong frame would silently return someone else's value" -- the latter is diagnosed, never
  * silently miscomputed (see the call-resolution arm in fk_sparse). */
 static long long fk_cur_defn_idx = -1;
+/* A name the IMMEDIATELY enclosing defn binds, read from a nested defn's body. Its first reference
+ * captures it: a fresh local slot (an ordinary let-style bump), pushed into THIS defn's own bd so
+ * every later reference resolves through fk_bd_lookup, and recorded per function so (a) this
+ * defn's own prologue fills the slot from fk_call_cap_vals on entry and (b) every call site that
+ * creates or invokes it knows what to supply. Answers the slot, or -1 when the enclosing frame does
+ * not bind the name. A captured name shadows every global of the same name, a defn or a constant,
+ * as the three siblings scope it, so the call head and value position both ask here before either
+ * table. Capped at FK_CLOSURE_CAP_MAX per function; a cap that is HIT diagnoses rather than
+ * silently drops the (n+1)-th capture. */
+static long long fk_enc_capture(long long s, long long n) {
+    if (fk_cur_defn_idx < 0 || fk_enc_count <= 0) {
+        return -1;
+    }
+    long long encoff = fk_enc_lookup(s, n);
+    if (encoff < 0) {
+        return -1;
+    }
+    long long fcc = (fk_cur_defn_idx < fk_fn_cap_capacity) ? fk_fn_cap_count[fk_cur_defn_idx] : 0;
+    if (fcc >= FK_CLOSURE_CAP_MAX) {
+        fk_diag(FK_DIAG_ERR, s,
+                "[closure-scope] '%.*s' would be this function's %dth captured name (max %d) -- "
+                "not captured",
+                (int)n, fk_srctext + s, (int)fcc + 1, FK_CLOSURE_CAP_MAX);
+        return -1;
+    }
+    fk_fn_cap_reserve(fk_cur_defn_idx + 1);
+    long long capslot = fk_maxslot + 1;
+    fk_maxslot = capslot;
+    fk_bd_push(s, n, capslot);
+    fk_fn_cap_encoff[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + fcc] = encoff;
+    fk_fn_cap_slot[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + fcc] = capslot;
+    fk_fn_cap_count[fk_cur_defn_idx] = fcc + 1;
+    return capslot;
+}
 static long long fk_parse_do(void);
 static long long fk_parse_top_do_value(void);
 static void fk_parse_top(void);
@@ -16866,33 +16900,14 @@ static long long fk_sparse(void) {
          * param (map's f, filter's pred) was one same-named prelude defn away from silent
          * capture. A shadowed head lowers through the indirect-call arm below (tag 244). */
         long long hshadow = fk_bd_lookup(s, hn);
-        if (hshadow < 0 && fk_cur_defn_idx >= 0 && fk_enc_count > 0) {
+        if (hshadow < 0) {
             /* The call HEAD itself may be a captured free variable -- a parameter of the
              * enclosing defn that HOLDS a fn (http-layer.fk's layer-wrap taking a `layer-fn`
              * argument and its nested lw-handler later calling it is the standing example).
-             * Capture it exactly like any other free var (fresh local slot, recorded per
-             * function) and let it fall straight into the ordinary "head is a bound name"
-             * indirect-call path just below -- its value is only known at call time either
-             * way, capture or not. */
-            long long hencoff = fk_enc_lookup(s, hn);
-            if (hencoff >= 0) {
-                long long hfcc = (fk_cur_defn_idx < fk_fn_cap_capacity) ? fk_fn_cap_count[fk_cur_defn_idx] : 0;
-                if (hfcc < FK_CLOSURE_CAP_MAX) {
-                    fk_fn_cap_reserve(fk_cur_defn_idx + 1);
-                    long long hcapslot = fk_maxslot + 1;
-                    fk_maxslot = hcapslot;
-                    fk_bd_push(s, hn, hcapslot);
-                    fk_fn_cap_encoff[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + hfcc] = hencoff;
-                    fk_fn_cap_slot[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + hfcc] = hcapslot;
-                    fk_fn_cap_count[fk_cur_defn_idx] = hfcc + 1;
-                    hshadow = hcapslot;
-                } else {
-                    fk_diag(FK_DIAG_ERR, s,
-                            "[closure-scope] '%.*s' would be this function's %dth captured name "
-                            "(max %d) -- not captured",
-                            (int)hn, fk_srctext + s, (int)hfcc + 1, FK_CLOSURE_CAP_MAX);
-                }
-            }
+             * fk_enc_capture captures it like any other free var, and it falls straight into the
+             * ordinary "head is a bound name" indirect-call path just below -- its value is only
+             * known at call time either way, capture or not. */
+            hshadow = fk_enc_capture(s, hn);
         }
         long long fidx = (hshadow >= 0) ? -1 : fk_fn_lookup(s, hn);
         if (fidx >= 0) {
@@ -17223,6 +17238,13 @@ static long long fk_sparse(void) {
     if (fk_sym_eq(s, fk_spos - s, "false")) {
         return fk_smklit(0);
     }
+    /* A name the IMMEDIATELY enclosing defn binds shadows every global of the same name, a
+     * constant or a defn, so value position asks the enclosing frame before either table:
+     * model-service.fk's ms-handle reads its captured `model`, never a band's global `model`. */
+    long long vcap = fk_enc_capture(s, fk_spos - s);
+    if (vcap >= 0) {
+        return fk_smknode(110, fk_smklit(vcap), 0, 0);
+    }
     long long crow = fk_const_lookup(s, fk_spos - s);
     if (crow >= 0) {
         /* every reference shares the binding's ONE hold node, so the value
@@ -17262,37 +17284,6 @@ static long long fk_sparse(void) {
             venvchain = fk_smknode(242, fk_smknode(110, fk_smklit(vencoff), 0, 0), venvchain, 0);
         }
         return fk_smknode(243, vfidx, venvchain, 0);
-    }
-    /* A bare name unresolved by every ordinary lookup above may still be a FREE VARIABLE: a name
-     * bound in the IMMEDIATELY enclosing defn's own frame (fk_enc_lookup, populated only while
-     * parsing a nested defn's body -- see fk_parse_do's "defn" branch). The first reference
-     * captures it: a fresh local slot is allocated (ordinary let-style bump, exactly like any
-     * other new binding), pushed into THIS defn's own bd so every later reference resolves through
-     * the ordinary fk_bd_lookup above instead of back through here, and recorded per-function so
-     * (a) this defn's own compiled prologue can populate that slot from fk_call_cap_vals on entry,
-     * and (b) every call site that creates or invokes this function knows what to supply. Capped
-     * at FK_CLOSURE_CAP_MAX free variables per function -- generous for the real shape (a handful
-     * of an enclosing handler-factory's own parameters), and a cap that's HIT diagnoses rather
-     * than silently drops the (fcc+1)-th capture. */
-    if (fk_cur_defn_idx >= 0 && fk_enc_count > 0) {
-        long long encoff = fk_enc_lookup(s, fk_spos - s);
-        if (encoff >= 0) {
-            long long fcc2 = (fk_cur_defn_idx < fk_fn_cap_capacity) ? fk_fn_cap_count[fk_cur_defn_idx] : 0;
-            if (fcc2 < FK_CLOSURE_CAP_MAX) {
-                fk_fn_cap_reserve(fk_cur_defn_idx + 1);
-                long long capslot = fk_maxslot + 1;
-                fk_maxslot = capslot;
-                fk_bd_push(s, fk_spos - s, capslot);
-                fk_fn_cap_encoff[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + fcc2] = encoff;
-                fk_fn_cap_slot[fk_cur_defn_idx * FK_CLOSURE_CAP_MAX + fcc2] = capslot;
-                fk_fn_cap_count[fk_cur_defn_idx] = fcc2 + 1;
-                return fk_smknode(110, fk_smklit(capslot), 0, 0);
-            }
-            fk_diag(FK_DIAG_ERR, s,
-                    "[closure-scope] '%.*s' would be this function's %dth captured name (max "
-                    "%d) -- not captured",
-                    (int)(fk_spos - s), fk_srctext + s, (int)fcc2 + 1, FK_CLOSURE_CAP_MAX);
-        }
     }
     /* UNBOUND NAME IN VALUE POSITION. This used to be "an honest 0" — and it was the
      * deepest silent-green in this body. A name that resolves to nothing is not a
