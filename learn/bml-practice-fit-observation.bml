@@ -1,0 +1,42 @@
+// Read complete events while the owner continues. Missing evidence remains null.
+// preludes: learn/bml-practice-fit.bml
+section [form.bml] {
+ class BmlPracticeFitObservation {
+  def bpo-events(path) {
+   let parts = split-on(nsm-text(path),"\n");
+   beo-events(take(sub(len(parts),1),parts));
+  }
+  def bpo-last(rows) = if nil?(rows) then json-node-null() else nth(rows,sub(len(rows),1));
+  def bpo-select(events,stage) = beo-kept-events(events,list(stage));
+  def bpo-sum(rows,field) = if nil?(rows) then 0 else add(nsm-num(head(rows),field),bpo-sum(tail(rows),field));
+  def bpo-have(rows,field) = if nil?(rows) then 1 else and(json-object-has?(head(rows),field),bpo-have(tail(rows),field));
+  def bpo-total(rows,field) = json-node-pair(field,if or(nil?(rows),not(bpo-have(rows,field))) then json-node-null() else json-precise-float(bpo-sum(rows,field)));
+  def bpo-totals(rows,fields) = if nil?(fields) then list() else cons(bpo-total(rows,head(fields)),bpo-totals(rows,tail(fields)));
+  def bpo-practice(event) {
+   let health = oh-get(event,"health"); let needs = json-array-elements(oh-get(health,"needs"));
+   if nil?(needs) then json-node-null() else nsm-json(nsm-at(nsm-str(oh-get(head(needs),"detail"),"path"),"reading.json"));
+  }
+  def bpo-streams(dir,contracts) = if nil?(contracts) then list() else cons(bpo-stream(dir,nsm-str(head(contracts),"id")),bpo-streams(dir,tail(contracts)));
+  def bpo-stream(dir,id) {
+   let stem = nsm-at(dir,id); let events = bpo-events(str_concat(stem,".events.jsonl"));
+   let stream = str_concat(stem,".stream"); let present = fs-exists?(stream);
+   json-node-object(list(nsm-s("id",id),nsm-s("events",str_concat(stem,".events.jsonl")),nsm-n("stream_present",present),json-node-pair("stream_bytes",if present then json-node-int(file_size(stream)) else json-node-null()),nsm-n("response_retained",gt(file_size(str_concat(stem,".response.json")),0)),json-node-pair("last_model_event",bpo-last(events))));
+  }
+  def bpo-read(home) {
+   let out = nsm-at(home,"fit"); let source = nsm-at(out,"training-events.jsonl"); let events = bpo-events(source); let latest = bpo-last(events);
+   let rounds = bpo-select(events,"round"); let rows = bpo-select(events,"row"); let observations = bpo-select(events,"practice-observed");
+   let resultPath = nsm-at(out,"result.json"); let current = if gt(file_size(resultPath),0) then nsm-json(resultPath) else json-node-null();
+   let finished = json-object-has?(current,"rounds_this_admission"); let result = if finished then current else json-node-null();
+   let status = json-node-object(list(nsm-n("observed_at_ms",now_unix_ms()),nsm-s("source",source),nsm-n("complete_events",len(events)),nsm-n("completed_updates",len(rounds)),nsm-n("completed_training_rows",len(rows)),nsm-n("completed_practice_observations",len(observations)),json-node-pair("last_event",latest),json-node-pair("last_event_age_ms",if nil?(events) then json-node-null() else json-node-int(sub(host_monotonic_ms(),nsm-num(latest,"at_ms")))),json-node-pair("last_round",bpo-last(rounds)),json-node-pair("last_practice",if finished then oh-get(result,"practice") else bpo-practice(bpo-last(observations))),json-node-pair("round_totals",json-node-object(bpo-totals(rounds,list("input_tokens","supervised_tokens","tokenize_ms","training_ms","update_ms","checkpoint_ms","wall_ms")))),json-node-pair("completed_row_totals",json-node-object(bpo-totals(rows,list("forward_ms","backward_ms","forward_gpu_us","backward_gpu_us","dispatches")))),json-node-pair("result",result),nsm-s("accounting","Completed events only; the current in-flight row is not counted as completed. Round totals and row totals overlap.")));
+   let detailed = oh-set(oh-set(oh-set(status,"admission",bpo-last(bpo-select(events,"admitted"))),"last_selected_response",bpo-last(bpo-select(events,"practice-response"))),"run",current);
+   let generation = bpo-last(bpo-select(events,"practice-start")); let dir = nsm-str(generation,"evidence");
+   oh-set(detailed,"latest_generation_streams",if str_eq(dir,"") then json-node-null() else json-node-array(bpo-streams(dir,json-array-elements(nsm-json(nsm-at(out,"contracts.json"))))));
+  }
+  def bpo-status(home) {
+   let reading = bpo-read(home);
+   print_str(str_concat(json-emit-precise(reading),"\n"));
+   reading;
+  }
+ }
+ 0;
+}

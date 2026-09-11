@@ -1,0 +1,66 @@
+// Local teacher proposals are evidence to execute, never correct targets by origin.
+// Each task gets fresh recurrent/KV state while admitted weights stay shared.
+// preludes: learn/bml-execution-observation.bml form-stdlib/bml/form-cli-code-session.bml form-stdlib/bml/form-cli-model-renew.bml
+section [form.bml] {
+ class BmlNativeTeacher {
+  def bnt-progress(stem,session,start) {
+   let row = json-node-object(list(nsm-n("tokens",fcms-generated-ids(session)),nsm-n("prompt_tokens",fcms-prompt-ids(session)),nsm-n("position",fcms-pos(session)),nsm-n("context_capacity",fcms-maxpos(session)),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),nsm-s("model",fcms-path(session)),nsm-n("lora_pairs",0)));
+   let kept = sbt-append(str_concat(stem,".events.jsonl"),str_concat(json-emit-precise(row),"\n"));
+   let frame = fb_record(intern_trivial_int(fcms-generated-ids(session)),"bml-native-teacher.bml",fcms-pos(session));
+   print_str(str_concat(json-emit-precise(row),"\n"));
+  }
+  def bnt-stop(session,stem) = if not(fcms-live?(session)) then fcms-reason(session) else if lt(fcms-pending(session),0) then "native-token-unavailable" else if gt(file_size(str_concat(stem,".cancel")),0) then "cancelled" else if fcms-stopped?(session) then "" else if ge(fcms-pos(session),sub(fcms-maxpos(session),1)) then "context-capacity" else "continue";
+  def bnt-decode(session,stem,start,stops,ids) = if not(str_eq(bnt-stop(session,stem),"continue")) then list(session,ids,bnt-stop(session,stem)) else bnt-decoded(fcacs-quantum(session,stops,nlg-min(4,sub(fcms-maxpos(session),fcms-pos(session)))),stem,start,stops,ids);
+  def bnt-decoded(generation,stem,start,stops,before) {
+   let session = fcms-generation-session(generation); let chunk = fcms-generation-ids(generation); let ids = append(reverse(chunk),before);
+   let decodeAt = host_monotonic_ms(); let text = tkz-decode-text(fcms-src(session),chunk); let decodedAt = host_monotonic_ms();
+   let saved = sbt-append(str_concat(stem,".stream"),text); let wroteAt = host_monotonic_ms();
+   let work = nsm-event(fs-path-dirname(stem),"text-decoded",list(nsm-s("id",fs-path-basename(stem)),nsm-n("new_token_ids",len(chunk)),nsm-n("total_token_ids",fcms-generated-ids(session)),nsm-n("text_decode_ms",sub(decodedAt,decodeAt)),nsm-n("stream_write_ms",sub(wroteAt,decodedAt))));
+   let shown = bnt-progress(stem,session,start);
+   if not(str_eq(bnt-stop(session,stem),"continue")) then list(session,ids,bnt-stop(session,stem)) else bnt-decode(fcacs-next(session,stops),stem,start,stops,ids);
+  }
+  def bnt-row(session,dir,row,prompt,start) {
+   let stem = nsm-at(dir,nsm-str(row,"id")); let saved = nag-write(str_concat(stem,".prompt"),prompt);
+   let cleared = nag-write(str_concat(stem,".stream"),"");
+   let result = bnt-decode(session,stem,start,fcacs-stops(session,qsx-load(fcms-path(session))),list());
+   let owner = head(result); let text = nsm-text(str_concat(stem,".stream"));
+   let ids = nsm-write(str_concat(stem,".ids.json"),json-node-array(bnt-id-nodes(reverse(nth(result,1)))));
+   let response = json-node-object(list(nsm-s("id",nsm-str(row,"id")),nsm-s("text",text),nsm-s("reason",nth(result,2)),nsm-n("tokens",len(nth(result,1))),nsm-n("prompt_tokens",fcms-prompt-ids(owner)),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),nsm-s("prompt_sha256",nsm-hash(prompt))));
+   let kept = nsm-write(str_concat(stem,".response.json"),response); let proposal = nag-write(str_concat(stem,".proposal"),text);
+   list(owner,response);
+  }
+  def bnt-id-nodes(ids) = if nil?(ids) then list() else cons(json-node-int(head(ids)),bnt-id-nodes(tail(ids)));
+  def bnt-prepared(result,elapsed,route) = list(head(result),oh-set(oh-set(nth(result,1),"context_ms",json-node-int(elapsed)),"context_route",json-node-string(route)));
+  def bnt-next(session,dir,rows,context,responses) = if nil?(rows) then list(session,responses,"responses-retained") else bnt-renew(session,dir,rows,context,responses,host_monotonic_ms());
+  def bnt-renew(session,dir,rows,context,responses,start) = bnt-renewed(fcmr-replace-with-profile(session,str_concat(context,nsm-str(head(rows),"prompt")),"knowledge-query"),dir,rows,context,responses,sub(host_monotonic_ms(),start));
+  def bnt-renewed(renewal,dir,rows,context,responses,elapsed) {
+   let event = nsm-event(dir,"stream-renewal",list(nsm-s("id",nsm-str(head(rows),"id")),nsm-n("context_ms",elapsed),nsm-s("reason",fcmr-reason(renewal)),nsm-n("changed",fcmr-changed(renewal)),nsm-n("weight_admissions",0)));
+   if not(and(fcmr-changed(renewal),str_eq(fcmr-reason(renewal),"fresh-stream-same-weights"))) then list(fcmr-session(renewal),responses,fcmr-reason(renewal)) else bnt-follow(bnt-prepared(bnt-row(fcmr-session(renewal),dir,head(rows),str_concat(context,nsm-str(head(rows),"prompt")),host_monotonic_ms()),elapsed,"fresh-stream-same-weights"),dir,tail(rows),context,responses);
+  }
+  def bnt-follow(result,dir,rows,context,responses) = bnt-next(head(result),dir,rows,context,append(responses,list(nth(result,1))));
+  def bnt-generate(home,label,model,capacity) {
+   let manifest = beo-manifest(home); let dir = beo-condition(home,label);
+   if fs-exists?(dir) then form_error("Preserve the previous teacher condition; use a new identity") else bnt-fresh(home,dir,manifest,model,capacity);
+  }
+  def bnt-fresh(home,dir,manifest,model,capacity) {
+   let made = fs-mkdir(dir); let context = beo-practice-context(beo-rows(manifest,"practice"));
+   let path = mr-path(mr-find(model)); let rows = beo-rows(manifest,"test"); let start = host_monotonic_ms();
+   let kept = nag-write(nsm-at(dir,"context.txt"),context);
+   let condition = nsm-write(nsm-at(dir,"condition.json"),json-node-object(list(nsm-s("model",path),nsm-s("adapter",""),nsm-n("lora_pairs",0),nsm-n("context_capacity",capacity),nsm-s("manifest_sha256",nsm-hash(nsm-text(nsm-at(home,"manifest.json")))),nsm-s("context_sha256",nsm-hash(context)),nsm-s("scope","Local Qwen; same previously seen tasks and executed practice context; independent streams; no test targets supplied; no training"))));
+   bnt-batch(dir,model,capacity,context,rows);
+  }
+  // Internal embedding door: rows carry caller-owned id and prompt strings.
+  // The caller prepares an empty private directory and owns verification.
+  def bnt-batch(dir,model,capacity,context,rows) {
+   let path = mr-path(mr-find(model)); let start = host_monotonic_ms();
+   let birth = nsm-write(nsm-at(dir,"generator.json"),json-node-object(list(nsm-s("source_sha256",nsm-hash(nsm-text("learn/bml-native-teacher.bml"))),nsm-s("model",path),nsm-n("context_capacity",capacity),nsm-n("requested_rows",len(rows)),nsm-s("context_sha256",nsm-hash(context)),nsm-n("started_at_ms",now_unix_ms()))));
+   let prompt = str_concat(context,nsm-str(head(rows),"prompt"));
+   let session = fcms-open-with-profile(path,prompt,capacity,"knowledge-query"); let admitted = sub(host_monotonic_ms(),start);
+   let result = bnt-follow(bnt-prepared(bnt-row(session,dir,head(rows),prompt,host_monotonic_ms()),admitted,"model-admission"),dir,tail(rows),context,list());
+   let released = fcms-release-ok?(head(result));
+   let report = json-node-object(list(nsm-s("model",path),nsm-s("adapter",""),nsm-n("adapter_unchanged",1),nsm-n("lora_pairs",0),nsm-s("status",nth(result,2)),nsm-n("admission_ms",admitted),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),nsm-n("model_released",released),nsm-n("retained_buffers",nth(metal_live(),2)),nsm-n("remote_model_calls",0),nsm-n("training_updates",0),json-node-pair("responses",json-node-array(nth(result,1)))));
+   nsm-write(nsm-at(dir,"generation.json"),report);
+  }
+ }
+ 0;
+}

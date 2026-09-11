@@ -1,0 +1,52 @@
+// Read the exact target decisions hidden by an average practice loss.
+// Targets come from verified practice. This observes logits, never gradients.
+// preludes: learn/bml-practice-fit.bml
+section [form.bml] {
+ class BmlTokenObservation {
+  def bto-find(rows,id) = if nil?(rows) then form_error("Token observation requires a practice case") else if str_eq(nsm-str(head(rows),"id"),id) then head(rows) else bto-find(tail(rows),id);
+  def bto-positions(model,tk,forward,one,targets,mask,index,rows) {
+   if ge(index,len(targets)) then reverse(rows) else if le(nth(mask,index),0) then bto-positions(model,tk,forward,one,targets,mask,add(index,1),rows) else bto-position(model,tk,forward,one,targets,mask,index,rows);
+  }
+  def bto-position(model,tk,forward,one,targets,mask,index,rows) {
+   let vocab = nth(head(model),5); let copied = nll-last(head(forward),one,vocab,mul(index,vocab));
+   let predicted = nll-select(one,vocab); let target = nth(targets,index);
+   let row = json-node-object(list(nsm-n("position",index),nsm-n("target_id",target),nsm-n("predicted_id",predicted),nsm-n("matched",eq(target,predicted)),nsm-s("target_piece",nlt-decode-id(tk,target)),nsm-s("predicted_piece",nlt-decode-id(tk,predicted))));
+   bto-positions(model,tk,forward,one,targets,mask,add(index,1),cons(row,rows));
+  }
+  def bto-errors(rows) = if nil?(rows) then list() else if eq(nsm-num(head(rows),"matched"),1) then bto-errors(tail(rows)) else cons(head(rows),bto-errors(tail(rows)));
+  def bto-run(home,teacher,label,adapter,id) {
+   let manifest = bso-manifest(home); let row = bpf-target(nsm-at(home,teacher),bto-find(beo-rows(manifest,"practice"),id));
+   let dir = nsm-at(nsm-at(home,"token-observations"),label); let selected = nag-resolve(adapter);
+   if or(fs-exists?(dir),or(str_eq(selected,""),not(fs-exists?(nsm-at(selected,"adapter_config.json"))))) then form_error("Token observation needs fresh evidence and an explicit available adapter") else bto-open(dir,row,selected);
+  }
+  def bto-open(dir,row,adapter) {
+   let root = fs-mkdir(fs-path-dirname(dir)); let made = fs-mkdir(dir); let start = host_monotonic_ms();
+   let binding = json-node-object(list(nsm-s("case",nsm-str(row,"id")),nsm-s("adapter",adapter),nsm-s("adapter_seal",nsl-adapter-seal(adapter)),nsm-s("base_seal",nsl-base-seal(nsm-model())),nsm-s("prompt_sha256",nsm-hash(nsm-str(row,"prompt"))),nsm-s("completion_sha256",nsm-hash(nsm-str(row,"completion"))),nsm-s("reference",nsm-str(row,"reference"))));
+   let saved = nsm-write(nsm-at(dir,"condition.json"),binding);
+   let session = nlg-open-at(nsm-model(),adapter,nsm-at(dir,"admission.events.jsonl")); let admittedAt = host_monotonic_ms();
+   if or(not(str_eq(nll-adapter(head(session)),adapter)),le(nll-pair-count(nth(head(session),1)),0)) then bto-unadapted(session) else bto-owned(session,dir,row,binding,start,admittedAt);
+  }
+  def bto-unadapted(session) {
+   let closed = nlg-close(session);
+   form_error("Token observation did not admit its selected LoRA tensors");
+  }
+  def bto-owned(session,dir,row,binding,start,admittedAt) {
+   let model = head(session); let tk = nth(session,1);
+   let sample = head(nld-prepare(tk,nld-lines(nsl-lines(bep-pairs(list(row)))),1));
+   let admitted = ntr-admit(model,sample); let ctx = nll-context(model,len(head(sample))); let preparedAt = host_monotonic_ms();
+   let forward = nll-forward(model,ctx,head(sample),0,1); let forwardedAt = host_monotonic_ms(); let one = nam-alloc(nth(head(model),5));
+   let positions = bto-positions(model,tk,forward,one,nth(sample,1),nth(sample,2),0,list()); let readAt = host_monotonic_ms(); let errors = bto-errors(positions);
+   let pairs = nll-pair-count(nth(model,1)); let freed = nam-free(list(one)); let forwardClosed = nll-forward-close(forward); let ctxClosed = nll-context-close(ctx); let closed = nlg-close(session);
+   let identity = list(nsm-s("case",nsm-str(row,"id")),nsm-s("model",nsm-model()),nsm-s("adapter",nsm-str(binding,"adapter")),nsm-n("lora_pairs",pairs),nsm-n("adapter_unchanged",str_eq(nsm-str(binding,"adapter_seal"),nsl-adapter-seal(nsm-str(binding,"adapter")))));
+   let measured = list(nsm-n("input_tokens",len(head(sample))),nsm-n("supervised_tokens",len(positions)),nsm-n("teacher_forced_wrong_argmax",len(errors)),nsm-n("retained_buffers",nth(metal_live(),2)),nsm-n("admission_and_binding_ms",sub(admittedAt,start)),nsm-n("prepare_ms",sub(preparedAt,admittedAt)),nsm-n("forward_ms",sub(forwardedAt,preparedAt)),nsm-n("target_read_ms",sub(readAt,forwardedAt)),nsm-n("release_ms",sub(host_monotonic_ms(),readAt)),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),nsm-n("training_updates",0),nsm-n("generated_tokens",0),nsm-n("remote_model_calls",0));
+   let reading = json-node-object(append(identity,append(measured,list(json-node-pair("positions",json-node-array(positions))))));
+   let saved = nsm-write(nsm-at(dir,"reading.json"),reading);
+   let healthy = eq(len(errors),0);
+   let health = oh-reading("native-bml-learning",dir,"teacher-forced-decisions",json-node-int(0),json-node-int(len(errors)),json-node-int(healthy),if healthy then list() else list(oh-need("target-decision-practice",oh-reference(nsm-at(dir,"reading.json")))),list("retain-reading","rehearse-unmet-practice"),oh-reference(nsm-at(dir,"reading.json")));
+   let event = nsm-event(dir,"decisions-observed",list(json-node-pair("health",health)));
+   print_str(str_concat(json-emit-precise(json-node-object(list(nsm-s("reading",nsm-at(dir,"reading.json")),nsm-n("supervised_tokens",len(positions)),nsm-n("wrong_argmax",len(errors))))),"\n"));
+   reading;
+  }
+ }
+ 0;
+}

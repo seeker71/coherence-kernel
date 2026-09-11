@@ -1,0 +1,191 @@
+// Practice deepens until its generated behavior works, or an actual care signal stops it.
+// One admission shares mutable LoRA tensors and Adam state across all rounds.
+// Transfer tests are never read by this loop. Serving pointers remain caller-owned.
+// preludes: learn/bml-scalar-observation.bml
+section [form.bml] {
+ class BmlPracticeFit {
+  def bpf-compact(s,i,acc) = if ge(i,str_len(s)) then acc else bpf-compact(s,add(i,1),if ge(str_find(" \n\r\t",substring(s,i,add(i,1)),0),0) then acc else str_concat(acc,substring(s,i,add(i,1))));
+  def bpf-name-char(c) = ge(str_find("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-?",c,0),0);
+  def bpf-number(s,i) = if ge(i,str_len(s)) then gt(i,0) else and(ge(str_find("0123456789",substring(s,i,add(i,1)),0),0),bpf-number(s,add(i,1)));
+  def bpf-word(word,allowed) = or(str_eq(word,""),or(nsm-has(allowed,word),bpf-number(word,0)));
+  def bpf-words(s,i,word,allowed) = if ge(i,str_len(s)) then bpf-word(word,allowed) else bpf-char(s,i,word,allowed,substring(s,i,add(i,1)));
+  def bpf-char(s,i,word,allowed,c) = if bpf-name-char(c) then bpf-words(s,add(i,1),str_concat(word,c),allowed) else and(ge(str_find(" \n\r\t(),;=",c,0),0),and(bpf-word(word,allowed),bpf-words(s,add(i,1),"",allowed)));
+  def bpf-tail-calls(s,name,start) {
+   let call = str_find(s,str_concat(name,"("),start); let shape = str_concat(name,"(tail(xs))");
+   if lt(call,0) then 1 else and(str_eq(substring(s,call,add(call,str_len(shape))),shape),bpf-tail-calls(s,name,add(call,str_len(shape))));
+  }
+  // This exercise's scalar-list contract: one pure declaration, an empty-list
+  // base case, and structurally decreasing recursive calls. Other BML surfaces
+  // need their own caller checker; they are not executed by this practice door.
+  def bpf-pure(code,name) {
+   let s = bpf-compact(code,0,""); let prefix = str_concat("def",str_concat(name,"(xs)=ifeq(len(xs),0)then"));
+   let branch = str_find(s,"else",str_len(prefix));
+   let base = if lt(branch,0) then "" else substring(s,str_len(prefix),branch);
+   let allowed = list("def",name,"xs","if","then","else","len","eq","gt","lt","head","tail","nothing?","nothing","add","sub","mul");
+   and(bpf-words(code,0,"",allowed),and(str_eq(substring(s,0,str_len(prefix)),prefix),and(or(str_eq(base,"0"),str_eq(base,"nothing()")),and(eq(str_find(s,";",0),sub(str_len(s),1)),bpf-tail-calls(s,name,str_len(prefix))))));
+  }
+  def bpf-target(dir,row) {
+   let id = nsm-str(row,"id"); let response = nsm-json(nsm-at(dir,str_concat(id,".response.json"))); let answer = nsm-str(response,"text");
+   let prompt = str_concat(bso-context(),nsm-str(row,"prompt"));
+   let inputBound = and(str_eq(nsm-str(response,"prompt_sha256"),nsm-hash(prompt)),and(str_eq(nsm-text(nsm-at(dir,str_concat(id,".prompt"))),prompt),str_eq(nsm-text(nsm-at(dir,str_concat(id,".proposal"))),answer)));
+   let target = oh-set(oh-set(oh-set(row,"answer",json-node-string(answer)),"completion",json-node-string(answer)),"reference",json-node-string(nsm-at(dir,str_concat(id,"-execution"))));
+   if and(bpf-pure(answer,id),and(inputBound,and(str_eq(nsm-str(response,"reason"),""),beo-reference-valid(target)))) then target else form_error("Teacher target needs the caller's pure contract and bound successful native execution");
+  }
+  def bpf-targets(dir,rows) = if nil?(rows) then list() else cons(bpf-target(dir,head(rows)),bpf-targets(dir,tail(rows)));
+  def bpf-enqueue-row(home,session,row) = if not(beo-reference-valid(row)) then form_error("Native teacher execution changed before session retention") else nsm-record(home,session,nsm-str(row,"id"),"native-code",nsm-str(row,"prompt"),nsm-str(row,"completion"),"verified-answer",nsm-str(row,"reference"),0);
+  def bpf-enqueue-rows(home,session,rows) = if nil?(rows) then list() else cons(bpf-enqueue-row(home,session,head(rows)),bpf-enqueue-rows(home,session,tail(rows)));
+  def bpf-enqueue(home,teacher) {
+   let manifest = bso-manifest(home); let dir = nsm-at(home,teacher); let condition = nsm-json(nsm-at(dir,"condition.json"));
+   if not(str_eq(nsm-str(condition,"kind"),"practice")) then form_error("Only verified teacher practice enters session learning") else bpf-enqueue-ready(home,dir,manifest);
+  }
+  def bpf-enqueue-ready(home,dir,manifest) {
+   let targets = bpf-targets(dir,beo-rows(manifest,"practice"));
+   let session = str_concat("bml-local-teacher:",nsm-hash(str_concat(nsm-text(nsm-at(home,"manifest.json")),nsm-text(nsm-at(dir,"generation.json")))));
+   let paths = bpf-enqueue-rows(hearth-session-learning(),session,targets);
+   let report = json-node-object(list(nsm-s("session",session),nsm-s("teacher",dir),nsm-s("route","native-code"),json-node-pair("rows",json-node-array(nsm-string-nodes(paths))),nsm-s("next","drain through observe/form-cli-session-home-embody-run.fk; inspect actual updates and serving decisions")));
+   let saved = nsm-write(nsm-at(home,"teacher-session-queued.json"),report);
+   print_str(str_concat(json-emit-precise(report),"\n"));
+   report;
+  }
+  def bpf-prepare(home,teacher,parent,rate) {
+   let manifest = bso-manifest(home); let dir = nsm-at(home,teacher); let condition = nsm-json(nsm-at(dir,"condition.json")); let out = nsm-at(home,"fit");
+   if or(fs-exists?(out),not(str_eq(nsm-str(condition,"kind"),"practice"))) then form_error("Fit needs fresh output and verified teacher practice") else bpf-prepare-ready(home,dir,out,manifest,parent,rate);
+  }
+  def bpf-prepare-ready(home,dir,out,manifest,parent,rate) {
+   let targets = bpf-targets(dir,beo-rows(manifest,"practice")); let made = fs-mkdir(out);
+   let text = nsl-lines(bep-pairs(targets)); let saved = nag-write(nsm-at(out,"train.jsonl"),text);
+   let contracts = nsm-write(nsm-at(out,"contracts.json"),json-node-array(targets));
+   let config = nsm-json(nsm-at(parent,"adapter_config.json"));
+   let request = ntr-request(nsm-model(),parent,out,out,1,len(targets),rate,1,nsm-num(config,"num_layers"));
+   let bound = json-node-object(list(nsm-s("teacher",dir),nsm-s("teacher_reading_sha256",nsm-hash(nsm-text(nsm-at(dir,"reading.json")))),nsm-s("train_sha256",nsm-hash(text)),nsm-s("request_sha256",nsm-hash(json-emit-precise(request))),nsm-s("contracts_sha256",nsm-hash(nsm-text(nsm-at(out,"contracts.json")))),nsm-s("parent",parent),nsm-s("parent_seal",nsl-adapter-seal(parent)),nsm-s("base_seal",nsl-base-seal(nsm-model())),nsm-n("evaluation_gradients",0)));
+   let boundSaved = nsm-write(nsm-at(out,"binding.json"),bound);
+   nsm-write(nsm-at(out,"request.json"),request);
+  }
+  def bpf-check(dir,row) {
+   let id = nsm-str(row,"id"); let response = nsm-json(nsm-at(dir,str_concat(id,".response.json")));
+   let pure = bpf-pure(nsm-str(response,"text"),id); let complete = str_eq(nsm-str(response,"reason"),"");
+   let checked = if and(pure,complete) then beo-code(dir,row,response) else json-node-object(list(nsm-n("verified",0),nsm-s("execution","not-run; generated declaration does not meet the caller's pure scalar-list contract")));
+   let reading = oh-set(oh-set(oh-set(checked,"id",json-node-string(id)),"pure_contract",json-node-int(pure)),"stop_reason",json-node-string(nsm-str(response,"reason")));
+   let saved = nsm-write(nsm-at(dir,str_concat(id,".reading.json")),reading);
+   let shown = print_str(str_concat(json-emit-precise(reading),"\n"));
+   reading;
+  }
+  def bpf-checks(dir,rows) = if nil?(rows) then list() else cons(bpf-check(dir,head(rows)),bpf-checks(dir,tail(rows)));
+  def bpf-ready(rows) = if nil?(rows) then 1 else and(eq(nsm-num(head(rows),"verified"),1),bpf-ready(tail(rows)));
+  def bpf-observe(session,out,contracts,round,step) {
+   let dir = nsm-at(out,str_concat("practice-",str_concat(int_to_str(step),str_concat("-",int_to_str(host_monotonic_ms()))))); let made = fs-mkdir(dir); let start = host_monotonic_ms();
+   let announced = ntr-event(out,"practice-start",list(nsm-n("optimizer_step",step),nsm-n("round",round),nsm-s("evidence",dir),nsm-n("contracts",len(contracts))));
+   let responses = beo-generate-rows(dir,session,contracts,""); let checks = bpf-checks(dir,contracts);
+   let reading = json-node-object(list(nsm-n("round",round),nsm-n("optimizer_step",step),nsm-n("ready",bpf-ready(checks)),nsm-s("evidence",dir),nsm-s("adapter",nll-adapter(head(session))),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),json-node-pair("responses",json-node-array(responses)),json-node-pair("checks",json-node-array(checks))));
+   let saved = nsm-write(nsm-at(dir,"reading.json"),reading);
+   reading;
+  }
+  def bpf-model-at(model,checkpoint) = append(take(5,model),list(nsm-json(nsm-at(checkpoint,"adapter_config.json")),checkpoint));
+  def bpf-regressed(before,after) = if nil?(before) then list() else if or(nil?(after),not(str_eq(nsm-str(head(before),"id"),nsm-str(head(after),"id")))) then form_error("Update pressure lost its prior observation identity") else if and(eq(nsm-num(head(before),"verified"),1),not(eq(nsm-num(head(after),"verified"),1))) then cons(json-node-string(nsm-str(head(after),"id")),bpf-regressed(tail(before),tail(after))) else bpf-regressed(tail(before),tail(after));
+  def bpf-pressure-rate(rate,regressed) = div(rate,add(1,len(regressed)));
+  def bpf-attune(r,observation) {
+   let previousPath = nsm-str(r,"practice_observation_path");
+   let previous = if str_eq(previousPath,"") then json-node-null() else nsm-json(previousPath);
+   let regressed = bpf-regressed(beo-rows(previous,"checks"),beo-rows(observation,"checks"));
+   let currentPath = nsm-at(nsm-str(observation,"evidence"),"reading.json");
+   let rate = ntr-get(r,"learning_rate"); let nextRate = bpf-pressure-rate(rate,regressed);
+   let detail = json-node-object(list(nsm-s("before",previousPath),nsm-s("after",currentPath),nsm-s("before_sha256",if str_eq(previousPath,"") then "" else nsm-hash(nsm-text(previousPath))),nsm-s("after_sha256",nsm-hash(nsm-text(currentPath))),json-node-pair("newly_unmet",json-node-array(regressed)),nsm-real("prior_learning_rate",rate),nsm-real("learning_rate",nextRate),nsm-s("policy","Divide update size by one plus the count of previously passing functions that now fail")));
+   let health = oh-reading("native-bml-learning",ntr-get(r,"output"),"update-interference",json-node-int(0),json-node-int(len(regressed)),json-node-int(nil?(regressed)),if nil?(regressed) then list() else list(oh-need("smaller-update",oh-reference(currentPath))),list("continue-update-size","reduce-update-size"),oh-reference(currentPath));
+   let selected = if nil?(regressed) then "continue-update-size" else "reduce-update-size";
+   let voiced = ntr-health-event(ntr-get(r,"output"),"pressure-observed",health,list(json-node-pair("reading",detail)));
+   let response = oh-response(health,selected); let incoming = ntr-health-event(ntr-get(r,"output"),"pressure-response",response,list());
+   let choice = oh-select(health,response,"continue-update-size");
+   let appliedRate = if str_eq(choice,"reduce-update-size") then nextRate else rate;
+   let applied = ntr-health-event(ntr-get(r,"output"),"pressure-applied",oh-applied(health,choice,json-node-object(list(nsm-real("learning_rate",appliedRate)))),list());
+   oh-set(oh-set(r,"learning_rate",json-precise-float(appliedRate)),"practice_observation_path",json-node-string(currentPath));
+  }
+  def bpf-loop(session,state,r,rows,contracts,step,round) {
+   let out = ntr-get(r,"output"); let observation = bpf-observe(session,out,contracts,round,step); let ready = nsm-num(observation,"ready");
+   let attuned = bpf-attune(r,observation);
+   let cancel = gt(file_size(nsm-at(out,"cancel")),0);
+   let selected = if ready then "retain-practice-ready" else if cancel then "retain-checkpoint" else "rehearse-verified-practice";
+   let health = oh-reading("native-bml-learning",out,"generated-practice",json-node-int(1),json-node-int(ready),json-node-int(ready),if ready then list() else list(oh-need("executable-BML-practice",oh-reference(nsm-str(observation,"evidence")))),list("rehearse-verified-practice","retain-practice-ready","retain-checkpoint"),oh-reference(nsm-at(out,"binding.json")));
+   let voiced = ntr-health-event(out,"practice-observed",health,list(nsm-n("optimizer_step",step)));
+   let response = oh-response(health,selected); let incoming = ntr-health-event(out,"practice-response",response,list());
+   if or(ready,cancel) then list(step,round,selected,observation) else bpf-update(session,state,attuned,rows,contracts,step,round,health,oh-select(health,response,"retain-checkpoint"),observation);
+  }
+  def bpf-needed(contracts,checks) = if ne(len(contracts),len(checks)) then form_error("Practice attention needs every caller observation") else if nil?(contracts) then list() else bpf-needed-row(contracts,checks);
+  def bpf-needed-row(contracts,checks) {
+   if not(str_eq(nsm-str(head(contracts),"id"),nsm-str(head(checks),"id"))) then form_error("Practice attention lost the caller's row identity") else if eq(nsm-num(head(checks),"verified"),1) then bpf-needed(tail(contracts),tail(checks)) else cons(head(contracts),bpf-needed(tail(contracts),tail(checks)));
+  }
+  def bpf-target-ids(rows) = if nil?(rows) then list() else cons(json-node-string(nsm-str(head(rows),"id")),bpf-target-ids(tail(rows)));
+  def bpf-update(session,state,r,rows,contracts,step,round,health,selected,observation) {
+   if not(str_eq(selected,"rehearse-verified-practice")) then list(step,round,"retained-without-update",json-node-null()) else bpf-focus(session,state,r,rows,contracts,step,round,health,observation,bpf-needed(contracts,beo-rows(observation,"checks")));
+  }
+  def bpf-focus(session,state,r,rows,contracts,step,round,health,observation,needed) {
+   if nil?(needed) then form_error("Unsuccessful practice supplied no unmet need") else bpf-focused(session,state,r,rows,contracts,step,round,health,observation,needed);
+  }
+  def bpf-focused(session,state,r,rows,contracts,step,round,health,observation,needed) {
+   let out = ntr-get(r,"output"); let root = nsm-at(out,"attention"); let made = fs-mkdir(root);
+   let dir = nsm-at(root,str_concat(int_to_str(step),str_concat("-",int_to_str(host_monotonic_ms())))); let made = fs-mkdir(dir);
+   let text = nsl-lines(bep-pairs(needed)); let written = nag-write(nsm-at(dir,"train.jsonl"),text);
+   let traversal = nlp-restore(nth(head(session),5),nlp-bind(text,len(needed),1));
+   let parent = nll-adapter(head(session));
+   let focus = nlp-request(oh-set(oh-set(oh-set(r,"data",json-node-string(dir)),"batch",json-node-int(len(needed))),"adapter",json-node-string(parent)),head(traversal));
+   let request = nsm-write(nsm-at(dir,"request.json"),focus);
+   let observationPath = nsm-at(nsm-str(observation,"evidence"),"reading.json");
+   let witnessed = list(nsm-s("observation",observationPath),nsm-s("observation_sha256",nsm-hash(nsm-text(observationPath))),nsm-s("parent",parent),nsm-s("parent_seal",nsl-adapter-seal(parent)));
+   let selection = list(json-node-pair("selected",json-node-array(bpf-target-ids(needed))),nsm-n("selected_rows",len(needed)),nsm-n("observed_rows",len(contracts)),nsm-s("dataset_sha256",nsm-hash(text)),nsm-s("dataset_continuity",nth(traversal,1)),nsm-s("request",nsm-at(dir,"request.json")),nsm-s("policy","Train observed unmet practice; re-observe every contract after the update"));
+   let attention = json-node-object(append(witnessed,selection));
+   let saved = nsm-write(nsm-at(dir,"selection.json"),attention);
+   let event = ntr-event(out,"practice-attention",list(json-node-pair("selection",attention)));
+   bpf-updated(session,state,focus,rows,contracts,round,health,ntr-round(head(session),nth(session,1),state,nld-lines(text),focus,0,step));
+  }
+  def bpf-updated(session,state,r,rows,contracts,round,health,result) {
+   if not(eq(nth(result,1),1)) then list(head(result),round,nth(result,2),json-node-null()) else bpf-updated-once(session,state,r,rows,contracts,round,health,result);
+  }
+  def bpf-updated-once(session,state,r,rows,contracts,round,health,result) {
+   let out = ntr-get(r,"output"); let checkpoint = nag-resolve(out); let model = bpf-model-at(head(session),checkpoint);
+   let progress = oh-get(nth(model,5),"training_progress"); let next = nlp-request(r,progress);
+   let applied = ntr-health-event(out,"practice-applied",oh-applied(health,"rehearse-verified-practice",json-node-object(list(nsm-n("optimizer_step",head(result)),nsm-s("checkpoint",checkpoint),nsm-n("lora_pairs_updated",len(state))))),list());
+   bpf-loop(list(model,nth(session,1)),state,next,rows,contracts,head(result),add(round,1));
+  }
+  def bpf-run(home) {
+   let out = nsm-at(home,"fit"); let r = nsm-json(nsm-at(out,"request.json")); let bound = nsm-json(nsm-at(out,"binding.json"));
+   let text = nsm-text(nsm-at(out,"train.jsonl")); let contractsText = nsm-text(nsm-at(out,"contracts.json"));
+   let intact = and(str_eq(nsm-str(bound,"train_sha256"),nsm-hash(text)),and(str_eq(nsm-str(bound,"contracts_sha256"),nsm-hash(contractsText)),and(str_eq(nsm-str(bound,"parent_seal"),nsl-adapter-seal(nsm-str(bound,"parent"))),str_eq(nsm-str(bound,"base_seal"),nsl-base-seal(nsm-model())))));
+   if not(and(intact,str_eq(nsm-str(bound,"request_sha256"),nsm-hash(json-emit-precise(r))))) then form_error("Fit inputs or lineage changed") else bpf-open(r,text,json-array-elements(parse-json("fit contracts",contractsText)));
+  }
+  def bpf-open(r,text,contracts) {
+   let out = ntr-get(r,"output"); let adapter = if fs-exists?(nsm-at(out,"native-current")) then out else ntr-get(r,"adapter"); let start = host_monotonic_ms();
+   let selected = nag-resolve(adapter);
+   if or(str_eq(selected,""),not(fs-exists?(nsm-at(selected,"adapter_config.json")))) then form_error("Native BML fitting requires an explicit available LoRA adapter") else bpf-open-selected(r,text,contracts,out,selected,start);
+  }
+  def bpf-open-selected(r,text,contracts,out,adapter,start) {
+   let session = nlg-open-at(ntr-get(r,"model"),adapter,nsm-at(out,"admission.events.jsonl")); let state = nlb-state(head(session));
+   if or(nil?(state),not(str_eq(nll-adapter(head(session)),adapter))) then bpf-unadapted(session,state) else bpf-owned(r,text,contracts,out,adapter,start,session,state);
+  }
+  def bpf-unadapted(session,state) {
+   let stateClosed = nlb-state-close(state); let released = nlg-close(session);
+   form_error("Native BML fitting did not admit the selected LoRA tensors");
+  }
+  def bpf-resume-request(r,model) {
+   let continuing = fs-exists?(nsm-at(ntr-get(r,"output"),"native-current"));
+   if continuing then bpf-resume-pressure(r,nth(model,5)) else r;
+  }
+  def bpf-resume-pressure(r,config) {
+   let selection = nsm-json(nsm-at(nsm-str(config,"data"),"selection.json"));
+   let path = nsm-str(selection,"observation"); let rate = nsm-num(config,"learning_rate");
+   if le(rate,0) then form_error("Resumed update pressure requires a positive checkpointed rate") else if str_eq(path,"") then oh-set(r,"learning_rate",json-precise-float(rate)) else if not(str_eq(nsm-str(selection,"observation_sha256"),nsm-hash(nsm-text(path)))) then form_error("Resumed update pressure lost its bound prior observation") else oh-set(oh-set(r,"learning_rate",json-precise-float(rate)),"practice_observation_path",json-node-string(path));
+  }
+  def bpf-owned(r,text,contracts,out,adapter,start,session,state) {
+   let resumed = ntr-resume(head(session),state,adapter); let rows = nld-lines(text); let traversal = nlp-restore(nth(head(session),5),nlp-bind(text,len(rows),1));
+   let continuation = bpf-resume-request(r,head(session));
+   let running = nsm-write(nsm-at(out,"result.json"),json-node-object(list(nsm-s("status","running"),nsm-n("pid",host_pid()),nsm-n("started_at_monotonic_ms",start),nsm-s("candidate",adapter),nsm-n("optimizer_step",head(resumed)))));
+   let admitted = ntr-event(out,"admitted",list(nsm-s("model",ntr-get(r,"model")),nsm-s("adapter",nag-resolve(adapter)),nsm-n("optimizer_step",head(resumed)),nsm-n("lora_pairs",len(state)),nsm-real("learning_rate",ntr-get(continuation,"learning_rate")),nsm-n("mask_prompt",1),nsm-n("training_rows",len(rows)),nsm-s("stopping","observed generated practice success, cancellation or actual runtime failure"),nsm-n("weight_admissions",1),nsm-s("fit_source_sha256",nsm-hash(nsm-text("learn/bml-practice-fit.bml"))),nsm-s("prior_observation",nsm-str(continuation,"practice_observation_path"))));
+   let result = bpf-loop(session,state,nlp-request(continuation,head(traversal)),rows,contracts,head(resumed),0);
+   let settled = nam-sync(); let closeState = nlb-state-close(state); let closed = nlg-close(session);
+   let report = json-node-object(list(nsm-n("pid",host_pid()),nsm-n("started_at_monotonic_ms",start),nsm-n("optimizer_step",head(result)),nsm-n("rounds_this_admission",nth(result,1)),nsm-s("status",nth(result,2)),nsm-s("candidate",if fs-exists?(nsm-at(out,"native-current")) then nag-resolve(out) else adapter),nsm-n("retained_buffers",nth(metal_live(),2)),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),nsm-n("remote_model_calls",0),nsm-n("transfer_test_gradients",0),json-node-pair("practice",nth(result,3))));
+   let history = nsm-at(out,"admissions"); let made = fs-mkdir(history);
+   let retained = nsm-write(nsm-at(history,str_concat(int_to_str(host_pid()),str_concat("-",str_concat(int_to_str(start),".json")))),report);
+   let saved = nsm-write(nsm-at(out,"result.json"),report);
+   print_str(str_concat(json-emit-precise(report),"\n"));
+  }
+ }
+ 0;
+}
