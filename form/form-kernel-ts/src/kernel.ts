@@ -1206,7 +1206,7 @@ export class Kernel {
       case "ctor":
         return `${v.ctor_name}(${v.args.map((a) => this.render(a)).join(", ")})`;
       case "record":
-        return `<record @${nodeKey(v.record.blueprint)} #${v.record.fields.length}fields>`;
+        return `<record @${v.record.blueprint === null ? "0" : nodeKey(v.record.blueprint)} #${v.record.fields.length}fields>`;
     }
   }
 
@@ -1358,8 +1358,14 @@ export class Kernel {
     // Blueprint NodeID tags the type; fields are a name→value map.
     //
     // record_new — (record_new blueprint k1 v1 k2 v2 ...) → record.
+    // A blueprint of 0 builds a record with no blueprint (null): its fields
+    // work as on any record, record_blueprint reads back 0, and no method
+    // dispatches on it. fkwu keeps the blueprint operand verbatim, and 0 is
+    // the body's most common record shape (a plain field map).
     this.registerNative("record_new", catMethod(), (k, args) => {
-      const rec: Record = { blueprint: argNodeID(args, 0), fields: [] };
+      const a0 = args[0];
+      const bp = a0?.kind === "int" && a0.int === 0 ? null : argNodeID(args, 0);
+      const rec: Record = { blueprint: bp, fields: [] };
       let i = 1;
       while (i + 1 < args.length) {
         recordSet(rec, k.internName(argStr(args, i)), args[i + 1]!);
@@ -1367,12 +1373,13 @@ export class Kernel {
       }
       return { kind: "record", record: rec };
     });
-    // record_get — (record_get rec "field") → value, or null if absent.
+    // record_get — (record_get rec "field") → value, or 0 when the record
+    // carries no such field: fkwu's answer, which the body reads as eq(v, 0).
     this.registerNative("record_get", catAccess(), (k, args) => {
       const r = args[0]!;
       if (r.kind !== "record") throw new Error("record_get: not a record");
       const v = recordGet(r.record, k.internName(argStr(args, 1)));
-      return v ?? { kind: "null" };
+      return v ?? { kind: "int", int: 0 };
     });
     // record_set — (record_set rec "field" value) → the record (mutated in
     // place; shared identity means all holders see it). BML's `self.x = v`.
@@ -1393,6 +1400,7 @@ export class Kernel {
     this.registerNative("record_blueprint", catAccess(), (_k, args) => {
       const r = args[0]!;
       if (r.kind !== "record") throw new Error("record_blueprint: not a record");
+      if (r.record.blueprint === null) return { kind: "int", int: 0 };
       return { kind: "nodeid", nodeid: r.record.blueprint };
     });
     // record? — (record? v) → bool type predicate.
@@ -1430,8 +1438,10 @@ export class Kernel {
     this.registerNative("method_has", catAccess(), (k, args) => {
       const a0 = args[0]!;
       let bp: NodeID;
-      if (a0.kind === "record") bp = a0.record.blueprint;
-      else if (a0.kind === "nodeid") bp = a0.nodeid;
+      if (a0.kind === "record") {
+        if (a0.record.blueprint === null) return { kind: "bool", bool: false };
+        bp = a0.record.blueprint;
+      } else if (a0.kind === "nodeid") bp = a0.nodeid;
       else return { kind: "bool", bool: false };
       const key = `${nodeKey(bp)}:${k.internName(argStr(args, 1))}`;
       return { kind: "bool", bool: k.methods.has(key) };
@@ -1445,6 +1455,11 @@ export class Kernel {
         throw new Error("method_invoke: first arg must be a record");
       }
       const bp = a0.record.blueprint;
+      if (bp === null) {
+        throw new Error(
+          `method_invoke: no method '${argStr(args, 1)}' on a record with no blueprint (record_new 0)`,
+        );
+      }
       const key = `${nodeKey(bp)}:${k.internName(argStr(args, 1))}`;
       const cl = k.methods.get(key);
       if (!cl) {
@@ -3481,7 +3496,7 @@ export class Kernel {
       case "ctor":
         return `${v.ctor_name}(${v.args.map((a) => this.render(a)).join(", ")})`;
       case "record":
-        return `<record @${nodeKey(v.record.blueprint)} #${v.record.fields.length}fields>`;
+        return `<record @${v.record.blueprint === null ? "0" : nodeKey(v.record.blueprint)} #${v.record.fields.length}fields>`;
     }
   }
 }
@@ -3803,7 +3818,9 @@ export type Value =
 // blueprint tags the record's type (class / method-table NodeID); fields is
 // an ordered name→value map.
 export interface Record {
-  blueprint: NodeID;
+  // null for a record built as (record_new 0 ...): fields, but no type and no
+  // method table; record_blueprint reads back 0 (fkwu keeps the operand verbatim).
+  blueprint: NodeID | null;
   fields: { name: NameID; val: Value }[];
 }
 

@@ -2050,8 +2050,17 @@ func (k *Kernel) registerNatives() {
 	// Blueprint NodeID tags the type; fields are a name→value map.
 	//
 	// record_new — (record_new blueprint k1 v1 k2 v2 ...) → Record.
+	// A blueprint of 0 builds a record with no blueprint: its fields work as
+	// on any record, record_blueprint reads back 0, and no method dispatches
+	// on it. fkwu keeps the blueprint operand verbatim, and 0 is the body's
+	// most common record shape (a plain field map).
 	k.registerNative("record_new", catMethod(), func(k *Kernel, args []Value) Value {
-		rec := &Record{Blueprint: args[0].AsNid()}
+		rec := &Record{}
+		if args[0].Kind == VInt && args[0].Int == 0 {
+			rec.NoBlueprint = true
+		} else {
+			rec.Blueprint = args[0].AsNid()
+		}
 		i := 1
 		for i+1 < len(args) {
 			rec.Set(k.internName(args[i].Str), args[i+1])
@@ -2059,9 +2068,13 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VRecord, Rec: rec}
 	})
-	// record_get — (record_get rec "field") → value, or null if absent.
+	// record_get — (record_get rec "field") → value, or 0 when the record
+	// carries no such field: fkwu's answer, which the body reads as eq(v, 0).
 	k.registerNative("record_get", catAccess(), func(k *Kernel, args []Value) Value {
-		v, _ := args[0].Rec.Get(k.internName(argStr(args, 1)))
+		v, ok := args[0].Rec.Get(k.internName(argStr(args, 1)))
+		if !ok {
+			return Value{Kind: VInt, Int: 0}
+		}
 		return v
 	})
 	// record_set — (record_set rec "field" value) → the record (mutated in
@@ -2075,8 +2088,12 @@ func (k *Kernel) registerNatives() {
 		_, ok := args[0].Rec.Get(k.internName(argStr(args, 1)))
 		return Value{Kind: VBool, Bool: ok}
 	})
-	// record_blueprint — (record_blueprint rec) → the blueprint NodeID.
+	// record_blueprint — (record_blueprint rec) → the blueprint NodeID, or 0
+	// for a record built without one.
 	k.registerNative("record_blueprint", catAccess(), func(_ *Kernel, args []Value) Value {
+		if args[0].Rec.NoBlueprint {
+			return Value{Kind: VInt, Int: 0}
+		}
 		return Value{Kind: VNodeID, Nid: args[0].Rec.Blueprint}
 	})
 	// record_keys — (record_keys rec) → list of field-name strings, in
@@ -2111,6 +2128,9 @@ func (k *Kernel) registerNatives() {
 		var bp NodeID
 		switch args[0].Kind {
 		case VRecord:
+			if args[0].Rec.NoBlueprint {
+				return Value{Kind: VBool, Bool: false}
+			}
 			bp = args[0].Rec.Blueprint
 		case VNodeID:
 			bp = args[0].Nid
@@ -2128,6 +2148,9 @@ func (k *Kernel) registerNatives() {
 			panic("method_invoke: first arg must be a record")
 		}
 		rec := args[0].Rec
+		if rec.NoBlueprint {
+			panic(fmt.Sprintf("method_invoke: no method '%s' on a record with no blueprint (record_new 0)", args[1].Str))
+		}
 		key := methodKey{rec.Blueprint, k.internName(argStr(args, 1))}
 		cl, ok := k.methods[key]
 		if !ok {
