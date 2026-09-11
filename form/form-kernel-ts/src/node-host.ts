@@ -392,7 +392,7 @@ export function createNodeKernelHost(options: NodeKernelHostOptions = {}): Kerne
       try { statSync(path); return true; } catch { return false; }
     },
     pathIsDirectory: (path) => statSync(path).isDirectory(),
-    makeDirectory: (path) => mkdirSync(path, { recursive: true }),
+    makeDirectory: (path) => mkdirSync(path),
     removeDirectory: (path) => rmSync(path, { recursive: true, force: true }),
     removePath: (path) => unlinkSync(path),
     renamePath: (from, to) => renameSync(from, to),
@@ -400,6 +400,9 @@ export function createNodeKernelHost(options: NodeKernelHostOptions = {}): Kerne
     resolveReadPath: resolveHostReadPath,
     sourceInventory: inventory,
     randomBytes: (length) => Uint8Array.from(nodeRandomBytes(length)),
+    processId: () => process.pid,
+    monotonicMs: () => performance.now(),
+    workingDirectory: () => process.cwd(),
     tempDirectory:
       options.tempDirectory ??
       (() => tmpdir().replace(/\/+$/, "") || "/tmp"),

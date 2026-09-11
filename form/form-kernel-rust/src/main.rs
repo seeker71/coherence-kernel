@@ -35,6 +35,13 @@ mod formats;
 mod inductive;
 mod quotient;
 
+/// The instant host_monotonic_ms counts from: this kernel's start, touched when the doors register.
+/// Only differences between two readings mean anything.
+fn process_clock_start() -> Instant {
+    static START: OnceLock<Instant> = OnceLock::new();
+    *START.get_or_init(Instant::now)
+}
+
 /// Where a host path names a file for a read-side door, the same way on every kernel. A path that
 /// stands where the kernel runs names itself. Otherwise the walk tries dir/p, dir/form/p and
 /// dir/form/form/p from the working directory upward and stops at the checkout that holds it, the
@@ -5021,9 +5028,11 @@ impl Kernel {
         };
         self.register_native("host_path_is_dir", cat_call(), fs_is_dir_native);
         self.register_native("fs_is_dir", cat_call(), fs_is_dir_native);
-        let fs_mkdir_native: NativeFn = |_, _, args| match fs::create_dir_all(args[0].as_str()) {
-            Ok(_) => Value::Int(0),
-            Err(_) => Value::Int(-1),
+        // One atomic mkdir, as fkwu's tag 56: 1 when this call created the directory, 0 when it
+        // already stood or could not be made — the answer a lock directory reads.
+        let fs_mkdir_native: NativeFn = |_, _, args| match fs::create_dir(args[0].as_str()) {
+            Ok(_) => Value::Int(1),
+            Err(_) => Value::Int(0),
         };
         self.register_native("host_dir_mkdir", cat_call(), fs_mkdir_native);
         self.register_native("fs_mkdir", cat_call(), fs_mkdir_native);
@@ -6020,6 +6029,19 @@ impl Kernel {
         };
         self.register_native("host_temp_dir", cat_call(), temp_dir_native);
         self.register_native("temp_dir", cat_call(), temp_dir_native);
+        // host_pid, host_monotonic_ms, host_cwd — this process's id, a monotonic millisecond clock
+        // and its working directory: the doors fkwu carries as tags 160, 182 and 29. Parity holds on
+        // shape, not value: each leg is its own process, and only differences between two clock
+        // readings mean anything (fkwu counts from boot, the siblings from their own start).
+        let _ = process_clock_start();
+        self.register_native("host_pid", cat_call(), |_, _, _| Value::Int(std::process::id() as i64));
+        self.register_native("host_monotonic_ms", cat_call(), |_, _, _| {
+            Value::Int(process_clock_start().elapsed().as_millis() as i64)
+        });
+        self.register_native("host_cwd", cat_call(), |_, _, _| match env::current_dir() {
+            Ok(dir) => Value::Str(dir.to_string_lossy().to_string().into()),
+            Err(_) => Value::Null,
+        });
 
         // No Form category claimed — `trace` is a debug surface, honest
         // about being outside the structural vocabulary.
