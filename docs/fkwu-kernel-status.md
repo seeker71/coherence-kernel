@@ -27,6 +27,14 @@ Form owns the following executing surfaces. Each linked page names its public do
 | [Terminal acceptance](glass-keyboard.md) | Form owns real Darwin ARM64 PTYs, immediate input checks, signals, exact termios restoration, deadlines and independently supervised resource release |
 | [Ordered CPU mathematics](native-fp64-matrix.md) | Form emits binary64 MXFP8 matrix code in RAM; repeated calls reuse owned output memory without boxing intermediate products or sums |
 
+The deterministic substantive build and its three downstream generators share
+one `fkwu` process through `observe/concept-substantive-build-run.bml`. Form
+publishes 21 checked artifacts from admitted evidence, including 111 stable-ID
+repairs and 1,443 attributed language cells. Current generated metadata and all
+10,000 rank/repair queries are executable witnesses. Fresh acquisition and
+translation retain their separate JavaScript responsibilities until a native
+acquisition receipt and proposed projection are admitted and observed.
+
 [Native source inspection](native-source-inventory.md) captures source lists into owned files and checks child exit status, exact reads and NUL termination. `observe/carrier-mass.bml` counts source bytes in Form, including unknown-extension shebangs and paths containing spaces or newlines. It retains the complete source reading at `.hearth/carrier-mass-current.json`; weighted exclusions remain present in that evidence. The native authoring guide retains its separate Python inventory at `.hearth/native-authoring-current.json`. Neither lexical inventory establishes execution or native ownership by itself.
 
 The current guide identifies two Python implementations: `dsv4-mla-core-oracle.py` supplies the active large-model numerical reference, and `test_glass_keyboard_pty.py` retains POSIX/Linux terminal acceptance. The native terminal acceptance executes on Darwin ARM64; another native target still needs an observed admission and full behavior check. Shell orchestration, JavaScript builders, target-language specimens, proof siblings and platform carriers also remain visible in the broader source reading. The checkout is not entirely Form-owned.

@@ -17,6 +17,13 @@ const translateApi = "https://translate.googleapis.com/translate_a/single";
 const userAgent = "coherence-kernel/1.0 (https://github.com/seeker71/coherence-kernel; stable substantive concept repair)";
 const refresh = process.argv.includes("--refresh");
 
+if (!refresh) {
+  const result = spawnSync(resolve(root, "fkwu"), ["observe/concept-substantive-build-run.bml"],
+    { cwd: root, stdio: ["ignore", "inherit", "inherit"] });
+  if (result.error) throw result.error;
+  process.exit(result.status ?? 1);
+}
+
 const rankedPath = resolve(root, "model/concept-10000-ranked.dat");
 const lexicalIndexPath = resolve(root, "model/concept-10000-lexical-index.dat");
 const holesPath = resolve(root, "model/concept-semantics-10000-wiktionary-lexical-remaining.tsv");
