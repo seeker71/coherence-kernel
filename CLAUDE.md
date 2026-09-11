@@ -37,10 +37,10 @@ echo path/to/cell.fk > /tmp/preflight-target && ./fkwu observe/preflight-run.fk
 ```
 
 from [`observe/preflight.fk`](observe/preflight.fk). A green number with a nonzero exit is a fold computed over
-`nothing`, not a pass — and an `[unresolved-call]` is one red line with two opposite repairs (a typo, or a lane
-seam another kernel resolves). Preflight probes all four kernels and tells you which, checks paren balance, and
-forces a fresh compile so a warm cache cannot replace the error with a tally. `AGENTS.md` item 9 carries the
-practice.
+`nothing`, not a pass — and an `[unresolved-call]` is one red line with three repairs (a typo, a unit the chain
+does not load, or a lane seam another kernel resolves). Preflight probes all four kernels, names the unit that
+defines the name, checks paren balance, and forces a fresh compile so a warm cache cannot replace the error with
+a tally. `AGENTS.md` item 9 carries the practice.
 
 Living doors carry only what is and where we are going; how we got here lives in git. A correction note
 that stays in a door after its wound healed is a keloid (corpus row 1260) — remove it.
