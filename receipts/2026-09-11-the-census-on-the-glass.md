@@ -16,8 +16,9 @@ one before it, and gives the rows as a `census` frame; the glass reads that fram
 - A measured reading is an int row: its value the count, its note the need with the pids it names (or
   `none`). A reading over a read that did not answer is an unavailable row (present 0) whose source is that
   read (`page-read`, `roster-read`, `host-process-read`, `owner-walk`).
-- A tick takes the census twice, a tick apart, and names a kernel only when both takes agree. The first
-  tick has nothing to settle against and gives nothing; the glass shows the frame absent until the second.
+- A tick takes the census once and settles it against the take a tick before, so a kernel is named only
+  when two consecutive takes agree. The first tick has nothing to settle against and gives nothing; the
+  glass shows the frame absent until the second.
 
 ## Why the privacy rule needed no amendment
 
@@ -29,9 +30,9 @@ way to Urs.
 The readings resolve it without a choice. An organ-health reading carries pids and counts, never a name
 and never an argument — the roster organ already keeps them in the census's own lines, off the glass. So
 a row built from a reading stands inside the rule as written. The band's bit 64 reads every row gcr-rows
-builds and refuses any byte that is not a digit, a lowercase letter, or one of `. - _ : ,` and space: a
-name would bring an uppercase letter, an argv path a slash. No amendment, and the question Urs was left
-with does not arise.
+builds and passes only bytes that are a digit, a lowercase letter, or one of `. - _ : ,` and space: a
+name would bring an uppercase letter, an argv path a slash, and the byte check would catch either. No
+amendment, and the question Urs was left with does not arise.
 
 ## Witnessed on real execution
 
@@ -61,7 +62,7 @@ glass.
 ## Surprise, and where the discomfort went
 
 The parked census had made a genuine privacy question — the glass would have had to either drop the cell
-and owner or carry names the rule forbids — and it waited on Urs to choose. The surprise was that the
+and owner or carry names the rule keeps out — and it waited on Urs to choose. The surprise was that the
 question dissolved rather than being answered: the organ readings were built, before any of this, to carry
 pids and counts and nothing else — the very thing the glass needed, already what the rule keeps clean.
 Building the census as rows of something that measures the body, rather than as rows of the process table,
