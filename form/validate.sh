@@ -230,6 +230,11 @@ fk_band_proof_level() {
 fk_band_declared_verdict() {
     awk '/^;/ { if (match($0, /Verdict [0-9]+/)) { print substr($0, RSTART + 8, RLENGTH - 8); exit } } !/^;/ && NF { exit }' "$1" 2>/dev/null
 }
+# A diagnostic is an error line on fkwu's stderr, or its word that the cached image it ran was
+# compiled with errors: a warm cache answers the verdict, and must not answer it clean.
+fk_diag_count() {
+    grep -c 'unresolved-call\|error:\|compiled with errors' "$1" 2>/dev/null || true
+}
 
 # The fourth sibling is the repo-root fkwu source/JIT door. It resolves the
 # band's Form dependency graph and executes source directly; hot CPU/Metal/MLX
@@ -659,7 +664,7 @@ run_siblings() {
     if [[ -n "$fourth_stem" ]]; then
         fk_out=$(cat "$legs/fk" 2>/dev/null || true)
         fk_rc=$(cat "$legs/fk.rc" 2>/dev/null || echo 1)
-        fk_diags=$(grep -c 'unresolved-call\|error:' "$legs/fk.err" 2>/dev/null || true)
+        fk_diags=$(fk_diag_count "$legs/fk.err")
     fi
     printf '  evidence=%s exits go=%s rust=%s typescript=%s\n' "$legs" "$go_rc" "$rs_rc" "$ts_rc"
     if [[ "$go_rc" == 0 && "$rs_rc" == 0 && "$ts_rc" == 0 && "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]] \
@@ -764,7 +769,7 @@ run_workload() {
             local lane_out lane_diags
             lane_out="$(mktemp "${TMPDIR:-/tmp}/form-fkwu-lane.XXXXXX")"
             answered="$( (cd .. && ./fkwu "form/$band") 2>"$lane_out" | tail -1 || true)"
-            lane_diags="$(grep -c "unresolved-call\|error:" "$lane_out" 2>/dev/null || true)"
+            lane_diags="$(fk_diag_count "$lane_out")"
             rm -f "$lane_out"
             if [[ "${lane_diags:-0}" -gt 0 ]]; then
                 printf "  ✗  %-30s  fkwu-only lane: %s diagnostic line(s) on stderr — verdict %s untrusted\n" \
