@@ -1771,10 +1771,12 @@ export class Kernel {
       if (v?.kind === "str") return { kind: "int", int: v.str.length };
       return { kind: "int", int: 0 };
     });
+    // A receiver that is not a list answers null, as Go and Rust answer.
     this.registerNative("nth", catAccess(), (_k, args) => {
-      const lst = argList(args, 0);
+      const xs = args[0];
+      if (xs?.kind !== "list") return { kind: "null" };
       const i = argInt(args, 1);
-      return lst[i] ?? { kind: "null" };
+      return xs.list[i] ?? { kind: "null" };
     });
     this.registerNative("empty", catListNat(), () => ({ kind: "list", list: [] }));
     // _list_append — functional list extension: (_list_append xs x) → a NEW
