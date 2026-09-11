@@ -29,7 +29,12 @@ is copied into Glass or the diagnostic framebuffer. Training text and generated
 streams remain private in the hearth; telemetry carries identities and counts.
 
 One supervisor serializes the learning queue and records the learner's actual
-exit and stderr. Recording does not wait for GPU training during a session.
+exit and stderr. Before the learner starts, the supervisor admits the dynamic
+Metal carrier through `form/form-stdlib/metal-carrier.bml`. A fresh worktree
+holds the carrier's source without its artifact, so the supervisor builds it
+and records `carrier-admitted`, or `carrier-refused` with the compiler's stderr.
+An unloaded carrier is named in the learner's error, never read as an allocator
+refusal. Recording does not wait for GPU training during a session.
 Normal session close and the one-shot embodiment door retain the parent process
 until the supervisor returns; an external interruption keeps the immutable queue
 for the next drain. Each new training example

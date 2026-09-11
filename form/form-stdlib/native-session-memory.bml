@@ -1,7 +1,7 @@
 // Session experience stays private in the hearth. Immutable examples and one
 // serialized learner retain evidence, candidate generations and serving choices.
 // This client has no model admission: recording and kicking a worker are cheap.
-// preludes: form-stdlib/hearth.bml form-stdlib/native-adapter-generation.bml form-stdlib/json-precise.bml form-stdlib/sha256.fk form-stdlib/model-registry.bml form-stdlib/organ-health.bml
+// preludes: form-stdlib/hearth.bml form-stdlib/native-adapter-generation.bml form-stdlib/json-precise.bml form-stdlib/sha256.fk form-stdlib/model-registry.bml form-stdlib/organ-health.bml form-stdlib/metal-carrier.bml
 section [form.bml] {
  class NativeSessionMemory {
   def nsm-at(root,leaf) = str_concat(root,str_concat("/",leaf));
@@ -68,6 +68,8 @@ section [form.bml] {
   def nsm-child(home,mode,request,stem) {
    let input = nsm-at(home,str_concat(stem,".request"));
    let wrote = nag-write(input,str_concat(mode,str_concat("\n",str_concat(home,str_concat("\n",str_concat(request,"\n"))))));
+   // The spawn door appends; each run's stdout and stderr are its own.
+   let log = fs-remove-file(nsm-at(home,str_concat(stem,".log"))); let err = fs-remove-file(nsm-at(home,str_concat(stem,".err")));
    host_spawn_at(list("./fkwu","observe/native-session-learning-run.fk"),list(input,nsm-at(home,str_concat(stem,".log")),nsm-at(home,str_concat(stem,".err"))));
   }
   def nsm-running(home) = or(eq(host_alive(str_to_int(trim(nsm-text(nsm-at(home,"worker.pid"))))),1),eq(host_alive(str_to_int(trim(nsm-text(nsm-at(home,"learner.pid"))))),1));
@@ -89,9 +91,23 @@ section [form.bml] {
    let owner = nag-write(nsm-at(home,"worker.pid"),int_to_str(pid));
    if gt(pid,0) then "launched" else nsm-launch-failed(home,pid);
   }
+  // The learner's Metal handles need the dynamic carrier beside fkwu. A fresh
+  // worktree has only its source; the supervisor admits it before the child starts.
+  def nsm-carrier(home) {
+   let before = mca-state();
+   if str_eq(before,"standing") then 1 else nsm-carrier-admit(home,before);
+  }
+  def nsm-carrier-admit(home,before) {
+   let reading = oh-reading("session-learning","metal-carrier","admission",json-node-string("standing"),json-node-string(before),json-node-int(0),list(oh-need("metal-carrier",oh-reference(mca-artifact()))),list("build-carrier-from-source","defer"),oh-reference(mca-source()));
+   let seen = mca-admit(nsm-at(home,"carrier.log"),nsm-at(home,"carrier.err"));
+   let ready = str_eq(head(seen),"admitted");
+   let health = if ready then oh-applied(reading,"build-carrier-from-source",json-node-object(list(nsm-s("state",head(seen)),nsm-n("build_exit",nth(seen,1)),nsm-s("artifact",mca-artifact())))) else oh-set(reading,"evidence",oh-reference(nth(seen,2)));
+   let event = nsm-event(home,if ready then "carrier-admitted" else "carrier-refused",list(nsm-s("state",head(seen)),nsm-n("build_exit",nth(seen,1)),json-node-pair("health",health)));
+   ready;
+  }
   def nsm-supervise(home) {
    let owner = nag-write(nsm-at(home,"worker.pid"),int_to_str(host_pid()));
-   let pid = nsm-child(home,"drain","","learner");
+   let pid = if nsm-carrier(home) then nsm-child(home,"drain","","learner") else -1;
    let child = nag-write(nsm-at(home,"learner.pid"),int_to_str(pid));
    let rc = if gt(pid,0) then host_wait(pid) else -1;
    let result = nag-write(nsm-at(home,"worker.rc"),int_to_str(rc));
