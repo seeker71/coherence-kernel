@@ -43,6 +43,7 @@ The north star is one Form-owned numerical program that retains tensors and
 activations in owned native memory across the whole computation. Additional
 quantized formats, attention reductions, explicit concurrent leases and dynamic
 program selection can then extend the same lifetime and evidence boundaries.
-The complete DSV4 oracle still has its Python owner until the native GGUF,
-F16/MXFP4/IQ2, MLA, hyperconnection, expert-routing and full-stack responsibilities
-pass their independent consumer checks.
+The [real-model DSV4 oracle](native-dsv4-oracle.md) extends this owner with mapped
+GGUF input, F16/MXFP4/IQ2 matrix programs, MLA, hyperconnections, expert routing
+and per-layer sequence state. Its independent consumer observations and current
+acceptance boundary are recorded with that organ.

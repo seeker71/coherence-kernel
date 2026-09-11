@@ -1,0 +1,135 @@
+// Form-owned binary64 argument reduction. Integer limbs carry every
+// quotient bit; finite input is never converted to a tagged integer directly.
+// A pi/2 interval is derived by alternating Machin series, not a host trig call.
+// preludes: form-stdlib/core.fk form-stdlib/bml/native-fp64-bytes.bml
+section [form.bml] {
+ class NativeAngle {
+  def na-need(ok,why) = if ok then 1 else form_error(str_concat("native angle: ",why));
+  def na-base() = 16777216;
+  def na-trim(a) = if nil?(a) then a else if eq(head(a),0) then na-trim(tail(a)) else a;
+  def na-norm(a) = reverse(na-trim(reverse(a)));
+  def na-int(n) = if eq(n,0) then list() else cons(mod(n,na-base()),na-int(div(n,na-base())));
+  def na-small(a) = if nil?(a) then 0 else add(head(a),mul(na-base(),na-small(tail(a))));
+  def na-head(a) = if nil?(a) then 0 else head(a);
+  def na-tail(a) = if nil?(a) then a else tail(a);
+  def na-cmp-high(a,b) = if nil?(a) then 0 else if lt(head(a),head(b)) then -1 else if gt(head(a),head(b)) then 1 else na-cmp-high(tail(a),tail(b));
+  def na-cmp(a,b) = if lt(len(a),len(b)) then -1 else if gt(len(a),len(b)) then 1 else na-cmp-high(reverse(a),reverse(b));
+  def na-add-loop(a,b,c) = if and(nil?(a),nil?(b)) then na-int(c) else na-add-next(na-tail(a),na-tail(b),add(add(na-head(a),na-head(b)),c));
+  def na-add-next(a,b,s) = cons(mod(s,na-base()),na-add-loop(a,b,div(s,na-base())));
+  def na-add(a,b) = na-add-loop(a,b,0);
+  def na-sub-loop(a,b,borrow) = if nil?(a) then list() else na-sub-next(tail(a),na-tail(b),sub(sub(head(a),na-head(b)),borrow));
+  def na-sub-next(a,b,d) = cons(if lt(d,0) then add(d,na-base()) else d,na-sub-loop(a,b,if lt(d,0) then 1 else 0));
+  def na-sub(a,b) = na-norm(na-sub-loop(a,b,0));
+  def na-times-loop(a,m,c) = if nil?(a) then na-int(c) else na-times-next(tail(a),m,add(mul(head(a),m),c));
+  def na-times-next(a,m,p) = cons(mod(p,na-base()),na-times-loop(a,m,div(p,na-base())));
+  def na-times(a,m) = if eq(m,0) then list() else na-times-loop(a,m,0);
+  def na-div-loop(a,d,r,out) = if nil?(a) then list(na-norm(out),r) else na-div-next(tail(a),d,add(mul(r,na-base()),head(a)),out);
+  def na-div-next(a,d,n,out) = na-div-loop(a,d,mod(n,d),cons(div(n,d),out));
+  def na-div-small(a,d) = na-div-loop(reverse(a),d,0,list());
+  def na-div(a,d) = head(na-div-small(a,d));
+  def na-zeros(a,n) = if eq(n,0) then a else cons(0,na-zeros(a,sub(n,1)));
+  def na-ipow2(n) = if eq(n,0) then 1 else mul(2,na-ipow2(sub(n,1)));
+  def na-shl(a,n) = if nil?(a) then a else na-zeros(na-times(a,na-ipow2(mod(n,24))),div(n,24));
+  def na-drop(a,n) = if or(eq(n,0),nil?(a)) then a else na-drop(tail(a),sub(n,1));
+  def na-shr(a,n) = na-div(na-drop(a,div(n,24)),na-ipow2(mod(n,24)));
+  def na-highbits(n,b) = if eq(n,0) then b else na-highbits(div(n,2),add(b,1));
+  def na-bits(a) = if nil?(a) then 0 else add(mul(sub(len(a),1),24),na-highbits(head(reverse(a)),0));
+  def na-mul(a,b) = if nil?(b) then list() else na-add(na-times(a,head(b)),na-shl(na-mul(a,tail(b)),24));
+  // Normalize the divisor's leading digit, estimate one base-2^24 quotient
+  // digit from two numerator digits, then correct the estimate exactly.
+  // The estimate is an upper bound; the complete product is always checked.
+  def na-quotient(a,b) = if lt(na-cmp(a,b),0) then list(list(),a) else na-quotient-scaled(a,b,sub(24,na-highbits(head(reverse(b)),0)));
+  def na-quotient-scaled(a,b,shift) {
+   let d = na-shl(b,shift); let qr = na-qdigits(reverse(na-shl(a,shift)),d,len(d),head(reverse(d)),list(),list());
+   list(na-norm(head(qr)),na-shr(nth(qr,1),shift));
+  }
+  def na-qdigits(digits,d,size,lead,r,q) = if nil?(digits) then list(q,r) else na-qnext(tail(digits),d,size,lead,na-add(na-shl(r,24),na-int(head(digits))),q);
+  def na-qnext(digits,d,size,lead,r,q) {
+   let estimate = if lt(len(r),size) then 0 else na-qestimate(reverse(r),gt(len(r),size),lead); let product = na-times(d,estimate); let chosen = na-qcorrect(r,d,estimate,product);
+   na-qdigits(digits,d,size,lead,nth(chosen,1),cons(head(chosen),q));
+  }
+  def na-qestimate(top,two,lead) {
+   let n = if two then add(mul(head(top),na-base()),nth(top,1)) else head(top); let q = div(n,lead);
+   if ge(q,na-base()) then sub(na-base(),1) else q;
+  }
+  def na-qcorrect(r,d,q,product) = if gt(na-cmp(product,r),0) then na-qcorrect(r,d,sub(q,1),na-sub(product,d)) else list(q,na-sub(r,product));
+  def na-sign(s,a) = list(if nil?(a) then 1 else s,a);
+  def na-neg(a) = na-sign(sub(0,head(a)),nth(a,1));
+  def na-sadd(a,b) = if eq(head(a),head(b)) then na-sign(head(a),na-add(nth(a,1),nth(b,1))) else if ge(na-cmp(nth(a,1),nth(b,1)),0) then na-sign(head(a),na-sub(nth(a,1),nth(b,1))) else na-sign(head(b),na-sub(nth(b,1),nth(a,1)));
+  def na-ssub(a,b) = na-sadd(a,na-neg(b));
+  def na-stimes(a,n) = na-sign(head(a),na-times(nth(a,1),n));
+  def na-smul(a,b) = na-sign(mul(head(a),head(b)),na-mul(nth(a,1),nth(b,1)));
+  def na-sdiv(a,n) = na-sign(head(a),na-div(nth(a,1),n));
+  def na-sshr(a,n) = na-sign(head(a),na-shr(nth(a,1),n));
+
+  // Each floor term differs by less than one scaled unit; the omitted
+  // alternating tail is also less than one. The bound is conservative.
+  def na-atan-loop(power,q,k,total) = if nil?(power) then list(total,add(k,1)) else na-atan-loop(na-div(power,mul(q,q)),q,add(k,1),na-sadd(total,na-sign(if eq(mod(k,2),0) then 1 else -1,na-div(power,add(mul(2,k),1)))));
+  def na-atan(scale,q) = na-atan-loop(na-div(scale,q),q,0,na-sign(1,list()));
+  // A resource arithmetic boundary, independent of the input angle. With
+  // b=24*limbs and q>=5, every atan term index is <=b. Long division forms
+  // remainder*base+digit, so its odd denominator <=2*b+3 must satisfy
+  // denominator*base<=the tagged maximum. Error sums <=10*(b+1) also fit.
+  // This admits exact arithmetic, not a promise that the host can allocate it.
+  def na-precision-max-limbs() = div(div(sub(div(4611686018427387903,na-base()),3),2),24);
+  def na-precision-limbs-good(limbs) = if str_eq(value_kind(limbs),"int") then and(ge(limbs,48),le(limbs,na-precision-max-limbs())) else 0;
+  def na-context(limbs) {
+   na-need(na-precision-limbs-good(limbs),"precision is outside exact limb arithmetic");
+   let bits = mul(24,limbs); let scale = na-shl(list(1),bits); let a = na-atan(scale,5); let b = na-atan(scale,239);
+   let pi = na-ssub(na-stimes(head(a),8),na-stimes(head(b),2));
+   list(bits,nth(pi,1),add(mul(8,nth(a,1)),mul(2,nth(b,1))));
+  }
+  def na-exponent(x,low,high) = if eq(sub(high,low),1) then low else na-exponent-mid(x,low,high,add(low,div(sub(high,low),2)));
+  def na-exponent-mid(x,low,high,mid) = if lt(x,nfb-pow2(mid)) then na-exponent(x,low,mid) else na-exponent(x,mid,high);
+  def na-normal(x) = na-normal-at(x,na-exponent(x,-1074,1024));
+  def na-normal-at(x,e) = list(trunc(mul(div(x,nfb-pow2(e)),4503599627370496.0)),sub(e,52));
+  def na-exact(x,bits) = if eq(x,0.0) then na-sign(1,list()) else na-exact-parts(na-normal(abs(x)),if lt(x,0.0) then -1 else 1,bits);
+  def na-exact-parts(p,s,bits) = na-sign(s,na-shl(na-int(head(p)),add(bits,nth(p,1))));
+  // Rounding occurs entirely in the integer domain, including subnormals.
+  def na-round-bits(a,discard) = if le(discard,0) then na-small(na-shl(a,sub(0,discard))) else na-round-tail(a,discard,na-shr(a,discard));
+  def na-round-tail(a,discard,q) {
+   let r = na-sub(a,na-shl(q,discard)); let half = na-shl(list(1),sub(discard,1)); let cmp = na-cmp(r,half);
+   add(na-small(q),if or(gt(cmp,0),and(eq(cmp,0),eq(mod(na-head(q),2),1))) then 1 else 0);
+  }
+  def na-larger(a,b) = if gt(a,b) then a else b;
+  def na-float(a,bits) = if nil?(nth(a,1)) then 0.0 else na-float-nonzero(a,bits,na-larger(sub(na-bits(nth(a,1)),53),sub(bits,1074)));
+  def na-float-nonzero(a,bits,discard) = mul(mul(1.0,head(a)),mul(mul(1.0,na-round-bits(nth(a,1),discard)),nfb-pow2(sub(discard,bits))));
+  def na-same-float(a,b) = if not(eq(a,b)) then 0 else if eq(a,0.0) then eq(div(1.0,a),div(1.0,b)) else 1;
+  def na-nearest(x,p) {
+   let qr = na-quotient(x,p); let q = head(qr); let r = nth(qr,1);
+   if gt(na-cmp(na-times(r,2),p),0) then list(na-add(q,list(1)),na-sign(-1,na-sub(p,r))) else list(q,na-sign(1,r));
+  }
+  // The complete interval must select one quadrant and one high/low result.
+  // Otherwise the caller derives a finer pi interval and retries explicitly.
+  def na-attempt(ctx,x) {
+   let bits = head(ctx); let p = nth(ctx,1); let error = nth(ctx,2); let exact = na-exact(abs(x),bits); let nearest = na-nearest(nth(exact,1),p);
+   let q = head(nearest); let r = nth(nearest,1); let radius = na-mul(q,na-int(error));
+   let boundary = na-div(na-sub(p,na-int(error)),2);
+   if ge(na-cmp(na-add(nth(r,1),radius),boundary),0) then nothing() else na-attempt-rounded(ctx,x,q,r,radius);
+  }
+  def na-attempt-rounded(ctx,x,q,r,radius) {
+   let bits = head(ctx); let lower = na-ssub(r,na-sign(1,radius)); let upper = na-sadd(r,na-sign(1,radius));
+   let hi = na-float(lower,bits);
+   if not(na-same-float(hi,na-float(upper,bits))) then nothing() else na-attempt-low(ctx,x,q,lower,upper,hi);
+  }
+  def na-attempt-low(ctx,x,q,lower,upper,hi) {
+   let bits = head(ctx); let held = na-exact(hi,bits); let lo = na-float(na-ssub(lower,held),bits);
+   if not(na-same-float(lo,na-float(na-ssub(upper,held),bits))) then nothing() else list(mod(if lt(x,0.0) then sub(4,mod(na-head(q),4)) else mod(na-head(q),4),4),if lt(x,0.0) then sub(0.0,hi) else hi,if lt(x,0.0) then sub(0.0,lo) else lo,bits);
+  }
+  def na-reduce-refine(ctx,x) {
+   let answer = na-attempt(ctx,x);
+   if nothing?(answer) then na-reduce-refine(na-context(add(div(head(ctx),24),16)),x) else answer;
+  }
+  def na-reduce(ctx,x) {
+   na-need(and(or(str_eq(value_kind(x),"int"),str_eq(value_kind(x),"float")),eq(sub(x,x),0.0)),"finite numeric angle required");
+   if le(abs(x),0.5) then list(0,mul(1.0,x),0.0,head(ctx)) else na-reduce-refine(ctx,mul(1.0,x));
+  }
+  def na-series(x,k,term,total) = na-series-next(x,k,div(mul(sub(0.0,mul(x,x)),term),mul(mul(1.0,add(k,1)),add(k,2))),total);
+  def na-series-next(x,k,term,total) = if eq(add(total,term),total) then total else na-series(x,add(k,2),term,add(total,term));
+  def na-pair(reduced) {
+   let x = nth(reduced,1); let lo = nth(reduced,2); let s = if eq(x,0.0) then x else na-series(x,1,x,x); let c = na-series(x,0,1.0,1.0); let ss = if eq(lo,0.0) then s else add(s,mul(lo,c)); let cc = if eq(lo,0.0) then c else sub(c,mul(lo,s)); let q = head(reduced);
+   if eq(q,0) then list(ss,cc) else if eq(q,1) then list(cc,sub(0.0,ss)) else if eq(q,2) then list(sub(0.0,ss),sub(0.0,cc)) else list(sub(0.0,cc),ss);
+  }
+ }
+ 0;
+}

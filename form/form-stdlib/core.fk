@@ -167,42 +167,21 @@
     (defn char_at (s i) (substring s i (add i 1)))
     (defn ord (c) (if (eq (str_len c) 0) -1 (str_byte_at c 0)))
 
-    ; int_to_str — decimal rendering, built from byte_to_str + arithmetic
-    ; (ASCII '0' is byte 48), not a digit-lookup string. Handles 0 and
-    ; negative numbers explicitly; every existing caller in this codebase
-    ; (HTTP status/content-length, JSON encoding, counts — grep int_to_str
-    ; under form/form-stdlib/) passes an integer, never a bool/null/string,
-    ; so this covers the load-bearing surface; the native's bool/null/string
-    ; pass-through fallback is not reproduced here.
-    ;
-    ; A NON-INTEGER ARGUMENT DIVERGES THREE WAYS — measured 2026-07-26:
-    ;
-    ;     (int_to_str 10.5)     fkwu ""      go "10"     rust "10"     ts "10.5"
-    ;
-    ; fkwu answers the EMPTY STRING, which is the dangerous one: it makes no error and
-    ; the caller's output is simply missing a piece. Found by having four kernels each
-    ; emit the same SVG and hashing the results — three hashes, and the diff was two
-    ; font-size attributes. Every band over that cell read 1023 on all four while the
-    ; pictures differed, because a band folds to a scalar and cannot compare documents.
-    ; The header above says every caller passes an integer; that was true and stayed
-    ; true only by luck the moment someone wrote a font size of 11.5.
-    ; See receipts/2026-07-26-navier-stokes-comes-home.md.
+    ; int_to_str renders decimal integers with ASCII digits. Zero has one digit;
+    ; nothing is displayed explicitly as "nothing". Negative values split their
+    ; quotient and remainder before negation, including the minimum tagged value.
     (defn fstr-digit-char (d) (byte_to_str (add d 48)))
     (defn fstr-int-to-str-pos (n)
         (if (lt n 10)
             (fstr-digit-char n)
             (str_concat (fstr-int-to-str-pos (div n 10)) (fstr-digit-char (mod n 10)))))
-    ; `nothing` is not an int, and it does not compare like one: (eq nothing 0)
-    ; is 0 while (lt nothing 0) is 1, so an unguarded render sends the absence
-    ; down the NEGATIVE branch and prints -4499999999999999999 — a number, in a
-    ; reader's eye, where there was no number. Rendering it as the word cannot
-    ; crash a caller the way returning nothing into a str_concat would, and it
-    ; is what a reader actually needs to see. Found 2026-08-26 by giving
-    ; form-eval-full a first-class nothing and printing the result.
     (defn int_to_str (n)
         (if (nothing? n) "nothing"
         (if (eq n 0) "0"
-            (if (lt n 0) (str_concat "-" (fstr-int-to-str-pos (sub 0 n)))
+            (if (lt n 0) (str_concat "-"
+                (if (lt n -9)
+                    (str_concat (fstr-int-to-str-pos (sub 0 (div n 10))) (fstr-digit-char (sub 0 (mod n 10))))
+                    (fstr-digit-char (sub 0 n))))
                 (fstr-int-to-str-pos n)))))
 
     ; str_to_int — the inverse of int_to_str. Same digit arithmetic in
@@ -368,18 +347,9 @@
                     (fstr-find-loop h n hlen nlen start (str_byte_at n 0))))))
     (defn str_find (h n from) (fstr-find h n from))
 
-    ; float_to_str — the missing dual of the native str_to_float. Scoped
-    ; honestly: fixed 6 fractional digits, trailing zeros trimmed, decimal
-    ; notation only — NOT a replacement for fkwu's retired native int_to_str
-    ; float fallback (`sprintf(tmp, "%.15g", ...)`, arbitrary precision,
-    ; switches to scientific notation for extreme magnitudes). Built because
-    ; form-stdlib/json.fk's json-emit-leaf calls int_to_str uniformly for
-    ; every numeric node type, including node_type 7 (a trivial float,
-    ; confirmed: `(node_type (intern_trivial_float "3.14"))` -> `7`) — that
-    ; silently broke the moment int_to_str stopped auto-detecting floats
-    ; (receipts/2026-07-01-c-seed-shrink-substring-int-to-str.md retired the
-    ; native that used to do that detection). json.fk itself is fixed
-    ; separately to dispatch ty 7 here instead of to int_to_str.
+    ; float_to_str renders finite values with six fractional decimal digits,
+    ; trailing zeros trimmed. Large values use a six-place scientific mantissa.
+    ; This display format is not the exact binary64 serialization door.
     (defn fstr-pow10 (n) (if (eq n 0) 1 (mul 10 (fstr-pow10 (sub n 1)))))
     (defn fstr-pad-left (s n)
         (if (ge (str_len s) n) s (fstr-pad-left (str_concat "0" s) n)))
@@ -388,46 +358,41 @@
             (if (str_eq (substring s (sub (str_len s) 1) (str_len s)) "0")
                 (fstr-trim-trailing-zeros (substring s 0 (sub (str_len s) 1)))
                 s)))
-    ; Rounds the WHOLE scaled value (integer-part-and-fraction together) to
-    ; one integer BEFORE splitting it back with div/mod — not the fractional
-    ; digits alone. Splitting first and rounding the fraction independently
-    ; breaks on carry (verified: 2.9999999 rounded that way gave "80",
-    ; garbage — mod/pad-left on an unrounded fractional int can overflow its
-    ; own width when the carry should have bumped the integer part instead).
-    ; div/mod on the pre-rounded combined integer carries correctly for free.
-    ; THE RANGE, SPLIT BY WHAT CAN ACTUALLY BE CARRIED (2026-09-10). The six-decimal
-    ; path scales by 10^6 BEFORE it can round, so it only holds a value whose scaled
-    ; form still fits an int64: |f| < 2^63/10^6, about 9.223e12. Above that the
-    ; multiply overflowed, and the printer did not refuse -- it answered.
-    ; 9000000000000.0 came back as "-223372036854.-775808": a positive number
-    ; rendered negative, with a negative fraction. 1e20 came back as "0.0000-1".
-    ; Nine trillion is not an exotic number; it is nine terabytes counted in bytes,
-    ; and every float this body has ever shown a human went through here
-    ; (corpus row 1418 printpast).
-    ;
-    ; Under 9e12 the scaled round is exact and nothing about it changes. From there
-    ; to 9e18 a double has no fractional precision left to print anyway and the
-    ; integer part still fits an int64, so it is rendered whole. Past 9e18 this body
-    ; holds no integer wide enough, and the honest answer is the notation that does
-    ; not need one.
-    (defn fstr-frac-limit () 9000000000000.0)
-    (defn fstr-int-limit () 9000000000000000000.0)
+    ; Conversion is bounded by Form's tagged integer, not the host int64 ABI.
+    ; The exclusive limit 2^62 is itself a float, so rounding that limit cannot
+    ; admit it as an integer. Binary64 has no fractional bits at or above 2^52.
+    ; Round only the fractional part and carry its quotient into the separately
+    ; admitted whole. Scaling the whole binary64 can invent fractional digits
+    ; even while the resulting integer remains inside the tagged range.
+    (defn fstr-frac-limit () 4503599627370496.0)
+    (defn fstr-int-limit () 4611686018427387904.0)
     (defn fstr-sci-exp (x e) (if (lt x 10.0) e (fstr-sci-exp (div x 10.0) (add e 1))))
     (defn fstr-sci-man (x) (if (lt x 10.0) x (fstr-sci-man (div x 10.0))))
-    (defn fstr-six (af)
+    (defn fstr-fixed (ip fp)
         (do
-            (let scale (fstr-pow10 6))
-            (let scaled (float_to_int (add 0.5 (mul af scale))))
-            (let ip (div scaled scale))
-            (let fp (mod scaled scale))
             (let frac (fstr-trim-trailing-zeros (fstr-pad-left (int_to_str fp) 6)))
             (if (eq (str_len frac) 0) (int_to_str ip) (str_concat (int_to_str ip) (str_concat "." frac)))))
+    (defn fstr-fraction (af scale)
+        (do
+            (let ip (float_to_int af))
+            (let rounded (float_to_int (add 0.5 (mul (sub af ip) scale))))
+            (fstr-fixed (add ip (div rounded scale)) (mod rounded scale))))
+    (defn fstr-six (af)
+        (fstr-fraction af (fstr-pow10 6)))
+    (defn fstr-scientific (af)
+        (do
+            (let mantissa (fstr-six (fstr-sci-man af)))
+            (let exponent (fstr-sci-exp af 0))
+            (if (str_eq mantissa "10") (str_concat "1e" (int_to_str (add exponent 1)))
+                (str_concat mantissa (str_concat "e" (int_to_str exponent))))))
     (defn fstr-abs (af)
         (if (lt af (fstr-frac-limit)) (fstr-six af)
             (if (lt af (fstr-int-limit)) (int_to_str (float_to_int af))
-                (str_concat (fstr-six (fstr-sci-man af)) (str_concat "e" (int_to_str (fstr-sci-exp af 0)))))))
+                (fstr-scientific af))))
     (defn float_to_str (f)
-        (if (lt f 0) (str_concat "-" (fstr-abs (sub 0 f))) (fstr-abs f)))
+        (if (str_eq (value-kind f) "int") (int_to_str f)
+            (if (not (eq (sub f f) 0)) (form_error "float_to_str requires a finite value")
+                (if (lt f 0) (str_concat "-" (fstr-abs (sub 0 f))) (fstr-abs f)))))
 
     ; intern_node_at — intern_node plus source attribution, over the native
     ; fb_record (record cell provenance: file + packed line/col). Was

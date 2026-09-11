@@ -1,0 +1,53 @@
+// Each Metal resource contains one complete tensor and its necessary page
+// alignment. The source file remains mapped once; bytes are never copied.
+// preludes: form/form-stdlib/bml/dsv4-oracle-execution.bml form/form-stdlib/bml/dsv4-view-publication.bml
+section [form.bml] {
+ class Dsv4TensorViews {
+  def dtv-aligned-end(at,page) = dfo-size(dfo-sum(at,mod(sub(page,mod(at,page)),page)));
+  def dtv-view(at,bytes,extent,maximum,page) {
+   dfo-require(and(dfo-natural(at),and(dfo-positive(bytes),and(dtv-geometry-good(maximum,page),and(le(at,extent),le(bytes,sub(extent,at)))))),"complete typed tensor view extent");
+   let start = sub(at,mod(at,page)); let end = dtv-aligned-end(dfo-size(dfo-sum(at,bytes)),page); let span = sub(end,start); let inner = sub(at,start);
+   dfo-require(and(le(span,maximum),and(le(end,dtv-aligned-end(extent,page)),and(eq(mod(start,page),0),and(eq(mod(span,page),0),le(bytes,sub(span,inner)))))),"aligned tensor resource exceeds admitted device or file span");
+   list(start,span,inner);
+  }
+  def dtv-geometry-good(maximum,page) = and(dfo-positive(maximum),and(dfo-positive(page),le(page,maximum)));
+  def dtv-name-good(name) = and(gt(str_len(name),0),and(lt(str_find(name,byte_to_str(0),0),0),and(lt(str_find(name," ",0),0),and(lt(str_find(name,"\t",0),0),and(lt(str_find(name,"\n",0),0),lt(str_find(name,"\r",0),0))))));
+  def dtv-rows(r,names,maximum,page,index,acc,maxBytes,maxSpan,totalSpan) = if nil?(names) then list(reverse(acc),maxBytes,maxSpan,totalSpan) else dtv-row(r,names,maximum,page,index,acc,maxBytes,maxSpan,totalSpan);
+  def dtv-row(r,names,maximum,page,index,acc,maxBytes,maxSpan,totalSpan) {
+   let name = head(names); let tensor = dfo-tensor(r,name); let bytes = dfo-tensor-size(tensor); let at = dfo-abs(r,tensor); let view = dtv-view(at,bytes,record_get(r,"extent"),maximum,page);
+   dfo-require(dtv-name-good(name),"tensor view stream name must be one nonempty NUL-free field");
+   dtv-rows(r,tail(names),maximum,page,add(index,1),cons(list(name,at,bytes,index,nth(view,2),1,head(view),nth(view,1)),acc),dfo-max(maxBytes,bytes),dfo-max(maxSpan,nth(view,1)),dfo-size(dfo-sum(totalSpan,nth(view,1))));
+  }
+  def dtv-plan(path,maximum,page) {
+   dfo-require(dtv-geometry-good(maximum,page),"device maximum and page must be positive exact integers");
+   let r = dfo-open(path); let names = record_get(r,"tensor-names"); dfo-require(eq(len(names),record_get(r,"tensor-count")),"complete ordered tensor census");
+   let rows = dtv-rows(r,names,maximum,page,0,list(),0,0,0);
+   dfo-require(eq(file_size(path),record_get(r,"extent")),"tensor plan observed source extent changed");
+   record_new(0,"path",path,"extent",record_get(r,"extent"),"maximum",maximum,"page",page,"mapped",dtv-aligned-end(record_get(r,"extent"),page),"rows",head(rows),"max-bytes",nth(rows,1),"max-span",nth(rows,2),"total-span",nth(rows,3));
+  }
+  def dtv-words(xs) = if nil?(xs) then "" else str_concat(if str_eq(value_kind(head(xs)),"string") then head(xs) else int_to_str(head(xs)),if nil?(tail(xs)) then "" else str_concat(" ",dtv-words(tail(xs))));
+  def dtv-emit-rows(rows) {
+   if nil?(rows) then 1 else dtv-emit-row(head(rows),tail(rows));
+  }
+  def dtv-emit-row(row,rest) {
+   print_str(dtv-words(cons("TV",dnr-take(row,6)))); print_str(dtv-words(list("VIEW",nth(row,3),nth(row,6),nth(row,7)))); dtv-emit-rows(rest);
+  }
+  def dtv-emit(plan) {
+   let rows = record_get(plan,"rows"); let count = len(rows);
+   print_str(dtv-words(list("VR",record_get(plan,"extent"),record_get(plan,"maximum"),record_get(plan,"max-bytes"),record_get(plan,"page"),record_get(plan,"max-span"),record_get(plan,"mapped"),count)));
+   print_str(dtv-words(list("NT",count))); dtv-emit-rows(rows); print_str(dtv-words(list("TVDONE",count,0))); print_str("END"); 1;
+  }
+  def dtv-params(rows,bins) = if nil?(rows) then fbc-finish(bins,"") else dtv-param(head(rows),tail(rows),bins);
+  def dtv-param(row,rest,bins) {
+   let prefix = str_concat("VIEW_",int_to_str(nth(row,3))); let text = str_concat(prefix,str_concat("_START ",str_concat(int_to_str(nth(row,6)),str_concat("\n",str_concat(prefix,str_concat("_BYTES ",str_concat(int_to_str(nth(row,7)),"\n")))))));
+   dtv-params(rest,fbc-put(bins,text));
+  }
+  def dtv-publish-params(plan,path) {
+   let prefix = dtv-words(list("PLAN_EXTENT",record_get(plan,"extent"))); let page = dtv-words(list("PLAN_PAGE",record_get(plan,"page")));
+   let text = str_concat(prefix,str_concat("\n",str_concat(page,str_concat("\n",dtv-params(record_get(plan,"rows"),list())))));
+   let published = dtvp-new(path,text); dfo-require(eq(record_get(published,"ready"),1),"tensor view destination must be a new file; complete write and resource release required");
+   let held = fbc-read-exact(path,0); dfo-require(and(fbc-good(held),str_eq(fbc-value(held),text)),"tensor view parameter publication exact readback"); 1;
+  }
+ }
+ 0;
+}

@@ -19,9 +19,10 @@
 # EVIDENCE CLASS PER STAGE (twinblind, corpus row 868):
 #   CHOOSING  — the per-layer routing regime, the bias-in/weight-out asymmetry, which expert-type kernel
 #               each half takes, the compressed-RoPE reduction, and how the four hyper-connection streams
-#               compose from one layer into the next. Proven against the rented fp64 ds4.c transcription
-#               by the native runner's per-layer finite, diversity, routing-bound, sentinel, and command-
-#               buffer witnesses. No reference process enters generation.
+#               compose from one layer into the next. Independent Form numerical comparisons live in
+#               metal_dsv4_stack_oracle.sh for its admitted specimen. This runner checks per-layer
+#               finite values, diversity, routing bounds, sentinels and command completion.
+#               No reference process enters generation.
 #   CANONICAL — the MXFP4 / IQ2_XXS / MXFP8 / F16 decodes and matvecs (Stones 33/34/35).
 #
 # halfrent (row 870) DEEPENS: ds4.c cannot even VALIDATE this file's layers 3..42 —
@@ -1261,23 +1262,10 @@ func gpuHeadrms(_ x: MTLBuffer) -> MTLBuffer {
 // own scalars and ratio array.
 let nPair = nRot/2
 var freqCache: [Int: MTLBuffer] = [:]
-// FORM_DS4_RAW_LANE=1: run the RAW attention lane. ds4.c:12437-12460 shows the compressed-base rope
-// and the fp8 KV round belong to a SECOND cache — a compressor pools compress_ratio raw KVs into one
-// row (gated pooling over compressor_gate/ape/norm, tensors this harness never loads), rotates that
-// pooled row at comp_pos = pos+1-ratio with the compressed base, fp8-rounds it, and stores it BESIDE
-// a raw f32 cache whose keys carry PLAIN rope at true positions (ds4 --inspect: "KV raw + compressed").
-// This harness had ported the compressed lane as if it were the attention itself — on 41 of 43 layers
-// keys were rotated base-160000 where ds4's short-context answer comes from the raw base-10000 lane.
-// The per-layer fp64 oracle shares the misreading (its line 822 skips the compressor), so their
-// agreement was common-mode and could not catch it. With this flag: plain rope every layer, no fp8
-// round — the raw lane's semantics. The compressor/indexer lanes remain unimplemented and are only
-// reachable past compress_ratio tokens; at short contexts ds4's compressed cache is empty too.
-// REFUTED 2026-07-30, kept only as a falsifier. Reading layer_attention_raw_swa_one (ds4.c:12936)
-// whole shows the raw path DOES rope per-layer at true pos with the compressed base on ratio layers
-// AND fp8-rounds the row (kv_cache_push_raw f16-rounds it too) — i.e. the DEFAULT lane above is
-// ds4's recipe, and this flag's two premises are both false. Measured against ds4 --raw-prompt on
-// "The capital of France is": default lane puts " Paris" at rank 148, this flag at 407. The earlier
-// "10x improvement" was measured against a CHAT-TEMPLATED ds4 prompt and was an artifact.
+// FORM_DS4_RAW_LANE=1 explicitly selects plain-base RoPE at every layer and
+// omits the key/value fp8 round for comparison. The default uses each layer's
+// declared RoPE regime and applies that round. Changing this flag changes the
+// numerical policy; it is not an equivalent implementation selection.
 let rawLane = ProcessInfo.processInfo.environment["FORM_DS4_RAW_LANE"] == "1"
 func ropeFreqs(_ il: Int) -> MTLBuffer {
     if let b = freqCache[il] { return b }

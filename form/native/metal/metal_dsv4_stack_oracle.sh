@@ -1,52 +1,29 @@
 #!/usr/bin/env bash
-# metal_dsv4_stack.sh — STONE 39: STACKING the 43 HETEROGENEOUS DeepSeek-V4-Flash layers at REAL DIMS.
+# Full heterogeneous DeepSeek-V4 layer stack, compared with an independent
+# Form fp64 reference. The file supplies each layer's expert count, weight
+# formats, routing regime and RoPE configuration. Native reference matrices
+# use independent decoders and ordered fp64 arithmetic; Metal uses its own
+# Form-authored shaders through this Swift proof carrier.
 #
-# Stone 37 stood ONE complete layer (metal_dsv4_layer_join.sh, 31 gates) on blk.0's weights. This is not
-# that layer run 43 times. The file's own tensor table says the layers differ on four independent
-# per-layer decisions, and a blk.0-shaped stack is right-shaped, right-magnitude and silently wrong:
+# Every numerical threshold remains local to its stage. A separately perturbed
+# reference measures composed-state sensitivity; injected inputs isolate one
+# layer, and actual per-layer KV histories isolate attention over many keys.
+# Each GPU output is sentinelled and each command completion is checked.
 #
-#   1. the expert count is the gate stack's own dim[2] (256 for layers 0..2, 192 after), NOT the KV's 256,
-#      while the router still projects 256 logits at every layer. The file keeps the two consistent by
-#      carrying exp_probs_b.bias = -1e30 on exactly the 64 pruned indices — read, not assumed (gate 2).
-#   2. the expert TYPES flip between GGUF 40 (MXFP4) and 16 (IQ2_XXS), independently for gate/up vs down,
-#      across six layer groups. The dispatch reads each tensor's own type.
-#   3. routing changes at layer 3: the ffn_gate_tid2eid I32 table (forepick, row 867) gives way to biased
-#      top-k with UNBIASED weighting (ds4.c:10665) — the new form_dsv4_topk_weights kernel.
-#   4. RoPE goes compressed at layer 2 and needs NO new kernel: the YaRN magnitude cancels (ds4.c:10175)
-#      and the angle reduces to a per-pair SCALE of theta_extrap, which form_mla_rope_f32's freqs[]
-#      already carries. The freqs are re-derived HERE, on the host, from the file's own KV — never taken
-#      from the oracle, or the RoPE choice would be inherited on both sides and falsify nothing.
+# The Form plan gives each tensor one complete aligned bytesNoCopy view.
+# The Swift proof process owns its one whole-file mmap and those Metal views.
+# FORM_DS4_STACK_LAYERS selects a prefix; FORM_DS4_SEQ_IDS supplies ordered IDs.
+# FORM_DS4_ORACLE_DIR0/DIR7 and FORM_DS4_PERTURB_DIR0/DIR7 reuse exact references.
 #
-# EVIDENCE CLASS PER STAGE (twinblind, corpus row 868):
-#   CHOOSING  — the per-layer routing regime, the bias-in/weight-out asymmetry, which expert-type kernel
-#               each half takes, the compressed-RoPE reduction, and how the four hyper-connection streams
-#               compose from one layer into the next. Proven against the rented fp64 ds4.c transcription
-#               in dsv4-mla-core-oracle.py's `stack` mode, which carries its OWN state through every layer
-#               and shares no code, no buffer and no arithmetic with the band, the MSL or this carrier.
-#               The oracle's stack mode was itself controlled: at layer 0 it reproduces `layer` mode's
-#               vectors BYTE-IDENTICALLY, and `layer` mode is what gates metal_dsv4_layer_join.sh.
-#   CANONICAL — the MXFP4 / IQ2_XXS / MXFP8 / F16 decodes and matvecs (Stones 33/34/35), re-witnessed by
-#               the oracle's own independent decode.
-#
-# halfrent (row 870) DEEPENS: ds4.c cannot even VALIDATE this file's layers 3..42 —
-# tensor_expect_routed_expert (:4641) demands dim[2] == 256 and exit(1)s on 192. So what is rented is the
-# order and the scalars; the arithmetic for these types is re-derived on both sides. Said, not buried.
-#
-# hushfold (row 859): the whole stack runs at TWO positions; the outputs must DIFFER while each agrees
-# with its own oracle. unispan: per-layer wall time is reported at both positions, never from one.
-# zerobirth/edgedrop: every output buffer is NaN-sentinelled and cb.error/cb.status checked.
-# onelean/lapspan: every weight of every layer is reached through the overlapping bytesNoCopy views.
-#
-# Run:  form/native/metal/metal_dsv4_stack.sh
-#   FORM_DS4_STACK_LAYERS=<n>     how many layers to stack (default: the file's block_count)
-#   FORM_DS4_ORACLE_DIR0/DIR7     reuse an already-computed oracle stack instead of running one
-#   FORM_DS4_PROMPT_TOKEN=<id>
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
+# Run: form/native/metal/metal_dsv4_stack_oracle.sh
+# Darwin/Metal proof tools and the model are required; unavailable inputs exit2.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form
-GO_BIN="$ROOT/form-kernel-go/bin-go"
 BLOB="${FORM_DS4_BLOB:-$HOME/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf}"
+case "$BLOB" in /*) ;; *) BLOB="$PWD/$BLOB" ;; esac
+PROOF_ARCHIVE="${FORM_DS4_PROOF_ARCHIVE:-}"
+case "$PROOF_ARCHIVE" in ""|/*) ;; *) PROOF_ARCHIVE="$PWD/$PROOF_ARCHIVE" ;; esac
 CACHE="$ROOT/native/metal/.metallib-cache"
 TOKEN="${FORM_DS4_PROMPT_TOKEN:-671}"
 KV_CAP="${FORM_DS4_KV_CAP:-4}"
@@ -55,17 +32,8 @@ KV_STEPS="${FORM_DS4_KV_STEPS:-2}"
 POS_A=0
 POS_B=7
 
-# ── THE SEQUENCE, 2026-07-28 ──────────────────────────────────────────────────────────────────────
-# FORM_DS4_SEQ_IDS="id id id ..." makes position B a REAL position in a REAL sequence: the prefix is
-# run through every layer first, each position leaving its latent in that layer's KV arena, and the
-# last id is the one all 100+ per-layer gates then judge.
-#
-# WHY. Until today every gate here ran ONE token, so `gpuAttend` was called with its default
-# `nrows = 1` and attention was a softmax over a single score plus the learned sink — an operation
-# that cannot SELECT. Meanwhile the autoregressive loop below flips `useGrowingKv` and calls the same
-# kernel with `pos + 1` rows. The proven path and the text-producing path were not the same path,
-# and the multi-key softmax — the thing that makes attention attention — had no reference at all.
-# That is exactly the shape of defect that yields locally-plausible, globally-threadless output.
+# A sequence runs every prefix token through each layer's own KV arena.
+# The final token is compared at position count-1 against its complete history.
 SEQ_IDS="${FORM_DS4_SEQ_IDS:-}"
 if [[ -n "$SEQ_IDS" ]]; then
     SEQ_N=$(echo "$SEQ_IDS" | wc -w | tr -d ' ')
@@ -82,19 +50,26 @@ fi
 if [[ ! -f "$BLOB" ]]; then
     echo "SKIP  the ds4 GGUF is not on this host: $BLOB   (set FORM_DS4_BLOB)"; exit 2
 fi
-if [[ ! -x "$GO_BIN" ]]; then
-    echo "  building the Go kernel..."; (cd "$ROOT/form-kernel-go" && go build -o bin-go .) || { echo "FAIL go build"; exit 1; }
-fi
 FSIZE=$(stat -f%z "$BLOB")
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+work="$(mktemp -d)" || exit 1
+proof_cleanup() {
+    local result=$?
+    trap - EXIT
+    if [[ -n "$PROOF_ARCHIVE" ]]; then
+        if ! ( cd "$ROOT/.." && printf '%s\0' DPA1 "$work" "$PROOF_ARCHIVE" END | ./fkwu observe/dsv4-proof-retention-run.bml ); then
+            echo "FAIL proof retention; work remains at $work" >&2
+            (( result != 0 )) || result=1
+            exit "$result"
+        fi
+    fi
+    if ! rm -rf "$work"; then (( result != 0 )) || result=1; fi
+    exit "$result"
+}
+trap proof_cleanup EXIT
 echo "ds4 blob: $FSIZE bytes at $(date '+%H:%M:%S')   THE HETEROGENEOUS STACK (token=$TOKEN)"
 
-# ── the `; preludes:` directives are LIVE recursive load instructions; walked, never hand-catted ──
-fk_deps(){ awk 'BEGIN{IGNORECASE=1} /^;[ \t]*preludes:/{ s=$0; sub(/^;[ \t]*preludes:[ \t]*/,"",s); n=split(s,a,/[ \t]+/); for(i=1;i<=n;i++){ if(a[i]=="\\"||tolower(a[i])=="none"||tolower(a[i])=="(none)"||a[i]=="")continue; if(a[i]~/\.fk$/)print a[i] } }' "$1" 2>/dev/null; }
-fk_path(){ local dir; dir="$(dirname "$1")"; if [[ -f "$dir/$2" ]]; then printf '%s\n' "$dir/$2"; elif [[ -f "$2" ]]; then printf '%s\n' "$2"; elif [[ "$2" == form/* && -f "${2#form/}" ]]; then printf '%s\n' "${2#form/}"; else printf '%s\n' "$dir/$2"; fi; }
-fk_expand(){ local f="$1" d p; case " $FK_SEEN " in *" $f "*) return ;; esac; FK_SEEN="$FK_SEEN $f"; while read -r d; do [[ -z "$d" ]] && continue; p="$(fk_path "$f" "$d")"; fk_expand "$p"; done < <(fk_deps "$f"); printf '%s\n' "$f"; }
+# Native source loading and emission are owned by the Form door.
 cd "$ROOT"
-FK_SEEN=""; FILES=(); while read -r x; do FILES+=("$x"); done < <(fk_expand native/metal/dsv4-stack-real.fk)
 
 # ── 1. measure the device ─────────────────────────────────────────────────────────────────────────
 cat > "$work/probe.swift" <<'SWIFT'
@@ -111,14 +86,13 @@ echo "device: $DEVNAME  maxBufferLength=$MAXBUF  page=$PAGE"
 
 # ── 2. the body's residency plan + the manifest, walked over the LIVE file ─────────────────────────
 echo "walking the file header for the residency plan and the manifest..."
-printf '(wre-emit "%s" %s %s %s)\n' "$BLOB" "$FSIZE" "$MAXBUF" "$PAGE" > "$work/plan.fk"
-"$GO_BIN" "${FILES[@]}" "$work/plan.fk" > "$work/plan.out" 2>"$work/plan.err" || { echo "FAIL plan emission"; tail -5 "$work/plan.err"; exit 1; }
+( cd "$ROOT/.." && printf '%s\0' DTV1 "$BLOB" "$MAXBUF" "$PAGE" "$work/views.txt" END | ./fkwu observe/dsv4-tensor-views-run.bml ) > "$work/plan.out" 2> "$work/plan.err" || { echo "FAIL tensor-view plan emission"; tail -5 "$work/plan.err"; exit 1; }
 grep -qx 'END' "$work/plan.out" || { echo "FAIL plan stream truncated"; exit 1; }
-WR=($(awk '$1=="WR"{print; exit}' "$work/plan.out"))
-STEP=${WR[7]}; VIEWLIMIT=${WR[5]}; NVIEWS=${WR[9]}
-printf '(gm-emit-manifest "%s")\n' "$BLOB" > "$work/man.fk"
-"$GO_BIN" "${FILES[@]}" "$work/man.fk" > "$work/man.out" 2>"$work/man.err" || { echo "FAIL manifest emission"; tail -5 "$work/man.err"; exit 1; }
-echo "  plan: view_limit=$VIEWLIMIT step=$STEP nviews=$NVIEWS"
+VR=($(awk '$1=="VR"{print; exit}' "$work/plan.out"))
+MAXVIEW=${VR[5]}; NVIEWS=${VR[7]}
+( cd "$ROOT/.." && printf '%s\0' DSE1 manifest "$BLOB" "" END | ./fkwu observe/dsv4-proof-emission-run.bml ) > "$work/man.out" 2>"$work/man.err" || { echo "FAIL manifest emission"; tail -5 "$work/man.err"; exit 1; }
+grep -qx 'END' "$work/man.out" || { echo "FAIL manifest stream truncated"; exit 1; }
+echo "  plan: maximum_tensor_view=$MAXVIEW nviews=$NVIEWS"
 
 # the KV stream the manifest emits is `KV <i> <vtype> <key>` followed by its own value line, so a scalar
 # is read by NAME through the body's own walk — never by position and never hardcoded.
@@ -172,7 +146,7 @@ awk -v plan="$work/plan.out" -v man="$work/man.out" '
              k,a[n], k,b[n], k,c[n], k,d[n], k,e[n], k,z0[n], k,z1[n], k,z2[n], k,ty[n]
   }
   END { if (bad) exit 1 }' "$work/plan.out" "$work/man.out" "$work/want.txt" > "$work/params.txt" || exit 1
-cat "$work/flags.txt" >> "$work/params.txt"
+cat "$work/flags.txt" "$work/views.txt" >> "$work/params.txt"
 
 N_EMBD=4096; N_HEAD=64; HEAD_DIM=512; N_ROT=64; O_RANK=1024
 N_HC=4; HC_ITERS=20; HC_EPS=0.0000009999999975; RMS_EPS=0.0000009999999975
@@ -184,10 +158,9 @@ ROPE_SCALEF="$(kvf deepseek4.rope.scaling.factor)";               ROPE_SCALEF="$
 ROPE_ORIGCTX="$(kvf deepseek4.rope.scaling.original_context_length)"; ROPE_ORIGCTX="${ROPE_ORIGCTX:-65536}"
 BETA_FAST="$(kvf deepseek4.rope.scaling.yarn_beta_fast)";         BETA_FAST="${BETA_FAST:-32.0}"
 BETA_SLOW="$(kvf deepseek4.rope.scaling.yarn_beta_slow)";         BETA_SLOW="${BETA_SLOW:-1.0}"
-# the per-layer compress ratios are a HYPER-PARAMETER wearing an array's clothes, and the body already
-# has a reader for exactly that case (gguf-manifest.fk, gm-emit-array). Walked, never guessed.
-printf '(gm-emit-array "%s" "deepseek4.attention.compress_ratios")\n' "$BLOB" > "$work/arr.fk"
-"$GO_BIN" "${FILES[@]}" "$work/arr.fk" > "$work/arr.out" 2>"$work/arr.err" || { echo "FAIL ratio array emission"; tail -5 "$work/arr.err"; exit 1; }
+# The native DSE metadata owner reads each layer's compression ratio from the file.
+( cd "$ROOT/.." && printf '%s\0' DSE1 array "$BLOB" deepseek4.attention.compress_ratios END | ./fkwu observe/dsv4-proof-emission-run.bml ) > "$work/arr.out" 2>"$work/arr.err" || { echo "FAIL ratio array emission"; tail -5 "$work/arr.err"; exit 1; }
+grep -qx 'END' "$work/arr.out" || { echo "FAIL ratio stream truncated"; exit 1; }
 grep -q '^ARR deepseek4.attention.compress_ratios' "$work/arr.out" || { echo "FAIL the file carries no deepseek4.attention.compress_ratios"; cat "$work/arr.out"; exit 1; }
 RATIOS="$(awk '$1=="A"{ s = s (n++ ? "," : "") $3 } END{ print s }' "$work/arr.out")"
 NRATIO="$(awk '$1=="A"{n++} END{print n+0}' "$work/arr.out")"
@@ -199,8 +172,6 @@ for ((il=0; il<WANT_LAYERS; il++)); do
 done
 
 cat >> "$work/params.txt" <<EOF
-STEP $STEP
-VIEWLIMIT $VIEWLIMIT
 NVIEWS $NVIEWS
 TOKEN $TOKEN
 KV_CAP $KV_CAP
@@ -232,47 +203,38 @@ CLAMP $CLAMP
 EOF
 awk 'NF < 2 { print "FAIL missing value for " $1 > "/dev/stderr"; exit 1 }' "$work/params.txt" || exit 1
 
-# ── 2b. THE RENTED ORACLE, in `stack` mode, at BOTH positions (hushfold) ───────────────────────────
-ORACLE="$ROOT/form-stdlib/tests/dsv4-mla-core-oracle.py"
-[[ -f "$ORACLE" ]] || { echo "FAIL the rented oracle is missing: $ORACLE"; exit 1; }
-# The oracle is rented at pos A with a ONE-id sequence (the degenerate single-key case, kept so the
-# old comparison still runs) and at pos B with the WHOLE sequence, so its attention sees the same
-# history the device's KV arena holds. With no FORM_DS4_SEQ_IDS both are empty and the oracle keeps
-# its previous one-token behaviour exactly.
+# Independent native references carry the same per-layer history as the GPU.
+ORACLE="$ROOT/../observe/dsv4-oracle-run.bml"
+[[ -f "$ORACLE" ]] || { echo "FAIL the native oracle source is missing: $ORACLE"; exit 1; }
 if [[ -n "$SEQ_IDS" ]]; then TOKS_A="$TOKEN"; TOKS_B="$SEQ_IDS"; else TOKS_A=""; TOKS_B=""; fi
 ORA0="${FORM_DS4_ORACLE_DIR0:-}"; ORA7="${FORM_DS4_ORACLE_DIR7:-}"
 if [[ -z "$ORA0" || -z "$ORA7" ]]; then
     ORA0="$work/ora$POS_A"; ORA7="$work/ora$POS_B"; mkdir -p "$ORA0" "$ORA7"
-    echo "  renting the oracle in STACK mode at pos $POS_A and pos $POS_B over $WANT_LAYERS layers..."
-    DSV4_ORACLE_MODE=stack DSV4_ORACLE_TOKENS="$TOKS_A" DSV4_ORACLE_OUT="$ORA0" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_A" "$WANT_LAYERS" > "$work/ora0.txt" 2>&1 &
+    echo "  running the native oracle in STACK mode at pos $POS_A and pos $POS_B over $WANT_LAYERS layers..."
+    ( cd "$ROOT/.." && printf '%s\0' DFO2 "$BLOB" "$TOKEN" "$POS_A" "$WANT_LAYERS" stack "$ORA0" "env:${DSV4_ORACLE_F32_STATE:-}" "${DSV4_ORACLE_PERTURB:-0}" "${DSV4_ORACLE_PERTURB_EVERY:-0}" "$TOKS_A" END | ./fkwu "$ORACLE" ) > "$work/ora0.txt" 2>&1 &
     p0=$!
-    DSV4_ORACLE_MODE=stack DSV4_ORACLE_TOKENS="$TOKS_B" DSV4_ORACLE_OUT="$ORA7" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_B" "$WANT_LAYERS" > "$work/ora7.txt" 2>&1 &
+    ( cd "$ROOT/.." && printf '%s\0' DFO2 "$BLOB" "$TOKEN" "$POS_B" "$WANT_LAYERS" stack "$ORA7" "env:${DSV4_ORACLE_F32_STATE:-}" "${DSV4_ORACLE_PERTURB:-0}" "${DSV4_ORACLE_PERTURB_EVERY:-0}" "$TOKS_B" END | ./fkwu "$ORACLE" ) > "$work/ora7.txt" 2>&1 &
     p7=$!
-    wait $p0; wait $p7
+    s0=0; s7=0; wait "$p0" || s0=$?; wait "$p7" || s7=$?
+    (( s0 == 0 && s7 == 0 )) || { echo "FAIL native reference exits: $s0 $s7"; exit 1; }
 else
     echo "  reusing pre-computed oracle stacks: $ORA0 and $ORA7"
 fi
-# THE COMPOSED-TRAJECTORY ENVELOPE (selfgauge). A 43-layer comparison cannot honestly ask "is the GPU's
-# final state right to 1e-6" — it can only ask "do two runs of THIS recipe, one of them nudged each layer
-# by as much as f32 arithmetic nudges it, stay this close?" So the oracle is rented a second time, in fp64
-# throughout, with the state tilted by PERSTEP after every layer. The distance between those two fp64
-# trajectories is the yardstick — measured from the reference, not chosen to make this harness green.
-# (A one-ulp INPUT tilt was measured first and is the wrong yardstick: this model DAMPS an input
-# perturbation hard — 1.2e-7 at blk.0 falls to 4e-10 by blk.18 — so it says nothing about noise that is
-# injected fresh at every layer, which is what an f32 carrier does.)
-# the per-layer tilt: the size of the gap an f32 carrier was MEASURED to have when ONE layer is run alone
-# from this oracle's own input (the "THIS LAYER ALONE" gates below report it at every layer; the largest observed is 1.4e-5).
+# The composed-state envelope comes from a second independent fp64 trajectory
+# perturbed after every layer. Its1.4e-5 relative input tilt is the observed
+# single-layer carrier scale; each stage's numerical bounds stay unchanged.
 PERSTEP=1.4e-5
 PER0="${FORM_DS4_PERTURB_DIR0:-}"; PER7="${FORM_DS4_PERTURB_DIR7:-}"
 if [[ -z "$PER0" || -z "$PER7" ]]; then
     PER0="$work/per$POS_A"; PER7="$work/per$POS_B"; mkdir -p "$PER0" "$PER7"
-    echo "  renting the oracle AGAIN, tilted by $PERSTEP after EVERY layer, to measure how far two runs of"
+    echo "  running the native oracle AGAIN, tilted by $PERSTEP after EVERY layer, to measure how far two runs of"
     echo "  the same recipe drift apart when one is nudged each layer by as much as f32 nudges it..."
-    DSV4_ORACLE_MODE=stack DSV4_ORACLE_PERTURB_EVERY=$PERSTEP DSV4_ORACLE_TOKENS="$TOKS_A" DSV4_ORACLE_OUT="$PER0" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_A" "$WANT_LAYERS" > "$work/per0.txt" 2>&1 &
+    ( cd "$ROOT/.." && printf '%s\0' DFO2 "$BLOB" "$TOKEN" "$POS_A" "$WANT_LAYERS" stack "$PER0" "env:${DSV4_ORACLE_F32_STATE:-}" "${DSV4_ORACLE_PERTURB:-0}" "$PERSTEP" "$TOKS_A" END | ./fkwu "$ORACLE" ) > "$work/per0.txt" 2>&1 &
     q0=$!
-    DSV4_ORACLE_MODE=stack DSV4_ORACLE_PERTURB_EVERY=$PERSTEP DSV4_ORACLE_TOKENS="$TOKS_B" DSV4_ORACLE_OUT="$PER7" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_B" "$WANT_LAYERS" > "$work/per7.txt" 2>&1 &
+    ( cd "$ROOT/.." && printf '%s\0' DFO2 "$BLOB" "$TOKEN" "$POS_B" "$WANT_LAYERS" stack "$PER7" "env:${DSV4_ORACLE_F32_STATE:-}" "${DSV4_ORACLE_PERTURB:-0}" "$PERSTEP" "$TOKS_B" END | ./fkwu "$ORACLE" ) > "$work/per7.txt" 2>&1 &
     q7=$!
-    wait $q0; wait $q7
+    s0=0; s7=0; wait "$q0" || s0=$?; wait "$q7" || s7=$?
+    (( s0 == 0 && s7 == 0 )) || { echo "FAIL perturbed native reference exits: $s0 $s7"; exit 1; }
 else
     echo "  reusing pre-computed one-ulp sensitivity stacks: $PER0 and $PER7"
 fi
@@ -292,10 +254,11 @@ fi
 echo "  hushfold: the ORACLE's stack output already differs between pos $POS_A and pos $POS_B — the GPU must too"
 
 # ── 3. compile the translation units, cached by sha ────────────────────────────────────────────────
-compile_unit() { # $1 emit-form  $2 grep-token  $3 cache-prefix -> echoes LIB path
-    local form="$1" tok="$2" pre="$3" lib sha
-    echo "($form)" > "$work/$pre.fk"
-    "$GO_BIN" "${FILES[@]}" "$work/$pre.fk" > "$work/$pre.out" 2>"$work/$pre.err" || { echo "FAIL $pre MSL emission" >&2; cat "$work/$pre.err" >&2; return 1; }
+compile_unit() { # $1 source entry, $2 kernel name, $3 cache prefix -> library path
+    local form="$1" tok="$2" pre="$3" lib sha detail=""
+    [[ "$form" != dsv4-mla-core-msl ]] || detail=core-precision
+    ( cd "$ROOT/.." && printf '%s\0' DSE1 shader "$form" "$detail" END | ./fkwu observe/dsv4-proof-emission-run.bml ) > "$work/$pre.out" 2>"$work/$pre.err" || { echo "FAIL $pre MSL emission" >&2; cat "$work/$pre.err" >&2; return 1; }
+    grep -qx 'MSL' "$work/$pre.out" && grep -qx 'END' "$work/$pre.out" || { echo "FAIL $pre shader stream truncated" >&2; return 1; }
     awk '/^MSL$/{d=1;next} /^END$/{d=0;next} d{print}' "$work/$pre.out" > "$work/$pre.metal"
     grep -q "$tok" "$work/$pre.metal" || { echo "FAIL $pre kernel $tok not emitted" >&2; return 1; }
     sha="$(shasum -a 256 "$work/$pre.metal" | cut -c1-16)"; lib="$CACHE/$pre-$sha.metallib"
@@ -350,7 +313,7 @@ func T(_ k: String) -> Tn {
 let emb = T("EMB")
 let outHcFn = T("OUT_HC_FN"), outHcScale = T("OUT_HC_SCALE"), outHcBase = T("OUT_HC_BASE")
 let outNorm = T("OUT_NORM"), outWeight = T("OUT_WEIGHT")
-let step = I("STEP"), viewLimit = I("VIEWLIMIT"), nviews = I("NVIEWS"), token = I("TOKEN")
+let nviews = I("NVIEWS"), token = I("TOKEN")
 let nLayers = I("NLAYERS")
 let kvCap = I("KV_CAP"), kvSequence = I("KV_SEQUENCE") == 1, kvSteps = I("KV_STEPS")
 let nEmbd = I("N_EMBD"), nHead = I("N_HEAD"), headDim = I("HEAD_DIM"), nRot = I("N_ROT"), oRank = I("O_RANK")
@@ -399,32 +362,45 @@ func check(_ ok: Bool, _ pass: String, _ fail: String) {
     if ok { print("PASS  gate \(gateNo) " + pass) } else { print("FAIL  gate \(gateNo) " + fail); failures += 1 }
 }
 
-// ---- the file, mmapped once and wrapped in the body's own overlapping views (onelean/lapspan) ----
+// ---- the file, mmapped once and bound through Form's exact tensor views (onelean/lapspan) ----
 let fd = open(blobPath, O_RDONLY)
 guard fd >= 0 else { print("FAIL cannot open blob"); exit(1) }
-var st = stat(); fstat(fd, &st)
+var st = stat()
+guard fstat(fd, &st) == 0, st.st_size > 0, st.st_size <= Int.max else { print("FAIL exact source fstat extent"); close(fd); exit(1) }
 let fileLen = Int(st.st_size); let page = Int(getpagesize())
-let mapLen = (fileLen + page - 1) / page * page
+guard page > 0, fileLen == I("PLAN_EXTENT"), page == I("PLAN_PAGE") else { print("FAIL source extent or platform page changed after the Form plan"); close(fd); exit(1) }
+let padding = (page - fileLen % page) % page
+guard fileLen <= Int.max - padding else { print("FAIL aligned map extent overflows"); close(fd); exit(1) }
+let mapLen = fileLen + padding
 guard let mapped0 = mmap(nil, mapLen, PROT_READ, MAP_PRIVATE, fd, 0), mapped0 != MAP_FAILED else { print("FAIL mmap failed"); exit(1) }
 
 var views: [MTLBuffer] = []
 for i in 0..<nviews {
-    let vs = i*step; let vlen = min(viewLimit, mapLen - vs)
-    guard vs % page == 0 else { print("FAIL view \(i) start not page-aligned"); exit(1) }
+    let vs = I("VIEW_\(i)_START"), vlen = I("VIEW_\(i)_BYTES")
+    guard vs >= 0, vlen > 0, vs <= mapLen, vlen <= mapLen - vs,
+          vs % page == 0, vlen % page == 0, vlen <= dev.maxBufferLength else {
+        print("FAIL tensor view \(i) violates its file, alignment or device extent"); exit(1)
+    }
     guard let buf = dev.makeBuffer(bytesNoCopy: mapped0.advanced(by: vs), length: vlen, options: .storageModeShared, deallocator: nil) else {
         print("FAIL view \(i) makeBuffer failed"); failures += 1; break
     }
     views.append(buf)
 }
 check(views.count == nviews,
-  "the views map: all \(nviews) overlapping page-aligned bytesNoCopy views of the \(fileLen) B file wrap on \(dev.name) — one buffer over the whole file cannot (maxBufferLength \(dev.maxBufferLength))",
+  "the tensor views map: all \(nviews) complete page-aligned bytesNoCopy resources of the \(fileLen) B file wrap on \(dev.name)",
   "only \(views.count)/\(nviews) views mapped")
 if failures > 0 { print("VERDICT FAIL the views did not map"); exit(1) }
 
 // ---- gate 2: RESIDENCY over EVERY tensor of EVERY stacked layer, and the per-layer table said out loud
 var spanning: [String] = []
 var groups: [String: [Int]] = [:]
-func resident(_ n: String, _ t: Tn) { if t.holds != 1 || t.idx >= nviews { spanning.append(n) } }
+func resident(_ n: String, _ t: Tn) {
+    guard t.idx >= 0, t.idx < views.count else { spanning.append(n); return }
+    let length = views[t.idx].length, start = I("VIEW_\(t.idx)_START")
+    if t.holds != 1 || t.abs < 0 || t.abs > fileLen || t.bytes <= 0 || t.bytes > fileLen - t.abs ||
+       t.inner < 0 || t.inner > length ||
+       t.bytes > length - t.inner || t.abs != start + t.inner { spanning.append(n) }
+}
 resident("token_embd", emb)
 resident("output_hc_fn", outHcFn)
 resident("output_hc_scale", outHcScale)
@@ -582,6 +558,13 @@ let pMx8 = pipe(l8, "form_dsv4_mx8_matvec")
 let pGrouped = pipe(lCore, "form_dsv4_mx8_matvec_grouped")
 let pKvq = pipe(lCore, "form_dsv4_kv_fp8_f16_round")
 let pF16mv = pipe(lCore, "form_dsv4_f16_matvec")
+let pKvMx8Precise = pipe(lCore, "form_dsv4_mx8_precise")
+let pKvRmsPrecise = pipe(lCore, "form_dsv4_rms_precise")
+guard pKvMx8Precise.threadExecutionWidth == 32,
+      min(pKvMx8Precise.maxTotalThreadsPerThreadgroup, 256) >= 32,
+      min(pKvMx8Precise.maxTotalThreadsPerThreadgroup, 256) % 32 == 0 else {
+    print("FAIL precise MXFP8 requires 32-wide SIMD groups and complete row groups"); exit(1)
+}
 let pHcBcast = pipe(lHc, "form_hc_broadcast_f32")
 let pHcRmsNw = pipe(lHc, "form_hc_rmsnorm_nw_f32")
 let pHcSplit = pipe(lHc, "form_hc_split_f32")
@@ -598,16 +581,24 @@ let pHashW = pipe(lFfn, "form_dsv4_hash_weights")
 let pTopkW = pipe(lFfn, "form_dsv4_topk_weights")
 let pKvAppend = pipe(lKv, "form_dkv_append_f32")
 
-func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
+func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn, _ pipeline: MTLComputePipelineState = pRms) -> MTLBuffer {
+    if pipeline === pKvRmsPrecise {
+        guard n > 0, n <= 16777216, eps.isFinite, eps > 0 else { print("FAIL precise RMS extent or epsilon"); exit(1) }
+    }
     let out = sentinelled(n); var n32 = UInt32(n), e = eps
-    enc(pRms, 1, 1) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(views[t.idx], offset: t.inner, index: 1)
+    enc(pipeline, 1, 1) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(views[t.idx], offset: t.inner, index: 1)
                            c.setBuffer(out, offset: 0, index: 2)
                            c.setBytes(&n32, length: 4, index: 3); c.setBytes(&e, length: 4, index: 4) }
     return out
 }
-func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
+func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int, _ pipeline: MTLComputePipelineState = pMx8) -> MTLBuffer {
+    if pipeline === pKvMx8Precise {
+        guard rows > 0, cols > 0, cols % 32 == 0, rows <= Int(UInt32.max) / cols else { print("FAIL precise MXFP8 geometry"); exit(1) }
+        let cells = rows * cols
+        guard cells <= Int(UInt32.max) - cells / 32 else { print("FAIL precise MXFP8 plane offsets"); exit(1) }
+    }
     let out = sentinelled(rows); var r = UInt32(rows), c32 = UInt32(cols), nel = UInt32(rows*cols)
-    enc(pMx8, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+    enc(pipeline, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                    c.setBuffer(out, offset: 0, index: 2)
                                    c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4); c.setBytes(&nel, length: 4, index: 5) }
     return out
@@ -664,7 +655,7 @@ func ropeFreqs(_ il: Int) -> MTLBuffer {
 func gpuRope(_ v: MTLBuffer, _ nh: Int, _ pos: Int, _ il: Int, _ inverse: Bool) -> MTLBuffer {
     let out = sentinelled(nh*headDim)
     var a = UInt32(nh), b = UInt32(headDim), c32 = UInt32(nRot), p = Float(pos), s: Float = inverse ? -1.0 : 1.0
-    enc(pRope, nh, 64) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+    enc(pRope, nh*headDim, 64) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                               c.setBuffer(ropeFreqs(il), offset: 0, index: 2)
                               c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
                               c.setBytes(&p, length: 4, index: 6); c.setBytes(&s, length: 4, index: 7) }
@@ -711,7 +702,6 @@ func gpuAttend(_ q: MTLBuffer, _ rows: MTLBuffer, _ snk: Tn, _ nrows: Int = 1) -
 }
 var useGrowingKv = false
 // the attention half's insides, captured so runStack can gate between its ends
-var lastQr: MTLBuffer? = nil, lastKq: MTLBuffer? = nil, lastHa: MTLBuffer? = nil, lastAo: MTLBuffer? = nil
 var kvArenas: [MTLBuffer] = []
 func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows)
@@ -760,7 +750,12 @@ func gpuSwiglu(_ gate: MTLBuffer, _ up: MTLBuffer, _ n: Int, _ w: Float, _ lim: 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════
 // ONE LAYER, driven by that layer's OWN row of the file's table.
 // ══════════════════════════════════════════════════════════════════════════════════════════════════
+struct AttentionOut {
+    let input: MTLBuffer, normalizedInput: MTLBuffer, projectedKv: MTLBuffer
+    let query: MTLBuffer, kvBeforeRound: MTLBuffer, kv: MTLBuffer, heads: MTLBuffer, output: MTLBuffer
+}
 struct LayerOut {
+    let attention: AttentionOut
     let afterAttn: MTLBuffer, ffnCur: MTLBuffer, ffnNorm: MTLBuffer, logits: MTLBuffer
     let ids: [Int], wts: [Float], gate0: MTLBuffer, up0: MTLBuffer, mid0: MTLBuffer, down0: MTLBuffer
     let moe: MTLBuffer, shared: MTLBuffer, ffnOut: MTLBuffer, outHc: MTLBuffer
@@ -789,14 +784,14 @@ func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLB
 }
 func hcPost(_ blockOut: MTLBuffer, _ resid: MTLBuffer, _ split: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(hcDim); var a = UInt32(nHc), b = UInt32(nEmbd)
-    enc(pHcPost, nHc, 256) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
+    enc(pHcPost, hcDim, 256) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
                                   c.setBuffer(split, offset: nHc*4, index: 2)
                                   c.setBuffer(split, offset: 2*nHc*4, index: 3)
                                   c.setBuffer(out, offset: 0, index: 4)
                                   c.setBytes(&a, length: 4, index: 5); c.setBytes(&b, length: 4, index: 6) }
     return out
 }
-func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
+func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int, _ injectedArena: MTLBuffer?) -> AttentionOut {
     let w = LW[il]
     let xn = gpuRmsnorm(input, nEmbd, w.nrm)
     let ql = gpuMx8(w.qa, xn, w.qa.rows, w.qa.cols)
@@ -804,32 +799,31 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let qq = gpuMx8(w.qb, qln, w.qb.rows, w.qb.cols)
     let qh = gpuHeadrms(qq)
     let qr = gpuRope(qh, nHead, pos, il, false)
-    let kl = gpuMx8(w.kv, xn, w.kv.rows, w.kv.cols)
-    let kln = gpuRmsnorm(kl, w.kv.rows, w.kvan)
+    // The quantizer's discontinuous decisions require the compensated pair.
+    let kl = gpuMx8(w.kv, xn, w.kv.rows, w.kv.cols, pKvMx8Precise)
+    let kln = gpuRmsnorm(kl, w.kv.rows, w.kvan, pKvRmsPrecise)
     let kr = gpuRope(kln, 1, pos, il, false)
     let kq = gpuKvRound(kr)
     if il == 0 { observeRealKvAppend(kq) }
-    lastQr = qr; lastKq = kq
     let ha: MTLBuffer
     if useGrowingKv {
-        gpuKvAppend(kq, kvArenas[il], pos, kvCap)
-        ha = gpuAttend(qr, kvArenas[il], w.snk, pos + 1)
+        let arena = injectedArena ?? kvArenas[il]
+        gpuKvAppend(kq, arena, pos, kvCap)
+        ha = gpuAttend(qr, arena, w.snk, pos + 1)
     } else {
         ha = gpuAttend(qr, kq, w.snk)
     }
-    lastHa = ha
     let hu = gpuRope(ha, nHead, pos, il, true)
     let lo = gpuGrouped(w.oa, hu)
     let ao = gpuMx8(w.ob, lo, w.ob.rows, w.ob.cols)
-    lastAo = ao
-    return ao
+    return AttentionOut(input: input, normalizedInput: xn, projectedKv: kl, query: qr, kvBeforeRound: kr, kv: kq, heads: ha, output: ao)
 }
 
-func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) -> LayerOut {
+func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer, _ injectedArena: MTLBuffer? = nil) -> LayerOut {
     let w = LW[il]
     let (attnCur, attnSplit) = hcPre(residHc, w.haf, w.has, w.hab)
-    let attnOut = mlaBlock(attnCur, pos, il)
-    let afterAttn = hcPost(attnOut, residHc, attnSplit)
+    let attention = mlaBlock(attnCur, pos, il, injectedArena)
+    let afterAttn = hcPost(attention.output, residHc, attnSplit)
 
     let (ffnCur, ffnSplit) = hcPre(afterAttn, w.hff, w.hfs, w.hfb)
     let ffnNorm = gpuRmsnorm(ffnCur, nEmbd, w.fnw)
@@ -898,7 +892,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
          enc(pAxpy, nEmbd, 256) { c in c.setBuffer(shared, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
                                        c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) } }
     let outHc = hcPost(ffnOut, afterAttn, ffnSplit)
-    return LayerOut(afterAttn: afterAttn, ffnCur: ffnCur, ffnNorm: ffnNorm, logits: logits,
+    return LayerOut(attention: attention, afterAttn: afterAttn, ffnCur: ffnCur, ffnNorm: ffnNorm, logits: logits,
                     ids: ids, wts: wts, gate0: g0, up0: u0, mid0: m0, down0: d0,
                     moe: moe, shared: shared, ffnOut: ffnOut, outHc: outHc)
 }
@@ -1052,9 +1046,18 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = [])
             ndByLayer[il, default: []].append(nd); neByLayer[il, default: []].append(ne)
             if key == "out_hc" { l2ByLayer[il, default: []].append(l2) }
             check(ok && gpuErrors == 0,
-              "\(tag) \(what) [RENTED ORACLE, pos \(pos)] (normalised disagreement \(nd) < \(bound); relative L2 \(l2); the reference's own one-ulp envelope here is \(ne); relative \(mr) above 1e-3 of peak; \(ds) distinct, range [\(mn),\(mx)]; \(nn) NaN)",
+              "\(tag) \(what) [INDEPENDENT FORM ORACLE, pos \(pos)] (normalised disagreement \(nd) < \(bound); relative L2 \(l2); the reference's own one-ulp envelope here is \(ne); relative \(mr) above 1e-3 of peak; \(ds) distinct, range [\(mn),\(mx)]; \(nn) NaN)",
               "\(tag) \(key) pos \(pos): normalised disagreement \(nd) exceeds \(bound) (per-layer-nudge envelope \(ne), floor \(floorN)); relative L2 \(l2); relative \(mr); nan \(nn); distinct \(ds); gpuErrors \(gpuErrors)")
             if !(ok && gpuErrors == 0) { layerFail += 1 }
+            if !ok && key == "kv_q" {
+                for i in 0..<cnt {
+                    print("KV-EVIDENCE layer=\(il) pos=\(pos) index=\(i) before=\(Double(fp(R.attention.kvBeforeRound, cnt)[i])) gpu=\(Double(fp(buf, cnt)[i])) reference=\(ref[i]) perturb=\(prt.count == cnt ? prt[i] : Double.nan)")
+                    if il == 0 { print("KV-PROJECTED index=\(i) value=\(Double(fp(R.attention.projectedKv, cnt)[i]))") }
+                }
+                if il == 0 {
+                    for i in 0..<nEmbd { print("KV-INPUT index=\(i) input=\(Double(fp(R.attention.input, nEmbd)[i])) normalized=\(Double(fp(R.attention.normalizedInput, nEmbd)[i]))") }
+                }
+            }
         }
         // THE DISCRETE FALSIFIER, at EVERY layer and not only the witnesses. The numeric gates are
         // envelopes; this one is not. Which six experts fire is an integer decision that a wrong routing
@@ -1064,7 +1067,7 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = [])
         let perSel = readOracle(perDir, il, "selected").map { Int($0) }
         if perSel != oraSel { ulpRouteSplit.append(il) }
         check(R.ids == oraSel && !R.ids.isEmpty && R.ids.allSatisfy { $0 >= 0 && $0 < w.nExpStack },
-          "\(tag) the routing DECISION [RENTED ORACLE, pos \(pos)]: \(w.hashed ? "the I32 table row for token \(token), read through the view" : "biased top-k over \(w.nExpRouter) logits with UNBIASED weighting") chose \(R.ids) -- bit-identical to the oracle's, and every id inside this layer's own \(w.nExpStack)-deep stack",
+          "\(tag) the routing DECISION [INDEPENDENT FORM ORACLE, pos \(pos)]: \(w.hashed ? "the I32 table row for token \(token), read through the view" : "biased top-k over \(w.nExpRouter) logits with UNBIASED weighting") chose \(R.ids) -- bit-identical to the oracle's, and every id inside this layer's own \(w.nExpStack)-deep stack",
           "\(tag) routing: GPU \(R.ids) vs oracle \(oraSel)")
         if R.ids != oraSel { layerFail += 1 }
         if witness.contains(il) {
@@ -1124,7 +1127,10 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = [])
         do {
             let (inR, inN) = il == 0 ? (gateResid0, hcDim) : oracleBuf(oraDir, il-1, "out_hc")
             if inN == hcDim {
-                let J = runLayer(il, pos, gateToken, inR)
+                // The injected proof owns its arena. Its current row cannot
+                // replace the live stack's row or any retained observation.
+                let injectedArena = useGrowingKv ? dev.makeBuffer(bytes: kvArenas[il].contents(), length: kvArenas[il].length, options: .storageModeShared)! : nil
+                let J = runLayer(il, pos, gateToken, inR, injectedArena)
                 let ref = readOracle(oraDir, il, "out_hc")
                 let (ok, nd, _, _, mr, nn, ds, mn, mx, l2) = cmpOra(fp(J.outHc, hcDim), ref, [], 3e-5)
                 injNd[il, default: []].append(nd)
@@ -1135,9 +1141,9 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = [])
             }
         }
         // ── INSIDE THE ATTENTION HALF ───────────────────────────────────────────────────────────
-        if let q = lastQr { G(q, nHead*headDim, "q_roped", 3e-5, "the ROPED query, \(nHead) heads x \(headDim)") }
-        if let k = lastKq { G(k, headDim, "kv_q", 3e-5, "the quantized latent this position APPENDS to the arena") }
-        if let h = lastHa { G(h, nHead*headDim, "heads_attn", 3e-5, "the attention output over \(pos+1) key(s), BEFORE the inverse rotation") }
+        G(R.attention.query, nHead*headDim, "q_roped", 3e-5, "the ROPED query, \(nHead) heads x \(headDim)")
+        G(R.attention.kv, headDim, "kv_q", 3e-5, "the quantized latent this position APPENDS to the arena")
+        G(R.attention.heads, nHead*headDim, "heads_attn", 3e-5, "the attention output over \(useGrowingKv ? pos+1 : 1) key(s), BEFORE the inverse rotation")
         // ── THE ARENA ITSELF ───────────────────────────────────────────────────────────────────
         // The attend kernel is proven over the oracle's rows, so what remains is whether OUR rows
         // are the oracle's. Every row is compared, not just the last: a per-row report says WHICH
@@ -1179,7 +1185,8 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = [])
         // depth-independent in a sequence however much it says so. This one loads the ORACLE's whole
         // per-layer KV history into a fresh arena and runs OUR attend kernel over it with OUR proven
         // query. Both doors replaced: whatever it reports is the kernel's, at this key count.
-        if let q = lastQr {
+        do {
+            let q = R.attention.query
             let kh = readOracle(oraDir, il, "kv_hist")
             if kh.count == (pos+1)*headDim {
                 let arena = dev.makeBuffer(length: kh.count*4, options: .storageModeShared)!
@@ -1190,7 +1197,7 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = [])
                   "INJECTED HISTORY — our attend kernel over the ORACLE's own \(pos+1) KV rows")
             }
         }
-        if let a = lastAo { G(a, nEmbd, "attn_out", 3e-5, "the attention block's output, after the inverse rotation and both output projections") }
+        G(R.attention.output, nEmbd, "attn_out", 3e-5, "the attention block's output, after the inverse rotation and both output projections")
         G(R.outHc, hcDim, "out_hc", 3e-5,
           "THE LAYER'S OUTPUT — the \(hcDim) hyper-connection entries blk.\(il+1) receives, carried forward")
         resid = R.outHc
@@ -1293,12 +1300,12 @@ print(String(format: "      per layer (mean of the two positions): min %.1f ms, 
 for (il, ms) in slow.prefix(3) {
     print(String(format: "        slowest: blk.%d %.1f ms  [gate/up %d down %d]", il, ms, LW[il].gx.type, LW[il].dx.type))
 }
-print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — the model is mmapped and wrapped, not copied (onelean); it does NOT grow with layer count",
+print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — observed total including scratch and KV; the fixed weight plan wraps all tensors through bytesNoCopy views",
              dev.currentAllocatedSize, Double(dev.currentAllocatedSize)/1073741824.0))
 
 let ok = failures == 0 && gpuErrors == 0
 if ok {
-    print("VERDICT PASS  \(gateNo) gates — \(nLayers) HETEROGENEOUS DeepSeek-V4-Flash LAYERS STACKED at real dims over the 85 GiB file, the four hyper-connection streams carried from each layer into the next, every per-layer decision (expert count, gate/up and down type, routing regime, rope regime) read from the file's own tensor table, at TWO positions, every choosing surface against a rented fp64 ds4.c transcription and every dispatch sentinelled")
+    print("VERDICT PASS  \(gateNo) gates — \(nLayers) HETEROGENEOUS DeepSeek-V4-Flash LAYERS STACKED at real dims over the 85 GiB file, the four hyper-connection streams carried from each layer into the next, every per-layer decision (expert count, gate/up and down type, routing regime, rope regime) read from the file's own tensor table, at TWO positions, every choosing surface against an independent Form fp64 reference and every dispatch sentinelled")
 } else {
     print("VERDICT FAIL  \(failures) gate(s), \(gpuErrors) cb errors")
 }

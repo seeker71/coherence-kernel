@@ -1,0 +1,34 @@
+// Complete writes borrow stdout, preserve its flags and retire native memory.
+// preludes: form/form-stdlib/bml/dsv4-oracle-input.bml
+section [form.bml] {
+ class Dsv4ProofOutput {
+  def dso-loop(owner,end,text,offset) = if eq(offset,str_len(text)) then list(offset,0) else dso-step(owner,end,text,offset,npp-write-at(owner,end,text,offset));
+  def dso-step(owner,end,text,offset,wrote) = if and(gt(wrote,0),le(wrote,sub(str_len(text),offset))) then dso-loop(owner,end,text,add(offset,wrote)) else if eq(wrote,-4) then dso-loop(owner,end,text,offset) else if eq(wrote,-35) then dso-wait(owner,end,text,offset,npp-ready(owner,end,4,1000)) else list(offset,if nothing?(wrote) then -1 else wrote);
+  def dso-wait(owner,end,text,offset,flags) = if eq(flags,-4) then dso-loop(owner,end,text,offset) else if or(lt(flags,0),or(npp-flag(flags,8),or(npp-flag(flags,16),npp-flag(flags,32)))) then list(offset,if lt(flags,0) then flags else -32) else dso-loop(owner,end,text,offset);
+  def dso-invalid() = record_new(0,"kind","dsv4-output-result","ready",0,"bytes",0,"expected",0,"error",-22,"flags-restored",1,"released",1);
+  def dso-write-at(fd,text) = if not(and(str_eq(value_kind(text),"string"),and(str_eq(value_kind(fd),"int"),and(ge(fd,0),le(fd,2147483647))))) then dso-invalid() else dso-admitted(fd,text);
+  def dso-admitted(fd,text) {
+   let owner = npp-open(); let end = npp-borrow-end(owner,fd,"write"); let prior = npp-fcntl(owner,end,74,0);
+   let quiet = if or(eq(prior,0),eq(prior,1)) then npp-fcntl(owner,end,73,1) else prior;
+   let result = if eq(quiet,0) then dso-loop(owner,end,text,0) else list(0,quiet);
+   dso-settle(record_new(0,"kind","dsv4-output-result","ready",0,"bytes",head(result),"expected",str_len(text),"error",nth(result,1),"flags-restored",if eq(quiet,0) then 0 else 1,"released",0,"owner",owner,"end",end,"fd",fd,"prior-flags",prior,"quiet-result",quiet));
+  }
+  def dso-settle(result) {
+   if not(and(record?(result),str_eq(record_get(result,"kind"),"dsv4-output-result"))) then form_error("unowned output settlement") else 0;
+   let owner = record_get(result,"owner");
+   let restored = if eq(record_get(result,"flags-restored"),1) then 1 else eq(npp-fcntl(owner,record_get(result,"end"),73,record_get(result,"prior-flags")),0); record_set(result,"flags-restored",restored);
+   let released = if eq(record_get(result,"released"),1) then 1 else if restored then npp-close(owner) else 0; record_set(result,"released",released);
+   record_set(result,"ready",and(eq(record_get(result,"bytes"),record_get(result,"expected")),and(eq(record_get(result,"error"),0),and(restored,released)))); result;
+  }
+  def dso-health(result) {
+   let ok = record_get(result,"ready"); let flow = str_concat("proof-output-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(now_unix_ms()))));
+   let evidence = json-node-object(list(oh-n("written",record_get(result,"bytes")),oh-n("expected",record_get(result,"expected")),oh-n("errno",record_get(result,"error")),oh-n("flagsRestored",record_get(result,"flags-restored")),oh-n("released",record_get(result,"released"))));
+   let row = oh-reading("dsv4-proof-emission",flow,"complete-output",json-node-int(record_get(result,"expected")),json-node-int(record_get(result,"bytes")),json-node-int(ok),list(),list("continue","abstain"),evidence);
+   npp-health-at("/dev/stderr",row); let response = oh-response(row,if ok then "continue" else "abstain"); npp-health-at("/dev/stderr",response); npp-health-at("/dev/stderr",oh-applied(row,oh-select(row,response,"abstain"),evidence)); result;
+  }
+  def dso-write(text) {
+   let result = dso-health(dso-write-at(1,text)); dfo-require(record_get(result,"ready"),if eq(record_get(result,"released"),1) then "complete output refused; owned resources released" else "output settlement refused; live owner and restoration state retained"); 0;
+  }
+ }
+ 0;
+}

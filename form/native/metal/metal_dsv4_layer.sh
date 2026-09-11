@@ -1,33 +1,17 @@
 #!/usr/bin/env bash
-# metal_dsv4_layer.sh — Stone 35, Stage 1: ENTER the DeepSeek-V4-Flash MLA attention block at REAL DIMS
-# over the windowed-resident 85 GiB file. Stone 33 proved the two ends (metal_dsv4_token.sh: EMBED in,
-# MXFP8 vocab out). Stone 34 proved the MoE-FFN middle. This harness proves the ATTENTION block's ENTRY:
-# the input RMSNorm, the low-rank Q and KV down-projections (attn_q_a 4096->1024, attn_kv 4096->512, both
-# type-41 MXFP8), and the two rank-space RMSNorms (attn_q_a_norm 1024, attn_kv_a_norm 512) — each dispatch
-# on the file's OWN blk.0 weights through the overlapping views, each checked against an INDEPENDENT CPU
-# carve at the tensor's absolute mmap offset. The kernels are mla-msl.fk's (MLA_MAX_HD=512 = the real
-# head_dim) and mxfp8-msl.fk's (the vocab-projection kernel, unchanged), authored by the body.
-#
-# THE RADIUS (aporon). No external oracle can run this file — ds4/llama.cpp/ollama REFUSE types 40/41, so
-# any activation is UNFALSIFIABLE against a reference (selfgauge). Each dispatch stands on the internal
-# falsifier: GPU-through-the-view == independent CPU carve of the same bytes, to a stated f32 bound (the
-# MXFP8/F32 weight decode is exact; a matvec and a Newton-sqrt reassociate — assocwall, row 872).
-#
-# THE HONEST BOUND on the INPUT (knownsolved). The true MLA input at layer 0 is the HC-pre of the residual
-# stream, not yet wired. So the chain is fed the token's real EMBEDDING as a PROBE vector — exactly Stone
-# 33/34's mechanism-witness class: it proves the projections and rank-norms BIND and COMPUTE at real dims
-# through the views, NOT that the numbers are the real layer-0 activations. Tensors/dims/offsets ARE real.
-#
-# THE OFFERED-INTERFACE GUARD (edgedrop/zerobirth). Every output buffer is SENTINELLED (NaN) before its
-# dispatch and cb.error/cb.status checked after; every result is required NON-DEGENERATE. A dead read cannot pass.
-#
-# Run:  form/native/metal/metal_dsv4_layer.sh   (optional: FORM_DS4_PROMPT_TOKEN=<id>)
-# Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal witness here.
+# DeepSeek-V4 attention proof on actual model weights. Projection gates use
+# the real embedding as a probe; HC gates use the complete layer0 residual
+# input. An independent Form fp64 reference owns GGUF decoding, normalization,
+# rotation, quantization and attention choices. The Swift/Metal proof carrier
+# checks each sentinelled dispatch and both positions0/7 at unchanged bounds.
+# Run: form/native/metal/metal_dsv4_layer.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form
-GO_BIN="$ROOT/form-kernel-go/bin-go"
 BLOB="${FORM_DS4_BLOB:-$HOME/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf}"
+case "$BLOB" in /*) ;; *) BLOB="$PWD/$BLOB" ;; esac
+PROOF_ARCHIVE="${FORM_DS4_PROOF_ARCHIVE:-}"
+case "$PROOF_ARCHIVE" in ""|/*) ;; *) PROOF_ARCHIVE="$PWD/$PROOF_ARCHIVE" ;; esac
 CACHE="$ROOT/native/metal/.metallib-cache"
 TOKEN="${FORM_DS4_PROMPT_TOKEN:-671}"   # "The capital of France is" -> 671 ...
 
@@ -37,19 +21,26 @@ fi
 if [[ ! -f "$BLOB" ]]; then
     echo "SKIP  the ds4 GGUF is not on this host: $BLOB   (set FORM_DS4_BLOB)"; exit 2
 fi
-if [[ ! -x "$GO_BIN" ]]; then
-    echo "  building the Go kernel..."; (cd "$ROOT/form-kernel-go" && go build -o bin-go .) || { echo "FAIL go build"; exit 1; }
-fi
 FSIZE=$(stat -f%z "$BLOB")
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+work="$(mktemp -d)" || exit 1
+proof_cleanup() {
+    local result=$?
+    trap - EXIT
+    if [[ -n "$PROOF_ARCHIVE" ]]; then
+        if ! ( cd "$ROOT/.." && printf '%s\0' DPA1 "$work" "$PROOF_ARCHIVE" END | ./fkwu observe/dsv4-proof-retention-run.bml ); then
+            echo "FAIL proof retention; work remains at $work" >&2
+            (( result != 0 )) || result=1
+            exit "$result"
+        fi
+    fi
+    if ! rm -rf "$work"; then (( result != 0 )) || result=1; fi
+    exit "$result"
+}
+trap proof_cleanup EXIT
 echo "ds4 blob: $FSIZE bytes at $(date '+%H:%M:%S')   MLA-entry probe(token=$TOKEN)"
 
-# ── the `; preludes:` directives are LIVE recursive load instructions; walked, never hand-catted ──
-fk_deps(){ awk 'BEGIN{IGNORECASE=1} /^;[ \t]*preludes:/{ s=$0; sub(/^;[ \t]*preludes:[ \t]*/,"",s); n=split(s,a,/[ \t]+/); for(i=1;i<=n;i++){ if(a[i]=="\\"||tolower(a[i])=="none"||tolower(a[i])=="(none)"||a[i]=="")continue; if(a[i]~/\.fk$/)print a[i] } }' "$1" 2>/dev/null; }
-fk_path(){ local dir; dir="$(dirname "$1")"; if [[ -f "$dir/$2" ]]; then printf '%s\n' "$dir/$2"; elif [[ -f "$2" ]]; then printf '%s\n' "$2"; elif [[ "$2" == form/* && -f "${2#form/}" ]]; then printf '%s\n' "${2#form/}"; else printf '%s\n' "$dir/$2"; fi; }
-fk_expand(){ local f="$1" d p; case " $FK_SEEN " in *" $f "*) return ;; esac; FK_SEEN="$FK_SEEN $f"; while read -r d; do [[ -z "$d" ]] && continue; p="$(fk_path "$f" "$d")"; fk_expand "$p"; done < <(fk_deps "$f"); printf '%s\n' "$f"; }
+# Native source loading and emission are owned by the Form door.
 cd "$ROOT"
-FK_SEEN=""; FILES=(); while read -r x; do FILES+=("$x"); done < <(fk_expand native/metal/dsv4-mla-real.fk)
 
 # ── 1. measure the device ─────────────────────────────────────────────────────────────────────────
 cat > "$work/probe.swift" <<'SWIFT'
@@ -66,14 +57,13 @@ echo "device: $DEVNAME  maxBufferLength=$MAXBUF  page=$PAGE"
 
 # ── 2. the residency plan (view/inner/holds per tensor) + the manifest (types & dims) over the file ──
 echo "walking the file header for the residency plan and the manifest..."
-printf '(wre-emit "%s" %s %s %s)\n' "$BLOB" "$FSIZE" "$MAXBUF" "$PAGE" > "$work/plan.fk"
-"$GO_BIN" "${FILES[@]}" "$work/plan.fk" > "$work/plan.out" 2>"$work/plan.err" || { echo "FAIL plan emission"; tail -5 "$work/plan.err"; exit 1; }
+( cd "$ROOT/.." && printf '%s\0' DTV1 "$BLOB" "$MAXBUF" "$PAGE" "$work/views.txt" END | ./fkwu observe/dsv4-tensor-views-run.bml ) > "$work/plan.out" 2> "$work/plan.err" || { echo "FAIL tensor-view plan emission"; tail -5 "$work/plan.err"; exit 1; }
 grep -qx 'END' "$work/plan.out" || { echo "FAIL plan stream truncated"; exit 1; }
-WR=($(awk '$1=="WR"{print; exit}' "$work/plan.out"))
-STEP=${WR[7]}; VIEWLIMIT=${WR[5]}; NVIEWS=${WR[9]}
-printf '(gm-emit-manifest "%s")\n' "$BLOB" > "$work/man.fk"
-"$GO_BIN" "${FILES[@]}" "$work/man.fk" > "$work/man.out" 2>"$work/man.err" || { echo "FAIL manifest emission"; tail -5 "$work/man.err"; exit 1; }
-echo "  plan: view_limit=$VIEWLIMIT step=$STEP nviews=$NVIEWS"
+VR=($(awk '$1=="VR"{print; exit}' "$work/plan.out"))
+MAXVIEW=${VR[5]}; NVIEWS=${VR[7]}
+( cd "$ROOT/.." && printf '%s\0' DSE1 manifest "$BLOB" "" END | ./fkwu observe/dsv4-proof-emission-run.bml ) > "$work/man.out" 2>"$work/man.err" || { echo "FAIL manifest emission"; tail -5 "$work/man.err"; exit 1; }
+grep -qx 'END' "$work/man.out" || { echo "FAIL manifest stream truncated"; exit 1; }
+echo "  plan: maximum_tensor_view=$MAXVIEW nviews=$NVIEWS"
 
 tv()  { awk -v n="$1" -v f="$2" '$1=="TV" && $2==n {print $(f); exit}' "$work/plan.out"; }  # 3=abs 4=bytes 5=idx 6=inner 7=holds
 trow(){ awk -v n="$1" -v f="$2" '$1=="T"  && $2==n {print $(f); exit}' "$work/man.out"; }    # T name type ndim d0 d1 d2 abs nelslice slices bytes
@@ -114,15 +104,13 @@ RMS_EPS=0.0000009999999975
 N_HEAD=64; HEAD_DIM=512; N_ROT=64; ROPE_BASE=10000.0; N_GROUPS=8; O_RANK=1024
 POS_A=0; POS_B=7      # hushfold (row 865): RoPE is IDENTITY at pos 0 — one position cannot witness it.
 
-# ── 2b. THE RENTED ORACLE (twinblind, row 874). The attention core is a set of CHOICES, so a self-carve
-# is blind to it. form-stdlib/tests/dsv4-mla-core-oracle.py is an independent fp64 transcription of ds4.c's
-# control flow — it parses this same GGUF itself and shares no code with the band, the MSL or the carrier.
-ORACLE="$ROOT/form-stdlib/tests/dsv4-mla-core-oracle.py"
-[[ -f "$ORACLE" ]] || { echo "FAIL the rented oracle is missing: $ORACLE"; exit 1; }
+# Independent native reference for each probe and complete attention half.
+ORACLE="$ROOT/../observe/dsv4-oracle-run.bml"
+[[ -f "$ORACLE" ]] || { echo "FAIL the native oracle source is missing: $ORACLE"; exit 1; }
 for P in "$POS_A" "$POS_B"; do
     mkdir -p "$work/ora$P"
-    echo "  renting the oracle at pos=$P (independent fp64 transcription of ds4.c)..."
-    DSV4_ORACLE_OUT="$work/ora$P" python3 "$ORACLE" "$BLOB" "$TOKEN" "$P" > "$work/ora$P.txt" 2>"$work/ora$P.err" \
+    echo "  running the native oracle at pos=$P (independent fp64 transcription of ds4.c)..."
+    ( cd "$ROOT/.." && printf '%s\0' DFO2 "$BLOB" "$TOKEN" "$P" 0 probe "$work/ora$P" 0 0 0 "" END | ./fkwu "$ORACLE" ) > "$work/ora$P.txt" 2>"$work/ora$P.err" \
         || { echo "FAIL oracle run at pos=$P"; tail -5 "$work/ora$P.err"; exit 1; }
     grep -qx 'END' "$work/ora$P.txt" || { echo "FAIL oracle stream truncated at pos=$P"; exit 1; }
 done
@@ -140,8 +128,8 @@ echo "  hushfold: at pos $POS_B it is NOT — so pos $POS_A and pos $POS_B toget
 # STAGE 4 — the same oracle in `hc` mode: the MLA's input is no longer a probe but the REAL layer-0 input,
 # the embedding broadcast to n_hc streams (ds4.c:9764) and collapsed by hc_pre (ds4.c:9690).
 mkdir -p "$work/orahc"
-echo "  renting the oracle in HC mode at pos=$POS_A (the complete attention half of a real layer)..."
-DSV4_ORACLE_MODE=hc DSV4_ORACLE_OUT="$work/orahc" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_A" > "$work/orahc.txt" 2>"$work/orahc.err" \
+echo "  running the native oracle in HC mode at pos=$POS_A (the complete attention half of a real layer)..."
+( cd "$ROOT/.." && printf '%s\0' DFO2 "$BLOB" "$TOKEN" "$POS_A" 0 hc "$work/orahc" 0 0 0 "" END | ./fkwu "$ORACLE" ) > "$work/orahc.txt" 2>"$work/orahc.err" \
     || { echo "FAIL oracle hc-mode run"; tail -5 "$work/orahc.err"; exit 1; }
 grep -qx 'END' "$work/orahc.txt" || { echo "FAIL oracle hc stream truncated"; exit 1; }
 echo "  attn_norm: abs=$NORM_ABS view=$NORM_IDX inner=$NORM_INNER holds=$NORM_HOLDS"
@@ -149,10 +137,11 @@ echo "  attn_q_a (MXFP8 $QA_IN->$QA_OUT): abs=$QA_ABS view=$QA_IDX inner=$QA_INN
 echo "  attn_kv  (MXFP8 $KV_IN->$KV_OUT): abs=$KV_ABS view=$KV_IDX inner=$KV_INNER holds=$KV_HOLDS"
 
 # ── 3. compile the three translation units (embed, MLA norms, MXFP8 matvec), cached by sha ────────────
-compile_unit() { # $1 emit-form  $2 grep-token  $3 cache-prefix -> echoes LIB path
-    local form="$1" tok="$2" pre="$3" out lib sha
-    echo "($form)" > "$work/$pre.fk"
-    "$GO_BIN" "${FILES[@]}" "$work/$pre.fk" > "$work/$pre.out" 2>"$work/$pre.err" || { echo "FAIL $pre MSL emission" >&2; cat "$work/$pre.err" >&2; return 1; }
+compile_unit() { # $1 source entry, $2 kernel name, $3 cache prefix -> library path
+    local form="$1" tok="$2" pre="$3" lib sha detail=""
+    [[ "$form" != dsv4-hc-unit ]] || detail=hc-precision
+    ( cd "$ROOT/.." && printf '%s\0' DSE1 shader "$form" "$detail" END | ./fkwu observe/dsv4-proof-emission-run.bml ) > "$work/$pre.out" 2>"$work/$pre.err" || { echo "FAIL $pre MSL emission" >&2; cat "$work/$pre.err" >&2; return 1; }
+    grep -qx 'MSL' "$work/$pre.out" && grep -qx 'END' "$work/$pre.out" || { echo "FAIL $pre shader stream truncated" >&2; return 1; }
     awk '/^MSL$/{d=1;next} /^END$/{d=0;next} d{print}' "$work/$pre.out" > "$work/$pre.metal"
     grep -q "$tok" "$work/$pre.metal" || { echo "FAIL $pre kernel $tok not emitted" >&2; return 1; }
     sha="$(shasum -a 256 "$work/$pre.metal" | cut -c1-16)"; lib="$CACHE/$pre-$sha.metallib"
@@ -183,7 +172,7 @@ func S() -> String { let v = a[ai]; ai += 1; return v }
 func I() -> Int { let v = Int(a[ai])!; ai += 1; return v }
 func F() -> Float { let v = Float(a[ai])!; ai += 1; return v }
 let libEmb = S(), libMla = S(), lib8 = S(), libCore = S(), libHc = S(), blobPath = S()
-let step = I(), viewLimit = I(), nviews = I()
+let viewParamPath = S(), tensorPlanPath = S(), nviews = I()
 let embAbs = I(), rowOff = I(), nEmbd = I(), embIdx = I(), embInner = I(), embHolds = I(), token = I()
 let normAbs = I(), normIdx = I(), normInner = I(), normHolds = I()
 let qaAbs = I(), qaIdx = I(), qaInner = I(), qaHolds = I(), qaRows = I(), qaCols = I()
@@ -201,6 +190,31 @@ let hfAbs = I(), hfIdx = I(), hfInner = I(), hfHolds = I(), hfRows = I(), hfCols
 let hsAbs = I(), hsIdx = I(), hsInner = I(), hsHolds = I()
 let hbAbs = I(), hbIdx = I(), hbInner = I(), hbHolds = I()
 let nHc = I(), hcIters = I(), hcEps = F(), oraDirHc = S()
+
+// Exact geometry comes from the same Form plan used for the tensor coordinates.
+var viewParams: [String: Int] = [:]
+for line in (try String(contentsOfFile: viewParamPath, encoding: .utf8)).split(separator: "\n") {
+    let fields = line.split(separator: " ")
+    guard fields.count == 2, let value = Int(fields[1]), viewParams[String(fields[0])] == nil else {
+        print("FAIL malformed or duplicate tensor view parameter"); exit(1)
+    }
+    viewParams[String(fields[0])] = value
+}
+func V(_ key: String) -> Int {
+    guard let value = viewParams[key] else { print("FAIL missing tensor view parameter \(key)"); exit(1) }
+    return value
+}
+struct TensorView { let abs: Int, bytes: Int, idx: Int, inner: Int, holds: Int }
+var tensorViews: [String: TensorView] = [:]
+for line in (try String(contentsOfFile: tensorPlanPath, encoding: .utf8)).split(separator: "\n") {
+    let fields = line.split(separator: " ")
+    if fields.first != "TV" { continue }
+    guard fields.count == 7, let abs = Int(fields[2]), let bytes = Int(fields[3]),
+          let idx = Int(fields[4]), let inner = Int(fields[5]), let holds = Int(fields[6]),
+          tensorViews[String(fields[1])] == nil else { print("FAIL malformed or duplicate tensor plan row"); exit(1) }
+    tensorViews[String(fields[1])] = TensorView(abs: abs, bytes: bytes, idx: idx, inner: inner, holds: holds)
+}
+guard nviews > 0, tensorViews.count == nviews else { print("FAIL complete tensor plan census"); exit(1) }
 
 guard let dev = MTLCreateSystemDefaultDevice() else { print("SKIP no Metal device"); exit(2) }
 let lEmb = try dev.makeLibrary(URL: URL(fileURLWithPath: libEmb))
@@ -245,9 +259,13 @@ func mx8_val(_ b: Int) -> Float {
 
 let fd = open(blobPath, O_RDONLY)
 guard fd >= 0 else { print("FAIL cannot open blob"); exit(1) }
-var st = stat(); fstat(fd, &st)
+var st = stat()
+guard fstat(fd, &st) == 0, st.st_size > 0, st.st_size <= Int.max else { print("FAIL exact source fstat extent"); close(fd); exit(1) }
 let fileLen = Int(st.st_size); let page = Int(getpagesize())
-let mapLen = (fileLen + page - 1) / page * page
+guard page > 0, fileLen == V("PLAN_EXTENT"), page == V("PLAN_PAGE") else { print("FAIL source extent or platform page changed after the Form plan"); close(fd); exit(1) }
+let padding = (page - fileLen % page) % page
+guard fileLen <= Int.max - padding else { print("FAIL aligned map extent overflows"); close(fd); exit(1) }
+let mapLen = fileLen + padding
 guard let mapped0 = mmap(nil, mapLen, PROT_READ, MAP_PRIVATE, fd, 0), mapped0 != MAP_FAILED else { print("FAIL mmap failed"); exit(1) }
 let base = mapped0.assumingMemoryBound(to: UInt8.self)
 
@@ -304,26 +322,45 @@ func cmp(_ gpu: UnsafeMutablePointer<Float>, _ cpu: [Float]) -> (Bool, Float, Fl
     return (nan == 0 && maxRel < 1e-3 && maxAbs < 1e-4 && nonDegen, maxAbs, maxRel, nan, seen.count, vmin, vmax)
 }
 
-// ── GATE 0: the views map. One buffer over the whole file FAILs (onelean); build the overlapping set.
+// GATE 0: the proof process owns one whole-file mapping and exact tensor views.
 var views: [MTLBuffer] = []
 for i in 0..<nviews {
-    let vs = i*step; let vlen = min(viewLimit, mapLen - vs)
-    guard vs % page == 0 else { print("FAIL view \(i) start not page-aligned"); exit(1) }
+    let vs = V("VIEW_\(i)_START"), vlen = V("VIEW_\(i)_BYTES")
+    guard vs >= 0, vlen > 0, vs <= mapLen, vlen <= mapLen - vs,
+          vs % page == 0, vlen % page == 0, vlen <= dev.maxBufferLength else {
+        print("FAIL tensor view \(i) violates its file, alignment or device extent"); exit(1)
+    }
     guard let buf = dev.makeBuffer(bytesNoCopy: mapped0.advanced(by: vs), length: vlen, options: .storageModeShared, deallocator: nil) else {
         print("FAIL view \(i) makeBuffer failed"); failures += 1; break
     }
     views.append(buf)
 }
 check(views.count == nviews,
-  "gate 0 the views map: all \(nviews) overlapping page-aligned bytesNoCopy views of the \(fileLen) B file wrap on \(dev.name) (one buffer over the whole file FAILs; \(nviews) views do not)",
+  "gate 0 the views map: all \(nviews) complete page-aligned bytesNoCopy tensor resources of the \(fileLen) B file wrap on \(dev.name)",
   "gate 0 only \(views.count)/\(nviews) views mapped")
 if failures > 0 { print("VERDICT FAIL the views did not map"); exit(1) }
 
-// ── GATE 1: the five MLA tensors are each resident in a single view (holds==1).
-let resident = embHolds==1 && normHolds==1 && qaHolds==1 && qanHolds==1 && qbHolds==1 && kvHolds==1 && kvanHolds==1
-  && snkHolds==1 && oaHolds==1 && obHolds==1
-  && embIdx<nviews && normIdx<nviews && qaIdx<nviews && qanIdx<nviews && qbIdx<nviews && kvIdx<nviews && kvanIdx<nviews
-  && snkIdx<nviews && oaIdx<nviews && obIdx<nviews
+// GATE 1: complete tensor bytes must lie in the actual file and their admitted view.
+func tensorResident(_ name: String, _ abs: Int, _ idx: Int, _ inner: Int, _ holds: Int) -> Bool {
+    guard let t = tensorViews[name], idx >= 0, idx < views.count else { return false }
+    let length = views[idx].length, start = V("VIEW_\(idx)_START")
+    return t.abs == abs && t.idx == idx && t.inner == inner && t.holds == holds && holds == 1 &&
+           abs >= 0 && abs <= fileLen && t.bytes > 0 && t.bytes <= fileLen - abs &&
+           inner >= 0 && inner <= length && t.bytes <= length - inner && abs == start + inner
+}
+let resident = tensorResident("token_embd.weight", embAbs, embIdx, embInner, embHolds)
+  && tensorResident("blk.0.attn_norm.weight", normAbs, normIdx, normInner, normHolds)
+  && tensorResident("blk.0.attn_q_a.weight", qaAbs, qaIdx, qaInner, qaHolds)
+  && tensorResident("blk.0.attn_q_a_norm.weight", qanAbs, qanIdx, qanInner, qanHolds)
+  && tensorResident("blk.0.attn_q_b.weight", qbAbs, qbIdx, qbInner, qbHolds)
+  && tensorResident("blk.0.attn_kv.weight", kvAbs, kvIdx, kvInner, kvHolds)
+  && tensorResident("blk.0.attn_kv_a_norm.weight", kvanAbs, kvanIdx, kvanInner, kvanHolds)
+  && tensorResident("blk.0.attn_sinks.weight", snkAbs, snkIdx, snkInner, snkHolds)
+  && tensorResident("blk.0.attn_output_a.weight", oaAbs, oaIdx, oaInner, oaHolds)
+  && tensorResident("blk.0.attn_output_b.weight", obAbs, obIdx, obIdxInner, obHolds)
+  && tensorResident("blk.0.hc_attn_fn.weight", hfAbs, hfIdx, hfInner, hfHolds)
+  && tensorResident("blk.0.hc_attn_scale.weight", hsAbs, hsIdx, hsInner, hsHolds)
+  && tensorResident("blk.0.hc_attn_base.weight", hbAbs, hbIdx, hbInner, hbHolds)
 check(resident,
   "gate 1 residency: token_embd(v\(embIdx)), attn_norm(v\(normIdx)), attn_q_a(v\(qaIdx)), attn_q_a_norm(v\(qanIdx)), attn_q_b(v\(qbIdx)), attn_kv(v\(kvIdx)), attn_kv_a_norm(v\(kvanIdx)), attn_sinks(v\(snkIdx)), attn_output_a(v\(oaIdx)), attn_output_b(v\(obIdx)) each lie wholly inside one view",
   "gate 1 an MLA tensor spans views (holds: emb\(embHolds) norm\(normHolds) qa\(qaHolds) qan\(qanHolds) kv\(kvHolds) kvan\(kvanHolds) snk\(snkHolds) oa\(oaHolds) ob\(obHolds))")
@@ -448,14 +485,14 @@ check(ok6 && gpuErrors == 0,
   "gate 6 KV rank-norm: maxRel \(mr6) maxAbs \(ma6) nan \(nn6)")
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════
-// STONE 36 — THE ATTENTION CORE, the CHOOSING half, proven against the RENTED ORACLE.
+// STONE 36 — THE ATTENTION CORE, the CHOOSING half, proven against the INDEPENDENT FORM ORACLE.
 //
 // Gates 2..7 above are the CANONICAL half: a matvec and an RMSNorm have one right answer, so a self-carve
 // (GPU vs an independent CPU decode of the same bytes) is a real falsifier there. From here on it is not.
 // Where the sink enters the softmax, whether the KV row is fp8+f16 rounded before it is attended to,
 // whether the heads are UN-roped after attending, which output path is taken — all CHOICES, and a
 // self-carve inherits the choice on both sides (twinblind, row 874). So every gate below compares the GPU
-// against dsv4-mla-core-oracle.py: an INDEPENDENT fp64 transcription of ds4.c, written from the C.
+// against the independent Form numerical reference: an INDEPENDENT fp64 transcription of ds4.c, written from the C.
 // ══════════════════════════════════════════════════════════════════════════════════════════════════
 
 func readOracle(_ dir: String, _ key: String) -> [Double] {
@@ -584,7 +621,7 @@ let qHrp = qHrBuf.contents().bindMemory(to: Float.self, capacity: nHead*headDim)
 let oraQhr = readOracle(oraDirA, "q_headrms")
 let (ok8, ma8, mr8, nn8, ds8, mn8, mx8v) = cmpOra(qHrp, oraQhr, 2e-4, 2e-4, 1e-2)
 check(ok8 && gpuErrors == 0 && oraQhr.count == nHead*headDim,
-  "gate 8 per-head RMSNorm at real dims [RENTED ORACLE]: form_mla_headrms_f32 over all \(nHead) heads x \(headDim) agrees with the fp64 ds4.c transcription (maxAbs \(ma8), maxRel \(mr8) above |1e-2|; \(ds8) distinct, range [\(mn8),\(mx8v)]; \(nn8) NaN)",
+  "gate 8 per-head RMSNorm at real dims [INDEPENDENT FORM ORACLE]: form_mla_headrms_f32 over all \(nHead) heads x \(headDim) agrees with the fp64 ds4.c transcription (maxAbs \(ma8), maxRel \(mr8) above |1e-2|; \(ds8) distinct, range [\(mn8),\(mx8v)]; \(nn8) NaN)",
   "gate 8 headrms vs oracle: maxAbs \(ma8) maxRel \(mr8) nan \(nn8) distinct \(ds8) n \(oraQhr.count) gpuErrors \(gpuErrors)")
 
 var coreFail = 0
@@ -605,14 +642,14 @@ func runCore(_ pos: Int, _ oraDir: String, _ gateBase: Int) {
     let qRoped = gpuRope(qHrBuf, nHead, headDim, pos, false)
     let qRp = qRoped.contents().bindMemory(to: Float.self, capacity: nHead*headDim)
     let (a1, m1, r1, n1, d1, _, _) = cmpOra(qRp, oq, 3e-4, 3e-4, 1e-2)
-    check(a1, "gate \(gateBase) RoPE(q) at pos \(pos) [RENTED ORACLE]: the trailing-\(nRot) rotation over all \(nHead) heads (leading \(headDim - nRot) untouched) agrees with the fp64 ds4.c transcription (maxAbs \(m1), maxRel \(r1); \(d1) distinct; \(n1) NaN)",
+    check(a1, "gate \(gateBase) RoPE(q) at pos \(pos) [INDEPENDENT FORM ORACLE]: the trailing-\(nRot) rotation over all \(nHead) heads (leading \(headDim - nRot) untouched) agrees with the fp64 ds4.c transcription (maxAbs \(m1), maxRel \(r1); \(d1) distinct; \(n1) NaN)",
       "gate \(gateBase) RoPE(q) pos \(pos): maxAbs \(m1) maxRel \(r1) nan \(n1)")
     if !a1 { coreFail += 1 }
 
     let kvRoped = gpuRope(kvLatNBuf, 1, headDim, pos, false)
     let kvRp = kvRoped.contents().bindMemory(to: Float.self, capacity: headDim)
     let (a2, m2, r2, n2, d2, _, _) = cmpOra(kvRp, okvr, 3e-5, 3e-5, 1e-2)
-    check(a2, "gate \(gateBase+1) RoPE(kv latent) at pos \(pos) [RENTED ORACLE]: head_count_kv is 1, so the single \(headDim)-wide latent rotates once (maxAbs \(m2), maxRel \(r2); \(d2) distinct; \(n2) NaN)",
+    check(a2, "gate \(gateBase+1) RoPE(kv latent) at pos \(pos) [INDEPENDENT FORM ORACLE]: head_count_kv is 1, so the single \(headDim)-wide latent rotates once (maxAbs \(m2), maxRel \(r2); \(d2) distinct; \(n2) NaN)",
       "gate \(gateBase+1) RoPE(kv) pos \(pos): maxAbs \(m2) maxRel \(r2) nan \(n2)")
     if !a2 { coreFail += 1 }
 
@@ -625,7 +662,7 @@ func runCore(_ pos: Int, _ oraDir: String, _ gateBase: Int) {
     var moved = 0
     for i in 0..<headDim { if kvRp2[i] != kvRp[i] { moved += 1 } }
     check(a3 && moved > headDim/4,
-      "gate \(gateBase+2) the KV row's fp8+f16 round-trip at pos \(pos) [RENTED ORACLE]: E4M3FN in \(64)-wide groups over the leading \(headDim - nRot) (the roped tail is NOT fp8-rounded) then f16 over all \(headDim) — agrees with the fp64 ds4.c transcription and MOVED \(moved)/\(headDim) entries (maxAbs \(m3), maxRel \(r3); \(d3) distinct; \(n3) NaN)",
+      "gate \(gateBase+2) the KV row's fp8+f16 round-trip at pos \(pos) [INDEPENDENT FORM ORACLE]: E4M3FN in \(64)-wide groups over the leading \(headDim - nRot) (the roped tail is NOT fp8-rounded) then f16 over all \(headDim) — agrees with the fp64 ds4.c transcription and MOVED \(moved)/\(headDim) entries (maxAbs \(m3), maxRel \(r3); \(d3) distinct; \(n3) NaN)",
       "gate \(gateBase+2) kv round-trip pos \(pos): maxAbs \(m3) maxRel \(r3) nan \(n3) moved \(moved)")
     if !(a3 && moved > headDim/4) { coreFail += 1 }
 
@@ -634,7 +671,7 @@ func runCore(_ pos: Int, _ oraDir: String, _ gateBase: Int) {
     let headsA = gpuAttend(qRoped, kvR, nHead, headDim, 1, views[snkIdx], snkInner)
     let hap = headsA.contents().bindMemory(to: Float.self, capacity: nHead*headDim)
     let (a4, m4, r4, n4, d4, _, _) = cmpOra(hap, oha, 3e-4, 3e-4, 1e-2)
-    check(a4, "gate \(gateBase+3) the sink softmax at pos \(pos) [RENTED ORACLE]: form_mla_attend_f32 over \(nHead) heads against the single KV latent row, attn_sinks read through view \(snkIdx), agrees with the fp64 ds4.c transcription (maxAbs \(m4), maxRel \(r4); \(d4) distinct; \(n4) NaN)",
+    check(a4, "gate \(gateBase+3) the sink softmax at pos \(pos) [INDEPENDENT FORM ORACLE]: form_mla_attend_f32 over \(nHead) heads against the single KV latent row, attn_sinks read through view \(snkIdx), agrees with the fp64 ds4.c transcription (maxAbs \(m4), maxRel \(r4); \(d4) distinct; \(n4) NaN)",
       "gate \(gateBase+3) sink softmax pos \(pos): maxAbs \(m4) maxRel \(r4) nan \(n4)")
     if !a4 { coreFail += 1 }
 
@@ -642,7 +679,7 @@ func runCore(_ pos: Int, _ oraDir: String, _ gateBase: Int) {
     let headsU = gpuRope(headsA, nHead, headDim, pos, true)
     let hup = headsU.contents().bindMemory(to: Float.self, capacity: nHead*headDim)
     let (a5, m5, r5, n5, d5, _, _) = cmpOra(hup, ohd, 3e-4, 3e-4, 1e-2)
-    check(a5, "gate \(gateBase+4) the INVERSE RoPE on the attention output at pos \(pos) [RENTED ORACLE]: sign -1 over the same trailing \(nRot), agrees with the fp64 ds4.c transcription (maxAbs \(m5), maxRel \(r5); \(d5) distinct; \(n5) NaN)",
+    check(a5, "gate \(gateBase+4) the INVERSE RoPE on the attention output at pos \(pos) [INDEPENDENT FORM ORACLE]: sign -1 over the same trailing \(nRot), agrees with the fp64 ds4.c transcription (maxAbs \(m5), maxRel \(r5); \(d5) distinct; \(n5) NaN)",
       "gate \(gateBase+4) inverse RoPE pos \(pos): maxAbs \(m5) maxRel \(r5) nan \(n5)")
     if !a5 { coreFail += 1 }
 
@@ -650,7 +687,7 @@ func runCore(_ pos: Int, _ oraDir: String, _ gateBase: Int) {
     let low = gpuGrouped(views[oaIdx], oaInner, headsU, oaRows, oaCols, oRank)
     let lowp = low.contents().bindMemory(to: Float.self, capacity: oaRows)
     let (a6, m6, r6, n6, d6, _, _) = cmpOra(lowp, olow, 2e-3, 2e-3, 1e-2)
-    check(a6, "gate \(gateBase+5) the GROUPED output factor a at pos \(pos) [RENTED ORACLE]: the type-41 attn_output_a (\(oaRows)x\(oaCols)) with row \(oRank)-grouped input addressing — group g's \(oaCols) heads-slice into rows g*\(oRank)..+\(oRank) — agrees with the fp64 ds4.c transcription (maxAbs \(m6), maxRel \(r6); \(d6) distinct; \(n6) NaN)",
+    check(a6, "gate \(gateBase+5) the GROUPED output factor a at pos \(pos) [INDEPENDENT FORM ORACLE]: the type-41 attn_output_a (\(oaRows)x\(oaCols)) with row \(oRank)-grouped input addressing — group g's \(oaCols) heads-slice into rows g*\(oRank)..+\(oRank) — agrees with the fp64 ds4.c transcription (maxAbs \(m6), maxRel \(r6); \(d6) distinct; \(n6) NaN)",
       "gate \(gateBase+5) grouped out a pos \(pos): maxAbs \(m6) maxRel \(r6) nan \(n6)")
     if !a6 { coreFail += 1 }
 
@@ -658,7 +695,7 @@ func runCore(_ pos: Int, _ oraDir: String, _ gateBase: Int) {
     let attnOut = gpuMx8(views[obIdx], obIdxInner, low, obRows, obCols)
     let aop = attnOut.contents().bindMemory(to: Float.self, capacity: obRows)
     let (a7, m7, r7, n7, d7, mn7b, mx7b) = cmpOra(aop, oout, 6e-3, 6e-3, 1e-2)
-    check(a7, "gate \(gateBase+6) the GROUPED output factor b at pos \(pos) [RENTED ORACLE]: the type-41 attn_output_b (\(obRows)x\(obCols)) maps the \(obCols) group-latents back to n_embd \(obRows) — the WHOLE attention block's output — agreeing with the fp64 ds4.c transcription (maxAbs \(m7), maxRel \(r7); \(d7) distinct, range [\(mn7b),\(mx7b)]; \(n7) NaN)",
+    check(a7, "gate \(gateBase+6) the GROUPED output factor b at pos \(pos) [INDEPENDENT FORM ORACLE]: the type-41 attn_output_b (\(obRows)x\(obCols)) maps the \(obCols) group-latents back to n_embd \(obRows) — the WHOLE attention block's output — agreeing with the fp64 ds4.c transcription (maxAbs \(m7), maxRel \(r7); \(d7) distinct, range [\(mn7b),\(mx7b)]; \(n7) NaN)",
       "gate \(gateBase+6) grouped out b pos \(pos): maxAbs \(m7) maxRel \(r7) nan \(n7)")
     if !a7 { coreFail += 1 }
 
@@ -689,10 +726,10 @@ check(posDiff > 0 && coreFail == 0,
 // here: the residual state is the embedding BROADCAST to all \(nHc) hyper-connection streams (ds4.c:9764),
 // hc_pre collapses it (ds4.c:9690) and hc_post recombines the block's output with the same residual and the
 // SAME post/comb that hc_pre produced (ds4.c:9772). These are the real layer-0 activations.
-// The whole half is proven against the rented oracle in `hc` mode — the choosing class throughout.
+// The whole half is proven against the independent Form oracle in `hc` mode — the choosing class throughout.
 // ══════════════════════════════════════════════════════════════════════════════════════════════════
 let pHcBcast = try dev.makeComputePipelineState(function: lHc.makeFunction(name: "form_hc_broadcast_f32")!)
-let pHcRmsNw = try dev.makeComputePipelineState(function: lHc.makeFunction(name: "form_hc_rmsnorm_nw_f32")!)
+let pHcRmsNw = try dev.makeComputePipelineState(function: lHc.makeFunction(name: "form_dsv4_hc_rms_precise")!)
 let pHcSplit = try dev.makeComputePipelineState(function: lHc.makeFunction(name: "form_hc_split_f32")!)
 let pHcWsum  = try dev.makeComputePipelineState(function: lHc.makeFunction(name: "form_hc_wsum_f32")!)
 let pHcPost  = try dev.makeComputePipelineState(function: lHc.makeFunction(name: "form_hc_post_f32")!)
@@ -706,6 +743,7 @@ func enc1(_ p: MTLComputePipelineState, _ n: Int, _ body: (MTLComputeCommandEnco
     e.endEncoding(); run(cb)
 }
 let hcDim = nHc * nEmbd
+guard hcDim > 0 && hcDim <= 16777216 && eps.isFinite && eps > 0 else { print("FAIL precise HC RMS geometry or epsilon"); exit(1) }
 // ds4.c:9764 — the plain embedding broadcast to every stream.
 let residHc = sentinelled(hcDim)
 do { var a = UInt32(nHc), b = UInt32(nEmbd)
@@ -718,7 +756,7 @@ do { var n = UInt32(hcDim), e0 = eps
                               e.setBytes(&n, length: 4, index: 2); e.setBytes(&e0, length: 4, index: 3) } }
 let hcFlatP = hcFlat.contents().bindMemory(to: Float.self, capacity: hcDim)
 let (okF, maF, mrF, nnF, dsF, _, _) = cmpOra(hcFlatP, readOracle(oraDirHc, "hc_flat"), 2e-4, 2e-4, 1e-2)
-check(okF, "gate 24 the HC state's unweighted RMSNorm at real dims [RENTED ORACLE]: the embedding broadcast to all \(nHc) streams and normed over the WHOLE \(hcDim)-wide state agrees with the fp64 ds4.c transcription (maxAbs \(maF), maxRel \(mrF); \(dsF) distinct; \(nnF) NaN)",
+check(okF, "gate 24 the HC state's unweighted RMSNorm at real dims [INDEPENDENT FORM ORACLE]: the embedding broadcast to all \(nHc) streams and normed over the WHOLE \(hcDim)-wide state agrees with the fp64 ds4.c transcription (maxAbs \(maF), maxRel \(mrF); \(dsF) distinct; \(nnF) NaN)",
   "gate 24 hc rmsnorm: maxAbs \(maF) maxRel \(mrF) nan \(nnF)")
 
 // ds4.c:9711 — the F16 mixing projection hc_attn_fn [16384 -> 24].
@@ -735,7 +773,7 @@ for i in 0..<min(hfRows, oMix.count) {
     if abs(oMix[i]) > 1e-2 { mixRel = max(mixRel, d/abs(oMix[i])) }
 }
 check(mixRel < 1e-4 && oMix.count == hfRows && gpuErrors == 0,
-  "gate 25 the HC mixing projection at real dims [RENTED ORACLE]: hc_attn_fn (F16, \(hfRows)x\(hfCols)) through view \(hfIdx) agrees with the fp64 ds4.c transcription on all \(hfRows) mix logits (maxRel \(mixRel), maxAbs \(mixAbs) on a vector reaching \(oMix.map{abs($0)}.max() ?? 0))",
+  "gate 25 the HC mixing projection at real dims [INDEPENDENT FORM ORACLE]: hc_attn_fn (F16, \(hfRows)x\(hfCols)) through view \(hfIdx) agrees with the fp64 ds4.c transcription on all \(hfRows) mix logits (maxRel \(mixRel), maxAbs \(mixAbs) on a vector reaching \(oMix.map{abs($0)}.max() ?? 0))",
   "gate 25 hc mix: maxRel \(mixRel) maxAbs \(mixAbs) n \(oMix.count)")
 
 // ds4.c:9592 — the sinkhorn split: pre = sigmoid+eps, post = 2*sigmoid, comb = row-softmax then \(hcIters)
@@ -756,7 +794,7 @@ for i in 0..<(nHc*nHc) { splitAbs = max(splitAbs, abs(Double(hcSplitP[2*nHc+i]) 
 var combRowSum = 0.0
 for src in 0..<nHc { combRowSum += Double(hcSplitP[2*nHc + src]) }
 check(splitAbs < 1e-5 && gpuErrors == 0,
-  "gate 26 the HC sinkhorn split at real dims [RENTED ORACLE]: \(hcIters) iterations over the \(nHc)x\(nHc) combine matrix, plus the pre and post gates, agree with the fp64 ds4.c transcription (maxAbs \(splitAbs); post reaches \(oPost.map{abs($0)}.max() ?? 0), comb row 0 sums to \(combRowSum))",
+  "gate 26 the HC sinkhorn split at real dims [INDEPENDENT FORM ORACLE]: \(hcIters) iterations over the \(nHc)x\(nHc) combine matrix, plus the pre and post gates, agree with the fp64 ds4.c transcription (maxAbs \(splitAbs); post reaches \(oPost.map{abs($0)}.max() ?? 0), comb row 0 sums to \(combRowSum))",
   "gate 26 hc split: maxAbs \(splitAbs)")
 
 // ds4.c:9717 — the weighted collapse of the streams. THIS is the MLA's real input.
@@ -767,7 +805,7 @@ do { var a = UInt32(nHc), b = UInt32(nEmbd)
                                  e.setBytes(&a, length: 4, index: 3); e.setBytes(&b, length: 4, index: 4) } }
 let hcCurP = hcCur.contents().bindMemory(to: Float.self, capacity: nEmbd)
 let (okC, maC, mrC, nnC, dsC, mnC, mxC) = cmpOra(hcCurP, readOracle(oraDirHc, "hc_cur"), 2e-5, 2e-5, 1e-2)
-check(okC, "gate 27 the HC-pre collapse at real dims [RENTED ORACLE]: the \(nHc) streams weighted by the split's pre gates give the REAL layer-0 MLA input — no longer a probe (maxAbs \(maC), maxRel \(mrC); \(dsC) distinct, range [\(mnC),\(mxC)]; \(nnC) NaN)",
+check(okC, "gate 27 the HC-pre collapse at real dims [INDEPENDENT FORM ORACLE]: the \(nHc) streams weighted by the split's pre gates give the REAL layer-0 MLA input — no longer a probe (maxAbs \(maC), maxRel \(mrC); \(dsC) distinct, range [\(mnC),\(mxC)]; \(nnC) NaN)",
   "gate 27 hc-pre collapse: maxAbs \(maC) maxRel \(mrC) nan \(nnC)")
 
 // ── the whole MLA block, re-run on the REAL input. Same kernels, same views, same order as gates 2..22.
@@ -790,7 +828,7 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int) -> MTLBuffer {
 let realAttnOut = mlaBlock(hcCur, posA)
 let raop = realAttnOut.contents().bindMemory(to: Float.self, capacity: obRows)
 let (okR, maR, mrR, nnR, dsR, mnR, mxR) = cmpOra(raop, readOracle(oraDirHc, "attn_out"), 6e-3, 6e-3, 1e-2)
-check(okR, "gate 28 the WHOLE MLA block on the REAL layer-0 input at pos \(posA) [RENTED ORACLE]: the same 13 dispatches gates 2-22 proved, re-run on hc_pre's output instead of a probe, agree with the fp64 ds4.c transcription end to end (maxAbs \(maR), maxRel \(mrR); \(dsR) distinct, range [\(mnR),\(mxR)]; \(nnR) NaN)",
+check(okR, "gate 28 the WHOLE MLA block on the REAL layer-0 input at pos \(posA) [INDEPENDENT FORM ORACLE]: the same 13 dispatches gates 2-22 proved, re-run on hc_pre's output instead of a probe, agree with the fp64 ds4.c transcription end to end (maxAbs \(maR), maxRel \(mrR); \(dsR) distinct, range [\(mnR),\(mxR)]; \(nnR) NaN)",
   "gate 28 real MLA block: maxAbs \(maR) maxRel \(mrR) nan \(nnR)")
 
 // ds4.c:9772 — hc_post: block_out*post[dst] + sum_src comb[dst + src*n_hc]*resid[src]. The combine matrix
@@ -804,8 +842,14 @@ do { var a = UInt32(nHc), b = UInt32(nEmbd)
                                e.setBytes(&a, length: 4, index: 5); e.setBytes(&b, length: 4, index: 6) } }
 let aap = afterAttn.contents().bindMemory(to: Float.self, capacity: hcDim)
 let (okA, maA, mrA, nnA, dsA, mnA, mxA) = cmpOra(aap, readOracle(oraDirHc, "after_attn_hc"), 2e-5, 2e-5, 1e-2)
-check(okA, "gate 29 the HC-post recombination at real dims [RENTED ORACLE]: out[dst][d] = attn_out[d]*post[dst] + sum_src comb[dst + src*\(nHc)]*resid[src][d] over all \(hcDim) — the COMPLETE attention half of a real layer-0, HC-pre -> MLA -> HC-post, agreeing with the fp64 ds4.c transcription (maxAbs \(maA), maxRel \(mrA); \(dsA) distinct, range [\(mnA),\(mxA)]; \(nnA) NaN)",
+check(okA, "gate 29 the HC-post recombination at real dims [INDEPENDENT FORM ORACLE]: out[dst][d] = attn_out[d]*post[dst] + sum_src comb[dst + src*\(nHc)]*resid[src][d] over all \(hcDim) — the COMPLETE attention half of a real layer-0, HC-pre -> MLA -> HC-post, agreeing with the fp64 ds4.c transcription (maxAbs \(maA), maxRel \(mrA); \(dsA) distinct, range [\(mnA),\(mxA)]; \(nnA) NaN)",
   "gate 29 hc-post: maxAbs \(maA) maxRel \(mrA) nan \(nnA)")
+if !okA {
+    for i in 0..<hcDim { print("HC-STATE i=\(i) flat=\(Double(hcFlatP[i])) after=\(Double(aap[i]))") }
+    for i in 0..<hfRows { print("HC-MIX i=\(i) value=\(Double(hcMixP[i]))") }
+    for i in 0..<(2*nHc+nHc*nHc) { print("HC-SPLIT i=\(i) value=\(Double(hcSplitP[i]))") }
+    for i in 0..<nEmbd { print("HC-ATTN i=\(i) value=\(Double(raop[i]))") }
+}
 
 if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(gpuFirstError ?? "unknown") ===") }
 print(String(format: "      Q latent[0..3] = %.6f %.6f %.6f %.6f", qLatp[0], qLatp[1], qLatp[2], qLatp[3]))
@@ -815,14 +859,14 @@ print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — t
 print(String(format: "      attn_out(pos %d)[0..3] = %.6f %.6f %.6f %.6f", posB, lastOut[0], lastOut[1], lastOut[2], lastOut[3]))
 
 let ok = failures == 0 && gpuErrors == 0
-if ok { print("VERDICT PASS  30 gates — Stone 35's MLA projection surface at real dims (gates 0-7, CANONICAL, self-carve) PLUS Stone 36's whole ATTENTION CORE at real dims (gates 8-23, CHOOSING, vs a rented fp64 ds4.c transcription) at two positions: per-head RMSNorm, RoPE fwd on q and kv, the KV fp8+f16 round-trip, the sink softmax, the inverse RoPE, and the GROUPED output a then b — the block's whole output — PLUS Stone 36 Stage 4 (gates 24-29): ONE COMPLETE ATTENTION HALF of a real layer, HC-pre -> MLA -> HC-post on the REAL layer-0 activations, no probe") }
+if ok { print("VERDICT PASS  30 gates — Stone 35's MLA projection surface at real dims (gates 0-7, CANONICAL, self-carve) PLUS Stone 36's whole ATTENTION CORE at real dims (gates 8-23, CHOOSING, vs an independent Form fp64 reference) at two positions: per-head RMSNorm, RoPE fwd on q and kv, the KV fp8+f16 round-trip, the sink softmax, the inverse RoPE, and the GROUPED output a then b — the block's whole output — PLUS Stone 36 Stage 4 (gates 24-29): ONE COMPLETE ATTENTION HALF of a real layer, HC-pre -> MLA -> HC-post on the REAL layer-0 activations, no probe") }
 else { print("VERDICT FAIL  \(failures) gate(s), \(gpuErrors) cb errors") }
 exit(ok ? 0 : 1)
 SWIFT
 swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "FAIL swiftc runner"; tail -30 "$work/swift.err"; exit 1; }
 
 "$work/runner" "$LIB_EMB" "$LIB_MLA" "$LIB8" "$LIB_CORE" "$LIB_HC" "$BLOB" \
-    "$STEP" "$VIEWLIMIT" "$NVIEWS" \
+    "$work/views.txt" "$work/plan.out" "$NVIEWS" \
     "$EMB_ABS" "$ROW_OFF" "$N_EMBD" "$EMB_IDX" "$EMB_INNER" "$EMB_HOLDS" "$TOKEN" \
     "$NORM_ABS" "$NORM_IDX" "$NORM_INNER" "$NORM_HOLDS" \
     "$QA_ABS" "$QA_IDX" "$QA_INNER" "$QA_HOLDS" "$QA_OUT" "$QA_IN" \

@@ -45,9 +45,14 @@ cleanup preserves the channel needed to witness its own completion.
 
 ## Native programs and resident data
 
-CPU and device code is generated and admitted in RAM. Metal is discovered and loaded dynamically; executables do not link its framework. Compiled caches carry exact source, entry, target and ABI identities. Required reuse either meets that identity or reports a miss. Selection is explicit.
+CPU and device code is generated and admitted in RAM. The runtime discovers and loads Metal dynamically; its bootstrap executables do not link the framework. Separate Swift comparison carriers still use the host framework directly. Compiled caches carry exact source, entry, target and ABI identities. Required reuse either meets that identity or reports a miss. Selection is explicit.
 
 Bulk data stays in owned resident regions. A span carries allocation identity and generation, owner, offset, length, layout, access mode and completion dependencies. Crossings carry descriptors and batches. A zero-copy request preserves its alignment and lifetime contract or reports refusal.
+
+Device capacity is an admission ceiling. Each submitted resource view covers
+the data the computation needs, with its required alignment. Form records the
+view's admitted extent and completion alongside numerical results. Device
+allocation and process residency measurements guide the next resource choice.
 
 Physical capacity, encoding width and policy admission are distinct, discoverable limits. Growth follows actual availability and declared policy. Performance is measured through latency distributions, copies, copied bytes, occupancy and achieved bandwidth over a stated workload. Correctness is independently checked.
 
@@ -60,6 +65,12 @@ The value ABI defines tags, arithmetic and overflow, layouts, spans, handles, ca
 ABI identities remain unambiguous across images. Submitted work retains its granted version, buffers and completion identity until it settles. Programs, policies and evidence can be compared, renewed, published and retired for subsequent work. A deadline bounds observation; cancellation can discard a result while work still owns resources. Destruction follows the final lease. Indeterminate work never becomes successful through aggregate cleanup. Completed resources remain independent of unrelated work.
 
 Comparisons capture effectful input once and execute selected versions over the same bytes. Equivalence comparisons preserve policy; policy comparisons vary it deliberately. Selection, evidence expiry and physical reclamation are separately observable.
+
+Numerical programs carry their precision, reduction order, contraction policy
+and supported input range. Comparison includes downstream discrete choices,
+such as quantization and routing, alongside continuous error. A replacement
+earns selection through the consumer's existing contract; observations identify
+which stage needs different arithmetic and which stages already satisfy it.
 
 ## Complete OS contract
 

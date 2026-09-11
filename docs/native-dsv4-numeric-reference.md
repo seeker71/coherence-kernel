@@ -32,16 +32,14 @@ provide separate comparisons. The source provenance is ds4-engine's MIT
 `ds4.c`: `hc_split_sinkhorn_one`, `hc_post_one`, `layer_forward_self_one`,
 `layer_topk_selected_experts_from_probs` and `output_hc_head_one`.
 
-The real-model CPU oracle remains active at
-`form/form-stdlib/tests/dsv4-mla-core-oracle.py`, called by
-`metal_dsv4_layer.sh`, `metal_dsv4_layer_join.sh` and
-`metal_dsv4_stack_oracle.sh`. Its independent GGUF parser, F16/F32/MXFP8/MXFP4/
-IQ2_XXS decode, YaRN choices, fp8-plus-f16 KV round trip, routed experts and
-multi-token cache history are still needed by those checks. The available
-91,321,404,640-byte GGUF is observed on this host; those foreign execution paths
-are not run by the native reference witnesses.
+The separate [real-model Form oracle](native-dsv4-oracle.md) owns an independent
+GGUF parser, F16/F32/MXFP8/MXFP4/IQ2_XXS reads, YaRN choices, the fp8-plus-f16
+key/value round trip, routed experts and per-layer multi-token history. Its
+matrix programs execute in RAM over mapped weights and preserve complete
+intermediate vectors. The three Metal comparison callers use its physical
+request door at `observe/dsv4-oracle-run.bml`.
 
-The next native boundary is an independent mapped CPU reference for the real
-GGUF, preserving its full intermediate vectors, layer/stack modes, positional
-contrasts and tolerances. Once its native checks own those responsibilities,
-the real-model oracle and its foreign carriers can be released.
+The small algebra witnesses above and the real-model comparisons establish
+different observations. Their inputs, execution contracts and tolerances remain
+explicit. The numerical north star is a complete Form-owned graph retaining
+activation spans and replaceable CPU/device programs across the computation.

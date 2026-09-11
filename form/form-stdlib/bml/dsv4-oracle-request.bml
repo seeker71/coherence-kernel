@@ -1,0 +1,80 @@
+// Explicit finite configuration, admitted before model or output acquisition.
+// preludes: form/form-stdlib/bml/dsv4-oracle-stack.bml form/form-stdlib/bml/dsv4-oracle-mapped.bml
+section [form.bml] {
+ class Dsv4OracleRequest {
+  // DFO2 is twelve NUL-terminated fields. It carries literal LF in paths
+  // and sequence whitespace; shell printf transports fields without escaping.
+  def dqi-nul-frame(fields) = if not(and(eq(len(fields),13),str_eq(nth(fields,12),""))) then dqi-refused("exactly twelve NUL-terminated fields required") else dqi-parse(cons("DFO1",dnr-take(tail(fields),11)));
+  def dqi-trim-start(text,at) = if ge(at,str_len(text)) then at else if dqi-space(str_byte_at(text,at)) then dqi-trim-start(text,add(at,1)) else at;
+  def dqi-trim-end(text,at,start) = if le(at,start) then start else if dqi-space(str_byte_at(text,sub(at,1))) then dqi-trim-end(text,sub(at,1),start) else at;
+  def dqi-digit(byte) = and(ge(byte,48),le(byte,57));
+  def dqi-number-text(text) = if not(str_eq(value_kind(text),"string")) then nothing() else dqi-number-trim(text,dqi-trim-start(text,0));
+  def dqi-number-trim(text,start) = dqi-number-separators(substring(text,start,dqi-trim-end(text,str_len(text),start)),0,list());
+  def dqi-number-separators(text,at,bins) = if eq(at,str_len(text)) then fbc-finish(bins,"") else if eq(str_byte_at(text,at),95) then if and(gt(at,0),and(lt(add(at,1),str_len(text)),and(dqi-digit(str_byte_at(text,sub(at,1))),dqi-digit(str_byte_at(text,add(at,1)))))) then dqi-number-separators(text,add(at,1),bins) else nothing() else dqi-number-separators(text,add(at,1),fbc-put(bins,byte_to_str(str_byte_at(text,at))));
+  def dqi-int(text) = dqi-int-clean(dqi-number-text(text));
+  def dqi-int-clean(text) = if nothing?(text) then nothing() else dqi-int-start(text,dqi-sign(text,0));
+  def dqi-int-start(text,start) = if ge(start,str_len(text)) then nothing() else dqi-int-loop(text,start,0,eq(str_byte_at(text,0),45));
+  def dqi-int-loop(text,at,value,negative) = if eq(at,str_len(text)) then if negative then sub(0,value) else value else dqi-int-digit(text,at,value,negative,sub(str_byte_at(text,at),48));
+  def dqi-int-digit(text,at,value,negative,digit) = if not(and(ge(digit,0),le(digit,9))) then nothing() else if gt(value,div(sub(4611686018427387903,digit),10)) then nothing() else dqi-int-loop(text,add(at,1),add(mul(value,10),digit),negative);
+  def dqi-digits(text,at) = if ge(at,str_len(text)) then at else if and(ge(str_byte_at(text,at),48),le(str_byte_at(text,at),57)) then dqi-digits(text,add(at,1)) else at;
+  def dqi-sign(text,at) = if or(eq(str_byte_at(text,at),45),eq(str_byte_at(text,at),43)) then add(at,1) else at;
+  def dqi-decimal(text,start,end) = if eq(str_byte_at(text,end),46) then dqi-fraction(text,start,end,dqi-digits(text,add(end,1))) else and(gt(end,start),dqi-exponent(text,end));
+  def dqi-fraction(text,start,dot,end) = and(or(gt(dot,start),gt(end,add(dot,1))),dqi-exponent(text,end));
+  def dqi-exponent(text,at) = if or(eq(str_byte_at(text,at),101),eq(str_byte_at(text,at),69)) then dqi-exponent-end(text,dqi-sign(text,add(at,1))) else eq(at,str_len(text));
+  def dqi-exponent-end(text,at) = and(gt(dqi-digits(text,at),at),eq(dqi-digits(text,at),str_len(text)));
+  def dqi-float(text) = dqi-float-clean(dqi-number-text(text));
+  def dqi-float-clean(text) = if nothing?(text) then nothing() else dqi-float-at(text,dqi-sign(text,0));
+  def dqi-float-at(text,start) = if not(dqi-decimal(text,start,dqi-digits(text,start))) then nothing() else dqi-finite(str_to_float(text));
+  def dqi-finite(value) = if dfo-finite(value) then value else nothing();
+  def dqi-tokens(parts,acc) = if nil?(parts) then reverse(acc) else if str_eq(head(parts),"") then dqi-tokens(tail(parts),acc) else dqi-token(parts,acc,dqi-int(head(parts)));
+  def dqi-token(parts,acc,token) = if not(dfo-natural(token)) then nothing() else dqi-tokens(tail(parts),cons(token,acc));
+  def dqi-path(path) = and(str_eq(value_kind(path),"string"),and(gt(str_len(path),0),lt(str_find(path,byte_to_str(0),0),0)));
+  def dqi-destination(path) = and(str_eq(value_kind(path),"string"),lt(str_find(path,byte_to_str(0),0),0));
+  def dqi-space(byte) = or(eq(byte,32),and(ge(byte,9),le(byte,13)));
+  def dqi-token-text(text,at,bins) = if eq(at,str_len(text)) then fbc-finish(bins,"") else dqi-token-text(text,add(at,1),fbc-put(bins,if dqi-space(str_byte_at(text,at)) then " " else byte_to_str(str_byte_at(text,at))));
+  def dqi-refused(reason) = record_new(0,"ready",0,"reason",reason);
+  def dqi-strings(xs) = if nil?(xs) then 1 else and(str_eq(value_kind(head(xs)),"string"),dqi-strings(tail(xs)));
+  def dqi-parse(fields) = if not(and(fbc-list?(fields),and(eq(len(fields),12),dqi-strings(fields)))) then dqi-refused("exactly twelve complete text fields required") else if not(and(str_eq(head(fields),"DFO1"),str_eq(nth(fields,11),"END"))) then dqi-refused("oracle request framing") else dqi-parse-fields(fields);
+  def dqi-f32(text) = if eq(str_find(text,"env:",0),0) then if str_eq(substring(text,4,str_len(text)),"1") then 1 else 0 else dqi-int(text);
+  def dqi-parse-fields(fields) {
+   let token = dqi-int(nth(fields,2)); let pos = dqi-int(nth(fields,3)); let count = dqi-int(nth(fields,4)); let f32 = dqi-f32(nth(fields,7)); let perturb = dqi-float(nth(fields,8)); let perStep = dqi-float(nth(fields,9)); let tokens = dqi-tokens(split-on(dqi-token-text(nth(fields,10),0,list())," "),list());
+   if not(and(dfo-natural(token),and(dfo-natural(pos),and(dfo-natural(count),and(or(eq(f32,0),eq(f32,1)),and(not(nothing?(perturb)),and(not(nothing?(perStep)),not(nothing?(tokens))))))))) then dqi-refused("typed finite numeric request fields") else dqi-parse-controls(fields,token,pos,count,f32,perturb,perStep,tokens);
+  }
+  def dqi-parse-controls(fields,token,pos,count,f32,perturb,perStep,tokens) {
+   let path = nth(fields,1); let out = nth(fields,6); let mode = nth(fields,5);
+   if not(and(dqi-path(path),dqi-destination(out))) then dqi-refused("nonempty model path and optional output path without NUL required") else if not(or(str_eq(mode,"stack"),or(str_eq(mode,"layer"),or(str_eq(mode,"hc"),str_eq(mode,"probe"))))) then dqi-refused("unknown oracle mode") else if str_eq(mode,"stack") then dqi-stack-fields(path,out,mode,token,pos,count,f32,perturb,perStep,tokens) else if not(and(eq(f32,0),and(eq(perturb,0.0),and(eq(perStep,0.0),nil?(tokens))))) then dqi-refused("stack controls supplied to a single layer") else dqi-ready(path,out,mode,token,pos,count,f32,perturb,perStep,tokens);
+  }
+  def dqi-stack-fields(path,out,mode,token,pos,count,f32,perturb,perStep,tokens) = if not(dfo-positive(count)) then dqi-refused("positive stack layer count required") else if and(not(nil?(tokens)),not(eq(len(tokens),dfo-sum(pos,1)))) then dqi-refused("sequence must end at requested position") else dqi-ready(path,out,mode,token,pos,count,f32,perturb,perStep,tokens);
+  def dqi-ready(path,out,mode,token,pos,count,f32,perturb,perStep,tokens) = record_new(0,"ready",1,"reason","complete typed finite oracle request","path",path,"out",out,"mode",mode,"token",token,"pos",pos,"count",count,"f32",f32,"perturb",perturb,"per-step",perStep,"tokens",tokens);
+  def dqi-observe(request) {
+   let ok = eq(record_get(request,"ready"),1); let job = str_concat("oracle-request-",str_concat(int_to_str(host_pid()),str_concat("-",int_to_str(now_unix_ms())))); let evidence = oh-reference("form/form-stdlib/bml/dsv4-oracle-request.bml");
+   let reading = oh-reading("dsv4-native-oracle",job,"request-admission",json-node-string("complete typed finite oracle request"),json-node-string(record_get(request,"reason")),json-node-int(ok),if ok then list() else list(oh-need("complete-oracle-request",evidence)),list("continue","retain"),evidence);
+   oh-voice(reading); let response = oh-response(reading,if ok then "continue" else "retain"); oh-voice(response); let action = oh-select(reading,response,"retain"); oh-voice(oh-applied(reading,action,evidence));
+   dfo-require(and(ok,str_eq(action,"continue")),record_get(request,"reason")); request;
+  }
+  def dqi-execute(request) {
+   let prepared = dqa-prepare(record_get(request,"path"));
+   dqi-observe(dqi-model-request(request,prepared));
+   dfo-admit-position(prepared,record_get(request,"pos"));
+   let owner = dqm-admit(dqa-admit(prepared));
+   if str_eq(record_get(request,"mode"),"stack") then dqi-stack(request,owner) else dqi-one(request,owner);
+  }
+  def dqi-model-tokens(tokens,vocab) = if nil?(tokens) then 1 else and(and(dfo-natural(head(tokens)),lt(head(tokens),vocab)),dqi-model-tokens(tail(tokens),vocab));
+  def dqi-model-request(request,r) {
+   let vocab = nth(nth(dfo-tensor(r,"token_embd.weight"),1),1); let layers = dfo-meta(r,"deepseek4.block_count"); let count = record_get(request,"count");
+   if not(and(lt(record_get(request,"token"),vocab),dqi-model-tokens(record_get(request,"tokens"),vocab))) then dqi-refused("token or sequence token exceeds admitted vocabulary") else if str_eq(record_get(request,"mode"),"stack") then if le(count,layers) then request else dqi-refused("stack count exceeds admitted model layers") else if not(lt(count,layers)) then dqi-refused("single layer exceeds admitted model layers") else if not(eq(record_get(dfo-rope-params(r,count),"ratio"),0)) then dqi-refused("single-layer modes require an uncompressed layer") else request;
+  }
+  def dqi-one(request,owner) {
+   dfo-require(eq(record_get(owner,"ready"),1),"mapped oracle admission refused; owned release state retained");
+   dqm-memory(owner,"admitted");
+   let result = dfo-one-in(owner,record_get(request,"token"),record_get(request,"pos"),record_get(request,"count"),record_get(request,"mode"),record_get(request,"out"));
+   dqm-memory(owner,"published"); let closed = dqm-close(owner);
+   dfo-require(and(eq(result,1),eq(closed,1)),"mapped oracle completion"); dqm-memory(owner,"released"); 1;
+  }
+  def dqi-stack(request,owner) {
+   dfo-require(eq(record_get(owner,"ready"),1),"mapped model admission refused; release state retained");
+   dqs-stack-in(owner,dqm-close,record_get(request,"token"),record_get(request,"pos"),record_get(request,"count"),record_get(request,"out"),record_get(request,"f32"),record_get(request,"perturb"),record_get(request,"per-step"),record_get(request,"tokens"));
+  }
+ }
+ 0;
+}
