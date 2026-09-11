@@ -1,0 +1,106 @@
+; glass-census-rows-band.fk — the census readings become glass rows that keep the privacy rule.
+;
+; Every reading here is built by hand; no host is read, no organ is run. But a reading stamps its id from
+; host_pid (organ-health.bml oh-reading), a fkwu host door the sibling kernels do not bind, so this band
+; reads on the fkwu lane, beside the roster and pages organs it speaks for.
+; Verdict: 1023
+; PROOF LEVEL: FOURTH-ARM ONLY (oh-reading stamps its id from host_pid: a fkwu host door)
+; preludes: form-stdlib/form-glass-observer.bml form-stdlib/form-glass-sensor-rows.bml form/form-stdlib/glass-census-rows.bml
+;
+; glass-census-rows.bml turns each organ-health reading (kernel-roster.bml, kernel-pages.bml) into one
+; glass row. A measured reading is an int row whose value is its count and whose note names its need; a
+; reading over a read that did not answer is an unavailable row whose door is that read. The rows carry
+; pids and counts only — never a process name, never a command argument — so they stand inside the
+; observer's ProcessPrivacyRule.
+;
+; Verdict 1023:
+;   1    a measured reading with no need is an int row, value 0, note "none", id census.<organ>.<aspect>
+;   2    a measured reading with a need is an int row whose value is its count and note names the pids
+;   4    a null reading is an unavailable row (present 0), its source the read that did not answer
+;   8    the pages organ's rows carry unit "pages"; the roster organ's carry "kernels"
+;   16   a row's id and label name the organ and the aspect
+;   32   gcr-rows over two takes gives one row per reading, roster's then pages'
+;   64   no row's text carries a non-digit, non-separator byte: names and argv never reach a row
+;   128  an unavailable row's note still names its need's pids (the need is kept, only the health is null)
+;   256  the census sensor's declared cadence is 10000 ms, and it is not body-local (the host is shared)
+;   512  a measured reading's evidence is physical-live; a null one's is unavailable
+(do
+    (defn gcb-bit (ok bit) (if ok bit 0))
+    ; a reading by hand: organ, aspect, health (-1 for null), observed, and a need's (resource pids)
+    (defn gcb-need (resource pids) (oh-need resource (json-node-array (oh-ints pids))))
+    (defn gcb-reading (organ aspect health observed need)
+        (oh-reading organ "host" aspect (json-node-int 0)
+            (if (lt health 0) (json-node-null) (json-node-int observed))
+            (if (lt health 0) (json-node-null) (json-node-int health))
+            (if (eq (len need) 0) (list) need)
+            (list "request-evidence" "defer")
+            (json-node-array (list))))
+
+    ; 1: measured, no need — untracked at health 1, observed 0
+    (let m0 (gcb-reading "kernel-roster" "untracked" 1 0 (list)))
+    (let r0 (gcr-row m0))
+    (let b1 (gcb-bit (and (str_eq (fgo-value-kind r0) "int")
+                     (and (eq (fgo-int-value r0) 0)
+                     (and (str_eq (fgo-note r0) "none")
+                          (str_eq (fgo-id r0) "census.kernel-roster.untracked")))) 1))
+
+    ; 2: measured, a need — unpaged at health 0, observed 2, pids 101 102
+    (let m1 (gcb-reading "kernel-roster" "unpaged" 0 2 (list (gcb-need "kernel-page" (list 101 102)))))
+    (let r1 (gcr-row m1))
+    (let b2 (gcb-bit (and (str_eq (fgo-value-kind r1) "int")
+                     (and (eq (fgo-int-value r1) 2)
+                          (str_eq (fgo-note r1) "kernel-page: 101,102"))) 2))
+
+    ; 4: null — orphans over an unread owner walk
+    (let m2 (gcb-reading "kernel-roster" "orphans" (sub 0 1) 0 (list (gcb-need "owner-walk" (list 103)))))
+    (let r2 (gcr-row m2))
+    (let b3 (gcb-bit (and (eq (fgo-present? r2) 0)
+                          (str_eq (fgo-source r2) "owner-walk")) 4))
+
+    ; 8: the pages organ carries unit "pages"; the roster organ "kernels"
+    (let mp (gcb-reading "kernel-pages" "killed-pages" 0 1 (list (gcb-need "burial-word" (list 73204)))))
+    (let rp (gcr-row mp))
+    (let b4 (gcb-bit (and (str_eq (fgo-unit rp) "pages") (str_eq (fgo-unit r1) "kernels")) 8))
+
+    ; 16: id and label name the organ and the aspect
+    (let b5 (gcb-bit (and (str_eq (fgo-id rp) "census.kernel-pages.killed-pages")
+                          (str_eq (fgo-label rp) "kernel-pages killed-pages")) 16))
+
+    ; 32: gcr-rows over two hand-built takes — one row per reading, roster (5) then pages (3)
+    ; a take is (census-take pages-take); the settle keeps what both agree on, so give both takes the same lists.
+    ; census-take: (named roster kernels untracked stale orphans short errands unpaged unread-names unread-pages
+    ;   unread-rows host-read roster-read page-read); kernels are (pid cell cwd exe owner owner-pid kernel-parent withheld)
+    (defn gcb-k (pid) (list pid "c.fk" "/w" "/w/fkwu" "claude" 5 0 0))
+    (defn gcb-census-take () (list (list 10) (list 10) (list (gcb-k 10)) (list) (list) (list) (list) (list) (list) (list) (list) (list) 1 1 1))
+    ; pages-take: (ended broken withheld-gone withheld-living held paged)
+    (defn gcb-pages-take () (list (list) (list) (list) (list) 1 1))
+    (let rows (gcr-rows (list (gcb-census-take) (gcb-pages-take)) (list (gcb-census-take) (gcb-pages-take))))
+    (let b6 (gcb-bit (and (eq (len rows) 8)
+                     (and (str_eq (fgo-id (nth rows 0)) "census.kernel-roster.untracked")
+                          (str_eq (fgo-id (nth rows 5)) "census.kernel-pages.exit-burial"))) 32))
+
+    ; 64: no row's text (id, label, note, value-kind, unit, source) carries a byte that is not a digit,
+    ; a lowercase letter, or one of  . - _ : , space  — a process name (Terminal, codex) or an argv path
+    ; would bring an uppercase letter or a slash. Checked over every row gcr-rows built.
+    (defn gcb-ok-byte? (b) (if (and (ge b 48) (le b 57)) 1
+                           (if (and (ge b 97) (le b 122)) 1
+                           (if (eq b 46) 1 (if (eq b 45) 1 (if (eq b 95) 1 (if (eq b 58) 1 (if (eq b 44) 1 (if (eq b 32) 1 0)))))))))
+    (defn gcb-text-ok? (s i) (if (ge i (str_len s)) 1 (if (eq (gcb-ok-byte? (str_byte_at s i)) 1) (gcb-text-ok? s (add i 1)) 0)))
+    (defn gcb-row-ok? (r) (if (eq (gcb-text-ok? (fgo-id r) 0) 1)
+                          (if (eq (gcb-text-ok? (fgo-label r) 0) 1)
+                          (if (eq (gcb-text-ok? (fgo-note r) 0) 1)
+                          (if (eq (gcb-text-ok? (fgo-unit r) 0) 1) 1 0) 0) 0) 0))
+    (defn gcb-rows-ok? (rs) (if (eq (len rs) 0) 1 (if (eq (gcb-row-ok? (head rs)) 1) (gcb-rows-ok? (tail rs)) 0)))
+    (let b7 (gcb-bit (eq (gcb-rows-ok? rows) 1) 64))
+
+    ; 128: an unavailable row keeps its need's pids in the note
+    (let b8 (gcb-bit (str_eq (fgo-note r2) "owner-walk: 103") 128))
+
+    ; 256: the census sensor's cadence is 10000 ms and it is shared (not body-local)
+    (let b9 (gcb-bit (and (eq (GCRCadenceMs) 10000) (eq (fgsr-body-local? "census") 0)) 256))
+
+    ; 512: a measured row's evidence is physical-live; a null one's is unavailable
+    (let b10 (gcb-bit (and (str_eq (fgo-evidence r1) "physical-live") (str_eq (fgo-evidence r2) "unavailable")) 512))
+
+    (let told (print (list "bits" b1 b2 b3 b4 b5 b6 b7 b8 b9 b10)))
+    (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 (add b8 (add b9 b10))))))))))

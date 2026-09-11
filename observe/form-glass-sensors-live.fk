@@ -10,6 +10,8 @@
 ;   queue    every 250 ms   the hearth spools
 ;   owner    every 1000 ms  the model owner process rows (ps on the owner pid from its live sample)
 ;   governor every 1000 ms  the resource governor refreshes its own publication
+;   census   every 10000 ms the kernel census as its organs speak it, each take settled against the one
+;                           before it (glass-census-rows.bml); the first tick gives nothing
 ;
 ; Offered, never demanded: a glass that is not running costs this process
 ; nothing, and a sensor that is not running leaves the glass one row that says
@@ -18,7 +20,7 @@
 ; each loop step is one host_sleep_ms, never a forked /bin/sleep.
 ;
 ; preflight-exec: forbidden
-; preludes: form/form-stdlib/form-glass-live.bml form/form-stdlib/form-glass-sensor-rows.bml form/form-stdlib/born-under.bml
+; preludes: form/form-stdlib/form-glass-live.bml form/form-stdlib/form-glass-sensor-rows.bml form/form-stdlib/born-under.bml form/form-stdlib/glass-census-rows.bml
 
 (do
     (defn fgsl-due? (now last every) (if (lt last 0) 1 (if (ge (sub now last) every) 1 0)))
@@ -27,7 +29,10 @@
         (do (let inventory (fgtm-inventory (FGLRoot)))
             (let samples (fgl-local-samples (fgl-dedupe-samples (append (fgl-jit-current-samples) (fgl-external-samples (fgl-inventory-samples-at inventory now)))) now))
             (fgl-owner-rows-at 0 (list) samples now)))
-    (defn fgsl-step (now lastHost lastProcess lastStorage lastQueue lastGovernor lastOwner frame heldHost born)
+    ; the census: the take due now, given as rows settled against the take before it; with none before it, nothing
+    (defn fgsl-census-give (now prev take frame)
+        (if (eq (len prev) 0) now (fgsl-give-rows "census" now (fgo-observe-rows (gcr-rows prev take) now frame))))
+    (defn fgsl-step (now lastHost lastProcess lastStorage lastQueue lastGovernor lastOwner lastCensus frame heldHost born censusPrev)
         (if (and (eq (fgl-cycle? frame 40) 1) (eq (bun-held? born) 0)) 0
         (do
             (let hostDue (fgsl-due? now lastHost 1500))
@@ -38,6 +43,9 @@
             (let queue (if (eq (fgsl-due? now lastQueue 250) 1) (fgsl-give-rows "queue" now (fgo-observe-rows (fgl-hearth-queue-observe) now frame)) lastQueue))
             (let governor (if (eq (fgsl-due? now lastGovernor 1000) 1) (do (host_wait (host_spawn_quiet (list "./fkwu" "observe/form-resource-governor-glass-current-run.fk"))) now) lastGovernor))
             (let owner (if (eq (fgsl-due? now lastOwner 1000) 1) (fgsl-give-rows "owner" now (fgsl-owner-rows now frame)) lastOwner))
+            (let censusDue (fgsl-due? now lastCensus (GCRCadenceMs)))
+            (let censusTake (if (eq censusDue 1) (gcr-take) censusPrev))
+            (let census (if (eq censusDue 1) (fgsl-census-give now censusPrev censusTake frame) lastCensus))
             (let rested (host_sleep_ms 50))
-            (fgsl-step (now_unix_ms) host process storage queue governor owner (add frame 1) hostRows born))))
-    (fgsl-step (now_unix_ms) -1 -1 -1 -1 -1 -1 0 (list) (bun-parent)))
+            (fgsl-step (now_unix_ms) host process storage queue governor owner census (add frame 1) hostRows born censusTake))))
+    (fgsl-step (now_unix_ms) -1 -1 -1 -1 -1 -1 -1 0 (list) (bun-parent) (list)))
