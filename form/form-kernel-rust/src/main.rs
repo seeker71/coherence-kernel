@@ -1999,7 +1999,7 @@ impl Kernel {
             .into_iter()
             .map(|(name, value)| (self.intern_string(&name).inst, value))
             .collect();
-        Value::Record(Arc::new(Mutex::new(Record { blueprint, fields })))
+        Value::Record(Arc::new(Mutex::new(Record { blueprint: Some(blueprint), fields })))
     }
 
     fn substrate_mark(&self) -> Vec<Value> {
@@ -2354,7 +2354,10 @@ pub(crate) enum Value {
 
 #[derive(Debug)]
 pub(crate) struct Record {
-    blueprint: NodeID,
+    /// None for a record built as (record_new 0 ...): fields, but no type and
+    /// no method table; record_blueprint reads back 0 (fkwu keeps the operand
+    /// verbatim).
+    blueprint: Option<NodeID>,
     fields: Vec<(NameID, Value)>,
 }
 
@@ -2406,14 +2409,17 @@ impl Value {
             Value::Nid(n) => format!("@{}.{}.{}.{}", n.pkg, n.level, n.ty, n.inst),
             Value::Record(r) => {
                 let rec = r.lock().unwrap();
-                format!(
-                    "<record @{}.{}.{}.{} #{}fields>",
-                    rec.blueprint.pkg,
-                    rec.blueprint.level,
-                    rec.blueprint.ty,
-                    rec.blueprint.inst,
-                    rec.fields.len()
-                )
+                match rec.blueprint {
+                    Some(bp) => format!(
+                        "<record @{}.{}.{}.{} #{}fields>",
+                        bp.pkg,
+                        bp.level,
+                        bp.ty,
+                        bp.inst,
+                        rec.fields.len()
+                    ),
+                    None => format!("<record @0 #{}fields>", rec.fields.len()),
+                }
             }
         }
     }
@@ -3333,8 +3339,15 @@ impl Kernel {
         // record_new — (record_new blueprint k1 v1 k2 v2 ...) → Record.
         // The first arg is the blueprint NodeID; the rest are alternating
         // field-name (string) and value pairs. Field names intern to NameIDs.
+        // A blueprint of 0 builds a record with no blueprint (None): its
+        // fields work as on any record, record_blueprint reads back 0, and no
+        // method dispatches on it. fkwu keeps the blueprint operand verbatim,
+        // and 0 is the body's most common record shape (a plain field map).
         self.register_native("record_new", cat_method(), |k, _, args| {
-            let blueprint = args[0].as_nid();
+            let blueprint = match &args[0] {
+                Value::Int(0) => None,
+                other => Some(other.as_nid()),
+            };
             let mut fields: Vec<(NameID, Value)> = Vec::new();
             let mut i = 1;
             while i + 1 < args.len() {
@@ -3344,11 +3357,12 @@ impl Kernel {
             }
             Value::Record(Arc::new(Mutex::new(Record { blueprint, fields })))
         });
-        // record_get — (record_get rec "field") → value, or null if absent.
+        // record_get — (record_get rec "field") → value, or 0 when the record
+        // carries no such field: fkwu's answer, which the body reads as eq(v, 0).
         self.register_native("record_get", cat_access(), |k, _, args| {
             let name = k.intern_string(args[1].as_str()).inst;
             match &args[0] {
-                Value::Record(r) => r.lock().unwrap().get(name).unwrap_or(Value::Null),
+                Value::Record(r) => r.lock().unwrap().get(name).unwrap_or(Value::Int(0)),
                 _ => panic!("record_get: not a record: {:?}", args[0]),
             }
         });
@@ -3377,7 +3391,10 @@ impl Kernel {
         // (the record's class/type tag, for method dispatch by the lifter).
         self.register_native("record_blueprint", cat_access(), |_, _, args| {
             match &args[0] {
-                Value::Record(r) => Value::Nid(r.lock().unwrap().blueprint),
+                Value::Record(r) => match r.lock().unwrap().blueprint {
+                    Some(bp) => Value::Nid(bp),
+                    None => Value::Int(0),
+                },
                 _ => panic!("record_blueprint: not a record: {:?}", args[0]),
             }
         });
@@ -3421,7 +3438,10 @@ impl Kernel {
         // either a record (uses its blueprint) or a blueprint NodeID directly.
         self.register_native("method_has", cat_access(), |k, _, args| {
             let blueprint = match &args[0] {
-                Value::Record(r) => r.lock().unwrap().blueprint,
+                Value::Record(r) => match r.lock().unwrap().blueprint {
+                    Some(bp) => bp,
+                    None => return Value::Bool(false),
+                },
                 Value::Nid(n) => *n,
                 _ => return Value::Bool(false),
             };
@@ -3438,7 +3458,13 @@ impl Kernel {
                 Value::Record(r) => r.clone(),
                 _ => panic!("method_invoke: first arg must be a record"),
             };
-            let blueprint = rec.lock().unwrap().blueprint;
+            let blueprint = match rec.lock().unwrap().blueprint {
+                Some(bp) => bp,
+                None => panic!(
+                    "method_invoke: no method '{}' on a record with no blueprint (record_new 0)",
+                    args[1].as_str()
+                ),
+            };
             let name_id = k.intern_string(args[1].as_str()).inst;
             let cl = k
                 .methods
@@ -3856,7 +3882,7 @@ impl Kernel {
         self.register_native("_get", cat_access(), |k, _, args| {
             // Record: a marshalled structured input (the structure-access
             // capability) or a record built by record_new. A string key reads
-            // the named field; record_get returns Null for an absent field
+            // the named field; an absent field reads as Null on this lane
             // (Python `obj[k]` would KeyError, but the transmuted recipes read
             // fields they know exist, and Null is the honest "absent" surface).
             if let (Value::Record(r), Value::Str(key)) = (&args[0], &args[1]) {

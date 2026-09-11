@@ -38,10 +38,13 @@ type recField struct {
 }
 
 // Record — a mutable struct/object. Blueprint tags its type; Fields is an
-// ordered name→value map.
+// ordered name→value map. NoBlueprint marks a record built as
+// (record_new 0 ...): fields, but no type and no method table;
+// record_blueprint reads back 0 for it (fkwu keeps the operand verbatim).
 type Record struct {
-	Blueprint NodeID
-	Fields    []recField
+	Blueprint   NodeID
+	NoBlueprint bool
+	Fields      []recField
 }
 
 func (r *Record) Get(name NameID) (Value, bool) {
@@ -151,6 +154,9 @@ func (v Value) String() string {
 	case VNodeID:
 		return fmt.Sprintf("@%d.%d.%d.%d", v.Nid.Pkg, v.Nid.Level, v.Nid.Type, v.Nid.Inst)
 	case VRecord:
+		if v.Rec.NoBlueprint {
+			return fmt.Sprintf("<record @0 #%dfields>", len(v.Rec.Fields))
+		}
 		return fmt.Sprintf("<record @%d.%d.%d.%d #%dfields>",
 			v.Rec.Blueprint.Pkg, v.Rec.Blueprint.Level, v.Rec.Blueprint.Type,
 			v.Rec.Blueprint.Inst, len(v.Rec.Fields))
