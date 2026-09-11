@@ -19822,6 +19822,12 @@ static long long fk_fkb_remap_field(long long tag, long long field, long long va
     if (tag == 77) {
         return field == 2 ? value + node_base : value;
     }
+    if (tag == 201 && field == 3) {
+        /* substring: the rewrite row builds (201 LIT-9 s (cons start end)), so field 3 is the
+         * range's tag-19 node -- a child the float_leaf row's arity of 2 does not count. It
+         * shifts with the image's nodes like any child; 0 is float_leaf's own shape, no range. */
+        return value == 0 ? 0 : value + node_base;
+    }
     long long ar = fk_fkb_node_arity_for_tag(tag);
     if (field <= ar) {
         return value + node_base;
