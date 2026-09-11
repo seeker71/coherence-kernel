@@ -321,9 +321,9 @@ cleanup() {
 # So the handler that owns the EXIT slot carries both: the scratch dirs go,
 # and the seal keeps the last word on the exit status.
 _validate_exit() {
-    local rc=0
+    local rc=$?
     cleanup
-    _validate_seal ""
+    _validate_seal "$rc"
 }
 trap _validate_exit EXIT
 
