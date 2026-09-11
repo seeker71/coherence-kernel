@@ -11250,6 +11250,25 @@ static long long fk_field_intern_node(long long kind, long long sub, long long a
     fk_die("fkwu: the field's intern index is full");
     return fk_nothing;
 }
+/* An interned float the field already holds, found by value, or 0: the probe sequence
+ * fk_field_intern_node walks, without claiming a slot. fk_intern_float_node asks here before it
+ * boxes, so a float the field already holds costs no pool slot. A slot another process is still
+ * filling (-1) answers 0, and the intern path settles it. */
+static long long fk_field_find_float(double d, long long h) {
+    long long mask = FK_FIELD_HASH - 1;
+    long long slot = h & mask;
+    long long probes = 0;
+    while (probes < FK_FIELD_HASH) {
+        long long cur = __atomic_load_n(&fk_field_itab[slot], __ATOMIC_ACQUIRE);
+        if (cur <= 0) { return 0; }
+        if (fk_nkind[cur] == 1 && fk_nid[cur][2] == 7) {
+            double x = fk_num(fk_nval[cur]);
+            if (x == d || (x != x && d != d)) { return cur; }
+        }
+        slot = (slot + 1) & mask; probes = probes + 1;
+    }
+    return 0;
+}
 /* ---- the store: every value table of this kernel lives in shared memory ----
  * One sparse reservation per column, /fg-c<pid>-<letter>, sized once (macOS lets a shm object be
  * truncated once) and committed page by page as the table grows: a 4 GiB reservation touched at three
@@ -11606,7 +11625,11 @@ static long long fk_intern_float_node(double fd113) {
         double fcanon113;
         memcpy(&fcanon113, &fbits113, 8);
         long long h113 = fk_intern_key_trivial(7, (long long)fbits113);
-        if (fk_field_on) { return fk_field_intern_node(1, 7, fk_fbox(fcanon113), 0, 0, h113); }
+        if (fk_field_on) {
+            long long held113 = fk_field_find_float(fcanon113, h113);
+            if (held113 > 0) { return fk_nbox(held113); }
+            return fk_field_intern_node(1, 7, fk_fbox(fcanon113), 0, 0, h113);
+        }
         if (fk_np + 1 >= fk_node_cap) {
             fk_nodes_grow();
         }
@@ -13687,7 +13710,6 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * keep its name; the fkwu seed was the diverging arm. Compare by
          * BITS, not ==, so NaN interns to itself. nid[3] carries the pool
          * index, mirroring the Go arm's Inst. */
-        unsigned long long fbits113;
         return fk_intern_float_node(fd113);
     }
     if (t == 50) {
