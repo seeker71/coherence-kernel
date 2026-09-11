@@ -35,10 +35,14 @@
 ;   tag 3 = null leaf:   no payload
 ;   tag 4 = float leaf:  value (CDR double, real IEEE754 bits)
 ;
-; "Raw bytes as a Form string" is the same narrow-waist model this whole
-; codebase already uses for byte-level string ops (`str_byte_at`/
-; `byte_to_str`) — a CDR buffer here is just a Form string where each
-; character is one octet, not necessarily valid UTF-8 text.
+; A CDR buffer is a list of octets (ints 0-255), the shape read_file_bytes
+; answers on every kernel. A Form string does not carry octets the same way
+; on every kernel: byte_to_str of 128 or more is one byte on fkwu and a
+; two-byte UTF-8 code point on Go, Rust and TS, so a string buffer shifts
+; there at its first high octet (a negative long is enough). A CDR string's
+; octets are its str_byte_at bytes; decoding rebuilds the string octet by
+; octet with byte_to_str, exact for ASCII on every kernel and for any octet
+; on fkwu.
 ;
 ; Alignment is tracked by THREADING the growing buffer through every
 ; encode call and padding relative to its OWN current length before
@@ -61,34 +65,30 @@
 (do
     ; --- low-level octet buffer helpers ---------------------------------
 
-    (defn cdr-zeros (k) (if (eq k 0) "" (str_concat (byte_to_str 0) (cdr-zeros (sub k 1)))))
+    (defn cdr-zeros (k) (if (eq k 0) (empty) (cons 0 (cdr-zeros (sub k 1)))))
 
     (defn cdr-pad (buf n)
         (do
-            (let rem (mod (str_len buf) n))
-            (if (eq rem 0) buf (str_concat buf (cdr-zeros (sub n rem))))))
+            (let rem (mod (len buf) n))
+            (if (eq rem 0) buf (append buf (cdr-zeros (sub n rem))))))
 
-    (defn cdr-put-octet (buf v) (str_concat buf (byte_to_str v)))
+    (defn cdr-put-octet (buf v) (append buf (list v)))
 
     ; unsigned 32-bit, big-endian ("byte order flag 0" — CORBA's network
     ; byte order convention, the same one GIOP defaults to).
     (defn cdr-put-ulong (buf v)
-        (do
-            (let b (cdr-pad buf 4))
-            (str_concat b
-                (str_concat (byte_to_str (mod (div v 16777216) 256))
-                    (str_concat (byte_to_str (mod (div v 65536) 256))
-                        (str_concat (byte_to_str (mod (div v 256) 256))
-                            (byte_to_str (mod v 256))))))))
+        (append (cdr-pad buf 4)
+            (list (mod (div v 16777216) 256) (mod (div v 65536) 256)
+                  (mod (div v 256) 256) (mod v 256))))
 
     ; signed 32-bit: two's complement of the unsigned encoding above.
     (defn cdr-put-long (buf v) (cdr-put-ulong buf (if (lt v 0) (add v 4294967296) v)))
 
     ; CDR string: ulong length (INCLUDES the NUL terminator) + octets + NUL.
+    (defn cdr-str-octets (s i)
+        (if (ge i (str_len s)) (list 0) (cons (str_byte_at s i) (cdr-str-octets s (add i 1)))))
     (defn cdr-put-string (buf s)
-        (do
-            (let b (cdr-put-ulong buf (add (str_len s) 1)))
-            (str_concat b (str_concat s (byte_to_str 0)))))
+        (append (cdr-put-ulong buf (add (str_len s) 1)) (cdr-str-octets s 0)))
 
     ; --- IEEE754 double: decompose/reassemble sign+exponent+mantissa ----
 
@@ -143,15 +143,11 @@
             (let byte0 (add (mul sign 128) (div biased-exp 16)))
             (let byte1 (add (mul (mod biased-exp 16) 16) (div mantissa 281474976710656)))
             (let rest48 (mod mantissa 281474976710656))
-            (str_concat b
-                (str_concat (byte_to_str byte0)
-                    (str_concat (byte_to_str byte1)
-                        (str_concat (byte_to_str (mod (div rest48 1099511627776) 256))
-                            (str_concat (byte_to_str (mod (div rest48 4294967296) 256))
-                                (str_concat (byte_to_str (mod (div rest48 16777216) 256))
-                                    (str_concat (byte_to_str (mod (div rest48 65536) 256))
-                                        (str_concat (byte_to_str (mod (div rest48 256) 256))
-                                            (byte_to_str (mod rest48 256))))))))))))
+            (append b
+                (list byte0 byte1
+                      (mod (div rest48 1099511627776) 256) (mod (div rest48 4294967296) 256)
+                      (mod (div rest48 16777216) 256) (mod (div rest48 65536) 256)
+                      (mod (div rest48 256) 256) (mod rest48 256)))))
 
     ; NOTE: cdr-get-double's own body lives further down, right after
     ; cdr-align/cdr-get-string — it needs cdr-align, which isn't defined
@@ -201,7 +197,7 @@
             (if (eq (len x) 0) buf
                 (cdr-emit 1 (tail x) registry (cdr-emit 0 (head x) registry buf)))))
 
-    (defn cdr-emit-node (node registry) (cdr-emit 0 node registry ""))
+    (defn cdr-emit-node (node registry) (cdr-emit 0 node registry (empty)))
 
     (defn cell-to-cdr (node registry) (cdr-emit-node node registry))
 
@@ -209,15 +205,15 @@
 
     (defn cdr-align (i n) (mul (div (add i (sub n 1)) n) n))
 
-    (defn cdr-get-octet (buf i) (list (str_byte_at buf i) (add i 1)))
+    (defn cdr-get-octet (buf i) (list (nth buf i) (add i 1)))
 
     (defn cdr-get-ulong (buf i)
         (do
             (let i2 (cdr-align i 4))
-            (let v (add (mul (str_byte_at buf i2) 16777216)
-                    (add (mul (str_byte_at buf (add i2 1)) 65536)
-                        (add (mul (str_byte_at buf (add i2 2)) 256)
-                            (str_byte_at buf (add i2 3))))))
+            (let v (add (mul (nth buf i2) 16777216)
+                    (add (mul (nth buf (add i2 1)) 65536)
+                        (add (mul (nth buf (add i2 2)) 256)
+                            (nth buf (add i2 3))))))
             (list v (add i2 4))))
 
     (defn cdr-get-long (buf i)
@@ -226,25 +222,29 @@
             (let v (head r))
             (list (if (ge v 2147483648) (sub v 4294967296) v) (head (tail r)))))
 
+    ; k octets from the front of xs, rebuilt as a string
+    (defn cdr-octets-str (xs k acc)
+        (if (eq k 0) acc (cdr-octets-str (tail xs) (sub k 1) (str_concat acc (byte_to_str (head xs))))))
+
     (defn cdr-get-string (buf i)
         (do
             (let r (cdr-get-ulong buf i))
             (let n (head r))              ; includes the NUL terminator
             (let content-start (head (tail r)))
-            (list (substring buf content-start (add content-start (sub n 1)))
+            (list (cdr-octets-str (drop content-start buf) (sub n 1) "")
                 (add content-start n))))
 
     (defn cdr-get-double (buf i)
         (do
             (let i2 (cdr-align i 8))
-            (let b0 (str_byte_at buf i2))
-            (let b1 (str_byte_at buf (add i2 1)))
-            (let b2 (str_byte_at buf (add i2 2)))
-            (let b3 (str_byte_at buf (add i2 3)))
-            (let b4 (str_byte_at buf (add i2 4)))
-            (let b5 (str_byte_at buf (add i2 5)))
-            (let b6 (str_byte_at buf (add i2 6)))
-            (let b7 (str_byte_at buf (add i2 7)))
+            (let b0 (nth buf i2))
+            (let b1 (nth buf (add i2 1)))
+            (let b2 (nth buf (add i2 2)))
+            (let b3 (nth buf (add i2 3)))
+            (let b4 (nth buf (add i2 4)))
+            (let b5 (nth buf (add i2 5)))
+            (let b6 (nth buf (add i2 6)))
+            (let b7 (nth buf (add i2 7)))
             (let sign (div b0 128))
             (let biased-exp (add (mul (mod b0 128) 16) (div b1 16)))
             (let rest48
