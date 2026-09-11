@@ -46,65 +46,101 @@ section [form.bml] {
         def pm-parse-go(s, i, n) = if ge(i, n) then 0 else if eq(pm-door-byte(str_byte_at(s, i)), 1) then sub(str_byte_at(s, i), 48) else pm-parse-go(s, add(i, 1), n);
         def pm-parse(s) = pm-parse-go(s, 0, str_len(s));
 
-        // Only the provider's call-local `last_token_usage` object counts.
-        // A rollout-level `total_token_usage` repeats its prior cumulative
-        // values and must never be summed as a per-call quantity.
-        def rtm-output-mark() = str_concat(str_concat(byte_to_str(34), "output_tokens"), str_concat(byte_to_str(34), ":"));
-        def rtm-last-usage-mark() = str_concat(str_concat(byte_to_str(34), "last_token_usage"), str_concat(byte_to_str(34), ":"));
-        def rtm-line-end(text, from) {
-            let at = str_find(text, "\n", from);
-            if lt(at, 0) then str_len(text) else at;
+        // Two carriers write the rented mind's output spend as JSONL rows.
+        // A Codex rollout row counts its call-local `last_token_usage`
+        // object; a rollout-level `total_token_usage` repeats prior
+        // cumulative values and is never summed as a per-call quantity.
+        // A Claude Code transcript row carries the assistant message's
+        // `usage` and the `requestId` that billed it. That carrier writes one
+        // row per content block of a response, each repeating the response's
+        // usage, and can re-append earlier rows verbatim, so one request is
+        // one spend, counted once. Its usage repeats `output_tokens` inside
+        // `iterations`; the first one after `usage` is the response's own.
+        def rtm-mark(name) = str_concat(str_concat(byte_to_str(34), name), str_concat(byte_to_str(34), ":"));
+        def rtm-output-mark() = rtm-mark("output_tokens");
+        def rtm-last-usage-mark() = rtm-mark("last_token_usage");
+        def rtm-usage-mark() = rtm-mark("usage");
+        def rtm-request-mark() = str_concat(rtm-mark("requestId"), byte_to_str(34));
+        def rtm-seen-none() = ",";
+        def rtm-seen-key(reqId) = str_concat(",", str_concat(reqId, ","));
+        def rtm-row-output(text, markAt, rowEnd) {
+            let outAt = str_find(text, rtm-output-mark(), markAt);
+            let value = if or(lt(outAt, 0), ge(outAt, rowEnd)) then 0 else fmv-field-int(text, add(outAt, str_len(rtm-output-mark())), 0, 0);
+            if lt(value, 0) then 0 else value;
         }
-        def rtm-last-output-at(text, usageAt, end) {
-            let at = str_find(text, rtm-output-mark(), usageAt);
-            if or(lt(at, 0), ge(at, end)) then sub(0, 1) else at;
+        // The request that billed a transcript row, or "" when the row names
+        // none: a carrier-local synthetic message spends nothing.
+        def rtm-row-request(text, usageAt, rowEnd) {
+            let reqAt = str_find(text, rtm-request-mark(), usageAt);
+            let outAt = str_find(text, rtm-output-mark(), usageAt);
+            let idAt = add(reqAt, str_len(rtm-request-mark()));
+            let closeAt = if lt(reqAt, 0) then sub(0, 1) else str_find(text, byte_to_str(34), idAt);
+            if or(lt(reqAt, 0), ge(reqAt, rowEnd)) then "" else if or(lt(outAt, 0), ge(outAt, reqAt)) then "" else if or(lt(closeAt, 0), ge(closeAt, rowEnd)) then "" else substring(text, idAt, closeAt);
         }
-        // One self-recursive scanner replaces the older sum-go -> sum-at ->
-        // sum-go pair. It keeps one slice alive while it scans and advances
-        // one complete JSONL row at a time.
-        def rtm-sum-go(text, from, acc) {
-            let usageAt = str_find(text, rtm-last-usage-mark(), from);
-            let end = rtm-line-end(text, if lt(usageAt, 0) then from else usageAt);
-            let outputAt = rtm-last-output-at(text, usageAt, end);
-            if lt(usageAt, 0) then acc else rtm-sum-go(text, add(end, 1), if lt(outputAt, 0) then acc else add(acc, fmv-field-int(text, add(outputAt, str_len(rtm-output-mark())), 0, 0)));
+        def rtm-next-at(text, mark, cached, from) = if eq(cached, sub(0, 1)) then cached else if ge(cached, from) then cached else str_find(text, mark, from);
+        def rtm-first-at(a, b) = if lt(a, 0) then b else if lt(b, 0) then a else if lt(a, b) then a else b;
+        def rtm-rest-at(text, from) {
+            let tailAt = sub(str_len(text), rtm-over());
+            if gt(from, tailAt) then from else tailAt;
         }
+        // One self-recursive scanner walks a slice one whole row at a time
+        // and answers list(sum, resume, seen). A row is decided once its
+        // newline stands in the slice. A marked row still open stops the walk
+        // and resume names its first mark, so the next slice, or the next
+        // reading of a growing transcript, starts there and reads the row
+        // once, whole. With no open row, resume holds back the last
+        // rtm-over() bytes, where a mark may still be cut. The next Codex and
+        // transcript mark positions ride along, so each mark is searched once.
+        def rtm-scan-go(text, from, codexAt, usageAt, acc, seen) {
+            let nextCodex = rtm-next-at(text, rtm-last-usage-mark(), codexAt, from);
+            let nextUsage = rtm-next-at(text, rtm-usage-mark(), usageAt, from);
+            let rowAt = rtm-first-at(nextCodex, nextUsage);
+            let rowEnd = if lt(rowAt, 0) then sub(0, 1) else str_find(text, "\n", rowAt);
+            let isCodex = if lt(rowEnd, 0) then 0 else if lt(nextCodex, 0) then 0 else if lt(nextCodex, rowEnd) then 1 else 0;
+            let reqId = if lt(rowEnd, 0) then "" else if eq(isCodex, 1) then "" else rtm-row-request(text, nextUsage, rowEnd);
+            let isFresh = if str_eq(reqId, "") then 0 else if ge(str_find(seen, rtm-seen-key(reqId), 0), 0) then 0 else 1;
+            let spend = if eq(isCodex, 1) then rtm-row-output(text, nextCodex, rowEnd) else if eq(isFresh, 1) then rtm-row-output(text, nextUsage, rowEnd) else 0;
+            if lt(rowAt, 0) then list(acc, rtm-rest-at(text, from), seen) else if lt(rowEnd, 0) then list(acc, rowAt, seen) else rtm-scan-go(text, add(rowEnd, 1), nextCodex, nextUsage, add(acc, spend), if eq(isFresh, 1) then str_concat(seen, str_concat(reqId, ",")) else seen);
+        }
+        def rtm-scan(text, acc, seen) = rtm-scan-go(text, 0, sub(0, 2), sub(0, 2), acc, seen);
+        def rtm-sum(text) = nth(rtm-scan(text, 0, rtm-seen-none()), 0);
         def rtm-chunk() = 1048576;
         def rtm-over() = 32;
-        def rtm-slice-sum(text, first) = rtm-sum-go(text, if eq(first, 1) then 0 else rtm-over(), 0);
-        // The tail call is direct.  On a large private rollout this bounds
-        // retained source text to the one current chunk instead of one chunk
-        // per caller frame.  The 32-byte overlap remains scanner correctness,
-        // not a replay: later slices start scanning after that overlap.
-        def rtm-file-go(path, size, off, acc, first) {
-            let ended = ge(off, size);
-            let text = if ended then "" else read_file_slice(path, off, rtm-chunk());
-            let next = if ge(add(off, rtm-chunk()), size) then size else sub(add(off, rtm-chunk()), rtm-over());
-            let total = add(acc, rtm-slice-sum(text, first));
-            if ended then acc else rtm-file-go(path, size, next, total, 0);
+        // The walk answers list(sum, decided-extent, seen). Each slice after
+        // the first begins where the previous one stopped deciding rows. The
+        // tail call is direct, so a large private rollout retains one chunk
+        // at a time. A marked row reaching past a whole chunk from its mark
+        // is the one row the walk steps over unread.
+        def rtm-file-go(path, size, off, acc, seen, chunk) {
+            let slice = if ge(off, size) then "" else read_file_slice(path, off, chunk);
+            let scanned = rtm-scan(slice, acc, seen);
+            let resumeAt = nth(scanned, 1);
+            let stepBy = if gt(resumeAt, 0) then resumeAt else sub(str_len(slice), rtm-over());
+            let goOn = if ge(add(off, str_len(slice)), size) then 0 else if gt(stepBy, 0) then 1 else 0;
+            if eq(goOn, 1) then rtm-file-go(path, size, add(off, stepBy), nth(scanned, 0), nth(scanned, 2), chunk) else list(nth(scanned, 0), add(off, resumeAt), nth(scanned, 2));
         }
-        def rtm-sum(text) = rtm-sum-go(text, 0, 0);
-        def rtm-session-total(path) = rtm-file-go(path, file_size(path), 0, 0, 1);
 
         // A meter state is caller-bound to one private rollout path. It keeps
-        // a completed byte extent and its exact cumulative output-token sum;
+        // the byte extent whose rows are decided, their exact cumulative
+        // output-token sum, and the transcript requests already counted;
         // a changed path or a shrunk rollout deliberately begins again.
-        field RtmStateTag = "form-cli-rented-turn-meter-state-v2";
+        field RtmStateTag = "form-cli-rented-turn-meter-state-v3";
         def rtm-state-tag() = RtmStateTag();
-        def rtm-state(path, size, total) = list(rtm-state-tag(), path, size, total);
-        def rtm-state?(value) = if nothing?(value) then 0 else if not(eq(len(value), 4)) then 0 else str_eq(nth(value, 0), rtm-state-tag());
+        def rtm-state(path, extent, total, seen) = list(rtm-state-tag(), path, extent, total, seen);
+        def rtm-state?(value) = if nothing?(value) then 0 else if not(eq(len(value), 5)) then 0 else str_eq(nth(value, 0), rtm-state-tag());
         def rtm-state-path(value) = nth(value, 1);
-        def rtm-state-size(value) = nth(value, 2);
+        def rtm-state-extent(value) = nth(value, 2);
         def rtm-state-total(value) = nth(value, 3);
-        def rtm-state-text(value) = str_concat(pm-line(rtm-state-tag(), ""), str_concat(pm-line(rtm-state-path(value), ""), str_concat(pm-line(int_to_str(rtm-state-size(value)), ""), pm-line(int_to_str(rtm-state-total(value)), ""))));
+        def rtm-state-seen(value) = nth(value, 4);
+        def rtm-state-text(value) = str_concat(pm-line(rtm-state-tag(), ""), str_concat(pm-line(rtm-state-path(value), ""), str_concat(pm-line(int_to_str(rtm-state-extent(value)), ""), str_concat(pm-line(int_to_str(rtm-state-total(value)), ""), pm-line(rtm-state-seen(value), "")))));
         def rtm-state-from-text(text) {
             let rows = split-on(if nothing?(text) then "" else text, "\n");
-            if lt(len(rows), 4) then nothing() else if not(str_eq(nth(rows, 0), rtm-state-tag())) then nothing() else rtm-state(nth(rows, 1), str_to_int(nth(rows, 2)), str_to_int(nth(rows, 3)));
+            if lt(len(rows), 5) then nothing() else if not(str_eq(nth(rows, 0), rtm-state-tag())) then nothing() else rtm-state(nth(rows, 1), str_to_int(nth(rows, 2)), str_to_int(nth(rows, 3)), nth(rows, 4));
         }
-        def rtm-state-current?(value, path, size) = if eq(rtm-state?(value), 0) then 0 else if not(str_eq(rtm-state-path(value), path)) then 0 else if gt(rtm-state-size(value), size) then 0 else 1;
-        def rtm-state-base-size(value, path, size) = if eq(rtm-state-current?(value, path, size), 1) then rtm-state-size(value) else 0;
+        def rtm-state-current?(value, path, size) = if eq(rtm-state?(value), 0) then 0 else if not(str_eq(rtm-state-path(value), path)) then 0 else if gt(rtm-state-extent(value), size) then 0 else 1;
+        def rtm-state-scan-start(value, path, size) = if eq(rtm-state-current?(value, path, size), 1) then rtm-state-extent(value) else 0;
         def rtm-state-base-total(value, path, size) = if eq(rtm-state-current?(value, path, size), 1) then rtm-state-total(value) else 0;
-        def rtm-state-scan-start(value, path, size) = if le(rtm-state-base-size(value, path, size), rtm-over()) then 0 else sub(rtm-state-base-size(value, path, size), rtm-over());
-        def rtm-state-scan-first(value, path, size) = if eq(rtm-state-scan-start(value, path, size), 0) then 1 else 0;
+        def rtm-state-base-seen(value, path, size) = if eq(rtm-state-current?(value, path, size), 1) then rtm-state-seen(value) else rtm-seen-none();
     }
     0;
 }
