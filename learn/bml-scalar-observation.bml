@@ -1,0 +1,91 @@
+// Local-teacher practice is distinct from fresh student transfer tests.
+// preludes: learn/bml-scalar-practice.bml learn/bml-native-teacher.bml
+section [form.bml] {
+ class BmlScalarObservation {
+  def bso-manifest(home) {
+   let manifest = nsm-json(nsm-at(home,"manifest.json"));
+   let source = str_eq(nsm-str(manifest,"source_sha256"),nsm-hash(nsm-text("learn/bml-scalar-practice.bml")));
+   let rows = and(beo-bound-rows(beo-rows(manifest,"practice"),bsp-training()),beo-bound-rows(beo-rows(manifest,"test"),bsp-tests()));
+   if and(source,rows) then manifest else form_error("Scalar curriculum changed after preparation");
+  }
+  def bso-condition(home,label,adapter,kind) {
+   let manifest = bso-manifest(home); let dir = nsm-at(home,label);
+   if fs-exists?(dir) then form_error("Preserve previous scalar generation") else bso-generate(home,dir,manifest,adapter,kind);
+  }
+  def bso-generate(home,dir,manifest,adapter,kind) {
+   let made = fs-mkdir(dir);
+   let saved = nsm-write(nsm-at(dir,"condition.json"),json-node-object(list(nsm-s("manifest_sha256",nsm-hash(nsm-text(nsm-at(home,"manifest.json")))),nsm-s("kind",kind),nsm-n("evaluation",if str_eq(kind,"test") then 1 else 0))));
+   let generated = if str_eq(kind,"test") then beo-generate-context(home,dir,adapter,manifest,"") else bnt-batch(dir,"qwen38-q8",8192,bso-context(),beo-rows(manifest,"practice"));
+   nsm-write(nsm-at(dir,"condition.json"),oh-set(nsm-json(nsm-at(dir,"condition.json")),"kind",json-node-string(kind)));
+  }
+  def bso-context() = str_concat("Executed repository BML example (a different function):\n",str_concat(bep-pick(),"\nIts behavior preserves zero as present. Now follow the new contract.\n"));
+  def bso-teacher-test(home,label) {
+   let manifest = bso-manifest(home); let dir = nsm-at(home,label);
+   if fs-exists?(dir) then form_error("Preserve previous local teacher transfer") else bso-teacher-test-fresh(home,dir,manifest);
+  }
+  def bso-teacher-test-fresh(home,dir,manifest) {
+   let made = fs-mkdir(dir); let context = beo-practice-context(beo-rows(manifest,"practice"));
+   let saved = nag-write(nsm-at(dir,"context.txt"),context);
+   let condition = json-node-object(list(nsm-s("manifest_sha256",nsm-hash(nsm-text(nsm-at(home,"manifest.json")))),nsm-s("kind","test"),nsm-n("evaluation",1),nsm-s("context_sha256",nsm-hash(context)),nsm-s("scope","Local Qwen transfer with verified practice references; no test answers, LoRA or training")));
+   let bound = nsm-write(nsm-at(dir,"condition.json"),condition);
+   bnt-batch(dir,"qwen38-q8",8192,context,beo-rows(manifest,"test"));
+  }
+  def bso-grade(home,label,kind) {
+   let manifest = bso-manifest(home); let dir = nsm-at(home,label);
+   let condition = nsm-json(nsm-at(dir,"condition.json")); let generation = nsm-json(nsm-at(dir,"generation.json"));
+   let rows = beo-rows(manifest,kind);
+   let bound = and(str_eq(nsm-str(condition,"kind"),kind),str_eq(nsm-str(condition,"manifest_sha256"),nsm-hash(nsm-text(nsm-at(home,"manifest.json")))));
+   let completed = and(eq(nsm-num(generation,"adapter_unchanged"),1),eq(len(beo-rows(generation,"responses")),len(rows)));
+   if or(not(and(bound,completed)),fs-exists?(nsm-at(dir,"reading.json"))) then form_error("Scalar grading requires a completed, ungraded, bound generation") else bso-grade-ready(home,dir,rows,kind);
+  }
+  def bso-practice-rows(home,dir,rows) = if nil?(rows) then list() else cons(bso-practice-row(home,dir,head(rows)),bso-practice-rows(home,dir,tail(rows)));
+  def bso-practice-row(home,dir,row) {
+   let id = nsm-str(row,"id"); let response = nsm-json(nsm-at(dir,str_concat(id,".response.json")));
+   let rawCheck = beo-code(dir,row,response);
+   let checked = if json-object-has?(response,"transport") then oh-set(rawCheck,"assistance",oh-get(response,"transport")) else rawCheck;
+   let reading = oh-set(oh-set(checked,"id",json-node-string(id)),"stop_reason",json-node-string(nsm-str(response,"reason")));
+   let saved = nsm-write(nsm-at(dir,str_concat(id,".reading.json")),reading);
+   let healthy = and(eq(nsm-num(reading,"verified"),1),str_eq(nsm-str(response,"reason"),""));
+   let health = oh-reading("native-bml-teacher",dir,id,json-node-int(1),json-node-int(healthy),json-node-int(healthy),if healthy then list() else list(oh-need("compiler-grounded-repair",oh-reference(nsm-at(dir,str_concat(id,".reading.json"))))),list("retain-verified-practice","repair-proposal"),oh-reference(nsm-at(dir,str_concat(id,".reading.json"))));
+   let event = nsm-event(home,"teacher-practice-observed",list(json-node-pair("health",health)));
+   reading;
+  }
+  def bso-grade-ready(home,dir,rows,kind) {
+   let cases = if str_eq(kind,"test") then beo-grade-rows(home,dir,rows) else bso-practice-rows(home,dir,rows);
+   let result = json-node-object(list(nsm-s("condition",dir),nsm-n("observed_at_ms",now_unix_ms()),json-node-pair("cases",json-node-array(cases))));
+   let saved = nsm-write(nsm-at(dir,"reading.json"),result); let shown = beo-show-cases(cases);
+   result;
+  }
+  // A whole-response BML fence is transport. Retain its exact interior byte span.
+  // Surrounding prose, a missing close or multiple blocks are not silently removed.
+  def bso-payload(raw) {
+   let text = trim(raw); let open = str_find(text,"\n",0); let close = if lt(open,0) then -1 else str_find(text,"\n```",open);
+   let header = if lt(open,0) then "" else substring(text,0,open);
+   let framed = and(or(str_eq(header,"```bml"),or(str_eq(header,"```form.bml"),str_eq(header,"```"))),and(ge(close,0),str_eq(trim(substring(text,add(close,4),str_len(text))),"")));
+   if framed then list("single-BML-fence-body; no code edits",substring(text,add(open,1),close)) else list("unchanged response",raw);
+  }
+  def bso-extract-row(prior,dir,row) {
+   let id = nsm-str(row,"id"); let source = nsm-at(prior,str_concat(id,".response.json")); let response = nsm-json(source); let payload = bso-payload(nsm-str(response,"text"));
+   let next = oh-set(oh-set(oh-set(response,"text",json-node-string(nth(payload,1))),"transport",json-node-string(head(payload))),"source_response",json-node-string(source));
+   let kept = nsm-write(nsm-at(dir,str_concat(id,".response.json")),next);
+   let prompt = nag-write(nsm-at(dir,str_concat(id,".prompt")),nsm-text(nsm-at(prior,str_concat(id,".prompt"))));
+   let proposal = nag-write(nsm-at(dir,str_concat(id,".proposal")),nth(payload,1));
+   next;
+  }
+  def bso-extract-rows(prior,dir,rows) = if nil?(rows) then list() else cons(bso-extract-row(prior,dir,head(rows)),bso-extract-rows(prior,dir,tail(rows)));
+  def bso-extract(home,label,parent) {
+   let manifest = bso-manifest(home); let prior = nsm-at(home,parent); let dir = nsm-at(home,label); let condition = nsm-json(nsm-at(prior,"condition.json"));
+   let kind = nsm-str(condition,"kind");
+   let bound = and(or(str_eq(kind,"practice"),str_eq(kind,"test")),str_eq(nsm-str(condition,"manifest_sha256"),nsm-hash(nsm-text(nsm-at(home,"manifest.json")))));
+   if or(fs-exists?(dir),not(and(bound,fs-exists?(nsm-at(prior,"reading.json"))))) then form_error("Transport extraction needs a graded bound parent and a fresh condition") else bso-extract-ready(home,prior,dir,manifest,condition);
+  }
+  def bso-extract-ready(home,prior,dir,manifest,condition) {
+   let start = host_monotonic_ms(); let made = fs-mkdir(dir); let source = nsm-json(nsm-at(prior,"generation.json"));
+   let responses = bso-extract-rows(prior,dir,beo-rows(manifest,nsm-str(condition,"kind")));
+   let kept = nsm-write(nsm-at(dir,"condition.json"),oh-set(oh-set(condition,"transport",json-node-string("single-BML-fence extraction; original response retained")),"parent",json-node-string(prior)));
+   let report = json-node-object(list(nsm-s("model",nsm-str(source,"model")),nsm-n("adapter_unchanged",1),nsm-s("source_generation",nsm-at(prior,"generation.json")),nsm-n("new_model_calls",0),nsm-n("new_model_tokens",0),nsm-n("training_updates",0),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),json-node-pair("responses",json-node-array(responses))));
+   nsm-write(nsm-at(dir,"generation.json"),report);
+  }
+ }
+ 0;
+}
