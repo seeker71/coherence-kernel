@@ -16091,12 +16091,14 @@ static void fk_diag_flush(void) {
 #define FK_HEAT_REPORT_MIN 100000
 /* the live pulse: every ~64M dispatches the report rewrites, so a long
  * walker is CAUGHT during flight (the glass reads the file), not
- * discovered after lunch. One file per working directory, last hot
- * writer speaks — a catching signal, not a ledger. */
+ * discovered after lunch. A catching signal, not a ledger: each process
+ * writes its own board, named by its pid, and a hot exit takes back the
+ * boards of writers that have ended (fk_heat_bury_ended). */
 #define FK_HEAT_PULSE_MASK ((1LL << 26) - 1)
 static int fk_heat_reported;
 
-static void fk_heat_write(void) {
+/* answers which boards it placed: 1 the heat board, 2 the boxing board */
+static int fk_heat_write(void) {
     long long top = fk_fn_count;
     char path[96], tmp[112], bpath[96], btmp[112];
     sprintf(path, ".fkwu-heat.%d", getpid());
@@ -16105,6 +16107,7 @@ static void fk_heat_write(void) {
     sprintf(btmp, ".fkwu-boxing.%d.tmp", getpid());
     int fd = -1;
     int bfd = -1;
+    int placed = 0;
     /* NAME BY THE MAP, NOT BY COINCIDENCE: heat is per fn-INDEX, names
      * live in the symbol table keyed by fk_fnidx[symtop] -> fnidx. On a
      * fresh compile the two spaces coincide and indexing symbols with
@@ -16179,6 +16182,8 @@ static void fk_heat_write(void) {
         if (close(fd) == 0) {
             if (rename(tmp, path) != 0) {
                 unlink(tmp);
+            } else {
+                placed = placed | 1;
             }
         } else {
             unlink(tmp);
@@ -16188,11 +16193,55 @@ static void fk_heat_write(void) {
         if (close(bfd) == 0) {
             if (rename(btmp, bpath) != 0) {
                 unlink(btmp);
+            } else {
+                placed = placed | 2;
             }
         } else {
             unlink(btmp);
         }
     }
+    return placed;
+}
+/* A process that places a board at exit becomes the last hot writer of its kind in this directory, and
+ * takes back the boards of writers that have ended, their staging .tmp files with them. A board whose pid
+ * still answers, a living process of this user or another, is never touched: the glass reads its resident's
+ * board while it runs, and the per-pid name exists so that a short run cannot erase it. */
+static void fk_heat_bury_ended(const char *prefix) {
+#ifdef FK_HAVE_DIRENT_HEADER
+    DIR *d = opendir(".");
+    if (!d) {
+        return;
+    }
+    long long self = (long long)getpid();
+    long long pn = 0;
+    while (prefix[pn] != 0) {
+        pn = pn + 1;
+    }
+    struct dirent *e;
+    while ((e = readdir(d)) != 0) {
+        if (!fk_starts(e->d_name, prefix)) {
+            continue;
+        }
+        const char *q = e->d_name + pn;
+        long long pid = 0;
+        while (*q >= '0' && *q <= '9') {
+            pid = pid * 10 + (*q - '0');
+            q = q + 1;
+        }
+        if (q == e->d_name + pn) {
+            continue;
+        }
+        if (*q != 0 && !(q[0] == FK_CH_DOT && q[1] == 't' && q[2] == 'm' && q[3] == 'p' && q[4] == 0)) {
+            continue;
+        }
+        if (pid != self && fk_pid_gone(pid)) {
+            unlink(e->d_name);
+        }
+    }
+    closedir(d);
+#else
+    (void)prefix;
+#endif
 }
 static void fk_heat_report(void) {
     if (fk_heat_reported) {
@@ -16201,7 +16250,9 @@ static void fk_heat_report(void) {
     fk_heat_reported = 1;
     fk_live_publish(1);
     if (fk_store_shared) { fk_store_unlink_pid((long long)getpid()); }
-    fk_heat_write();
+    int placed = fk_heat_write();
+    if (placed & 1) { fk_heat_bury_ended(".fkwu-heat."); }
+    if (placed & 2) { fk_heat_bury_ended(".fkwu-boxing."); }
 }
 static void fk_heat_pulse(void) {
     fk_heat_total = fk_heat_total + 1;
