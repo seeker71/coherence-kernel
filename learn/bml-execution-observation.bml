@@ -1,0 +1,218 @@
+// Generation, execution and learning remain separately observable actions.
+// A caller inspects generated code before requesting execution of its tests.
+// preludes: learn/bml-execution-practice.bml form-stdlib/native-session-learning.bml form-stdlib/bml/form-agent-json-query.bml
+section [form.bml] {
+ class BmlExecutionObservation {
+  def beo-manifest(home) {
+   let manifest = nsm-json(nsm-at(home,"manifest.json"));
+   let source = str_eq(nsm-str(manifest,"source_sha256"),nsm-hash(nsm-text("learn/bml-execution-practice.bml")));
+   let rows = and(beo-bound-rows(beo-rows(manifest,"practice"),bep-training()),beo-bound-rows(beo-rows(manifest,"test"),bep-tests()));
+   if not(and(source,rows)) then form_error("BML curriculum changed after preparation; prepare a fresh comparison") else manifest;
+  }
+  def beo-rows(manifest,field) = json-array-elements(json-object-get(manifest,field));
+  def beo-bound-fields(row,reference,fields) = if nil?(fields) then 1 else and(str_eq(nsm-str(row,head(fields)),nsm-str(reference,head(fields))),beo-bound-fields(row,reference,tail(fields)));
+  def beo-bound-rows(rows,references) = if not(eq(len(rows),len(references))) then 0 else if nil?(rows) then 1 else and(beo-bound-fields(head(rows),head(references),list("id","prompt","answer","checks","expected","kind")),beo-bound-rows(tail(rows),tail(references)));
+  def beo-condition(home,label) = nsm-at(home,label);
+  def beo-generate(home,label,adapter) {
+   let manifest = beo-manifest(home); let dir = beo-condition(home,label);
+   if fs-exists?(dir) then form_error("BML generation condition already exists; preserve its observations") else beo-generate-fresh(home,dir,adapter,manifest);
+  }
+  def beo-generate-fresh(home,dir,adapter,manifest) = beo-generate-context(home,dir,adapter,manifest,"");
+  def beo-generate-context(home,dir,adapter,manifest,context) {
+   let made = fs-mkdir(dir); let start = host_monotonic_ms(); let seal = nsl-adapter-seal(adapter);
+   let unassisted = and(str_eq(value_kind(context),"string"),str_eq(context,""));
+   let scope = if unassisted then "fresh compositions; supplied contracts and syntax; no RAG, answer hints or intervening training" else "assisted practice on the same compositions; executed practice references supplied; no test answers or intervening training";
+   let contextText = if str_eq(value_kind(context),"string") then context else json-emit-precise(context);
+   let kept = nag-write(nsm-at(dir,"context.txt"),contextText);
+   let admitted = nsm-write(nsm-at(dir,"condition.json"),json-node-object(list(nsm-s("model",nsm-model()),nsm-s("adapter",adapter),nsm-s("adapter_seal",seal),nsm-s("manifest_sha256",nsm-hash(nsm-text(nsm-at(home,"manifest.json")))),nsm-s("context_sha256",nsm-hash(contextText)),nsm-s("scope",scope))));
+   let session = nlg-open-at(nsm-model(),adapter,nsm-at(dir,"admission.events.jsonl"));
+   let rows = beo-generate-rows(dir,session,beo-rows(manifest,"test"),context);
+   let closed = nlg-close(session);
+   let unchanged = str_eq(seal,nsl-adapter-seal(adapter));
+   let report = json-node-object(list(nsm-s("adapter",adapter),nsm-n("adapter_unchanged",unchanged),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),nsm-n("remote_model_calls",0),nsm-n("training_updates",0),nsm-n("retained_buffers",nth(metal_live(),2)),json-node-pair("responses",json-node-array(rows))));
+   nsm-write(nsm-at(dir,"generation.json"),report);
+  }
+  def beo-generate-rows(dir,session,rows,context) = if eq(len(rows),0) then list() else cons(beo-generate-row(dir,session,head(rows),context),beo-generate-rows(dir,session,tail(rows),context));
+  def beo-generate-row(dir,session,row,context) {
+   let id = nsm-str(row,"id"); let stem = nsm-at(dir,id);
+   let selectedContext = if str_eq(value_kind(context),"string") then context else nsm-str(context,id);
+   let prompt = str_concat(selectedContext,nsm-str(row,"prompt"));
+   let saved = nag-write(str_concat(stem,".prompt"),prompt); let start = host_monotonic_ms();
+   let announced = print_str(str_concat("generating=",str_concat(id,"\n")));
+   let answer = nlg-ask(session,prompt,0,str_concat(stem,".stream"),str_concat(stem,".cancel"),str_concat(stem,".events.jsonl"));
+   let result = json-node-object(list(nsm-s("id",id),nsm-s("text",head(answer)),nsm-s("reason",nth(answer,1)),nsm-n("tokens",nth(answer,2)),nsm-n("wall_ms",sub(host_monotonic_ms(),start)),nsm-s("prompt_sha256",nsm-hash(prompt))));
+   let saved = nsm-write(str_concat(stem,".response.json"),result);
+   let wrote = nag-write(str_concat(stem,".proposal"),head(answer));
+   let shown = print_str(str_concat("generated=",str_concat(id,str_concat(" tokens=",str_concat(int_to_str(nth(answer,2)),"\n")))));
+   result;
+  }
+  def beo-practice-context(rows) = if nil?(rows) then "Now solve the following task. Return only the requested output.\n" else if not(beo-reference-valid(head(rows))) then form_error("BML context reference is not execution-bound") else str_concat("Executed repository example:\n",str_concat(nsm-str(head(rows),"prompt"),str_concat("\nVerified answer:\n",str_concat(nsm-str(head(rows),"completion"),str_concat("\n\n",beo-practice-context(tail(rows)))))));
+  def beo-ground(home,label,adapter) {
+   let manifest = beo-manifest(home); let dir = beo-condition(home,label);
+   if fs-exists?(dir) then form_error("BML assisted condition already exists; preserve its observations") else beo-generate-context(home,dir,adapter,manifest,beo-practice-context(beo-rows(manifest,"practice")));
+  }
+  def beo-compiler-feedback(dir,rows) = if nil?(rows) then "" else str_concat(beo-case-feedback(dir,head(rows)),beo-compiler-feedback(dir,tail(rows)));
+  def beo-diagnostic-lines(lines) = if nil?(lines) then "" else str_concat(head(lines),if eq(len(lines),1) then "" else str_concat("\n",beo-diagnostic-lines(tail(lines))));
+  def beo-case-feedback(dir,row) {
+   let id = nsm-str(row,"id"); let reading = nsm-json(nsm-at(dir,str_concat(id,".reading.json")));
+   if or(not(str_eq(nsm-str(row,"kind"),"code")),eq(nsm-num(reading,"verified"),1)) then "" else beo-failed-code(dir,id,reading);
+  }
+  def beo-failed-code(dir,id,reading) {
+   let response = nsm-json(nsm-at(dir,str_concat(id,".response.json")));
+   let execution = oh-get(reading,"execution");
+   let diagnostic = beo-diagnostic-lines(take(3,split-on(nsm-str(execution,"stderr"),"\n")));
+   let result = if eq(nsm-num(execution,"exit"),0) then "It compiled but did not satisfy the caller checks." else str_concat("Compiler exit ",str_concat(int_to_str(nsm-num(execution,"exit")),str_concat(":\n",diagnostic)));
+   str_concat("Prior local attempt for ",str_concat(id,str_concat(":\n",str_concat(nsm-str(response,"text"),str_concat("\nObserved feedback: ",str_concat(result,"\nRevise the attempt using the executed examples and the task contract.\n\n"))))));
+  }
+  def beo-feedback(home,label,adapter,parent) {
+   let manifest = beo-manifest(home); let dir = beo-condition(home,label); let prior = beo-condition(home,parent);
+   let source = nsm-json(nsm-at(prior,"condition.json"));
+   let bound = str_eq(nsm-str(source,"manifest_sha256"),nsm-hash(nsm-text(nsm-at(home,"manifest.json"))));
+   if or(not(bound),not(fs-exists?(nsm-at(prior,"reading.json")))) then form_error("BML feedback requires a graded condition on the same manifest") else if fs-exists?(dir) then form_error("BML feedback condition already exists") else beo-feedback-ready(home,dir,adapter,manifest,prior);
+  }
+  def beo-feedback-ready(home,dir,adapter,manifest,prior) {
+   let feedback = beo-compiler-feedback(prior,beo-rows(manifest,"test"));
+   let context = str_concat(feedback,beo-practice-context(beo-rows(manifest,"practice")));
+   let made = fs-mkdir(dir);
+   let saved = nsm-write(nsm-at(dir,"feedback-source.json"),json-node-object(list(nsm-s("condition",prior),nsm-s("reading_sha256",nsm-hash(nsm-text(nsm-at(prior,"reading.json")))),nsm-s("kind","assisted local repair; no test answer targets"))));
+   beo-generate-context(home,dir,adapter,manifest,context);
+  }
+  def beo-rag-options(query,rows) = if nil?(rows) then list() else cons(beo-rag-option(query,head(rows)),beo-rag-options(query,tail(rows)));
+  def beo-rag-option(query,row) {
+   let features = re-semantic-features(nsm-str(row,"prompt")); let common = nse-common(query,features);
+   let score = if nil?(common) then 0.0 else div(mul(1.0,len(common)),sub(add(len(query),len(features)),len(common)));
+   oh-set(oh-set(row,"feature_overlap",json-precise-float(score)),"matched_features",json-node-array(oh-strings(common)));
+  }
+  def beo-focus-rows(prior,rows,practice) = if nil?(rows) then list() else cons(beo-focus-row(prior,head(rows),practice),beo-focus-rows(prior,tail(rows),practice));
+  def beo-focus-row(prior,row,practice) {
+   let options = beo-rag-options(re-semantic-features(nsm-str(row,"prompt")),practice);
+   let selected = nse-best(options,0,list());
+   let context = str_concat(beo-case-feedback(prior,row),beo-practice-context(selected));
+   json-node-object(list(nsm-s("id",nsm-str(row,"id")),nsm-s("context",context),json-node-pair("offered",json-node-array(options)),json-node-pair("selected",json-node-array(selected))));
+  }
+  def beo-context-pairs(rows) = if nil?(rows) then list() else cons(nsm-s(nsm-str(head(rows),"id"),nsm-str(head(rows),"context")),beo-context-pairs(tail(rows)));
+  def beo-focus(home,label,adapter,parent) {
+   let manifest = beo-manifest(home); let dir = beo-condition(home,label); let prior = beo-condition(home,parent);
+   let source = nsm-json(nsm-at(prior,"condition.json"));
+   let bound = str_eq(nsm-str(source,"manifest_sha256"),nsm-hash(nsm-text(nsm-at(home,"manifest.json"))));
+   if or(not(bound),not(fs-exists?(nsm-at(prior,"reading.json")))) then form_error("BML focus requires a graded condition on the same manifest") else if fs-exists?(dir) then form_error("BML focused condition already exists") else beo-focus-ready(home,dir,adapter,manifest,prior);
+  }
+  def beo-focus-ready(home,dir,adapter,manifest,prior) {
+   let selected = beo-focus-rows(prior,beo-rows(manifest,"test"),beo-rows(manifest,"practice"));
+   let made = fs-mkdir(dir);
+   let saved = nsm-write(nsm-at(dir,"retrieval.json"),json-node-object(list(nsm-s("parent",prior),nsm-s("method","native RAG semantic features; shared-over-union; strongest with ties; only this case feedback"),json-node-pair("cases",json-node-array(selected)))));
+   beo-generate-context(home,dir,adapter,manifest,json-node-object(beo-context-pairs(selected)));
+  }
+  def beo-array-text(raw) {
+   let start = str_find(raw,"[",0); let end = if lt(start,0) then -1 else str_find(raw,"]",start);
+   if or(lt(start,0),lt(end,start)) then "" else substring(raw,start,add(end,1));
+  }
+  def beo-matches(expected,actual,i) = if ge(i,len(expected)) then 0 else add(if lt(i,len(actual)) then str_eq(json-emit-precise(nth(expected,i)),json-emit-precise(nth(actual,i))) else 0,beo-matches(expected,actual,add(i,1)));
+  def beo-prediction(row,response) {
+   let raw = nsm-str(response,"text"); let format = faj-valid(raw); let array = if format then raw else beo-array-text(raw); let valid = faj-valid(array);
+   let expected = json-array-elements(parse-json("reference-output",nsm-str(row,"completion")));
+   let actual = if valid then json-array-elements(parse-json("model-prediction",array)) else list();
+   let correct = beo-matches(expected,actual,0);
+   json-node-object(list(nsm-n("verified",and(format,and(eq(len(expected),len(actual)),eq(correct,len(expected))))),nsm-n("format_valid",format),nsm-n("correct",correct),nsm-n("checks",len(expected)),json-node-pair("expected",json-node-array(expected)),json-node-pair("observed",json-node-array(actual))));
+  }
+  def beo-code(dir,row,response) {
+   let target = nsm-at(dir,str_concat(nsm-str(row,"id"),"-execution")); let made = fs-mkdir(target);
+   let result = bep-execute(target,bep-wrap(nsm-str(response,"text"),nsm-str(row,"checks")));
+   let valid = and(eq(nsm-num(result,"exit"),0),str_eq(bep-first-line(result),nsm-str(row,"expected")));
+   json-node-object(list(nsm-n("verified",valid),json-node-pair("execution",result),nsm-s("evidence",target),nsm-s("assistance","none; exact proposal enclosed by caller test wrapper")));
+  }
+  def beo-grade-row(home,dir,row) {
+   let id = nsm-str(row,"id"); let response = nsm-json(nsm-at(dir,str_concat(id,".response.json")));
+   let reading = if str_eq(nsm-str(row,"kind"),"prediction") then beo-prediction(row,response) else beo-code(dir,row,response);
+   let report = oh-set(oh-set(reading,"id",json-node-string(id)),"stop_reason",json-node-string(nsm-str(response,"reason")));
+   let saved = nsm-write(nsm-at(dir,str_concat(id,".reading.json")),report);
+   let passed = and(eq(nsm-num(report,"verified"),1),str_eq(nsm-str(response,"reason"),""));
+   let retained = nsm-experience(hearth-session-learning(),home,str_concat(fs-path-basename(dir),str_concat("/",id)),"bml-execution-evaluation",nsm-str(row,"prompt"),nsm-str(response,"text"),if passed then "caller-contract-satisfied" else "caller-contract-needs-practice",nsm-at(dir,str_concat(id,".reading.json")),1);
+   let health = oh-reading("native-bml-ability",dir,id,json-node-int(1),json-node-int(passed),json-node-int(passed),if passed then list() else list(oh-need("execution-grounded-practice",oh-reference(nsm-at(dir,str_concat(id,".reading.json"))))),list("retain-observation","rehearse-related-semantics"),oh-reference(nsm-at(dir,str_concat(id,".reading.json"))));
+   let observed = nsm-event(home,"ability-observed",list(json-node-pair("health",health)));
+   let responseEvent = oh-response(health,"retain-observation"); let selected = oh-select(health,responseEvent,"defer");
+   let received = nsm-event(home,"ability-response",list(json-node-pair("health",responseEvent)));
+   let applied = nsm-event(home,"ability-applied",list(json-node-pair("health",oh-applied(health,selected,json-node-object(list(nsm-s("experience",retained),nsm-n("assessment_gradients",0)))))));
+   report;
+  }
+  def beo-grade-rows(home,dir,rows) = if eq(len(rows),0) then list() else cons(beo-grade-row(home,dir,head(rows)),beo-grade-rows(home,dir,tail(rows)));
+  def beo-grade(home,label) {
+   let dir = beo-condition(home,label); let manifest = beo-manifest(home); let condition = nsm-json(nsm-at(dir,"condition.json"));
+   let generation = nsm-json(nsm-at(dir,"generation.json"));
+   let complete = and(eq(nsm-num(generation,"adapter_unchanged"),1),eq(len(json-array-elements(oh-get(generation,"responses"))),len(beo-rows(manifest,"test"))));
+   if not(complete) then form_error("BML grading requires completed generation with its adapter unchanged") else if fs-exists?(nsm-at(dir,"reading.json")) then form_error("BML condition is already graded; retain its reading") else if not(str_eq(nsm-str(condition,"manifest_sha256"),nsm-hash(nsm-text(nsm-at(home,"manifest.json"))))) then form_error("BML test manifest changed after generation") else beo-grade-bound(home,dir,manifest);
+  }
+  def beo-grade-bound(home,dir,manifest) {
+   let rows = beo-grade-rows(home,dir,beo-rows(manifest,"test"));
+   let report = json-node-object(list(nsm-s("condition",dir),nsm-n("observed_at_ms",now_unix_ms()),json-node-pair("cases",json-node-array(rows))));
+   let saved = nsm-write(nsm-at(dir,"reading.json"),report);
+   print_str(str_concat("reading=",str_concat(nsm-at(dir,"reading.json"),"\n")));
+   beo-show-cases(rows);
+   report;
+  }
+  def beo-show-cases(rows) = if nil?(rows) then 0 else add(beo-show-case(head(rows)),beo-show-cases(tail(rows)));
+  def beo-show-case(row) {
+   let common = list(nsm-s("id",nsm-str(row,"id")),json-node-pair("verified",oh-get(row,"verified")),nsm-s("stop_reason",nsm-str(row,"stop_reason")));
+   let details = if json-object-has?(row,"execution") then list(json-node-pair("execution_exit",oh-get(oh-get(row,"execution"),"exit"))) else list(json-node-pair("format_valid",oh-get(row,"format_valid")),json-node-pair("correct",oh-get(row,"correct")),json-node-pair("checks",oh-get(row,"checks")));
+   let compact = json-node-object(append(common,details));
+   let shown = print_str(str_concat(json-emit-precise(compact),"\n"));
+   0;
+  }
+  def beo-events(lines) = if nil?(lines) then list() else if str_eq(trim(head(lines)),"") then beo-events(tail(lines)) else cons(parse-json("BML learning event",head(lines)),beo-events(tail(lines)));
+  def beo-round-status(dir) {
+   let result = nsm-json(nsm-at(dir,"result.json"));
+   let eventsPath = nsm-at(nsm-at(dir,"adapter"),"training-events.jsonl");
+   let events = beo-events(split-on(nsm-text(eventsPath),"\n"));
+   json-node-object(list(nsm-s("row",dir),nsm-s("trainer",nlw-status(dir)),nsm-n("result_present",gt(file_size(nsm-at(dir,"result.json")),0)),json-node-pair("status",oh-get(result,"status")),json-node-pair("optimizer_step",oh-get(result,"optimizer_step")),json-node-pair("promoted",oh-get(result,"promoted")),json-node-pair("last_training_event",if nil?(events) then json-node-null() else nth(events,sub(len(events),1))),nsm-s("result",nsm-at(dir,"result.json")),nsm-s("training_events",eventsPath)));
+  }
+  def beo-round-statuses(paths) = if nil?(paths) then list() else cons(beo-round-status(json-string-value(head(paths))),beo-round-statuses(tail(paths)));
+  def beo-status(home) {
+   let queued = nsm-json(nsm-at(home,"queued.json"));
+   let rows = beo-round-statuses(json-array-elements(oh-get(queued,"rows")));
+   let report = json-node-object(list(nsm-n("observed_at_ms",now_unix_ms()),nsm-s("worker",nsm-worker-state(hearth-session-learning())),json-node-pair("state",nsm-state(hearth-session-learning())),json-node-pair("rounds",json-node-array(rows))));
+   let saved = nsm-write(nsm-at(home,"learning-current.json"),report);
+   print_str(str_concat(json-emit-precise(report),"\n"));
+   report;
+  }
+  def beo-kept-events(events,stages) = if nil?(events) then list() else if nsm-has(stages,nsm-str(head(events),"stage")) then cons(head(events),beo-kept-events(tail(events),stages)) else beo-kept-events(tail(events),stages);
+  def beo-learning-row(dir) {
+   let path = nsm-at(nsm-at(dir,"adapter"),"training-events.jsonl");
+   let events = beo-events(split-on(nsm-text(path),"\n"));
+   let stages = list("admitted","validation","assessment-before","row","round","assessment-after","finished");
+   json-node-object(list(nsm-s("row",dir),nsm-n("result_present",gt(file_size(nsm-at(dir,"result.json")),0)),json-node-pair("result",nsm-json(nsm-at(dir,"result.json"))),nsm-s("events_source",path),json-node-pair("stages",json-node-array(beo-kept-events(events,stages)))));
+  }
+  def beo-learning-rows(paths) = if nil?(paths) then list() else cons(beo-learning-row(json-string-value(head(paths))),beo-learning-rows(tail(paths)));
+  def beo-report(home) {
+   let queued = nsm-json(nsm-at(home,"queued.json"));
+   let rows = beo-learning-rows(json-array-elements(oh-get(queued,"rows")));
+   let report = json-node-object(list(nsm-n("observed_at_ms",now_unix_ms()),nsm-s("worker",nsm-worker-state(hearth-session-learning())),json-node-pair("state",nsm-state(hearth-session-learning())),json-node-pair("rounds",json-node-array(rows))));
+   let path = nsm-at(home,"learning-report.json"); let saved = nsm-write(path,report);
+   print_str(str_concat("learning_report=",str_concat(path,"\n")));
+   report;
+  }
+  def beo-reference-valid(row) {
+   let reference = nsm-str(row,"reference"); let execution = nsm-json(nsm-at(reference,"execution.json")); let source = nsm-text(nsm-at(reference,"check.bml"));
+   let bound = and(str_eq(nsm-str(execution,"source_sha256"),nsm-hash(source)),str_eq(source,bep-wrap(nsm-str(row,"answer"),nsm-str(row,"checks"))));
+   let passed = and(eq(nsm-num(execution,"exit"),0),str_eq(bep-first-line(execution),nsm-str(row,"expected")));
+   let target = if str_eq(nsm-str(row,"kind"),"prediction") then bep-first-line(execution) else nsm-str(row,"answer");
+   and(bound,and(passed,str_eq(nsm-str(row,"completion"),target)));
+  }
+  def beo-enqueue-row(home,session,row) {
+   if not(beo-reference-valid(row)) then form_error("practice target is not bound to its native execution") else nsm-record(home,session,nsm-str(row,"id"),"caller",nsm-str(row,"prompt"),nsm-str(row,"completion"),"caller-teaching","explicit-local-correction",0);
+  }
+  def beo-enqueue-rows(home,session,rows) = if eq(len(rows),0) then list() else cons(beo-enqueue-row(home,session,head(rows)),beo-enqueue-rows(home,session,tail(rows)));
+  def beo-enqueue(home) {
+   let manifest = beo-manifest(home); let rows = beo-rows(manifest,"practice");
+   let digest = nsm-hash(nsm-text(nsm-at(home,"manifest.json")));
+   let session = str_concat("bml-practice:",digest);
+   let queued = beo-enqueue-rows(hearth-session-learning(),session,rows);
+   let request = json-node-object(list(nsm-s("prompt",nsm-str(head(rows),"prompt")),nsm-s("completion",nsm-str(head(rows),"completion")),nsm-s("session",session),nsm-s("event",nsm-str(head(rows),"id"))));
+   let saved = nsm-write(nsm-at(home,"embody.request.json"),request);
+   let report = json-node-object(list(nsm-s("session",session),json-node-pair("rows",json-node-array(nsm-string-nodes(queued))),nsm-s("embody_request",nsm-at(home,"embody.request.json"))));
+   let saved = nsm-write(nsm-at(home,"queued.json"),report);
+   print_str(str_concat(json-emit-precise(report),"\n"));
+   report;
+  }
+ }
+ 0;
+}
