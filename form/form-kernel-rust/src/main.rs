@@ -6288,20 +6288,6 @@ pub(crate) fn walk(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Va
     r
 }
 
-fn native_bypasses_form_binding(k: &Kernel, name: NameID) -> bool {
-    matches!(
-        k.name_str(name),
-        "str_len"
-            | "str_byte_at"
-            | "byte_to_str"
-            | "substring"
-            | "char_at"
-            | "str_find"
-            | "scan_run"
-            | "form_table_text"
-    )
-}
-
 fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
     // TCO: a tail-position call — a closure body, a cond branch, or a do/seq
     // block's last expr — reassigns n/env and loops here instead of recursing,
@@ -6508,37 +6494,32 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                         return (ne.func)(k, a, env, &args);
                     }
                 }
-                // Most user bindings still shadow same-named natives. The
-                // exception is the byte-string/cursor and table-image waist:
-                // source compilers and BMF cursors depend on those names staying
-                // byte-indexed, and universal table emission depends on its
-                // linear native serializer, when portable fallbacks are loaded.
-                // Copy the entry out so the natives-map borrow releases before
-                // we call &mut k.
+                // A present native answers its name, as on fkwu and TS: a Form
+                // definition of the same name is a fallback for a kernel without
+                // the native, never an override of one. Copy the entry out so the
+                // natives-map borrow releases before we call &mut k.
                 let ne_opt = k.natives.get(&name).copied();
                 if let Some(ne) = ne_opt {
-                    if a.lookup(env, name).is_none() || native_bypasses_form_binding(k, name) {
-                        let mut args = Vec::with_capacity(kids.len() - 1);
-                        for arg in &kids[1..] {
-                            args.push(walk(k, a, *arg, env));
-                        }
-                        // Native Blueprint attribution — record the Form
-                        // category the native expresses alongside the FNCALL
-                        // arm already recorded above. Trace now reflects the
-                        // structural shape of the work, not just the dispatch
-                        // mechanism.
-                        if ne.category.ty != RB_UNDEFINED {
-                            if let Some(t) = &mut k.trace {
-                                t.record(ne.category.ty, ne.category.inst);
-                            }
-                        }
-                        let native_name = k.name_str(ne.name).to_string();
-                        if let Some(t) = &mut k.trace {
-                            t.record_native(&native_name);
-                        }
-                        let _form_frame = FormStackFrame::push(native_name);
-                        return (ne.func)(k, a, &args);
+                    let mut args = Vec::with_capacity(kids.len() - 1);
+                    for arg in &kids[1..] {
+                        args.push(walk(k, a, *arg, env));
                     }
+                    // Native Blueprint attribution — record the Form
+                    // category the native expresses alongside the FNCALL
+                    // arm already recorded above. Trace now reflects the
+                    // structural shape of the work, not just the dispatch
+                    // mechanism.
+                    if ne.category.ty != RB_UNDEFINED {
+                        if let Some(t) = &mut k.trace {
+                            t.record(ne.category.ty, ne.category.inst);
+                        }
+                    }
+                    let native_name = k.name_str(ne.name).to_string();
+                    if let Some(t) = &mut k.trace {
+                        t.record_native(&native_name);
+                    }
+                    let _form_frame = FormStackFrame::push(native_name);
+                    return (ne.func)(k, a, &args);
                 }
                 // Closure lookup uses the ORIGINAL function-name (not the JIT-
                 // aliased one) — the user defined this function and wants to

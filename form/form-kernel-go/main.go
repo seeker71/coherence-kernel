@@ -4229,15 +4229,6 @@ func (k *Kernel) registerNatives() {
 // Walker — full RBasic dispatch
 // ---------------------------------------------------------------------------
 
-func (k *Kernel) nativeBypassesFormBinding(name NameID) bool {
-	switch k.nameStr(name) {
-	case "str_len", "str_byte_at", "byte_to_str", "substring", "char_at", "str_find", "scan_run", "form_table_text":
-		return true
-	default:
-		return false
-	}
-}
-
 func (k *Kernel) walk(n NodeID, env *Frame) Value {
 	// One Form-stack slot per host walk invocation (see walkInner's closure
 	// arm). The truncation runs only on the success path — a panic leaves
@@ -4505,29 +4496,24 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 					return v
 				}
 			}
-			// Most user bindings still shadow same-named natives. The exception
-			// is the byte-string/cursor and table-image waist: source compilers and
-			// BMF cursors depend on those names staying byte-indexed, and universal
-			// table emission depends on its linear native serializer, when portable
-			// fallback definitions are loaded.
+			// A present native answers its name, as on fkwu and TS: a Form definition of the
+			// same name is a fallback for a kernel without the native, never an override of one.
 			if ne, ok := k.natives[name]; ok {
-				if _, hasUserBinding := env.Lookup(name); !hasUserBinding || k.nativeBypassesFormBinding(name) {
-					args := make([]Value, len(kids)-1)
-					for i := 1; i < len(kids); i++ {
-						args[i-1] = k.walk(kids[i], env)
-					}
-					if k.Trace != nil && ne.Category.Type != RBasicUndefined {
-						k.Trace.record(ne.Category.Type, ne.Category.Inst)
-					}
-					if k.Trace != nil {
-						k.Trace.recordNative(k.nameStr(ne.Name))
-					}
-					k.observeNamedDispatch("observe/go/native-dispatch", ne.Name)
-					k.formStack = append(k.formStack, formFrame{name: ne.Name})
-					v := ne.Fn(k, args)
-					k.formStack = k.formStack[:len(k.formStack)-1]
-					return v
+				args := make([]Value, len(kids)-1)
+				for i := 1; i < len(kids); i++ {
+					args[i-1] = k.walk(kids[i], env)
 				}
+				if k.Trace != nil && ne.Category.Type != RBasicUndefined {
+					k.Trace.record(ne.Category.Type, ne.Category.Inst)
+				}
+				if k.Trace != nil {
+					k.Trace.recordNative(k.nameStr(ne.Name))
+				}
+				k.observeNamedDispatch("observe/go/native-dispatch", ne.Name)
+				k.formStack = append(k.formStack, formFrame{name: ne.Name})
+				v := ne.Fn(k, args)
+				k.formStack = k.formStack[:len(k.formStack)-1]
+				return v
 			}
 			// Closure lookup uses the original function name so user code stays
 			// canonical when no native or alias resolved above.
